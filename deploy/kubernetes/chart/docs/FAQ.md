@@ -370,6 +370,8 @@ kubectl -n cube-system logs <cube-node-pod> -c cube-egress-net --tail=100
 5. 原地升级后 cubelet `LoadExistingShims` + `RecoverAllCubebox`、network-agent `recover()` 重连。
 6. 默认 `rollingUpdateType: InPlaceIfPossible`，`maxUnavailable: 1`；readiness 在 recover 完成后才 Ready。
 
+**例外（会 recreate）**：增删 Big Pod 容器（含首次引入 `cube-slot-1`…`6`）、改 volumeMount / securityContext / 容器名 / 直接改 env。占位槽服务名应改 Pod annotation `cube.tencent.com/slot-N`（values：`cubeNode.placeholderSlots.services`），不要改容器名。
+
 完整步骤见 [`UPGRADE.md`](UPGRADE.md)。集群需已装 OpenKruise（安装命令见 [`QUICKSTART.md`](QUICKSTART.md) §1.4）。
 
 若从仍使用 `cube-proxy-node` 资源名的旧 Chart 升级：Deployment/Service 现为 `cube-proxy`，Helm 会删旧建新（Proxy 短暂中断一次），见 [`UPGRADE.md`](UPGRADE.md)。

@@ -108,7 +108,10 @@ flowchart TB
 | `wait-node-prep` | `images.waitNodePrep` | Kruise 优先级 10 sidecar：轮询 bootstrap 的 `node-prep-ready`，Ready 后 `sleep infinity` |
 | `network-agent` | `images.networkAgent` | self-stage 后启动；优先级 0 |
 | `cubelet` | `images.cubelet` | self-stage 后启动；优先级 0 |
+| `cube-slot-1`…`cube-slot-6` | `images.pause` | 冻结占位槽；挂载/特权与 cubelet 相同；日后只 InPlace 换镜像/资源 |
 | `cube-egress` / `cube-egress-net` | 对应镜像 | 可选；透明出站 / TPROXY |
+
+占位槽服务名写在 Pod annotations：`cube.tencent.com/slot-N`（values：`cubeNode.placeholderSlots.services`）。空字符串表示未分配；日后可原地改 annotation（容器 env `CUBE_SLOT_SERVICE` 经 fieldRef 刷新）。单槽换镜像/调资源用 `cubeNode.placeholderSlots.overrides."<N>"`（未设字段继承 `images.pause` / `placeholderSlots.resources`）。**容器名 / volumeMount / securityContext / imagePullPolicy 不可改**（会 recreate）。
 
 #### Installer：`cube-node-installer`
 

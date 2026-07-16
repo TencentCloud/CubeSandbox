@@ -22,6 +22,9 @@ spec:
         {{- with .Values.cubeNode.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+        {{- range $slot := list "1" "2" "3" "4" "5" "6" }}
+        cube.tencent.com/slot-{{ $slot }}: {{ index $.Values.cubeNode.placeholderSlots.services $slot | default "" | quote }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "cube.nodeServiceAccountName" . }}
       automountServiceAccountToken: true
@@ -82,15 +85,7 @@ spec:
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.networkAgent "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.networkAgent.pullPolicy }}
           securityContext:
-            privileged: {{ .Values.security.privileged }}
-            capabilities:
-              add:
-                - SYS_ADMIN
-                - NET_ADMIN
-                - SYS_MODULE
-                - SYS_RESOURCE
-                - IPC_LOCK
-                - SYS_PTRACE
+            {{- include "cube.nodeDataplaneSecurityContext" . | nindent 12 }}
           env:
             {{- include "cube.nodeComponentCommonEnv" . | nindent 12 }}
             - name: CUBE_COMPONENT
@@ -121,15 +116,7 @@ spec:
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubelet "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.cubelet.pullPolicy }}
           securityContext:
-            privileged: {{ .Values.security.privileged }}
-            capabilities:
-              add:
-                - SYS_ADMIN
-                - NET_ADMIN
-                - SYS_MODULE
-                - SYS_RESOURCE
-                - IPC_LOCK
-                - SYS_PTRACE
+            {{- include "cube.nodeDataplaneSecurityContext" . | nindent 12 }}
           env:
             {{- include "cube.nodeComponentCommonEnv" . | nindent 12 }}
             - name: CUBE_COMPONENT
@@ -341,6 +328,31 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
         {{- end }}
+        {{- end }}
+        # Frozen placeholder slots: InPlace-replace image/resources later; do not
+        # rename, remount, or change securityContext (those recreate the Big Pod).
+        {{- range $slot := list "1" "2" "3" "4" "5" "6" }}
+        {{- $override := index (default dict $.Values.cubeNode.placeholderSlots.overrides) $slot | default dict }}
+        {{- $pause := $.Values.images.pause }}
+        {{- $imgOverride := default dict $override.image }}
+        {{- $slotImage := dict "repository" ($imgOverride.repository | default $pause.repository) "tag" ($imgOverride.tag | default $pause.tag) "pullPolicy" ($imgOverride.pullPolicy | default $pause.pullPolicy) }}
+        {{- $slotResources := default $.Values.cubeNode.placeholderSlots.resources $override.resources }}
+        - name: cube-slot-{{ $slot }}
+          image: {{ include "cube.cubeImage" (dict "image" $slotImage "context" $) | quote }}
+          imagePullPolicy: {{ $slotImage.pullPolicy }}
+          securityContext:
+            {{- include "cube.nodeDataplaneSecurityContext" $ | nindent 12 }}
+          env:
+            - name: KRUISE_CONTAINER_PRIORITY
+              value: "0"
+            - name: CUBE_SLOT_SERVICE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations['cube.tencent.com/slot-{{ $slot }}']
+          volumeMounts:
+            {{- include "cube.nodeDataplaneVolumeMounts" $ | nindent 12 }}
+          resources:
+            {{- toYaml $slotResources | nindent 12 }}
         {{- end }}
       volumes:
         - name: host-root

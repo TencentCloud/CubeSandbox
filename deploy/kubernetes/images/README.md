@@ -64,6 +64,20 @@ target first.
 For source-built images (`cube-api`, `cube-proxy`, …), use `SOURCE_REF=""` to
 compile from the current worktree (see below).
 
+## `pause` image (Big Pod placeholder slots)
+
+The chart Big Pod ships six frozen containers `cube-slot-1`…`cube-slot-6`
+that start as pause and can later be InPlace-replaced with real component
+images. Build/push the pause image into the chart registry (default tag
+`3.9`, override with `PAUSE_TAG`):
+
+```bash
+./deploy/kubernetes/images/build-cube-images.sh pause
+PUSH=1 PAUSE_TAG=3.9 ./deploy/kubernetes/images/build-cube-images.sh pause
+```
+
+Dockerfile: `deploy/kubernetes/images/pause/Dockerfile` (`FROM registry.k8s.io/pause:3.9`).
+
 ## Pinning source to a release tag
 
 `cube-api`, `cube-proxy`, `cube-egress`, `cube-lifecycle-manager`, and

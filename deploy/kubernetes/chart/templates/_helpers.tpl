@@ -383,6 +383,22 @@ Toolbox is mounted whole at the fixed path (InPlace-stable).
 {{- end -}}
 
 {{/*
+Privileged securityContext shared by cubelet / network-agent / placeholder slots.
+Must stay identical across frozen Big Pod containers (securityContext is not InPlace).
+*/}}
+{{- define "cube.nodeDataplaneSecurityContext" -}}
+privileged: {{ .Values.security.privileged }}
+capabilities:
+  add:
+    - SYS_ADMIN
+    - NET_ADMIN
+    - SYS_MODULE
+    - SYS_RESOURCE
+    - IPC_LOCK
+    - SYS_PTRACE
+{{- end -}}
+
+{{/*
 Installer: toolbox only (no dataplane mounts).
 */}}
 {{- define "cube.installerVolumeMounts" -}}

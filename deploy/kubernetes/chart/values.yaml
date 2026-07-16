@@ -18,7 +18,7 @@ global:
   # individually. Applies to the pvmHostBootstrap / nodeInit / node / master
   # / api / cubemastercli / proxy / lifecycleManager / cubeEgress /
   # cubeEgressNet / webui / cubelet / networkAgent / cubeShim / cubeKernel /
-  # cubeGuest / waitNodePrep entries but not to third-party images such as mysql /
+  # cubeGuest / waitNodePrep / pause entries but not to third-party images such as mysql /
   # redis / docker-in-docker / alpine/k8s.
   imageRegistry: ""
 
@@ -40,18 +40,25 @@ images:
   waitNodePrep:
     repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-wait-node-prep
     tag: v0.5.1
-    pullPolicy: Always
+    pullPolicy: IfNotPresent
+
+  # Big Pod placeholder slots (cube-slot-1..6). Tiny pause image; InPlace-replace
+  # later with a real component image. Delivered by build-cube-images.sh.
+  pause:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/pause
+    tag: "3.9"
+    pullPolicy: IfNotPresent
 
   # Big Pod per-component runtime images.
   cubelet:
     repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cubelet
     tag: v0.5.1
-    pullPolicy: Always
+    pullPolicy: IfNotPresent
 
   networkAgent:
     repository: ccr.ccs.tencentyun.com/cubesandbox-chart/network-agent
     tag: v0.5.1
-    pullPolicy: Always
+    pullPolicy: IfNotPresent
 
   cubeShim:
     repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-shim
@@ -96,12 +103,12 @@ images:
   cubeEgress:
     repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-egress
     tag: v0.5.1
-    pullPolicy: Always
+    pullPolicy: IfNotPresent
 
   cubeEgressNet:
     repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-egress-net
     tag: v0.5.1
-    pullPolicy: Always
+    pullPolicy: IfNotPresent
 
   webui:
     repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-webui
@@ -461,6 +468,40 @@ cubeNode:
       memory: "1Gi"
     limits:
       memory: "4Gi"
+
+  # Frozen Big Pod placeholder slots (cube-slot-1..6). Always present once
+  # introduced: adding/removing slots recreates the Big Pod (not InPlace).
+  # Mounts/securityContext match cubelet; bump only image/resources/slot
+  # annotations later. services maps slot index -> service name (empty = unused).
+  #
+  # Per-slot overrides (optional): unset fields inherit images.pause and
+  # placeholderSlots.resources. Change only image tag / resources / services
+  # for InPlace; changing imagePullPolicy (or mounts / securityContext /
+  # container name) falls back to recreate.
+  # Example:
+  #   overrides:
+  #     "1":
+  #       image:
+  #         tag: "3.9-inplace-test"
+  #       resources:
+  #         requests: {cpu: "10m", memory: "16Mi"}
+  #         limits: {cpu: "10m", memory: "16Mi"}
+  placeholderSlots:
+    resources:
+      requests:
+        cpu: "1m"
+        memory: "8Mi"
+      limits:
+        cpu: "1m"
+        memory: "8Mi"
+    services:
+      "1": ""
+      "2": ""
+      "3": ""
+      "4": ""
+      "5": ""
+      "6": ""
+    overrides: {}
 
   probes:
     startup:

@@ -20,7 +20,7 @@ helm install kruise openkruise/kruise --version 1.9.0 \
 
 1. toolbox 整树 hostPath 挂在 `/usr/local/services/cubetoolbox`（Big Pod volumeMount **冻结**）。
 2. 同 `placement.compute`、selector 互斥的三个 DaemonSet：
-   - **`*-node`（Big Pod）**：`wait-node-prep`（Kruise prio 10）+ `network-agent` / `cubelet`（self-stage）+ 可选 egress；**零 init**；日常只 **InPlace** bump **containers** 镜像。
+   - **`*-node`（Big Pod）**：`wait-node-prep`（Kruise prio 10）+ `network-agent` / `cubelet`（self-stage）+ 可选 egress + **6 个冻结 `cube-slot-*` pause 占位**；**零 init**；日常只 **InPlace** bump **containers** 镜像 / slot annotation / slot resources。
    - **`*-node-installer`**：shim / kernel / guest 安装；可 RollingUpdate、可增容器。
    - **`*-node-bootstrap`**：pvm / node-init / 写 `node-prep-ready`；低频 RollingUpdate。
 3. Bootstrap 写 `node-prep-ready`；Installer / self-stage 写组件 `.staged-*`；cubelet 等 artifact 与 network-agent sentinel。

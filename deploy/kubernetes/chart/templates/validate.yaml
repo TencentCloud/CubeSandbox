@@ -28,6 +28,9 @@
 {{- if and .Values.cubeNode.enabled (not .Values.images.waitNodePrep.repository) }}
 {{- fail "cubeNode.enabled=true requires images.waitNodePrep.repository (Big Pod wait-node-prep sidecar)" }}
 {{- end }}
+{{- if and .Values.cubeNode.enabled (not .Values.images.pause.repository) }}
+{{- fail "cubeNode.enabled=true requires images.pause.repository (Big Pod placeholder slots)" }}
+{{- end }}
 {{- if hasKey .Values.security "hostNetwork" }}
 {{- fail "security.hostNetwork was removed; cube-node always runs on the Pod network. Remove security.hostNetwork from your values." }}
 {{- end }}

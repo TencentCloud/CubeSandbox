@@ -4,7 +4,7 @@ This chart delivers CubeSandbox on Kubernetes/TKE as chart-managed resources.
 
 Current compute-plane shape (per compute node):
 
-- **`cube-node` (Big Pod)**: OpenKruise Advanced DaemonSet (`InPlaceIfPossible`; hard dependency); `wait-node-prep` sidecar + `cubelet` / `network-agent` + optional egress; **no initContainers**; Pod network (`hostNetwork=false`).
+- **`cube-node` (Big Pod)**: OpenKruise Advanced DaemonSet (`InPlaceIfPossible`; hard dependency); `wait-node-prep` sidecar + `cubelet` / `network-agent` + optional egress + six frozen `cube-slot-*` pause placeholders; **no initContainers**; Pod network (`hostNetwork=false`).
 - **`cube-node-installer`**: DaemonSet that stages shim / kernel / guest into the host toolbox tree.
 - **`cube-node-bootstrap`**: DaemonSet that runs PVM host-kernel prep and `cube-node-init`, then writes `node-prep-ready`.
 
@@ -44,6 +44,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for component layering, the t
 | `cube-wait-node-prep` | Big Pod high-priority sidecar (poll `node-prep-ready`) and bootstrap write-ready container. |
 | `cube-shim` / `cube-kernel` / `cube-guest` | Installer DaemonSet containers; stage artifacts into `/usr/local/services/cubetoolbox`. |
 | `cubelet` / `network-agent` | Big Pod runtime containers (self-stage then run). |
+| `pause` | Big Pod `cube-slot-1`…`6` placeholders (InPlace-replace later). |
 | `cube-master` | Control-plane master; embedded schema migrations. |
 | `cube-api` | HTTP API. |
 | `cubemastercli` | Operational CLI for exec-based ops. |
@@ -493,10 +494,12 @@ helm test cube -n cube-system --timeout 20m
 
 `cube-node` always uses **OpenKruise Advanced DaemonSet** with
 `rollingUpdateType: InPlaceIfPossible` so bumping Big Pod runtime images
-(`images.cubelet`, `images.networkAgent`, `images.waitNodePrep`, …) keeps Pod
-UID/IP/netns. Artifact images bump only `cube-node-installer`; node-prep images
-bump only `cube-node-bootstrap`. See `docs/UPGRADE.md`. Cluster must have
-OpenKruise installed (see `docs/QUICKSTART.md` §1.4).
+(`images.cubelet`, `images.networkAgent`, `images.waitNodePrep`, slot images, …)
+or slot service annotations keeps Pod UID/IP/netns. **First introducing
+`cube-slot-1`…`6` recreates Big Pods once** (adding containers is not InPlace).
+Artifact images bump only `cube-node-installer`; node-prep images bump only
+`cube-node-bootstrap`. See `docs/UPGRADE.md`. Cluster must have OpenKruise
+installed (see `docs/QUICKSTART.md` §1.4).
 
 Set `cubeNode.updateStrategy.type: OnDelete` for fully manual
 per-node upgrades.
