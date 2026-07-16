@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
+	"github.com/tencentcloud/CubeSandbox/CubeDB/dao/driver/mysql"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/crypto"
-	"github.com/tencentcloud/CubeSandbox/cubedb/dao"
-	"github.com/tencentcloud/CubeSandbox/cubedb/dao/driver/mysql"
 	"gorm.io/gorm"
 )
 

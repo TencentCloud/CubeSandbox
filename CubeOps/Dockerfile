@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-# Build from repository root so sibling modules (e.g. cubedb) are in context:
+# Build from repository root so sibling modules (e.g. CubeDB) are in context:
 #   docker build -f CubeOps/Dockerfile -t cube-ops:latest .
 
 # ── Build stage ────────────────────────────────────────────────────────────
@@ -15,7 +15,7 @@ WORKDIR /build/CubeOps
 
 # Copy go.mod/go.sum first for better layer caching
 COPY CubeOps/go.mod CubeOps/go.sum ./
-COPY cubedb /build/cubedb
+COPY CubeDB /build/CubeDB
 RUN go mod download
 
 COPY CubeOps/ .

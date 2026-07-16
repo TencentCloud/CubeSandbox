@@ -16,7 +16,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3/lock"
-	"github.com/tencentcloud/CubeSandbox/cubedb/migrate"
+	"github.com/tencentcloud/CubeSandbox/CubeDB/migrate"
 )
 
 // newPostgres / openPGDB are thin aliases over the shared dockertest fixture.

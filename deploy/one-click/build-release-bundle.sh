@@ -543,7 +543,7 @@ copy_file "${ROOT_DIR}/configs/single-node/network-agent.yaml" "${PACKAGE_ROOT}/
 copy_dir_contents "${SCRIPT_DIR}/CubeAPI" "${PACKAGE_ROOT}/CubeAPI"
 copy_file "${CORE_BIN_DIR}/cube-api" "${PACKAGE_ROOT}/CubeAPI/bin/cube-api"
 
-# CubeOps binary — admin/ops API (Go), depends on cubedb via go.mod replace.
+# CubeOps binary — admin/ops API (Go), depends on CubeDB via go.mod replace.
 copy_file "${CORE_BIN_DIR}/cubeops" "${PACKAGE_ROOT}/CubeOps/bin/cubeops"
 
 # Same ordering for CubeMaster so cubemaster/cubemastercli binaries survive the

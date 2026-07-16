@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/tencentcloud/CubeSandbox/cubedb/dao"
+	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
 )
 
 func TestSessionLockerUsesConfiguredTimeout(t *testing.T) {

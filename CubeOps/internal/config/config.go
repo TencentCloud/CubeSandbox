@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/goccy/go-yaml"
-	"github.com/tencentcloud/CubeSandbox/cubedb/dao"
+	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
 )
 
 // Config holds all CubeOps runtime configuration.
@@ -109,7 +109,7 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
-// DaoConfig converts the CubeOps config to a cubedb dao.Config.
+// DaoConfig converts the CubeOps config to a CubeDB dao.Config.
 func (c *Config) DaoConfig() dao.Config {
 	return dao.Config{
 		Driver:       "mysql",

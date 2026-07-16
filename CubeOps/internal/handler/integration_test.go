@@ -15,10 +15,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/ory/dockertest/v3"
 	"github.com/ory/dockertest/v3/docker"
+	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/crypto"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/handler"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
-	"github.com/tencentcloud/CubeSandbox/cubedb/dao"
 )
 
 func init() { gin.SetMode(gin.TestMode) }

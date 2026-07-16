@@ -14,9 +14,9 @@ import (
 
 	"github.com/ory/dockertest/v3"
 	"github.com/ory/dockertest/v3/docker"
+	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/crypto"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
-	"github.com/tencentcloud/CubeSandbox/cubedb/dao"
 )
 
 // dockertest_fixture_test.go provides a shared MySQL test environment for

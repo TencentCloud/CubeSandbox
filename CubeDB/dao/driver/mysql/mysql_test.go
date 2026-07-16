@@ -10,7 +10,7 @@ import (
 	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
-	"github.com/tencentcloud/CubeSandbox/cubedb/dao"
+	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
 )
 
 func TestSessionLockerUsesConfiguredTimeout(t *testing.T) {

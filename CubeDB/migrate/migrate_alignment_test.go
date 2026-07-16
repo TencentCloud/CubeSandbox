@@ -15,7 +15,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
-	"github.com/tencentcloud/CubeSandbox/cubedb/migrate"
+	"github.com/tencentcloud/CubeSandbox/CubeDB/migrate"
 )
 
 // bookkeepingTables are goose / fingerprint bookkeeping objects that exist

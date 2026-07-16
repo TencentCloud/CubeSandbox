@@ -4,12 +4,16 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
+      - 'CubeDB/migrate/**'
       - 'CubeMaster/pkg/base/dao/migrate/**'
+      - 'cubedb/migrate/**'
       - '.github/workflows/migration-check.yml'
   push:
     branches: [master]
     paths:
+      - 'CubeDB/migrate/**'
       - 'CubeMaster/pkg/base/dao/migrate/**'
+      - 'cubedb/migrate/**'
       - '.github/workflows/migration-check.yml'
   workflow_dispatch:
 
@@ -33,15 +37,15 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: CubeMaster/go.mod
-          cache-dependency-path: CubeMaster/go.sum
+          go-version-file: CubeDB/go.mod
+          cache-dependency-path: CubeDB/go.sum
 
       - name: Validate migration filenames & cross-dialect parity
         shell: bash
-        working-directory: CubeMaster
+        working-directory: CubeDB
         run: |
           set -euo pipefail
-          go test ./pkg/base/dao/migrate/ \
+          go test ./migrate/ \
             -run 'TestMigrationFilenames|TestMigrationsDirHasReadme|TestMigrationVersionParityAcrossDialects|TestDefaultsCompatible|TestNormalizeDefaultLiteral|TestClassifyMySQLDefault|TestRequireDockerTests' -v
 
       - name: Reject changes to already-merged migrations
@@ -60,7 +64,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          migrations_dir="CubeMaster/pkg/base/dao/migrate/migrations"
+          migrations_dir="CubeDB/migrate/migrations"
 
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
             base_sha="${PR_BASE_SHA}"
@@ -125,7 +129,7 @@ jobs:
 
           if [[ "${violations}" -gt 0 ]]; then
             echo ""
-            echo "::error::${violations} forbidden migration change(s). See CubeMaster/pkg/base/dao/migrate/migrations/mysql/README.md"
+            echo "::error::${violations} forbidden migration change(s). See CubeDB/migrate/migrations/mysql/README.md"
             exit 1
           fi
 
@@ -141,18 +145,21 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: CubeMaster/go.mod
-          cache-dependency-path: CubeMaster/go.sum
+          go-version-file: CubeDB/go.mod
+          cache-dependency-path: CubeDB/go.sum
 
       - name: Run migrate integration tests (MySQL + PostgreSQL + alignment)
         shell: bash
-        working-directory: CubeMaster
+        working-directory: CubeDB
         env:
           # Forbid t.Skip when Docker is unavailable — job must not go green by skip.
+          # NOTE: env var name is kept as CUBEMASTER_REQUIRE_DOCKER_TESTS for backward
+          # compatibility with the migrate package's requireDockerTestsEnv constant;
+          # rename both sides together if you change this.
           CUBEMASTER_REQUIRE_DOCKER_TESTS: "1"
         run: |
           set -euo pipefail
           # ubuntu-latest runners have Docker pre-installed. These tests spin
           # up throwaway MySQL 8.0 and PostgreSQL 16 containers via dockertest.
-          go test ./pkg/base/dao/migrate/ \
+          go test ./migrate/ \
             -run 'Alignment|Postgres|Run_' -v -count=1 -timeout 20m

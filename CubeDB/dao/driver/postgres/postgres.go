@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-// Package postgres plugs the PostgreSQL engine into cubedb/dao.
+// Package postgres plugs the PostgreSQL engine into CubeDB/dao.
 // Blank-import it from main.go so the driver registers with the dao registry.
 package postgres
 
@@ -18,7 +18,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib" // database/sql driver: "pgx"
 	"github.com/pressly/goose/v3/lock"
-	"github.com/tencentcloud/CubeSandbox/cubedb/dao"
+	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
 	gormpostgres "gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )

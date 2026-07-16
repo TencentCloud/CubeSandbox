@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-// Package mysql plugs the MySQL engine into cubedb/dao. Blank-import it
+// Package mysql plugs the MySQL engine into CubeDB/dao. Blank-import it
 // from main.go (or the integration test bootstrap) so the driver registers
 // itself with the dao registry.
 package mysql
@@ -15,14 +15,14 @@ import (
 
 	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/pressly/goose/v3/lock"
-	"github.com/tencentcloud/CubeSandbox/cubedb/dao"
+	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
 	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
 
 const (
 	// DriverName is the canonical short name; it doubles as the
-	// migrations sub-directory under cubedb/migrate/migrations.
+	// migrations sub-directory under CubeDB/migrate/migrations.
 	DriverName = "mysql"
 
 	// globalLockName is the GET_LOCK key held for the entire goose.Up()

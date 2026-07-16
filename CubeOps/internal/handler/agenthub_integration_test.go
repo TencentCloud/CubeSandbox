@@ -76,7 +76,7 @@ func TestAgentHub_ListInstances_Pagination(t *testing.T) {
 	env := newTestEnv(t)
 	defer env.teardown()
 	// Seed 5 instances. Note each needs a unique sandbox_id because
-	// t_agenthub_instance has UNIQUE (sandbox_id) (see cubedb migration
+	// t_agenthub_instance has UNIQUE (sandbox_id) (see CubeDB migration
 	// 0003_agenthub_instances.sql); re-using sb-x would collapse all 5
 	// rows into a single upsert.
 	for i, name := range []string{"alpha", "beta", "gamma", "delta", "epsilon"} {

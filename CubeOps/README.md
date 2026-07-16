@@ -12,7 +12,7 @@ CubeOps is the "ops half" of the CubeAPI/CubeOps split:
 - **CubeOps** (Go) — stateful, internal-only, admin/ops API
 
 Both services share the same MySQL database. Schema migrations are managed
-by the shared [`cubedb`](../cubedb) Go module, which wraps goose with
+by the shared [`CubeDB`](../CubeDB) Go module, which wraps goose with
 content-fingerprint tamper detection and cluster-wide locking.
 
 CubeOps exposes two API groups:
@@ -312,7 +312,7 @@ go test ./internal/store/... -v
 
 ## Dependencies
 
-- [cubedb](../cubedb) — Shared database migration & DAO package
+- [CubeDB](../CubeDB) — Shared database migration & DAO package
 - [CubeMaster](../CubeMaster) — Cluster orchestrator (HTTP API)
 - MySQL 8.0 — Shared database
 - Docker — For store image metadata (`docker pull` + `docker image inspect` to fetch size/digest of template images)

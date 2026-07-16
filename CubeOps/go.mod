@@ -8,7 +8,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.2.2
 	github.com/google/uuid v1.6.0
 	github.com/ory/dockertest/v3 v3.12.0
-	github.com/tencentcloud/CubeSandbox/cubedb v0.1.0
+	github.com/tencentcloud/CubeSandbox/CubeDB v0.1.0
 	golang.org/x/crypto v0.50.0
 	gorm.io/gorm v1.25.10
 )
@@ -89,4 +89,4 @@ require (
 	gorm.io/driver/mysql v1.5.1 // indirect
 )
 
-replace github.com/tencentcloud/CubeSandbox/cubedb => ../cubedb
+replace github.com/tencentcloud/CubeSandbox/CubeDB => ../CubeDB
