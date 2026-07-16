@@ -276,7 +276,7 @@ with Sandbox.create(config=cfg) as sb:
 | Method | Description |
 |---|---|
 | `sb.run_code(code, *, on_stdout, on_stderr, on_result, on_error, envs, timeout)` | `POST /execute` — execute code, returns `Execution` |
-| `sb.get_info()` | `GET /sandboxes/:id` — get sandbox state and metadata |
+| `sb.get_info()` | `GET /sandboxes/:id` — get sandbox state and metadata as a `SandboxInfo` |
 | `sb.pause(*, wait, timeout, interval)` | `POST /sandboxes/:id/pause` — pause sandbox |
 | `sb.resume(timeout)` | `POST /sandboxes/:id/resume` — resume (deprecated, use `connect`) |
 | `sb.set_timeout(timeout)` | `POST /sandboxes/:id/timeout` — set sandbox idle timeout |
@@ -307,6 +307,43 @@ with Sandbox.create(config=cfg) as sb:
 | `.logs.stderr` | `list[str]` | All stderr lines |
 | `.error` | `ExecutionError \| None` | Exception info if execution failed |
 | `.results` | `list[Result]` | All result events |
+
+### `SandboxInfo` object
+
+Returned by `sb.get_info()`. Exposes E2B-compatible `snake_case` attributes with
+typed values. It is also a `dict` containing the raw CubeAPI JSON snapshot, so
+existing code using iteration, `len()`, `copy()`, or JSON serialization remains
+backward-compatible. The sensitive `envdAccessToken` is intentionally omitted
+from iteration and serialization, while explicit `info["envdAccessToken"]`
+lookup remains supported.
+
+| Attribute | Type | Description |
+|---|---|---|
+| `.sandbox_id` | `str` | Sandbox ID (raw `sandboxID`) |
+| `.template_id` | `str` | Template ID (raw `templateID`) |
+| `.sandbox_domain` | `str \| None` | Sandbox domain (raw `domain`) |
+| `.started_at` | `datetime \| None` | Start time (raw `startedAt` string) |
+| `.end_at` | `datetime \| None` | Expiry time (raw `endAt` string) |
+| `.cpu_count` | `int \| None` | vCPU count (raw `cpuCount`) |
+| `.memory_mb` | `int \| None` | Memory in MB (raw `memoryMB`) |
+| `.disk_size_mb` | `int \| None` | Disk size in MB (raw `diskSizeMB`) |
+| `.envd_version` | `str` | envd version (raw `envdVersion`) |
+| `.state` | `SandboxState \| str \| None` | Lifecycle state; unknown values fall back to the raw string |
+| `.name` | `str \| None` | Alias (raw `alias`) |
+| `.metadata` | `dict[str, str]` | User metadata |
+
+```python
+info = sandbox.get_info()
+
+# E2B-style typed attribute access
+info.sandbox_id
+info.end_at            # datetime
+info.state             # SandboxState.RUNNING
+
+# Backward-compatible dict access to raw CubeAPI JSON
+info["sandboxID"]
+info.get("state")      # "running"
+```
 
 ## Examples
 

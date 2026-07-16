@@ -14,6 +14,7 @@ import json
 import struct
 import threading
 import time
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -31,7 +32,15 @@ from cubesandbox._exceptions import (
     TemplateNotFoundError,
 )
 from cubesandbox._filesystem import Filesystem
-from cubesandbox._models import Execution, ExecutionError, Logs, OutputMessage, Result
+from cubesandbox._models import (
+    Execution,
+    ExecutionError,
+    Logs,
+    OutputMessage,
+    Result,
+    SandboxInfo,
+    SandboxState,
+)
 from cubesandbox._stream import _parse_line
 from cubesandbox.sandbox import Sandbox
 
@@ -716,13 +725,146 @@ class TestHealth:
 
 # ── GET /sandboxes/:id ────────────────────────────────────────────────────────
 
+FULL_INFO_DATA = {
+    "sandboxID": SANDBOX_ID,
+    "templateID": "tpl-test",
+    "alias": "my-sandbox",
+    "clientID": "client-1",
+    "domain": DOMAIN,
+    "startedAt": "2026-05-14T00:00:00Z",
+    "endAt": "2026-05-14T01:00:00Z",
+    "envdVersion": "0.0.1",
+    "cpuCount": 2,
+    "memoryMB": 512,
+    "diskSizeMB": 1024,
+    "metadata": {"team": "core"},
+    "state": "running",
+}
+
+
 class TestGetInfo:
-    def test_get_info_success(self):
+    def test_sandbox_info_supports_e2b_style_construction(self):
+        info = SandboxInfo(sandbox_id="sb-direct", template_id="tpl-direct")
+        assert info.sandbox_id == "sb-direct"
+        assert info.template_id == "tpl-direct"
+        assert info["sandboxID"] == "sb-direct"
+        assert info["templateID"] == "tpl-direct"
+        assert json.loads(json.dumps(info))["sandboxID"] == "sb-direct"
+
+    def test_sandbox_info_does_not_serialize_envd_access_token(self):
+        secret = "envd-secret"
+        raw = {**FULL_INFO_DATA, "envdAccessToken": secret}
+        info = SandboxInfo.from_dict(raw)
+
+        assert info._envd_access_token == secret
+        assert info["envdAccessToken"] == secret
+        assert info.get("envdAccessToken") == secret
+        assert "envdAccessToken" not in info
+        assert "envdAccessToken" not in info.keys()
+        assert secret not in info.values()
+        assert "envdAccessToken" not in info.to_dict()
+        assert "envdAccessToken" not in info.copy()
+        assert secret not in json.dumps(info)
+
+    def test_get_info_returns_sandbox_info(self):
         sb = make_sandbox()
-        info = {**SANDBOX_DATA, "state": "paused"}
+        with patch.object(sb._session, "get", return_value=mock_response(FULL_INFO_DATA)):
+            info = sb.get_info()
+        assert isinstance(info, SandboxInfo)
+
+    def test_get_info_field_mapping(self):
+        sb = make_sandbox()
+        with patch.object(sb._session, "get", return_value=mock_response(FULL_INFO_DATA)):
+            info = sb.get_info()
+        assert info.sandbox_id == SANDBOX_ID
+        assert info.template_id == "tpl-test"
+        assert info.sandbox_domain == DOMAIN
+        assert info.cpu_count == 2
+        assert info.memory_mb == 512
+        assert info.disk_size_mb == 1024
+        assert info.envd_version == "0.0.1"
+        assert info.name == "my-sandbox"
+        assert info.metadata == {"team": "core"}
+
+    def test_get_info_timestamp_parsing(self):
+        sb = make_sandbox()
+        with patch.object(sb._session, "get", return_value=mock_response(FULL_INFO_DATA)):
+            info = sb.get_info()
+        assert isinstance(info.started_at, datetime)
+        assert info.started_at.year == 2026
+        assert info.started_at.tzinfo is not None
+        assert isinstance(info.end_at, datetime)
+        assert info.end_at.hour == 1
+
+    def test_get_info_nanosecond_timestamp_parsing(self):
+        """CubeAPI often emits 9-digit fractional seconds; parse to microseconds."""
+        sb = make_sandbox()
+        info = {
+            **FULL_INFO_DATA,
+            "startedAt": "2026-07-16T03:03:15.877523628Z",
+            "endAt": "2026-07-16T04:03:15.877523628Z",
+        }
         with patch.object(sb._session, "get", return_value=mock_response(info)):
             result = sb.get_info()
+        assert isinstance(result.started_at, datetime)
+        assert result.started_at.microsecond == 877523
+        assert result.started_at.tzinfo is not None
+        assert isinstance(result.end_at, datetime)
+
+    def test_get_info_out_of_range_epoch_timestamp_returns_none(self):
+        sb = make_sandbox()
+        info = {**FULL_INFO_DATA, "startedAt": 10**30}
+        with patch.object(sb._session, "get", return_value=mock_response(info)):
+            result = sb.get_info()
+        assert result.started_at is None
+
+    def test_get_info_state_normalization(self):
+        sb = make_sandbox()
+        info = {**FULL_INFO_DATA, "state": "paused"}
+        with patch.object(sb._session, "get", return_value=mock_response(info)):
+            result = sb.get_info()
+        assert result.state == SandboxState.PAUSED
+        assert result.state == "paused"
+        assert str(result.state) == "paused"
+
+    def test_get_info_unknown_state_falls_back_to_string(self):
+        sb = make_sandbox()
+        info = {**FULL_INFO_DATA, "state": "hibernating"}
+        with patch.object(sb._session, "get", return_value=mock_response(info)):
+            result = sb.get_info()
+        assert result.state == "hibernating"
+
+    def test_get_info_dict_access_backward_compat(self):
+        sb = make_sandbox()
+        info = {**FULL_INFO_DATA, "state": "paused"}
+        with patch.object(sb._session, "get", return_value=mock_response(info)):
+            result = sb.get_info()
+        assert isinstance(result, dict)
+        assert len(result) == len(info)
+        assert list(result) == list(info)
+        assert result["sandboxID"] == SANDBOX_ID
         assert result["state"] == "paused"
+        assert result.get("state") == "paused"
+        assert result.get("missing", "default") == "default"
+        assert "cpuCount" in result
+        assert dict(result.items())["state"] == "paused"
+        assert "paused" in list(result.values())
+        assert json.loads(json.dumps(result)) == info
+        assert result.copy() == info
+        copied = SandboxInfo.from_dict(info)
+        assert copied.pop("state") == "paused"
+        assert "state" not in copied
+
+    def test_get_info_missing_optional_fields(self):
+        sb = make_sandbox()
+        minimal = {"sandboxID": SANDBOX_ID, "templateID": "tpl-test"}
+        with patch.object(sb._session, "get", return_value=mock_response(minimal)):
+            info = sb.get_info()
+        assert info.started_at is None
+        assert info.end_at is None
+        assert info.cpu_count is None
+        assert info.metadata == {}
+        assert info.state is None
 
     def test_get_info_not_found(self):
         sb = make_sandbox()
