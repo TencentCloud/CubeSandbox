@@ -3,8 +3,12 @@
 FROM ubuntu:20.04
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG APT_PRIMARY_MIRROR=http://mirrors.tencent.com/ubuntu
-ARG APT_SECURITY_MIRROR=http://mirrors.tencent.com/ubuntu
+# Base URL of a China-reachable Ubuntu apt mirror (set via `make builder-image
+# MIRROR=cn`). When set, amd64 packages resolve under ${APT_MIRROR_BASE}/ubuntu and
+# arm64 under ${APT_MIRROR_BASE}/ubuntu-ports; empty leaves the image default
+# (archive.ubuntu.com on amd64, ports.ubuntu.com on arm64). The rewrite is also
+# skipped when GITHUB_ACTIONS=true so CI always builds against upstream.
+ARG APT_MIRROR_BASE=
 ARG GO_VERSION=1.24.8
 ARG PROTOC_VERSION=28.3
 ARG LIBSECCOMP_VERSION=2.5.5
@@ -53,9 +57,18 @@ RUN set -eux; \
 RUN apt-get update -o Acquire::Retries=3 \
     && apt install -y ca-certificates --no-install-recommends
 
-RUN if [ "${GITHUB_ACTIONS}" != "true" ]; then \
-        sed -i "s|http://archive.ubuntu.com/ubuntu|${APT_PRIMARY_MIRROR}|g; \
-                s|http://security.ubuntu.com/ubuntu|${APT_SECURITY_MIRROR}|g" \
+RUN set -eux; \
+    if [ "${GITHUB_ACTIONS}" != "true" ] && [ -n "${APT_MIRROR_BASE}" ]; then \
+        case "${APT_MIRROR_BASE}" in \
+            http://*|https://*) ;; \
+            *) echo "APT_MIRROR_BASE must be an http(s) URL: ${APT_MIRROR_BASE}" >&2; exit 1;; \
+        esac; \
+        case "${APT_MIRROR_BASE}" in \
+            *[\$\`\"\;\!\&\|\\]*) echo "APT_MIRROR_BASE contains characters unsafe for sed: ${APT_MIRROR_BASE}" >&2; exit 1;; \
+        esac; \
+        sed -i "s|http://archive.ubuntu.com/ubuntu|${APT_MIRROR_BASE}/ubuntu|g; \
+                s|http://security.ubuntu.com/ubuntu|${APT_MIRROR_BASE}/ubuntu|g; \
+                s|http://ports.ubuntu.com/ubuntu-ports|${APT_MIRROR_BASE}/ubuntu-ports|g" \
             /etc/apt/sources.list; \
     fi
 
