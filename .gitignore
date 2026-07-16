@@ -4,6 +4,10 @@
 # Go build artifacts
 CubeOps/bin/
 
+# Go workspace (local-only, do not commit)
+/go.work
+/go.work.sum
+
 # IDE
 .idea/
 .vscode/

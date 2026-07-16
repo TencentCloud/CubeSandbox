@@ -1,8 +1,0 @@
-go 1.25.7
-
-use (
-	./CubeMaster
-	./CubeOps
-	./cubedb
-	./cubelog
-)
