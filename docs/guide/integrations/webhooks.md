@@ -45,8 +45,8 @@ X-Cube-Signature-256: sha256=<hex HMAC-SHA256 of the raw request body>
 ```
 
 Verify the signature against the raw body before parsing it. The bundled
-[receiver example](../../../examples/webhook-receiver/README.md) shows a
-standard-library Python implementation.
+[receiver example](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/webhook-receiver)
+shows a standard-library Python implementation.
 
 ## Delivery Behavior
 

@@ -44,8 +44,8 @@ X-Cube-Signature-256: sha256=<原始请求体的 HMAC-SHA256 十六进制值>
 ```
 
 请在解析 JSON 前使用原始请求体校验签名。仓库内附带的
-[接收端示例](../../../../examples/webhook-receiver/README_zh.md) 使用 Python
-标准库完成校验。
+[接收端示例](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/webhook-receiver/README_zh.md)
+使用 Python 标准库完成校验。
 
 ## 投递行为
 
