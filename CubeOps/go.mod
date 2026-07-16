@@ -8,7 +8,7 @@ require (
 	github.com/gorilla/mux v1.8.0
 	github.com/tencentcloud/CubeSandbox/cubedb v0.1.0
 	golang.org/x/crypto v0.50.0
-	gorm.io/gorm v1.25.2
+	gorm.io/gorm v1.25.10
 )
 
 require (
