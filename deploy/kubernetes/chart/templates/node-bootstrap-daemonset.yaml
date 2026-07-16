@@ -1,0 +1,199 @@
+{{- if .Values.cubeNode.enabled }}
+# Node prep DaemonSet (pvm + node-init + write node-prep-ready).
+# Low-churn workload: bumping nodeInit/pvmHostBootstrap recreates THIS pod only,
+# not the Big Pod. Artifact install stays on cube-node-installer (narrow mounts).
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "cube.nodeBootstrapName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-node-bootstrap
+spec:
+  updateStrategy:
+    type: {{ .Values.cubeNodeBootstrap.updateStrategy.type | default "RollingUpdate" }}
+    {{- if .Values.cubeNodeBootstrap.updateStrategy.rollingUpdate }}
+    rollingUpdate:
+      maxUnavailable: {{ .Values.cubeNodeBootstrap.updateStrategy.rollingUpdate.maxUnavailable | default 1 }}
+      {{- with .Values.cubeNodeBootstrap.updateStrategy.rollingUpdate.maxSurge }}
+      maxSurge: {{ . }}
+      {{- end }}
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: cube-node-bootstrap
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: cube-node-bootstrap
+      annotations:
+        {{- with .Values.cubeNodeBootstrap.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "cube.nodeServiceAccountName" . }}
+      automountServiceAccountToken: true
+      # nsenter --target 1 for pvm/node-init (same privilege model as former Big Pod inits).
+      hostPID: true
+      dnsPolicy: ClusterFirst
+      terminationGracePeriodSeconds: {{ .Values.cubeNodeBootstrap.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "cube.computePlacement" . | nindent 6 }}
+      initContainers:
+        {{- if .Values.bootstrap.pvmHostKernel.enabled }}
+        - name: pvm-host-bootstrap
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.pvmHostBootstrap "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.pvmHostBootstrap.pullPolicy }}
+          securityContext:
+            privileged: {{ .Values.security.privileged }}
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: HOST_ROOT
+              value: /host
+            - name: STATE_DIR
+              value: {{ .Values.hostPaths.bootstrapState | quote }}
+            - name: PVM_ENABLED
+              value: "1"
+            - name: DESIRED_KERNEL_PATTERN
+              value: {{ .Values.bootstrap.pvmHostKernel.desiredKernelPattern | quote }}
+            - name: PVM_KERNEL_BOOT_ARGS
+              value: {{ .Values.bootstrap.pvmHostKernel.bootArgs | quote }}
+            - name: PVM_KERNEL_RPM_PATH
+              value: {{ .Values.bootstrap.pvmHostKernel.package.rpmPath | quote }}
+            - name: PVM_KERNEL_DEB_PATH
+              value: {{ .Values.bootstrap.pvmHostKernel.package.debPath | quote }}
+            - name: PVM_KERNEL_RPM_URL
+              value: {{ .Values.bootstrap.pvmHostKernel.package.rpmUrl | quote }}
+            - name: PVM_KERNEL_DEB_URL
+              value: {{ .Values.bootstrap.pvmHostKernel.package.debUrl | quote }}
+            - name: PVM_KERNEL_PACKAGE_SOURCE
+              value: {{ .Values.bootstrap.pvmHostKernel.package.source | quote }}
+            - name: REBOOT_ENABLED
+              value: {{ .Values.bootstrap.pvmHostKernel.reboot.enabled | quote }}
+            - name: REBOOT_COORDINATED
+              value: {{ .Values.bootstrap.pvmHostKernel.reboot.coordinated | quote }}
+            - name: LEASE_NAME
+              value: {{ .Values.bootstrap.pvmHostKernel.reboot.leaseName | quote }}
+            - name: LEASE_TTL_SECONDS
+              value: {{ .Values.bootstrap.pvmHostKernel.reboot.leaseTTLSeconds | quote }}
+            - name: REBOOT_MAX_COUNT
+              value: {{ .Values.bootstrap.pvmHostKernel.reboot.maxCount | quote }}
+          volumeMounts:
+            {{- include "cube.bootstrapHostVolumeMounts" . | nindent 12 }}
+        {{- end }}
+        {{- if .Values.bootstrap.nodeInit.enabled }}
+        - name: cube-node-init
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.nodeInit "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.nodeInit.pullPolicy }}
+          securityContext:
+            privileged: {{ .Values.security.privileged }}
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: HOST_ROOT
+              value: /host
+            - name: STATE_DIR
+              value: {{ .Values.hostPaths.bootstrapState | quote }}
+            - name: NODE_INIT_ENABLED
+              value: "1"
+            - name: PVM_ENABLED
+              value: {{ ternary "1" "0" .Values.bootstrap.pvmHostKernel.enabled | quote }}
+            - name: SKIP_IF_NODE_PREP_READY
+              value: "true"
+            - name: DATA_CUBELET
+              value: {{ .Values.hostPaths.dataCubelet | quote }}
+            - name: REQUIRE_KVM
+              value: {{ .Values.bootstrap.nodeInit.requireKVM | quote }}
+            - name: REQUIRE_XFS
+              value: {{ .Values.bootstrap.nodeInit.requireXFS | quote }}
+            - name: CHMOD_KVM
+              value: {{ .Values.bootstrap.nodeInit.chmodKVM | quote }}
+            - name: LOAD_KVM_MODULE
+              value: {{ .Values.bootstrap.nodeInit.loadKVMModule | quote }}
+            - name: WRITE_UDEV_RULE
+              value: {{ .Values.bootstrap.nodeInit.writeUdevRule | quote }}
+            - name: CREATE_HOST_DIRS
+              value: {{ .Values.bootstrap.nodeInit.createHostDirs | quote }}
+            - name: CHECK_MASTER_CONNECTIVITY
+              value: {{ .Values.bootstrap.nodeInit.checkMasterConnectivity | quote }}
+            - name: CUBE_MASTER_ENDPOINT
+              value: {{ include "cube.masterEndpoint" . | quote }}
+            - name: LOOPBACK_ENABLED
+              value: {{ .Values.bootstrap.nodeInit.dataCubelet.loopback.enabled | quote }}
+            - name: LOOPBACK_IMAGE_PATH
+              value: {{ .Values.bootstrap.nodeInit.dataCubelet.loopback.imagePath | quote }}
+            - name: LOOPBACK_SIZE
+              value: {{ .Values.bootstrap.nodeInit.dataCubelet.loopback.size | quote }}
+            - name: CHECK_MEMORY
+              value: {{ .Values.bootstrap.nodeInit.checkMemory | quote }}
+            - name: MIN_MEMORY_KB
+              value: {{ .Values.bootstrap.nodeInit.minMemoryKB | quote }}
+            - name: CHECK_CGROUP_CPU
+              value: {{ .Values.bootstrap.nodeInit.checkCgroupCPU | quote }}
+            - name: CHECK_GLIBC
+              value: {{ .Values.bootstrap.nodeInit.checkGlibc | quote }}
+            - name: CHECK_CIDR
+              value: {{ .Values.bootstrap.nodeInit.checkCIDR | quote }}
+            - name: CHECK_CUBECOW_DEPS
+              value: {{ .Values.bootstrap.nodeInit.checkCubecowDeps | quote }}
+            - name: CUBE_PVM_ENABLE
+              value: {{ ternary "1" "0" .Values.cubeNode.pvmGuestKernel.enabled | quote }}
+            - name: CUBE_SANDBOX_NETWORK_CIDR
+              value: {{ .Values.cubeNode.network.cidr | quote }}
+            - name: CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK
+              value: {{ ternary "1" "0" .Values.cubeNode.network.cidrSkipConflictCheck | quote }}
+            - name: PREP_GENERATION
+              value: {{ .Values.cubeNodeBootstrap.prepGeneration | quote }}
+            - name: DESIRED_KERNEL_PATTERN
+              value: {{ .Values.bootstrap.pvmHostKernel.desiredKernelPattern | quote }}
+            - name: KERNEL_BOOT_ARGS
+              value: {{ .Values.bootstrap.pvmHostKernel.bootArgs | quote }}
+          volumeMounts:
+            {{- include "cube.bootstrapHostVolumeMounts" . | nindent 12 }}
+            {{- include "cube.bootstrapDataVolumeMounts" . | nindent 12 }}
+        {{- end }}
+      containers:
+        - name: write-node-prep-ready
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.waitNodePrep "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.waitNodePrep.pullPolicy }}
+          command: ["/usr/bin/tini", "-s", "--", "/scripts/write-node-prep-ready.sh"]
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: STATE_DIR
+              value: {{ .Values.hostPaths.bootstrapState | quote }}
+            - name: PREP_GENERATION
+              value: {{ .Values.cubeNodeBootstrap.prepGeneration | quote }}
+            - name: PVM_ENABLED
+              value: {{ ternary "1" "0" .Values.bootstrap.pvmHostKernel.enabled | quote }}
+            - name: NODE_INIT_ENABLED
+              value: {{ ternary "1" "0" .Values.bootstrap.nodeInit.enabled | quote }}
+            - name: DESIRED_KERNEL_PATTERN
+              value: {{ .Values.bootstrap.pvmHostKernel.desiredKernelPattern | quote }}
+            - name: KERNEL_BOOT_ARGS
+              value: {{ .Values.bootstrap.pvmHostKernel.bootArgs | quote }}
+            {{- if and (not .Values.bootstrap.pvmHostKernel.enabled) (not .Values.bootstrap.nodeInit.enabled) }}
+            - name: PREP_MODE
+              value: noop
+            {{- end }}
+          volumeMounts:
+            - name: bootstrap-state
+              mountPath: {{ .Values.hostPaths.bootstrapState }}
+          {{- with .Values.cubeNodeBootstrap.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        {{- include "cube.bootstrapVolumes" . | nindent 8 }}
+{{- end }}

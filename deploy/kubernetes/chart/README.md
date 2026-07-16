@@ -1,15 +1,14 @@
 # CubeSandbox Kubernetes/TKE Helm Chart
 
 This chart delivers CubeSandbox on Kubernetes/TKE as chart-managed resources.
-It follows the final Big Pod delivery design:
 
-- bootstrap images are separate from runtime images;
-- `cube-node` is a DaemonSet Big Pod;
-- control-plane and compute/data-plane scheduling are separated through `placement.controlPlane` and `placement.compute`;
-- PVM host kernel installation and host reboot are handled by a dedicated Init Container;
-- Cube Node host preparation is handled by a second Init Container;
-- MySQL schema migration is handled by CubeMaster itself using embedded migrations;
-- Cube Master, Cube API, cubemastercli, Cube Proxy Node, cube-lifecycle-manager, WebUI, Template Builder, and Cube Node use separate images.
+Current compute-plane shape (per compute node):
+
+- **`cube-node` (Big Pod)**: OpenKruise Advanced DaemonSet (`InPlaceIfPossible`; hard dependency); `wait-node-prep` sidecar + `cubelet` / `network-agent` + optional egress; **no initContainers**; Pod network (`hostNetwork=false`).
+- **`cube-node-installer`**: DaemonSet that stages shim / kernel / guest into the host toolbox tree.
+- **`cube-node-bootstrap`**: DaemonSet that runs PVM host-kernel prep and `cube-node-init`, then writes `node-prep-ready`.
+
+Control-plane vs compute scheduling uses `placement.controlPlane` and `placement.compute`. MySQL schema migration is embedded in CubeMaster. Control-plane and runtime components use separate images.
 
 ## Directory
 
@@ -20,44 +19,44 @@ deploy/kubernetes/chart/
   docs/
     ARCHITECTURE.md
     QUICKSTART.md
+    UPGRADE.md
     FAQ.md
   templates/
 ```
 
 ## Documentation
 
-- [`docs/QUICKSTART.md`](docs/QUICKSTART.md) — one-click install walkthrough from prerequisites to `helm test`.
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — component layering, startup sequence, DNS / Proxy / Egress data flow, external control plane / compute-only mode.
-- [`docs/FAQ.md`](docs/FAQ.md) — common install and runtime issues grouped by subsystem.
+- [`docs/QUICKSTART.md`](docs/QUICKSTART.md) — install walkthrough from prerequisites to `helm test`.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — current architecture, startup sequence, DNS / Proxy / Egress, compute-only mode.
+- [`docs/UPGRADE.md`](docs/UPGRADE.md) — compute-plane image upgrades without killing live sandboxes.
+- [`docs/FAQ.md`](docs/FAQ.md) — common install and runtime issues.
 
 ## Architecture
 
-整体组件关系、安装流程、节点启动流程、DNS/Proxy/Egress 数据流和
-external control plane / compute-only 模式见：
-
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for component layering, the three compute DaemonSets, DNS/Proxy/Egress flows, and external control plane / compute-only mode.
 
 ## Image responsibilities
 
 | Image | Role |
 |---|---|
-| `cube-pvm-host-bootstrap` | Init Container only. Installs/configures PVM host kernel and may reboot the node. |
-| `cube-node-init` | Init Container only. Loads KVM module, prepares host paths, validates `/dev/kvm` and XFS. |
-| `cube-node` | Runtime container only. Runs `cubelet` and `network-agent`. |
-| `cube-master` | Control-plane master only. Built from `CubeMaster/docker/Dockerfile`; runs `cubemaster`; schema migrations are embedded in the binary. |
-| `cube-api` | HTTP API only. Runs `cube-api`. |
-| `cubemastercli` | Operational CLI only. Packages the real `CubeMaster/bin/cubemastercli` binary for exec-based operations. |
-| `cube-proxy-node` | Data-plane proxy. Reuses `CubeProxy/Dockerfile` and runs as a chart-managed control-plane Deployment when `cubeProxy.enabled=true`. |
-| `cube-lifecycle-manager` | Sandbox auto-pause / auto-resume coordinator. Replaces the obsolete in-process cube-proxy-sidecar; CubeProxy discovers it via Service DNS and Redis registry. |
-| `cube-egress` | CubeEgress transparent outbound proxy. Reuses `CubeEgress/Dockerfile` and runs as a Cube Node sidecar when `cubeEgress.enabled=true`. |
-| `cube-egress-net` | Host network rule helper for CubeEgress TPROXY/ip-rule/sysctl setup. |
-| `cube-webui` | One-click WebUI static assets and OpenResty runtime. |
-| template builder sidecar | Optional template builder with `dockerd`/BuildKit. Uses `docker:27-dind` by default. |
+| `cube-pvm-host-bootstrap` | Bootstrap DaemonSet init. Installs/configures PVM host kernel and may reboot the node. |
+| `cube-node-init` | Bootstrap DaemonSet init. Loads KVM, prepares host paths, validates `/dev/kvm` and XFS. |
+| `cube-wait-node-prep` | Big Pod high-priority sidecar (poll `node-prep-ready`) and bootstrap write-ready container. |
+| `cube-shim` / `cube-kernel` / `cube-guest` | Installer DaemonSet containers; stage artifacts into `/usr/local/services/cubetoolbox`. |
+| `cubelet` / `network-agent` | Big Pod runtime containers (self-stage then run). |
+| `cube-master` | Control-plane master; embedded schema migrations. |
+| `cube-api` | HTTP API. |
+| `cubemastercli` | Operational CLI for exec-based ops. |
+| `cube-proxy` | Data-plane proxy (control-plane placement when enabled). |
+| `cube-lifecycle-manager` | Sandbox auto-pause / auto-resume; discovered via Service DNS and Redis. |
+| `cube-egress` / `cube-egress-net` | Transparent outbound proxy + host TPROXY helper (Big Pod sidecars). |
+| `cube-webui` | WebUI static assets and OpenResty. |
+| template builder sidecar | Optional `dockerd`/BuildKit on CubeMaster (`docker:27-dind` by default). |
 
 ## Node selection
 
 The chart separates placement into dedicated control-plane nodes and compute
-nodes. Control-plane Deployments, StatefulSets, and `cube-proxy-node` use
+nodes. Control-plane Deployments, StatefulSets, and `cube-proxy` use
 `placement.controlPlane`; `cube-node` uses `placement.compute`. In-cluster
 `*.cube.app` is wired automatically when CubeProxy is enabled: the chart
 patches cluster CoreDNS so the domain rewrites to the CubeProxy Service.
@@ -145,7 +144,7 @@ can set it to `false`.
 - `cubeNode.network.cidr` can patch Cubelet cubevs CIDR when the packaged default conflicts with the host network.
 
 `bootstrap.pvmHostKernel.enabled` also defaults to `true`, so the PVM host
-kernel bootstrap Init Container can install/configure the host kernel and
+kernel bootstrap on `cube-node-bootstrap` can install/configure the host kernel and
 perform the configured coordinated reboot. The default
 `bootstrap.pvmHostKernel.bootArgs` is `nopti pti=off` because the current
 `kvm_pvm` module does not support host KPTI. `cube-node-init` performs the same
@@ -158,7 +157,7 @@ kernel with `kvm_pvm` loaded.
 ## Build and push images
 
 ```bash
-PUSH=1 REGISTRY=ccr.ccs.tencentyun.com/cubesandbox-chart IMAGE_TAG=v0.5.0 ./deploy/kubernetes/images/build-cube-images.sh
+PUSH=1 REGISTRY=ccr.ccs.tencentyun.com/cubesandbox-chart IMAGE_TAG=v0.5.1 ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
 Cube-owned images default to `imagePullPolicy: Always` because this chart uses the release tag directly and environments are expected to pull the pushed image from the registry during deployment.
@@ -290,11 +289,11 @@ carry this operational entry point.
 
 ## Cube Proxy Node
 
-`cube-proxy-node` is a Cube data-plane component. It is enabled by default to match one-click behavior and is installed, upgraded, and uninstalled with the Cube release as a control-plane Deployment.
+`cube-proxy` is a Cube data-plane component. It is enabled by default to match one-click behavior and is installed, upgraded, and uninstalled with the Cube release as a control-plane Deployment.
 
 The default TLS mode is `selfSigned`, matching the one-click mkcert-style test experience. Production environments should provide a real TLS certificate for CubeProxy. External clients reach `cubeProxy.domain` / `*.domain` through the chart Ingress (SSL passthrough; TLS still terminates in CubeProxy). The image reuses `CubeProxy/Dockerfile`; the chart does not override nginx with a Kubernetes-only configuration.
 
-`cube-proxy-node` depends on chart-managed `cube-lifecycle-manager` for sandbox auto-pause / auto-resume. The chart wires nginx `$cube_sidecar_addr` to the lifecycle-manager Service, opens the proxy admin listener for in-cluster discovery, and registers each proxy replica in Redis. Do not deploy a separate cube-proxy-sidecar.
+`cube-proxy` depends on chart-managed `cube-lifecycle-manager` for sandbox auto-pause / auto-resume. The chart wires nginx `$cube_sidecar_addr` to the lifecycle-manager Service, opens the proxy admin listener for in-cluster discovery, and registers each proxy replica in Redis. Do not deploy a separate cube-proxy-sidecar.
 
 ### Production TLS Secret
 
@@ -368,7 +367,7 @@ cubeProxy:
 
 This mode creates a release-scoped Secret with `tls.crt`, `tls.key`, and `ca.crt`. Import `ca.crt` into clients if browser or SDK trust is required. Do not use this mode for production.
 
-`cube-proxy-node` uses `placement.controlPlane`. The chart does not create node labels.
+`cube-proxy` uses `placement.controlPlane`. The chart does not create node labels.
 
 CubeProxy runs on the **Pod network** (no `hostNetwork`). Traffic path:
 
@@ -477,12 +476,13 @@ helm template cube ./deploy/kubernetes/chart -n cube-system > /tmp/cube-rendered
 
 ```bash
 kubectl get pods -n cube-system -o wide
-kubectl get ds -n cube-system cube-node
-kubectl get deploy -n cube-system cube-proxy-node
+kubectl get ads -n cube-system cube-node
+kubectl get deploy -n cube-system cube-proxy
 kubectl get sts -n cube-system cube-mysql cube-redis
-kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node -c pvm-host-bootstrap --tail=100
-kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node -c cube-node-init --tail=100
-kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node -c cube-node --tail=100
+kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node-bootstrap -c pvm-host-bootstrap --tail=100
+kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node-bootstrap -c cube-node-init --tail=100
+kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node -c cubelet --tail=100
+kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node -c wait-node-prep --tail=50
 kubectl logs -n cube-system deploy/cube-master -c cube-master --tail=100
 kubectl exec -n cube-system deploy/cube-cubemastercli -- \
   sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
@@ -491,13 +491,19 @@ helm test cube -n cube-system --timeout 20m
 
 ## Upgrade policy
 
-`cubeNode.updateStrategy.type` defaults to `RollingUpdate`. For production
-maintenance windows, set it to `OnDelete` if you need to upgrade one compute
-node at a time after draining or cleaning Cube sandboxes on that node.
+`cube-node` always uses **OpenKruise Advanced DaemonSet** with
+`rollingUpdateType: InPlaceIfPossible` so bumping Big Pod runtime images
+(`images.cubelet`, `images.networkAgent`, `images.waitNodePrep`, …) keeps Pod
+UID/IP/netns. Artifact images bump only `cube-node-installer`; node-prep images
+bump only `cube-node-bootstrap`. See `docs/UPGRADE.md`. Cluster must have
+OpenKruise installed (see `docs/QUICKSTART.md` §1.4).
+
+Set `cubeNode.updateStrategy.type: OnDelete` for fully manual
+per-node upgrades.
 
 ## Rollback warning
 
-Helm rollback only rolls back Kubernetes resources. It does not undo host kernel, GRUB, udev, fstab, or XFS changes made by the bootstrap Init Containers.
+Helm rollback only rolls back Kubernetes resources. It does not undo host kernel, GRUB, udev, fstab, or XFS changes made by the bootstrap DaemonSet.
 Prepare a separate host-kernel rollback runbook for production.
 
 ## Uninstall cleanup

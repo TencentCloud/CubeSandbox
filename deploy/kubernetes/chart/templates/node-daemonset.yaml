@@ -1,5 +1,5 @@
 {{- if .Values.cubeNode.enabled }}
-apiVersion: apps/v1
+apiVersion: {{ include "cube.nodeDaemonSetAPIVersion" . }}
 kind: DaemonSet
 metadata:
   name: {{ include "cube.nodeName" . }}
@@ -25,243 +25,62 @@ spec:
     spec:
       serviceAccountName: {{ include "cube.nodeServiceAccountName" . }}
       automountServiceAccountToken: true
-      hostNetwork: {{ .Values.security.hostNetwork }}
       hostPID: {{ .Values.security.hostPID }}
       terminationGracePeriodSeconds: {{ .Values.cubeNode.terminationGracePeriodSeconds }}
-      dnsPolicy: ClusterFirstWithHostNet
+      dnsPolicy: ClusterFirst
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- include "cube.computePlacement" . | nindent 6 }}
-      initContainers:
-        # Stage image toolbox onto a hostPath before any other compute init so
-        # cube-shim / cube-runtime binaries survive Pod rebuilds (overlay unmount).
-        # Inline script so this works with existing cube-node images that do not
-        # yet ship /usr/local/bin/stage-toolbox.sh; the image still provides the
-        # toolbox tree under /usr/local/services/cubetoolbox.
-        - name: stage-toolbox
-          image: {{ include "cube.cubeImage" (dict "image" .Values.images.node "context" $) | quote }}
-          imagePullPolicy: {{ .Values.images.node.pullPolicy }}
-          command:
-            - /bin/bash
-            - -ec
-            - |
-              set -euo pipefail
-              IMAGE_TOOLBOX_ROOT="${IMAGE_TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
-              HOST_TOOLBOX_ROOT="${HOST_TOOLBOX_ROOT:-/host-toolbox}"
-              # Align with one-click install.sh: do not wipe runtime dirs under
-              # the install prefix (cube-snapshot / cubebox_os_image / ...).
-              PRESERVE_NAMES=(cube-snapshot cubebox_os_image cubeletmnt cube-vs)
-              log() { printf '[stage-toolbox] %s\n' "$*"; }
-              fail() { printf '[stage-toolbox] ERROR: %s\n' "$*" >&2; exit 1; }
-              should_preserve() {
-                local name="$1" preserved
-                for preserved in "${PRESERVE_NAMES[@]}"; do
-                  [[ "${name}" == "${preserved}" ]] && return 0
-                done
-                return 1
-              }
-              [[ -d "${IMAGE_TOOLBOX_ROOT}" ]] || fail "image toolbox missing: ${IMAGE_TOOLBOX_ROOT}"
-              [[ -n "${HOST_TOOLBOX_ROOT}" && "${HOST_TOOLBOX_ROOT}" != "/" ]] || fail "invalid HOST_TOOLBOX_ROOT"
-              [[ "${HOST_TOOLBOX_ROOT}" != "${IMAGE_TOOLBOX_ROOT}" ]] || fail "HOST_TOOLBOX_ROOT must differ from IMAGE_TOOLBOX_ROOT"
-              mkdir -p "${HOST_TOOLBOX_ROOT}"
-              log "staging ${IMAGE_TOOLBOX_ROOT} -> ${HOST_TOOLBOX_ROOT} (selective overwrite)"
-              while IFS= read -r -d '' entry; do
-                name="$(basename "${entry}")"
-                if should_preserve "${name}"; then
-                  log "preserving ${name}"
-                  continue
-                fi
-                rm -rf "${entry}"
-              done < <(find "${HOST_TOOLBOX_ROOT}" -mindepth 1 -maxdepth 1 -print0)
-              while IFS= read -r -d '' entry; do
-                name="$(basename "${entry}")"
-                dest="${HOST_TOOLBOX_ROOT}/${name}"
-                if should_preserve "${name}" && [[ -e "${dest}" ]]; then
-                  log "skipping image copy over preserved ${name}"
-                  continue
-                fi
-                rm -rf "${dest}"
-                cp -a "${entry}" "${dest}"
-              done < <(find "${IMAGE_TOOLBOX_ROOT}" -mindepth 1 -maxdepth 1 -print0)
-              chmod +x \
-                "${HOST_TOOLBOX_ROOT}/Cubelet/bin/cubelet" \
-                "${HOST_TOOLBOX_ROOT}/Cubelet/bin/cubecli" \
-                "${HOST_TOOLBOX_ROOT}/network-agent/bin/network-agent" \
-                "${HOST_TOOLBOX_ROOT}/network-agent/bin/cubevsmapdump" \
-                "${HOST_TOOLBOX_ROOT}/cube-shim/bin/cube-runtime" \
-                "${HOST_TOOLBOX_ROOT}/cube-shim/bin/containerd-shim-cube-rs" \
-                2>/dev/null || true
-              for required in \
-                Cubelet/bin/cubelet \
-                network-agent/bin/network-agent \
-                cube-shim/bin/containerd-shim-cube-rs \
-                cube-shim/bin/cube-runtime
-              do
-                [[ -x "${HOST_TOOLBOX_ROOT}/${required}" ]] || fail "missing executable after stage: ${required}"
-              done
-              log "toolbox staged successfully at ${HOST_TOOLBOX_ROOT}"
+      containers:
+        # wait-node-prep: Kruise high-priority sidecar (not init).
+        # Priority 10 starts and becomes Ready before prio-0 run containers.
+        # Freeze wait env/mounts; bumping only images.waitNodePrep may InPlace.
+        # Do NOT attach ConfigMap checksum annotations to this Pod.
+        - name: wait-node-prep
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.waitNodePrep "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.waitNodePrep.pullPolicy }}
           env:
             {{- include "cube.timezoneEnv" . | nindent 12 }}
-            - name: IMAGE_TOOLBOX_ROOT
-              value: /usr/local/services/cubetoolbox
-            - name: HOST_TOOLBOX_ROOT
-              value: /host-toolbox
-          volumeMounts:
-            - name: toolbox
-              mountPath: /host-toolbox
-          securityContext:
-            privileged: {{ .Values.security.privileged }}
-        {{- if .Values.bootstrap.pvmHostKernel.enabled }}
-        - name: pvm-host-bootstrap
-          image: {{ include "cube.cubeImage" (dict "image" .Values.images.pvmHostBootstrap "context" $) | quote }}
-          imagePullPolicy: {{ .Values.images.pvmHostBootstrap.pullPolicy }}
-          securityContext:
-            privileged: {{ .Values.security.privileged }}
-          env:
-            {{- include "cube.timezoneEnv" . | nindent 12 }}
-            - name: NODE_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
-            - name: POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-            - name: HOST_ROOT
-              value: /host
+            - name: STATE_DIR
+              value: {{ .Values.hostPaths.bootstrapState | quote }}
+            - name: PREP_GENERATION
+              value: {{ .Values.cubeNodeBootstrap.prepGeneration | quote }}
+            - name: PVM_ENABLED
+              value: {{ ternary "1" "0" .Values.bootstrap.pvmHostKernel.enabled | quote }}
+            - name: NODE_INIT_ENABLED
+              value: {{ ternary "1" "0" .Values.bootstrap.nodeInit.enabled | quote }}
             - name: DESIRED_KERNEL_PATTERN
               value: {{ .Values.bootstrap.pvmHostKernel.desiredKernelPattern | quote }}
-            - name: PVM_KERNEL_BOOT_ARGS
+            - name: KERNEL_BOOT_ARGS
               value: {{ .Values.bootstrap.pvmHostKernel.bootArgs | quote }}
-            - name: PVM_KERNEL_RPM_PATH
-              value: {{ .Values.bootstrap.pvmHostKernel.package.rpmPath | quote }}
-            - name: PVM_KERNEL_DEB_PATH
-              value: {{ .Values.bootstrap.pvmHostKernel.package.debPath | quote }}
-            - name: PVM_KERNEL_RPM_URL
-              value: {{ .Values.bootstrap.pvmHostKernel.package.rpmUrl | quote }}
-            - name: PVM_KERNEL_DEB_URL
-              value: {{ .Values.bootstrap.pvmHostKernel.package.debUrl | quote }}
-            - name: PVM_KERNEL_PACKAGE_SOURCE
-              value: {{ .Values.bootstrap.pvmHostKernel.package.source | quote }}
-            - name: REBOOT_ENABLED
-              value: {{ .Values.bootstrap.pvmHostKernel.reboot.enabled | quote }}
-            - name: REBOOT_COORDINATED
-              value: {{ .Values.bootstrap.pvmHostKernel.reboot.coordinated | quote }}
-            - name: LEASE_NAME
-              value: {{ .Values.bootstrap.pvmHostKernel.reboot.leaseName | quote }}
-            - name: LEASE_TTL_SECONDS
-              value: {{ .Values.bootstrap.pvmHostKernel.reboot.leaseTTLSeconds | quote }}
-            - name: REBOOT_MAX_COUNT
-              value: {{ .Values.bootstrap.pvmHostKernel.reboot.maxCount | quote }}
+            - name: WAIT_TIMEOUT_SECONDS
+              value: {{ .Values.cubeNodeBootstrap.waitTimeoutSeconds | quote }}
+            - name: KRUISE_CONTAINER_PRIORITY
+              value: "10"
+            {{- if and (not .Values.bootstrap.pvmHostKernel.enabled) (not .Values.bootstrap.nodeInit.enabled) }}
+            - name: PREP_MODE
+              value: noop
+            {{- end }}
+          readinessProbe:
+            exec:
+              command: ["test", "-f", "/run/wait-node-prep.ready"]
+            periodSeconds: 2
+            failureThreshold: 1
           volumeMounts:
-            - name: host-root
-              mountPath: /host
-            - name: dev
-              mountPath: /dev
-            - name: sys
-              mountPath: /sys
-            - name: lib-modules
-              mountPath: /lib/modules
-              readOnly: true
-        {{- end }}
-        {{- if .Values.bootstrap.nodeInit.enabled }}
-        - name: cube-node-init
-          image: {{ include "cube.cubeImage" (dict "image" .Values.images.nodeInit "context" $) | quote }}
-          imagePullPolicy: {{ .Values.images.nodeInit.pullPolicy }}
-          securityContext:
-            privileged: {{ .Values.security.privileged }}
-          env:
-            {{- include "cube.timezoneEnv" . | nindent 12 }}
-            - name: HOST_ROOT
-              value: /host
-            - name: DATA_CUBELET
-              value: {{ .Values.hostPaths.dataCubelet | quote }}
-            - name: REQUIRE_KVM
-              value: {{ .Values.bootstrap.nodeInit.requireKVM | quote }}
-            - name: REQUIRE_XFS
-              value: {{ .Values.bootstrap.nodeInit.requireXFS | quote }}
-            - name: CHMOD_KVM
-              value: {{ .Values.bootstrap.nodeInit.chmodKVM | quote }}
-            - name: LOAD_KVM_MODULE
-              value: {{ .Values.bootstrap.nodeInit.loadKVMModule | quote }}
-            - name: WRITE_UDEV_RULE
-              value: {{ .Values.bootstrap.nodeInit.writeUdevRule | quote }}
-            - name: CREATE_HOST_DIRS
-              value: {{ .Values.bootstrap.nodeInit.createHostDirs | quote }}
-            - name: CHECK_MASTER_CONNECTIVITY
-              value: {{ .Values.bootstrap.nodeInit.checkMasterConnectivity | quote }}
-            - name: CUBE_MASTER_ENDPOINT
-              value: {{ include "cube.masterEndpoint" . | quote }}
-            - name: LOOPBACK_ENABLED
-              value: {{ .Values.bootstrap.nodeInit.dataCubelet.loopback.enabled | quote }}
-            - name: LOOPBACK_IMAGE_PATH
-              value: {{ .Values.bootstrap.nodeInit.dataCubelet.loopback.imagePath | quote }}
-            - name: LOOPBACK_SIZE
-              value: {{ .Values.bootstrap.nodeInit.dataCubelet.loopback.size | quote }}
-            - name: CHECK_MEMORY
-              value: {{ .Values.bootstrap.nodeInit.checkMemory | quote }}
-            - name: MIN_MEMORY_KB
-              value: {{ .Values.bootstrap.nodeInit.minMemoryKB | quote }}
-            - name: CHECK_CGROUP_CPU
-              value: {{ .Values.bootstrap.nodeInit.checkCgroupCPU | quote }}
-            - name: CHECK_GLIBC
-              value: {{ .Values.bootstrap.nodeInit.checkGlibc | quote }}
-            - name: CHECK_CIDR
-              value: {{ .Values.bootstrap.nodeInit.checkCIDR | quote }}
-            - name: CHECK_CUBECOW_DEPS
-              value: {{ .Values.bootstrap.nodeInit.checkCubecowDeps | quote }}
-            - name: CUBE_PVM_ENABLE
-              value: {{ ternary "1" "0" .Values.cubeNode.pvmGuestKernel.enabled | quote }}
-            - name: CUBE_SANDBOX_NETWORK_CIDR
-              value: {{ .Values.cubeNode.network.cidr | quote }}
-            - name: CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK
-              value: {{ ternary "1" "0" .Values.cubeNode.network.cidrSkipConflictCheck | quote }}
-          volumeMounts:
-            - name: host-root
-              mountPath: /host
-            - name: dev
-              mountPath: /dev
-            - name: sys
-              mountPath: /sys
-            - name: lib-modules
-              mountPath: /lib/modules
-              readOnly: true
-            - name: data-cubelet
-              mountPath: {{ .Values.hostPaths.dataCubelet }}
-              mountPropagation: Bidirectional
-            - name: data-log
-              mountPath: {{ .Values.hostPaths.dataLog }}
-            - name: data-cube-shim
-              mountPath: {{ .Values.hostPaths.dataCubeShim }}
-              mountPropagation: Bidirectional
-            - name: data-snapshot-pack
-              mountPath: {{ .Values.hostPaths.dataSnapshotPack }}
-            - name: tmp-cube
-              mountPath: {{ .Values.hostPaths.tmpCube }}
-              mountPropagation: Bidirectional
-        {{- end }}
-      containers:
-        - name: cube-node
-          image: {{ include "cube.cubeImage" (dict "image" .Values.images.node "context" $) | quote }}
-          imagePullPolicy: {{ .Values.images.node.pullPolicy }}
-          # Keep /data/cubelet/state on the dataCubelet hostPath. cubelet's
-          # default mountTmpfsDir() puts a 500Mi tmpfs over state inside its
-          # private mount NS; that tmpfs (and shim bundle metadata) disappears
-          # when the Pod is deleted, so LoadExistingShims cannot reconnect.
-          # Bind-mounting state first makes mountinfo.Mounted(state)=true in the
-          # NS cubelet clones, so mountTmpfsDir is a no-op.
-          command:
-            - /bin/bash
-            - -ec
-            - |
-              set -euo pipefail
-              mkdir -p /data/cubelet/state
-              if ! findmnt --mountpoint /data/cubelet/state >/dev/null 2>&1; then
-                mount --bind /data/cubelet/state /data/cubelet/state
-              fi
-              exec /usr/local/bin/cube-node-entrypoint.sh
+            - name: bootstrap-state
+              mountPath: {{ .Values.hostPaths.bootstrapState }}
+          {{- with .Values.cubeNodeBootstrap.waitResources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        # Artifact install (shim/kernel/guest) lives in cube-node-installer.
+        # Big Pod container set is frozen for InPlace-only upgrades.
+        # --- run containers (KRUISE_CONTAINER_PRIORITY=0; after wait Ready) ---
+        - name: network-agent
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.networkAgent "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.networkAgent.pullPolicy }}
           securityContext:
             privileged: {{ .Values.security.privileged }}
             capabilities:
@@ -273,37 +92,52 @@ spec:
                 - IPC_LOCK
                 - SYS_PTRACE
           env:
-            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            {{- include "cube.nodeComponentCommonEnv" . | nindent 12 }}
+            - name: CUBE_COMPONENT
+              value: network-agent
             - name: CUBE_ROLE
-              value: node
-            - name: CUBE_MASTER_ENDPOINT
-              value: {{ include "cube.masterEndpoint" . | quote }}
-            - name: TOOLBOX_ROOT
-              value: /usr/local/services/cubetoolbox
-            - name: CUBE_SANDBOX_NODE_IP
-              {{- if eq .Values.cubeNode.ipSource "statusHostIP" }}
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.hostIP
-              {{- else }}
-              value: {{ .Values.cubeNode.staticNodeIP | quote }}
-              {{- end }}
-            - name: CUBE_PVM_ENABLE
-              value: {{ ternary "1" "0" .Values.cubeNode.pvmGuestKernel.enabled | quote }}
-            - name: CUBE_SANDBOX_AUTO_DETECT_ETH
-              value: {{ .Values.cubeNode.network.autoDetectEthName | quote }}
-            - name: CUBE_SANDBOX_ETH_NAME
-              value: {{ .Values.cubeNode.network.ethName | quote }}
-            - name: CUBE_SANDBOX_NETWORK_CIDR
-              value: {{ .Values.cubeNode.network.cidr | quote }}
-            - name: CUBE_SANDBOX_DNS_SERVERS
-              {{- if .Values.cubeNode.dns.sandbox.nameservers }}
-              value: {{ join "," .Values.cubeNode.dns.sandbox.nameservers | quote }}
-              {{- else }}
-              value: ""
-              {{- end }}
-            - name: CUBE_SANDBOX_DNS_FOLLOW_NODE
-              value: {{ ternary "true" "false" (and .Values.cubeNode.dns.sandbox.followNodeDns (not .Values.cubeNode.dns.sandbox.nameservers)) | quote }}
+              value: run
+            - name: KRUISE_CONTAINER_PRIORITY
+              value: "0"
+          ports:
+            - name: network-agent
+              containerPort: 19090
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/bash
+                  - -ec
+                  - |
+                    # Kill only this container's pidfile. Never pkill -f —
+                    # must not match containerd-shim-cube-rs / cube-runtime / VMM.
+                    pidfile=/run/cube-node/network-agent.pid
+                    if [[ -f "${pidfile}" ]]; then
+                      kill -TERM "$(cat "${pidfile}")" 2>/dev/null || true
+                    fi
+          volumeMounts:
+            {{- include "cube.nodeDataplaneVolumeMounts" . | nindent 12 }}
+        - name: cubelet
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubelet "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.cubelet.pullPolicy }}
+          securityContext:
+            privileged: {{ .Values.security.privileged }}
+            capabilities:
+              add:
+                - SYS_ADMIN
+                - NET_ADMIN
+                - SYS_MODULE
+                - SYS_RESOURCE
+                - IPC_LOCK
+                - SYS_PTRACE
+          env:
+            {{- include "cube.nodeComponentCommonEnv" . | nindent 12 }}
+            - name: CUBE_COMPONENT
+              value: cubelet
+            - name: CUBE_ROLE
+              value: run
+            - name: KRUISE_CONTAINER_PRIORITY
+              value: "0"
             {{- with .Values.cubeNode.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -314,8 +148,6 @@ spec:
               containerPort: 9998
             - name: cubelet-debug
               containerPort: 9966
-            - name: network-agent
-              containerPort: 19090
           lifecycle:
             preStop:
               exec:
@@ -323,12 +155,12 @@ spec:
                   - /bin/bash
                   - -ec
                   - |
-                    # Graceful stop for control processes only. Never match
-                    # containerd-shim-cube-rs / cube-runtime / VMM — those must
-                    # survive Pod rebuilds so existing sandboxes keep running.
-                    pkill -TERM -f '/usr/local/services/cubetoolbox/Cubelet/bin/cubelet --config' || true
-                    pkill -TERM -f '/usr/local/services/cubetoolbox/network-agent/bin/network-agent' || true
-                    sleep 5
+                    # Kill only this container's pidfile. Never pkill -f —
+                    # must not match containerd-shim-cube-rs / cube-runtime / VMM.
+                    pidfile=/run/cube-node/cubelet.pid
+                    if [[ -f "${pidfile}" ]]; then
+                      kill -TERM "$(cat "${pidfile}")" 2>/dev/null || true
+                    fi
           {{- if .Values.cubeNode.probes.startup.enabled }}
           startupProbe:
             {{- if .Values.cubeNode.probes.startup.exec }}
@@ -370,35 +202,7 @@ spec:
             failureThreshold: {{ .Values.cubeNode.probes.liveness.failureThreshold }}
           {{- end }}
           volumeMounts:
-            - name: dev
-              mountPath: /dev
-            - name: sys
-              mountPath: /sys
-            - name: lib-modules
-              mountPath: /lib/modules
-              readOnly: true
-            - name: toolbox
-              mountPath: /usr/local/services/cubetoolbox
-            - name: data-cubelet
-              mountPath: {{ .Values.hostPaths.dataCubelet }}
-              mountPropagation: Bidirectional
-            - name: data-log
-              mountPath: {{ .Values.hostPaths.dataLog }}
-            - name: data-cube-shim
-              mountPath: {{ .Values.hostPaths.dataCubeShim }}
-              mountPropagation: Bidirectional
-            - name: data-snapshot-pack
-              mountPath: {{ .Values.hostPaths.dataSnapshotPack }}
-            - name: tmp-cube
-              mountPath: {{ .Values.hostPaths.tmpCube }}
-              mountPropagation: Bidirectional
-            # Persist shim ttrpc sockets (/run/containerd/s/*) across Pod
-            # rebuilds so LoadExistingShims can reconnect. See hostPaths.runContainerd.
-            - name: run-containerd
-              mountPath: /run/containerd
-            # Persist CH API / vsock sockets (/run/vc/vm/*). See hostPaths.runVc.
-            - name: run-vc
-              mountPath: /run/vc
+            {{- include "cube.nodeDataplaneVolumeMounts" . | nindent 12 }}
           resources:
             {{- toYaml .Values.cubeNode.resources | nindent 12 }}
         {{- if .Values.cubeEgress.enabled }}
@@ -428,6 +232,11 @@ spec:
               value: {{ .Values.cubeEgress.bootstrapURL | quote }}
             - name: CUBE_EGRESS_DEBUG_DUMP
               value: {{ ternary "1" "0" .Values.cubeEgress.debugDump | quote }}
+            # Optional: entrypoint may wait on this sentinel before bootstrap.
+            - name: CUBE_WAIT_NETWORK_AGENT_SENTINEL
+              value: /usr/local/services/cubetoolbox/.staged-network-agent
+            - name: KRUISE_CONTAINER_PRIORITY
+              value: "0"
           ports:
             - name: egress-admin
               containerPort: 9090
@@ -465,6 +274,9 @@ spec:
               mountPath: {{ .Values.hostPaths.dataLog }}
             - name: cube-egress-run
               mountPath: /var/run/openresty
+            - name: toolbox
+              mountPath: /usr/local/services/cubetoolbox
+              readOnly: true
           {{- with .Values.cubeEgress.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -490,6 +302,11 @@ spec:
               value: {{ .Values.cubeEgress.network.initialWaitSeconds | quote }}
             - name: CUBE_EGRESS_NET_REAPPLY_INTERVAL_SECONDS
               value: {{ .Values.cubeEgress.network.reapplyIntervalSeconds | quote }}
+            # Optional: entrypoint may wait on this sentinel before applying rules.
+            - name: CUBE_WAIT_NETWORK_AGENT_SENTINEL
+              value: /usr/local/services/cubetoolbox/.staged-network-agent
+            - name: KRUISE_CONTAINER_PRIORITY
+              value: "0"
           {{- if .Values.cubeEgress.network.probes.readiness.enabled }}
           readinessProbe:
             exec:
@@ -516,6 +333,9 @@ spec:
             - name: lib-modules
               mountPath: /lib/modules
               readOnly: true
+            - name: toolbox
+              mountPath: /usr/local/services/cubetoolbox
+              readOnly: true
           {{- with .Values.cubeEgress.netResources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -531,6 +351,14 @@ spec:
           hostPath:
             path: {{ .Values.hostPaths.toolbox }}
             type: DirectoryOrCreate
+        - name: bootstrap-state
+          hostPath:
+            path: {{ .Values.hostPaths.bootstrapState }}
+            type: DirectoryOrCreate
+        - name: cube-pid
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Mi
         - name: dev
           hostPath:
             path: {{ .Values.hostPaths.dev }}

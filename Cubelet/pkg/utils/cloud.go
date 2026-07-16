@@ -34,14 +34,14 @@ var (
 
 func GetHostIdentity() (HostIdentity, error) {
 	hostIdentityOnce.Do(func() {
-		ip, err := detectPrimaryIPv4()
+		instanceID, localIPv4, err := resolveHostIdentity()
 		if err != nil {
 			hostIdentityErr = err
 			return
 		}
 		hostIdentity = HostIdentity{
-			InstanceID:   ip,
-			LocalIPv4:    ip,
+			InstanceID:   instanceID,
+			LocalIPv4:    localIPv4,
 			InstanceType: localInstanceType,
 			Region:       "",
 		}
@@ -85,6 +85,51 @@ func GetVPCIDByMAC(mac string) (string, error) {
 func GetSubNetID(mac string) (string, error) {
 	_ = mac
 	return "", ErrMetadataUnsupported
+}
+
+// resolveHostIdentity separates stable NodeID (InstanceID) from the dialable
+// endpoint address (LocalIPv4 / HostIP registration).
+//
+// InstanceID:
+//  1. CUBE_SANDBOX_NODE_ID (may be nodeName or any stable id)
+//  2. else CUBE_SANDBOX_NODE_IP (IPv4)
+//  3. else auto-detected primary IPv4
+//
+// LocalIPv4:
+//  1. CUBE_SANDBOX_ENDPOINT_IP (PodIP for Addresses / Redis HostIP)
+//  2. else if InstanceID is an IPv4, use it (legacy single-identity behaviour)
+//  3. else auto-detected primary IPv4
+func resolveHostIdentity() (instanceID, localIPv4 string, err error) {
+	if id := strings.TrimSpace(os.Getenv("CUBE_SANDBOX_NODE_ID")); id != "" {
+		instanceID = id
+	} else if ip, e := nodeIPFromEnv(); e == nil {
+		instanceID = ip
+	} else {
+		ip, e := detectPrimaryIPv4()
+		if e != nil {
+			return "", "", e
+		}
+		instanceID = ip
+	}
+
+	if ep := strings.TrimSpace(os.Getenv("CUBE_SANDBOX_ENDPOINT_IP")); ep != "" {
+		ip := net.ParseIP(ep)
+		if ip == nil || ip.To4() == nil || ip.IsLoopback() {
+			return "", "", fmt.Errorf("invalid CUBE_SANDBOX_ENDPOINT_IP: %q", ep)
+		}
+		localIPv4 = ip.String()
+		return instanceID, localIPv4, nil
+	}
+
+	if ip := net.ParseIP(instanceID); ip != nil && ip.To4() != nil && !ip.IsLoopback() {
+		return instanceID, ip.String(), nil
+	}
+
+	ip, e := detectPrimaryIPv4()
+	if e != nil {
+		return "", "", e
+	}
+	return instanceID, ip, nil
 }
 
 func detectPrimaryIPv4() (string, error) {

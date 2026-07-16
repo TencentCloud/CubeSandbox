@@ -16,68 +16,96 @@ global:
   # exactly as declared. Set to e.g. "my-registry.example.com/cubesandbox"
   # to mirror all images into a private registry without editing each entry
   # individually. Applies to the pvmHostBootstrap / nodeInit / node / master
-  # / api / cubemastercli / proxyNode / lifecycleManager / cubeEgress /
-  # cubeEgressNet / webui entries but not to third-party images such as mysql /
+  # / api / cubemastercli / proxy / lifecycleManager / cubeEgress /
+  # cubeEgressNet / webui / cubelet / networkAgent / cubeShim / cubeKernel /
+  # cubeGuest / waitNodePrep entries but not to third-party images such as mysql /
   # redis / docker-in-docker / alpine/k8s.
   imageRegistry: ""
 
 images:
-  # Init container 1: installs/configures PVM host kernel and may reboot the host.
+  # Bootstrap DaemonSet init: installs/configures PVM host kernel and may reboot the host.
   pvmHostBootstrap:
     repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-pvm-host-bootstrap
-    tag: v0.5.0
+    tag: v0.5.1
     pullPolicy: Always
 
-  # Init container 2: validates KVM/XFS, prepares host directories, checks CubeMaster reachability.
+  # Bootstrap DaemonSet init: validates KVM/XFS, prepares host directories, checks CubeMaster reachability.
   nodeInit:
     repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-node-init
-    tag: v0.5.0
+    tag: v0.5.1
     pullPolicy: Always
 
-  # Runtime container for Cube compute nodes. It should contain node-only components.
-  node:
-    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-node
-    tag: v0.5.0
+  # Big Pod wait-node-prep sidecar (Kruise priority 10) + bootstrap write-ready/hold.
+  # Freeze wait env/mounts; bumping only this image may InPlace on Big Pod.
+  waitNodePrep:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-wait-node-prep
+    tag: v0.5.1
+    pullPolicy: Always
+
+  # Big Pod per-component runtime images.
+  cubelet:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cubelet
+    tag: v0.5.1
+    pullPolicy: Always
+
+  networkAgent:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/network-agent
+    tag: v0.5.1
+    pullPolicy: Always
+
+  cubeShim:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-shim
+    tag: v0.5.1
+    pullPolicy: Always
+
+  cubeKernel:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-kernel
+    tag: v0.5.1
+    pullPolicy: Always
+
+  cubeGuest:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-guest
+    tag: v0.5.1
     pullPolicy: Always
 
   master:
     repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-master
-    tag: v0.5.0
+    tag: v0.5.1
     pullPolicy: Always
 
   api:
     repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-api
-    tag: v0.5.0
+    tag: v0.5.1
     pullPolicy: Always
 
   cubemastercli:
     repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cubemastercli
-    tag: v0.5.0
+    tag: v0.5.1
     pullPolicy: Always
 
-  proxyNode:
-    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-proxy-node
-    tag: v0.5.0
+  proxy:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-proxy
+    tag: v0.5.1
     pullPolicy: Always
 
   lifecycleManager:
     repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-lifecycle-manager
-    tag: v0.5.0
+    tag: v0.5.1
     pullPolicy: Always
 
   cubeEgress:
     repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-egress
-    tag: v0.5.0
+    tag: v0.5.1
     pullPolicy: Always
 
   cubeEgressNet:
     repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-egress-net
-    tag: v0.5.0
+    tag: v0.5.1
     pullPolicy: Always
 
   webui:
     repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-webui
-    tag: v0.5.0
+    tag: v0.5.1
     pullPolicy: Always
 
   templateBuilder:
@@ -383,20 +411,23 @@ redis:
 cubeNode:
   enabled: true
   podAnnotations: {}
-  # RollingUpdate with maxUnavailable=1 upgrades one compute node at a time so
-  # the CubeMaster scheduling window without a live cubelet stays small.
-  # Switch to OnDelete for fully manual per-node rollouts.
+  # OpenKruise Advanced DaemonSet (apps.kruise.io/v1beta1) is required.
+  # InPlaceIfPossible image upgrades keep cube-node Pod UID / IP / netns stable.
+  # Requires OpenKruise >= 1.9 with Advanced DaemonSet CRD + kruise-daemon.
+  # Default: InPlaceIfPossible. Switch type to OnDelete for fully manual rolls,
+  # or rollingUpdateType to Standard to force recreate (debug / contrast).
   updateStrategy:
     type: RollingUpdate
     rollingUpdate:
+      rollingUpdateType: InPlaceIfPossible
       maxUnavailable: 1
   # Give cubelet/network-agent time to exit cleanly on Pod delete. preStop only
-  # signals those two processes; containerd-shim-cube-rs / microVMs are left alone.
+  # signals those processes via pidfile; containerd-shim-cube-rs / microVMs are left alone.
   terminationGracePeriodSeconds: 30
 
-  # How CUBE_SANDBOX_NODE_IP is populated. Currently statusHostIP or static are supported.
-  ipSource: statusHostIP
-  staticNodeIP: ""
+  # Stable NodeID = Kubernetes node name (CUBE_SANDBOX_NODE_ID).
+  # Endpoint = status.podIP (CUBE_SANDBOX_ENDPOINT_IP).
+  nodeIDSource: specNodeName
 
   # Default to the PVM profile so a labelled compute node can be initialized by
   # this chart without an extra values file. cube-node-init fails fast if this
@@ -405,7 +436,7 @@ cubeNode:
     enabled: true
 
   network:
-    # One-click auto-detects the primary NIC and patches Cubelet eth_name.
+    # Auto-detect primary NIC inside the Pod netns and patch Cubelet eth_name.
     autoDetectEthName: true
     # Leave empty to keep auto-detection. Set to pin Cubelet eth_name.
     ethName: ""
@@ -423,10 +454,7 @@ cubeNode:
       nameservers: []
 
   env: []
-  # Sensible default resource requests / limits for the cube-node runtime
-  # container. Cube nodes host multiple KVM microVMs and must not be evicted
-  # by the scheduler under memory pressure. Downgrade or override in
-  # runtime-values.yaml when the workload profile is known.
+  # Resource defaults for the cubelet run container.
   resources:
     requests:
       cpu: "500m"
@@ -438,19 +466,13 @@ cubeNode:
     startup:
       enabled: true
       tcpSocketPort: 9999
-      # Optional exec probe overriding the TCP check. Set to a shell command
-      # list (e.g. ["/bin/sh","-c","cubectl status --local"]) to detect a
-      # process that keeps port 9999 open while internally deadlocked.
       exec: []
       periodSeconds: 10
       failureThreshold: 30
     readiness:
       enabled: true
       tcpSocketPort: 9999
-      # Recovery gate: cubelet must be listening AND network-agent must have
-      # finished its TAP/state recover() before the Pod is marked Ready. This
-      # keeps RollingUpdate from advancing while the node is still reconnecting
-      # to existing shims after an image upgrade.
+      # Recovery gate: cubelet listening AND network-agent ready.
       exec:
         - /bin/bash
         - -ec
@@ -469,6 +491,53 @@ cubeNode:
       initialDelaySeconds: 60
       periodSeconds: 20
       failureThreshold: 6
+
+# Artifact install DaemonSet (shim/kernel/guest). Always deployed with
+# cube-node (no enable switch). May RollingUpdate and grow containers; does NOT
+# hold PodIP/dataplane.
+cubeNodeInstaller:
+  podAnnotations: {}
+  # Standard recreate is intentional: adding install containers must not touch
+  # the Big Pod. Do not require InPlace here.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  terminationGracePeriodSeconds: 15
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      memory: "512Mi"
+
+# Node prep DaemonSet (pvm + node-init + write node-prep-ready). Low churn;
+# bumping nodeInit/pvmHostBootstrap recreates this DS only. hostPID=true and
+# wide host mounts — do NOT merge into cube-node-installer.
+cubeNodeBootstrap:
+  podAnnotations: {}
+  # Bump only when intentionally invalidating all nodes' prep fingerprint
+  # (forces wait-node-prep to re-block until bootstrap rewrites sentinel).
+  prepGeneration: "1"
+  waitTimeoutSeconds: "600"
+  # Resources for Big Pod wait-node-prep sidecar.
+  waitResources:
+    requests:
+      cpu: "20m"
+      memory: "32Mi"
+    limits:
+      memory: "64Mi"
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  terminationGracePeriodSeconds: 30
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      memory: "256Mi"
 
 cubeProxy:
   # Cube data-plane proxy. When enabled, it is delivered and removed by this
@@ -736,7 +805,7 @@ bootstrap:
         size: 25G
 
 security:
-  hostNetwork: true
+  # cube-node always uses the Pod network; no hostNetwork toggle.
   hostPID: true
   privileged: true
 
@@ -750,14 +819,14 @@ hostPaths:
   dataCubeShim: /data/cube-shim
   dataSnapshotPack: /data/snapshot_pack
   tmpCube: /tmp/cube
-  # Host-persistent copy of the cube-node image toolbox (Cubelet, network-agent,
-  # cube-shim, guest kernels, ...). Same path as one-click INSTALL_PREFIX so
-  # K8s and one-click share the KillMode=process / unlink-inode upgrade model.
-  # The stage-toolbox initContainer selectively replaces package trees on every
-  # Pod start (aligned with one-click install.sh), while preserving runtime
-  # dirs such as cube-snapshot / cubebox_os_image / cubeletmnt / cube-vs.
-  # Running shims keep their already-mapped inodes across upgrades because
-  # this hostPath is never unmounted when the Pod is deleted.
+  # pvm/node-init state + node-prep-ready sentinel (shared by bootstrap DS and
+  # Big Pod wait-node-prep).
+  bootstrapState: /var/lib/cube-node-bootstrap
+  # Host-persistent toolbox tree. Big Pod mounts this path whole at
+  # /usr/local/services/cubetoolbox (stable volumeMount for InPlace). Installer
+  # and Big Pod self-stage copy from /opt/cube-image into this tree; preserve
+  # dirs such as cube-snapshot / cubebox_os_image / cubeletmnt / cube-vs are not
+  # wiped by component installs.
   toolbox: /usr/local/services/cubetoolbox
   # Shim ttrpc listen sockets: containerd-shim SOCKET_ROOT is hardcoded to
   # /run/containerd, and LoadExistingShims dials unix:///run/containerd/s/{hash}

@@ -27,14 +27,14 @@ External control plane:
   Cluster DNS: *.{{ .Values.cubeProxy.domain }} -> {{ include "cube.proxyServiceFQDN" . }} (patched into kube-system/coredns)
 {{- end }}
 
-Cube Node DaemonSet:
+Cube Node DaemonSet (OpenKruise Advanced / InPlaceIfPossible):
   {{ include "cube.nodeName" . }}
 {{- if .Values.cubeNode.dns.sandbox.followNodeDns }}
   Sandbox guest DNS: follow node / cluster DNS
 {{- end }}
 {{- if eq (include "cube.proxyEnabled" .) "true" }}
 
-Cube Proxy Node Deployment:
+Cube Proxy Deployment:
   {{ include "cube.proxyName" . }}
   Service ({{ .Values.cubeProxy.service.type | default "ClusterIP" }}): {{ include "cube.proxyServiceFQDN" . }}:{{ .Values.cubeProxy.ports.http.containerPort }}/{{ .Values.cubeProxy.ports.https.containerPort }}
 {{- if .Values.cubeProxy.ingress.enabled }}
@@ -47,13 +47,16 @@ Cube Proxy Node Deployment:
 
 Useful commands:
   kubectl get pods -n {{ .Release.Namespace }} -o wide
-  kubectl get ds -n {{ .Release.Namespace }} {{ include "cube.nodeName" . }}
+  kubectl get ads -n {{ .Release.Namespace }} {{ include "cube.nodeName" . }}
+  kubectl get ds -n {{ .Release.Namespace }} {{ include "cube.nodeBootstrapName" . }}
+  kubectl get ds -n {{ .Release.Namespace }} {{ include "cube.nodeInstallerName" . }}
 {{- if eq (include "cube.proxyEnabled" .) "true" }}
   kubectl get deploy -n {{ .Release.Namespace }} {{ include "cube.proxyName" . }}
 {{- end }}
-  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node -c pvm-host-bootstrap --tail=100
-  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node -c cube-node-init --tail=100
-  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node -c cube-node --tail=100
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node-bootstrap -c pvm-host-bootstrap --tail=100
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node-bootstrap -c cube-node-init --tail=100
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node -c wait-node-prep --tail=100
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node -c cubelet --tail=100
 {{- if eq (include "cube.cubemastercliEnabled" .) "true" }}
   kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.cubemastercliName" . }} -- cubemastercli --help
   kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.cubemastercliName" . }} -- sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
@@ -64,5 +67,6 @@ Useful commands:
   sh /tmp/cube-diag-k8s.sh {{ .Release.Namespace }} {{ .Release.Name }}
 {{- end }}
 
-WARNING: If bootstrap.pvmHostKernel.enabled=true, this release may install a host kernel and reboot selected compute nodes.
+WARNING: If bootstrap.pvmHostKernel.enabled=true, this release may install a host kernel and reboot selected compute nodes (via cube-node-bootstrap).
 Helm rollback does not roll back host kernel/GRUB changes.
+Bump images.waitNodePrep image-only for InPlace; changing wait env/mounts forces Big Pod recreate.

@@ -10,7 +10,7 @@ metadata:
   name: {{ include "cube.proxyName" . }}
   labels:
     {{- include "cube.labels" . | nindent 4 }}
-    app.kubernetes.io/component: cube-proxy-node
+    app.kubernetes.io/component: cube-proxy
   {{- with .Values.cubeProxy.ingress.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -44,7 +44,7 @@ metadata:
   name: {{ include "cube.proxyName" . }}-http
   labels:
     {{- include "cube.labels" . | nindent 4 }}
-    app.kubernetes.io/component: cube-proxy-node
+    app.kubernetes.io/component: cube-proxy
   {{- with .Values.cubeProxy.ingress.className }}
   {{- /* intentionally no ssl-passthrough annotations */}}
   {{- end }}

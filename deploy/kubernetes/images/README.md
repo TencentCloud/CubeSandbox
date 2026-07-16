@@ -5,14 +5,14 @@ This directory contains image build definitions used by the Kubernetes/TKE chart
 ## Build entrypoint
 
 ```bash
-PUSH=1 REGISTRY=ccr.ccs.tencentyun.com/cubesandbox-chart IMAGE_TAG=v0.5.0 ./deploy/kubernetes/images/build-cube-images.sh
+PUSH=1 REGISTRY=ccr.ccs.tencentyun.com/cubesandbox-chart IMAGE_TAG=v0.5.1 ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
 Use `NO_CACHE=1` when every Docker image layer must be rebuilt instead of
 using Docker's build cache:
 
 ```bash
-NO_CACHE=1 PUSH=1 REGISTRY=ccr.ccs.tencentyun.com/cubesandbox-chart IMAGE_TAG=v0.5.0 ./deploy/kubernetes/images/build-cube-images.sh
+NO_CACHE=1 PUSH=1 REGISTRY=ccr.ccs.tencentyun.com/cubesandbox-chart IMAGE_TAG=v0.5.1 ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
 The script defaults its temporary `BUILD_ROOT` to
@@ -25,10 +25,10 @@ and does not require a `.complete` marker.
 
 ## Pinning source to a release tag
 
-`cube-api`, `cube-proxy-node`, `cube-egress`, `cube-lifecycle-manager`, and
+`cube-api`, `cube-proxy`, `cube-egress`, `cube-lifecycle-manager`, and
 `cube-webui` are compiled from repository source (rather than binaries in the
 release tarball). By default the script pins those source trees to
-`${SOURCE_REF}` (defaulting to `${VERSION}`, so `v0.5.0` for the default
+`${SOURCE_REF}` (defaulting to `${VERSION}`, so `v0.5.1` for the default
 build). It exports `CubeMaster/`, `CubeAPI/`, `CubeProxy/`, `CubeEgress/`,
 `cube-lifecycle-manager/`, `web/`, and `deploy/one-click/webui/` at that git
 ref into `${BUILD_ROOT}/source-tree/` via `git archive` and points `REPO_ROOT`
@@ -39,14 +39,14 @@ To build from the current worktree instead (typically for development), set
 `SOURCE_REF=""`:
 
 ```bash
-SOURCE_REF="" PUSH=1 REGISTRY=<...> IMAGE_TAG=v0.5.0-dev \
+SOURCE_REF="" PUSH=1 REGISTRY=<...> IMAGE_TAG=v0.5.1-dev \
   ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
 To build from a different ref (branch, tag, or commit SHA):
 
 ```bash
-SOURCE_REF=some-feature-branch PUSH=1 REGISTRY=<...> IMAGE_TAG=v0.5.0-featureX \
+SOURCE_REF=some-feature-branch PUSH=1 REGISTRY=<...> IMAGE_TAG=v0.5.1-featureX \
   ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
@@ -56,7 +56,7 @@ entrypoint into it:
 
 ```bash
 CUBE_NODE_BASE_IMAGE=ccr.ccs.tencentyun.com/pavleli/cube-node:v0.4.0-cubevsfix-20260627 \
-  PUSH=1 REGISTRY=ccr.ccs.tencentyun.com/cubesandbox-chart IMAGE_TAG=v0.5.0 \
+  PUSH=1 REGISTRY=ccr.ccs.tencentyun.com/cubesandbox-chart IMAGE_TAG=v0.5.1 \
   ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
@@ -69,14 +69,15 @@ entrypoint behavior.
   It is a Kubernetes delivery image that bundles the node-side runtime components required by the Cube Node Big Pod, including `Cubelet`, `network-agent`, `cube-shim`, `cube-kernel-scf`, `cube-image`, `cube-vs`, and `cube-snapshot`. `cube-egress` is intentionally not bundled in this image because it is delivered as a separate sidecar image.
   If `CUBE_NODE_BASE_IMAGE` is set, the build script rebases that image instead
   and only replaces `/usr/local/bin/cube-node-entrypoint.sh`.
-- `cube-node-init` and `cube-pvm-host-bootstrap` are Kubernetes Init Container images and stay in this delivery image directory.
+- `cube-node-init` and `cube-pvm-host-bootstrap` run on the **`cube-node-bootstrap`** DaemonSet (REV3.2; not Big Pod init).
+- `cube-wait-node-prep` is the Big Pod `wait-node-prep` **sidecar** (Kruise container launch priority) and the bootstrap `write-node-prep-ready` hold container. Bumping only the wait **image** on Big Pod may InPlace; do not change wait env/mounts routinely.
 - `cube-master` is built directly from `CubeMaster/docker/Dockerfile`. The build script prepares a temporary Docker context with the release-package `cubemaster` binary and the `CubeMaster/docker/tools` directory expected by that Dockerfile.
 - `cube-api` is built from `CubeAPI/Dockerfile`; no duplicate Dockerfile is kept here.
 - `cubemastercli` is an operational CLI image. It packages only the
   release-package `CubeMaster/bin/cubemastercli` binary and minimal runtime
   dependencies. It is separate from `cube-master` and `cube-node` so runtime
   image responsibilities remain clean.
-- `cube-proxy-node` is built from `CubeProxy/Dockerfile`; no duplicate Dockerfile is kept here. Auto-pause/resume is **not** baked into this image — use the standalone `cube-lifecycle-manager` image instead of the retired `cube-proxy-sidecar`.
+- `cube-proxy` is built from `CubeProxy/Dockerfile`; no duplicate Dockerfile is kept here. Auto-pause/resume is **not** baked into this image — use the standalone `cube-lifecycle-manager` image instead of the retired `cube-proxy-sidecar`.
 - `cube-lifecycle-manager` is built from `cube-lifecycle-manager/Dockerfile`; no duplicate Dockerfile is kept here.
 - `cube-egress` is built from `CubeEgress/Dockerfile`; no duplicate Dockerfile is kept here. Its `cube-egress/openresty:1.29.2.5-tproxy` base image is built first from `CubeEgress/openresty/Dockerfile`, because that patched OpenResty base is part of the upstream CubeEgress build chain rather than a public pull-only dependency.
   The build script also tags that local base as

@@ -38,7 +38,7 @@ data:
     run helm-values helm get values "${RELEASE}" -n "${NS}" -o yaml
     run helm-manifest helm get manifest "${RELEASE}" -n "${NS}"
 
-    for component in master api cube-node cube-proxy-node webui dns mysql redis; do
+    for component in master api cube-node cube-proxy webui dns mysql redis; do
       run "pods-${component}" kubectl get pods -n "${NS}" -l "app.kubernetes.io/component=${component}" -o wide
       kubectl get pods -n "${NS}" -l "app.kubernetes.io/component=${component}" -o name 2>/dev/null \
         | while read -r pod; do
@@ -53,7 +53,7 @@ data:
     for ds in {{ include "cube.nodeName" . | quote }}; do
       run "rollout-${ds}" kubectl rollout status "daemonset/${ds}" -n "${NS}" --timeout=30s
     done
-    run rollout-proxy-node kubectl rollout status "deployment/{{ include "cube.proxyName" . }}" -n "${NS}" --timeout=30s
+    run rollout-proxy kubectl rollout status "deployment/{{ include "cube.proxyName" . }}" -n "${NS}" --timeout=30s
     run rollout-mysql kubectl rollout status "statefulset/{{ include "cube.mysqlName" . }}" -n "${NS}" --timeout=30s
     run rollout-redis kubectl rollout status "statefulset/{{ include "cube.redisName" . }}" -n "${NS}" --timeout=30s
 

@@ -1,8 +1,8 @@
 # 一键安装指南 (Quick Start)
 
-本文档描述如何在 30 分钟内,使用 Helm 把 CubeSandbox v0.5.0 完整部署到一个 Kubernetes/TKE 集群。适合首次接触 chart 的交付人员、SRE 或用户。
+本文档描述如何在 30 分钟内,使用 Helm 把 CubeSandbox v0.5.1 完整部署到一个 Kubernetes/TKE 集群。适合首次接触 chart 的交付人员、SRE 或用户。
 
-如果你需要理解组件关系、启动流程、DNS/Proxy/Egress 数据流,请阅读 [`ARCHITECTURE.md`](ARCHITECTURE.md);运行中遇到问题请查阅 [`FAQ.md`](FAQ.md)。
+如果你需要理解组件关系、启动流程、DNS/Proxy/Egress 数据流,请阅读 [`ARCHITECTURE.md`](ARCHITECTURE.md);计算面镜像升级见 [`UPGRADE.md`](UPGRADE.md);运行中遇到问题请查阅 [`FAQ.md`](FAQ.md)。
 
 ---
 
@@ -13,6 +13,7 @@
 | 项目 | 最低要求 | 说明 |
 | --- | --- | --- |
 | Kubernetes / TKE | v1.24+ | 建议使用 TKE 托管集群或 TKE Serverless(节点池模式) |
+| OpenKruise | 1.9+（**必需**） | 计算面强依赖 Advanced DaemonSet + InPlaceIfPossible；需 CRD 与 kruise-daemon。安装见下文 §1.4 |
 | kubectl | 与集群同大版本 | 确保 `kubectl get nodes` 能正常返回 |
 | Helm | v3.10+ | `helm version` 应可返回 |
 | Docker(仅打包镜像时) | v20+ | 生产集群只需能 pull 已推送的镜像 |
@@ -46,24 +47,37 @@ kubectl taint nodes <compute-node-1> cube.tencent.com/compute=true:NoSchedule --
 
 `allow-pvm-bootstrap=true` 显式授权该节点可以被 chart 替换 host kernel;不打这个 label 就无法作为 compute 节点部署。
 
+### 1.4 安装 OpenKruise（计算面原地升级）
+
+```bash
+helm repo add openkruise https://openkruise.github.io/charts/
+helm repo update
+helm install kruise openkruise/kruise --version 1.9.0 \
+  --set featureGates='ImagePullJobGate=true\,InPlaceWorkloadVerticalScaling=true'
+kubectl get pods -n kruise-system
+kubectl api-resources | grep 'apps.kruise.io.*daemonsets'
+```
+
+安装完成后可用 `kubectl get pods -n kruise-system` 与 `kubectl api-resources | grep 'apps.kruise.io.*daemonsets'` 确认。OpenKruise 为计算面硬依赖，不可关闭。
+
 ---
 
 ## 2. 准备镜像(可跳过)
 
-若使用官方 v0.5.0 镜像,跳过本章,直接进入"安装"。若需自建镜像,一条命令构建 + 推送:
+若使用官方 v0.5.1 镜像,跳过本章,直接进入"安装"。若需自建镜像,一条命令构建 + 推送:
 
 ```bash
 docker login ccr.ccs.tencentyun.com   # 或你的私有 registry
 
 PUSH=1 \
 REGISTRY=ccr.ccs.tencentyun.com/<your-namespace> \
-IMAGE_TAG=v0.5.0 \
+IMAGE_TAG=v0.5.1 \
 ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
 脚本会自动:
 
-1. 从 SourceForge 下载 `cube-sandbox-one-click-v0.5.0-amd64.tar.gz`(约 245MB)+ PVM host kernel RPM/DEB
+1. 从 SourceForge 下载 `cube-sandbox-one-click-v0.5.1-amd64.tar.gz`(约 245MB)+ PVM host kernel RPM/DEB
 2. 基于 `CubeMaster/CubeAPI/CubeProxy/CubeEgress` 源代码构建 10 个镜像
 3. 推送到 `${REGISTRY}` 下,tag 为 `${IMAGE_TAG}`
 
@@ -84,14 +98,14 @@ IMAGE_TAG=v0.5.0 \
 # - 若把 chart 镜像镜像到私有 registry, 用一个开关一次改所有 Cube 镜像:
 #     global:
 #       imageRegistry: my-registry.example.com/mirror
-#   会渲染成 my-registry.example.com/mirror/cubesandbox-chart/cube-master:v0.5.0
+#   会渲染成 my-registry.example.com/mirror/cubesandbox-chart/cube-master:v0.5.1
 #   等等, 保留 sub-path (cubesandbox-chart/); 第三方镜像 (mysql/redis/
 #   coredns/busybox/curl) 不受影响。
 # - 也可以直接改单个镜像的 repository:
 #     images:
 #       master:
 #         repository: my-registry.example.com/mirror/cubesandbox-chart/cube-master
-#         tag: v0.5.0
+#         tag: v0.5.1
 
 # StorageClass —— 默认不创建, 3 个 PVC (CubeMaster / MySQL / Redis)
 # 走集群 default StorageClass。self-hosted / EKS / GKE / AKS 用户
@@ -156,7 +170,7 @@ helm upgrade --install cube ./deploy/kubernetes/chart \
 1. **秒级**:控制面 Secret / ConfigMap / RBAC 创建
 2. **1-3 分钟**:MySQL / Redis StatefulSet ready,CubeMaster 完成 schema migration
 3. **1-2 分钟**:CubeAPI / CubeProxy / WebUI ready
-4. **首次 5-15 分钟**:cube-node DaemonSet 在每个 compute 节点上依次执行 `pvm-host-bootstrap`(可能触发重启)→ `cube-node-init` → 主容器启动 → 节点向 CubeMaster 注册
+4. **首次 5-15 分钟**:每 compute 节点上 `cube-node-bootstrap` 执行 `pvm-host-bootstrap`(可能触发重启)→ `cube-node-init` → 写 `node-prep-ready`；Big Pod `wait-node-prep` sidecar（Kruise prio 10）Ready 后主容器启动 → 节点向 CubeMaster 注册
 5. **之后**:后续升级/滚动更新只需秒级
 
 ---
@@ -178,7 +192,7 @@ helm test cube -n cube-system --timeout 20m --logs
 **期望结果**:
 
 - `cube-node` DaemonSet Ready 数量 = 打了 compute label 的节点数量
-- `cube-master` / `cube-api` / `cube-proxy-node` / `cube-webui` Deployment Ready
+- `cube-master` / `cube-api` / `cube-proxy` / `cube-webui` Deployment Ready
 - `cube-mysql` / `cube-redis` StatefulSet Ready(若使用内置)
 - `helm test` 全绿
 

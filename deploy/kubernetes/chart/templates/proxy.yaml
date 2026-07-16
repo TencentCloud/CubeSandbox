@@ -26,7 +26,7 @@ metadata:
   name: {{ $proxyCertSecretName }}
   labels:
     {{- include "cube.labels" . | nindent 4 }}
-    app.kubernetes.io/component: cube-proxy-node
+    app.kubernetes.io/component: cube-proxy
 type: Opaque
 stringData:
   {{ .Values.cubeProxy.tls.certSecretKey | quote }}: |-
@@ -56,7 +56,7 @@ metadata:
   name: {{ $proxyCertSecretName }}
   labels:
     {{- include "cube.labels" . | nindent 4 }}
-    app.kubernetes.io/component: cube-proxy-node
+    app.kubernetes.io/component: cube-proxy
 type: Opaque
 {{ if $hasExisting }}
 data:
@@ -82,7 +82,7 @@ metadata:
   name: {{ $proxyCertSecretName }}
   labels:
     {{- include "cube.labels" . | nindent 4 }}
-    app.kubernetes.io/component: cube-proxy-node
+    app.kubernetes.io/component: cube-proxy
 spec:
   secretName: {{ $proxyCertSecretName }}
   {{- if .Values.cubeProxy.tls.certManager.commonName }}
@@ -120,7 +120,7 @@ metadata:
   name: {{ include "cube.proxyName" . }}
   labels:
     {{- include "cube.labels" . | nindent 4 }}
-    app.kubernetes.io/component: cube-proxy-node
+    app.kubernetes.io/component: cube-proxy
 spec:
   replicas: {{ .Values.cubeProxy.replicas }}
   strategy:
@@ -128,12 +128,12 @@ spec:
   selector:
     matchLabels:
       {{- include "cube.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: cube-proxy-node
+      app.kubernetes.io/component: cube-proxy
   template:
     metadata:
       labels:
         {{- include "cube.selectorLabels" . | nindent 8 }}
-        app.kubernetes.io/component: cube-proxy-node
+        app.kubernetes.io/component: cube-proxy
       {{- with .Values.cubeProxy.podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
@@ -147,14 +147,14 @@ spec:
       {{- end }}
       {{- include "cube.controlPlanePlacement" . | nindent 6 }}
       containers:
-        - name: cube-proxy-node
-          image: {{ include "cube.cubeImage" (dict "image" .Values.images.proxyNode "context" $) | quote }}
-          imagePullPolicy: {{ .Values.images.proxyNode.pullPolicy }}
+        - name: cube-proxy
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.proxy "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.proxy.pullPolicy }}
           command:
             - /bin/sh
             - -ec
             - |
-              exec /etc/cube-proxy-node/cube-proxy-node-entrypoint.sh
+              exec /etc/cube-proxy/cube-proxy-entrypoint.sh
           env:
             {{- include "cube.timezoneEnv" . | nindent 12 }}
             - name: POD_IP
@@ -220,7 +220,7 @@ spec:
             - name: CUBE_PROXY_NODE_IP
               value: "$(POD_IP)"
             - name: CUBE_PROXY_VERSION
-              value: {{ .Values.images.proxyNode.tag | quote }}
+              value: {{ .Values.images.proxy.tag | quote }}
             - name: CUBE_PROXY_HEARTBEAT_INTERVAL_MS
               value: {{ .Values.cubeProxy.registry.heartbeatIntervalMs | quote }}
             - name: CUBE_PROXY_REGISTRY_REDIS_HOST
@@ -274,7 +274,7 @@ spec:
             - name: proxy-logs
               mountPath: /data/log/cube-proxy
             - name: entrypoint
-              mountPath: /etc/cube-proxy-node
+              mountPath: /etc/cube-proxy
               readOnly: true
           {{- with .Values.cubeProxy.resources }}
           resources:
@@ -304,8 +304,8 @@ metadata:
   name: {{ include "cube.proxyName" . }}-entrypoint
   labels:
     {{- include "cube.labels" . | nindent 4 }}
-    app.kubernetes.io/component: proxy-node
+    app.kubernetes.io/component: proxy
 data:
-  cube-proxy-node-entrypoint.sh: |
-{{ .Files.Get "files/cube-proxy-node/cube-proxy-node-entrypoint.sh" | indent 4 }}
+  cube-proxy-entrypoint.sh: |
+{{ .Files.Get "files/cube-proxy/cube-proxy-entrypoint.sh" | indent 4 }}
 {{- end }}

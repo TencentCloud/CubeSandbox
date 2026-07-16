@@ -11,12 +11,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 WORKTREE_ROOT="${REPO_ROOT}"
 
-VERSION="${VERSION:-v0.5.0}"
+VERSION="${VERSION:-v0.5.1}"
 IMAGE_TAG="${IMAGE_TAG:-${VERSION}}"
 REGISTRY="${REGISTRY:-ccr.ccs.tencentyun.com/cubesandbox-chart}"
 # SOURCE_REF pins the CubeMaster / CubeAPI / CubeProxy / CubeEgress /
 # cube-lifecycle-manager / web / deploy/one-click/webui source tree used when
-# building cube-api / cube-proxy-node / cube-egress / cube-lifecycle-manager /
+# building cube-api / cube-proxy / cube-egress / cube-lifecycle-manager /
 # cube-webui from repository source, ensuring the delivered images match the
 # release tag rather than the current worktree. Set SOURCE_REF="" to build from
 # the current worktree.
@@ -189,7 +189,7 @@ log "release download base (${MIRROR:-github}): ${RELEASE_DOWNLOAD_BASE}"
 # When SOURCE_REF is set (default: ${VERSION}), export the CubeMaster / CubeAPI /
 # CubeProxy / CubeEgress / cube-lifecycle-manager / web / deploy/one-click/webui
 # trees at that ref into ${SOURCE_TREE_DIR} and point REPO_ROOT there. This
-# ensures cube-api, cube-proxy-node, cube-egress, cube-lifecycle-manager,
+# ensures cube-api, cube-proxy, cube-egress, cube-lifecycle-manager,
 # cube-webui and related contexts are compiled from the release-tag source, not
 # from whatever happens to be in the current worktree (which may be ahead of
 # the tag).
@@ -291,7 +291,7 @@ copy_cube_proxy_component_context() {
   [[ -d "${src}/conf/includes" ]] || fail "missing CubeProxy conf/includes"
 
   # Auto-pause/resume moved out of cube-proxy-sidecar into the standalone
-  # cube-lifecycle-manager image. cube-proxy-node is nginx/OpenResty only.
+  # cube-lifecycle-manager image. cube-proxy is nginx/OpenResty only.
   cp -a "${src}/lua" "${ctx}/lua"
   mkdir -p "${ctx}/conf"
   cp -a "${src}/conf/includes" "${ctx}/conf/includes"
@@ -338,10 +338,10 @@ build_cube_webui_image() {
   fi
 }
 
-build_cube_proxy_node_image() {
+build_cube_proxy_image() {
   local ctx="$1"
   local dockerfile="${REPO_ROOT}/CubeProxy/Dockerfile"
-  local image="${REGISTRY}/cube-proxy-node:${IMAGE_TAG}"
+  local image="${REGISTRY}/cube-proxy:${IMAGE_TAG}"
   local docker_args=(
     -f "${dockerfile}"
     -t "${image}"
@@ -484,9 +484,9 @@ ctx="$(prepare_context cubemastercli)"
 copy_cubemastercli_context "${ctx}"
 build_image cubemastercli "${ctx}"
 
-ctx="$(prepare_context cube-proxy-node)"
+ctx="$(prepare_context cube-proxy)"
 copy_cube_proxy_component_context "${ctx}"
-build_cube_proxy_node_image "${ctx}"
+build_cube_proxy_image "${ctx}"
 
 build_cube_lifecycle_manager_image
 
@@ -499,28 +499,35 @@ build_image cube-egress-net "${ctx}"
 
 build_cube_webui_image
 
-if [[ -n "${CUBE_NODE_BASE_IMAGE}" ]]; then
-  log "building cube-node by rebasing ${CUBE_NODE_BASE_IMAGE}"
-  build_cube_node_from_base_image
-else
-  ctx="$(prepare_context cube-node)"
-  copy_scripts "${ctx}" cube-node-entrypoint.sh stage-toolbox.sh
-  for d in Cubelet network-agent cube-shim cube-kernel-scf cube-image cube-vs cube-snapshot; do
-    [[ -d "${PACKAGE_DIR}/${d}" ]] || fail "invalid sandbox-package: missing required cube-node component ${d}"
-    cp -a "${PACKAGE_DIR}/${d}" "${ctx}/package/${d}"
-  done
-  [[ -d "${PACKAGE_DIR}/scripts/common" ]] || fail "invalid sandbox-package: missing required cube-node component scripts/common"
-  mkdir -p "${ctx}/package/scripts"
-  cp -a "${PACKAGE_DIR}/scripts/common" "${ctx}/package/scripts/common"
-  build_image cube-node "${ctx}"
-fi
+# Big Pod REV3: per-component images (no monolithic cube-node).
+build_component_image() {
+  local name="$1"
+  local pkg_dir="$2"
+  local ctx
+  [[ -d "${PACKAGE_DIR}/${pkg_dir}" ]] || fail "invalid sandbox-package: missing ${pkg_dir} for ${name}"
+  ctx="$(prepare_context "${name}")"
+  copy_scripts "${ctx}" component-entrypoint.sh
+  mkdir -p "${ctx}/package"
+  cp -a "${PACKAGE_DIR}/${pkg_dir}" "${ctx}/package/$(basename "${pkg_dir}")"
+  build_image "${name}" "${ctx}"
+}
+
+build_component_image cubelet Cubelet
+build_component_image network-agent network-agent
+build_component_image cube-shim cube-shim
+build_component_image cube-kernel cube-kernel-scf
+build_component_image cube-guest cube-image
 
 ctx="$(prepare_context cube-node-init)"
-copy_scripts "${ctx}" cube-node-init.sh
+copy_scripts "${ctx}" cube-node-init.sh node-prep-lib.sh
 build_image cube-node-init "${ctx}"
 
+ctx="$(prepare_context cube-wait-node-prep)"
+copy_scripts "${ctx}" node-prep-lib.sh wait-node-prep.sh write-node-prep-ready.sh
+build_image cube-wait-node-prep "${ctx}"
+
 ctx="$(prepare_context cube-pvm-host-bootstrap)"
-copy_scripts "${ctx}" pvm-host-bootstrap.sh
+copy_scripts "${ctx}" pvm-host-bootstrap.sh node-prep-lib.sh
 if [[ "${INCLUDE_PVM_KERNEL_RPM}" == "1" ]]; then
   log "downloading PVM host kernel rpm for bootstrap image"
   download_file "${PVM_KERNEL_RPM_URL}" "${PVM_KERNEL_RPM}" file "${PVM_KERNEL_RPM_SHA256}"
@@ -539,13 +546,18 @@ Built CubeSandbox images:
   ${REGISTRY}/cube-master:${IMAGE_TAG}
   ${REGISTRY}/cube-api:${IMAGE_TAG}
   ${REGISTRY}/cubemastercli:${IMAGE_TAG}
-  ${REGISTRY}/cube-proxy-node:${IMAGE_TAG}
+  ${REGISTRY}/cube-proxy:${IMAGE_TAG}
   ${REGISTRY}/cube-lifecycle-manager:${IMAGE_TAG}
   ${REGISTRY}/cube-egress:${IMAGE_TAG}
   ${REGISTRY}/cube-egress-net:${IMAGE_TAG}
   ${REGISTRY}/cube-webui:${IMAGE_TAG}
-  ${REGISTRY}/cube-node:${IMAGE_TAG}
+  ${REGISTRY}/cubelet:${IMAGE_TAG}
+  ${REGISTRY}/network-agent:${IMAGE_TAG}
+  ${REGISTRY}/cube-shim:${IMAGE_TAG}
+  ${REGISTRY}/cube-kernel:${IMAGE_TAG}
+  ${REGISTRY}/cube-guest:${IMAGE_TAG}
   ${REGISTRY}/cube-node-init:${IMAGE_TAG}
+  ${REGISTRY}/cube-wait-node-prep:${IMAGE_TAG}
   ${REGISTRY}/cube-pvm-host-bootstrap:${IMAGE_TAG}
 
 Use these values:

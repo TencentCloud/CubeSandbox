@@ -1,7 +1,7 @@
 #!/bin/sh
-# Cube Proxy Node entrypoint script.
+# Cube Proxy entrypoint script.
 #
-# Extracted from the chart-embedded shell in templates/proxy-node.yaml so
+# Extracted from the chart-embedded shell in templates/proxy.yaml so
 # that it can be linted (`shellcheck`), unit-tested, and reviewed as a
 # proper source file rather than an inline command list.
 #

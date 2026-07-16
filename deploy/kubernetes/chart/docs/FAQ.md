@@ -37,15 +37,17 @@ placement:
 
 ### A2. `helm install --wait` 挂在 CubeNode DaemonSet Ready 数不足
 
-先看 DaemonSet 的 desiredNumberScheduled 是否与实际 compute 节点数一致:
+先看三个计算面 DaemonSet 的 desiredNumberScheduled 是否与实际 compute 节点数一致:
 
 ```bash
-kubectl -n cube-system get ds cube-node
+kubectl -n cube-system get ds -l 'app.kubernetes.io/component in (cube-node,cube-node-installer,cube-node-bootstrap)'
+# OpenKruise Advanced DaemonSet:
+kubectl -n cube-system get ads cube-node
 ```
 
 - `DESIRED=0` → 没有节点匹配 `placement.compute.nodeSelector`,回到 [QUICKSTART 1.3](QUICKSTART.md#13-打节点-label--taint) 打 label
 - `CURRENT<DESIRED` → 至少一台节点被 taint 挡住,检查是否给 compute 节点也加了 toleration
-- `READY<CURRENT` → 有 Pod 起来了但没 Ready,进入 [D. cube-node](#d-cube-node--pvm-内核--沙箱运行时) 定位
+- `READY<CURRENT` → 有 Pod 起来了但没 Ready；Big Pod 未 Ready 时先看 `wait-node-prep` 与 `cube-node-bootstrap`，进入 [D. cube-node](#d-cube-node--pvm-内核--沙箱运行时) 定位
 
 ### A3. `helm test` 中 `cube-health-test` 报 CubeAPI /health 失败
 
@@ -83,7 +85,7 @@ kubectl -n cube-system logs <test-pod-name>
 不建议。Chart 有意采用**显式 label 授权**,原因:
 
 - `pvm-host-bootstrap` 会替换 host kernel 并重启,误伤生产节点后果严重
-- `hostNetwork`、`privileged`、hostPath 挂载都要求节点显式授权
+- `privileged`、hostPath 挂载都要求节点显式授权
 - K8s 原生的调度语义,操作者可以精确控制部署范围
 
 生产环境可以通过 GitOps / Terraform 让 label 由基础设施代码统一管理。
@@ -92,7 +94,7 @@ kubectl -n cube-system logs <test-pod-name>
 
 技术上可以(单节点试用/小规模);生产不建议。原因:
 
-- Cube Node Big Pod 使用 `hostNetwork` + `hostPID` + 特权容器,会与常规控制面共享网络命名空间
+- Cube Node Big Pod 使用 Pod 网络 + `hostPID` + 特权容器，与控制面争抢节点资源、且升级策略与控制面不同
 - MySQL / Redis 与 sandbox 抢 CPU / 内存 / 磁盘 IO,SLA 无法保证
 
 如果确实要合并,给节点同时打两组 label,并**去掉 control taint**,避免 Cube Node 被驱逐。
@@ -184,19 +186,23 @@ cubemastercli sandbox list
 
 ## D. cube-node / PVM 内核 / 沙箱运行时
 
-### D1. `pvm-host-bootstrap` Init Container 反复重启
+### D1. `pvm-host-bootstrap` 反复重启 / 节点 reboot
 
-绝大多数是 host kernel 替换后节点需要重启。观察 events:
+`pvm-host-bootstrap` 跑在 **`cube-node-bootstrap`** DaemonSet（与 Big Pod、Installer 分离）。绝大多数反复重启是 host kernel 替换后节点需要 reboot。观察:
 
 ```bash
-kubectl -n cube-system describe pod <cube-node-pod> | grep -A3 pvm-host-bootstrap
-kubectl -n cube-system logs <cube-node-pod> -c pvm-host-bootstrap --tail=100
+kubectl -n cube-system logs -l app.kubernetes.io/component=cube-node-bootstrap -c pvm-host-bootstrap --tail=100
+kubectl -n cube-system describe pod -l app.kubernetes.io/component=cube-node-bootstrap
+kubectl -n cube-system logs -l app.kubernetes.io/component=cube-node -c wait-node-prep --tail=50
 ```
 
 正常流程:
 
-1. 首次运行:检测 host kernel → 若不是 PVM kernel,安装 RPM/DEB → 触发节点重启
-2. 节点重启后:DaemonSet 拉起同名 Pod → `pvm-host-bootstrap` 再次运行 → 检测到 PVM kernel → 成功退出 → 进入 `cube-node-init`
+1. 首次运行:检测 host kernel → 若不是 PVM kernel,安装 RPM/DEB → **先删 `node-prep-ready`** → 触发节点重启
+2. 节点重启后:bootstrap 再次运行 → 检测到 PVM kernel（快速路径，**不抢**集群 lease）→ `cube-node-init` → 写 `node-prep-ready`
+3. Big Pod `wait-node-prep` sidecar（Kruise prio 10）校验指纹 Ready → 主容器启动
+
+若卡在 wait-node-prep Not Ready，先查 bootstrap 是否 Ready、`/var/lib/cube-node-bootstrap/node-prep-ready` 是否存在且指纹匹配，再看 wait 容器是否写出 `/run/wait-node-prep.ready`。
 
 若卡在"waiting for reboot",通常是节点没有 sudo/reboot 权限或 GRUB 未更新,需人工登录节点执行 `reboot` 并检查:
 
@@ -263,7 +269,7 @@ kubectl -n cube-system logs <cube-node-pod> -c cube-node --tail=200 | grep -i re
 1. **集群内**（Pod / 跟随节点 DNS 的 sandbox guest）:`nslookup test.cube.app`
    - 无应答 → 查 `kubectl -n kube-system get cm coredns -o yaml` 是否含 `# BEGIN cube-sandbox-dns`
    - 或看 Job：`kubectl -n cube-system logs job/cube-cluster-dns-apply`
-   - 应答应是 CubeProxy **ClusterIP**；对照 `kubectl -n cube-system get svc cube-proxy-node -o wide`
+   - 应答应是 CubeProxy **ClusterIP**；对照 `kubectl -n cube-system get svc cube-proxy -o wide`
 2. **guest DNS**：默认 `followNodeDns=true`；显式覆盖用 `cubeNode.dns.sandbox.nameservers`
 3. **集群外部**(客户浏览器 / SDK):把 `cube.app` / `*.cube.app` 指到 Ingress Controller / LB
 
@@ -307,7 +313,7 @@ CubeProxy 的路由信息来自 Redis(sandbox owner 表),chart 只修改**入口
 如需强制刷新:
 
 ```bash
-kubectl -n cube-system rollout restart deployment/cube-proxy-node
+kubectl -n cube-system rollout restart deployment/cube-proxy
 ```
 
 ---
@@ -351,20 +357,22 @@ kubectl -n cube-system logs <cube-node-pod> -c cube-egress-net --tail=100
 
 ## G. 升级、回滚与卸载
 
-### G1. `helm upgrade` 后 cube-node DaemonSet 滚动重建,会不会中断存量沙箱?
+### G1. `helm upgrade` 后 cube-node 升级,会不会中断存量沙箱? Pod IP 会变吗?
 
-**默认不会中断存量沙箱**（cubelet / network-agent 控制面组件升级场景）。
+**默认不会中断存量沙箱**；Big Pod 使用 OpenKruise Advanced DaemonSet 的 **InPlaceIfPossible**，仅换镜像时 **Pod UID / IP / 网络命名空间不变**。
 
 机制对齐一键包「停服务、不杀 shim、覆盖二进制、重启」：
 
-1. `stage-toolbox` initContainer 把镜像内 toolbox **按目录选择性**同步到宿主机 `/usr/local/services/cubetoolbox`（对齐 one-click：只换软件包，保留 `cube-snapshot` / `cubebox_os_image` / `cubeletmnt` / `cube-vs`），主容器再挂回同路径。删 Pod 卸载的是容器 overlay，不是该 hostPath；存量 shim 继续持有已 unlink 的旧 inode。
-2. shim ttrpc / VMM socket 目录也是 hostPath：容器 `/run/containerd` → 宿主机 `/data/cubelet/run/containerd`，容器 `/run/vc` → 宿主机 `/data/cubelet/run/vc`（**不是**节点真实的 `/run/containerd`）。否则 Pod 重建后 `LoadExistingShims` 无法 dial `unix:///run/containerd/s/{hash}`。
-3. `/data/cubelet/state` 通过启动前 `mount --bind` 留在 hostPath 上，避免 cubelet 默认 state tmpfs 在 Pod 删除后带走 `bootstrap.json`/`address`。
+1. **`cube-node-installer`** 与 Big Pod **self-stage** 从 `/opt/cube-image` stage 到 `/usr/local/services/cubetoolbox`（整树 hostPath；原子目录替换）。升产物只动 Installer；升控面只动 Big Pod。**`cube-node-bootstrap`** 负责 pvm / node-init 并写 `node-prep-ready`；升 nodeInit/pvm 只动 Bootstrap。分工见 [`ARCHITECTURE.md`](ARCHITECTURE.md)；步骤见 [`UPGRADE.md`](UPGRADE.md)。
+2. shim ttrpc / VMM socket 目录也是 hostPath：容器 `/run/containerd` → 宿主机 `/data/cubelet/run/containerd`，容器 `/run/vc` → 宿主机 `/data/cubelet/run/vc`。
+3. `/data/cubelet/state` 通过启动前 `mount --bind` 留在 hostPath 上。
 4. `preStop` / entrypoint 只 TERM **cubelet** 与 **network-agent**，不匹配 `containerd-shim-cube-rs` / `cube-runtime`。
-5. 新 Pod 启动后 cubelet `LoadExistingShims` + `RecoverAllCubebox`、network-agent `recover()` 重连。
-6. 默认 `updateStrategy.rollingUpdate.maxUnavailable: 1`，逐节点滚动；readiness 在 recover 完成（9999 + network-agent readyz + sock）后才 Ready。
+5. 原地升级后 cubelet `LoadExistingShims` + `RecoverAllCubebox`、network-agent `recover()` 重连。
+6. 默认 `rollingUpdateType: InPlaceIfPossible`，`maxUnavailable: 1`；readiness 在 recover 完成后才 Ready。
 
-完整步骤见 [`UPGRADE.md`](UPGRADE.md)。
+完整步骤见 [`UPGRADE.md`](UPGRADE.md)。集群需已装 OpenKruise（安装命令见 [`QUICKSTART.md`](QUICKSTART.md) §1.4）。
+
+若从仍使用 `cube-proxy-node` 资源名的旧 Chart 升级：Deployment/Service 现为 `cube-proxy`，Helm 会删旧建新（Proxy 短暂中断一次），见 [`UPGRADE.md`](UPGRADE.md)。
 
 若仍希望完全手工控制节奏：
 
@@ -381,7 +389,9 @@ kubectl -n cube-system delete pod -l app.kubernetes.io/component=cube-node --fie
 **注意**：
 
 - 升级的是控制组件镜像；存量沙箱仍跑**旧** shim/runtime 二进制（N/N-1），直到沙箱自然销毁。
+- **加新产物组件**：只改 Installer 模板，不要往 Big Pod 加容器。
 - 不要在升级路径执行 `cubecli unsafe init` / `InitHost`，那会 Destroy 全部沙箱。
+- 若改 Big Pod YAML 中不可原地字段（直接改 env/volumeMounts / 增删容器）或 `rollingUpdateType: Standard`，会退化为重建，IP 通常会变。
 - 升级窗口内**新建**沙箱可能短暂失败并被 CubeMaster reschedule，见 UPGRADE.md。
 
 ### G2. `helm rollback` 会回滚 host kernel 吗?
@@ -412,8 +422,8 @@ CubeMaster 的 PVC(默认 CBS 盘)按 K8s reclaimPolicy 处理,default `Delete`�
 - 检查网络:`curl -I https://downloads.sourceforge.net/`
 - 手动预下载并跳过脚本下载:
   ```bash
-  mkdir -p /tmp/cube-kubernetes-images-v0.5.0/downloads
-  cd /tmp/cube-kubernetes-images-v0.5.0/downloads
+  mkdir -p /tmp/cube-kubernetes-images-v0.5.1/downloads
+  cd /tmp/cube-kubernetes-images-v0.5.1/downloads
   # 从 SourceForge 手动下载 3 个文件
   # 然后重新运行 build-cube-images.sh,会检测到本地文件跳过下载
   ```
@@ -422,7 +432,7 @@ CubeMaster 的 PVC(默认 CBS 盘)按 K8s reclaimPolicy 处理,default `Delete`�
 
 ```bash
 ONE_CLICK_ARCH=arm64 \
-PUSH=1 REGISTRY=<your-registry> IMAGE_TAG=v0.5.0-arm64 \
+PUSH=1 REGISTRY=<your-registry> IMAGE_TAG=v0.5.1-arm64 \
 ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
@@ -432,7 +442,7 @@ PUSH=1 REGISTRY=<your-registry> IMAGE_TAG=v0.5.0-arm64 \
 
 脚本目前无子命令拆分,但可以设置环境变量跳过其他步骤,或复用中间产物:
 
-- `PACKAGE_DIR_OVERRIDE=/tmp/cube-kubernetes-images-v0.5.0/sandbox-package` → 跳过下载 / 解压
+- `PACKAGE_DIR_OVERRIDE=/tmp/cube-kubernetes-images-v0.5.1/sandbox-package` → 跳过下载 / 解压
 - 手工 `docker build` 到需要的镜像
 
 后续版本考虑加子命令。
@@ -448,7 +458,7 @@ PUSH=1 REGISTRY=<your-registry> IMAGE_TAG=v0.5.0-arm64 \
 如果以上都没覆盖你的问题,提 issue 时请附上:
 
 ```text
-Chart 版本: v0.5.0
+Chart 版本: v0.5.1
 K8s 版本: (kubectl version --short 输出)
 运行环境: (TKE / 自建 / 单节点 / 多可用区)
 values.yaml 关键片段(隐去密码)

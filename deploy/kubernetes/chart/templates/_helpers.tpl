@@ -128,8 +128,16 @@ tolerations:
 {{- printf "%s-node" (include "cube.fullname" .) -}}
 {{- end -}}
 
+{{- define "cube.nodeInstallerName" -}}
+{{- printf "%s-node-installer" (include "cube.fullname" .) -}}
+{{- end -}}
+
+{{- define "cube.nodeBootstrapName" -}}
+{{- printf "%s-node-bootstrap" (include "cube.fullname" .) -}}
+{{- end -}}
+
 {{- define "cube.proxyName" -}}
-{{- printf "%s-proxy-node" (include "cube.fullname" .) -}}
+{{- printf "%s-proxy" (include "cube.fullname" .) -}}
 {{- end -}}
 
 {{- define "cube.proxyEnabled" -}}
@@ -319,4 +327,191 @@ change bind without editing multiple places.
 {{- $bind := default "0.0.0.0:3000" .Values.controlPlane.api.bind -}}
 {{- $port := regexFind "[0-9]+$" $bind -}}
 {{- default "3000" $port -}}
+{{- end -}}
+
+{{/*
+cube-node always uses OpenKruise Advanced DaemonSet (hard dependency).
+*/}}
+{{- define "cube.nodeDaemonSetAPIVersion" -}}
+apps.kruise.io/v1beta1
+{{- end -}}
+
+{{/*
+Kubernetes API path prefix for the cube-node Advanced DaemonSet (health-test).
+*/}}
+{{- define "cube.nodeDaemonSetAPIPath" -}}
+/apis/apps.kruise.io/v1beta1/namespaces
+{{- end -}}
+
+{{/*
+Big Pod: shared volumeMounts for component install/run containers.
+Toolbox is mounted whole at the fixed path (InPlace-stable).
+*/}}
+{{- define "cube.nodeToolboxVolumeMounts" -}}
+- name: toolbox
+  mountPath: /usr/local/services/cubetoolbox
+- name: data-cubelet
+  mountPath: {{ .Values.hostPaths.dataCubelet }}
+  mountPropagation: Bidirectional
+- name: data-log
+  mountPath: {{ .Values.hostPaths.dataLog }}
+- name: data-cube-shim
+  mountPath: {{ .Values.hostPaths.dataCubeShim }}
+  mountPropagation: Bidirectional
+- name: data-snapshot-pack
+  mountPath: {{ .Values.hostPaths.dataSnapshotPack }}
+- name: tmp-cube
+  mountPath: {{ .Values.hostPaths.tmpCube }}
+  mountPropagation: Bidirectional
+- name: run-containerd
+  mountPath: /run/containerd
+- name: run-vc
+  mountPath: /run/vc
+- name: cube-pid
+  mountPath: /run/cube-node
+{{- end -}}
+
+{{- define "cube.nodeDataplaneVolumeMounts" -}}
+{{- include "cube.nodeToolboxVolumeMounts" . }}
+- name: dev
+  mountPath: /dev
+- name: sys
+  mountPath: /sys
+- name: lib-modules
+  mountPath: /lib/modules
+  readOnly: true
+{{- end -}}
+
+{{/*
+Installer: toolbox only (no dataplane mounts).
+*/}}
+{{- define "cube.installerVolumeMounts" -}}
+- name: toolbox
+  mountPath: /usr/local/services/cubetoolbox
+{{- end -}}
+
+{{- define "cube.installerComponentEnv" -}}
+{{- include "cube.timezoneEnv" . }}
+- name: TOOLBOX_ROOT
+  value: /usr/local/services/cubetoolbox
+- name: IMAGE_ROOT
+  value: /opt/cube-image
+{{- end -}}
+
+{{/*
+Bootstrap: host mutation mounts for pvm / node-init.
+*/}}
+{{- define "cube.bootstrapHostVolumeMounts" -}}
+- name: host-root
+  mountPath: /host
+- name: dev
+  mountPath: /dev
+- name: sys
+  mountPath: /sys
+- name: lib-modules
+  mountPath: /lib/modules
+  readOnly: true
+- name: bootstrap-state
+  mountPath: {{ .Values.hostPaths.bootstrapState }}
+{{- end -}}
+
+{{- define "cube.bootstrapDataVolumeMounts" -}}
+- name: data-cubelet
+  mountPath: {{ .Values.hostPaths.dataCubelet }}
+  mountPropagation: Bidirectional
+- name: data-log
+  mountPath: {{ .Values.hostPaths.dataLog }}
+- name: data-cube-shim
+  mountPath: {{ .Values.hostPaths.dataCubeShim }}
+  mountPropagation: Bidirectional
+- name: data-snapshot-pack
+  mountPath: {{ .Values.hostPaths.dataSnapshotPack }}
+- name: tmp-cube
+  mountPath: {{ .Values.hostPaths.tmpCube }}
+  mountPropagation: Bidirectional
+{{- end -}}
+
+{{- define "cube.bootstrapVolumes" -}}
+- name: host-root
+  hostPath:
+    path: {{ .Values.hostPaths.root }}
+- name: dev
+  hostPath:
+    path: {{ .Values.hostPaths.dev }}
+- name: sys
+  hostPath:
+    path: {{ .Values.hostPaths.sys }}
+- name: lib-modules
+  hostPath:
+    path: {{ .Values.hostPaths.libModules }}
+- name: bootstrap-state
+  hostPath:
+    path: {{ .Values.hostPaths.bootstrapState }}
+    type: DirectoryOrCreate
+- name: data-cubelet
+  hostPath:
+    path: {{ .Values.hostPaths.dataCubelet }}
+    type: DirectoryOrCreate
+- name: data-log
+  hostPath:
+    path: {{ .Values.hostPaths.dataLog }}
+    type: DirectoryOrCreate
+- name: data-cube-shim
+  hostPath:
+    path: {{ .Values.hostPaths.dataCubeShim }}
+    type: DirectoryOrCreate
+- name: data-snapshot-pack
+  hostPath:
+    path: {{ .Values.hostPaths.dataSnapshotPack }}
+    type: DirectoryOrCreate
+- name: tmp-cube
+  hostPath:
+    path: {{ .Values.hostPaths.tmpCube }}
+    type: DirectoryOrCreate
+{{- end -}}
+
+{{- define "cube.nodeComponentCommonEnv" -}}
+{{- include "cube.timezoneEnv" . }}
+- name: TOOLBOX_ROOT
+  value: /usr/local/services/cubetoolbox
+- name: IMAGE_ROOT
+  value: /opt/cube-image
+- name: CUBE_PID_DIR
+  value: /run/cube-node
+- name: CUBE_MASTER_ENDPOINT
+  value: {{ include "cube.masterEndpoint" . | quote }}
+- name: CUBE_SANDBOX_NODE_ID
+  valueFrom:
+    fieldRef:
+      fieldPath: spec.nodeName
+- name: CUBE_SANDBOX_ENDPOINT_IP
+  valueFrom:
+    fieldRef:
+      fieldPath: status.podIP
+- name: CUBE_PVM_ENABLE
+  value: {{ ternary "1" "0" .Values.cubeNode.pvmGuestKernel.enabled | quote }}
+- name: CUBE_SANDBOX_AUTO_DETECT_ETH
+  value: {{ .Values.cubeNode.network.autoDetectEthName | quote }}
+- name: CUBE_SANDBOX_ETH_NAME
+  value: {{ .Values.cubeNode.network.ethName | quote }}
+- name: CUBE_SANDBOX_NETWORK_CIDR
+  value: {{ .Values.cubeNode.network.cidr | quote }}
+- name: CUBE_SANDBOX_DNS_SERVERS
+  {{- if .Values.cubeNode.dns.sandbox.nameservers }}
+  value: {{ join "," .Values.cubeNode.dns.sandbox.nameservers | quote }}
+  {{- else }}
+  value: ""
+  {{- end }}
+- name: CUBE_SANDBOX_DNS_FOLLOW_NODE
+  value: {{ ternary "true" "false" (and .Values.cubeNode.dns.sandbox.followNodeDns (not .Values.cubeNode.dns.sandbox.nameservers)) | quote }}
+{{- end -}}
+
+{{/*
+Selective toolbox sync helper kept for reference / one-off jobs.
+Current chart uses per-component /opt/cube-image copy instead.
+*/}}
+{{- define "cube.stageToolboxScript" -}}
+set -euo pipefail
+echo "cube.stageToolboxScript is superseded by per-component install containers" >&2
+exit 1
 {{- end -}}

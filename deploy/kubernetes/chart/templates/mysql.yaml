@@ -115,7 +115,8 @@ spec:
     - metadata:
         name: mysql-data
         labels:
-          {{- include "cube.labels" . | nindent 10 }}
+          app.kubernetes.io/name: {{ include "cube.name" . }}
+          app.kubernetes.io/instance: {{ .Release.Name }}
           app.kubernetes.io/component: mysql
       spec:
         accessModes:
@@ -123,6 +124,7 @@ spec:
         resources:
           requests:
             storage: {{ .Values.mysql.persistence.size | quote }}
+        volumeMode: Filesystem
         {{- if .Values.mysql.persistence.storageClassName }}
         storageClassName: {{ .Values.mysql.persistence.storageClassName | quote }}
         {{- end }}

@@ -4,7 +4,14 @@ set -eu
 log() { printf '[cube-node-init] %s\n' "$*"; }
 fail() { printf '[cube-node-init] ERROR: %s\n' "$*" >&2; exit 1; }
 
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+if [ -f "${SCRIPT_DIR}/node-prep-lib.sh" ]; then
+  # shellcheck disable=SC1091
+  . "${SCRIPT_DIR}/node-prep-lib.sh"
+fi
+
 HOST_ROOT="${HOST_ROOT:-/host}"
+STATE_DIR="${STATE_DIR:-/var/lib/cube-node-bootstrap}"
 DATA_CUBELET="${DATA_CUBELET:-/data/cubelet}"
 REQUIRE_KVM="${REQUIRE_KVM:-true}"
 REQUIRE_XFS="${REQUIRE_XFS:-true}"
@@ -26,8 +33,22 @@ CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK="${CUBE_SANDBOX_NETWORK_CIDR_SKIP_
 LOOPBACK_ENABLED="${LOOPBACK_ENABLED:-false}"
 LOOPBACK_IMAGE_PATH="${LOOPBACK_IMAGE_PATH:-/data/cubelet-xfs.img}"
 LOOPBACK_SIZE="${LOOPBACK_SIZE:-25G}"
+# REV3.2: when bootstrap Pod restarts and fingerprint already matches, skip
+# (avoids blocking artifact-unrelated paths on Master/preflight). Default true
+# for bootstrap DS; set false to force a full re-run.
+SKIP_IF_NODE_PREP_READY="${SKIP_IF_NODE_PREP_READY:-true}"
+NODE_INIT_ENABLED="${NODE_INIT_ENABLED:-1}"
+PVM_ENABLED="${PVM_ENABLED:-${CUBE_PVM_ENABLE}}"
+export HOST_ROOT STATE_DIR NODE_INIT_ENABLED PVM_ENABLED
 
 host_path() { printf '%s%s' "$HOST_ROOT" "$1"; }
+
+if [ "$SKIP_IF_NODE_PREP_READY" = "true" ] \
+  && command -v node_prep_fingerprint_matches_file >/dev/null 2>&1 \
+  && node_prep_fingerprint_matches_file; then
+  log "node-prep-ready fingerprint matches; skipping node-init"
+  exit 0
+fi
 # SECURITY MODEL (host_chroot_sh / host_mount_sh):
 #   Both helpers enter PID 1's uts/ipc/net/pid namespaces via `nsenter --target 1`
 #   and chroot into /host. This is a deliberate, architecturally required

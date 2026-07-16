@@ -1,0 +1,104 @@
+{{- if .Values.cubeNode.enabled }}
+# Artifact installer DaemonSet. Shares placement + toolbox hostPath with
+# cube-node, but uses a disjoint selector and may RollingUpdate / grow containers
+# without recreating the Big Pod. Always deployed with cube-node (no separate enable switch).
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "cube.nodeInstallerName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-node-installer
+spec:
+  updateStrategy:
+    type: {{ .Values.cubeNodeInstaller.updateStrategy.type | default "RollingUpdate" }}
+    {{- if .Values.cubeNodeInstaller.updateStrategy.rollingUpdate }}
+    rollingUpdate:
+      maxUnavailable: {{ .Values.cubeNodeInstaller.updateStrategy.rollingUpdate.maxUnavailable | default 1 }}
+      {{- with .Values.cubeNodeInstaller.updateStrategy.rollingUpdate.maxSurge }}
+      maxSurge: {{ . }}
+      {{- end }}
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: cube-node-installer
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: cube-node-installer
+      annotations:
+        {{- with .Values.cubeNodeInstaller.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "cube.nodeServiceAccountName" . }}
+      automountServiceAccountToken: true
+      # Installer only stages files; no host PID / dataplane netns needed.
+      hostPID: false
+      dnsPolicy: ClusterFirst
+      terminationGracePeriodSeconds: {{ .Values.cubeNodeInstaller.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "cube.computePlacement" . | nindent 6 }}
+      containers:
+        - name: cube-shim-install
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubeShim "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.cubeShim.pullPolicy }}
+          securityContext:
+            privileged: {{ .Values.security.privileged }}
+          env:
+            {{- include "cube.installerComponentEnv" . | nindent 12 }}
+            - name: CUBE_COMPONENT
+              value: cube-shim
+            - name: CUBE_ROLE
+              value: install
+          volumeMounts:
+            {{- include "cube.installerVolumeMounts" . | nindent 12 }}
+          {{- with .Values.cubeNodeInstaller.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        - name: cube-kernel-install
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubeKernel "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.cubeKernel.pullPolicy }}
+          securityContext:
+            privileged: {{ .Values.security.privileged }}
+          env:
+            {{- include "cube.installerComponentEnv" . | nindent 12 }}
+            - name: CUBE_COMPONENT
+              value: cube-kernel
+            - name: CUBE_ROLE
+              value: install
+          volumeMounts:
+            {{- include "cube.installerVolumeMounts" . | nindent 12 }}
+          {{- with .Values.cubeNodeInstaller.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        - name: cube-guest-install
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubeGuest "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.cubeGuest.pullPolicy }}
+          securityContext:
+            privileged: {{ .Values.security.privileged }}
+          env:
+            {{- include "cube.installerComponentEnv" . | nindent 12 }}
+            - name: CUBE_COMPONENT
+              value: cube-guest
+            - name: CUBE_ROLE
+              value: install
+          volumeMounts:
+            {{- include "cube.installerVolumeMounts" . | nindent 12 }}
+          {{- with .Values.cubeNodeInstaller.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: toolbox
+          hostPath:
+            path: {{ .Values.hostPaths.toolbox }}
+            type: DirectoryOrCreate
+{{- end }}

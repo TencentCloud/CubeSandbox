@@ -77,7 +77,7 @@ spec:
 
           {{- if eq (include "cube.proxyEnabled" .) "true" }}
           echo '[health-test] check CubeProxy Deployment'
-          proxy_pods_json="$(kget "/api/v1/namespaces/${ns}/pods?labelSelector=app.kubernetes.io/component%3Dcube-proxy-node")"
+          proxy_pods_json="$(kget "/api/v1/namespaces/${ns}/pods?labelSelector=app.kubernetes.io/component%3Dcube-proxy")"
           printf '%s\n' "${proxy_pods_json}" \
             | grep -oE '"ready"[[:space:]]*:[[:space:]]*true' | grep -q true
           echo '[health-test] check CubeProxy ClusterIP Service HTTP'
@@ -88,7 +88,7 @@ spec:
 
           {{- if .Values.cubeNode.enabled }}
           echo '[health-test] check CubeNode DaemonSet readiness'
-          node_ds="$(kget "/apis/apps/v1/namespaces/${ns}/daemonsets/{{ include "cube.nodeName" . }}")"
+          node_ds="$(kget "{{ include "cube.nodeDaemonSetAPIPath" . }}/${ns}/daemonsets/{{ include "cube.nodeName" . }}")"
           printf '%s\n' "${node_ds}" | grep -Eq '"numberReady"[[:space:]]*:[[:space:]]*[1-9]'
           printf '%s\n' "${node_ds}" | grep -Eq '"desiredNumberScheduled"[[:space:]]*:[[:space:]]*[1-9]'
           {{- end }}
@@ -108,7 +108,7 @@ spec:
           {{- end }}
 {{ if eq (include "cube.cubemastercliEnabled" .) "true" }}
 {{- $images := default dict .Values.images -}}
-{{- $cubemastercliImage := default (dict "repository" "ccr.ccs.tencentyun.com/cubesandbox-chart/cubemastercli" "tag" "v0.5.0" "pullPolicy" "Always") (get $images "cubemastercli") -}}
+{{- $cubemastercliImage := default (dict "repository" "ccr.ccs.tencentyun.com/cubesandbox-chart/cubemastercli" "tag" "v0.5.1" "pullPolicy" "Always") (get $images "cubemastercli") -}}
 ---
 apiVersion: v1
 kind: Pod
