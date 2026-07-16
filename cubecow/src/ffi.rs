@@ -49,6 +49,7 @@ const COW_ERR_NOT_FOUND: i32 = -1;
 const COW_ERR_ALREADY_EXISTS: i32 = -2;
 const COW_ERR_RESOURCE_EXHAUSTED: i32 = -3;
 const COW_ERR_INVALID_ARG: i32 = -4;
+const COW_ERR_COMMAND_FAILED: i32 = -5;
 const COW_ERR_IO_ERROR: i32 = -6;
 const COW_ERR_CONFIG_ERROR: i32 = -10;
 const COW_ERR_PRECONDITION_FAILED: i32 = -11;
@@ -84,6 +85,7 @@ fn handle_cow_error(e: &CubecowError) -> i32 {
         CubecowError::AlreadyExists(_) => COW_ERR_ALREADY_EXISTS,
         CubecowError::ResourceExhausted(_) => COW_ERR_RESOURCE_EXHAUSTED,
         CubecowError::InvalidArg(_) => COW_ERR_INVALID_ARG,
+        CubecowError::CommandFailed { .. } => COW_ERR_COMMAND_FAILED,
         CubecowError::IoError(_) => COW_ERR_IO_ERROR,
         CubecowError::ConfigError(_) => COW_ERR_CONFIG_ERROR,
         CubecowError::PreconditionFailed(_) => COW_ERR_PRECONDITION_FAILED,

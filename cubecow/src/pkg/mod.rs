@@ -6,5 +6,6 @@
 // Common infrastructure shared across all layers.
 
 pub mod errors;
+pub mod executor;
 pub mod logger;
 pub mod metrics;

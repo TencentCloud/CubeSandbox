@@ -27,6 +27,17 @@ pub enum CubecowError {
     #[error("invalid argument: {0}")]
     InvalidArg(String),
 
+    /// External command spawn failure, timeout, or non-zero exit.
+    /// `code` is the numeric exit status when the command completed
+    /// (None for spawn failures, timeouts, signals), letting callers
+    /// classify on stable errno-style codes instead of stderr wording.
+    #[error("command failed: {cmd}: {reason}")]
+    CommandFailed {
+        cmd: String,
+        reason: String,
+        code: Option<i32>,
+    },
+
     /// IO error from the underlying system
     #[error("io error: {0}")]
     IoError(#[from] io::Error),

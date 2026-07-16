@@ -52,6 +52,7 @@ typedef void* CubecowEngineHandle;
 #define COW_ERR_ALREADY_EXISTS      -2
 #define COW_ERR_RESOURCE_EXHAUSTED  -3
 #define COW_ERR_INVALID_ARG         -4
+#define COW_ERR_COMMAND_FAILED      -5
 #define COW_ERR_IO_ERROR            -6
 #define COW_ERR_CONFIG_ERROR        -10
 #define COW_ERR_PRECONDITION_FAILED -11
@@ -210,6 +211,9 @@ int32_t cubecow_list_volumes(
  *   - activate = false: metadata-only; out_device_path is written as
  *                       an empty string. Call cubecow_activate_volume()
  *                       later to materialise the device.
+ *
+ * The snapshot is an independent, writable copy of the source (no shared
+ * lifetime or storage dependency).
  *
  * Regardless of `activate`, the snapshot is identified by snapshot_name
  * for every subsequent operation.
