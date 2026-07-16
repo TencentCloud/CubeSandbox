@@ -143,6 +143,12 @@ pub enum SandboxOnTimeout {
     Pause,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, ToSchema)]
+pub struct SandboxAutoResumeConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
 impl Default for SandboxOnTimeout {
     fn default() -> Self {
         Self::Kill
@@ -180,6 +186,22 @@ pub struct NewSandbox {
     /// (None) means today's behaviour: idle sandboxes are killed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<SandboxLifecycleConfig>,
+
+    /// Compatibility with the e2b JS SDK's top-level sandbox create fields.
+    /// `lifecycle` takes precedence when both shapes are present.
+    #[serde(
+        rename = "autoPause",
+        alias = "auto_pause",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auto_pause: Option<bool>,
+
+    #[serde(
+        rename = "autoResume",
+        alias = "auto_resume",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auto_resume: Option<SandboxAutoResumeConfig>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secure: Option<bool>,

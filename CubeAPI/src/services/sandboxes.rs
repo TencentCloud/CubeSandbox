@@ -147,10 +147,10 @@ impl SandboxService {
     }
 
     pub async fn create_sandbox(&self, body: NewSandbox) -> AppResult<Sandbox> {
+        let (auto_pause, auto_resume) = resolve_lifecycle_flags(&body);
         let NewSandbox {
             template_id,
             timeout,
-            lifecycle,
             allow_internet_access,
             network,
             metadata,
@@ -181,20 +181,6 @@ impl SandboxService {
 
         let cube_network_config =
             build_cube_network_config(allow_internet_access, network.as_ref())?;
-
-        // Derive the two CubeMaster-side bools from the e2b-shaped lifecycle
-        // object. Absent lifecycle keeps today's behaviour: idle sandboxes
-        // are killed (auto_pause = false), and auto_resume defaults off.
-        let (auto_pause, auto_resume) = lifecycle
-            .as_ref()
-            .map(|lc| {
-                use crate::models::SandboxOnTimeout;
-                (
-                    matches!(lc.on_timeout, SandboxOnTimeout::Pause),
-                    lc.auto_resume,
-                )
-            })
-            .unwrap_or((false, false));
 
         let req = CreateSandboxRequest {
             request_id: new_request_id(),
@@ -584,6 +570,24 @@ impl SandboxService {
             limit,
         }
     }
+}
+
+fn resolve_lifecycle_flags(body: &NewSandbox) -> (bool, bool) {
+    if let Some(lifecycle) = body.lifecycle.as_ref() {
+        use crate::models::SandboxOnTimeout;
+        return (
+            matches!(lifecycle.on_timeout, SandboxOnTimeout::Pause),
+            lifecycle.auto_resume,
+        );
+    }
+
+    (
+        body.auto_pause.unwrap_or(false),
+        body.auto_resume
+            .as_ref()
+            .map(|auto_resume| auto_resume.enabled)
+            .unwrap_or(false),
+    )
 }
 
 /// Validate environment variable names against the POSIX name convention
@@ -1283,19 +1287,10 @@ mod tests {
     /// covers each meaningful combination.
     #[test]
     fn lifecycle_object_translates_to_cubemaster_bools() {
-        use crate::models::{NewSandbox, SandboxOnTimeout};
+        use crate::models::NewSandbox;
 
-        // Helper that mimics services::create_sandbox's lifecycle decoding.
         fn translate(body: &NewSandbox) -> (bool, bool) {
-            body.lifecycle
-                .as_ref()
-                .map(|lc| {
-                    (
-                        matches!(lc.on_timeout, SandboxOnTimeout::Pause),
-                        lc.auto_resume,
-                    )
-                })
-                .unwrap_or((false, false))
+            super::resolve_lifecycle_flags(body)
         }
 
         // Absent lifecycle => preserve historical behaviour.
@@ -1351,6 +1346,34 @@ mod tests {
         assert_eq!(translate(&empty), (false, false));
     }
 
+    #[test]
+    fn js_sdk_auto_pause_fields_translate_to_cubemaster_bools() {
+        let req: NewSandbox = serde_json::from_value(serde_json::json!({
+            "templateID": "tpl",
+            "autoPause": true,
+            "autoResume": { "enabled": true },
+        }))
+        .unwrap();
+
+        let (auto_pause, auto_resume) = super::resolve_lifecycle_flags(&req);
+
+        assert!(auto_pause);
+        assert!(auto_resume);
+    }
+
+    #[test]
+    fn lifecycle_object_takes_precedence_over_js_sdk_auto_pause_fields() {
+        let req: NewSandbox = serde_json::from_value(serde_json::json!({
+            "templateID": "tpl",
+            "lifecycle": { "onTimeout": "kill", "autoResume": false },
+            "autoPause": true,
+            "autoResume": { "enabled": true },
+        }))
+        .unwrap();
+
+        assert_eq!(super::resolve_lifecycle_flags(&req), (false, false));
+    }
+
     #[tokio::test]
     async fn create_sandbox_forwards_create_time_env_vars_to_cubemaster() {
         #[derive(Clone, Default)]
@@ -1404,6 +1427,8 @@ mod tests {
                 template_id: "tpl-1".to_string(),
                 timeout: Some(15),
                 lifecycle: None,
+                auto_pause: None,
+                auto_resume: None,
                 secure: None,
                 allow_internet_access: None,
                 network: None,
@@ -1479,6 +1504,8 @@ mod tests {
                 template_id: "tpl-1".to_string(),
                 timeout: Some(15),
                 lifecycle: None,
+                auto_pause: None,
+                auto_resume: None,
                 secure: None,
                 allow_internet_access: None,
                 network: None,
