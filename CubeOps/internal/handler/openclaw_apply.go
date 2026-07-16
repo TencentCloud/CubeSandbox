@@ -156,13 +156,13 @@ func resolveLLMConfig(ctx context.Context, s *store.Store) (*llmConfig, error) {
 	provider, _ := s.GetSetting(ctx, "llm_provider")
 	provider = normalizeLLMProvider(provider)
 
-	baseURL, _ := s.GetSetting(nil, "llm_base_url")
+	baseURL, _ := s.GetSetting(ctx, "llm_base_url")
 	baseURL = normalizeLLMBaseURL(baseURL)
 
-	model, _ := s.GetSetting(nil, "llm_model")
+	model, _ := s.GetSetting(ctx, "llm_model")
 	model = normalizeLLMModel(model)
 
-	credentialMode, _ := s.GetSetting(nil, "llm_credential_mode")
+	credentialMode, _ := s.GetSetting(ctx, "llm_credential_mode")
 	credentialMode = normalizeLLMCredentialMode(credentialMode)
 
 	// Read API key (try llm_api_key first, then deepseek_api_key).

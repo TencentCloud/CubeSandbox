@@ -23,11 +23,3 @@ func writeRawJSON(w http.ResponseWriter, status int, raw json.RawMessage) {
 	w.WriteHeader(status)
 	w.Write(raw)
 }
-
-func mustJSON(v interface{}) string {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return "null"
-	}
-	return string(b)
-}

@@ -84,14 +84,25 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 }
 
 // ChangePassword handles POST /auth/change-password.
+//
+// The target username is taken exclusively from the JWT-authenticated
+// request context (UsernameFromContext). Any "username" field in the
+// request body is ignored to prevent IDOR — a caller must not be able
+// to change another user's password by passing that user's name in the
+// payload.
 func (h *Handler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 	var req model.ChangePasswordRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.Username == "" || req.OldPassword == "" || req.NewPassword == "" {
-		writeError(w, http.StatusBadRequest, "username, oldPassword and newPassword are required")
+	username := UsernameFromContext(r.Context())
+	if username == "" {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if req.OldPassword == "" || req.NewPassword == "" {
+		writeError(w, http.StatusBadRequest, "oldPassword and newPassword are required")
 		return
 	}
 	if len(req.NewPassword) < 4 {
@@ -99,7 +110,7 @@ func (h *Handler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stored, err := h.store.GetUserPassword(r.Context(), req.Username)
+	stored, err := h.store.GetUserPassword(r.Context(), username)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read user")
 		return
@@ -114,7 +125,7 @@ func (h *Handler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to hash password")
 		return
 	}
-	if err := h.store.SetUserPassword(r.Context(), req.Username, newHash); err != nil {
+	if err := h.store.SetUserPassword(r.Context(), username, newHash); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update password")
 		return
 	}

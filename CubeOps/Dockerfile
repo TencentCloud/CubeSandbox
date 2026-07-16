@@ -3,19 +3,22 @@
 # Copyright (c) 2026 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
+# Build from repository root so sibling modules (e.g. cubedb) are in context:
+#   docker build -f CubeOps/Dockerfile -t cube-ops:latest .
+
 # ── Build stage ────────────────────────────────────────────────────────────
 FROM golang:1.25-alpine AS builder
 
 RUN apk add --no-cache git ca-certificates
 
-WORKDIR /build
+WORKDIR /build/CubeOps
 
 # Copy go.mod/go.sum first for better layer caching
-COPY go.mod go.sum ./
-COPY ../cubedb /build/../cubedb
+COPY CubeOps/go.mod CubeOps/go.sum ./
+COPY cubedb /build/cubedb
 RUN go mod download
 
-COPY . .
+COPY CubeOps/ .
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -ldflags="-s -w" \

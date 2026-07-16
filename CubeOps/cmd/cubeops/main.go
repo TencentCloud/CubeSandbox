@@ -5,8 +5,9 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -64,7 +65,7 @@ func main() {
 		cancel()
 	}()
 
-	if err := srv.Start(); err != nil && err.Error() != fmt.Sprintf("http: Server closed") {
+	if err := srv.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("server error", "error", err)
 		os.Exit(1)
 	}

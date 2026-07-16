@@ -99,7 +99,10 @@ func TestPasswordHashVerification(t *testing.T) {
 }
 
 func TestGenerateMasterKeyB64(t *testing.T) {
-	key := GenerateMasterKeyB64()
+	key, err := GenerateMasterKeyB64()
+	if err != nil {
+		t.Fatalf("GenerateMasterKeyB64: %v", err)
+	}
 	decoded, err := base64.StdEncoding.DecodeString(key)
 	if err != nil {
 		t.Fatalf("generated key is not valid base64: %v", err)

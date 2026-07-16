@@ -29,7 +29,7 @@ clean:
 	rm -rf bin/
 
 docker:
-	docker build -t cube-ops:latest -f docker/Dockerfile ..
+	docker build -t cube-ops:latest -f Dockerfile ..
 
 tidy:
 	go mod tidy

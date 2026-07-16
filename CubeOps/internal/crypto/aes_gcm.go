@@ -12,6 +12,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -34,16 +35,21 @@ var (
 )
 
 // GenerateMasterKeyB64 generates a fresh random master key encoded as base64.
-func GenerateMasterKeyB64() string {
+// crypto/rand failures (e.g. exhausted entropy source) are returned to the
+// caller rather than panicking, so the caller — which already has an error
+// path — can decide whether to retry, abort startup, or escalate.
+func GenerateMasterKeyB64() (string, error) {
 	bytes := make([]byte, masterKeyLen)
 	if _, err := io.ReadFull(rand.Reader, bytes); err != nil {
-		panic(fmt.Sprintf("crypto/rand failed: %v", err))
+		return "", fmt.Errorf("crypto/rand: %w", err)
 	}
-	return base64.StdEncoding.EncodeToString(bytes)
+	return base64.StdEncoding.EncodeToString(bytes), nil
 }
 
 // InstallMasterKey installs the process-wide master key from its base64 representation.
-// Idempotent: installing the same key again is a no-op.
+// Idempotent: installing the same key again is a no-op. Installing a different key
+// after one is already installed returns an error — the caller must restart the
+// process to rotate the key, otherwise previously encrypted data becomes undecryptable.
 func InstallMasterKey(b64 string) error {
 	bytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
 	if err != nil {
@@ -55,9 +61,8 @@ func InstallMasterKey(b64 string) error {
 	masterKeyMu.Lock()
 	defer masterKeyMu.Unlock()
 	if masterKey != nil {
-		// Already installed — only warn if the value differs.
 		if !bytesEqual(masterKey, bytes) {
-			// Log-level warning; in production this indicates misconfiguration.
+			return errors.New("master key already installed with a different value; restart the process to rotate")
 		}
 		return nil
 	}
@@ -167,17 +172,16 @@ func VerifyPassword(stored, candidate string) bool {
 	if strings.HasPrefix(stored, "$2") {
 		return bcrypt.CompareHashAndPassword([]byte(stored), []byte(candidate)) == nil
 	}
-	return stored == candidate
+	// Legacy plaintext path: compare in constant time to prevent an attacker
+	// from inferring the stored value through response-time differences.
+	return subtle.ConstantTimeCompare([]byte(stored), []byte(candidate)) == 1
 }
 
 func bytesEqual(a, b []byte) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+	// Master-key install already rejects length mismatches; use constant-time
+	// compare for the actual byte check to avoid leaking key bytes via timing.
+	return subtle.ConstantTimeCompare(a, b) == 1
 }

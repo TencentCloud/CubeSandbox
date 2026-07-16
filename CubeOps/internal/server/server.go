@@ -77,7 +77,7 @@ func (s *Server) buildRouter() *mux.Router {
 	authHandler := auth.NewHandler(s.store, s.jm)
 	clusterHandler := handler.NewClusterHandler(s.cm)
 	storeHandler := handler.NewStoreHandler()
-	configHandler := handler.NewConfigHandler(s.cfg.Bind, 100, s.cfg.JWTSecret != "", "cube.app", "cubebox")
+	configHandler := handler.NewConfigHandler(s.cfg.Bind, 100, s.cfg.JWTSecret != "", s.cfg.SandboxDomain, "cubebox")
 	agenthubHandler := handler.NewAgentHubHandler(s.store, s.cm)
 	sdkHandler := handler.NewSDKHandler(s.cm)
 

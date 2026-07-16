@@ -34,6 +34,10 @@ type Config struct {
 
 	// Redis (optional)
 	RedisURL string
+
+	// Sandbox domain exposed to SDK clients; matches SDK handler's
+	// CUBE_API_SANDBOX_DOMAIN env so the /config endpoint stays in sync.
+	SandboxDomain string
 }
 
 // Load reads configuration from environment variables.
@@ -46,6 +50,7 @@ func Load() (*Config, error) {
 		CubeMasterAddr: envOr("CUBE_MASTER_ADDR", "http://127.0.0.1:8089"),
 		CubeAPIURL:     envOr("CUBE_API_URL", "http://127.0.0.1:3000"),
 		RedisURL:       os.Getenv("REDIS_URL"),
+		SandboxDomain:  envOr("CUBE_API_SANDBOX_DOMAIN", "cube.app"),
 	}
 
 	// Build DATABASE_URL from individual env vars if not set directly.

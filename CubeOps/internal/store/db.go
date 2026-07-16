@@ -62,7 +62,11 @@ func (s *Store) Close() error {
 
 // bootstrapMasterKey loads or creates the master encryption key from t_system_setting.
 func (s *Store) bootstrapMasterKey(ctx context.Context) error {
-	b64, err := s.GetOrCreateSystemSetting(ctx, "secret_master_key", crypto.GenerateMasterKeyB64())
+	generated, err := crypto.GenerateMasterKeyB64()
+	if err != nil {
+		return fmt.Errorf("generate master key: %w", err)
+	}
+	b64, err := s.GetOrCreateSystemSetting(ctx, "secret_master_key", generated)
 	if err != nil {
 		return err
 	}
@@ -85,7 +89,10 @@ func (s *Store) BootstrapJWTSecret(ctx context.Context, envSecret string) (strin
 	// Use GetOrCreateSystemSetting (INSERT IGNORE + read-back) so that
 	// concurrent starts (process restart overlap, multi-replica) all
 	// converge on the same value instead of overwriting each other.
-	generated := crypto.GenerateMasterKeyB64()
+	generated, err := crypto.GenerateMasterKeyB64()
+	if err != nil {
+		return "", fmt.Errorf("generate JWT secret: %w", err)
+	}
 	winner, err := s.GetOrCreateSystemSetting(ctx, "jwt_secret", generated)
 	if err != nil {
 		return "", fmt.Errorf("persist JWT secret: %w", err)
