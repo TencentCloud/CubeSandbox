@@ -7,6 +7,10 @@
 //! Events are accepted through a bounded channel and dispatched from a
 //! background Tokio task. `Logger::log()` only attempts to enqueue an event;
 //! it never waits for queue capacity or performs network I/O.
+//!
+//! Each enabled endpoint has an independent outstanding-delivery budget.
+//! Saturating one endpoint does not stall dispatcher admission for other
+//! endpoints.
 
 use std::{
     borrow::Cow,
@@ -28,7 +32,7 @@ use serde_json::Value;
 use sha2::Sha256;
 use tokio::{
     runtime::Handle,
-    sync::{mpsc, oneshot, Semaphore},
+    sync::{mpsc, oneshot, Semaphore, TryAcquireError},
     task::{JoinError, JoinSet},
     time::{sleep, timeout},
 };
@@ -90,6 +94,16 @@ impl Endpoint {
     fn matches(&self, event: &str) -> bool {
         events_match(&self.events, event)
     }
+}
+
+/// An enabled endpoint paired with its outstanding-delivery limiter.
+///
+/// The limiter lives next to the endpoint it bounds so there is no parallel
+/// collection to mis-index: `Endpoint::index` is the sparse original
+/// configuration index used for logging, not a position in any vector.
+struct EndpointSlot {
+    endpoint: Endpoint,
+    outstanding: Arc<Semaphore>,
 }
 
 #[derive(Debug)]
@@ -209,8 +223,17 @@ impl HttpLogger {
         let queue_capacity = config.queue_capacity;
         let max_concurrency = config.max_concurrency;
         let flush_timeout = Duration::from_secs(config.flush_timeout_secs);
-        let max_outstanding =
-            max_outstanding_deliveries(queue_capacity, endpoints.len(), max_concurrency);
+        let slots: Vec<EndpointSlot> =
+            match per_endpoint_outstanding_budget(queue_capacity, endpoints.len()) {
+                Some(outstanding_budget) => endpoints
+                    .into_iter()
+                    .map(|endpoint| EndpointSlot {
+                        endpoint,
+                        outstanding: Arc::new(Semaphore::new(outstanding_budget)),
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
         let options = DeliveryOptions {
             max_retries: config.max_retries,
             max_payload_bytes: config.max_payload_bytes,
@@ -221,12 +244,11 @@ impl HttpLogger {
 
         handle.spawn(run_dispatcher(
             rx,
-            Arc::new(endpoints),
+            Arc::new(slots),
             client,
             Arc::new(Semaphore::new(max_concurrency)),
             options,
             flush_timeout,
-            max_outstanding,
         ));
 
         Ok(Self { tx, flush_timeout })
@@ -279,6 +301,11 @@ impl Logger for HttpLogger {
     }
 }
 
+/// Safety ceiling for admitted unfinished deliveries across all endpoints.
+///
+/// Every unfinished Delivery task holds one endpoint permit, and the sum of
+/// configured endpoint permits never exceeds this limit. Completed task
+/// results can remain in the JoinSet until the dispatcher reaps them.
 const MAX_OUTSTANDING_DELIVERY_TASKS: usize = 100_000;
 /// Maximum number of retries after the initial delivery attempt.
 const MAX_WEBHOOK_RETRIES: usize = 6;
@@ -293,15 +320,27 @@ const WEBHOOK_POOL_IDLE_TIMEOUT_SECS: u64 = 30;
 /// accepted trade-off for a small idle pool.
 const WEBHOOK_POOL_MAX_IDLE_PER_HOST: usize = 2;
 
-fn max_outstanding_deliveries(
-    queue_capacity: usize,
-    endpoint_count: usize,
-    max_concurrency: usize,
-) -> usize {
-    queue_capacity
-        .saturating_mul(endpoint_count.max(1))
-        .max(max_concurrency)
-        .min(MAX_OUTSTANDING_DELIVERY_TASKS)
+/// Number of outstanding deliveries each enabled endpoint may hold.
+///
+/// Zero enabled endpoints need no endpoint slots. For a positive count
+/// validated by `validate_enabled_endpoint_count`, integer division keeps the
+/// sum of all endpoint budgets within `MAX_OUTSTANDING_DELIVERY_TASKS`.
+fn per_endpoint_outstanding_budget(queue_capacity: usize, enabled_count: usize) -> Option<usize> {
+    if enabled_count == 0 {
+        return None;
+    }
+
+    Some(queue_capacity.min(MAX_OUTSTANDING_DELIVERY_TASKS / enabled_count))
+}
+
+fn validate_enabled_endpoint_count(enabled_count: usize) -> anyhow::Result<()> {
+    if enabled_count > MAX_OUTSTANDING_DELIVERY_TASKS {
+        bail!(
+            "webhook configuration enables {enabled_count} endpoints; \
+             at most {MAX_OUTSTANDING_DELIVERY_TASKS} may be enabled"
+        );
+    }
+    Ok(())
 }
 
 fn validate_config(config: &WebhookConfig) -> anyhow::Result<()> {
@@ -335,6 +374,12 @@ fn validate_config(config: &WebhookConfig) -> anyhow::Result<()> {
     if config.initial_backoff_ms > config.max_backoff_ms {
         bail!("webhook initial_backoff_ms must not exceed max_backoff_ms");
     }
+    let enabled_endpoints = config
+        .endpoints
+        .iter()
+        .filter(|endpoint| endpoint.enabled)
+        .count();
+    validate_enabled_endpoint_count(enabled_endpoints)?;
     Ok(())
 }
 
@@ -503,24 +548,18 @@ fn classify_ip(ip: IpAddr) -> HostClass {
 
 async fn run_dispatcher(
     mut rx: mpsc::Receiver<Msg>,
-    endpoints: Arc<Vec<Endpoint>>,
+    endpoints: Arc<Vec<EndpointSlot>>,
     client: reqwest::Client,
     semaphore: Arc<Semaphore>,
     options: DeliveryOptions,
     flush_timeout: Duration,
-    max_outstanding: usize,
 ) {
     let mut deliveries = JoinSet::new();
 
     loop {
-        if deliveries.len() >= max_outstanding {
-            if let Some(result) = deliveries.join_next().await {
-                log_delivery_task_result(result);
-            }
-            continue;
-        }
-
         tokio::select! {
+            biased;
+
             result = deliveries.join_next(), if !deliveries.is_empty() => {
                 if let Some(result) = result {
                     log_delivery_task_result(result);
@@ -555,14 +594,14 @@ async fn run_dispatcher(
 fn spawn_deliveries(
     deliveries: &mut JoinSet<()>,
     event: LogEvent,
-    endpoints: &[Endpoint],
+    endpoints: &[EndpointSlot],
     client: &reqwest::Client,
     semaphore: &Arc<Semaphore>,
     options: DeliveryOptions,
 ) {
-    let matching: Vec<&Endpoint> = endpoints
+    let matching: Vec<&EndpointSlot> = endpoints
         .iter()
-        .filter(|endpoint| endpoint.matches(&event.event))
+        .filter(|slot| slot.endpoint.matches(&event.event))
         .collect();
 
     if matching.is_empty() {
@@ -572,9 +611,9 @@ fn spawn_deliveries(
     let fields = sanitized_fields(&event.fields);
     let mut built = Vec::with_capacity(matching.len());
 
-    for endpoint in &matching {
-        match Delivery::new(&event, endpoint, &fields, options.max_payload_bytes) {
-            Ok(delivery) => built.push(delivery),
+    for slot in &matching {
+        match Delivery::new(&event, &slot.endpoint, &fields, options.max_payload_bytes) {
+            Ok(delivery) => built.push((*slot, delivery)),
             Err(DeliveryBuildError::PayloadTooLarge { payload_bytes }) => {
                 warn!(
                     event = %event.event,
@@ -587,20 +626,44 @@ fn spawn_deliveries(
                 return;
             }
             Err(DeliveryBuildError::Serialization(_serialization_error)) => error!(
-                endpoint_index = endpoint.index,
+                endpoint_index = slot.endpoint.index,
                 event = %event.event,
                 "failed to build webhook delivery; dropping delivery"
             ),
         }
     }
 
-    for delivery in built {
-        deliveries.spawn(deliver_with_retry(
-            delivery,
-            client.clone(),
-            semaphore.clone(),
-            options,
-        ));
+    // Every delivery is built before any permit is acquired, so an oversized
+    // event is rejected for all matching endpoints without consuming budget.
+    for (slot, delivery) in built {
+        // Admission is per endpoint and never awaits: waiting for a saturated
+        // endpoint here would stall the dispatcher and with it every other
+        // endpoint's traffic. A full endpoint sheds only its own delivery.
+        match slot.outstanding.clone().try_acquire_owned() {
+            Ok(permit) => {
+                let delivery_task =
+                    deliver_with_retry(delivery, client.clone(), semaphore.clone(), options);
+                deliveries.spawn(async move {
+                    // The permit counts unfinished deliveries, so it is held
+                    // through retries and backoff and released only when this
+                    // task ends - by completion, cancellation, or panic.
+                    let _permit = permit;
+                    delivery_task.await;
+                });
+            }
+            Err(TryAcquireError::NoPermits) => warn!(
+                endpoint_index = slot.endpoint.index,
+                event = %delivery.event,
+                drop_reason = "endpoint_backlog_full",
+                "webhook endpoint has too many outstanding deliveries; dropping delivery"
+            ),
+            Err(TryAcquireError::Closed) => warn!(
+                endpoint_index = slot.endpoint.index,
+                event = %delivery.event,
+                drop_reason = "endpoint_backlog_closed",
+                "webhook endpoint delivery limiter is closed; dropping delivery"
+            ),
+        }
     }
 }
 
@@ -1233,21 +1296,49 @@ mod tests {
     }
 
     #[test]
-    fn max_outstanding_preserves_default_scale() {
-        assert_eq!(max_outstanding_deliveries(1024, 1, 32), 1024);
-        assert_eq!(max_outstanding_deliveries(1, 1, 32), 32);
-        assert_eq!(max_outstanding_deliveries(128, 3, 32), 384);
+    fn per_endpoint_budget_preserves_queue_scale() {
+        assert_eq!(per_endpoint_outstanding_budget(1024, 1), Some(1024));
+        assert_eq!(per_endpoint_outstanding_budget(8, 3), Some(8));
+        assert_eq!(
+            per_endpoint_outstanding_budget(usize::MAX, MAX_OUTSTANDING_DELIVERY_TASKS),
+            Some(1)
+        );
+        assert_eq!(per_endpoint_outstanding_budget(1024, 0), None);
     }
 
     #[test]
-    fn max_outstanding_caps_extreme_configurations() {
+    fn per_endpoint_budget_holds_aggregate_bound_for_all_valid_counts() {
+        for enabled_count in 1..=MAX_OUTSTANDING_DELIVERY_TASKS {
+            for queue_capacity in [1, 1024, usize::MAX] {
+                let budget = per_endpoint_outstanding_budget(queue_capacity, enabled_count)
+                    .expect("positive endpoint count must have a budget");
+                assert!(budget >= 1, "budget must stay positive");
+                assert!(budget <= queue_capacity);
+                let aggregate = enabled_count
+                    .checked_mul(budget)
+                    .expect("validated endpoint budget must not overflow");
+                assert!(
+                    aggregate <= MAX_OUTSTANDING_DELIVERY_TASKS,
+                    "aggregate bound violated for {enabled_count} endpoints"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn validate_enabled_endpoint_count_uses_outstanding_delivery_limit() {
+        assert!(validate_enabled_endpoint_count(MAX_OUTSTANDING_DELIVERY_TASKS).is_ok());
+
+        let rejected_count = MAX_OUTSTANDING_DELIVERY_TASKS + 1;
+        let error = validate_enabled_endpoint_count(rejected_count)
+            .unwrap_err()
+            .to_string();
         assert_eq!(
-            max_outstanding_deliveries(100_000, 5, 32),
-            MAX_OUTSTANDING_DELIVERY_TASKS
-        );
-        assert_eq!(
-            max_outstanding_deliveries(usize::MAX, usize::MAX, 32),
-            MAX_OUTSTANDING_DELIVERY_TASKS
+            error,
+            format!(
+                "webhook configuration enables {rejected_count} endpoints; \
+                 at most {MAX_OUTSTANDING_DELIVERY_TASKS} may be enabled"
+            )
         );
     }
 
@@ -2317,7 +2408,7 @@ mod tests {
         let (url, calls, _requests) = spawn_mock_server(vec![StatusCode::OK]).await;
         let logger = HttpLogger::new(test_config(url, 1, 0)).await.unwrap();
 
-        timeout(Duration::from_millis(50), async {
+        timeout(Duration::from_secs(1), async {
             for _ in 0..20 {
                 logger.log(test_event()).await;
             }
@@ -2327,5 +2418,294 @@ mod tests {
 
         logger.flush().await;
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Mock server with a `/gated` route that parks each request until the
+    /// test releases a `gate` permit, and an `/open` route that responds
+    /// immediately. Arrival semaphores start at zero permits and gain one per
+    /// incoming request, so tests await the k-th arrival deterministically
+    /// instead of sleeping.
+    #[derive(Clone)]
+    struct GatedMockState {
+        gate: Arc<Semaphore>,
+        gated_arrivals: Arc<Semaphore>,
+        gated_completions: Arc<AtomicUsize>,
+        open_arrivals: Arc<Semaphore>,
+        open_calls: Arc<AtomicUsize>,
+    }
+
+    async fn gated_webhook(State(state): State<GatedMockState>) -> StatusCode {
+        state.gated_arrivals.add_permits(1);
+        match state.gate.acquire().await {
+            // `forget` consumes the permit so each release admits exactly one
+            // parked request.
+            Ok(permit) => permit.forget(),
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE,
+        }
+        state.gated_completions.fetch_add(1, Ordering::SeqCst);
+        StatusCode::OK
+    }
+
+    async fn open_webhook(State(state): State<GatedMockState>) -> StatusCode {
+        state.open_calls.fetch_add(1, Ordering::SeqCst);
+        state.open_arrivals.add_permits(1);
+        StatusCode::OK
+    }
+
+    async fn spawn_gated_mock_server() -> (String, String, GatedMockState) {
+        let state = GatedMockState {
+            gate: Arc::new(Semaphore::new(0)),
+            gated_arrivals: Arc::new(Semaphore::new(0)),
+            gated_completions: Arc::new(AtomicUsize::new(0)),
+            open_arrivals: Arc::new(Semaphore::new(0)),
+            open_calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let app = Router::new()
+            .route("/gated", post(gated_webhook))
+            .route("/open", post(open_webhook))
+            .route("/__ready", get(|| async { StatusCode::NO_CONTENT }))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let readiness_url = format!("http://{address}/__ready");
+        let readiness_client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("readiness client should build");
+        let mut ready = false;
+        for attempt in 0..100 {
+            if matches!(
+                readiness_client.get(&readiness_url).send().await,
+                Ok(response) if response.status().is_success()
+            ) {
+                ready = true;
+                break;
+            }
+            if attempt < 99 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        assert!(
+            ready,
+            "gated mock webhook server did not become ready after 100 attempts"
+        );
+
+        (
+            format!("http://{address}/gated"),
+            format!("http://{address}/open"),
+            state,
+        )
+    }
+
+    /// Waits for `count` arrivals, consuming their permits so every arrival is
+    /// counted exactly once. The timeout is only a hang guard; the semaphore
+    /// is the synchronization mechanism.
+    async fn acquire_arrivals(arrivals: &Semaphore, count: u32) {
+        timeout(Duration::from_secs(5), arrivals.acquire_many(count))
+            .await
+            .expect("timed out waiting for expected webhook requests")
+            .expect("arrival semaphore closed")
+            .forget();
+    }
+
+    fn gated_test_config(url: String, queue_capacity: usize) -> WebhookConfig {
+        let mut config = test_config(url, queue_capacity, 0);
+        // Generous limits: parked requests must never hit the client timeout,
+        // and flush must never abort deliveries, before the test releases the
+        // gate. The gate is always released, so these limits are never
+        // approached in a passing run.
+        config.timeout_secs = 30;
+        config.flush_timeout_secs = 30;
+        config.max_concurrency = 16;
+        config
+    }
+
+    #[tokio::test]
+    async fn saturated_endpoint_does_not_block_healthy_endpoint() {
+        let (gated_url, open_url, mock) = spawn_gated_mock_server().await;
+        // max_concurrency (16) deliberately exceeds the endpoint budget (4):
+        // this test isolates per-endpoint admission, while parked requests
+        // still hold global HTTP permits.
+        let mut config = gated_test_config(gated_url, 4);
+        let mut open_endpoint = config.endpoints[0].clone();
+        open_endpoint.url = open_url;
+        open_endpoint.events = vec!["sandbox.created".to_string()];
+        config.endpoints.push(open_endpoint);
+        let logger = HttpLogger::new(config).await.unwrap();
+
+        for _ in 0..4 {
+            logger
+                .log(LogEvent::new(LogLevel::Info, "sandbox.deleted").field("sandbox_id", "s-1"))
+                .await;
+            acquire_arrivals(&mock.gated_arrivals, 1).await;
+        }
+
+        logger.log(test_event()).await;
+        acquire_arrivals(&mock.open_arrivals, 1).await;
+        assert_eq!(mock.gated_completions.load(Ordering::SeqCst), 0);
+
+        mock.gate.add_permits(64);
+        logger.flush().await;
+        assert_eq!(mock.gated_completions.load(Ordering::SeqCst), 4);
+        assert_eq!(mock.open_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            mock.gated_arrivals.available_permits(),
+            0,
+            "the saturated endpoint must not receive the fifth delivery"
+        );
+    }
+
+    #[tokio::test]
+    async fn endpoint_outstanding_deliveries_never_exceed_budget() {
+        let (gated_url, open_url, mock) = spawn_gated_mock_server().await;
+        // queue_capacity 4 also derives a per-endpoint outstanding budget of
+        // 4; max_concurrency (16) keeps admission the binding limit. The
+        // gated endpoint subscribes to all events; the open endpoint only to
+        // "sandbox.created", so fill events park on the gated endpoint alone.
+        let mut config = gated_test_config(gated_url, 4);
+        let mut open_endpoint = config.endpoints[0].clone();
+        open_endpoint.url = open_url;
+        open_endpoint.events = vec!["sandbox.created".to_string()];
+        config.endpoints.push(open_endpoint);
+        let logger = HttpLogger::new(config).await.unwrap();
+
+        // Fill the gated endpoint's budget one event at a time; observing
+        // each arrival proves the dispatcher admitted and spawned that
+        // delivery.
+        for _ in 0..4 {
+            logger
+                .log(LogEvent::new(LogLevel::Info, "sandbox.deleted").field("sandbox_id", "s-1"))
+                .await;
+            acquire_arrivals(&mock.gated_arrivals, 1).await;
+        }
+
+        // These exceed the gated endpoint's budget and must be rejected
+        // without blocking the dispatcher. Each event is adjudicated for the
+        // gated endpoint before its open-endpoint delivery is spawned (config
+        // order within one spawn_deliveries call), so the open arrivals below
+        // prove all three rejections happened while the budget was still
+        // fully held - no permit could free up before the gate opens.
+        for _ in 0..3 {
+            logger.log(test_event()).await;
+        }
+        acquire_arrivals(&mock.open_arrivals, 3).await;
+
+        mock.gate.add_permits(64);
+        logger.flush().await;
+
+        assert_eq!(mock.gated_completions.load(Ordering::SeqCst), 4);
+        assert_eq!(mock.open_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            mock.gated_arrivals.available_permits(),
+            0,
+            "a delivery beyond the endpoint budget must never reach the endpoint"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocked_endpoint_does_not_block_log() {
+        let (gated_url, _open_url, mock) = spawn_gated_mock_server().await;
+        let logger = HttpLogger::new(gated_test_config(gated_url, 1))
+            .await
+            .unwrap();
+
+        logger.log(test_event()).await;
+        acquire_arrivals(&mock.gated_arrivals, 1).await;
+
+        timeout(Duration::from_secs(1), async {
+            for _ in 0..20 {
+                logger.log(test_event()).await;
+            }
+        })
+        .await
+        .expect("log() must not wait for queue capacity or endpoint admission");
+
+        mock.gate.add_permits(64);
+        logger.flush().await;
+        assert!(mock.gated_completions.load(Ordering::SeqCst) >= 1);
+    }
+
+    #[tokio::test]
+    async fn oversized_event_consumes_no_endpoint_budget() {
+        let slots: Vec<EndpointSlot> = [
+            compile_endpoint(&endpoint(&["*"]), 0).unwrap(),
+            compile_endpoint(&endpoint(&["*"]), 1).unwrap(),
+        ]
+        .into_iter()
+        .map(|endpoint| EndpointSlot {
+            endpoint,
+            outstanding: Arc::new(Semaphore::new(1)),
+        })
+        .collect();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let semaphore = Arc::new(Semaphore::new(4));
+        let options = DeliveryOptions {
+            max_retries: 0,
+            max_payload_bytes: 8,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 2,
+        };
+        let mut deliveries = JoinSet::new();
+
+        spawn_deliveries(
+            &mut deliveries,
+            test_event(),
+            &slots,
+            &client,
+            &semaphore,
+            options,
+        );
+
+        assert!(deliveries.is_empty(), "no delivery task may be spawned");
+        for slot in &slots {
+            assert_eq!(slot.outstanding.available_permits(), 1);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn saturated_endpoint_budget_drops_only_its_own_delivery() {
+        let saturated = EndpointSlot {
+            endpoint: compile_endpoint(&endpoint(&["*"]), 0).unwrap(),
+            outstanding: Arc::new(Semaphore::new(0)),
+        };
+        let available = EndpointSlot {
+            endpoint: compile_endpoint(&endpoint(&["*"]), 1).unwrap(),
+            outstanding: Arc::new(Semaphore::new(1)),
+        };
+        let slots = vec![saturated, available];
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let semaphore = Arc::new(Semaphore::new(4));
+        let options = DeliveryOptions {
+            max_retries: 0,
+            max_payload_bytes: MAX_WEBHOOK_PAYLOAD_BYTES,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 2,
+        };
+        let mut deliveries = JoinSet::new();
+
+        spawn_deliveries(
+            &mut deliveries,
+            test_event(),
+            &slots,
+            &client,
+            &semaphore,
+            options,
+        );
+
+        // Only the endpoint with remaining budget received a delivery task;
+        // the spawned task has not been polled yet on this current-thread
+        // runtime, so its permit is still held.
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(slots[1].outstanding.available_permits(), 0);
+
+        // Cancellation must release the outstanding permit via RAII.
+        deliveries.abort_all();
+        while deliveries.join_next().await.is_some() {}
+        assert_eq!(slots[1].outstanding.available_permits(), 1);
     }
 }
