@@ -74,15 +74,14 @@ func handleSandboxLogsAction(c *gin.Context) {
 	req := &SandboxLogsReq{}
 	if err := utils.DecodeHttpBody(c.Request.Body, req); err != nil {
 		// Also support query params for GET-style calls.
-		q := c.Request.URL.Query()
-		req.SandboxID = q.Get("sandbox_id")
+		req.SandboxID = c.Query("sandbox_id")
 		if req.SandboxID == "" {
-			req.SandboxID = q.Get("sandboxID")
+			req.SandboxID = c.Query("sandboxID")
 		}
-		if cursor := q.Get("cursor"); cursor != "" {
+		if cursor := c.Query("cursor"); cursor != "" {
 			req.Cursor, _ = strconv.ParseInt(cursor, 10, 64)
 		}
-		if l := q.Get("limit"); l != "" {
+		if l := c.Query("limit"); l != "" {
 			req.Limit, _ = strconv.Atoi(l)
 		}
 	}

@@ -62,25 +62,19 @@ type deleteTemplateRequest struct {
 	Sync         bool   `json:"sync,omitempty"`
 }
 
-func handleTemplateAction(c *gin.Context) {
+func createTemplateGinHandler(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
-	var res interface{}
-	switch c.Request.Method {
-	case http.MethodPost:
-		res = createTemplate(c.Request, rt)
-	case http.MethodGet:
-		res = getTemplate(c.Request, rt)
-	case http.MethodDelete:
-		res = deleteTemplate(c.Request, rt)
-	default:
-		res = &types.Res{
-			Ret: &types.Ret{
-				RetCode: int(errorcode.ErrorCode_MasterParamsError),
-				RetMsg:  http.StatusText(http.StatusMethodNotAllowed),
-			},
-		}
-	}
-	common.WriteAPI(c, res)
+	common.WriteAPI(c, createTemplate(c.Request, rt))
+}
+
+func getTemplateGinHandler(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	common.WriteAPI(c, getTemplate(c.Request, rt))
+}
+
+func deleteTemplateGinHandler(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	common.WriteAPI(c, deleteTemplate(c.Request, rt))
 }
 
 func deleteTemplate(r *http.Request, rt *CubeLog.RequestTrace) interface{} {

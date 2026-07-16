@@ -17,7 +17,7 @@ import (
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
-func handleImageAction(c *gin.Context) {
+func createImageGinHandler(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
 	rsp := &types.Res{
 		Ret: &types.Ret{
@@ -29,40 +29,52 @@ func handleImageAction(c *gin.Context) {
 		rt.RetCode = int64(rsp.Ret.RetCode)
 	}()
 
-	if c.Request.Method == http.MethodPost {
-		req := &types.CreateImageReq{}
-		if err := utils.DecodeHttpBody(c.Request.Body, req); err != nil {
-			rsp.Ret.RetMsg = err.Error()
-			common.WriteAPI(c, rsp)
-			return
-		}
-		rt.RequestID = req.RequestID
-		if req.InstanceType == "" {
-			req.InstanceType = cubebox.InstanceType_cubebox.String()
-		}
-		rt.InstanceType = req.InstanceType
-		ctx := log.WithLogger(c.Request.Context(), log.G(c.Request.Context()).WithFields(map[string]any{
-			"RequestId":    req.RequestID,
-			"InstanceType": req.InstanceType,
-		}))
-		rsp = sandbox.CreateImage(CubeLog.WithRequestTrace(ctx, rt), req)
-	} else if c.Request.Method == http.MethodDelete {
-		req := &types.DeleteImageReq{}
-		if err := utils.DecodeHttpBody(c.Request.Body, req); err != nil {
-			rsp.Ret.RetMsg = err.Error()
-			common.WriteAPI(c, rsp)
-			return
-		}
-		rt.RequestID = req.RequestID
-		if req.InstanceType == "" {
-			req.InstanceType = cubebox.InstanceType_cubebox.String()
-		}
-		rt.InstanceType = req.InstanceType
-		ctx := log.WithLogger(c.Request.Context(), log.G(c.Request.Context()).WithFields(map[string]any{
-			"RequestId":    req.RequestID,
-			"InstanceType": req.InstanceType,
-		}))
-		rsp = sandbox.DeleteImage(CubeLog.WithRequestTrace(ctx, rt), req)
+	req := &types.CreateImageReq{}
+	if err := utils.DecodeHttpBody(c.Request.Body, req); err != nil {
+		rsp.Ret.RetMsg = err.Error()
+		common.WriteAPI(c, rsp)
+		return
 	}
+	rt.RequestID = req.RequestID
+	if req.InstanceType == "" {
+		req.InstanceType = cubebox.InstanceType_cubebox.String()
+	}
+	rt.InstanceType = req.InstanceType
+	ctx := log.WithLogger(c.Request.Context(), log.G(c.Request.Context()).WithFields(map[string]any{
+		"RequestId":    req.RequestID,
+		"InstanceType": req.InstanceType,
+	}))
+	rsp = sandbox.CreateImage(CubeLog.WithRequestTrace(ctx, rt), req)
+	common.WriteAPI(c, rsp)
+}
+
+func deleteImageGinHandler(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	rsp := &types.Res{
+		Ret: &types.Ret{
+			RetCode: -1,
+			RetMsg:  http.StatusText(http.StatusNotFound),
+		},
+	}
+	defer func() {
+		rt.RetCode = int64(rsp.Ret.RetCode)
+	}()
+
+	req := &types.DeleteImageReq{}
+	if err := utils.DecodeHttpBody(c.Request.Body, req); err != nil {
+		rsp.Ret.RetMsg = err.Error()
+		common.WriteAPI(c, rsp)
+		return
+	}
+	rt.RequestID = req.RequestID
+	if req.InstanceType == "" {
+		req.InstanceType = cubebox.InstanceType_cubebox.String()
+	}
+	rt.InstanceType = req.InstanceType
+	ctx := log.WithLogger(c.Request.Context(), log.G(c.Request.Context()).WithFields(map[string]any{
+		"RequestId":    req.RequestID,
+		"InstanceType": req.InstanceType,
+	}))
+	rsp = sandbox.DeleteImage(CubeLog.WithRequestTrace(ctx, rt), req)
 	common.WriteAPI(c, rsp)
 }

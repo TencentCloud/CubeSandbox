@@ -7,6 +7,7 @@ package cube
 import (
 	"errors"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -23,23 +24,14 @@ import (
 
 var redoTemplateFromImageFn = templatecenter.SubmitRedoTemplateFromImage
 
-func handleTemplateFromImageAction(c *gin.Context) {
+func createTemplateFromImageGinHandler(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
-	var res interface{}
-	switch c.Request.Method {
-	case http.MethodPost:
-		res = createTemplateFromImage(c.Request, rt)
-	case http.MethodGet:
-		res = getTemplateFromImage(c.Request, rt)
-	default:
-		res = &types.Res{
-			Ret: &types.Ret{
-				RetCode: int(errorcode.ErrorCode_MasterParamsError),
-				RetMsg:  http.StatusText(http.StatusMethodNotAllowed),
-			},
-		}
-	}
-	common.WriteAPI(c, res)
+	common.WriteAPI(c, createTemplateFromImage(c.Request, rt))
+}
+
+func getTemplateFromImageGinHandler(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	common.WriteAPI(c, getTemplateFromImage(c.Request, rt))
 }
 
 func handleRedoTemplateAction(c *gin.Context) {
@@ -153,11 +145,15 @@ func getTemplateFromImage(r *http.Request, rt *CubeLog.RequestTrace) interface{}
 	}
 }
 
-func handleTemplateArtifactDownloadAction(c *gin.Context) {
-	rt := CubeLog.GetTraceInfo(c.Request.Context())
-	artifactID := strings.TrimSpace(c.Request.URL.Query().Get("artifact_id"))
-	token := strings.TrimSpace(c.Request.URL.Query().Get("token"))
-	record, file, err := templatecenter.OpenRootfsArtifact(c.Request.Context(), artifactID, token)
+// openTemplateArtifactForDownload resolves, opens, and stats the template
+// rootfs artifact identified by the artifact_id/token query params and writes
+// the common response headers (Content-Type/Length, ETag, X-Cube-Artifact-Id).
+// On error it writes the API error response and returns ok=false. On success
+// the caller owns file (must Close).
+func openTemplateArtifactForDownload(c *gin.Context) (name string, file *os.File, stat os.FileInfo, ok bool) {
+	artifactID := strings.TrimSpace(c.Query("artifact_id"))
+	token := strings.TrimSpace(c.Query("token"))
+	record, f, err := templatecenter.OpenRootfsArtifact(c.Request.Context(), artifactID, token)
 	if err != nil {
 		common.WriteAPI(c, &types.Res{
 			Ret: &types.Ret{
@@ -165,34 +161,50 @@ func handleTemplateArtifactDownloadAction(c *gin.Context) {
 				RetMsg:  err.Error(),
 			},
 		})
-		return
+		return "", nil, nil, false
 	}
-	defer file.Close()
-	stat, err := file.Stat()
+	st, err := f.Stat()
 	if err != nil {
+		f.Close()
 		common.WriteAPI(c, &types.Res{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterInternalError),
 				RetMsg:  err.Error(),
 			},
 		})
-		return
+		return "", nil, nil, false
 	}
 	c.Writer.Header().Set("Content-Type", "application/octet-stream")
-	c.Writer.Header().Set("Content-Length", strconv.FormatInt(stat.Size(), 10))
+	c.Writer.Header().Set("Content-Length", strconv.FormatInt(st.Size(), 10))
 	c.Writer.Header().Set("ETag", record.Ext4SHA256)
 	c.Writer.Header().Set("X-Cube-Artifact-Id", record.ArtifactID)
-	if c.Request.Method == http.MethodHead {
-		rt.RetCode = int64(errorcode.ErrorCode_Success)
+	return filepath.Base(record.Ext4Path), f, st, true
+}
+
+func downloadTemplateArtifactGinHandler(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	name, file, stat, ok := openTemplateArtifactForDownload(c)
+	if !ok {
 		return
 	}
-	http.ServeContent(c.Writer, c.Request, filepath.Base(record.Ext4Path), stat.ModTime(), file)
+	defer file.Close()
+	http.ServeContent(c.Writer, c.Request, name, stat.ModTime(), file)
+	rt.RetCode = int64(errorcode.ErrorCode_Success)
+}
+
+func headTemplateArtifactGinHandler(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	_, file, _, ok := openTemplateArtifactForDownload(c)
+	if !ok {
+		return
+	}
+	file.Close()
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
 }
 
 func handleRootfsArtifactAction(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
-	artifactID := strings.TrimSpace(c.Request.URL.Query().Get("artifact_id"))
+	artifactID := strings.TrimSpace(c.Query("artifact_id"))
 	if artifactID == "" {
 		common.WriteAPI(c, &types.CreateTemplateFromImageRes{
 			Ret: &types.Ret{

@@ -19,8 +19,8 @@ import "github.com/gin-gonic/gin"
 // — see the inner package.)
 func RegisterCubeRoutes(g *gin.RouterGroup) {
 	// Sandbox CRUD
-	g.POST(SandboxAction, handleSandboxAction)
-	g.DELETE(SandboxAction, handleSandboxAction)
+	g.POST(SandboxAction, createSandboxGinHandler)
+	g.DELETE(SandboxAction, deleteSandboxGinHandler)
 	g.POST(SandboxPreviewAction, handleSandboxPreviewAction)
 	g.POST(SandboxCommitAction, handleSandboxCommitAction)
 	g.POST(SandboxRollbackAction, handleSandboxRollbackAction)
@@ -37,34 +37,34 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	g.POST(SandboxLogsAction, handleSandboxLogsAction)
 
 	// Image
-	g.POST(ImageAction, handleImageAction)
-	g.DELETE(ImageAction, handleImageAction)
+	g.POST(ImageAction, createImageGinHandler)
+	g.DELETE(ImageAction, deleteImageGinHandler)
 
 	// Snapshot (NOTE: DELETE /snapshot collection-level is NOT registered —
 	// the original mux only registered DELETE /snapshot/{snapshot_id})
-	g.POST(SnapshotAction, handleSnapshotAction)
-	g.GET(SnapshotAction, handleSnapshotAction)
+	g.POST(SnapshotAction, createSnapshotGinHandler)
+	g.GET(SnapshotAction, getSnapshotGinHandler)
 	g.GET(SnapshotStorageAction, handleSnapshotStorageAction)
-	g.GET(SnapshotAction+"/:snapshot_id", handleSnapshotAction)
-	g.DELETE(SnapshotAction+"/:snapshot_id", handleSnapshotAction)
+	g.GET(SnapshotAction+"/:snapshot_id", getSnapshotGinHandler)
+	g.DELETE(SnapshotAction+"/:snapshot_id", deleteSnapshotGinHandler)
 	g.GET(OperationAction+"/:operation_id", handleSnapshotOperationAction)
 
 	// Template
-	g.POST(TemplateAction, handleTemplateAction)
-	g.GET(TemplateAction, handleTemplateAction)
-	g.DELETE(TemplateAction, handleTemplateAction)
-	g.GET(TemplateCompatAction, handleTemplateCompatAction)
-	g.POST(TemplateCompatAction, handleTemplateCompatAction)
+	g.POST(TemplateAction, createTemplateGinHandler)
+	g.GET(TemplateAction, getTemplateGinHandler)
+	g.DELETE(TemplateAction, deleteTemplateGinHandler)
+	g.GET(TemplateCompatAction, getTemplateCompatGinHandler)
+	g.POST(TemplateCompatAction, updateTemplateCompatGinHandler)
 	g.POST(TemplateRedoAction, handleRedoTemplateAction)
 	g.GET(TemplateBuildStatusAction+"/:build_id/status", handleTemplateBuildStatusAction)
-	g.GET(TemplateFromImageAction, handleTemplateFromImageAction)
-	g.POST(TemplateFromImageAction, handleTemplateFromImageAction)
-	g.GET(TemplateArtifactDownloadAction, handleTemplateArtifactDownloadAction)
-	g.HEAD(TemplateArtifactDownloadAction, handleTemplateArtifactDownloadAction)
+	g.GET(TemplateFromImageAction, getTemplateFromImageGinHandler)
+	g.POST(TemplateFromImageAction, createTemplateFromImageGinHandler)
+	g.GET(TemplateArtifactDownloadAction, downloadTemplateArtifactGinHandler)
+	g.HEAD(TemplateArtifactDownloadAction, headTemplateArtifactGinHandler)
 
 	// Artifact / CA download
-	g.GET(CADownloadActionPrefix+":filename", handleCADownloadAction)
-	g.HEAD(CADownloadActionPrefix+":filename", handleCADownloadAction)
+	g.GET(CADownloadActionPrefix+":filename", downloadCAGinHandler)
+	g.HEAD(CADownloadActionPrefix+":filename", headCAGinHandler)
 	g.GET(RootfsArtifactAction, handleRootfsArtifactAction)
 
 	// Inventory

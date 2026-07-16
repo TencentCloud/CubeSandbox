@@ -6,7 +6,6 @@ package cube
 
 import (
 	"errors"
-	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -34,71 +33,66 @@ type templateCompatAdoptResponse struct {
 	Updated int `json:"updated"`
 }
 
-func handleTemplateCompatAction(c *gin.Context) {
+func getTemplateCompatGinHandler(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
-	switch c.Request.Method {
-	case http.MethodGet:
-		matrix, err := templatecenter.GetCompatMatrix(c.Request.Context())
-		if err != nil {
-			rt.RetCode = int64(errorcode.ErrorCode_Unknown)
-			common.WriteAPI(c, &templateCompatResponse{
-				Res:  &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Unknown), RetMsg: err.Error()}},
-				Data: nil,
-			})
-			return
-		}
-		rt.RetCode = int64(errorcode.ErrorCode_Success)
+	matrix, err := templatecenter.GetCompatMatrix(c.Request.Context())
+	if err != nil {
+		rt.RetCode = int64(errorcode.ErrorCode_Unknown)
 		common.WriteAPI(c, &templateCompatResponse{
-			Res:  &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success), RetMsg: "success"}},
-			Data: matrix,
+			Res:  &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Unknown), RetMsg: err.Error()}},
+			Data: nil,
 		})
 		return
-	case http.MethodPost:
-		req := &templateCompatActionRequest{}
-		if err := common.GetBodyReq(c.Request, req); err != nil {
-			rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
-			common.WriteAPI(c, &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_MasterParamsError), RetMsg: err.Error()}})
-			return
-		}
-		switch strings.TrimSpace(req.Action) {
-		case "adopt_baseline":
-			updated, err := templatecenter.AdoptCompatBaseline(c.Request.Context(), req.TemplateID)
-			if err != nil {
-				retCode := errorcode.ErrorCode_Unknown
-				if errors.Is(err, templatecenter.ErrTemplateNotFound) {
-					retCode = errorcode.ErrorCode_NotFound
-				}
-				rt.RetCode = int64(retCode)
-				common.WriteAPI(c, &types.Res{Ret: &types.Ret{RetCode: int(retCode), RetMsg: err.Error()}})
-				return
+	}
+	rt.RetCode = int64(errorcode.ErrorCode_Success)
+	common.WriteAPI(c, &templateCompatResponse{
+		Res:  &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success), RetMsg: "success"}},
+		Data: matrix,
+	})
+}
+
+func updateTemplateCompatGinHandler(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	req := &templateCompatActionRequest{}
+	if err := common.GetBodyReq(c.Request, req); err != nil {
+		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
+		common.WriteAPI(c, &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_MasterParamsError), RetMsg: err.Error()}})
+		return
+	}
+	switch strings.TrimSpace(req.Action) {
+	case "adopt_baseline":
+		updated, err := templatecenter.AdoptCompatBaseline(c.Request.Context(), req.TemplateID)
+		if err != nil {
+			retCode := errorcode.ErrorCode_Unknown
+			if errors.Is(err, templatecenter.ErrTemplateNotFound) {
+				retCode = errorcode.ErrorCode_NotFound
 			}
-			rt.RetCode = int64(errorcode.ErrorCode_Success)
-			common.WriteAPI(c, &templateCompatAdoptResponse{
-				Res:     &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success), RetMsg: "success"}},
-				Updated: updated,
-			})
-			return
-		case "rescan":
-			if !req.AllNodes && len(req.NodeIDs) == 0 {
-				rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
-				common.WriteAPI(c, &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_MasterParamsError), RetMsg: "node_ids is required unless all_nodes is true"}})
-				return
-			}
-		default:
-			rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
-			common.WriteAPI(c, &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_MasterParamsError), RetMsg: "unsupported template compat action"}})
-			return
-		}
-		if err := templatecenter.RescanCompat(c.Request.Context(), req.NodeIDs); err != nil {
-			rt.RetCode = int64(errorcode.ErrorCode_Unknown)
-			common.WriteAPI(c, &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Unknown), RetMsg: err.Error()}})
+			rt.RetCode = int64(retCode)
+			common.WriteAPI(c, &types.Res{Ret: &types.Ret{RetCode: int(retCode), RetMsg: err.Error()}})
 			return
 		}
 		rt.RetCode = int64(errorcode.ErrorCode_Success)
-		common.WriteAPI(c, &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success), RetMsg: "success"}})
+		common.WriteAPI(c, &templateCompatAdoptResponse{
+			Res:     &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success), RetMsg: "success"}},
+			Updated: updated,
+		})
 		return
+	case "rescan":
+		if !req.AllNodes && len(req.NodeIDs) == 0 {
+			rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
+			common.WriteAPI(c, &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_MasterParamsError), RetMsg: "node_ids is required unless all_nodes is true"}})
+			return
+		}
 	default:
 		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
-		common.WriteAPI(c, &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_MasterParamsError), RetMsg: http.StatusText(http.StatusMethodNotAllowed)}})
+		common.WriteAPI(c, &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_MasterParamsError), RetMsg: "unsupported template compat action"}})
+		return
 	}
+	if err := templatecenter.RescanCompat(c.Request.Context(), req.NodeIDs); err != nil {
+		rt.RetCode = int64(errorcode.ErrorCode_Unknown)
+		common.WriteAPI(c, &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Unknown), RetMsg: err.Error()}})
+		return
+	}
+	rt.RetCode = int64(errorcode.ErrorCode_Success)
+	common.WriteAPI(c, &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success), RetMsg: "success"}})
 }

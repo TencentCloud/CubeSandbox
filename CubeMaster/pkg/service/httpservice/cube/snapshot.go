@@ -128,32 +128,26 @@ type snapshotStorageResource struct {
 	LastUpdatedAt int64  `json:"last_updated_at,omitempty"`
 }
 
-func handleSnapshotAction(c *gin.Context) {
+func createSnapshotGinHandler(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
-	var res interface{}
-	switch c.Request.Method {
-	case http.MethodPost:
-		extendSnapshotWriteDeadline(c.Writer)
-		res = createSnapshot(c.Request, rt)
-	case http.MethodGet:
-		res = getSnapshot(c.Request, rt, c.Param("snapshot_id"))
-	case http.MethodDelete:
-		extendSnapshotWriteDeadline(c.Writer)
-		res = deleteSnapshot(c.Request, rt, c.Param("snapshot_id"))
-	default:
-		res = &types.Res{
-			Ret: &types.Ret{
-				RetCode: int(errorcode.ErrorCode_MasterParamsError),
-				RetMsg:  http.StatusText(http.StatusMethodNotAllowed),
-			},
-		}
-	}
-	common.WriteAPI(c, res)
+	extendSnapshotWriteDeadline(c.Writer)
+	common.WriteAPI(c, createSnapshot(c.Request, rt))
+}
+
+func getSnapshotGinHandler(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	common.WriteAPI(c, getSnapshot(c.Request, rt, c.Param("snapshot_id")))
+}
+
+func deleteSnapshotGinHandler(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	extendSnapshotWriteDeadline(c.Writer)
+	common.WriteAPI(c, deleteSnapshot(c.Request, rt, c.Param("snapshot_id")))
 }
 func handleSnapshotStorageAction(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
-	refresh := strings.EqualFold(strings.TrimSpace(c.Request.URL.Query().Get("refresh")), "true") ||
-		strings.TrimSpace(c.Request.URL.Query().Get("refresh")) == "1"
+	refreshParam := strings.TrimSpace(c.Query("refresh"))
+	refresh := strings.EqualFold(refreshParam, "true") || refreshParam == "1"
 	data, err := listSnapshotStorageFn(c.Request.Context(), refresh)
 	response := &snapshotStorageResponse{
 		Res: &types.Res{

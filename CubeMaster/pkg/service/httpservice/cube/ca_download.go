@@ -38,35 +38,22 @@ var caServableFiles = map[string]struct{}{
 	"cube-root-ca.key": {},
 }
 
-// handleCADownloadAction serves the CubeEgress root CA materials
-// (cube-root-ca.crt / cube-root-ca.key) to compute nodes that need to
-// run their own CubeEgress instance against templates baked with the
-// same CA.
-//
-// Path: /cube/ca/<filename>. Other names → 404.
-//
-// Auth: NONE today. Anyone reachable on the master HTTP port can pull
-// the MITM private key. Acceptable iff the master HTTP port is
-// reachable only from inside the cluster network (the typical
-// one-click deployment). Production hardening — bearer token in a
-// header, request-source ACL, or mTLS — should land before this
-// endpoint is exposed to anything wider; a verifyAuth(r) hook is the
-// natural place to add it.
-func handleCADownloadAction(c *gin.Context) {
-	rt := CubeLog.GetTraceInfo(c.Request.Context())
-
+// openCAFile resolves, opens, and stats the requested CA file and writes the
+// common Content-Type/Length headers. On error it writes the API error
+// response and returns ok=false. On success the caller owns file (must Close).
+func openCAFile(c *gin.Context) (filename string, file *os.File, stat os.FileInfo, ok bool) {
 	// The filename is a gin path param (:filename), so it is already a
 	// single path segment; the allow-list below is the real boundary and
 	// rejects anything not on the documented list.
 	requested := c.Param("filename")
-	if _, ok := caServableFiles[requested]; !ok {
+	if _, allow := caServableFiles[requested]; !allow {
 		common.WriteAPI(c, &types.Res{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_NotFound),
 				RetMsg:  http.StatusText(http.StatusNotFound),
 			},
 		})
-		return
+		return "", nil, nil, false
 	}
 
 	fullPath := filepath.Join(caRootDir, requested)
@@ -87,31 +74,61 @@ func handleCADownloadAction(c *gin.Context) {
 				RetMsg:  err.Error(),
 			},
 		})
-		return
+		return "", nil, nil, false
 	}
-	defer f.Close()
 
-	stat, err := f.Stat()
+	st, err := f.Stat()
 	if err != nil {
+		f.Close()
 		common.WriteAPI(c, &types.Res{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterInternalError),
 				RetMsg:  err.Error(),
 			},
 		})
-		return
+		return "", nil, nil, false
 	}
 
 	c.Writer.Header().Set("Content-Type", "application/octet-stream")
-	c.Writer.Header().Set("Content-Length", strconv.FormatInt(stat.Size(), 10))
-	if c.Request.Method == http.MethodHead {
-		rt.RetCode = int64(errorcode.ErrorCode_Success)
+	c.Writer.Header().Set("Content-Length", strconv.FormatInt(st.Size(), 10))
+	return requested, f, st, true
+}
+
+// downloadCAGinHandler (GET) and headCAGinHandler (HEAD) serve the CubeEgress
+// root CA materials (cube-root-ca.crt / cube-root-ca.key) to compute nodes
+// that need to run their own CubeEgress instance against templates baked with
+// the same CA.
+//
+// Path: /cube/ca/<filename>. Other names → 404.
+//
+// Auth: NONE today. Anyone reachable on the master HTTP port can pull
+// the MITM private key. Acceptable iff the master HTTP port is
+// reachable only from inside the cluster network (the typical
+// one-click deployments). Production hardening — bearer token in a
+// header, request-source ACL, or mTLS — should land before this
+// endpoint is exposed to anything wider; a verifyAuth(r) hook is the
+// natural place to add it.
+func downloadCAGinHandler(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	requested, f, stat, ok := openCAFile(c)
+	if !ok {
 		return
 	}
+	defer f.Close()
 	// http.ServeContent gives us range support for free; the CA files
 	// are tiny (sub-kilobyte) so range isn't load-bearing, but it
 	// keeps the response handling consistent with the artifact
 	// download endpoint.
 	http.ServeContent(c.Writer, c.Request, requested, stat.ModTime(), f)
+	rt.RetCode = int64(errorcode.ErrorCode_Success)
+}
+
+func headCAGinHandler(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	_, f, _, ok := openCAFile(c)
+	if !ok {
+		return
+	}
+	f.Close()
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
 }

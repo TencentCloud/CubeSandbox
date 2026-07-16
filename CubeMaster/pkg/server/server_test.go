@@ -66,6 +66,23 @@ func TestMethodNotAllowedReturnsBare405(t *testing.T) {
 	assert.Empty(t, w.Body.String(), "405 must have an empty body")
 }
 
+// TestMethodNotAllowedSetsAllowHeader documents an intentional, beneficial
+// difference from gorilla/mux: gin's 405 includes an RFC 7231 "Allow" header
+// listing the methods supported at the path; mux's default 405 did not set it.
+// We keep gin's behavior (standards-compliant, helps clients) — this test locks
+// it in as a known/accepted parity delta. /cube/sandbox is registered POST+DELETE.
+func TestMethodNotAllowedSetsAllowHeader(t *testing.T) {
+	engine := newTestEngine(t)
+	req := httptest.NewRequest(http.MethodGet, "/cube/sandbox", nil)
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
+	allow := w.Header().Get("Allow")
+	assert.NotEmpty(t, allow, "gin sets an Allow header on 405 (RFC 7231; mux did not — intentional)")
+	assert.Contains(t, allow, http.MethodPost)
+	assert.Contains(t, allow, http.MethodDelete)
+}
+
 // TestStaticPrioritySnapshotStorageRoute — the static /cube/snapshot/storage
 // route is registered separately from /cube/snapshot/:snapshot_id so gin's
 // radix tree resolves the static path (not the param).

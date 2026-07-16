@@ -27,12 +27,11 @@ func handleInfoAction(c *gin.Context) {
 	err := utils.DecodeHttpBody(c.Request.Body, req)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
-			querys := c.Request.URL.Query()
-			req.RequestID = querys.Get("requestID")
-			req.HostID = querys.Get("host_id")
-			req.SandboxID = querys.Get("sandbox_id")
-			req.InstanceType = querys.Get("instance_type")
-			if containerPort := querys.Get("container_port"); containerPort != "" {
+			req.RequestID = c.Query("requestID")
+			req.HostID = c.Query("host_id")
+			req.SandboxID = c.Query("sandbox_id")
+			req.InstanceType = c.Query("instance_type")
+			if containerPort := c.Query("container_port"); containerPort != "" {
 				port, _ := strconv.ParseInt(containerPort, 10, 32)
 				req.ContainerPort = int32(port)
 			}
