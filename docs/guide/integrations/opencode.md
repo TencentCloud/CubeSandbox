@@ -77,9 +77,8 @@ RUN apt-get update \
         ca-certificates curl git gnupg jq less procps python3 python3-pip ripgrep \
     && curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && npm install -g --ignore-scripts "opencode-ai@${OPENCODE_VERSION}" \
+    && npm install -g "opencode-ai@${OPENCODE_VERSION}" \
     && opencode --version \
-    && npm cache clean --force \
     && rm -rf /root/.npm /var/lib/apt/lists/*
 
 WORKDIR /workspace
@@ -128,6 +127,7 @@ pip install -r requirements.txt
 | `CUBE_TEMPLATE_ID` | `Sandbox.create(template=...)` | From step 2 |
 | `OPENCODE_PROVIDER` / `OPENCODE_MODEL` | OpenCode CLI flags | Provider and model selection |
 | `ANTHROPIC_API_KEY` | `envs=...` (direct) or CubeEgress inject (vault) | Provider key |
+| `ANTHROPIC_BASE_URL` | Passed into the exec env | Anthropic-compatible gateways (e.g. DeepSeek) |
 | `OPENCODE_LLM_HOST` | `network_policy.py` | LLM host allowed under default-deny egress |
 
 ### 4. Runtime Configuration and API Key Injection

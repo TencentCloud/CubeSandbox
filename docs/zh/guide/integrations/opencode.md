@@ -71,9 +71,8 @@ RUN apt-get update \
         ca-certificates curl git gnupg jq less procps python3 python3-pip ripgrep \
     && curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && npm install -g --ignore-scripts "opencode-ai@${OPENCODE_VERSION}" \
+    && npm install -g "opencode-ai@${OPENCODE_VERSION}" \
     && opencode --version \
-    && npm cache clean --force \
     && rm -rf /root/.npm /var/lib/apt/lists/*
 
 WORKDIR /workspace
@@ -121,6 +120,7 @@ pip install -r requirements.txt
 | `CUBE_TEMPLATE_ID` | `Sandbox.create(template=...)` | 来自第 2 步 |
 | `OPENCODE_PROVIDER` / `OPENCODE_MODEL` | OpenCode CLI 参数 | 选择 provider 与模型 |
 | `ANTHROPIC_API_KEY` | `envs=...`（直连）或 CubeEgress 注入（vault） | provider 密钥 |
+| `ANTHROPIC_BASE_URL` | 传入 exec 环境 | Anthropic 兼容网关（如 DeepSeek） |
 | `OPENCODE_LLM_HOST` | `network_policy.py` | 默认拒绝出网下放行的 LLM host |
 
 ### 4. 运行时配置与 API Key 注入

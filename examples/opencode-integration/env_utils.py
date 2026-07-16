@@ -234,7 +234,7 @@ def opencode_run_command(
 
 
 def opencode_serve_command(
-    *, hostname: str = "0.0.0.0", port: int = 4096,
+    *, hostname: str = "127.0.0.1", port: int = 4096,
     provider: str | None = None, model: str | None = None,
 ) -> str:
     """Build an OpenCode serve invocation for SDK-based integration.

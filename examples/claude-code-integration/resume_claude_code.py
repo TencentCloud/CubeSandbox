@@ -149,10 +149,11 @@ def main() -> int:
     # the key per command. The pause() snapshot also captures the in-VM env and
     # any credentials that might persist, widening exposure — for shared
     # clusters prefer the default-deny + vault pattern in network_policy.py.
-    sandbox = Sandbox.create(template=template_id, timeout=args.sandbox_timeout)
-    sandbox_id = sandbox_identifier(sandbox)
-
+    sandbox = None
+    sandbox_id = "uncreated"
     try:
+        sandbox = Sandbox.create(template=template_id, timeout=args.sandbox_timeout)
+        sandbox_id = sandbox_identifier(sandbox)
         print(f"Sandbox ready: {sandbox_id}")
 
         version_result = run_command(sandbox, "claude --version", timeout=60)
@@ -175,7 +176,7 @@ def main() -> int:
         print(f"Paused. Resume handle: {sandbox_id}")
 
         print(f"\nReconnecting to {sandbox_id}...")
-        sandbox = Sandbox.connect(sandbox_id=sandbox_id)
+        sandbox = Sandbox.connect(sandbox_id=sandbox_id, timeout=args.sandbox_timeout)
         print("Reconnected after resume.")
 
         print("\n=== Verifying persistence after resume ===\n")

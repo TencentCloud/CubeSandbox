@@ -153,7 +153,7 @@ python network_policy.py
 ## 参考
 
 - 集成指南：[`docs/zh/guide/integrations/opencode.md`](../../docs/zh/guide/integrations/opencode.md)
-- 快照 / 克隆 / 回滚：[`docs/guide/snapshot-rollback-clone.md`](../../docs/guide/snapshot-rollback-clone.md)
+- 快照 / 克隆 / 回滚：[`docs/zh/guide/snapshot-rollback-clone.md`](../../docs/zh/guide/snapshot-rollback-clone.md)
 - 网络 / 出网策略示例：[`examples/network-policy`](../network-policy)
 - OpenCode coding agent：<https://www.npmjs.com/package/opencode-ai>
 - OpenCode SDK：<https://www.npmjs.com/package/@opencode-ai/sdk>

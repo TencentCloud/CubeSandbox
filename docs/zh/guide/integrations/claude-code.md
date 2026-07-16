@@ -69,9 +69,8 @@ RUN apt-get update \
         ca-certificates curl git gnupg jq less procps python3 python3-pip ripgrep \
     && curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && npm install -g --ignore-scripts "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && claude --version \
-    && npm cache clean --force \
     && rm -rf /root/.npm /var/lib/apt/lists/*
 
 WORKDIR /workspace

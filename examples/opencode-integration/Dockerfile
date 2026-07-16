@@ -47,9 +47,8 @@ RUN apt-get update \
 
 # Install OpenCode in its own layer so bumping OPENCODE_VERSION does not
 # invalidate the slow OS + Node.js layer above.
-RUN npm install -g --ignore-scripts --no-audit --no-fund "opencode-ai@${OPENCODE_VERSION}" \
+RUN npm install -g --no-audit --no-fund "opencode-ai@${OPENCODE_VERSION}" \
     && opencode --version \
-    && npm cache clean --force \
     && rm -rf /root/.npm
 
 RUN mkdir -p /workspace "${OPENCODE_DIR}"

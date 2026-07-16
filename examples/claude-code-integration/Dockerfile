@@ -47,9 +47,8 @@ RUN apt-get update \
 # Install Claude Code in its own layer so bumping CLAUDE_CODE_VERSION does not
 # invalidate the slow OS + Node.js layer above (only this short layer rebuilds
 # on a version bump).
-RUN npm install -g --ignore-scripts --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+RUN npm install -g --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && claude --version \
-    && npm cache clean --force \
     && rm -rf /root/.npm
 
 RUN mkdir -p /workspace

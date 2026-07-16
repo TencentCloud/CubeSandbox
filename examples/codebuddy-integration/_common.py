@@ -28,7 +28,7 @@ def stream_writer(stream) -> Callable[[object], None]:
 
 
 def _tool_brief(arguments: dict) -> str:
-    for key in ("command", "path", "pattern", "query", "url"):
+    for key in ("command", "path", "pattern", "query", "url", "file_path"):
         value = arguments.get(key)
         if value:
             return str(value).replace("\n", " ")[:120]

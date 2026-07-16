@@ -48,9 +48,8 @@ RUN apt-get update \
 # Install CodeBuddy CLI in its own layer so bumping CODEBUDDY_VERSION does not
 # invalidate the slow OS + Node.js layer above (only this short layer rebuilds
 # on a version bump).
-RUN npm install -g --ignore-scripts --no-audit --no-fund "@tencent-ai/codebuddy-code@${CODEBUDDY_VERSION}" \
+RUN npm install -g --no-audit --no-fund "@tencent-ai/codebuddy-code@${CODEBUDDY_VERSION}" \
     && codebuddy --version \
-    && npm cache clean --force \
     && rm -rf /root/.npm
 
 RUN mkdir -p /workspace "${CODEBUDDY_HOME}" \
