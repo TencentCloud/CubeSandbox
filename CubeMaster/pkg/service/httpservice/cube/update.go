@@ -31,14 +31,14 @@ func handleUpdateAction(c *gin.Context) {
 	if err := utils.DecodeHttpBody(c.Request.Body, req); err != nil {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
 		rsp.Ret.RetMsg = "请求体解析失败"
-		common.WriteResponse(c.Writer, http.StatusOK, rsp)
+		common.WriteAPI(c, rsp)
 		return
 	}
 	if req.RequestID == "" {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
 		rsp.Ret.RetMsg = "requestID is empty"
 		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
-		common.WriteResponse(c.Writer, http.StatusOK, rsp)
+		common.WriteAPI(c, rsp)
 		return
 	}
 	if req.InstanceType == "" {
@@ -51,5 +51,5 @@ func handleUpdateAction(c *gin.Context) {
 		"InstanceType": req.InstanceType,
 	}))
 	rsp = sandbox.Update(CubeLog.WithRequestTrace(ctx, rt), req)
-	common.WriteResponse(c.Writer, http.StatusOK, rsp)
+	common.WriteAPI(c, rsp)
 }

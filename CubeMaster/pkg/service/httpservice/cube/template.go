@@ -80,7 +80,7 @@ func handleTemplateAction(c *gin.Context) {
 			},
 		}
 	}
-	common.WriteResponse(c.Writer, http.StatusOK, res)
+	common.WriteAPI(c, res)
 }
 
 func deleteTemplate(r *http.Request, rt *CubeLog.RequestTrace) interface{} {

@@ -10,10 +10,11 @@ import (
 )
 
 const (
-	innerURI   = "/internal"
-	NodeAction = "/node"
-	StateWs    = "/ws"
-	StateQuery = "/query"
+	innerURI         = "/internal"
+	NodeAction       = "/node"
+	FakeCreateAction = "/fake_create"
+	StateWs          = "/ws"
+	StateQuery       = "/query"
 )
 
 func InnerURI() string {

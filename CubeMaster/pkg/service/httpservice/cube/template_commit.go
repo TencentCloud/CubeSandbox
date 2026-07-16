@@ -6,7 +6,6 @@ package cube
 
 import (
 	"errors"
-	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -49,13 +48,13 @@ func handleSandboxCommitAction(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
 	req := &commitTemplateRequest{}
 	if err := common.GetBodyReq(c.Request, req); err != nil {
-		common.WriteResponse(c.Writer, http.StatusOK, &commitTemplateResponse{
+		common.WriteAPI(c, &commitTemplateResponse{
 			Res: &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_MasterParamsError), RetMsg: err.Error()}},
 		})
 		return
 	}
 	if strings.TrimSpace(req.SandboxID) == "" || req.CreateRequest == nil {
-		common.WriteResponse(c.Writer, http.StatusOK, &commitTemplateResponse{
+		common.WriteAPI(c, &commitTemplateResponse{
 			Res: &types.Res{Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  "sandbox_id and create_request are required",
@@ -68,7 +67,7 @@ func handleSandboxCommitAction(c *gin.Context) {
 	// system depends on the tpl- / snap- prefix convention.
 	req.TemplateID = templatecenter.GenerateTemplateID()
 	if strings.TrimSpace(req.RequestID) == "" {
-		common.WriteResponse(c.Writer, http.StatusOK, &commitTemplateResponse{
+		common.WriteAPI(c, &commitTemplateResponse{
 			Res: &types.Res{Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  "requestID is required for commit; retry should generate a new request id",
@@ -103,7 +102,7 @@ func handleSandboxCommitAction(c *gin.Context) {
 			if infoRsp != nil && infoRsp.Ret != nil && infoRsp.Ret.RetMsg != "" {
 				msg = infoRsp.Ret.RetMsg
 			}
-			common.WriteResponse(c.Writer, http.StatusOK, &commitTemplateResponse{
+			common.WriteAPI(c, &commitTemplateResponse{
 				Res:        &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_NotFound), RetMsg: msg}},
 				TemplateID: req.TemplateID,
 			})
@@ -118,7 +117,7 @@ func handleSandboxCommitAction(c *gin.Context) {
 		}
 	}
 	if hostIP == "" || hostID == "" {
-		common.WriteResponse(c.Writer, http.StatusOK, &commitTemplateResponse{
+		common.WriteAPI(c, &commitTemplateResponse{
 			Res: &types.Res{Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_NotFound),
 				RetMsg:  "unable to resolve sandbox host",
@@ -139,7 +138,7 @@ func handleSandboxCommitAction(c *gin.Context) {
 	if err != nil {
 		code := commitTemplateErrorCode(err)
 		rt.RetCode = int64(code)
-		common.WriteResponse(c.Writer, http.StatusOK, &commitTemplateResponse{
+		common.WriteAPI(c, &commitTemplateResponse{
 			Res: &types.Res{
 				RequestID: req.RequestID,
 				Ret:       &types.Ret{RetCode: code, RetMsg: err.Error()},
@@ -150,7 +149,7 @@ func handleSandboxCommitAction(c *gin.Context) {
 	}
 	rt.RequestID = req.RequestID
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
-	common.WriteResponse(c.Writer, http.StatusOK, &commitTemplateResponse{
+	common.WriteAPI(c, &commitTemplateResponse{
 		Res: &types.Res{
 			RequestID: req.RequestID,
 			Ret:       &types.Ret{RetCode: int(errorcode.ErrorCode_Success), RetMsg: "success"},
@@ -177,7 +176,7 @@ func handleTemplateBuildStatusAction(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
 	buildID := strings.TrimSpace(c.Param("build_id"))
 	if buildID == "" {
-		common.WriteResponse(c.Writer, http.StatusOK, &templateBuildStatusResponse{
+		common.WriteAPI(c, &templateBuildStatusResponse{
 			Res: &types.Res{Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  "build_id is required",
@@ -191,7 +190,7 @@ func handleTemplateBuildStatusAction(c *gin.Context) {
 		if errors.Is(err, templatecenter.ErrTemplateStoreNotInitialized) {
 			code = int(errorcode.ErrorCode_DBError)
 		}
-		common.WriteResponse(c.Writer, http.StatusOK, &templateBuildStatusResponse{
+		common.WriteAPI(c, &templateBuildStatusResponse{
 			Res:     &types.Res{Ret: &types.Ret{RetCode: code, RetMsg: err.Error()}},
 			BuildID: buildID,
 		})
@@ -209,7 +208,7 @@ func handleTemplateBuildStatusAction(c *gin.Context) {
 		message = job.ErrorMessage
 	}
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
-	common.WriteResponse(c.Writer, http.StatusOK, &templateBuildStatusResponse{
+	common.WriteAPI(c, &templateBuildStatusResponse{
 		Res:          &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success), RetMsg: "success"}},
 		BuildID:      buildID,
 		TemplateID:   job.TemplateID,

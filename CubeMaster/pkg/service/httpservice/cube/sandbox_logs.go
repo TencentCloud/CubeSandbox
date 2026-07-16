@@ -6,7 +6,6 @@ package cube
 
 import (
 	"bufio"
-	"net/http"
 	"os"
 	"strconv"
 	"time"
@@ -90,7 +89,7 @@ func handleSandboxLogsAction(c *gin.Context) {
 
 	if req.SandboxID == "" {
 		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
-		common.WriteResponse(c.Writer, http.StatusOK, &SandboxLogsRes{
+		common.WriteAPI(c, &SandboxLogsRes{
 			Res: &types.Res{
 				Ret: &types.Ret{
 					RetCode: int(errorcode.ErrorCode_MasterParamsError),
@@ -113,7 +112,7 @@ func handleSandboxLogsAction(c *gin.Context) {
 	if err != nil {
 		CubeLog.Errorf("readShimLogs sandboxID=%s err=%v", req.SandboxID, err)
 		rt.RetCode = int64(errorcode.ErrorCode_MasterInternalError)
-		common.WriteResponse(c.Writer, http.StatusOK, &SandboxLogsRes{
+		common.WriteAPI(c, &SandboxLogsRes{
 			Res: &types.Res{
 				Ret: &types.Ret{
 					RetCode: int(errorcode.ErrorCode_MasterInternalError),
@@ -125,7 +124,7 @@ func handleSandboxLogsAction(c *gin.Context) {
 	}
 
 	rt.RetCode = 0
-	common.WriteResponse(c.Writer, http.StatusOK, &SandboxLogsRes{
+	common.WriteAPI(c, &SandboxLogsRes{
 		Res: &types.Res{
 			Ret: &types.Ret{RetCode: 0, RetMsg: ""},
 		},

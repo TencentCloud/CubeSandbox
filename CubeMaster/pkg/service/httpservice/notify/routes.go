@@ -5,8 +5,6 @@
 package notify
 
 import (
-	"net/http"
-
 	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
@@ -26,7 +24,7 @@ func hostChangeGinHandler(c *gin.Context) {
 	req := &types.HostChangeEvent{}
 	if err := common.GetBodyReq(c.Request, req); err != nil {
 		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
-		common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
+		common.WriteAPI(c, &types.Res{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  err.Error(),
@@ -40,10 +38,12 @@ func hostChangeGinHandler(c *gin.Context) {
 	}))
 	rsp := hostChangeNotify(ctx, req)
 	rt.RetCode = int64(rsp.Ret.RetCode)
-	common.WriteResponse(c.Writer, http.StatusOK, rsp)
+	common.WriteAPI(c, rsp)
 }
 
 func healthCheckGinHandler(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
 	rsp := healthCheck(c.Request)
-	common.WriteResponse(c.Writer, http.StatusOK, rsp)
+	rt.RetCode = int64(rsp.Ret.RetCode)
+	common.WriteAPI(c, rsp)
 }

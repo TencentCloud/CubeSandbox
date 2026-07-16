@@ -5,8 +5,6 @@
 package cube
 
 import (
-	"net/http"
-
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
@@ -21,20 +19,11 @@ import (
 
 func handleSandboxTimeoutAction(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
-	if c.Request.Method != http.MethodPost {
-		common.WriteResponse(c.Writer, http.StatusOK, &types.SetTimeoutRes{
-			Ret: &types.Ret{
-				RetCode: int(errorcode.ErrorCode_MasterParamsError),
-				RetMsg:  http.StatusText(http.StatusMethodNotAllowed),
-			},
-		})
-		return
-	}
 
 	req := &types.SetTimeoutRequest{}
 	if err := utils.DecodeHttpBody(c.Request.Body, req); err != nil {
 		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
-		common.WriteResponse(c.Writer, http.StatusOK, &types.SetTimeoutRes{
+		common.WriteAPI(c, &types.SetTimeoutRes{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  err.Error(),
@@ -61,25 +50,16 @@ func handleSandboxTimeoutAction(c *gin.Context) {
 	if res != nil && res.Ret != nil {
 		rt.RetCode = int64(res.Ret.RetCode)
 	}
-	common.WriteResponse(c.Writer, http.StatusOK, res)
+	common.WriteAPI(c, res)
 }
 
 func handleSandboxRefreshAction(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
-	if c.Request.Method != http.MethodPost {
-		common.WriteResponse(c.Writer, http.StatusOK, &types.RefreshSandboxRes{
-			Ret: &types.Ret{
-				RetCode: int(errorcode.ErrorCode_MasterParamsError),
-				RetMsg:  http.StatusText(http.StatusMethodNotAllowed),
-			},
-		})
-		return
-	}
 
 	req := &types.RefreshSandboxRequest{}
 	if err := utils.DecodeHttpBody(c.Request.Body, req); err != nil {
 		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
-		common.WriteResponse(c.Writer, http.StatusOK, &types.RefreshSandboxRes{
+		common.WriteAPI(c, &types.RefreshSandboxRes{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  err.Error(),
@@ -106,5 +86,5 @@ func handleSandboxRefreshAction(c *gin.Context) {
 	if res != nil && res.Ret != nil {
 		rt.RetCode = int64(res.Ret.RetCode)
 	}
-	common.WriteResponse(c.Writer, http.StatusOK, res)
+	common.WriteAPI(c, res)
 }

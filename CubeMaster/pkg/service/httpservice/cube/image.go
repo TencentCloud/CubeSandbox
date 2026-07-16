@@ -33,7 +33,7 @@ func handleImageAction(c *gin.Context) {
 		req := &types.CreateImageReq{}
 		if err := utils.DecodeHttpBody(c.Request.Body, req); err != nil {
 			rsp.Ret.RetMsg = err.Error()
-			common.WriteResponse(c.Writer, http.StatusOK, rsp)
+			common.WriteAPI(c, rsp)
 			return
 		}
 		rt.RequestID = req.RequestID
@@ -50,7 +50,7 @@ func handleImageAction(c *gin.Context) {
 		req := &types.DeleteImageReq{}
 		if err := utils.DecodeHttpBody(c.Request.Body, req); err != nil {
 			rsp.Ret.RetMsg = err.Error()
-			common.WriteResponse(c.Writer, http.StatusOK, rsp)
+			common.WriteAPI(c, rsp)
 			return
 		}
 		rt.RequestID = req.RequestID
@@ -64,5 +64,5 @@ func handleImageAction(c *gin.Context) {
 		}))
 		rsp = sandbox.DeleteImage(CubeLog.WithRequestTrace(ctx, rt), req)
 	}
-	common.WriteResponse(c.Writer, http.StatusOK, rsp)
+	common.WriteAPI(c, rsp)
 }

@@ -5,8 +5,6 @@
 package cube
 
 import (
-	"net/http"
-
 	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
@@ -35,7 +33,7 @@ func handleListInventoryAction(c *gin.Context) {
 	if err := utils.DecodeHttpBody(c.Request.Body, req); err != nil {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
 		rsp.Ret.RetMsg = err.Error()
-		common.WriteResponse(c.Writer, http.StatusOK, rsp)
+		common.WriteAPI(c, rsp)
 		return
 	}
 
@@ -89,7 +87,7 @@ func handleListInventoryAction(c *gin.Context) {
 		rsp.Data = append(rsp.Data, v)
 	}
 	log.G(ctx).Infof("handleListInventoryAction success:%s", utils.InterfaceToString(rsp))
-	common.WriteResponse(c.Writer, http.StatusOK, rsp)
+	common.WriteAPI(c, rsp)
 }
 
 func mergeInventory(all map[string]*types.InstanceTypeQuotaItem, in *types.InstanceTypeQuotaItem) {

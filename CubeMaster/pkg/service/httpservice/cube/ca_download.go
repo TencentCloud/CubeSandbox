@@ -54,22 +54,13 @@ var caServableFiles = map[string]struct{}{
 // natural place to add it.
 func handleCADownloadAction(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
-	if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
-		common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
-			Ret: &types.Ret{
-				RetCode: int(errorcode.ErrorCode_MasterParamsError),
-				RetMsg:  http.StatusText(http.StatusMethodNotAllowed),
-			},
-		})
-		return
-	}
 
 	// The filename is a gin path param (:filename), so it is already a
 	// single path segment; the allow-list below is the real boundary and
 	// rejects anything not on the documented list.
 	requested := c.Param("filename")
 	if _, ok := caServableFiles[requested]; !ok {
-		common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
+		common.WriteAPI(c, &types.Res{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_NotFound),
 				RetMsg:  http.StatusText(http.StatusNotFound),
@@ -90,7 +81,7 @@ func handleCADownloadAction(c *gin.Context) {
 		if errors.Is(err, os.ErrNotExist) {
 			retCode = int(errorcode.ErrorCode_NotFound)
 		}
-		common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
+		common.WriteAPI(c, &types.Res{
 			Ret: &types.Ret{
 				RetCode: retCode,
 				RetMsg:  err.Error(),
@@ -102,7 +93,7 @@ func handleCADownloadAction(c *gin.Context) {
 
 	stat, err := f.Stat()
 	if err != nil {
-		common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
+		common.WriteAPI(c, &types.Res{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterInternalError),
 				RetMsg:  err.Error(),

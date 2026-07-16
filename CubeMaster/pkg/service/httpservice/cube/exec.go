@@ -29,7 +29,7 @@ func handleExecAction(c *gin.Context) {
 	req := &types.ExecRequest{}
 	if err := utils.DecodeHttpBody(c.Request.Body, req); err != nil {
 		rsp.Ret.RetMsg = err.Error()
-		common.WriteResponse(c.Writer, http.StatusOK, rsp)
+		common.WriteAPI(c, rsp)
 		return
 	}
 	rt.RequestID = req.RequestID
@@ -42,5 +42,5 @@ func handleExecAction(c *gin.Context) {
 		"InstanceType": req.InstanceType,
 	}))
 	rsp = sandbox.Exec(CubeLog.WithRequestTrace(ctx, rt), req)
-	common.WriteResponse(c.Writer, http.StatusOK, rsp)
+	common.WriteAPI(c, rsp)
 }

@@ -41,14 +41,14 @@ func handleTemplateCompatAction(c *gin.Context) {
 		matrix, err := templatecenter.GetCompatMatrix(c.Request.Context())
 		if err != nil {
 			rt.RetCode = int64(errorcode.ErrorCode_Unknown)
-			common.WriteResponse(c.Writer, http.StatusOK, &templateCompatResponse{
+			common.WriteAPI(c, &templateCompatResponse{
 				Res:  &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Unknown), RetMsg: err.Error()}},
 				Data: nil,
 			})
 			return
 		}
 		rt.RetCode = int64(errorcode.ErrorCode_Success)
-		common.WriteResponse(c.Writer, http.StatusOK, &templateCompatResponse{
+		common.WriteAPI(c, &templateCompatResponse{
 			Res:  &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success), RetMsg: "success"}},
 			Data: matrix,
 		})
@@ -57,7 +57,7 @@ func handleTemplateCompatAction(c *gin.Context) {
 		req := &templateCompatActionRequest{}
 		if err := common.GetBodyReq(c.Request, req); err != nil {
 			rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
-			common.WriteResponse(c.Writer, http.StatusOK, &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_MasterParamsError), RetMsg: err.Error()}})
+			common.WriteAPI(c, &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_MasterParamsError), RetMsg: err.Error()}})
 			return
 		}
 		switch strings.TrimSpace(req.Action) {
@@ -69,11 +69,11 @@ func handleTemplateCompatAction(c *gin.Context) {
 					retCode = errorcode.ErrorCode_NotFound
 				}
 				rt.RetCode = int64(retCode)
-				common.WriteResponse(c.Writer, http.StatusOK, &types.Res{Ret: &types.Ret{RetCode: int(retCode), RetMsg: err.Error()}})
+				common.WriteAPI(c, &types.Res{Ret: &types.Ret{RetCode: int(retCode), RetMsg: err.Error()}})
 				return
 			}
 			rt.RetCode = int64(errorcode.ErrorCode_Success)
-			common.WriteResponse(c.Writer, http.StatusOK, &templateCompatAdoptResponse{
+			common.WriteAPI(c, &templateCompatAdoptResponse{
 				Res:     &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success), RetMsg: "success"}},
 				Updated: updated,
 			})
@@ -81,24 +81,24 @@ func handleTemplateCompatAction(c *gin.Context) {
 		case "rescan":
 			if !req.AllNodes && len(req.NodeIDs) == 0 {
 				rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
-				common.WriteResponse(c.Writer, http.StatusOK, &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_MasterParamsError), RetMsg: "node_ids is required unless all_nodes is true"}})
+				common.WriteAPI(c, &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_MasterParamsError), RetMsg: "node_ids is required unless all_nodes is true"}})
 				return
 			}
 		default:
 			rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
-			common.WriteResponse(c.Writer, http.StatusOK, &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_MasterParamsError), RetMsg: "unsupported template compat action"}})
+			common.WriteAPI(c, &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_MasterParamsError), RetMsg: "unsupported template compat action"}})
 			return
 		}
 		if err := templatecenter.RescanCompat(c.Request.Context(), req.NodeIDs); err != nil {
 			rt.RetCode = int64(errorcode.ErrorCode_Unknown)
-			common.WriteResponse(c.Writer, http.StatusOK, &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Unknown), RetMsg: err.Error()}})
+			common.WriteAPI(c, &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Unknown), RetMsg: err.Error()}})
 			return
 		}
 		rt.RetCode = int64(errorcode.ErrorCode_Success)
-		common.WriteResponse(c.Writer, http.StatusOK, &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success), RetMsg: "success"}})
+		common.WriteAPI(c, &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success), RetMsg: "success"}})
 		return
 	default:
 		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
-		common.WriteResponse(c.Writer, http.StatusOK, &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_MasterParamsError), RetMsg: http.StatusText(http.StatusMethodNotAllowed)}})
+		common.WriteAPI(c, &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_MasterParamsError), RetMsg: http.StatusText(http.StatusMethodNotAllowed)}})
 	}
 }

@@ -7,15 +7,16 @@ import "github.com/gin-gonic/gin"
 
 // RegisterCubeRoutes registers all /cube routes onto the given gin.RouterGroup.
 // The method/path registrations preserve parity with the previous observable
-// behavior of the gorilla/mux wiring in server.go. Two intentional deltas from
+// behavior of the gorilla/mux wiring in server.go. One intentional delta from
 // a literal mux mirror:
 //
 //   - GET /cube/snapshot/storage is registered as an explicit static route
 //     (ahead of /cube/snapshot/:snapshot_id), so the storage listing is never
 //     shadowed by the param + method switch — safer than the mux approach of
 //     parsing the path inside a single handler.
-//   - mux's POST /internal/fake_create is NOT registered here; it lives in the
-//     inner router (see the inner package).
+//
+// (mux's POST /internal/fake_create is registered in the inner router, not here
+// — see the inner package.)
 func RegisterCubeRoutes(g *gin.RouterGroup) {
 	// Sandbox CRUD
 	g.POST(SandboxAction, handleSandboxAction)

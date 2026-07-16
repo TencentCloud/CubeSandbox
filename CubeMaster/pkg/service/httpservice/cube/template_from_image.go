@@ -39,23 +39,14 @@ func handleTemplateFromImageAction(c *gin.Context) {
 			},
 		}
 	}
-	common.WriteResponse(c.Writer, http.StatusOK, res)
+	common.WriteAPI(c, res)
 }
 
 func handleRedoTemplateAction(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
-	if c.Request.Method != http.MethodPost {
-		common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
-			Ret: &types.Ret{
-				RetCode: int(errorcode.ErrorCode_MasterParamsError),
-				RetMsg:  http.StatusText(http.StatusMethodNotAllowed),
-			},
-		})
-		return
-	}
 	req := &types.RedoTemplateFromImageReq{}
 	if err := common.GetBodyReq(c.Request, req); err != nil {
-		common.WriteResponse(c.Writer, http.StatusOK, &types.CreateTemplateFromImageRes{
+		common.WriteAPI(c, &types.CreateTemplateFromImageRes{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  err.Error(),
@@ -71,7 +62,7 @@ func handleRedoTemplateAction(c *gin.Context) {
 	}))
 	job, err := redoTemplateFromImageFn(ctx, req, requestBaseURL(c.Request))
 	if err != nil {
-		common.WriteResponse(c.Writer, http.StatusOK, &types.CreateTemplateFromImageRes{
+		common.WriteAPI(c, &types.CreateTemplateFromImageRes{
 			RequestID: req.RequestID,
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
@@ -81,7 +72,7 @@ func handleRedoTemplateAction(c *gin.Context) {
 		return
 	}
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
-	common.WriteResponse(c.Writer, http.StatusOK, &types.CreateTemplateFromImageRes{
+	common.WriteAPI(c, &types.CreateTemplateFromImageRes{
 		RequestID: req.RequestID,
 		Ret: &types.Ret{
 			RetCode: int(errorcode.ErrorCode_Success),
@@ -164,20 +155,11 @@ func getTemplateFromImage(r *http.Request, rt *CubeLog.RequestTrace) interface{}
 
 func handleTemplateArtifactDownloadAction(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
-	if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
-		common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
-			Ret: &types.Ret{
-				RetCode: int(errorcode.ErrorCode_MasterParamsError),
-				RetMsg:  http.StatusText(http.StatusMethodNotAllowed),
-			},
-		})
-		return
-	}
 	artifactID := strings.TrimSpace(c.Request.URL.Query().Get("artifact_id"))
 	token := strings.TrimSpace(c.Request.URL.Query().Get("token"))
 	record, file, err := templatecenter.OpenRootfsArtifact(c.Request.Context(), artifactID, token)
 	if err != nil {
-		common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
+		common.WriteAPI(c, &types.Res{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_NotFound),
 				RetMsg:  err.Error(),
@@ -188,7 +170,7 @@ func handleTemplateArtifactDownloadAction(c *gin.Context) {
 	defer file.Close()
 	stat, err := file.Stat()
 	if err != nil {
-		common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
+		common.WriteAPI(c, &types.Res{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterInternalError),
 				RetMsg:  err.Error(),
@@ -210,18 +192,9 @@ func handleTemplateArtifactDownloadAction(c *gin.Context) {
 
 func handleRootfsArtifactAction(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
-	if c.Request.Method != http.MethodGet {
-		common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
-			Ret: &types.Ret{
-				RetCode: int(errorcode.ErrorCode_MasterParamsError),
-				RetMsg:  http.StatusText(http.StatusMethodNotAllowed),
-			},
-		})
-		return
-	}
 	artifactID := strings.TrimSpace(c.Request.URL.Query().Get("artifact_id"))
 	if artifactID == "" {
-		common.WriteResponse(c.Writer, http.StatusOK, &types.CreateTemplateFromImageRes{
+		common.WriteAPI(c, &types.CreateTemplateFromImageRes{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  "artifact_id is required",
@@ -235,7 +208,7 @@ func handleRootfsArtifactAction(c *gin.Context) {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			code = int(errorcode.ErrorCode_NotFound)
 		}
-		common.WriteResponse(c.Writer, http.StatusOK, &types.CreateTemplateFromImageRes{
+		common.WriteAPI(c, &types.CreateTemplateFromImageRes{
 			Ret: &types.Ret{
 				RetCode: code,
 				RetMsg:  err.Error(),
@@ -244,7 +217,7 @@ func handleRootfsArtifactAction(c *gin.Context) {
 		return
 	}
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
-	common.WriteResponse(c.Writer, http.StatusOK, &types.CreateTemplateFromImageRes{
+	common.WriteAPI(c, &types.CreateTemplateFromImageRes{
 		Ret: &types.Ret{
 			RetCode: int(errorcode.ErrorCode_Success),
 			RetMsg:  "success",

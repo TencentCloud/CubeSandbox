@@ -7,7 +7,6 @@ package cube
 import (
 	"errors"
 	"io"
-	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -39,7 +38,7 @@ func handleInfoAction(c *gin.Context) {
 			}
 		} else {
 			rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
-			common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
+			common.WriteAPI(c, &types.Res{
 				Ret: &types.Ret{
 					RetCode: int(errorcode.ErrorCode_MasterParamsError),
 					RetMsg:  err.Error(),
@@ -59,5 +58,5 @@ func handleInfoAction(c *gin.Context) {
 	}))
 	rsp := sandbox.SandboxInfo(ctx, req)
 	rt.RetCode = int64(rsp.Ret.RetCode)
-	common.WriteResponse(c.Writer, http.StatusOK, rsp)
+	common.WriteAPI(c, rsp)
 }

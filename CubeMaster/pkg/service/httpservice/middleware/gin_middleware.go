@@ -58,7 +58,7 @@ func GinRequestMiddleware() gin.HandlerFunc {
 		defer func() {
 			if err := recover(); err != nil {
 				log.G(ctx).Fatalf("HandlerFunc panic:%s", string(debug.Stack()))
-				common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
+				common.WriteAPI(c, &types.Res{
 					Ret: &types.Ret{
 						RetCode: -1,
 						RetMsg:  http.StatusText(http.StatusInternalServerError),
@@ -85,7 +85,7 @@ func GinRequestMiddleware() gin.HandlerFunc {
 
 		// Mock mode
 		if config.GetConfig().Common.MockHttpDirect {
-			common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
+			common.WriteAPI(c, &types.Res{
 				Ret: &types.Ret{
 					RetCode: int(errorcode.ErrorCode_Success),
 					RetMsg:  errorcode.ErrorCode_Success.String(),
@@ -100,7 +100,7 @@ func GinRequestMiddleware() gin.HandlerFunc {
 		if err := checkAuth(ctx, c.Request); err != nil {
 			status, _ := ret.FromError(err)
 			rt.RetCode = int64(status.Code())
-			common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
+			common.WriteAPI(c, &types.Res{
 				Ret: &types.Ret{
 					RetCode: int(status.Code()),
 					RetMsg:  status.Message(),

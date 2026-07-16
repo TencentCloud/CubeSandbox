@@ -29,17 +29,8 @@ type sandboxPreviewResponse struct {
 }
 
 func handleSandboxPreviewAction(c *gin.Context) {
-	if c.Request.Method != http.MethodPost {
-		common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
-			Ret: &types.Ret{
-				RetCode: int(errorcode.ErrorCode_MasterParamsError),
-				RetMsg:  http.StatusText(http.StatusMethodNotAllowed),
-			},
-		})
-		return
-	}
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
-	common.WriteResponse(c.Writer, http.StatusOK, previewSandbox(c.Request, rt))
+	common.WriteAPI(c, previewSandbox(c.Request, rt))
 }
 
 func previewSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {

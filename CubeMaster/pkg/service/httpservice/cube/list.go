@@ -7,7 +7,6 @@ package cube
 import (
 	"errors"
 	"io"
-	"net/http"
 	"strconv"
 	"strings"
 
@@ -69,7 +68,7 @@ func handleListAction(c *gin.Context) {
 		} else {
 			rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
 			rsp.Ret.RetMsg = err.Error()
-			common.WriteListResponse(c.Writer, http.StatusOK, rsp)
+			common.WriteListAPI(c, rsp)
 			return
 		}
 	}
@@ -84,5 +83,5 @@ func handleListAction(c *gin.Context) {
 		"InstanceType": req.InstanceType,
 	}))
 	rsp = sandbox.ListSandbox(ctx, req)
-	common.WriteListResponse(c.Writer, http.StatusOK, rsp)
+	common.WriteListAPI(c, rsp)
 }

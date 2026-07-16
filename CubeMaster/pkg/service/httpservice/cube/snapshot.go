@@ -148,19 +148,10 @@ func handleSnapshotAction(c *gin.Context) {
 			},
 		}
 	}
-	common.WriteResponse(c.Writer, http.StatusOK, res)
+	common.WriteAPI(c, res)
 }
 func handleSnapshotStorageAction(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
-	if c.Request.Method != http.MethodGet {
-		common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
-			Ret: &types.Ret{
-				RetCode: int(errorcode.ErrorCode_MasterParamsError),
-				RetMsg:  http.StatusText(http.StatusMethodNotAllowed),
-			},
-		})
-		return
-	}
 	refresh := strings.EqualFold(strings.TrimSpace(c.Request.URL.Query().Get("refresh")), "true") ||
 		strings.TrimSpace(c.Request.URL.Query().Get("refresh")) == "1"
 	data, err := listSnapshotStorageFn(c.Request.Context(), refresh)
@@ -179,7 +170,7 @@ func handleSnapshotStorageAction(c *gin.Context) {
 	}
 	rt.RequestID = response.Res.RequestID
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
-	common.WriteResponse(c.Writer, http.StatusOK, response)
+	common.WriteAPI(c, response)
 }
 
 func handleSandboxRollbackAction(c *gin.Context) {
@@ -187,7 +178,7 @@ func handleSandboxRollbackAction(c *gin.Context) {
 	extendSnapshotWriteDeadline(c.Writer)
 	req := &snapshotRollbackRequest{}
 	if err := common.GetBodyReq(c.Request, req); err != nil {
-		common.WriteResponse(c.Writer, http.StatusOK, &operationResponse{
+		common.WriteAPI(c, &operationResponse{
 			Res: &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_MasterParamsError), RetMsg: err.Error()}},
 		})
 		return
@@ -198,7 +189,7 @@ func handleSandboxRollbackAction(c *gin.Context) {
 		req.SandboxID = pathSandboxID
 	}
 	if pathSandboxID != "" && strings.TrimSpace(req.SandboxID) != pathSandboxID {
-		common.WriteResponse(c.Writer, http.StatusOK, &operationResponse{
+		common.WriteAPI(c, &operationResponse{
 			Res: &types.Res{Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  "sandbox_id in path does not match request body",
@@ -207,7 +198,7 @@ func handleSandboxRollbackAction(c *gin.Context) {
 		return
 	}
 	if requestID == "" || strings.TrimSpace(req.SandboxID) == "" || strings.TrimSpace(req.SnapshotID) == "" {
-		common.WriteResponse(c.Writer, http.StatusOK, &operationResponse{
+		common.WriteAPI(c, &operationResponse{
 			Res: &types.Res{Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  "request_id, sandbox_id and snapshot_id are required",
@@ -226,7 +217,7 @@ func handleSandboxRollbackAction(c *gin.Context) {
 	if err != nil {
 		code := snapshotErrorCode(err)
 		rt.RetCode = int64(code)
-		common.WriteResponse(c.Writer, http.StatusOK, &operationResponse{
+		common.WriteAPI(c, &operationResponse{
 			Res: &types.Res{
 				RequestID: requestID,
 				Ret:       &types.Ret{RetCode: code, RetMsg: err.Error()},
@@ -236,7 +227,7 @@ func handleSandboxRollbackAction(c *gin.Context) {
 	}
 	rt.RequestID = requestID
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
-	common.WriteResponse(c.Writer, http.StatusOK, &operationResponse{
+	common.WriteAPI(c, &operationResponse{
 		Res: &types.Res{
 			RequestID: requestID,
 			Ret:       &types.Ret{RetCode: int(errorcode.ErrorCode_Success), RetMsg: "success"},
@@ -262,19 +253,10 @@ func snapshotExecutionContext(parent context.Context, fields map[string]any) (co
 
 func handleSnapshotOperationAction(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
-	if c.Request.Method != http.MethodGet {
-		common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
-			Ret: &types.Ret{
-				RetCode: int(errorcode.ErrorCode_MasterParamsError),
-				RetMsg:  http.StatusText(http.StatusMethodNotAllowed),
-			},
-		})
-		return
-	}
 	operationID := c.Param("operation_id")
 	requestID := requestIDFromQuery(c.Request)
 	if operationID == "" {
-		common.WriteResponse(c.Writer, http.StatusOK, &operationResponse{
+		common.WriteAPI(c, &operationResponse{
 			Res: &types.Res{Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  "operation_id is required",
@@ -286,14 +268,14 @@ func handleSnapshotOperationAction(c *gin.Context) {
 	if err != nil {
 		code := snapshotErrorCode(err)
 		rt.RetCode = int64(code)
-		common.WriteResponse(c.Writer, http.StatusOK, &operationResponse{
+		common.WriteAPI(c, &operationResponse{
 			Res: &types.Res{RequestID: requestID, Ret: &types.Ret{RetCode: code, RetMsg: err.Error()}},
 		})
 		return
 	}
 	rt.RequestID = requestID
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
-	common.WriteResponse(c.Writer, http.StatusOK, &operationResponse{
+	common.WriteAPI(c, &operationResponse{
 		Res:       &types.Res{RequestID: requestID, Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success), RetMsg: "success"}},
 		Operation: operationResourceFromInfo(info),
 	})

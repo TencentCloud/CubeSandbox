@@ -89,7 +89,7 @@ func readyzGinHandler(c *gin.Context) {
 		retCode = int(errorcode.ErrorCode_MasterInternalError)
 		retMsg = "metadata service not ready"
 	}
-	common.WriteResponse(c.Writer, http.StatusOK, &sandboxtypes.Res{
+	common.WriteAPI(c, &sandboxtypes.Res{
 		Ret: &sandboxtypes.Ret{
 			RetCode: retCode,
 			RetMsg:  retMsg,
@@ -108,7 +108,7 @@ func registerNodeGinHandler(c *gin.Context) {
 		writeErr(c.Writer, http.StatusOK, err)
 		return
 	}
-	common.WriteResponse(c.Writer, http.StatusOK, &nodeResponse{
+	common.WriteAPI(c, &nodeResponse{
 		RequestID: req.RequestID,
 		Ret:       successRet(),
 		Data:      data,
@@ -127,7 +127,7 @@ func updateNodeStatusGinHandler(c *gin.Context) {
 		writeErr(c.Writer, http.StatusOK, err)
 		return
 	}
-	common.WriteResponse(c.Writer, http.StatusOK, &nodeResponse{
+	common.WriteAPI(c, &nodeResponse{
 		RequestID: req.RequestID,
 		Ret:       successRet(),
 		Data:      data,
@@ -141,7 +141,7 @@ func getNodeGinHandler(c *gin.Context) {
 		writeErr(c.Writer, http.StatusOK, err)
 		return
 	}
-	common.WriteResponse(c.Writer, http.StatusOK, &nodeResponse{
+	common.WriteAPI(c, &nodeResponse{
 		Ret:  successRet(),
 		Data: data,
 	})
@@ -153,7 +153,7 @@ func listNodesGinHandler(c *gin.Context) {
 		writeErr(c.Writer, http.StatusOK, err)
 		return
 	}
-	common.WriteResponse(c.Writer, http.StatusOK, &nodesResponse{
+	common.WriteAPI(c, &nodesResponse{
 		Ret:  successRet(),
 		Data: data,
 	})
@@ -165,7 +165,7 @@ func versionMatrixGinHandler(c *gin.Context) {
 		writeErr(c.Writer, http.StatusOK, err)
 		return
 	}
-	common.WriteResponse(c.Writer, http.StatusOK, &versionMatrixResponse{
+	common.WriteAPI(c, &versionMatrixResponse{
 		Ret:  successRet(),
 		Data: data,
 	})
@@ -182,7 +182,7 @@ func updateNodeLabelsGinHandler(c *gin.Context) {
 		writeErr(c.Writer, http.StatusOK, err)
 		return
 	}
-	common.WriteResponse(c.Writer, http.StatusOK, &sandboxtypes.Res{
+	common.WriteAPI(c, &sandboxtypes.Res{
 		Ret: successRet(),
 	})
 }
@@ -194,7 +194,7 @@ func deleteNodeLabelGinHandler(c *gin.Context) {
 		writeErr(c.Writer, http.StatusOK, err)
 		return
 	}
-	common.WriteResponse(c.Writer, http.StatusOK, &sandboxtypes.Res{
+	common.WriteAPI(c, &sandboxtypes.Res{
 		Ret: successRet(),
 	})
 }
@@ -215,7 +215,7 @@ func writeIsolation(c *gin.Context, disabled bool) {
 		writeErr(c.Writer, http.StatusOK, err)
 		return
 	}
-	common.WriteResponse(c.Writer, http.StatusOK, &nodeResponse{Ret: successRet(), Data: data})
+	common.WriteAPI(c, &nodeResponse{Ret: successRet(), Data: data})
 }
 
 func successRet() *sandboxtypes.Ret {
