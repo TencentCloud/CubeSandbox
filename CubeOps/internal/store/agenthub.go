@@ -66,6 +66,18 @@ const instanceColumns = `agent_id, sandbox_id, template_id, name, engine, env, m
        wecom_bot_id, wecom_bot_secret,
        last_error, setup_exit_code, base_snapshot_id`
 
+// Pagination defaults for list endpoints. These exist to prevent unbounded
+// full-table scans as t_agenthub_instance and t_agenthub_template grow
+// (review-bot flag: "No LIMIT clause — unbounded full-table scan").
+//
+// DefaultListLimit is used when the caller passes 0 (e.g. legacy callers
+// or omitted query params). MaxListLimit is a hard cap to prevent an
+// adversarial client from pulling millions of rows in a single request.
+const (
+	DefaultListLimit = 50
+	MaxListLimit     = 200
+)
+
 // UpsertInstance inserts or updates an agent instance record.
 // Matches the old Rust upsert_instance SQL exactly.
 func (s *Store) UpsertInstance(ctx context.Context, inst *AgentInstance) error {
@@ -147,10 +159,20 @@ func (s *Store) UpsertInstance(ctx context.Context, inst *AgentInstance) error {
 	).Error
 }
 
-// ListInstances returns all non-deleted agent instances.
-func (s *Store) ListInstances(ctx context.Context) ([]AgentInstance, error) {
+// ListInstances returns a page of non-deleted agent instances, ordered by
+// created_at DESC, id DESC. limit must be > 0; offset must be >= 0.
+// Callers should cap limit to avoid OOM on large tables — see
+// DefaultListLimit / MaxListLimit.
+func (s *Store) ListInstances(ctx context.Context, limit, offset int) ([]AgentInstance, error) {
+	if limit <= 0 {
+		limit = DefaultListLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := s.db.WithContext(ctx).Raw(
-		`SELECT ` + instanceColumns + ` FROM t_agenthub_instance WHERE deleted_at IS NULL ORDER BY created_at DESC, id DESC`,
+		`SELECT `+instanceColumns+` FROM t_agenthub_instance WHERE deleted_at IS NULL ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+		limit, offset,
 	).Rows()
 	if err != nil {
 		return nil, fmt.Errorf("list instances: %w", err)
@@ -443,15 +465,25 @@ type AgentTemplate struct {
 	CreatedAt        *string `json:"createdAt"`
 }
 
-// ListAgentTemplates returns all agent templates.
-func (s *Store) ListAgentTemplates(ctx context.Context) ([]AgentTemplate, error) {
+// ListAgentTemplates returns a page of non-deleted agent templates,
+// ordered by created_at DESC, id DESC. limit must be > 0; offset must be
+// >= 0. See DefaultListLimit / MaxListLimit for caller guidance.
+func (s *Store) ListAgentTemplates(ctx context.Context, limit, offset int) ([]AgentTemplate, error) {
+	if limit <= 0 {
+		limit = DefaultListLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := s.db.WithContext(ctx).Raw(
 		`SELECT template_id, name, source_agent_id, source_snapshot_id,
 		        source_sandbox_id, model, version, persistence_mode,
 		        recommended, created_at
 		 FROM t_agenthub_template
 		 WHERE deleted_at IS NULL
-		 ORDER BY created_at DESC, id DESC`,
+		 ORDER BY created_at DESC, id DESC
+		 LIMIT ? OFFSET ?`,
+		limit, offset,
 	).Rows()
 	if err != nil {
 		return nil, fmt.Errorf("list templates: %w", err)

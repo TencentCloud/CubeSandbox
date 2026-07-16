@@ -55,7 +55,7 @@ func TestStore_InstanceCRUD(t *testing.T) {
 	}
 
 	// 3. List should include it.
-	list, err := s.ListInstances(ctx)
+	list, err := s.ListInstances(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("ListInstances: %v", err)
 	}
@@ -68,6 +68,31 @@ func TestStore_InstanceCRUD(t *testing.T) {
 	}
 	if !found {
 		t.Error("agent-test-1 not found in ListInstances")
+	}
+
+	// 3a. ListInstances pagination: limit=0 should fall back to
+	// DefaultListLimit, and a tight limit should cap the result.
+	page, err := s.ListInstances(ctx, 1, 0)
+	if err != nil {
+		t.Fatalf("ListInstances(1, 0): %v", err)
+	}
+	if len(page) != 1 {
+		t.Errorf("ListInstances(limit=1) returned %d rows, want 1", len(page))
+	}
+	page, err = s.ListInstances(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("ListInstances(0, 0): %v", err)
+	}
+	if len(page) > store.DefaultListLimit {
+		t.Errorf("ListInstances(limit=0) returned %d rows, want <= DefaultListLimit (%d)", len(page), store.DefaultListLimit)
+	}
+	// Negative offset must be clamped to 0, not error.
+	page, err = s.ListInstances(ctx, 0, -5)
+	if err != nil {
+		t.Fatalf("ListInstances(0, -5): %v", err)
+	}
+	if len(page) == 0 {
+		t.Error("ListInstances with negative offset should still return rows, got 0")
 	}
 
 	// 4. UpdateStatus.
@@ -190,7 +215,7 @@ func TestStore_AgentTemplate(t *testing.T) {
 	}
 
 	// ListAgentTemplates.
-	list, err := s.ListAgentTemplates(ctx)
+	list, err := s.ListAgentTemplates(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("ListAgentTemplates: %v", err)
 	}
@@ -203,6 +228,22 @@ func TestStore_AgentTemplate(t *testing.T) {
 	}
 	if !found {
 		t.Error("tpl-test-2 not found in ListAgentTemplates")
+	}
+
+	// ListAgentTemplates pagination: same bounds as ListInstances.
+	page, err := s.ListAgentTemplates(ctx, 1, 0)
+	if err != nil {
+		t.Fatalf("ListAgentTemplates(1, 0): %v", err)
+	}
+	if len(page) != 1 {
+		t.Errorf("ListAgentTemplates(limit=1) returned %d rows, want 1", len(page))
+	}
+	page, err = s.ListAgentTemplates(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("ListAgentTemplates(0, 0): %v", err)
+	}
+	if len(page) > store.DefaultListLimit {
+		t.Errorf("ListAgentTemplates(limit=0) returned %d rows, want <= DefaultListLimit (%d)", len(page), store.DefaultListLimit)
 	}
 
 	// DeleteAgentTemplate.

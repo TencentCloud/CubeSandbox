@@ -592,6 +592,27 @@ func (h *SDKHandler) GetSandbox(c *gin.Context) {
 		httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 		return
 	}
+
+	// Map CubeMaster's ret_code to HTTP status. The previous version
+	// skipped this and returned 200 + null body whenever the sandbox
+	// wasn't found, which violated REST conventions and confused SDK
+	// clients (review-bot flag: "Test gap: Confirms existing bug rather
+	// than correct behavior"). Matches the ret_code handling used by
+	// CreateSandbox and other SDK handlers above.
+	var env cmEnvelope
+	if err := json.Unmarshal(raw, &env); err == nil && env.Ret != nil && env.Ret.RetCode != 0 && env.Ret.RetCode != 200 {
+		msg := env.Ret.RetMsg
+		switch env.Ret.RetCode {
+		case 130404, 404:
+			httputil.WriteError(c, http.StatusNotFound, msg)
+		case 130409:
+			httputil.WriteError(c, http.StatusConflict, msg)
+		default:
+			httputil.WriteError(c, http.StatusBadGateway, fmt.Sprintf("cubemaster error %d: %s", env.Ret.RetCode, msg))
+		}
+		return
+	}
+
 	transformed := transformSandboxDetail(raw)
 	httputil.WriteJSON(c, http.StatusOK, transformed)
 }

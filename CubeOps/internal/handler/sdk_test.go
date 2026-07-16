@@ -120,18 +120,26 @@ func TestSDK_GetSandbox_Success(t *testing.T) {
 func TestSDK_GetSandbox_NotFoundInCM(t *testing.T) {
 	cm := &fakeCM{
 		getSandbox: func(_ context.Context, _, _ string) (json.RawMessage, error) {
-			// CubeMaster returns ret_code 130404 → handler maps to 404.
+			// CubeMaster returns ret_code 130404 → handler must map to HTTP 404
+			// (review-bot flag: the previous version returned 200 + null body,
+			// which violated REST conventions and the existing-test was
+			// asserting the buggy "existing behavior" rather than the fix).
 			return raw(`{"ret": {"ret_code": 130404, "ret_msg": "sandbox not found"}, "data": []}`), nil
 		},
 	}
 	r := newSDKRouter(t, cm)
 
 	w := httptestRecorder(t, r, "GET", "/api/v1/sdk/sandboxes/nope")
-	if w.Code != http.StatusBadGateway {
-		// GetSandbox uses transformSandboxDetail which returns nil for empty
-		// data; the handler then returns 200 with nil body. This is the
-		// existing behavior — we just verify it doesn't panic.
-		t.Logf("status = %d (transformSandboxDetail returns nil for empty data; existing behavior)", w.Code)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 (ret_code 130404 must map to NotFound); body=%s", w.Code, w.Body.String())
+	}
+	// Body should carry the CubeMaster ret_msg so the client sees the cause.
+	var body map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal body: %v body=%s", err, w.Body.String())
+	}
+	if got, _ := body["error"].(string); got != "sandbox not found" {
+		t.Errorf("error = %q, want %q (CubeMaster ret_msg must surface in the response)", got, "sandbox not found")
 	}
 }
 

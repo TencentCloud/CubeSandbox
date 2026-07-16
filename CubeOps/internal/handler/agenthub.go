@@ -19,7 +19,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/crypto"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/httputil"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/redact"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
+	"gorm.io/gorm"
 )
 
 const openclawUIPort = 18789
@@ -313,8 +315,13 @@ func (h *AgentHubHandler) Register(r *gin.RouterGroup) {
 }
 
 // ListInstances handles GET /agenthub/instances.
+//
+// Supports pagination via ?limit= and ?offset= query params. limit is
+// capped at store.MaxListLimit (200) to prevent OOM on large tables.
+// limit <= 0 or missing falls back to store.DefaultListLimit (50).
 func (h *AgentHubHandler) ListInstances(c *gin.Context) {
-	instances, err := h.store.ListInstances(c.Request.Context())
+	limit, offset := parsePagination(c)
+	instances, err := h.store.ListInstances(c.Request.Context(), limit, offset)
 	if err != nil {
 		httputil.WriteError(c, http.StatusInternalServerError, "failed to list instances: "+err.Error())
 		return
@@ -364,8 +371,12 @@ func (h *AgentHubHandler) DeleteInstance(c *gin.Context) {
 }
 
 // ListTemplates handles GET /agenthub/templates.
+//
+// Supports pagination via ?limit= and ?offset= query params. See
+// ListInstances for the cap and default behaviour.
 func (h *AgentHubHandler) ListTemplates(c *gin.Context) {
-	templates, err := h.store.ListAgentTemplates(c.Request.Context())
+	limit, offset := parsePagination(c)
+	templates, err := h.store.ListAgentTemplates(c.Request.Context(), limit, offset)
 	if err != nil {
 		httputil.WriteError(c, http.StatusInternalServerError, "failed to list templates: "+err.Error())
 		return
@@ -941,9 +952,12 @@ func (h *AgentHubHandler) CreateInstance(c *gin.Context) {
 		cmReq["distribution_scope"] = scope
 	}
 
-	// Debug: log the request
-	if reqJSON, err := json.Marshal(cmReq); err == nil {
-		slog.Info("CreateSandbox request", "body", string(reqJSON))
+	// Debug: log the request. Use redact.JSON so credential-shaped fields
+	// (e.g. cube_network_config's egress rule "secret" carrying the LLM
+	// API key) are masked before reaching the log aggregation system.
+	// We log at Debug, not Info, so the body is off by default in prod.
+	if reqJSON, err := redact.JSON(cmReq); err == nil {
+		slog.Debug("CreateSandbox request", "body", string(reqJSON))
 	}
 
 	sandboxResp, err := h.cm.CreateSandbox(c.Request.Context(), cmReq)
@@ -2013,33 +2027,52 @@ func (h *AgentHubHandler) PublishTemplate(c *gin.Context) {
 		persistenceModePtr = inst.PersistenceMode
 	}
 
-	// INSERT into t_agenthub_template with all required fields (matches old Rust publish_template).
-	err = h.store.DB().WithContext(ctx).Exec(
-		`INSERT INTO t_agenthub_template (
-		  template_id, name, source_agent_id, source_snapshot_id, source_sandbox_id,
-		  model, version, persistence_mode, recommended, deleted_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
-		ON DUPLICATE KEY UPDATE
-		  name = VALUES(name), source_agent_id = VALUES(source_agent_id),
-		  source_snapshot_id = VALUES(source_snapshot_id), source_sandbox_id = VALUES(source_sandbox_id),
-		  model = VALUES(model), version = VALUES(version),
-		  persistence_mode = VALUES(persistence_mode), deleted_at = NULL`,
-		templateID, templateName, agentID, snapshotID, inst.SandboxID,
-		inst.Model, inst.Version, persistenceModePtr,
-	).Error
-	if err != nil {
-		httputil.WriteError(c, http.StatusInternalServerError, "failed to publish template: "+err.Error())
+	// Wrap the template INSERT and the snapshot.published_template_id UPDATE
+	// in a single transaction so the two records stay consistent.
+	//
+	// Review-bot flag (cubesandboxbot): the previous version discarded the
+	// UPDATE error with `_ = ... .Error`, leaving t_agenthub_template rows
+	// with no back-link to their source snapshot. Either the template and
+	// snapshot link are both committed, or neither is.
+	txErr := h.store.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// INSERT into t_agenthub_template with all required fields
+		// (matches old Rust publish_template).
+		if err := tx.Exec(
+			`INSERT INTO t_agenthub_template (
+			  template_id, name, source_agent_id, source_snapshot_id, source_sandbox_id,
+			  model, version, persistence_mode, recommended, deleted_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
+			ON DUPLICATE KEY UPDATE
+			  name = VALUES(name), source_agent_id = VALUES(source_agent_id),
+			  source_snapshot_id = VALUES(source_snapshot_id), source_sandbox_id = VALUES(source_sandbox_id),
+			  model = VALUES(model), version = VALUES(version),
+			  persistence_mode = VALUES(persistence_mode), deleted_at = NULL`,
+			templateID, templateName, agentID, snapshotID, inst.SandboxID,
+			inst.Model, inst.Version, persistenceModePtr,
+		).Error; err != nil {
+			return fmt.Errorf("insert template: %w", err)
+		}
+
+		// Mark snapshot as published (matches old Rust).
+		if err := tx.Exec(
+			`UPDATE t_agenthub_snapshot SET published_template_id = ? WHERE snapshot_id = ? AND deleted_at IS NULL`,
+			templateID, snapshotID,
+		).Error; err != nil {
+			return fmt.Errorf("update snapshot published_template_id: %w", err)
+		}
+		return nil
+	})
+	if txErr != nil {
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to publish template: "+txErr.Error())
 		return
 	}
 
-	// Mark snapshot as published (matches old Rust).
-	_ = h.store.DB().WithContext(ctx).Exec(
-		`UPDATE t_agenthub_snapshot SET published_template_id = ? WHERE snapshot_id = ? AND deleted_at IS NULL`,
-		templateID, snapshotID,
-	).Error
-
-	// Record operation.
-	_ = h.store.RecordOperation(ctx, agentID, inst.SandboxID, "publish_template", "succeeded", "")
+	// Record operation. Best-effort: a failure here doesn't invalidate the
+	// published template, but we log a warning so operators can detect it.
+	if opErr := h.store.RecordOperation(ctx, agentID, inst.SandboxID, "publish_template", "succeeded", ""); opErr != nil {
+		slog.Warn("PublishTemplate: failed to record operation",
+			"agentID", agentID, "templateID", templateID, "err", opErr)
+	}
 
 	httputil.WriteJSON(c, http.StatusCreated, map[string]string{
 		"templateId": templateID,
