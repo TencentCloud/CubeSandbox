@@ -36,7 +36,8 @@ import (
 	_ "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin/binary"
 	_ "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin/rpc"
 	"github.com/tencentcloud/CubeSandbox/cubedb/dao"
-	_ "github.com/tencentcloud/CubeSandbox/cubedb/dao/driver/mysql" // register mysql driver
+	_ "github.com/tencentcloud/CubeSandbox/cubedb/dao/driver/mysql"    // register mysql driver
+	_ "github.com/tencentcloud/CubeSandbox/cubedb/dao/driver/postgres" // register postgres driver
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
