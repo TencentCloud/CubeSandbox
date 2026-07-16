@@ -2,13 +2,19 @@
 """
 snapshot_demo.py - Demonstrate snapshot and rollback capabilities.
 
-This script demonstrates:
-1. Creating snapshots of sandbox state
-2. Creating new sandboxes from snapshots (rollback)
-3. Using snapshots for safe database operations
+Cube Sandbox snapshots capture the entire state of a sandbox (memory + filesystem)
+and persist them even after the sandbox is deleted. This enables:
 
-Note: Snapshots are persistent and survive sandbox deletion.
-You can create a new sandbox from a snapshot using Sandbox.create(snapshot_id).
+- **Safe experimentation**: snapshot before risky operations, restore on failure
+- **Long-running task checkpoints**: save progress and resume later
+- **Branching workflows**: create multiple sandboxes from the same baseline
+- **Database migration safety**: snapshot before migration, rollback if it fails
+
+Usage:
+    python3 snapshot_demo.py
+
+Note: Snapshots persist independently of sandbox lifetime. They survive sandbox
+deletion and can be used to create new sandboxes at any time.
 """
 
 import os
@@ -20,7 +26,7 @@ from e2b_code_interpreter import Sandbox
 
 from env_utils import get_api_key, get_api_url, get_env, get_ssl_cert_file, get_template_id
 
-# Set environment variables for the sandbox
+# Initialize Sandbox SDK credentials.
 os.environ["E2B_API_URL"] = get_api_url()
 os.environ["E2B_API_KEY"] = get_api_key()
 
@@ -35,7 +41,14 @@ print("=" * 60)
 
 
 def demo_snapshot_workflow():
-    """Demonstrate basic snapshot workflow."""
+    """Demonstrate basic snapshot workflow: create, modify, rollback.
+
+    This demo shows:
+    1. Create a sandbox and write some initial state
+    2. Create a snapshot (captures current state)
+    3. Modify the state (simulating a risky operation)
+    4. Create a NEW sandbox from the snapshot — it has the original state
+    """
     print("\n" + "-" * 40)
     print("Snapshot Workflow Demo")
     print("-" * 40)
@@ -49,7 +62,7 @@ def demo_snapshot_workflow():
     with Sandbox.create(**create_kwargs) as sandbox:
         print("[2] Sandbox created!")
 
-        # Step 1: Setup initial state
+        # Step 1: Write some initial state to a file.
         print("\n[3] Setting up initial state...")
         sandbox.commands.run("echo 'initial state' > /tmp/app_state.txt")
         sandbox.commands.run("echo 'version: 1.0' >> /tmp/app_state.txt")
@@ -57,17 +70,19 @@ def demo_snapshot_workflow():
         result = sandbox.commands.run("cat /tmp/app_state.txt")
         print(f"    Initial state:\n{result.stdout}")
 
-        # Step 2: Create snapshot of initial state
+        # Step 2: Snapshot the current state.
+        # The snapshot captures memory + filesystem at this moment.
         print("\n[4] Creating snapshot of initial state...")
         try:
             snapshot = sandbox.create_snapshot()
             snapshot_id = snapshot.snapshot_id
             print(f"    ✓ Snapshot created: {snapshot_id}")
         except Exception as e:
+            # Snapshot creation may fail due to resource limits or permissions.
             print(f"    Note: Snapshot failed: {e}")
             return
 
-        # Step 3: Modify state
+        # Step 3: Modify the state — simulating a risky operation.
         print("\n[5] Modifying state (simulating dangerous operation)...")
         sandbox.commands.run("echo 'version: 2.0' > /tmp/app_state.txt")
         sandbox.commands.run("echo 'modified by user' >> /tmp/app_state.txt")
@@ -75,7 +90,8 @@ def demo_snapshot_workflow():
         result = sandbox.commands.run("cat /tmp/app_state.txt")
         print(f"    Modified state:\n{result.stdout}")
 
-    # Step 4: Create new sandbox from snapshot (rollback)
+    # Step 4: Create a NEW sandbox from the snapshot.
+    # This sandbox starts in the exact state from when the snapshot was taken.
     print(f"\n[6] Creating new sandbox from snapshot {snapshot_id[:20]}...")
 
     try:
@@ -83,7 +99,7 @@ def demo_snapshot_workflow():
             result = restored_sandbox.commands.run("cat /tmp/app_state.txt")
             print(f"    State in restored sandbox:\n{result.stdout}")
 
-            if "initial state" in result.stdout:
+            if "initial state" in result.stdout and "version: 1.0" in result.stdout:
                 print("\n    ✓ Rollback successful! State restored from snapshot.")
             else:
                 print("\n    Note: State differs from expected.")
@@ -92,7 +108,17 @@ def demo_snapshot_workflow():
 
 
 def demo_safe_database_operations():
-    """Demonstrate safe database operations with snapshots."""
+    """Demonstrate snapshot-based safety for database migrations.
+
+    This demo shows how to safely test database changes:
+    1. Snapshot the current database schema (export via mysqldump)
+    2. Apply the migration
+    3. If the migration fails or causes issues, restore from snapshot
+
+    Note: This snapshots the sandbox filesystem, not the database itself.
+    For full database snapshot/restore, use database-native tools like
+    mysqldump or point-in-time recovery.
+    """
     print("\n" + "-" * 40)
     print("Safe Database Operations Demo")
     print("-" * 40)
@@ -116,11 +142,11 @@ def demo_safe_database_operations():
     with Sandbox.create(**create_kwargs) as sandbox:
         print("[2] Sandbox created!")
 
-        # Setup workspace
+        # Setup a workspace directory for SQL files.
         print("\n[3] Preparing SQL workspace...")
         sandbox.commands.run("mkdir -p /srv/sql")
 
-        # Save initial schema
+        # Save initial schema to a file (simple export without mysqldump).
         print("\n[4] Saving initial schema...")
         sandbox.commands.run("""
 cat > /srv/sql/schema.sql << 'EOF'
@@ -134,7 +160,7 @@ EOF
 """)
         print("    ✓ Schema saved")
 
-        # Create snapshot before risky operation
+        # Create a snapshot before applying any changes.
         print("\n[5] Creating pre-operation snapshot...")
         try:
             pre_snapshot = sandbox.create_snapshot()
@@ -143,17 +169,17 @@ EOF
             print(f"    Note: {e}")
             return
 
-        # Perform risky update
-        print("\n[6] Simulating schema migration...")
+        # Prepare the migration script.
+        print("\n[6] Preparing schema migration script...")
         sandbox.commands.run("""
 cat > /srv/sql/migration.sql << 'EOF'
--- Risky migration
+-- Risky migration: add a new column
 ALTER TABLE products ADD COLUMN description TEXT;
 EOF
 """)
         print("    ✓ Migration script prepared")
 
-    # Restore from snapshot (rollback)
+    # Restore from snapshot (rollback to safe state).
     print("\n[7] Rolling back to safe state...")
     try:
         with Sandbox.create(pre_snapshot.snapshot_id) as restored:
@@ -165,7 +191,11 @@ EOF
 
 
 def demo_list_snapshots():
-    """Demonstrate listing and using snapshots."""
+    """Demonstrate listing and using existing snapshots.
+
+    This shows how to enumerate all snapshots in the current namespace
+    and how to create a new sandbox from any of them.
+    """
     print("\n" + "-" * 40)
     print("List & Use Snapshots Demo")
     print("-" * 40)
@@ -173,7 +203,8 @@ def demo_list_snapshots():
     print("\n[1] Listing existing snapshots...")
 
     try:
-        # list_snapshots() returns (list[SnapshotInfo], next_token: str | None)
+        # list_snapshots() returns a tuple: (list of SnapshotInfo objects, next_token).
+        # The next_token is used for pagination when many snapshots exist.
         snapshots, next_token = Sandbox.list_snapshots()
         print(f"    Found {len(snapshots)} snapshot(s)")
 

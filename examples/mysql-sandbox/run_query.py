@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-run_query.py - Execute SQL queries against a MySQL database.
+run_query.py - Execute SQL queries against a MySQL database from a sandbox.
 
 This script demonstrates:
-1. Creating a sandbox with environment variables for DB connection
-2. Running SQL queries via mysql client
-3. Handling query results
+1. Creating a sandbox with database credentials injected as environment variables
+2. Running SQL queries via the mysql command-line client
+3. Handling and displaying query results
 
 Prerequisites:
-- A running MySQL server accessible from the sandbox
+- A running MySQL server accessible from the sandbox (see network_isolated.py
+  for how to configure network policies to reach it)
 - Set DB_HOST, DB_USER, DB_PASSWORD environment variables
+
+Usage:
+    python3 run_query.py
 """
 
 import os
@@ -28,14 +32,15 @@ from env_utils import (
     run_mysql_query,
 )
 
-# Set environment variables
+# Configure Sandbox SDK with credentials from environment.
 os.environ["E2B_API_URL"] = get_api_url()
 os.environ["E2B_API_KEY"] = get_api_key()
 
 template_id = get_template_id()
 ssl_cert = get_ssl_cert_file()
 
-# Database configuration (set in .env or export)
+# Database configuration from environment variables.
+# All have sensible defaults for local development.
 db_host = get_env("DB_HOST", "localhost") or "localhost"
 db_user = get_env("DB_USER", "root") or "root"
 db_password = get_env("DB_PASSWORD", "") or ""
@@ -52,13 +57,12 @@ print("=" * 60)
 
 
 def main():
-    """Main test function."""
+    """Run a series of test queries against the configured MySQL server."""
     print("\n[1] Creating sandbox with database credentials...")
 
-    # Create sandbox with database credentials as environment variables.
-    # DB_PASSWORD is mirrored into MYSQL_PWD inside the sandbox so the
-    # mysql client can authenticate without exposing the password on
-    # the command line (`/proc/<pid>/cmdline`, `ps aux`).
+    # Inject credentials as environment variables (not on the command line).
+    # MYSQL_PWD is the standard, secure way to pass the password to the
+    # mysql client without exposing it to /proc/<pid>/cmdline or `ps aux`.
     sandbox_envs = {
         "DB_HOST": db_host,
         "DB_USER": db_user,
@@ -77,7 +81,7 @@ def main():
     with Sandbox.create(**create_kwargs) as sandbox:
         print("[2] Sandbox created successfully!")
 
-        # Test 1: Check MySQL connection
+        # Test 1: Basic connectivity check (works even without a real database).
         print("\n[3] Testing MySQL connection...")
         query = "SELECT 'Connection successful!' AS status"
         stdout = run_mysql_query(sandbox, query)
@@ -87,19 +91,19 @@ def main():
         else:
             print("    Warning: No output received")
 
-        # Test 2: Get MySQL version
+        # Test 2: Get MySQL server version.
         print("\n[4] Getting MySQL server version...")
         query = "SELECT VERSION() AS version"
         stdout = run_mysql_query(sandbox, query)
         print(f"    {stdout.strip() if stdout else '(no output)'}")
 
-        # Test 3: List databases (if user has permission)
+        # Test 3: List accessible databases (requires appropriate privileges).
         print("\n[5] Listing accessible databases...")
         query = "SHOW DATABASES"
         stdout = run_mysql_query(sandbox, query)
         print(f"    {stdout.strip() if stdout else '(no output)'}")
 
-        # Test 4: Run custom query (if DB_NAME is set)
+        # Test 4: List tables in the configured database (if DB_NAME is set).
         if db_name:
             print(f"\n[6] Querying database '{db_name}'...")
             query = "SHOW TABLES"

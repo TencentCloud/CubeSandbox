@@ -261,8 +261,9 @@ E2B_API_KEY="e2b_000000"
 # 必需：模板 ID（从第三步获取）
 CUBE_TEMPLATE_ID="tpl-xxxxxxxxxxxxxxxx"
 
-# 可选：仅当使用 Cube 内置 mkcert 证书时需要
-SSL_CERT_FILE="/root/.local/share/mkcert/rootCA.pem"
+# 可选：仅当使用自定义 CA 证书（如 mkcert 本地 HTTPS）时需要
+# 大多数系统使用默认 CA 包，无需设置此变量
+# SSL_CERT_FILE="/root/.local/share/mkcert/rootCA.pem"
 
 # 可选：MySQL 数据库连接配置
 DB_HOST="localhost"

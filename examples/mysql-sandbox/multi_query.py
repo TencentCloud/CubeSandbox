@@ -1,45 +1,48 @@
 #!/usr/bin/env python3
 """
-multi_query.py - Execute multiple SQL queries in sequence.
+multi_query.py - Execute multiple SQL queries in sequence inside a sandbox.
 
 This script demonstrates:
-1. Executing multiple queries in a sandbox
-2. Handling query results
-3. Batch database operations
+1. Executing multiple queries in a sandboxed MySQL client session
+2. Handling query results and exit codes
+3. Batch database operations (CREATE, INSERT, SELECT)
 
-This is useful for:
-- Database migrations
-- Batch data processing
-- Automated testing
+Use cases:
+- Database migrations with multiple steps
+- Batch data processing and imports
+- Automated testing with setup/teardown
 
 Destructive operations — read before running
 --------------------------------------------
 
-This script **drops the database named in ``DB_NAME``** at the end of the
-run as cleanup. A misconfigured ``DB_NAME`` (e.g. ``production``) can
-therefore destroy unrelated data on a shared MySQL server.
+This script **drops the database named in ``DB_NAME``** at the end as cleanup.
+A misconfigured ``DB_NAME`` (e.g. ``production``) can destroy unrelated data
+on a shared MySQL server.
 
-The DROP is gated by *two* opt-in signals; if either is missing the
-script skips the DROP and only leaves behind the test artifacts in
-``DB_NAME``:
+The DROP is gated by *two* independent opt-in signals; if either is missing the
+script skips the DROP:
 
-1. The ``MYSQL_SANDBOX_ALLOW_DROP`` environment variable must be set
-   to a truthy value (``1`` / ``true`` / ``yes``).
-2. The ``DB_NAME`` value must match the demo prefix
-   ``cube_demo_<suffix>`` (the script also creates the database with
-   that prefix to keep the demo isolated from real schemas).
+1. ``MYSQL_SANDBOX_ALLOW_DROP`` environment variable must be truthy
+   (``1`` / ``true`` / ``yes`` / ``on``).
+2. ``DB_NAME`` must start with the ``cube_demo_`` prefix. This prefix is also
+   prepended automatically, so ``DB_NAME=smoke`` becomes ``cube_demo_smoke``.
+   This prevents the DROP from reaching any schema the operator didn't
+   explicitly authorize.
 
-For non-interactive / CI use, set both explicitly, e.g.::
+Example safe usage::
 
     export DB_NAME="cube_demo_smoke_$(date +%s)"
     export MYSQL_SANDBOX_ALLOW_DROP=1
     python3 multi_query.py
+
+For interactive use, the script also prompts for confirmation before dropping.
 """
 
 import os
 import re
 import sys
 
+# Ensure env_utils can be imported from any working directory.
 sys.path.insert(0, str(__file__).rsplit("/", 1)[0])
 
 from e2b_code_interpreter import Sandbox
@@ -53,49 +56,64 @@ from env_utils import (
     run_mysql_query,
 )
 
-# MySQL identifier limits
+# MySQL has a 64-character limit on identifier lengths (database, table, column names).
 _MYSQL_MAX_IDENT = 64
+# All demo databases are prefixed with this string so the cleanup DROP can never
+# reach a schema the operator didn't explicitly authorize.
 _PREFIX = "cube_demo_"
 _PREFIX_LEN = len(_PREFIX)  # 10 characters
+# Maximum length for the user-provided DB_NAME suffix to stay within the 64-char limit.
 _MAX_SUFFIX_LEN = _MYSQL_MAX_IDENT - _PREFIX_LEN  # 54 characters
 
-# Regex for valid database name: alphanumeric, underscore, dash, dot (MySQL allows these)
+# Valid database name pattern: MySQL allows letters, digits, underscore, dash, dot.
+# Must start with a letter or underscore (MySQL rule).
 _DB_NAME_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_\-.]*$")
 
 
 def _ident(name: str) -> str:
-    """Return ``name`` wrapped in MySQL backticks to safely quote identifiers.
+    """Return ``name`` wrapped in MySQL backticks for safe identifier quoting.
 
     Database, table, and column names that collide with MySQL reserved words
-    or contain special characters need to be quoted. Backtick quoting is the
-    MySQL-native approach; it is NOT the same as SQL-injection mitigation
-    (values should still be passed as prepared-statement parameters), but it
-    prevents accidentally breaking queries when a name happens to match a
-    keyword.
+    (e.g., ``SELECT``, ``TABLE``, ``INDEX``) or contain special characters need
+    to be quoted. Backtick quoting is the MySQL-native approach.
+
+    Note: Backtick quoting is NOT the same as SQL-injection mitigation.
+    User-provided **values** (e.g., in WHERE clauses) should still be passed
+    as parameterized query parameters, not via string concatenation or backtick
+    quoting.
+
+    Args:
+        name: Identifier to quote (database name, table name, column name, etc.).
+
+    Returns:
+        The identifier wrapped in backticks, with any embedded backticks doubled.
     """
     _b = "`"
     return _b + name.replace(_b, _b + _b) + _b
 
 
-# Set environment variables for the sandbox
+# Load required configuration from environment.
 os.environ["E2B_API_URL"] = get_api_url()
 os.environ["E2B_API_KEY"] = get_api_key()
 
 template_id = get_template_id()
 ssl_cert = get_ssl_cert_file()
 
-# Database configuration
+# Database configuration (optional — script works without DB connection).
 db_host = get_env("DB_HOST", "localhost") or "localhost"
 db_user = get_env("DB_USER", "root") or "root"
 db_password = get_env("DB_PASSWORD", "") or ""
 db_name = get_env("DB_NAME", "") or ""
 
+# Validate DB_NAME format before doing anything else.
 if db_name and not _DB_NAME_PATTERN.match(db_name):
     raise ValueError(
         f"Invalid DB_NAME value: {db_name!r}. "
         "Only letters, numbers, underscore, dash, and dot are allowed."
     )
 
+# Check MySQL identifier length: DB_NAME gets prefixed with "cube_demo_",
+# and the full name must fit within MySQL's 64-character limit.
 if db_name and len(db_name) > _MAX_SUFFIX_LEN:
     raise ValueError(
         f"DB_NAME value too long: {db_name!r} ({len(db_name)} chars). "
@@ -103,7 +121,7 @@ if db_name and len(db_name) > _MAX_SUFFIX_LEN:
         f"Please use a DB_NAME with at most {_MAX_SUFFIX_LEN} characters."
     )
 
-# Treat "DROP DATABASE" as a destructive side-effect: it is opt-in.
+# Treat "DROP DATABASE" as a destructive side-effect: both signals are required.
 # See module docstring for the two required signals.
 allow_drop_env = get_env("MYSQL_SANDBOX_ALLOW_DROP", "") or ""
 allow_drop = allow_drop_env.strip().lower() in ("1", "true", "yes", "on")
@@ -120,11 +138,12 @@ print("=" * 60)
 
 
 def main():
-    """Execute multiple queries."""
+    """Execute multiple queries in a sandboxed MySQL client session."""
     print("\n[1] Creating sandbox...")
 
-    # Sandbox reads DB_PASSWORD via MYSQL_PWD so the password never appears
-    # on the command line (`/proc/<pid>/cmdline`, `ps aux`).
+    # Inject DB credentials as environment variables so they never appear on
+    # the command line. MYSQL_PWD is the standard way to pass the password
+    # without exposing it to /proc/<pid>/cmdline or `ps aux`.
     sandbox_envs = {
         "DB_HOST": db_host,
         "DB_USER": db_user,
@@ -142,7 +161,7 @@ def main():
     with Sandbox.create(**create_kwargs) as sandbox:
         print("[2] Sandbox created!")
 
-        # Demo queries (without actual database connection)
+        # Basic sanity checks that work without a database connection.
         demo_queries = [
             ("Check MySQL client", "mysql --version"),
             ("Check connection", "echo 'Connection test'"),
@@ -156,9 +175,9 @@ def main():
                 print(f"    Warning: exit code {result.exit_code}")
             print(f"    {result.stdout.strip() if result.stdout else '(no output)'}")
 
-        # If database is configured, run actual queries. We always work
-        # under a `{_PREFIX}` prefix so the cleanup DROP can never reach
-        # an unrelated schema the operator didn't explicitly authorize.
+        # If both DB_HOST and DB_NAME are set, run actual database queries.
+        # The demo always operates under the "cube_demo_" prefix so that a
+        # misconfigured DB_NAME cannot accidentally affect unrelated schemas.
         if db_host and db_name:
             print("\n[4] Running database queries...")
             demo_db = f"{_PREFIX}{db_name}"
@@ -166,10 +185,8 @@ def main():
             print(f"    Using isolated demo database: '{demo_db}'")
             print(f"    (Derived from DB_NAME='{db_name}' + '{_PREFIX}' prefix)")
 
-            # Identifier quoting: wrap all db/table names in backticks.
-            # This is the MySQL-native way to handle names that collide with
-            # reserved words or contain special characters.  Values (INSERT data)
-            # still use single quotes as usual.
+            # Wrap identifiers in backticks to handle names that collide with
+            # MySQL reserved words or contain special characters.
             q_db = _ident(demo_db)
             queries = [
                 ("Create test database", f"CREATE DATABASE IF NOT EXISTS {q_db}"),
@@ -207,8 +224,8 @@ CREATE TABLE IF NOT EXISTS {q_db}.`users` (
             )
             print(f"    Total users: {stdout.strip() if stdout else '(none)'}")
 
-            # Cleanup — DROP is opt-in. Two independent signals must both
-            # be present before we issue a destructive statement.
+            # Cleanup: DROP DATABASE is destructive — two independent signals
+            # must both be present before we issue it.
             print("\n[6] Cleanup...")
             if not allow_drop:
                 print("    ⊘ Skipping DROP DATABASE (MYSQL_SANDBOX_ALLOW_DROP not set).")
@@ -216,17 +233,17 @@ CREATE TABLE IF NOT EXISTS {q_db}.`users` (
                 print("    To enable auto-cleanup, run:")
                 print('        export MYSQL_SANDBOX_ALLOW_DROP=1  # and use a "cube_demo_" DB_NAME')
             else:
-                # Even with the env var set, refuse to drop a database whose
-                # name does NOT start with `cube_demo_` — this catches the
-                # "user fat-fingered DB_NAME=production" scenario.
+                # Even with the env var set, refuse to drop if the database name
+                # does NOT start with "cube_demo_" — catches the operator
+                # accidentally setting DB_NAME=production.
                 if not demo_db.startswith(_PREFIX):
                     print(
                         f"    ⊘ Refusing to DROP '{demo_db}' — name does not start with 'cube_demo_'."
                     )
                     print("    Aborting cleanup to protect unrelated data.")
                 else:
-                    # Safety gate: show the databases that exist so the
-                    # operator can visually confirm the target before DROP runs.
+                    # Safety gate: list existing databases so the operator can
+                    # visually confirm before the DROP runs.
                     listing = run_mysql_query(sandbox, "SHOW DATABASES", "")
                     print(f"    Databases currently visible:\n{listing}")
                     print(f"    >>> About to DROP DATABASE: {demo_db!r} <<<")

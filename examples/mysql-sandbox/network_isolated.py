@@ -2,27 +2,38 @@
 """
 network_isolated.py - Demonstrate network isolation policies.
 
-This script demonstrates:
-1. Creating a sandbox with network allowlist (only specific CIDRs allowed)
-2. Creating a fully isolated sandbox (no internet access)
-3. Testing network policies
+This script demonstrates three network isolation strategies available in Cube Sandbox:
 
-Network Policy Options:
-- allow_internet_access=False: Completely isolated, no outbound traffic
-- network={"allow_out": ["10.0.0.0/8"]}: Only allow specific private networks
-- network={"deny_out": ["1.2.3.4/32"]}: Block specific IP/CIDR
+1. Full isolation (allow_internet_access=False)
+   - No outbound traffic allowed whatsoever
+   - Suitable for maximum security workloads
+
+2. CIDR allowlist (network={"allow_out": [...]})
+   - Only specified IP ranges can receive outbound connections
+   - Example: private networks only (10.0.0.0/8, 192.168.0.0/16, 172.16.0.0/12)
+   - Public internet is blocked
+
+3. CIDR denylist (network={"deny_out": [...]})
+   - All outbound traffic allowed except specified IP ranges
+   - Less restrictive but more complex to reason about
+
+Usage:
+    python3 network_isolated.py
+
+Note: This script does not require a MySQL server to be running.
 """
 
 import os
 import sys
 
+# Ensure env_utils can be imported regardless of working directory.
 sys.path.insert(0, str(__file__).rsplit("/", 1)[0])
 
 from e2b_code_interpreter import Sandbox
 
 from env_utils import get_api_key, get_api_url, get_env, get_ssl_cert_file, get_template_id
 
-# Set environment variables for the sandbox
+# Initialize Sandbox SDK credentials from environment.
 os.environ["E2B_API_URL"] = get_api_url()
 os.environ["E2B_API_KEY"] = get_api_key()
 
@@ -37,7 +48,11 @@ print("=" * 60)
 
 
 def test_full_isolation():
-    """Test fully isolated sandbox (no internet)."""
+    """Test 1: Fully isolated sandbox with no internet access.
+
+    This demonstrates the most restrictive network policy.
+    Use this when you need to guarantee that no data can leave the sandbox.
+    """
     print("\n" + "-" * 40)
     print("Test 1: Full Network Isolation")
     print("-" * 40)
@@ -46,7 +61,9 @@ def test_full_isolation():
 
     create_kwargs = {
         "template": template_id,
-        "allow_internet_access": False,  # No internet access
+        # No outbound traffic of any kind is allowed.
+        # Even DNS queries to resolve hostnames will fail.
+        "allow_internet_access": False,
     }
     if ssl_cert:
         create_kwargs["envs"] = {"SSL_CERT_FILE": ssl_cert}
@@ -54,8 +71,9 @@ def test_full_isolation():
     with Sandbox.create(**create_kwargs) as sandbox:
         print("[2] Sandbox created with full isolation!")
 
-        # Try to access internet - should fail
-        print("\n[3] Testing internet access (should be blocked)...")
+        # Verify: attempt to reach a public endpoint.
+        # Expected: connection fails (blocked by policy).
+        print("\n[3] Verifying internet access is blocked...")
         result = sandbox.commands.run(
             "curl -s --connect-timeout 5 https://google.com 2>&1 || echo 'BLOCKED: Internet access denied'"
         )
@@ -69,18 +87,24 @@ def test_full_isolation():
 
 
 def test_allowlist():
-    """Test sandbox with CIDR allowlist."""
+    """Test 2: Sandbox with CIDR allowlist (private networks only).
+
+    This demonstrates a more practical isolation policy where only
+    internal/private networks are reachable. Useful for connecting to
+    databases on private infrastructure.
+    """
     print("\n" + "-" * 40)
     print("Test 2: CIDR Allowlist (Internal Networks Only)")
     print("-" * 40)
 
     print("[1] Creating sandbox with allowlist...")
 
-    # Use network parameter for allow_out
+    # Only RFC 1918 private address ranges are allowed.
+    # Anything else (public IPs, including 8.8.8.8 for DNS) is blocked.
     create_kwargs = {
         "template": template_id,
         "network": {
-            "allow_out": ["10.0.0.0/8", "192.168.0.0/16", "172.16.0.0/12"],  # Private networks
+            "allow_out": ["10.0.0.0/8", "192.168.0.0/16", "172.16.0.0/12"],
         },
     }
     if ssl_cert:
@@ -89,14 +113,13 @@ def test_allowlist():
     with Sandbox.create(**create_kwargs) as sandbox:
         print("[2] Sandbox created with CIDR allowlist!")
 
-        # Show allowed networks
         print("\n[3] Allowed outbound networks:")
         print("    - 10.0.0.0/8 (Class A private)")
         print("    - 192.168.0.0/16 (Class B private)")
         print("    - 172.16.0.0/12 (Class C private)")
 
-        # Verify policy: public internet should be blocked
-        print("\n[4] Verifying network policy (public IPs should be blocked)...")
+        # Verify: public internet should be blocked.
+        print("\n[4] Verifying public internet is blocked...")
         result = sandbox.commands.run(
             "curl -s --connect-timeout 5 https://google.com 2>&1 || echo 'BLOCKED'"
         )
@@ -105,39 +128,46 @@ def test_allowlist():
         else:
             print("    ✗ Public internet unexpectedly allowed!")
 
-        # Verify positive: loopback should always work
-        print("\n[5] Verifying loopback connectivity (should work)...")
+        # Verify: loopback is always reachable (never subject to network policy).
+        print("\n[5] Verifying loopback connectivity (always allowed)...")
         result = sandbox.commands.run("ping -c 1 127.0.0.1 --timeout=3 2>&1")
         if result.exit_code == 0:
             print("    ✓ Loopback (127.0.0.1) accessible!")
         else:
             print("    ✗ Loopback not accessible - policy may be too restrictive")
 
-        # Verify positive: private IP in allowlist should be reachable
-        print("\n[6] Verifying private network access (10.0.0.0/8 in allowlist)...")
+        # Verify: private IP in allowlist — traffic is permitted (may still fail
+        # if there's no host at that IP, but the policy allows it).
+        print("\n[6] Verifying private network access (traffic allowed to 10.0.0.0/8)...")
         result = sandbox.commands.run("ping -c 1 10.255.255.1 --timeout=3 2>&1 || echo 'UNREACHABLE'")
-        # Even if ping fails (no host), we verify the traffic was allowed (not blocked by policy)
         if "UNREACHABLE" not in result.stdout and "Destination Host Unreachable" not in result.stdout:
             print("    ✓ Private network traffic allowed!")
         else:
-            print("    Note: Private IPs reachable but no host at 10.255.255.1 (expected in isolated env)")
+            print("    Note: No host at 10.255.255.1, but traffic was policy-permitted")
 
         print("\n    ✓ Sandbox configured with CIDR allowlist!")
 
 
 def test_database_access():
-    """Test database access with network isolation."""
+    """Test 3: Database access with network isolation.
+
+    This demonstrates the recommended setup for production database access:
+    - Only the internal network (where the DB lives) is reachable
+    - Public internet is blocked to prevent data exfiltration
+    - Database credentials are injected as environment variables
+    """
     print("\n" + "-" * 40)
     print("Test 3: Database Access with Isolation")
     print("-" * 40)
 
     print("[1] Creating sandbox for database access...")
 
-    # Example: Allow only database network
     create_kwargs = {
         "template": template_id,
+        # Restrict to internal network only — change this CIDR to match
+        # your actual database server's subnet.
         "network": {
-            "allow_out": ["10.0.0.0/8"],  # Only internal network
+            "allow_out": ["10.0.0.0/8"],
         },
         "envs": {
             "DB_HOST": get_env("DB_HOST", "localhost") or "localhost",
@@ -147,6 +177,7 @@ def test_database_access():
     }
     db_password = get_env("DB_PASSWORD", "") or ""
     if db_password:
+        # Inject password via MYSQL_PWD — never on the command line.
         create_kwargs["envs"]["MYSQL_PWD"] = db_password
     if ssl_cert:
         create_kwargs["envs"]["SSL_CERT_FILE"] = ssl_cert
@@ -158,8 +189,8 @@ def test_database_access():
         print("    Network policy: Only 10.0.0.0/8 allowed")
         print("    (Set DB_HOST, DB_USER, DB_PASSWORD to connect)")
 
-        # Verify policy: public internet should be blocked
-        print("\n[4] Verifying network policy (public IPs should be blocked)...")
+        # Verify: public internet blocked.
+        print("\n[4] Verifying public internet is blocked...")
         result = sandbox.commands.run(
             "curl -s --connect-timeout 5 https://google.com 2>&1 || echo 'BLOCKED'"
         )
@@ -168,16 +199,16 @@ def test_database_access():
         else:
             print("    ✗ Public internet unexpectedly allowed!")
 
-        # Verify positive: private network (10.0.0.0/8) should be accessible
-        print("\n[5] Verifying internal network access (10.0.0.0/8 in allowlist)...")
+        # Verify: internal network reachable.
+        print("\n[5] Verifying internal network access (10.0.0.0/8 allowed)...")
         result = sandbox.commands.run("ping -c 1 10.0.0.1 --timeout=3 2>&1 || echo 'UNREACHABLE'")
         if "UNREACHABLE" not in result.stdout and "Destination Host Unreachable" not in result.stdout:
             print("    ✓ Private network traffic allowed!")
         else:
-            print("    Note: Private IPs reachable but no host at 10.0.0.1 (expected without DB)")
+            print("    Note: No host at 10.0.0.1, but traffic was policy-permitted")
 
-        # Verify positive: loopback should always work
-        print("\n[6] Verifying loopback connectivity (should work)...")
+        # Verify: loopback always works.
+        print("\n[6] Verifying loopback connectivity (always allowed)...")
         result = sandbox.commands.run("ping -c 1 127.0.0.1 --timeout=3 2>&1")
         if result.exit_code == 0:
             print("    ✓ Loopback (127.0.0.1) accessible!")

@@ -228,8 +228,9 @@ E2B_API_KEY="e2b_000000"
 # Required: template ID (from Step 3)
 CUBE_TEMPLATE_ID="tpl-xxxxxxxxxxxxxxxx"
 
-# Optional: only when using Cube's built-in mkcert certificate
-SSL_CERT_FILE="/root/.local/share/mkcert/rootCA.pem"
+# Optional: only needed when using a custom CA certificate (e.g., mkcert for local HTTPS).
+# On most systems the default CA bundle works without setting this.
+# SSL_CERT_FILE="/root/.local/share/mkcert/rootCA.pem"
 
 # Optional: MySQL database connection configuration
 DB_HOST="localhost"
