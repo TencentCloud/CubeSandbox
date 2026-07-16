@@ -2,8 +2,7 @@
 
 CubeOps is the operations backend for the CubeSandbox platform. It provides
 the admin WebUI API surface (agent management, cluster monitoring, store
-metadata, authentication) and is designed to run **inside the internal
-network only** — never exposed to the public internet.
+metadata, authentication).
 
 ## Architecture
 
@@ -16,11 +15,19 @@ Both services share the same MySQL database. Schema migrations are managed
 by the shared [`cubedb`](../cubedb) Go module, which wraps goose with
 content-fingerprint tamper detection and cluster-wide locking.
 
+CubeOps exposes two API groups:
+
+1. **Admin/Ops API** (`/api/v1/auth`, `/api/v1/cluster`, `/api/v1/agenthub`,
+   `/api/v1/store`, `/api/v1/config`) — used by the WebUI for cluster
+   management, digital assistant (AgentHub) lifecycle, and store operations.
+2. **SDK API** (`/api/v1/sdk/*`) — used by the WebUI for sandbox/template/
+   snapshot CRUD. These endpoints call CubeMaster HTTP REST API directly
+   (replacing the former CubeAPI reverse proxy).
+
 ## Quick Start
 
 ```bash
 # 1. Set required environment variables
-export JWT_SECRET=$(openssl rand -hex 32)
 export DATABASE_URL=mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
 export CUBE_MASTER_ADDR=http://127.0.0.1:8089
 
@@ -28,19 +35,72 @@ export CUBE_MASTER_ADDR=http://127.0.0.1:8089
 make run
 ```
 
+`make run` builds the binary (`make build`) and starts it with hardcoded
+defaults. Note that the Makefile sets `JWT_SECRET=test-secret-dummy` at the
+command level, which overrides any `export JWT_SECRET=...` in your shell.
+For a real deployment, run the binary directly with your own env:
+
+```bash
+make build
+export JWT_SECRET=$(openssl rand -hex 32)
+./bin/cubeops
+```
+
+> **Migration fingerprint check**: if you are connecting to a database that
+> was previously migrated by an older version of the codebase, you may see
+> a `migration fingerprint check failed` error on startup. This is a safety
+> guard against silent schema drift. To bypass it (e.g. in dev), set
+> `CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK=1`. The one-click deployment
+> sets this automatically in `.one-click.env`.
+
+## Service Management
+
+In one-click deployments CubeOps is managed by systemd as
+`cube-sandbox-cubeops.service`:
+
+```bash
+# Check status (shows PID, memory, recent logs)
+systemctl status cube-sandbox-cubeops.service
+
+# For scripts: returns "active" / "inactive" / "failed" (exit code 0/1/2)
+systemctl is-active cube-sandbox-cubeops.service
+
+# Start / stop / restart
+systemctl start cube-sandbox-cubeops.service
+systemctl stop cube-sandbox-cubeops.service
+systemctl restart cube-sandbox-cubeops.service
+
+# View recent logs
+journalctl -u cube-sandbox-cubeops.service -n 50 --no-pager
+
+# Follow logs in real-time
+journalctl -u cube-sandbox-cubeops.service -f
+```
+
+Quick health check (no auth required):
+
+```bash
+curl -s http://127.0.0.1:3010/health
+# → ok
+```
+
+The systemd unit reads environment variables from `.one-click.env` via the
+start script at `deploy/one-click/scripts/systemd/cubeops-start.sh`.
+
 ## Configuration
 
 All configuration is via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CUBE_OPS_BIND` | `127.0.0.1:3010` | Listen address (internal only) |
+| `CUBE_OPS_BIND` | `127.0.0.1:3010` | Listen address. In All-in-One deployments this must be set to `0.0.0.0:3010` so the WebUI nginx container can reach CubeOps via `host.docker.internal:3010`. |
 | `CUBE_OPS_LOG_LEVEL` | `info` | Log level |
-| `JWT_SECRET` | *(required)* | JWT signing secret (32+ bytes) |
+| `JWT_SECRET` | *(optional)* | JWT signing secret. If unset, a secret is auto-generated on first startup and persisted to the `t_system_setting` table in the database. |
 | `JWT_ACCESS_TTL` | `15m` | Access token TTL |
 | `JWT_REFRESH_TTL` | `168h` | Refresh token TTL (7 days) |
-| `DATABASE_URL` | *(required)* | MySQL connection URL |
+| `DATABASE_URL` | *(required)* | MySQL connection URL. If unset, built from `CUBE_SANDBOX_MYSQL_{HOST,PORT,USER,PASSWORD,DB}` env vars. |
 | `CUBE_MASTER_ADDR` | `http://127.0.0.1:8089` | CubeMaster base URL |
+| `CUBE_API_SANDBOX_DOMAIN` | `cube.app` | Sandbox domain (used by SDK handler for sandbox URL construction) |
 | `REDIS_URL` | *(optional)* | Redis for JWT blacklist |
 
 ## Authentication
@@ -93,11 +153,49 @@ RBAC is reserved for future use — currently any valid JWT grants full access.
 - `GET|PUT /api/v1/agenthub/settings` — Global settings
 
 ### Store
-- `GET /api/v1/store/meta` — Image metadata
-- `POST /api/v1/store/refresh` — Pull + refresh images
+- `GET /api/v1/store/meta` — Image metadata (inspects locally cached Docker images via `docker image inspect`)
+- `POST /api/v1/store/refresh` — Pull + refresh images (`docker pull` then inspect)
 
 ### Config
 - `GET /api/v1/config` — Runtime config snapshot
+
+### SDK (WebUI sandbox/template/snapshot operations via CubeMaster direct)
+
+These endpoints replace the former CubeAPI reverse proxy; CubeOps calls
+CubeMaster HTTP REST API directly for all SDK data needs. The WebUI frontend
+uses these as its primary data path.
+
+**Sandboxes**
+- `GET /api/v1/sdk/sandboxes` — List sandboxes
+- `POST /api/v1/sdk/sandboxes` — Create sandbox
+- `GET /api/v1/sdk/sandboxes/{id}` — Get sandbox detail
+- `DELETE /api/v1/sdk/sandboxes/{id}` — Delete (kill) sandbox
+- `GET /api/v1/sdk/sandboxes/{id}/logs` — Sandbox logs
+- `POST /api/v1/sdk/sandboxes/{id}/timeout` — Set sandbox timeout
+- `POST /api/v1/sdk/sandboxes/{id}/refreshes` — Refresh sandbox
+- `POST /api/v1/sdk/sandboxes/{id}/pause` — Pause sandbox
+- `POST /api/v1/sdk/sandboxes/{id}/resume` — Resume sandbox
+- `POST /api/v1/sdk/sandboxes/{id}/connect` — Connect to existing sandbox
+
+**V2 Sandboxes (E2B v2 compatible)**
+- `GET /api/v1/sdk/v2/sandboxes` — List sandboxes (v2 format)
+- `GET /api/v1/sdk/v2/sandboxes/{id}/logs` — Sandbox logs (v2 format)
+
+**Snapshots**
+- `GET /api/v1/sdk/snapshots` — List snapshots
+- `POST /api/v1/sdk/sandboxes/{id}/snapshots` — Create snapshot
+- `POST /api/v1/sdk/sandboxes/{id}/rollback` — Rollback sandbox to snapshot
+
+**Templates**
+- `GET /api/v1/sdk/templates` — List templates
+- `POST /api/v1/sdk/templates` — Create template
+- `GET /api/v1/sdk/templates/compat` — Template compatibility matrix
+- `GET /api/v1/sdk/templates/{id}` — Get template detail
+- `POST /api/v1/sdk/templates/{id}` — Rebuild template
+- `DELETE /api/v1/sdk/templates/{id}` — Delete template
+- `POST /api/v1/sdk/templates/{id}/builds/{buildID}` — Start template build
+- `GET /api/v1/sdk/templates/{id}/builds/{buildID}/status` — Template build status
+- `GET /api/v1/sdk/templates/{id}/builds/{buildID}/logs` — Template build logs
 
 ## Development
 
@@ -120,4 +218,4 @@ make docker
 - [cubedb](../cubedb) — Shared database migration & DAO package
 - [CubeMaster](../CubeMaster) — Cluster orchestrator (HTTP API)
 - MySQL 8.0 — Shared database
-- Docker — For store image metadata (docker inspect/pull)
+- Docker — For store image metadata (`docker pull` + `docker image inspect` to fetch size/digest of template images)

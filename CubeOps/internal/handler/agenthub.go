@@ -410,7 +410,7 @@ func (h *AgentHubHandler) sandboxAction(w http.ResponseWriter, r *http.Request, 
 	// Pause and Resume both use update_sandbox API 
 	if action == "pause" {
 		_, err = h.cm.UpdateSandbox(r.Context(), map[string]interface{}{
-			"request_id":    fmt.Sprintf("req-%d", time.Now().UnixNano()),
+			"RequestID":     fmt.Sprintf("req-%d", time.Now().UnixNano()),
 			"sandbox_id":    inst.SandboxID,
 			"instance_type": "cubebox",
 			"action":        "pause",
@@ -418,7 +418,7 @@ func (h *AgentHubHandler) sandboxAction(w http.ResponseWriter, r *http.Request, 
 	} else {
 		// Resume = update_sandbox with action "resume" 
 		_, err = h.cm.UpdateSandbox(r.Context(), map[string]interface{}{
-			"request_id":    fmt.Sprintf("req-%d", time.Now().UnixNano()),
+			"RequestID":     fmt.Sprintf("req-%d", time.Now().UnixNano()),
 			"sandbox_id":    inst.SandboxID,
 			"instance_type": "cubebox",
 			"action":        "resume",
@@ -1583,6 +1583,12 @@ func (h *AgentHubHandler) CloneAgent(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// Fallback to the source agent's own openclaw_state_path when no snapshot
+	// was specified or the snapshot didn't carry one. (Matches old Rust:
+	// .or(record.openclaw_state_path.as_deref()).)
+	if sourceOpenclawStatePath == "" && inst.OpenclawStatePath != nil {
+		sourceOpenclawStatePath = *inst.OpenclawStatePath
+	}
 
 	cloneName := inst.Name + " 临时助手"
 	if req.Name != nil && strings.TrimSpace(*req.Name) != "" {
@@ -1654,6 +1660,16 @@ func (h *AgentHubHandler) CloneAgent(w http.ResponseWriter, r *http.Request) {
 			cmReq["distribution_scope"] = scope
 		}
 	}
+	// Network config: in egress credential mode, the LLM egress rule (with
+	// real API key injection) must be installed on the cloned sandbox too,
+	// otherwise OpenClaw falls back to the placeholder key and gets HTTP 401
+	// from the LLM provider. (Matches CreateInstance behaviour.)
+	cloneLLMCfgForNet, _ := resolveLLMConfig(r.Context(), h.store)
+	if cloneLLMCfgForNet != nil {
+		if networkConfig, err := agenthubNetworkConfig(cloneLLMCfgForNet); err == nil && networkConfig != nil {
+			cmReq["cube_network_config"] = networkConfig
+		}
+	}
 
 	sandboxResp, err := h.cm.CreateSandbox(r.Context(), cmReq)
 	if err != nil {
@@ -1706,22 +1722,68 @@ func (h *AgentHubHandler) CloneAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	envURL := fmt.Sprintf("http://%d-%s.%s", envPort, sbResult.SandboxID, inst.Domain)
 
-	// Apply OpenClaw runtime config (merge_llm mode for clones)
+	// Apply OpenClaw runtime config.
+	// A copied/full-snapshot sandbox already carries OpenClaw state, so we
+	// only merge LLM settings and keep its gateway token; a fresh shared-files
+	// mount needs a full init with a new token. (Matches old Rust logic.)
 	cloneLLMCfg, err := resolveLLMConfig(r.Context(), h.store)
+	if err != nil {
+		slog.Warn("CloneAgent: failed to resolve LLM config", "err", err)
+	}
+	cloneGatewayToken := ""
 	if err == nil {
 		clonePlan := resolveRuntimePlan(cloneLLMCfg, inst.Model)
-		cloneOpts := &openclawApplyOptions{
-			mode:                 applyModeMergeLLM,
-			preserveGatewayToken: true,
+
+		// Determine has_openclaw_state: true if full_snapshot (rootfs carries
+		// state) or shared_files with a copied state dir.
+		copiedOpenclawState := cloneSharedFiles && cloneOpenclawStatePath != "" && sourceOpenclawStatePath != ""
+		hasOpenclawState := copiedOpenclawState || !cloneSharedFiles
+
+		var cloneOpts *openclawApplyOptions
+		if hasOpenclawState {
+			// Preserve existing gateway token from the snapshot.
+			cloneOpts = &openclawApplyOptions{
+				mode:                 applyModeMergeLLM,
+				preserveGatewayToken: true,
+			}
+		} else {
+			// Fresh shared-files mount needs a full init with a new token.
+			cloneGatewayToken = generateGatewayToken()
+			cloneOpts = &openclawApplyOptions{
+				mode:         applyModeFullInit,
+				gatewayToken: cloneGatewayToken,
+			}
 		}
-		applyOpenclawRuntime(envdHTTPClient, h.store, sbResult.SandboxID, inst.Domain, clonePlan, cloneOpts)
+
+		applyOutput, applyErr := applyOpenclawRuntime(envdHTTPClient, h.store, sbResult.SandboxID, inst.Domain, clonePlan, cloneOpts)
+		if applyErr != nil {
+			slog.Error("CloneAgent: failed to apply OpenClaw config, killing clone sandbox",
+				"agentID", agentID, "sandboxID", sbResult.SandboxID, "err", applyErr)
+			// Best-effort kill the clone sandbox since OpenClaw didn't start.
+			h.cm.DeleteSandbox(r.Context(), sbResult.SandboxID)
+			if cloneOpenclawStatePath != "" {
+				_ = os.RemoveAll(cloneOpenclawStatePath)
+			}
+			writeError(w, http.StatusBadGateway, "failed to apply OpenClaw config: "+applyErr.Error())
+			return
+		}
+		_ = applyOutput
 	}
 
+	// Wait for OpenClaw to finish booting before reading the gateway token.
+	// (Matches old Rust tokio::time::sleep(Duration::from_secs(5)).)
+	time.Sleep(5 * time.Second)
+
 	// Read gateway token from the clone sandbox.
+	// Priority (matching old Rust): host-side file > sandbox-side poll > fallback.
 	// For shared_files clones, read from the clone's own host state path.
-	// For non-shared_files clones, hostStatePath is empty and we fall through
-	// to sandbox-side polling.
-	cloneGatewayToken := resolveGatewayToken(envdHTTPClient, sbResult.SandboxID, inst.Domain, cloneOpenclawStatePath, "")
+	// The fallback is the source agent's token (for merge_llm) or the
+	// generated token (for full_init).
+	fallbackToken := cloneGatewayToken
+	if fallbackToken == "" {
+		fallbackToken = inst.GatewayToken
+	}
+	cloneGatewayToken = resolveGatewayToken(envdHTTPClient, sbResult.SandboxID, inst.Domain, cloneOpenclawStatePath, fallbackToken)
 	if cloneGatewayToken != "" {
 		gatewayURL = gatewayURL + "#token=" + cloneGatewayToken
 	}

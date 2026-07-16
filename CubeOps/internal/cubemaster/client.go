@@ -293,6 +293,19 @@ func readResponse(resp *http.Response) (json.RawMessage, error) {
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("cubemaster returned %d: %s", resp.StatusCode, string(data))
 	}
+	// Check CubeMaster business error code. CubeMaster uses ret_code=200 for
+	// success (and sometimes 0). Any other value is a failure, even when HTTP
+	// status is 200. This prevents silent failures like pause/resume returning
+	// "requestID is empty" but being treated as success.
+	var envelope struct {
+		Ret struct {
+			RetCode int    `json:"ret_code"`
+			RetMsg  string `json:"ret_msg"`
+		} `json:"ret"`
+	}
+	if json.Unmarshal(data, &envelope) == nil && envelope.Ret.RetCode != 0 && envelope.Ret.RetCode != 200 {
+		return nil, fmt.Errorf("cubemaster error %d: %s", envelope.Ret.RetCode, envelope.Ret.RetMsg)
+	}
 	return json.RawMessage(data), nil
 }
 

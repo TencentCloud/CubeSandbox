@@ -81,9 +81,34 @@ func initDB(ctx context.Context, cfg dao.Config) error {
 **Never edit an already-applied migration file** — the fingerprint layer
 will reject it. Always add a new migration instead.
 
+## Troubleshooting
+
+### Migration fingerprint check failed
+
+If a migration that was previously applied to the database is missing from
+the current codebase (e.g. after a version rollback or branch switch), or
+if its content has been modified, startup will fail with:
+
+```
+schema migration failed: migrate: migration fingerprint check failed:
+an already-applied migration version was modified or reused, which goose
+would otherwise skip SILENTLY. Never edit/rename/reuse an applied migration;
+add a new timestamped migration instead. To bypass intentionally, set
+CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK=1.
+```
+
+This is a safety guard against silent schema drift. To bypass it (e.g. in
+dev or when connecting to a database migrated by a different code version):
+
+```bash
+export CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK=1
+```
+
+The one-click deployment sets this automatically in `.one-click.env`.
+
 ## Migration Files
 
-Currently 14 migration files covering:
+Currently 15 migration files covering:
 - Baseline schema (v0.2.2)
 - AgentHub instances, settings, templates, snapshots
 - Node component versions
@@ -92,4 +117,7 @@ Currently 14 migration files covering:
 - OpenClaw persistence fields
 - Template image pull progress
 - Artifact node placement
+- Template source snapshot index
+- Template definition rootfs artifact ID
 - Snapshot runtime active binding
+- System setting table (e.g. auto-generated JWT secret)
