@@ -459,9 +459,6 @@ mod tests {
     #[tokio::test]
     async fn simple_key_empty_passthrough() {
         let server = build_test_server_with_api_key("").await;
-        server
-            .get("/sandboxes/abc")
-            .await
-            .assert_status_ok();
+        server.get("/sandboxes/abc").await.assert_status_ok();
     }
 }
