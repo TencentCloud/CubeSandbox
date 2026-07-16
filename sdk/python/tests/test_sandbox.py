@@ -134,6 +134,24 @@ class TestCreate:
         body = m.call_args.kwargs["json"]
         assert body["envVars"] == {"FOO": "bar"}
 
+    def test_create_accepts_e2b_envs_alias(self):
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(envs={"FOO": "bar"}, config=make_config())
+        body = m.call_args.kwargs["json"]
+        assert body["envVars"] == {"FOO": "bar"}
+
+    def test_create_accepts_matching_environment_aliases(self):
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(
+                env_vars={"FOO": "bar"}, envs={"FOO": "bar"}, config=make_config()
+            )
+        body = m.call_args.kwargs["json"]
+        assert body["envVars"] == {"FOO": "bar"}
+
+    def test_create_rejects_conflicting_environment_aliases(self):
+        with pytest.raises(ValueError, match="env_vars and envs"):
+            Sandbox.create(env_vars={"FOO": "bar"}, envs={"FOO": "baz"}, config=make_config())
+
     def test_create_sends_metadata(self):
         meta = {"network-policy": "deny-all"}
         with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:

@@ -148,6 +148,7 @@ class Sandbox:
         *,
         timeout: int | None = None,
         env_vars: Dict[str, str] | None = None,
+        envs: Dict[str, str] | None = None,
         metadata: Dict[str, str] | None = None,
         allow_internet_access: bool = True,
         network: Dict[str, Any] | None = None,
@@ -162,6 +163,8 @@ class Sandbox:
             timeout: Sandbox idle timeout in seconds (``None`` omits the field).
                 See ``docs/guide/lifecycle.md``.
             env_vars: Environment variables injected into the sandbox.
+            envs: E2B-compatible alias for ``env_vars``. When both aliases are
+                provided, they must contain the same values.
             metadata: Arbitrary key-value metadata (e.g. network-policy, host-mount).
             allow_internet_access: When ``False``, the sandbox is blocked from
                 making outbound traffic to the public internet.
@@ -204,12 +207,16 @@ class Sandbox:
         if not tpl:
             raise ValueError("template is required. Set CUBE_TEMPLATE_ID or pass template=")
 
+        if env_vars is not None and envs is not None and env_vars != envs:
+            raise ValueError("env_vars and envs must match when both are provided")
+        sandbox_env_vars = env_vars if env_vars is not None else envs
+
         # Omitted when None; see docs/guide/lifecycle.md.
         payload: dict = {"templateID": tpl}
         if timeout is not None:
             payload["timeout"] = timeout
-        if env_vars:
-            payload["envVars"] = env_vars
+        if sandbox_env_vars:
+            payload["envVars"] = sandbox_env_vars
         if metadata:
             payload["metadata"] = metadata
         if not allow_internet_access:
