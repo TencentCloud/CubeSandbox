@@ -38,37 +38,32 @@ print("=" * 60)
 
 def check_mysql_in_sandbox(sandbox: Sandbox, try_install: bool = True) -> bool:
     """Check if MySQL client is available, optionally install it."""
-    try:
-        result = sandbox.commands.run("mysql --version", timeout=30)
-        if result.exit_code == 0:
-            print(f"    MySQL version: {result.stdout.strip()}")
-            return True
-        # Non-zero exit code means mysql command exists but returned an error.
-        # Treat this as "not found" and offer to install.
-    except Exception as e:
-        # Real errors (auth failures, network timeouts, sandbox issues) are
-        # caught here so the user sees a meaningful message instead of silently
-        # falling through to the install attempt.
-        print(f"    Error checking MySQL client: {e}")
-        print("    Please verify your configuration and try again.")
-        return False
+    result = sandbox.commands.run("mysql --version", timeout=30)
+    if result.exit_code == 0:
+        print(f"    MySQL version: {result.stdout.strip()}")
+        return True
+    # Non-zero exit codes are treated as "not found" and trigger install.
+    # Stderr may contain the actual error (e.g. "mysql: command not found"),
+    # so we include it in the message to help the user understand what happened.
+    stderr = result.stderr.strip() if result.stderr else ""
+    print(f"    MySQL client check failed: {stderr or 'exit code ' + str(result.exit_code)}")
 
     if try_install:
-        print("    MySQL client not found, attempting to install...")
+        print("    Attempting to install MySQL client...")
         install_cmd = """
 if command -v apt-get &> /dev/null; then
-    apt-get update -qq && apt-get install -y -qq mysql-client default-mysql-client 2>/dev/null
+    apt-get update -qq && apt-get install -y -qq mysql-client default-mysql-client && echo "INSTALL_OK"
 elif command -v yum &> /dev/null; then
-    yum install -y mysql 2>/dev/null
+    yum install -y mysql && echo "INSTALL_OK"
 elif command -v apk &> /dev/null; then
-    apk add --no-cache mysql-client 2>/dev/null
+    apk add --no-cache mysql-client && echo "INSTALL_OK"
 else
-    echo "UNSUPPORTED_PACKAGE_MANAGER"
+    echo "UNSUPPORTED_PACKAGE_MANAGER" >&2
     exit 1
 fi
 """
         result = sandbox.commands.run(install_cmd, timeout=300)
-        if result.exit_code == 0:
+        if result.exit_code == 0 and "INSTALL_OK" in result.stdout:
             print("    MySQL client installed successfully!")
             # Verify installation
             result = sandbox.commands.run("mysql --version", timeout=30)
@@ -79,6 +74,9 @@ fi
                 print("    Installation verification failed")
         else:
             print("    Installation failed or timed out")
+            stderr = result.stderr.strip() if result.stderr else ""
+            if stderr:
+                print(f"    Error details: {stderr}")
             print("    Note: If installation times out, the sandbox may have network restrictions.")
             print("    Consider using a pre-built template with MySQL client installed.")
 
@@ -135,4 +133,5 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         print(f"\nError: {e}")
+        print("\nPlease verify your configuration (API key, template ID, API URL) and try again.")
         sys.exit(1)

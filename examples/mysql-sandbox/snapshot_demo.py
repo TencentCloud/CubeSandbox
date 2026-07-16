@@ -173,17 +173,14 @@ def demo_list_snapshots():
     print("\n[1] Listing existing snapshots...")
 
     try:
-        # List snapshots - returns a paginator
-        paginator = Sandbox.list_snapshots()
-        snapshots = list(paginator)
+        # list_snapshots() returns (list[SnapshotInfo], next_token: str | None)
+        snapshots, next_token = Sandbox.list_snapshots()
         print(f"    Found {len(snapshots)} snapshot(s)")
 
         for snap in snapshots:
             print(f"\n    Snapshot ID: {snap.snapshot_id}")
-            if hasattr(snap, "name") and snap.name:
-                print(f"    Name: {snap.name}")
-            if hasattr(snap, "created_at") and snap.created_at:
-                print(f"    Created: {snap.created_at}")
+            if snap.names:
+                print(f"    Names: {', '.join(snap.names)}")
 
         if snapshots:
             print("\n[2] You can create a new sandbox from any snapshot using:")

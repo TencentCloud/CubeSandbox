@@ -53,6 +53,12 @@ from env_utils import (
     run_mysql_query,
 )
 
+# MySQL identifier limits
+_MYSQL_MAX_IDENT = 64
+_PREFIX = "cube_demo_"
+_PREFIX_LEN = len(_PREFIX)  # 10 characters
+_MAX_SUFFIX_LEN = _MYSQL_MAX_IDENT - _PREFIX_LEN  # 54 characters
+
 # Regex for valid database name: alphanumeric, underscore, dash, dot (MySQL allows these)
 _DB_NAME_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_\-.]*$")
 
@@ -88,6 +94,13 @@ if db_name and not _DB_NAME_PATTERN.match(db_name):
     raise ValueError(
         f"Invalid DB_NAME value: {db_name!r}. "
         "Only letters, numbers, underscore, dash, and dot are allowed."
+    )
+
+if db_name and len(db_name) > _MAX_SUFFIX_LEN:
+    raise ValueError(
+        f"DB_NAME value too long: {db_name!r} ({len(db_name)} chars). "
+        f"The 'cube_demo_' prefix plus DB_NAME must not exceed {_MYSQL_MAX_IDENT} characters. "
+        f"Please use a DB_NAME with at most {_MAX_SUFFIX_LEN} characters."
     )
 
 # Treat "DROP DATABASE" as a destructive side-effect: it is opt-in.
@@ -144,14 +157,14 @@ def main():
             print(f"    {result.stdout.strip() if result.stdout else '(no output)'}")
 
         # If database is configured, run actual queries. We always work
-        # under a `cube_demo_` prefix so the cleanup DROP can never reach
+        # under a `{_PREFIX}` prefix so the cleanup DROP can never reach
         # an unrelated schema the operator didn't explicitly authorize.
         if db_host and db_name:
             print("\n[4] Running database queries...")
-            demo_db = f"cube_demo_{db_name}"
+            demo_db = f"{_PREFIX}{db_name}"
 
             print(f"    Using isolated demo database: '{demo_db}'")
-            print(f"    (Derived from DB_NAME='{db_name}' + 'cube_demo_' prefix)")
+            print(f"    (Derived from DB_NAME='{db_name}' + '{_PREFIX}' prefix)")
 
             # Identifier quoting: wrap all db/table names in backticks.
             # This is the MySQL-native way to handle names that collide with
@@ -206,17 +219,22 @@ CREATE TABLE IF NOT EXISTS {q_db}.`users` (
                 # Even with the env var set, refuse to drop a database whose
                 # name does NOT start with `cube_demo_` — this catches the
                 # "user fat-fingered DB_NAME=production" scenario.
-                if not demo_db.startswith("cube_demo_"):
+                if not demo_db.startswith(_PREFIX):
                     print(
                         f"    ⊘ Refusing to DROP '{demo_db}' — name does not start with 'cube_demo_'."
                     )
                     print("    Aborting cleanup to protect unrelated data.")
                 else:
-                    # Belt-and-suspenders: show the databases that exist so the
+                    # Safety gate: show the databases that exist so the
                     # operator can visually confirm the target before DROP runs.
                     listing = run_mysql_query(sandbox, "SHOW DATABASES", "")
                     print(f"    Databases currently visible:\n{listing}")
                     print(f"    >>> About to DROP DATABASE: {demo_db!r} <<<")
+                    try:
+                        input("    Press Enter to continue or Ctrl+C to abort...")
+                    except KeyboardInterrupt:
+                        print("\n    Operation cancelled.")
+                        return
                     run_mysql_query(sandbox, f"DROP DATABASE IF EXISTS {_ident(demo_db)}", "")
                     print(f"    ✓ Demo database '{demo_db}' dropped")
         else:

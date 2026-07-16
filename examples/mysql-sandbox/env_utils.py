@@ -133,4 +133,4 @@ def run_mysql_query(sandbox: "Sandbox", query: str, database: str = "", check: b
             print(f"    Error: {result.stderr.strip()}")
     elif result.stderr:
         print(f"    Warning: {result.stderr.strip()}")
-    return result.stdout
+    return result.stdout or ""
