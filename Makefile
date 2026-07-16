@@ -134,11 +134,14 @@ help:
 	@printf "  - Run 'make builder-image' first if image %s is missing\n" "$(BUILDER_IMAGE)"
 
 .PHONY: builder-image
+# BUILDER_FORCE_REBUILD rebuilds even when the image is present, and adds
+# --no-cache so a stale image is refreshed from scratch rather than reproduced
+# from the Docker layer cache. A plain first build (image missing) stays cached.
 builder-image:
 	@if [ -z "$(BUILDER_FORCE_REBUILD)" ] && docker image inspect $(BUILDER_IMAGE) >/dev/null 2>&1; then \
 		printf 'Builder image %s already present, skipping build (set BUILDER_FORCE_REBUILD=1 to rebuild)\n' "$(BUILDER_IMAGE)"; \
 	else \
-		docker build $(BUILDER_BUILD_ARGS) -t $(BUILDER_IMAGE) -f $(BUILDER_DOCKERFILE) ./docker; \
+		docker build $(if $(BUILDER_FORCE_REBUILD),--no-cache) $(BUILDER_BUILD_ARGS) -t $(BUILDER_IMAGE) -f $(BUILDER_DOCKERFILE) ./docker; \
 	fi
 
 .PHONY: prepare-builder-home
