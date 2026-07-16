@@ -44,6 +44,21 @@ def _check_response(resp: requests.Response) -> None:
 _VALID_ON_TIMEOUT = ("kill", "pause")
 
 
+def _auth_headers(cfg: Config) -> dict[str, str]:
+    """Return the ``X-API-Key`` header when an API key is configured.
+
+    CubeAPI only enforces auth when it is started with an auth-callback URL;
+    in the default deployment no callback is set and every request passes
+    through unauthenticated. So the key is optional here: when
+    ``CUBE_API_KEY`` / ``Config.api_key`` is unset we send no auth header and
+    behavior is unchanged; when set we attach ``X-API-Key: <key>`` so the SDK
+    also works against an auth-enabled backend.
+    """
+    if cfg.api_key:
+        return {"X-API-Key": cfg.api_key}
+    return {}
+
+
 def _serialize_lifecycle(lifecycle: Dict[str, Any]) -> Dict[str, Any]:
     """Translate a snake_case ``lifecycle`` dict to the camelCase wire shape
     used by CubeAPI (and by the e2b SDK).
@@ -239,7 +254,7 @@ class Sandbox:
 
         s = requests.Session()
         resp = s.post(f"{cfg.api_url}/sandboxes", json=payload,
-                      headers={"Content-Type": "application/json"})
+                      headers={"Content-Type": "application/json", **_auth_headers(cfg)})
         _check_response(resp)
         return cls(resp.json(), config=cfg)
 
@@ -264,7 +279,7 @@ class Sandbox:
         s = requests.Session()
         resp = s.post(f"{cfg.api_url}/sandboxes/{sandbox_id}/connect",
                       json={"timeout": cfg.timeout},
-                      headers={"Content-Type": "application/json"})
+                      headers={"Content-Type": "application/json", **_auth_headers(cfg)})
         _check_response(resp)
         return cls(resp.json(), config=cfg)
 
@@ -282,7 +297,7 @@ class Sandbox:
         """
         cfg = config or Config()
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/sandboxes")
+        resp = s.get(f"{cfg.api_url}/sandboxes", headers=_auth_headers(cfg))
         _check_response(resp)
         return resp.json()
 
@@ -300,7 +315,7 @@ class Sandbox:
         """
         cfg = config or Config()
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/v2/sandboxes")
+        resp = s.get(f"{cfg.api_url}/v2/sandboxes", headers=_auth_headers(cfg))
         _check_response(resp)
         return resp.json()
 
@@ -317,7 +332,7 @@ class Sandbox:
         """
         cfg = config or Config()
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/health")
+        resp = s.get(f"{cfg.api_url}/health", headers=_auth_headers(cfg))
         _check_response(resp)
         return resp.json()
 
@@ -551,7 +566,7 @@ class Sandbox:
         if next_token is not None:
             params["nextToken"] = next_token
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/snapshots", params=params)
+        resp = s.get(f"{cfg.api_url}/snapshots", params=params, headers=_auth_headers(cfg))
         _check_response(resp)
         items = [SnapshotInfo.from_dict(d) for d in (resp.json() or [])]
         nt = resp.headers.get("x-next-token") or None
@@ -575,7 +590,7 @@ class Sandbox:
         """
         cfg = config or Config()
         s = requests.Session()
-        resp = s.delete(f"{cfg.api_url}/templates/{snapshot_id}")
+        resp = s.delete(f"{cfg.api_url}/templates/{snapshot_id}", headers=_auth_headers(cfg))
         _check_response(resp)
 
     # 1.4 — create_from_snapshot is covered by Sandbox.create(template=snapshot_id).
@@ -746,7 +761,7 @@ class Sandbox:
 
     def _build_session(self) -> requests.Session:
         s = requests.Session()
-        s.headers.update({"Content-Type": "application/json"})
+        s.headers.update({"Content-Type": "application/json", **_auth_headers(self._config)})
         return s
 
     def _build_data_client(self) -> httpx.Client:
