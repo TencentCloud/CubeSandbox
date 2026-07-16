@@ -10,6 +10,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/service"
 )
 
 // AccessClaims is the JWT claims for short-lived access tokens.
@@ -42,6 +43,12 @@ func NewJWTManager(secret string, accessTTL, refreshTTL time.Duration) *JWTManag
 		refreshTTL: refreshTTL,
 	}
 }
+
+// AccessTTL returns the configured access-token TTL.
+func (m *JWTManager) AccessTTL() time.Duration { return m.accessTTL }
+
+// RefreshTTL returns the configured refresh-token TTL.
+func (m *JWTManager) RefreshTTL() time.Duration { return m.refreshTTL }
 
 // GenerateAccessToken creates a signed JWT access token.
 func (m *JWTManager) GenerateAccessToken(username string) (string, error) {
@@ -99,8 +106,11 @@ func (m *JWTManager) VerifyAccessToken(tokenStr string) (*AccessClaims, error) {
 	return claims, nil
 }
 
-// VerifyRefreshToken parses and validates a refresh token.
-func (m *JWTManager) VerifyRefreshToken(tokenStr string) (*RefreshClaims, error) {
+// VerifyRefreshToken parses and validates a refresh token and returns the
+// service-layer claim DTO. We return *service.RefreshClaims (instead of
+// *RefreshClaims) so the service package can depend on its own types rather
+// than on this package's internals.
+func (m *JWTManager) VerifyRefreshToken(tokenStr string) (*service.RefreshClaims, error) {
 	token, err := jwt.ParseWithClaims(tokenStr, &RefreshClaims{}, func(t *jwt.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
@@ -114,5 +124,5 @@ func (m *JWTManager) VerifyRefreshToken(tokenStr string) (*RefreshClaims, error)
 	if !ok || !token.Valid {
 		return nil, errors.New("invalid refresh token")
 	}
-	return claims, nil
+	return &service.RefreshClaims{Username: claims.Username, TokenID: claims.TokenID}, nil
 }

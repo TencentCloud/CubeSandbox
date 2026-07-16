@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -48,13 +49,26 @@ func (c *Client) ClusterVersions(ctx context.Context) (json.RawMessage, error) {
 }
 
 // GetSandbox fetches sandbox detail from CubeMaster.
+//
+// sandboxID and instanceType are passed via query parameters using net/url
+// to ensure they are properly percent-encoded. Hand-rolled fmt.Sprintf
+// concatenation is unsafe — values containing '&', '=', or '#' could let a
+// caller inject extra query parameters or break out of the query string
+// entirely. See SECURITY.md for the original advisory.
 func (c *Client) GetSandbox(ctx context.Context, sandboxID, instanceType string) (json.RawMessage, error) {
-	return c.get(ctx, fmt.Sprintf("/cube/sandbox/info?sandbox_id=%s&instance_type=%s", sandboxID, instanceType))
+	return c.getWithQuery(ctx, "/cube/sandbox/info", map[string]string{
+		"sandbox_id":    sandboxID,
+		"instance_type": instanceType,
+	})
 }
 
 // GetNode fetches a single node's detail from CubeMaster.
+//
+// nodeID is appended to the path; values.QueryEscape handles any character
+// that would otherwise be reserved in the URL path.
 func (c *Client) GetNode(ctx context.Context, nodeID string) (json.RawMessage, error) {
-	return c.get(ctx, fmt.Sprintf("/internal/meta/nodes/%s", nodeID))
+	escaped := url.PathEscape(nodeID)
+	return c.get(ctx, fmt.Sprintf("/internal/meta/nodes/%s", escaped))
 }
 
 // ListSandboxes fetches the sandbox list from CubeMaster.

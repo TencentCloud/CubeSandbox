@@ -204,30 +204,48 @@ type openclawApplyOptions struct {
 
 // openclawApplySpec renders the JSON spec handed to the sandbox apply script.
 func openclawApplySpec(plan *llmRuntimePlan, opts *openclawApplyOptions) map[string]interface{} {
+	// Defensive: every production caller supplies non-nil opts, but tests and
+	// future refactors might not. Default to merge_llm (the safe no-op mode)
+	// rather than panicking on a nil deref.
+	mode := applyModeMergeLLM
+	preserveToken := true
+	token := ""
+	configureWecom := false
+	var botID, botSecret string
+	if opts != nil {
+		mode = opts.mode
+		preserveToken = opts.preserveGatewayToken
+		token = opts.gatewayToken
+		configureWecom = opts.configureWecom
+		botID = opts.botID
+		botSecret = opts.botSecret
+	}
 	modeStr := "merge_llm"
-	if opts.mode == applyModeFullInit {
+	if mode == applyModeFullInit {
 		modeStr = "full_init"
 	}
 	gatewaySpec := map[string]interface{}{
-		"manage":          opts.mode == applyModeFullInit,
-		"preserveExisting": opts.preserveGatewayToken,
+		"manage":           mode == applyModeFullInit,
+		"preserveExisting": preserveToken,
 	}
 	// Only include token in spec if it's non-empty (avoids null values in JSON)
-	if opts.gatewayToken != "" {
-		gatewaySpec["token"] = opts.gatewayToken
+	if token != "" {
+		gatewaySpec["token"] = token
 	}
 	spec := map[string]interface{}{
-		"mode":             modeStr,
-		"provider":         plan.UpstreamProvider,
-		"baseUrl":          plan.UpstreamBaseURL,
-		"apiKey":           plan.OpenclawAPIKey,
-		"openclawPrimary":  plan.OpenclawPrimary,
-		"upstreamModelId":  plan.UpstreamModelID,
-		"modelName":        plan.OpenclawModelName,
-		"credentialMode":   plan.CredentialMode,
-		"configureWecom":   opts.configureWecom,
-		"gateway":          gatewaySpec,
+		"mode":            modeStr,
+		"provider":        plan.UpstreamProvider,
+		"baseUrl":         plan.UpstreamBaseURL,
+		"apiKey":          plan.OpenclawAPIKey,
+		"openclawPrimary": plan.OpenclawPrimary,
+		"upstreamModelId": plan.UpstreamModelID,
+		"modelName":       plan.OpenclawModelName,
+		"credentialMode":  plan.CredentialMode,
+		"configureWecom":  configureWecom,
+		"gateway":         gatewaySpec,
 	}
+	_ = botID
+	_ = botSecret
 	// Resolve LLM host IP on the host side and pass via spec.
 	// Egress mode blocks UDP DNS inside the sandbox; pinning the IP in
 	// /etc/hosts lets OpenClaw reach the API without DNS.
@@ -267,7 +285,9 @@ func applyOpenclawRuntime(httpClient *http.Client, s *store.Store, sandboxID, do
 		"OPENCLAW_NODE_EXTRA_CA_CERTS": "/root/.openclaw/cube-egress-ca.crt",
 		"CUBE_SANDBOX_NODE_IP":         os.Getenv("CUBE_SANDBOX_NODE_IP"),
 	}
-	if opts.configureWecom {
+	// WeCom envs are only present when the caller explicitly asked for them.
+	// Guard against a nil opts (defensive — production callers always set it).
+	if opts != nil && opts.configureWecom {
 		if opts.botID != "" {
 			envs["OPENCLAW_BOT_ID"] = opts.botID
 		}
@@ -363,9 +383,9 @@ func llmEgressRule(llm *llmConfig) (map[string]interface{}, error) {
 			"audit": audit,
 			"inject": []map[string]interface{}{
 				{
-					"header":  "Authorization",
-					"secret":  llm.APIKey,
-					"format":  format,
+					"header": "Authorization",
+					"secret": llm.APIKey,
+					"format": format,
 				},
 			},
 		},

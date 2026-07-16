@@ -9,18 +9,24 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/gorilla/mux"
-	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/cubemaster"
+	"github.com/gin-gonic/gin"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/httputil"
 )
 
 // ClusterHandler handles cluster-related HTTP requests.
 type ClusterHandler struct {
-	cm *cubemaster.Client
+	cm CubeMasterClient
 }
 
 // NewClusterHandler creates a new cluster handler.
-func NewClusterHandler(cm *cubemaster.Client) *ClusterHandler {
-	return &ClusterHandler{cm: cm}
+func NewClusterHandler(cm CubeMasterClient) *ClusterHandler { return &ClusterHandler{cm: cm} }
+
+// Register installs the cluster routes on the given router group.
+func (h *ClusterHandler) Register(r *gin.RouterGroup) {
+	r.GET("/cluster/overview", h.Overview)
+	r.GET("/cluster/versions", h.Versions)
+	r.GET("/nodes", h.ListNodes)
+	r.GET("/nodes/:nodeID", h.GetNode)
 }
 
 // --- Response types matching the frontend's expected format ---
@@ -31,37 +37,37 @@ type nodeResourcesView struct {
 }
 
 type nodeConditionView struct {
-	Type               string  `json:"type"`
-	Status             string  `json:"status"`
-	LastHeartbeatTime  *string `json:"lastHeartbeatTime"`
-	Reason             string  `json:"reason"`
-	Message            string  `json:"message"`
+	Type              string  `json:"type"`
+	Status            string  `json:"status"`
+	LastHeartbeatTime *string `json:"lastHeartbeatTime"`
+	Reason            string  `json:"reason"`
+	Message           string  `json:"message"`
 }
 
 type componentVersionView struct {
-	Component string  `json:"component"`
-	Version   string  `json:"version"`
-	Commit    string  `json:"commit"`
-	BuildTime string  `json:"buildTime"`
-	Source    string  `json:"source"`
+	Component string `json:"component"`
+	Version   string `json:"version"`
+	Commit    string `json:"commit"`
+	BuildTime string `json:"buildTime"`
+	Source    string `json:"source"`
 }
 
 type nodeView struct {
-	NodeID              string              `json:"nodeID"`
-	HostIP              string              `json:"hostIP"`
-	InstanceType        string              `json:"instanceType"`
-	Healthy             bool                `json:"healthy"`
-	Capacity            nodeResourcesView   `json:"capacity"`
-	Allocatable         nodeResourcesView   `json:"allocatable"`
-	CpuSaturation       float32             `json:"cpuSaturation"`
-	MemorySaturation    float32             `json:"memorySaturation"`
-	MaxMvmSlots         int                 `json:"maxMvmSlots"`
-	QuotaCpu            int64               `json:"quotaCpu"`
-	QuotaMemMB          int64               `json:"quotaMemMB"`
-	CreateConcurrentNum int                 `json:"createConcurrentNum"`
-	HeartbeatTime       *string             `json:"heartbeatTime"`
-	Conditions          []nodeConditionView `json:"conditions"`
-	LocalTemplates      []string            `json:"localTemplates"`
+	NodeID              string                 `json:"nodeID"`
+	HostIP              string                 `json:"hostIP"`
+	InstanceType        string                 `json:"instanceType"`
+	Healthy             bool                   `json:"healthy"`
+	Capacity            nodeResourcesView      `json:"capacity"`
+	Allocatable         nodeResourcesView      `json:"allocatable"`
+	CpuSaturation       float32                `json:"cpuSaturation"`
+	MemorySaturation    float32                `json:"memorySaturation"`
+	MaxMvmSlots         int                    `json:"maxMvmSlots"`
+	QuotaCpu            int64                  `json:"quotaCpu"`
+	QuotaMemMB          int64                  `json:"quotaMemMB"`
+	CreateConcurrentNum int                    `json:"createConcurrentNum"`
+	HeartbeatTime       *string                `json:"heartbeatTime"`
+	Conditions          []nodeConditionView    `json:"conditions"`
+	LocalTemplates      []string               `json:"localTemplates"`
 	Versions            []componentVersionView `json:"versions"`
 }
 
@@ -83,11 +89,11 @@ type cmNodeResources struct {
 }
 
 type cmNodeCondition struct {
-	Type               string  `json:"type"`
-	Status             string  `json:"status"`
-	LastHeartbeatTime  *string `json:"lastHeartbeatTime"`
-	Reason             string  `json:"reason"`
-	Message            string  `json:"message"`
+	Type              string  `json:"type"`
+	Status            string  `json:"status"`
+	LastHeartbeatTime *string `json:"lastHeartbeatTime"`
+	Reason            string  `json:"reason"`
+	Message           string  `json:"message"`
 }
 
 type cmComponentVersion struct {
@@ -103,19 +109,19 @@ type cmLocalTemplate struct {
 }
 
 type cmNodeSnapshot struct {
-	NodeID              string            `json:"node_id"`
-	HostIP              string            `json:"host_ip"`
-	InstanceType        string            `json:"instance_type"`
-	Healthy             bool              `json:"healthy"`
-	Capacity            cmNodeResources   `json:"capacity"`
-	Allocatable         cmNodeResources   `json:"allocatable"`
-	MaxMvmNum           int               `json:"max_mvm_num"`
-	QuotaCPU            int64             `json:"quota_cpu"`
-	QuotaMemMB          int64             `json:"quota_mem_mb"`
-	CreateConcurrentNum int               `json:"create_concurrent_num"`
-	HeartbeatTime       *string           `json:"heartbeat_time"`
-	Conditions          []cmNodeCondition `json:"conditions"`
-	LocalTemplates      []cmLocalTemplate `json:"local_templates"`
+	NodeID              string               `json:"node_id"`
+	HostIP              string               `json:"host_ip"`
+	InstanceType        string               `json:"instance_type"`
+	Healthy             bool                 `json:"healthy"`
+	Capacity            cmNodeResources      `json:"capacity"`
+	Allocatable         cmNodeResources      `json:"allocatable"`
+	MaxMvmNum           int                  `json:"max_mvm_num"`
+	QuotaCPU            int64                `json:"quota_cpu"`
+	QuotaMemMB          int64                `json:"quota_mem_mb"`
+	CreateConcurrentNum int                  `json:"create_concurrent_num"`
+	HeartbeatTime       *string              `json:"heartbeat_time"`
+	Conditions          []cmNodeCondition    `json:"conditions"`
+	LocalTemplates      []cmLocalTemplate    `json:"local_templates"`
 	Versions            []cmComponentVersion `json:"versions"`
 }
 
@@ -186,72 +192,76 @@ func (h *ClusterHandler) fetchUsedResources(ctx context.Context) map[string]stru
 // --- Handlers ---
 
 // Overview handles GET /cluster/overview.
-func (h *ClusterHandler) Overview(w http.ResponseWriter, r *http.Request) {
-	data, err := h.cm.GetNodes(r.Context())
+func (h *ClusterHandler) Overview(c *gin.Context) {
+	data, err := h.cm.GetNodes(c.Request.Context())
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "failed to fetch cluster overview: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "failed to fetch cluster overview: "+err.Error())
 		return
 	}
 	var resp cmNodesResponse
 	if err := json.Unmarshal(data, &resp); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to parse nodes response")
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to parse nodes response")
 		return
 	}
-	used := h.fetchUsedResources(r.Context())
+	used := h.fetchUsedResources(c.Request.Context())
 	overview := buildOverview(resp.Data, used)
-	writeJSON(w, http.StatusOK, overview)
+	httputil.WriteJSON(c, http.StatusOK, overview)
 }
 
 // ListNodes handles GET /nodes.
-func (h *ClusterHandler) ListNodes(w http.ResponseWriter, r *http.Request) {
-	data, err := h.cm.GetNodes(r.Context())
+func (h *ClusterHandler) ListNodes(c *gin.Context) {
+	data, err := h.cm.GetNodes(c.Request.Context())
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "failed to fetch nodes: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "failed to fetch nodes: "+err.Error())
 		return
 	}
 	var resp cmNodesResponse
 	if err := json.Unmarshal(data, &resp); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to parse nodes response")
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to parse nodes response")
 		return
 	}
-	used := h.fetchUsedResources(r.Context())
+	used := h.fetchUsedResources(c.Request.Context())
 	views := make([]nodeView, 0, len(resp.Data))
 	for _, s := range resp.Data {
 		views = append(views, toNodeView(s, used))
 	}
-	writeJSON(w, http.StatusOK, views)
+	httputil.WriteJSON(c, http.StatusOK, views)
 }
 
 // GetNode handles GET /nodes/{nodeID}.
-func (h *ClusterHandler) GetNode(w http.ResponseWriter, r *http.Request) {
-	nodeID := mux.Vars(r)["nodeID"]
+func (h *ClusterHandler) GetNode(c *gin.Context) {
+	nodeID := c.Param("nodeID")
 	if nodeID == "" {
-		writeError(w, http.StatusBadRequest, "nodeID is required")
+		httputil.WriteError(c, http.StatusBadRequest, "nodeID is required")
 		return
 	}
-	data, err := h.cm.GetNode(r.Context(), nodeID)
+	data, err := h.cm.GetNode(c.Request.Context(), nodeID)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "failed to fetch node: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "failed to fetch node: "+err.Error())
 		return
 	}
 	var resp cmNodeResponse
 	if err := json.Unmarshal(data, &resp); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to parse node response")
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to parse node response")
 		return
 	}
 	if resp.Data == nil {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("node %s not found", nodeID))
+		httputil.WriteError(c, http.StatusNotFound, fmt.Sprintf("node %s not found", nodeID))
 		return
 	}
-	used := h.fetchUsedResources(r.Context())
-	writeJSON(w, http.StatusOK, toNodeView(*resp.Data, used))
+	used := h.fetchUsedResources(c.Request.Context())
+	httputil.WriteJSON(c, http.StatusOK, toNodeView(*resp.Data, used))
 }
 
 // Versions handles GET /cluster/versions.
-func (h *ClusterHandler) Versions(w http.ResponseWriter, r *http.Request) {
-	data, err := h.cm.ClusterVersions(r.Context())
+//
+// CubeMaster's version endpoint sometimes returns an empty data field when
+// the cluster is freshly bootstrapped; we then return an empty shell so the
+// UI doesn't blow up on a nil object.
+func (h *ClusterHandler) Versions(c *gin.Context) {
+	data, err := h.cm.ClusterVersions(c.Request.Context())
 	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]interface{}{
+		httputil.WriteJSON(c, http.StatusOK, map[string]interface{}{
 			"controlPlane": map[string]string{},
 			"components":   []interface{}{},
 			"nodes":        []interface{}{},
@@ -261,10 +271,10 @@ func (h *ClusterHandler) Versions(w http.ResponseWriter, r *http.Request) {
 	// Extract data field if wrapped, otherwise pass through
 	var resp cmResponse
 	if err := json.Unmarshal(data, &resp); err != nil || resp.Data == nil {
-		writeRawJSON(w, http.StatusOK, data)
+		httputil.WriteRawJSON(c, http.StatusOK, data)
 		return
 	}
-	writeRawJSON(w, http.StatusOK, resp.Data)
+	httputil.WriteRawJSON(c, http.StatusOK, resp.Data)
 }
 
 // --- Transformation helpers ---

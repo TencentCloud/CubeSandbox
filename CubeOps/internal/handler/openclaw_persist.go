@@ -16,9 +16,9 @@ import (
 const (
 	// Host directories for OpenClaw shared-files persistence.
 	// Must be under CubeMaster's allowed_host_mount_prefixes (default: /data/shared/).
-	openclawHostStateRoot     = "/data/shared/agenthub/openclaw"
-	openclawHostSnapshotRoot  = "/data/shared/agenthub/openclaw-snapshots"
-	openclawSandboxStatePath  = "/root/.openclaw"
+	openclawHostStateRoot    = "/data/shared/agenthub/openclaw"
+	openclawHostSnapshotRoot = "/data/shared/agenthub/openclaw-snapshots"
+	openclawSandboxStatePath = "/root/.openclaw"
 
 	// Metadata key for host directory mount in sandbox labels.
 	// Matches old Rust HOSTDIR_MOUNT_KEY.

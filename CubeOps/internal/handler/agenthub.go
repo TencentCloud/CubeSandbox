@@ -15,10 +15,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/gorilla/mux"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/crypto"
-	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/cubemaster"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/httputil"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
 )
 
@@ -267,37 +267,74 @@ func upgradeOpenclawForInstance(inst *store.AgentInstance) (*CommandOutput, erro
 // AgentHubHandler handles agenthub-related HTTP requests.
 type AgentHubHandler struct {
 	store *store.Store
-	cm    *cubemaster.Client
+	cm    CubeMasterClient
 }
 
 // NewAgentHubHandler creates a new agenthub handler.
-func NewAgentHubHandler(s *store.Store, cm *cubemaster.Client) *AgentHubHandler {
+func NewAgentHubHandler(s *store.Store, cm CubeMasterClient) *AgentHubHandler {
 	return &AgentHubHandler{store: s, cm: cm}
 }
 
+// Register installs the agenthub routes on the given router group.
+func (h *AgentHubHandler) Register(r *gin.RouterGroup) {
+	// Instances
+	r.GET("/agenthub/instances", h.ListInstances)
+	r.POST("/agenthub/instances", h.CreateInstance)
+	r.DELETE("/agenthub/instances/:agentID", h.DeleteInstance)
+	r.GET("/agenthub/instances/:agentID/operations", h.ListOperations)
+	r.GET("/agenthub/instances/:agentID/gateway/health", h.GatewayHealth)
+	r.POST("/agenthub/instances/:agentID/restart", h.RestartAgent)
+	r.POST("/agenthub/instances/:agentID/pause", h.PauseAgent)
+	r.POST("/agenthub/instances/:agentID/resume", h.ResumeAgent)
+	r.POST("/agenthub/instances/:agentID/upgrade", h.UpgradeAgent)
+	r.PUT("/agenthub/instances/:agentID/model", h.UpdateModel)
+	r.GET("/agenthub/instances/:agentID/wecom", h.GetWecomConfig)
+	r.PUT("/agenthub/instances/:agentID/wecom", h.UpdateWecomConfig)
+
+	// Snapshots
+	r.GET("/agenthub/instances/:agentID/snapshots", h.ListSnapshots)
+	r.POST("/agenthub/instances/:agentID/snapshots", h.CreateSnapshot)
+	r.DELETE("/agenthub/instances/:agentID/snapshots/:snapshotID", h.DeleteSnapshot)
+	r.PATCH("/agenthub/instances/:agentID/snapshots/:snapshotID", h.UpdateSnapshot)
+	r.POST("/agenthub/instances/:agentID/rollback", h.RollbackAgent)
+	r.POST("/agenthub/instances/:agentID/recover", h.RecoverAgent)
+	r.POST("/agenthub/instances/:agentID/clone", h.CloneAgent)
+	r.POST("/agenthub/instances/:agentID/publish-template", h.PublishTemplate)
+
+	// Templates
+	r.GET("/agenthub/templates", h.ListTemplates)
+	r.POST("/agenthub/templates/market", h.RegisterMarketTemplate)
+	r.PATCH("/agenthub/templates/:templateID", h.UpdateTemplate)
+	r.DELETE("/agenthub/templates/:templateID", h.DeleteTemplate)
+
+	// Settings
+	r.GET("/agenthub/settings", h.GetSettings)
+	r.PUT("/agenthub/settings", h.UpdateSettings)
+}
+
 // ListInstances handles GET /agenthub/instances.
-func (h *AgentHubHandler) ListInstances(w http.ResponseWriter, r *http.Request) {
-	instances, err := h.store.ListInstances(r.Context())
+func (h *AgentHubHandler) ListInstances(c *gin.Context) {
+	instances, err := h.store.ListInstances(c.Request.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to list instances: "+err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to list instances: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, instances)
+	httputil.WriteJSON(c, http.StatusOK, instances)
 }
 
 // DeleteInstance handles DELETE /agenthub/instances/{agentID}.
-func (h *AgentHubHandler) DeleteInstance(w http.ResponseWriter, r *http.Request) {
-	agentID := mux.Vars(r)["agentID"]
-	inst, err := h.store.GetInstance(r.Context(), agentID)
+func (h *AgentHubHandler) DeleteInstance(c *gin.Context) {
+	agentID := c.Param("agentID")
+	inst, err := h.store.GetInstance(c.Request.Context(), agentID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to get instance: "+err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to get instance: "+err.Error())
 		return
 	}
 	if inst == nil {
-		writeError(w, http.StatusNotFound, "instance not found")
+		httputil.WriteError(c, http.StatusNotFound, "instance not found")
 		return
 	}
-	if _, err := h.cm.DeleteSandbox(r.Context(), map[string]string{
+	if _, err := h.cm.DeleteSandbox(c.Request.Context(), map[string]string{
 		"sandbox_id":    inst.SandboxID,
 		"instance_type": inst.Engine,
 	}); err != nil {
@@ -319,55 +356,55 @@ func (h *AgentHubHandler) DeleteInstance(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if err := h.store.SoftDeleteInstance(r.Context(), agentID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to delete instance: "+err.Error())
+	if err := h.store.SoftDeleteInstance(c.Request.Context(), agentID); err != nil {
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to delete instance: "+err.Error())
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	httputil.WriteNoContent(c)
 }
 
 // ListTemplates handles GET /agenthub/templates.
-func (h *AgentHubHandler) ListTemplates(w http.ResponseWriter, r *http.Request) {
-	templates, err := h.store.ListAgentTemplates(r.Context())
+func (h *AgentHubHandler) ListTemplates(c *gin.Context) {
+	templates, err := h.store.ListAgentTemplates(c.Request.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to list templates: "+err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to list templates: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, templates)
+	httputil.WriteJSON(c, http.StatusOK, templates)
 }
 
 // DeleteTemplate handles DELETE /agenthub/templates/{templateID}.
-func (h *AgentHubHandler) DeleteTemplate(w http.ResponseWriter, r *http.Request) {
-	templateID := mux.Vars(r)["templateID"]
-	if err := h.store.DeleteAgentTemplate(r.Context(), templateID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to delete template: "+err.Error())
+func (h *AgentHubHandler) DeleteTemplate(c *gin.Context) {
+	templateID := c.Param("templateID")
+	if err := h.store.DeleteAgentTemplate(c.Request.Context(), templateID); err != nil {
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to delete template: "+err.Error())
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	httputil.WriteNoContent(c)
 }
 
 // RestartAgent handles POST /agenthub/instances/{agentID}/restart.
 // Restarts the OpenClaw process inside the sandbox via envd .
 // Returns AgentSetupResult { exitCode, stdout, stderr } .
-func (h *AgentHubHandler) RestartAgent(w http.ResponseWriter, r *http.Request) {
-	agentID := mux.Vars(r)["agentID"]
-	inst, err := h.store.GetInstance(r.Context(), agentID)
+func (h *AgentHubHandler) RestartAgent(c *gin.Context) {
+	agentID := c.Param("agentID")
+	inst, err := h.store.GetInstance(c.Request.Context(), agentID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to get instance: "+err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to get instance: "+err.Error())
 		return
 	}
 	if inst == nil {
-		writeError(w, http.StatusNotFound, "instance not found")
+		httputil.WriteError(c, http.StatusNotFound, "instance not found")
 		return
 	}
 
 	output, err := restartOpenclawForInstance(inst)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "failed to restart: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "failed to restart: "+err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	httputil.WriteJSON(c, http.StatusOK, map[string]interface{}{
 		"exitCode": output.ExitCode,
 		"stdout":   output.Stdout,
 		"stderr":   output.Stderr,
@@ -375,50 +412,46 @@ func (h *AgentHubHandler) RestartAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 // ListOperations handles GET /agenthub/instances/{agentID}/operations.
-func (h *AgentHubHandler) ListOperations(w http.ResponseWriter, r *http.Request) {
-	agentID := mux.Vars(r)["agentID"]
-	ops, err := h.store.ListAgentOperations(r.Context(), agentID)
+func (h *AgentHubHandler) ListOperations(c *gin.Context) {
+	agentID := c.Param("agentID")
+	ops, err := h.store.ListAgentOperations(c.Request.Context(), agentID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to list operations: "+err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to list operations: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, ops)
+	httputil.WriteJSON(c, http.StatusOK, ops)
 }
 
 // PauseAgent handles POST /agenthub/instances/{agentID}/pause.
-func (h *AgentHubHandler) PauseAgent(w http.ResponseWriter, r *http.Request) {
-	h.sandboxAction(w, r, "pause")
-}
+func (h *AgentHubHandler) PauseAgent(c *gin.Context) { h.sandboxAction(c, "pause") }
 
 // ResumeAgent handles POST /agenthub/instances/{agentID}/resume.
-func (h *AgentHubHandler) ResumeAgent(w http.ResponseWriter, r *http.Request) {
-	h.sandboxAction(w, r, "resume")
-}
+func (h *AgentHubHandler) ResumeAgent(c *gin.Context) { h.sandboxAction(c, "resume") }
 
-func (h *AgentHubHandler) sandboxAction(w http.ResponseWriter, r *http.Request, action string) {
-	agentID := mux.Vars(r)["agentID"]
-	inst, err := h.store.GetInstance(r.Context(), agentID)
+func (h *AgentHubHandler) sandboxAction(c *gin.Context, action string) {
+	agentID := c.Param("agentID")
+	inst, err := h.store.GetInstance(c.Request.Context(), agentID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to get instance: "+err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to get instance: "+err.Error())
 		return
 	}
 	if inst == nil {
-		writeError(w, http.StatusNotFound, "instance not found")
+		httputil.WriteError(c, http.StatusNotFound, "instance not found")
 		return
 	}
 
-	// Pause and Resume both use update_sandbox API 
+	// Pause and Resume both use update_sandbox API
 	if action == "pause" {
-		_, err = h.cm.UpdateSandbox(r.Context(), map[string]interface{}{
-			"RequestID":     fmt.Sprintf("req-%d", time.Now().UnixNano()),
+		_, err = h.cm.UpdateSandbox(c.Request.Context(), map[string]interface{}{
+			"requestID":     fmt.Sprintf("req-%d", time.Now().UnixNano()),
 			"sandbox_id":    inst.SandboxID,
 			"instance_type": "cubebox",
 			"action":        "pause",
 		})
 	} else {
-		// Resume = update_sandbox with action "resume" 
-		_, err = h.cm.UpdateSandbox(r.Context(), map[string]interface{}{
-			"RequestID":     fmt.Sprintf("req-%d", time.Now().UnixNano()),
+		// Resume = update_sandbox with action "resume"
+		_, err = h.cm.UpdateSandbox(c.Request.Context(), map[string]interface{}{
+			"requestID":     fmt.Sprintf("req-%d", time.Now().UnixNano()),
 			"sandbox_id":    inst.SandboxID,
 			"instance_type": "cubebox",
 			"action":        "resume",
@@ -426,51 +459,51 @@ func (h *AgentHubHandler) sandboxAction(w http.ResponseWriter, r *http.Request, 
 		})
 	}
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "failed to "+action+" sandbox: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "failed to "+action+" sandbox: "+err.Error())
 		return
 	}
 
-	// Update status: pause → "stopped", resume → "running" 
+	// Update status: pause → "stopped", resume → "running"
 	newStatus := "running"
 	if action == "pause" {
 		newStatus = "stopped"
 	}
-	if err := h.store.UpdateInstanceStatus(r.Context(), agentID, newStatus); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update status: "+err.Error())
+	if err := h.store.UpdateInstanceStatus(c.Request.Context(), agentID, newStatus); err != nil {
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to update status: "+err.Error())
 		return
 	}
 
-	// Return full updated instance 
-	updated, err := h.store.GetInstance(r.Context(), agentID)
+	// Return full updated instance
+	updated, err := h.store.GetInstance(c.Request.Context(), agentID)
 	if err != nil || updated == nil {
-		writeJSON(w, http.StatusOK, map[string]string{"status": newStatus})
+		httputil.WriteJSON(c, http.StatusOK, map[string]string{"status": newStatus})
 		return
 	}
-	writeJSON(w, http.StatusOK, updated)
+	httputil.WriteJSON(c, http.StatusOK, updated)
 }
 
 // UpgradeAgent handles POST /agenthub/instances/{agentID}/upgrade.
 // Upgrades OpenClaw to the latest version (via npm/pnpm/pip) and restarts it.
 // Matches old Rust upgrade_agent_openclaw.
-func (h *AgentHubHandler) UpgradeAgent(w http.ResponseWriter, r *http.Request) {
-	agentID := mux.Vars(r)["agentID"]
-	inst, err := h.store.GetInstance(r.Context(), agentID)
+func (h *AgentHubHandler) UpgradeAgent(c *gin.Context) {
+	agentID := c.Param("agentID")
+	inst, err := h.store.GetInstance(c.Request.Context(), agentID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to get instance: "+err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to get instance: "+err.Error())
 		return
 	}
 	if inst == nil {
-		writeError(w, http.StatusNotFound, "instance not found")
+		httputil.WriteError(c, http.StatusNotFound, "instance not found")
 		return
 	}
 
 	output, err := upgradeOpenclawForInstance(inst)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "failed to upgrade: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "failed to upgrade: "+err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	httputil.WriteJSON(c, http.StatusOK, map[string]interface{}{
 		"exitCode": output.ExitCode,
 		"stdout":   output.Stdout,
 		"stderr":   output.Stderr,
@@ -478,57 +511,57 @@ func (h *AgentHubHandler) UpgradeAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 // UpdateModel handles PUT /agenthub/instances/{agentID}/model.
-func (h *AgentHubHandler) UpdateModel(w http.ResponseWriter, r *http.Request) {
-	agentID := mux.Vars(r)["agentID"]
+func (h *AgentHubHandler) UpdateModel(c *gin.Context) {
+	agentID := c.Param("agentID")
 	var body struct {
 		Model string `json:"model"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if err := c.ShouldBindJSON(&body); err != nil {
+		httputil.WriteError(c, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if err := h.store.UpdateInstanceModel(r.Context(), agentID, body.Model); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update model: "+err.Error())
+	if err := h.store.UpdateInstanceModel(c.Request.Context(), agentID, body.Model); err != nil {
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to update model: "+err.Error())
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	httputil.WriteNoContent(c)
 }
 
 // GetWecomConfig handles GET /agenthub/instances/{agentID}/wecom.
-func (h *AgentHubHandler) GetWecomConfig(w http.ResponseWriter, r *http.Request) {
-	agentID := mux.Vars(r)["agentID"]
-	botID, botSecret, err := h.store.GetAgentWecomConfig(r.Context(), agentID)
+func (h *AgentHubHandler) GetWecomConfig(c *gin.Context) {
+	agentID := c.Param("agentID")
+	botID, botSecret, err := h.store.GetAgentWecomConfig(c.Request.Context(), agentID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to get wecom config: "+err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to get wecom config: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{
+	httputil.WriteJSON(c, http.StatusOK, map[string]string{
 		"botId":     botID,
 		"botSecret": botSecret,
 	})
 }
 
 // UpdateWecomConfig handles PUT /agenthub/instances/{agentID}/wecom.
-func (h *AgentHubHandler) UpdateWecomConfig(w http.ResponseWriter, r *http.Request) {
-	agentID := mux.Vars(r)["agentID"]
+func (h *AgentHubHandler) UpdateWecomConfig(c *gin.Context) {
+	agentID := c.Param("agentID")
 	var body struct {
 		BotID     string `json:"botId"`
 		BotSecret string `json:"botSecret"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if err := c.ShouldBindJSON(&body); err != nil {
+		httputil.WriteError(c, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if err := h.store.UpdateAgentWecomConfig(r.Context(), agentID, body.BotID, body.BotSecret); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update wecom config: "+err.Error())
+	if err := h.store.UpdateAgentWecomConfig(c.Request.Context(), agentID, body.BotID, body.BotSecret); err != nil {
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to update wecom config: "+err.Error())
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	httputil.WriteNoContent(c)
 }
 
 // GetSettings handles GET /agenthub/settings.
-func (h *AgentHubHandler) GetSettings(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+func (h *AgentHubHandler) GetSettings(c *gin.Context) {
+	ctx := c.Request.Context()
 
 	provider, _ := h.store.GetSetting(ctx, "llm_provider")
 	if provider == "" {
@@ -569,7 +602,7 @@ func (h *AgentHubHandler) GetSettings(w http.ResponseWriter, r *http.Request) {
 		gatewayDomainPtr = &gatewayDomain
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	httputil.WriteJSON(c, http.StatusOK, map[string]interface{}{
 		"deepseekApiKeyConfigured": apiKeyConfigured,
 		"deepseekApiKeyMasked":     apiKeyMasked,
 		"source":                   apiKeySource,
@@ -610,22 +643,22 @@ func decryptSetting(stored string) string {
 }
 
 // UpdateSettings handles PUT /agenthub/settings.
-func (h *AgentHubHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
+func (h *AgentHubHandler) UpdateSettings(c *gin.Context) {
 	var body map[string]string
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if err := c.ShouldBindJSON(&body); err != nil {
+		httputil.WriteError(c, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	// Map frontend field names to DB setting keys
 	keyMap := map[string]string{
-		"deepseekApiKey":  "deepseek_api_key",
-		"llmProvider":     "llm_provider",
-		"llmBaseUrl":      "llm_base_url",
-		"llmModel":        "llm_model",
-		"llmApiKey":       "llm_api_key",
+		"deepseekApiKey":    "deepseek_api_key",
+		"llmProvider":       "llm_provider",
+		"llmBaseUrl":        "llm_base_url",
+		"llmModel":          "llm_model",
+		"llmApiKey":         "llm_api_key",
 		"llmCredentialMode": "llm_credential_mode",
-		"gatewayDomain":   "gateway_domain",
+		"gatewayDomain":     "gateway_domain",
 	}
 	for jsonKey, value := range body {
 		dbKey := jsonKey
@@ -642,37 +675,36 @@ func (h *AgentHubHandler) UpdateSettings(w http.ResponseWriter, r *http.Request)
 				value = enc
 			}
 		}
-		if err := h.store.SetSetting(r.Context(), dbKey, value); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to update setting "+jsonKey+": "+err.Error())
+		if err := h.store.SetSetting(c.Request.Context(), dbKey, value); err != nil {
+			httputil.WriteError(c, http.StatusInternalServerError, "failed to update setting "+jsonKey+": "+err.Error())
 			return
 		}
 	}
 
 	// Return updated settings (same format as GET)
-	h.GetSettings(w, r)
+	h.GetSettings(c)
 }
 
 // ListSnapshots handles GET /agenthub/instances/{agentID}/snapshots.
-func (h *AgentHubHandler) ListSnapshots(w http.ResponseWriter, r *http.Request) {
-	agentID := mux.Vars(r)["agentID"]
-	snapshots, err := h.store.ListAgentSnapshots(r.Context(), agentID)
+func (h *AgentHubHandler) ListSnapshots(c *gin.Context) {
+	agentID := c.Param("agentID")
+	snapshots, err := h.store.ListAgentSnapshots(c.Request.Context(), agentID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to list snapshots: "+err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to list snapshots: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, snapshots)
+	httputil.WriteJSON(c, http.StatusOK, snapshots)
 }
 
 // DeleteSnapshot handles DELETE /agenthub/instances/{agentID}/snapshots/{snapshotID}.
-func (h *AgentHubHandler) DeleteSnapshot(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	agentID := vars["agentID"]
-	snapshotID := vars["snapshotID"]
+func (h *AgentHubHandler) DeleteSnapshot(c *gin.Context) {
+	agentID := c.Param("agentID")
+	snapshotID := c.Param("snapshotID")
 
 	// Look up the snapshot before soft-deleting so we can clean up host-side
 	// OpenClaw state files (agenthub_state kind). Best-effort cleanup: log
 	// errors but don't fail the delete, matching DeleteInstance semantics.
-	snap, _ := h.store.GetAgentSnapshot(r.Context(), agentID, snapshotID)
+	snap, _ := h.store.GetAgentSnapshot(c.Request.Context(), agentID, snapshotID)
 	if snap != nil && snap.OpenclawStateSnapshotPath != nil && *snap.OpenclawStateSnapshotPath != "" {
 		if err := os.RemoveAll(*snap.OpenclawStateSnapshotPath); err != nil {
 			slog.Warn("DeleteSnapshot: failed to clean up OpenClaw snapshot directory",
@@ -685,25 +717,25 @@ func (h *AgentHubHandler) DeleteSnapshot(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if err := h.store.DeleteAgentSnapshot(r.Context(), agentID, snapshotID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to delete snapshot: "+err.Error())
+	if err := h.store.DeleteAgentSnapshot(c.Request.Context(), agentID, snapshotID); err != nil {
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to delete snapshot: "+err.Error())
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	httputil.WriteNoContent(c)
 }
 
 // GatewayHealth handles GET /agenthub/instances/{agentID}/gateway/health.
-// Probes the OpenClaw gateway via the sandbox proxy 
+// Probes the OpenClaw gateway via the sandbox proxy
 // get_agent_gateway_health). Returns { "ready": bool }.
-func (h *AgentHubHandler) GatewayHealth(w http.ResponseWriter, r *http.Request) {
-	agentID := mux.Vars(r)["agentID"]
-	inst, err := h.store.GetInstance(r.Context(), agentID)
+func (h *AgentHubHandler) GatewayHealth(c *gin.Context) {
+	agentID := c.Param("agentID")
+	inst, err := h.store.GetInstance(c.Request.Context(), agentID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to get instance: "+err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to get instance: "+err.Error())
 		return
 	}
 	if inst == nil {
-		writeError(w, http.StatusNotFound, "instance not found")
+		httputil.WriteError(c, http.StatusNotFound, "instance not found")
 		return
 	}
 
@@ -723,14 +755,14 @@ func (h *AgentHubHandler) GatewayHealth(w http.ResponseWriter, r *http.Request) 
 		resp.Body.Close()
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	httputil.WriteJSON(c, http.StatusOK, map[string]interface{}{
 		"ready": ready,
 	})
 }
 
 // Complex operations requiring sandbox creation / openclaw management — stubbed for now.
 
-func (h *AgentHubHandler) CreateInstance(w http.ResponseWriter, r *http.Request) {
+func (h *AgentHubHandler) CreateInstance(c *gin.Context) {
 	var req struct {
 		Name            string  `json:"name"`
 		Engine          string  `json:"engine"`
@@ -741,25 +773,25 @@ func (h *AgentHubHandler) CreateInstance(w http.ResponseWriter, r *http.Request)
 		BotID           *string `json:"botId"`
 		BotSecret       *string `json:"botSecret"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httputil.WriteError(c, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
-		writeError(w, http.StatusBadRequest, "agent name is required")
+		httputil.WriteError(c, http.StatusBadRequest, "agent name is required")
 		return
 	}
 	if req.Engine != "openclaw" {
-		writeError(w, http.StatusBadRequest, "only openclaw engine is currently supported")
+		httputil.WriteError(c, http.StatusBadRequest, "only openclaw engine is currently supported")
 		return
 	}
 
 	hasBotID := req.BotID != nil && strings.TrimSpace(*req.BotID) != ""
 	hasBotSecret := req.BotSecret != nil && strings.TrimSpace(*req.BotSecret) != ""
 	if hasBotID != hasBotSecret {
-		writeError(w, http.StatusBadRequest, "Bot ID and Secret must be provided together")
+		httputil.WriteError(c, http.StatusBadRequest, "Bot ID and Secret must be provided together")
 		return
 	}
 	shouldBindWecom := hasBotID && hasBotSecret
@@ -797,9 +829,9 @@ func (h *AgentHubHandler) CreateInstance(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Resolve LLM config from settings
-	llmCfg, err := resolveLLMConfig(r.Context(), h.store)
+	llmCfg, err := resolveLLMConfig(c.Request.Context(), h.store)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		httputil.WriteError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 	llmModel := llmCfg.Model
@@ -808,7 +840,7 @@ func (h *AgentHubHandler) CreateInstance(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Resolve domain from settings
-	domain, _ := h.store.GetSetting(r.Context(), "gateway_domain")
+	domain, _ := h.store.GetSetting(c.Request.Context(), "gateway_domain")
 	if domain == "" {
 		domain = "cube.app"
 	}
@@ -816,7 +848,7 @@ func (h *AgentHubHandler) CreateInstance(w http.ResponseWriter, r *http.Request)
 	// Build egress network config for LLM API key injection
 	networkConfig, err := agenthubNetworkConfig(llmCfg)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to build network config: "+err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to build network config: "+err.Error())
 		return
 	}
 
@@ -830,10 +862,10 @@ func (h *AgentHubHandler) CreateInstance(w http.ResponseWriter, r *http.Request)
 	// Check if the template has a bundled OpenClaw state snapshot path.
 	var agentTemplate *store.AgentTemplate
 	if rootfsSourceType == "template" {
-		agentTemplate, _ = h.store.GetAgentTemplate(r.Context(), templateID)
+		agentTemplate, _ = h.store.GetAgentTemplate(c.Request.Context(), templateID)
 	}
 	if agentTemplate != nil && agentTemplate.SourceAgentID != "market" {
-		if snap, _ := h.store.GetAgentSnapshot(r.Context(), agentTemplate.SourceAgentID, agentTemplate.SourceSnapshotID); snap != nil {
+		if snap, _ := h.store.GetAgentSnapshot(c.Request.Context(), agentTemplate.SourceAgentID, agentTemplate.SourceSnapshotID); snap != nil {
 			// If the snapshot has a rootfs_snapshot_id, switch to snapshot source.
 			if snap.RootfsSnapshotID != nil && *snap.RootfsSnapshotID != "" {
 				rootfsSourceType = "snapshot"
@@ -850,7 +882,7 @@ func (h *AgentHubHandler) CreateInstance(w http.ResponseWriter, r *http.Request)
 		openclawPersistID = newOpenclawPersistID()
 		statePath, err := prepareOpenclawStateDir(openclawPersistID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			httputil.WriteError(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 		openclawStatePath = statePath
@@ -865,12 +897,12 @@ func (h *AgentHubHandler) CreateInstance(w http.ResponseWriter, r *http.Request)
 	// Build CubeMaster create sandbox request (matching old Rust format)
 	requestID := fmt.Sprintf("req-%d", time.Now().UnixNano())
 	labels := map[string]string{
-		"agenthub":                   "true",
-		"agenthub.name":              name,
-		"agenthub.engine":            "openclaw",
-		"agenthub.persistence_mode":  persistenceMode,
+		"agenthub":                    "true",
+		"agenthub.name":               name,
+		"agenthub.engine":             "openclaw",
+		"agenthub.persistence_mode":   persistenceMode,
 		"agenthub.rootfs_source_type": rootfsSourceType,
-		"agenthub.rootfs_source_id":  rootfsSourceID,
+		"agenthub.rootfs_source_id":   rootfsSourceID,
 	}
 	// Build annotations — host-mount goes here (NOT labels) because CubeMaster's
 	// injectHostDirMounts reads from req.Annotations["host-mount"].
@@ -881,7 +913,7 @@ func (h *AgentHubHandler) CreateInstance(w http.ResponseWriter, r *http.Request)
 	if sharedFiles {
 		mountMeta, err := openclawHostMountMetadata(openclawStatePath)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			httputil.WriteError(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 		labels["agenthub.openclaw.persist_id"] = openclawPersistID
@@ -889,16 +921,16 @@ func (h *AgentHubHandler) CreateInstance(w http.ResponseWriter, r *http.Request)
 	}
 
 	cmReq := map[string]interface{}{
-		"RequestID":      requestID,
-		"instance_type":  "cubebox",
-		"timeout":        86400,
-		"containers":     []interface{}{},
-		"exposed_ports":  []interface{}{},
-		"annotations":    annotations,
-		"labels":             labels,
-		"network_type":       "tap",
-		"auto_pause":         false,
-		"auto_resume":        false,
+		"requestID":     requestID,
+		"instance_type": "cubebox",
+		"timeout":       86400,
+		"containers":    []interface{}{},
+		"exposed_ports": []interface{}{},
+		"annotations":   annotations,
+		"labels":        labels,
+		"network_type":  "tap",
+		"auto_pause":    false,
+		"auto_resume":   false,
 	}
 	if networkConfig != nil {
 		cmReq["cube_network_config"] = networkConfig
@@ -914,9 +946,9 @@ func (h *AgentHubHandler) CreateInstance(w http.ResponseWriter, r *http.Request)
 		slog.Info("CreateSandbox request", "body", string(reqJSON))
 	}
 
-	sandboxResp, err := h.cm.CreateSandbox(r.Context(), cmReq)
+	sandboxResp, err := h.cm.CreateSandbox(c.Request.Context(), cmReq)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "failed to create sandbox: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "failed to create sandbox: "+err.Error())
 		return
 	}
 
@@ -929,11 +961,11 @@ func (h *AgentHubHandler) CreateInstance(w http.ResponseWriter, r *http.Request)
 		} `json:"ret"`
 	}
 	if err := json.Unmarshal(sandboxResp, &sbResult); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to parse sandbox response: "+err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to parse sandbox response: "+err.Error())
 		return
 	}
 	if sbResult.SandboxID == "" {
-		writeError(w, http.StatusBadGateway, "CubeMaster returned empty sandbox_id")
+		httputil.WriteError(c, http.StatusBadGateway, "CubeMaster returned empty sandbox_id")
 		return
 	}
 
@@ -953,7 +985,7 @@ func (h *AgentHubHandler) CreateInstance(w http.ResponseWriter, r *http.Request)
 
 	useTemplateFastpath := false
 	if rootfsSourceType == "template" && !shouldBindWecom {
-		if tmpl, _ := h.store.GetAgentTemplate(r.Context(), templateID); tmpl != nil && tmpl.SourceAgentID != "market" {
+		if tmpl, _ := h.store.GetAgentTemplate(c.Request.Context(), templateID); tmpl != nil && tmpl.SourceAgentID != "market" {
 			useTemplateFastpath = true
 		}
 	}
@@ -986,7 +1018,7 @@ func (h *AgentHubHandler) CreateInstance(w http.ResponseWriter, r *http.Request)
 	}
 	applyOutput, err := applyOpenclawRuntime(envdHTTPClient, h.store, sandboxID, domain, plan, applyOpts)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "failed to apply OpenClaw config: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "failed to apply OpenClaw config: "+err.Error())
 		return
 	}
 
@@ -1026,7 +1058,7 @@ func (h *AgentHubHandler) CreateInstance(w http.ResponseWriter, r *http.Request)
 	// lightweight images have a code interpreter on 49999 and no desktop.
 	// Query CubeMaster directly (no CubeAPI dependency).
 	envPort := 8080
-	if raw, err := h.cm.ListTemplates(r.Context(), templateID, false); err == nil {
+	if raw, err := h.cm.ListTemplates(c.Request.Context(), templateID, false); err == nil {
 		// CubeMaster returns flat structure for single-template query:
 		// {ret, template_id, image_info, ...}
 		var tmpl struct {
@@ -1088,15 +1120,15 @@ func (h *AgentHubHandler) CreateInstance(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if err := h.store.UpsertInstance(r.Context(), inst); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create instance record: "+err.Error())
+	if err := h.store.UpsertInstance(c.Request.Context(), inst); err != nil {
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to create instance record: "+err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, inst)
+	httputil.WriteJSON(c, http.StatusCreated, inst)
 }
 
-func (h *AgentHubHandler) RegisterMarketTemplate(w http.ResponseWriter, r *http.Request) {
+func (h *AgentHubHandler) RegisterMarketTemplate(c *gin.Context) {
 	var req struct {
 		TemplateID  string  `json:"templateId"`
 		Name        *string `json:"name"`
@@ -1104,12 +1136,12 @@ func (h *AgentHubHandler) RegisterMarketTemplate(w http.ResponseWriter, r *http.
 		Version     *string `json:"version"`
 		Recommended bool    `json:"recommended"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httputil.WriteError(c, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if req.TemplateID == "" {
-		writeError(w, http.StatusBadRequest, "templateId is required")
+		httputil.WriteError(c, http.StatusBadRequest, "templateId is required")
 		return
 	}
 	name := ""
@@ -1124,63 +1156,63 @@ func (h *AgentHubHandler) RegisterMarketTemplate(w http.ResponseWriter, r *http.
 	if req.Version != nil {
 		version = *req.Version
 	}
-	err := h.store.DB().WithContext(r.Context()).Exec(
+	err := h.store.DB().WithContext(c.Request.Context()).Exec(
 		`INSERT INTO t_agenthub_template (template_id, name, source_agent_id, source_snapshot_id, source_sandbox_id, model, version)
 		 VALUES (?, ?, 'market', '', '', ?, ?)`,
 		req.TemplateID, name, model, version,
 	).Error
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to register template: "+err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to register template: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]string{"templateId": req.TemplateID})
+	httputil.WriteJSON(c, http.StatusCreated, map[string]string{"templateId": req.TemplateID})
 }
 
-func (h *AgentHubHandler) UpdateTemplate(w http.ResponseWriter, r *http.Request) {
-	templateID := mux.Vars(r)["templateID"]
+func (h *AgentHubHandler) UpdateTemplate(c *gin.Context) {
+	templateID := c.Param("templateID")
 	var req struct {
 		Name        *string `json:"name"`
 		Recommended *bool   `json:"recommended"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httputil.WriteError(c, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if req.Name != nil {
-		if err := h.store.DB().WithContext(r.Context()).Exec(
+		if err := h.store.DB().WithContext(c.Request.Context()).Exec(
 			`UPDATE t_agenthub_template SET name = ? WHERE template_id = ? AND deleted_at IS NULL`,
 			*req.Name, templateID,
 		).Error; err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to update template: "+err.Error())
+			httputil.WriteError(c, http.StatusInternalServerError, "failed to update template: "+err.Error())
 			return
 		}
 	}
 	if req.Recommended != nil {
-		if err := h.store.DB().WithContext(r.Context()).Exec(
+		if err := h.store.DB().WithContext(c.Request.Context()).Exec(
 			`UPDATE t_agenthub_template SET recommended = ? WHERE template_id = ? AND deleted_at IS NULL`,
 			*req.Recommended, templateID,
 		).Error; err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to update template: "+err.Error())
+			httputil.WriteError(c, http.StatusInternalServerError, "failed to update template: "+err.Error())
 			return
 		}
 	}
-	w.WriteHeader(http.StatusNoContent)
+	httputil.WriteNoContent(c)
 }
 
-func (h *AgentHubHandler) CreateSnapshot(w http.ResponseWriter, r *http.Request) {
-	agentID := mux.Vars(r)["agentID"]
+func (h *AgentHubHandler) CreateSnapshot(c *gin.Context) {
+	agentID := c.Param("agentID")
 	var req struct {
 		Name *string `json:"name"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	_ = c.ShouldBindJSON(&req)
 
-	inst, err := h.store.GetInstance(r.Context(), agentID)
+	inst, err := h.store.GetInstance(c.Request.Context(), agentID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to get instance: "+err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to get instance: "+err.Error())
 		return
 	}
 	if inst == nil {
-		writeError(w, http.StatusNotFound, "instance not found")
+		httputil.WriteError(c, http.StatusNotFound, "instance not found")
 		return
 	}
 
@@ -1206,7 +1238,7 @@ func (h *AgentHubHandler) CreateSnapshot(w http.ResponseWriter, r *http.Request)
 		snapshotID := fmt.Sprintf("agenthub-%s", uuid.New().String())
 		snapPath := openclawHostSnapshotPath(snapshotID)
 		if err := copyOpenclawStateDir(sourceOpenclawPath, snapPath); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to copy OpenClaw state: "+err.Error())
+			httputil.WriteError(c, http.StatusInternalServerError, "failed to copy OpenClaw state: "+err.Error())
 			return
 		}
 
@@ -1223,7 +1255,7 @@ func (h *AgentHubHandler) CreateSnapshot(w http.ResponseWriter, r *http.Request)
 			rootfsSourceType = *inst.RootfsSourceType
 		}
 
-		err = h.store.DB().WithContext(r.Context()).Exec(
+		err = h.store.DB().WithContext(c.Request.Context()).Exec(
 			`INSERT INTO t_agenthub_snapshot (
 				snapshot_id, agent_id, sandbox_id, name, status, snapshot_kind, origin_sandbox_id,
 				rootfs_source_type, rootfs_source_id, rootfs_snapshot_id, openclaw_state_snapshot_path, deleted_at
@@ -1240,12 +1272,12 @@ func (h *AgentHubHandler) CreateSnapshot(w http.ResponseWriter, r *http.Request)
 			rootfsSourceType, rootfsSnapshotID, rootfsSnapshotID, snapPath,
 		).Error
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to record snapshot: "+err.Error())
+			httputil.WriteError(c, http.StatusInternalServerError, "failed to record snapshot: "+err.Error())
 			return
 		}
 
-		_ = h.store.RecordOperation(r.Context(), agentID, inst.SandboxID, "snapshot", "succeeded", "")
-		writeJSON(w, http.StatusCreated, map[string]interface{}{
+		_ = h.store.RecordOperation(c.Request.Context(), agentID, inst.SandboxID, "snapshot", "succeeded", "")
+		httputil.WriteJSON(c, http.StatusCreated, map[string]interface{}{
 			"snapshotID": snapshotID,
 			"names":      []string{},
 			"status":     "ready",
@@ -1256,14 +1288,14 @@ func (h *AgentHubHandler) CreateSnapshot(w http.ResponseWriter, r *http.Request)
 	// full_snapshot mode: create a CubeMaster snapshot of the entire sandbox.
 	// Matches old Rust create_agent_snapshot full_snapshot branch.
 	requestID := fmt.Sprintf("req-%d", time.Now().UnixNano())
-	snapResp, err := h.cm.CreateSnapshot(r.Context(), map[string]interface{}{
+	snapResp, err := h.cm.CreateSnapshot(c.Request.Context(), map[string]interface{}{
 		"request_id":     requestID,
 		"sandbox_id":     inst.SandboxID,
 		"display_name":   displayName,
 		"create_request": map[string]interface{}{},
 	})
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "failed to create snapshot: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "failed to create snapshot: "+err.Error())
 		return
 	}
 
@@ -1278,16 +1310,16 @@ func (h *AgentHubHandler) CreateSnapshot(w http.ResponseWriter, r *http.Request)
 			RetMsg  string `json:"ret_msg"`
 		} `json:"ret"`
 	}
-	json.Unmarshal(snapResp, &snapResult)
+	_ = json.Unmarshal(snapResp, &snapResult)
 	if snapResult.Snapshot.SnapshotID == "" {
-		writeError(w, http.StatusBadGateway, "CubeMaster returned empty snapshot_id: "+snapResult.Ret.RetMsg)
+		httputil.WriteError(c, http.StatusBadGateway, "CubeMaster returned empty snapshot_id: "+snapResult.Ret.RetMsg)
 		return
 	}
 
 	snapshotID := snapResult.Snapshot.SnapshotID
 
 	// Insert snapshot record (matching old Rust upsert_snapshot_info)
-	err = h.store.DB().WithContext(r.Context()).Exec(
+	err = h.store.DB().WithContext(c.Request.Context()).Exec(
 		`INSERT INTO t_agenthub_snapshot (
 			snapshot_id, agent_id, sandbox_id, name, status, snapshot_kind, origin_sandbox_id,
 			rootfs_source_type, rootfs_source_id, rootfs_snapshot_id, deleted_at
@@ -1299,74 +1331,73 @@ func (h *AgentHubHandler) CreateSnapshot(w http.ResponseWriter, r *http.Request)
 		inst.SandboxID, snapshotID, snapshotID,
 	).Error
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to record snapshot: "+err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to record snapshot: "+err.Error())
 		return
 	}
 
 	// Record operation for "最近操作" history (matching old CubeAPI).
-	_ = h.store.RecordOperation(r.Context(), agentID, inst.SandboxID, "snapshot", "succeeded", "")
+	_ = h.store.RecordOperation(c.Request.Context(), agentID, inst.SandboxID, "snapshot", "succeeded", "")
 
-	writeJSON(w, http.StatusCreated, map[string]interface{}{
+	httputil.WriteJSON(c, http.StatusCreated, map[string]interface{}{
 		"snapshotID": snapshotID,
 		"names":      []string{},
 		"status":     "ready",
 	})
 }
 
-func (h *AgentHubHandler) UpdateSnapshot(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	agentID := vars["agentID"]
-	snapshotID := vars["snapshotID"]
+func (h *AgentHubHandler) UpdateSnapshot(c *gin.Context) {
+	agentID := c.Param("agentID")
+	snapshotID := c.Param("snapshotID")
 	var req struct {
 		Name      *string `json:"name"`
 		IsHealthy *bool   `json:"isHealthy"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httputil.WriteError(c, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if req.Name != nil {
-		if err := h.store.DB().WithContext(r.Context()).Exec(
+		if err := h.store.DB().WithContext(c.Request.Context()).Exec(
 			`UPDATE t_agenthub_snapshot SET name = ? WHERE snapshot_id = ? AND agent_id = ? AND deleted_at IS NULL`,
 			*req.Name, snapshotID, agentID,
 		).Error; err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to update snapshot: "+err.Error())
+			httputil.WriteError(c, http.StatusInternalServerError, "failed to update snapshot: "+err.Error())
 			return
 		}
 	}
 	if req.IsHealthy != nil {
-		if err := h.store.DB().WithContext(r.Context()).Exec(
+		if err := h.store.DB().WithContext(c.Request.Context()).Exec(
 			`UPDATE t_agenthub_snapshot SET is_healthy = ? WHERE snapshot_id = ? AND agent_id = ? AND deleted_at IS NULL`,
 			*req.IsHealthy, snapshotID, agentID,
 		).Error; err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to update snapshot: "+err.Error())
+			httputil.WriteError(c, http.StatusInternalServerError, "failed to update snapshot: "+err.Error())
 			return
 		}
 	}
-	w.WriteHeader(http.StatusNoContent)
+	httputil.WriteNoContent(c)
 }
 
-func (h *AgentHubHandler) RollbackAgent(w http.ResponseWriter, r *http.Request) {
-	agentID := mux.Vars(r)["agentID"]
+func (h *AgentHubHandler) RollbackAgent(c *gin.Context) {
+	agentID := c.Param("agentID")
 	var req struct {
 		SnapshotID string `json:"snapshotId"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httputil.WriteError(c, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if req.SnapshotID == "" {
-		writeError(w, http.StatusBadRequest, "snapshotId is required")
+		httputil.WriteError(c, http.StatusBadRequest, "snapshotId is required")
 		return
 	}
 
-	inst, err := h.store.GetInstance(r.Context(), agentID)
+	inst, err := h.store.GetInstance(c.Request.Context(), agentID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to get instance: "+err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to get instance: "+err.Error())
 		return
 	}
 	if inst == nil {
-		writeError(w, http.StatusNotFound, "instance not found")
+		httputil.WriteError(c, http.StatusNotFound, "instance not found")
 		return
 	}
 
@@ -1374,18 +1405,18 @@ func (h *AgentHubHandler) RollbackAgent(w http.ResponseWriter, r *http.Request) 
 	// shared_files / agenthub_state snapshots store OpenClaw state on the host
 	// filesystem, not in CubeMaster — they must be restored by copying the host
 	// state directory and restarting OpenClaw, not via RollbackSandbox.
-	snap, _ := h.store.GetAgentSnapshot(r.Context(), agentID, req.SnapshotID)
+	snap, _ := h.store.GetAgentSnapshot(c.Request.Context(), agentID, req.SnapshotID)
 	if snap != nil && snap.SnapshotKind != nil && *snap.SnapshotKind == "agenthub_state" {
 		if snap.OpenclawStateSnapshotPath == nil || *snap.OpenclawStateSnapshotPath == "" {
-			writeError(w, http.StatusBadRequest, "snapshot has no OpenClaw state path")
+			httputil.WriteError(c, http.StatusBadRequest, "snapshot has no OpenClaw state path")
 			return
 		}
 		if inst.OpenclawStatePath == nil || *inst.OpenclawStatePath == "" {
-			writeError(w, http.StatusBadRequest, "instance has no active OpenClaw state path")
+			httputil.WriteError(c, http.StatusBadRequest, "instance has no active OpenClaw state path")
 			return
 		}
 		if err := copyOpenclawStateDir(*snap.OpenclawStateSnapshotPath, *inst.OpenclawStatePath); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to restore OpenClaw state: "+err.Error())
+			httputil.WriteError(c, http.StatusInternalServerError, "failed to restore OpenClaw state: "+err.Error())
 			return
 		}
 		// Restart OpenClaw to pick up the restored state.
@@ -1397,52 +1428,52 @@ func (h *AgentHubHandler) RollbackAgent(w http.ResponseWriter, r *http.Request) 
 			} else if output != nil {
 				errMsg = output.Stderr
 			}
-			writeError(w, http.StatusBadGateway, "OpenClaw restart failed after state restore: "+errMsg)
+			httputil.WriteError(c, http.StatusBadGateway, "OpenClaw restart failed after state restore: "+errMsg)
 			return
 		}
 	} else {
 		// full_snapshot / sandbox snapshot: delegate to CubeMaster.
-		_, err = h.cm.RollbackSandbox(r.Context(), inst.SandboxID, map[string]string{
+		_, err = h.cm.RollbackSandbox(c.Request.Context(), inst.SandboxID, map[string]string{
 			"snapshot_id": req.SnapshotID,
 		})
 		if err != nil {
-			writeError(w, http.StatusBadGateway, "failed to rollback: "+err.Error())
+			httputil.WriteError(c, http.StatusBadGateway, "failed to rollback: "+err.Error())
 			return
 		}
 	}
 
-	_ = h.store.UpdateInstanceStatus(r.Context(), agentID, "running")
+	_ = h.store.UpdateInstanceStatus(c.Request.Context(), agentID, "running")
 	// Record operation for "最近操作" history (matching old CubeAPI).
-	_ = h.store.RecordOperation(r.Context(), agentID, inst.SandboxID, "rollback", "succeeded", "")
-	writeJSON(w, http.StatusOK, map[string]string{"status": "rolled-back"})
+	_ = h.store.RecordOperation(c.Request.Context(), agentID, inst.SandboxID, "rollback", "succeeded", "")
+	httputil.WriteJSON(c, http.StatusOK, map[string]string{"status": "rolled-back"})
 }
 
-func (h *AgentHubHandler) RecoverAgent(w http.ResponseWriter, r *http.Request) {
+func (h *AgentHubHandler) RecoverAgent(c *gin.Context) {
 	// Crash auto-recovery: attempt to bring OpenClaw back to a healthy state.
 	// Matches old Rust recover_agent_openclaw exactly:
 	//
 	//  1. Try a plain restart — enough for transient failures.
 	//  2. If restart fails, roll back to the latest known-healthy snapshot.
 	//  3. Restart OpenClaw again after rollback.
-	agentID := mux.Vars(r)["agentID"]
-	inst, err := h.store.GetInstance(r.Context(), agentID)
+	agentID := c.Param("agentID")
+	inst, err := h.store.GetInstance(c.Request.Context(), agentID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to get instance: "+err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to get instance: "+err.Error())
 		return
 	}
 	if inst == nil {
-		writeError(w, http.StatusNotFound, "instance not found")
+		httputil.WriteError(c, http.StatusNotFound, "instance not found")
 		return
 	}
 
-	ctx := r.Context()
+	ctx := c.Request.Context()
 
 	// Step 1: a plain restart is enough for transient failures.
 	output, err := restartOpenclawForInstance(inst)
 	if err == nil && output.ExitCode == 0 {
 		_ = h.store.UpdateInstanceStatus(ctx, agentID, "running")
 		_ = h.store.RecordOperation(ctx, agentID, inst.SandboxID, "recover", "succeeded", "")
-		writeJSON(w, http.StatusOK, map[string]interface{}{
+		httputil.WriteJSON(c, http.StatusOK, map[string]interface{}{
 			"recovered":  true,
 			"method":     "restart",
 			"snapshotId": nil,
@@ -1464,13 +1495,13 @@ func (h *AgentHubHandler) RecoverAgent(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		_ = h.store.UpdateInstanceStatus(ctx, agentID, "error")
 		_ = h.store.RecordOperation(ctx, agentID, inst.SandboxID, "recover", "failed", "failed to look up healthy snapshot: "+err.Error())
-		writeError(w, http.StatusInternalServerError, "failed to look up healthy snapshot: "+err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to look up healthy snapshot: "+err.Error())
 		return
 	}
 	if snapshotID == "" {
 		_ = h.store.UpdateInstanceStatus(ctx, agentID, "error")
 		_ = h.store.RecordOperation(ctx, agentID, inst.SandboxID, "recover", "failed", "no healthy snapshot available")
-		writeError(w, http.StatusConflict, "OpenClaw is unhealthy and no healthy snapshot is available to recover from")
+		httputil.WriteError(c, http.StatusConflict, "OpenClaw is unhealthy and no healthy snapshot is available to recover from")
 		return
 	}
 
@@ -1483,19 +1514,19 @@ func (h *AgentHubHandler) RecoverAgent(w http.ResponseWriter, r *http.Request) {
 		if snap.OpenclawStateSnapshotPath == nil || *snap.OpenclawStateSnapshotPath == "" {
 			_ = h.store.UpdateInstanceStatus(ctx, agentID, "error")
 			_ = h.store.RecordOperation(ctx, agentID, inst.SandboxID, "recover", "failed", "healthy snapshot has no OpenClaw state path")
-			writeError(w, http.StatusInternalServerError, "cannot recover: healthy snapshot has no OpenClaw state path")
+			httputil.WriteError(c, http.StatusInternalServerError, "cannot recover: healthy snapshot has no OpenClaw state path")
 			return
 		}
 		if inst.OpenclawStatePath == nil || *inst.OpenclawStatePath == "" {
 			_ = h.store.UpdateInstanceStatus(ctx, agentID, "error")
 			_ = h.store.RecordOperation(ctx, agentID, inst.SandboxID, "recover", "failed", "instance has no active OpenClaw state path")
-			writeError(w, http.StatusInternalServerError, "cannot recover: instance has no active OpenClaw state path")
+			httputil.WriteError(c, http.StatusInternalServerError, "cannot recover: instance has no active OpenClaw state path")
 			return
 		}
 		if err := copyOpenclawStateDir(*snap.OpenclawStateSnapshotPath, *inst.OpenclawStatePath); err != nil {
 			_ = h.store.UpdateInstanceStatus(ctx, agentID, "error")
 			_ = h.store.RecordOperation(ctx, agentID, inst.SandboxID, "recover", "failed", "state restore failed: "+err.Error())
-			writeError(w, http.StatusInternalServerError, "failed to restore OpenClaw state: "+err.Error())
+			httputil.WriteError(c, http.StatusInternalServerError, "failed to restore OpenClaw state: "+err.Error())
 			return
 		}
 	} else {
@@ -1505,7 +1536,7 @@ func (h *AgentHubHandler) RecoverAgent(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			_ = h.store.UpdateInstanceStatus(ctx, agentID, "error")
 			_ = h.store.RecordOperation(ctx, agentID, inst.SandboxID, "recover", "failed", "rollback failed: "+err.Error())
-			writeError(w, http.StatusBadGateway, "failed to rollback sandbox: "+err.Error())
+			httputil.WriteError(c, http.StatusBadGateway, "failed to rollback sandbox: "+err.Error())
 			return
 		}
 	}
@@ -1521,35 +1552,35 @@ func (h *AgentHubHandler) RecoverAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = h.store.UpdateInstanceStatus(ctx, agentID, "error")
 		_ = h.store.RecordOperation(ctx, agentID, inst.SandboxID, "recover", "failed", "post-rollback restart failed: "+postErr)
-		writeError(w, http.StatusInternalServerError, "OpenClaw restart failed after rollback: "+postErr)
+		httputil.WriteError(c, http.StatusInternalServerError, "OpenClaw restart failed after rollback: "+postErr)
 		return
 	}
 
 	_ = h.store.SetBaseSnapshotID(ctx, agentID, snapshotID)
 	_ = h.store.UpdateInstanceStatus(ctx, agentID, "running")
 	_ = h.store.RecordOperation(ctx, agentID, inst.SandboxID, "recover", "succeeded", "")
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	httputil.WriteJSON(c, http.StatusOK, map[string]interface{}{
 		"recovered":  true,
 		"method":     "rollback",
 		"snapshotId": snapshotID,
 	})
 }
 
-func (h *AgentHubHandler) CloneAgent(w http.ResponseWriter, r *http.Request) {
-	agentID := mux.Vars(r)["agentID"]
+func (h *AgentHubHandler) CloneAgent(c *gin.Context) {
+	agentID := c.Param("agentID")
 	var req struct {
 		Name       *string `json:"name"`
 		SnapshotID *string `json:"snapshotId"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	_ = c.ShouldBindJSON(&req)
 
-	inst, err := h.store.GetInstance(r.Context(), agentID)
+	inst, err := h.store.GetInstance(c.Request.Context(), agentID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to get instance: "+err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to get instance: "+err.Error())
 		return
 	}
 	if inst == nil {
-		writeError(w, http.StatusNotFound, "instance not found")
+		httputil.WriteError(c, http.StatusNotFound, "instance not found")
 		return
 	}
 
@@ -1574,7 +1605,7 @@ func (h *AgentHubHandler) CloneAgent(w http.ResponseWriter, r *http.Request) {
 	rootfsSnapshotID := snapshotID
 	var sourceOpenclawStatePath string
 	if req.SnapshotID != nil && strings.TrimSpace(*req.SnapshotID) != "" {
-		if snap, _ := h.store.GetAgentSnapshot(r.Context(), agentID, snapshotID); snap != nil {
+		if snap, _ := h.store.GetAgentSnapshot(c.Request.Context(), agentID, snapshotID); snap != nil {
 			if snap.RootfsSnapshotID != nil && *snap.RootfsSnapshotID != "" {
 				rootfsSnapshotID = *snap.RootfsSnapshotID
 			}
@@ -1609,7 +1640,7 @@ func (h *AgentHubHandler) CloneAgent(w http.ResponseWriter, r *http.Request) {
 		cloneOpenclawPersistID = newOpenclawPersistID()
 		statePath, err := prepareOpenclawStateDir(cloneOpenclawPersistID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			httputil.WriteError(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 		cloneOpenclawStatePath = statePath
@@ -1635,7 +1666,7 @@ func (h *AgentHubHandler) CloneAgent(w http.ResponseWriter, r *http.Request) {
 	if cloneSharedFiles && cloneOpenclawStatePath != "" {
 		mountMeta, err := openclawHostMountMetadata(cloneOpenclawStatePath)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			httputil.WriteError(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 		labels["agenthub.openclaw.persist_id"] = cloneOpenclawPersistID
@@ -1643,7 +1674,7 @@ func (h *AgentHubHandler) CloneAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cmReq := map[string]interface{}{
-		"RequestID":     requestID,
+		"requestID":     requestID,
 		"instance_type": "cubebox",
 		"timeout":       86400,
 		"containers":    []interface{}{},
@@ -1664,32 +1695,32 @@ func (h *AgentHubHandler) CloneAgent(w http.ResponseWriter, r *http.Request) {
 	// real API key injection) must be installed on the cloned sandbox too,
 	// otherwise OpenClaw falls back to the placeholder key and gets HTTP 401
 	// from the LLM provider. (Matches CreateInstance behaviour.)
-	cloneLLMCfgForNet, _ := resolveLLMConfig(r.Context(), h.store)
+	cloneLLMCfgForNet, _ := resolveLLMConfig(c.Request.Context(), h.store)
 	if cloneLLMCfgForNet != nil {
 		if networkConfig, err := agenthubNetworkConfig(cloneLLMCfgForNet); err == nil && networkConfig != nil {
 			cmReq["cube_network_config"] = networkConfig
 		}
 	}
 
-	sandboxResp, err := h.cm.CreateSandbox(r.Context(), cmReq)
+	sandboxResp, err := h.cm.CreateSandbox(c.Request.Context(), cmReq)
 	if err != nil {
 		// Best-effort cleanup of the host state dir we just created.
 		if cloneOpenclawStatePath != "" {
 			_ = os.RemoveAll(cloneOpenclawStatePath)
 		}
-		writeError(w, http.StatusBadGateway, "failed to create clone sandbox: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "failed to create clone sandbox: "+err.Error())
 		return
 	}
 
 	var sbResult struct {
 		SandboxID string `json:"sandbox_id"`
 	}
-	json.Unmarshal(sandboxResp, &sbResult)
+	_ = json.Unmarshal(sandboxResp, &sbResult)
 	if sbResult.SandboxID == "" {
 		if cloneOpenclawStatePath != "" {
 			_ = os.RemoveAll(cloneOpenclawStatePath)
 		}
-		writeError(w, http.StatusBadGateway, "CubeMaster returned empty sandbox_id")
+		httputil.WriteError(c, http.StatusBadGateway, "CubeMaster returned empty sandbox_id")
 		return
 	}
 
@@ -1726,7 +1757,7 @@ func (h *AgentHubHandler) CloneAgent(w http.ResponseWriter, r *http.Request) {
 	// A copied/full-snapshot sandbox already carries OpenClaw state, so we
 	// only merge LLM settings and keep its gateway token; a fresh shared-files
 	// mount needs a full init with a new token. (Matches old Rust logic.)
-	cloneLLMCfg, err := resolveLLMConfig(r.Context(), h.store)
+	cloneLLMCfg, err := resolveLLMConfig(c.Request.Context(), h.store)
 	if err != nil {
 		slog.Warn("CloneAgent: failed to resolve LLM config", "err", err)
 	}
@@ -1760,11 +1791,17 @@ func (h *AgentHubHandler) CloneAgent(w http.ResponseWriter, r *http.Request) {
 			slog.Error("CloneAgent: failed to apply OpenClaw config, killing clone sandbox",
 				"agentID", agentID, "sandboxID", sbResult.SandboxID, "err", applyErr)
 			// Best-effort kill the clone sandbox since OpenClaw didn't start.
-			h.cm.DeleteSandbox(r.Context(), sbResult.SandboxID)
+			if _, derr := h.cm.DeleteSandbox(c.Request.Context(), map[string]interface{}{
+				"RequestID":     fmt.Sprintf("req-%d", time.Now().UnixNano()),
+				"sandbox_id":    sbResult.SandboxID,
+				"instance_type": "cubebox",
+			}); derr != nil {
+				slog.Warn("CloneAgent: best-effort delete failed", "sandboxID", sbResult.SandboxID, "err", derr)
+			}
 			if cloneOpenclawStatePath != "" {
 				_ = os.RemoveAll(cloneOpenclawStatePath)
 			}
-			writeError(w, http.StatusBadGateway, "failed to apply OpenClaw config: "+applyErr.Error())
+			httputil.WriteError(c, http.StatusBadGateway, "failed to apply OpenClaw config: "+applyErr.Error())
 			return
 		}
 		_ = applyOutput
@@ -1823,36 +1860,36 @@ func (h *AgentHubHandler) CloneAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := h.store.UpsertInstance(r.Context(), clone); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create clone record: "+err.Error())
+	if err := h.store.UpsertInstance(c.Request.Context(), clone); err != nil {
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to create clone record: "+err.Error())
 		return
 	}
 
 	// Record operation for "最近操作" history (matching old CubeAPI).
-	_ = h.store.RecordOperation(r.Context(), agentID, inst.SandboxID, "clone", "succeeded", "")
+	_ = h.store.RecordOperation(c.Request.Context(), agentID, inst.SandboxID, "clone", "succeeded", "")
 
-	writeJSON(w, http.StatusCreated, clone)
+	httputil.WriteJSON(c, http.StatusCreated, clone)
 }
 
-func (h *AgentHubHandler) PublishTemplate(w http.ResponseWriter, r *http.Request) {
-	agentID := mux.Vars(r)["agentID"]
+func (h *AgentHubHandler) PublishTemplate(c *gin.Context) {
+	agentID := c.Param("agentID")
 	var req struct {
 		Name       *string `json:"name"`
 		SnapshotID *string `json:"snapshotId"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	_ = c.ShouldBindJSON(&req)
 
-	inst, err := h.store.GetInstance(r.Context(), agentID)
+	inst, err := h.store.GetInstance(c.Request.Context(), agentID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to get instance: "+err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to get instance: "+err.Error())
 		return
 	}
 	if inst == nil {
-		writeError(w, http.StatusNotFound, "instance not found")
+		httputil.WriteError(c, http.StatusNotFound, "instance not found")
 		return
 	}
 
-	ctx := r.Context()
+	ctx := c.Request.Context()
 	snapshotID := ""
 	if req.SnapshotID != nil {
 		snapshotID = strings.TrimSpace(*req.SnapshotID)
@@ -1880,14 +1917,14 @@ func (h *AgentHubHandler) PublishTemplate(w http.ResponseWriter, r *http.Request
 				sourceOpenclawPath = *inst.OpenclawStatePath
 			}
 			if sourceOpenclawPath == "" {
-				writeError(w, http.StatusBadRequest, "current assistant does not have an OpenClaw host state directory")
+				httputil.WriteError(c, http.StatusBadRequest, "current assistant does not have an OpenClaw host state directory")
 				return
 			}
 
 			snapshotID = fmt.Sprintf("agenthub-%s", uuid.New().String())
 			snapPath := openclawHostSnapshotPath(snapshotID)
 			if err := copyOpenclawStateDir(sourceOpenclawPath, snapPath); err != nil {
-				writeError(w, http.StatusInternalServerError, "failed to copy OpenClaw state: "+err.Error())
+				httputil.WriteError(c, http.StatusInternalServerError, "failed to copy OpenClaw state: "+err.Error())
 				return
 			}
 
@@ -1930,17 +1967,17 @@ func (h *AgentHubHandler) PublishTemplate(w http.ResponseWriter, r *http.Request
 				"instance_type": "cubebox",
 			})
 			if err != nil {
-				writeError(w, http.StatusBadGateway, "failed to create snapshot for template: "+err.Error())
+				httputil.WriteError(c, http.StatusBadGateway, "failed to create snapshot for template: "+err.Error())
 				return
 			}
 
 			var snapResult struct {
 				SnapshotID string `json:"snapshot_id"`
 			}
-			json.Unmarshal(snapResp, &snapResult)
+			_ = json.Unmarshal(snapResp, &snapResult)
 			snapshotID = snapResult.SnapshotID
 			if snapshotID == "" {
-				writeError(w, http.StatusBadGateway, "CubeMaster returned empty snapshot_id")
+				httputil.WriteError(c, http.StatusBadGateway, "CubeMaster returned empty snapshot_id")
 				return
 			}
 
@@ -1991,7 +2028,7 @@ func (h *AgentHubHandler) PublishTemplate(w http.ResponseWriter, r *http.Request
 		inst.Model, inst.Version, persistenceModePtr,
 	).Error
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to publish template: "+err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to publish template: "+err.Error())
 		return
 	}
 
@@ -2004,7 +2041,7 @@ func (h *AgentHubHandler) PublishTemplate(w http.ResponseWriter, r *http.Request
 	// Record operation.
 	_ = h.store.RecordOperation(ctx, agentID, inst.SandboxID, "publish_template", "succeeded", "")
 
-	writeJSON(w, http.StatusCreated, map[string]string{
+	httputil.WriteJSON(c, http.StatusCreated, map[string]string{
 		"templateId": templateID,
 		"snapshotId": snapshotID,
 	})

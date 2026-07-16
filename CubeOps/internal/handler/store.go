@@ -10,14 +10,21 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+
+	"github.com/gin-gonic/gin"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/httputil"
 )
 
 // StoreHandler handles store image metadata HTTP requests.
 type StoreHandler struct{}
 
 // NewStoreHandler creates a new store handler.
-func NewStoreHandler() *StoreHandler {
-	return &StoreHandler{}
+func NewStoreHandler() *StoreHandler { return &StoreHandler{} }
+
+// Register installs the store routes on the given router group.
+func (h *StoreHandler) Register(r *gin.RouterGroup) {
+	r.GET("/store/meta", h.GetStoreMeta)
+	r.POST("/store/refresh", h.RefreshStoreMeta)
 }
 
 var storeImages = []string{
@@ -28,11 +35,11 @@ var storeImages = []string{
 
 // ImageMeta is the per-image metadata entry.
 type ImageMeta struct {
-	Image       string   `json:"image"`
-	SizeBytes   uint64   `json:"sizeBytes"`
-	SizeMB      float64  `json:"sizeMb"`
-	Digest      *string  `json:"digest"`
-	DigestShort *string  `json:"digestShort"`
+	Image       string  `json:"image"`
+	SizeBytes   uint64  `json:"sizeBytes"`
+	SizeMB      float64 `json:"sizeMb"`
+	Digest      *string `json:"digest"`
+	DigestShort *string `json:"digestShort"`
 }
 
 // StoreMeta is the response for GET /store/meta.
@@ -47,58 +54,48 @@ type dockerInspectResult struct {
 }
 
 // GetStoreMeta handles GET /store/meta.
-func (h *StoreHandler) GetStoreMeta(w http.ResponseWriter, r *http.Request) {
-	var mu sync.Mutex
-	images := make([]ImageMeta, 0, len(storeImages))
-	var wg sync.WaitGroup
-
-	for _, img := range storeImages {
-		wg.Add(1)
-		go func(image string) {
-			defer wg.Done()
-			meta := inspectImage(image)
-			if meta != nil {
-				mu.Lock()
-				images = append(images, *meta)
-				mu.Unlock()
-			}
-		}(img)
-	}
-	wg.Wait()
-
-	writeJSON(w, http.StatusOK, StoreMeta{Images: images})
+func (h *StoreHandler) GetStoreMeta(c *gin.Context) {
+	httputil.WriteJSON(c, http.StatusOK, StoreMeta{Images: inspectAll(storeImages, false)})
 }
 
 // RefreshStoreMeta handles POST /store/refresh.
-func (h *StoreHandler) RefreshStoreMeta(w http.ResponseWriter, r *http.Request) {
-	var mu sync.Mutex
-	images := make([]ImageMeta, 0, len(storeImages))
-	var wg sync.WaitGroup
+func (h *StoreHandler) RefreshStoreMeta(c *gin.Context) {
+	httputil.WriteJSON(c, http.StatusOK, StoreMeta{Images: inspectAll(storeImages, true)})
+}
 
-	for _, img := range storeImages {
+// inspectAll concurrently inspects each image and returns the metadata
+// slice. When pull is true, it also tries to docker pull each image first
+// (best-effort — pull failures fall back to whatever the local cache has).
+func inspectAll(images []string, pull bool) []ImageMeta {
+	var mu sync.Mutex
+	out := make([]ImageMeta, 0, len(images))
+	var wg sync.WaitGroup
+	for _, img := range images {
 		wg.Add(1)
 		go func(image string) {
 			defer wg.Done()
-			// Pull (ignore errors — image might not be accessible)
-			_ = exec.Command("docker", "pull", "--quiet", image).Run()
-			// Inspect regardless (use cached if pull failed)
-			meta := inspectImage(image)
-			if meta != nil {
-				mu.Lock()
-				images = append(images, *meta)
-				mu.Unlock()
+			if pull {
+				_ = exec.Command("docker", "pull", "--quiet", image).Run()
 			}
+			meta := inspectImage(image)
+			if meta == nil {
+				return
+			}
+			mu.Lock()
+			out = append(out, *meta)
+			mu.Unlock()
 		}(img)
 	}
 	wg.Wait()
-
-	writeJSON(w, http.StatusOK, StoreMeta{Images: images})
+	return out
 }
 
+// inspectImage returns the image metadata by shelling out to docker. The
+// result may be nil when the image is not present locally and pull failed.
 func inspectImage(image string) *ImageMeta {
 	output, err := exec.Command("docker", "image", "inspect", "--format", "{{json .}}", image).Output()
 	if err != nil {
-		return nil // image not present locally
+		return nil
 	}
 
 	raw := strings.TrimSpace(string(output))
@@ -112,10 +109,14 @@ func inspectImage(image string) *ImageMeta {
 		return nil
 	}
 
+	// Round size to 1 decimal place so the response is stable and readable.
+	// math.Round returns float64 so we apply the standard "round-half-away-from-zero"
+	// rounding by multiplying, rounding, then dividing.
 	sizeMB := float64(info.Size) / (1024.0 * 1024.0)
-	sizeMB = math.Round(sizeMB*10) / 10 // round to 1 decimal
+	sizeMB = math.Round(sizeMB*10) / 10
 
-	// Pick the digest that matches the queried registry (first match wins)
+	// Pick the digest that matches the queried registry (first match wins);
+	// fall back to the first available digest if no match is found.
 	registry := ""
 	if parts := strings.SplitN(image, "/", 2); len(parts) > 0 {
 		registry = parts[0]

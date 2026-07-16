@@ -19,28 +19,28 @@ import (
 
 // AgentInstance matches the old Rust AgentInstanceResponse exactly.
 type AgentInstance struct {
-	ID               string             `json:"id"`
-	Name             string             `json:"name"`
-	Status           string             `json:"status"`
-	Engine           string             `json:"engine"`
-	Env              string             `json:"env"`
-	Model            string             `json:"model"`
-	Version          string             `json:"version"`
-	Bots             []string           `json:"bots"`
-	BotsAvailable    []string           `json:"botsAvailable"`
-	Avatar           string             `json:"avatar"`
-	AvatarTone       string             `json:"avatarTone"`
-	SandboxID        string             `json:"sandboxId"`
-	TemplateID       string             `json:"templateId"`
-	GatewayURL       string             `json:"gatewayUrl"`
-	EnvURL           string             `json:"envUrl"`
-	PersistenceMode  *string            `json:"persistenceMode,omitempty"`
-	RootfsSourceType *string            `json:"rootfsSourceType,omitempty"`
-	RootfsSourceID   *string            `json:"rootfsSourceId,omitempty"`
+	ID                string            `json:"id"`
+	Name              string            `json:"name"`
+	Status            string            `json:"status"`
+	Engine            string            `json:"engine"`
+	Env               string            `json:"env"`
+	Model             string            `json:"model"`
+	Version           string            `json:"version"`
+	Bots              []string          `json:"bots"`
+	BotsAvailable     []string          `json:"botsAvailable"`
+	Avatar            string            `json:"avatar"`
+	AvatarTone        string            `json:"avatarTone"`
+	SandboxID         string            `json:"sandboxId"`
+	TemplateID        string            `json:"templateId"`
+	GatewayURL        string            `json:"gatewayUrl"`
+	EnvURL            string            `json:"envUrl"`
+	PersistenceMode   *string           `json:"persistenceMode,omitempty"`
+	RootfsSourceType  *string           `json:"rootfsSourceType,omitempty"`
+	RootfsSourceID    *string           `json:"rootfsSourceId,omitempty"`
 	OpenclawPersistID *string           `json:"openclawPersistId,omitempty"`
 	OpenclawStatePath *string           `json:"openclawStatePath,omitempty"`
-	WecomConfig      *AgentWecomConfig  `json:"wecomConfig,omitempty"`
-	Setup            *AgentSetupResult  `json:"setup,omitempty"`
+	WecomConfig       *AgentWecomConfig `json:"wecomConfig,omitempty"`
+	Setup             *AgentSetupResult `json:"setup,omitempty"`
 
 	// Internal fields (not serialized to JSON)
 	BaseSnapshotID string `json:"-"`
@@ -249,21 +249,21 @@ func (s *Store) UpdateAgentWecomConfig(ctx context.Context, agentID, botID, botS
 
 // AgentSnapshot matches the old Rust AgentSnapshotResponse.
 type AgentSnapshot struct {
-	SnapshotID                string  `json:"snapshotID"`
+	SnapshotID                string   `json:"snapshotID"`
 	Names                     []string `json:"names"`
-	Status                    string  `json:"status"`
-	SnapshotKind              *string `json:"snapshotKind,omitempty"`
-	OriginSandboxID           *string `json:"originSandboxID,omitempty"`
-	PublishedTemplate         *string `json:"publishedTemplateId,omitempty"`
-	RootfsSourceType          *string `json:"rootfsSourceType,omitempty"`
-	RootfsSourceID            *string `json:"rootfsSourceId,omitempty"`
-	RootfsSnapshotID          *string `json:"rootfsSnapshotId,omitempty"`
-	OpenclawStateSnapshotPath *string `json:"openclawStateSnapshotPath,omitempty"`
-	TemplateRef               bool    `json:"templateReferenced"`
-	IsHealthy                 bool    `json:"isHealthy"`
-	ParentSnapshotID          *string `json:"parentSnapshotID,omitempty"`
-	CreatedAt                 *string `json:"createdAt,omitempty"`
-	UpdatedAt                 *string `json:"updatedAt,omitempty"`
+	Status                    string   `json:"status"`
+	SnapshotKind              *string  `json:"snapshotKind,omitempty"`
+	OriginSandboxID           *string  `json:"originSandboxID,omitempty"`
+	PublishedTemplate         *string  `json:"publishedTemplateId,omitempty"`
+	RootfsSourceType          *string  `json:"rootfsSourceType,omitempty"`
+	RootfsSourceID            *string  `json:"rootfsSourceId,omitempty"`
+	RootfsSnapshotID          *string  `json:"rootfsSnapshotId,omitempty"`
+	OpenclawStateSnapshotPath *string  `json:"openclawStateSnapshotPath,omitempty"`
+	TemplateRef               bool     `json:"templateReferenced"`
+	IsHealthy                 bool     `json:"isHealthy"`
+	ParentSnapshotID          *string  `json:"parentSnapshotID,omitempty"`
+	CreatedAt                 *string  `json:"createdAt,omitempty"`
+	UpdatedAt                 *string  `json:"updatedAt,omitempty"`
 }
 
 // GetAgentSnapshot returns a single snapshot by agent_id and snapshot_id.

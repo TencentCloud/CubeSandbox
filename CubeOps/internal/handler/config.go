@@ -7,6 +7,9 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/gin-gonic/gin"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/httputil"
 )
 
 // ConfigHandler handles runtime config HTTP requests.
@@ -31,17 +34,22 @@ func NewConfigHandler(bind string, rateLimitPerSec uint32, authEnabled bool, san
 
 // RuntimeConfig is the response for GET /config.
 type RuntimeConfig struct {
-	APIEndpoint     string `json:"apiEndpoint"`     // CUBE_API_PUBLIC_HOST + /cubeapi/v1 (E2B SDK compatible, legacy)
-	OpsAPIEndpoint  string `json:"opsApiEndpoint"`  // CUBE_OPS_PUBLIC_HOST + /opsapi/v1 (CubeOps ops API)
+	APIEndpoint     string `json:"apiEndpoint"`    // CUBE_API_PUBLIC_HOST + /cubeapi/v1 (E2B SDK compatible, legacy)
+	OpsAPIEndpoint  string `json:"opsApiEndpoint"` // CUBE_OPS_PUBLIC_HOST + /opsapi/v1 (CubeOps ops API)
 	RateLimitPerSec uint32 `json:"rateLimitPerSec"`
 	AuthEnabled     bool   `json:"authEnabled"`
 	SandboxDomain   string `json:"sandboxDomain"`
 	InstanceType    string `json:"instanceType"`
 }
 
+// Register installs the config routes on the given router group.
+func (h *ConfigHandler) Register(r *gin.RouterGroup) {
+	r.GET("/config", h.GetConfig)
+}
+
 // GetConfig handles GET /config.
-func (h *ConfigHandler) GetConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, RuntimeConfig{
+func (h *ConfigHandler) GetConfig(c *gin.Context) {
+	httputil.WriteJSON(c, http.StatusOK, RuntimeConfig{
 		APIEndpoint:     publicAPIEndpoint(h.bind),
 		OpsAPIEndpoint:  publicOpsAPIEndpoint(h.bind),
 		RateLimitPerSec: h.rateLimitPerSec,

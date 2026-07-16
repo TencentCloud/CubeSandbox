@@ -80,6 +80,16 @@ func loadKey() ([]byte, error) {
 	return masterKey, nil
 }
 
+// ResetMasterKeyForTest clears the process-wide master key. It is only
+// intended for tests that need to spin up a fresh database with a different
+// key; calling it in production code would make all previously encrypted
+// secrets undecryptable. The function is safe to call concurrently.
+func ResetMasterKeyForTest() {
+	masterKeyMu.Lock()
+	defer masterKeyMu.Unlock()
+	masterKey = nil
+}
+
 // EncryptSecret encrypts a UTF-8 secret, returning an enc:v1: tagged, base64 payload.
 func EncryptSecret(plaintext string) (string, error) {
 	key, err := loadKey()

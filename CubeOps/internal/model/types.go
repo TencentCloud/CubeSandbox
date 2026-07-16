@@ -11,17 +11,17 @@ type LoginRequest struct {
 
 // LoginResponse is the response body for POST /auth/login.
 type LoginResponse struct {
-	AccessToken  string `json:"accessToken"`
-	RefreshToken string `json:"refreshToken"`
-	Username     string `json:"username"`
-	ExpiresInSecs int64 `json:"expiresInSecs"`
+	AccessToken   string `json:"accessToken"`
+	RefreshToken  string `json:"refreshToken"`
+	Username      string `json:"username"`
+	ExpiresInSecs int64  `json:"expiresInSecs"`
 }
 
 // SessionResponse is the response body for GET /auth/session.
 type SessionResponse struct {
-	AuthRequired bool   `json:"authRequired"`
-	Authenticated bool  `json:"authenticated"`
-	Username     string `json:"username,omitempty"`
+	AuthRequired  bool   `json:"authRequired"`
+	Authenticated bool   `json:"authenticated"`
+	Username      string `json:"username,omitempty"`
 }
 
 // ChangePasswordRequest is the request body for POST /auth/change-password.

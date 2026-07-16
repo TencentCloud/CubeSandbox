@@ -1,70 +1,109 @@
 // Copyright (c) 2026 Tencent Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+// Package config loads CubeOps configuration.
+//
+// Resolution order, highest priority first:
+//
+//  1. Environment variables (CUBE_OPS_*, DATABASE_URL, JWT_SECRET, ...).
+//     This keeps the existing deployment workflow working: systemd / k8s
+//     manifests keep using env vars without changes.
+//
+//  2. YAML file at the path in CUBE_OPS_CONFIG (or /etc/cube/ops.yaml if
+//     unset). YAML is the recommended way to configure CubeOps going forward
+//     because it groups all knobs in one place and supports comments.
+//
+//  3. Built-in defaults.
+//
+// The YAML schema is intentionally flat — one section per top-level
+// component. See config.example.yaml for a fully commented example.
 package config
 
 import (
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
+	"github.com/goccy/go-yaml"
 	"github.com/tencentcloud/CubeSandbox/cubedb/dao"
 )
 
 // Config holds all CubeOps runtime configuration.
 type Config struct {
 	// Server
-	Bind      string
-	LogLevel  string
-	JWTSecret string
+	Bind      string `yaml:"bind"`
+	LogLevel  string `yaml:"log_level"`
+	JWTSecret string `yaml:"jwt_secret"`
 
-	// Database
-	DatabaseURL string
+	// Database — either a single URL or the individual fields below.
+	DatabaseURL   string `yaml:"database_url"`
+	MySQLHost     string `yaml:"mysql_host"`
+	MySQLPort     int    `yaml:"mysql_port"`
+	MySQLUser     string `yaml:"mysql_user"`
+	MySQLPassword string `yaml:"mysql_password"`
+	MySQLDB       string `yaml:"mysql_db"`
 
 	// JWT
-	AccessTTL  time.Duration
-	RefreshTTL time.Duration
+	AccessTTL  time.Duration `yaml:"access_ttl"`
+	RefreshTTL time.Duration `yaml:"refresh_ttl"`
 
 	// CubeMaster
-	CubeMasterAddr string
+	CubeMasterAddr string `yaml:"cubemaster_addr"`
 
 	// CubeAPI (for SDK endpoint proxy)
-	CubeAPIURL string
+	CubeAPIURL string `yaml:"cubeapi_url"`
 
 	// Redis (optional)
-	RedisURL string
+	RedisURL string `yaml:"redis_url"`
 
 	// Sandbox domain exposed to SDK clients; matches SDK handler's
 	// CUBE_API_SANDBOX_DOMAIN env so the /config endpoint stays in sync.
-	SandboxDomain string
+	SandboxDomain string `yaml:"sandbox_domain"`
 }
 
-// Load reads configuration from environment variables.
+// Load reads configuration from YAML + environment variables (env wins).
 func Load() (*Config, error) {
-	cfg := &Config{
-		Bind:           envOr("CUBE_OPS_BIND", "127.0.0.1:3010"),
-		LogLevel:       envOr("CUBE_OPS_LOG_LEVEL", "info"),
-		JWTSecret:      os.Getenv("JWT_SECRET"),
-		DatabaseURL:    envOr("DATABASE_URL", ""),
-		CubeMasterAddr: envOr("CUBE_MASTER_ADDR", "http://127.0.0.1:8089"),
-		CubeAPIURL:     envOr("CUBE_API_URL", "http://127.0.0.1:3000"),
-		RedisURL:       os.Getenv("REDIS_URL"),
-		SandboxDomain:  envOr("CUBE_API_SANDBOX_DOMAIN", "cube.app"),
+	cfg, err := loadFromYAML()
+	if err != nil {
+		return nil, err
 	}
 
-	// Build DATABASE_URL from individual env vars if not set directly.
+	// Environment variable overrides take precedence.
+	overrideFromEnv(cfg)
+
+	// Build DATABASE_URL from individual fields if not set directly.
 	if cfg.DatabaseURL == "" {
-		cfg.DatabaseURL = buildMySQLURLFromEnv()
+		cfg.DatabaseURL = cfg.buildMySQLURL()
 	}
 
-	cfg.AccessTTL = parseDurationOr("JWT_ACCESS_TTL", 15*time.Minute)
-	cfg.RefreshTTL = parseDurationOr("JWT_REFRESH_TTL", 168*time.Hour)
+	// Default durations.
+	if cfg.AccessTTL == 0 {
+		cfg.AccessTTL = 15 * time.Minute
+	}
+	if cfg.RefreshTTL == 0 {
+		cfg.RefreshTTL = 168 * time.Hour
+	}
+	if cfg.Bind == "" {
+		cfg.Bind = "127.0.0.1:3010"
+	}
+	if cfg.LogLevel == "" {
+		cfg.LogLevel = "info"
+	}
+	if cfg.CubeMasterAddr == "" {
+		cfg.CubeMasterAddr = "http://127.0.0.1:8089"
+	}
+	if cfg.CubeAPIURL == "" {
+		cfg.CubeAPIURL = "http://127.0.0.1:3000"
+	}
+	if cfg.SandboxDomain == "" {
+		cfg.SandboxDomain = "cube.app"
+	}
 
-	// JWT_SECRET is optional — if not set via env, it will be auto-generated
-	// and persisted to the DB on first startup (see store.bootstrapJWTSecret).
+	// JWT_SECRET is optional — if not set, it will be auto-generated and
+	// persisted to the DB on first startup (see store.bootstrapJWTSecret).
 	if cfg.DatabaseURL == "" {
-		return nil, fmt.Errorf("DATABASE_URL (or CUBE_SANDBOX_MYSQL_* vars) is required")
+		return nil, fmt.Errorf("database_url (or mysql_host + mysql_user + mysql_password + mysql_db) is required (set in YAML %s or via DATABASE_URL env)",
+			yamlConfigPath())
 	}
 
 	return cfg, nil
@@ -72,74 +111,113 @@ func Load() (*Config, error) {
 
 // DaoConfig converts the CubeOps config to a cubedb dao.Config.
 func (c *Config) DaoConfig() dao.Config {
-	user, pass, addr, dbname := parseMySQLURL(c.DatabaseURL)
 	return dao.Config{
-		Driver:     "mysql",
-		User:       user,
-		Pwd:        pass,
-		Addr:       addr,
-		DBName:     dbname,
+		Driver:       "mysql",
+		User:         c.MySQLUser,
+		Pwd:          c.MySQLPassword,
+		Addr:         fmt.Sprintf("%s:%d", c.MySQLHost, c.MySQLPortOrDefault()),
+		DBName:       c.MySQLDB,
 		MaxIdleConns: 10,
 		MaxOpenConns: 100,
 	}
 }
 
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+// MySQLPortOrDefault returns the configured MySQL port or 3306.
+func (c *Config) MySQLPortOrDefault() int {
+	if c.MySQLPort == 0 {
+		return 3306
 	}
-	return def
+	return c.MySQLPort
 }
 
-func parseDurationOr(key string, def time.Duration) time.Duration {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil {
-		return def
-	}
-	return d
-}
-
-func buildMySQLURLFromEnv() string {
-	host := os.Getenv("CUBE_SANDBOX_MYSQL_HOST")
-	if host == "" {
+// buildMySQLURL builds a mysql:// URL from the individual MySQL fields.
+func (c *Config) buildMySQLURL() string {
+	if c.MySQLHost == "" {
 		return ""
 	}
-	port := envOr("CUBE_SANDBOX_MYSQL_PORT", "3306")
-	user := os.Getenv("CUBE_SANDBOX_MYSQL_USER")
-	pass := os.Getenv("CUBE_SANDBOX_MYSQL_PASSWORD")
-	db := os.Getenv("CUBE_SANDBOX_MYSQL_DB")
-	return fmt.Sprintf("mysql://%s:%s@%s:%s/%s", user, pass, host, port, db)
+	return fmt.Sprintf("mysql://%s:%s@%s:%d/%s",
+		c.MySQLUser, c.MySQLPassword, c.MySQLHost, c.MySQLPortOrDefault(), c.MySQLDB)
 }
 
-func parseMySQLURL(url string) (user, pass, addr, dbname string) {
-	// Strip mysql:// prefix
-	s := strings.TrimPrefix(url, "mysql://")
-	// Format: user:pass@host:port/db
-	atIdx := strings.LastIndex(s, "@")
-	if atIdx < 0 {
-		return
+func yamlConfigPath() string {
+	if p := os.Getenv("CUBE_OPS_CONFIG"); p != "" {
+		return p
 	}
-	userpass := s[:atIdx]
-	hostdb := s[atIdx+1:]
+	return "/etc/cube/ops.yaml"
+}
 
-	colonIdx := strings.Index(userpass, ":")
-	if colonIdx >= 0 {
-		user = userpass[:colonIdx]
-		pass = userpass[colonIdx+1:]
-	} else {
-		user = userpass
+// loadFromYAML reads config from the YAML file. If the file does not exist,
+// the returned config is the zero value (env vars / defaults fill in).
+// An existing-but-malformed file is a hard error.
+func loadFromYAML() (*Config, error) {
+	cfg := &Config{}
+	path := yamlConfigPath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return cfg, nil
+		}
+		return nil, fmt.Errorf("read config file %s: %w", path, err)
 	}
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parse config file %s: %w", path, err)
+	}
+	return cfg, nil
+}
 
-	slashIdx := strings.Index(hostdb, "/")
-	if slashIdx >= 0 {
-		addr = hostdb[:slashIdx]
-		dbname = hostdb[slashIdx+1:]
-	} else {
-		addr = hostdb
+// overrideFromEnv fills in any zero-valued fields from environment
+// variables. Env vars are higher priority than the YAML file.
+func overrideFromEnv(cfg *Config) {
+	if v := os.Getenv("CUBE_OPS_BIND"); v != "" {
+		cfg.Bind = v
 	}
-	return
+	if v := os.Getenv("CUBE_OPS_LOG_LEVEL"); v != "" {
+		cfg.LogLevel = v
+	}
+	if v := os.Getenv("JWT_SECRET"); v != "" {
+		cfg.JWTSecret = v
+	}
+	if v := os.Getenv("DATABASE_URL"); v != "" {
+		cfg.DatabaseURL = v
+	}
+	if v := os.Getenv("CUBE_SANDBOX_MYSQL_HOST"); v != "" {
+		cfg.MySQLHost = v
+	}
+	if v := os.Getenv("CUBE_SANDBOX_MYSQL_PORT"); v != "" {
+		var p int
+		if _, err := fmt.Sscanf(v, "%d", &p); err == nil {
+			cfg.MySQLPort = p
+		}
+	}
+	if v := os.Getenv("CUBE_SANDBOX_MYSQL_USER"); v != "" {
+		cfg.MySQLUser = v
+	}
+	if v := os.Getenv("CUBE_SANDBOX_MYSQL_PASSWORD"); v != "" {
+		cfg.MySQLPassword = v
+	}
+	if v := os.Getenv("CUBE_SANDBOX_MYSQL_DB"); v != "" {
+		cfg.MySQLDB = v
+	}
+	if v := os.Getenv("CUBE_MASTER_ADDR"); v != "" {
+		cfg.CubeMasterAddr = v
+	}
+	if v := os.Getenv("CUBE_API_URL"); v != "" {
+		cfg.CubeAPIURL = v
+	}
+	if v := os.Getenv("REDIS_URL"); v != "" {
+		cfg.RedisURL = v
+	}
+	if v := os.Getenv("CUBE_API_SANDBOX_DOMAIN"); v != "" {
+		cfg.SandboxDomain = v
+	}
+	if v := os.Getenv("JWT_ACCESS_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.AccessTTL = d
+		}
+	}
+	if v := os.Getenv("JWT_REFRESH_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.RefreshTTL = d
+		}
+	}
 }

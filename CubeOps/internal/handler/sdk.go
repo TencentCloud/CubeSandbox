@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/mux"
-	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/cubemaster"
+	"github.com/gin-gonic/gin"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/httputil"
 )
 
 // SDKHandler serves WebUI SDK data operations by calling CubeMaster directly,
@@ -23,12 +23,46 @@ import (
 // names converted from snake_case to camelCase to match the frontend's
 // expected E2B-compatible format.
 type SDKHandler struct {
-	cm *cubemaster.Client
+	cm CubeMasterClient
 }
 
 // NewSDKHandler creates a new SDK handler backed by the CubeMaster client.
-func NewSDKHandler(cm *cubemaster.Client) *SDKHandler {
-	return &SDKHandler{cm: cm}
+func NewSDKHandler(cm CubeMasterClient) *SDKHandler { return &SDKHandler{cm: cm} }
+
+// Register installs the SDK routes on the given router group. The SDK and
+// "v2 SDK" (E2B v2 compatible) prefixes share the same handlers; we register
+// them on a sub-group so the caller can mount at both prefixes.
+func (h *SDKHandler) Register(r *gin.RouterGroup) {
+	// Sandboxes
+	r.GET("/sandboxes", h.ListSandboxes)
+	r.POST("/sandboxes", h.CreateSandbox)
+	r.GET("/sandboxes/:id", h.GetSandbox)
+	r.DELETE("/sandboxes/:id", h.DeleteSandbox)
+	r.GET("/sandboxes/:id/logs", h.GetSandboxLogs)
+	r.POST("/sandboxes/:id/timeout", h.SetSandboxTimeout)
+	r.POST("/sandboxes/:id/refreshes", h.RefreshSandbox)
+	r.POST("/sandboxes/:id/pause", h.PauseSandbox)
+	r.POST("/sandboxes/:id/resume", h.ResumeSandbox)
+	r.POST("/sandboxes/:id/connect", h.ConnectSandbox)
+
+	// Snapshots
+	r.GET("/snapshots", h.ListSnapshots)
+	r.POST("/sandboxes/:id/snapshots", h.CreateSnapshot)
+	r.POST("/sandboxes/:id/rollback", h.RollbackSandbox)
+
+	// Templates
+	// Literal "compat" path must be registered before the {id} catch-all so
+	// "compat" isn't matched as a template id. With gin's tree-based router
+	// this is automatic as long as we register in the right order.
+	r.GET("/templates", h.ListTemplates)
+	r.POST("/templates", h.CreateTemplate)
+	r.GET("/templates/compat", h.GetTemplateCompat)
+	r.GET("/templates/:id", h.GetTemplate)
+	r.POST("/templates/:id", h.RebuildTemplate)
+	r.DELETE("/templates/:id", h.DeleteTemplate)
+	r.POST("/templates/:id/builds/:buildID", h.StartTemplateBuild)
+	r.GET("/templates/:id/builds/:buildID/status", h.GetTemplateBuildStatus)
+	r.GET("/templates/:id/builds/:buildID/logs", h.GetTemplateBuildLogs)
 }
 
 const sdkInstanceType = "cubebox"
@@ -41,8 +75,8 @@ func sdkRequestID() string {
 
 // cmEnvelope is CubeMaster's standard response wrapper.
 type cmEnvelope struct {
-	Ret  *cmRet            `json:"ret,omitempty"`
-	Data json.RawMessage   `json:"data,omitempty"`
+	Ret  *cmRet                     `json:"ret,omitempty"`
+	Data json.RawMessage            `json:"data,omitempty"`
 	Raw  map[string]json.RawMessage `json:"-"`
 }
 
@@ -56,11 +90,11 @@ type cmRet struct {
 // and writes the transformed JSON to the response.
 // For responses without a data field (action endpoints like pause/resume),
 // it returns the raw response with camelCase key conversion.
-func writeSDKResponse(w http.ResponseWriter, raw json.RawMessage) {
+func writeSDKResponse(c *gin.Context, raw json.RawMessage) {
 	var env cmEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
 		// Not a standard envelope — pass through as-is.
-		writeRawJSON(w, http.StatusOK, raw)
+		httputil.WriteRawJSON(c, http.StatusOK, raw)
 		return
 	}
 
@@ -70,14 +104,14 @@ func writeSDKResponse(w http.ResponseWriter, raw json.RawMessage) {
 		switch env.Ret.RetCode {
 		case 130404, 404:
 			// Not found — matches old CubeAPI map_err → AppError::NotFound
-			writeError(w, http.StatusNotFound, msg)
+			httputil.WriteError(c, http.StatusNotFound, msg)
 		case 130409:
 			// Conflict — matches old CubeAPI map_err → AppError::Conflict
-			writeError(w, http.StatusConflict, msg)
+			httputil.WriteError(c, http.StatusConflict, msg)
 		case 400:
-			writeError(w, http.StatusBadRequest, msg)
+			httputil.WriteError(c, http.StatusBadRequest, msg)
 		default:
-			writeError(w, http.StatusBadGateway, fmt.Sprintf("cubemaster error %d: %s", env.Ret.RetCode, msg))
+			httputil.WriteError(c, http.StatusBadGateway, fmt.Sprintf("cubemaster error %d: %s", env.Ret.RetCode, msg))
 		}
 		return
 	}
@@ -85,7 +119,7 @@ func writeSDKResponse(w http.ResponseWriter, raw json.RawMessage) {
 	// If data field exists, unwrap and transform it.
 	if len(env.Data) > 0 && string(env.Data) != "null" {
 		transformed := camelCaseJSON(env.Data)
-		writeRawJSON(w, http.StatusOK, transformed)
+		httputil.WriteRawJSON(c, http.StatusOK, transformed)
 		return
 	}
 
@@ -97,14 +131,14 @@ func writeSDKResponse(w http.ResponseWriter, raw json.RawMessage) {
 	if err := json.Unmarshal(transformed, &m); err == nil {
 		delete(m, "ret")
 		if len(m) == 0 {
-			w.WriteHeader(http.StatusOK)
+			c.Status(http.StatusOK)
 			return
 		}
 		out, _ := json.Marshal(m)
-		writeRawJSON(w, http.StatusOK, out)
+		httputil.WriteRawJSON(c, http.StatusOK, out)
 		return
 	}
-	writeRawJSON(w, http.StatusOK, transformed)
+	httputil.WriteRawJSON(c, http.StatusOK, transformed)
 }
 
 // camelCaseJSON recursively converts all object keys in a JSON document
@@ -169,34 +203,34 @@ func snakeToCamel(s string) string {
 // the Job field directly as a flat object (matching old CubeAPI to_job()).
 // Used by rebuild/create template endpoints where the frontend expects
 // a top-level jobID field.
-func writeSDKJobResponse(w http.ResponseWriter, raw json.RawMessage) {
+func writeSDKJobResponse(c *gin.Context, raw json.RawMessage) {
 	var env struct {
-		Ret *cmRet            `json:"ret,omitempty"`
-		Job json.RawMessage   `json:"Job,omitempty"`
+		Ret *cmRet          `json:"ret,omitempty"`
+		Job json.RawMessage `json:"Job,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
-		writeRawJSON(w, http.StatusOK, raw)
+		httputil.WriteRawJSON(c, http.StatusOK, raw)
 		return
 	}
 	if env.Ret != nil && env.Ret.RetCode != 0 && env.Ret.RetCode != 200 {
 		msg := env.Ret.RetMsg
 		switch env.Ret.RetCode {
 		case 130404, 404:
-			writeError(w, http.StatusNotFound, msg)
+			httputil.WriteError(c, http.StatusNotFound, msg)
 		case 130409:
-			writeError(w, http.StatusConflict, msg)
+			httputil.WriteError(c, http.StatusConflict, msg)
 		default:
-			writeError(w, http.StatusBadGateway, fmt.Sprintf("cubemaster error %d: %s", env.Ret.RetCode, msg))
+			httputil.WriteError(c, http.StatusBadGateway, fmt.Sprintf("cubemaster error %d: %s", env.Ret.RetCode, msg))
 		}
 		return
 	}
 	if len(env.Job) > 0 && string(env.Job) != "null" {
 		transformed := camelCaseJSON(env.Job)
-		writeRawJSON(w, http.StatusOK, transformed)
+		httputil.WriteRawJSON(c, http.StatusOK, transformed)
 		return
 	}
 	// No Job field — return empty object.
-	writeRawJSON(w, http.StatusOK, json.RawMessage(`{}`))
+	httputil.WriteRawJSON(c, http.StatusOK, json.RawMessage(`{}`))
 }
 
 // ── Sandboxes ──────────────────────────────────────────────────────────────
@@ -205,9 +239,9 @@ func writeSDKJobResponse(w http.ResponseWriter, raw json.RawMessage) {
 type cmSandboxListItem struct {
 	SandboxID   string            `json:"sandbox_id"`
 	HostID      string            `json:"host_id"`
-	Status      json.RawMessage   `json:"status"`        // may be string or int
-	StartedAt   json.RawMessage   `json:"started_at"`    // may be ISO string or timestamp
-	CreateAt    int64             `json:"create_at"`     // Unix nanoseconds, fallback for started_at
+	Status      json.RawMessage   `json:"status"`     // may be string or int
+	StartedAt   json.RawMessage   `json:"started_at"` // may be ISO string or timestamp
+	CreateAt    int64             `json:"create_at"`  // Unix nanoseconds, fallback for started_at
 	EndAt       json.RawMessage   `json:"end_at"`
 	CPUCount    int               `json:"cpu_count"`
 	MemoryMB    int               `json:"memory_mb"`
@@ -218,15 +252,15 @@ type cmSandboxListItem struct {
 
 // cmSandboxDetailItem matches CubeMaster's /cube/sandbox/info response items.
 type cmSandboxDetailItem struct {
-	SandboxID   string                 `json:"sandbox_id"`
-	Status      int                    `json:"status"`
-	HostID      string                 `json:"host_id"`
-	TemplateID  string                 `json:"template_id"`
-	Containers  []cmSandboxContainer   `json:"containers"`
-	Namespace   string                 `json:"namespace"`
-	EndAt       json.RawMessage        `json:"end_at"`
-	Annotations map[string]string      `json:"annotations"`
-	Labels      map[string]string      `json:"labels"`
+	SandboxID   string               `json:"sandbox_id"`
+	Status      int                  `json:"status"`
+	HostID      string               `json:"host_id"`
+	TemplateID  string               `json:"template_id"`
+	Containers  []cmSandboxContainer `json:"containers"`
+	Namespace   string               `json:"namespace"`
+	EndAt       json.RawMessage      `json:"end_at"`
+	Annotations map[string]string    `json:"annotations"`
+	Labels      map[string]string    `json:"labels"`
 }
 
 type cmSandboxContainer struct {
@@ -463,7 +497,7 @@ func transformSandboxDetail(raw json.RawMessage) interface{} {
 }
 
 // ListSandboxes — GET /api/v1/sdk/sandboxes
-func (h *SDKHandler) ListSandboxes(w http.ResponseWriter, r *http.Request) {
+func (h *SDKHandler) ListSandboxes(c *gin.Context) {
 	body := map[string]interface{}{
 		"RequestID":     sdkRequestID(),
 		"instance_type": sdkInstanceType,
@@ -471,35 +505,35 @@ func (h *SDKHandler) ListSandboxes(w http.ResponseWriter, r *http.Request) {
 		"size":          500,
 	}
 	// Frontend sends "limit" param; map it to CubeMaster's "size".
-	if v := r.URL.Query().Get("limit"); v != "" {
+	if v := c.Query("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			body["size"] = n
 		}
 	}
-	if v := r.URL.Query().Get("size"); v != "" {
+	if v := c.Query("size"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			body["size"] = n
 		}
 	}
-	if v := r.URL.Query().Get("start_idx"); v != "" {
+	if v := c.Query("start_idx"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			body["start_idx"] = n
 		}
 	}
-	raw, err := h.cm.ListSandboxesWithBody(r.Context(), body)
+	raw, err := h.cm.ListSandboxesWithBody(c.Request.Context(), body)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "cubemaster: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 		return
 	}
 	transformed := transformSandboxList(raw)
-	writeJSON(w, http.StatusOK, transformed)
+	httputil.WriteJSON(c, http.StatusOK, transformed)
 }
 
 // CreateSandbox — POST /api/v1/sdk/sandboxes
-func (h *SDKHandler) CreateSandbox(w http.ResponseWriter, r *http.Request) {
+func (h *SDKHandler) CreateSandbox(c *gin.Context) {
 	var req map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httputil.WriteError(c, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 
@@ -508,7 +542,7 @@ func (h *SDKHandler) CreateSandbox(w http.ResponseWriter, r *http.Request) {
 	// CubeMaster's CreateCubeSandboxReq with required fields.
 	templateID := getString(req, "templateID")
 	if templateID == "" {
-		writeError(w, http.StatusBadRequest, "templateID is required")
+		httputil.WriteError(c, http.StatusBadRequest, "templateID is required")
 		return
 	}
 
@@ -542,134 +576,130 @@ func (h *SDKHandler) CreateSandbox(w http.ResponseWriter, r *http.Request) {
 		cmReq["labels"] = labels
 	}
 
-	raw, err := h.cm.CreateSandbox(r.Context(), cmReq)
+	raw, err := h.cm.CreateSandbox(c.Request.Context(), cmReq)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "cubemaster: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 		return
 	}
-	writeSDKResponse(w, raw)
+	writeSDKResponse(c, raw)
 }
 
 // GetSandbox — GET /api/v1/sdk/sandboxes/{id}
-func (h *SDKHandler) GetSandbox(w http.ResponseWriter, r *http.Request) {
-	sandboxID := mux.Vars(r)["id"]
-	raw, err := h.cm.GetSandbox(r.Context(), sandboxID, sdkInstanceType)
+func (h *SDKHandler) GetSandbox(c *gin.Context) {
+	sandboxID := c.Param("id")
+	raw, err := h.cm.GetSandbox(c.Request.Context(), sandboxID, sdkInstanceType)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "cubemaster: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 		return
 	}
 	transformed := transformSandboxDetail(raw)
-	writeJSON(w, http.StatusOK, transformed)
+	httputil.WriteJSON(c, http.StatusOK, transformed)
 }
 
 // DeleteSandbox — DELETE /api/v1/sdk/sandboxes/{id}
-func (h *SDKHandler) DeleteSandbox(w http.ResponseWriter, r *http.Request) {
-	sandboxID := mux.Vars(r)["id"]
+func (h *SDKHandler) DeleteSandbox(c *gin.Context) {
+	sandboxID := c.Param("id")
 	body := map[string]interface{}{
 		"RequestID":     sdkRequestID(),
 		"sandbox_id":    sandboxID,
 		"instance_type": sdkInstanceType,
 	}
-	raw, err := h.cm.DeleteSandbox(r.Context(), body)
+	raw, err := h.cm.DeleteSandbox(c.Request.Context(), body)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "cubemaster: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 		return
 	}
-	writeSDKResponse(w, raw)
+	writeSDKResponse(c, raw)
 }
 
 // GetSandboxLogs — GET /api/v1/sdk/sandboxes/{id}/logs
-func (h *SDKHandler) GetSandboxLogs(w http.ResponseWriter, r *http.Request) {
-	sandboxID := mux.Vars(r)["id"]
+func (h *SDKHandler) GetSandboxLogs(c *gin.Context) {
+	sandboxID := c.Param("id")
 	body := map[string]interface{}{
 		"sandboxID": sandboxID,
 		"limit":     100,
 	}
-	if v := r.URL.Query().Get("limit"); v != "" {
+	if v := c.Query("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			body["limit"] = n
 		}
 	}
-	if v := r.URL.Query().Get("cursor"); v != "" {
+	if v := c.Query("cursor"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			body["cursor"] = n
 		}
 	}
-	raw, err := h.cm.GetSandboxLogs(r.Context(), body)
+	raw, err := h.cm.GetSandboxLogs(c.Request.Context(), body)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "cubemaster: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 		return
 	}
-	writeSDKResponse(w, raw)
+	writeSDKResponse(c, raw)
 }
 
 // SetSandboxTimeout — POST /api/v1/sdk/sandboxes/{id}/timeout
-func (h *SDKHandler) SetSandboxTimeout(w http.ResponseWriter, r *http.Request) {
-	sandboxID := mux.Vars(r)["id"]
+func (h *SDKHandler) SetSandboxTimeout(c *gin.Context) {
+	sandboxID := c.Param("id")
 	var req map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httputil.WriteError(c, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 	req["RequestID"] = sdkRequestID()
 	req["sandboxID"] = sandboxID
 	req["instanceType"] = sdkInstanceType
-	raw, err := h.cm.SetSandboxTimeout(r.Context(), req)
+	raw, err := h.cm.SetSandboxTimeout(c.Request.Context(), req)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "cubemaster: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 		return
 	}
-	writeSDKResponse(w, raw)
+	writeSDKResponse(c, raw)
 }
 
 // RefreshSandbox — POST /api/v1/sdk/sandboxes/{id}/refreshes
-func (h *SDKHandler) RefreshSandbox(w http.ResponseWriter, r *http.Request) {
-	sandboxID := mux.Vars(r)["id"]
+func (h *SDKHandler) RefreshSandbox(c *gin.Context) {
+	sandboxID := c.Param("id")
 	var req map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httputil.WriteError(c, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 	req["RequestID"] = sdkRequestID()
 	req["sandboxID"] = sandboxID
 	req["instanceType"] = sdkInstanceType
-	raw, err := h.cm.RefreshSandbox(r.Context(), req)
+	raw, err := h.cm.RefreshSandbox(c.Request.Context(), req)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "cubemaster: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 		return
 	}
-	writeSDKResponse(w, raw)
+	writeSDKResponse(c, raw)
 }
 
 // PauseSandbox — POST /api/v1/sdk/sandboxes/{id}/pause
-func (h *SDKHandler) PauseSandbox(w http.ResponseWriter, r *http.Request) {
-	h.sandboxUpdateAction(w, r, "pause")
-}
+func (h *SDKHandler) PauseSandbox(c *gin.Context) { h.sandboxUpdateAction(c, "pause") }
 
 // ResumeSandbox — POST /api/v1/sdk/sandboxes/{id}/resume
-func (h *SDKHandler) ResumeSandbox(w http.ResponseWriter, r *http.Request) {
-	h.sandboxUpdateAction(w, r, "resume")
-}
+func (h *SDKHandler) ResumeSandbox(c *gin.Context) { h.sandboxUpdateAction(c, "resume") }
 
-func (h *SDKHandler) sandboxUpdateAction(w http.ResponseWriter, r *http.Request, action string) {
-	sandboxID := mux.Vars(r)["id"]
+func (h *SDKHandler) sandboxUpdateAction(c *gin.Context, action string) {
+	sandboxID := c.Param("id")
 	body := map[string]interface{}{
 		"requestID":     sdkRequestID(),
 		"sandbox_id":    sandboxID,
 		"instance_type": sdkInstanceType,
 		"action":        action,
 	}
-	raw, err := h.cm.UpdateSandbox(r.Context(), body)
+	raw, err := h.cm.UpdateSandbox(c.Request.Context(), body)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "cubemaster: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 		return
 	}
-	writeSDKResponse(w, raw)
+	writeSDKResponse(c, raw)
 }
 
 // ConnectSandbox — POST /api/v1/sdk/sandboxes/{id}/connect
-func (h *SDKHandler) ConnectSandbox(w http.ResponseWriter, r *http.Request) {
-	sandboxID := mux.Vars(r)["id"]
+func (h *SDKHandler) ConnectSandbox(c *gin.Context) {
+	sandboxID := c.Param("id")
 	body := map[string]interface{}{
 		"request_id":    sdkRequestID(),
 		"sandbox_id":    sandboxID,
@@ -678,106 +708,105 @@ func (h *SDKHandler) ConnectSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 	// Allow optional timeout override from request body.
 	var req map[string]interface{}
-	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&req)
+	if c.Request.Body != nil {
+		_ = json.NewDecoder(c.Request.Body).Decode(&req)
 	}
 	if v, ok := req["timeout"]; ok {
 		body["timeout"] = v
 	}
-	raw, err := h.cm.ConnectSandboxWithBody(r.Context(), body)
+	raw, err := h.cm.ConnectSandboxWithBody(c.Request.Context(), body)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "cubemaster: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 		return
 	}
-	writeSDKResponse(w, raw)
+	writeSDKResponse(c, raw)
 }
 
 // ── Snapshots ──────────────────────────────────────────────────────────────
 
 // ListSnapshots — GET /api/v1/sdk/snapshots
-func (h *SDKHandler) ListSnapshots(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
+func (h *SDKHandler) ListSnapshots(c *gin.Context) {
 	params := map[string]string{
 		"request_id":    sdkRequestID(),
 		"instance_type": sdkInstanceType,
 	}
 	for _, k := range []string{"sandbox_id", "name", "status", "limit", "next_token"} {
-		if v := q.Get(k); v != "" {
+		if v := c.Query(k); v != "" {
 			params[k] = v
 		}
 	}
-	raw, err := h.cm.ListSnapshots(r.Context(), params)
+	raw, err := h.cm.ListSnapshots(c.Request.Context(), params)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "cubemaster: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 		return
 	}
-	writeSDKResponse(w, raw)
+	writeSDKResponse(c, raw)
 }
 
 // CreateSnapshot — POST /api/v1/sdk/sandboxes/{id}/snapshots
-func (h *SDKHandler) CreateSnapshot(w http.ResponseWriter, r *http.Request) {
-	sandboxID := mux.Vars(r)["id"]
+func (h *SDKHandler) CreateSnapshot(c *gin.Context) {
+	sandboxID := c.Param("id")
 	var req map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httputil.WriteError(c, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 	req["request_id"] = sdkRequestID()
 	req["sandbox_id"] = sandboxID
-	raw, err := h.cm.CreateSnapshot(r.Context(), req)
+	raw, err := h.cm.CreateSnapshot(c.Request.Context(), req)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "cubemaster: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 		return
 	}
-	writeSDKResponse(w, raw)
+	writeSDKResponse(c, raw)
 }
 
 // RollbackSandbox — POST /api/v1/sdk/sandboxes/{id}/rollback
-func (h *SDKHandler) RollbackSandbox(w http.ResponseWriter, r *http.Request) {
-	sandboxID := mux.Vars(r)["id"]
+func (h *SDKHandler) RollbackSandbox(c *gin.Context) {
+	sandboxID := c.Param("id")
 	var req map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httputil.WriteError(c, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 	req["request_id"] = sdkRequestID()
 	req["instance_type"] = sdkInstanceType
-	raw, err := h.cm.RollbackSandbox(r.Context(), sandboxID, req)
+	raw, err := h.cm.RollbackSandbox(c.Request.Context(), sandboxID, req)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "cubemaster: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 		return
 	}
-	writeSDKResponse(w, raw)
+	writeSDKResponse(c, raw)
 }
 
 // ── Templates ──────────────────────────────────────────────────────────────
 
 // ListTemplates — GET /api/v1/sdk/templates
-func (h *SDKHandler) ListTemplates(w http.ResponseWriter, r *http.Request) {
-	templateID := r.URL.Query().Get("template_id")
-	includeReq := r.URL.Query().Get("include_request") == "true"
-	raw, err := h.cm.ListTemplates(r.Context(), templateID, includeReq)
+func (h *SDKHandler) ListTemplates(c *gin.Context) {
+	templateID := c.Query("template_id")
+	includeReq := c.Query("include_request") == "true"
+	raw, err := h.cm.ListTemplates(c.Request.Context(), templateID, includeReq)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "cubemaster: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 		return
 	}
-	writeSDKResponse(w, raw)
+	writeSDKResponse(c, raw)
 }
 
 // GetTemplate — GET /api/v1/sdk/templates/{id}
-func (h *SDKHandler) GetTemplate(w http.ResponseWriter, r *http.Request) {
-	templateID := mux.Vars(r)["id"]
-	raw, err := h.cm.ListTemplates(r.Context(), templateID, true)
+func (h *SDKHandler) GetTemplate(c *gin.Context) {
+	templateID := c.Param("id")
+	raw, err := h.cm.ListTemplates(c.Request.Context(), templateID, true)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "cubemaster: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 		return
 	}
 	transformed := transformTemplateDetail(raw)
 	if transformed == nil {
-		writeError(w, http.StatusNotFound, "template not found")
+		httputil.WriteError(c, http.StatusNotFound, "template not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, transformed)
+	httputil.WriteJSON(c, http.StatusOK, transformed)
 }
 
 // transformTemplateDetail converts CubeMaster's template detail response to
@@ -862,17 +891,17 @@ func transformTemplateDetail(raw json.RawMessage) interface{} {
 }
 
 // CreateTemplate — POST /api/v1/sdk/templates
-func (h *SDKHandler) CreateTemplate(w http.ResponseWriter, r *http.Request) {
+func (h *SDKHandler) CreateTemplate(c *gin.Context) {
 	var req map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httputil.WriteError(c, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 
 	// Validate required field.
 	image, _ := req["image"].(string)
 	if strings.TrimSpace(image) == "" {
-		writeError(w, http.StatusBadRequest, "image is required")
+		httputil.WriteError(c, http.StatusBadRequest, "image is required")
 		return
 	}
 
@@ -883,12 +912,12 @@ func (h *SDKHandler) CreateTemplate(w http.ResponseWriter, r *http.Request) {
 		cmReq["instance_type"] = sdkInstanceType
 	}
 
-	raw, err := h.cm.CreateTemplateFromImage(r.Context(), cmReq)
+	raw, err := h.cm.CreateTemplateFromImage(c.Request.Context(), cmReq)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "cubemaster: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 		return
 	}
-	writeSDKJobResponse(w, raw)
+	writeSDKJobResponse(c, raw)
 }
 
 // transformCreateTemplateRequest converts the frontend's create template
@@ -1074,88 +1103,88 @@ func getArray(m map[string]interface{}, key string) []interface{} {
 }
 
 // RebuildTemplate — POST /api/v1/sdk/templates/{id}
-func (h *SDKHandler) RebuildTemplate(w http.ResponseWriter, r *http.Request) {
-	templateID := mux.Vars(r)["id"]
+func (h *SDKHandler) RebuildTemplate(c *gin.Context) {
+	templateID := c.Param("id")
 	var req map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httputil.WriteError(c, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 	req["requestID"] = sdkRequestID()
 	req["template_id"] = templateID
-	raw, err := h.cm.RedoTemplate(r.Context(), req)
+	raw, err := h.cm.RedoTemplate(c.Request.Context(), req)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "cubemaster: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 		return
 	}
-	writeSDKJobResponse(w, raw)
+	writeSDKJobResponse(c, raw)
 }
 
 // DeleteTemplate — DELETE /api/v1/sdk/templates/{id}
-func (h *SDKHandler) DeleteTemplate(w http.ResponseWriter, r *http.Request) {
-	templateID := mux.Vars(r)["id"]
+func (h *SDKHandler) DeleteTemplate(c *gin.Context) {
+	templateID := c.Param("id")
 	body := map[string]interface{}{
 		"RequestID":     sdkRequestID(),
 		"template_id":   templateID,
 		"instance_type": sdkInstanceType,
 		"sync":          true,
 	}
-	raw, err := h.cm.DeleteTemplate(r.Context(), body)
+	raw, err := h.cm.DeleteTemplate(c.Request.Context(), body)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "cubemaster: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 		return
 	}
-	writeSDKResponse(w, raw)
+	writeSDKResponse(c, raw)
 }
 
 // StartTemplateBuild — POST /api/v1/sdk/templates/{id}/builds/{buildID}
-func (h *SDKHandler) StartTemplateBuild(w http.ResponseWriter, r *http.Request) {
-	buildID := mux.Vars(r)["buildID"]
+func (h *SDKHandler) StartTemplateBuild(c *gin.Context) {
+	buildID := c.Param("buildID")
 	var req map[string]interface{}
-	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&req)
+	if c.Request.Body != nil {
+		_ = json.NewDecoder(c.Request.Body).Decode(&req)
 	}
 	if req == nil {
 		req = map[string]interface{}{}
 	}
 	req["RequestID"] = sdkRequestID()
-	raw, err := h.cm.StartTemplateBuild(r.Context(), buildID, req)
+	raw, err := h.cm.StartTemplateBuild(c.Request.Context(), buildID, req)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "cubemaster: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 		return
 	}
-	writeSDKResponse(w, raw)
+	writeSDKResponse(c, raw)
 }
 
 // GetTemplateBuildStatus — GET /api/v1/sdk/templates/{id}/builds/{buildID}/status
-func (h *SDKHandler) GetTemplateBuildStatus(w http.ResponseWriter, r *http.Request) {
-	buildID := mux.Vars(r)["buildID"]
-	raw, err := h.cm.GetTemplateBuildStatus(r.Context(), buildID)
+func (h *SDKHandler) GetTemplateBuildStatus(c *gin.Context) {
+	buildID := c.Param("buildID")
+	raw, err := h.cm.GetTemplateBuildStatus(c.Request.Context(), buildID)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "cubemaster: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 		return
 	}
-	writeSDKResponse(w, raw)
+	writeSDKResponse(c, raw)
 }
 
 // GetTemplateBuildLogs — GET /api/v1/sdk/templates/{id}/builds/{buildID}/logs
 // Matches old CubeAPI behavior: reuses build status endpoint and formats as log lines.
-func (h *SDKHandler) GetTemplateBuildLogs(w http.ResponseWriter, r *http.Request) {
-	buildID := mux.Vars(r)["buildID"]
-	raw, err := h.cm.GetTemplateBuildStatus(r.Context(), buildID)
+func (h *SDKHandler) GetTemplateBuildLogs(c *gin.Context) {
+	buildID := c.Param("buildID")
+	raw, err := h.cm.GetTemplateBuildStatus(c.Request.Context(), buildID)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "cubemaster: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 		return
 	}
 
 	// Parse the CubeMaster build status response.
 	var env cmEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to parse build status")
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to parse build status")
 		return
 	}
 	if env.Ret != nil && env.Ret.RetCode != 0 && env.Ret.RetCode != 200 {
-		writeError(w, http.StatusBadGateway, fmt.Sprintf("cubemaster error %d: %s", env.Ret.RetCode, env.Ret.RetMsg))
+		httputil.WriteError(c, http.StatusBadGateway, fmt.Sprintf("cubemaster error %d: %s", env.Ret.RetCode, env.Ret.RetMsg))
 		return
 	}
 
@@ -1196,7 +1225,7 @@ func (h *SDKHandler) GetTemplateBuildLogs(w http.ResponseWriter, r *http.Request
 		line = fmt.Sprintf("[%s] %s", status, message)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	httputil.WriteJSON(c, http.StatusOK, map[string]interface{}{
 		"buildID":  buildID,
 		"status":   status,
 		"progress": progress,
@@ -1205,11 +1234,11 @@ func (h *SDKHandler) GetTemplateBuildLogs(w http.ResponseWriter, r *http.Request
 }
 
 // GetTemplateCompat — GET /api/v1/sdk/templates/compat
-func (h *SDKHandler) GetTemplateCompat(w http.ResponseWriter, r *http.Request) {
-	raw, err := h.cm.GetTemplateCompat(r.Context())
+func (h *SDKHandler) GetTemplateCompat(c *gin.Context) {
+	raw, err := h.cm.GetTemplateCompat(c.Request.Context())
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "cubemaster: "+err.Error())
+		httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 		return
 	}
-	writeSDKResponse(w, raw)
+	writeSDKResponse(c, raw)
 }

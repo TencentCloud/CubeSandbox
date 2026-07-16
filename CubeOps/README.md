@@ -89,7 +89,30 @@ start script at `deploy/one-click/scripts/systemd/cubeops-start.sh`.
 
 ## Configuration
 
-All configuration is via environment variables:
+CubeOps supports two configuration methods, which can be combined:
+
+### Option 1: YAML config file (recommended)
+
+Copy the example and edit:
+
+```bash
+cp config.example.yaml /etc/cube/ops.yaml
+vi /etc/cube/ops.yaml
+```
+
+Or point to a custom path:
+
+```bash
+export CUBE_OPS_CONFIG=/path/to/your/config.yaml
+```
+
+See [`config.example.yaml`](./config.example.yaml) for all available fields
+with inline comments.
+
+### Option 2: Environment variables (legacy, still supported)
+
+Environment variables take precedence over YAML — use this to override
+individual fields without editing the YAML file.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -102,6 +125,8 @@ All configuration is via environment variables:
 | `CUBE_MASTER_ADDR` | `http://127.0.0.1:8089` | CubeMaster base URL |
 | `CUBE_API_SANDBOX_DOMAIN` | `cube.app` | Sandbox domain (used by SDK handler for sandbox URL construction) |
 | `REDIS_URL` | *(optional)* | Redis for JWT blacklist |
+
+**Resolution order**: environment variables > YAML file > built-in defaults.
 
 ## Authentication
 
@@ -203,14 +228,86 @@ uses these as its primary data path.
 # Build
 make build
 
-# Test
-make test
+# Run (sets JWT_SECRET=test-secret-dummy at the command level)
+make run
 
 # Format
 make fmt
 
 # Docker
 make docker
+```
+
+## Testing
+
+CubeOps has three levels of tests: unit tests (no external dependencies),
+HTTP handler tests (fake CubeMaster client + real gin router), and
+integration tests (Docker MySQL + real database).
+
+### Run all tests
+
+```bash
+# Unit + handler tests only (fast, no Docker needed)
+go test ./...
+
+# Include integration tests (requires Docker daemon running)
+go test ./... -timeout 600s
+```
+
+### Test categories
+
+| Category | Files | Docker? | What it covers |
+|----------|-------|---------|----------------|
+| **Unit tests** | `config/config_test.go`, `crypto/aes_gcm_test.go`, `httputil/response_test.go`, `service/auth_test.go` | No | Pure function logic: YAML parsing, AES-GCM encryption, JSON helpers, auth service business logic |
+| **HTTP handler tests** | `handler/sdk_test.go`, `handler/cluster_test.go`, `handler/store_test.go`, `auth/handler_test.go` | No | gin routing, middleware, JSON request/response, error code mapping — uses fake CubeMasterClient |
+| **Integration tests** | `store/agenthub_test.go`, `handler/agenthub_integration_test.go` | **Yes** | Full HTTP → gin → handler → real MySQL chain — spins up throwaway MySQL 8.0 containers via `dockertest` |
+
+### Running specific test categories
+
+```bash
+# Only unit tests (fastest, no Docker)
+go test ./internal/config/... ./internal/crypto/... ./internal/httputil/... ./internal/service/...
+
+# Only handler tests (no Docker, uses fake CubeMasterClient)
+go test ./internal/handler/... -run 'TestSDK|TestCluster|TestStore|TestConfig' -v
+
+# Only auth handler tests (no Docker, uses fake user store)
+go test ./internal/auth/... -v
+
+# Only store integration tests (requires Docker)
+go test ./internal/store/... -v -timeout 120s
+
+# Only agenthub handler integration tests (requires Docker)
+go test ./internal/handler/... -run TestAgentHub -v -timeout 300s
+```
+
+### Integration test details
+
+Integration tests use [`github.com/ory/dockertest/v3`](https://github.com/ory/dockertest)
+to spin up throwaway MySQL 8.0 containers. Each test gets its own fresh
+database — migrations run automatically, the master encryption key is
+bootstrapped, and the default admin account is seeded.
+
+**Prerequisites**:
+- Docker daemon must be running and reachable
+- The test image `mysql:8.0` will be pulled automatically on first run
+
+**Without Docker**: integration tests are automatically skipped with
+`t.Skip()`. To force them to run (e.g. in CI), set
+`CUBEOPS_REQUIRE_DOCKER_TESTS=1` — this makes Docker-missing a fatal
+failure instead of a skip:
+
+```bash
+# CI mode: Docker is mandatory, skip is forbidden
+CUBEOPS_REQUIRE_DOCKER_TESTS=1 go test ./... -timeout 600s
+```
+
+**External MySQL**: if you have a MySQL instance you'd like to use instead
+of Docker, set `CUBEMASTER_DAO_TEST_MYSQL_DSN`:
+
+```bash
+export CUBEMASTER_DAO_TEST_MYSQL_DSN="root:pass@tcp(127.0.0.1:3306)/cube_test"
+go test ./internal/store/... -v
 ```
 
 ## Dependencies
