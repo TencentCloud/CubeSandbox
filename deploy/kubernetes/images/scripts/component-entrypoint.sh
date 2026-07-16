@@ -103,6 +103,10 @@ stage_component() {
       chmod +x "${dst}/bin/cube-runtime" "${dst}/bin/containerd-shim-cube-rs" 2>/dev/null || true
       [[ -x "${dst}/bin/containerd-shim-cube-rs" ]] || fail "missing shim after stage"
       [[ -x "${dst}/bin/cube-runtime" ]] || fail "missing cube-runtime after stage"
+      # containerd resolves io.containerd.cube.rs via PATH (same as one-click install.sh).
+      mkdir -p /usr/local/bin
+      ln -sf "${dst}/bin/containerd-shim-cube-rs" /usr/local/bin/containerd-shim-cube-rs
+      ln -sf "${dst}/bin/cube-runtime" /usr/local/bin/cube-runtime
       ;;
     cube-kernel)
       # Prefer existing vmlinux symlink selection by cubelet run; ensure files exist.
