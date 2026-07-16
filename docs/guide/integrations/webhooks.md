@@ -45,7 +45,7 @@ X-Cube-Signature-256: sha256=<hex HMAC-SHA256 of the raw request body>
 ```
 
 Verify the signature against the raw body before parsing it. The bundled
-[receiver example](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/webhook-receiver)
+[receiver example](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/webhook-receiver/README.md)
 shows a standard-library Python implementation.
 
 ## Delivery Behavior
@@ -54,4 +54,7 @@ Each endpoint has a bounded in-memory queue. If it fills, new events are
 dropped with a warning instead of delaying the sandbox API. Network errors,
 HTTP `408`, `429`, and `5xx` responses are retried with exponential backoff.
 Other `4xx` responses are not retried because they normally indicate a
-configuration or receiver error.
+configuration or receiver error. Retry counts above 10 are capped, and each
+backoff delay is capped at 30 seconds. Use HTTPS for every non-loopback
+endpoint; CubeAPI warns when a remote Webhook is configured with plaintext
+HTTP.

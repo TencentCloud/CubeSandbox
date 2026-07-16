@@ -98,13 +98,13 @@ pub struct ServerConfig {
 
     /// Number of retries after the initial Webhook delivery attempt.
     ///
-    /// Env var: `WEBHOOK_MAX_RETRIES` (default: 3).
+    /// Env var: `WEBHOOK_MAX_RETRIES` (default: 3, maximum: 10).
     #[serde(default = "default_webhook_max_retries")]
     pub webhook_max_retries: usize,
 
     /// Base delay in milliseconds for exponential Webhook retry backoff.
     ///
-    /// Env var: `WEBHOOK_RETRY_BASE_MS` (default: 200).
+    /// Env var: `WEBHOOK_RETRY_BASE_MS` (default: 200, per-delay maximum: 30000).
     #[serde(default = "default_webhook_retry_base_ms")]
     pub webhook_retry_base_ms: u64,
 

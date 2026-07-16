@@ -200,8 +200,12 @@ fn main() -> anyhow::Result<()> {
 
 async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()> {
     use logging::{
-        arc, file::FileLogger, filtered::FilteredLogger, http::HttpLogger, http::HttpLoggerConfig,
-        multi::MultiLogger, LogLevel,
+        arc,
+        file::FileLogger,
+        filtered::FilteredLogger,
+        http::{HttpLogger, HttpLoggerConfig, WebhookClient},
+        multi::MultiLogger,
+        LogLevel,
     };
 
     // ── Logger ────────────────────────────────────────────────────────────
@@ -221,22 +225,23 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
         .unwrap_or_else(default_webhook_events);
 
     if let Some(urls) = cfg.webhook_urls.as_deref() {
-        for url in urls.split(',').map(str::trim).filter(|url| !url.is_empty()) {
-            let mut webhook_config = HttpLoggerConfig::new(url, webhook_events.clone());
-            webhook_config.secret = cfg.webhook_secret.clone();
-            webhook_config.queue_capacity = cfg.webhook_queue_capacity;
-            webhook_config.max_retries = cfg.webhook_max_retries;
-            webhook_config.retry_base_ms = cfg.webhook_retry_base_ms;
-            webhook_config.request_timeout_secs = cfg.webhook_request_timeout_secs;
+        match WebhookClient::new(cfg.webhook_request_timeout_secs) {
+            Ok(webhook_client) => {
+                for url in urls.split(',').map(str::trim).filter(|url| !url.is_empty()) {
+                    let mut webhook_config = HttpLoggerConfig::new(url, webhook_events.clone());
+                    webhook_config.secret = cfg.webhook_secret.clone();
+                    webhook_config.queue_capacity = cfg.webhook_queue_capacity;
+                    webhook_config.max_retries = cfg.webhook_max_retries;
+                    webhook_config.retry_base_ms = cfg.webhook_retry_base_ms;
+                    webhook_config.request_timeout_secs = cfg.webhook_request_timeout_secs;
 
-            match HttpLogger::new(webhook_config) {
-                Ok(logger) => {
+                    let logger = HttpLogger::with_client(webhook_config, webhook_client.clone());
                     tracing::info!(webhook_url = %url, "Webhook logger enabled");
                     backends = backends.add(arc(logger));
                 }
-                Err(err) => {
-                    tracing::warn!(webhook_url = %url, %err, "Webhook logger disabled");
-                }
+            }
+            Err(err) => {
+                tracing::warn!(%err, "Webhook loggers disabled");
             }
         }
     }
