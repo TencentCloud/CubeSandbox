@@ -74,9 +74,15 @@ type UpdateEgressRuleRequest struct {
 type UpdateEgressRuleResponse struct {
 	SandboxID string `json:"sandboxID,omitempty"`
 	SandboxIP string `json:"sandboxIP,omitempty"`
-	Applied   bool   `json:"applied"`
-	Pending   bool   `json:"pending,omitempty"`
-	RuleCount int    `json:"ruleCount"`
+	// Applied is true when the rule was pushed to CubeEgress successfully and is
+	// already live on the data plane.
+	Applied bool `json:"applied"`
+	// Pending is true when the rule was persisted but its CubeEgress push failed
+	// transiently and was deferred to the maintenance retry loop. Applied and
+	// Pending are mutually exclusive.
+	Pending bool `json:"pending,omitempty"`
+	// RuleCount is the number of egress rules on the sandbox after the upsert.
+	RuleCount int `json:"ruleCount"`
 }
 
 type GetNetworkRequest struct {
