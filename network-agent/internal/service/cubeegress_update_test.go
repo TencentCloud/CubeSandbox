@@ -7,7 +7,9 @@ package service
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/network-agent/internal/cubeegress"
 )
@@ -193,6 +195,11 @@ func TestUpdateEgressRuleFindsStateByNetworkHandle(t *testing.T) {
 	if resp.RuleCount != 1 {
 		t.Fatalf("RuleCount=%d, want 1", resp.RuleCount)
 	}
+	// The response reports the resolved state's sandbox ID, not the (empty)
+	// SandboxID from a handle-based request.
+	if resp.SandboxID != "sb-1" {
+		t.Fatalf("SandboxID=%q, want sb-1 (resolved from the network handle)", resp.SandboxID)
+	}
 }
 
 func TestUpdateEgressRuleValidation(t *testing.T) {
@@ -287,5 +294,80 @@ func TestRetryPendingEgressPushesSkipsFlagClearedMidBatch(t *testing.T) {
 	}
 	if pushed != 1 {
 		t.Fatalf("expected exactly 1 retry push (second skipped after its flag cleared mid-batch), got %d", pushed)
+	}
+}
+
+// TestUpdateEgressRuleRollsBackOnPersistFailure verifies the in-memory rule set
+// is restored when store.Save fails, so it can't diverge from disk. A SandboxID
+// containing '.' makes stateStore.path (and thus Save) fail deterministically.
+func TestUpdateEgressRuleRollsBackOnPersistFailure(t *testing.T) {
+	s, _ := ueService(t)
+	ueSeed(s, "nh-1", "bad.id", "192.168.0.10", ueRule("keep", "v1"))
+
+	// Append path: the appended rule must be rolled back.
+	if _, err := s.UpdateEgressRule(context.Background(), &UpdateEgressRuleRequest{
+		NetworkHandle: "nh-1",
+		Rule:          ueRule("added", "v2"),
+	}); err == nil {
+		t.Fatal("expected a persist error for an invalid sandbox id")
+	}
+	rules := s.states["nh-1"].CubeNetworkConfig.Rules
+	if len(rules) != 1 || rules[0].Name != "keep" {
+		t.Fatalf("append not rolled back on persist failure: %+v", rules)
+	}
+
+	// Replace path: the original rule must be restored, not the new value.
+	if _, err := s.UpdateEgressRule(context.Background(), &UpdateEgressRuleRequest{
+		NetworkHandle: "nh-1",
+		Rule:          ueRule("keep", "v2-new"),
+	}); err == nil {
+		t.Fatal("expected a persist error for an invalid sandbox id")
+	}
+	rules = s.states["nh-1"].CubeNetworkConfig.Rules
+	if len(rules) != 1 || rules[0].Action.Inject[0].Secret != "v1" {
+		t.Fatalf("replace not rolled back on persist failure: %+v", rules)
+	}
+}
+
+// TestPushEgressSerializedPerSandbox verifies that concurrent pushes for the same
+// sandbox are serialized by egressPushMu (the fix for the retry/update TOCTOU
+// window): the hook records how many pushes are inside PutPolicy at once, which
+// must never exceed 1.
+func TestPushEgressSerializedPerSandbox(t *testing.T) {
+	store, err := newStateStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("newStateStore error=%v", err)
+	}
+	hook := &hookEgress{fakeEgress: newFakeEgress()}
+	s := &localService{store: store, egress: hook, states: map[string]*managedState{}}
+	ueSeed(s, "sb-1", "sb-1", "192.168.0.10", ueRule("cred", "v"))
+
+	var mu sync.Mutex
+	active, maxActive := 0, 0
+	hook.onPut = func(string) {
+		mu.Lock()
+		active++
+		if active > maxActive {
+			maxActive = active
+		}
+		mu.Unlock()
+		time.Sleep(2 * time.Millisecond) // widen the window so a missing lock would overlap
+		mu.Lock()
+		active--
+		mu.Unlock()
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.pushEgressSerialized(context.Background(), s.states["sb-1"])
+		}()
+	}
+	wg.Wait()
+
+	if maxActive != 1 {
+		t.Fatalf("pushes for the same sandbox overlapped (maxActive=%d); egressPushMu not serializing", maxActive)
 	}
 }

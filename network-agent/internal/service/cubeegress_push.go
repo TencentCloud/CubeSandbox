@@ -164,76 +164,73 @@ func (s *localService) deleteEgressForState(ctx context.Context, sandboxID, sand
 	}
 }
 
+// pushEgressSerialized renders the sandbox's CURRENT egress policy and pushes it
+// to CubeEgress, serialized per sandbox via state.egressPushMu. This prevents a
+// live UpdateEgressRule and a maintenance retry (or two concurrent updates) from
+// interleaving and leaving a stale policy live: whichever push acquires
+// egressPushMu last re-renders under s.mu and therefore reflects the latest
+// rules. It returns whether the push is still pending (a transient failure the
+// maintenance loop will retry).
+//
+// Must be called WITHOUT s.mu held; egressPushMu is always taken before s.mu.
+func (s *localService) pushEgressSerialized(ctx context.Context, state *managedState) bool {
+	state.egressPushMu.Lock()
+	defer state.egressPushMu.Unlock()
+
+	s.mu.Lock()
+	pushable := s.egress != nil && s.egress.Configured()
+	input := toEgressInput(state.CubeNetworkConfig)
+	s.mu.Unlock()
+
+	if !pushable {
+		return false
+	}
+	if input == nil {
+		// No L7 rules to push; clear any stale pending flag.
+		s.mu.Lock()
+		state.pendingEgressPush = false
+		s.mu.Unlock()
+		return false
+	}
+
+	err := s.egress.PutPolicy(ctx, state.SandboxIP, input)
+
+	s.mu.Lock()
+	applyEgressPushResult(ctx, state, err)
+	pending := state.pendingEgressPush
+	s.mu.Unlock()
+	return pending
+}
+
 // retryPendingEgressPushes is invoked from the maintenance loop. It re-pushes
-// every managed state with pendingEgressPush=true. Each push renders the policy
-// under s.mu, releases the lock for the HTTP call, then re-acquires it to record
-// the result — and skips any state whose flag was cleared by a concurrent
-// UpdateEgressRule in the meantime, so a stale snapshot can never overwrite a
-// freshly rotated credential in CubeEgress.
+// every managed state with pendingEgressPush=true via pushEgressSerialized, which
+// serializes per sandbox against a live UpdateEgressRule so a retry can never
+// overwrite a freshly rotated credential with a stale policy.
 func (s *localService) retryPendingEgressPushes() {
 	if s.egress == nil || !s.egress.Configured() {
 		return
 	}
-	// Snapshot which sandboxes need a retry; we don't hold the lock during HTTP
-	// I/O. We deliberately do NOT capture the rendered policy here: it is
-	// re-read under the lock just before each push so a concurrent
-	// UpdateEgressRule can't have us overwrite a freshly rotated credential with
-	// a stale snapshot (TOCTOU).
-	type pending struct {
-		state *managedState
-		ip    string
-	}
-	var todo []pending
 	s.mu.Lock()
+	var todo []*managedState
 	for _, st := range s.states {
 		if st.pendingEgressPush {
-			todo = append(todo, pending{state: st, ip: st.SandboxIP})
+			todo = append(todo, st)
 		}
 	}
 	s.mu.Unlock()
 
-	if len(todo) == 0 {
-		return
-	}
-
-	logger := CubeLog.WithContext(context.Background())
-	for _, item := range todo {
-		// Re-check and re-render under the lock: a concurrent UpdateEgressRule
-		// may have pushed a fresh policy and cleared the flag since we
-		// snapshotted. If so, skip — that push already superseded this retry.
+	for _, st := range todo {
+		// Skip if a concurrent UpdateEgressRule already resolved this sandbox;
+		// pushEgressSerialized would otherwise redundantly re-push the same policy.
 		s.mu.Lock()
-		if !item.state.pendingEgressPush {
-			s.mu.Unlock()
-			continue
-		}
-		input := toEgressInput(item.state.CubeNetworkConfig)
+		stillPending := st.pendingEgressPush
 		s.mu.Unlock()
-		if input == nil {
-			// Pending was set but the rules are gone; clear the flag.
-			s.mu.Lock()
-			item.state.pendingEgressPush = false
-			s.mu.Unlock()
+		if !stillPending {
 			continue
 		}
-
 		ctx, cancel := context.WithTimeout(context.Background(), egressRetryCallTimeout)
-		err := s.egress.PutPolicy(ctx, item.ip, input)
+		s.pushEgressSerialized(ctx, st)
 		cancel()
-		s.mu.Lock()
-		switch {
-		case err == nil:
-			item.state.pendingEgressPush = false
-			logger.Infof("network-agent retry egress policy succeeded: sandbox_ip=%s", item.ip)
-		case cubeegress.IsPermanent(err):
-			item.state.pendingEgressPush = false
-			logger.Errorf("network-agent retry egress policy permanently failed: sandbox_ip=%s err=%v",
-				item.ip, err)
-		default:
-			// Leave pending=true; next maintenance tick tries again.
-			logger.Debugf("network-agent retry egress policy still transient: sandbox_ip=%s err=%v",
-				item.ip, err)
-		}
-		s.mu.Unlock()
 	}
 }
 

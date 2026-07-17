@@ -53,6 +53,13 @@ type managedState struct {
 	// sandbox is released. Permanent failures (4xx) clear the flag —
 	// retrying a malformed body won't fix it.
 	pendingEgressPush bool
+
+	// egressPushMu serializes CubeEgress pushes for THIS sandbox so a live
+	// UpdateEgressRule and a maintenance retry can't interleave and leave a
+	// stale policy live: whichever push runs last re-renders the rules and
+	// therefore reflects the latest state. It is distinct from s.mu (which is
+	// never held during the HTTP call) and is only ever taken without s.mu held.
+	egressPushMu sync.Mutex
 }
 
 type localService struct {
@@ -353,14 +360,17 @@ func (s *localService) UpdateEgressRule(ctx context.Context, req *UpdateEgressRu
 	state, ok := s.lookupStateLocked(req.SandboxID, req.NetworkHandle)
 	if !ok {
 		s.mu.Unlock()
-		return nil, fmt.Errorf("network %q not found", req.SandboxID)
+		return nil, fmt.Errorf("network %q not found", nonEmpty(req.SandboxID, req.NetworkHandle))
 	}
 	if state.CubeNetworkConfig == nil {
 		state.CubeNetworkConfig = &CubeNetworkConfig{}
 	}
 	replaced := false
+	replacedIdx := -1
+	var replacedOld *EgressRule
 	for i, r := range state.CubeNetworkConfig.Rules {
 		if r != nil && r.Name == rule.Name {
+			replacedIdx, replacedOld = i, r
 			state.CubeNetworkConfig.Rules[i] = rule
 			replaced = true
 			break
@@ -370,33 +380,31 @@ func (s *localService) UpdateEgressRule(ctx context.Context, req *UpdateEgressRu
 		state.CubeNetworkConfig.Rules = append(state.CubeNetworkConfig.Rules, rule)
 	}
 	// Persist BEFORE pushing so the change survives a CubeEgress restart even if
-	// the push below fails and only the maintenance loop lands it later.
+	// the push below fails and only the maintenance loop lands it later. On a
+	// persist failure, roll back the in-memory mutation so state can't diverge
+	// from disk — a later restart would otherwise drop or resurrect a rule.
 	if err := s.store.Save(&state.persistedState); err != nil {
+		if replaced {
+			state.CubeNetworkConfig.Rules[replacedIdx] = replacedOld
+		} else {
+			state.CubeNetworkConfig.Rules = state.CubeNetworkConfig.Rules[:len(state.CubeNetworkConfig.Rules)-1]
+		}
 		s.mu.Unlock()
 		return nil, fmt.Errorf("persist updated egress rule: %w", err)
 	}
+	sandboxID := state.SandboxID
 	ip := state.SandboxIP
 	ruleCount := len(state.CubeNetworkConfig.Rules)
-	// Render the policy under the lock, then push with the lock RELEASED so a
-	// slow CubeEgress call can't block the data plane for every other sandbox.
-	// Unlike createState (which pushes before the state is visible in s.states),
-	// this state is already shared, so we mirror retryPendingEgressPushes:
-	// snapshot here, push lock-free, and re-acquire only to record the outcome.
-	input := toEgressInput(state.CubeNetworkConfig)
-	pushable := s.egress != nil && s.egress.Configured()
 	s.mu.Unlock()
 
-	pending := false
-	if pushable && input != nil {
-		err := s.egress.PutPolicy(ctx, ip, input)
-		s.mu.Lock()
-		applyEgressPushResult(ctx, state, err)
-		pending = state.pendingEgressPush
-		s.mu.Unlock()
-	}
+	// Push to CubeEgress serialized per sandbox (see pushEgressSerialized) so a
+	// concurrent maintenance retry can't overwrite this update with a stale
+	// policy. The rule is persisted above regardless, so a transient push
+	// failure is picked up by the maintenance loop.
+	pending := s.pushEgressSerialized(ctx, state)
 
 	return &UpdateEgressRuleResponse{
-		SandboxID: req.SandboxID,
+		SandboxID: sandboxID,
 		SandboxIP: ip,
 		Applied:   !pending,
 		Pending:   pending,
