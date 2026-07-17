@@ -1,7 +1,7 @@
 oom_score = 0
 root = "/data/cubelet/root"
 #独立空间 存放元数据
-#mount -t tmpfs -o size=500m none /data/cubelet/state/
+#mount -t tmpfs -o size=1024m none /data/cubelet/state/
 state = "/data/cubelet/state"
 version = 3
 pid_file = "/run/cube-let.pid"

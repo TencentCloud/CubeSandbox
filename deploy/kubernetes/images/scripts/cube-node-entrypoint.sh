@@ -205,7 +205,7 @@ mkdir -p \
 
 # Keep shim bundle metadata on the dataCubelet hostPath across Pod rebuilds.
 # cubelet mountTmpfsDir() skips when state is already mounted; without this,
-# a 500Mi tmpfs in cubelet's private mount NS holds bootstrap.json/address and
+# a 1Gi tmpfs in cubelet's private mount NS holds bootstrap.json/address and
 # is discarded when the Pod (and that mount NS) goes away, breaking
 # LoadExistingShims even if shim processes and /run/containerd sockets survive.
 if ! findmnt --mountpoint /data/cubelet/state >/dev/null 2>&1; then
