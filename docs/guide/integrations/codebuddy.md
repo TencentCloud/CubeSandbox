@@ -86,12 +86,12 @@ RUN apt-get update \
         > /etc/apt/sources.list.d/nodesource.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g --omit=dev --ignore-scripts \
         "@tencent-ai/codebuddy-code@${CODEBUDDY_VERSION}" \
     && codebuddy --version \
-    && npm cache clean --force \
     && rm -rf /root/.npm
 
 # CodeBuddy runs as an unprivileged user. UID/GID are auto-assigned because the
@@ -179,13 +179,19 @@ the trailing positional argument. Two key-flow flavors share the same template:
 
 **Direct flavor** — forward the key per command. `e2b`'s `commands.run(envs=...)`
 puts the environment into the exec envelope, not into a persistent file inside
-the VM, so the key lives only for the lifetime of that command:
+the VM, so the key lives only for the lifetime of that command. The exec
+channel only accepts the usernames `root` and `user` (the same `user` that
+`_codebuddy_common.run_command` defaults to); passing `user="codebuddy"`
+raises `invalid username: 'codebuddy'`. Inside the image the agent still runs
+unprivileged because the Dockerfile drops to `USER codebuddy`; the SDK-level
+`user` argument only constrains the exec channel identity, not the container's
+process identity:
 
 ```python
 result = sandbox.commands.run(
     "cd /workspace && codebuddy -p -y --model claude-sonnet-4-6 'do something'",
     envs={"ANTHROPIC_API_KEY": key},
-    user="codebuddy",
+    user="user",
     timeout=900,
 )
 ```
@@ -296,7 +302,7 @@ cmd = (
     "cd /workspace && codebuddy -p -y --model claude-sonnet-4-6 "
     "'Inspect the project, run app.py, and summarize the result.'"
 )
-result = sandbox.commands.run(cmd, envs=codebuddy_env, user="codebuddy", timeout=900)
+result = sandbox.commands.run(cmd, envs=codebuddy_env, timeout=900)
 ```
 
 ### Preflight version check

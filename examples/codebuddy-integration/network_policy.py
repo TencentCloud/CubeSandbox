@@ -27,13 +27,13 @@ import sys
 
 from cubesandbox import Sandbox, Rule, Match, Action, Inject
 
-from _codebuddy_common import ensure_success, run_command, sandbox_identifier
+from _codebuddy_common import ensure_success, positive_int, run_command, sandbox_identifier
 from env_utils import (
+    _env_positive_int,
     build_codebuddy_env,
     codebuddy_command,
     codebuddy_model,
     codebuddy_workspace,
-    int_env,
     internet_environment,
     llm_host,
     load_local_dotenv,
@@ -92,14 +92,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--sandbox-timeout",
-        type=int,
-        default=int_env("CODEBUDDY_SANDBOX_TIMEOUT", 1800),
+        type=positive_int,
+        default=_env_positive_int("CODEBUDDY_SANDBOX_TIMEOUT", 1800),
         help="Sandbox lifetime in seconds. Defaults to CODEBUDDY_SANDBOX_TIMEOUT or 1800.",
     )
     parser.add_argument(
         "--exec-timeout",
-        type=int,
-        default=int_env("CODEBUDDY_AGENT_EXEC_TIMEOUT", 900),
+        type=positive_int,
+        default=_env_positive_int("CODEBUDDY_AGENT_EXEC_TIMEOUT", 900),
         help="CodeBuddy command timeout in seconds. Defaults to CODEBUDDY_AGENT_EXEC_TIMEOUT or 900.",
     )
     parser.add_argument(

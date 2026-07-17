@@ -81,12 +81,12 @@ RUN apt-get update \
         > /etc/apt/sources.list.d/nodesource.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g --omit=dev --ignore-scripts \
         "@tencent-ai/codebuddy-code@${CODEBUDDY_VERSION}" \
     && codebuddy --version \
-    && npm cache clean --force \
     && rm -rf /root/.npm
 
 # CodeBuddy 以非 root 用户运行。基础镜像已经用 uid=1000 作为 ``user`` exec 账号，
@@ -167,13 +167,16 @@ CodeBuddy 以无交互模式启动：`-p` 让它处理完 prompt 即退出（不
 份模板：
 
 **直连方式** —— 每个命令注入一次 Key。`e2b` 的 `commands.run(envs=...)` 把环境放进 exec 信
-封，而不是写入 VM 内的持久文件，所以 Key 只在该命令执行期间存在：
+封，而不是写入 VM 内的持久文件，所以 Key 只在该命令执行期间存在。exec 信道只接受
+`root` 和 `user` 两个用户名；传 `user="codebuddy"` 会触发 `invalid username: 'codebuddy'`。
+镜像内 Agent 仍以非 root 身份运行（因为 Dockerfile 有 `USER codebuddy`），SDK 层面的
+`user` 参数只约束 exec 信道的身份，不影响容器内进程身份：
 
 ```python
 result = sandbox.commands.run(
     "cd /workspace && codebuddy -p -y --model claude-sonnet-4-6 'do something'",
     envs={"ANTHROPIC_API_KEY": key},
-    user="codebuddy",
+    user="user",
     timeout=900,
 )
 ```
@@ -276,7 +279,7 @@ cmd = (
     "cd /workspace && codebuddy -p -y --model claude-sonnet-4-6 "
     "'Inspect the project, run app.py, and summarize the result.'"
 )
-result = sandbox.commands.run(cmd, envs=codebuddy_env, user="codebuddy", timeout=900)
+result = sandbox.commands.run(cmd, envs=codebuddy_env, timeout=900)
 ```
 
 ### 启动前版本检查

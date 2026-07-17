@@ -34,7 +34,7 @@ This section collects integration guides for agent frameworks, developer tools, 
 ```md
 ---
 title: LangChain Integration Guide
-author: your-github-id
+author: your
 date: 2026-05-14
 tags:
   - integration
@@ -48,4 +48,4 @@ lang: en-US
 | Title | Author | Date | Tags |
 | --- | --- | --- | --- |
 | [Pi Agent Integration Guide](./pi-agent.md) | chaojixinren | 2026-07-01 | integration, pi-agent, coding-agent, agent |
-| [CodeBuddy Code Integration Guide](./codebuddy.md) | your-github-id | 2026-07-16 | integration, codebuddy, coding-agent, agent |
+| [CodeBuddy Code Integration Guide](./codebuddy.md) | pei-pei45 | 2026-07-16 | integration, codebuddy, coding-agent, agent |

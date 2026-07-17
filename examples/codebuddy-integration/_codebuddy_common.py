@@ -11,10 +11,28 @@ SDK used by ``network_policy.py``.
 
 from __future__ import annotations
 
-import os
+import argparse
 import sys
 from collections.abc import Callable
 from typing import Any
+
+
+def positive_int(value: str) -> int:
+    """argparse type that rejects zero and negative integers.
+
+    Both the CLI value and the env-var fallback default flow through this
+    function so passing ``--exec-timeout 0`` fails the same way as setting
+    ``CODEBUDDY_AGENT_EXEC_TIMEOUT=0`` in the environment.
+    """
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"expected an integer, got {value!r}") from None
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(
+            f"expected a positive integer, got {parsed}"
+        )
+    return parsed
 
 
 def stream_writer(stream) -> Callable[[object], None]:

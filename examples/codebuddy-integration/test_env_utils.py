@@ -13,8 +13,10 @@ is a pure resolution helper around environment variables. Run:
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
+import types
 import unittest
 from unittest import mock
 
@@ -265,6 +267,7 @@ class BuildEnvTests(unittest.TestCase):
     def setUp(self) -> None:
         self._saved = {k: os.environ.get(k) for k in (
             "CODEBUDDY_INTERNET_ENVIRONMENT",
+            "CODEBUDDY_PROVIDER",
             "CODEBUDDY_CONFIG_DIR",
             "CODEBUDDY_BASE_URL",
             "ANTHROPIC_BASE_URL",
@@ -339,6 +342,22 @@ class BuildEnvTests(unittest.TestCase):
         os.environ["HTTPS_PROXY"] = "http://proxy:8080"
         env = env_utils.build_codebuddy_env()
         self.assertEqual(env["HTTPS_PROXY"], "http://proxy:8080")
+
+    def test_only_first_matching_key_forwarded(self) -> None:
+        # When CODEBUDDY_INTERNET_ENVIRONMENT=io (provider=codebuddy_io) with a
+        # custom BASE_URL containing "anthropic", provider_key_candidates() extends
+        # the list with ANTHROPIC_API_KEY.  If both CODEBUDDY_API_KEY and
+        # ANTHROPIC_API_KEY are set on the host, the first match
+        # (CODEBUDDY_API_KEY, higher priority for codebuddy_io) enters the
+        # sandbox — confirming the loop breaks after the first hit.
+        self._clear()
+        os.environ["CODEBUDDY_INTERNET_ENVIRONMENT"] = "io"
+        os.environ["CODEBUDDY_BASE_URL"] = "https://api.anthropic.com"
+        os.environ["CODEBUDDY_API_KEY"] = "cb-primary"
+        os.environ["ANTHROPIC_API_KEY"] = "sk-ant-secondary"
+        env = env_utils.build_codebuddy_env(include_secrets=True)
+        self.assertEqual(env["CODEBUDDY_API_KEY"], "cb-primary")
+        self.assertNotIn("ANTHROPIC_API_KEY", env)
 
 
 class StripUrlUserinfoTests(unittest.TestCase):
@@ -504,6 +523,226 @@ class OptionalAndIntEnvTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"X": "abc"}):
             with self.assertRaises(SystemExit):
                 env_utils.int_env("X", 0)
+
+
+class CodebuddyModelTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._saved = {k: os.environ.get(k) for k in (
+            "CODEBUDDY_INTERNET_ENVIRONMENT",
+            "CODEBUDDY_PROVIDER",
+            "CODEBUDDY_MODEL",
+            "ANTHROPIC_MODEL",
+        )}
+
+    def tearDown(self) -> None:
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _clear(self) -> None:
+        for k in self._saved:
+            os.environ.pop(k, None)
+
+    def test_explicit_model_wins(self) -> None:
+        self._clear()
+        os.environ["CODEBUDDY_MODEL"] = "claude-opus-4-5"
+        self.assertEqual(env_utils.codebuddy_model(), "claude-opus-4-5")
+
+    def test_anthropic_model_fallback(self) -> None:
+        # When CODEBUDDY_MODEL is unset and provider is anthropic, fall back
+        # to ANTHROPIC_MODEL.
+        self._clear()
+        os.environ["CODEBUDDY_PROVIDER"] = "anthropic"
+        os.environ["ANTHROPIC_MODEL"] = "claude-sonnet-4-7"
+        self.assertEqual(env_utils.codebuddy_model(), "claude-sonnet-4-7")
+
+    def test_no_default_for_non_anthropic_raises(self) -> None:
+        # OpenAI and other non-Anthropic providers have no safe cross-provider
+        # default, so omitting both CODEBUDDY_MODEL and ANTHROPIC_MODEL raises.
+        self._clear()
+        os.environ["CODEBUDDY_PROVIDER"] = "openai"
+        with self.assertRaises(SystemExit):
+            env_utils.codebuddy_model()
+
+    def test_anthropic_default_when_nothing_set(self) -> None:
+        self._clear()
+        os.environ["CODEBUDDY_PROVIDER"] = "anthropic"
+        # no CODEBUDDY_MODEL, no ANTHROPIC_MODEL → must use the shipped default
+        self.assertEqual(env_utils.codebuddy_model(), "claude-sonnet-4-6")
+
+
+class ProviderKeyNameTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._saved = {k: os.environ.get(k) for k in (
+            "CODEBUDDY_INTERNET_ENVIRONMENT",
+            "CODEBUDDY_PROVIDER",
+            "CODEBUDDY_BASE_URL",
+            "CODEBUDDY_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "DEEPSEEK_API_KEY",
+        )}
+
+    def tearDown(self) -> None:
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _clear(self) -> None:
+        for k in self._saved:
+            os.environ.pop(k, None)
+
+    def test_returns_first_set_key(self) -> None:
+        self._clear()
+        os.environ["CODEBUDDY_PROVIDER"] = "anthropic"
+        os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test"
+        os.environ["CODEBUDDY_API_KEY"] = "cb-test"
+        self.assertEqual(env_utils.provider_key_name(), "ANTHROPIC_API_KEY")
+
+    def test_falls_back_to_codebuddy_key(self) -> None:
+        self._clear()
+        os.environ["CODEBUDDY_PROVIDER"] = "anthropic"
+        os.environ["CODEBUDDY_API_KEY"] = "cb-fallback"
+        # ANTHROPIC_API_KEY is not set → first candidate is ANTHROPIC_API_KEY
+        # (always added by provider_key_candidates), which returns empty string
+        # from os.environ.get; the second candidate CODEBUDDY_API_KEY matches.
+        self.assertEqual(env_utils.provider_key_name(), "CODEBUDDY_API_KEY")
+
+    def test_unknown_provider_returns_default(self) -> None:
+        self._clear()
+        os.environ["CODEBUDDY_PROVIDER"] = "anthropic"
+        # no keys set → returns the canonical first candidate name
+        self.assertEqual(env_utils.provider_key_name(), "ANTHROPIC_API_KEY")
+
+
+class LoadLocalDotenvTests(unittest.TestCase):
+    def test_load_local_dotenv_does_not_raise(self) -> None:
+        # Smoke test: the function should not raise even when no .env exists.
+        env_utils.load_local_dotenv()
+
+
+class PositiveIntTests(unittest.TestCase):
+    def test_parses_positive_integer(self) -> None:
+        from _codebuddy_common import positive_int
+        self.assertEqual(positive_int("42"), 42)
+
+    def test_rejects_zero(self) -> None:
+        from _codebuddy_common import positive_int
+        with self.assertRaises(argparse.ArgumentTypeError):
+            positive_int("0")
+
+    def test_rejects_negative(self) -> None:
+        from _codebuddy_common import positive_int
+        with self.assertRaises(argparse.ArgumentTypeError):
+            positive_int("-5")
+
+    def test_rejects_non_integer(self) -> None:
+        from _codebuddy_common import positive_int
+        with self.assertRaises(argparse.ArgumentTypeError):
+            positive_int("abc")
+
+
+class EnvPositiveIntTests(unittest.TestCase):
+    """Verify env-var fallback also rejects zero / negative / non-integer values.
+
+    argparse evaluates ``default=`` before ``type=``, so the bare
+    ``default=int_env(...)`` pattern that used to be there would silently let
+    ``CODEBUDDY_SANDBOX_TIMEOUT=0`` reach the SDK. These tests pin down
+    ``_env_positive_int`` as the right helper.
+    """
+
+    def test_unset_returns_default(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(env_utils._env_positive_int("X", 42), 42)
+
+    def test_empty_returns_default(self) -> None:
+        with mock.patch.dict(os.environ, {"X": ""}):
+            self.assertEqual(env_utils._env_positive_int("X", 42), 42)
+
+    def test_positive_passes_through(self) -> None:
+        with mock.patch.dict(os.environ, {"X": "120"}):
+            self.assertEqual(env_utils._env_positive_int("X", 1), 120)
+
+    def test_zero_raises(self) -> None:
+        with mock.patch.dict(os.environ, {"X": "0"}):
+            with self.assertRaises(SystemExit):
+                env_utils._env_positive_int("X", 1)
+
+    def test_negative_raises(self) -> None:
+        with mock.patch.dict(os.environ, {"X": "-5"}):
+            with self.assertRaises(SystemExit):
+                env_utils._env_positive_int("X", 1)
+
+    def test_non_integer_raises(self) -> None:
+        with mock.patch.dict(os.environ, {"X": "abc"}):
+            with self.assertRaises(SystemExit):
+                env_utils._env_positive_int("X", 1)
+
+
+class CommonHelpersTests(unittest.TestCase):
+    """Tests for _codebuddy_common helpers that are not exercised by env_utils."""
+
+    def test_ensure_success_zero_exit(self) -> None:
+        from _codebuddy_common import ensure_success
+        result = unittest.mock.MagicMock(exit_code=0)
+        # must not raise
+        ensure_success(result, "do something")
+
+    def test_ensure_success_none_exit(self) -> None:
+        from _codebuddy_common import ensure_success
+        result = unittest.mock.MagicMock(exit_code=None, stdout="ok", stderr="")
+        ensure_success(result, "do something")  # must not raise
+
+    def test_ensure_success_non_zero_exit(self) -> None:
+        from _codebuddy_common import ensure_success
+        result = unittest.mock.MagicMock(
+            exit_code=1, stdout="out", stderr="error"
+        )
+        with self.assertRaises(SystemExit) as ctx:
+            ensure_success(result, "do something")
+        # SystemExit raised by ensure_success carries the formatted message as
+        # args[0], not an integer exit code.
+        self.assertIn("Failed to do something (exit 1)", str(ctx.exception))
+
+    def test_sandbox_identifier_prefers_sandbox_id(self) -> None:
+        from _codebuddy_common import sandbox_identifier
+        # Use a plain object so the attribute lookup is a real getattr, not a
+        # auto-generated MagicMock attribute (which would always succeed and
+        # silently mask the priority path).
+        sandbox = types.SimpleNamespace(sandbox_id="sb-abc", id="legacy-id")
+        self.assertEqual(sandbox_identifier(sandbox), "sb-abc")
+
+    def test_sandbox_identifier_falls_back_to_id(self) -> None:
+        from _codebuddy_common import sandbox_identifier
+        sandbox = types.SimpleNamespace(id="legacy-id")
+        self.assertEqual(sandbox_identifier(sandbox), "legacy-id")
+
+    def test_sandbox_identifier_returns_unknown_when_neither_attr(self) -> None:
+        from _codebuddy_common import sandbox_identifier
+        sandbox = types.SimpleNamespace()
+        self.assertEqual(sandbox_identifier(sandbox), "unknown")
+
+    def test_stream_writer_extracts_line(self) -> None:
+        from _codebuddy_common import stream_writer
+        import io
+        buf = io.StringIO()
+        writer = stream_writer(buf)
+        writer("hello")
+        self.assertEqual(buf.getvalue(), "hello")
+
+    def test_stream_writer_handles_chunk_with_line_attr(self) -> None:
+        from _codebuddy_common import stream_writer
+        import io
+        buf = io.StringIO()
+        writer = stream_writer(buf)
+        chunk = unittest.mock.MagicMock()
+        chunk.line = "chunked output"
+        writer(chunk)
+        self.assertEqual(buf.getvalue(), "chunked output")
 
 
 if __name__ == "__main__":

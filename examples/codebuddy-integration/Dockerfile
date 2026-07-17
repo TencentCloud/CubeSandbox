@@ -73,6 +73,7 @@ RUN apt-get update \
         > /etc/apt/sources.list.d/nodesource.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # Layer 2 — CodeBuddy Code. Skips dev deps (50-200 MB of tooling the headless
@@ -81,7 +82,6 @@ RUN apt-get update \
 RUN npm install -g --omit=dev --ignore-scripts \
         "@tencent-ai/codebuddy-code@${CODEBUDDY_VERSION}" \
     && codebuddy --version \
-    && npm cache clean --force \
     && rm -rf /root/.npm
 
 # Create an unprivileged user that owns the workspace. CodeBuddy is an

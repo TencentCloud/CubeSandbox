@@ -19,13 +19,13 @@ from typing import Any
 
 from e2b import Sandbox
 
-from _codebuddy_common import ensure_success, run_command, sandbox_identifier
+from _codebuddy_common import ensure_success, positive_int, run_command, sandbox_identifier
 from env_utils import (
+    _env_positive_int,
     build_codebuddy_env,
     codebuddy_command,
     codebuddy_model,
     codebuddy_workspace,
-    int_env,
     load_local_dotenv,
     require_provider_key,
     required,
@@ -68,22 +68,31 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--approve",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
             "Skip tool-call permission prompts (-y / --dangerously-skip-permissions). "
-            "Required for any non-interactive run that touches files or commands."
+            "Required for any non-interactive run that touches files or commands. "
+            "Defaults to enabled; pass --no-approve to run with CodeBuddy's permission "
+            "prompts on (the exec channel cannot answer them, so this will hang — only "
+            "use --no-approve if you've tightened the tool allow-list via settings.json)."
         ),
     )
     parser.add_argument(
         "--sandbox-timeout",
         type=positive_int,
-        default=int_env("CODEBUDDY_SANDBOX_TIMEOUT", 1800),
+        # Resolve the env-var through positive_int too so
+        # CODEBUDDY_SANDBOX_TIMEOUT=0 fails the same way as ``--sandbox-timeout 0``
+        # (a bare ``int_env(...)`` default would skip that check and let a
+        # zero-value env var reach the SDK, which then creates a sandbox with
+        # no lifetime).
+        default=_env_positive_int("CODEBUDDY_SANDBOX_TIMEOUT", 1800),
         help="Sandbox lifetime in seconds. Defaults to CODEBUDDY_SANDBOX_TIMEOUT or 1800.",
     )
     parser.add_argument(
         "--exec-timeout",
         type=positive_int,
-        default=int_env("CODEBUDDY_AGENT_EXEC_TIMEOUT", 900),
+        default=_env_positive_int("CODEBUDDY_AGENT_EXEC_TIMEOUT", 900),
         help="CodeBuddy command timeout in seconds. Defaults to CODEBUDDY_AGENT_EXEC_TIMEOUT or 900.",
     )
     parser.add_argument(
@@ -95,24 +104,6 @@ def parse_args() -> argparse.Namespace:
     if args.prompt is None:
         args.prompt = default_prompt(args.workspace)
     return args
-
-
-def positive_int(value: str) -> int:
-    """argparse type that rejects zero and negative integers.
-
-    Both the CLI value and the env-var fallback default flow through this
-    function so passing ``--exec-timeout 0`` fails the same way as setting
-    ``CODEBUDDY_AGENT_EXEC_TIMEOUT=0`` in the environment.
-    """
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        raise argparse.ArgumentTypeError(f"expected an integer, got {value!r}")
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError(
-            f"expected a positive integer, got {parsed}"
-        )
-    return parsed
 
 
 def seed_project(sandbox: Sandbox, workspace: str, timeout: int) -> None:
@@ -174,7 +165,7 @@ def main() -> int:
         f"cd {shlex.quote(args.workspace)}",
         codebuddy_command(
             args.prompt,
-            dangerously_skip_permissions=args.approve or True,
+            dangerously_skip_permissions=args.approve,
             model=model,
         ),
     )

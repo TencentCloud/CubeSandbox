@@ -112,6 +112,27 @@ def int_env(name: str, default: int) -> int:
         raise SystemExit(f"{name} must be an integer, got {raw!r}") from exc
 
 
+def _env_positive_int(name: str, default: int) -> int:
+    """``int_env`` + ``positive_int``: rejects zero/negative env-var values too.
+
+    argparse evaluates ``default=`` before ``type=``, so a bare
+    ``default=int_env(...)`` lets a malformed env var (e.g.
+    ``CODEBUDDY_SANDBOX_TIMEOUT=0``) bypass the ``type=positive_int`` check.
+    Use this helper for timeout defaults that share the positive-integer
+    constraint with their CLI flag.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        parsed = int(raw)
+    except ValueError as exc:
+        raise SystemExit(f"{name} must be an integer, got {raw!r}") from exc
+    if parsed <= 0:
+        raise SystemExit(f"{name} must be a positive integer, got {parsed}")
+    return parsed
+
+
 def codebuddy_home() -> str:
     return optional("CODEBUDDY_CONFIG_DIR", DEFAULT_CODEBUDDY_HOME)
 
@@ -143,6 +164,11 @@ def provider() -> str:
     CODEBUDDY_API_KEY / CODEBUDDY_BASE_URL; this helper just translates that
     trio into a single string so the egress allow-list (network_policy.py) can
     pick the right host and the right auth-header shape.
+
+    **Heuristic caveat:** host detection uses substring matching (``"anthropic" in
+    host``, etc.). A custom gateway hostname like ``anthropic-proxy.attacker.io``
+    would match incorrectly. Set ``CODEBUDDY_PROVIDER`` explicitly to bypass the
+    heuristic whenever a non-standard upstream is in use.
     """
     explicit = os.environ.get("CODEBUDDY_PROVIDER")
     if explicit:
@@ -345,13 +371,18 @@ def build_codebuddy_env(include_secrets: bool = True) -> dict[str, str]:
                 value = strip_url_userinfo(value)
             env[name] = value
     if include_secrets:
-        # Forward ONLY the active provider's key, never every known secret —
-        # a host with several provider keys (e.g. a CI matrix) must not leak
-        # all of them into the sandbox.
+        # Forward ONLY the first (highest-priority) provider key that is actually
+        # set, never every candidate — a host with several provider keys (e.g. a
+        # CI matrix) must not leak all of them into the sandbox. The fallback
+        # chain in provider_key_candidates covers multi-name aliases (e.g.
+        # ANTHROPIC_API_KEY vs CODEBUDDY_API_KEY) for the same logical provider,
+        # but once one name matches we stop, so a dual-key host only forwards the
+        # one the operator actually set for this invocation.
         for name in provider_key_candidates(provider()):
             value = os.environ.get(name)
             if value:
                 env[name] = value
+                break
     return env
 
 
