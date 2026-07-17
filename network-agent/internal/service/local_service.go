@@ -331,6 +331,63 @@ func (s *localService) ReconcileNetwork(ctx context.Context, req *ReconcileNetwo
 	}, nil
 }
 
+// UpdateEgressRule upserts a single L7 egress rule (keyed by Name == CubeEgress
+// rule id) into a RUNNING sandbox's policy. It is the durable counterpart to
+// CubeEgress's ephemeral admin PATCH: the rule is written into the persisted
+// CubeNetworkConfig and Saved to disk, so it survives a CubeEgress restart
+// (bootstrap re-hydrates from DumpEgressPolicies, which reads this state), and
+// then the full policy is re-pushed so the change takes effect on the next
+// request. Typical use: refresh an injected per-user credential when its token
+// rotates, without recreating the sandbox.
+func (s *localService) UpdateEgressRule(ctx context.Context, req *UpdateEgressRuleRequest) (*UpdateEgressRuleResponse, error) {
+	if req == nil || req.Rule == nil || req.Rule.Name == "" {
+		return nil, fmt.Errorf("a rule with a name is required")
+	}
+	s.mu.Lock()
+	state, ok := s.lookupStateLocked(req.SandboxID, req.NetworkHandle)
+	if !ok {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("network %q not found", req.SandboxID)
+	}
+	if state.CubeNetworkConfig == nil {
+		state.CubeNetworkConfig = &CubeNetworkConfig{}
+	}
+	replaced := false
+	for i, r := range state.CubeNetworkConfig.Rules {
+		if r != nil && r.Name == req.Rule.Name {
+			state.CubeNetworkConfig.Rules[i] = req.Rule
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		state.CubeNetworkConfig.Rules = append(state.CubeNetworkConfig.Rules, req.Rule)
+	}
+	// Persist BEFORE pushing so the change survives a CubeEgress restart even if
+	// the push below fails and only the maintenance loop lands it later.
+	if err := s.store.Save(&state.persistedState); err != nil {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("persist updated egress rule: %w", err)
+	}
+	ip := state.SandboxIP
+	ruleCount := len(state.CubeNetworkConfig.Rules)
+	// Re-push the full updated policy via the same best-effort dispatcher
+	// EnsureNetwork uses; a transient failure sets pendingEgressPush so the
+	// maintenance loop retries. Held under s.mu (a bounded localhost call) so the
+	// pendingEgressPush read is race-free.
+	s.pushEgressForState(ctx, state)
+	pending := state.pendingEgressPush
+	s.mu.Unlock()
+
+	return &UpdateEgressRuleResponse{
+		SandboxID: req.SandboxID,
+		SandboxIP: ip,
+		Applied:   !pending,
+		Pending:   pending,
+		RuleCount: ruleCount,
+	}, nil
+}
+
 func (s *localService) GetNetwork(ctx context.Context, req *GetNetworkRequest) (*GetNetworkResponse, error) {
 	_ = ctx
 	s.mu.Lock()

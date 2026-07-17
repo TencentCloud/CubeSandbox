@@ -11,6 +11,7 @@ type Service interface {
 	EnsureNetwork(ctx context.Context, req *EnsureNetworkRequest) (*EnsureNetworkResponse, error)
 	ReleaseNetwork(ctx context.Context, req *ReleaseNetworkRequest) (*ReleaseNetworkResponse, error)
 	ReconcileNetwork(ctx context.Context, req *ReconcileNetworkRequest) (*ReconcileNetworkResponse, error)
+	UpdateEgressRule(ctx context.Context, req *UpdateEgressRuleRequest) (*UpdateEgressRuleResponse, error)
 	GetNetwork(ctx context.Context, req *GetNetworkRequest) (*GetNetworkResponse, error)
 	ListNetworks(ctx context.Context, req *ListNetworksRequest) (*ListNetworksResponse, error)
 	Health(ctx context.Context) error
@@ -56,6 +57,10 @@ func (s *noopService) ReconcileNetwork(ctx context.Context, req *ReconcileNetwor
 		Converged:       true,
 		PersistMetadata: req.PersistMetadata,
 	}, nil
+}
+
+func (s *noopService) UpdateEgressRule(ctx context.Context, req *UpdateEgressRuleRequest) (*UpdateEgressRuleResponse, error) {
+	return &UpdateEgressRuleResponse{SandboxID: req.SandboxID, Applied: true}, nil
 }
 
 func (s *noopService) GetNetwork(ctx context.Context, req *GetNetworkRequest) (*GetNetworkResponse, error) {
