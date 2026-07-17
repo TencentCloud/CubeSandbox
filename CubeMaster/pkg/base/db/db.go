@@ -6,8 +6,8 @@
 package db
 
 import (
+	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/dao"
 	"gorm.io/gorm"
 )
 

@@ -178,7 +178,9 @@ builder-shell: prepare-builder-home prepare-tmp-git-credentials
 
 .PHONY: builder-run
 builder-run: prepare-builder-home prepare-tmp-git-credentials
-	@test -n "$(strip $(BUILDER_CMD))" || { echo "BUILDER_CMD must not be empty"; exit 1; }
+ifeq ($(strip $(BUILDER_CMD)),)
+	$(error BUILDER_CMD must not be empty)
+endif
 	docker run --rm -i \
 		--user "$(UID):$(GID)" \
 		-e HOME=$(BUILDER_CONTAINER_HOME) \
@@ -273,7 +275,7 @@ cube-api: cubeapi
 .PHONY: cubeops
 cubeops: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeOps && go mod download && CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -ldflags "-s -w -X main.Version=$(CUBE_VERSION) -X main.Commit=$(CUBE_COMMIT) -X main.BuildTime=$(CUBE_BUILD_TIME)" -o /workspace/_output/bin/cubeops ./cmd/cubeops'
+	$(MAKE) builder-run BUILDER_CMD="mkdir -p /workspace/_output/bin && cd /workspace/CubeOps && go mod download && CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -ldflags '-s -w -X main.Version=$(CUBE_VERSION) -X main.Commit=$(CUBE_COMMIT) -X main.BuildTime=$(CUBE_BUILD_TIME)' -o /workspace/_output/bin/cubeops ./cmd/cubeops"
 
 .PHONY: cubeops-test
 cubeops-test: builder-image

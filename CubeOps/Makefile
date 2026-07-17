@@ -22,8 +22,8 @@ vet:
 	go vet ./...
 
 fmt:
-	gofmt -w .
-	goimports -w .
+	go fmt ./...
+	@command -v goimports >/dev/null 2>&1 && goimports -w . || true
 
 clean:
 	rm -rf bin/
