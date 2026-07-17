@@ -200,3 +200,34 @@ func TestUpdateEgressRuleValidation(t *testing.T) {
 		})
 	}
 }
+
+// TestUpdateEgressRuleClonesCallerRule guards the aliasing hazard: the stored
+// and persisted state must be independent of the caller's rule pointer, so a
+// later mutation of it cannot silently diverge in-memory state from disk.
+func TestUpdateEgressRuleClonesCallerRule(t *testing.T) {
+	s, _ := ueService(t)
+	ueSeed(s, "sb-1", "sb-1", "192.168.0.10")
+
+	rule := ueRule("gitlab_token", "tok-A")
+	if _, err := s.UpdateEgressRule(context.Background(), &UpdateEgressRuleRequest{
+		SandboxID: "sb-1",
+		Rule:      rule,
+	}); err != nil {
+		t.Fatalf("UpdateEgressRule error=%v", err)
+	}
+
+	// Mutate the caller's rule after the call returned.
+	rule.Name = "renamed"
+	rule.Action.Inject[0].Secret = "MUTATED"
+
+	stored := s.states["sb-1"].CubeNetworkConfig.Rules[0]
+	if stored.Name != "gitlab_token" || stored.Action.Inject[0].Secret != "tok-A" {
+		t.Fatalf("in-memory state aliased the caller's rule: name=%q secret=%q",
+			stored.Name, stored.Action.Inject[0].Secret)
+	}
+	persisted := ueLoadRules(t, s, "sb-1")
+	if persisted[0].Name != "gitlab_token" || persisted[0].Action.Inject[0].Secret != "tok-A" {
+		t.Fatalf("persisted state aliased the caller's rule: name=%q secret=%q",
+			persisted[0].Name, persisted[0].Action.Inject[0].Secret)
+	}
+}
