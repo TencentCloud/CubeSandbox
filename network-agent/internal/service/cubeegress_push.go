@@ -164,35 +164,31 @@ func (s *localService) deleteEgressForState(ctx context.Context, sandboxID, sand
 	}
 }
 
-// retryPendingEgressPushes is invoked from the maintenance loop. It
-// iterates current managed states and re-pushes any that have
-// pendingEgressPush=true. Holds s.mu for the duration of each per-state
-// push so the state map can't change underneath us; the actual HTTP
-// call happens with the lock released to avoid blocking the data plane.
+// retryPendingEgressPushes is invoked from the maintenance loop. It re-pushes
+// every managed state with pendingEgressPush=true. Each push renders the policy
+// under s.mu, releases the lock for the HTTP call, then re-acquires it to record
+// the result — and skips any state whose flag was cleared by a concurrent
+// UpdateEgressRule in the meantime, so a stale snapshot can never overwrite a
+// freshly rotated credential in CubeEgress.
 func (s *localService) retryPendingEgressPushes() {
 	if s.egress == nil || !s.egress.Configured() {
 		return
 	}
-	// Snapshot states needing retry so we don't hold the lock during HTTP I/O.
+	// Snapshot which sandboxes need a retry; we don't hold the lock during HTTP
+	// I/O. We deliberately do NOT capture the rendered policy here: it is
+	// re-read under the lock just before each push so a concurrent
+	// UpdateEgressRule can't have us overwrite a freshly rotated credential with
+	// a stale snapshot (TOCTOU).
 	type pending struct {
 		state *managedState
 		ip    string
-		input *cubeegress.PolicyInput
 	}
 	var todo []pending
 	s.mu.Lock()
 	for _, st := range s.states {
-		if !st.pendingEgressPush {
-			continue
+		if st.pendingEgressPush {
+			todo = append(todo, pending{state: st, ip: st.SandboxIP})
 		}
-		input := toEgressInput(st.CubeNetworkConfig)
-		if input == nil {
-			// Pending got set but rules are gone (mutation we don't yet
-			// support). Clear the flag.
-			st.pendingEgressPush = false
-			continue
-		}
-		todo = append(todo, pending{state: st, ip: st.SandboxIP, input: input})
 	}
 	s.mu.Unlock()
 
@@ -202,8 +198,26 @@ func (s *localService) retryPendingEgressPushes() {
 
 	logger := CubeLog.WithContext(context.Background())
 	for _, item := range todo {
+		// Re-check and re-render under the lock: a concurrent UpdateEgressRule
+		// may have pushed a fresh policy and cleared the flag since we
+		// snapshotted. If so, skip — that push already superseded this retry.
+		s.mu.Lock()
+		if !item.state.pendingEgressPush {
+			s.mu.Unlock()
+			continue
+		}
+		input := toEgressInput(item.state.CubeNetworkConfig)
+		s.mu.Unlock()
+		if input == nil {
+			// Pending was set but the rules are gone; clear the flag.
+			s.mu.Lock()
+			item.state.pendingEgressPush = false
+			s.mu.Unlock()
+			continue
+		}
+
 		ctx, cancel := context.WithTimeout(context.Background(), egressRetryCallTimeout)
-		err := s.egress.PutPolicy(ctx, item.ip, item.input)
+		err := s.egress.PutPolicy(ctx, item.ip, input)
 		cancel()
 		s.mu.Lock()
 		switch {

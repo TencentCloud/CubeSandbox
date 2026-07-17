@@ -8,7 +8,23 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/tencentcloud/CubeSandbox/network-agent/internal/cubeegress"
 )
+
+// hookEgress wraps fakeEgress to run a callback on each PutPolicy, letting a
+// test simulate a concurrent operation landing mid-batch.
+type hookEgress struct {
+	*fakeEgress
+	onPut func(ip string)
+}
+
+func (h *hookEgress) PutPolicy(ctx context.Context, ip string, in *cubeegress.PolicyInput) error {
+	if h.onPut != nil {
+		h.onPut(ip)
+	}
+	return h.fakeEgress.PutPolicy(ctx, ip, in)
+}
 
 func ueStrPtr(s string) *string { return &s }
 
@@ -229,5 +245,47 @@ func TestUpdateEgressRuleClonesCallerRule(t *testing.T) {
 	if persisted[0].Name != "gitlab_token" || persisted[0].Action.Inject[0].Secret != "tok-A" {
 		t.Fatalf("persisted state aliased the caller's rule: name=%q secret=%q",
 			persisted[0].Name, persisted[0].Action.Inject[0].Secret)
+	}
+}
+
+// TestRetryPendingEgressPushesSkipsFlagClearedMidBatch guards the TOCTOU race:
+// the retry loop must not overwrite CubeEgress with a stale snapshot after a
+// concurrent UpdateEgressRule has pushed a fresh policy and cleared the pending
+// flag. Two sandboxes are pending; whichever the retry pushes first simulates
+// that concurrent push by clearing the OTHER's flag, so exactly one push must
+// happen — the second must be skipped, not re-pushed with stale data.
+func TestRetryPendingEgressPushesSkipsFlagClearedMidBatch(t *testing.T) {
+	store, err := newStateStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("newStateStore error=%v", err)
+	}
+	fake := newFakeEgress()
+	hook := &hookEgress{fakeEgress: fake}
+	s := &localService{store: store, egress: hook, states: map[string]*managedState{}}
+	ueSeed(s, "sb-a", "sb-a", "192.168.0.10", ueRule("cred", "old"))
+	ueSeed(s, "sb-b", "sb-b", "192.168.0.11", ueRule("cred", "old"))
+	s.states["sb-a"].pendingEgressPush = true
+	s.states["sb-b"].pendingEgressPush = true
+
+	hook.onPut = func(ip string) {
+		other := "sb-b"
+		if ip == "192.168.0.11" {
+			other = "sb-a"
+		}
+		s.mu.Lock()
+		s.states[other].pendingEgressPush = false
+		s.mu.Unlock()
+	}
+
+	s.retryPendingEgressPushes()
+
+	pushed := 0
+	for _, p := range fake.puts {
+		if p.ip == "192.168.0.10" || p.ip == "192.168.0.11" {
+			pushed++
+		}
+	}
+	if pushed != 1 {
+		t.Fatalf("expected exactly 1 retry push (second skipped after its flag cleared mid-batch), got %d", pushed)
 	}
 }
