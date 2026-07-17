@@ -60,6 +60,25 @@ type ReconcileNetworkResponse struct {
 	PersistMetadata map[string]string `json:"persistMetadata,omitempty"`
 }
 
+// UpdateEgressRuleRequest upserts a single L7 egress rule on a RUNNING sandbox
+// without recreating it — used to refresh an injected credential (e.g. a rotated
+// per-user OAuth token) whose value lives only in the rule's inject secret.
+type UpdateEgressRuleRequest struct {
+	SandboxID     string `json:"sandboxID,omitempty"`
+	NetworkHandle string `json:"networkHandle,omitempty"`
+	// Rule is upserted by Name (== the CubeEgress rule id): a rule with the same
+	// Name is replaced in place (order preserved); otherwise it is appended.
+	Rule *EgressRule `json:"rule,omitempty"`
+}
+
+type UpdateEgressRuleResponse struct {
+	SandboxID string `json:"sandboxID,omitempty"`
+	SandboxIP string `json:"sandboxIP,omitempty"`
+	Applied   bool   `json:"applied"`
+	Pending   bool   `json:"pending,omitempty"`
+	RuleCount int    `json:"ruleCount"`
+}
+
 type GetNetworkRequest struct {
 	SandboxID     string `json:"sandboxID,omitempty"`
 	NetworkHandle string `json:"networkHandle,omitempty"`
