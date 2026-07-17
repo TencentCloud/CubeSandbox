@@ -66,7 +66,7 @@ func New(listen string, svc service.Service) *Server {
 			return svc.ReconcileNetwork(r.Context(), req)
 		})
 	})
-	mux.HandleFunc("/v1/egress/update", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/network/updateEgress", func(w http.ResponseWriter, r *http.Request) {
 		handleJSON(w, r, func(body []byte) (interface{}, error) {
 			req := &service.UpdateEgressRuleRequest{}
 			if err := json.Unmarshal(body, req); err != nil {
