@@ -152,6 +152,9 @@ func (f *fakeDumpService) ReleaseNetwork(ctx context.Context, req *service.Relea
 func (f *fakeDumpService) ReconcileNetwork(ctx context.Context, req *service.ReconcileNetworkRequest) (*service.ReconcileNetworkResponse, error) {
 	return &service.ReconcileNetworkResponse{}, nil
 }
+func (f *fakeDumpService) UpdateEgressRule(ctx context.Context, req *service.UpdateEgressRuleRequest) (*service.UpdateEgressRuleResponse, error) {
+	return &service.UpdateEgressRuleResponse{}, nil
+}
 func (f *fakeDumpService) GetNetwork(ctx context.Context, req *service.GetNetworkRequest) (*service.GetNetworkResponse, error) {
 	return &service.GetNetworkResponse{}, nil
 }
