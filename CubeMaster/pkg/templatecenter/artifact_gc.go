@@ -6,7 +6,7 @@ package templatecenter
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -14,6 +14,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"gorm.io/gorm"
 )
 
 const (
@@ -26,17 +27,57 @@ const (
 var (
 	artifactGCOnce         sync.Once
 	cleanupArtifactFullyGC = cleanupArtifactFully
+	// errArtifactGCLockNotAcquired is returned from the candidate-selection
+	// transaction when another instance already holds the session lock.
+	errArtifactGCLockNotAcquired = errors.New("artifact gc lock not acquired")
 )
+
+// trySessionLock attempts to acquire a cross-instance session lock with 0
+// timeout (immediate return). MySQL: GET_LOCK(name, 0); PG: pg_try_advisory_lock(hashtext(name)).
+// Caller must pass a *gorm.DB that is pinned to one connection (e.g. inside
+// Transaction) so acquire and release share the same session.
+func trySessionLock(tx *gorm.DB, name string) bool {
+	driver := tx.Dialector.Name()
+	switch driver {
+	case "postgres":
+		var ok bool
+		err := tx.Raw("SELECT pg_try_advisory_lock(hashtext(?))", name).Scan(&ok).Error
+		return err == nil && ok
+	default: // mysql
+		var res int64
+		err := tx.Raw("SELECT GET_LOCK(?, 0)", name).Scan(&res).Error
+		return err == nil && res == 1
+	}
+}
+
+// releaseSessionLock releases a cross-instance session lock on the same
+// connection that acquired it.
+func releaseSessionLock(tx *gorm.DB, name string) {
+	driver := tx.Dialector.Name()
+	var err error
+	switch driver {
+	case "postgres":
+		err = tx.Exec("SELECT pg_advisory_unlock(hashtext(?))", name).Error
+	default:
+		err = tx.Exec("SELECT RELEASE_LOCK(?)", name).Error
+	}
+	if err != nil {
+		ctx := context.Background()
+		if tx.Statement != nil && tx.Statement.Context != nil {
+			ctx = tx.Statement.Context
+		}
+		log.G(ctx).Warnf("artifact gc: release lock %q failed: %v", name, err)
+	}
+}
 
 // startArtifactGC launches the orphan/expired rootfs-artifact garbage
 // collector. It is registered alongside the snapshot reconciler (not folded
 // into it) and converges the cases online deletion cannot finish in one pass:
 // interrupted builds, artifacts whose nodes were busy (CLEANUP_PENDING), and
-// TTL-expired artifacts. A component-scoped MySQL GET_LOCK keeps candidate
+// TTL-expired artifacts. A component-scoped advisory lock keeps candidate
 // selection single-instance across the HA cluster without covering slow
 // cross-node cleanup RPCs; the lock name is intentionally distinct from
-// schema-migration locks (`cubemaster_schema_migration_global` and
-// `cubemaster_migration_*`).
+// schema-migration locks.
 func startArtifactGC(ctx context.Context) {
 	artifactGCOnce.Do(func() {
 		go func() {
@@ -115,32 +156,30 @@ func cleanupArtifactGCCandidate(ctx context.Context, artifact models.RootfsArtif
 
 func listArtifactGCCandidatesLocked(ctx context.Context) ([]models.RootfsArtifact, bool) {
 	logger := log.G(ctx).WithFields(map[string]any{"component": "artifact_gc"})
-	// Single-instance execution across the cluster: GET_LOCK with a 0s timeout
-	// returns immediately; another instance holding it means we skip this pass.
-	// The lock protects only candidate selection. cleanupArtifactFully performs
-	// its own row-level serialisation and idempotent physical deletes, so slow
-	// RPCs must not keep this HA-wide lock held.
-	var lockRes sql.NullInt64
-	if err := store.db.WithContext(ctx).
-		Raw("SELECT GET_LOCK(?, ?)", artifactGCLockName, 0).Scan(&lockRes).Error; err != nil {
-		logger.Warnf("artifact gc: acquire lock failed: %v", err)
+
+	// Pin one connection for acquire + query + release: MySQL GET_LOCK and
+	// PostgreSQL pg_try_advisory_lock are session-scoped, so unlocking on a
+	// different pooled connection would silently no-op and leak the lock.
+	var candidates []models.RootfsArtifact
+	err := store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if !trySessionLock(tx, artifactGCLockName) {
+			return errArtifactGCLockNotAcquired
+		}
+		defer releaseSessionLock(tx, artifactGCLockName)
+
+		now := time.Now().Unix()
+		if err := tx.Table(constants.RootfsArtifactTableName).
+			Where("status IN ? OR (gc_deadline > 0 AND gc_deadline < ?)",
+				[]string{ArtifactStatusFailed, ArtifactStatusOrphaned, ArtifactStatusCleanupPending}, now).
+			Limit(artifactGCMaxPerPass).Find(&candidates).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+	if errors.Is(err, errArtifactGCLockNotAcquired) {
 		return nil, false
 	}
-	if !lockRes.Valid || lockRes.Int64 != 1 {
-		return nil, false // another instance is selecting candidates
-	}
-	defer func() {
-		if err := store.db.WithContext(ctx).Exec("SELECT RELEASE_LOCK(?)", artifactGCLockName).Error; err != nil {
-			logger.Warnf("artifact gc: release lock failed: %v", err)
-		}
-	}()
-
-	now := time.Now().Unix()
-	var candidates []models.RootfsArtifact
-	if err := store.db.WithContext(ctx).Table(constants.RootfsArtifactTableName).
-		Where("status IN ? OR (gc_deadline > 0 AND gc_deadline < ?)",
-			[]string{ArtifactStatusFailed, ArtifactStatusOrphaned, ArtifactStatusCleanupPending}, now).
-		Limit(artifactGCMaxPerPass).Find(&candidates).Error; err != nil {
+	if err != nil {
 		logger.Warnf("artifact gc: list candidates failed: %v", err)
 		return nil, false
 	}
