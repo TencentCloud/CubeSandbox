@@ -1255,7 +1255,7 @@ func (h *AgentHubHandler) CreateInstance(c *gin.Context) {
 			Stderr:   applyOutput.Stderr,
 		},
 	}
-	// Shared-files persistence fields
+	// Shared-files persistence fields.
 	if sharedFiles && openclawPersistID != "" {
 		inst.OpenclawPersistID = &openclawPersistID
 		inst.OpenclawStatePath = &openclawStatePath
