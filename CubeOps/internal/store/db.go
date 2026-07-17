@@ -60,20 +60,56 @@ func (s *Store) Close() error {
 	return dao.Close()
 }
 
-// bootstrapMasterKey loads or creates the master encryption key from t_system_setting.
+// bootstrapMasterKey loads or creates the master encryption key.
+//
+// Resolution order (R15 dual-read for safe rollback):
+//  1. t_system_setting.secret_master_key (new table, post-migration)
+//  2. t_agenthub_setting.secret_master_key (old table, pre-migration / rollback)
+//  3. Generate a new key and persist to t_system_setting.
+//
+// The migration that copies the key to t_system_setting intentionally does
+// NOT delete it from t_agenthub_setting, so rolling back to the old CubeAPI
+// binary (which reads from t_agenthub_setting) still finds the original key
+// and can decrypt existing enc:v1 secrets.
 func (s *Store) bootstrapMasterKey(ctx context.Context) error {
+	// 1. Try the new system settings table.
+	b64, err := s.GetSystemSetting(ctx, "secret_master_key")
+	if err != nil {
+		return fmt.Errorf("read master key from t_system_setting: %w", err)
+	}
+
+	if b64 == "" {
+		// 2. Fallback: read from the old agenthub settings table.
+		//    This covers the upgrade window where the migration has run
+		//    (key copied to t_system_setting) but also the case where
+		//    CubeOps starts against a DB that hasn't been migrated yet.
+		b64, err = s.GetSetting(ctx, "secret_master_key")
+		if err != nil {
+			return fmt.Errorf("read master key from t_agenthub_setting: %w", err)
+		}
+	}
+
+	if b64 != "" {
+		if err := crypto.InstallMasterKey(b64); err != nil {
+			return fmt.Errorf("install master key: %w", err)
+		}
+		slog.Info("master encryption key loaded from database")
+		return nil
+	}
+
+	// 3. No existing key anywhere — generate and persist to t_system_setting.
 	generated, err := crypto.GenerateMasterKeyB64()
 	if err != nil {
 		return fmt.Errorf("generate master key: %w", err)
 	}
-	b64, err := s.GetOrCreateSystemSetting(ctx, "secret_master_key", generated)
+	b64, err = s.GetOrCreateSystemSetting(ctx, "secret_master_key", generated)
 	if err != nil {
 		return err
 	}
 	if err := crypto.InstallMasterKey(b64); err != nil {
 		return fmt.Errorf("install master key: %w", err)
 	}
-	slog.Info("master encryption key installed")
+	slog.Info("master encryption key generated and persisted to t_system_setting")
 	return nil
 }
 

@@ -14,6 +14,59 @@ import (
 	"time"
 )
 
+// CMError carries a CubeMaster business error (non-zero ret_code) out of
+// readResponse so that handlers can map it to the correct HTTP status code
+// instead of collapsing every business error into 502. See R11.
+type CMError struct {
+	RetCode int
+	RetMsg  string
+}
+
+func (e *CMError) Error() string {
+	return fmt.Sprintf("cubemaster error %d: %s", e.RetCode, e.RetMsg)
+}
+
+// IsNotFound returns true for CubeMaster "not found" ret codes.
+func (e *CMError) IsNotFound() bool {
+	return e.RetCode == 130404 || e.RetCode == 404
+}
+
+// IsConflict returns true for CubeMaster "conflict" ret codes.
+func (e *CMError) IsConflict() bool {
+	return e.RetCode == 130409 || e.RetCode == 409
+}
+
+// IsPausing returns true for the "sandbox is pausing; retry later" ret code.
+// Used by DELETE /sandboxes/:id to return 503 + Retry-After.
+func (e *CMError) IsPausing() bool {
+	return e.RetCode == 130490
+}
+
+// IsResumeFailed returns true for "failed to resume paused sandbox before delete".
+// Used by DELETE /sandboxes/:id to return 503 + Retry-After.
+func (e *CMError) IsResumeFailed() bool {
+	return e.RetCode == 130589
+}
+
+// IsCapacity returns true for "resume rejected by capacity policy".
+// Used by DELETE /sandboxes/:id to return 409 Conflict.
+func (e *CMError) IsCapacity() bool {
+	return e.RetCode == 130409
+}
+
+// RetryAfter returns the Retry-After value (seconds) for retryable errors,
+// or 0 if the error is not retryable.
+func (e *CMError) RetryAfter() int {
+	switch {
+	case e.IsPausing():
+		return 2
+	case e.IsResumeFailed():
+		return 5
+	default:
+		return 0
+	}
+}
+
 // Client is a thin HTTP client wrapping CubeMaster REST API.
 type Client struct {
 	baseURL string
@@ -21,11 +74,15 @@ type Client struct {
 }
 
 // New creates a CubeMaster client pointing at baseURL.
+//
+// The HTTP client does NOT set a global Timeout — that would break long
+// operations like snapshot create/rollback (R12). Instead, per-request
+// deadlines are controlled by the context passed by each caller. The
+// transport keeps idle connection pooling for efficiency.
 func New(baseURL string) *Client {
 	return &Client{
 		baseURL: trimTrailingSlash(baseURL),
 		http: &http.Client{
-			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
 				MaxIdleConnsPerHost: 100,
 			},
@@ -309,8 +366,8 @@ func readResponse(resp *http.Response) (json.RawMessage, error) {
 	}
 	// Check CubeMaster business error code. CubeMaster uses ret_code=200 for
 	// success (and sometimes 0). Any other value is a failure, even when HTTP
-	// status is 200. This prevents silent failures like pause/resume returning
-	// "requestID is empty" but being treated as success.
+	// status is 200. Return a typed CMError so handlers can map ret_code to
+	// the correct HTTP status (404/409/503) instead of collapsing to 502.
 	var envelope struct {
 		Ret struct {
 			RetCode int    `json:"ret_code"`
@@ -318,7 +375,7 @@ func readResponse(resp *http.Response) (json.RawMessage, error) {
 		} `json:"ret"`
 	}
 	if json.Unmarshal(data, &envelope) == nil && envelope.Ret.RetCode != 0 && envelope.Ret.RetCode != 200 {
-		return nil, fmt.Errorf("cubemaster error %d: %s", envelope.Ret.RetCode, envelope.Ret.RetMsg)
+		return nil, &CMError{RetCode: envelope.Ret.RetCode, RetMsg: envelope.Ret.RetMsg}
 	}
 	return json.RawMessage(data), nil
 }

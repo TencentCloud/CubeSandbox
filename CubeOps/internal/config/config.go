@@ -21,7 +21,10 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/goccy/go-yaml"
@@ -110,16 +113,73 @@ func Load() (*Config, error) {
 }
 
 // DaoConfig converts the CubeOps config to a CubeDB dao.Config.
+//
+// If DatabaseURL is set, it is the single source of truth and the individual
+// MySQL* fields are ignored. This fixes R06: previously DatabaseURL was
+// accepted by Load() and passed the required-field check, but DaoConfig()
+// silently used the (possibly empty) MySQL* fields instead, causing CubeOps
+// to connect with empty user/db or fall back to localhost.
 func (c *Config) DaoConfig() dao.Config {
+	// Fast path: no DatabaseURL — use the individual fields as before.
+	if c.DatabaseURL == "" {
+		return dao.Config{
+			Driver:       "mysql",
+			User:         c.MySQLUser,
+			Pwd:          c.MySQLPassword,
+			Addr:         fmt.Sprintf("%s:%d", c.MySQLHost, c.MySQLPortOrDefault()),
+			DBName:       c.MySQLDB,
+			MaxIdleConns: 10,
+			MaxOpenConns: 100,
+		}
+	}
+
+	// Parse DatabaseURL: mysql://user:pass@host:port/dbname
+	// Individual MySQL* fields are NOT mixed in — DatabaseURL wins entirely.
+	user, pass, host, port, dbname := parseMySQLURL(c.DatabaseURL)
 	return dao.Config{
 		Driver:       "mysql",
-		User:         c.MySQLUser,
-		Pwd:          c.MySQLPassword,
-		Addr:         fmt.Sprintf("%s:%d", c.MySQLHost, c.MySQLPortOrDefault()),
-		DBName:       c.MySQLDB,
+		User:         user,
+		Pwd:          pass,
+		Addr:         fmt.Sprintf("%s:%d", host, port),
+		DBName:       dbname,
 		MaxIdleConns: 10,
 		MaxOpenConns: 100,
 	}
+}
+
+// parseMySQLURL extracts (user, password, host, port, dbname) from a
+// mysql:// URL. If parsing fails for any component, the caller's individual
+// fields are NOT consulted — the error surfaces as an empty component that
+// the DB driver will reject with a clear "access denied" or "unknown
+// database" message, which is better than silently connecting to the wrong
+// database.
+func parseMySQLURL(rawURL string) (user, pass, host string, port int, dbname string) {
+	port = 3306 // default
+
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return
+	}
+
+	// url.Parse puts user:pass into User, host:port into Host.
+	if u.User != nil {
+		user = u.User.Username()
+		if p, ok := u.User.Password(); ok {
+			pass = p
+		}
+	}
+
+	host = u.Hostname()
+	if h := u.Port(); h != "" {
+		if p, err := strconv.Atoi(h); err == nil {
+			port = p
+		}
+	}
+
+	// Database name is the path without leading "/".
+	dbname = strings.TrimPrefix(u.Path, "/")
+
+	return
 }
 
 // MySQLPortOrDefault returns the configured MySQL port or 3306.

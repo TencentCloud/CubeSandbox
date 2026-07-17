@@ -20,7 +20,8 @@ RUN go mod download
 
 COPY CubeOps/ .
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
     -ldflags="-s -w" \
     -o /usr/local/bin/cubeops \
     ./cmd/cubeops

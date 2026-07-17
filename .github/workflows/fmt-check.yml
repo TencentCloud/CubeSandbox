@@ -13,6 +13,7 @@ on:
       - 'CubeMaster/Makefile'
       - 'CubeNet/Makefile'
       - 'CubeNet/cubevs/Makefile'
+      - 'CubeOps/Makefile'
       - 'CubeShim/Makefile'
       - 'cube-lifecycle-manager/Makefile'
       - 'cubecow/Makefile'

@@ -46,10 +46,14 @@ func (s *Server) Start() error {
 	s.httpSrv = &http.Server{
 		Addr:              s.cfg.Bind,
 		Handler:           engine,
-		ReadHeaderTimeout: 10 * time.Second, // mitigate Slowloris attacks
-		ReadTimeout:       15 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,  // mitigate Slowloris attacks
 		WriteTimeout:      300 * time.Second, // match nginx proxy_read_timeout
 		IdleTimeout:       120 * time.Second,
+		// ReadTimeout is intentionally NOT set. Go's http.Server.ReadTimeout
+		// covers the entire request body read AND cancels the request context
+		// when it expires — which would abort long-running handlers like Agent
+		// creation (applyOpenclawRuntime can take 25+ seconds). ReadHeaderTimeout
+		// alone is sufficient for Slowloris mitigation.
 	}
 
 	slog.Info("CubeOps starting", "addr", s.cfg.Bind)

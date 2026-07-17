@@ -4,7 +4,9 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -18,6 +20,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/crypto"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/cubemaster"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/httputil"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/redact"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
@@ -330,6 +333,25 @@ func (h *AgentHubHandler) ListInstances(c *gin.Context) {
 }
 
 // DeleteInstance handles DELETE /agenthub/instances/{agentID}.
+// compensateDeleteSandbox is a best-effort cleanup used when Agent creation
+// fails after the sandbox has already been created by CubeMaster. It deletes
+// the sandbox so CPU/memory/quota are not leaked. Errors are logged but not
+// returned — the caller already has an error to report to the client.
+// See R10.
+func (h *AgentHubHandler) compensateDeleteSandbox(ctx context.Context, sandboxID, reason string) {
+	if _, err := h.cm.DeleteSandbox(ctx, map[string]interface{}{
+		"request_id":    fmt.Sprintf("cubeops-compensate-%s-%d", reason, time.Now().UnixNano()),
+		"sandbox_id":    sandboxID,
+		"instance_type": sdkInstanceType,
+	}); err != nil {
+		slog.Error("compensateDeleteSandbox: failed to delete sandbox after creation failure",
+			"sandboxID", sandboxID, "reason", reason, "err", err)
+	} else {
+		slog.Info("compensateDeleteSandbox: sandbox deleted after creation failure",
+			"sandboxID", sandboxID, "reason", reason)
+	}
+}
+
 func (h *AgentHubHandler) DeleteInstance(c *gin.Context) {
 	agentID := c.Param("agentID")
 	inst, err := h.store.GetInstance(c.Request.Context(), agentID)
@@ -341,18 +363,37 @@ func (h *AgentHubHandler) DeleteInstance(c *gin.Context) {
 		httputil.WriteError(c, http.StatusNotFound, "instance not found")
 		return
 	}
-	if _, err := h.cm.DeleteSandbox(c.Request.Context(), map[string]string{
+	// R07 fix: send a proper DeleteSandbox request with requestID (required by
+	// CubeMaster) and use the correct instance_type ("cubebox", not inst.Engine
+	// which is usually "openclaw").
+	//
+	// If CubeMaster returns "not found" (130404), the sandbox is already gone
+	// (expired, auto-cleaned, or never fully created). This is NOT an error —
+	// we treat it as "already deleted" and proceed to clean up host-side state
+	// and DB records. This handles orphan DB records from failed creations.
+	//
+	// For other errors (pausing, capacity, internal), we do NOT continue to
+	// delete host-side state or DB records — that would leave a running
+	// sandbox with no UI visibility (resource leak + data loss).
+	if _, err := h.cm.DeleteSandbox(c.Request.Context(), map[string]interface{}{
+		"request_id":    fmt.Sprintf("cubeops-del-%d", time.Now().UnixNano()),
 		"sandbox_id":    inst.SandboxID,
-		"instance_type": inst.Engine,
+		"instance_type": sdkInstanceType,
 	}); err != nil {
-		// Log but continue — DB record is the source of truth for the UI
-		slog.Warn("DeleteInstance: DeleteSandbox failed, continuing with cleanup",
-			"agentID", agentID, "sandboxID", inst.SandboxID, "err", err)
+		var cmErr *cubemaster.CMError
+		if errors.As(err, &cmErr) && cmErr.IsNotFound() {
+			// Sandbox already gone — log and continue with cleanup.
+			slog.Info("DeleteInstance: sandbox not found in CubeMaster, treating as already deleted",
+				"agentID", agentID, "sandboxID", inst.SandboxID)
+		} else {
+			// Real error (pausing/capacity/internal) — do not clean up.
+			writeCMError(c, err)
+			return
+		}
 	}
 
-	// Clean up host-side OpenClaw state directory (shared_files persistence mode).
-	// Best-effort: log errors but don't fail the delete, since the DB record is
-	// the source of truth and sandbox deletion already happened.
+	// CubeMaster confirmed sandbox deletion — now safe to clean up host-side
+	// OpenClaw state directory (shared_files persistence mode).
 	if inst.OpenclawStatePath != nil && *inst.OpenclawStatePath != "" {
 		if err := os.RemoveAll(*inst.OpenclawStatePath); err != nil {
 			slog.Warn("DeleteInstance: failed to clean up OpenClaw state directory",
@@ -563,6 +604,70 @@ func (h *AgentHubHandler) UpdateWecomConfig(c *gin.Context) {
 		httputil.WriteError(c, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	// R14 fix: validate that botID and botSecret are both non-empty or both
+	// empty (the old CubeAPI required them to be paired). Allowing single-sided
+	// updates would leave the runtime in an inconsistent state.
+	botID := strings.TrimSpace(body.BotID)
+	botSecret := strings.TrimSpace(body.BotSecret)
+	if (botID == "") != (botSecret == "") {
+		httputil.WriteError(c, http.StatusBadRequest, "botId and botSecret must both be set or both be empty")
+		return
+	}
+
+	// R14 fix: apply the new WeCom config to the running sandbox BEFORE
+	// persisting to DB. The old CubeAPI called apply_openclaw_runtime with
+	// configureWecom=true to update the live OpenClaw process; without this,
+	// the UI shows "saved" but the running agent keeps using old config.
+	inst, err := h.store.GetInstance(c.Request.Context(), agentID)
+	if err != nil {
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to get instance: "+err.Error())
+		return
+	}
+	if inst == nil {
+		httputil.WriteError(c, http.StatusNotFound, "instance not found")
+		return
+	}
+
+	if botID != "" && inst.SandboxID != "" {
+		// Resolve LLM config for the apply spec (merge_llm mode preserves
+		// existing gateway token, only updates WeCom channel config).
+		// If LLM config is not available (e.g. API key not yet configured),
+		// we still proceed with defaults — WeCom update should not be blocked
+		// by missing LLM config.
+		llmCfg, err := resolveLLMConfig(c.Request.Context(), h.store)
+		if err != nil {
+			slog.Warn("UpdateWecomConfig: LLM config not available, using defaults", "err", err)
+			llmCfg = &llmConfig{
+				Provider:       defaultLLMProvider,
+				BaseURL:        defaultLLMBaseURL,
+				Model:          defaultOpenclawModel,
+				APIKey:         "",
+				CredentialMode: defaultLLMCredentialMode,
+			}
+		}
+		plan := resolveRuntimePlan(llmCfg, "")
+		domain := inst.Domain
+		if domain == "" {
+			domain = os.Getenv("CUBE_API_SANDBOX_DOMAIN")
+		}
+		envdClient := envdHTTPClient
+		applyOpts := &openclawApplyOptions{
+			mode:           applyModeMergeLLM,
+			configureWecom: true,
+			botID:          botID,
+			botSecret:      botSecret,
+		}
+		if _, err := applyOpenclawRuntime(envdClient, h.store, inst.SandboxID, domain, plan, applyOpts); err != nil {
+			// Runtime apply failed — the agent keeps running with old WeCom config.
+			// We still persist the DB record so the UI shows the intended value,
+			// but return an error so the user knows the runtime wasn't updated.
+			slog.Error("UpdateWecomConfig: failed to apply to running agent", "err", err)
+			httputil.WriteError(c, http.StatusBadGateway, "failed to apply WeCom config to running agent: "+err.Error())
+			return
+		}
+	}
+
+	// Runtime apply succeeded — now persist to DB.
 	if err := h.store.UpdateAgentWecomConfig(c.Request.Context(), agentID, body.BotID, body.BotSecret); err != nil {
 		httputil.WriteError(c, http.StatusInternalServerError, "failed to update wecom config: "+err.Error())
 		return
@@ -712,19 +817,46 @@ func (h *AgentHubHandler) DeleteSnapshot(c *gin.Context) {
 	agentID := c.Param("agentID")
 	snapshotID := c.Param("snapshotID")
 
-	// Look up the snapshot before soft-deleting so we can clean up host-side
-	// OpenClaw state files (agenthub_state kind). Best-effort cleanup: log
-	// errors but don't fail the delete, matching DeleteInstance semantics.
-	snap, _ := h.store.GetAgentSnapshot(c.Request.Context(), agentID, snapshotID)
-	if snap != nil && snap.OpenclawStateSnapshotPath != nil && *snap.OpenclawStateSnapshotPath != "" {
-		if err := os.RemoveAll(*snap.OpenclawStateSnapshotPath); err != nil {
-			slog.Warn("DeleteSnapshot: failed to clean up OpenClaw snapshot directory",
-				"agentID", agentID, "snapshotID", snapshotID,
-				"path", *snap.OpenclawStateSnapshotPath, "err", err)
-		} else {
-			slog.Info("DeleteSnapshot: cleaned up OpenClaw snapshot directory",
-				"agentID", agentID, "snapshotID", snapshotID,
-				"path", *snap.OpenclawStateSnapshotPath)
+	// R09 fix: look up the snapshot BEFORE deleting to check template references
+	// and determine the correct physical cleanup path.
+	snap, err := h.store.GetAgentSnapshot(c.Request.Context(), agentID, snapshotID)
+	if err != nil {
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to get snapshot: "+err.Error())
+		return
+	}
+	if snap == nil {
+		httputil.WriteError(c, http.StatusNotFound, "snapshot not found")
+		return
+	}
+
+	// R09 fix: reject deletion if the snapshot is referenced by a published template.
+	// The old CubeAPI returned 409 Conflict in this case.
+	if snap.TemplateRef {
+		httputil.WriteError(c, http.StatusConflict, "snapshot is referenced by a published template; remove the template first")
+		return
+	}
+
+	// R09 fix: physical cleanup based on snapshot kind.
+	// - agenthub_state: remove host-side OpenClaw state directory
+	// - full_snapshot / sandbox snapshot: call CubeMaster to delete the physical
+	//   snapshot (frees LVM/storage). Only proceed to DB soft-delete after
+	//   physical cleanup succeeds, preventing "DB invisible but storage leaked".
+	if snap.SnapshotKind != nil {
+		switch *snap.SnapshotKind {
+		case "agenthub_state":
+			if snap.OpenclawStateSnapshotPath != nil && *snap.OpenclawStateSnapshotPath != "" {
+				if err := os.RemoveAll(*snap.OpenclawStateSnapshotPath); err != nil {
+					slog.Warn("DeleteSnapshot: failed to clean up OpenClaw snapshot directory",
+						"agentID", agentID, "snapshotID", snapshotID,
+						"path", *snap.OpenclawStateSnapshotPath, "err", err)
+				}
+			}
+		case "full_snapshot", "sandbox_snapshot":
+			// Call CubeMaster to delete the physical snapshot.
+			if _, err := h.cm.DeleteSnapshot(c.Request.Context(), snapshotID); err != nil {
+				writeCMError(c, err)
+				return
+			}
 		}
 	}
 
@@ -1032,6 +1164,11 @@ func (h *AgentHubHandler) CreateInstance(c *gin.Context) {
 	}
 	applyOutput, err := applyOpenclawRuntime(envdHTTPClient, h.store, sandboxID, domain, plan, applyOpts)
 	if err != nil {
+		// R10 fix: sandbox was already created by CubeMaster at this point.
+		// If we just return the error, the sandbox keeps running (consuming
+		// CPU/memory/quota) but has no DB record — the UI can't see or clean
+		// it up. Compensate by deleting the sandbox before returning the error.
+		h.compensateDeleteSandbox(c.Request.Context(), sandboxID, "apply_openclaw")
 		httputil.WriteError(c, http.StatusBadGateway, "failed to apply OpenClaw config: "+err.Error())
 		return
 	}
@@ -1135,6 +1272,10 @@ func (h *AgentHubHandler) CreateInstance(c *gin.Context) {
 	}
 
 	if err := h.store.UpsertInstance(c.Request.Context(), inst); err != nil {
+		// R10 fix: sandbox was created and OpenClaw was applied, but the DB
+		// record failed. Compensate by deleting the sandbox to avoid a
+		// running sandbox with no DB record (invisible to the UI).
+		h.compensateDeleteSandbox(c.Request.Context(), sandboxID, "upsert_instance")
 		httputil.WriteError(c, http.StatusInternalServerError, "failed to create instance record: "+err.Error())
 		return
 	}
@@ -1447,11 +1588,15 @@ func (h *AgentHubHandler) RollbackAgent(c *gin.Context) {
 		}
 	} else {
 		// full_snapshot / sandbox snapshot: delegate to CubeMaster.
-		_, err = h.cm.RollbackSandbox(c.Request.Context(), inst.SandboxID, map[string]string{
-			"snapshot_id": req.SnapshotID,
+		// R08 fix: include request_id (required by CubeMaster snapshot rollback).
+		_, err = h.cm.RollbackSandbox(c.Request.Context(), inst.SandboxID, map[string]interface{}{
+			"request_id":    fmt.Sprintf("cubeops-rollback-%d", time.Now().UnixNano()),
+			"snapshot_id":   req.SnapshotID,
+			"sandbox_id":    inst.SandboxID,
+			"instance_type": sdkInstanceType,
 		})
 		if err != nil {
-			httputil.WriteError(c, http.StatusBadGateway, "failed to rollback: "+err.Error())
+			writeCMError(c, err)
 			return
 		}
 	}
@@ -1544,13 +1689,17 @@ func (h *AgentHubHandler) RecoverAgent(c *gin.Context) {
 			return
 		}
 	} else {
-		_, err = h.cm.RollbackSandbox(ctx, inst.SandboxID, map[string]string{
-			"snapshot_id": snapshotID,
+		// R08 fix: include request_id (required by CubeMaster snapshot rollback).
+		_, err = h.cm.RollbackSandbox(ctx, inst.SandboxID, map[string]interface{}{
+			"request_id":    fmt.Sprintf("cubeops-recover-%d", time.Now().UnixNano()),
+			"snapshot_id":   snapshotID,
+			"sandbox_id":    inst.SandboxID,
+			"instance_type": sdkInstanceType,
 		})
 		if err != nil {
 			_ = h.store.UpdateInstanceStatus(ctx, agentID, "error")
 			_ = h.store.RecordOperation(ctx, agentID, inst.SandboxID, "recover", "failed", "rollback failed: "+err.Error())
-			httputil.WriteError(c, http.StatusBadGateway, "failed to rollback sandbox: "+err.Error())
+			writeCMError(c, err)
 			return
 		}
 	}
@@ -1975,13 +2124,14 @@ func (h *AgentHubHandler) PublishTemplate(c *gin.Context) {
 			).Error
 		} else {
 			// Full-snapshot mode: create a CubeMaster snapshot of the entire sandbox.
-			// Matches old Rust full_snapshot branch → snapshots.create + upsert_snapshot_info.
+			// R08 fix: include request_id (required by CubeMaster snapshot create).
 			snapResp, err := h.cm.CreateSnapshot(ctx, map[string]interface{}{
+				"request_id":    fmt.Sprintf("cubeops-publish-%d", time.Now().UnixNano()),
 				"sandbox_id":    inst.SandboxID,
 				"instance_type": "cubebox",
 			})
 			if err != nil {
-				httputil.WriteError(c, http.StatusBadGateway, "failed to create snapshot for template: "+err.Error())
+				writeCMError(c, err)
 				return
 			}
 

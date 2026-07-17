@@ -45,9 +45,11 @@ SELECT username, password, created_at, updated_at
   FROM t_agenthub_user
 ON CONFLICT (username) DO NOTHING;
 
--- Remove migrated keys from t_agenthub_setting.
-DELETE FROM t_agenthub_setting
-WHERE setting_key IN ('jwt_secret', 'secret_master_key');
+-- NOTE: We intentionally do NOT delete jwt_secret / secret_master_key from
+-- t_agenthub_setting here. Keeping the old keys in place allows a safe
+-- rollback to the previous CubeAPI binary, which still reads from
+-- t_agenthub_setting. A follow-up migration (after the upgrade window is
+-- confirmed stable) will remove them. See R15 in the ops-extraction review.
 
 SELECT pg_advisory_unlock(hashtext('cubemaster_migration_20260713160000_system_setting'));
 

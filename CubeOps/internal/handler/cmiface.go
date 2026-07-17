@@ -31,6 +31,7 @@ type CubeMasterClient interface {
 
 	CreateSnapshot(ctx context.Context, body interface{}) (json.RawMessage, error)
 	ListSnapshots(ctx context.Context, params map[string]string) (json.RawMessage, error)
+	DeleteSnapshot(ctx context.Context, snapshotID string) (json.RawMessage, error)
 	RollbackSandbox(ctx context.Context, sandboxID string, body interface{}) (json.RawMessage, error)
 
 	ListTemplates(ctx context.Context, templateID string, includeRequest bool) (json.RawMessage, error)
@@ -40,6 +41,7 @@ type CubeMasterClient interface {
 	GetTemplateBuildStatus(ctx context.Context, buildID string) (json.RawMessage, error)
 	StartTemplateBuild(ctx context.Context, buildID string, body interface{}) (json.RawMessage, error)
 	GetTemplateCompat(ctx context.Context) (json.RawMessage, error)
+	AdoptTemplateCompatBaseline(ctx context.Context, body interface{}) (json.RawMessage, error)
 }
 
 // Compile-time assertion: *cubemaster.Client satisfies CubeMasterClient.

@@ -17,9 +17,11 @@ import (
 // *store.Store. Only methods that agenthub integration tests touch are
 // implemented; the rest return an error.
 type fakeCMHandler struct {
+	createSandbox   func(ctx context.Context, body interface{}) (json.RawMessage, error)
 	deleteSandbox   func(ctx context.Context, body interface{}) (json.RawMessage, error)
 	updateSandbox   func(ctx context.Context, body interface{}) (json.RawMessage, error)
 	createSnapshot  func(ctx context.Context, body interface{}) (json.RawMessage, error)
+	deleteSnapshot  func(ctx context.Context, snapshotID string) (json.RawMessage, error)
 	rollbackSandbox func(ctx context.Context, sandboxID string, body interface{}) (json.RawMessage, error)
 	listTemplates   func(ctx context.Context, templateID string, includeRequest bool) (json.RawMessage, error)
 }
@@ -40,7 +42,10 @@ func (f *fakeCMHandler) GetSandbox(ctx context.Context, sandboxID, instanceType 
 	return nil, errMethodNotConfigured("GetSandbox")
 }
 func (f *fakeCMHandler) CreateSandbox(ctx context.Context, body interface{}) (json.RawMessage, error) {
-	return nil, errMethodNotConfigured("CreateSandbox")
+	if f.createSandbox == nil {
+		return raw(`{"ret":{"ret_code":0},"data":{"sandbox_id":"sb-fake"}}`), nil
+	}
+	return f.createSandbox(ctx, body)
 }
 func (f *fakeCMHandler) DeleteSandbox(ctx context.Context, body interface{}) (json.RawMessage, error) {
 	if f.deleteSandbox == nil {
@@ -78,6 +83,12 @@ func (f *fakeCMHandler) CreateSnapshot(ctx context.Context, body interface{}) (j
 func (f *fakeCMHandler) ListSnapshots(ctx context.Context, params map[string]string) (json.RawMessage, error) {
 	return nil, errMethodNotConfigured("ListSnapshots")
 }
+func (f *fakeCMHandler) DeleteSnapshot(ctx context.Context, snapshotID string) (json.RawMessage, error) {
+	if f.deleteSnapshot == nil {
+		return raw(`{"ret": {"ret_code": 0}}`), nil // default: success
+	}
+	return f.deleteSnapshot(ctx, snapshotID)
+}
 func (f *fakeCMHandler) RollbackSandbox(ctx context.Context, sandboxID string, body interface{}) (json.RawMessage, error) {
 	if f.rollbackSandbox == nil {
 		return nil, errMethodNotConfigured("RollbackSandbox")
@@ -107,6 +118,9 @@ func (f *fakeCMHandler) StartTemplateBuild(ctx context.Context, buildID string, 
 }
 func (f *fakeCMHandler) GetTemplateCompat(ctx context.Context) (json.RawMessage, error) {
 	return nil, errMethodNotConfigured("GetTemplateCompat")
+}
+func (f *fakeCMHandler) AdoptTemplateCompatBaseline(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	return nil, errMethodNotConfigured("AdoptTemplateCompatBaseline")
 }
 
 // Compile-time assertion.

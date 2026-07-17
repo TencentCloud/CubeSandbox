@@ -276,7 +276,9 @@ func TestAgentHub_UpdateSettings_RoundTrip(t *testing.T) {
 func TestAgentHub_WecomConfig_RoundTrip(t *testing.T) {
 	env := newTestEnv(t)
 	defer env.teardown()
-	seedInstance(t, env.store, "agent-wecom", "Wecom", "sb-wecom")
+	// Use empty sandboxID so UpdateWecomConfig skips the runtime apply step
+	// (there's no real sandbox in the test env). This tests the DB round-trip.
+	seedInstance(t, env.store, "agent-wecom", "Wecom", "")
 
 	// Initially no wecom config — should return empty strings.
 	w := doRequest(t, env, "GET", "/api/v1/agenthub/instances/agent-wecom/wecom", "")
