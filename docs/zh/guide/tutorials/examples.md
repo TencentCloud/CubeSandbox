@@ -10,6 +10,7 @@
 | [SWE-bench + mini-swe-agent](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/mini-rl-training) | 使用 cube-sandbox + mini-swe-agent 在隔离沙箱中自动化 SWE-bench 编码任务，支持多模型切换和 RL 训练愿景。 |
 | [OpenAI Agents SDK 集成](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/openai-agents-example) | 将 OpenAI Agents SDK 的 `E2BSandboxClient` 对接 Cube Sandbox。包含最小 Shell Agent（含 Pause/Resume 演示）以及完整的 SWE-bench Django 调试 Agent（流式输出 + 全链路追踪）。 |
 | [OpenAI Agents + Code Interpreter](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/openai-agents-code-interpreter) | 在 Cube Sandbox 中运行使用 pandas / matplotlib 的数据分析 Agent，提供通用 E2B（write+exec）与 Jupyter kernel（状态跨轮保留、图像自动捕获）两种执行形态。 |
+| [崩溃恢复 Worker](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/crash-recovery-worker) | 让长期运行的有状态 Worker 连续经历多轮 checkpoint、崩溃、rollback 和任务重放，并在每次转账后验证进程内存与可写工作区。 |
 | [cube-bench](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/cube-bench) | Go 编写的 CLI 压测工具，可在可配置并发数下测量沙箱创建/删除延迟。具备实时 TUI 看板（Bubbletea/Lipgloss）、分位数报告（P50/P95/P99）和 JSON 导出功能。 |
 
 ::: tip
