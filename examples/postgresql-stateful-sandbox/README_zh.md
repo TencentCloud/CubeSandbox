@@ -20,29 +20,34 @@
 
 ```text
 宿主端 Python 脚本
-    |
-    | cubesandbox SDK（每个沙箱独立的流量令牌）
-    v
-CubeProxy -> envd :49983 -> 以 postgres 系统用户执行命令
-                                  |
-                                  v
-                         PostgreSQL Unix Socket
-                         /var/run/postgresql
+    |-- 控制面：创建、snapshot 和删除
+    |   `-- CubeAPI -> CubeMaster
+    `-- 已鉴权的命令与文件流量
+        `-- CubeProxy -> envd :49983
+                            `-- 以 postgres 系统用户执行命令
+                                `-- PostgreSQL Unix Socket
+                                    /var/run/postgresql
 ```
+
+原生 SDK 从 CubeAPI 获取沙箱生命周期状态，并使用创建时返回的每沙箱流量令牌，通过
+CubeProxy 向 envd 发起请求。PostgreSQL 本身仍然只能从 MicroVM 内部访问。
 
 容器进程树：
 
 ```text
 tini
 `-- cube-entrypoint.sh
-    |-- postgres-ready-envd.sh
+    |-- postgres-ready-envd.sh（后台子进程）
     |   `-- 等待 pg_isready，再启动 envd :49983
-    `-- start-postgres.sh
-        `-- postgres（前台进程）
+    `-- start-postgres.sh（后台子进程）
+        `-- postgres（helper 内的前台进程）
 ```
 
+`cube-entrypoint.sh` 会等待并回收两个子进程。收到 TERM 或 INT 后，它会等待 PostgreSQL
+完成 fast shutdown，再停止 envd 并退出。
 就绪端点会等待 `pg_isready` 成功后才启动。因此，`:49983/health` 返回 HTTP 204 表示
-Cube 命令通道和 PostgreSQL 都已经就绪。
+Cube 命令通道和 PostgreSQL 都已经就绪。`POSTGRES_READY_TIMEOUT` 默认为 60 秒；设为
+`0` 时只执行一次即时就绪检查，未就绪则失败。
 
 数据库边界有意保持最小：
 
@@ -198,6 +203,9 @@ cubemastercli tpl create-from-image \
   --with-cube-ca=false \
   --detach
 ```
+
+`--with-cube-ca=false` 避免把特定部署的 CubeEgress MITM CA 烘焙进这个离线模板。只有在
+模板改为使用受拦截的 HTTPS 出站，并且需要信任 CubeEgress 生成的证书时，才应启用该选项。
 
 保存输出的 `job_id` 和 `template_id`，等待全部目标节点的副本就绪：
 

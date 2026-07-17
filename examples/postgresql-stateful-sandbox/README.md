@@ -24,30 +24,36 @@ workloads. It is not a production PostgreSQL deployment or backup system.
 
 ```text
 host-side Python script
-    |
-    | cubesandbox SDK (per-sandbox traffic token)
-    v
-CubeProxy -> envd :49983 -> command executed as OS user postgres
-                                  |
-                                  v
-                         PostgreSQL Unix socket
-                         /var/run/postgresql
+    |-- control plane: create, snapshot, and delete
+    |   `-- CubeAPI -> CubeMaster
+    `-- authenticated command and file traffic
+        `-- CubeProxy -> envd :49983
+                            `-- command executed as OS user postgres
+                                `-- PostgreSQL Unix socket
+                                    /var/run/postgresql
 ```
+
+The native SDK obtains sandbox lifecycle state from CubeAPI and uses the
+per-sandbox traffic token returned at creation time for requests routed through
+CubeProxy to envd. PostgreSQL itself remains reachable only inside the MicroVM.
 
 The container process tree is:
 
 ```text
 tini
 `-- cube-entrypoint.sh
-    |-- postgres-ready-envd.sh
+    |-- postgres-ready-envd.sh (background child)
     |   `-- wait for pg_isready, then start envd :49983
-    `-- start-postgres.sh
-        `-- postgres (foreground process)
+    `-- start-postgres.sh (background child)
+        `-- postgres (foreground within the helper)
 ```
 
+`cube-entrypoint.sh` waits for and reaps both children. On TERM or INT it waits
+for PostgreSQL to finish its fast shutdown before stopping envd and exiting.
 The readiness endpoint is deliberately delayed until `pg_isready` succeeds.
 Therefore, an HTTP 204 from `:49983/health` means both the Cube command channel
-and PostgreSQL are ready.
+and PostgreSQL are ready. `POSTGRES_READY_TIMEOUT` defaults to 60 seconds; a
+value of `0` performs one immediate readiness check and fails if it is not ready.
 
 The database boundary is intentionally narrow:
 
@@ -208,6 +214,10 @@ cubemastercli tpl create-from-image \
   --with-cube-ca=false \
   --detach
 ```
+
+`--with-cube-ca=false` avoids baking a deployment-specific CubeEgress MITM CA
+into this offline template. Enable it only if the template is changed to use
+intercepted HTTPS egress and must trust CubeEgress's generated certificates.
 
 Copy the printed `job_id` and `template_id`, then wait for all target-node
 replicas to become ready:

@@ -169,13 +169,13 @@ def checkpoint(sandbox: Sandbox) -> None:
     sql(sandbox, "CHECKPOINT;")
 
 
-def list_snapshot_ids(
+def snapshot_exists(
+    snapshot_id: str,
     *,
     config: Config,
     sandbox_id: Optional[str] = None,
-) -> set[str]:
-    """List every matching snapshot ID, following all pagination cursors."""
-    snapshot_ids = set()
+) -> bool:
+    """Find one snapshot, stopping pagination as soon as its ID appears."""
     next_token = None
     seen_tokens = set()
 
@@ -186,9 +186,10 @@ def list_snapshot_ids(
             next_token=next_token,
             config=config,
         )
-        snapshot_ids.update(item.snapshot_id for item in items)
+        if any(item.snapshot_id == snapshot_id for item in items):
+            return True
         if not next_token:
-            return snapshot_ids
+            return False
         if next_token in seen_tokens:
             raise RuntimeError("snapshot pagination returned a repeated next token")
         seen_tokens.add(next_token)
@@ -205,7 +206,8 @@ def wait_for_snapshot(
     """Wait for a snapshot list operation to reflect creation or deletion."""
     deadline = time.monotonic() + timeout
     while True:
-        found = snapshot_id in list_snapshot_ids(
+        found = snapshot_exists(
+            snapshot_id,
             config=config,
             sandbox_id=sandbox_id,
         )

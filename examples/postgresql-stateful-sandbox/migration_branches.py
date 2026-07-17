@@ -32,7 +32,7 @@ def create_branches(
     branches: dict[str, Sandbox],
 ) -> None:
     """Populate a caller-owned map so partial branches remain cleanable."""
-    first_error: Optional[BaseException] = None
+    first_error: Optional[Exception] = None
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures: dict[Future, str] = {
@@ -48,7 +48,7 @@ def create_branches(
             try:
                 branches[branch_name] = future.result()
                 print(f"{branch_name} branch: {branches[branch_name].sandbox_id}")
-            except BaseException as exc:  # noqa: BLE001 - collect sibling result
+            except Exception as exc:  # noqa: BLE001 - collect sibling result
                 if first_error is None:
                     first_error = exc
 
@@ -65,6 +65,40 @@ def run_migration(sandbox: Sandbox, local_path: Path) -> str:
         remote_path=REMOTE_MIGRATION_PATH,
     )
     return sandbox.files.read(REMOTE_MIGRATION_PATH, user=POSTGRES_USER)
+
+
+def run_branch_migrations(
+    branches: dict[str, Sandbox],
+    migration_paths: dict[str, Path],
+) -> dict[str, str]:
+    """Run every branch migration and report all observed task failures."""
+    uploaded_files: dict[str, str] = {}
+    errors: list[tuple[str, Exception]] = []
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures: dict[Future, str] = {
+            executor.submit(
+                run_migration,
+                branches[branch_name],
+                migration_path,
+            ): branch_name
+            for branch_name, migration_path in migration_paths.items()
+        }
+        for future in as_completed(futures):
+            branch_name = futures[future]
+            try:
+                uploaded_files[branch_name] = future.result()
+            except Exception as exc:  # noqa: BLE001 - observe every sibling task
+                errors.append((branch_name, exc))
+
+    if errors:
+        details = "; ".join(
+            f"{branch_name}: {type(error).__name__}: {error}"
+            for branch_name, error in errors
+        )
+        raise RuntimeError(f"branch migration failed: {details}") from errors[0][1]
+
+    return uploaded_files
 
 
 def assert_branch_state(
@@ -102,7 +136,8 @@ def assert_branch_state(
         """
         SELECT string_agg(
             version,
-            ',' ORDER BY CASE WHEN version = 'base_v1' THEN 0 ELSE 1 END
+            ',' ORDER BY CASE WHEN version = 'base_v1' THEN 0 ELSE 1 END,
+            version
         )
         FROM schema_migrations;
         """,
@@ -119,24 +154,24 @@ def cleanup_resources(
     config: Config,
 ) -> None:
     """Attempt every cleanup in dependency order and report any failures."""
-    cleanup_errors: list[BaseException] = []
+    cleanup_errors: list[Exception] = []
     for branch in branches.values():
         try:
             kill_sandbox(branch)
-        except BaseException as exc:  # noqa: BLE001 - attempt every cleanup
+        except Exception as exc:  # noqa: BLE001 - attempt every cleanup
             cleanup_errors.append(exc)
 
     if source is not None:
         try:
             kill_sandbox(source)
-        except BaseException as exc:  # noqa: BLE001 - snapshot must still be tried
+        except Exception as exc:  # noqa: BLE001 - snapshot must still be tried
             cleanup_errors.append(exc)
 
     if snapshot_id is not None:
         try:
             delete_snapshot(snapshot_id, config=config)
             wait_for_snapshot(snapshot_id, config=config, present=False)
-        except BaseException as exc:  # noqa: BLE001 - include cleanup failure
+        except Exception as exc:  # noqa: BLE001 - include cleanup failure
             cleanup_errors.append(exc)
 
     if cleanup_errors:
@@ -196,19 +231,15 @@ def main() -> None:
 
         email_path = EXAMPLE_DIR / "sql" / "add_email.sql"
         last_login_path = EXAMPLE_DIR / "sql" / "add_last_login.sql"
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            email_future = executor.submit(
-                run_migration,
-                branches["email"],
-                email_path,
-            )
-            last_login_future = executor.submit(
-                run_migration,
-                branches["last_login"],
-                last_login_path,
-            )
-            uploaded_email = email_future.result()
-            uploaded_last_login = last_login_future.result()
+        uploaded_files = run_branch_migrations(
+            branches,
+            {
+                "email": email_path,
+                "last_login": last_login_path,
+            },
+        )
+        uploaded_email = uploaded_files["email"]
+        uploaded_last_login = uploaded_files["last_login"]
 
         if uploaded_email != email_path.read_text(encoding="utf-8"):
             raise AssertionError("email branch migration file changed after upload")

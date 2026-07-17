@@ -31,17 +31,12 @@ RUN apt-get update \
     && chmod 0440 /etc/sudoers.d/user
 
 COPY --from=cube-envd /usr/bin/envd /usr/bin/envd
-COPY cube-entrypoint.sh start-postgres.sh postgres-ready-envd.sh /usr/local/bin/
 
 # Keep the database cluster outside the VOLUME inherited from the upstream
 # image. Cube snapshots then capture PGDATA and pg_wal in the sandbox rootfs.
 # Peer authentication is sufficient because examples execute psql as the
 # postgres operating-system user. TCP authentication is rejected explicitly.
-RUN chmod +x \
-        /usr/bin/envd \
-        /usr/local/bin/cube-entrypoint.sh \
-        /usr/local/bin/start-postgres.sh \
-        /usr/local/bin/postgres-ready-envd.sh \
+RUN chmod +x /usr/bin/envd \
     && install -d -o postgres -g postgres -m 0700 "${PGDATA}" \
     && gosu postgres initdb \
         --pgdata="${PGDATA}" \
@@ -52,6 +47,15 @@ RUN chmod +x \
         --auth-local=peer \
         --auth-host=reject \
     && mkdir -p /var/log
+
+# Keep frequently edited runtime scripts after initdb so script-only changes
+# do not invalidate the initialized database-cluster layer.
+COPY cube-entrypoint.sh start-postgres.sh postgres-ready-envd.sh /usr/local/bin/
+
+RUN chmod +x \
+        /usr/local/bin/cube-entrypoint.sh \
+        /usr/local/bin/start-postgres.sh \
+        /usr/local/bin/postgres-ready-envd.sh
 
 LABEL org.opencontainers.image.source="https://github.com/TencentCloud/CubeSandbox" \
       org.opencontainers.image.title="cubesandbox-postgresql-stateful" \
