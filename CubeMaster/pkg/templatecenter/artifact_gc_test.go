@@ -55,15 +55,24 @@ func TestTrySessionLockPostgreSQL(t *testing.T) {
 	gormDB := openMigratedPostgresGORM(t, env)
 	ctx := context.Background()
 
-	// Pin one connection via Transaction so acquire and release share a session.
-	err := gormDB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if !trySessionLock(tx, "cubemaster_test_lock") {
+	err := gormDB.WithContext(ctx).Connection(func(tx *gorm.DB) error {
+		acquired, err := trySessionLock(tx, "cubemaster_test_lock")
+		if err != nil {
+			return err
+		}
+		if !acquired {
 			t.Fatal("expected pg_try_advisory_lock to succeed on fresh database")
 		}
-		releaseSessionLock(tx, "cubemaster_test_lock")
+		released, err := releaseSessionLock(tx, "cubemaster_test_lock")
+		if err != nil {
+			return err
+		}
+		if !released {
+			t.Fatal("expected pg_advisory_unlock to release the held lock")
+		}
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("transaction: %v", err)
+		t.Fatalf("connection: %v", err)
 	}
 }
