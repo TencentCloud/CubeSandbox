@@ -23,12 +23,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
-        sudo \
         tini \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --uid 1000 --user-group --shell /bin/bash user \
-    && printf '%s\n' 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/user \
-    && chmod 0440 /etc/sudoers.d/user
+    && useradd --create-home --uid 1000 --user-group --shell /bin/bash user
 
 COPY --from=cube-envd /usr/bin/envd /usr/bin/envd
 
@@ -66,7 +63,7 @@ EXPOSE 49983
 
 HEALTHCHECK --interval=2s --timeout=2s --start-period=10s --retries=30 \
     CMD curl -fsS -o /dev/null "http://127.0.0.1:${ENVD_PORT}/health" \
-        && gosu postgres pg_isready -q \
+        && gosu postgres pg_isready -q --timeout=1 \
             -h "${POSTGRES_SOCKET_DIR}" -U postgres -d postgres
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/cube-entrypoint.sh"]

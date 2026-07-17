@@ -4,6 +4,8 @@
 """Verify SQL execution and the PostgreSQL template's network isolation."""
 
 from pathlib import Path
+from typing import Optional
+from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 
 from cubesandbox import Config, Sandbox
@@ -26,10 +28,12 @@ def envd_health_status(
     sandbox: Sandbox,
     config: Config,
     *,
-    traffic_token: str,
+    traffic_token: Optional[str] = None,
 ) -> int:
-    """Read envd health with its traffic token and no host proxy settings."""
-    headers = {"e2b-traffic-access-token": traffic_token}
+    """Read envd health with no host proxy settings and return any HTTP code."""
+    headers = {}
+    if traffic_token is not None:
+        headers["e2b-traffic-access-token"] = traffic_token
     if config.proxy_node_ip:
         url = f"http://{config.proxy_node_ip}:{config.proxy_port}/health"
         headers["Host"] = sandbox.get_host(ENVD_PORT)
@@ -37,8 +41,13 @@ def envd_health_status(
         url = f"http://{sandbox.get_host(ENVD_PORT)}/health"
     request = Request(url, headers=headers, method="GET")
     opener = build_opener(ProxyHandler({}))
-    with opener.open(request, timeout=5) as response:
-        return response.status
+    try:
+        with opener.open(request, timeout=5) as response:
+            return response.status
+    except HTTPError as exc:
+        status = exc.code
+        exc.close()
+        return status
 
 
 def main() -> None:
@@ -82,6 +91,12 @@ def main() -> None:
             raise AssertionError(
                 "envd health with a traffic token returned "
                 f"HTTP {authenticated_status}, expected 204"
+            )
+
+        unauthenticated_status = envd_health_status(sandbox, config)
+        if unauthenticated_status == 204:
+            raise AssertionError(
+                "envd health without a traffic token unexpectedly returned HTTP 204"
             )
 
         internet = sandbox.commands.run(

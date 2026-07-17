@@ -32,7 +32,7 @@ def create_branches(
     branches: dict[str, Sandbox],
 ) -> None:
     """Populate a caller-owned map so partial branches remain cleanable."""
-    first_error: Optional[Exception] = None
+    errors: list[tuple[str, Exception]] = []
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures: dict[Future, str] = {
@@ -49,11 +49,14 @@ def create_branches(
                 branches[branch_name] = future.result()
                 print(f"{branch_name} branch: {branches[branch_name].sandbox_id}")
             except Exception as exc:  # noqa: BLE001 - collect sibling result
-                if first_error is None:
-                    first_error = exc
+                errors.append((branch_name, exc))
 
-    if first_error is not None:
-        raise first_error
+    if errors:
+        details = "; ".join(
+            f"{branch_name}: {type(error).__name__}: {error}"
+            for branch_name, error in errors
+        )
+        raise RuntimeError(f"branch creation failed: {details}") from errors[0][1]
 
 
 def run_migration(sandbox: Sandbox, local_path: Path) -> str:
@@ -104,16 +107,18 @@ def run_branch_migrations(
 def assert_branch_state(
     sandbox: Sandbox,
     *,
+    branch_name: str,
     expected_column: str,
     expected_migration: str,
 ) -> None:
     """Assert one branch contains only its own schema and migration record."""
+    context = f"branch {branch_name!r} (sandbox {sandbox.sandbox_id})"
     inherited_rows = sql(
         sandbox,
         "SELECT owner || ':' || balance::text FROM accounts ORDER BY owner;",
     )
     if inherited_rows != "alice:100\nbob:200":
-        raise AssertionError(f"branch inherited unexpected rows: {inherited_rows!r}")
+        raise AssertionError(f"{context} inherited unexpected rows: {inherited_rows!r}")
 
     columns = sql(
         sandbox,
@@ -128,7 +133,7 @@ def assert_branch_state(
     )
     if columns != expected_column:
         raise AssertionError(
-            f"expected only column {expected_column!r}, got {columns!r}"
+            f"{context} expected only column {expected_column!r}, got {columns!r}"
         )
 
     migrations = sql(
@@ -144,7 +149,9 @@ def assert_branch_state(
     )
     expected = f"base_v1,{expected_migration}"
     if migrations != expected:
-        raise AssertionError(f"expected migrations {expected!r}, got {migrations!r}")
+        raise AssertionError(
+            f"{context} expected migrations {expected!r}, got {migrations!r}"
+        )
 
 
 def cleanup_resources(
@@ -242,19 +249,29 @@ def main() -> None:
         uploaded_last_login = uploaded_files["last_login"]
 
         if uploaded_email != email_path.read_text(encoding="utf-8"):
-            raise AssertionError("email branch migration file changed after upload")
+            raise AssertionError(
+                "email branch "
+                f"(sandbox {branches['email'].sandbox_id}) migration file "
+                "changed after upload"
+            )
         if uploaded_last_login != last_login_path.read_text(encoding="utf-8"):
-            raise AssertionError("last-login branch migration file changed after upload")
+            raise AssertionError(
+                "last-login branch "
+                f"(sandbox {branches['last_login'].sandbox_id}) migration file "
+                "changed after upload"
+            )
         if uploaded_email == uploaded_last_login:
             raise AssertionError("branch migration files unexpectedly have identical content")
 
         assert_branch_state(
             branches["email"],
+            branch_name="email",
             expected_column="email",
             expected_migration="add_email",
         )
         assert_branch_state(
             branches["last_login"],
+            branch_name="last_login",
             expected_column="last_login_at",
             expected_migration="add_last_login",
         )

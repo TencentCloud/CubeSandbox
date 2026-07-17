@@ -16,6 +16,7 @@ esac
 
 elapsed=0
 until gosu postgres pg_isready -q \
+    --timeout=1 \
     -h "${POSTGRES_SOCKET_DIR}" -U postgres -d postgres; do
     if [ "${elapsed}" -ge "${POSTGRES_READY_TIMEOUT}" ]; then
         echo "postgres-ready-envd: PostgreSQL was not ready after ${POSTGRES_READY_TIMEOUT}s" >&2

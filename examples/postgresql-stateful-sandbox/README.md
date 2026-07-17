@@ -50,6 +50,9 @@ tini
 
 `cube-entrypoint.sh` waits for and reaps both children. On TERM or INT it waits
 for PostgreSQL to finish its fast shutdown before stopping envd and exiting.
+If envd exits unexpectedly, the entrypoint stops PostgreSQL cleanly and exits
+non-zero instead of leaving a database process running without its command
+channel.
 The readiness endpoint is deliberately delayed until `pg_isready` succeeds.
 Therefore, an HTTP 204 from `:49983/health` means both the Cube command channel
 and PostgreSQL are ready. `POSTGRES_READY_TIMEOUT` defaults to 60 seconds; a
@@ -66,8 +69,10 @@ The database boundary is intentionally narrow:
 - `network.allow_public_traffic=false` protects inbound `envd` traffic with a
   per-sandbox token that the native SDK supplies automatically.
 
-The sandbox's root user can become the `postgres` operating-system user. The
-MicroVM, not PostgreSQL roles, is the trust boundary; do not share one instance
+The conventional UID 1000 `user` account has no `sudo` access. Database
+commands are explicitly executed as the `postgres` operating-system user
+through envd. The sandbox's root user can still become `postgres`; the MicroVM,
+not PostgreSQL roles, is the trust boundary, so do not share one instance
 between mutually untrusted users.
 
 ## Directory layout
@@ -287,9 +292,12 @@ python smoke.py
 
 The script creates the baseline schema, verifies PostgreSQL 16.14, and checks two
 seeded accounts with a total balance of 300. It confirms that sandbox creation
-returns a traffic token and that token-authenticated envd health returns 204,
-then proves that an outbound request to `example.com` fails, verifies local SQL
-still works, and confirms that TCP 5432 is closed.
+returns a traffic token, that token-authenticated envd health returns 204, and
+that the same request without a token does not receive envd's 204 success
+response. The exact anonymous error status is a CubeProxy contract rather than
+a PostgreSQL template contract. The script then proves that an outbound request
+to `example.com` fails, verifies local SQL still works, and confirms that TCP
+5432 is closed.
 
 Expected final line:
 

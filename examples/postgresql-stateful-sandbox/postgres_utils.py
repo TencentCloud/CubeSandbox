@@ -237,4 +237,6 @@ def delete_snapshot(snapshot_id: str, *, config: Config) -> None:
     try:
         Sandbox.delete_snapshot(snapshot_id, config=config)
     except TemplateNotFoundError:
+        # Cube stores snapshots as templates, and the SDK maps a missing
+        # snapshot deletion (DELETE /templates/:id) to this exception.
         pass

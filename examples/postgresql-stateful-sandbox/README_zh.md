@@ -45,6 +45,8 @@ tini
 
 `cube-entrypoint.sh` 会等待并回收两个子进程。收到 TERM 或 INT 后，它会等待 PostgreSQL
 完成 fast shutdown，再停止 envd 并退出。
+如果 envd 意外退出，entrypoint 会先干净停止 PostgreSQL，再以非零状态退出，不会让数据库
+在失去命令通道后继续运行。
 就绪端点会等待 `pg_isready` 成功后才启动。因此，`:49983/health` 返回 HTTP 204 表示
 Cube 命令通道和 PostgreSQL 都已经就绪。`POSTGRES_READY_TIMEOUT` 默认为 60 秒；设为
 `0` 时只执行一次即时就绪检查，未就绪则失败。
@@ -58,7 +60,8 @@ Cube 命令通道和 PostgreSQL 都已经就绪。`POSTGRES_READY_TIMEOUT` 默�
 - `network.allow_public_traffic=false` 使用每个沙箱独立的令牌保护入站 `envd` 流量，
   原生 SDK 会自动携带该令牌。
 
-沙箱内的 root 可以切换到 `postgres` 系统用户。因此，安全边界是 MicroVM，而不是
+约定的 UID 1000 `user` 账户没有 `sudo` 权限；数据库命令由 envd 显式以 `postgres`
+系统用户执行。沙箱内的 root 仍可切换到 `postgres`，因此安全边界是 MicroVM，而不是
 PostgreSQL role；不要让互不信任的用户共享同一个实例。
 
 ## 目录结构
@@ -271,8 +274,10 @@ python smoke.py
 ```
 
 脚本创建基线 schema、验证 PostgreSQL 16.14，并检查两条种子账户及余额总和 300。随后确认
-创建响应包含流量令牌、携带该令牌访问 envd health 返回 204，再确认访问 `example.com` 的
-出站请求失败、本地 SQL 仍可执行，并确认 TCP 5432 关闭。
+创建响应包含流量令牌、携带该令牌访问 envd health 返回 204，且不携带令牌的相同请求不会
+得到 envd 的 204 成功响应。匿名请求的精确错误状态码属于 CubeProxy 契约，而不是
+PostgreSQL 模板契约。脚本随后确认访问 `example.com` 的出站请求失败、本地 SQL 仍可执行，
+并确认 TCP 5432 关闭。
 
 预期最后一行：
 
