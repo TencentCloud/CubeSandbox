@@ -103,7 +103,24 @@ func deleteTemplate(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 		"Action":       "DeleteTemplate",
 		"TemplateID":   req.TemplateID,
 	}))
-	err := deleteTemplateFn(ctx, req.TemplateID, req.InstanceType)
+	// Alias resolution: resolve human-readable aliases to template IDs,
+	// matching the GET handler (see getTemplate).
+	resolvedTemplateID, err := resolveTemplateIdentifierFn(ctx, req.TemplateID)
+	if err != nil {
+		code := int(errorcode.ErrorCode_MasterInternalError)
+		if errors.Is(err, templatecenter.ErrTemplateNotFound) {
+			code = int(errorcode.ErrorCode_NotFound)
+		}
+		rt.RetCode = int64(code)
+		return &templateResponse{
+			Res: &types.Res{Ret: &types.Ret{
+				RetCode: code,
+				RetMsg:  err.Error(),
+			}},
+			TemplateID: req.TemplateID,
+		}
+	}
+	err = deleteTemplateFn(ctx, resolvedTemplateID, req.InstanceType)
 	if err != nil {
 		code := int(errorcode.ErrorCode_MasterInternalError)
 		switch {
