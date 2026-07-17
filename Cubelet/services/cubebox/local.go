@@ -204,15 +204,17 @@ func init() {
 			}
 
 			l := &local{
-				client:         client,
-				localTask:      i.(tasks.TasksClient),
-				config:         config,
-				criImage:       obj.(*cubeimages.CubeImageService),
-				cbriManager:    cbriManager,
-				cubeboxManger:  cubeboxAPIObj.(cubes.CubeboxAPI),
-				shims:          shimPlugin.(*v2.ShimManager),
-				envdHTTPClient: newEnvdHTTPClient(),
-				envdInitPort:   defaultEnvdInitPort,
+				client:              client,
+				localTask:           i.(tasks.TasksClient),
+				config:              config,
+				criImage:            obj.(*cubeimages.CubeImageService),
+				cbriManager:         cbriManager,
+				cubeboxManger:       cubeboxAPIObj.(cubes.CubeboxAPI),
+				shims:               shimPlugin.(*v2.ShimManager),
+				containerdAddr:      ic.Properties[plugins.PropertyGRPCAddress],
+				containerdTTRPCAddr: ic.Properties[plugins.PropertyTTRPCAddress],
+				envdHTTPClient:      newEnvdHTTPClient(),
+				envdInitPort:        defaultEnvdInitPort,
 			}
 
 			CubeLog.Info("Start recovering state")
@@ -257,12 +259,14 @@ type local struct {
 	config    *CubeConfig
 	shims     *v2.ShimManager
 
-	criImage       *cubeimages.CubeImageService
-	cbriManager    cbri.APIManager
-	cubeboxManger  cubes.CubeboxAPI
-	envdHTTPClient *http.Client
-	envdInitPort   int
-	destroyFn      func(context.Context, *workflow.DestroyContext) error
+	criImage            *cubeimages.CubeImageService
+	cbriManager         cbri.APIManager
+	cubeboxManger       cubes.CubeboxAPI
+	containerdAddr      string
+	containerdTTRPCAddr string
+	envdHTTPClient      *http.Client
+	envdInitPort        int
+	destroyFn           func(context.Context, *workflow.DestroyContext) error
 }
 
 const (
@@ -460,10 +464,23 @@ func (l *local) CleanUp(ctx context.Context, opts *workflow.CleanContext) error 
 		ctrLists = append(ctrLists, ctr)
 	}
 	ctrLists = append(ctrLists, info.FirstContainer())
-	for _, ctr := range ctrLists {
-		err = l.stopTask(ctx, ctr.Container)
-		if err != nil {
-			stepLog.Warnf("CleanUp stopTask %s fail: %v", sandBoxID, err)
+	// A paused VM can't serve its runtime API, so stopTask would fail and the
+	// shim-still-Exists guard below would loop forever. Force it down out-of-band
+	// (mirrors Destroy). The IsPaused read is unlocked, matching CleanUp's existing
+	// lock-free pattern. CleanUp only runs for a sandbox already converging to
+	// deleted; a concurrent resume racing paused->running here would have its shim
+	// reaped without a guest flush (power-loss semantics for that one sandbox),
+	// acceptable for a sandbox being torn down and never affecting others.
+	if info.GetStatus() != nil && info.GetStatus().IsPaused() {
+		if er := l.destroyPausedSandbox(ctx, sandBoxID); er != nil {
+			stepLog.Warnf("CleanUp force delete paused sandbox %s fail: %v", sandBoxID, er)
+		}
+	} else {
+		for _, ctr := range ctrLists {
+			err = l.stopTask(ctx, ctr.Container)
+			if err != nil {
+				stepLog.Warnf("CleanUp stopTask %s fail: %v", sandBoxID, err)
+			}
 		}
 	}
 	if info.GetStatus() != nil &&

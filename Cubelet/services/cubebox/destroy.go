@@ -17,6 +17,7 @@ import (
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
+	shimclient "github.com/containerd/containerd/v2/pkg/shim"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/errdefs/pkg/errgrpc"
 	"github.com/hashicorp/go-multierror"
@@ -117,12 +118,29 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 		containers = append(containers, ci)
 	}
 	if sb.GetStatus().IsPaused() {
-
-		ctx = constants.WithSkipRuntimeAPI(ctx)
-		if _, err := l.localTask.Delete(ctx, &tasks.DeleteTaskRequest{
-			ContainerID: sb.ID,
-		}); err != nil {
-			result = multierror.Append(result, fmt.Errorf("delete sandbox by binary failed: %w", err))
+		// A paused VM can't serve its runtime API, so the shim rejects the task
+		// delete. Force it down through the shim's own binary delete subcommand,
+		// which reaps the shim (and its in-process VMM) and reclaims the VM workdir,
+		// pause snapshot, and ivshmem file.
+		if err := l.destroyPausedSandbox(ctx, sb.ID); err != nil {
+			result = multierror.Append(result, fmt.Errorf("delete paused sandbox failed: %w", err))
+		}
+		// The shim reclaims VM-layer state; reclaim the host-side per-container
+		// resources it does not touch (containerd record, rootfs mount, fifos),
+		// which the normal (non-paused) path does via destroyContainer.
+		for _, cntr := range append(containers, sb.FirstContainer()) {
+			if cntr == nil {
+				continue
+			}
+			if er := l.cleanPausedContainerHost(ctx, cntr); er != nil {
+				result = multierror.Append(result, fmt.Errorf("clean paused container [%s]: %w", cntr.ID, er))
+			}
+			if er := l.cubeboxManger.Delete(ctx, &cubes.DeleteOption{
+				CubeboxID:   sb.ID,
+				ContainerID: cntr.ID,
+			}); er != nil {
+				log.G(ctx).Warnf("Delete container [%s] in cubestore fail: %v", cntr.ID, er)
+			}
 		}
 	} else {
 
@@ -171,6 +189,67 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 		return ret.Errorf(errorcode.ErrorCode_RemoveContainerFailed, "%s", er.Error())
 	}
 	return nil
+}
+
+// destroyPausedSandbox tears down a paused sandbox that can no longer serve its
+// runtime API. It runs the shim's own `delete` subcommand (the same path
+// containerd uses to reap a dead shim), which SIGKILLs the shim process,
+// reaping the in-process VMM, and reclaims the VM workdir, pause snapshot, and
+// ivshmem file via the shim's clean_sandbox_resource. It then detaches the shim
+// from the runtime manager. No custom kill logic lives in Cubelet.
+func (l *local) destroyPausedSandbox(ctx context.Context, sandboxID string) error {
+	shim, err := l.shims.Get(ctx, sandboxID)
+	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("get shim: %w", err)
+	}
+	bundlePath := shim.Bundle()
+	cmd, err := shimclient.Command(ctx, &shimclient.CommandConfig{
+		Runtime:      l.config.CubeShimPath,
+		Address:      l.containerdAddr,
+		TTRPCAddress: l.containerdTTRPCAddr,
+		Path:         bundlePath,
+		Args:         []string{"-id", sandboxID, "-bundle", bundlePath, "delete"},
+	})
+	if err != nil {
+		return fmt.Errorf("build shim delete command: %w", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("shim delete: %w: %s", err, stderr.String())
+	}
+	// The shim (and its VMM) is already reaped; detaching only drops the runtime
+	// manager's record and removes the bundle dir, so a hiccup there must not fail
+	// the delete (a leftover bundle is reconciled by GC / on restart).
+	if err := l.shims.Delete(ctx, sandboxID); err != nil && !errdefs.IsNotFound(err) {
+		log.G(ctx).Warnf("detach shim %s after force delete: %v", sandboxID, err)
+	}
+	return nil
+}
+
+// cleanPausedContainerHost reclaims a container's host-side resources after its
+// sandbox was force-deleted while paused: the containerd container record, the
+// rootfs mount/dir, and the task IO fifos. The shim's clean_sandbox_resource
+// reclaims only VM-layer state, and the shim's task API is already gone, so this
+// makes no runtime-API call.
+func (l *local) cleanPausedContainerHost(ctx context.Context, c *cubeboxstore.Container) error {
+	var result *multierror.Error
+	if c.Container != nil {
+		if er := deleteContainer(ctx, c.Container); er != nil &&
+			!cubes.IsNotFoundContainerError(er) && !isTtrpcError(er) {
+			result = multierror.Append(result, fmt.Errorf("delete containerd container: %w", er))
+		}
+	}
+	if er := rootfs.CleanRootfs(ctx, c.ID); er != nil {
+		result = multierror.Append(result, fmt.Errorf("clean rootfs: %w", er))
+	}
+	if er := taskio.Clean(ctx, c.ID); er != nil {
+		result = multierror.Append(result, fmt.Errorf("clean fifo: %w", er))
+	}
+	return result.ErrorOrNil()
 }
 
 func sandboxDeletable(sb *cubeboxstore.CubeBox, filter *cubebox.CubeSandboxFilter) bool {
