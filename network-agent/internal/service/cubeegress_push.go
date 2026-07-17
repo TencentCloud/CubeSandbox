@@ -118,7 +118,6 @@ func (s *localService) pushEgressForState(ctx context.Context, state *managedSta
 	if s.egress == nil || !s.egress.Configured() {
 		return
 	}
-	logger := CubeLog.WithContext(ctx)
 	in := toEgressInput(state.CubeNetworkConfig)
 	if in == nil {
 		// No L7 rules; nothing for CubeEgress to do. Make sure any
@@ -126,22 +125,25 @@ func (s *localService) pushEgressForState(ctx context.Context, state *managedSta
 		state.pendingEgressPush = false
 		return
 	}
-	err := s.egress.PutPolicy(ctx, state.SandboxIP, in)
+	applyEgressPushResult(ctx, state, s.egress.PutPolicy(ctx, state.SandboxIP, in))
+}
+
+// applyEgressPushResult records the outcome of a CubeEgress PutPolicy call on
+// state.pendingEgressPush: cleared on success or a permanent (4xx) failure —
+// where a replay can't help and the operator must fix the rule — and set on a
+// transient failure so retryPendingEgressPushes tries again later. The caller
+// must have exclusive access to state (hold s.mu, or own a state not yet
+// published to s.states).
+func applyEgressPushResult(ctx context.Context, state *managedState, err error) {
 	switch {
-	case err == nil:
-		state.pendingEgressPush = false
-	case errors.Is(err, cubeegress.ErrNotConfigured):
-		// Race: client unconfigured by the time we got here. Treat as
-		// no-op; nothing to retry.
+	case err == nil, errors.Is(err, cubeegress.ErrNotConfigured):
 		state.pendingEgressPush = false
 	case cubeegress.IsPermanent(err):
-		logger.Errorf("network-agent push egress policy permanently failed: sandbox_id=%s sandbox_ip=%s err=%v",
+		CubeLog.WithContext(ctx).Errorf("network-agent push egress policy permanently failed: sandbox_id=%s sandbox_ip=%s err=%v",
 			state.SandboxID, state.SandboxIP, err)
-		// Don't keep retrying a malformed body — operator must fix the
-		// upstream rule. Clear the pending flag so we don't loop.
 		state.pendingEgressPush = false
 	default:
-		logger.Warnf("network-agent push egress policy transiently failed; will retry: sandbox_id=%s sandbox_ip=%s err=%v",
+		CubeLog.WithContext(ctx).Warnf("network-agent push egress policy transiently failed; will retry: sandbox_id=%s sandbox_ip=%s err=%v",
 			state.SandboxID, state.SandboxIP, err)
 		state.pendingEgressPush = true
 	}

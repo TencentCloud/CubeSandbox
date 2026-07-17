@@ -1049,40 +1049,49 @@ func cloneEgressRules(in []*EgressRule) []*EgressRule {
 	}
 	out := make([]*EgressRule, 0, len(in))
 	for _, r := range in {
-		if r == nil {
-			continue
+		if cp := cloneEgressRule(r); cp != nil {
+			out = append(out, cp)
 		}
-		cp := &EgressRule{Name: r.Name}
-		if r.Match != nil {
-			match := *r.Match
-			match.Method = append([]string(nil), r.Match.Method...)
-			cp.Match = &match
-		}
-		if r.Action != nil {
-			action := &EgressRuleAction{Allow: r.Action.Allow}
-			if r.Action.Audit != nil {
-				audit := *r.Action.Audit
-				action.Audit = &audit
-			}
-			if len(r.Action.Inject) > 0 {
-				action.Inject = make([]*EgressRuleInject, 0, len(r.Action.Inject))
-				for _, inj := range r.Action.Inject {
-					if inj == nil {
-						continue
-					}
-					injCopy := *inj
-					if inj.Format != nil {
-						format := *inj.Format
-						injCopy.Format = &format
-					}
-					action.Inject = append(action.Inject, &injCopy)
-				}
-			}
-			cp.Action = action
-		}
-		out = append(out, cp)
 	}
 	return out
+}
+
+// cloneEgressRule deep-copies a single egress rule (including its Match, Action,
+// and Inject secrets) so a pointer retained by the caller can't later mutate
+// stored state. Returns nil for a nil input.
+func cloneEgressRule(r *EgressRule) *EgressRule {
+	if r == nil {
+		return nil
+	}
+	cp := &EgressRule{Name: r.Name}
+	if r.Match != nil {
+		match := *r.Match
+		match.Method = append([]string(nil), r.Match.Method...)
+		cp.Match = &match
+	}
+	if r.Action != nil {
+		action := &EgressRuleAction{Allow: r.Action.Allow}
+		if r.Action.Audit != nil {
+			audit := *r.Action.Audit
+			action.Audit = &audit
+		}
+		if len(r.Action.Inject) > 0 {
+			action.Inject = make([]*EgressRuleInject, 0, len(r.Action.Inject))
+			for _, inj := range r.Action.Inject {
+				if inj == nil {
+					continue
+				}
+				injCopy := *inj
+				if inj.Format != nil {
+					format := *inj.Format
+					injCopy.Format = &format
+				}
+				action.Inject = append(action.Inject, &injCopy)
+			}
+		}
+		cp.Action = action
+	}
+	return cp
 }
 
 func formatCubeNetworkConfig(in *CubeNetworkConfig) string {
