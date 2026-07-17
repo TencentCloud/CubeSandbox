@@ -223,6 +223,21 @@ pub struct HttpLogger {
     flush_timeout: Duration,
 }
 
+fn configure_webhook_client_builder(
+    builder: reqwest::ClientBuilder,
+    config: &WebhookConfig,
+) -> reqwest::ClientBuilder {
+    builder
+        // Webhook destinations are validated above, and hostnames are DNS-pinned.
+        // Proxy routing would bypass those destination controls.
+        .no_proxy()
+        .redirect(Policy::none())
+        .timeout(Duration::from_secs(config.timeout_secs))
+        .connect_timeout(Duration::from_secs(WEBHOOK_CONNECT_TIMEOUT_SECS))
+        .pool_idle_timeout(Duration::from_secs(WEBHOOK_POOL_IDLE_TIMEOUT_SECS))
+        .pool_max_idle_per_host(WEBHOOK_POOL_MAX_IDLE_PER_HOST)
+}
+
 impl HttpLogger {
     /// Validate the configuration, create the shared HTTP client, and start
     /// the background dispatcher.
@@ -249,12 +264,8 @@ impl HttpLogger {
             endpoints.push(endpoint);
         }
 
-        let mut client_builder = reqwest::Client::builder()
-            .redirect(Policy::none())
-            .timeout(Duration::from_secs(config.timeout_secs))
-            .connect_timeout(Duration::from_secs(WEBHOOK_CONNECT_TIMEOUT_SECS))
-            .pool_idle_timeout(Duration::from_secs(WEBHOOK_POOL_IDLE_TIMEOUT_SECS))
-            .pool_max_idle_per_host(WEBHOOK_POOL_MAX_IDLE_PER_HOST);
+        let mut client_builder =
+            configure_webhook_client_builder(reqwest::Client::builder(), &config);
         for (host, addrs) in pinned_hosts {
             // Port zero lets reqwest use the URL's explicit port or the scheme default,
             // so one pinned hostname is safe across endpoints with different ports.
@@ -2467,6 +2478,45 @@ mod tests {
         );
 
         (format!("http://{address}/webhook"), calls, requests)
+    }
+
+    #[tokio::test]
+    async fn webhook_client_builder_clears_configured_proxies() {
+        use tokio::io::AsyncWriteExt;
+
+        let (url, direct_calls, _requests) = spawn_mock_server(vec![StatusCode::NO_CONTENT]).await;
+
+        let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_address = proxy_listener.local_addr().unwrap();
+        let proxy_calls = Arc::new(AtomicUsize::new(0));
+        let observed_proxy_calls = proxy_calls.clone();
+
+        let proxy_task = tokio::spawn(async move {
+            let (mut stream, _) = proxy_listener.accept().await.unwrap();
+            observed_proxy_calls.fetch_add(1, Ordering::SeqCst);
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await;
+        });
+
+        // Use an explicit local proxy as a deterministic tripwire. Mutating
+        // process-wide proxy environment variables would race parallel tests.
+        let proxy = reqwest::Proxy::all(format!("http://{proxy_address}")).unwrap();
+        let config = test_config(url.clone(), 8, 0);
+        let client =
+            configure_webhook_client_builder(reqwest::Client::builder().proxy(proxy), &config)
+                .build()
+                .unwrap();
+
+        let response = client.post(&url).body("{}").send().await.unwrap();
+
+        proxy_task.abort();
+        let _ = proxy_task.await;
+        assert!(response.status().is_success());
+        assert_eq!(direct_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(proxy_calls.load(Ordering::SeqCst), 0);
     }
 
     async fn delivery_attempts(statuses: Vec<StatusCode>, max_retries: usize) -> usize {
