@@ -30,6 +30,7 @@ sudo tail -F /data/log/Cubelet/Cubelet-req.log
 sudo tail -F /data/log/CubeMaster/cubemaster-req.log
 sudo tail -F /data/log/CubeAPI/cube-api-$(date +%F).log
 sudo tail -F /data/log/CubeVmm/vmm.log              # sandbox VMM lifecycle
+sudo tail -F /data/log/cube-proxy/error.log         # proxy errors
 
 # 4. Startup failures / process exit reasons -> journalctl
 sudo journalctl -u cube-sandbox-cube-api.service -n 200 --no-pager
@@ -217,13 +218,12 @@ sudo systemctl stop cube-sandbox-compute.target   # compute node
 
 ## Reading logs
 
-CubeSandbox emits three log streams. **Don't mix them up:**
+CubeSandbox has multiple log sources, including component-specific in-container logs. The two primary host-side entry points are:
 
 | Source | Contains | How to read |
 |---|---|---|
 | **Runtime logs (primary entry point)** | requests, scheduling decisions, stats, audit, VMM creation | **`/data/log/<Module>/`** |
 | Startup logs | systemd start / hooks / ExecStartPost / exit codes / container build output | `journalctl -u <unit>` |
-| In-container logs | `cube-proxy` only: nginx access/error inside the container | `docker exec cube-proxy tail /data/log/cube-proxy/error.log` |
 
 ### `/data/log/` runtime logs (primary)
 
@@ -237,7 +237,7 @@ CubeSandbox emits three log streams. **Don't mix them up:**
 | network-agent | `/data/log/network-agent/` | `network-agent-req.log` |
 | CubeShim | `/data/log/CubeShim/` | `cube-shim-req.log`, `cube-shim-stat.log` |
 | Hypervisor (VMM) | `/data/log/CubeVmm/` | `vmm.log` (one entry per sandbox creation) |
-| cube-proxy | container `/data/log/cube-proxy/` | `error.log`, `access.log` (see below) |
+| cube-proxy | `/data/log/cube-proxy/` | `error.log`, `access.log` (see below) |
 
 Common commands:
 
@@ -276,16 +276,16 @@ sudo journalctl -u cube-sandbox-cube-api.service -b
 Once a process is stable, its stdout/stderr volume is tiny because each component writes business logs straight to `/data/log/<Module>/`. To find "which sandboxes were created in the last hour", **journalctl is the wrong place** — go to `/data/log/CubeMaster/cubemaster-req.log` or `/data/log/Cubelet/Cubelet-req.log`.
 :::
 
-### `cube-proxy` in-container logs
+### `cube-proxy` host logs
 
-`cube-proxy` is an OpenResty/nginx container. Its access/error logs are inside the container at `/data/log/cube-proxy/`, **not** on the host filesystem. Use `docker exec`:
+`cube-proxy` is an OpenResty/nginx container. The one-click deployment bind-mounts the host directory `/data/log/cube-proxy/` into the container at the same path, so the logs remain available across container restarts and can be read directly from the host:
 
 ```bash
-sudo docker exec cube-proxy tail -200 /data/log/cube-proxy/error.log
-sudo docker exec cube-proxy tail -200 /data/log/cube-proxy/access.log
+sudo tail -200 /data/log/cube-proxy/error.log
+sudo tail -200 /data/log/cube-proxy/access.log
 ```
 
-The container name is fixed to `cube-proxy` (created by systemd via `docker create`).
+The same directory is mounted at `/data/log/cube-proxy/` inside the container; no image rebuild is required.
 
 ### One-shot diagnostic bundle
 
@@ -298,7 +298,7 @@ sudo /usr/local/services/cubetoolbox/scripts/cube-diag/collect-logs.sh
 It collects everything into `cube-diag-<timestamp>/`:
 
 - Tails of `/data/log/CubeMaster|Cubelet|CubeAPI|CubeShim|CubeVmm|network-agent/`
-- `cube-proxy` container's `error.log` / `access.log`
+- `/data/log/cube-proxy/` access/error logs
 - `dmesg` / process list / ports / mounts / cgroup / cpuinfo
 - Major config files (with secrets redacted)
 

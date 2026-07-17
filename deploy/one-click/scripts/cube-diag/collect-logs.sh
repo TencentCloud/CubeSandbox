@@ -13,7 +13,7 @@
 #   /data/log/CubeShim/                CubeShim request/stat logs
 #   /data/log/CubeVmm/                 VMM logs
 #   /data/log/network-agent/           network-agent request logs
-#   cube-proxy (Docker)                error.log and access.log via docker exec
+#   /data/log/cube-proxy/              cube-proxy access/error logs
 #   dmesg                              kernel ring buffer
 #   process/env snapshot               ps, ports, mounts, cgroup, cpuinfo, …
 #   config files                       with secrets redacted
@@ -50,7 +50,7 @@ Log sources:
   /data/log/CubeShim/                CubeShim request/stat logs
   /data/log/CubeVmm/                 VMM logs
   /data/log/network-agent/           network-agent request logs
-  cube-proxy (Docker)                error.log and access.log via docker exec
+  /data/log/cube-proxy/              cube-proxy access/error logs
   dmesg                              Full kernel ring buffer + filtered views
   env                                Process list, ports, mounts, cgroup, cpuinfo, ...
   configs                            Config files with secrets redacted
@@ -256,59 +256,7 @@ collect_cube_proxy() {
   _info "── cube-proxy ──"
   local dest="${OUT_DIR}/cube-proxy"
   mkdir -p "${dest}"
-
-  # cube-proxy runs inside a Docker container; its logs are not on the host
-  # filesystem. Find the running container by name (or image path containing
-  # /cube-proxy:) and extract via docker exec.
-  if ! command -v docker >/dev/null 2>&1; then
-    _warn "docker not found — cannot collect cube-proxy container logs"
-    return
-  fi
-
-  # Locate the cube-proxy container by exact name 'cube-proxy'.
-  # docker --filter name= does prefix/substring matching, so we must verify
-  # the exact name from the output to avoid matching 'cube-proxy-coredns'.
-  local cid
-  cid="$(docker ps --filter 'name=cube-proxy' --filter 'status=running' \
-           --format '{{.Names}}\t{{.ID}}' 2>/dev/null \
-         | awk '$1=="cube-proxy" {print $2}' | head -1)"
-  if [[ -z "${cid}" ]]; then
-    # Fall back: match by image name (local cube-proxy:* or registry .../cube-proxy:*)
-    cid="$(docker ps --filter 'status=running' \
-             --format '{{.Image}}\t{{.ID}}' 2>/dev/null \
-           | awk '$1~/(^|\/)cube-proxy:/ {print $2}' | head -1)"
-  fi
-  if [[ -z "${cid}" ]]; then
-    _warn "cube-proxy container not running — cannot collect its logs"
-    return
-  fi
-  _info "cube-proxy container: ${cid}"
-
-  local -a log_paths=(
-    /data/log/cube-proxy/error.log
-    /data/log/cube-proxy/access.log
-  )
-
-  for log_path in "${log_paths[@]}"; do
-    local base; base="$(basename "${log_path}")"
-    local out_file="${dest}/${base}"
-    # Use '[ -f ... ]' via sh -c to avoid relying on the 'test' binary
-    # which may not be present in the container's PATH.
-    if docker exec "${cid}" sh -c "[ -f '${log_path}' ]" 2>/dev/null; then
-      if [[ "${ALL_LINES}" -eq 1 ]]; then
-        docker exec "${cid}" cat "${log_path}" > "${out_file}" 2>/dev/null \
-          && _info "docker exec ${cid} cat ${log_path}" \
-          || _warn "could not read ${log_path} from container ${cid}"
-      else
-        docker exec "${cid}" sh -c "tail -n ${TAIL_LINES} ${log_path}" \
-          > "${out_file}" 2>/dev/null \
-          && _info "docker exec ${cid} tail -${TAIL_LINES} ${log_path}" \
-          || _warn "could not tail ${log_path} from container ${cid}"
-      fi
-    else
-      _warn "${log_path} not found inside container ${cid}"
-    fi
-  done
+  _collect_data_log_dir "${DATA_LOG_DIR}/cube-proxy" "${dest}"
 }
 
 collect_runtime() {

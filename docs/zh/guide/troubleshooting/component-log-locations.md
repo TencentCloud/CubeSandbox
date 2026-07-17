@@ -53,7 +53,7 @@ Cubelet 默认日志级别较低（`warn`），常规运行时不会打印详细
 | CubeShim | 统计日志 | `/data/log/CubeShim/cube-shim-stat.log` | `tail -F` |
 | Hypervisor (VMM) | VMM 创建过程日志 | `/data/log/CubeVmm/vmm.log` | `tail -F` |
 | network-agent | 业务请求日志 | `/data/log/network-agent/network-agent-req.log` | `tail -F` |
-| cube-proxy | 访问/错误/sidecar 日志（容器内） | 容器内 `/data/log/cube-proxy/{access,error,sidecar}.log` | `docker exec <容器名> tail ...`（见下文） |
+| cube-proxy | 访问/错误日志 | `/data/log/cube-proxy/{access,error}.log` | `tail -F`（见下文） |
 | 沙箱容器 | init 进程 stdout/stderr | `/data/cubelet/state/io.containerd.runtime.v2.task/default/<sandbox-id>/{stdout,stderr}`（Cubelet 挂载命名空间内） | `cubecli logs <sandbox-id>`（见下文） |
 | 模板构建 | 构建容器 stdout/stderr | `/data/log/template/<template-id>_0/{stdout,stderr}`（宿主机文件系统） | `cubecli logs --tpl <template-id>` |
 
@@ -118,23 +118,21 @@ LC_ALL=C sudo grep -a -E "(<sandbox-id 或 InstanceId>|Linux version)" /data/log
 `console=hvc0` 是虚拟机的串口控制台，内核所有 `printk` 输出都会走这条通路。CubeShim 把这条控制台流量直接转发进它自己的日志管道（和普通请求日志共用同一个 writer），所以查 guest kernel 日志不需要额外挂载或调试工具，直接 grep `cube-shim-req.log` 即可。
 :::
 
-### 4. cube-proxy 容器内日志
+### 4. cube-proxy 宿主机日志
 
-`cube-proxy` 是基于 OpenResty 的 nginx 容器，日志写在容器内部的 `/data/log/cube-proxy/`，**不在宿主机文件系统上**，需要 `docker exec` 进容器读取：
+`cube-proxy` 是基于 OpenResty 的 nginx 容器。一键部署会将宿主机目录 `/data/log/cube-proxy/` bind mount 到容器内同一路径，可以直接从宿主机读取日志：
 
 ```bash
-docker exec -it cube-proxy tail /data/log/cube-proxy/error.log
-docker exec -it cube-proxy tail /data/log/cube-proxy/sidecar.log
-docker exec -it cube-proxy tail /data/log/cube-proxy/access.log
+tail -F /data/log/cube-proxy/error.log
+tail -F /data/log/cube-proxy/access.log
 ```
 
-容器名固定为 `cube-proxy`（由 systemd 用 `docker create` 创建）；也可以先用 `docker ps` 确认实际容器名/ID 后再替换。
+容器内仍使用同一个 `/data/log/cube-proxy/` 路径，底层由宿主机目录提供。
 
 | 文件 | 内容 |
 |---|---|
 | `access.log` | nginx 访问日志 |
 | `error.log` | nginx 错误日志 |
-| `sidecar.log` | cube-proxy sidecar 逻辑（鉴权/路由等）日志 |
 
 ### 5. 开启 Cubelet debug 级别日志
 
