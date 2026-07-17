@@ -1,0 +1,78 @@
+# Example runtime values for CubeSandbox (copy & edit locally).
+#
+# Generic Kubernetes (cluster default StorageClass, ClusterIP + Ingress):
+#   cp deploy/kubernetes/chart/runtime-values.example.yaml runtime-values.yaml
+#   # edit passwords / advertiseIP / domain
+#   helm upgrade --install cube ./deploy/kubernetes/chart \
+#     -n cube-system --create-namespace \
+#     -f runtime-values.yaml
+#
+# Tencent Cloud TKE (CBS StorageClass + CLB):
+#   helm upgrade --install cube ./deploy/kubernetes/chart \
+#     -n cube-system --create-namespace \
+#     -f deploy/kubernetes/chart/values-tke.yaml \
+#     -f runtime-values.yaml
+#   # In runtime-values.yaml override:
+#   #   cubeProxy.service.annotations["service.cloud.tencent.com/security-groups"]
+#
+# Do NOT commit real passwords or cloud security-group IDs.
+# Local copies named runtime-values.yaml are gitignored.
+
+cubeProxy:
+  advertiseIP: "10.0.0.10"   # control-node HostIP, or LB EXTERNAL-IP on TKE
+  domain: "cube.app"
+  tls:
+    mode: selfSigned   # trial; production: existingSecret or certManager
+  # TKE only (when using values-tke.yaml LoadBalancer):
+  # service:
+  #   annotations:
+  #     service.cloud.tencent.com/security-groups: "sg-xxxxxxxx"
+  # No Ingress controller? Set cubeProxy.ingress.enabled: false and expose
+  # the ClusterIP Service yourself.
+
+# REQUIRED: validate.yaml refuses CHANGE_ME_* sentinels from values.yaml.
+mysql:
+  host: ""
+  password: "replace-me-mysql-password"
+  rootPassword: "replace-me-mysql-root-password"
+  # host: "mysql.example.com"   # optional: skip built-in StatefulSet
+redis:
+  host: ""
+  password: "replace-me-redis-password"
+
+# --- Persistence (optional) ---
+# Default: leave unset → CubeMaster / MySQL / Redis PVCs use the cluster's
+# default StorageClass. Chart does NOT create a StorageClass unless you merge
+# values-tke.yaml (or set storageClass.create=true yourself).
+#
+# Pin all three PVCs to one existing SC (e.g. local-path / gp3 / premium-rwo):
+# persistence:
+#   storageClassName: local-path
+#
+# Or set per-component (overrides the top-level key when non-empty):
+# controlPlane:
+#   master:
+#     persistence:
+#       storageClassName: gp3
+# mysql:
+#   persistence:
+#     storageClassName: gp3
+# redis:
+#   persistence:
+#     storageClassName: gp3
+#
+# Single-node / no CSI: use hostPath instead of PVC
+# controlPlane:
+#   master:
+#     persistence:
+#       hostPath: /data/CubeMaster/storage
+# mysql:
+#   persistence:
+#     hostPath: /data/mysql
+# redis:
+#   persistence:
+#     hostPath: /data/redis
+
+# Optional: mirror Cube-owned images into a private registry
+# global:
+#   imageRegistry: my-mirror.example.com/cubesandbox

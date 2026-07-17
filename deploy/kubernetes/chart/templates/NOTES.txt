@@ -3,6 +3,18 @@ CubeSandbox chart installed.
 Release: {{ .Release.Name }}
 Namespace: {{ .Release.Namespace }}
 
+Persistence (CubeMaster / MySQL / Redis):
+{{- if or .Values.controlPlane.master.persistence.hostPath .Values.mysql.persistence.hostPath .Values.redis.persistence.hostPath }}
+  mode: hostPath (at least one component)
+{{- else }}
+{{- $sc := include "cube.persistenceStorageClassName" (dict "root" . "component" .Values.controlPlane.master.persistence) }}
+{{- if $sc }}
+  storageClassName: {{ $sc }} (explicit; component-level overrides top-level persistence.storageClassName)
+{{- else }}
+  storageClassName: <cluster default> (no chart-owned StorageClass unless storageClass.create=true / values-tke.yaml)
+{{- end }}
+{{- end }}
+
 {{- if .Values.controlPlane.enabled }}
 Control plane:
   CubeMaster Service: {{ include "cube.masterName" . }}:{{ .Values.controlPlane.master.service.port }}

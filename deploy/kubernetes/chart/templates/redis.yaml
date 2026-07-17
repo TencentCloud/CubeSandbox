@@ -114,8 +114,9 @@ spec:
         resources:
           requests:
             storage: {{ .Values.redis.persistence.size | quote }}
-        {{- if .Values.redis.persistence.storageClassName }}
-        storageClassName: {{ .Values.redis.persistence.storageClassName | quote }}
+        {{- $sc := include "cube.persistenceStorageClassName" (dict "root" . "component" .Values.redis.persistence) -}}
+        {{- if $sc }}
+        storageClassName: {{ $sc | quote }}
         {{- end }}
   {{- end }}
 {{- end }}

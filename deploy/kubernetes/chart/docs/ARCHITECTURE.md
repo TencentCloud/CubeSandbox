@@ -328,7 +328,9 @@ externalControlPlane:
 | values 路径 | 默认 | 影响 |
 | --- | --- | --- |
 | `global.timezone` | `Asia/Shanghai` | 注入 Chart 管理容器的 `TZ` |
-| `storageClass.create` / `name` / `volumeBindingMode` | 见 values | 状态组件 StorageClass（TKE 多可用区常用 WaitForFirstConsumer） |
+| `storageClass.create` / `name` / `provisioner` | `create=false` | 是否由 chart 创建 StorageClass;默认不创建（PVC 省略 `storageClassName` → 集群 default SC；TKE 用 `values-tke.yaml` pin CBS） |
+| `persistence.storageClassName` | `""` | 便捷键:组件级为空时,三 PVC 共用此 SC name;`""` → 集群 default SC |
+| `*.persistence.storageClassName` (master/mysql/redis) | `""` | 组件级覆盖;非空优先于顶层 `persistence.storageClassName` |
 | `controlPlane.enabled` | `true` | 内置控制面 |
 | `externalControlPlane.enabled` | `false` | 外部 CubeMaster |
 | `placement.controlPlane.nodeSelector` | `cube.tencent.com/role=control` | 控制面调度 |

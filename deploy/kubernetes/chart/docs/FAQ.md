@@ -99,17 +99,26 @@ kubectl -n cube-system logs <test-pod-name>
 
 如果确实要合并,给节点同时打两组 label,并**去掉 control taint**,避免 Cube Node 被驱逐。
 
-### B3. TKE 多可用区集群,pv 一直 pending
+### B3. PVC / PV 一直 Pending
 
-`cube-cbs-wffc` StorageClass 的 `volumeBindingMode` 是 `WaitForFirstConsumer`,CBS 盘会在 Pod 被调度到具体节点后再创建到该节点所在 AZ。如果 Pod 因调度限制无法落地,PV 也永远 pending。
-
-检查 Pod 的 events:
+先确认走的是哪条持久化路径:
 
 ```bash
+kubectl get sc
+kubectl get pvc -n cube-system
+kubectl describe pvc -n cube-system <pvc-name>
 kubectl -n cube-system describe pod <pod-name>
 ```
 
-常见原因:
+**通用集群(默认不建 SC):**
+
+- 集群没有 default StorageClass → 给 PVC 设 `persistence.storageClassName` 指向已有 SC(如 `local-path` / `gp3`),或改用 hostPath(见 QUICKSTART §6.1 / §6.3)
+- 指定的 SC 不存在 / provisioner 未装 → 先装 CSI / local-path-provisioner,再装 chart
+- Pod 因 nodeSelector / taint / 资源不足无法调度,且 SC 使用 `WaitForFirstConsumer` → PV 也会一直 Pending;先让 Pod 可调度
+
+**TKE + `values-tke.yaml`(`cube-cbs-wffc`):**
+
+`cube-cbs-wffc` 的 `volumeBindingMode` 是 `WaitForFirstConsumer`,CBS 盘在 Pod 落到具体节点后再创建到该 AZ。常见原因:
 
 - 节点资源不足 → 扩容或降低 request
 - Pod 的 nodeSelector 与 CBS 支持的 AZ 不匹配 → 用与 CBS 同 AZ 的节点
@@ -413,7 +422,7 @@ sudo rm -rf /data/cubelet /data/cube-shim /data/snapshot_pack /data/log /usr/loc
 # 3. reboot
 ```
 
-CubeMaster 的 PVC(默认 CBS 盘)按 K8s reclaimPolicy 处理,default `Delete`。若 policy=`Retain`,PVC 会保留。
+CubeMaster / MySQL / Redis 的 PVC 遵循**实际绑定的** StorageClass 的 `reclaimPolicy`（通用路径下通常是集群 default SC 的策略）。仅当使用 chart 创建的 SC（例如 `values-tke.yaml` 的 `cube-cbs-wffc`，`storageClass.reclaimPolicy: Delete`）时，才由 chart 侧默认 `Delete`。若 policy=`Retain`，PVC/PV 会保留。
 
 ---
 

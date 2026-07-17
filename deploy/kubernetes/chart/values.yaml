@@ -131,14 +131,16 @@ imagePullSecrets: []
 # Optional StorageClass created by the chart. Off by default: on a plain
 # Kubernetes / self-hosted cluster the PVCs below should use the cluster's
 # default StorageClass, so leave `storageClass.create=false` and either leave
-# `controlPlane.master.persistence.storageClassName` / `mysql.persistence.storageClassName`
-# / `redis.persistence.storageClassName` empty (falls back to the cluster default)
-# or point them at an existing StorageClass name.
+# `persistence.storageClassName` / component-level storageClassName empty
+# (falls back to the cluster default) or point them at an existing StorageClass.
 #
 # When you do want the chart to provision its own StorageClass, set
 # `create=true` and supply `name` + `provisioner` (+ `parameters` when the
 # provisioner needs them). Example for TKE CBS is included below as a comment;
 # see values-tke.yaml for a ready-to-merge override.
+#
+# Do not confuse `storageClass.*` (create a chart-owned SC) with
+# `persistence.storageClassName` below (which SC name PVCs bind to).
 storageClass:
   create: false
   name: ""
@@ -152,6 +154,14 @@ storageClass:
   # provisioner: com.tencent.cloud.csi.cbs
   # parameters:
   #   type: cbs
+
+# Convenience: pin CubeMaster / MySQL / Redis PVCs to one StorageClass name
+# when the component-level storageClassName is empty. Empty (default) means
+# omit storageClassName on the PVC → cluster default SC. Component-level
+# non-empty values always win (used by values-tke.yaml). Mix different SCs
+# by setting the three component fields explicitly instead of this key.
+persistence:
+  storageClassName: ""
 
 placement:
   # Control-plane components run only on dedicated control nodes.
@@ -207,11 +217,11 @@ controlPlane:
       enabled: true
       hostPath: ""
       existingClaim: ""
-      # Empty falls back to the cluster's default StorageClass (recommended
-      # on self-hosted clusters). Set to the name of an explicit
-      # StorageClass — e.g. "cube-cbs-wffc" for the bundled TKE preset — to
-      # pin the PVC to a specific provisioner. `existingClaim` and
-      # `hostPath` override storageClassName when set.
+      # Empty falls back to persistence.storageClassName, then the cluster's
+      # default StorageClass (recommended on self-hosted clusters). Set to the
+      # name of an explicit StorageClass — e.g. "cube-cbs-wffc" for the bundled
+      # TKE preset — to pin the PVC. `existingClaim` and `hostPath` override
+      # storageClassName when set.
       storageClassName: ""
       size: 20Gi
       accessModes:
@@ -382,9 +392,10 @@ mysql:
     existingClaim: ""
     hostPath: ""
     size: 20Gi
-    # Empty falls back to the cluster's default StorageClass. Override to
-    # bind the MySQL data PVC to a specific provisioner (e.g. cube-cbs-wffc
-    # from values-tke.yaml, or gp3 / pd-ssd / local-path on other clouds).
+    # Empty falls back to persistence.storageClassName, then the cluster's
+    # default StorageClass. Override to bind the MySQL data PVC to a specific
+    # provisioner (e.g. cube-cbs-wffc from values-tke.yaml, or gp3 / pd-ssd /
+    # local-path on other clouds).
     storageClassName: ""
     accessModes:
       - ReadWriteOnce
@@ -408,8 +419,9 @@ redis:
     existingClaim: ""
     hostPath: ""
     size: 10Gi
-    # Empty falls back to the cluster's default StorageClass. Override to
-    # bind the Redis data PVC to a specific provisioner.
+    # Empty falls back to persistence.storageClassName, then the cluster's
+    # default StorageClass. Override to bind the Redis data PVC to a specific
+    # provisioner.
     storageClassName: ""
     accessModes:
       - ReadWriteOnce

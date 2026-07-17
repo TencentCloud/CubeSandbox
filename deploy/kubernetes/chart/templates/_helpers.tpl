@@ -214,6 +214,32 @@ tolerations:
 {{- end -}}
 {{- end -}}
 
+{{/*
+Resolve PVC storageClassName for a stateful component (master / mysql / redis).
+
+Call as:
+  include "cube.persistenceStorageClassName" (dict "root" . "component" .Values.mysql.persistence)
+
+Precedence:
+  1. component.storageClassName if non-empty (always wins)
+  2. else persistence.storageClassName (top-level convenience key)
+  3. else empty → omit the field so the cluster default StorageClass applies
+
+Do not confuse with storageClass.create / storageClass.name (those create a
+chart-owned StorageClass). This helper only picks which SC name a PVC binds to.
+*/}}
+{{- define "cube.persistenceStorageClassName" -}}
+{{- $component := "" -}}
+{{- if and .component (hasKey .component "storageClassName") -}}
+{{- $component = .component.storageClassName | toString -}}
+{{- end -}}
+{{- if $component -}}
+{{- $component -}}
+{{- else if and .root.Values.persistence .root.Values.persistence.storageClassName -}}
+{{- .root.Values.persistence.storageClassName | toString -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "cube.proxyCertSecretName" -}}
 {{- if and (eq .Values.cubeProxy.tls.mode "existingSecret") .Values.cubeProxy.tls.existingSecret -}}
 {{- .Values.cubeProxy.tls.existingSecret -}}

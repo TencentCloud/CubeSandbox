@@ -12,7 +12,8 @@ spec:
   resources:
     requests:
       storage: {{ .Values.controlPlane.master.persistence.size | quote }}
-  {{- if .Values.controlPlane.master.persistence.storageClassName }}
-  storageClassName: {{ .Values.controlPlane.master.persistence.storageClassName | quote }}
+  {{- $sc := include "cube.persistenceStorageClassName" (dict "root" . "component" .Values.controlPlane.master.persistence) -}}
+  {{- if $sc }}
+  storageClassName: {{ $sc | quote }}
   {{- end }}
 {{- end }}

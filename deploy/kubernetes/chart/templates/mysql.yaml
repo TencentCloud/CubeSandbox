@@ -125,8 +125,9 @@ spec:
           requests:
             storage: {{ .Values.mysql.persistence.size | quote }}
         volumeMode: Filesystem
-        {{- if .Values.mysql.persistence.storageClassName }}
-        storageClassName: {{ .Values.mysql.persistence.storageClassName | quote }}
+        {{- $sc := include "cube.persistenceStorageClassName" (dict "root" . "component" .Values.mysql.persistence) -}}
+        {{- if $sc }}
+        storageClassName: {{ $sc | quote }}
         {{- end }}
   {{- end }}
 {{- end }}

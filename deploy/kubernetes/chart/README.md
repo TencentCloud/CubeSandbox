@@ -198,12 +198,16 @@ The chart uses PVC-backed persistence by default so state can survive
 rescheduling across dedicated control nodes:
 
 ```yaml
+# Optional: pin all three control-plane PVCs at once
+persistence:
+  storageClassName: ""   # empty → cluster default SC
+
 controlPlane:
   master:
     persistence:
       enabled: true
       hostPath: ""
-      storageClassName: ""   # empty → cluster default SC
+      storageClassName: ""   # empty → persistence.storageClassName → cluster default
 mysql:
   persistence:
     enabled: true
@@ -216,14 +220,19 @@ redis:
     storageClassName: ""
 ```
 
-Set `storageClassName` to a specific class (e.g. `gp3` on EKS,
-`premium-rwo` on GKE, `managed-csi` on AKS, `cube-cbs-wffc` on TKE) if
-you need to pin the PVC to a particular provisioner. Empty falls back to
-the cluster's default StorageClass, which works out of the box for most
+Set `persistence.storageClassName` (or a component-level
+`*.persistence.storageClassName`) to a specific class (e.g. `gp3` on EKS,
+`premium-rwo` on GKE, `managed-csi` on AKS, `local-path`, or `cube-cbs-wffc`
+via `values-tke.yaml`) if you need to pin PVCs. Empty falls back to the
+cluster's default StorageClass, which works out of the box for most
 self-hosted / EKS / GKE / AKS clusters. Use `hostPath` only for
 single-node throwaway environments; multi-control-node deployments must
 use PVCs or external MySQL / Redis. `existingClaim` overrides both
 `storageClassName` and `hostPath`.
+
+Do not confuse `storageClass.*` (whether the chart **creates** a
+StorageClass) with `persistence.storageClassName` (which SC **name** PVCs
+bind to).
 
 Built-in MySQL and Redis use StatefulSet `volumeClaimTemplates` by default.
 For a release named `cube`, the generated claims are owned by the StatefulSet
