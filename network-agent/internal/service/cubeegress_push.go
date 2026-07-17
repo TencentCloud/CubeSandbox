@@ -170,10 +170,11 @@ func (s *localService) deleteEgressForState(ctx context.Context, sandboxID, sand
 // interleaving and leaving a stale policy live: whichever push acquires
 // egressPushMu last re-renders under s.mu and therefore reflects the latest
 // rules. It returns whether the push is still pending (a transient failure the
-// maintenance loop will retry).
+// maintenance loop will retry) and the push error (nil on success or when no
+// push was needed) so callers can log the outcome.
 //
 // Must be called WITHOUT s.mu held; egressPushMu is always taken before s.mu.
-func (s *localService) pushEgressSerialized(ctx context.Context, state *managedState) bool {
+func (s *localService) pushEgressSerialized(ctx context.Context, state *managedState) (pending bool, err error) {
 	state.egressPushMu.Lock()
 	defer state.egressPushMu.Unlock()
 
@@ -183,23 +184,23 @@ func (s *localService) pushEgressSerialized(ctx context.Context, state *managedS
 	s.mu.Unlock()
 
 	if !pushable {
-		return false
+		return false, nil
 	}
 	if input == nil {
 		// No L7 rules to push; clear any stale pending flag.
 		s.mu.Lock()
 		state.pendingEgressPush = false
 		s.mu.Unlock()
-		return false
+		return false, nil
 	}
 
-	err := s.egress.PutPolicy(ctx, state.SandboxIP, input)
+	err = s.egress.PutPolicy(ctx, state.SandboxIP, input)
 
 	s.mu.Lock()
 	applyEgressPushResult(ctx, state, err)
-	pending := state.pendingEgressPush
+	pending = state.pendingEgressPush
 	s.mu.Unlock()
-	return pending
+	return pending, err
 }
 
 // retryPendingEgressPushes is invoked from the maintenance loop. It re-pushes
@@ -229,8 +230,12 @@ func (s *localService) retryPendingEgressPushes() {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), egressRetryCallTimeout)
-		s.pushEgressSerialized(ctx, st)
+		pending, err := s.pushEgressSerialized(ctx, st)
 		cancel()
+		if err == nil && !pending {
+			CubeLog.WithContext(context.Background()).Infof(
+				"network-agent retry egress policy succeeded: sandbox_ip=%s", st.SandboxIP)
+		}
 	}
 }
 

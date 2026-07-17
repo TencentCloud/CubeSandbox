@@ -74,9 +74,11 @@ type UpdateEgressRuleRequest struct {
 type UpdateEgressRuleResponse struct {
 	SandboxID string `json:"sandboxID,omitempty"`
 	SandboxIP string `json:"sandboxIP,omitempty"`
-	// Applied is true when the sandbox's latest egress policy is live and nothing
-	// is pending — either the push to CubeEgress succeeded, or no push was needed
-	// (no egress client is configured, or the sandbox has no L7 rules).
+	// Applied is true when the sandbox's latest policy is live on CubeEgress: the
+	// push succeeded, or no push was needed (no egress client configured, or no L7
+	// rules). It is false when the push failed — transiently (Pending is then true
+	// and the maintenance loop retries) or permanently (Pending is false; the rule
+	// is persisted but CubeEgress rejected it, so it is not live).
 	Applied bool `json:"applied"`
 	// Pending is true when the rule was persisted but its CubeEgress push failed
 	// transiently and was deferred to the maintenance retry loop. Applied and

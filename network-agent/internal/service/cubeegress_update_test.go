@@ -333,6 +333,32 @@ func TestUpdateEgressRuleRollsBackOnPersistFailure(t *testing.T) {
 	}
 }
 
+// TestUpdateEgressRulePermanentPushFailureNotApplied verifies Applied honestly
+// reports not-live on a permanent CubeEgress rejection: the rule is persisted,
+// but both Applied and Pending are false (a 4xx is not retried).
+func TestUpdateEgressRulePermanentPushFailureNotApplied(t *testing.T) {
+	s, fake := ueService(t)
+	fake.putErrs["192.168.0.10"] = []error{&cubeegress.PermanentError{Status: 400, Body: "bad rule"}}
+	ueSeed(s, "sb-1", "sb-1", "192.168.0.10")
+
+	resp, err := s.UpdateEgressRule(context.Background(), &UpdateEgressRuleRequest{
+		SandboxID: "sb-1",
+		Rule:      ueRule("gitlab_token", "tok-A"),
+	})
+	if err != nil {
+		t.Fatalf("a permanent push failure must not fail the call, got err=%v", err)
+	}
+	if resp.Applied {
+		t.Fatal("Applied must be false when CubeEgress permanently rejected the rule")
+	}
+	if resp.Pending {
+		t.Fatal("Pending must be false on a permanent failure (a 4xx is not retried)")
+	}
+	if rules := ueLoadRules(t, s, "sb-1"); len(rules) != 1 || rules[0].Name != "gitlab_token" {
+		t.Fatalf("rule not persisted on permanent failure: %+v", rules)
+	}
+}
+
 // TestPushEgressSerializedPerSandbox verifies that concurrent pushes for the same
 // sandbox are serialized by egressPushMu (the fix for the retry/update TOCTOU
 // window): the hook records how many pushes are inside PutPolicy at once, which

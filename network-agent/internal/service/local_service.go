@@ -401,12 +401,15 @@ func (s *localService) UpdateEgressRule(ctx context.Context, req *UpdateEgressRu
 	// concurrent maintenance retry can't overwrite this update with a stale
 	// policy. The rule is persisted above regardless, so a transient push
 	// failure is picked up by the maintenance loop.
-	pending := s.pushEgressSerialized(ctx, state)
+	pending, err := s.pushEgressSerialized(ctx, state)
 
 	return &UpdateEgressRuleResponse{
 		SandboxID: sandboxID,
 		SandboxIP: ip,
-		Applied:   !pending,
+		// Applied reflects reality: true only when the push actually landed (or
+		// none was needed). A permanent rejection clears Pending but leaves the
+		// rule not-live, so err != nil keeps Applied false there too.
+		Applied:   err == nil,
 		Pending:   pending,
 		RuleCount: ruleCount,
 	}, nil
