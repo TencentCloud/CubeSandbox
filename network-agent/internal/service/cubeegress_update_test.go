@@ -59,6 +59,10 @@ func ueService(t *testing.T) (*localService, *fakeEgress) {
 	}, fake
 }
 
+// ueSeed registers a managed state directly in s.states, in memory only — it does
+// NOT write the store, so a test must call UpdateEgressRule (which persists)
+// before relying on ueLoadRules. key is the s.states map key and may differ from
+// sandboxID (e.g. a network handle), letting tests exercise handle-based lookups.
 func ueSeed(s *localService, key, sandboxID, sandboxIP string, rules ...*EgressRule) {
 	s.states[key] = &managedState{
 		persistedState: persistedState{
