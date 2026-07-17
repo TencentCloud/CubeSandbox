@@ -25,6 +25,9 @@ func (s *typedNilService) ReleaseNetwork(ctx context.Context, req *service.Relea
 func (s *typedNilService) ReconcileNetwork(ctx context.Context, req *service.ReconcileNetworkRequest) (*service.ReconcileNetworkResponse, error) {
 	return nil, nil
 }
+func (s *typedNilService) UpdateEgressRule(ctx context.Context, req *service.UpdateEgressRuleRequest) (*service.UpdateEgressRuleResponse, error) {
+	return nil, nil
+}
 
 func (s *typedNilService) GetNetwork(ctx context.Context, req *service.GetNetworkRequest) (*service.GetNetworkResponse, error) {
 	return nil, nil
