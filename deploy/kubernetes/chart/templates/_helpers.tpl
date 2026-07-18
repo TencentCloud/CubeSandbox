@@ -98,6 +98,21 @@ tolerations:
 {{- end }}
 {{- end -}}
 
+{{- define "cube.pvmPlacement" -}}
+{{- with .Values.placement.pvm.nodeSelector }}
+nodeSelector:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with .Values.placement.pvm.affinity }}
+affinity:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with .Values.placement.pvm.tolerations }}
+tolerations:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end -}}
+
 {{/* Proxy Service FQDN and cluster-DNS enablement helpers. */}}
 
 {{- define "cube.nodeServiceAccountName" -}}
@@ -134,6 +149,10 @@ tolerations:
 
 {{- define "cube.nodeBootstrapName" -}}
 {{- printf "%s-node-bootstrap" (include "cube.fullname" .) -}}
+{{- end -}}
+
+{{- define "cube.nodePvmName" -}}
+{{- printf "%s-node-pvm" (include "cube.fullname" .) -}}
 {{- end -}}
 
 {{- define "cube.proxyName" -}}
@@ -399,6 +418,8 @@ Toolbox is mounted whole at the fixed path (InPlace-stable).
 
 {{- define "cube.nodeDataplaneVolumeMounts" -}}
 {{- include "cube.nodeToolboxVolumeMounts" . }}
+- name: bootstrap-state
+  mountPath: {{ .Values.hostPaths.bootstrapState }}
 - name: dev
   mountPath: /dev
 - name: sys
@@ -520,6 +541,8 @@ Bootstrap: host mutation mounts for pvm / node-init.
   value: /opt/cube-image
 - name: CUBE_PID_DIR
   value: /run/cube-node
+- name: STATE_DIR
+  value: {{ .Values.hostPaths.bootstrapState | quote }}
 - name: CUBE_MASTER_ENDPOINT
   value: {{ include "cube.masterEndpoint" . | quote }}
 - name: CUBE_SANDBOX_NODE_ID

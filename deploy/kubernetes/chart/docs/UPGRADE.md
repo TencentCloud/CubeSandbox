@@ -19,14 +19,15 @@ helm install kruise openkruise/kruise --version 1.9.0 \
 ## 原理
 
 1. toolbox 整树 hostPath 挂在 `/usr/local/services/cubetoolbox`（Big Pod volumeMount **冻结**）。
-2. 同 `placement.compute`、selector 互斥的三个 DaemonSet：
+2. 计算面 DaemonSet：
    - **`*-node`（Big Pod）**：`wait-node-prep`（Kruise prio 10）+ `network-agent` / `cubelet`（self-stage）+ 可选 egress + **6 个冻结 `cube-slot-*` pause 占位**；**零 init**；日常只 **InPlace** bump **containers** 镜像 / slot annotation / slot resources。
    - **`*-node-installer`**：shim / kernel / guest 安装；可 RollingUpdate、可增容器。
-   - **`*-node-bootstrap`**：pvm / node-init / 写 `node-prep-ready`；低频 RollingUpdate。
-3. Bootstrap 写 `node-prep-ready`；Installer / self-stage 写组件 `.staged-*`；cubelet 等 artifact 与 network-agent sentinel。
+   - **`*-node-bootstrap`**：`wait-pvm-host` / node-init / 写 `node-prep-ready`；低频 RollingUpdate。
+   - **`*-node-pvm`**（可选）：PVM host kernel；仅 `placement.pvm`；升 PVM 只 bump 本 DS。
+3. Bootstrap 写 `node-prep-ready`；PVM 写指纹 `pvm-host-ready`；Installer / self-stage 写组件 `.staged-*`；cubelet 等 artifact 与 network-agent sentinel。
 4. **NodeID** = `spec.nodeName`；**Endpoint** = Big Pod `status.podIP`。
 5. `preStop` 只杀本容器 pidfile，禁止宽 `pkill -f`。
-6. 日常分工：**升控面 → 只 bump Big Pod 镜像**；**升产物 → 只动 Installer**；**升节点引导 → 只动 Bootstrap**。
+6. 日常分工：**升控面 → 只 bump Big Pod 镜像**；**升产物 → 只动 Installer**；**升 node-init → 只动 Bootstrap**；**升 PVM → 只动 cube-node-pvm**。
 
 ## 按组件升级示例
 
@@ -63,6 +64,7 @@ helm upgrade cube ./deploy/kubernetes/chart -n cube-system \
 | Big Pod `rollingUpdateType: Standard` / 删 Big Pod | 数据面中断 |
 | 把新产物 install 塞进 Big Pod | 破坏冻结契约（应加在 Installer） |
 | 把 pvm / node-init 并进 Installer | 日常升 shim 可能 reboot / 扩大 hostPID 面 |
+| 把 `allow-pvm-bootstrap` 写进 `placement.compute` | validate 失败；且会让所有 compute 拉 PVM 镜像 |
 
 ## 相关镜像键
 
@@ -74,9 +76,9 @@ helm upgrade cube ./deploy/kubernetes/chart -n cube-system \
 | `images.cubeShim` | Installer | `cube-shim-install` |
 | `images.cubeKernel` | Installer | `cube-kernel-install` |
 | `images.cubeGuest` | Installer | `cube-guest-install` |
-| `images.pvmHostBootstrap` | Bootstrap | `pvm-host-bootstrap` |
-| `images.nodeInit` | Bootstrap | `cube-node-init` |
-| `images.waitNodePrep` | Bootstrap | `write-node-prep-ready`（同镜像） |
+| `images.pvmHostBootstrap` | **cube-node-pvm** | `pvm-host-bootstrap` |
+| `images.nodeInit` | Bootstrap | `wait-pvm-host` / `cube-node-init` |
+| `images.waitNodePrep` | Bootstrap / PVM hold | `write-node-prep-ready` / `hold-pvm-ready` |
 
 ## 卸载后全新安装
 

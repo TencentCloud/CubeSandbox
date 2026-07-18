@@ -5,10 +5,8 @@ log() { printf '[pvm-host-bootstrap] %s\n' "$*"; }
 fail() { printf '[pvm-host-bootstrap] ERROR: %s\n' "$*" >&2; exit 1; }
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
-if [ -f "${SCRIPT_DIR}/node-prep-lib.sh" ]; then
-  # shellcheck disable=SC1091
-  . "${SCRIPT_DIR}/node-prep-lib.sh"
-fi
+# shellcheck disable=SC1091
+. "${SCRIPT_DIR}/node-prep-lib.sh"
 
 HOST_ROOT="${HOST_ROOT:-/host}"
 STATE_DIR="${STATE_DIR:-/var/lib/cube-node-bootstrap}"
@@ -18,7 +16,7 @@ DEB_PATH="${PVM_KERNEL_DEB_PATH:-/artifacts/linux-image-pvm-host.deb}"
 RPM_URL="${PVM_KERNEL_RPM_URL:-}"
 DEB_URL="${PVM_KERNEL_DEB_URL:-}"
 PACKAGE_SOURCE="${PVM_KERNEL_PACKAGE_SOURCE:-image}"
-KERNEL_BOOT_ARGS="${PVM_KERNEL_BOOT_ARGS:-}"
+KERNEL_BOOT_ARGS="${KERNEL_BOOT_ARGS:-${PVM_KERNEL_BOOT_ARGS:-}}"
 REBOOT_ENABLED="${REBOOT_ENABLED:-true}"
 REBOOT_MAX_COUNT="${REBOOT_MAX_COUNT:-1}"
 REBOOT_COORDINATED="${REBOOT_COORDINATED:-true}"
@@ -26,7 +24,6 @@ LEASE_NAME="${LEASE_NAME:-cube-node-pvm-bootstrap}"
 LEASE_TTL_SECONDS="${LEASE_TTL_SECONDS:-900}"
 NODE_NAME="${NODE_NAME:-$(hostname)}"
 NAMESPACE="${POD_NAMESPACE:-default}"
-# REV3.2: export for node-prep-lib fingerprint helpers
 PVM_ENABLED="${PVM_ENABLED:-1}"
 export HOST_ROOT STATE_DIR DESIRED_KERNEL_PATTERN KERNEL_BOOT_ARGS PVM_ENABLED
 
@@ -127,16 +124,8 @@ EOF
   done
 }
 
-# REV3.2: only acquire the cluster reboot lease on paths that may reboot.
+# Only acquire the cluster reboot lease on paths that may reboot.
 # Do NOT acquire on the fast-success path (already on desired kernel).
-
-will_mutate_host() {
-  if command -v invalidate_node_prep_ready >/dev/null 2>&1; then
-    invalidate_node_prep_ready
-  else
-    rm -f "$(host_path "$STATE_DIR/node-prep-ready")" "$(host_path "$STATE_DIR/node-prep-ready.tmp")"
-  fi
-}
 
 install_kernel() {
   if [ "$PACKAGE_SOURCE" = "download" ]; then
@@ -183,19 +172,6 @@ configure_bootloader() {
   printf 'KERNEL=="kvm", MODE="0666"\n' > "$(host_path /etc/udev/rules.d/99-kvm.rules)"
 }
 
-missing_boot_args() {
-  [ -n "$KERNEL_BOOT_ARGS" ] || return 0
-  cmdline=" $(cat /proc/cmdline 2>/dev/null || true) "
-  missing=""
-  for arg in $KERNEL_BOOT_ARGS; do
-    case "$cmdline" in
-      *" ${arg} "*) ;;
-      *) missing="${missing} ${arg}" ;;
-    esac
-  done
-  [ -z "$missing" ] || printf '%s\n' "$missing"
-}
-
 request_reboot_or_fail() {
   count_name="${1:-reboot-count}"
   not_ready_message="${2:-PVM kernel installed but host is not running it yet}"
@@ -218,26 +194,30 @@ request_reboot_or_fail() {
     exit 1
   fi
 
-  fail "${not_ready_message}; reboot_enabled=${REBOOT_ENABLED}, reboot_count=${count}/${REBOOT_MAX_COUNT}, missing_boot_args=$(missing_boot_args)"
+  fail "${not_ready_message}; reboot_enabled=${REBOOT_ENABLED}, reboot_count=${count}/${REBOOT_MAX_COUNT}, missing_boot_args=$(node_prep_missing_boot_args)"
 }
 
 current_kernel="$(uname -r || true)"
 log "current kernel: ${current_kernel}"
+
+# Fast path: live kernel already matches pattern + required boot args.
+# No lease; write fingerprint-matched pvm-host-ready for wait-pvm-host.
+if node_prep_kernel_ready; then
+  log "PVM kernel check passed (fast path; no lease)"
+  write_pvm_host_ready || fail "failed to write fingerprint pvm-host-ready"
+  release_lease
+  exit 0
+fi
+
 if printf '%s' "$current_kernel" | grep -q "$DESIRED_KERNEL_PATTERN"; then
-  missing_args="$(missing_boot_args)"
-  if [ -z "$missing_args" ]; then
-    log "PVM kernel check passed (fast path; no lease)"
-    echo "$current_kernel" > "$(host_path "$STATE_DIR/pvm-ready")"
-    exit 0
-  fi
-  log "PVM kernel is running but required boot args are missing:${missing_args}"
-  will_mutate_host
+  log "PVM kernel is running but required boot args are missing: $(node_prep_missing_boot_args)"
+  invalidate_pvm_gate_sentinels
   acquire_lease
   configure_bootloader
   request_reboot_or_fail boot-args-reboot-count "PVM kernel boot args configured but host is not running with required boot args yet"
 fi
 
-will_mutate_host
+invalidate_pvm_gate_sentinels
 acquire_lease
 install_kernel
 configure_bootloader

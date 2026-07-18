@@ -797,7 +797,7 @@ run_selected_builds() {
 
   if should_build cube-node-init; then
     ctx="$(prepare_context cube-node-init)"
-    copy_scripts "${ctx}" cube-node-init.sh node-prep-lib.sh
+    copy_scripts "${ctx}" cube-node-init.sh wait-pvm-host.sh node-prep-lib.sh
     build_image cube-node-init "${ctx}"
     record_built cube-node-init
   fi

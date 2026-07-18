@@ -1,7 +1,7 @@
 {{- if .Values.cubeNode.enabled }}
-# Node prep DaemonSet (pvm + node-init + write node-prep-ready).
-# Low-churn workload: bumping nodeInit/pvmHostBootstrap recreates THIS pod only,
-# not the Big Pod. Artifact install stays on cube-node-installer (narrow mounts).
+# Node prep DaemonSet (wait-pvm-host + node-init + write node-prep-ready).
+# PVM host install is on cube-node-pvm. Low-churn: bumping nodeInit recreates
+# THIS pod only, not the Big Pod. Artifact install stays on cube-node-installer.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -35,7 +35,7 @@ spec:
     spec:
       serviceAccountName: {{ include "cube.nodeServiceAccountName" . }}
       automountServiceAccountToken: true
-      # nsenter --target 1 for pvm/node-init (same privilege model as former Big Pod inits).
+      # nsenter --target 1 for node-init (same privilege model as former Big Pod inits).
       hostPID: true
       dnsPolicy: ClusterFirst
       terminationGracePeriodSeconds: {{ .Values.cubeNodeBootstrap.terminationGracePeriodSeconds }}
@@ -45,10 +45,10 @@ spec:
       {{- end }}
       {{- include "cube.computePlacement" . | nindent 6 }}
       initContainers:
-        {{- if .Values.bootstrap.pvmHostKernel.enabled }}
-        - name: pvm-host-bootstrap
-          image: {{ include "cube.cubeImage" (dict "image" .Values.images.pvmHostBootstrap "context" $) | quote }}
-          imagePullPolicy: {{ .Values.images.pvmHostBootstrap.pullPolicy }}
+        - name: wait-pvm-host
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.nodeInit "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.nodeInit.pullPolicy }}
+          command: ["/usr/bin/tini", "-s", "--", "/scripts/wait-pvm-host.sh"]
           securityContext:
             privileged: {{ .Values.security.privileged }}
           env:
@@ -57,43 +57,24 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            - name: POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
             - name: HOST_ROOT
               value: /host
             - name: STATE_DIR
               value: {{ .Values.hostPaths.bootstrapState | quote }}
-            - name: PVM_ENABLED
-              value: "1"
+            - name: PVM_FEATURE_ENABLED
+              value: {{ ternary "1" "0" .Values.bootstrap.pvmHostKernel.enabled | quote }}
+            - name: CUBE_PVM_ENABLE
+              value: {{ ternary "1" "0" .Values.cubeNode.pvmGuestKernel.enabled | quote }}
+            - name: ALLOW_PVM_LABEL
+              value: cube.tencent.com/allow-pvm-bootstrap
             - name: DESIRED_KERNEL_PATTERN
               value: {{ .Values.bootstrap.pvmHostKernel.desiredKernelPattern | quote }}
-            - name: PVM_KERNEL_BOOT_ARGS
+            - name: KERNEL_BOOT_ARGS
               value: {{ .Values.bootstrap.pvmHostKernel.bootArgs | quote }}
-            - name: PVM_KERNEL_RPM_PATH
-              value: {{ .Values.bootstrap.pvmHostKernel.package.rpmPath | quote }}
-            - name: PVM_KERNEL_DEB_PATH
-              value: {{ .Values.bootstrap.pvmHostKernel.package.debPath | quote }}
-            - name: PVM_KERNEL_RPM_URL
-              value: {{ .Values.bootstrap.pvmHostKernel.package.rpmUrl | quote }}
-            - name: PVM_KERNEL_DEB_URL
-              value: {{ .Values.bootstrap.pvmHostKernel.package.debUrl | quote }}
-            - name: PVM_KERNEL_PACKAGE_SOURCE
-              value: {{ .Values.bootstrap.pvmHostKernel.package.source | quote }}
-            - name: REBOOT_ENABLED
-              value: {{ .Values.bootstrap.pvmHostKernel.reboot.enabled | quote }}
-            - name: REBOOT_COORDINATED
-              value: {{ .Values.bootstrap.pvmHostKernel.reboot.coordinated | quote }}
-            - name: LEASE_NAME
-              value: {{ .Values.bootstrap.pvmHostKernel.reboot.leaseName | quote }}
-            - name: LEASE_TTL_SECONDS
-              value: {{ .Values.bootstrap.pvmHostKernel.reboot.leaseTTLSeconds | quote }}
-            - name: REBOOT_MAX_COUNT
-              value: {{ .Values.bootstrap.pvmHostKernel.reboot.maxCount | quote }}
+            - name: WAIT_TIMEOUT_SECONDS
+              value: {{ .Values.cubeNodeBootstrap.pvmWaitTimeoutSeconds | default "900" | quote }}
           volumeMounts:
             {{- include "cube.bootstrapHostVolumeMounts" . | nindent 12 }}
-        {{- end }}
         {{- if .Values.bootstrap.nodeInit.enabled }}
         - name: cube-node-init
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.nodeInit "context" $) | quote }}

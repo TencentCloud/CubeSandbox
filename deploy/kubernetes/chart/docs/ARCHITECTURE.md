@@ -1,6 +1,6 @@
 # CubeSandbox Chart 架构
 
-本文描述 `deploy/kubernetes/chart` **当前**交付形态：组件分层、计算面三个 DaemonSet 的分工、安装与启动顺序、以及 DNS / Proxy / Egress 等运行期链路。升级操作见 [`UPGRADE.md`](UPGRADE.md)；排障见 [`FAQ.md`](FAQ.md)。
+本文描述 `deploy/kubernetes/chart` **当前**交付形态：组件分层、计算面 DaemonSet 的分工、安装与启动顺序、以及 DNS / Proxy / Egress 等运行期链路。升级操作见 [`UPGRADE.md`](UPGRADE.md)；排障见 [`FAQ.md`](FAQ.md)。
 
 ## 1. 总体分层
 
@@ -13,7 +13,8 @@
 | 依赖存储 | MySQL / Redis | 内置 StatefulSet 或第三方 | 业务数据 / Proxy 与 lifecycle 状态 |
 | 计算面 · 运行时 | `cube-node`（Big Pod） | OpenKruise Advanced DaemonSet（InPlaceIfPossible） | `wait-node-prep` + cubelet / network-agent + 可选 egress；**无 initContainers** |
 | 计算面 · 产物 | `cube-node-installer` | DaemonSet | 将 shim / kernel / guest 安装到宿主机 toolbox |
-| 计算面 · 节点引导 | `cube-node-bootstrap` | DaemonSet | PVM host kernel、`cube-node-init`、写 `node-prep-ready` |
+| 计算面 · 节点引导 | `cube-node-bootstrap` | DaemonSet | `wait-pvm-host`、`cube-node-init`、写 `node-prep-ready` |
+| 计算面 · PVM 宿主机 | `cube-node-pvm` | DaemonSet（仅 `placement.pvm`） | PVM host kernel 安装（可 reboot）；写带指纹的 `pvm-host-ready` |
 | 数据面入口 | CubeProxy + 集群 DNS | Deployment；可选改写 CoreDNS | HTTP/HTTPS sandbox 入口；`*.domain` 泛解析 |
 | 生命周期 | cube-lifecycle-manager | Deployment + ClusterIP | sandbox pause/resume；经 Redis 发现 Proxy 副本 |
 
@@ -35,9 +36,14 @@ flowchart TB
     KDNS["CoreDNS · *.cube.app → Proxy Service"]
   end
 
+  subgraph PVMN["PVM nodes · placement.pvm"]
+    PVMDS["cube-node-pvm"]
+    PVMREADY["pvm-host-ready fingerprint"]
+  end
+
   subgraph COMPUTE["Compute · placement.compute"]
     subgraph BOOT["cube-node-bootstrap"]
-      PVM["init: pvm-host-bootstrap"]
+      WAITPVM["init: wait-pvm-host"]
       NINIT["init: cube-node-init"]
       READY["write node-prep-ready"]
     end
@@ -60,7 +66,9 @@ flowchart TB
   PROXY --> REDIS
   PROXY --> CM
   KDNS --> PROXY
-  PVM --> READY
+  PVMDS --> PVMREADY
+  PVMREADY --> WAITPVM
+  WAITPVM --> NINIT
   NINIT --> READY
   READY --> WAIT
   WAIT --> RUN
@@ -92,9 +100,9 @@ flowchart TB
 | 内置 Redis | `redis.host=""` 且控制面或 Proxy 需要时安装 |
 | 第三方 Redis | `redis.host` 非空 → 不装内置 Redis |
 
-### 2.3 计算面：三个 DaemonSet
+### 2.3 计算面：四个 DaemonSet
 
-同节点、同 `placement.compute`，**selector 互斥**，各司其职。
+`cube-node` / `cube-node-installer` / `cube-node-bootstrap` 用 `placement.compute`（**不含** `allow-pvm-bootstrap`）。`cube-node-pvm` 用 `placement.pvm`（含 `allow-pvm-bootstrap`），因此非 PVM 节点不会拉取 `cube-pvm-host-bootstrap` 大镜像。
 
 #### Big Pod：`cube-node`
 
@@ -121,11 +129,31 @@ flowchart TB
 
 #### Bootstrap：`cube-node-bootstrap`
 
-- init：`pvm-host-bootstrap` → `cube-node-init`；主容器写 `node-prep-ready`。
-- 哨兵目录：`/var/lib/cube-node-bootstrap`（与 Big Pod 的 `wait-node-prep` 共享）。
-- `hostPID: true`（`nsenter --target 1`）；低频变更；升引导 **只 bump Bootstrap 镜像**。
+- init：`wait-pvm-host` → `cube-node-init`；主容器写 `node-prep-ready`。
+- `wait-pvm-host`：按节点 label 决定是否等待 PVM；写 `effective-pvm`（`0`/`1`）。PVM 节点必须等到 **指纹匹配** 的 `pvm-host-ready`（禁止「文件存在即 ready」）。
+- 哨兵目录：`/var/lib/cube-node-bootstrap`（与 Big Pod 的 `wait-node-prep` / PVM DS 共享）。
+- `hostPID: true`（`nsenter --target 1`）；低频变更；升 node-init **只 bump Bootstrap / nodeInit 镜像**。
 
-为何拆成三个：Big Pod 保持 InPlace 友好（不因升 shim / 升 node-init 而 recreate）；产物安装与可 reboot 的节点引导分离，避免日常 artifact 升级触发 host kernel 路径。
+#### PVM：`cube-node-pvm`
+
+- 仅当 `bootstrap.pvmHostKernel.enabled=true` 时创建；仅调度到 `placement.pvm`。
+- init：`pvm-host-bootstrap`；成功（live 内核已满足 pattern+boot args）后写带指纹的 `pvm-host-ready`；主容器 hold。
+- 换核 / 改 boot args 前 `invalidate_pvm_gate_sentinels`：删除 `node-prep-ready`、`pvm-host-ready`、`effective-pvm`，再 reboot。
+- 升 PVM 镜像 **只 bump `images.pvmHostBootstrap`**，不 recreate Big Pod。
+
+为何拆成四个：Big Pod 保持 InPlace 友好；产物安装与可 reboot 的 PVM 引导分离；非 PVM compute 节点不拉 PVM 大镜像。
+
+### 2.3.1 Reboot 与 ready 哨兵
+
+| 标记 | 跨 reboot 残留？ | 误放行？ |
+| --- | --- | --- |
+| `pvm-host-ready`（指纹含 live `uname` + boot_args） | 会 | **不会**：wait 比对 live 指纹；mutate 前主动删除 |
+| `effective-pvm` | 会 | wait-pvm-host **每次**重写；mutate 前删除 |
+| `node-prep-ready`（指纹含 `uname`） | 会 | **不会**；换核后期望指纹变 |
+| `/run/wait-node-prep.ready` | 否（tmpfs） | 安全 |
+| `.staged-*` | 会 | 有意：产物仍在盘上 |
+
+验收：PVM 换核期间 Big Pod NotReady；故意残留错误内核的 `pvm-host-ready` 时 `wait-pvm-host` 不得放行；普通掉电且内核未变时可快速恢复。
 
 ### 2.4 数据面入口
 
@@ -176,7 +204,7 @@ flowchart TD
   D --> E["MySQL / Redis 或外部"]
   E --> F["控制面 Deployment"]
   F --> G["Proxy / cluster-dns"]
-  G --> H["cube-node + installer + bootstrap"]
+  G --> H["cube-node + installer + bootstrap + pvm"]
 ```
 
 主要校验：
@@ -184,9 +212,10 @@ flowchart TD
 - 启用控制面 / 计算面 / Proxy 时须配置对应 `placement.*.nodeSelector`。
 - `configureClusterDNS=true` 须配置 `cubeProxy.domain`。
 - compute-only 须配置 `externalControlPlane.masterEndpoint`。
+- `pvmHostKernel.enabled=true` 时 `placement.pvm` 须含 `allow-pvm-bootstrap`，且 **不得** 写在 `placement.compute`。
 - 已移除 `security.hostNetwork`；cube-node 固定 Pod 网络。
 
-调度：控制面组件（含 Proxy、lifecycle、内置 DB）用 `placement.controlPlane`；三个计算面 DaemonSet 用 `placement.compute`。Chart 管理的容器经 `global.timezone` 注入 `TZ`（默认 `Asia/Shanghai`）。
+调度：控制面用 `placement.controlPlane`；`cube-node` / installer / bootstrap 用 `placement.compute`；`cube-node-pvm` 用 `placement.pvm`。Chart 管理的容器经 `global.timezone` 注入 `TZ`（默认 `Asia/Shanghai`）。
 
 ### 4.2 控制面启动
 
@@ -217,15 +246,19 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
+  participant PVM as cube-node-pvm
   participant Boot as cube-node-bootstrap
   participant Inst as cube-node-installer
   participant Wait as wait-node-prep
   participant CN as cube-node
   participant CM as CubeMaster
 
-  opt pvmHostKernel.enabled
-    Boot->>Boot: pvm-host-bootstrap
+  alt allow-pvm-bootstrap node
+    PVM->>PVM: pvm-host-bootstrap may reboot
+    Note over PVM: mutate 前删各类 ready
+    PVM->>PVM: write pvm-host-ready fingerprint
   end
+  Boot->>Boot: wait-pvm-host label + fingerprint gate
   opt nodeInit.enabled
     Boot->>Boot: cube-node-init
   end
@@ -234,7 +267,7 @@ sequenceDiagram
   Wait->>Wait: poll fingerprint → Ready hold
   Note over Wait,CN: Kruise barrier → prio 0
   Wait-->>CN: wait Ready
-  CN->>CN: self-stage cubelet / network-agent
+  CN->>CN: self-stage + effective-pvm guest kernel
   CN->>CM: register + heartbeat
 ```
 
@@ -250,7 +283,7 @@ sequenceDiagram
 
 - CubeMaster `/notify/health`、CubeAPI `/health`。
 - CubeAPI 能查到 healthy node。
-- 三个计算面 DaemonSet ready 数等于命中 `placement.compute` 的节点数。
+- `cube-node` / installer / bootstrap ready 数等于命中 `placement.compute` 的节点数；`cube-node-pvm` ready 数等于命中 `placement.pvm` 的节点数。
 - egress 启用时 sidecar Ready。
 
 ## 5. 运行期数据流
@@ -334,7 +367,8 @@ externalControlPlane:
 | `controlPlane.enabled` | `true` | 内置控制面 |
 | `externalControlPlane.enabled` | `false` | 外部 CubeMaster |
 | `placement.controlPlane.nodeSelector` | `cube.tencent.com/role=control` | 控制面调度 |
-| `placement.compute.nodeSelector` | 含 `allow-pvm-bootstrap=true` | 计算面调度；显式授权 PVM bootstrap |
+| `placement.compute.nodeSelector` | `role=compute` + `cube-node=true` | 计算面（不含 allow-pvm） |
+| `placement.pvm.nodeSelector` | 另含 `allow-pvm-bootstrap=true` | 仅 PVM 宿主机 DaemonSet |
 | `cubeProxy.domain` | `cube.app` | sandbox 域名 |
 | `cubeProxy.configureClusterDNS` | `true` | 是否写入集群 CoreDNS |
 | `cubeNode.dns.sandbox.followNodeDns` | `true` | guest 跟随节点 DNS |

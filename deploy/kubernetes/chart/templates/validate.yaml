@@ -7,8 +7,18 @@
 {{- if not $computeSelector }}
 {{- fail "cube-node requires placement.compute.nodeSelector, otherwise host-mutating bootstrap may run on all nodes" }}
 {{- end }}
-{{- if and .Values.bootstrap.pvmHostKernel.enabled (not (hasKey $computeSelector "cube.tencent.com/allow-pvm-bootstrap")) }}
-{{- fail "bootstrap.pvmHostKernel.enabled=true requires placement.compute.nodeSelector to include cube.tencent.com/allow-pvm-bootstrap=true" }}
+{{- $pvmSelector := ((.Values.placement).pvm).nodeSelector | default dict -}}
+{{- if .Values.bootstrap.pvmHostKernel.enabled }}
+{{- if not (hasKey $pvmSelector "cube.tencent.com/allow-pvm-bootstrap") }}
+{{- fail "bootstrap.pvmHostKernel.enabled=true requires placement.pvm.nodeSelector to include cube.tencent.com/allow-pvm-bootstrap=true (PVM DaemonSet only; keep it out of placement.compute so non-PVM nodes skip the PVM image)" }}
+{{- end }}
+{{- $allowPvmRaw := index $pvmSelector "cube.tencent.com/allow-pvm-bootstrap" -}}
+{{- if or (not (kindIs "string" $allowPvmRaw)) (ne $allowPvmRaw "true") }}
+{{- fail (printf "placement.pvm.nodeSelector[cube.tencent.com/allow-pvm-bootstrap] must be the YAML string \"true\" (got %T %v)" $allowPvmRaw $allowPvmRaw) }}
+{{- end }}
+{{- if hasKey $computeSelector "cube.tencent.com/allow-pvm-bootstrap" }}
+{{- fail "placement.compute.nodeSelector must not include cube.tencent.com/allow-pvm-bootstrap; that label belongs only in placement.pvm.nodeSelector" }}
+{{- end }}
 {{- end }}
 {{- if and (eq (.Values.cubeNode.nodeIDSource | default "specNodeName") "static") (not .Values.cubeNode.staticNodeID) }}
 {{- fail "cubeNode.nodeIDSource=static requires cubeNode.staticNodeID" }}

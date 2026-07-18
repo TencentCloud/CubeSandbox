@@ -19,9 +19,24 @@ if [[ -z "${CUBE_MASTER_ENDPOINT:-}" ]]; then
 fi
 CUBE_PVM_ENABLE="${CUBE_PVM_ENABLE:-1}"
 CUBE_SANDBOX_AUTO_DETECT_ETH="${CUBE_SANDBOX_AUTO_DETECT_ETH:-true}"
+STATE_DIR="${STATE_DIR:-/var/lib/cube-node-bootstrap}"
 
 log() { printf '[cube-node-entrypoint] %s\n' "$*"; }
 fail() { printf '[cube-node-entrypoint] ERROR: %s\n' "$*" >&2; exit 1; }
+
+apply_effective_pvm_from_state() {
+  local path="${STATE_DIR}/effective-pvm"
+  local val
+  [[ -f "${path}" ]] || return 0
+  val="$(tr -d '[:space:]' < "${path}" 2>/dev/null || true)"
+  case "${val}" in
+    0|1)
+      CUBE_PVM_ENABLE="${val}"
+      export CUBE_PVM_ENABLE
+      log "CUBE_PVM_ENABLE overridden from ${path}=${val}"
+      ;;
+  esac
+}
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "missing command in cube-node image: $1"
@@ -147,6 +162,7 @@ configure_sandbox_dns() {
 [[ -n "${CUBE_SANDBOX_NODE_IP:-}" ]] || fail "CUBE_SANDBOX_NODE_IP is required"
 
 validate_runtime_commands
+apply_effective_pvm_from_state
 select_guest_kernel
 
 # Escape backslashes, ampersands, and forward slashes so they cannot terminate

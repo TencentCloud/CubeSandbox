@@ -37,15 +37,19 @@ Chart **不会自动打 label**,请部署前手动执行:
 kubectl label nodes <control-node-1> cube.tencent.com/role=control cube.tencent.com/cube-control=true
 kubectl taint nodes <control-node-1> cube.tencent.com/control=true:NoSchedule --overwrite
 
-# 计算节点
+# 计算节点（运行 cube-node / bootstrap / installer）
 kubectl label nodes <compute-node-1> \
   cube.tencent.com/role=compute \
-  cube.tencent.com/cube-node=true \
-  cube.tencent.com/allow-pvm-bootstrap=true
+  cube.tencent.com/cube-node=true
 kubectl taint nodes <compute-node-1> cube.tencent.com/compute=true:NoSchedule --overwrite
+
+# 需要 PVM 宿主机内核的节点额外授权（才会调度 cube-node-pvm、拉取 PVM 镜像）
+kubectl label nodes <pvm-compute-node> cube.tencent.com/allow-pvm-bootstrap=true
 ```
 
-`allow-pvm-bootstrap=true` 显式授权该节点可以被 chart 替换 host kernel;不打这个 label 就无法作为 compute 节点部署。
+- compute 节点：打 `role=compute` + `cube-node=true` 即可跑 Big Pod / bootstrap / installer。
+- **仅**需要替换 host kernel 的节点再打 `allow-pvm-bootstrap=true`；不打则不会拉 `cube-pvm-host-bootstrap`。
+- 混部：部分 compute 打 allow-pvm，其余不打即可。
 
 ### 1.4 安装 OpenKruise（计算面原地升级）
 
@@ -145,7 +149,7 @@ helm upgrade --install cube ./deploy/kubernetes/chart \
 1. **秒级**:控制面 Secret / ConfigMap / RBAC 创建
 2. **1-3 分钟**:MySQL / Redis StatefulSet ready,CubeMaster 完成 schema migration
 3. **1-2 分钟**:CubeAPI / CubeProxy / WebUI ready
-4. **首次 5-15 分钟**:每 compute 节点上 `cube-node-bootstrap` 执行 `pvm-host-bootstrap`(可能触发重启)→ `cube-node-init` → 写 `node-prep-ready`；Big Pod `wait-node-prep` sidecar（Kruise prio 10）Ready 后主容器启动 → 节点向 CubeMaster 注册
+4. **首次 5-15 分钟**:有 `allow-pvm-bootstrap` 的节点上 `cube-node-pvm` 执行 `pvm-host-bootstrap`(可能触发重启)→ 写指纹 `pvm-host-ready`；全部 compute 上 `cube-node-bootstrap` 的 `wait-pvm-host` → `cube-node-init` → 写 `node-prep-ready`；Big Pod `wait-node-prep` Ready 后主容器启动 → 节点向 CubeMaster 注册
 5. **之后**:后续升级/滚动更新只需秒级
 
 ---
@@ -188,6 +192,7 @@ kubectl label nodes <node> \
   cube.tencent.com/cube-node=true \
   cube.tencent.com/allow-pvm-bootstrap=true
 # 不要打 taint
+# 单节点试用若需要 PVM，保留 allow-pvm；纯 BM 可去掉 allow-pvm 并设 bootstrap.pvmHostKernel.enabled=false
 ```
 
 `runtime-values.yaml` 中把持久化改成 hostPath 以避免依赖任何 CSI:

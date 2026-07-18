@@ -31,7 +31,8 @@ placement:
 | 报错关键字 | 说明 |
 |---|---|
 | `cube-node requires placement.compute.nodeSelector` | 计算节点必须显式指定,不能空 |
-| `bootstrap.pvmHostKernel.enabled=true requires ... allow-pvm-bootstrap=true` | 计算节点 nodeSelector 必须包含 `allow-pvm-bootstrap=true`,防止误替换内核 |
+| `bootstrap.pvmHostKernel.enabled=true requires ... placement.pvm ... allow-pvm-bootstrap` | PVM DaemonSet 的 nodeSelector 必须含该 label；不要写在 `placement.compute` |
+| `placement.compute.nodeSelector must not include ... allow-pvm-bootstrap` | 该 label 只属于 `placement.pvm`，写在 compute 会让所有计算节点拉 PVM 镜像 |
 | `cubeProxy.enabled=true requires placement.controlPlane.nodeSelector` | CubeProxy 只跑在 control 节点上 |
 | `cubeProxy.configureClusterDNS=true requires cubeProxy.domain` | 开启集群 DNS 注入时必须有 sandbox 域名 |
 
@@ -40,7 +41,7 @@ placement:
 先看三个计算面 DaemonSet 的 desiredNumberScheduled 是否与实际 compute 节点数一致:
 
 ```bash
-kubectl -n cube-system get ds -l 'app.kubernetes.io/component in (cube-node,cube-node-installer,cube-node-bootstrap)'
+kubectl -n cube-system get ds -l 'app.kubernetes.io/component in (cube-node,cube-node-installer,cube-node-bootstrap,cube-node-pvm)'
 # OpenKruise Advanced DaemonSet:
 kubectl -n cube-system get ads cube-node
 ```
@@ -197,21 +198,23 @@ cubemastercli sandbox list
 
 ### D1. `pvm-host-bootstrap` 反复重启 / 节点 reboot
 
-`pvm-host-bootstrap` 跑在 **`cube-node-bootstrap`** DaemonSet（与 Big Pod、Installer 分离）。绝大多数反复重启是 host kernel 替换后节点需要 reboot。观察:
+`pvm-host-bootstrap` 跑在 **`cube-node-pvm`** DaemonSet（仅 `placement.pvm` / `allow-pvm-bootstrap` 节点）。绝大多数反复重启是 host kernel 替换后节点需要 reboot。观察:
 
 ```bash
-kubectl -n cube-system logs -l app.kubernetes.io/component=cube-node-bootstrap -c pvm-host-bootstrap --tail=100
-kubectl -n cube-system describe pod -l app.kubernetes.io/component=cube-node-bootstrap
+kubectl -n cube-system logs -l app.kubernetes.io/component=cube-node-pvm -c pvm-host-bootstrap --tail=100
+kubectl -n cube-system describe pod -l app.kubernetes.io/component=cube-node-pvm
+kubectl -n cube-system logs -l app.kubernetes.io/component=cube-node-bootstrap -c wait-pvm-host --tail=50
 kubectl -n cube-system logs -l app.kubernetes.io/component=cube-node -c wait-node-prep --tail=50
 ```
 
 正常流程:
 
-1. 首次运行:检测 host kernel → 若不是 PVM kernel,安装 RPM/DEB → **先删 `node-prep-ready`** → 触发节点重启
-2. 节点重启后:bootstrap 再次运行 → 检测到 PVM kernel（快速路径，**不抢**集群 lease）→ `cube-node-init` → 写 `node-prep-ready`
-3. Big Pod `wait-node-prep` sidecar（Kruise prio 10）校验指纹 Ready → 主容器启动
+1. 首次运行:检测 host kernel → 若不是 PVM kernel,安装 RPM/DEB → **先删 `node-prep-ready` / `pvm-host-ready` / `effective-pvm`** → 触发节点重启
+2. 节点重启后:PVM DS 再次运行 → 检测到 PVM kernel（快速路径，**不抢**集群 lease）→ 写带指纹的 `pvm-host-ready`
+3. bootstrap `wait-pvm-host` 校验指纹（禁止「文件存在即 ready」）→ 写 `effective-pvm=1` → `cube-node-init` → 写 `node-prep-ready`
+4. Big Pod `wait-node-prep` sidecar（Kruise prio 10）校验指纹 Ready → 主容器启动
 
-若卡在 wait-node-prep Not Ready，先查 bootstrap 是否 Ready、`/var/lib/cube-node-bootstrap/node-prep-ready` 是否存在且指纹匹配，再看 wait 容器是否写出 `/run/wait-node-prep.ready`。
+若卡在 wait-node-prep Not Ready，先查 bootstrap 是否 Ready、`/var/lib/cube-node-bootstrap/node-prep-ready` 是否存在且指纹匹配，再看 wait 容器是否写出 `/run/wait-node-prep.ready`。若卡在 `wait-pvm-host`，查 `cube-node-pvm` 与 `pvm-host-ready` 指纹是否与 live `uname` 一致。
 
 若卡在"waiting for reboot",通常是节点没有 sudo/reboot 权限或 GRUB 未更新,需人工登录节点执行 `reboot` 并检查:
 
@@ -372,7 +375,7 @@ kubectl -n cube-system logs <cube-node-pod> -c cube-egress-net --tail=100
 
 机制对齐一键包「停服务、不杀 shim、覆盖二进制、重启」：
 
-1. **`cube-node-installer`** 与 Big Pod **self-stage** 从 `/opt/cube-image` stage 到 `/usr/local/services/cubetoolbox`（整树 hostPath；原子目录替换）。升产物只动 Installer；升控面只动 Big Pod。**`cube-node-bootstrap`** 负责 pvm / node-init 并写 `node-prep-ready`；升 nodeInit/pvm 只动 Bootstrap。分工见 [`ARCHITECTURE.md`](ARCHITECTURE.md)；步骤见 [`UPGRADE.md`](UPGRADE.md)。
+1. **`cube-node-installer`** 与 Big Pod **self-stage** 从 `/opt/cube-image` stage 到 `/usr/local/services/cubetoolbox`（整树 hostPath；原子目录替换）。升产物只动 Installer；升控面只动 Big Pod。**`cube-node-pvm`** 负责 PVM host；**`cube-node-bootstrap`** 负责 wait-pvm / node-init 并写 `node-prep-ready`。分工见 [`ARCHITECTURE.md`](ARCHITECTURE.md)；步骤见 [`UPGRADE.md`](UPGRADE.md)。
 2. shim ttrpc / VMM socket 目录也是 hostPath：容器 `/run/containerd` → 宿主机 `/data/cubelet/run/containerd`，容器 `/run/vc` → 宿主机 `/data/cubelet/run/vc`。
 3. `/data/cubelet/state` 通过启动前 `mount --bind` 留在 hostPath 上。
 4. `preStop` / entrypoint 只 TERM **cubelet** 与 **network-agent**，不匹配 `containerd-shim-cube-rs` / `cube-runtime`。

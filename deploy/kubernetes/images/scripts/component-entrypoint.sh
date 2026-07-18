@@ -17,9 +17,24 @@ TOOLBOX_ROOT="${TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
 CUBE_COMPONENT="${CUBE_COMPONENT:-}"
 CUBE_ROLE="${CUBE_ROLE:-install}"
 CUBE_PID_DIR="${CUBE_PID_DIR:-/run/cube-node}"
+STATE_DIR="${STATE_DIR:-/var/lib/cube-node-bootstrap}"
 
 log() { printf '[cube-component:%s:%s] %s\n' "${CUBE_COMPONENT:-?}" "${CUBE_ROLE}" "$*"; }
 fail() { printf '[cube-component:%s:%s] ERROR: %s\n' "${CUBE_COMPONENT:-?}" "${CUBE_ROLE}" "$*" >&2; exit 1; }
+
+apply_effective_pvm_from_state() {
+  local path="${STATE_DIR}/effective-pvm"
+  local val
+  [[ -f "${path}" ]] || return 0
+  val="$(tr -d '[:space:]' < "${path}" 2>/dev/null || true)"
+  case "${val}" in
+    0|1)
+      CUBE_PVM_ENABLE="${val}"
+      export CUBE_PVM_ENABLE
+      log "CUBE_PVM_ENABLE overridden from ${path}=${val}"
+      ;;
+  esac
+}
 
 component_relpath() {
   case "$1" in
@@ -322,6 +337,7 @@ run_cubelet() {
   [[ -n "${CUBE_SANDBOX_NODE_ID:-}${CUBE_SANDBOX_NODE_IP:-}" ]] || fail "CUBE_SANDBOX_NODE_ID or CUBE_SANDBOX_NODE_IP is required"
   [[ -n "${CUBE_SANDBOX_ENDPOINT_IP:-}" ]] || fail "CUBE_SANDBOX_ENDPOINT_IP is required"
 
+  apply_effective_pvm_from_state
   select_guest_kernel
 
   local ep_esc

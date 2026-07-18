@@ -175,8 +175,23 @@ placement:
         value: "true"
         effect: NoSchedule
 
-  # Compute placement is used by cube-node.
+  # Compute placement is used by cube-node / bootstrap / installer.
+  # Do NOT require allow-pvm-bootstrap here — that label is only for placement.pvm
+  # so non-PVM compute nodes never pull cube-pvm-host-bootstrap.
   compute:
+    nodeSelector:
+      cube.tencent.com/role: compute
+      cube.tencent.com/cube-node: "true"
+    affinity: {}
+    tolerations:
+      - key: cube.tencent.com/compute
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+
+  # PVM host-kernel DaemonSet only. Nodes without this label skip PVM install
+  # and do not pull the PVM bootstrap image (mixed-cluster safe).
+  pvm:
     nodeSelector:
       cube.tencent.com/role: compute
       cube.tencent.com/cube-node: "true"
@@ -564,15 +579,18 @@ cubeNodeInstaller:
     limits:
       memory: "512Mi"
 
-# Node prep DaemonSet (pvm + node-init + write node-prep-ready). Low churn;
-# bumping nodeInit/pvmHostBootstrap recreates this DS only. hostPID=true and
-# wide host mounts — do NOT merge into cube-node-installer.
+# Node prep DaemonSet (wait-pvm-host + node-init + write node-prep-ready).
+# Low churn; bumping nodeInit recreates this DS only. hostPID=true and wide
+# host mounts — do NOT merge into cube-node-installer. PVM host install lives
+# on cube-node-pvm (placement.pvm).
 cubeNodeBootstrap:
   podAnnotations: {}
   # Bump only when intentionally invalidating all nodes' prep fingerprint
   # (forces wait-node-prep to re-block until bootstrap rewrites sentinel).
   prepGeneration: "1"
   waitTimeoutSeconds: "600"
+  # How long wait-pvm-host polls pvm-host-ready on PVM-labeled nodes.
+  pvmWaitTimeoutSeconds: "900"
   # Resources for Big Pod wait-node-prep sidecar.
   waitResources:
     requests:
@@ -580,6 +598,22 @@ cubeNodeBootstrap:
       memory: "32Mi"
     limits:
       memory: "64Mi"
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  terminationGracePeriodSeconds: 30
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      memory: "256Mi"
+
+# PVM host-kernel DaemonSet (only on placement.pvm). Bumping pvmHostBootstrap
+# recreates this DS only — not bootstrap or Big Pod.
+cubeNodePvm:
+  podAnnotations: {}
   updateStrategy:
     type: RollingUpdate
     rollingUpdate:
@@ -872,8 +906,8 @@ hostPaths:
   dataCubeShim: /data/cube-shim
   dataSnapshotPack: /data/snapshot_pack
   tmpCube: /tmp/cube
-  # pvm/node-init state + node-prep-ready sentinel (shared by bootstrap DS and
-  # Big Pod wait-node-prep).
+  # pvm/node-init state + node-prep-ready / pvm-host-ready / effective-pvm
+  # (shared by cube-node-pvm, bootstrap DS, and Big Pod wait-node-prep).
   bootstrapState: /var/lib/cube-node-bootstrap
   # Host-persistent toolbox tree. Big Pod mounts this path whole at
   # /usr/local/services/cubetoolbox (stable volumeMount for InPlace). Installer

@@ -6,9 +6,10 @@ Current compute-plane shape (per compute node):
 
 - **`cube-node` (Big Pod)**: OpenKruise Advanced DaemonSet (`InPlaceIfPossible`; hard dependency); `wait-node-prep` sidecar + `cubelet` / `network-agent` + optional egress + six frozen `cube-slot-*` pause placeholders; **no initContainers**; Pod network (`hostNetwork=false`).
 - **`cube-node-installer`**: DaemonSet that stages shim / kernel / guest into the host toolbox tree.
-- **`cube-node-bootstrap`**: DaemonSet that runs PVM host-kernel prep and `cube-node-init`, then writes `node-prep-ready`.
+- **`cube-node-bootstrap`**: DaemonSet that runs `wait-pvm-host` + `cube-node-init`, then writes `node-prep-ready`.
+- **`cube-node-pvm`**: DaemonSet scheduled only via `placement.pvm` (`allow-pvm-bootstrap`); installs PVM host kernel and writes fingerprint `pvm-host-ready`. Non-PVM compute nodes never pull this image.
 
-Control-plane vs compute scheduling uses `placement.controlPlane` and `placement.compute`. MySQL schema migration is embedded in CubeMaster. Control-plane and runtime components use separate images.
+Control-plane vs compute scheduling uses `placement.controlPlane` and `placement.compute`. PVM host install uses `placement.pvm`. MySQL schema migration is embedded in CubeMaster. Control-plane and runtime components use separate images.
 
 ## Directory
 
@@ -33,15 +34,15 @@ deploy/kubernetes/chart/
 
 ## Architecture
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for component layering, the three compute DaemonSets, DNS/Proxy/Egress flows, and external control plane / compute-only mode.
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for component layering, the four compute DaemonSets, DNS/Proxy/Egress flows, and external control plane / compute-only mode.
 
 ## Image responsibilities
 
 | Image | Role |
 |---|---|
-| `cube-pvm-host-bootstrap` | Bootstrap DaemonSet init. Installs/configures PVM host kernel and may reboot the node. |
-| `cube-node-init` | Bootstrap DaemonSet init. Loads KVM, prepares host paths, validates `/dev/kvm` and XFS. |
-| `cube-wait-node-prep` | Big Pod high-priority sidecar (poll `node-prep-ready`) and bootstrap write-ready container. |
+| `cube-pvm-host-bootstrap` | **cube-node-pvm** init. Installs/configures PVM host kernel and may reboot the node. |
+| `cube-node-init` | Bootstrap DaemonSet: `wait-pvm-host` + `cube-node-init`. Loads KVM, prepares host paths, validates `/dev/kvm` and XFS. |
+| `cube-wait-node-prep` | Big Pod high-priority sidecar (poll `node-prep-ready`), bootstrap write-ready, and PVM hold container. |
 | `cube-shim` / `cube-kernel` / `cube-guest` | Installer DaemonSet containers; stage artifacts into `/usr/local/services/cubetoolbox`. |
 | `cubelet` / `network-agent` | Big Pod runtime containers (self-stage then run). |
 | `pause` | Big Pod `cube-slot-1`…`6` placeholders (InPlace-replace later). |
@@ -58,15 +59,17 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for component layering, the t
 
 The chart separates placement into dedicated control-plane nodes and compute
 nodes. Control-plane Deployments, StatefulSets, and `cube-proxy` use
-`placement.controlPlane`; `cube-node` uses `placement.compute`. In-cluster
-`*.cube.app` is wired automatically when CubeProxy is enabled: the chart
-patches cluster CoreDNS so the domain rewrites to the CubeProxy Service.
+`placement.controlPlane`; `cube-node` / installer / bootstrap use
+`placement.compute`. PVM host install (`cube-node-pvm`) uses `placement.pvm`
+and requires `cube.tencent.com/allow-pvm-bootstrap=true` so non-PVM compute
+nodes never pull the heavy PVM bootstrap image. In-cluster `*.cube.app` is
+wired automatically when CubeProxy is enabled: the chart patches cluster
+CoreDNS so the domain rewrites to the CubeProxy Service.
 
 The chart refuses to render host-mutating compute components without
-`placement.compute.nodeSelector`. This prevents PVM bootstrap and Cube runtime
-setup from running on ordinary nodes. The default compute selector includes
-`cube.tencent.com/allow-pvm-bootstrap=true` because the default profile
-initializes the PVM host kernel and may reboot selected compute nodes.
+`placement.compute.nodeSelector`. When `bootstrap.pvmHostKernel.enabled=true`,
+`placement.pvm.nodeSelector` must include `allow-pvm-bootstrap`, and that key
+must **not** appear under `placement.compute`.
 
 Default placement values:
 
@@ -104,6 +107,16 @@ placement:
     nodeSelector:
       cube.tencent.com/role: compute
       cube.tencent.com/cube-node: "true"
+    tolerations:
+      - key: cube.tencent.com/compute
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+
+  pvm:
+    nodeSelector:
+      cube.tencent.com/role: compute
+      cube.tencent.com/cube-node: "true"
       cube.tencent.com/allow-pvm-bootstrap: "true"
     tolerations:
       - key: cube.tencent.com/compute
@@ -119,9 +132,12 @@ kubectl label node <control-node>   cube.tencent.com/role=control   cube.tencent
 
 kubectl taint node <control-node>   cube.tencent.com/control=true:NoSchedule   --overwrite
 
-kubectl label node <compute-node>   cube.tencent.com/role=compute   cube.tencent.com/cube-node=true   cube.tencent.com/allow-pvm-bootstrap=true   --overwrite
+kubectl label node <compute-node>   cube.tencent.com/role=compute   cube.tencent.com/cube-node=true   --overwrite
 
 kubectl taint node <compute-node>   cube.tencent.com/compute=true:NoSchedule   --overwrite
+
+# Only on nodes that should install the PVM host kernel:
+kubectl label node <pvm-compute-node>   cube.tencent.com/allow-pvm-bootstrap=true   --overwrite
 ```
 
 The chart does not label or taint nodes. The platform operator must prepare node labels and taints before installation.
@@ -145,15 +161,16 @@ can set it to `false`.
 - `cubeNode.network.cidr` can patch Cubelet cubevs CIDR when the packaged default conflicts with the host network.
 
 `bootstrap.pvmHostKernel.enabled` also defaults to `true`, so the PVM host
-kernel bootstrap on `cube-node-bootstrap` can install/configure the host kernel and
-perform the configured coordinated reboot. The default
+kernel bootstrap on **`cube-node-pvm`** (only nodes with `allow-pvm-bootstrap`)
+can install/configure the host kernel and perform the configured coordinated
+reboot. Per-node `effective-pvm` (written by bootstrap `wait-pvm-host`) overrides
+Helm `CUBE_PVM_ENABLE` for guest kernel selection and fingerprinting. The default
 `bootstrap.pvmHostKernel.bootArgs` is `nopti pti=off` because the current
 `kvm_pvm` module does not support host KPTI. `cube-node-init` performs the same
 fail-fast style checks as one-click for memory, glibc, cgroup v2 cpu
 controller, cubecow dependencies, KVM, XFS, and PVM consistency. It fails when
-a host has `kvm_pvm` loaded but `cubeNode.pvmGuestKernel.enabled=false`, or
-when `cubeNode.pvmGuestKernel.enabled=true` but the host has not booted a PVM
-kernel with `kvm_pvm` loaded.
+a host has `kvm_pvm` loaded but effective PVM is off, or when effective PVM is
+on but the host has not booted a PVM kernel with `kvm_pvm` loaded.
 
 ## Build and push images
 
@@ -489,7 +506,8 @@ kubectl get pods -n cube-system -o wide
 kubectl get ads -n cube-system cube-node
 kubectl get deploy -n cube-system cube-proxy
 kubectl get sts -n cube-system cube-mysql cube-redis
-kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node-bootstrap -c pvm-host-bootstrap --tail=100
+kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node-pvm -c pvm-host-bootstrap --tail=100
+kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node-bootstrap -c wait-pvm-host --tail=100
 kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node-bootstrap -c cube-node-init --tail=100
 kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node -c cubelet --tail=100
 kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node -c wait-node-prep --tail=50
@@ -506,9 +524,10 @@ helm test cube -n cube-system --timeout 20m
 (`images.cubelet`, `images.networkAgent`, `images.waitNodePrep`, slot images, …)
 or slot service annotations keeps Pod UID/IP/netns. **First introducing
 `cube-slot-1`…`6` recreates Big Pods once** (adding containers is not InPlace).
-Artifact images bump only `cube-node-installer`; node-prep images bump only
-`cube-node-bootstrap`. See `docs/UPGRADE.md`. Cluster must have OpenKruise
-installed (see `docs/QUICKSTART.md` §1.4).
+Artifact images bump only `cube-node-installer`; node-init images bump
+`cube-node-bootstrap`; PVM host image bumps only `cube-node-pvm`. See
+`docs/UPGRADE.md`. Cluster must have OpenKruise installed (see
+`docs/QUICKSTART.md` §1.4).
 
 Set `cubeNode.updateStrategy.type: OnDelete` for fully manual
 per-node upgrades.

@@ -10,7 +10,8 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 
 log() { printf '[write-node-prep-ready] %s\n' "$*"; }
 
-log "computing fingerprint (mode=$(node_prep_resolve_mode))"
+apply_effective_pvm_env
+log "computing fingerprint (mode=$(node_prep_resolve_mode) pvm_enabled=$(node_prep_bool01 "$PVM_ENABLED"))"
 write_node_prep_ready
 log "node prep ready; holding bootstrap pod"
 exec sleep infinity

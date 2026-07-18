@@ -124,7 +124,7 @@ entrypoint behavior.
   It is a Kubernetes delivery image that bundles the node-side runtime components required by the Cube Node Big Pod, including `Cubelet`, `network-agent`, `cube-shim`, `cube-kernel-scf`, `cube-image`, `cube-vs`, and `cube-snapshot`. `cube-egress` is intentionally not bundled in this image because it is delivered as a separate sidecar image.
   If `CUBE_NODE_BASE_IMAGE` is set, the build script rebases that image instead
   and only replaces `/usr/local/bin/cube-node-entrypoint.sh`.
-- `cube-node-init` and `cube-pvm-host-bootstrap` run on the **`cube-node-bootstrap`** DaemonSet (REV3.2; not Big Pod init).
+- `cube-node-init` (`wait-pvm-host` + `cube-node-init`) runs on the **`cube-node-bootstrap`** DaemonSet; `cube-pvm-host-bootstrap` runs on **`cube-node-pvm`** (placement.pvm only).
 - `cube-wait-node-prep` is the Big Pod `wait-node-prep` **sidecar** (Kruise container launch priority) and the bootstrap `write-node-prep-ready` hold container. Bumping only the wait **image** on Big Pod may InPlace; do not change wait env/mounts routinely.
 - `cube-master` is built directly from `CubeMaster/docker/Dockerfile`. The build script prepares a temporary Docker context with the release-package `cubemaster` binary and the `CubeMaster/docker/tools` directory expected by that Dockerfile.
 - `cube-api` is built from `CubeAPI/Dockerfile`; no duplicate Dockerfile is kept here.

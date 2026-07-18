@@ -2,8 +2,8 @@
 set -eu
 
 # Big Pod REV3.2.1: Kruise high-priority sidecar (not an initContainer).
-# Poll hostPath node-prep-ready until fingerprint matches, then mark Ready and
-# sleep forever so Container Launch Priority can release lower-priority containers.
+# Poll hostPath node-prep-ready until fingerprint matches, mark Ready, and
+# KEEP polling so mutate/reboot that invalidates the sentinel clears readiness.
 # Does NOT watch Installer Pod Ready.
 # Day-1: freeze wait env/mounts; bumping only images.waitNodePrep may InPlace.
 
@@ -22,24 +22,34 @@ ready="$(node_prep_ready_path)"
 rm -f "$WAIT_READY_MARKER"
 log "waiting for ${ready} (timeout=${WAIT_TIMEOUT_SECONDS}s)"
 start="$(date +%s)"
+became_ready=0
 while true; do
-  if node_prep_fingerprint_valid_for_wait; then
-    log "node-prep-ready fingerprint matched; marking ready and holding"
-    : > "$WAIT_READY_MARKER"
-    exec sleep infinity
-  fi
-  now="$(date +%s)"
-  elapsed=$((now - start))
-  if [ "$elapsed" -ge "$WAIT_TIMEOUT_SECONDS" ]; then
-    if [ -f "$ready" ]; then
-      printf '[wait-node-prep] ERROR: timeout after %ss; sentinel present but fingerprint mismatch\n' "$elapsed" >&2
-      printf '--- want ---\n' >&2
-      node_prep_compute_fingerprint >&2
-      printf '--- have ---\n' >&2
-      cat "$ready" >&2
-      exit 1
+  if node_prep_fingerprint_matches_file; then
+    if [ ! -f "$WAIT_READY_MARKER" ]; then
+      log "node-prep-ready fingerprint matched; marking ready and continuing to re-validate"
+      became_ready=1
     fi
-    fail "timeout after ${elapsed}s; ${ready} not ready"
+    : > "$WAIT_READY_MARKER"
+  else
+    if [ -f "$WAIT_READY_MARKER" ]; then
+      log "node-prep-ready lost or fingerprint mismatch; clearing readiness marker"
+      rm -f "$WAIT_READY_MARKER"
+    fi
+    if [ "$became_ready" = "0" ]; then
+      now="$(date +%s)"
+      elapsed=$((now - start))
+      if [ "$elapsed" -ge "$WAIT_TIMEOUT_SECONDS" ]; then
+        if [ -f "$ready" ]; then
+          printf '[wait-node-prep] ERROR: timeout after %ss; sentinel present but fingerprint mismatch\n' "$elapsed" >&2
+          printf '%s\n' '--- want ---' >&2
+          node_prep_compute_fingerprint >&2
+          printf '%s\n' '--- have ---' >&2
+          cat "$ready" >&2
+          exit 1
+        fi
+        fail "timeout after ${elapsed}s; ${ready} not ready"
+      fi
+    fi
   fi
   sleep "$WAIT_POLL_SECONDS"
 done

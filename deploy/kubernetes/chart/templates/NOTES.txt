@@ -61,11 +61,17 @@ Useful commands:
   kubectl get pods -n {{ .Release.Namespace }} -o wide
   kubectl get ads -n {{ .Release.Namespace }} {{ include "cube.nodeName" . }}
   kubectl get ds -n {{ .Release.Namespace }} {{ include "cube.nodeBootstrapName" . }}
+{{- if .Values.bootstrap.pvmHostKernel.enabled }}
+  kubectl get ds -n {{ .Release.Namespace }} {{ include "cube.nodePvmName" . }}
+{{- end }}
   kubectl get ds -n {{ .Release.Namespace }} {{ include "cube.nodeInstallerName" . }}
 {{- if eq (include "cube.proxyEnabled" .) "true" }}
   kubectl get deploy -n {{ .Release.Namespace }} {{ include "cube.proxyName" . }}
 {{- end }}
-  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node-bootstrap -c pvm-host-bootstrap --tail=100
+{{- if .Values.bootstrap.pvmHostKernel.enabled }}
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node-pvm -c pvm-host-bootstrap --tail=100
+{{- end }}
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node-bootstrap -c wait-pvm-host --tail=100
   kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node-bootstrap -c cube-node-init --tail=100
   kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node -c wait-node-prep --tail=100
   kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node -c cubelet --tail=100
@@ -79,6 +85,6 @@ Useful commands:
   sh /tmp/cube-diag-k8s.sh {{ .Release.Namespace }} {{ .Release.Name }}
 {{- end }}
 
-WARNING: If bootstrap.pvmHostKernel.enabled=true, this release may install a host kernel and reboot selected compute nodes (via cube-node-bootstrap).
+WARNING: If bootstrap.pvmHostKernel.enabled=true, this release may install a host kernel and reboot nodes labeled allow-pvm-bootstrap (via cube-node-pvm).
 Helm rollback does not roll back host kernel/GRUB changes.
 Bump images.waitNodePrep image-only for InPlace; changing wait env/mounts forces Big Pod recreate.
