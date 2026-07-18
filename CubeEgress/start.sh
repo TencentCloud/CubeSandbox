@@ -7,6 +7,7 @@
 #   3. Assert placeholder cert/key exist (host pre-generates them)
 #   4. Assert audit log dir is writable as the cube-proxy worker uid
 #   5. nginx -t (config validity)
+#   5b. Optional: write cube-egress/version.json for inventory (best-effort)
 #   6. exec openresty as PID 1
 
 set -euo pipefail
@@ -169,6 +170,58 @@ fi
 configure_listen_ip
 log "Running nginx -t"
 "${NGINX_BIN}" -t
+
+# -------- 5b. Version marker for inventory (optional) --------
+# Write TOOLBOX/cube-egress/version.json when toolbox is mounted and writable.
+# Skip when toolbox is absent (e.g. one-click without that mount).
+json_string_field() {
+    sed -n "s/.*\"${1}\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "${2}" | head -n1
+}
+
+publish_version_json() {
+    local src="${CUBE_EGRESS_VERSION_JSON:-/etc/cube/version.json}"
+    local dst="${CUBE_EGRESS_VERSION_PATH:-/usr/local/services/cubetoolbox/cube-egress/version.json}"
+    local dst_dir toolbox_root ver commit built tmp
+
+    dst_dir="$(dirname "${dst}")"
+    toolbox_root="$(dirname "${dst_dir}")"
+    if [[ ! -d "${dst_dir}" ]]; then
+        if [[ -d "${toolbox_root}" && -w "${toolbox_root}" ]]; then
+            mkdir -p "${dst_dir}" || {
+                log "version.json skipped: cannot mkdir ${dst_dir}"
+                return 0
+            }
+        else
+            log "version.json skipped: ${dst_dir} not present"
+            return 0
+        fi
+    fi
+    [[ -w "${dst_dir}" ]] || {
+        log "version.json skipped: ${dst_dir} not writable"
+        return 0
+    }
+    [[ -f "${src}" ]] || {
+        log "version.json skipped: missing ${src}"
+        return 0
+    }
+
+    ver="$(json_string_field version "${src}")"
+    commit="$(json_string_field commit "${src}")"
+    built="$(json_string_field build_time "${src}")"
+    [[ -n "${ver}" ]] || {
+        log "version.json skipped: empty version in ${src}"
+        return 0
+    }
+    case "${ver}${commit}${built}" in
+        *\"*|*$'\n'*|*\\*) log "version.json skipped: unsafe token in ${src}"; return 0 ;;
+    esac
+
+    tmp="${dst}.tmp.$$"
+    printf '%s\n' "{\"schema_version\":1,\"components\":{\"cube-egress\":{\"version\":\"${ver}\",\"commit\":\"${commit}\",\"build_time\":\"${built}\"}}}" > "${tmp}"
+    mv -f "${tmp}" "${dst}"
+    log "wrote ${dst} (version=${ver})"
+}
+publish_version_json
 
 # -------- 6. exec openresty (becomes PID 1) --------
 log "Starting openresty (PID 1)"

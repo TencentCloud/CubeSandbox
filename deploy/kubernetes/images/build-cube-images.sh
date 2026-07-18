@@ -647,9 +647,9 @@ build_cube_egress_image() {
   local docker_args=(
     -f "${REPO_ROOT}/CubeEgress/Dockerfile"
     -t "${image}"
-    --build-arg "CUBE_EGRESS_VERSION=${VERSION}"
-    --build-arg "CUBE_EGRESS_COMMIT=$(git -C "${REPO_ROOT}" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
-    --build-arg "CUBE_EGRESS_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    --build-arg "CUBE_VERSION=${IMAGE_TAG}"
+    --build-arg "CUBE_COMMIT=$(git -C "${REPO_ROOT}" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+    --build-arg "CUBE_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   )
   if [[ "${NO_CACHE}" == "1" ]]; then
     # Do not add --pull here: CubeEgress/Dockerfile uses a fixed FROM name.
@@ -714,7 +714,10 @@ build_component_image() {
   mkdir -p "${ctx}/package"
   cp -a "${PACKAGE_DIR}/${pkg_dir}" "${ctx}/package/${pkg_basename}"
   overlay_local_bins_for_component "${name}" "${ctx}" "${pkg_basename}"
-  build_image "${name}" "${ctx}"
+  build_image "${name}" "${ctx}" \
+    --build-arg "CUBE_VERSION=${IMAGE_TAG}" \
+    --build-arg "CUBE_KERNEL_BM_VERSION=${CUBE_KERNEL_BM_VERSION:-}" \
+    --build-arg "CUBE_KERNEL_PVM_VERSION=${CUBE_KERNEL_PVM_VERSION:-}"
   record_built "${name}"
 }
 

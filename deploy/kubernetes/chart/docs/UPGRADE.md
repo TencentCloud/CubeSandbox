@@ -24,10 +24,11 @@ helm install kruise openkruise/kruise --version 1.9.0 \
    - **`*-node-installer`**：shim / kernel / guest 安装；可 RollingUpdate、可增容器。
    - **`*-node-bootstrap`**：`wait-pvm-host` / node-init / 写 `node-prep-ready`；低频 RollingUpdate。
    - **`*-node-pvm`**（可选）：PVM host kernel；仅 `placement.pvm`；升 PVM 只 bump 本 DS。
-3. Bootstrap 写 `node-prep-ready`；PVM 写指纹 `pvm-host-ready`；Installer / self-stage 写组件 `.staged-*`；cubelet 等 artifact 与 network-agent sentinel。
+3. Bootstrap 写「节点可启动」；有 PVM label 的节点写「宿主机 PVM 就绪」。Installer / Big Pod 把组件换到 toolbox：替换过程中版本矩阵可能短暂显示未完成（正常）；成功后组件就绪，矩阵恢复完整。
 4. **NodeID** = `spec.nodeName`；**Endpoint** = Big Pod `status.podIP`。
 5. `preStop` 只杀本容器 pidfile，禁止宽 `pkill -f`。
 6. 日常分工：**升控面 → 只 bump Big Pod 镜像**；**升产物 → 只动 Installer**；**升 node-init → 只动 Bootstrap**；**升 PVM → 只动 cube-node-pvm**。
+7. 升 kernel **不会**因为 Chart 默认值把已在跑 PVM 的节点悄悄切成 bm；要关某节点 PVM，去掉其 `allow-pvm-bootstrap` label。
 
 ## 按组件升级示例
 

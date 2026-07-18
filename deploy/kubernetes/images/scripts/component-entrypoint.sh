@@ -72,36 +72,95 @@ wait_sentinel() {
   fail "timeout waiting for sentinel ${name} at ${path}"
 }
 
-# Atomic directory replace: any concurrent reader sees either the full old
-# tree or the full new tree (no rm -rf gap). Requires src/dst on same FS.
+# Promote a staged tree into place without rm -rf of the live directory.
+# Rename-aside then rename-in leaves a brief ENOENT window; we keep a
+# ".staging-<component>" marker for the whole window so the collector marks
+# inventory_incomplete (and Master will not hard-delete). Requires src/dst on
+# the same filesystem.
 atomic_replace_dir() {
   local src="$1"
   local dst="$2"
-  local parent new
+  local parent new legacy recovered=""
   parent="$(dirname "${dst}")"
   mkdir -p "${parent}"
+
+  # Crash recovery first: dst missing after rename-aside — restore newest legacy.
+  if [[ ! -e "${dst}" ]]; then
+    recovered="$(ls -1dt "${dst}.legacy."* 2>/dev/null | head -n1 || true)"
+    if [[ -n "${recovered}" && -d "${recovered}" ]]; then
+      log "recovering ${dst} from ${recovered}"
+      mv "${recovered}" "${dst}" || fail "cannot restore ${dst} from ${recovered}"
+    fi
+  fi
+
+  # Drop remaining orphans from prior crashed stages (same component is not concurrent).
+  rm -rf "${dst}.new."* "${dst}.legacy."* 2>/dev/null || true
+
   new="${dst}.new.$$"
-  rm -rf "${new}"
+  legacy="${dst}.legacy.$$"
+  rm -rf "${new}" "${legacy}"
   cp -a "${src}" "${new}"
-  # Promote staged tree into place. Prefer mv -T (GNU); fall back to rm+mv.
-  if mv -T "${new}" "${dst}" 2>/dev/null; then
+  if [[ ! -e "${dst}" ]]; then
+    mv "${new}" "${dst}"
     return 0
   fi
-  rm -rf "${dst}"
-  mv "${new}" "${dst}"
+  if mv -T "${dst}" "${legacy}" 2>/dev/null || mv "${dst}" "${legacy}"; then
+    if mv -T "${new}" "${dst}" 2>/dev/null || mv "${new}" "${dst}"; then
+      rm -rf "${legacy}"
+      return 0
+    fi
+    mv -T "${legacy}" "${dst}" 2>/dev/null || mv "${legacy}" "${dst}" || true
+    rm -rf "${new}"
+    fail "failed to promote staged tree into ${dst}"
+  fi
+  fail "cannot replace ${dst} (rename-aside failed)"
+}
+
+# Return vmlinux-bm|vmlinux-pvm from a symlink path, or empty.
+kernel_symlink_target() {
+  local link="$1"
+  local base
+  [[ -L "${link}" ]] || return 0
+  base="$(basename "$(readlink "${link}")")"
+  case "${base}" in
+    vmlinux-bm|vmlinux-pvm) printf '%s\n' "${base}" ;;
+  esac
+}
+
+# Capture active guest-kernel selection before a whole-tree replace.
+preserve_guest_kernel_selection() {
+  local dir="$1"
+  local state_dir="${STATE_DIR:-/var/lib/cube-node-bootstrap}"
+  local t=""
+  t="$(kernel_symlink_target "${state_dir}/vmlinux-active")"
+  if [[ -z "${t}" ]]; then
+    t="$(kernel_symlink_target "${dir}/vmlinux")"
+  fi
+  printf '%s\n' "${t}"
 }
 
 stage_component() {
   local rel="$1"
   local src="${IMAGE_ROOT}/${rel}"
   local dst="${TOOLBOX_ROOT}/${rel}"
-  local sentinel
+  local sentinel staging_marker preserved_kernel=""
   sentinel="$(component_sentinel "${CUBE_COMPONENT}")"
+  staging_marker="${TOOLBOX_ROOT}/.staging-${CUBE_COMPONENT}"
 
   [[ -d "${src}" ]] || fail "image bypass missing: ${src}"
   mkdir -p "${TOOLBOX_ROOT}"
-  # Clear previous sentinel so peers re-wait during refresh.
+  # Mark in-flight before clearing the ready sentinel so collectors see incomplete
+  # during the rename-aside ENOENT window. Cleared only on success — keep marker
+  # on failure/crash so Incomplete is not a false negative.
+  printf 'staging\n' > "${staging_marker}.tmp"
+  mv -f "${staging_marker}.tmp" "${staging_marker}"
   rm -f "${sentinel}"
+
+  if [[ "${CUBE_COMPONENT}" == "cube-kernel" ]]; then
+    preserved_kernel="$(preserve_guest_kernel_selection "${dst}")"
+    [[ -n "${preserved_kernel}" ]] && log "preserved guest kernel selection: ${preserved_kernel}"
+  fi
+
   log "staging ${src} -> ${dst} (atomic replace)"
   atomic_replace_dir "${src}" "${dst}"
 
@@ -124,14 +183,17 @@ stage_component() {
       ln -sf "${dst}/bin/cube-runtime" /usr/local/bin/cube-runtime
       ;;
     cube-kernel)
-      # Prefer existing vmlinux symlink selection by cubelet run; ensure files exist.
       [[ -e "${dst}/vmlinux-bm" || -e "${dst}/vmlinux-pvm" || -e "${dst}/vmlinux" ]] \
         || fail "missing guest kernel files under ${dst}"
+      apply_effective_pvm_from_state
+      select_guest_kernel "${preserved_kernel}"
       ;;
     cube-guest)
       [[ -d "${dst}" ]] || fail "missing guest image dir ${dst}"
       ;;
   esac
+
+  ensure_component_version_json "${CUBE_COMPONENT}" "${dst}"
 
   # Digest: informational change marker (completeness is write-order: cp then sentinel).
   {
@@ -140,7 +202,51 @@ stage_component() {
     find "${dst}" -type f -printf '%P %s %T@\n' 2>/dev/null | sort | head -n 50 || true
   } > "${sentinel}.tmp"
   mv -f "${sentinel}.tmp" "${sentinel}"
+  rm -f "${staging_marker}"
   log "wrote sentinel ${sentinel}"
+}
+
+# Best-effort: if the image did not bake version.json, synthesize from guest markers.
+json_escape() {
+  # Minimal JSON string escape for version tokens (no control chars expected).
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# Atomic tmp+mv write; body is read from stdin.
+write_atomic() {
+  local dest="$1"
+  local tmp="${dest}.tmp.$$"
+  cat > "${tmp}"
+  mv -f "${tmp}" "${dest}"
+}
+
+ensure_component_version_json() {
+  local component="$1"
+  local dst="$2"
+  local json="${dst}/version.json"
+  [[ -f "${json}" ]] && return 0
+  case "${component}" in
+    cube-guest)
+      local img_ver agent_ver
+      img_ver="$(tr -d '[:space:]' < "${dst}/version" 2>/dev/null || true)"
+      agent_ver="$(tr -d '[:space:]' < "${dst}/agent-version" 2>/dev/null || true)"
+      [[ -n "${img_ver}" || -n "${agent_ver}" ]] || return 0
+      {
+        printf '{\n  "schema_version": 1,\n  "components": {\n'
+        local first=1
+        if [[ -n "${img_ver}" ]]; then
+          printf '    "guest-image": {"version": "%s"}' "$(json_escape "${img_ver}")"
+          first=0
+        fi
+        if [[ -n "${agent_ver}" ]]; then
+          [[ "${first}" -eq 1 ]] || printf ',\n'
+          printf '    "cube-agent": {"version": "%s"}' "$(json_escape "${agent_ver}")"
+        fi
+        printf '\n  }\n}\n'
+      } | write_atomic "${json}"
+      log "synthesized ${json}"
+      ;;
+  esac
 }
 
 run_install() {
@@ -165,17 +271,44 @@ detect_primary_interface() {
     }'
 }
 
+# select_guest_kernel [preserved_target]
+# preserved_target is vmlinux-bm|vmlinux-pvm captured before whole-tree replace.
 select_guest_kernel() {
+  local preserved="${1:-}"
   local dir="${TOOLBOX_ROOT}/cube-kernel-scf"
-  local target="vmlinux-bm"
-  case "${CUBE_PVM_ENABLE:-1}" in
-    1|true|TRUE|yes|YES) target="vmlinux-pvm" ;;
-    0|false|FALSE|no|NO) target="vmlinux-bm" ;;
-    *) fail "unsupported CUBE_PVM_ENABLE=${CUBE_PVM_ENABLE}" ;;
-  esac
+  local target=""
+  local state_dir="${STATE_DIR:-/var/lib/cube-node-bootstrap}"
+  # 1) bootstrap effective-pvm wins
+  if [[ -f "${state_dir}/effective-pvm" ]]; then
+    case "$(tr -d '[:space:]' < "${state_dir}/effective-pvm" 2>/dev/null || true)" in
+      1) target="vmlinux-pvm" ;;
+      0) target="vmlinux-bm" ;;
+    esac
+  fi
+  # 2) else restore pre-replace / on-disk selection (node history; beats Chart env)
+  if [[ -z "${target}" ]]; then
+    case "${preserved}" in
+      vmlinux-bm|vmlinux-pvm) target="${preserved}" ;;
+    esac
+  fi
+  # 3) else honor CUBE_PVM_ENABLE when explicitly set (first install / Chart intent)
+  if [[ -z "${target}" && -n "${CUBE_PVM_ENABLE+x}" ]]; then
+    case "${CUBE_PVM_ENABLE}" in
+      1|true|TRUE|yes|YES) target="vmlinux-pvm" ;;
+      0|false|FALSE|no|NO) target="vmlinux-bm" ;;
+    esac
+  fi
+  # 4) else keep post-replace artifact symlink if already valid
+  if [[ -z "${target}" ]]; then
+    target="$(kernel_symlink_target "${dir}/vmlinux")"
+  fi
+  # 5) first-install default
+  [[ -n "${target}" ]] || target="vmlinux-bm"
   [[ -f "${dir}/${target}" ]] || fail "missing guest kernel: ${dir}/${target}"
   ln -sfn "${target}" "${dir}/vmlinux"
-  log "selected guest kernel: ${dir}/vmlinux -> ${target}"
+  mkdir -p "${state_dir}"
+  ln -sfn "${dir}/${target}" "${state_dir}/vmlinux-active"
+  log "selected guest kernel: ${dir}/vmlinux -> ${target} (vmlinux-active updated)"
 }
 
 patch_common_yaml_list() {
@@ -338,7 +471,7 @@ run_cubelet() {
   [[ -n "${CUBE_SANDBOX_ENDPOINT_IP:-}" ]] || fail "CUBE_SANDBOX_ENDPOINT_IP is required"
 
   apply_effective_pvm_from_state
-  select_guest_kernel
+  select_guest_kernel "$(preserve_guest_kernel_selection "${TOOLBOX_ROOT}/cube-kernel-scf")"
 
   local ep_esc
   ep_esc="$(sed_escape_replacement "${CUBE_MASTER_ENDPOINT}")"

@@ -451,6 +451,8 @@ Installer: toolbox only (no dataplane mounts).
 {{- define "cube.installerVolumeMounts" -}}
 - name: toolbox
   mountPath: /usr/local/services/cubetoolbox
+- name: bootstrap-state
+  mountPath: {{ .Values.hostPaths.bootstrapState }}
 {{- end -}}
 
 {{- define "cube.installerComponentEnv" -}}
@@ -459,6 +461,10 @@ Installer: toolbox only (no dataplane mounts).
   value: /usr/local/services/cubetoolbox
 - name: IMAGE_ROOT
   value: /opt/cube-image
+- name: STATE_DIR
+  value: {{ .Values.hostPaths.bootstrapState | quote }}
+- name: CUBE_PVM_ENABLE
+  value: {{ ternary "1" "0" .Values.cubeNode.pvmGuestKernel.enabled | quote }}
 {{- end -}}
 
 {{/*

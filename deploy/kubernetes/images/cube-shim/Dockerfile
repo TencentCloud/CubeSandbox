@@ -15,7 +15,10 @@ RUN apt-get update \
 COPY package/cube-shim ${IMAGE_ROOT}/cube-shim
 COPY scripts/component-entrypoint.sh /usr/local/bin/component-entrypoint.sh
 
-RUN chmod +x \
+ARG CUBE_VERSION=unknown
+RUN printf '{"schema_version":1,"components":{"containerd-shim-cube-rs":{"version":"%s"},"cube-runtime":{"version":"%s"}}}\n' \
+      "${CUBE_VERSION}" "${CUBE_VERSION}" > ${IMAGE_ROOT}/cube-shim/version.json \
+    && chmod +x \
       ${IMAGE_ROOT}/cube-shim/bin/cube-runtime \
       ${IMAGE_ROOT}/cube-shim/bin/containerd-shim-cube-rs \
       /usr/local/bin/component-entrypoint.sh

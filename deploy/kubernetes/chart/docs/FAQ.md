@@ -270,6 +270,28 @@ kubectl -n cube-system logs <cube-node-pod> -c cube-node --tail=200 | grep -i re
 
 利用 `Pause` 可以把非活跃 sandbox 归零(CPU/RSS→0),盘不释放。运营层面通常在闲置 N 分钟后 Pause,更长后 Destroy。
 
+### D6. 怎么关某台节点的 PVM？只改 Chart 行吗？
+
+**关单节点 guest PVM：去掉该节点的 PVM label。**
+
+```bash
+kubectl label node <node> cube.tencent.com/allow-pvm-bootstrap-
+```
+
+之后 bootstrap 会把该节点记成「用 bm guest」。下一次 kernel 安装/选核会切到 bm。
+
+**不要指望**只把 `cubeNode.pvmGuestKernel.enabled=false` 就关掉已经在跑 PVM 的节点——那个开关主要管**首次安装默认**；节点若已有历史选择，升级会尽量保持原样，避免被 Chart 默认值悄悄改掉。
+
+整集群都不做 PVM 宿主机换核：部署时不要打 `allow-pvm-bootstrap`，并可设 `bootstrap.pvmHostKernel.enabled=false`（见 [QUICKSTART](QUICKSTART.md) 单节点试用说明）。
+
+自检当前 guest：
+
+```bash
+readlink /usr/local/services/cubetoolbox/cube-kernel-scf/vmlinux
+# 或
+readlink /var/lib/cube-node-bootstrap/vmlinux-active
+```
+
 ---
 
 ## E. CubeProxy / TLS / DNS

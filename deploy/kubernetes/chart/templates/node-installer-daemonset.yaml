@@ -101,4 +101,8 @@ spec:
           hostPath:
             path: {{ .Values.hostPaths.toolbox }}
             type: DirectoryOrCreate
+        - name: bootstrap-state
+          hostPath:
+            path: {{ .Values.hostPaths.bootstrapState }}
+            type: DirectoryOrCreate
 {{- end }}

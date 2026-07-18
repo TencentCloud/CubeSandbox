@@ -124,13 +124,13 @@ flowchart TB
 #### Installer：`cube-node-installer`
 
 - 容器：`cube-shim-install` / `cube-kernel-install` / `cube-guest-install`。
-- 从镜像 `/opt/cube-image` **原子 stage** 到 toolbox；`hostPID: false`，仅挂 toolbox 相关路径。
+- 把镜像里的 shim / kernel / guest **整目录换到** 宿主机 toolbox；换目录期间版本矩阵会短暂标「未完成」，成功后恢复正常。
 - 可独立 RollingUpdate；日常升产物 **只 bump Installer 镜像**。
 
 #### Bootstrap：`cube-node-bootstrap`
 
 - init：`wait-pvm-host` → `cube-node-init`；主容器写 `node-prep-ready`。
-- `wait-pvm-host`：按节点 label 决定是否等待 PVM；写 `effective-pvm`（`0`/`1`）。PVM 节点必须等到 **指纹匹配** 的 `pvm-host-ready`（禁止「文件存在即 ready」）。
+- `wait-pvm-host`：看节点有没有 `allow-pvm-bootstrap`——有则等 PVM 宿主机就绪并记「本节点用 PVM guest」；没有则记「本节点用 bm guest」。
 - 哨兵目录：`/var/lib/cube-node-bootstrap`（与 Big Pod 的 `wait-node-prep` / PVM DS 共享）。
 - `hostPID: true`（`nsenter --target 1`）；低频变更；升 node-init **只 bump Bootstrap / nodeInit 镜像**。
 
@@ -138,22 +138,25 @@ flowchart TB
 
 - 仅当 `bootstrap.pvmHostKernel.enabled=true` 时创建；仅调度到 `placement.pvm`。
 - init：`pvm-host-bootstrap`；成功（live 内核已满足 pattern+boot args）后写带指纹的 `pvm-host-ready`；主容器 hold。
-- 换核 / 改 boot args 前 `invalidate_pvm_gate_sentinels`：删除 `node-prep-ready`、`pvm-host-ready`、`effective-pvm`，再 reboot。
+- 换核 / 改 boot args 前会清掉就绪标记再 reboot，避免用旧状态误放行。
 - 升 PVM 镜像 **只 bump `images.pvmHostBootstrap`**，不 recreate Big Pod。
 
 为何拆成四个：Big Pod 保持 InPlace 友好；产物安装与可 reboot 的 PVM 引导分离；非 PVM compute 节点不拉 PVM 大镜像。
 
-### 2.3.1 Reboot 与 ready 哨兵
+### 2.3.1 节点上你会看到的标记（重启后）
 
-| 标记 | 跨 reboot 残留？ | 误放行？ |
-| --- | --- | --- |
-| `pvm-host-ready`（指纹含 live `uname` + boot_args） | 会 | **不会**：wait 比对 live 指纹；mutate 前主动删除 |
-| `effective-pvm` | 会 | wait-pvm-host **每次**重写；mutate 前删除 |
-| `node-prep-ready`（指纹含 `uname`） | 会 | **不会**；换核后期望指纹变 |
-| `/run/wait-node-prep.ready` | 否（tmpfs） | 安全 |
-| `.staged-*` | 会 | 有意：产物仍在盘上 |
+| 标记 | 含义（给运维看） |
+| --- | --- |
+| `pvm-host-ready` | 宿主机 PVM 内核已按预期装好；内容带指纹，换核后必须对上当前 `uname` 才算就绪 |
+| `effective-pvm` | 本节点 guest 该用 PVM（`1`）还是 bm（`0`）；有 `allow-pvm-bootstrap` 且 host 就绪 → `1`，否则 → `0` |
+| `node-prep-ready` | bootstrap 预检通过，Big Pod 可以启动 |
+| `/run/wait-node-prep.ready` | 本轮 Pod 内临时标记，重启即没 |
+| toolbox 下「组件已就绪」标记 | 该组件 stage 成功，产物可被版本矩阵采集 |
+| toolbox 下「组件正在替换」标记 | 正在换目录；矩阵会标未完成，避免报残缺版本；成功后清除，失败会留下直到下次成功 |
 
-验收：PVM 换核期间 Big Pod NotReady；故意残留错误内核的 `pvm-host-ready` 时 `wait-pvm-host` 不得放行；普通掉电且内核未变时可快速恢复。
+Guest 选核最终结果：先看 `effective-pvm`；没有则尽量保持节点上一次已在用的内核；再没有才用 Chart 首次安装默认（`cubeNode.pvmGuestKernel.enabled`）。
+
+验收：PVM 换核期间 Big Pod NotReady；故意残留错误内核的 `pvm-host-ready` 时不得放行；普通掉电且内核未变时可快速恢复。
 
 ### 2.4 数据面入口
 
@@ -267,7 +270,7 @@ sequenceDiagram
   Wait->>Wait: poll fingerprint → Ready hold
   Note over Wait,CN: Kruise barrier → prio 0
   Wait-->>CN: wait Ready
-  CN->>CN: self-stage + effective-pvm guest kernel
+  CN->>CN: self-stage；按节点 PVM 决定选 guest 内核
   CN->>CM: register + heartbeat
 ```
 
@@ -372,7 +375,7 @@ externalControlPlane:
 | `cubeProxy.domain` | `cube.app` | sandbox 域名 |
 | `cubeProxy.configureClusterDNS` | `true` | 是否写入集群 CoreDNS |
 | `cubeNode.dns.sandbox.followNodeDns` | `true` | guest 跟随节点 DNS |
-| `cubeNode.pvmGuestKernel.enabled` | `true` | PVM guest kernel；与 `kvm_pvm` 一致性由 node-init 校验 |
+| `cubeNode.pvmGuestKernel.enabled` | `true` | 首次安装默认是否倾向 PVM guest；**不能**单独用来关掉已在跑 PVM 的节点（应去掉 `allow-pvm-bootstrap`） |
 | `bootstrap.pvmHostKernel.enabled` | `true` | host kernel bootstrap（可能重启节点） |
 | `bootstrap.pvmHostKernel.bootArgs` | `nopti pti=off` | 当前 `kvm_pvm` 不支持 host KPTI |
 | `bootstrap.nodeInit.*` | 多项 | 预检、XFS、KVM、CIDR |

@@ -27,7 +27,10 @@ RUN apt-get update \
 COPY package/Cubelet ${IMAGE_ROOT}/Cubelet
 COPY scripts/component-entrypoint.sh /usr/local/bin/component-entrypoint.sh
 
-RUN chmod +x \
+ARG CUBE_VERSION=unknown
+RUN printf '{"schema_version":1,"components":{"cubelet":{"version":"%s"},"cubecli":{"version":"%s"}}}\n' \
+      "${CUBE_VERSION}" "${CUBE_VERSION}" > ${IMAGE_ROOT}/Cubelet/version.json \
+    && chmod +x \
       ${IMAGE_ROOT}/Cubelet/bin/cubelet \
       ${IMAGE_ROOT}/Cubelet/bin/cubecli \
       /usr/local/bin/component-entrypoint.sh \

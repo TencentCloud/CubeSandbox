@@ -156,21 +156,20 @@ can set it to `false`.
 `cube-node` mirrors the one-click runtime layout:
 
 - runtime tools are available through `/usr/local/bin/containerd-shim-cube-rs`, `/usr/local/bin/cube-runtime`, `/usr/local/bin/cubecli`, and `/usr/local/bin/cubevsmapdump`;
-- `cubeNode.pvmGuestKernel.enabled` defaults to `true` and controls the one-click `CUBE_PVM_ENABLE` behavior, selecting `cube-kernel-scf/vmlinux -> vmlinux-pvm` or `vmlinux-bm`;
 - `cubeNode.network.autoDetectEthName=true` auto-detects the primary host NIC and patches Cubelet `eth_name`;
 - `cubeNode.network.cidr` can patch Cubelet cubevs CIDR when the packaged default conflicts with the host network.
 
-`bootstrap.pvmHostKernel.enabled` also defaults to `true`, so the PVM host
-kernel bootstrap on **`cube-node-pvm`** (only nodes with `allow-pvm-bootstrap`)
-can install/configure the host kernel and perform the configured coordinated
-reboot. Per-node `effective-pvm` (written by bootstrap `wait-pvm-host`) overrides
-Helm `CUBE_PVM_ENABLE` for guest kernel selection and fingerprinting. The default
-`bootstrap.pvmHostKernel.bootArgs` is `nopti pti=off` because the current
-`kvm_pvm` module does not support host KPTI. `cube-node-init` performs the same
-fail-fast style checks as one-click for memory, glibc, cgroup v2 cpu
-controller, cubecow dependencies, KVM, XFS, and PVM consistency. It fails when
-a host has `kvm_pvm` loaded but effective PVM is off, or when effective PVM is
-on but the host has not booted a PVM kernel with `kvm_pvm` loaded.
+### Guest kernel (bm vs PVM)
+
+What actually decides the guest kernel on a node:
+
+1. **Node decision** — bootstrap writes `effective-pvm` (`1` = PVM guest, `0` = bm). Nodes with `cube.tencent.com/allow-pvm-bootstrap=true` get `1` after the PVM host is ready; others get `0`.
+2. **Keep what the node already runs** — if there is no `effective-pvm` yet, an upgrade keeps the previous guest kernel (so Chart defaults cannot silently flip a PVM node to bm).
+3. **Chart default for first install** — `cubeNode.pvmGuestKernel.enabled` (default `true`) only matters when the node has no prior choice; it is the first-install intent, not a force switch.
+
+To **turn off PVM on one node**: remove the `allow-pvm-bootstrap` label. Bootstrap then writes `effective-pvm=0` and the guest kernel switches to bm. Setting `pvmGuestKernel.enabled=false` alone does **not** override a node that already runs PVM.
+
+`bootstrap.pvmHostKernel.enabled` (default `true`) installs/configures the **host** PVM kernel on labeled nodes (`cube-node-pvm`) and may reboot. Boot args default to `nopti pti=off` (`kvm_pvm` does not support host KPTI). `cube-node-init` fail-fast checks match one-click (memory, glibc, cgroup v2 cpu, cubecow, KVM, XFS, PVM consistency): it fails if `kvm_pvm` is loaded but PVM is off for that node, or if PVM is on but the host has not booted a PVM kernel.
 
 ## Build and push images
 

@@ -22,7 +22,10 @@ RUN apt-get update \
 COPY package/network-agent ${IMAGE_ROOT}/network-agent
 COPY scripts/component-entrypoint.sh /usr/local/bin/component-entrypoint.sh
 
-RUN chmod +x \
+ARG CUBE_VERSION=unknown
+RUN printf '{"schema_version":1,"components":{"network-agent":{"version":"%s"}}}\n' \
+      "${CUBE_VERSION}" > ${IMAGE_ROOT}/network-agent/version.json \
+    && chmod +x \
       ${IMAGE_ROOT}/network-agent/bin/network-agent \
       ${IMAGE_ROOT}/network-agent/bin/cubevsmapdump \
       /usr/local/bin/component-entrypoint.sh \

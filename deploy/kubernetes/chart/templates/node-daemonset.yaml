@@ -196,12 +196,6 @@ spec:
         - name: cube-egress
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubeEgress "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.cubeEgress.pullPolicy }}
-          command:
-            - /bin/bash
-            - -ec
-            - |
-              mkdir -p /data/log/cube-egress
-              exec /usr/local/openresty/nginx/sbin/start.sh
           securityContext:
             privileged: {{ .Values.security.privileged }}
             capabilities:
@@ -263,7 +257,6 @@ spec:
               mountPath: /var/run/openresty
             - name: toolbox
               mountPath: /usr/local/services/cubetoolbox
-              readOnly: true
           {{- with .Values.cubeEgress.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -322,7 +315,6 @@ spec:
               readOnly: true
             - name: toolbox
               mountPath: /usr/local/services/cubetoolbox
-              readOnly: true
           {{- with .Values.cubeEgress.netResources }}
           resources:
             {{- toYaml . | nindent 12 }}
