@@ -340,7 +340,7 @@ func (h *AgentHubHandler) ListInstances(c *gin.Context) {
 // See R10.
 func (h *AgentHubHandler) compensateDeleteSandbox(ctx context.Context, sandboxID, reason string) {
 	if _, err := h.cm.DeleteSandbox(ctx, map[string]interface{}{
-		"request_id":    fmt.Sprintf("cubeops-compensate-%s-%d", reason, time.Now().UnixNano()),
+		"requestID":     fmt.Sprintf("cubeops-compensate-%s-%d", reason, time.Now().UnixNano()),
 		"sandbox_id":    sandboxID,
 		"instance_type": sdkInstanceType,
 	}); err != nil {
@@ -376,7 +376,7 @@ func (h *AgentHubHandler) DeleteInstance(c *gin.Context) {
 	// delete host-side state or DB records — that would leave a running
 	// sandbox with no UI visibility (resource leak + data loss).
 	if _, err := h.cm.DeleteSandbox(c.Request.Context(), map[string]interface{}{
-		"request_id":    fmt.Sprintf("cubeops-del-%d", time.Now().UnixNano()),
+		"requestID":     fmt.Sprintf("cubeops-del-%d", time.Now().UnixNano()),
 		"sandbox_id":    inst.SandboxID,
 		"instance_type": sdkInstanceType,
 	}); err != nil {
@@ -576,7 +576,14 @@ func (h *AgentHubHandler) UpdateModel(c *gin.Context) {
 		httputil.WriteError(c, http.StatusInternalServerError, "failed to update model: "+err.Error())
 		return
 	}
-	httputil.WriteNoContent(c)
+	// return the updated instance (frontend declares AgentInstanceDto,
+	// not void). Returning 204 caused TypeError when frontend read agent.id.
+	updated, err := h.store.GetInstance(c.Request.Context(), agentID)
+	if err != nil || updated == nil {
+		httputil.WriteJSON(c, http.StatusOK, map[string]string{"model": body.Model})
+		return
+	}
+	httputil.WriteJSON(c, http.StatusOK, updated)
 }
 
 // GetWecomConfig handles GET /agenthub/instances/{agentID}/wecom.
@@ -672,7 +679,14 @@ func (h *AgentHubHandler) UpdateWecomConfig(c *gin.Context) {
 		httputil.WriteError(c, http.StatusInternalServerError, "failed to update wecom config: "+err.Error())
 		return
 	}
-	httputil.WriteNoContent(c)
+	// return the updated instance (frontend declares AgentInstanceDto,
+	// not void). Returning 204 caused TypeError when frontend read agent.id.
+	updated, err := h.store.GetInstance(c.Request.Context(), agentID)
+	if err != nil || updated == nil {
+		httputil.WriteJSON(c, http.StatusOK, map[string]string{"botId": body.BotID})
+		return
+	}
+	httputil.WriteJSON(c, http.StatusOK, updated)
 }
 
 // GetSettings handles GET /agenthub/settings.
@@ -1411,18 +1425,25 @@ func (h *AgentHubHandler) CreateSnapshot(c *gin.Context) {
 		}
 
 		err = h.store.DB().WithContext(c.Request.Context()).Exec(
-			`INSERT INTO t_agenthub_snapshot (
-				snapshot_id, agent_id, sandbox_id, name, status, snapshot_kind, origin_sandbox_id,
-				rootfs_source_type, rootfs_source_id, rootfs_snapshot_id, openclaw_state_snapshot_path, deleted_at
-			) VALUES (?, ?, ?, ?, 'ready', 'agenthub_state', ?, ?, ?, ?, ?, NULL)
-			ON DUPLICATE KEY UPDATE
-				agent_id = VALUES(agent_id), sandbox_id = VALUES(sandbox_id),
+			store.UpsertSnapshotSQL(
+				`snapshot_id, agent_id, sandbox_id, name, status, snapshot_kind, origin_sandbox_id,
+				rootfs_source_type, rootfs_source_id, rootfs_snapshot_id, openclaw_state_snapshot_path`,
+				`?, ?, ?, ?, 'ready', 'agenthub_state', ?, ?, ?, ?, ?`,
+				`agent_id = EXCLUDED.agent_id, sandbox_id = EXCLUDED.sandbox_id,
+				name = EXCLUDED.name, status = EXCLUDED.status, snapshot_kind = EXCLUDED.snapshot_kind,
+				origin_sandbox_id = EXCLUDED.origin_sandbox_id,
+				rootfs_source_type = EXCLUDED.rootfs_source_type,
+				rootfs_source_id = EXCLUDED.rootfs_source_id,
+				rootfs_snapshot_id = EXCLUDED.rootfs_snapshot_id,
+				openclaw_state_snapshot_path = EXCLUDED.openclaw_state_snapshot_path`,
+				`agent_id = VALUES(agent_id), sandbox_id = VALUES(sandbox_id),
 				name = VALUES(name), status = VALUES(status), snapshot_kind = VALUES(snapshot_kind),
 				origin_sandbox_id = VALUES(origin_sandbox_id),
 				rootfs_source_type = VALUES(rootfs_source_type),
 				rootfs_source_id = VALUES(rootfs_source_id),
 				rootfs_snapshot_id = VALUES(rootfs_snapshot_id),
-				openclaw_state_snapshot_path = VALUES(openclaw_state_snapshot_path), deleted_at = NULL`,
+				openclaw_state_snapshot_path = VALUES(openclaw_state_snapshot_path)`,
+			),
 			snapshotID, agentID, inst.SandboxID, displayName, inst.SandboxID,
 			rootfsSourceType, rootfsSnapshotID, rootfsSnapshotID, snapPath,
 		).Error
@@ -1444,9 +1465,9 @@ func (h *AgentHubHandler) CreateSnapshot(c *gin.Context) {
 	// Matches old Rust create_agent_snapshot full_snapshot branch.
 	requestID := fmt.Sprintf("req-%d", time.Now().UnixNano())
 	snapResp, err := h.cm.CreateSnapshot(c.Request.Context(), map[string]interface{}{
-		"request_id":     requestID,
-		"sandbox_id":     inst.SandboxID,
-		"display_name":   displayName,
+		"requestID":     requestID,
+		"sandbox_id":    inst.SandboxID,
+		"display_name":  displayName,
 		"create_request": map[string]interface{}{},
 	})
 	if err != nil {
@@ -1473,15 +1494,21 @@ func (h *AgentHubHandler) CreateSnapshot(c *gin.Context) {
 
 	snapshotID := snapResult.Snapshot.SnapshotID
 
-	// Insert snapshot record (matching old Rust upsert_snapshot_info)
+	// Insert snapshot record (matching old Rust upsert_snapshot_info).
+	// use snapshot_kind="sandbox_snapshot"  so the
+	// delete path's switch case can match it and call CubeMaster
+	// DeleteSnapshot to free LVM/storage. The old "sandbox" value was never
+	// handled by the delete switch, causing physical storage leaks.
 	err = h.store.DB().WithContext(c.Request.Context()).Exec(
-		`INSERT INTO t_agenthub_snapshot (
-			snapshot_id, agent_id, sandbox_id, name, status, snapshot_kind, origin_sandbox_id,
-			rootfs_source_type, rootfs_source_id, rootfs_snapshot_id, deleted_at
-		) VALUES (?, ?, ?, ?, 'ready', 'sandbox', ?, 'snapshot', ?, ?, NULL)
-		ON DUPLICATE KEY UPDATE
-			agent_id = VALUES(agent_id), sandbox_id = VALUES(sandbox_id),
-			status = VALUES(status), deleted_at = NULL`,
+		store.UpsertSnapshotSQL(
+			`snapshot_id, agent_id, sandbox_id, name, status, snapshot_kind, origin_sandbox_id,
+			rootfs_source_type, rootfs_source_id, rootfs_snapshot_id`,
+			`?, ?, ?, ?, 'ready', 'sandbox_snapshot', ?, 'snapshot', ?, ?`,
+			`agent_id = EXCLUDED.agent_id, sandbox_id = EXCLUDED.sandbox_id,
+			status = EXCLUDED.status`,
+			`agent_id = VALUES(agent_id), sandbox_id = VALUES(sandbox_id),
+			status = VALUES(status)`,
+		),
 		snapshotID, agentID, inst.SandboxID, req.Name,
 		inst.SandboxID, snapshotID, snapshotID,
 	).Error
@@ -1590,7 +1617,7 @@ func (h *AgentHubHandler) RollbackAgent(c *gin.Context) {
 		// full_snapshot / sandbox snapshot: delegate to CubeMaster.
 		// R08 fix: include request_id (required by CubeMaster snapshot rollback).
 		_, err = h.cm.RollbackSandbox(c.Request.Context(), inst.SandboxID, map[string]interface{}{
-			"request_id":    fmt.Sprintf("cubeops-rollback-%d", time.Now().UnixNano()),
+			"requestID":     fmt.Sprintf("cubeops-rollback-%d", time.Now().UnixNano()),
 			"snapshot_id":   req.SnapshotID,
 			"sandbox_id":    inst.SandboxID,
 			"instance_type": sdkInstanceType,
@@ -1691,7 +1718,7 @@ func (h *AgentHubHandler) RecoverAgent(c *gin.Context) {
 	} else {
 		// R08 fix: include request_id (required by CubeMaster snapshot rollback).
 		_, err = h.cm.RollbackSandbox(ctx, inst.SandboxID, map[string]interface{}{
-			"request_id":    fmt.Sprintf("cubeops-recover-%d", time.Now().UnixNano()),
+			"requestID":     fmt.Sprintf("cubeops-recover-%d", time.Now().UnixNano()),
 			"snapshot_id":   snapshotID,
 			"sandbox_id":    inst.SandboxID,
 			"instance_type": sdkInstanceType,
@@ -1955,7 +1982,7 @@ func (h *AgentHubHandler) CloneAgent(c *gin.Context) {
 				"agentID", agentID, "sandboxID", sbResult.SandboxID, "err", applyErr)
 			// Best-effort kill the clone sandbox since OpenClaw didn't start.
 			if _, derr := h.cm.DeleteSandbox(c.Request.Context(), map[string]interface{}{
-				"RequestID":     fmt.Sprintf("req-%d", time.Now().UnixNano()),
+				"requestID":     fmt.Sprintf("cubeops-clone-%d", time.Now().UnixNano()),
 				"sandbox_id":    sbResult.SandboxID,
 				"instance_type": "cubebox",
 			}); derr != nil {
@@ -2024,6 +2051,14 @@ func (h *AgentHubHandler) CloneAgent(c *gin.Context) {
 	}
 
 	if err := h.store.UpsertInstance(c.Request.Context(), clone); err != nil {
+		//sandbox was created and OpenClaw applied, but the DB record
+		// failed. Compensate by deleting the sandbox to avoid a running sandbox
+		// with no DB record (invisible to the UI), matching CreateInstance's
+		// compensation path. Also clean up the clone's host state dir.
+		h.compensateDeleteSandbox(c.Request.Context(), sbResult.SandboxID, "clone_upsert")
+		if cloneOpenclawStatePath != "" {
+			_ = os.RemoveAll(cloneOpenclawStatePath)
+		}
 		httputil.WriteError(c, http.StatusInternalServerError, "failed to create clone record: "+err.Error())
 		return
 	}
@@ -2107,18 +2142,25 @@ func (h *AgentHubHandler) PublishTemplate(c *gin.Context) {
 			// Record the agenthub_state snapshot in t_agenthub_snapshot.
 			// Matches old Rust upsert_agenthub_openclaw_snapshot.
 			_ = h.store.DB().WithContext(ctx).Exec(
-				`INSERT INTO t_agenthub_snapshot (
-				  snapshot_id, agent_id, sandbox_id, name, status, snapshot_kind, origin_sandbox_id,
-				  rootfs_source_type, rootfs_source_id, rootfs_snapshot_id, openclaw_state_snapshot_path, deleted_at
-				) VALUES (?, ?, ?, ?, 'ready', 'agenthub_state', ?, ?, ?, ?, ?, NULL)
-				ON DUPLICATE KEY UPDATE
-				  agent_id = VALUES(agent_id), sandbox_id = VALUES(sandbox_id),
+				store.UpsertSnapshotSQL(
+					`snapshot_id, agent_id, sandbox_id, name, status, snapshot_kind, origin_sandbox_id,
+				  rootfs_source_type, rootfs_source_id, rootfs_snapshot_id, openclaw_state_snapshot_path`,
+					`?, ?, ?, ?, 'ready', 'agenthub_state', ?, ?, ?, ?, ?`,
+					`agent_id = EXCLUDED.agent_id, sandbox_id = EXCLUDED.sandbox_id,
+				  name = EXCLUDED.name, status = EXCLUDED.status, snapshot_kind = EXCLUDED.snapshot_kind,
+				  origin_sandbox_id = EXCLUDED.origin_sandbox_id,
+				  rootfs_source_type = EXCLUDED.rootfs_source_type,
+				  rootfs_source_id = EXCLUDED.rootfs_source_id,
+				  rootfs_snapshot_id = EXCLUDED.rootfs_snapshot_id,
+				  openclaw_state_snapshot_path = EXCLUDED.openclaw_state_snapshot_path`,
+					`agent_id = VALUES(agent_id), sandbox_id = VALUES(sandbox_id),
 				  name = VALUES(name), status = VALUES(status), snapshot_kind = VALUES(snapshot_kind),
 				  origin_sandbox_id = VALUES(origin_sandbox_id),
 				  rootfs_source_type = VALUES(rootfs_source_type),
 				  rootfs_source_id = VALUES(rootfs_source_id),
 				  rootfs_snapshot_id = VALUES(rootfs_snapshot_id),
-				  openclaw_state_snapshot_path = VALUES(openclaw_state_snapshot_path), deleted_at = NULL`,
+				  openclaw_state_snapshot_path = VALUES(openclaw_state_snapshot_path)`,
+				),
 				snapshotID, agentID, inst.SandboxID, snapName, inst.SandboxID,
 				rootfsSourceType, rootfsSnapshotID, rootfsSnapshotID, snapPath,
 			).Error
@@ -2126,7 +2168,7 @@ func (h *AgentHubHandler) PublishTemplate(c *gin.Context) {
 			// Full-snapshot mode: create a CubeMaster snapshot of the entire sandbox.
 			// R08 fix: include request_id (required by CubeMaster snapshot create).
 			snapResp, err := h.cm.CreateSnapshot(ctx, map[string]interface{}{
-				"request_id":    fmt.Sprintf("cubeops-publish-%d", time.Now().UnixNano()),
+				"requestID":     fmt.Sprintf("cubeops-publish-%d", time.Now().UnixNano()),
 				"sandbox_id":    inst.SandboxID,
 				"instance_type": "cubebox",
 			})
@@ -2146,18 +2188,26 @@ func (h *AgentHubHandler) PublishTemplate(c *gin.Context) {
 			}
 
 			// Record snapshot info in t_agenthub_snapshot.
+			//  use snapshot_kind="sandbox_snapshot" for consistency with
+			// CreateSnapshot so the delete path can match and free storage.
 			_ = h.store.DB().WithContext(ctx).Exec(
-				`INSERT INTO t_agenthub_snapshot (
-				  snapshot_id, agent_id, sandbox_id, name, status, snapshot_kind, origin_sandbox_id,
-				  rootfs_source_type, rootfs_source_id, rootfs_snapshot_id, deleted_at
-				) VALUES (?, ?, ?, ?, 'ready', 'sandbox', ?, 'snapshot', ?, ?, NULL)
-				ON DUPLICATE KEY UPDATE
-				  agent_id = VALUES(agent_id), sandbox_id = VALUES(sandbox_id),
+				store.UpsertSnapshotSQL(
+					`snapshot_id, agent_id, sandbox_id, name, status, snapshot_kind, origin_sandbox_id,
+				  rootfs_source_type, rootfs_source_id, rootfs_snapshot_id`,
+					`?, ?, ?, ?, 'ready', 'sandbox_snapshot', ?, 'snapshot', ?, ?`,
+					`agent_id = EXCLUDED.agent_id, sandbox_id = EXCLUDED.sandbox_id,
+				  status = EXCLUDED.status, snapshot_kind = EXCLUDED.snapshot_kind,
+				  origin_sandbox_id = EXCLUDED.origin_sandbox_id,
+				  rootfs_source_type = EXCLUDED.rootfs_source_type,
+				  rootfs_source_id = EXCLUDED.rootfs_source_id,
+				  rootfs_snapshot_id = EXCLUDED.rootfs_snapshot_id`,
+					`agent_id = VALUES(agent_id), sandbox_id = VALUES(sandbox_id),
 				  status = VALUES(status), snapshot_kind = VALUES(snapshot_kind),
 				  origin_sandbox_id = VALUES(origin_sandbox_id),
 				  rootfs_source_type = VALUES(rootfs_source_type),
 				  rootfs_source_id = VALUES(rootfs_source_id),
-				  rootfs_snapshot_id = VALUES(rootfs_snapshot_id), deleted_at = NULL`,
+				  rootfs_snapshot_id = VALUES(rootfs_snapshot_id)`,
+				),
 				snapshotID, agentID, inst.SandboxID, snapName, inst.SandboxID,
 				snapshotID, snapshotID,
 			).Error
@@ -2188,15 +2238,7 @@ func (h *AgentHubHandler) PublishTemplate(c *gin.Context) {
 		// INSERT into t_agenthub_template with all required fields
 		// (matches old Rust publish_template).
 		if err := tx.Exec(
-			`INSERT INTO t_agenthub_template (
-			  template_id, name, source_agent_id, source_snapshot_id, source_sandbox_id,
-			  model, version, persistence_mode, recommended, deleted_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
-			ON DUPLICATE KEY UPDATE
-			  name = VALUES(name), source_agent_id = VALUES(source_agent_id),
-			  source_snapshot_id = VALUES(source_snapshot_id), source_sandbox_id = VALUES(source_sandbox_id),
-			  model = VALUES(model), version = VALUES(version),
-			  persistence_mode = VALUES(persistence_mode), deleted_at = NULL`,
+			store.UpsertTemplateSQL(),
 			templateID, templateName, agentID, snapshotID, inst.SandboxID,
 			inst.Model, inst.Version, persistenceModePtr,
 		).Error; err != nil {

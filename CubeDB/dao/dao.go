@@ -183,6 +183,18 @@ func Close() error {
 	return err
 }
 
+// DriverName returns the name of the currently opened driver (e.g. "mysql"
+// or "postgres"). It returns "" if Open has not been called. Business code
+// uses this to select dialect-specific SQL fragments. 
+func DriverName() string {
+	globalMu.RLock()
+	defer globalMu.RUnlock()
+	if global == nil {
+		return ""
+	}
+	return global.driver.Name()
+}
+
 // HealthCheck pings the database with a short timeout. It is used by the
 // startup sequence in main.go to fail-fast if the DB is unreachable.
 func HealthCheck(ctx context.Context, timeout time.Duration) error {

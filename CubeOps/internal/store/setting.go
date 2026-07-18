@@ -26,10 +26,11 @@ func (s *Store) GetSystemSetting(ctx context.Context, key string) (string, error
 }
 
 // GetOrCreateSystemSetting atomically gets an existing system setting or
-// creates it with the given value. Uses INSERT IGNORE for concurrency safety.
+// creates it with the given value. Uses INSERT IGNORE / ON CONFLICT DO
+// NOTHING for concurrency safety .
 func (s *Store) GetOrCreateSystemSetting(ctx context.Context, key, value string) (string, error) {
 	if err := s.db.WithContext(ctx).Exec(
-		"INSERT IGNORE INTO t_system_setting (setting_key, setting_value) VALUES (?, ?)",
+		insertIgnorePrefix()+" INTO t_system_setting (setting_key, setting_value) VALUES (?, ?)"+onConflictDoNothing(),
 		key, value,
 	).Error; err != nil {
 		return "", err
@@ -40,8 +41,7 @@ func (s *Store) GetOrCreateSystemSetting(ctx context.Context, key, value string)
 // SetSystemSetting upserts a system-level setting value.
 func (s *Store) SetSystemSetting(ctx context.Context, key, value string) error {
 	return s.db.WithContext(ctx).Exec(
-		"INSERT INTO t_system_setting (setting_key, setting_value) VALUES (?, ?) "+
-			"ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)",
+		upsertSettingSQL("t_system_setting"),
 		key, value,
 	).Error
 }
@@ -61,11 +61,11 @@ func (s *Store) GetSetting(ctx context.Context, key string) (string, error) {
 }
 
 // GetOrCreateSetting atomically gets an existing setting or creates it with the given value.
-// Uses INSERT IGNORE semantics for concurrency safety.
+// Uses INSERT IGNORE / ON CONFLICT DO NOTHING semantics .
 func (s *Store) GetOrCreateSetting(ctx context.Context, key, value string) (string, error) {
 	// Try INSERT IGNORE first (concurrent-safe).
 	if err := s.db.WithContext(ctx).Exec(
-		"INSERT IGNORE INTO t_agenthub_setting (setting_key, setting_value) VALUES (?, ?)",
+		insertIgnorePrefix()+" INTO t_agenthub_setting (setting_key, setting_value) VALUES (?, ?)"+onConflictDoNothing(),
 		key, value,
 	).Error; err != nil {
 		return "", err
@@ -77,8 +77,7 @@ func (s *Store) GetOrCreateSetting(ctx context.Context, key, value string) (stri
 // SetSetting upserts a setting value.
 func (s *Store) SetSetting(ctx context.Context, key, value string) error {
 	return s.db.WithContext(ctx).Exec(
-		"INSERT INTO t_agenthub_setting (setting_key, setting_value) VALUES (?, ?) "+
-			"ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)",
+		upsertSettingSQL("t_agenthub_setting"),
 		key, value,
 	).Error
 }

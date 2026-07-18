@@ -10,6 +10,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
 	"github.com/tencentcloud/CubeSandbox/CubeDB/dao/driver/mysql"
+	"github.com/tencentcloud/CubeSandbox/CubeDB/dao/driver/postgres"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/crypto"
 	"gorm.io/gorm"
 )
@@ -21,8 +22,9 @@ type Store struct {
 
 // New opens the database connection, runs migrations, and bootstraps the master key.
 func New(ctx context.Context, cfg dao.Config) (*Store, error) {
-	// Register the MySQL driver (idempotent via init()).
+	// Register the MySQL + PostgreSQL drivers (idempotent via init()).
 	_ = mysql.DriverName
+	_ = postgres.DriverName
 
 	gormDB, err := dao.Open(ctx, cfg)
 	if err != nil {
@@ -148,7 +150,7 @@ func (s *Store) seedDefaultAdmin(ctx context.Context) error {
 		return fmt.Errorf("hash default password: %w", err)
 	}
 	result := s.db.WithContext(ctx).Exec(
-		"INSERT IGNORE INTO t_system_user (username, password) VALUES (?, ?)",
+		insertIgnorePrefix()+" INTO t_system_user (username, password) VALUES (?, ?)"+onConflictDoNothing(),
 		"admin", hash,
 	)
 	if result.Error != nil {

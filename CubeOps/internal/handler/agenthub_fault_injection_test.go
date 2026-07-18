@@ -122,9 +122,9 @@ func TestAgentHub_DeleteInstance_SendsRequestIDAndCubebox(t *testing.T) {
 	}
 
 	// R07 fix: request_id must be present and non-empty.
-	reqID, ok := capturedBody["request_id"].(string)
+	reqID, ok := capturedBody["requestID"].(string)
 	if !ok || reqID == "" {
-		t.Errorf("request_id = %v, want non-empty string", capturedBody["request_id"])
+		t.Errorf("request_id = %v, want non-empty string", capturedBody["requestID"])
 	}
 	// R07 fix: instance_type must be "cubebox", not "openclaw" (inst.Engine).
 	instType, ok := capturedBody["instance_type"].(string)
@@ -275,9 +275,9 @@ func TestAgentHub_Rollback_SendsRequestID(t *testing.T) {
 	}
 
 	// R08 fix: request_id must be present and non-empty.
-	reqID, ok := capturedBody["request_id"].(string)
+	reqID, ok := capturedBody["requestID"].(string)
 	if !ok || reqID == "" {
-		t.Errorf("request_id = %v, want non-empty string; full body = %v", capturedBody["request_id"], capturedBody)
+		t.Errorf("request_id = %v, want non-empty string; full body = %v", capturedBody["requestID"], capturedBody)
 	}
 	// R08 fix: sandbox_id must be present.
 	sbID, ok := capturedBody["sandbox_id"].(string)
@@ -372,7 +372,7 @@ func TestAgentHub_R10_CompensateDeleteOnApplyFailure(t *testing.T) {
 			t.Errorf("compensation DeleteSandbox called with sandbox_id=%q, want %q", sid, createdSandboxID)
 		}
 		// R07/R10: request_id must be present and non-empty.
-		reqID, _ := reqMap["request_id"].(string)
+		reqID, _ := reqMap["requestID"].(string)
 		if reqID == "" {
 			t.Error("compensation DeleteSandbox: request_id is empty, want non-empty")
 		}
@@ -459,9 +459,9 @@ func TestAgentHub_Recover_SendsRequestID(t *testing.T) {
 	w := doRequest(t, env, "POST", "/api/v1/agenthub/instances/agent-rec/recover", "")
 
 	// R08 fix: request_id must be present and non-empty.
-	reqID, ok := capturedBody["request_id"].(string)
+	reqID, ok := capturedBody["requestID"].(string)
 	if !ok || reqID == "" {
-		t.Errorf("request_id = %v, want non-empty string; full body = %v", capturedBody["request_id"], capturedBody)
+		t.Errorf("request_id = %v, want non-empty string; full body = %v", capturedBody["requestID"], capturedBody)
 	}
 	// R08 fix: the request_id must have the "cubeops-recover-" prefix.
 	if reqID != "" && !strings.HasPrefix(reqID, "cubeops-recover-") {
@@ -506,9 +506,9 @@ func TestAgentHub_PublishTemplate_SendsRequestID(t *testing.T) {
 	}
 
 	// R08 fix: request_id must be present and non-empty.
-	reqID, ok := capturedBody["request_id"].(string)
+	reqID, ok := capturedBody["requestID"].(string)
 	if !ok || reqID == "" {
-		t.Errorf("request_id = %v, want non-empty string; full body = %v", capturedBody["request_id"], capturedBody)
+		t.Errorf("request_id = %v, want non-empty string; full body = %v", capturedBody["requestID"], capturedBody)
 	}
 	// R08 fix: the request_id must have the "cubeops-publish-" prefix.
 	if reqID != "" && !strings.HasPrefix(reqID, "cubeops-publish-") {
@@ -523,5 +523,199 @@ func TestAgentHub_PublishTemplate_SendsRequestID(t *testing.T) {
 	instType, ok := capturedBody["instance_type"].(string)
 	if !ok || instType != "cubebox" {
 		t.Errorf("instance_type = %v, want \"cubebox\"", capturedBody["instance_type"])
+	}
+}
+
+// ── S3: CloneAgent apply failure sends correct requestID ──
+
+// TestAgentHub_CloneAgent_ApplyFailureSendsRequestID verifies that when
+// CloneAgent's applyOpenclawRuntime fails, the compensation DeleteSandbox
+// request uses "requestID" (not "RequestID" or "request_id") with the
+// "cubeops-clone-" prefix.
+//
+// The old code at agenthub.go:~1958 used "RequestID" (wrong case). See
+// review S3.
+func TestAgentHub_CloneAgent_ApplyFailureSendsRequestID(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.teardown()
+
+	// Seed a source instance.
+	seedInstance(t, env.store, "agent-clone-src", "CloneSource", "sb-clone-src")
+
+	// Seed LLM API key so resolveLLMConfig passes.
+	if err := env.store.SetSetting(t.Context(), "llm_api_key", "test-key"); err != nil {
+		t.Fatalf("seed llm_api_key: %v", err)
+	}
+
+	// Seed a template so template resolution works.
+	result := env.store.DB().WithContext(t.Context()).Exec(
+		`INSERT INTO t_agenthub_template
+		   (template_id, name, source_agent_id, source_snapshot_id, source_sandbox_id, model, version)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"tpl-clone", "CloneTpl", "agent-clone-src", "snap-clone-1", "sb-clone-src", "deepseek-v4", "1.0.0",
+	)
+	if result.Error != nil {
+		t.Fatalf("seed template: %v", result.Error)
+	}
+
+	// Track CreateSandbox and DeleteSandbox calls.
+	var createdSandboxID string
+	var deleteBody map[string]interface{}
+	var deleteCalled bool
+	env.fakeCM.createSandbox = func(ctx context.Context, body interface{}) (json.RawMessage, error) {
+		createdSandboxID = "sb-clone-created"
+		return raw(`{"ret":{"ret_code":0},"sandbox_id":"` + createdSandboxID + `"}`), nil
+	}
+	env.fakeCM.deleteSandbox = func(ctx context.Context, body interface{}) (json.RawMessage, error) {
+		deleteCalled = true
+		b, _ := json.Marshal(body)
+		_ = json.Unmarshal(b, &deleteBody)
+		return raw(`{"ret": {"ret_code": 0}}`), nil
+	}
+
+	// POST clone — applyOpenclawRuntime will fail because there's no real
+	// envd listening in the test environment, triggering the compensation
+	// path at agenthub.go:~1984.
+	w := doRequest(t, env, "POST", "/api/v1/agenthub/instances/agent-clone-src/clone",
+		`{"name":"CloneTarget"}`)
+
+	// The handler should return an error (apply failed → 502).
+	if w.Code < 400 {
+		t.Errorf("expected error status (apply should fail), got %d; body=%s", w.Code, w.Body.String())
+	}
+
+	// S3 fix: compensation DeleteSandbox must have been called.
+	if !deleteCalled {
+		t.Fatal("expected DeleteSandbox to be called as compensation after clone apply failure, but it was not (S3)")
+	}
+
+	// S3 fix: must use "requestID" (not "request_id" or "RequestID").
+	reqID, ok := deleteBody["requestID"].(string)
+	if !ok || reqID == "" {
+		t.Errorf("requestID = %v, want non-empty string; body = %v", deleteBody["requestID"], deleteBody)
+	}
+	if _, exists := deleteBody["request_id"]; exists {
+		t.Error(`body contains "request_id" — Clone compensation must use "requestID" (S3)`)
+	}
+	if _, exists := deleteBody["RequestID"]; exists {
+		t.Error(`body contains "RequestID" — Clone compensation must use "requestID" (S3)`)
+	}
+
+	// Prefix must be "cubeops-clone-".
+	if reqID != "" && !strings.HasPrefix(reqID, "cubeops-clone-") {
+		t.Errorf("requestID = %q, want prefix \"cubeops-clone-\" (S3)", reqID)
+	}
+
+	// Sandbox ID must match the created sandbox.
+	sbID, _ := deleteBody["sandbox_id"].(string)
+	if sbID != createdSandboxID {
+		t.Errorf("sandbox_id = %q, want %q (S3)", sbID, createdSandboxID)
+	}
+
+	// Instance type must be "cubebox".
+	instType, _ := deleteBody["instance_type"].(string)
+	if instType != "cubebox" {
+		t.Errorf("instance_type = %q, want \"cubebox\" (S3)", instType)
+	}
+
+	// No DB record should exist for the clone (apply failed before upsert).
+	var count int
+	row := env.store.DB().WithContext(t.Context()).Raw(
+		`SELECT COUNT(*) FROM t_agenthub_instance WHERE sandbox_id = ? AND deleted_at IS NULL`,
+		createdSandboxID,
+	).Row()
+	_ = row.Scan(&count)
+	if count > 0 {
+		t.Errorf("expected no DB instance record for sandbox %s, found %d (S3)", createdSandboxID, count)
+	}
+}
+
+// ── S3: CloneAgent UpsertInstance failure compensates ──
+
+// TestAgentHub_CloneAgent_UpsertFailureCompensates verifies that when
+// CloneAgent successfully creates the sandbox but the apply step fails,
+// the compensation DeleteSandbox is called with the correct sandbox_id.
+//
+// The UpsertInstance-failure path (after successful apply) is harder to
+// trigger in Docker tests (requires forcing a DB error after a successful
+// envd apply). That path is covered by the contract test in
+// s3_clone_contract_test.go. This test covers the apply-failure path
+// (more common in production) and verifies the compensation deletes the
+// correct sandbox and leaves no orphan DB record. See review S3.
+func TestAgentHub_CloneAgent_UpsertFailureCompensates(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.teardown()
+
+	// Seed a source instance.
+	seedInstance(t, env.store, "agent-clone-upsert", "CloneUpsertSrc", "sb-clone-upsert")
+
+	// Set persistence_mode to full_snapshot on the source instance
+	// (avoid shared_files host directory creation in the test).
+	result := env.store.DB().WithContext(t.Context()).Exec(
+		`UPDATE t_agenthub_instance SET persistence_mode = 'full_snapshot' WHERE agent_id = 'agent-clone-upsert'`,
+	)
+	if result.Error != nil {
+		t.Fatalf("set persistence_mode: %v", result.Error)
+	}
+
+	// Seed LLM API key.
+	if err := env.store.SetSetting(t.Context(), "llm_api_key", "test-key"); err != nil {
+		t.Fatalf("seed llm_api_key: %v", err)
+	}
+
+	// Seed a template.
+	result = env.store.DB().WithContext(t.Context()).Exec(
+		`INSERT INTO t_agenthub_template
+		   (template_id, name, source_agent_id, source_snapshot_id, source_sandbox_id, model, version)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"tpl-upsert", "UpsertTpl", "agent-clone-upsert", "snap-upsert-1", "sb-clone-upsert", "deepseek-v4", "1.0.0",
+	)
+	if result.Error != nil {
+		t.Fatalf("seed template: %v", result.Error)
+	}
+
+	var createdSandboxID string
+	var deleteBody map[string]interface{}
+	var deleteCalled bool
+	env.fakeCM.createSandbox = func(ctx context.Context, body interface{}) (json.RawMessage, error) {
+		createdSandboxID = "sb-clone-upsert-created"
+		return raw(`{"ret":{"ret_code":0},"sandbox_id":"` + createdSandboxID + `"}`), nil
+	}
+	env.fakeCM.deleteSandbox = func(ctx context.Context, body interface{}) (json.RawMessage, error) {
+		deleteCalled = true
+		b, _ := json.Marshal(body)
+		_ = json.Unmarshal(b, &deleteBody)
+		return raw(`{"ret": {"ret_code": 0}}`), nil
+	}
+
+	// POST clone — apply will fail (no envd), triggering compensation.
+	w := doRequest(t, env, "POST", "/api/v1/agenthub/instances/agent-clone-upsert/clone",
+		`{"name":"CloneUpsertTarget"}`)
+
+	if w.Code < 400 {
+		t.Errorf("expected error status, got %d; body=%s", w.Code, w.Body.String())
+	}
+
+	if !deleteCalled {
+		t.Fatal("expected DeleteSandbox to be called as compensation after clone failure (S3)")
+	}
+
+	reqID, ok := deleteBody["requestID"].(string)
+	if !ok || reqID == "" {
+		t.Errorf("requestID = %v, want non-empty; body = %v", deleteBody["requestID"], deleteBody)
+	}
+	if reqID != "" && !strings.HasPrefix(reqID, "cubeops-clone-") {
+		t.Errorf("requestID = %q, want prefix \"cubeops-clone-\" (S3)", reqID)
+	}
+
+	// No DB record for the clone sandbox.
+	var count int
+	row := env.store.DB().WithContext(t.Context()).Raw(
+		`SELECT COUNT(*) FROM t_agenthub_instance WHERE sandbox_id = ? AND deleted_at IS NULL`,
+		createdSandboxID,
+	).Row()
+	_ = row.Scan(&count)
+	if count > 0 {
+		t.Errorf("expected no DB instance record for sandbox %s, found %d (S3)", createdSandboxID, count)
 	}
 }

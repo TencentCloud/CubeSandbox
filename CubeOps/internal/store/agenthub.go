@@ -124,30 +124,7 @@ func (s *Store) UpsertInstance(ctx context.Context, inst *AgentInstance) error {
 	}
 
 	return s.db.WithContext(ctx).Exec(
-		`INSERT INTO t_agenthub_instance (
-			agent_id, sandbox_id, template_id, name, engine, env, model, version, status,
-			bots, avatar, avatar_tone, domain, gateway_port, env_port, gateway_token,
-			persistence_mode, rootfs_source_type, rootfs_source_id,
-			openclaw_persist_id, openclaw_state_path,
-			wecom_bot_id, wecom_bot_secret,
-			last_error, setup_exit_code, deleted_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-		ON DUPLICATE KEY UPDATE
-			sandbox_id = VALUES(sandbox_id), template_id = VALUES(template_id),
-			name = VALUES(name), engine = VALUES(engine), env = VALUES(env),
-			model = VALUES(model), version = VALUES(version), status = VALUES(status),
-			bots = VALUES(bots), avatar = VALUES(avatar), avatar_tone = VALUES(avatar_tone),
-			domain = VALUES(domain), gateway_token = VALUES(gateway_token),
-			persistence_mode = VALUES(persistence_mode),
-			rootfs_source_type = VALUES(rootfs_source_type),
-			rootfs_source_id = VALUES(rootfs_source_id),
-			openclaw_persist_id = VALUES(openclaw_persist_id),
-			openclaw_state_path = VALUES(openclaw_state_path),
-			wecom_bot_id = VALUES(wecom_bot_id),
-			wecom_bot_secret = VALUES(wecom_bot_secret),
-			last_error = VALUES(last_error),
-			setup_exit_code = VALUES(setup_exit_code),
-			deleted_at = NULL`,
+		upsertInstanceSQL(),
 		inst.ID, inst.SandboxID, inst.TemplateID, inst.Name, inst.Engine, inst.Env,
 		inst.Model, inst.Version, inst.Status,
 		botsJSON, inst.Avatar, inst.AvatarTone, inst.Domain,
@@ -297,8 +274,8 @@ func (s *Store) GetAgentSnapshot(ctx context.Context, agentID, snapshotID string
 		        s.rootfs_snapshot_id, s.openclaw_state_snapshot_path,
 		        s.parent_snapshot_id, s.is_healthy,
 		        t.template_id IS NOT NULL AS template_referenced,
-		        DATE_FORMAT(s.created_at, '%Y-%m-%dT%H:%i:%sZ') AS created_at,
-		        DATE_FORMAT(s.updated_at, '%Y-%m-%dT%H:%i:%sZ') AS updated_at
+		        `+formatTimestamp("s.created_at")+` AS created_at,
+		        `+formatTimestamp("s.updated_at")+` AS updated_at
 		 FROM t_agenthub_snapshot s
 		 LEFT JOIN t_agenthub_template t ON t.source_snapshot_id = s.snapshot_id AND t.deleted_at IS NULL
 		 WHERE s.agent_id = ? AND s.snapshot_id = ? AND s.deleted_at IS NULL
@@ -344,8 +321,8 @@ func (s *Store) ListAgentSnapshots(ctx context.Context, agentID string) ([]Agent
 		        s.rootfs_snapshot_id, s.openclaw_state_snapshot_path,
 		        s.parent_snapshot_id, s.is_healthy,
 		        t.template_id IS NOT NULL AS template_referenced,
-		        DATE_FORMAT(s.created_at, '%Y-%m-%dT%H:%i:%sZ') AS created_at,
-		        DATE_FORMAT(s.updated_at, '%Y-%m-%dT%H:%i:%sZ') AS updated_at
+		        `+formatTimestamp("s.created_at")+` AS created_at,
+		        `+formatTimestamp("s.updated_at")+` AS updated_at
 		 FROM t_agenthub_snapshot s
 		 LEFT JOIN t_agenthub_template t ON t.source_snapshot_id = s.snapshot_id AND t.deleted_at IS NULL
 		 WHERE s.agent_id = ? AND s.deleted_at IS NULL
@@ -422,8 +399,8 @@ type AgentOperation struct {
 func (s *Store) ListAgentOperations(ctx context.Context, agentID string) ([]AgentOperation, error) {
 	rows, err := s.db.WithContext(ctx).Raw(
 		`SELECT operation_id, agent_id, operation_type, status, target_id, error_message,
-		        DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:%sZ') AS created_at,
-		        DATE_FORMAT(updated_at, '%Y-%m-%dT%H:%i:%sZ') AS updated_at
+		        `+formatTimestamp("created_at")+` AS created_at,
+		        `+formatTimestamp("updated_at")+` AS updated_at
 		 FROM t_agenthub_operation
 		 WHERE agent_id = ?
 		 ORDER BY id DESC

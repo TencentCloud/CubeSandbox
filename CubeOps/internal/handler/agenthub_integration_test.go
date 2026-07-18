@@ -204,8 +204,8 @@ func TestAgentHub_UpdateModel_Success(t *testing.T) {
 
 	w := doRequest(t, env, "PUT", "/api/v1/agenthub/instances/agent-model/model",
 		`{"model":"gpt-4"}`)
-	if w.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204; body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
 	// Verify in DB.
 	inst, _ := env.store.GetInstance(t.Context(), "agent-model")
@@ -289,8 +289,8 @@ func TestAgentHub_WecomConfig_RoundTrip(t *testing.T) {
 	// Update wecom config.
 	w = doRequest(t, env, "PUT", "/api/v1/agenthub/instances/agent-wecom/wecom",
 		`{"botId":"bot-123","botSecret":"secret-456"}`)
-	if w.Code != http.StatusNoContent {
-		t.Fatalf("PUT status = %d, want 204; body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
 
 	// Read it back — botId should match, botSecret is encrypted in DB but

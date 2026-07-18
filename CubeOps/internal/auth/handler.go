@@ -30,7 +30,8 @@ func NewHandler(svc *service.AuthService) *Handler {
 // RegisterPublic installs the auth routes that don't require a valid JWT
 // (login + refresh) on the given router group.
 func (h *Handler) RegisterPublic(r *gin.RouterGroup) {
-	r.POST("/auth/login", h.Login)
+	//rate-limit login to protect weak default credentials.
+	r.POST("/auth/login", LoginRateLimit(), h.Login)
 	r.POST("/auth/refresh", h.Refresh)
 }
 
@@ -54,6 +55,8 @@ func (h *Handler) Login(c *gin.Context) {
 		// For security, do not distinguish "user not found" from "wrong password"
 		// to the caller.
 		if errors.Is(err, service.ErrInvalidCredentials) {
+			//record the failure for rate-limiting.
+			markLoginFailure(c)
 			httputil.WriteError(c, http.StatusUnauthorized, "invalid credentials")
 			return
 		}

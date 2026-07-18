@@ -8,8 +8,8 @@ metadata, authentication).
 
 CubeOps is the "ops half" of the CubeAPI/CubeOps split:
 
-- **CubeAPI** (Rust/Axum) — stateless, public-facing, E2B-compatible SDK API
-- **CubeOps** (Go) — stateful, internal-only, admin/ops API
+- **CubeAPI** (Rust/Axum) — stateless, public-facing, E2B-compatible SDK API (no DB)
+- **CubeOps** (Go) — stateful admin/ops API + SDK proxy to CubeMaster. Listens on `:3010`; in All-in-One mode binds `0.0.0.0:3010` so the WebUI nginx container can reach it via `host.docker.internal`. Change the default password in production.
 
 Both services share the same MySQL database. Schema migrations are managed
 by the shared [`CubeDB`](../CubeDB) Go module, which wraps goose with

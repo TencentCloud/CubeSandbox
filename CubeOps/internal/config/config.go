@@ -119,6 +119,10 @@ func Load() (*Config, error) {
 // accepted by Load() and passed the required-field check, but DaoConfig()
 // silently used the (possibly empty) MySQL* fields instead, causing CubeOps
 // to connect with empty user/db or fall back to localhost.
+//
+// S6 fix: the driver is selected from the URL scheme (mysql:// or
+// postgres://), so PostgreSQL deployments work instead of silently falling
+// back to MySQL and failing on dialect-specific SQL.
 func (c *Config) DaoConfig() dao.Config {
 	// Fast path: no DatabaseURL — use the individual fields as before.
 	if c.DatabaseURL == "" {
@@ -133,11 +137,11 @@ func (c *Config) DaoConfig() dao.Config {
 		}
 	}
 
-	// Parse DatabaseURL: mysql://user:pass@host:port/dbname
-	// Individual MySQL* fields are NOT mixed in — DatabaseURL wins entirely.
-	user, pass, host, port, dbname := parseMySQLURL(c.DatabaseURL)
+	// Parse DatabaseURL and select driver from the scheme.
+	// Supported schemes: mysql://, postgres:// (or postgresql://).
+	driver, user, pass, host, port, dbname := parseDatabaseURL(c.DatabaseURL)
 	return dao.Config{
-		Driver:       "mysql",
+		Driver:       driver,
 		User:         user,
 		Pwd:          pass,
 		Addr:         fmt.Sprintf("%s:%d", host, port),
@@ -147,18 +151,33 @@ func (c *Config) DaoConfig() dao.Config {
 	}
 }
 
-// parseMySQLURL extracts (user, password, host, port, dbname) from a
-// mysql:// URL. If parsing fails for any component, the caller's individual
-// fields are NOT consulted — the error surfaces as an empty component that
-// the DB driver will reject with a clear "access denied" or "unknown
-// database" message, which is better than silently connecting to the wrong
-// database.
-func parseMySQLURL(rawURL string) (user, pass, host string, port int, dbname string) {
-	port = 3306 // default
+// parseDatabaseURL extracts (driver, user, password, host, port, dbname) from
+// a database URL. The driver is inferred from the scheme:
+//   - mysql://    → "mysql"
+//   - postgres:// or postgresql:// → "postgres"
+//
+// If parsing fails for any component, the caller's individual fields are NOT
+// consulted — the error surfaces as an empty component that the DB driver
+// will reject with a clear "access denied" or "unknown database" message,
+// which is better than silently connecting to the wrong database.
+func parseDatabaseURL(rawURL string) (driver, user, pass, host string, port int, dbname string) {
+	port = 3306 // default (MySQL)
 
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return
+	}
+
+	// Select driver from scheme.
+	scheme := strings.ToLower(u.Scheme)
+	switch scheme {
+	case "postgres", "postgresql":
+		driver = "postgres"
+		port = 5432 // default PG port if not specified
+	case "mysql", "":
+		driver = "mysql"
+	default:
+		driver = scheme // let resolveDriver reject unknown schemes
 	}
 
 	// url.Parse puts user:pass into User, host:port into Host.
