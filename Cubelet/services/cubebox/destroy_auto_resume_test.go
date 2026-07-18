@@ -17,6 +17,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/semaphore"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
@@ -366,6 +367,40 @@ func TestDestroyReturnsLongRetryWhenResponseReserveIsExhausted(t *testing.T) {
 		rsp.Ret.RetMsg)
 	assert.Zero(t, flow.destroyCalls)
 	assert.Nil(t, sb.UserMarkDeletedTime)
+}
+
+func TestDestroyPausedSandboxSucceedsWhenCapacityWouldRejectResume(t *testing.T) {
+	sb := sandboxWithResourceForTest("paused-delete-overcommit", cubeboxstore.Status{
+		PausedAt: time.Now().Add(-time.Minute).UnixNano(),
+	}, "4000m", "8Gi", 4, 0, 0)
+	task := &fakeDestroyTask{}
+	container := &fakeDestroyContainer{task: task}
+	sb.FirstContainer().Container = container
+	s, manager, flow := newDestroyAutoResumeServiceForTest(sb)
+
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	hostConf := config.GetHostConf()
+	hostConf.Quota.PausedResourceReleaseRatio = 1.0
+	hostConf.Quota.Cpu = 4000
+	hostConf.Quota.Mem = "4Gi"
+	defer func() {
+		hostConf.Quota.PausedResourceReleaseRatio = 0
+		hostConf.Quota.Cpu = 0
+		hostConf.Quota.Mem = ""
+	}()
+
+	rsp := destroySandboxForTest(t, s, sb.ID)
+
+	assert.Equal(t, errorcode.ErrorCode_Success, rsp.Ret.RetCode,
+		"delete must succeed even when the node cannot admit a normal resume")
+	assert.Equal(t, 1, task.resumeCalls)
+	assert.Equal(t, 1, flow.destroyCalls)
+	require.NotNil(t, sb.UserMarkDeletedTime)
+	assert.Equal(t, "delete-request", sb.DeleteRequestID)
+	assert.Equal(t, int64(0), sb.GetStatus().Get().PausedAt)
+	assert.NotZero(t, sb.GetStatus().Get().StartedAt)
+	assert.Len(t, manager.syncIDs, 2)
 }
 
 func TestDestroyDebugCleanupPreservesDeleteMarker(t *testing.T) {

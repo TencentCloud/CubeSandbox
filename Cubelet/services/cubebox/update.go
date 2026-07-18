@@ -254,6 +254,7 @@ type resumeOptions struct {
 	taskDeadline      time.Time
 	reconcileDeadline time.Time
 	persist           bool
+	skipAdmission     bool // true only for delete-triggered auto-resume; overcommit is bounded by destroy deadline
 }
 
 type resumeResult struct {
@@ -273,8 +274,10 @@ func (s *service) resumeLocked(ctx context.Context, sb *cubeboxstore.CubeBox, op
 	preflightCtx, preflightCancel := context.WithDeadline(ctx, opts.taskDeadline)
 	defer preflightCancel()
 
-	if rejected := s.admitResume(preflightCtx, sb); rejected != nil {
-		return resumeResult{ret: rejected}
+	if !opts.skipAdmission {
+		if rejected := s.admitResume(preflightCtx, sb); rejected != nil {
+			return resumeResult{ret: rejected}
+		}
 	}
 	if err := preflightCtx.Err(); err != nil {
 		return resumeResult{ret: &errorcode.Ret{

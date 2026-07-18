@@ -14,6 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/resource"
 
+	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 )
 
@@ -236,4 +238,115 @@ func TestResumeQuotaRejectionMessageFormat(t *testing.T) {
 		cpuQuotaMilli: 8000,
 	})
 	assert.Equal(t, "need 2000m + used 7000m > cpu quota 8000m", cpu)
+}
+
+func TestAdmitResumeRejectsWhenResourceMetadataIsMissing(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	hostConf := config.GetHostConf()
+	hostConf.Quota.PausedResourceReleaseRatio = 1.0
+	defer func() { hostConf.Quota.PausedResourceReleaseRatio = 0 }()
+
+	sb := newCubeboxWithStatusForTest("sb-no-resource", cubeboxstore.Status{PausedAt: time.Now().UnixNano()})
+	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}}
+
+	ret := s.admitResume(context.Background(), sb)
+
+	require.NotNil(t, ret)
+	assert.Equal(t, errorcode.ErrorCode_Conflict, ret.RetCode)
+	assert.Contains(t, ret.RetMsg, "missing resource metadata")
+}
+
+func TestAdmitResumeRejectsWhenCapacityExceeded(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	hostConf := config.GetHostConf()
+	hostConf.Quota.PausedResourceReleaseRatio = 1.0
+	hostConf.Quota.Cpu = 4000
+	hostConf.Quota.Mem = "4Gi"
+	defer func() {
+		hostConf.Quota.PausedResourceReleaseRatio = 0
+		hostConf.Quota.Cpu = 0
+		hostConf.Quota.Mem = ""
+	}()
+
+	sb := sandboxWithResourceForTest("sb-overcommit", cubeboxstore.Status{
+		PausedAt: time.Now().UnixNano(),
+	}, "4000m", "8Gi", 4, 0, 0)
+	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}}
+
+	ret := s.admitResume(context.Background(), sb)
+
+	require.NotNil(t, ret, "admitResume must reject when post-resume demand exceeds quota")
+	assert.Equal(t, errorcode.ErrorCode_Conflict, ret.RetCode)
+}
+
+func TestResumeLockedSkipsAdmissionWhenFlagSet(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	hostConf := config.GetHostConf()
+	hostConf.Quota.PausedResourceReleaseRatio = 1.0
+	hostConf.Quota.Cpu = 4000
+	hostConf.Quota.Mem = "4Gi"
+	defer func() {
+		hostConf.Quota.PausedResourceReleaseRatio = 0
+		hostConf.Quota.Cpu = 0
+		hostConf.Quota.Mem = ""
+	}()
+
+	sb := sandboxWithResourceForTest("sb-skip-admit", cubeboxstore.Status{
+		PausedAt: time.Now().UnixNano(),
+	}, "4000m", "8Gi", 4, 0, 0)
+	task := &fakeResumeTask{}
+	sb.FirstContainer().Container = &fakeDestroyContainer{task: task}
+	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}}
+
+	now := time.Now()
+	result := s.resumeLocked(context.Background(), sb, resumeOptions{
+		taskDeadline:      now.Add(5 * time.Second),
+		reconcileDeadline: now.Add(5 * time.Second),
+		persist:           false,
+		skipAdmission:     true,
+	})
+
+	require.True(t, result.running,
+		"resumeLocked with skipAdmission must proceed despite capacity pressure")
+	assert.Equal(t, 1, task.resumeCalls)
+	assert.Equal(t, int64(0), sb.GetStatus().Get().PausedAt)
+	assert.NotZero(t, sb.GetStatus().Get().StartedAt)
+}
+
+func TestResumeLockedRejectsWithoutSkipAdmissionUnderCapacityPressure(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	hostConf := config.GetHostConf()
+	hostConf.Quota.PausedResourceReleaseRatio = 1.0
+	hostConf.Quota.Cpu = 4000
+	hostConf.Quota.Mem = "4Gi"
+	defer func() {
+		hostConf.Quota.PausedResourceReleaseRatio = 0
+		hostConf.Quota.Cpu = 0
+		hostConf.Quota.Mem = ""
+	}()
+
+	sb := sandboxWithResourceForTest("sb-no-skip-admit", cubeboxstore.Status{
+		PausedAt: time.Now().UnixNano(),
+	}, "4000m", "8Gi", 4, 0, 0)
+	task := &fakeResumeTask{}
+	sb.FirstContainer().Container = &fakeDestroyContainer{task: task}
+	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}}
+
+	now := time.Now()
+	result := s.resumeLocked(context.Background(), sb, resumeOptions{
+		taskDeadline:      now.Add(5 * time.Second),
+		reconcileDeadline: now.Add(5 * time.Second),
+		persist:           false,
+		skipAdmission:     false,
+	})
+
+	require.False(t, result.running,
+		"resumeLocked without skipAdmission must reject under capacity pressure")
+	require.NotNil(t, result.ret)
+	assert.Equal(t, errorcode.ErrorCode_Conflict, result.ret.RetCode)
+	assert.Zero(t, task.resumeCalls, "task.Resume must not be called when admission rejects")
 }

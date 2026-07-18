@@ -138,6 +138,7 @@ func (s *service) resumePausedSandboxForDestroy(ctx context.Context, sb *cubebox
 		taskDeadline:      budget.resumeDeadline(now),
 		reconcileDeadline: budget.resumeDeadline(now),
 		persist:           false,
+		skipAdmission:     true, // sandbox will be destroyed immediately after resume
 	})
 	durationMS := time.Since(now).Milliseconds()
 	if result.running {
