@@ -59,7 +59,7 @@ python3 receiver.py \
   --wechat-webhook-url "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_KEY"
 ```
 
-The receiver converts `event_id`, `event`, `sandbox_id`, `timestamp`, and `template_id` into a text message before forwarding.
+The receiver converts `event_id`, `event`, `sandbox_id`, `timestamp`, `template_id`, and host context into a text message before forwarding.
 
 ## Local mock verification
 
@@ -130,8 +130,11 @@ CUBEMASTER_PROXY=http://host.docker.internal:7897 \
   "event": "sandbox.created",
   "timestamp": "2026-07-01T20:00:00Z",
   "sandbox_id": "sandbox-1",
-  "template_id": "template-1"
+  "template_id": "template-1",
+  "host_id": "node-1",
+  "host_ip": "10.0.0.1",
+  "instance_type": "cubebox"
 }
 ```
 
-`template_id` is included when available. Use `event_id` for idempotency. Delivery is at-most-once with limited retries and is not persisted.
+Use `event_id` for idempotency. Delivery is at-most-once with limited retries and is not persisted.
