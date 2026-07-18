@@ -20,6 +20,10 @@ EXAMPLE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 OPENCODE_CONFIG_HOME="${OPENCODE_CONFIG_HOME:-$HOME/.config/opencode}"
 PLUGIN_DIR="$OPENCODE_CONFIG_HOME/plugins"
 PLUGIN_FILE="$PLUGIN_DIR/cubesandbox-sandbox.js"
+# sandbox_exec.py is bundled alongside the plugin so the JS hook can reference
+# it via a sibling path (plugins/sandbox_exec.py) regardless of where the user
+# installed OpenCode's config dir.
+EXECUTOR_FILE="$PLUGIN_DIR/sandbox_exec.py"
 PACKAGE_FILE="$PLUGIN_DIR/package.json"
 CONFIG_FILE="$OPENCODE_CONFIG_HOME/opencode.json"
 SOURCE_ENV="$EXAMPLE_DIR/.env.example"
@@ -116,7 +120,7 @@ PYEOF
 }
 
 if [[ "${1:-}" == "--uninstall" ]]; then
-    rm -f "$PLUGIN_FILE" "$PACKAGE_FILE"
+    rm -f "$PLUGIN_FILE" "$EXECUTOR_FILE" "$PACKAGE_FILE"
     echo "CubeSandbox OpenCode plugin uninstalled from $PLUGIN_DIR."
     echo "(Your opencode.json was left intact — remove the \"cubesandbox\" key manually if desired.)"
     exit 0
@@ -134,6 +138,10 @@ command -v python3 >/dev/null 2>&1 || {
 
 mkdir -p "$PLUGIN_DIR"
 install -m 0644 "$SCRIPT_DIR/cubesandbox-sandbox.js" "$PLUGIN_FILE"
+# Copy the sandbox executor alongside the plugin so the JS hook can import it
+# via a sibling path (plugins/sandbox_exec.py) after install.sh relocates the
+# plugin from examples/opencode-integration/hooks/ to ~/.config/opencode/plugins/.
+install -m 0644 "$EXAMPLE_DIR/sandbox_exec.py" "$EXECUTOR_FILE"
 # OpenCode loads the plugin as an ES module; the host plugin dir must
 # declare "type": "module" so the .js file's `import` statements resolve.
 cat > "$PACKAGE_FILE" <<'JSONEOF'
@@ -149,6 +157,7 @@ write_opencode_config
 
 echo "CubeSandbox OpenCode plugin installed:"
 echo "  plugin file: $PLUGIN_FILE"
+echo "  executor:    $EXECUTOR_FILE"
 echo "  config:      $CONFIG_FILE  (only CUBE_* keys added)"
 echo ""
 echo "Restart OpenCode for the plugin to take effect."
