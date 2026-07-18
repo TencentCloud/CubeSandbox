@@ -17,7 +17,7 @@ import (
 	"github.com/ory/dockertest/v3"
 	"github.com/ory/dockertest/v3/docker"
 	"github.com/pressly/goose/v3/lock"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/dao/migrate"
+	"github.com/tencentcloud/CubeSandbox/CubeDB/migrate"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )

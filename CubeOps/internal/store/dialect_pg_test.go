@@ -84,7 +84,7 @@ func TestS6_Dialect_UpsertSnapshotPostgres(t *testing.T) {
 		"snapshot_id, agent_id, name",
 		"?, ?, ?",
 		"agent_id = EXCLUDED.agent_id", // PG form
-		"agent_id = VALUES(agent_id)",   // MySQL form (should be ignored in PG mode)
+		"agent_id = VALUES(agent_id)",  // MySQL form (should be ignored in PG mode)
 	)
 	if !strings.Contains(sql, "ON CONFLICT (snapshot_id) DO UPDATE") {
 		t.Errorf("PG UpsertSnapshotSQL missing ON CONFLICT: %s", sql)

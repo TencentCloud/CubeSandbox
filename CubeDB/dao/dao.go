@@ -185,7 +185,7 @@ func Close() error {
 
 // DriverName returns the name of the currently opened driver (e.g. "mysql"
 // or "postgres"). It returns "" if Open has not been called. Business code
-// uses this to select dialect-specific SQL fragments. 
+// uses this to select dialect-specific SQL fragments.
 func DriverName() string {
 	globalMu.RLock()
 	defer globalMu.RUnlock()

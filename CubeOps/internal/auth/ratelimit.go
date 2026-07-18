@@ -13,7 +13,7 @@ import (
 
 // loginLimiter is a per-IP sliding-window rate limiter for the login
 // endpoint. It protects the weak default credentials (admin/admin) from
-// brute-force attacks. 
+// brute-force attacks.
 //
 // Limit: maxAttempts failures per window per IP. Successful logins do not
 // count. The limiter is in-process and conservative — it is intentionally
@@ -27,8 +27,8 @@ type loginLimiter struct {
 
 var defaultLoginLimiter = &loginLimiter{
 	failures: make(map[string][]time.Time),
-	limit:    5,                 // 5 failed attempts
-	window:   1 * time.Minute,   // per minute per IP
+	limit:    5,               // 5 failed attempts
+	window:   1 * time.Minute, // per minute per IP
 }
 
 // recordFailure records a failed login attempt for the given IP.

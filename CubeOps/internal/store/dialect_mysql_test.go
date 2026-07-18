@@ -82,7 +82,7 @@ func TestS6_Dialect_UpsertSnapshotMySQL(t *testing.T) {
 		"snapshot_id, agent_id, name",
 		"?, ?, ?",
 		"agent_id = EXCLUDED.agent_id", // PG form (ignored in MySQL mode)
-		"agent_id = VALUES(agent_id)",   // MySQL form
+		"agent_id = VALUES(agent_id)",  // MySQL form
 	)
 	if !strings.Contains(sql, "ON DUPLICATE KEY UPDATE") {
 		t.Errorf("MySQL UpsertSnapshotSQL missing ON DUPLICATE KEY UPDATE: %s", sql)

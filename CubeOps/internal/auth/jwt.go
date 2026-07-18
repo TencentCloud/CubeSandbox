@@ -17,7 +17,7 @@ import (
 // private "typ" claim to enforce access/refresh token-type isolation.
 // Without this, a refresh token (7-day TTL) could be presented to
 // VerifyAccessToken and accepted, turning it into a long-lived access
-// token. 
+// token.
 const (
 	tokenTypeAccess  = "access"
 	tokenTypeRefresh = "refresh"
@@ -109,7 +109,7 @@ func (m *JWTManager) GenerateRefreshToken(username string) (string, string, erro
 
 // VerifyAccessToken parses and validates an access token. It rejects refresh
 // tokens by checking the "typ" claim and the audience, so a long-lived
-// refresh token cannot be used as an access token. 
+// refresh token cannot be used as an access token.
 func (m *JWTManager) VerifyAccessToken(tokenStr string) (*AccessClaims, error) {
 	token, err := jwt.ParseWithClaims(tokenStr, &AccessClaims{}, func(t *jwt.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -134,7 +134,7 @@ func (m *JWTManager) VerifyAccessToken(tokenStr string) (*AccessClaims, error) {
 // service-layer claim DTO. We return *service.RefreshClaims (instead of
 // *RefreshClaims) so the service package can depend on its own types rather
 // than on this package's internals. It rejects access tokens via the "typ"
-// claim and the audience. 
+// claim and the audience.
 func (m *JWTManager) VerifyRefreshToken(tokenStr string) (*service.RefreshClaims, error) {
 	token, err := jwt.ParseWithClaims(tokenStr, &RefreshClaims{}, func(t *jwt.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {

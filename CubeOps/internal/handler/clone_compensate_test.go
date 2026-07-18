@@ -96,9 +96,9 @@ func TestS3_CloneAgent_UpsertFailureCompensates(t *testing.T) {
 
 // TestS3_AllCompensationPathsUseCorrectRequestID verifies that all three
 // compensation paths use "requestID":
-//   1. Create apply failure → compensateDeleteSandbox("apply_openclaw")
-//   2. Create DB failure   → compensateDeleteSandbox("upsert_instance")
-//   3. Clone DB failure    → compensateDeleteSandbox("clone_upsert")
+//  1. Create apply failure → compensateDeleteSandbox("apply_openclaw")
+//  2. Create DB failure   → compensateDeleteSandbox("upsert_instance")
+//  3. Clone DB failure    → compensateDeleteSandbox("clone_upsert")
 func TestS3_AllCompensationPathsUseCorrectRequestID(t *testing.T) {
 	reasons := []string{"apply_openclaw", "upsert_instance", "clone_upsert"}
 

@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
+	_ "github.com/tencentcloud/CubeSandbox/CubeDB/dao/driver/postgres"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/dao"
-	_ "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/dao/driver/postgres"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db"
 )
 

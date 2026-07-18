@@ -30,6 +30,7 @@ require (
 	github.com/rcrowley/go-metrics v0.0.0-20200313005456-10cdbea86bc0
 	github.com/smallnest/weighted v0.0.0-20230419055410-36b780e40a7a
 	github.com/stretchr/testify v1.11.1
+	github.com/tencentcloud/CubeSandbox/CubeDB v0.0.0-00010101000000-000000000000
 	github.com/tencentcloud/CubeSandbox/Cubelet v0.0.0
 	github.com/tencentcloud/CubeSandbox/cubelog v0.1.1-0.20260113105508-a996703fa42f
 	github.com/urfave/cli v1.22.15
@@ -40,7 +41,6 @@ require (
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
-	gorm.io/driver/mysql v1.5.1
 	gorm.io/driver/postgres v1.6.0
 	gorm.io/gorm v1.25.10
 	k8s.io/api v0.34.1
@@ -165,6 +165,7 @@ require (
 	golang.org/x/tools v0.45.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260420184626-e10c466a9529 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
+	gorm.io/driver/mysql v1.5.1 // indirect
 	k8s.io/klog/v2 v2.130.1 // indirect
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
@@ -173,5 +174,7 @@ require (
 )
 
 replace github.com/tencentcloud/CubeSandbox/cubelog => ../cubelog
+
+replace github.com/tencentcloud/CubeSandbox/CubeDB => ../CubeDB
 
 replace github.com/tencentcloud/CubeSandbox/Cubelet => ../Cubelet

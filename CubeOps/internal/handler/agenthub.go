@@ -1465,9 +1465,9 @@ func (h *AgentHubHandler) CreateSnapshot(c *gin.Context) {
 	// Matches old Rust create_agent_snapshot full_snapshot branch.
 	requestID := fmt.Sprintf("req-%d", time.Now().UnixNano())
 	snapResp, err := h.cm.CreateSnapshot(c.Request.Context(), map[string]interface{}{
-		"requestID":     requestID,
-		"sandbox_id":    inst.SandboxID,
-		"display_name":  displayName,
+		"requestID":      requestID,
+		"sandbox_id":     inst.SandboxID,
+		"display_name":   displayName,
 		"create_request": map[string]interface{}{},
 	})
 	if err != nil {
