@@ -70,14 +70,14 @@ cubemastercli tpl watch --job-id <job_id>
 ```bash
 cd examples/codebuddy-integration
 cp .env.example .env
-# 填写 E2B_API_URL、CUBE_TEMPLATE_ID、CODEBUDDY_INTERNET_ENVIRONMENT 以及你的密钥
+# 填写 CUBE_API_URL、CUBE_TEMPLATE_ID、CODEBUDDY_INTERNET_ENVIRONMENT 以及你的密钥
 pip install -r requirements.txt
 ```
 
 | 变量 | 作用位置 | 说明 |
 |---|---|---|
-| `E2B_API_URL` | 本地进程 | CubeAPI 地址（`http://<node>:3000`） |
-| `E2B_API_KEY` | 本地进程 | 本地开发填任意非空字符串 |
+| `CUBE_API_URL` | 本地进程 | CubeAPI 地址（`http://<node>:3000`） |
+| `CUBE_API_KEY` | 本地进程 | 本地开发填任意非空字符串 |
 | `CUBE_TEMPLATE_ID` | `Sandbox.create(template=...)` | 来自第 2 步 |
 | `CODEBUDDY_INTERNET_ENVIRONMENT` | CodeBuddy CLI | `io`（默认，国际版）、`internal`（国内）、`ioa`（腾讯企业版） |
 | `CODEBUDDY_MODEL` | CodeBuddy CLI | 对应 provider 的模型 id |

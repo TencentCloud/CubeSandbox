@@ -77,14 +77,14 @@ Note the `template_id` once the job reaches `READY`.
 ```bash
 cd examples/codebuddy-integration
 cp .env.example .env
-# fill in E2B_API_URL, CUBE_TEMPLATE_ID, CODEBUDDY_INTERNET_ENVIRONMENT, and your key
+# fill in CUBE_API_URL, CUBE_TEMPLATE_ID, CODEBUDDY_INTERNET_ENVIRONMENT, and your key
 pip install -r requirements.txt
 ```
 
 | Variable | Where it flows | Notes |
 |---|---|---|
-| `E2B_API_URL` | Local process | CubeAPI address (`http://<node>:3000`) |
-| `E2B_API_KEY` | Local process | Any non-empty string in local dev |
+| `CUBE_API_URL` | Local process | CubeAPI address (`http://<node>:3000`) |
+| `CUBE_API_KEY` | Local process | Any non-empty string in local dev |
 | `CUBE_TEMPLATE_ID` | `Sandbox.create(template=...)` | From step 2 |
 | `CODEBUDDY_INTERNET_ENVIRONMENT` | CodeBuddy CLI | `io` (default, international), `internal` (China), `ioa` (Tencent enterprise) |
 | `CODEBUDDY_MODEL` | CodeBuddy CLI | Model id for the active provider |

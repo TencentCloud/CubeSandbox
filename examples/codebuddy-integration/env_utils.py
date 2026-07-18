@@ -89,6 +89,23 @@ def required(name: str) -> str:
     return value
 
 
+def cube_required(cube_name: str, legacy_name: str) -> str:
+    """Resolve a CUBE_* config key with an E2B_* legacy fallback.
+
+    ``cube_name`` is the canonical env-var name (``CUBE_API_URL``, ``CUBE_API_KEY``);
+    ``legacy_name`` is the older alias (``E2B_API_URL``, ``E2B_API_KEY``). The
+    function checks the canonical name first and falls back to the legacy name,
+    so existing deployments that only set ``E2B_*`` continue to work without changes.
+    """
+    value = os.environ.get(cube_name) or os.environ.get(legacy_name)
+    if not value:
+        raise SystemExit(
+            f"Missing required environment variable: set either {cube_name} "
+            f"(preferred) or {legacy_name} (legacy alias) in your .env"
+        )
+    return value
+
+
 def optional(name: str, default: str = "") -> str:
     """Return ``os.environ[name]`` if the key exists, else ``default``.
 

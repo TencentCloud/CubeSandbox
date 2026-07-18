@@ -34,6 +34,7 @@ from env_utils import (
     codebuddy_command,
     codebuddy_model,
     codebuddy_workspace,
+    cube_required,
     internet_environment,
     llm_host,
     load_local_dotenv,
@@ -193,8 +194,8 @@ def main() -> int:
     args = parse_args()
 
     template_id = args.template or required("CUBE_TEMPLATE_ID")
-    required("E2B_API_URL")
-    required("E2B_API_KEY")
+    cube_required("CUBE_API_URL", "E2B_API_URL")
+    cube_required("CUBE_API_KEY", "E2B_API_KEY")
 
     provider_name = provider()
     secret = require_provider_key()
