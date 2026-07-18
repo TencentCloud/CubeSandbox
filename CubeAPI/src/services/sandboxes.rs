@@ -12,13 +12,14 @@ use crate::{
         datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeEgressRule,
         CubeEgressRuleAction, CubeEgressRuleInject, CubeEgressRuleMatch, CubeMasterClient,
         CubeMasterError, CubeNetworkConfig, DeleteSandboxRequest, ListSandboxRequest, SandboxInfo,
-        SandboxLogsRequest, SandboxRefreshRequest, SandboxStatus, SandboxTimeoutRequest,
-        SandboxUpdateRequest,
+        SandboxLogsRequest, SandboxMetricItem, SandboxRefreshRequest, SandboxStatus,
+        SandboxTimeoutRequest, SandboxUpdateRequest,
     },
     error::{AppError, AppResult},
     models::{
         EgressRule, LogLevel as ModelLogLevel, NewSandbox, Sandbox, SandboxDetail, SandboxLog,
-        SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxState,
+        SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxMetric, SandboxNetworkConfig,
+        SandboxState,
     },
 };
 
@@ -31,6 +32,8 @@ const RET_CODE_TASK_RESUME_FAILED: i32 = 130589;
 const HOSTDIR_MOUNT_KEY: &str = "host-mount";
 const ENV_VAR_NAME_MAX_LEN: usize = 256;
 const ENV_VAR_VALUE_MAX_LEN: usize = 4096;
+const RET_CODE_MASTER_PARAMS: i32 = 130400;
+const RET_CODE_PRECONDITION_FAILED: i32 = 130568;
 
 /// Environment variable names that may compromise sandbox isolation if injected
 /// at the runtime level (loader overrides, language runtime paths).
@@ -145,6 +148,39 @@ impl SandboxService {
             state: sandbox_state_from_status(d.status),
             volume_mounts: None,
         })
+    }
+
+    /// Fetches one sandbox's metrics through CubeMaster and normalizes the
+    /// internal response into the E2B-compatible API shape.
+    pub async fn get_metrics(
+        &self,
+        sandbox_id: &str,
+        start: Option<i64>,
+        end: Option<i64>,
+    ) -> AppResult<Vec<SandboxMetric>> {
+        if start.is_some_and(|v| v < 0) || end.is_some_and(|v| v < 0) {
+            return Err(AppError::BadRequest(
+                "start/end must be greater than or equal to 0".to_string(),
+            ));
+        }
+        if let (Some(start), Some(end)) = (start, end) {
+            if start > end {
+                return Err(AppError::BadRequest(
+                    "start must be less than or equal to end".to_string(),
+                ));
+            }
+        }
+        let resp = self
+            .cubemaster
+            .get_sandbox_metrics(sandbox_id, &self.instance_type, start, end)
+            .await
+            .map_err(|e| map_metrics_cubemaster_err(e, sandbox_id))?;
+
+        resp.ret
+            .into_result()
+            .map_err(|e| map_metrics_cubemaster_err(e, sandbox_id))?;
+
+        Ok(resp.data.into_iter().map(from_master_metric).collect())
     }
 
     pub async fn create_sandbox(&self, body: NewSandbox) -> AppResult<Sandbox> {
@@ -714,6 +750,43 @@ fn map_update_cubemaster_err(e: CubeMasterError, sandbox_id: &str) -> AppError {
     }
 }
 
+// Metrics has a different public error contract from generic sandbox actions:
+// invalid ranges must remain 400, while "not found" can come back either as
+// CubeMaster NotFound or a Cubelet precondition failure.
+fn map_metrics_cubemaster_err(e: CubeMasterError, sandbox_id: &str) -> AppError {
+    match e {
+        CubeMasterError::Api { ret_code, ret_msg } if ret_code == RET_CODE_MASTER_PARAMS => {
+            AppError::BadRequest(ret_msg)
+        }
+        CubeMasterError::Api { ret_code, .. } if ret_code == RET_CODE_NOT_FOUND => {
+            AppError::NotFound(format!("sandbox {} not found", sandbox_id))
+        }
+        CubeMasterError::Api { ret_code, ret_msg }
+            if ret_code == RET_CODE_PRECONDITION_FAILED
+                && ret_msg.to_ascii_lowercase().contains("not found") =>
+        {
+            AppError::NotFound(format!("sandbox {} not found", sandbox_id))
+        }
+        other => sandbox_not_found_or_internal(other, sandbox_id),
+    }
+}
+
+fn from_master_metric(metric: SandboxMetricItem) -> SandboxMetric {
+    let timestamp =
+        datetime_from_unix_nanos(metric.timestamp_unix_nano).unwrap_or_else(chrono::Utc::now);
+    SandboxMetric {
+        timestamp,
+        timestamp_unix: metric.timestamp_unix_nano / 1_000_000_000,
+        cpu_count: metric.cpu_count,
+        cpu_used_pct: metric.cpu_used_pct,
+        mem_used: metric.mem_used,
+        mem_total: metric.mem_total,
+        mem_cache: metric.mem_cache,
+        disk_used: metric.disk_used,
+        disk_total: metric.disk_total,
+    }
+}
+
 fn ensure_update_result(
     ret_code: i32,
     ret_msg: String,
@@ -947,10 +1020,10 @@ mod tests {
         SandboxNetworkConfig, SandboxState,
     };
     use axum::{
-        extract::State,
+        extract::{Query, State},
         http::{header::RETRY_AFTER, StatusCode},
         response::IntoResponse,
-        routing::{delete, post},
+        routing::{delete, get, post},
         Json, Router,
     };
     use serde_json::Value;
@@ -1465,6 +1538,105 @@ mod tests {
             serde_json::json!("from-create")
         );
         assert!(create_body.get("envVars").is_none());
+    }
+
+    #[tokio::test]
+    async fn get_metrics_returns_e2b_metric_shape_from_cubemaster_snapshot() {
+        #[derive(Clone, Default)]
+        struct Capture {
+            query: Arc<Mutex<Option<HashMap<String, String>>>>,
+        }
+
+        async fn metrics_handler(
+            State(capture): State<Capture>,
+            Query(query): Query<HashMap<String, String>>,
+        ) -> Json<Value> {
+            *capture.query.lock().await = Some(query);
+            Json(serde_json::json!({
+                "requestID": "req-1",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{
+                    "timestamp_unix_nano": 1700000000123456789i64,
+                    "cpu_count": 2,
+                    "cpu_used_pct": 12.5,
+                    "mem_used": 1024,
+                    "mem_total": 4096,
+                    "mem_cache": 512,
+                    "disk_used": 2048,
+                    "disk_total": 8192
+                }]
+            }))
+        }
+
+        async fn spawn_server(app: Router) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("listener should bind");
+            let addr = listener.local_addr().expect("listener addr");
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("server should run");
+            });
+            format!("http://{}", addr)
+        }
+
+        let capture = Capture::default();
+        let cubemaster_url = spawn_server(
+            Router::new()
+                .route("/cube/sandbox/metrics", get(metrics_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+        let service = SandboxService::new(
+            CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
+            "cubebox".to_string(),
+            "cube.app".to_string(),
+        );
+
+        let metrics = service
+            .get_metrics("sb-1", Some(1700000000), Some(1700000001))
+            .await
+            .expect("metrics request should succeed");
+
+        let query = capture
+            .query
+            .lock()
+            .await
+            .clone()
+            .expect("query should be captured");
+        assert_eq!(query.get("sandbox_id").map(String::as_str), Some("sb-1"));
+        assert_eq!(
+            query.get("instance_type").map(String::as_str),
+            Some("cubebox")
+        );
+        assert_eq!(query.get("start").map(String::as_str), Some("1700000000"));
+        assert_eq!(query.get("end").map(String::as_str), Some("1700000001"));
+
+        assert_eq!(metrics.len(), 1);
+        let metric = &metrics[0];
+        assert_eq!(metric.timestamp_unix, 1700000000);
+        assert_eq!(metric.cpu_count, 2);
+        assert_eq!(metric.cpu_used_pct, 12.5);
+        assert_eq!(metric.mem_used, 1024);
+        assert_eq!(metric.mem_total, 4096);
+        assert_eq!(metric.mem_cache, 512);
+        assert_eq!(metric.disk_used, 2048);
+        assert_eq!(metric.disk_total, 8192);
+    }
+
+    #[tokio::test]
+    async fn get_metrics_rejects_invalid_time_range_before_cubemaster() {
+        let service = SandboxService::new(
+            CubeMasterClient::new("http://127.0.0.1:9", reqwest::Client::new()),
+            "cubebox".to_string(),
+            "cube.app".to_string(),
+        );
+
+        let err = service
+            .get_metrics("sb-1", Some(10), Some(9))
+            .await
+            .expect_err("invalid range should fail before network call");
+
+        assert!(matches!(err, AppError::BadRequest(_)));
     }
 
     #[tokio::test]

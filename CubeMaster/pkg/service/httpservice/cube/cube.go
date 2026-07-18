@@ -19,6 +19,7 @@ const (
 	ImageAction                    = "/image"
 	SandboxListAction              = "/sandbox/list"
 	SandboxInfoAction              = "/sandbox/info"
+	SandboxMetricsAction           = "/sandbox/metrics"
 	SandboxExecAction              = "/sandbox/exec"
 	SandboxUpdateAction            = "/sandbox/update"
 	SandboxTimeoutAction           = "/sandbox/timeout"

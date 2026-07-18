@@ -36,6 +36,7 @@ const (
 	CubeboxMgr_ListLocalSnapshots_FullMethodName        = "/cubelet.services.cubebox.v1.CubeboxMgr/ListLocalSnapshots"
 	CubeboxMgr_GetLocalSnapshot_FullMethodName          = "/cubelet.services.cubebox.v1.CubeboxMgr/GetLocalSnapshot"
 	CubeboxMgr_GetStorageMetrics_FullMethodName         = "/cubelet.services.cubebox.v1.CubeboxMgr/GetStorageMetrics"
+	CubeboxMgr_GetSandboxMetrics_FullMethodName         = "/cubelet.services.cubebox.v1.CubeboxMgr/GetSandboxMetrics"
 	CubeboxMgr_InspectStorageVolumes_FullMethodName     = "/cubelet.services.cubebox.v1.CubeboxMgr/InspectStorageVolumes"
 	CubeboxMgr_CleanupOrphanStorageFiles_FullMethodName = "/cubelet.services.cubebox.v1.CubeboxMgr/CleanupOrphanStorageFiles"
 )
@@ -73,6 +74,8 @@ type CubeboxMgrClient interface {
 	GetLocalSnapshot(ctx context.Context, in *GetLocalSnapshotRequest, opts ...grpc.CallOption) (*GetLocalSnapshotResponse, error)
 	// GetStorageMetrics returns node-local cubecow storage metrics.
 	GetStorageMetrics(ctx context.Context, in *GetStorageMetricsRequest, opts ...grpc.CallOption) (*GetStorageMetricsResponse, error)
+	// GetSandboxMetrics returns the current metrics snapshot for one sandbox.
+	GetSandboxMetrics(ctx context.Context, in *GetSandboxMetricsRequest, opts ...grpc.CallOption) (*GetSandboxMetricsResponse, error)
 	// InspectStorageVolumes lists every sandbox storage record cubelet owns and
 	// re-resolves cubecow device paths so cubecli can render an authoritative
 	// view without touching boltdb or the cubecow SDK directly.
@@ -220,6 +223,16 @@ func (c *cubeboxMgrClient) GetStorageMetrics(ctx context.Context, in *GetStorage
 	return out, nil
 }
 
+func (c *cubeboxMgrClient) GetSandboxMetrics(ctx context.Context, in *GetSandboxMetricsRequest, opts ...grpc.CallOption) (*GetSandboxMetricsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetSandboxMetricsResponse)
+	err := c.cc.Invoke(ctx, CubeboxMgr_GetSandboxMetrics_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *cubeboxMgrClient) InspectStorageVolumes(ctx context.Context, in *InspectStorageVolumesRequest, opts ...grpc.CallOption) (*InspectStorageVolumesResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(InspectStorageVolumesResponse)
@@ -273,6 +286,8 @@ type CubeboxMgrServer interface {
 	GetLocalSnapshot(context.Context, *GetLocalSnapshotRequest) (*GetLocalSnapshotResponse, error)
 	// GetStorageMetrics returns node-local cubecow storage metrics.
 	GetStorageMetrics(context.Context, *GetStorageMetricsRequest) (*GetStorageMetricsResponse, error)
+	// GetSandboxMetrics returns the current metrics snapshot for one sandbox.
+	GetSandboxMetrics(context.Context, *GetSandboxMetricsRequest) (*GetSandboxMetricsResponse, error)
 	// InspectStorageVolumes lists every sandbox storage record cubelet owns and
 	// re-resolves cubecow device paths so cubecli can render an authoritative
 	// view without touching boltdb or the cubecow SDK directly.
@@ -328,6 +343,9 @@ func (UnimplementedCubeboxMgrServer) GetLocalSnapshot(context.Context, *GetLocal
 }
 func (UnimplementedCubeboxMgrServer) GetStorageMetrics(context.Context, *GetStorageMetricsRequest) (*GetStorageMetricsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetStorageMetrics not implemented")
+}
+func (UnimplementedCubeboxMgrServer) GetSandboxMetrics(context.Context, *GetSandboxMetricsRequest) (*GetSandboxMetricsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetSandboxMetrics not implemented")
 }
 func (UnimplementedCubeboxMgrServer) InspectStorageVolumes(context.Context, *InspectStorageVolumesRequest) (*InspectStorageVolumesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method InspectStorageVolumes not implemented")
@@ -590,6 +608,24 @@ func _CubeboxMgr_GetStorageMetrics_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CubeboxMgr_GetSandboxMetrics_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSandboxMetricsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CubeboxMgrServer).GetSandboxMetrics(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CubeboxMgr_GetSandboxMetrics_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CubeboxMgrServer).GetSandboxMetrics(ctx, req.(*GetSandboxMetricsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _CubeboxMgr_InspectStorageVolumes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(InspectStorageVolumesRequest)
 	if err := dec(in); err != nil {
@@ -684,6 +720,10 @@ var CubeboxMgr_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetStorageMetrics",
 			Handler:    _CubeboxMgr_GetStorageMetrics_Handler,
+		},
+		{
+			MethodName: "GetSandboxMetrics",
+			Handler:    _CubeboxMgr_GetSandboxMetrics_Handler,
 		},
 		{
 			MethodName: "InspectStorageVolumes",

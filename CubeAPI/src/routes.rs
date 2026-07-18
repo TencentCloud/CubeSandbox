@@ -121,6 +121,10 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
         .route("/sandboxes/:sandboxID", get(sandboxes::get_sandbox))
         .route("/sandboxes/:sandboxID", delete(sandboxes::kill_sandbox))
         .route(
+            "/sandboxes/:sandboxID/metrics",
+            get(sandboxes::get_sandbox_metrics),
+        )
+        .route(
             "/sandboxes/:sandboxID/logs",
             get(sandboxes::get_sandbox_logs),
         )
@@ -364,7 +368,7 @@ fn apply_http_layers(router: Router<AppState>, timeout: Duration) -> Router<AppS
 
 #[cfg(test)]
 mod tests {
-    use super::build_router;
+    use super::{build_router, build_sandbox_routes};
     use crate::{
         config::ServerConfig,
         logging::{arc, noop::NoopLogger},
@@ -496,6 +500,40 @@ mod tests {
                 .status_code(),
             StatusCode::NOT_FOUND
         );
+    }
+
+    #[tokio::test]
+    async fn exposes_sandbox_metrics_routes_on_root_and_cubeapi_prefix() {
+        let server = test_server().await;
+
+        server
+            .get("/sandboxes/sb-1/metrics")
+            .add_query_param("start", "2")
+            .add_query_param("end", "1")
+            .await
+            .assert_status(StatusCode::BAD_REQUEST);
+        server
+            .get("/cubeapi/v1/sandboxes/sb-1/metrics")
+            .add_query_param("start", "2")
+            .add_query_param("end", "1")
+            .await
+            .assert_status(StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn sandbox_metrics_route_matches_inside_sandbox_router() {
+        let mut config = ServerConfig::default();
+        config.cubemaster_url = "http://127.0.0.1:9".to_string();
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        let app = build_sandbox_routes(&state, false).with_state(state);
+        let server = TestServer::new(app).expect("sandbox router should build");
+
+        server
+            .get("/sandboxes/sb-1/metrics")
+            .add_query_param("start", "2")
+            .add_query_param("end", "1")
+            .await
+            .assert_status(StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

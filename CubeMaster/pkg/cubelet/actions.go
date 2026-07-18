@@ -133,6 +133,19 @@ func GetStorageMetrics(ctx context.Context, calleeEp string,
 	return c.GetStorageMetrics(ctx, req)
 }
 
+// GetSandboxMetrics calls the target Cubelet over gRPC. CubeMaster resolves the
+// target node first; Cubelet then reads the sandbox-local envd endpoint.
+func GetSandboxMetrics(ctx context.Context, calleeEp string,
+	req *cubebox.GetSandboxMetricsRequest) (*cubebox.GetSandboxMetricsResponse, error) {
+	conn, err := grpcconn.GetWorkerConn(ctx, calleeEp)
+	if err != nil {
+		return nil, ret.Err(errorcode.ErrorCode_ConnHostFailed, err.Error())
+	}
+	defer conn.Close()
+	c := cubebox.NewCubeboxMgrClient(conn.Value())
+	return c.GetSandboxMetrics(ctx, req)
+}
+
 func List(ctx context.Context, calleeEp string,
 	req *cubebox.ListCubeSandboxRequest) (*cubebox.ListCubeSandboxResponse, error) {
 	conn, err := grpcconn.GetWorkerConn(ctx, calleeEp)

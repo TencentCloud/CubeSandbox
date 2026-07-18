@@ -16,7 +16,7 @@ use crate::{
     models::{
         ApiError, ConnectSandbox, ListSandboxesQuery, ListSandboxesV2Query, NewSandbox,
         RefreshRequest, ResumedSandbox, Sandbox, SandboxDetail, SandboxLogsQuery,
-        SandboxLogsV2Query, SandboxLogsV2Response, SetTimeoutRequest,
+        SandboxLogsV2Query, SandboxLogsV2Response, SandboxMetricsQuery, SetTimeoutRequest,
     },
     state::AppState,
 };
@@ -152,6 +152,55 @@ pub async fn get_sandbox(
         )
         .await;
     Ok(Json(detail))
+}
+
+// ─── GET /sandboxes/:sandboxID/metrics ─────────────────────────────────────
+
+/// Handles the public E2B-compatible metrics route and delegates range
+/// validation plus CubeMaster error translation to SandboxService.
+#[utoipa::path(
+    get,
+    path = "/sandboxes/{sandboxID}/metrics",
+    params(
+        ("sandboxID" = String, Path, description = "Sandbox identifier"),
+        SandboxMetricsQuery
+    ),
+    responses(
+        (status = 200, description = "Sandbox metrics", body = [crate::models::SandboxMetric]),
+        (status = 400, description = "Invalid time range", body = ApiError),
+        (status = 404, description = "Sandbox not found", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn get_sandbox_metrics(
+    State(state): State<AppState>,
+    Path(sandbox_id): Path<String>,
+    Query(params): Query<SandboxMetricsQuery>,
+) -> AppResult<impl IntoResponse> {
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Debug, "api.request")
+                .field("handler", "get_sandbox_metrics")
+                .field("sandbox_id", &sandbox_id),
+        )
+        .await;
+
+    let metrics = state
+        .services
+        .sandboxes
+        .get_metrics(&sandbox_id, params.start, params.end)
+        .await?;
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Info, "api.response")
+                .field("handler", "get_sandbox_metrics")
+                .field("sandbox_id", &sandbox_id)
+                .field_value("count", metrics.len()),
+        )
+        .await;
+    Ok(Json(metrics))
 }
 
 // ─── POST /sandboxes ──────────────────────────────────────────────────────────

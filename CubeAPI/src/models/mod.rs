@@ -316,6 +316,39 @@ pub struct SandboxDetail {
     pub volume_mounts: Option<Vec<SandboxVolumeMount>>,
 }
 
+/// Query parameters for GET /sandboxes/{sandboxID}/metrics.
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct SandboxMetricsQuery {
+    /// Unix timestamp for the start of the interval, in seconds.
+    pub start: Option<i64>,
+    /// Unix timestamp for the end of the interval, in seconds.
+    pub end: Option<i64>,
+}
+
+/// One E2B-compatible sandbox metric entry.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct SandboxMetric {
+    /// Deprecated by E2B but still returned for compatibility.
+    pub timestamp: DateTime<Utc>,
+    #[serde(rename = "timestampUnix")]
+    pub timestamp_unix: i64,
+    #[serde(rename = "cpuCount")]
+    pub cpu_count: i32,
+    #[serde(rename = "cpuUsedPct")]
+    pub cpu_used_pct: f64,
+    #[serde(rename = "memUsed")]
+    pub mem_used: i64,
+    #[serde(rename = "memTotal")]
+    pub mem_total: i64,
+    #[serde(rename = "memCache")]
+    pub mem_cache: i64,
+    #[serde(rename = "diskUsed")]
+    pub disk_used: i64,
+    #[serde(rename = "diskTotal")]
+    pub disk_total: i64,
+}
+
 // ─── Sandbox — pause/resume/connect/snapshot ──────────────────────────────
 
 /// Request body for POST /sandboxes/{id}/resume (deprecated).

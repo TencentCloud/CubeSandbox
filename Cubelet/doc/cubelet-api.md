@@ -43,6 +43,8 @@
     - [ExecCubeSandboxResponse](#cubelet-services-cubebox-v1-ExecCubeSandboxResponse)
     - [GetLocalSnapshotRequest](#cubelet-services-cubebox-v1-GetLocalSnapshotRequest)
     - [GetLocalSnapshotResponse](#cubelet-services-cubebox-v1-GetLocalSnapshotResponse)
+    - [GetSandboxMetricsRequest](#cubelet-services-cubebox-v1-GetSandboxMetricsRequest)
+    - [GetSandboxMetricsResponse](#cubelet-services-cubebox-v1-GetSandboxMetricsResponse)
     - [GetStorageMetricsRequest](#cubelet-services-cubebox-v1-GetStorageMetricsRequest)
     - [GetStorageMetricsResponse](#cubelet-services-cubebox-v1-GetStorageMetricsResponse)
     - [GetStorageMetricsResponse.MetricsEntry](#cubelet-services-cubebox-v1-GetStorageMetricsResponse-MetricsEntry)
@@ -85,6 +87,7 @@
     - [RunCubeSandboxResponse](#cubelet-services-cubebox-v1-RunCubeSandboxResponse)
     - [RunCubeSandboxResponse.ExtInfoEntry](#cubelet-services-cubebox-v1-RunCubeSandboxResponse-ExtInfoEntry)
     - [SELinuxOption](#cubelet-services-cubebox-v1-SELinuxOption)
+    - [SandboxMetric](#cubelet-services-cubebox-v1-SandboxMetric)
     - [SandboxPathVolumeSource](#cubelet-services-cubebox-v1-SandboxPathVolumeSource)
     - [SandboxStorageInfo](#cubelet-services-cubebox-v1-SandboxStorageInfo)
     - [StorageOrphanEntry](#cubelet-services-cubebox-v1-StorageOrphanEntry)
@@ -931,6 +934,40 @@ EmptyDirVolumeSource represents an empty directory for a sandbox.
 
 
 
+<a name="cubelet-services-cubebox-v1-GetSandboxMetricsRequest"></a>
+
+### GetSandboxMetricsRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| requestID | [string](#string) |  | requestID reqID |
+| sandboxID | [string](#string) |  | Sandbox identifier to inspect. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-GetSandboxMetricsResponse"></a>
+
+### GetSandboxMetricsResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| requestID | [string](#string) |  | requestID reqID |
+| ret | [cubelet.services.errorcode.v1.Ret](#cubelet-services-errorcode-v1-Ret) |  | Ret. |
+| sandboxID | [string](#string) |  | Sandbox identifier that produced this metric snapshot. |
+| metrics | [SandboxMetric](#cubelet-services-cubebox-v1-SandboxMetric) | repeated | Current sandbox metric snapshot. Empty when no sample is available. |
+
+
+
+
+
+
 <a name="cubelet-services-cubebox-v1-GetStorageMetricsRequest"></a>
 
 ### GetStorageMetricsRequest
@@ -1672,6 +1709,28 @@ SELinuxOption are the labels to be applied to the container.
 
 
 
+<a name="cubelet-services-cubebox-v1-SandboxMetric"></a>
+
+### SandboxMetric
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| timestamp_unix_nano | [int64](#int64) |  | Timestamp when metrics were collected. |
+| cpu_count | [int32](#int32) |  | Number of CPU cores assigned to the sandbox. |
+| cpu_used_pct | [double](#double) |  | CPU usage percentage. Best-effort in the current implementation. |
+| mem_used | [int64](#int64) |  | Memory used in bytes. Best-effort in the current implementation. |
+| mem_total | [int64](#int64) |  | Total memory in bytes. |
+| mem_cache | [int64](#int64) |  | Cached memory in bytes. Best-effort in the current implementation. |
+| disk_used | [int64](#int64) |  | Disk used in bytes. Best-effort in the current implementation. |
+| disk_total | [int64](#int64) |  | Total sandbox disk quota in bytes. |
+
+
+
+
+
+
 <a name="cubelet-services-cubebox-v1-SandboxPathVolumeSource"></a>
 
 ### SandboxPathVolumeSource
@@ -1995,6 +2054,7 @@ Service for handling cubesandbox
 | ListLocalSnapshots | [ListLocalSnapshotsRequest](#cubelet-services-cubebox-v1-ListLocalSnapshotsRequest) | [ListLocalSnapshotsResponse](#cubelet-services-cubebox-v1-ListLocalSnapshotsResponse) | ListLocalSnapshots returns the full catalog of snapshots known to this node. It is intended for master discovery / inspection so master does not need to persist physical references (vol/dev/path/meta_dir) in its tables. |
 | GetLocalSnapshot | [GetLocalSnapshotRequest](#cubelet-services-cubebox-v1-GetLocalSnapshotRequest) | [GetLocalSnapshotResponse](#cubelet-services-cubebox-v1-GetLocalSnapshotResponse) | GetLocalSnapshot returns the physical catalog entry for a single snapshot by snapshot id. Returns PreConditionFailed when no local record exists. |
 | GetStorageMetrics | [GetStorageMetricsRequest](#cubelet-services-cubebox-v1-GetStorageMetricsRequest) | [GetStorageMetricsResponse](#cubelet-services-cubebox-v1-GetStorageMetricsResponse) | GetStorageMetrics returns node-local cubecow storage metrics. |
+| GetSandboxMetrics | [GetSandboxMetricsRequest](#cubelet-services-cubebox-v1-GetSandboxMetricsRequest) | [GetSandboxMetricsResponse](#cubelet-services-cubebox-v1-GetSandboxMetricsResponse) | GetSandboxMetrics returns the current metrics snapshot for one sandbox. |
 | InspectStorageVolumes | [InspectStorageVolumesRequest](#cubelet-services-cubebox-v1-InspectStorageVolumesRequest) | [InspectStorageVolumesResponse](#cubelet-services-cubebox-v1-InspectStorageVolumesResponse) | InspectStorageVolumes lists every sandbox storage record cubelet owns and re-resolves cubecow device paths so cubecli can render an authoritative view without touching boltdb or the cubecow SDK directly. |
 | CleanupOrphanStorageFiles | [CleanupOrphanStorageFilesRequest](#cubelet-services-cubebox-v1-CleanupOrphanStorageFilesRequest) | [CleanupOrphanStorageFilesResponse](#cubelet-services-cubebox-v1-CleanupOrphanStorageFilesResponse) | CleanupOrphanStorageFiles scans configured emptydir format roots, drops files that have no live sandbox owner, and reports the action taken. |
 

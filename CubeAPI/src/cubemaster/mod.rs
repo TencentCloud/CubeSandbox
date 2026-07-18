@@ -11,6 +11,7 @@
 ///
 /// Implemented on CubeMaster (see pkg/service/sandbox/types):
 ///   - GET    /cube/sandbox/info       get single sandbox detail (query: sandbox_id, instance_type)
+///   - GET    /cube/sandbox/metrics    get single sandbox metrics snapshot
 ///   - POST   /cube/sandbox/update     update sandbox (action: "pause" | "resume")
 /// Implemented on CubeMaster (snapshot APIs):
 ///   - POST   /cube/snapshot                          create runtime snapshot (synchronous terminal result)
@@ -119,6 +120,36 @@ impl CubeMasterClient {
             .inner
             .get(&url)
             .query(&[("sandbox_id", sandbox_id), ("instance_type", instance_type)])
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// GET /cube/sandbox/metrics — fetch one sandbox's current metrics snapshot.
+    /// Query: sandbox_id, instance_type, optional start/end Unix seconds.
+    pub async fn get_sandbox_metrics(
+        &self,
+        sandbox_id: &str,
+        instance_type: &str,
+        start: Option<i64>,
+        end: Option<i64>,
+    ) -> Result<GetSandboxMetricsResponse, CubeMasterError> {
+        let url = format!("{}/cube/sandbox/metrics", self.base_url);
+        let mut query = vec![
+            ("sandbox_id", sandbox_id.to_string()),
+            ("instance_type", instance_type.to_string()),
+        ];
+        if let Some(start) = start {
+            query.push(("start", start.to_string()));
+        }
+        if let Some(end) = end {
+            query.push(("end", end.to_string()));
+        }
+        let resp = self
+            .inner
+            .get(&url)
+            .query(&query)
             .send()
             .await
             .map_err(CubeMasterError::Http)?;
@@ -1058,6 +1089,37 @@ pub struct GetSandboxContainerItem {
     pub kind: String,
     #[serde(default)]
     pub pause_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct GetSandboxMetricsResponse {
+    #[serde(rename = "RequestID", alias = "requestID", default)]
+    pub request_id: String,
+    #[serde(default)]
+    pub data: Vec<SandboxMetricItem>,
+    pub ret: RetCode,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
+pub struct SandboxMetricItem {
+    #[serde(default)]
+    pub timestamp_unix_nano: i64,
+    #[serde(default)]
+    pub cpu_count: i32,
+    #[serde(default)]
+    pub cpu_used_pct: f64,
+    #[serde(default)]
+    pub mem_used: i64,
+    #[serde(default)]
+    pub mem_total: i64,
+    #[serde(default)]
+    pub mem_cache: i64,
+    #[serde(default)]
+    pub disk_used: i64,
+    #[serde(default)]
+    pub disk_total: i64,
 }
 
 /// Normalized sandbox detail used by handlers (built from GetSandboxDataItem).

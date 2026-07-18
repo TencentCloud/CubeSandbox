@@ -40,6 +40,8 @@ service CubeboxMgr {
   rpc GetLocalSnapshot(GetLocalSnapshotRequest) returns (GetLocalSnapshotResponse);
   // GetStorageMetrics returns node-local cubecow storage metrics.
   rpc GetStorageMetrics(GetStorageMetricsRequest) returns (GetStorageMetricsResponse);
+  // GetSandboxMetrics returns the current metrics snapshot for one sandbox.
+  rpc GetSandboxMetrics(GetSandboxMetricsRequest) returns (GetSandboxMetricsResponse);
   // InspectStorageVolumes lists every sandbox storage record cubelet owns and
   // re-resolves cubecow device paths so cubecli can render an authoritative
   // view without touching boltdb or the cubecow SDK directly.
@@ -1089,6 +1091,43 @@ message GetStorageMetricsResponse {
   int64 timestamp_unix_nano = 4;
   // Storage metrics reported by cubecow.
   map<string, uint64> metrics = 5;
+}
+
+message GetSandboxMetricsRequest {
+  // requestID reqID
+  string requestID = 1;
+  // Sandbox identifier to inspect.
+  string sandboxID = 2;
+}
+
+message SandboxMetric {
+  // Timestamp when metrics were collected.
+  int64 timestamp_unix_nano = 1;
+  // Number of CPU cores assigned to the sandbox.
+  int32 cpu_count = 2;
+  // CPU usage percentage. Best-effort in the current implementation.
+  double cpu_used_pct = 3;
+  // Memory used in bytes. Best-effort in the current implementation.
+  int64 mem_used = 4;
+  // Total memory in bytes.
+  int64 mem_total = 5;
+  // Cached memory in bytes. Best-effort in the current implementation.
+  int64 mem_cache = 6;
+  // Disk used in bytes. Best-effort in the current implementation.
+  int64 disk_used = 7;
+  // Total sandbox disk quota in bytes.
+  int64 disk_total = 8;
+}
+
+message GetSandboxMetricsResponse {
+  // requestID reqID
+  string requestID = 1;
+  // Ret.
+  cubelet.services.errorcode.v1.Ret ret = 2;
+  // Sandbox identifier that produced this metric snapshot.
+  string sandboxID = 3;
+  // Current sandbox metric snapshot. Empty when no sample is available.
+  repeated SandboxMetric metrics = 4;
 }
 
 // StorageVolumeInfo describes a single backend file/volume entry attached to a

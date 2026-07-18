@@ -485,6 +485,32 @@ type GetCubeSandboxRes struct {
 	Data      []*SandboxData `json:"data,omitempty"`
 }
 
+type GetSandboxMetricsReq struct {
+	RequestID    string `json:"requestID,omitempty"`
+	SandboxID    string `json:"sandbox_id,omitempty"`
+	HostID       string `json:"host_id,omitempty"`
+	InstanceType string `json:"instance_type,omitempty"`
+	Start        int64  `json:"start,omitempty"`
+	End          int64  `json:"end,omitempty"`
+}
+
+type GetSandboxMetricsRes struct {
+	RequestID string               `json:"requestID,omitempty"`
+	Ret       *Ret                 `json:"ret,omitempty"`
+	Data      []*SandboxMetricData `json:"data"`
+}
+
+type SandboxMetricData struct {
+	TimestampUnixNano int64   `json:"timestamp_unix_nano,omitempty"`
+	CPUCount          int32   `json:"cpu_count,omitempty"`
+	CPUUsedPct        float64 `json:"cpu_used_pct,omitempty"`
+	MemUsed           int64   `json:"mem_used,omitempty"`
+	MemTotal          int64   `json:"mem_total,omitempty"`
+	MemCache          int64   `json:"mem_cache,omitempty"`
+	DiskUsed          int64   `json:"disk_used,omitempty"`
+	DiskTotal         int64   `json:"disk_total,omitempty"`
+}
+
 type SandboxData struct {
 	SandboxID              string            `json:"sandbox_id,omitempty"`
 	Status                 int32             `json:"status,omitempty"`
