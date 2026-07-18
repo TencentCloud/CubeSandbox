@@ -38,8 +38,11 @@ load_dotenv()
 
 # --- Configuration -----------------------------------------------------------
 
-E2B_API_URL = os.getenv("E2B_API_URL", "http://127.0.0.1:3000")
-E2B_API_KEY = os.getenv("E2B_API_KEY", "e2b_000000")
+# CUBE_API_URL / CUBE_API_KEY are the canonical names (documented in .env.example).
+# E2B_API_URL / E2B_API_KEY are accepted as legacy aliases so existing deployments
+# that only set the E2B_ names continue to work without changes.
+E2B_API_URL = os.getenv("CUBE_API_URL") or os.getenv("E2B_API_URL", "http://127.0.0.1:3000")
+E2B_API_KEY = os.getenv("CUBE_API_KEY") or os.getenv("E2B_API_KEY", "e2b_000000")
 TEMPLATE_ID = os.getenv("CUBE_TEMPLATE_ID", "")
 
 # The session file lives under gettempdir() so `mktemp`/`/tmp` rotations can

@@ -23,6 +23,7 @@ from _opencode_common import ensure_success, positive_int, run_command, sandbox_
 from env_utils import (
     _env_positive_int,
     build_opencode_env,
+    cube_required,
     opencode_command,
     opencode_model,
     opencode_workspace,
@@ -156,8 +157,8 @@ def main() -> int:
     args = parse_args()
 
     template_id = args.template or required("CUBE_TEMPLATE_ID")
-    required("E2B_API_URL")
-    required("E2B_API_KEY")
+    cube_required("CUBE_API_URL", "E2B_API_URL")
+    cube_required("CUBE_API_KEY", "E2B_API_KEY")
     require_provider_key()
 
     opencode_env = build_opencode_env()
