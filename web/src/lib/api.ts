@@ -71,6 +71,13 @@ async function refreshAccessToken(): Promise<string | null> {
     const data = await resp.json();
     if (data.accessToken) {
       localStorage.setItem('cube.accessToken', data.accessToken);
+      // M2: backend rotates the refresh token on each refresh (old one is
+      // revoked). We must persist the new refresh token, otherwise the next
+      // refresh will use the now-revoked old token and fail with 401,
+      // kicking the user out after ~15-30 min.
+      if (data.refreshToken) {
+        localStorage.setItem('cube.refreshToken', data.refreshToken);
+      }
       return data.accessToken as string;
     }
   } catch {
