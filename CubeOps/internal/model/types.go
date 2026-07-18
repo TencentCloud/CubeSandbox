@@ -38,7 +38,8 @@ type RefreshRequest struct {
 
 // RefreshResponse is the response body for POST /auth/refresh.
 type RefreshResponse struct {
-	AccessToken string `json:"accessToken"`
+	AccessToken  string `json:"accessToken"`
+	RefreshToken string `json:"refreshToken"`
 }
 
 // APIError is a generic error response.

@@ -122,7 +122,7 @@ func (h *Handler) Refresh(c *gin.Context) {
 		httputil.WriteError(c, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	accessToken, err := h.svc.Refresh(c.Request.Context(), req.RefreshToken)
+	accessToken, newRefreshToken, err := h.svc.Refresh(c.Request.Context(), req.RefreshToken)
 	if err != nil {
 		if errors.Is(err, service.ErrInvalidRefreshToken) {
 			httputil.WriteError(c, http.StatusUnauthorized, "invalid or expired refresh token")
@@ -131,5 +131,8 @@ func (h *Handler) Refresh(c *gin.Context) {
 		httputil.WriteError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	httputil.WriteJSON(c, http.StatusOK, model.RefreshResponse{AccessToken: accessToken})
+	httputil.WriteJSON(c, http.StatusOK, model.RefreshResponse{
+		AccessToken:  accessToken,
+		RefreshToken: newRefreshToken,
+	})
 }

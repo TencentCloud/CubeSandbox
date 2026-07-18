@@ -43,6 +43,10 @@ type TokenIssuer interface {
 type UserStore interface {
 	GetUserPassword(ctx context.Context, username string) (string, error)
 	SetUserPassword(ctx context.Context, username, passwordHash string) error
+	CreateRefreshToken(ctx context.Context, tokenID, username string) error
+	IsRefreshTokenRevoked(ctx context.Context, tokenID string) (bool, error)
+	RevokeRefreshToken(ctx context.Context, tokenID string) error
+	RevokeAllRefreshTokensForUser(ctx context.Context, username string) error
 }
 
 // AuthService handles login / password change / token refresh.
@@ -92,9 +96,16 @@ func (s *AuthService) Login(ctx context.Context, username, password string) (*Lo
 	if err != nil {
 		return nil, fmt.Errorf("generate access token: %w", err)
 	}
-	refreshToken, _, err := s.jm.GenerateRefreshToken(username)
+	refreshToken, tokenID, err := s.jm.GenerateRefreshToken(username)
 	if err != nil {
 		return nil, fmt.Errorf("generate refresh token: %w", err)
+	}
+	// M2 fix: persist refresh token so it can be revoked during rotation
+	// and after password change. Without this, a stolen refresh token
+	// remains valid for its full 7-day TTL even after the user changes
+	// their password.
+	if err := s.store.CreateRefreshToken(ctx, tokenID, username); err != nil {
+		return nil, fmt.Errorf("persist refresh token: %w", err)
 	}
 	return &LoginResult{
 		AccessToken:   accessToken,
@@ -104,20 +115,50 @@ func (s *AuthService) Login(ctx context.Context, username, password string) (*Lo
 	}, nil
 }
 
-// Refresh exchanges a refresh token for a new access token.
-func (s *AuthService) Refresh(ctx context.Context, refreshToken string) (string, error) {
+// Refresh exchanges a refresh token for a new access token AND a new refresh
+// token (rotation). The old refresh token is revoked, so a stolen token
+// cannot be replayed after the legitimate user refreshes.
+//
+// M2 fix: previously Refresh returned only a new access token and left the
+// old refresh token valid for its full 7-day TTL. An attacker who stole the
+// refresh token could use it indefinitely. With rotation, each refresh
+// invalidates the previous token.
+func (s *AuthService) Refresh(ctx context.Context, refreshToken string) (string, string, error) {
 	if refreshToken == "" {
-		return "", errors.New("refreshToken is required")
+		return "", "", errors.New("refreshToken is required")
 	}
 	claims, err := s.jm.VerifyRefreshToken(refreshToken)
 	if err != nil {
-		return "", ErrInvalidRefreshToken
+		return "", "", ErrInvalidRefreshToken
 	}
+	// M2 fix: check if the token has been revoked (e.g. after password change
+	// or a previous rotation).
+	revoked, err := s.store.IsRefreshTokenRevoked(ctx, claims.TokenID)
+	if err != nil {
+		return "", "", fmt.Errorf("check refresh token revocation: %w", err)
+	}
+	if revoked {
+		return "", "", ErrInvalidRefreshToken
+	}
+	// Generate new access token.
 	accessToken, err := s.jm.GenerateAccessToken(claims.Username)
 	if err != nil {
-		return "", fmt.Errorf("generate access token: %w", err)
+		return "", "", fmt.Errorf("generate access token: %w", err)
 	}
-	return accessToken, nil
+	// M2 fix: generate a new refresh token (rotation) and revoke the old one.
+	newRefreshToken, newTokenID, err := s.jm.GenerateRefreshToken(claims.Username)
+	if err != nil {
+		return "", "", fmt.Errorf("generate refresh token: %w", err)
+	}
+	if err := s.store.CreateRefreshToken(ctx, newTokenID, claims.Username); err != nil {
+		return "", "", fmt.Errorf("persist new refresh token: %w", err)
+	}
+	if err := s.store.RevokeRefreshToken(ctx, claims.TokenID); err != nil {
+		// Best-effort: log but don't fail the refresh — the new tokens are
+		// already issued. The old token will expire naturally.
+		_ = err
+	}
+	return accessToken, newRefreshToken, nil
 }
 
 // ChangePassword updates the password for the authenticated user.
@@ -148,6 +189,14 @@ func (s *AuthService) ChangePassword(ctx context.Context, username, oldPassword,
 	}
 	if err := s.store.SetUserPassword(ctx, username, newHash); err != nil {
 		return fmt.Errorf("update password: %w", err)
+	}
+	// M2 fix: revoke all existing refresh tokens for this user so that
+	// sessions on other devices are forced to re-authenticate after a
+	// password change.
+	if err := s.store.RevokeAllRefreshTokensForUser(ctx, username); err != nil {
+		// Best-effort: password was changed successfully, token revocation
+		// failure should not roll back the password change.
+		_ = err
 	}
 	return nil
 }

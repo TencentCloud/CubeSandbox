@@ -22,7 +22,9 @@ func init() { gin.SetMode(gin.TestMode) }
 
 // fakeUserStore is a tiny in-memory user store for auth handler tests.
 type fakeUserStore struct {
-	passwords map[string]string
+	passwords     map[string]string
+	refreshTokens map[string]string
+	revoked       map[string]bool
 }
 
 func (f *fakeUserStore) GetUserPassword(_ context.Context, username string) (string, error) {
@@ -38,6 +40,38 @@ func (f *fakeUserStore) SetUserPassword(_ context.Context, username, hash string
 		f.passwords = map[string]string{}
 	}
 	f.passwords[username] = hash
+	return nil
+}
+
+func (f *fakeUserStore) CreateRefreshToken(_ context.Context, tokenID, username string) error {
+	if f.refreshTokens == nil {
+		f.refreshTokens = map[string]string{}
+	}
+	f.refreshTokens[tokenID] = username
+	return nil
+}
+
+func (f *fakeUserStore) IsRefreshTokenRevoked(_ context.Context, tokenID string) (bool, error) {
+	if f.revoked == nil {
+		return false, nil
+	}
+	return f.revoked[tokenID], nil
+}
+
+func (f *fakeUserStore) RevokeRefreshToken(_ context.Context, tokenID string) error {
+	if f.revoked == nil {
+		f.revoked = map[string]bool{}
+	}
+	f.revoked[tokenID] = true
+	return nil
+}
+
+func (f *fakeUserStore) RevokeAllRefreshTokensForUser(_ context.Context, username string) error {
+	for tid, u := range f.refreshTokens {
+		if u == username {
+			f.RevokeRefreshToken(nil, tid)
+		}
+	}
 	return nil
 }
 
