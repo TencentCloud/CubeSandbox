@@ -37,7 +37,7 @@ func (s *Store) IsRefreshTokenRevoked(ctx context.Context, tokenID string) (bool
 		}
 		return false, fmt.Errorf("check refresh token: %w", err)
 	}
-	return revokedAt.Valid && revokedAt.String != "", nil
+	return revokedAt.Valid, nil
 }
 
 // RevokeRefreshToken marks a refresh token as revoked. Idempotent — revoking

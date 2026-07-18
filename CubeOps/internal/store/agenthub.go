@@ -12,8 +12,8 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
-	"time"
 
+	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/crypto"
 )
 
@@ -527,7 +527,7 @@ func (s *Store) RecordOperation(ctx context.Context, agentID, sandboxID, operati
 	return s.db.WithContext(ctx).Exec(
 		`INSERT INTO t_agenthub_operation (operation_id, agent_id, sandbox_id, operation_type, status, error_message)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		fmt.Sprintf("op-%d", time.Now().UnixNano()), agentID, sandboxID, operationType, status, errMsg,
+		fmt.Sprintf("op-%s", uuid.New().String()), agentID, sandboxID, operationType, status, errMsg,
 	).Error
 }
 
