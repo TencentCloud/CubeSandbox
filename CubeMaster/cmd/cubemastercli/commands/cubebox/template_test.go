@@ -614,7 +614,7 @@ func TestPrintTemplateSummaryIncludesOptionalMetadata(t *testing.T) {
 	logOutput := logBuf.String()
 	for _, want := range []string{
 		"template_id: tpl-1",
-		"display_name: python-template",
+		"alias: python-template",
 		"created_at: 2026-06-17 12:00:00",
 		"image_info: docker.io/library/python:3.12",
 	} {

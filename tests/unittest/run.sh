@@ -12,7 +12,7 @@
 #
 # By default it runs only the self-contained components (the green gate) and
 # skips "gated" components that need a live database or a full VM. Naming a
-# gated component explicitly (e.g. `run.sh cubemaster`) forces it to run.
+# gated component explicitly (e.g. `run.sh cubelet`) forces it to run.
 #
 # Usage:
 #   tests/unittest/run.sh                 # run the default (self-contained) gate
@@ -70,7 +70,7 @@ cd "$REPO_ROOT"
 #   Components that DO have tests but need an environment the builder lacks
 #   (a live MySQL/PostgreSQL/Redis, or a full VM for hypervisor integration
 #   tests). Skipped by default so the sweep stays green, but run when named
-#   explicitly (e.g. `run.sh cubemaster`). This keeps them visible and runnable
+#   explicitly (e.g. `run.sh cubelet`). This keeps them visible and runnable
 #   without wedging the default gate on environment-only failures.
 #
 # NO_TESTS: "name|reason" — printed as an explicit skip so the absence of unit
@@ -82,6 +82,7 @@ cd "$REPO_ROOT"
 # same package set (`-short` skips the Redis/KVM-dependent cases).
 WITH_TESTS=(
 	"cubeops|Go|0|make cubeops-test"
+	"cubemaster|Go|0|make builder-run BUILDER_CMD='cd /workspace/CubeMaster && go mod download && make proto && if [ -f test/conf.yaml ]; then export CUBE_MASTER_CONFIG_PATH=/workspace/CubeMaster/test/conf.yaml; fi && CI=true go test -short -timeout=20m ./api/... ./pkg/...'"
 	"network-agent|Go|0|make network-agent-test"
 	"cubecow|Go+CGO|0|make cubecow-test-native"
 	"cube-lifecycle-manager|Go|0|make builder-run BUILDER_CMD='cd /workspace/cube-lifecycle-manager && go mod download && go test ./...'"
@@ -98,7 +99,6 @@ WITH_TESTS=(
 
 GATED_TESTS=(
 	"cubelet|Go|0|some pkg tests need a writable cgroupfs / host caps the builder lacks|make builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && make proto && go test -short ./pkg/...'"
-	"cubemaster|Go|0|some tests need a live MySQL/PostgreSQL/Redis|make builder-run BUILDER_CMD='cd /workspace/CubeMaster && go mod download && make proto && if [ -f test/conf.yaml ]; then export CUBE_MASTER_CONFIG_PATH=/workspace/CubeMaster/test/conf.yaml; fi && CI=true go test -short -timeout=20m ./api/... ./pkg/...'"
 	"hypervisor|Rust|1|integration tests need a full VM (windows guest, RAM hotplug)|make builder-run BUILDER_CMD='cd /workspace/hypervisor && cargo test --features kvm'"
 )
 

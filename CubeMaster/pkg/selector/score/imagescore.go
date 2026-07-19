@@ -28,6 +28,8 @@ type imageScore struct {
 	weight float64
 }
 
+var getImageStateByNode = localcache.GetImageStateByNode
+
 func NewImageScore() *imageScore {
 	if config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore == nil {
 		panic("config.Scheduler.Score.ScorePluginConf.ImageScore is nil")
@@ -155,7 +157,7 @@ func calculatePriority(sumScores int64, numContainers int) int64 {
 func sumImageScores(nodeInfo *node.Node, images []*selctx.ImageSpec) int64 {
 	var sum int64 = 0
 	for _, image := range images {
-		if state := localcache.GetImageStateByNode(image.ImageID, nodeInfo.ID()); state != nil {
+		if state := getImageStateByNode(image.ImageID, nodeInfo.ID()); state != nil {
 			sum += int64(state.ScaledImageScore)
 		}
 	}
@@ -164,7 +166,7 @@ func sumImageScores(nodeInfo *node.Node, images []*selctx.ImageSpec) int64 {
 
 func sumTemplateScores(nodeInfo *node.Node, templateID string) int64 {
 	var sum int64 = 0
-	if state := localcache.GetImageStateByNode(templateID, nodeInfo.ID()); state != nil {
+	if state := getImageStateByNode(templateID, nodeInfo.ID()); state != nil {
 		sum += int64(state.ScaledImageScore)
 	}
 	return sum

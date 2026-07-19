@@ -9,7 +9,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 # (archive.ubuntu.com on amd64, ports.ubuntu.com on arm64). The rewrite is also
 # skipped when GITHUB_ACTIONS=true so CI always builds against upstream.
 ARG APT_MIRROR_BASE=
-ARG GO_VERSION=1.24.8
+ARG GO_VERSION=1.25.7
 ARG PROTOC_VERSION=28.3
 ARG LIBSECCOMP_VERSION=2.5.5
 ARG RUST_TOOLCHAIN_DEFAULT=1.89

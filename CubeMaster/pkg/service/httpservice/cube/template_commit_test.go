@@ -46,8 +46,10 @@ func invokeCommitHandler(t *testing.T, req *http.Request, rt *CubeLog.RequestTra
 }
 
 func TestHandleSandboxCommitActionRejectsEmptyRequestID(t *testing.T) {
+	registerKnownSandboxTestID(t)
+
 	body := `{
-		"sandbox_id":"sb-1",
+		"sandbox_id":"` + knownSandboxTestID + `",
 		"template_id":"tpl-1",
 		"create_request":{
 			"instance_type":"cubebox",
@@ -135,13 +137,12 @@ func TestHandleSandboxCommitActionSanitizesInternalErrors(t *testing.T) {
 }
 
 func TestHandleSandboxCommitActionIgnoresProvidedTemplateID(t *testing.T) {
+	registerKnownSandboxTestID(t)
+
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 
 	var submittedTemplateID string
-	patches.ApplyFunc(localcache.GetSandboxCache, func(sandboxID string) *localcache.SandboxCache {
-		return &localcache.SandboxCache{SandboxID: sandboxID, HostIP: "10.0.0.1"}
-	})
 	patches.ApplyFunc(localcache.GetNodesByIp, func(ip string) (*node.Node, bool) {
 		return &node.Node{InsID: "node-1", IP: ip}, true
 	})
@@ -155,7 +156,7 @@ func TestHandleSandboxCommitActionIgnoresProvidedTemplateID(t *testing.T) {
 
 	body := `{
 		"requestID":"req-1",
-		"sandbox_id":"sb-1",
+		"sandbox_id":"` + knownSandboxTestID + `",
 		"template_id":"custom-template",
 		"create_request":{
 			"instance_type":"cubebox",

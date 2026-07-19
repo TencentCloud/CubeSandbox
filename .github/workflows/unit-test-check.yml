@@ -8,6 +8,7 @@ on:
       - 'CubeOps/**'
       - 'CubeDB/**'
       - 'CubeProxy/**'
+      - 'CubeMaster/**'
       - 'CubeShim/**'
       - 'CubeNet/**'
       - 'network-agent/**'
@@ -21,6 +22,7 @@ on:
       - 'CubeOps/**'
       - 'CubeDB/**'
       - 'CubeProxy/**'
+      - 'CubeMaster/**'
       - 'CubeShim/**'
       - 'CubeNet/**'
       - 'network-agent/**'
@@ -39,6 +41,7 @@ on:
           - all
           - cubeapi
           - cubeproxy
+          - cubemaster
           - cubeshim
           - network-agent
 
@@ -88,6 +91,7 @@ jobs:
             add_component "CubeAPI"
             add_component "CubeOps"
             add_component "CubeProxy"
+            add_component "CubeMaster"
             add_component "CubeShim"
             add_component "network-agent"
           }
@@ -99,6 +103,7 @@ jobs:
               cubeapi) add_component "CubeAPI" ;;
               cubeops) add_component "CubeOps" ;;
               cubeproxy) add_component "CubeProxy" ;;
+              cubemaster) add_component "CubeMaster" ;;
               cubeshim) add_component "CubeShim" ;;
               network-agent) add_component "network-agent" ;;
               *)
@@ -138,6 +143,9 @@ jobs:
                 CubeProxy/*)
                   add_component "CubeProxy"
                   ;;
+                CubeMaster/*)
+                  add_component "CubeMaster"
+                  ;;
                 CubeShim/*)
                   add_component "CubeShim"
                   ;;
@@ -163,6 +171,7 @@ jobs:
                     if . == "CubeAPI" then "CubeAPI"
                     elif . == "CubeOps" then "CubeOps"
                     elif . == "CubeProxy" then "CubeProxy"
+                    elif . == "CubeMaster" then "CubeMaster"
                     elif . == "CubeShim" then "CubeShim"
                     elif . == "network-agent" then "Network Agent"
                     else error("unsupported component: " + .)
@@ -172,6 +181,7 @@ jobs:
                     if . == "CubeAPI" then "cube-api-test"
                     elif . == "CubeOps" then "cubeops-test"
                     elif . == "CubeProxy" then "cube-proxy-test"
+                    elif . == "CubeMaster" then "cubemaster-test"
                     elif . == "CubeShim" then "shim-test"
                     elif . == "network-agent" then "network-agent-test"
                     else error("unsupported component: " + .)
