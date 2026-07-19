@@ -18,7 +18,7 @@ use tower_http::{
 };
 
 use crate::{
-    handlers::{health, sandboxes, snapshots, templates, volumes},
+    handlers::{health, sandboxes, snapshots, templates, terminal, volumes},
     middleware::{auth::unified_auth, rate_limit::rate_limit},
     state::AppState,
 };
@@ -64,6 +64,7 @@ fn build_e2b_router(state: &AppState, auth_configured: bool) -> Router<AppState>
         .merge(build_sandbox_routes(state, auth_configured))
         .merge(build_template_routes(state, auth_configured))
         .merge(build_volume_routes(state, auth_configured))
+        .merge(build_terminal_routes(state))
 }
 
 /// Routes that need the longer 240 s timeout when surfaced under the e2b
@@ -72,6 +73,23 @@ fn build_e2b_snapshot_long_router(state: &AppState, auth_configured: bool) -> Ro
     Router::new()
         .merge(build_long_sandbox_routes(state, auth_configured))
         .merge(build_long_template_routes(state, auth_configured))
+}
+
+/// Interactive Web Terminal routes.
+///
+/// The WebSocket upgrade is deliberately *not* wrapped in `unified_auth`:
+/// browsers cannot attach headers to a WebSocket upgrade, so the handler
+/// authorizes via a one-time ticket (or request headers for non-browser
+/// clients). Both routes carry the shared `rate_limit` middleware, and
+/// terminal sessions are additionally capped by a server-wide semaphore.
+fn build_terminal_routes(state: &AppState) -> Router<AppState> {
+    Router::new()
+        .route(
+            "/sandboxes/:sandboxID/terminal/ticket",
+            post(terminal::terminal_ticket),
+        )
+        .route("/sandboxes/:sandboxID/terminal", get(terminal::terminal_ws))
+        .layer(middleware::from_fn_with_state(state.clone(), rate_limit))
 }
 
 fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {

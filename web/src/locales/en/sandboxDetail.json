@@ -45,6 +45,20 @@
     "pause": "Pause",
     "kill": "Kill"
   },
+  "terminal": {
+    "open": "Terminal",
+    "title": "Terminal",
+    "disabled": "The sandbox must be running to open a terminal.",
+    "reconnect": "Reconnect",
+    "fullscreen": "Toggle fullscreen",
+    "exited": "Session ended (exit code {{code}}).",
+    "status": {
+      "connecting": "Connecting…",
+      "ready": "Connected",
+      "closed": "Disconnected",
+      "error": "Connection error"
+    }
+  },
   "errors": {
     "unknown": "Unknown error",
     "actionFailed": "Action failed: {{message}}",

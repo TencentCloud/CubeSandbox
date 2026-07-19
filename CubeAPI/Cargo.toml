@@ -30,6 +30,8 @@ tower-http = { version = "0.5", features = [
 tokio = { version = "1", features = ["full"] }
 # select!, join!, channel helpers
 futures = "0.3"
+# Byte buffers shared with reqwest/axum streaming bodies (web terminal)
+bytes = "1"
 
 # ── Serialization ─────────────────────────────────────────────────────────
 serde = { version = "1", features = ["derive"] }
@@ -69,7 +71,7 @@ governor = { version = "0.6", features = ["dashmap"] }
 
 # ── HTTP client (orchestrator / backend calls) ────────────────────────────
 # connection pool built-in, rustls for TLS
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
 
 # ── Validation ────────────────────────────────────────────────────────────
 validator = { version = "0.16", features = ["derive"] }
@@ -88,6 +90,9 @@ utoipa = { version = "5.4.0", features = ["chrono", "uuid", "yaml"] }
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.4" }
 axum-test = "14"
+# WebSocket client + stream adapters for the web terminal integration tests
+tokio-tungstenite = "0.24"
+tokio-stream = "0.1"
 
 [profile.release]
 # Maximize single-binary performance

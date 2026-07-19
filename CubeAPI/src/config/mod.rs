@@ -76,6 +76,32 @@ pub struct ServerConfig {
     /// Env var: CUBE_API_KEY
     #[serde(default)]
     pub cube_api_key: Option<String>,
+
+    /// Env var: `DATABASE_URL`. When unset, built from `CUBE_SANDBOX_MYSQL_*`.
+    /// Example: mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
+    #[serde(default = "default_database_url")]
+    pub database_url: Option<String>,
+
+    /// Web Terminal idle timeout in seconds: a terminal session that receives
+    /// no user input for this long is closed (and its PTY killed). Values
+    /// below 30 are clamped up to 30 at session start.
+    ///
+    /// Env var: `CUBE_API_TERMINAL_IDLE_TIMEOUT_SECS` (default 900 = 15 min)
+    #[serde(default = "default_terminal_idle_timeout_secs")]
+    pub terminal_idle_timeout_secs: u64,
+
+    /// Maximum number of concurrent Web Terminal sessions across the whole
+    /// server.
+    ///
+    /// Env var: `CUBE_API_TERMINAL_MAX_SESSIONS` (default 64)
+    #[serde(default = "default_terminal_max_sessions")]
+    pub terminal_max_sessions: usize,
+
+    /// Time-to-live in seconds for a one-time Web Terminal ticket.
+    ///
+    /// Env var: `CUBE_API_TERMINAL_TICKET_TTL_SECS` (default 30)
+    #[serde(default = "default_terminal_ticket_ttl_secs")]
+    pub terminal_ticket_ttl_secs: u64,
 }
 
 fn default_bind() -> String {
@@ -109,6 +135,44 @@ fn default_log_dir() -> String {
 fn default_log_prefix() -> String {
     "cube-api".to_string()
 }
+fn default_database_url() -> Option<String> {
+    std::env::var("DATABASE_URL")
+        .ok()
+        .or_else(default_cube_sandbox_mysql_url)
+}
+fn default_terminal_idle_timeout_secs() -> u64 {
+    std::env::var("CUBE_API_TERMINAL_IDLE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(900)
+}
+fn default_terminal_max_sessions() -> usize {
+    std::env::var("CUBE_API_TERMINAL_MAX_SESSIONS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(64)
+}
+fn default_terminal_ticket_ttl_secs() -> u64 {
+    std::env::var("CUBE_API_TERMINAL_TICKET_TTL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(30)
+}
+
+fn default_cube_sandbox_mysql_url() -> Option<String> {
+    let host = std::env::var("CUBE_SANDBOX_MYSQL_HOST").ok()?;
+    let port = std::env::var("CUBE_SANDBOX_MYSQL_PORT").unwrap_or_else(|_| "3306".to_string());
+    let user = std::env::var("CUBE_SANDBOX_MYSQL_USER").ok()?;
+    let password = std::env::var("CUBE_SANDBOX_MYSQL_PASSWORD").ok()?;
+    let database = std::env::var("CUBE_SANDBOX_MYSQL_DB").ok()?;
+
+    Some(format!(
+        "mysql://{}:{}@{}:{}/{}",
+        user, password, host, port, database
+    ))
+}
 
 impl ServerConfig {
     pub fn from_env() -> anyhow::Result<Self> {
@@ -135,6 +199,10 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             cube_api_key: std::env::var("CUBE_API_KEY").ok().filter(|s| !s.is_empty()),
+            database_url: default_database_url(),
+            terminal_idle_timeout_secs: default_terminal_idle_timeout_secs(),
+            terminal_max_sessions: default_terminal_max_sessions(),
+            terminal_ticket_ttl_secs: default_terminal_ticket_ttl_secs(),
         }
     }
 }

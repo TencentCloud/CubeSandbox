@@ -45,6 +45,20 @@
     "pause": "暂停",
     "kill": "终止"
   },
+  "terminal": {
+    "open": "终端",
+    "title": "终端",
+    "disabled": "沙箱需处于运行中状态才能打开终端。",
+    "reconnect": "重新连接",
+    "fullscreen": "切换全屏",
+    "exited": "会话已结束（退出码 {{code}}）。",
+    "status": {
+      "connecting": "连接中…",
+      "ready": "已连接",
+      "closed": "已断开",
+      "error": "连接错误"
+    }
+  },
   "errors": {
     "unknown": "未知错误",
     "actionFailed": "操作失败: {{message}}",
