@@ -19,9 +19,9 @@ import (
 	"github.com/containerd/plugin/registry"
 	"github.com/opencontainers/runtime-spec/specs-go"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
-	cubeimages "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
+	"github.com/tencentcloud/CubeSandbox/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/api/services/errorcode/v1"
+	cubeimages "github.com/tencentcloud/CubeSandbox/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cbri"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/pmem"

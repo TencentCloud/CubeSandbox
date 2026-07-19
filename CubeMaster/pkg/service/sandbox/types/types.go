@@ -7,8 +7,8 @@ package types
 
 import (
 	jsoniter "github.com/json-iterator/go"
-	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
-	imagev1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/images/v1"
+	cubeboxv1 "github.com/tencentcloud/CubeSandbox/api/services/cubebox/v1"
+	imagev1 "github.com/tencentcloud/CubeSandbox/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 )
 

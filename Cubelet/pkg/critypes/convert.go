@@ -1,15 +1,12 @@
-// Copyright (c) 2024 Tencent Inc.
-// SPDX-License-Identifier: Apache-2.0
-//
-
-package types
+package critypes
 
 import (
+	types "github.com/tencentcloud/CubeSandbox/api/types/v1"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 	runtimeAlpha "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 )
 
-func (a *AuthConfig) ToCRI() *runtime.AuthConfig {
+func AuthConfigToCRI(a *types.AuthConfig) *runtime.AuthConfig {
 	return &runtime.AuthConfig{
 		Username:      a.Username,
 		Password:      a.Password,
@@ -20,7 +17,7 @@ func (a *AuthConfig) ToCRI() *runtime.AuthConfig {
 	}
 }
 
-func (a *AuthConfig) ToCRIAlpha() *runtimeAlpha.AuthConfig {
+func AuthConfigToCRIAlpha(a *types.AuthConfig) *runtimeAlpha.AuthConfig {
 	return &runtimeAlpha.AuthConfig{
 		Username:      a.Username,
 		Password:      a.Password,
@@ -31,38 +28,38 @@ func (a *AuthConfig) ToCRIAlpha() *runtimeAlpha.AuthConfig {
 	}
 }
 
-func (x *ImageFilter) ToCRI() *runtime.ImageFilter {
+func ImageFilterToCRI(x *types.ImageFilter) *runtime.ImageFilter {
 	ifer := &runtime.ImageFilter{}
 	if x.Image != nil {
-		ifer.Image = x.Image.ToCRI()
+		ifer.Image = ImageSpecToCRI(x.Image)
 	}
 	return ifer
 }
 
-func (x *ImageFilter) ToCRIAlpha() *runtimeAlpha.ImageFilter {
+func ImageFilterToCRIAlpha(x *types.ImageFilter) *runtimeAlpha.ImageFilter {
 	ifer := &runtimeAlpha.ImageFilter{}
 	if x.Image != nil {
-		ifer.Image = x.Image.ToCRIAlpha()
+		ifer.Image = ImageSpecToCRIAlpha(x.Image)
 	}
 	return ifer
 }
 
-func (x *ImageSpec) ToCRI() *runtime.ImageSpec {
+func ImageSpecToCRI(x *types.ImageSpec) *runtime.ImageSpec {
 	return &runtime.ImageSpec{
 		Image:       x.Image,
 		Annotations: x.Annotations,
 	}
 }
 
-func (x *ImageSpec) ToCRIAlpha() *runtimeAlpha.ImageSpec {
+func ImageSpecToCRIAlpha(x *types.ImageSpec) *runtimeAlpha.ImageSpec {
 	return &runtimeAlpha.ImageSpec{
 		Image:       x.Image,
 		Annotations: x.Annotations,
 	}
 }
 
-func FromCRIImage(cri *runtime.Image) *Image {
-	img := &Image{
+func FromCRIImage(cri *runtime.Image) *types.Image {
+	img := &types.Image{
 		Id:          cri.Id,
 		RepoTags:    cri.RepoTags,
 		RepoDigests: cri.RepoDigests,
@@ -72,15 +69,15 @@ func FromCRIImage(cri *runtime.Image) *Image {
 		Pinned:      cri.Pinned,
 	}
 	if cri.Uid != nil {
-		img.Uid = &Int64Value{
+		img.Uid = &types.Int64Value{
 			Value: cri.Uid.Value,
 		}
 	}
 	return img
 }
 
-func FromCRIAlphaImage(cri *runtimeAlpha.Image) *Image {
-	img := &Image{
+func FromCRIAlphaImage(cri *runtimeAlpha.Image) *types.Image {
+	img := &types.Image{
 		Id:          cri.Id,
 		RepoTags:    cri.RepoTags,
 		RepoDigests: cri.RepoDigests,
@@ -90,33 +87,29 @@ func FromCRIAlphaImage(cri *runtimeAlpha.Image) *Image {
 		Pinned:      cri.Pinned,
 	}
 	if cri.Uid != nil {
-		img.Uid = &Int64Value{
+		img.Uid = &types.Int64Value{
 			Value: cri.Uid.Value,
 		}
 	}
 	return img
 }
 
-func FromCRIImageSpec(cri *runtime.ImageSpec) *ImageSpec {
+func FromCRIImageSpec(cri *runtime.ImageSpec) *types.ImageSpec {
 	if cri == nil {
 		return nil
 	}
-	return &ImageSpec{
+	return &types.ImageSpec{
 		Image:       cri.Image,
 		Annotations: cri.Annotations,
 	}
 }
 
-func FromCRIAlphaImageSpec(cri *runtimeAlpha.ImageSpec) *ImageSpec {
+func FromCRIAlphaImageSpec(cri *runtimeAlpha.ImageSpec) *types.ImageSpec {
 	if cri == nil {
 		return nil
 	}
-	return &ImageSpec{
+	return &types.ImageSpec{
 		Image:       cri.Image,
 		Annotations: cri.Annotations,
 	}
-}
-
-func (i *Image) ID() string {
-	return i.Id
 }

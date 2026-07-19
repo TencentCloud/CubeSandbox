@@ -17,8 +17,8 @@ import (
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
+	"github.com/tencentcloud/CubeSandbox/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/nbi/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/version/v1"
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"

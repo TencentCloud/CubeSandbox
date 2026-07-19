@@ -11,8 +11,8 @@
 package images
 
 import (
-	v1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
-	v11 "github.com/tencentcloud/CubeSandbox/Cubelet/api/types/v1"
+	v1 "github.com/tencentcloud/CubeSandbox/api/services/errorcode/v1"
+	v11 "github.com/tencentcloud/CubeSandbox/api/types/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -793,7 +793,7 @@ const file_api_services_images_v1_images_proto_rawDesc = "" +
 	"\n" +
 	"ListImages\x120.cubelet.services.images.v1.CubeListImageRequest\x1a1.cubelet.services.images.v1.CubeListImageResponse\x12q\n" +
 	"\fDestroyImage\x12/.cubelet.services.images.v1.DestroyImageRequest\x1a0.cubelet.services.images.v1.DestroyImageResponse\x12l\n" +
-	"\vVolumeUtils\x12-.cubelet.services.images.v1.VolumUtilsRequest\x1a..cubelet.services.images.v1.VolumUtilsResponseBKZIgithub.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1;imagesb\x06proto3"
+	"\vVolumeUtils\x12-.cubelet.services.images.v1.VolumUtilsRequest\x1a..cubelet.services.images.v1.VolumUtilsResponseBNZLgithub.com/tencentcloud/CubeSandbox/CubeMaster/api/services/images/v1;imagesb\x06proto3"
 
 var (
 	file_api_services_images_v1_images_proto_rawDescOnce sync.Once

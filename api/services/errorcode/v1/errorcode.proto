@@ -6,7 +6,7 @@ syntax = "proto3";
 
 package cubelet.services.errorcode.v1;
 
-option go_package = "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1;errorcode";
+option go_package = "github.com/tencentcloud/CubeSandbox/api/services/errorcode/v1;errorcode";
 
 
 enum ErrorCode {

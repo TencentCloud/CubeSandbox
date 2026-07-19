@@ -5,7 +5,7 @@
 package cubebox
 
 import (
-	v1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
+	v1 "github.com/tencentcloud/CubeSandbox/api/services/images/v1"
 )
 
 func (containerReq *ContainerConfig) IsImageStorageMediaType(mediaType v1.ImageStorageMediaType) bool {

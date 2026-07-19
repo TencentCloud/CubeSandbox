@@ -16,7 +16,7 @@ import (
 	"github.com/containerd/plugin/registry"
 
 	"github.com/containerd/plugin"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/api/services/errorcode/v1"
 	pb "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/nbi/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"

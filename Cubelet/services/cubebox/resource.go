@@ -9,7 +9,7 @@ import (
 	"math"
 	"sync/atomic"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/numa"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"

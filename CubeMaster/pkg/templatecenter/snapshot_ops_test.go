@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/agiledragon/gomonkey/v2"
-	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
-	errorcodev1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/errorcode/v1"
+	cubeboxv1 "github.com/tencentcloud/CubeSandbox/api/services/cubebox/v1"
+	errorcodev1 "github.com/tencentcloud/CubeSandbox/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"

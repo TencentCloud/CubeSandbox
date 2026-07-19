@@ -9,7 +9,7 @@ import (
 	"fmt"
 
 	"github.com/containerd/containerd/v2/pkg/oci"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"k8s.io/apimachinery/pkg/api/resource"
 )

@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	cubebox "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-	v1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
+	cubebox "github.com/tencentcloud/CubeSandbox/api/services/cubebox/v1"
+	v1 "github.com/tencentcloud/CubeSandbox/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 )

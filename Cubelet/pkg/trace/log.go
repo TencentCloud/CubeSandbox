@@ -8,7 +8,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
 

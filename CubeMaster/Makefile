@@ -28,7 +28,9 @@ DOCKER_BUILD_DIR=docker
 
 
 PKG=github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base
-PROTO=services/errorcode services/cubebox services/images types
+# Shared protos are now in the top-level api/ module.
+# Run `make proto` from the api/ directory to regenerate them.
+PROTO=
 
 
 # Version — injected at build time via ldflags.
@@ -123,13 +125,8 @@ testlocal:
 testtt:
 	@export CUBE_MASTER_CONFIG_PATH="$(ROOT_DIR)/test/conf.yaml" && go test -v -timeout=24h -gcflags=all=-l ./integration/... -run $(tt)
 
-proto: check-proto-tools
-	$(call msg,Generate proto)
-	@( for pkg in ${PROTO}; do \
-		echo $$pkg ;\
-		protoc $(PROTOC_INCLUDE_FLAGS) $(PROTOC_GO_FLAGS) \
-		api/$$pkg/v1/*.proto ;\
-	done)
+proto:
+	@echo "Shared protos moved to api/ module. Run 'make proto' from the api/ directory."
 
 
 BUILDKIT=DOCKER_BUILDKIT=1 docker buildx build

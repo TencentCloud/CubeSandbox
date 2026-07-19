@@ -11,8 +11,8 @@
 package cubebox
 
 import (
-	v11 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/errorcode/v1"
-	v1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/images/v1"
+	v11 "github.com/tencentcloud/CubeSandbox/api/services/errorcode/v1"
+	v1 "github.com/tencentcloud/CubeSandbox/api/services/images/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"

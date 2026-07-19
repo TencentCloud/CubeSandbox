@@ -20,7 +20,7 @@ import (
 	"github.com/rcrowley/go-metrics"
 	"github.com/smallnest/weighted"
 	"github.com/stretchr/testify/assert"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"

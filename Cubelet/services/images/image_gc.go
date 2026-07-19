@@ -17,8 +17,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-	cubeimages "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
+	"github.com/tencentcloud/CubeSandbox/api/services/cubebox/v1"
+	cubeimages "github.com/tencentcloud/CubeSandbox/api/services/images/v1"
 	criimages "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/server/images"
 	imagestore "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/image"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cdp"

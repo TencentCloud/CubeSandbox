@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 )
 

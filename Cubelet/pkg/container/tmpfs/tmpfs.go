@@ -10,7 +10,7 @@ import (
 	"strconv"
 
 	"github.com/opencontainers/runtime-spec/specs-go"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 )
 

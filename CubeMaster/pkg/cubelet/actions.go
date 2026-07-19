@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	cubebox "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
-	imagesv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/images/v1"
+	cubebox "github.com/tencentcloud/CubeSandbox/api/services/cubebox/v1"
+	imagesv1 "github.com/tencentcloud/CubeSandbox/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet/grpcconn"

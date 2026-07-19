@@ -8,7 +8,7 @@ package cubelet.services.cubebox.v1;
 import "api/services/errorcode/v1/errorcode.proto";
 import "api/services/images/v1/images.proto";
 
-option go_package = "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1;cubebox";
+option go_package = "github.com/tencentcloud/CubeSandbox/api/services/cubebox/v1;cubebox";
 
 
 // Service for handling cubesandbox

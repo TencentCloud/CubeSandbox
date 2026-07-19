@@ -9,8 +9,8 @@ import (
 	"fmt"
 
 	"github.com/containerd/containerd/v2/pkg/namespaces"
-	cubebox "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-	cubeimages "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
+	cubebox "github.com/tencentcloud/CubeSandbox/api/services/cubebox/v1"
+	cubeimages "github.com/tencentcloud/CubeSandbox/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/server/images/ext4image"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/image"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"

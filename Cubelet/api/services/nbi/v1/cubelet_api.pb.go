@@ -11,7 +11,7 @@
 package nbi
 
 import (
-	v1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
+	v1 "github.com/tencentcloud/CubeSandbox/api/services/errorcode/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"

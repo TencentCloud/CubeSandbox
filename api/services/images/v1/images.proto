@@ -7,7 +7,7 @@ syntax = "proto3";
 package cubelet.services.images.v1;
 import "api/services/errorcode/v1/errorcode.proto";
 import "api/types/v1/images.proto";
-option go_package = "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/images/v1;images";
+option go_package = "github.com/tencentcloud/CubeSandbox/api/services/images/v1;images";
 
 // Service for handling image operations.
 service Images {

@@ -8,7 +8,7 @@ import (
 	"net/http"
 
 	jsoniter "github.com/json-iterator/go"
-	api "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
+	api "github.com/tencentcloud/CubeSandbox/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"

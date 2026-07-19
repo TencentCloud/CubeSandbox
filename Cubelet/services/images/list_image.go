@@ -14,9 +14,9 @@ import (
 
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/types/v1"
+	"github.com/tencentcloud/CubeSandbox/api/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/api/services/images/v1"
+	"github.com/tencentcloud/CubeSandbox/api/types/v1"
 	imagestore "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/image"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/util"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"

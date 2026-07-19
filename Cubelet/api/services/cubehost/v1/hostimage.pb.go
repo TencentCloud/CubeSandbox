@@ -22,7 +22,7 @@
 package cubehost
 
 import (
-	v1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/types/v1"
+	v1 "github.com/tencentcloud/CubeSandbox/api/types/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	anypb "google.golang.org/protobuf/types/known/anypb"
