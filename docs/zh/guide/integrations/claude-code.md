@@ -56,6 +56,9 @@ Claude Code 是一个会编辑文件、执行命令、安装依赖的终端 Agen
 
 镜像在 `cubesandbox-base` 上叠加 Node.js 24 与 Claude Code CLI，envd 已监听 `:49983`。
 
+下方节选仅展示主要构建步骤。准确的软件包列表、安装参数和环境设置以仓库中的
+`Dockerfile` 为准。
+
 ```dockerfile
 # examples/claude-code-integration/Dockerfile（节选）
 ARG CUBE_BASE_IMAGE=ghcr.io/tencentcloud/cubesandbox-base:2026.16

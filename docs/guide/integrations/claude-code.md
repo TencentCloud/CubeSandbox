@@ -62,6 +62,10 @@ with your dev environment. Running it inside CubeSandbox gives you:
 The image stacks Node.js 24 and the Claude Code CLI on top of `cubesandbox-base`,
 so envd is already listening on `:49983`.
 
+The excerpt below highlights the main build steps. Use the checked-in
+`Dockerfile` as the canonical source for the exact package list, install flags,
+and environment settings.
+
 ```dockerfile
 # examples/claude-code-integration/Dockerfile (excerpt)
 ARG CUBE_BASE_IMAGE=ghcr.io/tencentcloud/cubesandbox-base:2026.16
