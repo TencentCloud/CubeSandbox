@@ -122,6 +122,7 @@ help:
 	@printf "  web-build     Build WebUI static assets\n"
 	@printf "  web-preview   Preview built WebUI assets\n"
 	@printf "  web-lint      Run WebUI lint checks\n"
+	@printf "  web-fmt       Format WebUI sources\n"
 	@printf "  fmt            Format code in all component directories\n"
 	@printf "  web-api-sync  Export OpenAPI and regenerate WebUI schema types\n"
 	@printf "  web-sync-dev-env Build and deploy WebUI into dev-env VM\n"
@@ -342,6 +343,10 @@ web-preview:
 web-lint:
 	cd "$(WEB_DIR)" && npm run lint
 
+.PHONY: web-fmt
+web-fmt:
+	@$(MAKE) -C web fmt
+
 .PHONY: web-api-sync
 web-api-sync:
 	cd "$(WEB_DIR)" && npm run api:sync
@@ -366,9 +371,23 @@ fmt:
 	@$(MAKE) -C cubelog fmt
 	@printf '  %-8s %s\n' "FMT" "CubeMaster"
 	@$(MAKE) -C CubeMaster fmt
+	@printf '  %-8s %s\n' "FMT" "CubeNet"
+	@$(MAKE) -C CubeNet fmt
 	@printf '  %-8s %s\n' "FMT" "CubeShim"
 	@$(MAKE) -C CubeShim fmt
+	@printf '  %-8s %s\n' "FMT" "cube-lifecycle-manager"
+	@$(MAKE) -C cube-lifecycle-manager fmt
 	@printf '  %-8s %s\n' "FMT" "hypervisor"
 	@$(MAKE) -C hypervisor fmt
 	@printf '  %-8s %s\n' "FMT" "network-agent"
 	@$(MAKE) -C network-agent fmt
+	@printf '  %-8s %s\n' "FMT" "sdk/go"
+	@$(MAKE) -C sdk/go fmt
+	@printf '  %-8s %s\n' "FMT" "examples/cube-bench"
+	@$(MAKE) -C examples/cube-bench fmt
+	@printf '  %-8s %s\n' "FMT" "web"
+	@if command -v npm >/dev/null 2>&1; then \
+		$(MAKE) -C web fmt; \
+	else \
+		printf '  %-8s %s\n' "SKIP" "web (npm not available)"; \
+	fi

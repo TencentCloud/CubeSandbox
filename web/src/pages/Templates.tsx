@@ -174,7 +174,8 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
   };
 
   const mutation = useMutation({
-    mutationFn: () => templateApi.create(buildCreateBody(form) as Parameters<typeof templateApi.create>[0]),
+    mutationFn: () =>
+      templateApi.create(buildCreateBody(form) as Parameters<typeof templateApi.create>[0]),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['templates'] });
       onClose();
@@ -220,7 +221,10 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
             <div className="space-y-1.5">
               <label className="text-xs font-medium text-muted-foreground">
                 {t('create.writableLayerSize')}{' '}
-                <span className="text-destructive text-sm font-bold" aria-label={t('create.required')}>
+                <span
+                  className="text-destructive text-sm font-bold"
+                  aria-label={t('create.required')}
+                >
                   *
                 </span>
               </label>
@@ -276,16 +280,12 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
               <p className="text-xs text-muted-foreground">{t('create.probePathHint')}</p>
             </div>
           </div>
-          <p className="text-xs text-muted-foreground -mt-2">
-            {t('create.probeAutoSyncHint')}
-          </p>
+          <p className="text-xs text-muted-foreground -mt-2">{t('create.probeAutoSyncHint')}</p>
 
           {/* cpu + memory */}
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">
-                {t('create.cpu')}
-              </label>
+              <label className="text-xs font-medium text-muted-foreground">{t('create.cpu')}</label>
               <Input
                 placeholder="2000"
                 value={form.cpu}
@@ -308,9 +308,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
 
           {/* env */}
           <div className="space-y-1.5">
-            <label className="text-xs font-medium text-muted-foreground">
-              {t('create.env')}
-            </label>
+            <label className="text-xs font-medium text-muted-foreground">{t('create.env')}</label>
             <textarea
               className="w-full rounded-md border bg-background px-3 py-2 text-sm font-mono resize-y min-h-[64px] focus:outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground/40"
               placeholder={'APP_ENV=production\nDEBUG=false'}
@@ -338,7 +336,11 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
               className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground"
               onClick={() => setShowAdvanced((v) => !v)}
             >
-              {showAdvanced ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+              {showAdvanced ? (
+                <ChevronDown className="h-3.5 w-3.5" />
+              ) : (
+                <ChevronRight className="h-3.5 w-3.5" />
+              )}
               {showAdvanced ? t('create.advanced.hide') : t('create.advanced.show')}
             </button>
 
@@ -533,13 +535,11 @@ function DeleteTemplateModal({ templateID, onClose }: DeleteModalProps) {
         <CardContent className="space-y-4">
           <p className="text-sm text-muted-foreground">
             {t('delete.confirmDesc', { defaultValue: '确定要删除模板' })}{' '}
-            <span className="font-mono font-medium text-foreground">{templateID}</span>
-            {' '}{t('delete.confirmDescSuffix', { defaultValue: '吗？此操作不可撤销。' })}
+            <span className="font-mono font-medium text-foreground">{templateID}</span>{' '}
+            {t('delete.confirmDescSuffix', { defaultValue: '吗？此操作不可撤销。' })}
           </p>
           {mutation.isError && (
-            <p className="text-xs text-destructive">
-              {formatDeleteError(mutation.error)}
-            </p>
+            <p className="text-xs text-destructive">{formatDeleteError(mutation.error)}</p>
           )}
           <div className="flex justify-end gap-2">
             <Button variant="outline" size="sm" onClick={onClose}>
@@ -609,13 +609,23 @@ export default function TemplatesPage() {
       )}
 
       <div className="flex gap-2">
-        <Button variant={tab === 'list' ? 'default' : 'secondary'} size="sm" onClick={() => setTab('list')}>
+        <Button
+          variant={tab === 'list' ? 'default' : 'secondary'}
+          size="sm"
+          onClick={() => setTab('list')}
+        >
           {t('tabs.list')}
         </Button>
-        <Button variant={tab === 'compat' ? 'default' : 'secondary'} size="sm" onClick={() => setTab('compat')}>
+        <Button
+          variant={tab === 'compat' ? 'default' : 'secondary'}
+          size="sm"
+          onClick={() => setTab('compat')}
+        >
           {t('tabs.compat')}
           {(compat?.summary.staleTemplates ?? 0) > 0 && (
-            <Badge tone="err" className="ml-2">{compat?.summary.staleTemplates}</Badge>
+            <Badge tone="err" className="ml-2">
+              {compat?.summary.staleTemplates}
+            </Badge>
           )}
         </Button>
       </div>
@@ -632,84 +642,103 @@ export default function TemplatesPage() {
 
       {tab === 'list' && data && data.length === 0 && (
         <Card>
-          <div className="py-16 text-center text-sm text-muted-foreground">
-            {t('noTemplates')}
-          </div>
+          <div className="py-16 text-center text-sm text-muted-foreground">{t('noTemplates')}</div>
         </Card>
       )}
 
-      {tab === 'list' && <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {data?.map((tpl) => (
-          <div key={tpl.templateID} className="relative group">
-            <Link to={`/templates/${tpl.templateID}`} className="block">
-              <Card className="panel-hover h-full">
-                <CardHeader>
-                  <div className="flex items-center gap-3">
-                    <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-primary/20 to-cube-accent/20 text-primary ring-1 ring-primary/20">
-                      <Package size={18} />
-                    </span>
+      {tab === 'list' && (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {data?.map((tpl) => (
+            <div key={tpl.templateID} className="relative group">
+              <Link to={`/templates/${tpl.templateID}`} className="block">
+                <Card className="panel-hover h-full">
+                  <CardHeader>
+                    <div className="flex items-center gap-3">
+                      <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-primary/20 to-cube-accent/20 text-primary ring-1 ring-primary/20">
+                        <Package size={18} />
+                      </span>
+                      <div>
+                        <CardTitle className="text-base">{tpl.templateID}</CardTitle>
+                        <CardDescription className="font-mono text-xs">
+                          {tpl.templateID}
+                        </CardDescription>
+                      </div>
+                    </div>
+                    {compatByTemplate.get(tpl.templateID)?.overall === 'STALE' ? (
+                      <Badge tone="err">{t('compat.status.STALE')}</Badge>
+                    ) : (
+                      <Badge
+                        tone={
+                          tpl.status.toLowerCase() === 'ready'
+                            ? 'ok'
+                            : tpl.status.toLowerCase() === 'failed'
+                              ? 'err'
+                              : 'warn'
+                        }
+                      >
+                        {tpl.status}
+                      </Badge>
+                    )}
+                  </CardHeader>
+                  <div className="grid grid-cols-2 gap-3 pt-3 text-xs text-muted-foreground">
                     <div>
-                      <CardTitle className="text-base">{tpl.templateID}</CardTitle>
-                      <CardDescription className="font-mono text-xs">{tpl.templateID}</CardDescription>
+                      <div className="text-xs uppercase tracking-wider">{t('col.instance')}</div>
+                      <div className="mt-0.5 text-foreground/80">
+                        {tpl.instanceType ?? t('instanceDefault')}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs uppercase tracking-wider">{t('col.created')}</div>
+                      <div className="mt-0.5 text-foreground/80">
+                        {formatRelative(tpl.createdAt)}
+                      </div>
                     </div>
                   </div>
-                  {compatByTemplate.get(tpl.templateID)?.overall === 'STALE' ? (
-                    <Badge tone="err">{t('compat.status.STALE')}</Badge>
-                  ) : (
-                    <Badge tone={tpl.status.toLowerCase() === 'ready' ? 'ok' : tpl.status.toLowerCase() === 'failed' ? 'err' : 'warn'}>
-                      {tpl.status}
-                    </Badge>
-                  )}
-                </CardHeader>
-                <div className="grid grid-cols-2 gap-3 pt-3 text-xs text-muted-foreground">
-                  <div>
-                    <div className="text-xs uppercase tracking-wider">{t('col.instance')}</div>
-                    <div className="mt-0.5 text-foreground/80">{tpl.instanceType ?? t('instanceDefault')}</div>
+                  <div className="mt-3 space-y-1 text-xs text-muted-foreground">
+                    <div className="truncate">
+                      {t('col.version')}:{' '}
+                      <span className="text-foreground/80">{tpl.version ?? '—'}</span>
+                    </div>
+                    <div className="truncate">
+                      {t('col.image')}:{' '}
+                      <span className="text-foreground/80">{tpl.imageInfo ?? '—'}</span>
+                    </div>
+                    {tpl.jobID ? (
+                      <div className="truncate font-mono">
+                        {t('col.jobID')}: <span className="text-foreground/80">{tpl.jobID}</span>
+                      </div>
+                    ) : null}
                   </div>
-                  <div>
-                    <div className="text-xs uppercase tracking-wider">{t('col.created')}</div>
-                    <div className="mt-0.5 text-foreground/80">{formatRelative(tpl.createdAt)}</div>
-                  </div>
-                </div>
-                <div className="mt-3 space-y-1 text-xs text-muted-foreground">
-                  <div className="truncate">{t('col.version')}: <span className="text-foreground/80">{tpl.version ?? '—'}</span></div>
-                  <div className="truncate">{t('col.image')}: <span className="text-foreground/80">{tpl.imageInfo ?? '—'}</span></div>
-                  {tpl.jobID ? (
-                    <div className="truncate font-mono">{t('col.jobID')}: <span className="text-foreground/80">{tpl.jobID}</span></div>
-                  ) : null}
-                </div>
-              </Card>
-            </Link>
-            {/* delete button — visible on hover, always shown for failed templates */}
-            <button
-              className={[
-                'absolute top-2.5 right-2.5 z-10 flex items-center justify-center',
-                'h-7 w-7 rounded-md border bg-background shadow-sm',
-                'text-muted-foreground hover:text-destructive hover:border-destructive/50',
-                'transition-opacity duration-150',
-                tpl.status.toLowerCase() === 'failed'
-                  ? 'opacity-100'
-                  : 'opacity-0 group-hover:opacity-100',
-              ].join(' ')}
-              title={t('delete.button', { defaultValue: '删除模板' })}
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                setDeletingID(tpl.templateID);
-              }}
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-            </button>
-          </div>
-        ))}
-      </div>}
+                </Card>
+              </Link>
+              {/* delete button — visible on hover, always shown for failed templates */}
+              <button
+                className={[
+                  'absolute top-2.5 right-2.5 z-10 flex items-center justify-center',
+                  'h-7 w-7 rounded-md border bg-background shadow-sm',
+                  'text-muted-foreground hover:text-destructive hover:border-destructive/50',
+                  'transition-opacity duration-150',
+                  tpl.status.toLowerCase() === 'failed'
+                    ? 'opacity-100'
+                    : 'opacity-0 group-hover:opacity-100',
+                ].join(' ')}
+                title={t('delete.button', { defaultValue: '删除模板' })}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setDeletingID(tpl.templateID);
+                }}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       {showCreate && <CreateTemplateModal onClose={() => setShowCreate(false)} />}
       {deletingID && (
-        <DeleteTemplateModal
-          templateID={deletingID}
-          onClose={() => setDeletingID(null)}
-        />
+        <DeleteTemplateModal templateID={deletingID} onClose={() => setDeletingID(null)} />
       )}
     </div>
   );
@@ -720,31 +749,65 @@ function TemplateCompatPanel({ matrix }: { matrix?: TemplateCompatMatrix }) {
   if (!matrix) {
     return (
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        {Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-24" />)}
+        {Array.from({ length: 3 }).map((_, i) => (
+          <Skeleton key={i} className="h-24" />
+        ))}
       </div>
     );
   }
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
-        <CompatKpi label={t('compat.kpi.staleTemplates')} value={matrix.summary.staleTemplates} tone="err" />
-        <CompatKpi label={t('compat.kpi.staleReplicas')} value={matrix.summary.staleReplicas} tone="err" />
-        <CompatKpi label={t('compat.kpi.affectedNodes')} value={matrix.summary.affectedNodes} tone="warn" />
-        <CompatKpi label={t('compat.kpi.missingReplicas')} value={matrix.summary.missingReplicas} tone="warn" />
-        <CompatKpi label={t('compat.kpi.unknownReplicas')} value={matrix.summary.unknownReplicas} tone="mute" />
+        <CompatKpi
+          label={t('compat.kpi.staleTemplates')}
+          value={matrix.summary.staleTemplates}
+          tone="err"
+        />
+        <CompatKpi
+          label={t('compat.kpi.staleReplicas')}
+          value={matrix.summary.staleReplicas}
+          tone="err"
+        />
+        <CompatKpi
+          label={t('compat.kpi.affectedNodes')}
+          value={matrix.summary.affectedNodes}
+          tone="warn"
+        />
+        <CompatKpi
+          label={t('compat.kpi.missingReplicas')}
+          value={matrix.summary.missingReplicas}
+          tone="warn"
+        />
+        <CompatKpi
+          label={t('compat.kpi.unknownReplicas')}
+          value={matrix.summary.unknownReplicas}
+          tone="mute"
+        />
       </div>
       {matrix.templates.length === 0 ? (
-        <Card><div className="p-8 text-center text-sm text-muted-foreground">{t('noTemplates')}</div></Card>
+        <Card>
+          <div className="p-8 text-center text-sm text-muted-foreground">{t('noTemplates')}</div>
+        </Card>
       ) : (
         <div className="space-y-3">
-          {matrix.templates.map((row) => <CompatTemplateRow key={row.templateID} row={row} />)}
+          {matrix.templates.map((row) => (
+            <CompatTemplateRow key={row.templateID} row={row} />
+          ))}
         </div>
       )}
     </div>
   );
 }
 
-function CompatKpi({ label, value, tone }: { label: string; value: number; tone: 'err' | 'warn' | 'mute' }) {
+function CompatKpi({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone: 'err' | 'warn' | 'mute';
+}) {
   return (
     <Card>
       <div className="p-4">
@@ -780,7 +843,12 @@ function CompatTemplateRow({ row }: { row: TemplateCompatRow }) {
     <Card>
       <div className="space-y-3 p-4">
         <div className="flex items-center justify-between gap-3">
-          <Link to={`/templates/${row.templateID}`} className="font-mono text-sm hover:text-primary">{row.templateID}</Link>
+          <Link
+            to={`/templates/${row.templateID}`}
+            className="font-mono text-sm hover:text-primary"
+          >
+            {row.templateID}
+          </Link>
           <div className="flex items-center gap-2">
             {hasUnknown && (
               <Button
@@ -796,12 +864,17 @@ function CompatTemplateRow({ row }: { row: TemplateCompatRow }) {
                 {t('compat.adoptBaseline')}
               </Button>
             )}
-            <Badge tone={compatTone(row.overall)}>{t(`compat.status.${row.overall}`, { defaultValue: row.overall })}</Badge>
+            <Badge tone={compatTone(row.overall)}>
+              {t(`compat.status.${row.overall}`, { defaultValue: row.overall })}
+            </Badge>
           </div>
         </div>
         <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
           {row.nodes.map((node) => (
-            <div key={node.nodeID} className="rounded-lg border border-border/60 bg-card/40 p-3 text-xs">
+            <div
+              key={node.nodeID}
+              className="rounded-lg border border-border/60 bg-card/40 p-3 text-xs"
+            >
               <div className="flex items-center justify-between gap-2">
                 <span className="font-mono">{node.nodeID}</span>
                 <Badge tone={compatTone(node.compatStatus)}>
@@ -809,9 +882,21 @@ function CompatTemplateRow({ row }: { row: TemplateCompatRow }) {
                 </Badge>
               </div>
               <div className="mt-2 space-y-1 text-muted-foreground">
-                <CompatVersionLine label="guest" bound={node.boundGuestImageVersion} current={node.currentGuestImageVersion} />
-                <CompatVersionLine label="agent" bound={node.boundAgentVersion} current={node.currentAgentVersion} />
-                <CompatVersionLine label="kernel" bound={node.boundKernelVersion} current={node.currentKernelVersion} />
+                <CompatVersionLine
+                  label="guest"
+                  bound={node.boundGuestImageVersion}
+                  current={node.currentGuestImageVersion}
+                />
+                <CompatVersionLine
+                  label="agent"
+                  bound={node.boundAgentVersion}
+                  current={node.currentAgentVersion}
+                />
+                <CompatVersionLine
+                  label="kernel"
+                  bound={node.boundKernelVersion}
+                  current={node.currentKernelVersion}
+                />
               </div>
             </div>
           ))}
@@ -821,11 +906,21 @@ function CompatTemplateRow({ row }: { row: TemplateCompatRow }) {
   );
 }
 
-function CompatVersionLine({ label, bound, current }: { label: string; bound?: string | null; current?: string | null }) {
+function CompatVersionLine({
+  label,
+  bound,
+  current,
+}: {
+  label: string;
+  bound?: string | null;
+  current?: string | null;
+}) {
   return (
     <div className="flex justify-between gap-3">
       <span>{label}</span>
-      <span className="truncate font-mono text-foreground/80">{bound ?? '—'} → {current ?? '—'}</span>
+      <span className="truncate font-mono text-foreground/80">
+        {bound ?? '—'} → {current ?? '—'}
+      </span>
     </div>
   );
 }

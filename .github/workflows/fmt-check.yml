@@ -11,11 +11,17 @@ on:
       - 'CubeAPI/Makefile'
       - 'Cubelet/Makefile'
       - 'CubeMaster/Makefile'
+      - 'CubeNet/Makefile'
+      - 'CubeNet/cubevs/Makefile'
       - 'CubeShim/Makefile'
+      - 'cube-lifecycle-manager/Makefile'
       - 'cubecow/Makefile'
       - 'cubelog/Makefile'
       - 'hypervisor/Makefile'
       - 'network-agent/Makefile'
+      - 'sdk/go/Makefile'
+      - 'examples/cube-bench/Makefile'
+      - 'web/**'
       - '.github/workflows/fmt-check.yml'
   workflow_dispatch:
 
@@ -129,6 +135,21 @@ jobs:
           make builder-run \
             BUILDER_IMAGE="${{ steps.builder_image.outputs.image }}" \
             BUILDER_CMD='make fmt'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Format web
+        working-directory: web
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run fmt
 
       - name: Check for uncommitted formatting changes
         shell: bash

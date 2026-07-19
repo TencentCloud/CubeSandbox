@@ -95,7 +95,8 @@ export default function SandboxDetailPage() {
   });
 
   const state = data?.state ?? 'running';
-  const tone = state === 'paused' || state === 'pausing' ? 'warn' : state === 'running' ? 'ok' : 'mute';
+  const tone =
+    state === 'paused' || state === 'pausing' ? 'warn' : state === 'running' ? 'ok' : 'mute';
   const entries = logs.data?.logs ?? [];
 
   return (
@@ -206,7 +207,9 @@ export default function SandboxDetailPage() {
               <CardDescription>
                 {t('logsDesc')}
                 {entries.length > 0 && (
-                  <span className="ml-2 text-muted-foreground">({entries.length} {t('logsEntries')})</span>
+                  <span className="ml-2 text-muted-foreground">
+                    ({entries.length} {t('logsEntries')})
+                  </span>
                 )}
               </CardDescription>
             </div>
@@ -238,9 +241,7 @@ export default function SandboxDetailPage() {
                   <span className="shrink-0 text-muted-foreground/60">
                     {formatLogTime(entry.timestamp as unknown as string)}
                   </span>
-                  <span className={cn('shrink-0 w-10 uppercase font-semibold', cls)}>
-                    {lvl}
-                  </span>
+                  <span className={cn('shrink-0 w-10 uppercase font-semibold', cls)}>{lvl}</span>
                   <span className={cn('break-all', cls)}>{entry.message}</span>
                 </div>
               );
@@ -258,8 +259,12 @@ function formatDateTime(value?: string | null): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return new Intl.DateTimeFormat(undefined, {
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
     hour12: false,
   }).format(date);
 }

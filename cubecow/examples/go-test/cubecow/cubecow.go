@@ -23,16 +23,16 @@ import (
 
 // Error codes matching the C FFI definitions.
 const (
-	ErrNotFound          = -1
-	ErrAlreadyExists     = -2
-	ErrResourceExhausted = -3
-	ErrInvalidArg        = -4
-	ErrIoError           = -6
-	ErrConfigError       = -10
+	ErrNotFound           = -1
+	ErrAlreadyExists      = -2
+	ErrResourceExhausted  = -3
+	ErrInvalidArg         = -4
+	ErrIoError            = -6
+	ErrConfigError        = -10
 	ErrPreconditionFailed = -11
-	ErrNullPointer       = -12
-	ErrInvalidUtf8       = -13
-	ErrPanic             = -99
+	ErrNullPointer        = -12
+	ErrInvalidUtf8        = -13
+	ErrPanic              = -99
 )
 
 // CubecowError represents an error returned by the cubecow engine.

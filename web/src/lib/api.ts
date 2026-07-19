@@ -3,7 +3,9 @@
 
 // Minimal fetch wrapper. Auth header can be injected via the api-key header.
 
-export type ApiInit = RequestInit & { params?: Record<string, string | number | boolean | undefined> };
+export type ApiInit = RequestInit & {
+  params?: Record<string, string | number | boolean | undefined>;
+};
 
 const BASE = '/cubeapi/v1'; // same-origin via Vite proxy in dev; prefixed in prod
 
@@ -47,9 +49,10 @@ export async function api<T = unknown>(path: string, init: ApiInit = {}): Promis
   const text = await resp.text();
   const body = text ? safeJson(text) : undefined;
   if (!resp.ok) {
-    const msg = (body && typeof body === 'object' && 'error' in body && (body as any).error)
-      || (body && typeof body === 'object' && 'message' in body && (body as any).message)
-      || `${resp.status} ${resp.statusText}`;
+    const msg =
+      (body && typeof body === 'object' && 'error' in body && (body as any).error) ||
+      (body && typeof body === 'object' && 'message' in body && (body as any).message) ||
+      `${resp.status} ${resp.statusText}`;
     throw new ApiError(resp.status, String(msg), body);
   }
   return body as T;

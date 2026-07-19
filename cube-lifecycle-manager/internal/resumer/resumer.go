@@ -202,10 +202,10 @@ func (r *Resumer) callCubeMasterResume(ctx context.Context, sandboxID, instanceT
 //
 //   - "paused" or expired:        we own the resume — write "resuming"
 //   - "running":                   nothing to do, return nil-and-success
-//                                  via a sentinel (the caller's success
-//                                  bookkeeping then runs and re-asserts
-//                                  state, which is the right behaviour
-//                                  for race-recovery).
+//     via a sentinel (the caller's success
+//     bookkeeping then runs and re-asserts
+//     state, which is the right behaviour
+//     for race-recovery).
 //   - "pausing" or "resuming":    a peer is in flight → waitForRunning
 //
 // This is intentionally racy: between GET and SET another sidecar could
@@ -268,13 +268,13 @@ var errAlreadyRunning = errors.New("sandbox already running")
 //
 //   - state == "running"    → peer succeeded, request can proceed.
 //   - state == "paused"     → peer gave up; bail with an error so
-//                              CubeProxy returns 503 and the next request
-//                              gets a fresh resume attempt.
+//     CubeProxy returns 503 and the next request
+//     gets a fresh resume attempt.
 //   - key expired (!ok)     → peer crashed mid-flight; do NOT treat this
-//                              as success — return a clear error so the
-//                              caller can retry. Without this guard we
-//                              would silently let through a request to a
-//                              still-paused sandbox.
+//     as success — return a clear error so the
+//     caller can retry. Without this guard we
+//     would silently let through a request to a
+//     still-paused sandbox.
 func (r *Resumer) waitForRunning(ctx context.Context, sandboxID string) error {
 	const pollEvery = 200 * time.Millisecond
 	t := time.NewTicker(pollEvery)
@@ -295,7 +295,7 @@ func (r *Resumer) waitForRunning(ctx context.Context, sandboxID string) error {
 			return nil
 		case state == "paused":
 			return errors.New("peer resume left sandbox paused")
-		// pausing / resuming → keep polling
+			// pausing / resuming → keep polling
 		}
 		select {
 		case <-ctx.Done():

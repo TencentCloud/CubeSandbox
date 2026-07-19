@@ -27,8 +27,7 @@ export default function SandboxesPage() {
 
   const { data, isLoading } = useQuery({
     queryKey: ['sandboxes', stateFilter],
-    queryFn: () =>
-      sandboxApi.list({ state: stateFilter === 'all' ? undefined : stateFilter }),
+    queryFn: () => sandboxApi.list({ state: stateFilter === 'all' ? undefined : stateFilter }),
     refetchInterval: 5_000,
   });
 
@@ -40,22 +39,40 @@ export default function SandboxesPage() {
   };
 
   const killMut = useMutation({
-    mutationFn: (id: string) => { setPendingId(id); return sandboxApi.kill(id); },
+    mutationFn: (id: string) => {
+      setPendingId(id);
+      return sandboxApi.kill(id);
+    },
     onMutate: () => setActionError(null),
     onError: onLifecycleError,
-    onSettled: () => { setPendingId(null); qc.invalidateQueries({ queryKey: ['sandboxes'] }); },
+    onSettled: () => {
+      setPendingId(null);
+      qc.invalidateQueries({ queryKey: ['sandboxes'] });
+    },
   });
   const pauseMut = useMutation({
-    mutationFn: (id: string) => { setPendingId(id); return sandboxApi.pause(id); },
+    mutationFn: (id: string) => {
+      setPendingId(id);
+      return sandboxApi.pause(id);
+    },
     onMutate: () => setActionError(null),
     onError: onLifecycleError,
-    onSettled: () => { setPendingId(null); qc.invalidateQueries({ queryKey: ['sandboxes'] }); },
+    onSettled: () => {
+      setPendingId(null);
+      qc.invalidateQueries({ queryKey: ['sandboxes'] });
+    },
   });
   const resumeMut = useMutation({
-    mutationFn: (id: string) => { setPendingId(id); return sandboxApi.resume(id); },
+    mutationFn: (id: string) => {
+      setPendingId(id);
+      return sandboxApi.resume(id);
+    },
     onMutate: () => setActionError(null),
     onError: onLifecycleError,
-    onSettled: () => { setPendingId(null); qc.invalidateQueries({ queryKey: ['sandboxes'] }); },
+    onSettled: () => {
+      setPendingId(null);
+      qc.invalidateQueries({ queryKey: ['sandboxes'] });
+    },
   });
 
   const filtered = useMemo(() => {
@@ -214,15 +231,33 @@ function Row({
       <div className="text-xs text-muted-foreground">{formatRelative(sb.startedAt)}</div>
       <div className="flex justify-end gap-1">
         {state === 'paused' ? (
-          <Button size="icon" variant="ghost" title={t('actions.resume')} onClick={onResume} disabled={busy}>
+          <Button
+            size="icon"
+            variant="ghost"
+            title={t('actions.resume')}
+            onClick={onResume}
+            disabled={busy}
+          >
             <Play size={14} />
           </Button>
         ) : (
-          <Button size="icon" variant="ghost" title={t('actions.pause')} onClick={onPause} disabled={busy}>
+          <Button
+            size="icon"
+            variant="ghost"
+            title={t('actions.pause')}
+            onClick={onPause}
+            disabled={busy}
+          >
             <Pause size={14} />
           </Button>
         )}
-        <Button size="icon" variant="ghost" title={t('actions.kill')} onClick={onKill} disabled={busy}>
+        <Button
+          size="icon"
+          variant="ghost"
+          title={t('actions.kill')}
+          onClick={onKill}
+          disabled={busy}
+        >
           <Trash2 size={14} className="text-cube-err" />
         </Button>
       </div>

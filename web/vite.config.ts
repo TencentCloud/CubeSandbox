@@ -19,7 +19,9 @@ function resolveAppVersion(): string {
   const fromEnv = process.env.CUBE_VERSION?.trim();
   if (fromEnv) return fromEnv.replace(/^v/, '');
   try {
-    const described = execSync('git describe --tags --abbrev=0', { stdio: ['ignore', 'pipe', 'ignore'] })
+    const described = execSync('git describe --tags --abbrev=0', {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
       .toString()
       .trim();
     if (described) return described.replace(/^v/, '');

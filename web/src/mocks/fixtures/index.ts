@@ -319,25 +319,29 @@ function buildMockCreateRequest(base: TemplateSummaryDto) {
           allowOut: ['172.67.0.0/16'],
           denyOut: ['10.0.0.0/8'],
         },
-        containers: [{
-          ...containerBase,
-          envs: [
-            { key: 'APP_ENV', value: 'production' },
-            { key: 'DEBUG', value: 'false' },
-          ],
-          dns_config: { servers: ['8.8.8.8', '1.1.1.1'] },
-        }],
+        containers: [
+          {
+            ...containerBase,
+            envs: [
+              { key: 'APP_ENV', value: 'production' },
+              { key: 'DEBUG', value: 'false' },
+            ],
+            dns_config: { servers: ['8.8.8.8', '1.1.1.1'] },
+          },
+        ],
       };
     case 'nodejs-20-web':
       return {
         ...common,
         network_type: 'tap',
         cubevs_context: { allowInternetAccess: false },
-        containers: [{
-          ...containerBase,
-          envs: [{ key: 'NODE_ENV', value: 'production' }],
-          dns_config: { servers: ['114.114.114.114'] },
-        }],
+        containers: [
+          {
+            ...containerBase,
+            envs: [{ key: 'NODE_ENV', value: 'production' }],
+            dns_config: { servers: ['114.114.114.114'] },
+          },
+        ],
       };
     default:
       return common;
@@ -375,8 +379,12 @@ export function getTemplate(templateID: string): TemplateDetailDto | undefined {
         artifact_id: 'rfs-mock-edge-01',
         last_job_id: 'job-mock-edge-01',
         compat_status: base.templateID === 'python-3.11-ai' ? 'STALE' : 'OK',
-        guest_image_version: base.templateID === 'python-3.11-ai' ? 'guest-image@2024.11.02' : 'guest-image@2024.12.01',
-        agent_version: base.templateID === 'python-3.11-ai' ? 'cube-agent@0.1.7' : 'cube-agent@0.1.8',
+        guest_image_version:
+          base.templateID === 'python-3.11-ai'
+            ? 'guest-image@2024.11.02'
+            : 'guest-image@2024.12.01',
+        agent_version:
+          base.templateID === 'python-3.11-ai' ? 'cube-agent@0.1.7' : 'cube-agent@0.1.8',
       },
       {
         node_id: 'cube-edge-02',
@@ -508,7 +516,11 @@ export function getVersionMatrix(): VersionMatrixDto {
   }));
 
   return {
-    controlPlane: { version: 'v0.5.0', commit: 'a1b2c3d4e5f6a1b2', buildTime: '2026-01-15T08:00:00Z' },
+    controlPlane: {
+      version: 'v0.5.0',
+      commit: 'a1b2c3d4e5f6a1b2',
+      buildTime: '2026-01-15T08:00:00Z',
+    },
     components,
     nodes: matrixNodes,
   };
@@ -552,7 +564,8 @@ export function getSandboxLogs(sandboxID: string): SandboxLogsDto | undefined {
         timestamp: ago(18),
         level: sandbox.state === 'paused' ? 'warn' : 'info',
         message: sandbox.state === 'paused' ? 'sandbox paused by operator' : 'client connected',
-        fields: sandbox.state === 'paused' ? { actor: 'dashboard' } : { client: 'sdk/python@1.4.2' },
+        fields:
+          sandbox.state === 'paused' ? { actor: 'dashboard' } : { client: 'sdk/python@1.4.2' },
       },
     ],
   };
@@ -572,7 +585,7 @@ export function createSandbox(body: {
     alias: body.alias,
     clientID: 'dashboard',
     startedAt: new Date().toISOString(),
-    endAt: later((body.timeout ?? 300)),
+    endAt: later(body.timeout ?? 300),
     cpuCount: 2,
     memoryMB: 4096,
     diskSizeMB: 8192,

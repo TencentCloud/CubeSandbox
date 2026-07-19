@@ -56,7 +56,7 @@ export function Rail() {
               className={cn(
                 'group relative flex h-10 w-10 items-center justify-center rounded-lg text-muted-foreground transition-all duration-150 ease-cube',
                 'hover:bg-muted hover:text-foreground',
-                active && 'bg-primary/15 text-primary ring-1 ring-primary/30'
+                active && 'bg-primary/15 text-primary ring-1 ring-primary/30',
               )}
             >
               <Icon size={18} strokeWidth={1.75} />
