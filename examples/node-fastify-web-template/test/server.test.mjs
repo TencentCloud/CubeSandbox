@@ -95,6 +95,7 @@ test("write-note rejects invalid bodies without creating notes.jsonl", async (t)
     { note: "" },
     { note: "ok", unexpected: true },
     { note: 42 },
+    { note: "x".repeat(10_001) },
   ];
 
   for (const body of invalidBodies) {

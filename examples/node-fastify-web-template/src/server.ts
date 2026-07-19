@@ -6,6 +6,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 const defaultPort = Number.parseInt(process.env.PORT ?? "3000", 10);
 const defaultStateDir = process.env.STATE_DIR ?? "/workspace/state";
 const shutdownTimeoutMs = 10_000;
+const maxNoteLength = 10_000;
 
 type CounterFile = {
   count: number;
@@ -153,7 +154,11 @@ export function buildServer(options: ServerOptions = {}): FastifyInstance {
       counterWrite = update.then(
         () => undefined,
         (error) => {
-          fastify.log.error({ error }, "counter update failed");
+          try {
+            fastify.log.error({ error }, "counter update failed");
+          } catch {
+            // A logger failure must not poison future serialized counter updates.
+          }
         },
       );
       return { count: await update };
@@ -167,7 +172,7 @@ export function buildServer(options: ServerOptions = {}): FastifyInstance {
         body: {
           type: "object",
           properties: {
-            note: { type: "string", minLength: 1 },
+            note: { type: "string", minLength: 1, maxLength: maxNoteLength },
           },
           required: ["note"],
           additionalProperties: false,

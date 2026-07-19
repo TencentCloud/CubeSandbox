@@ -21,6 +21,12 @@ test("Docker entrypoint preserves tini and CMD stays aligned with the package st
   );
   assert.ok(cmdMatch, "Dockerfile must define a JSON-array CMD");
   assert.deepEqual(JSON.parse(cmdMatch[1]), packageJson.scripts.start.split(/\s+/));
+
+  const installIndex = dockerfile.indexOf("npm ci");
+  const buildIndex = dockerfile.indexOf("npm run build");
+  const pruneIndex = dockerfile.indexOf("npm prune --omit=dev");
+  assert.ok(installIndex >= 0 && installIndex < buildIndex);
+  assert.ok(buildIndex < pruneIndex, "devDependencies must be pruned after the build");
 });
 
 test(".env.example points the E2B SDK at CubeAPI", async () => {

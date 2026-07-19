@@ -13,10 +13,10 @@ RUN apt-get update \
 WORKDIR /workspace/node-fastify-web
 
 COPY package*.json tsconfig.json ./
-RUN npm ci
-
 COPY src ./src
-RUN npm run build
+RUN npm ci \
+    && npm run build \
+    && npm prune --omit=dev
 
 EXPOSE 49983 3000
 
