@@ -4,7 +4,7 @@ FROM node:24-bookworm-slim
 
 COPY --from=cubesandbox-base /usr/bin/envd /usr/bin/envd
 COPY --from=cubesandbox-base /usr/bin/tini /usr/bin/tini
-COPY --from=cubesandbox-base /usr/local/bin/cube-entrypoint.sh /usr/local/bin/cube-entrypoint.sh
+COPY --chmod=0755 cube-entrypoint.sh /usr/local/bin/cube-entrypoint.sh
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
