@@ -95,21 +95,24 @@ export async function api<T = unknown>(path: string, init: ApiInit = {}): Promis
   const accessToken = getAccessToken();
   const url = `${SDK_BASE}${path}${query}`;
 
-  const doFetch = (token: string) => fetch(url, {
-    ...rest,
-    headers: {
-      ...(rest.body != null ? { 'Content-Type': 'application/json' } : {}),
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(headers ?? {}),
-    },
-  });
+  const doFetch = (token: string) =>
+    fetch(url, {
+      ...rest,
+      headers: {
+        ...(rest.body != null ? { 'Content-Type': 'application/json' } : {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(headers ?? {}),
+      },
+    });
 
   let resp = await doFetch(accessToken);
 
   // Auto-refresh on 401 (same logic as ops())
   if (resp.status === 401 && accessToken) {
     if (!refreshing) {
-      refreshing = refreshAccessToken().finally(() => { refreshing = null; });
+      refreshing = refreshAccessToken().finally(() => {
+        refreshing = null;
+      });
     }
     const newToken = await refreshing;
     if (newToken) {
@@ -120,9 +123,10 @@ export async function api<T = unknown>(path: string, init: ApiInit = {}): Promis
   const text = await resp.text();
   const body = text ? safeJson(text) : undefined;
   if (!resp.ok) {
-    const msg = (body && typeof body === 'object' && 'error' in body && (body as any).error)
-      || (body && typeof body === 'object' && 'message' in body && (body as any).message)
-      || `${resp.status} ${resp.statusText}`;
+    const msg =
+      (body && typeof body === 'object' && 'error' in body && (body as any).error) ||
+      (body && typeof body === 'object' && 'message' in body && (body as any).message) ||
+      `${resp.status} ${resp.statusText}`;
     throw new ApiError(resp.status, String(msg), body);
   }
   return body as T;
@@ -137,21 +141,24 @@ export async function ops<T = unknown>(path: string, init: ApiInit = {}): Promis
   const accessToken = getAccessToken();
   const url = `${OPS_BASE}${path}${query}`;
 
-  const doFetch = (token: string) => fetch(url, {
-    ...rest,
-    headers: {
-      ...(rest.body != null ? { 'Content-Type': 'application/json' } : {}),
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(headers ?? {}),
-    },
-  });
+  const doFetch = (token: string) =>
+    fetch(url, {
+      ...rest,
+      headers: {
+        ...(rest.body != null ? { 'Content-Type': 'application/json' } : {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(headers ?? {}),
+      },
+    });
 
   let resp = await doFetch(accessToken);
 
   // Auto-refresh on 401
   if (resp.status === 401 && accessToken) {
     if (!refreshing) {
-      refreshing = refreshAccessToken().finally(() => { refreshing = null; });
+      refreshing = refreshAccessToken().finally(() => {
+        refreshing = null;
+      });
     }
     const newToken = await refreshing;
     if (newToken) {

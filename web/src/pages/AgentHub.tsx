@@ -57,10 +57,15 @@ const DEFAULT_LOGIN_ENV_PORT = 49999;
 function envPortFromUrl(envUrl?: string): number {
   if (!envUrl) return DEFAULT_LOGIN_ENV_PORT;
   try {
-    const url = new URL(envUrl, typeof window !== 'undefined' ? window.location.href : 'http://localhost');
+    const url = new URL(
+      envUrl,
+      typeof window !== 'undefined' ? window.location.href : 'http://localhost',
+    );
     const match = url.hostname.match(/^(\d+)-/);
     if (match) return parseInt(match[1], 10);
-  } catch { /* fall through */ }
+  } catch {
+    /* fall through */
+  }
   return DEFAULT_LOGIN_ENV_PORT;
 }
 

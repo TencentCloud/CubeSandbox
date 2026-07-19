@@ -231,9 +231,7 @@ function Row({
         )}
       </div>
       <div className="truncate text-xs text-muted-foreground">{sb.templateID ?? '—'}</div>
-      <div className="text-xs text-muted-foreground text-num">
-        {sb.cpuCount ?? '—'}
-      </div>
+      <div className="text-xs text-muted-foreground text-num">{sb.cpuCount ?? '—'}</div>
       <div className="text-xs text-muted-foreground text-num">{formatBytes(sb.memoryMB)}</div>
       <div className="text-xs text-muted-foreground/80 text-num">{sb.clientID || '—'}</div>
       <div className="text-xs text-muted-foreground">{formatRelative(sb.startedAt)}</div>

@@ -158,7 +158,10 @@ func (c *Client) GetTemplate(ctx context.Context, templateID string) (json.RawMe
 
 // DeleteSnapshot deletes a snapshot via CubeMaster.
 func (c *Client) DeleteSnapshot(ctx context.Context, snapshotID string) (json.RawMessage, error) {
-	return c.delete(ctx, fmt.Sprintf("/cube/snapshot/%s", snapshotID))
+	body := map[string]interface{}{
+		"request_id": fmt.Sprintf("cubeops-del-snap-%d", time.Now().UnixNano()),
+	}
+	return c.deleteWithBody(ctx, fmt.Sprintf("/cube/snapshot/%s", snapshotID), body)
 }
 
 // RollbackSandbox rolls back a sandbox to a snapshot via CubeMaster.

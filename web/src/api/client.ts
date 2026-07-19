@@ -129,7 +129,8 @@ function mapTemplateSummary(dto: TemplateSummaryDto): TemplateSummary {
     imageInfo: dto.imageInfo,
     jobID: dto.jobID ?? null,
     networkType: (dto as unknown as { networkType?: string }).networkType ?? null,
-    allowInternetAccess: (dto as unknown as { allowInternetAccess?: boolean }).allowInternetAccess ?? null,
+    allowInternetAccess:
+      (dto as unknown as { allowInternetAccess?: boolean }).allowInternetAccess ?? null,
   };
 }
 
@@ -146,7 +147,8 @@ function mapTemplateDetail(dto: TemplateDetailDto): TemplateDetail {
     createRequest: dto.createRequest,
     jobID: (dto as unknown as { jobID?: string }).jobID ?? null,
     networkType: (dto as unknown as { networkType?: string }).networkType ?? null,
-    allowInternetAccess: (dto as unknown as { allowInternetAccess?: boolean }).allowInternetAccess ?? null,
+    allowInternetAccess:
+      (dto as unknown as { allowInternetAccess?: boolean }).allowInternetAccess ?? null,
   };
 }
 
@@ -165,7 +167,8 @@ function mapNode(dto: ApiNodeView): ClusterNodeView {
       maxMvmSlots: dto.maxMvmSlots,
       quotaCpu: (dto as unknown as { quotaCpu?: number }).quotaCpu ?? 0,
       quotaMemMB: (dto as unknown as { quotaMemMB?: number }).quotaMemMB ?? 0,
-      createConcurrentNum: (dto as unknown as { createConcurrentNum?: number }).createConcurrentNum ?? 0,
+      createConcurrentNum:
+        (dto as unknown as { createConcurrentNum?: number }).createConcurrentNum ?? 0,
     },
     conditions: dto.conditions?.map((condition) => ({
       type: condition.type,
@@ -189,8 +192,12 @@ const DEFAULT_RESUME_BODY: SandboxResumeRequest = {
 };
 
 export const sandboxApi = {
-  list: (params?: { metadata?: string; state?: RunningSandbox['state']; nextToken?: string; limit?: number }) =>
-    api<ListedSandboxDto[]>('/v2/sandboxes', { params }).then((items) => items.map(mapSandbox)),
+  list: (params?: {
+    metadata?: string;
+    state?: RunningSandbox['state'];
+    nextToken?: string;
+    limit?: number;
+  }) => api<ListedSandboxDto[]>('/v2/sandboxes', { params }).then((items) => items.map(mapSandbox)),
   get: (id: string) => api<SandboxDetailDto>(`/sandboxes/${id}`).then(mapSandboxDetail),
   kill: (id: string) => api<void>(`/sandboxes/${id}`, { method: 'DELETE' }),
   pause: (id: string) => api<void>(`/sandboxes/${id}/pause`, { method: 'POST' }),
@@ -200,14 +207,13 @@ export const sandboxApi = {
       body: JSON.stringify(body),
     }).then(() => undefined),
   setTimeout: (id: string, seconds: number) =>
-    api<void>(`/sandboxes/${id}/timeout`, { method: 'POST', body: JSON.stringify({ timeout: seconds }) }),
+    api<void>(`/sandboxes/${id}/timeout`, {
+      method: 'POST',
+      body: JSON.stringify({ timeout: seconds }),
+    }),
   logs: (id: string, params?: { cursor?: number; limit?: number; direction?: string }) =>
     api<SandboxLogsDto>(`/v2/sandboxes/${id}/logs`, { params }),
-  create: (body: {
-    templateID: string;
-    timeout?: number;
-    metadata?: Record<string, string>;
-  }) =>
+  create: (body: { templateID: string; timeout?: number; metadata?: Record<string, string> }) =>
     api<SandboxSessionDto>('/sandboxes', {
       method: 'POST',
       body: JSON.stringify(body),
@@ -215,7 +221,8 @@ export const sandboxApi = {
 };
 
 export const templateApi = {
-  list: () => api<TemplateSummaryDto[]>('/templates').then((items) => items.map(mapTemplateSummary)),
+  list: () =>
+    api<TemplateSummaryDto[]>('/templates').then((items) => items.map(mapTemplateSummary)),
   get: (id: string) => api<TemplateDetailDto>(`/templates/${id}`).then(mapTemplateDetail),
   create: (body: {
     templateID?: string;
@@ -240,11 +247,14 @@ export const templateApi = {
     denyOut?: string[];
     with_cube_ca?: boolean;
   }) => api<unknown>('/templates', { method: 'POST', body: JSON.stringify(body) }),
-  rebuild: (id: string) => api<unknown>(`/templates/${id}`, { method: 'POST', body: JSON.stringify({}) }),
+  rebuild: (id: string) =>
+    api<unknown>(`/templates/${id}`, { method: 'POST', body: JSON.stringify({}) }),
   getBuildStatus: (id: string, buildID: string) =>
     api<unknown>(`/templates/${id}/builds/${buildID}/status`),
   getBuildLogs: (id: string, buildID: string) =>
-    api<{ lines?: string[]; status?: string; progress?: number }>(`/templates/${id}/builds/${buildID}/logs`),
+    api<{ lines?: string[]; status?: string; progress?: number }>(
+      `/templates/${id}/builds/${buildID}/logs`,
+    ),
   remove: (id: string) => api<void>(`/templates/${id}`, { method: 'DELETE' }),
   compat: () => api<TemplateCompatMatrix>('/templates/compat'),
   adoptCompatBaseline: (id: string) =>
@@ -259,14 +269,15 @@ export const clusterApi = {
   overview: () => ops<ClusterOverviewDto>('/cluster/overview'),
   nodes: () => ops<ApiNodeView[]>('/nodes').then((items) => items.map(mapNode)),
   node: (id: string) => ops<ApiNodeView>(`/nodes/${id}`).then(mapNode),
-  config: () => ops<{
-    apiEndpoint: string;
-    opsApiEndpoint: string;
-    rateLimitPerSec: number;
-    authEnabled: boolean;
-    sandboxDomain: string;
-    instanceType: string;
-  }>('/config'),
+  config: () =>
+    ops<{
+      apiEndpoint: string;
+      opsApiEndpoint: string;
+      rateLimitPerSec: number;
+      authEnabled: boolean;
+      sandboxDomain: string;
+      instanceType: string;
+    }>('/config'),
 };
 
 export interface ImageMeta {
@@ -416,10 +427,12 @@ export interface LoginResponseDto {
 export const authApi = {
   session: () => ops<SessionDto>('/auth/session'),
   login: (body: { username: string; password: string }) =>
-    ops<LoginResponseDto>('/auth/login', { method: 'POST', body: JSON.stringify(body) }).then((resp) => {
-      setTokens(resp.accessToken, resp.refreshToken);
-      return resp;
-    }),
+    ops<LoginResponseDto>('/auth/login', { method: 'POST', body: JSON.stringify(body) }).then(
+      (resp) => {
+        setTokens(resp.accessToken, resp.refreshToken);
+        return resp;
+      },
+    ),
   logout: () => {
     clearTokens();
     return ops<void>('/auth/logout', { method: 'POST' });
@@ -545,14 +558,20 @@ export const agentHubApi = {
       body: JSON.stringify(body),
     }),
   deleteSnapshot: (id: string, snapshotId: string) =>
-    ops<void>(`/agenthub/instances/${encodeURIComponent(id)}/snapshots/${encodeURIComponent(snapshotId)}`, {
-      method: 'DELETE',
-    }),
+    ops<void>(
+      `/agenthub/instances/${encodeURIComponent(id)}/snapshots/${encodeURIComponent(snapshotId)}`,
+      {
+        method: 'DELETE',
+      },
+    ),
   updateSnapshot: (id: string, snapshotId: string, body: { name?: string; isHealthy?: boolean }) =>
-    ops<void>(`/agenthub/instances/${encodeURIComponent(id)}/snapshots/${encodeURIComponent(snapshotId)}`, {
-      method: 'PATCH',
-      body: JSON.stringify(body),
-    }),
+    ops<void>(
+      `/agenthub/instances/${encodeURIComponent(id)}/snapshots/${encodeURIComponent(snapshotId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      },
+    ),
   recover: (id: string) =>
     ops<AgentRecoverResponseDto>(`/agenthub/instances/${encodeURIComponent(id)}/recover`, {
       method: 'POST',
@@ -568,10 +587,13 @@ export const agentHubApi = {
       body: JSON.stringify(body),
     }),
   publishTemplate: (id: string, body: { name?: string; snapshotId?: string }) =>
-    ops<AgentPublishTemplateResponseDto>(`/agenthub/instances/${encodeURIComponent(id)}/publish-template`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    }),
+    ops<AgentPublishTemplateResponseDto>(
+      `/agenthub/instances/${encodeURIComponent(id)}/publish-template`,
+      {
+        method: 'POST',
+        body: JSON.stringify(body),
+      },
+    ),
   updateTemplate: (templateId: string, body: { name?: string; recommended?: boolean }) =>
     ops<void>(`/agenthub/templates/${encodeURIComponent(templateId)}`, {
       method: 'PATCH',

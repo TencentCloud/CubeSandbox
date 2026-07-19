@@ -4,16 +4,7 @@
 import { Command } from 'cmdk';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import {
-  Boxes,
-  Package,
-  Server,
-  LayoutDashboard,
-  Activity,
-  KeyRound,
-  Settings,
-  Plus,
-} from 'lucide-react';
+import { Boxes, Package, Server, LayoutDashboard, Activity, Settings, Plus } from 'lucide-react';
 import { useCommandPaletteStore } from '@/store/ui';
 
 export function CommandPalette() {
@@ -78,11 +69,6 @@ export function CommandPalette() {
                 icon={<Activity size={14} />}
                 label={tNav('observability')}
                 onSelect={() => go('/observability')}
-              />
-              <Item
-                icon={<KeyRound size={14} />}
-                label={tNav('apiKeys')}
-                onSelect={() => go('/keys')}
               />
               <Item
                 icon={<Settings size={14} />}

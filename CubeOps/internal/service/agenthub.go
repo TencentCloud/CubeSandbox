@@ -419,9 +419,6 @@ type CreateInstanceResult struct {
 //     optional WeCom channel).
 //  6. Read back the gateway token after apply.
 //  7. Persist the AgentInstance record to the DB.
-//
-// On failure after step 4, the sandbox is compensated (deleted) so no
-// orphan sandbox is left running. See R10.
 func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstanceRequest) (*CreateInstanceResult, error) {
 	// --- Validate ---
 	name := strings.TrimSpace(req.Name)
@@ -1548,13 +1545,23 @@ func (s *AgentHubService) PublishTemplate(ctx context.Context, req PublishTempla
 			if err != nil {
 				return nil, wrapCMError(err)
 			}
+			// CubeMaster wraps snapshot_id inside a nested "snapshot" object:
+			// {"ret":..., "snapshot": {"snapshot_id": "snap-xxx", ...}}
 			var snapResult struct {
+				Snapshot struct {
+					SnapshotID string `json:"snapshot_id"`
+				} `json:"snapshot"`
+				// Fallback: some CubeMaster versions return snapshot_id at the
+				// top level. Keep it for backward compatibility.
 				SnapshotID string `json:"snapshot_id"`
 			}
 			_ = json.Unmarshal(snapResp, &snapResult)
-			snapshotID = snapResult.SnapshotID
+			snapshotID = snapResult.Snapshot.SnapshotID
 			if snapshotID == "" {
-				return nil, NewBadGateway("CubeMaster returned empty snapshot_id")
+				snapshotID = snapResult.SnapshotID
+			}
+			if snapshotID == "" {
+				return nil, NewBadGateway("CubeMaster returned empty snapshot_id: " + string(snapResp))
 			}
 
 			_ = s.Store.DB().WithContext(ctx).Exec(
