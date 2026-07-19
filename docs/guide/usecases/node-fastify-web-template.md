@@ -58,7 +58,7 @@ The Python demos use the E2B-compatible SDK endpoint exposed by CubeSandbox. `ru
 - **Stateful web app validation**: the counter and note endpoints make workspace persistence visible and easy to test.
 - **Snapshot/resume coverage**: the demo verifies that web-service state survives pause and resume flows.
 - **Non-happy-path tests**: local tests cover corrupted state, invalid bodies, malformed JSON, and a real listener on an ephemeral port.
-- **Verified on a real CubeSandbox environment**: the template was registered as `tpl-03f52e94be8c48ca8ef68dee` and validated end to end in WSL with Kimi K2.7-assisted semi-automated real-machine testing.
+- **Verified in WSL2 Docker**: the image build and default container runtime were validated in WSL2. End-to-end CubeSandbox snapshot/resume verification still requires a stable Linux or nested-virtualization host.
 
 ## References
 

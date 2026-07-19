@@ -58,7 +58,7 @@ Python demo 使用 CubeSandbox 暴露的 E2B 兼容 SDK 入口。`run_demo.py` �
 - **有状态 Web 应用验证**：counter 和 note 接口让工作区持久化能力可见且易测。
 - **覆盖快照恢复链路**：demo 验证 Web 服务状态可以跨 pause / resume 保留。
 - **非 happy-path 测试**：本地测试覆盖损坏状态、非法请求体、非法 JSON，以及随机端口上的真实 listener。
-- **已在真实 CubeSandbox 环境验证**：模板已注册为 `tpl-03f52e94be8c48ca8ef68dee`，并通过 Kimi K2.7 辅助的半自动真机测试完成端到端验证。
+- **已通过 WSL2 Docker 验证**：镜像构建和默认容器运行已在 WSL2 中验证；CubeSandbox 快照恢复的端到端验证仍需在稳定的 Linux 或嵌套虚拟化主机上完成。
 
 ## 参考资料
 

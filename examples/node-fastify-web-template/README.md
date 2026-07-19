@@ -23,7 +23,7 @@ This example shows how to build a CubeSandbox-ready Node.js web development sand
 | Language | TypeScript |
 | Local dev runner | `tsx` |
 | Build | `tsc` |
-| Runtime command | `node dist/server.js` |
+| Runtime command | `node dist/main.js` |
 
 ## Local development
 
@@ -111,8 +111,10 @@ Edit `.env`:
 | Variable | Description |
 |----------|-------------|
 | `E2B_API_KEY` | CubeSandbox / E2B-compatible API key |
-| `E2B_API_URL` | CubeAPI URL, for example `http://127.0.0.1:8089` |
+| `E2B_API_URL` | CubeAPI URL, for example `http://127.0.0.1:3000` |
 | `CUBE_TEMPLATE_ID` | Template ID created from this Docker image |
+
+`E2B_API_URL` points to the host-side CubeAPI endpoint, not this template's Fastify service. Both use port `3000` in different network contexts; port `8089` belongs to CubeMaster and is used by `cubemastercli`.
 
 Run the basic web API demo:
 

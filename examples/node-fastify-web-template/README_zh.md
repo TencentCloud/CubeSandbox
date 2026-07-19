@@ -23,7 +23,7 @@
 | 语言 | TypeScript |
 | 本地开发运行器 | `tsx` |
 | 构建方式 | `tsc` |
-| 运行命令 | `node dist/server.js` |
+| 运行命令 | `node dist/main.js` |
 
 ## 本地开发
 
@@ -111,8 +111,10 @@ cp .env.example .env
 | 变量 | 说明 |
 |------|------|
 | `E2B_API_KEY` | CubeSandbox / E2B 兼容 API Key |
-| `E2B_API_URL` | CubeAPI 地址，例如 `http://127.0.0.1:8089` |
+| `E2B_API_URL` | CubeAPI 地址，例如 `http://127.0.0.1:3000` |
 | `CUBE_TEMPLATE_ID` | 基于此 Docker 镜像创建的模板 ID |
+
+`E2B_API_URL` 指向宿主机侧的 CubeAPI，而不是本模板的 Fastify 服务。两者处于不同网络上下文，因此都使用 `3000` 端口并不冲突；`8089` 属于 CubeMaster，由 `cubemastercli` 使用。
 
 运行基础 Web API 演示：
 

@@ -1,0 +1,33 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { test } from "node:test";
+
+const exampleRoot = new URL("../", import.meta.url);
+
+test("Docker entrypoint preserves tini and CMD stays aligned with the package start script", async () => {
+  const [dockerfile, packageJsonRaw] = await Promise.all([
+    readFile(new URL("Dockerfile", exampleRoot), "utf8"),
+    readFile(new URL("package.json", exampleRoot), "utf8"),
+  ]);
+  const packageJson = JSON.parse(packageJsonRaw);
+  const entrypointMatch = dockerfile.match(/^ENTRYPOINT\s+(\[[^\n]+\])$/m);
+  const cmdMatch = dockerfile.match(/^CMD\s+(\[[^\n]+\])$/m);
+
+  assert.match(dockerfile, /^COPY --from=cubesandbox-base \/usr\/bin\/tini \/usr\/bin\/tini$/m);
+  assert.ok(entrypointMatch, "Dockerfile must define a JSON-array ENTRYPOINT");
+  assert.deepEqual(
+    JSON.parse(entrypointMatch[1]),
+    ["/usr/bin/tini", "-g", "--", "/usr/local/bin/cube-entrypoint.sh"],
+  );
+  assert.ok(cmdMatch, "Dockerfile must define a JSON-array CMD");
+  assert.deepEqual(JSON.parse(cmdMatch[1]), packageJson.scripts.start.split(/\s+/));
+});
+
+test(".env.example points the E2B SDK at CubeAPI", async () => {
+  const envExample = await readFile(new URL(".env.example", exampleRoot), "utf8");
+  const apiUrl = envExample
+    .split(/\r?\n/)
+    .find((line) => line.startsWith("E2B_API_URL="));
+
+  assert.equal(apiUrl, "E2B_API_URL=http://127.0.0.1:3000");
+});
