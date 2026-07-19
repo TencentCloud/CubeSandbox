@@ -1,0 +1,19 @@
+CAPTURE_TIME=2026-07-19T14:48:18.9756389+08:00
+GIT_HEAD=84ae673a78c933ab8964fb6376f04884efc963b8
+BRANCH=import/pr-732
+TRACKING=origin/codex/fastify-template-docs
+TRACKING_HEAD=c7eaab65e240956ea7bd9aaf601c63ff1354058d
+WSL_KERNEL=6.18.33.2-microsoft-standard-WSL2
+PRETTY_NAME="Debian GNU/Linux 13 (trixie)"
+NAME="Debian GNU/Linux"
+VERSION_ID="13"
+VERSION="13 (trixie)"
+VERSION_CODENAME=trixie
+DEBIAN_VERSION_FULL=13.5
+ID=debian
+HOME_URL="https://www.debian.org/"
+SUPPORT_URL="https://www.debian.org/support"
+BUG_REPORT_URL="https://bugs.debian.org/"
+DOCKER_CONTEXT=desktop-linux
+DOCKER_CLIENT=29.6.1 DOCKER_SERVER=29.6.1 SERVER_OS=linux SERVER_ARCH=amd64
+IMAGE_ID=sha256:610ce75b199e0dcc37f2196d6017db0ce25c7cd8056281c41ab52612a2996de4 ENTRYPOINT=["/usr/bin/tini","-g","--","/usr/local/bin/cube-entrypoint.sh"] CMD=["node","dist/main.js"]

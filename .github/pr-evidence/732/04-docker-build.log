@@ -1,0 +1,66 @@
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 734B 0.0s done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for ghcr.io/tencentcloud/cubesandbox-base:2026.16
+#2 DONE 0.0s
+
+#3 [internal] load metadata for docker.io/library/node:24-bookworm-slim
+#3 DONE 1.8s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 86B 0.0s done
+#4 DONE 0.1s
+
+#5 [internal] load build context
+#5 DONE 0.0s
+
+#6 [cubesandbox-base 1/1] FROM ghcr.io/tencentcloud/cubesandbox-base:2026.16@sha256:34ea312a63a5534e66ab17005c23d7fbaf33c38bccd5411ee402d901e63a3193
+#6 resolve ghcr.io/tencentcloud/cubesandbox-base:2026.16@sha256:34ea312a63a5534e66ab17005c23d7fbaf33c38bccd5411ee402d901e63a3193 0.0s done
+#6 DONE 0.1s
+
+#7 [stage-1 1/9] FROM docker.io/library/node:24-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d
+#7 resolve docker.io/library/node:24-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d
+#7 resolve docker.io/library/node:24-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d 0.0s done
+#7 DONE 0.1s
+
+#5 [internal] load build context
+#5 transferring context: 229B 0.0s done
+#5 DONE 0.0s
+
+#8 [stage-1 2/9] COPY --from=cubesandbox-base /usr/bin/envd /usr/bin/envd
+#8 CACHED
+
+#9 [stage-1 8/9] COPY src ./src
+#9 CACHED
+
+#10 [stage-1 7/9] COPY package*.json tsconfig.json ./
+#10 CACHED
+
+#11 [stage-1 3/9] COPY --from=cubesandbox-base /usr/bin/tini /usr/bin/tini
+#11 CACHED
+
+#12 [stage-1 4/9] COPY --chmod=0755 cube-entrypoint.sh /usr/local/bin/cube-entrypoint.sh
+#12 CACHED
+
+#13 [stage-1 5/9] RUN apt-get update     && apt-get install -y --no-install-recommends ca-certificates curl     && rm -rf /var/lib/apt/lists/*
+#13 CACHED
+
+#14 [stage-1 6/9] WORKDIR /workspace/node-fastify-web
+#14 CACHED
+
+#15 [stage-1 9/9] RUN npm ci     && npm run build     && npm prune --omit=dev
+#15 CACHED
+
+#16 exporting to image
+#16 exporting layers done
+#16 exporting manifest sha256:2f2f80893bba657d95fbb2a06a72a1494bc6d0ca43e62ddb19c9509c96e372ab done
+#16 exporting config sha256:93ffcb63108f4981d31c393d7bb81cbc2dcccac732555c9a585791a0968de4f1 done
+#16 exporting attestation manifest sha256:9aa1c002205e81aae328d91191930784acc34db31a2156e87e0cab99b9252461 0.0s done
+#16 exporting manifest list sha256:610ce75b199e0dcc37f2196d6017db0ce25c7cd8056281c41ab52612a2996de4
+#16 exporting manifest list sha256:610ce75b199e0dcc37f2196d6017db0ce25c7cd8056281c41ab52612a2996de4 0.0s done
+#16 naming to docker.io/library/cube-node-fastify-web:pr732-final-signal done
+#16 unpacking to docker.io/library/cube-node-fastify-web:pr732-final-signal 0.0s done
+#16 DONE 0.2s

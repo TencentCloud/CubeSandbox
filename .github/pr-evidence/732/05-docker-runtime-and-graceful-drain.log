@@ -1,0 +1,76 @@
+REDACTION=Local harness source path replaced with <local-graceful-drain-harness.mjs>; result fields unchanged.
+CAPTURE_TIME=2026-07-19T14:37:12.7492615+08:00
+HOST=Microsoft Windows NT 10.0.26200.0
+WSL_DISTRO=Debian
+DOCKER_CONTEXT=desktop-linux
+IMAGE=cube-node-fastify-web:pr732-final-signal
+=== DEFAULT_IMAGE_RUNTIME ===
+RUN_COMMAND=docker run -d --name pr732-final-default-20260719 -p 63292:49983 -p 63293:3000 cube-node-fastify-web:pr732-final-signal
+CONTAINER_ID=f9e34f2f34a83c95db20be6b7936dc0de9240583637311cc22693fdcc5542288
+PORTS ENVD=63292 APP=63293
+READY_ATTEMPT=1 ENVD_STATUS=204 APP_STATUS=200
+IMAGE_METADATA
+ID=sha256:610ce75b199e0dcc37f2196d6017db0ce25c7cd8056281c41ab52612a2996de4 Entrypoint=["/usr/bin/tini","-g","--","/usr/local/bin/cube-entrypoint.sh"] Cmd=["node","dist/main.js"]
+PROCESS_TREE
+PID                 PPID                STAT                COMMAND             COMMAND
+3866                3841                Ss                  tini                /usr/bin/tini -g -- /usr/local/bin/cube-entrypoint.sh node dist/main.js
+3893                3866                S                   cube-entrypoint     /bin/sh /usr/local/bin/cube-entrypoint.sh node dist/main.js
+3896                3893                Sl                  envd                /usr/bin/envd -port 49983
+3897                3893                Sl                  MainThread          node dist/main.js
+HEALTH={"ok":true}
+INFO={"node":"v24.18.0","platform":"linux","arch":"x64","cwd":"/workspace/node-fastify-web","stateDir":"/workspace/state"}
+COUNTER_1={"count":1}
+COUNTER_2={"count":2}
+NOTE={"ok":true,"path":"/workspace/state/notes.jsonl"}
+OVERSIZED_NOTE_STATUS=400
+cube-node-fastify-web-template@0.1.0 /workspace/node-fastify-web
+`-- fastify@5.9.0
+
+DEV_DEPENDENCIES=PRUNED
+pr732-final-default-20260719
+DEFAULT_STOP_DURATION_MS=771
+DEFAULT_FINAL Status=exited ExitCode=0 FinishedAt=2026-07-19T06:37:14.369661194Z
+DEFAULT_SHUTDOWN_EVIDENCE
+{"level":30,"time":1784443033401,"pid":11,"hostname":"f9e34f2f34a8","msg":"Server listening at http://127.0.0.1:3000"}
+cube-entrypoint: started envd (pid=10) on port 49983
+cube-entrypoint: exec user command (pid=11): node dist/main.js
+{"level":30,"time":1784443033401,"pid":11,"hostname":"f9e34f2f34a8","msg":"Server listening at http://172.17.0.2:3000"}
+{"level":30,"time":1784443033487,"pid":11,"hostname":"f9e34f2f34a8","reqId":"req-1","req":{"method":"GET","url":"/health","host":"127.0.0.1:63293","remoteAddress":"172.17.0.1","remotePort":48768},"msg":"incoming request"}
+{"level":30,"time":1784443033490,"pid":11,"hostname":"f9e34f2f34a8","reqId":"req-1","res":{"statusCode":200},"responseTime":2.4692550003528595,"msg":"request completed"}
+{"level":30,"time":1784443033761,"pid":11,"hostname":"f9e34f2f34a8","reqId":"req-2","req":{"method":"GET","url":"/health","host":"127.0.0.1:63293","remoteAddress":"172.17.0.1","remotePort":48780},"msg":"incoming request"}
+{"level":30,"time":1784443033762,"pid":11,"hostname":"f9e34f2f34a8","reqId":"req-2","res":{"statusCode":200},"responseTime":0.19496899843215942,"msg":"request completed"}
+{"level":30,"time":1784443033769,"pid":11,"hostname":"f9e34f2f34a8","reqId":"req-3","req":{"method":"GET","url":"/api/info","host":"127.0.0.1:63293","remoteAddress":"172.17.0.1","remotePort":48796},"msg":"incoming request"}
+{"level":30,"time":1784443033770,"pid":11,"hostname":"f9e34f2f34a8","reqId":"req-3","res":{"statusCode":200},"responseTime":0.5886819995939732,"msg":"request completed"}
+{"level":30,"time":1784443033776,"pid":11,"hostname":"f9e34f2f34a8","reqId":"req-4","req":{"method":"POST","url":"/api/counter","host":"127.0.0.1:63293","remoteAddress":"172.17.0.1","remotePort":48808},"msg":"incoming request"}
+{"level":30,"time":1784443033779,"pid":11,"hostname":"f9e34f2f34a8","reqId":"req-4","res":{"statusCode":200},"responseTime":3.04279899969697,"msg":"request completed"}
+{"level":30,"time":1784443033782,"pid":11,"hostname":"f9e34f2f34a8","reqId":"req-5","req":{"method":"POST","url":"/api/counter","host":"127.0.0.1:63293","remoteAddress":"172.17.0.1","remotePort":48816},"msg":"incoming request"}
+{"level":30,"time":1784443033784,"pid":11,"hostname":"f9e34f2f34a8","reqId":"req-5","res":{"statusCode":200},"responseTime":1.3852040022611618,"msg":"request completed"}
+{"level":30,"time":1784443033796,"pid":11,"hostname":"f9e34f2f34a8","reqId":"req-6","req":{"method":"POST","url":"/api/write-note","host":"127.0.0.1:63293","remoteAddress":"172.17.0.1","remotePort":48818},"msg":"incoming request"}
+{"level":30,"time":1784443033797,"pid":11,"hostname":"f9e34f2f34a8","reqId":"req-6","res":{"statusCode":200},"responseTime":1.0296470001339912,"msg":"request completed"}
+{"level":30,"time":1784443033839,"pid":11,"hostname":"f9e34f2f34a8","reqId":"req-7","req":{"method":"POST","url":"/api/write-note","host":"127.0.0.1:63293","remoteAddress":"172.17.0.1","remotePort":48822},"msg":"incoming request"}
+{"level":30,"time":1784443033840,"pid":11,"hostname":"f9e34f2f34a8","reqId":"req-7","res":{"statusCode":400},"err":{"type":"Error","message":"body/note must NOT have more than 10000 characters","stack":"Error: body/note must NOT have more than 10000 characters\n    at defaultSchemaErrorFormatter (/workspace/node-fastify-web/node_modules/fastify/lib/context.js:95:10)\n    at wrapValidationError (/workspace/node-fastify-web/node_modules/fastify/lib/validation.js:255:17)\n    at validate (/workspace/node-fastify-web/node_modules/fastify/lib/validation.js:173:16)\n    at preValidationCallback (/workspace/node-fastify-web/node_modules/fastify/lib/handle-request.js:99:25)\n    at handler (/workspace/node-fastify-web/node_modules/fastify/lib/handle-request.js:83:7)\n    at onDone (/workspace/node-fastify-web/node_modules/fastify/lib/content-type-parser.js:241:5)\n    at AsyncResource.runInAsyncScope (node:async_hooks:227:14)\n    at bound (node:async_hooks:258:16)\n    at Parser.defaultJsonParser [as fn] (/workspace/node-fastify-web/node_modules/fastify/lib/content-type-parser.js:329:7)\n    at IncomingMessage.onEnd (/workspace/node-fastify-web/node_modules/fastify/lib/content-type-parser.js:311:27)","statusCode":400,"code":"FST_ERR_VALIDATION","validation":[{"instancePath":"/note","schemaPath":"#/properties/note/maxLength","keyword":"maxLength","params":{"limit":10000},"message":"must NOT have more than 10000 characters"}],"validationContext":"body"},"msg":"body/note must NOT have more than 10000 characters"}
+{"level":30,"time":1784443033841,"pid":11,"hostname":"f9e34f2f34a8","reqId":"req-7","res":{"statusCode":400},"responseTime":1.3242020010948181,"msg":"request completed"}
+{"level":30,"time":1784443034362,"pid":11,"hostname":"f9e34f2f34a8","signal":"SIGTERM","msg":"received shutdown signal"}
+=== IN_FLIGHT_DRAIN_HARNESS ===
+RUN_COMMAND=docker run -d --name pr732-final-drain-20260719 -p 63310:3000 --mount type=bind,source=<local-graceful-drain-harness.mjs>,target=/tmp/graceful-drain-harness.mjs,readonly cube-node-fastify-web:pr732-final-signal node /tmp/graceful-drain-harness.mjs
+CONTAINER_ID=c39b5b85b0719838778f9f7972a503dbc3bf9e827c073fee53ff3566150acedd
+PORT=63310
+HARNESS_READY_ATTEMPT=2 STATUS=200
+IN_FLIGHT_REQUEST=ACTIVE
+pr732-final-drain-20260719
+DRAIN_STOP_DURATION_MS=1796
+IN_FLIGHT_STATUS=200
+IN_FLIGHT_BODY=drained
+DRAIN_FINAL Status=exited ExitCode=0 FinishedAt=2026-07-19T06:37:18.585027809Z
+DRAIN_SHUTDOWN_EVIDENCE
+HARNESS_READY
+cube-entrypoint: started envd (pid=10) on port 49983
+cube-entrypoint: exec user command (pid=11): node /tmp/graceful-drain-harness.mjs
+REQUEST_STARTED
+SIGNAL=SIGTERM
+REQUEST_FINISHED
+DRAIN_COMPLETE
+pr732-final-default-20260719
+pr732-final-drain-20260719
+CLEANUP=TEMP_CONTAINERS_REMOVED
+RESULT=PASS_WSL2_DOCKER_GRACEFUL_DRAIN

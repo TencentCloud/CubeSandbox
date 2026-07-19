@@ -1,0 +1,99 @@
+
+> cube-node-fastify-web-template@0.1.0 test
+> npm run build && node --test test/*.test.mjs
+
+
+> cube-node-fastify-web-template@0.1.0 build
+> tsc -p tsconfig.json
+
+TAP version 13
+# Subtest: entrypoint waits for a user process after TERM interrupts dash wait
+ok 1 - entrypoint waits for a user process after TERM interrupts dash wait
+  ---
+  duration_ms: 517.732093
+  ...
+# Subtest: GET / returns HTML landing page
+ok 2 - GET / returns HTML landing page
+  ---
+  duration_ms: 125.251123
+  ...
+# Subtest: counter creates missing state directory and persists increments
+ok 3 - counter creates missing state directory and persists increments
+  ---
+  duration_ms: 22.783516
+  ...
+# Subtest: counter serializes concurrent increments
+ok 4 - counter serializes concurrent increments
+  ---
+  duration_ms: 27.088628
+  ...
+# Subtest: counter treats invalid count values as zero
+    # Subtest: missing count
+    ok 1 - missing count
+      ---
+      duration_ms: 18.246824
+      ...
+    # Subtest: wrong type
+    ok 2 - wrong type
+      ---
+      duration_ms: 14.078465
+      ...
+    # Subtest: null
+    ok 3 - null
+      ---
+      duration_ms: 18.815109
+      ...
+    # Subtest: non-finite
+    ok 4 - non-finite
+      ---
+      duration_ms: 15.465924
+      ...
+    1..4
+ok 5 - counter treats invalid count values as zero
+  ---
+  duration_ms: 67.76518
+  ...
+# Subtest: counter does not silently overwrite a corrupted counter file
+ok 6 - counter does not silently overwrite a corrupted counter file
+  ---
+  duration_ms: 21.107698
+  ...
+# Subtest: write-note rejects invalid bodies without creating notes.jsonl
+ok 7 - write-note rejects invalid bodies without creating notes.jsonl
+  ---
+  duration_ms: 18.913269
+  ...
+# Subtest: write-note rejects malformed JSON sent with application/json
+ok 8 - write-note rejects malformed JSON sent with application/json
+  ---
+  duration_ms: 14.577313
+  ...
+# Subtest: write-note appends json lines only after schema validation passes
+ok 9 - write-note appends json lines only after schema validation passes
+  ---
+  duration_ms: 12.939845
+  ...
+# Subtest: real listener serves health and info on an ephemeral port
+ok 10 - real listener serves health and info on an ephemeral port
+  ---
+  duration_ms: 55.950464
+  ...
+# Subtest: Docker entrypoint preserves tini and CMD stays aligned with the package start script
+ok 11 - Docker entrypoint preserves tini and CMD stays aligned with the package start script
+  ---
+  duration_ms: 6.051609
+  ...
+# Subtest: .env.example points the E2B SDK at CubeAPI
+ok 12 - .env.example points the E2B SDK at CubeAPI
+  ---
+  duration_ms: 1.843177
+  ...
+1..12
+# tests 16
+# suites 0
+# pass 16
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 667.866402
