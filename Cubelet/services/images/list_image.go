@@ -13,17 +13,17 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/v2/pkg/namespaces"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/types/v1"
 	imagestore "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/image"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/util"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/proto/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/proto/services/images/v1"
+	"github.com/tencentcloud/CubeSandbox/proto/types/v1"
 )
 
 func (s *service) ListImages(ctx context.Context, req *images.CubeListImageRequest) (*images.CubeListImageResponse, error) {

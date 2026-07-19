@@ -8,6 +8,12 @@ import (
 	gocontext "context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"regexp"
+	"strings"
+	"sync"
+
 	"github.com/containerd/console"
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/cmd/ctr/commands"
@@ -18,15 +24,10 @@ import (
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
-	"io"
-	"os"
-	"regexp"
-	"strings"
-	"sync"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	cubecommands "github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
+	"github.com/tencentcloud/CubeSandbox/proto/services/cubebox/v1"
 )
 
 var ExecCommand = &cli.Command{

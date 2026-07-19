@@ -21,13 +21,11 @@ import (
 	"github.com/containerd/plugin"
 	"github.com/containerd/plugin/registry"
 	jsoniter "github.com/json-iterator/go"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"k8s.io/utils/clock"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/resourcesource"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
@@ -37,7 +35,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/proto/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/proto/services/images/v1"
 )
 
 const (

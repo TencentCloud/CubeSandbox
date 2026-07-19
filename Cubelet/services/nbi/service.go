@@ -14,9 +14,9 @@ import (
 	"time"
 
 	"github.com/containerd/plugin/registry"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 
 	"github.com/containerd/plugin"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	pb "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/nbi/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
@@ -24,7 +24,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/trace"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/proto/services/errorcode/v1"
 	"google.golang.org/grpc"
 )
 

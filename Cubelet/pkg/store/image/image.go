@@ -40,14 +40,14 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/util"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	imagedigest "github.com/opencontainers/go-digest"
 	"github.com/opencontainers/go-digest/digestset"
 	imageidentity "github.com/opencontainers/image-spec/identity"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
-	cubeimages "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
+	cubeimages "github.com/tencentcloud/CubeSandbox/proto/services/images/v1"
 )
 
 type Image struct {

@@ -18,8 +18,6 @@ import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-	cubeimages "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
 	cubeconfig "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
@@ -32,6 +30,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/images"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+	"github.com/tencentcloud/CubeSandbox/proto/services/cubebox/v1"
+	cubeimages "github.com/tencentcloud/CubeSandbox/proto/services/images/v1"
 )
 
 func TestIsImageStorageMediaType(t *testing.T) {

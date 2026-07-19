@@ -11,10 +11,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/network/proto"
 	networkstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/network"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
+	"github.com/tencentcloud/CubeSandbox/proto/services/cubebox/v1"
 )
 
 func TestRecoverStore(t *testing.T) {

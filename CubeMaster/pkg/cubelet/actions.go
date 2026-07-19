@@ -11,12 +11,12 @@ import (
 	"strings"
 	"time"
 
-	cubebox "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
-	imagesv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet/grpcconn"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	cubebox "github.com/tencentcloud/CubeSandbox/proto/services/cubebox/v1"
+	imagesv1 "github.com/tencentcloud/CubeSandbox/proto/services/images/v1"
 )
 
 func Destroy(ctx context.Context, calleeEp string,

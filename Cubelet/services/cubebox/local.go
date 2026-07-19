@@ -33,9 +33,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cbri"
 	cubeconfig "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 	protobuf "google.golang.org/protobuf/proto"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	cubeimages "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/server/images"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/netfile"
@@ -48,7 +48,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/proto/services/cubebox/v1"
 )
 
 const (

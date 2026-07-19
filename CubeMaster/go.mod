@@ -2,8 +2,6 @@ module github.com/tencentcloud/CubeSandbox/CubeMaster
 
 go 1.25.7
 
-// toolchain go1.22.9
-
 require (
 	github.com/agiledragon/gomonkey/v2 v2.9.0
 	github.com/alicebob/miniredis/v2 v2.35.0
@@ -30,14 +28,14 @@ require (
 	github.com/rcrowley/go-metrics v0.0.0-20200313005456-10cdbea86bc0
 	github.com/smallnest/weighted v0.0.0-20230419055410-36b780e40a7a
 	github.com/stretchr/testify v1.11.1
+	github.com/tencentcloud/CubeSandbox/proto v0.0.0
 	github.com/tencentcloud/CubeSandbox/cubelog v0.1.0
 	github.com/urfave/cli v1.22.14
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.44.0
 	golang.org/x/time v0.14.0
-	google.golang.org/grpc v1.80.0
-	google.golang.org/protobuf v1.36.11
+	google.golang.org/grpc v1.82.1
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/mysql v1.5.1
 	gorm.io/driver/postgres v1.6.0
@@ -157,6 +155,7 @@ require (
 	golang.org/x/net v0.54.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260420184626-e10c466a9529 // indirect
+	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	k8s.io/klog/v2 v2.130.1 // indirect
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4 // indirect
@@ -164,5 +163,7 @@ require (
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.0 // indirect
 )
+
+replace github.com/tencentcloud/CubeSandbox/proto => ../proto
 
 replace github.com/tencentcloud/CubeSandbox/cubelog => ../cubelog

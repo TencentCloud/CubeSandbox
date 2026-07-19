@@ -10,10 +10,10 @@ import (
 	"strings"
 	"testing"
 
-	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
-	errorcodev1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	cubeboxv1 "github.com/tencentcloud/CubeSandbox/proto/services/cubebox/v1"
+	errorcodev1 "github.com/tencentcloud/CubeSandbox/proto/services/errorcode/v1"
 	"gorm.io/gorm"
 )
 

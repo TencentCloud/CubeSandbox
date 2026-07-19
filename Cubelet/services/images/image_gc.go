@@ -14,11 +14,10 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/distribution/reference"
 	"github.com/hashicorp/go-multierror"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"k8s.io/apimachinery/pkg/util/sets"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-	cubeimages "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
 	criimages "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/server/images"
 	imagestore "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/image"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cdp"
@@ -28,7 +27,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/chi"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/proto/services/cubebox/v1"
+	cubeimages "github.com/tencentcloud/CubeSandbox/proto/services/images/v1"
 )
 
 type imageRecord struct {

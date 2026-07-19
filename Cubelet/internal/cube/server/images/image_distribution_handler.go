@@ -9,8 +9,6 @@ import (
 	"fmt"
 
 	"github.com/containerd/containerd/v2/pkg/namespaces"
-	cubebox "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-	cubeimages "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/server/images/ext4image"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/image"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
@@ -18,7 +16,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	cubebox "github.com/tencentcloud/CubeSandbox/proto/services/cubebox/v1"
+	cubeimages "github.com/tencentcloud/CubeSandbox/proto/services/images/v1"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 

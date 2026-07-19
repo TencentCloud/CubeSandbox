@@ -12,9 +12,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
+	"github.com/tencentcloud/CubeSandbox/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/proto/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/proto/services/images/v1"
 )
 
 func TestCubeboxCreateDestroy(t *testing.T) {

@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/network/proto"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
@@ -22,6 +21,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow/provider"
 	srvconfig "github.com/tencentcloud/CubeSandbox/Cubelet/services/server/config"
+	"github.com/tencentcloud/CubeSandbox/proto/services/cubebox/v1"
 	"github.com/urfave/cli/v2"
 )
 

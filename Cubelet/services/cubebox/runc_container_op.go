@@ -20,12 +20,10 @@ import (
 	"github.com/hashicorp/go-multierror"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"k8s.io/apimachinery/pkg/api/resource"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
 	customopts "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/opts"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container"
@@ -36,7 +34,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/proto/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/proto/services/images/v1"
 )
 
 type ociRuntime struct {

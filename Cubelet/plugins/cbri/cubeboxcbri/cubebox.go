@@ -18,10 +18,8 @@ import (
 	"github.com/containerd/plugin"
 	"github.com/containerd/plugin/registry"
 	"github.com/opencontainers/runtime-spec/specs-go"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
-	cubeimages "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cbri"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/pmem"
@@ -33,7 +31,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/proto/services/errorcode/v1"
+	cubeimages "github.com/tencentcloud/CubeSandbox/proto/services/images/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 

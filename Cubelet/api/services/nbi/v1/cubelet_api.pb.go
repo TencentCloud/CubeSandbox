@@ -11,12 +11,13 @@
 package nbi
 
 import (
-	v1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
-	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
-	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
+
+	v1 "github.com/tencentcloud/CubeSandbox/proto/services/errorcode/v1"
+	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 )
 
 const (
