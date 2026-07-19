@@ -247,12 +247,39 @@ integration tests (Docker MySQL + real database).
 ### Run all tests
 
 ```bash
-# Unit + handler tests only (fast, no Docker needed)
-go test ./...
-
-# Include integration tests (requires Docker daemon running)
+# All tests (unit + handler + integration). Integration tests spin up
+# throwaway MySQL containers via dockertest; they auto-skip with t.Skip()
+# when the Docker daemon is unavailable, so this command is safe to run
+# with or without Docker installed.
 go test ./... -timeout 600s
 ```
+
+`-timeout` only sets the upper time bound for the whole test binary (the
+default is 10 minutes); it does **not** select which tests run. Whether
+integration tests execute is decided at runtime by `dockertest.NewPool`:
+Docker reachable → run; Docker missing → `t.Skipf`.
+
+If Docker is unavailable and you want the missing-Docker condition to be a
+hard failure instead of a silent skip (e.g. in CI), set
+`CUBEOPS_REQUIRE_DOCKER_TESTS=1` (or `CI=true`):
+
+```bash
+# CI mode: Docker is mandatory, skip is forbidden
+CUBEOPS_REQUIRE_DOCKER_TESTS=1 go test ./... -timeout 600s
+```
+
+**Bypassing the test cache**: `go test` caches results when the test source,
+the package under test, and the `GO*` environment variables are unchanged.
+Business env vars like `CUBEOPS_REQUIRE_DOCKER_TESTS` are **not** part of the
+cache key, so setting it alone does not invalidate the cache. To force every
+test to re-run (e.g. when verifying a refactor), add `-count=1`:
+
+```bash
+# Force re-run, ignoring the cache entirely
+go test ./... -timeout 600s -count=1
+```
+
+`go clean -testcache` clears the cache globally for the same effect.
 
 ### Test categories
 
@@ -278,7 +305,7 @@ go test ./internal/auth/... -v
 go test ./internal/store/... -v -timeout 120s
 
 # Only agenthub handler integration tests (requires Docker)
-go test ./internal/handler/... -run TestAgentHub -v -timeout 300s
+go test ./internal/handler/... -run TestAgentHub -v -timeout 600s
 ```
 
 ### Integration test details
@@ -293,14 +320,10 @@ bootstrapped, and the default admin account is seeded.
 - The test image `mysql:8.0` will be pulled automatically on first run
 
 **Without Docker**: integration tests are automatically skipped with
-`t.Skip()`. To force them to run (e.g. in CI), set
-`CUBEOPS_REQUIRE_DOCKER_TESTS=1` — this makes Docker-missing a fatal
-failure instead of a skip:
-
-```bash
-# CI mode: Docker is mandatory, skip is forbidden
-CUBEOPS_REQUIRE_DOCKER_TESTS=1 go test ./... -timeout 600s
-```
+`t.Skip()`. Set `CUBEOPS_REQUIRE_DOCKER_TESTS=1` (or `CI=true`) to turn
+that into a hard failure instead — useful in CI to catch regressions where
+Docker silently went missing. See "Run all tests" above for the exact
+command.
 
 **External MySQL**: if you have a MySQL instance you'd like to use instead
 of Docker, set `CUBEMASTER_DAO_TEST_MYSQL_DSN`:
