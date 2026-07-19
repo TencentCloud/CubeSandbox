@@ -92,7 +92,10 @@ func (s *Server) buildRouter() *gin.Engine {
 	storeH := handler.NewStoreHandler()
 	configH := handler.NewConfigHandler(s.cfg.Bind, 100, s.cfg.JWTSecret != "", s.cfg.SandboxDomain, "cubebox")
 	agenthubH := handler.NewAgentHubHandler(s.store, s.cm)
-	sdkH := handler.NewSDKHandler(s.cm)
+	// SDK handler gets the AgentHubService so that E2B template/snapshot
+	// deletions can reverse-sync AgentHub registrations (matching the old
+	// Rust reverse_sync_agenthub_template that lived in CubeAPI).
+	sdkH := handler.NewSDKHandler(s.cm).WithAgentHubService(agenthubH.AgentHubService())
 
 	// Public (no auth) routes — login + refresh.
 	public := r.Group("/api/v1")

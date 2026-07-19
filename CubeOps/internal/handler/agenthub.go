@@ -42,6 +42,11 @@ func NewAgentHubHandler(s *store.Store, cm CubeMasterClient) *AgentHubHandler {
 	}
 }
 
+// AgentHubService returns the underlying service. Used by server.go to wire
+// the SDK handler's reverse-sync (SDK template deletes must clean up AgentHub
+// registrations, same as the old Rust reverse_sync_agenthub_template).
+func (h *AgentHubHandler) AgentHubService() *service.AgentHubService { return h.svc }
+
 // writeServiceError maps a service.Error to the corresponding HTTP response.
 // For 503 errors that carry a "retry-after:N" code, the Retry-After header
 // is set before writing the response body.
@@ -167,12 +172,21 @@ func (h *AgentHubHandler) ListTemplates(c *gin.Context) {
 }
 
 // DeleteTemplate handles DELETE /agenthub/templates/{templateID}.
+//
+// After the AgentHub template registration is soft-deleted, best-effort
+// reverse-sync any OTHER AgentHub registrations that referenced the same
+// infra template/snapshot id. This mirrors the old Rust
+// reverse_sync_agenthub_template and prevents dangling references when an
+// infra template is deleted via the AgentHub path.
 func (h *AgentHubHandler) DeleteTemplate(c *gin.Context) {
 	templateID := c.Param("templateID")
 	if err := h.store.DeleteAgentTemplate(c.Request.Context(), templateID); err != nil {
 		httputil.WriteError(c, http.StatusInternalServerError, "failed to delete template: "+err.Error())
 		return
 	}
+	// Best-effort: clean up any other AgentHub registrations pointing at the
+	// same infra id. Failures are logged inside the service, never propagated.
+	h.svc.ReverseSyncAgentHubTemplate(c.Request.Context(), templateID)
 	httputil.WriteNoContent(c)
 }
 

@@ -508,6 +508,13 @@ func (s *Store) GetAgentTemplate(ctx context.Context, templateID string) (*Agent
 }
 
 // DeleteAgentTemplate soft-deletes a template.
+//
+// This is the explicit AgentHub delete (DELETE /agenthub/templates/{id}).
+// It soft-deletes the t_agenthub_template row AND nulls out
+// published_template_id on any snapshots that referenced it — matching the
+// old Rust soft_delete_template (db.rs:851). The snapshot cleanup was
+// previously missing in CubeOps, leaving dangling published_template_id
+// values after a template delete.
 func (s *Store) DeleteAgentTemplate(ctx context.Context, templateID string) error {
 	result := s.db.WithContext(ctx).Exec(
 		`UPDATE t_agenthub_template SET deleted_at = NOW() WHERE template_id = ? AND deleted_at IS NULL`,
@@ -518,6 +525,72 @@ func (s *Store) DeleteAgentTemplate(ctx context.Context, templateID string) erro
 	}
 	if result.RowsAffected == 0 {
 		return errors.New("template not found")
+	}
+	// Clear published_template_id on snapshots referencing this template.
+	// Best-effort: a failure here is logged but does not unwind the template
+	// delete that already succeeded.
+	if err := s.db.WithContext(ctx).Exec(
+		`UPDATE t_agenthub_snapshot SET published_template_id = NULL WHERE published_template_id = ?`,
+		templateID,
+	).Error; err != nil {
+		return fmt.Errorf("clear snapshot published_template_id: %w", err)
+	}
+	return nil
+}
+
+// FindTemplateIDsByInfraID returns the template_ids of all live (non-deleted)
+// AgentHub template registrations whose template_id OR source_snapshot_id
+// matches the given infra template/snapshot id.
+//
+// This is the Go equivalent of the old Rust
+// find_template_ids_by_template_or_source_snapshot (db.rs:788). It backs the
+// reverse-sync that runs after an infrastructure template/snapshot is
+// deleted via the E2B / SDK path, so that AgentHub registrations pointing at
+// the just-deleted infra resource are cleaned up rather than left dangling.
+func (s *Store) FindTemplateIDsByInfraID(ctx context.Context, infraID string) ([]string, error) {
+	rows, err := s.db.WithContext(ctx).Raw(
+		`SELECT template_id FROM t_agenthub_template
+		 WHERE deleted_at IS NULL
+		   AND (template_id = ? OR source_snapshot_id = ?)`,
+		infraID, infraID,
+	).Rows()
+	if err != nil {
+		return nil, fmt.Errorf("find template ids by infra id: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan template_id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// SoftDeleteAgentHubTemplate soft-deletes a single AgentHub template
+// registration by template_id and clears published_template_id on any
+// snapshots that referenced it. Used by the reverse-sync path; unlike
+// DeleteAgentTemplate it is best-effort (RowsAffected==0 is not an error)
+// because the reverse-sync iterates over possibly-stale query results.
+//
+// This is the Go equivalent of the old Rust soft_delete_template
+// (db.rs:851), minus the "not found" error that DeleteAgentTemplate
+// surfaces for the explicit-delete API.
+func (s *Store) SoftDeleteAgentHubTemplate(ctx context.Context, templateID string) error {
+	if err := s.db.WithContext(ctx).Exec(
+		`UPDATE t_agenthub_template SET deleted_at = NOW() WHERE template_id = ? AND deleted_at IS NULL`,
+		templateID,
+	).Error; err != nil {
+		return fmt.Errorf("soft-delete template: %w", err)
+	}
+	if err := s.db.WithContext(ctx).Exec(
+		`UPDATE t_agenthub_snapshot SET published_template_id = NULL WHERE published_template_id = ?`,
+		templateID,
+	).Error; err != nil {
+		return fmt.Errorf("clear snapshot published_template_id: %w", err)
 	}
 	return nil
 }

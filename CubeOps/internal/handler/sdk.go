@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/cubemaster"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/httputil"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/service"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/translator"
 )
 
@@ -54,11 +55,21 @@ var (
 // names converted from snake_case to camelCase to match the frontend's
 // expected E2B-compatible format.
 type SDKHandler struct {
-	cm CubeMasterClient
+	cm          CubeMasterClient
+	agenthubSvc *service.AgentHubService // optional; when set, DeleteTemplate triggers AgentHub reverse-sync
 }
 
 // NewSDKHandler creates a new SDK handler backed by the CubeMaster client.
 func NewSDKHandler(cm CubeMasterClient) *SDKHandler { return &SDKHandler{cm: cm} }
+
+// WithAgentHubService attaches an AgentHubService so that SDK template/snapshot
+// deletions can reverse-sync AgentHub registrations (soft-delete AgentHub
+// templates that referenced the just-deleted infra resource). Returns the
+// receiver for chaining.
+func (h *SDKHandler) WithAgentHubService(svc *service.AgentHubService) *SDKHandler {
+	h.agenthubSvc = svc
+	return h
+}
 
 // Register installs the SDK routes on the given router group. The SDK and
 // "v2 SDK" (E2B v2 compatible) prefixes share the same handlers; we register
@@ -673,6 +684,12 @@ func (h *SDKHandler) RebuildTemplate(c *gin.Context) {
 }
 
 // DeleteTemplate — DELETE /api/v1/sdk/templates/{id}
+//
+// After the infra template is deleted via CubeMaster, best-effort reverse-sync
+// AgentHub registrations that pointed at it (or at a snapshot with the same
+// id). This migrates the old Rust reverse_sync_agenthub_template into CubeOps
+// — without it, the AgentHub registry would keep referencing a deleted infra
+// template/snapshot, leaving dangling WebUI entries.
 func (h *SDKHandler) DeleteTemplate(c *gin.Context) {
 	templateID := c.Param("id")
 	body := map[string]interface{}{
@@ -687,6 +704,12 @@ func (h *SDKHandler) DeleteTemplate(c *gin.Context) {
 	if err != nil {
 		writeCMError(c, err)
 		return
+	}
+	// Best-effort reverse-sync. Only runs when an AgentHubService is wired
+	// (production server wires it via WithAgentHubService; SDK-only tests
+	// skip it). Failures are logged inside the service, never propagated.
+	if h.agenthubSvc != nil {
+		h.agenthubSvc.ReverseSyncAgentHubTemplate(ctx, templateID)
 	}
 	writeSDKResponse(c, raw)
 }

@@ -125,6 +125,10 @@ type AgentStore interface {
 	RecordOperation(ctx context.Context, agentID, sandboxID, operationType, status, errMsg string) error
 	LatestHealthySnapshot(ctx context.Context, agentID string) (string, error)
 	SetBaseSnapshotID(ctx context.Context, agentID, snapshotID string) error
+	// Reverse-sync: find AgentHub templates backed by an infra template/snapshot
+	// id, and soft-delete them. Used after E2B/SDK template/snapshot delete.
+	FindTemplateIDsByInfraID(ctx context.Context, infraID string) ([]string, error)
+	SoftDeleteAgentHubTemplate(ctx context.Context, templateID string) error
 	DB() *gorm.DB
 }
 
@@ -200,6 +204,37 @@ func (s *AgentHubService) CompensateDeleteSandbox(ctx context.Context, sandboxID
 	} else {
 		slog.Info("CompensateDeleteSandbox: sandbox deleted after creation failure",
 			"sandboxID", sandboxID, "reason", reason)
+	}
+}
+
+// ReverseSyncAgentHubTemplate best-effort soft-deletes any AgentHub template
+// registration backed by the just-deleted infrastructure template/snapshot.
+//
+// This migrates the old Rust reverse_sync_agenthub_template
+// (CubeAPI/src/handlers/templates.rs:192) into CubeOps. The old CubeAPI
+// called it from the E2B delete_template handler after the infra delete
+// succeeded; now that CubeOps owns the SDK path (SDKHandler.DeleteTemplate)
+// and the AgentHub path (AgentHubHandler.DeleteTemplate), both must trigger
+// the reverse-sync so the AgentHub registry does not keep pointing at a
+// snapshot/template that no longer exists.
+//
+// Failures are logged, never propagated — a reverse-sync failure must not
+// block the primary deletion that already succeeded (FIX-5b, L15/H5).
+func (s *AgentHubService) ReverseSyncAgentHubTemplate(ctx context.Context, infraID string) {
+	ids, err := s.Store.FindTemplateIDsByInfraID(ctx, infraID)
+	if err != nil {
+		slog.Warn("ReverseSyncAgentHubTemplate: query AgentHub templates failed",
+			"infraID", infraID, "err", err)
+		return
+	}
+	for _, id := range ids {
+		if err := s.Store.SoftDeleteAgentHubTemplate(ctx, id); err != nil {
+			slog.Warn("ReverseSyncAgentHubTemplate: failed to soft-delete AgentHub template",
+				"templateID", id, "err", err)
+		} else {
+			slog.Info("ReverseSyncAgentHubTemplate: soft-deleted AgentHub template",
+				"templateID", id, "infraID", infraID)
+		}
 	}
 }
 
