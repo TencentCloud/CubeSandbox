@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import sys
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -85,6 +86,7 @@ def pytest_configure(config: pytest.Config) -> None:
         "sdk_compat: SDK compatibility E2E tests",
         "requires_capability(name): current SDK backend must support this capability",
         "sandbox_create_options(**kwargs): SDK sandbox create options for this test",
+        "sandbox_template_id(template_id): override template ID for this test or module",
         "requires_code_interpreter: test requires a stateful Code Interpreter kernel",
         "requires_internet: test requires public internet access from the sandbox",
         "requires_cubeproxy: test requires CubeProxy routing to the sandbox",
@@ -100,6 +102,14 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    config._sdk_e2e_template_ids = {
+        template_id
+        for item in items
+        if (template_id := _template_id_for_node(item)) is not None
+    }
+    config._sdk_e2e_default_template_needed = any(
+        _template_id_for_node(item) is None for item in items
+    )
     if config.getoption("--run-e2e"):
         return
     skip = pytest.mark.skip(reason="live SDK E2E disabled; pass --run-e2e to run")
@@ -207,7 +217,16 @@ def sdk_e2e_preflight(pytestconfig: pytest.Config, sdk_e2e_config: SdkE2EConfig,
     if not pytestconfig.getoption("--run-e2e"):
         return
     try:
-        run_preflight(sdk_e2e_config, sdk_e2e_reporter)
+        run_preflight(
+            sdk_e2e_config,
+            sdk_e2e_reporter,
+            template_ids=getattr(pytestconfig, "_sdk_e2e_template_ids", set()),
+            require_default_template=getattr(
+                pytestconfig,
+                "_sdk_e2e_default_template_needed",
+                True,
+            ),
+        )
     except RuntimeError as exc:
         pytest.exit(str(exc), returncode=2)
 
@@ -242,8 +261,10 @@ def sdk_sandbox(
             "(cube-proxy + lifecycle manager coordination)"
         )
 
-    if not sdk_e2e_config.cube_template_id:
+    template_id = _template_id_for_node(request.node) or sdk_e2e_config.cube_template_id
+    if not template_id:
         pytest.skip("CUBE_TEMPLATE_ID or --cube-template-id is required for SDK E2E")
+    node_config = replace(sdk_e2e_config, cube_template_id=template_id)
 
     create_options = _create_options_for_node(request.node)
 
@@ -254,7 +275,7 @@ def sdk_sandbox(
         "test_run_id": uuid.uuid4().hex,
     }
     if request.node.get_closest_marker("requires_cubeproxy"):
-        create_options.setdefault("timeout", sdk_e2e_config.platform_lifecycle_idle_timeout)
+        create_options.setdefault("timeout", node_config.platform_lifecycle_idle_timeout)
     request.node._sdk_e2e_backend = sdk_backend
     trace_token = set_current_trace(sdk_e2e_trace)
     adapter = None
@@ -262,11 +283,12 @@ def sdk_sandbox(
         try:
             _setup_log(
                 f"creating sandbox backend={sdk_backend} "
+                f"template_id={node_config.cube_template_id} "
                 f"nodeid={request.node.nodeid}"
             )
             adapter = create_adapter(
                 sdk_backend,
-                sdk_e2e_config,
+                node_config,
                 metadata=metadata,
                 create_options=create_options,
             )
@@ -291,7 +313,7 @@ def sdk_sandbox(
                 adapter,
                 request,
                 sdk_backend,
-                sdk_e2e_config,
+                node_config,
                 sdk_e2e_reporter,
             )
     finally:
@@ -323,6 +345,25 @@ def _create_options_for_node(node: pytest.Item) -> dict:
                 raise ValueError("sandbox_create_options accepts keyword arguments or one dict argument")
             create_options.update(marker.args[0])
     return create_options
+
+
+def _template_id_for_node(node: pytest.Item) -> str | None:
+    marker = node.get_closest_marker("sandbox_template_id")
+    if marker is None:
+        return None
+    if marker.args and marker.kwargs:
+        raise ValueError("sandbox_template_id accepts either one positional or one keyword template_id value")
+    if marker.kwargs:
+        if set(marker.kwargs) != {"template_id"}:
+            raise ValueError("sandbox_template_id accepts one template_id value")
+        template_id = marker.kwargs["template_id"]
+    else:
+        if len(marker.args) != 1:
+            raise ValueError("sandbox_template_id accepts one template_id value")
+        template_id = marker.args[0]
+    if not isinstance(template_id, str) or not template_id.strip():
+        raise ValueError("sandbox_template_id requires a non-empty string")
+    return template_id.strip()
 
 
 def _cleanup_sdk_sandbox(

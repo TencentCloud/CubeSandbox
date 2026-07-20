@@ -18,8 +18,9 @@ pytest cases
 ```
 
 Cases use only the shared adapter methods: `info`, `run_command`, `run_code`,
-`write_file`, `read_file`, `pause`, `resume_or_connect`, `kill`, and `close`.
-SDK-specific translation belongs in `adapters/`.
+`write_file`, `read_file`, `pause`, `resume_or_connect`, `get_host`,
+`traffic_access_token`, `kill`, and `close`. SDK-specific translation belongs
+in `adapters/`.
 
 ## Fixture lifecycle
 
@@ -48,6 +49,12 @@ Use `requires_capability` for backend support boundaries:
 Available capability domains include `lifecycle`, `commands`, `filesystem`,
 `run_code`, `pause_resume`, `network_allow_deny`, `network_public_access`, and
 `platform_lifecycle`.
+
+`platform_lifecycle` is currently enabled only where the backend can correctly
+honor lifecycle create fields through CubeAPI. E2B coverage should be revisited
+after the lifecycle create-parameter alignment from
+[PR #988](https://github.com/TencentCloud/CubeSandbox/pull/988) is merged and
+verified in the target environment.
 
 Use `smoke`, `p0`, `p1`, `p2`, `p3`, and `slow` to describe execution priority.
 Use `requires_cubeproxy` only for cases that require CubeProxy/lifecycle-manager

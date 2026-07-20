@@ -14,12 +14,23 @@ from framework.platform_lifecycle import probe_platform_lifecycle
 from framework.reporting import JsonlReporter
 
 
-def run_preflight(config: SdkE2EConfig, reporter: JsonlReporter) -> None:
+def run_preflight(
+    config: SdkE2EConfig,
+    reporter: JsonlReporter,
+    *,
+    template_ids: set[str] | None = None,
+    require_default_template: bool = True,
+) -> None:
     errors: list[str] = []
     details: dict[str, Any] = {"backends": config.backends}
+    effective_template_ids = set(template_ids or set())
+    if config.cube_template_id:
+        effective_template_ids.add(config.cube_template_id)
 
-    if not config.cube_template_id:
+    if require_default_template and not config.cube_template_id:
         errors.append("CUBE_TEMPLATE_ID or --cube-template-id is required")
+    if not effective_template_ids:
+        errors.append("at least one template ID is required")
 
     _check_backend_dependencies(config.backends, errors)
 
@@ -33,16 +44,19 @@ def run_preflight(config: SdkE2EConfig, reporter: JsonlReporter) -> None:
         except Exception as exc:  # noqa: BLE001 - preflight should aggregate diagnostics
             errors.append(f"CubeAPI {config.cube_api_url}/health is not reachable: {exc}")
 
-        if config.cube_template_id:
+        if effective_template_ids:
+            template_summaries = []
             try:
-                template = api.get_template(config.cube_template_id)
-                details["template"] = _template_summary(config.cube_template_id, template)
-                if not template:
-                    errors.append(f"template {config.cube_template_id!r} was not found")
-                else:
-                    _check_template_ready(config.cube_template_id, template, errors)
+                for template_id in sorted(effective_template_ids):
+                    template = api.get_template(template_id)
+                    template_summaries.append(_template_summary(template_id, template))
+                    if not template:
+                        errors.append(f"template {template_id!r} was not found")
+                    else:
+                        _check_template_ready(template_id, template, errors)
+                details["templates"] = template_summaries
             except Exception as exc:  # noqa: BLE001
-                errors.append(f"failed to read template {config.cube_template_id!r}: {exc}")
+                errors.append(f"failed to read template metadata: {exc}")
     finally:
         api.close()
 

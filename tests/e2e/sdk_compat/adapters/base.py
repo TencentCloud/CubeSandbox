@@ -56,6 +56,12 @@ class SandboxAdapter(ABC):
     def resume_or_connect(self, *, timeout: int = 60) -> "SandboxAdapter":
         raise UnsupportedCapability(self.backend, "pause_resume")
 
+    def get_host(self, port: int) -> str:
+        raise UnsupportedCapability(self.backend, "network_public_access")
+
+    def traffic_access_token(self) -> str | None:
+        raise UnsupportedCapability(self.backend, "network_public_access")
+
     @abstractmethod
     def kill(self) -> None:
         raise NotImplementedError
