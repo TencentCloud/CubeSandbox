@@ -903,12 +903,13 @@ func GetDefinition(ctx context.Context, templateID string) (*models.TemplateDefi
 // display_name (used as a stable alias). Returns ErrTemplateNotFound when no
 // template has the given alias.
 //
-// The query is scoped to kind = template to mirror the write-path invariant
-// (createDefinitionTx only reassigns aliases among template-kind rows, see
-// snapshot_ops.go): a snapshot carries its own informational display_name and
-// must never resolve through a template alias. Without this filter, First()
-// could return a snapshot sharing the alias and shadow the owning template,
-// resolving the alias to a snap-* id instead of the tpl-* owner.
+// The query uses alias_key (the STORED generated column, non-NULL only for
+// kind='template' rows with a non-empty display_name — see migration
+// 20260704120000) so it is inherently scoped to template-kind rows: a snapshot
+// carries its own informational display_name (NULL alias_key) and can never
+// match. The write path that owns template aliases is claimTemplateAlias
+// (called post-READY); without the alias_key filter, a snapshot sharing the
+// alias could shadow the owning template and resolve the alias to a snap-* id.
 func GetTemplateByAlias(ctx context.Context, alias string) (*models.TemplateDefinition, error) {
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized

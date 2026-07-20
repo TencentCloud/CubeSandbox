@@ -342,11 +342,12 @@ func TestResolveTemplateIdentifierAliasLookup(t *testing.T) {
 
 // TestGetTemplateByAliasFiltersByKindExcludesSnapshots is the regression test
 // for issue #584: a snapshot that shares a template's display_name (alias)
-// must never be returned by GetTemplateByAlias. The write path only ever
-// reassigns aliases among template-kind rows (createDefinitionTx in
-// snapshot_ops.go), so the read path mirrors that invariant by filtering
-// kind = template; otherwise First() could return the snapshot row and
-// resolve the alias to a snap-* id instead of the tpl-* owner.
+// must never be returned by GetTemplateByAlias. Template aliases are owned
+// exclusively by claimTemplateAlias (a post-READY write path on template-kind
+// rows); snapshots only carry an informational display_name. The read path
+// mirrors that invariant by filtering on alias_key (the STORED generated
+// column, NULL for snapshots); otherwise First() could return the snapshot row
+// and resolve the alias to a snap-* id instead of the tpl-* owner.
 //
 // This package's unit tests stub the DB, and the repo has no in-memory DB
 // driver (no sqlite/sqlmock; dependencies are frozen). To still exercise the

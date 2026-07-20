@@ -1092,29 +1092,6 @@ func createDefinitionTx(ctx context.Context, tx *gorm.DB, templateID string, sto
 	if kind == TemplateKindSnapshot && model.StorageBackend == "" {
 		model.StorageBackend = StorageBackendCow
 	}
-	// Alias reassignment: when a new template claims a display_name (alias)
-	// that another non-deleting template already holds, release it from the
-	// old template first. This gives "stable naming across rebuilds" — the
-	// newest template with a given alias wins — without requiring callers to
-	// manually clear stale aliases.
-	//
-	// Snapshots are deliberately excluded: their display_name is
-	// informational only (a human label for the snapshot) and must never
-	// steal — or be stolen by — a template's alias. Without this guard, a
-	// snapshot created with displayName='X' would clear a template's
-	// alias='X', breaking alias-based lookups. The UNIQUE index on the
-	// alias_key generated column (see migration 20260704120000) is likewise
-	// scoped to template-kind rows, so the two kinds never contend on
-	// display_name.
-	if kind == TemplateKindTemplate {
-		if alias := strings.TrimSpace(opts.DisplayName); alias != "" {
-			if err := tx.Table(constants.TemplateDefinitionTableName).
-				Where("kind = ? AND display_name = ? AND template_id <> ? AND status <> ?", TemplateKindTemplate, alias, templateID, StatusDeleting).
-				Update("display_name", "").Error; err != nil {
-				return fmt.Errorf("release stale alias %q fail: %w", alias, err)
-			}
-		}
-	}
 	if err := tx.Table(constants.TemplateDefinitionTableName).Create(model).Error; err != nil {
 		if strings.Contains(err.Error(), "1062") || strings.Contains(err.Error(), "Duplicate entry") {
 			return ErrDuplicateTemplate
