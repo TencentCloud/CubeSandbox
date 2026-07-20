@@ -865,6 +865,68 @@ test_postcheck_skips_when_external_host_set() {
   CUBE_EXTERNAL_REDIS_HOST=cache.example.com \
     bash "${ONE_CLICK_DIR}/scripts/systemd/redis-postcheck.sh" \
     || fail "redis-postcheck must exit 0 when CUBE_EXTERNAL_REDIS_HOST is set"
+  # Sentinel-only external Redis has no fixed HOST; MASTER_NAME alone must
+  # also skip the local container health wait.
+  CUBE_EXTERNAL_REDIS_MASTER_NAME=mymaster \
+    bash "${ONE_CLICK_DIR}/scripts/systemd/redis-postcheck.sh" \
+    || fail "redis-postcheck must exit 0 when CUBE_EXTERNAL_REDIS_MASTER_NAME is set"
+}
+
+test_external_redis_sentinel_wiring() {
+  # Contract checks for "connect to an existing Sentinel" (no local Redis).
+  # These are source-level assertions so they stay docker/redis-free like the
+  # rest of this suite; they catch accidental drops of the Sentinel branch.
+  local install_sh="${ONE_CLICK_DIR}/install.sh"
+  local up_deps="${ONE_CLICK_DIR}/scripts/one-click/up-with-deps.sh"
+  local up_support="${ONE_CLICK_DIR}/scripts/one-click/up-support.sh"
+  local up_proxy="${ONE_CLICK_DIR}/scripts/one-click/up-cube-proxy.sh"
+  local up_lcm="${ONE_CLICK_DIR}/scripts/one-click/up-cube-lifecycle-manager.sh"
+  local quickcheck="${ONE_CLICK_DIR}/scripts/one-click/quickcheck.sh"
+  local env_example="${ONE_CLICK_DIR}/env.example"
+  local global_conf="${ONE_CLICK_DIR}/cubeproxy/global.conf.template"
+  local proxy_compose="${ONE_CLICK_DIR}/cubeproxy/docker-compose.yaml.template"
+  local lcm_compose="${ONE_CLICK_DIR}/cube-lifecycle-manager/docker-compose.yaml.template"
+  local postcheck="${ONE_CLICK_DIR}/scripts/systemd/redis-postcheck.sh"
+
+  assert_contains "${env_example}" "CUBE_EXTERNAL_REDIS_MASTER_NAME"
+  assert_contains "${env_example}" "CUBE_EXTERNAL_REDIS_SENTINEL_NODES"
+  assert_contains "${postcheck}" "CUBE_EXTERNAL_REDIS_MASTER_NAME"
+  assert_contains "${up_support}" "CUBE_EXTERNAL_REDIS_MASTER_NAME"
+  assert_contains "${up_deps}" "CUBE_PROXY_REDIS_MASTER_NAME"
+  assert_contains "${up_deps}" "CUBE_LCM_REDIS_MASTER_NAME"
+  assert_contains "${up_deps}" "CUBE_PROXY_REDIS_SENTINEL_NODES"
+  assert_contains "${up_lcm}" "CUBE_LCM_REDIS_MASTER_NAME"
+  assert_contains "${up_proxy}" "CUBE_PROXY_REDIS_MASTER_NAME"
+  assert_contains "${up_proxy}" "__CUBE_PROXY_REDIS_MASTER_NAME__"
+  assert_contains "${up_proxy}" "__CUBE_PROXY_REGISTRY_REDIS_SENTINEL_NODES__"
+  assert_contains "${quickcheck}" "EXTERNAL_REDIS_MASTER_NAME"
+  assert_contains "${install_sh}" "CUBE_EXTERNAL_REDIS_MASTER_NAME"
+  assert_contains "${install_sh}" "CUBE_EXTERNAL_REDIS_SENTINEL_NODES"
+  assert_contains "${install_sh}" "SENTINEL get-master-addr-by-name"
+  assert_contains "${install_sh}" "master_name:"
+  assert_contains "${install_sh}" "sentinel_nodes:"
+  # Leaving Sentinel mode must scrub conf.yaml keys (env side uses remove_env_kv).
+  assert_contains "${install_sh}" "removing stale Redis Sentinel keys from conf.yaml"
+  assert_contains "${install_sh}" "/^  master_name:/d; /^  sentinel_nodes:/d; /^  sentinel_password:/d"
+  # Back to bundled Redis must also drop external Redis markers from .one-click.env.
+  assert_contains "${install_sh}" "Back to bundled local Redis: drop every external Redis marker"
+  # SENTINEL lookup must reuse credentials without putting the password in argv.
+  assert_contains "${install_sh}" 'REDISCLI_AUTH="${sentinel_pd}"'
+  # Leaving Sentinel for bundled Redis must restore password as well as nodes.
+  assert_contains "${install_sh}" "restoring bundled Redis nodes/password in conf.yaml"
+  # Sentinel → external standalone must scrub leftover master_name/sentinel_* keys.
+  assert_contains "${install_sh}" "Sentinel → standalone: drop leftover master_name/sentinel_*"
+  # Empty CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD must not AUTH with the master password.
+  if grep -E 'sentinel_pd="\$\{CUBE_EXTERNAL_REDIS_PASSWORD\}"' "${install_sh}" >/dev/null; then
+    fail "install.sh must not fall back Sentinel AUTH to CUBE_EXTERNAL_REDIS_PASSWORD"
+  fi
+  assert_contains "${env_example}" "Leave SENTINEL_PASSWORD empty"
+  assert_contains "${global_conf}" "redis_master_name"
+  assert_contains "${global_conf}" "redis_sentinel_nodes"
+  assert_contains "${proxy_compose}" "CUBE_PROXY_REGISTRY_REDIS_MASTER_NAME"
+  assert_contains "${proxy_compose}" "CUBE_PROXY_REGISTRY_REDIS_SENTINEL_NODES"
+  assert_contains "${lcm_compose}" "CUBE_LCM_REDIS_MASTER_NAME"
+  assert_contains "${lcm_compose}" "CUBE_LCM_REDIS_SENTINEL_NODES"
 }
 
 test_webui_postcheck_skips_when_disabled() {
@@ -946,6 +1008,7 @@ test_cube_proxy_postcheck_follows_grpc_port
 test_cube_proxy_postcheck_fails_when_grpc_port_not_ready
 test_postcheck_skips_when_external_host_set
 test_webui_postcheck_skips_when_disabled
+test_external_redis_sentinel_wiring
 test_mask_external_dep_services_remove_then_mask
 
 echo "runtime file safety tests OK"

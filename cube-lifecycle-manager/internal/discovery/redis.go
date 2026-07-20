@@ -20,7 +20,7 @@ import (
 // registration Hash + heartbeat Sorted Set from Redis and keeps an in-memory
 // map of live endpoints.
 type RedisDiscovery struct {
-	rdb     *redis.Client
+	rdb     redis.UniversalClient
 	log     *zap.Logger
 	ttl     time.Duration
 	refresh time.Duration
@@ -33,7 +33,7 @@ type RedisDiscovery struct {
 
 // Options configures a RedisDiscovery instance.
 type Options struct {
-	Redis           *redis.Client
+	Redis           redis.UniversalClient
 	Log             *zap.Logger
 	HeartbeatTTL    time.Duration // members with score < now-TTL are considered dead
 	RefreshInterval time.Duration // how often to re-scan Redis

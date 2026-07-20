@@ -294,6 +294,7 @@ quickcheck_main() {
   # not exist, so the corresponding checks must be skipped.
   local EXTERNAL_MYSQL_HOST="${CUBE_EXTERNAL_MYSQL_HOST:-}"
   local EXTERNAL_REDIS_HOST="${CUBE_EXTERNAL_REDIS_HOST:-}"
+  local EXTERNAL_REDIS_MASTER_NAME="${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}"
 
   # Validate the host:port / IP values before they are interpolated into curl
   # URLs and grep patterns. resolve_control_plane_cubemaster_addr already
@@ -325,8 +326,12 @@ quickcheck_main() {
     else
       check_unit_active cube-sandbox-mysql.service
     fi
-    if [[ -n "${EXTERNAL_REDIS_HOST}" ]]; then
-      echo "[quickcheck] external Redis (${EXTERNAL_REDIS_HOST}); skipping local redis unit check"
+    if [[ -n "${EXTERNAL_REDIS_HOST}" || -n "${EXTERNAL_REDIS_MASTER_NAME}" ]]; then
+      if [[ -n "${EXTERNAL_REDIS_MASTER_NAME}" ]]; then
+        echo "[quickcheck] external Redis Sentinel (${EXTERNAL_REDIS_MASTER_NAME}); skipping local redis unit check"
+      else
+        echo "[quickcheck] external Redis (${EXTERNAL_REDIS_HOST}); skipping local redis unit check"
+      fi
     else
       check_unit_active cube-sandbox-redis.service
     fi
@@ -344,7 +349,7 @@ quickcheck_main() {
   if command -v docker >/dev/null 2>&1 && [[ "${ROLE}" != "compute" ]]; then
     echo "[quickcheck] check container runtime state"
     [[ -n "${EXTERNAL_MYSQL_HOST}" ]] || check_container_ready "${CUBE_SANDBOX_MYSQL_CONTAINER:-cube-sandbox-mysql}"
-    [[ -n "${EXTERNAL_REDIS_HOST}" ]] || check_container_ready "${CUBE_SANDBOX_REDIS_CONTAINER:-cube-sandbox-redis}"
+    [[ -n "${EXTERNAL_REDIS_HOST}" || -n "${EXTERNAL_REDIS_MASTER_NAME}" ]] || check_container_ready "${CUBE_SANDBOX_REDIS_CONTAINER:-cube-sandbox-redis}"
     check_container_ready "${CUBE_PROXY_CONTAINER_NAME:-cube-proxy}"
     check_container_ready "${CUBE_PROXY_COREDNS_CONTAINER:-cube-proxy-coredns}"
     if [[ "${WEB_UI_ENABLE:-1}" == "1" ]]; then

@@ -1,6 +1,9 @@
 set $redis_ip "__CUBE_PROXY_REDIS_IP__";
 set $redis_port "__CUBE_PROXY_REDIS_PORT__";
 set $redis_pd "__CUBE_PROXY_REDIS_PASSWORD__";
+set $redis_master_name "__CUBE_PROXY_REDIS_MASTER_NAME__";
+set $redis_sentinel_nodes "__CUBE_PROXY_REDIS_SENTINEL_NODES__";
+set $redis_sentinel_pd "__CUBE_PROXY_REDIS_SENTINEL_PASSWORD__";
 set $redis_index 0;
 set $timeout_min 500;
 set $timeout_max 700;

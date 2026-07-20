@@ -77,7 +77,8 @@ esac
 # services only so we don't accidentally launch a conflicting container.
 CUBE_EXTERNAL_MYSQL_HOST="${CUBE_EXTERNAL_MYSQL_HOST:-}"
 CUBE_EXTERNAL_REDIS_HOST="${CUBE_EXTERNAL_REDIS_HOST:-}"
-if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" || -n "${CUBE_EXTERNAL_REDIS_HOST}" ]]; then
+CUBE_EXTERNAL_REDIS_MASTER_NAME="${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}"
+if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" || -n "${CUBE_EXTERNAL_REDIS_HOST}" || -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
   requested_services="${SUPPORT_SERVICES:-mysql redis}"
   filtered_services=""
   # Split on whitespace into an array so SUPPORT_SERVICES (user-controllable) is
@@ -92,8 +93,12 @@ if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" || -n "${CUBE_EXTERNAL_REDIS_HOST}" ]]; t
         fi
         ;;
       redis)
-        if [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" ]]; then
-          log "using external Redis (${CUBE_EXTERNAL_REDIS_HOST}), skipping local redis container"
+        if [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" || -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
+          if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
+            log "using external Redis Sentinel (${CUBE_EXTERNAL_REDIS_MASTER_NAME}), skipping local redis container"
+          else
+            log "using external Redis (${CUBE_EXTERNAL_REDIS_HOST}), skipping local redis container"
+          fi
           continue
         fi
         ;;

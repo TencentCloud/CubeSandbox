@@ -632,8 +632,27 @@ CUBE_SANDBOX_MYSQL_* alone is always assembled as mysql://.
 {{- if .Values.redis.host -}}{{ .Values.redis.host }}{{- else -}}{{ include "cube.redisName" . }}.{{ .Release.Namespace }}.svc.{{ include "cube.clusterDomain" . }}{{- end -}}
 {{- end -}}
 
+{{- /* Non-empty redis.masterName selects external Redis Sentinel (skips chart redis). */ -}}
+{{- define "cube.redisSentinelEnabled" -}}
+{{- if ne (((.Values.redis).masterName) | default "") "" -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{- /* Count non-empty comma-separated sentinel endpoints after trim. */ -}}
+{{- define "cube.redisSentinelEndpointCount" -}}
+{{- $n := 0 -}}
+{{- range $p := splitList "," (((.Values.redis).sentinelNodes) | default "") -}}
+{{- if ne ($p | trim) "" -}}{{- $n = add $n 1 -}}{{- end -}}
+{{- end -}}
+{{- $n -}}
+{{- end -}}
+
 {{- define "cube.redisBuiltinEnabled" -}}
-{{- if and (or .Values.controlPlane.enabled (eq (include "cube.proxyEnabled" .) "true")) .Values.redis.enabled (not .Values.redis.host) -}}true{{- else -}}false{{- end -}}
+{{- if and (or .Values.controlPlane.enabled (eq (include "cube.proxyEnabled" .) "true")) .Values.redis.enabled (not .Values.redis.host) (ne (include "cube.redisSentinelEnabled" .) "true") -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{- /* Master conf nodes: empty under Sentinel; else host:port. */ -}}
+{{- define "cube.redisNodes" -}}
+{{- if eq (include "cube.redisSentinelEnabled" .) "true" -}}{{- else -}}{{ printf "%s:%v" (include "cube.redisHost" .) .Values.redis.port }}{{- end -}}
 {{- end -}}
 
 {{- define "cube.egressNetProbeCommand" -}}

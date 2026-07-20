@@ -216,6 +216,24 @@ EOF
     || fail "read_env_key should keep seeing plain scalar values"
 }
 
+test_remove_env_kv_drops_key() {
+  local env_file="${TMP_DIR}/remove-sentinel.env"
+
+  upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_HOST" "10.0.0.1"
+  upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_MASTER_NAME" "mymaster"
+  upsert_env_kv "${env_file}" "CUBE_PROXY_REDIS_MASTER_NAME" "mymaster"
+  remove_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_MASTER_NAME"
+  remove_env_kv "${env_file}" "CUBE_PROXY_REDIS_MASTER_NAME"
+
+  assert_value "${env_file}" CUBE_EXTERNAL_REDIS_HOST 10.0.0.1
+  if grep -q '^CUBE_EXTERNAL_REDIS_MASTER_NAME=' "${env_file}"; then
+    fail "CUBE_EXTERNAL_REDIS_MASTER_NAME should be removed"
+  fi
+  if grep -q '^CUBE_PROXY_REDIS_MASTER_NAME=' "${env_file}"; then
+    fail "CUBE_PROXY_REDIS_MASTER_NAME should be removed"
+  fi
+}
+
 test_keeps_old_only_host_keys() {
   local new="${TMP_DIR}/new6.example" old="${TMP_DIR}/old6.env"
   local out="${TMP_DIR}/out6.env" diff="${TMP_DIR}/diff6.txt"
@@ -596,6 +614,7 @@ test_preserves_shell_sensitive_values
 test_upsert_env_kv_preserves_shell_sensitive_values
 test_upsert_env_kv_quotes_shell_metachar_only_values
 test_upsert_env_kv_keeps_plain_scalars_readable
+test_remove_env_kv_drops_key
 test_keeps_old_only_host_keys
 test_preserves_comments_and_structure
 test_two_way_fallback_without_baseline

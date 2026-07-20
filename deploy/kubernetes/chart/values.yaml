@@ -470,8 +470,19 @@ redis:
     pullPolicy: IfNotPresent
   # Empty host installs and uses the chart-managed cube-redis service.
   # Non-empty host uses the configured third-party Redis service and skips cube-redis.
+  # Sentinel mode (non-empty masterName) skips cube-redis and must leave host empty.
   host: ""
   port: 6379
+  # Redis Sentinel (external). Non-empty masterName enables Sentinel for
+  # CubeMaster / CubeProxy / cube-lifecycle-manager; requires sentinelNodes.
+  # masterName and sentinelNodes must be set together (validated at render time).
+  masterName: ""
+  # Comma-separated sentinel endpoints, e.g. "10.0.0.11:26379,10.0.0.12:26379".
+  # Also accepts hostname and bracketed IPv6 ([2001:db8::10]:26379).
+  sentinelNodes: ""
+  # AUTH against Sentinel instances only. Leave empty when Sentinel has no requirepass
+  # (master password still uses redis.password).
+  sentinelPassword: ""
   # SECURITY: Override before any non-throwaway deployment. templates/validate.yaml
   # refuses to render when this equals the CHANGE_ME_* sentinel.
   password: CHANGE_ME_REDIS_PASSWORD

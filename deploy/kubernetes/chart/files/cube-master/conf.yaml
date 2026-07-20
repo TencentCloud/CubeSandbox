@@ -56,7 +56,10 @@ instance_db_config:
   max_conn_life_time_seconds: 300
 
 redis:
-  nodes: {{ printf "%s:%v" (include "cube.redisHost" .) .Values.redis.port | quote }}
+  nodes: {{ include "cube.redisNodes" . | quote }}
+  master_name: {{ .Values.redis.masterName | default "" | quote }}
+  sentinel_nodes: {{ .Values.redis.sentinelNodes | default "" | quote }}
+  sentinel_password: {{ .Values.redis.sentinelPassword | default "" | quote }}
   password: {{ .Values.redis.password | quote }}
   db_no: 0
   max_idle: 8
@@ -65,7 +68,10 @@ redis:
   max_retry: 2
 
 redis_read:
-  nodes: {{ printf "%s:%v" (include "cube.redisHost" .) .Values.redis.port | quote }}
+  nodes: {{ include "cube.redisNodes" . | quote }}
+  master_name: {{ .Values.redis.masterName | default "" | quote }}
+  sentinel_nodes: {{ .Values.redis.sentinelNodes | default "" | quote }}
+  sentinel_password: {{ .Values.redis.sentinelPassword | default "" | quote }}
   password: {{ .Values.redis.password | quote }}
   db_no: 0
   max_idle: 8
@@ -74,7 +80,10 @@ redis_read:
   max_retry: 2
 
 redis_write:
-  nodes: {{ printf "%s:%v" (include "cube.redisHost" .) .Values.redis.port | quote }}
+  nodes: {{ include "cube.redisNodes" . | quote }}
+  master_name: {{ .Values.redis.masterName | default "" | quote }}
+  sentinel_nodes: {{ .Values.redis.sentinelNodes | default "" | quote }}
+  sentinel_password: {{ .Values.redis.sentinelPassword | default "" | quote }}
   password: {{ .Values.redis.password | quote }}
   db_no: 0
   max_idle: 8

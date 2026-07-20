@@ -19,6 +19,7 @@
 #   CUBE_PROXY_RESOLVER_TIMEOUT   - nginx `resolver_timeout` value
 #   CUBE_PROXY_RESOLVER_IPV6      - on/off
 #   REDIS_HOST, REDIS_PORT, REDIS_PASSWORD, REDIS_DB
+#   REDIS_MASTER_NAME, REDIS_SENTINEL_NODES, REDIS_SENTINEL_PASSWORD
 #   TIMEOUT_MIN, TIMEOUT_MAX
 #   NODE_IP, CUBE_SIDECAR_LISTEN_ADDR (cube-lifecycle-manager host:port)
 # Rewrites nginx.conf listen ports / admin bind in-place, then generates
@@ -97,7 +98,8 @@ sidecar_addr="${CUBE_SIDECAR_LISTEN_ADDR:-}"
 
 # proxy_registry.lua publishes from ngx.timer, which has no nginx resolver.
 # Resolve a hostname REDIS target to an IP up-front when possible.
-if [ -n "${CUBE_PROXY_REGISTRY_REDIS_HOST:-}" ]; then
+# Sentinel mode does not need a fixed registry host.
+if [ -z "${CUBE_PROXY_REGISTRY_REDIS_MASTER_NAME:-}" ] && [ -n "${CUBE_PROXY_REGISTRY_REDIS_HOST:-}" ]; then
   case "${CUBE_PROXY_REGISTRY_REDIS_HOST}" in
     *[!0-9.]* )
       resolved="$(getent ahostsv4 "${CUBE_PROXY_REGISTRY_REDIS_HOST}" 2>/dev/null | awk 'NR==1 {print $1}')"
@@ -112,10 +114,13 @@ fi
 cat > /usr/local/openresty/nginx/conf/global/global.conf <<EOF
 resolver ${resolver_addrs} valid=${CUBE_PROXY_RESOLVER_VALID} ipv6=${CUBE_PROXY_RESOLVER_IPV6};
 resolver_timeout ${CUBE_PROXY_RESOLVER_TIMEOUT};
-set \$redis_ip "$(escape_nginx_value "${REDIS_HOST}")";
-set \$redis_port "$(escape_nginx_value "${REDIS_PORT}")";
-set \$redis_pd "$(escape_nginx_value "${REDIS_PASSWORD}")";
-set \$redis_index "$(escape_nginx_value "${REDIS_DB}")";
+set \$redis_ip "$(escape_nginx_value "${REDIS_HOST:-}")";
+set \$redis_port "$(escape_nginx_value "${REDIS_PORT:-6379}")";
+set \$redis_pd "$(escape_nginx_value "${REDIS_PASSWORD:-}")";
+set \$redis_master_name "$(escape_nginx_value "${REDIS_MASTER_NAME:-}")";
+set \$redis_sentinel_nodes "$(escape_nginx_value "${REDIS_SENTINEL_NODES:-}")";
+set \$redis_sentinel_pd "$(escape_nginx_value "${REDIS_SENTINEL_PASSWORD:-}")";
+set \$redis_index "$(escape_nginx_value "${REDIS_DB:-0}")";
 set \$timeout_min "$(escape_nginx_value "${TIMEOUT_MIN}")";
 set \$timeout_max "$(escape_nginx_value "${TIMEOUT_MAX}")";
 set \$cube_proxy_host_ip "$(escape_nginx_value "${NODE_IP}")";

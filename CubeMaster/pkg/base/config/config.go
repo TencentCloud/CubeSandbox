@@ -162,6 +162,17 @@ type RedisConf struct {
 	Nodes    string `yaml:"nodes"`
 	MaxRetry int    `yaml:"max_retry"`
 
+	// MasterName enables Redis Sentinel mode when non-empty. SentinelNodes
+	// must list one or more sentinel endpoints (host:port, comma-separated).
+	MasterName string `yaml:"master_name"`
+
+	// SentinelNodes lists sentinel endpoints used when MasterName is set.
+	SentinelNodes string `yaml:"sentinel_nodes"`
+
+	// SentinelPassword authenticates to sentinel instances. Empty means no
+	// AUTH against sentinel (master Password is still used for the Redis master).
+	SentinelPassword string `yaml:"sentinel_password"`
+
 	// NodeMetricTTLSec is the safety TTL (seconds) for node-metric keys so an
 	// offline node's entry auto-expires; refreshed on every heartbeat write.
 	// A value <= 0 disables the TTL.

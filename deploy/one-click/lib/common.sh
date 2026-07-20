@@ -320,22 +320,21 @@ ensure_file() {
   [[ -f "${path}" ]] || die "required file not found: ${path}"
 }
 
-# Escape a string so it can be used safely as the replacement text in a sed
-# `s|...|...|` expression. Escapes the delimiter '|', backslashes, '&' (the
-# whole-match reference) and '"'. Mirrors the escape_sed helper in
-# up-support.sh, which escapes for the '/' delimiter instead.
-#
-# The '"' is escaped because the only caller (patch_cubemaster_external_deps in
-# install.sh) embeds the result inside double-quoted sed replacement strings
-# such as `pwd: "${value}"`; escaping it keeps a value that itself contains a
-# '"' from corrupting the rendered YAML.
+# Escape VALUE so it can be used safely as the replacement text in a sed
+# `s<delim>...<delim>...<delim>` expression. Escapes backslashes, '&' (the
+# whole-match reference), '"' (install.sh embeds results in double-quoted YAML
+# snippets), and the substitution delimiter (default '|'). Pass the delimiter
+# actually used at the call site (e.g. '#') so values containing it do not
+# terminate the command.
 #
 # SECURITY: embedded newlines / carriage returns are stripped first as
 # defense-in-depth. An unescaped newline in the replacement text would
 # terminate the sed `s` command and let a crafted value (e.g. a password read
 # from .env) inject arbitrary sed commands into the rendered config.
 escape_sed() {
-  printf '%s' "$1" | tr -d '\n\r' | sed 's/[|\\&"]/\\&/g'
+  local value="$1"
+  local delim="${2:-|}"
+  printf '%s' "${value}" | tr -d '\n\r' | sed "s/[\\\\${delim}&\"]/\\\\&/g"
 }
 
 # Percent-encode a string for safe use as a URL component (e.g. the userinfo
@@ -620,6 +619,35 @@ upsert_env_kv() {
   if [[ "${replaced}" != "true" ]]; then
     printf '%s=%s\n' "${key}" "${rendered_value}" >> "${tmp_file}"
   fi
+
+  mv -f "${tmp_file}" "${env_file}"
+}
+
+# remove_env_kv deletes KEY=... lines from env_file. Used when switching Redis
+# modes (Sentinel <-> standalone) so stale sentinel/host keys cannot keep the
+# previous mode alive via ":-" fallbacks in downstream scripts.
+remove_env_kv() {
+  local env_file="$1"
+  local key="$2"
+  local tmp_file
+  local old_umask
+  [[ -f "${env_file}" ]] || return 0
+
+  old_umask="$(umask)"
+  umask 077
+  tmp_file="$(mktemp "${env_file}.XXXXXX")"
+  umask "${old_umask}"
+  chmod 600 "${tmp_file}"
+
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    if [[ "${line}" == "${key}="* ]]; then
+      continue
+    fi
+    if ! printf '%s\n' "${line}" >> "${tmp_file}"; then
+      rm -f "${tmp_file}"
+      die "failed to rewrite ${env_file} while removing ${key}"
+    fi
+  done < "${env_file}"
 
   mv -f "${tmp_file}" "${env_file}"
 }
