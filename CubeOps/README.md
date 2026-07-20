@@ -178,8 +178,8 @@ RBAC is reserved for future use — currently any valid JWT grants full access.
 - `GET|PUT /api/v1/agenthub/settings` — Global settings
 
 ### Store
-- `GET /api/v1/store/meta` — Image metadata (inspects locally cached Docker images via `docker image inspect`)
-- `POST /api/v1/store/refresh` — Pull + refresh images (`docker pull` then inspect)
+- `GET /api/v1/store/meta` — Cached image metadata from previous refreshes (no network call)
+- `POST /api/v1/store/refresh` — Refresh image digests and sizes via the OCI distribution API (go-containerregistry, no docker required)
 
 ### Config
 - `GET /api/v1/config` — Runtime config snapshot
@@ -338,4 +338,3 @@ go test ./internal/store/... -v
 - [CubeDB](../CubeDB) — Shared database migration & DAO package
 - [CubeMaster](../CubeMaster) — Cluster orchestrator (HTTP API)
 - MySQL 8.0 — Shared database
-- Docker — For store image metadata (`docker pull` + `docker image inspect` to fetch size/digest of template images)

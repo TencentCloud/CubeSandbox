@@ -30,7 +30,7 @@ func (f *fakeRegistryClient) FetchLatest(_ context.Context, ref string) *ImageMe
 }
 
 func (f *fakeRegistryClient) Cached(ref string) *ImageMeta {
-	return f.FetchLatest(nil, ref)
+	return f.FetchLatest(context.Background(), ref)
 }
 
 func newStoreRouterWithFake(t *testing.T) *gin.Engine {
@@ -177,5 +177,46 @@ func TestConfig_GetConfig(t *testing.T) {
 	}
 	if cfg["opsApiEndpoint"] != "http://127.0.0.1:3010/opsapi/v1" {
 		t.Errorf("opsApiEndpoint = %v, want http://127.0.0.1:3010/opsapi/v1", cfg["opsApiEndpoint"])
+	}
+}
+
+// TestStore_NilClient_FallsBackToDefault exercises the production code
+// path at inspectAll lines 84-86, where a nil registryClient falls back
+// to defaultRegistryClient. We use a malformed image reference to force
+// FetchLatest to return nil and verify the handler does not panic and
+// still returns a placeholder entry.
+func TestStore_NilClient_FallsBackToDefault(t *testing.T) {
+	// Save the global and restore it after the test so the fallback path
+	// (which would hit the real registry) is exercised only against the
+	// malformed ref we inject below.
+	orig := storeImages
+	t.Cleanup(func() { storeImages = orig })
+
+	// A reference with an unparseable format (raw CR characters) makes
+	// name.ParseReference return an error before any network call, so the
+	// test stays hermetic and fast.
+	storeImages = []string{"not a valid ref !!!"}
+
+	r := gin.New()
+	h := NewStoreHandler() // nil registryClient → fallback path
+	g := r.Group("/api/v1")
+	h.Register(g)
+
+	w := httptestRecorder(t, r, "POST", "/api/v1/store/refresh", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var resp StoreMeta
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, w.Body.String())
+	}
+	if len(resp.Images) != 1 {
+		t.Fatalf("images count = %d, want 1 (placeholder expected)", len(resp.Images))
+	}
+	if resp.Images[0].Digest != nil {
+		t.Errorf("expected nil digest for unresolvable ref, got %v", *resp.Images[0].Digest)
+	}
+	if resp.Images[0].Image != storeImages[0] {
+		t.Errorf("image = %q, want %q", resp.Images[0].Image, storeImages[0])
 	}
 }

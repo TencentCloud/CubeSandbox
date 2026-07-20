@@ -6,6 +6,7 @@ package handler
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/http"
 	"strings"
@@ -144,9 +145,14 @@ func newGCRRegistryClient() *gcrRegistryClient {
 // FetchLatest resolves ref via go-containerregistry. For multi-arch
 // indexes the library automatically picks the linux/amd64 platform
 // manifest and reports its digest and layer sizes.
+//
+// Errors at each step are logged at debug level and surface to the
+// caller as a nil ImageMeta so the handler can return a placeholder
+// entry. Production failures remain diagnosable from CubeOps logs.
 func (c *gcrRegistryClient) FetchLatest(ctx context.Context, ref string) *ImageMeta {
 	parsedRef, err := name.ParseReference(ref)
 	if err != nil {
+		slog.Debug("store: failed to parse image ref", "ref", ref, "err", err)
 		return nil
 	}
 
@@ -160,11 +166,13 @@ func (c *gcrRegistryClient) FetchLatest(ctx context.Context, ref string) *ImageM
 		remote.WithPlatform(v1.Platform{OS: "linux", Architecture: "amd64"}),
 	)
 	if err != nil {
+		slog.Debug("store: failed to resolve image", "ref", ref, "err", err)
 		return nil
 	}
 
 	manifest, err := img.Manifest()
 	if err != nil {
+		slog.Debug("store: failed to read manifest", "ref", ref, "err", err)
 		return nil
 	}
 
@@ -175,6 +183,7 @@ func (c *gcrRegistryClient) FetchLatest(ctx context.Context, ref string) *ImageM
 
 	digest, err := img.Digest()
 	if err != nil {
+		slog.Debug("store: failed to read digest", "ref", ref, "err", err)
 		return nil
 	}
 
