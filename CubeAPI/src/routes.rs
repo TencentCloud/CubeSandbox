@@ -345,7 +345,6 @@ mod tests {
         );
     }
 
-
     #[tokio::test]
     async fn removes_cluster_routes_from_root_surface() {
         let server = test_server().await;
