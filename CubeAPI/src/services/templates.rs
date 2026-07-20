@@ -370,9 +370,29 @@ fn alias_from_name(value: &str) -> Option<String> {
     let alias = without_tag.rsplit('/').next().unwrap_or(without_tag).trim();
     if alias.is_empty() {
         None
-    } else {
+    } else if is_valid_alias(alias) {
         Some(alias.to_string())
+    } else {
+        None
     }
+}
+
+/// Returns true if the alias matches the same regex CubeMaster enforces:
+/// ^[a-z0-9][a-z0-9-]{0,63}$ . Aliases derived from names that don't
+/// conform (e.g. "a:b:c" → "a:b", "UPPER" → "UPPER") are silently
+/// dropped rather than forwarded to CubeMaster, where they'd fail with
+/// a less helpful error.
+fn is_valid_alias(alias: &str) -> bool {
+    if alias.is_empty() || alias.len() > 64 {
+        return false;
+    }
+    alias.chars().enumerate().all(|(i, c)| {
+        if i == 0 {
+            c.is_ascii_lowercase() || c.is_ascii_digit()
+        } else {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'
+        }
+    })
 }
 
 fn build_log_line(status: &str, progress: i32, message: &str) -> String {

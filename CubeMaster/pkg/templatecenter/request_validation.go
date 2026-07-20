@@ -127,7 +127,7 @@ func validateTemplateAlias(alias string) error {
 	if alias == "" {
 		return nil
 	}
-	if strings.HasPrefix(alias, "tpl-") || strings.HasPrefix(alias, "snap-") {
+	if hasValidTemplateIDPrefix(alias) {
 		return fmt.Errorf("alias %q must not start with 'tpl-' or 'snap-'", alias)
 	}
 	if !aliasValidationRe.MatchString(alias) {

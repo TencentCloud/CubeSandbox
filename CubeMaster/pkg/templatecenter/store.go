@@ -964,8 +964,8 @@ func claimTemplateAlias(ctx context.Context, templateID, alias string) error {
 	}
 	return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Table(constants.TemplateDefinitionTableName).
-			Where("alias_key = ? AND template_id <> ? AND status <> ?",
-				alias, templateID, StatusDeleting).
+			Where("alias_key = ? AND template_id <> ?",
+				alias, templateID).
 			Update("display_name", "").Error; err != nil {
 			return fmt.Errorf("release stale alias %q fail: %w", alias, err)
 		}
