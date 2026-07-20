@@ -715,10 +715,7 @@ mod tests {
         let mut body = sample_request();
         body.name = Some("registry:5000/team/app:v2".to_string());
 
-        assert_eq!(
-            template_alias_from_request(&body).as_deref(),
-            Some("app")
-        );
+        assert_eq!(template_alias_from_request(&body).as_deref(), Some("app"));
     }
 
     #[test]

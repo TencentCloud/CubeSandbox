@@ -437,7 +437,6 @@ func dealCubeboxCreateReqWithTemplate(ctx context.Context, reqInOut *types.Creat
 
 	templateID, hasTemplateID := reqInOut.Annotations[constants.CubeAnnotationAppSnapshotTemplateID]
 
-
 	if !hasTemplateID && config.GetConfig().Common.EnableAGSColdStartSwitch {
 		return handleColdStartCompatibility(reqInOut)
 	}
