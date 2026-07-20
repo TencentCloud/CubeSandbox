@@ -231,7 +231,7 @@ func TestGetTemplateResolvesAliasBeforeLookup(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/cube/template?template_id=stable-python&include_request=true", nil)
 	rt := &CubeLog.RequestTrace{}
-	resp := getTemplate(httptest.NewRecorder(), req, rt)
+	resp := getTemplate(req, rt)
 
 	got, ok := resp.(*templateResponse)
 	if !ok {

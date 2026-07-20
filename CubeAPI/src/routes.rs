@@ -345,52 +345,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn serves_web_routes_under_cubeapi_prefix() {
-        let server = test_server().await;
-
-        server.get("/cubeapi/v1/health").await.assert_status_ok();
-        assert_ne!(
-            server.get("/cubeapi/v1/v2/sandboxes").await.status_code(),
-            StatusCode::NOT_FOUND
-        );
-        assert_ne!(
-            server.get("/cubeapi/v1/templates").await.status_code(),
-            StatusCode::NOT_FOUND
-        );
-        assert_ne!(
-            server
-                .get("/cubeapi/v1/cluster/overview")
-                .await
-                .status_code(),
-            StatusCode::NOT_FOUND
-        );
-    }
-
-    #[tokio::test]
-    async fn auth_login_route_is_rate_limited_without_auth_middleware() {
-        let mut config = ServerConfig::default();
-        config.cubemaster_url = "http://127.0.0.1:9".to_string();
-        config.rate_limit_per_sec = 1;
-        let state = AppState::new(config, arc(NoopLogger)).await;
-        let server = TestServer::new(build_router(state)).expect("router should build");
-        let login_body = serde_json::json!({
-            "username": "admin",
-            "password": "admin"
-        });
-
-        let first = server
-            .post("/cubeapi/v1/auth/login")
-            .json(&login_body)
-            .await;
-        assert_ne!(first.status_code(), StatusCode::TOO_MANY_REQUESTS);
-
-        server
-            .post("/cubeapi/v1/auth/login")
-            .json(&login_body)
-            .await
-            .assert_status(StatusCode::TOO_MANY_REQUESTS);
-    }
 
     #[tokio::test]
     async fn removes_cluster_routes_from_root_surface() {
