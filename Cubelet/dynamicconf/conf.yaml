@@ -8,9 +8,9 @@ common:
    - "/usr/local/cubetools/cube_exec_cmd_before_exist.sh"
   cgroup_set_memory_reparent_file: ""
   disable_host_cgroup: true
-  # 禁用传统的netfile
+  # Disable the legacy netfile.
   disable_host_netfile: true
-  # guest 容器默认 DNS，模板/请求中的 dns_config.servers 优先于这里
+  # Default DNS servers for guest containers. dns_config.servers in a template or request takes precedence.
   default_dns_servers:
     - 119.29.29.29
 
