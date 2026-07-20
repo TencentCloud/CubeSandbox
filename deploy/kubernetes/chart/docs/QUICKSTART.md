@@ -189,11 +189,11 @@ helm test cube -n cube-system --timeout 20m --logs
 **期望结果**:
 
 - `cube-node` DaemonSet Ready 数量 = 打了 compute label 的节点数量
-- `cube-master` / `cube-api` / `cube-proxy` / `cube-webui` CloneSet Ready
+- `cube-master` / `cube-ops` / `cube-api` / `cube-proxy` / `cube-webui` CloneSet Ready
 - `cube-mysql` / `cube-redis` StatefulSet Ready(若使用内置)
 - `helm test` 全绿
 
-登录 WebUI(默认在 `http://<control-node-hostip>:12088`)开始使用。
+登录 WebUI（默认 `http://<control-node-hostip>:12088`）开始使用。WebUI 将 `/opsapi` 与 SDK 路径反代到 CubeOps；外部 E2B 客户端使用 CubeAPI。
 
 ---
 

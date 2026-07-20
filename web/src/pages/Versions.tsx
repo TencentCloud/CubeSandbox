@@ -77,7 +77,7 @@ function stripPlatformVersionSuffix(version: string): string {
 }
 
 function rowHasUndeclaredVersion(row: ComponentRow): boolean {
-  return row.versions.some((g) => isVersionUndeclared(row, g.version));
+  return (row.versions ?? []).some((g) => isVersionUndeclared(row, g.version));
 }
 
 function hasReleaseDeclaration(rows: ComponentRow[]): boolean {
@@ -523,13 +523,16 @@ function MatrixSection({ nodes, components }: { nodes: NodeRow[]; components: Co
     const q = query.trim().toLowerCase();
     return nodes
       .filter((n) => {
-        if (q && !n.nodeID.toLowerCase().includes(q)) return false;
+        const nodeID = n.nodeID ?? '';
+        if (q && !nodeID.toLowerCase().includes(q)) return false;
         if (filter === 'healthy' && !n.healthy) return false;
         if (filter === 'notReady' && n.healthy) return false;
         return true;
       })
       .sort((a, b) => {
-        if (sortBy.col == null) return a.nodeID.localeCompare(b.nodeID);
+        const aID = a.nodeID ?? '';
+        const bID = b.nodeID ?? '';
+        if (sortBy.col == null) return aID.localeCompare(bID);
         const aEntry = a.components.find((e) => e.component === sortBy.col);
         const bEntry = b.components.find((e) => e.component === sortBy.col);
         const av = aEntry?.version ?? '';
@@ -594,10 +597,11 @@ function MatrixSection({ nodes, components }: { nodes: NodeRow[]; components: Co
           </thead>
           <tbody className="divide-y divide-border/40">
             {filtered.map((n) => {
-              const byComponent = new Map(n.components.map((e) => [e.component, e]));
+              const nodeID = n.nodeID ?? '';
+              const byComponent = new Map((n.components ?? []).map((e) => [e.component, e]));
               return (
                 <tr
-                  key={n.nodeID}
+                  key={nodeID}
                   className={cn(
                     'group transition-colors hover:bg-muted/40',
                     !n.healthy && 'bg-cube-err/[0.04]',
@@ -605,7 +609,7 @@ function MatrixSection({ nodes, components }: { nodes: NodeRow[]; components: Co
                 >
                   <td className="sticky left-0 z-10 bg-card/40 px-4 py-3 group-hover:bg-muted/40">
                     <Link
-                      to={`/nodes/${n.nodeID}`}
+                      to={`/nodes/${nodeID}`}
                       className="flex items-center gap-2 text-foreground/90 hover:text-cube-info"
                     >
                       <span
@@ -614,7 +618,7 @@ function MatrixSection({ nodes, components }: { nodes: NodeRow[]; components: Co
                           n.healthy ? 'bg-cube-ok' : 'bg-cube-err',
                         )}
                       />
-                      <MonoId size="sm">{n.nodeID}</MonoId>
+                      <MonoId size="sm">{nodeID}</MonoId>
                       <ChevronRight
                         size={11}
                         className="ml-0.5 text-muted-foreground/30 group-hover:text-cube-info"

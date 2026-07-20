@@ -255,8 +255,9 @@ helm test cube -n cube-system --timeout 20m --logs
 
 - `cube-node-pvm` 的 apiVersion 为 `apps/v1`，且 Ready
 - `cube-node` / bootstrap / installer ADS Ready
-- master / api / proxy / webui CloneSet Ready；内置 MySQL/Redis Ready
-- WebUI：`http://<advertiseIP 或 HostIP>:12088`
+- master / ops / api / proxy / webui CloneSet Ready；内置 MySQL/Redis Ready
+- WebUI：`http://<advertiseIP 或 HostIP>:12088`（`/opsapi` 与 SDK 上游为 CubeOps）
+- CubeAPI：对外 E2B 兼容 HTTP API
 
 ---
 

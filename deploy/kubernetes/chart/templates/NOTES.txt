@@ -18,8 +18,13 @@ Persistence (CubeMaster / MySQL / Redis):
 {{- if .Values.controlPlane.enabled }}
 Control plane:
   CubeMaster Service: {{ include "cube.masterName" . }}:{{ .Values.controlPlane.master.service.port }}
-  CubeAPI Service:    {{ include "cube.apiName" . }}:{{ .Values.controlPlane.api.service.port }}
-{{- if .Values.webui.enabled }}
+{{- if .Values.controlPlane.api.enabled }}
+  CubeAPI Service:    {{ include "cube.apiName" . }}:{{ .Values.controlPlane.api.service.port }} (external E2B SDK)
+{{- end }}
+{{- if eq (include "cube.opsEnabled" .) "true" }}
+  CubeOps Service:    {{ include "cube.opsName" . }}:{{ .Values.cubeOps.service.port }} (WebUI /opsapi + SDK)
+{{- end }}
+{{- if and .Values.webui.enabled (eq (include "cube.opsEnabled" .) "true") }}
   WebUI Service:      {{ include "cube.webuiName" . }}:{{ .Values.webui.service.port }}
 {{- end }}
 {{- if eq (include "cube.cubemastercliEnabled" .) "true" }}

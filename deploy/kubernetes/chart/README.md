@@ -47,7 +47,8 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for component layering, the f
 | `cubelet` / `network-agent` | Big Pod runtime containers (self-stage then run). |
 | `pause` | Big Pod `cube-slot-1`…`6` placeholders (InPlace-replace later). |
 | `cube-master` | Control-plane master; embedded schema migrations. |
-| `cube-api` | HTTP API. |
+| `cube-api` | External E2B-compatible HTTP API. |
+| `cube-ops` | Ops/admin backend (JWT) + WebUI SDK proxy to CubeMaster. |
 | `cubemastercli` | Operational CLI for exec-based ops. |
 | `cube-proxy` | Data-plane proxy (control-plane placement when enabled). |
 | `cube-lifecycle-manager` | Sandbox auto-pause / auto-resume; discovered via Service DNS and Redis. |
@@ -441,13 +442,16 @@ cubeNode:
       followNodeDns: true          # guests use node/cluster DNS
 ```
 
-## WebUI
+## WebUI and CubeOps
 
-`webui.enabled=true` delivers the one-click WebUI by default:
+`webui.enabled=true` delivers the one-click WebUI by default and **requires** `cubeOps.enabled=true`:
 
 - `cube-webui` image packages one-click `webui/dist` static assets;
-- a chart-rendered nginx config proxies `/cubeapi/` to the CubeAPI Service;
+- a chart-rendered nginx config proxies `/opsapi/` and `/cubeapi/v1/` (SDK) to the CubeOps Service (`0.0.0.0:3010` in-pod, ClusterIP);
+- `/sandbox/` proxies to CubeProxy; static assets are unchanged;
 - the Service listens on port `12088`, matching one-click `WEB_UI_HOST_PORT`.
+
+CubeAPI serves external E2B-compatible SDK clients.
 
 Expose the WebUI externally by changing `webui.service.type` or by adding your platform's ingress/load balancer configuration.
 

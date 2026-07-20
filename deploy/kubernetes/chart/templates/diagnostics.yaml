@@ -40,7 +40,7 @@ data:
     run helm-values helm get values "${RELEASE}" -n "${NS}" -o yaml
     run helm-manifest helm get manifest "${RELEASE}" -n "${NS}"
 
-    for component in master api cube-node cube-proxy webui dns mysql redis; do
+    for component in master api ops cube-node cube-proxy webui dns mysql redis; do
       run "pods-${component}" kubectl get pods -n "${NS}" -l "app.kubernetes.io/component=${component}" -o wide
       kubectl get pods -n "${NS}" -l "app.kubernetes.io/component=${component}" -o name 2>/dev/null \
         | while read -r pod; do

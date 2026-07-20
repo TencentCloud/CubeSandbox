@@ -2,6 +2,7 @@
 {{- $domain := .Values.cubeProxy.domain -}}
 {{- $internalMaster := and .Values.controlPlane.enabled .Values.controlPlane.master.enabled -}}
 {{- $internalAPI := and .Values.controlPlane.enabled .Values.controlPlane.api.enabled -}}
+{{- $internalOps := eq (include "cube.opsEnabled" .) "true" -}}
 {{- $externalAPIEndpoint := default "" .Values.externalControlPlane.apiEndpoint -}}
 apiVersion: v1
 kind: Pod
@@ -45,6 +46,13 @@ spec:
           echo '[health-test] skip CubeMaster: no internal or external control plane'
           {{- end }}
 
+          {{- if $internalOps }}
+          echo '[health-test] check CubeOps'
+          curl --connect-timeout 5 --max-time 15 -fsS http://{{ include "cube.opsFQDN" . }}:{{ .Values.cubeOps.service.port }}/health
+          {{- else }}
+          echo '[health-test] skip CubeOps: cubeOps.enabled=false'
+          {{- end }}
+
           {{- if or $internalAPI $externalAPIEndpoint }}
           echo '[health-test] check CubeAPI'
           api_endpoint={{ include "cube.apiEndpoint" . | quote }}
@@ -69,10 +77,10 @@ spec:
           echo '[health-test] skip CubeAPI: no internal API and externalControlPlane.apiEndpoint is empty'
           {{- end }}
 
-          {{- if and .Values.webui.enabled $internalAPI }}
+          {{- if and .Values.webui.enabled $internalOps }}
           echo '[health-test] check WebUI'
           curl --connect-timeout 5 --max-time 15 -fsS http://{{ include "cube.webuiName" . }}.{{ .Release.Namespace }}.svc.{{ include "cube.clusterDomain" . }}:{{ .Values.webui.service.port }}/ >/dev/null
-          curl --connect-timeout 5 --max-time 15 -fsS http://{{ include "cube.webuiName" . }}.{{ .Release.Namespace }}.svc.{{ include "cube.clusterDomain" . }}:{{ .Values.webui.service.port }}/cubeapi/v1/health
+          curl --connect-timeout 5 --max-time 15 -fsS http://{{ include "cube.webuiName" . }}.{{ .Release.Namespace }}.svc.{{ include "cube.clusterDomain" . }}:{{ .Values.webui.service.port }}/health
           {{- end }}
 
           {{- if eq (include "cube.proxyEnabled" .) "true" }}

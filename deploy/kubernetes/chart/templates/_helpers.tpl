@@ -188,6 +188,164 @@ tolerations:
 {{- printf "%s-webui" (include "cube.fullname" .) -}}
 {{- end -}}
 
+{{- define "cube.opsName" -}}
+{{- printf "%s-ops" (include "cube.fullname" .) -}}
+{{- end -}}
+
+{{- define "cube.opsEnabled" -}}
+{{- $ops := default dict .Values.cubeOps -}}
+{{- if and .Values.controlPlane.enabled (dig "enabled" true $ops) -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{- define "cube.opsFQDN" -}}
+{{- printf "%s.%s.svc.%s" (include "cube.opsName" .) .Release.Namespace (include "cube.clusterDomain" .) -}}
+{{- end -}}
+
+{{- define "cube.opsUpstream" -}}
+{{- $override := dig "opsUpstream" "" (default dict .Values.webui) | trimSuffix "/" -}}
+{{- if $override -}}
+{{- $override -}}
+{{- else -}}
+{{- printf "http://%s:%v" (include "cube.opsFQDN" .) .Values.cubeOps.service.port -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "cube.webuiProxyUpstream" -}}
+{{- $override := dig "proxyUpstream" "" (default dict .Values.webui) | trimSuffix "/" -}}
+{{- if $override -}}
+{{- $override -}}
+{{- else if eq (include "cube.proxyEnabled" .) "true" -}}
+{{- printf "http://%s:%v" (include "cube.proxyServiceFQDN" .) .Values.cubeProxy.ports.http.containerPort -}}
+{{- else -}}
+{{- "" -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+WebUI OpenResty config: static SPA + /opsapi|/cubeapi/v1/SDK → CubeOps, optional /sandbox/ → CubeProxy.
+Rendered into cube-webui-config and checksum'd so edits roll the CloneSet.
+*/}}
+{{- define "cube.webuiNginxConf" -}}
+{{- $opsUpstream := include "cube.opsUpstream" . -}}
+{{- $proxyUpstream := include "cube.webuiProxyUpstream" . -}}
+worker_processes auto;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include /usr/local/openresty/nginx/conf/mime.types;
+    default_type application/octet-stream;
+
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+
+    gzip on;
+    gzip_types text/plain text/css application/javascript application/json application/xml;
+
+    map $http_upgrade $connection_upgrade {
+        default upgrade;
+        ''      '';
+    }
+
+    server {
+        listen 80;
+        server_name _;
+
+        root /usr/share/nginx/html;
+        index index.html;
+
+        location = /cubeapi {
+            return 308 /cubeapi/;
+        }
+
+        {{- if $proxyUpstream }}
+        location ^~ /sandbox/ {
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+            proxy_read_timeout 7206s;
+            proxy_send_timeout 7206s;
+
+            proxy_pass {{ $proxyUpstream }};
+        }
+        {{- end }}
+
+        location /opsapi/ {
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_read_timeout 300s;
+            proxy_send_timeout 300s;
+
+            proxy_pass {{ $opsUpstream }}/api/;
+        }
+
+        location /cubeapi/v1/ {
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_read_timeout 300s;
+            proxy_send_timeout 300s;
+
+            rewrite ^/cubeapi/v1/(.*)$ /api/v1/sdk/$1 break;
+            proxy_pass {{ $opsUpstream }};
+        }
+
+        location = /health {
+            proxy_pass {{ $opsUpstream }}/health;
+        }
+
+        location ~ ^/(sandboxes|v2/sandboxes|templates|snapshots) {
+            if ($http_authorization = "") {
+                return 418;
+            }
+            add_header Vary "Authorization" always;
+            add_header Cache-Control "no-store" always;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_read_timeout 300s;
+            proxy_send_timeout 300s;
+
+            rewrite ^/(.*)$ /api/v1/sdk/$1 break;
+            proxy_pass {{ $opsUpstream }};
+        }
+
+        error_page 418 = @spa_fallback;
+        location @spa_fallback {
+            root /usr/share/nginx/html;
+            try_files /index.html =404;
+            add_header Vary "Authorization" always;
+            add_header Cache-Control "no-store, no-cache, must-revalidate" always;
+        }
+
+        location /assets/ {
+            try_files $uri =404;
+            expires 1y;
+            add_header Cache-Control "public, immutable";
+        }
+
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+    }
+}
+{{- end -}}
+
 {{- define "cube.nodeName" -}}
 {{- printf "%s-node" (include "cube.fullname" .) -}}
 {{- end -}}
@@ -397,7 +555,7 @@ iptables -t mangle -S "${chain}" | grep -q -- "--dport 443"
 {{- end -}}
 
 {{- define "cube.secretEnabled" -}}
-{{- if or (and .Values.controlPlane.enabled (or .Values.controlPlane.master.enabled .Values.controlPlane.api.enabled)) (eq (include "cube.proxyEnabled" .) "true") (eq (include "cube.mysqlBuiltinEnabled" .) "true") (eq (include "cube.redisBuiltinEnabled" .) "true") -}}true{{- else -}}false{{- end -}}
+{{- if or (and .Values.controlPlane.enabled (or .Values.controlPlane.master.enabled .Values.controlPlane.api.enabled (eq (include "cube.opsEnabled" .) "true"))) (eq (include "cube.proxyEnabled" .) "true") (eq (include "cube.mysqlBuiltinEnabled" .) "true") (eq (include "cube.redisBuiltinEnabled" .) "true") -}}true{{- else -}}false{{- end -}}
 {{- end -}}
 
 {{/*

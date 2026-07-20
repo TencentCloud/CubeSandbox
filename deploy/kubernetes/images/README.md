@@ -61,7 +61,7 @@ Override the binary directory with `LOCAL_BIN_DIR` if needed. The script does
 not run `make` itself; missing binaries fail with a hint to build the matching
 target first.
 
-For source-built images (`cube-api`, `cube-proxy`, …), use `SOURCE_REF=""` to
+For source-built images (`cube-api`, `cube-ops`, `cube-proxy`, …), use `SOURCE_REF=""` to
 compile from the current worktree (see below).
 
 ## `pause` image (Big Pod placeholder slots)
@@ -80,15 +80,18 @@ Dockerfile: `deploy/kubernetes/images/pause/Dockerfile` (`FROM registry.k8s.io/p
 
 ## Pinning source to a release tag
 
-`cube-api`, `cube-proxy`, `cube-egress`, `cube-lifecycle-manager`, and
+`cube-api`, `cube-ops`, `cube-proxy`, `cube-egress`, `cube-lifecycle-manager`, and
 `cube-webui` are compiled from repository source (rather than binaries in the
 release tarball). By default the script pins those source trees to
 `${SOURCE_REF}` (defaulting to `${VERSION}`, so `v0.5.1` for the default
 build). It exports `CubeMaster/`, `CubeAPI/`, `CubeProxy/`, `CubeEgress/`,
 `cube-lifecycle-manager/`, `web/`, and `deploy/one-click/webui/` at that git
 ref into `${BUILD_ROOT}/source-tree/` via `git archive` and points `REPO_ROOT`
-there for the duration of the build. This guarantees the images match the
-release tag even when the current worktree is ahead of it.
+there for the duration of the build. When building `cube-ops`, it also exports
+`CubeOps/` and `CubeDB/` (required by `CubeOps/Dockerfile`; not present on
+older release tags such as `v0.5.1` — use `SOURCE_REF=""` for worktree builds).
+This guarantees the images match the release tag even when the current worktree
+is ahead of it.
 
 To build from the current worktree instead (typically for development), set
 `SOURCE_REF=""`:
@@ -128,6 +131,9 @@ entrypoint behavior.
 - `cube-wait-node-prep` is the Big Pod `wait-node-prep` **sidecar** (Kruise container launch priority) and the bootstrap `write-node-prep-ready` hold container. Bumping only the wait **image** on Big Pod may InPlace; do not change wait env/mounts routinely.
 - `cube-master` is built directly from `CubeMaster/docker/Dockerfile`. The build script prepares a temporary Docker context with the release-package `cubemaster` binary and the `CubeMaster/docker/tools` directory expected by that Dockerfile.
 - `cube-api` is built from `CubeAPI/Dockerfile`; no duplicate Dockerfile is kept here.
+- `cube-ops` is built from `CubeOps/Dockerfile` with context = repository root
+  (needs sibling `CubeDB/` via `CubeOps/Dockerfile.dockerignore`); same as CI
+  `release-docker-images.yml`. No duplicate Dockerfile is kept here.
 - `cubemastercli` is an operational CLI image. It packages only the
   release-package `CubeMaster/bin/cubemastercli` binary and minimal runtime
   dependencies. It is separate from `cube-master` and `cube-node` so runtime

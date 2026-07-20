@@ -85,3 +85,11 @@ redis:
 # Optional: mirror Cube-owned images into a private registry
 # global:
 #   imageRegistry: my-mirror.example.com/cubesandbox
+#
+# Or override per-image repositories (required when the path differs from the
+# chart default cubesandbox-chart/... — e.g. private TCR cube-sandbox/...):
+# images:
+#   ops:
+#     repository: my-mirror.example.com/cube-sandbox/cube-ops
+#     tag: v0.5.1
+#     pullPolicy: Always

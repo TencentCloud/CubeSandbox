@@ -141,25 +141,69 @@ func TestCluster_GetNode_NotFound(t *testing.T) {
 	}
 }
 
-func TestCluster_Versions_PassThrough(t *testing.T) {
+func TestCluster_Versions_RewritesCamelCase(t *testing.T) {
 	cm := &fakeCM{
 		clusterVersions: func(_ context.Context) (json.RawMessage, error) {
-			return raw(`{"data": {"control_plane": "v1.0"}}`), nil
+			return raw(`{
+				"data": {
+					"control_plane": {"version": "v1.0", "commit": "abc", "build_time": "2026-01-01T00:00:00Z"},
+					"components": [{
+						"component": "cubelet",
+						"declared_version": "v1.0",
+						"declared_versions": ["v1.0"],
+						"consistent": true,
+						"versions": [{"version": "v1.0", "nodes": ["n-1"]}]
+					}],
+					"nodes": [{
+						"node_id": "n-1",
+						"healthy": true,
+						"components": [{"component": "cubelet", "version": "v1.0", "declared": true}]
+					}]
+				}
+			}`), nil
 		},
 	}
 	r := newClusterRouter(t, cm)
 
 	w := httptestRecorder(t, r, "GET", "/api/v1/cluster/versions")
 	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", w.Code)
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
-	// The data field is passed through verbatim.
 	var resp map[string]interface{}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal: %v body=%s", err, w.Body.String())
 	}
-	if resp["control_plane"] != "v1.0" {
-		t.Errorf("control_plane = %v, want v1.0", resp["control_plane"])
+	cp, ok := resp["controlPlane"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("controlPlane missing or wrong type: %v", resp)
+	}
+	if cp["version"] != "v1.0" || cp["buildTime"] != "2026-01-01T00:00:00Z" {
+		t.Errorf("controlPlane = %v", cp)
+	}
+	if _, ok := resp["control_plane"]; ok {
+		t.Errorf("snake_case control_plane must not leak into response: %v", resp)
+	}
+	nodes, ok := resp["nodes"].([]interface{})
+	if !ok || len(nodes) != 1 {
+		t.Fatalf("nodes = %v", resp["nodes"])
+	}
+	n0, ok := nodes[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("node[0] = %v", nodes[0])
+	}
+	if n0["nodeID"] != "n-1" {
+		t.Errorf("nodeID = %v, want n-1", n0["nodeID"])
+	}
+	if _, ok := n0["node_id"]; ok {
+		t.Errorf("snake_case node_id must not leak into response: %v", n0)
+	}
+	comps, ok := resp["components"].([]interface{})
+	if !ok || len(comps) != 1 {
+		t.Fatalf("components = %v", resp["components"])
+	}
+	c0 := comps[0].(map[string]interface{})
+	if c0["declaredVersion"] != "v1.0" {
+		t.Errorf("declaredVersion = %v", c0["declaredVersion"])
 	}
 }
 

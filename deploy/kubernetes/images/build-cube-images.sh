@@ -20,12 +20,12 @@ WORKTREE_ROOT="${REPO_ROOT}"
 VERSION="${VERSION:-v0.5.1}"
 IMAGE_TAG="${IMAGE_TAG:-${VERSION}}"
 REGISTRY="${REGISTRY:-ccr.ccs.tencentyun.com/cubesandbox-chart}"
-# SOURCE_REF pins the CubeMaster / CubeAPI / CubeProxy / CubeEgress /
-# cube-lifecycle-manager / web / deploy/one-click/webui source tree used when
-# building cube-api / cube-proxy / cube-egress / cube-lifecycle-manager /
-# cube-webui from repository source, ensuring the delivered images match the
-# release tag rather than the current worktree. Set SOURCE_REF="" to build from
-# the current worktree.
+# SOURCE_REF pins the CubeMaster / CubeAPI / CubeOps / CubeDB / CubeProxy /
+# CubeEgress / cube-lifecycle-manager / web / deploy/one-click/webui source tree
+# used when building cube-api / cube-ops / cube-proxy / cube-egress /
+# cube-lifecycle-manager / cube-webui from repository source, ensuring the
+# delivered images match the release tag rather than the current worktree. Set
+# SOURCE_REF="" to build from the current worktree.
 SOURCE_REF="${SOURCE_REF-${VERSION}}"
 PUSH="${PUSH:-0}"
 NO_CACHE="${NO_CACHE:-0}"
@@ -87,6 +87,7 @@ DOWNLOAD_CONNECT_TIMEOUT="${DOWNLOAD_CONNECT_TIMEOUT:-20}"
 ALL_IMAGES=(
   cube-master
   cube-api
+  cube-ops
   cubemastercli
   cube-proxy
   cube-lifecycle-manager
@@ -119,6 +120,7 @@ PACKAGE_IMAGES=(
 SOURCE_IMAGES=(
   cube-master
   cube-api
+  cube-ops
   cube-proxy
   cube-lifecycle-manager
   cube-egress
@@ -170,6 +172,7 @@ Examples:
 
   $0 --local cube-shim
   SOURCE_REF="" IMAGE_TAG=dev $0 cube-api
+  SOURCE_REF="" IMAGE_TAG=dev $0 cube-ops
 
 Available images:
 $(printf '  %s\n' "${ALL_IMAGES[@]}")
@@ -341,12 +344,12 @@ ensure_source_tree() {
   SOURCE_READY=1
 
   # When SOURCE_REF is set (default: ${VERSION}), export the CubeMaster / CubeAPI /
-  # CubeProxy / CubeEgress / cube-lifecycle-manager / web / deploy/one-click/webui
-  # trees at that ref into ${SOURCE_TREE_DIR} and point REPO_ROOT there. This
-  # ensures cube-api, cube-proxy, cube-egress, cube-lifecycle-manager,
-  # cube-webui and related contexts are compiled from the release-tag source, not
-  # from whatever happens to be in the current worktree (which may be ahead of
-  # the tag).
+  # CubeOps / CubeDB / CubeProxy / CubeEgress / cube-lifecycle-manager / web /
+  # deploy/one-click/webui trees at that ref into ${SOURCE_TREE_DIR} and point
+  # REPO_ROOT there. This ensures cube-api, cube-ops, cube-proxy, cube-egress,
+  # cube-lifecycle-manager, cube-webui and related contexts are compiled from the
+  # release-tag source, not from whatever happens to be in the current worktree
+  # (which may be ahead of the tag).
   if [[ -z "${SOURCE_REF}" ]]; then
     REPO_ROOT="${WORKTREE_ROOT}"
     log "using current worktree source (SOURCE_REF empty)"
@@ -358,7 +361,12 @@ ensure_source_tree() {
     || fail "SOURCE_REF=${SOURCE_REF} is not a valid git ref in ${WORKTREE_ROOT}"
   SOURCE_REF_SHA="$(git -C "${WORKTREE_ROOT}" rev-parse "${SOURCE_REF}^{commit}")"
   SOURCE_TREE_STAMP="${SOURCE_TREE_DIR}/.exported-sha"
+  # CubeOps/CubeDB are post-v0.5.1; only export when building cube-ops so older
+  # release tags still work for cube-api / cube-proxy / webui / etc.
   SOURCE_EXPORT_SET="CubeMaster CubeAPI CubeProxy CubeEgress cube-lifecycle-manager web deploy/one-click/webui"
+  if should_build cube-ops; then
+    SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} CubeOps CubeDB"
+  fi
   if [[ ! -f "${SOURCE_TREE_STAMP}" ]] \
     || [[ "$(cat "${SOURCE_TREE_STAMP}")" != "${SOURCE_REF_SHA}"$'\n'"${SOURCE_EXPORT_SET}" ]]; then
     log "exporting source tree at ${SOURCE_REF} (${SOURCE_REF_SHA:0:12}) into ${SOURCE_TREE_DIR}"
@@ -627,6 +635,15 @@ build_cube_api_image() {
   record_built cube-api
 }
 
+# Same as .github/workflows/release-docker-images.yml for component "cube-ops":
+# context=., file=CubeOps/Dockerfile (needs sibling CubeDB via Dockerfile.dockerignore).
+build_cube_ops_image() {
+  [[ -f "${REPO_ROOT}/CubeOps/go.mod" ]] || fail "missing CubeOps go.mod in ${REPO_ROOT}"
+  [[ -d "${REPO_ROOT}/CubeDB" ]] || fail "missing CubeDB sibling module in ${REPO_ROOT}"
+  build_image cube-ops "${REPO_ROOT}" "${REPO_ROOT}/CubeOps/Dockerfile"
+  record_built cube-ops
+}
+
 build_cube_egress_openresty_base_image() {
   local image="cube-egress/openresty:1.29.2.5-tproxy"
   local docker_args=(
@@ -736,6 +753,11 @@ run_selected_builds() {
   if should_build cube-api; then
     ensure_source_tree
     build_cube_api_image
+  fi
+
+  if should_build cube-ops; then
+    ensure_source_tree
+    build_cube_ops_image
   fi
 
   if should_build cubemastercli; then

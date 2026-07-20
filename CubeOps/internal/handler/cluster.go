@@ -255,26 +255,25 @@ func (h *ClusterHandler) GetNode(c *gin.Context) {
 
 // Versions handles GET /cluster/versions.
 //
-// CubeMaster's version endpoint sometimes returns an empty data field when
-// the cluster is freshly bootstrapped; we then return an empty shell so the
-// UI doesn't blow up on a nil object.
+// Empty/missing CubeMaster data returns an empty shell for the UI. Otherwise
+// keys are rewritten with camelCaseJSON (same path as writeSDKResponse).
 func (h *ClusterHandler) Versions(c *gin.Context) {
+	empty := map[string]interface{}{
+		"controlPlane": map[string]string{},
+		"components":   []interface{}{},
+		"nodes":        []interface{}{},
+	}
 	data, err := h.cm.ClusterVersions(c.Request.Context())
 	if err != nil {
-		httputil.WriteJSON(c, http.StatusOK, map[string]interface{}{
-			"controlPlane": map[string]string{},
-			"components":   []interface{}{},
-			"nodes":        []interface{}{},
-		})
+		httputil.WriteJSON(c, http.StatusOK, empty)
 		return
 	}
-	// Extract data field if wrapped, otherwise pass through
 	var resp cmResponse
-	if err := json.Unmarshal(data, &resp); err != nil || resp.Data == nil {
-		httputil.WriteRawJSON(c, http.StatusOK, data)
+	if err := json.Unmarshal(data, &resp); err != nil || len(resp.Data) == 0 || string(resp.Data) == "null" {
+		httputil.WriteJSON(c, http.StatusOK, empty)
 		return
 	}
-	httputil.WriteRawJSON(c, http.StatusOK, resp.Data)
+	httputil.WriteRawJSON(c, http.StatusOK, camelCaseJSON(resp.Data))
 }
 
 // --- Transformation helpers ---

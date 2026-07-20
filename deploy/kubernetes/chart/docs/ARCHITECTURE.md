@@ -7,8 +7,9 @@
 | 层级 | 组件 | Kubernetes 形态 | 主要职责 |
 | --- | --- | --- | --- |
 | 控制面 | CubeMaster | OpenKruise CloneSet + Service + Secret + PVC/hostPath | 节点注册、模板/rootfs artifact、内置 DB migration、调度/元数据 |
-| 控制面 API | CubeAPI | CloneSet + Service | 对外 HTTP API；读写 MySQL；访问 CubeMaster |
-| 管理入口 | WebUI | CloneSet + Service + ConfigMap | 静态控制台；`/cubeapi/` 反代到 CubeAPI |
+| 控制面 API | CubeAPI | CloneSet + Service | 对外 E2B 兼容 HTTP API；读写 MySQL；访问 CubeMaster |
+| 运维后端 | CubeOps | CloneSet + Service | JWT 运维 API + WebUI SDK；监听 `0.0.0.0:3010`；读写 MySQL；访问 CubeMaster |
+| 管理入口 | WebUI | CloneSet + Service + ConfigMap | 静态控制台；`/opsapi/`、`/cubeapi/v1/` 反代到 CubeOps（依赖 `cubeOps.enabled`） |
 | 运维入口 | cubemastercli | CloneSet | `kubectl exec` 用 CLI；注入本 Release 的 CubeMaster endpoint |
 | 依赖存储 | MySQL / Redis | 内置 StatefulSet 或第三方 | 业务数据 / Proxy 与 lifecycle 状态 |
 | 计算面 · 运行时 | `cube-node`（Big Pod） | OpenKruise Advanced DaemonSet（InPlaceIfPossible） | `wait-node-prep` + cubelet / network-agent + 可选 egress；**无 initContainers** |
@@ -25,6 +26,7 @@ flowchart TB
   subgraph CP["Control Plane · placement.controlPlane"]
     CM["cube-master"]
     API["cube-api"]
+    OPS["cube-ops"]
     WEB["cube-webui"]
     CLI["cubemastercli"]
     MYSQL[("MySQL")]
@@ -57,8 +59,11 @@ flowchart TB
     end
   end
 
-  WEB --> API
+  WEB -->|"/opsapi /cubeapi/v1"| OPS
+  WEB -->|"/sandbox/"| PROXY
   CLI --> CM
+  OPS --> CM
+  OPS --> MYSQL
   API --> CM
   API --> MYSQL
   CM --> MYSQL
@@ -86,9 +91,10 @@ flowchart TB
 | `cube-master` | `templates/master.yaml` | `images.master`；挂载 Chart 渲染的 `conf.yaml`；内置 schema migration |
 | `cube-master-config` | `templates/master-config-secret.yaml` | `files/cube-master/conf.yaml` 渲染结果 |
 | `cube-master-storage` | `master.yaml` / `master-pvc.yaml` | 默认 PVC；可选 existingClaim / hostPath / emptyDir |
-| `cube-api` | `templates/api.yaml` | `images.api` |
+| `cube-api` | `templates/api.yaml` | `images.api`（外部 E2B） |
+| `cube-ops` | `templates/ops.yaml` | `images.ops`；ClusterIP；bind `0.0.0.0:3010` |
 | `cubemastercli` | `templates/cubemastercli.yaml` | `images.cubemastercli` |
-| `cube-webui` | `templates/webui.yaml` | `images.webui` + nginx ConfigMap |
+| `cube-webui` | `templates/webui.yaml` | `images.webui` + nginx ConfigMap（上游 CubeOps） |
 | `cube-secret` | `templates/secret.yaml` | MySQL / Redis / Proxy 等密码 |
 
 ### 2.2 MySQL / Redis
@@ -104,7 +110,7 @@ flowchart TB
 
 `cube-node` / `cube-node-installer` / `cube-node-bootstrap` 用 `placement.compute`（**不含** `allow-pvm-bootstrap`）。`cube-node-pvm` 用 `placement.pvm`（含 `allow-pvm-bootstrap`），因此非 PVM 节点不会拉取 `cube-pvm-host-bootstrap` 大镜像。
 
-三条计算面（Big Pod / installer / bootstrap）为 OpenKruise Advanced DaemonSet：Big Pod 使用 `InPlaceIfPossible`，bootstrap/installer 使用 `Standard`。**PVM 为原生 `apps/v1` DaemonSet**（不依赖 kruise-manager 创建 Pod）。无状态控制面（master/api/webui/proxy/lifecycle/cubemastercli）为 CloneSet；MySQL/Redis 继续使用原生 StatefulSet。
+三条计算面（Big Pod / installer / bootstrap）为 OpenKruise Advanced DaemonSet：Big Pod 使用 `InPlaceIfPossible`，bootstrap/installer 使用 `Standard`。**PVM 为原生 `apps/v1` DaemonSet**（不依赖 kruise-manager 创建 Pod）。无状态控制面（master/api/ops/webui/proxy/lifecycle/cubemastercli）为 CloneSet；MySQL/Redis 继续使用原生 StatefulSet。
 
 #### Big Pod：`cube-node`
 
@@ -234,6 +240,7 @@ sequenceDiagram
   participant R as Redis
   participant CM as CubeMaster
   participant API as CubeAPI
+  participant OPS as CubeOps
   participant WEB as WebUI
   participant CLI as cubemastercli
 
@@ -244,7 +251,9 @@ sequenceDiagram
   CM-->>H: /notify/health
   H->>API: CUBE_MASTER_ENDPOINT + MySQL
   API-->>H: /health
-  H->>WEB: nginx → CubeAPI
+  H->>OPS: CUBE_MASTER_ADDR + MySQL
+  OPS-->>H: /health
+  H->>WEB: nginx → CubeOps
   H->>CLI: CUBEMASTERCLI_ADDRESS / PORT
 ```
 
@@ -289,21 +298,24 @@ sequenceDiagram
 
 ### 4.4 注册与验收关注点
 
-- CubeMaster `/notify/health`、CubeAPI `/health`。
-- CubeAPI 能查到 healthy node。
+- CubeMaster `/notify/health`、CubeOps `/health`、CubeAPI `/health`（若启用）。
+- CubeAPI（或经 CubeOps SDK）能查到 healthy node。
 - `cube-node` / installer / bootstrap ready 数等于命中 `placement.compute` 的节点数；`cube-node-pvm` ready 数等于命中 `placement.pvm` 的节点数。
 - egress 启用时 sidecar Ready。
 
 ## 5. 运行期数据流
 
-### 5.1 WebUI / API / Master
+### 5.1 WebUI / CubeOps / CubeAPI / Master
 
 ```mermaid
 flowchart LR
   U["Browser / Operator"] --> WEB["cube-webui"]
-  WEB -->|/cubeapi/*| API["cube-api"]
-  API --> CM["cube-master"]
-  API --> MYSQL[("MySQL")]
+  WEB -->|"/opsapi/ /cubeapi/v1/"| OPS["cube-ops"]
+  Ext["External E2B SDK"] --> API["cube-api"]
+  OPS --> CM["cube-master"]
+  OPS --> MYSQL[("MySQL")]
+  API --> CM
+  API --> MYSQL
   CM --> MYSQL
   CM --> REDIS[("Redis")]
 ```
@@ -389,14 +401,15 @@ externalControlPlane:
 | `cubeProxy.enabled` / `ingress.enabled` | `true` | Proxy / Ingress |
 | `lifecycleManager.enabled` | `true` | Proxy 启用时必开 |
 | `cubeEgress.enabled` | `true` | Big Pod egress sidecar |
-| `webui.enabled` | `true` | WebUI |
+| `cubeOps.enabled` | `true` | CubeOps（JWT 运维 API；WebUI `/opsapi` / SDK 上游） |
+| `webui.enabled` | `true` | WebUI（要求 `cubeOps.enabled=true`） |
 | `controlPlane.templateBuilder.enabled` | `false` | 模板构建 sidecar |
 
 ## 8. Helm test
 
 | Test Pod | 覆盖 |
 | --- | --- |
-| `<release>-health-test` | Master / API / 节点注册 / WebUI / Proxy / 工作负载 Ready / Egress 存在性 |
+| `<release>-health-test` | Master / Ops / API / 节点注册 / WebUI / Proxy / 工作负载 Ready / Egress 存在性 |
 | `<release>-mysql-test` / `redis-test` | 内置依赖连通性 |
 | `<release>-dns-test` | `cube.app` / wildcard → Proxy Service |
 | `<release>-node-image-test` | 镜像内 runtime 工具与 asset |

@@ -136,6 +136,17 @@
 {{- end }}
 {{- end }}
 {{- end }}
+{{- if and .Values.webui.enabled .Values.controlPlane.enabled (ne (include "cube.opsEnabled" .) "true") }}
+{{- fail "webui.enabled=true requires cubeOps.enabled=true (WebUI proxies /opsapi and SDK paths to CubeOps)" }}
+{{- end }}
+{{- if eq (include "cube.opsEnabled" .) "true" }}
+{{- if not (include "cube.masterEndpoint" .) }}
+{{- fail "cubeOps.enabled=true requires a CubeMaster endpoint (controlPlane.master or externalControlPlane.masterEndpoint)" }}
+{{- end }}
+{{- if not .Values.images.ops.repository }}
+{{- fail "cubeOps.enabled=true requires images.ops.repository" }}
+{{- end }}
+{{- end }}
 {{- if .Values.cubeEgress.enabled }}
 {{- if not (has .Values.cubeEgress.ca.mode (list "existingSecret" "selfSigned" "inline")) }}
 {{- fail "cubeEgress.ca.mode must be one of: existingSecret, selfSigned, inline" }}

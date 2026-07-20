@@ -1,5 +1,8 @@
-{{- if and .Values.webui.enabled .Values.controlPlane.enabled .Values.controlPlane.api.enabled }}
-{{- $apiUpstream := default (printf "http://%s.%s.svc.%s:%v" (include "cube.apiName" .) .Release.Namespace (include "cube.clusterDomain" .) .Values.controlPlane.api.service.port) .Values.webui.upstream | trimSuffix "/" -}}
+{{- if and .Values.webui.enabled .Values.controlPlane.enabled (eq (include "cube.opsEnabled" .) "true") }}
+{{- /* Hash full nginx body so ConfigMap edits force a pod roll (InPlace + subPath
+     would otherwise keep a stale file). Mount is a directory (no subPath). */ -}}
+{{- $nginxBody := include "cube.webuiNginxConf" . -}}
+{{- $nginxChecksum := $nginxBody | sha256sum -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -9,60 +12,7 @@ metadata:
     app.kubernetes.io/component: webui
 data:
   nginx.conf: |-
-    worker_processes auto;
-
-    events {
-        worker_connections 1024;
-    }
-
-    http {
-        include mime.types;
-        default_type application/octet-stream;
-
-        sendfile on;
-        tcp_nopush on;
-        tcp_nodelay on;
-        keepalive_timeout 65;
-
-        gzip on;
-        gzip_types text/plain text/css application/javascript application/json application/xml;
-
-        server {
-            listen 80;
-            server_name _;
-
-            root /usr/share/nginx/html;
-            index index.html;
-
-            location = /cubeapi {
-                return 308 /cubeapi/;
-            }
-
-            location /cubeapi/ {
-                proxy_http_version 1.1;
-                proxy_set_header Host $host;
-                proxy_set_header X-Real-IP $remote_addr;
-                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                proxy_set_header X-Forwarded-Proto $scheme;
-                proxy_set_header Upgrade $http_upgrade;
-                proxy_set_header Connection "upgrade";
-                proxy_read_timeout 300s;
-                proxy_send_timeout 300s;
-
-                proxy_pass {{ $apiUpstream }}/cubeapi/;
-            }
-
-            location /assets/ {
-                try_files $uri =404;
-                expires 1y;
-                add_header Cache-Control "public, immutable";
-            }
-
-            location / {
-                try_files $uri $uri/ /index.html;
-            }
-        }
-    }
+{{- $nginxBody | nindent 4 }}
 ---
 apiVersion: {{ include "cube.cloneSetAPIVersion" . }}
 kind: CloneSet
@@ -84,7 +34,7 @@ spec:
         {{- include "cube.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: webui
       annotations:
-        checksum/nginx-conf: {{ $apiUpstream | sha256sum | quote }}
+        checksum/nginx-conf: {{ $nginxChecksum | quote }}
       {{- with .Values.webui.podAnnotations }}
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -98,6 +48,15 @@ spec:
         - name: webui
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.webui "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.webui.pullPolicy }}
+          # Image ENTRYPOINT embeds "-g daemon off;"; override so we can load the
+          # chart ConfigMap without a subPath file mount (which does not refresh).
+          command:
+            - /usr/local/openresty/bin/openresty
+          args:
+            - -c
+            - /etc/cube-webui/nginx.conf
+            - -g
+            - daemon off;
           {{- if .Values.global.timezone }}
           env:
             {{- include "cube.timezoneEnv" . | nindent 12 }}
@@ -121,8 +80,7 @@ spec:
             failureThreshold: 6
           volumeMounts:
             - name: webui-config
-              mountPath: /usr/local/openresty/nginx/conf/nginx.conf
-              subPath: nginx.conf
+              mountPath: /etc/cube-webui
               readOnly: true
           {{- with .Values.webui.resources }}
           resources:

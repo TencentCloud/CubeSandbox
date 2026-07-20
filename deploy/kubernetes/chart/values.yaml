@@ -16,7 +16,7 @@ global:
   # exactly as declared. Set to e.g. "my-registry.example.com/cubesandbox"
   # to mirror all images into a private registry without editing each entry
   # individually. Applies to the pvmHostBootstrap / nodeInit / node / master
-  # / api / cubemastercli / proxy / lifecycleManager / cubeEgress /
+  # / api / ops / cubemastercli / proxy / lifecycleManager / cubeEgress /
   # cubeEgressNet / webui / cubelet / networkAgent / cubeShim / cubeKernel /
   # cubeGuest / waitNodePrep / pause entries but not to third-party images such as mysql /
   # redis / docker-in-docker / alpine/k8s.
@@ -82,6 +82,11 @@ images:
 
   api:
     repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-api
+    tag: v0.5.1
+    pullPolicy: Always
+
+  ops:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-ops
     tag: v0.5.1
     pullPolicy: Always
 
@@ -320,8 +325,8 @@ cubemastercli:
   resources: {}
 
 webui:
-  # One-click enables WebUI by default on host port 12088. In Kubernetes the
-  # chart delivers it as a Service on port 12088 and proxies /cubeapi to CubeAPI.
+  # Dashboard nginx. Proxies /opsapi and WebUI SDK paths to CubeOps.
+  # CubeAPI is a separate Service for external E2B SDK clients.
   enabled: true
   replicas: 1
   podAnnotations: {}
@@ -330,8 +335,37 @@ webui:
     port: 12088
     targetPort: 80
     annotations: {}
-  # Empty upstream uses the chart-managed CubeAPI Service.
-  upstream: ""
+  # Optional overrides (empty = chart-managed Service FQDNs).
+  opsUpstream: ""
+  proxyUpstream: ""
+  resources: {}
+
+cubeOps:
+  # Stateful ops/admin backend (JWT) + WebUI SDK proxy to CubeMaster.
+  # Required when webui.enabled=true.
+  enabled: true
+  replicas: 1
+  podAnnotations: {}
+  bind: "0.0.0.0:3010"
+  # Empty uses cubeProxy.domain for CUBE_API_SANDBOX_DOMAIN.
+  sandboxDomain: ""
+  service:
+    type: ClusterIP
+    port: 3010
+  env: []
+  probes:
+    readiness:
+      enabled: true
+      path: /health
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      failureThreshold: 12
+    liveness:
+      enabled: true
+      path: /health
+      initialDelaySeconds: 30
+      periodSeconds: 20
+      failureThreshold: 6
   resources: {}
 
 lifecycleManager:
