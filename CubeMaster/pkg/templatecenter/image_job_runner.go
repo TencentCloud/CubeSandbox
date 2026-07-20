@@ -197,30 +197,13 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 		})
 		return
 	}
-	// Claim alias only after the template is confirmed READY, so a failed
-	// build never steals the alias from the previous working template.
-	// result_json is built AFTER the claim so a successful claim refreshes
-	// info.DisplayName, and a non-duplicate claim failure is surfaced in
-	// error_message instead of being silently swallowed.
+	// Claim alias after READY via the shared helper.
 	claimWarning := ""
 	if info.Status != StatusFailed {
-		if alias := strings.TrimSpace(req.Alias); alias != "" {
-			if claimErr := claimTemplateAlias(ctx, req.TemplateID, alias); claimErr != nil {
-				if isDuplicateAliasError(claimErr) {
-					logger.Infof("alias %q concurrently claimed by another template; template %s is READY without alias", alias, req.TemplateID)
-				} else {
-					logger.Warnf("claim alias %q for template %s fail: %v", alias, req.TemplateID, claimErr)
-					// The template is READY, but the requested alias could not
-					// be claimed. Surface the failure in error_message so it is
-					// observable to callers; the job still reports READY.
-					claimWarning = fmt.Sprintf("template is ready but alias %q could not be claimed: %v", alias, claimErr)
-				}
-			} else if refreshed, refreshErr := GetTemplateInfo(ctx, req.TemplateID); refreshErr == nil && refreshed != nil {
-				// Reflect the claimed alias (display_name) in result_json.
-				info = refreshed
-			} else {
-				info.DisplayName = alias
-			}
+		warning, displayName := claimAliasAfterReady(ctx, req.TemplateID, req.Alias)
+		claimWarning = warning
+		if displayName != "" {
+			info.DisplayName = displayName
 		}
 	}
 	resultPayload, _ := json.Marshal(info)

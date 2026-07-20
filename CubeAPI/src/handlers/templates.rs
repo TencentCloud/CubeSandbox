@@ -252,8 +252,9 @@ pub async fn delete_template(
         return Ok((StatusCode::NO_CONTENT, headers).into_response());
     }
     // Alias resolution happens at the CubeMaster layer (deleteTemplate
-    // calls resolveTemplateIdentifierFn). AgentHub reverse-sync was
-    // removed from CubeAPI in #984; cleanup is now CubeMaster-owned.
+    // calls resolveTemplateIdentifierFn). CubeAPI no longer performs
+    // AgentHub reverse-sync (removed when this branch was rebased onto
+    // master, which includes the #984 refactoring).
     state
         .services
         .templates

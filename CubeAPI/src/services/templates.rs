@@ -109,21 +109,10 @@ impl TemplateService {
         if alias.is_empty() {
             return Err(AppError::BadRequest("alias is required".to_string()));
         }
-        if alias.starts_with("tpl-") || alias.starts_with("snap-") {
+        if !is_valid_alias(alias) {
             return Err(AppError::BadRequest(
-                "alias must not start with 'tpl-' or 'snap-'".to_string(),
-            ));
-        }
-        let valid = alias.chars().enumerate().all(|(i, c)| {
-            if i == 0 {
-                c.is_ascii_lowercase() || c.is_ascii_digit()
-            } else {
-                c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'
-            }
-        }) && alias.len() <= 64;
-        if !valid {
-            return Err(AppError::BadRequest(
-                "alias must match ^[a-z0-9][a-z0-9-]{0,63}$".to_string(),
+                "alias must match ^[a-z0-9][a-z0-9-]{0,63}$ and not start with tpl-/snap-"
+                    .to_string(),
             ));
         }
 

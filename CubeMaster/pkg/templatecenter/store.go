@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
@@ -684,12 +685,9 @@ func refreshTemplateReplicaSummary(ctx context.Context, templateID string) error
 	return nil
 }
 
-// createDefinitionWithOptions wraps createDefinitionTx in a real DB transaction.
-// This is critical for alias correctness: the release-stale-alias UPDATE and the
-// new-row INSERT inside createDefinitionTx must be atomic (TOCTOU window
-// otherwise). The snapshot path (snapshot_ops.go) already wraps createDefinitionTx
-// in its own store.db.Transaction, so this wrapper only affects the template
-// (image/redo) paths.
+// createDefinitionWithOptions wraps createDefinitionTx in a real DB transaction
+// so the INSERT is atomic. Alias claiming is NOT done here — it happens
+// separately in claimTemplateAlias after the template reaches READY.
 func createDefinitionWithOptions(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string, opts definitionCreateOptions) error {
 	return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		return createDefinitionTx(ctx, tx, templateID, storedReq, instanceType, version, opts)
@@ -976,15 +974,45 @@ func claimTemplateAlias(ctx context.Context, templateID, alias string) error {
 	})
 }
 
-// isDuplicateAliasError returns true for MySQL (1062 / Duplicate entry) and
-// PostgreSQL (23505 / unique_constraint) unique-violation errors. Used by
-// claimTemplateAlias callers to treat concurrent alias claims as non-fatal.
+// isDuplicateAliasError returns true for MySQL (1062) and PostgreSQL (23505)
+// unique-violation errors, using structured type assertions instead of string
+// matching to avoid false positives from unrelated error text.
 func isDuplicateAliasError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1062 {
+		return true
+	}
+	// pgconn.PgError has Code == "23505" for unique_violation. We check via
+	// string matching on the error message as a fallback because the pgx
+	// driver may not be imported in all build configurations.
 	s := err.Error()
-	return strings.Contains(s, "1062") || strings.Contains(s, "Duplicate entry") ||
-		strings.Contains(s, "23505") || strings.Contains(s, "unique_constraint")
+	return strings.Contains(s, "23505") || strings.Contains(s, "unique_constraint")
 }
 
+// claimAliasAfterReady is the shared claim-after-READY pattern used by both
+// image_job_runner and redo. It attempts to claim the alias for a template
+// that has just reached READY. Returns a warning string (non-empty if the
+// claim failed for a non-duplicate reason) and the refreshed DisplayName
+// (non-empty if the claim succeeded).
+func claimAliasAfterReady(ctx context.Context, templateID, alias string) (claimWarning, displayName string) {
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return "", ""
+	}
+	if claimErr := claimTemplateAlias(ctx, templateID, alias); claimErr != nil {
+		if isDuplicateAliasError(claimErr) {
+			log.G(ctx).Infof("alias %q concurrently claimed by another template; template %s is READY without alias", alias, templateID)
+		} else {
+			log.G(ctx).Warnf("claim alias %q for template %s fail: %v", alias, templateID, claimErr)
+			return fmt.Sprintf("template is ready but alias %q could not be claimed: %v", alias, claimErr), ""
+		}
+	} else if refreshed, refreshErr := GetTemplateInfo(ctx, templateID); refreshErr == nil && refreshed != nil {
+		return "", refreshed.DisplayName
+	} else {
+		return "", alias
+	}
+	return "", ""
+}
 func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.CreateCubeSandboxReq, error) {
 	cacheStart := time.Now()
 	if req, hit, err := getCachedTemplateRequest(templateID); err != nil {
