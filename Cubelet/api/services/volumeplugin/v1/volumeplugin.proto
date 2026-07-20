@@ -1,0 +1,108 @@
+// Copyright (c) 2024 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package cubelet.services.volumeplugin.v1;
+
+option go_package = "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/volumeplugin/v1;volumepluginv1";
+
+// PluginVolumeSource selects an external volume plugin by driver name.
+// Embedded in cubebox.VolumeSource.
+message PluginVolumeSource {
+  // driver is the registered plugin name (e.g. "nfs", "s3fuse", "cfs").
+  // Must match VolumePlugin.Name() on the Cubelet node.
+  string driver = 1;
+}
+
+// VolumePluginService is the gRPC interface implemented by RPC-type plugins.
+// The Cubelet VolumePlugin framework calls these RPCs instead of forking a
+// subprocess.
+service VolumePluginService {
+  // Attach provisions the volume on the host and returns attach metadata.
+  // Cubelet stores the returned metadata and passes it back unchanged on
+  // Detach.
+  rpc Attach(AttachRequest) returns (AttachResponse);
+
+  // Detach tears down a previously attached volume.
+  rpc Detach(DetachRequest) returns (DetachResponse);
+}
+
+// Attach / Detach ─────────────────────────────────────────────────────────────
+
+message AttachRequest {
+  // sandbox_id is the sandbox being created.
+  string sandbox_id  = 1;
+  // namespace is the containerd namespace.
+  string namespace   = 2;
+  // volume_id is the CubeMaster VolumeRecord identifier.
+  // Used as the ref-count DB key for cross-sandbox deduplication.
+  string volume_id   = 3;
+  reserved 4;  // was driver; plugin is selected by Cubelet before the RPC
+  // volume_base_dir is the parent directory that Cubelet requires the plugin
+  // to mount this volume under. The plugin MUST return a host_path located
+  // inside this directory (typically "<volume_base_dir>/<plugin>-<volume_id>").
+  // Cubelet rejects the attach if host_path is not within volume_base_dir.
+  string volume_base_dir = 5;
+  // ref_count is the number of sandboxes already attached to this volume
+  // BEFORE this call (i.e. the pre-attach count).
+  // 0 → first attach; plugin should perform host-level setup.
+  int64  ref_count   = 6;
+}
+
+message AttachResponse {
+  reserved 1;  // was volume_id; Cubelet uses AttachRequest.volume_id
+  // host_path is the host-side path cubelet exposes into the VM.
+  string host_path = 2;
+  reserved 3;  // was read_only; rw/ro is decided by sandbox volumeMounts.readonly
+  // metadata is opaque key-value data cubelet persists and passes back
+  // unchanged to Detach.
+  map<string, string> metadata = 4;
+}
+
+message DetachRequest {
+  string sandbox_id  = 1;
+  string namespace   = 2;
+  string volume_id   = 3;
+  reserved 4;  // was driver; plugin is selected by Cubelet before the RPC
+  // metadata is the exact map returned by the corresponding Attach call.
+  map<string, string> metadata = 6;
+  reserved 7;
+  // ref_count is the number of sandboxes still attached AFTER this call
+  // (i.e. the post-detach count).
+  // 0 → last detach; plugin should tear down host-level resources.
+  int64  ref_count   = 8;
+}
+
+message DetachResponse {}
+
+// VolumeControllerService is the gRPC interface for CubeMaster Controller hooks.
+// RPC-type plugins implement this service alongside VolumePluginService (Node).
+service VolumeControllerService {
+  // Create provisions a new volume in the backend storage.
+  rpc Create(CreateRequest) returns (CreateResponse);
+
+  // Destroy permanently deletes a volume and its backend data.
+  rpc Destroy(DestroyRequest) returns (DestroyResponse);
+}
+
+message CreateRequest {
+  // volume_id is the stable identifier assigned by CubeMaster.
+  string volume_id = 1;
+  // name is the human-readable label.
+  string name = 2;
+  reserved 3;  // was driver; plugin is selected by CubeMaster before the RPC
+}
+
+message CreateResponse {
+  // token is an optional credential for volume-content access.
+  // volume_id and name come from the CreateRequest; plugins must not echo them.
+  string token = 1;
+}
+
+message DestroyRequest {
+  string volume_id = 1;
+  reserved 2;  // was driver; plugin is selected by CubeMaster before the RPC
+}
+
+message DestroyResponse {}

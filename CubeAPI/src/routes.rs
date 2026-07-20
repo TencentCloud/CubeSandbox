@@ -18,7 +18,9 @@ use tower_http::{
 };
 
 use crate::{
-    handlers::{agenthub, auth, cluster, config, health, sandboxes, snapshots, store, templates},
+    handlers::{
+        agenthub, auth, cluster, config, health, sandboxes, snapshots, store, templates, volumes,
+    },
     middleware::{auth::unified_auth, rate_limit::rate_limit},
     state::AppState,
 };
@@ -70,6 +72,7 @@ fn build_e2b_router(state: &AppState, auth_configured: bool) -> Router<AppState>
         .route("/health", get(health::health))
         .merge(build_sandbox_routes(state, auth_configured))
         .merge(build_template_routes(state, auth_configured))
+        .merge(build_volume_routes(state, auth_configured))
 }
 
 /// Routes that need the longer 240 s timeout when surfaced under the e2b
@@ -245,6 +248,20 @@ fn build_long_agenthub_routes(state: &AppState, auth_configured: bool) -> Router
         .route(
             "/agenthub/instances/:agentID/publish-template",
             post(agenthub::publish_agent_template),
+        );
+
+    with_auth(routes, state, auth_configured)
+}
+
+fn build_volume_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
+    let routes = Router::new()
+        .route(
+            "/volumes",
+            get(volumes::list_volumes).post(volumes::create_volume),
+        )
+        .route(
+            "/volumes/:volumeID",
+            get(volumes::get_volume).delete(volumes::delete_volume),
         );
 
     with_auth(routes, state, auth_configured)

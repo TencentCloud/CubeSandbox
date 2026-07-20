@@ -189,6 +189,11 @@ type VolumeSource struct {
 	HostDirVolumeSources *HostDirVolumeSources    `json:"host_dir_volumes,omitempty"`
 
 	Image *imagev1.ImageVolumeSource `protobuf:"bytes,9,opt,name=image,proto3" json:"image,omitempty"`
+
+	// PluginVolume delegates provisioning to a named external VolumePlugin
+	// (built-in, binary or RPC) on the Cubelet node.
+	// Field number 11 matches cubebox.proto VolumeSource.plugin_volume.
+	PluginVolume *PluginVolumeSource `json:"plugin_volume,omitempty"`
 }
 
 type HostDirVolumeSources struct {
@@ -759,4 +764,15 @@ type InstanceTypeQuotaItem struct {
 	CPUType string `json:"cpu_type,omitempty"`
 	CPU     int64  `json:"cpu,omitempty"`
 	Memory  int64  `json:"memory,omitempty"`
+}
+
+// PluginVolumeSource mirrors cubelet.services.volumeplugin.v1.PluginVolumeSource.
+// It selects an external VolumePlugin on the Cubelet node by driver name.
+type PluginVolumeSource struct {
+	// Driver is the registered plugin name, e.g. "nfs", "cos", "host-mount".
+	// Must match a VolumePlugin registered in Cubelet's volume.Manager.
+	Driver string `json:"driver"`
+	// Options are driver-specific key-value pairs forwarded verbatim to the
+	// Node Hook plugin.  At minimum contains "volume_id".
+	Options map[string]string `json:"options,omitempty"`
 }

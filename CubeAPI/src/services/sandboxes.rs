@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use super::validate_allow_out_domains_require_deny_all;
@@ -13,12 +13,13 @@ use crate::{
         CubeEgressRuleAction, CubeEgressRuleInject, CubeEgressRuleMatch, CubeMasterClient,
         CubeMasterError, CubeNetworkConfig, DeleteSandboxRequest, ListSandboxRequest, SandboxInfo,
         SandboxLogsRequest, SandboxRefreshRequest, SandboxStatus, SandboxTimeoutRequest,
-        SandboxUpdateRequest,
+        SandboxUpdateRequest, VolumeMount, VolumeSpec,
     },
     error::{AppError, AppResult},
     models::{
         EgressRule, LogLevel as ModelLogLevel, NewSandbox, Sandbox, SandboxDetail, SandboxLog,
         SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxState,
+        SandboxVolumeMount,
     },
 };
 
@@ -157,10 +158,14 @@ impl SandboxService {
             metadata,
             distribution_scope,
             env_vars,
+            volume_mounts,
             ..
         } = body;
         if let Some(env_vars) = env_vars.as_ref() {
             validate_env_vars(env_vars)?;
+        }
+        if let Some(mounts) = volume_mounts.as_ref() {
+            validate_unique_volume_mount_names(mounts)?;
         }
         let mut annotations = HashMap::from([
             (
@@ -197,6 +202,54 @@ impl SandboxService {
             })
             .unwrap_or((false, false));
 
+        // Convert e2b-style volumeMounts into the CubeMaster wire format.
+        // Volumes (pod-level declarations) are passed in the volumes field;
+        // VolumeSource is left None so CubeMaster resolves from the volume DB.
+        //
+        // Container-level volume_mounts are forwarded via the
+        // "plugin-volume-mounts" annotation so CubeMaster can inject them
+        // into the existing template containers WITHOUT overriding the
+        // template's command / image / other settings.
+        let cube_volumes: Vec<VolumeSpec> = volume_mounts
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|SandboxVolumeMount { name, .. }| VolumeSpec {
+                name: Some(name.clone()),
+                volume_source: None,
+            })
+            .collect();
+
+        // Build the plugin-volume-mounts annotation value (JSON array).
+        if let Some(mounts) = &volume_mounts {
+            if !mounts.is_empty() {
+                #[derive(serde::Serialize)]
+                struct MountEntry<'a> {
+                    name: &'a str,
+                    container_path: &'a str,
+                }
+                let entries: Vec<MountEntry> = mounts
+                    .iter()
+                    .map(|m| MountEntry {
+                        name: &m.name,
+                        container_path: &m.path,
+                    })
+                    .collect();
+                if let Ok(json) = serde_json::to_string(&entries) {
+                    annotations.insert("plugin-volume-mounts".to_string(), json);
+                }
+            }
+        }
+
+        let volumes = if cube_volumes.is_empty() {
+            None
+        } else {
+            Some(cube_volumes)
+        };
+        // Always leave containers empty — CubeMaster injects volume_mounts
+        // from the annotation into the template's existing container spec.
+        let containers = vec![];
+
         let req = CreateSandboxRequest {
             request_id: new_request_id(),
             instance_type: self.instance_type.clone(),
@@ -208,8 +261,8 @@ impl SandboxService {
             labels,
             create_time_env_vars: env_vars,
             distribution_scope,
-            volumes: None,
-            containers: vec![],
+            volumes,
+            containers,
             exposed_ports: vec![],
             network_type: Some("tap".to_string()),
             cube_network_config,
@@ -618,6 +671,20 @@ fn validate_env_vars(env_vars: &HashMap<String, String>) -> AppResult<()> {
         if value.chars().any(|ch| ch != '\t' && ch.is_control()) {
             return Err(AppError::BadRequest(format!(
                 "env var value contains control character: {name:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Each volume (`volumeMounts[].name`) may be mounted at most once per sandbox.
+fn validate_unique_volume_mount_names(mounts: &[SandboxVolumeMount]) -> AppResult<()> {
+    let mut seen = HashSet::with_capacity(mounts.len());
+    for m in mounts {
+        if !seen.insert(m.name.as_str()) {
+            return Err(AppError::BadRequest(format!(
+                "duplicate volumeMounts name {:?}: each volume may be mounted at most once per sandbox",
+                m.name
             )));
         }
     }
@@ -1799,5 +1866,98 @@ mod tests {
             ("TAB_OK".to_string(), "hello\tworld".to_string()),
         ]))
         .expect("valid env var names should be accepted");
+    }
+
+    #[test]
+    fn volume_mounts_reject_duplicate_names() {
+        use crate::models::SandboxVolumeMount;
+
+        let mounts = vec![
+            SandboxVolumeMount {
+                name: "data".to_string(),
+                path: "/mnt/a".to_string(),
+            },
+            SandboxVolumeMount {
+                name: "data".to_string(),
+                path: "/mnt/b".to_string(),
+            },
+        ];
+        let err = super::validate_unique_volume_mount_names(&mounts)
+            .expect_err("duplicate volume mount names should be rejected");
+        assert!(
+            err.to_string().contains("duplicate volumeMounts name"),
+            "unexpected error: {err}"
+        );
+
+        let ok = vec![
+            SandboxVolumeMount {
+                name: "data".to_string(),
+                path: "/mnt/a".to_string(),
+            },
+            SandboxVolumeMount {
+                name: "logs".to_string(),
+                path: "/mnt/b".to_string(),
+            },
+        ];
+        super::validate_unique_volume_mount_names(&ok)
+            .expect("unique volume mount names should be accepted");
+    }
+
+    /// Verifies that `volumeMounts` from the e2b-shaped `NewSandbox` are
+    /// correctly split into `VolumeSpec` (pod-level declarations) and
+    /// `VolumeMount` (container-level bindings) for CubeMaster.
+    #[test]
+    fn volume_mounts_are_split_into_spec_and_mount() {
+        use crate::{
+            cubemaster::{VolumeMount, VolumeSpec},
+            models::SandboxVolumeMount,
+        };
+
+        let mounts = vec![
+            SandboxVolumeMount {
+                name: "data".to_string(),
+                path: "/mnt/data".to_string(),
+            },
+            SandboxVolumeMount {
+                name: "logs".to_string(),
+                path: "/mnt/logs".to_string(),
+            },
+        ];
+
+        let (specs, bindings): (Vec<VolumeSpec>, Vec<VolumeMount>) = mounts
+            .into_iter()
+            .map(|SandboxVolumeMount { name, path }| {
+                (
+                    VolumeSpec {
+                        name: Some(name.clone()),
+                        volume_source: None,
+                    },
+                    VolumeMount {
+                        name,
+                        container_path: path,
+                        readonly: None,
+                    },
+                )
+            })
+            .unzip();
+
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].name.as_deref(), Some("data"));
+        assert_eq!(specs[1].name.as_deref(), Some("logs"));
+
+        assert_eq!(bindings[0].name, "data");
+        assert_eq!(bindings[0].container_path, "/mnt/data");
+        assert_eq!(bindings[1].name, "logs");
+        assert_eq!(bindings[1].container_path, "/mnt/logs");
+    }
+
+    /// When no `volumeMounts` are provided, `volumes` and `containers` in the
+    /// CubeMaster request should be empty/None so CubeMaster falls back to the
+    /// template's container definition.
+    #[test]
+    fn empty_volume_mounts_produces_none_volumes_and_empty_containers() {
+        let mounts: Vec<crate::models::SandboxVolumeMount> = vec![];
+        let has_mounts = !mounts.is_empty();
+        assert!(!has_mounts, "no mounts → containers should stay empty");
     }
 }

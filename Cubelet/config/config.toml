@@ -99,6 +99,14 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     # FICLONE (e.g. xfs with `-m reflink=1` or btrfs).
     data_path = "/data/cubelet/storage"
 
+    # Parent directory for volume plugin host_path mounts (Attach --volume-base-dir).
+    volume_plugin_base_dir = "/data/volume"
+
+    [[plugins."io.cubelet.internal.v1.storage".volume_plugins]]
+      name        = "cos"
+      type        = "binary"
+      binary_path = "/usr/local/services/cubetoolbox/Cubelet/plugin/cube-volume-cos"
+
 
     [plugins."io.cubelet.internal.v1.storage".cow.log]
     level = "info,h2=warn,hyper=warn,tower=warn"

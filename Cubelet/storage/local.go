@@ -31,6 +31,7 @@ import (
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/plugin"
 	jsoniter "github.com/json-iterator/go"
+	bolt "go.etcd.io/bbolt"
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
@@ -42,6 +43,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/volume/refcount"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
@@ -66,6 +68,11 @@ type local struct {
 	multiLock            *multilock.MultiLock
 	cowEngine            *cubecow.Engine
 	cowManager           cowVolumeManager
+
+	// rcDB is the dedicated bbolt DB for the plugin-volume reference-count store.
+	// It is a sibling file to meta.db in the same db directory.
+	rcDB    *bolt.DB
+	rcStore *refcount.Store
 }
 
 type HostStorageMeta struct {
@@ -562,6 +569,19 @@ func (l *local) initDb() error {
 		bucket.CubeStore = l.db
 		multimeta.RegisterBucket(bucket)
 	}
+
+	// Open a dedicated bbolt file for plugin-volume ref-counts.
+	// This is separate from the sharded CubeStore so we can use bbolt
+	// transactions directly.
+	rcDBPath := filepath.Join(basePath, "volume_refcount.db")
+	l.rcDB, err = bolt.Open(rcDBPath, 0644, utils.MakeBoltDBOption())
+	if err != nil {
+		return fmt.Errorf("open volume refcount db %s: %w", rcDBPath, err)
+	}
+	l.rcStore, err = refcount.New(l.rcDB)
+	if err != nil {
+		return fmt.Errorf("init volume refcount store: %w", err)
+	}
 	return nil
 }
 
@@ -784,7 +804,20 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (retEr
 	var restoreMemoryVolURL string
 	eg, groupCtx := errgroup.WithContext(ctx)
 	eg.Go(func() error {
-		return l.prepareRequestVolumes(groupCtx, opts, realReq, result)
+		var err error
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					CubeLog.Errorf("[plugin_volume] prepareRequestVolumes PANIC: %v", r)
+					err = fmt.Errorf("prepareRequestVolumes panic: %v", r)
+				}
+			}()
+			err = l.prepareRequestVolumes(groupCtx, opts, realReq, result)
+		}()
+		if err != nil {
+			CubeLog.Errorf("[plugin_volume] prepareRequestVolumes error: %v", err)
+		}
+		return err
 	})
 	eg.Go(func() error {
 		url, err := l.prefetchRestoreMemoryVolURL(groupCtx, opts)
@@ -831,6 +864,11 @@ func (l *local) prepareRequestVolumes(ctx context.Context, opts *workflow.Create
 		}
 
 		if err := l.prepareHostDirVolume(ctx, opts, v, result); err != nil {
+			return err
+		}
+
+		// plugin_volume: routed entirely through the VolumePlugin framework.
+		if err := l.attachPluginVolume(ctx, opts, v, result); err != nil {
 			return err
 		}
 	}
@@ -955,6 +993,15 @@ func (l *local) prepareDefaultMedium(ctx context.Context, opts *workflow.CreateC
 	v *cubebox.Volume, result *StorageInfo) error {
 	if v.GetVolumeSource() == nil || v.GetVolumeSource().GetEmptyDir() == nil ||
 		v.GetVolumeSource().GetEmptyDir().GetMedium() != cubebox.StorageMedium_StorageMediumDefault {
+		return nil
+	}
+	// Plugin volumes are injected by CubeMaster as EmptyDir placeholders but
+	// must NOT be provisioned here — they are handled entirely by
+	// attachPluginVolume via the VolumePlugin binary framework.
+	// Provisioning them here would create a spurious cubecow snapshot with the
+	// same sandboxID, causing an "already exists" collision when the real
+	// rootfs snapshot is created moments later.
+	if isPluginVolume(opts.ReqInfo.GetAnnotations(), v.GetName()) {
 		return nil
 	}
 	sizeLimit := v.GetVolumeSource().GetEmptyDir().SizeLimit
@@ -1230,7 +1277,8 @@ func (l *local) destroy(ctx context.Context, info *StorageInfo, opts *workflow.D
 		errs = errors.Join(errs, err)
 	}
 
-	if err := l.cleanupHostDirVolumes(ctx, info); err != nil {
+	// plugin_volume: unmount all volumes that were provisioned via VolumePlugin.
+	if err := l.detachPluginVolumes(ctx, info, opts); err != nil {
 		errs = errors.Join(errs, err)
 	}
 
@@ -1549,6 +1597,12 @@ type StorageInfo struct {
 	HostDirBackendInfos map[string]*HostDirBackendInfo `json:"hostDirBackendInfos,omitempty"`
 
 	RestoreMemoryVolURL string `json:"-"`
+
+	// PluginVolumeBackendInfos records the result of every plugin_volume attach.
+	// Keyed by Volume.name (the RunCubeSandboxRequest name, not volumeID).
+	// Persisted in the same DB bucket as the rest of StorageInfo so
+	// Destroy / CleanUp can reconstruct what to detach.
+	PluginVolumeBackendInfos map[string]*PluginVolumeBackendInfo `json:"pluginVolumeBackendInfos,omitempty"`
 }
 
 func (i *StorageInfo) GetNICQueues() int64 {

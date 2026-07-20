@@ -22,6 +22,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/task"
+	volrefcount "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/refcount"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
@@ -190,6 +191,9 @@ func callCubelet(ctx context.Context, callEp string, req *cubebox.DestroyCubeSan
 			log.G(ctx).Errorf("Destroy error:%+v", rsp)
 			return ret.Err(errorcode.MasterCode(rsp.GetRet().GetRetCode()), rsp.GetRet().GetRetMsg())
 		}
+		// Apply any node-level volume ref-count transitions (1→0) reported by
+		// Cubelet so the volume DB releases the reference held by this node.
+		volrefcount.ApplyFromExtInfo(ctx, rsp.GetExtInfo())
 	}
 
 	err := localcache.DeleteSandboxProxyMap(ctx, req.GetSandboxID())

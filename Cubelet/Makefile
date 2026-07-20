@@ -2,7 +2,7 @@ APPS=cubelet cubecli
 COVERAGE_PROFILE=coverage.profile
 ROOT_DIR=$(shell pwd)
 BUILD_DIR=$(ROOT_DIR)/build
-PROTO=services/errorcode services/version services/cubebox services/images services/nbi services/multimetadb types
+PROTO=services/errorcode services/version services/cubebox services/images services/nbi services/multimetadb services/volumeplugin types
 PACK_DIR=$(BUILD_DIR)/cube-let
 
 export GO111MODULE=on

@@ -1322,7 +1322,9 @@ backup_before_upgrade() {
     "VERSION.txt" \
     "release-manifest.json" \
     "CubeMaster/conf.yaml" \
+    "CubeMaster/plugin/volume-cos.conf" \
     "Cubelet/config/config.toml" \
+    "Cubelet/plugin/volume-cos.conf" \
     "cube-shim/conf/config-cube.toml" \
     "network-agent/network-agent.yaml" \
     "cubeproxy/global.conf" \
@@ -1350,6 +1352,76 @@ backup_before_upgrade() {
 
   log "backed up existing config to ${backup_dir}"
   printf '%s\n' "${backup_dir}"
+}
+
+# restore_volume_plugin_config_from_upgrade_backup: on upgrade, put operator-edited
+# volume-cos.conf back after the packaged CubeMaster/Cubelet trees are replaced.
+restore_volume_plugin_config_from_upgrade_backup() {
+  local install_prefix="$1"
+  local install_mode="$2"
+  local backup_dir="$3"
+  local rel src dst
+
+  [[ "${install_mode}" == "upgrade" && -n "${backup_dir}" && -d "${backup_dir}" ]] || return 0
+
+  for rel in \
+    "CubeMaster/plugin/volume-cos.conf" \
+    "Cubelet/plugin/volume-cos.conf"
+  do
+    src="${backup_dir}/${rel}"
+    dst="${install_prefix}/${rel}"
+    if [[ -f "${src}" ]]; then
+      mkdir -p "$(dirname "${dst}")"
+      cp -a "${src}" "${dst}"
+      chmod 600 "${dst}" 2>/dev/null || true
+      log "restored ${rel} from upgrade backup"
+    fi
+  done
+}
+
+# seed_volume_plugin_config: create volume-cos.conf from the shipped example on
+# first install; skip when the file already exists (including after restore).
+seed_volume_plugin_config() {
+  local install_prefix="$1"
+  local deploy_role="$2"
+  local plugin_dir example conf
+
+  for plugin_dir in \
+    "CubeMaster/plugin" \
+    "Cubelet/plugin"
+  do
+    [[ "${deploy_role}" == "compute" && "${plugin_dir}" == CubeMaster/plugin ]] && continue
+    [[ -d "${install_prefix}/${plugin_dir}" ]] || continue
+    example="${install_prefix}/${plugin_dir}/volume-cos.conf.example"
+    conf="${install_prefix}/${plugin_dir}/volume-cos.conf"
+    if [[ ! -f "${conf}" && -f "${example}" ]]; then
+      cp -a "${example}" "${conf}"
+      chmod 600 "${conf}"
+      log "seeded ${plugin_dir}/volume-cos.conf from example (edit COS credentials before use)"
+    fi
+  done
+}
+
+# prepare_volume_plugin_install: restore/seed config and ensure plugin binaries
+# are executable under CubeMaster/Cubelet plugin directories.
+prepare_volume_plugin_install() {
+  local install_prefix="$1"
+  local install_mode="$2"
+  local backup_dir="$3"
+  local deploy_role="$4"
+  local plugin_bin
+
+  restore_volume_plugin_config_from_upgrade_backup \
+    "${install_prefix}" "${install_mode}" "${backup_dir}"
+  seed_volume_plugin_config "${install_prefix}" "${deploy_role}"
+
+  for plugin_bin in \
+    "${install_prefix}/CubeMaster/plugin/cube-volume-cos" \
+    "${install_prefix}/Cubelet/plugin/cube-volume-cos"
+  do
+    [[ -f "${plugin_bin}" ]] || continue
+    chmod +x "${plugin_bin}"
+  done
 }
 
 detect_pkg_manager() {

@@ -35,6 +35,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/task"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
+	volumeplugin "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin"
+	_ "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin/binary"
+	_ "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin/rpc"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
@@ -161,6 +164,11 @@ func coreInit(ctx context.Context, cfg *config.Config) error {
 
 	if err := templatecenter.Init(ctx); err != nil {
 		stdlog.Fatalf("templatecenter init fail:%v", err)
+		return err
+	}
+
+	if err := initVolumePlugins(cfg); err != nil {
+		stdlog.Fatalf("volume plugin init fail:%v", err)
 		return err
 	}
 
@@ -302,4 +310,30 @@ func setLogLevel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	CubeLog.SetLevel(CubeLog.StringToLevel(strings.ToUpper(l)))
+}
+
+// initVolumePlugins registers external Controller Hook Plugins (binary or rpc).
+func initVolumePlugins(cfg *config.Config) error {
+	if err := volumeplugin.ValidateConfigs(cfg.VolumePlugins); err != nil {
+		return err
+	}
+	for _, pc := range cfg.VolumePlugins {
+		switch pc.Type {
+		case "binary":
+			if err := volumeplugin.LoadBinary(pc); err != nil {
+				return fmt.Errorf("load volume plugin %q: %w", pc.Name, err)
+			}
+			CubeLog.Infof("[volume] registered binary plugin %q at %s", pc.Name, pc.BinaryPath)
+		case "rpc":
+			if err := volumeplugin.LoadRPC(pc); err != nil {
+				return fmt.Errorf("load volume plugin %q: %w", pc.Name, err)
+			}
+			CubeLog.Infof("[volume] registered rpc plugin %q at %s", pc.Name, pc.SocketPath)
+		case "", "builtin":
+			// built-in plugins register themselves via init(); nothing to do.
+		default:
+			return fmt.Errorf("volume plugin %q: unknown type %q", pc.Name, pc.Type)
+		}
+	}
+	return nil
 }

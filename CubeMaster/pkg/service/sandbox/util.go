@@ -6,6 +6,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -15,12 +16,15 @@ import (
 	cubeboximages "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/dao"
+	dbmodels "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"gorm.io/gorm"
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
@@ -177,8 +181,19 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 	}
 	log.G(ctx).Infof("[hostdir] ConstructCubeletReq: volumes_after_inject=%d", len(req.Volumes))
 
+	if err = injectPluginVolumeMounts(ctx, req); err != nil {
+		return nil, ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
+	}
+
 	if err = checkAndGetVolumes(req, out); err != nil {
 		return nil, ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
+	}
+	// Sync any annotations added by checkAndGetVolumes (e.g. plugin-volume-sources)
+	// into the outgoing RunCubeSandboxRequest.
+	for k, v := range req.Annotations {
+		if _, exists := out.Annotations[k]; !exists {
+			out.Annotations[k] = v
+		}
 	}
 
 	if err = checkAndGetContainers(req, out); err != nil {
@@ -613,16 +628,48 @@ func handlePrestop(dst **cubebox.PreStop, src *types.PreStop) {
 	}
 }
 func checkAndGetVolumes(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSandboxRequest) error {
+	// Build a set of plugin volume names from the plugin-volume-mounts annotation.
+	pluginVolumeNames := map[string]bool{}
+	if raw := req.Annotations[AnnotationPluginVolumeMounts]; raw != "" {
+		type mountEntry struct {
+			Name string `json:"name"`
+		}
+		var entries []mountEntry
+		if err := json.Unmarshal([]byte(raw), &entries); err == nil {
+			for _, e := range entries {
+				pluginVolumeNames[e.Name] = true
+			}
+		}
+	}
+
 	if req.Volumes != nil {
 		for _, e := range req.Volumes {
-			if e.Name == "" || e.VolumeSource == nil {
-				return fmt.Errorf("volume [%s] source is nil", e.Name)
+			if e.Name == "" {
+				return fmt.Errorf("volume name must not be empty")
 			}
 
 			v := &cubebox.Volume{
 				Name:         e.Name,
 				VolumeSource: &cubebox.VolumeSource{},
 			}
+
+			// Identify plugin volumes by name appearing in plugin-volume-mounts
+			// annotation, or by having a nil VolumeSource.
+			if e.VolumeSource == nil || pluginVolumeNames[e.Name] {
+				record, err := resolveVolumeRecord(e.Name)
+				if err != nil {
+					return fmt.Errorf("volume [%s]: %w", e.Name, err)
+				}
+				if err := appendPluginVolumeSourceAnnotation(req, e.Name, record.Driver); err != nil {
+					return fmt.Errorf("volume [%s]: annotation: %w", e.Name, err)
+				}
+				v.VolumeSource.EmptyDir = &cubebox.EmptyDirVolumeSource{
+					SizeLimit: "1Gi",
+				}
+				out.Volumes = append(out.Volumes, v)
+				continue
+			}
+
 			if e.VolumeSource.EmptyDir != nil {
 				v.VolumeSource.EmptyDir = &cubebox.EmptyDirVolumeSource{
 					SizeLimit: e.VolumeSource.EmptyDir.SizeLimit,
@@ -645,6 +692,21 @@ func checkAndGetVolumes(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSan
 		}
 	}
 	return nil
+}
+
+// resolveVolumeRecord looks up a VolumeRecord by volumeID from the DB.
+func resolveVolumeRecord(volumeID string) (*dbmodels.VolumeRecord, error) {
+	var record dbmodels.VolumeRecord
+	err := dao.Default().
+		Where("volume_id = ?", volumeID).
+		First(&record).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("volume not found: %s", volumeID)
+		}
+		return nil, fmt.Errorf("db error: %w", err)
+	}
+	return &record, nil
 }
 
 func checkAndGetHostDirVolumeSource(src *types.HostDirVolumeSources, out *cubebox.Volume) error {
@@ -931,5 +993,34 @@ func checkAndGetContainerHooks(out *cubebox.ContainerConfig, in *types.Container
 			})
 		}
 	}
+	return nil
+}
+
+// appendPluginVolumeSourceAnnotation records name+driver for a plugin volume
+// in the "plugin-volume-sources" annotation so Cubelet can call the right
+// Node Hook binary at attach time.
+//
+// Format: JSON array of {"name": "<volumeID>", "driver": "<driver>"}
+func appendPluginVolumeSourceAnnotation(req *types.CreateCubeSandboxReq, name, driver string) error {
+	const key = "plugin-volume-sources"
+	type entry struct {
+		Name   string `json:"name"`
+		Driver string `json:"driver"`
+	}
+	if req.Annotations == nil {
+		req.Annotations = make(map[string]string)
+	}
+	var entries []entry
+	if raw := req.Annotations[key]; raw != "" {
+		if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+			return err
+		}
+	}
+	entries = append(entries, entry{Name: name, Driver: driver})
+	b, err := json.Marshal(entries)
+	if err != nil {
+		return err
+	}
+	req.Annotations[key] = string(b)
 	return nil
 }

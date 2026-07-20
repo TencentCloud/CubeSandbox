@@ -25,6 +25,10 @@ A host mount maps an **absolute path on the sandbox host node** to a **path insi
 | **Path restriction** | `hostPath` must be under an allowed directory prefix (default `/data/shared/`) |
 | **Compatibility** | Works with both E2B SDK (`e2b_code_interpreter`) and Cube SDK (`cubesandbox`) |
 
+::: tip Volume Plugin (e2b Volume API)
+For **user-scoped persistent volumes** (`POST /volumes` + `volumeMounts`) backed by COS, NFS, etc., see the [Volume Plugin Development guide](./volume-plugin.md). Host Mount is best for pre-existing directories on the node; Volume Plugins fit cloud storage and e2b-compatible volume lifecycle.
+:::
+
 ## Use Cases
 
 - **Large datasets** — mount a multi-GB dataset directory into many sandboxes without copying

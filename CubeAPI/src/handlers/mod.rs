@@ -11,3 +11,4 @@ pub mod sandboxes;
 pub mod snapshots;
 pub mod store;
 pub mod templates;
+pub mod volumes;

@@ -1053,6 +1053,12 @@ fi
 
 select_installed_kernel_vmlinux
 
+prepare_volume_plugin_install \
+  "${INSTALL_PREFIX}" \
+  "${INSTALL_MODE}" \
+  "${UPGRADE_BACKUP_DIR}" \
+  "${DEPLOY_ROLE}"
+
 mkdir -p \
   "${INSTALL_PREFIX}/cube-vs/network" \
   "${INSTALL_PREFIX}/cube-snapshot" \
@@ -1060,7 +1066,8 @@ mkdir -p \
   /data/log/CubeShim \
   /data/log/CubeVmm \
   /data/cube-shim/disks \
-  /data/snapshot_pack/disks
+  /data/snapshot_pack/disks \
+  /data/volume
 
 if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
   mkdir -p \

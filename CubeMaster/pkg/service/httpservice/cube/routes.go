@@ -69,4 +69,10 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 
 	// Inventory
 	g.POST(ListInventoryAction, handleListInventoryAction)
+
+	// Volume plugin CRUD
+	g.GET(VolumeAction, handleListVolumes)
+	g.POST(VolumeAction, handleCreateVolume)
+	g.GET(VolumeAction+"/:volume_id", handleGetVolume)
+	g.DELETE(VolumeAction+"/:volume_id", handleDeleteVolume)
 }

@@ -991,3 +991,59 @@ pub struct VersionMatrixView {
     pub components: Vec<ComponentMatrixRowView>,
     pub nodes: Vec<NodeVersionRowView>,
 }
+
+// ─── Volume API models ──────────────────────────────────────────────────────
+
+/// Maximum length of a customer-supplied volume `name` (matches `t_cube_volume.name`).
+pub const MAX_VOLUME_NAME_LEN: usize = 128;
+
+/// Request body for POST /volumes.
+///
+/// `name` must match `^[a-zA-Z0-9_-]+$` and be at most [`MAX_VOLUME_NAME_LEN`] characters
+/// (validated in the handler).
+/// `driver` selects the Controller Hook Plugin in CubeMaster; omit to use the
+/// default plugin configured in CubeMaster.
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone)]
+pub struct NewVolume {
+    /// Human-readable name for the volume. Optional;
+    /// if omitted a UUIDv4 is generated and used as both name and volume_id.
+    #[serde(default)]
+    pub name: String,
+    /// Plugin/driver to use, e.g. "nfs", "cos", "host-mount".
+    /// Omit to use CubeMaster's default plugin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
+}
+
+impl NewVolume {
+    /// Returns true iff `name` matches `^[a-zA-Z0-9_-]+$` and is within length limit.
+    pub fn name_is_valid(&self) -> bool {
+        !self.name.is_empty()
+            && self.name.len() <= MAX_VOLUME_NAME_LEN
+            && self
+                .name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    }
+}
+
+/// Volume descriptor returned in list responses (no token).
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone)]
+pub struct Volume {
+    #[serde(rename = "volumeID")]
+    pub volume_id: String,
+    pub name: String,
+}
+
+/// Volume descriptor with auth token — returned on create / get-single.
+/// E2B SDK requires `token` to always be present (non-optional); use empty
+/// string when the plugin does not return a token.
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone)]
+pub struct VolumeAndToken {
+    #[serde(rename = "volumeID")]
+    pub volume_id: String,
+    pub name: String,
+    /// Auth token returned by the volume plugin. Empty string when not applicable.
+    #[serde(default)]
+    pub token: String,
+}

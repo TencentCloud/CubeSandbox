@@ -354,8 +354,47 @@ func SetRunCubeSandboxRequestDefaultValue(req *cubebox.RunCubeSandboxRequest) {
 }
 
 func setCubeExtKey(rsp *cubebox.RunCubeSandboxResponse, createInfo *workflow.CreateContext) {
-	_ = rsp
-	_ = createInfo
+	// Only report node-level volume ref-count transitions when the sandbox
+	// was created successfully. On failure the workflow rolls back (detach),
+	// so the net node transition is zero and nothing should be reported.
+	if !ret.IsSuccessCode(rsp.GetRet().GetRetCode()) {
+		return
+	}
+	if data := marshalVolumeRefEvents(createInfo.VolumeRefEvents); data != nil {
+		if rsp.ExtInfo == nil {
+			rsp.ExtInfo = map[string][]byte{}
+		}
+		rsp.ExtInfo[constants.CubeExtVolumeRefEvents] = data
+	}
+}
+
+// setDestroyVolumeRefEvents reports node-level volume ref-count transitions
+// (1→0) observed during destroy into the response ext_info. Only successful
+// Detach calls populate VolumeRefEvents; plugin Detach failures roll back the
+// local ref-count and do not emit events.
+func setDestroyVolumeRefEvents(rsp *cubebox.DestroyCubeSandboxResponse, destroyInfo *workflow.DestroyContext) {
+	if destroyInfo == nil {
+		return
+	}
+	if data := marshalVolumeRefEvents(destroyInfo.VolumeRefEvents); data != nil {
+		if rsp.ExtInfo == nil {
+			rsp.ExtInfo = map[string][]byte{}
+		}
+		rsp.ExtInfo[constants.CubeExtVolumeRefEvents] = data
+	}
+}
+
+// marshalVolumeRefEvents serialises volume ref-count transition events for the
+// response ext_info. Returns nil when there is nothing to report.
+func marshalVolumeRefEvents(events []workflow.VolumeRefEvent) []byte {
+	if len(events) == 0 {
+		return nil
+	}
+	data, err := jsoniter.Marshal(events)
+	if err != nil {
+		return nil
+	}
+	return data
 }
 
 func dealCreateInnerMetric(rsp *cubebox.RunCubeSandboxResponse, createInfo *workflow.CreateContext) {
@@ -507,6 +546,7 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 			stepLog.Infof("destroy cubebox success")
 		}
 		dealDestroyInnerMetric(rsp, destroyInfo)
+		setDestroyVolumeRefEvents(rsp, destroyInfo)
 
 		go s.reportTrace(CubeLog.GetTraceInfo(ctx), destroyInfo.GetMetric())
 	}()

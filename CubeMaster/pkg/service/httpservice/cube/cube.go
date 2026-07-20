@@ -38,6 +38,7 @@ const (
 	CADownloadActionPrefix         = "/ca/"
 	ListInventoryAction            = "/listinventory"
 	SandboxLogsAction              = "/sandbox/logs"
+	VolumeAction                   = "/volume"
 )
 
 func CubeURI() string {

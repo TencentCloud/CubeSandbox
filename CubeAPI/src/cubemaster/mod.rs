@@ -481,6 +481,67 @@ impl CubeMasterClient {
             .map_err(CubeMasterError::Http)?;
         parse_response(resp).await
     }
+
+    /// GET /cube/volume — list all volumes.
+    pub async fn list_volumes(
+        &self,
+        req: &ListVolumesRequest,
+    ) -> Result<ListVolumesResponse, CubeMasterError> {
+        let url = format!("{}/cube/volume", self.base_url);
+        let resp = self
+            .inner
+            .get(&url)
+            .query(&[("request_id", &req.request_id)])
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// POST /cube/volume — create a new volume.
+    pub async fn create_volume(
+        &self,
+        req: &CreateVolumeRequest,
+    ) -> Result<CreateVolumeResponse, CubeMasterError> {
+        let url = format!("{}/cube/volume", self.base_url);
+        let resp = self
+            .inner
+            .post(&url)
+            .json(req)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// GET /cube/volume/{volume_id} — get a single volume (with token).
+    pub async fn get_volume(&self, volume_id: &str) -> Result<GetVolumeResponse, CubeMasterError> {
+        validate_volume_id(volume_id)?;
+        let url = format!("{}/cube/volume/{}", self.base_url, volume_id);
+        let resp = self
+            .inner
+            .get(&url)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// DELETE /cube/volume/{volume_id} — delete a volume.
+    pub async fn delete_volume(
+        &self,
+        volume_id: &str,
+    ) -> Result<DeleteVolumeResponse, CubeMasterError> {
+        validate_volume_id(volume_id)?;
+        let url = format!("{}/cube/volume/{}", self.base_url, volume_id);
+        let resp = self
+            .inner
+            .delete(&url)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
 }
 
 // ─── Error ─────────────────────────────────────────────────────────────────
@@ -562,6 +623,26 @@ pub(crate) fn validate_path_segment(
     } else {
         Err(CubeMasterError::InvalidPathParameter {
             name,
+            value: value.to_string(),
+        })
+    }
+}
+
+/// Volume IDs may include `_` (same alphabet as `NewVolume::name_is_valid` /
+/// CubeMaster `isValidVolumeName`). Unlike generic CubeMaster resource IDs,
+/// customer-supplied volume names are allowed to use underscores.
+pub(crate) fn validate_volume_id(value: &str) -> Result<(), CubeMasterError> {
+    let is_valid = !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b == b'-' || b == b'_' || b.is_ascii_alphanumeric());
+
+    if is_valid {
+        Ok(())
+    } else {
+        Err(CubeMasterError::InvalidPathParameter {
+            name: "volume_id",
             value: value.to_string(),
         })
     }
@@ -2177,7 +2258,8 @@ pub struct VersionMatrixResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        non_empty_str, validate_path_segment, CubeMasterError, GetSandboxResponse, SandboxInfo,
+        non_empty_str, validate_path_segment, validate_volume_id, CubeMasterError,
+        GetSandboxResponse, SandboxInfo,
     };
 
     #[test]
@@ -2220,6 +2302,30 @@ mod tests {
                 err,
                 CubeMasterError::InvalidPathParameter {
                     name: "build_id",
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn volume_id_accepts_underscore_like_create_name() {
+        for value in ["my_data", "vol-1", "abc_123-x", "A"] {
+            validate_volume_id(value).unwrap_or_else(|err| {
+                panic!("expected volume id {value:?} to be accepted, got {err:?}")
+            });
+        }
+    }
+
+    #[test]
+    fn volume_id_rejects_invalid_characters() {
+        for value in ["", "my.data", "vol/1", "a:b", "../../x"] {
+            let err =
+                validate_volume_id(value).expect_err("volume id should reject invalid characters");
+            assert!(matches!(
+                err,
+                CubeMasterError::InvalidPathParameter {
+                    name: "volume_id",
                     ..
                 }
             ));
@@ -2332,4 +2438,103 @@ mod tests {
             Some(1713953785140309977)
         );
     }
+}
+
+// ─── Volume APIs ─────────────────────────────────────────────────────────────
+//
+// Wire types for /cube/volume* endpoints on CubeMaster.
+
+/// Volume resource as returned by CubeMaster.
+#[derive(Debug, Deserialize, Clone)]
+pub struct CubeMasterVolume {
+    #[serde(default, alias = "volumeID")]
+    pub volume_id: String,
+    #[serde(default)]
+    pub name: String,
+    /// Auth token used by volume-content service; present on create/get.
+    #[serde(default)]
+    pub token: String,
+}
+
+/// GET /cube/volume — request context.
+#[derive(Debug)]
+pub struct ListVolumesRequest {
+    pub request_id: String,
+}
+
+/// GET /cube/volume — response.
+#[derive(Debug, Deserialize)]
+pub struct ListVolumesResponse {
+    #[serde(rename = "RequestID", alias = "requestID", default)]
+    pub request_id: String,
+    pub ret: RetCode,
+    #[serde(default, alias = "data", alias = "volumes")]
+    pub items: Vec<CubeMasterVolume>,
+}
+
+/// POST /cube/volume — request body.
+#[derive(Debug, Serialize)]
+pub struct CreateVolumeRequest {
+    pub request_id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
+}
+
+/// POST /cube/volume — response.
+#[derive(Debug, Deserialize)]
+pub struct CreateVolumeResponse {
+    #[serde(rename = "RequestID", alias = "requestID", default)]
+    pub request_id: String,
+    pub ret: RetCode,
+    pub volume: CubeMasterVolume,
+}
+
+/// GET /cube/volume/{volume_id} — response.
+#[derive(Debug, Deserialize)]
+pub struct GetVolumeResponse {
+    #[serde(rename = "RequestID", alias = "requestID", default)]
+    pub request_id: String,
+    pub ret: RetCode,
+    pub volume: CubeMasterVolume,
+}
+
+/// DELETE /cube/volume/{volume_id} — response.
+#[derive(Debug, Deserialize)]
+pub struct DeleteVolumeResponse {
+    #[serde(rename = "RequestID", alias = "requestID", default)]
+    pub request_id: String,
+    pub ret: RetCode,
+}
+
+// ─── plugin_volume VolumeSource extension ──────────────────────────────────
+//
+// Used when building RunCubeSandboxRequest.volumes[] from a sandbox create
+// request that carries volume_mounts.  Cubelet routes volumes whose
+// VolumeSource has a non-nil plugin_volume field to the VolumePlugin framework.
+
+/// Mirrors cubelet.services.volumeplugin.v1.PluginVolumeSource.
+#[derive(Debug, Serialize, Clone)]
+pub struct PluginVolumeSource {
+    /// Driver name — must match a registered VolumePlugin on the Cubelet node.
+    pub driver: String,
+}
+
+/// Extended VolumeSource that includes plugin_volume alongside the existing
+/// empty_dir field.  Replaces the narrower VolumeSource used in sandbox create.
+#[derive(Debug, Serialize, Clone)]
+pub struct VolumeSourceExt {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub empty_dir: Option<EmptyDir>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_volume: Option<PluginVolumeSource>,
+}
+
+/// VolumeSpec extended with the new VolumeSourceExt.
+#[derive(Debug, Serialize, Clone)]
+pub struct VolumeSpecExt {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub volume_source: Option<VolumeSourceExt>,
 }

@@ -1,0 +1,19 @@
+# CubeMaster/plugin/volume-cos.conf or Cubelet/plugin/volume-cos.conf (one-click install)
+# Same directory as the cube-volume-cos / cube-volume-cos-rpc binary.
+#
+# chmod 600 <plugin-dir>/volume-cos.conf
+
+# Tencent Cloud API credentials
+# Recommended: use a sub-account key scoped to this bucket only.
+SECRET_ID=<your-secret-id>
+SECRET_KEY=<your-secret-key>
+
+# COS bucket  (BucketName-APPID format)
+BUCKET=mybucket-1250000000
+
+# COS region  (e.g. ap-guangzhou, ap-beijing, ap-shanghai)
+REGION=ap-guangzhou
+
+# FUSE mount base: Cubelet passes --volume-base-dir on attach
+# (volume_plugin_base_dir, default /data/volume). host_path must be under it,
+# e.g. /data/volume/cos-<volume_id>.
