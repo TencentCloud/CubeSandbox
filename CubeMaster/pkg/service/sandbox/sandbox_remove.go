@@ -34,6 +34,18 @@ func DestroySandbox(ctx context.Context, req *types.DeleteCubeSandboxReq) (rsp *
 			RetMsg:  errorcode.ErrorCode_Success.String(),
 		},
 	}
+	if req.SandboxID == "" {
+		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
+		rsp.Ret.RetMsg = "should provide sandbox id"
+		return
+	}
+	// Resolve before config-dependent work so invalid / ambiguous IDs fail fast.
+	if ret := normalizeSandboxIDInReq(ctx, &req.SandboxID); ret != nil {
+		rsp.Ret = ret
+		return
+	}
+	rsp.SandboxID = req.SandboxID
+
 	destroyReq := &cubebox.DestroyCubeSandboxRequest{
 		RequestID:   req.RequestID,
 		SandboxID:   req.SandboxID,
@@ -83,11 +95,6 @@ func DestroySandbox(ctx context.Context, req *types.DeleteCubeSandboxReq) (rsp *
 		}
 	}()
 	if config.GetConfig().Common.MockCreateDirect {
-		return
-	}
-	if req.SandboxID == "" {
-		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
-		rsp.Ret.RetMsg = "should provide sandbox id"
 		return
 	}
 

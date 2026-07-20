@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	cubeleterrorcode "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
 	basetypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
@@ -27,6 +28,13 @@ func TestDestroySandboxMissingSandboxReturnsNotFound(t *testing.T) {
 	})
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
+	patches.ApplyFunc(config.GetConfig, func() *config.Config {
+		return &config.Config{Common: &config.CommonConf{}}
+	})
+	// Keep ID as-is so the missing-sandbox path is exercised after resolve.
+	patches.ApplyFunc(ResolveSandboxID, func(_ context.Context, input string) (string, error) {
+		return input, nil
+	})
 	patches.ApplyFunc(localcache.GetSandboxCache, func(string) *localcache.SandboxCache {
 		return nil
 	})

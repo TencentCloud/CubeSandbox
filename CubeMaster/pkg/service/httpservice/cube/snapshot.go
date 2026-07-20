@@ -182,15 +182,6 @@ func handleSandboxRollbackAction(c *gin.Context) {
 	if req.SandboxID == "" {
 		req.SandboxID = pathSandboxID
 	}
-	if pathSandboxID != "" && strings.TrimSpace(req.SandboxID) != pathSandboxID {
-		common.WriteAPI(c, &operationResponse{
-			Res: &types.Res{Ret: &types.Ret{
-				RetCode: int(errorcode.ErrorCode_MasterParamsError),
-				RetMsg:  "sandbox_id in path does not match request body",
-			}},
-		})
-		return
-	}
 	if requestID == "" || strings.TrimSpace(req.SandboxID) == "" || strings.TrimSpace(req.SnapshotID) == "" {
 		common.WriteAPI(c, &operationResponse{
 			Res: &types.Res{Ret: &types.Ret{
@@ -199,6 +190,30 @@ func handleSandboxRollbackAction(c *gin.Context) {
 			}},
 		})
 		return
+	}
+	// Resolve short/full IDs before comparing path vs body so a short prefix
+	// and the matching full ID are not treated as a mismatch.
+	if resolved, ret := sandbox.NormalizeSandboxIDParam(c.Request.Context(), req.SandboxID); ret != nil {
+		common.WriteAPI(c, &operationResponse{Res: &types.Res{Ret: ret}})
+		return
+	} else {
+		req.SandboxID = resolved
+	}
+	if pathSandboxID != "" {
+		resolvedPath, pathRet := sandbox.NormalizeSandboxIDParam(c.Request.Context(), pathSandboxID)
+		if pathRet != nil {
+			common.WriteAPI(c, &operationResponse{Res: &types.Res{Ret: pathRet}})
+			return
+		}
+		if resolvedPath != req.SandboxID {
+			common.WriteAPI(c, &operationResponse{
+				Res: &types.Res{Ret: &types.Ret{
+					RetCode: int(errorcode.ErrorCode_MasterParamsError),
+					RetMsg:  "sandbox_id in path does not match request body",
+				}},
+			})
+			return
+		}
 	}
 	ctx, cancel := snapshotExecutionContext(c.Request.Context(), map[string]any{
 		"RequestId":  requestID,
@@ -289,6 +304,11 @@ func createSnapshot(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 				RetMsg:  "sandbox_id is required",
 			}},
 		}
+	}
+	if resolved, ret := sandbox.NormalizeSandboxIDParam(r.Context(), req.SandboxID); ret != nil {
+		return &snapshotResponse{Res: &types.Res{Ret: ret}}
+	} else {
+		req.SandboxID = resolved
 	}
 	requestID := firstNonEmptyTrimmed(req.RequestID, req.LegacyRequestID)
 	if requestID == "" {

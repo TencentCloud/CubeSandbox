@@ -62,6 +62,12 @@ func handleSandboxCommitAction(c *gin.Context) {
 		})
 		return
 	}
+	if resolved, ret := sandbox.NormalizeSandboxIDParam(c.Request.Context(), req.SandboxID); ret != nil {
+		common.WriteAPI(c, &commitTemplateResponse{Res: &types.Res{Ret: ret}})
+		return
+	} else {
+		req.SandboxID = resolved
+	}
 	// Auto-generate the template ID before any later response can reference it.
 	// Users are not allowed to set custom template IDs because the snapshot
 	// system depends on the tpl- / snap- prefix convention.

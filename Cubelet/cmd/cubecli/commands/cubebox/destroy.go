@@ -70,10 +70,21 @@ var Destroy = &cli.Command{
 			ids = append(ids, context.String("name"))
 		}
 		if context.Bool("force") {
+			ctx, cancel := commands.AppContext(context)
+			defer cancel()
+			req := &cubebox.ListCubeSandboxRequest{}
+			resp, err := client.List(ctx, req)
+			if err != nil {
+				return err
+			}
 			for _, id := range ids {
+				resolved, err := resolveSandboxIDFromList(resp.Items, strings.TrimSpace(id))
+				if err != nil {
+					return err
+				}
 				if err = destroy(context, &cubebox.DestroyCubeSandboxRequest{
 					RequestID: uuid.New().String(),
-					SandboxID: strings.TrimSpace(id),
+					SandboxID: resolved,
 				}, client); err != nil {
 					return err
 				}
@@ -105,24 +116,17 @@ var Destroy = &cli.Command{
 			return nil
 		}
 
-		for _, item := range resp.Items {
-			for _, id := range ids {
-				id := strings.TrimSpace(id)
-				if len(item.GetContainers()) == 0 {
-					log.Printf("Warning sandbox:%s has no container", item.GetId())
-					continue
-				}
-
-				if strings.HasPrefix(item.GetId(), id) || strings.HasPrefix(item.GetContainers()[0].GetId(), id) {
-					if err = destroy(context, &cubebox.DestroyCubeSandboxRequest{
-						RequestID:   uuid.New().String(),
-						SandboxID:   item.GetId(),
-						Annotations: tmpAnnation,
-					}, client); err == nil {
-						break
-					}
-
-				}
+		for _, id := range ids {
+			resolved, err := resolveSandboxIDFromList(resp.Items, strings.TrimSpace(id))
+			if err != nil {
+				return err
+			}
+			if err = destroy(context, &cubebox.DestroyCubeSandboxRequest{
+				RequestID:   uuid.New().String(),
+				SandboxID:   resolved,
+				Annotations: tmpAnnation,
+			}, client); err != nil {
+				return err
 			}
 		}
 		return nil

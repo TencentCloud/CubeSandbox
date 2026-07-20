@@ -15,6 +15,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
@@ -97,6 +98,13 @@ func handleSandboxLogsAction(c *gin.Context) {
 			},
 		})
 		return
+	}
+	if resolved, ret := sandbox.NormalizeSandboxIDParam(c.Request.Context(), req.SandboxID); ret != nil {
+		rt.RetCode = int64(ret.RetCode)
+		common.WriteAPI(c, &SandboxLogsRes{Res: &types.Res{Ret: ret}})
+		return
+	} else {
+		req.SandboxID = resolved
 	}
 
 	limit := req.Limit
