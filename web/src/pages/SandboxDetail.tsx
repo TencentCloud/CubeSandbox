@@ -6,6 +6,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useParams, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { sandboxApi } from '@/api/client';
+import { ApiError } from '@/lib/api';
 import { Card, CardTitle, CardDescription, CardHeader } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -24,6 +25,10 @@ const LEVEL_CLASS: Record<string, string> = {
   error: 'text-cube-err/70',
 };
 
+function isNotFoundError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404;
+}
+
 function formatLogTime(ts: string): string {
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return ts;
@@ -38,19 +43,30 @@ export default function SandboxDetailPage() {
   const { t } = useTranslation('sandboxDetail');
 
   // ── Sandbox detail ──────────────────────────────────────────────────────
-  const { data, isLoading } = useQuery({
+  const detail = useQuery({
     queryKey: ['sandbox', sandboxID],
     queryFn: () => sandboxApi.get(sandboxID),
     enabled: !!sandboxID,
-    refetchInterval: 5_000,
+    retry: (failureCount, error) => !isNotFoundError(error) && failureCount < 1,
+    refetchInterval: (query) => (isNotFoundError(query.state.error) ? false : 5_000),
   });
+  const { data, isLoading } = detail;
+  const isUnavailable = detail.isError && isNotFoundError(detail.error);
+  const hasLoadedData = detail.dataUpdatedAt > 0;
+
+  useEffect(() => {
+    if (isUnavailable) {
+      void qc.invalidateQueries({ queryKey: ['sandboxes'] });
+    }
+  }, [isUnavailable, qc]);
 
   // ── Logs ────────────────────────────────────────────────────────────────
   const logs = useQuery({
     queryKey: ['sandbox-logs', sandboxID],
     queryFn: () => sandboxApi.logs(sandboxID),
-    enabled: !!sandboxID,
-    refetchInterval: 10_000,
+    enabled: !!sandboxID && !isUnavailable,
+    retry: (failureCount, error) => !isNotFoundError(error) && failureCount < 1,
+    refetchInterval: (query) => (isNotFoundError(query.state.error) ? false : 10_000),
   });
   const logRef = useRef<HTMLPreElement>(null);
   // Auto-scroll to bottom whenever new logs arrive
@@ -94,10 +110,94 @@ export default function SandboxDetailPage() {
     },
   });
 
-  const state = data?.state ?? 'running';
+  const state = data?.state ?? (isLoading ? 'loading' : 'unknown');
   const tone =
     state === 'paused' || state === 'pausing' ? 'warn' : state === 'running' ? 'ok' : 'mute';
   const entries = logs.data?.logs ?? [];
+
+  if (isUnavailable) {
+    if (!hasLoadedData || !data) {
+      return (
+        <div className="animate-fade-in space-y-5">
+          <Link to="/sandboxes">
+            <Button variant="ghost" size="sm">
+              <ArrowLeft size={16} /> {t('backToList')}
+            </Button>
+          </Link>
+          <Card>
+            <div className="flex flex-col items-center gap-3 py-12 text-center">
+              <CardTitle>{t('notFound.title')}</CardTitle>
+              <CardDescription>{t('notFound.description')}</CardDescription>
+              <Button variant="outline" asChild>
+                <Link to="/sandboxes">{t('backToList')}</Link>
+              </Button>
+            </div>
+          </Card>
+        </div>
+      );
+    }
+
+    return (
+      <div className="animate-fade-in space-y-5">
+        <div className="flex items-center gap-3">
+          <Link to="/sandboxes">
+            <Button variant="ghost" size="icon">
+              <ArrowLeft size={16} />
+            </Button>
+          </Link>
+          <div className="flex-1">
+            <div className="flex items-center gap-2">
+              <h1 className="font-mono text-xl font-medium tracking-tight">{sandboxID}</h1>
+              <Badge tone="mute">{t('unavailable.badge')}</Badge>
+            </div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {data.templateID} · {t('started', { time: formatRelative(data.startedAt) })}
+            </p>
+          </div>
+        </div>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>{t('unavailable.title')}</CardTitle>
+            <CardDescription>{t('unavailable.description')}</CardDescription>
+          </CardHeader>
+          <dl className="grid grid-cols-1 gap-4 px-6 pb-6 text-sm sm:grid-cols-3">
+            <Field label={t('fields.template')} value={data.templateID} />
+            <Field label={t('fields.started')} value={formatDateTime(data.startedAt)} />
+            <Field label={t('fields.ends')} value={formatDateTime(data.endAt)} />
+          </dl>
+        </Card>
+
+        <div className="flex justify-center">
+          <Button variant="outline" asChild>
+            <Link to="/sandboxes">{t('backToList')}</Link>
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  if (detail.isError && !data) {
+    return (
+      <div className="animate-fade-in space-y-5">
+        <Link to="/sandboxes">
+          <Button variant="ghost" size="sm">
+            <ArrowLeft size={16} /> {t('backToList')}
+          </Button>
+        </Link>
+        <Card>
+          <div className="flex flex-col items-center gap-3 py-12 text-center">
+            <CardTitle>{t('loadError.title')}</CardTitle>
+            <CardDescription>{t('loadError.description')}</CardDescription>
+            <Button variant="outline" onClick={() => detail.refetch()} disabled={detail.isFetching}>
+              <RefreshCw size={14} className={cn(detail.isFetching && 'animate-spin')} />
+              {t('logsRefresh')}
+            </Button>
+          </div>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="animate-fade-in space-y-5">
@@ -117,23 +217,30 @@ export default function SandboxDetailPage() {
             {data?.templateID ?? '—'} · {t('started', { time: formatRelative(data?.startedAt) })}
           </p>
         </div>
-        <div className="flex gap-2">
-          {state === 'paused' ? (
-            <Button variant="outline" onClick={() => resume.mutate()} disabled={resume.isPending}>
-              <Play size={14} /> {t('actions.resume')}
+        {data ? (
+          <div className="flex gap-2">
+            {state === 'paused' ? (
+              <Button variant="outline" onClick={() => resume.mutate()} disabled={resume.isPending}>
+                <Play size={14} /> {t('actions.resume')}
+              </Button>
+            ) : (
+              <Button variant="outline" onClick={() => pause.mutate()} disabled={pause.isPending}>
+                <Pause size={14} /> {t('actions.pause')}
+              </Button>
+            )}
+            <Button variant="destructive" onClick={() => kill.mutate()} disabled={kill.isPending}>
+              <Trash2 size={14} /> {t('actions.kill')}
             </Button>
-          ) : (
-            <Button variant="outline" onClick={() => pause.mutate()} disabled={pause.isPending}>
-              <Pause size={14} /> {t('actions.pause')}
-            </Button>
-          )}
-          <Button variant="destructive" onClick={() => kill.mutate()} disabled={kill.isPending}>
-            <Trash2 size={14} /> {t('actions.kill')}
-          </Button>
-        </div>
+          </div>
+        ) : null}
       </div>
 
       <SandboxActionErrorBanner message={actionError} onDismiss={() => setActionError(null)} />
+      {detail.isError && data ? (
+        <div className="rounded-md border border-cube-warn/30 bg-cube-warn/10 px-3 py-2 text-sm text-cube-warn">
+          {t('refreshFailed')}
+        </div>
+      ) : null}
 
       {/* ── Info cards ── */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
@@ -168,6 +275,10 @@ export default function SandboxDetailPage() {
               <span>{formatDateTime(data?.startedAt)}</span>
             </li>
 
+            <li className="flex justify-between">
+              <span className="text-muted-foreground">{t('fields.ends')}</span>
+              <span>{formatDateTime(data?.endAt)}</span>
+            </li>
             <li className="flex justify-between">
               <span className="text-muted-foreground">{t('fields.state')}</span>
               <span>{state}</span>
@@ -218,7 +329,7 @@ export default function SandboxDetailPage() {
               variant="ghost"
               title={t('logsRefresh')}
               onClick={() => logs.refetch()}
-              disabled={logs.isFetching}
+              disabled={logs.isFetching || isNotFoundError(logs.error)}
             >
               <RefreshCw size={14} className={cn(logs.isFetching && 'animate-spin')} />
             </Button>
@@ -230,6 +341,10 @@ export default function SandboxDetailPage() {
         >
           {logs.isLoading ? (
             <span className="text-muted-foreground">{t('logsLoading')}</span>
+          ) : logs.isError ? (
+            <span className="text-muted-foreground">
+              {isNotFoundError(logs.error) ? t('logsUnavailable') : t('logsError')}
+            </span>
           ) : entries.length === 0 ? (
             <span className="text-muted-foreground">{t('logsEmpty')}</span>
           ) : (
