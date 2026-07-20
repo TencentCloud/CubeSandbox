@@ -4,19 +4,28 @@
 package handler
 
 import (
-	"encoding/json"
+	"context"
+	"fmt"
 	"math"
 	"net/http"
-	"os/exec"
 	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/google/go-containerregistry/pkg/name"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/httputil"
 )
 
 // StoreHandler handles store image metadata HTTP requests.
-type StoreHandler struct{}
+type StoreHandler struct {
+	// registryClient is overridable in tests. When nil the handler uses
+	// the package-level defaultRegistryClient, which talks to real
+	// registries over HTTPS via go-containerregistry.
+	registryClient RegistryClient
+}
 
 // NewStoreHandler creates a new store handler.
 func NewStoreHandler() *StoreHandler { return &StoreHandler{} }
@@ -47,39 +56,54 @@ type StoreMeta struct {
 	Images []ImageMeta `json:"images"`
 }
 
-type dockerInspectResult struct {
-	ID          string   `json:"Id"`
-	Size        uint64   `json:"Size"`
-	RepoDigests []string `json:"RepoDigests"`
-}
-
 // GetStoreMeta handles GET /store/meta.
+//
+// It returns metadata for the curated set of official images without
+// contacting any registry. Only images that have previously been fetched
+// (and therefore cached by the registry client) will appear with a digest;
+// unknown images are still listed so the frontend can render them.
 func (h *StoreHandler) GetStoreMeta(c *gin.Context) {
-	httputil.WriteJSON(c, http.StatusOK, StoreMeta{Images: inspectAll(storeImages, false)})
+	httputil.WriteJSON(c, http.StatusOK, StoreMeta{Images: h.inspectAll(c.Request.Context(), false)})
 }
 
 // RefreshStoreMeta handles POST /store/refresh.
+//
+// It queries each configured registry for the latest manifest digest of
+// the official images using go-containerregistry. It does NOT shell out
+// to `docker pull` — only the manifest is fetched, so the request is fast
+// and does not require docker on the host.
 func (h *StoreHandler) RefreshStoreMeta(c *gin.Context) {
-	httputil.WriteJSON(c, http.StatusOK, StoreMeta{Images: inspectAll(storeImages, true)})
+	httputil.WriteJSON(c, http.StatusOK, StoreMeta{Images: h.inspectAll(c.Request.Context(), true)})
 }
 
 // inspectAll concurrently inspects each image and returns the metadata
-// slice. When pull is true, it also tries to docker pull each image first
-// (best-effort — pull failures fall back to whatever the local cache has).
-func inspectAll(images []string, pull bool) []ImageMeta {
+// slice. When refresh is true, it queries the upstream registry for the
+// latest manifest digest; otherwise it returns whatever digest the
+// registry client has cached from a previous refresh.
+func (h *StoreHandler) inspectAll(ctx context.Context, refresh bool) []ImageMeta {
+	client := h.registryClient
+	if client == nil {
+		client = defaultRegistryClient
+	}
+
 	var mu sync.Mutex
-	out := make([]ImageMeta, 0, len(images))
+	out := make([]ImageMeta, 0, len(storeImages))
 	var wg sync.WaitGroup
-	for _, img := range images {
+	for _, img := range storeImages {
 		wg.Add(1)
 		go func(image string) {
 			defer wg.Done()
-			if pull {
-				_ = exec.Command("docker", "pull", "--quiet", image).Run()
+
+			var meta *ImageMeta
+			if refresh {
+				meta = client.FetchLatest(ctx, image)
+			} else {
+				meta = client.Cached(image)
 			}
-			meta := inspectImage(image)
 			if meta == nil {
-				return
+				// Even when we cannot resolve a digest we still report
+				// the image so the frontend can render the store entry.
+				meta = &ImageMeta{Image: image}
 			}
 			mu.Lock()
 			out = append(out, *meta)
@@ -90,63 +114,98 @@ func inspectAll(images []string, pull bool) []ImageMeta {
 	return out
 }
 
-// inspectImage returns the image metadata by shelling out to docker. The
-// result may be nil when the image is not present locally and pull failed.
-func inspectImage(image string) *ImageMeta {
-	output, err := exec.Command("docker", "image", "inspect", "--format", "{{json .}}", image).Output()
+// ── Registry client ────────────────────────────────────────────────────────
+
+// RegistryClient resolves image metadata from an OCI/Docker registry.
+type RegistryClient interface {
+	// FetchLatest queries the registry for the current manifest digest
+	// of the given image reference. It also caches the result so a
+	// subsequent Cached(ref) returns it without network I/O.
+	FetchLatest(ctx context.Context, ref string) *ImageMeta
+	// Cached returns the most recently fetched metadata for ref, or nil
+	// when no refresh has been performed yet.
+	Cached(ref string) *ImageMeta
+}
+
+// defaultRegistryClient is the client used by the handler in production.
+var defaultRegistryClient RegistryClient = newGCRRegistryClient()
+
+// gcrRegistryClient uses google/go-containerregistry to resolve image
+// metadata. It keeps an in-memory cache of the most recent result per
+// image so GET /store/meta does not hit the network.
+type gcrRegistryClient struct {
+	cache sync.Map // ref -> ImageMeta
+}
+
+func newGCRRegistryClient() *gcrRegistryClient {
+	return &gcrRegistryClient{}
+}
+
+// FetchLatest resolves ref via go-containerregistry. For multi-arch
+// indexes the library automatically picks the linux/amd64 platform
+// manifest and reports its digest and layer sizes.
+func (c *gcrRegistryClient) FetchLatest(ctx context.Context, ref string) *ImageMeta {
+	parsedRef, err := name.ParseReference(ref)
 	if err != nil {
 		return nil
 	}
 
-	raw := strings.TrimSpace(string(output))
-	// docker inspect may return a JSON array; unwrap the single element
-	if strings.HasPrefix(raw, "[") {
-		raw = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(raw, "["), "]"))
-	}
-
-	var info dockerInspectResult
-	if err := json.Unmarshal([]byte(raw), &info); err != nil {
+	// Anonymous access: use the default keychain which handles
+	// ~/.docker/config.json. For public images on ghcr.io / TCR this
+	// is sufficient — the library performs the bearer-token dance
+	// internally.
+	img, err := remote.Image(parsedRef,
+		remote.WithContext(ctx),
+		remote.WithAuthFromKeychain(authn.DefaultKeychain),
+		remote.WithPlatform(v1.Platform{OS: "linux", Architecture: "amd64"}),
+	)
+	if err != nil {
 		return nil
 	}
 
-	// Round size to 1 decimal place so the response is stable and readable.
-	// math.Round returns float64 so we apply the standard "round-half-away-from-zero"
-	// rounding by multiplying, rounding, then dividing.
-	sizeMB := float64(info.Size) / (1024.0 * 1024.0)
+	manifest, err := img.Manifest()
+	if err != nil {
+		return nil
+	}
+
+	var totalSize int64
+	for _, layer := range manifest.Layers {
+		totalSize += layer.Size
+	}
+
+	digest, err := img.Digest()
+	if err != nil {
+		return nil
+	}
+
+	// Build the canonical "repo@sha256:..." form to match the old
+	// docker-inspect RepoDigests output and the CubeMaster
+	// imageDigestFromReference convention.
+	repoName := parsedRef.Context().Name()
+	// Normalise docker.io canonical name: go-containerregistry may
+	// return "index.docker.io/<repo>"; we prefer "docker.io/<repo>".
+	repoName = strings.Replace(repoName, "index.docker.io/", "docker.io/", 1)
+	fullDigest := fmt.Sprintf("%s@%s", repoName, digest.String())
+	shortDigest := digest.String()
+
+	sizeMB := float64(totalSize) / (1024.0 * 1024.0)
 	sizeMB = math.Round(sizeMB*10) / 10
 
-	// Pick the digest that matches the queried registry (first match wins);
-	// fall back to the first available digest if no match is found.
-	registry := ""
-	if parts := strings.SplitN(image, "/", 2); len(parts) > 0 {
-		registry = parts[0]
-	}
-	var digest *string
-	for _, d := range info.RepoDigests {
-		if strings.HasPrefix(d, registry) {
-			dCopy := d
-			digest = &dCopy
-			break
-		}
-	}
-	if digest == nil && len(info.RepoDigests) > 0 {
-		dCopy := info.RepoDigests[0]
-		digest = &dCopy
-	}
-
-	var digestShort *string
-	if digest != nil {
-		if parts := strings.SplitN(*digest, "@", 2); len(parts) > 1 {
-			dsCopy := parts[1]
-			digestShort = &dsCopy
-		}
-	}
-
-	return &ImageMeta{
-		Image:       image,
-		SizeBytes:   info.Size,
+	meta := &ImageMeta{
+		Image:       ref,
+		SizeBytes:   uint64(totalSize),
 		SizeMB:      sizeMB,
-		Digest:      digest,
-		DigestShort: digestShort,
+		Digest:      &fullDigest,
+		DigestShort: &shortDigest,
 	}
+	c.cache.Store(ref, *meta)
+	return meta
+}
+
+func (c *gcrRegistryClient) Cached(ref string) *ImageMeta {
+	if v, ok := c.cache.Load(ref); ok {
+		m := v.(ImageMeta)
+		return &m
+	}
+	return nil
 }
