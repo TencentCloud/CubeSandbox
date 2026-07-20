@@ -20,11 +20,13 @@ WORKDIR /src
 COPY CubeMaster/go.mod CubeMaster/go.sum ./
 COPY cubelog/go.mod cubelog/go.sum /cubelog/
 COPY CubeDB/go.mod CubeDB/go.sum /CubeDB/
+COPY Cubelet/go.mod Cubelet/go.sum /Cubelet/
 RUN go mod download
 
 COPY CubeMaster/ ./
 COPY cubelog/ /cubelog/
 COPY CubeDB/ /CubeDB/
+COPY Cubelet/ /Cubelet/
 
 ENV CGO_ENABLED=0
 RUN set -eux; \
