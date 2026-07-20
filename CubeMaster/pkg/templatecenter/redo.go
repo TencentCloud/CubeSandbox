@@ -379,7 +379,6 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 		})
 		return
 	}
-	resultPayload, _ := json.Marshal(info)
 	finalStatus := JobStatusReady
 	finalPhase := JobPhaseReady
 	if info.Status == StatusFailed {
@@ -387,6 +386,10 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 		finalPhase = JobPhaseSnapshotting
 	}
 	// Claim alias only after the template is confirmed READY.
+	// result_json is built AFTER the claim so a successful claim refreshes
+	// info.DisplayName, and a non-duplicate claim failure is surfaced in
+	// error_message instead of being silently swallowed.
+	claimWarning := ""
 	if info.Status != StatusFailed {
 		if alias := strings.TrimSpace(sourceReq.Alias); alias != "" {
 			if claimErr := claimTemplateAlias(ctx, req.TemplateID, alias); claimErr != nil {
@@ -394,9 +397,23 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 					logger.Infof("alias %q concurrently claimed by another template; template %s is READY without alias", alias, req.TemplateID)
 				} else {
 					logger.Warnf("claim alias %q for template %s fail: %v", alias, req.TemplateID, claimErr)
+					// The template is READY, but the requested alias could not
+					// be claimed. Surface the failure in error_message so it is
+					// observable to callers; the job still reports READY.
+					claimWarning = fmt.Sprintf("template is ready but alias %q could not be claimed: %v", alias, claimErr)
 				}
+			} else if refreshed, refreshErr := GetTemplateInfo(ctx, req.TemplateID); refreshErr == nil && refreshed != nil {
+				// Reflect the claimed alias (display_name) in result_json.
+				info = refreshed
+			} else {
+				info.DisplayName = alias
 			}
 		}
+	}
+	resultPayload, _ := json.Marshal(info)
+	errorMessage := info.LastError
+	if errorMessage == "" && claimWarning != "" {
+		errorMessage = claimWarning
 	}
 	_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 		"status":          finalStatus,
@@ -406,6 +423,6 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 		"artifact_status": artifact.Status,
 		"template_status": info.Status,
 		"result_json":     string(resultPayload),
-		"error_message":   info.LastError,
+		"error_message":   errorMessage,
 	})
 }
