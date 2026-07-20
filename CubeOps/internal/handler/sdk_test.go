@@ -453,7 +453,7 @@ func TestR13_CreateSandbox_RequiredFields(t *testing.T) {
 	}
 
 	// Required fields that must always be present (R13: were lost in regression).
-	required := []string{"RequestID", "instance_type", "template_id", "annotations",
+	required := []string{"requestID", "instance_type", "template_id", "annotations",
 		"labels", "volumes", "containers", "exposed_ports", "network_type",
 		"auto_pause", "auto_resume"}
 	for _, field := range required {

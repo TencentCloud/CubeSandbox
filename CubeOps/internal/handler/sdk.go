@@ -315,7 +315,7 @@ func (h *SDKHandler) CreateSandbox(c *gin.Context) {
 	}
 
 	cmReq := map[string]interface{}{
-		"RequestID":     sdkRequestID(),
+		"requestID":     sdkRequestID(),
 		"instance_type": sdkInstanceType,
 		"template_id":   templateID,
 		"annotations": map[string]string{
@@ -415,7 +415,7 @@ func (h *SDKHandler) GetSandbox(c *gin.Context) {
 func (h *SDKHandler) DeleteSandbox(c *gin.Context) {
 	sandboxID := c.Param("id")
 	body := map[string]interface{}{
-		"RequestID":     sdkRequestID(),
+		"requestID":     sdkRequestID(),
 		"sandbox_id":    sandboxID,
 		"instance_type": sdkInstanceType,
 		"sync":          true,
@@ -517,7 +517,7 @@ func (h *SDKHandler) sandboxUpdateAction(c *gin.Context, action string) {
 func (h *SDKHandler) ConnectSandbox(c *gin.Context) {
 	sandboxID := c.Param("id")
 	body := map[string]interface{}{
-		"request_id":    sdkRequestID(),
+		"requestID":     sdkRequestID(),
 		"sandbox_id":    sandboxID,
 		"instance_type": sdkInstanceType,
 		"timeout":       86400,
