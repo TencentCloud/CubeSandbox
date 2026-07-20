@@ -1,42 +1,34 @@
-# syntax=docker/dockerfile:1.7
-#
-# Demo: MySQL client sandbox for Cube Sandbox
-#
-# This image provides a MySQL client environment that can be used to:
-# - Connect to MySQL databases from an isolated sandbox
-# - Execute SQL queries with network isolation policies
-# - Demonstrate snapshot/rollback capabilities
-#
-# Build:
-#   docker build -t cubesandbox-mysql-sandbox:latest examples/mysql-sandbox
-#
-# Run locally:
-#   docker run --rm -d -p 49983:49983 \
-#     --name cube-mysql-sandbox cubesandbox-mysql-sandbox:latest
-#   docker exec cube-mysql-sandbox mysql --version
+FROM debian:12-slim
 
-ARG CUBE_BASE_IMAGE=ghcr.io/tencentcloud/cubesandbox-base:2026.16
-FROM ${CUBE_BASE_IMAGE}
+LABEL maintainer="CubeSandbox Contributors"
+LABEL description="MySQL Client Sandbox Template for CubeSandbox"
+LABEL version="1.0.0"
 
-ARG DEBIAN_FRONTEND=noninteractive
-
-# Install MySQL client and common database tools
+# Install MySQL client and common tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    mysql-client \
+    default-mysql-client \
+    mysql-common \
     curl \
     wget \
-    jq \
+    vim \
+    less \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
-# Create working directory for SQL scripts
-RUN mkdir -p /srv/sql && chmod 755 /srv/sql
+# Create non-root user for better security
+RUN useradd -m -s /bin/bash sandbox && \
+    mkdir -p /home/sandbox && \
+    chown -R sandbox:sandbox /home/sandbox
 
-# Health check script that validates MySQL client is available
-RUN printf '#!/bin/bash\nmysql --version\n' > /health-mysql.sh && chmod +x /health-mysql.sh
+# Set working directory
+WORKDIR /home/sandbox
 
-EXPOSE 49983
+# Environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+ENV MYSQL_CLIENT_VERSION=8.0
 
-# cube-entrypoint.sh (inherited from the base image) will:
-#   1. Launch envd on ${ENVD_PORT:-49983} in the background.
-#   2. exec the CMD below as the foreground process.
-CMD ["bash"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD mysqladmin ping -h localhost --silent 2>/dev/null || exit 0
+
+USER sandbox

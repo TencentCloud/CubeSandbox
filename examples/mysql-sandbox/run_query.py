@@ -19,10 +19,6 @@ Usage:
 import os
 import sys
 
-sys.path.insert(0, str(__file__).rsplit("/", 1)[0])
-
-from e2b_code_interpreter import Sandbox
-
 from env_utils import (
     get_api_key,
     get_api_url,
@@ -31,6 +27,13 @@ from env_utils import (
     get_template_id,
     run_mysql_query,
 )
+
+try:
+    from e2b_code_interpreter import Sandbox
+except ImportError:
+    print("Error: Please install dependencies first:")
+    print("  pip install -r requirements.txt")
+    sys.exit(1)
 
 # Configure Sandbox SDK with credentials from environment.
 os.environ["E2B_API_URL"] = get_api_url()

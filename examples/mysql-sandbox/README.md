@@ -1,183 +1,60 @@
-# MySQL Sandbox Example
+# MySQL Client Sandbox
 
-[中文](README_zh.md)
+[中文文档](README_zh.md)
 
-A lightweight MySQL client sandbox for Cube Sandbox, providing isolated SQL execution with network policy controls and snapshot capabilities.
+A lightweight sandbox environment with MySQL client pre-installed for connecting to external MySQL databases. Ideal for testing database operations, running migrations, and executing SQL queries in an isolated environment.
 
-## Overview
+## 1. Background
 
-This example demonstrates how to build a MySQL client sandbox that can:
-- Connect to MySQL databases from an isolated KVM MicroVM
-- Enforce network isolation policies (allowlist/denylist)
-- Create snapshots for state preservation and rollback
+**Cube Sandbox** is a lightweight MicroVM platform fully compatible with the [E2B SDK](https://e2b.dev). This MySQL client sandbox provides:
 
-### Key Features
-
-| Feature | Description |
-|---------|-------------|
-| **Isolated Execution** | Each sandbox runs in an independent KVM MicroVM with full hardware-level isolation |
-| **Network Control** | Supports full isolation, CIDR allowlists, denylists, and granular network policies |
-| **Snapshot & Rollback** | Create snapshots to save state, restore to any previous state |
-| **Flexible Resources** | Customizable CPU, memory, and storage sizes |
-
-## Use Cases
-
-### 1. Database Operations
-
-Execute SQL queries without installing MySQL client locally.
-
-**Advantages**:
-- No need to configure local database environment
-- Clean, pristine environment for every use
-- No risk of polluting local development environment
-
-### 2. AI Agent Integration
-
-Provide SQL execution capabilities to AI agents with security controls.
-
-**Typical Applications**:
-- Data Analysis Agent: Allow access to analytics servers, block external networks
-- Code Review Agent: Only access internal code repository databases
-- Report Generation Agent: Read-only data access, no modifications
-
-### 3. Database Migration Testing
-
-Safely test database migrations in an isolated environment with rollback capability.
-
-**Workflow**:
-1. Create baseline snapshot
-2. Execute migration scripts
-3. Verify data integrity
-4. Rollback on failure
-
-### 4. Data Analysis
-
-Query databases from sandboxed environments with reduced data leakage risk.
-
-**Security Features**:
-- Data completely cleared after sandbox destruction
-- Restrict access to specific databases only
-- Audit logging support
-
-## Architecture
+- Pre-installed MySQL client tools (`mysql`, `mysqldump`)
+- Network isolation capabilities (can restrict outbound access)
+- Snapshot and restore for stateful database testing
+- Hardware-level isolation for running untrusted SQL scripts
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Cube Sandbox                              │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │                   KVM MicroVM                             │   │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐ │   │
-│  │  │  envd       │  │  MySQL      │  │  Snapshot       │ │   │
-│  │  │  (port      │  │  Client     │  │  (memory +     │ │   │
-│  │  │  49983)     │  │             │  │   rootfs)      │ │   │
-│  │  └─────────────┘  └─────────────┘  └─────────────────┘ │   │
-│  └─────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-                      ┌───────────────┐
-                      │   MySQL       │
-                      │   Database    │
-                      └───────────────┘
+┌──────────────────────┐         ┌─────── Cube Sandbox ──────────────┐
+│                      │         │                                    │
+│  Your Script         │  MySQL  │  ┌───────────────────────────┐    │
+│  (Python / Shell)   │────────►│  │  mysql client             │    │
+│                      │   Wire  │  │  /usr/bin/mysql           │    │
+│                      │         │  └───────────────────────────┘    │
+└──────────────────────┘         │                                    │
+                                 │  ┌───────────────────────────┐    │
+                                 │  │  External MySQL Server     │    │
+                                 │  │  (any accessible host)   │    │
+                                 │  └───────────────────────────┘    │
+                                 └────────────────────────────────────┘
 ```
 
-### Component Description
+## 2. Use Cases
 
-| Component | Description |
-|-----------|-------------|
-| **KVM MicroVM** | Lightweight VM based on KVM, providing hardware-level isolation |
-| **envd** | Environment daemon managing sandbox lifecycle and code execution |
-| **MySQL Client** | Pre-installed MySQL command-line client |
-| **Snapshot System** | Supports both memory and filesystem snapshots |
+- **Database Testing**: Run SQL queries and migrations against test databases
+- **Data Migration**: Execute `mysqldump` operations in an isolated environment
+- **ORM Validation**: Test database connections for various frameworks
+- **Security Testing**: Run untrusted SQL scripts with network isolation
+- **CI/CD Integration**: Database operations in ephemeral, isolated environments
 
-## Prerequisites
+## 3. Prerequisites
 
-### Required Conditions
-
-- Deployed Cube Sandbox environment (see [Quick Start](../../docs/guide/quickstart.md))
+- A running Cube Sandbox deployment
 - Python 3.8+
-- Docker (for building custom images)
-
-### Environment Verification
 
 ```bash
-# Verify Python version
-python3 --version
-# Should output Python 3.8+
-
-# Verify Docker
-docker --version
-# Should output Docker version
-
-# Verify Cube environment
-cubemastercli --version
-# Should output cubemastercli version
+pip install -r requirements.txt
 ```
 
-## Before You Run
+## 4. Quick Start
 
-> **IMPORTANT: Security warnings — read before using `multi_query.py`!**
-
-This sandbox executes SQL against your MySQL server. Please understand these safeguards:
-
-### Credential Security
-
-The helper `build_mysql_cmd()` in `env_utils.py` intentionally omits `-p<password>`.
-The `mysql` client reads `MYSQL_PWD` from the sandbox environment, so credentials
-never appear in `/proc/<pid>/cmdline` or `ps aux` inside the sandbox.
-
-**Do not** inject `DB_PASSWORD` into a shell command line. Pass it via
-`Sandbox.create(envs=...)` as `MYSQL_PWD` instead.
-
-### Destructive Cleanup in `multi_query.py`
-
-The cleanup step at the end of `multi_query.py` issues `DROP DATABASE`. To prevent
-accidental data loss, the DROP is gated by **two** independent signals:
-
-1. The environment variable `MYSQL_SANDBOX_ALLOW_DROP` must be set to a
-   truthy value (`1` / `true` / `yes` / `on`).
-2. The effective database name must start with the prefix `cube_demo_`
-   (the script prepends this prefix automatically, so `DB_NAME=smoke`
-   becomes `cube_demo_smoke`).
-
-If either signal is missing the DROP is skipped and the demo database is
-left intact.
-
-**Before running against a real server, always set `DB_NAME` to a throwaway value
-(e.g. `cube_demo_$(date +%s)`).**
-
-## Quick Start
-
-### Step 1: Build the Docker Image
+### Step 1 — Build and Create Template
 
 ```bash
+# Build the Docker image
 cd /root/CubeSandbox
 docker build -t cubesandbox-mysql-sandbox:latest examples/mysql-sandbox
-```
 
-**Expected Output**:
-```
-[+] Building 10.5s (8/8) FINISHED
-...
- => naming to docker.io/library/cubesandbox-mysql-sandbox:latest
-```
-
-### Step 2: Push Image to Registry (Optional)
-
-For multi-node environments:
-
-```bash
-# Login to registry
-docker login <your-registry>
-
-# Push image
-docker tag cubesandbox-mysql-sandbox:latest <your-registry>/cubesandbox-mysql-sandbox:latest
-docker push <your-registry>/cubesandbox-mysql-sandbox:latest
-```
-
-### Step 3: Register as Cube Template
-
-```bash
+# Register as Cube template
 cubemastercli tpl create-from-image \
     --image cubesandbox-mysql-sandbox:latest \
     --writable-layer-size 1G \
@@ -186,209 +63,195 @@ cubemastercli tpl create-from-image \
     --probe-path /health
 ```
 
-**Parameter Description**:
+Note the `template_id` printed on success (format: `tpl-xxxxxxxxxxxxxxxx`).
 
-| Parameter | Description | Recommended |
-|-----------|-------------|-------------|
-| `--image` | Docker image address | Your image address |
-| `--writable-layer-size` | Writable layer size | 1G ~ 5G |
-| `--expose-port` | Exposed port | 49983 (envd) |
-| `--probe` | Health check port | 49983 |
-| `--probe-path` | Health check path | /health |
-
-**Expected Output**:
-```
-Template created successfully!
-Template ID: tpl-xxxxxxxxxxxxxxxx
-Status: PENDING
-...
-Status: READY
-```
-
-> **Note**: First-time creation requires pulling the base image and building snapshots, which may take 1-3 minutes. The template is ready for use when Status becomes READY.
-
-Record the output `template_id` for later use.
-
-### Step 4: Configure Environment Variables
+### Step 2 — Configure Environment Variables
 
 ```bash
-cd /root/CubeSandbox/examples/mysql-sandbox
 cp .env.example .env
+# edit .env and fill in E2B_API_URL and CUBE_TEMPLATE_ID
 ```
 
-Edit the `.env` file:
+Or export directly:
 
 ```bash
-# Required: Cube API server address
-E2B_API_URL="http://<node-ip>:3000"
-
-# Required: any non-empty value satisfies SDK validation
-E2B_API_KEY="e2b_000000"
-
-# Required: template ID (from Step 3)
-CUBE_TEMPLATE_ID="tpl-xxxxxxxxxxxxxxxx"
-
-# Optional: only needed when using a custom CA certificate (e.g., mkcert for local HTTPS).
-# On most systems the default CA bundle works without setting this.
-# SSL_CERT_FILE="/root/.local/share/mkcert/rootCA.pem"
-
-# Optional: MySQL database connection configuration
-DB_HOST="localhost"
-DB_USER="root"
-DB_PASSWORD=""
-DB_NAME="test_db"
+export E2B_API_KEY=e2b_000000
+export E2B_API_URL=http://<your-node-ip>:3000
+export CUBE_TEMPLATE_ID=<template-id>
 ```
 
-Or export environment variables directly:
+### Step 3 — Run the Example
 
 ```bash
-E2B_API_KEY="e2b_000000"
-E2B_API_URL="http://127.0.0.1:3000"
-CUBE_TEMPLATE_ID="tpl-xxxxxxxxxxxxxxxx"
-SSL_CERT_FILE="/root/.local/share/mkcert/rootCA.pem"
+python check_mysql.py
 ```
 
-### Step 5: Install Dependencies
-
-```bash
-pip3 install -r requirements.txt
-```
-
-**Dependencies**:
-
-| Dependency | Version | Description |
-|------------|---------|-------------|
-| e2b-code-interpreter | >= 2.4.1 | Cube Sandbox Python SDK |
-| python-dotenv | Latest | Environment variable loading |
-
-See the [Example Scripts](#example-scripts) section below for details.
-
-## Example Scripts
-
-Each script runs independently. For the full implementation, see the script files directly.
-
-| Script | Purpose | Prerequisite |
-|--------|---------|--------------|
-| `check_mysql.py` | Verify MySQL client is available in sandbox | Template only |
-| `run_query.py` | Connect to MySQL server and run a query | Reachable MySQL server |
-| `multi_query.py` | Execute a batch of SQL statements | Reachable MySQL server |
-| `network_isolated.py` | Demonstrate three network isolation policies | Template only |
-| `snapshot_demo.py` | Demonstrate snapshot creation and rollback | Template only |
-
-Run the examples:
-
-```bash
-cd /root/CubeSandbox/examples/mysql-sandbox
-source .env
-
-python3 check_mysql.py        # verify MySQL client
-python3 network_isolated.py   # network isolation (no MySQL server needed)
-python3 snapshot_demo.py      # snapshot and rollback (no MySQL server needed)
-python3 run_query.py          # execute SQL (DB_HOST must be reachable)
-python3 multi_query.py        # batch SQL (DB_HOST must be reachable)
-```
-
-Expected output sample (`check_mysql.py`):
+Expected output:
 
 ```
 ============================================================
-MySQL Client Sandbox - Verification Test
+MySQL Client Sandbox - Environment Check
 ============================================================
 Template ID: tpl-xxxxxxxxxxxxxxxx
+API URL: http://<node-ip>:3000
 ============================================================
 
 [1] Creating sandbox...
-[2] Sandbox created successfully!
-[3] Checking MySQL client...
-    MySQL version: mysql  Ver 15.1 Distrib 10.11.18-MariaDB, ...
+[2] Sandbox created: sb-xxxxxxxxxxxxxxxx
+
+[3] Checking MySQL client version...
+    MySQL version: mysql  Ver 8.0.xx ...
+
 [4] Checking available database tools...
     /usr/bin/mysql
     /usr/bin/mysqldump
-[5] System information...
-    Linux tpl-a067 6.6.69-opencloudos9.cubesandbox.pvm.guest-gb85200d80fa2 ...
-[6] Verifying sandbox environment...
-    PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"
 
+[5] Verifying sandbox environment...
+    PRETTY_NAME="Debian GNU/Linux 12"
+    Kernel: Linux ... x86_64 GNU/Linux
+
+============================================================
 Sandbox verification completed!
+============================================================
 ```
 
-## Known Limitations
+## 5. All Examples
 
-- The sandbox only ships the MySQL **client**; it needs an external MySQL server. KVM sandboxes are network-isolated from the host, so services on `localhost` / `127.0.0.1` are unreachable (`cube-egress` only proxies `tcp dport 80/443` by default).
-- Default `--writable-layer-size 1G` caps the snapshot size; writing large temp files slows down snapshot creation.
-- The cluster enforces limits on concurrent sandboxes and snapshot count.
+| Script | Demonstrates |
+|--------|--------------|
+| `check_mysql.py` | Basic MySQL client environment check |
+| `run_query.py` | Execute SQL queries against a MySQL server |
+| `multi_query.py` | Multi-step database operations (DDL + DML) |
+| `snapshot_demo.py` | Snapshot, modify, and restore sandbox state |
+| `network_isolated.py` | Network isolation with no internet access |
 
-## Troubleshooting
+### check_mysql.py — Environment Check
 
-| Problem | Possible Cause | Solution |
-|---------|----------------|----------|
-| `Template not found` | Wrong template ID or not ready | Run `cubemastercli tpl list` |
-| `Connection refused` | MySQL not running or wrong port | Check `DB_HOST` / port; ensure sandbox can route to target IP |
-| `Can't connect to server` | Network isolation blocking connection | Adjust `allow_out`/`deny_out` CIDRs |
-| `SSL certificate error` | HTTPS without CA bundle configured | Set the `SSL_CERT_FILE` env var |
-| `create-from-image` stuck at UNPACKING 20% | Cross-border egress too narrow, registry pull stalls | Switch to an in-region registry, or use `cubemastercli tpl commit` |
-
-Debug example:
+Verifies that the MySQL client and tools are properly installed:
 
 ```python
 with Sandbox.create(template=template_id) as sandbox:
-    info = sandbox.get_info()
-    print(f"Sandbox ID: {info.sandbox_id}, Status: {info.status}")
-    print(sandbox.commands.run("mysql --version").stdout)
+    # Check MySQL client version
+    result = sandbox.commands.run("mysql --version")
+    print(result.stdout)
 ```
 
-Template build log:
+### run_query.py — Execute SQL Queries
+
+Execute SQL queries against a MySQL server:
 
 ```bash
-cubemastercli tpl info --template-id <template-id>
+export DB_HOST=your-mysql-server.com
+export DB_USER=testuser
+export DB_PASSWORD=testpass
+python run_query.py
 ```
 
-## File Structure
+### multi_query.py — Multi-Step Database Operations
+
+Run multiple queries in sequence (CREATE, INSERT, SELECT):
+
+```bash
+export DB_HOST=your-mysql-server.com
+export DB_USER=testuser
+export DB_PASSWORD=testpass
+export DB_NAME=smoke
+export MYSQL_SANDBOX_ALLOW_DROP=1
+python multi_query.py
+```
+
+> **Security Note**: The DROP DATABASE operation is protected by two-factor confirmation:
+> 1. `MYSQL_SANDBOX_ALLOW_DROP=1` environment variable
+> 2. Database name must start with `cube_demo_` prefix
+
+### snapshot_demo.py — Snapshot and Restore
+
+Demonstrates CubeSandbox's snapshot capabilities for database testing:
+
+```python
+with Sandbox.create(template=template_id) as sandbox:
+    # Create initial snapshot
+    snapshot_id = sandbox.create_snapshot()
+
+    # Make changes (e.g., create tables, insert data)
+    sandbox.commands.run("mysql -h $DB_HOST -u $DB_USER ...")
+
+    # Restore to initial state
+    sandbox.restore_snapshot(snapshot_id)
+```
+
+### network_isolated.py — Network Isolation
+
+Create a sandbox with no outbound internet access for secure testing:
+
+```python
+sandbox = Sandbox.create(
+    template=template_id,
+    allow_internet_access=False  # No outbound network
+)
+```
+
+## 6. Connecting to a MySQL Server
+
+### Within the Sandbox
+
+```bash
+# Connect to MySQL server
+mysql -h <host> -P <port> -u <user> -p<password>
+
+# Run SQL file
+mysql -h <host> -u <user> < database.sql
+
+# Export database
+mysqldump -h <host> -u <user> --all-databases > backup.sql
+```
+
+### Environment Variables
+
+Set these when creating the sandbox:
+
+```python
+sandbox = Sandbox.create(
+    template=template_id,
+    envs={
+        "DB_HOST": "your-mysql-host.com",
+        "DB_PORT": "3306",
+        "DB_USER": "testuser",
+        "DB_PASSWORD": "testpass",
+        "DB_NAME": "testdb"
+    }
+)
+```
+
+## 7. Troubleshooting
+
+| Symptom | Likely Cause | Fix |
+|---------|--------------|-----|
+| `mysql: command not found` | Template not built correctly | Rebuild Docker image |
+| `Connection refused` | MySQL server not reachable | Check DB_HOST and network policy |
+| `Access denied` | Wrong credentials | Verify DB_USER and DB_PASSWORD |
+| `Can't connect to MySQL server` | Firewall or network policy | Check allow_out rules |
+
+## 8. Directory Structure
 
 ```
 mysql-sandbox/
-├── Dockerfile                 # Docker image definition
-├── README.md                  # English documentation (this file)
-├── README_zh.md              # Chinese documentation
-├── requirements.txt          # Python dependencies
-├── .env.example              # Environment variables template
-│
-├── env_utils.py              # Shared environment utility functions
-│
-├── check_mysql.py            # Verify MySQL client installation
-├── run_query.py              # Execute SQL query example
-├── network_isolated.py       # Network isolation demo
-├── snapshot_demo.py           # Snapshot and rollback demo
-└── multi_query.py            # Execute multiple queries
+├── Dockerfile              # Docker image definition
+├── README.md              # English documentation (this file)
+├── README_zh.md           # Chinese documentation
+├── check_mysql.py         # Environment check script
+├── run_query.py           # Execute SQL queries
+├── multi_query.py         # Multi-step database operations
+├── snapshot_demo.py       # Snapshot and restore demo
+├── network_isolated.py    # Network isolation demo
+├── env_utils.py           # Environment variable utilities
+├── requirements.txt       # Python dependencies
+├── ruff.toml             # Code linting configuration
+├── .env.example           # Environment variable template
+├── VERIFICATION.md        # Verification guide for contributors
+└── screenshots/          # Verification screenshots
+    ├── 01_check_mysql.png
+    ├── 02_network_isolated.png
+    ├── 03_snapshot_demo.png
+    └── 04_tpl_list.png
 ```
-
-## Related Examples
-
-| Example | Path | Description |
-|---------|------|-------------|
-| Basic Sandbox | [code-sandbox-quickstart](../code-sandbox-quickstart/) | Sandbox basics tutorial |
-| Network Policy | [network-policy](../network-policy/) | More network configuration examples |
-| Snapshot Management | [snapshot-rollback-clone](../snapshot-rollback-clone/) | Full snapshot features |
-| AI Agent | [openai-agents-example](../openai-agents-example/) | OpenAI Agents integration |
-| Browser Sandbox | [browser-sandbox](../browser-sandbox/) | Playwright browser automation |
-
-For full `Sandbox.create()` / `create_snapshot()` / `list_snapshots()` API usage, see the [e2b-code-interpreter SDK documentation](https://github.com/cube-sandbox/e2b-code-interpreter).
-
-## Contributing
-
-Contributions are welcome! Please follow these steps:
-
-1. Fork this repository
-2. Create a feature branch: `git checkout -b feature/my-template`
-3. Commit changes: `git commit -m 'Add MySQL sandbox template'`
-4. Push branch: `git push origin feature/my-template`
-5. Open a Pull Request
-
-Please ensure:
-- Code follows project coding standards
-- Documentation is clear and complete
-- Necessary tests are added
-
-## License
-
-This project follows the license agreement in the project root directory.

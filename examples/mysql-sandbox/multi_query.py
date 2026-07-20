@@ -42,11 +42,6 @@ import os
 import re
 import sys
 
-# Ensure env_utils can be imported from any working directory.
-sys.path.insert(0, str(__file__).rsplit("/", 1)[0])
-
-from e2b_code_interpreter import Sandbox
-
 from env_utils import (
     get_api_key,
     get_api_url,
@@ -55,6 +50,13 @@ from env_utils import (
     get_template_id,
     run_mysql_query,
 )
+
+try:
+    from e2b_code_interpreter import Sandbox
+except ImportError:
+    print("Error: Please install dependencies first:")
+    print("  pip install -r requirements.txt")
+    sys.exit(1)
 
 # MySQL has a 64-character limit on identifier lengths (database, table, column names).
 _MYSQL_MAX_IDENT = 64
