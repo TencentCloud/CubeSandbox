@@ -919,7 +919,7 @@ func GetTemplateByAlias(ctx context.Context, alias string) (*models.TemplateDefi
 	}
 	def := &models.TemplateDefinition{}
 	err := store.db.WithContext(ctx).Table(constants.TemplateDefinitionTableName).
-		Where("kind = ? AND display_name = ? AND status <> ?", TemplateKindTemplate, alias, StatusDeleting).
+		Where("alias_key = ? AND status <> ?", alias, StatusDeleting).
 		First(def).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -964,8 +964,8 @@ func claimTemplateAlias(ctx context.Context, templateID, alias string) error {
 	}
 	return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Table(constants.TemplateDefinitionTableName).
-			Where("kind = ? AND display_name = ? AND template_id <> ? AND status <> ?",
-				TemplateKindTemplate, alias, templateID, StatusDeleting).
+			Where("alias_key = ? AND template_id <> ? AND status <> ?",
+				alias, templateID, StatusDeleting).
 			Update("display_name", "").Error; err != nil {
 			return fmt.Errorf("release stale alias %q fail: %w", alias, err)
 		}
@@ -973,6 +973,15 @@ func claimTemplateAlias(ctx context.Context, templateID, alias string) error {
 			Where("template_id = ?", templateID).
 			Update("display_name", alias).Error
 	})
+}
+
+// isDuplicateAliasError returns true for MySQL (1062 / Duplicate entry) and
+// PostgreSQL (23505 / unique_constraint) unique-violation errors. Used by
+// claimTemplateAlias callers to treat concurrent alias claims as non-fatal.
+func isDuplicateAliasError(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "1062") || strings.Contains(s, "Duplicate entry") ||
+		strings.Contains(s, "23505") || strings.Contains(s, "unique_constraint")
 }
 
 func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.CreateCubeSandboxReq, error) {

@@ -390,7 +390,11 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 	if info.Status != StatusFailed {
 		if alias := strings.TrimSpace(sourceReq.Alias); alias != "" {
 			if claimErr := claimTemplateAlias(ctx, req.TemplateID, alias); claimErr != nil {
-				logger.Warnf("claim alias %q for template %s fail: %v", alias, req.TemplateID, claimErr)
+				if isDuplicateAliasError(claimErr) {
+					logger.Infof("alias %q concurrently claimed by another template; template %s is READY without alias", alias, req.TemplateID)
+				} else {
+					logger.Warnf("claim alias %q for template %s fail: %v", alias, req.TemplateID, claimErr)
+				}
 			}
 		}
 	}

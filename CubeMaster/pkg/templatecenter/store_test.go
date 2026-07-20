@@ -383,27 +383,20 @@ func TestGetTemplateByAliasFiltersByKindExcludesSnapshots(t *testing.T) {
 	require.NoError(t, err) // DryRun returns a zero-value def; the assertion target is the captured SQL.
 	require.NotNil(t, def)
 
-	// Regression: the WHERE clause must scope by kind so a snapshot sharing
-	// the alias cannot be returned. Before the fix this predicate was absent.
-	assert.Contains(t, capturedSQL, "kind = ?",
-		"GetTemplateByAlias must filter kind=? so a snapshot sharing the alias cannot shadow the owning template; got SQL: %s", capturedSQL)
+	// Regression: the WHERE clause must use alias_key (the STORED generated
+	// column) so the unique index is used and snapshots (whose alias_key is
+	// always NULL) can never be returned. Before the fix the predicate
+	// filtered display_name + kind without the index.
+	assert.Contains(t, capturedSQL, "alias_key = ?",
+		"GetTemplateByAlias must filter alias_key=? to use the unique index; got SQL: %s", capturedSQL)
 
-	// The kind column must bind to the template kind, mirroring the write-path
-	// invariant (kind = TemplateKindTemplate in createDefinitionTx).
-	kindBoundToTemplate := false
+	// The alias value must be bound so the lookup targets the correct alias.
+	aliasBound := false
 	for _, v := range capturedVars {
-		if s, ok := v.(string); ok && s == TemplateKindTemplate {
-			kindBoundToTemplate = true
+		if s, ok := v.(string); ok && s == alias {
+			aliasBound = true
 		}
 	}
-	assert.True(t, kindBoundToTemplate,
-		"kind must bind to TemplateKindTemplate (%q); captured vars: %v", TemplateKindTemplate, capturedVars)
-
-	// The read path must never resolve an alias to a snapshot (snap-* id):
-	// the kind filter must not bind to the snapshot kind.
-	for _, v := range capturedVars {
-		if s, ok := v.(string); ok && s == TemplateKindSnapshot {
-			t.Fatalf("GetTemplateByAlias must never filter kind=snapshot; captured vars: %v", capturedVars)
-		}
-	}
+	assert.True(t, aliasBound,
+		"alias must be bound in the query; captured vars: %v", capturedVars)
 }

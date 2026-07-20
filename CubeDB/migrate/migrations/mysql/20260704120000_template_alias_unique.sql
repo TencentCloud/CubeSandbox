@@ -36,6 +36,7 @@ JOIN (
   HAVING COUNT(*) > 1
 ) AS d
   ON t.`display_name` = d.`display_name`
+ AND t.`kind` = 'template'
  AND t.`id` <> d.`keep_id`
 SET t.`display_name` = '';
 

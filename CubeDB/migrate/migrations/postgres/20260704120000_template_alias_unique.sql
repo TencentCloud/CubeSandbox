@@ -34,6 +34,7 @@ UPDATE t_cube_template_definition AS t
     HAVING COUNT(*) > 1
   ) AS d
  WHERE t.display_name = d.display_name
+   AND t.kind = 'template'
    AND t.id <> d.keep_id;
 
 -- Generated column: non-NULL only for kind='template' with non-empty

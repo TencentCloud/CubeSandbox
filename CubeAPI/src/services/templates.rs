@@ -357,7 +357,16 @@ fn alias_from_name(value: &str) -> Option<String> {
         return None;
     }
 
-    let without_tag = name.split_once(':').map_or(name, |(name, _)| name).trim();
+    // Strip the tag suffix (after the last ':') only when the remainder
+    // contains no '/' — this avoids mistaking a registry port (e.g.
+    // "registry:5000/team/app:v2") for a tag delimiter. The last path
+    // component after '/' is then taken as the alias, mirroring E2B's
+    // flat global namespace.
+    let without_tag = match name.rsplit_once(':') {
+        Some((before, after)) if !after.contains('/') => before,
+        _ => name,
+    }
+    .trim();
     let alias = without_tag.rsplit('/').next().unwrap_or(without_tag).trim();
     if alias.is_empty() {
         None
@@ -678,6 +687,17 @@ mod tests {
         assert_eq!(
             template_alias_from_request(&body).as_deref(),
             Some("my-app")
+        );
+    }
+
+    #[test]
+    fn template_name_strips_tag_but_not_registry_port() {
+        let mut body = sample_request();
+        body.name = Some("registry:5000/team/app:v2".to_string());
+
+        assert_eq!(
+            template_alias_from_request(&body).as_deref(),
+            Some("app")
         );
     }
 

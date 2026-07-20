@@ -162,14 +162,17 @@ def test_template_alias_create_get_and_delete(pytestconfig: pytest.Config) -> No
         assert job.template_id.startswith("tpl-")
         created_template_id = job.template_id
 
-        # Poll until the definition is persisted.
+        # Poll until the build finishes (READY or FAILED), since the alias
+        # is claimed only after finalizeTemplateReplicas succeeds.
         deadline = time.time() + 120
         while time.time() < deadline:
             try:
-                Template.get(created_template_id, config=config)
-                break
+                built = Template.get(created_template_id, config=config)
+                if built.status in ("READY", "FAILED"):
+                    break
             except TemplateNotFoundError:
-                time.sleep(2)
+                pass
+            time.sleep(2)
 
         # 2. Look up by alias — CubeMaster resolves alias → template ID.
         detail = Template.get(alias, config=config)
@@ -261,14 +264,16 @@ def test_template_alias_dedicated_lookup_endpoint(pytestconfig: pytest.Config) -
         )
         created_template_id = job.template_id
 
-        # Poll until persisted.
+        # Poll until the build finishes (alias claimed after READY).
         deadline = time.time() + 120
         while time.time() < deadline:
             try:
-                Template.get(created_template_id, config=config)
-                break
+                built = Template.get(created_template_id, config=config)
+                if built.status in ("READY", "FAILED"):
+                    break
             except TemplateNotFoundError:
-                time.sleep(2)
+                pass
+            time.sleep(2)
 
         # Hit the dedicated alias endpoint.
         resp = requests.get(f"{config.api_url}/templates/aliases/{alias}")
@@ -320,14 +325,16 @@ def test_template_alias_rebuild_reassignment(pytestconfig: pytest.Config) -> Non
         job_a = Template.build(name=alias, **common_kwargs)
         template_ids.append(job_a.template_id)
 
-        # Poll until A is persisted.
+        # Poll until A is READY (alias claimed after finalize).
         deadline = time.time() + 120
         while time.time() < deadline:
             try:
-                Template.get(job_a.template_id, config=config)
-                break
+                built_a = Template.get(job_a.template_id, config=config)
+                if built_a.status in ("READY", "FAILED"):
+                    break
             except TemplateNotFoundError:
-                time.sleep(2)
+                pass
+            time.sleep(2)
 
         # Verify alias resolves to A initially.
         detail_a = Template.get(alias, config=config)
@@ -337,14 +344,16 @@ def test_template_alias_rebuild_reassignment(pytestconfig: pytest.Config) -> Non
         job_b = Template.build(name=alias, **common_kwargs)
         template_ids.append(job_b.template_id)
 
-        # Poll until B is persisted.
+        # Poll until B is READY (alias claim steals from A).
         deadline = time.time() + 120
         while time.time() < deadline:
             try:
-                Template.get(job_b.template_id, config=config)
-                break
+                built_b = Template.get(job_b.template_id, config=config)
+                if built_b.status in ("READY", "FAILED"):
+                    break
             except TemplateNotFoundError:
-                time.sleep(2)
+                pass
+            time.sleep(2)
 
         # 3. Alias should now resolve to B, not A.
         detail_b = Template.get(alias, config=config)
