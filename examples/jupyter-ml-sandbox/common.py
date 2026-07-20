@@ -11,9 +11,12 @@ from dotenv import load_dotenv
 from e2b_code_interpreter import Sandbox
 
 WORKSPACE_ROOT = "/workspace"
-NOTEBOOK_PATH = f"{WORKSPACE_ROOT}/notebooks/jupyter_ml_workbench.ipynb"
+NOTEBOOK_DIR = f"{WORKSPACE_ROOT}/notebooks"
 EXECUTED_NOTEBOOK_DIR = f"{WORKSPACE_ROOT}/artifacts"
+DATA_DIR = f"{WORKSPACE_ROOT}/data"
+NOTEBOOK_PATH = f"{NOTEBOOK_DIR}/jupyter_ml_workbench.ipynb"
 SUMMARY_PATH = f"{EXECUTED_NOTEBOOK_DIR}/summary.json"
+CHECKPOINT_PATH = f"{EXECUTED_NOTEBOOK_DIR}/pause_resume_checkpoint.json"
 
 
 def load_env() -> None:
@@ -49,7 +52,7 @@ def ensure_success(result, action: str) -> None:
 def prepare_workspace(sandbox) -> None:
     ensure_success(
         sandbox.commands.run(
-            "mkdir -p /workspace/notebooks /workspace/artifacts /workspace/data"
+            f"mkdir -p {NOTEBOOK_DIR} {EXECUTED_NOTEBOOK_DIR} {DATA_DIR}"
         ),
         "prepare workspace",
     )

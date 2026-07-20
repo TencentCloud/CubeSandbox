@@ -7,6 +7,8 @@ import argparse
 import os
 
 from common import (
+    EXECUTED_NOTEBOOK_DIR,
+    NOTEBOOK_PATH,
     SUMMARY_PATH,
     build_workbench_notebook,
     create_sandbox,
@@ -39,7 +41,7 @@ def main() -> None:
 
     with create_sandbox(template=template_id, timeout=args.timeout) as sandbox:
         prepare_workspace(sandbox)
-        write_text(sandbox, "/workspace/notebooks/jupyter_ml_workbench.ipynb", build_workbench_notebook())
+        write_text(sandbox, NOTEBOOK_PATH, build_workbench_notebook())
 
         print(f"Sandbox: {sandbox.get_info().sandbox_id}")
         print(f"JupyterLab: {sandbox_url(sandbox, args.jupyter_port)}/lab")
@@ -47,9 +49,9 @@ def main() -> None:
         run = sandbox.commands.run(
             "jupyter nbconvert "
             "--to notebook "
-            "--execute /workspace/notebooks/jupyter_ml_workbench.ipynb "
+            f"--execute {NOTEBOOK_PATH} "
             "--output jupyter_ml_workbench.executed.ipynb "
-            "--output-dir /workspace/artifacts "
+            f"--output-dir {EXECUTED_NOTEBOOK_DIR} "
             "--ExecutePreprocessor.timeout=300 "
             "--ExecutePreprocessor.kernel_name=python3",
             cwd="/workspace",
@@ -59,7 +61,7 @@ def main() -> None:
         ensure_success(run, "execute the Jupyter notebook")
         print(run.stdout)
 
-        artifacts = sandbox.commands.run("find /workspace/artifacts -maxdepth 1 -type f | sort")
+        artifacts = sandbox.commands.run(f"find {EXECUTED_NOTEBOOK_DIR} -maxdepth 1 -type f | sort")
         ensure_success(artifacts, "list notebook artifacts")
         print("Artifacts:")
         print(artifacts.stdout.strip())
@@ -71,4 +73,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

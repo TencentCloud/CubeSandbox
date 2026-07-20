@@ -46,6 +46,14 @@ cubemastercli tpl create-from-image \
 
 当 JupyterLab 的 `/api/status` 返回 HTTP 200 时，模板就会变成可用状态。
 
+## 安全说明
+
+这个示例会关闭 JupyterLab 内置的 token、password 和 XSRF 校验，让
+CubeSandbox 可以通过自身的沙箱访问流程暴露 notebook，避免额外登录步骤。
+notebook 服务也会以 root 运行，以匹配基础镜像和 envd 执行环境。请只在
+CubeSandbox 的隔离沙箱边界内使用该配置；如果复用这个 Dockerfile 到
+CubeSandbox 之外的环境，请重新开启 Jupyter 认证和 XSRF 校验。
+
 ## 配置本地运行脚本
 
 ```bash
@@ -71,6 +79,7 @@ jupyter-ml-sandbox/
 ├── README.md
 ├── README_zh.md
 ├── common.py
+├── jupyterlab-home.png
 ├── jupyter_start.sh
 ├── notebook_demo.py
 ├── pause_resume_demo.py

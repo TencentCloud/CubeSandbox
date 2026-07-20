@@ -6,9 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import time
 
 from common import (
+    CHECKPOINT_PATH,
     create_sandbox,
     ensure_success,
     load_env,
@@ -34,25 +34,27 @@ def main() -> None:
 
     with create_sandbox(template=template_id, timeout=args.timeout) as sandbox:
         prepare_workspace(sandbox)
+        checkpoint = {"step": 1, "message": "checkpoint before pause"}
         write_text(
             sandbox,
-            "/workspace/artifacts/pause_resume_checkpoint.json",
-            json.dumps({"step": 1, "message": "checkpoint before pause"}, indent=2),
+            CHECKPOINT_PATH,
+            json.dumps(checkpoint, indent=2),
         )
 
-        before = sandbox.files.read("/workspace/artifacts/pause_resume_checkpoint.json")
+        before_text = sandbox.files.read(CHECKPOINT_PATH)
+        before = json.loads(before_text)
         print(f"Sandbox: {sandbox.get_info().sandbox_id}")
         print(f"JupyterLab: {sandbox_url(sandbox, args.jupyter_port)}/lab")
         print("Before pause:")
-        print(before)
+        print(before_text)
 
         sandbox.pause()
-        time.sleep(1)
         sandbox.connect()
 
-        after = sandbox.files.read("/workspace/artifacts/pause_resume_checkpoint.json")
+        after_text = sandbox.files.read(CHECKPOINT_PATH)
+        after = json.loads(after_text)
         print("After resume:")
-        print(after)
+        print(after_text)
 
         if before != after:
             raise SystemExit("pause/resume state check failed")
@@ -60,7 +62,7 @@ def main() -> None:
         run = sandbox.commands.run(
             "python3 - <<'PY'\n"
             "from pathlib import Path\n"
-            "path = Path('/workspace/artifacts/pause_resume_checkpoint.json')\n"
+            f"path = Path({CHECKPOINT_PATH!r})\n"
             "print(path.read_text())\n"
             "PY",
             cwd="/workspace",

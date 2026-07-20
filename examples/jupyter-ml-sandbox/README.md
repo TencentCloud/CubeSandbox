@@ -46,6 +46,15 @@ cubemastercli tpl create-from-image \
 
 The template is ready once JupyterLab answers `/api/status` with HTTP 200.
 
+## Security note
+
+This example disables JupyterLab's built-in token, password, and XSRF checks so
+CubeSandbox can expose the notebook through its sandbox access flow without an
+extra login prompt. The notebook server also runs as root to match the base image
+and envd execution environment. Keep this configuration inside CubeSandbox's
+isolated sandbox boundary; re-enable Jupyter authentication and XSRF checks if
+you reuse the Dockerfile outside CubeSandbox.
+
 ## Configure the host demo
 
 ```bash
@@ -72,6 +81,7 @@ jupyter-ml-sandbox/
 ├── README.md
 ├── README_zh.md
 ├── common.py
+├── jupyterlab-home.png
 ├── jupyter_start.sh
 ├── notebook_demo.py
 ├── pause_resume_demo.py

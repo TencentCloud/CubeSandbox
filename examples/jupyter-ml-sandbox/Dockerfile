@@ -44,8 +44,7 @@ RUN apt-get update \
         --extra-index-url https://download.pytorch.org/whl/cpu \
         torch==2.4.1
 
-COPY jupyter_start.sh /usr/local/bin/jupyter_start.sh
-RUN chmod +x /usr/local/bin/jupyter_start.sh
+COPY --chmod=755 jupyter_start.sh /usr/local/bin/jupyter_start.sh
 
 EXPOSE 8888 49983
 
