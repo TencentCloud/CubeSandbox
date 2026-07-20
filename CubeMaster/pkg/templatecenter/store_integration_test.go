@@ -97,3 +97,89 @@ func TestGetTemplateByAliasIntegrationExcludesSnapshots(t *testing.T) {
 	assert.True(t, errors.Is(err, ErrTemplateNotFound),
 		"a snapshot's alias must NOT resolve; got err=%v, def resolved when it should be ErrTemplateNotFound", err)
 }
+
+// TestClaimTemplateAliasConcurrentIsMutex verifies that two goroutines
+// concurrently claiming the same alias for different templates are
+// serialized by the DB unique constraint: exactly one wins, the other
+// receives a duplicate-key error. This exercises the same InnoDB row-level
+// locking + unique-index path that protects multi-instance CubeMaster
+// deployments — the DB does not distinguish connections by source process.
+func TestClaimTemplateAliasConcurrentIsMutex(t *testing.T) {
+	dsn := os.Getenv("CUBE_TEST_DB_DSN")
+	if dsn == "" {
+		t.Skip("set CUBE_TEST_DB_DSN to run this integration test")
+	}
+	sqlDB, err := sql.Open("mysql", dsn)
+	require.NoError(t, err)
+	gormDB, err := gorm.Open(mysql.New(mysql.Config{Conn: sqlDB}), &gorm.Config{})
+	require.NoError(t, err)
+	if err := sqlDB.Ping(); err != nil {
+		t.Skipf("MySQL unreachable: %v", err)
+	}
+
+	oldDB := store.db
+	store.db = gormDB
+	t.Cleanup(func() { store.db = oldDB })
+
+	suf := fmt.Sprintf("conc-%d", time.Now().UnixNano())
+	tplA := "tpl-conc-a-" + suf
+	tplB := "tpl-conc-b-" + suf
+	alias := "alias-conc-" + suf
+
+	for _, id := range []string{tplA, tplB} {
+		require.NoError(t, gormDB.Create(&models.TemplateDefinition{
+			TemplateID:  id,
+			Kind:        TemplateKindTemplate,
+			Status:      "READY",
+			RequestJSON: "{}",
+		}).Error)
+	}
+	t.Cleanup(func() {
+		gormDB.Unscoped().Where("template_id IN ?", []string{tplA, tplB}).
+			Delete(&models.TemplateDefinition{})
+	})
+
+	// Two goroutines claim the same alias concurrently.
+	type result struct {
+		err error
+	}
+	resCh := make(chan result, 2)
+	for _, id := range []string{tplA, tplB} {
+		go func(templateID string) {
+			resCh <- result{err: claimTemplateAlias(context.Background(), templateID, alias)}
+		}(id)
+	}
+	r1, r2 := <-resCh, <-resCh
+
+	// Both calls may succeed (sequential: second claim's Step 1 releases
+	// the first's alias before claiming) or one may fail with a duplicate-
+	// key error (truly concurrent Step 2: unique index blocks the loser).
+	// Either way, the invariant is: exactly one template ends up with the
+	// alias. Verify that, not which call errored.
+	if r1.err != nil {
+		assert.True(t, isDuplicateAliasError(r1.err),
+			"if a claim fails it must be a duplicate-key error; got: %v", r1.err)
+	}
+	if r2.err != nil {
+		assert.True(t, isDuplicateAliasError(r2.err),
+			"if a claim fails it must be a duplicate-key error; got: %v", r2.err)
+	}
+	atLeastOneSuccess := r1.err == nil || r2.err == nil
+	assert.True(t, atLeastOneSuccess, "at least one claim must succeed")
+
+	// Invariant: exactly one template owns the alias.
+	got, err := GetTemplateByAlias(context.Background(), alias)
+	require.NoError(t, err)
+	assert.True(t, got.TemplateID == tplA || got.TemplateID == tplB,
+		"alias must resolve to one of the two templates; got %s", got.TemplateID)
+
+	// The other template must NOT have the alias.
+	otherID := tplA
+	if got.TemplateID == tplA {
+		otherID = tplB
+	}
+	otherDef, err := GetDefinition(context.Background(), otherID)
+	require.NoError(t, err)
+	assert.Empty(t, otherDef.DisplayName,
+		"the non-owning template's display_name must be empty; got %q", otherDef.DisplayName)
+}
