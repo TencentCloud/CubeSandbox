@@ -251,6 +251,21 @@ pub async fn delete_template(
         }
         return Ok((StatusCode::NO_CONTENT, headers).into_response());
     }
+    // Resolve a possible alias to its canonical `tpl-*` ID *before* deleting
+    // so the AgentHub reverse-sync can match stored registrations (which key
+    // on the canonical template_id, never the alias). When the caller already
+    // passed a canonical `tpl-*` ID we skip the extra CubeMaster round-trip.
+    // A resolution failure is non-fatal: we fall back to the raw id and let
+    // the primary delete proceed (reverse-sync then simply finds nothing,
+    // matching the previous behavior).
+    let canonical_id = if template_id.starts_with("tpl-") {
+        template_id.clone()
+    } else {
+        match state.services.templates.get_template(&template_id).await {
+            Ok(detail) if !detail.template_id.is_empty() => detail.template_id,
+            _ => template_id.clone(),
+        }
+    };
 
     state
         .services
@@ -258,6 +273,7 @@ pub async fn delete_template(
         .delete_template(template_id.clone(), params.instance_type, params.sync)
         .await?;
 
+    reverse_sync_agenthub_template(&state, &canonical_id).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

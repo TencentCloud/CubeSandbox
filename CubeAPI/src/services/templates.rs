@@ -386,6 +386,13 @@ fn is_valid_alias(alias: &str) -> bool {
     if alias.is_empty() || alias.len() > 64 {
         return false;
     }
+    // Reject canonical infrastructure-ID prefixes so a derived alias can never
+    // collide with a real `tpl-*` template or `snap-*` snapshot id. This
+    // mirrors the prefix guard enforced on the alias *lookup* path
+    // (get_template_by_alias) and keeps the create path consistent (§1.4).
+    if alias.starts_with("tpl-") || alias.starts_with("snap-") {
+        return false;
+    }
     alias.chars().enumerate().all(|(i, c)| {
         if i == 0 {
             c.is_ascii_lowercase() || c.is_ascii_digit()
@@ -764,6 +771,38 @@ mod tests {
 
         assert!(summary.aliases.is_empty());
         assert!(!summary.public);
+    }
+
+    #[test]
+    fn is_valid_alias_accepts_plain_lowercase_slug() {
+        assert!(is_valid_alias("my-app"));
+        assert!(is_valid_alias("stable-python-v2"));
+        assert!(is_valid_alias("a"));
+        assert!(is_valid_alias("a1"));
+    }
+
+    #[test]
+    fn is_valid_alias_rejects_canonical_id_prefixes() {
+        // §1.4: a derived alias must never collide with a real `tpl-*` /
+        // `snap-*` infrastructure id — otherwise the alias-lookup path and
+        // the canonical-id path could address the same resource two ways.
+        assert!(!is_valid_alias("tpl-abc123"));
+        assert!(!is_valid_alias("tpl-1"));
+        assert!(!is_valid_alias("snap-deadbeef"));
+        assert!(!is_valid_alias("tpl-"));
+        assert!(!is_valid_alias("snap-"));
+    }
+
+    #[test]
+    fn is_valid_alias_rejects_other_invalid_forms() {
+        assert!(!is_valid_alias(""));
+        assert!(!is_valid_alias("UPPER"));
+        assert!(!is_valid_alias("-leading-dash"));
+        assert!(!is_valid_alias("has space"));
+        assert!(!is_valid_alias(&"x".repeat(65)));
+        // Note: a trailing dash IS permitted by CubeMaster's regex
+        // ^[a-z0-9][a-z0-9-]{0,63}$, so we don't reject it here.
+        assert!(is_valid_alias("trailing-dash-"));
     }
 
     #[test]
