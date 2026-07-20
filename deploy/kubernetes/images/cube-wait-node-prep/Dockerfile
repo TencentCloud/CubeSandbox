@@ -1,6 +1,7 @@
 FROM ubuntu:22.04
 
 ARG DEBIAN_FRONTEND=noninteractive
+ENV PATH="/usr/local/services/cubetoolbox/cube-shim/bin:${PATH}"
 
 # Minimal image for Big Pod wait-node-prep sidecar (Kruise priority) and
 # bootstrap write-ready/hold. Bumping wait image on Big Pod may InPlace; do not

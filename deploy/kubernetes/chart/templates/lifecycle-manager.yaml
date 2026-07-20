@@ -1,8 +1,8 @@
 {{- if eq (include "cube.lifecycleManagerEnabled" .) "true" }}
 {{- $redisHost := default (include "cube.redisHost" .) .Values.lifecycleManager.redis.host -}}
 {{- $redisPort := default .Values.redis.port .Values.lifecycleManager.redis.port -}}
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: {{ include "cube.cloneSetAPIVersion" . }}
+kind: CloneSet
 metadata:
   name: {{ include "cube.lifecycleManagerName" . }}
   labels:
@@ -10,6 +10,7 @@ metadata:
     app.kubernetes.io/component: lifecycle-manager
 spec:
   replicas: {{ .Values.lifecycleManager.replicas }}
+  {{- include "cube.cloneSetUpdateStrategy" . | nindent 2 }}
   selector:
     matchLabels:
       {{- include "cube.selectorLabels" . | nindent 6 }}

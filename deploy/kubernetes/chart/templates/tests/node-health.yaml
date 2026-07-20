@@ -76,7 +76,7 @@ spec:
           {{- end }}
 
           {{- if eq (include "cube.proxyEnabled" .) "true" }}
-          echo '[health-test] check CubeProxy Deployment'
+          echo '[health-test] check CubeProxy CloneSet'
           proxy_pods_json="$(kget "/api/v1/namespaces/${ns}/pods?labelSelector=app.kubernetes.io/component%3Dcube-proxy")"
           printf '%s\n' "${proxy_pods_json}" \
             | grep -oE '"ready"[[:space:]]*:[[:space:]]*true' | grep -q true

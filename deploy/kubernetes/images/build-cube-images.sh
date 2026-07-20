@@ -814,7 +814,12 @@ run_selected_builds() {
 
   if should_build cube-pvm-host-bootstrap; then
     ctx="$(prepare_context cube-pvm-host-bootstrap)"
-    copy_scripts "${ctx}" pvm-host-bootstrap.sh node-prep-lib.sh
+    copy_scripts "${ctx}" \
+      pvm-host-bootstrap.sh \
+      node-prep-lib.sh \
+      pvm-startup-gate-lib.sh \
+      pvm-startup-gate-reconcile.sh \
+      pvm-startup-gate-preflight.sh
     if [[ "${INCLUDE_PVM_KERNEL_RPM}" == "1" ]]; then
       log "downloading PVM host kernel rpm for bootstrap image"
       download_file "${PVM_KERNEL_RPM_URL}" "${PVM_KERNEL_RPM}" file "${PVM_KERNEL_RPM_SHA256}"

@@ -1,6 +1,7 @@
 FROM ubuntu:22.04
 
 ARG DEBIAN_FRONTEND=noninteractive
+ENV PATH="/usr/local/services/cubetoolbox/cube-shim/bin:${PATH}"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

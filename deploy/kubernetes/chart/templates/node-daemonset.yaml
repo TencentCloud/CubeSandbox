@@ -45,27 +45,10 @@ spec:
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.waitNodePrep "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.waitNodePrep.pullPolicy }}
           env:
-            {{- include "cube.timezoneEnv" . | nindent 12 }}
             - name: STATE_DIR
               value: {{ .Values.hostPaths.bootstrapState | quote }}
-            - name: PREP_GENERATION
-              value: {{ .Values.cubeNodeBootstrap.prepGeneration | quote }}
-            - name: PVM_ENABLED
-              value: {{ ternary "1" "0" .Values.bootstrap.pvmHostKernel.enabled | quote }}
-            - name: NODE_INIT_ENABLED
-              value: {{ ternary "1" "0" .Values.bootstrap.nodeInit.enabled | quote }}
-            - name: DESIRED_KERNEL_PATTERN
-              value: {{ .Values.bootstrap.pvmHostKernel.desiredKernelPattern | quote }}
-            - name: KERNEL_BOOT_ARGS
-              value: {{ .Values.bootstrap.pvmHostKernel.bootArgs | quote }}
-            - name: WAIT_TIMEOUT_SECONDS
-              value: {{ .Values.cubeNodeBootstrap.waitTimeoutSeconds | quote }}
             - name: KRUISE_CONTAINER_PRIORITY
               value: "10"
-            {{- if and (not .Values.bootstrap.pvmHostKernel.enabled) (not .Values.bootstrap.nodeInit.enabled) }}
-            - name: PREP_MODE
-              value: noop
-            {{- end }}
           readinessProbe:
             exec:
               command: ["test", "-f", "/run/wait-node-prep.ready"]

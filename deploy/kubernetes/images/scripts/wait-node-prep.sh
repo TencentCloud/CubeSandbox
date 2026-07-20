@@ -14,6 +14,8 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 log() { printf '[wait-node-prep] %s\n' "$*"; }
 fail() { printf '[wait-node-prep] ERROR: %s\n' "$*" >&2; exit 1; }
 
+# Initial timeout is an image contract, not a Helm value: changing PVM policy
+# must not mutate the frozen Big Pod template.
 WAIT_TIMEOUT_SECONDS="${WAIT_TIMEOUT_SECONDS:-600}"
 WAIT_POLL_SECONDS="${WAIT_POLL_SECONDS:-2}"
 WAIT_READY_MARKER="${WAIT_READY_MARKER:-/run/wait-node-prep.ready}"
@@ -24,7 +26,7 @@ log "waiting for ${ready} (timeout=${WAIT_TIMEOUT_SECONDS}s)"
 start="$(date +%s)"
 became_ready=0
 while true; do
-  if node_prep_fingerprint_matches_file; then
+  if node_prep_host_sentinel_is_ready; then
     if [ ! -f "$WAIT_READY_MARKER" ]; then
       log "node-prep-ready fingerprint matched; marking ready and continuing to re-validate"
       became_ready=1
@@ -41,9 +43,7 @@ while true; do
       if [ "$elapsed" -ge "$WAIT_TIMEOUT_SECONDS" ]; then
         if [ -f "$ready" ]; then
           printf '[wait-node-prep] ERROR: timeout after %ss; sentinel present but fingerprint mismatch\n' "$elapsed" >&2
-          printf '%s\n' '--- want ---' >&2
-          node_prep_compute_fingerprint >&2
-          printf '%s\n' '--- have ---' >&2
+          printf '%s\n' '--- host sentinel ---' >&2
           cat "$ready" >&2
           exit 1
         fi

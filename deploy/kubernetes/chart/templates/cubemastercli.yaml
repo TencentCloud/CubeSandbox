@@ -2,8 +2,8 @@
 {{- $cubemastercli := default dict .Values.cubemastercli -}}
 {{- $images := default dict .Values.images -}}
 {{- $image := default (dict "repository" "ccr.ccs.tencentyun.com/cubesandbox-chart/cubemastercli" "tag" "v0.5.1" "pullPolicy" "Always") (get $images "cubemastercli") -}}
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: {{ include "cube.cloneSetAPIVersion" . }}
+kind: CloneSet
 metadata:
   name: {{ include "cube.cubemastercliName" . }}
   labels:
@@ -11,6 +11,7 @@ metadata:
     app.kubernetes.io/component: cubemastercli
 spec:
   replicas: {{ dig "replicas" 1 $cubemastercli }}
+  {{- include "cube.cloneSetUpdateStrategy" . | nindent 2 }}
   selector:
     matchLabels:
       {{- include "cube.selectorLabels" . | nindent 6 }}

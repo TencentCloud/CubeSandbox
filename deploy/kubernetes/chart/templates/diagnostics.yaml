@@ -31,6 +31,8 @@ data:
     run pods kubectl get pods -n "${NS}" -o wide
     run daemonsets kubectl get daemonsets -n "${NS}" -o wide
     run deployments kubectl get deployments -n "${NS}" -o wide
+    run advanced-daemonsets kubectl get daemonsets.apps.kruise.io -n "${NS}" -o wide
+    run clonesets kubectl get clonesets.apps.kruise.io -n "${NS}" -o wide
     run statefulsets kubectl get statefulsets -n "${NS}" -o wide
     run services kubectl get services -n "${NS}" -o wide
     run endpoints kubectl get endpoints -n "${NS}" -o wide
@@ -50,10 +52,13 @@ data:
           done
     done
 
-    for ds in {{ include "cube.nodeName" . | quote }}; do
-      run "rollout-${ds}" kubectl rollout status "daemonset/${ds}" -n "${NS}" --timeout=30s
+    for ds in {{ include "cube.nodeName" . | quote }} {{ include "cube.nodeInstallerName" . | quote }} {{ include "cube.nodeBootstrapName" . | quote }}; do
+      run "status-${ds}" kubectl get "daemonset.apps.kruise.io/${ds}" -n "${NS}" -o wide
     done
-    run rollout-proxy kubectl rollout status "deployment/{{ include "cube.proxyName" . }}" -n "${NS}" --timeout=30s
+    {{ if .Values.bootstrap.pvmHostKernel.enabled }}
+    run status-{{ include "cube.nodePvmName" . }} kubectl get "daemonset/{{ include "cube.nodePvmName" . }}" -n "${NS}" -o wide
+    {{ end }}
+    run status-proxy kubectl get "cloneset.apps.kruise.io/{{ include "cube.proxyName" . }}" -n "${NS}" -o wide
     run rollout-mysql kubectl rollout status "statefulset/{{ include "cube.mysqlName" . }}" -n "${NS}" --timeout=30s
     run rollout-redis kubectl rollout status "statefulset/{{ include "cube.redisName" . }}" -n "${NS}" --timeout=30s
 

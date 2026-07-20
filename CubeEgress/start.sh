@@ -144,12 +144,18 @@ pre-generate on host: openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:pr
 [[ -f "${PLACEHOLDER_KEY}"  ]] || fatal "placeholder key missing: ${PLACEHOLDER_KEY}"
 
 # -------- 4. Audit dir writable as worker uid --------
-# We chown the directory to uid 8049 here, but we deliberately do NOT
-# create access.jsonl: once the dir is owned by 8049, the in-container
-# root has no DAC_OVERRIDE under --cap-drop=ALL and cannot create files
-# inside it. The cube-proxy worker creates the file itself in
-# init_worker_by_lua (audit.lua: open with O_APPEND|O_CREAT).
-[[ -d "${AUDIT_DIR}" ]] || fatal "audit dir missing: ${AUDIT_DIR} (bind-mount missing?)"
+# Parent /data/log is typically bind-mounted from the host. Create the
+# cube-egress subdirectory if node init has not already done so (K8s path
+# only mkdir's /data/log). We deliberately do NOT create access.jsonl:
+# once the dir is owned by 8049, the in-container root has no DAC_OVERRIDE
+# under --cap-drop=ALL and cannot create files inside it. The cube-proxy
+# worker creates the file itself in init_worker_by_lua (audit.lua: open
+# with O_APPEND|O_CREAT).
+if [[ ! -d "${AUDIT_DIR}" ]]; then
+    log "audit dir missing: ${AUDIT_DIR}; creating"
+    mkdir -p "${AUDIT_DIR}" \
+        || fatal "cannot create audit dir: ${AUDIT_DIR} (is /data/log mounted writable?)"
+fi
 
 audit_uid="$(stat -c '%u' "${AUDIT_DIR}")"
 if [[ "${audit_uid}" != "8049" ]]; then

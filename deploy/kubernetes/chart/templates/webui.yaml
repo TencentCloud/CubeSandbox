@@ -64,8 +64,8 @@ data:
         }
     }
 ---
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: {{ include "cube.cloneSetAPIVersion" . }}
+kind: CloneSet
 metadata:
   name: {{ include "cube.webuiName" . }}
   labels:
@@ -73,6 +73,7 @@ metadata:
     app.kubernetes.io/component: webui
 spec:
   replicas: {{ .Values.webui.replicas }}
+  {{- include "cube.cloneSetUpdateStrategy" . | nindent 2 }}
   selector:
     matchLabels:
       {{- include "cube.selectorLabels" . | nindent 6 }}

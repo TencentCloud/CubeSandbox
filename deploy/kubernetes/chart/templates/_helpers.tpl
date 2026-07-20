@@ -99,6 +99,8 @@ tolerations:
 {{- end -}}
 
 {{- define "cube.pvmPlacement" -}}
+{{- $root := . -}}
+{{- $gateEnabled := eq (include "cube.startupGateEnabled" .) "true" -}}
 {{- with .Values.placement.pvm.nodeSelector }}
 nodeSelector:
   {{- toYaml . | nindent 2 }}
@@ -107,10 +109,48 @@ nodeSelector:
 affinity:
   {{- toYaml . | nindent 2 }}
 {{- end }}
-{{- with .Values.placement.pvm.tolerations }}
+{{- if .Values.placement.pvm.tolerations }}
 tolerations:
-  {{- toYaml . | nindent 2 }}
+  {{- toYaml .Values.placement.pvm.tolerations | nindent 2 }}
+  {{- if $gateEnabled }}
+  - key: {{ $root.Values.bootstrap.pvmHostKernel.startupGate.taintKey }}
+    operator: Exists
+    effect: {{ $root.Values.bootstrap.pvmHostKernel.startupGate.effect }}
+  {{- end }}
+{{- else if $gateEnabled }}
+tolerations:
+  - key: {{ $root.Values.bootstrap.pvmHostKernel.startupGate.taintKey }}
+    operator: Exists
+    effect: {{ $root.Values.bootstrap.pvmHostKernel.startupGate.effect }}
 {{- end }}
+{{- end -}}
+
+{{/* Shared env for cube-node-pvm init + hold (fingerprint + gate identity). */}}
+{{- define "cube.pvmHostCommonEnv" -}}
+- name: NODE_NAME
+  valueFrom:
+    fieldRef:
+      fieldPath: spec.nodeName
+- name: POD_NAMESPACE
+  valueFrom:
+    fieldRef:
+      fieldPath: metadata.namespace
+- name: HOST_ROOT
+  value: /host
+- name: STATE_DIR
+  value: {{ .Values.hostPaths.bootstrapState | quote }}
+- name: PVM_ENABLED
+  value: "1"
+- name: DESIRED_KERNEL_PATTERN
+  value: {{ .Values.bootstrap.pvmHostKernel.desiredKernelPattern | quote }}
+- name: KERNEL_BOOT_ARGS
+  value: {{ .Values.bootstrap.pvmHostKernel.bootArgs | quote }}
+- name: STARTUP_GATE_ENABLED
+  value: {{ ternary "true" "false" .Values.bootstrap.pvmHostKernel.startupGate.enabled | quote }}
+- name: STARTUP_GATE_TAINT_KEY
+  value: {{ .Values.bootstrap.pvmHostKernel.startupGate.taintKey | quote }}
+- name: STARTUP_GATE_TAINT_EFFECT
+  value: {{ .Values.bootstrap.pvmHostKernel.startupGate.effect | quote }}
 {{- end -}}
 
 {{/* Proxy Service FQDN and cluster-DNS enablement helpers. */}}
@@ -121,6 +161,15 @@ tolerations:
 {{- else -}}
 {{- default "default" .Values.serviceAccount.name -}}
 {{- end -}}
+{{- end -}}
+
+{{- define "cube.releaseIdentityHash" -}}
+{{- printf "%s/%s" .Release.Namespace .Release.Name | sha256sum | trunc 10 -}}
+{{- end -}}
+
+{{- define "cube.nodeClusterRoleName" -}}
+{{- $base := include "cube.fullname" . | trunc 41 | trimSuffix "-" -}}
+{{- printf "cube-node-%s-%s" $base (include "cube.releaseIdentityHash" .) -}}
 {{- end -}}
 
 {{- define "cube.masterName" -}}
@@ -375,10 +424,38 @@ change bind without editing multiple places.
 {{- end -}}
 
 {{/*
-cube-node always uses OpenKruise Advanced DaemonSet (hard dependency).
+cube-node / installer / bootstrap always use OpenKruise Advanced DaemonSet
+(hard dependency). Do NOT change this to apps/v1 — that would break InPlace
+and the other compute-plane ADS workloads.
 */}}
 {{- define "cube.nodeDaemonSetAPIVersion" -}}
 apps.kruise.io/v1beta1
+{{- end -}}
+
+{{/*
+cube-node-pvm uses a native apps/v1 DaemonSet so Pod creation does not depend
+on kruise-manager (see docs/PVM-NATIVE-DS-MIGRATION-PLAN.md).
+*/}}
+{{- define "cube.nodePvmDaemonSetAPIVersion" -}}
+apps/v1
+{{- end -}}
+
+{{- define "cube.cloneSetAPIVersion" -}}
+apps.kruise.io/v1alpha1
+{{- end -}}
+
+{{- define "cube.cloneSetUpdateStrategy" -}}
+updateStrategy:
+  {{- toYaml .Values.controlPlane.cloneSetUpdateStrategy | nindent 2 }}
+{{- end -}}
+
+{{- define "cube.startupGateEnabled" -}}
+{{- if and .Values.cubeNode.enabled .Values.bootstrap.pvmHostKernel.enabled .Values.bootstrap.pvmHostKernel.startupGate.enabled -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{- define "cube.pvmPriorityClassName" -}}
+{{- $base := include "cube.fullname" . | trunc 42 | trimSuffix "-" -}}
+{{- default (printf "cube-pvm-%s-%s" $base (include "cube.releaseIdentityHash" .)) .Values.bootstrap.pvmHostKernel.startupGate.priorityClassName -}}
 {{- end -}}
 
 {{/*

@@ -1,8 +1,9 @@
 {{- if and .Values.cubeNode.enabled .Values.bootstrap.pvmHostKernel.enabled }}
-# PVM host-kernel DaemonSet. Schedules only via placement.pvm (allow-pvm-bootstrap).
-# Non-PVM compute nodes never pull images.pvmHostBootstrap. Reboot-capable;
-# invalidates node-prep / pvm-host-ready sentinels before mutate.
-apiVersion: apps/v1
+# PVM host-kernel DaemonSet (native apps/v1). Schedules only via placement.pvm
+# (allow-pvm-bootstrap). Non-PVM compute nodes never pull images.pvmHostBootstrap.
+# Reboot-capable; invalidates node-prep / pvm-host-ready sentinels before mutate.
+# Pod creation uses kube-controller-manager — not kruise-manager.
+apiVersion: {{ include "cube.nodePvmDaemonSetAPIVersion" . }}
 kind: DaemonSet
 metadata:
   name: {{ include "cube.nodePvmName" . }}
@@ -35,6 +36,7 @@ spec:
     spec:
       serviceAccountName: {{ include "cube.nodeServiceAccountName" . }}
       automountServiceAccountToken: true
+      priorityClassName: {{ include "cube.pvmPriorityClassName" . }}
       hostPID: true
       dnsPolicy: ClusterFirst
       terminationGracePeriodSeconds: {{ .Values.cubeNodePvm.terminationGracePeriodSeconds }}
@@ -51,24 +53,9 @@ spec:
             privileged: {{ .Values.security.privileged }}
           env:
             {{- include "cube.timezoneEnv" . | nindent 12 }}
-            - name: NODE_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
-            - name: POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-            - name: HOST_ROOT
-              value: /host
-            - name: STATE_DIR
-              value: {{ .Values.hostPaths.bootstrapState | quote }}
-            - name: PVM_ENABLED
-              value: "1"
-            - name: DESIRED_KERNEL_PATTERN
-              value: {{ .Values.bootstrap.pvmHostKernel.desiredKernelPattern | quote }}
-            - name: KERNEL_BOOT_ARGS
-              value: {{ .Values.bootstrap.pvmHostKernel.bootArgs | quote }}
+            {{- include "cube.pvmHostCommonEnv" . | nindent 12 }}
+            - name: CUBE_RELEASE
+              value: {{ .Release.Name | quote }}
             - name: PVM_KERNEL_RPM_PATH
               value: {{ .Values.bootstrap.pvmHostKernel.package.rpmPath | quote }}
             - name: PVM_KERNEL_DEB_PATH
@@ -89,18 +76,27 @@ spec:
               value: {{ .Values.bootstrap.pvmHostKernel.reboot.leaseTTLSeconds | quote }}
             - name: REBOOT_MAX_COUNT
               value: {{ .Values.bootstrap.pvmHostKernel.reboot.maxCount | quote }}
+            - name: STARTUP_GATE_DRAIN_TIMEOUT_SECONDS
+              value: {{ .Values.bootstrap.pvmHostKernel.startupGate.drainTimeoutSeconds | quote }}
+            - name: STARTUP_GATE_CLEAR_MAINTENANCE
+              value: "true"
           volumeMounts:
             {{- include "cube.bootstrapHostVolumeMounts" . | nindent 12 }}
       containers:
         - name: hold-pvm-ready
-          image: {{ include "cube.cubeImage" (dict "image" .Values.images.waitNodePrep "context" $) | quote }}
-          imagePullPolicy: {{ .Values.images.waitNodePrep.pullPolicy }}
-          command: ["/usr/bin/tini", "-s", "--", "sleep", "infinity"]
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.pvmHostBootstrap "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.pvmHostBootstrap.pullPolicy }}
+          command: ["/usr/bin/tini", "-s", "--", "/scripts/pvm-startup-gate-reconcile.sh"]
           env:
             {{- include "cube.timezoneEnv" . | nindent 12 }}
+            {{- include "cube.pvmHostCommonEnv" . | nindent 12 }}
+            # Hold must never clear value=maintenance; only the new init may.
+            - name: STARTUP_GATE_CLEAR_MAINTENANCE
+              value: "false"
+            - name: STARTUP_GATE_RECONCILE_INTERVAL_SECONDS
+              value: {{ .Values.bootstrap.pvmHostKernel.startupGate.reconcileIntervalSeconds | quote }}
           volumeMounts:
-            - name: bootstrap-state
-              mountPath: {{ .Values.hostPaths.bootstrapState }}
+            {{- include "cube.bootstrapHostVolumeMounts" . | nindent 12 }}
           {{- with .Values.cubeNodePvm.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

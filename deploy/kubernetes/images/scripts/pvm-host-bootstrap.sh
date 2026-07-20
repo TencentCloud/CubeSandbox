@@ -7,6 +7,8 @@ fail() { printf '[pvm-host-bootstrap] ERROR: %s\n' "$*" >&2; exit 1; }
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
 . "${SCRIPT_DIR}/node-prep-lib.sh"
+# shellcheck disable=SC1091
+. "${SCRIPT_DIR}/pvm-startup-gate-lib.sh"
 
 HOST_ROOT="${HOST_ROOT:-/host}"
 STATE_DIR="${STATE_DIR:-/var/lib/cube-node-bootstrap}"
@@ -205,18 +207,24 @@ log "current kernel: ${current_kernel}"
 if node_prep_kernel_ready; then
   log "PVM kernel check passed (fast path; no lease)"
   write_pvm_host_ready || fail "failed to write fingerprint pvm-host-ready"
+  pvm_host_fingerprint_matches_file || fail "pvm-host-ready verification failed"
+  clear_startup_gate_taint
   release_lease
   exit 0
 fi
 
 if printf '%s' "$current_kernel" | grep -q "$DESIRED_KERNEL_PATTERN"; then
   log "PVM kernel is running but required boot args are missing: $(node_prep_missing_boot_args)"
+  ensure_startup_gate_taint
+  drain_startup_gate_dependents
   invalidate_pvm_gate_sentinels
   acquire_lease
   configure_bootloader
   request_reboot_or_fail boot-args-reboot-count "PVM kernel boot args configured but host is not running with required boot args yet"
 fi
 
+ensure_startup_gate_taint
+drain_startup_gate_dependents
 invalidate_pvm_gate_sentinels
 acquire_lease
 install_kernel

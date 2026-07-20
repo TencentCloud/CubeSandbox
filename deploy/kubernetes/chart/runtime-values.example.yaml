@@ -73,6 +73,15 @@ redis:
 #   persistence:
 #     hostPath: /data/redis
 
+# Optional: cubevs/sandbox CIDR (Chart default is 172.16.0.0/18).
+# Override when it collides with your VPC; keep tproxyOnIP as the CIDR gateway.
+# cubeNode:
+#   network:
+#     cidr: "172.16.0.0/18"
+# cubeEgress:
+#   network:
+#     tproxyOnIP: "172.16.0.1"
+
 # Optional: mirror Cube-owned images into a private registry
 # global:
 #   imageRegistry: my-mirror.example.com/cubesandbox

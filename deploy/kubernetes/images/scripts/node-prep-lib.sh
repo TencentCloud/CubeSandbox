@@ -227,6 +227,42 @@ node_prep_fingerprint_matches_file() {
   return 0
 }
 
+# Big Pod validation deliberately derives all mutable policy from the hostPath
+# sentinel. This keeps Helm values out of the frozen cube-node Pod template.
+node_prep_host_sentinel_is_ready() {
+  ready="$(node_prep_ready_path)"
+  [ -f "$ready" ] || return 1
+  pvm_is_mutating && return 1
+
+  version="$(sed -n 's/^version=//p' "$ready")"
+  mode="$(sed -n 's/^mode=//p' "$ready")"
+  kernel="$(sed -n 's/^kernel=//p' "$ready")"
+  boot_args="$(sed -n 's/^boot_args=//p' "$ready")"
+  prep_generation="$(sed -n 's/^prep_generation=//p' "$ready")"
+  pvm="$(sed -n 's/^pvm_enabled=//p' "$ready")"
+  ninit="$(sed -n 's/^node_init_enabled=//p' "$ready")"
+
+  [ "$version" = "1" ] || return 1
+  case "$mode" in full|noop) ;; *) return 1 ;; esac
+  [ -n "$kernel" ] && [ "$kernel" = "$(uname -r 2>/dev/null || true)" ] || return 1
+  [ -n "$prep_generation" ] || return 1
+  case "$pvm" in 0|1) ;; *) return 1 ;; esac
+  case "$ninit" in 0|1) ;; *) return 1 ;; esac
+
+  if [ "$pvm" = "1" ]; then
+    pvm_ready="$(pvm_host_ready_path)"
+    [ -f "$pvm_ready" ] || return 1
+    desired_pattern="$(sed -n 's/^desired_pattern=//p' "$pvm_ready")"
+    [ -n "$desired_pattern" ] || return 1
+    PVM_ENABLED=1
+    KERNEL_BOOT_ARGS="$boot_args"
+    DESIRED_KERNEL_PATTERN="$desired_pattern"
+    export PVM_ENABLED KERNEL_BOOT_ARGS DESIRED_KERNEL_PATTERN
+    pvm_host_fingerprint_matches_file || return 1
+  fi
+  return 0
+}
+
 invalidate_node_prep_ready() {
   ready="$(node_prep_ready_path)"
   if [ -e "$ready" ] || [ -e "${ready}.tmp" ]; then

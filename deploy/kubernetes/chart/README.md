@@ -7,7 +7,7 @@ Current compute-plane shape (per compute node):
 - **`cube-node` (Big Pod)**: OpenKruise Advanced DaemonSet (`InPlaceIfPossible`; hard dependency); `wait-node-prep` sidecar + `cubelet` / `network-agent` + optional egress + six frozen `cube-slot-*` pause placeholders; **no initContainers**; Pod network (`hostNetwork=false`).
 - **`cube-node-installer`**: DaemonSet that stages shim / kernel / guest into the host toolbox tree.
 - **`cube-node-bootstrap`**: DaemonSet that runs `wait-pvm-host` + `cube-node-init`, then writes `node-prep-ready`.
-- **`cube-node-pvm`**: DaemonSet scheduled only via `placement.pvm` (`allow-pvm-bootstrap`); installs PVM host kernel and writes fingerprint `pvm-host-ready`. Non-PVM compute nodes never pull this image.
+- **`cube-node-pvm`**: native `apps/v1` DaemonSet scheduled only via `placement.pvm` (`allow-pvm-bootstrap`); installs PVM host kernel and writes fingerprint `pvm-host-ready`. Non-PVM compute nodes never pull this image.
 
 Control-plane vs compute scheduling uses `placement.controlPlane` and `placement.compute`. PVM host install uses `placement.pvm`. MySQL schema migration is embedded in CubeMaster. Control-plane and runtime components use separate images.
 
@@ -58,7 +58,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for component layering, the f
 ## Node selection
 
 The chart separates placement into dedicated control-plane nodes and compute
-nodes. Control-plane Deployments, StatefulSets, and `cube-proxy` use
+nodes. Control-plane CloneSets, StatefulSets, and `cube-proxy` use
 `placement.controlPlane`; `cube-node` / installer / bootstrap use
 `placement.compute`. PVM host install (`cube-node-pvm`) uses `placement.pvm`
 and requires `cube.tencent.com/allow-pvm-bootstrap=true` so non-PVM compute
@@ -95,7 +95,6 @@ storageClass:
 placement:
   controlPlane:
     nodeSelector:
-      cube.tencent.com/role: control
       cube.tencent.com/cube-control: "true"
     tolerations:
       - key: cube.tencent.com/control
@@ -105,7 +104,6 @@ placement:
 
   compute:
     nodeSelector:
-      cube.tencent.com/role: compute
       cube.tencent.com/cube-node: "true"
     tolerations:
       - key: cube.tencent.com/compute
@@ -115,7 +113,6 @@ placement:
 
   pvm:
     nodeSelector:
-      cube.tencent.com/role: compute
       cube.tencent.com/cube-node: "true"
       cube.tencent.com/allow-pvm-bootstrap: "true"
     tolerations:
@@ -128,19 +125,22 @@ placement:
 Recommended labels:
 
 ```bash
-kubectl label node <control-node>   cube.tencent.com/role=control   cube.tencent.com/cube-control=true   --overwrite
+kubectl label node <control-node>   cube.tencent.com/cube-control=true   --overwrite
 
 kubectl taint node <control-node>   cube.tencent.com/control=true:NoSchedule   --overwrite
 
-kubectl label node <compute-node>   cube.tencent.com/role=compute   cube.tencent.com/cube-node=true   --overwrite
+kubectl label node <compute-node>   cube.tencent.com/cube-node=true   --overwrite
 
 kubectl taint node <compute-node>   cube.tencent.com/compute=true:NoSchedule   --overwrite
 
 # Only on nodes that should install the PVM host kernel:
 kubectl label node <pvm-compute-node>   cube.tencent.com/allow-pvm-bootstrap=true   --overwrite
+# The Helm preflight Hook writes pvm-not-ready=true:NoSchedule on
+# fingerprint-unready pvm nodes. For intentional kernel/bootArgs mutate,
+# see docs/UPGRADE.md (value=maintenance).
 ```
 
-The chart does not label or taint nodes. The platform operator must prepare node labels and taints before installation.
+The chart does not label nodes or apply role taints; prepare those before install. The PVM startup-gate taint is written by the preflight Hook when the node is not fingerprint-ready.
 All chart-managed Cube containers and init containers receive `TZ` from
 `global.timezone`.
 
@@ -157,7 +157,7 @@ can set it to `false`.
 
 - runtime tools are available through `/usr/local/bin/containerd-shim-cube-rs`, `/usr/local/bin/cube-runtime`, `/usr/local/bin/cubecli`, and `/usr/local/bin/cubevsmapdump`;
 - `cubeNode.network.autoDetectEthName=true` auto-detects the primary host NIC and patches Cubelet `eth_name`;
-- `cubeNode.network.cidr` can patch Cubelet cubevs CIDR when the packaged default conflicts with the host network.
+- `cubeNode.network.cidr` patches Cubelet cubevs/sandbox CIDR (default `172.16.0.0/18`, chosen to avoid common cluster Service CIDR `192.168.0.0/16` while keeping a /18 pool). A Helm `pre-install`/`pre-upgrade` Hook fails fast when this range overlaps the cluster Service CIDR or existing ClusterIPs; set `cubeNode.network.cidrSkipConflictCheck=true` only if you accept that risk.
 
 ### Guest kernel (bm vs PVM)
 
@@ -292,7 +292,7 @@ The chart does not deliver a separate DB migration Job or image. CubeMaster owns
 ## cubemastercli operational CLI
 
 `cubemastercli.enabled=true` installs a chart-managed
-`<release>-cubemastercli` Deployment. The image contains the real
+`<release>-cubemastercli` CloneSet. The image contains the real
 `CubeMaster/bin/cubemastercli` binary only; it does not provide a wrapper or
 fake `ctl` command.
 
@@ -302,10 +302,10 @@ environment variables as flag defaults, commands should pass those values to
 the real binary:
 
 ```bash
-kubectl exec -n cube-system deploy/cube-cubemastercli -- cubemastercli --help
-kubectl exec -n cube-system deploy/cube-cubemastercli -- \
+kubectl exec -n cube-system cloneset/cube-cubemastercli -- cubemastercli --help
+kubectl exec -n cube-system cloneset/cube-cubemastercli -- \
   sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
-kubectl exec -n cube-system deploy/cube-cubemastercli -- \
+kubectl exec -n cube-system cloneset/cube-cubemastercli -- \
   sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" template list'
 ```
 
@@ -315,7 +315,7 @@ carry this operational entry point.
 
 ## Cube Proxy Node
 
-`cube-proxy` is a Cube data-plane component. It is enabled by default to match one-click behavior and is installed, upgraded, and uninstalled with the Cube release as a control-plane Deployment.
+`cube-proxy` is a Cube data-plane component. It is enabled by default to match one-click behavior and is installed, upgraded, and uninstalled with the Cube release as a control-plane CloneSet.
 
 The default TLS mode is `selfSigned`, matching the one-click mkcert-style test experience. Production environments should provide a real TLS certificate for CubeProxy. External clients reach `cubeProxy.domain` / `*.domain` through the chart Ingress (SSL passthrough; TLS still terminates in CubeProxy). The image reuses `CubeProxy/Dockerfile`; the chart does not override nginx with a Kubernetes-only configuration.
 
@@ -460,7 +460,7 @@ kubectl get configmap -n cube-system cube-diagnostics -o jsonpath='{.data.cube-d
 sh /tmp/cube-diag-k8s.sh cube-system cube
 ```
 
-The script collects Pods, DaemonSets, Deployments, Services, Endpoints, Events, Helm values/manifests, Pod descriptions, and recent logs for Cube components into a timestamped directory.
+The script collects Pods, Advanced DaemonSets, CloneSets, StatefulSets, Services, Endpoints, Events, Helm values/manifests, Pod descriptions, and recent logs for Cube components into a timestamped directory.
 
 ## CubeEgress
 
@@ -503,15 +503,16 @@ helm template cube ./deploy/kubernetes/chart -n cube-system > /tmp/cube-rendered
 ```bash
 kubectl get pods -n cube-system -o wide
 kubectl get ads -n cube-system cube-node
-kubectl get deploy -n cube-system cube-proxy
+kubectl get daemonset -n cube-system cube-node-pvm
+kubectl get cloneset -n cube-system cube-proxy
 kubectl get sts -n cube-system cube-mysql cube-redis
 kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node-pvm -c pvm-host-bootstrap --tail=100
 kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node-bootstrap -c wait-pvm-host --tail=100
 kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node-bootstrap -c cube-node-init --tail=100
 kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node -c cubelet --tail=100
 kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node -c wait-node-prep --tail=50
-kubectl logs -n cube-system deploy/cube-master -c cube-master --tail=100
-kubectl exec -n cube-system deploy/cube-cubemastercli -- \
+kubectl logs -n cube-system cloneset/cube-master -c cube-master --tail=100
+kubectl exec -n cube-system cloneset/cube-cubemastercli -- \
   sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
 helm test cube -n cube-system --timeout 20m
 ```

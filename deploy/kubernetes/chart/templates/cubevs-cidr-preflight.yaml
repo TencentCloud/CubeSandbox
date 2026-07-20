@@ -1,0 +1,155 @@
+{{- if .Values.cubeNode.enabled }}
+{{- $hookAnnotations := dict
+  "helm.sh/hook" "pre-install,pre-upgrade"
+  "helm.sh/hook-weight" "-110"
+  "helm.sh/hook-delete-policy" "before-hook-creation,hook-succeeded,hook-failed"
+-}}
+{{- $preflightBase := include "cube.fullname" . | trunc 40 | trimSuffix "-" -}}
+{{- $preflightClusterName := printf "cube-cidr-%s-%s" $preflightBase (include "cube.releaseIdentityHash" .) -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "cube.fullname" . }}-cubevs-cidr-preflight
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cubevs-cidr-preflight
+  annotations:
+    {{- toYaml $hookAnnotations | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $preflightClusterName }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cubevs-cidr-preflight
+  annotations:
+    {{- toYaml $hookAnnotations | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $preflightClusterName }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cubevs-cidr-preflight
+  annotations:
+    {{- toYaml $hookAnnotations | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $preflightClusterName }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cube.fullname" . }}-cubevs-cidr-preflight
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $preflightClusterName }}
+  namespace: kube-system
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cubevs-cidr-preflight
+  annotations:
+    {{- toYaml $hookAnnotations | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $preflightClusterName }}
+  namespace: kube-system
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cubevs-cidr-preflight
+  annotations:
+    {{- toYaml $hookAnnotations | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $preflightClusterName }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cube.fullname" . }}-cubevs-cidr-preflight
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cube.fullname" . }}-cubevs-cidr-preflight
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cubevs-cidr-preflight
+  annotations:
+    {{- toYaml $hookAnnotations | nindent 4 }}
+data:
+  cubevs-cidr-preflight.sh: |
+{{ .Files.Get "files/cubevs-cidr-preflight.sh" | indent 4 }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "cube.fullname" . }}-cubevs-cidr-preflight
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cubevs-cidr-preflight
+  annotations:
+    {{- toYaml $hookAnnotations | nindent 4 }}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 120
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: cubevs-cidr-preflight
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "cube.fullname" . }}-cubevs-cidr-preflight
+      {{- with .Values.placement.controlPlane.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      tolerations:
+        {{- with .Values.placement.controlPlane.tolerations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        - key: {{ .Values.bootstrap.pvmHostKernel.startupGate.taintKey }}
+          operator: Exists
+          effect: {{ .Values.bootstrap.pvmHostKernel.startupGate.effect }}
+      containers:
+        - name: preflight
+          image: {{ include "cube.image" .Values.images.kubectl | quote }}
+          imagePullPolicy: {{ .Values.images.kubectl.pullPolicy }}
+          command: ["/bin/bash", "/scripts/cubevs-cidr-preflight.sh"]
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: CUBE_SANDBOX_NETWORK_CIDR
+              value: {{ .Values.cubeNode.network.cidr | quote }}
+            - name: CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK
+              value: {{ ternary "1" "0" .Values.cubeNode.network.cidrSkipConflictCheck | quote }}
+            - name: PACKAGED_CUBELET_CIDR
+              value: "192.168.0.0/18"
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+      volumes:
+        - name: scripts
+          configMap:
+            name: {{ include "cube.fullname" . }}-cubevs-cidr-preflight
+            defaultMode: 0755
+{{- end }}

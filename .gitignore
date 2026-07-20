@@ -58,3 +58,10 @@ __pycache__
 /tests/e2e/sdk_compat/.pytest_cache/
 
 web/tsconfig.tsbuildinfo
+
+test-openkruise/
+
+# Local Helm runtime secrets (keep runtime-values.example.yaml tracked)
+**/runtime-values.yaml
+!**/runtime-values.example.yaml
+

@@ -19,6 +19,24 @@
 {{- if hasKey $computeSelector "cube.tencent.com/allow-pvm-bootstrap" }}
 {{- fail "placement.compute.nodeSelector must not include cube.tencent.com/allow-pvm-bootstrap; that label belongs only in placement.pvm.nodeSelector" }}
 {{- end }}
+{{- $gate := .Values.bootstrap.pvmHostKernel.startupGate -}}
+{{- if $gate.enabled }}
+{{- if ne ($gate.effect | default "") "NoSchedule" }}
+{{- fail "bootstrap.pvmHostKernel.startupGate.effect must be NoSchedule" }}
+{{- end }}
+{{- if ne ($gate.manager | default "") "script" }}
+{{- fail "bootstrap.pvmHostKernel.startupGate.manager must be script" }}
+{{- end }}
+{{- if ne ($gate.taintKey | default "") "cube.tencent.com/pvm-not-ready" }}
+{{- fail "bootstrap.pvmHostKernel.startupGate.taintKey is a fixed cluster-wide contract and must be cube.tencent.com/pvm-not-ready" }}
+{{- end }}
+{{- if not $gate.requirePreflight }}
+{{- fail "startupGate.enabled=true requires startupGate.requirePreflight=true; the Helm hook closes the first-install scheduling window" }}
+{{- end }}
+{{- if and (not $gate.priorityClassCreate) (not ($gate.priorityClassName | default "")) }}
+{{- fail "startupGate.priorityClassCreate=false requires startupGate.priorityClassName to reference an existing PriorityClass" }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- if and (eq (.Values.cubeNode.nodeIDSource | default "specNodeName") "static") (not .Values.cubeNode.staticNodeID) }}
 {{- fail "cubeNode.nodeIDSource=static requires cubeNode.staticNodeID" }}
@@ -46,6 +64,10 @@
 {{- end }}
 {{- if hasKey .Values.cubeNode "useAdvancedDaemonSet" }}
 {{- fail "cubeNode.useAdvancedDaemonSet was removed; cube-node always uses OpenKruise Advanced DaemonSet (hard dependency). Remove cubeNode.useAdvancedDaemonSet from your values and install OpenKruise." }}
+{{- end }}
+{{- $pvmRolling := (((.Values.cubeNodePvm).updateStrategy).rollingUpdate) | default dict -}}
+{{- if hasKey $pvmRolling "rollingUpdateType" }}
+{{- fail "cubeNodePvm.updateStrategy.rollingUpdate.rollingUpdateType was removed; cube-node-pvm is a native apps/v1 DaemonSet (not Advanced DaemonSet). Remove rollingUpdateType from your values." }}
 {{- end }}
 {{- $controlPlaneNeedsMysql := and .Values.controlPlane.enabled (or .Values.controlPlane.master.enabled .Values.controlPlane.api.enabled) -}}
 {{- if and $controlPlaneNeedsMysql (not (eq (include "cube.mysqlBuiltinEnabled" .) "true")) (not .Values.mysql.host) }}

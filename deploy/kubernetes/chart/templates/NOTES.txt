@@ -23,7 +23,7 @@ Control plane:
   WebUI Service:      {{ include "cube.webuiName" . }}:{{ .Values.webui.service.port }}
 {{- end }}
 {{- if eq (include "cube.cubemastercliEnabled" .) "true" }}
-  cubemastercli Deployment: {{ include "cube.cubemastercliName" . }}
+  cubemastercli CloneSet: {{ include "cube.cubemastercliName" . }}
 {{- end }}
 {{- else if .Values.externalControlPlane.enabled }}
 External control plane:
@@ -32,7 +32,7 @@ External control plane:
   CubeAPI Endpoint:    {{ .Values.externalControlPlane.apiEndpoint }}
 {{- end }}
 {{- if eq (include "cube.cubemastercliEnabled" .) "true" }}
-  cubemastercli Deployment: {{ include "cube.cubemastercliName" . }}
+  cubemastercli CloneSet: {{ include "cube.cubemastercliName" . }}
 {{- end }}
 {{- end }}
 {{- if eq (include "cube.configureClusterDNS" .) "true" }}
@@ -46,7 +46,7 @@ Cube Node DaemonSet (OpenKruise Advanced / InPlaceIfPossible):
 {{- end }}
 {{- if eq (include "cube.proxyEnabled" .) "true" }}
 
-Cube Proxy Deployment:
+Cube Proxy CloneSet:
   {{ include "cube.proxyName" . }}
   Service ({{ .Values.cubeProxy.service.type | default "ClusterIP" }}): {{ include "cube.proxyServiceFQDN" . }}:{{ .Values.cubeProxy.ports.http.containerPort }}/{{ .Values.cubeProxy.ports.https.containerPort }}
 {{- if .Values.cubeProxy.ingress.enabled }}
@@ -60,13 +60,13 @@ Cube Proxy Deployment:
 Useful commands:
   kubectl get pods -n {{ .Release.Namespace }} -o wide
   kubectl get ads -n {{ .Release.Namespace }} {{ include "cube.nodeName" . }}
-  kubectl get ds -n {{ .Release.Namespace }} {{ include "cube.nodeBootstrapName" . }}
+  kubectl get ads -n {{ .Release.Namespace }} {{ include "cube.nodeBootstrapName" . }}
+  kubectl get ads -n {{ .Release.Namespace }} {{ include "cube.nodeInstallerName" . }}
 {{- if .Values.bootstrap.pvmHostKernel.enabled }}
-  kubectl get ds -n {{ .Release.Namespace }} {{ include "cube.nodePvmName" . }}
+  kubectl get daemonset -n {{ .Release.Namespace }} {{ include "cube.nodePvmName" . }}
 {{- end }}
-  kubectl get ds -n {{ .Release.Namespace }} {{ include "cube.nodeInstallerName" . }}
 {{- if eq (include "cube.proxyEnabled" .) "true" }}
-  kubectl get deploy -n {{ .Release.Namespace }} {{ include "cube.proxyName" . }}
+  kubectl get cloneset -n {{ .Release.Namespace }} {{ include "cube.proxyName" . }}
 {{- end }}
 {{- if .Values.bootstrap.pvmHostKernel.enabled }}
   kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node-pvm -c pvm-host-bootstrap --tail=100
@@ -76,8 +76,8 @@ Useful commands:
   kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node -c wait-node-prep --tail=100
   kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node -c cubelet --tail=100
 {{- if eq (include "cube.cubemastercliEnabled" .) "true" }}
-  kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.cubemastercliName" . }} -- cubemastercli --help
-  kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.cubemastercliName" . }} -- sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
+  kubectl exec -n {{ .Release.Namespace }} cloneset/{{ include "cube.cubemastercliName" . }} -- cubemastercli --help
+  kubectl exec -n {{ .Release.Namespace }} cloneset/{{ include "cube.cubemastercliName" . }} -- sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
 {{- end }}
   helm test {{ .Release.Name }} -n {{ .Release.Namespace }} --timeout 20m
 {{- if .Values.diagnostics.enabled }}
@@ -88,3 +88,10 @@ Useful commands:
 WARNING: If bootstrap.pvmHostKernel.enabled=true, this release may install a host kernel and reboot nodes labeled allow-pvm-bootstrap (via cube-node-pvm).
 Helm rollback does not roll back host kernel/GRUB changes.
 Bump images.waitNodePrep image-only for InPlace; changing wait env/mounts forces Big Pod recreate.
+{{- if .Values.cubeNode.enabled }}
+Cubevs/sandbox CIDR is {{ .Values.cubeNode.network.cidr | default "packaged Cubelet default" }} (cubeNode.network.cidr). A pre-install/pre-upgrade Hook fails if it overlaps the cluster Service CIDR or existing ClusterIPs; override the CIDR (and cubeEgress.network.tproxyOnIP) or set cubeNode.network.cidrSkipConflictCheck=true only if you accept routing risk.
+{{- end }}
+{{- if eq (include "cube.startupGateEnabled" .) "true" }}
+PVM startup gate is enabled. CNI, kube-proxy, and kruise-daemon MUST tolerate NoSchedule with operator Exists (or explicitly tolerate {{ .Values.bootstrap.pvmHostKernel.startupGate.taintKey }}). Chart preflight requires kruise-controller-manager Ready (and kruise-daemon Ready + gate toleration). Optional: configure manager Exists for rebuild resilience under the gate.
+The pre-install/pre-upgrade preflight Hook writes {{ .Values.bootstrap.pvmHostKernel.startupGate.taintKey }}=true:{{ .Values.bootstrap.pvmHostKernel.startupGate.effect }} on fingerprint-unready placement.pvm nodes, then probes CNI. Fingerprint-ready upgrades leave the node untainted. For intentional kernel/bootArgs mutate, use value=maintenance (see UPGRADE.md).
+{{- end }}
