@@ -14,11 +14,35 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
+	"strings"
 
 	"github.com/pressly/goose/v3"
 	"github.com/pressly/goose/v3/database"
 	"github.com/pressly/goose/v3/lock"
 )
+
+// autoMigrationEnv gates the schema migration performed at CubeMaster
+// startup. A runtime database account with no DDL grant cannot run the
+// migrator at all — not even the fingerprint layer's CREATE TABLE — so
+// such a deployment sets this to a falsey value and applies the schema
+// out-of-band with a privileged account.
+const autoMigrationEnv = "CUBEMASTER_AUTO_MIGRATION"
+
+// AutoMigrationEnabled reports whether CubeMaster should run schema
+// migrations at startup. It defaults to true and returns false only for
+// an explicit falsey value (false/0/no/off, case-insensitive). We do not
+// use strconv.ParseBool because it rejects "no"/"off", and any unset,
+// empty, or unrecognised value must keep the safe default (migrate) so a
+// typo can never silently skip migration.
+func AutoMigrationEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(autoMigrationEnv))) {
+	case "false", "0", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
 
 //go:embed migrations/mysql/*.sql
 var mysqlMigrations embed.FS

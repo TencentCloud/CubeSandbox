@@ -21,6 +21,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
 	_ "github.com/tencentcloud/CubeSandbox/CubeDB/dao/driver/mysql"    // register mysql driver
 	_ "github.com/tencentcloud/CubeSandbox/CubeDB/dao/driver/postgres" // register postgres driver
+	"github.com/tencentcloud/CubeSandbox/CubeDB/migrate"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"
@@ -237,6 +238,16 @@ func initDatabaseSchema(ctx context.Context, cfg *config.Config) error {
 	}
 	if _, err := dao.Open(ctx, daoCfg); err != nil {
 		return fmt.Errorf("dao open: %w", err)
+	}
+	// A runtime account with no DDL permission cannot run the migrator (not even
+	// the fingerprint CREATE TABLE), so let such a deployment skip migration and
+	// apply schema out-of-band with a privileged account. Default is enabled,
+	// so unset/typo never disables migration.
+	if !migrate.AutoMigrationEnabled() {
+		CubeLog.WithContext(ctx).Warnf(
+			"CUBEMASTER_AUTO_MIGRATION=false: skipping schema migration; DDL must be " +
+				"applied out-of-band by a privileged account")
+		return nil
 	}
 	if err := dao.Migrate(ctx); err != nil {
 		return fmt.Errorf("dao migrate: %w", err)
