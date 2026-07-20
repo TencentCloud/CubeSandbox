@@ -511,6 +511,7 @@ run_cubelet() {
     /data/log/CubeVmm \
     /data/cube-shim/disks \
     /data/snapshot_pack/disks \
+    /data/cubebox_os_image \
     /data/cubelet/state \
     "${TOOLBOX_ROOT}/cube-snapshot" \
     "${TOOLBOX_ROOT}/cube-vs/network"

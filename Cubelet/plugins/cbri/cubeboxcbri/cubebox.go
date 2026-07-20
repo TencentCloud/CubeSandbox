@@ -63,8 +63,11 @@ func defaultConfig() *cubeboxInstancePluginConfig {
 	cfg := &cubeboxInstancePluginConfig{
 		BasePath: "/usr/local/services/cubetoolbox",
 	}
-	cfg.ImageBasePath = filepath.Join(cfg.BasePath, "cubebox_os_image")
-	cfg.KernelBasePath = filepath.Join(cfg.BasePath, "cubebox_os_image")
+	// Keep in sync with images plugin default (pmem.DefaultOsImageParentDir).
+	// Overriding os_image_parent_dir also requires updating image_base_path and
+	// kernel_base_path below so write/read paths stay aligned.
+	cfg.ImageBasePath = pmem.DefaultCubeboxOsImageDir()
+	cfg.KernelBasePath = pmem.DefaultCubeboxOsImageDir()
 	cfg.SnapShotBasePath = filepath.Join(cfg.BasePath, "cube-snapshot")
 	cfg.instanceType = cubebox.InstanceType_cubebox.String()
 	return cfg

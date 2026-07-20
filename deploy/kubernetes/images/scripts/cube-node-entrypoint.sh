@@ -217,6 +217,7 @@ mkdir -p \
   /data/log/CubeVmm \
   /data/cube-shim/disks \
   /data/snapshot_pack/disks \
+  /data/cubebox_os_image \
   /data/cubelet/state
 
 # Keep shim bundle metadata on the dataCubelet hostPath across Pod rebuilds.

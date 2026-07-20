@@ -1056,6 +1056,7 @@ select_installed_kernel_vmlinux
 mkdir -p \
   "${INSTALL_PREFIX}/cube-vs/network" \
   "${INSTALL_PREFIX}/cube-snapshot" \
+  /data/cubebox_os_image \
   /data/log/Cubelet \
   /data/log/CubeShim \
   /data/log/CubeVmm \

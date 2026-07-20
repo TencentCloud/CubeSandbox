@@ -43,6 +43,10 @@ type Config struct {
 	DiscardUnpackedLayers bool `toml:"discard_unpacked_layers"`
 
 	CubeToolBaseDir string `toml:"cubetool_base_dir"`
+	// OsImageParentDir is the parent of <instanceType>_os_image (default /data).
+	// Large template rootfs artifacts are stored there so they do not fill the
+	// system disk under cubetoolbox.
+	OsImageParentDir string `toml:"os_image_parent_dir"`
 }
 
 type local struct {
@@ -79,6 +83,7 @@ func init() {
 			if config.CubeToolBaseDir == "" {
 				config.CubeToolBaseDir = "/usr/local/services/cubetoolbox"
 			}
+			config.OsImageParentDir = pmem.ResolveOsImageParentDir(config.OsImageParentDir)
 			t, err := time.ParseDuration(config.PullDeadlineStr)
 			if err != nil || t == 0 {
 				config.pullDeadline = defaultPullDeadline
@@ -122,7 +127,9 @@ func init() {
 			ois := oldimagestore.NewStore(client, config.RuntimeType, db, oldimagestore.WithUidFileDir(uidFileDir))
 			_ = ois
 
-			pmem.Init(config.CubeToolBaseDir)
+			if err := pmem.InitWithPaths(config.CubeToolBaseDir, config.OsImageParentDir); err != nil {
+				return nil, fmt.Errorf("init pmem paths: %w", err)
+			}
 			err = imgSrv.recover()
 			if err != nil {
 				return nil, fmt.Errorf("recover images failed: %w", err)

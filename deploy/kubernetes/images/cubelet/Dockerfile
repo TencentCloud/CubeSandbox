@@ -41,6 +41,7 @@ RUN printf '{"schema_version":1,"components":{"cubelet":{"version":"%s"},"cubecl
       /data/log/CubeVmm \
       /data/cube-shim/disks \
       /data/snapshot_pack/disks \
+      /data/cubebox_os_image \
       /tmp/cube \
       /run/cube-node
 

@@ -52,6 +52,7 @@ RUN chmod +x \
       /data/log/CubeVmm \
       /data/cube-shim/disks \
       /data/snapshot_pack/disks \
+      /data/cubebox_os_image \
       /tmp/cube
 
 EXPOSE 9999 9998 9966 19090

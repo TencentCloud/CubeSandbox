@@ -912,8 +912,9 @@ hostPaths:
   # Host-persistent toolbox tree. Big Pod mounts this path whole at
   # /usr/local/services/cubetoolbox (stable volumeMount for InPlace). Installer
   # and Big Pod self-stage copy from /opt/cube-image into this tree; preserve
-  # dirs such as cube-snapshot / cubebox_os_image / cubeletmnt / cube-vs are not
-  # wiped by component installs.
+  # dirs such as cube-snapshot / cubeletmnt / cube-vs are not wiped by component
+  # installs. Template rootfs artifacts live under /data/cubebox_os_image
+  # (not under toolbox) on fresh installs.
   toolbox: /usr/local/services/cubetoolbox
   # Shim ttrpc listen sockets: containerd-shim SOCKET_ROOT is hardcoded to
   # /run/containerd, and LoadExistingShims dials unix:///run/containerd/s/{hash}

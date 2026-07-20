@@ -119,6 +119,16 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     # pool_trigger_interval_in_ms = 800
   [plugins."io.cubelet.internal.v1.images"]
     runtime_type = "io.containerd.cube.v2"
+    # cubetoolbox install root (shared kernel).
+    cubetool_base_dir = "/usr/local/services/cubetoolbox"
+    # Template rootfs parent defaults to /data (→ /data/cubebox_os_image).
+    # If you override this, also set CBRI image_base_path and kernel_base_path
+    # to the matching <parent>/cubebox_os_image so write/read paths stay aligned.
+    # os_image_parent_dir = "/data"
+  [plugins."io.cubelet.cbri.v1.cubebox"]
+    # Defaults match images os_image_parent_dir (/data/cubebox_os_image).
+    # image_base_path = "/data/cubebox_os_image"
+    # kernel_base_path = "/data/cubebox_os_image"
   [plugins."io.cubelet.internal.v1.cubebox"]
     default_runtime_name = "cube"
     [plugins."io.cubelet.internal.v1.cubebox".runtimes]
@@ -128,7 +138,6 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
       [plugins."io.cubelet.internal.v1.cubebox".runtimes.runc]
         runtime_type = "io.containerd.runc.v2"
     #cube_host_shared_dir = "/run/cube-containers/shared/sandboxes/"
-    cubetool_base_dir = "/usr/local/services/cubetoolbox"
   [plugins."io.cubelet.cubebox-service.v1.cubebox-service"]
     destroy_dead_line = "60s"
     dead_container_ttl = "1h"
