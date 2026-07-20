@@ -341,13 +341,7 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 		failRedoTemplateImageJob(ctx, jobID, resumePhase, err.Error())
 		return
 	}
-	if _, err := ensureTemplateDefinitionWithOptions(ctx, req.TemplateID, storedReq, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), definitionCreateOptions{
-		// Preserve the alias from the original create request (stored in
-		// the job's RequestJSON). Without this, a redo that recreates the
-		// template definition would drop the display_name, breaking
-		// alias-based lookups after rebuild.
-		DisplayName: strings.TrimSpace(sourceReq.Alias),
-	}); err != nil {
+	if _, err := ensureTemplateDefinitionWithOptions(ctx, req.TemplateID, storedReq, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), definitionCreateOptions{}); err != nil {
 		failRedoTemplateImageJob(ctx, jobID, resumePhase, err.Error())
 		return
 	}
@@ -391,6 +385,14 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 	if info.Status == StatusFailed {
 		finalStatus = JobStatusFailed
 		finalPhase = JobPhaseSnapshotting
+	}
+	// Claim alias only after the template is confirmed READY.
+	if info.Status != StatusFailed {
+		if alias := strings.TrimSpace(sourceReq.Alias); alias != "" {
+			if claimErr := claimTemplateAlias(ctx, req.TemplateID, alias); claimErr != nil {
+				logger.Warnf("claim alias %q for template %s fail: %v", alias, req.TemplateID, claimErr)
+			}
+		}
 	}
 	_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 		"status":          finalStatus,

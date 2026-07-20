@@ -163,9 +163,7 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 		})
 		return
 	}
-	if _, err := ensureTemplateDefinitionWithOptions(ctx, req.TemplateID, storedReq, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), definitionCreateOptions{
-		DisplayName: strings.TrimSpace(req.Alias),
-	}); err != nil {
+	if _, err := ensureTemplateDefinitionWithOptions(ctx, req.TemplateID, storedReq, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), definitionCreateOptions{}); err != nil {
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":          JobStatusFailed,
 			"phase":           JobPhaseCreatingTemplate,
@@ -198,6 +196,15 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 			"error_message":   err.Error(),
 		})
 		return
+	}
+	// Claim alias only after the template is confirmed READY, so a failed
+	// build never steals the alias from the previous working template.
+	if info.Status != StatusFailed {
+		if alias := strings.TrimSpace(req.Alias); alias != "" {
+			if claimErr := claimTemplateAlias(ctx, req.TemplateID, alias); claimErr != nil {
+				logger.Warnf("claim alias %q for template %s fail: %v", alias, req.TemplateID, claimErr)
+			}
+		}
 	}
 	resultPayload, _ := json.Marshal(info)
 	jobStatus := JobStatusReady

@@ -44,6 +44,8 @@ func TestValidateTemplateAlias(t *testing.T) {
 		{name: "underscore", alias: "my_app", wantValid: false},
 		{name: "leading-dash", alias: "-myapp", wantValid: false},
 		{name: "internal-space", alias: "my app", wantValid: false},
+		{name: "tpl-prefix-bare", alias: "tpl-", wantValid: false},
+		{name: "snap-prefix-bare", alias: "snap-", wantValid: false},
 	}
 
 	for _, tc := range tests {

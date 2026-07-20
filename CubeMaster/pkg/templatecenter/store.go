@@ -950,6 +950,31 @@ func ResolveTemplateIdentifier(ctx context.Context, identifier string) (string, 
 	return def.TemplateID, nil
 }
 
+// claimTemplateAlias atomically claims an alias for a template: releases it
+// from any other non-deleting template that currently holds it, then sets
+// display_name on the target template. Call this only after the template is
+// confirmed READY so an alias never points to a broken template.
+func claimTemplateAlias(ctx context.Context, templateID, alias string) error {
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return nil
+	}
+	if !isReady() {
+		return ErrTemplateStoreNotInitialized
+	}
+	return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Table(constants.TemplateDefinitionTableName).
+			Where("kind = ? AND display_name = ? AND template_id <> ? AND status <> ?",
+				TemplateKindTemplate, alias, templateID, StatusDeleting).
+			Update("display_name", "").Error; err != nil {
+			return fmt.Errorf("release stale alias %q fail: %w", alias, err)
+		}
+		return tx.Table(constants.TemplateDefinitionTableName).
+			Where("template_id = ?", templateID).
+			Update("display_name", alias).Error
+	})
+}
+
 func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.CreateCubeSandboxReq, error) {
 	cacheStart := time.Now()
 	if req, hit, err := getCachedTemplateRequest(templateID); err != nil {
