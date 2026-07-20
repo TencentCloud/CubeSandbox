@@ -1,5 +1,20 @@
 {{- if eq (include "cube.redisBuiltinEnabled" .) "true" }}
 apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cube.redisName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+data:
+  redis.conf: |
+    include /etc/redis/redis-auth.conf
+    bind 0.0.0.0
+    port 6379
+    dir /data
+    protected-mode yes
+---
+apiVersion: v1
 kind: Service
 metadata:
   name: {{ include "cube.redisName" . }}
@@ -41,8 +56,8 @@ spec:
         - name: redis
           image: {{ include "cube.image" .Values.redis.image | quote }}
           imagePullPolicy: {{ .Values.redis.image.pullPolicy }}
-          command: ["redis-server"]
-          args: ["--requirepass", "$(REDIS_PASSWORD)"]
+          args:
+            - /etc/redis/redis.conf
           env:
             {{- include "cube.timezoneEnv" . | nindent 12 }}
             - name: REDIS_PASSWORD
@@ -58,7 +73,7 @@ spec:
               command:
                 - /bin/sh
                 - -ec
-                - redis-cli -a "${REDIS_PASSWORD}" ping | grep -x PONG
+                - REDISCLI_AUTH="${REDIS_PASSWORD}" redis-cli ping | grep -x PONG
             initialDelaySeconds: 5
             periodSeconds: 3
             failureThreshold: 40
@@ -67,7 +82,7 @@ spec:
               command:
                 - /bin/sh
                 - -ec
-                - redis-cli -a "${REDIS_PASSWORD}" ping | grep -x PONG
+                - REDISCLI_AUTH="${REDIS_PASSWORD}" redis-cli ping | grep -x PONG
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 6
@@ -76,21 +91,35 @@ spec:
               command:
                 - /bin/sh
                 - -ec
-                - redis-cli -a "${REDIS_PASSWORD}" ping | grep -x PONG
+                - REDISCLI_AUTH="${REDIS_PASSWORD}" redis-cli ping | grep -x PONG
             initialDelaySeconds: 30
             periodSeconds: 20
             failureThreshold: 6
-          {{- if .Values.redis.persistence.enabled }}
           volumeMounts:
+            - name: redis-config
+              mountPath: /etc/redis
+              readOnly: true
             - name: redis-data
               mountPath: /data
-          {{- end }}
           {{- with .Values.redis.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-      {{- if and .Values.redis.persistence.enabled (or .Values.redis.persistence.hostPath .Values.redis.persistence.existingClaim) }}
       volumes:
+        - name: redis-config
+          projected:
+            sources:
+              - configMap:
+                  name: {{ include "cube.redisName" . }}
+              - secret:
+                  name: {{ include "cube.secretName" . }}
+                  items:
+                    - key: redis-auth.conf
+                      path: redis-auth.conf
+        {{- if not .Values.redis.persistence.enabled }}
+        - name: redis-data
+          emptyDir: {}
+        {{- else if or .Values.redis.persistence.hostPath .Values.redis.persistence.existingClaim }}
         - name: redis-data
           {{- if .Values.redis.persistence.hostPath }}
           hostPath:
@@ -100,7 +129,7 @@ spec:
           persistentVolumeClaim:
             claimName: {{ include "cube.redisPVCName" . }}
           {{- end }}
-      {{- end }}
+        {{- end }}
   {{- if and .Values.redis.persistence.enabled (not .Values.redis.persistence.hostPath) (not .Values.redis.persistence.existingClaim) }}
   volumeClaimTemplates:
     - metadata:

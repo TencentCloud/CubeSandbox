@@ -217,7 +217,7 @@ spec:
         - -ec
         - |
           echo '[health-test] check Redis'
-          redis-cli -h {{ include "cube.redisHost" . | quote }} -p {{ .Values.redis.port }} -a "${REDIS_PASSWORD}" ping | grep -x PONG
+          REDISCLI_AUTH="${REDIS_PASSWORD}" redis-cli -h {{ include "cube.redisHost" . | quote }} -p {{ .Values.redis.port }} ping | grep -x PONG
 {{- end }}
 {{ if eq (include "cube.proxyEnabled" .) "true" }}
 ---
