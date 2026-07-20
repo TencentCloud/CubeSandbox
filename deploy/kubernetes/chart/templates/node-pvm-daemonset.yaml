@@ -87,6 +87,13 @@ spec:
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.pvmHostBootstrap "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.pvmHostBootstrap.pullPolicy }}
           command: ["/usr/bin/tini", "-s", "--", "/scripts/pvm-startup-gate-reconcile.sh"]
+          securityContext:
+            seccompProfile:
+              type: RuntimeDefault
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
           env:
             {{- include "cube.timezoneEnv" . | nindent 12 }}
             {{- include "cube.pvmHostCommonEnv" . | nindent 12 }}

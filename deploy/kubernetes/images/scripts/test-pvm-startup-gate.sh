@@ -239,6 +239,22 @@ case "$cmd" in
     printf '%s' "$phase" > "$TEST_STATE/phase-$name"
     : > "$TEST_STATE/created-$name"
     ;;
+  wait\ *)
+    # "wait --for=jsonpath=...=Succeeded pod/<name> --timeout=..."
+    name=""
+    for tok in $cmd; do
+      case "$tok" in
+        pod/*) name="${tok#pod/}" ;;
+      esac
+    done
+    [ -n "$name" ] || { printf 'wait missing pod/: %s\n' "$cmd" >&2; exit 1; }
+    if [ -f "$TEST_STATE/phase-$name" ]; then
+      phase="$(cat "$TEST_STATE/phase-$name")"
+    else
+      phase="${CHECK_POD_PHASE:-Succeeded}"
+    fi
+    [ "$phase" = "Succeeded" ] || exit 1
+    ;;
   taint\ node\ *)
     # "taint node <name> key=true:NoSchedule --overwrite"
     node="$(printf '%s\n' "$cmd" | awk '{print $3}')"
@@ -249,7 +265,7 @@ case "$cmd" in
     : > "$TEST_STATE/tainted-$node"
     ;;
   get\ pod\ *\ -o\ jsonpath=*)
-    # "get pod <name> -o jsonpath=..."
+    # "get pod <name> -o jsonpath=..." (failure diagnostics after wait)
     name="$(printf '%s\n' "$cmd" | awk '{print $3}')"
     if [ -f "$TEST_STATE/phase-$name" ]; then
       cat "$TEST_STATE/phase-$name"
@@ -300,7 +316,12 @@ export CHECK_POD_PHASE=Succeeded
 rm -f "$TEST_STATE"/*
 sh "$PREFLIGHT_SCRIPT"
 grep -q 'create -f -' "$TEST_LOG"
+grep -q 'wait ' "$TEST_LOG"
 grep -q 'value: "true"' "$TEST_STATE/last-pod.yaml"
+if grep -q 'hostPID:' "$TEST_STATE/last-pod.yaml"; then
+  echo "check pod unexpectedly set hostPID" >&2
+  exit 1
+fi
 if grep -q 'taint node ' "$TEST_LOG"; then
   echo "fingerprint-ready path unexpectedly tainted" >&2
   exit 1

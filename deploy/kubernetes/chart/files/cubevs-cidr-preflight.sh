@@ -32,6 +32,9 @@ ip_to_int() {
   local ip="$1"
   local a b c d
   IFS=. read -r a b c d <<< "${ip}"
+  # Reject truncated/extra-field inputs (e.g. "1.2.3") that would otherwise
+  # treat empty octets as 0 in arithmetic.
+  [ -n "$a" ] && [ -n "$b" ] && [ -n "$c" ] && [ -n "$d" ] || return 1
   case "${a}${b}${c}${d}" in
     ''|*[!0-9]*) return 1 ;;
   esac

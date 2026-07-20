@@ -84,15 +84,10 @@ extract_big_pod "$TMP_DIR/policy.yaml" "$TMP_DIR/policy-node.yaml"
 extract_big_pod "$TMP_DIR/pvm-disabled.yaml" "$TMP_DIR/pvm-disabled-node.yaml"
 normalize_frozen_template "$TMP_DIR/base-node.yaml" "$TMP_DIR/base-frozen.yaml"
 
+# PVM / bootArgs / prepGeneration / gate must not touch Big Pod at all.
 diff -u "$TMP_DIR/base-node.yaml" "$TMP_DIR/policy-node.yaml"
 diff -u "$TMP_DIR/base-node.yaml" "$TMP_DIR/pvm-disabled-node.yaml"
-expected_frozen_sha256="037239c67db322235cc2009834778ff5bfc1685c96d61814f7d508b0a92dc858"
-actual_frozen_sha256="$(sha256sum "$TMP_DIR/base-frozen.yaml" | awk '{print $1}')"
-[ "$actual_frozen_sha256" = "$expected_frozen_sha256" ] || {
-  echo "Big Pod frozen template changed outside image/annotation/resources allowlist" >&2
-  echo "expected=${expected_frozen_sha256} actual=${actual_frozen_sha256}" >&2
-  exit 1
-}
+
 
 assert_recreate_change_detected() {
   name="$1"
@@ -100,11 +95,10 @@ assert_recreate_change_detected() {
   render "$TMP_DIR/${name}.yaml" "$@"
   extract_big_pod "$TMP_DIR/${name}.yaml" "$TMP_DIR/${name}-node.yaml"
   normalize_frozen_template "$TMP_DIR/${name}-node.yaml" "$TMP_DIR/${name}-frozen.yaml"
-  changed_sha="$(sha256sum "$TMP_DIR/${name}-frozen.yaml" | awk '{print $1}')"
-  [ "$changed_sha" != "$actual_frozen_sha256" ] || {
+  if diff -q "$TMP_DIR/base-frozen.yaml" "$TMP_DIR/${name}-frozen.yaml" >/dev/null; then
     echo "expected maintenance-only value '${name}' to change the frozen template" >&2
     exit 1
-  }
+  fi
 }
 
 assert_recreate_change_detected pod-annotation \

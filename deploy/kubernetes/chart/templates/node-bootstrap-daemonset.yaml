@@ -175,6 +175,13 @@ spec:
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.waitNodePrep "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.waitNodePrep.pullPolicy }}
           command: ["/usr/bin/tini", "-s", "--", "/scripts/write-node-prep-ready.sh"]
+          securityContext:
+            seccompProfile:
+              type: RuntimeDefault
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
           env:
             {{- include "cube.timezoneEnv" . | nindent 12 }}
             - name: STATE_DIR

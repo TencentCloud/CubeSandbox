@@ -22,10 +22,20 @@ set -eu
 # KERNEL_BOOT_ARGS and IMAGE_PULL_SECRET_NAMES may be empty.
 KERNEL_BOOT_ARGS="${KERNEL_BOOT_ARGS:-}"
 IMAGE_PULL_SECRET_NAMES="${IMAGE_PULL_SECRET_NAMES:-}"
+PREFLIGHT_NODE_CONCURRENCY="${PREFLIGHT_NODE_CONCURRENCY:-8}"
 
 fail() {
   printf 'PVM preflight: %s\n' "$*" >&2
   exit 1
+}
+
+# Per-pod wait budget: avoid one slow pod consuming the full Job timeout.
+per_pod_wait_seconds() {
+  if [ "$PREFLIGHT_TIMEOUT_SECONDS" -gt 120 ]; then
+    echo 120
+  else
+    echo "$PREFLIGHT_TIMEOUT_SECONDS"
+  fi
 }
 
 cleanup_stale_check_pods() {
@@ -93,6 +103,14 @@ render_image_pull_secrets() {
   done
 }
 
+# Stable, collision-safe check pod name for parallel batches (no shared counter).
+check_pod_name_for() {
+  node_name=$1
+  suffix=$2
+  safe="$(printf '%s' "$node_name" | tr '.:/_' '-' | cut -c1-32)"
+  printf 'pvm-check-%s-%s-%s' "$safe" "$suffix" "$RELEASE_NAME" | cut -c1-63
+}
+
 create_check_pod() {
   pod_name=$1
   node_name=$2
@@ -111,7 +129,6 @@ spec:
   nodeName: ${node_name}
   serviceAccountName: ${PREFLIGHT_SERVICE_ACCOUNT}
   automountServiceAccountToken: true
-  hostPID: true
 EOF
     render_image_pull_secrets
     cat <<EOF
@@ -155,17 +172,19 @@ EOF
 # Returns 0 on Succeeded, 1 on Failed/timeout (does not exit the script).
 wait_check_pod() {
   pod_name=$1
+  wait_secs="$(per_pod_wait_seconds)"
 
-  deadline=$(( $(date +%s) + PREFLIGHT_TIMEOUT_SECONDS ))
-  while true; do
-    phase="$(kubectl -n "$POD_NAMESPACE" get pod "$pod_name" -o jsonpath='{.status.phase}')"
-    [ "$phase" = "Succeeded" ] && return 0
-    if [ "$phase" = "Failed" ] || [ "$(date +%s)" -ge "$deadline" ]; then
-      kubectl -n "$POD_NAMESPACE" logs "$pod_name" >&2 || true
-      return 1
-    fi
-    sleep 2
-  done
+  if kubectl -n "$POD_NAMESPACE" wait \
+    --for=jsonpath='{.status.phase}'=Succeeded \
+    "pod/${pod_name}" \
+    --timeout="${wait_secs}s"; then
+    return 0
+  fi
+  kubectl -n "$POD_NAMESPACE" logs "$pod_name" >&2 || true
+  phase="$(kubectl -n "$POD_NAMESPACE" get pod "$pod_name" \
+    -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  printf 'PVM preflight: check pod %s ended phase=%s\n' "$pod_name" "${phase:-unknown}" >&2
+  return 1
 }
 
 node_taint_effects() {
@@ -196,11 +215,6 @@ delete_check_pod() {
   kubectl -n "$POD_NAMESPACE" delete pod "$1" --wait=false >/dev/null 2>&1 || true
 }
 
-alloc_check_pod_name() {
-  index=$((index + 1))
-  CHECK_POD_NAME="$(printf 'pvm-check-%s-%s' "$index" "$RELEASE_NAME" | cut -c1-63)"
-}
-
 probe_cni_under_gate() {
   node_name=$1
   pod_name=$2
@@ -218,8 +232,9 @@ probe_cni_under_gate() {
   printf 'PVM preflight: %s CNI/apiserver path is ready under the gate taint\n' "$node_name"
 }
 
-index=0
-for node_ref in $nodes; do
+# Per-node preflight (safe to run in parallel across nodes).
+check_one_node() {
+  node_ref=$1
   node="${node_ref#node/}"
   effects="$(node_taint_effects "$node_ref")"
 
@@ -232,24 +247,53 @@ for node_ref in $nodes; do
           *) fail "upgrade gate on ${node} must use value=maintenance" ;;
         esac
       fi
-      alloc_check_pod_name
-      probe_cni_under_gate "$node" "$CHECK_POD_NAME"
-      continue
+      probe_cni_under_gate "$node" "$(check_pod_name_for "$node" cni)"
+      return 0
       ;;
   esac
 
   # No gate: try fingerprint-ready path first (daily upgrade / already prepared).
-  alloc_check_pod_name
-  create_check_pod "$CHECK_POD_NAME" "$node" "true"
-  if wait_check_pod "$CHECK_POD_NAME"; then
-    delete_check_pod "$CHECK_POD_NAME"
+  fp_pod="$(check_pod_name_for "$node" fp)"
+  create_check_pod "$fp_pod" "$node" "true"
+  if wait_check_pod "$fp_pod"; then
+    delete_check_pod "$fp_pod"
     printf 'PVM preflight: %s is already fingerprint-ready\n' "$node"
-    continue
+    return 0
   fi
-  delete_check_pod "$CHECK_POD_NAME"
+  delete_check_pod "$fp_pod"
 
   # Not fingerprint-ready: auto-ensure gate, then probe CNI under the taint.
   ensure_gate_taint_on_node "$node"
-  alloc_check_pod_name
-  probe_cni_under_gate "$node" "$CHECK_POD_NAME"
-done
+  probe_cni_under_gate "$node" "$(check_pod_name_for "$node" cni)"
+}
+
+# Batch nodes with concurrency cap (no wait -n; portable /bin/sh).
+run_node_batches() {
+  concurrency="$PREFLIGHT_NODE_CONCURRENCY"
+  [ "$concurrency" -ge 1 ] || concurrency=1
+
+  batch_pids=""
+  batch_count=0
+  failed=0
+
+  for node_ref in $nodes; do
+    check_one_node "$node_ref" &
+    batch_pids="$batch_pids $!"
+    batch_count=$((batch_count + 1))
+    if [ "$batch_count" -ge "$concurrency" ]; then
+      for pid in $batch_pids; do
+        wait "$pid" || failed=1
+      done
+      batch_pids=""
+      batch_count=0
+      [ "$failed" -eq 0 ] || fail "one or more PVM nodes failed preflight"
+    fi
+  done
+
+  for pid in $batch_pids; do
+    wait "$pid" || failed=1
+  done
+  [ "$failed" -eq 0 ] || fail "one or more PVM nodes failed preflight"
+}
+
+run_node_batches
