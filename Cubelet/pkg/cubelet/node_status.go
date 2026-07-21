@@ -523,7 +523,9 @@ func (kl *Cubelet) buildRegisterRequest(node *cubeletnodemeta.Node) *masterclien
 	req.QuotaCPU = resolveHostQuotaCPUMilli(hostCfg, req.Allocatable.MilliCPU, req.Capacity.MilliCPU)
 	req.QuotaMemMB = resolveHostQuotaMemMB(hostCfg, req.Allocatable.MemoryMB, req.Capacity.MemoryMB)
 	req.MaxMvmNum = resolveHostMaxMvmNum(hostCfg, req.QuotaMemMB)
-	req.Versions = kl.collectVersions()
+	versions, incomplete := kl.collectVersionReport()
+	req.Versions = versions
+	req.InventoryIncomplete = incomplete
 	return req
 }
 
@@ -535,31 +537,32 @@ func (kl *Cubelet) buildStatusRequest(node *cubeletnodemeta.Node) *masterclient.
 		HeartbeatTime:  kl.clock.Now(),
 	}
 	attachResourceReport(req, kl.clock.Now())
-	req.Versions = kl.collectVersions()
+	versions, incomplete := kl.collectVersionReport()
+	req.Versions = versions
+	req.InventoryIncomplete = incomplete
 	return req
 }
 
-// collectVersions gathers this node's component versions for reporting. It is
-// best-effort: a nil collector or empty result simply omits the field.
-func (kl *Cubelet) collectVersions() []masterclient.ComponentVersion {
+func (kl *Cubelet) collectVersionReport() ([]masterclient.ComponentVersion, bool) {
 	if kl.versionCollector == nil {
-		return nil
+		return nil, false
 	}
-	collected := kl.versionCollector.Collect()
-	if len(collected) == 0 {
-		return nil
+	report := kl.versionCollector.CollectReport()
+	if len(report.Versions) == 0 {
+		return nil, report.Incomplete
 	}
-	out := make([]masterclient.ComponentVersion, 0, len(collected))
-	for _, v := range collected {
+	out := make([]masterclient.ComponentVersion, 0, len(report.Versions))
+	for _, v := range report.Versions {
 		out = append(out, masterclient.ComponentVersion{
 			Component: v.Component,
 			Version:   v.Version,
 			Commit:    v.Commit,
 			BuildTime: v.BuildTime,
 			Source:    v.Source,
+			Variant:   v.Variant,
 		})
 	}
-	return out
+	return out, report.Incomplete
 }
 
 // attachResourceReport folds the allocated-resource and disk-usage views

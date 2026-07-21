@@ -119,3 +119,56 @@ func runAfterCreateSandboxSuccessHook(ctx context.Context, sandboxID, hostID, ho
 	}
 	return firstErr
 }
+
+// UpdateSandboxSuccessHook is invoked after a sandbox pause / resume RPC
+// (POST /cube/sandbox/update) succeeds. Subscribers use it to fan out state
+// transitions to downstream consumers such as the lifecycle metadata
+// channel. The hook MUST NOT fail the update path — implementations should
+// log and swallow errors.
+//
+// Action carries "pause" or "resume" (validated upstream). RequestID is
+// forwarded from the incoming request for log correlation.
+type UpdateSandboxSuccessHook func(ctx context.Context, sandboxID, instanceType, action, requestID string)
+
+var (
+	updateHooksMu sync.RWMutex
+	updateHooks   []UpdateSandboxSuccessHook
+)
+
+// RegisterAfterUpdateSandboxSuccessHook appends a hook to the update chain.
+// Hooks run sequentially in registration order.
+func RegisterAfterUpdateSandboxSuccessHook(hook UpdateSandboxSuccessHook) {
+	if hook == nil {
+		return
+	}
+	updateHooksMu.Lock()
+	updateHooks = append(updateHooks, hook)
+	updateHooksMu.Unlock()
+}
+
+// ResetAfterUpdateSandboxSuccessHooks clears every registered update hook.
+// Test-only helper.
+func ResetAfterUpdateSandboxSuccessHooks() {
+	updateHooksMu.Lock()
+	updateHooks = nil
+	updateHooksMu.Unlock()
+}
+
+func runAfterUpdateSandboxSuccessHook(ctx context.Context, sandboxID, instanceType, action, requestID string) {
+	updateHooksMu.RLock()
+	hooks := append([]UpdateSandboxSuccessHook(nil), updateHooks...)
+	updateHooksMu.RUnlock()
+
+	for _, h := range hooks {
+		// Hooks are best-effort; recover in case a subscriber panics so
+		// we can't take down the update path.
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.G(ctx).Warnf("afterUpdateSandboxSuccess hook panicked: %v", r)
+				}
+			}()
+			h(ctx, sandboxID, instanceType, action, requestID)
+		}()
+	}
+}

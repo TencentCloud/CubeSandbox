@@ -7,16 +7,18 @@ package cube
 import (
 	"net/http"
 
+	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
-func handleExecAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	_ = w
+func handleExecAction(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
 	rt.RetCode = -1
 	rsp := &types.Res{
 		Ret: &types.Ret{
@@ -25,20 +27,20 @@ func handleExecAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.Reques
 		},
 	}
 	req := &types.ExecRequest{}
-	if err := utils.DecodeHttpBody(r.Body, req); err != nil {
+	if err := utils.DecodeHttpBody(c.Request.Body, req); err != nil {
 		rsp.Ret.RetMsg = err.Error()
-		return rsp
+		common.WriteAPI(c, rsp)
+		return
 	}
 	rt.RequestID = req.RequestID
 	if req.InstanceType == "" {
 		req.InstanceType = cubebox.InstanceType_cubebox.String()
 	}
 	rt.InstanceType = req.InstanceType
-	ctx := log.WithLogger(r.Context(), log.G(r.Context()).WithFields(map[string]any{
+	ctx := log.WithLogger(c.Request.Context(), log.G(c.Request.Context()).WithFields(map[string]any{
 		"RequestId":    req.RequestID,
 		"InstanceType": req.InstanceType,
 	}))
 	rsp = sandbox.Exec(CubeLog.WithRequestTrace(ctx, rt), req)
-	return rsp
-
+	common.WriteAPI(c, rsp)
 }

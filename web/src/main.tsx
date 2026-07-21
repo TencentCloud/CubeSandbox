@@ -17,7 +17,6 @@ import SandboxNewPage from '@/pages/SandboxNew';
 import TemplatesPage from '@/pages/Templates';
 import NodesPage from '@/pages/Nodes';
 import VersionsPage from '@/pages/Versions';
-import KeysPage from '@/pages/Keys';
 import SettingsPage from '@/pages/Settings';
 import TemplateDetailPage from '@/pages/TemplateDetail';
 import NodeDetailPage from '@/pages/NodeDetail';
@@ -49,25 +48,21 @@ const App = () => (
             <Route path="/login" element={<LoginPage />} />
             <Route element={<AuthGuard />}>
               <Route element={<AppShell />}>
-              <Route path="/" element={<OverviewPage />} />
-              <Route path="/sandboxes" element={<SandboxesPage />} />
-              <Route path="/sandboxes/new" element={<SandboxNewPage />} />
-              <Route path="/sandboxes/:sandboxID" element={<SandboxDetailPage />} />
-              <Route path="/templates" element={<TemplatesPage />} />
-              <Route
-                path="/templates/:templateID"
-                element={<TemplateDetailPage />}
-              />
-              <Route path="/nodes" element={<NodesPage />} />
-              <Route path="/nodes/:nodeID" element={<NodeDetailPage />} />
-              <Route path="/versions" element={<VersionsPage />} />
-              <Route path="/network" element={<NetworkPage />} />
-              <Route path="/observability" element={<ObservabilityPage />} />
-              <Route path="/store" element={<TemplateStorePage />} />
-              <Route path="/agenthub" element={<AgentHubPage />} />
-              <Route path="/keys" element={<KeysPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
-              <Route path="*" element={<Navigate to="/" replace />} />
+                <Route path="/" element={<OverviewPage />} />
+                <Route path="/sandboxes" element={<SandboxesPage />} />
+                <Route path="/sandboxes/new" element={<SandboxNewPage />} />
+                <Route path="/sandboxes/:sandboxID" element={<SandboxDetailPage />} />
+                <Route path="/templates" element={<TemplatesPage />} />
+                <Route path="/templates/:templateID" element={<TemplateDetailPage />} />
+                <Route path="/nodes" element={<NodesPage />} />
+                <Route path="/nodes/:nodeID" element={<NodeDetailPage />} />
+                <Route path="/versions" element={<VersionsPage />} />
+                <Route path="/network" element={<NetworkPage />} />
+                <Route path="/observability" element={<ObservabilityPage />} />
+                <Route path="/store" element={<TemplateStorePage />} />
+                <Route path="/agenthub" element={<AgentHubPage />} />
+                <Route path="/settings" element={<SettingsPage />} />
+                <Route path="*" element={<Navigate to="/" replace />} />
               </Route>
             </Route>
           </Routes>

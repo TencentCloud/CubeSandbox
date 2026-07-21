@@ -447,6 +447,7 @@ impl CubeMasterClient {
     // ── Node / Cluster APIs ──────────────────────────────────────────────
 
     /// GET /internal/meta/nodes — list all nodes (capacity + health).
+    #[allow(dead_code)]
     pub async fn list_nodes(&self) -> Result<NodesResponse, CubeMasterError> {
         let url = format!("{}/internal/meta/nodes", self.base_url);
         let resp = self
@@ -459,6 +460,7 @@ impl CubeMasterClient {
     }
 
     /// GET /internal/meta/nodes/{id} — single node detail.
+    #[allow(dead_code)]
     pub async fn get_node(&self, node_id: &str) -> Result<NodeResponse, CubeMasterError> {
         let url = format!("{}/internal/meta/nodes/{}", self.base_url, node_id);
         let resp = self
@@ -471,11 +473,73 @@ impl CubeMasterClient {
     }
 
     /// GET /internal/meta/version-matrix — cluster-wide component version matrix.
+    #[allow(dead_code)]
     pub async fn get_version_matrix(&self) -> Result<VersionMatrixResponse, CubeMasterError> {
         let url = format!("{}/internal/meta/version-matrix", self.base_url);
         let resp = self
             .inner
             .get(&url)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// GET /cube/volume — list all volumes.
+    pub async fn list_volumes(
+        &self,
+        req: &ListVolumesRequest,
+    ) -> Result<ListVolumesResponse, CubeMasterError> {
+        let url = format!("{}/cube/volume", self.base_url);
+        let resp = self
+            .inner
+            .get(&url)
+            .query(&[("request_id", &req.request_id)])
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// POST /cube/volume — create a new volume.
+    pub async fn create_volume(
+        &self,
+        req: &CreateVolumeRequest,
+    ) -> Result<CreateVolumeResponse, CubeMasterError> {
+        let url = format!("{}/cube/volume", self.base_url);
+        let resp = self
+            .inner
+            .post(&url)
+            .json(req)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// GET /cube/volume/{volume_id} — get a single volume (with token).
+    pub async fn get_volume(&self, volume_id: &str) -> Result<GetVolumeResponse, CubeMasterError> {
+        validate_volume_id(volume_id)?;
+        let url = format!("{}/cube/volume/{}", self.base_url, volume_id);
+        let resp = self
+            .inner
+            .get(&url)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// DELETE /cube/volume/{volume_id} — delete a volume.
+    pub async fn delete_volume(
+        &self,
+        volume_id: &str,
+    ) -> Result<DeleteVolumeResponse, CubeMasterError> {
+        validate_volume_id(volume_id)?;
+        let url = format!("{}/cube/volume/{}", self.base_url, volume_id);
+        let resp = self
+            .inner
+            .delete(&url)
             .send()
             .await
             .map_err(CubeMasterError::Http)?;
@@ -535,6 +599,19 @@ impl CubeMasterError {
             _ => false,
         }
     }
+
+    /// True when CubeMaster returned 130400 (params error — invalid client input).
+    /// These are user-facing validation failures (bad alias, missing field, etc.)
+    /// and should surface as HTTP 400, not 500.
+    pub fn is_params_error(&self) -> bool {
+        matches!(
+            self,
+            Self::Api {
+                ret_code: 130400,
+                ..
+            }
+        )
+    }
 }
 
 /// Restrict path segments to characters that CubeMaster's resource identifiers
@@ -562,6 +639,26 @@ pub(crate) fn validate_path_segment(
     } else {
         Err(CubeMasterError::InvalidPathParameter {
             name,
+            value: value.to_string(),
+        })
+    }
+}
+
+/// Volume IDs may include `_` (same alphabet as `NewVolume::name_is_valid` /
+/// CubeMaster `isValidVolumeName`). Unlike generic CubeMaster resource IDs,
+/// customer-supplied volume names are allowed to use underscores.
+pub(crate) fn validate_volume_id(value: &str) -> Result<(), CubeMasterError> {
+    let is_valid = !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b == b'-' || b == b'_' || b.is_ascii_alphanumeric());
+
+    if is_valid {
+        Ok(())
+    } else {
+        Err(CubeMasterError::InvalidPathParameter {
+            name: "volume_id",
             value: value.to_string(),
         })
     }
@@ -1659,6 +1756,8 @@ pub struct TemplateSummaryItem {
     #[serde(default)]
     pub last_error: String,
     #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
     pub created_at: String,
     #[serde(default)]
     pub image_info: String,
@@ -1697,6 +1796,10 @@ pub struct TemplateResponse {
     pub last_error: String,
     #[serde(default)]
     pub job_id: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub created_at: String,
     /// Opaque replica list (node placement). Left as raw JSON to avoid
     /// coupling to CubeMaster-internal types.
     #[serde(default)]
@@ -1820,6 +1923,9 @@ pub struct CreateTemplateFromImageReq {
     /// Writable layer size, e.g. "1G".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub writable_layer_size: Option<String>,
+    /// Human-readable stable template alias.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
     /// Ports exposed by the container.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exposed_ports: Option<Vec<u16>>,
@@ -1840,6 +1946,9 @@ pub struct CreateTemplateFromImageReq {
         skip_serializing_if = "Option::is_none"
     )]
     pub cube_network_config: Option<CreateTemplateCubeNetworkConfig>,
+    /// Whether the template build sandbox should include ivshmem.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_ivshmem: Option<bool>,
     /// Whether CubeMaster bakes the CubeEgress root CA into the template rootfs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub with_cube_ca: Option<bool>,
@@ -2174,7 +2283,8 @@ pub struct VersionMatrixResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        non_empty_str, validate_path_segment, CubeMasterError, GetSandboxResponse, SandboxInfo,
+        non_empty_str, validate_path_segment, validate_volume_id, CubeMasterError,
+        GetSandboxResponse, SandboxInfo, TemplateResponse, TemplateSummaryItem,
     };
 
     #[test]
@@ -2217,6 +2327,30 @@ mod tests {
                 err,
                 CubeMasterError::InvalidPathParameter {
                     name: "build_id",
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn volume_id_accepts_underscore_like_create_name() {
+        for value in ["my_data", "vol-1", "abc_123-x", "A"] {
+            validate_volume_id(value).unwrap_or_else(|err| {
+                panic!("expected volume id {value:?} to be accepted, got {err:?}")
+            });
+        }
+    }
+
+    #[test]
+    fn volume_id_rejects_invalid_characters() {
+        for value in ["", "my.data", "vol/1", "a:b", "../../x"] {
+            let err =
+                validate_volume_id(value).expect_err("volume id should reject invalid characters");
+            assert!(matches!(
+                err,
+                CubeMasterError::InvalidPathParameter {
+                    name: "volume_id",
                     ..
                 }
             ));
@@ -2284,6 +2418,33 @@ mod tests {
     }
 
     #[test]
+    fn template_summary_item_deserializes_display_name() {
+        let item: TemplateSummaryItem = serde_json::from_value(serde_json::json!({
+            "template_id": "tpl-1",
+            "display_name": "stable-python",
+            "status": "ready"
+        }))
+        .expect("summary should deserialize");
+
+        assert_eq!(item.display_name, "stable-python");
+    }
+
+    #[test]
+    fn template_response_deserializes_display_name() {
+        let resp: TemplateResponse = serde_json::from_value(serde_json::json!({
+            "ret": {"ret_code": 0, "ret_msg": "success"},
+            "template_id": "tpl-1",
+            "display_name": "stable-python",
+            "created_at": "2026-07-06T00:00:00Z",
+            "status": "ready"
+        }))
+        .expect("response should deserialize");
+
+        assert_eq!(resp.display_name, "stable-python");
+        assert_eq!(resp.created_at, "2026-07-06T00:00:00Z");
+    }
+
+    #[test]
     fn get_sandbox_prefers_sandbox_container_timestamps_and_host() {
         let payload = serde_json::json!({
             "requestID": "req-1",
@@ -2329,4 +2490,107 @@ mod tests {
             Some(1713953785140309977)
         );
     }
+}
+
+// ─── Volume APIs ─────────────────────────────────────────────────────────────
+//
+// Wire types for /cube/volume* endpoints on CubeMaster.
+
+/// Volume resource as returned by CubeMaster.
+#[derive(Debug, Deserialize, Clone)]
+pub struct CubeMasterVolume {
+    #[serde(default, alias = "volumeID")]
+    pub volume_id: String,
+    #[serde(default)]
+    pub name: String,
+    /// Auth token used by volume-content service; present on create/get.
+    #[serde(default)]
+    pub token: String,
+}
+
+/// GET /cube/volume — request context.
+#[derive(Debug)]
+pub struct ListVolumesRequest {
+    pub request_id: String,
+}
+
+/// GET /cube/volume — response.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+pub struct ListVolumesResponse {
+    #[serde(rename = "RequestID", alias = "requestID", default)]
+    pub request_id: String,
+    pub ret: RetCode,
+    #[serde(default, alias = "data", alias = "volumes")]
+    pub items: Vec<CubeMasterVolume>,
+}
+
+/// POST /cube/volume — request body.
+#[derive(Debug, Serialize)]
+pub struct CreateVolumeRequest {
+    pub request_id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
+}
+
+/// POST /cube/volume — response.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+pub struct CreateVolumeResponse {
+    #[serde(rename = "RequestID", alias = "requestID", default)]
+    pub request_id: String,
+    pub ret: RetCode,
+    pub volume: CubeMasterVolume,
+}
+
+/// GET /cube/volume/{volume_id} — response.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+pub struct GetVolumeResponse {
+    #[serde(rename = "RequestID", alias = "requestID", default)]
+    pub request_id: String,
+    pub ret: RetCode,
+    pub volume: CubeMasterVolume,
+}
+
+/// DELETE /cube/volume/{volume_id} — response.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+pub struct DeleteVolumeResponse {
+    #[serde(rename = "RequestID", alias = "requestID", default)]
+    pub request_id: String,
+    pub ret: RetCode,
+}
+
+// ─── plugin_volume VolumeSource extension ──────────────────────────────────
+//
+// Used when building RunCubeSandboxRequest.volumes[] from a sandbox create
+// request that carries volume_mounts.  Cubelet routes volumes whose
+// VolumeSource has a non-nil plugin_volume field to the VolumePlugin framework.
+
+/// Mirrors cubelet.services.volumeplugin.v1.PluginVolumeSource.
+#[derive(Debug, Serialize, Clone)]
+pub struct PluginVolumeSource {
+    /// Driver name — must match a registered VolumePlugin on the Cubelet node.
+    pub driver: String,
+}
+
+/// Extended VolumeSource that includes plugin_volume alongside the existing
+/// empty_dir field.  Replaces the narrower VolumeSource used in sandbox create.
+#[derive(Debug, Serialize, Clone)]
+pub struct VolumeSourceExt {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub empty_dir: Option<EmptyDir>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_volume: Option<PluginVolumeSource>,
+}
+
+/// VolumeSpec extended with the new VolumeSourceExt.
+#[derive(Debug, Serialize, Clone)]
+pub struct VolumeSpecExt {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub volume_source: Option<VolumeSourceExt>,
 }

@@ -58,6 +58,14 @@ RUN apt-get update \
     && echo "Asia/Shanghai" > /etc/timezone \
     && update-ca-certificates
 
+# Volume plugin host tools (cosfs / coscmd / jq). Script is injected into this
+# package directory by build-release-bundle.sh from
+# deploy/scripts/docker-install-volume-deps.sh (single source; not checked in here).
+COPY docker-install-volume-deps.sh /tmp/docker-install-volume-deps.sh
+RUN chmod +x /tmp/docker-install-volume-deps.sh \
+    && /tmp/docker-install-volume-deps.sh \
+    && rm -f /tmp/docker-install-volume-deps.sh
+
 # --chmod folds the executable bit into the COPY so the (large, cache-busting)
 # binary lands in a single layer instead of being duplicated by a separate
 # `RUN chmod`, which would copy the whole file up into a second layer. The COPY

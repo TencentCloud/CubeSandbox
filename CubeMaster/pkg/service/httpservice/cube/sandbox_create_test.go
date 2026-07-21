@@ -42,7 +42,7 @@ func TestCreateSandboxMapsMissingTemplateToNotFound(t *testing.T) {
 		}
 	}`))
 	rt := &CubeLog.RequestTrace{}
-	resp := createSandbox(httptest.NewRecorder(), req, rt)
+	resp := createSandbox(req, rt)
 
 	got, ok := resp.(*types.Res)
 	if !ok {
@@ -77,7 +77,7 @@ func TestCreateSandboxKeepsOtherTemplateErrorsAsParamsError(t *testing.T) {
 		}
 	}`))
 	rt := &CubeLog.RequestTrace{}
-	resp := createSandbox(httptest.NewRecorder(), req, rt)
+	resp := createSandbox(req, rt)
 
 	got, ok := resp.(*types.Res)
 	if !ok {

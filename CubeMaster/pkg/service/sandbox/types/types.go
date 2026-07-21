@@ -189,6 +189,11 @@ type VolumeSource struct {
 	HostDirVolumeSources *HostDirVolumeSources    `json:"host_dir_volumes,omitempty"`
 
 	Image *imagev1.ImageVolumeSource `protobuf:"bytes,9,opt,name=image,proto3" json:"image,omitempty"`
+
+	// PluginVolume delegates provisioning to a named external VolumePlugin
+	// (built-in, binary or RPC) on the Cubelet node.
+	// Field number 11 matches cubebox.proto VolumeSource.plugin_volume.
+	PluginVolume *PluginVolumeSource `json:"plugin_volume,omitempty"`
 }
 
 type HostDirVolumeSources struct {
@@ -541,10 +546,15 @@ type ContainerOverrides struct {
 
 type CreateTemplateFromImageReq struct {
 	*Request
-	SourceImageRef     string              `json:"source_image_ref,omitempty" p:"source_image_ref" v:"required"`
-	RegistryUsername   string              `json:"registry_username,omitempty"`
-	RegistryPassword   string              `json:"registry_password,omitempty"`
-	TemplateID         string              `json:"template_id,omitempty" p:"template_id"`
+	SourceImageRef   string `json:"source_image_ref,omitempty" p:"source_image_ref" v:"required"`
+	RegistryUsername string `json:"registry_username,omitempty"`
+	RegistryPassword string `json:"registry_password,omitempty"`
+	TemplateID       string `json:"template_id,omitempty" p:"template_id"`
+	// Alias is a human-readable, stable name for the template. When set,
+	// sandboxes can reference the template by this alias instead of the
+	// auto-generated template ID, surviving rebuilds that produce a new ID.
+	// Valid: ^[a-z0-9][a-z0-9-]{0,63}$ , must not start with tpl-/snap-.
+	Alias              string              `json:"alias,omitempty"`
 	InstanceType       string              `json:"instance_type,omitempty"`
 	NetworkType        string              `json:"network_type,omitempty"`
 	CubeNetworkConfig  *CubeNetworkConfig  `json:"cube_network_config,omitempty"`
@@ -565,6 +575,11 @@ type CreateTemplateFromImageReq struct {
 	//   false → skip the bake entirely
 	// See design/cube-egress-ca-bake.md.
 	WithCubeCA *bool `json:"with_cube_ca,omitempty"`
+
+	// EnableIvshmem controls whether the template build sandbox should boot
+	// with ivshmem enabled so the captured snapshot already contains the
+	// device topology.
+	EnableIvshmem *bool `json:"enable_ivshmem,omitempty"`
 }
 
 type RedoTemplateFromImageReq struct {
@@ -754,4 +769,15 @@ type InstanceTypeQuotaItem struct {
 	CPUType string `json:"cpu_type,omitempty"`
 	CPU     int64  `json:"cpu,omitempty"`
 	Memory  int64  `json:"memory,omitempty"`
+}
+
+// PluginVolumeSource mirrors cubelet.services.volumeplugin.v1.PluginVolumeSource.
+// It selects an external VolumePlugin on the Cubelet node by driver name.
+type PluginVolumeSource struct {
+	// Driver is the registered plugin name, e.g. "nfs", "cos", "host-mount".
+	// Must match a VolumePlugin registered in Cubelet's volume.Manager.
+	Driver string `json:"driver"`
+	// Options are driver-specific key-value pairs forwarded verbatim to the
+	// Node Hook plugin.  At minimum contains "volume_id".
+	Options map[string]string `json:"options,omitempty"`
 }

@@ -29,8 +29,7 @@ var (
 	createSandboxRegisterRuntimeRefWithReplicaFn    = templatecenter.RegisterSnapshotRuntimeRefForCreatedSandboxWithReplica
 )
 
-func createSandbox(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	_ = w
+func createSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	rt.RetCode = -1
 	rsp := &types.Res{
 		Ret: &types.Ret{

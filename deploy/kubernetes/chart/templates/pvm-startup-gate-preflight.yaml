@@ -1,0 +1,163 @@
+{{- if and (eq (include "cube.startupGateEnabled" .) "true") .Values.bootstrap.pvmHostKernel.startupGate.requirePreflight }}
+{{- $hookAnnotations := dict
+  "helm.sh/hook" "pre-install,pre-upgrade"
+  "helm.sh/hook-weight" "-100"
+  "helm.sh/hook-delete-policy" "before-hook-creation,hook-succeeded,hook-failed"
+-}}
+{{- $preflightBase := include "cube.fullname" . | trunc 43 | trimSuffix "-" -}}
+{{- $preflightClusterName := printf "cube-pf-%s-%s" $preflightBase (include "cube.releaseIdentityHash" .) -}}
+{{- $nodeSelector := "" -}}
+{{- $first := true -}}
+{{- range $key := keys .Values.placement.pvm.nodeSelector | sortAlpha -}}
+{{- if not $first -}}{{- $nodeSelector = print $nodeSelector "," -}}{{- end -}}
+{{- $nodeSelector = printf "%s%s=%s" $nodeSelector $key (index $.Values.placement.pvm.nodeSelector $key) -}}
+{{- $first = false -}}
+{{- end -}}
+{{- $pullSecrets := list -}}
+{{- range .Values.imagePullSecrets -}}
+{{- $pullSecrets = append $pullSecrets .name -}}
+{{- end -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "cube.fullname" . }}-pvm-preflight
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+  annotations:
+    {{- toYaml $hookAnnotations | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $preflightClusterName }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+  annotations:
+    {{- toYaml $hookAnnotations | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    # patch/update: preflight auto-ensures pvm-not-ready on not-ready pvm nodes
+    verbs: ["get", "list", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $preflightClusterName }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+  annotations:
+    {{- toYaml $hookAnnotations | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $preflightClusterName }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cube.fullname" . }}-pvm-preflight
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cube.fullname" . }}-pvm-preflight
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+  annotations:
+    {{- toYaml $hookAnnotations | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "cube.fullname" . }}-pvm-preflight
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+  annotations:
+    {{- toYaml $hookAnnotations | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "cube.fullname" . }}-pvm-preflight
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cube.fullname" . }}-pvm-preflight
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "cube.fullname" . }}-pvm-preflight
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pvm-preflight
+  annotations:
+    {{- toYaml $hookAnnotations | nindent 4 }}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ .Values.bootstrap.pvmHostKernel.startupGate.preflightTimeoutSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: pvm-preflight
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "cube.fullname" . }}-pvm-preflight
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      tolerations:
+        {{- with .Values.placement.pvm.tolerations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        - key: {{ .Values.bootstrap.pvmHostKernel.startupGate.taintKey }}
+          operator: Exists
+          effect: {{ .Values.bootstrap.pvmHostKernel.startupGate.effect }}
+      containers:
+        - name: preflight
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.pvmHostBootstrap "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.pvmHostBootstrap.pullPolicy }}
+          command: ["/usr/bin/tini", "-s", "--", "/scripts/pvm-startup-gate-preflight.sh"]
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NODE_SELECTOR
+              value: {{ $nodeSelector | quote }}
+            - name: TAINT_KEY
+              value: {{ .Values.bootstrap.pvmHostKernel.startupGate.taintKey | quote }}
+            - name: TAINT_EFFECT
+              value: {{ .Values.bootstrap.pvmHostKernel.startupGate.effect | quote }}
+            - name: PREFLIGHT_TIMEOUT_SECONDS
+              value: {{ .Values.bootstrap.pvmHostKernel.startupGate.preflightTimeoutSeconds | quote }}
+            - name: RELEASE_NAME
+              value: {{ .Release.Name | quote }}
+            - name: IS_UPGRADE
+              value: {{ .Release.IsUpgrade | quote }}
+            - name: CHECK_IMAGE
+              value: {{ include "cube.cubeImage" (dict "image" .Values.images.pvmHostBootstrap "context" $) | quote }}
+            - name: CHECK_IMAGE_PULL_POLICY
+              value: {{ .Values.images.pvmHostBootstrap.pullPolicy | quote }}
+            - name: PREFLIGHT_SERVICE_ACCOUNT
+              value: {{ printf "%s-pvm-preflight" (include "cube.fullname" .) | quote }}
+            - name: IMAGE_PULL_SECRET_NAMES
+              value: {{ join "," $pullSecrets | quote }}
+            - name: STATE_DIR
+              value: {{ .Values.hostPaths.bootstrapState | quote }}
+            - name: DESIRED_KERNEL_PATTERN
+              value: {{ .Values.bootstrap.pvmHostKernel.desiredKernelPattern | quote }}
+            - name: KERNEL_BOOT_ARGS
+              value: {{ .Values.bootstrap.pvmHostKernel.bootArgs | quote }}
+{{- end }}

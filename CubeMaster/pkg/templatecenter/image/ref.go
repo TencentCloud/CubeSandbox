@@ -5,8 +5,40 @@
 package image
 
 import (
+	"errors"
+	"fmt"
+	"regexp"
 	"strings"
+
+	"github.com/google/go-containerregistry/pkg/name"
 )
+
+// imageRefAllowedPattern is the strict character whitelist for image
+// references. It permits exactly the characters that appear in legitimate
+// registry/repository[:tag][@algo:hexdigest] references.
+var imageRefAllowedPattern = regexp.MustCompile(`^[A-Za-z0-9._:/@-]+$`)
+
+// ValidateImageRef guards every external image consumer against argument
+// injection and rejects syntactically invalid Docker/OCI references.
+//
+// The optional docker:// transport is accepted for compatibility with skopeo,
+// but it is not passed to the semantic parser.
+func ValidateImageRef(imageRef string) error {
+	rawRef := strings.TrimPrefix(imageRef, "docker://")
+	if rawRef == "" {
+		return errors.New("empty image reference")
+	}
+	if strings.HasPrefix(rawRef, "docker://") {
+		return fmt.Errorf("invalid image reference: %s", imageRef)
+	}
+	if strings.HasPrefix(rawRef, "-") || !imageRefAllowedPattern.MatchString(rawRef) {
+		return fmt.Errorf("invalid image reference: %s", imageRef)
+	}
+	if _, err := name.ParseReference(rawRef); err != nil {
+		return fmt.Errorf("invalid image reference %q: %w", imageRef, err)
+	}
+	return nil
+}
 
 func skopeoDockerImageRef(imageRef string) string {
 	if strings.HasPrefix(imageRef, "docker://") {

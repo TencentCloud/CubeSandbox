@@ -163,7 +163,7 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 		})
 		return
 	}
-	if _, err := ensureTemplateDefinition(ctx, req.TemplateID, storedReq, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations)); err != nil {
+	if _, err := ensureTemplateDefinitionWithOptions(ctx, req.TemplateID, storedReq, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), definitionCreateOptions{}); err != nil {
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":          JobStatusFailed,
 			"phase":           JobPhaseCreatingTemplate,
@@ -197,6 +197,15 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 		})
 		return
 	}
+	// Claim alias after READY via the shared helper.
+	claimWarning := ""
+	if info.Status != StatusFailed {
+		warning, displayName := claimAliasAfterReady(ctx, req.TemplateID, req.Alias)
+		claimWarning = warning
+		if displayName != "" {
+			info.DisplayName = displayName
+		}
+	}
 	resultPayload, _ := json.Marshal(info)
 	jobStatus := JobStatusReady
 	jobPhase := JobPhaseReady
@@ -209,13 +218,17 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 		jobStatus = JobStatusFailed
 		jobPhase = JobPhaseCreatingTemplate
 	}
+	errorMessage := info.LastError
+	if errorMessage == "" && claimWarning != "" {
+		errorMessage = claimWarning
+	}
 	_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 		"status":          jobStatus,
 		"phase":           jobPhase,
 		"progress":        100,
 		"template_status": info.Status,
 		"result_json":     string(resultPayload),
-		"error_message":   info.LastError,
+		"error_message":   errorMessage,
 	})
 }
 

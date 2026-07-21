@@ -43,28 +43,28 @@ type TemplateBuildStatus struct {
 }
 
 type BuildTemplateOptions struct {
-	Image                string
-	InstanceType         string
-	WritableLayerSize    string
-	ExposedPorts         []uint16
-	ProbePort            *uint16
-	ProbePath            string
-	CPU                  *uint32
-	Memory               *uint32
-	Env                  map[string]string
-	AllowInternetAccess  *bool
-	NetworkType          string
-	Nodes                []string
-	RegistryUsername     string
-	RegistryPassword     string
-	Command              []string
-	Args                 []string
-	DNS                  []string
-	AllowOut             []string
-	DenyOut              []string
+	Image               string
+	InstanceType        string
+	WritableLayerSize   string
+	ExposedPorts        []uint16
+	ProbePort           *uint16
+	ProbePath           string
+	CPU                 *uint32
+	Memory              *uint32
+	Env                 map[string]string
+	AllowInternetAccess *bool
+	NetworkType         string
+	Nodes               []string
+	RegistryUsername    string
+	RegistryPassword    string
+	Command             []string
+	Args                []string
+	DNS                 []string
+	AllowOut            []string
+	DenyOut             []string
 	// Extra is merged into the request payload after the named fields above,
 	// so duplicate keys override those fields to match Python kwargs behavior.
-	Extra                map[string]any
+	Extra map[string]any
 }
 
 func (c *Client) ListTemplates(ctx context.Context) ([]TemplateInfo, error) {

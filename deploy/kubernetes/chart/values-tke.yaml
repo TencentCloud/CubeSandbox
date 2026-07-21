@@ -1,0 +1,70 @@
+# Tencent Cloud TKE preset overrides.
+#
+# Merge on top of the default chart values with:
+#   helm upgrade --install cube ./deploy/kubernetes/chart \
+#     -f deploy/kubernetes/chart/values-tke.yaml \
+#     -f runtime-values.yaml   # your own passwords / advertiseIP / TLS
+#
+# What this file does compared to values.yaml defaults:
+#   1. Provisions a chart-owned CBS StorageClass named "cube-cbs-wffc" and
+#      pins every CubeMaster / MySQL / Redis PVC to it.
+#   2. Uses WaitForFirstConsumer volume binding so multi-AZ TKE clusters
+#      create CBS disks in the same AZ as the scheduled Pod.
+#   3. Exposes CubeProxy via a TKE CLB (LoadBalancer Service) and disables
+#      chart Ingress. qcloud Ingress is L7 and only accepts NodePort/LB
+#      backends; NodePort is a poor fit for TLS-in-CubeProxy. Point
+#      cube.app / *.cube.app DNS at the Service EXTERNAL-IP instead.
+#   4. Sets TKE CLB Service annotations for security-group binding. The
+#      security-groups value defaults to CHANGE_ME_TKE_CLB_SECURITY_GROUP;
+#      helm fails render until you override it in a local values file (or
+#      set it to "" if you manage CLB SGs outside Helm).
+#
+# Nothing else about the release is TKE-specific — Cube-owned images are
+# already published to ccr.ccs.tencentyun.com, so the chart's default image
+# repositories work as-is.
+
+storageClass:
+  create: true
+  name: cube-cbs-wffc
+  provisioner: com.tencent.cloud.csi.cbs
+  reclaimPolicy: Delete
+  volumeBindingMode: WaitForFirstConsumer
+  parameters:
+    type: cbs
+
+controlPlane:
+  master:
+    persistence:
+      storageClassName: cube-cbs-wffc
+
+mysql:
+  persistence:
+    storageClassName: cube-cbs-wffc
+
+redis:
+  persistence:
+    storageClassName: cube-cbs-wffc
+
+cubeProxy:
+  service:
+    type: LoadBalancer
+    # TKE CLB annotations. Override security-groups in your runtime values —
+    # do not commit real SG ids into this preset. Helm refuses to render while
+    # the CHANGE_ME_* sentinel remains
+    #
+    # Example runtime override:
+    #   cubeProxy:
+    #     service:
+    #       annotations:
+    #         service.cloud.tencent.com/security-groups: "sg-xxxxxxxx"
+    #         # multiple: "sg-aaa,sg-bbb"
+    #   # Or clear if you manage CLB SGs outside Helm:
+    #   #     service.cloud.tencent.com/security-groups: ""
+    annotations:
+      # CLB → backend default pass-through; pair with security-groups below.
+      # See: https://cloud.tencent.com/document/product/457/51258
+      service.cloud.tencent.com/pass-to-target: "true"
+      # REPLACE via -f override with your VPC security group id(s).
+      service.cloud.tencent.com/security-groups: "CHANGE_ME_TKE_CLB_SECURITY_GROUP"
+  ingress:
+    enabled: false

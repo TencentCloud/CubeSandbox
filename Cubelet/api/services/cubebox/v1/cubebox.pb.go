@@ -13,6 +13,7 @@ package cubebox
 import (
 	v11 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	v1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
+	vpv1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/volumeplugin/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -2539,7 +2540,10 @@ type VolumeSource struct {
 	// host_dir_volumes shares host directories into the container via virtiofs.
 	HostDirVolumes *HostDirVolumeSources `protobuf:"bytes,7,opt,name=host_dir_volumes,json=hostDirVolumes,proto3" json:"host_dir_volumes,omitempty"`
 	// image volume source for image volume mount
-	Image         *v1.ImageVolumeSource `protobuf:"bytes,9,opt,name=image,proto3" json:"image,omitempty"`
+	Image *v1.ImageVolumeSource `protobuf:"bytes,9,opt,name=image,proto3" json:"image,omitempty"`
+	// plugin_volume delegates provisioning to a named external VolumePlugin.
+	// Field 11 matches the proto definition in volumeplugin.proto.
+	PluginVolume  *vpv1.PluginVolumeSource `protobuf:"bytes,11,opt,name=plugin_volume,json=pluginVolume,proto3" json:"plugin_volume,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2598,6 +2602,13 @@ func (x *VolumeSource) GetHostDirVolumes() *HostDirVolumeSources {
 func (x *VolumeSource) GetImage() *v1.ImageVolumeSource {
 	if x != nil {
 		return x.Image
+	}
+	return nil
+}
+
+func (x *VolumeSource) GetPluginVolume() *vpv1.PluginVolumeSource {
+	if x != nil {
+		return x.PluginVolume
 	}
 	return nil
 }

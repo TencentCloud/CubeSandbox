@@ -790,6 +790,11 @@ do_nat:
 	return TCP_NAT_PACK(sess->node_ifindex, TCP_NAT_OK);
 }
 
+static __always_inline bool dns_policy_enabled(const struct mvm_meta *mvm_meta)
+{
+	return mvm_meta && mvm_meta->dns_policy_flags;
+}
+
 /* Parse one DNS QNAME chunk and dispatch to reverse or finish stage. */
 SEC("tc")
 int dns_parse_chunk(struct __sk_buff *skb)

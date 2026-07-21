@@ -3,7 +3,7 @@
 BINARY  := bin/cube-bench
 GOFLAGS ?=
 
-.PHONY: build clean help
+.PHONY: build clean fmt help
 
 ## build: compile the benchmark binary (default)
 build: $(BINARY)
@@ -12,6 +12,10 @@ $(BINARY):
 	@mkdir -p bin
 	go build $(GOFLAGS) -o $(BINARY) .
 	@echo "Built: $(BINARY)"
+
+## fmt: format Go sources
+fmt:
+	go fmt ./...
 
 ## clean: remove compiled binary
 clean:

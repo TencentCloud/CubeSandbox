@@ -1,0 +1,87 @@
+{{- if eq (include "cube.cubemastercliEnabled" .) "true" }}
+{{- $cubemastercli := default dict .Values.cubemastercli -}}
+{{- $images := default dict .Values.images -}}
+{{- $image := default (dict "repository" "ccr.ccs.tencentyun.com/cubesandbox-chart/cubemastercli" "tag" "v0.5.1" "pullPolicy" "Always") (get $images "cubemastercli") -}}
+apiVersion: {{ include "cube.cloneSetAPIVersion" . }}
+kind: CloneSet
+metadata:
+  name: {{ include "cube.cubemastercliName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cubemastercli
+spec:
+  replicas: {{ dig "replicas" 1 $cubemastercli }}
+  {{- include "cube.cloneSetUpdateStrategy" . | nindent 2 }}
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: cubemastercli
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: cubemastercli
+      {{- with (dig "podAnnotations" dict $cubemastercli) }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      terminationGracePeriodSeconds: 5
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      containers:
+        - name: cubemastercli
+          image: {{ include "cube.cubeImage" (dict "image" $image "context" $) | quote }}
+          imagePullPolicy: {{ dig "pullPolicy" "Always" $image }}
+          {{- with (dig "command" list $cubemastercli) }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with (dig "args" list $cubemastercli) }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: CUBE_RELEASE
+              value: {{ .Release.Name | quote }}
+            - name: CUBE_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: CUBE_MASTER_ENDPOINT
+              value: {{ include "cube.cubemastercliMasterEndpoint" . | quote }}
+            - name: CUBEMASTERCLI_ADDRESS
+              value: {{ include "cube.cubemastercliMasterAddress" . | quote }}
+            - name: CUBEMASTERCLI_PORT
+              value: {{ include "cube.cubemastercliMasterPort" . | quote }}
+            {{- with (dig "env" list $cubemastercli) }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if dig "probes" "readiness" "enabled" true $cubemastercli }}
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - cubemastercli --address "${CUBEMASTERCLI_ADDRESS}" --port "${CUBEMASTERCLI_PORT}" node list >/tmp/cubemastercli-node-list.out
+            initialDelaySeconds: {{ dig "probes" "readiness" "initialDelaySeconds" 5 $cubemastercli }}
+            periodSeconds: {{ dig "probes" "readiness" "periodSeconds" 10 $cubemastercli }}
+            failureThreshold: {{ dig "probes" "readiness" "failureThreshold" 12 $cubemastercli }}
+          {{- end }}
+          {{- if dig "probes" "liveness" "enabled" true $cubemastercli }}
+          livenessProbe:
+            exec:
+              command:
+                - /usr/local/bin/cubemastercli
+                - --help
+            initialDelaySeconds: {{ dig "probes" "liveness" "initialDelaySeconds" 30 $cubemastercli }}
+            periodSeconds: {{ dig "probes" "liveness" "periodSeconds" 20 $cubemastercli }}
+            failureThreshold: {{ dig "probes" "liveness" "failureThreshold" 6 $cubemastercli }}
+          {{- end }}
+          {{- with (dig "resources" dict $cubemastercli) }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

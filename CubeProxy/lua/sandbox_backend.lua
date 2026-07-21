@@ -19,10 +19,13 @@ local _M = { _VERSION = "0.01" }
 --
 -- Both args are the raw values stored in Redis (string form). expected_token
 -- being empty while allow_public is "false" indicates a server-side
--- inconsistency. Both failure paths return 404 (not 403/500) so that a
--- caller cannot distinguish "sandbox exists but access denied" from
--- "sandbox does not exist"; silently letting the request through would be
--- worse.
+-- inconsistency. Both failure paths return 403 (not the collapsed 404 used
+-- for "sandbox not found") to preserve E2B behavioral compatibility — E2B's
+-- restrict-public-access contract, our public docs, and the SDK all promise
+-- that unauthenticated / mismatched tokens are rejected with 403. This does
+-- leak the fact that the sandbox exists (vs. non-existent → 404), but the
+-- sandbox ID space is already unguessable and the wire compatibility win
+-- outweighs the enumeration signal.
 local function enforce_traffic_token(allow_public, expected_token, ins_id)
     if allow_public ~= "false" then
         return
@@ -31,7 +34,7 @@ local function enforce_traffic_token(allow_public, expected_token, ins_id)
         ngx.log(ngx.ERR, "LEVEL_ERROR||",
             string.format("request %s sandbox %s marked restricted but token missing in metadata",
                 ngx.var.http_x_cube_request_id, ins_id))
-        utils:respond_not_found()
+        utils:respond_forbidden()
     end
     local provided = ngx.var.http_e2b_traffic_access_token
                   or ngx.var.http_cube_traffic_access_token
@@ -39,7 +42,7 @@ local function enforce_traffic_token(allow_public, expected_token, ins_id)
         ngx.log(ngx.ERR, "LEVEL_WARN||",
             string.format("request %s sandbox %s traffic token mismatch",
                 ngx.var.http_x_cube_request_id, ins_id))
-        utils:respond_not_found()
+        utils:respond_forbidden()
     end
 end
 

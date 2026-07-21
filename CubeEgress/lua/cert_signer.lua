@@ -130,7 +130,8 @@ local function sign_leaf(sni, dst_ip)
     elseif dst_ip then
         sans:add("IP", dst_ip)
     end
-    cert:add_extension(ext_lib.new("subjectAltName", sans))
+    local ok_san, err_san = cert:set_subject_alt_name(sans)
+    if not ok_san then return nil, "set SAN: " .. tostring(err_san) end
 
     cert:add_extension(ext_lib.new("basicConstraints", "critical,CA:FALSE"))
     cert:add_extension(ext_lib.new("keyUsage",

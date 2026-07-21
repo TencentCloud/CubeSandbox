@@ -2212,6 +2212,7 @@ class TestTemplateAPI:
                 dns=["8.8.8.8", "1.1.1.1"],
                 allow_out=["172.67.0.0/16"],
                 deny_out=["10.0.0.0/8"],
+                enable_ivshmem=True,
                 config=config,
             )
 
@@ -2229,6 +2230,7 @@ class TestTemplateAPI:
                 "dns": ["8.8.8.8", "1.1.1.1"],
                 "allowOut": ["172.67.0.0/16"],
                 "denyOut": ["10.0.0.0/8"],
+                "enableIvshmem": True,
             },
             headers={"Content-Type": "application/json"},
         )

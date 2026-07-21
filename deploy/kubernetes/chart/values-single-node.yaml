@@ -1,0 +1,49 @@
+# Single-node mixed control/compute profile.
+# The node must carry both cube-control=true and cube-node=true labels.
+#
+# Cubevs CIDR inherits values.yaml default (172.16.0.0/18). Helm preflight
+# rejects overlap with cluster Service CIDR (often 192.168.0.0/16 on single-node).
+placement:
+  controlPlane:
+    nodeSelector:
+      cube.tencent.com/cube-control: "true"
+    tolerations:
+      - key: cube.tencent.com/control
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+      - key: cube.tencent.com/compute
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+  compute:
+    nodeSelector:
+      cube.tencent.com/cube-node: "true"
+    tolerations:
+      - key: cube.tencent.com/control
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+      - key: cube.tencent.com/compute
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+  pvm:
+    nodeSelector:
+      cube.tencent.com/cube-node: "true"
+      cube.tencent.com/allow-pvm-bootstrap: "true"
+    tolerations:
+      - key: cube.tencent.com/control
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+      - key: cube.tencent.com/compute
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+
+bootstrap:
+  pvmHostKernel:
+    startupGate:
+      enabled: true
+      requirePreflight: true

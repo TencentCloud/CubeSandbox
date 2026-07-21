@@ -415,3 +415,190 @@ func TestCollectCubeEgressDegradesWithoutMarker(t *testing.T) {
 		t.Errorf("cube-egress must NOT be reported when version marker is absent")
 	}
 }
+
+func TestCollectAgentVersionFileWithoutManifest(t *testing.T) {
+	dir := t.TempDir()
+	imgDir := filepath.Join(dir, "cube-image")
+	if err := os.MkdirAll(imgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(imgDir, "version"), []byte("guest-v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(imgDir, "agent-version"), []byte("agent-v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewCollector(dir)
+	got := c.Collect()
+
+	agent, ok := versionOf(t, got, ComponentCubeAgent)
+	if !ok || agent.Version != "agent-v1" || agent.Source != SourceFile {
+		t.Fatalf("cube-agent from agent-version file, got %+v ok=%v", agent, ok)
+	}
+}
+
+func TestCollectVersionJSONWithoutManifest(t *testing.T) {
+	dir := t.TempDir()
+	na := filepath.Join(dir, "network-agent")
+	if err := os.MkdirAll(na, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{
+  "schema_version": 1,
+  "components": {
+    "network-agent": {"version": "na-1.0", "commit": "abc"}
+  }
+}`
+	if err := os.WriteFile(filepath.Join(na, "version.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewCollector(dir)
+	got := c.Collect()
+	v, ok := versionOf(t, got, "network-agent")
+	if !ok || v.Version != "na-1.0" || v.Source != SourceComponentJSON {
+		t.Fatalf("network-agent from version.json, got %+v ok=%v", v, ok)
+	}
+}
+
+func TestCollectKernelFromVersionJSONAndActiveSymlink(t *testing.T) {
+	dir := t.TempDir()
+	mkKernelLayout(t, dir, "vmlinux-pvm")
+	body := `{
+  "schema_version": 1,
+  "variants": {
+    "bm": {"version": "bm@sha256:bm"},
+    "pvm": {"version": "pvm@sha256:pvm"}
+  }
+}`
+	if err := os.WriteFile(filepath.Join(dir, "cube-kernel-scf", "version.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewCollector(dir)
+	got := c.Collect()
+	k, ok := versionOf(t, got, ComponentKernel)
+	if !ok || k.Version != "pvm@sha256:pvm" || k.Variant != "pvm" || k.Source != SourceComponentJSON {
+		t.Fatalf("kernel from version.json+symlink, got %+v ok=%v", k, ok)
+	}
+}
+
+func TestCollectReportMarksMalformedJSONIncomplete(t *testing.T) {
+	dir := t.TempDir()
+	na := filepath.Join(dir, "network-agent")
+	if err := os.MkdirAll(na, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(na, "version.json"), []byte("{not-json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := NewCollector(dir)
+	report := c.CollectReport()
+	if !report.Incomplete {
+		t.Fatal("expected incomplete on malformed version.json")
+	}
+}
+
+func TestCollectEgressVersionJSON(t *testing.T) {
+	dir := t.TempDir()
+	eg := filepath.Join(dir, "cube-egress")
+	if err := os.MkdirAll(eg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"schema_version":1,"components":{"cube-egress":{"version":"egress-from-json"}}}`
+	if err := os.WriteFile(filepath.Join(eg, "version.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(eg, "version"), []byte("marker-should-lose\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := NewCollector(dir)
+	got := c.Collect()
+	v, ok := versionOf(t, got, ComponentCubeEgress)
+	if !ok || v.Version != "egress-from-json" {
+		t.Fatalf("cube-egress from version.json, got %+v ok=%v", v, ok)
+	}
+	if v.Source != SourceComponentJSON {
+		t.Fatalf("source=%s, want %s", v.Source, SourceComponentJSON)
+	}
+}
+
+func TestCollectStageGapMarksIncomplete(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".staged-network-agent"), []byte("staged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Sentinel present but network-agent/ directory missing → mid-stage gap.
+	c := NewCollector(dir)
+	report := c.CollectReport()
+	if !report.Incomplete {
+		t.Fatal("expected incomplete when staged sentinel exists without component dir")
+	}
+}
+
+func TestCollectStagingMarkerMarksIncomplete(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".staging-cube-guest"), []byte("staging\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := NewCollector(dir)
+	report := c.CollectReport()
+	if !report.Incomplete {
+		t.Fatal("expected incomplete while .staging-* marker is present")
+	}
+}
+
+func TestCollectMalformedJSONDoesNotFallBackToMarker(t *testing.T) {
+	dir := t.TempDir()
+	img := filepath.Join(dir, "cube-image")
+	if err := os.MkdirAll(img, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(img, "version.json"), []byte("{bad"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(img, "version"), []byte("legacy-guest\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(img, "agent-version"), []byte("legacy-agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := NewCollector(dir)
+	report := c.CollectReport()
+	if !report.Incomplete {
+		t.Fatal("expected incomplete on malformed cube-image/version.json")
+	}
+	if _, ok := versionOf(t, report.Versions, ComponentGuestImage); ok {
+		t.Fatal("malformed version.json must not fall back to guest-image marker")
+	}
+	if _, ok := versionOf(t, report.Versions, ComponentCubeAgent); ok {
+		t.Fatal("malformed version.json must not fall back to agent-version marker")
+	}
+}
+
+func TestCollectKernelPrefersVmlinuxActiveOverArtifactSymlink(t *testing.T) {
+	dir := t.TempDir()
+	boot := t.TempDir()
+	mkKernelLayout(t, dir, "vmlinux-bm") // artifact default still bm
+	body := `{
+  "schema_version": 1,
+  "variants": {
+    "bm": {"version": "bm@sha256:bm"},
+    "pvm": {"version": "pvm@sha256:pvm"}
+  }
+}`
+	if err := os.WriteFile(filepath.Join(dir, "cube-kernel-scf", "version.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "cube-kernel-scf", "vmlinux-pvm")
+	if err := os.Symlink(target, filepath.Join(boot, "vmlinux-active")); err != nil {
+		t.Fatal(err)
+	}
+	c := NewCollectorWithDirs(dir, boot)
+	got := c.Collect()
+	k, ok := versionOf(t, got, ComponentKernel)
+	if !ok || k.Version != "pvm@sha256:pvm" || k.Variant != "pvm" {
+		t.Fatalf("vmlinux-active should win over artifact bm symlink, got %+v ok=%v", k, ok)
+	}
+}

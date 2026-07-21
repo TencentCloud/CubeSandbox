@@ -23,7 +23,7 @@ use containerd_shim::protos::events::task::TaskOOM;
 use containerd_shim::protos::protobuf::MessageDyn;
 use containerd_shim::{Error, Result};
 use cube_hypervisor::config::RestoreConfig;
-use cube_hypervisor::vm_config::{DeviceConfig, FsConfig};
+use cube_hypervisor::vm_config::{DeviceConfig, FsConfig, IvshmemConfig};
 use cube_hypervisor::{SnapshotType, VmRemoveDeviceData};
 use oci_spec::runtime::{LinuxResources, Process, Spec};
 use protoc::{agent, agent_ttrpc, health, health_ttrpc};
@@ -47,6 +47,8 @@ use super::pmem::Pmem;
 //use tokio_uring::fs::UnixStream;
 
 const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
+const ANNO_ENABLE_IVSHMEM: &str = "cube.master.enable_ivshmem";
+const IVSHMEM_DEFAULT_SIZE: usize = 1 * 1024 * 1024; // 1MB
 
 #[derive(PartialEq, Eq)]
 enum SandBoxState {
@@ -721,6 +723,12 @@ impl SandBox {
             .add_virtiofs(&self.conf.virtiofs)
             .add_vsock(self.id.clone());
 
+        // Enable ivshmem device when the template build path sets the internal annotation.
+        if self.is_ivshmem_enabled() {
+            Self::enable_default_ivshmem(&mut vc, &self.id)
+                .map_err(|e| format!("failed to enable ivshmem: {}", e))?;
+        }
+
         if let Some(fs) = self.conf.fs.as_ref() {
             vc.add_fs(fs);
         }
@@ -760,6 +768,48 @@ impl SandBox {
 
     pub async fn recycle_resource(&mut self) -> CResult<()> {
         Ok(())
+    }
+
+    fn is_ivshmem_enabled(&self) -> bool {
+        self.spec
+            .annotations()
+            .as_ref()
+            .and_then(|anno| anno.get(ANNO_ENABLE_IVSHMEM))
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false)
+    }
+
+    /// Enable the default ivshmem backend at `/dev/shm/ivshmem-{sandbox_id}`.
+    fn enable_default_ivshmem(vc: &mut VmConfig, sandbox_id: &str) -> CResult<()> {
+        let path = Utils::ivshmem_path(sandbox_id)?;
+        Utils::create_ivshmem_file(&path, IVSHMEM_DEFAULT_SIZE)?;
+        vc.enable_ivshmem(path, IVSHMEM_DEFAULT_SIZE);
+        Ok(())
+    }
+
+    /// Build restore-time ivshmem config with the default backend path.
+    fn default_ivshmem_config(sandbox_id: &str) -> CResult<IvshmemConfig> {
+        let path = Utils::ivshmem_path(sandbox_id)?;
+        Ok(IvshmemConfig {
+            path,
+            size: IVSHMEM_DEFAULT_SIZE,
+        })
+    }
+
+    /// Ensure the default ivshmem backend file exists before restore.
+    fn ensure_ivshmem_file(sandbox_id: &str) -> CResult<()> {
+        let path = Utils::ivshmem_path(sandbox_id)?;
+        match stdfs::metadata(&path) {
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Utils::create_ivshmem_file(&path, IVSHMEM_DEFAULT_SIZE)
+            }
+            Err(e) => Err(format!(
+                "failed to stat ivshmem file {}: {}",
+                path.display(),
+                e
+            )),
+        }
     }
 
     fn by_snapshot(&self) -> bool {
@@ -837,6 +887,13 @@ impl SandBox {
     }
 
     async fn restore_vm(&mut self) -> CResult<()> {
+        // Ensure the sandbox-specific ivshmem shm file exists when enabled by template annotation.
+        let enable_ivshmem = self.is_ivshmem_enabled();
+
+        if enable_ivshmem {
+            Self::ensure_ivshmem_file(&self.id)?;
+        }
+
         let ss_file = SnapshotInfo::load(
             self.conf.snapshot_base.as_str(),
             self.conf.vm_res.cpu,
@@ -883,6 +940,11 @@ impl SandBox {
             pmem: Some(pmems),
             vsock: Some(vsock),
             memory_vol_url: restore_memory_vol_url,
+            ivshmem: if enable_ivshmem {
+                Some(Self::default_ivshmem_config(&self.id)?)
+            } else {
+                None
+            },
             ..Default::default()
         };
 

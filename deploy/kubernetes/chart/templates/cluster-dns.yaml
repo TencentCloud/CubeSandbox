@@ -1,0 +1,227 @@
+{{- if eq (include "cube.configureClusterDNS" .) "true" }}
+{{- $domain := .Values.cubeProxy.domain -}}
+{{- $domainRegex := replace "." "\\." $domain -}}
+{{- $svcFQDN := include "cube.proxyServiceFQDN" . -}}
+{{- $clusterDomain := include "cube.clusterDomain" . -}}
+{{- $markerBegin := printf "# BEGIN cube-sandbox-dns %s" .Release.Name -}}
+{{- $markerEnd := printf "# END cube-sandbox-dns %s" .Release.Name -}}
+{{- $coreDNSNamespace := "kube-system" -}}
+{{- $coreDNSConfigMap := "coredns" -}}
+{{- $coreDNSKey := "Corefile" -}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cube.fullname" . }}-cluster-dns
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cluster-dns
+data:
+  domain: {{ $domain | quote }}
+  target: {{ $svcFQDN | quote }}
+  marker.begin: {{ $markerBegin | quote }}
+  marker.end: {{ $markerEnd | quote }}
+  Corefile.snippet: |
+    {{ $markerBegin }}
+    {{ $domain }}:53 {
+        errors
+        cache 60
+        rewrite name exact {{ $domain }}. {{ $svcFQDN }}.
+        rewrite name regex (.*)\.{{ $domainRegex }}\.? {{ $svcFQDN }}.
+        kubernetes {{ $clusterDomain }}
+        forward . /etc/resolv.conf
+    }
+    {{ $markerEnd }}
+  sync.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    mode="${1:?mode apply|remove}"
+    # alpine/k8s kubectl does not auto-load in-cluster config.
+    if [[ -f /var/run/secrets/kubernetes.io/serviceaccount/token ]]; then
+      kubectl() {
+        command kubectl \
+          --server="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}" \
+          --token="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
+          --certificate-authority=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
+          "$@"
+      }
+    fi
+    kubectl_opts=(--request-timeout=30s)
+    marker_begin="$(cat /snippet/marker.begin)"
+    marker_end="$(cat /snippet/marker.end)"
+    if ! kubectl "${kubectl_opts[@]}" -n "${COREDNS_NS}" get configmap "${COREDNS_CM}" >/dev/null 2>&1; then
+      if [[ "${mode}" == "remove" ]]; then
+        echo "coredns configmap missing; nothing to remove"
+        exit 0
+      fi
+      echo "coredns configmap ${COREDNS_NS}/${COREDNS_CM} not found" >&2
+      exit 1
+    fi
+    tmp="$(mktemp)"
+    kubectl "${kubectl_opts[@]}" -n "${COREDNS_NS}" get configmap "${COREDNS_CM}" -o json > "${tmp}.cm.json"
+    jq -r --arg key "${COREDNS_KEY}" '.data[$key] // empty' "${tmp}.cm.json" > "${tmp}.raw"
+    awk -v begin="${marker_begin}" -v end="${marker_end}" '
+      $0 == begin { skip=1; next }
+      $0 == end { skip=0; next }
+      !skip { print }
+    ' "${tmp}.raw" > "${tmp}.clean"
+    if [[ "${mode}" == "apply" ]]; then
+      {
+        cat "${tmp}.clean"
+        printf '\n%s\n' "$(cat /snippet/Corefile.snippet)"
+      } > "${tmp}.new"
+    else
+      cp "${tmp}.clean" "${tmp}.new"
+    fi
+    jq --arg key "${COREDNS_KEY}" --rawfile cf "${tmp}.new" \
+      '.data[$key] = $cf' "${tmp}.cm.json" | kubectl "${kubectl_opts[@]}" apply -f -
+    echo "${mode} ${marker_begin} on ${COREDNS_NS}/${COREDNS_CM}"
+---
+{{/*
+  SA/Role/RoleBinding must be regular release resources (not hooks with
+  hook-succeeded). Hook-succeeded deletes them as soon as they are created,
+  so the apply Job loses RBAC mid-flight and fails with Forbidden.
+  Keep them for pre-delete remove Job; Helm deletes release resources after
+  pre-delete hooks finish.
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "cube.fullname" . }}-cluster-dns
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cluster-dns
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cube.fullname" . }}-cluster-dns
+  namespace: {{ $coreDNSNamespace | quote }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cluster-dns
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ $coreDNSConfigMap | quote }}]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "cube.fullname" . }}-cluster-dns
+  namespace: {{ $coreDNSNamespace | quote }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cluster-dns
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "cube.fullname" . }}-cluster-dns
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cube.fullname" . }}-cluster-dns
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "cube.fullname" . }}-cluster-dns-apply
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cluster-dns
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  ttlSecondsAfterFinished: 600
+  activeDeadlineSeconds: 180
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: cluster-dns
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ include "cube.fullname" . }}-cluster-dns
+      {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: apply
+          image: {{ include "cube.image" .Values.images.kubectl | quote }}
+          imagePullPolicy: {{ .Values.images.kubectl.pullPolicy }}
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: COREDNS_NS
+              value: {{ $coreDNSNamespace | quote }}
+            - name: COREDNS_CM
+              value: {{ $coreDNSConfigMap | quote }}
+            - name: COREDNS_KEY
+              value: {{ $coreDNSKey | quote }}
+          command: ["/bin/bash", "/snippet/sync.sh", "apply"]
+          volumeMounts:
+            - name: snippet
+              mountPath: /snippet
+              readOnly: true
+      volumes:
+        - name: snippet
+          configMap:
+            name: {{ include "cube.fullname" . }}-cluster-dns
+            defaultMode: 0755
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "cube.fullname" . }}-cluster-dns-remove
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cluster-dns
+  annotations:
+    "helm.sh/hook": pre-delete
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  ttlSecondsAfterFinished: 600
+  activeDeadlineSeconds: 180
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: cluster-dns
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ include "cube.fullname" . }}-cluster-dns
+      {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: remove
+          image: {{ include "cube.image" .Values.images.kubectl | quote }}
+          imagePullPolicy: {{ .Values.images.kubectl.pullPolicy }}
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: COREDNS_NS
+              value: {{ $coreDNSNamespace | quote }}
+            - name: COREDNS_CM
+              value: {{ $coreDNSConfigMap | quote }}
+            - name: COREDNS_KEY
+              value: {{ $coreDNSKey | quote }}
+          command: ["/bin/bash", "/snippet/sync.sh", "remove"]
+          volumeMounts:
+            - name: snippet
+              mountPath: /snippet
+              readOnly: true
+      volumes:
+        - name: snippet
+          configMap:
+            name: {{ include "cube.fullname" . }}-cluster-dns
+            defaultMode: 0755
+{{- end }}

@@ -37,6 +37,9 @@ func generateTemplateCreateRequest(req *types.CreateTemplateFromImageReq, artifa
 	if len(req.ExposedPorts) > 0 {
 		annotations[constants.AnnotationsExposedPort] = formatExposedPortsAnnotation(req.ExposedPorts)
 	}
+	if req.EnableIvshmem != nil && *req.EnableIvshmem {
+		annotations[constants.CubeAnnotationEnableIvshmem] = "true"
+	}
 	rootVolume := &types.Volume{
 		Name: rootfsWritableVolumeName,
 		VolumeSource: &types.VolumeSource{

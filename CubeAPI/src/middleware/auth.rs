@@ -49,16 +49,23 @@ fn extract_credential(request: &Request) -> Option<AuthCredential> {
 
 /// Unified auth middleware.
 ///
-/// Behavior:
-/// - If `config.auth_callback_url` is not set (`None`), all requests are allowed through.
-/// - If set:
-///   1. Extract a Bearer token or X-API-Key from the request headers (Bearer takes priority).
-///   2. Forward a POST to the callback URL with:
+/// Behavior (priority order):
+///
+/// 1. **Callback mode** (`auth_callback_url` set):
+///    - Extract a Bearer token or X-API-Key from the request headers (Bearer takes priority).
+///    - Forward a POST to the callback URL with:
 ///      - `Authorization: Bearer <token>`  (when the client used Bearer auth)
 ///      - `X-API-Key: <key>`              (when the client used API Key auth)
 ///      - `X-Request-Path: <original path>` (the path the client requested)
 ///      - `X-Request-Method: <HTTP method>` (the HTTP method the client used, e.g. GET/DELETE)
-///   3. HTTP 200 from callback → allow; any other status → 401 Unauthorized.
+///    - HTTP 200 from callback → allow; any other status → 401 Unauthorized.
+///
+/// 2. **Simple key mode** (`cube_api_key` set, callback unset):
+///    - Extract a Bearer token or X-API-Key from the request headers (Bearer takes priority).
+///    - Compare the extracted credential string against `cube_api_key`.
+///    - Match → allow; mismatch or missing → 401 Unauthorized.
+///
+/// 3. **No auth** (both unset): all requests are allowed through.
 ///
 /// The two credential headers are mutually exclusive; the callback receives whichever
 /// one the client sent. No extra type discriminator is needed.
@@ -74,11 +81,45 @@ pub async fn unified_auth(
     request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    // No callback configured — pass through immediately.
+    // Mode 1: callback auth — if a callback URL is configured, forward the
+    // credential and let the external system decide.
     let callback_url = match state.config.auth_callback_url.as_deref() {
         Some(url) if !url.is_empty() => url.to_string(),
-        _ => return Ok(next.run(request).await),
+        _ => String::new(),
     };
+
+    if callback_url.is_empty() {
+        // Mode 2: simple key auth — if CUBE_API_KEY is configured, compare
+        // the extracted credential against it locally.
+        if let Some(expected_key) = state.config.cube_api_key.as_deref() {
+            if !expected_key.is_empty() {
+                let credential = extract_credential(&request).ok_or_else(|| {
+                    AppError::Unauthorized(
+                        "Missing authentication: provide 'Authorization: Bearer <token>' or 'X-API-Key: <key>'"
+                            .to_string(),
+                    )
+                })?;
+                let provided = match &credential {
+                    AuthCredential::Bearer(t) => t.as_str(),
+                    AuthCredential::ApiKey(k) => k.as_str(),
+                };
+                if provided != expected_key {
+                    tracing::warn!(
+                        path = %request.uri().path(),
+                        method = %request.method(),
+                        "simple key auth: credential mismatch"
+                    );
+                    return Err(AppError::Unauthorized(
+                        "Invalid API key or token".to_string(),
+                    ));
+                }
+            }
+        }
+        // Mode 3: no auth (both unset) or simple-key match — pass through.
+        return Ok(next.run(request).await);
+    }
+
+    // ── Callback mode continuation ──────────────────────────────────────
 
     // Capture the request path and HTTP method to forward to the callback.
     let request_path = request.uri().path().to_string();
@@ -344,5 +385,80 @@ mod tests {
             .collect();
         assert!(methods.contains(&"POST"), "should see POST");
         assert!(methods.contains(&"PATCH"), "should see PATCH");
+    }
+
+    // ── Simple key mode (CUBE_API_KEY) ───────────────────────────────────
+
+    async fn build_test_server_with_api_key(api_key: &str) -> TestServer {
+        let mut config = ServerConfig::default();
+        config.cube_api_key = Some(api_key.to_string());
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        let router = Router::new()
+            .route("/sandboxes/:id", any(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                unified_auth,
+            ))
+            .with_state(state);
+        TestServer::new(router).unwrap()
+    }
+
+    /// CUBE_API_KEY mode: X-API-Key matching the configured key must pass.
+    #[tokio::test]
+    async fn simple_key_match_x_api_key() {
+        let server = build_test_server_with_api_key("secret-123").await;
+        server
+            .get("/sandboxes/abc")
+            .add_header(
+                axum::http::header::HeaderName::from_static("x-api-key"),
+                axum::http::HeaderValue::from_static("secret-123"),
+            )
+            .await
+            .assert_status_ok();
+    }
+
+    /// CUBE_API_KEY mode: Authorization Bearer matching the configured key must pass.
+    #[tokio::test]
+    async fn simple_key_match_bearer() {
+        let server = build_test_server_with_api_key("secret-123").await;
+        server
+            .get("/sandboxes/abc")
+            .add_header(
+                axum::http::header::HeaderName::from_static("authorization"),
+                axum::http::HeaderValue::from_static("Bearer secret-123"),
+            )
+            .await
+            .assert_status_ok();
+    }
+
+    /// CUBE_API_KEY mode: mismatched X-API-Key must return 401.
+    #[tokio::test]
+    async fn simple_key_mismatch() {
+        let server = build_test_server_with_api_key("secret-123").await;
+        server
+            .get("/sandboxes/abc")
+            .add_header(
+                axum::http::header::HeaderName::from_static("x-api-key"),
+                axum::http::HeaderValue::from_static("wrong-key"),
+            )
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+    }
+
+    /// CUBE_API_KEY mode: missing credential must return 401.
+    #[tokio::test]
+    async fn simple_key_missing_credential() {
+        let server = build_test_server_with_api_key("secret-123").await;
+        server
+            .get("/sandboxes/abc")
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+    }
+
+    /// CUBE_API_KEY mode: empty key string should behave as no-auth (passthrough).
+    #[tokio::test]
+    async fn simple_key_empty_passthrough() {
+        let server = build_test_server_with_api_key("").await;
+        server.get("/sandboxes/abc").await.assert_status_ok();
     }
 }

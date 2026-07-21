@@ -6,6 +6,7 @@ package templatecenter
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"reflect"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
 
@@ -142,7 +144,7 @@ func TestCreateTemplateUsesRequestedDistributionScope(t *testing.T) {
 	patches.ApplyFunc(normalizeStoredTemplateRequest, func(in *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.CreateCubeSandboxReq, error) {
 		return in, nil
 	})
-	patches.ApplyFunc(createDefinition, func(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string) error {
+	patches.ApplyFunc(createDefinitionWithOptions, func(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string, _ definitionCreateOptions) error {
 		return nil
 	})
 	patches.ApplyFunc(setTemplateRequestCache, func(templateID string, req *sandboxtypes.CreateCubeSandboxReq) error {
@@ -257,4 +259,145 @@ func TestGetTemplateInfoPopulatesCreatedAtAndImageInfoFromDefinitionAndLatestJob
 	if info.ImageInfo != "docker.io/library/python:3.12@sha256:abcd" {
 		t.Fatalf("unexpected image_info: %q", info.ImageInfo)
 	}
+}
+
+// TestGetTemplateByAliasEmptyAliasReturnsNotFound verifies the empty-alias
+// fast path: an empty (or whitespace-only) alias short-circuits to
+// ErrTemplateNotFound without touching the database, because empty is never
+// a valid alias value (it is the "no alias" sentinel).
+func TestGetTemplateByAliasEmptyAliasReturnsNotFound(t *testing.T) {
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	defer func() { store.db = oldDB }()
+
+	for _, alias := range []string{"", "   "} {
+		_, err := GetTemplateByAlias(context.Background(), alias)
+		if !errors.Is(err, ErrTemplateNotFound) {
+			t.Fatalf("GetTemplateByAlias(%q) error = %v, want ErrTemplateNotFound", alias, err)
+		}
+	}
+}
+
+// TestResolveTemplateIdentifierPassthrough verifies the non-DB code paths of
+// ResolveTemplateIdentifier: template-ID-prefixed identifiers (tpl-/snap-)
+// and the empty identifier are resolved purely from the string, with no
+// alias lookup.
+func TestResolveTemplateIdentifierPassthrough(t *testing.T) {
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	defer func() { store.db = oldDB }()
+
+	tests := []struct {
+		name       string
+		identifier string
+		want       string
+	}{
+		{name: "tpl-prefix", identifier: "tpl-abc123", want: "tpl-abc123"},
+		{name: "snap-prefix", identifier: "snap-abc123", want: "snap-abc123"},
+		{name: "empty", identifier: "", want: ""},
+		{name: "whitespace-only", identifier: "  ", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ResolveTemplateIdentifier(context.Background(), tc.identifier)
+			if err != nil {
+				t.Fatalf("ResolveTemplateIdentifier(%q) returned error: %v", tc.identifier, err)
+			}
+			if got != tc.want {
+				t.Fatalf("ResolveTemplateIdentifier(%q) = %q, want %q", tc.identifier, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestResolveTemplateIdentifierAliasLookup verifies the alias-resolution path:
+// a bare identifier (no tpl-/snap- prefix) is resolved through
+// GetTemplateByAlias. The DB call itself is stubbed via gomonkey so the test
+// exercises the routing logic, not gorm internals.
+func TestResolveTemplateIdentifierAliasLookup(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	patches.ApplyFunc(GetTemplateByAlias, func(_ context.Context, alias string) (*models.TemplateDefinition, error) {
+		if alias == "my-alias" {
+			return &models.TemplateDefinition{TemplateID: "tpl-resolved"}, nil
+		}
+		return nil, ErrTemplateNotFound
+	})
+
+	got, err := ResolveTemplateIdentifier(context.Background(), "my-alias")
+	if err != nil {
+		t.Fatalf("ResolveTemplateIdentifier(\"my-alias\") returned error: %v", err)
+	}
+	if got != "tpl-resolved" {
+		t.Fatalf("ResolveTemplateIdentifier(\"my-alias\") = %q, want \"tpl-resolved\"", got)
+	}
+
+	// Not-found alias must propagate the error verbatim.
+	_, err = ResolveTemplateIdentifier(context.Background(), "missing-alias")
+	if !errors.Is(err, ErrTemplateNotFound) {
+		t.Fatalf("ResolveTemplateIdentifier(\"missing-alias\") error = %v, want ErrTemplateNotFound", err)
+	}
+}
+
+// TestGetTemplateByAliasFiltersByKindExcludesSnapshots is the regression test
+// for issue #584: a snapshot that shares a template's display_name (alias)
+// must never be returned by GetTemplateByAlias. Template aliases are owned
+// exclusively by claimTemplateAlias (a post-READY write path on template-kind
+// rows); snapshots only carry an informational display_name. The read path
+// mirrors that invariant by filtering on alias_key (the STORED generated
+// column, NULL for snapshots); otherwise First() could return the snapshot row
+// and resolve the alias to a snap-* id instead of the tpl-* owner.
+//
+// This package's unit tests stub the DB, and the repo has no in-memory DB
+// driver (no sqlite/sqlmock; dependencies are frozen). To still exercise the
+// REAL query GetTemplateByAlias builds, we run it against a DryRun gorm.DB:
+// SQL is generated but never executed, and in DryRun stmt.SQL/stmt.Vars stay
+// populated, so an after-query callback observes the exact WHERE predicate.
+// SkipInitializeWithVersion keeps Initialize from issuing SELECT VERSION()
+// (which would otherwise need a live MySQL). The captured SQL is therefore
+// exactly what the read path runs in production.
+func TestGetTemplateByAliasFiltersByKindExcludesSnapshots(t *testing.T) {
+	sqlDB, err := sql.Open("mysql", "root:root@tcp(127.0.0.1:3306)/unused?parseTime=true")
+	require.NoError(t, err)
+
+	dryRunDB, err := gorm.Open(mysql.New(mysql.Config{
+		Conn:                      sqlDB,
+		SkipInitializeWithVersion: true,
+	}), &gorm.Config{DryRun: true, DisableAutomaticPing: true})
+	require.NoError(t, err)
+
+	// Capture the WHERE clause GetTemplateByAlias generates.
+	var capturedSQL string
+	var capturedVars []any
+	dryRunDB.Callback().Query().After("gorm:query").Register("capture_alias_query", func(tx *gorm.DB) {
+		capturedSQL = tx.Statement.SQL.String()
+		capturedVars = append(capturedVars, tx.Statement.Vars...)
+	})
+
+	oldDB := store.db
+	store.db = dryRunDB
+	t.Cleanup(func() { store.db = oldDB })
+
+	const alias = "shared-alias"
+	def, err := GetTemplateByAlias(context.Background(), alias)
+	require.NoError(t, err) // DryRun returns a zero-value def; the assertion target is the captured SQL.
+	require.NotNil(t, def)
+
+	// Regression: the WHERE clause must use alias_key (the STORED generated
+	// column) so the unique index is used and snapshots (whose alias_key is
+	// always NULL) can never be returned. Before the fix the predicate
+	// filtered display_name + kind without the index.
+	assert.Contains(t, capturedSQL, "alias_key = ?",
+		"GetTemplateByAlias must filter alias_key=? to use the unique index; got SQL: %s", capturedSQL)
+
+	// The alias value must be bound so the lookup targets the correct alias.
+	aliasBound := false
+	for _, v := range capturedVars {
+		if s, ok := v.(string); ok && s == alias {
+			aliasBound = true
+		}
+	}
+	assert.True(t, aliasBound,
+		"alias must be bound in the query; captured vars: %v", capturedVars)
 }
