@@ -499,6 +499,9 @@ copy_cube_master_component_context() {
   chmod +x "${ctx}/cubemaster"
   overlay_local_bin cubemaster "${ctx}/cubemaster"
   cp -a "${REPO_ROOT}/CubeMaster/docker/tools" "${ctx}/tools"
+  # Keep in sync with deploy/scripts/docker-install-volume-deps.sh
+  cp "${REPO_ROOT}/deploy/scripts/docker-install-volume-deps.sh" "${ctx}/docker-install-volume-deps.sh"
+  chmod +x "${ctx}/docker-install-volume-deps.sh"
 }
 
 copy_cubemastercli_context() {
@@ -731,6 +734,11 @@ build_component_image() {
   mkdir -p "${ctx}/package"
   cp -a "${PACKAGE_DIR}/${pkg_dir}" "${ctx}/package/${pkg_basename}"
   overlay_local_bins_for_component "${name}" "${ctx}" "${pkg_basename}"
+  if [[ "${name}" == "cubelet" ]]; then
+    # Keep in sync with deploy/scripts/docker-install-volume-deps.sh
+    cp "${SCRIPT_DIR}/cubelet/docker-install-volume-deps.sh" "${ctx}/docker-install-volume-deps.sh"
+    chmod +x "${ctx}/docker-install-volume-deps.sh"
+  fi
   build_image "${name}" "${ctx}" \
     --build-arg "CUBE_VERSION=${IMAGE_TAG}" \
     --build-arg "CUBE_KERNEL_BM_VERSION=${CUBE_KERNEL_BM_VERSION:-}" \

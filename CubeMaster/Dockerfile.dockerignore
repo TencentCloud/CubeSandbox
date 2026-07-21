@@ -15,3 +15,7 @@
 !CubeDB/**
 !Cubelet
 !Cubelet/**
+# Volume plugin host tools installer used by the runtime stage.
+!deploy
+!deploy/scripts
+!deploy/scripts/docker-install-volume-deps.sh

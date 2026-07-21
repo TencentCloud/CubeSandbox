@@ -76,6 +76,13 @@ RUN apt-get update \
     && echo "Asia/Shanghai" > /etc/timezone \
     && update-ca-certificates
 
+# Volume plugin host tools (cosfs / coscmd / jq) for containerized CubeMaster.
+# Build context is the repository root (see header comment).
+COPY deploy/scripts/docker-install-volume-deps.sh /tmp/docker-install-volume-deps.sh
+RUN chmod +x /tmp/docker-install-volume-deps.sh \
+    && /tmp/docker-install-volume-deps.sh \
+    && rm -f /tmp/docker-install-volume-deps.sh
+
 COPY --from=builder --chmod=0755 /out/cubemaster /usr/local/services/cubemaster/cubemaster
 
 RUN ["/usr/local/services/cubemaster/cubemaster", "--version"]
