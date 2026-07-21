@@ -109,6 +109,23 @@ cp .env.example .env
 
 ## 5. 运行
 
+### 本地验证（默认不需要沙箱）
+
+```bash
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# Unix: source .venv/bin/activate
+pip install -r requirements.txt
+python verify_local.py
+```
+
+会跑单测、`run_denied.py`、Dockerfile↔`allowlist.py` 漂移检查，以及（若本地有镜像）
+Docker 标记检查。若已设置 `E2B_API_URL` 与 `CUBE_TEMPLATE_ID`，还会尝试
+`run_allowlisted.py`。
+
+> 即使 `http://127.0.0.1:13000/health` 正常，宿主机若没有 `*.cube.app` DNS，
+> allow 路径仍可能报 `getaddrinfo failed`。建议在 **开发虚机内** 跑 allow 脚本（见 §4）。
+
 ### 白名单工具（成功）
 
 ```bash
@@ -166,7 +183,9 @@ agent-tool-allowlist-sandbox/
 ├── README.md
 ├── README_zh.md
 ├── Dockerfile             # 基于官方 sandbox-code 的薄封装
-├── allowlist.py           # 宿主机 argv 门控
+├── allowlist.py           # 宿主机 argv 门控（唯一真相源）
+├── allowlist_sync.py      # 由 allowlist.py 生成 guest 清单正文
+├── verify_local.py        # 本地验证门控
 ├── run_allowlisted.py     # 放行路径 + 产物读回
 ├── run_denied.py          # 拒绝路径（不建沙箱）
 ├── test_allowlist.py      # 本地单测（无需沙箱）

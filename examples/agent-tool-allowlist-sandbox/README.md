@@ -116,6 +116,24 @@ dev VM**, or point a wildcard resolver at the CubeProxy forward ports
 
 ## 5. Run
 
+### Local verification (no sandbox required)
+
+```bash
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# Unix: source .venv/bin/activate
+pip install -r requirements.txt
+python verify_local.py
+```
+
+This runs unit tests, `run_denied.py`, Dockerfile↔`allowlist.py` drift checks, and
+(if present) Docker image marker checks. When `E2B_API_URL` and `CUBE_TEMPLATE_ID`
+are set it also attempts `run_allowlisted.py`.
+
+> Host machines outside the guest DNS path often fail allowlisted runs with
+> `getaddrinfo failed` on `*.cube.app` even when `http://127.0.0.1:13000/health`
+> returns OK. Prefer running allowlisted scripts **inside the dev VM** (see §4).
+
 ### Allowlisted tool (success)
 
 ```bash
@@ -176,7 +194,9 @@ agent-tool-allowlist-sandbox/
 ├── README.md
 ├── README_zh.md
 ├── Dockerfile             # thin wrapper on official sandbox-code
-├── allowlist.py           # host-side argv gate
+├── allowlist.py           # host-side argv gate (source of truth)
+├── allowlist_sync.py      # emit guest allowlist body from allowlist.py
+├── verify_local.py        # local verification gate
 ├── run_allowlisted.py     # allow path + artifact readback
 ├── run_denied.py          # deny path (no sandbox)
 ├── test_allowlist.py      # local unit tests (no sandbox required)
