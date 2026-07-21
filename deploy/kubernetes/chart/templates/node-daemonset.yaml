@@ -22,9 +22,6 @@ spec:
         {{- with .Values.cubeNode.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-        {{- range $slot := list "1" "2" "3" "4" "5" "6" }}
-        cube.tencent.com/slot-{{ $slot }}: {{ index $.Values.cubeNode.placeholderSlots.services $slot | default "" | quote }}
-        {{- end }}
     spec:
       serviceAccountName: {{ include "cube.nodeServiceAccountName" . }}
       automountServiceAccountToken: true
@@ -36,24 +33,15 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- include "cube.computePlacement" . | nindent 6 }}
-      containers:
-        # wait-node-prep: Kruise high-priority sidecar (not init).
-        # Priority 10 starts and becomes Ready before prio-0 run containers.
-        # Freeze wait env/mounts; bumping only images.waitNodePrep may InPlace.
-        # Do NOT attach ConfigMap checksum annotations to this Pod.
+      initContainers:
+        # wait-node-prep: block until bootstrap wrote a matching node-prep-ready
+        # fingerprint, then exit 0 so run containers can start.
         - name: wait-node-prep
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.waitNodePrep "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.waitNodePrep.pullPolicy }}
           env:
             - name: STATE_DIR
               value: {{ .Values.hostPaths.bootstrapState | quote }}
-            - name: KRUISE_CONTAINER_PRIORITY
-              value: "10"
-          readinessProbe:
-            exec:
-              command: ["test", "-f", "/run/wait-node-prep.ready"]
-            periodSeconds: 2
-            failureThreshold: 1
           volumeMounts:
             - name: bootstrap-state
               mountPath: {{ .Values.hostPaths.bootstrapState }}
@@ -61,9 +49,8 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+      containers:
         # Artifact install (shim/kernel/guest) lives in cube-node-installer.
-        # Big Pod container set is frozen for InPlace-only upgrades.
-        # --- run containers (KRUISE_CONTAINER_PRIORITY=0; after wait Ready) ---
         - name: network-agent
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.networkAgent "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.networkAgent.pullPolicy }}
@@ -75,8 +62,6 @@ spec:
               value: network-agent
             - name: CUBE_ROLE
               value: run
-            - name: KRUISE_CONTAINER_PRIORITY
-              value: "0"
           ports:
             - name: network-agent
               containerPort: 19090
@@ -106,8 +91,6 @@ spec:
               value: cubelet
             - name: CUBE_ROLE
               value: run
-            - name: KRUISE_CONTAINER_PRIORITY
-              value: "0"
             {{- with .Values.cubeNode.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -199,8 +182,6 @@ spec:
             # Optional: entrypoint may wait on this sentinel before bootstrap.
             - name: CUBE_WAIT_NETWORK_AGENT_SENTINEL
               value: /usr/local/services/cubetoolbox/.staged-network-agent
-            - name: KRUISE_CONTAINER_PRIORITY
-              value: "0"
           ports:
             - name: egress-admin
               containerPort: 9090
@@ -268,8 +249,6 @@ spec:
             # Optional: entrypoint may wait on this sentinel before applying rules.
             - name: CUBE_WAIT_NETWORK_AGENT_SENTINEL
               value: /usr/local/services/cubetoolbox/.staged-network-agent
-            - name: KRUISE_CONTAINER_PRIORITY
-              value: "0"
           {{- if .Values.cubeEgress.network.probes.readiness.enabled }}
           readinessProbe:
             exec:
@@ -303,31 +282,6 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
         {{- end }}
-        {{- end }}
-        # Frozen placeholder slots: InPlace-replace image/resources later; do not
-        # rename, remount, or change securityContext (those recreate the Big Pod).
-        {{- range $slot := list "1" "2" "3" "4" "5" "6" }}
-        {{- $override := index (default dict $.Values.cubeNode.placeholderSlots.overrides) $slot | default dict }}
-        {{- $pause := $.Values.images.pause }}
-        {{- $imgOverride := default dict $override.image }}
-        {{- $slotImage := dict "repository" ($imgOverride.repository | default $pause.repository) "tag" ($imgOverride.tag | default $pause.tag) "pullPolicy" ($imgOverride.pullPolicy | default $pause.pullPolicy) }}
-        {{- $slotResources := default $.Values.cubeNode.placeholderSlots.resources $override.resources }}
-        - name: cube-slot-{{ $slot }}
-          image: {{ include "cube.cubeImage" (dict "image" $slotImage "context" $) | quote }}
-          imagePullPolicy: {{ $slotImage.pullPolicy }}
-          securityContext:
-            {{- include "cube.nodeDataplaneSecurityContext" $ | nindent 12 }}
-          env:
-            - name: KRUISE_CONTAINER_PRIORITY
-              value: "0"
-            - name: CUBE_SLOT_SERVICE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.annotations['cube.tencent.com/slot-{{ $slot }}']
-          volumeMounts:
-            {{- include "cube.nodeDataplaneVolumeMounts" $ | nindent 12 }}
-          resources:
-            {{- toYaml $slotResources | nindent 12 }}
         {{- end }}
       volumes:
         - name: host-root

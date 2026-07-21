@@ -223,7 +223,7 @@ tolerations:
 
 {{/*
 WebUI OpenResty config: static SPA + /opsapi|/cubeapi/v1/SDK → CubeOps, optional /sandbox/ → CubeProxy.
-Rendered into cube-webui-config and checksum'd so edits roll the CloneSet.
+Rendered into cube-webui-config and checksum'd so edits roll the Deployment.
 */}}
 {{- define "cube.webuiNginxConf" -}}
 {{- $opsUpstream := include "cube.opsUpstream" . -}}
@@ -582,29 +582,25 @@ change bind without editing multiple places.
 {{- end -}}
 
 {{/*
-cube-node / installer / bootstrap always use OpenKruise Advanced DaemonSet
-(hard dependency). Do NOT change this to apps/v1 — that would break InPlace
-and the other compute-plane ADS workloads.
+cube-node / installer / bootstrap use native apps/v1 DaemonSet.
 */}}
 {{- define "cube.nodeDaemonSetAPIVersion" -}}
-apps.kruise.io/v1beta1
+apps/v1
 {{- end -}}
 
 {{/*
-cube-node-pvm uses a native apps/v1 DaemonSet so Pod creation does not depend
-on kruise-manager (see docs/PVM-NATIVE-DS-MIGRATION-PLAN.md).
+cube-node-pvm uses a native apps/v1 DaemonSet.
 */}}
 {{- define "cube.nodePvmDaemonSetAPIVersion" -}}
 apps/v1
 {{- end -}}
 
-{{- define "cube.cloneSetAPIVersion" -}}
-apps.kruise.io/v1alpha1
-{{- end -}}
-
-{{- define "cube.cloneSetUpdateStrategy" -}}
-updateStrategy:
-  {{- toYaml .Values.controlPlane.cloneSetUpdateStrategy | nindent 2 }}
+{{- define "cube.deploymentStrategy" -}}
+strategy:
+  type: {{ .Values.controlPlane.deploymentStrategy.type }}
+  rollingUpdate:
+    maxUnavailable: {{ .Values.controlPlane.deploymentStrategy.rollingUpdate.maxUnavailable }}
+    maxSurge: {{ .Values.controlPlane.deploymentStrategy.rollingUpdate.maxSurge }}
 {{- end -}}
 
 {{- define "cube.startupGateEnabled" -}}
@@ -617,15 +613,15 @@ updateStrategy:
 {{- end -}}
 
 {{/*
-Kubernetes API path prefix for the cube-node Advanced DaemonSet (health-test).
+Kubernetes API path prefix for the cube-node DaemonSet (health-test).
 */}}
 {{- define "cube.nodeDaemonSetAPIPath" -}}
-/apis/apps.kruise.io/v1beta1/namespaces
+/apis/apps/v1/namespaces
 {{- end -}}
 
 {{/*
 Big Pod: shared volumeMounts for component install/run containers.
-Toolbox is mounted whole at the fixed path (InPlace-stable).
+Toolbox is mounted whole at the fixed path.
 */}}
 {{- define "cube.nodeToolboxVolumeMounts" -}}
 - name: toolbox

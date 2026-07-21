@@ -21,9 +21,6 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments", "daemonsets", "statefulsets"]
     verbs: ["get", "list"]
-  - apiGroups: ["apps.kruise.io"]
-    resources: ["daemonsets", "clonesets"]
-    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

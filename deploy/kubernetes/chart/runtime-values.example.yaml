@@ -82,6 +82,18 @@ redis:
 #   network:
 #     tproxyOnIP: "172.16.0.1"
 
+# Optional: Cubelet data disk (/data/cubelet must be XFS with reflink).
+# Default: create a loopback XFS image on first bootstrap (25G).
+# bootstrap:
+#   nodeInit:
+#     dataCubelet:
+#       loopback:
+#         enabled: true
+#         imagePath: /data/cubelet-xfs.img
+#         size: 200G          # only applied when the image file does not exist yet
+# Production with a pre-mounted XFS volume at /data/cubelet:
+#         enabled: false
+
 # Optional: mirror Cube-owned images into a private registry
 # global:
 #   imageRegistry: my-mirror.example.com/cubesandbox

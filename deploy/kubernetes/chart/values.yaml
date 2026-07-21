@@ -35,18 +35,10 @@ images:
     tag: v0.5.1
     pullPolicy: Always
 
-  # Big Pod wait-node-prep sidecar (Kruise priority 10) + bootstrap write-ready/hold.
-  # Freeze wait env/mounts; bumping only this image may InPlace on Big Pod.
+  # Big Pod wait-node-prep initContainer + bootstrap write-ready/hold.
   waitNodePrep:
     repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-wait-node-prep
     tag: v0.5.1
-    pullPolicy: IfNotPresent
-
-  # Big Pod placeholder slots (cube-slot-1..6). Tiny pause image; InPlace-replace
-  # later with a real component image. Delivered by build-cube-images.sh.
-  pause:
-    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/pause
-    tag: "3.9"
     pullPolicy: IfNotPresent
 
   # Big Pod per-component runtime images.
@@ -216,11 +208,12 @@ externalControlPlane:
 controlPlane:
   enabled: true
   namespaceScoped: true
-  # OpenKruise CloneSet is required for all stateless control-plane workloads.
-  cloneSetUpdateStrategy:
-    type: InPlaceIfPossible
-    maxUnavailable: 1
-    maxSurge: 0
+  # Native Deployment rolling strategy for all stateless control-plane workloads.
+  deploymentStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
 
   master:
     enabled: true
@@ -481,15 +474,11 @@ redis:
 cubeNode:
   enabled: true
   podAnnotations: {}
-  # OpenKruise Advanced DaemonSet (apps.kruise.io/v1beta1) is required.
-  # InPlaceIfPossible image upgrades keep cube-node Pod UID / IP / netns stable.
-  # Requires OpenKruise >= 1.9 with Advanced DaemonSet CRD + kruise-daemon.
-  # Default: InPlaceIfPossible. Switch type to OnDelete for fully manual rolls,
-  # or rollingUpdateType to Standard to force recreate (debug / contrast).
+  # Native apps/v1 DaemonSet. Image/tag/resource changes recreate the Pod
+  # (PodIP / netns change; existing sandboxes on that node are interrupted).
   updateStrategy:
     type: RollingUpdate
     rollingUpdate:
-      rollingUpdateType: InPlaceIfPossible
       maxUnavailable: 1
   # Give cubelet/network-agent time to exit cleanly on Pod delete. preStop only
   # signals those processes via pidfile; containerd-shim-cube-rs / microVMs are left alone.
@@ -539,40 +528,6 @@ cubeNode:
     limits:
       memory: "4Gi"
 
-  # Frozen Big Pod placeholder slots (cube-slot-1..6). Always present once
-  # introduced: adding/removing slots recreates the Big Pod (not InPlace).
-  # Mounts/securityContext match cubelet; bump only image/resources/slot
-  # annotations later. services maps slot index -> service name (empty = unused).
-  #
-  # Per-slot overrides (optional): unset fields inherit images.pause and
-  # placeholderSlots.resources. Change only image tag / resources / services
-  # for InPlace; changing imagePullPolicy (or mounts / securityContext /
-  # container name) falls back to recreate.
-  # Example:
-  #   overrides:
-  #     "1":
-  #       image:
-  #         tag: "3.9-inplace-test"
-  #       resources:
-  #         requests: {cpu: "10m", memory: "16Mi"}
-  #         limits: {cpu: "10m", memory: "16Mi"}
-  placeholderSlots:
-    resources:
-      requests:
-        cpu: "1m"
-        memory: "8Mi"
-      limits:
-        cpu: "1m"
-        memory: "8Mi"
-    services:
-      "1": ""
-      "2": ""
-      "3": ""
-      "4": ""
-      "5": ""
-      "6": ""
-    overrides: {}
-
   probes:
     startup:
       enabled: true
@@ -608,12 +563,10 @@ cubeNode:
 # hold PodIP/dataplane.
 cubeNodeInstaller:
   podAnnotations: {}
-  # Standard recreate is intentional: adding install containers must not touch
-  # the Big Pod. Do not require InPlace here.
+  # Recreate is fine: adding install containers must not touch the Big Pod.
   updateStrategy:
     type: RollingUpdate
     rollingUpdate:
-      rollingUpdateType: Standard
       maxUnavailable: 1
   terminationGracePeriodSeconds: 15
   resources:
@@ -634,7 +587,7 @@ cubeNodeBootstrap:
   prepGeneration: "1"
   # How long wait-pvm-host polls pvm-host-ready on PVM-labeled nodes.
   pvmWaitTimeoutSeconds: "900"
-  # Resources for Big Pod wait-node-prep sidecar.
+  # Resources for Big Pod wait-node-prep initContainer.
   waitResources:
     requests:
       cpu: "20m"
@@ -644,7 +597,6 @@ cubeNodeBootstrap:
   updateStrategy:
     type: RollingUpdate
     rollingUpdate:
-      rollingUpdateType: Standard
       maxUnavailable: 1
   terminationGracePeriodSeconds: 30
   resources:
@@ -656,7 +608,7 @@ cubeNodeBootstrap:
 
 # PVM host-kernel DaemonSet (native apps/v1; only on placement.pvm).
 # Bumping pvmHostBootstrap recreates this DS only — not bootstrap or Big Pod.
-# Do not set rollingUpdateType here (ADS-only; validate rejects it).
+# Do not set rollingUpdateType (validate rejects it).
 cubeNodePvm:
   podAnnotations: {}
   updateStrategy:
@@ -964,7 +916,7 @@ hostPaths:
   # (shared by cube-node-pvm, bootstrap DS, and Big Pod wait-node-prep).
   bootstrapState: /var/lib/cube-node-bootstrap
   # Host-persistent toolbox tree. Big Pod mounts this path whole at
-  # /usr/local/services/cubetoolbox (stable volumeMount for InPlace). Installer
+  # /usr/local/services/cubetoolbox. Installer
   # and Big Pod self-stage copy from /opt/cube-image into this tree; preserve
   # dirs such as cube-snapshot / cubebox_os_image / cubeletmnt / cube-vs are not
   # wiped by component installs.

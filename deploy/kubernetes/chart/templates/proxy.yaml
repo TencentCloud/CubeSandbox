@@ -114,8 +114,8 @@ spec:
     name: {{ .Values.cubeProxy.tls.certManager.issuerRef.name | quote }}
 ---
 {{- end }}
-apiVersion: {{ include "cube.cloneSetAPIVersion" . }}
-kind: CloneSet
+apiVersion: apps/v1
+kind: Deployment
 metadata:
   name: {{ include "cube.proxyName" . }}
   labels:
@@ -123,7 +123,7 @@ metadata:
     app.kubernetes.io/component: cube-proxy
 spec:
   replicas: {{ .Values.cubeProxy.replicas }}
-  {{- include "cube.cloneSetUpdateStrategy" . | nindent 2 }}
+  {{- include "cube.deploymentStrategy" . | nindent 2 }}
   selector:
     matchLabels:
       {{- include "cube.selectorLabels" . | nindent 6 }}

@@ -102,7 +102,6 @@ ALL_IMAGES=(
   cube-node-init
   cube-wait-node-prep
   cube-pvm-host-bootstrap
-  pause
 )
 
 # Images that need sandbox-package layout/binaries.
@@ -863,51 +862,22 @@ run_selected_builds() {
     build_image cube-pvm-host-bootstrap "${ctx}"
     record_built cube-pvm-host-bootstrap
   fi
-
-  if should_build pause; then
-    # Chart values default images.pause.tag=3.9 (upstream pause version), not IMAGE_TAG.
-    local pause_tag="${PAUSE_TAG:-3.9}"
-    local pause_ctx="${SCRIPT_DIR}/pause"
-    local pause_dockerfile="${pause_ctx}/Dockerfile"
-    local pause_image="${REGISTRY}/pause:${pause_tag}"
-    local docker_args=(-f "${pause_dockerfile}" -t "${pause_image}")
-    [[ -f "${pause_dockerfile}" ]] || fail "missing pause Dockerfile: ${pause_dockerfile}"
-    if [[ "${NO_CACHE}" == "1" ]]; then
-      docker_args=(--no-cache --pull "${docker_args[@]}")
-    fi
-    log "building ${pause_image} from ${pause_dockerfile}"
-    docker build "${docker_args[@]}" "${pause_ctx}"
-    if [[ "${PUSH}" == "1" ]]; then
-      log "pushing ${pause_image}"
-      docker push "${pause_image}"
-    fi
-    # record_built uses IMAGE_TAG in summary; print pause tag explicitly via BUILT_IMAGES name only
-    BUILT_IMAGES+=("pause")
-    # Override summary line by storing custom - print_summary uses IMAGE_TAG; fix via side channel
-    PAUSE_BUILT_TAG="${pause_tag}"
-  fi
 }
 
 print_summary() {
   local name
-  local tag
   cat <<EOF
 
 Built CubeSandbox images:
 EOF
   for name in "${BUILT_IMAGES[@]}"; do
-    tag="${IMAGE_TAG}"
-    if [[ "${name}" == "pause" ]]; then
-      tag="${PAUSE_BUILT_TAG:-3.9}"
-    fi
-    printf '  %s/%s:%s\n' "${REGISTRY}" "${name}" "${tag}"
+    printf '  %s/%s:%s\n' "${REGISTRY}" "${name}" "${IMAGE_TAG}"
   done
   cat <<EOF
 
 Use these values:
   images.*.repository: ${REGISTRY}/<image-name>
   images.*.tag: ${IMAGE_TAG}
-  images.pause.tag: ${PAUSE_BUILT_TAG:-3.9} (when pause was built)
 
 Template builder is not built by this script. The chart uses a dind image by
 default and can be overridden through images.templateBuilder.* when needed.

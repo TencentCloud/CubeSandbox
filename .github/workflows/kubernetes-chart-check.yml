@@ -33,7 +33,7 @@ jobs:
             --set-string mysql.password=test \
             --set-string mysql.rootPassword=test \
             --set-string redis.password=test >/dev/null
-      - name: Enforce Big Pod InPlace freeze
+      - name: Enforce Big Pod template stability
         run: sh deploy/kubernetes/chart/scripts/test-big-pod-inplace-guard.sh
       - name: Guard PVM native DaemonSet GVK
         run: sh deploy/kubernetes/chart/scripts/test-pvm-native-ds-gvk-guard.sh

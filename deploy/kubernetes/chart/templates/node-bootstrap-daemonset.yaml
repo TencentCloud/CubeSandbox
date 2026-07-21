@@ -14,7 +14,6 @@ spec:
     type: {{ .Values.cubeNodeBootstrap.updateStrategy.type | default "RollingUpdate" }}
     {{- if .Values.cubeNodeBootstrap.updateStrategy.rollingUpdate }}
     rollingUpdate:
-      rollingUpdateType: {{ .Values.cubeNodeBootstrap.updateStrategy.rollingUpdate.rollingUpdateType | default "Standard" }}
       maxUnavailable: {{ .Values.cubeNodeBootstrap.updateStrategy.rollingUpdate.maxUnavailable | default 1 }}
       {{- with .Values.cubeNodeBootstrap.updateStrategy.rollingUpdate.maxSurge }}
       maxSurge: {{ . }}

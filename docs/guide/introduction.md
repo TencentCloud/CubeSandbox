@@ -46,6 +46,7 @@ Cube Sandbox is a **purpose-built infrastructure for AI Agents** — a productio
 * [Digital Assistant (AgentHub)](./digital-assistant.md) — host and manage AI Agent instances.
 * [Self-Build Deployment](./self-build-deploy.md) — single-machine deployment reference.
 * [Multi-Node Cluster Deployment](./multi-node-deploy.md) — scale beyond a single machine.
+* [Kubernetes Deployment](./kubernetes/) — install with Helm on an existing K8s cluster.
 * [Creating Templates from OCI Images](./tutorials/template-from-image.md) — step-by-step template guide.
 * [WebUI Console](./webui.md) — visual management right after install.
 * [Security Proxy & Credential Vault](./security-proxy.md) — CubeEgress domain filtering and auditing.

@@ -2,7 +2,6 @@
 # PVM host-kernel DaemonSet (native apps/v1). Schedules only via placement.pvm
 # (allow-pvm-bootstrap). Non-PVM compute nodes never pull images.pvmHostBootstrap.
 # Reboot-capable; invalidates node-prep / pvm-host-ready sentinels before mutate.
-# Pod creation uses kube-controller-manager — not kruise-manager.
 apiVersion: {{ include "cube.nodePvmDaemonSetAPIVersion" . }}
 kind: DaemonSet
 metadata:

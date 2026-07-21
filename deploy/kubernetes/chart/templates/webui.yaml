@@ -1,6 +1,6 @@
 {{- if and .Values.webui.enabled .Values.controlPlane.enabled (eq (include "cube.opsEnabled" .) "true") }}
-{{- /* Hash full nginx body so ConfigMap edits force a pod roll (InPlace + subPath
-     would otherwise keep a stale file). Mount is a directory (no subPath). */ -}}
+{{- /* Hash full nginx body so ConfigMap edits force a pod roll (directory mount,
+     no subPath). */ -}}
 {{- $nginxBody := include "cube.webuiNginxConf" . -}}
 {{- $nginxChecksum := $nginxBody | sha256sum -}}
 apiVersion: v1
@@ -14,8 +14,8 @@ data:
   nginx.conf: |-
 {{- $nginxBody | nindent 4 }}
 ---
-apiVersion: {{ include "cube.cloneSetAPIVersion" . }}
-kind: CloneSet
+apiVersion: apps/v1
+kind: Deployment
 metadata:
   name: {{ include "cube.webuiName" . }}
   labels:
@@ -23,7 +23,7 @@ metadata:
     app.kubernetes.io/component: webui
 spec:
   replicas: {{ .Values.webui.replicas }}
-  {{- include "cube.cloneSetUpdateStrategy" . | nindent 2 }}
+  {{- include "cube.deploymentStrategy" . | nindent 2 }}
   selector:
     matchLabels:
       {{- include "cube.selectorLabels" . | nindent 6 }}
