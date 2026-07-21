@@ -11,11 +11,29 @@
   "logsEmpty": "暂无日志。",
   "logsEntries": "条",
   "logsRefresh": "立即刷新",
+  "logsUnavailable": "沙箱已结束，日志停止刷新。",
+  "logsError": "日志加载失败，请稍后重试。",
+  "refreshFailed": "状态刷新失败，当前显示的是上次成功获取的数据。",
+  "backToList": "返回沙箱列表",
+  "unavailable": {
+    "title": "沙箱已结束",
+    "badge": "已结束",
+    "description": "该沙箱可能已因超时自动销毁，或已被其他操作删除。"
+  },
+  "notFound": {
+    "title": "找不到沙箱",
+    "description": "请确认沙箱 ID 是否正确，或该沙箱是否已经被删除。"
+  },
+  "loadError": {
+    "title": "沙箱详情加载失败",
+    "description": "暂时无法获取沙箱详情，请检查连接后重试。"
+  },
   "fields": {
     "vcpu": "vCPU",
     "memory": "内存",
     "client": "客户端",
     "alias": "别名",
+    "template": "模板",
     "ends": "到期时间",
     "domain": "域名",
     "started": "启动时间",

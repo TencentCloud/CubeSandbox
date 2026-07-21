@@ -15,7 +15,10 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
 
 // ── Types ────────────────────────────────────────────────────────────────────
-interface MetaEntry { key: string; value: string }
+interface MetaEntry {
+  key: string;
+  value: string;
+}
 
 interface FormState {
   templateID: string;
@@ -49,9 +52,7 @@ function TemplatePicker({
     staleTime: 15_000,
   });
   const staleTemplates = new Set(
-    (compat?.templates ?? [])
-      .filter((row) => row.overall === 'STALE')
-      .map((row) => row.templateID),
+    (compat?.templates ?? []).filter((row) => row.overall === 'STALE').map((row) => row.templateID),
   );
 
   if (isLoading) {
@@ -88,7 +89,15 @@ function TemplatePicker({
             <div className="flex items-center justify-between gap-2">
               <span className="truncate font-mono text-sm font-medium">{tpl.templateID}</span>
               <Badge
-                tone={isStale ? 'err' : statusLower === 'ready' ? 'ok' : statusLower === 'building' ? 'warn' : 'err'}
+                tone={
+                  isStale
+                    ? 'err'
+                    : statusLower === 'ready'
+                      ? 'ok'
+                      : statusLower === 'building'
+                        ? 'warn'
+                        : 'err'
+                }
                 className="shrink-0 text-xs"
               >
                 {isStale ? t('compat.stale') : tpl.status}
@@ -159,7 +168,15 @@ function MetaEditor({
 }
 
 // ── Section wrapper ──────────────────────────────────────────────────────────
-function Section({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
+function Section({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description?: string;
+  children: React.ReactNode;
+}) {
   return (
     <Card>
       <CardHeader>

@@ -5,6 +5,7 @@
 package storage
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -21,7 +22,10 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubecow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	volpkg "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/volume"
+	volbinary "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/volume/binary"
+	volrpc "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/volume/rpc"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
 var cowLookPath = exec.LookPath
@@ -36,6 +40,11 @@ const StorageBackendCow = "cubecow"
 // It is forwarded verbatim into the cubecow inline JSON payload and
 // matches the `BackendKind::Reflink` variant on the Rust side.
 const cowBackendReflink = "reflink"
+
+// defaultVolumePluginBaseDir is the fallback parent directory that
+// plugin_volume Attach must mount volumes under when Config.VolumePluginBaseDir
+// is not set in TOML.
+const defaultVolumePluginBaseDir = "/data/volume"
 
 // reflinkExt4InitCommands lists the external commands the **cubelet
 // upper layers** need when they initialise an ext4 default-medium
@@ -94,6 +103,23 @@ type Config struct {
 	// than the 3s default; this knob lets operators bump it without
 	// recompiling.
 	CmdTimeout tomlext.Duration `toml:"cmd_timeout"`
+
+	// VolumePlugins lists external volume plugin configurations.
+	// Built-in plugins are registered in code and do not need entries here.
+	//
+	// Example:
+	//   [[plugins."io.cubelet.internal.v1.storage".volume_plugins]]
+	//     name        = "nfs"
+	//     type        = "binary"
+	//     binary_path = "/usr/local/bin/cube-volume-nfs"
+	VolumePlugins []volpkg.PluginConfig `toml:"volume_plugins"`
+
+	// VolumePluginBaseDir is the parent directory that every plugin_volume
+	// Attach must mount its volume under. Cubelet passes this path to the
+	// plugin (AttachRequest.VolumeBaseDir / --volume-base-dir) and rejects any
+	// attach whose returned host_path is not located inside it. Defaults to
+	// defaultVolumePluginBaseDir ("/data/volume") when empty.
+	VolumePluginBaseDir string `toml:"volume_plugin_base_dir"`
 }
 
 // CowInlineConfig mirrors the cubecow `AppConfig` schema. cubecow is
@@ -274,6 +300,9 @@ func init() {
 			if localStorage.config.PoolType == "" {
 				localStorage.config.PoolType = cp_type
 			}
+			if localStorage.config.VolumePluginBaseDir == "" {
+				localStorage.config.VolumePluginBaseDir = defaultVolumePluginBaseDir
+			}
 			if localStorage.config.CmdTimeout == 0 {
 				localStorage.config.CmdTimeout = tomlext.FromStdTime(defaultCmdTimeout)
 			}
@@ -312,6 +341,12 @@ func init() {
 				return nil, err
 			}
 
+			// initialise external volume plugins declared in TOML
+			if err := initVolumePlugins(ic.Context, localStorage.config); err != nil {
+				CubeLog.Errorf("volume plugin init fail: %v", err)
+				return nil, err
+			}
+
 			SetSnapshotCatalogRoots(constants.DefaultSnapshotDir)
 
 			return localStorage, nil
@@ -337,4 +372,108 @@ func checkPoolType(c *Config) {
 			return
 		}
 	}
+}
+
+// collectLiveSandboxIDs reads all StorageInfo entries from the local DB and
+// returns the set of sandbox IDs that are currently persisted.
+// collectLiveSandboxIDs returns the set of sandbox IDs that are currently
+// alive according to the in-memory cubebox store.  This is authoritative:
+// if a sandbox has been destroyed, its entry is gone from the store even if
+// a stale StorageInfo record remains in the DB.
+//
+// Falls back to reading all StorageInfo entries from the DB if cubeboxAPI
+// is not available (e.g. during early init).
+func collectLiveSandboxIDs() (map[string]struct{}, error) {
+	if api := localStorage.cubeboxAPI; api != nil {
+		boxes := api.List()
+		live := make(map[string]struct{}, len(boxes))
+		for _, b := range boxes {
+			if b != nil {
+				live[b.SandboxID] = struct{}{}
+			}
+		}
+		return live, nil
+	}
+	// Fallback: use storage DB (may include stale entries from failed destroys).
+	all, err := localStorage.readAllFileInfo()
+	if err != nil {
+		return nil, fmt.Errorf("readAllFileInfo: %w", err)
+	}
+	live := make(map[string]struct{}, len(all))
+	for k := range all {
+		if k == stubKeyName {
+			continue
+		}
+		live[k] = struct{}{}
+	}
+	return live, nil
+}
+
+// initVolumePlugins registers binary and RPC plugins declared in TOML config,
+// attaches the persistent RefCountStore from localStorage to the global Manager,
+// runs a recovery pass to reconcile ref-counts against live sandboxes, and
+// then calls InitAll so every registered plugin receives its PluginConfig.
+func initVolumePlugins(ctx context.Context, cfg *Config) error {
+	mgr := volpkg.Global()
+	cfgByName := make(map[string]volpkg.PluginConfig, len(cfg.VolumePlugins))
+	seen := make(map[string]volpkg.PluginType, len(cfg.VolumePlugins))
+
+	for _, pc := range cfg.VolumePlugins {
+		if pc.Name == "" {
+			return fmt.Errorf("volume_plugins entry has empty name")
+		}
+		if prev, dup := seen[pc.Name]; dup {
+			return fmt.Errorf(
+				"volume plugin %q: duplicate driver name (already declared as type %q); "+
+					"each plugin must have a unique name because the SDK selects plugins by driver only",
+				pc.Name, prev,
+			)
+		}
+		seen[pc.Name] = pc.Type
+		cfgByName[pc.Name] = pc
+
+		if pc.Type == volpkg.PluginTypeBuiltin {
+			continue
+		}
+		switch pc.Type {
+		case volpkg.PluginTypeBinary:
+			mgr.Register(volbinary.New(pc.Name))
+		case volpkg.PluginTypeRPC:
+			mgr.Register(volrpc.New(pc.Name))
+		default:
+			return fmt.Errorf("volume plugin %q: unknown type %q (want builtin|binary|rpc)", pc.Name, pc.Type)
+		}
+	}
+
+	if localStorage.rcStore != nil {
+		mgr.SetRefCountStore(localStorage.rcStore)
+
+		liveIDs, err := collectLiveSandboxIDs()
+		if err != nil {
+			CubeLog.Warnf("[plugin_volume] refcount recovery: collect live sandboxes: %v", err)
+		} else {
+			res, err := localStorage.rcStore.RecoverRefCounts(liveIDs)
+			if err != nil {
+				CubeLog.Warnf("[plugin_volume] refcount recovery: %v", err)
+			} else {
+				CubeLog.Infof("[plugin_volume] refcount recovery: scanned=%d stale_removed=%d records_deleted=%d",
+					res.RecordsScanned, res.StaleRefsRemoved, res.RecordsDeleted)
+			}
+		}
+	}
+
+	if err := mgr.InitAll(ctx, cfgByName); err != nil {
+		return err
+	}
+	for _, pc := range cfg.VolumePlugins {
+		switch pc.Type {
+		case volpkg.PluginTypeBuiltin:
+			continue
+		case volpkg.PluginTypeBinary:
+			CubeLog.Infof("[plugin_volume] initialized binary plugin %q at %s", pc.Name, pc.BinaryPath)
+		case volpkg.PluginTypeRPC:
+			CubeLog.Infof("[plugin_volume] initialized rpc plugin %q at %s", pc.Name, pc.SocketPath)
+		}
+	}
+	return nil
 }

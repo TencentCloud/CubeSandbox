@@ -1,0 +1,31 @@
+{{- if eq (include "cube.proxyEnabled" .) "true" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cube.proxyName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-proxy
+  {{- with .Values.cubeProxy.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.cubeProxy.service.type | default "ClusterIP" }}
+  selector:
+    {{- include "cube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-proxy
+  ports:
+    - name: http
+      port: {{ .Values.cubeProxy.ports.http.containerPort }}
+      targetPort: http
+      protocol: TCP
+    - name: https
+      port: {{ .Values.cubeProxy.ports.https.containerPort }}
+      targetPort: https
+      protocol: TCP
+    - name: admin
+      port: {{ .Values.cubeProxy.adminPort }}
+      targetPort: admin
+      protocol: TCP
+{{- end }}

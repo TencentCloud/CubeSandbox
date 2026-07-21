@@ -1,0 +1,102 @@
+CubeSandbox chart installed.
+
+Release: {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+
+Persistence (CubeMaster / MySQL / Redis):
+{{- if or .Values.controlPlane.master.persistence.hostPath .Values.mysql.persistence.hostPath .Values.redis.persistence.hostPath }}
+  mode: hostPath (at least one component)
+{{- else }}
+{{- $sc := include "cube.persistenceStorageClassName" (dict "root" . "component" .Values.controlPlane.master.persistence) }}
+{{- if $sc }}
+  storageClassName: {{ $sc }} (explicit; component-level overrides top-level persistence.storageClassName)
+{{- else }}
+  storageClassName: <cluster default> (no chart-owned StorageClass unless storageClass.create=true / values-tke.yaml)
+{{- end }}
+{{- end }}
+
+{{- if .Values.controlPlane.enabled }}
+Control plane:
+  CubeMaster Service: {{ include "cube.masterName" . }}:{{ .Values.controlPlane.master.service.port }}
+{{- if .Values.controlPlane.api.enabled }}
+  CubeAPI Service:    {{ include "cube.apiName" . }}:{{ .Values.controlPlane.api.service.port }} (external E2B SDK)
+{{- end }}
+{{- if eq (include "cube.opsEnabled" .) "true" }}
+  CubeOps Service:    {{ include "cube.opsName" . }}:{{ .Values.cubeOps.service.port }} (WebUI /opsapi + SDK)
+{{- end }}
+{{- if and .Values.webui.enabled (eq (include "cube.opsEnabled" .) "true") }}
+  WebUI Service:      {{ include "cube.webuiName" . }}:{{ .Values.webui.service.port }}
+{{- end }}
+{{- if eq (include "cube.cubemastercliEnabled" .) "true" }}
+  cubemastercli CloneSet: {{ include "cube.cubemastercliName" . }}
+{{- end }}
+{{- else if .Values.externalControlPlane.enabled }}
+External control plane:
+  CubeMaster Endpoint: {{ .Values.externalControlPlane.masterEndpoint }}
+{{- if .Values.externalControlPlane.apiEndpoint }}
+  CubeAPI Endpoint:    {{ .Values.externalControlPlane.apiEndpoint }}
+{{- end }}
+{{- if eq (include "cube.cubemastercliEnabled" .) "true" }}
+  cubemastercli CloneSet: {{ include "cube.cubemastercliName" . }}
+{{- end }}
+{{- end }}
+{{- if eq (include "cube.configureClusterDNS" .) "true" }}
+  Cluster DNS: *.{{ .Values.cubeProxy.domain }} -> {{ include "cube.proxyServiceFQDN" . }} (patched into kube-system/coredns)
+{{- end }}
+
+Cube Node DaemonSet (OpenKruise Advanced / InPlaceIfPossible):
+  {{ include "cube.nodeName" . }}
+{{- if .Values.cubeNode.dns.sandbox.followNodeDns }}
+  Sandbox guest DNS: follow node / cluster DNS
+{{- end }}
+{{- if eq (include "cube.proxyEnabled" .) "true" }}
+
+Cube Proxy CloneSet:
+  {{ include "cube.proxyName" . }}
+  Service ({{ .Values.cubeProxy.service.type | default "ClusterIP" }}): {{ include "cube.proxyServiceFQDN" . }}:{{ .Values.cubeProxy.ports.http.containerPort }}/{{ .Values.cubeProxy.ports.https.containerPort }}
+{{- if .Values.cubeProxy.ingress.enabled }}
+  Ingress: {{ include "cube.proxyName" . }} (TLS passthrough → CubeProxy; point external DNS at the Ingress)
+{{- end }}
+{{- if eq (include "cube.lifecycleManagerEnabled" .) "true" }}
+  Lifecycle Manager: {{ include "cube.lifecycleManagerName" . }}:{{ .Values.lifecycleManager.service.port }}
+{{- end }}
+{{- end }}
+
+Useful commands:
+  kubectl get pods -n {{ .Release.Namespace }} -o wide
+  kubectl get ads -n {{ .Release.Namespace }} {{ include "cube.nodeName" . }}
+  kubectl get ads -n {{ .Release.Namespace }} {{ include "cube.nodeBootstrapName" . }}
+  kubectl get ads -n {{ .Release.Namespace }} {{ include "cube.nodeInstallerName" . }}
+{{- if .Values.bootstrap.pvmHostKernel.enabled }}
+  kubectl get daemonset -n {{ .Release.Namespace }} {{ include "cube.nodePvmName" . }}
+{{- end }}
+{{- if eq (include "cube.proxyEnabled" .) "true" }}
+  kubectl get cloneset -n {{ .Release.Namespace }} {{ include "cube.proxyName" . }}
+{{- end }}
+{{- if .Values.bootstrap.pvmHostKernel.enabled }}
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node-pvm -c pvm-host-bootstrap --tail=100
+{{- end }}
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node-bootstrap -c wait-pvm-host --tail=100
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node-bootstrap -c cube-node-init --tail=100
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node -c wait-node-prep --tail=100
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node -c cubelet --tail=100
+{{- if eq (include "cube.cubemastercliEnabled" .) "true" }}
+  kubectl exec -n {{ .Release.Namespace }} cloneset/{{ include "cube.cubemastercliName" . }} -- cubemastercli --help
+  kubectl exec -n {{ .Release.Namespace }} cloneset/{{ include "cube.cubemastercliName" . }} -- sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
+{{- end }}
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }} --timeout 20m
+{{- if .Values.diagnostics.enabled }}
+  kubectl get configmap -n {{ .Release.Namespace }} {{ include "cube.fullname" . }}-diagnostics -o jsonpath='{.data.cube-diag-k8s\.sh}' > /tmp/cube-diag-k8s.sh
+  sh /tmp/cube-diag-k8s.sh {{ .Release.Namespace }} {{ .Release.Name }}
+{{- end }}
+
+WARNING: If bootstrap.pvmHostKernel.enabled=true, this release may install a host kernel and reboot nodes labeled allow-pvm-bootstrap (via cube-node-pvm).
+Helm rollback does not roll back host kernel/GRUB changes.
+Bump images.waitNodePrep image-only for InPlace; changing wait env/mounts forces Big Pod recreate.
+{{- if .Values.cubeNode.enabled }}
+Cubevs/sandbox CIDR is {{ .Values.cubeNode.network.cidr | default "packaged Cubelet default" }} (cubeNode.network.cidr). A pre-install/pre-upgrade Hook fails if it overlaps the cluster Service CIDR or existing ClusterIPs; override the CIDR (and cubeEgress.network.tproxyOnIP) or set cubeNode.network.cidrSkipConflictCheck=true only if you accept routing risk.
+{{- end }}
+{{- if eq (include "cube.startupGateEnabled" .) "true" }}
+PVM startup gate is enabled. CNI, kube-proxy, and kruise-daemon MUST tolerate NoSchedule with operator Exists (or explicitly tolerate {{ .Values.bootstrap.pvmHostKernel.startupGate.taintKey }}). Chart preflight requires kruise-controller-manager Ready (and kruise-daemon Ready + gate toleration). Optional: configure manager Exists for rebuild resilience under the gate.
+The pre-install/pre-upgrade preflight Hook writes {{ .Values.bootstrap.pvmHostKernel.startupGate.taintKey }}=true:{{ .Values.bootstrap.pvmHostKernel.startupGate.effect }} on fingerprint-unready placement.pvm nodes, then probes CNI. Fingerprint-ready upgrades leave the node untainted. For intentional kernel/bootArgs mutate, use value=maintenance (see UPGRADE.md).
+{{- end }}

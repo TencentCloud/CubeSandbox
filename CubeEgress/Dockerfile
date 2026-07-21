@@ -4,6 +4,9 @@ ARG CUBE_VERSION=0.0.0-dev
 ARG CUBE_COMMIT=unknown
 ARG CUBE_BUILD_TIME=unknown
 
+# Prepend toolbox shim dir without dropping PATH inherited from openresty base.
+ENV PATH="/usr/local/services/cubetoolbox/cube-shim/bin:${PATH}"
+
 RUN apt update && \
 	DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends \
 		bash \

@@ -154,8 +154,17 @@ func TestSnapshotLifecycle(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes/"+testSandboxID+"/snapshots":
+			// The server rejects an empty/null body with 422, so an empty name
+			// must still produce a JSON object body (not a nil/absent body).
+			raw, _ := io.ReadAll(r.Body)
+			trimmed := strings.TrimSpace(string(raw))
+			if trimmed == "" || trimmed == "null" {
+				t.Fatalf("CreateSnapshot sent empty/null body: %q", trimmed)
+			}
 			var body map[string]any
-			_ = json.NewDecoder(r.Body).Decode(&body)
+			if err := json.Unmarshal(raw, &body); err != nil {
+				t.Fatalf("CreateSnapshot body not a JSON object: %q (%v)", trimmed, err)
+			}
 			fmt.Fprint(w, `{"snapshotID":"snap-1","names":["n1"]}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/snapshots":
 			if r.URL.Query().Get("sandboxID") != testSandboxID || r.URL.Query().Get("limit") != "50" {

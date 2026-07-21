@@ -1,0 +1,1001 @@
+# Default values for CubeSandbox on Kubernetes/TKE.
+# This chart intentionally separates bootstrap images from runtime images.
+
+nameOverride: ""
+fullnameOverride: ""
+
+global:
+  timezone: Asia/Shanghai
+  # Cluster DNS domain used to build in-cluster Service FQDNs (mysql, redis,
+  # cube-master, cube-api). Override when the cluster is configured with
+  # kubelet --cluster-domain=<non-default>. Empty falls back to
+  # cubeNode.dns.clusterDomain, then "cluster.local".
+  clusterDomain: ""
+  # Optional registry prefix that replaces the registry portion of every
+  # Cube-owned image below. Leave empty to keep the per-image repository
+  # exactly as declared. Set to e.g. "my-registry.example.com/cubesandbox"
+  # to mirror all images into a private registry without editing each entry
+  # individually. Applies to the pvmHostBootstrap / nodeInit / node / master
+  # / api / ops / cubemastercli / proxy / lifecycleManager / cubeEgress /
+  # cubeEgressNet / webui / cubelet / networkAgent / cubeShim / cubeKernel /
+  # cubeGuest / waitNodePrep / pause entries but not to third-party images such as mysql /
+  # redis / docker-in-docker / alpine/k8s.
+  imageRegistry: ""
+
+images:
+  # Bootstrap DaemonSet init: installs/configures PVM host kernel and may reboot the host.
+  pvmHostBootstrap:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-pvm-host-bootstrap
+    tag: v0.5.1
+    pullPolicy: Always
+
+  # Bootstrap DaemonSet init: validates KVM/XFS, prepares host directories, checks CubeMaster reachability.
+  nodeInit:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-node-init
+    tag: v0.5.1
+    pullPolicy: Always
+
+  # Big Pod wait-node-prep sidecar (Kruise priority 10) + bootstrap write-ready/hold.
+  # Freeze wait env/mounts; bumping only this image may InPlace on Big Pod.
+  waitNodePrep:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-wait-node-prep
+    tag: v0.5.1
+    pullPolicy: IfNotPresent
+
+  # Big Pod placeholder slots (cube-slot-1..6). Tiny pause image; InPlace-replace
+  # later with a real component image. Delivered by build-cube-images.sh.
+  pause:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/pause
+    tag: "3.9"
+    pullPolicy: IfNotPresent
+
+  # Big Pod per-component runtime images.
+  cubelet:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cubelet
+    tag: v0.5.1
+    pullPolicy: IfNotPresent
+
+  networkAgent:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/network-agent
+    tag: v0.5.1
+    pullPolicy: IfNotPresent
+
+  cubeShim:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-shim
+    tag: v0.5.1
+    pullPolicy: Always
+
+  cubeKernel:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-kernel
+    tag: v0.5.1
+    pullPolicy: Always
+
+  cubeGuest:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-guest
+    tag: v0.5.1
+    pullPolicy: Always
+
+  master:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-master
+    tag: v0.5.1
+    pullPolicy: Always
+
+  api:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-api
+    tag: v0.5.1
+    pullPolicy: Always
+
+  ops:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-ops
+    tag: v0.5.1
+    pullPolicy: Always
+
+  cubemastercli:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cubemastercli
+    tag: v0.5.1
+    pullPolicy: Always
+
+  proxy:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-proxy
+    tag: v0.5.1
+    pullPolicy: Always
+
+  lifecycleManager:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-lifecycle-manager
+    tag: v0.5.1
+    pullPolicy: Always
+
+  cubeEgress:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-egress
+    tag: v0.5.1
+    pullPolicy: IfNotPresent
+
+  cubeEgressNet:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-egress-net
+    tag: v0.5.1
+    pullPolicy: IfNotPresent
+
+  webui:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-webui
+    tag: v0.5.1
+    pullPolicy: Always
+
+  templateBuilder:
+    repository: docker
+    tag: "27-dind"
+    pullPolicy: IfNotPresent
+
+  # Used by the post-install Job that merges *.cubeProxy.domain into cluster CoreDNS.
+  kubectl:
+    repository: alpine/k8s
+    tag: "1.28.15"
+    pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Optional StorageClass created by the chart. Off by default: on a plain
+# Kubernetes / self-hosted cluster the PVCs below should use the cluster's
+# default StorageClass, so leave `storageClass.create=false` and either leave
+# `persistence.storageClassName` / component-level storageClassName empty
+# (falls back to the cluster default) or point them at an existing StorageClass.
+#
+# When you do want the chart to provision its own StorageClass, set
+# `create=true` and supply `name` + `provisioner` (+ `parameters` when the
+# provisioner needs them). Example for TKE CBS is included below as a comment;
+# see values-tke.yaml for a ready-to-merge override.
+#
+# Do not confuse `storageClass.*` (create a chart-owned SC) with
+# `persistence.storageClassName` below (which SC name PVCs bind to).
+storageClass:
+  create: false
+  name: ""
+  provisioner: ""
+  reclaimPolicy: Delete
+  volumeBindingMode: WaitForFirstConsumer
+  parameters: {}
+  # --- Example: Tencent Cloud TKE CBS ---
+  # create: true
+  # name: cube-cbs-wffc
+  # provisioner: com.tencent.cloud.csi.cbs
+  # parameters:
+  #   type: cbs
+
+# Convenience: pin CubeMaster / MySQL / Redis PVCs to one StorageClass name
+# when the component-level storageClassName is empty. Empty (default) means
+# omit storageClassName on the PVC → cluster default SC. Component-level
+# non-empty values always win (used by values-tke.yaml). Mix different SCs
+# by setting the three component fields explicitly instead of this key.
+persistence:
+  storageClassName: ""
+
+placement:
+  # Control-plane components run only on dedicated control nodes.
+  controlPlane:
+    nodeSelector:
+      cube.tencent.com/cube-control: "true"
+    tolerations:
+      - key: cube.tencent.com/control
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+
+  # Compute placement is used by cube-node / bootstrap / installer.
+  # Do NOT require allow-pvm-bootstrap here — that label is only for placement.pvm
+  # so non-PVM compute nodes never pull cube-pvm-host-bootstrap.
+  compute:
+    nodeSelector:
+      cube.tencent.com/cube-node: "true"
+    affinity: {}
+    tolerations:
+      - key: cube.tencent.com/compute
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+
+  # PVM host-kernel DaemonSet only. Nodes without this label skip PVM install
+  # and do not pull the PVM bootstrap image (mixed-cluster safe).
+  pvm:
+    nodeSelector:
+      cube.tencent.com/cube-node: "true"
+      cube.tencent.com/allow-pvm-bootstrap: "true"
+    affinity: {}
+    tolerations:
+      - key: cube.tencent.com/compute
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+
+externalControlPlane:
+  # Compute-only mode equivalent to one-click ONE_CLICK_DEPLOY_ROLE=compute.
+  # When enabled, Cube Node and CubeAPI use the supplied CubeMaster endpoint
+  # instead of the chart-managed CubeMaster Service.
+  enabled: false
+  masterEndpoint: ""
+  apiEndpoint: ""
+
+controlPlane:
+  enabled: true
+  namespaceScoped: true
+  # OpenKruise CloneSet is required for all stateless control-plane workloads.
+  cloneSetUpdateStrategy:
+    type: InPlaceIfPossible
+    maxUnavailable: 1
+    maxSurge: 0
+
+  master:
+    enabled: true
+    replicas: 1
+    command: []
+    args: []
+    env: []
+    nodeIPs: []
+    service:
+      type: ClusterIP
+      port: 8089
+    persistence:
+      # One-click persists CubeMaster artifacts under /data/CubeMaster/storage.
+      # Kubernetes multi-control-node deployments use PVC by default so data
+      # follows the Pod when it is rescheduled across control nodes.
+      enabled: true
+      hostPath: ""
+      existingClaim: ""
+      # Empty falls back to persistence.storageClassName, then the cluster's
+      # default StorageClass (recommended on self-hosted clusters). Set to the
+      # name of an explicit StorageClass — e.g. "cube-cbs-wffc" for the bundled
+      # TKE preset — to pin the PVC. `existingClaim` and `hostPath` override
+      # storageClassName when set.
+      storageClassName: ""
+      size: 20Gi
+      accessModes:
+        - ReadWriteOnce
+    probes:
+      readiness:
+        enabled: true
+        path: /notify/health
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        failureThreshold: 12
+      liveness:
+        enabled: true
+        path: /notify/health
+        initialDelaySeconds: 30
+        periodSeconds: 20
+        failureThreshold: 6
+    resources: {}
+
+  api:
+    enabled: true
+    replicas: 1
+    command: []
+    args: []
+    env: []
+    bind: "0.0.0.0:3000"
+    sandboxDomain: "cube.app"
+    service:
+      type: ClusterIP
+      port: 3000
+    internalLoadBalancer:
+      enabled: false
+      annotations: {}
+      port: 3000
+    probes:
+      readiness:
+        enabled: true
+        path: /health
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        failureThreshold: 12
+      liveness:
+        enabled: true
+        path: /health
+        initialDelaySeconds: 30
+        periodSeconds: 20
+        failureThreshold: 6
+    resources: {}
+
+  templateBuilder:
+    # Optional sidecar in cube-master Pod. Enable only when template build is required.
+    enabled: false
+    privileged: true
+    dockerdArgs: []
+    resources: {}
+
+cubemastercli:
+  # Operational CLI Pod delivered with the chart. It contains the real
+  # CubeMaster/cmd/cubemastercli binary only. The chart injects
+  # CUBEMASTERCLI_ADDRESS and CUBEMASTERCLI_PORT for convenience; commands
+  # still execute the upstream cubemastercli binary with explicit flags.
+  enabled: true
+  replicas: 1
+  podAnnotations: {}
+  command: []
+  args: []
+  env: []
+  probes:
+    readiness:
+      enabled: true
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      failureThreshold: 12
+    liveness:
+      enabled: true
+      initialDelaySeconds: 30
+      periodSeconds: 20
+      failureThreshold: 6
+  resources: {}
+
+webui:
+  # Dashboard nginx. Proxies /opsapi and WebUI SDK paths to CubeOps.
+  # CubeAPI is a separate Service for external E2B SDK clients.
+  enabled: true
+  replicas: 1
+  podAnnotations: {}
+  service:
+    type: ClusterIP
+    port: 12088
+    targetPort: 80
+    annotations: {}
+  # Optional overrides (empty = chart-managed Service FQDNs).
+  opsUpstream: ""
+  proxyUpstream: ""
+  resources: {}
+
+cubeOps:
+  # Stateful ops/admin backend (JWT) + WebUI SDK proxy to CubeMaster.
+  # Required when webui.enabled=true.
+  enabled: true
+  replicas: 1
+  podAnnotations: {}
+  bind: "0.0.0.0:3010"
+  # Empty uses cubeProxy.domain for CUBE_API_SANDBOX_DOMAIN.
+  sandboxDomain: ""
+  service:
+    type: ClusterIP
+    port: 3010
+  env: []
+  probes:
+    readiness:
+      enabled: true
+      path: /health
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      failureThreshold: 12
+    liveness:
+      enabled: true
+      path: /health
+      initialDelaySeconds: 30
+      periodSeconds: 20
+      failureThreshold: 6
+  resources: {}
+
+lifecycleManager:
+  # Standalone sandbox auto-pause / auto-resume coordinator. Replaces the
+  # obsolete in-process cube-proxy-sidecar. Enabled by default when CubeProxy
+  # is enabled; CubeProxy points $cube_sidecar_addr at this Service and
+  # registers itself in Redis for CLM discovery.
+  enabled: true
+  replicas: 1
+  podAnnotations: {}
+  listenAddr: "0.0.0.0:8083"
+  service:
+    port: 8083
+    annotations: {}
+  redis:
+    # Empty host uses redis.host or chart-managed cube-redis.
+    host: ""
+    port: ""
+    db: 0
+  defaultIdleTimeout: 5m
+  heartbeatTTL: 15s
+  discoveryRefresh: 3s
+  lastActivePoll: 5s
+  idleSweepInterval: 5s
+  bootstrapWarmup: 30s
+  stateLockTTL: 60s
+  # Shared with CubeProxy admin endpoints (X-Cube-Admin-Token). Empty means
+  # the chart auto-generates and persists one in the release Secret.
+  adminToken: ""
+  probes:
+    readiness:
+      enabled: true
+      path: /readyz
+      port: 8083
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      failureThreshold: 3
+    liveness:
+      enabled: true
+      path: /healthz
+      port: 8083
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      failureThreshold: 6
+  resources: {}
+
+diagnostics:
+  # One-click ships cube-diag scripts. In Kubernetes the chart exposes an
+  # equivalent kubectl-based diagnostic script through a ConfigMap so operators
+  # can collect release state without maintaining a second script copy.
+  enabled: true
+
+mysql:
+  enabled: true
+  image:
+    repository: mysql
+    tag: "8.0"
+    pullPolicy: IfNotPresent
+  # Empty host installs and uses the chart-managed cube-mysql service.
+  # Non-empty host uses the configured third-party MySQL service and skips cube-mysql.
+  host: ""
+  port: 3306
+  database: cube_mvp
+  user: cube
+  # SECURITY: The default password is committed to a public repository and MUST
+  # be overridden for any environment that is not a throwaway local test. In
+  # production, provide `mysql.password` and `mysql.rootPassword` via -f
+  # secret-values.yaml or --set, or use `mysql.host` to point at an externally
+  # managed MySQL. templates/validate.yaml refuses to render when passwords
+  # equal the default sentinel below.
+  password: CHANGE_ME_MYSQL_PASSWORD
+  rootPassword: CHANGE_ME_MYSQL_ROOT_PASSWORD
+  persistence:
+    enabled: true
+    existingClaim: ""
+    hostPath: ""
+    size: 20Gi
+    # Empty falls back to persistence.storageClassName, then the cluster's
+    # default StorageClass. Override to bind the MySQL data PVC to a specific
+    # provisioner (e.g. cube-cbs-wffc from values-tke.yaml, or gp3 / pd-ssd /
+    # local-path on other clouds).
+    storageClassName: ""
+    accessModes:
+      - ReadWriteOnce
+  resources: {}
+
+redis:
+  enabled: true
+  image:
+    repository: redis
+    tag: "7-alpine"
+    pullPolicy: IfNotPresent
+  # Empty host installs and uses the chart-managed cube-redis service.
+  # Non-empty host uses the configured third-party Redis service and skips cube-redis.
+  host: ""
+  port: 6379
+  # SECURITY: Override before any non-throwaway deployment. templates/validate.yaml
+  # refuses to render when this equals the CHANGE_ME_* sentinel.
+  password: CHANGE_ME_REDIS_PASSWORD
+  persistence:
+    enabled: true
+    existingClaim: ""
+    hostPath: ""
+    size: 10Gi
+    # Empty falls back to persistence.storageClassName, then the cluster's
+    # default StorageClass. Override to bind the Redis data PVC to a specific
+    # provisioner.
+    storageClassName: ""
+    accessModes:
+      - ReadWriteOnce
+  resources: {}
+
+cubeNode:
+  enabled: true
+  podAnnotations: {}
+  # OpenKruise Advanced DaemonSet (apps.kruise.io/v1beta1) is required.
+  # InPlaceIfPossible image upgrades keep cube-node Pod UID / IP / netns stable.
+  # Requires OpenKruise >= 1.9 with Advanced DaemonSet CRD + kruise-daemon.
+  # Default: InPlaceIfPossible. Switch type to OnDelete for fully manual rolls,
+  # or rollingUpdateType to Standard to force recreate (debug / contrast).
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      rollingUpdateType: InPlaceIfPossible
+      maxUnavailable: 1
+  # Give cubelet/network-agent time to exit cleanly on Pod delete. preStop only
+  # signals those processes via pidfile; containerd-shim-cube-rs / microVMs are left alone.
+  terminationGracePeriodSeconds: 30
+
+  # Stable NodeID = Kubernetes node name (CUBE_SANDBOX_NODE_ID).
+  # Endpoint = status.podIP (CUBE_SANDBOX_ENDPOINT_IP).
+  nodeIDSource: specNodeName
+
+  # Default to the PVM profile so a labelled compute node can be initialized by
+  # this chart without an extra values file. cube-node-init fails fast if this
+  # value does not match host kvm_pvm state.
+  pvmGuestKernel:
+    enabled: true
+
+  network:
+    # Auto-detect primary NIC inside the Pod netns and patch Cubelet eth_name.
+    autoDetectEthName: true
+    # Leave empty to keep auto-detection. Set to pin Cubelet eth_name.
+    ethName: ""
+    # Cubevs/sandbox CIDR patched into Cubelet config.toml (CUBE_SANDBOX_NETWORK_CIDR).
+    # Default 172.16.0.0/18 keeps the historical /18 size while avoiding the common
+    # cluster Service CIDR 192.168.0.0/16 (and typical host LAN 192.168.x). Prefer a
+    # non-overlapping private range if this collides with your VPC (often 172.16/12).
+    # Empty falls back to the packaged Cubelet config.toml CIDR (192.168.0.0/18).
+    # Helm pre-install/pre-upgrade Hook fails fast when this overlaps Service CIDR.
+    cidr: "172.16.0.0/18"
+    # Skip host-network conflict checks (cube-node-init) and the Service CIDR
+    # preflight Hook. Use only when you accept blackhole / routing risk.
+    cidrSkipConflictCheck: false
+
+  dns:
+    clusterDomain: cluster.local
+    sandbox:
+      # Guests inherit the cube-node Pod nameservers (cluster DNS) so they can
+      # resolve in-cluster Services and *.cubeProxy.domain.
+      # Set nameservers to an explicit list to override.
+      followNodeDns: true
+      nameservers: []
+
+  env: []
+  # Resource defaults for the cubelet run container.
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      memory: "4Gi"
+
+  # Frozen Big Pod placeholder slots (cube-slot-1..6). Always present once
+  # introduced: adding/removing slots recreates the Big Pod (not InPlace).
+  # Mounts/securityContext match cubelet; bump only image/resources/slot
+  # annotations later. services maps slot index -> service name (empty = unused).
+  #
+  # Per-slot overrides (optional): unset fields inherit images.pause and
+  # placeholderSlots.resources. Change only image tag / resources / services
+  # for InPlace; changing imagePullPolicy (or mounts / securityContext /
+  # container name) falls back to recreate.
+  # Example:
+  #   overrides:
+  #     "1":
+  #       image:
+  #         tag: "3.9-inplace-test"
+  #       resources:
+  #         requests: {cpu: "10m", memory: "16Mi"}
+  #         limits: {cpu: "10m", memory: "16Mi"}
+  placeholderSlots:
+    resources:
+      requests:
+        cpu: "1m"
+        memory: "8Mi"
+      limits:
+        cpu: "1m"
+        memory: "8Mi"
+    services:
+      "1": ""
+      "2": ""
+      "3": ""
+      "4": ""
+      "5": ""
+      "6": ""
+    overrides: {}
+
+  probes:
+    startup:
+      enabled: true
+      tcpSocketPort: 9999
+      exec: []
+      periodSeconds: 10
+      failureThreshold: 30
+    readiness:
+      enabled: true
+      tcpSocketPort: 9999
+      # Recovery gate: cubelet listening AND network-agent ready.
+      exec:
+        - /bin/bash
+        - -ec
+        - |
+          ss -lntp 2>/dev/null | grep -q ':9999' || exit 1
+          curl -fsS http://127.0.0.1:19090/readyz >/dev/null
+          test -S /data/cubelet/cubelet.sock
+          test -S /tmp/cube/network-agent-grpc.sock
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      failureThreshold: 6
+    liveness:
+      enabled: true
+      tcpSocketPort: 9999
+      exec: []
+      initialDelaySeconds: 60
+      periodSeconds: 20
+      failureThreshold: 6
+
+# Artifact install DaemonSet (shim/kernel/guest). Always deployed with
+# cube-node (no enable switch). May RollingUpdate and grow containers; does NOT
+# hold PodIP/dataplane.
+cubeNodeInstaller:
+  podAnnotations: {}
+  # Standard recreate is intentional: adding install containers must not touch
+  # the Big Pod. Do not require InPlace here.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      rollingUpdateType: Standard
+      maxUnavailable: 1
+  terminationGracePeriodSeconds: 15
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      memory: "512Mi"
+
+# Node prep DaemonSet (wait-pvm-host + node-init + write node-prep-ready).
+# Low churn; bumping nodeInit recreates this DS only. hostPID=true and wide
+# host mounts — do NOT merge into cube-node-installer. PVM host install lives
+# on cube-node-pvm (placement.pvm).
+cubeNodeBootstrap:
+  podAnnotations: {}
+  # Bump only when intentionally invalidating all nodes' prep fingerprint
+  # (forces wait-node-prep to re-block until bootstrap rewrites sentinel).
+  prepGeneration: "1"
+  # How long wait-pvm-host polls pvm-host-ready on PVM-labeled nodes.
+  pvmWaitTimeoutSeconds: "900"
+  # Resources for Big Pod wait-node-prep sidecar.
+  waitResources:
+    requests:
+      cpu: "20m"
+      memory: "32Mi"
+    limits:
+      memory: "64Mi"
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      rollingUpdateType: Standard
+      maxUnavailable: 1
+  terminationGracePeriodSeconds: 30
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      memory: "256Mi"
+
+# PVM host-kernel DaemonSet (native apps/v1; only on placement.pvm).
+# Bumping pvmHostBootstrap recreates this DS only — not bootstrap or Big Pod.
+# Do not set rollingUpdateType here (ADS-only; validate rejects it).
+cubeNodePvm:
+  podAnnotations: {}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  terminationGracePeriodSeconds: 30
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      memory: "256Mi"
+
+cubeProxy:
+  # Cube data-plane proxy. When enabled, it is delivered and removed by this
+  # chart together with the rest of CubeSandbox.
+  #
+  # One-click enables CubeProxy by default. This chart follows that behavior
+  # and creates a self-signed test certificate unless production TLS is provided.
+  # Traffic reaches CubeProxy via ClusterIP Service + Ingress (TLS still
+  # terminates in CubeProxy; Ingress uses SSL passthrough / HTTPS backend).
+  enabled: true
+  # Public sandbox domain (also used for TLS CN / wildcard DNS / Ingress hosts).
+  # For production, point external DNS at the Ingress entrypoint.
+  domain: cube.app
+  podAnnotations: {}
+  replicas: 1
+  # Optional hint for external clients / docs (not used for in-cluster DNS).
+  advertiseIP: ""
+  # When true, Helm patches cluster CoreDNS so *.cubeProxy.domain rewrites to
+  # the CubeProxy ClusterIP Service. Set false only if mutating kube-system/coredns
+  # is not allowed (disabling does not remove a previously injected block;
+  # uninstall runs the cleanup hook).
+  configureClusterDNS: true
+  service:
+    type: ClusterIP
+    annotations: {}
+  ingress:
+    # Requires a cluster Ingress Controller. Set false to manage the entrypoint
+    # yourself (still keep the ClusterIP Service as the backend).
+    enabled: true
+    className: ""
+    annotations:
+      nginx.ingress.kubernetes.io/ssl-passthrough: "true"
+      nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+    # Empty hosts use cubeProxy.domain and "*.cubeProxy.domain".
+    hosts: []
+    # Passthrough mode usually leaves this empty; override when the controller
+    # requires an Ingress TLS block.
+    tls: []
+  ports:
+    http:
+      containerPort: 80
+    https:
+      containerPort: 443
+  redis:
+    # Empty host uses redis.host or chart-managed cube-redis.
+    host: ""
+    port: ""
+    db: 0
+  timeout:
+    min: 500
+    max: 700
+  tls:
+    # CubeProxy nginx.conf expects these file names inside the container:
+    #   /usr/local/openresty/nginx/certs/cube.app+3.pem
+    #   /usr/local/openresty/nginx/certs/cube.app+3-key.pem
+    #
+    # Supported modes:
+    #   existingSecret - production. The operator provides a TLS Secret.
+    #   certManager    - chart creates a cert-manager.io/v1 Certificate.
+    #   selfSigned     - chart creates a self-signed certificate Secret; test only.
+    #   inline         - chart creates a Secret from tls.cert/tls.key values.
+    mode: selfSigned
+    # Optional for certManager/selfSigned/inline. Defaults to <release>-proxy-certs.
+    secretName: ""
+    existingSecret: ""
+    certSecretKey: tls.crt
+    keySecretKey: tls.key
+    caSecretKey: ca.crt
+    certManager:
+      issuerRef:
+        group: cert-manager.io
+        kind: ClusterIssuer
+        name: ""
+      commonName: ""
+      dnsNames: []
+      ipAddresses: []
+      duration: ""
+      renewBefore: ""
+      usages:
+        - digital signature
+        - key encipherment
+        - server auth
+    selfSigned:
+      commonName: ""
+      dnsNames:
+        - cube.app
+        - "*.cube.app"
+        - localhost
+      ipAddresses:
+        - 127.0.0.1
+      caValidityDays: 3650
+      certValidityDays: 3650
+    # Used only when tls.mode=inline.
+    cert: ""
+    key: ""
+  # Admin HTTP server (stock nginx.conf listens on 127.0.0.1:8082). The chart
+  # rewrites this so cube-lifecycle-manager can reach /admin/* from other Pods.
+  adminListen: "0.0.0.0"
+  adminPort: 8082
+  # Redis registry so cube-lifecycle-manager can discover each proxy replica.
+  registry:
+    enabled: true
+    heartbeatIntervalMs: 5000
+  resolver:
+    # CubeProxy nginx Lua Redis client needs an nginx resolver when Redis is
+    # configured by DNS name (the default Kubernetes Service DNS name).
+    # Empty addresses auto-discovers nameservers from the Pod /etc/resolv.conf.
+    addresses: []
+    valid: 30s
+    timeout: 5s
+    ipv6: false
+  probes:
+    readiness:
+      enabled: true
+      path: /admin/healthz
+      port: 8082
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      failureThreshold: 6
+    liveness:
+      enabled: true
+      path: /admin/healthz
+      port: 8082
+      initialDelaySeconds: 30
+      periodSeconds: 20
+      failureThreshold: 6
+  logs:
+    hostPath: /data/log/cube-proxy
+  resources: {}
+
+cubeEgress:
+  # Transparent outbound egress/MITM data-plane component. When enabled, the
+  # Cube Node Big Pod gets a cube-egress sidecar and a cube-egress-net helper
+  # sidecar that owns host TPROXY iptables/ip-rule state.
+  enabled: true
+  bootstrapURL: http://127.0.0.1:19090/v1/policies/dump
+  debugDump: false
+  ca:
+    # Supported modes:
+    #   selfSigned     - chart creates/reuses a release-scoped CA Secret.
+    #   existingSecret - operator provides cube-root-ca.* and placeholder.*.
+    #   inline         - chart creates a Secret from the inline PEM values.
+    mode: selfSigned
+    secretName: ""
+    existingSecret: ""
+    rootCertKey: cube-root-ca.crt
+    rootKeyKey: cube-root-ca.key
+    placeholderCertKey: placeholder.crt
+    placeholderKeyKey: placeholder.key
+    selfSigned:
+      caCommonName: CubeSandbox Egress MITM CA
+      placeholderCommonName: cube-proxy-placeholder
+      caValidityDays: 3650
+      placeholderValidityDays: 36500
+    inline:
+      rootCert: ""
+      rootKey: ""
+      placeholderCert: ""
+      placeholderKey: ""
+  network:
+    enabled: true
+    ingressInterface: cube-dev
+    # Must match cube-dev gateway (first usable IP of cubeNode.network.cidr).
+    tproxyOnIP: 172.16.0.1
+    initialWaitSeconds: 300
+    reapplyIntervalSeconds: 30
+    probes:
+      readiness:
+        enabled: true
+        initialDelaySeconds: 10
+        periodSeconds: 10
+        failureThreshold: 30
+      liveness:
+        enabled: true
+        initialDelaySeconds: 330
+        periodSeconds: 20
+        failureThreshold: 6
+  probes:
+    readiness:
+      enabled: true
+      path: /admin/v1/health
+      port: 9090
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      failureThreshold: 12
+    liveness:
+      enabled: true
+      path: /admin/v1/health
+      port: 9090
+      initialDelaySeconds: 30
+      periodSeconds: 20
+      failureThreshold: 6
+  # Sidecar resource defaults. Guarantees each cube-egress instance gets a
+  # baseline slice of CPU/Mem so it is not evicted before the main cube-node
+  # container under memory pressure. Tune for actual sandbox traffic volume.
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      memory: "512Mi"
+  netResources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      memory: "128Mi"
+
+bootstrap:
+  pvmHostKernel:
+    enabled: true
+    desiredKernelPattern: pvm.host
+    # KPTI (Kernel Page-Table Isolation) is disabled here because kvm_pvm on the
+    # CubeSandbox host kernel does not currently support KPTI and boot fails
+    # when it is on. This is a deliberate performance/compatibility choice for
+    # a sandbox-workload host that runs KVM microVMs behind hardware isolation
+    # (guest kernel + KVM boundary already contains the sandbox process).
+    # SECURITY TRADE-OFF: the host is more exposed to Meltdown/Spectre-family
+    # side-channel primitives running on the same host (e.g. other CubeSandbox
+    # sidecars). If the host also runs untrusted workloads outside of PVM
+    # guests, override bootArgs (drop "nopti pti=off") after confirming that
+    # kvm_pvm on your kernel supports KPTI.
+    bootArgs: "nopti pti=off"
+    package:
+      # image: rpm/deb is baked into cube-pvm-host-bootstrap image under /artifacts.
+      # production delivery should use image and normal registry pulls.
+      source: image
+      rpmPath: /artifacts/kernel-pvm-host.rpm
+      debPath: /artifacts/linux-image-pvm-host.deb
+      rpmUrl: ""
+      debUrl: ""
+      sha256: ""
+    reboot:
+      enabled: true
+      coordinated: true
+      leaseName: cube-node-pvm-bootstrap
+      leaseTTLSeconds: 900
+      maxConcurrent: 1
+      maxCount: 1
+    startupGate:
+      enabled: true
+      taintKey: cube.tencent.com/pvm-not-ready
+      effect: NoSchedule
+      manager: script
+      reconcileIntervalSeconds: 30
+      # Empty derives a release-scoped name, avoiding cross-release ownership conflicts.
+      priorityClassName: ""
+      priorityClassCreate: true
+      priorityValue: 1000000
+      requirePreflight: true
+      preflightTimeoutSeconds: 900
+      drainTimeoutSeconds: 300
+
+  nodeInit:
+    enabled: true
+    requireKVM: true
+    requireXFS: true
+    chmodKVM: true
+    loadKVMModule: true
+    writeUdevRule: true
+    createHostDirs: true
+    checkMasterConnectivity: true
+    checkMemory: true
+    minMemoryKB: "7500000"
+    checkCgroupCPU: true
+    checkGlibc: true
+    checkCIDR: true
+    checkCubecowDeps: true
+    dataCubelet:
+      path: /data/cubelet
+      loopback:
+        enabled: true
+        imagePath: /data/cubelet-xfs.img
+        size: 25G
+
+security:
+  # cube-node always uses the Pod network; no hostNetwork toggle.
+  hostPID: true
+  privileged: true
+
+hostPaths:
+  root: /
+  dev: /dev
+  sys: /sys
+  libModules: /lib/modules
+  dataCubelet: /data/cubelet
+  dataLog: /data/log
+  dataCubeShim: /data/cube-shim
+  dataSnapshotPack: /data/snapshot_pack
+  tmpCube: /tmp/cube
+  # pvm/node-init state + node-prep-ready / pvm-host-ready / effective-pvm
+  # (shared by cube-node-pvm, bootstrap DS, and Big Pod wait-node-prep).
+  bootstrapState: /var/lib/cube-node-bootstrap
+  # Host-persistent toolbox tree. Big Pod mounts this path whole at
+  # /usr/local/services/cubetoolbox (stable volumeMount for InPlace). Installer
+  # and Big Pod self-stage copy from /opt/cube-image into this tree; preserve
+  # dirs such as cube-snapshot / cubebox_os_image / cubeletmnt / cube-vs are not
+  # wiped by component installs.
+  toolbox: /usr/local/services/cubetoolbox
+  # Shim ttrpc listen sockets: containerd-shim SOCKET_ROOT is hardcoded to
+  # /run/containerd, and LoadExistingShims dials unix:///run/containerd/s/{hash}
+  # from bootstrap.json/address after Pod rebuild. Do NOT point this hostPath
+  # at the node's real /run/containerd (owned by kubelet/containerd); use a
+  # dedicated directory under dataCubelet so cube-node's mount NS gets a
+  # persistent /run/containerd without colliding with the node runtime.
+  runContainerd: /data/cubelet/run/containerd
+  # Cloud Hypervisor API + vsock sockets (CubeShim VM_PATH=/run/vc/vm/).
+  # Surviving shims and post-reconnect cubelet paths such as
+  # /run/vc/vm/{id}/chapi and /run/vc/vm/{id}/cube.sock need this tree to
+  # remain on a filesystem that is not torn down with the Pod overlay.
+  runVc: /data/cubelet/run/vc
+
+serviceAccount:
+  create: true
+  annotations: {}
+
+rbac:
+  create: true
+
+helmTest:
+  enabled: true
+  image:
+    repository: curlimages/curl
+    tag: "8.10.1"
+    pullPolicy: IfNotPresent
+  dnsImage:
+    repository: busybox
+    tag: "1.36"
+    pullPolicy: IfNotPresent

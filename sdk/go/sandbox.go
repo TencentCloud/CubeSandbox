@@ -13,14 +13,13 @@ import (
 	"time"
 )
 
+// JupyterPort hosts the code-interpreter (`/execute`), while EnvdPort hosts the
+// envd data-plane RPCs (commands, files, filesystem, pty). They mirror the
+// Python/Node SDKs (JUPYTER_PORT=49999, ENVD_PORT=49983); routing an envd RPC
+// to JupyterPort returns 404.
 const (
-	// JupyterPort is the code-interpreter (Jupyter) port, used only by the
-	// /execute endpoint (RunCode).
 	JupyterPort = 49999
-	// EnvdPort is the envd daemon port. All envd data-plane RPCs — commands,
-	// filesystem, files, and PTY — route here, matching the Python/Node SDKs
-	// (ENVD_PORT = 49983). Sending these to JupyterPort yields 404s.
-	EnvdPort = 49983
+	EnvdPort    = 49983
 )
 
 func (s *Sandbox) GetHost(port int) string {

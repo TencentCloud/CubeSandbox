@@ -98,6 +98,7 @@ jobs:
               "cube-egress",
               "cube-master",
               "cube-api",
+              "cube-ops",
               "cube-proxy",
               "webui",
               "cube-lifecycle-manager",
@@ -133,6 +134,13 @@ jobs:
                   "context": "CubeAPI",
                   "dockerfile": "CubeAPI/Dockerfile",
                   "cache_scope": "cube-api",
+              },
+              {
+                  "component": "cube-ops",
+                  "image": "cube-ops",
+                  "context": ".",
+                  "dockerfile": "CubeOps/Dockerfile",
+                  "cache_scope": "cube-ops",
               },
               {
                   "component": "cube-proxy",

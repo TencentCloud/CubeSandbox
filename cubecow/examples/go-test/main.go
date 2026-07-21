@@ -13,13 +13,13 @@
 //
 // Four configuration sources are supported, in priority order:
 //
-//   1. -json-config-inline '<json>'  Raw JSON string, passed verbatim.
-//   2. -json-config <path>           Path to a JSON config file.
-//   3. Inline-config flags           Build the JSON in-process from
-//                                    -backend, -reflink-root-dir.
-//   4. -config <path>                Legacy TOML path (kept for
-//                                    backwards compatibility with
-//                                    scripts/go_e2e_test.sh).
+//  1. -json-config-inline '<json>'  Raw JSON string, passed verbatim.
+//  2. -json-config <path>           Path to a JSON config file.
+//  3. Inline-config flags           Build the JSON in-process from
+//     -backend, -reflink-root-dir.
+//  4. -config <path>                Legacy TOML path (kept for
+//     backwards compatibility with
+//     scripts/go_e2e_test.sh).
 //
 // In modes (1)–(3) we call cubecow.InitFromJSON /
 // InitWithoutLoggingFromJSON; mode (4) keeps the original TOML-based

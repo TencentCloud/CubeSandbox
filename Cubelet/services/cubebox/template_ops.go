@@ -76,7 +76,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		return rsp, nil
 	}
 
-	unlock := s.updateSandboxLocks.Lock(rsp.SandboxID)
+	unlock := s.sandboxLifecycleLocks.Lock(rsp.SandboxID)
 	defer unlock()
 
 	cb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, rsp.SandboxID)

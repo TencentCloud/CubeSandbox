@@ -40,6 +40,17 @@ test_component_build_inputs_exist() {
   # webui nginx.conf is the canonical source for both the package and the
   # terraform webui-nginx.conf the addons render.
   require_file "${ONE_CLICK_DIR}/webui/nginx.conf" "webui nginx.conf source"
+  # Shared volume-deps installer: must exist and be wired into the CubeMaster
+  # package context (Dockerfile COPY expects it beside bin/cubemaster).
+  require_file "${ROOT_DIR}/deploy/scripts/docker-install-volume-deps.sh" \
+    "volume deps installer (single source)"
+  if ! grep -q -F 'docker-install-volume-deps.sh' "${BUNDLE_SH}"; then
+    fail "build-release-bundle.sh must copy deploy/scripts/docker-install-volume-deps.sh into CubeMaster/"
+  fi
+  # Do not keep a checked-in duplicate under one-click CubeMaster/.
+  if [[ -f "${ONE_CLICK_DIR}/CubeMaster/docker-install-volume-deps.sh" ]]; then
+    fail "remove duplicate ${ONE_CLICK_DIR}/CubeMaster/docker-install-volume-deps.sh; use deploy/scripts/ only"
+  fi
 }
 
 # 2) The component image base names must match between what build_images.sh
@@ -111,7 +122,7 @@ test_terraform_deployer_files_present() {
 test_webui_nginx_placeholders() {
   local f="${ONE_CLICK_DIR}/webui/nginx.conf" t
   [[ -f "${f}" ]] || { fail "webui nginx.conf missing: ${f}"; return; }
-  for t in __WEB_UI_UPSTREAM__ __SANDBOX_PROXY_UPSTREAM__; do
+  for t in __WEB_UI_UPSTREAM__ __SANDBOX_PROXY_UPSTREAM__ __CUBE_OPS_UPSTREAM__; do
     grep -q -F "${t}" "${f}" || fail "webui/nginx.conf is missing placeholder ${t} (tke-addons.tf expects it)"
   done
 }

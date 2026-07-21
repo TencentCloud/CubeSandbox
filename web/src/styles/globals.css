@@ -46,20 +46,20 @@
     /* Semantic status palette (dark). Light variants override these in
        the .light block below. Saturation/lightness tuned to clear WCAG AA
        on the page's actual surface in both themes. */
-    --cube-ok:     158 64% 50%;   /* emerald */
-    --cube-warn:   32 95% 60%;    /* amber */
-    --cube-err:    0 72% 62%;     /* rose */
-    --cube-info:   245 70% 68%;   /* indigo */
-    --cube-accent: 280 70% 68%;   /* violet (decorative only) */
-    --cube-mute:   215 18% 65%;   /* slate */
+    --cube-ok: 158 64% 50%; /* emerald */
+    --cube-warn: 32 95% 60%; /* amber */
+    --cube-err: 0 72% 62%; /* rose */
+    --cube-info: 245 70% 68%; /* indigo */
+    --cube-accent: 280 70% 68%; /* violet (decorative only) */
+    --cube-mute: 215 18% 65%; /* slate */
   }
 
   /* Light — Paper-like, warm, easy on the eyes */
   .light {
-    --background: 40 20% 97%;        /* ivory */
-    --foreground: 20 15% 15%;        /* ink */
+    --background: 40 20% 97%; /* ivory */
+    --foreground: 20 15% 15%; /* ink */
 
-    --card: 0 0% 100%;              /* paper */
+    --card: 0 0% 100%; /* paper */
     --card-foreground: 20 15% 15%;
 
     --popover: 0 0% 100%;
@@ -68,7 +68,7 @@
     --muted: 20 15% 94%;
     --muted-foreground: 20 10% 40%;
 
-    --primary: 212 55% 42%;          /* deep calm blue */
+    --primary: 212 55% 42%; /* deep calm blue */
     --primary-foreground: 0 0% 100%;
 
     --secondary: 20 15% 94%;
@@ -77,7 +77,7 @@
     --accent: 212 50% 50%;
     --accent-foreground: 0 0% 100%;
 
-    --destructive: 0 55% 45%;        /* muted vermilion */
+    --destructive: 0 55% 45%; /* muted vermilion */
     --destructive-foreground: 0 0% 100%;
 
     --border: 20 15% 86%;
@@ -91,12 +91,12 @@
     /* Light theme overrides — darker / more saturated so the tokens stay
        legible against a near-white page. Each value is WCAG-AA-safe
        against #FFFFFF at 14px regular text. */
-    --cube-ok:     158 70% 32%;
-    --cube-warn:   32 95% 36%;
-    --cube-err:    0 72% 42%;
-    --cube-info:   245 58% 48%;
+    --cube-ok: 158 70% 32%;
+    --cube-warn: 32 95% 36%;
+    --cube-err: 0 72% 42%;
+    --cube-info: 245 58% 48%;
     --cube-accent: 270 50% 45%;
-    --cube-mute:   215 18% 35%;
+    --cube-mute: 215 18% 35%;
   }
 
   * {
@@ -132,7 +132,7 @@
   /* Dark atmospheric gradient */
   .dark body {
     background-image:
-      radial-gradient(1200px 600px at 15% -10%, hsl(var(--cube-info) / 0.10), transparent 60%),
+      radial-gradient(1200px 600px at 15% -10%, hsl(var(--cube-info) / 0.1), transparent 60%),
       radial-gradient(900px 500px at 100% 0%, hsl(var(--cube-accent) / 0.07), transparent 60%);
   }
 
@@ -144,13 +144,18 @@
   }
 
   /* Scrollbar */
-  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
   ::-webkit-scrollbar-thumb {
     background: hsl(var(--border));
     border-radius: 10px;
     border: 2px solid hsl(var(--background));
   }
-  ::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground) / 0.5); }
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground) / 0.5);
+  }
 }
 
 @layer components {
@@ -164,7 +169,7 @@
   }
   .light .glow-ring {
     box-shadow:
-      0 0 0 1px hsl(var(--cube-info) / 0.20),
+      0 0 0 1px hsl(var(--cube-info) / 0.2),
       0 8px 24px -8px hsl(var(--cube-info) / 0.25);
   }
   .chip {
@@ -211,10 +216,18 @@
   }
 
   /* Neutral overlay utilities (theme-aware) */
-  .tint-bg-5 { background-color: hsl(var(--tint) / 0.05); }
-  .tint-bg-10 { background-color: hsl(var(--tint) / 0.08); }
-  .tint-border-5 { border-color: hsl(var(--tint) / 0.08); }
-  .tint-border-10 { border-color: hsl(var(--tint) / 0.15); }
+  .tint-bg-5 {
+    background-color: hsl(var(--tint) / 0.05);
+  }
+  .tint-bg-10 {
+    background-color: hsl(var(--tint) / 0.08);
+  }
+  .tint-border-5 {
+    border-color: hsl(var(--tint) / 0.08);
+  }
+  .tint-border-10 {
+    border-color: hsl(var(--tint) / 0.15);
+  }
 
   /* Unified table primitives. Replaces three different <th> classNames
      scattered across Network/Observability/TemplateDetail. */

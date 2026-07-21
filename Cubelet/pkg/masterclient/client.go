@@ -26,13 +26,14 @@ type ResourceSnapshot struct {
 
 // ComponentVersion describes the version of a single component installed on
 // this node. Reported to CubeMaster on register and heartbeat. Source is one
-// of "manifest" | "binary" | "file".
+// of "manifest" | "binary" | "file" | "component-json".
 type ComponentVersion struct {
 	Component string `json:"component"`
 	Version   string `json:"version,omitempty"`
 	Commit    string `json:"commit,omitempty"`
 	BuildTime string `json:"build_time,omitempty"`
 	Source    string `json:"source,omitempty"`
+	Variant   string `json:"variant,omitempty"` // kernel: bm|pvm
 }
 
 type RegisterNodeRequest struct {
@@ -50,6 +51,7 @@ type RegisterNodeRequest struct {
 	CreateConcurrentNum int64              `json:"create_concurrent_num,omitempty"`
 	MaxMvmNum           int64              `json:"max_mvm_num,omitempty"`
 	Versions            []ComponentVersion `json:"versions,omitempty"`
+	InventoryIncomplete bool               `json:"inventory_incomplete,omitempty"`
 }
 
 type UpdateNodeStatusRequest struct {
@@ -63,7 +65,8 @@ type UpdateNodeStatusRequest struct {
 	DiskUsage  *DiskUsage          `json:"disk_usage,omitempty"`
 	MetricTime time.Time           `json:"metric_time,omitempty"`
 
-	Versions []ComponentVersion `json:"versions,omitempty"`
+	Versions            []ComponentVersion `json:"versions,omitempty"`
+	InventoryIncomplete bool               `json:"inventory_incomplete,omitempty"`
 }
 
 // AllocatedResources represents sandbox-quota resources already committed by

@@ -29,6 +29,13 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get install -y \
 RUN cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 RUN update-ca-certificates
 
+# Volume plugin host tools (cosfs / coscmd / jq). Injected into the build
+# context by build-cube-images.sh from deploy/scripts/docker-install-volume-deps.sh.
+COPY docker-install-volume-deps.sh /tmp/docker-install-volume-deps.sh
+RUN chmod +x /tmp/docker-install-volume-deps.sh \
+	&& /tmp/docker-install-volume-deps.sh \
+	&& rm -f /tmp/docker-install-volume-deps.sh
+
 RUN mkdir -p /usr/local/services/cubemaster
 RUN mkdir -p /usr/local/services/tools
 

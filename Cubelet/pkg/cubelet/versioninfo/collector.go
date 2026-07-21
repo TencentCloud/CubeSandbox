@@ -6,31 +6,25 @@
 // on a cubelet node and normalises them into a flat list for reporting to
 // cubemaster on register / heartbeat.
 //
-// Primary data source is the release-manifest.json installed alongside the
-// node binaries (machine-readable, complete, release-consistent). Four
-// adjustments are layered on top:
+// Primary data source is per-component version.json next to staged artifacts.
+// Fallbacks, in order:
 //
-//  1. the cubelet entry is overridden with the running binary's own
-//     pkg/version (the truly-running cubelet, not just what the manifest
-//     shipped);
-//  2. guest-image is taken from the on-node cube-image/version file (the
-//     version actually in effect, which may drift from the manifest), with a
-//     lazy mtime-based re-read so an out-of-band guest upgrade is picked up
-//     without restarting cubelet;
-//  3. kernel is selected from the active cube-kernel-scf/vmlinux symlink so
-//     PVM nodes report the PVM guest kernel version instead of the ordinary
-//     packaged kernel;
-//  4. components are filtered to those actually installed on this node, so a
-//     compute node does not report control-plane binaries it never runs.
+//  1. cubelet always from the running binary;
+//  2. directory version.json (allowlisted keys only);
+//  3. single-line markers (cube-image/version, agent-version, egress);
+//  4. release-manifest.json for remaining installed binary components / kernel.
 //
-// Collection never blocks register/heartbeat: a missing or malformed manifest
-// degrades to "cubelet self version + guest-image file (if present)".
+// Kernel identity prefers bootstrap-state/vmlinux-active, then the artifact
+// vmlinux symlink, and reports only the active bm|pvm variant.
+//
+// Collection never blocks register/heartbeat: missing sources degrade gracefully.
 package versioninfo
 
 import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/components"
@@ -39,9 +33,10 @@ import (
 
 // Source labels for ComponentVersion.Source.
 const (
-	SourceManifest = "manifest"
-	SourceBinary   = "binary"
-	SourceFile     = "file"
+	SourceManifest      = "manifest"
+	SourceBinary        = "binary"
+	SourceFile          = "file"
+	SourceComponentJSON = "component-json"
 )
 
 // Canonical component names.
@@ -54,17 +49,17 @@ const (
 )
 
 const (
-	manifestFileName  = "release-manifest.json"
-	guestImageVerPath = "cube-image/version"
-	kernelVmlinuxPath = "cube-kernel-scf/vmlinux"
-	cubeEgressVerPath = "cube-egress/version"
+	manifestFileName     = "release-manifest.json"
+	componentVersionJSON = "version.json"
+	guestImageVerPath    = "cube-image/version"
+	guestAgentVerPath    = "cube-image/agent-version"
+	kernelVmlinuxPath    = "cube-kernel-scf/vmlinux"
+	cubeEgressVerPath    = "cube-egress/version"
+	maxVersionJSONBytes  = 64 << 10
 )
 
 // oneClickInstallLayout maps manifest component keys to the concrete one-click
-// install paths that prove the component is actually present on this node. The
-// collector still supports the original "${baseDir}/<component>/" directory
-// shape first; these aliases cover the packaged control-plane layout
-// (CubeMaster/CubeAPI/Cubelet/cube-shim, etc.).
+// install paths that prove the component is actually present on this node.
 var oneClickInstallLayout = map[string][][]string{
 	"cubemaster":              {{"CubeMaster", "bin", "cubemaster"}},
 	"cubemastercli":           {{"CubeMaster", "bin", "cubemastercli"}},
@@ -76,15 +71,30 @@ var oneClickInstallLayout = map[string][][]string{
 	"cube-egress":             {{"cube-egress", "version"}},
 }
 
-// ComponentVersion is a pure-data version record. It mirrors
-// masterclient.ComponentVersion (kept independent to avoid a layering
-// dependency from this low-level package onto the HTTP client).
+// pathAllowlist restricts which component keys may be accepted from each
+// directory's version.json.
+var pathAllowlist = map[string]map[string]struct{}{
+	"Cubelet":       {"cubelet": {}, "cubecli": {}},
+	"network-agent": {"network-agent": {}},
+	"cube-shim":     {"containerd-shim-cube-rs": {}, "cube-runtime": {}},
+	"cube-image":    {"guest-image": {}, "cube-agent": {}},
+	"cube-egress":   {"cube-egress": {}},
+}
+
+// ComponentVersion is a pure-data version record.
 type ComponentVersion struct {
 	Component string
 	Version   string
 	Commit    string
 	BuildTime string
 	Source    string
+	Variant   string // kernel: bm|pvm
+}
+
+// CollectReport is the full collection outcome for one heartbeat.
+type CollectReport struct {
+	Versions   []ComponentVersion
+	Incomplete bool
 }
 
 type manifestComponent struct {
@@ -107,9 +117,24 @@ type releaseManifest struct {
 	} `json:"kernel"`
 }
 
+type componentJSONFile struct {
+	SchemaVersion int `json:"schema_version"`
+	Components    map[string]struct {
+		Version   string `json:"version"`
+		Commit    string `json:"commit"`
+		BuildTime string `json:"build_time"`
+	} `json:"components"`
+	Variants map[string]struct {
+		Version      string `json:"version"`
+		Tag          string `json:"tag"`
+		DigestSHA256 string `json:"digest_sha256"`
+	} `json:"variants"`
+}
+
 // Collector assembles the node's component versions. Safe for concurrent use.
 type Collector struct {
-	baseDir string
+	baseDir      string
+	bootstrapDir string
 
 	mu sync.Mutex
 	// manifest is parsed once and cached (nil when missing/unreadable).
@@ -126,27 +151,65 @@ type Collector struct {
 }
 
 // NewCollector builds a collector rooted at baseDir. An empty baseDir falls
-// back to the component manager's default versioned base dir (single source
-// of truth for the install layout).
+// back to the component manager's default versioned base dir.
 func NewCollector(baseDir string) *Collector {
 	if baseDir == "" {
 		baseDir = components.DefaultConfig().VersionedBaseDir
 	}
-	return &Collector{baseDir: baseDir}
+	bootstrap := strings.TrimSpace(os.Getenv("STATE_DIR"))
+	if bootstrap == "" {
+		bootstrap = strings.TrimSpace(os.Getenv("CUBE_BOOTSTRAP_STATE"))
+	}
+	if bootstrap == "" {
+		bootstrap = "/var/lib/cube-node-bootstrap"
+	}
+	return &Collector{baseDir: baseDir, bootstrapDir: bootstrap}
 }
 
-// Collect returns the current component versions for this node. It never
-// returns an error: collection failures degrade to a minimal set so the
-// heartbeat is never blocked.
+// NewCollectorWithDirs is for tests that need an isolated bootstrap state dir.
+func NewCollectorWithDirs(baseDir, bootstrapDir string) *Collector {
+	c := NewCollector(baseDir)
+	if strings.TrimSpace(bootstrapDir) != "" {
+		c.bootstrapDir = bootstrapDir
+	}
+	return c
+}
+
+// Collect returns versions only (backward compatible).
 func (c *Collector) Collect() []ComponentVersion {
+	return c.CollectReport().Versions
+}
+
+// CollectReport returns versions plus incompleteness signals.
+func (c *Collector) CollectReport() CollectReport {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	man := c.loadManifestLocked()
-	out := make([]ComponentVersion, 0, 12)
+	report := CollectReport{Versions: make([]ComponentVersion, 0, 16)}
+	seen := map[string]struct{}{}
+	// Keys owned by a malformed/unsupported version.json must not be filled
+	// from marker/manifest.
+	blocked := map[string]struct{}{}
+	add := func(v ComponentVersion) {
+		if v.Component == "" || v.Version == "" {
+			return
+		}
+		if _, ok := seen[v.Component]; ok {
+			return
+		}
+		if _, ok := blocked[v.Component]; ok {
+			return
+		}
+		seen[v.Component] = struct{}{}
+		report.Versions = append(report.Versions, v)
+	}
+	blockKeys := func(keys map[string]struct{}) {
+		for k := range keys {
+			blocked[k] = struct{}{}
+		}
+	}
 
-	// (1) cubelet always reported from the running binary.
-	out = append(out, ComponentVersion{
+	add(ComponentVersion{
 		Component: ComponentCubelet,
 		Version:   version.Version,
 		Commit:    version.Commit,
@@ -154,18 +217,61 @@ func (c *Collector) Collect() []ComponentVersion {
 		Source:    SourceBinary,
 	})
 
-	if man != nil {
-		// (2) binary components from the manifest, filtered to those actually
-		// installed on this node. cubelet handled above; cube-agent handled
-		// from guest_image.agent_version below.
+	// Mid-stage gap: staging marker or ready-sentinel with missing dir.
+	c.detectStageGapsLocked(&report)
+
+	// Directory version.json.
+	for dir, allow := range pathAllowlist {
+		path := filepath.Join(c.baseDir, dir, componentVersionJSON)
+		entries, errMsg, malformed := c.readComponentJSON(path, allow)
+		if errMsg != "" {
+			report.Incomplete = true
+		}
+		if malformed {
+			blockKeys(allow)
+			continue
+		}
+		for _, e := range entries {
+			if e.Component == ComponentCubelet {
+				continue // running binary wins
+			}
+			add(e)
+		}
+	}
+
+	// Markers (add() skips when already seen or blocked by malformed JSON).
+	add(ComponentVersion{Component: ComponentGuestImage, Version: c.guestImageVersionLocked(), Source: SourceFile})
+	add(ComponentVersion{
+		Component: ComponentCubeAgent,
+		Version:   c.readSingleLine(filepath.Join(c.baseDir, guestAgentVerPath)),
+		Source:    SourceFile,
+	})
+	add(ComponentVersion{
+		Component: ComponentCubeEgress,
+		Version:   c.readSingleLine(filepath.Join(c.baseDir, cubeEgressVerPath)),
+		Source:    SourceFile,
+	})
+
+	// Kernel: version.json variants + active selection.
+	// When version.json exists but is unusable, do not fall back to manifest.
+	if k, errMsg := c.kernelFromJSONLocked(); k.Version != "" {
+		add(k)
+	} else if errMsg != "" {
+		report.Incomplete = true
+		blocked[ComponentKernel] = struct{}{}
+	}
+
+	// Manifest fill: kernel (if not blocked) + remaining installed binaries / agent.
+	if man := c.loadManifestLocked(); man != nil {
+		add(c.kernelVersionLocked(man))
 		for name, mc := range man.Components {
-			if name == ComponentCubelet || name == ComponentCubeAgent || name == ComponentCubeEgress {
+			if name == ComponentCubelet || name == ComponentCubeAgent || name == ComponentCubeEgress || name == ComponentKernel {
 				continue
 			}
 			if !c.componentInstalledLocked(name) {
 				continue
 			}
-			out = append(out, ComponentVersion{
+			add(ComponentVersion{
 				Component: name,
 				Version:   mc.Version,
 				Commit:    mc.Commit,
@@ -173,65 +279,172 @@ func (c *Collector) Collect() []ComponentVersion {
 				Source:    SourceManifest,
 			})
 		}
-		// (3) cube-agent: take the guest's baked-in agent version, de-duped.
-		if man.GuestImage.AgentVersion != "" {
-			out = append(out, ComponentVersion{
-				Component: ComponentCubeAgent,
-				Version:   man.GuestImage.AgentVersion,
-				Source:    SourceManifest,
-			})
-		}
-		// (4) kernel: report the active guest kernel variant, not the host
-		// kernel and not just the static ordinary manifest value.
-		if kernel := c.kernelVersionLocked(man); kernel.Version != "" {
-			out = append(out, kernel)
-		}
-	}
-
-	// (5) guest-image: the version actually in effect on this node.
-	if ver := c.guestImageVersionLocked(); ver != "" {
-		out = append(out, ComponentVersion{
-			Component: ComponentGuestImage,
-			Version:   ver,
-			Source:    SourceFile,
+		add(ComponentVersion{
+			Component: ComponentCubeAgent,
+			Version:   man.GuestImage.AgentVersion,
+			Source:    SourceManifest,
 		})
 	}
 
-	// (6) cube-egress: version marker written by the deploy system.
-	// The marker file cube-egress/version is present only when the
-	// CubeEgress container is deployed on this node; when absent the
-	// component is silently omitted (graceful degradation).
-	if ver := c.cubeEgressVersionLocked(); ver != "" {
-		out = append(out, ComponentVersion{
-			Component: ComponentCubeEgress,
-			Version:   ver,
-			Source:    SourceFile,
-		})
-	}
-
-	return out
+	return report
 }
 
-// kernelVersionLocked returns the active guest kernel version. The active
-// variant is represented by cube-kernel-scf/vmlinux: a symlink to vmlinux-bm
-// for ordinary nodes, or vmlinux-pvm for PVM nodes. If the symlink is missing
-// or from an older install layout, fall back to the ordinary manifest identity.
+func (c *Collector) detectStageGapsLocked(report *CollectReport) {
+	type staged struct {
+		dir      string
+		sentinel string
+		staging  string
+	}
+	checks := []staged{
+		{"Cubelet", ".staged-cubelet", ".staging-cubelet"},
+		{"network-agent", ".staged-network-agent", ".staging-network-agent"},
+		{"cube-shim", ".staged-cube-shim", ".staging-cube-shim"},
+		{"cube-image", ".staged-cube-guest", ".staging-cube-guest"},
+		{"cube-kernel-scf", ".staged-cube-kernel", ".staging-cube-kernel"},
+	}
+	for _, ch := range checks {
+		staging := filepath.Join(c.baseDir, ch.staging)
+		if exists(staging) {
+			report.Incomplete = true
+			continue
+		}
+		sentinel := filepath.Join(c.baseDir, ch.sentinel)
+		if !exists(sentinel) {
+			continue
+		}
+		dir := filepath.Join(c.baseDir, ch.dir)
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			report.Incomplete = true
+		}
+	}
+}
+
+// loadVersionJSON reads and validates a component version.json.
+// missing is true when the file is absent (not an error).
+// bad is true when the file exists but is unusable (blocks marker/manifest fallback).
+func loadVersionJSON(path string) (parsed componentJSONFile, errMsg string, missing, bad bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return componentJSONFile{}, "", true, false
+		}
+		return componentJSONFile{}, path + ": " + err.Error(), false, true
+	}
+	if len(data) > maxVersionJSONBytes {
+		return componentJSONFile{}, path + ": exceeds size limit", false, true
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return componentJSONFile{}, path + ": malformed json", false, true
+	}
+	if parsed.SchemaVersion != 0 && parsed.SchemaVersion != 1 {
+		return componentJSONFile{}, path + ": unsupported schema_version", false, true
+	}
+	return parsed, "", false, false
+}
+
+func (c *Collector) readComponentJSON(path string, allow map[string]struct{}) ([]ComponentVersion, string, bool) {
+	parsed, errMsg, missing, bad := loadVersionJSON(path)
+	if missing {
+		return nil, "", false
+	}
+	if bad {
+		return nil, errMsg, true
+	}
+	out := make([]ComponentVersion, 0, len(parsed.Components))
+	for name, mc := range parsed.Components {
+		if _, ok := allow[name]; !ok {
+			continue // drop unauthorized keys
+		}
+		ver := strings.TrimSpace(mc.Version)
+		if ver == "" {
+			continue
+		}
+		out = append(out, ComponentVersion{
+			Component: name,
+			Version:   ver,
+			Commit:    mc.Commit,
+			BuildTime: mc.BuildTime,
+			Source:    SourceComponentJSON,
+		})
+	}
+	return out, "", false
+}
+
+func (c *Collector) kernelFromJSONLocked() (ComponentVersion, string) {
+	path := filepath.Join(c.baseDir, "cube-kernel-scf", componentVersionJSON)
+	parsed, errMsg, missing, bad := loadVersionJSON(path)
+	if missing {
+		return ComponentVersion{}, ""
+	}
+	if bad {
+		return ComponentVersion{}, errMsg
+	}
+	if len(parsed.Variants) == 0 {
+		return ComponentVersion{}, path + ": unusable kernel version.json"
+	}
+	variant := c.activeKernelVariantLocked()
+	if variant == "" {
+		return ComponentVersion{}, "kernel: cannot resolve active variant"
+	}
+	entry, ok := parsed.Variants[variant]
+	if !ok {
+		return ComponentVersion{}, "kernel: missing variant " + variant
+	}
+	identity := strings.TrimSpace(entry.Version)
+	if identity == "" {
+		identity = kernelArtifactIdentity(entry.Tag, entry.DigestSHA256)
+	}
+	if identity == "" {
+		return ComponentVersion{}, "kernel: empty identity for " + variant
+	}
+	return ComponentVersion{
+		Component: ComponentKernel,
+		Version:   identity,
+		Source:    SourceComponentJSON,
+		Variant:   variant,
+	}, ""
+}
+
+func kernelVariantFromVmlinuxBase(base string) string {
+	switch base {
+	case "vmlinux-pvm":
+		return "pvm"
+	case "vmlinux-bm":
+		return "bm"
+	}
+	return ""
+}
+
+func (c *Collector) activeKernelVariantLocked() string {
+	// Prefer bootstrap-state/vmlinux-active.
+	active := filepath.Join(c.bootstrapDir, "vmlinux-active")
+	if target, err := os.Readlink(active); err == nil {
+		if v := kernelVariantFromVmlinuxBase(filepath.Base(target)); v != "" {
+			return v
+		}
+	}
+	if target, ok := c.kernelLinkTargetLocked(); ok {
+		return kernelVariantFromVmlinuxBase(filepath.Base(target))
+	}
+	return ""
+}
+
 func (c *Collector) kernelVersionLocked(man *releaseManifest) ComponentVersion {
-	target, ok := c.kernelLinkTargetLocked()
-	if ok {
-		switch filepath.Base(target) {
-		case "vmlinux-pvm":
-			return ComponentVersion{
-				Component: ComponentKernel,
-				Version:   kernelArtifactIdentity(man.Kernel.PVMVersion, man.Kernel.VMLinuxPVMDigest),
-				Source:    SourceFile,
-			}
-		case "vmlinux-bm":
-			return ComponentVersion{
-				Component: ComponentKernel,
-				Version:   kernelArtifactIdentity(man.Kernel.Version, man.Kernel.VMLinuxDigest),
-				Source:    SourceFile,
-			}
+	variant := c.activeKernelVariantLocked()
+	switch variant {
+	case "pvm":
+		return ComponentVersion{
+			Component: ComponentKernel,
+			Version:   kernelArtifactIdentity(man.Kernel.PVMVersion, man.Kernel.VMLinuxPVMDigest),
+			Source:    SourceFile,
+			Variant:   "pvm",
+		}
+	case "bm":
+		return ComponentVersion{
+			Component: ComponentKernel,
+			Version:   kernelArtifactIdentity(man.Kernel.Version, man.Kernel.VMLinuxDigest),
+			Source:    SourceFile,
+			Variant:   "bm",
 		}
 	}
 	identity := kernelArtifactIdentity(man.Kernel.Version, man.Kernel.VMLinuxDigest)
@@ -242,6 +455,7 @@ func (c *Collector) kernelVersionLocked(man *releaseManifest) ComponentVersion {
 		Component: ComponentKernel,
 		Version:   identity,
 		Source:    SourceManifest,
+		Variant:   "bm",
 	}
 }
 
@@ -274,7 +488,6 @@ func (c *Collector) kernelLinkTargetLocked() (string, bool) {
 	return target, true
 }
 
-// loadManifestLocked parses the manifest once and caches the result.
 func (c *Collector) loadManifestLocked() *releaseManifest {
 	if c.manifestParsed {
 		return c.manifest
@@ -292,11 +505,10 @@ func (c *Collector) loadManifestLocked() *releaseManifest {
 	return c.manifest
 }
 
-// componentInstalledLocked reports whether a versioned directory exists for
-// the component (${baseDir}/<component>), or whether the one-click packaged
-// install layout carries the matching binary/config path, i.e. it is actually
-// deployed here.
 func (c *Collector) componentInstalledLocked(name string) bool {
+	if name == "" || strings.Contains(name, "..") || strings.ContainsAny(name, `/\`) {
+		return false
+	}
 	if exists(filepath.Join(c.baseDir, name)) {
 		return true
 	}
@@ -309,9 +521,6 @@ func (c *Collector) componentInstalledLocked(name string) bool {
 	return false
 }
 
-// guestImageVersionLocked returns the single-line guest image version, using
-// an mtime cache so an out-of-band guest upgrade is reflected without
-// restarting cubelet.
 func (c *Collector) guestImageVersionLocked() string {
 	path := filepath.Join(c.baseDir, guestImageVerPath)
 	info, err := os.Stat(path)
@@ -335,11 +544,7 @@ func (c *Collector) guestImageVersionLocked() string {
 	return c.guestImageVer
 }
 
-// cubeEgressVersionLocked returns the single-line cube-egress version from the
-// host-side marker file written by the deploy system at install time. The file
-// is static between deployments, so we read it directly without mtime caching.
-func (c *Collector) cubeEgressVersionLocked() string {
-	path := filepath.Join(c.baseDir, cubeEgressVerPath)
+func (c *Collector) readSingleLine(path string) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
@@ -347,11 +552,8 @@ func (c *Collector) cubeEgressVersionLocked() string {
 	return firstLine(data)
 }
 
-// firstLine returns the first line of data, trimmed of surrounding
-// whitespace. Matches CubeShim::get_image_version's strict single-line read.
 func firstLine(data []byte) string {
 	start := 0
-	// skip leading whitespace
 	for start < len(data) && isSpace(data[start]) {
 		start++
 	}
@@ -360,7 +562,6 @@ func firstLine(data []byte) string {
 		end++
 	}
 	line := data[start:end]
-	// trim trailing whitespace
 	j := len(line)
 	for j > 0 && isSpace(line[j-1]) {
 		j--

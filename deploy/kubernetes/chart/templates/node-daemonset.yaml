@@ -1,0 +1,398 @@
+{{- if .Values.cubeNode.enabled }}
+apiVersion: {{ include "cube.nodeDaemonSetAPIVersion" . }}
+kind: DaemonSet
+metadata:
+  name: {{ include "cube.nodeName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-node
+spec:
+  updateStrategy:
+    {{- toYaml .Values.cubeNode.updateStrategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: cube-node
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: cube-node
+      annotations:
+        {{- with .Values.cubeNode.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- range $slot := list "1" "2" "3" "4" "5" "6" }}
+        cube.tencent.com/slot-{{ $slot }}: {{ index $.Values.cubeNode.placeholderSlots.services $slot | default "" | quote }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "cube.nodeServiceAccountName" . }}
+      automountServiceAccountToken: true
+      hostPID: {{ .Values.security.hostPID }}
+      terminationGracePeriodSeconds: {{ .Values.cubeNode.terminationGracePeriodSeconds }}
+      dnsPolicy: ClusterFirst
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "cube.computePlacement" . | nindent 6 }}
+      containers:
+        # wait-node-prep: Kruise high-priority sidecar (not init).
+        # Priority 10 starts and becomes Ready before prio-0 run containers.
+        # Freeze wait env/mounts; bumping only images.waitNodePrep may InPlace.
+        # Do NOT attach ConfigMap checksum annotations to this Pod.
+        - name: wait-node-prep
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.waitNodePrep "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.waitNodePrep.pullPolicy }}
+          env:
+            - name: STATE_DIR
+              value: {{ .Values.hostPaths.bootstrapState | quote }}
+            - name: KRUISE_CONTAINER_PRIORITY
+              value: "10"
+          readinessProbe:
+            exec:
+              command: ["test", "-f", "/run/wait-node-prep.ready"]
+            periodSeconds: 2
+            failureThreshold: 1
+          volumeMounts:
+            - name: bootstrap-state
+              mountPath: {{ .Values.hostPaths.bootstrapState }}
+          {{- with .Values.cubeNodeBootstrap.waitResources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        # Artifact install (shim/kernel/guest) lives in cube-node-installer.
+        # Big Pod container set is frozen for InPlace-only upgrades.
+        # --- run containers (KRUISE_CONTAINER_PRIORITY=0; after wait Ready) ---
+        - name: network-agent
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.networkAgent "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.networkAgent.pullPolicy }}
+          securityContext:
+            {{- include "cube.nodeDataplaneSecurityContext" . | nindent 12 }}
+          env:
+            {{- include "cube.nodeComponentCommonEnv" . | nindent 12 }}
+            - name: CUBE_COMPONENT
+              value: network-agent
+            - name: CUBE_ROLE
+              value: run
+            - name: KRUISE_CONTAINER_PRIORITY
+              value: "0"
+          ports:
+            - name: network-agent
+              containerPort: 19090
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/bash
+                  - -ec
+                  - |
+                    # Kill only this container's pidfile. Never pkill -f —
+                    # must not match containerd-shim-cube-rs / cube-runtime / VMM.
+                    pidfile=/run/cube-node/network-agent.pid
+                    if [[ -f "${pidfile}" ]]; then
+                      kill -TERM "$(cat "${pidfile}")" 2>/dev/null || true
+                    fi
+          volumeMounts:
+            {{- include "cube.nodeDataplaneVolumeMounts" . | nindent 12 }}
+        - name: cubelet
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubelet "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.cubelet.pullPolicy }}
+          securityContext:
+            {{- include "cube.nodeDataplaneSecurityContext" . | nindent 12 }}
+          env:
+            {{- include "cube.nodeComponentCommonEnv" . | nindent 12 }}
+            - name: CUBE_COMPONENT
+              value: cubelet
+            - name: CUBE_ROLE
+              value: run
+            - name: KRUISE_CONTAINER_PRIORITY
+              value: "0"
+            {{- with .Values.cubeNode.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: cubelet-grpc
+              containerPort: 9999
+            - name: cubelet-http
+              containerPort: 9998
+            - name: cubelet-debug
+              containerPort: 9966
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/bash
+                  - -ec
+                  - |
+                    # Kill only this container's pidfile. Never pkill -f —
+                    # must not match containerd-shim-cube-rs / cube-runtime / VMM.
+                    pidfile=/run/cube-node/cubelet.pid
+                    if [[ -f "${pidfile}" ]]; then
+                      kill -TERM "$(cat "${pidfile}")" 2>/dev/null || true
+                    fi
+          {{- if .Values.cubeNode.probes.startup.enabled }}
+          startupProbe:
+            {{- if .Values.cubeNode.probes.startup.exec }}
+            exec:
+              {{- toYaml .Values.cubeNode.probes.startup.exec | nindent 14 }}
+            {{- else }}
+            tcpSocket:
+              port: {{ .Values.cubeNode.probes.startup.tcpSocketPort }}
+            {{- end }}
+            periodSeconds: {{ .Values.cubeNode.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.cubeNode.probes.startup.failureThreshold }}
+          {{- end }}
+          {{- if .Values.cubeNode.probes.readiness.enabled }}
+          readinessProbe:
+            {{- if .Values.cubeNode.probes.readiness.exec }}
+            exec:
+              command:
+                {{- toYaml .Values.cubeNode.probes.readiness.exec | nindent 16 }}
+            {{- else }}
+            tcpSocket:
+              port: {{ .Values.cubeNode.probes.readiness.tcpSocketPort }}
+            {{- end }}
+            initialDelaySeconds: {{ .Values.cubeNode.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.cubeNode.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.cubeNode.probes.readiness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.cubeNode.probes.liveness.enabled }}
+          livenessProbe:
+            {{- if .Values.cubeNode.probes.liveness.exec }}
+            exec:
+              command:
+                {{- toYaml .Values.cubeNode.probes.liveness.exec | nindent 16 }}
+            {{- else }}
+            tcpSocket:
+              port: {{ .Values.cubeNode.probes.liveness.tcpSocketPort }}
+            {{- end }}
+            initialDelaySeconds: {{ .Values.cubeNode.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.cubeNode.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.cubeNode.probes.liveness.failureThreshold }}
+          {{- end }}
+          volumeMounts:
+            {{- include "cube.nodeDataplaneVolumeMounts" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.cubeNode.resources | nindent 12 }}
+        {{- if .Values.cubeEgress.enabled }}
+        - name: cube-egress
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubeEgress "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.cubeEgress.pullPolicy }}
+          securityContext:
+            privileged: {{ .Values.security.privileged }}
+            capabilities:
+              add:
+                - NET_ADMIN
+                - NET_RAW
+                - NET_BIND_SERVICE
+                - CHOWN
+                - SETUID
+                - SETGID
+                - DAC_READ_SEARCH
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: CUBE_EGRESS_BOOTSTRAP_URL
+              value: {{ .Values.cubeEgress.bootstrapURL | quote }}
+            - name: CUBE_EGRESS_DEBUG_DUMP
+              value: {{ ternary "1" "0" .Values.cubeEgress.debugDump | quote }}
+            # Optional: entrypoint may wait on this sentinel before bootstrap.
+            - name: CUBE_WAIT_NETWORK_AGENT_SENTINEL
+              value: /usr/local/services/cubetoolbox/.staged-network-agent
+            - name: KRUISE_CONTAINER_PRIORITY
+              value: "0"
+          ports:
+            - name: egress-admin
+              containerPort: 9090
+            - name: egress-http
+              containerPort: 8080
+            - name: egress-https
+              containerPort: 8443
+          {{- if .Values.cubeEgress.probes.readiness.enabled }}
+          readinessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -ec
+                - {{ printf "curl -fsS http://127.0.0.1:%v%s >/dev/null" .Values.cubeEgress.probes.readiness.port .Values.cubeEgress.probes.readiness.path | quote }}
+            initialDelaySeconds: {{ .Values.cubeEgress.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.cubeEgress.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.cubeEgress.probes.readiness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.cubeEgress.probes.liveness.enabled }}
+          livenessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -ec
+                - {{ printf "curl -fsS http://127.0.0.1:%v%s >/dev/null" .Values.cubeEgress.probes.liveness.port .Values.cubeEgress.probes.liveness.path | quote }}
+            initialDelaySeconds: {{ .Values.cubeEgress.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.cubeEgress.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.cubeEgress.probes.liveness.failureThreshold }}
+          {{- end }}
+          volumeMounts:
+            - name: cube-egress-ca
+              mountPath: /etc/cube/ca
+              readOnly: true
+            - name: data-log
+              mountPath: {{ .Values.hostPaths.dataLog }}
+            - name: cube-egress-run
+              mountPath: /var/run/openresty
+            - name: toolbox
+              mountPath: /usr/local/services/cubetoolbox
+          {{- with .Values.cubeEgress.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- if .Values.cubeEgress.network.enabled }}
+        - name: cube-egress-net
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubeEgressNet "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.cubeEgressNet.pullPolicy }}
+          securityContext:
+            privileged: {{ .Values.security.privileged }}
+            capabilities:
+              add:
+                - NET_ADMIN
+                - NET_RAW
+                - SYS_MODULE
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: CUBE_INGRESS_IFACE
+              value: {{ .Values.cubeEgress.network.ingressInterface | quote }}
+            - name: CUBE_TPROXY_ON_IP
+              value: {{ .Values.cubeEgress.network.tproxyOnIP | quote }}
+            - name: CUBE_EGRESS_NET_INITIAL_WAIT_SECONDS
+              value: {{ .Values.cubeEgress.network.initialWaitSeconds | quote }}
+            - name: CUBE_EGRESS_NET_REAPPLY_INTERVAL_SECONDS
+              value: {{ .Values.cubeEgress.network.reapplyIntervalSeconds | quote }}
+            # Optional: entrypoint may wait on this sentinel before applying rules.
+            - name: CUBE_WAIT_NETWORK_AGENT_SENTINEL
+              value: /usr/local/services/cubetoolbox/.staged-network-agent
+            - name: KRUISE_CONTAINER_PRIORITY
+              value: "0"
+          {{- if .Values.cubeEgress.network.probes.readiness.enabled }}
+          readinessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -ec
+                - {{ include "cube.egressNetProbeCommand" . | quote }}
+            initialDelaySeconds: {{ .Values.cubeEgress.network.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.cubeEgress.network.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.cubeEgress.network.probes.readiness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.cubeEgress.network.probes.liveness.enabled }}
+          livenessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -ec
+                - {{ include "cube.egressNetProbeCommand" . | quote }}
+            initialDelaySeconds: {{ .Values.cubeEgress.network.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.cubeEgress.network.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.cubeEgress.network.probes.liveness.failureThreshold }}
+          {{- end }}
+          volumeMounts:
+            - name: lib-modules
+              mountPath: /lib/modules
+              readOnly: true
+            - name: toolbox
+              mountPath: /usr/local/services/cubetoolbox
+          {{- with .Values.cubeEgress.netResources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
+        {{- end }}
+        # Frozen placeholder slots: InPlace-replace image/resources later; do not
+        # rename, remount, or change securityContext (those recreate the Big Pod).
+        {{- range $slot := list "1" "2" "3" "4" "5" "6" }}
+        {{- $override := index (default dict $.Values.cubeNode.placeholderSlots.overrides) $slot | default dict }}
+        {{- $pause := $.Values.images.pause }}
+        {{- $imgOverride := default dict $override.image }}
+        {{- $slotImage := dict "repository" ($imgOverride.repository | default $pause.repository) "tag" ($imgOverride.tag | default $pause.tag) "pullPolicy" ($imgOverride.pullPolicy | default $pause.pullPolicy) }}
+        {{- $slotResources := default $.Values.cubeNode.placeholderSlots.resources $override.resources }}
+        - name: cube-slot-{{ $slot }}
+          image: {{ include "cube.cubeImage" (dict "image" $slotImage "context" $) | quote }}
+          imagePullPolicy: {{ $slotImage.pullPolicy }}
+          securityContext:
+            {{- include "cube.nodeDataplaneSecurityContext" $ | nindent 12 }}
+          env:
+            - name: KRUISE_CONTAINER_PRIORITY
+              value: "0"
+            - name: CUBE_SLOT_SERVICE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations['cube.tencent.com/slot-{{ $slot }}']
+          volumeMounts:
+            {{- include "cube.nodeDataplaneVolumeMounts" $ | nindent 12 }}
+          resources:
+            {{- toYaml $slotResources | nindent 12 }}
+        {{- end }}
+      volumes:
+        - name: host-root
+          hostPath:
+            path: {{ .Values.hostPaths.root }}
+            type: Directory
+        - name: toolbox
+          hostPath:
+            path: {{ .Values.hostPaths.toolbox }}
+            type: DirectoryOrCreate
+        - name: bootstrap-state
+          hostPath:
+            path: {{ .Values.hostPaths.bootstrapState }}
+            type: DirectoryOrCreate
+        - name: cube-pid
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Mi
+        - name: dev
+          hostPath:
+            path: {{ .Values.hostPaths.dev }}
+            type: Directory
+        - name: sys
+          hostPath:
+            path: {{ .Values.hostPaths.sys }}
+            type: Directory
+        - name: lib-modules
+          hostPath:
+            path: {{ .Values.hostPaths.libModules }}
+            type: Directory
+        - name: data-cubelet
+          hostPath:
+            path: {{ .Values.hostPaths.dataCubelet }}
+            type: DirectoryOrCreate
+        - name: data-log
+          hostPath:
+            path: {{ .Values.hostPaths.dataLog }}
+            type: DirectoryOrCreate
+        - name: data-cube-shim
+          hostPath:
+            path: {{ .Values.hostPaths.dataCubeShim }}
+            type: DirectoryOrCreate
+        - name: data-snapshot-pack
+          hostPath:
+            path: {{ .Values.hostPaths.dataSnapshotPack }}
+            type: DirectoryOrCreate
+        - name: tmp-cube
+          hostPath:
+            path: {{ .Values.hostPaths.tmpCube }}
+            type: DirectoryOrCreate
+        - name: run-containerd
+          hostPath:
+            path: {{ .Values.hostPaths.runContainerd }}
+            type: DirectoryOrCreate
+        - name: run-vc
+          hostPath:
+            path: {{ .Values.hostPaths.runVc }}
+            type: DirectoryOrCreate
+      {{- if .Values.cubeEgress.enabled }}
+        - name: cube-egress-ca
+          secret:
+            secretName: {{ include "cube.egressCASecretName" . }}
+        - name: cube-egress-run
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+      {{- end }}
+{{- end }}

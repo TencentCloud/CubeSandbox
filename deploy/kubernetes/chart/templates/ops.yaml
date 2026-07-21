@@ -1,0 +1,106 @@
+{{- if eq (include "cube.opsEnabled" .) "true" }}
+{{- $opsPort := .Values.cubeOps.service.port -}}
+apiVersion: {{ include "cube.cloneSetAPIVersion" . }}
+kind: CloneSet
+metadata:
+  name: {{ include "cube.opsName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ops
+spec:
+  replicas: {{ .Values.cubeOps.replicas }}
+  {{- include "cube.cloneSetUpdateStrategy" . | nindent 2 }}
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ops
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: ops
+      {{- with .Values.cubeOps.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      containers:
+        - name: cube-ops
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.ops "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.ops.pullPolicy }}
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: CUBE_OPS_BIND
+              value: {{ .Values.cubeOps.bind | quote }}
+            - name: CUBE_MASTER_ADDR
+              value: {{ printf "http://%s" (include "cube.masterEndpoint" .) | quote }}
+            - name: CUBE_SANDBOX_MYSQL_HOST
+              value: {{ include "cube.mysqlHost" . | quote }}
+            - name: CUBE_SANDBOX_MYSQL_PORT
+              value: {{ .Values.mysql.port | quote }}
+            - name: CUBE_SANDBOX_MYSQL_USER
+              value: {{ .Values.mysql.user | quote }}
+            - name: CUBE_SANDBOX_MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: mysql-password
+            - name: CUBE_SANDBOX_MYSQL_DB
+              value: {{ .Values.mysql.database | quote }}
+            - name: CUBE_API_SANDBOX_DOMAIN
+              value: {{ default .Values.cubeProxy.domain .Values.cubeOps.sandboxDomain | quote }}
+            # Shared CubeDB with CubeMaster; skip fingerprint so chart upgrades
+            # do not fail when Master already applied the same migrations.
+            - name: CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK
+              value: "true"
+            {{- with .Values.cubeOps.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $opsPort }}
+          {{- if .Values.cubeOps.probes.readiness.enabled }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.cubeOps.probes.readiness.path | quote }}
+              port: http
+            initialDelaySeconds: {{ .Values.cubeOps.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.cubeOps.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.cubeOps.probes.readiness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.cubeOps.probes.liveness.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.cubeOps.probes.liveness.path | quote }}
+              port: http
+            initialDelaySeconds: {{ .Values.cubeOps.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.cubeOps.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.cubeOps.probes.liveness.failureThreshold }}
+          {{- end }}
+          {{- with .Values.cubeOps.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cube.opsName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ops
+spec:
+  type: {{ .Values.cubeOps.service.type }}
+  selector:
+    {{- include "cube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: ops
+  ports:
+    - name: http
+      port: {{ $opsPort }}
+      targetPort: http
+{{- end }}

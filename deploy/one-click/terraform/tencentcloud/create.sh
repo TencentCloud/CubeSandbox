@@ -3316,7 +3316,7 @@ step6_replace_kernel() {
 	local key_file js_public_ip
 	key_file="${TENCENTCLOUD_SSH_PRIVATE_KEY_PATH:-$SSH_PRI_KEY}"
 	js_public_ip=$(terraform output -raw jumpserver_public_ip 2>/dev/null || echo "")
-	local pvm_kernel_url="${TENCENTCLOUD_PVM_KERNEL_RPM_URL:-https://mirrors.opencloudos.tech/opencloudos/9.4/extras/x86_64/os/Packages/kernel-core-6.6.69-1.1.cubesandbox.oc9.x86_64.rpm}"
+	local pvm_kernel_url="${TENCENTCLOUD_PVM_KERNEL_RPM_URL:-https://mirrors.opencloudos.tech/opencloudos/9.6/extras/x86_64/os/Packages/kernel-core-6.6.69-1.2.cubesandbox.oc9.x86_64.rpm}"
 	local rpm_name
 	rpm_name=$(basename "$pvm_kernel_url")
 	local rpm_file="/tmp/${rpm_name}"

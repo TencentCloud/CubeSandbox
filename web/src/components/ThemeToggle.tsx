@@ -27,7 +27,7 @@ export function ThemeToggle() {
           className={cn(
             'flex h-9 w-9 items-center justify-center rounded-lg border border-border/60 bg-muted/40',
             'text-muted-foreground transition hover:border-primary/30 hover:bg-muted/70 hover:text-foreground',
-            'focus:outline-none'
+            'focus:outline-none',
           )}
           aria-label={t('toggle')}
           title={t('toggle')}

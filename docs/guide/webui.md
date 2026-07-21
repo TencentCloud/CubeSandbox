@@ -18,8 +18,12 @@ The Dashboard is a static frontend served by an nginx container on the **control
 | Bare-metal deploy | `http://<server-ip>:12088` | Same port |
 | Local development | `http://localhost:5173` | Vite dev server, proxies `/cubeapi` to `127.0.0.1:3000` |
 
-::: tip Port 12088, not 3000
-Port `3000` is the E2B-compatible REST API (CubeAPI). Port `12088` is the human-facing Dashboard. The Dashboard internally calls CubeAPI under the same-origin prefix `/cubeapi/v1`, so you only ever need to open `12088`.
+::: tip Port 12088 vs CubeOps :3010
+Port `12088` is the human-facing Dashboard (nginx). Behind it, **CubeOps** (the ops/admin service) listens on `:3010`. The Dashboard talks to CubeOps under two same-origin prefixes:
+- `/opsapi/*` → CubeOps `/api/*` (admin endpoints, **restricted to localhost and Docker bridge networks**)
+- `/cubeapi/v1/*` → CubeOps `/api/v1/sdk/*` (E2B-compatible SDK endpoints, JWT-authenticated, public)
+
+You only ever need to open `12088` from your browser. Do **not** expose `:3010` directly to the public internet.
 :::
 
 If you don't know your control-node IP, run `ip -4 addr` on the server, or check `http://<hostname>:12088` on the same LAN.
@@ -37,7 +41,7 @@ Everything lives behind the 11 icons in the left rail. Hover any icon to see its
 | 5 | 🧬 | **Versions** | Component version matrix across nodes (kernel, agent, guest image) |
 | 6 | 🌐 | **Network** | API gateway config and per-node rate limits |
 | 7 | 📈 | **Observability** | Runtime status, sandbox health, template build overview |
-| 8 | 🔑 | **API Keys** | Store the `X-API-Key` value used for all Dashboard requests |
+| 8 | 🔑 | **API Keys** | SDK API key management (JWT-based since v0.6.0) |
 | 9 | 🏪 | **Template Store** | Install official preset images to bootstrap templates |
 | 10 | 🤖 | **AgentHub** | Recruit and manage AI agent instances running on Cube Sandbox |
 | 11 | ⚙️ | **Settings** | Theme, language, cluster info, keyboard shortcuts |
@@ -67,16 +71,18 @@ If any number is red, click into **Nodes** to see which host is unhappy.
 
 To stop a sandbox, go to **Sandboxes**, find the row, and click the pause / kill button on the right.
 
-### 3.3 Configure the API key (only if auth is enabled)
+### 3.3 Log in (JWT authentication)
 
-If your deployment has authentication turned on, the Dashboard needs an API key before any request will succeed.
+The Dashboard uses **JWT-based authentication** (since v0.6.0, replacing the old `X-API-Key` scheme). On first visit you'll be redirected to the login page.
 
-1. Open **API Keys** in the left rail.
-2. Paste your key (it looks like `sk-cube-…`) into the input.
-3. Click **Save**. The value is stored in your browser's `localStorage` under `cube.apiKey` and attached to every Dashboard request as the `X-API-Key` header.
+1. Enter your credentials. The default All-in-One account is `admin` / `admin` — **change this immediately in production** via Settings → Change Password.
+2. On success you receive an access token (short-lived) and a refresh token (7 days). Tokens are stored in `localStorage` and sent as `Authorization: Bearer <jwt>`.
+3. The admin endpoints (`/opsapi/*`) are **restricted to localhost and Docker bridge networks** at the nginx layer, so even with weak default credentials they are not reachable from the public internet. SDK endpoints (`/cubeapi/v1/*`) require a valid JWT.
 
-::: details Where does the key come from?
-The admin who enabled auth generated it. See [Authentication](./authentication.md) for the full flow.
+::: details Token lifecycle
+- **Access token**: 15 min TTL, `token_type=access`, audience `cubeops:access`.
+- **Refresh token**: 7 day TTL, `token_type=refresh`, audience `cubeops:refresh`. Refresh tokens **cannot** be used as access tokens (enforced by `typ` + `aud` claims).
+- Login is rate-limited: 5 failed attempts per minute per IP.
 :::
 
 ## 4. Keyboard shortcuts

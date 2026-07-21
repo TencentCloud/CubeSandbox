@@ -1,0 +1,114 @@
+{{- if and .Values.webui.enabled .Values.controlPlane.enabled (eq (include "cube.opsEnabled" .) "true") }}
+{{- /* Hash full nginx body so ConfigMap edits force a pod roll (InPlace + subPath
+     would otherwise keep a stale file). Mount is a directory (no subPath). */ -}}
+{{- $nginxBody := include "cube.webuiNginxConf" . -}}
+{{- $nginxChecksum := $nginxBody | sha256sum -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cube.webuiName" . }}-config
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webui
+data:
+  nginx.conf: |-
+{{- $nginxBody | nindent 4 }}
+---
+apiVersion: {{ include "cube.cloneSetAPIVersion" . }}
+kind: CloneSet
+metadata:
+  name: {{ include "cube.webuiName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webui
+spec:
+  replicas: {{ .Values.webui.replicas }}
+  {{- include "cube.cloneSetUpdateStrategy" . | nindent 2 }}
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: webui
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: webui
+      annotations:
+        checksum/nginx-conf: {{ $nginxChecksum | quote }}
+      {{- with .Values.webui.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      containers:
+        - name: webui
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.webui "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.webui.pullPolicy }}
+          # Image ENTRYPOINT embeds "-g daemon off;"; override so we can load the
+          # chart ConfigMap without a subPath file mount (which does not refresh).
+          command:
+            - /usr/local/openresty/bin/openresty
+          args:
+            - -c
+            - /etc/cube-webui/nginx.conf
+            - -g
+            - daemon off;
+          {{- if .Values.global.timezone }}
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 6
+          volumeMounts:
+            - name: webui-config
+              mountPath: /etc/cube-webui
+              readOnly: true
+          {{- with .Values.webui.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: webui-config
+          configMap:
+            name: {{ include "cube.webuiName" . }}-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cube.webuiName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webui
+  {{- with .Values.webui.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.webui.service.type }}
+  selector:
+    {{- include "cube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: webui
+  ports:
+    - name: http
+      port: {{ .Values.webui.service.port }}
+      targetPort: {{ .Values.webui.service.targetPort }}
+{{- end }}

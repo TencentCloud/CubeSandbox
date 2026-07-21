@@ -105,6 +105,46 @@ func GetNodes(n int) node.NodeList {
 }
 
 func GetHealthyNodes(n int) node.NodeList {
+	return collectCacheNodes(n, false)
+}
+
+func GetHealthyNodesByInstanceType(n int, product string) node.NodeList {
+	return collectClusterNodes(n, product, false)
+}
+
+// GetSchedulableNodesByInstanceType returns healthy nodes that may receive new
+// sandboxes. Cordon filtering happens before limit n so isolated nodes do not
+// consume PreSelectNum. Healthy-but-isolated nodes remain in GetHealthyNodes*.
+func GetSchedulableNodesByInstanceType(n int, product string) node.NodeList {
+	return collectClusterNodes(n, product, true)
+}
+
+func collectClusterNodes(n int, product string, requireSchedulable bool) node.NodeList {
+	l.lockSortedNodes.RLock()
+	clusterNodes, exists := l.sortedNodesByClusters[product]
+	l.lockSortedNodes.RUnlock()
+	if !exists {
+		return collectCacheNodes(n, requireSchedulable)
+	}
+
+	nodes := node.NodeList{}
+	now := time.Now()
+	for _, v := range clusterNodes {
+		if n >= 0 && nodes.Len() >= n {
+			break
+		}
+		if requireSchedulable && !v.SchedulingAllowed() {
+			continue
+		}
+		current := cloneNodeWithCurrentHealth(v, now)
+		if current.Healthy {
+			nodes.Append(current)
+		}
+	}
+	return nodes
+}
+
+func collectCacheNodes(n int, requireSchedulable bool) node.NodeList {
 	nodes := node.NodeList{}
 	elems := l.cache.Items()
 	now := time.Now()
@@ -113,42 +153,17 @@ func GetHealthyNodes(n int) node.NodeList {
 			break
 		}
 		h, ok := v.Object.(*node.Node)
-		if ok {
-			current := cloneNodeWithCurrentHealth(h, now)
-			if current.Healthy {
-				nodes.Append(current)
-			}
+		if !ok {
+			continue
 		}
-
-	}
-	return nodes
-}
-
-func GetHealthyNodesByInstanceType(n int, product string) node.NodeList {
-
-	l.lockSortedNodes.RLock()
-	clusterNodes, exists := l.sortedNodesByClusters[product]
-	l.lockSortedNodes.RUnlock()
-	if !exists {
-
-		return GetHealthyNodes(n)
-	}
-
-	nodes := node.NodeList{}
-	now := time.Now()
-
-	for _, v := range clusterNodes {
-
-		if n >= 0 && nodes.Len() >= n {
-			break
+		if requireSchedulable && !h.SchedulingAllowed() {
+			continue
 		}
-
-		current := cloneNodeWithCurrentHealth(v, now)
+		current := cloneNodeWithCurrentHealth(h, now)
 		if current.Healthy {
 			nodes.Append(current)
 		}
 	}
-
 	return nodes
 }
 

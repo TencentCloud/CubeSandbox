@@ -7,9 +7,17 @@ import { useRuntimeConfig } from '@/hooks/useRuntimeConfig';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
-  Activity, Server, Gauge, Package,
-  ExternalLink, Loader2, Wifi, WifiOff,
-  CheckCircle2, XCircle, AlertTriangle,
+  Activity,
+  Server,
+  Gauge,
+  Package,
+  ExternalLink,
+  Loader2,
+  Wifi,
+  WifiOff,
+  CheckCircle2,
+  XCircle,
+  AlertTriangle,
 } from 'lucide-react';
 import { clusterApi, sandboxApi, templateApi } from '@/api/client';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -18,8 +26,14 @@ import { cn, formatRelative } from '@/lib/utils';
 
 // ── Shared primitives ─────────────────────────────────────────────────────────
 
-function SectionHeader({ icon: Icon, title, desc }: {
-  icon: React.ElementType; title: string; desc?: string;
+function SectionHeader({
+  icon: Icon,
+  title,
+  desc,
+}: {
+  icon: React.ElementType;
+  title: string;
+  desc?: string;
 }) {
   return (
     <div className="flex items-start gap-3 mb-5">
@@ -34,11 +48,23 @@ function SectionHeader({ icon: Icon, title, desc }: {
   );
 }
 
-function KpiCard({ label, value, color }: { label: string; value: number | string; color?: string }) {
+function KpiCard({
+  label,
+  value,
+  color,
+}: {
+  label: string;
+  value: number | string;
+  color?: string;
+}) {
   return (
     <div className="rounded-xl border border-border/60 bg-card/40 px-5 py-4 flex flex-col gap-1">
-      <span className="text-xs text-muted-foreground uppercase tracking-wider font-medium">{label}</span>
-      <span className={cn('text-3xl font-semibold tabular-nums', color ?? 'text-foreground')}>{value}</span>
+      <span className="text-xs text-muted-foreground uppercase tracking-wider font-medium">
+        {label}
+      </span>
+      <span className={cn('text-3xl font-semibold tabular-nums', color ?? 'text-foreground')}>
+        {value}
+      </span>
     </div>
   );
 }
@@ -55,8 +81,8 @@ function SandboxSection() {
     refetchInterval: 10_000,
   });
 
-  const running = all?.filter(s => s.state === 'running') ?? [];
-  const paused = all?.filter(s => s.state === 'paused') ?? [];
+  const running = all?.filter((s) => s.state === 'running') ?? [];
+  const paused = all?.filter((s) => s.state === 'paused') ?? [];
 
   const totalCount = all?.length ?? 0;
   const runningCount = running.length;
@@ -92,14 +118,22 @@ function SandboxSection() {
       {/* Distribution bar */}
       {!loading && totalCount > 0 && (
         <div className="mb-5 rounded-xl border border-border/60 bg-card/40 px-5 py-4">
-          <p className="text-xs text-muted-foreground uppercase tracking-wider font-medium mb-3">{t('sandboxes.distribution')}</p>
+          <p className="text-xs text-muted-foreground uppercase tracking-wider font-medium mb-3">
+            {t('sandboxes.distribution')}
+          </p>
           <div className="flex h-2 w-full overflow-hidden rounded-full bg-muted">
             <div className="bg-cube-ok transition-all" style={{ width: `${runningPct}%` }} />
             <div className="bg-cube-warn transition-all" style={{ width: `${pausedPct}%` }} />
           </div>
           <div className="mt-2 flex items-center gap-4 text-xs text-muted-foreground">
-            <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-cube-ok" />{t('sandboxes.running')} <span className="text-num">{runningPct}%</span></span>
-            <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-cube-warn" />{t('sandboxes.paused')} <span className="text-num">{pausedPct}%</span></span>
+            <span className="flex items-center gap-1.5">
+              <span className="h-2 w-2 rounded-full bg-cube-ok" />
+              {t('sandboxes.running')} <span className="text-num">{runningPct}%</span>
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="h-2 w-2 rounded-full bg-cube-warn" />
+              {t('sandboxes.paused')} <span className="text-num">{pausedPct}%</span>
+            </span>
           </div>
         </div>
       )}
@@ -107,36 +141,69 @@ function SandboxSection() {
       {/* Recent list */}
       <div className="rounded-xl border border-border/60 bg-card/40 overflow-x-auto">
         <div className="px-5 py-3 border-b border-border/40">
-          <p className="text-xs text-muted-foreground uppercase tracking-wider font-medium">{t('sandboxes.recent')}</p>
+          <p className="text-xs text-muted-foreground uppercase tracking-wider font-medium">
+            {t('sandboxes.recent')}
+          </p>
         </div>
         <table className="w-full text-sm" style={{ minWidth: '560px' }}>
           <thead>
             <tr className="border-b border-border/40">
-              {[t('sandboxes.colId'), t('sandboxes.colTemplate'), t('sandboxes.colState'), t('sandboxes.colCreated')].map(h => (
-                <th key={h} className="tbl-th py-2.5">{h}</th>
+              {[
+                t('sandboxes.colId'),
+                t('sandboxes.colTemplate'),
+                t('sandboxes.colState'),
+                t('sandboxes.colCreated'),
+              ].map((h) => (
+                <th key={h} className="tbl-th py-2.5">
+                  {h}
+                </th>
               ))}
             </tr>
           </thead>
           <tbody className="divide-y divide-border/30">
             {loading ? (
               Array.from({ length: 3 }).map((_, i) => (
-                <tr key={i}>{[1,2,3,4].map(j => <td key={j} className="px-5 py-3"><Skeleton className="h-4 w-20" /></td>)}</tr>
+                <tr key={i}>
+                  {[1, 2, 3, 4].map((j) => (
+                    <td key={j} className="px-5 py-3">
+                      <Skeleton className="h-4 w-20" />
+                    </td>
+                  ))}
+                </tr>
               ))
             ) : recent.length === 0 ? (
-              <tr><td colSpan={4} className="px-5 py-6 text-sm text-muted-foreground text-center">{t('sandboxes.empty')}</td></tr>
+              <tr>
+                <td colSpan={4} className="px-5 py-6 text-sm text-muted-foreground text-center">
+                  {t('sandboxes.empty')}
+                </td>
+              </tr>
             ) : (
-              recent.map(s => (
+              recent.map((s) => (
                 <tr key={s.sandboxID} className="hover:bg-muted/30 transition-colors">
                   <td className="px-5 py-3">
-                    <Link to={`/sandboxes/${s.sandboxID}`} className="inline-flex items-center gap-1.5 font-mono text-xs text-foreground/80 hover:text-primary transition-colors">
+                    <Link
+                      to={`/sandboxes/${s.sandboxID}`}
+                      className="inline-flex items-center gap-1.5 font-mono text-xs text-foreground/80 hover:text-primary transition-colors"
+                    >
                       {s.sandboxID.slice(0, 8)}…<ExternalLink size={10} className="opacity-50" />
                     </Link>
                   </td>
-                  <td className="px-5 py-3 font-mono text-xs text-muted-foreground">{s.templateID ?? '—'}</td>
-                  <td className="px-5 py-3">
-                    <span className={cn('text-xs font-medium', s.state === 'running' ? 'text-cube-ok' : 'text-cube-warn')}>{s.state}</span>
+                  <td className="px-5 py-3 font-mono text-xs text-muted-foreground">
+                    {s.templateID ?? '—'}
                   </td>
-                  <td className="px-5 py-3 text-xs text-muted-foreground">{formatRelative(s.startedAt)}</td>
+                  <td className="px-5 py-3">
+                    <span
+                      className={cn(
+                        'text-xs font-medium',
+                        s.state === 'running' ? 'text-cube-ok' : 'text-cube-warn',
+                      )}
+                    >
+                      {s.state}
+                    </span>
+                  </td>
+                  <td className="px-5 py-3 text-xs text-muted-foreground">
+                    {formatRelative(s.startedAt)}
+                  </td>
                 </tr>
               ))
             )}
@@ -158,7 +225,7 @@ function NodeSection() {
     refetchInterval: 15_000,
   });
 
-  const healthyCount = nodes?.filter(n => n.healthy).length ?? 0;
+  const healthyCount = nodes?.filter((n) => n.healthy).length ?? 0;
   const totalCount = nodes?.length ?? 0;
 
   return (
@@ -170,12 +237,17 @@ function NodeSection() {
         {isLoading ? (
           Array.from({ length: 2 }).map((_, i) => (
             <div key={i} className="rounded-xl border border-border/60 bg-card/40 px-5 py-4">
-              <Skeleton className="h-3 w-16 mb-2" /><Skeleton className="h-8 w-10" />
+              <Skeleton className="h-3 w-16 mb-2" />
+              <Skeleton className="h-8 w-10" />
             </div>
           ))
         ) : (
           <>
-            <KpiCard label={t('nodes.healthyCount')} value={healthyCount} color={healthyCount === totalCount ? 'text-cube-ok' : 'text-cube-err'} />
+            <KpiCard
+              label={t('nodes.healthyCount')}
+              value={healthyCount}
+              color={healthyCount === totalCount ? 'text-cube-ok' : 'text-cube-err'}
+            />
             <KpiCard label={t('nodes.totalCount')} value={totalCount} />
           </>
         )}
@@ -192,17 +264,40 @@ function NodeSection() {
             </div>
           ))
         ) : !nodes || nodes.length === 0 ? (
-          <div className="rounded-xl border border-border/60 bg-card/40 px-5 py-6 text-sm text-muted-foreground text-center">{t('nodes.empty')}</div>
+          <div className="rounded-xl border border-border/60 bg-card/40 px-5 py-6 text-sm text-muted-foreground text-center">
+            {t('nodes.empty')}
+          </div>
         ) : (
-          nodes.map(node => (
-            <div key={node.nodeID} className={cn('rounded-xl border bg-card/40 px-5 py-4', node.healthy ? 'border-border/60' : 'border-cube-err/30 bg-cube-err/[0.04]')}>
+          nodes.map((node) => (
+            <div
+              key={node.nodeID}
+              className={cn(
+                'rounded-xl border bg-card/40 px-5 py-4',
+                node.healthy ? 'border-border/60' : 'border-cube-err/30 bg-cube-err/[0.04]',
+              )}
+            >
               <div className="flex items-center justify-between mb-4">
-                <Link to={`/nodes/${node.nodeID}`} className="inline-flex items-center gap-2 hover:text-primary transition-colors">
-                  <span className={cn('h-2 w-2 rounded-full', node.healthy ? 'bg-cube-ok animate-pulse' : 'bg-cube-err')} />
-                  <span className="text-sm text-foreground/90 text-num">{node.address ?? node.nodeID}</span>
+                <Link
+                  to={`/nodes/${node.nodeID}`}
+                  className="inline-flex items-center gap-2 hover:text-primary transition-colors"
+                >
+                  <span
+                    className={cn(
+                      'h-2 w-2 rounded-full',
+                      node.healthy ? 'bg-cube-ok animate-pulse' : 'bg-cube-err',
+                    )}
+                  />
+                  <span className="text-sm text-foreground/90 text-num">
+                    {node.address ?? node.nodeID}
+                  </span>
                   <ExternalLink size={11} className="opacity-40" />
                 </Link>
-                <span className={cn('text-xs font-medium', node.healthy ? 'text-cube-ok' : 'text-cube-err')}>
+                <span
+                  className={cn(
+                    'text-xs font-medium',
+                    node.healthy ? 'text-cube-ok' : 'text-cube-err',
+                  )}
+                >
                   {node.healthy ? t('nodes.healthy') : t('nodes.degraded')}
                 </span>
               </div>
@@ -215,7 +310,14 @@ function NodeSection() {
                   </div>
                   <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
                     <div
-                      className={cn('h-full rounded-full transition-all', node.saturationPct > 80 ? 'bg-cube-err' : node.saturationPct > 60 ? 'bg-cube-warn' : 'bg-cube-info')}
+                      className={cn(
+                        'h-full rounded-full transition-all',
+                        node.saturationPct > 80
+                          ? 'bg-cube-err'
+                          : node.saturationPct > 60
+                            ? 'bg-cube-warn'
+                            : 'bg-cube-info',
+                      )}
                       style={{ width: `${node.saturationPct}%` }}
                     />
                   </div>
@@ -228,7 +330,14 @@ function NodeSection() {
                   </div>
                   <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
                     <div
-                      className={cn('h-full rounded-full transition-all', node.memorySaturationPct > 80 ? 'bg-cube-err' : node.memorySaturationPct > 60 ? 'bg-cube-warn' : 'bg-cube-accent')}
+                      className={cn(
+                        'h-full rounded-full transition-all',
+                        node.memorySaturationPct > 80
+                          ? 'bg-cube-err'
+                          : node.memorySaturationPct > 60
+                            ? 'bg-cube-warn'
+                            : 'bg-cube-accent',
+                      )}
                       style={{ width: `${node.memorySaturationPct}%` }}
                     />
                   </div>
@@ -247,7 +356,9 @@ function NodeSection() {
 function ApiSection() {
   const { t } = useTranslation('observability');
   const [testing, setTesting] = useState(false);
-  const [result, setResult] = useState<{ ok: boolean; latency?: number; msg?: string } | null>(null);
+  const [result, setResult] = useState<{ ok: boolean; latency?: number; msg?: string } | null>(
+    null,
+  );
 
   const { data: cfg, isLoading } = useRuntimeConfig();
 
@@ -270,7 +381,11 @@ function ApiSection() {
       <SectionHeader icon={Gauge} title={t('api.title')} desc={t('api.desc')} />
       <div className="rounded-xl border border-border/60 bg-card/40 px-5 py-1 mb-3">
         {isLoading ? (
-          <div className="space-y-3 py-3">{[1,2].map(i => <Skeleton key={i} className="h-4 w-full" />)}</div>
+          <div className="space-y-3 py-3">
+            {[1, 2].map((i) => (
+              <Skeleton key={i} className="h-4 w-full" />
+            ))}
+          </div>
         ) : (
           <>
             <div className="flex items-center justify-between py-2.5 border-b border-border/40">
@@ -280,9 +395,15 @@ function ApiSection() {
             <div className="flex items-center justify-between py-2.5">
               <span className="text-sm text-muted-foreground">{t('api.auth')}</span>
               {cfg?.authEnabled ? (
-                <span className="inline-flex items-center gap-1 text-cube-ok text-xs font-medium"><CheckCircle2 size={12} />{t('api.authOn')}</span>
+                <span className="inline-flex items-center gap-1 text-cube-ok text-xs font-medium">
+                  <CheckCircle2 size={12} />
+                  {t('api.authOn')}
+                </span>
               ) : (
-                <span className="inline-flex items-center gap-1 text-muted-foreground text-xs"><XCircle size={12} />{t('api.authOff')}</span>
+                <span className="inline-flex items-center gap-1 text-muted-foreground text-xs">
+                  <XCircle size={12} />
+                  {t('api.authOff')}
+                </span>
               )}
             </div>
           </>
@@ -300,13 +421,25 @@ function ApiSection() {
           {testing ? t('api.testing') : t('api.test')}
         </button>
         {result && (
-          <div className={cn(
-            'flex items-center gap-2 rounded-lg border px-3 py-2 text-sm animate-fade-in',
-            result.ok ? 'border-cube-ok/20 bg-cube-ok/[0.06] text-cube-ok' : 'border-cube-err/20 bg-cube-err/[0.06] text-cube-err'
-          )}>
-            {result.ok
-              ? <><Wifi size={13} />{t('api.connected')} · <span className="text-num">{result.latency}ms</span></>
-              : <><WifiOff size={13} />{result.msg}</>}
+          <div
+            className={cn(
+              'flex items-center gap-2 rounded-lg border px-3 py-2 text-sm animate-fade-in',
+              result.ok
+                ? 'border-cube-ok/20 bg-cube-ok/[0.06] text-cube-ok'
+                : 'border-cube-err/20 bg-cube-err/[0.06] text-cube-err',
+            )}
+          >
+            {result.ok ? (
+              <>
+                <Wifi size={13} />
+                {t('api.connected')} · <span className="text-num">{result.latency}ms</span>
+              </>
+            ) : (
+              <>
+                <WifiOff size={13} />
+                {result.msg}
+              </>
+            )}
           </div>
         )}
       </div>
@@ -325,9 +458,9 @@ function TemplateSection() {
     refetchInterval: 30_000,
   });
 
-  const ready = templates?.filter(t => t.status.toLowerCase() === 'ready').length ?? 0;
-  const building = templates?.filter(t => t.status.toLowerCase() === 'building').length ?? 0;
-  const failed = templates?.filter(t => t.status.toLowerCase() === 'failed') ?? [];
+  const ready = templates?.filter((t) => t.status.toLowerCase() === 'ready').length ?? 0;
+  const building = templates?.filter((t) => t.status.toLowerCase() === 'building').length ?? 0;
+  const failed = templates?.filter((t) => t.status.toLowerCase() === 'failed') ?? [];
 
   return (
     <div>
@@ -336,20 +469,25 @@ function TemplateSection() {
       {/* Status badges */}
       <div className="flex items-center gap-3 mb-5 flex-wrap">
         {isLoading ? (
-          Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-7 w-20 rounded-full" />)
+          Array.from({ length: 3 }).map((_, i) => (
+            <Skeleton key={i} className="h-7 w-20 rounded-full" />
+          ))
         ) : (
           <>
             <span className="inline-flex items-center gap-1.5 rounded-full border border-cube-ok/20 bg-cube-ok/[0.08] px-3 py-1 text-xs font-medium text-cube-ok">
-              <CheckCircle2 size={11} />{t('templates.ready')} · <span className="text-num">{ready}</span>
+              <CheckCircle2 size={11} />
+              {t('templates.ready')} · <span className="text-num">{ready}</span>
             </span>
             {building > 0 && (
               <span className="inline-flex items-center gap-1.5 rounded-full border border-cube-warn/20 bg-cube-warn/[0.08] px-3 py-1 text-xs font-medium text-cube-warn">
-                <Loader2 size={11} className="animate-spin" />{t('templates.building')} · <span className="text-num">{building}</span>
+                <Loader2 size={11} className="animate-spin" />
+                {t('templates.building')} · <span className="text-num">{building}</span>
               </span>
             )}
             {failed.length > 0 && (
               <span className="inline-flex items-center gap-1.5 rounded-full border border-cube-err/20 bg-cube-err/[0.08] px-3 py-1 text-xs font-medium text-cube-err">
-                <AlertTriangle size={11} />{t('templates.failed')} · <span className="text-num">{failed.length}</span>
+                <AlertTriangle size={11} />
+                {t('templates.failed')} · <span className="text-num">{failed.length}</span>
               </span>
             )}
           </>
@@ -359,36 +497,58 @@ function TemplateSection() {
       {/* Failed templates */}
       <div className="rounded-xl border border-border/60 bg-card/40 overflow-x-auto">
         <div className="px-5 py-3 border-b border-border/40">
-          <p className="text-xs text-muted-foreground uppercase tracking-wider font-medium">{t('templates.failedList')}</p>
+          <p className="text-xs text-muted-foreground uppercase tracking-wider font-medium">
+            {t('templates.failedList')}
+          </p>
         </div>
         {isLoading ? (
-          <div className="px-5 py-4 space-y-2">{[1,2].map(i => <Skeleton key={i} className="h-4 w-full" />)}</div>
+          <div className="px-5 py-4 space-y-2">
+            {[1, 2].map((i) => (
+              <Skeleton key={i} className="h-4 w-full" />
+            ))}
+          </div>
         ) : failed.length === 0 ? (
           <div className="px-5 py-6 text-sm text-muted-foreground text-center flex items-center justify-center gap-2">
-            <CheckCircle2 size={14} className="text-cube-ok" />{t('templates.noFailed')}
+            <CheckCircle2 size={14} className="text-cube-ok" />
+            {t('templates.noFailed')}
           </div>
         ) : (
           <table className="w-full text-sm" style={{ minWidth: '560px' }}>
             <thead>
               <tr className="border-b border-border/40">
-                {[t('templates.colId'), t('templates.colStatus'), t('templates.colVersion'), t('templates.colError')].map(h => (
-                  <th key={h} className="tbl-th py-2.5">{h}</th>
+                {[
+                  t('templates.colId'),
+                  t('templates.colStatus'),
+                  t('templates.colVersion'),
+                  t('templates.colError'),
+                ].map((h) => (
+                  <th key={h} className="tbl-th py-2.5">
+                    {h}
+                  </th>
                 ))}
               </tr>
             </thead>
             <tbody className="divide-y divide-border/30">
-              {failed.map(tpl => (
+              {failed.map((tpl) => (
                 <tr key={tpl.templateID} className="hover:bg-muted/30 transition-colors">
                   <td className="px-5 py-3">
-                    <Link to={`/templates/${tpl.templateID}`} className="inline-flex items-center gap-1.5 font-mono text-xs text-foreground/80 hover:text-primary transition-colors">
-                      {tpl.templateID}<ExternalLink size={10} className="opacity-50" />
+                    <Link
+                      to={`/templates/${tpl.templateID}`}
+                      className="inline-flex items-center gap-1.5 font-mono text-xs text-foreground/80 hover:text-primary transition-colors"
+                    >
+                      {tpl.templateID}
+                      <ExternalLink size={10} className="opacity-50" />
                     </Link>
                   </td>
                   <td className="px-5 py-3">
                     <span className="text-xs font-medium text-cube-err">{tpl.status}</span>
                   </td>
-                  <td className="px-5 py-3 text-xs text-muted-foreground text-num">{tpl.version ?? '—'}</td>
-                  <td className="px-5 py-3 text-xs text-cube-err/80 max-w-xs truncate">{tpl.lastError ?? '—'}</td>
+                  <td className="px-5 py-3 text-xs text-muted-foreground text-num">
+                    {tpl.version ?? '—'}
+                  </td>
+                  <td className="px-5 py-3 text-xs text-cube-err/80 max-w-xs truncate">
+                    {tpl.lastError ?? '—'}
+                  </td>
                 </tr>
               ))}
             </tbody>

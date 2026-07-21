@@ -60,6 +60,8 @@ func TestGetShortInstanceType(t *testing.T) {
 func TestGetHostIdentityUsesEnvOverride(t *testing.T) {
 	resetHostIdentityCache()
 	t.Cleanup(resetHostIdentityCache)
+	t.Setenv("CUBE_SANDBOX_NODE_ID", "")
+	t.Setenv("CUBE_SANDBOX_ENDPOINT_IP", "")
 	t.Setenv("CUBE_SANDBOX_NODE_IP", "10.20.30.40")
 
 	identity, err := GetHostIdentity()
@@ -71,6 +73,25 @@ func TestGetHostIdentityUsesEnvOverride(t *testing.T) {
 	}
 	if identity.LocalIPv4 != "10.20.30.40" {
 		t.Fatalf("expected local ip from env override, got %s", identity.LocalIPv4)
+	}
+}
+
+func TestGetHostIdentitySeparatesNodeIDAndEndpointIP(t *testing.T) {
+	resetHostIdentityCache()
+	t.Cleanup(resetHostIdentityCache)
+	t.Setenv("CUBE_SANDBOX_NODE_ID", "node-a")
+	t.Setenv("CUBE_SANDBOX_NODE_IP", "10.20.30.40")
+	t.Setenv("CUBE_SANDBOX_ENDPOINT_IP", "10.244.1.5")
+
+	identity, err := GetHostIdentity()
+	if err != nil {
+		t.Fatalf("GetHostIdentity returned an error: %v", err)
+	}
+	if identity.InstanceID != "node-a" {
+		t.Fatalf("expected InstanceID=node-a, got %s", identity.InstanceID)
+	}
+	if identity.LocalIPv4 != "10.244.1.5" {
+		t.Fatalf("expected LocalIPv4=10.244.1.5, got %s", identity.LocalIPv4)
 	}
 }
 

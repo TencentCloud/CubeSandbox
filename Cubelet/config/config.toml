@@ -1,7 +1,7 @@
 oom_score = 0
 root = "/data/cubelet/root"
-#独立空间 存放元数据
-#mount -t tmpfs -o size=500m none /data/cubelet/state/
+# Dedicated space for metadata.
+#mount -t tmpfs -o size=1024m none /data/cubelet/state/
 state = "/data/cubelet/state"
 version = 3
 pid_file = "/run/cube-let.pid"
@@ -42,11 +42,11 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
 
   [plugins."io.cubelet.internal.v1.volume"]
   [plugins."io.cubelet.internal.v1.shimlog"]
-    #独立空间
+    # Dedicated space.
     #mount -t tmpfs -o size=100m none /data/cubelet/shimlog
     root_path = "/data/cubelet/shimlog"
   [plugins."io.cubelet.internal.v1.cleanup"]
-    #独立空间
+    # Dedicated space.
     #mount -t tmpfs -o size=100m none /data/cubelet/cleanup
     root_path = "/data/cubelet/cleanup"
   [plugins."io.cubelet.internal.v1.cgroup"]
@@ -98,6 +98,14 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     # <data_path>/cubecow-reflink, so the filesystem backing data_path must support
     # FICLONE (e.g. xfs with `-m reflink=1` or btrfs).
     data_path = "/data/cubelet/storage"
+
+    # Parent directory for volume plugin host_path mounts (Attach --volume-base-dir).
+    volume_plugin_base_dir = "/data/volume"
+
+    [[plugins."io.cubelet.internal.v1.storage".volume_plugins]]
+      name        = "cos"
+      type        = "binary"
+      binary_path = "/usr/local/services/cubetoolbox/Cubelet/plugin/cube-volume-cos"
 
 
     [plugins."io.cubelet.internal.v1.storage".cow.log]
@@ -162,14 +170,14 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     startup_delay = "5s"
 
   [plugins."io.containerd.snapshotter.v1.overlayfs"]
-    #独立空间 存放metada
+    # Dedicated space for metadata.
     #mount -t tmpfs -o size=300m none /data/cubelet/state/
     root_path = "/data/cubelet/state"
-    #独立空间 存放镜像unpack数据和snashot数据
+    # Dedicated space for unpacked image and snapshot data.
     data_path = "/data/cubelet/root"
 
   [plugins."io.containerd.metadata.v1.bolt"]
-    #独立空间
+    # Dedicated space.
     #mount -t tmpfs -o size=300m none /data/cubelet/state/
     root_path = "/data/cubelet/state"
     content_sharing_policy = "shared"

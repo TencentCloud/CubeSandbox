@@ -134,7 +134,7 @@ export function AgentSettingsDialog({ open, onOpenChange, onSaved }: Props) {
           className={cn(
             'fixed left-1/2 top-1/2 z-50 w-[min(560px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2',
             'max-h-[calc(100vh-3rem)] overflow-hidden rounded-2xl border border-border/60 bg-card shadow-2xl',
-            'flex flex-col'
+            'flex flex-col',
           )}
         >
           <div className="flex items-center justify-between border-b border-border/60 px-6 py-4">
@@ -167,7 +167,7 @@ export function AgentSettingsDialog({ open, onOpenChange, onSaved }: Props) {
                   'flex items-center gap-2 rounded-lg border px-3 py-2 text-sm',
                   configured
                     ? 'border-emerald-200/70 bg-emerald-50 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300'
-                    : 'border-amber-200/70 bg-amber-50 text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200'
+                    : 'border-amber-200/70 bg-amber-50 text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200',
                 )}
               >
                 {configured ? <ShieldCheck size={15} /> : <TriangleAlert size={15} />}
@@ -178,9 +178,11 @@ export function AgentSettingsDialog({ open, onOpenChange, onSaved }: Props) {
                         model: settings?.llmModel ?? 'deepseek/deepseek-v4-flash',
                         masked: settings?.llmApiKeyMasked ?? settings?.deepseekApiKeyMasked ?? '',
                         source: t(
-                          `settings.source.${settingsSourceKey(settings?.llmApiKeySource ?? settings?.source)}`
+                          `settings.source.${settingsSourceKey(settings?.llmApiKeySource ?? settings?.source)}`,
                         ),
-                        mode: t(`settings.credentialMode.${settings?.llmCredentialMode ?? 'egress'}`),
+                        mode: t(
+                          `settings.credentialMode.${settings?.llmCredentialMode ?? 'egress'}`,
+                        ),
                       })
                     : t('settings.status.missing')}
                 </span>
@@ -273,7 +275,10 @@ export function AgentSettingsDialog({ open, onOpenChange, onSaved }: Props) {
             </div>
 
             <div className="space-y-2">
-              <label className="flex items-center gap-1.5 text-sm font-medium" htmlFor="agenthub-credential-mode">
+              <label
+                className="flex items-center gap-1.5 text-sm font-medium"
+                htmlFor="agenthub-credential-mode"
+              >
                 <ShieldCheck size={14} className="text-primary" />
                 {t('settings.credentialMode.label')}
               </label>
@@ -298,7 +303,10 @@ export function AgentSettingsDialog({ open, onOpenChange, onSaved }: Props) {
             </div>
 
             <div className="space-y-2">
-              <label className="flex items-center gap-1.5 text-sm font-medium" htmlFor="agenthub-gateway-domain">
+              <label
+                className="flex items-center gap-1.5 text-sm font-medium"
+                htmlFor="agenthub-gateway-domain"
+              >
                 <Globe size={14} className="text-primary" />
                 {t('settings.gatewayDomain.label')}
               </label>

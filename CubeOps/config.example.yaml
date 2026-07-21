@@ -1,0 +1,46 @@
+# CubeOps configuration example.
+#
+# Copy to /etc/cube/ops.yaml and edit, or set the path in CUBE_OPS_CONFIG.
+# Any field here can be overridden by an environment variable; env wins.
+
+# --- HTTP server ---
+bind: "127.0.0.1:3010"
+log_level: "info"
+jwt_secret: ""             # leave empty to auto-generate on first start
+
+# --- Database (MySQL) ---
+# IMPORTANT: Replace the placeholder values below with your real credentials
+# before deploying. The defaults shown here are EXAMPLES ONLY and will not
+# connect to a real database.
+#
+# Two equivalent ways to configure:
+#
+# (a) Full URL (recommended):
+# database_url: "mysql://USER:PASSWORD@HOST:PORT/DBNAME"
+#
+# (b) Individual fields (URL takes precedence if both are set):
+# mysql_host: "127.0.0.1"
+# mysql_port: 3306
+# mysql_user: "REPLACE_ME"
+# mysql_password: "REPLACE_ME"
+# mysql_db: "REPLACE_ME"
+#
+# When neither is set, CubeOps falls back to the CUBE_SANDBOX_MYSQL_*
+# environment variables (legacy behavior).
+
+# --- JWT ---
+# Access tokens are short-lived; refresh tokens are long-lived.
+access_ttl: "15m"
+refresh_ttl: "168h"
+
+# --- CubeMaster (the actual sandbox / cluster control plane) ---
+cubemaster_addr: "http://127.0.0.1:8089"
+
+# --- CubeAPI (deprecated SDK proxy) ---
+cubeapi_url: "http://127.0.0.1:3000"
+
+# --- Redis (optional, only needed if you add rate-limiting later) ---
+redis_url: ""
+
+# --- Sandbox domain exposed to SDK clients via /config ---
+sandbox_domain: "cube.app"

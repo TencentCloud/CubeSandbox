@@ -1,0 +1,113 @@
+{{- if and .Values.cubeNode.enabled .Values.bootstrap.pvmHostKernel.enabled }}
+# PVM host-kernel DaemonSet (native apps/v1). Schedules only via placement.pvm
+# (allow-pvm-bootstrap). Non-PVM compute nodes never pull images.pvmHostBootstrap.
+# Reboot-capable; invalidates node-prep / pvm-host-ready sentinels before mutate.
+# Pod creation uses kube-controller-manager — not kruise-manager.
+apiVersion: {{ include "cube.nodePvmDaemonSetAPIVersion" . }}
+kind: DaemonSet
+metadata:
+  name: {{ include "cube.nodePvmName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-node-pvm
+spec:
+  updateStrategy:
+    type: {{ .Values.cubeNodePvm.updateStrategy.type | default "RollingUpdate" }}
+    {{- if .Values.cubeNodePvm.updateStrategy.rollingUpdate }}
+    rollingUpdate:
+      maxUnavailable: {{ .Values.cubeNodePvm.updateStrategy.rollingUpdate.maxUnavailable | default 1 }}
+      {{- with .Values.cubeNodePvm.updateStrategy.rollingUpdate.maxSurge }}
+      maxSurge: {{ . }}
+      {{- end }}
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: cube-node-pvm
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: cube-node-pvm
+      annotations:
+        {{- with .Values.cubeNodePvm.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "cube.nodeServiceAccountName" . }}
+      automountServiceAccountToken: true
+      priorityClassName: {{ include "cube.pvmPriorityClassName" . }}
+      hostPID: true
+      dnsPolicy: ClusterFirst
+      terminationGracePeriodSeconds: {{ .Values.cubeNodePvm.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "cube.pvmPlacement" . | nindent 6 }}
+      initContainers:
+        - name: pvm-host-bootstrap
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.pvmHostBootstrap "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.pvmHostBootstrap.pullPolicy }}
+          securityContext:
+            privileged: {{ .Values.security.privileged }}
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            {{- include "cube.pvmHostCommonEnv" . | nindent 12 }}
+            - name: CUBE_RELEASE
+              value: {{ .Release.Name | quote }}
+            - name: PVM_KERNEL_RPM_PATH
+              value: {{ .Values.bootstrap.pvmHostKernel.package.rpmPath | quote }}
+            - name: PVM_KERNEL_DEB_PATH
+              value: {{ .Values.bootstrap.pvmHostKernel.package.debPath | quote }}
+            - name: PVM_KERNEL_RPM_URL
+              value: {{ .Values.bootstrap.pvmHostKernel.package.rpmUrl | quote }}
+            - name: PVM_KERNEL_DEB_URL
+              value: {{ .Values.bootstrap.pvmHostKernel.package.debUrl | quote }}
+            - name: PVM_KERNEL_PACKAGE_SOURCE
+              value: {{ .Values.bootstrap.pvmHostKernel.package.source | quote }}
+            - name: REBOOT_ENABLED
+              value: {{ .Values.bootstrap.pvmHostKernel.reboot.enabled | quote }}
+            - name: REBOOT_COORDINATED
+              value: {{ .Values.bootstrap.pvmHostKernel.reboot.coordinated | quote }}
+            - name: LEASE_NAME
+              value: {{ .Values.bootstrap.pvmHostKernel.reboot.leaseName | quote }}
+            - name: LEASE_TTL_SECONDS
+              value: {{ .Values.bootstrap.pvmHostKernel.reboot.leaseTTLSeconds | quote }}
+            - name: REBOOT_MAX_COUNT
+              value: {{ .Values.bootstrap.pvmHostKernel.reboot.maxCount | quote }}
+            - name: STARTUP_GATE_DRAIN_TIMEOUT_SECONDS
+              value: {{ .Values.bootstrap.pvmHostKernel.startupGate.drainTimeoutSeconds | quote }}
+            - name: STARTUP_GATE_CLEAR_MAINTENANCE
+              value: "true"
+          volumeMounts:
+            {{- include "cube.bootstrapHostVolumeMounts" . | nindent 12 }}
+      containers:
+        - name: hold-pvm-ready
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.pvmHostBootstrap "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.pvmHostBootstrap.pullPolicy }}
+          command: ["/usr/bin/tini", "-s", "--", "/scripts/pvm-startup-gate-reconcile.sh"]
+          securityContext:
+            seccompProfile:
+              type: RuntimeDefault
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            {{- include "cube.pvmHostCommonEnv" . | nindent 12 }}
+            # Hold must never clear value=maintenance; only the new init may.
+            - name: STARTUP_GATE_CLEAR_MAINTENANCE
+              value: "false"
+            - name: STARTUP_GATE_RECONCILE_INTERVAL_SECONDS
+              value: {{ .Values.bootstrap.pvmHostKernel.startupGate.reconcileIntervalSeconds | quote }}
+          volumeMounts:
+            {{- include "cube.bootstrapHostVolumeMounts" . | nindent 12 }}
+          {{- with .Values.cubeNodePvm.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        {{- include "cube.bootstrapVolumes" . | nindent 8 }}
+{{- end }}

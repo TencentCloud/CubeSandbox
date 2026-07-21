@@ -21,6 +21,7 @@ import (
 	"github.com/google/uuid"
 	jsoniter "github.com/json-iterator/go"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/urfave/cli"
 )
@@ -147,9 +148,21 @@ var ListCommand = cli.Command{
 		}
 
 		if quiet {
+			var resolvedSandboxID string
+			if sandboxID != "" {
+				candidates := make([]string, 0, len(rsp.Data))
+				for _, sandbox := range rsp.Data {
+					candidates = append(candidates, sandbox.SandboxID)
+				}
+				var err error
+				resolvedSandboxID, err = sandboxid.Resolve(sandboxID, candidates)
+				if err != nil {
+					return err
+				}
+			}
 			for _, sandbox := range rsp.Data {
 				if delete {
-					if sandboxID != "" && sandbox.SandboxID != sandboxID {
+					if resolvedSandboxID != "" && sandbox.SandboxID != resolvedSandboxID {
 						continue
 					}
 					err = doInnerDestroySandbox(c, sandbox.SandboxID, sandbox.Labels, c.String("type"))

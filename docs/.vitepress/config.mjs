@@ -149,7 +149,8 @@ export default withMermaid(defineConfig({
             {
               text: 'Storage',
               items: [
-                { text: 'Persistent Storage (Host Mount)', link: '/guide/persistent-storage' }
+                { text: 'Persistent Storage (Host Mount)', link: '/guide/persistent-storage' },
+                { text: 'Volume Plugin Development', link: '/guide/volume-plugin' }
               ]
             },
             {
@@ -283,7 +284,8 @@ export default withMermaid(defineConfig({
             {
               text: '存储',
               items: [
-                { text: '持久化存储（Host Mount）', link: '/zh/guide/persistent-storage' }
+                { text: '持久化存储（Host Mount）', link: '/zh/guide/persistent-storage' },
+                { text: 'Volume 插件开发', link: '/zh/guide/volume-plugin' }
               ]
             },
             {

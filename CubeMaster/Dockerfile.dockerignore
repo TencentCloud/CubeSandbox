@@ -4,9 +4,18 @@
 # Build-context filter for CubeMaster/Dockerfile (context = repository root).
 # The repo-root .dockerignore is tailored to docker/Dockerfile.builder and would
 # exclude CubeMaster/ without these overrides. CubeMaster's go.mod replaces the
-# local cubelog module via ../cubelog, so the image build must include it too.
+# local cubelog, CubeDB and Cubelet modules via ../cubelog, ../CubeDB and
+# ../Cubelet, so the image build must include all four directories.
 **
 !CubeMaster
 !CubeMaster/**
 !cubelog
 !cubelog/**
+!CubeDB
+!CubeDB/**
+!Cubelet
+!Cubelet/**
+# Volume plugin host tools installer used by the runtime stage.
+!deploy
+!deploy/scripts
+!deploy/scripts/docker-install-volume-deps.sh
