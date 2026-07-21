@@ -6,6 +6,9 @@
 # --- HTTP server ---
 bind: "127.0.0.1:3010"
 log_level: "info"
+log_dir: "/data/log/CubeOps"  # log file directory
+log_file_num: 10              # number of rotated log files to retain
+log_file_size: 100            # max size in MB per log file before rotation
 jwt_secret: ""             # leave empty to auto-generate on first start
 
 # --- Database (MySQL) ---

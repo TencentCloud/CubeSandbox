@@ -75,11 +75,11 @@ systemctl start cube-sandbox-cubeops.service
 systemctl stop cube-sandbox-cubeops.service
 systemctl restart cube-sandbox-cubeops.service
 
-# View recent logs
-journalctl -u cube-sandbox-cubeops.service -n 50 --no-pager
+# View recent logs (file-based, via cubelog)
+tail -50 /data/log/CubeOps/cubeops-req.log
 
 # Follow logs in real-time
-journalctl -u cube-sandbox-cubeops.service -f
+tail -f /data/log/CubeOps/cubeops-req.log
 ```
 
 Quick health check (no auth required):
@@ -122,7 +122,10 @@ individual fields without editing the YAML file.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CUBE_OPS_BIND` | `127.0.0.1:3010` | Listen address. In All-in-One deployments this must be set to `0.0.0.0:3010` so the WebUI nginx container can reach CubeOps via `host.docker.internal:3010`. |
-| `CUBE_OPS_LOG_LEVEL` | `info` | Log level |
+| `CUBE_OPS_LOG_LEVEL` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
+| `CUBE_OPS_LOG_DIR` | `/data/log/CubeOps` | Log file directory. Logs are written to `cubeops-req.log` (business) and `cubeops-stat.log` (trace), rotated by size. |
+| `CUBE_OPS_LOG_FILE_NUM` | `10` | Number of rotated log files to retain. |
+| `CUBE_OPS_LOG_FILE_SIZE` | `100` | Max size in MB per log file before rotation. |
 | `JWT_SECRET` | *(optional)* | JWT signing secret. If unset, a secret is auto-generated on first startup and persisted to the `t_system_setting` table in the database. |
 | `JWT_ACCESS_TTL` | `15m` | Access token TTL |
 | `JWT_REFRESH_TTL` | `168h` | Refresh token TTL (7 days) |

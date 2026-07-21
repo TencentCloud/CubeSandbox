@@ -14,20 +14,29 @@ import (
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/config"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/server"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	})))
-
 	cfg, err := config.Load()
 	if err != nil {
+		// Config load failed before logging is initialised; use a
+		// stdout-only slog so the error is still visible.
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+			Level: slog.LevelInfo,
+		})))
 		slog.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
+
+	logging.Init(logging.Options{
+		Level:      cfg.LogLevel,
+		LogDir:     cfg.LogDir,
+		FileNum:    cfg.LogFileNum,
+		FileSizeMB: cfg.LogFileSize,
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

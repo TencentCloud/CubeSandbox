@@ -10,9 +10,12 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/ory/dockertest/v3 v3.12.0
 	github.com/tencentcloud/CubeSandbox/CubeDB v0.1.0
+	github.com/tencentcloud/CubeSandbox/cubelog v0.1.1-0.20260113105508-a996703fa42f
 	golang.org/x/crypto v0.50.0
 	gorm.io/gorm v1.25.10
 )
+
+replace github.com/tencentcloud/CubeSandbox/cubelog => ../cubelog
 
 require (
 	dario.cat/mergo v1.0.0 // indirect

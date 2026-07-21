@@ -16,6 +16,7 @@ WORKDIR /build/CubeOps
 # Copy go.mod/go.sum first for better layer caching
 COPY CubeOps/go.mod CubeOps/go.sum ./
 COPY CubeDB /build/CubeDB
+COPY cubelog /build/cubelog
 RUN go mod download
 
 COPY CubeOps/ .
