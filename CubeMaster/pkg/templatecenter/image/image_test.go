@@ -948,7 +948,7 @@ func TestBuildExt4StreamingSuccessSkipsPhase1(t *testing.T) {
 		return nil
 	})
 
-	result, err := BuildExt4(context.Background(), &PreparedSource{LocalRef: "docker.io/library/nginx:latest", ExportMode: ExportModeNative}, BuildOptions{ArtifactID: "artifact-stream"})
+	result, err := BuildExt4(context.Background(), &PreparedSource{LocalRef: "docker.io/library/nginx:latest", ExportMode: ExportModeNative}, BuildOptions{ArtifactID: "artifact-stream", Generation: 2})
 	if err != nil {
 		t.Fatalf("BuildExt4 failed: %v", err)
 	}
@@ -958,8 +958,12 @@ func TestBuildExt4StreamingSuccessSkipsPhase1(t *testing.T) {
 	if result.SHA256 != "sha-streaming" || result.SizeBytes != 9 {
 		t.Fatalf("unexpected result: %#v", result)
 	}
-	if _, err := os.Stat(filepath.Join(workRoot, "artifact-stream")); !os.IsNotExist(err) {
-		t.Fatalf("workDir should be removed after streaming success, stat err=%v", err)
+	wantPath := filepath.Join(workRoot, "artifact-stream", "build-2", "artifact-stream.ext4")
+	if result.Ext4Path != wantPath {
+		t.Fatalf("Ext4Path=%q, want %q", result.Ext4Path, wantPath)
+	}
+	if _, err := os.Stat(result.Ext4Path); err != nil {
+		t.Fatalf("local ext4 must remain available for publication: %v", err)
 	}
 }
 
@@ -1064,22 +1068,29 @@ func TestBuildExt4StreamingFailureFallsBackToPhase1(t *testing.T) {
 		return "sha-phase-1", 7, nil
 	})
 
-	result, err := BuildExt4(context.Background(), &PreparedSource{LocalRef: "docker.io/library/nginx:latest"}, BuildOptions{ArtifactID: "artifact-fallback"})
+	result, err := BuildExt4(context.Background(), &PreparedSource{LocalRef: "docker.io/library/nginx:latest"}, BuildOptions{ArtifactID: "artifact-fallback", Generation: 3})
 	if err != nil {
 		t.Fatalf("BuildExt4 failed: %v", err)
 	}
 	if result.SHA256 != "sha-phase-1" || result.SizeBytes != 7 {
 		t.Fatalf("unexpected result: %#v", result)
 	}
-	if _, err := os.Stat(filepath.Join(storeRoot, "artifact-fallback", "rootfs")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(workRoot, "artifact-fallback", "build-3", "rootfs")); !os.IsNotExist(err) {
 		t.Fatalf("rootfs dir should be removed after successful phase-1 build, stat err=%v", err)
 	}
-	if _, err := os.Stat(filepath.Join(storeRoot, "artifact-fallback", "artifact-fallback.ext4")); err != nil {
-		t.Fatalf("ext4 should remain after successful phase-1 build: %v", err)
+	wantPath := filepath.Join(workRoot, "artifact-fallback", "build-3", "artifact-fallback.ext4")
+	if result.Ext4Path != wantPath {
+		t.Fatalf("Ext4Path=%q, want %q", result.Ext4Path, wantPath)
+	}
+	if _, err := os.Stat(result.Ext4Path); err != nil {
+		t.Fatalf("local ext4 should remain after successful phase-1 build: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(storeRoot, "artifact-fallback")); !os.IsNotExist(err) {
+		t.Fatalf("phase-1 build must not write mutable data to the shared store: %v", err)
 	}
 }
 
-func TestBuildExt4Phase1FailureCleansStoreDir(t *testing.T) {
+func TestBuildExt4Phase1FailureCleansWorkDir(t *testing.T) {
 	workRoot := t.TempDir()
 	storeRoot := t.TempDir()
 	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_DIR", workRoot)
@@ -1106,8 +1117,11 @@ func TestBuildExt4Phase1FailureCleansStoreDir(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "export failed") {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if _, statErr := os.Stat(filepath.Join(workRoot, "artifact-fail", "build-1")); !os.IsNotExist(statErr) {
+		t.Fatalf("workDir should be removed on phase-1 failure, stat err=%v", statErr)
+	}
 	if _, statErr := os.Stat(filepath.Join(storeRoot, "artifact-fail")); !os.IsNotExist(statErr) {
-		t.Fatalf("storeDir should be removed on phase-1 failure, stat err=%v", statErr)
+		t.Fatalf("failed local build must not touch shared storage, stat err=%v", statErr)
 	}
 }
 

@@ -6,7 +6,6 @@ package image
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"os"
@@ -14,7 +13,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 func createExt4Image(ctx context.Context, rootfsDir, ext4Path string) error {
@@ -58,7 +56,7 @@ func createExt4Image(ctx context.Context, rootfsDir, ext4Path string) error {
 // EnsureArtifactBuildPreflight asserts that the host has all necessary tools
 // installed to build images before starting a long-running workflow.
 func EnsureArtifactBuildPreflight(ctx context.Context) error {
-	requiredCommands := []string{"mkfs.ext4", "truncate", "cp"}
+	requiredCommands := []string{"mkfs.ext4", "truncate"}
 	if !nativeRootfsExportEnabled() {
 		if hasDockerlessRootfsExportTools() {
 			requiredCommands = append(requiredCommands, "skopeo", "umoci")
@@ -90,41 +88,36 @@ func checkMkfsExt4DSupport(ctx context.Context) error {
 	return nil
 }
 
-func relocateRootfsToArtifactStore(ctx context.Context, srcRootfsDir, dstRootfsDir string) error {
-	if err := os.RemoveAll(dstRootfsDir); err != nil { // NOCC:Path Traversal()
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(dstRootfsDir), 0o755); err != nil {
-		return err
-	}
-	if err := os.Rename(srcRootfsDir, dstRootfsDir); err == nil {
-		return nil
-	} else if !isCrossDeviceRenameErr(err) {
-		return err
-	}
-	if err := runCommand(ctx, "", "cp", "-a", srcRootfsDir, dstRootfsDir); err != nil {
-		return fmt.Errorf("copy rootfs to artifact store failed: %w", err)
-	}
-	return os.RemoveAll(srcRootfsDir) // NOCC:Path Traversal()
-}
-
-func isCrossDeviceRenameErr(err error) bool {
-	var linkErr *os.LinkError
-	if errors.As(err, &linkErr) {
-		return errors.Is(linkErr.Err, syscall.EXDEV)
-	}
-	return errors.Is(err, syscall.EXDEV)
-}
-
 func BuildExt4(ctx context.Context, source *PreparedSource, opts BuildOptions) (BuildResult, error) {
-	workDir := filepath.Join(ArtifactWorkRootDir(), opts.ArtifactID)
-	storeDir, err := ResolveArtifactStoreDir(ctx, opts.ArtifactID)
-	if err != nil {
-		return BuildResult{}, err
+	generation := opts.Generation
+	if generation < 1 {
+		generation = 1
 	}
-	storeRootfsDir := filepath.Join(storeDir, "rootfs")
-	ext4Path := filepath.Join(storeDir, opts.ArtifactID+".ext4")
-	keepStoreDir := false
+	// Do all mutable work locally. In HA the artifact store can be CFS/NFS, so
+	// exporting rootfs and running mkfs there would expose concurrent builders
+	// to the same mutable directory. The caller publishes the completed ext4
+	// once into the shared generation path.
+	workDir := filepath.Join(ArtifactWorkRootDir(), opts.ArtifactID, "build-"+strconv.FormatInt(generation, 10))
+	rootfsDir := filepath.Join(workDir, "rootfs")
+	ext4Path := filepath.Join(workDir, opts.ArtifactID+".ext4")
+	keepExt4 := false
+	if err := os.RemoveAll(workDir); err != nil { // NOCC:Path Traversal()
+		return BuildResult{}, fmt.Errorf("clean stale local artifact workdir: %w", err)
+	}
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		return BuildResult{}, fmt.Errorf("prepare local artifact workdir: %w", err)
+	}
+	defer func() {
+		if keepExt4 {
+			if err := os.RemoveAll(rootfsDir); err != nil { // NOCC:Path Traversal()
+				log.G(ctx).Warnf("cleanup rootfsDir %s failed: %v", rootfsDir, err)
+			}
+			return
+		}
+		if err := os.RemoveAll(workDir); err != nil { // NOCC:Path Traversal()
+			log.G(ctx).Warnf("cleanup workDir %s failed: %v", workDir, err)
+		}
+	}()
 
 	// Phase 2: loop-mount streaming build (optional, auto-detects capability).
 	// Passes PostRootfsExport down to be executed before unmounting the loop device.
@@ -134,20 +127,21 @@ func BuildExt4(ctx context.Context, source *PreparedSource, opts BuildOptions) (
 		if err != nil {
 			log.G(ctx).Warnf("cannot estimate image size for Phase 2, falling back to Phase 1: %v", err)
 		} else {
-			if err := checkDiskSpace(ctx, storeDir, estimatedPhase2); err != nil {
+			if err := checkDiskSpace(ctx, workDir, estimatedPhase2); err != nil {
 				return BuildResult{}, err
 			}
 			if err := createExt4ImageStreaming(ctx, source, workDir, ext4Path, estimatedPhase2, opts.PostRootfsExport); err != nil {
 				log.G(ctx).Warnf("loop-mount streaming ext4 build failed, falling back to phase-1: %v", err)
 				_ = os.RemoveAll(workDir)
-				_ = os.Remove(ext4Path)
+				if err := os.MkdirAll(workDir, 0o755); err != nil {
+					return BuildResult{}, fmt.Errorf("recreate local artifact workdir after streaming fallback: %w", err)
+				}
 			} else {
 				shaValue, sizeBytes, err := computeFileSHA256(ext4Path)
 				if err != nil {
 					return BuildResult{}, err
 				}
-				_ = os.RemoveAll(workDir)
-				keepStoreDir = true
+				keepExt4 = true
 				return BuildResult{Ext4Path: ext4Path, SHA256: shaValue, SizeBytes: sizeBytes}, nil
 			}
 		}
@@ -157,68 +151,28 @@ func BuildExt4(ctx context.Context, source *PreparedSource, opts BuildOptions) (
 	if err != nil {
 		log.G(ctx).Warnf("cannot estimate image size for disk-space check, skipping: %v", err)
 	} else if estimatedSizeBytes > 0 {
-		if err := checkDiskSpace(ctx, storeDir, estimatedSizeBytes); err != nil {
+		if err := checkDiskSpace(ctx, workDir, estimatedSizeBytes); err != nil {
 			return BuildResult{}, err
 		}
 	}
 
-	defer func() {
-		if workDir != "" {
-			if err := os.RemoveAll(workDir); err != nil {
-				log.G(ctx).Warnf("cleanup workDir %s failed: %v", workDir, err)
-			}
-		}
-		if !keepStoreDir {
-			if storeDir != "" {
-				if err := os.RemoveAll(storeDir); err != nil {
-					log.G(ctx).Warnf("cleanup storeDir %s failed: %v", storeDir, err)
-				}
-			}
-		} else {
-			if storeRootfsDir != "" {
-				if err := os.RemoveAll(storeRootfsDir); err != nil {
-					log.G(ctx).Warnf("cleanup storeRootfsDir %s failed: %v", storeRootfsDir, err)
-				}
-			}
-		}
-	}()
-
-	if isLocalFastFS(storeDir) {
-		if err := exportImageRootfs(ctx, source, storeRootfsDir); err != nil {
-			return BuildResult{}, err
-		}
-	} else {
-		rootfsDir := filepath.Join(workDir, "rootfs")
-		if err := os.MkdirAll(rootfsDir, 0o755); err != nil {
-			return BuildResult{}, err
-		}
-		if err := exportImageRootfs(ctx, source, rootfsDir); err != nil {
-			return BuildResult{}, err
-		}
-		if err := relocateRootfsToArtifactStore(ctx, rootfsDir, storeRootfsDir); err != nil {
-			return BuildResult{}, err
-		}
-	}
-
-	if workDir != "" {
-		if err := os.RemoveAll(workDir); err != nil {
-			log.G(ctx).Warnf("cleanup workDir %s failed: %v", workDir, err)
-		}
+	if err := exportImageRootfs(ctx, source, rootfsDir); err != nil {
+		return BuildResult{}, err
 	}
 
 	if opts.PostRootfsExport != nil {
-		if err := opts.PostRootfsExport(ctx, storeRootfsDir); err != nil {
+		if err := opts.PostRootfsExport(ctx, rootfsDir); err != nil {
 			return BuildResult{}, err
 		}
 	}
 
-	if err := createExt4Image(ctx, storeRootfsDir, ext4Path); err != nil {
+	if err := createExt4Image(ctx, rootfsDir, ext4Path); err != nil {
 		return BuildResult{}, err
 	}
 	shaValue, sizeBytes, err := computeFileSHA256(ext4Path)
 	if err != nil {
 		return BuildResult{}, err
 	}
-	keepStoreDir = true
+	keepExt4 = true
 	return BuildResult{Ext4Path: ext4Path, SHA256: shaValue, SizeBytes: sizeBytes}, nil
 }

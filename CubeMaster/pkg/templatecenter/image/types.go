@@ -24,6 +24,10 @@ type SourceSpec struct {
 
 type BuildOptions struct {
 	ArtifactID string
+	// Generation scopes one fenced artifact build attempt. It is used only for
+	// local build paths; publication assigns the same generation on the shared
+	// artifact store.
+	Generation int64
 	// PostRootfsExport is invoked after the image rootfs has been exported to
 	// the working directory but before mkfs.ext4 runs, so callers can mutate
 	// the rootfs (e.g. bake the CubeEgress root CA into the trust store). The

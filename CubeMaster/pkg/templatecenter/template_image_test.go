@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/agiledragon/gomonkey/v2"
+	mysqldriver "github.com/go-sql-driver/mysql"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
@@ -1033,6 +1034,28 @@ func TestValidateReusableRootfsArtifactHandlesMissingRecord(t *testing.T) {
 	}
 }
 
+func TestIsRetryableRootfsArtifactClaimError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "duplicate key", err: gorm.ErrDuplicatedKey, want: true},
+		{name: "mysql deadlock", err: &mysqldriver.MySQLError{Number: 1213, Message: "deadlock"}, want: true},
+		{name: "mysql lock timeout", err: &mysqldriver.MySQLError{Number: 1205, Message: "timeout"}, want: true},
+		{name: "raw deadlock", err: errors.New("Deadlock found when trying to get lock"), want: true},
+		{name: "unrelated", err: errors.New("connection refused"), want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isRetryableRootfsArtifactClaimError(tc.err); got != tc.want {
+				t.Fatalf("isRetryableRootfsArtifactClaimError(%v)=%v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRootfsArtifactSoftDeleted(t *testing.T) {
 	if rootfsArtifactSoftDeleted(nil) {
 		t.Fatal("nil record should not be treated as deleted")
@@ -1058,6 +1081,9 @@ func TestManagedArtifactDirRecognizesWorkAndStoreRoots(t *testing.T) {
 	}
 	if dir, ok := managedArtifactDir("artifact-2", filepath.Join(storeRoot, "artifact-2", "artifact-2.ext4")); !ok || dir != filepath.Join(storeRoot, "artifact-2") {
 		t.Fatalf("managedArtifactDir should accept store root, got dir=%q ok=%v", dir, ok)
+	}
+	if dir, ok := managedArtifactDir("artifact-2", filepath.Join(storeRoot, "artifact-2", "generations", "3", "sha.ext4")); !ok || dir != filepath.Join(storeRoot, "artifact-2") {
+		t.Fatalf("managedArtifactDir should accept an immutable generation path, got dir=%q ok=%v", dir, ok)
 	}
 	if _, ok := managedArtifactDir("artifact-3", filepath.Join(t.TempDir(), "artifact-3", "artifact-3.ext4")); ok {
 		t.Fatal("managedArtifactDir should reject unmanaged roots")
@@ -1136,6 +1162,8 @@ func TestBuildRootfsArtifactFinalizesBuildResult(t *testing.T) {
 		ArtifactID:              "artifact-1",
 		TemplateSpecFingerprint: "fingerprint-1",
 		WritableLayerSize:       "20Gi",
+		BuildOwnerToken:         "build-token",
+		BuildGeneration:         1,
 	}
 	source := &image.PreparedSource{
 		Digest:       "sha256:digest",
@@ -1159,30 +1187,31 @@ func TestBuildRootfsArtifactFinalizesBuildResult(t *testing.T) {
 		if opts.ArtifactID != artifact.ArtifactID {
 			t.Fatalf("BuildOptions.ArtifactID=%q, want %q", opts.ArtifactID, artifact.ArtifactID)
 		}
+		if opts.Generation != artifact.BuildGeneration {
+			t.Fatalf("BuildOptions.Generation=%d, want %d", opts.Generation, artifact.BuildGeneration)
+		}
 		return image.BuildResult{Ext4Path: "/tmp/artifact-1.ext4", SHA256: "sha-ext4", SizeBytes: 1234}, nil
+	})
+	patches.ApplyFunc(image.PublishExt4, func(ctx context.Context, artifactID string, generation int64, shaValue string, srcPath string) (string, int64, error) {
+		if artifactID != artifact.ArtifactID || generation != artifact.BuildGeneration || shaValue != "sha-ext4" {
+			t.Fatalf("unexpected publish arguments: artifact=%q generation=%d sha=%q", artifactID, generation, shaValue)
+		}
+		return "/shared/artifact-1/generations/1/sha-ext4.ext4", 1234, nil
 	})
 
 	var updateValues map[string]any
-	patches.ApplyFunc(updateRootfsArtifact, func(ctx context.Context, artifactID string, values map[string]any) error {
-		if artifactID != artifact.ArtifactID {
-			t.Fatalf("artifactID=%q, want %q", artifactID, artifact.ArtifactID)
+	patches.ApplyFunc(finalizeRootfsArtifactRecord, func(ctx context.Context, record *models.RootfsArtifact, values map[string]any) error {
+		if record != artifact {
+			t.Fatalf("record=%p, want %p", record, artifact)
 		}
 		updateValues = values
 		return nil
 	})
-	patches.ApplyFunc(getRootfsArtifactByID, func(ctx context.Context, artifactID string) (*models.RootfsArtifact, error) {
-		if artifactID != artifact.ArtifactID {
-			t.Fatalf("artifactID=%q, want %q", artifactID, artifact.ArtifactID)
-		}
-		latest := *artifact
-		return &latest, nil
-	})
-
 	got, generatedReq, err := buildRootfsArtifact(context.Background(), artifact, req, source, "http://master.example", nil, "")
 	if err != nil {
 		t.Fatalf("buildRootfsArtifact failed: %v", err)
 	}
-	if got.Ext4Path != "/tmp/artifact-1.ext4" || got.Ext4SHA256 != "sha-ext4" || got.Ext4SizeBytes != 1234 {
+	if got.Ext4Path != "/shared/artifact-1/generations/1/sha-ext4.ext4" || got.Ext4SHA256 != "sha-ext4" || got.Ext4SizeBytes != 1234 {
 		t.Fatalf("artifact build result was not finalized: %#v", got)
 	}
 	if got.Status != ArtifactStatusReady {
@@ -1197,7 +1226,7 @@ func TestBuildRootfsArtifactFinalizesBuildResult(t *testing.T) {
 	if generatedReq.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactSHA256] != "sha-ext4" {
 		t.Fatalf("generated request did not include ext4 sha annotation")
 	}
-	if updateValues["ext4_path"] != "/tmp/artifact-1.ext4" ||
+	if updateValues["ext4_path"] != "/shared/artifact-1/generations/1/sha-ext4.ext4" ||
 		updateValues["ext4_sha256"] != "sha-ext4" ||
 		updateValues["ext4_size_bytes"] != int64(1234) ||
 		updateValues["status"] != ArtifactStatusReady {
@@ -1205,6 +1234,116 @@ func TestBuildRootfsArtifactFinalizesBuildResult(t *testing.T) {
 	}
 	if _, ok := updateValues["generated_request_json"].(string); !ok {
 		t.Fatalf("generated_request_json was not persisted as string: %#v", updateValues)
+	}
+}
+
+func TestBuildRootfsArtifactPreservesPublishedGenerationUntilFinalizeOutcomeIsFenced(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	artifact := &models.RootfsArtifact{
+		ArtifactID:      "artifact-1",
+		BuildOwnerToken: "build-token",
+		BuildGeneration: 7,
+	}
+	source := &image.PreparedSource{
+		Digest:     "sha256:digest",
+		ConfigJSON: `{}`,
+		Config:     image.DockerImageConfig{},
+	}
+	req := &types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		TemplateID:        "tpl-1",
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+		NetworkType:       cubeboxv1.NetworkType_tap.String(),
+	}
+	patches.ApplyFunc(image.BuildExt4, func(context.Context, *image.PreparedSource, image.BuildOptions) (image.BuildResult, error) {
+		return image.BuildResult{Ext4Path: "/tmp/artifact-1.ext4", SHA256: "sha-ext4", SizeBytes: 1234}, nil
+	})
+	publishedPath := "/shared/artifact-1/generations/7/sha-ext4.ext4"
+	patches.ApplyFunc(image.PublishExt4, func(context.Context, string, int64, string, string) (string, int64, error) {
+		return publishedPath, 1234, nil
+	})
+	finalizeErr := errors.New("fenced finalization failed")
+	patches.ApplyFunc(finalizeRootfsArtifactRecord, func(context.Context, *models.RootfsArtifact, map[string]any) error {
+		return finalizeErr
+	})
+	cleanupCalled := false
+	patches.ApplyFunc(image.RemovePublishedExt4, func(ctx context.Context, artifactID string, generation int64, path string) error {
+		cleanupCalled = true
+		if artifactID != artifact.ArtifactID || generation != artifact.BuildGeneration || path != publishedPath {
+			t.Fatalf("unexpected cleanup arguments: artifact=%q generation=%d path=%q", artifactID, generation, path)
+		}
+		return nil
+	})
+
+	_, _, err := buildRootfsArtifact(context.Background(), artifact, req, source, "http://master.example", nil, "")
+	if !errors.Is(err, finalizeErr) {
+		t.Fatalf("buildRootfsArtifact error=%v, want finalize error", err)
+	}
+	if cleanupCalled {
+		t.Fatal("published generation was removed before the database outcome was fenced")
+	}
+}
+
+func TestCleanupPublishedArtifactAfterFailedFinalizeRequiresFailedFence(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	artifact := &models.RootfsArtifact{
+		ArtifactID:      "artifact-1",
+		BuildOwnerToken: "build-token",
+		BuildGeneration: 7,
+	}
+	publishedPath := "/shared/artifact-1/generations/7/sha-ext4.ext4"
+	finalizeCause := errors.New("finalize response lost")
+	buildErr := &publishedArtifactFinalizeError{publishedPath: publishedPath, cause: finalizeCause}
+	cleanupCalls := 0
+	patches.ApplyFunc(image.RemovePublishedExt4, func(ctx context.Context, artifactID string, generation int64, path string) error {
+		cleanupCalls++
+		if artifactID != artifact.ArtifactID || generation != artifact.BuildGeneration || path != publishedPath {
+			t.Fatalf("unexpected cleanup arguments: artifact=%q generation=%d path=%q", artifactID, generation, path)
+		}
+		return nil
+	})
+
+	if err := cleanupPublishedArtifactAfterFailedFinalize(context.Background(), artifact, buildErr, errRootfsArtifactBuildLeaseLost); !errors.Is(err, finalizeCause) {
+		t.Fatalf("unfenced cleanup error=%v, want finalize cause", err)
+	}
+	if cleanupCalls != 0 {
+		t.Fatalf("cleanup calls=%d after ambiguous/lease-lost outcome, want 0", cleanupCalls)
+	}
+
+	if err := cleanupPublishedArtifactAfterFailedFinalize(context.Background(), artifact, buildErr, nil); !errors.Is(err, finalizeCause) {
+		t.Fatalf("fenced cleanup error=%v, want finalize cause", err)
+	}
+	if cleanupCalls != 1 {
+		t.Fatalf("cleanup calls=%d after FAILED fence, want 1", cleanupCalls)
+	}
+}
+
+func TestRootfsArtifactFinalizationMatchesExactPublishedGeneration(t *testing.T) {
+	intended := &models.RootfsArtifact{
+		ArtifactID:           "artifact-1",
+		Status:               ArtifactStatusReady,
+		BuildOwnerToken:      "build-token",
+		BuildGeneration:      7,
+		Ext4Path:             "/shared/artifact-1/generations/7/sha-ext4.ext4",
+		Ext4SHA256:           "sha-ext4",
+		Ext4SizeBytes:        1234,
+		GeneratedRequestJSON: `{"template_id":"tpl-1"}`,
+		DownloadToken:        "download-token",
+	}
+	current := *intended
+	if !rootfsArtifactFinalizationMatches(&current, intended) {
+		t.Fatal("exact READY generation should reconcile as committed")
+	}
+
+	current.Ext4Path = "/shared/artifact-1/generations/8/other.ext4"
+	if rootfsArtifactFinalizationMatches(&current, intended) {
+		t.Fatal("different published generation must not reconcile as committed")
 	}
 }
 

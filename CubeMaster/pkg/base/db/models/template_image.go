@@ -27,6 +27,12 @@ type RootfsArtifact struct {
 	Status                  string `json:"status" gorm:"column:status"`
 	LastError               string `json:"last_error" gorm:"column:last_error"`
 	GCDeadline              int64  `json:"gc_deadline" gorm:"column:gc_deadline"`
+	// BuildOwnerToken, BuildGeneration, and BuildLeaseExpireAt fence
+	// cross-CubeMaster artifact builds. The token identifies one build attempt;
+	// a stale attempt must never publish over a newer generation.
+	BuildOwnerToken    string `json:"build_owner_token" gorm:"column:build_owner_token"`
+	BuildGeneration    int64  `json:"build_generation" gorm:"column:build_generation"`
+	BuildLeaseExpireAt int64  `json:"build_lease_expire_at" gorm:"column:build_lease_expire_at"`
 
 	// CubeEgress CA bake metadata (see design/cube-egress-ca-bake.md).
 	// Used for audit/triage; the artifact reuse cache key folds

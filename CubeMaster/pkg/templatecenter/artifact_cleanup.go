@@ -69,9 +69,6 @@ func managedArtifactDir(artifactID, ext4Path string) (string, bool) {
 		return "", false
 	}
 	dir := filepath.Clean(filepath.Dir(ext4Path))
-	if filepath.Base(dir) != artifactID {
-		return "", false
-	}
 	roots := []string{image.ArtifactWorkRootDir(), image.ArtifactStoreRootDir()}
 	if strings.TrimSpace(os.Getenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR")) == "" {
 		roots = append(roots, image.ArtifactFallbackStoreRootDir())
@@ -81,8 +78,11 @@ func managedArtifactDir(artifactID, ext4Path string) (string, bool) {
 		if err != nil {
 			continue
 		}
-		if rel == artifactID {
-			return dir, true
+		parts := strings.Split(rel, string(filepath.Separator))
+		if len(parts) >= 1 && parts[0] == artifactID && parts[0] != ".." {
+			// Generation files live below <root>/<artifactID>/generations/...;
+			// artifact lifecycle cleanup reclaims the whole managed artifact tree.
+			return filepath.Join(filepath.Clean(root), artifactID), true
 		}
 	}
 	return "", false
