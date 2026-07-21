@@ -31,7 +31,7 @@ readback; non-allowlisted calls **fail fast without creating a sandbox**.
 
 | Theme (examples) | What those PRs add | What this example does instead |
 |------------------|--------------------|--------------------------------|
-| Language / web runtimes (e.g. Node #732, Go/Rust/Java #735/#755/#782, C++ #876, Ruby #926) | New language image + run that stack in a sandbox | Reuse official `sandbox-code`; no new language Dockerfile |
+| Language / web runtimes (e.g. Node #732, Go/Rust/Java #735/#755/#782, C++ #876, Ruby #926) | New language image + run that stack in a sandbox | Thin Dockerfile on official `sandbox-code` — no new language stack |
 | Interpreters / notebooks (e.g. Jupyter ML #1025, RCA interpreter #745) | Arbitrary or analysis-oriented code execution | Tool-command subset only; deny non-allowlisted tools |
 | Agent frameworks (e.g. LangGraph #710) | End-to-end agent orchestration | Gate pattern only — not a framework integration |
 | Platform demos (egress / DB / snapshot, e.g. #748, #979, #1004, #738) | CIDR policy, stateful services, snapshot cache | **Argv** allowlist (not CIDR); keep the demo minimal |
@@ -50,7 +50,11 @@ pip install -r requirements.txt
 
 ## 3. Create the template
 
-Reuse the official code image (same as the quickstart):
+Two paths. Prefer **Path B** when you want a buildable template belonging to
+this example (issue #645 bar). Path A matches
+[`code-sandbox-quickstart`](../code-sandbox-quickstart/README.md) exactly.
+
+### Path A — reuse official `sandbox-code` (fastest)
 
 ```bash
 # Mainland China registry
@@ -65,8 +69,38 @@ cubemastercli tpl create-from-image \
 # cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest
 ```
 
-Note the printed `template_id`.
+### Path B — build this example's Dockerfile, then register
 
+Thin wrapper on `sandbox-code` (see [`Dockerfile`](./Dockerfile)): sets
+`TOOL_ALLOWLIST_SANDBOX=1` and writes `/etc/cube-sandbox/tool-allowlist.txt`.
+Does **not** add a new language runtime.
+
+```bash
+# From this directory
+docker build -t agent-tool-allowlist-sandbox:latest .
+
+# Optional: retag/push to a registry CubeMaster can pull
+# docker tag agent-tool-allowlist-sandbox:latest <your-registry>/agent-tool-allowlist-sandbox:latest
+# docker push <your-registry>/agent-tool-allowlist-sandbox:latest
+
+# Same create-from-image flags as quickstart (ports/probe unchanged)
+cubemastercli tpl create-from-image \
+  --image agent-tool-allowlist-sandbox:latest \
+  --writable-layer-size 1G \
+  --expose-port 49999 \
+  --expose-port 49983 \
+  --probe 49999
+```
+
+Override the base image for international builds:
+
+```bash
+docker build \
+  --build-arg SANDBOX_CODE_IMAGE=cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
+  -t agent-tool-allowlist-sandbox:latest .
+```
+
+Note the printed `template_id` from either path.
 ## 4. Configure environment
 
 ```bash
@@ -119,10 +153,20 @@ Tighten or extend the set for your agent; keep it explicit in code reviews.
 
 ## 7. Limitations (read before production)
 
-- Host-side gate only — a caller that bypasses `assert_allowlisted` can still
-  send any command to the API. Pair with network policy and least-privilege
-  credentials in real agents.
-- Not a substitute for guest-side seccomp / AppArmor.
+This example is **defense-in-depth on the host**, not a replacement for Cube
+platform enforcement. Compare layers (egress facts from
+[`network-policy` README §6](../network-policy/README.md)):
+
+| Layer | What it gates | Where enforced | Bypass from sandbox? |
+|-------|---------------|----------------|----------------------|
+| **This example** (`assert_allowlisted`) | Tool **argv** (first binary name) | Host SDK caller (Python) | N/A — bypass by skipping the gate before API call |
+| **Egress policy** (`allow_out` / `deny_out` / `allow_internet_access`) | Network **destination CIDRs** | Cubelet **tap** network layer (pre-exit) | **No** — kernel-level; cannot be bypassed from inside the VM |
+| Guest seccomp / AppArmor | Syscalls / MAC (if configured) | Guest kernel / LSM | Out of scope here; not demonstrated |
+
+- A caller that bypasses `assert_allowlisted` can still send any command to the
+  API. Pair with network policy and least-privilege credentials in real agents.
+- The in-image `/etc/cube-sandbox/tool-allowlist.txt` is informational for Path B
+  templates; the host gate remains authoritative for this demo.
 - Does not implement unauthorized network scanning or exploit tooling.
 
 ## 8. Directory
@@ -131,9 +175,11 @@ Tighten or extend the set for your agent; keep it explicit in code reviews.
 agent-tool-allowlist-sandbox/
 ├── README.md
 ├── README_zh.md
+├── Dockerfile             # thin wrapper on official sandbox-code
 ├── allowlist.py           # host-side argv gate
 ├── run_allowlisted.py     # allow path + artifact readback
 ├── run_denied.py          # deny path (no sandbox)
+├── test_allowlist.py      # local unit tests (no sandbox required)
 ├── env_utils.py
 ├── requirements.txt
 └── .env.example

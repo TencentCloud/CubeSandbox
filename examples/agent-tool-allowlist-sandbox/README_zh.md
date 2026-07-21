@@ -27,7 +27,7 @@
 
 | 主题（举例） | 那些 PR 在做什么 | 本示例怎么避开 |
 |--------------|------------------|----------------|
-| 语言 / Web 运行时（如 Node #732、Go/Rust/Java #735/#755/#782、C++ #876、Ruby #926） | 新语言镜像 + 在沙箱里跑该栈 | 复用官方 `sandbox-code`，不新建语言 Dockerfile |
+| 语言 / Web 运行时（如 Node #732、Go/Rust/Java #735/#755/#782、C++ #876、Ruby #926） | 新语言镜像 + 在沙箱里跑该栈 | 基于官方 `sandbox-code` 的薄 Dockerfile — 不新增语言栈 |
 | 解释器 / 笔记本（如 Jupyter ML #1025、RCA interpreter #745） | 任意或分析向代码执行 | 只做工具命令子集；非白名单拒绝 |
 | Agent 框架（如 LangGraph #710） | 端到端 Agent 编排 | 只提供门控模式，不做框架集成 |
 | 平台能力演示（egress / DB / 快照，如 #748、#979、#1004、#738） | CIDR 策略、有状态服务、快照缓存 | 做的是 **argv** 白名单（不是 CIDR）；示例保持最小 |
@@ -45,7 +45,10 @@ pip install -r requirements.txt
 
 ## 3. 创建模板
 
-复用官方 code 镜像（与 quickstart 相同）：
+两条路径。要满足 #645「可构建模板」门槛时优先走 **路径 B**。路径 A 与
+[`code-sandbox-quickstart`](../code-sandbox-quickstart/README_zh.md) 完全一致。
+
+### 路径 A — 直接复用官方 `sandbox-code`（最快）
 
 ```bash
 # 国内镜像
@@ -55,10 +58,43 @@ cubemastercli tpl create-from-image \
   --expose-port 49999 \
   --expose-port 49983 \
   --probe 49999
+
+# 国际镜像（如在海外）
+# cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest
 ```
 
-记录输出的 `template_id`。
+### 路径 B — 构建本示例 Dockerfile 再注册模板
 
+基于 `sandbox-code` 的薄封装（见 [`Dockerfile`](./Dockerfile)）：设置
+`TOOL_ALLOWLIST_SANDBOX=1`，写入 `/etc/cube-sandbox/tool-allowlist.txt`。
+**不**新增语言运行时。
+
+```bash
+# 在本目录下
+docker build -t agent-tool-allowlist-sandbox:latest .
+
+# 可选：打标签并推到 CubeMaster 可拉取的仓库
+# docker tag agent-tool-allowlist-sandbox:latest <your-registry>/agent-tool-allowlist-sandbox:latest
+# docker push <your-registry>/agent-tool-allowlist-sandbox:latest
+
+# create-from-image 参数与 quickstart 相同（端口 / probe 不变）
+cubemastercli tpl create-from-image \
+  --image agent-tool-allowlist-sandbox:latest \
+  --writable-layer-size 1G \
+  --expose-port 49999 \
+  --expose-port 49983 \
+  --probe 49999
+```
+
+国际基础镜像覆写：
+
+```bash
+docker build \
+  --build-arg SANDBOX_CODE_IMAGE=cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
+  -t agent-tool-allowlist-sandbox:latest .
+```
+
+任一路记下输出的 `template_id`。
 ## 4. 配置环境变量
 
 ```bash
@@ -110,9 +146,17 @@ denied_as_expected: command not on tool allowlist: 'bash' ...
 
 ## 7. 限制（上线前请阅读）
 
-- 仅宿主机门控——绕过 `assert_allowlisted` 的调用方仍可向 API 发送任意命令。
-  真实 Agent 需配合网络策略与最小权限凭证。
-- 不能替代 guest 侧 seccomp / AppArmor。
+本示例是 **宿主机侧 defense-in-depth**，不能替代 Cube 平台层强制。对照表
+（egress 事实来自 [`network-policy` README §6](../network-policy/README.md)）：
+
+| 层次 | 管什么 | 强制位置 | 沙箱内能否绕过 |
+|------|--------|----------|----------------|
+| **本示例**（`assert_allowlisted`） | 工具 **argv**（首个二进制名） | 宿主机 SDK 调用方（Python） | 不适用——跳过门控直接调 API 即可绕过 |
+| **出口策略**（`allow_out` / `deny_out` / `allow_internet_access`） | 网络 **目的 CIDR** | Cubelet **tap** 网络层（出 VM 前） | **不能**——内核级；沙箱内无法绕过 |
+| Guest seccomp / AppArmor | 系统调用 / MAC（若配置） | Guest 内核 / LSM | 本示例不演示 |
+
+- 绕过 `assert_allowlisted` 的调用方仍可向 API 发送任意命令；真实 Agent 需配合网络策略与最小权限凭证。
+- 路径 B 镜像内的 `/etc/cube-sandbox/tool-allowlist.txt` 仅为信息标记；本演示仍以宿主机门控为准。
 - 不做未授权扫描或 exploit 类工具演示。
 
 ## 8. 目录结构
@@ -121,9 +165,11 @@ denied_as_expected: command not on tool allowlist: 'bash' ...
 agent-tool-allowlist-sandbox/
 ├── README.md
 ├── README_zh.md
+├── Dockerfile             # 基于官方 sandbox-code 的薄封装
 ├── allowlist.py           # 宿主机 argv 门控
 ├── run_allowlisted.py     # 放行路径 + 产物读回
 ├── run_denied.py          # 拒绝路径（不建沙箱）
+├── test_allowlist.py      # 本地单测（无需沙箱）
 ├── env_utils.py
 ├── requirements.txt
 └── .env.example
