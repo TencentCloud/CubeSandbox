@@ -102,14 +102,21 @@ func (f *fakeMaster) Resume(ctx context.Context, _, _ string) error {
 }
 
 type fakePush struct {
-	mu      sync.Mutex
-	pushed  []string
-	deleted []string
+	mu       sync.Mutex
+	pushed   []string
+	deleted  []string
+	failSet  int
+	setCalls int
 }
 
 func (f *fakePush) SetState(_ context.Context, _, state string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.setCalls++
+	if f.failSet > 0 {
+		f.failSet--
+		return errors.New("push failed")
+	}
 	f.pushed = append(f.pushed, state)
 	return nil
 }
@@ -317,5 +324,51 @@ func TestResumer_NoOpWhenStateIsAlreadyRunning(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&master.calls); got != 0 {
 		t.Fatalf("master.Resume must NOT be called when state=running, got %d", got)
+	}
+}
+
+func TestResumer_RunningStatePushRetriesAsynchronously(t *testing.T) {
+	tests := []struct {
+		name       string
+		failSet    int
+		wantCalls  int
+		wantPushes int
+	}{
+		{name: "succeeds immediately", failSet: 0, wantCalls: 1, wantPushes: 1},
+		{name: "succeeds after first retry", failSet: 1, wantCalls: 2, wantPushes: 1},
+		{name: "succeeds after second retry", failSet: 2, wantCalls: 3, wantPushes: 1},
+		{name: "fails after retry limit", failSet: 3, wantCalls: 3, wantPushes: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := registry.New()
+			reg.Upsert(lifecycle.SandboxLifecycleMeta{
+				SandboxID: "sbx-retry", InstanceType: "cubebox", AutoResume: true,
+			})
+			store := newFakeStore()
+			push := &fakePush{failSet: tt.failSet}
+			r := newTestResumer(reg, store, &fakeMaster{}, push)
+
+			if err := r.Resume(context.Background(), "sbx-retry"); err != nil {
+				t.Fatalf("resume failed: %v", err)
+			}
+
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				push.mu.Lock()
+				calls := push.setCalls
+				got := len(push.pushed)
+				push.mu.Unlock()
+				if calls == tt.wantCalls {
+					if got != tt.wantPushes {
+						t.Fatalf("got %d successful pushes, want %d", got, tt.wantPushes)
+					}
+					return
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			t.Fatalf("timed out waiting for %d calls", tt.wantCalls)
+		})
 	}
 }

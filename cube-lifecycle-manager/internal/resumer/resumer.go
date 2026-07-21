@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cenkalti/backoff/v7"
 	"go.uber.org/zap"
 
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/cubemasterclient"
@@ -42,6 +43,11 @@ type Resumer struct {
 	mu    sync.Mutex
 	calls map[string]*call
 }
+
+const (
+	proxyStatePushTimeout = 3 * time.Second
+	proxyStatePushRetries = 2
+)
 
 // call represents one in-flight resume operation. Every goroutine waiting on
 // the same sandbox blocks on done; the first arrival drives the work.
@@ -92,6 +98,7 @@ func (r *Resumer) Resume(ctx context.Context, sandboxID string) error {
 }
 
 func (r *Resumer) doResume(ctx context.Context, sandboxID string) error {
+	start := time.Now()
 	entry := r.o.Registry.Get(sandboxID)
 	if entry == nil {
 		return errors.New("sandbox not in registry")
@@ -139,16 +146,44 @@ func (r *Resumer) doResume(ctx context.Context, sandboxID string) error {
 		r.o.Log.Warn("write running state failed",
 			zap.String("sandbox_id", sandboxID), zap.Error(err))
 	}
-	if err := r.o.ProxyPush.SetState(ctx, sandboxID, "running"); err != nil {
-		// Best-effort; CubeProxy locally also flips state to running on a
-		// successful resume sub-request, so this is a safety net.
-		r.o.Log.Warn("push running state failed",
-			zap.String("sandbox_id", sandboxID), zap.Error(err))
-	}
+	// CubeProxy locally flips the state to running as part of the successful
+	// resume sub-request. The fleet-wide push is only a convergence/safety
+	// net, so do not make the first dataplane request wait for every proxy
+	// replica to respond. Use an independent bounded context because the
+	// request context is about to be returned (and may already be cancelled).
+	go r.pushRunningState(sandboxID)
 	r.o.Registry.MergeLastActive(sandboxID, time.Now().UnixMilli())
 
-	r.o.Log.Info("auto-resumed sandbox", zap.String("sandbox_id", sandboxID))
+	r.o.Log.Info("auto-resumed sandbox",
+		zap.String("sandbox_id", sandboxID),
+		zap.Duration("duration", time.Since(start)))
 	return nil
+}
+
+func (r *Resumer) pushRunningState(sandboxID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), proxyStatePushTimeout)
+	defer cancel()
+
+	b := backoff.NewExponentialBackOff()
+	b.InitialInterval = 100 * time.Millisecond
+	b.Multiplier = 2
+	b.RandomizationFactor = 0
+	b.MaxInterval = 200 * time.Millisecond
+
+	_, err := backoff.Retry(ctx, func() (struct{}, error) {
+		if err := ctx.Err(); err != nil {
+			return struct{}{}, backoff.Permanent(err)
+		}
+		return struct{}{}, r.o.ProxyPush.SetState(ctx, sandboxID, "running")
+	}, backoff.WithBackOff(b), backoff.WithMaxTries(proxyStatePushRetries+1), backoff.WithMaxElapsedTime(proxyStatePushTimeout))
+	if err == nil {
+		return
+	}
+
+	// Best-effort; a later lifecycle push or stream replay can reconcile a
+	// proxy that was unavailable during this broadcast.
+	r.o.Log.Warn("push running state failed after retries",
+		zap.String("sandbox_id", sandboxID), zap.Int("retries", proxyStatePushRetries), zap.Error(err))
 }
 
 // callCubeMasterResume issues the resume RPC and maps the three classes
