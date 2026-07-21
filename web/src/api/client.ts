@@ -255,7 +255,11 @@ export const templateApi = {
     api<{ lines?: string[]; status?: string; progress?: number }>(
       `/templates/${id}/builds/${buildID}/logs`,
     ),
-  remove: (id: string) => api<void>(`/templates/${id}`, { method: 'DELETE' }),
+  remove: (id: string) =>
+    api<void>(`/templates/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      params: { sync: true },
+    }),
   compat: () => api<TemplateCompatMatrix>('/templates/compat'),
   adoptCompatBaseline: (id: string) =>
     api<{ updated: number }>(`/templates/compat/${id}/adopt-baseline`, { method: 'POST' }),
