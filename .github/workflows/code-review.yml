@@ -30,6 +30,10 @@ jobs:
           # Strip the GITHUB_TOKEN from .git/config so even an accidental
           # git push from a future step cannot use base-repo write creds.
           persist-credentials: false
+          # Opt-in required since actions/checkout v6.1.0 (2026-07-20 backport
+          # from v7). Safe here: checked-out fork code is only READ by Claude
+          # for review context — no build, test, or execution steps follow.
+          allow-unsafe-pr-checkout: true
 
       - name: Generate GitHub App token
         id: app-token
