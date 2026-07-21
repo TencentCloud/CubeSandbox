@@ -134,7 +134,7 @@ function InstallModal({ item, enableForAgentHub = false, onClose }: InstallModal
   const startPolling = useCallback(
     (tplID: string) => {
       let attempts = 0;
-      const MAX = 60; // 60 × 2s = 2min
+      const MAX = 300; // 300 × 2s = 10min
       pollRef.current = setInterval(async () => {
         attempts++;
         try {
