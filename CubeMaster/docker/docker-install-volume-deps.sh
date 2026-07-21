@@ -28,7 +28,6 @@ fi
 
 COSFS_RELEASE="${COSFS_RELEASE:-v1.0.25}"
 COSFS_BASE_URL="${COSFS_BASE_URL:-https://github.com/tencentyun/cosfs/releases/download/${COSFS_RELEASE}}"
-COSCMD_VENV="${COSCMD_VENV:-/opt/coscmd-venv}"
 
 log() { printf '[docker-volume-deps] %s\n' "$*"; }
 
@@ -78,16 +77,18 @@ install_cosfs() {
 }
 
 install_coscmd() {
-  log "install coscmd into ${COSCMD_VENV}"
+  # Container-global: pip into the image Python (no venv).
+  log "install coscmd system-wide via pip"
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    python3 python3-venv python3-pip
-  python3 -m venv "${COSCMD_VENV}"
-  "${COSCMD_VENV}/bin/pip" install -q --upgrade pip coscmd
-  cat > /usr/local/bin/coscmd << EOF
-#!/bin/bash
-exec ${COSCMD_VENV}/bin/coscmd "\$@"
-EOF
-  chmod +x /usr/local/bin/coscmd
+    python3 python3-pip
+  # Ubuntu 23.04+/PEP 668 needs --break-system-packages for distro Python.
+  if ! python3 -m pip install -q --upgrade --break-system-packages coscmd; then
+    python3 -m pip install -q --upgrade coscmd
+  fi
+  command -v coscmd >/dev/null 2>&1 || {
+    echo "ERROR: coscmd not on PATH after pip install" >&2
+    exit 1
+  }
   coscmd --version | head -1
 }
 
