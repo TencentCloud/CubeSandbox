@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.7
-#
 # Thin wrapper on the official Cube Sandbox code image.
 # Purpose: give this example a buildable template path for #645, without
 # adding a new language/runtime stack.
