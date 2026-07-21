@@ -1,6 +1,12 @@
-# CubeSandbox Chart 架构
+# 架构说明
 
-本文描述 `deploy/kubernetes/chart` **当前**交付形态：组件分层、计算面 DaemonSet 的分工、安装与启动顺序、以及 DNS / Proxy / Egress 等运行期链路。升级操作见 [`UPGRADE.md`](UPGRADE.md)；排障见 [`FAQ.md`](FAQ.md)。
+本文说明 CubeSandbox **Kubernetes / Helm Chart** 的交付形态：组件分层、计算面四个 DaemonSet 的分工、安装与启动顺序，以及 DNS / Proxy / Egress 等运行期链路。
+
+安装步骤见 [Helm 安装](./install.md)。计算面镜像升级见 [升级](./upgrade.md)。排障见 [常见问题](./faq.md)。
+
+::: tip 和「产品架构」的区别
+[架构概览](../../architecture/overview.md)讲的是 CubeSandbox **产品组件**（CubeMaster / Cubelet / MicroVM 等）。本页讲的是这些组件在 **K8s 上怎么落盘、怎么调度、怎么启动**。
+:::
 
 ## 1. 总体分层
 
@@ -86,7 +92,7 @@ flowchart TB
 
 ### 2.1 控制面
 
-| 资源 | 模板 | 说明 |
+| 资源 | Chart 模板 | 说明 |
 | --- | --- | --- |
 | `cube-master` | `templates/master.yaml` | `images.master`；挂载 Chart 渲染的 `conf.yaml`；内置 schema migration |
 | `cube-master-config` | `templates/master-config-secret.yaml` | `files/cube-master/conf.yaml` 渲染结果 |
@@ -121,13 +127,19 @@ flowchart TB
 
 | 容器 | 镜像 | 职责 |
 | --- | --- | --- |
-| `wait-node-prep` | `images.waitNodePrep` | Kruise 优先级 10 sidecar：只读 hostPath `node-prep-ready` 自描述指纹并持续复核，不接收可变 Chart 策略 env |
+| `wait-node-prep` | `images.waitNodePrep` | Kruise 优先级 10 sidecar：只读 hostPath `node-prep-ready` 自描述指纹并持续复核 |
 | `network-agent` | `images.networkAgent` | self-stage 后启动；优先级 0 |
 | `cubelet` | `images.cubelet` | self-stage 后启动；优先级 0 |
 | `cube-slot-1`…`cube-slot-6` | `images.pause` | 冻结占位槽；挂载/特权与 cubelet 相同；日后只 InPlace 换镜像/资源 |
 | `cube-egress` / `cube-egress-net` | 对应镜像 | 可选；透明出站 / TPROXY |
 
-占位槽服务名写在 Pod annotations：`cube.tencent.com/slot-N`（values：`cubeNode.placeholderSlots.services`）。空字符串表示未分配；日后可原地改 annotation（容器 env `CUBE_SLOT_SERVICE` 经 fieldRef 刷新）。单槽换镜像/调资源用 `cubeNode.placeholderSlots.overrides."<N>"`（未设字段继承 `images.pause` / `placeholderSlots.resources`）。**容器名 / volumeMount / securityContext / imagePullPolicy 不可改**（会 recreate）。
+占位槽服务名写在 Pod annotations：`cube.tencent.com/slot-N`（values：`cubeNode.placeholderSlots.services`）。空字符串表示未分配；日后可原地改 annotation（容器 env `CUBE_SLOT_SERVICE` 经 fieldRef 刷新）。单槽换镜像/调资源用 `cubeNode.placeholderSlots.overrides."<N>"`。
+
+::: tip 槽位 InPlace 与集群版本
+后续若要向占位槽**原地加组件并改 resources**，需要 Kubernetes **1.27+** 且开启 `InPlacePodVerticalScaling`，以及 OpenKruise 的 `InPlaceWorkloadVerticalScaling`。详见 [Helm 安装 · 前置条件](./install.md#1-前置条件)。
+:::
+
+**容器名 / volumeMount / securityContext / imagePullPolicy 不可改**（会 recreate）。
 
 #### Installer：`cube-node-installer`
 
@@ -146,32 +158,30 @@ flowchart TB
 
 - 原生 `apps/v1` DaemonSet（非 ADS）；仅当 `bootstrap.pvmHostKernel.enabled=true` 时创建；仅调度到 `placement.pvm`。
 - `startupGate` 默认开启：目标节点指纹未就绪时，Helm pre-install/pre-upgrade Hook 写入 `cube.tencent.com/pvm-not-ready=true:NoSchedule`，再逐节点探针 CNI；指纹已匹配则不写该污点。
-- 安装/升级前另有 cubevs CIDR Hook（weight `-110`）：`cubeNode.network.cidr`（默认 `172.16.0.0/18`）与集群 Service CIDR / ClusterIP 重叠则 fail-fast，避免 `cube-dev` 黑洞 ClusterDNS。
+- 安装/升级前另有 cubevs CIDR Hook（weight `-110`）：`cubeNode.network.cidr`（默认 `172.16.0.0/18`）与集群 Service CIDR / ClusterIP 重叠则 fail-fast。
 - init：`pvm-host-bootstrap`；mutate 严格按 ensure taint → 删除本 namespace/本 release/本节点依赖 Pod → invalidate → Lease → mutate/reboot。
 - 成功路径按 write ready → verify live fingerprint → clear taint；主容器每 30 秒 reconcile 分裂态。
-- 只有 PVM DaemonSet 容忍临时门闩。CNI、kube-proxy、**kruise-daemon** 须以 `Exists` 或显式 key 容忍门闩（preflight 硬查 daemon）；`kruise-controller-manager` 硬门禁为 Ready，Exists 为门闩下重建的可选项。PVM 保持 Pod 网络。
+- 只有 PVM DaemonSet 容忍临时门闩。CNI、kube-proxy、**kruise-daemon** 须以 `Exists` 或显式 key 容忍门闩；`kruise-controller-manager` 硬门禁为 Ready。PVM 保持 Pod 网络。
 - 升 PVM 镜像 **只 bump `images.pvmHostBootstrap`**，不 recreate Big Pod。
 
 为何拆成四个：Big Pod 保持 InPlace 友好；产物安装与可 reboot 的 PVM 引导分离；非 PVM compute 节点不拉 PVM 大镜像。
 
-### 2.3.1 节点上你会看到的标记（重启后）
+### 2.3.1 节点上你会看到的标记
 
-| 标记 | 含义（给运维看） |
+| 标记 | 含义 |
 | --- | --- |
 | `pvm-host-ready` | 宿主机 PVM 内核已按预期装好；内容带指纹，换核后必须对上当前 `uname` 才算就绪 |
 | `effective-pvm` | 本节点 guest 该用 PVM（`1`）还是 bm（`0`）；有 `allow-pvm-bootstrap` 且 host 就绪 → `1`，否则 → `0` |
 | `node-prep-ready` | bootstrap 预检通过，Big Pod 可以启动 |
 | `/run/wait-node-prep.ready` | 本轮 Pod 内临时标记，重启即没 |
 | toolbox 下「组件已就绪」标记 | 该组件 stage 成功，产物可被版本矩阵采集 |
-| toolbox 下「组件正在替换」标记 | 正在换目录；矩阵会标未完成，避免报残缺版本；成功后清除，失败会留下直到下次成功 |
+| toolbox 下「组件正在替换」标记 | 正在换目录；矩阵会标未完成；成功后清除，失败会留下直到下次成功 |
 
-Guest 选核最终结果：先看 `effective-pvm`；没有则尽量保持节点上一次已在用的内核；再没有才用 Chart 首次安装默认（`cubeNode.pvmGuestKernel.enabled`）。
-
-验收：PVM 换核期间依赖 Pod 在清闩前保持 Pending；故意残留错误指纹不得清闩；普通掉电且内核未变时可快速恢复。`scripts/test-big-pod-inplace-guard.sh` 保证 PVM/boot args/prepGeneration 变更不会改变 Big Pod Pod template。
+Guest 选核：先看 `effective-pvm`；没有则尽量保持节点上一次已在用的内核；再没有才用 Chart 首次安装默认（`cubeNode.pvmGuestKernel.enabled`）。
 
 ### 2.4 数据面入口
 
-| 资源 | 模板 | 职责 |
+| 资源 | Chart 模板 | 职责 |
 | --- | --- | --- |
 | `cube-proxy` | `templates/proxy.yaml` | sandbox HTTP/HTTPS；`placement.controlPlane`；Pod 网络 |
 | `cube-lifecycle-manager` | `templates/lifecycle-manager.yaml` | pause/resume；Proxy 经 Redis 发现副本 |
@@ -179,7 +189,7 @@ Guest 选核最终结果：先看 `effective-pvm`；没有则尽量保持节点�
 | Service / Ingress | `proxy-service.yaml` / `proxy-ingress.yaml` | ClusterIP；Ingress SSL passthrough，TLS 在 Proxy 终结 |
 | cluster DNS | `templates/cluster-dns.yaml` | 启用时把 `*.cubeProxy.domain` rewrite 到 Proxy Service |
 
-CubeProxy 经 Redis 中的 owner 元数据转发到目标 compute 节点 sandbox；Chart 不修改 Proxy Lua 后端解析语义。
+CubeProxy 经 Redis 中的 owner 元数据转发到目标 compute 节点 sandbox。
 
 ## 3. DNS
 
@@ -294,8 +304,6 @@ sequenceDiagram
 - `cube-egress`：`127.0.0.1:9090/admin/v1/health`。
 - `cube-egress-net`：`cube-dev`、ip rule、table 100、mangle `TRANSPROXY`。
 
-镜像升级（保存量沙箱、保 Big Pod UID/IP）见 [`UPGRADE.md`](UPGRADE.md)。
-
 ### 4.4 注册与验收关注点
 
 - CubeMaster `/notify/health`、CubeOps `/health`、CubeAPI `/health`（若启用）。
@@ -381,9 +389,9 @@ externalControlPlane:
 | values 路径 | 默认 | 影响 |
 | --- | --- | --- |
 | `global.timezone` | `Asia/Shanghai` | 注入 Chart 管理容器的 `TZ` |
-| `storageClass.create` / `name` / `provisioner` | `create=false` | 是否由 chart 创建 StorageClass;默认不创建（PVC 省略 `storageClassName` → 集群 default SC；TKE 用 `values-tke.yaml` pin CBS） |
-| `persistence.storageClassName` | `""` | 便捷键:组件级为空时,三 PVC 共用此 SC name;`""` → 集群 default SC |
-| `*.persistence.storageClassName` (master/mysql/redis) | `""` | 组件级覆盖;非空优先于顶层 `persistence.storageClassName` |
+| `storageClass.create` / `name` / `provisioner` | `create=false` | 是否由 chart 创建 StorageClass；默认不创建（PVC 走集群 default SC；TKE 用 `values-tke.yaml`） |
+| `persistence.storageClassName` | `""` | 三 PVC 共用此 SC；`""` → 集群 default |
+| `*.persistence.storageClassName` (master/mysql/redis) | `""` | 组件级覆盖；非空优先于顶层 |
 | `controlPlane.enabled` | `true` | 内置控制面 |
 | `externalControlPlane.enabled` | `false` | 外部 CubeMaster |
 | `placement.controlPlane.nodeSelector` | `cube-control=true` | 控制面调度 |
@@ -392,7 +400,7 @@ externalControlPlane:
 | `cubeProxy.domain` | `cube.app` | sandbox 域名 |
 | `cubeProxy.configureClusterDNS` | `true` | 是否写入集群 CoreDNS |
 | `cubeNode.dns.sandbox.followNodeDns` | `true` | guest 跟随节点 DNS |
-| `cubeNode.pvmGuestKernel.enabled` | `true` | 首次安装默认是否倾向 PVM guest；**不能**单独用来关掉已在跑 PVM 的节点（应去掉 `allow-pvm-bootstrap`） |
+| `cubeNode.pvmGuestKernel.enabled` | `true` | 首次安装默认是否倾向 PVM guest |
 | `bootstrap.pvmHostKernel.enabled` | `true` | host kernel bootstrap（可能重启节点） |
 | `bootstrap.pvmHostKernel.startupGate.enabled` | `true` | PVM 未就绪时使用 Node NoSchedule 污点硬门闩 |
 | `bootstrap.pvmHostKernel.bootArgs` | `nopti pti=off` | 当前 `kvm_pvm` 不支持 host KPTI |
@@ -401,7 +409,7 @@ externalControlPlane:
 | `cubeProxy.enabled` / `ingress.enabled` | `true` | Proxy / Ingress |
 | `lifecycleManager.enabled` | `true` | Proxy 启用时必开 |
 | `cubeEgress.enabled` | `true` | Big Pod egress sidecar |
-| `cubeOps.enabled` | `true` | CubeOps（JWT 运维 API；WebUI `/opsapi` / SDK 上游） |
+| `cubeOps.enabled` | `true` | CubeOps（JWT 运维 API；WebUI 上游） |
 | `webui.enabled` | `true` | WebUI（要求 `cubeOps.enabled=true`） |
 | `controlPlane.templateBuilder.enabled` | `false` | 模板构建 sidecar |
 
@@ -423,4 +431,13 @@ helm test <release> -n <namespace> --timeout 20m --logs
 
 Chart 管理并随 release 卸载：控制面与计算面工作负载、内置 MySQL/Redis、Proxy、CA/TLS/config Secret、Helm test RBAC、diagnostics ConfigMap 等。
 
-Chart **不**管理：节点 label/taint、第三方 DB、外部 DNS/LB、hostPath 数据、host kernel / GRUB / udev / fstab / XFS 等节点级持久修改。卸载后按平台 runbook 清理宿主机残留（见 chart `scripts/cleanup-node-host.sh`）。
+Chart **不**管理：节点 label/taint、第三方 DB、外部 DNS/LB、hostPath 数据、host kernel / GRUB / udev / fstab / XFS 等节点级持久修改。卸载后按平台 runbook 清理宿主机残留。
+
+---
+
+## 下一步
+
+- [Helm 安装](./install.md)
+- [升级](./upgrade.md)
+- [常见问题](./faq.md)
+- [产品架构概览](../../architecture/overview.md)

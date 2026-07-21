@@ -113,6 +113,18 @@ export default withMermaid(defineConfig({
                 { text: 'PVM Deployment', link: '/guide/pvm-deploy' },
                 { text: 'Bare-Metal Deployment', link: '/guide/bare-metal-deploy' },
                 { text: 'Multi-Node Cluster', link: '/guide/multi-node-deploy' },
+                {
+                  text: 'Kubernetes Deployment',
+                  link: '/guide/kubernetes/',
+                  collapsed: true,
+                  items: [
+                    { text: 'Overview', link: '/guide/kubernetes/' },
+                    { text: 'Helm Install', link: '/guide/kubernetes/install' },
+                    { text: 'Architecture', link: '/guide/kubernetes/architecture' },
+                    { text: 'Upgrade', link: '/guide/kubernetes/upgrade' },
+                    { text: 'FAQ', link: '/guide/kubernetes/faq' }
+                  ]
+                },
                 { text: 'Tencent Cloud Cluster (Terraform)', link: '/guide/tencentcloud-terraform-deploy' },
                 { text: 'Self-Build Deployment', link: '/guide/self-build-deploy' },
                 { text: 'Development Environment (QEMU VM)', link: '/guide/dev-environment' }
@@ -248,6 +260,18 @@ export default withMermaid(defineConfig({
                 { text: 'PVM部署', link: '/zh/guide/pvm-deploy' },
                 { text: '裸金属/物理机部署', link: '/zh/guide/bare-metal-deploy' },
                 { text: '多机集群部署', link: '/zh/guide/multi-node-deploy' },
+                {
+                  text: 'Kubernetes 部署',
+                  link: '/zh/guide/kubernetes/',
+                  collapsed: true,
+                  items: [
+                    { text: '概览', link: '/zh/guide/kubernetes/' },
+                    { text: 'Helm 安装', link: '/zh/guide/kubernetes/install' },
+                    { text: '架构说明', link: '/zh/guide/kubernetes/architecture' },
+                    { text: '升级', link: '/zh/guide/kubernetes/upgrade' },
+                    { text: '常见问题', link: '/zh/guide/kubernetes/faq' }
+                  ]
+                },
                 { text: '腾讯云集群部署（Terraform）', link: '/zh/guide/tencentcloud-terraform-deploy' },
                 { text: '本地构建部署', link: '/zh/guide/self-build-deploy' },
                 { text: '开发环境（QEMU 虚机）', link: '/zh/guide/dev-environment' }

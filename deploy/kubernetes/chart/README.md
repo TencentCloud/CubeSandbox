@@ -17,24 +17,23 @@ Control-plane vs compute scheduling uses `placement.controlPlane` and `placement
 deploy/kubernetes/chart/
   Chart.yaml
   values.yaml
-  docs/
-    ARCHITECTURE.md
-    QUICKSTART.md
-    UPGRADE.md
-    FAQ.md
   templates/
 ```
 
 ## Documentation
 
-- [`docs/QUICKSTART.md`](docs/QUICKSTART.md) — install walkthrough from prerequisites to `helm test`.
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — current architecture, startup sequence, DNS / Proxy / Egress, compute-only mode.
-- [`docs/UPGRADE.md`](docs/UPGRADE.md) — compute-plane image upgrades without killing live sandboxes.
-- [`docs/FAQ.md`](docs/FAQ.md) — common install and runtime issues.
+Official docs (source of truth; do not keep a parallel copy under this chart):
+
+- [Kubernetes Deployment](https://cubesandbox.com/guide/kubernetes/) — overview and install order
+- [Helm Install](https://cubesandbox.com/guide/kubernetes/install) — prerequisites through `helm test`
+- [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) — component layering, four compute DaemonSets, DNS / Proxy / Egress, compute-only mode
+- [Upgrade](https://cubesandbox.com/guide/kubernetes/upgrade) — compute-plane image upgrades without killing live sandboxes
+- [FAQ](https://cubesandbox.com/guide/kubernetes/faq) — common install and runtime issues
+- Chinese: [https://cubesandbox.com/zh/guide/kubernetes/](https://cubesandbox.com/zh/guide/kubernetes/)
 
 ## Architecture
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for component layering, the four compute DaemonSets, DNS/Proxy/Egress flows, and external control plane / compute-only mode.
+See the [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) guide for component layering, the four compute DaemonSets, DNS/Proxy/Egress flows, and external control plane / compute-only mode.
 
 ## Image responsibilities
 
@@ -138,7 +137,7 @@ kubectl taint node <compute-node>   cube.tencent.com/compute=true:NoSchedule   -
 kubectl label node <pvm-compute-node>   cube.tencent.com/allow-pvm-bootstrap=true   --overwrite
 # The Helm preflight Hook writes pvm-not-ready=true:NoSchedule on
 # fingerprint-unready pvm nodes. For intentional kernel/bootArgs mutate,
-# see docs/UPGRADE.md (value=maintenance).
+# see https://cubesandbox.com/guide/kubernetes/upgrade (value=maintenance).
 ```
 
 The chart does not label nodes or apply role taints; prepare those before install. The PVM startup-gate taint is written by the preflight Hook when the node is not fingerprint-ready.
@@ -530,8 +529,8 @@ or slot service annotations keeps Pod UID/IP/netns. **First introducing
 `cube-slot-1`…`6` recreates Big Pods once** (adding containers is not InPlace).
 Artifact images bump only `cube-node-installer`; node-init images bump
 `cube-node-bootstrap`; PVM host image bumps only `cube-node-pvm`. See
-`docs/UPGRADE.md`. Cluster must have OpenKruise installed (see
-`docs/QUICKSTART.md` §1.4).
+[Upgrade](https://cubesandbox.com/guide/kubernetes/upgrade). Cluster must have
+OpenKruise installed (see [Helm Install](https://cubesandbox.com/guide/kubernetes/install)).
 
 Set `cubeNode.updateStrategy.type: OnDelete` for fully manual
 per-node upgrades.
