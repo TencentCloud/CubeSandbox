@@ -332,6 +332,8 @@ Current capability domains:
 - `cases/run_code/`: expression text, stdout, kernel state, Python error reporting.
 - `cases/network/`: create-time network policy for allow/deny and public egress access.
 - `cases/concurrency/`: simultaneous multi-sandbox isolation.
+- `cases/host-mount/`: host-directory mount extension — happy path plus create-time
+  validation, runtime bind-mount failures, and cross-sandbox sharing boundary cases.
 
 Keep new cases backend-neutral. Add backend-specific behavior through capability
 markers instead of branching inside test bodies. Future domains can be added next
@@ -356,6 +358,9 @@ Capability markers:
 - Common capabilities include `lifecycle`, `commands`, `filesystem`, and `run_code`.
 - Shared optional capabilities include `pause_resume`, `network_allow_deny`, and `network_public_access`.
 - `platform_lifecycle` is available only to CubeSandbox platform-managed lifecycle cases.
+- `host_mount` is a CubeSandbox-only extension; `cases/host-mount/` uses it via
+  `@pytest.mark.requires_capability("host_mount")` to skip backends (e.g. e2b) that
+  do not support host-directory mounts.
 
 ## Cleanup
 
@@ -364,3 +369,6 @@ fails, the suite falls back to `DELETE /sandboxes/{sandboxID}` against
 `CUBE_API_URL`.
 
 Set `SDK_E2E_KEEP_SANDBOX_ON_FAILURE=true` to preserve sandboxes while debugging.
+It only preserves sandboxes of *failed* tests created through the `sdk_sandbox`
+fixture; passed and skipped tests are always cleaned up, and boundary tests that
+create sandboxes directly (via their own helpers) always clean up regardless.

@@ -328,7 +328,9 @@ tests/e2e/sdk_compat/
 - `cases/filesystem/`：读写、覆盖、多行内容、文件 API 与 shell 互操作；
 - `cases/run_code/`：表达式结果、stdout、kernel 状态和 Python 错误；
 - `cases/network/`：创建时的 allow/deny 和公网出站策略；
-- `cases/concurrency/`：同时运行多个 sandbox 时的数据隔离。
+- `cases/concurrency/`：同时运行多个 sandbox 时的数据隔离；
+- `cases/host-mount/`：宿主目录挂载扩展——happy path，以及创建时校验、
+  运行期 bind-mount 失败和跨 sandbox 共享等边界用例。
 
 新增测试应保持后端无关，通过 capability marker 表达后端差异。
 
@@ -361,6 +363,8 @@ Capability marker：
 接收字段尚未对齐，导致 E2B 生命周期参数暂未生效。相关兼容修复见
 [PR #988](https://github.com/TencentCloud/CubeSandbox/pull/988)；修复合并并
 完成版本验证后，应重新启用 E2B 平台生命周期 capability 和双 backend 用例。
+`host_mount` 是 CubeSandbox 独有扩展；`cases/host-mount/` 通过
+`@pytest.mark.requires_capability("host_mount")` 跳过不支持宿主目录挂载的后端（如 e2b）。
 
 ## 清理
 
@@ -373,4 +377,5 @@ Capability marker：
 export SDK_E2E_KEEP_SANDBOX_ON_FAILURE=true
 ```
 
-通过和跳过的测试仍会清理 sandbox。
+该开关仅保留通过 `sdk_sandbox` fixture 创建、且**失败**的测试的 sandbox；通过和
+跳过的测试始终会被清理，直接创建 sandbox 的边界用例（使用各自的 helper）也始终清理。

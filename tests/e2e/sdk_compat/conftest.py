@@ -18,7 +18,7 @@ sys.path.insert(0, str(SDK_COMPAT_ROOT))
 
 from adapters import create_adapter  # noqa: E402
 from framework.cleanup import safe_kill  # noqa: E402
-from framework.capabilities import CODE_INTERPRETER, CUBESANDBOX_CAPABILITIES, E2B_CAPABILITIES  # noqa: E402
+from framework.capabilities import CODE_INTERPRETER, capabilities_for_backend  # noqa: E402
 from framework.config import SdkE2EConfig  # noqa: E402
 from framework.preflight import run_preflight  # noqa: E402
 from framework.reporting import JsonlReporter  # noqa: E402
@@ -329,11 +329,7 @@ def _config_from_pytest(config: pytest.Config) -> SdkE2EConfig:
 
 
 def _capabilities_for_backend(backend: str) -> frozenset[str]:
-    if backend == "cubesandbox":
-        return CUBESANDBOX_CAPABILITIES
-    if backend == "e2b":
-        return E2B_CAPABILITIES
-    return frozenset()
+    return capabilities_for_backend(backend)
 
 
 def _create_options_for_node(node: pytest.Item) -> dict:
