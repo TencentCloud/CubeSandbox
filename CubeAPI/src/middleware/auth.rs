@@ -235,7 +235,12 @@ mod tests {
     async fn build_test_server_with_callback(callback_url: &str) -> TestServer {
         let mut config = ServerConfig::default();
         config.auth_callback_url = Some(callback_url.to_string());
-        let state = AppState::new(config, arc(NoopLogger)).await;
+        let state = AppState::new(
+            config,
+            arc(NoopLogger),
+            crate::logging::http::WebhookRegistry::default(),
+        )
+        .await;
         let router = Router::new()
             .route("/templates/:id", any(|| async { "ok" }))
             .route("/sandboxes/:id", any(|| async { "ok" }))
@@ -333,7 +338,12 @@ mod tests {
     #[tokio::test]
     async fn no_callback_configured_passthrough() {
         let config = ServerConfig::default(); // auth_callback_url = None
-        let state = AppState::new(config, arc(NoopLogger)).await;
+        let state = AppState::new(
+            config,
+            arc(NoopLogger),
+            crate::logging::http::WebhookRegistry::default(),
+        )
+        .await;
         let router = Router::new()
             .route("/sandboxes/:id", any(|| async { "ok" }))
             .layer(axum::middleware::from_fn_with_state(
@@ -392,7 +402,12 @@ mod tests {
     async fn build_test_server_with_api_key(api_key: &str) -> TestServer {
         let mut config = ServerConfig::default();
         config.cube_api_key = Some(api_key.to_string());
-        let state = AppState::new(config, arc(NoopLogger)).await;
+        let state = AppState::new(
+            config,
+            arc(NoopLogger),
+            crate::logging::http::WebhookRegistry::default(),
+        )
+        .await;
         let router = Router::new()
             .route("/sandboxes/:id", any(|| async { "ok" }))
             .layer(axum::middleware::from_fn_with_state(

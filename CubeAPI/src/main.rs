@@ -239,12 +239,15 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
         );
     }
 
-    // FilteredLogger gates by level → MultiLogger fans out to file (+ webhook).
-    // WebhookLogger is a no-op when no endpoints are configured.
+    // The registry is shared: the WebhookLogger reads it to deliver events, and
+    // AppState holds a clone so the /webhooks management API can mutate it.
+    let webhooks = logging::http::WebhookRegistry::from_configs(cfg.webhooks.clone());
+
+    // FilteredLogger gates by level → MultiLogger fans out to file + webhook.
     let logger: logging::ArcLogger = arc(FilteredLogger::new(
         arc(MultiLogger::new()
             .add(arc(file_logger))
-            .add(arc(logging::http::WebhookLogger::new(cfg.webhooks.clone())))),
+            .add(arc(logging::http::WebhookLogger::new(webhooks.clone())))),
         min_level,
     ));
 
@@ -256,7 +259,7 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
     );
 
     // ── App state ─────────────────────────────────────────────────────────
-    let state = state::AppState::new(cfg.clone(), logger.clone()).await;
+    let state = state::AppState::new(cfg.clone(), logger.clone(), webhooks).await;
 
     // ── Router ────────────────────────────────────────────────────────────
     let app = routes::build_router(state);

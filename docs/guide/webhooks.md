@@ -59,6 +59,39 @@ the endpoint count.
 | `timeout_ms` | no | Per-request timeout in milliseconds. Default `5000`. |
 | `max_retries` | no | Retries after the first attempt. Default `3`. |
 
+## Management API
+
+Endpoints can also be managed at runtime over HTTP — no restart required. This
+is what the WebUI uses to let users add/remove webhooks from the dashboard.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/webhooks` | List registered endpoints (secrets masked). |
+| `POST` | `/webhooks` | Register an endpoint; the server assigns its `id`. |
+| `DELETE` | `/webhooks/{id}` | Remove an endpoint by id. |
+
+```bash
+# Register a webhook
+curl -X POST http://localhost:3000/webhooks -H 'Content-Type: application/json' -d '{
+  "url": "http://127.0.0.1:9100/webhook",
+  "events": ["sandbox.created", "sandbox.deleted"],
+  "secret": "my-shared-secret"
+}'
+# → 201 { "id": "8f3a…", "url": "…", "has_secret": true, ... }
+
+# List, then delete by id
+curl http://localhost:3000/webhooks
+curl -X DELETE http://localhost:3000/webhooks/8f3a…   # → 204
+```
+
+The response never contains the `secret` value — only `has_secret: true|false`.
+
+::: warning Runtime changes are in-memory
+Endpoints added/removed via this API are **not persisted**: they are lost on
+restart. The config file provides the durable startup set. (Persisting runtime
+changes would require a datastore and is out of scope here.)
+:::
+
 ## Payload
 
 Each event is delivered as an HTTP `POST` with `Content-Type: application/json`

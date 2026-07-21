@@ -3,6 +3,7 @@
 //
 
 use serde::Deserialize;
+use utoipa::ToSchema;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ServerConfig {
@@ -87,7 +88,9 @@ pub struct ServerConfig {
 }
 
 /// A single webhook subscription: where to POST and which events to send.
-#[derive(Debug, Deserialize, Clone)]
+///
+/// Also used as the request body of `POST /webhooks`.
+#[derive(Debug, Deserialize, Clone, ToSchema)]
 pub struct WebhookConfig {
     /// Full URL to POST events to, e.g. `"http://127.0.0.1:9100/webhook"`.
     pub url: String,

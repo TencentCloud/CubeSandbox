@@ -28,6 +28,10 @@ pub struct AppState {
 
     /// Server config snapshot.
     pub config: Arc<crate::config::ServerConfig>,
+
+    /// Shared, runtime-mutable webhook endpoint registry. Read by the webhook
+    /// delivery backend and mutated by the `/webhooks` management API.
+    pub webhooks: crate::logging::http::WebhookRegistry,
 }
 
 impl AppState {
@@ -35,7 +39,11 @@ impl AppState {
     ///
     /// The `logger` is built externally (in `main.rs`) because `FileLogger::new`
     /// is async and requires the Tokio runtime to be running.
-    pub async fn new(config: crate::config::ServerConfig, logger: ArcLogger) -> Self {
+    pub async fn new(
+        config: crate::config::ServerConfig,
+        logger: ArcLogger,
+        webhooks: crate::logging::http::WebhookRegistry,
+    ) -> Self {
         let quota = Quota::per_second(NonZeroU32::new(config.rate_limit_per_sec.max(1)).unwrap());
         let rate_limiter = Arc::new(RateLimiter::keyed(quota));
 
@@ -54,6 +62,7 @@ impl AppState {
             services,
             logger,
             config: Arc::new(config),
+            webhooks,
         }
     }
 }

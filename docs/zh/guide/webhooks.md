@@ -58,6 +58,38 @@ CUBE_API_WEBHOOK_CONFIG=/path/to/webhooks.yaml cube-api
 | `timeout_ms` | 否 | 单次请求超时（毫秒）。默认 `5000`。 |
 | `max_retries` | 否 | 首次投递之后的重试次数。默认 `3`。 |
 
+## 管理 API
+
+端点也可以在运行时通过 HTTP 管理——无需重启。WebUI 就是用它让用户在控制台里
+增删 webhook 的。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/webhooks` | 列出已注册端点（secret 打码）。 |
+| `POST` | `/webhooks` | 注册一个端点；`id` 由服务端分配。 |
+| `DELETE` | `/webhooks/{id}` | 按 id 删除一个端点。 |
+
+```bash
+# 注册一个 webhook
+curl -X POST http://localhost:3000/webhooks -H 'Content-Type: application/json' -d '{
+  "url": "http://127.0.0.1:9100/webhook",
+  "events": ["sandbox.created", "sandbox.deleted"],
+  "secret": "my-shared-secret"
+}'
+# → 201 { "id": "8f3a…", "url": "…", "has_secret": true, ... }
+
+# 列出，再按 id 删除
+curl http://localhost:3000/webhooks
+curl -X DELETE http://localhost:3000/webhooks/8f3a…   # → 204
+```
+
+响应中永远不含 `secret` 原文——只有 `has_secret: true|false`。
+
+::: warning 运行时改动是内存态
+通过该 API 增删的端点**不持久化**：重启即丢失。配置文件负责"开机时的持久初始
+值"。（要持久化运行时改动需要引入存储，超出本功能范围。）
+:::
+
 ## Payload
 
 每个事件以 HTTP `POST` 投递，`Content-Type: application/json`，并带有以下头：

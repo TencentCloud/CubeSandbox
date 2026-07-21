@@ -36,8 +36,7 @@ use crate::config::WebhookConfig;
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tracing::{debug, error, warn};
@@ -47,33 +46,115 @@ type HmacSha256 = Hmac<Sha256>;
 /// Upper bound on the exponential backoff sleep between retries.
 const MAX_BACKOFF_SECS: u64 = 30;
 
+// ─── WebhookRegistry ─────────────────────────────────────────────────────────
+
+/// One registered webhook endpoint: a stable id plus its configuration.
+#[derive(Clone)]
+pub struct WebhookEntry {
+    pub id: String,
+    pub config: WebhookConfig,
+}
+
+/// Thread-safe, runtime-mutable set of webhook endpoints, shared between the
+/// delivery backend ([`WebhookLogger`]) and the management API handlers.
+///
+/// Backed by an `Arc<RwLock<..>>`: many readers (event delivery, listing) run
+/// concurrently, while a writer (the management API) takes exclusive access
+/// only for the brief moment it mutates the list. Cloning is O(1) — every
+/// clone shares the same underlying lock.
+#[derive(Clone, Default)]
+pub struct WebhookRegistry {
+    inner: Arc<RwLock<Vec<WebhookEntry>>>,
+}
+
+impl WebhookRegistry {
+    /// Seed the registry from the startup config, assigning each endpoint an id.
+    pub fn from_configs(configs: Vec<WebhookConfig>) -> Self {
+        let entries = configs
+            .into_iter()
+            .map(|config| WebhookEntry {
+                id: uuid::Uuid::new_v4().to_string(),
+                config,
+            })
+            .collect();
+        Self {
+            inner: Arc::new(RwLock::new(entries)),
+        }
+    }
+
+    /// Snapshot of all entries (used by the management API to list).
+    pub fn list(&self) -> Vec<WebhookEntry> {
+        self.read().clone()
+    }
+
+    /// Owned clones of every endpoint subscribed to `event`. The read lock is
+    /// released as this returns, so callers never hold it across an `.await`.
+    fn matching(&self, event: &str) -> Vec<WebhookConfig> {
+        self.read()
+            .iter()
+            .filter(|e| e.config.events.iter().any(|ev| ev == event))
+            .map(|e| e.config.clone())
+            .collect()
+    }
+
+    /// Whether any endpoint currently subscribes to `event`.
+    fn any_subscribed(&self, event: &str) -> bool {
+        self.read()
+            .iter()
+            .any(|e| e.config.events.iter().any(|ev| ev == event))
+    }
+
+    /// Register a new endpoint, assigning it a fresh id. Takes the write lock.
+    pub fn add(&self, config: WebhookConfig) -> WebhookEntry {
+        let entry = WebhookEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            config,
+        };
+        self.write().push(entry.clone());
+        entry
+    }
+
+    /// Remove the entry with `id`. Returns whether one was actually removed.
+    pub fn remove(&self, id: &str) -> bool {
+        let mut guard = self.write();
+        let before = guard.len();
+        guard.retain(|e| e.id != id);
+        guard.len() != before
+    }
+
+    /// Acquire the read guard, recovering from a poisoned lock (a writer that
+    /// panicked mid-mutation can only leave the `Vec` intact, so the data is
+    /// still safe to read).
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, Vec<WebhookEntry>> {
+        self.inner.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Acquire the write guard, recovering from a poisoned lock.
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, Vec<WebhookEntry>> {
+        self.inner.write().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 // ─── WebhookLogger ───────────────────────────────────────────────────────────
 
 /// HTTP webhook log backend.
 ///
-/// Clone is O(1) — only the channel sender is cloned.
+/// Clone is O(1) — only the channel sender and the registry handle are cloned.
 #[derive(Clone)]
 pub struct WebhookLogger {
     /// Events matching a subscription are forwarded here to the dispatcher.
     tx: UnboundedSender<LogEvent>,
-    /// Union of every endpoint's subscribed event names, used to cheaply drop
-    /// events that no endpoint cares about before they hit the channel.
-    subscribed: Arc<HashSet<String>>,
+    /// Shared, runtime-mutable endpoint list (also held by the management API).
+    registry: WebhookRegistry,
 }
 
 impl WebhookLogger {
-    /// Create a `WebhookLogger` for the given endpoints.
+    /// Create a `WebhookLogger` backed by `registry` and spawn its dispatcher.
     ///
-    /// When at least one endpoint subscribes to an event, a background
-    /// dispatcher task is spawned; with no subscriptions the logger is inert
-    /// and `log()` is a no-op, so it is safe to register unconditionally.
-    pub fn new(endpoints: Vec<WebhookConfig>) -> Self {
-        let subscribed: HashSet<String> = endpoints
-            .iter()
-            .flat_map(|e| e.events.iter().cloned())
-            .collect();
-        let subscribed = Arc::new(subscribed);
-
+    /// The dispatcher reads the *current* registry on every event, so webhooks
+    /// added or removed at runtime (via the management API) take effect
+    /// immediately without a restart.
+    pub fn new(registry: WebhookRegistry) -> Self {
         // A shared client gives us connection pooling; the request timeout is
         // applied per-request (each endpoint may configure its own).
         let client = reqwest::Client::builder()
@@ -81,14 +162,9 @@ impl WebhookLogger {
             .expect("failed to build webhook HTTP client");
 
         let (tx, rx) = mpsc::unbounded_channel::<LogEvent>();
+        tokio::spawn(run_dispatcher(rx, client, registry.clone()));
 
-        // When no endpoint subscribes to anything, skip the dispatcher entirely
-        // — `log()` early-returns, so no events are ever enqueued.
-        if !subscribed.is_empty() {
-            tokio::spawn(run_dispatcher(rx, client, Arc::new(endpoints)));
-        }
-
-        Self { tx, subscribed }
+        Self { tx, registry }
     }
 }
 
@@ -99,7 +175,7 @@ impl WebhookLogger {
 async fn run_dispatcher(
     mut rx: mpsc::UnboundedReceiver<LogEvent>,
     client: reqwest::Client,
-    endpoints: Arc<Vec<WebhookConfig>>,
+    registry: WebhookRegistry,
 ) {
     while let Some(event) = rx.recv().await {
         // Build the JSON body once; it is identical for every endpoint.
@@ -111,14 +187,12 @@ async fn run_dispatcher(
             }
         };
 
-        for endpoint in endpoints.iter() {
-            if !endpoint.events.iter().any(|e| e == &event.event) {
-                continue;
-            }
+        // Snapshot the currently-subscribed endpoints (the read lock is
+        // released before we start spawning delivery tasks).
+        for endpoint in registry.matching(&event.event) {
             // Independent task per (event, endpoint) so a slow endpoint never
             // blocks the dispatcher or other endpoints.
             let client = client.clone();
-            let endpoint = endpoint.clone();
             let body = body.clone();
             let event_name = event.event.clone();
             tokio::spawn(async move {
@@ -136,7 +210,7 @@ impl Logger for WebhookLogger {
     async fn log(&self, event: LogEvent) {
         // Cheap early drop: skip events no endpoint subscribes to. This keeps
         // high-frequency events (e.g. `api.request`) off the channel entirely.
-        if !self.subscribed.contains(&event.event) {
+        if !self.registry.any_subscribed(&event.event) {
             return;
         }
         // Non-blocking: hand off to the dispatcher and return immediately.
@@ -339,6 +413,11 @@ mod tests {
             .field("template_id", "tmpl-abc")
     }
 
+    /// Build a logger whose registry is seeded with the given endpoints.
+    fn logger_for(configs: Vec<WebhookConfig>) -> WebhookLogger {
+        WebhookLogger::new(WebhookRegistry::from_configs(configs))
+    }
+
     async fn recv_timeout(rx: &mut UnboundedReceiver<Captured>) -> Option<Captured> {
         tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
@@ -349,7 +428,7 @@ mod tests {
     #[tokio::test]
     async fn delivers_subscribed_event_with_correct_payload() {
         let (url, mut rx) = spawn_receiver().await;
-        let logger = WebhookLogger::new(vec![WebhookConfig {
+        let logger = logger_for(vec![WebhookConfig {
             url,
             events: vec!["sandbox.created".to_string()],
             secret: None,
@@ -379,7 +458,7 @@ mod tests {
     async fn signs_payload_when_secret_is_set() {
         let (url, mut rx) = spawn_receiver().await;
         let secret = "top-secret";
-        let logger = WebhookLogger::new(vec![WebhookConfig {
+        let logger = logger_for(vec![WebhookConfig {
             url,
             events: vec!["sandbox.created".to_string()],
             secret: Some(secret.to_string()),
@@ -399,7 +478,7 @@ mod tests {
     #[tokio::test]
     async fn does_not_deliver_unsubscribed_event() {
         let (url, mut rx) = spawn_receiver().await;
-        let logger = WebhookLogger::new(vec![WebhookConfig {
+        let logger = logger_for(vec![WebhookConfig {
             url,
             events: vec!["sandbox.created".to_string()],
             secret: None,
@@ -422,7 +501,7 @@ mod tests {
     async fn log_is_non_blocking_when_endpoint_is_unreachable() {
         // Port 1 is not listening; delivery will fail and retry in the
         // background, but log() itself must return immediately.
-        let logger = WebhookLogger::new(vec![WebhookConfig {
+        let logger = logger_for(vec![WebhookConfig {
             url: "http://127.0.0.1:1/webhook".to_string(),
             events: vec!["sandbox.created".to_string()],
             secret: None,

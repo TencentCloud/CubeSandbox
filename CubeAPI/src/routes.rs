@@ -110,7 +110,11 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
             post(sandboxes::connect_sandbox),
         )
         .route("/snapshots", get(snapshots::list_snapshots))
-        .route("/webhooks", get(webhooks::list_webhooks));
+        .route(
+            "/webhooks",
+            get(webhooks::list_webhooks).post(webhooks::create_webhook),
+        )
+        .route("/webhooks/:id", delete(webhooks::delete_webhook));
 
     with_auth_and_rate_limit(routes, state, auth_configured)
 }
@@ -241,7 +245,12 @@ mod tests {
         let mut config = ServerConfig::default();
         config.cubemaster_url = "http://127.0.0.1:9".to_string();
 
-        let state = AppState::new(config, arc(NoopLogger)).await;
+        let state = AppState::new(
+            config,
+            arc(NoopLogger),
+            crate::logging::http::WebhookRegistry::default(),
+        )
+        .await;
         TestServer::new(build_router(state)).expect("router should build")
     }
 
@@ -284,7 +293,12 @@ mod tests {
 
         let mut config = ServerConfig::default();
         config.cubemaster_url = format!("http://{address}");
-        let state = AppState::new(config, arc(NoopLogger)).await;
+        let state = AppState::new(
+            config,
+            arc(NoopLogger),
+            crate::logging::http::WebhookRegistry::default(),
+        )
+        .await;
         let server = TestServer::new(build_router(state)).expect("router should build");
 
         for (sandbox_id, retry_after, message) in [
