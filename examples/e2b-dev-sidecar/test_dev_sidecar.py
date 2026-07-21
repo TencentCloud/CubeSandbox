@@ -6,6 +6,7 @@ import json
 import os
 import sys
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -65,6 +66,15 @@ async def _start_web_app(app: web.Application) -> tuple[web.AppRunner, str]:
     return runner, f"http://{host}:{port}"
 
 
+@dataclass
+class _ContentEncodingProxyResult:
+    proxy_url: str
+    payload: bytes
+    encoded_payload: bytes
+    etag: str
+    accepted_encodings: list[str | None]
+
+
 @asynccontextmanager
 async def _content_encoding_proxy(monkeypatch, dev_sidecar):
     payload = b"compressed sandbox response"
@@ -96,7 +106,13 @@ async def _content_encoding_proxy(monkeypatch, dev_sidecar):
     proxy_url = f"{sidecar_url}/sandboxes/router/sbx-1/49983/files"
 
     try:
-        yield proxy_url, payload, encoded_payload, etag, accepted_encodings
+        yield _ContentEncodingProxyResult(
+            proxy_url=proxy_url,
+            payload=payload,
+            encoded_payload=encoded_payload,
+            etag=etag,
+            accepted_encodings=accepted_encodings,
+        )
     finally:
         await sidecar_runner.cleanup()
         await upstream_runner.cleanup()
@@ -234,19 +250,18 @@ async def test_http_proxy_preserves_encoded_response_representation(
     dev_sidecar,
 ):
     async with _content_encoding_proxy(monkeypatch, dev_sidecar) as proxy:
-        proxy_url, _, encoded_payload, etag, accepted_encodings = proxy
         async with ClientSession(auto_decompress=False) as session:
             async with session.get(
-                proxy_url,
+                proxy.proxy_url,
                 headers={hdrs.ACCEPT_ENCODING: "gzip"},
             ) as response:
                 assert response.status == 200
                 assert response.headers[hdrs.CONTENT_ENCODING] == "gzip"
-                assert response.headers[hdrs.ETAG] == etag
+                assert response.headers[hdrs.ETAG] == proxy.etag
                 assert response.headers[hdrs.VARY] == hdrs.ACCEPT_ENCODING
-                assert await response.read() == encoded_payload
+                assert await response.read() == proxy.encoded_payload
 
-        assert accepted_encodings == ["gzip"]
+        assert proxy.accepted_encodings == ["gzip"]
 
 
 @pytest.mark.asyncio
@@ -255,27 +270,27 @@ async def test_http_proxy_allows_downstream_client_to_decode_once(
     dev_sidecar,
 ):
     async with _content_encoding_proxy(monkeypatch, dev_sidecar) as proxy:
-        proxy_url, payload, _, _, accepted_encodings = proxy
         async with httpx.AsyncClient(trust_env=False) as client:
-            response = await client.get(proxy_url)
+            response = await client.get(
+                proxy.proxy_url,
+                headers={hdrs.ACCEPT_ENCODING: "gzip"},
+            )
 
-        assert response.content == payload
-        assert len(accepted_encodings) == 1
-        assert "gzip" in (accepted_encodings[0] or "")
+        assert response.content == proxy.payload
+        assert proxy.accepted_encodings == ["gzip"]
 
 
 @pytest.mark.asyncio
 async def test_http_proxy_does_not_inject_accept_encoding(monkeypatch, dev_sidecar):
     async with _content_encoding_proxy(monkeypatch, dev_sidecar) as proxy:
-        proxy_url, payload, _, _, accepted_encodings = proxy
         async with ClientSession(
             skip_auto_headers={hdrs.ACCEPT_ENCODING},
         ) as session:
-            async with session.get(proxy_url) as response:
+            async with session.get(proxy.proxy_url) as response:
                 assert hdrs.CONTENT_ENCODING not in response.headers
-                assert await response.read() == payload
+                assert await response.read() == proxy.payload
 
-        assert accepted_encodings == [None]
+        assert proxy.accepted_encodings == [None]
 
 
 @pytest.mark.asyncio
