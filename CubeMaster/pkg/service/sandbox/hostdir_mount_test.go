@@ -129,6 +129,61 @@ func TestInjectHostDirMounts_MalformedJSON(t *testing.T) {
 	}
 }
 
+func TestInjectPluginVolumeMounts_Readonly(t *testing.T) {
+	tests := []struct {
+		name         string
+		annotation   string
+		wantReadonly bool
+	}{
+		{
+			name:         "readonly forwarded",
+			annotation:   `[{"name":"dataset-volume","container_path":"/dataset","readonly":true}]`,
+			wantReadonly: true,
+		},
+		{
+			name:         "readonly omitted defaults to false",
+			annotation:   `[{"name":"workspace-volume","container_path":"/workspace"}]`,
+			wantReadonly: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &types.CreateCubeSandboxReq{
+				Annotations: map[string]string{
+					AnnotationPluginVolumeMounts: tt.annotation,
+				},
+				Containers: []*types.Container{{Name: "main"}, {Name: "sidecar"}},
+			}
+
+			if err := injectPluginVolumeMounts(context.Background(), req); err != nil {
+				t.Fatalf("injectPluginVolumeMounts() error = %v", err)
+			}
+			for _, container := range req.Containers {
+				if got := len(container.VolumeMounts); got != 1 {
+					t.Fatalf("container %q len(VolumeMounts) = %d, want 1", container.Name, got)
+				}
+				if got := container.VolumeMounts[0].Readonly; got != tt.wantReadonly {
+					t.Errorf("container %q VolumeMounts[0].Readonly = %v, want %v", container.Name, got, tt.wantReadonly)
+				}
+			}
+		})
+	}
+}
+
+func TestInjectPluginVolumeMounts_InvalidReadonlyType(t *testing.T) {
+	req := &types.CreateCubeSandboxReq{
+		Annotations: map[string]string{
+			AnnotationPluginVolumeMounts: `[{"name":"dataset","container_path":"/dataset","readonly":"true"}]`,
+		},
+		Containers: []*types.Container{{Name: "main"}},
+	}
+
+	if err := injectPluginVolumeMounts(context.Background(), req); err == nil {
+		t.Fatal("injectPluginVolumeMounts() error = nil, want invalid readonly type error")
+	}
+}
+
 func TestValidateHostPath(t *testing.T) {
 	tests := []struct {
 		name     string

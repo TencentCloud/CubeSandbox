@@ -17,6 +17,7 @@ CubeSandbox 正在逐步兼容 e2b Volume，为沙箱提供跨生命周期的持
 > | SDK `Volume.create` / `connect` / `list` / `get_info` / `destroy` | ✅ 已支持（SDK ≥ 0.6.0） |
 > | SDK `Sandbox.create(volume_mounts={path: volume})` | ✅ 已支持（e2b dict 映射） |
 > | 同一 Volume 被多个沙箱同时挂载 | ✅ 已支持 |
+> | 按沙箱只读挂载 | ✅ Cube SDK 扩展（`VolumeMount(..., read_only=True)`）；官方 e2b SDK 自身没有只读挂载选项 |
 > | 创建时省略 `driver`（e2b 默认行为） | ✅ 已支持 |
 
 > **e2b API 与 SDK**
@@ -370,6 +371,7 @@ sequenceDiagram
 | 官方 e2b Python SDK | ❌ 否 | 硬编码 e2b.cloud 后端；**勿**用于 CubeSandbox |
 | `cubesandbox` Python SDK | ✅ 是 | `Volume`、`Sandbox.create(volume_mounts={path: volume})`（e2b dict） |
 | 创建时省略 `driver` | ✅ 是 | CubeMaster 取 `volume_plugins` **列表第一项** |
+| 按沙箱只读挂载 | ❌ 否 | 官方 e2b SDK 自身没有只读 Volume 挂载选项；Cube SDK 增加 `VolumeMount(volume, read_only=True)` 扩展 |
 
 完整 COS 插件体验见 [`examples/volume/cos/README.zh.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.zh.md)。
 
@@ -437,9 +439,33 @@ Volume.destroy(vol.volume_id)  # 返回 True；卷不存在时返回 False（幂
 | `Volume.destroy(volume_id)` | e2b 兼容删除；成功返回 `True`，404 返回 `False`（幂等） |
 | `Volume.delete(...)` | `destroy` 的兼容别名（旧代码可用，推荐 `destroy`） |
 | `driver` | 可选；插件名；**e2b 兼容用法下省略**——SDK 不发送该字段，CubeMaster 取 `volume_plugins` **列表第一项** |
-| `volume_mounts` | e2b dict `{挂载路径: Volume \| volume_id \| name}` — key 为沙箱内路径，value 为 `Volume` 实例或 volume ID 字符串 |
+| `volume_mounts` | e2b dict `{挂载路径: Volume \| volume_id \| name}` — key 为沙箱内路径，value 为 `Volume` 实例或 volume ID 字符串；Cube SDK 还可将 value 包装为 `VolumeMount(..., read_only=True)` 以启用只读挂载 |
 
 `driver` 写入 `t_cube_volume`，沙箱创建时经 annotation 传给 Cubelet——CubeMaster 与 Cubelet 两侧 `volume_plugins[].name` 须与之一致。
+
+### 按沙箱选择访问模式
+
+e2b 兼容的 mapping 仍是默认写法，并创建读写挂载。CubeSandbox 在 mapping 的 value 上增加了 `VolumeMount`，因此同一个持久 Volume 可以由不同沙箱分别选择读写或只读：
+
+```python
+from cubesandbox import Sandbox, Volume, VolumeMount
+
+dataset = Volume.create("shared-dataset")
+
+# 该沙箱可以更新 Volume。
+writer = Sandbox.create(
+    volume_mounts={"/dataset": dataset},
+)
+
+# 同一个 Volume 在该沙箱中禁止修改。
+reader = Sandbox.create(
+    volume_mounts={"/dataset": VolumeMount(dataset, read_only=True)},
+)
+```
+
+官方 e2b SDK 的 Volume 挂载接口自身没有只读选项，这不是 CubeSandbox 的兼容性限制。Cube SDK 和 REST 客户端可以显式使用 Cube 扩展 `volumeMounts[].readOnly: true`，原有 e2b 形式的请求不发送 `readOnly`，继续保持读写。
+
+只读是**单次沙箱挂载属性**，不是 Volume 自身的全局属性。reader 不能通过该挂载创建、修改、重命名或删除文件，但仍可能看到其他读写挂载产生的变化，因此它不是不可变快照。当前一个沙箱内仍只能挂载同一个 Volume 一次；同一沙箱重复挂载同一个 Volume 会继续被拒绝。
 
 ### 多沙箱共用同一 Volume
 

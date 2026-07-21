@@ -348,9 +348,7 @@ Current capability domains:
 - `cases/concurrency/`: simultaneous multi-sandbox isolation.
 - `cases/host-mount/`: host-directory mount extension — happy path plus create-time
   validation, runtime bind-mount failures, and cross-sandbox sharing boundary cases.
-- `cases/volume/`: Volume Plugin CRUD plus sandbox `volumeMounts` bind/unbind
-  (opt-in via `SDK_E2E_VOLUME_PLUGIN=true`; CubeSandbox only). Requires a
-  manually deployed/configured Volume Plugin and `cubesandbox` >= 0.6.0.
+- `cases/volume/`: Volume Plugin CRUD plus sandbox `volumeMounts` bind/unbind and per-sandbox read-only attachment enforcement (opt-in via `SDK_E2E_VOLUME_PLUGIN=true`; CubeSandbox only). Requires a manually deployed/configured Volume Plugin and `cubesandbox` >= 0.6.0.
 - `cases/auth/`: `CUBE_API_KEY` simple-key authentication against the CubeAPI
   control plane — `X-API-Key`/`Bearer` accept, wrong/missing 401, `/health`
   exempt (CubeSandbox only). Skipped unless the server was started with

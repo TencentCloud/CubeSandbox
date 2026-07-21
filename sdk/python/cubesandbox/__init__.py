@@ -8,7 +8,7 @@ from ._exceptions import CubeSandboxError, SandboxNotFoundError, ApiError, Templ
 from ._commands import CommandResult
 from ._pty import Pty, PtyHandle, PtyOutput, PtySize
 from ._template import Template, TemplateInfo, TemplateBuild
-from ._volume import Volume, VolumeInfo
+from ._volume import Volume, VolumeInfo, VolumeMount
 from ._policy import Rule, Match, Action, Inject
 
 __all__ = [
@@ -40,6 +40,7 @@ __all__ = [
     "TemplateBuild",
     "Volume",
     "VolumeInfo",
+    "VolumeMount",
     "Rule",
     "Match",
     "Action",

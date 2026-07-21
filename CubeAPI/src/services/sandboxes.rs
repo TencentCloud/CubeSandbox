@@ -229,12 +229,15 @@ impl SandboxService {
                 struct MountEntry<'a> {
                     name: &'a str,
                     container_path: &'a str,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    readonly: Option<bool>,
                 }
                 let entries: Vec<MountEntry> = mounts
                     .iter()
                     .map(|m| MountEntry {
                         name: &m.name,
                         container_path: &m.path,
+                        readonly: m.read_only.then_some(true),
                     })
                     .collect();
                 if let Ok(json) = serde_json::to_string(&entries) {
@@ -1074,7 +1077,7 @@ mod tests {
     use crate::error::AppError;
     use crate::models::{
         EgressRule, EgressRuleAction, EgressRuleInject, EgressRuleMatch, NewSandbox,
-        SandboxNetworkConfig, SandboxState,
+        SandboxNetworkConfig, SandboxState, SandboxVolumeMount,
     };
     use axum::{
         extract::State,
@@ -1738,6 +1741,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_sandbox_forwards_read_only_volume_mount_to_cubemaster() {
+        #[derive(Clone, Default)]
+        struct Capture {
+            create_body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn create_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            *capture.create_body.lock().await = Some(body);
+            Json(serde_json::json!({
+                "requestID": "req-volume",
+                "sandbox_id": "sb-volume",
+                "ret": { "ret_code": 0, "ret_msg": "ok" }
+            }))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener addr");
+        let capture = Capture::default();
+        let app = Router::new()
+            .route("/cube/sandbox", post(create_handler))
+            .with_state(capture.clone());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("server should run");
+        });
+
+        let service = SandboxService::new(
+            CubeMasterClient::new(format!("http://{addr}"), reqwest::Client::new()),
+            "cubebox".to_string(),
+            "cube.app".to_string(),
+        );
+
+        service
+            .create_sandbox(NewSandbox {
+                template_id: "tpl-1".to_string(),
+                timeout: Some(15),
+                lifecycle: None,
+                secure: None,
+                allow_internet_access: None,
+                network: None,
+                metadata: None,
+                distribution_scope: None,
+                env_vars: None,
+                mcp: None,
+                volume_mounts: Some(vec![
+                    SandboxVolumeMount {
+                        name: "dataset".to_string(),
+                        path: "/data".to_string(),
+                        read_only: true,
+                    },
+                    SandboxVolumeMount {
+                        name: "workspace".to_string(),
+                        path: "/workspace".to_string(),
+                        read_only: false,
+                    },
+                ]),
+            })
+            .await
+            .expect("sandbox create should succeed");
+
+        let create_body = capture
+            .create_body
+            .lock()
+            .await
+            .clone()
+            .expect("create body");
+        let raw = create_body["annotations"]["plugin-volume-mounts"]
+            .as_str()
+            .expect("plugin volume mounts annotation");
+        let mounts: Value = serde_json::from_str(raw).expect("annotation JSON");
+        assert_eq!(
+            mounts,
+            serde_json::json!([
+                {"name": "dataset", "container_path": "/data", "readonly": true},
+                {"name": "workspace", "container_path": "/workspace"}
+            ])
+        );
+    }
+
+    #[tokio::test]
     async fn kill_sandbox_maps_cubemaster_not_found_to_app_not_found() {
         async fn delete_handler() -> Json<Value> {
             Json(serde_json::json!({
@@ -2005,10 +2092,12 @@ mod tests {
             SandboxVolumeMount {
                 name: "data".to_string(),
                 path: "/mnt/a".to_string(),
+                read_only: false,
             },
             SandboxVolumeMount {
                 name: "data".to_string(),
                 path: "/mnt/b".to_string(),
+                read_only: false,
             },
         ];
         let err = super::validate_unique_volume_mount_names(&mounts)
@@ -2022,10 +2111,12 @@ mod tests {
             SandboxVolumeMount {
                 name: "data".to_string(),
                 path: "/mnt/a".to_string(),
+                read_only: false,
             },
             SandboxVolumeMount {
                 name: "logs".to_string(),
                 path: "/mnt/b".to_string(),
+                read_only: false,
             },
         ];
         super::validate_unique_volume_mount_names(&ok)
@@ -2046,28 +2137,36 @@ mod tests {
             SandboxVolumeMount {
                 name: "data".to_string(),
                 path: "/mnt/data".to_string(),
+                read_only: true,
             },
             SandboxVolumeMount {
                 name: "logs".to_string(),
                 path: "/mnt/logs".to_string(),
+                read_only: false,
             },
         ];
 
         let (specs, bindings): (Vec<VolumeSpec>, Vec<VolumeMount>) = mounts
             .into_iter()
-            .map(|SandboxVolumeMount { name, path }| {
-                (
-                    VolumeSpec {
-                        name: Some(name.clone()),
-                        volume_source: None,
-                    },
-                    VolumeMount {
-                        name,
-                        container_path: path,
-                        readonly: None,
-                    },
-                )
-            })
+            .map(
+                |SandboxVolumeMount {
+                     name,
+                     path,
+                     read_only,
+                 }| {
+                    (
+                        VolumeSpec {
+                            name: Some(name.clone()),
+                            volume_source: None,
+                        },
+                        VolumeMount {
+                            name,
+                            container_path: path,
+                            readonly: read_only.then_some(true),
+                        },
+                    )
+                },
+            )
             .unzip();
 
         assert_eq!(specs.len(), 2);
@@ -2076,8 +2175,10 @@ mod tests {
 
         assert_eq!(bindings[0].name, "data");
         assert_eq!(bindings[0].container_path, "/mnt/data");
+        assert_eq!(bindings[0].readonly, Some(true));
         assert_eq!(bindings[1].name, "logs");
         assert_eq!(bindings[1].container_path, "/mnt/logs");
+        assert_eq!(bindings[1].readonly, None);
     }
 
     /// When no `volumeMounts` are provided, `volumes` and `containers` in the

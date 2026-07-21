@@ -344,9 +344,7 @@ tests/e2e/sdk_compat/
 - `cases/concurrency/`：同时运行多个 sandbox 时的数据隔离；
 - `cases/host-mount/`：宿主目录挂载扩展——happy path，以及创建时校验、
   运行期 bind-mount 失败和跨 sandbox 共享等边界用例。
-- `cases/volume/`：Volume Plugin CRUD 与 sandbox `volumeMounts` 绑定/解绑
-  （需 `SDK_E2E_VOLUME_PLUGIN=true`；仅 CubeSandbox）。插件需手动部署并配置，
-  且要求 `cubesandbox` >= 0.6.0。
+- `cases/volume/`：Volume Plugin CRUD、sandbox `volumeMounts` 绑定/解绑，以及每个沙箱挂载点的只读约束（需 `SDK_E2E_VOLUME_PLUGIN=true`；仅 CubeSandbox）。插件需手动部署并配置，且要求 `cubesandbox` >= 0.6.0。
 - `cases/auth/`：`CUBE_API_KEY` 简单密钥鉴权，针对 CubeAPI 控制面——
   `X-API-Key`/`Bearer` 通过、错误/缺失返回 401、`/health` 豁免（仅 CubeSandbox）。
   仅当服务端以 `CUBE_API_KEY` 启动且 runner 导出相同 key 时才运行，否则跳过。

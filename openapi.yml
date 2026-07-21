@@ -1378,6 +1378,11 @@ components:
           type: string
         path:
           type: string
+        readOnly:
+          type: boolean
+          description: |-
+            CubeSandbox extension: mount this volume read-only for this sandbox
+            attachment. Defaults to false when omitted.
     TemplateAliasLookupResponse:
       type: object
       required:
