@@ -60,11 +60,17 @@ function _M.respond_with(self, status, body)
     ngx.exit(status)
 end
 
--- Convenience wrappers for the three error shapes the dataplane returns.
--- 400 = malformed request; 404 hides sandbox existence; 503 hides the
--- specific failing subsystem.
+-- Convenience wrappers for the error shapes the dataplane returns.
+-- 400 = malformed request; 403 = traffic-token gate rejection
+-- (deliberately distinct from 404 to preserve E2B header/status
+-- compatibility for restricted-public-access clients); 404 hides
+-- sandbox existence; 503 hides the specific failing subsystem.
 function _M.respond_bad_request(self)
     self:respond_with(400, '{"error":"bad request"}')
+end
+
+function _M.respond_forbidden(self)
+    self:respond_with(403, '{"error":"forbidden"}')
 end
 
 function _M.respond_not_found(self)
