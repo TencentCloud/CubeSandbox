@@ -284,7 +284,8 @@ async def on_startup(app: web.Application) -> None:
     config = app[CONFIG_KEY]
     connector = TCPConnector(ssl=config["verify_ssl"])
     timeout = ClientTimeout(total=None, connect=30, sock_read=None)
-    # Preserve coded response bytes and the downstream client's encoding negotiation.
+    # Disable upstream decompression so bytes stay aligned with Content-Encoding/ETag.
+    # Do not inject Accept-Encoding; downstream clients own content-coding negotiation.
     app[SESSION_KEY] = ClientSession(
         connector=connector,
         timeout=timeout,
