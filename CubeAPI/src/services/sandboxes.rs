@@ -13,7 +13,7 @@ use crate::{
         CubeEgressRuleAction, CubeEgressRuleInject, CubeEgressRuleMatch, CubeMasterClient,
         CubeMasterError, CubeNetworkConfig, DeleteSandboxRequest, ListSandboxRequest, SandboxInfo,
         SandboxLogsRequest, SandboxRefreshRequest, SandboxStatus, SandboxTimeoutRequest,
-        SandboxUpdateRequest, VolumeMount, VolumeSpec,
+        SandboxUpdateRequest, VolumeSpec,
     },
     error::{AppError, AppResult},
     models::{

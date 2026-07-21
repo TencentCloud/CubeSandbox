@@ -447,6 +447,7 @@ impl CubeMasterClient {
     // ── Node / Cluster APIs ──────────────────────────────────────────────
 
     /// GET /internal/meta/nodes — list all nodes (capacity + health).
+    #[allow(dead_code)]
     pub async fn list_nodes(&self) -> Result<NodesResponse, CubeMasterError> {
         let url = format!("{}/internal/meta/nodes", self.base_url);
         let resp = self
@@ -459,6 +460,7 @@ impl CubeMasterClient {
     }
 
     /// GET /internal/meta/nodes/{id} — single node detail.
+    #[allow(dead_code)]
     pub async fn get_node(&self, node_id: &str) -> Result<NodeResponse, CubeMasterError> {
         let url = format!("{}/internal/meta/nodes/{}", self.base_url, node_id);
         let resp = self
@@ -471,6 +473,7 @@ impl CubeMasterClient {
     }
 
     /// GET /internal/meta/version-matrix — cluster-wide component version matrix.
+    #[allow(dead_code)]
     pub async fn get_version_matrix(&self) -> Result<VersionMatrixResponse, CubeMasterError> {
         let url = format!("{}/internal/meta/version-matrix", self.base_url);
         let resp = self
@@ -2512,6 +2515,7 @@ pub struct ListVolumesRequest {
 }
 
 /// GET /cube/volume — response.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct ListVolumesResponse {
     #[serde(rename = "RequestID", alias = "requestID", default)]
@@ -2531,6 +2535,7 @@ pub struct CreateVolumeRequest {
 }
 
 /// POST /cube/volume — response.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct CreateVolumeResponse {
     #[serde(rename = "RequestID", alias = "requestID", default)]
@@ -2540,6 +2545,7 @@ pub struct CreateVolumeResponse {
 }
 
 /// GET /cube/volume/{volume_id} — response.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct GetVolumeResponse {
     #[serde(rename = "RequestID", alias = "requestID", default)]
@@ -2549,6 +2555,7 @@ pub struct GetVolumeResponse {
 }
 
 /// DELETE /cube/volume/{volume_id} — response.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct DeleteVolumeResponse {
     #[serde(rename = "RequestID", alias = "requestID", default)]
