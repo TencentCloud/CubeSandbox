@@ -101,6 +101,7 @@ docker build \
 ```
 
 Note the printed `template_id` from either path.
+
 ## 4. Configure environment
 
 ```bash
@@ -109,10 +110,15 @@ cp .env.example .env
 ```
 
 For the official QEMU `dev-env`, the host-forwarded API is typically
-`http://127.0.0.1:13000`. Full E2B command traffic needs `*.cube.app` DNS
-(CoreDNS inside the guest). Prefer running these scripts **inside the
-dev VM**, or point a wildcard resolver at the CubeProxy forward ports
-(`11080`/`11443` on the host).
+`http://127.0.0.1:13000`. Full E2B command traffic normally needs `*.cube.app`
+DNS (CoreDNS inside the guest). You can either:
+
+1. Run scripts **inside the dev VM**, or
+2. On the host, use `run_allowlisted_sidecar.py` (Option D in
+   [`connect-existing-cluster`](../../docs/guide/connect-existing-cluster.md),
+   reusing [`e2b-dev-sidecar`](../e2b-dev-sidecar)) so data-plane traffic is
+   rewritten locally without changing system DNS, or
+3. Point a wildcard resolver at CubeProxy forward ports (`11080`/`11443`).
 
 ## 5. Run
 
@@ -128,13 +134,23 @@ python verify_local.py
 
 This runs unit tests, `run_denied.py`, Dockerfile↔`allowlist.py` drift checks, and
 (if present) Docker image marker checks. When `E2B_API_URL` and `CUBE_TEMPLATE_ID`
-are set it also attempts `run_allowlisted.py`.
+are set it also attempts `run_allowlisted.py` (needs `*.cube.app` DNS).
 
-> Host machines outside the guest DNS path often fail allowlisted runs with
-> `getaddrinfo failed` on `*.cube.app` even when `http://127.0.0.1:13000/health`
-> returns OK. Prefer running allowlisted scripts **inside the dev VM** (see §4).
+### Allowlisted tool on the host (no wildcard DNS)
 
-### Allowlisted tool (success)
+```bash
+# .env should also set CUBE_REMOTE_PROXY_BASE=https://127.0.0.1:11443 for QEMU forwards
+python run_allowlisted_sidecar.py
+```
+
+Expected:
+
+```text
+agent-tool-allowlist-ok
+artifact: artifact-ok
+```
+
+### Allowlisted tool (success, inside guest / with DNS)
 
 ```bash
 python run_allowlisted.py
@@ -198,6 +214,7 @@ agent-tool-allowlist-sandbox/
 ├── allowlist_sync.py      # emit guest allowlist body from allowlist.py
 ├── verify_local.py        # local verification gate
 ├── run_allowlisted.py     # allow path + artifact readback
+├── run_allowlisted_sidecar.py  # host allow path via e2b-dev-sidecar
 ├── run_denied.py          # deny path (no sandbox)
 ├── test_allowlist.py      # local unit tests (no sandbox required)
 ├── env_utils.py

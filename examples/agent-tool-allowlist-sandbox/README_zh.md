@@ -95,6 +95,7 @@ docker build \
 ```
 
 任一路记下输出的 `template_id`。
+
 ## 4. 配置环境变量
 
 ```bash
@@ -103,9 +104,13 @@ cp .env.example .env
 ```
 
 官方 QEMU `dev-env` 下，宿主机转发 API 一般为 `http://127.0.0.1:13000`。
-完整 E2B 命令流量还需要 `*.cube.app` DNS（guest 内 CoreDNS）。建议在
-**开发虚机内**运行本示例，或在宿主机配置泛域名解析到 CubeProxy 转发端口
-（宿主机 `11080`/`11443`）。
+完整 E2B 命令流量通常需要 `*.cube.app` DNS（guest 内 CoreDNS）。你可以：
+
+1. 在 **开发虚机内** 跑脚本；或
+2. 在宿主机用 `run_allowlisted_sidecar.py`（见
+   [`connect-existing-cluster`](../../docs/guide/connect-existing-cluster.md) Option D，
+   复用 [`e2b-dev-sidecar`](../e2b-dev-sidecar)），本地改写数据面、**不改系统 DNS**；或
+3. 配置泛域名解析到 CubeProxy 转发端口（`11080`/`11443`）。
 
 ## 5. 运行
 
@@ -121,12 +126,23 @@ python verify_local.py
 
 会跑单测、`run_denied.py`、Dockerfile↔`allowlist.py` 漂移检查，以及（若本地有镜像）
 Docker 标记检查。若已设置 `E2B_API_URL` 与 `CUBE_TEMPLATE_ID`，还会尝试
-`run_allowlisted.py`。
+`run_allowlisted.py`（需要 `*.cube.app` DNS）。
 
-> 即使 `http://127.0.0.1:13000/health` 正常，宿主机若没有 `*.cube.app` DNS，
-> allow 路径仍可能报 `getaddrinfo failed`。建议在 **开发虚机内** 跑 allow 脚本（见 §4）。
+### 宿主机白名单工具（无需泛域名 DNS）
 
-### 白名单工具（成功）
+```bash
+# .env 建议同时设置 CUBE_REMOTE_PROXY_BASE=https://127.0.0.1:11443（QEMU 转发）
+python run_allowlisted_sidecar.py
+```
+
+预期：
+
+```text
+agent-tool-allowlist-ok
+artifact: artifact-ok
+```
+
+### 白名单工具（成功；虚机内 / 已有 DNS）
 
 ```bash
 python run_allowlisted.py
@@ -187,6 +203,7 @@ agent-tool-allowlist-sandbox/
 ├── allowlist_sync.py      # 由 allowlist.py 生成 guest 清单正文
 ├── verify_local.py        # 本地验证门控
 ├── run_allowlisted.py     # 放行路径 + 产物读回
+├── run_allowlisted_sidecar.py  # 宿主机放行路径（经 e2b-dev-sidecar）
 ├── run_denied.py          # 拒绝路径（不建沙箱）
 ├── test_allowlist.py      # 本地单测（无需沙箱）
 ├── env_utils.py
