@@ -552,6 +552,10 @@ copy_dir_contents "${SCRIPT_DIR}/CubeMaster" "${PACKAGE_ROOT}/CubeMaster"
 copy_file "${CORE_BIN_DIR}/cubemaster" "${PACKAGE_ROOT}/CubeMaster/bin/cubemaster"
 copy_file "${CORE_BIN_DIR}/cubemastercli" "${PACKAGE_ROOT}/CubeMaster/bin/cubemastercli"
 copy_file "${ROOT_DIR}/configs/single-node/cubemaster.yaml" "${PACKAGE_ROOT}/CubeMaster/conf.yaml"
+# CubeMaster/Dockerfile COPY's this from the package CubeMaster/ context.
+copy_file "${ROOT_DIR}/deploy/scripts/docker-install-volume-deps.sh" \
+  "${PACKAGE_ROOT}/CubeMaster/docker-install-volume-deps.sh"
+chmod +x "${PACKAGE_ROOT}/CubeMaster/docker-install-volume-deps.sh"
 
 copy_file "${CORE_BIN_DIR}/cubelet" "${PACKAGE_ROOT}/Cubelet/bin/cubelet"
 copy_file "${CORE_BIN_DIR}/cubecli" "${PACKAGE_ROOT}/Cubelet/bin/cubecli"

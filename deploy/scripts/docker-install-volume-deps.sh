@@ -2,19 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Tencent. All rights reserved.
 #
-# Canonical installer for Volume Plugin host tools in Ubuntu container images.
-# Keep copies in sync under:
-#   deploy/one-click/CubeMaster/docker-install-volume-deps.sh
-#   CubeMaster/docker/docker-install-volume-deps.sh
-#   deploy/kubernetes/images/cubelet/docker-install-volume-deps.sh
+# Single source of truth for Volume Plugin host tools in Ubuntu container images.
+# Build/packaging injects this file into each image's Docker context as
+# docker-install-volume-deps.sh (do not maintain per-Dockerfile copies):
+#   - CubeMaster/Dockerfile          — COPY deploy/scripts/... (repo-root context)
+#   - CubeMaster/docker/Dockerfile   — build-cube-images.sh → temp context
+#   - cubelet/Dockerfile             — build-cube-images.sh → temp context
+#   - one-click CubeMaster/Dockerfile — build-release-bundle.sh → package CubeMaster/
 #
 # Installs:
 #   cosfs  — Cubelet Attach/Detach (FUSE)
 #   coscmd — CubeMaster Create/Destroy (binary plugin)
 #   jq     — binary plugin JSON parsing
 #
-# Intended to be COPY'd into Docker build contexts and run as root during image build.
-# Not a substitute for examples/volume/cos/install-deps.sh on bare-metal hosts.
+# Run as root during image build. Not a substitute for
+# examples/volume/cos/install-deps.sh on bare-metal hosts.
 #
 # Docs: https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.md
 

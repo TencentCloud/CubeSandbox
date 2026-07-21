@@ -129,7 +129,8 @@ entrypoint behavior.
   and only replaces `/usr/local/bin/cube-node-entrypoint.sh`.
 - `cube-node-init` (`wait-pvm-host` + `cube-node-init`) runs on the **`cube-node-bootstrap`** DaemonSet; `cube-pvm-host-bootstrap` runs on **`cube-node-pvm`** (placement.pvm only).
 - `cube-wait-node-prep` is the Big Pod `wait-node-prep` **sidecar** (Kruise container launch priority) and the bootstrap `write-node-prep-ready` hold container. Bumping only the wait **image** on Big Pod may InPlace; do not change wait env/mounts routinely.
-- `cube-master` is built directly from `CubeMaster/docker/Dockerfile`. The build script prepares a temporary Docker context with the release-package `cubemaster` binary and the `CubeMaster/docker/tools` directory expected by that Dockerfile.
+- `cube-master` is built directly from `CubeMaster/docker/Dockerfile`. The build script prepares a temporary Docker context with the release-package `cubemaster` binary, the `CubeMaster/docker/tools` directory, and `deploy/scripts/docker-install-volume-deps.sh` (injected as `docker-install-volume-deps.sh`).
+- `cubelet` similarly receives `deploy/scripts/docker-install-volume-deps.sh` in its temporary context (same single-source installer as cube-master / one-click CubeMaster).
 - `cube-api` is built from `CubeAPI/Dockerfile`; no duplicate Dockerfile is kept here.
 - `cube-ops` is built from `CubeOps/Dockerfile` with context = repository root
   (needs sibling `CubeDB/` via `CubeOps/Dockerfile.dockerignore`); same as CI

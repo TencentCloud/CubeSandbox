@@ -499,7 +499,7 @@ copy_cube_master_component_context() {
   chmod +x "${ctx}/cubemaster"
   overlay_local_bin cubemaster "${ctx}/cubemaster"
   cp -a "${REPO_ROOT}/CubeMaster/docker/tools" "${ctx}/tools"
-  # Keep in sync with deploy/scripts/docker-install-volume-deps.sh
+  # Inject single-source installer (deploy/scripts/docker-install-volume-deps.sh).
   cp "${REPO_ROOT}/deploy/scripts/docker-install-volume-deps.sh" "${ctx}/docker-install-volume-deps.sh"
   chmod +x "${ctx}/docker-install-volume-deps.sh"
 }
@@ -735,8 +735,8 @@ build_component_image() {
   cp -a "${PACKAGE_DIR}/${pkg_dir}" "${ctx}/package/${pkg_basename}"
   overlay_local_bins_for_component "${name}" "${ctx}" "${pkg_basename}"
   if [[ "${name}" == "cubelet" ]]; then
-    # Keep in sync with deploy/scripts/docker-install-volume-deps.sh
-    cp "${SCRIPT_DIR}/cubelet/docker-install-volume-deps.sh" "${ctx}/docker-install-volume-deps.sh"
+    # Inject single-source installer (deploy/scripts/docker-install-volume-deps.sh).
+    cp "${REPO_ROOT}/deploy/scripts/docker-install-volume-deps.sh" "${ctx}/docker-install-volume-deps.sh"
     chmod +x "${ctx}/docker-install-volume-deps.sh"
   fi
   build_image "${name}" "${ctx}" \

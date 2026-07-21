@@ -58,7 +58,9 @@ RUN apt-get update \
     && echo "Asia/Shanghai" > /etc/timezone \
     && update-ca-certificates
 
-# Volume plugin host tools (cosfs / coscmd / jq) for containerized CubeMaster.
+# Volume plugin host tools (cosfs / coscmd / jq). Script is injected into this
+# package directory by build-release-bundle.sh from
+# deploy/scripts/docker-install-volume-deps.sh (single source; not checked in here).
 COPY docker-install-volume-deps.sh /tmp/docker-install-volume-deps.sh
 RUN chmod +x /tmp/docker-install-volume-deps.sh \
     && /tmp/docker-install-volume-deps.sh \
