@@ -114,8 +114,10 @@ async def _content_encoding_proxy(monkeypatch, dev_sidecar):
             accepted_encodings=accepted_encodings,
         )
     finally:
-        await sidecar_runner.cleanup()
-        await upstream_runner.cleanup()
+        try:
+            await sidecar_runner.cleanup()
+        finally:
+            await upstream_runner.cleanup()
 
 
 @pytest.mark.asyncio
@@ -270,6 +272,7 @@ async def test_http_proxy_allows_downstream_client_to_decode_once(
     dev_sidecar,
 ):
     async with _content_encoding_proxy(monkeypatch, dev_sidecar) as proxy:
+        # Keep this local request independent of host proxy environment variables.
         async with httpx.AsyncClient(trust_env=False) as client:
             response = await client.get(
                 proxy.proxy_url,
