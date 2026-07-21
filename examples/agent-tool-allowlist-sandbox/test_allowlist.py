@@ -28,7 +28,9 @@ class AllowlistTests(unittest.TestCase):
 
     def test_path_style_binary_rejected(self) -> None:
         self.assertFalse(is_allowlisted("/bin/bash -c id"))
-        self.assertFalse(is_allowlisted("C:\\Windows\\System32\\cmd.exe"))
+        # Single quotes preserve backslashes through POSIX shlex parsing, so
+        # this exercises the explicit Windows path-separator rejection branch.
+        self.assertFalse(is_allowlisted(r"'C:\Windows\System32\cmd.exe'"))
         with self.assertRaises(AllowlistDenied):
             assert_allowlisted("/usr/bin/python3 -c 'print(1)'")
 
