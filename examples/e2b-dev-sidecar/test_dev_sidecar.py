@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import importlib
 import json
 import os
@@ -8,7 +9,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from aiohttp import ClientSession, WSMsgType, web
+from aiohttp import ClientSession, WSMsgType, hdrs, web
 from packaging.version import Version
 
 from e2b import ConnectionConfig
@@ -184,6 +185,63 @@ async def test_http_proxy_forwards_path_query_body_and_host(monkeypatch, dev_sid
             "path_qs": "/api/v1/run?hello=1",
             "body": "payload",
         }
+    finally:
+        await sidecar_runner.cleanup()
+        await upstream_runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_http_proxy_preserves_content_encoded_response(monkeypatch, dev_sidecar):
+    payload = b"compressed sandbox response"
+    encoded_payload = gzip.compress(payload, mtime=0)
+    etag = '"encoded-representation"'
+    accepted_encodings: list[str | None] = []
+
+    async def upstream_handler(request: web.Request) -> web.Response:
+        accepted_encoding = request.headers.get(hdrs.ACCEPT_ENCODING)
+        accepted_encodings.append(accepted_encoding)
+        if accepted_encoding is None:
+            return web.Response(body=payload)
+        return web.Response(
+            body=encoded_payload,
+            headers={hdrs.CONTENT_ENCODING: "gzip", hdrs.ETAG: etag},
+        )
+
+    upstream = web.Application()
+    upstream.router.add_get("/{tail:.*}", upstream_handler)
+    upstream_runner, upstream_url = await _start_web_app(upstream)
+
+    monkeypatch.setenv("CUBE_REMOTE_PROXY_BASE", upstream_url)
+    monkeypatch.setenv("CUBE_REMOTE_SANDBOX_DOMAIN", "cube.app")
+    sidecar_runner, sidecar_url = await _start_web_app(dev_sidecar.build_app())
+    proxy_url = f"{sidecar_url}/sandboxes/router/sbx-1/49983/files"
+
+    try:
+        async with ClientSession(auto_decompress=False) as session:
+            async with session.get(
+                proxy_url,
+                headers={hdrs.ACCEPT_ENCODING: "gzip"},
+            ) as response:
+                assert response.status == 200
+                assert response.headers[hdrs.CONTENT_ENCODING] == "gzip"
+                assert response.headers[hdrs.ETAG] == etag
+                assert await response.read() == encoded_payload
+
+        async with httpx.AsyncClient(trust_env=False) as client:
+            response = await client.get(proxy_url)
+
+        assert response.content == payload
+
+        async with ClientSession(
+            skip_auto_headers={hdrs.ACCEPT_ENCODING},
+        ) as session:
+            async with session.get(proxy_url) as response:
+                assert hdrs.CONTENT_ENCODING not in response.headers
+                assert await response.read() == payload
+
+        assert accepted_encodings[0] == "gzip"
+        assert "gzip" in (accepted_encodings[1] or "")
+        assert accepted_encodings[2] is None
     finally:
         await sidecar_runner.cleanup()
         await upstream_runner.cleanup()

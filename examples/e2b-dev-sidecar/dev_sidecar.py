@@ -284,7 +284,13 @@ async def on_startup(app: web.Application) -> None:
     config = app[CONFIG_KEY]
     connector = TCPConnector(ssl=config["verify_ssl"])
     timeout = ClientTimeout(total=None, connect=30, sock_read=None)
-    app[SESSION_KEY] = ClientSession(connector=connector, timeout=timeout)
+    # Preserve coded response bytes and the downstream client's encoding negotiation.
+    app[SESSION_KEY] = ClientSession(
+        connector=connector,
+        timeout=timeout,
+        auto_decompress=False,
+        skip_auto_headers={hdrs.ACCEPT_ENCODING},
+    )
 
 
 async def on_cleanup(app: web.Application) -> None:
