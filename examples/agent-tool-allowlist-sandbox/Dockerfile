@@ -6,6 +6,9 @@
 #   - ENV TOOL_ALLOWLIST_SANDBOX=1
 #   - /etc/cube-sandbox/tool-allowlist.txt (demo allowlist file)
 #
+# The allowlist file body must stay aligned with allowlist.DEFAULT_ALLOWED_BINARIES.
+# Check with: python verify_local.py
+#
 # Build (from this directory):
 #   docker build -t agent-tool-allowlist-sandbox:latest .
 #
@@ -28,18 +31,19 @@ ENV TOOL_ALLOWLIST_SANDBOX=1
 
 # Demo allowlist file inside the guest (informational; host-side gate remains
 # the enforcement point for this example — see README Limitations).
+# Names are sorted to match allowlist_sync.allowlist_file_body().
 RUN mkdir -p /etc/cube-sandbox \
     && printf '%s\n' \
         '# Agent tool argv allowlist (demo; host gate is authoritative)' \
-        'echo' \
-        'uname' \
-        'pwd' \
-        'ls' \
         'cat' \
+        'echo' \
         'head' \
-        'wc' \
-        'sha256sum' \
+        'ls' \
+        'pwd' \
         'python3' \
+        'sha256sum' \
+        'uname' \
+        'wc' \
     > /etc/cube-sandbox/tool-allowlist.txt
 
 # Ports inherited from sandbox-code / quickstart convention.
