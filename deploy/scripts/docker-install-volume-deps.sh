@@ -67,8 +67,10 @@ install_cosfs() {
   tag="$(detect_ubuntu_cosfs_tag)"
   url="${COSFS_BASE_URL}/cosfs_1.0.25-${tag}_amd64.deb"
   log "install cosfs (${tag}) from ${url}"
+  # cosfs Ubuntu debs link libcurl-gnutls / libxml2; the .deb Depends are thin,
+  # so install runtime libs explicitly (libcurl3-gnutls → libcurl3t64-gnutls on 24.04).
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    fuse ca-certificates curl
+    fuse ca-certificates curl libcurl3-gnutls libxml2
   tmp="$(mktemp -d)"
   deb="${tmp}/cosfs.deb"
   curl -fsSL "$url" -o "$deb"
