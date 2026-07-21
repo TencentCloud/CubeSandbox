@@ -399,7 +399,7 @@ Typical Big Pod recreate triggers: bump `images.cubelet` and other runtime image
 By design. Uninstall only deletes Chart-managed objects. Common leftovers on compute nodes:
 
 ```bash
-sudo rm -rf /data/cubelet /data/cube-shim /data/snapshot_pack \
+sudo rm -rf /data/cubelet /data/cube-shim /data/cube-shared /data/snapshot_pack \
   /data/log/Cubelet /data/log/CubeShim /data/log/CubeVmm \
   /usr/local/services/cubetoolbox /var/lib/cube-node-bootstrap /tmp/cube \
   /data/cubelet-xfs.img

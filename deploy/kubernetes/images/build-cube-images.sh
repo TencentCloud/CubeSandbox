@@ -737,6 +737,14 @@ build_component_image() {
     # Inject single-source installer (deploy/scripts/docker-install-volume-deps.sh).
     cp "${REPO_ROOT}/deploy/scripts/docker-install-volume-deps.sh" "${ctx}/docker-install-volume-deps.sh"
     chmod +x "${ctx}/docker-install-volume-deps.sh"
+    # Prefer in-tree Cubelet config so image builds pick up worktree defaults
+    # (e.g. volume_plugin_base_dir) instead of only the release package snapshot.
+    if [[ -f "${REPO_ROOT}/Cubelet/config/config.toml" ]]; then
+      mkdir -p "${ctx}/package/${pkg_basename}/config"
+      cp "${REPO_ROOT}/Cubelet/config/config.toml" \
+        "${ctx}/package/${pkg_basename}/config/config.toml"
+      log "overlay Cubelet config.toml from worktree"
+    fi
   fi
   build_image "${name}" "${ctx}" \
     --build-arg "CUBE_VERSION=${IMAGE_TAG}" \

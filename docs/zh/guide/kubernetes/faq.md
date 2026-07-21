@@ -399,7 +399,7 @@ kubectl -n cube-system logs <cube-node-pod> -c cube-egress-net --tail=100
 设计如此。卸载只删 Chart 管理的对象。计算节点上常见残留：
 
 ```bash
-sudo rm -rf /data/cubelet /data/cube-shim /data/snapshot_pack \
+sudo rm -rf /data/cubelet /data/cube-shim /data/cube-shared /data/snapshot_pack \
   /data/log/Cubelet /data/log/CubeShim /data/log/CubeVmm \
   /usr/local/services/cubetoolbox /var/lib/cube-node-bootstrap /tmp/cube \
   /data/cubelet-xfs.img

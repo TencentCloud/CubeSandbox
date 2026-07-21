@@ -228,7 +228,7 @@ flowchart LR
 
 - `refCount == 0`：**本 node 首次挂载** — 执行后端挂载。
 - `refCount > 0`：**本 node 已有沙箱引用该 Volume** — 返回已有 `hostPath`（及 `metadata`），不要再次挂载。
-- **`hostPath`：** 位于 `volumeBaseDir` 下的绝对路径（推荐 `<volumeBaseDir>/<插件名>-<volumeID>`）。否则 Cubelet 拒绝 attach、回滚并导致沙箱创建失败。默认 `volumeBaseDir`：`/data/volume`。
+- **`hostPath`：** 位于 `volumeBaseDir` 下的绝对路径（推荐 `<volumeBaseDir>/<插件名>-<volumeID>`）。否则 Cubelet 拒绝 attach、回滚并导致沙箱创建失败。默认 `volumeBaseDir`：`/data/cube-shared/volume`。
 
 **binary 示例**
 
@@ -238,7 +238,7 @@ flowchart LR
 /path/to/my-plugin --op attach \
   --sandbox-id sb-001 --namespace default \
   --volume-id my-vol --ref-count 0 \
-  --volume-base-dir /data/volume
+  --volume-base-dir /data/cube-shared/volume
 # Create 返回非空 private_data 时可选附加：
 #   --private-data 'volumes/my-vol/'
 ```
@@ -246,7 +246,7 @@ flowchart LR
 输出（stdout JSON，exit 0）：
 
 ```json
-{"host_path":"/data/volume/my-storage-my-vol","metadata":{"mount_dir":"/data/volume/my-storage-my-vol"},"error":""}
+{"host_path":"/data/cube-shared/volume/my-storage-my-vol","metadata":{"mount_dir":"/data/cube-shared/volume/my-storage-my-vol"},"error":""}
 ```
 
 #### Detach
@@ -271,7 +271,7 @@ flowchart LR
 /path/to/my-plugin --op detach \
   --sandbox-id sb-001 --namespace default \
   --volume-id my-vol --ref-count 0 \
-  --metadata '{"mount_dir":"/data/volume/my-storage-my-vol"}'
+  --metadata '{"mount_dir":"/data/cube-shared/volume/my-storage-my-vol"}'
 ```
 
 输出（stdout JSON，exit 0）：
@@ -509,7 +509,7 @@ volume_plugins:
 
 **`driver` 名须全链路一致：** `Volume.create(..., driver=...)`（省略则取列表第一项）→ 写入 DB → annotation → Cubelet 按同名路由。CubeMaster 与 Cubelet 的 **`volume_plugins[].name` 必须一致**。
 
-**`volume_plugin_base_dir`：** 所有插件返回的 `host_path` **必须**落在该目录内（未配置时默认 `/data/volume`）。Cubelet 经 `volumeBaseDir`（rpc）/ `--volume-base-dir`（binary）传给插件；`host_path` 越界则 attach 被拒绝并回滚。
+**`volume_plugin_base_dir`：** 所有插件返回的 `host_path` **必须**落在该目录内（未配置时默认 `/data/cube-shared/volume`）。Cubelet 经 `volumeBaseDir`（rpc）/ `--volume-base-dir`（binary）传给插件；`host_path` 越界则 attach 被拒绝并回滚。
 
 **`name` 必须唯一**：同一进程内不能有两条相同 `name` 的 `volume_plugins`。列表顺序决定省略 `driver` 时的默认插件。
 
@@ -594,7 +594,7 @@ nsenter -t "$CPID" -m -- mount | grep -E 'volume|fuse'
 /path/to/my-plugin \
   --op attach --sandbox-id sb-001 --namespace default \
   --volume-id test-vol --ref-count 0 \
-  --volume-base-dir /data/volume
+  --volume-base-dir /data/cube-shared/volume
 ```
 
 COS 插件的手动测试命令见 [`examples/volume/cos/README.zh.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.zh.md)。

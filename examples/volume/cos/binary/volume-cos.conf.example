@@ -15,5 +15,5 @@ BUCKET=mybucket-1250000000
 REGION=ap-guangzhou
 
 # FUSE mount base: Cubelet passes --volume-base-dir on attach
-# (volume_plugin_base_dir, default /data/volume). host_path must be under it,
-# e.g. /data/volume/cos-<volume_id>.
+# (volume_plugin_base_dir, default /data/cube-shared/volume). host_path must be under it,
+# e.g. /data/cube-shared/volume/cos-<volume_id>.

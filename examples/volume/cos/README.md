@@ -163,7 +163,7 @@ Required fields in `volume-cos.conf`:
 | `BUCKET` | `BucketName-APPID` | `mybucket-1250000000` |
 | `REGION` | Region | `ap-guangzhou` |
 
-Mount base directory is **not** in this file — Cubelet passes it on attach (default `/data/volume`; see [§4](#4-configure-cubelet)).
+Mount base directory is **not** in this file — Cubelet passes it on attach (default `/data/cube-shared/volume`; see [§4](#4-configure-cubelet)).
 
 ---
 
@@ -191,11 +191,11 @@ Save and restart together with Cubelet ([§5](#5-restart-services-and-verify)).
 
 Edit Cubelet config (common path: `/usr/local/services/cubetoolbox/Cubelet/config/config.toml`).
 
-Under `[plugins."io.cubelet.internal.v1.storage"]`, confirm mount parent (optional; default `/data/volume`):
+Under `[plugins."io.cubelet.internal.v1.storage"]`, confirm mount parent (optional; default `/data/cube-shared/volume`):
 
 ```toml
 [plugins."io.cubelet.internal.v1.storage"]
-  volume_plugin_base_dir = "/data/volume"
+  volume_plugin_base_dir = "/data/cube-shared/volume"
 ```
 
 Add the **Node** plugin (Attach / Detach):
@@ -208,7 +208,7 @@ Add the **Node** plugin (Attach / Detach):
 ```
 
 **`name` must match CubeMaster** (both `cos` here).  
-Plugin `host_path` must be under `volume_plugin_base_dir` (example script uses `/data/volume/cos-<volumeID>`).
+Plugin `host_path` must be under `volume_plugin_base_dir` (example script uses `/data/cube-shared/volume/cos-<volumeID>`).
 
 ---
 
@@ -246,8 +246,8 @@ Expected (binary example):
   --namespace default \
   --volume-id test-vol \
   --ref-count 0 \
-  --volume-base-dir /data/volume
-# Success: one JSON line on stdout with "host_path":"/data/volume/cos-test-vol", "error":""
+  --volume-base-dir /data/cube-shared/volume
+# Success: one JSON line on stdout with "host_path":"/data/cube-shared/volume/cos-test-vol", "error":""
 ```
 
 ---
@@ -373,7 +373,7 @@ More: [Framework §8 Troubleshooting](../../docs/guide/volume-plugin.md#8-debugg
 <bucket>/volumes/<volumeID>/   ← one directory per Volume
 ```
 
-Attach mounts cosfs to `/data/volume/cos-<volumeID>/` on the host, then virtiofs into the sandbox.
+Attach mounts cosfs to `/data/cube-shared/volume/cos-<volumeID>/` on the host, then virtiofs into the sandbox.
 
 ### Hook behavior (RefCount)
 

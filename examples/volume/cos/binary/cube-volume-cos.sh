@@ -26,7 +26,7 @@
 #   REGION=ap-guangzhou
 #
 # The FUSE mount path is not configured here: Cubelet passes it on attach via
-# --volume-base-dir (default /data/volume) and the plugin mounts at
+# --volume-base-dir (default /data/cube-shared/volume) and the plugin mounts at
 # <volume-base-dir>/cos-<volume_id>.
 #
 # chmod 600 <plugin-dir>/volume-cos.conf
@@ -46,7 +46,7 @@
 # Mount layout (one cosfs process per volume):
 #   <volume-base-dir>/cos-<volume_id>/  →  BUCKET:/volumes/<volume_id>/
 #   where <volume-base-dir> is passed by Cubelet via --volume-base-dir
-#   (default /data/volume). host_path MUST live inside it.
+#   (default /data/cube-shared/volume). host_path MUST live inside it.
 #
 # Locking: per-volume flock on /run/cube-volume-cos/<volume_id>.lock
 # ensures concurrent attach/detach for the same volume is serialised.
@@ -64,9 +64,9 @@ LOCK_DIR="/run/cube-volume-cos"
 PASSWD_FILE="/etc/cube/.passwd-cosfs"
 
 # Parent directory Cubelet requires cosfs mounts to live under.
-# Cubelet passes --volume-base-dir on attach (default /data/volume).
+# Cubelet passes --volume-base-dir on attach (default /data/cube-shared/volume).
 # Each volume gets its own subdir: <volume-base-dir>/cos-<volume_id>.
-VOLUME_BASE_DIR="/data/volume"
+VOLUME_BASE_DIR="/data/cube-shared/volume"
 
 # Read SECRET_ID, SECRET_KEY, BUCKET, REGION from the config file.
 load_config() {

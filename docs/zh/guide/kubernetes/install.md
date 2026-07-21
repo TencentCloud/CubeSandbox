@@ -271,7 +271,7 @@ kubectl delete namespace cube-system
 卸载**不会**自动清理：
 
 - 节点上的 Cube 标签 / 角色污点
-- 计算节点 hostPath 数据（如 `/data/cubelet`、`/usr/local/services/cubetoolbox` 等）
+- 计算节点 hostPath 数据（如 `/data/cubelet`、`/data/cube-shared`、`/usr/local/services/cubetoolbox` 等）
 - PVM 宿主机内核改动（需按平台 runbook 回滚）
 - 外部 MySQL / Redis、DNS / LB 记录
 

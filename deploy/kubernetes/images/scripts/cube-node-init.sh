@@ -338,6 +338,8 @@ if [ "$CREATE_HOST_DIRS" = "true" ]; then
     "$(host_path /data/log)" \
     "$(host_path /data/cube-shim)" \
     "$(host_path /data/snapshot_pack)" \
+    "$(host_path /data/cube-shared)" \
+    "$(host_path /data/cube-shared/volume)" \
     "$(host_path /tmp/cube)"
 fi
 

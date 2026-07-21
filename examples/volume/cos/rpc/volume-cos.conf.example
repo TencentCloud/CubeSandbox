@@ -7,7 +7,7 @@ BUCKET=mybucket-1250000000
 REGION=ap-guangzhou
 
 # FUSE mount base: Cubelet AttachRequest.volumeBaseDir
-# (volume_plugin_base_dir, default /data/volume/cos-<id>).
+# (volume_plugin_base_dir, default /data/cube-shared/volume/cos-<id>).
 # PASSWD_FILE=/etc/cube/.passwd-cosfs
 # Must match CubeMaster / Cubelet socket_path
 SOCKET=/run/cube-volume-cos-rpc.sock

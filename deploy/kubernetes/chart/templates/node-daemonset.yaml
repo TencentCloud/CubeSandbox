@@ -328,6 +328,10 @@ spec:
           hostPath:
             path: {{ .Values.hostPaths.dataSnapshotPack }}
             type: DirectoryOrCreate
+        - name: data-cube-shared
+          hostPath:
+            path: {{ .Values.hostPaths.dataCubeShared }}
+            type: DirectoryOrCreate
         - name: tmp-cube
           hostPath:
             path: {{ .Values.hostPaths.tmpCube }}

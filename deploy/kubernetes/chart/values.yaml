@@ -918,6 +918,10 @@ hostPaths:
   dataLog: /data/log
   dataCubeShim: /data/cube-shim
   dataSnapshotPack: /data/snapshot_pack
+  # Host tree shared across compute-node Cube components (same path in Big Pod).
+  # Current use: volume plugin base dir at <dataCubeShared>/volume; more shared
+  # subdirs may land here later.
+  dataCubeShared: /data/cube-shared
   tmpCube: /tmp/cube
   # pvm/node-init state + node-prep-ready / pvm-host-ready / effective-pvm
   # (shared by cube-node-pvm, bootstrap DS, and Big Pod wait-node-prep).

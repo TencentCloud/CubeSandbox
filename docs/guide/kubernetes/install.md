@@ -270,7 +270,7 @@ kubectl delete namespace cube-system
 Uninstall **does not** automatically clean up:
 
 - Cube labels / role taints on nodes
-- Compute-node hostPath data (e.g. `/data/cubelet`, `/usr/local/services/cubetoolbox`, etc.)
+- Compute-node hostPath data (e.g. `/data/cubelet`, `/data/cube-shared`, `/usr/local/services/cubetoolbox`, etc.)
 - PVM host kernel changes (roll back per platform runbook)
 - External MySQL / Redis, DNS / LB records
 

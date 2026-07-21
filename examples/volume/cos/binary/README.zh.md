@@ -102,7 +102,7 @@ SECRET_ID=AKIDxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 SECRET_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 BUCKET=mybucket-1250000000
 REGION=ap-guangzhou
-# 挂载路径由 Cubelet 的 --volume-base-dir 决定（默认 /data/volume/cos-<id>），无需在此配置。
+# 挂载路径由 Cubelet 的 --volume-base-dir 决定（默认 /data/cube-shared/volume/cos-<id>），无需在此配置。
 EOF
 sudo chmod 600 "$PREFIX/CubeMaster/plugin/volume-cos.conf"
 # Cubelet 节点同样编辑 $PREFIX/Cubelet/plugin/volume-cos.conf
@@ -117,7 +117,7 @@ sudo chmod 600 "$PREFIX/CubeMaster/plugin/volume-cos.conf"
 | `BUCKET` | COS bucket，格式 `BucketName-APPID` | `mybucket-1250000000` |
 | `REGION` | COS 地域 | `ap-guangzhou` |
 
-挂载路径由 Cubelet 在 attach 时传入 `--volume-base-dir`（配置项 `volume_plugin_base_dir`，默认 `/data/volume`），插件返回的 `host_path` 须在其下，例如 `/data/volume/cos-<id>`。
+挂载路径由 Cubelet 在 attach 时传入 `--volume-base-dir`（配置项 `volume_plugin_base_dir`，默认 `/data/cube-shared/volume`），插件返回的 `host_path` 须在其下，例如 `/data/cube-shared/volume/cos-<id>`。
 
 > **安全建议**：建议使用仅拥有该 bucket 读写权限的子账号密钥，避免使用主账号密钥。
 
@@ -288,7 +288,7 @@ do_destroy() {
 ```bash
 do_attach() {
     local sandbox_id="$1" volume_id="$2" ref_count="$3"
-    # VOLUME_BASE_DIR comes from --volume-base-dir (default /data/volume)
+    # VOLUME_BASE_DIR comes from --volume-base-dir (default /data/cube-shared/volume)
 
     load_config                          # Step 1: read COS credentials
     ensure_passwd_file                   # Step 2: write /etc/cube/.passwd-cosfs for cosfs
@@ -298,7 +298,7 @@ do_attach() {
 
     cosfs_mount_volume "$volume_id"      # Step 4: mount BUCKET:/volumes/<id> (skip if already up)
 
-    local mnt="$(volume_mountpoint "$volume_id")"   # e.g. /data/volume/cos-my-vol
+    local mnt="$(volume_mountpoint "$volume_id")"   # e.g. /data/cube-shared/volume/cos-my-vol
 
     # Step 5: return host_path; Cubelet bind-mounts it into the sandbox
     jq -cn --arg path "$mnt" --arg vid "$volume_id" \
@@ -358,13 +358,13 @@ ensure_passwd_file() {
   --namespace default \
   --volume-id my-vol \
   --ref-count 0 \
-  --volume-base-dir /data/volume
-# → {"host_path":"/data/volume/cos-my-vol","metadata":{...},"error":""}
+  --volume-base-dir /data/cube-shared/volume
+# → {"host_path":"/data/cube-shared/volume/cos-my-vol","metadata":{...},"error":""}
 
 # 验证挂载（在 Cubelet mntns 里）
 CPID=$(pgrep -f "cubelet --config" | head -1)
-nsenter -t $CPID -m -- mountpoint /data/volume/cos-my-vol
-# → /data/volume/cos-my-vol is a mountpoint
+nsenter -t $CPID -m -- mountpoint /data/cube-shared/volume/cos-my-vol
+# → /data/cube-shared/volume/cos-my-vol is a mountpoint
 ```
 
 ### 手动测试 detach
@@ -376,7 +376,7 @@ nsenter -t $CPID -m -- mountpoint /data/volume/cos-my-vol
   --namespace default \
   --volume-id my-vol \
   --ref-count 0 \
-  --metadata '{"mount_dir":"/data/volume/cos-my-vol"}'
+  --metadata '{"mount_dir":"/data/cube-shared/volume/cos-my-vol"}'
 # → {"error":""}
 ```
 

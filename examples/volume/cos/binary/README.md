@@ -104,7 +104,7 @@ SECRET_ID=AKIDxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 SECRET_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 BUCKET=mybucket-1250000000
 REGION=ap-guangzhou
-# Mount path comes from Cubelet --volume-base-dir (default /data/volume/cos-<id>).
+# Mount path comes from Cubelet --volume-base-dir (default /data/cube-shared/volume/cos-<id>).
 EOF
 sudo chmod 600 "$PREFIX/CubeMaster/plugin/volume-cos.conf"
 # On Cubelet node, edit $PREFIX/Cubelet/plugin/volume-cos.conf similarly
@@ -117,7 +117,7 @@ sudo chmod 600 "$PREFIX/CubeMaster/plugin/volume-cos.conf"
 | `BUCKET` | COS bucket `BucketName-APPID` | `mybucket-1250000000` |
 | `REGION` | Region | `ap-guangzhou` |
 
-Mount path is passed as `--volume-base-dir` (`volume_plugin_base_dir`, default `/data/volume`). `host_path` must be under it, e.g. `/data/volume/cos-<id>`.
+Mount path is passed as `--volume-base-dir` (`volume_plugin_base_dir`, default `/data/cube-shared/volume`). `host_path` must be under it, e.g. `/data/cube-shared/volume/cos-<id>`.
 
 > **Security:** Prefer a sub-account key with bucket read/write only.
 
@@ -350,10 +350,10 @@ ensure_passwd_file() {
   --namespace default \
   --volume-id my-vol \
   --ref-count 0 \
-  --volume-base-dir /data/volume
+  --volume-base-dir /data/cube-shared/volume
 
 CPID=$(pgrep -f "cubelet --config" | head -1)
-nsenter -t $CPID -m -- mountpoint /data/volume/cos-my-vol
+nsenter -t $CPID -m -- mountpoint /data/cube-shared/volume/cos-my-vol
 ```
 
 ### Manual detach
@@ -365,7 +365,7 @@ nsenter -t $CPID -m -- mountpoint /data/volume/cos-my-vol
   --namespace default \
   --volume-id my-vol \
   --ref-count 0 \
-  --metadata '{"mount_dir":"/data/volume/cos-my-vol"}'
+  --metadata '{"mount_dir":"/data/cube-shared/volume/cos-my-vol"}'
 ```
 
 ### Plugin logs

@@ -543,7 +543,7 @@ Prepare a separate host-kernel rollback runbook for production.
 
 - operator-provided node labels/taints;
 - external MySQL/Redis resources;
-- hostPath data such as `/data/CubeMaster/storage`, `/data/cubelet`, `/data/cube-shim`, `/data/snapshot_pack`, and logs;
+- hostPath data such as `/data/CubeMaster/storage`, `/data/cubelet`, `/data/cube-shim`, `/data/cube-shared`, `/data/snapshot_pack`, and logs;
 - host kernel, GRUB, udev, fstab, or XFS changes made by bootstrap containers;
 - external DNS or load balancer records.
 

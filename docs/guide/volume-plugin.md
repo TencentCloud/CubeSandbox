@@ -228,7 +228,7 @@ Output (stdout JSON, exit 0):
 
 - `refCount == 0`: **first attach on this node** — perform backend mount.
 - `refCount > 0`: **another sandbox on this node** already references the volume — return existing `hostPath` (+ `metadata`); do not mount again.
-- **`hostPath`:** absolute path under `volumeBaseDir` (recommended `<volumeBaseDir>/<plugin-name>-<volumeID>`). Otherwise Cubelet rejects attach, rolls back, and fails sandbox create. Default `volumeBaseDir`: `/data/volume`.
+- **`hostPath`:** absolute path under `volumeBaseDir` (recommended `<volumeBaseDir>/<plugin-name>-<volumeID>`). Otherwise Cubelet rejects attach, rolls back, and fails sandbox create. Default `volumeBaseDir`: `/data/cube-shared/volume`.
 
 **binary example**
 
@@ -238,7 +238,7 @@ Input (CLI):
 /path/to/my-plugin --op attach \
   --sandbox-id sb-001 --namespace default \
   --volume-id my-vol --ref-count 0 \
-  --volume-base-dir /data/volume
+  --volume-base-dir /data/cube-shared/volume
 # optional when Create returned non-empty private_data:
 #   --private-data 'volumes/my-vol/'
 ```
@@ -246,7 +246,7 @@ Input (CLI):
 Output (stdout JSON, exit 0):
 
 ```json
-{"host_path":"/data/volume/my-storage-my-vol","metadata":{"mount_dir":"/data/volume/my-storage-my-vol"},"error":""}
+{"host_path":"/data/cube-shared/volume/my-storage-my-vol","metadata":{"mount_dir":"/data/cube-shared/volume/my-storage-my-vol"},"error":""}
 ```
 
 #### Detach
@@ -271,7 +271,7 @@ Input (CLI):
 /path/to/my-plugin --op detach \
   --sandbox-id sb-001 --namespace default \
   --volume-id my-vol --ref-count 0 \
-  --metadata '{"mount_dir":"/data/volume/my-storage-my-vol"}'
+  --metadata '{"mount_dir":"/data/cube-shared/volume/my-storage-my-vol"}'
 ```
 
 Output (stdout JSON, exit 0):
@@ -511,7 +511,7 @@ volume_plugins:
 
 **`driver` name must be consistent end-to-end:** `Volume.create(..., driver=...)` (or first list entry when omitted) → DB → annotations → Cubelet routes by the same `name`. CubeMaster and Cubelet **`volume_plugins[].name` must match**.
 
-**`volume_plugin_base_dir`:** every plugin `host_path` **must** be under this directory (default `/data/volume` when unset). Cubelet passes it to plugins as `volumeBaseDir` (rpc) / `--volume-base-dir` (binary) and rejects attach if `host_path` is outside it.
+**`volume_plugin_base_dir`:** every plugin `host_path` **must** be under this directory (default `/data/cube-shared/volume` when unset). Cubelet passes it to plugins as `volumeBaseDir` (rpc) / `--volume-base-dir` (binary) and rejects attach if `host_path` is outside it.
 
 **`name` must be unique** within each process: no two `volume_plugins` entries with the same `name`. List order sets the default plugin when API/SDK omits `driver`.
 
@@ -596,7 +596,7 @@ Replace `/path/to/my-plugin` and `my-storage` with your plugin binary and config
 /path/to/my-plugin \
   --op attach --sandbox-id sb-001 --namespace default \
   --volume-id test-vol --ref-count 0 \
-  --volume-base-dir /data/volume
+  --volume-base-dir /data/cube-shared/volume
 ```
 
 For COS-specific manual tests, see [`examples/volume/cos/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.md).

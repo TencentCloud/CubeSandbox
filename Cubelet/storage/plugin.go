@@ -44,7 +44,7 @@ const cowBackendReflink = "reflink"
 // defaultVolumePluginBaseDir is the fallback parent directory that
 // plugin_volume Attach must mount volumes under when Config.VolumePluginBaseDir
 // is not set in TOML.
-const defaultVolumePluginBaseDir = "/data/volume"
+const defaultVolumePluginBaseDir = "/data/cube-shared/volume"
 
 // reflinkExt4InitCommands lists the external commands the **cubelet
 // upper layers** need when they initialise an ext4 default-medium
@@ -118,7 +118,7 @@ type Config struct {
 	// Attach must mount its volume under. Cubelet passes this path to the
 	// plugin (AttachRequest.VolumeBaseDir / --volume-base-dir) and rejects any
 	// attach whose returned host_path is not located inside it. Defaults to
-	// defaultVolumePluginBaseDir ("/data/volume") when empty.
+	// defaultVolumePluginBaseDir ("/data/cube-shared/volume") when empty.
 	VolumePluginBaseDir string `toml:"volume_plugin_base_dir"`
 }
 

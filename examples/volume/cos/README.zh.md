@@ -161,7 +161,7 @@ sudo install -m 0600 examples/volume/cos/volume-cos.conf.example \
 | `BUCKET` | `BucketName-APPID` | `mybucket-1250000000` |
 | `REGION` | 地域 | `ap-guangzhou` |
 
-挂载基目录**不在此文件配置**——由 Cubelet 在 attach 时传入（默认 `/data/volume`，见 [§4](#4-配置-cubelet)）。
+挂载基目录**不在此文件配置**——由 Cubelet 在 attach 时传入（默认 `/data/cube-shared/volume`，见 [§4](#4-配置-cubelet)）。
 
 ---
 
@@ -189,11 +189,11 @@ volume_plugins:
 
 编辑 Cubelet 配置（常见路径：`/usr/local/services/cubetoolbox/Cubelet/config/config.toml`）。
 
-在 `[plugins."io.cubelet.internal.v1.storage"]` 段中确认挂载父目录（可选，默认已是 `/data/volume`）：
+在 `[plugins."io.cubelet.internal.v1.storage"]` 段中确认挂载父目录（可选，默认已是 `/data/cube-shared/volume`）：
 
 ```toml
 [plugins."io.cubelet.internal.v1.storage"]
-  volume_plugin_base_dir = "/data/volume"
+  volume_plugin_base_dir = "/data/cube-shared/volume"
 ```
 
 在同一段下增加 **Node** 侧插件（Attach / Detach）：
@@ -206,7 +206,7 @@ volume_plugins:
 ```
 
 **两侧 `name` 必须与 CubeMaster 一致**（此处均为 `cos`）。  
-插件返回的 `host_path` 必须是 `volume_plugin_base_dir` 下的子路径（示例脚本挂载为 `/data/volume/cos-<volumeID>`）。
+插件返回的 `host_path` 必须是 `volume_plugin_base_dir` 下的子路径（示例脚本挂载为 `/data/cube-shared/volume/cos-<volumeID>`）。
 
 ---
 
@@ -245,8 +245,8 @@ grep -aF '[plugin_volume] initialized' /data/log/Cubelet/Cubelet-req.log | tail 
   --namespace default \
   --volume-id test-vol \
   --ref-count 0 \
-  --volume-base-dir /data/volume
-# 成功时 stdout 一行 JSON，含 "host_path":"/data/volume/cos-test-vol", "error":""
+  --volume-base-dir /data/cube-shared/volume
+# 成功时 stdout 一行 JSON，含 "host_path":"/data/cube-shared/volume/cos-test-vol", "error":""
 ```
 
 ---
@@ -372,7 +372,7 @@ python3 verify_volume.py
 <bucket>/volumes/<volumeID>/   ← 每个 Volume 一个目录
 ```
 
-Attach 时 cosfs 挂到宿主机 `/data/volume/cos-<volumeID>/`，再经 virtiofs 进沙箱。
+Attach 时 cosfs 挂到宿主机 `/data/cube-shared/volume/cos-<volumeID>/`，再经 virtiofs 进沙箱。
 
 ### Hook 行为（RefCount）
 
