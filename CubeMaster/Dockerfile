@@ -19,10 +19,14 @@ WORKDIR /src
 
 COPY CubeMaster/go.mod CubeMaster/go.sum ./
 COPY cubelog/go.mod cubelog/go.sum /cubelog/
+COPY CubeDB/go.mod CubeDB/go.sum /CubeDB/
+COPY Cubelet/go.mod Cubelet/go.sum /Cubelet/
 RUN go mod download
 
 COPY CubeMaster/ ./
 COPY cubelog/ /cubelog/
+COPY CubeDB/ /CubeDB/
+COPY Cubelet/ /Cubelet/
 
 ENV CGO_ENABLED=0
 RUN set -eux; \
@@ -71,6 +75,13 @@ RUN apt-get update \
     && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
     && echo "Asia/Shanghai" > /etc/timezone \
     && update-ca-certificates
+
+# Volume plugin host tools (cosfs / coscmd / jq) for containerized CubeMaster.
+# Build context is the repository root (see header comment).
+COPY deploy/scripts/docker-install-volume-deps.sh /tmp/docker-install-volume-deps.sh
+RUN chmod +x /tmp/docker-install-volume-deps.sh \
+    && /tmp/docker-install-volume-deps.sh \
+    && rm -f /tmp/docker-install-volume-deps.sh
 
 COPY --from=builder --chmod=0755 /out/cubemaster /usr/local/services/cubemaster/cubemaster
 

@@ -15,6 +15,7 @@ on:
       - 'deploy/one-click/tests/**'
       - 'deploy/one-click/CubeAPI/**'
       - 'deploy/one-click/CubeMaster/**'
+      - 'deploy/scripts/docker-install-volume-deps.sh'
       - 'deploy/one-click/webui/**'
       - 'deploy/one-click/cubeproxy/**'
       - 'CubeProxy/Dockerfile'

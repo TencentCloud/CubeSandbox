@@ -8,7 +8,7 @@ from typing import Any, Dict
 
 import requests
 
-from ._config import Config
+from ._config import Config, _auth_headers
 from ._exceptions import ApiError, AuthenticationError, TemplateNotFoundError
 from ._policy import _validate_allow_out_domains_require_deny_all
 
@@ -160,7 +160,7 @@ class Template:
         """
         cfg = config or Config()
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/templates")
+        resp = s.get(f"{cfg.api_url}/templates", headers=_auth_headers(cfg))
         _check_response(resp)
         data = resp.json() or []
         if isinstance(data, dict):
@@ -200,7 +200,8 @@ class Template:
         if next_token is not None:
             params["nextToken"] = next_token
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/templates/{template_id}", params=params)
+        resp = s.get(f"{cfg.api_url}/templates/{template_id}", params=params,
+                     headers=_auth_headers(cfg))
         _check_response(resp)
         return TemplateInfo.from_dict(resp.json())
 
@@ -210,7 +211,7 @@ class Template:
         cls,
         *,
         template_id: str | None = None,  # Deprecated: server always auto-generates template IDs with "tpl-" prefix.
-        name: str | None = None,  # Deprecated alias for template_id.
+        name: str | None = None,  # E2B template name → forwarded as stable alias.
         image: str | None = None,
         dockerfile: str | None = None,
         start_cmd: str | None = None,
@@ -232,6 +233,7 @@ class Template:
         dns: list[str] | None = None,
         allow_out: list[str] | None = None,
         deny_out: list[str] | None = None,
+        enable_ivshmem: bool | None = None,
         config: Config | None = None,
         **kwargs: Any,
     ) -> TemplateBuild:
@@ -245,7 +247,9 @@ class Template:
             template_id: Template ID. Deprecated: the server always auto-generates template IDs
                 with the "tpl-" prefix. This parameter is accepted for backward compatibility
                 but its value is ignored.
-            name: Deprecated alias for ``template_id``.
+            name: E2B-compatible template name. Forwarded as ``"name"`` in the request body;
+                CubeAPI derives a stable alias from it so sandboxes can reference the template
+                by this name instead of the auto-generated ``tpl-*`` ID.
             image: Base container image URI (e.g. ``"python:3.11-slim"``).
             dockerfile: Not supported by CubeAPI's current template endpoint.
             start_cmd: Not supported by CubeAPI's current template endpoint.
@@ -267,6 +271,7 @@ class Template:
             dns: Container DNS nameservers.
             allow_out: Allowed outbound CIDRs for CubeVS egress policy.
             deny_out: Denied outbound CIDRs for CubeVS egress policy.
+            enable_ivshmem: Whether the template build sandbox should boot with ivshmem enabled.
             config: SDK config.  Uses default (env-based) config if omitted.
             **kwargs: Extra fields forwarded verbatim to the request body.
 
@@ -291,6 +296,8 @@ class Template:
 
         cfg = config or Config()
         payload: dict = {"image": image.strip()}
+        if name is not None:
+            payload["name"] = name
         if instance_type is not None:
             payload["instanceType"] = instance_type
         if writable_layer_size is not None:
@@ -327,13 +334,15 @@ class Template:
             payload["allowOut"] = allow_out
         if deny_out is not None:
             payload["denyOut"] = deny_out
+        if enable_ivshmem is not None:
+            payload["enableIvshmem"] = enable_ivshmem
         payload.update(kwargs)
 
         s = requests.Session()
         resp = s.post(
             f"{cfg.api_url}/templates",
             json=payload,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **_auth_headers(cfg)},
         )
         _check_response(resp)
         return TemplateBuild.from_dict(resp.json())
@@ -353,7 +362,7 @@ class Template:
         resp = s.post(
             f"{cfg.api_url}/templates/{template_id}",
             json=extra,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **_auth_headers(cfg)},
         )
         _check_response(resp)
         return TemplateBuild.from_dict(resp.json())
@@ -370,7 +379,8 @@ class Template:
         """GET /templates/:templateID/builds/:buildID/status."""
         cfg = config or Config()
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/templates/{template_id}/builds/{build_id}/status")
+        resp = s.get(f"{cfg.api_url}/templates/{template_id}/builds/{build_id}/status",
+                     headers=_auth_headers(cfg))
         _check_response(resp)
         return TemplateBuild.from_dict(resp.json())
 
@@ -386,7 +396,8 @@ class Template:
         """GET /templates/:templateID/builds/:buildID/logs."""
         cfg = config or Config()
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/templates/{template_id}/builds/{build_id}/logs")
+        resp = s.get(f"{cfg.api_url}/templates/{template_id}/builds/{build_id}/logs",
+                     headers=_auth_headers(cfg))
         _check_response(resp)
         return resp.json()
 
@@ -435,5 +446,5 @@ class Template:
         """
         cfg = config or Config()
         s = requests.Session()
-        resp = s.delete(f"{cfg.api_url}/templates/{template_id}")
+        resp = s.delete(f"{cfg.api_url}/templates/{template_id}", headers=_auth_headers(cfg))
         _check_response(resp)

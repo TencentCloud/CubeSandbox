@@ -7,6 +7,7 @@ syntax = "proto3";
 package cubelet.services.cubebox.v1;
 import "api/services/errorcode/v1/errorcode.proto";
 import "api/services/images/v1/images.proto";
+import "api/services/volumeplugin/v1/volumeplugin.proto";
 
 option go_package = "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1;cubebox";
 
@@ -503,6 +504,10 @@ message  VolumeSource {
   HostDirVolumeSources host_dir_volumes = 7;
   // image volume source for image volume mount
   cubelet.services.images.v1.ImageVolumeSource image = 9;
+  // plugin_volume delegates provisioning to a named external VolumePlugin
+  // (built-in, binary or RPC).  All other fields above are handled by the
+  // existing storage pipeline and are NOT routed through the plugin framework.
+  cubelet.services.volumeplugin.v1.PluginVolumeSource plugin_volume = 11;
 }
 
 // Volume represents a named volume in a pod that may be accessed by any container in the pod.

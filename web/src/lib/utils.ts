@@ -43,9 +43,12 @@ export function copyToClipboard(text: string, message = 'Copied'): void {
   };
 
   if (navigator.clipboard && window.isSecureContext) {
-    navigator.clipboard.writeText(text).then(() => dispatch(true)).catch(() => {
-      fallbackCopy(text, dispatch);
-    });
+    navigator.clipboard
+      .writeText(text)
+      .then(() => dispatch(true))
+      .catch(() => {
+        fallbackCopy(text, dispatch);
+      });
   } else {
     fallbackCopy(text, dispatch);
   }

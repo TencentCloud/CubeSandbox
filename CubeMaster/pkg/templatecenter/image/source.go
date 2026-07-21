@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/google/go-containerregistry/pkg/name"
@@ -24,7 +23,7 @@ func PrepareLocalSource(ctx context.Context, spec SourceSpec) (*PreparedSource, 
 	// Validate the reference up front so both the docker and dockerless branches
 	// enforce the same argument-injection guard before the ref is handed to
 	// external CLI subprocesses (docker / skopeo).
-	if err := validateImageRef(spec.ImageRef); err != nil {
+	if err := ValidateImageRef(spec.ImageRef); err != nil {
 		return nil, err
 	}
 	if nativeRootfsExportEnabled() {
@@ -73,7 +72,7 @@ func PrepareSource(ctx context.Context, spec SourceSpec) (*PreparedSource, error
 }
 
 func prepareNativeSource(ctx context.Context, spec SourceSpec) (*PreparedSource, error) {
-	if err := validateImageRef(spec.ImageRef); err != nil {
+	if err := ValidateImageRef(spec.ImageRef); err != nil {
 		return nil, err
 	}
 
@@ -157,7 +156,7 @@ func convertV1Config(cfg v1.Config) DockerImageConfig {
 }
 
 func prepareDockerlessSource(ctx context.Context, spec SourceSpec) (*PreparedSource, error) {
-	if err := validateImageRef(spec.ImageRef); err != nil {
+	if err := ValidateImageRef(spec.ImageRef); err != nil {
 		return nil, err
 	}
 	authFile, cleanup, err := createSkopeoAuthFile(spec.ImageRef, spec.RegistryUsername, spec.RegistryPassword)
@@ -211,7 +210,7 @@ func prepareDockerSource(ctx context.Context, spec SourceSpec) (*PreparedSource,
 	// Validate the reference up front so the docker prepare path enforces the
 	// same argument-injection guard as the dockerless path before the ref is
 	// handed to docker subprocesses.
-	if err := validateImageRef(spec.ImageRef); err != nil {
+	if err := ValidateImageRef(spec.ImageRef); err != nil {
 		return nil, err
 	}
 	if source, err := prepareDockerSourceWithEngine(ctx, spec); err == nil {
@@ -316,34 +315,6 @@ func dockerInspectToPreparedSource(spec SourceSpec, inspectInfo dockerInspectIma
 		},
 	}
 	return source, nil
-}
-
-// imageRefAllowedPattern is the strict character whitelist for image
-// references. It permits exactly the characters that appear in legitimate
-// registry/repository[:tag][@algo:hexdigest] references: alphanumerics and
-// `.`, `-`, `_`, `/`, `:`, `@`. Any other character (notably whitespace) is
-// rejected so the reference cannot be split into additional argv entries.
-var imageRefAllowedPattern = regexp.MustCompile(`^[A-Za-z0-9._:/@-]+$`)
-
-// validateImageRef guards against argument injection (CWE-88) when the image
-// reference is later passed as a positional argument to external CLIs
-// (skopeo/umoci/docker). Those tools accept flags interspersed with positional
-// arguments, so a ref such as `registry.example.com/image --authfile /etc/shadow`
-// would otherwise smuggle extra flags into the subprocess. To prevent this we
-// enforce a strict character whitelist (which excludes whitespace and other
-// argument delimiters) and reject any ref that begins with a dash.
-func validateImageRef(imageRef string) error {
-	trimmed := strings.TrimPrefix(imageRef, "docker://")
-	if trimmed == "" {
-		return errors.New("empty image reference")
-	}
-	if strings.HasPrefix(trimmed, "-") {
-		return fmt.Errorf("invalid image reference: %s", imageRef)
-	}
-	if !imageRefAllowedPattern.MatchString(trimmed) {
-		return fmt.Errorf("invalid image reference: %s", imageRef)
-	}
-	return nil
 }
 
 func createSkopeoAuthFile(imageRef, username, password string) (string, func(), error) {

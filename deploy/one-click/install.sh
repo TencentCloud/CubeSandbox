@@ -295,7 +295,11 @@ generate_cubemaster_config_ports() {
 
   local cfg="${PKG_ROOT}/CubeMaster/conf.yaml"
   local mysql_port="${CUBE_SANDBOX_MYSQL_PORT:-3306}"
+  local mysql_user="${CUBE_SANDBOX_MYSQL_USER:-cube}"
+  local mysql_password="${CUBE_SANDBOX_MYSQL_PASSWORD:-cube_pass}"
+  local mysql_db="${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}"
   local redis_port="${CUBE_SANDBOX_REDIS_PORT:-6379}"
+  local redis_password="${CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123}"
   # Decoupled from the TKE path: one-click decides CubeMaster's listen address
   # here. Defaults to 0.0.0.0 to stay reachable from compute nodes / host-net
   # cube-proxy; set CUBEMASTER_HTTP_BIND=127.0.0.1 to harden a lone node.
@@ -304,7 +308,11 @@ generate_cubemaster_config_ports() {
   ensure_file "${cfg}"
   sed -i \
     -e "s|__CUBE_SANDBOX_MYSQL_PORT__|${mysql_port}|g" \
+    -e "s|__CUBE_SANDBOX_MYSQL_USER__|$(escape_sed "${mysql_user}")|g" \
+    -e "s|__CUBE_SANDBOX_MYSQL_PASSWORD__|$(escape_sed "${mysql_password}")|g" \
+    -e "s|__CUBE_SANDBOX_MYSQL_DB__|$(escape_sed "${mysql_db}")|g" \
     -e "s|__CUBE_SANDBOX_REDIS_PORT__|${redis_port}|g" \
+    -e "s|__CUBE_SANDBOX_REDIS_PASSWORD__|$(escape_sed "${redis_password}")|g" \
     -e "s|__CUBEMASTER_HTTP_BIND__|$(escape_sed "${http_bind}")|g" \
     "${cfg}"
 }
@@ -1011,6 +1019,7 @@ assert_safe_install_prefix "${INSTALL_PREFIX}"
 rm -rf \
   "${INSTALL_PREFIX}/network-agent" \
   "${INSTALL_PREFIX}/CubeAPI" \
+  "${INSTALL_PREFIX}/CubeOps" \
   "${INSTALL_PREFIX}/CubeMaster" \
   "${INSTALL_PREFIX}/Cubelet" \
   "${INSTALL_PREFIX}/cubeproxy" \
@@ -1045,6 +1054,12 @@ fi
 
 select_installed_kernel_vmlinux
 
+prepare_volume_plugin_install \
+  "${INSTALL_PREFIX}" \
+  "${INSTALL_MODE}" \
+  "${UPGRADE_BACKUP_DIR}" \
+  "${DEPLOY_ROLE}"
+
 mkdir -p \
   "${INSTALL_PREFIX}/cube-vs/network" \
   "${INSTALL_PREFIX}/cube-snapshot" \
@@ -1052,11 +1067,13 @@ mkdir -p \
   /data/log/CubeShim \
   /data/log/CubeVmm \
   /data/cube-shim/disks \
-  /data/snapshot_pack/disks
+  /data/snapshot_pack/disks \
+  /data/volume
 
 if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
   mkdir -p \
     /data/log/CubeAPI \
+    /data/log/CubeOps \
     /data/log/CubeMaster \
     /data/log/cube-proxy
 fi
@@ -1194,6 +1211,7 @@ fi
 
 if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
   chmod +x "${INSTALL_PREFIX}/CubeAPI/bin/cube-api"
+  chmod +x "${INSTALL_PREFIX}/CubeOps/bin/cubeops"
   chmod +x "${INSTALL_PREFIX}/CubeMaster/bin/cubemaster" "${INSTALL_PREFIX}/CubeMaster/bin/cubemastercli"
 fi
 

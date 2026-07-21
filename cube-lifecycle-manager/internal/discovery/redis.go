@@ -20,12 +20,12 @@ import (
 // registration Hash + heartbeat Sorted Set from Redis and keeps an in-memory
 // map of live endpoints.
 type RedisDiscovery struct {
-	rdb       *redis.Client
-	log       *zap.Logger
-	ttl       time.Duration
-	refresh   time.Duration
-	onJoin    func(Endpoint)
-	onLeave   func(string)
+	rdb     *redis.Client
+	log     *zap.Logger
+	ttl     time.Duration
+	refresh time.Duration
+	onJoin  func(Endpoint)
+	onLeave func(string)
 
 	mu    sync.RWMutex
 	state map[string]*live

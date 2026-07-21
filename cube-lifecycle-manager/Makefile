@@ -64,6 +64,10 @@ manifest:
 		done; \
 	done
 
+.PHONY: fmt
+fmt:
+	$(Q)go fmt ./...
+
 .PHONY: test
 test:
 	$(Q)go test ./...

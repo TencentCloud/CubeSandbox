@@ -5,8 +5,11 @@
 package utils
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestResourceLock(t *testing.T) {
@@ -64,5 +67,29 @@ func TestResourceLocks(t *testing.T) {
 
 	if results[0]+results[1]+results[2] != n || locks.Len() != 0 {
 		t.Fatal("lock failed")
+	}
+}
+
+func TestResourceLockContextTimeoutDoesNotLeakWaiter(t *testing.T) {
+	locks := NewResourceLocks()
+	unlock := locks.Lock("sandbox")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	blockedUnlock, err := locks.LockContext(ctx, "sandbox")
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("LockContext error = %v, want deadline exceeded", err)
+	}
+	if blockedUnlock != nil {
+		t.Fatal("LockContext returned an unlock function after timing out")
+	}
+	if locks.Len() != 1 {
+		t.Fatalf("lock count = %d while holder remains, want 1", locks.Len())
+	}
+
+	unlock()
+	if locks.Len() != 0 {
+		t.Fatalf("lock count = %d after holder exits, want 0", locks.Len())
 	}
 }

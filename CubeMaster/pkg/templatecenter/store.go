@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
@@ -684,21 +685,31 @@ func refreshTemplateReplicaSummary(ctx context.Context, templateID string) error
 	return nil
 }
 
-func createDefinition(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string) error {
-	return createDefinitionTx(ctx, store.db.WithContext(ctx), templateID, storedReq, instanceType, version, definitionCreateOptions{})
-}
-
+// createDefinitionWithOptions wraps createDefinitionTx in a real DB transaction
+// so the INSERT is atomic. Alias claiming is NOT done here — it happens
+// separately in claimTemplateAlias after the template reaches READY.
 func createDefinitionWithOptions(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string, opts definitionCreateOptions) error {
-	return createDefinitionTx(ctx, store.db.WithContext(ctx), templateID, storedReq, instanceType, version, opts)
+	return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return createDefinitionTx(ctx, tx, templateID, storedReq, instanceType, version, opts)
+	})
 }
 
-func ensureTemplateDefinition(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string) (bool, error) {
+// createDefinition creates a definition without alias metadata. Convenience
+// wrapper around createDefinitionWithOptions for callers that don't set an
+// alias.
+func createDefinition(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string) error {
+	return createDefinitionWithOptions(ctx, templateID, storedReq, instanceType, version, definitionCreateOptions{})
+}
+
+// ensureTemplateDefinitionWithOptions checks whether a definition already exists
+// and creates one if missing, threading alias metadata (DisplayName) via opts.
+func ensureTemplateDefinitionWithOptions(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string, opts definitionCreateOptions) (bool, error) {
 	if _, err := GetDefinition(ctx, templateID); err == nil {
 		return false, nil
 	} else if !errors.Is(err, ErrTemplateNotFound) {
 		return false, err
 	}
-	if err := createDefinition(ctx, templateID, storedReq, instanceType, version); err != nil {
+	if err := createDefinitionWithOptions(ctx, templateID, storedReq, instanceType, version, opts); err != nil {
 		return false, err
 	}
 	if cacheErr := setTemplateRequestCache(templateID, storedReq); cacheErr != nil {
@@ -886,6 +897,122 @@ func GetDefinition(ctx context.Context, templateID string) (*models.TemplateDefi
 	return def, nil
 }
 
+// GetTemplateByAlias looks up a non-deleted TEMPLATE definition by its
+// display_name (used as a stable alias). Returns ErrTemplateNotFound when no
+// template has the given alias.
+//
+// The query uses alias_key (the STORED generated column, non-NULL only for
+// kind='template' rows with a non-empty display_name — see migration
+// 20260704120000) so it is inherently scoped to template-kind rows: a snapshot
+// carries its own informational display_name (NULL alias_key) and can never
+// match. The write path that owns template aliases is claimTemplateAlias
+// (called post-READY); without the alias_key filter, a snapshot sharing the
+// alias could shadow the owning template and resolve the alias to a snap-* id.
+func GetTemplateByAlias(ctx context.Context, alias string) (*models.TemplateDefinition, error) {
+	if !isReady() {
+		return nil, ErrTemplateStoreNotInitialized
+	}
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return nil, ErrTemplateNotFound
+	}
+	def := &models.TemplateDefinition{}
+	err := store.db.WithContext(ctx).Table(constants.TemplateDefinitionTableName).
+		Where("alias_key = ? AND status <> ?", alias, StatusDeleting).
+		First(def).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrTemplateNotFound
+		}
+		return nil, err
+	}
+	return def, nil
+}
+
+// ResolveTemplateIdentifier resolves an identifier that may be either a
+// template ID (tpl-.../snap-...) or a human-readable alias. If the identifier
+// already has a valid template ID prefix it is returned unchanged. Otherwise
+// it is treated as an alias and resolved to the underlying template ID.
+// Returns ("", nil) for an empty identifier.
+func ResolveTemplateIdentifier(ctx context.Context, identifier string) (string, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return "", nil
+	}
+	if hasValidTemplateIDPrefix(identifier) {
+		return identifier, nil
+	}
+	def, err := GetTemplateByAlias(ctx, identifier)
+	if err != nil {
+		return "", err
+	}
+	return def.TemplateID, nil
+}
+
+// claimTemplateAlias atomically claims an alias for a template: releases it
+// from any other non-deleting template that currently holds it, then sets
+// display_name on the target template. Call this only after the template is
+// confirmed READY so an alias never points to a broken template.
+func claimTemplateAlias(ctx context.Context, templateID, alias string) error {
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return nil
+	}
+	if !isReady() {
+		return ErrTemplateStoreNotInitialized
+	}
+	return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Table(constants.TemplateDefinitionTableName).
+			Where("alias_key = ? AND template_id <> ?",
+				alias, templateID).
+			Update("display_name", "").Error; err != nil {
+			return fmt.Errorf("release stale alias %q fail: %w", alias, err)
+		}
+		return tx.Table(constants.TemplateDefinitionTableName).
+			Where("template_id = ?", templateID).
+			Update("display_name", alias).Error
+	})
+}
+
+// isDuplicateAliasError returns true for MySQL (1062) and PostgreSQL (23505)
+// unique-violation errors, using structured type assertions instead of string
+// matching to avoid false positives from unrelated error text.
+func isDuplicateAliasError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1062 {
+		return true
+	}
+	// pgconn.PgError has Code == "23505" for unique_violation. We check via
+	// string matching on the error message as a fallback because the pgx
+	// driver may not be imported in all build configurations.
+	s := err.Error()
+	return strings.Contains(s, "23505") || strings.Contains(s, "unique_constraint")
+}
+
+// claimAliasAfterReady is the shared claim-after-READY pattern used by both
+// image_job_runner and redo. It attempts to claim the alias for a template
+// that has just reached READY. Returns a warning string (non-empty if the
+// claim failed for a non-duplicate reason) and the refreshed DisplayName
+// (non-empty if the claim succeeded).
+func claimAliasAfterReady(ctx context.Context, templateID, alias string) (claimWarning, displayName string) {
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return "", ""
+	}
+	if claimErr := claimTemplateAlias(ctx, templateID, alias); claimErr != nil {
+		if isDuplicateAliasError(claimErr) {
+			log.G(ctx).Infof("alias %q concurrently claimed by another template; template %s is READY without alias", alias, templateID)
+		} else {
+			log.G(ctx).Warnf("claim alias %q for template %s fail: %v", alias, templateID, claimErr)
+			return fmt.Sprintf("template is ready but alias %q could not be claimed: %v", alias, claimErr), ""
+		}
+	} else if refreshed, refreshErr := GetTemplateInfo(ctx, templateID); refreshErr == nil && refreshed != nil {
+		return "", refreshed.DisplayName
+	} else {
+		return "", alias
+	}
+	return "", ""
+}
 func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.CreateCubeSandboxReq, error) {
 	cacheStart := time.Now()
 	if req, hit, err := getCachedTemplateRequest(templateID); err != nil {
@@ -1126,9 +1253,11 @@ func UpsertReplica(ctx context.Context, templateID, instanceType string, replica
 		return ErrTemplateStoreNotInitialized
 	}
 	record := &models.TemplateReplica{}
-	dbq := store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
-		Where("template_id = ? AND node_id = ?", templateID, replica.NodeID)
-	err := dbq.First(record).Error
+	// Do not reuse the *gorm.DB chain after First on PostgreSQL: GORM may emit
+	// UPDATE ... FROM t_cube_template_replica (SQLSTATE 42712).
+	err := store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
+		Where("template_id = ? AND node_id = ?", templateID, replica.NodeID).
+		First(record).Error
 	if err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
@@ -1136,7 +1265,9 @@ func UpsertReplica(ctx context.Context, templateID, instanceType string, replica
 		return store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
 			Create(replicaStatusToModel(templateID, instanceType, replica)).Error
 	}
-	return dbq.Updates(replicaStatusUpdateFields(instanceType, replica)).Error
+	return store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
+		Where("template_id = ? AND node_id = ?", templateID, replica.NodeID).
+		Updates(replicaStatusUpdateFields(instanceType, replica)).Error
 }
 
 func EnsureReadyReplica(ctx context.Context, templateID string) error {

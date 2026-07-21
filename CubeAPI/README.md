@@ -68,8 +68,37 @@ cargo build --release
 |----------|---------|-------------|
 | `CUBE_API_BIND` | `0.0.0.0:3000` | Listen address |
 | `LOG_LEVEL` | `info` | Log level |
+| `CUBE_MASTER_ADDR` | `http://127.0.0.1:8089` | CubeMaster base URL |
+| `CUBE_API_SANDBOX_DOMAIN` | `cube.app` | Domain returned in sandbox API responses |
+| `AUTH_CALLBACK_URL` | *(unset)* | External auth callback URL (callback mode) |
+| `CUBE_API_KEY` | *(unset)* | Built-in API key for simple auth (simple-key mode) |
 
-CubeAPI also exposes dashboard-oriented routes under `/cubeapi/v1`. The one-click WebUI is served by a separate nginx container on port `12088`; that nginx instance serves the packaged static dashboard and proxies same-origin `/cubeapi` requests back to the host CubeAPI through Docker `host-gateway`.
+### Authentication
+
+CubeAPI provides two mutually exclusive authentication modes (callback mode
+takes priority when both are set). When neither is set, all requests pass
+through without authentication.
+
+**Mode 1 — Callback auth (`AUTH_CALLBACK_URL`)**
+
+For deployments that already have an authentication system. Every request
+(except `/health`) must carry either `Authorization: Bearer <token>` or
+`X-API-Key: <key>`. CubeAPI forwards the credential plus `X-Request-Path`
+and `X-Request-Method` to the callback URL; HTTP 200 grants access, any
+other status returns 401.
+
+**Mode 2 — Simple key auth (`CUBE_API_KEY`)**
+
+For deployments without a separate auth system. Set one environment variable:
+
+```bash
+CUBE_API_KEY=your-secret-key
+```
+
+Every request (except `/health`) must carry either `Authorization: Bearer <your-secret-key>`
+or `X-API-Key: <your-secret-key>`. The credential is compared as a string
+against `CUBE_API_KEY`; a match grants access, a mismatch or missing
+credential returns 401.
 
 ---
 

@@ -1,0 +1,50 @@
+name: Kubernetes Chart Check
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'deploy/kubernetes/chart/**'
+      - 'deploy/kubernetes/images/scripts/**'
+      - '.github/workflows/kubernetes-chart-check.yml'
+  pull_request:
+    paths:
+      - 'deploy/kubernetes/chart/**'
+      - 'deploy/kubernetes/images/scripts/**'
+      - '.github/workflows/kubernetes-chart-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: azure/setup-helm@v4
+      - name: Lint and render chart
+        run: |
+          helm lint deploy/kubernetes/chart \
+            --set-string mysql.password=test \
+            --set-string mysql.rootPassword=test \
+            --set-string redis.password=test
+          helm template chart-check deploy/kubernetes/chart \
+            --set-string mysql.password=test \
+            --set-string mysql.rootPassword=test \
+            --set-string redis.password=test >/dev/null
+      - name: Enforce Big Pod InPlace freeze
+        run: sh deploy/kubernetes/chart/scripts/test-big-pod-inplace-guard.sh
+      - name: Guard PVM native DaemonSet GVK
+        run: sh deploy/kubernetes/chart/scripts/test-pvm-native-ds-gvk-guard.sh
+      - name: Guard cluster-scoped resource names
+        run: sh deploy/kubernetes/chart/scripts/test-cluster-resource-names.sh
+      - name: Check startup-gate shell syntax
+        run: |
+          sh -n deploy/kubernetes/images/scripts/node-prep-lib.sh
+          sh -n deploy/kubernetes/images/scripts/pvm-startup-gate-lib.sh
+          sh -n deploy/kubernetes/images/scripts/pvm-startup-gate-reconcile.sh
+          sh -n deploy/kubernetes/images/scripts/pvm-host-bootstrap.sh
+          sh -n deploy/kubernetes/images/scripts/wait-node-prep.sh
+      - name: Test startup-gate state machine
+        run: sh deploy/kubernetes/images/scripts/test-pvm-startup-gate.sh

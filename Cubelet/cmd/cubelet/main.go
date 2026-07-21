@@ -280,7 +280,7 @@ func App() *cli.App {
 		},
 		&cli.IntFlag{
 			Name:  "state-tmpfs-size",
-			Value: 500,
+			Value: 1024,
 			Usage: "state-tmpfs-size(MB)",
 		},
 		&cli.IntFlag{
@@ -660,27 +660,6 @@ func ensureRootSharedMount(rootDir string) error {
 	return nil
 }
 
-func mountTmpfsDir(stateDir string, context *cli.Context) error {
-	exist, _ := mountinfo.Mounted(stateDir)
-	if exist {
-		return nil
-	}
-	size := context.Int("state-tmpfs-size")
-	_ = mount.UnmountAll(stateDir, 0)
-	m := &mount.Mount{
-		Type:    "tmpfs",
-		Source:  "none",
-		Options: []string{fmt.Sprintf("size=%dm", size)},
-	}
-	if err := m.Mount(stateDir); err != nil {
-		return err
-	}
-	exist, _ = mountinfo.Mounted(stateDir)
-	if !exist {
-		return fmt.Errorf("mount tmpfs:%v fail", stateDir)
-	}
-	return nil
-}
 func setPidFile(pidFile string) error {
 	if pidFile == "" {
 		return nil

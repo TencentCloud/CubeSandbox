@@ -368,10 +368,8 @@ mod tests {
 
     #[tokio::test]
     async fn signs_each_retry_with_a_fresh_nonce() {
-        let state = StateData::with_statuses([
-            StatusCode::INTERNAL_SERVER_ERROR,
-            StatusCode::NO_CONTENT,
-        ]);
+        let state =
+            StateData::with_statuses([StatusCode::INTERNAL_SERVER_ERROR, StatusCode::NO_CONTENT]);
         let mut cfg = config(receiver(state.clone()).await, "sandbox.resumed");
         cfg.secret = Some("endpoint-secret".into());
         let logger = HttpLogger::new(cfg).unwrap();

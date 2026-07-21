@@ -5,8 +5,12 @@
 package utils
 
 import (
+	"context"
 	"sync"
+	"time"
 )
+
+const resourceLockPollInterval = 5 * time.Millisecond
 
 type ResMutex struct {
 	mtx   *sync.Mutex
@@ -25,8 +29,9 @@ func NewResourceLocks() *ResourceLocks {
 	}
 }
 
-func (r *ResourceLocks) Lock(resource string) func() {
+func (r *ResourceLocks) retain(resource string) *ResMutex {
 	r.mutex.Lock()
+	defer r.mutex.Unlock()
 
 	l, ok := r.locks[resource]
 	if ok {
@@ -38,28 +43,71 @@ func (r *ResourceLocks) Lock(resource string) func() {
 		}
 		l, _ = r.locks[resource]
 	}
+	return l
+}
 
-	r.mutex.Unlock()
+func (r *ResourceLocks) release(resource string, l *ResMutex) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
 
-	l.mtx.Lock()
+	current, ok := r.locks[resource]
+	if !ok || current != l {
+		return
+	}
+	if l.count == 1 {
+		delete(r.locks, resource)
+		return
+	}
+	l.count--
+}
 
+func (r *ResourceLocks) unlock(resource string, l *ResMutex) func() {
 	return func() {
 		l.mtx.Unlock()
+		r.release(resource, l)
+	}
+}
 
-		r.mutex.Lock()
-		defer r.mutex.Unlock()
+func (r *ResourceLocks) Lock(resource string) func() {
+	l := r.retain(resource)
+	l.mtx.Lock()
+	return r.unlock(resource, l)
+}
 
-		l, ok := r.locks[resource]
-		if ok {
-			if l.count == 1 {
-				delete(r.locks, resource)
-				return
+// LockContext waits for a resource lock until ctx expires. It uses TryLock
+// polling because sync.Mutex has no context-aware wait primitive; the retained
+// reference is released on cancellation so a timed-out waiter cannot leak a
+// lock entry after the current holder exits.
+func (r *ResourceLocks) LockContext(ctx context.Context, resource string) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	l := r.retain(resource)
+	ticker := time.NewTicker(resourceLockPollInterval)
+	defer ticker.Stop()
+
+	for {
+		if l.mtx.TryLock() {
+			if err := ctx.Err(); err != nil {
+				l.mtx.Unlock()
+				r.release(resource, l)
+				return nil, err
 			}
-			l.count--
+			return r.unlock(resource, l), nil
+		}
+
+		select {
+		case <-ctx.Done():
+			r.release(resource, l)
+			return nil, ctx.Err()
+		case <-ticker.C:
 		}
 	}
 }
 
 func (r *ResourceLocks) Len() int {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
 	return len(r.locks)
 }

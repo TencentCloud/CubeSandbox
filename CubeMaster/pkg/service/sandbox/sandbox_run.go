@@ -37,6 +37,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/task"
+	volrefcount "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/refcount"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
@@ -214,6 +215,20 @@ func (c *createSandboxContext) handleCubelet() {
 			return
 		}
 
+		// Final cordon gate on this replica before Cubelet Create.
+		if err := c.refreshAndAdmitHost(); err != nil {
+			if c.directHost {
+				status, _ := ret.FromError(err)
+				c.setMasterRsp(int(status.Code()), status.Message())
+				return
+			}
+			c.selctx.AddLastBadNode(c.selectHost)
+			c.reschedule = true
+			log.G(c.ctx).Warnf("selected host blocked by scheduling admission, reschedule host=%s err=%v",
+				c.selectHost.ID(), err)
+			continue
+		}
+
 		if c.callCubelet() {
 			c.retryCost += c.cubeletEndTime.Sub(c.cubeletStartTime)
 			c.retryTimes++
@@ -228,6 +243,33 @@ func (c *createSandboxContext) handleCubelet() {
 		c.dealSuccResult()
 		return
 	}
+}
+
+func (c *createSandboxContext) refreshAndAdmitHost() error {
+	current, err := admitSelectedHost(c.selectHost, localcache.GetNode)
+	if err != nil {
+		return err
+	}
+	c.selectHost = current
+	return nil
+}
+
+// admitSelectedHost re-reads the selected host from cache and rejects cordoned
+// nodes. getNode is injected so unit tests cover all admission paths without a
+// live localcache.
+func admitSelectedHost(selected *node.Node, getNode func(string) (*node.Node, bool)) (*node.Node, error) {
+	if selected == nil {
+		return nil, ret.Err(errorcode.ErrorCode_SelectNodesFailed, "no selected host")
+	}
+	current, ok := getNode(selected.ID())
+	if !ok {
+		return nil, ret.Errorf(errorcode.ErrorCode_SelectNodesFailed, "selected host missing from cache: %s", selected.ID())
+	}
+	if !current.SchedulingAllowed() {
+		return nil, ret.Errorf(errorcode.ErrorCode_SelectNodesFailed,
+			"node %s is scheduling-disabled (cordon); new sandboxes are not admitted", current.ID())
+	}
+	return current, nil
 }
 
 func (c *createSandboxContext) callCubelet() bool {
@@ -266,6 +308,9 @@ func (c *createSandboxContext) dealSuccResult() {
 				c.masterRsp.ExtInfo[constants.CubeExtNumaKey] = string(v)
 			}
 		}
+		// Apply any node-level volume ref-count transitions (0→1) reported by
+		// Cubelet so the volume DB knows how many nodes reference each volume.
+		volrefcount.ApplyFromExtInfo(c.ctx, c.cubeletRsp.GetExtInfo())
 		if config.GetConfig().CubeletConf.EnableExposedPort {
 			if c.cubeletRsp.GetPortMappings() != nil {
 				c.cubeletRspPorts = make(map[string]string)

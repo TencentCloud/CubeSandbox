@@ -43,6 +43,17 @@ func SetSandboxCache(sandboxID string, cache *SandboxCache) {
 	listCache.Store(sandboxID, cache)
 }
 
+func ListKnownSandboxIDs() []string {
+	ids := make([]string, 0)
+	listCache.Range(func(key, _ any) bool {
+		if sandboxID, ok := key.(string); ok && sandboxID != "" {
+			ids = append(ids, sandboxID)
+		}
+		return true
+	})
+	return ids
+}
+
 func (l *local) cleanSandboxCache(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()

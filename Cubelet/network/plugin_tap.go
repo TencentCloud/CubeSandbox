@@ -348,20 +348,31 @@ func initTapPlugin(ic *plugin.InitContext) (*local, error) {
 
 	log.G(ic.Context).Info("network plugin init begin")
 
-	device, err := getMachineDevice(config.EthName)
-	if err != nil {
-		return nil, err
+	// When network-agent owns the dataplane, Create/Destroy only use
+	// networkAgentClient + Config. getMachineDevice / getOrNewCubeDev are
+	// legacy startup side effects (probe eth0 ARP, ensure local cube-dev) and
+	// must not block cubelet init in Pod netns (hostNetwork=false).
+	var device *MachineDevice
+	var cubeDev *CubeDev
+	if !config.EnableNetworkAgent {
+		var err error
+		device, err = getMachineDevice(config.EthName)
+		if err != nil {
+			return nil, err
+		}
+		log.G(ic.Context).Info("network get node info done")
+		gwIP, mask, err := getGwIPAndMask(config.CIDR)
+		if err != nil {
+			return nil, err
+		}
+		cubeDev, err = getOrNewCubeDev(gwIP, mask, config.MvmMtu, config.MvmGwMacAddr)
+		if err != nil {
+			return nil, err
+		}
+		log.G(ic.Context).Info("network cube-dev init done")
+	} else {
+		log.G(ic.Context).Info("skip local eth0/cube-dev init; dataplane owned by network-agent")
 	}
-	log.G(ic.Context).Info("network get node info done")
-	gwIP, mask, err := getGwIPAndMask(config.CIDR)
-	if err != nil {
-		return nil, err
-	}
-	cubeDev, err := getOrNewCubeDev(gwIP, mask, config.MvmMtu, config.MvmGwMacAddr)
-	if err != nil {
-		return nil, err
-	}
-	log.G(ic.Context).Info("network cube-dev init done")
 
 	l := &local{
 		Config:             config,

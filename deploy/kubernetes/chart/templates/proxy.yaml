@@ -1,0 +1,310 @@
+{{- if eq (include "cube.proxyEnabled" .) "true" }}
+{{- $redisHost := default (include "cube.redisHost" .) .Values.cubeProxy.redis.host -}}
+{{- $redisPort := default .Values.redis.port .Values.cubeProxy.redis.port -}}
+{{- /* proxy_registry.lua runs in ngx.timer and cannot use nginx location resolvers;
+     prefer a concrete IP (ClusterIP, or headless Endpoints address) for cosocket connect(). */ -}}
+{{- $redisRegistryHost := $redisHost -}}
+{{- if eq (include "cube.redisBuiltinEnabled" .) "true" }}
+{{- $redisSvc := lookup "v1" "Service" .Release.Namespace (include "cube.redisName" .) -}}
+{{- if and $redisSvc $redisSvc.spec.clusterIP (ne $redisSvc.spec.clusterIP "None") -}}
+{{- $redisRegistryHost = $redisSvc.spec.clusterIP -}}
+{{- else -}}
+{{- $redisEps := lookup "v1" "Endpoints" .Release.Namespace (include "cube.redisName" .) -}}
+{{- if and $redisEps $redisEps.subsets (gt (len $redisEps.subsets) 0) -}}
+{{- $subset := index $redisEps.subsets 0 -}}
+{{- if and $subset.addresses (gt (len $subset.addresses) 0) -}}
+{{- $redisRegistryHost = (index $subset.addresses 0).ip -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+{{- $proxyCertSecretName := include "cube.proxyCertSecretName" . -}}
+{{- if eq .Values.cubeProxy.tls.mode "inline" }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $proxyCertSecretName }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-proxy
+type: Opaque
+stringData:
+  {{ .Values.cubeProxy.tls.certSecretKey | quote }}: |-
+{{ .Values.cubeProxy.tls.cert | nindent 4 }}
+  {{ .Values.cubeProxy.tls.keySecretKey | quote }}: |-
+{{ .Values.cubeProxy.tls.key | nindent 4 }}
+---
+{{- else if eq .Values.cubeProxy.tls.mode "selfSigned" }}
+{{- $commonName := default .Values.cubeProxy.domain .Values.cubeProxy.tls.selfSigned.commonName -}}
+{{- $dnsNames := list .Values.cubeProxy.domain -}}
+{{- range .Values.cubeProxy.tls.selfSigned.dnsNames }}
+{{- $dnsNames = append $dnsNames . -}}
+{{- end }}
+{{- $dnsNames = uniq $dnsNames -}}
+{{- $ipAddresses := list -}}
+{{- range .Values.cubeProxy.tls.selfSigned.ipAddresses }}
+{{- $ipAddresses = append $ipAddresses . -}}
+{{- end }}
+{{- $certKey := .Values.cubeProxy.tls.certSecretKey -}}
+{{- $keyKey := .Values.cubeProxy.tls.keySecretKey -}}
+{{- $caKey := .Values.cubeProxy.tls.caSecretKey -}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $proxyCertSecretName -}}
+{{- $hasExisting := and $existing (hasKey $existing.data $certKey) (hasKey $existing.data $keyKey) (hasKey $existing.data $caKey) -}}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $proxyCertSecretName }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-proxy
+type: Opaque
+{{ if $hasExisting }}
+data:
+  {{ $certKey | quote }}: {{ index $existing.data $certKey | quote }}
+  {{ $keyKey | quote }}: {{ index $existing.data $keyKey | quote }}
+  {{ $caKey | quote }}: {{ index $existing.data $caKey | quote }}
+{{- else }}
+{{- $ca := genCA (printf "%s-proxy-ca" (include "cube.fullname" .)) (int .Values.cubeProxy.tls.selfSigned.caValidityDays) -}}
+{{- $cert := genSignedCert $commonName $ipAddresses $dnsNames (int .Values.cubeProxy.tls.selfSigned.certValidityDays) $ca -}}
+stringData:
+  {{ .Values.cubeProxy.tls.certSecretKey | quote }}: |-
+{{ $cert.Cert | nindent 4 }}
+  {{ .Values.cubeProxy.tls.keySecretKey | quote }}: |-
+{{ $cert.Key | nindent 4 }}
+  {{ .Values.cubeProxy.tls.caSecretKey | quote }}: |-
+{{ $ca.Cert | nindent 4 }}
+{{- end }}
+---
+{{- else if eq .Values.cubeProxy.tls.mode "certManager" }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $proxyCertSecretName }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-proxy
+spec:
+  secretName: {{ $proxyCertSecretName }}
+  {{- if .Values.cubeProxy.tls.certManager.commonName }}
+  commonName: {{ .Values.cubeProxy.tls.certManager.commonName | quote }}
+  {{- else }}
+  commonName: {{ .Values.cubeProxy.domain | quote }}
+  {{- end }}
+  dnsNames:
+    {{- if .Values.cubeProxy.tls.certManager.dnsNames }}
+    {{- toYaml .Values.cubeProxy.tls.certManager.dnsNames | nindent 4 }}
+    {{- else }}
+    - {{ .Values.cubeProxy.domain | quote }}
+    {{- end }}
+  {{- with .Values.cubeProxy.tls.certManager.ipAddresses }}
+  ipAddresses:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.cubeProxy.tls.certManager.duration }}
+  duration: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.cubeProxy.tls.certManager.renewBefore }}
+  renewBefore: {{ . | quote }}
+  {{- end }}
+  usages:
+    {{- toYaml .Values.cubeProxy.tls.certManager.usages | nindent 4 }}
+  issuerRef:
+    group: {{ .Values.cubeProxy.tls.certManager.issuerRef.group | quote }}
+    kind: {{ .Values.cubeProxy.tls.certManager.issuerRef.kind | quote }}
+    name: {{ .Values.cubeProxy.tls.certManager.issuerRef.name | quote }}
+---
+{{- end }}
+apiVersion: {{ include "cube.cloneSetAPIVersion" . }}
+kind: CloneSet
+metadata:
+  name: {{ include "cube.proxyName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-proxy
+spec:
+  replicas: {{ .Values.cubeProxy.replicas }}
+  {{- include "cube.cloneSetUpdateStrategy" . | nindent 2 }}
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: cube-proxy
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: cube-proxy
+      {{- with .Values.cubeProxy.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      dnsPolicy: ClusterFirst
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      containers:
+        - name: cube-proxy
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.proxy "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.proxy.pullPolicy }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              exec /etc/cube-proxy/cube-proxy-entrypoint.sh
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_IP
+              value: "$(POD_IP)"
+            - name: REDIS_HOST
+              value: {{ $redisHost | quote }}
+            - name: REDIS_PORT
+              value: {{ $redisPort | quote }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: redis-password
+            - name: REDIS_DB
+              value: {{ .Values.cubeProxy.redis.db | quote }}
+            - name: TIMEOUT_MIN
+              value: {{ .Values.cubeProxy.timeout.min | quote }}
+            - name: TIMEOUT_MAX
+              value: {{ .Values.cubeProxy.timeout.max | quote }}
+            {{- if eq (include "cube.lifecycleManagerEnabled" .) "true" }}
+            # nginx $cube_sidecar_addr → cube-lifecycle-manager Service (resume callback).
+            - name: CUBE_SIDECAR_LISTEN_ADDR
+              value: {{ include "cube.lifecycleManagerAddr" . | quote }}
+            {{- end }}
+            - name: CUBE_PROXY_HTTP_LISTEN_PORT
+              value: {{ .Values.cubeProxy.ports.http.containerPort | quote }}
+            - name: CUBE_PROXY_HTTPS_LISTEN_PORT
+              value: {{ .Values.cubeProxy.ports.https.containerPort | quote }}
+            - name: CUBE_PROXY_ADMIN_LISTEN
+              value: {{ .Values.cubeProxy.adminListen | quote }}
+            - name: CUBE_PROXY_ADMIN_PORT
+              value: {{ .Values.cubeProxy.adminPort | quote }}
+            - name: CUBE_PROXY_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: cube-admin-token
+            - name: CUBE_PROXY_RESOLVER_ADDRS
+              value: {{ join " " .Values.cubeProxy.resolver.addresses | quote }}
+            - name: CUBE_PROXY_RESOLVER_VALID
+              value: {{ .Values.cubeProxy.resolver.valid | quote }}
+            - name: CUBE_PROXY_RESOLVER_TIMEOUT
+              value: {{ .Values.cubeProxy.resolver.timeout | quote }}
+            - name: CUBE_PROXY_RESOLVER_IPV6
+              value: {{ ternary "on" "off" .Values.cubeProxy.resolver.ipv6 | quote }}
+            {{- if and .Values.cubeProxy.registry.enabled (eq (include "cube.lifecycleManagerEnabled" .) "true") }}
+            - name: CUBE_PROXY_REGISTRY_ENABLE
+              value: "1"
+            - name: CUBE_PROXY_ID
+              value: "$(POD_NAME)"
+            - name: CUBE_PROXY_ADMIN_URL
+              value: {{ printf "http://$(POD_IP):%v" .Values.cubeProxy.adminPort | quote }}
+            - name: CUBE_PROXY_RESUME_URL
+              value: {{ printf "http://$(POD_IP):%v" .Values.cubeProxy.adminPort | quote }}
+            - name: CUBE_PROXY_NODE_IP
+              value: "$(POD_IP)"
+            - name: CUBE_PROXY_VERSION
+              value: {{ .Values.images.proxy.tag | quote }}
+            - name: CUBE_PROXY_HEARTBEAT_INTERVAL_MS
+              value: {{ .Values.cubeProxy.registry.heartbeatIntervalMs | quote }}
+            - name: CUBE_PROXY_REGISTRY_REDIS_HOST
+              value: {{ $redisRegistryHost | quote }}
+            - name: CUBE_PROXY_REGISTRY_REDIS_PORT
+              value: {{ $redisPort | quote }}
+            - name: CUBE_PROXY_REGISTRY_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: redis-password
+            - name: CUBE_PROXY_REGISTRY_REDIS_DB
+              value: {{ .Values.cubeProxy.redis.db | quote }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.cubeProxy.ports.http.containerPort }}
+              protocol: TCP
+            - name: https
+              containerPort: {{ .Values.cubeProxy.ports.https.containerPort }}
+              protocol: TCP
+            - name: admin
+              containerPort: {{ .Values.cubeProxy.adminPort }}
+              protocol: TCP
+          {{- if .Values.cubeProxy.probes.readiness.enabled }}
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - {{ printf "curl -fsS -H \"X-Cube-Admin-Token: ${CUBE_PROXY_ADMIN_TOKEN}\" http://127.0.0.1:%v%s >/dev/null" .Values.cubeProxy.probes.readiness.port .Values.cubeProxy.probes.readiness.path | quote }}
+            initialDelaySeconds: {{ .Values.cubeProxy.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.cubeProxy.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.cubeProxy.probes.readiness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.cubeProxy.probes.liveness.enabled }}
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - {{ printf "curl -fsS -H \"X-Cube-Admin-Token: ${CUBE_PROXY_ADMIN_TOKEN}\" http://127.0.0.1:%v%s >/dev/null" .Values.cubeProxy.probes.liveness.port .Values.cubeProxy.probes.liveness.path | quote }}
+            initialDelaySeconds: {{ .Values.cubeProxy.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.cubeProxy.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.cubeProxy.probes.liveness.failureThreshold }}
+          {{- end }}
+          volumeMounts:
+            - name: proxy-certs
+              mountPath: /usr/local/openresty/nginx/certs
+              readOnly: true
+            - name: proxy-logs
+              mountPath: /data/log/cube-proxy
+            - name: entrypoint
+              mountPath: /etc/cube-proxy
+              readOnly: true
+          {{- with .Values.cubeProxy.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: proxy-certs
+          secret:
+            secretName: {{ $proxyCertSecretName }}
+            items:
+              - key: {{ .Values.cubeProxy.tls.certSecretKey | quote }}
+                path: cube.app+3.pem
+              - key: {{ .Values.cubeProxy.tls.keySecretKey | quote }}
+                path: cube.app+3-key.pem
+        - name: proxy-logs
+          hostPath:
+            path: {{ .Values.cubeProxy.logs.hostPath | quote }}
+            type: DirectoryOrCreate
+        - name: entrypoint
+          configMap:
+            name: {{ include "cube.proxyName" . }}-entrypoint
+            defaultMode: 0755
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cube.proxyName" . }}-entrypoint
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: proxy
+data:
+  cube-proxy-entrypoint.sh: |
+{{ .Files.Get "files/cube-proxy/cube-proxy-entrypoint.sh" | indent 4 }}
+{{- end }}

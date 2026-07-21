@@ -168,15 +168,66 @@ func TestResumer_HappyPath(t *testing.T) {
 }
 
 func TestResumer_RejectsAutoResumeDisabled(t *testing.T) {
+	// AutoResume=false + state=paused: resumer would need to drive
+	// CubeMaster.Resume to bring the sandbox back, but the sandbox opted
+	// out. Must return an error AND release the "resuming" lock it took
+	// during acquireResumeOwnership, otherwise the state key would sit at
+	// "resuming" for its full TTL and make the sweeper skip decisions.
 	reg := registry.New()
 	reg.Upsert(lifecycle.SandboxLifecycleMeta{
 		SandboxID: "sbx", InstanceType: "cubebox", AutoResume: false,
 	})
-	r := newTestResumer(reg, newFakeStore(), &fakeMaster{}, &fakePush{})
+	store := newFakeStore()
+	store.states["sbx"] = "paused"
+	master := &fakeMaster{}
+	push := &fakePush{}
+	r := newTestResumer(reg, store, master, push)
 
 	err := r.Resume(context.Background(), "sbx")
 	if err == nil || err.Error() != "auto_resume not enabled for sandbox" {
 		t.Fatalf("expected auto_resume disabled error, got %v", err)
+	}
+	if got := store.state("sbx"); got != "" {
+		t.Fatalf("resuming lock must be released on AutoResume rejection, got %q", got)
+	}
+	if got := atomic.LoadInt32(&master.calls); got != 0 {
+		t.Fatalf("master.Resume must not be called when AutoResume=false, got %d", got)
+	}
+}
+
+// TestResumer_AutoResumeFalseAllowedWhenAlreadyRunning is the regression
+// this scenario targets: the SDK called Sandbox.connect() to manually resume
+// a paused sandbox that was configured with auto_resume=false. CubeMaster
+// forwarded the resume to Cubelet and the state event synchroniser
+// (statesync.Handle) flipped Redis state to "running". The proxy's local
+// dict is momentarily still "paused", so the next dataplane request lands
+// on /internal/resume. The resumer must NOT reject the request just because
+// auto_resume is false — the sandbox is objectively running and we're only
+// being asked to re-assert state, not to drive the resume RPC ourselves.
+func TestResumer_AutoResumeFalseAllowedWhenAlreadyRunning(t *testing.T) {
+	reg := registry.New()
+	reg.Upsert(lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx", InstanceType: "cubebox", AutoResume: false,
+	})
+	store := newFakeStore()
+	store.states["sbx"] = "running" // state synced from CubeMaster→CLM
+	master := &fakeMaster{}
+	push := &fakePush{}
+	r := newTestResumer(reg, store, master, push)
+
+	if err := r.Resume(context.Background(), "sbx"); err != nil {
+		t.Fatalf("resume must succeed when sandbox already running, got %v", err)
+	}
+	if got := atomic.LoadInt32(&master.calls); got != 0 {
+		t.Fatalf("master.Resume must NOT be called, got %d", got)
+	}
+	// Success bookkeeping still re-asserts running into the proxy dict so
+	// the local cache converges even if the initial push missed the mark.
+	push.mu.Lock()
+	pushed := append([]string(nil), push.pushed...)
+	push.mu.Unlock()
+	if len(pushed) != 1 || pushed[0] != "running" {
+		t.Fatalf("proxy push should re-assert running, got %+v", pushed)
 	}
 }
 

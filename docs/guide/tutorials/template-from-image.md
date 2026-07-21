@@ -193,19 +193,21 @@ cubemastercli tpl list --json | jq '.data[].template_id'
 ### Inspect a single template
 
 ```bash
-cubemastercli tpl info --template-id tpl-748094d2f2374b0a8a37e6ec
+cubemastercli tpl info tpl-748094d2f2374b0a8a37e6ec
 ```
+
+The template ID can be passed as a positional argument (docker/kubectl style) or with `--template-id`; both forms are equivalent.
 
 Add `--json` for machine-readable output:
 
 ```bash
-cubemastercli tpl info --template-id tpl-748094d2f2374b0a8a37e6ec --json
+cubemastercli tpl info tpl-748094d2f2374b0a8a37e6ec --json
 ```
 
 Add `--include-request` when you want to inspect the stored template request body:
 
 ```bash
-cubemastercli tpl info --template-id tpl-748094d2f2374b0a8a37e6ec --json --include-request
+cubemastercli tpl info tpl-748094d2f2374b0a8a37e6ec --json --include-request
 ```
 
 If you want to preview the effective sandbox payload after template resolution, use:
@@ -221,7 +223,7 @@ For a user-oriented walkthrough of what each output means and how to preview the
 ## Deleting a Template
 
 ```bash
-cubemastercli tpl delete --template-id tpl-748094d2f2374b0a8a37e6ec
+cubemastercli tpl delete tpl-748094d2f2374b0a8a37e6ec
 ```
 
 On success:

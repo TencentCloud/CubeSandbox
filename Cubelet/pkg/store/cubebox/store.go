@@ -6,11 +6,13 @@ package cubebox
 
 import (
 	"errors"
+	"strings"
 
 	jsoniter "github.com/json-iterator/go"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/cache"
 
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/sandboxid"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/multimeta"
 )
@@ -114,7 +116,23 @@ func (s *Store) Add(box *CubeBox) {
 }
 
 func (s *Store) Get(id string) (*CubeBox, error) {
-	obj, exist, err := s.indexer.GetByKey(id)
+	id = sandboxid.NormalizeInput(id)
+	if sandboxid.IsFullID(id) {
+		return s.getByKey(strings.ToLower(id))
+	}
+
+	resolved, err := s.resolveID(id)
+	if err != nil {
+		if errors.Is(err, sandboxid.ErrNotFound) {
+			return nil, utils.ErrorKeyNotFound
+		}
+		return nil, err
+	}
+	return s.getByKey(resolved)
+}
+
+func (s *Store) getByKey(key string) (*CubeBox, error) {
+	obj, exist, err := s.indexer.GetByKey(key)
 	if err != nil {
 		return nil, err
 	}
@@ -126,6 +144,15 @@ func (s *Store) Get(id string) (*CubeBox, error) {
 		return nil, errors.New("obj is not a cubebox")
 	}
 	return cb, nil
+}
+
+func (s *Store) resolveID(input string) (string, error) {
+	boxes := s.List()
+	candidates := make([]string, 0, len(boxes))
+	for _, cb := range boxes {
+		candidates = append(candidates, cb.ID)
+	}
+	return sandboxid.Resolve(input, candidates)
 }
 
 func (s *Store) GetContainer(id string) (*Container, error) {

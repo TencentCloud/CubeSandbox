@@ -1,0 +1,163 @@
+{{- $computeSelector := .Values.placement.compute.nodeSelector -}}
+{{- $controlPlaneSelector := .Values.placement.controlPlane.nodeSelector -}}
+{{- if and .Values.controlPlane.enabled (not $controlPlaneSelector) }}
+{{- fail "controlPlane.enabled=true requires placement.controlPlane.nodeSelector" }}
+{{- end }}
+{{- if .Values.cubeNode.enabled }}
+{{- if not $computeSelector }}
+{{- fail "cube-node requires placement.compute.nodeSelector, otherwise host-mutating bootstrap may run on all nodes" }}
+{{- end }}
+{{- $pvmSelector := ((.Values.placement).pvm).nodeSelector | default dict -}}
+{{- if .Values.bootstrap.pvmHostKernel.enabled }}
+{{- if not (hasKey $pvmSelector "cube.tencent.com/allow-pvm-bootstrap") }}
+{{- fail "bootstrap.pvmHostKernel.enabled=true requires placement.pvm.nodeSelector to include cube.tencent.com/allow-pvm-bootstrap=true (PVM DaemonSet only; keep it out of placement.compute so non-PVM nodes skip the PVM image)" }}
+{{- end }}
+{{- $allowPvmRaw := index $pvmSelector "cube.tencent.com/allow-pvm-bootstrap" -}}
+{{- if or (not (kindIs "string" $allowPvmRaw)) (ne $allowPvmRaw "true") }}
+{{- fail (printf "placement.pvm.nodeSelector[cube.tencent.com/allow-pvm-bootstrap] must be the YAML string \"true\" (got %T %v)" $allowPvmRaw $allowPvmRaw) }}
+{{- end }}
+{{- if hasKey $computeSelector "cube.tencent.com/allow-pvm-bootstrap" }}
+{{- fail "placement.compute.nodeSelector must not include cube.tencent.com/allow-pvm-bootstrap; that label belongs only in placement.pvm.nodeSelector" }}
+{{- end }}
+{{- $gate := .Values.bootstrap.pvmHostKernel.startupGate -}}
+{{- if $gate.enabled }}
+{{- if ne ($gate.effect | default "") "NoSchedule" }}
+{{- fail "bootstrap.pvmHostKernel.startupGate.effect must be NoSchedule" }}
+{{- end }}
+{{- if ne ($gate.manager | default "") "script" }}
+{{- fail "bootstrap.pvmHostKernel.startupGate.manager must be script" }}
+{{- end }}
+{{- if ne ($gate.taintKey | default "") "cube.tencent.com/pvm-not-ready" }}
+{{- fail "bootstrap.pvmHostKernel.startupGate.taintKey is a fixed cluster-wide contract and must be cube.tencent.com/pvm-not-ready" }}
+{{- end }}
+{{- if not $gate.requirePreflight }}
+{{- fail "startupGate.enabled=true requires startupGate.requirePreflight=true; the Helm hook closes the first-install scheduling window" }}
+{{- end }}
+{{- if and (not $gate.priorityClassCreate) (not ($gate.priorityClassName | default "")) }}
+{{- fail "startupGate.priorityClassCreate=false requires startupGate.priorityClassName to reference an existing PriorityClass" }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if and (eq (.Values.cubeNode.nodeIDSource | default "specNodeName") "static") (not .Values.cubeNode.staticNodeID) }}
+{{- fail "cubeNode.nodeIDSource=static requires cubeNode.staticNodeID" }}
+{{- end }}
+{{- if and .Values.bootstrap.pvmHostKernel.enabled (not .Values.cubeNode.pvmGuestKernel.enabled) }}
+{{- fail "bootstrap.pvmHostKernel.enabled=true requires cubeNode.pvmGuestKernel.enabled=true to match one-click CUBE_PVM_ENABLE consistency" }}
+{{- end }}
+{{- end }}
+{{- if .Values.externalControlPlane.enabled }}
+{{- if not .Values.externalControlPlane.masterEndpoint }}
+{{- fail "externalControlPlane.enabled=true requires externalControlPlane.masterEndpoint" }}
+{{- end }}
+{{- end }}
+{{- if and .Values.cubeNode.enabled (not .Values.controlPlane.enabled) (not .Values.externalControlPlane.enabled) }}
+{{- fail "cubeNode.enabled=true with controlPlane.enabled=false requires externalControlPlane.enabled=true" }}
+{{- end }}
+{{- if and .Values.cubeNode.enabled (not .Values.images.waitNodePrep.repository) }}
+{{- fail "cubeNode.enabled=true requires images.waitNodePrep.repository (Big Pod wait-node-prep sidecar)" }}
+{{- end }}
+{{- if and .Values.cubeNode.enabled (not .Values.images.pause.repository) }}
+{{- fail "cubeNode.enabled=true requires images.pause.repository (Big Pod placeholder slots)" }}
+{{- end }}
+{{- if hasKey .Values.security "hostNetwork" }}
+{{- fail "security.hostNetwork was removed; cube-node always runs on the Pod network. Remove security.hostNetwork from your values." }}
+{{- end }}
+{{- if hasKey .Values.cubeNode "useAdvancedDaemonSet" }}
+{{- fail "cubeNode.useAdvancedDaemonSet was removed; cube-node always uses OpenKruise Advanced DaemonSet (hard dependency). Remove cubeNode.useAdvancedDaemonSet from your values and install OpenKruise." }}
+{{- end }}
+{{- $pvmRolling := (((.Values.cubeNodePvm).updateStrategy).rollingUpdate) | default dict -}}
+{{- if hasKey $pvmRolling "rollingUpdateType" }}
+{{- fail "cubeNodePvm.updateStrategy.rollingUpdate.rollingUpdateType was removed; cube-node-pvm is a native apps/v1 DaemonSet (not Advanced DaemonSet). Remove rollingUpdateType from your values." }}
+{{- end }}
+{{- $controlPlaneNeedsMysql := and .Values.controlPlane.enabled (or .Values.controlPlane.master.enabled .Values.controlPlane.api.enabled) -}}
+{{- if and $controlPlaneNeedsMysql (not (eq (include "cube.mysqlBuiltinEnabled" .) "true")) (not .Values.mysql.host) }}
+{{- fail "control plane requires mysql.host when mysql.enabled=false" }}
+{{- end }}
+{{- if and (eq (include "cube.mysqlBuiltinEnabled" .) "true") (or (hasPrefix "CHANGE_ME" (default "" .Values.mysql.password)) (hasPrefix "CHANGE_ME" (default "" .Values.mysql.rootPassword))) }}
+{{- fail "mysql.password / mysql.rootPassword still equal the CHANGE_ME_* default sentinel. Override them before deploying (or set mysql.host to use external MySQL)." }}
+{{- end }}
+{{- $controlPlaneNeedsRedis := and .Values.controlPlane.enabled .Values.controlPlane.master.enabled -}}
+{{- if and $controlPlaneNeedsRedis (not (eq (include "cube.redisBuiltinEnabled" .) "true")) (not .Values.redis.host) }}
+{{- fail "control plane master requires redis.host when redis.enabled=false" }}
+{{- end }}
+{{- if and (eq (include "cube.redisBuiltinEnabled" .) "true") (hasPrefix "CHANGE_ME" (default "" .Values.redis.password)) }}
+{{- fail "redis.password still equals the CHANGE_ME_* default sentinel. Override it before deploying (or set redis.host to use external Redis)." }}
+{{- end }}
+{{- if eq (include "cube.proxyEnabled" .) "true" }}
+{{- if not $controlPlaneSelector }}
+{{- fail "cubeProxy.enabled=true requires placement.controlPlane.nodeSelector because CubeProxy runs on control nodes" }}
+{{- end }}
+{{- if and (not (eq (include "cube.redisBuiltinEnabled" .) "true")) (not .Values.redis.host) (not .Values.cubeProxy.redis.host) }}
+{{- fail "cubeProxy.enabled=true requires redis.host or cubeProxy.redis.host when redis.enabled=false" }}
+{{- end }}
+{{- if not (has .Values.cubeProxy.tls.mode (list "existingSecret" "certManager" "selfSigned" "inline")) }}
+{{- fail "cubeProxy.tls.mode must be one of: existingSecret, certManager, selfSigned, inline" }}
+{{- end }}
+{{- if and (eq .Values.cubeProxy.tls.mode "existingSecret") (not .Values.cubeProxy.tls.existingSecret) }}
+{{- fail "cubeProxy.tls.mode=existingSecret requires cubeProxy.tls.existingSecret" }}
+{{- end }}
+{{- if and (eq .Values.cubeProxy.tls.mode "inline") (or (not .Values.cubeProxy.tls.cert) (not .Values.cubeProxy.tls.key)) }}
+{{- fail "cubeProxy.tls.mode=inline requires both cubeProxy.tls.cert and cubeProxy.tls.key" }}
+{{- end }}
+{{- if and (eq .Values.cubeProxy.tls.mode "certManager") (not .Values.cubeProxy.tls.certManager.issuerRef.name) }}
+{{- fail "cubeProxy.tls.mode=certManager requires cubeProxy.tls.certManager.issuerRef.name" }}
+{{- end }}
+{{- $clbSecurityGroups := index (default dict .Values.cubeProxy.service.annotations) "service.cloud.tencent.com/security-groups" | default "" -}}
+{{- if and (eq (.Values.cubeProxy.service.type | default "ClusterIP") "LoadBalancer") (hasPrefix "CHANGE_ME" $clbSecurityGroups) }}
+{{- fail "cubeProxy.service.annotations[\"service.cloud.tencent.com/security-groups\"] still equals the CHANGE_ME_* sentinel from values-tke.yaml. Override it with your VPC security group id(s) (comma-separated), or set it to \"\" if you manage CLB security groups outside Helm." }}
+{{- end }}
+{{- if hasKey .Values.cubeProxy "sidecar" }}
+{{- fail "cubeProxy.sidecar was removed; lifecycle coordination is handled by lifecycleManager (cube-lifecycle-manager). Remove cubeProxy.sidecar from your values." }}
+{{- end }}
+{{- if hasKey .Values.cubeProxy "hostNetwork" }}
+{{- fail "cubeProxy.hostNetwork was removed; CubeProxy always runs on the Pod network behind a ClusterIP Service + Ingress. Remove cubeProxy.hostNetwork from your values." }}
+{{- end }}
+{{- if and .Values.lifecycleManager.adminToken (lt (len .Values.lifecycleManager.adminToken) 16) }}
+{{- fail "lifecycleManager.adminToken must be empty for auto-generation or at least 16 characters when explicitly set" }}
+{{- end }}
+{{- if and .Values.cubeProxy.configureClusterDNS (eq (include "cube.proxyEnabled" .) "true") (not .Values.cubeProxy.domain) }}
+{{- fail "cubeProxy.configureClusterDNS=true requires cubeProxy.domain" }}
+{{- end }}
+{{- if and .Values.cubeProxy.ingress.enabled (not .Values.cubeProxy.domain) (not .Values.cubeProxy.ingress.hosts) }}
+{{- fail "cubeProxy.ingress.enabled=true requires cubeProxy.domain or cubeProxy.ingress.hosts" }}
+{{- end }}
+{{- if ne (include "cube.lifecycleManagerEnabled" .) "true" }}
+{{- fail "cubeProxy.enabled=true requires lifecycleManager.enabled=true (cube-lifecycle-manager replaces the obsolete cube-proxy-sidecar)" }}
+{{- end }}
+{{- if eq (include "cube.lifecycleManagerEnabled" .) "true" }}
+{{- if not (include "cube.masterEndpoint" .) }}
+{{- fail "lifecycleManager.enabled=true requires a CubeMaster endpoint (controlPlane.master or externalControlPlane.masterEndpoint)" }}
+{{- end }}
+{{- if and (not (eq (include "cube.redisBuiltinEnabled" .) "true")) (not .Values.redis.host) (not .Values.lifecycleManager.redis.host) (not .Values.cubeProxy.redis.host) }}
+{{- fail "lifecycleManager.enabled=true requires redis.host, lifecycleManager.redis.host, or cubeProxy.redis.host when redis.enabled=false" }}
+{{- end }}
+{{- if not .Values.images.lifecycleManager.repository }}
+{{- fail "lifecycleManager.enabled=true requires images.lifecycleManager.repository" }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if and .Values.webui.enabled .Values.controlPlane.enabled (ne (include "cube.opsEnabled" .) "true") }}
+{{- fail "webui.enabled=true requires cubeOps.enabled=true (WebUI proxies /opsapi and SDK paths to CubeOps)" }}
+{{- end }}
+{{- if eq (include "cube.opsEnabled" .) "true" }}
+{{- if not (include "cube.masterEndpoint" .) }}
+{{- fail "cubeOps.enabled=true requires a CubeMaster endpoint (controlPlane.master or externalControlPlane.masterEndpoint)" }}
+{{- end }}
+{{- if not .Values.images.ops.repository }}
+{{- fail "cubeOps.enabled=true requires images.ops.repository" }}
+{{- end }}
+{{- end }}
+{{- if .Values.cubeEgress.enabled }}
+{{- if not (has .Values.cubeEgress.ca.mode (list "existingSecret" "selfSigned" "inline")) }}
+{{- fail "cubeEgress.ca.mode must be one of: existingSecret, selfSigned, inline" }}
+{{- end }}
+{{- if and (eq .Values.cubeEgress.ca.mode "existingSecret") (not .Values.cubeEgress.ca.existingSecret) }}
+{{- fail "cubeEgress.ca.mode=existingSecret requires cubeEgress.ca.existingSecret" }}
+{{- end }}
+{{- if and (eq .Values.cubeEgress.ca.mode "inline") (or (not .Values.cubeEgress.ca.inline.rootCert) (not .Values.cubeEgress.ca.inline.rootKey) (not .Values.cubeEgress.ca.inline.placeholderCert) (not .Values.cubeEgress.ca.inline.placeholderKey)) }}
+{{- fail "cubeEgress.ca.mode=inline requires rootCert, rootKey, placeholderCert, and placeholderKey" }}
+{{- end }}
+{{- if and .Values.cubeEgress.network.enabled (not .Values.cubeEgress.network.ingressInterface) }}
+{{- fail "cubeEgress.network.enabled=true requires cubeEgress.network.ingressInterface" }}
+{{- end }}
+{{- end }}

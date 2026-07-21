@@ -28,7 +28,7 @@
   },
   "api": {
     "title": "API 请求监控",
-    "desc": "CubeAPI 网关连通性与限流配置",
+    "desc": "CubeOps 网关连通性与限流配置",
     "rateLimit": "限流阈值",
     "auth": "认证状态",
     "authOn": "已启用",

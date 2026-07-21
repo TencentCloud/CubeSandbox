@@ -1,0 +1,66 @@
+{{- if .Values.diagnostics.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cube.fullname" . }}-diagnostics
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: diagnostics
+data:
+  cube-diag-k8s.sh: |-
+    #!/bin/sh
+    set -eu
+
+    NS="${1:-{{ .Release.Namespace }}}"
+    RELEASE="${2:-{{ .Release.Name }}}"
+    OUT="${3:-cube-diag-${RELEASE}-$(date +%Y%m%d%H%M%S)}"
+
+    mkdir -p "${OUT}"
+
+    run() {
+      name="$1"
+      shift
+      echo "==> ${name}"
+      {
+        echo "# ${name}"
+        echo "# $*"
+        "$@"
+      } > "${OUT}/${name}.txt" 2>&1 || true
+    }
+
+    run pods kubectl get pods -n "${NS}" -o wide
+    run daemonsets kubectl get daemonsets -n "${NS}" -o wide
+    run deployments kubectl get deployments -n "${NS}" -o wide
+    run advanced-daemonsets kubectl get daemonsets.apps.kruise.io -n "${NS}" -o wide
+    run clonesets kubectl get clonesets.apps.kruise.io -n "${NS}" -o wide
+    run statefulsets kubectl get statefulsets -n "${NS}" -o wide
+    run services kubectl get services -n "${NS}" -o wide
+    run endpoints kubectl get endpoints -n "${NS}" -o wide
+    run events kubectl get events -n "${NS}" --sort-by=.lastTimestamp
+    run helm-values helm get values "${RELEASE}" -n "${NS}" -o yaml
+    run helm-manifest helm get manifest "${RELEASE}" -n "${NS}"
+
+    for component in master api ops cube-node cube-proxy webui dns mysql redis; do
+      run "pods-${component}" kubectl get pods -n "${NS}" -l "app.kubernetes.io/component=${component}" -o wide
+      kubectl get pods -n "${NS}" -l "app.kubernetes.io/component=${component}" -o name 2>/dev/null \
+        | while read -r pod; do
+            pod_name="${pod#pod/}"
+            run "describe-${pod_name}" kubectl describe -n "${NS}" "${pod}"
+            for container in $(kubectl get -n "${NS}" "${pod}" -o jsonpath='{range .spec.initContainers[*]}{.name}{"\n"}{end}{range .spec.containers[*]}{.name}{"\n"}{end}' 2>/dev/null); do
+              run "logs-${pod_name}-${container}" kubectl logs -n "${NS}" "${pod}" -c "${container}" --tail=300
+            done
+          done
+    done
+
+    for ds in {{ include "cube.nodeName" . | quote }} {{ include "cube.nodeInstallerName" . | quote }} {{ include "cube.nodeBootstrapName" . | quote }}; do
+      run "status-${ds}" kubectl get "daemonset.apps.kruise.io/${ds}" -n "${NS}" -o wide
+    done
+    {{ if .Values.bootstrap.pvmHostKernel.enabled }}
+    run status-{{ include "cube.nodePvmName" . }} kubectl get "daemonset/{{ include "cube.nodePvmName" . }}" -n "${NS}" -o wide
+    {{ end }}
+    run status-proxy kubectl get "cloneset.apps.kruise.io/{{ include "cube.proxyName" . }}" -n "${NS}" -o wide
+    run rollout-mysql kubectl rollout status "statefulset/{{ include "cube.mysqlName" . }}" -n "${NS}" --timeout=30s
+    run rollout-redis kubectl rollout status "statefulset/{{ include "cube.redisName" . }}" -n "${NS}" --timeout=30s
+
+    echo "diagnostics written to ${OUT}"
+{{- end }}

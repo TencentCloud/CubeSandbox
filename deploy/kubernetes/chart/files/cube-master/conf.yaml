@@ -1,0 +1,105 @@
+common:
+  http_port: {{ .Values.controlPlane.master.service.port }}
+  http_readtimeout: 120
+  http_writetimeout: 360
+  http_idletimeout: 360
+  sync_meta_data_interval: 30s
+  sync_metric_data_interval: 1s
+  collect_metric_interval: 1s
+  default_headless_service_nodes_num: 1
+  enable_check_com_net_id_param: false
+
+log:
+  module: "cubemaster"
+  path: "/data/log/CubeMaster"
+  file_size: 100
+  file_num: 10
+  level: "info"
+
+cubelet_conf:
+  grpc:
+    grpc_port: 9999
+  common_timeout_insec: 30
+  create_image_timeout_insec: 300
+  create_concurrent_limit: 100
+  destroy_concurent_limit: 100
+  enable_exposed_port: true
+  exposed_port_list:
+    - "80"
+  disable_redis_proxy_port: true
+
+auth:
+  enable: false
+
+req_template_conf:
+  whitelist_req_tag:
+    WorkingDir: true
+    RLimit: true
+    DnsConfig: true
+    HostAliases: true
+    Poststop: true
+    Prestop: true
+  cube_box_req_template: >-
+    {"volumes":[{"name":"tmp","volume_source":{"empty_dir":{"medium":0}}}],"containers":[{"name":"cubebox-default","envs":[{"key":"TZ","value":"Asia/Shanghai"},{"key":"TERM","value":"xterm"}],"volume_mounts":[{"name":"tmp","container_path":"/"}],"security_context":{"privileged":true,"readonly_rootfs":false,"no_new_privs":false}}],"network_type":"tap","cubevs_context":{"allowInternetAccess":true,"denyOut":["10.0.0.0/8","100.64.0.0/10","172.16.0.0/12","192.168.0.0/18"]}}
+
+ossdb_config:
+  addr: {{ printf "%s:%v" (include "cube.mysqlHost" .) .Values.mysql.port | quote }}
+  user: {{ .Values.mysql.user | quote }}
+  pwd: {{ .Values.mysql.password | quote }}
+  db_name: {{ .Values.mysql.database | quote }}
+  conn_timeout: 5
+  read_timeout: 5
+  write_timeout: 5
+  max_idle_conns: 5
+  max_open_conns: 20
+  max_conn_life_time_seconds: 300
+
+instance_db_config:
+  addr: {{ printf "%s:%v" (include "cube.mysqlHost" .) .Values.mysql.port | quote }}
+  user: {{ .Values.mysql.user | quote }}
+  pwd: {{ .Values.mysql.password | quote }}
+  db_name: {{ .Values.mysql.database | quote }}
+  conn_timeout: 5
+  read_timeout: 5
+  write_timeout: 5
+  max_idle_conns: 5
+  max_open_conns: 20
+  max_conn_life_time_seconds: 300
+
+redis:
+  nodes: {{ printf "%s:%v" (include "cube.redisHost" .) .Values.redis.port | quote }}
+  password: {{ .Values.redis.password | quote }}
+  db_no: 0
+  max_idle: 8
+  max_active: 32
+  idle_timeout: 30
+  max_retry: 2
+
+redis_read:
+  nodes: {{ printf "%s:%v" (include "cube.redisHost" .) .Values.redis.port | quote }}
+  password: {{ .Values.redis.password | quote }}
+  db_no: 0
+  max_idle: 8
+  max_active: 32
+  idle_timeout: 30
+  max_retry: 2
+
+redis_write:
+  nodes: {{ printf "%s:%v" (include "cube.redisHost" .) .Values.redis.port | quote }}
+  password: {{ .Values.redis.password | quote }}
+  db_no: 0
+  max_idle: 8
+  max_active: 32
+  idle_timeout: 30
+  max_retry: 2
+
+scheduler:
+  priority_select_num: 1
+  metric_update_timeout: 300s
+  local_metric_update_timeout: 300s
+  filter:
+    enable_filters:
+      - "cpu"
+      - "mem"
+      - "template_locality"
+      - "realtime_create_num"

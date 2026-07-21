@@ -1,0 +1,13 @@
+# Tencent Cloud COS credentials for cube-volume-cos-rpc
+# Install under CubeMaster/plugin/ (same directory as cube-volume-cos-rpc):
+#   /usr/local/services/cubetoolbox/CubeMaster/plugin/volume-cos.conf
+SECRET_ID=AKIDxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+SECRET_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+BUCKET=mybucket-1250000000
+REGION=ap-guangzhou
+
+# FUSE mount base: Cubelet AttachRequest.volumeBaseDir
+# (volume_plugin_base_dir, default /data/volume/cos-<id>).
+# PASSWD_FILE=/etc/cube/.passwd-cosfs
+# Must match CubeMaster / Cubelet socket_path
+SOCKET=/run/cube-volume-cos-rpc.sock

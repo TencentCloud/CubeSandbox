@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-pub mod cluster;
 pub mod sandboxes;
 pub mod snapshots;
 pub mod templates;
+pub mod volumes;
 
 use crate::{
     config::ServerConfig,
@@ -82,16 +82,15 @@ fn is_valid_dns_domain_name(domain: &str) -> bool {
 
 #[derive(Clone)]
 pub struct AppServices {
-    pub cluster: cluster::ClusterService,
     pub sandboxes: sandboxes::SandboxService,
     pub snapshots: snapshots::SnapshotService,
     pub templates: templates::TemplateService,
+    pub volumes: volumes::VolumeService,
 }
 
 impl AppServices {
     pub fn new(config: &ServerConfig, cubemaster: CubeMasterClient) -> Self {
         Self {
-            cluster: cluster::ClusterService::new(cubemaster.clone()),
             sandboxes: sandboxes::SandboxService::new(
                 cubemaster.clone(),
                 config.instance_type.clone(),
@@ -101,7 +100,11 @@ impl AppServices {
                 cubemaster.clone(),
                 config.instance_type.clone(),
             ),
-            templates: templates::TemplateService::new(cubemaster, config.instance_type.clone()),
+            templates: templates::TemplateService::new(
+                cubemaster.clone(),
+                config.instance_type.clone(),
+            ),
+            volumes: volumes::VolumeService::new(cubemaster),
         }
     }
 }

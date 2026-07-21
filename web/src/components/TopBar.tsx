@@ -1,7 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Tencent. All rights reserved.
 
-import { Search, Command as CmdIcon, Bell, Sparkles, FlaskConical, ExternalLink, Github, BookOpen } from 'lucide-react';
+import {
+  Search,
+  Command as CmdIcon,
+  Bell,
+  Sparkles,
+  FlaskConical,
+  ExternalLink,
+  Github,
+  BookOpen,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Button } from './ui/button';
 import { LanguageSwitcher } from './LanguageSwitcher';

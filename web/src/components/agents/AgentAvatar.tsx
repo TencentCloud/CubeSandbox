@@ -49,12 +49,7 @@ function deriveMonogram(seed: string): string {
   return trimmed.slice(0, 2).toUpperCase();
 }
 
-export function AgentAvatar({
-  seed,
-  size = 64,
-  className,
-  rounded = true,
-}: AgentAvatarProps) {
+export function AgentAvatar({ seed, size = 64, className, rounded = true }: AgentAvatarProps) {
   const { monogram, gradient } = useMemo(() => {
     const key = seed || 'guest';
     const [from, to] = PALETTES[hashString(key) % PALETTES.length];
@@ -77,7 +72,7 @@ export function AgentAvatar({
       className={cn(
         'flex select-none items-center justify-center font-semibold leading-none text-white shadow-sm ring-2 ring-white/40 dark:ring-white/10',
         rounded ? 'rounded-full' : 'rounded-lg',
-        className
+        className,
       )}
     >
       {monogram}
