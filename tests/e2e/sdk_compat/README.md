@@ -15,9 +15,11 @@ Documentation:
 
 - [Framework design](docs/framework-design.md)
 - [Case authoring guide](docs/case-authoring.md)
+- [Test coverage and improvement plan](docs/test-coverage.md)
 - [中文 README](README_zh.md)
-- [中文框架设计](docs/framework-design.zh-CN.md)
+- [中文框架设计](docs/zh/framework-design.md)
 - [中文用例编写指南](docs/zh/case-authoring.md)
+- [中文测试覆盖盘点与优化建议](docs/zh/test-coverage.md)
 
 ## Backend Environment Variables
 
@@ -210,6 +212,16 @@ Optional:
 - `SDK_E2E_TCP_TARGET_PORT`: public TCP probe port. Defaults to `53`.
 - `SDK_E2E_ALTERNATE_TCP_TARGET_IP`: alternate public TCP probe address.
   Defaults to `1.1.1.1`.
+- `SDK_E2E_PUBLIC_ACCESS_PORT`: exposed HTTP port used by restricted public
+  access inbound tests. Defaults to `49983`.
+- `SDK_E2E_PUBLIC_ACCESS_PATH`: path used by restricted public access inbound
+  tests. Defaults to `/health`.
+- `SDK_E2E_PUBLIC_ACCESS_EXPECTED_STATUS`: expected successful HTTP status for
+  restricted public access inbound tests. Defaults to `204`.
+- `SDK_E2E_PUBLIC_ACCESS_EXPECTED_BODY`: expected successful response body for
+  restricted public access inbound tests. Defaults to an empty string.
+  The default public URL uses HTTP, so traffic access tokens are sent in
+  cleartext. Use an HTTPS endpoint for cross-network or multi-tenant CI.
 - `SDK_E2E_KEEP_SANDBOX_ON_FAILURE`: preserve only sandboxes whose test setup
   or call phase failed. Passed and skipped tests are still cleaned up. Defaults
   to `false`.

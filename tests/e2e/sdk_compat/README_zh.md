@@ -15,9 +15,11 @@
 
 - [English README](README.md)
 - [English framework design](docs/framework-design.md)
-- [中文框架设计](docs/framework-design.zh-CN.md)
+- [中文框架设计](docs/zh/framework-design.md)
 - [English case authoring guide](docs/case-authoring.md)
 - [中文用例编写指南](docs/zh/case-authoring.md)
+- [English test coverage and improvement plan](docs/test-coverage.md)
+- [中文测试覆盖盘点与优化建议](docs/zh/test-coverage.md)
 
 ## Backend 环境变量
 
@@ -191,6 +193,15 @@ cp env.example .env
 - `SDK_E2E_TCP_TARGET_PORT`：公网 TCP 探测端口，默认 `53`；
 - `SDK_E2E_ALTERNATE_TCP_TARGET_IP`：备用公网 TCP 探测地址，默认
   `1.1.1.1`；
+- `SDK_E2E_PUBLIC_ACCESS_PORT`：限制公开访问入站用例访问的已暴露 HTTP
+  端口，默认 `49983`；
+- `SDK_E2E_PUBLIC_ACCESS_PATH`：限制公开访问入站用例访问的路径，默认
+  `/health`；
+- `SDK_E2E_PUBLIC_ACCESS_EXPECTED_STATUS`：限制公开访问入站用例期望的
+  成功 HTTP 状态码，默认 `204`；
+- `SDK_E2E_PUBLIC_ACCESS_EXPECTED_BODY`：限制公开访问入站用例期望的
+  成功响应 body，默认空字符串；默认公网 URL 使用 HTTP，traffic access token
+  会以明文 header 发送，跨网络或多租户 CI 环境应使用 HTTPS endpoint；
 - `SDK_E2E_KEEP_SANDBOX_ON_FAILURE`：仅保留 setup/call 失败的 sandbox；
 - `SDK_E2E_TRACE`：输出每次 SDK adapter 操作；
 - `SDK_E2E_SKIP_INTERNET_TESTS`：当 runner 或环境没有稳定公网出站时，
@@ -202,6 +213,31 @@ cp env.example .env
 - `SDK_E2E_PLATFORM_LIFECYCLE_WAIT_MARGIN`：额外等待时间，默认 `20` 秒；
 - `SDK_E2E_PLATFORM_LIFECYCLE_POLL_TIMEOUT`：轮询窗口，默认 `45` 秒；
 - `CUBE_PROXY_ADMIN_PORT`：CubeProxy admin 端口，默认 `8082`。
+
+### 失败时保留 sandbox
+
+默认情况下，测试结束后会清理主 sandbox。调试 setup 或测试主体
+（call phase）失败时，可以显式保留实例：
+
+```bash
+export SDK_E2E_KEEP_SANDBOX_ON_FAILURE=true
+pytest --run-e2e -vv cases/lifecycle/test_auto_lifecycle.py
+```
+
+该选项只保留 setup/call 失败的主 sandbox，便于通过 `info()`、CubeAPI、
+CubeProxy 和 lifecycle-manager 日志排查问题。以下情况仍会清理：
+
+- 测试通过或被跳过；
+- 只有 teardown 阶段失败；
+- 测试额外创建的 peer/control sandbox（必须由测试自己的 context manager
+  或 `finally` 清理）。
+
+保留实例会占用资源，不应作为常规运行配置。排查完成后应手动终止实例，
+或恢复默认配置：
+
+```bash
+unset SDK_E2E_KEEP_SANDBOX_ON_FAILURE
+```
 
 自托管 HTTPS 环境优先使用本地 CA：
 
@@ -277,6 +313,7 @@ tests/e2e/sdk_compat/
   adapters/       SDK adapter 和 tracing proxy
   framework/      配置、preflight、capability、清理、报告
   cases/          按 capability domain 划分的后端无关用例
+  docs/           框架设计、用例编写、覆盖盘点与优化建议
   reports/        本地 JSONL 报告
   README.md
   README_zh.md
@@ -311,13 +348,19 @@ Capability marker：
 - `@pytest.mark.requires_capability("<name>")`：当前后端不支持时跳过；
 - `@pytest.mark.sandbox_create_options(...)`：传入 `network`、`env_vars`、
   `lifecycle` 等 sandbox 创建参数；
+- `@pytest.mark.sandbox_template_id("tpl-...")`：为单个用例或模块级用例集
+  覆盖模板 ID；未设置时使用 `CUBE_TEMPLATE_ID` 或 `--cube-template-id`；
 - `@pytest.mark.requires_cubeproxy`：依赖 CubeProxy/lifecycle-manager
   协调，未设置 `SDK_E2E_PLATFORM_LIFECYCLE=true` 时跳过。
 
 常用 capability 有 `lifecycle`、`commands`、`filesystem`、`run_code`。
 可选共享 capability 包括 `pause_resume`、`network_allow_deny`、
 `network_public_access`。
-`platform_lifecycle` 仅由 CubeSandbox 的平台托管生命周期用例提供。
+当前分支的 `platform_lifecycle` 仅在 CubeSandbox capability 集合中启用。
+这不是 E2B 的固有能力限制，而是 E2B SDK 传递的 lifecycle 参数与 CubeAPI
+接收字段尚未对齐，导致 E2B 生命周期参数暂未生效。相关兼容修复见
+[PR #988](https://github.com/TencentCloud/CubeSandbox/pull/988)；修复合并并
+完成版本验证后，应重新启用 E2B 平台生命周期 capability 和双 backend 用例。
 
 ## 清理
 

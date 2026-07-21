@@ -298,6 +298,26 @@ class E2BAdapter(SandboxAdapter):
             error=getattr(result, "error", None),
         )
 
+    def get_host(self, port: int) -> str:
+        get_host = getattr(self._sandbox, "get_host", None)
+        if callable(get_host):
+            return str(get_host(port))
+        get_url = getattr(self._sandbox, "get_url", None)
+        if callable(get_url):
+            return str(get_url(port))
+        raise RuntimeError("E2B sandbox object does not expose get_host/get_url")
+
+    def traffic_access_token(self) -> str | None:
+        token = getattr(self._sandbox, "traffic_access_token", None)
+        if token:
+            return str(token)
+        try:
+            raw = self.info().raw
+        except Exception:  # noqa: BLE001 - token lookup should degrade gracefully
+            return None
+        token = first_present(raw, "traffic_access_token", "trafficAccessToken")
+        return str(token) if token else None
+
     def pause(self, *, timeout: int = 60) -> None:
         pause = getattr(self._sandbox, "pause", None)
         if not callable(pause):
