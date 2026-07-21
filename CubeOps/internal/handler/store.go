@@ -22,19 +22,18 @@ import (
 
 // StoreHandler handles store image metadata HTTP requests.
 type StoreHandler struct {
-	// registryClient is overridable in tests. When nil the handler uses
-	// the package-level defaultRegistryClient, which talks to real
-	// registries over HTTPS via go-containerregistry.
 	registryClient RegistryClient
 }
 
 // NewStoreHandler creates a new store handler.
-func NewStoreHandler() *StoreHandler { return &StoreHandler{} }
+func NewStoreHandler(registryClient RegistryClient) *StoreHandler {
+	return &StoreHandler{registryClient: registryClient}
+}
 
 // Register installs the store routes on the given router group.
 func (h *StoreHandler) Register(r *gin.RouterGroup) {
 	r.GET("/store/meta", h.GetStoreMeta)
-	r.POST("/store/refresh", h.RefreshStoreMeta)
+	r.POST("/store/refresh", StoreRefreshRateLimit(), h.RefreshStoreMeta)
 }
 
 var storeImages = []string{
@@ -70,46 +69,39 @@ func (h *StoreHandler) GetStoreMeta(c *gin.Context) {
 // RefreshStoreMeta handles POST /store/refresh.
 //
 // It queries each configured registry for the latest manifest digest of
-// the official images using go-containerregistry. It does NOT shell out
-// to `docker pull` — only the manifest is fetched, so the request is fast
-// and does not require docker on the host.
+// the official images using go-containerregistry. No image layers are
+// downloaded; the request only fetches the manifest and config blob
+// (KB-scale), so it is fast and does not require docker on the host.
 func (h *StoreHandler) RefreshStoreMeta(c *gin.Context) {
 	httputil.WriteJSON(c, http.StatusOK, StoreMeta{Images: h.inspectAll(c.Request.Context(), true)})
 }
 
 // inspectAll concurrently inspects each image and returns the metadata
-// slice. When refresh is true, it queries the upstream registry for the
-// latest manifest digest; otherwise it returns whatever digest the
-// registry client has cached from a previous refresh.
+// slice in storeImages order. When refresh is true it queries the
+// upstream registry for the latest manifest digest; otherwise it
+// returns whatever digest the registry client has cached from a
+// previous refresh.
 func (h *StoreHandler) inspectAll(ctx context.Context, refresh bool) []ImageMeta {
-	client := h.registryClient
-	if client == nil {
-		client = defaultRegistryClient
-	}
-
-	var mu sync.Mutex
-	out := make([]ImageMeta, 0, len(storeImages))
+	out := make([]ImageMeta, len(storeImages))
 	var wg sync.WaitGroup
-	for _, img := range storeImages {
+	for i, img := range storeImages {
 		wg.Add(1)
-		go func(image string) {
+		go func(i int, image string) {
 			defer wg.Done()
 
 			var meta *ImageMeta
 			if refresh {
-				meta = client.FetchLatest(ctx, image)
+				meta = h.registryClient.FetchLatest(ctx, image)
 			} else {
-				meta = client.Cached(image)
+				meta = h.registryClient.Cached(image)
 			}
 			if meta == nil {
 				// Even when we cannot resolve a digest we still report
 				// the image so the frontend can render the store entry.
 				meta = &ImageMeta{Image: image}
 			}
-			mu.Lock()
-			out = append(out, *meta)
-			mu.Unlock()
-		}(img)
+			out[i] = *meta
+		}(i, img)
 	}
 	wg.Wait()
 	return out
@@ -120,35 +112,46 @@ func (h *StoreHandler) inspectAll(ctx context.Context, refresh bool) []ImageMeta
 // RegistryClient resolves image metadata from an OCI/Docker registry.
 type RegistryClient interface {
 	// FetchLatest queries the registry for the current manifest digest
-	// of the given image reference. It also caches the result so a
-	// subsequent Cached(ref) returns it without network I/O.
+	// of the given image reference. Returns nil if the image cannot be
+	// resolved.
 	FetchLatest(ctx context.Context, ref string) *ImageMeta
 	// Cached returns the most recently fetched metadata for ref, or nil
-	// when no refresh has been performed yet.
+	// if FetchLatest has not been called successfully for it yet.
 	Cached(ref string) *ImageMeta
 }
 
 // defaultRegistryClient is the client used by the handler in production.
 var defaultRegistryClient RegistryClient = newGCRRegistryClient()
 
+// DefaultRegistryClient returns the package-level registry client used by
+// production code. Tests should construct their own fake client and
+// pass it to NewStoreHandler.
+func DefaultRegistryClient() RegistryClient { return defaultRegistryClient }
+
 // gcrRegistryClient uses google/go-containerregistry to resolve image
 // metadata. It keeps an in-memory cache of the most recent result per
 // image so GET /store/meta does not hit the network.
 type gcrRegistryClient struct {
-	cache sync.Map // ref -> ImageMeta
+	cache   sync.Map // ref -> ImageMeta
+	authOpt remote.Option
 }
 
 func newGCRRegistryClient() *gcrRegistryClient {
-	return &gcrRegistryClient{}
+	// Store images are public; anonymous access avoids the per-call
+	// filesystem I/O of authn.DefaultKeychain.
+	return &gcrRegistryClient{
+		authOpt: remote.WithAuth(authn.Anonymous),
+	}
 }
 
-// FetchLatest resolves ref via go-containerregistry. For multi-arch
-// indexes the library automatically picks the linux/amd64 platform
-// manifest and reports its digest and layer sizes.
+// FetchLatest resolves ref via go-containerregistry and caches the
+// result so a subsequent Cached(ref) returns it without network I/O.
+// For multi-arch indexes the library automatically picks the
+// linux/amd64 platform manifest and reports its digest and layer sizes.
 //
-// Errors at each step are logged at debug level and surface to the
-// caller as a nil ImageMeta so the handler can return a placeholder
-// entry. Production failures remain diagnosable from CubeOps logs.
+// Errors return nil so the handler can emit a placeholder entry for
+// the frontend; registry resolution failures are logged at warn level
+// so operators see them in production logs.
 func (c *gcrRegistryClient) FetchLatest(ctx context.Context, ref string) *ImageMeta {
 	parsedRef, err := name.ParseReference(ref)
 	if err != nil {
@@ -156,23 +159,19 @@ func (c *gcrRegistryClient) FetchLatest(ctx context.Context, ref string) *ImageM
 		return nil
 	}
 
-	// Anonymous access: use the default keychain which handles
-	// ~/.docker/config.json. For public images on ghcr.io / TCR this
-	// is sufficient — the library performs the bearer-token dance
-	// internally.
 	img, err := remote.Image(parsedRef,
 		remote.WithContext(ctx),
-		remote.WithAuthFromKeychain(authn.DefaultKeychain),
+		c.authOpt,
 		remote.WithPlatform(v1.Platform{OS: "linux", Architecture: "amd64"}),
 	)
 	if err != nil {
-		slog.Debug("store: failed to resolve image", "ref", ref, "err", err)
+		slog.Warn("store: failed to resolve image", "ref", ref, "err", err)
 		return nil
 	}
 
 	manifest, err := img.Manifest()
 	if err != nil {
-		slog.Debug("store: failed to read manifest", "ref", ref, "err", err)
+		slog.Warn("store: failed to read manifest", "ref", ref, "err", err)
 		return nil
 	}
 
@@ -183,7 +182,7 @@ func (c *gcrRegistryClient) FetchLatest(ctx context.Context, ref string) *ImageM
 
 	digest, err := img.Digest()
 	if err != nil {
-		slog.Debug("store: failed to read digest", "ref", ref, "err", err)
+		slog.Warn("store: failed to read digest", "ref", ref, "err", err)
 		return nil
 	}
 

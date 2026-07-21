@@ -89,7 +89,7 @@ func (s *Server) buildRouter() *gin.Engine {
 	authSvc := service.NewAuthService(s.store, s.jm)
 	authH := auth.NewHandler(authSvc)
 	clusterH := handler.NewClusterHandler(s.cm)
-	storeH := handler.NewStoreHandler()
+	storeH := handler.NewStoreHandler(handler.DefaultRegistryClient())
 	configH := handler.NewConfigHandler(s.cfg.Bind, 100, s.cfg.JWTSecret != "", s.cfg.SandboxDomain, "cubebox")
 	agenthubH := handler.NewAgentHubHandler(s.store, s.cm)
 	// SDK handler gets the AgentHubService so that E2B template/snapshot
