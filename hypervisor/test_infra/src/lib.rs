@@ -5,17 +5,16 @@
 
 #![allow(clippy::undocumented_unsafe_blocks)]
 
-use once_cell::sync::Lazy;
-use serde_json::Value;
-use ssh2::Session;
 use std::env;
 use std::ffi::OsStr;
-use std::io;
-use std::io::{Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::net::TcpStream;
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::io::{AsRawFd, FromRawFd};
+use std::os::unix::{
+    fs::PermissionsExt,
+    io::{AsRawFd, FromRawFd},
+    net::UnixStream,
+};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::str::FromStr;
@@ -23,6 +22,11 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 use std::{fmt, fs};
+
+use once_cell::sync::Lazy;
+use serde_json::Value;
+use ssh2::Session;
+use vmm_sys_util::sock_ctrl_msg::ScmSocket;
 use vmm_sys_util::tempdir::TempDir;
 use wait_timeout::ChildExt;
 
@@ -1089,6 +1093,96 @@ impl Guest {
         assert_eq!(
             self.ssh_command("cat vsock_log").unwrap().trim(),
             "HelloWorld!"
+        );
+    }
+
+    pub fn start_vsock_passthrough_fd_listener(&self) {
+        // Listen from guest on vsock CID=3 PORT=16
+        self.ssh_command(
+            "rm -f vsock_passfd_log vsock_passfd_socat.log vsock_passfd_socat.pid; sudo sh -c \
+             'socat SOCKET-LISTEN:40:0:x00x00x10x00x00x00x03x00x00x00x00x00x00x00,fork \
+             SYSTEM:\"head -n 1 >> vsock_passfd_log; printf GuestReply\" \
+             > vsock_passfd_socat.log 2>&1 & pid=$!; echo $pid > vsock_passfd_socat.pid; \
+             sleep 1; kill -0 $pid'",
+        )
+        .unwrap();
+    }
+
+    pub fn vsock_passthrough_fd_listener_identity(&self) -> String {
+        let identity = self
+            .ssh_command(
+                "sudo sh -c 'pid=$(cat vsock_passfd_socat.pid) || exit 1; \
+                 for fd_path in /proc/$pid/fd/*; do \
+                     target=$(readlink \"$fd_path\") || continue; \
+                     case \"$target\" in \
+                         socket:*) printf \"%s:%s:%s\\n\" \
+                             \"$pid\" \"${fd_path##*/}\" \"$target\";; \
+                     esac; \
+                 done'",
+            )
+            .unwrap()
+            .trim()
+            .to_string();
+        assert!(!identity.is_empty(), "socat has no open socket FD");
+        identity
+    }
+
+    pub fn check_vsock_passthrough_fd_bidirectional(
+        &self,
+        socket: &str,
+        payload: &str,
+        expected_log: &str,
+    ) {
+        // Connect via Unix socket
+
+        let mut stream = (0..30)
+            .find_map(|_| match UnixStream::connect(socket) {
+                Ok(stream) => Some(stream),
+                Err(_) => {
+                    thread::sleep(Duration::from_secs(1));
+                    None
+                }
+            })
+            .expect("Failed to connect to vsock unix socket within 30 seconds");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+
+        let (fd1, mut fd2) = UnixStream::pair().expect("Failed to create unix socket pair");
+        fd2.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+
+        let iov = [b"passfd 16 stream\n".as_slice()];
+        let fds = [fd1.as_raw_fd()];
+        stream.send_with_fds(&iov, &fds).unwrap();
+        drop(fd1);
+
+        // Read and validate the complete "OK stream <local_port>" response.
+        let mut rsp = String::new();
+        BufReader::new(&mut stream).read_line(&mut rsp).unwrap();
+        let mut fields = rsp.split_whitespace();
+        assert_eq!(fields.next(), Some("OK"));
+        assert_eq!(fields.next(), Some("stream"));
+        fields
+            .next()
+            .expect("passfd response is missing the local port")
+            .parse::<u32>()
+            .expect("passfd response contains an invalid local port");
+        assert_eq!(fields.next(), None, "passfd response has extra fields");
+
+        // The guest consumes one newline-terminated request and replies through the same passed
+        // FD. Keep the write direction open: this test verifies bidirectional passfd I/O without
+        // imposing half-close semantics on the generic vsock connection state machine.
+        fd2.write_all(payload.as_bytes()).unwrap();
+
+        let mut reply = [0u8; 10];
+        fd2.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply, b"GuestReply");
+
+        let actual_log = self.ssh_command("cat vsock_passfd_log").unwrap();
+        assert_eq!(
+            actual_log.trim(),
+            expected_log,
+            "guest passfd log does not contain the expected payload"
         );
     }
 

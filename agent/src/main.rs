@@ -19,11 +19,6 @@ extern crate scopeguard;
 #[macro_use]
 extern crate slog;
 
-use anyhow::{anyhow, Context, Result};
-use clap::{AppSettings, Parser};
-use nix::fcntl::OFlag;
-use nix::sys::socket::{self, AddressFamily, SockAddr, SockFlag, SockType};
-use nix::unistd::{self, dup, Pid};
 use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, File};
@@ -36,6 +31,12 @@ use std::sync::atomic::{compiler_fence, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+
+use anyhow::{anyhow, Context, Result};
+use clap::{AppSettings, Parser};
+use nix::fcntl::OFlag;
+use nix::sys::socket::{self, AddressFamily, SockAddr, SockFlag, SockType};
+use nix::unistd::{self, dup, Pid};
 use tracing::{instrument, span};
 
 mod config;
@@ -60,14 +61,12 @@ mod util;
 mod version;
 mod watcher;
 
+use futures::future::join_all;
 use mount::{cgroups_mount, general_mount};
+use rustjail::pipestream::PipeStream;
 use sandbox::Sandbox;
 use signal::setup_signal_handler;
-use slog::{error, o, warn, Logger};
-use uevent::watch_uevents;
-
-use futures::future::join_all;
-use rustjail::pipestream::PipeStream;
+use slog::{error, info, o, warn, Logger};
 use tokio::{
     io::AsyncWrite,
     sync::{
@@ -76,7 +75,9 @@ use tokio::{
     },
     task::JoinHandle,
 };
+use uevent::watch_uevents;
 
+pub mod passfd_io;
 mod rpc;
 mod tracer;
 
@@ -394,7 +395,15 @@ async fn start_sandbox(
     );
     // vsock:///dev/vsock, port
     let mut server = rpc::start(sandbox.clone(), config.server_addr.as_str())?;
+    info!(logger, "agent startup: binding passfd listener");
+    if let Err(e) = crate::passfd_io::start_passfd_listener(logger.clone()).await {
+        warn!(logger, "start_passfd_listener failed: {:?}", e);
+    }
+
     server.start().await?;
+    if let Err(e) = rpc::notify_vsock_server_ready() {
+        error!(logger, "notify_vsock_server_ready failed: {:?}", e);
+    }
 
     rx.await?;
 
@@ -453,8 +462,9 @@ fn reset_sigpipe() {
     }
 }
 
-use crate::config::AgentConfig;
 use std::os::unix::io::{FromRawFd, RawFd};
+
+use crate::config::AgentConfig;
 
 #[cfg(test)]
 mod tests {

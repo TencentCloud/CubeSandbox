@@ -2,6 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io;
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use std::os::unix::net::{UnixListener, UnixStream};
+
+use sendfd::RecvWithFd;
+use serde::{Deserialize, Serialize};
+use vm_migration::{MigratableError, Pausable, Snapshot, Snapshottable};
+
 use super::super::csm::ConnState;
 use super::super::defs::uapi;
 use super::super::device::MUXER_EPOLL_EVENT;
@@ -12,9 +22,68 @@ use super::super::{
 use super::defs;
 use super::muxer_killq::MuxerKillQ;
 use super::muxer_rxq::MuxerRxQ;
+use super::stream::PassFdLabel;
 use super::MuxerConnection;
 use super::{Error, Result};
+use super::{PassFdStream, VsockBackendStream};
 use crate::vsock::packet::VirtioVsockHdr;
+
+enum LocalStreamCommand {
+    Connect(u32),
+    PassFds(Vec<PassFdRequest>),
+}
+
+struct PassFdRequest {
+    label: PassFdLabel,
+    port: u32,
+    fd: RawFd,
+}
+
+impl Drop for PassFdRequest {
+    fn drop(&mut self) {
+        if self.fd >= 0 {
+            unsafe {
+                libc::close(self.fd);
+            }
+            self.fd = -1;
+        }
+    }
+}
+
+impl PassFdRequest {
+    fn take_fd(&mut self) -> RawFd {
+        let fd = self.fd;
+        self.fd = -1;
+        fd
+    }
+}
+
+struct LocalPassFd {
+    label: PassFdLabel,
+    port: u32,
+    local_port: u32,
+    fd: RawFd,
+}
+
+impl Drop for LocalPassFd {
+    fn drop(&mut self) {
+        if self.fd >= 0 {
+            unsafe {
+                libc::close(self.fd);
+            }
+            self.fd = -1;
+        }
+    }
+}
+
+impl LocalPassFd {
+    fn take_fd(&mut self) -> RawFd {
+        let fd = self.fd;
+        self.fd = -1;
+        fd
+    }
+}
+
 /// `VsockMuxer` is the device-facing component of the Unix domain sockets vsock backend. I.e.
 /// by implementing the `VsockBackend` trait, it abstracts away the gory details of translating
 /// between AF_VSOCK and AF_UNIX, and presents a clean interface to the rest of the vsock
@@ -44,13 +113,6 @@ use crate::vsock::packet::VirtioVsockHdr;
 ///    To route all these events to their handlers, the muxer uses another `HashMap` object,
 ///    mapping `RawFd`s to `EpollListener`s.
 ///
-use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io::{self, Read};
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::os::unix::net::{UnixListener, UnixStream};
-use vm_migration::{MigratableError, Pausable, Snapshot, Snapshottable};
 
 /// A unique identifier of a `MuxerConnection` object. Connections are stored in a hash map,
 /// keyed by a `ConnMapKey` object.
@@ -419,6 +481,191 @@ pub fn cube_get_vsock_dbg_conf() -> Vec<CubeVsockDbgConf> {
 }
 
 impl VsockMuxer {
+    fn close_fds_safely(fds: &mut [RawFd], count: usize) {
+        for fd in fds.iter_mut().take(count) {
+            if *fd >= 0 {
+                unsafe {
+                    libc::close(*fd);
+                }
+                *fd = -1;
+            }
+        }
+    }
+
+    fn validate_passfd(recv_fd: RawFd) -> bool {
+        if unsafe { libc::fcntl(recv_fd, libc::F_GETFD) } < 0 {
+            info!("vsock: passfd invalid fd: {}", recv_fd);
+            return false;
+        }
+
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(recv_fd, &mut stat) } < 0 {
+            info!(
+                "vsock: passfd fstat failed: fd={}, error={:?}",
+                recv_fd,
+                io::Error::last_os_error()
+            );
+            return false;
+        }
+
+        match stat.st_mode & libc::S_IFMT {
+            libc::S_IFIFO | libc::S_IFSOCK => true,
+            file_type => {
+                info!(
+                    "vsock: passfd unsupported fd type: fd={}, file_type={:#o}",
+                    recv_fd, file_type
+                );
+                false
+            }
+        }
+    }
+
+    fn set_passfd_nonblocking(recv_fd: RawFd) -> bool {
+        let flags = unsafe { libc::fcntl(recv_fd, libc::F_GETFL) };
+        if flags < 0 {
+            info!(
+                "vsock: passfd F_GETFL failed: fd={}, error={:?}",
+                recv_fd,
+                io::Error::last_os_error()
+            );
+            return false;
+        }
+
+        if unsafe { libc::fcntl(recv_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            info!(
+                "vsock: passfd F_SETFL O_NONBLOCK failed: fd={}, error={:?}",
+                recv_fd,
+                io::Error::last_os_error()
+            );
+            return false;
+        }
+        true
+    }
+
+    fn validate_local_peer(stream: &UnixStream) -> io::Result<()> {
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let ret = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                &mut cred as *mut _ as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let expected_uid = unsafe { libc::geteuid() };
+        if cred.uid != expected_uid {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "unexpected peer uid {}, expected {}",
+                    cred.uid, expected_uid
+                ),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn add_local_connect_connection(&mut self, stream: UnixStream, peer_port: u32) {
+        let local_port = self.allocate_local_port();
+        info!(
+            "vsock: local-init connection: local_port={}, peer_port={}",
+            local_port, peer_port
+        );
+        let backend = VsockBackendStream::Unix(stream);
+        if let Err(err) = self.add_connection(
+            ConnMapKey {
+                local_port,
+                peer_port,
+            },
+            MuxerConnection::new_local_init(
+                backend,
+                uapi::VSOCK_HOST_CID,
+                self.cid,
+                local_port,
+                peer_port,
+            ),
+        ) {
+            info!("vsock: error adding local-init connection: {:?}", err);
+            self.free_local_port(local_port);
+        }
+    }
+
+    fn prepare_local_passfds(
+        &mut self,
+        requests: &mut [PassFdRequest],
+    ) -> Option<Vec<LocalPassFd>> {
+        // A passfd command is one batch: the shim waits for one response per
+        // requested label. Do not establish valid siblings when any received
+        // fd is unusable, otherwise those connections have no ports in the
+        // eventual RPC and remain unclaimed in the guest.
+        if requests.iter().any(|req| !Self::validate_passfd(req.fd)) {
+            return None;
+        }
+        if requests
+            .iter()
+            .any(|req| !Self::set_passfd_nonblocking(req.fd))
+        {
+            return None;
+        }
+
+        let mut passfds = Vec::with_capacity(requests.len());
+        for req in requests.iter_mut() {
+            passfds.push(LocalPassFd {
+                label: req.label.clone(),
+                port: req.port,
+                local_port: self.allocate_local_port(),
+                fd: req.take_fd(),
+            });
+        }
+        Some(passfds)
+    }
+
+    fn add_local_passfd_connections(&mut self, stream: &UnixStream, mut passfds: Vec<LocalPassFd>) {
+        for passfd in passfds.iter_mut() {
+            info!(
+                "vsock: local-init passfd connection: label={}, local_port={}, peer_port={}",
+                passfd.label, passfd.local_port, passfd.port
+            );
+            let control = match stream.try_clone() {
+                Ok(control) => control,
+                Err(err) => {
+                    info!("vsock: error cloning passfd control stream: {:?}", err);
+                    self.free_local_port(passfd.local_port);
+                    continue;
+                }
+            };
+            let file = unsafe { std::fs::File::from_raw_fd(passfd.take_fd()) };
+            let backend =
+                VsockBackendStream::PassFd(PassFdStream::new(file, control, passfd.label.clone()));
+            if let Err(err) = self.add_connection(
+                ConnMapKey {
+                    local_port: passfd.local_port,
+                    peer_port: passfd.port,
+                },
+                MuxerConnection::new_local_init(
+                    backend,
+                    uapi::VSOCK_HOST_CID,
+                    self.cid,
+                    passfd.local_port,
+                    passfd.port,
+                ),
+            ) {
+                info!(
+                    "vsock: error adding local-init passfd connection: {:?}",
+                    err
+                );
+                self.free_local_port(passfd.local_port);
+            }
+        }
+    }
+
     /// Muxer constructor.
     ///
     pub fn new(
@@ -446,7 +693,6 @@ impl VsockMuxer {
         let host_sock = UnixListener::bind(&host_sock_path)
             .and_then(|sock| sock.set_nonblocking(true).map(|_| sock))
             .map_err(Error::UnixBind)?;
-
         let cube_dbg_conf = cube_get_vsock_dbg_conf();
         debug!("vsock: cube dbg conf {:?}", cube_dbg_conf);
 
@@ -487,11 +733,16 @@ impl VsockMuxer {
         None
     }
 
-    /// Handle host sock event.
-    fn handle_host_sock_event(&mut self, fd: RawFd, event_set: epoll::Events) {
+    fn dispatch_event(
+        &mut self,
+        fd: RawFd,
+        event_set: epoll::Events,
+        record_conn_info: bool,
+        log_label: &str,
+    ) {
         debug!(
-            "vsock: muxer processing host sock event: fd={}, event_set={:?}",
-            fd, event_set
+            "vsock: muxer processing {} event: fd={}, event_set={:?}",
+            log_label, fd, event_set
         );
 
         match self.listener_map.get_mut(&fd) {
@@ -530,6 +781,10 @@ impl VsockMuxer {
                     .accept()
                     .map_err(Error::UnixAccept)
                     .and_then(|(stream, _)| {
+                        Self::validate_local_peer(&stream).map_err(Error::UnixAccept)?;
+                        Ok(stream)
+                    })
+                    .and_then(|stream| {
                         stream
                             .set_nonblocking(true)
                             .map(|_| stream)
@@ -540,8 +795,10 @@ impl VsockMuxer {
                         // the guest side, we need to know the destination port. We'll read
                         // that port from a "connect" command received on this socket, so the
                         // next step is to ask to be notified the moment we can read from it.
-                        self.conn_info.insert(stream.as_raw_fd(), conn_info);
-                        debug!("vsock unix accept {:?}", tm);
+                        if record_conn_info {
+                            self.conn_info.insert(stream.as_raw_fd(), conn_info);
+                            debug!("vsock unix accept {:?}", tm);
+                        }
                         self.add_listener(stream.as_raw_fd(), EpollListener::LocalStream(stream))
                     })
                     .unwrap_or_else(|err| {
@@ -553,30 +810,21 @@ impl VsockMuxer {
             // "connect" command that we're expecting.
             Some(EpollListener::LocalStream(_)) => {
                 if let Some(EpollListener::LocalStream(mut stream)) = self.remove_listener(fd) {
-                    Self::read_local_stream_port(self, &mut stream)
-                        .map(|peer_port| (self.allocate_local_port(), peer_port))
-                        .and_then(|(local_port, peer_port)| {
-                            info!(
-                                "vsock: local-init connection: local_port={}, peer_port={}",
-                                local_port, peer_port
-                            );
-                            self.add_connection(
-                                ConnMapKey {
-                                    local_port,
-                                    peer_port,
-                                },
-                                MuxerConnection::new_local_init(
-                                    stream,
-                                    uapi::VSOCK_HOST_CID,
-                                    self.cid,
-                                    local_port,
-                                    peer_port,
-                                ),
-                            )
-                        })
-                        .unwrap_or_else(|err| {
+                    match Self::read_local_stream_port(self, &mut stream) {
+                        Ok(LocalStreamCommand::Connect(peer_port)) => {
+                            self.add_local_connect_connection(stream, peer_port);
+                        }
+                        Ok(LocalStreamCommand::PassFds(mut requests)) => {
+                            if let Some(passfds) = self.prepare_local_passfds(&mut requests) {
+                                self.add_local_passfd_connections(&stream, passfds);
+                            } else {
+                                info!("vsock: rejecting invalid passfd batch");
+                            }
+                        }
+                        Err(err) => {
                             info!("vsock: error adding local-init connection: {:?}", err);
-                        })
+                        }
+                    }
                 }
             }
 
@@ -587,149 +835,108 @@ impl VsockMuxer {
                 );
             }
         }
+    }
+
+    /// Handle host sock event.
+    fn handle_host_sock_event(&mut self, fd: RawFd, event_set: epoll::Events) {
+        self.dispatch_event(fd, event_set, true, "host sock");
     }
 
     /// Handle/dispatch an epoll event to its listener.
     ///
     fn handle_event(&mut self, fd: RawFd, event_set: epoll::Events) {
-        debug!(
-            "vsock: muxer processing event: fd={}, event_set={:?}",
-            fd, event_set
-        );
-
-        match self.listener_map.get_mut(&fd) {
-            // This event needs to be forwarded to a `MuxerConnection` that is listening for
-            // it.
-            //
-            Some(EpollListener::Connection { key, evset: _ }) => {
-                let key_copy = *key;
-                // The handling of this event will most probably mutate the state of the
-                // receiving connection. We'll need to check for new pending RX, event set
-                // mutation, and all that, so we're wrapping the event delivery inside those
-                // checks.
-                self.apply_conn_mutation(key_copy, |conn| {
-                    conn.notify(event_set);
-                });
-            }
-
-            // A new host-initiated connection is ready to be accepted.
-            //
-            Some(EpollListener::HostSock) => {
-                if self.conn_map.len() == defs::MAX_CONNECTIONS {
-                    // If we're already maxed-out on connections, we'll just accept and
-                    // immediately discard this potentially new one.
-                    warn!("vsock: connection limit reached; refusing new host connection");
-                    self.host_sock.accept().map(|_| 0).unwrap_or(0);
-                    return;
-                }
-                self.host_sock
-                    .accept()
-                    .map_err(Error::UnixAccept)
-                    .and_then(|(stream, _)| {
-                        stream
-                            .set_nonblocking(true)
-                            .map(|_| stream)
-                            .map_err(Error::UnixAccept)
-                    })
-                    .and_then(|stream| {
-                        // Before forwarding this connection to a listening AF_VSOCK socket on
-                        // the guest side, we need to know the destination port. We'll read
-                        // that port from a "connect" command received on this socket, so the
-                        // next step is to ask to be notified the moment we can read from it.
-                        self.add_listener(stream.as_raw_fd(), EpollListener::LocalStream(stream))
-                    })
-                    .unwrap_or_else(|err| {
-                        warn!("vsock: unable to accept local connection: {:?}", err);
-                    });
-            }
-
-            // Data is ready to be read from a host-initiated connection. That would be the
-            // "connect" command that we're expecting.
-            Some(EpollListener::LocalStream(_)) => {
-                if let Some(EpollListener::LocalStream(mut stream)) = self.remove_listener(fd) {
-                    Self::read_local_stream_port(self, &mut stream)
-                        .map(|peer_port| (self.allocate_local_port(), peer_port))
-                        .and_then(|(local_port, peer_port)| {
-                            info!(
-                                "vsock: local-init connection: local_port={}, peer_port={}",
-                                local_port, peer_port
-                            );
-                            self.add_connection(
-                                ConnMapKey {
-                                    local_port,
-                                    peer_port,
-                                },
-                                MuxerConnection::new_local_init(
-                                    stream,
-                                    uapi::VSOCK_HOST_CID,
-                                    self.cid,
-                                    local_port,
-                                    peer_port,
-                                ),
-                            )
-                        })
-                        .unwrap_or_else(|err| {
-                            info!("vsock: error adding local-init connection: {:?}", err);
-                        })
-                }
-            }
-
-            _ => {
-                info!(
-                    "vsock: unexpected event: fd={:?}, event_set={:?}",
-                    fd, event_set
-                );
-            }
-        }
+        self.dispatch_event(fd, event_set, false, "nested");
     }
 
-    /// Parse a host "connect" command, and extract the destination vsock port.
+    /// Parse a host "connect" or "passfd" command, and extract the destination vsock port.
     ///
-    fn read_local_stream_port(&mut self, stream: &mut UnixStream) -> Result<u32> {
-        let mut buf = [0u8; 32];
+    fn read_local_stream_port(&mut self, stream: &mut UnixStream) -> Result<LocalStreamCommand> {
+        let mut buf = [0u8; 96];
+        let mut fds = [-1; 3];
 
-        // This is the minimum number of bytes that we should be able to read, when parsing a
-        // valid connection request. I.e. `b"connect 0\n".len()`.
-        const MIN_READ_LEN: usize = 10;
+        // Locate the command terminator without consuming the stream. CONNECT
+        // clients may write their first payload in the same send, so the real
+        // read must stop exactly at the newline and leave that payload queued.
+        let peek_len = unsafe {
+            libc::recv(
+                stream.as_raw_fd(),
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+                libc::MSG_PEEK,
+            )
+        };
+        if peek_len == 0 {
+            return Err(Error::InvalidPortRequest);
+        }
+        if peek_len < 0 {
+            return Err(Error::UnixRead(io::Error::last_os_error()));
+        }
+        let peek_len = peek_len as usize;
+        let cmd_len = buf[..peek_len]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|pos| pos + 1)
+            .ok_or(Error::InvalidPortRequest)?;
 
-        // Bring in the minimum number of bytes that we should be able to read.
-        stream
-            .read_exact(&mut buf[..MIN_READ_LEN])
+        // Consume the complete command with recvmsg so PASSFD receives the
+        // SCM_RIGHTS control message attached to the stream data.
+        let (data_len, fd_len) = stream
+            .recv_with_fd(&mut buf[..cmd_len], &mut fds)
             .map_err(Error::UnixRead)?;
 
-        // Now, finish reading the destination port number, by bringing in one byte at a time,
-        // until we reach an EOL terminator (or our buffer space runs out).  Yeah, not
-        // particularly proud of this approach, but it will have to do for now.
-        let mut blen = MIN_READ_LEN;
-        while buf[blen - 1] != b'\n' && blen < buf.len() {
-            stream
-                .read_exact(&mut buf[blen..=blen])
-                .map_err(Error::UnixRead)?;
-            blen += 1;
+        if data_len != cmd_len {
+            Self::close_fds_safely(&mut fds, fd_len);
+            return Err(Error::InvalidPortRequest);
         }
+        // recvmsg transferred ownership of every SCM_RIGHTS descriptor to us.
+        // Guard them before parsing so all malformed-command paths close them.
+        let mut received_fds = fds
+            .iter_mut()
+            .take(fd_len)
+            .map(|fd| {
+                let owned = unsafe { OwnedFd::from_raw_fd(*fd) };
+                *fd = -1;
+                Some(owned)
+            })
+            .collect::<Vec<_>>();
 
-        let mut word_iter = std::str::from_utf8(&buf[..blen])
+        let mut word_iter = std::str::from_utf8(&buf[..data_len])
             .map_err(Error::ConvertFromUtf8)?
             .split_whitespace();
 
-        word_iter
-            .next()
-            .ok_or(Error::InvalidPortRequest)
-            .and_then(|word| {
-                if word.to_lowercase() == "connect" {
-                    if let Some(conn_info) = self.conn_info.get_mut(&stream.as_raw_fd()) {
-                        let tm = std::time::Instant::now();
-                        conn_info.send_connect_time = tm;
-                    }
+        let cmd = word_iter.next().ok_or(Error::InvalidPortRequest)?;
+        let port_str = word_iter.next().ok_or(Error::InvalidPortRequest)?;
+        let port = port_str.parse::<u32>().map_err(Error::ParseInteger)?;
 
-                    Ok(())
-                } else {
-                    Err(Error::InvalidPortRequest)
-                }
-            })
-            .and_then(|_| word_iter.next().ok_or(Error::InvalidPortRequest))
-            .and_then(|word| word.parse::<u32>().map_err(Error::ParseInteger))
-            .map_err(|e| Error::ReadStreamPort(Box::new(e)))
+        if cmd.to_lowercase() == "connect" {
+            if let Some(conn_info) = self.conn_info.get_mut(&stream.as_raw_fd()) {
+                conn_info.send_connect_time = std::time::Instant::now();
+            }
+            Ok(LocalStreamCommand::Connect(port))
+        } else if cmd.to_lowercase() == "passfd" {
+            let labels = word_iter.collect::<Vec<_>>();
+            // Keep the original single-stream command compatible. Batched
+            // passfd requests must label every fd so responses can be matched.
+            let labels = if labels.is_empty() && fd_len == 1 {
+                vec!["stream"]
+            } else {
+                labels
+            };
+            if fd_len != labels.len() || labels.len() > fds.len() {
+                return Err(Error::InvalidPortRequest);
+            }
+            let mut requests = Vec::with_capacity(labels.len());
+            for (idx, label) in labels.into_iter().enumerate() {
+                requests.push(PassFdRequest {
+                    label: PassFdLabel::from(label),
+                    port,
+                    fd: received_fds[idx].take().unwrap().into_raw_fd(),
+                });
+            }
+            Ok(LocalStreamCommand::PassFds(requests))
+        } else {
+            Err(Error::InvalidPortRequest)
+        }
     }
 
     /// Add a new connection to the active connection pool.
@@ -931,7 +1138,7 @@ impl VsockMuxer {
                         peer_port: pkt.src_port(),
                     },
                     MuxerConnection::new_peer_init(
-                        stream,
+                        VsockBackendStream::Unix(stream),
                         uapi::VSOCK_HOST_CID,
                         self.cid,
                         pkt.dst_port(),
@@ -965,7 +1172,6 @@ impl VsockMuxer {
             // If this is a host-initiated connection that has just become established, we'll have
             // to send an ack message to the host end.
             if prev_state == ConnState::LocalInit && conn.state() == ConnState::Established {
-                let msg = format!("OK {}\n", key.local_port);
                 let fd = conn.get_polled_fd();
                 if let Some(conn_info) = self.conn_info.get_mut(&fd) {
                     let unix_accept_time = conn_info.unix_accept_time;
@@ -980,14 +1186,8 @@ impl VsockMuxer {
                           unix_accept_cost, conn_cost, unix_accept_time, send_connect_time, std::time::Instant::now());
                 }
 
-                match conn.send_bytes_raw(msg.as_bytes()) {
-                    Ok(written) if written == msg.len() => (),
-                    Ok(_) => {
-                        // If we can't write a dozen bytes to a pristine connection something
-                        // must be really wrong. Killing it.
-                        conn.kill();
-                        warn!("vsock: unable to fully write connection ack msg.");
-                    }
+                match conn.stream_mut().send_connect_ack(key.local_port) {
+                    Ok(()) => (),
                     Err(err) => {
                         conn.kill();
                         warn!("vsock: unable to ack host connection: {:?}", err);
@@ -1138,9 +1338,11 @@ impl VsockMuxer {
 mod tests {
     use std::io::{Read, Write};
     use std::ops::Drop;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
 
+    use sendfd::SendWithFd;
     use virtio_queue::QueueOwnedT;
 
     use super::super::super::csm::defs as csm_defs;
@@ -1327,6 +1529,104 @@ mod tests {
         let ctx = MuxerTestContext::new("muxer_epoll_listener");
         assert_eq!(ctx.muxer.get_polled_fd(), ctx.muxer.epoll_file.as_raw_fd());
         assert_eq!(ctx.muxer.get_polled_evset(), epoll::Events::EPOLLIN);
+    }
+
+    fn temp_file() -> std::fs::File {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "muxer-passfd-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        std::fs::remove_file(path).unwrap();
+        file
+    }
+
+    #[test]
+    fn test_passfd_validation_accepts_supported_fd_types() {
+        let file = temp_file();
+        // Regular files cannot be registered with epoll (EPERM), so they are
+        // intentionally not supported by the passfd backend.
+        assert!(!VsockMuxer::validate_passfd(file.as_raw_fd()));
+
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        assert!(VsockMuxer::validate_passfd(socket.as_raw_fd()));
+
+        let mut pipe_fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
+        let pipe_read = unsafe { std::fs::File::from_raw_fd(pipe_fds[0]) };
+        let _pipe_write = unsafe { std::fs::File::from_raw_fd(pipe_fds[1]) };
+        assert!(VsockMuxer::validate_passfd(pipe_read.as_raw_fd()));
+    }
+
+    #[test]
+    fn test_passfd_validation_rejects_unsupported_fd_types() {
+        let dir = std::fs::File::open(std::env::temp_dir()).unwrap();
+
+        assert!(!VsockMuxer::validate_passfd(dir.as_raw_fd()));
+        assert!(!VsockMuxer::validate_passfd(-1));
+    }
+
+    #[test]
+    fn test_prepare_local_passfds_rejects_mixed_batch_atomically() {
+        let mut ctx = MuxerTestContext::new("passfd_mixed_batch");
+        let (valid, _peer) = UnixStream::pair().unwrap();
+        let invalid = temp_file();
+        let valid_fd = unsafe { libc::dup(valid.as_raw_fd()) };
+        let invalid_fd = unsafe { libc::dup(invalid.as_raw_fd()) };
+        assert!(valid_fd >= 0);
+        assert!(invalid_fd >= 0);
+
+        let initial_port = ctx.muxer.local_port_last;
+        let initial_ports = ctx.muxer.local_port_set.len();
+        let initial_connections = ctx.muxer.conn_map.len();
+        {
+            let mut requests = vec![
+                PassFdRequest {
+                    label: PassFdLabel::Stdin,
+                    port: 1027,
+                    fd: valid_fd,
+                },
+                PassFdRequest {
+                    label: PassFdLabel::Stdout,
+                    port: 1027,
+                    fd: invalid_fd,
+                },
+            ];
+
+            assert!(ctx.muxer.prepare_local_passfds(&mut requests).is_none());
+            assert_eq!(ctx.muxer.local_port_last, initial_port);
+            assert_eq!(ctx.muxer.local_port_set.len(), initial_ports);
+            assert_eq!(ctx.muxer.conn_map.len(), initial_connections);
+        }
+
+        // The rejected requests retain ownership until the whole batch is
+        // dropped, at which point every received fd is closed.
+        assert_eq!(unsafe { libc::fcntl(valid_fd, libc::F_GETFD) }, -1);
+        assert_eq!(unsafe { libc::fcntl(invalid_fd, libc::F_GETFD) }, -1);
+    }
+
+    #[test]
+    fn test_set_passfd_nonblocking_sets_flag() {
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let fd = stream.as_raw_fd();
+
+        assert!(VsockMuxer::set_passfd_nonblocking(fd));
+
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_ne!(flags & libc::O_NONBLOCK, 0);
+        assert!(!VsockMuxer::set_passfd_nonblocking(-1));
     }
 
     #[test]
@@ -1742,5 +2042,74 @@ mod tests {
         // Since initially the connection had two flags set, now there should
         // not be any pending RX in the muxer.
         assert!(!ctx.muxer.has_pending_rx());
+    }
+
+    #[test]
+    fn test_read_local_stream_port_connect_and_passfd() {
+        let mut ctx = MuxerTestContext::new("read_local_stream_port");
+
+        // Test "connect"
+        let (mut s1, mut s2) = std::os::unix::net::UnixStream::pair().unwrap();
+        s1.write_all(b"connect 5678\n").unwrap();
+
+        let res = ctx.muxer.read_local_stream_port(&mut s2);
+        match res {
+            Ok(LocalStreamCommand::Connect(port)) => {
+                assert_eq!(port, 5678);
+            }
+            _ => panic!("Expected Connect result, got {:?}", res.err()),
+        }
+
+        // Test batched "passfd"
+        let (s3, mut s4) = std::os::unix::net::UnixStream::pair().unwrap();
+        let req = b"passfd 1234 stdin stdout\n";
+        let fds = [s3.as_raw_fd(), s3.as_raw_fd()];
+        s3.send_with_fd(req, &fds).unwrap();
+
+        let res = ctx.muxer.read_local_stream_port(&mut s4);
+        match res {
+            Ok(LocalStreamCommand::PassFds(requests)) => {
+                assert_eq!(requests.len(), 2);
+                assert_eq!(requests[0].label, PassFdLabel::Stdin);
+                assert_eq!(requests[0].port, 1234);
+                assert!(requests[0].fd > 0);
+                assert_eq!(requests[1].label, PassFdLabel::Stdout);
+                assert_eq!(requests[1].port, 1234);
+                assert!(requests[1].fd > 0);
+            }
+            _ => panic!("Expected PassFds result, got {:?}", res.err()),
+        }
+
+        // Legacy single-stream passfd commands did not carry a label.
+        let (s5, mut s6) = std::os::unix::net::UnixStream::pair().unwrap();
+        s5.send_with_fd(b"passfd 1234\n", &[s5.as_raw_fd()])
+            .unwrap();
+
+        let res = ctx.muxer.read_local_stream_port(&mut s6);
+        match res {
+            Ok(LocalStreamCommand::PassFds(requests)) => {
+                assert_eq!(requests.len(), 1);
+                assert_eq!(requests[0].label, PassFdLabel::Stream);
+                assert_eq!(requests[0].port, 1234);
+                assert!(requests[0].fd > 0);
+            }
+            _ => panic!("Expected legacy PassFds result, got {:?}", res.err()),
+        }
+    }
+
+    #[test]
+    fn test_read_local_stream_port_closes_fds_on_parse_error() {
+        let mut ctx = MuxerTestContext::new("passfd_parse_error");
+        let (control, mut receiver) = UnixStream::pair().unwrap();
+        let (passed, mut observer) = UnixStream::pair().unwrap();
+        control
+            .send_with_fd(b"passfd invalid stdout\n", &[passed.as_raw_fd()])
+            .unwrap();
+
+        assert!(ctx.muxer.read_local_stream_port(&mut receiver).is_err());
+        drop(passed);
+
+        let mut byte = [0; 1];
+        assert_eq!(observer.read(&mut byte).unwrap(), 0);
     }
 }

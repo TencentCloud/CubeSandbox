@@ -4,11 +4,12 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::convert::TryInto;
+
 use seccompiler::{
     BpfProgram, Error, SeccompAction, SeccompCmpArgLen as ArgLen, SeccompCmpOp::Eq,
     SeccompCondition as Cond, SeccompFilter, SeccompRule,
 };
-use std::convert::TryInto;
 
 pub enum Thread {
     VirtioBalloon,
@@ -192,12 +193,41 @@ fn create_vsock_ioctl_seccomp_rule() -> Vec<SeccompRule> {
     or![and![Cond::new(1, ArgLen::Dword, Eq, FIONBIO,).unwrap()],]
 }
 
+fn create_vsock_fcntl_seccomp_rule() -> Vec<SeccompRule> {
+    or![
+        and![Cond::new(1, ArgLen::Dword, Eq, libc::F_GETFD as u64).unwrap()],
+        and![Cond::new(1, ArgLen::Dword, Eq, libc::F_GETFL as u64).unwrap()],
+        and![Cond::new(1, ArgLen::Dword, Eq, libc::F_SETFL as u64).unwrap()],
+        and![Cond::new(1, ArgLen::Dword, Eq, libc::F_DUPFD_CLOEXEC as u64).unwrap()],
+    ]
+}
+
+fn create_vsock_getsockopt_seccomp_rule() -> Vec<SeccompRule> {
+    vec![and![
+        Cond::new(1, ArgLen::Dword, Eq, libc::SOL_SOCKET as u64).unwrap(),
+        Cond::new(2, ArgLen::Dword, Eq, libc::SO_PEERCRED as u64).unwrap()
+    ]]
+}
+
+fn create_vsock_recvmsg_seccomp_rule() -> Vec<SeccompRule> {
+    vec![and![Cond::new(2, ArgLen::Dword, Eq, 0).unwrap()]]
+}
+
 fn virtio_vsock_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
     vec![
         (libc::SYS_accept4, vec![]),
         (libc::SYS_connect, vec![]),
+        // Passfd validates received SCM_RIGHTS descriptors and sets O_NONBLOCK.
+        (libc::SYS_fcntl, create_vsock_fcntl_seccomp_rule()),
+        (libc::SYS_fstat, vec![]),
+        // VsockMuxer validates every host-side UDS peer with
+        // getsockopt(SO_PEERCRED) before accepting its connect/passfd command.
+        (libc::SYS_geteuid, vec![]),
+        (libc::SYS_getsockopt, create_vsock_getsockopt_seccomp_rule()),
         (libc::SYS_ioctl, create_vsock_ioctl_seccomp_rule()),
         (libc::SYS_recvfrom, vec![]),
+        // recv_with_fd() receives passfd commands and SCM_RIGHTS.
+        (libc::SYS_recvmsg, create_vsock_recvmsg_seccomp_rule()),
         (libc::SYS_socket, vec![]),
     ]
 }
