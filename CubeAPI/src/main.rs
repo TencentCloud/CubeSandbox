@@ -118,6 +118,14 @@ struct Cli {
     /// Export the current OpenAPI spec to a YAML file and exit.
     #[arg(long, value_name = "PATH")]
     export_openapi: Option<String>,
+
+    /// Path to a webhook config file (YAML/JSON/TOML) declaring endpoints to
+    /// notify on sandbox lifecycle events.
+    ///
+    /// Overrides the CUBE_API_WEBHOOK_CONFIG environment variable.
+    /// See docs/guide/webhooks.md for the file format.
+    #[arg(long, value_name = "PATH")]
+    webhook_config: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -168,6 +176,21 @@ fn main() -> anyhow::Result<()> {
         cfg.sandbox_domain = v;
     }
 
+    // Load webhook endpoints from a config file, if one is specified via the
+    // --webhook-config flag or the CUBE_API_WEBHOOK_CONFIG env var.
+    if let Some(path) = cli
+        .webhook_config
+        .or_else(|| std::env::var("CUBE_API_WEBHOOK_CONFIG").ok())
+    {
+        match config::load_webhooks(&path) {
+            Ok(webhooks) => cfg.webhooks = webhooks,
+            Err(e) => {
+                eprintln!("failed to load webhook config from {path}: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // ── Tracing (stdout) ───────────────────────────────────────────────────
     // RUST_LOG env var takes precedence; --debug / --log-level / config is fallback.
     tracing_subscriber::registry()
@@ -209,13 +232,19 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
 
     let file_logger = FileLogger::new(cfg.log_dir.clone(), cfg.log_prefix.clone()).await?;
 
-    // FilteredLogger gates by level → MultiLogger fans out to file (+ future backends)
+    if !cfg.webhooks.is_empty() {
+        tracing::info!(
+            endpoints = cfg.webhooks.len(),
+            "webhook event notifications enabled"
+        );
+    }
+
+    // FilteredLogger gates by level → MultiLogger fans out to file (+ webhook).
+    // WebhookLogger is a no-op when no endpoints are configured.
     let logger: logging::ArcLogger = arc(FilteredLogger::new(
-        arc(
-            MultiLogger::new().add(arc(file_logger)), // Uncomment to add more backends:
-                                                      // .add(arc(logging::http::HttpLogger::new(Default::default())))
-                                                      // .add(arc(logging::otlp::OtlpLogger::new()))
-        ),
+        arc(MultiLogger::new()
+            .add(arc(file_logger))
+            .add(arc(logging::http::WebhookLogger::new(cfg.webhooks.clone())))),
         min_level,
     ));
 

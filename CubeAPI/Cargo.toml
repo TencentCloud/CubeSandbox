@@ -81,6 +81,12 @@ async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
 utoipa = { version = "5.4.0", features = ["chrono", "uuid", "yaml"] }
 
+# ── Webhook signing ───────────────────────────────────────────────────────
+# hmac + sha2: HMAC-SHA256 signatures over webhook payloads so receivers can
+# verify the request originated from CubeSandbox (see logging::http).
+hmac = "0.12"
+sha2 = "0.10"
+
 # ── Graceful shutdown ─────────────────────────────────────────────────────
 # (tokio::signal + axum::serve().with_graceful_shutdown is sufficient)
 

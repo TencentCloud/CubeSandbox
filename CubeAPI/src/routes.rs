@@ -18,7 +18,7 @@ use tower_http::{
 };
 
 use crate::{
-    handlers::{health, sandboxes, snapshots, templates, volumes},
+    handlers::{health, sandboxes, snapshots, templates, volumes, webhooks},
     middleware::{auth::unified_auth, rate_limit::rate_limit},
     state::AppState,
 };
@@ -109,7 +109,8 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
             "/sandboxes/:sandboxID/connect",
             post(sandboxes::connect_sandbox),
         )
-        .route("/snapshots", get(snapshots::list_snapshots));
+        .route("/snapshots", get(snapshots::list_snapshots))
+        .route("/webhooks", get(webhooks::list_webhooks));
 
     with_auth_and_rate_limit(routes, state, auth_configured)
 }

@@ -1,0 +1,25 @@
+# Example CubeAPI webhook configuration.
+#
+# Point CubeAPI at this file with either:
+#   cube-api --webhook-config /path/to/webhooks.yaml
+#   CUBE_API_WEBHOOK_CONFIG=/path/to/webhooks.yaml cube-api
+#
+# Each list entry registers one endpoint and the events it subscribes to.
+webhooks:
+  - # Where to POST events (the example receiver in this directory).
+    url: "http://127.0.0.1:9100/webhook"
+    # Which sandbox lifecycle events to deliver to this endpoint.
+    events:
+      - sandbox.created
+      - sandbox.paused
+      - sandbox.resumed
+      - sandbox.deleted
+    # Optional. When set, each request carries an
+    # `X-Cube-Signature: sha256=<hex>` header (HMAC-SHA256 of the body).
+    # Must match CUBE_WEBHOOK_SECRET on the receiver side.
+    secret: "my-shared-secret"
+    # Optional. Per-request timeout in milliseconds (default: 5000).
+    timeout_ms: 5000
+    # Optional. Retries after the first attempt, with exponential backoff
+    # (1s, 2s, 4s, ...). Default: 3.
+    max_retries: 3

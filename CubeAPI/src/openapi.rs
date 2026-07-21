@@ -67,7 +67,8 @@ impl Modify for SecurityAddon {
         handlers::sandboxes::kill_sandbox,
         handlers::sandboxes::pause_sandbox,
         handlers::sandboxes::resume_sandbox,
-        handlers::sandboxes::get_sandbox_logs_v2
+        handlers::sandboxes::get_sandbox_logs_v2,
+        handlers::webhooks::list_webhooks
     ),
     components(schemas(
         ApiError,
@@ -91,7 +92,8 @@ impl Modify for SecurityAddon {
         Sandbox,
         ResumedSandbox,
         SandboxLogEntry,
-        SandboxLogsV2Response
+        SandboxLogsV2Response,
+        handlers::webhooks::WebhookView
     )),
     modifiers(&SecurityAddon),
     tags(

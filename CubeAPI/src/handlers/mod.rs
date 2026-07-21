@@ -7,3 +7,4 @@ pub mod sandboxes;
 pub mod snapshots;
 pub mod templates;
 pub mod volumes;
+pub mod webhooks;

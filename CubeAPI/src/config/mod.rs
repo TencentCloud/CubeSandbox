@@ -76,6 +76,74 @@ pub struct ServerConfig {
     /// Env var: CUBE_API_KEY
     #[serde(default)]
     pub cube_api_key: Option<String>,
+
+    /// Registered webhook endpoints for sandbox lifecycle event notifications.
+    ///
+    /// Populated from a separate config file (YAML/JSON/TOML) whose path is
+    /// given by `--webhook-config` or the `CUBE_API_WEBHOOK_CONFIG` env var;
+    /// see [`load_webhooks`]. Defaults to empty (webhooks disabled).
+    #[serde(default)]
+    pub webhooks: Vec<WebhookConfig>,
+}
+
+/// A single webhook subscription: where to POST and which events to send.
+#[derive(Debug, Deserialize, Clone)]
+pub struct WebhookConfig {
+    /// Full URL to POST events to, e.g. `"http://127.0.0.1:9100/webhook"`.
+    pub url: String,
+
+    /// Event types this endpoint subscribes to, e.g.
+    /// `["sandbox.created", "sandbox.deleted"]`.
+    pub events: Vec<String>,
+
+    /// Optional shared secret. When set, each POST carries an
+    /// `X-Cube-Signature: sha256=<hex>` header (HMAC-SHA256 of the body).
+    #[serde(default)]
+    pub secret: Option<String>,
+
+    /// Per-request timeout in milliseconds (default: 5000).
+    #[serde(default = "default_webhook_timeout_ms")]
+    pub timeout_ms: u64,
+
+    /// Max delivery retries after the first attempt (default: 3).
+    /// Backoff is exponential: 1s, 2s, 4s, ...
+    #[serde(default = "default_webhook_max_retries")]
+    pub max_retries: u32,
+}
+
+fn default_webhook_timeout_ms() -> u64 {
+    5000
+}
+fn default_webhook_max_retries() -> u32 {
+    3
+}
+
+/// Wrapper matching the top-level `webhooks:` key of the webhook config file.
+#[derive(Debug, Deserialize)]
+struct WebhookFile {
+    #[serde(default)]
+    webhooks: Vec<WebhookConfig>,
+}
+
+/// Load webhook endpoints from a config file (YAML / JSON / TOML — format is
+/// auto-detected from the extension).
+///
+/// The file must contain a top-level `webhooks` list, e.g. (YAML):
+///
+/// ```yaml
+/// webhooks:
+///   - url: "http://127.0.0.1:9100/webhook"
+///     events: ["sandbox.created", "sandbox.deleted"]
+///     secret: "my-shared-secret"
+///     timeout_ms: 5000
+///     max_retries: 3
+/// ```
+pub fn load_webhooks(path: &str) -> anyhow::Result<Vec<WebhookConfig>> {
+    let parsed: WebhookFile = config::Config::builder()
+        .add_source(config::File::with_name(path))
+        .build()?
+        .try_deserialize()?;
+    Ok(parsed.webhooks)
 }
 
 fn default_bind() -> String {
@@ -121,6 +189,46 @@ impl ServerConfig {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn load_webhooks_parses_yaml_and_fills_defaults() {
+        let path = std::env::temp_dir().join("cube_api_webhooks_test.yaml");
+        let yaml = r#"
+webhooks:
+  - url: "http://127.0.0.1:9100/webhook"
+    events: ["sandbox.created", "sandbox.deleted"]
+    secret: "s3cret"
+  - url: "http://127.0.0.1:9200/hook"
+    events: ["sandbox.paused"]
+"#;
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(yaml.as_bytes())
+            .unwrap();
+
+        let hooks = load_webhooks(path.to_str().unwrap()).expect("should parse the YAML file");
+        assert_eq!(hooks.len(), 2);
+
+        // Explicit fields.
+        assert_eq!(hooks[0].url, "http://127.0.0.1:9100/webhook");
+        assert_eq!(hooks[0].events, vec!["sandbox.created", "sandbox.deleted"]);
+        assert_eq!(hooks[0].secret.as_deref(), Some("s3cret"));
+        // Omitted fields fall back to defaults.
+        assert_eq!(hooks[0].timeout_ms, 5000);
+        assert_eq!(hooks[0].max_retries, 3);
+
+        assert_eq!(hooks[1].url, "http://127.0.0.1:9200/hook");
+        assert_eq!(hooks[1].events, vec!["sandbox.paused"]);
+        assert!(hooks[1].secret.is_none());
+
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -135,6 +243,7 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             cube_api_key: std::env::var("CUBE_API_KEY").ok().filter(|s| !s.is_empty()),
+            webhooks: Vec::new(),
         }
     }
 }
