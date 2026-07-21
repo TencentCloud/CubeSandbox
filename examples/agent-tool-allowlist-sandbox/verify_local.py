@@ -131,15 +131,23 @@ def step_allowlisted_optional() -> None:
     if not os.environ.get("CUBE_TEMPLATE_ID") or not os.environ.get("E2B_API_URL"):
         print("allowlisted=SKIP (CUBE_TEMPLATE_ID / E2B_API_URL not set)")
         return
+
     os.environ.setdefault("E2B_API_KEY", "e2b_000000")
-    proc = _run([sys.executable, "run_allowlisted.py"], check=False)
+    use_sidecar = os.environ.get("ALLOWLIST_USE_SIDECAR", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    script = "run_allowlisted_sidecar.py" if use_sidecar else "run_allowlisted.py"
+    proc = _run([sys.executable, script], check=False)
     out = (proc.stdout or "") + (proc.stderr or "")
     print(out.strip())
     if proc.returncode != 0:
-        raise SystemExit(f"run_allowlisted.py failed with exit {proc.returncode}")
+        raise SystemExit(f"{script} failed with exit {proc.returncode}")
     if "agent-tool-allowlist-ok" not in out or "artifact: artifact-ok" not in out:
-        raise SystemExit("run_allowlisted.py output missing expected markers")
-    print("allowlisted=OK")
+        raise SystemExit(f"{script} output missing expected markers")
+    print(f"allowlisted=OK ({script})")
 
 
 def main() -> None:

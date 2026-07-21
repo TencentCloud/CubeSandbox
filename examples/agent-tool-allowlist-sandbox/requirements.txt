@@ -1,2 +1,4 @@
 e2b-code-interpreter>=2.4.1
 python-dotenv
+# Required only for run_allowlisted_sidecar.py (host without *.cube.app DNS)
+aiohttp>=3.9
