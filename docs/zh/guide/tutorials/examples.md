@@ -12,6 +12,7 @@
 | [OpenAI Agents + Code Interpreter](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/openai-agents-code-interpreter) | 在 Cube Sandbox 中运行使用 pandas / matplotlib 的数据分析 Agent，提供通用 E2B（write+exec）与 Jupyter kernel（状态跨轮保留、图像自动捕获）两种执行形态。 |
 | [cube-bench](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/cube-bench) | Go 编写的 CLI 压测工具，可在可配置并发数下测量沙箱创建/删除延迟。具备实时 TUI 看板（Bubbletea/Lipgloss）、分位数报告（P50/P95/P99）和 JSON 导出功能。 |
 | [Volume 插件（COS）](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.zh.md) | binary / rpc 两种类型的腾讯云 COS Volume 插件示例，含 Python SDK 验证脚本。框架文档见 [Volume 插件开发指南](../volume-plugin.md)。 |
+| [Agent 工具白名单沙箱](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/agent-tool-allowlist-sandbox) | 宿主机侧 Agent 工具 argv 白名单门控：白名单工具在 MicroVM 内执行并回传 stdout/小工件；非白名单命令快速失败且不创建沙箱。 |
 
 ::: tip
 所有示例共享相同的环境变量约定（`E2B_API_URL`、`E2B_API_KEY`、`CUBE_TEMPLATE_ID`）。请先参考[快速开始](../quickstart.md)指南搭建 Cube Sandbox 环境。
