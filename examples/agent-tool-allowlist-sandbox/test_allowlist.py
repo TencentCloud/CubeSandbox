@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import ast
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -20,6 +21,23 @@ from allowlist import (
 ROOT = Path(__file__).resolve().parent
 
 
+def _source_calls_sandbox_create(source: str) -> bool:
+    """True if AST contains Sandbox.create(...). Docstrings/comments do not count."""
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr == "create"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "Sandbox"
+        ):
+            return True
+    return False
+
+
 class AllowlistTests(unittest.TestCase):
     def test_allow_echo(self) -> None:
         self.assertTrue(is_allowlisted("echo hello"))
@@ -33,8 +51,10 @@ class AllowlistTests(unittest.TestCase):
     def test_empty_command(self) -> None:
         self.assertFalse(is_allowlisted(""))
         self.assertFalse(is_allowlisted("   "))
-        with self.assertRaises(AllowlistDenied):
+        with self.assertRaises(AllowlistDenied) as ctx:
             assert_allowlisted("   ")
+        self.assertIn("command not on tool allowlist:", str(ctx.exception))
+        self.assertIn("full:", str(ctx.exception))
 
     def test_path_style_binary_rejected(self) -> None:
         self.assertFalse(is_allowlisted("/bin/bash -c id"))
@@ -86,15 +106,15 @@ class AllowlistTests(unittest.TestCase):
         mock_create.assert_not_called()
 
     def test_run_denied_script_has_no_sandbox_create(self) -> None:
-        """Static guard: the deny demo must not call Sandbox.create."""
+        """AST guard: deny demo must not call Sandbox.create (comments OK)."""
         source = (ROOT / "run_denied.py").read_text(encoding="utf-8")
-        self.assertNotIn("Sandbox.create", source)
+        self.assertFalse(_source_calls_sandbox_create(source))
 
     def test_allow_scripts_stack_airgap_egress(self) -> None:
         """Static guard: allow paths set network-policy Mode 1 airgap."""
         for name in ("run_allowlisted.py", "run_allowlisted_sidecar.py"):
             source = (ROOT / name).read_text(encoding="utf-8")
-            self.assertIn("Sandbox.create", source)
+            self.assertTrue(_source_calls_sandbox_create(source))
             self.assertIn("allow_internet_access=False", source)
             self.assertNotIn("python3 -c", source)
 

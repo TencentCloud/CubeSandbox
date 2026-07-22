@@ -41,13 +41,6 @@ class AllowlistDenied(PermissionError):
     """Raised when a command is not on the host-side tool allowlist."""
 
 
-def _first_token(command: str) -> str:
-    parts = shlex.split(command)
-    if not parts:
-        raise AllowlistDenied("empty command")
-    return parts[0]
-
-
 def _resolve_allowed(
     allowed_binaries: Iterable[str] | None,
     *,
@@ -104,8 +97,9 @@ def assert_allowlisted(
         allowed_binaries,
         enable_code_execution=enable_code_execution,
     ):
-        # Re-parse only for the error message (empty → AllowlistDenied("empty command")).
-        binary = _first_token(command)
+        # One message shape for all denials (including empty / whitespace).
+        parts = shlex.split(command)
+        binary = parts[0] if parts else ""
         raise AllowlistDenied(
             f"command not on tool allowlist: {binary!r} (full: {command!r})"
         )
