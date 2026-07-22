@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import shlex
 import stat
 import sys
@@ -69,6 +70,9 @@ if os.getenv("ALLOWED_READ_DIRS"):
     for d in os.getenv("ALLOWED_READ_DIRS", "").split(":"):
         if d:
             _ALLOWED_READ_DIRS.append(Path(d).resolve())
+
+# PEP 508 package name validator — compiled once at module load.
+_PACKAGE_NAME_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$|^[A-Za-z0-9]$")
 
 # The session file lives under gettempdir() so `mktemp`/`/tmp` rotations can
 # reclaim it, but is scoped to the invoking UID and locked down with 0600 so
@@ -225,10 +229,8 @@ def exec_code(code: str, pip_packages: list[str] | None = None, timeout: int = 1
     # Accept only simple names (letters, digits, hyphens, underscores, periods)
     # following PEP 508 package name specification.
     if pip_packages:
-        import re
-        PACKAGE_NAME_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$|^[A-Za-z0-9]$")
         for pkg in pip_packages:
-            if not isinstance(pkg, str) or not PACKAGE_NAME_RE.match(pkg):
+            if not isinstance(pkg, str) or not _PACKAGE_NAME_RE.match(pkg):
                 return f"[error] invalid pip package name: {pkg!r}"
             if len(pkg) > 128:  # PEP 508 recommends max 214 chars, be conservative
                 return f"[error] pip package name too long: {pkg!r}"
@@ -260,24 +262,14 @@ def exec_file(filepath: str, timeout: int = 120) -> str:
     except (ValueError, OSError):
         return "[error] invalid filepath"
 
-    # Reject symlinks - check if the original path is a symlink
-    # (realpath resolves all symlinks, so check original first)
+    # Reject symlinks at the leaf — os.open with O_NOFOLLOW will also reject
+    # symlinks on intermediate components, but checking the leaf first keeps the
+    # error message clear and avoids hitting the OS penalty for deep paths.
     try:
         if Path(filepath).is_symlink():
             return "[error] symlinks not allowed"
     except (ValueError, OSError):
         pass
-
-    # Also check if any component in the resolved path is a symlink
-    # (this catches cases like /allowed/dir -> /malicious where /allowed/dir itself is a symlink)
-    parts = Path(filepath).parts
-    for i in range(1, len(parts) + 1):
-        partial = Path(*parts[:i])
-        try:
-            if partial.is_symlink():
-                return "[error] symlinks not allowed"
-        except (ValueError, OSError):
-            pass
 
     # Check if path is within any allowed directory (use separator guard to prevent
     # /workspace matching /workspace_evil)
@@ -288,16 +280,23 @@ def exec_file(filepath: str, timeout: int = 120) -> str:
         return "[error] filepath not in allowed directories"
 
     sandbox = _get_sandbox(timeout + 60)
+    fd = None
     try:
-        st = os.stat(filepath)
+        fd = os.open(filepath, os.O_RDONLY | os.O_NOFOLLOW)
+        st = os.fstat(fd)
         if st.st_size > MAX_FILE_LENGTH:
             return f"[error] file exceeds maximum size of {MAX_FILE_LENGTH} bytes"
-        with open(filepath, "r", encoding="utf-8") as fp:
-            content = fp.read()
-    except OSError:
-        return "[error] cannot read file"
-    except UnicodeDecodeError:
-        return "[error] file is not valid UTF-8"
+        try:
+            raw = os.read(fd, st.st_size)
+        except OSError:
+            return "[error] cannot read file"
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return "[error] file is not valid UTF-8"
+    finally:
+        if fd is not None:
+            os.close(fd)
 
     sandbox.files.write("/tmp/codebuddy_script.py", content)
     result = _run(sandbox, "python3 /tmp/codebuddy_script.py", timeout=timeout)

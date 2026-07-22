@@ -69,6 +69,17 @@ class TestHandleRequest:
         response = mcp_server.handle_request(request)
         assert response["error"]["code"] == -32601
 
+    def test_tools_call_missing_params_is_error(self):
+        request = {"jsonrpc": "2.0", "id": 5, "method": "tools/call"}
+        response = mcp_server.handle_request(request)
+        assert response["result"]["isError"] is True
+        assert "Invalid arguments" in response["result"]["content"][0]["text"]
+
+    def test_tools_call_empty_params_is_error(self):
+        request = {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {}}
+        response = mcp_server.handle_request(request)
+        assert response["result"]["isError"] is True
+
     def test_run_code_pipes_through_python(self):
         mock_result = {"exit_code": 0, "stdout": "42\n", "stderr": ""}
         with patch.object(mcp_server, "run_command", return_value=mock_result):

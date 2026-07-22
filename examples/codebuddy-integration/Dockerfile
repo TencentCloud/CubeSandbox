@@ -73,6 +73,7 @@ RUN apt-get update \
         > /etc/apt/sources.list.d/nodesource.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
+    && npm --version \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

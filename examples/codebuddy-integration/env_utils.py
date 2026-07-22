@@ -181,6 +181,7 @@ def _provider_from_host(host: str) -> str | None:
     endpoint, letting the caller decide how to proceed (typically raising an
     error unless ``CODEBUDDY_PROVIDER`` is already set).
     """
+    host = host.rstrip(".")  # strip trailing dot from FQDN notation
     if host.endswith(".anthropic.com"):
         return "anthropic"
     if host.endswith(".openai.com"):
@@ -337,6 +338,7 @@ def _host_from_url(value: str) -> str:
 # URL with userinfo (we extract only the hostname), so this only matters for the
 # HTTP_PROXY passthrough below.
 PROXY_URL_ENV_NAMES = frozenset({"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"})
+_BASE_URL_ENV_NAMES = frozenset({"ANTHROPIC_BASE_URL", "CODEBUDDY_BASE_URL"})
 
 
 def strip_url_userinfo(value: str) -> str:
@@ -406,6 +408,10 @@ def build_codebuddy_env(include_secrets: bool = True) -> dict[str, str]:
             # the userinfo segment but keep the host:port so the agent can still
             # route through the proxy.
             if name in PROXY_URL_ENV_NAMES:
+                value = strip_url_userinfo(value)
+            # Base URLs may embed credentials (e.g. https://token:key@gateway.example.com).
+            # Strip them for defense in depth so embedded tokens never reach the sandbox.
+            if name in _BASE_URL_ENV_NAMES:
                 value = strip_url_userinfo(value)
             env[name] = value
     if include_secrets:

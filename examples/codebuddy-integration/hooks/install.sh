@@ -148,7 +148,13 @@ cat > "$PACKAGE_FILE" <<'JSONEOF'
   "description": "Local plugin directory for CodeBuddy's CubeSandbox bash router. Auto-loaded by CodeBuddy."
 }
 JSONEOF
-write_codebuddy_config
+
+if [[ ! -f "$SOURCE_ENV" ]]; then
+    echo "Warning: $SOURCE_ENV not found — skipping config merge." >&2
+    echo "Create a .env file to configure the plugin (see .env.example for keys)." >&2
+else
+    write_codebuddy_config
+fi
 
 echo "CubeSandbox CodeBuddy plugin installed:"
 echo "  plugin file: $PLUGIN_FILE"

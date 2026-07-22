@@ -318,8 +318,18 @@ def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
         return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}}
 
     if method == "tools/call":
-        tool_name = request["params"]["name"]
-        arguments = request["params"].get("arguments", {})
+        params = request.get("params")
+        if not isinstance(params, dict):
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [{"type": "text", "text": "Invalid arguments: missing params"}],
+                    "isError": True,
+                },
+            }
+        tool_name = params.get("name", "")
+        arguments = params.get("arguments", {})
         text = ""
         is_error = False
         try:
