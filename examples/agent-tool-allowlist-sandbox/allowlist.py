@@ -41,6 +41,14 @@ class AllowlistDenied(PermissionError):
     """Raised when a command is not on the host-side tool allowlist."""
 
 
+def _split_argv(command: str) -> list[str] | None:
+    """Split command into argv tokens; return None if quoting is malformed."""
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return None
+
+
 def _resolve_allowed(
     allowed_binaries: Iterable[str] | None,
     *,
@@ -65,9 +73,10 @@ def is_allowlisted(
     """Return True if the first argv token is on the effective allowlist.
 
     Empty / whitespace-only commands return False (predicate contract).
+    Malformed shell quoting (``shlex`` ``ValueError``) returns False — deny, do not crash.
     Path-style first tokens (``/`` or ``\\``) return False.
     """
-    parts = shlex.split(command)
+    parts = _split_argv(command)
     if not parts:
         return False
     binary = parts[0]
@@ -100,8 +109,8 @@ def assert_allowlisted(
         allowed_binaries,
         enable_code_execution=enable_code_execution,
     ):
-        # One message shape for all denials (including empty / whitespace).
-        parts = shlex.split(command)
+        # One message shape for all denials (including empty / unparseable).
+        parts = _split_argv(command)
         binary = parts[0] if parts else ""
         raise AllowlistDenied(
             f"command not on tool allowlist: {binary!r} (full: {command!r})"

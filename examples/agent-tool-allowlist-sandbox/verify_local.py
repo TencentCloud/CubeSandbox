@@ -47,10 +47,14 @@ def step_unit_tests() -> None:
 
 def step_deny() -> None:
     proc = _run([sys.executable, "run_denied.py"])
-    out = (proc.stdout or "") + (proc.stderr or "")
-    print(out.strip())
-    if "denied_as_expected" not in out:
-        raise SystemExit("run_denied.py did not print denied_as_expected")
+    stdout = proc.stdout or ""
+    stderr = proc.stderr or ""
+    if stdout.strip():
+        print(stdout.strip())
+    if stderr.strip():
+        print("run_denied.py stderr:", stderr.strip())
+    if "denied_as_expected" not in stdout:
+        raise SystemExit("run_denied.py did not print denied_as_expected on stdout")
 
 
 def step_dockerfile_sync() -> None:
@@ -138,12 +142,16 @@ def step_allowlisted_optional() -> None:
     }
     script = "run_allowlisted_sidecar.py" if use_sidecar else "run_allowlisted.py"
     proc = _run([sys.executable, script], check=False)
-    out = (proc.stdout or "") + (proc.stderr or "")
-    print(out.strip())
+    stdout = proc.stdout or ""
+    stderr = proc.stderr or ""
+    if stdout.strip():
+        print(stdout.strip())
+    if stderr.strip():
+        print(f"{script} stderr:", stderr.strip())
     if proc.returncode != 0:
         raise SystemExit(f"{script} failed with exit {proc.returncode}")
-    if "agent-tool-allowlist-ok" not in out or "artifact: artifact-ok" not in out:
-        raise SystemExit(f"{script} output missing expected markers")
+    if "agent-tool-allowlist-ok" not in stdout or "artifact: artifact-ok" not in stdout:
+        raise SystemExit(f"{script} stdout missing expected markers")
     print(f"allowlisted=OK ({script})")
 
 

@@ -56,6 +56,13 @@ class AllowlistTests(unittest.TestCase):
         self.assertIn("command not on tool allowlist:", str(ctx.exception))
         self.assertIn("full:", str(ctx.exception))
 
+    def test_malformed_quotes_denied_not_crash(self) -> None:
+        bad = "echo 'unclosed"
+        self.assertFalse(is_allowlisted(bad))
+        with self.assertRaises(AllowlistDenied) as ctx:
+            assert_allowlisted(bad)
+        self.assertIn("command not on tool allowlist:", str(ctx.exception))
+
     def test_path_style_binary_rejected(self) -> None:
         self.assertFalse(is_allowlisted("/bin/bash -c id"))
         # Single quotes preserve backslashes through POSIX shlex parsing, so
