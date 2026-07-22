@@ -655,6 +655,9 @@ Toolbox is mounted whole at the fixed path.
 - name: data-cube-shared
   mountPath: {{ .Values.hostPaths.dataCubeShared }}
   mountPropagation: Bidirectional
+- name: data-shared
+  mountPath: {{ .Values.hostPaths.dataShared }}
+  mountPropagation: Bidirectional
 - name: tmp-cube
   mountPath: {{ .Values.hostPaths.tmpCube }}
   mountPropagation: Bidirectional
@@ -748,6 +751,9 @@ Bootstrap: host mutation mounts for pvm / node-init.
 - name: data-cube-shared
   mountPath: {{ .Values.hostPaths.dataCubeShared }}
   mountPropagation: Bidirectional
+- name: data-shared
+  mountPath: {{ .Values.hostPaths.dataShared }}
+  mountPropagation: Bidirectional
 - name: tmp-cube
   mountPath: {{ .Values.hostPaths.tmpCube }}
   mountPropagation: Bidirectional
@@ -789,6 +795,10 @@ Bootstrap: host mutation mounts for pvm / node-init.
 - name: data-cube-shared
   hostPath:
     path: {{ .Values.hostPaths.dataCubeShared }}
+    type: DirectoryOrCreate
+- name: data-shared
+  hostPath:
+    path: {{ .Values.hostPaths.dataShared }}
     type: DirectoryOrCreate
 - name: tmp-cube
   hostPath:

@@ -1069,7 +1069,8 @@ mkdir -p \
   /data/cube-shim/disks \
   /data/snapshot_pack/disks \
   /data/cube-shared \
-  /data/cube-shared/volume
+  /data/cube-shared/volume \
+  /data/shared
 
 if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
   mkdir -p \

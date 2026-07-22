@@ -48,7 +48,8 @@ mkdir -p \
   /data/cube-shim/disks \
   /data/snapshot_pack/disks \
   /data/cube-shared \
-  /data/cube-shared/volume
+  /data/cube-shared/volume \
+  /data/shared
 
 "${SCRIPT_DIR}/down-compute.sh" >/dev/null 2>&1 || true
 

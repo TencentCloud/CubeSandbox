@@ -332,6 +332,10 @@ spec:
           hostPath:
             path: {{ .Values.hostPaths.dataCubeShared }}
             type: DirectoryOrCreate
+        - name: data-shared
+          hostPath:
+            path: {{ .Values.hostPaths.dataShared }}
+            type: DirectoryOrCreate
         - name: tmp-cube
           hostPath:
             path: {{ .Values.hostPaths.tmpCube }}
