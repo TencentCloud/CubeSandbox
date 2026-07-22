@@ -29,10 +29,15 @@
 //     the host filesystem beyond the session file under /tmp.
 //   - If the plugin fails to spawn or the sandbox crashes, we throw so
 //     CodeBuddy does not silently fall back to host execution.
+//   - runInSandbox uses execFileAsync (promisified) to avoid blocking the
+//     Node.js event loop during sandbox execution.
 
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 const EXECUTOR = join(PLUGIN_DIR, "..", "sandbox_exec.py");
@@ -41,29 +46,33 @@ const EXECUTOR = join(PLUGIN_DIR, "..", "sandbox_exec.py");
  * Run a shell command inside a CubeSandbox via the host-side executor.
  * Returns the captured stdout. Throws on non-zero exit so the LLM sees the
  * failure and CodeBuddy aborts the tool call.
+ *
+ * Uses execFileAsync (via promisify) instead of spawnSync to avoid blocking
+ * the Node.js event loop. A hard timeout (5 minutes) is set as a safeguard;
+ * the sandbox-side timeout in sandbox_exec.py (default 120s, max 300s) is
+ * the authoritative limit for long-running commands.
  */
-function runInSandbox(command) {
-  // Note: The sandbox-side timeout in sandbox_exec.py (default 120s, max 300s)
-  // is the authoritative limit. We don't set a hard Node.js spawnSync timeout
-  // here to avoid killing a legitimate long-running command prematurely.
-  const result = spawnSync(
-    "python3",
-    [EXECUTOR, "--cmd", command],
-    { encoding: "utf-8" },
-  );
+async function runInSandbox(command) {
+  let stdout, stderr, status;
 
-  if (result.error) {
+  try {
+    ({ stdout, stderr, status } = await execFileAsync(
+      "python3",
+      [EXECUTOR, "--cmd", command],
+      { encoding: "utf-8", timeout: 300000 },  // 5-minute host-side timeout
+    ));
+  } catch (err) {
     throw new Error(
-      `cubesandbox plugin: failed to spawn sandbox_exec.py: ${result.error.message}`,
+      `cubesandbox plugin: failed to spawn sandbox_exec.py: ${err.message}`,
     );
   }
-  if (result.status !== 0) {
-    const stderr = (result.stderr || "").trim();
+
+  if (status !== 0) {
     throw new Error(
-      `cubesandbox plugin: sandbox command failed (exit ${result.status}): ${stderr}`,
+      `cubesandbox plugin: sandbox command failed (exit ${status}): ${(stderr || "").trim()}`,
     );
   }
-  return (result.stdout || "").trimEnd();
+  return (stdout || "").trimEnd();
 }
 
 /** Plugin entry point — CodeBuddy invokes this once on startup. */
@@ -77,7 +86,7 @@ export const CubeSandboxBashPlugin = async () => {
       const command = output?.args?.command;
       if (typeof command !== "string" || command.length === 0) return;
 
-      const stdout = runInSandbox(command);
+      const stdout = await runInSandbox(command);
 
       // Replace the command so CodeBuddy does not run it on the host shell,
       // and surface the sandbox output as a synthetic stdout the LLM can

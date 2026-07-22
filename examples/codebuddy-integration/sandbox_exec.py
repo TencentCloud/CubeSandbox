@@ -48,6 +48,9 @@ TEMPLATE_ID = os.getenv("CUBE_TEMPLATE_ID", "")
 # Maximum command length to prevent resource exhaustion.
 MAX_COMMAND_LENGTH = 65536
 
+# Maximum code length to prevent resource exhaustion.
+MAX_CODE_LENGTH = 100_000
+
 # Allowed directories for file operations (restrictive by default).
 # Can be extended via ALLOWED_READ_DIRS environment variable (colon-separated).
 _ALLOWED_READ_DIRS = [Path.cwd()]
@@ -77,16 +80,28 @@ def _write_session(sandbox_id: str) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    try:
-        fd = os.open(SESSION_FILE, flags, 0o600)
-    except FileExistsError:
-        # O_EXCL fails if file exists — unlink and retry.
-        SESSION_FILE.unlink(missing_ok=True)
-        fd = os.open(SESSION_FILE, flags, 0o600)
-    except OSError as e:
-        if hasattr(e, "errno") and e.errno == 40:  # ELOOP - symlink
-            raise OSError(f"session file is a symlink: {SESSION_FILE}") from e
-        raise
+
+    # ELOOP means the path resolved to a symlink. This can happen in a
+    # TOCTOU window: between the FileExistsError unlink() and the retry
+    # open(), a hostile or coincidental symlink may appear at the path.
+    # A short retry gives the legitimate file a chance to win while
+    # preserving O_NOFOLLOW's guarantee that we never follow a symlink.
+    for attempt in range(3):
+        try:
+            fd = os.open(SESSION_FILE, flags, 0o600)
+        except FileExistsError:
+            # O_EXCL fails if file exists — unlink and retry.
+            SESSION_FILE.unlink(missing_ok=True)
+            continue
+        except OSError as e:
+            if hasattr(e, "errno") and e.errno == 40:  # ELOOP - symlink race
+                import time
+                time.sleep(0.05 * (attempt + 1))  # brief backoff
+                continue
+            raise
+        break
+    else:
+        raise OSError(f"could not create session file after retries: {SESSION_FILE}")
 
     try:
         # Immediately verify it's a regular file before writing
@@ -173,6 +188,13 @@ def _run(sandbox: "Sandbox", cmd: str, timeout: int = 120):
 
 def exec_code(code: str, pip_packages: list[str] | None = None, timeout: int = 120) -> str:
     """Execute Python code in the sandbox and return stdout (or stderr on failure)."""
+    if not isinstance(code, str):
+        return "[error] code must be a string"
+    if len(code) > MAX_CODE_LENGTH:
+        return f"[error] code exceeds maximum length of {MAX_CODE_LENGTH} bytes"
+    if not code.strip():
+        return "[error] code cannot be empty"
+
     sandbox = _get_sandbox(timeout + 60)
     if pip_packages:
         r = _run(

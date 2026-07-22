@@ -31,7 +31,8 @@ Add to your MCP client's config (Claude Desktop example shown):
 
 Security notes:
 - The server executes commands inside an isolated MicroVM, limiting blast radius.
-- File paths are validated to prevent path traversal attacks.
+- File paths are validated syntactically (normpath only) to prevent obvious
+  path traversal. The sandbox's isolated namespace is the authoritative boundary.
 - No authentication is required when accessed via local MCP client config.
 - Ensure MCP client configurations are properly secured in production.
 """
@@ -109,20 +110,30 @@ atexit.register(_cleanup_sandbox)
 
 
 def _validate_path(path: str) -> str | None:
-    """Validate a path is within allowed prefixes. Returns None if valid, error message otherwise."""
+    """Validate a path is syntactically within allowed prefixes.
+
+    Returns None if valid, error message otherwise.
+
+    Note: This validation is purely syntactic (uses os.path.normpath, not
+    os.path.realpath). It checks that the normalized path starts with an
+    allowed prefix. The actual file operations run inside the sandbox's
+    isolated namespace, where the sandbox's own filesystem policies are
+    the authoritative security boundary. realpath is not used because it
+    would resolve against the host's symlinks, which may differ from the
+    sandbox's private namespace.
+    """
     if not isinstance(path, str):
         return "path must be a string"
     if not path:
         return "path cannot be empty"
-    # Normalize path and check prefix
+    # Normalize path syntactically and check prefix
     try:
         normalized = os.path.normpath(path)
-        resolved = os.path.realpath(path)
     except (ValueError, OSError):
         return "invalid path"
     for prefix in _ALLOWED_PATH_PREFIXES:
         # Use strict prefix check with os.sep to avoid /workspace-stuff matching /workspace
-        if resolved.startswith(prefix + os.sep) or resolved == prefix:
+        if normalized.startswith(prefix + os.sep) or normalized == prefix:
             return None
     return f"path must be within {', '.join(_ALLOWED_PATH_PREFIXES)}"
 

@@ -34,7 +34,7 @@ This section collects integration guides for agent frameworks, developer tools, 
 ```md
 ---
 title: LangChain Integration Guide
-author: your
+author: pei-pei45
 date: 2026-05-14
 tags:
   - integration
