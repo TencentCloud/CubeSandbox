@@ -1,0 +1,423 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 Tencent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+"""CubeSandbox MCP Server for CodeBuddy.
+
+Exposes a small set of tools that let any MCP-capable client (Claude
+Desktop, Cursor, Windsurf, VS Code, etc.) execute untrusted code or shell
+commands inside an isolated CubeSandbox MicroVM instead of on the host.
+The same backend (`sandbox_exec.py`) handles the actual work; this file
+just adapts it to the Model Context Protocol's newline-delimited JSON-RPC
+transport on stdio.
+
+Add to your MCP client's config (Claude Desktop example shown):
+
+    {
+      "mcpServers": {
+        "cubesandbox-codebuddy": {
+          "command": "python3",
+          "args": [
+            "/abs/path/to/CubeSandbox/examples/codebuddy-integration/mcp_server.py"
+          ],
+          "env": {
+            "CUBE_API_URL": "http://<cube-host>:3000",
+            "CUBE_API_KEY": "<api-key>",
+            "CUBE_TEMPLATE_ID": "<template-id>"
+          }
+        }
+      }
+    }
+
+Security notes:
+- The server executes commands inside an isolated MicroVM, limiting blast radius.
+- File paths are validated to prevent path traversal attacks.
+- No authentication is required when accessed via local MCP client config.
+- Ensure MCP client configurations are properly secured in production.
+"""
+
+from __future__ import annotations
+
+import atexit
+import json
+import os
+import shlex
+import sys
+import threading
+from typing import Any
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# --- Configuration -----------------------------------------------------------
+
+# CUBE_API_URL / CUBE_API_KEY are the canonical names (documented in .env.example).
+# E2B_API_URL / E2B_API_KEY are accepted as legacy aliases.
+E2B_API_URL = os.getenv("CUBE_API_URL") or os.getenv("E2B_API_URL", "http://127.0.0.1:3000")
+E2B_API_KEY = os.getenv("CUBE_API_KEY") or os.getenv("E2B_API_KEY", "e2b_000000")
+TEMPLATE_ID = os.getenv("CUBE_TEMPLATE_ID", "")
+
+# Security limits
+MAX_TIMEOUT = 300  # 5 minutes maximum
+MAX_CODE_LENGTH = 100_000  # 100KB
+MAX_CONTENT_LENGTH = 1_000_000  # 1MB
+MAX_COMMAND_LENGTH = 65536  # 64KB
+
+# Allowed path prefixes for file operations (sandbox-side).
+# In a typical setup, the sandbox VM only has access to /workspace.
+_ALLOWED_PATH_PREFIXES = ("/workspace", "/tmp", "/home/user")
+
+_sandbox: Any = None
+_sandbox_lock = threading.Lock()
+
+
+def _get_sandbox(timeout: int = 600):
+    """Lazy-create a sandbox and reuse it across tool calls until the process exits."""
+    global _sandbox
+    with _sandbox_lock:
+        if _sandbox is None:
+            from e2b_code_interpreter import Sandbox
+            if not TEMPLATE_ID:
+                raise RuntimeError("CUBE_TEMPLATE_ID is not set")
+            _sandbox = Sandbox.create(TEMPLATE_ID, timeout=timeout)
+        else:
+            try:
+                _sandbox.set_timeout(timeout)
+            except Exception:
+                try:
+                    _sandbox.kill()
+                except Exception:
+                    pass
+                from e2b_code_interpreter import Sandbox
+                _sandbox = Sandbox.create(TEMPLATE_ID, timeout=timeout)
+    return _sandbox
+
+
+def _cleanup_sandbox() -> None:
+    """Destroy the cached sandbox when the MCP process exits."""
+    global _sandbox
+    sandbox, _sandbox = _sandbox, None
+    if sandbox is not None:
+        try:
+            sandbox.kill()
+        except Exception as exc:
+            print(f"Failed to clean up sandbox: {exc}", file=sys.stderr)
+
+
+atexit.register(_cleanup_sandbox)
+
+
+def _validate_path(path: str) -> str | None:
+    """Validate a path is within allowed prefixes. Returns None if valid, error message otherwise."""
+    if not isinstance(path, str):
+        return "path must be a string"
+    if not path:
+        return "path cannot be empty"
+    # Normalize path and check prefix
+    try:
+        normalized = os.path.normpath(path)
+        resolved = os.path.realpath(path)
+    except (ValueError, OSError):
+        return "invalid path"
+    for prefix in _ALLOWED_PATH_PREFIXES:
+        # Use strict prefix check with os.sep to avoid /workspace-stuff matching /workspace
+        if resolved.startswith(prefix + os.sep) or resolved == prefix:
+            return None
+    return f"path must be within {', '.join(_ALLOWED_PATH_PREFIXES)}"
+
+
+def _validate_timeout(timeout: int | None) -> int:
+    """Validate and bound timeout value."""
+    if timeout is None:
+        return MAX_TIMEOUT
+    if not isinstance(timeout, int):
+        return MAX_TIMEOUT
+    return min(max(1, timeout), MAX_TIMEOUT)
+
+
+def _validate_string_length(value: str, max_length: int, field_name: str) -> str | None:
+    """Validate string length. Returns None if valid, error message otherwise."""
+    if not isinstance(value, str):
+        return f"{field_name} must be a string"
+    if len(value) > max_length:
+        return f"{field_name} exceeds maximum length of {max_length} bytes"
+    return None
+
+
+def run_command(cmd: str, timeout: int = 120) -> dict[str, Any]:
+    """Run a shell command inside the sandbox, capturing exit code / stdout / stderr."""
+    from e2b.sandbox.commands.command_handle import CommandExitException
+    try:
+        result = _get_sandbox().commands.run(cmd, timeout=timeout)
+        return {
+            "exit_code": result.exit_code,
+            "stdout": result.stdout.strip() if result.stdout else "",
+            "stderr": result.stderr.strip() if result.stderr else "",
+        }
+    except CommandExitException as exc:
+        return {
+            "exit_code": getattr(exc, "exit_code", 1),
+            "stdout": "",
+            "stderr": str(exc)[:2048],  # Truncate to prevent info leak
+        }
+    except Exception as exc:
+        return {
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": f"execution error: {type(exc).__name__}",
+        }
+
+
+def _format_command_result(result: dict[str, Any]) -> str:
+    """Render a command result for an MCP tool response.
+
+    The exit code is always included so the LLM can branch on success /
+    failure without having to parse free-form text. stdout / stderr are
+    rendered only when non-empty.
+    """
+    sections = [f"exit_code: {result['exit_code']}"]
+    if result["stdout"]:
+        sections.append(f"stdout:\n{result['stdout']}")
+    if result["stderr"]:
+        sections.append(f"stderr:\n{result['stderr']}")
+    if len(sections) == 1:
+        sections.append("(no output)")
+    return "\n".join(sections)
+
+
+# --- Tool definitions --------------------------------------------------------
+
+TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "sandbox_run_code",
+        "description": (
+            "Execute Python code in an isolated CubeSandbox MicroVM. Use this for "
+            "running untrusted code, testing generated scripts, or installing "
+            "packages safely."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "Python code to execute in the sandbox",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Execution timeout in seconds (default 120, max 300)",
+                    "default": 120,
+                },
+            },
+            "required": ["code"],
+        },
+    },
+    {
+        "name": "sandbox_run_command",
+        "description": (
+            "Execute a shell command in an isolated CubeSandbox MicroVM. Use this "
+            "to safely test shell commands, explore file systems, or run build "
+            "tools without affecting the host."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "Shell command to execute in the sandbox",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Execution timeout in seconds (default 120, max 300)",
+                    "default": 120,
+                },
+            },
+            "required": ["command"],
+        },
+    },
+    {
+        "name": "sandbox_write_file",
+        "description": "Write content to a file inside the sandbox.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Absolute path inside the sandbox (e.g. /workspace/script.py)",
+                },
+                "content": {"type": "string", "description": "File content to write"},
+            },
+            "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "sandbox_read_file",
+        "description": "Read a file's content from inside the sandbox.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Absolute path inside the sandbox"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "sandbox_reset",
+        "description": (
+            "Destroy the current sandbox and create a fresh one. Use between "
+            "unrelated tasks to get a clean environment."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+]
+
+
+# --- JSON-RPC handler --------------------------------------------------------
+
+def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
+    method = request.get("method", "")
+    req_id = request.get("id")
+
+    if method == "initialize":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {
+                    "name": "cubesandbox-codebuddy-mcp",
+                    "version": "1.0.0",
+                },
+            },
+        }
+
+    if method == "tools/list":
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}}
+
+    if method == "tools/call":
+        tool_name = request["params"]["name"]
+        arguments = request["params"].get("arguments", {})
+        text = ""
+        is_error = False
+        try:
+            if tool_name == "sandbox_run_code":
+                code = arguments.get("code", "")
+                timeout = _validate_timeout(arguments.get("timeout"))
+                err = _validate_string_length(code, MAX_CODE_LENGTH, "code")
+                if err:
+                    raise ValueError(err)
+                if not code.strip():
+                    raise ValueError("code cannot be empty")
+                result = run_command(f"python3 -c {shlex.quote(code)}", timeout=timeout)
+                text = _format_command_result(result)
+                is_error = result["exit_code"] != 0
+
+            elif tool_name == "sandbox_run_command":
+                cmd = arguments.get("command", "")
+                timeout = _validate_timeout(arguments.get("timeout"))
+                err = _validate_string_length(cmd, MAX_COMMAND_LENGTH, "command")
+                if err:
+                    raise ValueError(err)
+                if not cmd.strip():
+                    raise ValueError("command cannot be empty")
+                result = run_command(cmd, timeout=timeout)
+                text = _format_command_result(result)
+                is_error = result["exit_code"] != 0
+
+            elif tool_name == "sandbox_write_file":
+                path = arguments.get("path", "")
+                content = arguments.get("content", "")
+                err = _validate_path(path)
+                if err:
+                    raise ValueError(err)
+                err = _validate_string_length(content, MAX_CONTENT_LENGTH, "content")
+                if err:
+                    raise ValueError(err)
+                _get_sandbox().files.write(path, content)
+                text = f"Written {len(content)} bytes to {path}"
+
+            elif tool_name == "sandbox_read_file":
+                path = arguments.get("path", "")
+                err = _validate_path(path)
+                if err:
+                    raise ValueError(err)
+                content = _get_sandbox().files.read(path)
+                text = content if isinstance(content, str) else content.decode(
+                    "utf-8", errors="replace"
+                )
+
+            elif tool_name == "sandbox_reset":
+                _cleanup_sandbox()
+                text = "Sandbox destroyed. A new one will be created on next use."
+
+            else:
+                text = f"Unknown tool: {tool_name}"
+                is_error = True
+
+        except (ValueError, TypeError, KeyError) as exc:
+            text = f"Invalid arguments: {exc}"
+            is_error = True
+        except Exception as exc:
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+            error_type = type(exc).__name__
+            text = f"Error: {error_type}"
+            is_error = True
+
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "content": [{"type": "text", "text": text}],
+                "isError": is_error,
+            },
+        }
+
+    if method == "notifications/initialized":
+        return None
+
+    return {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "error": {"code": -32601, "message": f"Method not found: {method}"},
+    }
+
+
+# --- Main loop ---------------------------------------------------------------
+
+def _read_mcp_message() -> dict[str, Any] | None:
+    """Read one newline-delimited JSON-RPC message from MCP stdio.
+
+    Raises EOFError when stdin is exhausted (client disconnected). Malformed
+    lines return None so the loop can skip them without hanging.
+    """
+    line = sys.stdin.readline()
+    if not line:
+        raise EOFError()
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError:
+        return None
+
+
+def main() -> None:
+    """Run the MCP server on stdio (newline-delimited JSON-RPC)."""
+    try:
+        while True:
+            try:
+                request = _read_mcp_message()
+            except EOFError:
+                break
+            if request is None:
+                continue
+            response = handle_request(request)
+            if response is not None:
+                sys.stdout.write(json.dumps(response) + "\n")
+                sys.stdout.flush()
+    finally:
+        _cleanup_sandbox()
+
+
+if __name__ == "__main__":
+    main()

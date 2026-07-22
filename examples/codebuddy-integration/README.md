@@ -16,7 +16,19 @@ This example ships:
   and CodeBuddy's state directory (`/workspace/.codebuddy`) survive the snapshot.
 - `network_policy.py` — a default-deny egress policy where CubeEgress injects
   the API key on the wire, so the key never enters the VM.
-- `env_utils.py`, `_codebuddy_common.py`, `.env.example`, `requirements.txt`.
+- `sandbox_exec.py` — a host-side CLI executor that lets you run arbitrary
+  Python or shell code inside a disposable MicroVM (`--code`, `--file`,
+  `--cmd`, `--pip`). Reuses a cached sandbox across invocations via a
+  UID-scoped session file under `/tmp`.
+- `mcp_server.py` — exposes the same execution backend as an MCP server
+  (JSON-RPC over stdio) so any MCP client (Claude Desktop, Cursor, …) can
+  sandbox its code through CodeBuddy's toolchain.
+- `hooks/` — a CodeBuddy JavaScript plugin (`cubesandbox-sandbox.js`) that
+  routes the in-agent `bash` tool through the host-side executor, plus a
+  shell installer (`install.sh`) that drops the plugin into
+  `~/.config/codebuddy/plugins/`.
+- `env_utils.py`, `_codebuddy_common.py`, `.env.example`, `requirements.txt`,
+  `tests/`.
 
 ## Directory layout
 
@@ -31,6 +43,16 @@ codebuddy-integration/
 ├── run_codebuddy.py      # One-shot CodeBuddy task
 ├── resume_codebuddy.py   # Pause / resume session persistence
 ├── network_policy.py     # Default-deny egress + on-the-wire key injection
+├── sandbox_exec.py       # Host-side CLI: --code / --file / --cmd / --pip
+├── mcp_server.py         # JSON-RPC stdio MCP server with 5 sandbox tools
+├── hooks/
+│   ├── install.sh                       # Copy plugin + sanitized config into ~/.config/codebuddy
+│   └── cubesandbox-sandbox.js           # tool.execute.before plugin that forwards bash to a sandbox
+├── tests/                # pytest suite (fully offline, SDK mocked)
+│   ├── conftest.py
+│   ├── test_sandbox_exec.py
+│   ├── test_mcp_server.py
+│   └── test_codebuddy_common.py
 ├── README.md             # English docs (this file)
 └── README_zh.md          # Chinese docs
 ```
@@ -144,6 +166,113 @@ python network_policy.py
 
 If the agent needs extra hosts (package registries, MCP servers), add matching
 allow rules or preinstall those dependencies into the template.
+
+## 7. Host-side executor (`sandbox_exec.py`)
+
+For tasks that need to run untrusted code but do not need the CodeBuddy
+agent itself, the `sandbox_exec.py` CLI runs code directly inside a
+disposable MicroVM. The host stays clean; the sandbox is destroyed (or
+its session cached) at the end of each call.
+
+```bash
+python sandbox_exec.py --code "print(1+1)"
+python sandbox_exec.py --file ./script.py
+python sandbox_exec.py --cmd "ls -la /workspace"
+python sandbox_exec.py --pip requests --code "import requests; print(requests.__version__)"
+
+# Reuse the same sandbox on the next call instead of cold-starting
+python sandbox_exec.py --keep-alive --code "state = 42"
+python sandbox_exec.py --cmd "echo state still alive"
+
+# Force a fresh sandbox
+python sandbox_exec.py --reset
+```
+
+The cross-process cache uses a UID-scoped session file under
+`/tmp/cubesandbox_codebuddy_session_<uid>` (`O_NOFOLLOW` + `0600` +
+`symlink → S_ISREG` check) so a different user on a shared host cannot
+hijack your `Sandbox.connect()` on the next call.
+
+## 8. MCP server (`mcp_server.py`)
+
+The same execution backend is also exposed as a newline-delimited
+JSON-RPC MCP server so any MCP client (Claude Desktop, Cursor,
+Windsurf, VS Code, …) can run untrusted code in the CodeBuddy
+sandbox instead of locally. Five tools are exposed:
+
+| Tool | Purpose |
+| --- | --- |
+| `sandbox_run_code` | Run a Python snippet in the sandbox |
+| `sandbox_run_command` | Run an arbitrary shell command in the sandbox |
+| `sandbox_write_file` | Write a file into the sandbox |
+| `sandbox_read_file` | Read a file back from the sandbox |
+| `sandbox_reset` | Destroy the cached sandbox and start over |
+
+Wire it into an MCP client (Claude Desktop example shown):
+
+```json
+{
+  "mcpServers": {
+    "cubesandbox-codebuddy": {
+      "command": "python3",
+      "args": ["/abs/path/to/examples/codebuddy-integration/mcp_server.py"],
+      "env": {
+        "CUBE_API_URL": "http://<cube-host>:3000",
+        "CUBE_API_KEY": "<api-key>",
+        "CUBE_TEMPLATE_ID": "<template-id>"
+      }
+    }
+  }
+}
+```
+
+The server lifecycle is process-global: a single sandbox is created on
+first use, its TTL is refreshed on every tool call, and an `atexit`
+handler kills it when the MCP process exits. `sandbox_reset` is the
+only way to force a fresh one mid-session.
+
+## 9. Host CodeBuddy + bash-routing plugin (`hooks/`)
+
+For the opposite workflow — keep CodeBuddy on the host but route every
+`bash` tool call through CubeSandbox — install the JavaScript plugin
+in `hooks/`:
+
+```bash
+cd examples/codebuddy-integration
+pip install -r requirements.txt
+cp .env.example .env
+# Fill in CUBE_API_URL and CUBE_TEMPLATE_ID
+
+cd hooks
+./install.sh
+```
+
+The installer copies `cubesandbox-sandbox.js` into
+`~/.config/codebuddy/plugins/`, drops a sibling `package.json` declaring
+`"type": "module"`, and merges only an allow-listed subset of
+`CUBE_*` settings into the CodeBuddy config. LLM provider API keys are
+never copied.
+
+Restart CodeBuddy after install. The plugin's
+`tool.execute.before` hook intercepts `bash` calls, spawns the host
+`python3 sandbox_exec.py --cmd <quoted>` against the cached session
+sandbox, and replaces the host-shell command with the sandbox output.
+Other tools still run on the host as usual — the plugin only intercepts `bash`.
+
+Uninstall with `hooks/install.sh --uninstall`.
+
+## Running the tests
+
+```bash
+cd examples/codebuddy-integration
+pip install pytest
+pytest tests -v
+```
+
+The suite is fully offline: no CubeSandbox cluster or LLM credentials
+are needed. `sandbox_exec` and `mcp_server` are exercised via
+`unittest.mock` against the e2b SDK; the helpers are exercised
+directly so test order cannot leak state.
 
 ## Troubleshooting
 

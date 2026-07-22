@@ -16,6 +16,8 @@ import sys
 from collections.abc import Callable
 from typing import Any
 
+from e2b.sandbox.commands.command_handle import CommandExitException
+
 
 def positive_int(value: str) -> int:
     """argparse type that rejects zero and negative integers.
@@ -30,7 +32,7 @@ def positive_int(value: str) -> int:
         raise argparse.ArgumentTypeError(f"expected an integer, got {value!r}") from None
     if parsed <= 0:
         raise argparse.ArgumentTypeError(
-            f"expected a positive integer, got {parsed}"
+            f"expected a positive integer, got {value}"
         )
     return parsed
 
@@ -58,8 +60,7 @@ def run_command(
     # "invalid username: '<x>'", so we cannot pass ``codebuddy`` here even
     # though the image's USER directive drops privileges. ``user`` (uid 1000)
     # is the default non-root account the base image ships; pairing that with
-    # the image-level USER codebuddy means any containerized tool (CodeBuddy
-    # itself, npm scripts run via codebuddy, etc.) runs unprivileged, while
+    # the image-level USER means any containerized tool runs unprivileged, while
     # the exec channel stays within the SDK-accepted allow-list.
     kwargs = {"cwd": cwd, "timeout": timeout, "user": user}
     kwargs = {key: value for key, value in kwargs.items() if value is not None}
@@ -79,6 +80,11 @@ def run_command(
             raise
         kwargs["env"] = kwargs.pop("envs")
         return sandbox.commands.run(command, **kwargs)
+    except CommandExitException as exc:
+        # Some SDKs raise on non-zero exits instead of returning a result.
+        # Swallow it here so every caller can uniformly branch on exit_code
+        # without catching at every call site.
+        return exc
 
 
 def ensure_success(result, action: str) -> None:
