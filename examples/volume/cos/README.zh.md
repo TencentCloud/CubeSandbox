@@ -48,7 +48,7 @@
 
 ### 容器部署（Kubernetes / 镜像）
 
-若 CubeMaster、Cubelet 以**容器镜像**方式运行（例如 Helm / TKE 部署），镜像构建时已通过 `deploy/scripts/docker-install-volume-deps.sh` 把 **cosfs、coscmd、jq** 装进镜像环境，**无需**再在宿主机上执行下方 `install-deps.sh`。配置好 `volume-cos.conf` 与插件注册即可使用。
+若 CubeMaster、Cubelet 以**容器镜像**方式运行（例如 Kubernetes / Helm 部署），镜像构建时已通过 `deploy/scripts/docker-install-volume-deps.sh` 把 **cosfs、coscmd、jq** 装进镜像环境，**无需**再在宿主机上执行下方 `install-deps.sh`。配置好 `volume-cos.conf` 与插件注册即可使用。
 
 > 仍受上文架构限制：官方镜像同样基于 x86_64 cosfs，**不支持 ARM**。
 
