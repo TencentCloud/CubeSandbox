@@ -2328,6 +2328,7 @@ class TestTemplateAPI:
         get.assert_called_once_with(
             "http://localhost:3000/templates/tpl-network",
             params={},
+            headers={}
         )
         assert info.template_id == "tpl-network"
         assert info.network_type == "tap"
