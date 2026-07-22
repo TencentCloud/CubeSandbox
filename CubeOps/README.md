@@ -50,8 +50,13 @@ export JWT_SECRET=$(openssl rand -hex 32)
 > was previously migrated by an older version of the codebase, you may see
 > a `migration fingerprint check failed` error on startup. This is a safety
 > guard against silent schema drift. To bypass it (e.g. in dev), set
-> `CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK=1`. The one-click deployment
-> sets this automatically in `.one-click.env`.
+> `CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK=1`.
+>
+> **Disabling auto-migration**: in production environments where the
+> runtime database account has DML-only grants (no DDL), set
+> `CUBE_AUTO_MIGRATION=false` to skip schema migration at startup. The
+> schema must then be applied out-of-band by a privileged account. Default
+> is enabled (migrate on boot).
 
 ## Service Management
 

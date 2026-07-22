@@ -245,7 +245,7 @@ func initDatabaseSchema(ctx context.Context, cfg *config.Config) error {
 	// so unset/typo never disables migration.
 	if !migrate.AutoMigrationEnabled() {
 		CubeLog.WithContext(ctx).Warnf(
-			"CUBEMASTER_AUTO_MIGRATION=false: skipping schema migration; DDL must be " +
+			"CUBE_AUTO_MIGRATION=false: skipping schema migration; DDL must be " +
 				"applied out-of-band by a privileged account")
 		return nil
 	}

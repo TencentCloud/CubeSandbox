@@ -22,14 +22,14 @@ import (
 	"github.com/pressly/goose/v3/lock"
 )
 
-// autoMigrationEnv gates the schema migration performed at CubeMaster
-// startup. A runtime database account with no DDL grant cannot run the
-// migrator at all — not even the fingerprint layer's CREATE TABLE — so
-// such a deployment sets this to a falsey value and applies the schema
-// out-of-band with a privileged account.
-const autoMigrationEnv = "CUBEMASTER_AUTO_MIGRATION"
+// autoMigrationEnv gates the schema migration performed at startup by
+// CubeMaster and CubeOps. A runtime database account with no DDL grant
+// cannot run the migrator at all — not even the fingerprint layer's
+// CREATE TABLE — so such a deployment sets this to a falsey value and
+// applies the schema out-of-band with a privileged account.
+const autoMigrationEnv = "CUBE_AUTO_MIGRATION"
 
-// AutoMigrationEnabled reports whether CubeMaster should run schema
+// AutoMigrationEnabled reports whether a component should run schema
 // migrations at startup. It defaults to true and returns false only for
 // an explicit falsey value (false/0/no/off, case-insensitive). We do not
 // use strconv.ParseBool because it rejects "no"/"off", and any unset,
