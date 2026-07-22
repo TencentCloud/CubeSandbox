@@ -252,6 +252,7 @@ func initDatabaseSchema(ctx context.Context, cfg *config.Config) error {
 		MaxOpenConns:                src.MaxOpenConns,
 		MaxConnLifeTimeSeconds:      src.MaxConnLifeTimeSeconds,
 		MigrationLockTimeoutSeconds: src.MigrationLockTimeoutSeconds,
+		Extra:                       src.Extra,
 	}
 	if _, err := dao.Open(ctx, daoCfg); err != nil {
 		return fmt.Errorf("dao open: %w", err)

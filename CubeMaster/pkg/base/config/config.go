@@ -128,7 +128,7 @@ type Debug struct {
 }
 
 type DBConfig struct {
-	// Driver selects the dao engine ("mysql", future: "postgres", ...).
+	// Driver selects the dao engine ("mysql" or "postgres").
 	// Empty defaults to "mysql" for backwards compatibility with v0.2.2
 	// configurations that pre-date the multi-driver dao layer.
 	Driver string `yaml:"driver"`
@@ -147,6 +147,13 @@ type DBConfig struct {
 	// MigrationLockTimeoutSeconds bounds the cluster-wide GET_LOCK wait
 	// at startup. Defaults to 60 seconds when zero.
 	MigrationLockTimeoutSeconds int `yaml:"migration_lock_timeout_seconds"`
+
+	// Extra carries driver-specific connection options passed through to
+	// dao.Config.Extra. Ignored by the mysql driver. Postgres recognizes:
+	// "sslmode" (default "disable"), "statement_timeout" (ms; overrides the
+	// value derived from read/write_timeout), and
+	// "idle_in_transaction_session_timeout" (ms).
+	Extra map[string]string `yaml:"extra"`
 }
 
 type ExtraConf struct {
