@@ -19,6 +19,9 @@ service CubeboxMgr {
   rpc List(ListCubeSandboxRequest) returns (ListCubeSandboxResponse);
   rpc Update(UpdateCubeSandboxRequest) returns (UpdateCubeSandboxResponse);
   rpc Exec(ExecCubeSandboxRequest) returns (ExecCubeSandboxResponse);
+  // AttachTerminal owns one interactive TTY process for the stream lifetime.
+  // The first client frame must be open and binds the stream to one container.
+  rpc AttachTerminal(stream TerminalClientMessage) returns (stream TerminalServerMessage);
   // AppSnapshot creates a cubebox, makes an app snapshot, and destroys the cubebox.
   // Required annotations:
   //   - cube.master.appsnapshot.create: "true"
@@ -1170,4 +1173,68 @@ message CleanupOrphanStorageFilesResponse {
   cubelet.services.errorcode.v1.Ret ret = 2;
   // Orphan files cubelet found (and possibly removed).
   repeated StorageOrphanEntry orphans = 3;
+}
+
+// Client-to-server frames for an interactive terminal session. Keeping client
+// and server frames separate makes invalid message direction unrepresentable.
+message TerminalClientMessage {
+  oneof payload {
+    TerminalOpenRequest open = 1;
+    bytes stdin = 2;
+    TerminalResize resize = 3;
+    TerminalClose close = 4;
+  }
+}
+
+message TerminalOpenRequest {
+  string request_id = 1;
+  string session_id = 2;
+  string sandbox_id = 3;
+  string container_id = 4;
+  repeated string args = 5;
+  repeated string env = 6;
+  string cwd = 7;
+  uint32 cols = 8;
+  uint32 rows = 9;
+}
+
+message TerminalResize {
+  uint32 cols = 1;
+  uint32 rows = 2;
+}
+
+message TerminalClose {}
+
+// Server-to-client frames for an interactive terminal session.
+message TerminalServerMessage {
+  oneof payload {
+    TerminalReady ready = 1;
+    bytes output = 2;
+    TerminalExit exit = 3;
+    TerminalError error = 4;
+  }
+}
+
+message TerminalReady {
+  string exec_id = 1;
+}
+
+message TerminalExit {
+  int32 exit_code = 1;
+  string reason = 2;
+}
+
+enum TerminalErrorCode {
+  TERMINAL_ERROR_UNSPECIFIED = 0;
+  TERMINAL_ERROR_INVALID_REQUEST = 1;
+  TERMINAL_ERROR_TARGET_NOT_FOUND = 2;
+  TERMINAL_ERROR_TARGET_NOT_RUNNING = 3;
+  TERMINAL_ERROR_INTERNAL = 4;
+  TERMINAL_ERROR_IDLE_TIMEOUT = 5;
+}
+
+message TerminalError {
+  TerminalErrorCode code = 1;
+  string message = 2;
+  bool retryable = 3;
 }

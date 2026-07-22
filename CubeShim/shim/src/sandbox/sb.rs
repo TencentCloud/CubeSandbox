@@ -50,6 +50,21 @@ const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
 const ANNO_ENABLE_IVSHMEM: &str = "cube.master.enable_ivshmem";
 const IVSHMEM_DEFAULT_SIZE: usize = 1 * 1024 * 1024; // 1MB
 
+fn tty_win_resize_request(
+    container_id: &str,
+    exec_id: &str,
+    width: u32,
+    height: u32,
+) -> agent::TtyWinResizeRequest {
+    agent::TtyWinResizeRequest {
+        container_id: container_id.to_string(),
+        exec_id: exec_id.to_string(),
+        row: height,
+        column: width,
+        ..Default::default()
+    }
+}
+
 #[derive(PartialEq, Eq)]
 enum SandBoxState {
     Normal,
@@ -1407,6 +1422,36 @@ impl SandBox {
 
         Ok(())
     }
+
+    pub async fn resize_pty(
+        &self,
+        container_id: &str,
+        exec_id: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        let agent_container_id = {
+            let containers = self.containers.lock().await;
+            containers
+                .get(container_id)
+                .ok_or_else(|| {
+                    Error::NotFoundError(format!("not found container:{}", container_id))
+                })?
+                .get_id()
+        };
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| Error::Other("cube-agent client is not connected".to_string()))?
+            .lock()
+            .await;
+        let request = tty_win_resize_request(&agent_container_id, exec_id, width, height);
+        client
+            .tty_win_resize(self.ctx.clone(), &request)
+            .await
+            .map_err(|error| Error::Other(format!("resize terminal failed:{}", error)))?;
+        Ok(())
+    }
 }
 
 fn recreate_dir(path: &str, context: &str) -> CResult<()> {
@@ -1445,6 +1490,7 @@ mod tests {
     use crate::common::PRODUCT_CUBEBOX;
 
     use super::normalize_dns_for_agent;
+    use super::tty_win_resize_request;
     use super::Log;
     use super::SandBox;
 
@@ -1510,5 +1556,15 @@ mod tests {
     fn test_normalize_dns_for_agent_accepts_prefixed_entry() {
         let got = normalize_dns_for_agent(" nameserver 8.8.8.8 ").unwrap();
         assert_eq!(got, "nameserver 8.8.8.8");
+    }
+
+    #[test]
+    fn test_tty_win_resize_request_maps_dimensions() {
+        let request = tty_win_resize_request("container-1", "exec-1", 120, 40);
+
+        assert_eq!(request.container_id, "container-1");
+        assert_eq!(request.exec_id, "exec-1");
+        assert_eq!(request.column, 120);
+        assert_eq!(request.row, 40);
     }
 }
