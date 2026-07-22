@@ -177,6 +177,15 @@ class TestCreate:
         body = m.call_args.kwargs["json"]
         assert body["network"]["denyOut"] == ["0.0.0.0/0"]
 
+    def test_create_network_mask_request_host(self):
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(
+                network={"mask_request_host": "localhost:${PORT}"},
+                config=make_config(),
+            )
+        body = m.call_args.kwargs["json"]
+        assert body["network"]["maskRequestHost"] == "localhost:${PORT}"
+
     def test_create_network_empty_not_in_payload(self):
         with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
             Sandbox.create(network={}, config=make_config())

@@ -143,6 +143,9 @@ type CubeNetworkConfig struct {
 	AllowOut           []string      `json:"allowOut,omitempty"`
 	DenyOut            []string      `json:"denyOut,omitempty"`
 	Rules              []*EgressRule `json:"rules,omitempty"`
+	// MaskRequestHost is an ingress-only Host authority template consumed by
+	// CubeProxy. It is intentionally not forwarded to Cubelet.
+	MaskRequestHost *string `json:"maskRequestHost,omitempty"`
 }
 
 // EgressRule is an L7 egress rule, evaluated first-match-wins.
@@ -175,6 +178,81 @@ type EgressRuleInject struct {
 	Header string  `json:"header"`
 	Secret string  `json:"secret"`
 	Format *string `json:"format,omitempty"`
+}
+
+// DeepCopy returns an independent copy of the network configuration, including
+// all nested rule pointers. Keep field-copy knowledge here so template, HTTP,
+// and CLI paths cannot drift when the contract grows.
+func (c *CubeNetworkConfig) DeepCopy() *CubeNetworkConfig {
+	if c == nil {
+		return nil
+	}
+	out := &CubeNetworkConfig{
+		AllowInternetAccess: cloneBoolPtr(c.AllowInternetAccess),
+		AllowPublicTraffic:  cloneBoolPtr(c.AllowPublicTraffic),
+		AllowOut:            append([]string(nil), c.AllowOut...),
+		DenyOut:             append([]string(nil), c.DenyOut...),
+		MaskRequestHost:     cloneStringPtr(c.MaskRequestHost),
+	}
+	if len(c.Rules) > 0 {
+		out.Rules = make([]*EgressRule, 0, len(c.Rules))
+		for _, rule := range c.Rules {
+			out.Rules = append(out.Rules, rule.DeepCopy())
+		}
+	}
+	return out
+}
+
+func (r *EgressRule) DeepCopy() *EgressRule {
+	if r == nil {
+		return nil
+	}
+	out := &EgressRule{Name: r.Name}
+	if r.Match != nil {
+		out.Match = &EgressRuleMatch{
+			SNI:    cloneStringPtr(r.Match.SNI),
+			Host:   cloneStringPtr(r.Match.Host),
+			Method: append([]string(nil), r.Match.Method...),
+			Path:   cloneStringPtr(r.Match.Path),
+			Scheme: cloneStringPtr(r.Match.Scheme),
+		}
+	}
+	if r.Action != nil {
+		out.Action = &EgressRuleAction{
+			Allow: r.Action.Allow,
+			Audit: cloneStringPtr(r.Action.Audit),
+		}
+		if len(r.Action.Inject) > 0 {
+			out.Action.Inject = make([]*EgressRuleInject, 0, len(r.Action.Inject))
+			for _, inject := range r.Action.Inject {
+				if inject == nil {
+					continue
+				}
+				out.Action.Inject = append(out.Action.Inject, &EgressRuleInject{
+					Header: inject.Header,
+					Secret: inject.Secret,
+					Format: cloneStringPtr(inject.Format),
+				})
+			}
+		}
+	}
+	return out
+}
+
+func cloneBoolPtr(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func cloneStringPtr(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 type Volume struct {

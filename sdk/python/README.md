@@ -113,6 +113,14 @@ Two layers can be combined inside `network=`:
 - **L3/L4** — `allow_out` / `deny_out` lists of CIDRs or hostnames.
 - **L7** — `rules` for host / path / SNI matching, audit, and credential
   injection. Use the typed `Rule` / `Match` / `Action` / `Inject` dataclasses.
+- **Inbound Host** — `mask_request_host` customizes the Host CubeProxy forwards
+  to user services; `${PORT}` expands to the requested sandbox port.
+
+```python
+sb = Sandbox.create(
+    network={"mask_request_host": "localhost:${PORT}"},
+)
+```
 
 ```python
 from cubesandbox import Sandbox, Rule, Match, Action, Inject

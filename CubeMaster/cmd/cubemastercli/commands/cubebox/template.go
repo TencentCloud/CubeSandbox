@@ -263,18 +263,7 @@ func parseBoolToken(value string) (bool, bool) {
 }
 
 func cloneCubeNetworkConfig(in *types.CubeNetworkConfig) *types.CubeNetworkConfig {
-	if in == nil {
-		return nil
-	}
-	out := &types.CubeNetworkConfig{
-		AllowOut: append([]string(nil), in.AllowOut...),
-		DenyOut:  append([]string(nil), in.DenyOut...),
-	}
-	if in.AllowInternetAccess != nil {
-		allowInternetAccess := *in.AllowInternetAccess
-		out.AllowInternetAccess = &allowInternetAccess
-	}
-	return out
+	return in.DeepCopy()
 }
 
 func dedupeCIDRs(values []string) []string {

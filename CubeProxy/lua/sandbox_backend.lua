@@ -60,6 +60,23 @@ local function get_caller_host_ip()
     return ""
 end
 
+-- Optional metadata must still have a cache entry when absent. ngx.shared.DICT
+-- returns nil both for "not cached" and "evicted"; boolean false is therefore
+-- used as an unambiguous negative-cache value (Redis values are strings).
+local function encode_optional_cache_value(value)
+    if utils:is_null(value) then
+        return false
+    end
+    return value
+end
+
+local function decode_optional_cache_value(value)
+    if value == false then
+        return nil
+    end
+    return value
+end
+
 local function load_sandbox_proxy_metadata(ins_id)
     local redis = require "redis_iresty"
     local red = redis:new({
@@ -113,9 +130,10 @@ end
     2 args:
         - ins_id: string, sandbox / instance id
         - container_port: string, e.g. "8080" or "32000"
-    2 return values:
+    3 return values:
         - host_ip: string
         - host_port: string
+        - mask_request_host: optional unexpanded Host template
 
     On unrecoverable error this function calls ngx.exit() and does not return.
 --]]
@@ -127,26 +145,29 @@ function _M.resolve_backend(ins_id, container_port)
     local cache_backend_port_key = string.format("%s:%s:%s", ins_id, container_port, "backend_port")
     local host_ip = cache:get(cache_backend_ip_key)
     local host_port = cache:get(cache_backend_port_key)
-    if host_ip and host_port
-        and cache:get(ins_id .. ":meta_cached") then
+    local cached_allow_public = cache:get(ins_id .. ":AllowPublicTraffic")
+    local cached_traffic_token = cache:get(ins_id .. ":TrafficAccessToken")
+    local cached_mask_request_host = cache:get(ins_id .. ":MaskRequestHost")
+    -- Read meta_cached last. It is written first on fill/refresh (before the
+    -- dependent keys) with the same TTL, so its lifetime contains theirs: while
+    -- meta_cached is still present the later-written keys should not have expired.
+    local meta_cached = cache:get(ins_id .. ":meta_cached")
+    if host_ip and host_port and meta_cached then
         -- Cache-hit path must still enforce the per-sandbox traffic token,
         -- otherwise a single warm entry would let unauthenticated callers
-        -- bypass the gate for the whole cache TTL. The meta_cached sentinel
-        -- shares the TTL of the auth fields; if it is absent the auth
-        -- metadata has expired (or predates this feature), so fall through
-        -- to the Redis reload below instead of trusting a nil that may just
-        -- mean "expired". Refresh the auth keys alongside the backend keys
-        -- so their TTLs never drift apart under steady traffic.
-        local allow_public = cache:get(ins_id .. ":AllowPublicTraffic")
-        local traffic_token = cache:get(ins_id .. ":TrafficAccessToken")
+        -- bypass the gate for the whole cache TTL.
+        local allow_public = decode_optional_cache_value(cached_allow_public)
+        local traffic_token = decode_optional_cache_value(cached_traffic_token)
+        local mask_request_host = decode_optional_cache_value(cached_mask_request_host)
         enforce_traffic_token(allow_public, traffic_token, ins_id)
 
         cache:set(ins_id .. ":meta_cached", "1", timeout)
         cache:set(cache_backend_ip_key, host_ip, timeout)
         cache:set(cache_backend_port_key, host_port, timeout)
-        cache:set(ins_id .. ":AllowPublicTraffic", allow_public, timeout)
-        cache:set(ins_id .. ":TrafficAccessToken", traffic_token, timeout)
-        return host_ip, host_port
+        cache:set(ins_id .. ":AllowPublicTraffic", cached_allow_public, timeout)
+        cache:set(ins_id .. ":TrafficAccessToken", cached_traffic_token, timeout)
+        cache:set(ins_id .. ":MaskRequestHost", cached_mask_request_host, timeout)
+        return host_ip, host_port, mask_request_host
     end
 
     local metadata, err = load_sandbox_proxy_metadata(ins_id)
@@ -163,14 +184,23 @@ function _M.resolve_backend(ins_id, container_port)
         metadata_map[k] = v
         cache:set(ins_id .. ":" .. k, v, timeout)
     end
+    -- Optional fields must be re-written with encode_optional_cache_value so a
+    -- missing Redis key becomes an explicit false negative-cache sentinel
+    -- (ngx.shared.DICT returns nil for both "missing" and "evicted").
+    local allow_public = metadata_map["AllowPublicTraffic"]
+    local traffic_token = metadata_map["TrafficAccessToken"]
+    local mask_request_host = metadata_map["MaskRequestHost"]
+    cache:set(ins_id .. ":AllowPublicTraffic", encode_optional_cache_value(allow_public), timeout)
+    cache:set(ins_id .. ":TrafficAccessToken", encode_optional_cache_value(traffic_token), timeout)
+    cache:set(ins_id .. ":MaskRequestHost", encode_optional_cache_value(mask_request_host), timeout)
 
     -- Restrict Public Access: gate the request before exposing any backend
     -- info. Legacy entries written before this feature have no
     -- AllowPublicTraffic field, which evaluates as nil here and therefore
     -- skips enforcement (publicly reachable, the historical default).
     enforce_traffic_token(
-        metadata_map["AllowPublicTraffic"],
-        metadata_map["TrafficAccessToken"],
+        allow_public,
+        traffic_token,
         ins_id)
 
     local target_host_ip = metadata_map["HostIP"]
@@ -204,7 +234,7 @@ function _M.resolve_backend(ins_id, container_port)
 
     cache:set(cache_backend_ip_key, host_ip, timeout)
     cache:set(cache_backend_port_key, host_port, timeout)
-    return host_ip, host_port
+    return host_ip, host_port, mask_request_host
 end
 
 return _M

@@ -11,6 +11,7 @@ CODE_INTERPRETER = "code_interpreter"
 PAUSE_RESUME = "pause_resume"
 NETWORK_ALLOW_DENY = "network_allow_deny"
 NETWORK_PUBLIC_ACCESS = "network_public_access"
+NETWORK_MASK_REQUEST_HOST = "network_mask_request_host"
 PLATFORM_LIFECYCLE = "platform_lifecycle"
 HOST_MOUNT = "host_mount"
 
@@ -23,6 +24,7 @@ E2B_CAPABILITIES = frozenset(
         PAUSE_RESUME,
         NETWORK_ALLOW_DENY,
         NETWORK_PUBLIC_ACCESS,
+        NETWORK_MASK_REQUEST_HOST,
     }
 )
 
@@ -33,6 +35,7 @@ CUBESANDBOX_CAPABILITIES = frozenset(
         PAUSE_RESUME,
         NETWORK_ALLOW_DENY,
         NETWORK_PUBLIC_ACCESS,
+        NETWORK_MASK_REQUEST_HOST,
         PLATFORM_LIFECYCLE,
         HOST_MOUNT,
     }

@@ -50,6 +50,13 @@ class SandboxAdapter(ABC):
     def run_code(self, code: str, *, timeout: int = 60) -> CodeResult:
         raise NotImplementedError
 
+    def get_host(self, port: int) -> str:
+        """Return the public virtual hostname for a sandbox port."""
+        method = getattr(self.raw_sandbox, "get_host", None)
+        if not callable(method):
+            raise UnsupportedCapability(self.backend, "get_host")
+        return str(method(port))
+
     def pause(self, *, timeout: int = 60) -> None:
         raise UnsupportedCapability(self.backend, "pause_resume")
 

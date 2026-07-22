@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
@@ -30,7 +32,11 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 )
 
-const maxCreateTimeEnvVarsAnnotationBytes = 16 * 1024
+const (
+	maxCreateTimeEnvVarsAnnotationBytes = 16 * 1024
+	maxMaskRequestHostBytes             = 512
+	maskRequestHostPortPlaceholder      = "${PORT}"
+)
 
 func checkAndGetReqResource(req *types.CreateCubeSandboxReq) (*selctx.RequestResource, error) {
 	res := &selctx.RequestResource{
@@ -81,7 +87,71 @@ func checkParam(req *types.CreateCubeSandboxReq) error {
 		return ret.Err(errorcode.ErrorCode_MasterParamsError, "containers param is nil")
 	}
 
+	if req.CubeNetworkConfig != nil && req.CubeNetworkConfig.MaskRequestHost != nil {
+		if err := validateMaskRequestHost(*req.CubeNetworkConfig.MaskRequestHost); err != nil {
+			return ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
+		}
+	}
+
 	return nil
+}
+
+func validateMaskRequestHost(value string) error {
+	invalid := func(reason string) error {
+		return fmt.Errorf("network.maskRequestHost is invalid: %s", reason)
+	}
+
+	if value == "" {
+		return invalid("value must not be empty")
+	}
+	if len(value) > maxMaskRequestHostBytes {
+		return invalid("value is too long")
+	}
+	if strings.TrimSpace(value) != value {
+		return invalid("whitespace and control characters are not allowed")
+	}
+	for _, r := range value {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return invalid("whitespace and control characters are not allowed")
+		}
+	}
+
+	expanded := strings.ReplaceAll(value, maskRequestHostPortPlaceholder, "65535")
+	if strings.Contains(expanded, "${") {
+		return invalid("only the ${PORT} placeholder is supported")
+	}
+	if strings.HasSuffix(expanded, ":") {
+		return invalid("port must not be empty")
+	}
+	if strings.Count(expanded, ":") > 1 && !strings.HasPrefix(expanded, "[") {
+		return invalid("IPv6 hosts must use brackets")
+	}
+	authority, err := url.Parse("//" + expanded)
+	if err != nil || authority.Host == "" || authority.User != nil ||
+		authority.Path != "" || authority.RawQuery != "" || authority.Fragment != "" {
+		return invalid("expected a valid host or host:port authority")
+	}
+	host := authority.Hostname()
+	if host == "" || !isASCII(host) {
+		return invalid("host must be non-empty ASCII")
+	}
+	if port := authority.Port(); port != "" {
+		n, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || n == 0 {
+			return invalid("port must be between 1 and 65535")
+		}
+	}
+
+	return nil
+}
+
+func isASCII(value string) bool {
+	for _, r := range value {
+		if r > unicode.MaxASCII {
+			return false
+		}
+	}
+	return true
 }
 
 func getReqResource(req *types.CreateCubeSandboxReq) (cpu, mem resource.Quantity, err error) {

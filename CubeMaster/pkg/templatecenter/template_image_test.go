@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/agiledragon/gomonkey/v2"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
@@ -642,6 +644,7 @@ func TestGenerateTemplateCreateRequestClonesCubeNetworkRules(t *testing.T) {
 	scheme := "https"
 	audit := "log-only"
 	format := "bearer %s"
+	maskRequestHost := "localhost:${PORT}"
 	req := &types.CreateTemplateFromImageReq{
 		Request:           &types.Request{RequestID: "req-1"},
 		SourceImageRef:    "docker.io/library/nginx:latest",
@@ -651,6 +654,7 @@ func TestGenerateTemplateCreateRequestClonesCubeNetworkRules(t *testing.T) {
 		NetworkType:       cubeboxv1.NetworkType_tap.String(),
 		CubeNetworkConfig: &types.CubeNetworkConfig{
 			AllowInternetAccess: &allowInternetAccess,
+			MaskRequestHost:     &maskRequestHost,
 			Rules: []*types.EgressRule{{
 				Name: "allow-api",
 				Match: &types.EgressRuleMatch{
@@ -681,12 +685,11 @@ func TestGenerateTemplateCreateRequestClonesCubeNetworkRules(t *testing.T) {
 	}
 
 	got, err := generateTemplateCreateRequest(req, artifact, image.DockerImageConfig{}, "http://master.example")
-	if err != nil {
-		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
-	}
-	if got.CubeNetworkConfig == nil {
-		t.Fatal("expected CubeNetworkConfig to be propagated")
-	}
+	require.NoError(t, err)
+	require.NotNil(t, got.CubeNetworkConfig)
+	require.NotNil(t, got.CubeNetworkConfig.MaskRequestHost)
+	assert.Equal(t, maskRequestHost, *got.CubeNetworkConfig.MaskRequestHost)
+	assert.NotSame(t, req.CubeNetworkConfig.MaskRequestHost, got.CubeNetworkConfig.MaskRequestHost)
 	if len(got.CubeNetworkConfig.Rules) != 1 {
 		t.Fatalf("expected 1 egress rule, got %d", len(got.CubeNetworkConfig.Rules))
 	}

@@ -174,6 +174,8 @@ class Sandbox:
                 making outbound traffic to the public internet.
             network: Egress network policy. Accepts keys:
                 - ``allow_out`` / ``deny_out``: lists of CIDRs or hostnames (L3/L4).
+                - ``mask_request_host``: Host authority forwarded to user services;
+                  ``${PORT}`` expands to the requested sandbox port.
                 - ``rules``: list of :class:`~cubesandbox.Rule` dataclasses (or
                   equivalent dicts with snake_case keys) for L7 host/path/SNI
                   matching, audit, and credential injection. For E2B parity,
@@ -244,6 +246,8 @@ class Sandbox:
                 net["denyOut"] = network["deny_out"]
             if "allow_public_traffic" in network:
                 net["allowPublicTraffic"] = network["allow_public_traffic"]
+            if "mask_request_host" in network:
+                net["maskRequestHost"] = network["mask_request_host"]
             if "rules" in network and network["rules"]:
                 # ``rules`` accepts either CubeEgress's list-of-Rule shape or
                 # E2B's per-host transform mapping (``{host: [{transform: {...}}]}``).

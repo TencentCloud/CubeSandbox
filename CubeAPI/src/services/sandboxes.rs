@@ -32,6 +32,8 @@ const RET_CODE_TASK_RESUME_FAILED: i32 = 130589;
 const HOSTDIR_MOUNT_KEY: &str = "host-mount";
 const ENV_VAR_NAME_MAX_LEN: usize = 256;
 const ENV_VAR_VALUE_MAX_LEN: usize = 4096;
+const MASK_REQUEST_HOST_MAX_LEN: usize = 512;
+const MASK_REQUEST_HOST_PORT_PLACEHOLDER: &str = "${PORT}";
 
 /// Environment variable names that may compromise sandbox isolation if injected
 /// at the runtime level (loader overrides, language runtime paths).
@@ -929,6 +931,61 @@ fn new_request_id() -> String {
     Uuid::new_v4().to_string()
 }
 
+fn validate_mask_request_host(value: &str) -> AppResult<()> {
+    let invalid = |reason: &str| {
+        AppError::BadRequest(format!("network.maskRequestHost is invalid: {reason}"))
+    };
+
+    if value.is_empty() {
+        return Err(invalid("value must not be empty"));
+    }
+    if value.len() > MASK_REQUEST_HOST_MAX_LEN {
+        return Err(invalid("value is too long"));
+    }
+    if value.trim() != value || value.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(invalid("whitespace and control characters are not allowed"));
+    }
+    if value.contains("://")
+        || value.contains('/')
+        || value.contains('?')
+        || value.contains('#')
+        || value.contains('@')
+    {
+        return Err(invalid("expected a valid host or host:port authority"));
+    }
+
+    let expanded = value.replace(MASK_REQUEST_HOST_PORT_PLACEHOLDER, "65535");
+    if expanded.contains("${") {
+        return Err(invalid("only the ${PORT} placeholder is supported"));
+    }
+
+    let authority = expanded
+        .parse::<axum::http::uri::Authority>()
+        .map_err(|_| invalid("expected a valid host or host:port authority"))?;
+    if authority.host().is_empty() || !authority.host().is_ascii() {
+        return Err(invalid("host must be non-empty ASCII"));
+    }
+    let explicit_port = if expanded.starts_with('[') {
+        expanded
+            .find(']')
+            .and_then(|end| expanded.get(end + 1..))
+            .and_then(|suffix| suffix.strip_prefix(':'))
+    } else {
+        if expanded.matches(':').count() > 1 {
+            return Err(invalid("IPv6 hosts must use brackets"));
+        }
+        expanded.rsplit_once(':').map(|(_, port)| port)
+    };
+    if let Some(port) = explicit_port {
+        match port.parse::<u16>() {
+            Ok(1..=u16::MAX) => {}
+            _ => return Err(invalid("port must be between 1 and 65535")),
+        }
+    }
+
+    Ok(())
+}
+
 pub(crate) fn build_cube_network_config(
     allow_internet_access: Option<bool>,
     network: Option<&SandboxNetworkConfig>,
@@ -949,9 +1006,14 @@ pub(crate) fn build_cube_network_config(
         .unwrap_or_default();
 
     let allow_public_traffic = network.and_then(|n| n.allow_public_traffic);
+    let mask_request_host = network.and_then(|n| n.mask_request_host.clone());
+    if let Some(value) = mask_request_host.as_deref() {
+        validate_mask_request_host(value)?;
+    }
 
     if allow_internet_access.is_none()
         && allow_public_traffic.is_none()
+        && mask_request_host.is_none()
         && allow_out.is_empty()
         && deny_out.is_empty()
         && rules.is_empty()
@@ -962,6 +1024,7 @@ pub(crate) fn build_cube_network_config(
     Ok(Some(CubeNetworkConfig {
         allow_internet_access,
         allow_public_traffic,
+        mask_request_host,
         allow_out,
         deny_out,
         rules,
@@ -1001,8 +1064,8 @@ mod tests {
 
     use super::{
         build_cube_network_config, filter_by_metadata, from_cubemaster_info,
-        map_delete_cubemaster_err, SandboxService, RET_CODE_CONFLICT, RET_CODE_NOT_FOUND,
-        RET_CODE_TASK_RESUME_FAILED, RET_CODE_TASK_STATE_INVALID,
+        map_delete_cubemaster_err, validate_mask_request_host, SandboxService, RET_CODE_CONFLICT,
+        RET_CODE_NOT_FOUND, RET_CODE_TASK_RESUME_FAILED, RET_CODE_TASK_STATE_INVALID,
     };
     use crate::cubemaster::{
         CreateSandboxRequest, CubeMasterClient, CubeMasterError, ListSandboxResponse, SandboxInfo,
@@ -1056,6 +1119,72 @@ mod tests {
 
         assert_eq!(context.allow_internet_access, Some(false));
         assert_eq!(context.allow_out, vec!["github.com".to_string()]);
+    }
+
+    #[test]
+    fn network_context_forwards_mask_request_host_by_itself() {
+        let context = build_cube_network_config(
+            None,
+            Some(&SandboxNetworkConfig {
+                mask_request_host: Some("localhost:${PORT}".to_string()),
+                ..Default::default()
+            }),
+        )
+        .expect("mask should be valid")
+        .expect("mask-only network config must not be dropped");
+
+        assert_eq!(
+            context.mask_request_host.as_deref(),
+            Some("localhost:${PORT}")
+        );
+        let json = serde_json::to_value(&context).expect("serialize");
+        assert_eq!(json["maskRequestHost"], "localhost:${PORT}");
+    }
+
+    #[test]
+    fn mask_request_host_validation_accepts_documented_authorities() {
+        for value in [
+            "localhost",
+            "localhost:3000",
+            "localhost:${PORT}",
+            "my-app.example.com:${PORT}",
+            "127.0.0.1:3000",
+            "[::1]:${PORT}",
+        ] {
+            validate_mask_request_host(value).unwrap_or_else(|err| {
+                panic!("expected {value:?} to be valid, got {err}");
+            });
+        }
+    }
+
+    #[test]
+    fn mask_request_host_validation_rejects_unsafe_values() {
+        for value in [
+            "",
+            " localhost",
+            "localhost ",
+            "https://example.com",
+            "example.com/path",
+            "example.com?x=1",
+            "example.com#fragment",
+            "user@example.com",
+            "bad\r\nInjected: value",
+            "example.com:",
+            "example.com:0",
+            "example.com:99999",
+            "localhost:${OTHER}",
+            "localhost:${PORT",
+            "[::1",
+            "::1",
+            "[::1]]:3000",
+            "[::1]:",
+            "例子.测试",
+        ] {
+            assert!(
+                validate_mask_request_host(value).is_err(),
+                "expected {value:?} to be rejected"
+            );
+        }
     }
 
     #[test]

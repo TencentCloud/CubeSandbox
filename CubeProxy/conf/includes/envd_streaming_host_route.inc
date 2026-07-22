@@ -11,7 +11,7 @@ proxy_set_header Connection "upgrade";
 proxy_send_timeout 7206s;
 proxy_read_timeout 7206s;
 proxy_connect_timeout 3s;
-proxy_set_header Host $http_host;
+proxy_set_header Host $cube_upstream_host;
 proxy_set_header X-Real-IP $remote_addr;
 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 

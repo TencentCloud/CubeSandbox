@@ -378,6 +378,10 @@ func (l *local) getByPassProsyFromRedis(ctx context.Context, key string) (*types
 		nodeIdIp.TrafficAccessToken = v
 		delete(mapvalues, "TrafficAccessToken")
 	}
+	if v, ok := mapvalues["MaskRequestHost"]; ok {
+		nodeIdIp.MaskRequestHost = v
+		delete(mapvalues, "MaskRequestHost")
+	}
 
 	if len(mapvalues) == 0 {
 		log.G(ctx).Warnf("key: %s,has no ContainerToHostPorts", key)
@@ -448,6 +452,9 @@ func (l *local) setByPassProsyToRedis(ctx context.Context, key string, byPassPro
 	}
 	if byPassProsy.TrafficAccessToken != "" {
 		fieldValues = append(fieldValues, "TrafficAccessToken", byPassProsy.TrafficAccessToken)
+	}
+	if byPassProsy.MaskRequestHost != "" {
+		fieldValues = append(fieldValues, "MaskRequestHost", byPassProsy.MaskRequestHost)
 	}
 	for k, v := range byPassProsy.ContainerToHostPorts {
 		fieldValues = append(fieldValues, k, v)

@@ -56,6 +56,8 @@ pub struct SandboxNetworkConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub deny_out: Option<Vec<String>>,
+    /// Host authority forwarded to user services by CubeProxy. `${PORT}` is
+    /// expanded to the requested sandbox port; envd traffic is exempt.
     #[serde(rename = "maskRequestHost", skip_serializing_if = "Option::is_none")]
     pub mask_request_host: Option<String>,
     /// L7 egress rules, evaluated first-match-wins in list order.
@@ -573,7 +575,8 @@ mod tests {
     fn sandbox_network_config_accepts_snake_case_policy_fields() {
         let cfg: SandboxNetworkConfig = serde_json::from_value(serde_json::json!({
             "allow_out": ["api.example.com", "8.8.8.8"],
-            "deny_out": ["0.0.0.0/0"]
+            "deny_out": ["0.0.0.0/0"],
+            "maskRequestHost": "localhost:${PORT}"
         }))
         .expect("network config should deserialize");
 
@@ -582,6 +585,7 @@ mod tests {
             Some(vec!["api.example.com".to_string(), "8.8.8.8".to_string()])
         );
         assert_eq!(cfg.deny_out, Some(vec!["0.0.0.0/0".to_string()]));
+        assert_eq!(cfg.mask_request_host.as_deref(), Some("localhost:${PORT}"));
     }
 
     #[test]

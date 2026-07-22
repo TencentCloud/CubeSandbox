@@ -783,6 +783,11 @@ pub struct CubeNetworkConfig {
     #[serde(rename = "allowPublicTraffic", skip_serializing_if = "Option::is_none")]
     pub allow_public_traffic: Option<bool>,
 
+    /// Host authority CubeProxy forwards to user services. This is consumed by
+    /// CubeMaster/CubeProxy only and is intentionally not sent to Cubelet.
+    #[serde(rename = "maskRequestHost", skip_serializing_if = "Option::is_none")]
+    pub mask_request_host: Option<String>,
+
     /// Allowed outbound CIDRs whitelist.
     #[serde(rename = "allowOut", skip_serializing_if = "Vec::is_empty")]
     pub allow_out: Vec<String>,
