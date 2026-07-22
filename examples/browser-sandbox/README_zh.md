@@ -28,12 +28,12 @@ CubeProxy ── https://<sandbox_id>-9000.<domain>/cdp?
 ## 3. 架构
 
 ```
-┌──────────────────────┐         ┌─────── Cube Sandbox ──────────────┐
+┌──────────────────────┐         ┌─────── Cube Sandbox ───────────────┐
 │                      │         │                                    │
-│  你的脚本             │  CDP WS │  ┌───────────────────────────┐    │
-│  (Playwright Python) │────────►│  │  Chromium --remote-debug  │    │
-│                      │  HTTPS  │  │  端口 9000                │    │
-│                      │         │  └───────────────────────────┘    │
+│  你的脚本             │  CDP WS │  ┌───────────────────────────┐     │
+│  (Playwright Python) │────────►│  │  Chromium --remote-debug  │     │
+│                      │  HTTPS  │  │  端口 9000                 │     │
+│                      │         │  └───────────────────────────┘     │
 └──────────────────────┘         │                                    │
                                  │  CubeProxy（TLS 终结）              │
                                  └────────────────────────────────────┘
@@ -67,6 +67,8 @@ cubemastercli tpl create-from-image \
   --expose-port 9000 \
   --probe 9000 \
   --probe-path /cdp/json/version
+
+# 如果宿主机需要访问外部网络可以添加 --dns <dns1> --dns <dns2>
 ```
 
 > **镜像仓库说明：** 国内优先使用 `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest`；境外访问推荐使用 `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest`。
@@ -87,8 +89,8 @@ export E2B_API_KEY=e2b_000000
 export E2B_API_URL=http://<节点IP>:3000
 export CUBE_TEMPLATE_ID=<template-id>
 
-# 使用 Cube 内置 mkcert 证书时才需要配置：
-# export NODE_EXTRA_CA_CERTS=/root/.local/share/mkcert/rootCA.pem
+# 配置 mkcert 证书：
+export NODE_EXTRA_CA_CERTS=/root/.local/share/mkcert/rootCA.pem
 ```
 
 ### 第三步 — 运行示例
@@ -101,7 +103,7 @@ python browser.py
 
 ```
 SandboxInfo(sandbox_id='...', template_id='...', ...)
-腾讯网
+Home - Tencent
 ```
 
 ## 6. 脚本工作原理
@@ -122,7 +124,13 @@ with sync_playwright() as playwright:
 | 3 | `connect_over_cdp(cdp_url)` | Playwright 接入已运行的 Chromium 进程 |
 | 4 | `page.goto(...)` | 完整 Playwright API：导航、点击、截图、抓取等 |
 
-## 7. 进阶用法
+## 7. 远程访问
+
+如需远程访问，需要在远程机器上设置 cube.app 的通配 dns 解析到 CubeProxy IP
+
+> 使用 cubesandbox sdk + CUBE_PROXY_NODE_IP 的方式并不会生效，因为 CUBE_PROXY_NODE_IP 只对从 cubesandbox sdk 出去的请求有效，sdk 内部会自动替换 cube.app 的域名为对应的 proxy ip。但是浏览器沙箱中的请求是 Playwright 的 Node 进程发起的网络连接，因此 cube.app 的域名解析会失败。
+
+## 8. 进阶用法
 
 ```python
 # 截图
@@ -142,16 +150,16 @@ page.wait_for_load_state("networkidle")
 
 完整 API 参考 [Playwright Python 文档](https://playwright.dev/python/docs/api/class-page)。
 
-## 8. 常见问题
+## 9. 常见问题
 
 | 现象 | 可能原因 | 解决方法 |
 |------|---------|---------|
 | `Error: connect ECONNREFUSED` | CubeAPI 不可达 | 检查 `E2B_API_URL` 及端口 3000 是否开放 |
-| `SSL: CERTIFICATE_VERIFY_FAILED` | HTTPS 但未配置 CA 证书 | 设置 `NODE_EXTRA_CA_CERTS=/root/.local/share/mkcert/rootCA.pem` |
+| `SSL: CERTIFICATE_VERIFY_FAILED` | HTTPS 但未配置 CA 证书 | 设置 `export NODE_EXTRA_CA_CERTS=/root/.local/share/mkcert/rootCA.pem` |
 | `Timeout waiting for CDP` | Chromium 尚未就绪 | 浏览器镜像启动时会拉起 Chromium，稍后重试或增大超时 |
 | `Template not found` | 模板 ID 错误 | 重新运行 `cubemastercli tpl list` 确认 ID |
 
-## 9. 目录结构
+## 10. 目录结构
 
 ```
 browser-sandbox/

@@ -15,17 +15,16 @@ os.environ["NODE_NO_WARNINGS"] = "1"
 
 template_id = os.environ["CUBE_TEMPLATE_ID"]
 
-sandbox = Sandbox.create(template=template_id)
-print(sandbox.get_info())
+with Sandbox.create(template=template_id) as sandbox:
+    print(sandbox.get_info())
 
-cdp_url = f"https://{sandbox.get_host(9000)}/cdp?"
-# 使用playwright通过cdp_url来操作浏览器
-from playwright.sync_api import sync_playwright
-with sync_playwright() as playwright:
-    browser = playwright.chromium.connect_over_cdp(
-        cdp_url,
-    )
-    context = browser.new_context(ignore_https_errors=True)
-    page = context.new_page()
-    page.goto("http://www.tencent.com", wait_until="domcontentloaded")
-    print(page.title())
+    cdp_url = f"https://{sandbox.get_host(9000)}/cdp?"
+    # use playwright to operate the browser through cdp_url
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.connect_over_cdp(
+            cdp_url,
+        )
+        context = browser.new_context(ignore_https_errors=True)
+        page = context.new_page()
+        page.goto("http://www.tencent.com", wait_until="domcontentloaded")
+        print(page.title())

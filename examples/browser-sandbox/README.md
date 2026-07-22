@@ -33,12 +33,12 @@ Sandbox VM (Chromium, port 9000)
 ## 3. Architecture
 
 ```
-┌──────────────────────┐         ┌─────── Cube Sandbox ──────────────┐
+┌──────────────────────┐         ┌─────── Cube Sandbox ───────────────┐
 │                      │         │                                    │
-│  Your Script         │  CDP WS │  ┌───────────────────────────┐    │
-│  (Playwright Python) │────────►│  │  Chromium --remote-debug  │    │
-│                      │  HTTPS  │  │  port 9000                │    │
-│                      │         │  └───────────────────────────┘    │
+│  Your Script         │  CDP WS │  ┌───────────────────────────┐     │
+│  (Playwright Python) │────────►│  │  Chromium --remote-debug  │     │
+│                      │  HTTPS  │  │  port 9000                │     │
+│                      │         │  └───────────────────────────┘     │
 └──────────────────────┘         │                                    │
                                  │  CubeProxy (TLS termination)       │
                                  └────────────────────────────────────┘
@@ -72,6 +72,8 @@ cubemastercli tpl create-from-image \
   --expose-port 9000 \
   --probe 9000 \
   --probe-path /cdp/json/version
+
+# If the host needs external network access, add --dns <dns1> --dns <dns2>
 ```
 
 > **Image registry:** Use `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest` (recommended for international access). If you are in mainland China, use `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest` instead.
@@ -92,8 +94,8 @@ export E2B_API_KEY=e2b_000000
 export E2B_API_URL=http://<your-node-ip>:3000
 export CUBE_TEMPLATE_ID=<template-id>
 
-# Only needed when using Cube's built-in mkcert certificate:
-# export NODE_EXTRA_CA_CERTS=/root/.local/share/mkcert/rootCA.pem
+# Configure the mkcert certificate:
+export NODE_EXTRA_CA_CERTS=/root/.local/share/mkcert/rootCA.pem
 ```
 
 ### Step 3 — Run the Example
@@ -106,7 +108,7 @@ Expected output:
 
 ```
 SandboxInfo(sandbox_id='...', template_id='...', ...)
-腾讯网
+Home - Tencent
 ```
 
 ## 6. How the Script Works
@@ -127,7 +129,19 @@ with sync_playwright() as playwright:
 | 3 | `connect_over_cdp(cdp_url)` | Playwright attaches to the already-running Chromium process |
 | 4 | `page.goto(...)` | Full Playwright API — navigate, click, screenshot, scrape, etc. |
 
-## 7. Going Further
+## 7. Remote Access
+
+For remote access, configure wildcard DNS resolution for `cube.app` on the
+remote machine so that it resolves to the CubeProxy IP.
+
+> Using the CubeSandbox SDK together with `CUBE_PROXY_NODE_IP` does not work for
+> this connection. `CUBE_PROXY_NODE_IP` only affects requests sent by the
+> CubeSandbox SDK; the SDK internally replaces `cube.app` hostnames with the
+> corresponding proxy IP. Browser sandbox connections are initiated by
+> Playwright's Node.js process instead, so `cube.app` DNS resolution will fail
+> unless it is configured on the remote machine.
+
+## 8. Going Further
 
 ```python
 # Take a screenshot
@@ -147,16 +161,16 @@ page.wait_for_load_state("networkidle")
 
 Refer to the [Playwright Python docs](https://playwright.dev/python/docs/api/class-page) for the full API.
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
 | `Error: connect ECONNREFUSED` | CubeAPI not reachable | Check `E2B_API_URL` and that port 3000 is open |
-| `SSL: CERTIFICATE_VERIFY_FAILED` | HTTPS without CA cert | Set `NODE_EXTRA_CA_CERTS=/root/.local/share/mkcert/rootCA.pem` |
+| `SSL: CERTIFICATE_VERIFY_FAILED` | HTTPS without CA cert | Set `export NODE_EXTRA_CA_CERTS=/root/.local/share/mkcert/rootCA.pem` |
 | `Timeout waiting for CDP` | Chromium not yet ready | The browser image starts Chromium at boot; retry or increase timeout |
 | `Template not found` | Wrong template ID | Re-run `cubemastercli tpl list` to verify the ID |
 
-## 9. Directory Structure
+## 10. Directory Structure
 
 ```
 browser-sandbox/
