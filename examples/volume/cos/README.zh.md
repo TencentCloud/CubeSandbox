@@ -101,13 +101,6 @@ which cosfs && cosfs --version
 which coscmd && coscmd --version
 ```
 
-可选：用 `volume-cos.conf` 里的 bucket 测读写权限（需已配置密钥）：
-
-```bash
-source /usr/local/services/cubetoolbox/CubeMaster/plugin/volume-cos.conf
-coscmd -b "$BUCKET" -r "$REGION" list /
-```
-
 **CubeMaster 节点 — jq**（binary）
 
 ```bash

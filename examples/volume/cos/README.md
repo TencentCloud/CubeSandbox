@@ -103,13 +103,6 @@ Both must succeed; missing `/dev/fuse` breaks attach.
 which coscmd && coscmd --version
 ```
 
-Optional: test bucket access (after configuring keys in `volume-cos.conf`):
-
-```bash
-source /usr/local/services/cubetoolbox/CubeMaster/plugin/volume-cos.conf
-coscmd -b "$BUCKET" -r "$REGION" list /
-```
-
 **CubeMaster — jq** (binary)
 
 ```bash
