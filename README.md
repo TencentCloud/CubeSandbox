@@ -36,7 +36,8 @@
   <a href="./docs/index.md"><strong>Documentation</strong></a> ·
   <a href="./docs/changelog/index.md"><strong>Changelog</strong></a> ·
   <a href="https://x.com/CubeSandbox_AI"><strong>X(Twitter)</strong></a> ·
-  <a href="https://github.com/TencentCloud/CubeSandbox/issues/1040"><strong>Top Contributor Program</strong></a>
+  <a href="https://github.com/TencentCloud/CubeSandbox/issues/1040"><strong>Top Contributor Program</strong></a> ·
+  <a href="https://forms.gle/Wjy53fksUoc3y4388"><strong>Submit Use Case</strong></a>
 </p>
 
 ---
@@ -373,7 +374,7 @@ We welcome contributions of all kinds—whether it's a bug report, feature sugge
 - 🐞 **Found a Bug or have questions?** Submit an issue on <a href="https://github.com/tencentcloud/CubeSandbox/issues" target="_blank">GitHub Issues</a>.
 - 💡 **Have an Idea?** Join the conversation in <a href="https://github.com/tencentcloud/CubeSandbox/discussions" target="_blank">GitHub Discussions</a>.
 - 🛠️ **Want to Code?** Check out our <a href="./CONTRIBUTING.md" target="_blank">CONTRIBUTING.md</a> to learn how to submit a Pull Request.
-- 📝 **Want to contribute docs?** Submit bilingual PRs to our community doc channels: <a href="./docs/guide/troubleshooting/index.md" target="_blank">Troubleshooting</a>, <a href="./docs/guide/usecases/index.md" target="_blank">Use Cases</a>, and <a href="./docs/guide/integrations/index.md" target="_blank">Integrations</a>.
+- 📝 **Want to contribute docs?** Submit bilingual PRs to our community doc channels: <a href="./docs/guide/troubleshooting/index.md" target="_blank">Troubleshooting</a>, <a href="./docs/guide/usecases/index.md" target="_blank">Use Cases</a>, and <a href="./docs/guide/integrations/index.md" target="_blank">Integrations</a>. Additionally, the <strong>Cube 100 Program</strong> is now open — we're looking for the first 100 teams running AI agents in production with Cube. Limited to 100 seats. <a href="./docs/guide/cube100.md"><strong>Learn more & apply →</strong></a>
 - 💬 **Want to Chat?** Join our <a href="https://discord.gg/kkapzDXShb" target="_blank">Discord</a>.
 
 ## Roadmap

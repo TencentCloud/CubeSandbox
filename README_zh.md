@@ -36,7 +36,8 @@
   <a href="./docs/zh/changelog/index.md"><strong>变更日志</strong></a> ·
   <a href="#wechat-group"><strong>微信交流群</strong></a> ·
   <a href="https://x.com/CubeSandbox_AI"><strong>X(Twitter)</strong></a> ·
-  <a href="https://wj.qq.com/s2/26753159/ss16/"><strong>成为星级贡献者</strong></a>
+  <a href="https://wj.qq.com/s2/26753159/ss16/"><strong>成为星级贡献者</strong></a> ·
+  <a href="https://wj.qq.com/s2/27357586/b080/"><strong>用户案例提报</strong></a>
 </p>
 
 ---
@@ -373,7 +374,7 @@ http://<控制节点 IP>:12088
 - **发现 Bug** —— <a href="https://github.com/tencentcloud/CubeSandbox/issues" target="_blank">在这里报告问题或提出建议</a>
 - **有新想法** —— <a href="https://github.com/tencentcloud/CubeSandbox/discussions" target="_blank">提问交流与想法分享</a>
 - **想写代码？** —— 查看我们的 <a href="./CONTRIBUTING.md" target="_blank">CONTRIBUTING.md</a> 贡献指南，了解如何提交 Pull Request。
-- **想贡献文档 / PR？** —— 欢迎按双语方式投稿到这 3 个社区文档入口：<a href="./docs/zh/guide/troubleshooting/index.md" target="_blank">故障排障</a>、<a href="./docs/zh/guide/usecases/index.md" target="_blank">应用案例</a>、<a href="./docs/zh/guide/integrations/index.md" target="_blank">生态集成</a>。
+- **想贡献文档 / PR？** —— 欢迎按双语方式投稿到这 3 个社区文档入口：<a href="./docs/zh/guide/troubleshooting/index.md" target="_blank">故障排障</a>、<a href="./docs/zh/guide/usecases/index.md" target="_blank">应用案例</a>、<a href="./docs/zh/guide/integrations/index.md" target="_blank">生态集成</a>。此外，「<strong>Cube 100 计划</strong>」正式启动 —— 面向所有 Cuber 征集 AI Agent 生产案例，限量 100 席。<a href="./docs/zh/guide/cube100.md"><strong>查看详情与提交入口 →</strong></a>
 - **想成为最终用户？** —— 点击<a href="https://wj.qq.com/s2/26499618/a9fc/" target="_blank">这里</a>填写用户调研。
 - **想聊聊天？** —— 扫描二维码，加入我们的微信交流群。
 
