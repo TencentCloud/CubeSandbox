@@ -19,7 +19,20 @@ export type ComponentVersionDto = components['schemas']['ComponentVersionView'];
 
 export interface RunningSandbox extends ListedSandboxDto {}
 
-export interface SandboxDetail extends SandboxDetailDto {}
+export interface SandboxDetail extends SandboxDetailDto {
+  containers: Array<{ containerID: string }>;
+}
+
+type CubeOpsSandboxDetailDto = SandboxDetailDto & {
+  containers?: Array<{ containerID: string }>;
+};
+
+export interface TerminalSessionGrant {
+  sessionId: string;
+  grant: string;
+  expiresInSeconds: number;
+  protocol: 'cube-terminal.v1';
+}
 
 export interface TemplateSummary {
   templateID: string;
@@ -114,8 +127,8 @@ function mapSandbox(dto: ListedSandboxDto): RunningSandbox {
   return dto;
 }
 
-function mapSandboxDetail(dto: SandboxDetailDto): SandboxDetail {
-  return dto;
+function mapSandboxDetail(dto: CubeOpsSandboxDetailDto): SandboxDetail {
+  return { ...dto, containers: dto.containers ?? [] };
 }
 
 function mapTemplateSummary(dto: TemplateSummaryDto): TemplateSummary {
@@ -198,7 +211,7 @@ export const sandboxApi = {
     nextToken?: string;
     limit?: number;
   }) => api<ListedSandboxDto[]>('/v2/sandboxes', { params }).then((items) => items.map(mapSandbox)),
-  get: (id: string) => api<SandboxDetailDto>(`/sandboxes/${id}`).then(mapSandboxDetail),
+  get: (id: string) => api<CubeOpsSandboxDetailDto>(`/sandboxes/${id}`).then(mapSandboxDetail),
   kill: (id: string) => api<void>(`/sandboxes/${id}`, { method: 'DELETE' }),
   pause: (id: string) => api<void>(`/sandboxes/${id}/pause`, { method: 'POST' }),
   resume: (id: string, body: SandboxResumeRequest = DEFAULT_RESUME_BODY) =>
@@ -213,6 +226,11 @@ export const sandboxApi = {
     }),
   logs: (id: string, params?: { cursor?: number; limit?: number; direction?: string }) =>
     api<SandboxLogsDto>(`/v2/sandboxes/${id}/logs`, { params }),
+  createTerminalSession: (id: string, cols: number, rows: number, containerID?: string) =>
+    api<TerminalSessionGrant>(`/sandboxes/${id}/terminal-sessions`, {
+      method: 'POST',
+      body: JSON.stringify({ cols, rows, ...(containerID ? { containerId: containerID } : {}) }),
+    }),
   create: (body: { templateID: string; timeout?: number; metadata?: Record<string, string> }) =>
     api<SandboxSessionDto>('/sandboxes', {
       method: 'POST',

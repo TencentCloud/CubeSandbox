@@ -1,4 +1,32 @@
 {
+  "terminal": {
+    "title": "Web 终端",
+    "description": "交互式 TTY 会话，输入和输出通过原始二进制帧传输。",
+    "connect": "连接",
+    "reconnect": "重新连接",
+    "disconnect": "断开",
+    "clear": "清屏",
+    "open": "打开终端",
+    "close": "关闭终端",
+    "container": "容器",
+    "fullscreen": "进入全屏",
+    "exitFullscreen": "退出全屏",
+    "paste": "粘贴",
+    "clipboardDenied": "剪贴板访问被拒绝",
+    "paused": "请先恢复沙箱，再打开终端。",
+    "exit": "进程已退出，退出码 {{code}}",
+    "connectionFailed": "无法打开终端",
+    "disconnected": "终端连接已断开",
+    "protocolError": "终端协议响应无效",
+    "states": {
+      "idle": "未连接",
+      "authorizing": "正在授权",
+      "connecting": "正在连接",
+      "connected": "已连接",
+      "exited": "已退出",
+      "error": "连接中断"
+    }
+  },
   "started": "启动于 {{time}}",
   "resources": "资源",
   "runtime": "运行时",

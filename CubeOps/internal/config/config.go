@@ -59,6 +59,10 @@ type Config struct {
 	// CubeAPI (for SDK endpoint proxy)
 	CubeAPIURL string `yaml:"cubeapi_url"`
 
+	// Web Terminal (CubeOps is the public gateway; CubeMaster is the backend)
+	TerminalGatewayToken   string `yaml:"terminal_gateway_token"`
+	TerminalAllowedOrigins string `yaml:"terminal_allowed_origins"`
+
 	// Redis (optional)
 	RedisURL string `yaml:"redis_url"`
 
@@ -307,6 +311,12 @@ func overrideFromEnv(cfg *Config) {
 	}
 	if v := os.Getenv("CUBE_API_URL"); v != "" {
 		cfg.CubeAPIURL = v
+	}
+	if v := os.Getenv("CUBE_TERMINAL_GATEWAY_TOKEN"); v != "" {
+		cfg.TerminalGatewayToken = v
+	}
+	if v := os.Getenv("CUBE_TERMINAL_ALLOWED_ORIGINS"); v != "" {
+		cfg.TerminalAllowedOrigins = v
 	}
 	if v := os.Getenv("REDIS_URL"); v != "" {
 		cfg.RedisURL = v

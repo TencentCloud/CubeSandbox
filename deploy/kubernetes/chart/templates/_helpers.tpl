@@ -307,6 +307,23 @@ http {
             proxy_pass {{ $opsUpstream }}/health;
         }
 
+        # Browser WebSockets cannot attach the dashboard bearer token. CubeAPI
+        # authenticates this handshake with a one-time subprotocol grant.
+        location ~ ^/sandboxes/([^/]+)/terminal$ {
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+            proxy_read_timeout 1805s;
+            proxy_send_timeout 1805s;
+
+            rewrite ^/sandboxes/([^/]+)/terminal$ /api/v1/terminal/sandboxes/$1 break;
+            proxy_pass {{ $opsUpstream }};
+        }
+
         location ~ ^/(sandboxes|v2/sandboxes|templates|snapshots) {
             if ($http_authorization = "") {
                 return 418;

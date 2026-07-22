@@ -19,6 +19,8 @@ func TestLoad_FromYAML(t *testing.T) {
 	yamlContent := []byte(`bind: "0.0.0.0:9999"
 log_level: "debug"
 cubemaster_addr: "http://1.2.3.4:8089"
+terminal_gateway_token: "yaml-terminal-secret"
+terminal_allowed_origins: "https://console.example"
 sandbox_domain: "test.example.com"
 database_url: "mysql://root:pass@127.0.0.1:3306/testdb"
 jwt_secret: "yaml-secret"
@@ -43,6 +45,9 @@ refresh_ttl: "336h"
 	if cfg.CubeMasterAddr != "http://1.2.3.4:8089" {
 		t.Errorf("CubeMasterAddr = %q, want http://1.2.3.4:8089", cfg.CubeMasterAddr)
 	}
+	if cfg.TerminalGatewayToken != "yaml-terminal-secret" || cfg.TerminalAllowedOrigins != "https://console.example" {
+		t.Errorf("terminal config = (%q, %q)", cfg.TerminalGatewayToken, cfg.TerminalAllowedOrigins)
+	}
 	if cfg.SandboxDomain != "test.example.com" {
 		t.Errorf("SandboxDomain = %q, want test.example.com", cfg.SandboxDomain)
 	}
@@ -64,6 +69,7 @@ database_url: "mysql://root:pass@127.0.0.1:3306/yamldb"
 	}
 	t.Setenv("CUBE_OPS_CONFIG", yamlPath)
 	t.Setenv("CUBE_OPS_BIND", "127.0.0.1:7777")
+	t.Setenv("CUBE_TERMINAL_GATEWAY_TOKEN", "env-terminal-secret")
 
 	cfg, err := Load()
 	if err != nil {
@@ -71,6 +77,9 @@ database_url: "mysql://root:pass@127.0.0.1:3306/yamldb"
 	}
 	if cfg.Bind != "127.0.0.1:7777" {
 		t.Errorf("Bind = %q, want 127.0.0.1:7777 (env should override YAML)", cfg.Bind)
+	}
+	if cfg.TerminalGatewayToken != "env-terminal-secret" {
+		t.Errorf("TerminalGatewayToken = %q, want env-terminal-secret", cfg.TerminalGatewayToken)
 	}
 }
 

@@ -1118,6 +1118,16 @@ elif [[ -f "${SCRIPT_DIR}/release-manifest.json" ]]; then
 fi
 upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_DEPLOY_ROLE" "${DEPLOY_ROLE}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PVM_ENABLE" "${CUBE_PVM_ENABLE}"
+if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
+  terminal_gateway_token="${CUBE_TERMINAL_GATEWAY_TOKEN:-}"
+  if [[ -z "${terminal_gateway_token}" ]]; then
+    terminal_gateway_token="$(sed -n 's/^CUBE_TERMINAL_GATEWAY_TOKEN=//p' "${RUNTIME_ENV_FILE}" | tail -n 1)"
+  fi
+  if [[ -z "${terminal_gateway_token}" ]]; then
+    terminal_gateway_token="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+  fi
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_TERMINAL_GATEWAY_TOKEN" "${terminal_gateway_token}"
+fi
 MIRROR="${MIRROR:-}"
 case "${MIRROR}" in
   ""|cn) ;;

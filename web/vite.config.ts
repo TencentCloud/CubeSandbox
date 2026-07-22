@@ -51,7 +51,10 @@ export default defineConfig({
       },
       // CubeAPI (SDK/E2B endpoints) — proxy specific API paths to avoid
       // conflicting with vite's own static file serving.
-      '/sandboxes': 'http://127.0.0.1:3000',
+      '/sandboxes': {
+        target: 'http://127.0.0.1:3000',
+        ws: true,
+      },
       '/v2/sandboxes': 'http://127.0.0.1:3000',
       '/templates': 'http://127.0.0.1:3000',
       '/snapshots': 'http://127.0.0.1:3000',

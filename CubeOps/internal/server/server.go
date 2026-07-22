@@ -95,11 +95,17 @@ func (s *Server) buildRouter() *gin.Engine {
 	// SDK handler gets the AgentHubService so that E2B template/snapshot
 	// deletions can reverse-sync AgentHub registrations (matching the old
 	// Rust reverse_sync_agenthub_template that lived in CubeAPI).
-	sdkH := handler.NewSDKHandler(s.cm).WithAgentHubService(agenthubH.AgentHubService())
+	sdkH := handler.NewSDKHandler(s.cm).
+		WithAgentHubService(agenthubH.AgentHubService()).
+		WithTerminalGateway(s.cfg.CubeMasterAddr, s.cfg.TerminalGatewayToken, s.cfg.TerminalAllowedOrigins)
 
 	// Public (no auth) routes — login + refresh.
 	public := r.Group("/api/v1")
 	authH.RegisterPublic(public)
+	// WebSocket handshakes cannot attach the Dashboard bearer token. This
+	// public route authenticates with ProxyTerminal's single-use grant,
+	// HttpOnly binding cookie, subprotocol, and Origin checks instead.
+	public.GET("/terminal/sandboxes/:id", sdkH.ProxyTerminal)
 
 	// Authenticated routes. The session / logout / change-password endpoints
 	// are mounted here, behind the JWT middleware.

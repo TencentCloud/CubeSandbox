@@ -1,4 +1,32 @@
 {
+  "terminal": {
+    "title": "Terminal",
+    "description": "Interactive TTY session. Input and output are streamed as raw binary frames.",
+    "connect": "Connect",
+    "reconnect": "Reconnect",
+    "disconnect": "Disconnect",
+    "clear": "Clear",
+    "open": "Open terminal",
+    "close": "Close terminal",
+    "container": "Container",
+    "fullscreen": "Enter fullscreen",
+    "exitFullscreen": "Exit fullscreen",
+    "paste": "Paste",
+    "clipboardDenied": "Clipboard access was denied",
+    "paused": "Resume the sandbox before opening a terminal.",
+    "exit": "process exited with code {{code}}",
+    "connectionFailed": "Unable to open terminal",
+    "disconnected": "Terminal disconnected",
+    "protocolError": "Invalid terminal protocol response",
+    "states": {
+      "idle": "Idle",
+      "authorizing": "Authorizing",
+      "connecting": "Connecting",
+      "connected": "Connected",
+      "exited": "Exited",
+      "error": "Disconnected"
+    }
+  },
   "started": "started {{time}}",
   "resources": "Resources",
   "runtime": "Runtime",
