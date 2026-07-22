@@ -1417,7 +1417,9 @@ prepare_volume_plugin_install() {
 
   for plugin_bin in \
     "${install_prefix}/CubeMaster/plugin/cube-volume-cos" \
-    "${install_prefix}/Cubelet/plugin/cube-volume-cos"
+    "${install_prefix}/Cubelet/plugin/cube-volume-cos" \
+    "${install_prefix}/CubeMaster/plugin/install-deps.sh" \
+    "${install_prefix}/Cubelet/plugin/install-deps.sh"
   do
     [[ -f "${plugin_bin}" ]] || continue
     chmod +x "${plugin_bin}"

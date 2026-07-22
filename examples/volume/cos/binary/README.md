@@ -22,7 +22,8 @@
 | 5 | Configure CubeMaster + Cubelet — [§3–§5](../README.md#3-configure-cubemaster) |
 | 6 | SDK verification — [§6–§7](../README.md#6-prepare-sdk-environment) |
 
-**Dependencies:** [coscmd](https://cloud.tencent.com/document/product/436/6883) on CubeMaster; [cosfs](https://cloud.tencent.com/document/product/436/10976) on Cubelet. No COS Go SDK (see [rpc](../rpc/)).
+**Dependencies:** [coscmd](https://cloud.tencent.com/document/product/436/6883) on CubeMaster; [cosfs](https://cloud.tencent.com/document/product/436/10976) on Cubelet. No COS Go SDK (see [rpc](../rpc/)).  
+**Architecture:** ARM / aarch64 is not supported (official cosfs has no ARM packages). Install deps via [../README.md §1](../README.md#1-install-dependencies) (`Cube*/plugin/install-deps.sh` in release packages).
 
 ---
 

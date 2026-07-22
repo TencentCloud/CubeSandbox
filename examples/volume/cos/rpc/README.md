@@ -31,7 +31,8 @@ Compared to [binary](../binary/): Controller uses **Go SDK** instead of **coscmd
 | 4 | Configure CubeMaster + Cubelet `socket_path` and plugin `SOCKET` (`/run/cube-volume-cos-rpc.sock`) |
 | 5 | SDK: `Volume.create(..., driver="cos-rpc")` |
 
-**No coscmd** in this example; Create/Destroy use the COS Go SDK (`go mod`, [31215](https://cloud.tencent.com/document/product/436/31215)).
+**No coscmd** in this example; Create/Destroy use the COS Go SDK (`go mod`, [31215](https://cloud.tencent.com/document/product/436/31215)).  
+**Architecture:** ARM / aarch64 is not supported (Cubelet still needs cosfs; official packages are x86_64/amd64 only).
 
 ---
 
@@ -39,8 +40,11 @@ Compared to [binary](../binary/): Controller uses **Go SDK** instead of **coscmd
 
 Attach/Detach use cosfs. **Cubelet node only** — see [../README.md §1](../README.md#1-install-dependencies).
 
+Quick command (after one-click install, from the plugin directory; **x86_64 only**, ARM unsupported):
+
 ```bash
-sudo ../install-deps.sh --cosfs
+sudo /usr/local/services/cubetoolbox/Cubelet/plugin/install-deps.sh --cosfs
+# From a source checkout: sudo ../install-deps.sh --cosfs
 ls /dev/fuse && which cosfs && cosfs --version
 ```
 

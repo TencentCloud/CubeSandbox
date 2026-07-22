@@ -54,6 +54,12 @@ test_component_build_inputs_exist() {
   if [[ -f "${ONE_CLICK_DIR}/CubeMaster/docker-install-volume-deps.sh" ]]; then
     fail "remove duplicate ${ONE_CLICK_DIR}/CubeMaster/docker-install-volume-deps.sh; use deploy/scripts/ only"
   fi
+  # Bare-metal COS deps script ships next to the volume plugin binaries.
+  require_file "${ROOT_DIR}/examples/volume/cos/install-deps.sh" \
+    "COS volume install-deps.sh (examples source)"
+  if ! grep -q -F 'examples/volume/cos/install-deps.sh' "${BUNDLE_SH}"; then
+    fail "build-release-bundle.sh must copy examples/volume/cos/install-deps.sh into CubeMaster/plugin and Cubelet/plugin"
+  fi
 }
 
 # 2) The component image base names must match between what build_images.sh

@@ -29,6 +29,8 @@
 **单机开发**：CubeMaster 与 Cubelet 在同一台机器上时，依赖装在一台即可。  
 **多机部署**：各工具装在哪台见 [§1 安装依赖](#1-安装依赖) 表格。
 
+> **架构限制**：本 COS Volume 插件**不支持 ARM / aarch64**。Node 侧 attach 依赖 [cosfs](https://cloud.tencent.com/document/product/436/10976)，而官方 cosfs 目前仅提供 x86_64 / amd64 包。请在 x86_64 主机上部署 Cubelet（以及需要挂载 COS 的计算节点）。
+
 ---
 
 ## 1. 安装依赖
@@ -46,37 +48,41 @@
 
 ### 方式 A：一键脚本（推荐）
 
-脚本路径：`examples/volume/cos/install-deps.sh`。支持 CentOS / TencentOS / Ubuntu 等；安装结束会自动做基础 check。
+one-click / 发布包会把 `install-deps.sh` 与插件一起放到 **`CubeMaster/plugin/`** 与 **`Cubelet/plugin/`**。支持 CentOS / TencentOS / Ubuntu 等（**仅 x86_64**）；安装结束会自动做基础 check。
+
+默认安装前缀：`/usr/local/services/cubetoolbox`。
 
 **Cubelet 节点**（跑 Cubelet、执行 attach 的机器）：
 
 ```bash
-cd /path/to/CubeSandbox
-sudo ./examples/volume/cos/install-deps.sh --cosfs
+sudo /usr/local/services/cubetoolbox/Cubelet/plugin/install-deps.sh --cosfs
 ```
 
 **CubeMaster 节点**（跑 CubeMaster、binary 插件 create/destroy 的机器）：
 
 ```bash
-sudo ./examples/volume/cos/install-deps.sh --coscmd --jq
+sudo /usr/local/services/cubetoolbox/CubeMaster/plugin/install-deps.sh --coscmd --jq
 ```
 
-**单机 binary 全套**（CubeMaster + Cubelet 同机）：
+**单机 binary 全套**（CubeMaster + Cubelet 同机，任选一侧 plugin 目录即可）：
 
 ```bash
-sudo ./examples/volume/cos/install-deps.sh --all
+sudo /usr/local/services/cubetoolbox/Cubelet/plugin/install-deps.sh --all
 ```
 
 仅验证、不安装：
 
 ```bash
-./examples/volume/cos/install-deps.sh --cosfs --check-only    # 在 Cubelet 节点执行
-./examples/volume/cos/install-deps.sh --coscmd --jq --check-only  # 在 CubeMaster 节点执行
+/usr/local/services/cubetoolbox/Cubelet/plugin/install-deps.sh --cosfs --check-only
+/usr/local/services/cubetoolbox/CubeMaster/plugin/install-deps.sh --coscmd --jq --check-only
 ```
+
+从源码树开发时，也可用仓库内脚本：`examples/volume/cos/install-deps.sh`（参数相同）。
 
 ### 方式 B：脚本失败时 — 按腾讯云官方文档手动安装
 
-一键脚本无法覆盖所有发行版/架构（如 ARM、特殊镜像）。**请以腾讯云文档为准**自行安装对应包，再用下方命令确认成功。
+一键脚本无法覆盖所有发行版或特殊镜像时，**请以腾讯云文档为准**自行安装对应包，再用下方命令确认成功。  
+（ARM / aarch64 仍不可用：官方 cosfs 无 ARM 包，见上文架构限制。）
 
 | 工具 | 腾讯云官方安装文档 |
 |------|-------------------|
@@ -414,7 +420,7 @@ COS binary/rpc 示例在 `volume-cos.conf` 中**固定一个 `BUCKET`**，所有
 
 ```
 examples/volume/cos/
-├── install-deps.sh          # 依赖一键安装 + check
+├── install-deps.sh          # 依赖一键安装 + check（发布包装到 Cube*/plugin/）
 ├── verify_volume.py         # Python SDK 验证脚本
 ├── volume-cos.conf.example
 ├── binary/                  # Shell 插件源码与代码导读

@@ -1,17 +1,24 @@
 #!/usr/bin/env bash
 # Install Tencent Cloud COS dependencies for CubeSandbox volume plugins.
 #
+# Shipped in one-click / release packages next to the plugin binaries:
+#   /usr/local/services/cubetoolbox/CubeMaster/plugin/install-deps.sh
+#   /usr/local/services/cubetoolbox/Cubelet/plugin/install-deps.sh
+# Source tree copy: examples/volume/cos/install-deps.sh
+#
 # Where to run (multi-node clusters):
 #   cosfs  → Cubelet node(s)     attach/detach   binary + rpc
 #   coscmd → CubeMaster node      create/destroy  binary only
 #   jq     → CubeMaster node      binary JSON     binary only
 #
-# Usage:
-#   ./install-deps.sh --all              # cosfs + coscmd + jq (typical binary demo)
-#   ./install-deps.sh --cosfs            # Cubelet / attach side only
-#   ./install-deps.sh --coscmd           # CubeMaster / create side only (binary plugin)
-#   ./install-deps.sh --jq               # required by binary shell plugin
-#   ./install-deps.sh --all --check-only # verify already-installed tools only
+# Usage (after one-click install, on the matching node):
+#   sudo /usr/local/services/cubetoolbox/Cubelet/plugin/install-deps.sh --cosfs
+#   sudo /usr/local/services/cubetoolbox/CubeMaster/plugin/install-deps.sh --coscmd --jq
+#   sudo /usr/local/services/cubetoolbox/Cubelet/plugin/install-deps.sh --all   # single-node
+#
+# Architecture:
+#   cosfs official packages are x86_64/amd64 only. ARM/aarch64 is NOT supported
+#   (COS volume Node attach depends on cosfs). This script refuses --cosfs on ARM.
 #
 # Supported families (auto-detected via /etc/os-release):
 #   RHEL/CentOS/TencentOS/Rocky/Alma 7/8/9  — cosfs RPM + yum/dnf
@@ -49,7 +56,7 @@ CHECK_ONLY=0
 COSFS_EL_FLAVOR=""
 
 usage() {
-  sed -n '2,20p' "$0"
+  sed -n '2,28p' "$0"
   exit "${1:-0}"
 }
 
@@ -414,9 +421,27 @@ check_jq() {
   log "  jq: OK (${ver}, JSON parse ok)"
 }
 
+require_x86_64_for_cosfs() {
+  # Official cosfs releases publish only x86_64/amd64 packages; Node attach
+  # for the COS volume plugin depends on cosfs, so ARM hosts are unsupported.
+  local arch
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64|amd64) return 0 ;;
+    *)
+      echo "ERROR: cosfs (required for COS volume attach) does not support architecture ${arch}; official packages are x86_64/amd64 only. See ${COSFS_DOC}" >&2
+      exit 1
+      ;;
+  esac
+}
+
 # ── main ────────────────────────────────────────────────────────────────────
 
 detect_os
+
+if [[ "$INSTALL_COSFS" -eq 1 ]]; then
+  require_x86_64_for_cosfs
+fi
 
 if [[ "$CHECK_ONLY" -eq 0 ]]; then
   [[ "$INSTALL_COSFS"  -eq 1 ]] && install_cosfs

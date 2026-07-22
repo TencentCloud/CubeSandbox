@@ -572,13 +572,19 @@ copy_dir_contents "${ROOT_DIR}/Cubelet/dynamicconf" "${PACKAGE_ROOT}/Cubelet/dyn
 
 VOLUME_COS_PLUGIN_SRC="${ROOT_DIR}/examples/volume/cos/binary/cube-volume-cos.sh"
 VOLUME_COS_CONF_EXAMPLE="${ROOT_DIR}/examples/volume/cos/volume-cos.conf.example"
+VOLUME_COS_INSTALL_DEPS="${ROOT_DIR}/examples/volume/cos/install-deps.sh"
 ensure_file "${VOLUME_COS_PLUGIN_SRC}"
 ensure_file "${VOLUME_COS_CONF_EXAMPLE}"
+ensure_file "${VOLUME_COS_INSTALL_DEPS}"
 copy_file "${VOLUME_COS_PLUGIN_SRC}" "${PACKAGE_ROOT}/CubeMaster/plugin/cube-volume-cos"
 copy_file "${VOLUME_COS_PLUGIN_SRC}" "${PACKAGE_ROOT}/Cubelet/plugin/cube-volume-cos"
 chmod +x "${PACKAGE_ROOT}/CubeMaster/plugin/cube-volume-cos" "${PACKAGE_ROOT}/Cubelet/plugin/cube-volume-cos"
 copy_file "${VOLUME_COS_CONF_EXAMPLE}" "${PACKAGE_ROOT}/CubeMaster/plugin/volume-cos.conf.example"
 copy_file "${VOLUME_COS_CONF_EXAMPLE}" "${PACKAGE_ROOT}/Cubelet/plugin/volume-cos.conf.example"
+# Host-side COS deps installer (cosfs/coscmd/jq); docs run it from plugin/.
+copy_file "${VOLUME_COS_INSTALL_DEPS}" "${PACKAGE_ROOT}/CubeMaster/plugin/install-deps.sh"
+copy_file "${VOLUME_COS_INSTALL_DEPS}" "${PACKAGE_ROOT}/Cubelet/plugin/install-deps.sh"
+chmod +x "${PACKAGE_ROOT}/CubeMaster/plugin/install-deps.sh" "${PACKAGE_ROOT}/Cubelet/plugin/install-deps.sh"
 
 copy_dir_contents "${CUBE_PROXY_TEMPLATE_DIR}" "${PACKAGE_ROOT}/cubeproxy"
 copy_dir_contents "${CUBE_COREDNS_TEMPLATE_DIR}" "${PACKAGE_ROOT}/coredns"
