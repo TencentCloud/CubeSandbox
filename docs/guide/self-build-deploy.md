@@ -330,6 +330,78 @@ Build-performance knobs (all optional):
 | `CUBE_SANDBOX_MYSQL_PASSWORD` | `cube_pass` | MySQL user password |
 | `CUBE_SANDBOX_REDIS_PASSWORD` | `ceuhvu123` | Redis password |
 
+The variables above control the **bundled** MySQL / Redis (managed by Docker Compose). To reuse an existing database or cache service, see [Using an external database](#using-an-external-database) below.
+
+### Using an external database
+
+By default the installer starts a bundled `mysql:8.0` container via Docker Compose to hold CubeMaster's metadata. If you already run a database service, you can point CubeMaster at an external instance instead. The installer rewrites `conf.yaml`, masks the local MySQL container (`cube-sandbox-mysql.service`), and writes the connection string into the runtime environment.
+
+CubeMaster's dao layer supports both **MySQL** and **PostgreSQL**. The two are mutually exclusive — configure only one external database. Setting both `CUBE_EXTERNAL_MYSQL_HOST` and `CUBE_EXTERNAL_POSTGRES_HOST` makes the installer fail fast.
+
+#### External MySQL
+
+Enable by setting `CUBE_EXTERNAL_MYSQL_HOST` in `.env`:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CUBE_EXTERNAL_MYSQL_HOST` | (empty) | External MySQL host; enables external-MySQL mode when set |
+| `CUBE_EXTERNAL_MYSQL_PORT` | `3306` | Port |
+| `CUBE_EXTERNAL_MYSQL_USER` | `cube` | User |
+| `CUBE_EXTERNAL_MYSQL_PASSWORD` | `cube_pass` | Password (change to a strong value) |
+| `CUBE_EXTERNAL_MYSQL_DB` | same as `CUBE_SANDBOX_MYSQL_DB` (`cube_mvp`) | Database name |
+
+#### External PostgreSQL
+
+Enable by setting `CUBE_EXTERNAL_POSTGRES_HOST` in `.env`. The installer rewrites the `driver` of both `ossdb_config` and `instance_db_config` to `postgres` and syncs `extra.sslmode`:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CUBE_EXTERNAL_POSTGRES_HOST` | (empty) | External PostgreSQL host; enables external-PostgreSQL mode when set |
+| `CUBE_EXTERNAL_POSTGRES_PORT` | `5432` | Port |
+| `CUBE_EXTERNAL_POSTGRES_USER` | `cube` | User |
+| `CUBE_EXTERNAL_POSTGRES_PASSWORD` | `cube_pass` | Password (change to a strong value) |
+| `CUBE_EXTERNAL_POSTGRES_DB` | same as `CUBE_SANDBOX_MYSQL_DB` (`cube_mvp`) | Database name |
+| `CUBE_EXTERNAL_POSTGRES_SSLMODE` | `disable` | TLS mode: `disable` (default) / `require` / `verify-ca` / `verify-full`, etc. |
+
+On first start CubeMaster runs goose migrations against the target PostgreSQL database, creating all `t_cube_*` tables. Make sure that:
+
+- The target database (`CUBE_EXTERNAL_POSTGRES_DB`) already exists;
+- The configured user can create tables in it;
+- If the server enforces TLS, set `CUBE_EXTERNAL_POSTGRES_SSLMODE` to `require` or the stricter `verify-full`.
+
+Example `.env` snippet:
+
+```bash
+CUBE_EXTERNAL_POSTGRES_HOST=10.0.0.20
+CUBE_EXTERNAL_POSTGRES_PORT=5432
+CUBE_EXTERNAL_POSTGRES_USER=cube
+CUBE_EXTERNAL_POSTGRES_PASSWORD=<strong-password>
+CUBE_EXTERNAL_POSTGRES_DB=cube_mvp
+CUBE_EXTERNAL_POSTGRES_SSLMODE=require
+```
+
+The resulting `conf.yaml` (`ossdb_config` and `instance_db_config` are identical):
+
+```yaml
+ossdb_config:
+  driver: "postgres"
+  addr: "10.0.0.20:5432"
+  user: "cube"
+  pwd: "<strong-password>"
+  db_name: "cube_mvp"
+  conn_timeout: 5
+  read_timeout: 5
+  write_timeout: 5
+  extra:
+    sslmode: "require"
+```
+
+> **Semantic difference**: the PostgreSQL driver has no separate read/write timeouts; `read_timeout`/`write_timeout` are folded into a connection-level `statement_timeout`. For precise control, set `statement_timeout` (ms) or `idle_in_transaction_session_timeout` (ms) explicitly under `extra` — they override the folded value.
+
+> **Architecture note**: external PostgreSQL applies to the entire control plane — both **CubeMaster** (sandbox lifecycle, scheduling, templates) and **CubeOps** (AgentHub digital-assistant management, cluster ops API used by the WebUI). The two services share the same database (`cube_mvp` by default). CubeAPI, the E2B-compatible stateless SDK gateway, does not connect to the database. The installer writes a `postgres://…` `DATABASE_URL` to the runtime environment; CubeOps reads it and automatically selects the postgres driver based on the URL scheme.
+
+External Redis works the same way, via `CUBE_EXTERNAL_REDIS_HOST` / `CUBE_EXTERNAL_REDIS_PORT` / `CUBE_EXTERNAL_REDIS_PASSWORD`; when enabled the local `cube-sandbox-redis.service` is masked.
+
 ### CubeProxy and DNS
 
 | Variable | Default | Description |

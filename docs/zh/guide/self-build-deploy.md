@@ -330,6 +330,80 @@ sudo ./down.sh
 | `CUBE_SANDBOX_MYSQL_PASSWORD` | `cube_pass` | MySQL 用户密码 |
 | `CUBE_SANDBOX_REDIS_PASSWORD` | `ceuhvu123` | Redis 密码 |
 
+以上变量控制**内置**（Docker Compose 管理）的 MySQL / Redis。若希望复用已有的数据库或缓存服务，见下方[使用外部数据库](#使用外部数据库)。
+
+### 使用外部数据库
+
+默认情况下，安装脚本通过 Docker Compose 启动内置的 `mysql:8.0` 容器承载 CubeMaster 的元数据。如果你已有一套数据库服务，可以让 CubeMaster 直接连接外部实例，安装脚本会自动改写 `conf.yaml`、屏蔽本地 MySQL 容器（`cube-sandbox-mysql.service` 被 mask），并把连接串写入运行时环境。
+
+CubeMaster 的 dao 层同时支持 **MySQL** 和 **PostgreSQL** 两种引擎，二者互斥——只能配置其中一个外部数据库。若同时设置了 `CUBE_EXTERNAL_MYSQL_HOST` 和 `CUBE_EXTERNAL_POSTGRES_HOST`，安装脚本会直接报错退出。
+
+#### 外部 MySQL
+
+在 `.env` 中设置 `CUBE_EXTERNAL_MYSQL_HOST` 即启用：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `CUBE_EXTERNAL_MYSQL_HOST` | （空） | 外部 MySQL 主机；设置后启用外部 MySQL 模式 |
+| `CUBE_EXTERNAL_MYSQL_PORT` | `3306` | 端口 |
+| `CUBE_EXTERNAL_MYSQL_USER` | `cube` | 用户名 |
+| `CUBE_EXTERNAL_MYSQL_PASSWORD` | `cube_pass` | 密码（务必改为强密码） |
+| `CUBE_EXTERNAL_MYSQL_DB` | 同 `CUBE_SANDBOX_MYSQL_DB`（`cube_mvp`） | 数据库名 |
+
+#### 外部 PostgreSQL
+
+在 `.env` 中设置 `CUBE_EXTERNAL_POSTGRES_HOST` 即启用。安装脚本会把 `conf.yaml` 的 `ossdb_config`/`instance_db_config` 两段的 `driver` 改写为 `postgres`，并同步 `extra.sslmode`：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `CUBE_EXTERNAL_POSTGRES_HOST` | （空） | 外部 PostgreSQL 主机；设置后启用外部 PostgreSQL 模式 |
+| `CUBE_EXTERNAL_POSTGRES_PORT` | `5432` | 端口 |
+| `CUBE_EXTERNAL_POSTGRES_USER` | `cube` | 用户名 |
+| `CUBE_EXTERNAL_POSTGRES_PASSWORD` | `cube_pass` | 密码（务必改为强密码） |
+| `CUBE_EXTERNAL_POSTGRES_DB` | 同 `CUBE_SANDBOX_MYSQL_DB`（`cube_mvp`） | 数据库名 |
+| `CUBE_EXTERNAL_POSTGRES_SSLMODE` | `disable` | TLS 模式：`disable`（默认）/ `require` / `verify-ca` / `verify-full` 等 |
+
+启用后，CubeMaster 首次启动时会通过 goose 在目标 PostgreSQL 库上执行迁移，创建全部 `t_cube_*` 表。请确保：
+
+- 目标数据库（`CUBE_EXTERNAL_POSTGRES_DB`）已存在；
+- 配置的用户对该库有建表权限；
+- 若服务端启用了 TLS，把 `CUBE_EXTERNAL_POSTGRES_SSLMODE` 设为 `require` 或更严格的 `verify-full`。
+
+示例 `.env` 片段：
+
+```bash
+CUBE_EXTERNAL_POSTGRES_HOST=10.0.0.20
+CUBE_EXTERNAL_POSTGRES_PORT=5432
+CUBE_EXTERNAL_POSTGRES_USER=cube
+CUBE_EXTERNAL_POSTGRES_PASSWORD=<强密码>
+CUBE_EXTERNAL_POSTGRES_DB=cube_mvp
+CUBE_EXTERNAL_POSTGRES_SSLMODE=require
+```
+
+对应改写后的 `conf.yaml`（`ossdb_config` 与 `instance_db_config` 同构）：
+
+```yaml
+ossdb_config:
+  driver: "postgres"
+  addr: "10.0.0.20:5432"
+  user: "cube"
+  pwd: "<强密码>"
+  db_name: "cube_mvp"
+  conn_timeout: 5
+  read_timeout: 5
+  write_timeout: 5
+  extra:
+    sslmode: "require"
+```
+
+> **语义差异**：PostgreSQL 驱动没有独立的读/写超时，`read_timeout`/`write_timeout` 会被折算为连接级的 `statement_timeout`。如需精确控制，可在 `extra` 里显式设置 `statement_timeout`（毫秒）或 `idle_in_transaction_session_timeout`（毫秒），它们会覆盖折算值。
+
+> **架构说明**：外部 PostgreSQL 作用于整个控制平面——包括 **CubeMaster**（沙箱生命周期、调度、模板）和 **CubeOps**（AgentHub 数字助手管理、WebUI 使用的集群运维 API）。两个服务共享同一个数据库（默认 `cube_mvp`）。CubeAPI 是 E2B 兼容的无状态 SDK 网关，不连接数据库。安装脚本会把 `postgres://…` 形式的 `DATABASE_URL` 写入运行时环境；CubeOps 读取它并根据 URL scheme 自动选择 postgres 驱动。
+
+> **注意**：外部数据库当前仅由安装脚本自动建表迁移，不做数据播种（seed）之外的额外初始化；外部 Redis 见下方 `CUBE_EXTERNAL_REDIS_HOST` 相关变量。
+
+外部 Redis 同理，通过 `CUBE_EXTERNAL_REDIS_HOST` / `CUBE_EXTERNAL_REDIS_PORT` / `CUBE_EXTERNAL_REDIS_PASSWORD` 配置，启用后本地 `cube-sandbox-redis.service` 会被 mask。
+
 ### CubeProxy 与 DNS
 
 | 变量 | 默认值 | 说明 |
