@@ -74,9 +74,9 @@ artifact: artifact-ok
 denied_as_expected: command not on tool allowlist: 'bash' ...
 ```
 
-拒绝路径零 `Sandbox.create` 的证据：见 `test_allowlist.py` 中
-`test_assert_allowlisted_raises_before_create` 与
-`test_run_denied_script_has_no_sandbox_create`（`verify_local.py` 会跑到）。
+拒绝路径零 `Sandbox.create` 的证据：见 `test_allowlist.py` 中覆盖
+「门控先于 create」以及「`run_denied.py` 无 `Sandbox.create` 调用」的用例
+（`verify_local.py` 会跑到）。
 
 宿主机无 `*.cube.app` DNS 时，用 `python run_allowlisted_sidecar.py` 替代
 `run_allowlisted.py`（代理变量见 `.env.example`；另见

@@ -77,10 +77,9 @@ Deny:
 denied_as_expected: command not on tool allowlist: 'bash' ...
 ```
 
-Evidence that deny never calls `Sandbox.create`: see
-`test_assert_allowlisted_raises_before_create` and
-`test_run_denied_script_has_no_sandbox_create` in `test_allowlist.py`
-(also covered by `verify_local.py`).
+Evidence that deny never calls `Sandbox.create`: see the unit tests in
+`test_allowlist.py` that cover host-gate-before-create ordering and that
+`run_denied.py` has no `Sandbox.create` call (also covered by `verify_local.py`).
 
 On a host without `*.cube.app` DNS, use `python run_allowlisted_sidecar.py`
 instead of `run_allowlisted.py` (set proxy vars in `.env.example`; see

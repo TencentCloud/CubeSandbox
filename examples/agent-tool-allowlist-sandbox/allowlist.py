@@ -71,6 +71,9 @@ def is_allowlisted(
     if not parts:
         return False
     binary = parts[0]
+    # Reject path-style first tokens. Note: shlex.split() is POSIX-mode, so a bare
+    # unquoted Windows path like c:\Windows\... may lose backslashes before this
+    # check; quoted paths and Linux /path tokens are what this Linux demo covers.
     if "/" in binary or "\\" in binary:
         return False
     allowed = _resolve_allowed(
