@@ -8,7 +8,9 @@
 # This installer copies cubesandbox-sandbox.js into the global plugin
 # directory and writes a sanitized subset of CUBE_* settings into the
 # CodeBuddy config so the spawned sandbox_exec.py can authenticate against
-# CubeMaster. Provider API keys are never copied into the CodeBuddy config.
+# CubeMaster. Provider API keys and CUBE_API_KEY are never copied into the
+# CodeBuddy config — the cluster API key is read from the host environment
+# at runtime.
 
 set -euo pipefail
 
@@ -23,9 +25,13 @@ PACKAGE_FILE="$PLUGIN_DIR/package.json"
 CONFIG_FILE="$CODEBUDDY_CONFIG_HOME/config.json"
 SOURCE_ENV="$EXAMPLE_DIR/.env.example"
 
+# CUBE_API_KEY is deliberately excluded from this list and from config.json.
+# The cluster API key is a sensitive credential that should only be present in
+# the host environment, never stored in plaintext on disk.  sandbox_exec.py reads
+# CUBE_API_KEY directly from os.environ at runtime, and the JavaScript plugin
+# never accesses it.
 ALLOWED_KEYS=(
     "CUBE_API_URL"
-    "CUBE_API_KEY"
     "CUBE_TEMPLATE_ID"
     "CUBE_PROXY_NODE_IP"
     "CUBE_PROXY_PORT_HTTP"
@@ -53,7 +59,6 @@ except ImportError as exc:
 
 ALLOWED_KEYS = {
     "CUBE_API_URL",
-    "CUBE_API_KEY",
     "CUBE_TEMPLATE_ID",
     "CUBE_PROXY_NODE_IP",
     "CUBE_PROXY_PORT_HTTP",

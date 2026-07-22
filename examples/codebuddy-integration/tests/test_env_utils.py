@@ -116,11 +116,13 @@ class ProviderTests(unittest.TestCase):
         os.environ["CODEBUDDY_BASE_URL"] = "https://api.openai.com/v1"
         self.assertEqual(env_utils.provider(), "openai")
 
-    def test_internal_with_unknown_url_falls_back_to_codebuddy_io(self) -> None:
+    def test_internal_with_unknown_url_raises_requires_explicit_provider(self) -> None:
         self._clear()
         os.environ["CODEBUDDY_INTERNET_ENVIRONMENT"] = "internal"
         os.environ["CODEBUDDY_BASE_URL"] = "https://example.com"
-        self.assertEqual(env_utils.provider(), "codebuddy_io")
+        with self.assertRaises(SystemExit) as ctx:
+            env_utils.provider()
+        self.assertIn("Cannot determine provider", str(ctx.exception))
 
 
 class LLMHostTests(unittest.TestCase):
@@ -152,8 +154,9 @@ class LLMHostTests(unittest.TestCase):
     def test_anthropic_base_url_used_for_default(self) -> None:
         self._clear()
         os.environ["CODEBUDDY_INTERNET_ENVIRONMENT"] = "internal"
-        os.environ["ANTHROPIC_BASE_URL"] = "https://api.deepseek.com/anthropic"
-        self.assertEqual(env_utils.llm_host(), "api.deepseek.com")
+        os.environ["CODEBUDDY_PROVIDER"] = "anthropic"
+        os.environ["ANTHROPIC_BASE_URL"] = "https://api.anthropic.com/v1"
+        self.assertEqual(env_utils.llm_host(), "api.anthropic.com")
 
     def test_provider_default_when_nothing_set(self) -> None:
         self._clear()

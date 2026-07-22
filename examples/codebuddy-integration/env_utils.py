@@ -177,11 +177,10 @@ def internet_environment() -> str:
 def _provider_from_host(host: str) -> str | None:
     """Detect provider from hostname using exact suffix matching.
 
-    Falls back to substring matching only for non-standard hostnames,
-    which may produce incorrect results. Set CODEBUDDY_PROVIDER explicitly
-    when using a custom gateway to avoid ambiguity.
+    Returns ``None`` when the hostname does not match any known official
+    endpoint, letting the caller decide how to proceed (typically raising an
+    error unless ``CODEBUDDY_PROVIDER`` is already set).
     """
-    # Exact suffix matches for known official endpoints (precedence matters)
     if host.endswith(".anthropic.com"):
         return "anthropic"
     if host.endswith(".openai.com"):
@@ -193,19 +192,10 @@ def _provider_from_host(host: str) -> str | None:
     if host == "api.codebuddy.ai":
         return "codebuddy_io"
 
-    # Heuristic fallback for non-standard hostnames (may mis-identify)
-    # Documented caveat: a hostname like "anthropic-proxy.attacker.io"
-    # would incorrectly match as "anthropic". Users with custom gateways
-    # should set CODEBUDDY_PROVIDER explicitly.
-    if "anthropic" in host:
-        return "anthropic"
-    if "openai" in host:
-        return "openai"
-    if "deepseek" in host:
-        return "deepseek"
-    if "googleapis" in host:
-        return "google"
-
+    # No substring fallback: "anthropic-proxy.attacker.io" must NOT match as
+    # "anthropic", because provider_inject() and llm_host() are security-
+    # critical (auth header shape and egress allow-list).  Callers that
+    # need to handle custom gateways must set CODEBUDDY_PROVIDER explicitly.
     return None
 
 
@@ -217,12 +207,12 @@ def provider() -> str:
     trio into a single string so the egress allow-list (network_policy.py) can
     pick the right host and the right auth-header shape.
 
-    **Heuristic caveat:** when a non-standard CODEBUDDY_BASE_URL is used
-    without an explicit CODEBUDDY_PROVIDER, the fallback substring matching
-    (``"anthropic" in host``, etc.) may produce incorrect results. A hostname
-    like ``anthropic-proxy.attacker.io`` would match as ``anthropic`` even though
-    it is a custom gateway. Set ``CODEBUDDY_PROVIDER`` explicitly to bypass the
-    heuristic whenever a non-standard upstream is in use.
+    If ``CODEBUDDY_PROVIDER`` is set, it is used verbatim.  Otherwise, for the
+    ``io`` internet environment, the host from ``CODEBUDDY_BASE_URL`` is matched
+    against known official endpoints (``*.anthropic.com``, ``api.codebuddy.ai``,
+    etc.) — if the host is unknown and ``CODEBUDDY_PROVIDER`` was not set, an
+    error is raised instead of falling back to a best-guess heuristic.  Custom
+    gateways must therefore set ``CODEBUDDER_PROVIDER`` explicitly.
     """
     explicit = os.environ.get("CODEBUDDY_PROVIDER")
     if explicit:
@@ -235,7 +225,11 @@ def provider() -> str:
     detected = _provider_from_host(host)
     if detected:
         return detected
-    return "codebuddy_io"
+    raise SystemExit(
+        f"Cannot determine provider from host {host!r} in CODEBUDDY_BASE_URL. "
+        f"Set CODEBUDDY_PROVIDER explicitly (e.g. anthropic, openai, deepseek, google) "
+        f"when using a non-standard upstream."
+    )
 
 
 def codebuddy_model() -> str:

@@ -64,10 +64,18 @@ if os.getenv("ALLOWED_READ_DIRS"):
 
 # The session file lives under gettempdir() so `mktemp`/`/tmp` rotations can
 # reclaim it, but is scoped to the invoking UID and locked down with 0600 so
-# other users on a shared host cannot hijack `Sandbox.connect()` on the next
-# invocation. The O_NOFOLLOW + S_ISREG double-check guards against symlink
-# races that would otherwise let an attacker point us at an arbitrary file
-# before the write happens.
+# other users on a shared host cannot *read* it.  The O_NOFOLLOW + S_ISREG
+# double-check guards against symlink races that would otherwise let an attacker
+# point us at an arbitrary file before the write happens.
+#
+# Caveat — TOCTOU in the retry loop: between the FileExistsError unlink() and
+# the retry open(), a local attacker who can predict or observe SESSION_FILE
+# may re-create a symlink at the path.  O_NOFOLLOW makes open() fail with
+# ELOOP rather than following the link, but a persistent attacker can keep
+# re-creating the symlink and cause repeated failures.  The retry loop
+# mitigates but does not eliminate this window.  On a shared cluster where
+# untrusted users share a host's /tmp, use per-invocation sandboxes without
+# --keep-alive to avoid the session-file path entirely.
 SESSION_FILE = Path(tempfile.gettempdir()) / f"cubesandbox_codebuddy_session_{os.getuid()}"
 
 # Thread lock for sandbox access (prevents race conditions in multi-threaded usage).
@@ -353,7 +361,9 @@ def main() -> None:
         "--keep-alive",
         action="store_true",
         help="Keep the sandbox alive after this invocation so the next call "
-             "can reconnect via the session file instead of cold-starting.",
+             "can reconnect via the session file instead of cold-starting. "
+             "On shared hosts where untrusted users share /tmp, prefer "
+             "per-invocation mode to avoid the session-file TOCTOU window.",
     )
     parser.add_argument(
         "--reset",

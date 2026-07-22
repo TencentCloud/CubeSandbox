@@ -30,9 +30,9 @@ jobs:
           python3 -m py_compile env_utils.py _codebuddy_common.py \
             run_codebuddy.py resume_codebuddy.py network_policy.py
 
-      - name: Run env_utils unit tests
+      - name: Run unit tests
         working-directory: examples/codebuddy-integration
-        run: python3 -m unittest discover -s . -p test_env_utils.py -v
+        run: python3 -m unittest discover -s tests -p "test_*.py" -v
 
       - name: Smoke-check --help output
         working-directory: examples/codebuddy-integration

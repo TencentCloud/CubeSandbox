@@ -51,8 +51,7 @@ def stream_writer(stream) -> Callable[[object], None]:
         except OSError:
             pass  # Broken pipe / closed stream — command likely terminated
         except Exception:
-            import sys as _sys
-            print(f"[stream writer error: {type(chunk).__name__}]", file=_sys.stderr)
+            print(f"[stream writer error: {type(chunk).__name__}]", file=sys.stderr)
 
     return write
 
