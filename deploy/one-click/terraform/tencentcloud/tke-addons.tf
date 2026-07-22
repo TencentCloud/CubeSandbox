@@ -1203,7 +1203,7 @@ resource "kubernetes_deployment" "cube_proxy" {
   }
 }
 
-# cube-proxy CLB Service (public network 80/443)
+# cube-proxy CLB Service (public network 80/443/9090)
 resource "kubernetes_service" "cube_proxy" {
   count = local.deploy_addons ? 1 : 0
   metadata {
@@ -1225,6 +1225,10 @@ resource "kubernetes_service" "cube_proxy" {
   lifecycle {
     # TKE controller-manager injects runtime annotations (e.g. bindedip,
     # loadbalanceId) that would otherwise cause perpetual drift on every plan.
+    # NOTE: because annotations are ignored after create, upgrading an existing
+    # cluster will add Service port 9090 via spec.ports but will NOT refresh
+    # specify-protocol. Operators must manually patch the annotation to include
+    # 9090, or recreate this Service, for CLB to expose plaintext gRPC.
     ignore_changes = [
       metadata[0].annotations,
     ]

@@ -610,12 +610,25 @@ EOF
 # ---------------------------------------------------------------
 prepare_cubeproxy_nginx_conf() {
 	local dst="${SCRIPT_DIR}/cubeproxy-nginx.conf"
-	[ -f "${dst}" ] && return 0
+	if [ -f "${dst}" ]; then
+		# Stale pre-gRPC templates would leave Service:9090 open with no nginx
+		# listener. Force regeneration when the gRPC placeholder is missing.
+		if grep -q -F '__CUBE_PROXY_GRPC_PORT__' "${dst}"; then
+			return 0
+		fi
+		echo -e "  ${YELLOW}⚠ existing cubeproxy-nginx.conf lacks __CUBE_PROXY_GRPC_PORT__; regenerating${NC}"
+		rm -f "${dst}"
+	fi
 
 	local src
 	src="${SCRIPT_DIR}/../../cubeproxy/nginx.conf.template"
 	if [ -f "${src}" ]; then
 		cp -f "${src}" "${dst}"
+		if ! grep -q -F '__CUBE_PROXY_GRPC_PORT__' "${dst}"; then
+			rm -f "${dst}"
+			echo -e "  ${RED}✗ cubeproxy nginx template is missing __CUBE_PROXY_GRPC_PORT__; refusing stale ${src}${NC}" >&2
+			return 1
+		fi
 		echo -e "  ${GREEN}✓ Generated cubeproxy-nginx.conf from ${src}${NC}"
 		return 0
 	fi

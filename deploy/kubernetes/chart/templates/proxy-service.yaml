@@ -24,6 +24,10 @@ spec:
       port: {{ .Values.cubeProxy.ports.https.containerPort }}
       targetPort: https
       protocol: TCP
+    - name: grpc
+      port: {{ .Values.cubeProxy.ports.grpc.containerPort }}
+      targetPort: grpc
+      protocol: TCP
     - name: admin
       port: {{ .Values.cubeProxy.adminPort }}
       targetPort: admin

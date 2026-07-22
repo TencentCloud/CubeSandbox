@@ -661,6 +661,9 @@ cubeProxy:
       containerPort: 80
     https:
       containerPort: 443
+    # Plaintext gRPC (HTTP/2) ingress; mirrors CubeProxy listen 9090.
+    grpc:
+      containerPort: 9090
   redis:
     # Empty host uses redis.host or chart-managed cube-redis.
     host: ""

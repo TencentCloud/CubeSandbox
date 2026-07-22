@@ -64,6 +64,8 @@ cubeProxy:
       # CLB → backend default pass-through; pair with security-groups below.
       # See: https://cloud.tencent.com/document/product/457/51258
       service.cloud.tencent.com/pass-to-target: "true"
+      # Expose HTTP, HTTPS, and plaintext gRPC (9090) as TCP on the CLB.
+      service.cloud.tencent.com/specify-protocol: '{"80":{"protocol":["TCP"]},"443":{"protocol":["TCP"]},"9090":{"protocol":["TCP"]}}'
       # REPLACE via -f override with your VPC security group id(s).
       service.cloud.tencent.com/security-groups: "CHANGE_ME_TKE_CLB_SECURITY_GROUP"
   ingress:

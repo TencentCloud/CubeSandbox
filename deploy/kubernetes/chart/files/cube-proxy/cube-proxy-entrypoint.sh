@@ -9,6 +9,7 @@
 # Reads the following env vars (populated by the Chart in the Pod spec):
 #   CUBE_PROXY_HTTP_LISTEN_PORT   - digits only, target HTTP listen port
 #   CUBE_PROXY_HTTPS_LISTEN_PORT  - digits only, target HTTPS listen port
+#   CUBE_PROXY_GRPC_LISTEN_PORT   - digits only, target plaintext gRPC listen port
 #   CUBE_PROXY_ADMIN_LISTEN       - admin server listen address (default 0.0.0.0)
 #   CUBE_PROXY_ADMIN_PORT         - admin server port (default 8082)
 #   CUBE_PROXY_ADMIN_TOKEN        - optional shared secret for /admin/*
@@ -27,9 +28,11 @@ set -eu
 
 mkdir -p /usr/local/openresty/nginx/conf/global /data /data/log/cube-proxy /cache
 
-case "${CUBE_PROXY_HTTP_LISTEN_PORT}:${CUBE_PROXY_HTTPS_LISTEN_PORT}" in
-  *[!0-9:]*|:*|*:)
-    echo "invalid CubeProxy listen ports: http=${CUBE_PROXY_HTTP_LISTEN_PORT} https=${CUBE_PROXY_HTTPS_LISTEN_PORT}" >&2
+CUBE_PROXY_GRPC_LISTEN_PORT="${CUBE_PROXY_GRPC_LISTEN_PORT:-9090}"
+
+case "${CUBE_PROXY_HTTP_LISTEN_PORT}:${CUBE_PROXY_HTTPS_LISTEN_PORT}:${CUBE_PROXY_GRPC_LISTEN_PORT}" in
+  *[!0-9:]*|:*|*:|::*|*::*)
+    echo "invalid CubeProxy listen ports: http=${CUBE_PROXY_HTTP_LISTEN_PORT} https=${CUBE_PROXY_HTTPS_LISTEN_PORT} grpc=${CUBE_PROXY_GRPC_LISTEN_PORT}" >&2
     exit 1
     ;;
 esac
@@ -52,6 +55,7 @@ esac
 sed -i \
   -e "s/listen 8081 reuseport;/listen ${CUBE_PROXY_HTTP_LISTEN_PORT} reuseport;/g" \
   -e "s/listen 8080 ssl reuseport;/listen ${CUBE_PROXY_HTTPS_LISTEN_PORT} ssl reuseport;/g" \
+  -e "s/listen 9090 http2 reuseport;/listen ${CUBE_PROXY_GRPC_LISTEN_PORT} http2 reuseport;/g" \
   -e "s/set \\\$host_proxy_port 8081;/set \\\$host_proxy_port ${CUBE_PROXY_HTTP_LISTEN_PORT};/g" \
   -e "s/set \\\$host_proxy_port 8080;/set \\\$host_proxy_port ${CUBE_PROXY_HTTPS_LISTEN_PORT};/g" \
   -e "s/listen 127\\.0\\.0\\.1:8082;/listen ${admin_listen}:${admin_port};/g" \
