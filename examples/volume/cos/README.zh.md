@@ -52,8 +52,6 @@
 
 ### 方式 A：一键脚本（推荐，裸机 / one-click）
 
-裸机或 one-click 部署时，在对应节点的 `plugin` 目录执行（默认前缀 `/usr/local/services/cubetoolbox`）：
-
 **Cubelet 节点：**
 
 ```bash

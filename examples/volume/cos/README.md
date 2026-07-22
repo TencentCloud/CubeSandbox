@@ -54,8 +54,6 @@ Container images already include **cosfs, coscmd, and jq** — no need to run th
 
 ### Option A: install script (recommended for bare metal / one-click)
 
-On bare metal or one-click, run from the `plugin` directory on the matching node (default prefix `/usr/local/services/cubetoolbox`):
-
 **Cubelet node:**
 
 ```bash
