@@ -11,6 +11,7 @@ use axum::{
 
 use crate::{
     error::AppResult,
+    logging::{LogEvent, LogLevel, EVENT_SANDBOX_ROLLED_BACK, EVENT_SNAPSHOT_CREATED},
     models::{ApiError, CreateSnapshotRequest, ListSnapshotsQuery, RollbackRequest, SnapshotInfo},
     state::AppState,
 };
@@ -48,6 +49,15 @@ pub async fn create_snapshot(
         snapshot_id = %info.snapshot_id,
         "create_snapshot: success"
     );
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Info, EVENT_SNAPSHOT_CREATED)
+                .field("sandbox_id", &sandbox_id)
+                .field("snapshot_id", &info.snapshot_id)
+                .field_value("names", &info.names),
+        )
+        .await;
 
     Ok((StatusCode::CREATED, Json(info)))
 }
@@ -138,11 +148,21 @@ pub async fn rollback_sandbox(
         .await?;
 
     tracing::info!(
-        sandbox_id = %sandbox_id,
-        snapshot_id = %body.snapshot_id,
+        sandbox_id = %resp.sandbox_id,
+        snapshot_id = %resp.snapshot_id,
         operation_id = %resp.operation_id,
         "rollback_sandbox: success"
     );
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Info, EVENT_SANDBOX_ROLLED_BACK)
+                .field("sandbox_id", &resp.sandbox_id)
+                .field("snapshot_id", &resp.snapshot_id)
+                .field("operation_id", &resp.operation_id)
+                .field("status", &resp.status),
+        )
+        .await;
 
     Ok((StatusCode::OK, Json(resp)))
 }

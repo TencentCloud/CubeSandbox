@@ -22,6 +22,12 @@ pub struct SnapshotService {
     instance_type: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotContext {
+    pub snapshot_id: String,
+    pub origin_sandbox_id: Option<String>,
+}
+
 impl SnapshotService {
     pub fn new(cubemaster: CubeMasterClient, instance_type: String) -> Self {
         Self {
@@ -153,13 +159,16 @@ impl SnapshotService {
         }
     }
 
-    pub async fn has_snapshot(&self, snapshot_id: &str) -> AppResult<bool> {
+    pub async fn get_snapshot_context(
+        &self,
+        snapshot_id: &str,
+    ) -> AppResult<Option<SnapshotContext>> {
         match self.cubemaster.get_snapshot(snapshot_id, false).await {
             Ok(resp) => {
                 resp.ret.as_result().map_err(internal_error)?;
-                Ok(true)
+                Ok(Some(snapshot_resource_to_context(resp.snapshot)))
             }
-            Err(e) if e.is_not_found() => Ok(false),
+            Err(e) if e.is_not_found() => Ok(None),
             Err(e) => Err(internal_error(e)),
         }
     }
@@ -417,6 +426,21 @@ fn snapshot_resource_to_list_item(r: SnapshotResource) -> SnapshotListItem {
         },
         created_at: r.created_at,
         updated_at: r.updated_at,
+    }
+}
+
+fn snapshot_resource_to_context(r: SnapshotResource) -> SnapshotContext {
+    SnapshotContext {
+        snapshot_id: r.snapshot_id,
+        origin_sandbox_id: non_empty_string(r.origin_sandbox_id),
+    }
+}
+
+fn non_empty_string(value: String) -> Option<String> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
     }
 }
 
