@@ -4,8 +4,17 @@ on:
   # IMPORTANT: pull_request_target makes secrets available to fork PRs.
   # SECURITY RULE: never add steps that EXECUTE code from the PR
   # (no npm install / make / cargo build / pre-commit / etc.).
-  # Checkout only the base branch (trusted root). Claude reads PR changes via
-  # gh pr diff/view and posts review output through constrained tools below.
+  #
+  # Design (aligned with claude-code-action security intent):
+  # - Checkout base only (trusted root).
+  # - Prefetch PR meta/diff in a trusted workflow step (not inside Claude Bash).
+  # - Claude only Reads inputs + base tree, posts inline via MCP, writes sticky
+  #   body to review-input/summary.md.
+  # - A trusted post-step verifies scripts/gh.sh SHA-256 then publishes via it.
+  #
+  # Note: track_progress is intentionally NOT used — tag mode checks out the PR
+  # head into the workspace root (including forks via refs/pull/*/head), which
+  # reintroduces untrusted code at the trusted root.
   # See: https://github.com/anthropics/claude-code-action/blob/main/docs/security.md
   pull_request_target:
     types: [opened, synchronize, reopened]
@@ -23,9 +32,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Checkout PR head for review context
+      - name: Checkout base (trusted root)
         uses: actions/checkout@v6
         with:
+          # Default ref for pull_request_target is the base branch.
+          # Do NOT checkout the PR head into the workspace root.
           persist-credentials: false
           submodules: false
           lfs: false
@@ -39,42 +50,93 @@ jobs:
           permission-contents: read
           permission-pull-requests: write
 
-      - uses: anthropics/claude-code-action@v1
+      - name: Prefetch PR review inputs
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # Snapshot the trusted publisher script hash outside the workspace so
+          # a later Write cannot replace the expected digest.
+          sha256sum scripts/gh.sh > "${RUNNER_TEMP}/gh.sh.sha256"
+          mkdir -p review-input
+          gh pr view "$PR_NUMBER" \
+            --json title,body,author,baseRefName,headRefName,headRefOid,files,additions,deletions \
+            > review-input/meta.json
+          gh pr diff "$PR_NUMBER" > review-input/pr.diff.tmp
+          MAX_BYTES=2000000
+          SIZE=$(wc -c < review-input/pr.diff.tmp)
+          if [ "$SIZE" -gt "$MAX_BYTES" ]; then
+            head -c "$MAX_BYTES" review-input/pr.diff.tmp > review-input/pr.diff
+            printf '\n\n... [TRUNCATED: diff was %s bytes, showing first %s] ...\n' \
+              "$SIZE" "$MAX_BYTES" >> review-input/pr.diff
+            echo truncated > review-input/TRUNCATED
+            rm -f review-input/pr.diff.tmp
+          else
+            mv review-input/pr.diff.tmp review-input/pr.diff
+          fi
+
+      - name: Run Claude review
+        uses: anthropics/claude-code-action@v1
         env:
           ANTHROPIC_BASE_URL: https://tokenhub.tencentmaas.com
           ANTHROPIC_MODEL: deepseek-v4-flash-202605
           ANTHROPIC_SMALL_FAST_MODEL: deepseek-v4-flash-202605
-          CLAUDE_CODE_SCRIPT_CAPS: '{"gh.sh":3}'
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ steps.app-token.outputs.token }}
           allowed_non_write_users: "*"
-          show_full_output: true
+          show_full_output: false
           classify_inline_comments: true
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
 
-            Review this pull request. Use `gh pr diff` / `gh pr view` for changes.
-            The workspace is the base branch; do not assume PR files are checked out.
+            Review this pull request using ONLY the prefetched inputs and the
+            local base-branch workspace.
 
-            Comment management requirements:
-            - Use a single top-level sticky PR comment for this workflow.
-            - Inline issues: use mcp__github_inline_comment__create_inline_comment
+            Required reading (do this first):
+            1. review-input/meta.json
+            2. review-input/pr.diff
+            If review-input/TRUNCATED exists, note that the diff was truncated.
+
+            The workspace is the base branch. For surrounding context, Read files
+            from the base tree that appear in the diff. Do not assume PR head
+            files are checked out.
+
+            Publishing rules:
+            - Inline issues: mcp__github_inline_comment__create_inline_comment
               (set confirmed: true for final review comments).
-            - To publish the sticky top-level review, pass the full body through stdin:
-            ./scripts/gh.sh pr review-comment ${{ github.event.pull_request.number }} --body-file - <<'EOF'
-            <!-- cubesandbox-auto-review:start -->
-            ...review body...
-            <!-- cubesandbox-auto-review:end -->
-            EOF
-            - Wrap the review body with these exact hidden markers:
+            - Top-level sticky body: Write exactly one file at
+              review-input/summary.md containing the full markdown review body
+              wrapped with these markers:
               <!-- cubesandbox-auto-review:start -->
+              ...review body...
               <!-- cubesandbox-auto-review:end -->
-            - Do not call `gh pr comment` or `gh api` directly for top-level comments.
             - Mark the review as AI-generated; do not claim human approval.
-            - Only post GitHub comments — don't submit review text as messages only.
-
+            - Do not use Bash. Do not call gh. Do not write any other files.
           claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(./scripts/gh.sh pr review-comment:*)"
-            --disallowedTools "Write,Edit,NotebookEdit,Agent,WebFetch,WebSearch"
+            --allowedTools "Read,Glob,Grep,Write,mcp__github_inline_comment__create_inline_comment"
+            --disallowedTools "Bash,Edit,NotebookEdit,Agent,WebFetch,WebSearch"
+
+      - name: Publish sticky review comment
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if [ ! -f review-input/summary.md ]; then
+            echo "ERROR: Claude did not write review-input/summary.md; failing so a green CI cannot hide a missing review."
+            exit 1
+          fi
+          if ! grep -q '<!-- cubesandbox-auto-review:start -->' review-input/summary.md || \
+             ! grep -q '<!-- cubesandbox-auto-review:end -->' review-input/summary.md; then
+            echo "ERROR: review-input/summary.md is missing required sticky markers."
+            exit 1
+          fi
+          # Refuse to run a publisher script that Write may have overwritten.
+          if ! sha256sum -c "${RUNNER_TEMP}/gh.sh.sha256"; then
+            echo "ERROR: scripts/gh.sh integrity check failed; refusing to publish."
+            exit 1
+          fi
+          ./scripts/gh.sh pr review-comment "$PR_NUMBER" --body-file - < review-input/summary.md
