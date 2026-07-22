@@ -46,6 +46,7 @@ import os
 import shlex
 import sys
 import threading
+import traceback
 from typing import Any
 
 from dotenv import load_dotenv
@@ -66,6 +67,7 @@ TEMPLATE_ID = os.getenv("CUBE_TEMPLATE_ID", "")
 MAX_TIMEOUT = 300  # 5 minutes maximum
 MAX_CODE_LENGTH = 100_000  # 100KB
 MAX_CONTENT_LENGTH = 1_000_000  # 1MB
+MAX_MESSAGE_LENGTH = 1_000_000  # 1MB per JSON-RPC line on stdio
 MAX_COMMAND_LENGTH = 65536  # 64KB
 
 # Allowed path prefixes for file operations (sandbox-side).
@@ -378,12 +380,18 @@ def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
         except (ValueError, TypeError, KeyError) as exc:
             text = f"Invalid arguments: {exc}"
             is_error = True
-        except Exception as exc:
-            import traceback
+        except (OSError, RuntimeError) as exc:
+            # Expected errors from sandbox operations (network, file I/O, timeout).
             traceback.print_exc(file=sys.stderr)
-            error_type = type(exc).__name__
-            text = f"Error: {error_type}"
+            text = f"Error: {exc}"
             is_error = True
+        except (KeyboardInterrupt, SystemExit):
+            raise  # propagate without wrapping — daemon stop is not an error
+        except BaseException as exc:
+            # Fatal: MemoryError, RecursionError, etc. — log and propagate so
+            # the daemon can restart cleanly rather than silently continuing.
+            traceback.print_exc(file=sys.stderr)
+            raise
 
         return {
             "jsonrpc": "2.0",
@@ -410,11 +418,15 @@ def _read_mcp_message() -> dict[str, Any] | None:
     """Read one newline-delimited JSON-RPC message from MCP stdio.
 
     Raises EOFError when stdin is exhausted (client disconnected). Malformed
-    lines return None so the loop can skip them without hanging.
+    lines return None so the loop can skip them without hanging.  Each line is
+    bounded by MAX_MESSAGE_LENGTH to prevent a malicious client from exhausting
+    the server's memory with a multi-gigabyte payload.
     """
     line = sys.stdin.readline()
     if not line:
         raise EOFError()
+    if len(line) > MAX_MESSAGE_LENGTH:
+        return None
     try:
         return json.loads(line)
     except json.JSONDecodeError:

@@ -257,6 +257,16 @@ class TestReadMcpMessage:
         with pytest.raises(EOFError):
             mcp_server._read_mcp_message()
 
+    def test_oversized_message_returns_none(self, monkeypatch):
+        import io
+
+        oversized = "x" * (mcp_server.MAX_MESSAGE_LENGTH + 1) + "\n"
+        fake_stdin = io.StringIO(oversized)
+        monkeypatch.setattr(sys, "stdin", fake_stdin)
+
+        msg = mcp_server._read_mcp_message()
+        assert msg is None
+
 
 class TestValidation:
     def test_validate_path_allows_workspace(self):

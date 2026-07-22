@@ -54,8 +54,16 @@ MAX_COMMAND_LENGTH = 65536
 # Maximum code length to prevent resource exhaustion.
 MAX_CODE_LENGTH = 100_000
 
-# Allowed directories for file operations (restrictive by default).
-# Can be extended via ALLOWED_READ_DIRS environment variable (colon-separated).
+# Maximum file size (bytes) for --file to prevent host OOM from reading huge files.
+MAX_FILE_LENGTH = 10 * 1024 * 1024  # 10 MB
+
+# Allowed directories for file operations.  Defaults to cwd so the script
+# works out-of-the-box in a project directory, but note that running from
+# / or /etc would open those entire trees.  In production set
+# ALLOWED_READ_DIRS explicitly (colon-separated list) so the directory
+# boundary is intentional and auditable.  The --file guard is the only
+# filesystem boundary between the host and the sandbox; there is no
+# chroot or mount namespace here.
 _ALLOWED_READ_DIRS = [Path.cwd()]
 if os.getenv("ALLOWED_READ_DIRS"):
     for d in os.getenv("ALLOWED_READ_DIRS", "").split(":"):
@@ -281,6 +289,9 @@ def exec_file(filepath: str, timeout: int = 120) -> str:
 
     sandbox = _get_sandbox(timeout + 60)
     try:
+        st = os.stat(filepath)
+        if st.st_size > MAX_FILE_LENGTH:
+            return f"[error] file exceeds maximum size of {MAX_FILE_LENGTH} bytes"
         with open(filepath, "r", encoding="utf-8") as fp:
             content = fp.read()
     except OSError:

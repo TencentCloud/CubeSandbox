@@ -212,7 +212,7 @@ def provider() -> str:
     against known official endpoints (``*.anthropic.com``, ``api.codebuddy.ai``,
     etc.) — if the host is unknown and ``CODEBUDDY_PROVIDER`` was not set, an
     error is raised instead of falling back to a best-guess heuristic.  Custom
-    gateways must therefore set ``CODEBUDDER_PROVIDER`` explicitly.
+    gateways must therefore set ``CODEBUDDY_PROVIDER`` explicitly.
     """
     explicit = os.environ.get("CODEBUDDY_PROVIDER")
     if explicit:

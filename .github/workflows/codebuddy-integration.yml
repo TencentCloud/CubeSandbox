@@ -10,7 +10,7 @@ on:
       - "docs/**/integrations/codebuddy.md"
       - ".github/workflows/codebuddy-integration.yml"
   push:
-    branches: [main]
+    branches: [master]
 
 jobs:
   static:

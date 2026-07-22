@@ -49,7 +49,6 @@ codebuddy-integration/
 │   ├── install.sh                       # Copy plugin + sanitized config into ~/.config/codebuddy
 │   └── cubesandbox-sandbox.js           # tool.execute.before plugin that forwards bash to a sandbox
 ├── tests/                # pytest suite (fully offline, SDK mocked)
-│   ├── conftest.py
 │   ├── test_sandbox_exec.py
 │   ├── test_mcp_server.py
 │   └── test_codebuddy_common.py
