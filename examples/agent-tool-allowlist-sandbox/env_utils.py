@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 
 def load_local_dotenv() -> None:
     """Best-effort load of a nearby .env file without overriding real env vars."""
+    # Intentionally use resolve() for dedup + is_file + load (clearer than the
+    # unresolved-path variant still used in examples/code-sandbox-quickstart).
     candidate_paths = [
         Path(__file__).with_name(".env"),
         Path.cwd() / ".env",

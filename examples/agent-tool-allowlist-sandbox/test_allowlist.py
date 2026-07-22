@@ -72,8 +72,8 @@ class AllowlistTests(unittest.TestCase):
         self.assertTrue(is_allowlisted(cmd, enable_code_execution=True))
         self.assertEqual(assert_allowlisted(cmd, enable_code_execution=True), cmd)
 
-    def test_deny_path_never_calls_sandbox_create(self) -> None:
-        """Host gate failure must leave Sandbox.create uncalled (call_count == 0)."""
+    def test_assert_allowlisted_raises_before_create(self) -> None:
+        """Gate failure must leave a subsequent create helper uncalled."""
         mock_create = MagicMock()
 
         def run_tool_through_host_gate(command: str) -> None:

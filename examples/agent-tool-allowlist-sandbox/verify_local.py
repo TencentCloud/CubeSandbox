@@ -7,20 +7,21 @@ Runs:
   1) unit tests
   2) run_denied.py
   3) Dockerfile allowlist drift check vs allowlist.py
-  4) optional: docker image markers if ALLOWLIST_IMAGE_TAG exists
-  5) optional: run_allowlisted.py if CUBE_TEMPLATE_ID + E2B_API_URL are set
+  4) optional: docker image markers for ALLOWLIST_IMAGE_TAG
+     (default: agent-tool-allowlist-sandbox:night-verified; SKIP if missing)
+  5) optional: run_allowlisted.py (or sidecar if ALLOWLIST_USE_SIDECAR) when
+     CUBE_TEMPLATE_ID + E2B_API_URL are set
 """
 
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 import sys
 import unittest
 from pathlib import Path
 
-from allowlist_sync import HEADER, allowlist_file_body
+from allowlist_sync import allowlist_file_body, dockerfile_run_snippet
 
 ROOT = Path(__file__).resolve().parent
 
@@ -54,36 +55,32 @@ def step_deny() -> None:
 
 def step_dockerfile_sync() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-    expected_names = []
-    for line in allowlist_file_body().splitlines():
-        if line.startswith("#") or not line.strip():
-            continue
-        expected_names.append(line.strip())
-
-    # Extract single-quoted names from the printf block after the header comment.
-    block = re.search(
-        r"printf '%s\\n' \\\n(?P<body>.*?)\n\s*> /etc/cube-sandbox/tool-allowlist.txt",
-        dockerfile,
-        flags=re.S,
-    )
-    if not block:
-        raise SystemExit("Dockerfile printf allowlist block not found")
-
-    names = re.findall(r"'([^']+)'", block.group("body"))
-    # Drop the header string if present as a printf arg.
-    names = [n for n in names if n != HEADER and not n.startswith("#")]
-    if names != expected_names:
+    snippet = dockerfile_run_snippet()
+    if snippet not in dockerfile:
+        anchor = "RUN mkdir -p /etc/cube-sandbox"
+        idx = dockerfile.find(anchor)
+        if idx < 0:
+            preview = dockerfile[:200]
+        else:
+            preview = dockerfile[max(0, idx - 40) : idx + 200]
         raise SystemExit(
-            "Dockerfile allowlist drifted from allowlist.py:\n"
-            f"  dockerfile={names}\n"
-            f"  expected ={expected_names}\n"
+            "Dockerfile allowlist RUN block drifted from "
+            "allowlist_sync.dockerfile_run_snippet(): expected snippet missing.\n"
+            f"Around RUN block (~200 chars):\n{preview!r}\n"
             "Update Dockerfile or DEFAULT_ALLOWED_BINARIES, then re-run."
         )
+    names = sorted(
+        line
+        for line in allowlist_file_body().splitlines()
+        if line.strip() and not line.startswith("#")
+    )
     print("dockerfile_sync=OK", names)
 
 
 def step_docker_markers_optional() -> None:
-    image = os.environ.get("ALLOWLIST_IMAGE_TAG", "agent-tool-allowlist-sandbox:night-verified")
+    image = os.environ.get(
+        "ALLOWLIST_IMAGE_TAG", "agent-tool-allowlist-sandbox:night-verified"
+    )
     inspect = subprocess.run(
         ["docker", "image", "inspect", image],
         capture_output=True,

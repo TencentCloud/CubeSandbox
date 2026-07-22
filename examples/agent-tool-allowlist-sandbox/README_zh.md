@@ -75,11 +75,13 @@ denied_as_expected: command not on tool allowlist: 'bash' ...
 ```
 
 拒绝路径零 `Sandbox.create` 的证据：见 `test_allowlist.py` 中
-`test_deny_path_never_calls_sandbox_create`（`verify_local.py` 会跑到）。
+`test_assert_allowlisted_raises_before_create` 与
+`test_run_denied_script_has_no_sandbox_create`（`verify_local.py` 会跑到）。
 
 宿主机无 `*.cube.app` DNS 时，用 `python run_allowlisted_sidecar.py` 替代
 `run_allowlisted.py`（代理变量见 `.env.example`；另见
-[`e2b-dev-sidecar`](../e2b-dev-sidecar)）。
+[`e2b-dev-sidecar`](../e2b-dev-sidecar)）。`verify_local` 可选环境变量：
+`ALLOWLIST_IMAGE_TAG`、`ALLOWLIST_USE_SIDECAR`（见 `.env.example`）。
 
 ## 3. Path B（可选）— 构建本示例镜像
 
