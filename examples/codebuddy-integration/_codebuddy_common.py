@@ -38,10 +38,21 @@ def positive_int(value: str) -> int:
 
 
 def stream_writer(stream) -> Callable[[object], None]:
+    """Create a callback that writes chunks to a stream with error handling.
+
+    Errors during write/flush are logged to stderr rather than raised,
+    preventing stream exceptions from aborting the command execution.
+    """
     def write(chunk: object) -> None:
-        text = getattr(chunk, "line", chunk)
-        stream.write(str(text))
-        stream.flush()
+        try:
+            text = getattr(chunk, "line", chunk)
+            stream.write(str(text))
+            stream.flush()
+        except OSError:
+            pass  # Broken pipe / closed stream — command likely terminated
+        except Exception:
+            import sys as _sys
+            print(f"[stream writer error: {type(chunk).__name__}]", file=_sys.stderr)
 
     return write
 

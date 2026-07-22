@@ -23,6 +23,7 @@ Usage from a Python orchestrator or a shell:
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import shlex
 import stat
@@ -33,6 +34,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from e2b_code_interpreter import Sandbox
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -146,7 +149,14 @@ def _get_sandbox(timeout: int = 300) -> "Sandbox":
                 try:
                     _sandbox.kill()
                 except Exception:
-                    pass
+                    # Orphaned sandbox — set_timeout and kill both failed.
+                    # Log for operator visibility; the sandbox will remain alive
+                    # on the cluster until its TTL expires.
+                    logger.warning(
+                        "Failed to set timeout and kill sandbox; "
+                        "sandbox may be orphaned (id=%s)",
+                        getattr(_sandbox, "sandbox_id", "unknown")
+                    )
                 _sandbox = None
 
         # Try cross-process reuse first.
@@ -195,6 +205,18 @@ def exec_code(code: str, pip_packages: list[str] | None = None, timeout: int = 1
     if not code.strip():
         return "[error] code cannot be empty"
 
+    # Validate pip package names to prevent injection via malicious package names.
+    # Accept only simple names (letters, digits, hyphens, underscores, periods)
+    # following PEP 508 package name specification.
+    if pip_packages:
+        import re
+        PACKAGE_NAME_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$|^[A-Za-z0-9]$")
+        for pkg in pip_packages:
+            if not isinstance(pkg, str) or not PACKAGE_NAME_RE.match(pkg):
+                return f"[error] invalid pip package name: {pkg!r}"
+            if len(pkg) > 128:  # PEP 508 recommends max 214 chars, be conservative
+                return f"[error] pip package name too long: {pkg!r}"
+
     sandbox = _get_sandbox(timeout + 60)
     if pip_packages:
         r = _run(
@@ -241,8 +263,12 @@ def exec_file(filepath: str, timeout: int = 120) -> str:
         except (ValueError, OSError):
             pass
 
-    # Check if path is within any allowed directory
-    if not any(str(resolved).startswith(str(d)) for d in _ALLOWED_READ_DIRS):
+    # Check if path is within any allowed directory (use separator guard to prevent
+    # /workspace matching /workspace_evil)
+    if not any(
+        str(resolved).startswith(str(d) + os.sep) or str(resolved) == str(d)
+        for d in _ALLOWED_READ_DIRS
+    ):
         return "[error] filepath not in allowed directories"
 
     sandbox = _get_sandbox(timeout + 60)

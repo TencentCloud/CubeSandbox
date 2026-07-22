@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import atexit
 import json
+import logging
 import os
 import shlex
 import sys
@@ -48,6 +49,8 @@ import threading
 from typing import Any
 
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -89,7 +92,13 @@ def _get_sandbox(timeout: int = 600):
                 try:
                     _sandbox.kill()
                 except Exception:
-                    pass
+                    # Orphaned sandbox — set_timeout and kill both failed.
+                    # Log for operator visibility; the sandbox will remain alive
+                    # on the cluster until its TTL expires.
+                    logger.warning(
+                        "Failed to set timeout and kill sandbox; "
+                        "sandbox may be orphaned (id=%s)", getattr(_sandbox, "id", "unknown")
+                    )
                 from e2b_code_interpreter import Sandbox
                 _sandbox = Sandbox.create(TEMPLATE_ID, timeout=timeout)
     return _sandbox

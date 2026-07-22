@@ -79,6 +79,19 @@ class TestExecApi:
         assert "pip install" in results[0]
         assert "requests" in results[0]
 
+    def test_exec_code_rejects_invalid_pip_package_name(self):
+        # Package names with shell metacharacters should be rejected
+        with patch.object(sandbox_exec, "_get_sandbox"):
+            output = sandbox_exec.exec_code("print(1)", pip_packages=["pkg; rm -rf /"])
+        assert "[error]" in output
+        assert "invalid pip package name" in output
+
+    def test_exec_code_rejects_non_string_pip_package(self):
+        with patch.object(sandbox_exec, "_get_sandbox"):
+            output = sandbox_exec.exec_code("print(1)", pip_packages=[None])  # type: ignore
+        assert "[error]" in output
+        assert "invalid pip package name" in output
+
     def test_exec_code_reports_pip_error(self):
         mock_result = MagicMock()
         mock_result.exit_code = 1
