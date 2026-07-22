@@ -562,8 +562,6 @@ The repo ships a **Tencent Cloud COS** reference plugin (binary Shell + rpc Go) 
 | [`examples/volume/cos/rpc/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/rpc/README.md) | rpc plugin build and deploy |
 | [`examples/volume/cos/verify_volume.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/verify_volume.py) | Python SDK verification script |
 
-One-click / release packages place the binary plugin and `install-deps.sh` under `CubeMaster/plugin/` and `Cubelet/plugin/`. The COS example **does not support ARM / aarch64** (official cosfs packages are x86_64/amd64 only). Details: [`examples/volume/cos/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.md).
-
 COS-specific Hook behavior, object layout, trade-offs, and troubleshooting live in those example docs — not duplicated here.
 
 ---

@@ -560,8 +560,6 @@ rpc 插件实现 [`volumeplugin.proto`](https://github.com/TencentCloud/CubeSand
 | [`examples/volume/cos/rpc/README.zh.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/rpc/README.zh.md) | rpc 插件构建与部署 |
 | [`examples/volume/cos/verify_volume.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/verify_volume.py) | Python SDK 验证脚本 |
 
-one-click / 发布包会把 binary 插件与 `install-deps.sh` 放到 `CubeMaster/plugin/`、`Cubelet/plugin/`。COS 示例**不支持 ARM / aarch64**（官方 cosfs 仅提供 x86_64/amd64 包）。细节见 [`examples/volume/cos/README.zh.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.zh.md)。
-
 COS 专属的 Hook 行为、对象布局、实现取舍与排障说明均在上述 example 文档中，本文不再重复。
 
 ---
