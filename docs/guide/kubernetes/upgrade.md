@@ -5,7 +5,7 @@ The goal in one sentence: **the control plane can roll in an orderly fashion; co
 ---
 
 ::: warning Preview version warning
-The compute plane uses native `apps/v1` DaemonSets: image / resource / template changes **delete and recreate** the Big Pod (PodIP / netns change), which breaks existing sandbox networking. Compute-plane upgrades **recreate the `cube-node` Big Pod** (native DaemonSet) and **will interrupt existing sandboxes on that node**. Before upgrading, call CubeMaster’s isolate API, isolate the node for at least 60 seconds, and destroy the sandboxes on that node. Only after sandboxes are destroyed is it safe to upgrade the node.
+The compute plane uses native `apps/v1` DaemonSets: image / resource / template changes **delete and recreate** the Big Pod (PodIP / netns change), which breaks existing sandbox networking. Compute-plane upgrades **recreate the `cube-node` Big Pod** (native DaemonSet) and **will interrupt existing sandboxes on that node**. Before upgrading, call CubeMaster’s isolate API, isolate the node for at least 60 seconds, and destroy the sandboxes on that node. Only after sandboxes are destroyed is it safe to upgrade the node. See [Node Isolation](../node-isolation.md) for the isolate / unisolate commands.
 
 **To smooth upgrades, you may use a Kubernetes plugin you are familiar with to achieve “in-place upgrade”** — update container images without recreating the Pod. After deploying the current version, carefully evaluate changes and test before upgrading further.
 

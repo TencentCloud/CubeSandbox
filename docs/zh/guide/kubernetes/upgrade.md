@@ -5,7 +5,7 @@
 ---
 
 ::: warning Preview 版本警告
-计算面使用原生 `apps/v1` DaemonSet：镜像 / 资源 / template 变更会导致 Big Pod **删除重建**（PodIP / netns 变化），存量沙箱网络会中断。计算面升级会 **recreate `cube-node` Big Pod**（原生 DaemonSet），**会中断该节点上的存量沙箱**。升级前请先调用 CubeMaster 的 isolate API，将节点隔离 60 秒以上；并且销毁节点上的沙箱。在销毁沙箱后，才能安全的升级节点。
+计算面使用原生 `apps/v1` DaemonSet：镜像 / 资源 / template 变更会导致 Big Pod **删除重建**（PodIP / netns 变化），存量沙箱网络会中断。计算面升级会 **recreate `cube-node` Big Pod**（原生 DaemonSet），**会中断该节点上的存量沙箱**。升级前请先调用 CubeMaster 的 isolate API，将节点隔离 60 秒以上；并且销毁节点上的沙箱。在销毁沙箱后，才能安全的升级节点。隔离操作详见 [隔离节点](../node-isolation.md)。
 
 **为解决平滑升级问题，您可采用您熟悉的k8s插件去实现“原地升级”  ** —— 即不重建pod，仅升级容器镜像。部署当前版本后若计划升级，应当仔细评估更改、做测试后再实施。
 
