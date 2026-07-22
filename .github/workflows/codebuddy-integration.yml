@@ -24,6 +24,10 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install dependencies
+        working-directory: examples/codebuddy-integration
+        run: pip install -r requirements.txt
+
       - name: Compile host driver scripts
         working-directory: examples/codebuddy-integration
         run: |
@@ -32,7 +36,7 @@ jobs:
 
       - name: Run unit tests
         working-directory: examples/codebuddy-integration
-        run: python3 -m unittest discover -s tests -p "test_*.py" -v
+        run: python3 -m pytest tests/ -v
 
       - name: Smoke-check --help output
         working-directory: examples/codebuddy-integration
