@@ -204,7 +204,7 @@ pub struct VirtioCommon {
     pub paused_sync: Option<Arc<Barrier>>,
     pub epoll_threads: Option<Vec<thread::JoinHandle<()>>>,
     pub queue_sizes: Vec<u16>,
-    pub queue_evts: Vec<EventFd>,
+    pub queue_evts: Vec<(u16, EventFd)>,
     pub device_type: u32,
     pub min_queues: u16,
     pub access_platform: Option<Arc<dyn AccessPlatform>>,
@@ -244,11 +244,14 @@ impl VirtioCommon {
 
         self.queue_evts = queues
             .iter()
-            .map(|(_, _, queue_evt)| {
-                queue_evt.try_clone().map_err(|e| {
-                    error!("failed cloning queue EventFd: {e}");
-                    ActivateError::BadActivate
-                })
+            .map(|(queue_index, _, queue_evt)| {
+                queue_evt
+                    .try_clone()
+                    .map(|evt| (*queue_index as u16, evt))
+                    .map_err(|e| {
+                        error!("failed cloning queue EventFd: {e}");
+                        ActivateError::BadActivate
+                    })
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -359,7 +362,7 @@ impl Pausable for VirtioCommon {
 
         // Signal each activated queue eventfd so workers process restored queues
         // that may already contain pending requests.
-        for queue_evt in &self.queue_evts {
+        for (_, queue_evt) in &self.queue_evts {
             queue_evt.write(1).map_err(|e| {
                 MigratableError::Resume(anyhow!(
                     "Could not notify restored virtio worker on resume: {e}"
@@ -368,10 +371,22 @@ impl Pausable for VirtioCommon {
         }
 
         // Also trigger interrupts into the guest to wake up the driver to avoid a "livelock"
+        // if a used-ring completion interrupt was lost across restore.
+        //
+        // Use the real virtio queue index rather than the position in
+        // `queue_evts`. `VirtioInterruptType::Queue(x)` is defined to carry
+        // the real queue index, and `VirtioInterruptMsix` indexes
+        // `queues_vectors` (whose length is `total_queues`, filled by the
+        // guest driver at real-index positions) with it. When ready queues
+        // are non-contiguous (e.g. virtio-net control queue at index 2N when
+        // only a subset of queue pairs are enabled) the position in
+        // `queue_evts` differs from the real queue index, and using the
+        // position would either land on a `VIRTQ_MSI_NO_VECTOR` slot
+        // (silently dropping the interrupt) or on an unrelated queue's vector.
         if let Some(interrupt_cb) = &self.interrupt_cb {
-            for i in 0..self.queue_evts.len() {
+            for &(queue_index, _) in &self.queue_evts {
                 interrupt_cb
-                    .trigger(crate::VirtioInterruptType::Queue(i as u16))
+                    .trigger(crate::VirtioInterruptType::Queue(queue_index))
                     .ok();
             }
         }
