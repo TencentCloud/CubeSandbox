@@ -12,6 +12,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	cubelog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
 // TestReadResponse_BusinessErrorReturnsCMError verifies that readResponse
@@ -208,6 +210,160 @@ func TestClient_RespectsContextDeadline(t *testing.T) {
 	_, err := client.GetSandbox(ctx, "sb-1", "cubebox")
 	if err == nil {
 		t.Fatal("expected context deadline error, got nil")
+	}
+}
+
+func TestClient_PropagatesTraceHeaders(t *testing.T) {
+	const requestID = "cubeops-request-123"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-RequestID"); got != requestID {
+			t.Errorf("X-RequestID = %q, want %q", got, requestID)
+		}
+		if got := r.Header.Get("X-Caller"); got != "cubeops" {
+			t.Errorf("X-Caller = %q, want cubeops", got)
+		}
+		fmt.Fprint(w, `{"ret":{"ret_code":0}}`)
+	}))
+	defer srv.Close()
+
+	ctx := cubelog.WithRequestTrace(context.Background(), &cubelog.RequestTrace{RequestID: requestID})
+	if _, err := New(srv.URL).GetSandbox(ctx, "sb-1", "cubebox"); err != nil {
+		t.Fatalf("GetSandbox: %v", err)
+	}
+}
+
+// TestClient_OutboundBodyRequestIDCorrelates verifies that the request body
+// sent to CubeMaster reuses the inbound RequestTrace.RequestID, not a newly
+// generated ID.
+func TestClient_OutboundBodyRequestIDCorrelates(t *testing.T) {
+	const requestID = "cross-service-req-123"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var m map[string]interface{}
+		_ = json.Unmarshal(body, &m)
+		for _, key := range []string{"requestID", "RequestID", "request_id"} {
+			if got := m[key]; got != requestID {
+				t.Errorf("body %s = %v, want %q", key, got, requestID)
+			}
+		}
+		fmt.Fprint(w, `{"ret":{"ret_code":0}}`)
+	}))
+	defer srv.Close()
+
+	ctx := cubelog.WithRequestTrace(context.Background(), &cubelog.RequestTrace{RequestID: requestID})
+	client := New(srv.URL)
+	if _, err := client.DeleteSandbox(ctx, map[string]interface{}{"sandbox_id": "sb-1"}); err != nil {
+		t.Fatalf("DeleteSandbox: %v", err)
+	}
+}
+
+func TestClient_OutboundCallerAlwaysCubeOps(t *testing.T) {
+	// Even when the inbound trace carries a client caller (e.g. cubeops-client),
+	// outbound calls to CubeMaster must identify CubeOps as the caller.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Caller"); got != "cubeops" {
+			t.Errorf("X-Caller = %q, want cubeops", got)
+		}
+		fmt.Fprint(w, `{"ret":{"ret_code":0}}`)
+	}))
+	defer srv.Close()
+
+	ctx := cubelog.WithRequestTrace(context.Background(), &cubelog.RequestTrace{
+		RequestID: "req-1",
+		Caller:    "webui-client",
+	})
+	if _, err := New(srv.URL).GetSandbox(ctx, "sb-1", "cubebox"); err != nil {
+		t.Fatalf("GetSandbox: %v", err)
+	}
+}
+
+// TestEnsureRequestID_TypedNilMapDoesNotPanic verifies a typed-nil map boxed in
+// an interface{} is a no-op; `body == nil` misses it and assignment would panic.
+func TestEnsureRequestID_TypedNilMapDoesNotPanic(t *testing.T) {
+	var typedNil map[string]interface{}
+
+	cases := []struct {
+		name string
+		body interface{}
+	}{
+		{"untyped nil", nil},
+		{"typed nil map", typedNil},
+		{"non-map body", struct{ A int }{A: 1}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rid := EnsureRequestID(context.Background(), tc.body)
+			if rid == "" {
+				t.Error("EnsureRequestID returned an empty request id")
+			}
+		})
+	}
+}
+
+// TestEnsureRequestID_WritesAllThreeSpellings pins the wire contract: CubeMaster
+// binds a different spelling per endpoint, so all three carry the same value.
+func TestEnsureRequestID_WritesAllThreeSpellings(t *testing.T) {
+	const requestID = "rid-abc"
+	ctx := cubelog.WithRequestTrace(context.Background(), &cubelog.RequestTrace{RequestID: requestID})
+	body := map[string]interface{}{}
+
+	if rid := EnsureRequestID(ctx, body); rid != requestID {
+		t.Fatalf("returned id = %q, want %q", rid, requestID)
+	}
+	for _, key := range []string{"requestID", "RequestID", "request_id"} {
+		if got := body[key]; got != requestID {
+			t.Errorf("body[%q] = %v, want %q", key, got, requestID)
+		}
+	}
+}
+
+// TestClient_HeaderAndBodyRequestIDAgreeWithoutTrace verifies that on the
+// no-trace path the UUID stamped into the body is also sent as X-RequestID;
+// the header used to be derived independently, so it could differ or be absent.
+func TestClient_HeaderAndBodyRequestIDAgreeWithoutTrace(t *testing.T) {
+	var headerRID, bodyRID string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headerRID = r.Header.Get("X-RequestID")
+		raw, _ := io.ReadAll(r.Body)
+		var m map[string]interface{}
+		_ = json.Unmarshal(raw, &m)
+		bodyRID, _ = m["requestID"].(string)
+		fmt.Fprint(w, `{"ret":{"ret_code":0}}`)
+	}))
+	defer srv.Close()
+
+	// context.Background() carries no RequestTrace.
+	if _, err := New(srv.URL).DeleteSandbox(context.Background(), map[string]interface{}{"sandbox_id": "sb-1"}); err != nil {
+		t.Fatalf("DeleteSandbox: %v", err)
+	}
+	if headerRID == "" {
+		t.Fatal("X-RequestID header was not set on the no-trace path")
+	}
+	if headerRID != bodyRID {
+		t.Errorf("X-RequestID = %q but body requestID = %q; header and body must agree", headerRID, bodyRID)
+	}
+}
+
+// TestClient_QueryAndHeaderRequestIDAgreeWithoutTrace is the getWithQuery
+// counterpart of the test above.
+func TestClient_QueryAndHeaderRequestIDAgreeWithoutTrace(t *testing.T) {
+	var headerRID, queryCamel, querySnake string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headerRID = r.Header.Get("X-RequestID")
+		queryCamel = r.URL.Query().Get("requestID")
+		querySnake = r.URL.Query().Get("request_id")
+		fmt.Fprint(w, `{"ret":{"ret_code":0}}`)
+	}))
+	defer srv.Close()
+
+	if _, err := New(srv.URL).ListSnapshots(context.Background(), map[string]string{}); err != nil {
+		t.Fatalf("ListSnapshots: %v", err)
+	}
+	if headerRID == "" || queryCamel == "" || querySnake == "" {
+		t.Fatalf("missing request id: header=%q query(camel)=%q query(snake)=%q", headerRID, queryCamel, querySnake)
+	}
+	if headerRID != queryCamel || headerRID != querySnake {
+		t.Errorf("request id mismatch: header=%q query(camel)=%q query(snake)=%q", headerRID, queryCamel, querySnake)
 	}
 }
 

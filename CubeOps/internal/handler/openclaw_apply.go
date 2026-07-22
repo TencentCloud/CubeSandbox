@@ -56,17 +56,18 @@ var (
 	resolveRuntimePlan         = service.ResolveRuntimePlan
 	applyOpenclawRuntime       = service.ApplyOpenclawRuntime
 	openclawApplySpec          = service.OpenclawApplySpec
-	agenthubNetworkConfig      = service.AgenthubNetworkConfig
-	llmEgressRule              = service.LLMEgressRule
-	decryptSetting             = service.DecryptSetting
-	maskSecret                 = service.MaskSecret
-	newOpenclawPersistID       = service.NewOpenclawPersistID
-	openclawHostStatePath      = service.OpenclawHostStatePath
-	openclawHostSnapshotPath   = service.OpenclawHostSnapshotPath
-	prepareOpenclawStateDir    = service.PrepareOpenclawStateDir
-	copyOpenclawStateDir       = service.CopyOpenclawStateDir
-	openclawHostMountMetadata  = service.OpenclawHostMountMetadata
-	agenthubDistributionScope  = service.AgenthubDistributionScope
+
+	agenthubNetworkConfig     = service.AgenthubNetworkConfig
+	llmEgressRule             = service.LLMEgressRule
+	decryptSetting            = service.DecryptSetting
+	maskSecret                = service.MaskSecret
+	newOpenclawPersistID      = service.NewOpenclawPersistID
+	openclawHostStatePath     = service.OpenclawHostStatePath
+	openclawHostSnapshotPath  = service.OpenclawHostSnapshotPath
+	prepareOpenclawStateDir   = service.PrepareOpenclawStateDir
+	copyOpenclawStateDir      = service.CopyOpenclawStateDir
+	openclawHostMountMetadata = service.OpenclawHostMountMetadata
+	agenthubDistributionScope = service.AgenthubDistributionScope
 )
 
 // runEnvdCommand is kept as a thin wrapper so any future handler code that

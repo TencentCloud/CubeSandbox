@@ -417,13 +417,7 @@ func TransformTemplateDetail(raw json.RawMessage) interface{} {
 		result[camelKey] = val
 	}
 
-	// Promote network fields from createRequest to the top level, matching
-	// old CubeAPI behavior where it lifted create_request.network_type to a
-	// top-level networkType so the WebUI template detail page can render the
-	// "网络类型" column. allowInternetAccess is also lifted from the nested
-	// cube_network_config object so the WebUI "公网访问" column reflects the
-	// template's egress policy without requiring the frontend to traverse the
-	// nested createRequest structure.
+	// Promote network fields for the WebUI template detail view.
 	if cr, ok := result["createRequest"].(map[string]interface{}); ok {
 		if v, ok := cr["network_type"]; ok && v != nil {
 			if _, exists := result["networkType"]; !exists {

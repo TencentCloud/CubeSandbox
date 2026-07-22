@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -19,6 +18,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/cubemaster"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/redact"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
 	"gorm.io/gorm"
 )
@@ -139,10 +140,10 @@ var _ AgentStore = (*store.Store)(nil)
 
 // applyOpenclawFn is the signature of ApplyOpenclawRuntime. Declared as a
 // type so AgentHubService can hold it as an injectable field.
-type applyOpenclawFn func(httpClient *http.Client, sandboxID, domain string, plan *LLMRuntimePlan, opts *OpenclawApplyOptions) (*CommandOutput, error)
+type applyOpenclawFn func(ctx context.Context, httpClient *http.Client, sandboxID, domain string, plan *LLMRuntimePlan, opts *OpenclawApplyOptions) (*CommandOutput, error)
 
 // resolveGatewayFn is the signature of ResolveGatewayToken.
-type resolveGatewayFn func(httpClient *http.Client, sandboxID, domain, hostStatePath, fallbackToken string) string
+type resolveGatewayFn func(ctx context.Context, httpClient *http.Client, sandboxID, domain, hostStatePath, fallbackToken string) string
 
 // restartOpenclawFn is the signature of RestartOpenclawForInstance.
 type restartOpenclawFn func(inst *store.AgentInstance) (*CommandOutput, error)
@@ -192,48 +193,32 @@ func NewAgentHubService(s *store.Store, cm CubeMasterClient) *AgentHubService {
 // fails after the sandbox has already been created by CubeMaster. It deletes
 // the sandbox so CPU/memory/quota are not leaked. Errors are logged but not
 // returned — the caller already has an error to report to the client.
-// See R10.
 func (s *AgentHubService) CompensateDeleteSandbox(ctx context.Context, sandboxID, reason string) {
 	if _, err := s.CM.DeleteSandbox(ctx, map[string]interface{}{
-		"requestID":     fmt.Sprintf("cubeops-compensate-%s-%d", reason, time.Now().UnixNano()),
 		"sandbox_id":    sandboxID,
 		"instance_type": SDKInstanceType,
 	}); err != nil {
-		slog.Error("CompensateDeleteSandbox: failed to delete sandbox after creation failure",
-			"sandboxID", sandboxID, "reason", reason, "err", err)
+		logging.G(ctx).Errorf("CompensateDeleteSandbox: failed to delete sandbox %q (reason=%s): %v", sandboxID, reason, err)
 	} else {
-		slog.Info("CompensateDeleteSandbox: sandbox deleted after creation failure",
-			"sandboxID", sandboxID, "reason", reason)
+		logging.G(ctx).Infof("CompensateDeleteSandbox: sandbox %q deleted (reason=%s)", sandboxID, reason)
 	}
 }
 
 // ReverseSyncAgentHubTemplate best-effort soft-deletes any AgentHub template
 // registration backed by the just-deleted infrastructure template/snapshot.
-//
-// This migrates the old Rust reverse_sync_agenthub_template
-// (CubeAPI/src/handlers/templates.rs:192) into CubeOps. The old CubeAPI
-// called it from the E2B delete_template handler after the infra delete
-// succeeded; now that CubeOps owns the SDK path (SDKHandler.DeleteTemplate)
-// and the AgentHub path (AgentHubHandler.DeleteTemplate), both must trigger
-// the reverse-sync so the AgentHub registry does not keep pointing at a
-// snapshot/template that no longer exists.
-//
 // Failures are logged, never propagated — a reverse-sync failure must not
-// block the primary deletion that already succeeded (FIX-5b, L15/H5).
+// block the primary deletion that already succeeded.
 func (s *AgentHubService) ReverseSyncAgentHubTemplate(ctx context.Context, infraID string) {
 	ids, err := s.Store.FindTemplateIDsByInfraID(ctx, infraID)
 	if err != nil {
-		slog.Warn("ReverseSyncAgentHubTemplate: query AgentHub templates failed",
-			"infraID", infraID, "err", err)
+		logging.G(ctx).Warnf("ReverseSyncAgentHubTemplate: query AgentHub templates failed: infraID=%q err=%q", infraID, err.Error())
 		return
 	}
 	for _, id := range ids {
 		if err := s.Store.SoftDeleteAgentHubTemplate(ctx, id); err != nil {
-			slog.Warn("ReverseSyncAgentHubTemplate: failed to soft-delete AgentHub template",
-				"templateID", id, "err", err)
+			logging.G(ctx).Warnf("ReverseSyncAgentHubTemplate: failed to soft-delete AgentHub template %q: %v", id, err)
 		} else {
-			slog.Info("ReverseSyncAgentHubTemplate: soft-deleted AgentHub template",
-				"templateID", id, "infraID", infraID)
+			logging.G(ctx).Debugf("ReverseSyncAgentHubTemplate: soft-deleted AgentHub template %q (infraID=%q)", id, infraID)
 		}
 	}
 }
@@ -242,7 +227,6 @@ func (s *AgentHubService) ReverseSyncAgentHubTemplate(ctx context.Context, infra
 
 // CreateSandboxRequest is the typed input for BuildCreateSandboxRequest.
 type CreateSandboxRequest struct {
-	RequestID         string
 	Name              string
 	Engine            string
 	PersistenceMode   string
@@ -283,7 +267,6 @@ func BuildCreateSandboxRequest(req CreateSandboxRequest) map[string]interface{} 
 	annotations["cube.master.appsnapshot.template.version"] = "v2"
 
 	cmReq := map[string]interface{}{
-		"requestID":     req.RequestID,
 		"instance_type": SDKInstanceType,
 		"timeout":       86400,
 		"containers":    []interface{}{},
@@ -480,6 +463,9 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 	if err != nil {
 		return nil, NewInternal("failed to build network config: " + err.Error())
 	}
+	// redact.Value here masks the embedded Secret(llm.APIKey) leaf that
+	// jsoniter would otherwise emit verbatim.
+	logging.G(ctx).WithFields(map[string]interface{}{"network_config": redact.Value(networkConfig)}).Debugf("agenthub: built egress network config")
 
 	// --- Shared-files + published-template fast-path detection ---
 	sharedFiles := persistenceMode == "shared_files"
@@ -512,13 +498,12 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 		openclawStatePath = statePath
 		if templateOpenclawStateSource != "" {
 			if err := CopyOpenclawStateDir(templateOpenclawStateSource, statePath); err != nil {
-				slog.Warn("failed to copy OpenClaw state from template", "source", templateOpenclawStateSource, "err", err)
+				logging.G(ctx).Warnf("failed to copy OpenClaw state from template %q: %v", templateOpenclawStateSource, err)
 			}
 		}
 	}
 
 	// --- Build CubeMaster request ---
-	requestID := fmt.Sprintf("req-%d", time.Now().UnixNano())
 	extraLabels := map[string]string{}
 	extraAnnotations := map[string]string{}
 	if sharedFiles && openclawPersistID != "" {
@@ -535,7 +520,6 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 	}
 
 	cmReq := BuildCreateSandboxRequest(CreateSandboxRequest{
-		RequestID:         requestID,
 		Name:              name,
 		Engine:            "openclaw",
 		PersistenceMode:   persistenceMode,
@@ -603,13 +587,13 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 			GatewayToken: generatedToken,
 		}
 	}
-	applyOutput, err := s.applyFn(s.envdClient, sandboxID, domain, plan, applyOpts)
+	applyOutput, err := s.applyFn(ctx, s.envdClient, sandboxID, domain, plan, applyOpts)
 	if err != nil {
 		s.CompensateDeleteSandbox(ctx, sandboxID, "apply_openclaw")
 		return nil, NewBadGateway("failed to apply OpenClaw config: " + err.Error())
 	}
 
-	gatewayToken := s.resolveGatewayFn(s.envdClient, sandboxID, domain, openclawStatePath, generatedToken)
+	gatewayToken := s.resolveGatewayFn(ctx, s.envdClient, sandboxID, domain, openclawStatePath, generatedToken)
 
 	// --- Build instance record ---
 	bots := []string{}
@@ -686,25 +670,21 @@ func (s *AgentHubService) DeleteInstance(ctx context.Context, agentID string) er
 		return NewNotFound("instance not found")
 	}
 	if _, err := s.CM.DeleteSandbox(ctx, map[string]interface{}{
-		"requestID":     fmt.Sprintf("cubeops-del-%d", time.Now().UnixNano()),
 		"sandbox_id":    inst.SandboxID,
 		"instance_type": SDKInstanceType,
 	}); err != nil {
 		var cmErr *cubemaster.CMError
 		if errors.As(err, &cmErr) && cmErr.IsNotFound() {
-			slog.Info("DeleteInstance: sandbox not found in CubeMaster, treating as already deleted",
-				"agentID", agentID, "sandboxID", inst.SandboxID)
+			logging.G(ctx).Debugf("DeleteInstance: sandbox not found in CubeMaster, treating as already deleted: agentID=%q sandboxID=%q", agentID, inst.SandboxID)
 		} else {
 			return wrapCMError(err)
 		}
 	}
 	if inst.OpenclawStatePath != nil && *inst.OpenclawStatePath != "" {
 		if err := os.RemoveAll(*inst.OpenclawStatePath); err != nil {
-			slog.Warn("DeleteInstance: failed to clean up OpenClaw state directory",
-				"agentID", agentID, "path", *inst.OpenclawStatePath, "err", err)
+			logging.G(ctx).Warnf("DeleteInstance: failed to clean up OpenClaw state directory: agentID=%q path=%q err=%q", agentID, *inst.OpenclawStatePath, err.Error())
 		} else {
-			slog.Info("DeleteInstance: cleaned up OpenClaw state directory",
-				"agentID", agentID, "path", *inst.OpenclawStatePath)
+			logging.G(ctx).Debugf("DeleteInstance: cleaned up OpenClaw state directory: agentID=%q path=%q", agentID, *inst.OpenclawStatePath)
 		}
 	}
 	if err := s.Store.SoftDeleteInstance(ctx, agentID); err != nil {
@@ -768,7 +748,6 @@ func (s *AgentHubService) SandboxAction(ctx context.Context, agentID, action str
 	}
 
 	reqBody := map[string]interface{}{
-		"requestID":     fmt.Sprintf("req-%d", time.Now().UnixNano()),
 		"sandbox_id":    inst.SandboxID,
 		"instance_type": SDKInstanceType,
 		"action":        action,
@@ -833,7 +812,7 @@ func (s *AgentHubService) UpdateWecomConfig(ctx context.Context, agentID, botID,
 	if botID != "" && inst.SandboxID != "" {
 		llmCfg, err := ResolveLLMConfig(ctx, s.Store)
 		if err != nil {
-			slog.Warn("UpdateWecomConfig: LLM config not available, using defaults", "err", err)
+			logging.G(ctx).Warnf("UpdateWecomConfig: LLM config not available, using defaults: err=%q", err.Error())
 			llmCfg = DefaultLLMConfig()
 		}
 		plan := ResolveRuntimePlan(llmCfg, "")
@@ -847,8 +826,8 @@ func (s *AgentHubService) UpdateWecomConfig(ctx context.Context, agentID, botID,
 			BotID:          botID,
 			BotSecret:      botSecret,
 		}
-		if _, err := s.applyFn(s.envdClient, inst.SandboxID, domain, plan, applyOpts); err != nil {
-			slog.Error("UpdateWecomConfig: failed to apply to running agent", "err", err)
+		if _, err := s.applyFn(ctx, s.envdClient, inst.SandboxID, domain, plan, applyOpts); err != nil {
+			logging.G(ctx).Errorf("UpdateWecomConfig: failed to apply to running agent: err=%q", err.Error())
 			return nil, NewBadGateway("failed to apply WeCom config to running agent: " + err.Error())
 		}
 	}
@@ -885,9 +864,7 @@ func (s *AgentHubService) DeleteSnapshot(ctx context.Context, agentID, snapshotI
 		case "agenthub_state":
 			if snap.OpenclawStateSnapshotPath != nil && *snap.OpenclawStateSnapshotPath != "" {
 				if err := os.RemoveAll(*snap.OpenclawStateSnapshotPath); err != nil {
-					slog.Warn("DeleteSnapshot: failed to clean up OpenClaw snapshot directory",
-						"agentID", agentID, "snapshotID", snapshotID,
-						"path", *snap.OpenclawStateSnapshotPath, "err", err)
+					logging.G(ctx).Warnf("DeleteSnapshot: failed to clean up OpenClaw snapshot directory: agentID=%q snapshotID=%q path=%q err=%q", agentID, snapshotID, *snap.OpenclawStateSnapshotPath, err.Error())
 				}
 			}
 		case "full_snapshot", "sandbox_snapshot":
@@ -991,9 +968,7 @@ func (s *AgentHubService) CreateSnapshot(ctx context.Context, req CreateSnapshot
 	}
 
 	// full_snapshot mode
-	requestID := fmt.Sprintf("req-%d", time.Now().UnixNano())
 	snapResp, err := s.CM.CreateSnapshot(ctx, map[string]interface{}{
-		"requestID":      requestID,
 		"sandbox_id":     inst.SandboxID,
 		"display_name":   req.Name,
 		"create_request": map[string]interface{}{},
@@ -1082,7 +1057,6 @@ func (s *AgentHubService) RollbackAgent(ctx context.Context, agentID, snapshotID
 		}
 	} else {
 		if _, err := s.CM.RollbackSandbox(ctx, inst.SandboxID, map[string]interface{}{
-			"requestID":     fmt.Sprintf("cubeops-rollback-%d", time.Now().UnixNano()),
 			"snapshot_id":   snapshotID,
 			"sandbox_id":    inst.SandboxID,
 			"instance_type": SDKInstanceType,
@@ -1130,8 +1104,7 @@ func (s *AgentHubService) RecoverAgent(ctx context.Context, agentID string) (*Re
 	} else if output != nil {
 		restartErr = output.Stderr
 	}
-	slog.Warn("recover: restart failed, trying snapshot rollback",
-		"agentID", agentID, "error", restartErr)
+	logging.G(ctx).Warnf("recover: restart failed, trying snapshot rollback: agentID=%q err=%q", agentID, restartErr)
 
 	// Step 2: find latest healthy snapshot.
 	snapshotID, err := s.Store.LatestHealthySnapshot(ctx, agentID)
@@ -1166,7 +1139,6 @@ func (s *AgentHubService) RecoverAgent(ctx context.Context, agentID string) (*Re
 		}
 	} else {
 		if _, err := s.CM.RollbackSandbox(ctx, inst.SandboxID, map[string]interface{}{
-			"requestID":     fmt.Sprintf("cubeops-recover-%d", time.Now().UnixNano()),
 			"snapshot_id":   snapshotID,
 			"sandbox_id":    inst.SandboxID,
 			"instance_type": SDKInstanceType,
@@ -1260,10 +1232,7 @@ func (s *AgentHubService) CloneAgent(ctx context.Context, req CloneAgentRequest)
 	}
 
 	cloneSharedFiles := inst.PersistenceMode != nil && *inst.PersistenceMode == "shared_files"
-	slog.Info("CloneAgent: debug",
-		"agentID", agentID, "cloneSharedFiles", cloneSharedFiles,
-		"sourceOpenclawStatePath", sourceOpenclawStatePath,
-		"rootfsSnapshotID", rootfsSnapshotID, "snapshotID", snapshotID)
+	logging.G(ctx).Debugf("CloneAgent: debug: agentID=%q cloneSharedFiles=%v source=%q rootfs=%q snapshot=%q", agentID, cloneSharedFiles, sourceOpenclawStatePath, rootfsSnapshotID, snapshotID)
 
 	var cloneOpenclawStatePath string
 	var cloneOpenclawPersistID string
@@ -1275,13 +1244,11 @@ func (s *AgentHubService) CloneAgent(ctx context.Context, req CloneAgentRequest)
 		}
 		cloneOpenclawStatePath = statePath
 		if err := CopyOpenclawStateDir(sourceOpenclawStatePath, cloneOpenclawStatePath); err != nil {
-			slog.Warn("CloneAgent: failed to copy OpenClaw state for clone",
-				"agentID", agentID, "err", err)
+			logging.G(ctx).Warnf("CloneAgent: failed to copy OpenClaw state for clone: agentID=%q err=%q", agentID, err.Error())
 		}
 	}
 
 	// --- Build CubeMaster request ---
-	requestID := fmt.Sprintf("req-%d", time.Now().UnixNano())
 	extraLabels := map[string]string{}
 	extraAnnotations := map[string]string{}
 	if cloneSharedFiles && cloneOpenclawStatePath != "" {
@@ -1305,11 +1272,11 @@ func (s *AgentHubService) CloneAgent(ctx context.Context, req CloneAgentRequest)
 	if cloneLLMCfgForNet, _ := ResolveLLMConfig(ctx, s.Store); cloneLLMCfgForNet != nil {
 		if nc, err := AgenthubNetworkConfig(cloneLLMCfgForNet); err == nil {
 			networkConfig = nc
+			logging.G(ctx).WithFields(map[string]interface{}{"network_config": redact.Value(networkConfig)}).Debugf("agenthub: built egress network config (clone)")
 		}
 	}
 
 	cmReq := BuildCreateSandboxRequest(CreateSandboxRequest{
-		RequestID:         requestID,
 		Name:              cloneName,
 		Engine:            inst.Engine,
 		PersistenceMode:   clonePersistenceMode,
@@ -1348,7 +1315,7 @@ func (s *AgentHubService) CloneAgent(ctx context.Context, req CloneAgentRequest)
 	// --- Apply OpenClaw runtime ---
 	cloneLLMCfg, err := ResolveLLMConfig(ctx, s.Store)
 	if err != nil {
-		slog.Warn("CloneAgent: failed to resolve LLM config", "err", err)
+		logging.G(ctx).Warnf("CloneAgent: failed to resolve LLM config: err=%q", err.Error())
 	}
 	cloneGatewayToken := ""
 	if err == nil {
@@ -1370,16 +1337,14 @@ func (s *AgentHubService) CloneAgent(ctx context.Context, req CloneAgentRequest)
 			}
 		}
 
-		applyOutput, applyErr := s.applyFn(s.envdClient, sbResult.SandboxID, inst.Domain, clonePlan, cloneOpts)
+		applyOutput, applyErr := s.applyFn(ctx, s.envdClient, sbResult.SandboxID, inst.Domain, clonePlan, cloneOpts)
 		if applyErr != nil {
-			slog.Error("CloneAgent: failed to apply OpenClaw config, killing clone sandbox",
-				"agentID", agentID, "sandboxID", sbResult.SandboxID, "err", applyErr)
+			logging.G(ctx).Errorf("CloneAgent: failed to apply OpenClaw config, killing clone sandbox: agentID=%q sandboxID=%q err=%q", agentID, sbResult.SandboxID, applyErr.Error())
 			if _, derr := s.CM.DeleteSandbox(ctx, map[string]interface{}{
-				"requestID":     fmt.Sprintf("cubeops-clone-%d", time.Now().UnixNano()),
 				"sandbox_id":    sbResult.SandboxID,
 				"instance_type": SDKInstanceType,
 			}); derr != nil {
-				slog.Warn("CloneAgent: best-effort delete failed", "sandboxID", sbResult.SandboxID, "err", derr)
+				logging.G(ctx).Warnf("CloneAgent: best-effort delete failed: sandboxID=%q err=%q", sbResult.SandboxID, derr.Error())
 			}
 			if cloneOpenclawStatePath != "" {
 				_ = os.RemoveAll(cloneOpenclawStatePath)
@@ -1395,7 +1360,7 @@ func (s *AgentHubService) CloneAgent(ctx context.Context, req CloneAgentRequest)
 	if fallbackToken == "" {
 		fallbackToken = inst.GatewayToken
 	}
-	cloneGatewayToken = s.resolveGatewayFn(s.envdClient, sbResult.SandboxID, inst.Domain, cloneOpenclawStatePath, fallbackToken)
+	cloneGatewayToken = s.resolveGatewayFn(ctx, s.envdClient, sbResult.SandboxID, inst.Domain, cloneOpenclawStatePath, fallbackToken)
 	if cloneGatewayToken != "" {
 		gatewayURL = gatewayURL + "#token=" + cloneGatewayToken
 	}
@@ -1538,7 +1503,6 @@ func (s *AgentHubService) PublishTemplate(ctx context.Context, req PublishTempla
 			).Error
 		} else {
 			snapResp, err := s.CM.CreateSnapshot(ctx, map[string]interface{}{
-				"requestID":     fmt.Sprintf("cubeops-publish-%d", time.Now().UnixNano()),
 				"sandbox_id":    inst.SandboxID,
 				"instance_type": SDKInstanceType,
 			})
@@ -1620,8 +1584,7 @@ func (s *AgentHubService) PublishTemplate(ctx context.Context, req PublishTempla
 	}
 
 	if opErr := s.Store.RecordOperation(ctx, agentID, inst.SandboxID, "publish_template", "succeeded", ""); opErr != nil {
-		slog.Warn("PublishTemplate: failed to record operation",
-			"agentID", agentID, "templateID", templateID, "err", opErr)
+		logging.G(ctx).Warnf("PublishTemplate: failed to record operation: agentID=%q templateID=%q err=%q", agentID, templateID, opErr.Error())
 	}
 
 	return &PublishTemplateResult{TemplateID: templateID, SnapshotID: snapshotID}, nil

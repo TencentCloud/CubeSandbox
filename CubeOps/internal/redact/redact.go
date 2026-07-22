@@ -16,11 +16,41 @@ package redact
 
 import (
 	"encoding/json"
+	"log/slog"
+	"reflect"
 	"strings"
 )
 
 // redacted is the placeholder written in place of a sensitive value.
 const redacted = "***REDACTED***"
+
+// Secret wraps a credential so that fmt/String/GoString formatting is
+// redacted, but it still json.Marshal()s to the plaintext required by the
+// downstream API.
+//
+// That makes Secret safe for transport only: log codecs honouring MarshalJSON
+// (cubelog's jsoniter does) emit the credential verbatim. So a Secret may only
+// reach a log line via String()/%v, LogValue(), or Value()/JSON() on the
+// enclosing map — the latter also catch Secret leaves under harmless key names.
+type Secret string
+
+func (s Secret) String() string {
+	return redacted
+}
+
+func (s Secret) GoString() string {
+	return redacted
+}
+
+func (s Secret) MarshalJSON() ([]byte, error) {
+	return json.Marshal(string(s))
+}
+
+// LogValue implements slog.LogValuer so structured slog handlers render the
+// placeholder rather than invoking MarshalJSON on the plaintext.
+func (s Secret) LogValue() slog.Value {
+	return slog.StringValue(redacted)
+}
 
 // sensitiveKeys is the lower-cased set of map keys that must never be
 // logged in plaintext. The set is matched case-insensitively and against
@@ -60,17 +90,18 @@ func sensitiveKey(name string) bool {
 	return false
 }
 
-// Value returns a redacted copy of v. Only the following Go types are
-// traversed: map[string]interface{} and []interface{}. Other types are
-// returned unchanged (the caller is expected to feed the result through
-// json.Marshal so primitive leaves, including strings, are written
-// verbatim).
+// Value returns a redacted copy of v. Maps and slices of any concrete type are
+// traversed (reflection covers e.g. []map[string]interface{}); other types
+// pass through unchanged, except Secret leaves, which the type check catches
+// even when the key name is innocuous.
 //
 // The function is non-mutating: nested maps and slices are deep-copied
 // so the caller's data is not modified. Cycles are not supported
 // (input is expected to be a freshly-decoded JSON value).
 func Value(v interface{}) interface{} {
 	switch t := v.(type) {
+	case Secret:
+		return redacted
 	case map[string]interface{}:
 		out := make(map[string]interface{}, len(t))
 		for k, val := range t {
@@ -87,6 +118,52 @@ func Value(v interface{}) interface{} {
 			out[i] = Value(val)
 		}
 		return out
+	default:
+		return valueReflect(v)
+	}
+}
+
+// valueReflect covers container types the fast paths above miss, e.g.
+// []map[string]interface{}; without it, nested Secret or sensitive keys
+// would survive into the log line.
+func valueReflect(v interface{}) interface{} {
+	if v == nil {
+		return nil
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Map:
+		if rv.IsNil() || rv.Type().Key().Kind() != reflect.String {
+			return v
+		}
+		out := make(map[string]interface{}, rv.Len())
+		for _, k := range rv.MapKeys() {
+			name := k.String()
+			if sensitiveKey(name) {
+				out[name] = redacted
+			} else {
+				out[name] = Value(rv.MapIndex(k).Interface())
+			}
+		}
+		return out
+	case reflect.Slice, reflect.Array:
+		// []byte is a JSON string, not a container; leave it alone.
+		if rv.Kind() == reflect.Slice && rv.Type().Elem().Kind() == reflect.Uint8 {
+			return v
+		}
+		if rv.Kind() == reflect.Slice && rv.IsNil() {
+			return v
+		}
+		out := make([]interface{}, rv.Len())
+		for i := 0; i < rv.Len(); i++ {
+			out[i] = Value(rv.Index(i).Interface())
+		}
+		return out
+	case reflect.Ptr, reflect.Interface:
+		if rv.IsNil() {
+			return v
+		}
+		return Value(rv.Elem().Interface())
 	default:
 		return v
 	}

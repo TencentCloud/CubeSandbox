@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/httputil"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/model"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/service"
 )
@@ -47,6 +48,7 @@ func (h *Handler) RegisterAuthed(r *gin.RouterGroup) {
 func (h *Handler) Login(c *gin.Context) {
 	var req model.LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		logging.G(c.Request.Context()).Errorf("login request body validation failed: client_ip=%s error=%q", c.ClientIP(), err.Error())
 		httputil.WriteError(c, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -55,11 +57,13 @@ func (h *Handler) Login(c *gin.Context) {
 		// For security, do not distinguish "user not found" from "wrong password"
 		// to the caller.
 		if errors.Is(err, service.ErrInvalidCredentials) {
+			logging.G(c.Request.Context()).Errorf("login failed: invalid credentials: username=%q client_ip=%s", req.Username, c.ClientIP())
 			//record the failure for rate-limiting.
 			markLoginFailure(c)
 			httputil.WriteError(c, http.StatusUnauthorized, "invalid credentials")
 			return
 		}
+		logging.G(c.Request.Context()).Errorf("login failed: internal error: username=%q client_ip=%s error=%q", req.Username, c.ClientIP(), err.Error())
 		httputil.WriteError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -96,6 +100,7 @@ func (h *Handler) Logout(c *gin.Context) {
 func (h *Handler) ChangePassword(c *gin.Context) {
 	var req model.ChangePasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		logging.G(c.Request.Context()).Errorf("password change request body validation failed: operator=%q error=%q", c.GetString("username"), err.Error())
 		httputil.WriteError(c, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -103,12 +108,16 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 	err := h.svc.ChangePassword(c.Request.Context(), username, req.OldPassword, req.NewPassword)
 	switch {
 	case err == nil:
+		logging.G(c.Request.Context()).Infof("password changed: operator=%q result=success", username)
 		httputil.WriteNoContent(c)
 	case errors.Is(err, service.ErrUnauthenticated):
+		logging.G(c.Request.Context()).Errorf("password change failed: operator=%q result=unauthenticated", username)
 		httputil.WriteError(c, http.StatusUnauthorized, "authentication required")
 	case errors.Is(err, service.ErrInvalidOldPassword):
+		logging.G(c.Request.Context()).Errorf("password change failed: operator=%q result=invalid_old_password", username)
 		httputil.WriteError(c, http.StatusUnauthorized, "current password is incorrect or user not found")
 	default:
+		logging.G(c.Request.Context()).Errorf("password change failed: operator=%q result=error error=%q", username, err.Error())
 		// Validation errors and DB errors share the 500 path here; finer
 		// mapping can be added by wrapping with sentinel errors if needed.
 		httputil.WriteError(c, http.StatusInternalServerError, err.Error())

@@ -6,7 +6,6 @@ package handler
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"math"
 	"net/http"
 	"strings"
@@ -18,6 +17,7 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/httputil"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
 )
 
 // StoreHandler handles store image metadata HTTP requests.
@@ -58,29 +58,27 @@ type StoreMeta struct {
 
 // GetStoreMeta handles GET /store/meta.
 //
-// It returns metadata for the curated set of official images without
-// contacting any registry. Only images that have previously been fetched
-// (and therefore cached by the registry client) will appear with a digest;
-// unknown images are still listed so the frontend can render them.
+// Returns cached metadata for the curated image set without contacting
+// any registry. Images with no prior refresh are still listed so the
+// frontend can render them.
 func (h *StoreHandler) GetStoreMeta(c *gin.Context) {
 	httputil.WriteJSON(c, http.StatusOK, StoreMeta{Images: h.inspectAll(c.Request.Context(), false)})
 }
 
 // RefreshStoreMeta handles POST /store/refresh.
 //
-// It queries each configured registry for the latest manifest digest of
-// the official images using go-containerregistry. No image layers are
-// downloaded; the request only fetches the manifest and config blob
-// (KB-scale), so it is fast and does not require docker on the host.
+// Resolves each curated image's latest manifest digest from upstream
+// registries via go-containerregistry. Only the manifest and config
+// blob are fetched (no layers, no docker daemon).
 func (h *StoreHandler) RefreshStoreMeta(c *gin.Context) {
-	httputil.WriteJSON(c, http.StatusOK, StoreMeta{Images: h.inspectAll(c.Request.Context(), true)})
+	images := h.inspectAll(c.Request.Context(), true)
+	httputil.WriteJSON(c, http.StatusOK, StoreMeta{Images: images})
 }
 
-// inspectAll concurrently inspects each image and returns the metadata
-// slice in storeImages order. When refresh is true it queries the
-// upstream registry for the latest manifest digest; otherwise it
-// returns whatever digest the registry client has cached from a
-// previous refresh.
+// inspectAll resolves metadata for every curated image in parallel
+// and returns the results in storeImages order. When refresh is true
+// it queries the upstream registry; otherwise it returns the cached
+// digest from a previous refresh.
 func (h *StoreHandler) inspectAll(ctx context.Context, refresh bool) []ImageMeta {
 	out := make([]ImageMeta, len(storeImages))
 	var wg sync.WaitGroup
@@ -144,18 +142,14 @@ func newGCRRegistryClient() *gcrRegistryClient {
 	}
 }
 
-// FetchLatest resolves ref via go-containerregistry and caches the
-// result so a subsequent Cached(ref) returns it without network I/O.
-// For multi-arch indexes the library automatically picks the
-// linux/amd64 platform manifest and reports its digest and layer sizes.
-//
-// Errors return nil so the handler can emit a placeholder entry for
-// the frontend; registry resolution failures are logged at warn level
-// so operators see them in production logs.
+// FetchLatest resolves ref via go-containerregistry, picking the
+// linux/amd64 manifest for multi-arch indexes, and caches the result.
+// Errors return nil so the handler can emit a placeholder entry;
+// registry failures are logged at warn level.
 func (c *gcrRegistryClient) FetchLatest(ctx context.Context, ref string) *ImageMeta {
 	parsedRef, err := name.ParseReference(ref)
 	if err != nil {
-		slog.Debug("store: failed to parse image ref", "ref", ref, "err", err)
+		logging.G(ctx).Debugf("store: failed to parse image ref %q: %v", ref, err)
 		return nil
 	}
 
@@ -165,13 +159,13 @@ func (c *gcrRegistryClient) FetchLatest(ctx context.Context, ref string) *ImageM
 		remote.WithPlatform(v1.Platform{OS: "linux", Architecture: "amd64"}),
 	)
 	if err != nil {
-		slog.Warn("store: failed to resolve image", "ref", ref, "err", err)
+		logging.G(ctx).Warnf("store: failed to resolve image %q: %v", ref, err)
 		return nil
 	}
 
 	manifest, err := img.Manifest()
 	if err != nil {
-		slog.Warn("store: failed to read manifest", "ref", ref, "err", err)
+		logging.G(ctx).Warnf("store: failed to read manifest for %q: %v", ref, err)
 		return nil
 	}
 
@@ -182,7 +176,7 @@ func (c *gcrRegistryClient) FetchLatest(ctx context.Context, ref string) *ImageM
 
 	digest, err := img.Digest()
 	if err != nil {
-		slog.Warn("store: failed to read digest", "ref", ref, "err", err)
+		logging.G(ctx).Warnf("store: failed to read digest for %q: %v", ref, err)
 		return nil
 	}
 
