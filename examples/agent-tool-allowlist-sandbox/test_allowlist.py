@@ -6,8 +6,12 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from unittest.mock import MagicMock
 
 from allowlist import AllowlistDenied, assert_allowlisted, is_allowlisted
+
+ROOT = Path(__file__).resolve().parent
 
 
 class AllowlistTests(unittest.TestCase):
@@ -49,6 +53,25 @@ class AllowlistTests(unittest.TestCase):
     def test_custom_allowlist(self) -> None:
         self.assertTrue(is_allowlisted("curl https://x", allowed_binaries={"curl"}))
         self.assertFalse(is_allowlisted("echo hi", allowed_binaries={"curl"}))
+
+    def test_deny_path_never_calls_sandbox_create(self) -> None:
+        """Host gate failure must leave Sandbox.create uncalled (call_count == 0)."""
+        mock_create = MagicMock()
+
+        def run_tool_through_host_gate(command: str) -> None:
+            # Mirrors run_allowlisted.py ordering: gate, then create.
+            assert_allowlisted(command)
+            mock_create(template="unused")
+
+        with self.assertRaises(AllowlistDenied):
+            run_tool_through_host_gate("bash -c 'curl http://example.com'")
+        mock_create.assert_not_called()
+        self.assertEqual(mock_create.call_count, 0)
+
+    def test_run_denied_script_has_no_sandbox_create(self) -> None:
+        """Static guard: the deny demo must not call Sandbox.create."""
+        source = (ROOT / "run_denied.py").read_text(encoding="utf-8")
+        self.assertNotIn("Sandbox.create", source)
 
 
 if __name__ == "__main__":

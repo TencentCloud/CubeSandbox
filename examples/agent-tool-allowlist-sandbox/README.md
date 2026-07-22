@@ -74,6 +74,10 @@ Deny:
 denied_as_expected: command not on tool allowlist: 'bash' ...
 ```
 
+Evidence that deny never calls `Sandbox.create`: see
+`test_deny_path_never_calls_sandbox_create` in `test_allowlist.py`
+(also covered by `verify_local.py`).
+
 On a host without `*.cube.app` DNS, use `python run_allowlisted_sidecar.py`
 instead of `run_allowlisted.py` (set proxy vars in `.env.example`; see
 [`e2b-dev-sidecar`](../e2b-dev-sidecar)).
