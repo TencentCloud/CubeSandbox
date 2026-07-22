@@ -28,15 +28,10 @@ fi
 if [[ -n "${CUBE_API_KEY:-}" ]]; then
   export CUBE_API_KEY
 fi
-if [[ -n "${DATABASE_URL:-}" ]]; then
-  export DATABASE_URL
-else
-  mysql_host="${CUBE_SANDBOX_MYSQL_HOST:-127.0.0.1}"
-  mysql_port="${CUBE_SANDBOX_MYSQL_PORT:-3306}"
-  mysql_user="${CUBE_SANDBOX_MYSQL_USER:-cube}"
-  mysql_password="${CUBE_SANDBOX_MYSQL_PASSWORD:-cube_pass}"
-  mysql_db="${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}"
-  export DATABASE_URL="mysql://${mysql_user}:${mysql_password}@${mysql_host}:${mysql_port}/${mysql_db}"
-fi
+
+# CubeAPI is stateless and does not connect to the database (no DATABASE_URL
+# needed). After the CubeAPI/CubeOps decoupling (PR #984), all AgentHub
+# persistence moved to the CubeOps service; CubeAPI retains only the E2B and
+# SDK-compatible interfaces, which call CubeMaster directly.
 
 exec "${CUBE_API_BIN}"
