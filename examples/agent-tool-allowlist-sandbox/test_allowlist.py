@@ -84,7 +84,6 @@ class AllowlistTests(unittest.TestCase):
         with self.assertRaises(AllowlistDenied):
             run_tool_through_host_gate("bash -c 'curl http://example.com'")
         mock_create.assert_not_called()
-        self.assertEqual(mock_create.call_count, 0)
 
     def test_run_denied_script_has_no_sandbox_create(self) -> None:
         """Static guard: the deny demo must not call Sandbox.create."""

@@ -116,6 +116,8 @@ is only added when `enable_code_execution=True`.
   full parameter policy. Combining small tools / redirects is out of scope.
 - Default policy **denies interpreter execution**. Enabling `python3` grants
   arbitrary code execution inside the guest, not "one more binary".
+  Passing a custom `allowed_binaries` that includes `python3` also grants that
+  capability without `enable_code_execution=True`.
 - Host-side gate only — callers that skip `assert_allowlisted` can still send
   any command to the API. MicroVM isolation ≠ guest capability control.
 - Mode 1 airgap blocks egress; it does **not** stop local misuse in the guest.

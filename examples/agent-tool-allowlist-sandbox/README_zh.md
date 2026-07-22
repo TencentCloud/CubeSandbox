@@ -110,6 +110,8 @@ cubemastercli tpl create-from-image \
 - 本示例是基于**首个 argv token** 的能力式工具门控，不是完整参数策略；小工具组合 /
   重定向等不在范围内。
 - 默认**拒绝解释器**。打开 `python3` 等于授予 guest 内任意代码执行，不是「多一个二进制」。
+  若自定义 `allowed_binaries` 直接包含 `python3`，即使未设 `enable_code_execution=True`
+  也会获得同等能力。
 - 仅宿主机门控——跳过 `assert_allowlisted` 仍可向 API 发任意命令。MicroVM 隔离 ≠
   guest 内能力控制。
 - Mode 1 断网只挡出站，**不**防 guest 本地滥用。网络类工具不在默认 argv 名单；CIDR

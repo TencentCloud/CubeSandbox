@@ -5,20 +5,13 @@ from dotenv import load_dotenv
 
 def load_local_dotenv() -> None:
     """Best-effort load of a nearby .env file without overriding real env vars."""
-    # Intentionally use resolve() for dedup + is_file + load (clearer than the
-    # unresolved-path variant still used in examples/code-sandbox-quickstart).
-    candidate_paths = [
+    # Use resolved paths for existence + load. (Sibling examples may still use
+    # unresolved path after resolve-only dedup; early return makes dedup a no-op.)
+    for path in (
         Path(__file__).with_name(".env"),
         Path.cwd() / ".env",
-    ]
-
-    seen_paths = set()
-    for path in candidate_paths:
+    ):
         resolved_path = path.resolve()
-        if resolved_path in seen_paths:
-            continue
-        seen_paths.add(resolved_path)
-
         if resolved_path.is_file():
             load_dotenv(dotenv_path=resolved_path, override=False)
             return
