@@ -176,3 +176,8 @@
 {{- fail "cubeEgress.network.enabled=true requires cubeEgress.network.ingressInterface" }}
 {{- end }}
 {{- end }}
+{{- if .Values.volumeCos.enabled }}
+{{- if and (not .Values.volumeCos.existingSecret) (or (not .Values.volumeCos.secretId) (not .Values.volumeCos.secretKey) (not .Values.volumeCos.bucket)) }}
+{{- fail "volumeCos.enabled=true requires volumeCos.existingSecret or volumeCos.secretId/secretKey/bucket" }}
+{{- end }}
+{{- end }}

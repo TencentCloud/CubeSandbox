@@ -25,6 +25,7 @@ FILES=(
 	deploy/one-click/README_zh.md
 	docs/guide/tencentcloud-terraform-deploy.md
 	docs/zh/guide/tencentcloud-terraform-deploy.md
+	deploy/kubernetes/chart/values.yaml
 )
 
 failures=0
@@ -61,6 +62,16 @@ if check v9.9.9; then fail "--check v9.9.9 should fail when files are at ${CURRE
 bump v0.6.0 || fail "bump v0.6.0 failed"
 check v0.6.0 || fail "--check v0.6.0 should pass after bumping"
 if check "${CURRENT}"; then fail "--check ${CURRENT} should fail after bumping to v0.6.0"; fi
+
+# 2b. chart values.yaml component tags move; third-party tags stay put.
+component_tags="$(grep -E '^\s+tag:\s+v[0-9]' "${WORK}/deploy/kubernetes/chart/values.yaml" || true)"
+[[ -n "${component_tags}" ]] || fail "values.yaml should still have component tag: v… lines after bump"
+while IFS= read -r line; do
+	[[ -z "${line}" ]] && continue
+	echo "${line}" | grep -qE "tag:\s+v0\.6\.0$" || fail "values.yaml component tag not bumped: ${line}"
+done <<<"${component_tags}"
+grep -qE 'tag:\s+"1\.28\.15"' "${WORK}/deploy/kubernetes/chart/values.yaml" \
+	|| fail "values.yaml kubectl third-party tag must remain \"1.28.15\""
 
 # 3. reverse scan catches a stray tag in a NEW file that is not in the bump list.
 (cd "${WORK}" && printf 'IMAGE_TAG ?= v1.2.3\n' >stray.mk && git add -N stray.mk)

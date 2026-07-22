@@ -1,7 +1,7 @@
 {{- if eq (include "cube.cubemastercliEnabled" .) "true" }}
 {{- $cubemastercli := default dict .Values.cubemastercli -}}
 {{- $images := default dict .Values.images -}}
-{{- $image := default (dict "repository" "ccr.ccs.tencentyun.com/cubesandbox-chart/cubemastercli" "tag" "v0.5.1" "pullPolicy" "Always") (get $images "cubemastercli") -}}
+{{- $image := default (dict "repository" "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cubemastercli" "tag" "v0.5.1" "pullPolicy" "Always") (get $images "cubemastercli") -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Build-context filter for network-agent/Dockerfile (context = repository root).
+**
+!network-agent
+!network-agent/**
+!CubeNet
+!CubeNet/**
+!cubelog
+!cubelog/**
+!Cubelet
+!Cubelet/pkg
+!Cubelet/pkg/networkagentclient
+!Cubelet/pkg/networkagentclient/**
+!deploy
+!deploy/kubernetes
+!deploy/kubernetes/images
+!deploy/kubernetes/images/scripts
+!deploy/kubernetes/images/scripts/component-entrypoint.sh
+!configs
+!configs/single-node
+!configs/single-node/network-agent.yaml

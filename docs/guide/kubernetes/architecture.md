@@ -102,6 +102,7 @@ flowchart TB
 | `cubemastercli` | `templates/cubemastercli.yaml` | `images.cubemastercli` |
 | `cube-webui` | `templates/webui.yaml` | `images.webui` + nginx ConfigMap (upstream CubeOps) |
 | `cube-secret` | `templates/secret.yaml` | MySQL / Redis / Proxy passwords, etc. |
+| `volume-cos` (optional) | `templates/volume-cos-secret.yaml` | COS credentials (`volume-cos.conf`); mounted on Master + Cubelet when `volumeCos.enabled` |
 
 ### 2.2 MySQL / Redis
 
@@ -349,7 +350,9 @@ Master / API / Node share `cube-egress-ca` so template builds and runtime trust 
 
 ### 5.4 Template build
 
-When `controlPlane.templateBuilder.enabled=true`, the Master Pod adds a `template-builder` sidecar (default `docker:27-dind`); artifacts are written to Master storage.
+CubeMaster builds templates in-process via go-containerregistry (download +
+rootfs export). No Docker-in-Docker sidecar is required; artifacts are written
+to Master storage.
 
 ## 6. compute-only / external control plane
 
@@ -404,7 +407,6 @@ Does not install built-in Master / API / MySQL / Redis / WebUI; by default does 
 | `cubeEgress.enabled` | `true` | Big Pod egress sidecar |
 | `cubeOps.enabled` | `true` | CubeOps (JWT ops API; WebUI upstream) |
 | `webui.enabled` | `true` | WebUI (requires `cubeOps.enabled=true`) |
-| `controlPlane.templateBuilder.enabled` | `false` | Template-builder sidecar |
 
 ## 8. Helm test
 

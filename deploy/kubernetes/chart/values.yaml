@@ -18,108 +18,104 @@ global:
   # individually. Applies to the pvmHostBootstrap / nodeInit / node / master
   # / api / ops / cubemastercli / proxy / lifecycleManager / cubeEgress /
   # cubeEgressNet / webui / cubelet / networkAgent / cubeShim / cubeKernel /
-  # cubeGuest / waitNodePrep / pause entries but not to third-party images such as mysql /
-  # redis / docker-in-docker / alpine/k8s.
+  # cubeGuest / waitNodePrep / kubectl (alpine-k8s mirror) entries but not to
+  # third-party images such as mysql / redis.
   imageRegistry: ""
 
 images:
   # Bootstrap DaemonSet init: installs/configures PVM host kernel and may reboot the host.
   pvmHostBootstrap:
-    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-pvm-host-bootstrap
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-pvm-host-bootstrap
     tag: v0.5.1
-    pullPolicy: Always
+    pullPolicy: IfNotPresent
 
   # Bootstrap DaemonSet init: validates KVM/XFS, prepares host directories, checks CubeMaster reachability.
   nodeInit:
-    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-node-init
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-node-init
     tag: v0.5.1
-    pullPolicy: Always
+    pullPolicy: IfNotPresent
 
   # Big Pod wait-node-prep initContainer + bootstrap write-ready/hold.
   waitNodePrep:
-    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-wait-node-prep
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-wait-node-prep
     tag: v0.5.1
     pullPolicy: IfNotPresent
 
   # Big Pod per-component runtime images.
   cubelet:
-    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cubelet
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cubelet
     tag: v0.5.1
     pullPolicy: IfNotPresent
 
   networkAgent:
-    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/network-agent
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/network-agent
     tag: v0.5.1
     pullPolicy: IfNotPresent
 
   cubeShim:
-    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-shim
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-shim
     tag: v0.5.1
-    pullPolicy: Always
+    pullPolicy: IfNotPresent
 
   cubeKernel:
-    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-kernel
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-kernel
     tag: v0.5.1
-    pullPolicy: Always
+    pullPolicy: IfNotPresent
 
   cubeGuest:
-    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-guest
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-guest
     tag: v0.5.1
-    pullPolicy: Always
+    pullPolicy: IfNotPresent
 
   master:
-    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-master
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-master
     tag: v0.5.1
-    pullPolicy: Always
+    pullPolicy: IfNotPresent
 
   api:
-    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-api
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-api
     tag: v0.5.1
-    pullPolicy: Always
+    pullPolicy: IfNotPresent
 
   ops:
-    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-ops
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-ops
     tag: v0.5.1
-    pullPolicy: Always
+    pullPolicy: IfNotPresent
 
   cubemastercli:
-    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cubemastercli
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cubemastercli
     tag: v0.5.1
-    pullPolicy: Always
+    pullPolicy: IfNotPresent
 
   proxy:
-    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-proxy
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-proxy
     tag: v0.5.1
-    pullPolicy: Always
+    pullPolicy: IfNotPresent
 
   lifecycleManager:
-    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-lifecycle-manager
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager
     tag: v0.5.1
-    pullPolicy: Always
+    pullPolicy: IfNotPresent
 
   cubeEgress:
-    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-egress
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-egress
     tag: v0.5.1
     pullPolicy: IfNotPresent
 
   cubeEgressNet:
-    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-egress-net
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-egress-net
     tag: v0.5.1
     pullPolicy: IfNotPresent
 
   webui:
-    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-webui
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-webui
     tag: v0.5.1
-    pullPolicy: Always
-
-  templateBuilder:
-    repository: docker
-    tag: "27-dind"
     pullPolicy: IfNotPresent
 
   # Used by the post-install Job that merges *.cubeProxy.domain into cluster CoreDNS.
+  # Mirrored from docker.io/alpine/k8s:1.28.15 (multi-arch amd64/arm64).
   kubectl:
-    repository: alpine/k8s
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/alpine-k8s
     tag: "1.28.15"
     pullPolicy: IfNotPresent
 
@@ -293,18 +289,11 @@ controlPlane:
         failureThreshold: 6
     resources: {}
 
-  templateBuilder:
-    # Optional sidecar in cube-master Pod. Enable only when template build is required.
-    enabled: false
-    privileged: true
-    dockerdArgs: []
-    resources: {}
-
 cubemastercli:
-  # Operational CLI Pod delivered with the chart. It contains the real
-  # CubeMaster/cmd/cubemastercli binary only. The chart injects
-  # CUBEMASTERCLI_ADDRESS and CUBEMASTERCLI_PORT for convenience; commands
-  # still execute the upstream cubemastercli binary with explicit flags.
+  # Operational CLI Pod delivered with the chart. Image is built from
+  # CubeMaster/docker/Dockerfile.cubemastercli (CI + build-cube-images.sh).
+  # The chart injects CUBEMASTERCLI_ADDRESS and CUBEMASTERCLI_PORT for
+  # convenience; non-interactive commands should still pass those flags.
   enabled: true
   replicas: 1
   podAnnotations: {}
@@ -947,6 +936,24 @@ hostPaths:
   # /run/vc/vm/{id}/chapi and /run/vc/vm/{id}/cube.sock need this tree to
   # remain on a filesystem that is not torn down with the Pod overlay.
   runVc: /data/cubelet/run/vc
+
+# COS volume plugin credentials (volume-cos.conf). Plugin binaries ship in
+# cube-master / cubelet images; this Secret mounts the conf next to them.
+# Leave enabled=false to install a cluster without COS volume support.
+volumeCos:
+  enabled: false
+  # Use an existing Secret that contains key "volume-cos.conf". When set,
+  # the chart does not create a Secret.
+  existingSecret: ""
+  # Name for the chart-created Secret when existingSecret is empty.
+  # Empty → <release>-volume-cos.
+  secretName: ""
+  # Inline credentials used to render volume-cos.conf when existingSecret
+  # is empty (required when enabled=true and existingSecret is unset).
+  secretId: ""
+  secretKey: ""
+  bucket: ""
+  region: ap-guangzhou
 
 serviceAccount:
   create: true

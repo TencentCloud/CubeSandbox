@@ -156,6 +156,12 @@ spec:
           {{- end }}
           volumeMounts:
             {{- include "cube.nodeDataplaneVolumeMounts" . | nindent 12 }}
+          {{- if .Values.volumeCos.enabled }}
+            - name: volume-cos-conf
+              mountPath: /usr/local/services/cubetoolbox/Cubelet/plugin/volume-cos.conf
+              subPath: volume-cos.conf
+              readOnly: true
+          {{- end }}
           resources:
             {{- toYaml .Values.cubeNode.resources | nindent 12 }}
         {{- if .Values.cubeEgress.enabled }}
@@ -348,6 +354,12 @@ spec:
           hostPath:
             path: {{ .Values.hostPaths.runVc }}
             type: DirectoryOrCreate
+      {{- if .Values.volumeCos.enabled }}
+        - name: volume-cos-conf
+          secret:
+            secretName: {{ include "cube.volumeCosSecretName" . }}
+            defaultMode: 0400
+      {{- end }}
       {{- if .Values.cubeEgress.enabled }}
         - name: cube-egress-ca
           secret:

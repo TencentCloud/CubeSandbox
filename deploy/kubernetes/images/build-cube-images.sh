@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
 # Build and optionally push CubeSandbox images for the Kubernetes/TKE chart.
 #
-# This script builds role-specific images directly from the CubeSandbox release
-# package (sandbox-package). cube-node intentionally uses
+# Component images are built from repository source and/or pre-built Release
+# artifacts (kernel/guest). cube-node intentionally uses
 # deploy/kubernetes/images/cube-node/Dockerfile because it is a Kubernetes delivery image
 # that bundles node-side runtime components.
 #
 # Development shortcuts:
-#   LOCAL_BIN=1 ./build-cube-images.sh cubelet
-#   ./build-cube-images.sh --local cube-shim
-# Overlay binaries from _output/bin (make cubelet / make shim / ...) into the
-# image build context. Pass one or more image names to build only those images.
+#   Pass one or more image names to build only those images.
+# cube-shim / network-agent / cubelet are source-built like CI; use
+# SOURCE_REF="" for the worktree.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,13 +18,15 @@ WORKTREE_ROOT="${REPO_ROOT}"
 
 VERSION="${VERSION:-v0.5.1}"
 IMAGE_TAG="${IMAGE_TAG:-${VERSION}}"
-REGISTRY="${REGISTRY:-ccr.ccs.tencentyun.com/cubesandbox-chart}"
+REGISTRY="${REGISTRY:-cube-sandbox-int.tencentcloudcr.com/cube-sandbox}"
 # SOURCE_REF pins the CubeMaster / CubeAPI / CubeOps / CubeDB / CubeProxy /
-# CubeEgress / cube-lifecycle-manager / web / deploy/one-click/webui source tree
-# used when building cube-api / cube-ops / cube-proxy / cube-egress /
-# cube-lifecycle-manager / cube-webui from repository source, ensuring the
-# delivered images match the release tag rather than the current worktree. Set
-# SOURCE_REF="" to build from the current worktree.
+# CubeEgress / cube-lifecycle-manager / web / deploy/one-click/webui (and
+# cube-master / cubemastercli / cubelet / network-agent / cube-shim sibling
+# modules) source tree used when building cube-master / cubemastercli /
+# cubelet / network-agent / cube-shim / cube-api / cube-ops / cube-proxy /
+# cube-egress / cube-lifecycle-manager / cube-webui from repository source,
+# ensuring the delivered images match the release tag rather than the current
+# worktree. Set SOURCE_REF="" to build from the current worktree.
 SOURCE_REF="${SOURCE_REF-${VERSION}}"
 PUSH="${PUSH:-0}"
 NO_CACHE="${NO_CACHE:-0}"
@@ -38,10 +39,14 @@ CUBE_EGRESS_OPENRESTY_BASE_IMAGE="${CUBE_EGRESS_OPENRESTY_BASE_IMAGE:-cube-sandb
 # a reachable image (same knobs CI passes as OPENRESTY_BASE_IMAGE).
 CUBE_PROXY_BASE_IMAGE="${CUBE_PROXY_BASE_IMAGE:-openresty/openresty:1.21.4.1-6-alpine-fat}"
 OPENRESTY_BASE_IMAGE="${OPENRESTY_BASE_IMAGE:-${CUBE_PROXY_BASE_IMAGE}}"
-# Match CI release-docker-images.yml metadata build-args for webui / LCM.
+# Match CI release-docker-images.yml metadata build-args for cube-master / webui / LCM.
 CUBE_COMMIT="${CUBE_COMMIT:-$(git -C "${WORKTREE_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)}"
 CUBE_BUILD_TIME="${CUBE_BUILD_TIME:-$(date -u +'%Y-%m-%dT%H:%M:%SZ')}"
-# webui Dockerfile.dockerignore requires BuildKit (per-Dockerfile ignore files).
+# Builder image for Cubelet/Dockerfile, network-agent/Dockerfile, and
+# CubeShim/Dockerfile (CGO / cubecow / clang+bpf2go / Rust). Override for
+# air-gapped builds.
+CUBE_BUILDER_IMAGE="${CUBE_BUILDER_IMAGE:-ghcr.io/tencentcloud/cubesandbox-builder:ubuntu2004}"
+# Adjacent Dockerfile.dockerignore files require BuildKit.
 export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"
 
 ONE_CLICK_ARCH="${ONE_CLICK_ARCH:-amd64}"
@@ -105,19 +110,16 @@ ALL_IMAGES=(
 )
 
 # Images that need sandbox-package layout/binaries.
-PACKAGE_IMAGES=(
+# (empty: cube-guest stages from Release / local paths; no package consumers left)
+PACKAGE_IMAGES=()
+
+# Images that read source trees under REPO_ROOT (worktree or SOURCE_REF export).
+SOURCE_IMAGES=(
   cube-master
   cubemastercli
   cubelet
   network-agent
   cube-shim
-  cube-kernel
-  cube-guest
-)
-
-# Images that read source trees under REPO_ROOT (worktree or SOURCE_REF export).
-SOURCE_IMAGES=(
-  cube-master
   cube-api
   cube-ops
   cube-proxy
@@ -155,21 +157,35 @@ Environment:
   VERSION / IMAGE_TAG / REGISTRY / SOURCE_REF / PUSH / NO_CACHE / BUILD_ROOT
   LOCAL_BIN / LOCAL_BIN_DIR / PACKAGE_DIR_OVERRIDE / MIRROR
   CUBE_PROXY_BASE_IMAGE / OPENRESTY_BASE_IMAGE / CUBE_EGRESS_OPENRESTY_BASE_IMAGE
+  CUBE_BUILDER_IMAGE
+  CUBE_KERNEL_VMLINUX / CUBE_KERNEL_PVM_VMLINUX
+  CUBE_GUEST_IMAGE_DIR / CUBE_GUEST_IMAGE_TAR
 
-When no image names are given, all images are built. With --local / LOCAL_BIN=1,
-package-based images overlay matching binaries from make output:
+When no image names are given, all images are built. --local / LOCAL_BIN=1 is
+kept for package-based overlays; currently no package image uses it.
 
-  cubelet         <- cubelet, cubecli                 (make cubelet)
-  cube-shim       <- containerd-shim-cube-rs, cube-runtime  (make shim)
-  network-agent   <- network-agent                    (make network-agent)
-  cube-master     <- cubemaster                       (make cubemaster)
-  cubemastercli   <- cubemastercli                    (make cubemaster)
+cube-master / cubemastercli / cubelet / network-agent / cube-shim are source-built
+like CI; use SOURCE_REF="" to compile from the current worktree.
+
+cube-kernel assembles pre-built vmlinux assets from CUBE_KERNEL_VMLINUX
+(and optional CUBE_KERNEL_PVM_VMLINUX) or from the GitHub/CNB Release.
+BM is always required; PVM is required on amd64 and optional on arm64.
+
+cube-guest assembles pre-built guest rootfs assets from CUBE_GUEST_IMAGE_DIR /
+CUBE_GUEST_IMAGE_TAR or from Release asset cube-guest-image-\${arch}.tar.gz
+(same IMAGE_TAG when present, otherwise latest Release).
 
 Examples:
-  make cubelet
-  LOCAL_BIN=1 IMAGE_TAG=dev $0 cubelet
-
-  $0 --local cube-shim
+  SOURCE_REF="" IMAGE_TAG=dev $0 cube-master
+  SOURCE_REF="" IMAGE_TAG=dev $0 cubemastercli
+  SOURCE_REF="" IMAGE_TAG=dev $0 cubelet
+  SOURCE_REF="" IMAGE_TAG=dev $0 network-agent
+  SOURCE_REF="" IMAGE_TAG=dev $0 cube-shim
+  CUBE_KERNEL_VMLINUX=/path/vmlinux CUBE_KERNEL_PVM_VMLINUX=/path/vmlinux-pvm \\
+    IMAGE_TAG=dev $0 cube-kernel
+  IMAGE_TAG=v0.5.1 $0 cube-kernel
+  CUBE_GUEST_IMAGE_DIR=/path/to/cube-image IMAGE_TAG=dev $0 cube-guest
+  IMAGE_TAG=v0.5.1 $0 cube-guest
   SOURCE_REF="" IMAGE_TAG=dev $0 cube-api
   SOURCE_REF="" IMAGE_TAG=dev $0 cube-ops
 
@@ -345,10 +361,10 @@ ensure_source_tree() {
   # When SOURCE_REF is set (default: ${VERSION}), export the CubeMaster / CubeAPI /
   # CubeOps / CubeDB / CubeProxy / CubeEgress / cube-lifecycle-manager / web /
   # deploy/one-click/webui trees at that ref into ${SOURCE_TREE_DIR} and point
-  # REPO_ROOT there. This ensures cube-api, cube-ops, cube-proxy, cube-egress,
-  # cube-lifecycle-manager, cube-webui and related contexts are compiled from the
-  # release-tag source, not from whatever happens to be in the current worktree
-  # (which may be ahead of the tag).
+  # REPO_ROOT there. This ensures cube-master, cubemastercli, cubelet, cube-api,
+  # cube-ops, cube-proxy, cube-egress, cube-lifecycle-manager, cube-webui and
+  # related contexts are compiled from the release-tag source, not from whatever
+  # happens to be in the current worktree (which may be ahead of the tag).
   if [[ -z "${SOURCE_REF}" ]]; then
     REPO_ROOT="${WORKTREE_ROOT}"
     log "using current worktree source (SOURCE_REF empty)"
@@ -360,11 +376,34 @@ ensure_source_tree() {
     || fail "SOURCE_REF=${SOURCE_REF} is not a valid git ref in ${WORKTREE_ROOT}"
   SOURCE_REF_SHA="$(git -C "${WORKTREE_ROOT}" rev-parse "${SOURCE_REF}^{commit}")"
   SOURCE_TREE_STAMP="${SOURCE_TREE_DIR}/.exported-sha"
-  # CubeOps/CubeDB are post-v0.5.1; only export when building cube-ops so older
-  # release tags still work for cube-api / cube-proxy / webui / etc.
+  # CubeOps is post-v0.5.1; only export when building cube-ops so older release
+  # tags still work for cube-api / cube-proxy / webui / etc. cube-master /
+  # cubemastercli need cubelog / CubeDB / Cubelet; cube-master also needs
+  # deploy/scripts for volume-deps. cubelet needs Cubelet / cubelog / cubecow /
+  # deploy scripts + volume plugin examples. network-agent needs network-agent /
+  # CubeNet / cubelog / Cubelet client stubs / configs + entrypoint script.
+  # cube-shim needs CubeShim / hypervisor / config-cube.toml + entrypoint.
   SOURCE_EXPORT_SET="CubeMaster CubeAPI CubeProxy CubeEgress cube-lifecycle-manager web deploy/one-click/webui"
+  if should_build cube-master || should_build cubemastercli; then
+    SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} cubelog CubeDB Cubelet"
+  fi
+  if should_build cube-master; then
+    SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} deploy/scripts examples/volume/cos"
+  fi
+  if should_build cubelet; then
+    SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} Cubelet cubelog cubecow deploy/scripts deploy/kubernetes/images/scripts examples/volume/cos"
+  fi
+  if should_build network-agent; then
+    SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} network-agent CubeNet cubelog Cubelet/pkg/networkagentclient deploy/kubernetes/images/scripts configs/single-node"
+  fi
+  if should_build cube-shim; then
+    SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} CubeShim hypervisor deploy/one-click/config-cube.toml deploy/kubernetes/images/scripts"
+  fi
   if should_build cube-ops; then
-    SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} CubeOps CubeDB"
+    SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} CubeOps"
+    if ! should_build cube-master && ! should_build cubemastercli; then
+      SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} CubeDB"
+    fi
   fi
   if [[ ! -f "${SOURCE_TREE_STAMP}" ]] \
     || [[ "$(cat "${SOURCE_TREE_STAMP}")" != "${SOURCE_REF_SHA}"$'\n'"${SOURCE_EXPORT_SET}" ]]; then
@@ -416,8 +455,6 @@ ensure_package_dir() {
 make_hint_for_bin() {
   case "$1" in
     cubelet|cubecli) printf 'make cubelet' ;;
-    containerd-shim-cube-rs|cube-runtime) printf 'make shim' ;;
-    network-agent|cubevsmapdump) printf 'make network-agent' ;;
     cubemaster|cubemastercli) printf 'make cubemaster' ;;
     *) printf 'make <component>' ;;
   esac
@@ -451,19 +488,8 @@ overlay_local_bins_for_component() {
   local pkg_basename="$3"
 
   case "${name}" in
-    cubelet)
-      overlay_local_bin cubelet "${ctx}/package/${pkg_basename}/bin/cubelet"
-      overlay_local_bin cubecli "${ctx}/package/${pkg_basename}/bin/cubecli"
-      ;;
-    cube-shim)
-      overlay_local_bin containerd-shim-cube-rs \
-        "${ctx}/package/${pkg_basename}/bin/containerd-shim-cube-rs"
-      overlay_local_bin cube-runtime \
-        "${ctx}/package/${pkg_basename}/bin/cube-runtime"
-      ;;
-    network-agent)
-      overlay_local_bin network-agent "${ctx}/package/${pkg_basename}/bin/network-agent"
-      overlay_local_bin cubevsmapdump "${ctx}/package/${pkg_basename}/bin/cubevsmapdump" 0
+    *)
+      :
       ;;
   esac
 }
@@ -484,35 +510,6 @@ prepare_context() {
   rm -rf "${ctx}"
   mkdir -p "${ctx}/package" "${ctx}/scripts" "${ctx}/artifacts"
   printf '%s\n' "${ctx}"
-}
-
-copy_cube_master_component_context() {
-  local ctx="$1"
-  local src="${PACKAGE_DIR}/CubeMaster"
-  local bin="${src}/bin/cubemaster"
-
-  [[ -x "${bin}" ]] || fail "invalid CubeMaster package: missing executable ${bin}"
-  [[ -f "${REPO_ROOT}/CubeMaster/docker/tools/gracestop.sh" ]] || fail "missing CubeMaster docker tools/gracestop.sh"
-
-  cp "${bin}" "${ctx}/cubemaster"
-  chmod +x "${ctx}/cubemaster"
-  overlay_local_bin cubemaster "${ctx}/cubemaster"
-  cp -a "${REPO_ROOT}/CubeMaster/docker/tools" "${ctx}/tools"
-  # Inject single-source installer (deploy/scripts/docker-install-volume-deps.sh).
-  cp "${REPO_ROOT}/deploy/scripts/docker-install-volume-deps.sh" "${ctx}/docker-install-volume-deps.sh"
-  chmod +x "${ctx}/docker-install-volume-deps.sh"
-}
-
-copy_cubemastercli_context() {
-  local ctx="$1"
-  local src="${PACKAGE_DIR}/CubeMaster"
-  local bin="${src}/bin/cubemastercli"
-
-  [[ -x "${bin}" ]] || fail "invalid CubeMaster package: missing executable ${bin}"
-
-  cp "${bin}" "${ctx}/cubemastercli"
-  chmod +x "${ctx}/cubemastercli"
-  overlay_local_bin cubemastercli "${ctx}/cubemastercli"
 }
 
 copy_cube_proxy_component_context() {
@@ -615,26 +612,110 @@ build_image() {
   fi
 }
 
+# Same as .github/workflows/release-docker-images.yml for component "cube-api":
+# context=CubeAPI, file=CubeAPI/Dockerfile, CUBE_VERSION / CUBE_COMMIT / CUBE_BUILD_TIME.
 build_cube_api_image() {
-  local dockerfile="${CONTEXT_DIR}/cube-api.Dockerfile"
-
-  # CubeAPI/Dockerfile first compiles a dummy main to cache dependencies. Docker
-  # preserves source mtimes on COPY, so Cargo can incorrectly keep that dummy
-  # binary if the real src/main.rs is older than the cached artifact. Keep the
-  # upstream Dockerfile unchanged and inject one cache-busting cleanup layer for
-  # Kubernetes image builds.
-  awk '
-    {
-      print
-      if ($0 == "COPY src/ src/") {
-        print "RUN rust_target=\"$(cat /etc/rust-target)\" \\"
-        print "    && rm -f \"target/${rust_target}/release/cube-api\" target/${rust_target}/release/deps/cube_api-*"
-      }
-    }
-  ' "${REPO_ROOT}/CubeAPI/Dockerfile" > "${dockerfile}"
-
-  build_image cube-api "${REPO_ROOT}/CubeAPI" "${dockerfile}"
+  [[ -f "${REPO_ROOT}/CubeAPI/Dockerfile" ]] || fail "missing CubeAPI/Dockerfile in ${REPO_ROOT}"
+  build_image cube-api "${REPO_ROOT}/CubeAPI" "${REPO_ROOT}/CubeAPI/Dockerfile" \
+    --build-arg "CUBE_VERSION=${IMAGE_TAG}" \
+    --build-arg "CUBE_COMMIT=${CUBE_COMMIT}" \
+    --build-arg "CUBE_BUILD_TIME=${CUBE_BUILD_TIME}"
   record_built cube-api
+}
+
+# Same as .github/workflows/release-docker-images.yml for component "cube-master":
+# context=., file=CubeMaster/docker/Dockerfile, CUBE_VERSION / CUBE_COMMIT / CUBE_BUILD_TIME.
+build_cube_master_image() {
+  [[ -f "${REPO_ROOT}/CubeMaster/docker/Dockerfile" ]] || fail "missing CubeMaster/docker/Dockerfile in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/CubeMaster/go.mod" ]] || fail "missing CubeMaster go.mod in ${REPO_ROOT}"
+  [[ -d "${REPO_ROOT}/cubelog" ]] || fail "missing cubelog sibling module in ${REPO_ROOT}"
+  [[ -d "${REPO_ROOT}/CubeDB" ]] || fail "missing CubeDB sibling module in ${REPO_ROOT}"
+  [[ -d "${REPO_ROOT}/Cubelet" ]] || fail "missing Cubelet sibling module in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/deploy/scripts/docker-install-volume-deps.sh" ]] \
+    || fail "missing deploy/scripts/docker-install-volume-deps.sh in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/examples/volume/cos/binary/cube-volume-cos.sh" ]] \
+    || fail "missing examples/volume/cos/binary/cube-volume-cos.sh in ${REPO_ROOT}"
+  build_image cube-master "${REPO_ROOT}" "${REPO_ROOT}/CubeMaster/docker/Dockerfile" \
+    --build-arg "CUBE_VERSION=${IMAGE_TAG}" \
+    --build-arg "CUBE_COMMIT=${CUBE_COMMIT}" \
+    --build-arg "CUBE_BUILD_TIME=${CUBE_BUILD_TIME}"
+  record_built cube-master
+}
+
+# Same as .github/workflows/release-docker-images.yml for component "cubemastercli":
+# context=., file=CubeMaster/docker/Dockerfile.cubemastercli, CUBE_* build-args.
+build_cubemastercli_image() {
+  [[ -f "${REPO_ROOT}/CubeMaster/docker/Dockerfile.cubemastercli" ]] \
+    || fail "missing CubeMaster/docker/Dockerfile.cubemastercli in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/CubeMaster/go.mod" ]] || fail "missing CubeMaster go.mod in ${REPO_ROOT}"
+  [[ -d "${REPO_ROOT}/cubelog" ]] || fail "missing cubelog sibling module in ${REPO_ROOT}"
+  [[ -d "${REPO_ROOT}/CubeDB" ]] || fail "missing CubeDB sibling module in ${REPO_ROOT}"
+  [[ -d "${REPO_ROOT}/Cubelet" ]] || fail "missing Cubelet sibling module in ${REPO_ROOT}"
+  build_image cubemastercli "${REPO_ROOT}" "${REPO_ROOT}/CubeMaster/docker/Dockerfile.cubemastercli" \
+    --build-arg "CUBE_VERSION=${IMAGE_TAG}" \
+    --build-arg "CUBE_COMMIT=${CUBE_COMMIT}" \
+    --build-arg "CUBE_BUILD_TIME=${CUBE_BUILD_TIME}"
+  record_built cubemastercli
+}
+
+# Same as .github/workflows/release-docker-images.yml for component "cubelet":
+# context=., file=Cubelet/Dockerfile (CGO + cubecow via CUBE_BUILDER_IMAGE).
+build_cubelet_image() {
+  [[ -f "${REPO_ROOT}/Cubelet/Dockerfile" ]] || fail "missing Cubelet/Dockerfile in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/Cubelet/go.mod" ]] || fail "missing Cubelet go.mod in ${REPO_ROOT}"
+  [[ -d "${REPO_ROOT}/cubelog" ]] || fail "missing cubelog sibling module in ${REPO_ROOT}"
+  [[ -d "${REPO_ROOT}/cubecow" ]] || fail "missing cubecow tree in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/deploy/scripts/docker-install-volume-deps.sh" ]] \
+    || fail "missing deploy/scripts/docker-install-volume-deps.sh in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/deploy/kubernetes/images/scripts/component-entrypoint.sh" ]] \
+    || fail "missing component-entrypoint.sh in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/examples/volume/cos/binary/cube-volume-cos.sh" ]] \
+    || fail "missing examples/volume/cos/binary/cube-volume-cos.sh in ${REPO_ROOT}"
+  build_image cubelet "${REPO_ROOT}" "${REPO_ROOT}/Cubelet/Dockerfile" \
+    --build-arg "CUBE_BUILDER_IMAGE=${CUBE_BUILDER_IMAGE}" \
+    --build-arg "CUBE_VERSION=${IMAGE_TAG}" \
+    --build-arg "CUBE_COMMIT=${CUBE_COMMIT}" \
+    --build-arg "CUBE_BUILD_TIME=${CUBE_BUILD_TIME}"
+  record_built cubelet
+}
+
+# Same as .github/workflows/release-docker-images.yml for component "network-agent":
+# context=., file=network-agent/Dockerfile (cubevs gen + proto via CUBE_BUILDER_IMAGE).
+build_network_agent_image() {
+  [[ -f "${REPO_ROOT}/network-agent/Dockerfile" ]] || fail "missing network-agent/Dockerfile in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/network-agent/go.mod" ]] || fail "missing network-agent go.mod in ${REPO_ROOT}"
+  [[ -d "${REPO_ROOT}/CubeNet" ]] || fail "missing CubeNet tree in ${REPO_ROOT}"
+  [[ -d "${REPO_ROOT}/cubelog" ]] || fail "missing cubelog sibling module in ${REPO_ROOT}"
+  [[ -d "${REPO_ROOT}/Cubelet/pkg/networkagentclient" ]] \
+    || fail "missing Cubelet/pkg/networkagentclient in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/configs/single-node/network-agent.yaml" ]] \
+    || fail "missing configs/single-node/network-agent.yaml in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/deploy/kubernetes/images/scripts/component-entrypoint.sh" ]] \
+    || fail "missing component-entrypoint.sh in ${REPO_ROOT}"
+  build_image network-agent "${REPO_ROOT}" "${REPO_ROOT}/network-agent/Dockerfile" \
+    --build-arg "CUBE_BUILDER_IMAGE=${CUBE_BUILDER_IMAGE}" \
+    --build-arg "CUBE_VERSION=${IMAGE_TAG}" \
+    --build-arg "CUBE_COMMIT=${CUBE_COMMIT}" \
+    --build-arg "CUBE_BUILD_TIME=${CUBE_BUILD_TIME}"
+  record_built network-agent
+}
+
+# Same as .github/workflows/release-docker-images.yml for component "cube-shim":
+# context=., file=CubeShim/Dockerfile (cargo via CUBE_BUILDER_IMAGE).
+build_cube_shim_image() {
+  [[ -f "${REPO_ROOT}/CubeShim/Dockerfile" ]] || fail "missing CubeShim/Dockerfile in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/CubeShim/Cargo.toml" ]] || fail "missing CubeShim Cargo.toml in ${REPO_ROOT}"
+  [[ -d "${REPO_ROOT}/hypervisor" ]] || fail "missing hypervisor tree in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/deploy/one-click/config-cube.toml" ]] \
+    || fail "missing deploy/one-click/config-cube.toml in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/deploy/kubernetes/images/scripts/component-entrypoint.sh" ]] \
+    || fail "missing component-entrypoint.sh in ${REPO_ROOT}"
+  build_image cube-shim "${REPO_ROOT}" "${REPO_ROOT}/CubeShim/Dockerfile" \
+    --build-arg "CUBE_BUILDER_IMAGE=${CUBE_BUILDER_IMAGE}" \
+    --build-arg "CUBE_VERSION=${IMAGE_TAG}" \
+    --build-arg "CUBE_COMMIT=${CUBE_COMMIT}" \
+    --build-arg "CUBE_BUILD_TIME=${CUBE_BUILD_TIME}"
+  record_built cube-shim
 }
 
 # Same as .github/workflows/release-docker-images.yml for component "cube-ops":
@@ -733,36 +814,198 @@ build_component_image() {
   mkdir -p "${ctx}/package"
   cp -a "${PACKAGE_DIR}/${pkg_dir}" "${ctx}/package/${pkg_basename}"
   overlay_local_bins_for_component "${name}" "${ctx}" "${pkg_basename}"
-  if [[ "${name}" == "cubelet" ]]; then
-    # Inject single-source installer (deploy/scripts/docker-install-volume-deps.sh).
-    cp "${REPO_ROOT}/deploy/scripts/docker-install-volume-deps.sh" "${ctx}/docker-install-volume-deps.sh"
-    chmod +x "${ctx}/docker-install-volume-deps.sh"
-    # Prefer in-tree Cubelet config so image builds pick up worktree defaults
-    # (e.g. volume_plugin_base_dir) instead of only the release package snapshot.
-    if [[ -f "${REPO_ROOT}/Cubelet/config/config.toml" ]]; then
-      mkdir -p "${ctx}/package/${pkg_basename}/config"
-      cp "${REPO_ROOT}/Cubelet/config/config.toml" \
-        "${ctx}/package/${pkg_basename}/config/config.toml"
-      log "overlay Cubelet config.toml from worktree"
+  build_image "${name}" "${ctx}" \
+    --build-arg "CUBE_VERSION=${IMAGE_TAG}"
+  record_built "${name}"
+}
+
+# Resolve which GitHub/CNB Release tag to pull guest vmlinux from.
+# Prefer IMAGE_TAG/VERSION when that Release exists (BM asset reachable); else latest GitHub Release.
+resolve_kernel_release_tag() {
+  local arch="$1"
+  local tag="${IMAGE_TAG}"
+  local probe_url latest
+  local github_api="https://api.github.com/repos/TencentCloud/CubeSandbox/releases"
+
+  probe_url="$(release_download_base_for_tag "${tag}")/vmlinux-${arch}"
+  if curl --fail --silent --show-error --head \
+    --connect-timeout "${DOWNLOAD_CONNECT_TIMEOUT}" \
+    --output /dev/null \
+    "${probe_url}"; then
+    printf '%s\n' "${tag}"
+    return 0
+  fi
+
+  log "Release ${tag} has no vmlinux-${arch} (or Release missing); resolving latest GitHub Release"
+  latest="$(
+    curl --fail --silent --show-error \
+      --connect-timeout "${DOWNLOAD_CONNECT_TIMEOUT}" \
+      "${github_api}/latest" \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tag_name",""))'
+  )"
+  [[ -n "${latest}" ]] || fail "could not resolve latest GitHub Release for kernel assets"
+  printf '%s\n' "${latest}"
+}
+
+release_download_base_for_tag() {
+  local tag="$1"
+  case "${MIRROR}" in
+    cn|CN|cnb|CNB)
+      printf 'https://cnb.cool/CubeSandbox/CubeSandbox/-/releases/download/%s\n' "${tag}"
+      ;;
+    *)
+      printf 'https://github.com/TencentCloud/CubeSandbox/releases/download/%s\n' "${tag}"
+      ;;
+  esac
+}
+
+# Assemble cube-kernel from pre-built vmlinux artifacts.
+# BM is always required. PVM is required on amd64, optional on arm64 (no PVM guest).
+# Priority: CUBE_KERNEL_VMLINUX (+ optional CUBE_KERNEL_PVM_VMLINUX), else Release download
+# (same IMAGE_TAG when present, otherwise latest Release).
+build_cube_kernel_image() {
+  local arch="${ONE_CLICK_ARCH:-amd64}"
+  local bm_src="${CUBE_KERNEL_VMLINUX:-}"
+  local pvm_src="${CUBE_KERNEL_PVM_VMLINUX:-}"
+  local dl_dir="${BUILD_ROOT}/downloads/kernel-artifacts"
+  local ctx
+  local bm_url pvm_url
+  local pvm_required=0
+  local kernel_tag kernel_base
+  local asset_version
+
+  case "${arch}" in
+    amd64) pvm_required=1 ;;
+    arm64) pvm_required=0 ;;
+    *) fail "unsupported ONE_CLICK_ARCH for cube-kernel: ${arch} (use amd64 or arm64)" ;;
+  esac
+
+  if [[ -n "${bm_src}" || -n "${pvm_src}" ]]; then
+    [[ -n "${bm_src}" ]] || fail "cube-kernel requires CUBE_KERNEL_VMLINUX"
+    [[ -f "${bm_src}" ]] || fail "CUBE_KERNEL_VMLINUX not found: ${bm_src}"
+    if [[ -n "${pvm_src}" ]]; then
+      [[ -f "${pvm_src}" ]] || fail "CUBE_KERNEL_PVM_VMLINUX not found: ${pvm_src}"
+    elif [[ "${pvm_required}" == "1" ]]; then
+      fail "cube-kernel on ${arch} requires CUBE_KERNEL_PVM_VMLINUX (PVM guest kernel)"
+    fi
+    asset_version="${IMAGE_TAG}"
+  else
+    kernel_tag="$(resolve_kernel_release_tag "${arch}")"
+    kernel_base="$(release_download_base_for_tag "${kernel_tag}")"
+    asset_version="${kernel_tag}"
+    mkdir -p "${dl_dir}"
+    bm_url="${kernel_base}/vmlinux-${arch}"
+    pvm_url="${kernel_base}/vmlinux-pvm-${arch}"
+    bm_src="${dl_dir}/${kernel_tag}-vmlinux-${arch}"
+    pvm_src="${dl_dir}/${kernel_tag}-vmlinux-pvm-${arch}"
+    log "downloading cube-kernel BM vmlinux from ${bm_url} (Release ${kernel_tag})"
+    download_file "${bm_url}" "${bm_src}" file
+    if [[ "${pvm_required}" == "1" ]]; then
+      log "downloading cube-kernel PVM vmlinux from ${pvm_url}"
+      download_file "${pvm_url}" "${pvm_src}" file
+    elif download_file "${pvm_url}" "${pvm_src}" file; then
+      log "downloaded optional cube-kernel PVM vmlinux from ${pvm_url}"
+    else
+      log "no vmlinux-pvm-${arch} on Release ${kernel_tag}; building BM-only cube-kernel for ${arch}"
+      pvm_src=""
     fi
   fi
-  build_image "${name}" "${ctx}" \
+
+  ctx="$(prepare_context cube-kernel)"
+  mkdir -p "${ctx}/artifacts"
+  copy_scripts "${ctx}" component-entrypoint.sh
+  install -m 0644 "${bm_src}" "${ctx}/artifacts/vmlinux-bm"
+  if [[ -n "${pvm_src}" ]]; then
+    install -m 0644 "${pvm_src}" "${ctx}/artifacts/vmlinux-pvm"
+  fi
+  build_image cube-kernel "${ctx}" \
     --build-arg "CUBE_VERSION=${IMAGE_TAG}" \
-    --build-arg "CUBE_KERNEL_BM_VERSION=${CUBE_KERNEL_BM_VERSION:-}" \
-    --build-arg "CUBE_KERNEL_PVM_VERSION=${CUBE_KERNEL_PVM_VERSION:-}"
-  record_built "${name}"
+    --build-arg "CUBE_KERNEL_BM_VERSION=${CUBE_KERNEL_BM_VERSION:-${asset_version}}" \
+    --build-arg "CUBE_KERNEL_PVM_VERSION=${CUBE_KERNEL_PVM_VERSION:-${asset_version}}"
+  record_built cube-kernel
+}
+
+# Resolve which GitHub/CNB Release tag to pull guest rootfs from.
+# Prefer IMAGE_TAG when that Release has cube-guest-image-${arch}.tar.gz; else latest.
+resolve_guest_release_tag() {
+  local arch="$1"
+  local tag="${IMAGE_TAG}"
+  local probe_url latest
+  local github_api="https://api.github.com/repos/TencentCloud/CubeSandbox/releases"
+
+  probe_url="$(release_download_base_for_tag "${tag}")/cube-guest-image-${arch}.tar.gz"
+  if curl --fail --silent --show-error --head \
+    --connect-timeout "${DOWNLOAD_CONNECT_TIMEOUT}" \
+    --output /dev/null \
+    "${probe_url}"; then
+    printf '%s\n' "${tag}"
+    return 0
+  fi
+
+  log "Release ${tag} has no cube-guest-image-${arch}.tar.gz (or Release missing); resolving latest GitHub Release"
+  latest="$(
+    curl --fail --silent --show-error \
+      --connect-timeout "${DOWNLOAD_CONNECT_TIMEOUT}" \
+      "${github_api}/latest" \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tag_name",""))'
+  )"
+  [[ -n "${latest}" ]] || fail "could not resolve latest GitHub Release for guest assets"
+  printf '%s\n' "${latest}"
+}
+
+# Assemble cube-guest from pre-built guest rootfs artifacts.
+# Priority: CUBE_GUEST_IMAGE_DIR (directory with the three files),
+# CUBE_GUEST_IMAGE_TAR (tar.gz of those files), else Release download
+# (same IMAGE_TAG when present, otherwise latest Release).
+build_cube_guest_image() {
+  local arch="${ONE_CLICK_ARCH:-amd64}"
+  local guest_dir="${CUBE_GUEST_IMAGE_DIR:-}"
+  local guest_tar="${CUBE_GUEST_IMAGE_TAR:-}"
+  local dl_dir="${BUILD_ROOT}/downloads/guest-artifacts"
+  local ctx stage_dir
+  local guest_tag guest_base guest_url
+
+  stage_dir="${BUILD_ROOT}/guest-image-stage"
+  rm -rf "${stage_dir}"
+  mkdir -p "${stage_dir}"
+
+  if [[ -n "${guest_dir}" ]]; then
+    [[ -d "${guest_dir}" ]] || fail "CUBE_GUEST_IMAGE_DIR not found: ${guest_dir}"
+    cp -a "${guest_dir}/." "${stage_dir}/"
+  elif [[ -n "${guest_tar}" ]]; then
+    [[ -f "${guest_tar}" ]] || fail "CUBE_GUEST_IMAGE_TAR not found: ${guest_tar}"
+    tar -xzf "${guest_tar}" -C "${stage_dir}"
+  else
+    guest_tag="$(resolve_guest_release_tag "${arch}")"
+    guest_base="$(release_download_base_for_tag "${guest_tag}")"
+    mkdir -p "${dl_dir}"
+    guest_url="${guest_base}/cube-guest-image-${arch}.tar.gz"
+    guest_tar="${dl_dir}/${guest_tag}-cube-guest-image-${arch}.tar.gz"
+    log "downloading cube-guest rootfs from ${guest_url} (Release ${guest_tag})"
+    download_file "${guest_url}" "${guest_tar}" tar.gz
+    tar -xzf "${guest_tar}" -C "${stage_dir}"
+  fi
+
+  [[ -f "${stage_dir}/cube-guest-image-cpu.img" ]] \
+    || fail "guest artifacts missing cube-guest-image-cpu.img"
+  [[ -f "${stage_dir}/version" ]] || fail "guest artifacts missing version"
+  [[ -f "${stage_dir}/agent-version" ]] || fail "guest artifacts missing agent-version"
+
+  ctx="$(prepare_context cube-guest)"
+  mkdir -p "${ctx}/package/cube-image"
+  copy_scripts "${ctx}" component-entrypoint.sh
+  cp -a "${stage_dir}/." "${ctx}/package/cube-image/"
+  build_image cube-guest "${ctx}" \
+    --build-arg "CUBE_VERSION=${IMAGE_TAG}"
+  record_built cube-guest
 }
 
 run_selected_builds() {
   local ctx
 
   if should_build cube-master; then
-    ensure_package_dir
     ensure_source_tree
-    ctx="$(prepare_context cube-master)"
-    copy_cube_master_component_context "${ctx}"
-    build_image cube-master "${ctx}" "${REPO_ROOT}/CubeMaster/docker/Dockerfile"
-    record_built cube-master
+    build_cube_master_image
   fi
 
   if should_build cube-api; then
@@ -776,11 +1019,8 @@ run_selected_builds() {
   fi
 
   if should_build cubemastercli; then
-    ensure_package_dir
-    ctx="$(prepare_context cubemastercli)"
-    copy_cubemastercli_context "${ctx}"
-    build_image cubemastercli "${ctx}"
-    record_built cubemastercli
+    ensure_source_tree
+    build_cubemastercli_image
   fi
 
   if should_build cube-proxy; then
@@ -815,24 +1055,22 @@ run_selected_builds() {
   fi
 
   if should_build cubelet; then
-    ensure_package_dir
-    build_component_image cubelet Cubelet
+    ensure_source_tree
+    build_cubelet_image
   fi
   if should_build network-agent; then
-    ensure_package_dir
-    build_component_image network-agent network-agent
+    ensure_source_tree
+    build_network_agent_image
   fi
   if should_build cube-shim; then
-    ensure_package_dir
-    build_component_image cube-shim cube-shim
+    ensure_source_tree
+    build_cube_shim_image
   fi
   if should_build cube-kernel; then
-    ensure_package_dir
-    build_component_image cube-kernel cube-kernel-scf
+    build_cube_kernel_image
   fi
   if should_build cube-guest; then
-    ensure_package_dir
-    build_component_image cube-guest cube-image
+    build_cube_guest_image
   fi
 
   if should_build cube-node-init; then
@@ -886,9 +1124,6 @@ EOF
 Use these values:
   images.*.repository: ${REGISTRY}/<image-name>
   images.*.tag: ${IMAGE_TAG}
-
-Template builder is not built by this script. The chart uses a dind image by
-default and can be overridden through images.templateBuilder.* when needed.
 EOF
 }
 

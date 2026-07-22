@@ -31,7 +31,7 @@
 | Kubernetes | **v1.24+**（自建 / k3s / TKE 等均可） |
 | 工具 | `kubectl`、Helm v3.10+ |
 | 存储 | 集群有可用 StorageClass（或改用 hostPath，见下文） |
-| 镜像拉取 | 能拉取 Chart 默认镜像，或自备私有仓库 |
+| 镜像拉取 | 能拉取 Chart 默认镜像（TCR int），或叠加 `values-cn.yaml` 使用国内 TCR cn，或自备私有仓库 |
 
 ### 节点角色怎么分
 
@@ -193,6 +193,11 @@ bootstrap:
 
 ## 5. Helm 安装
 
+::: tip 中国大陆用户
+在以下任一安装命令中额外加上 `-f deploy/kubernetes/chart/values-cn.yaml`，即可从国内镜像源拉取镜像。
+:::
+
+
 在仓库根目录执行：
 
 ```bash
@@ -217,7 +222,6 @@ helm upgrade --install cube ./deploy/kubernetes/chart \
   --timeout 90m
 ```
 
-
 单节点试用：
 
 ```bash
@@ -229,7 +233,6 @@ helm upgrade --install cube ./deploy/kubernetes/chart \
   --wait \
   --timeout 90m
 ```
-
 
 
 安装可能较久（首次 PVM 换核、节点重启、冷启动都算在 timeout 里）。`--wait` 会等到主要工作负载 Ready。

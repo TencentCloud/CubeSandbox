@@ -52,7 +52,6 @@ See the [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) gu
 | `cube-lifecycle-manager` | Sandbox auto-pause / auto-resume; discovered via Service DNS and Redis. |
 | `cube-egress` / `cube-egress-net` | Transparent outbound proxy + host TPROXY helper (Big Pod sidecars). |
 | `cube-webui` | WebUI static assets and OpenResty. |
-| template builder sidecar | Optional `dockerd`/BuildKit on CubeMaster (`docker:27-dind` by default). |
 
 ## Node selection
 
@@ -173,10 +172,12 @@ To **turn off PVM on one node**: remove the `allow-pvm-bootstrap` label. Bootstr
 ## Build and push images
 
 ```bash
-PUSH=1 REGISTRY=ccr.ccs.tencentyun.com/cubesandbox-chart IMAGE_TAG=v0.5.1 ./deploy/kubernetes/images/build-cube-images.sh
+PUSH=1 REGISTRY=cube-sandbox-int.tencentcloudcr.com/cube-sandbox IMAGE_TAG=v0.5.1 ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
-Cube-owned images default to `imagePullPolicy: Always` because this chart uses the release tag directly and environments are expected to pull the pushed image from the registry during deployment.
+Cube-owned images default to `imagePullPolicy: IfNotPresent`. To pick up a
+registry rebuild that reuses the same tag, change the tag, delete the local
+image on the node, or override `pullPolicy: Always` for that image.
 
 If the target registry requires authentication, create a Kubernetes
 `kubernetes.io/dockerconfigjson` Secret in the release namespace and pass it to
@@ -205,8 +206,8 @@ Set `redis.host` to use an existing Redis service; the chart will not install `c
 
 ## CubeMaster configuration
 
-The `cube-master` image uses `CubeMaster/docker/Dockerfile` directly and does not carry a Kubernetes-specific entrypoint or bundled `conf.yaml`.
-The chart stores the One-click `CubeMaster/conf.yaml` at `deploy/kubernetes/chart/files/cube-master/conf.yaml`, renders MySQL/Redis values into it, creates a release-scoped Secret named `<release>-master-config`, and mounts it to `/usr/local/services/cubemaster/conf.yaml`; `CUBE_MASTER_CONFIG_PATH` points CubeMaster to that mounted file.
+The `cube-master` image is built like CI from `CubeMaster/docker/Dockerfile` (repository-root context) and does not carry a Kubernetes-specific entrypoint or bundled `conf.yaml`.
+The chart stores the One-click `CubeMaster/conf.yaml` at `deploy/kubernetes/chart/files/cube-master/conf.yaml`, renders MySQL/Redis values into it, creates a release-scoped Secret named `<release>-master-config`, and mounts it to `/usr/local/services/cubetoolbox/CubeMaster/conf.yaml` (same path as one-click); `CUBE_MASTER_CONFIG_PATH` points CubeMaster to that mounted file.
 
 CubeMaster artifact storage maps to `/data/CubeMaster/storage`, matching one-click.
 The chart uses PVC-backed persistence by default so state can survive
@@ -278,6 +279,24 @@ disabled, and sets TKE CLB annotations for `pass-to-target` plus a
 override that value in runtime values (comma-separated for multiple SGs),
 or set it to `""` if you manage CLB security groups outside Helm.
 
+### China registry preset (`values-cn.yaml`)
+
+Default Chart values pull Cube images from TCR **int**
+(`cube-sandbox-int.tencentcloudcr.com`). Users in mainland China should layer
+`values-cn.yaml` so component images, plus mirrored MySQL / Redis / kubectl,
+come from TCR **cn** (`cube-sandbox-cn.tencentcloudcr.com`):
+
+```bash
+helm upgrade --install cube ./deploy/kubernetes/chart \
+  -f deploy/kubernetes/chart/values-cn.yaml \
+  -f runtime-values.yaml \
+  -n cube-system --create-namespace
+```
+
+Combine with `values-tke.yaml` when installing on TKE in China. The preset sets
+`global.imageRegistry` to the cn host and overrides mysql / redis / kubectl
+repositories that do not go through `cube.cubeImage`.
+
 ## Database migration
 
 The chart does not deliver a separate DB migration Job or image. CubeMaster owns MySQL schema migration and runs its embedded `CubeMaster/pkg/base/dao/migrate/migrations/mysql` migrations during startup.
@@ -291,9 +310,12 @@ The chart does not deliver a separate DB migration Job or image. CubeMaster owns
 ## cubemastercli operational CLI
 
 `cubemastercli.enabled=true` installs a chart-managed
-`<release>-cubemastercli` Deployment. The image contains the real
-`CubeMaster/bin/cubemastercli` binary only; it does not provide a wrapper or
-fake `ctl` command.
+`<release>-cubemastercli` Deployment. The image is built like CI from
+`CubeMaster/docker/Dockerfile.cubemastercli` and contains the real
+`cmd/cubemastercli` binary at `/usr/local/bin/cubemastercli`; it does not
+provide a wrapper or fake `ctl` command. Interactive bash sessions may use a
+bashrc helper that injects `--address` / `--port` from env; non-interactive
+`kubectl exec` commands should still pass those flags explicitly.
 
 The chart injects `CUBEMASTERCLI_ADDRESS` and `CUBEMASTERCLI_PORT` from the
 current CubeMaster endpoint. Because upstream `cubemastercli` does not read

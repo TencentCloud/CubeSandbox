@@ -295,10 +295,19 @@ install_cosfs_deb() {
 }
 
 install_cosfs() {
+  local arch
   log "install cosfs (doc: ${COSFS_DOC})"
   if [[ "$CHECK_ONLY" -eq 1 ]]; then
     return 0
   fi
+  # Official cosfs packages are amd64/x86_64 only; skip on arm temporarily.
+  arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+  case "${arch}" in
+    arm64|aarch64)
+      warn "skip cosfs on ${arch}: no official arm64 package (temporary); see ${COSFS_DOC}"
+      return 0
+      ;;
+  esac
   need_root
   if command -v cosfs >/dev/null 2>&1; then
     log "cosfs already on PATH; skipping install"

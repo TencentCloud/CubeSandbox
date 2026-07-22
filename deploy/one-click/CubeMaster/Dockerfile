@@ -66,17 +66,27 @@ RUN chmod +x /tmp/docker-install-volume-deps.sh \
     && /tmp/docker-install-volume-deps.sh \
     && rm -f /tmp/docker-install-volume-deps.sh
 
+# Layout matches one-click host install:
+#   /usr/local/services/cubetoolbox/CubeMaster/{bin,plugin,conf.yaml}
+#
 # --chmod folds the executable bit into the COPY so the (large, cache-busting)
 # binary lands in a single layer instead of being duplicated by a separate
-# `RUN chmod`, which would copy the whole file up into a second layer. The COPY
-# also creates the parent directory, so no separate `mkdir` is needed.
-COPY --chmod=0755 bin/cubemaster /usr/local/services/cubemaster/cubemaster
+# `RUN chmod`, which would copy the whole file up into a second layer.
+COPY --chmod=0755 bin/cubemaster \
+    /usr/local/services/cubetoolbox/CubeMaster/bin/cubemaster
+
+# COS volume Controller plugin shipped in the package (credentials stay out of
+# the image; operators mount volume-cos.conf at deploy time when needed).
+COPY --chmod=0755 plugin/cube-volume-cos \
+    /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-cos
+COPY plugin/volume-cos.conf.example \
+    /usr/local/services/cubetoolbox/CubeMaster/plugin/volume-cos.conf.example
 
 # Fail the build early if the binary cannot exec in this image (wrong arch, or a
 # missing/incompatible ELF interpreter / shared library) instead of only
 # discovering it at `docker run`. `--version` prints the version and exits
 # before any config or database initialization, so it needs no runtime deps.
-RUN ["/usr/local/services/cubemaster/cubemaster", "--version"]
+RUN ["/usr/local/services/cubetoolbox/CubeMaster/bin/cubemaster", "--version"]
 
 # No USER directive: cubemaster intentionally runs as root. It shells out to
 # `umoci unpack` to materialize OCI template images, and only as root (without
@@ -85,7 +95,7 @@ RUN ["/usr/local/services/cubemaster/cubemaster", "--version"]
 # (see pkg/templatecenter/image/export.go). Constrain it at deploy time (drop
 # capabilities, seccomp/AppArmor, read-only rootfs) rather than here.
 
-WORKDIR /usr/local/services/cubemaster/
+WORKDIR /usr/local/services/cubetoolbox/CubeMaster/
 
 EXPOSE 8089
 
@@ -103,4 +113,4 @@ STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 --start-period=60s \
     CMD curl -fsS http://127.0.0.1:8089/notify/health
 
-ENTRYPOINT ["/usr/local/services/cubemaster/cubemaster"]
+ENTRYPOINT ["/usr/local/services/cubetoolbox/CubeMaster/bin/cubemaster"]

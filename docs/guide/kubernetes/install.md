@@ -31,7 +31,7 @@ The control plane uses native Deployments; the compute plane (`cube-node` / boot
 | Kubernetes | **v1.24+** (self-managed / k3s / TKE, etc.) |
 | Tools | `kubectl`, Helm v3.10+ |
 | Storage | A usable StorageClass in the cluster (or switch to hostPath; see below) |
-| Image pull | Ability to pull Chart default images, or your own private registry |
+| Image pull | Ability to pull Chart default images (TCR int), or layer `values-cn.yaml` for users in China, or your own private registry |
 
 ### How node roles are split
 
@@ -192,6 +192,10 @@ bootstrap:
 
 ## 5. Helm install
 
+::: tip Users in Mainland China
+Add `-f deploy/kubernetes/chart/values-cn.yaml` to whichever install command you use below to pull images from the China registry.
+:::
+
 From the repository root:
 
 ```bash
@@ -215,7 +219,6 @@ helm upgrade --install cube ./deploy/kubernetes/chart \
   --wait \
   --timeout 90m
 ```
-
 
 Single-node trial:
 

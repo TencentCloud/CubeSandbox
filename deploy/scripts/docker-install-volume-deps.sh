@@ -5,9 +5,8 @@
 # Single source of truth for Volume Plugin host tools in Ubuntu container images.
 # Build/packaging injects this file into each image's Docker context as
 # docker-install-volume-deps.sh (do not maintain per-Dockerfile copies):
-#   - CubeMaster/Dockerfile          — COPY deploy/scripts/... (repo-root context)
-#   - CubeMaster/docker/Dockerfile   — build-cube-images.sh → temp context
-#   - cubelet/Dockerfile             — build-cube-images.sh → temp context
+#   - CubeMaster/docker/Dockerfile   — COPY deploy/scripts/... (repo-root context; CI + build-cube-images.sh)
+#   - Cubelet/Dockerfile             — COPY deploy/scripts/... (repo-root context; CI + build-cube-images.sh)
 #   - one-click CubeMaster/Dockerfile — build-release-bundle.sh → package CubeMaster/
 #
 # Installs:
@@ -63,7 +62,22 @@ install_jq() {
 }
 
 install_cosfs() {
-  local tag url tmp deb
+  local tag url tmp deb arch
+  arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+  case "${arch}" in
+    amd64|x86_64) ;;
+    arm64|aarch64)
+      # Official cosfs releases ship amd64/x86_64 packages only
+      # (https://github.com/tencentyun/cosfs/releases). Skip on arm until an
+      # arm64 package or source build is available; COS Attach needs cosfs.
+      log "skip cosfs on ${arch}: no official arm64 .deb (temporary)"
+      return 0
+      ;;
+    *)
+      echo "ERROR: unsupported architecture for cosfs: ${arch}" >&2
+      exit 1
+      ;;
+  esac
   tag="$(detect_ubuntu_cosfs_tag)"
   url="${COSFS_BASE_URL}/cosfs_1.0.25-${tag}_amd64.deb"
   log "install cosfs (${tag}) from ${url}"
@@ -76,6 +90,10 @@ install_cosfs() {
   curl -fsSL "$url" -o "$deb"
   dpkg -i "$deb" || apt-get install -y -f
   rm -rf "$tmp"
+  command -v cosfs >/dev/null 2>&1 || {
+    echo "ERROR: cosfs not on PATH after package install" >&2
+    exit 1
+  }
   cosfs --version | head -1
 }
 
@@ -103,7 +121,9 @@ main() {
   install_coscmd
   apt-get clean
   rm -rf /var/lib/apt/lists/*
-  log "installed: $(command -v jq) $(command -v cosfs) $(command -v coscmd)"
+  local cosfs_path
+  cosfs_path="$(command -v cosfs 2>/dev/null || echo '(skipped)')"
+  log "installed: $(command -v jq) ${cosfs_path} $(command -v coscmd)"
 }
 
 main "$@"

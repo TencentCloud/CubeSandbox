@@ -306,9 +306,9 @@ variable "cubeproxy_image" {
 }
 
 variable "webui_image" {
-  description = "Full webui image override."
+  description = "Full cube-webui image override."
   type        = string
-  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/webui:v0.5.1"
+  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-webui:v0.5.1"
 }
 
 variable "cube_lifecycle_manager_image" {

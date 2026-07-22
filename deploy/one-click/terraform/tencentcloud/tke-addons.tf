@@ -15,7 +15,7 @@ locals {
   cube_master_image = var.cubemaster_image != "" ? var.cubemaster_image : "${local.image_registry}/${local.image_namespace}/cube-master:${var.image_tag}"
   cube_api_image    = var.cubeapi_image != "" ? var.cubeapi_image : "${local.image_registry}/${local.image_namespace}/cube-api:${var.image_tag}"
   cube_proxy_image  = var.cubeproxy_image != "" ? var.cubeproxy_image : "${local.image_registry}/${local.image_namespace}/cube-proxy:${var.image_tag}"
-  cube_webui_image  = var.webui_image != "" ? var.webui_image : "${local.image_registry}/${local.image_namespace}/webui:${var.image_tag}"
+  cube_webui_image  = var.webui_image != "" ? var.webui_image : "${local.image_registry}/${local.image_namespace}/cube-webui:${var.image_tag}"
   cube_lcm_image    = var.cube_lifecycle_manager_image != "" ? var.cube_lifecycle_manager_image : "${local.image_registry}/${local.image_namespace}/cube-lifecycle-manager:${var.image_tag}"
   cube_admin_token  = var.cube_admin_token != "" ? var.cube_admin_token : random_password.cube_admin_token[0].result
 
@@ -396,7 +396,7 @@ resource "kubernetes_deployment" "cubemaster" {
           image = local.cube_master_image
           env {
             name  = "CUBE_MASTER_CONFIG_PATH"
-            value = "/etc/cubemaster/conf.yaml"
+            value = "/usr/local/services/cubetoolbox/CubeMaster/conf.yaml"
           }
           port {
             name           = "http"
@@ -416,7 +416,9 @@ resource "kubernetes_deployment" "cubemaster" {
           }
           volume_mount {
             name       = "conf"
-            mount_path = "/etc/cubemaster"
+            mount_path = "/usr/local/services/cubetoolbox/CubeMaster/conf.yaml"
+            sub_path   = "conf.yaml"
+            read_only  = true
           }
           # Shared CFS (NFS, ReadWriteMany): all replicas read/write the same
           # template / snapshot / runtime state.

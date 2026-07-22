@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Tencent. All rights reserved.
 #
-# Build-context filter for CubeMaster/Dockerfile (context = repository root).
+# Build-context filter for CubeMaster/docker/Dockerfile (context = repository root).
 # The repo-root .dockerignore is tailored to docker/Dockerfile.builder and would
 # exclude CubeMaster/ without these overrides. CubeMaster's go.mod replaces the
 # local cubelog, CubeDB and Cubelet modules via ../cubelog, ../CubeDB and
@@ -19,3 +19,10 @@
 !deploy
 !deploy/scripts
 !deploy/scripts/docker-install-volume-deps.sh
+# COS volume Controller plugin binary + example conf (credentials via chart Secret).
+!examples
+!examples/volume
+!examples/volume/cos
+!examples/volume/cos/binary
+!examples/volume/cos/binary/**
+!examples/volume/cos/volume-cos.conf.example

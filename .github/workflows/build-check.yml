@@ -193,9 +193,8 @@ jobs:
             fi
           done <<< "${EXPECTED_BINS}"
 
-  # R16 fix: Docker smoke build for CubeMaster and CubeOps release images.
-  # This catches context/dockerignore issues (R01/R05) that the regular
-  # source build doesn't cover.
+  # Docker smoke build for release images that use repo-root context +
+  # adjacent Dockerfile.dockerignore (catches context/ignore regressions).
   docker-smoke:
     name: Docker Smoke Build
     runs-on: ubuntu-latest
@@ -210,7 +209,39 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: CubeMaster/Dockerfile
+          file: CubeMaster/docker/Dockerfile
+          push: false
+          load: false
+
+      - name: Build cubemastercli image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: CubeMaster/docker/Dockerfile.cubemastercli
+          push: false
+          load: false
+
+      - name: Build cubelet image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Cubelet/Dockerfile
+          push: false
+          load: false
+
+      - name: Build network-agent image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: network-agent/Dockerfile
+          push: false
+          load: false
+
+      - name: Build cube-shim image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: CubeShim/Dockerfile
           push: false
           load: false
 

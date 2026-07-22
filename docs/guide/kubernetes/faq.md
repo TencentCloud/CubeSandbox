@@ -424,7 +424,7 @@ See [`deploy/kubernetes/images/README.md`](https://github.com/TencentCloud/CubeS
 
 ```bash
 ONE_CLICK_ARCH=arm64 \
-PUSH=1 REGISTRY=<your-registry> IMAGE_TAG=v0.5.1-arm64 \
+PUSH=1 REGISTRY=<your-registry> IMAGE_TAG=v0.5.1 \
 ./deploy/kubernetes/images/build-cube-images.sh
 ```
 

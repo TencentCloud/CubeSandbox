@@ -486,6 +486,16 @@ chart-owned StorageClass). This helper only picks which SC name a PVC binds to.
 {{- end -}}
 {{- end -}}
 
+{{- define "cube.volumeCosSecretName" -}}
+{{- if .Values.volumeCos.existingSecret -}}
+{{- .Values.volumeCos.existingSecret -}}
+{{- else if .Values.volumeCos.secretName -}}
+{{- .Values.volumeCos.secretName -}}
+{{- else -}}
+{{- printf "%s-volume-cos" (include "cube.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "cube.masterEndpoint" -}}
 {{- if .Values.externalControlPlane.enabled -}}
 {{- .Values.externalControlPlane.masterEndpoint -}}

@@ -880,7 +880,7 @@ setup_env() {
 	export TF_VAR_cubemaster_image="${TENCENTCLOUD_CUBEMASTER_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-master:${CUBE_IMAGE_TAG}}"
 	export TF_VAR_cubeapi_image="${TENCENTCLOUD_CUBEAPI_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-api:${CUBE_IMAGE_TAG}}"
 	export TF_VAR_cubeproxy_image="${TENCENTCLOUD_CUBEPROXY_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-proxy:${CUBE_IMAGE_TAG}}"
-	export TF_VAR_webui_image="${TENCENTCLOUD_WEBUI_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/webui:${CUBE_IMAGE_TAG}}"
+	export TF_VAR_webui_image="${TENCENTCLOUD_WEBUI_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-webui:${CUBE_IMAGE_TAG}}"
 	export TF_VAR_cube_lifecycle_manager_image="${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager:${CUBE_IMAGE_TAG}}"
 	SSH_PORT="${TENCENTCLOUD_SSH_PORT:-22}"
 	[ -n "${TENCENTCLOUD_MYSQL_PASSWORD:-}" ] && export TF_VAR_mysql_root_password="$TENCENTCLOUD_MYSQL_PASSWORD"

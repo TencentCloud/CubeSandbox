@@ -24,7 +24,7 @@
 #
 # Selecting images:
 #   build_images.sh                       # all five (default)
-#   build_images.sh cube-api webui        # only the listed ones
+#   build_images.sh cube-api cube-webui   # only the listed ones
 #
 # Options / environment:
 #   --push | PUSH=1            also `docker push` each image after building
@@ -75,7 +75,7 @@ CUBE_API_IMAGE="${CUBE_API_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-api:${TAG}}"
 CUBE_MASTER_IMAGE="${CUBE_MASTER_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-master:${TAG}}"
 CUBE_PROXY_IMAGE="${CUBE_PROXY_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-proxy:${TAG}}"
 CUBE_LCM_IMAGE="${CUBE_LCM_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-lifecycle-manager:${TAG}}"
-CUBE_WEBUI_IMAGE="${CUBE_WEBUI_IMAGE:-${REGISTRY}/${NAMESPACE}/webui:${TAG}}"
+CUBE_WEBUI_IMAGE="${CUBE_WEBUI_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-webui:${TAG}}"
 
 WEB_UI_UPSTREAM="${WEB_UI_UPSTREAM:-http://host.docker.internal:3000}"
 PUSH="${PUSH:-0}"
@@ -258,18 +258,18 @@ main() {
 		case "${arg}" in
 		-h | --help) usage 0 ;;
 		--push) PUSH=1 ;;
-		all) targets+=(cube-api cube-master cube-proxy cube-lifecycle-manager webui) ;;
+		all) targets+=(cube-api cube-master cube-proxy cube-lifecycle-manager cube-webui) ;;
 		cube-api | cubeapi) targets+=(cube-api) ;;
 		cube-master | cubemaster | master) targets+=(cube-master) ;;
 		cube-proxy | cubeproxy | proxy) targets+=(cube-proxy) ;;
 		cube-lifecycle-manager | lifecycle-manager | lcm) targets+=(cube-lifecycle-manager) ;;
-		webui | cube-webui) targets+=(webui) ;;
+		webui | cube-webui) targets+=(cube-webui) ;;
 		*) die "unknown argument: ${arg} (run with --help)" ;;
 		esac
 	done
 
 	if [[ "${#targets[@]}" -eq 0 ]]; then
-		targets=(cube-api cube-master cube-proxy cube-lifecycle-manager webui)
+		targets=(cube-api cube-master cube-proxy cube-lifecycle-manager cube-webui)
 	fi
 
 	command -v docker >/dev/null 2>&1 || die "docker is required but was not found in PATH"
@@ -282,7 +282,7 @@ main() {
 		cube-master) build_cube_master ;;
 		cube-proxy) build_cube_proxy ;;
 		cube-lifecycle-manager) build_cube_lifecycle_manager ;;
-		webui) build_cube_webui ;;
+		cube-webui) build_cube_webui ;;
 		esac
 	done
 

@@ -39,7 +39,7 @@ spec:
           env:
             {{- include "cube.timezoneEnv" . | nindent 12 }}
             - name: CUBE_MASTER_CONFIG_PATH
-              value: /usr/local/services/cubemaster/conf.yaml
+              value: /usr/local/services/cubetoolbox/CubeMaster/conf.yaml
             - name: CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR
               value: /data/CubeMaster/storage
             - name: CUBE_NODE_IPS
@@ -70,9 +70,15 @@ spec:
           {{- end }}
           volumeMounts:
             - name: cube-master-config
-              mountPath: /usr/local/services/cubemaster/conf.yaml
+              mountPath: /usr/local/services/cubetoolbox/CubeMaster/conf.yaml
               subPath: conf.yaml
               readOnly: true
+          {{- if .Values.volumeCos.enabled }}
+            - name: volume-cos-conf
+              mountPath: /usr/local/services/cubetoolbox/CubeMaster/plugin/volume-cos.conf
+              subPath: volume-cos.conf
+              readOnly: true
+          {{- end }}
           {{- if .Values.cubeEgress.enabled }}
             - name: cube-egress-ca
               mountPath: /etc/cube/ca
@@ -82,42 +88,20 @@ spec:
               mountPath: /data/log/CubeMaster
             - name: cube-master-storage
               mountPath: /data/CubeMaster/storage
-          {{- if .Values.controlPlane.templateBuilder.enabled }}
-            - name: docker-run
-              mountPath: /var/run
-          {{- end }}
           {{- with .Values.controlPlane.master.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-        {{- if .Values.controlPlane.templateBuilder.enabled }}
-        - name: template-builder
-          image: {{ include "cube.image" .Values.images.templateBuilder | quote }}
-          imagePullPolicy: {{ .Values.images.templateBuilder.pullPolicy }}
-          securityContext:
-            privileged: {{ .Values.controlPlane.templateBuilder.privileged }}
-          {{- if .Values.global.timezone }}
-          env:
-            {{- include "cube.timezoneEnv" . | nindent 12 }}
-          {{- end }}
-          {{- with .Values.controlPlane.templateBuilder.dockerdArgs }}
-          args:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
-          volumeMounts:
-            - name: docker-run
-              mountPath: /var/run
-            - name: docker-graph
-              mountPath: /var/lib/docker
-          {{- with .Values.controlPlane.templateBuilder.resources }}
-          resources:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
-        {{- end }}
       volumes:
         - name: cube-master-config
           secret:
             secretName: {{ include "cube.masterConfigSecretName" . }}
+      {{- if .Values.volumeCos.enabled }}
+        - name: volume-cos-conf
+          secret:
+            secretName: {{ include "cube.volumeCosSecretName" . }}
+            defaultMode: 0400
+      {{- end }}
       {{- if .Values.cubeEgress.enabled }}
         - name: cube-egress-ca
           secret:
@@ -136,12 +120,6 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
-      {{- if .Values.controlPlane.templateBuilder.enabled }}
-        - name: docker-run
-          emptyDir: {}
-        - name: docker-graph
-          emptyDir: {}
-      {{- end }}
 ---
 apiVersion: v1
 kind: Service

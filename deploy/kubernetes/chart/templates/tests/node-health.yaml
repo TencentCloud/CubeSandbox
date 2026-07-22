@@ -116,7 +116,7 @@ spec:
           {{- end }}
 {{ if eq (include "cube.cubemastercliEnabled" .) "true" }}
 {{- $images := default dict .Values.images -}}
-{{- $cubemastercliImage := default (dict "repository" "ccr.ccs.tencentyun.com/cubesandbox-chart/cubemastercli" "tag" "v0.5.1" "pullPolicy" "Always") (get $images "cubemastercli") -}}
+{{- $cubemastercliImage := default (dict "repository" "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cubemastercli" "tag" "v0.5.1" "pullPolicy" "Always") (get $images "cubemastercli") -}}
 ---
 apiVersion: v1
 kind: Pod
