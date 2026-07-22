@@ -15,6 +15,7 @@ mod routes;
 mod services;
 mod state;
 
+use anyhow::Context;
 use clap::Parser;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -131,7 +132,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     // ── Config ─────────────────────────────────────────────────────────────
-    let mut cfg = config::ServerConfig::from_env().unwrap_or_default();
+    let mut cfg = config::ServerConfig::from_env()
+        .context("failed to load CubeAPI configuration from environment")?;
 
     // CLI flags override env vars / config file (highest priority)
     if cli.debug {
@@ -209,20 +211,21 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
 
     let file_logger = FileLogger::new(cfg.log_dir.clone(), cfg.log_prefix.clone()).await?;
 
-    // FilteredLogger gates by level → MultiLogger fans out to file (+ future backends)
-    let logger: logging::ArcLogger = arc(FilteredLogger::new(
-        arc(
-            MultiLogger::new().add(arc(file_logger)), // Uncomment to add more backends:
-                                                      // .add(arc(logging::http::HttpLogger::new(Default::default())))
-                                                      // .add(arc(logging::otlp::OtlpLogger::new()))
-        ),
-        min_level,
-    ));
+    let mut multi_logger = MultiLogger::new().add(arc(file_logger));
+    let webhook_endpoint_count = cfg.webhook_endpoints.len();
+    if webhook_endpoint_count > 0 {
+        let http_logger = logging::http::HttpLogger::new(cfg.webhook_endpoints.clone())?;
+        multi_logger = multi_logger.add(arc(http_logger));
+    }
+
+    // FilteredLogger gates by level → MultiLogger fans out to file + configured backends.
+    let logger: logging::ArcLogger = arc(FilteredLogger::new(arc(multi_logger), min_level));
 
     tracing::info!(
         log_dir = %cfg.log_dir,
         log_prefix = %cfg.log_prefix,
         min_level = %min_level,
+        webhook_endpoints = webhook_endpoint_count,
         "structured event logger started"
     );
 

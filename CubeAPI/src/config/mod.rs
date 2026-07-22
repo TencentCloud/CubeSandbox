@@ -3,6 +3,7 @@
 //
 
 use serde::Deserialize;
+use std::fmt;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ServerConfig {
@@ -76,6 +77,54 @@ pub struct ServerConfig {
     /// Env var: CUBE_API_KEY
     #[serde(default)]
     pub cube_api_key: Option<String>,
+
+    /// Webhook endpoints for structured lifecycle event delivery.
+    ///
+    /// Env var: CUBE_API_WEBHOOK_ENDPOINTS
+    /// Value: JSON array of WebhookEndpointConfig objects.
+    #[serde(default)]
+    pub webhook_endpoints: Vec<WebhookEndpointConfig>,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct WebhookEndpointConfig {
+    pub url: String,
+
+    #[serde(default = "default_webhook_events")]
+    pub events: Vec<String>,
+
+    #[serde(default)]
+    pub secret: Option<String>,
+
+    #[serde(default = "default_webhook_queue_capacity")]
+    pub queue_capacity: usize,
+
+    #[serde(default = "default_webhook_max_retries")]
+    pub max_retries: usize,
+
+    #[serde(default = "default_webhook_retry_base_ms")]
+    pub retry_base_ms: u64,
+
+    #[serde(default = "default_webhook_retry_max_ms")]
+    pub retry_max_ms: u64,
+
+    #[serde(default = "default_webhook_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl fmt::Debug for WebhookEndpointConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WebhookEndpointConfig")
+            .field("url", &self.url)
+            .field("events", &self.events)
+            .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
+            .field("queue_capacity", &self.queue_capacity)
+            .field("max_retries", &self.max_retries)
+            .field("retry_base_ms", &self.retry_base_ms)
+            .field("retry_max_ms", &self.retry_max_ms)
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
 }
 
 fn default_bind() -> String {
@@ -109,14 +158,54 @@ fn default_log_dir() -> String {
 fn default_log_prefix() -> String {
     "cube-api".to_string()
 }
+fn default_webhook_events() -> Vec<String> {
+    [
+        "sandbox.created",
+        "sandbox.deleted",
+        "sandbox.paused",
+        "sandbox.resumed",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+fn default_webhook_queue_capacity() -> usize {
+    1024
+}
+fn default_webhook_max_retries() -> usize {
+    3
+}
+fn default_webhook_retry_base_ms() -> u64 {
+    500
+}
+fn default_webhook_retry_max_ms() -> u64 {
+    30_000
+}
+fn default_webhook_timeout_secs() -> u64 {
+    5
+}
+
+fn webhook_endpoints_from_env() -> anyhow::Result<Option<Vec<WebhookEndpointConfig>>> {
+    let value = match std::env::var("CUBE_API_WEBHOOK_ENDPOINTS") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => return Ok(None),
+    };
+
+    let endpoints = serde_json::from_str::<Vec<WebhookEndpointConfig>>(&value)
+        .map_err(|e| anyhow::anyhow!("invalid CUBE_API_WEBHOOK_ENDPOINTS JSON: {e}"))?;
+    Ok(Some(endpoints))
+}
 
 impl ServerConfig {
     pub fn from_env() -> anyhow::Result<Self> {
         let _ = dotenvy::dotenv();
-        let cfg = config::Config::builder()
+        let mut cfg: Self = config::Config::builder()
             .add_source(config::Environment::default().separator("__"))
             .build()?
             .try_deserialize()?;
+        if let Some(endpoints) = webhook_endpoints_from_env()? {
+            cfg.webhook_endpoints = endpoints;
+        }
         Ok(cfg)
     }
 }
@@ -135,6 +224,44 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             cube_api_key: std::env::var("CUBE_API_KEY").ok().filter(|s| !s.is_empty()),
+            webhook_endpoints: webhook_endpoints_from_env()
+                .ok()
+                .flatten()
+                .unwrap_or_default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn webhook_endpoint_defaults_to_sandbox_lifecycle_events() {
+        let endpoint: WebhookEndpointConfig =
+            serde_json::from_str(r#"{"url":"http://127.0.0.1:9000/webhook"}"#)
+                .expect("endpoint config");
+
+        assert_eq!(
+            endpoint.events,
+            vec![
+                "sandbox.created",
+                "sandbox.deleted",
+                "sandbox.paused",
+                "sandbox.resumed",
+            ]
+        );
+    }
+
+    #[test]
+    fn webhook_endpoint_debug_redacts_secret() {
+        let endpoint: WebhookEndpointConfig = serde_json::from_str(
+            r#"{"url":"http://127.0.0.1:9000/webhook","secret":"super-secret"}"#,
+        )
+        .expect("endpoint config");
+        let debug = format!("{endpoint:?}");
+
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("super-secret"));
     }
 }

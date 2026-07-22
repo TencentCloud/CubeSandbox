@@ -56,6 +56,10 @@ dotenvy = "0.15"
 # ── UUID ──────────────────────────────────────────────────────────────────
 uuid = { version = "1", features = ["v4", "serde"] }
 
+# ── Webhook signing ───────────────────────────────────────────────────────
+hmac = "0.12"
+sha2 = "0.10"
+
 # ── High-concurrency in-memory state ──────────────────────────────────────
 # Lock-free concurrent HashMap: O(1) reads without global lock
 dashmap = "5"
