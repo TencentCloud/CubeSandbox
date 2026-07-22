@@ -1126,9 +1126,16 @@ func UpsertReplica(ctx context.Context, templateID, instanceType string, replica
 		return ErrTemplateStoreNotInitialized
 	}
 	record := &models.TemplateReplica{}
-	dbq := store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
-		Where("template_id = ? AND node_id = ?", templateID, replica.NodeID)
-	err := dbq.First(record).Error
+	// NB: a *gorm.DB statement must not be reused across two finalizing calls.
+	// First() mutates the statement (adds ORDER BY/LIMIT and pins the table),
+	// so feeding the same builder into Updates() makes GORM emit SQL that
+	// references t_cube_template_replica twice. MySQL tolerates that; Postgres
+	// rejects it with 42712 ("table name specified more than once"). Build a
+	// fresh WHERE for each call so the statement is finalized exactly once —
+	// correct on both dialects.
+	err := store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
+		Where("template_id = ? AND node_id = ?", templateID, replica.NodeID).
+		First(record).Error
 	if err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
@@ -1136,7 +1143,9 @@ func UpsertReplica(ctx context.Context, templateID, instanceType string, replica
 		return store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
 			Create(replicaStatusToModel(templateID, instanceType, replica)).Error
 	}
-	return dbq.Updates(replicaStatusUpdateFields(instanceType, replica)).Error
+	return store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
+		Where("template_id = ? AND node_id = ?", templateID, replica.NodeID).
+		Updates(replicaStatusUpdateFields(instanceType, replica)).Error
 }
 
 func EnsureReadyReplica(ctx context.Context, templateID string) error {

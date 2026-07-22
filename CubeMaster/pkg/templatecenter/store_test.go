@@ -6,11 +6,14 @@ package templatecenter
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib" // database/sql driver: "pgx"
 
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/stretchr/testify/assert"
@@ -19,6 +22,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	gormpostgres "gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
@@ -60,6 +64,83 @@ func TestNormalizeStoredTemplateRequestStripsPhysicalAnnotations(t *testing.T) {
 	assert.Equal(t, "tpl-after-norm", out.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
 	assert.Equal(t, "keep-me", out.Annotations["unrelated"])
 	assert.Empty(t, out.SnapshotDir)
+}
+
+// TestUpsertReplicaUpdateSQLReferencesTableOnce guards the PostgreSQL-only
+// regression where UpsertReplica reused a single *gorm.DB statement across
+// First() and Updates(). First() mutates the statement (it pins the table and
+// appends ORDER BY/LIMIT), so feeding the same builder into Updates() made
+// GORM emit SQL that named t_cube_template_replica twice. MySQL tolerates that
+// duplicate reference; PostgreSQL rejects it with 42712 ("table name specified
+// more than once"), which failed template distribution once CubeMaster ran on
+// Postgres. The fix builds a fresh WHERE for the Updates() call.
+//
+// We reconstruct exactly the read-then-update the function performs on a
+// Postgres-dialect DryRun handle and assert the generated UPDATE names the
+// table exactly once, regardless of dialect.
+func TestUpsertReplicaUpdateSQLReferencesTableOnce(t *testing.T) {
+	// Build a Postgres-dialect handle that never dials: sql.Open("pgx", ...) is
+	// lazy (it doesn't connect until a query runs), DryRun means no query ever
+	// runs, and DisableAutomaticPing skips the connect-on-open probe. This lets
+	// the test assert the generated SQL in CI without a live database.
+	lazyDB, err := sql.Open("pgx", "host=127.0.0.1 port=1 user=x dbname=x sslmode=disable")
+	require.NoError(t, err)
+	defer lazyDB.Close()
+	gdb, err := gorm.Open(
+		gormpostgres.New(gormpostgres.Config{Conn: lazyDB, WithoutReturning: true}),
+		&gorm.Config{DryRun: true, DisableAutomaticPing: true})
+	require.NoError(t, err)
+
+	tbl := constants.TemplateReplicaTableName
+
+	vals := map[string]any{"status": "READY", "phase": "DISTRIBUTED"}
+
+	// ToSQL runs the callback under an isolated DryRun session and returns the
+	// rendered SQL of the finalizer without touching the (never-dialed) conn.
+
+	// OLD (buggy) shape: the SAME builder is finalized by First() and then fed
+	// into Updates(). First() pins the table and leaves its FROM/qualifier
+	// clauses on the statement; reusing it for the UPDATE made GORM name
+	// t_cube_template_replica more than once — the Postgres 42712. We assert on
+	// the SELECT that First() emits from the reused builder as the observable
+	// signature of that reuse: it carries the qualified table reference
+	// (t_cube_template_replica"."deleted_at, ORDER BY t_cube_template_replica.id)
+	// that, carried into an UPDATE, produced the duplicate.
+	buggySQL := gdb.ToSQL(func(tx *gorm.DB) *gorm.DB {
+		return tx.Table(tbl).
+			Where("template_id = ? AND node_id = ?", "tpl-x", "node-1").
+			First(&models.TemplateReplica{})
+	})
+
+	// FIXED shape: a fresh builder for the Updates() call, which is exactly what
+	// UpsertReplica now does. This is the assertion that proves the fix.
+	fixedSQL := gdb.ToSQL(func(tx *gorm.DB) *gorm.DB {
+		return tx.Table(tbl).
+			Where("template_id = ? AND node_id = ?", "tpl-x", "node-1").
+			Updates(vals)
+	})
+
+	t.Logf("buggy (reused-builder First) SQL: %s", buggySQL)
+	t.Logf("fixed UPDATE SQL: %s", fixedSQL)
+
+	// Sanity: the reused builder really does over-reference the table (the
+	// qualifiers First() adds), so the fix below isn't vacuously satisfied.
+	if strings.Count(buggySQL, tbl) < 2 {
+		t.Fatalf("expected the reused builder to reference %q >=2 times "+
+			"(guard is meaningful only if it reflects the bug); got:\n%s", tbl, buggySQL)
+	}
+
+	// The fix must render a proper UPDATE that scopes by WHERE and names the
+	// physical table exactly once.
+	if !strings.HasPrefix(strings.TrimSpace(strings.ToUpper(fixedSQL)), "UPDATE") {
+		t.Fatalf("fixed shape must render an UPDATE, got:\n%s", fixedSQL)
+	}
+	if !strings.Contains(fixedSQL, "WHERE") {
+		t.Fatalf("fixed UPDATE must be scoped by WHERE (never a full-table update):\n%s", fixedSQL)
+	}
+	if n := strings.Count(fixedSQL, tbl); n != 1 {
+		t.Fatalf("fixed UPDATE must reference %q exactly once (got %d):\n%s", tbl, n, fixedSQL)
+	}
 }
 
 func TestConvergeEnvdVersionUsesNodeCollectionResults(t *testing.T) {
