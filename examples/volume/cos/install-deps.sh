@@ -1,24 +1,21 @@
 #!/usr/bin/env bash
 # Install Tencent Cloud COS dependencies for CubeSandbox volume plugins.
 #
-# Shipped in one-click / release packages next to the plugin binaries:
-#   /usr/local/services/cubetoolbox/CubeMaster/plugin/install-deps.sh
-#   /usr/local/services/cubetoolbox/Cubelet/plugin/install-deps.sh
-# Source tree copy: examples/volume/cos/install-deps.sh
+# Packaged under CubeMaster/plugin/ and Cubelet/plugin/ in release bundles.
+# Source: examples/volume/cos/install-deps.sh
 #
-# Where to run (multi-node clusters):
-#   cosfs  → Cubelet node(s)     attach/detach   binary + rpc
-#   coscmd → CubeMaster node      create/destroy  binary only
-#   jq     → CubeMaster node      binary JSON     binary only
+# Where to run (multi-node):
+#   cosfs  → Cubelet     attach/detach   binary + rpc
+#   coscmd → CubeMaster  create/destroy  binary only
+#   jq     → CubeMaster  binary JSON     binary only
 #
-# Usage (after one-click install, on the matching node):
-#   sudo /usr/local/services/cubetoolbox/Cubelet/plugin/install-deps.sh --cosfs
-#   sudo /usr/local/services/cubetoolbox/CubeMaster/plugin/install-deps.sh --coscmd --jq
-#   sudo /usr/local/services/cubetoolbox/Cubelet/plugin/install-deps.sh --all   # single-node
+# Usage:
+#   sudo .../Cubelet/plugin/install-deps.sh --cosfs
+#   sudo .../CubeMaster/plugin/install-deps.sh --coscmd --jq
+#   sudo .../Cubelet/plugin/install-deps.sh --all           # single-node
+#   ./install-deps.sh --all --check-only
 #
-# Architecture:
-#   cosfs official packages are x86_64/amd64 only. ARM/aarch64 is NOT supported
-#   (COS volume Node attach depends on cosfs). This script refuses --cosfs on ARM.
+# ARM/aarch64 is not supported (--cosfs refuses); official cosfs is x86_64/amd64 only.
 #
 # Supported families (auto-detected via /etc/os-release):
 #   RHEL/CentOS/TencentOS/Rocky/Alma 7/8/9  — cosfs RPM + yum/dnf
@@ -35,11 +32,9 @@
 #     platform:elN  → treat as EL N (e.g. el9)
 #     platform:tlN  → TencentOS Server N (e.g. tl4); treat as modern EL8+ cosfs
 #
-# Official docs (latest packages / manual install):
+# Official docs:
 #   cosfs:  https://cloud.tencent.com/document/product/436/10976
 #   coscmd: https://cloud.tencent.com/document/product/436/6883
-#
-# RPC plugin Controller uses COS Go SDK (go mod); no coscmd — see cos/rpc/README.md
 
 set -euo pipefail
 
@@ -56,7 +51,7 @@ CHECK_ONLY=0
 COSFS_EL_FLAVOR=""
 
 usage() {
-  sed -n '2,28p' "$0"
+  sed -n '2,24p' "$0"
   exit "${1:-0}"
 }
 

@@ -31,7 +31,7 @@ This guide is for **first-time Volume Plugin users**: follow the steps in order 
 **Single-machine dev:** CubeMaster and Cubelet on one host — install deps once.  
 **Multi-node:** See the table in [§1 Install dependencies](#1-install-dependencies).
 
-> **Architecture:** This COS Volume plugin **does not support ARM / aarch64**. Node attach depends on [cosfs](https://cloud.tencent.com/document/product/436/10976), and official cosfs packages are **x86_64 / amd64 only**. Run Cubelet (and any node that mounts COS) on x86_64 hosts.
+> **Architecture:** ARM / aarch64 is not supported (official cosfs packages are x86_64 / amd64 only).
 
 ---
 
@@ -50,44 +50,35 @@ This guide is for **first-time Volume Plugin users**: follow the steps in order 
 
 ### Container deployment (Kubernetes / images)
 
-When CubeMaster and Cubelet run from **container images** (e.g. Kubernetes / Helm), **cosfs, coscmd, and jq** are already packaged in the images — you do **not** need to run `install-deps.sh` on the host.
+Container images already include **cosfs, coscmd, and jq** — no need to run the script below.
 
-### Option A: install script (recommended for bare metal / systemd one-click)
+### Option A: install script (recommended for bare metal / one-click)
 
-On bare metal or one-click (processes under systemd), install host deps. Release packages ship `install-deps.sh` next to the plugin under **`CubeMaster/plugin/`** and **`Cubelet/plugin/`**. Supports CentOS / TencentOS / Ubuntu, etc. (**x86_64 only**); runs basic checks after install.
+On bare metal or one-click, run from the `plugin` directory on the matching node (default prefix `/usr/local/services/cubetoolbox`):
 
-Default install prefix: `/usr/local/services/cubetoolbox`.
-
-**Cubelet node** (runs Cubelet, attach):
+**Cubelet node:**
 
 ```bash
 sudo /usr/local/services/cubetoolbox/Cubelet/plugin/install-deps.sh --cosfs
 ```
 
-**CubeMaster node** (binary create/destroy):
+**CubeMaster node:**
 
 ```bash
 sudo /usr/local/services/cubetoolbox/CubeMaster/plugin/install-deps.sh --coscmd --jq
 ```
 
-**Single machine, full binary stack** (either plugin directory is fine):
+**Single machine** (CubeMaster and Cubelet on one host):
 
 ```bash
 sudo /usr/local/services/cubetoolbox/Cubelet/plugin/install-deps.sh --all
 ```
 
-Check only (no install):
-
-```bash
-/usr/local/services/cubetoolbox/Cubelet/plugin/install-deps.sh --cosfs --check-only
-/usr/local/services/cubetoolbox/CubeMaster/plugin/install-deps.sh --coscmd --jq --check-only
-```
-
-When developing from a source checkout, you can also use `examples/volume/cos/install-deps.sh` (same flags).
+Check only (no install): add `--check-only`.
 
 ### Option B: manual install — Tencent Cloud official docs
 
-If the script cannot cover your distro or custom image, **follow Tencent docs** and verify with the commands below.
+**Follow Tencent docs** and verify with the commands below.
 
 | Tool | Official doc |
 |------|--------------|
@@ -424,7 +415,7 @@ Step-by-step: [rpc/README.md](rpc/README.md).
 
 ```
 examples/volume/cos/
-├── install-deps.sh          # deps + checks (also shipped under Cube*/plugin/)
+├── install-deps.sh          # deps + checks
 ├── verify_volume.py         # Python SDK verification script
 ├── volume-cos.conf.example
 ├── binary/                  # Shell plugin source walkthrough

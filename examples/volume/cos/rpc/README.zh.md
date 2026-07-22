@@ -29,20 +29,16 @@
 | 4 | 配置 CubeMaster + Cubelet `socket_path` 与插件 `SOCKET`（`/run/cube-volume-cos-rpc.sock`） |
 | 5 | SDK：`Volume.create(..., driver="cos-rpc")` 验证 |
 
-**本示例不使用 coscmd**；Create/Destroy 由 COS Go SDK 完成（`go mod` 拉取，见 [31215](https://cloud.tencent.com/document/product/436/31215)）。  
-**架构**：不支持 ARM / aarch64（Cubelet 侧仍依赖 cosfs，官方无 ARM 包）。容器镜像已内置 cosfs；裸机见 [../README.zh.md §1](../README.zh.md#1-安装依赖)。
+**本示例不使用 coscmd**；Create/Destroy 由 COS Go SDK 完成（`go mod` 拉取，见 [31215](https://cloud.tencent.com/document/product/436/31215)）。
 
 ---
 
 ## 1. cosfs（Cubelet 节点）
 
-Attach/Detach 通过 cosfs 挂载。**仅在 Cubelet 节点**安装，步骤与校验见 [../README.zh.md §1](../README.zh.md#1-安装依赖)。
-
-容器部署时镜像已含 cosfs，可跳过安装。裸机 / one-click（**仅 x86_64**）：
+Attach/Detach 通过 cosfs 挂载。安装与校验见 [../README.zh.md §1](../README.zh.md#1-安装依赖)。
 
 ```bash
 sudo /usr/local/services/cubetoolbox/Cubelet/plugin/install-deps.sh --cosfs
-# 源码树开发：sudo ../install-deps.sh --cosfs
 ls /dev/fuse && which cosfs && cosfs --version
 ```
 
