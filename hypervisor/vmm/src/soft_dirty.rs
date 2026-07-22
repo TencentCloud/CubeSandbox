@@ -29,7 +29,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::time::Instant;
 use thiserror::Error;
-use vm_memory::{GuestAddress, GuestMemory, GuestMemoryMmap};
+use vm_memory::{Bytes, GuestAddress, GuestMemory, GuestMemoryMmap};
 #[cfg(test)]
 use vm_migration::protocol::MemoryRange;
 use vm_migration::protocol::MemoryRangeTable;
@@ -118,25 +118,102 @@ impl SoftDirtyStats {
     }
 }
 
-/// Probe whether the running kernel supports the soft-dirty mechanism.
+/// Probe whether the running kernel actually supports soft-dirty tracking,
+/// and on success leave the tracker armed for the next snapshot window.
 ///
-/// This performs a non-destructive write of "4" to `/proc/self/clear_refs`.
-/// On kernels with `CONFIG_MEM_SOFT_DIRTY=y` this clears soft-dirty bits and
-/// returns success. On kernels without this config the write returns
-/// `EINVAL`, which we map to `false`.
+/// # Approach
 ///
-/// Note: this call is technically not "non-destructive" — it does clear any
-/// existing soft-dirty bits. The probe is therefore intended to be invoked
-/// once at `MemoryManager` construction time, before any soft-dirty cycle
-/// has started, where clearing has no observable effect.
+/// Writing "4" to `/proc/self/clear_refs` always succeeds (even when
+/// `CONFIG_MEM_SOFT_DIRTY=n` the kernel silently no-ops), so its return
+/// value is not a reliable probe.  Instead we perform a real round-trip:
+///
+/// 1. `mmap` a fresh anonymous page.  On kernels with `CONFIG_MEM_SOFT_DIRTY=y`
+///    the VMA is created with the `VM_SOFTDIRTY` flag, so the **first write**
+///    that installs the PTE will propagate that flag into PTE bit 55.
+///    On kernels without the config, bit 55 is never observed by the page
+///    table walker and stays 0.
+///
+/// 2. Write one byte to the page.  This forces a minor fault, the kernel
+///    installs (or re-validates) the PTE, and — when CONFIG_MEM_SOFT_DIRTY
+///    is active — sets bit 55 to 1.
+///
+/// 3. Read `/proc/self/pagemap` for that page.  If bit 55 is 1 the kernel
+///    really tracks soft-dirty; if it is 0 the kernel does not.
+///
+/// 4. **Only on success** do we call `clear_soft_dirty()` once to arm the
+///    tracker process-wide for the caller's next snapshot window.  When the
+///    kernel does not support soft-dirty, no `clear_refs(4)` is performed
+///    at all, saving the heavy mmap_lock-write PTE walk on unsupported
+///    kernels.
+///
+/// # Arm side-effect
+///
+/// When the probe succeeds, `clear_soft_dirty()` is called exactly once,
+/// which clears every PTE soft-dirty bit process-wide.  The caller
+/// (`MemoryManager`) depends on this to start a new observation window.
+/// When the probe fails, no arm is performed and the caller must fall back
+/// to the pagemap_anon path.
 pub fn probe_soft_dirty_support() -> bool {
-    match clear_soft_dirty() {
-        Ok(()) => true,
+    let page_size = host_page_size();
+
+    // Step 1: allocate a page-aligned anonymous scratch region. The
+    // `GuestMemoryMmap::from_ranges` API issues an `mmap(MAP_PRIVATE |
+    // MAP_ANONYMOUS)`, which is exactly the VMA type whose PTEs the
+    // soft-dirty tracker targets. All `unsafe` is encapsulated by
+    // `vm-memory`, so this function stays safe.
+    let scratch = match GuestMemoryMmap::<()>::from_ranges(&[(
+        GuestAddress(0),
+        page_size as usize,
+    )]) {
+        Ok(mem) => mem,
         Err(e) => {
-            debug!("Soft-dirty kernel support probe failed: {}", e);
-            false
+            debug!("Soft-dirty probe: scratch mmap failed: {:?}", e);
+            return false;
         }
+    };
+
+    let host_addr = match scratch.get_host_address(GuestAddress(0)) {
+        Ok(p) => p as u64,
+        Err(e) => {
+            debug!("Soft-dirty probe: get_host_address failed: {:?}", e);
+            return false;
+        }
+    };
+
+    // Step 2: write one byte.  This is the **first** write to this page,
+    // so the kernel must install a real PTE.  On CONFIG_MEM_SOFT_DIRTY=y
+    // kernels the VMA carries VM_SOFTDIRTY, and the fault handler
+    // propagates that into PTE bit 55 accordingly.
+    if let Err(e) = scratch.write(&[0xabu8], GuestAddress(0)) {
+        debug!("Soft-dirty probe: verification write failed: {:?}", e);
+        return false;
     }
+
+    // Step 3: read the pagemap entry and check bit 55.
+    let bit55_set = get_soft_dirty_pages(host_addr, page_size)
+        .map(|bits| bits.len() == 1 && bits[0])
+        .unwrap_or(false);
+
+    // `scratch` is dropped at end of scope → `munmap` — no manual cleanup.
+
+    if !bit55_set {
+        debug!(
+            "Soft-dirty probe: write succeeded but bit 55 never flipped — \
+             kernel lacks CONFIG_MEM_SOFT_DIRTY \
+             (e.g. ARM64 or a stripped-down x86 kernel)"
+        );
+        return false;
+    }
+
+    // Step 4: kernel really supports soft-dirty.  Arm the tracker by
+    // clearing every PTE's soft-dirty bit process-wide.  This is the
+    // *only* `clear_refs(4)` call in the probe.
+    if let Err(e) = clear_soft_dirty() {
+        debug!("Soft-dirty probe: post-verify arm failed: {}", e);
+        return false;
+    }
+
+    true
 }
 
 /// Clear the soft-dirty bit on every PTE of the current process and (re)arm
@@ -769,3 +846,4 @@ mod tests {
         assert_eq!(stats.saved_bytes, 2 * page_size);
     }
 }
+
