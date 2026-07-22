@@ -2,88 +2,88 @@
 
 [中文文档](README_zh.md)
 
-Run **allowlisted agent tool commands** inside a Cube Sandbox MicroVM, return
-stdout / small artifacts, and **fail fast** when the agent asks for a
-non-allowlisted command.
+Demonstrates argv allowlisting for agent tools **before** `Sandbox.create`:
+allowlisted binaries run in a Cube Sandbox MicroVM; others fail on the host
+(no sandbox on the deny path).
 
-This is **not** a general code interpreter, Jupyter runtime, or full agent host
-(OpenClaw / OpenAI Agents). The gate lives on the **host** (SDK caller) so the
-security narrative stays honest: the MicroVM still isolates execution, while the
-example shows how an agent should refuse arbitrary tools before they are sent.
+The gate is host-side (`assert_allowlisted`). It is not egress CIDR policy or
+guest kernel enforcement.
 
-## 1. How it differs
+**Use when:** the host may only forward a fixed tool set (`echo` / `ls` /
+`python3`, …) and must reject shells / network tools early.
 
-**One-liner:** not another language runtime or full Agent host — a **host-side argv
-allowlist gate** for agent tool calls, then MicroVM execution + artifact
-readback; non-allowlisted calls **fail fast without creating a sandbox**.
+**Not for:** full agent frameworks, arbitrary interpreters, or replacing
+[`network-policy`](../network-policy).
 
-### In-repo examples
+## 1. Prerequisites
 
-| Example | Focus | Allowlist meaning |
-|---------|-------|-------------------|
-| [`code-sandbox-quickstart`](../code-sandbox-quickstart) | Arbitrary `run_code` / `commands.run` | None (any command) |
-| [`openai-agents-code-interpreter`](../openai-agents-code-interpreter) | LLM + data analysis / code interpreter | N/A (interpreter workload) |
-| [`openclaw-integration`](../openclaw-integration) / [`openai-agents-example`](../openai-agents-example) | Full agent hosting / orchestration | N/A |
-| [`network-policy`](../network-policy) / `network_allowlist.py` | **Egress CIDR** allow/deny | Network destinations |
-| **This example** | **Tool argv** allow/deny + artifact readback | First argv token (binary name) |
-
-### Related [#645](https://github.com/TencentCloud/CubeSandbox/issues/645) PR themes (do not overlap)
-
-| Theme (examples) | What those PRs add | What this example does instead |
-|------------------|--------------------|--------------------------------|
-| Language / web runtimes (e.g. Node #732, Go/Rust/Java #735/#755/#782, C++ #876, Ruby #926) | New language image + run that stack in a sandbox | Thin Dockerfile on official `sandbox-code` — no new language stack |
-| Interpreters / notebooks (e.g. Jupyter ML #1025, RCA interpreter #745) | Arbitrary or analysis-oriented code execution | Tool-command subset only; deny non-allowlisted tools |
-| Agent frameworks (e.g. LangGraph #710) | End-to-end agent orchestration | Gate pattern only — not a framework integration |
-| Platform demos (egress / DB / snapshot, e.g. #748, #979, #1004, #738) | CIDR policy, stateful services, snapshot cache | **Argv** allowlist (not CIDR); keep the demo minimal |
-
-Re-check open #645 PRs for titles containing `allowlist` / `tool-allowlist` before
-opening a PR, in case a same-direction submission appears later.
-
-## 2. Prerequisites
-
-- A running Cube Sandbox deployment (see [dev environment](../../docs/zh/guide/dev-environment.md))
+- A running Cube Sandbox deployment ([dev environment](../../docs/guide/dev-environment.md))
 - Python 3.8+
+- Docker only if you use Path B
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## 3. Create the template
+## 2. Quick Start
 
-Two paths. Prefer **Path B** when you want a buildable template belonging to
-this example (issue #645 bar). Path A matches
-[`code-sandbox-quickstart`](../code-sandbox-quickstart/README.md) exactly.
-
-### Path A — reuse official `sandbox-code` (fastest)
+### Step 1 — Create a template (Recommended)
 
 ```bash
-# Mainland China registry
 cubemastercli tpl create-from-image \
   --image cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
   --writable-layer-size 1G \
   --expose-port 49999 \
   --expose-port 49983 \
   --probe 49999
-
-# International registry (if outside CN)
-# cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest
 ```
 
-### Path B — build this example's Dockerfile, then register
+Note the printed `template_id`. Outside CN, use
+`cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest`.
 
-Thin wrapper on `sandbox-code` (see [`Dockerfile`](./Dockerfile)): sets
-`TOOL_ALLOWLIST_SANDBOX=1` and writes `/etc/cube-sandbox/tool-allowlist.txt`.
-Does **not** add a new language runtime.
+| Item | Suggestion |
+|------|------------|
+| Writable layer | `1G` |
+| Ports | `49999`, `49983`; `--probe 49999` |
+
+### Step 2 — Configure environment
 
 ```bash
-# From this directory
+cp .env.example .env
+# set E2B_API_URL (e.g. http://127.0.0.1:13000) and CUBE_TEMPLATE_ID
+```
+
+### Step 3 — Run
+
+```bash
+python verify_local.py          # unit + deny; no sandbox
+python run_allowlisted.py       # allow (needs *.cube.app DNS or run in dev VM)
+python run_denied.py            # deny on host; no sandbox
+```
+
+Allow:
+
+```text
+agent-tool-allowlist-ok
+artifact: artifact-ok
+```
+
+Deny:
+
+```text
+denied_as_expected: command not on tool allowlist: 'bash' ...
+```
+
+On a host without `*.cube.app` DNS, use `python run_allowlisted_sidecar.py`
+instead of `run_allowlisted.py` (set proxy vars in `.env.example`; see
+[`e2b-dev-sidecar`](../e2b-dev-sidecar)).
+
+## 3. Path B (optional) — build this example image
+
+```bash
 docker build -t agent-tool-allowlist-sandbox:latest .
+# optional: --build-arg SANDBOX_CODE_IMAGE=.../sandbox-code:latest
 
-# Optional: retag/push to a registry CubeMaster can pull
-# docker tag agent-tool-allowlist-sandbox:latest <your-registry>/agent-tool-allowlist-sandbox:latest
-# docker push <your-registry>/agent-tool-allowlist-sandbox:latest
-
-# Same create-from-image flags as quickstart (ports/probe unchanged)
 cubemastercli tpl create-from-image \
   --image agent-tool-allowlist-sandbox:latest \
   --writable-layer-size 1G \
@@ -92,131 +92,37 @@ cubemastercli tpl create-from-image \
   --probe 49999
 ```
 
-Override the base image for international builds:
+If CubeMaster cannot see a local tag, retag/push to a reachable registry first.
 
-```bash
-docker build \
-  --build-arg SANDBOX_CODE_IMAGE=cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
-  -t agent-tool-allowlist-sandbox:latest .
-```
+## 4. Default allowlist
 
-Note the printed `template_id` from either path.
+`allowlist.py` (`DEFAULT_ALLOWED_BINARIES`): `echo`, `uname`, `pwd`, `ls`,
+`cat`, `head`, `wc`, `sha256sum`, `python3`. Path-style binaries and shells
+such as `bash` / `curl` are rejected.
 
-## 4. Configure environment
+## 5. Limitations
 
-```bash
-cp .env.example .env
-# set E2B_API_URL and CUBE_TEMPLATE_ID
-```
+- Host-side gate only — callers that skip `assert_allowlisted` can still send
+  any command to the API.
+- Not a substitute for egress CIDR policy (`network-policy`) or guest seccomp /
+  AppArmor.
+- In-image `/etc/cube-sandbox/tool-allowlist.txt` (Path B) is informational;
+  the host gate is authoritative for this demo.
 
-For the official QEMU `dev-env`, the host-forwarded API is typically
-`http://127.0.0.1:13000`. Full E2B command traffic normally needs `*.cube.app`
-DNS (CoreDNS inside the guest). You can either:
-
-1. Run scripts **inside the dev VM**, or
-2. On the host, use `run_allowlisted_sidecar.py` (Option D in
-   [`connect-existing-cluster`](../../docs/guide/connect-existing-cluster.md),
-   reusing [`e2b-dev-sidecar`](../e2b-dev-sidecar)) so data-plane traffic is
-   rewritten locally without changing system DNS, or
-3. Point a wildcard resolver at CubeProxy forward ports (`11080`/`11443`).
-
-## 5. Run
-
-### Local verification (no sandbox required)
-
-```bash
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-# Unix: source .venv/bin/activate
-pip install -r requirements.txt
-python verify_local.py
-```
-
-This runs unit tests, `run_denied.py`, Dockerfile↔`allowlist.py` drift checks, and
-(if present) Docker image marker checks. When `E2B_API_URL` and `CUBE_TEMPLATE_ID`
-are set it also attempts `run_allowlisted.py` (needs `*.cube.app` DNS).
-
-### Allowlisted tool on the host (no wildcard DNS)
-
-```bash
-# .env should also set CUBE_REMOTE_PROXY_BASE=https://127.0.0.1:11443 for QEMU forwards
-python run_allowlisted_sidecar.py
-```
-
-Expected:
-
-```text
-agent-tool-allowlist-ok
-artifact: artifact-ok
-```
-
-### Allowlisted tool (success, inside guest / with DNS)
-
-```bash
-python run_allowlisted.py
-```
-
-Expected:
-
-```text
-agent-tool-allowlist-ok
-artifact: artifact-ok
-```
-
-### Non-allowlisted tool (must fail on host)
-
-```bash
-python run_denied.py
-```
-
-Expected:
-
-```text
-denied_as_expected: command not on tool allowlist: 'bash' ...
-```
-
-No sandbox is created on the deny path.
-
-## 6. Default allowlist
-
-See `allowlist.py` (`DEFAULT_ALLOWED_BINARIES`). The demo allows a small set of
-read-only / reporting tools (`echo`, `uname`, `ls`, `cat`, `python3`, …) and
-rejects path-style binaries (`/bin/bash`) and shells like `bash` / `curl`.
-
-Tighten or extend the set for your agent; keep it explicit in code reviews.
-
-## 7. Limitations (read before production)
-
-This example is **defense-in-depth on the host**, not a replacement for Cube
-platform enforcement. Compare layers (egress facts from
-[`network-policy` README §6](../network-policy/README.md)):
-
-| Layer | What it gates | Where enforced | Bypass from sandbox? |
-|-------|---------------|----------------|----------------------|
-| **This example** (`assert_allowlisted`) | Tool **argv** (first binary name) | Host SDK caller (Python) | N/A — bypass by skipping the gate before API call |
-| **Egress policy** (`allow_out` / `deny_out` / `allow_internet_access`) | Network **destination CIDRs** | Cubelet **tap** network layer (pre-exit) | **No** — kernel-level; cannot be bypassed from inside the VM |
-| Guest seccomp / AppArmor | Syscalls / MAC (if configured) | Guest kernel / LSM | Out of scope here; not demonstrated |
-
-- A caller that bypasses `assert_allowlisted` can still send any command to the
-  API. Pair with network policy and least-privilege credentials in real agents.
-- The in-image `/etc/cube-sandbox/tool-allowlist.txt` is informational for Path B
-  templates; the host gate remains authoritative for this demo.
-- Does not implement unauthorized network scanning or exploit tooling.
-
-## 8. Directory
+## 6. Directory
 
 ```text
 agent-tool-allowlist-sandbox/
 ├── README.md
 ├── README_zh.md
-├── Dockerfile             # thin wrapper on official sandbox-code
-├── allowlist.py           # host-side argv gate (source of truth)
-├── allowlist_sync.py      # emit guest allowlist body from allowlist.py
-├── verify_local.py        # local verification gate
-├── run_allowlisted.py     # allow path + artifact readback
-├── run_allowlisted_sidecar.py  # host allow path via e2b-dev-sidecar
-├── run_denied.py          # deny path (no sandbox)
-├── test_allowlist.py      # local unit tests (no sandbox required)
+├── Dockerfile
+├── allowlist.py
+├── allowlist_sync.py
+├── verify_local.py
+├── run_allowlisted.py
+├── run_allowlisted_sidecar.py
+├── run_denied.py
+├── test_allowlist.py
 ├── env_utils.py
 ├── requirements.txt
 └── .env.example
