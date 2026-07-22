@@ -1890,9 +1890,14 @@ class TestClone:
         stack, _snap, create_p, delete_p = self._patch_clone_internals()
         with stack:
             result = sb.clone()
-        assert len(result) == 1
-        assert create_p.call_count == 1
-        delete_p.assert_called_once()
+            assert len(result) == 1
+            assert create_p.call_count == 1
+            delete_p.assert_not_called()
+
+            response = MagicMock(ok=True)
+            with patch.object(result[0]._session, "delete", return_value=response):
+                result[0].kill()
+            delete_p.assert_called_once_with("snap-test", config=sb._config)
 
     def test_clone_n_sequential(self):
         sb = make_sandbox()
@@ -1922,14 +1927,52 @@ class TestClone:
         for call in create_p.call_args_list:
             assert call.kwargs["template"] == "snap-xyz"
 
-    def test_clone_deletes_snapshot_on_success(self):
+    def test_clone_deletes_snapshot_after_last_clone_is_killed(self):
         sb = make_sandbox()
         stack, _snap, _create, delete_p = self._patch_clone_internals(
             snapshot_id="snap-to-clean"
         )
         with stack:
-            sb.clone(n=3)
-        delete_p.assert_called_once_with("snap-to-clean", config=sb._config)
+            clones = sb.clone(n=3)
+            delete_p.assert_not_called()
+            response = MagicMock(ok=True)
+            for clone in clones:
+                with patch.object(clone._session, "delete", return_value=response):
+                    clone.kill()
+            delete_p.assert_called_once_with("snap-to-clean", config=sb._config)
+
+    def test_clone_cleanup_is_idempotent_for_repeated_kill(self):
+        sb = make_sandbox()
+        stack, _snap, _create, delete_p = self._patch_clone_internals()
+        with stack:
+            clone = sb.clone()[0]
+            response = MagicMock(ok=True)
+            with patch.object(clone._session, "delete", return_value=response):
+                clone.kill()
+                clone.kill()
+            delete_p.assert_called_once()
+
+    def test_clone_cleanup_is_thread_safe(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        sb = make_sandbox()
+        stack, _snap, _create, delete_p = self._patch_clone_internals()
+        with stack:
+            clones = sb.clone(n=8)
+            response = MagicMock(ok=True)
+            patches = [
+                patch.object(clone._session, "delete", return_value=response)
+                for clone in clones
+            ]
+            for session_patch in patches:
+                session_patch.start()
+            try:
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    list(pool.map(lambda clone: clone.kill(), clones))
+            finally:
+                for session_patch in patches:
+                    session_patch.stop()
+            delete_p.assert_called_once()
 
     def test_clone_deletes_snapshot_even_on_error(self):
         """If a Sandbox.create call raises, the ephemeral snapshot is still
@@ -1952,8 +1995,12 @@ class TestClone:
         stack, _snap, _create, delete_p = self._patch_clone_internals()
         delete_p.side_effect = ApiError("snapshot delete failed")
         with stack:
-            result = sb.clone(n=2)  # should not raise
-        assert len(result) == 2
+            result = sb.clone(n=2)
+            response = MagicMock(ok=True)
+            for clone in result:
+                with patch.object(clone._session, "delete", return_value=response):
+                    clone.kill()  # should not raise
+            assert len(result) == 2
 
     # ─── concurrent ──────────────────────────────────────────────────────────
 
@@ -2019,8 +2066,9 @@ class TestClone:
             with pytest.raises(ApiError, match="create failed"):
                 sb.clone(n=5, concurrency=3)
 
-        # Snapshot got cleaned up exactly once.
-        delete_p.assert_called_once()
+        # kill() is mocked and therefore cannot release clone ownership. The
+        # error-path backstop must still delete the temporary snapshot.
+        delete_p.assert_called_once_with("snap-partial", config=sb._config)
         # Every sandbox that ``Sandbox.create`` actually returned must have
         # been killed by clone() before it raised. We assert the count
         # matches what _flaky produced — n=5 with the 3rd raising means 4

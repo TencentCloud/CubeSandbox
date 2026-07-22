@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Callable, Dict
 
 import httpx
@@ -28,6 +29,38 @@ JUPYTER_PORT = 49999
 
 #: Never-timeout sentinel. See docs/guide/lifecycle.md.
 NEVER_TIMEOUT = -1
+
+class _CloneCleanup:
+    """Process-local ownership of one clone operation's temporary snapshot."""
+
+    def __init__(self, snapshot_id: str, remaining: int, config: Config) -> None:
+        self.snapshot_id = snapshot_id
+        self.remaining = remaining
+        self.config = config
+        self._released: set[str] = set()
+        self._cleanup_started = False
+        self._lock = threading.Lock()
+
+    def release(self, sandbox_id: str) -> None:
+        with self._lock:
+            if sandbox_id in self._released:
+                return
+            self._released.add(sandbox_id)
+            self.remaining -= 1
+            should_cleanup = self.remaining == 0
+        if should_cleanup:
+            self.cleanup()
+
+    def cleanup(self) -> None:
+        """Start best-effort deletion once, including failure backstops."""
+        with self._lock:
+            if self._cleanup_started:
+                return
+            self._cleanup_started = True
+        try:
+            Sandbox.delete_snapshot(self.snapshot_id, config=self.config)
+        except Exception:  # noqa: BLE001 — best-effort snapshot cleanup
+            return
 
 
 def _check_response(resp: requests.Response) -> None:
@@ -94,6 +127,7 @@ class Sandbox:
         self._commands = Commands(self)
         self._files = Filesystem(self)
         self._pty = Pty(self)
+        self._clone_cleanup: _CloneCleanup | None = None
 
 
     @property
@@ -504,6 +538,8 @@ class Sandbox:
         """
         resp = self._session.delete(f"{self._config.api_url}/sandboxes/{self.sandbox_id}")
         _check_response(resp)
+        if self._clone_cleanup is not None:
+            self._clone_cleanup.release(self.sandbox_id)
 
     def get_info(self) -> dict:
         """GET /sandboxes/:sandboxID - Get sandbox detail.
@@ -703,15 +739,17 @@ class Sandbox:
 
         1. :meth:`create_snapshot` — capture the current state.
         2. :func:`Sandbox.create` × n — spin up *n* sandboxes from the snapshot.
-        3. :meth:`delete_snapshot` — clean up the ephemeral snapshot.
+        3. Attach shared cleanup state to the clones. The temporary snapshot
+           is deleted after the last clone is killed through this SDK process.
 
         If any sandbox creation fails, **all sibling sandboxes that did
         succeed are killed** before the exception propagates. This prevents
         leaked sandboxes when a partial failure happens halfway through a
         concurrent fan-out — the alternative (returning a partial list and
         raising) loses one or the other in any caller that doesn't carefully
-        wrap the call in try/except. ``delete_snapshot`` for the ephemeral
-        snapshot is still best-effort and runs unconditionally.
+        wrap the call in try/except. Snapshot cleanup is best-effort and is
+        process-local; server-side timeout or deletion by another process is
+        not observable by this SDK instance.
 
         Args:
             n: Number of clones to create (default: 1).
@@ -745,55 +783,59 @@ class Sandbox:
 
         sandboxes: list[Sandbox] = []
         first_error: BaseException | None = None
-        try:
-            if concurrency <= 1 or n <= 1:
-                # Sequential: short-circuit on first failure to preserve the
-                # historical fail-fast behaviour. Anything created before the
-                # failure stays in ``sandboxes`` and is returned via finally.
-                for _ in range(n):
-                    try:
-                        sandboxes.append(_create_one())
-                    except BaseException as exc:  # noqa: BLE001
-                        first_error = exc
-                        break
-            else:
-                # Local import: keeps the default (sequential) path free of
-                # threading machinery for callers that never opt-in.
-                from concurrent.futures import ThreadPoolExecutor, as_completed
+        if concurrency <= 1 or n <= 1:
+            # Sequential: short-circuit on first failure to preserve the
+            # historical fail-fast behaviour.
+            for _ in range(n):
+                try:
+                    sandboxes.append(_create_one())
+                except BaseException as exc:  # noqa: BLE001
+                    first_error = exc
+                    break
+        else:
+            # Local import: keeps the default (sequential) path free of
+            # threading machinery for callers that never opt-in.
+            from concurrent.futures import ThreadPoolExecutor, as_completed
 
-                workers = min(n, concurrency)
-                with ThreadPoolExecutor(max_workers=workers) as pool:
-                    futures = [pool.submit(_create_one) for _ in range(n)]
-                    # Drain every future — never leak a Sandbox just because
-                    # an earlier sibling raised. We collect successes and the
-                    # first exception, then decide what to do once all futures
-                    # have settled.
-                    for fut in as_completed(futures):
-                        try:
-                            sandboxes.append(fut.result())
-                        except BaseException as exc:  # noqa: BLE001
-                            if first_error is None:
-                                first_error = exc
-                            # Keep draining: another in-flight create may
-                            # still succeed and we must not drop its result.
-        finally:
-            try:
-                Sandbox.delete_snapshot(snap_id, config=cfg)
-            except Exception:  # noqa: BLE001 — best-effort cleanup
-                pass
+            workers = min(n, concurrency)
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(_create_one) for _ in range(n)]
+                # Drain every future — never leak a Sandbox just because
+                # an earlier sibling raised. We collect successes and the
+                # first exception, then decide what to do once all futures
+                # have settled.
+                for fut in as_completed(futures):
+                    try:
+                        sandboxes.append(fut.result())
+                    except BaseException as exc:  # noqa: BLE001
+                        if first_error is None:
+                            first_error = exc
+                        # Keep draining: another in-flight create may
+                        # still succeed and we must not drop its result.
+        cleanup = _CloneCleanup(snap_id, len(sandboxes), cfg)
+        for sb in sandboxes:
+            sb._clone_cleanup = cleanup
 
         if first_error is not None:
             # We hit at least one failure. The caller asked for *n* clones
             # and got fewer — there is no clean way to return both partial
             # successes and an exception, so kill the orphans and propagate.
-            # This is "all-or-nothing" semantics for the failure case;
-            # without it, a partial result is silently lost when we raise.
+            # This is "all-or-nothing" semantics for the failure case.
             for sb in sandboxes:
                 try:
                     sb.kill()
                 except Exception:  # noqa: BLE001 — best-effort cleanup
                     pass
+            # A failed kill cannot release its ownership. Force the idempotent
+            # backstop after every surviving sibling has been attempted.
+            cleanup.cleanup()
             raise first_error
+
+        if not sandboxes:
+            try:
+                Sandbox.delete_snapshot(snap_id, config=cfg)
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
         return sandboxes
 
 

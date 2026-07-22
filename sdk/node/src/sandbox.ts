@@ -183,6 +183,35 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+class CloneCleanup {
+  private readonly released = new Set<string>();
+  private cleanupStarted = false;
+
+  constructor(
+    private readonly snapshotId: string,
+    private remaining: number,
+    private readonly config: Config,
+  ) {}
+
+  async release(sandboxId: string): Promise<void> {
+    if (this.released.has(sandboxId)) return;
+    this.released.add(sandboxId);
+    this.remaining -= 1;
+    if (this.remaining !== 0) return;
+    await this.cleanup();
+  }
+
+  async cleanup(): Promise<void> {
+    if (this.cleanupStarted) return;
+    this.cleanupStarted = true;
+    try {
+      await Sandbox.deleteSnapshot(this.snapshotId, { config: this.config });
+    } catch {
+      // best-effort snapshot cleanup
+    }
+  }
+}
+
 /**
  * Resolve the effective {@link Config} for {@link Sandbox.create}, merging the
  * inline config overrides on {@link CreateOptions} over ``options.config`` over
@@ -235,6 +264,7 @@ export class Sandbox {
   private readonly _commands: Commands;
   private readonly _files: Filesystem;
   private readonly _pty: Pty;
+  private _cloneCleanup: CloneCleanup | undefined;
 
   constructor(data: Record<string, any>, config: Config) {
     this._data = data;
@@ -555,6 +585,7 @@ export class Sandbox {
       method: "DELETE",
     });
     await checkControlResponse(resp);
+    await this._cloneCleanup?.release(this.sandboxId);
   }
 
   /** POST /sandboxes/:id/snapshots — create a snapshot. */
@@ -588,7 +619,8 @@ export class Sandbox {
   }
 
   /**
-   * Clone this sandbox ``n`` times: snapshot -> create ×n -> delete snapshot.
+   * Clone this sandbox ``n`` times. The temporary snapshot is deleted after
+   * the last clone is killed through this SDK process.
    *
    * ``concurrency`` caps how many ``Sandbox.create`` calls run in parallel at
    * ``min(n, concurrency)`` (default 1 = sequential), mirroring the Python
@@ -606,17 +638,16 @@ export class Sandbox {
     const sandboxes: Sandbox[] = [];
     let firstError: unknown = null;
 
-    try {
-      if (concurrency <= 1 || n <= 1) {
-        for (let i = 0; i < n; i++) {
-          try {
-            sandboxes.push(await createOne());
-          } catch (err) {
-            firstError = err;
-            break;
-          }
+    if (concurrency <= 1 || n <= 1) {
+      for (let i = 0; i < n; i++) {
+        try {
+          sandboxes.push(await createOne());
+        } catch (err) {
+          firstError = err;
+          break;
         }
-      } else {
+      }
+    } else {
         // Bounded fan-out: at most min(n, concurrency) create calls are in
         // flight at once (workers pull from a shared cursor), matching the
         // Python (ThreadPoolExecutor) and Go (semaphore) SDKs. Every task is
@@ -639,18 +670,26 @@ export class Sandbox {
           }
         };
         await Promise.all(Array.from({ length: limit }, () => worker()));
-      }
-    } finally {
-      try {
-        await Sandbox.deleteSnapshot(snapId, { config: cfg });
-      } catch {
-        // best-effort cleanup
-      }
     }
+
+    const cleanup = new CloneCleanup(snapId, sandboxes.length, cfg);
+    sandboxes.forEach((sandbox) => {
+      sandbox._cloneCleanup = cleanup;
+    });
 
     if (firstError !== null) {
       await Promise.allSettled(sandboxes.map((sb) => sb.kill()));
+      // A failed kill cannot release its ownership. Force the idempotent
+      // backstop after every surviving sibling has settled.
+      await cleanup.cleanup();
       throw firstError;
+    }
+    if (sandboxes.length === 0) {
+      try {
+        await Sandbox.deleteSnapshot(snapId, { config: cfg });
+      } catch {
+        // best-effort snapshot cleanup
+      }
     }
     return sandboxes;
   }

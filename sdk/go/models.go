@@ -7,7 +7,8 @@ import "time"
 
 // Sandbox is a connected CubeSandbox instance returned by create/connect.
 type Sandbox struct {
-	client *Client `json:"-"`
+	client       *Client       `json:"-"`
+	cloneCleanup *cloneCleanup `json:"-"`
 
 	TemplateID         string `json:"templateID"`
 	SandboxID          string `json:"sandboxID"`
