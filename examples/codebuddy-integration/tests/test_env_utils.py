@@ -24,7 +24,7 @@ from unittest import mock
 # ``python3 -m unittest`` as well as for pytest's automatic path discovery.
 _parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _parent not in sys.path:
-    sys.path.insert(0, _parent)
+    sys.path.append(_parent)
 
 import env_utils  # noqa: E402
 

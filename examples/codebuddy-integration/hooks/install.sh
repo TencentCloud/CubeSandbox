@@ -120,7 +120,7 @@ PYEOF
 }
 
 if [[ "${1:-}" == "--uninstall" ]]; then
-    rm -f "$PLUGIN_FILE" "$PACKAGE_FILE"
+    rm -f "$PLUGIN_FILE" "$PACKAGE_FILE" "$PLUGIN_DIR/sandbox_exec.py"
     echo "CubeSandbox CodeBuddy plugin uninstalled from $PLUGIN_DIR."
     echo "(Your config.json was left intact — remove the \"cubesandbox\" key manually if desired.)"
     exit 0
@@ -138,6 +138,7 @@ command -v python3 >/dev/null 2>&1 || {
 
 mkdir -p "$PLUGIN_DIR"
 install -m 0644 "$SCRIPT_DIR/cubesandbox-sandbox.js" "$PLUGIN_FILE"
+install -m 0755 "$EXAMPLE_DIR/sandbox_exec.py" "$PLUGIN_DIR/sandbox_exec.py"
 # CodeBuddy loads the plugin as an ES module
 cat > "$PACKAGE_FILE" <<'JSONEOF'
 {

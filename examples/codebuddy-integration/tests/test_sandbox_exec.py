@@ -239,10 +239,13 @@ class TestExecApi:
 
 class TestGetSandbox:
     def test_raises_when_template_id_unset(self):
+        original_id = sandbox_exec.TEMPLATE_ID
         sandbox_exec.TEMPLATE_ID = ""
-
-        with pytest.raises(SystemExit):
-            sandbox_exec._get_sandbox()
+        try:
+            with pytest.raises(SystemExit):
+                sandbox_exec._get_sandbox()
+        finally:
+            sandbox_exec.TEMPLATE_ID = original_id
 
     def test_reconnects_from_session_file(self):
         mock_sandbox = MagicMock()

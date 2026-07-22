@@ -39,7 +39,6 @@ Security notes:
 
 from __future__ import annotations
 
-import atexit
 import json
 import logging
 import os
@@ -50,6 +49,7 @@ import traceback
 from typing import Any
 
 from dotenv import load_dotenv
+from e2b_code_interpreter import Sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,6 @@ def _get_sandbox(timeout: int = 600):
     global _sandbox
     with _sandbox_lock:
         if _sandbox is None:
-            from e2b_code_interpreter import Sandbox
             if not TEMPLATE_ID:
                 raise RuntimeError("CUBE_TEMPLATE_ID is not set")
             _sandbox = Sandbox.create(TEMPLATE_ID, timeout=timeout)
@@ -101,7 +100,6 @@ def _get_sandbox(timeout: int = 600):
                         "Failed to set timeout and kill sandbox; "
                         "sandbox may be orphaned (id=%s)", getattr(_sandbox, "id", "unknown")
                     )
-                from e2b_code_interpreter import Sandbox
                 _sandbox = Sandbox.create(TEMPLATE_ID, timeout=timeout)
     return _sandbox
 
@@ -115,9 +113,6 @@ def _cleanup_sandbox() -> None:
             sandbox.kill()
         except Exception as exc:
             print(f"Failed to clean up sandbox: {exc}", file=sys.stderr)
-
-
-atexit.register(_cleanup_sandbox)
 
 
 def _validate_path(path: str) -> str | None:

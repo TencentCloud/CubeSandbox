@@ -68,7 +68,13 @@ jobs:
         run: |
           cid=$(docker run -d --rm codebuddy-cube:ci)
           docker exec "$cid" codebuddy --version
-          # envd /health reachable means the readiness probe will succeed
-          docker exec "$cid" curl -fsS -o /dev/null \
-            http://127.0.0.1:49983/health
+          # envd /health reachable means the readiness probe will succeed;
+          # add a retry loop because envd may still be booting on cold cache.
+          for i in $(seq 30); do
+            if docker exec "$cid" curl -fsS -o /dev/null \
+                http://127.0.0.1:49983/health; then
+              break
+            fi
+            sleep 1
+          done
           docker rm -f "$cid"

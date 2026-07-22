@@ -35,6 +35,7 @@ import time
 from pathlib import Path
 
 from dotenv import load_dotenv
+from e2b.sandbox.commands.command_handle import CommandExitException
 from e2b_code_interpreter import Sandbox
 
 logger = logging.getLogger(__name__)
@@ -183,7 +184,6 @@ def _get_sandbox(timeout: int = 300) -> "Sandbox":
         sandbox_id = _read_session()
         if sandbox_id:
             try:
-                from e2b_code_interpreter import Sandbox
                 _sandbox = Sandbox.connect(sandbox_id)
                 _sandbox.set_timeout(timeout)
                 return _sandbox
@@ -194,7 +194,6 @@ def _get_sandbox(timeout: int = 300) -> "Sandbox":
             raise SystemExit(
                 "CUBE_TEMPLATE_ID is not set. Set it in your .env or pass it via the environment."
             )
-        from e2b_code_interpreter import Sandbox
         _sandbox = Sandbox.create(TEMPLATE_ID, timeout=timeout)
         _write_session(_sandbox.sandbox_id)
         return _sandbox
@@ -207,7 +206,6 @@ def _run(sandbox: "Sandbox", cmd: str, timeout: int = 120):
     swallowing it here lets callers handle success / failure uniformly instead
     of catching at every call site.
     """
-    from e2b.sandbox.commands.command_handle import CommandExitException
     try:
         return sandbox.commands.run(cmd, timeout=timeout)
     except CommandExitException as exc:
