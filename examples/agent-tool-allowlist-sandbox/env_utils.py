@@ -17,6 +17,6 @@ def load_local_dotenv() -> None:
             continue
         seen_paths.add(resolved_path)
 
-        if path.is_file():
-            load_dotenv(dotenv_path=path, override=False)
+        if resolved_path.is_file():
+            load_dotenv(dotenv_path=resolved_path, override=False)
             return
