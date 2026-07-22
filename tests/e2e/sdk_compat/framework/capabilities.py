@@ -14,6 +14,7 @@ NETWORK_PUBLIC_ACCESS = "network_public_access"
 NETWORK_MASK_REQUEST_HOST = "network_mask_request_host"
 PLATFORM_LIFECYCLE = "platform_lifecycle"
 HOST_MOUNT = "host_mount"
+VOLUME_PLUGIN = "volume_plugin"
 
 COMMON_CAPABILITIES = frozenset({LIFECYCLE, COMMANDS, FILESYSTEM, RUN_CODE})
 
@@ -38,13 +39,13 @@ CUBESANDBOX_CAPABILITIES = frozenset(
         NETWORK_MASK_REQUEST_HOST,
         PLATFORM_LIFECYCLE,
         HOST_MOUNT,
+        VOLUME_PLUGIN,
     }
 )
 
-# Canonical backend -> capability-set map. Single source of truth for both the
-# sdk_sandbox fixture gate (conftest._capabilities_for_backend) and the helpers
-# that drive create_adapter directly (framework.host_mount). Unknown backends
-# resolve to the empty set.
+# Canonical backend -> capability-set map. Single source of truth for the
+# sdk_sandbox fixture gate and helpers that drive create_adapter directly
+# (framework.host_mount / cases/volume). Unknown backends resolve to empty.
 BACKEND_CAPABILITIES = {
     "cubesandbox": CUBESANDBOX_CAPABILITIES,
     "e2b": E2B_CAPABILITIES,

@@ -92,6 +92,9 @@ pytest --run-e2e -m "smoke or p0" --sdk-e2e-backends=cubesandbox
 # 每日双 SDK 兼容性回归
 SDK_E2E_BACKENDS=e2b,cubesandbox pytest --run-e2e -m "p0 or p1"
 
+# Volume Plugin 回归（需手动部署并配置插件；cubesandbox >= 0.6.0）
+SDK_E2E_VOLUME_PLUGIN=true pytest --run-e2e -m volume --sdk-e2e-backends=cubesandbox
+
 # 更广泛的回归
 SDK_E2E_BACKENDS=e2b,cubesandbox \
 pytest --run-e2e -m "p0 or p1 or p2"
@@ -212,7 +215,12 @@ cp env.example .env
 - `SDK_E2E_PLATFORM_LIFECYCLE_IDLE_TIMEOUT`：平台空闲超时，默认 `30` 秒；
 - `SDK_E2E_PLATFORM_LIFECYCLE_WAIT_MARGIN`：额外等待时间，默认 `20` 秒；
 - `SDK_E2E_PLATFORM_LIFECYCLE_POLL_TIMEOUT`：轮询窗口，默认 `45` 秒；
-- `CUBE_PROXY_ADMIN_PORT`：CubeProxy admin 端口，默认 `8082`。
+- `CUBE_PROXY_ADMIN_PORT`：CubeProxy admin 端口，默认 `8082`；
+- `SDK_E2E_VOLUME_PLUGIN`：启用 Volume Plugin 用例（CRUD 与 sandbox
+  `volumeMounts` 绑定/解绑），默认 `false`；
+- `SDK_E2E_VOLUME_DRIVER`：`POST /volumes` 使用的 driver，默认 `cos`；
+- `SDK_E2E_VOLUME_REFCOUNT_WAIT`：等待绑定中删除 `409` / 解绑后 `204`
+  的秒数，默认 `60`。
 
 ### 失败时保留 sandbox
 
@@ -331,6 +339,9 @@ tests/e2e/sdk_compat/
 - `cases/concurrency/`：同时运行多个 sandbox 时的数据隔离；
 - `cases/host-mount/`：宿主目录挂载扩展——happy path，以及创建时校验、
   运行期 bind-mount 失败和跨 sandbox 共享等边界用例。
+- `cases/volume/`：Volume Plugin CRUD 与 sandbox `volumeMounts` 绑定/解绑
+  （需 `SDK_E2E_VOLUME_PLUGIN=true`；仅 CubeSandbox）。插件需手动部署并配置，
+  且要求 `cubesandbox` >= 0.6.0。
 
 新增测试应保持后端无关，通过 capability marker 表达后端差异。
 
@@ -353,18 +364,22 @@ Capability marker：
 - `@pytest.mark.sandbox_template_id("tpl-...")`：为单个用例或模块级用例集
   覆盖模板 ID；未设置时使用 `CUBE_TEMPLATE_ID` 或 `--cube-template-id`；
 - `@pytest.mark.requires_cubeproxy`：依赖 CubeProxy/lifecycle-manager
-  协调，未设置 `SDK_E2E_PLATFORM_LIFECYCLE=true` 时跳过。
+  协调，未设置 `SDK_E2E_PLATFORM_LIFECYCLE=true` 时跳过；
+- `@pytest.mark.volume`：Volume Plugin 用例，未设置
+  `SDK_E2E_VOLUME_PLUGIN=true` 时跳过。
 
 常用 capability 有 `lifecycle`、`commands`、`filesystem`、`run_code`。
 可选共享 capability 包括 `pause_resume`、`network_allow_deny`、
 `network_public_access`。
-当前分支的 `platform_lifecycle` 仅在 CubeSandbox capability 集合中启用。
+当前分支的 `platform_lifecycle` 与 `volume_plugin` 仅在 CubeSandbox
+capability 集合中启用。
 这不是 E2B 的固有能力限制，而是 E2B SDK 传递的 lifecycle 参数与 CubeAPI
 接收字段尚未对齐，导致 E2B 生命周期参数暂未生效。相关兼容修复见
 [PR #988](https://github.com/TencentCloud/CubeSandbox/pull/988)；修复合并并
 完成版本验证后，应重新启用 E2B 平台生命周期 capability 和双 backend 用例。
 `host_mount` 是 CubeSandbox 独有扩展；`cases/host-mount/` 通过
 `@pytest.mark.requires_capability("host_mount")` 跳过不支持宿主目录挂载的后端（如 e2b）。
+`volume_plugin` 仅用于 CubeSandbox Volume Plugin 用例。
 
 ## 清理
 

@@ -20,6 +20,14 @@ import (
 	"gorm.io/gorm"
 )
 
+// volumeDB returns the GORM handle used by volume handlers.
+// Tests override this to inject an in-memory database without touching the
+// process-global dao.Default().
+//
+// volumeDB must NOT be swapped concurrently: callers of newVolumeTestEngine
+// must not call t.Parallel() on any test that uses it.
+var volumeDB = func() *gorm.DB { return dao.Default() }
+
 // ─── Request / response types ───────────────────────────────────────────────
 
 // CreateVolumeReq is the JSON body expected by POST /cube/volume.
@@ -102,7 +110,7 @@ func validatePluginPrivateData(privateData string) error {
 func handleListVolumes(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
 	var records []models.VolumeRecord
-	if err := dao.Default().
+	if err := volumeDB().
 		WithContext(c.Request.Context()).
 		Find(&records).Error; err != nil {
 		common.WriteAPI(c, &listVolumesRes{Ret: volErr(rt, errorcode.ErrorCode_DBError, "db error: "+err.Error()), Volumes: []VolumeItem{}})
@@ -172,7 +180,7 @@ func handleCreateVolume(c *gin.Context) {
 		Name:     req.Name,
 		Driver:   req.Driver,
 	}
-	if err := dao.Default().WithContext(c.Request.Context()).Create(record).Error; err != nil {
+	if err := volumeDB().WithContext(c.Request.Context()).Create(record).Error; err != nil {
 		if isDuplicateKey(err) {
 			common.WriteAPI(c, &singleVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_Conflict, "volume already exists: "+volumeID)})
 			return
@@ -183,7 +191,7 @@ func handleCreateVolume(c *gin.Context) {
 
 	info, err := p.Create(c.Request.Context(), volumeID, req.Name)
 	if err != nil {
-		_ = dao.Default().WithContext(c.Request.Context()).
+		_ = volumeDB().WithContext(c.Request.Context()).
 			Where("volume_id = ?", volumeID).
 			Delete(&models.VolumeRecord{}).Error
 		common.WriteAPI(c, &singleVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterInternalError, "plugin create error: "+err.Error())})
@@ -192,7 +200,7 @@ func handleCreateVolume(c *gin.Context) {
 
 	if err := validatePluginPrivateData(info.PrivateData); err != nil {
 		_ = p.Destroy(c.Request.Context(), volumeID)
-		_ = dao.Default().WithContext(c.Request.Context()).
+		_ = volumeDB().WithContext(c.Request.Context()).
 			Where("volume_id = ?", volumeID).
 			Delete(&models.VolumeRecord{}).Error
 		common.WriteAPI(c, &singleVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterParamsError, err.Error())})
@@ -209,11 +217,11 @@ func handleCreateVolume(c *gin.Context) {
 		updates["private_data"] = info.PrivateData
 	}
 	if len(updates) > 0 {
-		if err := dao.Default().WithContext(c.Request.Context()).
+		if err := volumeDB().WithContext(c.Request.Context()).
 			Model(record).
 			Updates(updates).Error; err != nil {
 			_ = p.Destroy(c.Request.Context(), volumeID)
-			_ = dao.Default().WithContext(c.Request.Context()).
+			_ = volumeDB().WithContext(c.Request.Context()).
 				Where("volume_id = ?", volumeID).
 				Delete(&models.VolumeRecord{}).Error
 			common.WriteAPI(c, &singleVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_DBError, "db update volume fields error: "+err.Error())})
@@ -236,7 +244,7 @@ func handleGetVolume(c *gin.Context) {
 	}
 
 	var record models.VolumeRecord
-	err := dao.Default().
+	err := volumeDB().
 		WithContext(c.Request.Context()).
 		Where("volume_id = ?", volumeID).
 		First(&record).Error
@@ -264,7 +272,7 @@ func handleDeleteVolume(c *gin.Context) {
 	}
 
 	var record models.VolumeRecord
-	err := dao.Default().
+	err := volumeDB().
 		WithContext(c.Request.Context()).
 		Where("volume_id = ?", volumeID).
 		First(&record).Error
@@ -300,7 +308,7 @@ func handleDeleteVolume(c *gin.Context) {
 	}
 
 	// Hard-delete: remove the row so volume_id / name can be reused.
-	if dbErr := dao.Default().WithContext(c.Request.Context()).Delete(&record).Error; dbErr != nil {
+	if dbErr := volumeDB().WithContext(c.Request.Context()).Delete(&record).Error; dbErr != nil {
 		common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_DBError, "db delete error: "+dbErr.Error())})
 		return
 	}

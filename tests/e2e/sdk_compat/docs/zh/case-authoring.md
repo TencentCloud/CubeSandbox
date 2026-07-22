@@ -24,6 +24,7 @@ filesystem/    文件 API、路径、内容与 shell 互操作
 lifecycle/     创建、connect、pause/resume、kill、平台托管生命周期
 network/       创建时网络策略、公共网络访问与协议验证
 run_code/      Code Interpreter 输出、错误与 kernel 状态
+volume/        Volume Plugin CRUD 与 sandbox volumeMounts 绑定/解绑
 ```
 
 仅当新行为同时满足“独立 API 或独立 capability 边界”和“可形成可维护的执行

@@ -206,6 +206,19 @@ func Get(name string) (ControllerPlugin, bool) {
 	return p, ok
 }
 
+// UnregisterForTest removes a plugin from the global registry.
+// Intended for tests that register ephemeral fake ControllerPlugins.
+func UnregisterForTest(name string) {
+	delete(registry, name)
+	kept := registryOrder[:0]
+	for _, n := range registryOrder {
+		if n != name {
+			kept = append(kept, n)
+		}
+	}
+	registryOrder = kept
+}
+
 // First returns the first registered plugin (in registration order).
 // Returns (nil, false) when no plugin has been registered yet.
 func First() (ControllerPlugin, bool) {
