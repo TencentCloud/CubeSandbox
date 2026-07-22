@@ -95,9 +95,9 @@ func Refresh(ctx context.Context, req *types.RefreshSandboxRequest) (rsp *types.
 		rsp.Ret = ret
 		return
 	}
-	if req.Duration < -1 {
+	if req.Duration < -1 || req.Duration > 3600 {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
-		rsp.Ret.RetMsg = "duration must be >= -1 (use -1 for never timeout)"
+		rsp.Ret.RetMsg = "duration must be in [-1, 3600]"
 		return
 	}
 
@@ -130,6 +130,9 @@ func refreshTimeoutMeta(ctx context.Context, sandboxID string, timeoutSeconds in
 		} else if endAt > 0 {
 			return endAt
 		}
+	}
+	if timeoutSeconds < 0 {
+		return 0
 	}
 	return time.Now().UnixMilli() + int64(timeoutSeconds)*1000
 }

@@ -7,7 +7,7 @@ import pytest
 
 from framework.assertions import assert_code_ok, assert_command_ok
 from framework.capabilities import PAUSE_RESUME, RUN_CODE
-from framework.lifecycle import wait_until_paused
+from framework.lifecycle import wait_until_paused, wait_until_running
 
 pytestmark = [
     pytest.mark.e2e,
@@ -16,6 +16,13 @@ pytestmark = [
     pytest.mark.p1,
     pytest.mark.requires_capability(PAUSE_RESUME),
 ]
+
+
+@pytest.fixture()
+def cubesandbox_resume_sandbox(sdk_backend, sdk_sandbox):
+    if sdk_backend != "cubesandbox":
+        pytest.skip("explicit resume timeout validation is CubeSandbox SDK specific")
+    return sdk_sandbox
 
 
 def test_pause_sets_state_paused(sdk_sandbox, sdk_e2e_config):
@@ -63,6 +70,35 @@ def test_pause_and_connect_resume_preserves_env_vars(sdk_sandbox, sdk_e2e_config
         assert result.stdout == "pause-env"
     finally:
         resumed.close()
+
+
+def test_resume_accepts_never_timeout(cubesandbox_resume_sandbox, sdk_e2e_config):
+    cubesandbox_resume_sandbox.pause(timeout=sdk_e2e_config.default_timeout)
+
+    cubesandbox_resume_sandbox.resume(timeout=-1)
+    assert wait_until_running(
+        cubesandbox_resume_sandbox,
+        timeout=sdk_e2e_config.default_timeout,
+    ) == "running"
+
+    result = cubesandbox_resume_sandbox.run_command(
+        "printf never-timeout-resume",
+        timeout=sdk_e2e_config.command_timeout,
+    )
+    assert_command_ok(result)
+    assert result.stdout == "never-timeout-resume"
+
+
+def test_resume_rejects_invalid_negative_timeout(cubesandbox_resume_sandbox, sdk_e2e_config):
+    from cubesandbox import ApiError
+
+    cubesandbox_resume_sandbox.pause(timeout=sdk_e2e_config.default_timeout)
+
+    with pytest.raises(ApiError) as exc_info:
+        cubesandbox_resume_sandbox.resume(timeout=-2)
+
+    assert getattr(exc_info.value, "status_code", None) == 400
+    assert "timeout" in str(exc_info.value).lower()
 
 
 @pytest.mark.requires_capability(RUN_CODE)

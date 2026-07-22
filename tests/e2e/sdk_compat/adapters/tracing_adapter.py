@@ -129,6 +129,18 @@ class TracingSandboxAdapter(SandboxAdapter):
         )
         return wrap_adapter(resumed, self._trace)
 
+    def resume(self, *, timeout: int | None = None) -> None:
+        return self._trace.capture(
+            "resume",
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+                "timeout": timeout,
+            },
+            lambda: self._wrapped.resume(timeout=timeout),
+            output=lambda _: {"resumed": True},
+        )
+
     def get_host(self, port: int) -> str:
         return self._trace.capture(
             "get_host",

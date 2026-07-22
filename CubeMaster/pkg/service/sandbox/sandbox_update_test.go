@@ -34,7 +34,7 @@ func (p *updateTimeoutProvider) LookupEndAt(ctx context.Context, sandboxID strin
 	return 0, nil
 }
 
-func TestUpdateNormalizesNegativeResumeTimeout(t *testing.T) {
+func TestUpdateRejectsInvalidNegativeResumeTimeout(t *testing.T) {
 	const sandboxID = "sbx-update-timeout"
 	localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{
 		SandboxID: sandboxID,
@@ -59,9 +59,9 @@ func TestUpdateNormalizesNegativeResumeTimeout(t *testing.T) {
 
 	rsp := Update(context.Background(), req)
 
-	require.NotNil(t, req.Timeout)
-	assert.Equal(t, types.NeverTimeout, *req.Timeout)
-	assert.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
+	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), rsp.Ret.RetCode)
+	assert.Equal(t, "timeout must be >= -1 (use -1 for never timeout)", rsp.Ret.RetMsg)
+	assert.Equal(t, -2, *req.Timeout)
 }
 
 func TestUpdateResumePublishesTimeoutMetadata(t *testing.T) {

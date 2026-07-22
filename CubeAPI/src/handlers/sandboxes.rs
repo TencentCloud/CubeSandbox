@@ -310,6 +310,8 @@ pub async fn resume_sandbox(
     Path(sandbox_id): Path<String>,
     Json(body): Json<ResumedSandbox>,
 ) -> AppResult<impl IntoResponse> {
+    body.validate()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
     state
         .logger
         .log(

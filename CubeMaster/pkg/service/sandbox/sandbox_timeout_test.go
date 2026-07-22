@@ -113,6 +113,15 @@ func TestSetTimeoutValidationAllowsNeverTimeout(t *testing.T) {
 	})
 
 	assert.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
+	assert.Equal(t, int64(0), rsp.EndAt, "never-timeout should return endAt=0")
+}
+
+func TestRefreshTimeoutMetaFallbackReturnsZeroForNeverTimeout(t *testing.T) {
+	SetTimeoutProvider(nil)
+
+	endAt := refreshTimeoutMeta(context.Background(), "sb-timeout-never-fallback", types.NeverTimeout)
+
+	assert.Equal(t, int64(0), endAt)
 }
 
 func TestRefreshValidationAllowsZero(t *testing.T) {

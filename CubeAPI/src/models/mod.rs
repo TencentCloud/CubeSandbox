@@ -329,11 +329,12 @@ pub struct SandboxDetail {
 // ─── Sandbox — pause/resume/connect/snapshot ──────────────────────────────
 
 /// Request body for POST /sandboxes/{id}/resume (deprecated).
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 #[allow(dead_code)]
 pub struct ResumedSandbox {
     /// Idle timeout in seconds; None when the client did not send one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[validate(custom(function = "validate_timeout_value"))]
     pub timeout: Option<i32>,
     #[serde(rename = "autoPause", default)]
     pub auto_pause: bool,
@@ -513,6 +514,8 @@ fn validate_timeout_value(timeout: i32) -> Result<(), validator::ValidationError
 /// Request body for POST /sandboxes/{id}/refreshes
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct RefreshRequest {
+    /// Refresh duration in seconds. If omitted, CubeAPI treats it as `0`,
+    /// which means immediate timeout. Use `-1` for never-timeout.
     #[validate(range(min = -1, max = 3600))]
     pub duration: Option<i32>,
 }
@@ -546,8 +549,8 @@ fn default_page_limit() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateTemplateRequest, NewSandbox, RefreshRequest, SandboxNetworkConfig, SetTimeoutRequest,
-        TemplateAliasLookupResponse,
+        CreateTemplateRequest, NewSandbox, RefreshRequest, ResumedSandbox, SandboxNetworkConfig,
+        SetTimeoutRequest, TemplateAliasLookupResponse,
     };
     use validator::Validate;
 
@@ -601,6 +604,31 @@ mod tests {
                 "duration={duration} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn resumed_sandbox_accepts_omitted_never_zero_and_positive_timeout() {
+        for timeout in [None, Some(-1), Some(0), Some(60)] {
+            let req = ResumedSandbox {
+                timeout,
+                auto_pause: false,
+            };
+            req.validate()
+                .unwrap_or_else(|e| panic!("resume timeout={timeout:?} should be valid: {e}"));
+        }
+    }
+
+    #[test]
+    fn resumed_sandbox_rejects_invalid_negative_timeout() {
+        let req = ResumedSandbox {
+            timeout: Some(-2),
+            auto_pause: false,
+        };
+
+        assert!(
+            req.validate().is_err(),
+            "resume timeout=-2 should be rejected"
+        );
     }
 
     #[test]

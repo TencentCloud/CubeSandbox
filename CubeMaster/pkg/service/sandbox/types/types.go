@@ -788,7 +788,11 @@ type UpdateRequest struct {
 	SandboxID    string `json:"sandbox_id"`
 	InstanceType string `json:"instance_type"`
 	Action       string `json:"action"`
-	Timeout      *int   `json:"timeout"`
+	// Timeout is the new idle TTL in seconds for "resume" actions.
+	// Accepted values: -1 (never timeout), 0 (immediate timeout),
+	// or a positive number of seconds. nil preserves the existing
+	// timeout without rebasing the idle clock.
+	Timeout *int `json:"timeout,omitempty"`
 }
 
 // SetTimeoutRequest is the wire shape for POST /cube/sandbox/timeout.

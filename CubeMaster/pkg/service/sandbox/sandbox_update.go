@@ -50,9 +50,10 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 		rsp.Ret = ret
 		return
 	}
-	if req.Action == "resume" && req.Timeout != nil && *req.Timeout < 0 {
-		timeout := types.NeverTimeout
-		req.Timeout = &timeout
+	if req.Action == "resume" && req.Timeout != nil && *req.Timeout < types.NeverTimeout {
+		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
+		rsp.Ret.RetMsg = "timeout must be >= -1 (use -1 for never timeout)"
+		return
 	}
 
 	var hostIP string
@@ -108,6 +109,15 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 	return
 }
 
+// publishUpdateTimeout syncs the requested timeout to the lifecycle
+// metadata channel after a successful sandbox resume. It is a
+// best-effort operation: failures are logged but do not affect the
+// resume response.
+//
+// Only acts on "resume" action with a non-nil Timeout. Pause
+// requests and resumes without an explicit Timeout are silently
+// skipped (preserving the existing timeout without rebasing the
+// idle clock).
 func publishUpdateTimeout(ctx context.Context, req *types.UpdateRequest) {
 	if req == nil || req.Action != "resume" || req.Timeout == nil {
 		return

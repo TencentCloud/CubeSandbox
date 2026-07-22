@@ -124,6 +124,9 @@ class CubeSandboxAdapter(SandboxAdapter):
     def resume_or_connect(self, *, timeout: int = 60) -> "CubeSandboxAdapter":
         return type(self).connect(self.sandbox_id, self._e2e_config or SdkE2EConfig.from_env())
 
+    def resume(self, *, timeout: int | None = None) -> None:
+        self._sandbox.resume(timeout=timeout)
+
     def get_host(self, port: int) -> str:
         return str(self._sandbox.get_host(port))
 
