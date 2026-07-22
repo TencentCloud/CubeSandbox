@@ -50,9 +50,7 @@ This guide is for **first-time Volume Plugin users**: follow the steps in order 
 
 ### Container deployment (Kubernetes / images)
 
-When CubeMaster and Cubelet run from **container images** (e.g. Kubernetes / Helm), the image build already installs **cosfs, coscmd, and jq** via `deploy/scripts/docker-install-volume-deps.sh`. You do **not** need to run `install-deps.sh` on the host. Configure `volume-cos.conf` and register the plugin, then use Volumes as usual.
-
-> The Architecture limit still applies: official images use x86_64 cosfs and **do not support ARM**.
+When CubeMaster and Cubelet run from **container images** (e.g. Kubernetes / Helm), **cosfs, coscmd, and jq** are already packaged in the images — you do **not** need to run `install-deps.sh` on the host.
 
 ### Option A: install script (recommended for bare metal / systemd one-click)
 
