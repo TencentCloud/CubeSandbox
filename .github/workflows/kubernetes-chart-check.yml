@@ -37,6 +37,8 @@ jobs:
         run: sh deploy/kubernetes/chart/scripts/test-big-pod-inplace-guard.sh
       - name: Guard PVM native DaemonSet GVK
         run: sh deploy/kubernetes/chart/scripts/test-pvm-native-ds-gvk-guard.sh
+      - name: Guard cube-master Recreate strategy for RWO PVC
+        run: sh deploy/kubernetes/chart/scripts/test-master-recreate-strategy-guard.sh
       - name: Guard cluster-scoped resource names
         run: sh deploy/kubernetes/chart/scripts/test-cluster-resource-names.sh
       - name: Check startup-gate shell syntax

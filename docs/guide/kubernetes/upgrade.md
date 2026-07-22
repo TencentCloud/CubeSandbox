@@ -81,7 +81,7 @@ kubectl rollout status deploy/cube-master -n cube-system
 
 Expect:
 
-- Control-plane Pods finished rolling per Deployment strategy
+- Control-plane Pods finished rolling per Deployment strategy (`cube-master` uses Recreate; other CP Deployments use RollingUpdate)
 - Compute: matching DaemonSet Pods run the new images and are Ready
 - If you bumped Big Pod runtime: existing sandboxes on that node were interrupted; new sandboxes can be created; the node has re-registered with CubeMaster
 

@@ -595,12 +595,28 @@ cube-node-pvm uses a native apps/v1 DaemonSet.
 apps/v1
 {{- end -}}
 
+{{/*
+Render a Deployment strategy block.
+
+Call with the root context to use controlPlane.deploymentStrategy, or with
+(dict "root" $ "strategy" .Values.controlPlane.master.deploymentStrategy) for a
+component override. type Recreate omits rollingUpdate (required for single-
+replica RWO PVC workloads such as cube-master).
+*/}}
 {{- define "cube.deploymentStrategy" -}}
+{{- $strategy := dict -}}
+{{- if hasKey . "Values" -}}
+{{- $strategy = .Values.controlPlane.deploymentStrategy -}}
+{{- else -}}
+{{- $strategy = .strategy | default .root.Values.controlPlane.deploymentStrategy -}}
+{{- end -}}
 strategy:
-  type: {{ .Values.controlPlane.deploymentStrategy.type }}
+  type: {{ required "deploymentStrategy.type is required" $strategy.type }}
+{{- if ne ($strategy.type | toString) "Recreate" }}
   rollingUpdate:
-    maxUnavailable: {{ .Values.controlPlane.deploymentStrategy.rollingUpdate.maxUnavailable }}
-    maxSurge: {{ .Values.controlPlane.deploymentStrategy.rollingUpdate.maxSurge }}
+    maxUnavailable: {{ $strategy.rollingUpdate.maxUnavailable }}
+    maxSurge: {{ $strategy.rollingUpdate.maxSurge }}
+{{- end }}
 {{- end -}}
 
 {{- define "cube.startupGateEnabled" -}}

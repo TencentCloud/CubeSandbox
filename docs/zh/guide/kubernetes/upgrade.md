@@ -81,7 +81,7 @@ kubectl rollout status deploy/cube-master -n cube-system
 
 期望：
 
-- 控制面 Pod 按 Deployment 策略滚动完成
+- 控制面 Pod 按 Deployment 策略完成（`cube-master` 为 Recreate；其它控制面 Deployment 为 RollingUpdate）
 - 计算面：对应 DaemonSet 的 Pod 已换成新镜像并 Ready
 - 若升了 Big Pod 运行时：节点上存量沙箱已中断；新沙箱可创建；节点已重新注册到 CubeMaster
 

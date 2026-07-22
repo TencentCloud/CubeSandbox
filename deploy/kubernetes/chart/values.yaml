@@ -208,7 +208,9 @@ externalControlPlane:
 controlPlane:
   enabled: true
   namespaceScoped: true
-  # Native Deployment rolling strategy for all stateless control-plane workloads.
+  # Native Deployment rolling strategy for stateless control-plane workloads
+  # (api, webui, proxy, ops, lifecycle-manager, cubemastercli). Do not apply
+  # maxSurge > 0 to cube-master when it mounts a ReadWriteOnce PVC.
   deploymentStrategy:
     type: RollingUpdate
     rollingUpdate:
@@ -218,6 +220,11 @@ controlPlane:
   master:
     enabled: true
     replicas: 1
+    # Default PVC is ReadWriteOnce: RollingUpdate with maxSurge would start a
+    # second Pod before the old one releases the volume and hang on multi-attach.
+    # Recreate deletes the old Pod first so the PVC can remount cleanly.
+    deploymentStrategy:
+      type: Recreate
     command: []
     args: []
     env: []

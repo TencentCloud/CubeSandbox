@@ -8,7 +8,7 @@ metadata:
     app.kubernetes.io/component: master
 spec:
   replicas: {{ .Values.controlPlane.master.replicas }}
-  {{- include "cube.deploymentStrategy" . | nindent 2 }}
+  {{- include "cube.deploymentStrategy" (dict "root" . "strategy" .Values.controlPlane.master.deploymentStrategy) | nindent 2 }}
   selector:
     matchLabels:
       {{- include "cube.selectorLabels" . | nindent 6 }}
