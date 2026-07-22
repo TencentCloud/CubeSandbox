@@ -87,8 +87,7 @@ When developing from a source checkout, you can also use `examples/volume/cos/in
 
 ### Option B: manual install — Tencent Cloud official docs
 
-If the script cannot cover your distro or custom image, **follow Tencent docs** and verify with the commands below.  
-(ARM / aarch64 remains unsupported: official cosfs has no ARM packages — see Architecture above.)
+If the script cannot cover your distro or custom image, **follow Tencent docs** and verify with the commands below.
 
 | Tool | Official doc |
 |------|--------------|
