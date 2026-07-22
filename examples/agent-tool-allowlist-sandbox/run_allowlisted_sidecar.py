@@ -59,9 +59,8 @@ with Sandbox.create(
     result = sandbox.commands.run(command)
     print(result.stdout.strip())
 
-    artifact_cmd = "python3 -c \"open('/tmp/tool_out.txt','w').write('artifact-ok\\n')\""
-    assert_allowlisted(artifact_cmd)
-    sandbox.commands.run(artifact_cmd)
+    # Demo path != privilege path: SDK write, then allowlisted cat to read back.
+    sandbox.files.write("/tmp/tool_out.txt", "artifact-ok\n")
 
     # Prefer allowlisted `cat` over files.read for host+sidecar setups: some
     # proxy paths mishandle Content-Encoding on the files API (see evidence).

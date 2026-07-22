@@ -9,7 +9,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from allowlist import AllowlistDenied, assert_allowlisted, is_allowlisted
+from allowlist import (
+    CODE_EXECUTION_BINARIES,
+    DEFAULT_ALLOWED_BINARIES,
+    AllowlistDenied,
+    assert_allowlisted,
+    is_allowlisted,
+)
 
 ROOT = Path(__file__).resolve().parent
 
@@ -25,8 +31,8 @@ class AllowlistTests(unittest.TestCase):
             assert_allowlisted("bash -c 'echo hi'")
 
     def test_empty_command(self) -> None:
-        with self.assertRaises(AllowlistDenied):
-            is_allowlisted("")
+        self.assertFalse(is_allowlisted(""))
+        self.assertFalse(is_allowlisted("   "))
         with self.assertRaises(AllowlistDenied):
             assert_allowlisted("   ")
 
@@ -54,6 +60,18 @@ class AllowlistTests(unittest.TestCase):
         self.assertTrue(is_allowlisted("curl https://x", allowed_binaries={"curl"}))
         self.assertFalse(is_allowlisted("echo hi", allowed_binaries={"curl"}))
 
+    def test_default_denies_code_execution(self) -> None:
+        self.assertNotIn("python3", DEFAULT_ALLOWED_BINARIES)
+        self.assertEqual(CODE_EXECUTION_BINARIES, frozenset({"python3"}))
+        self.assertFalse(is_allowlisted("python3 -c 'print(1)'"))
+        with self.assertRaises(AllowlistDenied):
+            assert_allowlisted("python3 -c 'print(1)'")
+
+    def test_enable_code_execution_is_explicit_escalation(self) -> None:
+        cmd = "python3 -c 'print(1)'"
+        self.assertTrue(is_allowlisted(cmd, enable_code_execution=True))
+        self.assertEqual(assert_allowlisted(cmd, enable_code_execution=True), cmd)
+
     def test_deny_path_never_calls_sandbox_create(self) -> None:
         """Host gate failure must leave Sandbox.create uncalled (call_count == 0)."""
         mock_create = MagicMock()
@@ -79,6 +97,7 @@ class AllowlistTests(unittest.TestCase):
             source = (ROOT / name).read_text(encoding="utf-8")
             self.assertIn("Sandbox.create", source)
             self.assertIn("allow_internet_access=False", source)
+            self.assertNotIn("python3 -c", source)
 
 
 if __name__ == "__main__":

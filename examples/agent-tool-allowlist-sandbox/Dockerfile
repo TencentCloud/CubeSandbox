@@ -40,7 +40,6 @@ RUN mkdir -p /etc/cube-sandbox \
         'head' \
         'ls' \
         'pwd' \
-        'python3' \
         'sha256sum' \
         'uname' \
         'wc' \

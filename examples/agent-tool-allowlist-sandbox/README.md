@@ -10,9 +10,10 @@ The gate is host-side (`assert_allowlisted`). It is not egress CIDR policy or
 guest kernel enforcement.
 
 **Use when:** the host may only forward a fixed tool set (`echo` / `ls` /
-`python3`, …) and must reject shells / network tools early.
+`cat`, …) and must reject shells / network tools early. Interpreters are an
+explicit capability (`enable_code_execution=True`), not part of the default set.
 
-**Not for:** full agent frameworks, arbitrary interpreters, or replacing
+**Not for:** full agent frameworks, or replacing
 [`network-policy`](../network-policy).
 
 ## 1. Prerequisites
@@ -103,17 +104,24 @@ If CubeMaster cannot see a local tag, retag/push to a reachable registry first.
 ## 4. Default allowlist
 
 `allowlist.py` (`DEFAULT_ALLOWED_BINARIES`): `echo`, `uname`, `pwd`, `ls`,
-`cat`, `head`, `wc`, `sha256sum`, `python3`. Path-style binaries and shells
-such as `bash` / `curl` are rejected.
+`cat`, `head`, `wc`, `sha256sum`. Path-style binaries and shells such as
+`bash` / `curl` are rejected. `python3` lives in `CODE_EXECUTION_BINARIES` and
+is only added when `enable_code_execution=True`.
 
 ## 5. Limitations
 
+- This demo is **capability-style tool gating** on the first argv token — not
+  full parameter policy. Combining small tools / redirects is out of scope.
+- Default policy **denies interpreter execution**. Enabling `python3` grants
+  arbitrary code execution inside the guest, not "one more binary".
 - Host-side gate only — callers that skip `assert_allowlisted` can still send
-  any command to the API.
-- Not a substitute for egress CIDR policy (`network-policy`) or guest seccomp /
-  AppArmor. Allow path stacks Mode 1 airgap to show the two layers are orthogonal.
+  any command to the API. MicroVM isolation ≠ guest capability control.
+- Mode 1 airgap blocks egress; it does **not** stop local misuse in the guest.
+  Network tools stay off the default argv list; use [`network-policy`](../network-policy)
+  for CIDR policy.
 - In-image `/etc/cube-sandbox/tool-allowlist.txt` (Path B) is informational;
-  the host gate is authoritative for this demo.
+  the host gate is authoritative for this demo. Production should set
+  capabilities explicitly (do not casually `| CODE_EXECUTION_BINARIES`).
 
 ## 6. Directory
 

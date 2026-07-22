@@ -7,9 +7,10 @@
 
 门控在宿主机（`assert_allowlisted`），不能替代出口 CIDR 或 guest 内核强制。
 
-**适用：** 调用方只允许转发固定工具集（`echo` / `ls` / `python3` 等），并尽早拒绝 shell / 网络类工具。
+**适用：** 调用方只允许转发固定工具集（`echo` / `ls` / `cat` 等），并尽早拒绝
+shell / 网络类工具。解释器是显式能力（`enable_code_execution=True`），不在默认集。
 
-**不适用：** 完整 Agent 框架、任意解释器，或替代 [`network-policy`](../network-policy)。
+**不适用：** 完整 Agent 框架，或替代 [`network-policy`](../network-policy)。
 
 ## 1. 前置条件
 
@@ -99,15 +100,20 @@ cubemastercli tpl create-from-image \
 ## 4. 默认白名单
 
 `allowlist.py`（`DEFAULT_ALLOWED_BINARIES`）：`echo`、`uname`、`pwd`、`ls`、
-`cat`、`head`、`wc`、`sha256sum`、`python3`。路径形式二进制以及 `bash` / `curl`
-等会被拒绝。
+`cat`、`head`、`wc`、`sha256sum`。路径形式二进制以及 `bash` / `curl` 等会被拒绝。
+`python3` 在 `CODE_EXECUTION_BINARIES` 中，仅当 `enable_code_execution=True` 时并入。
 
 ## 5. 限制
 
-- 仅宿主机门控——跳过 `assert_allowlisted` 仍可向 API 发任意命令。
-- 不能替代出口 CIDR（`network-policy`）或 guest seccomp / AppArmor。放行路径叠加
-  Mode 1 断网，用以演示两层正交。
-- Path B 写入的 `/etc/cube-sandbox/tool-allowlist.txt` 仅为信息标记；本演示以宿主机门控为准。
+- 本示例是基于**首个 argv token** 的能力式工具门控，不是完整参数策略；小工具组合 /
+  重定向等不在范围内。
+- 默认**拒绝解释器**。打开 `python3` 等于授予 guest 内任意代码执行，不是「多一个二进制」。
+- 仅宿主机门控——跳过 `assert_allowlisted` 仍可向 API 发任意命令。MicroVM 隔离 ≠
+  guest 内能力控制。
+- Mode 1 断网只挡出站，**不**防 guest 本地滥用。网络类工具不在默认 argv 名单；CIDR
+  见 [`network-policy`](../network-policy)。
+- Path B 的 `/etc/cube-sandbox/tool-allowlist.txt` 仅为信息标记；生产应显式配置能力，
+  勿随意 `| CODE_EXECUTION_BINARIES`。
 
 ## 6. 目录结构
 

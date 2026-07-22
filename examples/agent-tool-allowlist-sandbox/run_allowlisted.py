@@ -9,6 +9,9 @@ Sandbox.commands.run() runs it in a MicroVM and returns stdout.
 
 Also stacks Cube Mode-1 airgap (allow_internet_access=False): argv allowlist
 and platform egress are orthogonal — a passed gate does not imply network.
+
+Artifact write uses the SDK files API so the default tool allowlist stays
+free of interpreters (code execution is an explicit capability elsewhere).
 """
 
 import os
@@ -36,9 +39,7 @@ with Sandbox.create(
     result = sandbox.commands.run(command)
     print(result.stdout.strip())
 
-    # Optional artifact: write a small file and read it back (product recovery).
-    artifact_cmd = "python3 -c \"open('/tmp/tool_out.txt','w').write('artifact-ok\\n')\""
-    assert_allowlisted(artifact_cmd)
-    sandbox.commands.run(artifact_cmd)
+    # Demo path != privilege path: do not require guest python3 for artifacts.
+    sandbox.files.write("/tmp/tool_out.txt", "artifact-ok\n")
     content = sandbox.files.read("/tmp/tool_out.txt")
     print("artifact:", content.strip())

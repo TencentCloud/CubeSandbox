@@ -7,7 +7,7 @@ Runs:
   1) unit tests
   2) run_denied.py
   3) Dockerfile allowlist drift check vs allowlist.py
-  4) optional: docker image markers if IMAGE_TAG exists
+  4) optional: docker image markers if ALLOWLIST_IMAGE_TAG exists
   5) optional: run_allowlisted.py if CUBE_TEMPLATE_ID + E2B_API_URL are set
 """
 
