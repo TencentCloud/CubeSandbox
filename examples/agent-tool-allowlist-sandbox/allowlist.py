@@ -96,12 +96,16 @@ def assert_allowlisted(
 
     Set ``enable_code_execution=True`` only when the caller intentionally
     grants guest arbitrary code execution (adds ``CODE_EXECUTION_BINARIES``).
+
+    Parsing and path checks live in ``is_allowlisted`` so the two APIs cannot drift.
     """
-    binary = _first_token(command)
-    allowed = _resolve_allowed(
-        allowed_binaries, enable_code_execution=enable_code_execution
-    )
-    if "/" in binary or "\\" in binary or binary not in allowed:
+    if not is_allowlisted(
+        command,
+        allowed_binaries,
+        enable_code_execution=enable_code_execution,
+    ):
+        # Re-parse only for the error message (empty → AllowlistDenied("empty command")).
+        binary = _first_token(command)
         raise AllowlistDenied(
             f"command not on tool allowlist: {binary!r} (full: {command!r})"
         )
