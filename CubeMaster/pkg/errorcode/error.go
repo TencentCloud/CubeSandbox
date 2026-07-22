@@ -51,6 +51,7 @@ var (
 		"NotFoundAtCubelet":      130406,
 		"TooManyRequests":        130429,
 		"ClientCancel":           130499,
+		"CubeletUnHealthy":       130408,
 		"AuthFailed":             130401,
 	}
 	errorCode_name = map[int32]string{
@@ -70,6 +71,7 @@ var (
 		130406: "NotFoundAtCubelet",
 		130429: "TooManyRequests",
 		130499: "ClientCancel",
+		130408: "CubeletUnHealthy",
 	}
 )
 

@@ -29,6 +29,23 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
+// Test seams (see setSandboxProxyMapFn in sandbox_run.go for the convention).
+var (
+	rangeDBHostFn           = localcache.RangeDBHost
+	healthyNodesByProductFn = localcache.GetHealthyNodesByInstanceType
+)
+
+// hasAnyDBHost reports whether the node source ListSandbox pages over has any
+// entry at all. IndexByPage collapses "empty list" and "start index past the
+// last node" into the same nil result, so an empty page alone cannot tell a
+// service outage from the legitimate end of pagination; probing the first page
+// disambiguates using the same source (and instance-type fallback) as the
+// paged read.
+func hasAnyDBHost(instanceType string) bool {
+	firstPage, _ := rangeDBHostFn(1, 1, instanceType)
+	return len(firstPage) != 0
+}
+
 func ListSandbox(ctx context.Context, req *types.ListCubeSandboxReq) (rsp *types.ListCubeSandboxRes) {
 	if req.RequestID == "" {
 		req.RequestID = uuid.New().String()
@@ -51,7 +68,7 @@ func ListSandbox(ctx context.Context, req *types.ListCubeSandboxReq) (rsp *types
 			RetMsg:  errorcode.ErrorCode_Success.String(),
 		},
 
-		Total: localcache.GetHealthyNodesByInstanceType(-1, req.InstanceType).Len(),
+		Total: healthyNodesByProductFn(-1, req.InstanceType).Len(),
 	}
 
 	var nodeList []*node.Node
@@ -74,10 +91,23 @@ func ListSandbox(ctx context.Context, req *types.ListCubeSandboxReq) (rsp *types
 			req.StartIdx = 1
 		}
 
-		nodeList, rsp.EndIdx = localcache.RangeDBHost(req.StartIdx, req.Size, req.InstanceType)
+		nodeList, rsp.EndIdx = rangeDBHostFn(req.StartIdx, req.Size, req.InstanceType)
 	}
 
 	if len(nodeList) == 0 {
+		if req.HostID == "" && !hasAnyDBHost(req.InstanceType) {
+			// Fail loud instead of fail-open: with no queryable nodes at all
+			// (e.g. the only cubelet's health registration briefly lapsed) the
+			// list cannot be authoritatively answered, and "Success + empty" is
+			// indistinguishable from "there are genuinely no sandboxes" — a
+			// caller reconciling its inventory against this list would treat
+			// the transient outage as mass deletion. Return the retryable
+			// CubeletUnHealthy instead, mirroring GetSandbox's handling of
+			// unhealthy nodes. Paginating past the last node while nodes are
+			// still registered keeps returning an empty Success page.
+			rsp.Ret.RetCode = int(errorcode.ErrorCode_CubeletUnHealthy)
+			rsp.Ret.RetMsg = errorcode.ErrorCode_CubeletUnHealthy.String()
+		}
 		return
 	}
 

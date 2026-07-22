@@ -3,7 +3,14 @@
 
 package sandbox
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+)
 
 func TestParseCPUCount(t *testing.T) {
 	tests := []struct {
@@ -54,4 +61,52 @@ func TestParseMemoryMB(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestListSandboxEmptyResultClassification(t *testing.T) {
+	origRange := rangeDBHostFn
+	origHealthy := healthyNodesByProductFn
+	defer func() {
+		rangeDBHostFn = origRange
+		healthyNodesByProductFn = origHealthy
+	}()
+
+	stub := func(nodes node.NodeList) {
+		rangeDBHostFn = func(index, size int, product string) ([]*node.Node, int) {
+			return nodes.IndexByPage(index, size)
+		}
+		healthyNodesByProductFn = func(n int, product string) node.NodeList {
+			return nodes
+		}
+	}
+
+	t.Run("no queryable nodes returns retryable CubeletUnHealthy", func(t *testing.T) {
+		stub(node.NodeList{})
+
+		rsp := ListSandbox(context.Background(), &types.ListCubeSandboxReq{StartIdx: 1, Size: 10})
+
+		if rsp.Ret.RetCode != int(errorcode.ErrorCode_CubeletUnHealthy) {
+			t.Fatalf("RetCode=%d, want CubeletUnHealthy(%d)",
+				rsp.Ret.RetCode, int(errorcode.ErrorCode_CubeletUnHealthy))
+		}
+		if len(rsp.Data) != 0 {
+			t.Fatalf("Data=%v, want empty", rsp.Data)
+		}
+		if rsp.Ret.RetMsg != "CubeletUnHealthy" {
+			t.Fatalf("RetMsg=%q, want CubeletUnHealthy", rsp.Ret.RetMsg)
+		}
+	})
+
+	t.Run("paginating past the last node keeps Success with an empty page", func(t *testing.T) {
+		stub(node.NodeList{{InsID: "host-1"}, {InsID: "host-2"}})
+
+		rsp := ListSandbox(context.Background(), &types.ListCubeSandboxReq{StartIdx: 5, Size: 10})
+
+		if rsp.Ret.RetCode != int(errorcode.ErrorCode_Success) {
+			t.Fatalf("RetCode=%d, want Success", rsp.Ret.RetCode)
+		}
+		if len(rsp.Data) != 0 {
+			t.Fatalf("Data=%v, want empty page", rsp.Data)
+		}
+	})
 }
