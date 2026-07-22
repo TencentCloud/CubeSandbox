@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+use crate::security::outbound_url::OutboundUrlSecurityConfig;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -76,6 +77,13 @@ pub struct ServerConfig {
     /// Env var: CUBE_API_KEY
     #[serde(default)]
     pub cube_api_key: Option<String>,
+
+    /// Outbound URL security configuration.
+    ///
+    /// Controls how CubeAPI validates URLs for outbound requests such as
+    /// auth callbacks and (in the future) webhooks.
+    #[serde(default)]
+    pub outbound_url_security: OutboundUrlSecurityConfig,
 }
 
 fn default_bind() -> String {
@@ -135,6 +143,7 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             cube_api_key: std::env::var("CUBE_API_KEY").ok().filter(|s| !s.is_empty()),
+            outbound_url_security: OutboundUrlSecurityConfig::default(),
         }
     }
 }

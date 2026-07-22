@@ -240,7 +240,7 @@ mod tests {
         let mut config = ServerConfig::default();
         config.cubemaster_url = "http://127.0.0.1:9".to_string();
 
-        let state = AppState::new(config, arc(NoopLogger)).await;
+        let state = AppState::new(config, arc(NoopLogger)).await.unwrap();
         TestServer::new(build_router(state)).expect("router should build")
     }
 
@@ -283,7 +283,7 @@ mod tests {
 
         let mut config = ServerConfig::default();
         config.cubemaster_url = format!("http://{address}");
-        let state = AppState::new(config, arc(NoopLogger)).await;
+        let state = AppState::new(config, arc(NoopLogger)).await.unwrap();
         let server = TestServer::new(build_router(state)).expect("router should build");
 
         for (sandbox_id, retry_after, message) in [

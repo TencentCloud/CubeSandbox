@@ -12,6 +12,7 @@ mod middleware;
 mod models;
 mod openapi;
 mod routes;
+mod security;
 mod services;
 mod state;
 
@@ -227,7 +228,7 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
     );
 
     // ── App state ─────────────────────────────────────────────────────────
-    let state = state::AppState::new(cfg.clone(), logger.clone()).await;
+    let state = state::AppState::new(cfg.clone(), logger.clone()).await?;
 
     // ── Router ────────────────────────────────────────────────────────────
     let app = routes::build_router(state);

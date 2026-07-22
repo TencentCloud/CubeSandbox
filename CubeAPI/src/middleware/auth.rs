@@ -83,41 +83,42 @@ pub async fn unified_auth(
 ) -> Result<Response, AppError> {
     // Mode 1: callback auth — if a callback URL is configured, forward the
     // credential and let the external system decide.
-    let callback_url = match state.config.auth_callback_url.as_deref() {
-        Some(url) if !url.is_empty() => url.to_string(),
-        _ => String::new(),
-    };
-
-    if callback_url.is_empty() {
-        // Mode 2: simple key auth — if CUBE_API_KEY is configured, compare
-        // the extracted credential against it locally.
-        if let Some(expected_key) = state.config.cube_api_key.as_deref() {
-            if !expected_key.is_empty() {
-                let credential = extract_credential(&request).ok_or_else(|| {
-                    AppError::Unauthorized(
-                        "Missing authentication: provide 'Authorization: Bearer <token>' or 'X-API-Key: <key>'"
-                            .to_string(),
-                    )
-                })?;
-                let provided = match &credential {
-                    AuthCredential::Bearer(t) => t.as_str(),
-                    AuthCredential::ApiKey(k) => k.as_str(),
-                };
-                if provided != expected_key {
-                    tracing::warn!(
-                        path = %request.uri().path(),
-                        method = %request.method(),
-                        "simple key auth: credential mismatch"
-                    );
-                    return Err(AppError::Unauthorized(
-                        "Invalid API key or token".to_string(),
-                    ));
+    let auth_callback = match state.auth_callback.as_ref() {
+        Some(cb) if !cb.url.is_empty() => cb,
+        _ => {
+            // Mode 2: simple key auth — if CUBE_API_KEY is configured, compare
+            // the extracted credential against it locally.
+            if let Some(expected_key) = state.config.cube_api_key.as_deref() {
+                if !expected_key.is_empty() {
+                    let credential = extract_credential(&request).ok_or_else(|| {
+                        AppError::Unauthorized(
+                            "Missing authentication: provide 'Authorization: Bearer <token>' or 'X-API-Key: <key>'"
+                                .to_string(),
+                        )
+                    })?;
+                    let provided = match &credential {
+                        AuthCredential::Bearer(t) => t.as_str(),
+                        AuthCredential::ApiKey(k) => k.as_str(),
+                    };
+                    if provided != expected_key {
+                        tracing::warn!(
+                            path = %request.uri().path(),
+                            method = %request.method(),
+                            "simple key auth: credential mismatch"
+                        );
+                        return Err(AppError::Unauthorized(
+                            "Invalid API key or token".to_string(),
+                        ));
+                    }
                 }
             }
+            // Mode 3: no auth (both unset) or simple-key match — pass through.
+            return Ok(next.run(request).await);
         }
-        // Mode 3: no auth (both unset) or simple-key match — pass through.
-        return Ok(next.run(request).await);
-    }
+    };
+
+    let callback_url = &auth_callback.url;
+    let client = &auth_callback.client;
 
     // ── Callback mode continuation ──────────────────────────────────────
 
@@ -136,9 +137,11 @@ pub async fn unified_auth(
     // Build the callback POST, forwarding the credential headers, request path, and HTTP method.
     // X-Request-Method is required for correct authz: the same path (e.g. /templates/:id)
     // serves GET/POST/DELETE/PATCH, so path alone is insufficient to distinguish read vs write.
-    let req_builder = state
-        .http_client
-        .post(&callback_url)
+    //
+    // The bundled client has DNS pinning, redirects/proxies disabled, and strict
+    // timeouts because it was built together with this callback URL in AppState.
+    let req_builder = client
+        .post(callback_url)
         .header("X-Request-Path", &request_path)
         .header("X-Request-Method", &request_method);
 
@@ -235,7 +238,12 @@ mod tests {
     async fn build_test_server_with_callback(callback_url: &str) -> TestServer {
         let mut config = ServerConfig::default();
         config.auth_callback_url = Some(callback_url.to_string());
-        let state = AppState::new(config, arc(NoopLogger)).await;
+        // Unit-test callback servers bind to loopback addresses, so relax the
+        // outbound URL policy for tests only.
+        config.outbound_url_security.allow_private_ips = true;
+        config.outbound_url_security.allowed_schemes =
+            vec!["http".to_string(), "https".to_string()];
+        let state = AppState::new(config, arc(NoopLogger)).await.unwrap();
         let router = Router::new()
             .route("/templates/:id", any(|| async { "ok" }))
             .route("/sandboxes/:id", any(|| async { "ok" }))
@@ -333,7 +341,7 @@ mod tests {
     #[tokio::test]
     async fn no_callback_configured_passthrough() {
         let config = ServerConfig::default(); // auth_callback_url = None
-        let state = AppState::new(config, arc(NoopLogger)).await;
+        let state = AppState::new(config, arc(NoopLogger)).await.unwrap();
         let router = Router::new()
             .route("/sandboxes/:id", any(|| async { "ok" }))
             .layer(axum::middleware::from_fn_with_state(
@@ -392,7 +400,7 @@ mod tests {
     async fn build_test_server_with_api_key(api_key: &str) -> TestServer {
         let mut config = ServerConfig::default();
         config.cube_api_key = Some(api_key.to_string());
-        let state = AppState::new(config, arc(NoopLogger)).await;
+        let state = AppState::new(config, arc(NoopLogger)).await.unwrap();
         let router = Router::new()
             .route("/sandboxes/:id", any(|| async { "ok" }))
             .layer(axum::middleware::from_fn_with_state(

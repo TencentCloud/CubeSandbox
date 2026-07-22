@@ -74,6 +74,9 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 # ── Validation ────────────────────────────────────────────────────────────
 validator = { version = "0.16", features = ["derive"] }
 
+# ── URL parsing for outbound security ─────────────────────────────────────
+url = "2"
+
 # ── Async trait support ───────────────────────────────────────────────────
 async-trait = "0.1"
 
@@ -88,6 +91,11 @@ utoipa = { version = "5.4.0", features = ["chrono", "uuid", "yaml"] }
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.4" }
 axum-test = "14"
+
+[features]
+default = ["webhooks"]
+# Enables webhook-specific helpers (response body streaming, dev policy, etc.).
+webhooks = ["reqwest/stream"]
 
 [profile.release]
 # Maximize single-binary performance
