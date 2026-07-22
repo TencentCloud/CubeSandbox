@@ -353,8 +353,8 @@ pub async fn create_agent_instance(
         .and_then(|v| v.parse::<i32>().ok())
         .unwrap_or(86_400);
 
-    // 若 template_id 命中已发布的助手模板，则克隆出的沙箱已内置 OpenClaw 配置，
-    // 创建时可走快路径，跳过重复装配。
+    // If template_id matches a published agent template, cloned sandboxes already
+    // include OpenClaw configuration and can skip repeated setup.
     let agent_template = if rootfs_source_type == ROOTFS_SOURCE_TEMPLATE {
         if let Some(store) = &state.agenthub_store {
             store.get_template(&template_id).await.ok().flatten()
@@ -397,8 +397,9 @@ pub async fn create_agent_instance(
         } else {
             None
         };
-    // 快照发布的助手模板已内置 OpenClaw 配置，可走快路径；应用市场模板
-    // 只是基础镜像，仍需按当前 LLM/企微设置装配。
+    // Templates published from snapshots already include OpenClaw configuration
+    // and can use the fast path. Market templates are base images and still need
+    // setup based on the current LLM and WeCom settings.
     let use_template_fastpath = agent_template.is_some() && !market_template && !should_bind_wecom;
     let mut llm_config = resolve_llm_config(&state).await?;
     let default_model: String = body
@@ -1684,8 +1685,8 @@ pub async fn delete_agent_template(
     })?;
 
     // Cascade to the backing snapshot before removing the registration row
-    // (先物理后元数据). Market templates intentionally do NOT cascade to their
-    // shared `tpl-*` infrastructure template; that is reclaimed by the
+    // (delete storage first, metadata second). Market templates intentionally do
+    // NOT cascade to their shared `tpl-*` infrastructure template; that is reclaimed by the
     // infrastructure DELETE /templates path + reference counting.
     if let Some(record) = store.get_template(&template_id).await.map_err(|e| {
         AppError::Internal(anyhow::anyhow!("failed to load AgentHub template: {}", e))
@@ -1809,9 +1810,10 @@ pub async fn create_agent_snapshot(
         .filter(|v| !v.is_empty())
         .map(ToString::to_string)
         .or_else(|| Some(format!("{} 存档", record.name)));
-    // 快照本质是提交 rootfs 的 COW 增量，耗时与数据量成正比、可能较长。
-    // 这里改为后台执行并立即返回操作 ID，前端用操作流水（operation）轮询完成状态，
-    // 避免请求长时间阻塞、转圈。
+    // Snapshot creation commits rootfs COW deltas, so duration scales with data
+    // size and can be long-running. Run it in the background and return an
+    // operation ID immediately so the frontend can poll for completion instead
+    // of blocking the request.
     let task_state = state.clone();
     let task_agent = agent_id.clone();
     let task_sandbox = record.sandbox_id.clone();
@@ -2460,8 +2462,9 @@ pub async fn publish_agent_template(
                     })?;
                 snapshot_id
             } else {
-                // 直接对当前状态打快照后发布：不脱敏、不还原。
-                // 模板保留可用配置，配合「从模板秒级孵化」克隆即用，无需重新装配。
+                // Publish by snapshotting the current state directly without
+                // redaction or restore. The template keeps usable configuration
+                // so clones can start from it immediately without another setup pass.
                 let snapshot = state
                     .services
                     .snapshots
