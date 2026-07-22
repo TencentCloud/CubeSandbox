@@ -46,9 +46,15 @@
 
 > **rpc 插件**：Cubelet 节点仍须 cosfs；**不需要** coscmd / jq。Controller 逻辑在 `cube-volume-cos-rpc` 进程内，用 Go SDK 访问 COS。
 
-### 方式 A：一键脚本（推荐）
+### 容器部署（Kubernetes / 镜像）
 
-one-click / 发布包会把 `install-deps.sh` 与插件一起放到 **`CubeMaster/plugin/`** 与 **`Cubelet/plugin/`**。支持 CentOS / TencentOS / Ubuntu 等（**仅 x86_64**）；安装结束会自动做基础 check。
+若 CubeMaster、Cubelet 以**容器镜像**方式运行（例如 Helm / TKE 部署），镜像构建时已通过 `deploy/scripts/docker-install-volume-deps.sh` 把 **cosfs、coscmd、jq** 装进镜像环境，**无需**再在宿主机上执行下方 `install-deps.sh`。配置好 `volume-cos.conf` 与插件注册即可使用。
+
+> 仍受上文架构限制：官方镜像同样基于 x86_64 cosfs，**不支持 ARM**。
+
+### 方式 A：一键脚本（推荐，裸机 / systemd one-click）
+
+裸机或 one-click（systemd 直接跑进程）时，需在宿主机安装依赖。发布包会把 `install-deps.sh` 与插件一起放到 **`CubeMaster/plugin/`** 与 **`Cubelet/plugin/`**。支持 CentOS / TencentOS / Ubuntu 等（**仅 x86_64**）；安装结束会自动做基础 check。
 
 默认安装前缀：`/usr/local/services/cubetoolbox`。
 

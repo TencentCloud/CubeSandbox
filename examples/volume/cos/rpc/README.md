@@ -32,7 +32,7 @@ Compared to [binary](../binary/): Controller uses **Go SDK** instead of **coscmd
 | 5 | SDK: `Volume.create(..., driver="cos-rpc")` |
 
 **No coscmd** in this example; Create/Destroy use the COS Go SDK (`go mod`, [31215](https://cloud.tencent.com/document/product/436/31215)).  
-**Architecture:** ARM / aarch64 is not supported (Cubelet still needs cosfs; official packages are x86_64/amd64 only).
+**Architecture:** ARM / aarch64 is not supported (Cubelet still needs cosfs; official packages are x86_64/amd64 only). Container images already include cosfs; bare metal: [../README.md §1](../README.md#1-install-dependencies).
 
 ---
 
@@ -40,7 +40,7 @@ Compared to [binary](../binary/): Controller uses **Go SDK** instead of **coscmd
 
 Attach/Detach use cosfs. **Cubelet node only** — see [../README.md §1](../README.md#1-install-dependencies).
 
-Quick command (after one-click install, from the plugin directory; **x86_64 only**, ARM unsupported):
+Container images already include cosfs — skip host install. Bare metal / one-click (**x86_64 only**):
 
 ```bash
 sudo /usr/local/services/cubetoolbox/Cubelet/plugin/install-deps.sh --cosfs

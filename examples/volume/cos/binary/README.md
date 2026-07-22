@@ -23,7 +23,7 @@
 | 6 | SDK verification — [§6–§7](../README.md#6-prepare-sdk-environment) |
 
 **Dependencies:** [coscmd](https://cloud.tencent.com/document/product/436/6883) on CubeMaster; [cosfs](https://cloud.tencent.com/document/product/436/10976) on Cubelet. No COS Go SDK (see [rpc](../rpc/)).  
-**Architecture:** ARM / aarch64 is not supported (official cosfs has no ARM packages). Install deps via [../README.md §1](../README.md#1-install-dependencies) (`Cube*/plugin/install-deps.sh` in release packages).
+**Architecture:** ARM / aarch64 is not supported (official cosfs has no ARM packages). Deps: [../README.md §1](../README.md#1-install-dependencies) — container images already include cosfs/coscmd/jq; bare metal / one-click uses `Cube*/plugin/install-deps.sh`.
 
 ---
 

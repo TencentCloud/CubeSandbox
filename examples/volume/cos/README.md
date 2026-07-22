@@ -48,9 +48,15 @@ This guide is for **first-time Volume Plugin users**: follow the steps in order 
 
 > **rpc plugin:** Cubelet still needs cosfs; **no** coscmd / jq. Controller logic lives in the `cube-volume-cos-rpc` process using the Go SDK.
 
-### Option A: install script (recommended)
+### Container deployment (Kubernetes / images)
 
-One-click / release packages ship `install-deps.sh` next to the plugin under **`CubeMaster/plugin/`** and **`Cubelet/plugin/`**. Supports CentOS / TencentOS / Ubuntu, etc. (**x86_64 only**); runs basic checks after install.
+When CubeMaster and Cubelet run from **container images** (e.g. Helm / TKE), the image build already installs **cosfs, coscmd, and jq** via `deploy/scripts/docker-install-volume-deps.sh`. You do **not** need to run `install-deps.sh` on the host. Configure `volume-cos.conf` and register the plugin, then use Volumes as usual.
+
+> The Architecture limit still applies: official images use x86_64 cosfs and **do not support ARM**.
+
+### Option A: install script (recommended for bare metal / systemd one-click)
+
+On bare metal or one-click (processes under systemd), install host deps. Release packages ship `install-deps.sh` next to the plugin under **`CubeMaster/plugin/`** and **`Cubelet/plugin/`**. Supports CentOS / TencentOS / Ubuntu, etc. (**x86_64 only**); runs basic checks after install.
 
 Default install prefix: `/usr/local/services/cubetoolbox`.
 
