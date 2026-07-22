@@ -31,6 +31,7 @@ import stat
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -118,7 +119,6 @@ def _write_session(sandbox_id: str) -> None:
             continue
         except OSError as e:
             if hasattr(e, "errno") and e.errno == 40:  # ELOOP - symlink race
-                import time
                 time.sleep(0.05 * (attempt + 1))  # brief backoff
                 continue
             raise

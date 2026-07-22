@@ -375,6 +375,14 @@ def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
                 if err:
                     raise ValueError(err)
                 content = _get_sandbox().files.read(path)
+                if isinstance(content, bytes):
+                    content_bytes = content
+                else:
+                    content_bytes = content.encode("utf-8")
+                if len(content_bytes) > MAX_CONTENT_LENGTH:
+                    raise ValueError(
+                        f"file content exceeds maximum size of {MAX_CONTENT_LENGTH} bytes"
+                    )
                 text = content if isinstance(content, str) else content.decode(
                     "utf-8", errors="replace"
                 )
@@ -436,10 +444,12 @@ def _read_mcp_message() -> dict[str, Any] | None:
     if not line:
         raise EOFError()
     if len(line) > MAX_MESSAGE_LENGTH:
+        print(f"[mcp_server] dropped oversized message ({len(line)} bytes > {MAX_MESSAGE_LENGTH} limit)", file=sys.stderr)
         return None
     try:
         return json.loads(line)
     except json.JSONDecodeError:
+        print(f"[mcp_server] dropped malformed JSON message: {line[:100]!r}", file=sys.stderr)
         return None
 
 

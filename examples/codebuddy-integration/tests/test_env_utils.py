@@ -20,7 +20,11 @@ import types
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Ensure the parent directory is on sys.path for direct execution via
+# ``python3 -m unittest`` as well as for pytest's automatic path discovery.
+_parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _parent not in sys.path:
+    sys.path.insert(0, _parent)
 
 import env_utils  # noqa: E402
 
