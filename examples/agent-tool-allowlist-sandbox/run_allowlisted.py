@@ -6,6 +6,9 @@ run_allowlisted.py — Execute an allowlisted agent tool command inside a sandbo
 
 Demonstrates the happy path: host-side gate accepts the command, then
 Sandbox.commands.run() runs it in a MicroVM and returns stdout.
+
+Also stacks Cube Mode-1 airgap (allow_internet_access=False): argv allowlist
+and platform egress are orthogonal — a passed gate does not imply network.
 """
 
 import os
@@ -24,7 +27,12 @@ command = "echo agent-tool-allowlist-ok"
 
 assert_allowlisted(command)
 
-with Sandbox.create(template=template_id) as sandbox:
+# network-policy Mode 1: no internet; local echo/artifact still work.
+print("egress: allow_internet_access=False (airgap; argv gate != network)")
+with Sandbox.create(
+    template=template_id,
+    allow_internet_access=False,
+) as sandbox:
     result = sandbox.commands.run(command)
     print(result.stdout.strip())
 

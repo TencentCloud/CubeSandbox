@@ -57,9 +57,12 @@ python run_allowlisted.py       # 放行（需 *.cube.app DNS 或在开发虚机
 python run_denied.py            # 宿主机拒绝；不建沙箱
 ```
 
-放行：
+放行（宿主机门控通过后，`Sandbox.create` 带
+`allow_internet_access=False`——[`network-policy`](../network-policy) Mode 1
+断网；argv 放行 ≠ 网络通）：
 
 ```text
+egress: allow_internet_access=False (airgap; argv gate != network)
 agent-tool-allowlist-ok
 artifact: artifact-ok
 ```
@@ -102,7 +105,8 @@ cubemastercli tpl create-from-image \
 ## 5. 限制
 
 - 仅宿主机门控——跳过 `assert_allowlisted` 仍可向 API 发任意命令。
-- 不能替代出口 CIDR（`network-policy`）或 guest seccomp / AppArmor。
+- 不能替代出口 CIDR（`network-policy`）或 guest seccomp / AppArmor。放行路径叠加
+  Mode 1 断网，用以演示两层正交。
 - Path B 写入的 `/etc/cube-sandbox/tool-allowlist.txt` 仅为信息标记；本演示以宿主机门控为准。
 
 ## 6. 目录结构

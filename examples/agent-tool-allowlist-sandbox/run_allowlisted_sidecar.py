@@ -9,7 +9,8 @@ Option D) so the official E2B SDK can reach CubeProxy data plane via a local
 proxy instead of resolving *.cube.app.
 
 This does not change the host-side argv gate: assert_allowlisted() still runs
-before Sandbox.create() / commands.run().
+before Sandbox.create() / commands.run(). Create uses allow_internet_access=False
+(network-policy Mode 1) so argv allow and platform egress stay orthogonal.
 """
 
 from __future__ import annotations
@@ -49,7 +50,12 @@ template_id = os.environ["CUBE_TEMPLATE_ID"]
 command = "echo agent-tool-allowlist-ok"
 assert_allowlisted(command)
 
-with Sandbox.create(template=template_id) as sandbox:
+# network-policy Mode 1: no internet; local echo/artifact still work.
+print("egress: allow_internet_access=False (airgap; argv gate != network)")
+with Sandbox.create(
+    template=template_id,
+    allow_internet_access=False,
+) as sandbox:
     result = sandbox.commands.run(command)
     print(result.stdout.strip())
 

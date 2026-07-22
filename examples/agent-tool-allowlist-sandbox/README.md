@@ -61,9 +61,11 @@ python run_allowlisted.py       # allow (needs *.cube.app DNS or run in dev VM)
 python run_denied.py            # deny on host; no sandbox
 ```
 
-Allow:
+Allow (host gate passes, then create with `allow_internet_access=False` —
+[`network-policy`](../network-policy) Mode 1 airgap; argv allow ≠ network):
 
 ```text
+egress: allow_internet_access=False (airgap; argv gate != network)
 agent-tool-allowlist-ok
 artifact: artifact-ok
 ```
@@ -109,7 +111,7 @@ such as `bash` / `curl` are rejected.
 - Host-side gate only — callers that skip `assert_allowlisted` can still send
   any command to the API.
 - Not a substitute for egress CIDR policy (`network-policy`) or guest seccomp /
-  AppArmor.
+  AppArmor. Allow path stacks Mode 1 airgap to show the two layers are orthogonal.
 - In-image `/etc/cube-sandbox/tool-allowlist.txt` (Path B) is informational;
   the host gate is authoritative for this demo.
 

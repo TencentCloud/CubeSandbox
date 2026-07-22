@@ -73,6 +73,13 @@ class AllowlistTests(unittest.TestCase):
         source = (ROOT / "run_denied.py").read_text(encoding="utf-8")
         self.assertNotIn("Sandbox.create", source)
 
+    def test_allow_scripts_stack_airgap_egress(self) -> None:
+        """Static guard: allow paths set network-policy Mode 1 airgap."""
+        for name in ("run_allowlisted.py", "run_allowlisted_sidecar.py"):
+            source = (ROOT / name).read_text(encoding="utf-8")
+            self.assertIn("Sandbox.create", source)
+            self.assertIn("allow_internet_access=False", source)
+
 
 if __name__ == "__main__":
     unittest.main()
