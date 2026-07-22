@@ -3077,6 +3077,7 @@ Service for machine level operations.
 | volume_id | [string](#string) |  | volume_id is the CubeMaster VolumeRecord identifier. Used as the ref-count DB key for cross-sandbox deduplication. |
 | volume_base_dir | [string](#string) |  | volume_base_dir is the parent directory that Cubelet requires the plugin to mount this volume under. The plugin MUST return a host_path located inside this directory (typically &#34;&lt;volume_base_dir&gt;/&lt;plugin&gt;-&lt;volume_id&gt;&#34;). Cubelet rejects the attach if host_path is not within volume_base_dir. |
 | ref_count | [int64](#int64) |  | ref_count is the number of sandboxes already attached to this volume BEFORE this call (i.e. the pre-attach count). 0 → first attach; plugin should perform host-level setup. |
+| private_data | [string](#string) |  | private_data is opaque plugin state returned by Create and persisted in t_cube_volume. CubeMaster forwards it on sandbox create so Attach can reuse Create-time context without a second control-plane round-trip. Max length: 1024 bytes. May be empty. |
 
 
 
@@ -3140,6 +3141,7 @@ Service for machine level operations.
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | token | [string](#string) |  | token is an optional credential for volume-content access. volume_id and name come from the CreateRequest; plugins must not echo them. |
+| private_data | [string](#string) |  | private_data is opaque plugin state persisted in t_cube_volume and forwarded to Attach on sandbox create. Not returned to API/SDK clients. Max length: 1024 bytes. May be empty. |
 
 
 

@@ -172,6 +172,7 @@ flowchart LR
 | 输入 | `volumeID` | string | 稳定 ID（UUID 或与 `name` 相同） |
 | 输入 | `name` | string | 展示名 |
 | 输出 | `token` | string | 可选鉴权令牌，返回给 SDK |
+| 输出 | `private_data` | string | 插件私有状态（最长 **1024** 字节）。写入 `t_cube_volume`，沙箱创建绑定时转发给 **Attach**。**不**对 API/SDK 暴露。可为空。 |
 | 输出 | `error` | string | 成功为 `""`（仅 binary stdout JSON） |
 
 **binary 示例**
@@ -185,7 +186,7 @@ flowchart LR
 输出（stdout JSON，exit 0）：
 
 ```json
-{"token":"","error":""}
+{"token":"","private_data":"","error":""}
 ```
 
 #### Destroy
@@ -220,6 +221,7 @@ flowchart LR
 | 输入 | `volumeID` | string | 与 `volumeMounts[].name` 相同 |
 | 输入 | `refCount` | int64 | **本 node 挂载前**沙箱数；`0` = 本 node 首次 |
 | 输入 | `volumeBaseDir` | string | 父目录；`hostPath` **必须**在其内 |
+| 输入 | `private_data` | string | Create 返回并落库的同一私有状态；可为空。binary：可选 `--private-data`（为空时不传） |
 | 输出 | `hostPath` | string | Cubelet mntns 内路径，供 virtiofs bind |
 | 输出 | `metadata` | map[string]string | opaque 状态；Detach 原样回传 |
 | 输出 | `error` | string | 成功为 `""`（仅 binary stdout JSON） |
@@ -237,6 +239,8 @@ flowchart LR
   --sandbox-id sb-001 --namespace default \
   --volume-id my-vol --ref-count 0 \
   --volume-base-dir /data/volume
+# Create 返回非空 private_data 时可选附加：
+#   --private-data 'volumes/my-vol/'
 ```
 
 输出（stdout JSON，exit 0）：
@@ -320,7 +324,7 @@ sequenceDiagram
     U->>API: POST /volumes {name, driver}
     API->>M: POST /cube/volume
     M->>P: Create(volumeID, name)
-    P-->>M: stdout JSON {"token":"...","error":""}
+    P-->>M: stdout JSON {"token":"...","private_data":"...","error":""}
     M->>M: 写入 t_cube_volume
     M-->>U: {volumeID, name, token}
 

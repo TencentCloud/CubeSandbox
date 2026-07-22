@@ -660,7 +660,7 @@ func checkAndGetVolumes(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSan
 				if err != nil {
 					return fmt.Errorf("volume [%s]: %w", e.Name, err)
 				}
-				if err := appendPluginVolumeSourceAnnotation(req, e.Name, record.Driver); err != nil {
+				if err := appendPluginVolumeSourceAnnotation(req, e.Name, record.Driver, record.PrivateData); err != nil {
 					return fmt.Errorf("volume [%s]: annotation: %w", e.Name, err)
 				}
 				v.VolumeSource.EmptyDir = &cubebox.EmptyDirVolumeSource{
@@ -996,16 +996,21 @@ func checkAndGetContainerHooks(out *cubebox.ContainerConfig, in *types.Container
 	return nil
 }
 
-// appendPluginVolumeSourceAnnotation records name+driver for a plugin volume
-// in the "plugin-volume-sources" annotation so Cubelet can call the right
-// Node Hook binary at attach time.
+// appendPluginVolumeSourceAnnotation records name+driver(+private_data) for a
+// plugin volume in the "plugin-volume-sources" annotation so Cubelet can call
+// the right Node Hook at attach time and forward Create-time private_data.
 //
-// Format: JSON array of {"name": "<volumeID>", "driver": "<driver>"}
-func appendPluginVolumeSourceAnnotation(req *types.CreateCubeSandboxReq, name, driver string) error {
+// Format: JSON array of
+//
+//	{"name":"<volumeID>","driver":"<driver>","private_data":"<opaque>"}
+//
+// private_data is omitted from the JSON object when empty.
+func appendPluginVolumeSourceAnnotation(req *types.CreateCubeSandboxReq, name, driver, privateData string) error {
 	const key = "plugin-volume-sources"
 	type entry struct {
-		Name   string `json:"name"`
-		Driver string `json:"driver"`
+		Name        string `json:"name"`
+		Driver      string `json:"driver"`
+		PrivateData string `json:"private_data,omitempty"`
 	}
 	if req.Annotations == nil {
 		req.Annotations = make(map[string]string)
@@ -1016,7 +1021,7 @@ func appendPluginVolumeSourceAnnotation(req *types.CreateCubeSandboxReq, name, d
 			return err
 		}
 	}
-	entries = append(entries, entry{Name: name, Driver: driver})
+	entries = append(entries, entry{Name: name, Driver: driver, PrivateData: privateData})
 	b, err := json.Marshal(entries)
 	if err != nil {
 		return err

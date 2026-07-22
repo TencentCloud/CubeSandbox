@@ -49,8 +49,10 @@ func (s *Server) Create(ctx context.Context, req *vpb.CreateRequest) (*vpb.Creat
 	if err := s.cos.CreateVolume(ctx, volumeID); err != nil {
 		return nil, fmt.Errorf("create volume %q: %w", volumeID, err)
 	}
-	log.Printf("[cos-rpc] create volumeID=%s name=%s", volumeID, name)
-	return &vpb.CreateResponse{Token: ""}, nil
+	// private_data carries the COS key prefix for Attach (max 1024 bytes).
+	privateData := fmt.Sprintf("volumes/%s/", volumeID)
+	log.Printf("[cos-rpc] create volumeID=%s name=%s private_data=%s", volumeID, name, privateData)
+	return &vpb.CreateResponse{Token: "", PrivateData: privateData}, nil
 }
 
 func (s *Server) Destroy(ctx context.Context, req *vpb.DestroyRequest) (*vpb.DestroyResponse, error) {
@@ -65,6 +67,7 @@ func (s *Server) Destroy(ctx context.Context, req *vpb.DestroyRequest) (*vpb.Des
 func (s *Server) Attach(_ context.Context, req *vpb.AttachRequest) (*vpb.AttachResponse, error) {
 	volumeID := req.GetVolumeId()
 	baseDir := req.GetVolumeBaseDir()
+	privateData := req.GetPrivateData()
 	if req.GetRefCount() > 0 {
 		mnt := s.fs.MountPoint(baseDir, volumeID)
 		return &vpb.AttachResponse{
@@ -80,7 +83,8 @@ func (s *Server) Attach(_ context.Context, req *vpb.AttachRequest) (*vpb.AttachR
 	if err != nil {
 		return nil, fmt.Errorf("attach volume %q: %w", volumeID, err)
 	}
-	log.Printf("[cos-rpc] attach sandbox=%s volume=%s host_path=%s", req.GetSandboxId(), volumeID, hostPath)
+	log.Printf("[cos-rpc] attach sandbox=%s volume=%s host_path=%s private_data=%s",
+		req.GetSandboxId(), volumeID, hostPath, privateData)
 
 	return &vpb.AttachResponse{
 		HostPath: hostPath,

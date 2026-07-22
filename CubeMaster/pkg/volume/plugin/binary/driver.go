@@ -17,7 +17,7 @@
 //	create
 //	  --volume-id  <volumeID>   pre-generated UUIDv4
 //	  --name       <name>       human-readable label
-//	  stdout JSON: {"token":"...","error":""}
+//	  stdout JSON: {"token":"...","private_data":"...","error":""}
 //
 //	destroy
 //	  --volume-id  <volumeID>
@@ -66,8 +66,9 @@ func (p *Plugin) Create(
 	volumeID, name string,
 ) (*plugin.VolumeInfo, error) {
 	var resp struct {
-		Token string `json:"token"`
-		Error string `json:"error"`
+		Token       string `json:"token"`
+		PrivateData string `json:"private_data"`
+		Error       string `json:"error"`
 	}
 	if err := p.run(ctx, &resp,
 		"--op", "create",
@@ -80,10 +81,11 @@ func (p *Plugin) Create(
 		return nil, fmt.Errorf("binary plugin %q create: %s", p.name, resp.Error)
 	}
 	return &plugin.VolumeInfo{
-		VolumeID:   volumeID,
-		Name:       name,
-		Token:      resp.Token,
-		PluginName: p.name,
+		VolumeID:    volumeID,
+		Name:        name,
+		Token:       resp.Token,
+		PrivateData: resp.PrivateData,
+		PluginName:  p.name,
 	}, nil
 }
 

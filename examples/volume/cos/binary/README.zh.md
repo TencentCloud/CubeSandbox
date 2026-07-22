@@ -262,7 +262,8 @@ do_create() {
 
     load_config                          # Step 1: read SECRET_ID/KEY, BUCKET, REGION
     cos_create_dir "$volume_id"          # Step 2: upload volumes/<id>/.keep via coscmd
-    jq -cn '{ token: "", error: "" }'    # Step 3: return success (no extra token for COS)
+    jq -cn --arg pd "volumes/${volume_id}/" \
+        '{ token: "", private_data: $pd, error: "" }'  # Step 3: private_data 会转给 Attach
 }
 ```
 

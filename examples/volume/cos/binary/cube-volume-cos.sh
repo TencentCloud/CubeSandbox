@@ -233,10 +233,13 @@ cosfs_unmount_volume() {
 # ---------------------------------------------------------------------------
 
 # create: provision backend storage for a new volume.
-# Steps: load config -> create COS folder -> return empty token JSON.
+# Steps: load config -> create COS folder -> return token/private_data JSON.
 #
 # Input:  --volume-id <id>  --name <name>
-# Output: stdout JSON {"token":"","error":""}
+# Output: stdout JSON {"token":"","private_data":"volumes/<id>/","error":""}
+#
+# private_data is opaque Create→Attach state (max 1024 bytes). This COS demo
+# stores the object-key prefix so Attach can log/reuse it without hardcoding.
 do_create() {
     local volume_id="$1" name="$2"
     log "create volumeID=${volume_id} name=${name}"
@@ -245,8 +248,9 @@ do_create() {
     # Step 1: create volumes/<volume_id>/ in the COS bucket
     cos_create_dir "$volume_id" || { err_json "coscmd create dir failed for ${volume_id}"; exit 1; }
 
-    # Step 2: return success (COS plugin has no extra token to hand back)
-    jq -cn '{ token: "", error: "" }'
+    # Step 2: return success; private_data carries the COS key prefix for Attach
+    jq -cn --arg pd "volumes/${volume_id}/" \
+        '{ token: "", private_data: $pd, error: "" }'
 }
 
 # destroy: remove backend storage when user deletes a volume.
@@ -277,12 +281,13 @@ do_destroy() {
 # Cubelet bind-mounts host_path into the sandbox at the user's chosen path.
 #
 # Input:  --sandbox-id <id>  --namespace <ns>  --volume-id <vid>
-#         --ref-count <n>  --volume-base-dir <dir>
+#         --ref-count <n>  --volume-base-dir <dir>  [--private-data <str>]
 # Output: {"host_path":"<volume-base-dir>/cos-<vid>","metadata":{...},"error":""}
 do_attach() {
     local sandbox_id="$1" volume_id="$2" ref_count="$3"
+    local private_data="${4:-}"
 
-    log "attach sandbox=${sandbox_id} volumeID=${volume_id} refcount_before=${ref_count}"
+    log "attach sandbox=${sandbox_id} volumeID=${volume_id} refcount_before=${ref_count} private_data=${private_data}"
 
     load_config
     ensure_passwd_file
@@ -360,6 +365,7 @@ OP=""
 VOLUME_ID="" NAME=""
 SANDBOX_ID="" NAMESPACE="" REF_COUNT="0"
 METADATA="{}"
+PRIVATE_DATA=""
 
 # CubeMaster/Cubelet pass arguments like --op attach --volume-id xxx ...
 while [[ $# -gt 0 ]]; do
@@ -372,6 +378,7 @@ while [[ $# -gt 0 ]]; do
         --ref-count)    REF_COUNT="$2";    shift 2 ;;
         --volume-base-dir)
             [[ -n "${2:-}" ]] && VOLUME_BASE_DIR="$2"; shift 2 ;;
+        --private-data) PRIVATE_DATA="$2"; shift 2 ;;
         --metadata)     METADATA="$2";     shift 2 ;;
         *) die "unknown argument: $1" ;;
     esac
@@ -384,7 +391,7 @@ case "$OP" in
     create)  do_create  "$VOLUME_ID" "$NAME" ;;
     destroy) do_destroy "$VOLUME_ID" ;;
     # Cubelet (data plane)
-    attach)  do_attach  "$SANDBOX_ID" "$VOLUME_ID" "$REF_COUNT" ;;
+    attach)  do_attach  "$SANDBOX_ID" "$VOLUME_ID" "$REF_COUNT" "$PRIVATE_DATA" ;;
     detach)  do_detach  "$SANDBOX_ID" "$VOLUME_ID" "$REF_COUNT" "$METADATA" ;;
     *)       err_json "unknown op: ${OP}"; exit 1 ;;
 esac

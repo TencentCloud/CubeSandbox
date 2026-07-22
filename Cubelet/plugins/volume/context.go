@@ -73,6 +73,11 @@ type AttachRequest struct {
 	// inside this directory (typically "<VolumeBaseDir>/<plugin-name>-<volumeID>").
 	// Cubelet rejects the attach if HostPath is not within VolumeBaseDir.
 	VolumeBaseDir string
+
+	// PrivateData is opaque plugin state returned by Create, persisted in
+	// t_cube_volume, and forwarded by CubeMaster via plugin-volume-sources.
+	// Max length: 1024 bytes. May be empty.
+	PrivateData string
 }
 
 // AttachResult is returned by VolumePlugin.Attach.

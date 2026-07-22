@@ -48,6 +48,11 @@ message AttachRequest {
   // BEFORE this call (i.e. the pre-attach count).
   // 0 → first attach; plugin should perform host-level setup.
   int64  ref_count   = 6;
+  // private_data is opaque plugin state returned by Create and persisted in
+  // t_cube_volume. CubeMaster forwards it on sandbox create so Attach can
+  // reuse Create-time context without a second control-plane round-trip.
+  // Max length: 1024 bytes. May be empty.
+  string private_data = 7;
 }
 
 message AttachResponse {
@@ -98,6 +103,10 @@ message CreateResponse {
   // token is an optional credential for volume-content access.
   // volume_id and name come from the CreateRequest; plugins must not echo them.
   string token = 1;
+  // private_data is opaque plugin state persisted in t_cube_volume and
+  // forwarded to Attach on sandbox create. Not returned to API/SDK clients.
+  // Max length: 1024 bytes. May be empty.
+  string private_data = 2;
 }
 
 message DestroyRequest {

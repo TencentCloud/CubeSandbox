@@ -89,7 +89,12 @@ type AttachRequest struct {
 	// ref_count is the number of sandboxes already attached to this volume
 	// BEFORE this call (i.e. the pre-attach count).
 	// 0 → first attach; plugin should perform host-level setup.
-	RefCount      int64 `protobuf:"varint,6,opt,name=ref_count,json=refCount,proto3" json:"ref_count,omitempty"`
+	RefCount int64 `protobuf:"varint,6,opt,name=ref_count,json=refCount,proto3" json:"ref_count,omitempty"`
+	// private_data is opaque plugin state returned by Create and persisted in
+	// t_cube_volume. CubeMaster forwards it on sandbox create so Attach can
+	// reuse Create-time context without a second control-plane round-trip.
+	// Max length: 1024 bytes. May be empty.
+	PrivateData   string `protobuf:"bytes,7,opt,name=private_data,json=privateData,proto3" json:"private_data,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -157,6 +162,13 @@ func (x *AttachRequest) GetRefCount() int64 {
 		return x.RefCount
 	}
 	return 0
+}
+
+func (x *AttachRequest) GetPrivateData() string {
+	if x != nil {
+		return x.PrivateData
+	}
+	return ""
 }
 
 type AttachResponse struct {
@@ -388,7 +400,11 @@ type CreateResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// token is an optional credential for volume-content access.
 	// volume_id and name come from the CreateRequest; plugins must not echo them.
-	Token         string `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	Token string `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	// private_data is opaque plugin state persisted in t_cube_volume and
+	// forwarded to Attach on sandbox create. Not returned to API/SDK clients.
+	// Max length: 1024 bytes. May be empty.
+	PrivateData   string `protobuf:"bytes,2,opt,name=private_data,json=privateData,proto3" json:"private_data,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -426,6 +442,13 @@ func (*CreateResponse) Descriptor() ([]byte, []int) {
 func (x *CreateResponse) GetToken() string {
 	if x != nil {
 		return x.Token
+	}
+	return ""
+}
+
+func (x *CreateResponse) GetPrivateData() string {
+	if x != nil {
+		return x.PrivateData
 	}
 	return ""
 }
@@ -516,14 +539,15 @@ const file_api_services_volumeplugin_v1_volumeplugin_proto_rawDesc = "" +
 	"\n" +
 	"/api/services/volumeplugin/v1/volumeplugin.proto\x12 cubelet.services.volumeplugin.v1\",\n" +
 	"\x12PluginVolumeSource\x12\x16\n" +
-	"\x06driver\x18\x01 \x01(\tR\x06driver\"\xb4\x01\n" +
+	"\x06driver\x18\x01 \x01(\tR\x06driver\"\xd7\x01\n" +
 	"\rAttachRequest\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12\x1c\n" +
 	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12\x1b\n" +
 	"\tvolume_id\x18\x03 \x01(\tR\bvolumeId\x12&\n" +
 	"\x0fvolume_base_dir\x18\x05 \x01(\tR\rvolumeBaseDir\x12\x1b\n" +
-	"\tref_count\x18\x06 \x01(\x03R\brefCountJ\x04\b\x04\x10\x05\"\xd2\x01\n" +
+	"\tref_count\x18\x06 \x01(\x03R\brefCount\x12!\n" +
+	"\fprivate_data\x18\a \x01(\tR\vprivateDataJ\x04\b\x04\x10\x05\"\xd2\x01\n" +
 	"\x0eAttachResponse\x12\x1b\n" +
 	"\thost_path\x18\x02 \x01(\tR\bhostPath\x12Z\n" +
 	"\bmetadata\x18\x04 \x03(\v2>.cubelet.services.volumeplugin.v1.AttachResponse.MetadataEntryR\bmetadata\x1a;\n" +
@@ -543,9 +567,10 @@ const file_api_services_volumeplugin_v1_volumeplugin_proto_rawDesc = "" +
 	"\x0eDetachResponse\"F\n" +
 	"\rCreateRequest\x12\x1b\n" +
 	"\tvolume_id\x18\x01 \x01(\tR\bvolumeId\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04nameJ\x04\b\x03\x10\x04\"&\n" +
+	"\x04name\x18\x02 \x01(\tR\x04nameJ\x04\b\x03\x10\x04\"I\n" +
 	"\x0eCreateResponse\x12\x14\n" +
-	"\x05token\x18\x01 \x01(\tR\x05token\"3\n" +
+	"\x05token\x18\x01 \x01(\tR\x05token\x12!\n" +
+	"\fprivate_data\x18\x02 \x01(\tR\vprivateData\"3\n" +
 	"\x0eDestroyRequest\x12\x1b\n" +
 	"\tvolume_id\x18\x01 \x01(\tR\bvolumeIdJ\x04\b\x02\x10\x03\"\x11\n" +
 	"\x0fDestroyResponse2\xef\x01\n" +

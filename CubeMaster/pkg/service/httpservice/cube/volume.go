@@ -74,6 +74,8 @@ func volErr(rt *CubeLog.RequestTrace, code errorcode.ErrorCode, msg string) *typ
 }
 
 // volumeItemFromRecord converts a DB row to the wire type.
+// PrivateData is intentionally omitted: it is plugin-internal state and must
+// not appear on the Volume HTTP/SDK response.
 func volumeItemFromRecord(r *models.VolumeRecord) VolumeItem {
 	return VolumeItem{
 		VolumeID:  r.VolumeID,
@@ -83,6 +85,15 @@ func volumeItemFromRecord(r *models.VolumeRecord) VolumeItem {
 		RefCount:  r.RefCount,
 		CreatedAt: r.CreatedAt.Unix(),
 	}
+}
+
+// validatePluginPrivateData rejects Create-hook private_data that exceeds
+// models.MaxPrivateDataLen (1024 bytes via Go len()).
+func validatePluginPrivateData(privateData string) error {
+	if len(privateData) > models.MaxPrivateDataLen {
+		return fmt.Errorf("plugin private_data exceeds max length %d", models.MaxPrivateDataLen)
+	}
+	return nil
 }
 
 // ─── Handlers ───────────────────────────────────────────────────────────────
@@ -179,16 +190,33 @@ func handleCreateVolume(c *gin.Context) {
 		return
 	}
 
+	if err := validatePluginPrivateData(info.PrivateData); err != nil {
+		_ = p.Destroy(c.Request.Context(), volumeID)
+		_ = dao.Default().WithContext(c.Request.Context()).
+			Where("volume_id = ?", volumeID).
+			Delete(&models.VolumeRecord{}).Error
+		common.WriteAPI(c, &singleVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterParamsError, err.Error())})
+		return
+	}
+
+	updates := map[string]any{}
 	if info.Token != "" {
 		record.Token = info.Token
+		updates["token"] = info.Token
+	}
+	if info.PrivateData != "" {
+		record.PrivateData = info.PrivateData
+		updates["private_data"] = info.PrivateData
+	}
+	if len(updates) > 0 {
 		if err := dao.Default().WithContext(c.Request.Context()).
 			Model(record).
-			Update("token", info.Token).Error; err != nil {
+			Updates(updates).Error; err != nil {
 			_ = p.Destroy(c.Request.Context(), volumeID)
 			_ = dao.Default().WithContext(c.Request.Context()).
 				Where("volume_id = ?", volumeID).
 				Delete(&models.VolumeRecord{}).Error
-			common.WriteAPI(c, &singleVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_DBError, "db update token error: "+err.Error())})
+			common.WriteAPI(c, &singleVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_DBError, "db update volume fields error: "+err.Error())})
 			return
 		}
 	}
