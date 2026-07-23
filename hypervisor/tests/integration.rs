@@ -32,6 +32,11 @@ use vmm::vm_config::{DiskConfig, FsConfig, NetConfig, PmemConfig, VsockConfig};
 use vmm_sys_util::{tempdir::TempDir, tempfile::TempFile};
 use wait_timeout::ChildExt;
 
+/// Minimum expected MemTotal (in kB) for a 512 MB VM guest.
+/// With CONFIG_VFAT_FS enabled the kernel reports ~469,000 kB on a
+/// 512 MB VM, leaving ~19,000 kB of headroom above this threshold.
+const MIN_EXPECTED_MEMORY_KB: u32 = 450_000;
+
 #[cfg(target_arch = "x86_64")]
 mod x86_64 {
     pub const BIONIC_IMAGE_NAME: &str = "bionic-server-cloudimg-amd64.raw";
@@ -1142,7 +1147,7 @@ fn test_boot_from_vhost_user_blk(
 
         // Just check the VM booted correctly.
         assert_eq!(guest.get_cpu_count().unwrap_or_default(), num_queues as u32);
-        assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+        assert!(guest.get_total_memory().unwrap_or_default() > MIN_EXPECTED_MEMORY_KB);
     });
     kill_child(&mut child);
     let output = child.wait_with_output().unwrap();
@@ -2501,7 +2506,7 @@ mod common_parallel {
 
             assert_eq!(guest.get_cpu_count().unwrap_or_default(), 1);
             assert_eq!(guest.get_initial_apicid().unwrap_or(1), 0);
-            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+            assert!(guest.get_total_memory().unwrap_or_default() > MIN_EXPECTED_MEMORY_KB);
             assert_eq!(guest.get_pci_bridge_class().unwrap_or_default(), "0x060000");
 
             let expected_sequential_events = [
@@ -3141,7 +3146,7 @@ mod common_parallel {
             guest.wait_vm_boot(None).unwrap();
 
             assert_eq!(guest.get_cpu_count().unwrap_or_default(), 1);
-            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+            assert!(guest.get_total_memory().unwrap_or_default() > MIN_EXPECTED_MEMORY_KB);
 
             let grep_cmd = if cfg!(target_arch = "x86_64") {
                 "grep -c PCI-MSI /proc/interrupts"
@@ -3803,7 +3808,7 @@ mod common_parallel {
 
             // Simple checks to validate the VM booted properly
             assert_eq!(guest.get_cpu_count().unwrap_or_default(), 1);
-            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+            assert!(guest.get_total_memory().unwrap_or_default() > MIN_EXPECTED_MEMORY_KB);
         });
 
         kill_child(&mut child);
@@ -4537,7 +4542,7 @@ mod common_parallel {
             // up as expected. In order to check, we will use the virtio-net
             // device already passed through L2 as a VFIO device, this will
             // verify that VFIO devices are functional with memory hotplug.
-            assert!(guest.get_total_memory_l2().unwrap_or_default() > 480_000);
+            assert!(guest.get_total_memory_l2().unwrap_or_default() > MIN_EXPECTED_MEMORY_KB);
             guest
                 .ssh_command_l2_1(
                     "sudo bash -c 'echo online > /sys/devices/system/memory/auto_online_blocks'",
@@ -4586,7 +4591,7 @@ mod common_parallel {
             guest.wait_vm_boot(None).unwrap();
 
             assert_eq!(guest.get_cpu_count().unwrap_or_default(), 1);
-            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+            assert!(guest.get_total_memory().unwrap_or_default() > MIN_EXPECTED_MEMORY_KB);
         });
 
         kill_child(&mut child);
@@ -4649,7 +4654,7 @@ mod common_parallel {
         let r = std::panic::catch_unwind(|| {
             // Check that the VM booted as expected
             assert_eq!(guest.get_cpu_count().unwrap_or_default() as u8, cpu_count);
-            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+            assert!(guest.get_total_memory().unwrap_or_default() > MIN_EXPECTED_MEMORY_KB);
         });
 
         kill_child(&mut child);
@@ -4702,7 +4707,7 @@ mod common_parallel {
 
             // Check that the VM booted as expected
             assert_eq!(guest.get_cpu_count().unwrap_or_default() as u8, cpu_count);
-            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+            assert!(guest.get_total_memory().unwrap_or_default() > MIN_EXPECTED_MEMORY_KB);
 
             // Sync and shutdown without powering off to prevent filesystem
             // corruption.
@@ -4727,7 +4732,7 @@ mod common_parallel {
 
             // Check that the VM booted as expected
             assert_eq!(guest.get_cpu_count().unwrap_or_default() as u8, cpu_count);
-            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+            assert!(guest.get_total_memory().unwrap_or_default() > MIN_EXPECTED_MEMORY_KB);
         });
 
         kill_child(&mut child);
@@ -4780,7 +4785,7 @@ mod common_parallel {
 
             // Check that the VM booted as expected
             assert_eq!(guest.get_cpu_count().unwrap_or_default() as u8, cpu_count);
-            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+            assert!(guest.get_total_memory().unwrap_or_default() > MIN_EXPECTED_MEMORY_KB);
 
             // Sync and shutdown without powering off to prevent filesystem
             // corruption.
@@ -4812,7 +4817,7 @@ mod common_parallel {
 
             // Check that the VM booted as expected
             assert_eq!(guest.get_cpu_count().unwrap_or_default() as u8, cpu_count);
-            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+            assert!(guest.get_total_memory().unwrap_or_default() > MIN_EXPECTED_MEMORY_KB);
         });
 
         kill_child(&mut child);
@@ -4864,7 +4869,7 @@ mod common_parallel {
         let r = std::panic::catch_unwind(|| {
             // Check that the VM booted as expected
             assert_eq!(guest.get_cpu_count().unwrap_or_default() as u8, cpu_count);
-            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+            assert!(guest.get_total_memory().unwrap_or_default() > MIN_EXPECTED_MEMORY_KB);
 
             // We now pause the VM
             assert!(remote_command(&api_socket, "pause", None));
@@ -5128,7 +5133,7 @@ mod common_parallel {
         let r = std::panic::catch_unwind(|| {
             guest.wait_vm_boot(None).unwrap();
 
-            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+            assert!(guest.get_total_memory().unwrap_or_default() > MIN_EXPECTED_MEMORY_KB);
 
             guest.enable_memory_hotplug();
 
@@ -5144,7 +5149,7 @@ mod common_parallel {
             resize_command(&api_socket, None, None, Some(desired_balloon), None);
 
             thread::sleep(std::time::Duration::new(10, 0));
-            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+            assert!(guest.get_total_memory().unwrap_or_default() > MIN_EXPECTED_MEMORY_KB);
             assert!(guest.get_total_memory().unwrap_or_default() < 960_000);
 
             // guest.reboot_linux(0, None);
@@ -5211,7 +5216,7 @@ mod common_parallel {
         let r = std::panic::catch_unwind(|| {
             guest.wait_vm_boot(None).unwrap();
 
-            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+            assert!(guest.get_total_memory().unwrap_or_default() > MIN_EXPECTED_MEMORY_KB);
 
             guest.enable_memory_hotplug();
 
@@ -5247,7 +5252,7 @@ mod common_parallel {
             // let desired_ram = 512 << 20;
             // resize_command(&api_socket, None, Some(desired_ram), None, None);
             // thread::sleep(std::time::Duration::new(10, 0));
-            // assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+            // assert!(guest.get_total_memory().unwrap_or_default() > MIN_EXPECTED_MEMORY_KB);
             // assert!(guest.get_total_memory().unwrap_or_default() < 960_000);
         });
 
@@ -5284,7 +5289,7 @@ mod common_parallel {
             guest.wait_vm_boot(None).unwrap();
 
             assert_eq!(guest.get_cpu_count().unwrap_or_default(), 2);
-            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+            assert!(guest.get_total_memory().unwrap_or_default() > MIN_EXPECTED_MEMORY_KB);
 
             guest.enable_memory_hotplug();
 
@@ -7702,6 +7707,7 @@ mod compatibility {
 }
 
 mod vmm_instance {
+    use crate::MIN_EXPECTED_MEMORY_KB;
     use std::fs::File;
     use std::io::Write;
     use std::path::PathBuf;
@@ -7886,7 +7892,7 @@ mod vmm_instance {
         guest.wait_vm_boot(None).unwrap();
         // Check that the VM booted as expected
         assert_eq!(guest.get_cpu_count().unwrap_or_default() as u8, cpu_count);
-        assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+        assert!(guest.get_total_memory().unwrap_or_default() > MIN_EXPECTED_MEMORY_KB);
         assert!(vmm.send_request(ApiRequest::VmmShutdown));
         vmm.join_timeout(Some(Duration::from_secs(5)));
     }
@@ -7940,7 +7946,7 @@ mod vmm_instance {
         guest.wait_vm_boot(None).unwrap();
         // Check that the VM booted as expected
         assert_eq!(guest.get_cpu_count().unwrap_or_default() as u8, cpu_count);
-        assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+        assert!(guest.get_total_memory().unwrap_or_default() > MIN_EXPECTED_MEMORY_KB);
 
         // Waiting for ssh
         thread::sleep(std::time::Duration::new(5, 0));
@@ -7956,7 +7962,7 @@ mod vmm_instance {
         guest.wait_vm_boot(None).unwrap();
         // Check that the VM booted as expected
         assert_eq!(guest.get_cpu_count().unwrap_or_default() as u8, cpu_count);
-        assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+        assert!(guest.get_total_memory().unwrap_or_default() > MIN_EXPECTED_MEMORY_KB);
 
         assert!(vmm.send_request(ApiRequest::VmmShutdown));
         vmm.join_timeout(Some(Duration::from_secs(5)));
@@ -8011,7 +8017,7 @@ mod vmm_instance {
         guest.wait_vm_boot(None).unwrap();
         // Check that the VM booted as expected
         assert_eq!(guest.get_cpu_count().unwrap_or_default() as u8, cpu_count);
-        assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+        assert!(guest.get_total_memory().unwrap_or_default() > MIN_EXPECTED_MEMORY_KB);
 
         // We now pause the VM
         assert!(vmm.send_request(ApiRequest::VmPause));
@@ -8097,7 +8103,7 @@ mod vmm_instance {
         guest.wait_vm_boot(None).unwrap();
         // Check that the VM booted as expected
         assert_eq!(guest.get_cpu_count().unwrap_or_default() as u8, cpu_count);
-        assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+        assert!(guest.get_total_memory().unwrap_or_default() > MIN_EXPECTED_MEMORY_KB);
 
         assert!(vmm.send_request(ApiRequest::VmPause));
         let latest_events = [
@@ -8162,7 +8168,7 @@ mod vmm_instance {
         assert!(check_latest_events_exact(&latest_events, &event_path));
         // Perform same checks to validate VM has been properly restored
         assert_eq!(guest.get_cpu_count().unwrap_or_default(), 4);
-        assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+        assert!(guest.get_total_memory().unwrap_or_default() > MIN_EXPECTED_MEMORY_KB);
 
         assert!(vmm.send_request(ApiRequest::VmmShutdown));
         vmm.join_timeout(Some(Duration::from_secs(5)));
@@ -9530,7 +9536,7 @@ mod vfio {
             // up as expected. In order to check, we will use the virtio-net
             // device already passed through L2 as a VFIO device, this will
             // verify that VFIO devices are functional with memory hotplug.
-            assert!(guest.get_total_memory_l2().unwrap_or_default() > 480_000);
+            assert!(guest.get_total_memory_l2().unwrap_or_default() > MIN_EXPECTED_MEMORY_KB);
             guest
                 .ssh_command_l2_1(
                     "sudo bash -c 'echo online > /sys/devices/system/memory/auto_online_blocks'",
