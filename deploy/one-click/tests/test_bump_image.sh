@@ -26,6 +26,12 @@ FILES=(
 	docs/guide/tencentcloud-terraform-deploy.md
 	docs/zh/guide/tencentcloud-terraform-deploy.md
 	deploy/kubernetes/chart/values.yaml
+	deploy/kubernetes/images/build-cube-images.sh
+	deploy/kubernetes/images/README.md
+	deploy/kubernetes/chart/README.md
+	deploy/one-click/build-guest-image.sh
+	docs/guide/kubernetes/faq.md
+	docs/zh/guide/kubernetes/faq.md
 )
 
 failures=0
