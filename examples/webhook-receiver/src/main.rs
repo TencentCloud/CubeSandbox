@@ -45,21 +45,48 @@ async fn handle_webhook(
 ) -> (axum::http::StatusCode, String) {
     // Verify HMAC signature FIRST (if configured)
     if !secret.is_empty() {
-        if let Some(sig_header) = headers.get("X-Cube-Signature") {
-            let sig = sig_header.to_str().unwrap_or("");
-            let expected = sign_payload(&secret, &body);
-            if sig != expected {
-                println!("=== Webhook REJECTED (signature mismatch) ===");
+        let sig_header = match headers.get("X-Cube-Signature").and_then(|v| v.to_str().ok()) {
+            Some(v) => v,
+            None => {
+                println!("=== Webhook REJECTED (missing X-Cube-Signature) ===");
                 return (
                     axum::http::StatusCode::UNAUTHORIZED,
-                    "signature mismatch".to_string(),
+                    "X-Cube-Signature header missing".to_string(),
                 );
             }
-        } else {
-            println!("=== Webhook REJECTED (missing X-Cube-Signature) ===");
+        };
+
+        let sig_hex = match sig_header.strip_prefix("sha256=") {
+            Some(hex) => hex,
+            None => {
+                println!("=== Webhook REJECTED (invalid signature format) ===");
+                return (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    "invalid signature format".to_string(),
+                );
+            }
+        };
+
+        let sig_bytes = match hex::decode(sig_hex) {
+            Ok(b) => b,
+            Err(_) => {
+                println!("=== Webhook REJECTED (invalid signature encoding) ===");
+                return (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    "invalid signature encoding".to_string(),
+                );
+            }
+        };
+
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+            .expect("HMAC can take key of any size");
+        mac.update(&body);
+
+        if mac.verify_slice(&sig_bytes).is_err() {
+            println!("=== Webhook REJECTED (signature mismatch) ===");
             return (
                 axum::http::StatusCode::UNAUTHORIZED,
-                "X-Cube-Signature header missing".to_string(),
+                "signature mismatch".to_string(),
             );
         }
     }
@@ -109,9 +136,3 @@ async fn forward_to_wecom(body_str: &str) {
         .await;
 }
 
-fn sign_payload(secret: &str, body: &[u8]) -> String {
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-        .expect("HMAC can take key of any size");
-    mac.update(body);
-    format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
-}

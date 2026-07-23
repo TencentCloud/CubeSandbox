@@ -112,7 +112,6 @@ impl HttpLogger {
 
         // ── Background receiver task ──────────────────────────────────────
         let targets_bg = targets.clone();
-        let subscribed_events_bg = subscribed_events.clone();
         let secret_bg = secret.clone();
         let http_client_bg = http_client.clone();
         let pending_bg = pending.clone();
@@ -122,12 +121,6 @@ impl HttpLogger {
             while let Some(msg) = rx.recv().await {
                 match msg {
                     Msg::Event(event) => {
-                        if !subscribed_events_bg.is_empty()
-                            && !subscribed_events_bg.contains(&event.event)
-                        {
-                            continue;
-                        }
-
                         let payload = build_payload(&event);
                         let body_bytes =
                             bytes::Bytes::from(serde_json::to_string(&payload).unwrap_or_default());
@@ -235,6 +228,11 @@ fn build_payload(event: &LogEvent) -> serde_json::Value {
     });
     if let Some(obj) = payload.as_object_mut() {
         for (k, v) in &event.fields {
+            // Protect reserved top-level keys from being overwritten
+            // by field entries (defense-in-depth; no existing handler does this).
+            if k == "event" || k == "timestamp" {
+                continue;
+            }
             obj.insert(k.clone(), v.clone());
         }
     }
