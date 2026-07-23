@@ -123,7 +123,10 @@ impl HttpLogger {
                     Msg::Event(event) => {
                         let payload = build_payload(&event);
                         let body_bytes =
-                            bytes::Bytes::from(serde_json::to_string(&payload).unwrap_or_default());
+                            bytes::Bytes::from(
+                            serde_json::to_vec(&payload)
+                                .expect("serializing a freshly-built serde_json::Value never fails"),
+                        );
                         let event_name = event.event.clone();
 
                         pending_bg.fetch_add(1, Ordering::Relaxed);
