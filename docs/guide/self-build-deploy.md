@@ -334,50 +334,40 @@ The variables above control the **bundled** MySQL / Redis (managed by Docker Com
 
 ### Using an external database
 
-By default the installer starts a bundled `mysql:8.0` container via Docker Compose to hold CubeMaster's metadata. If you already run a database service, you can point CubeMaster at an external instance instead. The installer rewrites `conf.yaml`, masks the local MySQL container (`cube-sandbox-mysql.service`), and writes the connection string into the runtime environment.
+By default the installer starts a bundled `mysql:8.0` container via Docker Compose to hold the control-plane metadata. If you already run a database service, you can point the control plane at an external instance instead. The installer rewrites `conf.yaml`, masks the local MySQL container (`cube-sandbox-mysql.service`), and writes the connection string into the runtime environment.
 
-CubeMaster's dao layer supports both **MySQL** and **PostgreSQL**. The two are mutually exclusive — configure only one external database. Setting both `CUBE_EXTERNAL_MYSQL_HOST` and `CUBE_EXTERNAL_POSTGRES_HOST` makes the installer fail fast.
+The control plane supports both **MySQL** and **PostgreSQL**. Configure at most one external database — the installer fails fast if conflicting variables are detected.
 
-#### External MySQL
+#### Unified interface (`CUBE_EXTERNAL_DB_*`)
 
-Enable by setting `CUBE_EXTERNAL_MYSQL_HOST` in `.env`:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CUBE_EXTERNAL_MYSQL_HOST` | (empty) | External MySQL host; enables external-MySQL mode when set |
-| `CUBE_EXTERNAL_MYSQL_PORT` | `3306` | Port |
-| `CUBE_EXTERNAL_MYSQL_USER` | `cube` | User |
-| `CUBE_EXTERNAL_MYSQL_PASSWORD` | `cube_pass` | Password (change to a strong value) |
-| `CUBE_EXTERNAL_MYSQL_DB` | same as `CUBE_SANDBOX_MYSQL_DB` (`cube_mvp`) | Database name |
-
-#### External PostgreSQL
-
-Enable by setting `CUBE_EXTERNAL_POSTGRES_HOST` in `.env`. The installer rewrites the `driver` of both `ossdb_config` and `instance_db_config` to `postgres` and syncs `extra.sslmode`:
+Set `CUBE_EXTERNAL_DB_HOST` in `.env` to enable external-database mode. `CUBE_EXTERNAL_DB_DRIVER` selects the engine:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CUBE_EXTERNAL_POSTGRES_HOST` | (empty) | External PostgreSQL host; enables external-PostgreSQL mode when set |
-| `CUBE_EXTERNAL_POSTGRES_PORT` | `5432` | Port |
-| `CUBE_EXTERNAL_POSTGRES_USER` | `cube` | User |
-| `CUBE_EXTERNAL_POSTGRES_PASSWORD` | `cube_pass` | Password (change to a strong value) |
-| `CUBE_EXTERNAL_POSTGRES_DB` | same as `CUBE_SANDBOX_MYSQL_DB` (`cube_mvp`) | Database name |
-| `CUBE_EXTERNAL_POSTGRES_SSLMODE` | `disable` | TLS mode: `disable` (default) / `require` / `verify-ca` / `verify-full`, etc. |
+| `CUBE_EXTERNAL_DB_HOST` | (empty) | External database host; enables external-DB mode when set |
+| `CUBE_EXTERNAL_DB_DRIVER` | `mysql` | Engine: `mysql` or `postgres` |
+| `CUBE_EXTERNAL_DB_PORT` | `3306` / `5432` | Port (defaults by driver when unset) |
+| `CUBE_EXTERNAL_DB_USER` | `cube` | User |
+| `CUBE_EXTERNAL_DB_PASSWORD` | `cube_pass` | Password (change to a strong value) |
+| `CUBE_EXTERNAL_DB_NAME` | same as `CUBE_SANDBOX_MYSQL_DB` (`cube_mvp`) | Database name |
+| `CUBE_EXTERNAL_DB_SSLMODE` | `disable` | (postgres only) TLS mode: `disable` / `require` / `verify-ca` / `verify-full` |
 
-On first start CubeMaster runs goose migrations against the target PostgreSQL database, creating all `t_cube_*` tables. Make sure that:
+On first start CubeMaster and CubeOps run goose migrations against the target database, creating all required tables. Make sure that:
 
-- The target database (`CUBE_EXTERNAL_POSTGRES_DB`) already exists;
+- The target database (`CUBE_EXTERNAL_DB_NAME`) already exists;
 - The configured user can create tables in it;
-- If the server enforces TLS, set `CUBE_EXTERNAL_POSTGRES_SSLMODE` to `require` or the stricter `verify-full`.
+- If the server enforces TLS, set `CUBE_EXTERNAL_DB_SSLMODE` to `require` or the stricter `verify-full`.
 
-Example `.env` snippet:
+Example `.env` snippet for PostgreSQL:
 
 ```bash
-CUBE_EXTERNAL_POSTGRES_HOST=10.0.0.20
-CUBE_EXTERNAL_POSTGRES_PORT=5432
-CUBE_EXTERNAL_POSTGRES_USER=cube
-CUBE_EXTERNAL_POSTGRES_PASSWORD=<strong-password>
-CUBE_EXTERNAL_POSTGRES_DB=cube_mvp
-CUBE_EXTERNAL_POSTGRES_SSLMODE=require
+CUBE_EXTERNAL_DB_HOST=10.0.0.20
+CUBE_EXTERNAL_DB_DRIVER=postgres
+CUBE_EXTERNAL_DB_PORT=5432
+CUBE_EXTERNAL_DB_USER=cube
+CUBE_EXTERNAL_DB_PASSWORD=<strong-password>
+CUBE_EXTERNAL_DB_NAME=cube_mvp
+CUBE_EXTERNAL_DB_SSLMODE=require
 ```
 
 The resulting `conf.yaml` (`ossdb_config` and `instance_db_config` are identical):
@@ -398,7 +388,21 @@ ossdb_config:
 
 > **Semantic difference**: the PostgreSQL driver has no separate read/write timeouts; `read_timeout`/`write_timeout` are folded into a connection-level `statement_timeout`. For precise control, set `statement_timeout` (ms) or `idle_in_transaction_session_timeout` (ms) explicitly under `extra` — they override the folded value.
 
-> **Architecture note**: external PostgreSQL applies to the entire control plane — both **CubeMaster** (sandbox lifecycle, scheduling, templates) and **CubeOps** (AgentHub digital-assistant management, cluster ops API used by the WebUI). The two services share the same database (`cube_mvp` by default). CubeAPI, the E2B-compatible stateless SDK gateway, does not connect to the database. The installer writes a `postgres://…` `DATABASE_URL` to the runtime environment; CubeOps reads it and automatically selects the postgres driver based on the URL scheme.
+> **Architecture note**: external database support applies to the entire control plane — both **CubeMaster** (sandbox lifecycle, scheduling, templates) and **CubeOps** (AgentHub digital-assistant management, cluster ops API used by the WebUI). The two services share the same database (`cube_mvp` by default). CubeAPI, the E2B-compatible stateless SDK gateway, does not connect to the database. The installer writes a `<driver>://…` `DATABASE_URL` to the runtime environment; CubeOps reads it and automatically selects the driver based on the URL scheme.
+
+#### Legacy MySQL alias (`CUBE_EXTERNAL_MYSQL_*`)
+
+The older `CUBE_EXTERNAL_MYSQL_*` variables are still supported for backwards compatibility. They are automatically mapped to the corresponding `CUBE_EXTERNAL_DB_*` values with `DRIVER=mysql` at startup:
+
+| Legacy variable | Maps to |
+|-----------------|---------|
+| `CUBE_EXTERNAL_MYSQL_HOST` | `CUBE_EXTERNAL_DB_HOST` |
+| `CUBE_EXTERNAL_MYSQL_PORT` | `CUBE_EXTERNAL_DB_PORT` |
+| `CUBE_EXTERNAL_MYSQL_USER` | `CUBE_EXTERNAL_DB_USER` |
+| `CUBE_EXTERNAL_MYSQL_PASSWORD` | `CUBE_EXTERNAL_DB_PASSWORD` |
+| `CUBE_EXTERNAL_MYSQL_DB` | `CUBE_EXTERNAL_DB_NAME` |
+
+New deployments should use `CUBE_EXTERNAL_DB_*`. Existing `.env` files using `CUBE_EXTERNAL_MYSQL_*` continue to work without changes.
 
 External Redis works the same way, via `CUBE_EXTERNAL_REDIS_HOST` / `CUBE_EXTERNAL_REDIS_PORT` / `CUBE_EXTERNAL_REDIS_PASSWORD`; when enabled the local `cube-sandbox-redis.service` is masked.
 

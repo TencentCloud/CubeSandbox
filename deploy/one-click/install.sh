@@ -57,35 +57,56 @@ fi
 DEPLOY_ROLE="$(one_click_deploy_role)"
 
 # ---- External MySQL / Redis support ----
-# Set CUBE_EXTERNAL_MYSQL_HOST / CUBE_EXTERNAL_REDIS_HOST to use external
-# services instead of the bundled local Docker containers. Defaults are filled
+# Set CUBE_EXTERNAL_DB_HOST + CUBE_EXTERNAL_DB_DRIVER to use an external
+# database engine instead of the bundled MySQL container. Defaults are filled
 # after the optional upgrade env merge so they are based on the final runtime
 # configuration.
+#
+# Legacy aliases (backwards compatible):
+#   CUBE_EXTERNAL_MYSQL_HOST / _PORT / _USER / _PASSWORD / _DB
+#     → mapped to CUBE_EXTERNAL_DB_* with DRIVER=mysql automatically.
+#   These remain supported indefinitely; existing .env files need no changes.
 init_external_dep_defaults() {
-  CUBE_EXTERNAL_MYSQL_HOST="${CUBE_EXTERNAL_MYSQL_HOST:-}"
-  CUBE_EXTERNAL_MYSQL_PORT="${CUBE_EXTERNAL_MYSQL_PORT:-3306}"
-  CUBE_EXTERNAL_MYSQL_USER="${CUBE_EXTERNAL_MYSQL_USER:-cube}"
-  CUBE_EXTERNAL_MYSQL_PASSWORD="${CUBE_EXTERNAL_MYSQL_PASSWORD:-cube_pass}"
-  # Default the external DB name from CUBE_SANDBOX_MYSQL_DB so it resolves to the
-  # same value up-with-deps.sh derives independently. Otherwise a custom
-  # CUBE_SANDBOX_MYSQL_DB (without an explicit CUBE_EXTERNAL_MYSQL_DB) would make
-  # the persisted .one-click.env and the seed step disagree on the database name.
-  CUBE_EXTERNAL_MYSQL_DB="${CUBE_EXTERNAL_MYSQL_DB:-${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}}"
+  # ── Legacy CUBE_EXTERNAL_MYSQL_* → unified CUBE_EXTERNAL_DB_* ────────────
+  # Map old per-engine variables to the new generic interface. DB_* values
+  # take priority if set directly (e.g. CUBE_EXTERNAL_DB_HOST overrides
+  # CUBE_EXTERNAL_MYSQL_HOST when both are present, which validate below
+  # catches via CUBE_EXTERNAL_MYSQL_HOST still being set).
+  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST:-}" ]]; then
+    CUBE_EXTERNAL_DB_DRIVER="${CUBE_EXTERNAL_DB_DRIVER:-mysql}"
+    CUBE_EXTERNAL_DB_HOST="${CUBE_EXTERNAL_DB_HOST:-${CUBE_EXTERNAL_MYSQL_HOST}}"
+    CUBE_EXTERNAL_DB_PORT="${CUBE_EXTERNAL_DB_PORT:-${CUBE_EXTERNAL_MYSQL_PORT:-3306}}"
+    CUBE_EXTERNAL_DB_USER="${CUBE_EXTERNAL_DB_USER:-${CUBE_EXTERNAL_MYSQL_USER:-cube}}"
+    CUBE_EXTERNAL_DB_PASSWORD="${CUBE_EXTERNAL_DB_PASSWORD:-${CUBE_EXTERNAL_MYSQL_PASSWORD:-cube_pass}}"
+    CUBE_EXTERNAL_DB_NAME="${CUBE_EXTERNAL_DB_NAME:-${CUBE_EXTERNAL_MYSQL_DB:-${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}}}"
+  fi
 
-  # External PostgreSQL. Set CUBE_EXTERNAL_POSTGRES_HOST to point CubeMaster's
-  # dao layer at an existing PostgreSQL server instead of the bundled MySQL
-  # container. Mutually exclusive with CUBE_EXTERNAL_MYSQL_HOST (enforced by
-  # validate_external_db_exclusive). User/password/db default to the same
-  # cube/cube_pass/cube_mvp identifiers as MySQL for parity. sslmode defaults to
-  # "disable"; set "require"/"verify-full" for a TLS-protected server.
-  CUBE_EXTERNAL_POSTGRES_HOST="${CUBE_EXTERNAL_POSTGRES_HOST:-}"
-  CUBE_EXTERNAL_POSTGRES_PORT="${CUBE_EXTERNAL_POSTGRES_PORT:-5432}"
-  CUBE_EXTERNAL_POSTGRES_USER="${CUBE_EXTERNAL_POSTGRES_USER:-cube}"
-  CUBE_EXTERNAL_POSTGRES_PASSWORD="${CUBE_EXTERNAL_POSTGRES_PASSWORD:-cube_pass}"
-  CUBE_EXTERNAL_POSTGRES_DB="${CUBE_EXTERNAL_POSTGRES_DB:-${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}}"
-  CUBE_EXTERNAL_POSTGRES_SSLMODE="${CUBE_EXTERNAL_POSTGRES_SSLMODE:-disable}"
+  # ── Unified CUBE_EXTERNAL_DB_* interface ─────────────────────────────────
+  # Set CUBE_EXTERNAL_DB_HOST + CUBE_EXTERNAL_DB_DRIVER to point CubeMaster
+  # and CubeOps at an external database server instead of the bundled MySQL
+  # container. Supported drivers: "mysql", "postgres".
+  # sslmode defaults to "disable"; use "require"/"verify-full" for TLS.
+  CUBE_EXTERNAL_DB_HOST="${CUBE_EXTERNAL_DB_HOST:-}"
+  # Default driver is "mysql" to match the bundled local service; set to
+  # "postgres" explicitly when pointing at a PostgreSQL server.
+  CUBE_EXTERNAL_DB_DRIVER="${CUBE_EXTERNAL_DB_DRIVER:-mysql}"
+  # Default port based on driver when not explicitly set.
+  if [[ -n "${CUBE_EXTERNAL_DB_HOST}" && -z "${CUBE_EXTERNAL_DB_PORT:-}" ]]; then
+    case "${CUBE_EXTERNAL_DB_DRIVER}" in
+      postgres) CUBE_EXTERNAL_DB_PORT=5432 ;;
+      *)        CUBE_EXTERNAL_DB_PORT=3306 ;;
+    esac
+  fi
+  CUBE_EXTERNAL_DB_PORT="${CUBE_EXTERNAL_DB_PORT:-}"
+  CUBE_EXTERNAL_DB_USER="${CUBE_EXTERNAL_DB_USER:-cube}"
+  CUBE_EXTERNAL_DB_PASSWORD="${CUBE_EXTERNAL_DB_PASSWORD:-cube_pass}"
+  # Default the external DB name from CUBE_SANDBOX_MYSQL_DB so it resolves to
+  # the same value up-with-deps.sh derives independently.
+  CUBE_EXTERNAL_DB_NAME="${CUBE_EXTERNAL_DB_NAME:-${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}}"
+  # sslmode: postgres reads this; mysql driver ignores it.
+  CUBE_EXTERNAL_DB_SSLMODE="${CUBE_EXTERNAL_DB_SSLMODE:-disable}"
 
-  # Mirrors the MySQL behaviour above (patch conf.yaml, persist env, mask local
+  # Mirrors the DB behaviour above (patch conf.yaml, persist env, mask local
   # redis unit).
   CUBE_EXTERNAL_REDIS_HOST="${CUBE_EXTERNAL_REDIS_HOST:-}"
   CUBE_EXTERNAL_REDIS_PORT="${CUBE_EXTERNAL_REDIS_PORT:-6379}"
@@ -110,14 +131,20 @@ init_external_dep_defaults() {
   CUBE_S3_S3FS_EXTRA_OPTS="${CUBE_S3_S3FS_EXTRA_OPTS:-}"
 }
 
-# CubeMaster talks to exactly one metadata engine. External MySQL and external
-# PostgreSQL are mutually exclusive: configuring both is ambiguous (which one
-# does DATABASE_URL / conf.yaml point at?) and silently picking one would ship a
-# deployment wired to a database the operator did not intend. Fail fast instead.
+# CubeMaster talks to exactly one metadata engine. Validate that the operator
+# has not set conflicting external-database variables. The legacy
+# CUBE_EXTERNAL_MYSQL_HOST is mapped to CUBE_EXTERNAL_DB_* by
+# init_external_dep_defaults, so by the time this runs the canonical variable
+# is CUBE_EXTERNAL_DB_HOST. The check below catches the case where an operator
+# explicitly sets both CUBE_EXTERNAL_MYSQL_HOST and CUBE_EXTERNAL_DB_HOST with
+# a non-mysql driver — an ambiguous configuration that should fail fast.
 validate_external_db_exclusive() {
-  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" && -n "${CUBE_EXTERNAL_POSTGRES_HOST}" ]]; then
-    die "CUBE_EXTERNAL_MYSQL_HOST (${CUBE_EXTERNAL_MYSQL_HOST}) and CUBE_EXTERNAL_POSTGRES_HOST (${CUBE_EXTERNAL_POSTGRES_HOST}) are both set.
-  CubeMaster uses a single metadata database; configure only one external engine (unset the other in your .env)."
+  # Detect legacy MYSQL_HOST used alongside new DB_HOST for a different engine.
+  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST:-}" && -n "${CUBE_EXTERNAL_DB_HOST:-}" \
+        && "${CUBE_EXTERNAL_DB_DRIVER:-}" != "mysql" \
+        && "${CUBE_EXTERNAL_DB_HOST}" != "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
+    die "CUBE_EXTERNAL_MYSQL_HOST (${CUBE_EXTERNAL_MYSQL_HOST}) and CUBE_EXTERNAL_DB_HOST (${CUBE_EXTERNAL_DB_HOST}, driver=${CUBE_EXTERNAL_DB_DRIVER}) are both set with different targets.
+  Configure only one external database engine (unset CUBE_EXTERNAL_MYSQL_HOST to use CUBE_EXTERNAL_DB_* directly)."
   fi
 }
 
@@ -126,13 +153,9 @@ validate_external_db_exclusive() {
 # are trivially guessable, so warn loudly when an external endpoint is wired up
 # without overriding them.
 warn_default_external_credentials() {
-  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" && "${CUBE_EXTERNAL_MYSQL_PASSWORD}" == "cube_pass" ]]; then
-    log "WARNING: external MySQL (${CUBE_EXTERNAL_MYSQL_HOST}) configured with the default password 'cube_pass'."
-    log "WARNING: set CUBE_EXTERNAL_MYSQL_PASSWORD to a strong value in your .env before exposing this deployment."
-  fi
-  if [[ -n "${CUBE_EXTERNAL_POSTGRES_HOST}" && "${CUBE_EXTERNAL_POSTGRES_PASSWORD}" == "cube_pass" ]]; then
-    log "WARNING: external PostgreSQL (${CUBE_EXTERNAL_POSTGRES_HOST}) configured with the default password 'cube_pass'."
-    log "WARNING: set CUBE_EXTERNAL_POSTGRES_PASSWORD to a strong value in your .env before exposing this deployment."
+  if [[ -n "${CUBE_EXTERNAL_DB_HOST}" && "${CUBE_EXTERNAL_DB_PASSWORD}" == "cube_pass" ]]; then
+    log "WARNING: external database (${CUBE_EXTERNAL_DB_HOST}, driver=${CUBE_EXTERNAL_DB_DRIVER}) configured with the default password 'cube_pass'."
+    log "WARNING: set CUBE_EXTERNAL_DB_PASSWORD to a strong value in your .env before exposing this deployment."
   fi
   if [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" && "${CUBE_EXTERNAL_REDIS_PASSWORD}" == "ceuhvu123" ]]; then
     log "WARNING: external Redis (${CUBE_EXTERNAL_REDIS_HOST}) configured with the default password 'ceuhvu123'."
@@ -453,7 +476,7 @@ generate_cubemaster_config_ports() {
 
   ensure_file "${cfg}"
   # The bundled datastore is always MySQL; patch_cubemaster_external_deps
-  # rewrites driver -> "postgres" later when CUBE_EXTERNAL_POSTGRES_HOST is set.
+  # rewrites driver -> the configured engine when CUBE_EXTERNAL_DB_HOST is set.
   sed -i \
     -e "s|__CUBE_SANDBOX_DB_DRIVER__|mysql|g" \
     -e "s|__CUBE_SANDBOX_DB_SSLMODE__|disable|g" \
@@ -468,9 +491,11 @@ generate_cubemaster_config_ports() {
     "${cfg}"
 }
 
-# When external MySQL/Redis is configured, patch CubeMaster conf.yaml to replace
-# the default 127.0.0.1 endpoints with the external connection details. Must run
-# after generate_cubemaster_config_ports so the port placeholders are resolved.
+# When an external database/Redis is configured, patch CubeMaster conf.yaml to
+# replace the default 127.0.0.1 endpoints with the external connection details.
+# Must run after generate_cubemaster_config_ports so the port placeholders are
+# resolved. Supports any driver registered in CUBE_EXTERNAL_DB_DRIVER
+# ("mysql", "postgres"); new engines only need a new case in the dispatch below.
 patch_cubemaster_external_deps() {
   [[ "${DEPLOY_ROLE}" != "compute" ]] || return 0
 
@@ -496,7 +521,7 @@ patch_cubemaster_external_deps() {
   fi
 
   # Validate once up front; all branches patch the same file.
-  if [[ -z "${CUBE_EXTERNAL_MYSQL_HOST}" && -z "${CUBE_EXTERNAL_POSTGRES_HOST}" \
+  if [[ -z "${CUBE_EXTERNAL_DB_HOST}" \
       && -z "${CUBE_EXTERNAL_REDIS_HOST}" \
       && -z "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" \
       && "${scrub_stale_sentinel}" -eq 0 && "${restore_bundled_redis}" -eq 0 ]]; then
@@ -509,68 +534,71 @@ patch_cubemaster_external_deps() {
     sed -i '/^  master_name:/d; /^  sentinel_nodes:/d; /^  sentinel_password:/d' "${cfg}"
   fi
 
-  if [[ -n "${CUBE_EXTERNAL_POSTGRES_HOST}" ]]; then
-    log "patching conf.yaml for external PostgreSQL: ${CUBE_EXTERNAL_POSTGRES_HOST}:${CUBE_EXTERNAL_POSTGRES_PORT}/${CUBE_EXTERNAL_POSTGRES_DB}"
-    local pg_addr_esc pg_user_esc pg_pwd_esc pg_db_esc pg_sslmode_esc
-    pg_addr_esc="$(escape_sed "${CUBE_EXTERNAL_POSTGRES_HOST}:${CUBE_EXTERNAL_POSTGRES_PORT}")"
-    pg_user_esc="$(escape_sed "${CUBE_EXTERNAL_POSTGRES_USER}")"
-    pg_pwd_esc="$(escape_sed "${CUBE_EXTERNAL_POSTGRES_PASSWORD}")"
-    pg_db_esc="$(escape_sed "${CUBE_EXTERNAL_POSTGRES_DB}")"
-    pg_sslmode_esc="$(escape_sed "${CUBE_EXTERNAL_POSTGRES_SSLMODE}")"
-    # The rendered template already carries driver:/extra.sslmode lines (as
-    # "mysql"/"disable"), so the substitutions below flip them. But a conf.yaml
-    # from an OLDER package (or hand-edited by the operator) may predate those
-    # keys -- a plain substitution on a missing line is a silent no-op, which
-    # would leave driver empty and the dao layer would fall back to mysql and
-    # fail to connect. So first ensure the keys exist, inserting them right
-    # under each DB section header / db_name line when absent, then substitute.
-    if ! grep -qE '^  driver:' "${cfg}"; then
-      awk '
-        { print }
-        /^(ossdb_config|instance_db_config):[[:space:]]*$/ { print "  driver: \"mysql\"" }
-      ' "${cfg}" > "${cfg}.tmp" && mv "${cfg}.tmp" "${cfg}"
-    fi
-    if ! grep -qE '^    sslmode:' "${cfg}"; then
-      awk '
-        { print }
-        /^  db_name:/ { print "  extra:"; print "    sslmode: \"disable\"" }
-      ' "${cfg}" > "${cfg}.tmp" && mv "${cfg}.tmp" "${cfg}"
-    fi
-    # Key-prefix matching as in the MySQL branch (addr/user/pwd/db_name appear
-    # once per DB section, so no 'g' flag patches each line exactly once). The
-    # sslmode match is anchored on the 4-space indent so it only touches the
-    # extra.sslmode lines.
-    sed -i \
-      -e "s|addr: \".*\"|addr: \"${pg_addr_esc}\"|" \
-      -e "s|user: \".*\"|user: \"${pg_user_esc}\"|" \
-      -e "s|pwd: \".*\"|pwd: \"${pg_pwd_esc}\"|" \
-      -e "s|db_name: \".*\"|db_name: \"${pg_db_esc}\"|" \
-      -e "s|^  driver: \".*\"|  driver: \"postgres\"|" \
-      -e "s|^    sslmode: \".*\"|    sslmode: \"${pg_sslmode_esc}\"|" \
-      "${cfg}"
-  fi
+  if [[ -n "${CUBE_EXTERNAL_DB_HOST}" ]]; then
+    local db_driver="${CUBE_EXTERNAL_DB_DRIVER:-mysql}"
+    log "patching conf.yaml for external database: driver=${db_driver} ${CUBE_EXTERNAL_DB_HOST}:${CUBE_EXTERNAL_DB_PORT}/${CUBE_EXTERNAL_DB_NAME}"
+    local db_addr_esc db_user_esc db_pwd_esc db_name_esc db_sslmode_esc
+    db_addr_esc="$(escape_sed "${CUBE_EXTERNAL_DB_HOST}:${CUBE_EXTERNAL_DB_PORT}")"
+    db_user_esc="$(escape_sed "${CUBE_EXTERNAL_DB_USER}")"
+    db_pwd_esc="$(escape_sed "${CUBE_EXTERNAL_DB_PASSWORD}")"
+    db_name_esc="$(escape_sed "${CUBE_EXTERNAL_DB_NAME}")"
+    db_sslmode_esc="$(escape_sed "${CUBE_EXTERNAL_DB_SSLMODE}")"
 
-  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
-    log "patching conf.yaml for external MySQL: ${CUBE_EXTERNAL_MYSQL_HOST}:${CUBE_EXTERNAL_MYSQL_PORT}/${CUBE_EXTERNAL_MYSQL_DB}"
-    # SECURITY: escape user-supplied values for the sed '|' delimiter so that a
-    # '|', '\', '&' or '"' in a host/user/password does not corrupt conf.yaml
-    # or break the double-quoted sed replacement strings below.
-    local mysql_addr_esc mysql_user_esc mysql_pwd_esc mysql_db_esc
-    mysql_addr_esc="$(escape_sed "${CUBE_EXTERNAL_MYSQL_HOST}:${CUBE_EXTERNAL_MYSQL_PORT}")"
-    mysql_user_esc="$(escape_sed "${CUBE_EXTERNAL_MYSQL_USER}")"
-    mysql_pwd_esc="$(escape_sed "${CUBE_EXTERNAL_MYSQL_PASSWORD}")"
-    mysql_db_esc="$(escape_sed "${CUBE_EXTERNAL_MYSQL_DB}")"
-    # Match only on the YAML key prefix ('addr:'/'user:'/'pwd:'/'db_name:') and
-    # accept any current value, so these patterns keep working even if the
-    # conf.yaml template is regenerated with different defaults. These keys only
-    # appear in the MySQL section (instance_db_config), so without
-    # a trailing 'g' flag each line is patched exactly once and Redis fields
+    # A conf.yaml from an older package (or hand-edited) may predate the
+    # driver:/extra.sslmode keys. Ensure they exist before substituting so a
+    # missing line is not silently ignored. The awk scripts below are IDEMPOTENT
+    # — they inspect the instance_db_config section and only insert when the key
+    # is absent, so upgrades from older configs are handled correctly.
+
+    # 1) Guarantee instance_db_config has a `driver:` line.
+    awk '
+      function flush_section() {
+        if (!in_section) return
+        if (!has_driver) { print buf[1]; print "  driver: \"mysql\""; for (i=2; i<=buf_n; i++) print buf[i] }
+        else { for (i=1; i<=buf_n; i++) print buf[i] }
+        in_section=0; has_driver=0; delete buf; buf_n=0
+      }
+      /^instance_db_config:[[:space:]]*$/ {
+        flush_section()
+        in_section=1; has_driver=0; delete buf; buf_n=0
+        buf[++buf_n] = $0; next
+      }
+      in_section && /^  driver:/ { has_driver=1 }
+      in_section && /^[a-z_]+:[[:space:]]*$/ { flush_section(); print; next }
+      in_section { buf[++buf_n] = $0; next }
+      !in_section { print }
+      END { flush_section() }
+    ' "${cfg}" > "${cfg}.tmp" && mv "${cfg}.tmp" "${cfg}"
+
+    # 2) Guarantee instance_db_config has `extra:` with `sslmode:` inside it.
+    #    If the section already has `extra:` but no `sslmode:`, append sslmode
+    #    into the existing block (avoids duplicate `extra:` keys).
+    awk '
+      function inject_missing() {
+        if (!in_section || has_sslmode) return
+        if (!has_extra) printf "  extra:\n"
+        printf "    sslmode: \"disable\"\n"
+      }
+      /^instance_db_config:[[:space:]]*$/ { inject_missing(); in_section=1; has_extra=0; has_sslmode=0 }
+      in_section && /^  extra:[[:space:]]*$/ { has_extra=1 }
+      in_section && /^    sslmode:/ { has_sslmode=1 }
+      in_section && /^[a-z_]+:[[:space:]]*$/ && !/^instance_db_config:/ {
+        inject_missing(); in_section=0
+      }
+      { print }
+      END { inject_missing() }
+    ' "${cfg}" > "${cfg}.tmp" && mv "${cfg}.tmp" "${cfg}"
+
+    # Substitute connection details and driver. Key-prefix matching (no 'g'
+    # flag) ensures each line is patched exactly once per section; Redis fields
     # (nodes:/password:) are never touched.
     sed -i \
-      -e "s|addr: \".*\"|addr: \"${mysql_addr_esc}\"|" \
-      -e "s|user: \".*\"|user: \"${mysql_user_esc}\"|" \
-      -e "s|pwd: \".*\"|pwd: \"${mysql_pwd_esc}\"|" \
-      -e "s|db_name: \".*\"|db_name: \"${mysql_db_esc}\"|" \
+      -e "s|addr: \".*\"|addr: \"${db_addr_esc}\"|" \
+      -e "s|user: \".*\"|user: \"${db_user_esc}\"|" \
+      -e "s|pwd: \".*\"|pwd: \"${db_pwd_esc}\"|" \
+      -e "s|db_name: \".*\"|db_name: \"${db_name_esc}\"|" \
+      -e "s|^  driver: \".*\"|  driver: \"${db_driver}\"|" \
+      -e "s|^    sslmode: \".*\"|    sslmode: \"${db_sslmode_esc}\"|" \
       "${cfg}"
   fi
 
@@ -611,9 +639,6 @@ patch_cubemaster_external_deps() {
     local redis_nodes_esc redis_pwd_esc
     redis_nodes_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT}")"
     redis_pwd_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_PASSWORD}")"
-    # Match only on the YAML key prefix so these patterns survive template
-    # default changes. 'nodes:'/'password:' only appear in the redis* sections,
-    # so every Redis endpoint is repointed while MySQL fields stay untouched.
     sed -i \
       -e "s|nodes: \".*\"|nodes: \"${redis_nodes_esc}\"|" \
       -e "s|password: \".*\"|password: \"${redis_pwd_esc}\"|" \
@@ -642,76 +667,78 @@ patch_cubemaster_external_deps() {
 check_external_deps_preflight() {
   local connect_timeout="${ONE_CLICK_EXTERNAL_DEP_TIMEOUT:-5}"
 
-  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
-    if command -v mysqladmin >/dev/null 2>&1; then
-      log "checking connectivity to external MySQL ${CUBE_EXTERNAL_MYSQL_HOST}:${CUBE_EXTERNAL_MYSQL_PORT}"
-      local mysql_cnf
-      # SECURITY: tighten umask before mktemp so the credential file is created
-      # 0600 from the start -- this closes the brief race window between mktemp's
-      # default (umask-derived) permissions and the chmod 600 below.
-      local old_umask
-      old_umask="$(umask)"
-      umask 077
-      mysql_cnf="$(mktemp)"
-      umask "${old_umask}"
-      # SECURITY: trap on EXIT so the plaintext password is removed even if the
-      # script is killed abruptly between here and the explicit rm-f below.
-      # Mirrors the trap pattern in up-with-deps.sh.
-      trap 'rm -f "${mysql_cnf}"' EXIT
-      chmod 600 "${mysql_cnf}"
-      cat > "${mysql_cnf}" <<EOF
+  if [[ -n "${CUBE_EXTERNAL_DB_HOST}" ]]; then
+    local db_driver="${CUBE_EXTERNAL_DB_DRIVER:-mysql}"
+    case "${db_driver}" in
+      mysql)
+        if command -v mysqladmin >/dev/null 2>&1; then
+          log "checking connectivity to external MySQL ${CUBE_EXTERNAL_DB_HOST}:${CUBE_EXTERNAL_DB_PORT}"
+          local mysql_cnf
+          # SECURITY: tighten umask before mktemp so the credential file is
+          # created 0600 from the start.
+          local old_umask
+          old_umask="$(umask)"
+          umask 077
+          mysql_cnf="$(mktemp)"
+          umask "${old_umask}"
+          trap 'rm -f "${mysql_cnf}"' EXIT
+          chmod 600 "${mysql_cnf}"
+          cat > "${mysql_cnf}" <<EOF
 [client]
-password="${CUBE_EXTERNAL_MYSQL_PASSWORD}"
+password="${CUBE_EXTERNAL_DB_PASSWORD}"
 EOF
-      if ! mysqladmin --defaults-extra-file="${mysql_cnf}" \
-          -h "${CUBE_EXTERNAL_MYSQL_HOST}" \
-          -P "${CUBE_EXTERNAL_MYSQL_PORT}" \
-          -u "${CUBE_EXTERNAL_MYSQL_USER}" \
-          --connect-timeout="${connect_timeout}" ping >/dev/null 2>&1; then
-        rm -f "${mysql_cnf}"
-        trap - EXIT
-        die "cannot reach external MySQL at ${CUBE_EXTERNAL_MYSQL_HOST}:${CUBE_EXTERNAL_MYSQL_PORT} as user '${CUBE_EXTERNAL_MYSQL_USER}'.
-  Verify CUBE_EXTERNAL_MYSQL_HOST / _PORT / _USER / _PASSWORD and that the server is reachable from this host."
-      fi
-      rm -f "${mysql_cnf}"
-      trap - EXIT
-      log "external MySQL connectivity OK"
-    else
-      log "mysqladmin not found; skipping external MySQL connectivity preflight"
-    fi
-  fi
-
-  if [[ -n "${CUBE_EXTERNAL_POSTGRES_HOST}" ]]; then
-    # Prefer psql (also verifies credentials + database) and fall back to
-    # pg_isready (reachability only). Best-effort like the MySQL branch: if
-    # neither client is installed we skip rather than block, since seeding runs
-    # later anyway. PGPASSWORD is passed inline to the command only, never
-    # exported, so it does not leak into the wider process environment.
-    if command -v psql >/dev/null 2>&1; then
-      log "checking connectivity to external PostgreSQL ${CUBE_EXTERNAL_POSTGRES_HOST}:${CUBE_EXTERNAL_POSTGRES_PORT}"
-      if ! PGPASSWORD="${CUBE_EXTERNAL_POSTGRES_PASSWORD}" \
-          PGCONNECT_TIMEOUT="${connect_timeout}" \
-          psql -h "${CUBE_EXTERNAL_POSTGRES_HOST}" \
-               -p "${CUBE_EXTERNAL_POSTGRES_PORT}" \
-               -U "${CUBE_EXTERNAL_POSTGRES_USER}" \
-               -d "${CUBE_EXTERNAL_POSTGRES_DB}" \
-               -w -tAc 'SELECT 1' >/dev/null 2>&1; then
-        die "cannot reach external PostgreSQL at ${CUBE_EXTERNAL_POSTGRES_HOST}:${CUBE_EXTERNAL_POSTGRES_PORT} as user '${CUBE_EXTERNAL_POSTGRES_USER}' (db '${CUBE_EXTERNAL_POSTGRES_DB}').
-  Verify CUBE_EXTERNAL_POSTGRES_HOST / _PORT / _USER / _PASSWORD / _DB and that the server is reachable from this host."
-      fi
-      log "external PostgreSQL connectivity OK"
-    elif command -v pg_isready >/dev/null 2>&1; then
-      log "checking reachability of external PostgreSQL ${CUBE_EXTERNAL_POSTGRES_HOST}:${CUBE_EXTERNAL_POSTGRES_PORT} (psql absent; credentials not verified)"
-      if ! pg_isready -h "${CUBE_EXTERNAL_POSTGRES_HOST}" \
-                      -p "${CUBE_EXTERNAL_POSTGRES_PORT}" \
-                      -t "${connect_timeout}" >/dev/null 2>&1; then
-        die "cannot reach external PostgreSQL at ${CUBE_EXTERNAL_POSTGRES_HOST}:${CUBE_EXTERNAL_POSTGRES_PORT}.
-  Verify CUBE_EXTERNAL_POSTGRES_HOST / _PORT and that the server is reachable from this host."
-      fi
-      log "external PostgreSQL reachable"
-    else
-      log "psql/pg_isready not found; skipping external PostgreSQL connectivity preflight"
-    fi
+          if ! mysqladmin --defaults-extra-file="${mysql_cnf}" \
+              -h "${CUBE_EXTERNAL_DB_HOST}" \
+              -P "${CUBE_EXTERNAL_DB_PORT}" \
+              -u "${CUBE_EXTERNAL_DB_USER}" \
+              --connect-timeout="${connect_timeout}" ping >/dev/null 2>&1; then
+            rm -f "${mysql_cnf}"
+            trap - EXIT
+            die "cannot reach external MySQL at ${CUBE_EXTERNAL_DB_HOST}:${CUBE_EXTERNAL_DB_PORT} as user '${CUBE_EXTERNAL_DB_USER}'.
+  Verify CUBE_EXTERNAL_DB_HOST / _PORT / _USER / _PASSWORD and that the server is reachable from this host."
+          fi
+          rm -f "${mysql_cnf}"
+          trap - EXIT
+          log "external MySQL connectivity OK"
+        else
+          log "mysqladmin not found; skipping external MySQL connectivity preflight"
+        fi
+        ;;
+      postgres)
+        # Prefer psql (verifies credentials + database) and fall back to
+        # pg_isready (reachability only). Best-effort: if neither client is
+        # installed we skip rather than block. PGPASSWORD is passed inline to the
+        # command only, never exported.
+        if command -v psql >/dev/null 2>&1; then
+          log "checking connectivity to external PostgreSQL ${CUBE_EXTERNAL_DB_HOST}:${CUBE_EXTERNAL_DB_PORT}"
+          if ! PGPASSWORD="${CUBE_EXTERNAL_DB_PASSWORD}" \
+              PGCONNECT_TIMEOUT="${connect_timeout}" \
+              psql -h "${CUBE_EXTERNAL_DB_HOST}" \
+                   -p "${CUBE_EXTERNAL_DB_PORT}" \
+                   -U "${CUBE_EXTERNAL_DB_USER}" \
+                   -d "${CUBE_EXTERNAL_DB_NAME}" \
+                   -w -tAc 'SELECT 1' >/dev/null 2>&1; then
+            die "cannot reach external PostgreSQL at ${CUBE_EXTERNAL_DB_HOST}:${CUBE_EXTERNAL_DB_PORT} as user '${CUBE_EXTERNAL_DB_USER}' (db '${CUBE_EXTERNAL_DB_NAME}').
+  Verify CUBE_EXTERNAL_DB_HOST / _PORT / _USER / _PASSWORD / _NAME and that the server is reachable from this host."
+          fi
+          log "external PostgreSQL connectivity OK"
+        elif command -v pg_isready >/dev/null 2>&1; then
+          log "checking reachability of external PostgreSQL ${CUBE_EXTERNAL_DB_HOST}:${CUBE_EXTERNAL_DB_PORT} (psql absent; credentials not verified)"
+          if ! pg_isready -h "${CUBE_EXTERNAL_DB_HOST}" \
+                          -p "${CUBE_EXTERNAL_DB_PORT}" \
+                          -t "${connect_timeout}" >/dev/null 2>&1; then
+            die "cannot reach external PostgreSQL at ${CUBE_EXTERNAL_DB_HOST}:${CUBE_EXTERNAL_DB_PORT}.
+  Verify CUBE_EXTERNAL_DB_HOST / _PORT and that the server is reachable from this host."
+          fi
+          log "external PostgreSQL reachable"
+        else
+          log "psql/pg_isready not found; skipping external PostgreSQL connectivity preflight"
+        fi
+        ;;
+      *)
+        log "WARNING: unknown database driver '${db_driver}'; skipping connectivity preflight"
+        ;;
+    esac
   fi
 
   if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
@@ -1555,11 +1582,8 @@ mask_external_dep_services() {
   # lives elsewhere -- whether that is an external MySQL or an external
   # PostgreSQL. Mask it in both cases so a stray local container cannot bind the
   # port or be mistaken for the live datastore.
-  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
-    log "masking local MySQL service (external MySQL at ${CUBE_EXTERNAL_MYSQL_HOST} in use)"
-    mask_local_dep_service cube-sandbox-mysql.service
-  elif [[ -n "${CUBE_EXTERNAL_POSTGRES_HOST}" ]]; then
-    log "masking local MySQL service (external PostgreSQL at ${CUBE_EXTERNAL_POSTGRES_HOST} in use)"
+  if [[ -n "${CUBE_EXTERNAL_DB_HOST}" ]]; then
+    log "masking local MySQL service (external database at ${CUBE_EXTERNAL_DB_HOST}, driver=${CUBE_EXTERNAL_DB_DRIVER})"
     mask_local_dep_service cube-sandbox-mysql.service
   else
     # Re-enable in case a previous install masked it and the user switched back.
@@ -1914,44 +1938,40 @@ if [[ -n "${CUBE_SANDBOX_CUBE_ROUTER_CIDR:-}" ]]; then
 fi
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EGRESS_ADMIN_PORT" "${CUBE_EGRESS_ADMIN_PORT}"
 
-# Persist external MySQL config so every systemd unit / helper picks it up
-# instead of the local container. The CUBE_EXTERNAL_* markers let quickcheck
+# Persist external database config so every systemd unit / helper picks it up
+# instead of the local container. CUBE_EXTERNAL_DB_* markers let quickcheck
 # and the up/down helpers skip the local service entirely; DATABASE_URL points
-# CubeAPI at the external server (CubeMaster reads the patched conf.yaml).
-if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_HOST" "${CUBE_EXTERNAL_MYSQL_HOST}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_PORT" "${CUBE_EXTERNAL_MYSQL_PORT}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_USER" "${CUBE_EXTERNAL_MYSQL_USER}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_PASSWORD" "${CUBE_EXTERNAL_MYSQL_PASSWORD}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_DB" "${CUBE_EXTERNAL_MYSQL_DB}"
+# CubeOps at the external server (CubeMaster reads the patched conf.yaml).
+# Legacy CUBE_EXTERNAL_MYSQL_* values were already mapped to CUBE_EXTERNAL_DB_*
+# by init_external_dep_defaults above, so only the generic form needs persisting.
+if [[ -n "${CUBE_EXTERNAL_DB_HOST}" ]]; then
+  local_db_driver="${CUBE_EXTERNAL_DB_DRIVER:-mysql}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_DB_DRIVER"   "${local_db_driver}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_DB_HOST"     "${CUBE_EXTERNAL_DB_HOST}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_DB_PORT"     "${CUBE_EXTERNAL_DB_PORT}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_DB_USER"     "${CUBE_EXTERNAL_DB_USER}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_DB_PASSWORD" "${CUBE_EXTERNAL_DB_PASSWORD}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_DB_NAME"     "${CUBE_EXTERNAL_DB_NAME}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_DB_SSLMODE"  "${CUBE_EXTERNAL_DB_SSLMODE}"
   # Percent-encode every URI component so values containing URL metacharacters
-  # (@, :, /, #, %, ...) cannot corrupt the connection string. This covers the
-  # userinfo (user/password) as well as the host, port, and database name (e.g.
-  # a '/' in the db name would otherwise be parsed as a path separator).
-  database_url_user="$(urlencode "${CUBE_EXTERNAL_MYSQL_USER}")"
-  database_url_pass="$(urlencode "${CUBE_EXTERNAL_MYSQL_PASSWORD}")"
-  database_url_host="$(urlencode "${CUBE_EXTERNAL_MYSQL_HOST}")"
-  database_url_port="$(urlencode "${CUBE_EXTERNAL_MYSQL_PORT}")"
-  database_url_db="$(urlencode "${CUBE_EXTERNAL_MYSQL_DB}")"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "DATABASE_URL" "mysql://${database_url_user}:${database_url_pass}@${database_url_host}:${database_url_port}/${database_url_db}"
-elif [[ -n "${CUBE_EXTERNAL_POSTGRES_HOST}" ]]; then
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_POSTGRES_HOST" "${CUBE_EXTERNAL_POSTGRES_HOST}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_POSTGRES_PORT" "${CUBE_EXTERNAL_POSTGRES_PORT}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_POSTGRES_USER" "${CUBE_EXTERNAL_POSTGRES_USER}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_POSTGRES_PASSWORD" "${CUBE_EXTERNAL_POSTGRES_PASSWORD}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_POSTGRES_DB" "${CUBE_EXTERNAL_POSTGRES_DB}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_POSTGRES_SSLMODE" "${CUBE_EXTERNAL_POSTGRES_SSLMODE}"
-  # Percent-encode every URI component (see the MySQL branch above). sslmode is a
-  # fixed keyword (disable/require/verify-full/...) so it is appended as a query
-  # parameter rather than encoded as userinfo/path.
-  database_url_user="$(urlencode "${CUBE_EXTERNAL_POSTGRES_USER}")"
-  database_url_pass="$(urlencode "${CUBE_EXTERNAL_POSTGRES_PASSWORD}")"
-  database_url_host="$(urlencode "${CUBE_EXTERNAL_POSTGRES_HOST}")"
-  database_url_port="$(urlencode "${CUBE_EXTERNAL_POSTGRES_PORT}")"
-  database_url_db="$(urlencode "${CUBE_EXTERNAL_POSTGRES_DB}")"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "DATABASE_URL" "postgres://${database_url_user}:${database_url_pass}@${database_url_host}:${database_url_port}/${database_url_db}?sslmode=$(urlencode "${CUBE_EXTERNAL_POSTGRES_SSLMODE}")"
+  # (@, :, /, #, %, ...) cannot corrupt the connection string.
+  database_url_user="$(urlencode "${CUBE_EXTERNAL_DB_USER}")"
+  database_url_pass="$(urlencode "${CUBE_EXTERNAL_DB_PASSWORD}")"
+  database_url_host="$(urlencode "${CUBE_EXTERNAL_DB_HOST}")"
+  database_url_port="$(urlencode "${CUBE_EXTERNAL_DB_PORT}")"
+  database_url_db="$(urlencode "${CUBE_EXTERNAL_DB_NAME}")"
+  case "${local_db_driver}" in
+    postgres)
+      upsert_env_kv "${RUNTIME_ENV_FILE}" "DATABASE_URL" \
+        "postgres://${database_url_user}:${database_url_pass}@${database_url_host}:${database_url_port}/${database_url_db}?sslmode=$(urlencode "${CUBE_EXTERNAL_DB_SSLMODE}")"
+      ;;
+    *)
+      upsert_env_kv "${RUNTIME_ENV_FILE}" "DATABASE_URL" \
+        "mysql://${database_url_user}:${database_url_pass}@${database_url_host}:${database_url_port}/${database_url_db}"
+      ;;
+  esac
 else
-  # Local MySQL (bundled container): persist DATABASE_URL so CubeAPI and other
+  # Local MySQL (bundled container): persist DATABASE_URL so CubeOps and other
   # components can reach the database without relying on per-script defaults.
   local_mysql_host="127.0.0.1"
   local_mysql_port="${CUBE_SANDBOX_MYSQL_PORT:-3306}"

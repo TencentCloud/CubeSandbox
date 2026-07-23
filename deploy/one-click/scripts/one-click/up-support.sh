@@ -101,20 +101,21 @@ case "${COMPOSE_DETACH}" in
   *) die "unsupported ONE_CLICK_COMPOSE_DETACH: ${COMPOSE_DETACH} (expected 0 or 1)" ;;
 esac
 
-# Never start a local container that is externalized (MySQL/PostgreSQL/Redis)
-# or not enabled (MinIO). Empty SUPPORT_SERVICES is the default path: expand to
+# Never start a local container that is externalized (database/Redis) or not
+# enabled (MinIO). Empty SUPPORT_SERVICES is the default path: expand to
 # "mysql redis minio", then drop external/disabled ones so a conflicting
-# container is never launched. The bundled datastore is always MySQL, so an
-# external PostgreSQL also means the local mysql container must be skipped.
-CUBE_EXTERNAL_MYSQL_HOST="${CUBE_EXTERNAL_MYSQL_HOST:-}"
-CUBE_EXTERNAL_POSTGRES_HOST="${CUBE_EXTERNAL_POSTGRES_HOST:-}"
+# container is never launched. The bundled datastore is always MySQL;
+# CUBE_EXTERNAL_DB_HOST covers all external engines (mysql, postgres, ...).
+# The legacy CUBE_EXTERNAL_MYSQL_HOST is also checked for deployments upgraded
+# without re-running the installer.
+CUBE_EXTERNAL_DB_HOST="${CUBE_EXTERNAL_DB_HOST:-${CUBE_EXTERNAL_MYSQL_HOST:-}}"
 CUBE_EXTERNAL_REDIS_HOST="${CUBE_EXTERNAL_REDIS_HOST:-}"
 CUBE_EXTERNAL_REDIS_MASTER_NAME="${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}"
 CUBE_SANDBOX_MINIO_ENABLED="${CUBE_SANDBOX_MINIO_ENABLED:-1}"
 minio_dropped=0
-if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" || -n "${CUBE_EXTERNAL_POSTGRES_HOST}" \
-    || -n "${CUBE_EXTERNAL_REDIS_HOST}" || -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" \
-    || "${CUBE_SANDBOX_MINIO_ENABLED}" != "1" || -z "${SUPPORT_SERVICES}" ]]; then
+if [[ -n "${CUBE_EXTERNAL_DB_HOST}" || -n "${CUBE_EXTERNAL_REDIS_HOST}" \
+    || -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" || "${CUBE_SANDBOX_MINIO_ENABLED}" != "1" \
+    || -z "${SUPPORT_SERVICES}" ]]; then
   requested_services="${SUPPORT_SERVICES:-mysql redis minio}"
   filtered_services=""
   # Split on whitespace into an array so SUPPORT_SERVICES (user-controllable) is
@@ -123,12 +124,8 @@ if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" || -n "${CUBE_EXTERNAL_POSTGRES_HOST}" \
   for svc in "${requested_services_arr[@]}"; do
     case "${svc}" in
       mysql)
-        if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
-          log "using external MySQL (${CUBE_EXTERNAL_MYSQL_HOST}), skipping local mysql container"
-          continue
-        fi
-        if [[ -n "${CUBE_EXTERNAL_POSTGRES_HOST}" ]]; then
-          log "using external PostgreSQL (${CUBE_EXTERNAL_POSTGRES_HOST}), skipping local mysql container"
+        if [[ -n "${CUBE_EXTERNAL_DB_HOST}" ]]; then
+          log "using external database (${CUBE_EXTERNAL_DB_HOST}), skipping local mysql container"
           continue
         fi
         ;;
