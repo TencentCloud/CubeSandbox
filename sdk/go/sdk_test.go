@@ -1516,7 +1516,7 @@ func TestBuildTemplateOmitsNameWhenBlank(t *testing.T) {
 	}
 }
 
-func TestGetTemplateParsesNameAndAliases(t *testing.T) {
+func TestGetTemplateDerivesNameFromAliases(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/templates/tpl-alias" {
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -1524,7 +1524,6 @@ func TestGetTemplateParsesNameAndAliases(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{
 			"templateID":"tpl-alias",
-			"name":"my-alias",
 			"aliases":["my-alias"],
 			"status":"READY"
 		}`)

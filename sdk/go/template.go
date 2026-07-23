@@ -48,7 +48,9 @@ func (t *TemplateInfo) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &tmp); err != nil {
 		return err
 	}
-	if tmp.Name == "" && len(tmp.Aliases) > 0 {
+	// CubeSandbox returns only the aliases array (no top-level name); derive
+	// Name from aliases[0] for E2B API compatibility.
+	if len(tmp.Aliases) > 0 {
 		tmp.Name = tmp.Aliases[0]
 	}
 	*t = TemplateInfo(tmp.alias)

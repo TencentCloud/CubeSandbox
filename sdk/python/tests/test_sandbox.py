@@ -2305,20 +2305,12 @@ class TestTemplateAPI:
         assert info.network_type == "tap"
         assert info.allow_internet_access is True
 
-    def test_template_info_from_dict_exposes_aliases_and_name_fallback(self):
+    def test_template_info_from_dict_name_fallback_from_aliases(self):
         info = TemplateInfo.from_dict({
             "templateID": "tpl-alias",
             "aliases": ["my-alias"],
         })
         assert info.name == "my-alias"
-
-    def test_template_info_from_dict_prefers_explicit_name_over_alias(self):
-        info = TemplateInfo.from_dict({
-            "templateID": "tpl-named",
-            "name": "explicit-name",
-            "aliases": ["alias-name"],
-        })
-        assert info.name == "explicit-name"
 
     def test_build_forwards_name_into_payload(self):
         body = {"jobID": "job-name", "templateID": "tpl-name", "status": "accepted"}
