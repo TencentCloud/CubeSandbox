@@ -233,7 +233,8 @@ export class Template {
 
     const cfg = resolveConfig(options.config);
     const payload: Record<string, unknown> = { image: options.image.trim() };
-    if (options.name !== undefined) payload.name = options.name;
+    const name = options.name?.trim();
+    if (name) payload.name = name;
     if (options.instanceType !== undefined) payload.instanceType = options.instanceType;
     if (options.writableLayerSize !== undefined) {
       payload.writableLayerSize = options.writableLayerSize;

@@ -298,7 +298,8 @@ class Template:
 
         cfg = config or Config()
         payload: dict = {"image": image.strip()}
-        if name is not None:
+        name = name.strip() if name else ""
+        if name:
             payload["name"] = name
         if instance_type is not None:
             payload["instanceType"] = instance_type
