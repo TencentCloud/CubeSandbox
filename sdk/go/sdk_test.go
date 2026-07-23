@@ -1539,9 +1539,6 @@ func TestGetTemplateParsesNameAndAliases(t *testing.T) {
 	if info.Name != "my-alias" {
 		t.Fatalf("Name=%q, want my-alias", info.Name)
 	}
-	if len(info.Aliases) != 1 || info.Aliases[0] != "my-alias" {
-		t.Fatalf("Aliases=%#v, want [my-alias]", info.Aliases)
-	}
 }
 
 func TestGetTemplateFallsBackToFirstAliasForName(t *testing.T) {
@@ -1558,9 +1555,6 @@ func TestGetTemplateFallsBackToFirstAliasForName(t *testing.T) {
 	}
 	if info.Name != "fallback-alias" {
 		t.Fatalf("Name=%q, want fallback-alias (from aliases[0])", info.Name)
-	}
-	if len(info.Aliases) != 1 || info.Aliases[0] != "fallback-alias" {
-		t.Fatalf("Aliases=%#v", info.Aliases)
 	}
 }
 

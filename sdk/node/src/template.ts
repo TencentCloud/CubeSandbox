@@ -88,7 +88,6 @@ export class TemplateBuild {
 export class TemplateInfo {
   templateId: string;
   name: string;
-  aliases: string[];
   instanceType: string;
   version: string;
   status: string;
@@ -108,7 +107,6 @@ export class TemplateInfo {
   constructor(fields: Partial<TemplateInfo> = {}) {
     this.templateId = fields.templateId ?? "";
     this.name = fields.name ?? "";
-    this.aliases = fields.aliases ?? [];
     this.instanceType = fields.instanceType ?? "";
     this.version = fields.version ?? "";
     this.status = fields.status ?? "";
@@ -131,7 +129,6 @@ export class TemplateInfo {
     return new TemplateInfo({
       templateId: data.templateID ?? data.template_id ?? "",
       name: data.name || (aliases.length ? aliases[0] : "") || "",
-      aliases,
       instanceType: data.instanceType ?? data.instance_type ?? "",
       version: data.version ?? "",
       status: data.status ?? "",

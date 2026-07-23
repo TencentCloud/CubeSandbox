@@ -70,7 +70,6 @@ class TemplateInfo:
 
     template_id: str
     name: str = ""
-    aliases: list[str] = field(default_factory=list)
     instance_type: str = ""
     version: str = ""
     status: str = ""
@@ -94,7 +93,6 @@ class TemplateInfo:
         return cls(
             template_id=data.get("templateID") or data.get("template_id", ""),
             name=data.get("name") or (aliases[0] if aliases else "") or "",
-            aliases=list(aliases),
             instance_type=data.get("instanceType") or data.get("instance_type", ""),
             version=data.get("version") or "",
             status=data.get("status") or "",

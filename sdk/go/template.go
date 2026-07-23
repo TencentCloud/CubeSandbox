@@ -23,32 +23,35 @@ type TemplateBuildJob struct {
 }
 
 type TemplateInfo struct {
-	TemplateID          string   `json:"templateID"`
-	Name                string   `json:"name,omitempty"`
-	Aliases             []string `json:"aliases,omitempty"`
-	InstanceType        string   `json:"instanceType,omitempty"`
-	Version             string   `json:"version,omitempty"`
-	Status              string   `json:"status,omitempty"`
-	LastError           string   `json:"lastError,omitempty"`
-	CreatedAt           string   `json:"createdAt,omitempty"`
-	ImageInfo           string   `json:"imageInfo,omitempty"`
-	JobID               string   `json:"jobID,omitempty"`
-	NetworkType         string   `json:"networkType,omitempty"`
-	AllowInternetAccess *bool    `json:"allowInternetAccess,omitempty"`
+	TemplateID          string `json:"templateID"`
+	Name                string `json:"name,omitempty"`
+	InstanceType        string `json:"instanceType,omitempty"`
+	Version             string `json:"version,omitempty"`
+	Status              string `json:"status,omitempty"`
+	LastError           string `json:"lastError,omitempty"`
+	CreatedAt           string `json:"createdAt,omitempty"`
+	ImageInfo           string `json:"imageInfo,omitempty"`
+	JobID               string `json:"jobID,omitempty"`
+	NetworkType         string `json:"networkType,omitempty"`
+	AllowInternetAccess *bool  `json:"allowInternetAccess,omitempty"`
 }
 
 // UnmarshalJSON populates Name from aliases[0] when the server omits the
-// top-level name field (CubeSandbox returns only the aliases array).
+// top-level name field (CubeSandbox returns only the aliases array). The
+// aliases array is parsed into a local helper and not exposed as a field.
 func (t *TemplateInfo) UnmarshalJSON(data []byte) error {
 	type alias TemplateInfo
-	var tmp alias
+	var tmp struct {
+		alias
+		Aliases []string `json:"aliases"`
+	}
 	if err := json.Unmarshal(data, &tmp); err != nil {
 		return err
 	}
 	if tmp.Name == "" && len(tmp.Aliases) > 0 {
 		tmp.Name = tmp.Aliases[0]
 	}
-	*t = TemplateInfo(tmp)
+	*t = TemplateInfo(tmp.alias)
 	return nil
 }
 

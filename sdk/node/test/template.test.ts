@@ -86,7 +86,6 @@ describe("Template.list", () => {
     expect(templates).toHaveLength(1);
     expect(templates[0].templateId).toBe("tpl-a");
     expect(templates[0].status).toBe("READY");
-    expect(templates[0].aliases).toEqual(["alpha"]);
     expect(templates[0].name).toBe("alpha");
   });
 });
@@ -121,7 +120,6 @@ describe("Template.get", () => {
       },
     });
     const info = await Template.get("tpl-alias", { config: makeConfig() });
-    expect(info.aliases).toEqual(["my-alias"]);
     expect(info.name).toBe("my-alias");
   });
 
@@ -131,7 +129,6 @@ describe("Template.get", () => {
       json: { templateID: "tpl-noalias", status: "READY" },
     });
     const info = await Template.get("tpl-noalias", { config: makeConfig() });
-    expect(info.aliases).toEqual([]);
     expect(info.name).toBe("");
   });
 });

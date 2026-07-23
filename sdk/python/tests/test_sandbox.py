@@ -2302,7 +2302,6 @@ class TestTemplateAPI:
         })
         assert info.template_id == "tpl-test"
         assert info.name == ""
-        assert info.aliases == []
         assert info.network_type == "tap"
         assert info.allow_internet_access is True
 
@@ -2311,7 +2310,6 @@ class TestTemplateAPI:
             "templateID": "tpl-alias",
             "aliases": ["my-alias"],
         })
-        assert info.aliases == ["my-alias"]
         assert info.name == "my-alias"
 
     def test_template_info_from_dict_prefers_explicit_name_over_alias(self):
@@ -2321,7 +2319,6 @@ class TestTemplateAPI:
             "aliases": ["alias-name"],
         })
         assert info.name == "explicit-name"
-        assert info.aliases == ["alias-name"]
 
     def test_build_forwards_name_into_payload(self):
         body = {"jobID": "job-name", "templateID": "tpl-name", "status": "accepted"}
