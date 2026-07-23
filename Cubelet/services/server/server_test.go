@@ -4,7 +4,10 @@
 
 package server
 
-import "testing"
+import (
+	"net/http"
+	"testing"
+)
 
 func TestIsCriticalCubeletPlugin(t *testing.T) {
 	tests := []struct {
@@ -24,5 +27,20 @@ func TestIsCriticalCubeletPlugin(t *testing.T) {
 				t.Fatalf("isCriticalCubeletPlugin(%q)=%v, want %v", tc.id, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestServeMetricsIncludesDedicatedResourceEndpoint(t *testing.T) {
+	called := false
+	resourceHandler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })
+	s := &Server{resourceMetricServer: resourceHandler}
+	handlers := s.serveMetrics()
+	handler := handlers["/v1/metrics/resource"]
+	if handler == nil {
+		t.Fatal("resource metrics handler is not registered at /v1/metrics/resource")
+	}
+	handler.ServeHTTP(nil, nil)
+	if !called {
+		t.Fatal("resource metrics endpoint did not invoke the configured handler")
 	}
 }

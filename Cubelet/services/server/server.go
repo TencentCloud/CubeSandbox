@@ -39,6 +39,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/resourcemetrics"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 	"google.golang.org/grpc"
@@ -153,6 +154,13 @@ func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
 			}
 			s.metricServer = metricHandler
 		}
+		if reqID == constants.InternalPlugin.String()+"."+resourcemetrics.PluginID {
+			resourceMetricHandler, ok := instance.(http.Handler)
+			if !ok {
+				return nil, fmt.Errorf("resource metrics plugin has not implemented http.Handler")
+			}
+			s.resourceMetricServer = resourceMetricHandler
+		}
 
 		if e, ok := instance.(*workflow.Engine); ok {
 			engine = e
@@ -196,12 +204,13 @@ func isCriticalCubeletPlugin(id string) bool {
 
 type Server struct {
 	*containerdserver.Server
-	operationServer *OperationServer
-	tcpServer       *grpc.Server
-	tapProvider     *tapProvider
-	metricServer    http.Handler
-	config          *srvconfig.Config
-	stopCh          chan struct{}
+	operationServer      *OperationServer
+	tcpServer            *grpc.Server
+	tapProvider          *tapProvider
+	metricServer         http.Handler
+	resourceMetricServer http.Handler
+	config               *srvconfig.Config
+	stopCh               chan struct{}
 }
 
 func (s *Server) ServeOperation(l net.Listener) error {
@@ -226,6 +235,9 @@ func (s *Server) serveMetrics() map[string]http.Handler {
 
 	if s.metricServer != nil {
 		handlers["/v1/metrics/scheduler"] = s.metricServer
+	}
+	if s.resourceMetricServer != nil {
+		handlers["/v1/metrics/resource"] = s.resourceMetricServer
 	}
 
 	return handlers

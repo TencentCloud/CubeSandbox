@@ -61,6 +61,14 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     vm_snapshot_specs_config = "/usr/local/services/cubetoolbox/cube-snapshot/spec.json"
     snapshot_disk_dir = "/data/snapshot_pack/disks"
 
+  [plugins."io.cubelet.internal.v1.resource-metrics"]
+    enabled = true
+    collection_interval = "5s"
+    request_timeout = "2s"
+    max_concurrent_requests = 8
+    stale_after = "15s"
+    export_scopes = ["host_sandbox"]
+
   [plugins."io.cubelet.internal.v1.network"]
     object_dir = "/usr/local/services/cubetoolbox/cube-vs/network"
     eth_name = "eth0"
