@@ -207,3 +207,73 @@ def test_template_alias_rebuild_reassignment(sdk_backend, sdk_e2e_config):
                 Template.delete(tid, config=cfg)
             except (ApiError, TemplateNotFoundError):
                 pass
+
+
+def test_template_alias_set_on_existing_template(sdk_backend, sdk_e2e_config):
+    """Set an alias on an already-existing template, then clear it (PUT /templates/:id/alias)."""
+    _require_cubesandbox(sdk_backend)
+    cfg = _cfg(sdk_e2e_config)
+    alias = f"e2e-set-alias-{uuid.uuid4().hex[:8]}"
+    created_id = None
+    try:
+        # 1. Create WITHOUT an alias.
+        job = Template.build(image=DEFAULT_IMAGE, writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE, config=cfg)
+        created_id = job.template_id
+        _wait_for_ready(created_id, cfg)
+
+        # 2. Set the alias on the existing template.
+        updated = Template.set_alias(created_id, alias, config=cfg)
+        assert updated.template_id == created_id
+
+        # 3. GET by alias resolves to the template.
+        assert Template.get(alias, config=cfg).template_id == created_id
+
+        # 4. Clear the alias.
+        cleared = Template.set_alias(created_id, None, config=cfg)
+        assert cleared.template_id == created_id
+
+        # 5. Alias should no longer resolve.
+        with pytest.raises(TemplateNotFoundError):
+            Template.get(alias, config=cfg)
+    finally:
+        time.sleep(1)
+        if created_id:
+            try:
+                Template.delete(created_id, config=cfg)
+            except (ApiError, TemplateNotFoundError):
+                pass
+
+
+def test_template_alias_set_reassign_between_templates(sdk_backend, sdk_e2e_config):
+    """Setting an alias held by another template steals it (PUT /templates/:id/alias)."""
+    _require_cubesandbox(sdk_backend)
+    cfg = _cfg(sdk_e2e_config)
+    alias = f"e2e-set-reassign-{uuid.uuid4().hex[:8]}"
+    template_ids = []
+    try:
+        # 1. Create T1 WITH alias A.
+        job_a = Template.build(name=alias, image=DEFAULT_IMAGE, writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE, config=cfg)
+        template_ids.append(job_a.template_id)
+        _wait_for_ready(job_a.template_id, cfg)
+
+        # 2. Create T2 WITHOUT alias.
+        job_b = Template.build(image=DEFAULT_IMAGE, writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE, config=cfg)
+        template_ids.append(job_b.template_id)
+        _wait_for_ready(job_b.template_id, cfg)
+
+        # 3. set_alias(T2, A) should release A from T1 and claim for T2.
+        Template.set_alias(job_b.template_id, alias, config=cfg)
+
+        # 4. Alias A now resolves to T2.
+        assert Template.get(alias, config=cfg).template_id == job_b.template_id
+
+        # 5. T1 no longer holds A (name derives from aliases[0]; empty once released).
+        t1_detail = Template.get(job_a.template_id, config=cfg)
+        assert not t1_detail.name
+    finally:
+        time.sleep(1)
+        for tid in template_ids:
+            try:
+                Template.delete(tid, config=cfg)
+            except (ApiError, TemplateNotFoundError):
+                pass

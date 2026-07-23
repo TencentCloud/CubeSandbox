@@ -673,3 +673,162 @@ func TestGetTemplateByAliasFiltersByKindExcludesSnapshots(t *testing.T) {
 	assert.True(t, aliasBound,
 		"alias must be bound in the query; captured vars: %v", capturedVars)
 }
+
+// TestSetTemplateAlias_Clear_SetsEmptyDisplayName verifies the clear path
+// calls updateDefinitionFields with display_name="" on the target template.
+// We patch updateDefinitionFields with gomonkey (instead of the DryRun gorm.DB
+// trick used by TestGetTemplateByAliasFiltersByKindExcludesSnapshots) because
+// DryRun reliably suppresses connection attempts for SELECT but, in this gorm
+// version, still attempts to BEGIN a transaction for UPDATE statements — and
+// the test env has a live MySQL on 127.0.0.1:3306 that rejects the DSN's
+// credentials. Patching the private updateDefinitionFields directly captures
+// the exact map SetTemplateAlias builds, which is the assertion target.
+func TestSetTemplateAlias_Clear_SetsEmptyDisplayName(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(GetDefinition, func(ctx context.Context, templateID string) (*models.TemplateDefinition, error) {
+		return &models.TemplateDefinition{
+			TemplateID: templateID,
+			Kind:       TemplateKindTemplate,
+			Status:     StatusReady,
+		}, nil
+	})
+
+	var capturedTemplateID string
+	var capturedValues map[string]any
+	updateCalled := false
+	patches.ApplyFunc(updateDefinitionFields, func(ctx context.Context, templateID string, values map[string]any) error {
+		capturedTemplateID = templateID
+		// Copy the map so we can inspect it after the call (updateDefinitionFields
+		// itself mutates it by writing "updated_at").
+		capturedValues = map[string]any{}
+		for k, v := range values {
+			capturedValues[k] = v
+		}
+		updateCalled = true
+		return nil
+	})
+
+	err := SetTemplateAlias(context.Background(), "tpl-clear-1", "")
+	require.NoError(t, err)
+	assert.True(t, updateCalled, "clear path must call updateDefinitionFields")
+	assert.Equal(t, "tpl-clear-1", capturedTemplateID)
+	assert.Equal(t, "", capturedValues["display_name"],
+		"clear path must set display_name to empty string")
+}
+
+// TestSetTemplateAlias_RejectsSnapshot verifies that snapshots are rejected
+// with ErrAliasNotApplicableToSnapshot — a snapshot's display_name is an
+// informational label (alias_key is always NULL), so it cannot hold a unique
+// alias (design §3.7).
+func TestSetTemplateAlias_RejectsSnapshot(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(GetDefinition, func(ctx context.Context, templateID string) (*models.TemplateDefinition, error) {
+		return &models.TemplateDefinition{
+			TemplateID: templateID,
+			Kind:       TemplateKindSnapshot,
+		}, nil
+	})
+
+	err := SetTemplateAlias(context.Background(), "snap-1", "my-alias")
+	assert.ErrorIs(t, err, ErrAliasNotApplicableToSnapshot)
+}
+
+// TestSetTemplateAlias_RejectsDeletingTemplate verifies that DELETING
+// templates surface as ErrTemplateNotFound, matching GetTemplateByAlias'
+// behavior (store.go:921 filters status <> 'DELETING').
+func TestSetTemplateAlias_RejectsDeletingTemplate(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(GetDefinition, func(ctx context.Context, templateID string) (*models.TemplateDefinition, error) {
+		return &models.TemplateDefinition{
+			TemplateID: templateID,
+			Kind:       TemplateKindTemplate,
+			Status:     StatusDeleting,
+		}, nil
+	})
+
+	err := SetTemplateAlias(context.Background(), "tpl-deleting-1", "my-alias")
+	assert.ErrorIs(t, err, ErrTemplateNotFound)
+}
+
+// TestSetTemplateAlias_ValidatesAlias verifies that invalid alias strings
+// are rejected before any DB access, and that the rejection wraps
+// ErrInvalidAlias so the HTTP handler can map it to 400 (vs. raw DB errors
+// which map to 500). validateTemplateAlias rejects tpl-/snap- prefixes and
+// anything outside ^[a-z0-9][a-z0-9-]{0,63}$. The empty-string case (clear
+// path) is exercised separately by
+// TestSetTemplateAlias_Clear_SetsEmptyDisplayName.
+func TestSetTemplateAlias_ValidatesAlias(t *testing.T) {
+	// Prefix collision: aliases must not look like template IDs.
+	err := SetTemplateAlias(context.Background(), "tpl-1", "tpl-hijack")
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidAlias, "validation errors must wrap ErrInvalidAlias")
+
+	// Uppercase not allowed.
+	err = SetTemplateAlias(context.Background(), "tpl-1", "My-Alias")
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidAlias)
+
+	// Leading hyphen not allowed.
+	err = SetTemplateAlias(context.Background(), "tpl-1", "-leading")
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidAlias)
+}
+
+// TestSetTemplateAlias_RejectsEmptyID verifies that an empty or
+// whitespace-only templateID is rejected up front with ErrTemplateIDRequired
+// (before any DB access), so direct callers get a clear error instead of a
+// misleading ErrTemplateNotFound from GetDefinition.
+func TestSetTemplateAlias_RejectsEmptyID(t *testing.T) {
+	for _, id := range []string{"", "   ", "\t"} {
+		err := SetTemplateAlias(context.Background(), id, "my-alias")
+		assert.Error(t, err)
+		assert.ErrorIs(t, err, ErrTemplateIDRequired)
+	}
+}
+
+// TestSetTemplateAlias_ReachableClaim verifies the claim path delegates to
+// claimTemplateAlias with the right (templateID, alias). claimTemplateAlias
+// is patched so the test does not require a live DB transaction.
+func TestSetTemplateAlias_ReachableClaim(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(GetDefinition, func(ctx context.Context, templateID string) (*models.TemplateDefinition, error) {
+		return &models.TemplateDefinition{
+			TemplateID: templateID,
+			Kind:       TemplateKindTemplate,
+			Status:     StatusReady,
+		}, nil
+	})
+
+	var capturedTemplateID, capturedAlias string
+	called := false
+	patches.ApplyFunc(claimTemplateAlias, func(ctx context.Context, templateID, alias string) error {
+		capturedTemplateID = templateID
+		capturedAlias = alias
+		called = true
+		return nil
+	})
+
+	err := SetTemplateAlias(context.Background(), "tpl-claim-1", "my-alias")
+	require.NoError(t, err)
+	assert.True(t, called, "claim path must invoke claimTemplateAlias")
+	assert.Equal(t, "tpl-claim-1", capturedTemplateID)
+	assert.Equal(t, "my-alias", capturedAlias)
+}
+
+// TestSetTemplateAlias_PropagatesGetDefinitionNotFound verifies that a
+// missing template surfaces as ErrTemplateNotFound (not some wrapped DB
+// error), so the HTTP handler can map it to 404.
+func TestSetTemplateAlias_PropagatesGetDefinitionNotFound(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(GetDefinition, func(ctx context.Context, templateID string) (*models.TemplateDefinition, error) {
+		return nil, ErrTemplateNotFound
+	})
+
+	err := SetTemplateAlias(context.Background(), "tpl-missing-1", "my-alias")
+	assert.ErrorIs(t, err, ErrTemplateNotFound)
+}

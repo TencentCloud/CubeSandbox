@@ -449,3 +449,39 @@ class Template:
         s = requests.Session()
         resp = s.delete(f"{cfg.api_url}/templates/{template_id}", headers=_auth_headers(cfg))
         _check_response(resp)
+
+
+    @classmethod
+    def set_alias(
+        cls,
+        template_id: str,
+        alias: str | None = None,
+        *,
+        config: Config | None = None,
+    ) -> TemplateInfo:
+        """PUT /templates/:templateID/alias — Set, reassign, or clear the alias of an existing template.
+
+        Args:
+            template_id: Template identifier or current alias.
+            alias: New alias. ``None`` or empty string clears the alias.
+                Validated server-side against ``^[a-z0-9][a-z0-9-]{0,63}$`` with
+                ``tpl-``/``snap-`` prefixes rejected.
+            config: SDK config.  Uses default (env-based) config if omitted.
+
+        Returns:
+            :class:`TemplateInfo` reflecting the post-update state.
+
+        Raises:
+            ApiError: On invalid alias (HTTP 400), template not found (HTTP 404),
+                or concurrent alias conflict (HTTP 409).
+        """
+        cfg = config or Config()
+        payload = {"alias": alias or ""}
+        s = requests.Session()
+        resp = s.put(
+            f"{cfg.api_url}/templates/{template_id}/alias",
+            json=payload,
+            headers={"Content-Type": "application/json", **_auth_headers(cfg)},
+        )
+        _check_response(resp)
+        return TemplateInfo.from_dict(resp.json())

@@ -1626,6 +1626,63 @@ func TestGetTemplateFallsBackToFirstAliasForName(t *testing.T) {
 	}
 }
 
+func TestSetTemplateAliasForwardsPutAndParsesResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/templates/tpl-1/alias" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body["alias"] != "my-alias" {
+			t.Fatalf("alias=%v, want my-alias", body["alias"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"templateID":"tpl-1","aliases":["my-alias"],"status":"READY"}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	info, err := client.SetTemplateAlias(context.Background(), "tpl-1", "my-alias")
+	if err != nil {
+		t.Fatalf("SetTemplateAlias returned error: %v", err)
+	}
+	if info.TemplateID != "tpl-1" {
+		t.Fatalf("TemplateID=%q, want tpl-1", info.TemplateID)
+	}
+	if info.Name != "my-alias" {
+		t.Fatalf("Name=%q, want my-alias", info.Name)
+	}
+}
+
+func TestSetTemplateAliasClearSendsEmptyAlias(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Fatalf("method=%s, want PUT", r.Method)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body["alias"] != "" {
+			t.Fatalf("alias=%v, want empty", body["alias"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"templateID":"tpl-1","aliases":[],"status":"READY"}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	info, err := client.SetTemplateAlias(context.Background(), "tpl-1", "")
+	if err != nil {
+		t.Fatalf("SetTemplateAlias returned error: %v", err)
+	}
+	if info.Name != "" {
+		t.Fatalf("Name=%q, want empty", info.Name)
+	}
+}
+
 // ── SetTimeout ─────────────────────────────────────────────────────────────
 
 func TestSetTimeoutWireValues(t *testing.T) {

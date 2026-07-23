@@ -59,6 +59,7 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	g.POST(TemplateAction, createTemplateGinHandler)
 	g.GET(TemplateAction, getTemplateGinHandler)
 	g.DELETE(TemplateAction, deleteTemplateGinHandler)
+	g.PUT(TemplateAction+"/:template_id/alias", setTemplateAliasGinHandler)
 	g.GET(TemplateCompatAction, getTemplateCompatGinHandler)
 	g.POST(TemplateCompatAction, updateTemplateCompatGinHandler)
 	g.POST(TemplateRedoAction, handleRedoTemplateAction)

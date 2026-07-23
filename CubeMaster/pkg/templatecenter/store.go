@@ -72,13 +72,15 @@ const (
 )
 
 var (
-	ErrTemplateStoreNotInitialized = errors.New("template store is not initialized")
-	ErrTemplateNotFound            = errors.New("template not found")
-	ErrTemplateIDRequired          = errors.New("template id is required")
-	ErrTemplateHasNoReadyReplica   = errors.New("template has no ready replica")
-	ErrNoTemplateNodes             = errors.New("no healthy nodes available for template creation")
-	ErrDuplicateTemplate           = errors.New("template already exists")
-	ErrTemplateAttemptInProgress   = errors.New("template attempt is already in progress")
+	ErrTemplateStoreNotInitialized  = errors.New("template store is not initialized")
+	ErrTemplateNotFound             = errors.New("template not found")
+	ErrTemplateIDRequired           = errors.New("template id is required")
+	ErrTemplateHasNoReadyReplica    = errors.New("template has no ready replica")
+	ErrNoTemplateNodes              = errors.New("no healthy nodes available for template creation")
+	ErrDuplicateTemplate            = errors.New("template already exists")
+	ErrTemplateAttemptInProgress    = errors.New("template attempt is already in progress")
+	ErrAliasNotApplicableToSnapshot = errors.New("alias is not applicable to snapshot")
+	ErrInvalidAlias                 = errors.New("alias is invalid")
 )
 
 type localStore struct {
@@ -1027,6 +1029,12 @@ func isDuplicateAliasError(err error) bool {
 	return strings.Contains(s, "23505") || strings.Contains(s, "unique_constraint")
 }
 
+// IsDuplicateAliasError is the exported wrapper around isDuplicateAliasError
+// so the HTTP layer (separate package) can map concurrent-claim failures to
+// HTTP 409 / RetCode=ErrorCode_Conflict without duplicating the driver
+// detection logic. See design §3.3.
+func IsDuplicateAliasError(err error) bool { return isDuplicateAliasError(err) }
+
 // claimAliasForReadyTemplate is the shared alias-claim helper used by both the
 // image-job and redo paths. It is called for a template that has reached a
 // non-FAILED status, and — per the create/claim ordering fix — runs *before*
@@ -1051,6 +1059,51 @@ func claimAliasForReadyTemplate(ctx context.Context, templateID, alias string) (
 	// the alias itself — no read-back needed.
 	return "", alias
 }
+
+// SetTemplateAlias atomically sets, transfers, or clears the alias (display_name)
+// of an existing template-kind definition.
+//
+//	alias == ""  → clear: UPDATE display_name = '' WHERE template_id = ?
+//	alias != ""  → claim: reuse claimTemplateAlias (release from any other
+//	                    holder inside the same transaction, then UPDATE on the
+//	                    target template).
+//
+// The target must be a non-deleting template. Snapshots are rejected because
+// their display_name is an informational label, not a unique alias (their
+// alias_key is always NULL per the STORED generated column). DELETING templates
+// return ErrTemplateNotFound, matching GetTemplateByAlias' behavior (store.go:921).
+//
+// Unlike claimAliasAfterReady, this does NOT require the template to be READY —
+// it is an explicit operator action; see design §3.5.
+func SetTemplateAlias(ctx context.Context, templateID, alias string) error {
+	if strings.TrimSpace(templateID) == "" {
+		return ErrTemplateIDRequired
+	}
+	alias = strings.TrimSpace(alias)
+	if err := validateTemplateAlias(alias); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidAlias, err)
+	}
+	def, err := GetDefinition(ctx, templateID)
+	if err != nil {
+		return err
+	}
+	if isSnapshotDefinition(def) {
+		return ErrAliasNotApplicableToSnapshot
+	}
+	if def.Status == StatusDeleting {
+		return ErrTemplateNotFound
+	}
+	if alias == "" {
+		// Clear path. updateDefinitionFields (snapshot_ops.go:1031) writes
+		// "updated_at" into the caller's map, so pass a fresh map to avoid
+		// polluting any caller-held state.
+		return updateDefinitionFields(ctx, templateID, map[string]any{"display_name": ""})
+	}
+	// Claim path — claimTemplateAlias already has its own isReady() guard
+	// and release+claim transaction.
+	return claimTemplateAlias(ctx, templateID, alias)
+}
+
 func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.CreateCubeSandboxReq, error) {
 	cacheStart := time.Now()
 	if req, hit, err := getCachedTemplateRequest(templateID); err != nil {

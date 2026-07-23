@@ -400,6 +400,27 @@ impl CubeMasterClient {
         parse_response(resp).await
     }
 
+    /// PUT /cube/template/{template_id}/alias — set, modify, or clear the
+    /// alias of an existing template. Pass `None` to clear. Returns the
+    /// updated template detail (same shape as `get_template`).
+    pub async fn set_template_alias(
+        &self,
+        template_id: &str,
+        alias: Option<&str>,
+    ) -> Result<TemplateResponse, CubeMasterError> {
+        validate_path_segment("template_id", template_id)?;
+        let url = format!("{}/cube/template/{}/alias", self.base_url, template_id);
+        let body = serde_json::json!({ "alias": alias.unwrap_or("") });
+        let resp = self
+            .inner
+            .put(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
     /// GET /cube/template/build/{build_id}/status — build status.
     pub async fn get_template_build_status(
         &self,

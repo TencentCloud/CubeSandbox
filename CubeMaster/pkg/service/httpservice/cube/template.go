@@ -7,6 +7,7 @@ package cube
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
@@ -21,6 +22,7 @@ var deleteTemplateFn = templatecenter.DeleteTemplate
 var getTemplateInfoFn = templatecenter.GetTemplateInfo
 var getTemplateRequestFn = templatecenter.GetTemplateRequest
 var resolveTemplateIdentifierFn = templatecenter.ResolveTemplateIdentifier
+var setTemplateAliasFn = templatecenter.SetTemplateAlias
 
 type templateResponse struct {
 	*types.Res
@@ -77,6 +79,133 @@ func getTemplateGinHandler(c *gin.Context) {
 func deleteTemplateGinHandler(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
 	common.WriteAPI(c, deleteTemplate(c.Request, rt))
+}
+
+func setTemplateAliasGinHandler(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	common.WriteAPI(c, setTemplateAlias(c.Request, rt, c.Param("template_id")))
+}
+
+// setAliasRequest is the body for PUT /cube/template/:template_id/alias.
+// alias is optional; absent / null / "" means "clear" (design §3.1).
+type setAliasRequest struct {
+	Alias string `json:"alias,omitempty"`
+}
+
+// setTemplateAlias sets, transfers, or clears the alias of an existing
+// template. The templateID path param may be a tpl- id or a current alias
+// (resolved via resolveTemplateIdentifierFn, matching GET/DELETE).
+//
+// Error mapping (design §3.3):
+//   - validateTemplateAlias failure → 400 MasterParamsError
+//   - ErrTemplateNotFound (missing OR DELETING) → 404 NotFound
+//   - ErrAliasNotApplicableToSnapshot → 404 NotFound (a snapshot has no
+//     alias slot, so "alias for this id" is not found)
+//   - isDuplicateAliasError → 130409 Conflict (so CubeAPI maps to HTTP 409)
+//   - other → 500 MasterInternalError
+func setTemplateAlias(r *http.Request, rt *CubeLog.RequestTrace, rawTemplateID string) interface{} {
+	if strings.TrimSpace(rawTemplateID) == "" {
+		return &templateResponse{
+			Res: &types.Res{Ret: &types.Ret{
+				RetCode: int(errorcode.ErrorCode_MasterParamsError),
+				RetMsg:  "template_id is required",
+			}},
+		}
+	}
+	// Body is optional; missing body = clear alias. GetBodyReq tolerates an
+	// empty body only if the JSON is valid; treat empty body as alias="".
+	bodyReq := &setAliasRequest{}
+	if r.ContentLength != 0 {
+		if err := common.GetBodyReq(r, bodyReq); err != nil {
+			return &templateResponse{
+				Res: &types.Res{Ret: &types.Ret{
+					RetCode: int(errorcode.ErrorCode_MasterParamsError),
+					RetMsg:  err.Error(),
+				}},
+			}
+		}
+	}
+	ctx := log.WithLogger(r.Context(), log.G(r.Context()).WithFields(map[string]any{
+		"Action":     "SetTemplateAlias",
+		"TemplateID": rawTemplateID,
+	}))
+	resolvedTemplateID, err := resolveTemplateIdentifierFn(ctx, rawTemplateID)
+	if err != nil {
+		code := int(errorcode.ErrorCode_MasterInternalError)
+		if errors.Is(err, templatecenter.ErrTemplateNotFound) {
+			code = int(errorcode.ErrorCode_NotFound)
+		}
+		rt.RetCode = int64(code)
+		return &templateResponse{
+			Res: &types.Res{Ret: &types.Ret{
+				RetCode: code,
+				RetMsg:  err.Error(),
+			}},
+			TemplateID: rawTemplateID,
+		}
+	}
+	if err := setTemplateAliasFn(ctx, resolvedTemplateID, bodyReq.Alias); err != nil {
+		code := int(errorcode.ErrorCode_MasterInternalError)
+		switch {
+		case errors.Is(err, templatecenter.ErrTemplateNotFound),
+			errors.Is(err, templatecenter.ErrAliasNotApplicableToSnapshot):
+			code = int(errorcode.ErrorCode_NotFound)
+		case errors.Is(err, templatecenter.ErrInvalidAlias):
+			code = int(errorcode.ErrorCode_MasterParamsError)
+		case templatecenter.IsDuplicateAliasError(err):
+			code = int(errorcode.ErrorCode_Conflict)
+		case errors.Is(err, templatecenter.ErrTemplateStoreNotInitialized):
+			code = int(errorcode.ErrorCode_DBError)
+		default:
+			// Unknown errors (e.g. raw gorm DB failures) → 500.
+			code = int(errorcode.ErrorCode_MasterInternalError)
+		}
+		rt.RetCode = int64(code)
+		return &templateResponse{
+			Res: &types.Res{Ret: &types.Ret{
+				RetCode: code,
+				RetMsg:  err.Error(),
+			}},
+			TemplateID: resolvedTemplateID,
+		}
+	}
+	info, err := getTemplateInfoFn(ctx, resolvedTemplateID)
+	if err != nil {
+		code := int(errorcode.ErrorCode_MasterInternalError)
+		if errors.Is(err, templatecenter.ErrTemplateNotFound) {
+			code = int(errorcode.ErrorCode_NotFound)
+		}
+		rt.RetCode = int64(code)
+		return &templateResponse{
+			Res: &types.Res{Ret: &types.Ret{
+				RetCode: code,
+				RetMsg:  err.Error(),
+			}},
+			TemplateID: resolvedTemplateID,
+		}
+	}
+	rt.RetCode = int64(errorcode.ErrorCode_Success)
+	return &templateResponse{
+		Res: &types.Res{
+			Ret: &types.Ret{
+				RetCode: int(errorcode.ErrorCode_Success),
+				RetMsg:  "success",
+			},
+		},
+		TemplateID:                 info.TemplateID,
+		InstanceType:               info.InstanceType,
+		Version:                    info.Version,
+		Status:                     info.Status,
+		LastError:                  info.LastError,
+		DisplayName:                info.DisplayName,
+		CreatedAt:                  info.CreatedAt,
+		ImageInfo:                  info.ImageInfo,
+		JobID:                      info.JobID,
+		Replicas:                   info.Replicas,
+		CubeEgressCABaked:          info.CubeEgressCABaked,
+		CubeEgressCAFingerprint:    info.CubeEgressCAFingerprint,
+		CubeEgressCATargetsWritten: info.CubeEgressCATargetsWritten,
+	}
 }
 
 func deleteTemplate(r *http.Request, rt *CubeLog.RequestTrace) interface{} {

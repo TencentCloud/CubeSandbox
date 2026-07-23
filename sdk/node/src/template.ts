@@ -327,4 +327,21 @@ export class Template {
     });
     await checkTemplateResponse(resp);
   }
+
+  /** PUT /templates/:id/alias — set, reassign, or clear the alias of an existing template.
+   *  `alias` null or empty string clears the alias. Returns the updated TemplateInfo. */
+  static async setAlias(
+    templateId: string,
+    alias: string | null,
+    options: { config?: Config | ConfigOptions } = {},
+  ): Promise<TemplateInfo> {
+    const cfg = resolveConfig(options.config);
+    const resp = await controlFetch(cfg, `${cfg.apiUrl}/templates/${templateId}/alias`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ alias: alias ?? "" }),
+    });
+    await checkTemplateResponse(resp);
+    return TemplateInfo.fromDict((await resp.json()) as Record<string, any>);
+  }
 }

@@ -64,41 +64,54 @@ impl TemplateService {
             )));
         }
 
-        // Extract network fields from create_request JSON (stored by CubeMaster)
-        let network_type = resp
-            .create_request
-            .as_ref()
-            .and_then(|v| v.get("network_type"))
-            .and_then(|v| v.as_str())
-            .and_then(|s| {
-                if s.is_empty() {
-                    None
-                } else {
-                    Some(s.to_string())
-                }
-            });
-        let allow_internet_access = resp
-            .create_request
-            .as_ref()
-            .and_then(|v| v.get("cube_network_config"))
-            .and_then(|v| v.get("allowInternetAccess"))
-            .and_then(|v| v.as_bool());
+        Ok(template_detail_from_cubemaster(resp, template_id))
+    }
 
-        Ok(TemplateDetail {
-            template_id: string_or(resp.template_id, template_id),
-            public: TEMPLATE_PUBLIC,
-            instance_type: non_empty(resp.instance_type),
-            version: non_empty(resp.version),
-            status: resp.status,
-            last_error: non_empty(resp.last_error),
-            created_at: non_empty(resp.created_at),
-            replicas: resp.replicas,
-            create_request: resp.create_request,
-            network_type,
-            allow_internet_access,
-            job_id: non_empty(resp.job_id),
-            aliases: alias_values_from_display_name(&resp.display_name),
-        })
+    /// PUT /templates/:id/alias — set, modify, or clear the alias of an
+    /// existing template. `alias=None` clears. The returned `TemplateDetail`
+    /// reflects the post-update state (mirrors `GET /templates/:id`).
+    pub async fn set_template_alias(
+        &self,
+        template_id: &str,
+        alias: Option<&str>,
+    ) -> AppResult<TemplateDetail> {
+        // Normalize: trim, and treat empty / whitespace-only as None (clear).
+        // The handler already does this, but direct service callers (and
+        // tests) rely on the same invariant.
+        let alias = alias.and_then(|s| {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+
+        // Client-side validation mirrors CubeMaster's `validateTemplateAlias`
+        // so a bad alias surfaces as 400 without a round-trip.
+        if let Some(value) = alias {
+            if !is_valid_alias(value) {
+                return Err(AppError::BadRequest(
+                    "alias must match ^[a-z0-9][a-z0-9-]{0,63}$ and not start with tpl-/snap-"
+                        .to_string(),
+                ));
+            }
+        }
+
+        let resp = self
+            .cubemaster
+            .set_template_alias(template_id, alias)
+            .await
+            .map_err(map_err)?;
+
+        if resp.template_id.is_empty() && resp.status.is_empty() {
+            return Err(AppError::NotFound(format!(
+                "template {} not found",
+                template_id
+            )));
+        }
+
+        Ok(template_detail_from_cubemaster(resp, template_id))
     }
 
     pub async fn get_template_by_alias(
@@ -315,6 +328,50 @@ fn alias_values_from_display_name(display_name: &str) -> Vec<String> {
         Vec::new()
     } else {
         vec![alias.to_string()]
+    }
+}
+
+/// Shape a CubeMaster `TemplateResponse` into the public `TemplateDetail`.
+/// `fallback_id` is used when CubeMaster omits `template_id` (e.g. some
+/// alias-resolved paths) so the caller still sees a meaningful identifier.
+fn template_detail_from_cubemaster(
+    resp: crate::cubemaster::TemplateResponse,
+    fallback_id: &str,
+) -> TemplateDetail {
+    // Extract network fields from create_request JSON (stored by CubeMaster)
+    let network_type = resp
+        .create_request
+        .as_ref()
+        .and_then(|v| v.get("network_type"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| {
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        });
+    let allow_internet_access = resp
+        .create_request
+        .as_ref()
+        .and_then(|v| v.get("cube_network_config"))
+        .and_then(|v| v.get("allowInternetAccess"))
+        .and_then(|v| v.as_bool());
+
+    TemplateDetail {
+        template_id: string_or(resp.template_id, fallback_id),
+        public: TEMPLATE_PUBLIC,
+        instance_type: non_empty(resp.instance_type),
+        version: non_empty(resp.version),
+        status: resp.status,
+        last_error: non_empty(resp.last_error),
+        created_at: non_empty(resp.created_at),
+        replicas: resp.replicas,
+        create_request: resp.create_request,
+        network_type,
+        allow_internet_access,
+        job_id: non_empty(resp.job_id),
+        aliases: alias_values_from_display_name(&resp.display_name),
     }
 }
 
@@ -973,5 +1030,160 @@ mod tests {
 
         assert_eq!(resp.template_id, "tpl-abc");
         assert!(!resp.public);
+    }
+
+    #[tokio::test]
+    async fn set_template_alias_forwards_to_cubemaster() {
+        use axum::{extract::Path, extract::State, routing::put, Json, Router};
+        use serde_json::Value;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        #[derive(Clone, Default)]
+        struct Capture {
+            body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn alias_handler(
+            State(capture): State<Capture>,
+            Path(template_id): Path<String>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            assert_eq!(template_id, "tpl-1");
+            *capture.body.lock().await = Some(body);
+            Json(serde_json::json!({
+                "RequestID": "req-1",
+                "ret": { "ret_code": 0, "ret_msg": "success" },
+                "template_id": "tpl-1",
+                "display_name": "my-alias",
+                "status": "READY",
+                "replicas": []
+            }))
+        }
+
+        let capture = Capture::default();
+        let cubemaster_url = spawn_server(
+            Router::new()
+                .route("/cube/template/:template_id/alias", put(alias_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+
+        let service = TemplateService::new(
+            CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
+            "cubebox".to_string(),
+        );
+
+        let detail = service
+            .set_template_alias("tpl-1", Some("my-alias"))
+            .await
+            .expect("set_template_alias should succeed");
+
+        assert_eq!(detail.template_id, "tpl-1");
+        assert_eq!(detail.aliases, vec!["my-alias".to_string()]);
+
+        let body = capture
+            .body
+            .lock()
+            .await
+            .clone()
+            .expect("request body should be captured");
+        assert_eq!(body["alias"], "my-alias");
+    }
+
+    #[tokio::test]
+    async fn set_template_alias_clear_passes_empty_string() {
+        use axum::{extract::Path, extract::State, routing::put, Json, Router};
+        use serde_json::Value;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        #[derive(Clone, Default)]
+        struct Capture {
+            body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn alias_handler(
+            State(capture): State<Capture>,
+            Path(template_id): Path<String>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            assert_eq!(template_id, "tpl-1");
+            *capture.body.lock().await = Some(body);
+            Json(serde_json::json!({
+                "RequestID": "req-1",
+                "ret": { "ret_code": 0, "ret_msg": "success" },
+                "template_id": "tpl-1",
+                "display_name": "",
+                "status": "READY",
+                "replicas": []
+            }))
+        }
+
+        let capture = Capture::default();
+        let cubemaster_url = spawn_server(
+            Router::new()
+                .route("/cube/template/:template_id/alias", put(alias_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+
+        let service = TemplateService::new(
+            CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
+            "cubebox".to_string(),
+        );
+
+        let detail = service
+            .set_template_alias("tpl-1", None)
+            .await
+            .expect("set_template_alias clear should succeed");
+
+        assert!(detail.aliases.is_empty());
+
+        let body = capture
+            .body
+            .lock()
+            .await
+            .clone()
+            .expect("request body should be captured");
+        // None maps to an empty string so CubeMaster's clear path is
+        // exercised (display_name = '' → alias_key = NULL).
+        assert_eq!(body["alias"], "");
+    }
+
+    #[tokio::test]
+    async fn set_template_alias_rejects_invalid_alias_client_side() {
+        // The mock server is never reached for these cases — client-side
+        // validation returns BadRequest before any HTTP call. We bind to a
+        // closed port (127.0.0.1:9) so that if a regression forwards, the
+        // connection fails fast rather than hanging.
+        let service = TemplateService::new(
+            CubeMasterClient::new("http://127.0.0.1:9", reqwest::Client::new()),
+            "cubebox".to_string(),
+        );
+
+        // Uppercase fails the ^[a-z0-9][a-z0-9-]{0,63}$ regex.
+        let err = service
+            .set_template_alias("tpl-1", Some("UPPER"))
+            .await
+            .expect_err("uppercase alias must be rejected");
+        assert!(matches!(err, AppError::BadRequest(_)));
+
+        // `tpl-` prefix is rejected to avoid collisions with canonical ids.
+        let err = service
+            .set_template_alias("tpl-1", Some("tpl-abc"))
+            .await
+            .expect_err("tpl- prefix alias must be rejected");
+        assert!(matches!(err, AppError::BadRequest(_)));
+
+        // Leading dash fails the first-char regex.
+        let err = service
+            .set_template_alias("tpl-1", Some("-leading-dash"))
+            .await
+            .expect_err("leading dash alias must be rejected");
+        assert!(matches!(err, AppError::BadRequest(_)));
+
+        // Whitespace-only is normalized to None (clear) and is NOT rejected
+        // — it's covered by set_template_alias_clear_passes_empty_string.
     }
 }

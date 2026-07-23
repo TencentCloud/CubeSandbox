@@ -320,6 +320,7 @@ var TemplateCommand = cli.Command{
 		TemplateCreateFromImageCommand,
 		TemplateRedoCommand,
 		TemplateDeleteCommand,
+		TemplateSetAliasCommand,
 		TemplateStatusCommand,
 		TemplateWatchCommand,
 		TemplateBuildStatusCommand,
@@ -647,6 +648,81 @@ var TemplateDeleteCommand = cli.Command{
 			return errors.New(rsp.Ret.RetMsg)
 		}
 		log.Printf("template deleted: %s\n", templateID)
+		return nil
+	},
+}
+
+// templateSetAliasRequest is the JSON body for PUT /cube/template/:id/alias.
+type templateSetAliasRequest struct {
+	Alias string `json:"alias,omitempty"`
+}
+
+var TemplateSetAliasCommand = cli.Command{
+	Name:      "set-alias",
+	Usage:     "set, change, or clear the alias of an existing template",
+	ArgsUsage: "<template-id>",
+	Flags: []cli.Flag{
+		cli.StringFlag{
+			Name:  "template-id",
+			Usage: "template id (or current alias) to update",
+		},
+		cli.StringFlag{
+			Name:  "alias",
+			Usage: "new alias for the template; pass empty string (or --clear) to remove the alias",
+		},
+		cli.BoolFlag{
+			Name:  "clear",
+			Usage: "clear the template's alias (equivalent to --alias \"\")",
+		},
+		cli.BoolFlag{
+			Name:  "json",
+			Usage: "print raw json response",
+		},
+	},
+	Action: func(c *cli.Context) error {
+		templateID := resolveTemplateID(c)
+		if templateID == "" {
+			return errors.New("template-id is required")
+		}
+		serverList = getServerAddrs(c)
+		if len(serverList) == 0 {
+			return errors.New("no server addr")
+		}
+		port = c.GlobalString("port")
+		host := serverList[rand.Int()%len(serverList)]
+
+		// --clear takes precedence and sends alias="". Otherwise forward the
+		// --alias value (which may itself be "" to clear, per the shared
+		// contract).
+		alias := c.String("alias")
+		if c.Bool("clear") {
+			alias = ""
+		}
+
+		bodyReq := &templateSetAliasRequest{Alias: alias}
+		body, err := jsoniter.Marshal(bodyReq)
+		if err != nil {
+			return err
+		}
+		url := fmt.Sprintf("http://%s/cube/template/%s/alias", net.JoinHostPort(host, port), templateID)
+		requestID := uuid.New().String()
+		rsp := &templateResponse{}
+		if err := doHttpReq(c, url, http.MethodPut, requestID, bytes.NewBuffer(body), rsp); err != nil {
+			log.Printf("template set-alias request err. %s. RequestId: %s\n", err.Error(), requestID)
+			return err
+		}
+		if rsp.Ret == nil {
+			return errors.New("empty response")
+		}
+		if rsp.Ret.RetCode != 200 {
+			log.Printf("template set-alias failed. %s. RequestId: %s\n", rsp.Ret.RetMsg, requestID)
+			return errors.New(rsp.Ret.RetMsg)
+		}
+		if c.Bool("json") {
+			commands.PrintAsJSON(rsp)
+			return nil
+		}
+		printTemplateSummary(rsp)
 		return nil
 	},
 }
