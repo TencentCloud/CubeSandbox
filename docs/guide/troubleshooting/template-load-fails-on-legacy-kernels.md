@@ -27,9 +27,13 @@ After deploying CubeSandbox on an older Linux kernel image, loading a newly buil
 
 ## Root Cause
 
-Older kernels and hardened container images sometimes omit KVM userspace compatibility bits (`vfio`, `CONFIG_KVM`, `CONFIG_USER_NS`) or expose stricter `seccomp` defaults. In those environments, Cubelet can create the template object, but envd fails when the VM boots with privileged syscalls blocked.
+Older hosts, nested-virtualization environments, and hardened deployments can
+leave KVM unavailable to CubeSandbox. Common causes include disabled CPU
+virtualization, unloaded KVM modules, or service permissions that block
+`/dev/kvm`.
 
-Because the failure happens during template bootstrap, it is often reported as a generic timeout, which masks the actual host capability issue.
+Because the failure happens during template bootstrap, it is often reported as
+a generic timeout, which masks the actual host capability issue.
 
 ## Resolution
 
@@ -55,29 +59,52 @@ Expected result:
 - `lsmod` shows `kvm` (and `kvm_intel`/`kvm_amd`)
 - `/dev/kvm` exists and is accessible to the service account
 
-### 2. Rebuild the template with explicit kernel and sysctl settings
+### 2. Fix the host capability or use PVM
 
-Use a template base image that keeps a known-good kernel stack and disables strict seccomp on the runtime path for the sandbox startup phase.
+A template Dockerfile cannot enable KVM on its host. Fix the host first:
 
-1. In the template Dockerfile, avoid custom `ENTRYPOINT` wrappers that set aggressive seccomp overrides.
-2. Keep `KERNEL_VERSION` pinned to a kernel known to work with CubeSandbox (for example 6.x + envd compatible line).
-3. Ensure the sandbox startup timeout in template config is >= 180 seconds for first run in hardened nodes.
+1. Enable CPU virtualization in firmware or the cloud instance configuration.
+2. Load the appropriate `kvm_intel` or `kvm_amd` module and grant the Cubelet
+   service access to `/dev/kvm`.
+3. If the cloud environment cannot expose KVM or reliable nested
+   virtualization, use the [PVM deployment](../pvm-deploy.md).
+
+For custom images, rebuild from the supported CubeSandbox base and pin its tag
+for reproducibility. Do not add compatibility environment variables unless they
+are documented by the component that reads them.
 
 ```dockerfile
-# Example template adjustment
 FROM ghcr.io/tencentcloud/cubesandbox-base:2026.16
 
-# Keep a known-good kernel package and user namespace settings
-ENV CUBEVM_ALLOW_LEGACY_COMPAT=1
-ENV CUBEVM_STARTUP_TIMEOUT=180
+# Add only the packages required by your workload.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
 ```
 
 ### 3. Validate quickly with a tiny smoke test
 
+Register the rebuilt image, wait for the template to become ready, and run one
+short command:
+
 ```bash
-# 1) Build and register
-# 2) Create a minimal container run with a short timeout
-# 3) Verify process startup logs are visible
+cubemastercli tpl create-from-image \
+  --image <your-registry>/cube-compat:2026.16 \
+  --writable-layer-size 1G \
+  --expose-port 49983 \
+  --probe 49983 \
+  --probe-path /health
+
+cubemastercli tpl watch --job-id <job-id>
+
+CUBE_TEMPLATE_ID=<template-id> python3 - <<'PY'
+import os
+from e2b import Sandbox
+
+with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"]) as sandbox:
+    result = sandbox.commands.run("echo cube-ready", timeout=30)
+    print(result.stdout)
+PY
 ```
 
 If the template still fails, compare sandbox and shim logs directly:
@@ -91,7 +118,7 @@ cubecli logs <sandbox-id> --stderr
 
 When your cluster has mixed kernels, keep two template tracks:
 
-- **Compat template**: lower startup timeout + minimal dependency set
+- **Compat template**: pinned supported base image + minimal dependency set
 - **Performance template**: richer environment for modern nodes
 
 This lets CI/ops route workloads to the right template instead of forcing all jobs onto one boot profile.
@@ -102,6 +129,5 @@ This lets CI/ops route workloads to the right template instead of forcing all jo
   - https://github.com/TencentCloud/CubeSandbox/issues/241
 - Related docs:
   - [Deployment Troubleshooting](./deployment.md)
+  - [Bring Your Own Image](../tutorials/bring-your-own-image.md)
   - [How to Find CubeSandbox Component Logs](./component-log-locations.md)
-- External references:
-  - Linux virtualization docs and host/kernel compatibility notes for your OS distribution

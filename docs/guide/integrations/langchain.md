@@ -12,14 +12,16 @@ lang: en-US
 
 ## Integration Target and Version
 
-- LangChain: `0.3.x` and compatible tool calling runtimes
+- Python: `3.10+`
+- LangChain: `>=1.0,<2.0`
+- LangChain OpenAI integration: `>=1.0,<2.0`
+- E2B Python SDK: `>=2.4.1,<3.0`
 - Cube API endpoint: 0.4.x compatible control plane
-- SDK: `e2b` client layer or direct Cube API proxy
 
 ## Prerequisites
 
 - Working CubeSandbox deployment (API + auth path tested).
-- Python environment with LangChain and your preferred LLM provider.
+- An OpenAI API key, or equivalent configuration for another supported model provider.
 - A prebuilt template for runtime execution (Python + shell helpers).
 
 ## Integration Steps
@@ -27,76 +29,107 @@ lang: en-US
 ### 1. Install dependencies
 
 ```bash
-pip install langchain e2b
+python3 -m pip install \
+  "langchain>=1,<2" \
+  "langchain-openai>=1,<2" \
+  "e2b>=2.4.1,<3"
 ```
 
-### 2. Create an adapter wrapper around E2B tool execution
+### 2. Configure CubeSandbox and the model provider
 
-LangChain tool calls should be funneled through a single sandbox launcher:
+The E2B-compatible SDK reads `E2B_API_URL`; point it at CubeAPI instead of the
+E2B cloud endpoint:
+
+```bash
+export E2B_API_URL="http://<cubeapi-host>:3000"
+export E2B_API_KEY="<cube-api-key>"
+export CUBE_TEMPLATE_ID="<template-id>"
+export OPENAI_API_KEY="<openai-api-key>"
+```
+
+For a local deployment without authentication, use a non-empty placeholder such
+as `E2B_API_KEY=e2b_000000`.
+
+### 3. Create a reusable CubeSandbox adapter
+
+Keep the template, API key, and API URL together in the adapter. This makes the
+target deployment explicit and avoids hidden module-level configuration.
+
+```python
+from e2b import Sandbox
+
+class CubeTool:
+    def __init__(
+        self,
+        template_id: str,
+        api_key: str,
+        api_url: str,
+        timeout: int = 120,
+    ) -> None:
+        self.template_id = template_id
+        self.api_key = api_key
+        self.api_url = api_url
+        self.timeout = timeout
+
+    def run(self, code: str) -> str:
+        with Sandbox.create(
+            template=self.template_id,
+            api_key=self.api_key,
+            api_url=self.api_url,
+            timeout=self.timeout,
+        ) as sandbox:
+            script_path = "/tmp/langchain_task.py"
+            sandbox.files.write(script_path, code)
+            result = sandbox.commands.run(
+                f"python3 {script_path}",
+                timeout=self.timeout,
+            )
+            if result.exit_code != 0:
+                raise RuntimeError(result.stderr)
+            return result.stdout
+```
+
+### 4. Register the adapter as a LangChain tool
 
 ```python
 import os
-from e2b import Sandbox
+from langchain.tools import tool
 
-CUBE_API_URL = os.environ["CUBE_API_URL"]
-CUBE_API_KEY = os.environ.get("CUBE_API_KEY", "")
-CUBE_TEMPLATE_ID = os.environ["CUBE_TEMPLATE_ID"]
-
-def run_in_cube(code: str, timeout: int = 60) -> str:
-    with Sandbox(
-        api_url=CUBE_API_URL,
-        api_key=CUBE_API_KEY,
-        template=CUBE_TEMPLATE_ID,
-        timeout=timeout,
-    ) as sandbox:
-        execution = sandbox.commands.run(
-            f"python - <<'PY'\n{code}\nPY",
-            timeout=timeout,
-        )
-        return execution.stdout
-```
-
-### 3. Bind to LangChain tool interface
-
-```python
-from langchain.tools import Tool
-
-tool = Tool.from_function(
-    name="cube_exec",
-    description="Execute untrusted user code inside CubeSandbox",
-    func=run_in_cube,
+cube = CubeTool(
+    template_id=os.environ["CUBE_TEMPLATE_ID"],
+    api_key=os.environ["E2B_API_KEY"],
+    api_url=os.environ["E2B_API_URL"],
 )
+
+@tool
+def cube_exec(code: str) -> str:
+    """Execute Python code inside an isolated CubeSandbox."""
+    return cube.run(code)
 ```
 
-### 4. Use in an agent
+### 5. Run a real agent task
 
 ```python
-from langchain.agents import initialize_agent
+from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
 
-agent = initialize_agent(
-    tools=[tool],
-    llm=ChatOpenAI(model="gpt-4o-mini", temperature=0),
-    agent="zero-shot-react-description",
+agent = create_agent(
+    model=ChatOpenAI(model="gpt-4o-mini", temperature=0),
+    tools=[cube_exec],
+    system_prompt="Use cube_exec whenever you need to run Python code.",
 )
 
-print(agent.run("Generate a tiny Python script that sorts a list and run it."))
-```
-
-## Key Code Snippets
-
-### Keep per-task isolation with short-lived sandboxes
-
-```python
-class CubeTool:
-    def __init__(self, template_id: str):
-        self.template_id = template_id
-
-    def run(self, query: str) -> str:
-        with Sandbox(template=self.template_id, api_key=CUBE_API_KEY, api_url=CUBE_API_URL) as s:
-            s.filesystem.write("/workspace/input.txt", query)
-            res = s.commands.run("python /workspace/run.py")
-            return res.stdout
+response = agent.invoke(
+    {
+        "messages": [
+            {
+                "role": "user",
+                "content": "Sort [5, 2, 9, 1] in Python and report the result.",
+            }
+        ]
+    }
+)
+print(response["messages"][-1].content)
 ```
 
 ## Caveats
@@ -104,6 +137,7 @@ class CubeTool:
 - Keep execution timeout strict (`10-120s`) to avoid long-lived runaway jobs.
 - For Python packages requiring GPU/compiler toolchain, isolate those workloads into a dedicated template.
 - Do not persist long-lived secrets inside the template image.
+- Treat model-generated code as untrusted and restrict sandbox network access and file mounts accordingly.
 - Route logs from LangChain run and `cubecli logs` together for complete traceability.
 
 ## References
@@ -111,7 +145,7 @@ class CubeTool:
 - Related docs:
   - [Integrations index](./index.md)
   - [Template best practices](../templates.md)
-- Sample repository:
-  - Internal PoC repository in your org (agent-side execution runner)
-- Upstream project:
-  - https://github.com/langchain-ai/langchain
+  - [CubeSandbox quick start](../quickstart.md)
+- Upstream docs:
+  - [LangChain agents](https://docs.langchain.com/oss/python/langchain/agents)
+  - [E2B Python SDK](https://e2b.dev/docs/sdk-reference/python-sdk/v2.0.1/sandbox_sync)

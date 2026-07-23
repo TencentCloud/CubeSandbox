@@ -67,9 +67,7 @@ The team replaced shared runtime containers with Cube templates and aligned exec
 ## References
 
 - Related docs:
-  - [模板系统与部署文档](../template-inspection-and-preview.md)
-  - [组件日志排障](./troubleshooting/index.md)
+  - [Template inspection and request preview](../template-inspection-and-preview.md)
+  - [Troubleshooting index](../troubleshooting/index.md)
 - Demo or repository:
   - Internal evaluation runner repository (internal)
-- Additional reading:
-  - [How to Build Reliable Evals](https://docs.google.com/)

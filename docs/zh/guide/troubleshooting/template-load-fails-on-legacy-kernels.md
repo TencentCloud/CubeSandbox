@@ -27,7 +27,9 @@ lang: zh-CN
 
 ## 根因分析
 
-部分旧内核和加固镜像缺少 KVM 兼容能力（`CONFIG_KVM` / `CONFIG_USER_NS`）或采用了更严格的 `seccomp` 约束，导致模板创建后在 VM 启动阶段被拒绝。
+旧宿主机、嵌套虚拟化环境或经过安全加固的部署可能无法向 CubeSandbox
+提供 KVM。常见原因包括 CPU 虚拟化未启用、KVM 模块未加载，或服务权限
+阻止访问 `/dev/kvm`。
 
 此类问题常被表现为泛化超时，掩盖了宿主能力不足的真实原因。
 
@@ -55,29 +57,50 @@ journalctl -u cube-sandbox-cubelet -n 200 --no-pager
 - `lsmod` 能看到 `kvm`（及 `kvm_intel` / `kvm_amd`）
 - `/dev/kvm` 对服务账号可访问
 
-### 2. 使用显式启动参数重建模板
+### 2. 修复宿主能力或改用 PVM
 
-选择已知兼容内核栈的模板基础镜像，并在启动阶段放宽过激的运行时限制。
+模板 Dockerfile 无法在宿主机上启用 KVM，因此应先修复宿主环境：
 
-1. 模板 Dockerfile 中避免自定义 `ENTRYPOINT` 覆盖导致严格 seccomp 的启动路径。
-2. 将内核相关配置保持与环境兼容。
-3. 将模板启动超时设为 >=180 秒，给第一次启动留出更多准备时间。
+1. 在固件或云实例配置中启用 CPU 虚拟化。
+2. 加载对应的 `kvm_intel` 或 `kvm_amd` 模块，并允许 Cubelet 服务访问
+   `/dev/kvm`。
+3. 如果云环境无法提供 KVM 或可靠的嵌套虚拟化，请使用
+   [PVM 部署](../pvm-deploy.md)。
+
+自定义镜像应基于受支持的 CubeSandbox 基础镜像重建，并固定标签以保证可复现。
+除非组件文档明确说明并实现了相应变量，否则不要自行添加兼容性环境变量。
 
 ```dockerfile
-# 示例：降低启动阶段的兼容压力
 FROM ghcr.io/tencentcloud/cubesandbox-base:2026.16
 
-# 保持兼容内核与启动行为
-ENV CUBEVM_ALLOW_LEGACY_COMPAT=1
-ENV CUBEVM_STARTUP_TIMEOUT=180
+# 只安装工作负载所需的软件包。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
 ```
 
 ### 3. 快速冒烟验证
 
+注册重建后的镜像，等待模板就绪，再运行一条短命令：
+
 ```bash
-# 1) 重新构建并注册模板
-# 2) 用短任务发起一次创建
-# 3) 使用 cubecli 拉取模板/沙箱日志确认启动序列
+cubemastercli tpl create-from-image \
+  --image <your-registry>/cube-compat:2026.16 \
+  --writable-layer-size 1G \
+  --expose-port 49983 \
+  --probe 49983 \
+  --probe-path /health
+
+cubemastercli tpl watch --job-id <job-id>
+
+CUBE_TEMPLATE_ID=<template-id> python3 - <<'PY'
+import os
+from e2b import Sandbox
+
+with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"]) as sandbox:
+    result = sandbox.commands.run("echo cube-ready", timeout=30)
+    print(result.stdout)
+PY
 ```
 
 如仍失败，建议直接比对沙箱与 Shim 日志：
@@ -91,7 +114,7 @@ cubecli logs <sandbox-id> --stderr
 
 对于混合内核集群，建议保留两套模板：
 
-- **兼容模板**：更保守的启动参数，依赖更少
+- **兼容模板**：固定受支持的基础镜像，依赖更少
 - **性能模板**：功能更丰富，面向现代内核
 
 这样可按主机特征路由到匹配模板，避免一个模板覆盖所有场景。
@@ -102,6 +125,5 @@ cubecli logs <sandbox-id> --stderr
   - https://github.com/TencentCloud/CubeSandbox/issues/241
 - 相关文档：
   - [部署相关排障](./deployment.md)
+  - [自定义镜像接入](../tutorials/bring-your-own-image.md)
   - [如何查看 CubeSandbox 组件日志（含 cubecli logs 与 guest kernel log）](./component-log-locations.md)
-- 外部资料：
-  - Linux 虚拟化与 KVM 配置文档，以及各 Linux 发行版内核兼容说明
