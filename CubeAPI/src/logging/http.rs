@@ -123,10 +123,9 @@ impl HttpLogger {
                     Msg::Event(event) => {
                         let payload = build_payload(&event);
                         let body_bytes =
-                            bytes::Bytes::from(
-                            serde_json::to_vec(&payload)
-                                .expect("serializing a freshly-built serde_json::Value never fails"),
-                        );
+                            bytes::Bytes::from(serde_json::to_vec(&payload).expect(
+                                "serializing a freshly-built serde_json::Value never fails",
+                            ));
                         let event_name = event.event.clone();
 
                         pending_bg.fetch_add(1, Ordering::Relaxed);
@@ -234,6 +233,10 @@ fn build_payload(event: &LogEvent) -> serde_json::Value {
             // Protect reserved top-level keys from being overwritten
             // by field entries (defense-in-depth; no existing handler does this).
             if k == "event" || k == "timestamp" {
+                tracing::warn!(
+                    field = %k,
+                    "webhook: field name collides with reserved payload key, skipping"
+                );
                 continue;
             }
             obj.insert(k.clone(), v.clone());
