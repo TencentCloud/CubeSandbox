@@ -1,0 +1,218 @@
+# Copyright (c) 2026 Tencent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Shared command and MiMo Code NDJSON helpers."""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from collections.abc import Callable
+from typing import Any
+
+
+def stream_writer(stream) -> Callable[[object], None]:
+    def write(chunk: object) -> None:
+        text = getattr(chunk, "line", chunk)
+        stream.write(str(text))
+        stream.flush()
+
+    return write
+
+
+def parse_jsonl(text: str) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def _tool_summary(part: dict[str, Any]) -> str:
+    tool = str(part.get("tool") or "tool")
+    state = part.get("state") if isinstance(part.get("state"), dict) else {}
+    status = str(state.get("status") or "completed")
+    details = state.get("input")
+    if isinstance(details, dict):
+        for key in ("command", "file_path", "path", "pattern", "query", "url"):
+            value = details.get(key)
+            if value:
+                return f"{tool} [{status}]: {str(value).replace(chr(10), ' ')[:120]}"
+    return f"{tool} [{status}]"
+
+
+def render_event(event: dict[str, Any]) -> None:
+    event_type = event.get("type")
+    part = event.get("part") if isinstance(event.get("part"), dict) else {}
+    if event_type == "text":
+        text = str(part.get("text") or "").strip()
+        if text:
+            print(text)
+    elif event_type == "tool_use":
+        print(f"  \u2192 [tool] {_tool_summary(part)}")
+    elif event_type == "error":
+        error = event.get("error")
+        if isinstance(error, dict):
+            data = error.get("data") if isinstance(error.get("data"), dict) else {}
+            print(
+                f"  [error] {data.get('message') or error.get('name') or error}",
+                file=sys.stderr,
+            )
+        else:
+            print(f"  [error] {error}", file=sys.stderr)
+
+
+class JsonlCollector:
+    """Collect arbitrary stdout chunks into complete MiMo NDJSON events."""
+
+    def __init__(self, *, raw: bool = False) -> None:
+        self.raw = raw
+        self.events: list[dict[str, Any]] = []
+        self._buffer = ""
+
+    def __call__(self, chunk: object) -> None:
+        text = getattr(chunk, "line", chunk)
+        self._buffer += text if isinstance(text, str) else str(text)
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._consume(line)
+
+    def flush(self) -> None:
+        if self._buffer:
+            self._consume(self._buffer)
+            self._buffer = ""
+
+    def _consume(self, line: str) -> None:
+        if not line.strip():
+            return
+        if self.raw:
+            print(line)
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            if not self.raw:
+                print(line)
+            return
+        if not isinstance(event, dict):
+            return
+        self.events.append(event)
+        if not self.raw:
+            render_event(event)
+
+
+def run_command(
+    sandbox: Any,
+    command: str,
+    *,
+    cwd: str | None = None,
+    envs: dict[str, str] | None = None,
+    timeout: int | float | None = None,
+    on_stdout: Callable[[object], None] | None = None,
+    user: str = "root",
+):
+    kwargs = {"cwd": cwd, "timeout": timeout, "user": user}
+    kwargs = {key: value for key, value in kwargs.items() if value is not None}
+    if envs:
+        kwargs["envs"] = envs
+    if on_stdout:
+        kwargs["on_stdout"] = on_stdout
+        kwargs["on_stderr"] = stream_writer(sys.stderr)
+    try:
+        return sandbox.commands.run(command, **kwargs)
+    except TypeError as exc:
+        if "envs" not in kwargs or "envs" not in str(exc):
+            raise
+        kwargs["env"] = kwargs.pop("envs")
+        return sandbox.commands.run(command, **kwargs)
+
+
+def run_mimo_command(
+    sandbox: Any,
+    command: str,
+    *,
+    cwd: str,
+    envs: dict[str, str],
+    timeout: int,
+) -> tuple[Any, list[dict[str, Any]]]:
+    raw = os.environ.get("MIMO_STREAM_RAW", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    collector = JsonlCollector(raw=raw)
+    result = run_command(
+        sandbox,
+        command,
+        cwd=cwd,
+        envs=envs,
+        timeout=timeout,
+        on_stdout=collector,
+    )
+    collector.flush()
+    events = collector.events or parse_jsonl(
+        str(getattr(result, "stdout", "") or "")
+    )
+    return result, events
+
+
+def ensure_success(result: Any, action: str) -> None:
+    exit_code = getattr(result, "exit_code", None)
+    if exit_code not in (None, 0):
+        raise SystemExit(
+            f"Failed to {action} (exit {exit_code}).\n"
+            f"STDOUT:\n{getattr(result, 'stdout', '')}\n"
+            f"STDERR:\n{getattr(result, 'stderr', '')}"
+        )
+
+
+def session_id_from_events(events: list[dict[str, Any]]) -> str:
+    ids = {
+        str(event["sessionID"])
+        for event in events
+        if isinstance(event.get("sessionID"), str) and event["sessionID"]
+    }
+    if not ids:
+        raise SystemExit("MiMo Code returned no sessionID in its NDJSON stream")
+    if len(ids) != 1:
+        raise SystemExit(f"MiMo Code returned multiple session IDs: {sorted(ids)}")
+    return ids.pop()
+
+
+def session_list_contains(text: str, session_id: str) -> bool:
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return False
+    sessions = payload.get("sessions", []) if isinstance(payload, dict) else payload
+    if not isinstance(sessions, list):
+        return False
+    return any(
+        isinstance(item, dict) and item.get("id") == session_id for item in sessions
+    )
+
+
+def sandbox_identifier(sandbox: Any) -> str:
+    return str(getattr(sandbox, "sandbox_id", getattr(sandbox, "id", "unknown")))
+
+
+def kill_sandbox(sandbox: Any, sandbox_id: str, *, run_failed: bool) -> None:
+    """Kill a sandbox without masking a primary error or hiding a cleanup leak."""
+    try:
+        sandbox.kill()
+        print(f"\nSandbox {sandbox_id} killed.")
+    except Exception as exc:
+        message = (
+            f"Failed to kill sandbox {sandbox_id}: {exc}. "
+            f"Clean it up manually with sandbox ID {sandbox_id}."
+        )
+        if run_failed:
+            print(f"Warning: {message}", file=sys.stderr)
+            return
+        raise SystemExit(message) from exc
