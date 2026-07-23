@@ -995,12 +995,11 @@ func (l *local) prepareDefaultMedium(ctx context.Context, opts *workflow.CreateC
 		v.GetVolumeSource().GetEmptyDir().GetMedium() != cubebox.StorageMedium_StorageMediumDefault {
 		return nil
 	}
-	// Plugin volumes are injected by CubeMaster as EmptyDir placeholders but
-	// must NOT be provisioned here — they are handled entirely by
-	// attachPluginVolume via the VolumePlugin binary framework.
-	// Provisioning them here would create a spurious cubecow snapshot with the
-	// same sandboxID, causing an "already exists" collision when the real
-	// rootfs snapshot is created moments later.
+	// Plugin volumes are handled by attachPluginVolume (via the
+	// plugin-volume-sources annotation). Keep this skip for mixed-version
+	// clusters: a CubeMaster that still injects Default EmptyDir placeholders
+	// for plugin volumes must not cause a second rootfs derive
+	// (sb-<id>-rootfs-gen0) that collides with cube_rootfs_rw.
 	if isPluginVolume(opts.ReqInfo.GetAnnotations(), v.GetName()) {
 		return nil
 	}

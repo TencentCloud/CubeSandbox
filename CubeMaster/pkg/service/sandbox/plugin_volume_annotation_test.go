@@ -10,6 +10,20 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
 
+func TestPluginVolumeWireVolume_hasNoDefaultEmptyDir(t *testing.T) {
+	t.Parallel()
+
+	v := pluginVolumeWireVolume("max-data")
+	if v.GetVolumeSource() == nil {
+		t.Fatal("VolumeSource must be non-nil so the volume is still declared")
+	}
+	if v.GetVolumeSource().GetEmptyDir() != nil {
+		t.Fatalf("plugin volumes must not use EmptyDir placeholders; old Cubelets "+
+			"derive rootfs for StorageMediumDefault EmptyDir and collide with "+
+			"cube_rootfs_rw: got %+v", v.GetVolumeSource().GetEmptyDir())
+	}
+}
+
 func TestAppendPluginVolumeSourceAnnotation_includesPrivateData(t *testing.T) {
 	t.Parallel()
 
