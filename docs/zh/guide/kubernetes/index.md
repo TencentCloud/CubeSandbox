@@ -41,4 +41,15 @@
 
 控制面为原生 Deployment，计算面为原生 `apps/v1` DaemonSet；安装只需标准 Kubernetes / Helm。
 
+## 已测试环境
+
+当前已在腾讯云 TKE、Kubernetes 与 K3s 上完成验证。其中腾讯云 TKE 使用 VPC-CNI 作为网络插件，另外两个环境使用 Flannel。
+
+| 环境 | 网络插件 |
+| --- | --- |
+| 腾讯云 TKE | VPC-CNI |
+| Kubernetes | Flannel |
+| K3s | Flannel |
+
+
 下一步 → [Helm 安装](./install.md)

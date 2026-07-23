@@ -41,4 +41,16 @@ The current K8s deployment is a **preview** release. Known issues:
 
 The control plane uses native Deployments; the compute plane uses native `apps/v1` DaemonSets. Install needs only standard Kubernetes / Helm.
 
+
+## Tested environments
+
+CubeSandbox has been verified on Tencent Cloud TKE, Kubernetes, and K3s. Tencent Cloud TKE uses VPC-CNI as the CNI plugin; the other two environments use Flannel.
+
+| Environment | CNI plugin |
+| --- | --- |
+| Tencent Cloud TKE | VPC-CNI |
+| Kubernetes | Flannel |
+| K3s | Flannel |
+
+
 Next → [Helm Install](./install.md)
