@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+output/
+workspace-seed/
