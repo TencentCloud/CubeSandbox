@@ -3,7 +3,7 @@
 #
 # Usage:
 #   OUTPUT_DIR=/path/to/cube-image [ONE_CLICK_CUBE_AGENT_BIN=/path/to/cube-agent] \
-#     CUBE_VERSION=v0.5.1 ./deploy/one-click/build-guest-image.sh
+#     CUBE_VERSION=v0.6.0-rc1 ./deploy/one-click/build-guest-image.sh
 #
 # When ONE_CLICK_CUBE_AGENT_BIN is unset, cube-agent is built locally (or via
 # ONE_CLICK_CUBE_AGENT_BUILD_MODE=docker).
