@@ -5,11 +5,14 @@ package terminalprotocol
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	cubebox "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 )
@@ -25,6 +28,39 @@ type fakeSocket struct {
 	closeOnce sync.Once
 	mu        sync.Mutex
 	writes    []socketMessage
+}
+
+type detectingSocket struct {
+	*fakeSocket
+	writing      atomic.Bool
+	concurrent   atomic.Bool
+	firstWrite   sync.Once
+	writeStarted chan struct{}
+	releaseWrite chan struct{}
+}
+
+func newDetectingSocket() *detectingSocket {
+	return &detectingSocket{
+		fakeSocket:   newFakeSocket(),
+		writeStarted: make(chan struct{}),
+		releaseWrite: make(chan struct{}),
+	}
+}
+
+func (s *detectingSocket) WriteMessage(typeID int, data []byte) error {
+	if !s.writing.CompareAndSwap(false, true) {
+		s.concurrent.Store(true)
+		return errors.New("concurrent socket write")
+	}
+	defer s.writing.Store(false)
+	s.firstWrite.Do(func() {
+		close(s.writeStarted)
+		select {
+		case <-s.releaseWrite:
+		case <-s.closed:
+		}
+	})
+	return s.fakeSocket.WriteMessage(typeID, data)
 }
 
 func newFakeSocket() *fakeSocket {
@@ -198,5 +234,54 @@ func TestRelayDoesNotExposeBackendErrorDetails(t *testing.T) {
 	}
 	if strings.Contains(string(socket.writes[0].data), "10.0.0.9") || !strings.Contains(string(socket.writes[0].data), "terminal session failed") {
 		t.Fatalf("public error leaked backend details: %s", socket.writes[0].data)
+	}
+}
+
+func TestRelayClosesIdleSessionWithPublicError(t *testing.T) {
+	socket := newFakeSocket()
+	socket.reads <- socketMessage{typeID: TextMessage, data: validOpenJSON()}
+	backend := newFakeBackend()
+
+	err := relayWithIdleTimeout(context.Background(), socket, &fakeBackendFactory{backend: backend}, 10*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "terminal idle timeout") {
+		t.Fatalf("relayWithIdleTimeout() error = %v, want terminal idle timeout", err)
+	}
+	if len(socket.writes) != 1 {
+		t.Fatalf("socket wrote %d frames, want one idle-timeout error", len(socket.writes))
+	}
+	var control ServerControl
+	decodeErr := json.Unmarshal(socket.writes[0].data, &control)
+	if decodeErr != nil {
+		t.Fatalf("DecodeServerControl() error = %v", decodeErr)
+	}
+	if control.Type != TypeError || control.Code != CodeIdleTimeout || !control.Retryable {
+		t.Fatalf("idle timeout control = %#v", control)
+	}
+}
+
+func TestRelaySerializesBackendAndTimeoutWrites(t *testing.T) {
+	socket := newDetectingSocket()
+	socket.reads <- socketMessage{typeID: TextMessage, data: validOpenJSON()}
+	backend := newFakeBackend()
+	backend.recv <- &cubebox.TerminalServerMessage{
+		Payload: &cubebox.TerminalServerMessage_Output{Output: []byte("output")},
+	}
+	result := make(chan error, 1)
+	go func() {
+		result <- relayWithIdleTimeout(context.Background(), socket, &fakeBackendFactory{backend: backend}, 10*time.Millisecond)
+	}()
+
+	select {
+	case <-socket.writeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("backend write did not start")
+	}
+	time.AfterFunc(20*time.Millisecond, func() { close(socket.releaseWrite) })
+	err := <-result
+	if err == nil || !strings.Contains(err.Error(), "terminal idle timeout") {
+		t.Fatalf("relayWithIdleTimeout() error = %v, want terminal idle timeout", err)
+	}
+	if socket.concurrent.Load() {
+		t.Fatal("Relay() wrote backend output and idle-timeout control concurrently")
 	}
 }

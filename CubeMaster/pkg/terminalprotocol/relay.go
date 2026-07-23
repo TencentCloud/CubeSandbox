@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
+	"time"
 
 	cubebox "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 )
@@ -15,14 +17,29 @@ import (
 const (
 	TextMessage   = 1
 	BinaryMessage = 2
+	idleTimeout   = 30 * time.Minute
 )
 
-var ErrProtocol = errors.New("terminal protocol error")
+var (
+	ErrProtocol    = errors.New("terminal protocol error")
+	errIdleTimeout = errors.New("terminal idle timeout")
+)
 
 type Socket interface {
 	ReadMessage() (messageType int, data []byte, err error)
 	WriteMessage(messageType int, data []byte) error
 	Close() error
+}
+
+type serializedWriteSocket struct {
+	Socket
+	mu sync.Mutex
+}
+
+func (socket *serializedWriteSocket) WriteMessage(messageType int, data []byte) error {
+	socket.mu.Lock()
+	defer socket.mu.Unlock()
+	return socket.Socket.WriteMessage(messageType, data)
 }
 
 type Backend interface {
@@ -36,6 +53,11 @@ type BackendFactory interface {
 }
 
 func Relay(ctx context.Context, socket Socket, factory BackendFactory) error {
+	return relayWithIdleTimeout(ctx, socket, factory, idleTimeout)
+}
+
+func relayWithIdleTimeout(ctx context.Context, socket Socket, factory BackendFactory, timeout time.Duration) error {
+	socket = &serializedWriteSocket{Socket: socket}
 	defer socket.Close()
 	relayCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -73,22 +95,44 @@ func Relay(ctx context.Context, socket Socket, factory BackendFactory) error {
 		return err
 	}
 
+	activity := make(chan struct{}, 1)
+	markActivity := func() {
+		select {
+		case activity <- struct{}{}:
+		default:
+		}
+	}
 	clientDone := make(chan error, 1)
-	go func() { clientDone <- forwardClient(socket, backend) }()
+	go func() { clientDone <- forwardClient(socket, backend, markActivity) }()
 	serverDone := make(chan error, 1)
-	go func() { serverDone <- forwardServer(socket, backend, open.SessionID) }()
+	go func() { serverDone <- forwardServer(socket, backend, open.SessionID, markActivity) }()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 
-	select {
-	case err := <-clientDone:
-		return normalizeRelayEnd(err)
-	case err := <-serverDone:
-		return normalizeRelayEnd(err)
-	case <-relayCtx.Done():
-		return nil
+	for {
+		select {
+		case err := <-clientDone:
+			return normalizeRelayEnd(err)
+		case err := <-serverDone:
+			return normalizeRelayEnd(err)
+		case <-activity:
+			resetTimer(timer, timeout)
+		case <-timer.C:
+			writeErr := writeServerControl(socket, ServerControl{
+				Version:   Version,
+				Type:      TypeError,
+				Code:      CodeIdleTimeout,
+				Message:   PublicErrorMessage(CodeIdleTimeout),
+				Retryable: true,
+			})
+			return errors.Join(errIdleTimeout, writeErr)
+		case <-relayCtx.Done():
+			return nil
+		}
 	}
 }
 
-func forwardClient(socket Socket, backend Backend) error {
+func forwardClient(socket Socket, backend Backend, markActivity func()) error {
 	for {
 		messageType, data, err := socket.ReadMessage()
 		if err != nil {
@@ -101,6 +145,7 @@ func forwardClient(socket Socket, backend Backend) error {
 			}); err != nil {
 				return err
 			}
+			markActivity()
 		case TextMessage:
 			control, err := DecodeClientControl(data, StateReady)
 			if err != nil {
@@ -114,6 +159,9 @@ func forwardClient(socket Socket, backend Backend) error {
 						Rows: control.Rows,
 					}},
 				})
+				if err == nil {
+					markActivity()
+				}
 			case TypeKeepalive:
 				continue
 			case TypeClose:
@@ -133,7 +181,7 @@ func forwardClient(socket Socket, backend Backend) error {
 	}
 }
 
-func forwardServer(socket Socket, backend Backend, sessionID string) error {
+func forwardServer(socket Socket, backend Backend, sessionID string, markActivity func()) error {
 	for {
 		frame, err := backend.Recv()
 		if err != nil {
@@ -151,6 +199,7 @@ func forwardServer(socket Socket, backend Backend, sessionID string) error {
 			if err := socket.WriteMessage(BinaryMessage, payload.Output); err != nil {
 				return err
 			}
+			markActivity()
 		case *cubebox.TerminalServerMessage_Exit:
 			if payload.Exit == nil {
 				return fmt.Errorf("%w: exit payload is missing", ErrProtocol)
@@ -177,6 +226,16 @@ func forwardServer(socket Socket, backend Backend, sessionID string) error {
 			return fmt.Errorf("%w: unsupported backend terminal frame", ErrProtocol)
 		}
 	}
+}
+
+func resetTimer(timer *time.Timer, timeout time.Duration) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(timeout)
 }
 
 func PublicErrorMessage(code ErrorCode) string {

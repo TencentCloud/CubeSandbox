@@ -29,8 +29,9 @@ const (
 var terminalUpgrader = websocket.Upgrader{
 	ReadBufferSize:  32 * 1024,
 	WriteBufferSize: 32 * 1024,
-	// CubeOps is the only supported caller and does not send a browser Origin.
-	// Direct browser connections are rejected before the upgrade.
+	// The gateway token validated in handleTerminalAction is the authoritative
+	// authentication boundary. Requiring an empty Origin additionally rejects
+	// direct browser connections as defense in depth.
 	CheckOrigin: func(request *http.Request) bool {
 		return request.Header.Get("Origin") == ""
 	},
@@ -46,6 +47,8 @@ func handleTerminalAction(c *gin.Context) {
 		http.Error(c.Writer, "terminal gateway is not authorized", http.StatusUnauthorized)
 		return
 	}
+	// This is defense in depth only: the gateway token above authenticates the
+	// trusted CubeOps caller even if a proxy strips or rewrites Origin.
 	if c.GetHeader("Origin") != "" {
 		http.Error(c.Writer, "browser-originated terminal connections are not allowed", http.StatusForbidden)
 		return
@@ -62,10 +65,10 @@ func handleTerminalAction(c *gin.Context) {
 	}
 }
 
-// terminalDeadlineSocket gives CubeMaster its own upper bound even if the
-// trusted CubeOps gateway stops enforcing or forwarding its idle timeout.
-// CubeOps sends a text keepalive every 20 seconds, so each successful read
-// naturally refreshes this deadline while a live session is connected.
+// terminalDeadlineSocket detects dead transports independently of the
+// application-level idle timeout in terminalprotocol.Relay. CubeOps sends a
+// text keepalive every 20 seconds, so a live connection refreshes this deadline
+// without counting keepalives as terminal activity.
 type terminalDeadlineSocket struct {
 	*websocket.Conn
 }
