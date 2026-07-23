@@ -13,12 +13,17 @@ use containerd_shim::{
         TaskCreate, TaskDelete, TaskExecAdded, TaskExecStarted, TaskIO, TaskStart,
     },
     protos::{
-        api, protobuf::MessageDyn, shim_async::Task, ttrpc::r#async::TtrpcContext,
-        ttrpc::Error::Others, types::task,
+        api,
+        cgroups::metrics::{CPUStat, CPUUsage, MemoryEntry, MemoryStat, Metrics, Throttle},
+        protobuf::MessageDyn,
+        shim_async::Task,
+        ttrpc::r#async::TtrpcContext,
+        ttrpc::Error::Others,
+        types::task,
     },
     Context, Error, TtrpcResult,
 };
-use protobuf::Enum;
+use protobuf::{Enum, Message};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
 
@@ -30,6 +35,239 @@ use crate::service::update_ext;
 use crate::{debugf, errf, infof, warnf};
 const MODULE: &str = "Shim";
 const INTERNAL_PROBE_EXEC_ID_PREFIX: &str = "cubesandbox-internal-probe-";
+const CGROUP_V1_METRICS_TYPE_URL: &str = "io.containerd.cgroups.v1.Metrics";
+const RESOURCE_METRICS_VERSION_V1: u32 = 1;
+
+fn normalize_guest_stats(stats: &protoc::agent::StatsContainerResponse) -> Result<Metrics, String> {
+    let version = stats.get_resource_metrics_version();
+    if version != RESOURCE_METRICS_VERSION_V1 {
+        return Err(format!(
+            "guest does not support resource metrics version {} (reported version {})",
+            RESOURCE_METRICS_VERSION_V1, version
+        ));
+    }
+    if !stats.has_cgroup_stats() {
+        return Err("guest response is missing cgroup stats".to_string());
+    }
+    let guest = stats.get_cgroup_stats();
+    if !guest.has_cpu_stats() || !guest.has_memory_stats() {
+        return Err("guest response is missing CPU or memory stats".to_string());
+    }
+    let guest_cpu = guest.get_cpu_stats();
+    if !guest_cpu.has_cpu_usage() || !guest_cpu.has_throttling_data() {
+        return Err("guest response is missing CPU usage or throttling stats".to_string());
+    }
+    if !guest.get_memory_stats().has_usage() {
+        return Err("guest response is missing memory usage stats".to_string());
+    }
+    let guest_usage = guest_cpu.get_cpu_usage();
+    let guest_throttling = guest_cpu.get_throttling_data();
+    let guest_memory = guest.get_memory_stats().get_usage();
+
+    let cpu = CPUStat {
+        usage: Some(CPUUsage {
+            total: guest_usage.get_total_usage(),
+            kernel: guest_usage.get_usage_in_kernelmode(),
+            user: guest_usage.get_usage_in_usermode(),
+            per_cpu: guest_usage.get_percpu_usage().to_vec(),
+            ..Default::default()
+        })
+        .into(),
+        throttling: Some(Throttle {
+            periods: guest_throttling.get_periods(),
+            throttled_periods: guest_throttling.get_throttled_periods(),
+            throttled_time: guest_throttling.get_throttled_time(),
+            ..Default::default()
+        })
+        .into(),
+        ..Default::default()
+    };
+    let memory = MemoryStat {
+        usage: Some(MemoryEntry {
+            usage: guest_memory.get_usage(),
+            max: guest_memory.get_max_usage(),
+            failcnt: guest_memory.get_failcnt(),
+            limit: guest_memory.get_limit(),
+            ..Default::default()
+        })
+        .into(),
+        ..Default::default()
+    };
+
+    Ok(Metrics {
+        cpu: Some(cpu).into(),
+        memory: Some(memory).into(),
+        ..Default::default()
+    })
+}
+
+fn encode_guest_stats(
+    stats: &protoc::agent::StatsContainerResponse,
+) -> Result<protobuf::well_known_types::any::Any, String> {
+    let metrics = normalize_guest_stats(stats)?;
+    let value = metrics
+        .write_to_bytes()
+        .map_err(|e| format!("encode cgroup metrics failed: {}", e))?;
+    Ok(protobuf::well_known_types::any::Any {
+        type_url: CGROUP_V1_METRICS_TYPE_URL.to_string(),
+        value,
+        ..Default::default()
+    })
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::{encode_guest_stats, normalize_guest_stats, CGROUP_V1_METRICS_TYPE_URL};
+    use protoc::agent::{
+        CgroupStats, CpuStats, CpuUsage as GuestCpuUsage, MemoryData, MemoryStats,
+        StatsContainerResponse, ThrottlingData,
+    };
+
+    fn complete_guest_stats_response() -> StatsContainerResponse {
+        let mut response = StatsContainerResponse::new();
+        let mut cgroup = CgroupStats::new();
+        let mut cpu = CpuStats::new();
+        cpu.set_cpu_usage(GuestCpuUsage {
+            // cube-agent normalizes cgroup v2 microsecond counters to
+            // nanoseconds before returning StatsContainerResponse.
+            total_usage: 101_000,
+            usage_in_kernelmode: 31_000,
+            usage_in_usermode: 70_000,
+            percpu_usage: vec![40_000, 61_000],
+            ..Default::default()
+        });
+        cpu.set_throttling_data(ThrottlingData {
+            periods: 9,
+            throttled_periods: 3,
+            throttled_time: 17,
+            ..Default::default()
+        });
+        cgroup.set_cpu_stats(cpu);
+
+        let mut memory = MemoryStats::new();
+        memory.set_usage(MemoryData {
+            usage: 4096,
+            max_usage: 8192,
+            failcnt: 2,
+            limit: 16384,
+            ..Default::default()
+        });
+        cgroup.set_memory_stats(memory);
+        response.set_cgroup_stats(cgroup);
+        response.set_resource_metrics_version(1);
+        response
+    }
+
+    #[test]
+    fn normalizes_guest_cpu_and_memory_into_containerd_metrics() {
+        let response = complete_guest_stats_response();
+
+        let metrics = normalize_guest_stats(&response).unwrap();
+        assert_eq!(metrics.cpu().usage().total, 101_000);
+        assert_eq!(metrics.cpu().usage().kernel, 31_000);
+        assert_eq!(metrics.cpu().usage().user, 70_000);
+        assert_eq!(metrics.cpu().throttling().periods, 9);
+        assert_eq!(metrics.cpu().throttling().throttled_periods, 3);
+        assert_eq!(metrics.cpu().throttling().throttled_time, 17);
+        assert_eq!(metrics.memory().usage().usage, 4096);
+        assert_eq!(metrics.memory().usage().max, 8192);
+        assert_eq!(metrics.memory().usage().failcnt, 2);
+        assert_eq!(metrics.memory().usage().limit, 16384);
+
+        let encoded = encode_guest_stats(&response).unwrap();
+        assert_eq!(encoded.type_url, CGROUP_V1_METRICS_TYPE_URL);
+        assert!(!encoded.value.is_empty());
+    }
+
+    #[test]
+    fn rejects_incomplete_guest_cpu_and_memory_stats() {
+        let mut missing_cpu_stats = complete_guest_stats_response();
+        missing_cpu_stats.mut_cgroup_stats().clear_cpu_stats();
+
+        let mut missing_memory_stats = complete_guest_stats_response();
+        missing_memory_stats.mut_cgroup_stats().clear_memory_stats();
+
+        let mut missing_cpu_usage = complete_guest_stats_response();
+        missing_cpu_usage
+            .mut_cgroup_stats()
+            .mut_cpu_stats()
+            .clear_cpu_usage();
+
+        let mut missing_throttling = complete_guest_stats_response();
+        missing_throttling
+            .mut_cgroup_stats()
+            .mut_cpu_stats()
+            .clear_throttling_data();
+
+        let mut missing_memory_usage = complete_guest_stats_response();
+        missing_memory_usage
+            .mut_cgroup_stats()
+            .mut_memory_stats()
+            .clear_usage();
+
+        for (name, response, expected) in [
+            (
+                "cpu stats",
+                missing_cpu_stats,
+                "guest response is missing CPU or memory stats",
+            ),
+            (
+                "memory stats",
+                missing_memory_stats,
+                "guest response is missing CPU or memory stats",
+            ),
+            (
+                "CPU usage",
+                missing_cpu_usage,
+                "guest response is missing CPU usage or throttling stats",
+            ),
+            (
+                "CPU throttling",
+                missing_throttling,
+                "guest response is missing CPU usage or throttling stats",
+            ),
+            (
+                "memory usage",
+                missing_memory_usage,
+                "guest response is missing memory usage stats",
+            ),
+        ] {
+            assert_eq!(
+                normalize_guest_stats(&response).unwrap_err(),
+                expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_missing_guest_cgroup_stats() {
+        let mut response = StatsContainerResponse::new();
+        response.set_resource_metrics_version(1);
+        let err = normalize_guest_stats(&response).unwrap_err();
+        assert_eq!(err, "guest response is missing cgroup stats");
+    }
+
+    #[test]
+    fn rejects_guest_without_resource_metrics_capability() {
+        let err = normalize_guest_stats(&StatsContainerResponse::new()).unwrap_err();
+        assert_eq!(
+            err,
+            "guest does not support resource metrics version 1 (reported version 0)"
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_resource_metrics_capability_version() {
+        let mut response = StatsContainerResponse::new();
+        response.set_resource_metrics_version(2);
+        let err = normalize_guest_stats(&response).unwrap_err();
+        assert_eq!(
+            err,
+            "guest does not support resource metrics version 1 (reported version 2)"
+        );
+    }
+}
 
 #[derive(Clone)]
 pub struct TaskService {
@@ -287,6 +525,31 @@ impl Task for TaskService {
         Ok(api::WaitResponse {
             exit_status: code,
             exited_at: Some(e_tm).into(),
+            ..Default::default()
+        })
+    }
+
+    async fn stats(
+        &self,
+        _ctx: &TtrpcContext,
+        req: api::StatsRequest,
+    ) -> TtrpcResult<api::StatsResponse> {
+        if req.id.is_empty() {
+            return Err(Error::InvalidArgument("stats request id is empty".to_string()).into());
+        }
+
+        let sb = {
+            let sb = self.sandbox.lock().await;
+            sb.clone()
+        };
+        let guest_stats = sb.stats_container(&req.id).await.map_err(|e| {
+            errf!(self.log, "StatsContainer failed for {}: {}", req.id, e);
+            e
+        })?;
+        let stats = encode_guest_stats(&guest_stats).map_err(Error::FailedPreconditionError)?;
+
+        Ok(api::StatsResponse {
+            stats: Some(stats).into(),
             ..Default::default()
         })
     }

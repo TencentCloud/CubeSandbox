@@ -1065,6 +1065,33 @@ impl SandBox {
         ci
     }
 
+    async fn guest_container_id(&self, id: &str) -> Result<String> {
+        let containers = self.containers.lock().await;
+        containers
+            .get(id)
+            .ok_or_else(|| Error::NotFoundError(format!("not found container:{}", id)))
+            .map(Container::get_id)
+    }
+
+    pub async fn stats_container(&self, id: &str) -> Result<agent::StatsContainerResponse> {
+        let guest_container_id = self.guest_container_id(id).await?;
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| Error::Other("guest agent is not connected".to_string()))?
+            .lock()
+            .await;
+        let req = agent::StatsContainerRequest {
+            container_id: guest_container_id,
+            ..Default::default()
+        };
+
+        client
+            .stats_container(self.ctx.clone(), &req)
+            .await
+            .map_err(|e| Error::Other(format!("StatsContainer failed for {}: {}", id, e)))
+    }
+
     pub async fn wait_container(&self, id: &String, exec_id: &str) -> Result<(u32, DateTime<Utc>)> {
         let mut cid = exec_id.to_owned();
         if cid.is_empty() {
@@ -1448,15 +1475,24 @@ fn normalize_dns_for_agent(entry: &str) -> CResult<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
+    use nix::sys::socket::{socketpair, AddressFamily, SockFlag, SockType};
+    use oci_spec::runtime::SpecBuilder;
     use protobuf::MessageDyn;
+    use std::collections::{HashMap, HashSet};
+    use std::os::fd::IntoRawFd;
+    use std::sync::Arc;
     use tokio::sync::mpsc::channel;
+    use tokio::sync::Mutex;
 
+    use crate::common::PRODUCT_CUBEBOX;
+    use crate::container::container_mgr::ContainerInfo;
+    use crate::container::{Container, ANNO_APP_SNAPSHOT_CONTAINER_ID};
+
+    use super::agent_ttrpc;
+    use super::config;
     use super::normalize_dns_for_agent;
     use super::Log;
     use super::SandBox;
-    use crate::common::PRODUCT_CUBEBOX;
 
     #[tokio::test]
     async fn test_sandbox_prepare_resource() {
@@ -1520,5 +1556,49 @@ mod tests {
     fn test_normalize_dns_for_agent_accepts_prefixed_entry() {
         let got = normalize_dns_for_agent(" nameserver 8.8.8.8 ").unwrap();
         assert_eq!(got, "nameserver 8.8.8.8");
+    }
+
+    #[tokio::test]
+    async fn guest_container_id_uses_restored_container_identity() {
+        let (client_fd, _peer_fd) = socketpair(
+            AddressFamily::Unix,
+            SockType::Stream,
+            None,
+            SockFlag::empty(),
+        )
+        .unwrap();
+        let client = ttrpc::r#async::Client::new(client_fd.into_raw_fd());
+        let agent_client = Arc::new(Mutex::new(agent_ttrpc::AgentServiceClient::new(client)));
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(128);
+        let spec = SpecBuilder::default()
+            .annotations(HashMap::from([(
+                ANNO_APP_SNAPSHOT_CONTAINER_ID.to_string(),
+                "guest-container".to_string(),
+            )]))
+            .build()
+            .unwrap();
+        let container = Container::new(
+            "sandbox".to_string(),
+            "real-task".to_string(),
+            spec,
+            agent_client,
+            Log::default(),
+            config::Config::default(),
+            ContainerInfo::default(),
+            tx.clone(),
+            false,
+        )
+        .unwrap();
+        let sandbox = SandBox::new("sandbox".to_string(), Log::default(), false, tx);
+        sandbox
+            .containers
+            .lock()
+            .await
+            .insert("real-task".to_string(), container);
+
+        assert_eq!(
+            sandbox.guest_container_id("real-task").await.unwrap(),
+            "guest-container"
+        );
     }
 }

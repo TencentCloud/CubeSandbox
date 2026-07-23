@@ -23,6 +23,17 @@ fn replace_text_in_file(file_name: &str, from: &str, to: &str) -> Result<(), std
     Ok(())
 }
 
+fn ensure_trailing_newline(file_name: &str) -> Result<(), std::io::Error> {
+    let mut contents = String::new();
+    File::open(file_name)?.read_to_string(&mut contents)?;
+    if contents.ends_with('\n') {
+        return Ok(());
+    }
+
+    contents.push('\n');
+    File::create(file_name)?.write_all(contents.as_bytes())
+}
+
 fn use_serde(protos: &[&str], out_dir: &Path) -> Result<(), std::io::Error> {
     protos
         .iter()
@@ -181,6 +192,12 @@ fn real_main() -> Result<(), std::io::Error> {
         .try_for_each(|&f| -> Result<(), std::io::Error> {
             replace_text_in_file(f, "#![allow(box_pointers)]", "")
         })?;
+    replace_text_in_file(
+        "src/agent.rs",
+        "\n    // uint32 resource_metrics_version = 3;\n\n\n",
+        "\n",
+    )?;
+    ensure_trailing_newline("src/agent.rs")?;
 
     Ok(())
 }

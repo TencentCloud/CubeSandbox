@@ -65,6 +65,8 @@ __pycache__
 !/tests/e2e/sdk_compat/
 !/tests/e2e/sdk_compat/**
 /tests/e2e/sdk_compat/.pytest_cache/
+!/tests/e2e/resource_metrics/
+!/tests/e2e/resource_metrics/**
 
 # Keep the SDK E2E skills guide tracked while ignoring other tests/skills files.
 !/tests/skills/

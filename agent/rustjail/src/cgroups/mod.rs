@@ -14,6 +14,8 @@ pub mod mock;
 pub mod notifier;
 pub mod systemd;
 
+pub const RESOURCE_METRICS_VERSION_V1: u32 = 1;
+
 pub trait Manager {
     fn apply(&self, _pid: i32) -> Result<()> {
         Err(anyhow!("not supported!".to_string()))
@@ -27,6 +29,10 @@ pub trait Manager {
         Err(anyhow!("not supported!"))
     }
 
+    fn resource_metrics_version(&self) -> u32 {
+        0
+    }
+
     fn freeze(&self, _state: FreezerState) -> Result<()> {
         Err(anyhow!("not supported!"))
     }
@@ -37,5 +43,19 @@ pub trait Manager {
 
     fn set(&self, _container: &LinuxResources, _update: bool) -> Result<()> {
         Err(anyhow!("not supported!"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Manager;
+
+    struct UnsupportedManager;
+
+    impl Manager for UnsupportedManager {}
+
+    #[test]
+    fn managers_must_explicitly_claim_resource_metrics_support() {
+        assert_eq!(UnsupportedManager.resource_metrics_version(), 0);
     }
 }

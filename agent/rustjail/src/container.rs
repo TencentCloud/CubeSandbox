@@ -526,8 +526,15 @@ fn do_init_child(cwfd: RawFd) -> Result<()> {
 
     if to_new.contains(CloneFlags::CLONE_NEWNS) {
         // setup rootfs
-        mount::init_rootfs(cfd_log, &spec, &cm.paths, &cm.mounts, bind_device)
-            .map_err(|e| anyhow!("init_rootfs faild.{:}", e))?;
+        mount::init_rootfs(
+            cfd_log,
+            &spec,
+            &cm.paths,
+            &cm.mounts,
+            &cm.cpath,
+            bind_device,
+        )
+        .map_err(|e| anyhow!("init_rootfs failed.{:}", e))?;
     }
 
     if init {
@@ -828,8 +835,9 @@ impl BaseContainer for LinuxContainer {
     fn stats(&self) -> Result<StatsContainerResponse> {
         let mut r = StatsContainerResponse::default();
 
-        if self.cgroup_manager.is_some() {
-            r.cgroup_stats = MessageField::some(self.cgroup_manager.as_ref().unwrap().get_stats()?);
+        if let Some(manager) = self.cgroup_manager.as_ref() {
+            r.cgroup_stats = MessageField::some(manager.get_stats()?);
+            r.resource_metrics_version = manager.resource_metrics_version();
         }
 
         // what about network interface stats?
@@ -2123,6 +2131,17 @@ mod tests {
     fn test_linuxcontainer_stats() {
         let ret = new_linux_container_and_then(|c: LinuxContainer| c.stats());
         assert!(ret.is_ok(), "Expecting Ok, Got {:?}", ret);
+        assert_eq!(ret.unwrap().resource_metrics_version(), 1);
+    }
+
+    #[test]
+    fn test_linuxcontainer_without_cgroup_manager_does_not_claim_resource_metrics() {
+        let ret = new_linux_container_and_then(|mut c: LinuxContainer| {
+            c.cgroup_manager = None;
+            c.stats()
+        });
+        assert!(ret.is_ok(), "Expecting Ok, Got {:?}", ret);
+        assert_eq!(ret.unwrap().resource_metrics_version(), 0);
     }
 
     #[test]

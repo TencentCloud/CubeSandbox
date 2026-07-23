@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use crate::cgroups::Manager as CgroupManager;
+use crate::cgroups::{Manager as CgroupManager, RESOURCE_METRICS_VERSION_V1};
 use crate::container::DEFAULT_DEVICES;
 use anyhow::{anyhow, Context, Result};
 use cgroups::blkio::{BlkIoController, BlkIoData, IoService};
@@ -32,8 +32,11 @@ use protocols::agent::{
     BlkioStats, BlkioStatsEntry, CgroupStats, CpuStats, CpuUsage, HugetlbStats, MemoryData,
     MemoryStats, PidsStats, ThrottlingData,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 //use std::path::Path;
 use lazy_static::lazy_static;
 
@@ -52,6 +55,14 @@ lazy_static! {
 }
 
 const GUEST_CPUS_PATH: &str = "/sys/devices/system/cpu/online";
+
+fn resource_metrics_version_for_layout(cgroup_v2: bool, has_process_cgroup: bool) -> u32 {
+    if cgroup_v2 && has_process_cgroup {
+        RESOURCE_METRICS_VERSION_V1
+    } else {
+        0
+    }
+}
 
 // Convenience macro to obtain the scope logger
 macro_rules! sl {
@@ -76,6 +87,11 @@ pub struct Manager {
     pub cpath: String,
     #[serde(skip)]
     cgroup: cgroups::Cgroup,
+    // On cgroup v2 the accounting cgroup must remain process-free so its
+    // controllers can be delegated to envd's child cgroups. Runtime-created
+    // OCI processes are placed in this leaf instead.
+    #[serde(skip)]
+    process_cgroup: Option<cgroups::Cgroup>,
 }
 
 // set_resource is used to set reources by cgroup controller.
@@ -91,10 +107,11 @@ macro_rules! set_resource {
 impl CgroupManager for Manager {
     fn apply(&self, pid: pid_t) -> Result<()> {
         let cgroup_pid = CgroupPid::from(pid as u64);
-        if self.cgroup.v2() {
-            self.cgroup.add_task_by_tgid(cgroup_pid)?;
+        let target = self.process_cgroup.as_ref().unwrap_or(&self.cgroup);
+        if target.v2() {
+            target.add_task_by_tgid(cgroup_pid)?;
         } else {
-            self.cgroup.add_task(cgroup_pid)?;
+            target.add_task(cgroup_pid)?;
         }
         Ok(())
     }
@@ -143,9 +160,9 @@ impl CgroupManager for Manager {
 
     fn get_stats(&self) -> Result<CgroupStats> {
         // CpuStats
-        let cpu_usage = get_cpuacct_stats(&self.cgroup);
+        let cpu_usage = get_cpuacct_stats_strict(&self.cgroup)?;
 
-        let throttling_data = get_cpu_stats(&self.cgroup);
+        let throttling_data = get_cpu_stats_strict(&self.cgroup)?;
 
         let cpu_stats = MessageField::some(CpuStats {
             cpu_usage,
@@ -154,7 +171,7 @@ impl CgroupManager for Manager {
         });
 
         // Memorystats
-        let memory_stats = get_memory_stats(&self.cgroup);
+        let memory_stats = get_memory_stats_strict(&self.cgroup)?;
 
         // PidsStats
         let pids_stats = get_pids_stats(&self.cgroup);
@@ -176,6 +193,10 @@ impl CgroupManager for Manager {
         })
     }
 
+    fn resource_metrics_version(&self) -> u32 {
+        resource_metrics_version_for_layout(self.cgroup.v2(), self.process_cgroup.is_some())
+    }
+
     fn freeze(&self, state: FreezerState) -> Result<()> {
         let freezer_controller: &FreezerController = self.cgroup.controller_of().unwrap();
         match state {
@@ -194,21 +215,199 @@ impl CgroupManager for Manager {
     }
 
     fn destroy(&mut self) -> Result<()> {
+        if self.cgroup.v2() {
+            // cgroup.kill is recursive on supported cgroup v2 kernels. It is
+            // best-effort because the caller already kills tracked PIDs.
+            let _ = self.cgroup.kill();
+            return remove_cgroup_tree(&self.cpath);
+        }
+
         let _ = self.cgroup.delete();
         Ok(())
     }
 
     fn get_pids(&self) -> Result<Vec<pid_t>> {
-        let pids = if self.cgroup.v2() {
-            self.cgroup.procs()
+        let pids: Vec<pid_t> = if self.cgroup.v2() {
+            let mut pids = BTreeSet::new();
+            collect_cgroup_pids(&cgroup_filesystem_path(&self.cpath)?, &mut pids)?;
+            pids.into_iter().collect::<Vec<_>>()
         } else {
             let mem_controller: &MemController = self.cgroup.controller_of().unwrap();
-            mem_controller.tasks()
+            mem_controller
+                .tasks()
+                .into_iter()
+                .map(|pid| pid.pid as pid_t)
+                .collect()
         };
-        let result = pids.iter().map(|x| x.pid as i32).collect::<Vec<i32>>();
+        let result = pids.into_iter().map(|pid| pid as i32).collect::<Vec<i32>>();
 
         Ok(result)
     }
+}
+
+const CGROUP2_MOUNTPOINT: &str = "/sys/fs/cgroup";
+const PROCESS_CGROUP_NAME: &str = "runtime";
+const REQUIRED_DELEGATED_CONTROLLERS: [&str; 3] = ["cpu", "memory", "pids"];
+
+pub fn process_cgroup_path(cpath: &str) -> String {
+    format!("{}/{}", cpath.trim_end_matches('/'), PROCESS_CGROUP_NAME)
+}
+
+pub fn cgroup_filesystem_path(cpath: &str) -> Result<PathBuf> {
+    let relative = cpath.trim_matches('/');
+    let mut path = PathBuf::from(CGROUP2_MOUNTPOINT);
+    if relative.is_empty() {
+        return Ok(path);
+    }
+
+    for component in relative.split('/') {
+        if component.is_empty() || component == "." || component == ".." {
+            return Err(anyhow!("invalid cgroup path component in {cpath:?}"));
+        }
+        path.push(component);
+    }
+    Ok(path)
+}
+
+fn read_cgroup_words(path: &Path) -> Result<BTreeSet<String>> {
+    Ok(fs::read_to_string(path)
+        .with_context(|| format!("read cgroup controller file {}", path.display()))?
+        .split_whitespace()
+        .map(str::to_string)
+        .collect())
+}
+
+fn verify_delegated_controllers_at(path: &Path) -> Result<()> {
+    let available = read_cgroup_words(&path.join("cgroup.controllers"))?;
+    let delegated = read_cgroup_words(&path.join("cgroup.subtree_control"))?;
+
+    for controller in REQUIRED_DELEGATED_CONTROLLERS {
+        if !available.contains(controller) {
+            return Err(anyhow!(
+                "required cgroup v2 controller {controller} is unavailable at {}",
+                path.display()
+            ));
+        }
+        if !delegated.contains(controller) {
+            return Err(anyhow!(
+                "required cgroup v2 controller {controller} is not delegated at {}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn collect_cgroup_pids(path: &Path, pids: &mut BTreeSet<pid_t>) -> Result<()> {
+    let procs = path.join("cgroup.procs");
+    match fs::read_to_string(&procs) {
+        Ok(content) => {
+            for line in content.lines() {
+                let pid = line
+                    .trim()
+                    .parse::<pid_t>()
+                    .with_context(|| format!("parse cgroup pid {line:?}"))?;
+                pids.insert(pid);
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read cgroup process list {}", procs.display()))
+        }
+    }
+
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("read cgroup directory {}", path.display()))
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if file_type.is_dir() {
+            collect_cgroup_pids(&entry.path(), pids)?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_cgroup_dirs(path: &Path, dirs: &mut Vec<PathBuf>) -> Result<()> {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("read cgroup directory {}", path.display()))
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if file_type.is_dir() {
+            let child = entry.path();
+            collect_cgroup_dirs(&child, dirs)?;
+            dirs.push(child);
+        }
+    }
+    Ok(())
+}
+
+fn remove_cgroup_tree(cpath: &str) -> Result<()> {
+    remove_cgroup_tree_at(&cgroup_filesystem_path(cpath)?)
+}
+
+fn remove_cgroup_tree_at(root: &Path) -> Result<()> {
+    for _ in 0..20 {
+        if !root.exists() {
+            return Ok(());
+        }
+
+        let mut dirs = Vec::new();
+        collect_cgroup_dirs(root, &mut dirs)?;
+        dirs.push(root.to_path_buf());
+        let mut retry = false;
+
+        for dir in dirs {
+            match fs::remove_dir(&dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error)
+                    if error.raw_os_error() == Some(libc::EBUSY)
+                        || error.raw_os_error() == Some(libc::ENOTEMPTY) =>
+                {
+                    retry = true;
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| format!("remove cgroup {}", dir.display()));
+                }
+            }
+        }
+
+        if !retry && !root.exists() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    Err(anyhow!("cgroup {} remained busy", root.display()))
 }
 
 fn set_network_resources(
@@ -489,25 +688,6 @@ fn linux_device_group_to_cgroup_device(d: &LinuxDeviceCgroup) -> Option<DeviceRe
     })
 }
 
-// split space separated values into an vector of u64
-fn line_to_vec(line: &str) -> Vec<u64> {
-    line.split_whitespace()
-        .filter_map(|x| x.parse::<u64>().ok())
-        .collect::<Vec<u64>>()
-}
-
-// split flat keyed values into an hashmap of <String, u64>
-fn lines_to_map(content: &str) -> HashMap<String, u64> {
-    content
-        .lines()
-        .map(|x| x.split_whitespace().collect::<Vec<&str>>())
-        .filter(|x| x.len() == 2 && x[1].parse::<u64>().is_ok())
-        .fold(HashMap::new(), |mut hm, x| {
-            hm.insert(x[0].to_string(), x[1].parse::<u64>().unwrap());
-            hm
-        })
-}
-
 pub const NANO_PER_SECOND: u64 = 1000000000;
 pub const WILDCARD: i64 = -1;
 
@@ -577,68 +757,295 @@ lazy_static! {
     };
 }
 
-fn get_cpu_stats(cg: &cgroups::Cgroup) -> MessageField<ThrottlingData> {
-    let cpu_controller: &CpuController = get_controller_or_return_singular_none!(cg);
-    let stat = cpu_controller.cpu().stat;
-    let h = lines_to_map(&stat);
+#[derive(Debug, PartialEq, Eq)]
+struct V2CpuStats {
+    usage_ns: u64,
+    user_ns: u64,
+    system_ns: u64,
+    periods: u64,
+    throttled_periods: u64,
+    throttled_time_ns: u64,
+}
 
-    MessageField::some(ThrottlingData {
-        periods: *h.get("nr_periods").unwrap_or(&0),
-        throttled_periods: *h.get("nr_throttled").unwrap_or(&0),
-        throttled_time: *h.get("throttled_time").unwrap_or(&0),
-        ..Default::default()
+#[derive(Debug, PartialEq, Eq)]
+struct V1CpuAcctStats {
+    usage_ns: u64,
+    user_ns: u64,
+    system_ns: u64,
+    per_cpu_ns: Vec<u64>,
+}
+
+fn required_counter(content: &str, key: &str, source: &str) -> Result<u64> {
+    let value = content
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            match (fields.next(), fields.next(), fields.next()) {
+                (Some(name), Some(value), None) if name == key => Some(value),
+                _ => None,
+            }
+        })
+        .ok_or_else(|| anyhow!("missing required cgroup key {} in {}", key, source))?;
+    value
+        .parse::<u64>()
+        .with_context(|| format!("invalid cgroup value for {} in {}: {}", key, source, value))
+}
+
+fn micros_to_nanos(value: u64, key: &str, source: &str) -> Result<u64> {
+    value.checked_mul(1_000).ok_or_else(|| {
+        anyhow!(
+            "cgroup value for {} in {} overflows nanoseconds",
+            key,
+            source
+        )
     })
 }
 
-fn get_cpuacct_stats(cg: &cgroups::Cgroup) -> MessageField<CpuUsage> {
-    if let Some(cpuacct_controller) = cg.controller_of::<CpuAcctController>() {
-        let cpuacct = cpuacct_controller.cpuacct();
-
-        let h = lines_to_map(&cpuacct.stat);
-        let usage_in_usermode =
-            (((*h.get("user").unwrap_or(&0) * NANO_PER_SECOND) as f64) / *CLOCK_TICKS) as u64;
-        let usage_in_kernelmode =
-            (((*h.get("system").unwrap_or(&0) * NANO_PER_SECOND) as f64) / *CLOCK_TICKS) as u64;
-
-        let total_usage = cpuacct.usage;
-
-        let percpu_usage = line_to_vec(&cpuacct.usage_percpu);
-
-        return MessageField::some(CpuUsage {
-            total_usage,
-            percpu_usage,
-            usage_in_kernelmode,
-            usage_in_usermode,
-            ..Default::default()
-        });
+fn ticks_to_nanos(value: u64, ticks_per_second: u64, key: &str) -> Result<u64> {
+    if ticks_per_second == 0 {
+        return Err(anyhow!("system clock ticks per second is zero"));
     }
-
-    if cg.v2() {
-        return MessageField::some(CpuUsage {
-            total_usage: 0,
-            percpu_usage: vec![],
-            usage_in_kernelmode: 0,
-            usage_in_usermode: 0,
-            ..Default::default()
-        });
+    let nanos = u128::from(value) * u128::from(NANO_PER_SECOND) / u128::from(ticks_per_second);
+    if nanos > u128::from(u64::MAX) {
+        return Err(anyhow!("cgroup value for {} overflows nanoseconds", key));
     }
+    Ok(nanos as u64)
+}
 
-    // try to get from cpu controller
-    let cpu_controller: &CpuController = get_controller_or_return_singular_none!(cg);
-    let stat = cpu_controller.cpu().stat;
-    let h = lines_to_map(&stat);
-    let usage_in_usermode = *h.get("user_usec").unwrap_or(&0);
-    let usage_in_kernelmode = *h.get("system_usec").unwrap_or(&0);
-    let total_usage = *h.get("usage_usec").unwrap_or(&0);
-    let percpu_usage = vec![];
-
-    MessageField::some(CpuUsage {
-        total_usage,
-        percpu_usage,
-        usage_in_kernelmode,
-        usage_in_usermode,
-        ..Default::default()
+fn parse_v1_cpuacct_stats(
+    usage: &str,
+    stat: &str,
+    per_cpu: &str,
+    ticks_per_second: u64,
+) -> Result<V1CpuAcctStats> {
+    Ok(V1CpuAcctStats {
+        usage_ns: usage
+            .trim()
+            .parse::<u64>()
+            .context("invalid cgroup value for cpuacct.usage")?,
+        user_ns: ticks_to_nanos(
+            required_counter(stat, "user", "cpuacct.stat")?,
+            ticks_per_second,
+            "cpuacct.stat user",
+        )?,
+        system_ns: ticks_to_nanos(
+            required_counter(stat, "system", "cpuacct.stat")?,
+            ticks_per_second,
+            "cpuacct.stat system",
+        )?,
+        per_cpu_ns: per_cpu
+            .split_whitespace()
+            .map(|value| {
+                value
+                    .parse::<u64>()
+                    .with_context(|| format!("invalid cpuacct.usage_percpu value {}", value))
+            })
+            .collect::<Result<Vec<_>>>()?,
     })
+}
+
+fn parse_v2_cpu_stats(content: &str) -> Result<V2CpuStats> {
+    Ok(V2CpuStats {
+        usage_ns: micros_to_nanos(
+            required_counter(content, "usage_usec", "cpu.stat")?,
+            "usage_usec",
+            "cpu.stat",
+        )?,
+        user_ns: micros_to_nanos(
+            required_counter(content, "user_usec", "cpu.stat")?,
+            "user_usec",
+            "cpu.stat",
+        )?,
+        system_ns: micros_to_nanos(
+            required_counter(content, "system_usec", "cpu.stat")?,
+            "system_usec",
+            "cpu.stat",
+        )?,
+        periods: required_counter(content, "nr_periods", "cpu.stat")?,
+        throttled_periods: required_counter(content, "nr_throttled", "cpu.stat")?,
+        throttled_time_ns: micros_to_nanos(
+            required_counter(content, "throttled_usec", "cpu.stat")?,
+            "throttled_usec",
+            "cpu.stat",
+        )?,
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct V2MemoryStats {
+    current: u64,
+    limit: u64,
+    peak: u64,
+    failures: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct V1MemoryUsage {
+    current: u64,
+    limit: u64,
+    peak: u64,
+    failures: u64,
+}
+
+fn parse_v1_memory_usage(
+    current: &str,
+    limit: &str,
+    peak: &str,
+    failures: &str,
+) -> Result<V1MemoryUsage> {
+    let parse = |value: &str, key: &str| {
+        value
+            .trim()
+            .parse::<u64>()
+            .with_context(|| format!("invalid cgroup value for {}: {}", key, value.trim()))
+    };
+    Ok(V1MemoryUsage {
+        current: parse(current, "memory.usage_in_bytes")?,
+        limit: parse(limit, "memory.limit_in_bytes")?,
+        peak: parse(peak, "memory.max_usage_in_bytes")?,
+        failures: parse(failures, "memory.failcnt")?,
+    })
+}
+
+fn parse_v2_limit(value: &str, key: &str) -> Result<u64> {
+    if value.trim() == "max" {
+        return Ok(u64::MAX);
+    }
+    value
+        .trim()
+        .parse::<u64>()
+        .with_context(|| format!("invalid cgroup value for {}: {}", key, value.trim()))
+}
+
+fn parse_v2_memory_stats(
+    current: &str,
+    limit: &str,
+    peak: &str,
+    events: &str,
+) -> Result<V2MemoryStats> {
+    Ok(V2MemoryStats {
+        current: current
+            .trim()
+            .parse::<u64>()
+            .context("invalid cgroup value for memory.current")?,
+        limit: parse_v2_limit(limit, "memory.max")?,
+        peak: peak
+            .trim()
+            .parse::<u64>()
+            .context("invalid cgroup value for memory.peak")?,
+        failures: required_counter(events, "max", "memory.events")?,
+    })
+}
+
+fn read_required(path: &Path) -> Result<String> {
+    fs::read_to_string(path).with_context(|| format!("read cgroup stat {}", path.display()))
+}
+
+fn get_cpuacct_stats_strict(cg: &cgroups::Cgroup) -> Result<MessageField<CpuUsage>> {
+    if !cg.v2() {
+        let controller: &CpuAcctController = cg
+            .controller_of()
+            .ok_or_else(|| anyhow!("cpu accounting controller is unavailable"))?;
+        let usage = read_required(&controller.path().join("cpuacct.usage"))?;
+        let stat = read_required(&controller.path().join("cpuacct.stat"))?;
+        let per_cpu = read_required(&controller.path().join("cpuacct.usage_percpu"))?;
+        if *CLOCK_TICKS <= 0.0 {
+            return Err(anyhow!("failed to determine system clock ticks per second"));
+        }
+        let stats = parse_v1_cpuacct_stats(&usage, &stat, &per_cpu, *CLOCK_TICKS as u64)?;
+        return Ok(MessageField::some(CpuUsage {
+            total_usage: stats.usage_ns,
+            percpu_usage: stats.per_cpu_ns,
+            usage_in_kernelmode: stats.system_ns,
+            usage_in_usermode: stats.user_ns,
+            ..Default::default()
+        }));
+    }
+    let controller: &CpuController = cg
+        .controller_of()
+        .ok_or_else(|| anyhow!("CPU controller is unavailable"))?;
+    let stats = parse_v2_cpu_stats(&read_required(&controller.path().join("cpu.stat"))?)?;
+    Ok(MessageField::some(CpuUsage {
+        total_usage: stats.usage_ns,
+        usage_in_kernelmode: stats.system_ns,
+        usage_in_usermode: stats.user_ns,
+        ..Default::default()
+    }))
+}
+
+fn get_cpu_stats_strict(cg: &cgroups::Cgroup) -> Result<MessageField<ThrottlingData>> {
+    if !cg.v2() {
+        let controller: &CpuController = cg
+            .controller_of()
+            .ok_or_else(|| anyhow!("CPU controller is unavailable"))?;
+        let stat = read_required(&controller.path().join("cpu.stat"))?;
+        return Ok(MessageField::some(ThrottlingData {
+            periods: required_counter(&stat, "nr_periods", "cpu.stat")?,
+            throttled_periods: required_counter(&stat, "nr_throttled", "cpu.stat")?,
+            throttled_time: required_counter(&stat, "throttled_time", "cpu.stat")?,
+            ..Default::default()
+        }));
+    }
+    let controller: &CpuController = cg
+        .controller_of()
+        .ok_or_else(|| anyhow!("CPU controller is unavailable"))?;
+    let stats = parse_v2_cpu_stats(&read_required(&controller.path().join("cpu.stat"))?)?;
+    Ok(MessageField::some(ThrottlingData {
+        periods: stats.periods,
+        throttled_periods: stats.throttled_periods,
+        throttled_time: stats.throttled_time_ns,
+        ..Default::default()
+    }))
+}
+
+fn get_memory_stats_strict(cg: &cgroups::Cgroup) -> Result<MessageField<MemoryStats>> {
+    if !cg.v2() {
+        let controller: &MemController = cg
+            .controller_of()
+            .ok_or_else(|| anyhow!("memory controller is unavailable"))?;
+        let path = controller.path();
+        let usage = parse_v1_memory_usage(
+            &read_required(&path.join("memory.usage_in_bytes"))?,
+            &read_required(&path.join("memory.limit_in_bytes"))?,
+            &read_required(&path.join("memory.max_usage_in_bytes"))?,
+            &read_required(&path.join("memory.failcnt"))?,
+        )?;
+        let mut value = get_memory_stats(cg)
+            .into_option()
+            .ok_or_else(|| anyhow!("memory stats are unavailable"))?;
+        value.usage = MessageField::some(MemoryData {
+            usage: usage.current,
+            max_usage: usage.peak,
+            failcnt: usage.failures,
+            limit: usage.limit,
+            ..Default::default()
+        });
+        return Ok(MessageField::some(value));
+    }
+    let controller: &MemController = cg
+        .controller_of()
+        .ok_or_else(|| anyhow!("memory controller is unavailable"))?;
+    let path = controller.path();
+    let stats = parse_v2_memory_stats(
+        &read_required(&path.join("memory.current"))?,
+        &read_required(&path.join("memory.max"))?,
+        &read_required(&path.join("memory.peak"))?,
+        &read_required(&path.join("memory.events"))?,
+    )?;
+    // Preserve the cache and raw memory.stat fields exposed by the existing
+    // StatsContainer contract while replacing its usage entry with values
+    // read from the accounting cgroup using strict cgroup v2 semantics.
+    let mut value = get_memory_stats(cg)
+        .into_option()
+        .ok_or_else(|| anyhow!("memory stats are unavailable"))?;
+    value.usage = MessageField::some(MemoryData {
+        usage: stats.current,
+        max_usage: stats.peak,
+        failcnt: stats.failures,
+        limit: stats.limit,
+        ..Default::default()
+    });
+    Ok(MessageField::some(value))
 }
 
 fn get_memory_stats(cg: &cgroups::Cgroup) -> MessageField<MemoryStats> {
@@ -960,6 +1367,7 @@ fn new_cgroup(h: Box<dyn cgroups::Hierarchy>, path: &str) -> Result<Cgroup> {
 
 impl Manager {
     pub fn new(cpath: &str) -> Result<Self> {
+        let cgroup_path = cgroup_filesystem_path(cpath)?;
         let mut m = HashMap::new();
         let paths = get_paths()?;
         let mounts = get_mounts()?;
@@ -975,12 +1383,35 @@ impl Manager {
 
             m.insert(key.to_string(), p);
         }
+        let cgroup = new_cgroup(cgroups::hierarchies::auto(), cpath)?;
+        let process_cgroup = if cgroup.v2() {
+            let process_path = process_cgroup_path(cpath);
+            match new_cgroup(cgroups::hierarchies::auto(), &process_path) {
+                Ok(process_cgroup) => {
+                    if let Err(error) = verify_delegated_controllers_at(&cgroup_path) {
+                        let _ = process_cgroup.delete();
+                        let _ = cgroup.delete();
+                        return Err(error).context("verify runtime cgroup delegation");
+                    }
+                    Some(process_cgroup)
+                }
+                Err(error) => {
+                    let _ = cgroup.delete();
+                    return Err(error)
+                        .with_context(|| format!("create runtime process cgroup {process_path}"));
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             paths: m,
             mounts,
             // rels: paths,
             cpath: cpath.to_string(),
-            cgroup: new_cgroup(cgroups::hierarchies::auto(), cpath)?,
+            cgroup,
+            process_cgroup,
         })
     }
 
@@ -1108,49 +1539,224 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_line_to_vec() {
-        let test_cases = vec![
-            ("1 2 3", vec![1, 2, 3]),
-            ("a 1 b 2 3 c", vec![1, 2, 3]),
-            ("a b c", vec![]),
-        ];
-
-        for test_case in test_cases {
-            let result = line_to_vec(test_case.0);
-            assert_eq!(
-                result, test_case.1,
-                "except: {:?} for input {}",
-                test_case.1, test_case.0
-            );
-        }
+    fn resource_metrics_capability_requires_complete_v2_accounting_layout() {
+        assert_eq!(resource_metrics_version_for_layout(false, false), 0);
+        assert_eq!(resource_metrics_version_for_layout(false, true), 0);
+        assert_eq!(resource_metrics_version_for_layout(true, false), 0);
+        assert_eq!(
+            resource_metrics_version_for_layout(true, true),
+            RESOURCE_METRICS_VERSION_V1
+        );
     }
 
     #[test]
-    fn test_lines_to_map() {
-        let hm1: HashMap<String, u64> = [
-            ("a".to_string(), 1),
-            ("b".to_string(), 2),
-            ("c".to_string(), 3),
-            ("e".to_string(), 5),
-        ]
-        .iter()
-        .cloned()
-        .collect();
-        let hm2: HashMap<String, u64> = [("a".to_string(), 1)].iter().cloned().collect();
+    fn process_cgroup_path_uses_a_runtime_leaf() {
+        assert_eq!(
+            process_cgroup_path("/default/container"),
+            "/default/container/runtime"
+        );
+        assert_eq!(
+            process_cgroup_path("default/container/"),
+            "default/container/runtime"
+        );
+    }
 
-        let test_cases = vec![
-            ("a 1\nb 2\nc 3\nd X\ne 5\n", hm1),
-            ("a 1", hm2),
-            ("a c", HashMap::new()),
-        ];
+    #[test]
+    fn cgroup_filesystem_path_stays_below_the_unified_mount() {
+        assert_eq!(
+            cgroup_filesystem_path("/default/container").unwrap(),
+            PathBuf::from("/sys/fs/cgroup/default/container")
+        );
+        assert!(cgroup_filesystem_path("/default/../escape").is_err());
+        assert!(cgroup_filesystem_path("/default//escape").is_err());
+    }
 
-        for test_case in test_cases {
-            let result = lines_to_map(test_case.0);
-            assert_eq!(
-                result, test_case.1,
-                "except: {:?} for input {}",
-                test_case.1, test_case.0
-            );
-        }
+    #[test]
+    fn delegated_controller_check_requires_cpu_memory_and_pids() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("cgroup.controllers"),
+            "cpu io memory pids\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("cgroup.subtree_control"),
+            "cpu memory pids\n",
+        )
+        .unwrap();
+        verify_delegated_controllers_at(root.path()).unwrap();
+
+        fs::write(root.path().join("cgroup.subtree_control"), "cpu memory\n").unwrap();
+        assert!(verify_delegated_controllers_at(root.path()).is_err());
+    }
+
+    #[test]
+    fn collect_cgroup_pids_includes_nested_envd_groups() {
+        let root = tempfile::tempdir().unwrap();
+        let user = root.path().join("user");
+        let ptys = user.join("ptys");
+        fs::create_dir_all(&ptys).unwrap();
+        fs::write(root.path().join("cgroup.procs"), "10\n").unwrap();
+        fs::write(user.join("cgroup.procs"), "11\n").unwrap();
+        fs::write(ptys.join("cgroup.procs"), "12\n11\n").unwrap();
+
+        let mut pids = BTreeSet::new();
+        collect_cgroup_pids(root.path(), &mut pids).unwrap();
+        assert_eq!(pids.into_iter().collect::<Vec<_>>(), vec![10, 11, 12]);
+    }
+
+    #[test]
+    fn remove_cgroup_tree_deletes_descendants_before_the_parent() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("container");
+        fs::create_dir_all(root.join("user/ptys")).unwrap();
+        fs::create_dir_all(root.join("runtime")).unwrap();
+
+        remove_cgroup_tree_at(&root).unwrap();
+
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn remove_cgroup_tree_retries_after_enotempty() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("container");
+        let user = root.join("user");
+        fs::create_dir_all(&user).unwrap();
+        let hold = user.join("hold");
+        fs::write(&hold, "busy").unwrap();
+
+        let cleanup = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(25));
+            fs::remove_file(hold).unwrap();
+        });
+        remove_cgroup_tree_at(&root).unwrap();
+        cleanup.join().unwrap();
+
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn parse_v2_cpu_stats_converts_microseconds_to_nanoseconds() {
+        let got = parse_v2_cpu_stats(
+            "usage_usec 12\nuser_usec 7\nsystem_usec 5\nnr_periods 9\nnr_throttled 2\nthrottled_usec 3\n",
+        )
+        .unwrap();
+        assert_eq!(
+            got,
+            V2CpuStats {
+                usage_ns: 12_000,
+                user_ns: 7_000,
+                system_ns: 5_000,
+                periods: 9,
+                throttled_periods: 2,
+                throttled_time_ns: 3_000,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_v1_cpuacct_stats_preserves_nanosecond_and_tick_semantics() {
+        let got =
+            parse_v1_cpuacct_stats("12000\n", "user 7\nsystem 5\n", "4000 8000\n", 100).unwrap();
+        assert_eq!(
+            got,
+            V1CpuAcctStats {
+                usage_ns: 12_000,
+                user_ns: 70_000_000,
+                system_ns: 50_000_000,
+                per_cpu_ns: vec![4_000, 8_000],
+            }
+        );
+    }
+
+    #[test]
+    fn parse_v1_cpuacct_stats_accepts_large_ticks_when_final_nanoseconds_fit() {
+        let got =
+            parse_v1_cpuacct_stats("1\n", "user 20000000000\nsystem 1\n", "1\n", 100).unwrap();
+        assert_eq!(got.user_ns, 200_000_000_000_000_000);
+    }
+
+    #[test]
+    fn parse_v1_cpuacct_stats_rejects_bad_values_and_tick_overflow() {
+        assert!(parse_v1_cpuacct_stats("bad\n", "user 1\nsystem 1\n", "1\n", 100).is_err());
+        assert!(parse_v1_cpuacct_stats("1\n", "user 1\nsystem 1\n", "bad\n", 100).is_err());
+        assert!(parse_v1_cpuacct_stats("1\n", "user 1\nsystem 1\n", "1\n", 0).is_err());
+        assert!(
+            parse_v1_cpuacct_stats("1\n", "user 18446744073709551615\nsystem 1\n", "1\n", 100,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn parse_v2_cpu_stats_rejects_missing_malformed_and_overflow_values() {
+        let error = parse_v2_cpu_stats("usage_usec 1\n").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "missing required cgroup key user_usec in cpu.stat"
+        );
+        assert!(parse_v2_cpu_stats("usage_usec nope\nuser_usec 1\nsystem_usec 1\nnr_periods 1\nnr_throttled 1\nthrottled_usec 1\n").is_err());
+        let error = parse_v2_cpu_stats("usage_usec 18446744073709552\nuser_usec 1\nsystem_usec 1\nnr_periods 1\nnr_throttled 1\nthrottled_usec 1\n").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "cgroup value for usage_usec in cpu.stat overflows nanoseconds"
+        );
+    }
+
+    #[test]
+    fn parse_v2_memory_stats_reads_current_limit_peak_and_failures() {
+        let got = parse_v2_memory_stats(
+            "4096\n",
+            "max\n",
+            "8192\n",
+            "low 0\nmax 4\nome 1\noom_kill 1\n",
+        )
+        .unwrap();
+        assert_eq!(
+            got,
+            V2MemoryStats {
+                current: 4096,
+                limit: u64::MAX,
+                peak: 8192,
+                failures: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_v2_memory_stats_reads_numeric_limit() {
+        let got = parse_v2_memory_stats("4096\n", "16384\n", "8192\n", "max 4\n").unwrap();
+        assert_eq!(got.limit, 16_384);
+    }
+
+    #[test]
+    fn parse_v1_memory_usage_preserves_failcnt_semantics() {
+        let got = parse_v1_memory_usage("4096\n", "16384\n", "8192\n", "4\n").unwrap();
+        assert_eq!(
+            got,
+            V1MemoryUsage {
+                current: 4096,
+                limit: 16_384,
+                peak: 8192,
+                failures: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_v2_memory_stats_rejects_missing_or_malformed_values() {
+        let error = parse_v2_memory_stats("4096\n", "1024\n", "8192\n", "low 0\n").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "missing required cgroup key max in memory.events"
+        );
+        assert!(parse_v2_memory_stats("bad\n", "1024\n", "8192\n", "max 1\n").is_err());
+        assert!(parse_v2_memory_stats("4096\n", "bad\n", "8192\n", "max 1\n").is_err());
+    }
+
+    #[test]
+    fn read_required_rejects_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_required(&dir.path().join("cpu.stat")).is_err());
     }
 }
