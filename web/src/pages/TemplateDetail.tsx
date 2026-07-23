@@ -928,6 +928,7 @@ export default function TemplateDetailPage() {
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-8 gap-y-5">
           <Field label={t('fields.templateID')} value={data.templateID} mono copyable />
+          <Field label={t('fields.alias')} value={data.displayName || null} />
           <Field label={t('fields.instanceType')} value={data.instanceType ?? '—'} />
           {cfg?.exposedPorts && <Field label={t('exposedPorts')} value={cfg.exposedPorts} mono />}
           {cfg?.probePath && (
