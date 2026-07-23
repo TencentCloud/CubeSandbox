@@ -276,7 +276,7 @@ Compose 是 MiMo 的主 Agent，可用于无头模式。具体委派行为由模
 | 平台二进制无法执行 | 镜像架构错误 | 按 Cube 节点架构构建 |
 | 鉴权失败 | Key 无效或使用 Bearer 请求头 | MiMo Platform 要求 `api-key` |
 | `403 Forbidden - CubeEgress` 或 curl 状态 `000` | 请求 Host 未命中 | 使用精确 MiMo 端点并查看出口审计；部分部署会在网络数据面直接阻断未匹配流量 |
-| TLS 校验失败 | 运行时不信任 CubeEgress CA | 正确设置 `MIMO_NODE_EXTRA_CA_CERTS` |
+| TLS 校验失败 | 运行时不信任 CubeEgress CA | 在 `.env` 中设置 `MIMO_NODE_EXTRA_CA_CERTS`；Runner 会将其映射为沙箱内的 `NODE_EXTRA_CA_CERTS`，并验证该路径可读 |
 | 出现 models.dev/更新错误 | 辅助网络功能被开启 | 保留示例提供的 disable 开关 |
 | 模板停在 `PULLING` | 镜像仓库不可达 | 使用节点可访问的仓库和拉取凭证 |
 | Probe 超时 | 缺少 Cube entrypoint/envd | 继承 CubeSandbox base image |

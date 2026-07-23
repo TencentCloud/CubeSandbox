@@ -15,6 +15,7 @@ from cubesandbox import Action, Config, Inject, Match, Rule, Sandbox
 
 from _mimo_common import (
     ensure_success,
+    is_unexpected_keyword_error,
     kill_sandbox,
     run_command,
     run_mimo_command,
@@ -105,7 +106,7 @@ def create_sandbox(
             template_id=template_id,
         )
     except TypeError as exc:
-        if "api_key" not in str(exc):
+        if not is_unexpected_keyword_error(exc, "api_key"):
             raise
         print(
             "Installed CubeSandbox SDK does not support Cube API key forwarding; "

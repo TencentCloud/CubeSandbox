@@ -289,7 +289,7 @@ tests rather than require a fixed subagent trace.
 | Platform binary cannot execute | Wrong image architecture | Build for the Cube node architecture |
 | Authentication failed | Invalid key or Bearer header used | MiMo Platform requires the `api-key` header |
 | `403 Forbidden - CubeEgress` or curl status `000` | Request host does not match | Use the exact MiMo endpoint and inspect egress audit logs; some deployments block unmatched traffic at the network data plane |
-| TLS verification failed | Runtime does not trust CubeEgress CA | Set `MIMO_NODE_EXTRA_CA_CERTS` correctly |
+| TLS verification failed | Runtime does not trust CubeEgress CA | Set `MIMO_NODE_EXTRA_CA_CERTS` in `.env`; the runner maps it to `NODE_EXTRA_CA_CERTS` inside the sandbox and verifies that the path is readable |
 | Unexpected models.dev/update errors | Auxiliary network feature enabled | Keep the supplied disable switches |
 | Template remains `PULLING` | Registry unavailable | Use a node-reachable registry and pull credentials |
 | Probe timeout | Missing Cube entrypoint/envd | Inherit the CubeSandbox base image |

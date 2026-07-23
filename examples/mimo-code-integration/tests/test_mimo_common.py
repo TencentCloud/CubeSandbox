@@ -17,6 +17,7 @@ sys.path.insert(0, str(EXAMPLE_DIR))
 from _mimo_common import (  # noqa: E402
     JsonlCollector,
     ensure_success,
+    is_unexpected_keyword_error,
     kill_sandbox,
     parse_jsonl,
     run_command,
@@ -33,6 +34,20 @@ def event(event_type: str, session_id: str = "ses_123", **extra) -> str:
 
 
 class MimoCommonTests(unittest.TestCase):
+    def test_unexpected_keyword_error_matches_only_named_argument(self) -> None:
+        self.assertTrue(
+            is_unexpected_keyword_error(
+                TypeError("got an unexpected keyword argument 'envs'"),
+                "envs",
+            )
+        )
+        self.assertFalse(
+            is_unexpected_keyword_error(
+                TypeError("an envs value caused an internal error"),
+                "envs",
+            )
+        )
+
     def test_parse_jsonl_ignores_non_json_lines(self) -> None:
         text = f"warning\n{event('step_start')}\n{event('text')}\n"
         events = parse_jsonl(text)

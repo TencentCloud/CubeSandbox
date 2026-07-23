@@ -7,9 +7,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from collections.abc import Callable
 from typing import Any
+
+
+def is_unexpected_keyword_error(error: TypeError, keyword: str) -> bool:
+    """Return whether an SDK rejected one named keyword argument."""
+    pattern = rf"unexpected keyword argument ['\"]{re.escape(keyword)}['\"]"
+    return re.search(pattern, str(error)) is not None
 
 
 def stream_writer(stream) -> Callable[[object], None]:
@@ -127,7 +134,7 @@ def run_command(
     try:
         return sandbox.commands.run(command, **kwargs)
     except TypeError as exc:
-        if "envs" not in kwargs or "envs" not in str(exc):
+        if "envs" not in kwargs or not is_unexpected_keyword_error(exc, "envs"):
             raise
         kwargs["env"] = kwargs.pop("envs")
         return sandbox.commands.run(command, **kwargs)
