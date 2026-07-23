@@ -39,6 +39,11 @@ refresh_ttl: "168h"
 # --- CubeMaster (the actual sandbox / cluster control plane) ---
 cubemaster_addr: "http://127.0.0.1:8089"
 
+# --- Web Terminal (shared with CubeMaster; keep the internal endpoint private) ---
+terminal_gateway_token: ""
+# Optional comma-separated exact origins; same-host origins are allowed by default.
+terminal_allowed_origins: ""
+
 # --- CubeAPI (deprecated SDK proxy) ---
 cubeapi_url: "http://127.0.0.1:3000"
 

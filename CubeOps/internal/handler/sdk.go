@@ -57,6 +57,7 @@ var (
 type SDKHandler struct {
 	cm          CubeMasterClient
 	agenthubSvc *service.AgentHubService // optional; when set, DeleteTemplate triggers AgentHub reverse-sync
+	terminal    *terminalGateway
 }
 
 // NewSDKHandler creates a new SDK handler backed by the CubeMaster client.
@@ -68,6 +69,14 @@ func NewSDKHandler(cm CubeMasterClient) *SDKHandler { return &SDKHandler{cm: cm}
 // receiver for chaining.
 func (h *SDKHandler) WithAgentHubService(svc *service.AgentHubService) *SDKHandler {
 	h.agenthubSvc = svc
+	return h
+}
+
+// WithTerminalGateway configures CubeOps as the authenticated Web Terminal
+// gateway. CubeOps validates the sandbox through CubeMaster and relays the
+// WebSocket directly; CubeAPI is not part of this ops-only feature.
+func (h *SDKHandler) WithTerminalGateway(masterURL, token, allowedOrigins string) *SDKHandler {
+	h.terminal = newTerminalGateway(masterURL, token, allowedOrigins)
 	return h
 }
 
@@ -86,6 +95,7 @@ func (h *SDKHandler) Register(r *gin.RouterGroup) {
 	r.POST("/sandboxes/:id/pause", h.PauseSandbox)
 	r.POST("/sandboxes/:id/resume", h.ResumeSandbox)
 	r.POST("/sandboxes/:id/connect", h.ConnectSandbox)
+	r.POST("/sandboxes/:id/terminal-sessions", h.CreateTerminalSession)
 
 	// Snapshots
 	r.GET("/snapshots", h.ListSnapshots)

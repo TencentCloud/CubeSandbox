@@ -49,9 +49,19 @@ export default defineConfig({
         target: 'http://127.0.0.1:3010',
         rewrite: (path) => path.replace(/^\/opsapi/, '/api'),
       },
+      // CubeOps terminal WebSocket endpoint. Keep this separate from the
+      // SDK's /sandboxes proxy: CubeAPI does not expose the ops terminal.
+      '/terminal': {
+        target: 'http://127.0.0.1:3010',
+        ws: true,
+        rewrite: (path) => path.replace(/^\/terminal/, '/api/v1/terminal'),
+      },
       // CubeAPI (SDK/E2B endpoints) — proxy specific API paths to avoid
       // conflicting with vite's own static file serving.
-      '/sandboxes': 'http://127.0.0.1:3000',
+      '/sandboxes': {
+        target: 'http://127.0.0.1:3000',
+        ws: true,
+      },
       '/v2/sandboxes': 'http://127.0.0.1:3000',
       '/templates': 'http://127.0.0.1:3000',
       '/snapshots': 'http://127.0.0.1:3000',

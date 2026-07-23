@@ -204,6 +204,9 @@ externalControlPlane:
 controlPlane:
   enabled: true
   namespaceScoped: true
+  # Shared only by CubeOps and CubeMaster to authorize the internal terminal
+  # gateway. Empty means the chart generates and preserves a random value.
+  terminalGatewayToken: ""
   # Native Deployment rolling strategy for stateless control-plane workloads
   # (api, webui, proxy, ops, lifecycle-manager, cubemastercli). Do not apply
   # maxSurge > 0 to cube-master when it mounts a ReadWriteOnce PVC.

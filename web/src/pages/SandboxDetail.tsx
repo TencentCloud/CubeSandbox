@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Tencent. All rights reserved.
 
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useParams, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -12,10 +12,25 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 
 import { Skeleton } from '@/components/ui/skeleton';
-import { ArrowLeft, Pause, Play, Trash2, RefreshCw } from 'lucide-react';
+import {
+  ArrowLeft,
+  Maximize2,
+  Minimize2,
+  Pause,
+  Play,
+  RefreshCw,
+  TerminalSquare,
+  Trash2,
+  X,
+} from 'lucide-react';
 import { cn, formatBytes, formatRelative } from '@/lib/utils';
 import { formatSandboxActionError } from '@/lib/sandboxActionError';
 import { SandboxActionErrorBanner } from '@/components/SandboxActionErrorBanner';
+import { reconcileTerminalContainer } from '@/lib/terminalProtocol';
+
+const WebTerminal = lazy(() =>
+  import('@/components/WebTerminal').then((module) => ({ default: module.WebTerminal })),
+);
 
 // ── Log level colors ────────────────────────────────────────────────────────
 const LEVEL_CLASS: Record<string, string> = {
@@ -77,6 +92,9 @@ export default function SandboxDetailPage() {
   }, [logs.data]);
 
   const [actionError, setActionError] = useState<string | null>(null);
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  const [terminalFullscreen, setTerminalFullscreen] = useState(false);
+  const [terminalContainer, setTerminalContainer] = useState('');
   const onLifecycleError = (err: unknown) => {
     setActionError(formatSandboxActionError(err, t));
   };
@@ -114,6 +132,23 @@ export default function SandboxDetailPage() {
   const tone =
     state === 'paused' || state === 'pausing' ? 'warn' : state === 'running' ? 'ok' : 'mute';
   const entries = logs.data?.logs ?? [];
+  const terminalContainers =
+    (data as (typeof data & { containers?: Array<{ containerID: string }> }) | undefined)
+      ?.containers ?? [];
+  const terminalContainerKey = terminalContainers
+    .map((container) => container.containerID)
+    .join('\u0000');
+
+  useEffect(() => {
+    setTerminalOpen(false);
+    setTerminalFullscreen(false);
+    setTerminalContainer('');
+  }, [sandboxID]);
+
+  useEffect(() => {
+    const available = terminalContainers.map((container) => container.containerID);
+    setTerminalContainer((current) => reconcileTerminalContainer(current, available));
+  }, [sandboxID, terminalContainerKey]);
 
   if (isUnavailable) {
     if (!hasLoadedData || !data) {
@@ -219,6 +254,14 @@ export default function SandboxDetailPage() {
         </div>
         {data ? (
           <div className="flex gap-2">
+            <Button
+              variant="outline"
+              onClick={() => setTerminalOpen(true)}
+              disabled={state !== 'running'}
+              title={state === 'running' ? t('terminal.open') : t('terminal.paused')}
+            >
+              <TerminalSquare size={14} /> {t('terminal.open')}
+            </Button>
             {state === 'paused' ? (
               <Button variant="outline" onClick={() => resume.mutate()} disabled={resume.isPending}>
                 <Play size={14} /> {t('actions.resume')}
@@ -308,6 +351,71 @@ export default function SandboxDetailPage() {
           </dl>
         </Card>
       </div>
+
+      {data && terminalOpen ? (
+        <Card
+          className={cn(
+            terminalFullscreen &&
+              'fixed inset-3 z-50 flex flex-col overflow-auto border bg-background shadow-2xl',
+          )}
+        >
+          <CardHeader>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <CardTitle>{t('terminal.title')}</CardTitle>
+                <CardDescription>{t('terminal.description')}</CardDescription>
+              </div>
+              <div className="flex items-center gap-2">
+                {terminalContainers.length > 1 ? (
+                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                    {t('terminal.container')}
+                    <select
+                      className="h-8 rounded-md border border-input bg-background px-2 font-mono text-foreground"
+                      value={terminalContainer}
+                      onChange={(event) => setTerminalContainer(event.target.value)}
+                    >
+                      {terminalContainers.map((container) => (
+                        <option key={container.containerID} value={container.containerID}>
+                          {container.containerID}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  title={
+                    terminalFullscreen ? t('terminal.exitFullscreen') : t('terminal.fullscreen')
+                  }
+                  onClick={() => setTerminalFullscreen((value) => !value)}
+                >
+                  {terminalFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                </Button>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  title={t('terminal.close')}
+                  onClick={() => {
+                    setTerminalOpen(false);
+                    setTerminalFullscreen(false);
+                  }}
+                >
+                  <X size={14} />
+                </Button>
+              </div>
+            </div>
+          </CardHeader>
+          <Suspense fallback={<Skeleton className="h-[468px] rounded-lg" />}>
+            <WebTerminal
+              key={terminalContainer}
+              sandboxID={sandboxID}
+              containerID={terminalContainer || undefined}
+              enabled={state === 'running'}
+            />
+          </Suspense>
+        </Card>
+      ) : null}
 
       {/* ── Logs ── */}
       <Card>

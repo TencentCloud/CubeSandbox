@@ -7,6 +7,7 @@ import type { TemplateCompatMatrix } from '@/api/client';
 type ClusterOverviewDto = components['schemas']['ClusterOverview'];
 type ListedSandboxDto = components['schemas']['ListedSandbox'];
 type SandboxDetailDto = components['schemas']['SandboxDetail'];
+type CubeOpsSandboxDetailDto = SandboxDetailDto & { containers: Array<{ containerID: string }> };
 type SandboxLogsDto = components['schemas']['SandboxLogsV2Response'];
 type SandboxSessionDto = components['schemas']['Sandbox'];
 type TemplateDetailDto = components['schemas']['TemplateDetail'];
@@ -252,13 +253,16 @@ export function listSandboxes(filters: { state?: string | null; metadata?: strin
   );
 }
 
-export function getSandboxDetail(sandboxID: string): SandboxDetailDto | undefined {
+export function getSandboxDetail(sandboxID: string): CubeOpsSandboxDetailDto | undefined {
   const sandbox = sandboxes.find((item) => item.sandboxID === sandboxID);
   if (!sandbox) return undefined;
+  const containers = [{ containerID: sandbox.sandboxID }];
+  if (sandbox !== sandboxes[0]) containers.push({ containerID: `${sandbox.sandboxID}-sidecar` });
   return {
     ...clone(sandbox),
     envdAccessToken: `eat_${sandbox.sandboxID.slice(-8)}`,
     domain: 'cube.local',
+    containers,
   };
 }
 

@@ -39,6 +39,11 @@ spec:
               value: {{ .Values.cubeOps.bind | quote }}
             - name: CUBE_MASTER_ADDR
               value: {{ printf "http://%s" (include "cube.masterEndpoint" .) | quote }}
+            - name: CUBE_TERMINAL_GATEWAY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: terminal-gateway-token
             - name: CUBE_SANDBOX_MYSQL_HOST
               value: {{ include "cube.mysqlHost" . | quote }}
             - name: CUBE_SANDBOX_MYSQL_PORT
