@@ -113,6 +113,8 @@ def build_mimo_config() -> str:
     config = {
         "model": model,
         "small_model": model,
+        # A caller-provided CLI --agent value takes precedence over this
+        # default; keep build as the safe default for direct invocations.
         "default_agent": "build",
         "share": "disabled",
         "autoupdate": False,

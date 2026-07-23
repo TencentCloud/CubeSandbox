@@ -92,6 +92,26 @@ class NetworkPolicyTests(unittest.TestCase):
         )
         self.assertEqual(create.call_args.kwargs["config"].template_id, "tpl_123")
 
+    @patch.object(network_policy, "run_command")
+    def test_verify_ca_bundle_checks_path_inside_sandbox(self, run_command) -> None:
+        result = object()
+        run_command.return_value = result
+
+        with patch.object(network_policy, "ensure_success") as ensure_success:
+            network_policy.verify_ca_bundle(
+                object(),
+                {"NODE_EXTRA_CA_CERTS": "/etc/cube/ca/cube-root-ca.crt"},
+            )
+
+        self.assertEqual(
+            run_command.call_args.args[1],
+            "test -r /etc/cube/ca/cube-root-ca.crt",
+        )
+        ensure_success.assert_called_once_with(
+            result,
+            "verify CubeEgress CA bundle at '/etc/cube/ca/cube-root-ca.crt'",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

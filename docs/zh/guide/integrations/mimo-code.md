@@ -45,6 +45,10 @@ sessionID 和 Compose 模式，而不是再次实现通用 OpenCode executor 或
 - Host runner 使用 Python 3.10+；
 - 从 <https://platform.xiaomimimo.com> 获取 MiMo Platform API Key。
 
+可执行的配置步骤和当前 runner 前置条件请参阅
+[示例 README](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/mimo-code-integration/README_zh.md)；该 README
+保持自包含并作为运行细节的维护来源。
+
 ## 为什么在 CubeSandbox 中运行 MiMo Code
 
 MiMo 可以修改文件、执行 Shell、安装依赖和启动子 Agent。MicroVM 把这些能力限制在
@@ -165,9 +169,7 @@ first_result, events = run_turn(
 session_id = session_id_from_events(events)
 
 sandbox_id = sandbox.sandbox_id
-paused = sandbox.pause()
-if isinstance(paused, str) and paused:
-    sandbox_id = paused
+sandbox.pause()  # pause() 保留 sandbox_id，并返回 None
 sandbox = Sandbox.connect(sandbox_id=sandbox_id)
 
 second_result, events = run_turn(
@@ -180,8 +182,8 @@ second_result, events = run_turn(
 )
 ```
 
-实际实现会兼容 SDK 不同的 pause 返回类型，也不会使用 `Sandbox.create()` 上下文
-管理器，因为其 `__exit__` 会 kill 已暂停沙箱。
+CubeSandbox 和 E2B 的 `pause()` 都会保留 sandbox ID 并返回 `None`。Runner 也不会
+使用 `Sandbox.create()` 上下文管理器，因为其 `__exit__` 会 kill 已暂停沙箱。
 
 测试 token 不会写入 `/workspace`，所以成功回忆能证明 MiMo 对话连续性，而不只是
 文件仍然存在。Runner 还会验证 workspace、profile data 和
@@ -226,7 +228,8 @@ Rule(
 沙箱使用 `allow_internet_access=False` 创建。VM 中只有占位
 `MIMO_API_KEY`，真实值只存在于 Host 侧 CubeEgress 规则。MiMo 运行时必须信任
 拦截 CA，因此示例设置
-`NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt`。
+`NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt`，并在发起 API 请求前验证
+该路径在沙箱内可读。
 
 示例关闭分享、遥测、自动更新、模型清单下载、LSP 下载和外部 Skills/插件，以减少
 辅助请求；CubeEgress 规则才是白名单的实际强制边界。
@@ -272,7 +275,7 @@ Compose 是 MiMo 的主 Agent，可用于无头模式。具体委派行为由模
 | `mimo: command not found` | 模板过旧 | 重新构建并注册固定版本镜像 |
 | 平台二进制无法执行 | 镜像架构错误 | 按 Cube 节点架构构建 |
 | 鉴权失败 | Key 无效或使用 Bearer 请求头 | MiMo Platform 要求 `api-key` |
-| `403 Forbidden - CubeEgress` | 请求 Host 未命中 | 使用精确 MiMo 端点并查看出口审计 |
+| `403 Forbidden - CubeEgress` 或 curl 状态 `000` | 请求 Host 未命中 | 使用精确 MiMo 端点并查看出口审计；部分部署会在网络数据面直接阻断未匹配流量 |
 | TLS 校验失败 | 运行时不信任 CubeEgress CA | 正确设置 `MIMO_NODE_EXTRA_CA_CERTS` |
 | 出现 models.dev/更新错误 | 辅助网络功能被开启 | 保留示例提供的 disable 开关 |
 | 模板停在 `PULLING` | 镜像仓库不可达 | 使用节点可访问的仓库和拉取凭证 |

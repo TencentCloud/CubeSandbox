@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import argparse
-import inspect
 import os
 import shlex
 import sys
@@ -99,19 +98,21 @@ def create_sandbox(
     api_url: str,
     api_key: str,
 ) -> Sandbox:
-    config_kwargs: dict[str, str] = {
-        "api_url": api_url,
-        "template_id": template_id,
-    }
-    if "api_key" in inspect.signature(Config).parameters:
-        config_kwargs["api_key"] = api_key
-    else:
+    try:
+        config = Config(
+            api_url=api_url,
+            api_key=api_key,
+            template_id=template_id,
+        )
+    except TypeError as exc:
+        if "api_key" not in str(exc):
+            raise
         print(
             "Installed CubeSandbox SDK does not support Cube API key forwarding; "
             "CubeAPI authentication must be disabled or the SDK must be upgraded.",
             file=sys.stderr,
         )
-    config = Config(**config_kwargs)
+        config = Config(api_url=api_url, template_id=template_id)
     return Sandbox.create(
         template=template_id,
         allow_internet_access=False,
@@ -119,6 +120,20 @@ def create_sandbox(
         timeout=timeout,
         config=config,
     )
+
+
+def verify_ca_bundle(sandbox: Sandbox, envs: dict[str, str]) -> None:
+    ca_bundle = shlex.quote(envs["NODE_EXTRA_CA_CERTS"])
+    result = run_command(
+        sandbox,
+        f"test -r {ca_bundle}",
+        timeout=30,
+    )
+    ensure_success(
+        result,
+        f"verify CubeEgress CA bundle at {envs['NODE_EXTRA_CA_CERTS']!r}",
+    )
+    print(f"CubeEgress CA bundle is readable: {envs['NODE_EXTRA_CA_CERTS']}")
 
 
 def show_secret_boundary(sandbox: Sandbox, envs: dict[str, str]) -> None:
@@ -201,6 +216,7 @@ def main() -> int:
     sandbox_id = sandbox_identifier(sandbox)
     try:
         print(f"Sandbox ready: {sandbox_id}")
+        verify_ca_bundle(sandbox, envs)
         show_secret_boundary(sandbox, envs)
         show_unmatched_host_blocked(sandbox)
         if args.skip_agent:

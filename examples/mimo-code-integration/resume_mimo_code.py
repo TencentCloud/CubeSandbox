@@ -182,9 +182,9 @@ def main() -> int:
         verify_turn_one(sandbox, args.workspace, resume_token)
 
         print(f"\nPausing sandbox {sandbox_id}...")
-        paused = sandbox.pause()
-        if isinstance(paused, str) and paused:
-            sandbox_id = paused
+        # CubeSandbox and E2B pause() both preserve the existing sandbox ID
+        # and return None.
+        sandbox.pause()
         print(f"Paused. Resume handle: {sandbox_id}")
 
         sandbox = Sandbox.connect(sandbox_id=sandbox_id)

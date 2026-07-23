@@ -46,6 +46,9 @@ Compose mode rather than reproducing a generic OpenCode executor or plugin.
 - Python 3.10+ for the host runners.
 - A MiMo Platform API key from <https://platform.xiaomimimo.com>.
 
+For executable setup details and the current runner prerequisites, see the
+self-contained [example README](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/mimo-code-integration/README.md).
+
 ## Why Run MiMo Code in CubeSandbox
 
 MiMo can edit files, execute shell commands, install dependencies, and spawn
@@ -172,9 +175,7 @@ first_result, events = run_turn(
 session_id = session_id_from_events(events)
 
 sandbox_id = sandbox.sandbox_id
-paused = sandbox.pause()
-if isinstance(paused, str) and paused:
-    sandbox_id = paused
+sandbox.pause()  # pause() preserves sandbox_id and returns None
 sandbox = Sandbox.connect(sandbox_id=sandbox_id)
 
 second_result, events = run_turn(
@@ -187,9 +188,9 @@ second_result, events = run_turn(
 )
 ```
 
-The actual implementation handles SDK return-type differences and does not use
-a `Sandbox.create()` context manager, whose `__exit__` would kill the paused
-sandbox.
+CubeSandbox and E2B both preserve the sandbox ID and return `None` from
+`pause()`. The runner also does not use a `Sandbox.create()` context manager,
+whose `__exit__` would kill the paused sandbox.
 
 The test token is deliberately absent from `/workspace`; successful recall
 therefore proves MiMo conversation continuity. The runner also verifies the
@@ -234,7 +235,8 @@ Rule(
 The sandbox is created with `allow_internet_access=False`. It sees only a
 placeholder `MIMO_API_KEY`; the real value exists in the host-side CubeEgress
 rule. MiMo's runtime must trust the interception CA, so the example sets
-`NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt`.
+`NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt` and verifies that the
+path is readable inside the sandbox before making the API request.
 
 Sharing, telemetry, auto-update, model-manifest fetches, LSP downloads, and
 external skills/plugins are disabled. These settings reduce auxiliary requests;
@@ -286,7 +288,7 @@ tests rather than require a fixed subagent trace.
 | `mimo: command not found` | Old template | Rebuild and register the pinned image |
 | Platform binary cannot execute | Wrong image architecture | Build for the Cube node architecture |
 | Authentication failed | Invalid key or Bearer header used | MiMo Platform requires the `api-key` header |
-| `403 Forbidden - CubeEgress` | Request host does not match | Use the exact MiMo endpoint and inspect egress audit logs |
+| `403 Forbidden - CubeEgress` or curl status `000` | Request host does not match | Use the exact MiMo endpoint and inspect egress audit logs; some deployments block unmatched traffic at the network data plane |
 | TLS verification failed | Runtime does not trust CubeEgress CA | Set `MIMO_NODE_EXTRA_CA_CERTS` correctly |
 | Unexpected models.dev/update errors | Auxiliary network feature enabled | Keep the supplied disable switches |
 | Template remains `PULLING` | Registry unavailable | Use a node-reachable registry and pull credentials |
