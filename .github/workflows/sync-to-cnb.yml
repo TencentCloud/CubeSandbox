@@ -230,11 +230,26 @@ jobs:
   sync_release_assets:
     if: needs.resolve_release_context.outputs.should_sync_assets == 'true'
     needs: [resolve_release_context, ensure_cnb_release]
-    runs-on: ubuntu-latest
+    # Run attachment transfers from China to avoid slow GitHub-hosted US -> CNB uploads.
+    # This ARC runner set requires a job container.
+    runs-on: arc-2c4g-ctd-gz
+    container:
+      image: ubuntu:24.04
+    # Job containers default to `sh` (dash); pipefail / [[ ]] / arrays need bash.
+    defaults:
+      run:
+        shell: bash
     concurrency:
       group: sync-to-cnb-release-${{ needs.resolve_release_context.outputs.release_tag }}
       cancel-in-progress: false
     steps:
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl gh python3
+          rm -rf /var/lib/apt/lists/*
+
       - name: Inspect GitHub release assets
         id: assets
         env:
@@ -250,6 +265,26 @@ jobs:
           if [[ "${asset_count}" == "0" ]]; then
             echo "GitHub release ${RELEASE_TAG} has no assets yet; nothing to sync."
           fi
+
+      - name: Install git-cnb
+        if: steps.assets.outputs.asset_count != '0'
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          case "${arch}" in
+            x86_64|amd64) git_cnb_arch=amd64 ;;
+            aarch64|arm64) git_cnb_arch=arm64 ;;
+            *) echo "Unsupported architecture: ${arch}" >&2; exit 1 ;;
+          esac
+
+          bin_dir="${RUNNER_TEMP}/git-cnb-bin"
+          mkdir -p "${bin_dir}"
+          curl -fsSL \
+            "https://cnb.cool/looc/git-cnb/-/releases/latest/download/git-cnb_linux_${git_cnb_arch}" \
+            -o "${bin_dir}/git-cnb"
+          chmod +x "${bin_dir}/git-cnb"
+          echo "${bin_dir}" >> "${GITHUB_PATH}"
+          "${bin_dir}/git-cnb" version
 
       - name: Download GitHub release assets
         if: steps.assets.outputs.asset_count != '0'
@@ -282,13 +317,6 @@ jobs:
 
           for file in "${files[@]}"; do
             echo "Uploading $(basename "${file}") to CNB release ${RELEASE_TAG}..."
-            docker run --rm \
-              -v "${PWD}:${PWD}" \
-              -w "${PWD}" \
-              -e CNB_TOKEN="${CNB_TOKEN}" \
-              -e CNB_API_ENDPOINT="${CNB_API_ENDPOINT}" \
-              -e CNB_WEB_ENDPOINT="${CNB_WEB_ENDPOINT}" \
-              docker.cnb.cool/looc/git-cnb:latest \
-              git-cnb --domain "${CNB_DOMAIN}" --repo "${CNB_REPO_SLUG}" \
+            git-cnb --domain "${CNB_DOMAIN}" --repo "${CNB_REPO_SLUG}" \
               release asset-upload -t "${RELEASE_TAG}" -f "${file}"
           done
