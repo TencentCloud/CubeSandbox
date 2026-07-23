@@ -284,7 +284,9 @@ jobs:
             -o "${bin_dir}/git-cnb"
           chmod +x "${bin_dir}/git-cnb"
           echo "${bin_dir}" >> "${GITHUB_PATH}"
-          "${bin_dir}/git-cnb" version
+          # This job has no checkout; git-cnb auto-detects repo from cwd and
+          # fails with "repo is required" unless --repo is provided explicitly.
+          "${bin_dir}/git-cnb" --domain "${CNB_DOMAIN}" --repo "${CNB_REPO_SLUG}" version
 
       - name: Download GitHub release assets
         if: steps.assets.outputs.asset_count != '0'

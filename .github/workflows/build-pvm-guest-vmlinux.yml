@@ -145,6 +145,5 @@ jobs:
             pvm-guest-release-assets/vmlinux-pvm \
             pvm-guest-release-assets/vmlinux-pvm-amd64
           gh release upload "${GITHUB_REF_NAME}" \
-            pvm-guest-release-assets/vmlinux-pvm \
             pvm-guest-release-assets/vmlinux-pvm-amd64 \
             --clobber
