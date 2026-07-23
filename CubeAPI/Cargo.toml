@@ -84,6 +84,14 @@ utoipa = { version = "5.4.0", features = ["chrono", "uuid", "yaml"] }
 # ── Graceful shutdown ─────────────────────────────────────────────────────
 # (tokio::signal + axum::serve().with_graceful_shutdown is sufficient)
 
+# ── Webhook delivery ─────────────────────────────────────────────────────
+bytes = "1"
+
+# ── Webhook signing ──────────────────────────────────────────────────────
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.4" }
