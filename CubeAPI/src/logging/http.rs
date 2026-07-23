@@ -342,3 +342,264 @@ async fn deliver_with_retry(
 
 // ─── Tests ───────────────────────────────────────────────────────────────
 
+#[cfg(test)]
+mod tests {
+    use super::super::{LogEvent, LogLevel};
+    use super::*;
+    use axum::{routing::post, Router};
+    use std::sync::Mutex;
+
+    #[test]
+    fn build_payload_includes_event_and_timestamp() {
+        let event = LogEvent::new(LogLevel::Info, "sandbox.created")
+            .field("sandbox_id", "sb-abc")
+            .field("template_id", "tpl-xyz");
+        let payload = build_payload(&event);
+        assert_eq!(payload["event"], "sandbox.created");
+        assert!(!payload["timestamp"].as_str().unwrap().is_empty());
+        assert_eq!(payload["sandbox_id"], "sb-abc");
+        assert_eq!(payload["template_id"], "tpl-xyz");
+    }
+
+    #[test]
+    fn sign_payload_produces_deterministic_hmac() {
+        let body = b"test body";
+        let sig = sign_payload("secret", body);
+        assert!(sig.starts_with("sha256="));
+        assert_eq!(sig, sign_payload("secret", body));
+        assert_ne!(sig, sign_payload("different", body));
+    }
+
+    #[test]
+    fn redact_url_strips_path_and_query() {
+        assert_eq!(
+            redact_url("https://hooks.example.com/webhook"),
+            "hooks.example.com"
+        );
+        assert_eq!(
+            redact_url("http://127.0.0.1:9090/callback?token=abc"),
+            "127.0.0.1:9090"
+        );
+        assert_eq!(redact_url("https://example.com"), "example.com");
+    }
+
+    #[tokio::test]
+    async fn empty_targets_are_noop() {
+        let config = HttpLoggerConfig {
+            targets: vec![],
+            subscribed_events: HashSet::new(),
+            secret: String::new(),
+            max_concurrency: 4,
+            http_client: reqwest::Client::new(),
+        };
+        let logger = HttpLogger::new(config);
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created"))
+            .await;
+        logger.flush().await;
+    }
+
+    async fn spawn_mock_server() -> (String, Arc<Mutex<Vec<String>>>) {
+        let bodies: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let b = bodies.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{}:{}/webhook", addr.ip(), addr.port());
+        let app = Router::new().route(
+            "/webhook",
+            post(move |body: axum::body::Bytes| async move {
+                b.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&body).to_string());
+                "ok"
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        (url, bodies)
+    }
+
+    #[tokio::test]
+    async fn delivers_event_to_target() {
+        let (url, bodies) = spawn_mock_server().await;
+        let config = HttpLoggerConfig {
+            targets: vec![url],
+            subscribed_events: HashSet::new(),
+            secret: String::new(),
+            max_concurrency: 4,
+            http_client: reqwest::Client::new(),
+        };
+        let logger = HttpLogger::new(config);
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created").field("sandbox_id", "sb-test"))
+            .await;
+        logger.flush().await;
+        let captured = bodies.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        let body: serde_json::Value = serde_json::from_str(&captured[0]).unwrap();
+        assert_eq!(body["event"], "sandbox.created");
+        assert_eq!(body["sandbox_id"], "sb-test");
+    }
+
+    #[tokio::test]
+    async fn filters_out_unsubscribed_events() {
+        let (url, bodies) = spawn_mock_server().await;
+        let mut events = HashSet::new();
+        events.insert("sandbox.created".to_string());
+        let config = HttpLoggerConfig {
+            targets: vec![url],
+            subscribed_events: events,
+            secret: String::new(),
+            max_concurrency: 4,
+            http_client: reqwest::Client::new(),
+        };
+        let logger = HttpLogger::new(config);
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created"))
+            .await;
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.deleted"))
+            .await;
+        logger.flush().await;
+        assert_eq!(bodies.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn retries_on_500_then_succeeds() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let counter = Arc::new(AtomicU32::new(0));
+        let c = counter.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{}:{}/webhook", addr.ip(), addr.port());
+        let app = Router::new().route(
+            "/webhook",
+            post(move |_: axum::body::Bytes| async move {
+                let n = c.fetch_add(1, Ordering::SeqCst);
+                if n <= 1 {
+                    (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "err")
+                } else {
+                    (axum::http::StatusCode::OK, "ok")
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let config = HttpLoggerConfig {
+            targets: vec![url],
+            subscribed_events: HashSet::new(),
+            secret: String::new(),
+            max_concurrency: 4,
+            http_client: reqwest::Client::new(),
+        };
+        let logger = HttpLogger::new(config);
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created"))
+            .await;
+        logger.flush().await;
+        assert!(
+            counter.load(Ordering::SeqCst) >= 2,
+            "expected at least 2 attempts, got {}",
+            counter.load(Ordering::SeqCst)
+        );
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_on_4xx() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let counter = Arc::new(AtomicU32::new(0));
+        let c = counter.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{}:{}/webhook", addr.ip(), addr.port());
+        let app = Router::new().route(
+            "/webhook",
+            post(move |_: axum::body::Bytes| async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                (axum::http::StatusCode::BAD_REQUEST, "bad")
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let config = HttpLoggerConfig {
+            targets: vec![url],
+            subscribed_events: HashSet::new(),
+            secret: String::new(),
+            max_concurrency: 4,
+            http_client: reqwest::Client::new(),
+        };
+        let logger = HttpLogger::new(config);
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created"))
+            .await;
+        logger.flush().await;
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn sends_hmac_signature_when_secret_set() {
+        let sig: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let s = sig.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{}:{}/webhook", addr.ip(), addr.port());
+        let app = Router::new().route(
+            "/webhook",
+            post(
+                move |headers: axum::http::HeaderMap, _body: axum::body::Bytes| async move {
+                    if let Some(val) = headers.get("X-Cube-Signature") {
+                        *s.lock().unwrap() = Some(val.to_str().unwrap().to_string());
+                    }
+                    axum::http::StatusCode::OK
+                },
+            ),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let config = HttpLoggerConfig {
+            targets: vec![url],
+            subscribed_events: HashSet::new(),
+            secret: "test-secret".to_string(),
+            max_concurrency: 4,
+            http_client: reqwest::Client::new(),
+        };
+        let logger = HttpLogger::new(config);
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created"))
+            .await;
+        logger.flush().await;
+        let captured = sig.lock().unwrap();
+        assert!(captured.is_some(), "X-Cube-Signature header missing");
+        assert!(captured.as_ref().unwrap().starts_with("sha256="));
+    }
+
+    #[tokio::test]
+    async fn flush_waits_for_inflight_delivery() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{}:{}/webhook", addr.ip(), addr.port());
+        let app = Router::new().route(
+            "/webhook",
+            post(|| async {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                "ok"
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let config = HttpLoggerConfig {
+            targets: vec![url],
+            subscribed_events: HashSet::new(),
+            secret: String::new(),
+            max_concurrency: 4,
+            http_client: reqwest::Client::new(),
+        };
+        let logger = HttpLogger::new(config);
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created"))
+            .await;
+        let start = std::time::Instant::now();
+        logger.flush().await;
+        assert!(start.elapsed() >= std::time::Duration::from_millis(100));
+    }
+}
