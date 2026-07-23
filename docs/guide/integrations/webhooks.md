@@ -142,6 +142,12 @@ Headers:
 Receivers can use `batch_id` for idempotency. Retries reuse the same `batch_id`
 and resend the same batch body.
 
+Events keep their production order within one batch. CubeAPI does not guarantee
+the delivery order of separate batches, even for the same endpoint: batches may
+be delivered concurrently, and a retried older batch can arrive after a newer
+batch. Receivers must use `batch_id` and event timestamps rather than arrival
+order when reconstructing state.
+
 Verify the signature against the raw request body:
 
 ```python

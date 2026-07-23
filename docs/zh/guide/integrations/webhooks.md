@@ -129,6 +129,10 @@ Header：
 接收端可以使用 `batch_id` 做幂等处理。重试时会复用同一个 `batch_id`，并重新
 发送相同的 batch body。
 
+单个 batch 内的事件保留其产生顺序；但 CubeAPI 不保证不同 batch 的到达顺序，即使
+它们发往同一个 endpoint。不同 batch 可能并发投递，较早 batch 的重试也可能晚于较新
+batch 到达。接收端重建状态时应使用 `batch_id` 和事件时间戳，而不能依赖到达顺序。
+
 用原始 request body 验签：
 
 ```python

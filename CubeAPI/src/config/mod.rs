@@ -120,8 +120,8 @@ fn default_webhook_config_path() -> Option<String> {
     std::env::var("CUBE_API_WEBHOOK_CONFIG")
         .ok()
         .filter(|value| !value.trim().is_empty())
-}
 
+    }
 
 impl ServerConfig {
     pub fn from_env() -> anyhow::Result<Self> {

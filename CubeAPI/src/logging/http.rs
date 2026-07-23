@@ -144,6 +144,21 @@ pub struct HttpLogger {
     routes: Arc<EndpointRoutes>,
 }
 
+struct DroppedEventContext<'a> {
+    event: &'a str,
+    sandbox_id: Option<&'a str>,
+}
+
+fn dropped_event_context(event: &LogEvent) -> DroppedEventContext<'_> {
+    DroppedEventContext {
+        event: &event.event,
+        sandbox_id: event
+            .fields
+            .get("sandbox_id")
+            .and_then(serde_json::Value::as_str),
+    }
+}
+
 impl HttpLogger {
     pub fn new(config: HttpLoggerConfig) -> anyhow::Result<Self> {
         validate_delivery(&config.delivery)?;
@@ -175,11 +190,25 @@ impl Logger for HttpLogger {
 
         match self.tx.try_send(Msg::Event(event)) {
             Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                error!("HttpLogger: webhook queue is full, dropping event");
+            Err(mpsc::error::TrySendError::Full(Msg::Event(event))) => {
+                let context = dropped_event_context(&event);
+                error!(
+                    event = %context.event,
+                    sandbox_id = ?context.sandbox_id,
+                    "HttpLogger: webhook queue is full, dropping event"
+                );
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                error!("HttpLogger: webhook worker is gone, dropping event");
+            Err(mpsc::error::TrySendError::Closed(Msg::Event(event))) => {
+                let context = dropped_event_context(&event);
+                error!(
+                    event = %context.event,
+                    sandbox_id = ?context.sandbox_id,
+                    "HttpLogger: webhook worker is gone, dropping event"
+                );
+            }
+            Err(mpsc::error::TrySendError::Full(Msg::Flush(_)))
+            | Err(mpsc::error::TrySendError::Closed(Msg::Flush(_))) => {
+                unreachable!("HttpLogger only sends Event messages with try_send");
             }
         }
     }
@@ -951,6 +980,16 @@ mod tests {
             signature,
             "sha256=9fce8beb32bfed09995cada741f29b4b67882b1694b37dfa74e76cf82e29dca7"
         );
+    }
+
+    #[test]
+    fn dropped_event_context_includes_event_and_sandbox_id() {
+        let event = LogEvent::new(LogLevel::Info, "sandbox.created").field("sandbox_id", "sbx-1");
+
+        let context = dropped_event_context(&event);
+
+        assert_eq!(context.event, "sandbox.created");
+        assert_eq!(context.sandbox_id, Some("sbx-1"));
     }
 
     #[tokio::test]
