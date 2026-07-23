@@ -357,6 +357,8 @@ pub async fn connect_sandbox(
     Path(sandbox_id): Path<String>,
     Json(body): Json<ConnectSandbox>,
 ) -> AppResult<impl IntoResponse> {
+    body.validate()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
     state
         .logger
         .log(

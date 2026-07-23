@@ -345,6 +345,7 @@ pub struct ResumedSandbox {
 pub struct ConnectSandbox {
     /// Idle timeout in seconds; None when the client did not send one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[validate(custom(function = "validate_timeout_value"))]
     pub timeout: Option<i32>,
 }
 
@@ -549,8 +550,8 @@ fn default_page_limit() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateTemplateRequest, NewSandbox, RefreshRequest, ResumedSandbox, SandboxNetworkConfig,
-        SetTimeoutRequest, TemplateAliasLookupResponse,
+        ConnectSandbox, CreateTemplateRequest, NewSandbox, RefreshRequest, ResumedSandbox,
+        SandboxNetworkConfig, SetTimeoutRequest, TemplateAliasLookupResponse,
     };
     use validator::Validate;
 
@@ -628,6 +629,21 @@ mod tests {
         assert!(
             req.validate().is_err(),
             "resume timeout=-2 should be rejected"
+        );
+    }
+
+    #[test]
+    fn connect_sandbox_validates_timeout_like_resume() {
+        for timeout in [None, Some(-1), Some(0), Some(60)] {
+            let req = ConnectSandbox { timeout };
+            req.validate()
+                .unwrap_or_else(|e| panic!("connect timeout={timeout:?} should be valid: {e}"));
+        }
+
+        let req = ConnectSandbox { timeout: Some(-2) };
+        assert!(
+            req.validate().is_err(),
+            "connect timeout=-2 should be rejected"
         );
     }
 

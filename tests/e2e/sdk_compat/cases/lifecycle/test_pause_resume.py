@@ -18,13 +18,6 @@ pytestmark = [
 ]
 
 
-@pytest.fixture()
-def cubesandbox_resume_sandbox(sdk_backend, sdk_sandbox):
-    if sdk_backend != "cubesandbox":
-        pytest.skip("explicit resume timeout validation is CubeSandbox SDK specific")
-    return sdk_sandbox
-
-
 def test_pause_sets_state_paused(sdk_sandbox, sdk_e2e_config):
     sdk_sandbox.pause(timeout=sdk_e2e_config.default_timeout)
     state = wait_until_paused(sdk_sandbox, timeout=sdk_e2e_config.default_timeout)
@@ -72,16 +65,16 @@ def test_pause_and_connect_resume_preserves_env_vars(sdk_sandbox, sdk_e2e_config
         resumed.close()
 
 
-def test_resume_accepts_never_timeout(cubesandbox_resume_sandbox, sdk_e2e_config):
-    cubesandbox_resume_sandbox.pause(timeout=sdk_e2e_config.default_timeout)
+def test_resume_accepts_never_timeout(sdk_sandbox, sdk_e2e_config):
+    sdk_sandbox.pause(timeout=sdk_e2e_config.default_timeout)
 
-    cubesandbox_resume_sandbox.resume(timeout=-1)
+    sdk_sandbox.resume(timeout=-1)
     assert wait_until_running(
-        cubesandbox_resume_sandbox,
+        sdk_sandbox,
         timeout=sdk_e2e_config.default_timeout,
     ) == "running"
 
-    result = cubesandbox_resume_sandbox.run_command(
+    result = sdk_sandbox.run_command(
         "printf never-timeout-resume",
         timeout=sdk_e2e_config.command_timeout,
     )
@@ -89,16 +82,27 @@ def test_resume_accepts_never_timeout(cubesandbox_resume_sandbox, sdk_e2e_config
     assert result.stdout == "never-timeout-resume"
 
 
-def test_resume_rejects_invalid_negative_timeout(cubesandbox_resume_sandbox, sdk_e2e_config):
-    from cubesandbox import ApiError
+def test_resume_rejects_invalid_negative_timeout(sdk_sandbox, sdk_e2e_config):
+    sdk_sandbox.pause(timeout=sdk_e2e_config.default_timeout)
 
-    cubesandbox_resume_sandbox.pause(timeout=sdk_e2e_config.default_timeout)
+    with pytest.raises(
+        Exception,  # noqa: B017 - SDKs wrap API errors differently
+    ) as exc_info:
+        sdk_sandbox.resume(timeout=-2)
 
-    with pytest.raises(ApiError) as exc_info:
-        cubesandbox_resume_sandbox.resume(timeout=-2)
+    _assert_invalid_timeout_error(exc_info.value)
 
-    assert getattr(exc_info.value, "status_code", None) == 400
-    assert "timeout" in str(exc_info.value).lower()
+
+def _assert_invalid_timeout_error(exc: Exception) -> None:
+    status_code = getattr(exc, "status_code", None)
+    response = getattr(exc, "response", None)
+    if status_code is None and response is not None:
+        status_code = getattr(response, "status_code", None)
+    if status_code is not None:
+        assert status_code == 400
+
+    message = str(exc).lower()
+    assert "timeout" in message
 
 
 @pytest.mark.requires_capability(RUN_CODE)
