@@ -42,7 +42,7 @@ Related validations:
 | `cubeProxy.enabled=true requires placement.controlPlane.nodeSelector` | Proxy runs on control-plane nodes |
 | `configureClusterDNS=true requires cubeProxy.domain` | Injecting cluster DNS requires a sandbox domain |
 
-How to label nodes: [Helm Install · Label nodes](./install.md#3-label-nodes-and-role-taints).
+How to label nodes: [Helm Install · Label nodes](./install.md#3-label-nodes-and-roles).
 
 ### Compute DaemonSet Ready count is short
 
@@ -253,7 +253,7 @@ A common cause is inability to reach CubeMaster (network / DNS).
 
 ### Sandbox start is slow (>10s) while the node is mostly idle
 
-- **First** use of a template: rootfs is pulled from the control plane, may take 5–30s; subsequent starts of the same template are usually within ~1s
+- Check whether the node's CPU load is high.
 - Check whether `/data/cubelet` is full or IOPS-bound: `iostat -x 1`
 - Many Paused sandboxes occupying disk without cleanup
 
@@ -276,15 +276,13 @@ Config examples: [Helm Install · Compute node data disk](./install.md#compute-n
 
 ### How do I disable PVM on a node?
 
-**Remove that node’s label** (do not only flip the Chart default switch):
+**Remove that node’s label**:
 
 ```bash
 kubectl label node <node> cube.tencent.com/allow-pvm-bootstrap-
 ```
 
-`cubeNode.pvmGuestKernel.enabled=false` mainly affects the **first-install default**; nodes already running PVM try to stay as-is across upgrades.
-
-To skip PVM kernel swap cluster-wide: do not apply `allow-pvm-bootstrap`, and you may set `bootstrap.pvmHostKernel.enabled=false`.
+Then reboot the node's host machine.
 
 Self-check the current guest:
 
@@ -308,7 +306,7 @@ readlink /var/lib/cube-node-bootstrap/vmlinux-active
 
 ### Ingress / external entry does not work
 
-CubeProxy **no longer** occupies node 80/443. Check:
+Check:
 
 - Whether IngressClass / Ingress exists
 - Whether passthrough annotations match your Controller (defaults assume nginx-ingress)
@@ -347,13 +345,8 @@ kubectl -n cube-system rollout restart deploy/cube-proxy
 
 ### Sandbox cannot reach the internet
 
-Egress denies by default and only allows the whitelist:
-
-```bash
-kubectl -n cube-system logs <cube-node-pod> -c cube-egress --tail=200 | grep -i deny
-```
-
-Adjust `cubeEgress` values as needed, or update the whitelist via the CubeMaster API.
+- Log into the `cube-node` pod and check whether external connectivity works.
+- Inspect the sandbox network policy.
 
 ### TLS errors after outbound MITM
 
@@ -412,13 +405,6 @@ Whether PVC/PV are deleted depends on the StorageClass `reclaimPolicy` (TKE’s 
 ---
 
 ## Image builds
-
-### `build-cube-images.sh` download hangs
-
-- By default it pulls the all-in-one package from **GitHub Releases**; in China set `MIRROR=cn` to use CNB (not SourceForge)
-- Or pre-download into `${BUILD_ROOT}/downloads/` (default `BUILD_ROOT=/tmp/cube-kubernetes-images-<version>`); the script skips download when local files are present
-
-See [`deploy/kubernetes/images/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/deploy/kubernetes/images/README.md).
 
 ### Building arm64
 

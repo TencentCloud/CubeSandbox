@@ -253,7 +253,7 @@ kubectl -n cube-system logs -l app.kubernetes.io/component=cube-node -c cubelet 
 
 ### 沙箱启动很慢（>10s），节点却很空
 
-- **首次**用某模板：要从控制面拉 rootfs，可能 5–30s；同模板后续通常约 1s 内
+- 排查节点CPU 负载是否较高。
 - 查 `/data/cubelet` 是否打满盘或 IOPS：`iostat -x 1`
 - 是否有大量 Paused 沙箱占盘未清理
 
@@ -276,15 +276,13 @@ kubectl -n cube-system logs -l app.kubernetes.io/component=cube-node -c cubelet 
 
 ### 怎么关掉某台节点的 PVM？
 
-**去掉该节点的 label**（不要只改 Chart 默认开关）：
+**去掉该节点的 label**：
 
 ```bash
 kubectl label node <node> cube.tencent.com/allow-pvm-bootstrap-
 ```
 
-`cubeNode.pvmGuestKernel.enabled=false` 主要影响**首次安装默认**；已在跑 PVM 的节点升级时会尽量保持原样。
-
-整集群不做 PVM 换核：不要打 `allow-pvm-bootstrap`，并可设 `bootstrap.pvmHostKernel.enabled=false`。
+然后重启节点所在的服务器。
 
 自检当前 guest：
 
@@ -308,7 +306,7 @@ readlink /var/lib/cube-node-bootstrap/vmlinux-active
 
 ### Ingress / 外部入口不通
 
-CubeProxy **不再**占节点 80/443。排查：
+排查：
 
 - IngressClass / Ingress 是否存在
 - passthrough 注解是否匹配你的 Controller（默认按 nginx-ingress）
@@ -347,13 +345,8 @@ kubectl -n cube-system rollout restart deploy/cube-proxy
 
 ### 沙箱上不了外网
 
-egress 默认拒绝，只放行白名单：
-
-```bash
-kubectl -n cube-system logs <cube-node-pod> -c cube-egress --tail=200 | grep -i deny
-```
-
-按需改 `cubeEgress` values，或经 CubeMaster API 更新白名单。
+- 登录到 `cube-node` pod内，检查是否能连通外网。
+- 排查沙箱网络策略
 
 ### 出站 MITM 后 TLS 报错
 
@@ -412,13 +405,6 @@ PVC/PV 是否删除取决于实际 StorageClass 的 `reclaimPolicy`（TKE 的 `c
 ---
 
 ## 镜像构建
-
-### `build-cube-images.sh` 下载卡住
-
-- 默认从 **GitHub Releases** 拉一体化包；国内可设 `MIRROR=cn` 走 CNB（不是 SourceForge）
-- 或预下载到 `${BUILD_ROOT}/downloads/`（默认 `BUILD_ROOT=/tmp/cube-kubernetes-images-<version>`），脚本检测到本地文件会跳过下载
-
-见 [`deploy/kubernetes/images/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/deploy/kubernetes/images/README.md)。
 
 ### 构建 arm64
 
