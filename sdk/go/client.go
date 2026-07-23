@@ -150,6 +150,9 @@ func (c *Client) createPayload(opts CreateOptions) (map[string]any, error) {
 	if opts.Network.AllowPublicTraffic != nil {
 		network["allowPublicTraffic"] = *opts.Network.AllowPublicTraffic
 	}
+	if opts.Network.MaskRequestHost != nil {
+		network["maskRequestHost"] = *opts.Network.MaskRequestHost
+	}
 	if len(opts.Network.AllowOut) > 0 {
 		network["allowOut"] = opts.Network.AllowOut
 	}

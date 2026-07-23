@@ -15,9 +15,11 @@ Documentation:
 
 - [Framework design](docs/framework-design.md)
 - [Case authoring guide](docs/case-authoring.md)
+- [Test coverage and improvement plan](docs/test-coverage.md)
 - [中文 README](README_zh.md)
-- [中文框架设计](docs/framework-design.zh-CN.md)
+- [中文框架设计](docs/zh/framework-design.md)
 - [中文用例编写指南](docs/zh/case-authoring.md)
+- [中文测试覆盖盘点与优化建议](docs/zh/test-coverage.md)
 
 ## Backend Environment Variables
 
@@ -97,6 +99,9 @@ SDK_E2E_BACKENDS=e2b,cubesandbox pytest --run-e2e -m "p0 or p1"
 
 # Platform lifecycle regression (cube-proxy + lifecycle manager)
 SDK_E2E_PLATFORM_LIFECYCLE=true pytest --run-e2e -k lifecycle -m "p1 and slow"
+
+# Volume plugin regression (manual plugin deploy/config; cubesandbox >= 0.6.0)
+SDK_E2E_VOLUME_PLUGIN=true pytest --run-e2e -m volume --sdk-e2e-backends=cubesandbox
 
 # Broader regression
 SDK_E2E_BACKENDS=e2b,cubesandbox pytest --run-e2e -m "p0 or p1 or p2"
@@ -210,6 +215,16 @@ Optional:
 - `SDK_E2E_TCP_TARGET_PORT`: public TCP probe port. Defaults to `53`.
 - `SDK_E2E_ALTERNATE_TCP_TARGET_IP`: alternate public TCP probe address.
   Defaults to `1.1.1.1`.
+- `SDK_E2E_PUBLIC_ACCESS_PORT`: exposed HTTP port used by restricted public
+  access inbound tests. Defaults to `49983`.
+- `SDK_E2E_PUBLIC_ACCESS_PATH`: path used by restricted public access inbound
+  tests. Defaults to `/health`.
+- `SDK_E2E_PUBLIC_ACCESS_EXPECTED_STATUS`: expected successful HTTP status for
+  restricted public access inbound tests. Defaults to `204`.
+- `SDK_E2E_PUBLIC_ACCESS_EXPECTED_BODY`: expected successful response body for
+  restricted public access inbound tests. Defaults to an empty string.
+  The default public URL uses HTTP, so traffic access tokens are sent in
+  cleartext. Use an HTTPS endpoint for cross-network or multi-tenant CI.
 - `SDK_E2E_KEEP_SANDBOX_ON_FAILURE`: preserve only sandboxes whose test setup
   or call phase failed. Passed and skipped tests are still cleaned up. Defaults
   to `false`.
@@ -229,6 +244,11 @@ Optional:
   initial wait. Defaults to `45`.
 - `CUBE_PROXY_ADMIN_PORT`: CubeProxy admin port used by the lifecycle probe.
   Defaults to `8082`.
+- `SDK_E2E_VOLUME_PLUGIN`: enable Volume Plugin cases (CRUD and sandbox
+  `volumeMounts` bind/unbind). Defaults to `false`.
+- `SDK_E2E_VOLUME_DRIVER`: driver name for `POST /volumes`. Defaults to `cos`.
+- `SDK_E2E_VOLUME_REFCOUNT_WAIT`: seconds to wait for delete-while-bound `409`
+  and post-unbind `204`. Defaults to `60`.
 
 For self-hosted HTTPS sandbox endpoints, trust the local CA:
 
@@ -320,6 +340,11 @@ Current capability domains:
 - `cases/run_code/`: expression text, stdout, kernel state, Python error reporting.
 - `cases/network/`: create-time network policy for allow/deny and public egress access.
 - `cases/concurrency/`: simultaneous multi-sandbox isolation.
+- `cases/host-mount/`: host-directory mount extension — happy path plus create-time
+  validation, runtime bind-mount failures, and cross-sandbox sharing boundary cases.
+- `cases/volume/`: Volume Plugin CRUD plus sandbox `volumeMounts` bind/unbind
+  (opt-in via `SDK_E2E_VOLUME_PLUGIN=true`; CubeSandbox only). Requires a
+  manually deployed/configured Volume Plugin and `cubesandbox` >= 0.6.0.
 
 Keep new cases backend-neutral. Add backend-specific behavior through capability
 markers instead of branching inside test bodies. Future domains can be added next
@@ -341,9 +366,14 @@ Capability markers:
 - `@pytest.mark.requires_capability("<name>")`: skip or deselect unsupported backends.
 - `@pytest.mark.sandbox_create_options(...)`: pass SDK create-time options such as `network`, `env_vars`, or `lifecycle`.
 - `@pytest.mark.requires_cubeproxy`: platform lifecycle cases that depend on cube-proxy and lifecycle-manager coordination. Skipped unless `SDK_E2E_PLATFORM_LIFECYCLE=true`.
+- `@pytest.mark.volume`: Volume Plugin cases. Skipped unless `SDK_E2E_VOLUME_PLUGIN=true`.
 - Common capabilities include `lifecycle`, `commands`, `filesystem`, and `run_code`.
 - Shared optional capabilities include `pause_resume`, `network_allow_deny`, and `network_public_access`.
 - `platform_lifecycle` is available only to CubeSandbox platform-managed lifecycle cases.
+- `host_mount` is a CubeSandbox-only extension; `cases/host-mount/` uses it via
+  `@pytest.mark.requires_capability("host_mount")` to skip backends (e.g. e2b) that
+  do not support host-directory mounts.
+- `volume_plugin` is available only to CubeSandbox Volume Plugin cases.
 
 ## Cleanup
 
@@ -352,3 +382,6 @@ fails, the suite falls back to `DELETE /sandboxes/{sandboxID}` against
 `CUBE_API_URL`.
 
 Set `SDK_E2E_KEEP_SANDBOX_ON_FAILURE=true` to preserve sandboxes while debugging.
+It only preserves sandboxes of *failed* tests created through the `sdk_sandbox`
+fixture; passed and skipped tests are always cleaned up, and boundary tests that
+create sandboxes directly (via their own helpers) always clean up regardless.

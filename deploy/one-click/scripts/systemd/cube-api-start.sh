@@ -25,6 +25,9 @@ fi
 if [[ -n "${AUTH_CALLBACK_URL:-}" ]]; then
   export AUTH_CALLBACK_URL
 fi
+if [[ -n "${CUBE_API_KEY:-}" ]]; then
+  export CUBE_API_KEY
+fi
 if [[ -n "${DATABASE_URL:-}" ]]; then
   export DATABASE_URL
 else

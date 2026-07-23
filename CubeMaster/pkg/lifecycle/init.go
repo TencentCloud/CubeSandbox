@@ -44,6 +44,8 @@ func Init(ctx context.Context) error {
 	sandbox.RegisterAfterDestroySandboxSuccessHook(onAfterDestroy)
 	task.RegisterAfterDestroyTaskSuccessHook(onAfterDestroy)
 
+	sandbox.RegisterAfterUpdateSandboxSuccessHook(onAfterUpdate)
+
 	sandbox.SetTimeoutProvider(&storeTimeoutProvider{store: store})
 
 	log.G(ctx).Infof("lifecycle: auto-pause metadata channel ready (key=%s, stream=%s)",
@@ -156,4 +158,34 @@ func onAfterDestroy(ctx context.Context, sandboxID string) error {
 		store.PublishDelete(ctx, sandboxID)
 	}
 	return nil
+}
+
+// PublishStateDefault is the public entry point for callers that don't hold a
+// *Store reference to announce a pause / resume transition to the CLM.
+// Safe to call when lifecycle is disabled or Redis is unreachable — the
+// underlying Store swallows those cases.
+func PublishStateDefault(ctx context.Context, sandboxID, state, source string) {
+	if store := getDefaultStore(); store != nil {
+		store.PublishState(ctx, sandboxID, state, source)
+	}
+}
+
+// onAfterUpdate maps a successful pause / resume action to the corresponding
+// terminal state and forwards it to the CLM via the events stream.
+// Registered with sandbox.RegisterAfterUpdateSandboxSuccessHook in Init.
+//
+// Unknown actions are ignored (the update handler already validates that
+// action ∈ {"pause","resume"}; this is defence-in-depth against future
+// action codes reaching the hook chain without a schema update here).
+func onAfterUpdate(ctx context.Context, sandboxID, _ /*instanceType*/, action, _ /*requestID*/ string) {
+	var state string
+	switch action {
+	case "pause":
+		state = StatePaused
+	case "resume":
+		state = StateRunning
+	default:
+		return
+	}
+	PublishStateDefault(ctx, sandboxID, state, "api")
 }

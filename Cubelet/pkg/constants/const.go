@@ -151,6 +151,13 @@ const (
 
 	CubeExtQueueKey = "cube-ext-queue"
 
+	// CubeExtVolumeRefEvents carries a JSON array of plugin_volume node-level
+	// reference-state changes ([{"volume_id","referenced"}]) reported to
+	// CubeMaster on create/destroy responses. referenced is 1 when this node
+	// started referencing the volume (0→1) and 0 when it stopped (1→0); repeat
+	// references on the same node emit no entry.
+	CubeExtVolumeRefEvents = "cube-volume-refcount-events"
+
 	CubeShimPid = "shim-pid"
 	CubeVmPid   = "vm-pid"
 )

@@ -135,8 +135,11 @@ func TestMergeEgressRulesSkipsNilEntries(t *testing.T) {
 func TestMergeCubeNetworkConfigsMergesRulesWithoutAliasingTemplate(t *testing.T) {
 	templateAllow := false
 	requestAllow := true
+	templateMask := "template.example.com"
+	requestMask := "localhost:${PORT}"
 	templateCfg := &types.CubeNetworkConfig{
 		AllowInternetAccess: &templateAllow,
+		MaskRequestHost:     &templateMask,
 		AllowOut:            []string{"10.0.0.0/8"},
 		DenyOut:             []string{"192.168.0.0/16"},
 		Rules: []*types.EgressRule{
@@ -145,6 +148,7 @@ func TestMergeCubeNetworkConfigsMergesRulesWithoutAliasingTemplate(t *testing.T)
 	}
 	requestCfg := &types.CubeNetworkConfig{
 		AllowInternetAccess: &requestAllow,
+		MaskRequestHost:     &requestMask,
 		AllowOut:            []string{"172.16.0.0/12"},
 		DenyOut:             []string{"100.64.0.0/10"},
 		Rules: []*types.EgressRule{
@@ -158,6 +162,12 @@ func TestMergeCubeNetworkConfigsMergesRulesWithoutAliasingTemplate(t *testing.T)
 	}
 	if got.AllowInternetAccess == nil || !*got.AllowInternetAccess {
 		t.Fatalf("expected request allowInternetAccess override, got %+v", got.AllowInternetAccess)
+	}
+	if got.MaskRequestHost == nil || *got.MaskRequestHost != requestMask {
+		t.Fatalf("expected request maskRequestHost override, got %+v", got.MaskRequestHost)
+	}
+	if got.MaskRequestHost == requestCfg.MaskRequestHost {
+		t.Fatal("expected maskRequestHost to be cloned, got shared pointer")
 	}
 	if len(got.AllowOut) != 2 || got.AllowOut[0] != "10.0.0.0/8" || got.AllowOut[1] != "172.16.0.0/12" {
 		t.Fatalf("unexpected merged allowOut: %#v", got.AllowOut)
@@ -176,8 +186,10 @@ func TestMergeCubeNetworkConfigsMergesRulesWithoutAliasingTemplate(t *testing.T)
 func TestMergeCubeNetworkConfigsClonesTemplateRulesWhenRequestRulesEmpty(t *testing.T) {
 	templateAllow := false
 	requestAllow := true
+	templateMask := "localhost:${PORT}"
 	templateCfg := &types.CubeNetworkConfig{
 		AllowInternetAccess: &templateAllow,
+		MaskRequestHost:     &templateMask,
 		Rules: []*types.EgressRule{
 			{Name: "template-only", Match: &types.EgressRuleMatch{Host: strPtr("template.example.com")}},
 		},
@@ -198,6 +210,12 @@ func TestMergeCubeNetworkConfigsClonesTemplateRulesWhenRequestRulesEmpty(t *test
 	}
 	if got.Rules[0] == templateCfg.Rules[0] {
 		t.Fatal("expected template rules to be cloned when request has no rules")
+	}
+	if got.MaskRequestHost == nil || *got.MaskRequestHost != templateMask {
+		t.Fatalf("expected template maskRequestHost to be inherited, got %+v", got.MaskRequestHost)
+	}
+	if got.MaskRequestHost == templateCfg.MaskRequestHost {
+		t.Fatal("expected inherited maskRequestHost to be cloned")
 	}
 }
 

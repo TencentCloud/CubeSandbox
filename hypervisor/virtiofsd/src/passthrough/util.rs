@@ -116,6 +116,49 @@ pub fn printable_fd(fd: &impl AsRawFd, proc_self_fd: Option<&impl AsRawFd>) -> S
     }
 }
 
+/// Verify that a dentry name coming from a FUSE request is syntactically a
+/// single path component, as any legitimate Linux VFS request would already
+/// guarantee before dispatching to a FUSE server.
+///
+/// The VFS resolves the leading portion of the user-supplied pathname inside
+/// the guest kernel (see `fs/namei.c::filename_create()` and friends) and only
+/// hands FUSE the final path component; therefore the following properties
+/// must hold on the wire:
+///
+///   * name is non-empty
+///   * name does not contain `/`
+///   * name is neither `.` nor `..`
+///   * name does not contain an interior NUL byte
+///
+/// A compromised guest userspace could nevertheless *forge* a FUSE request
+/// where `name` is a multi-component path such as `"../etc/passwd"`. If we
+/// then blindly hand that string to `openat(2)` / `symlinkat(2)` /
+/// `mkdirat(2)` / `linkat(2)` / `renameat2(2)` etc., the kernel would happily
+/// walk it and let the write escape the intended parent directory. This
+/// validator closes that gap while remaining zero-cost for legitimate VFS
+/// traffic (which never violates any of the above).
+pub fn validate_dentry_name(name: &CStr) -> io::Result<()> {
+    let bytes = name.to_bytes();
+    // An empty name matches the kernel's own errno for e.g. `openat(fd, "")`.
+    if bytes.is_empty() {
+        return Err(io::Error::from_raw_os_error(libc::ENOENT));
+    }
+    // Reject `.`, `..` and any embedded `/`. A legitimate VFS request cannot
+    // hit any of these: the guest kernel resolves the pathname down to the
+    // final component before dispatching to FUSE. A forged FUSE request that
+    // does contain them would otherwise let the syscall walk outside the
+    // intended parent directory (`../etc/passwd`) or violate the
+    // "single new child" contract (`.`, `foo/bar`).
+    //
+    // Note: interior NUL bytes are already ruled out by the `&CStr` type
+    // invariant -- `server.rs` performs `CStr::from_bytes_with_nul` before
+    // we ever get here, so we don't need to re-check that.
+    if bytes == b"." || bytes == b".." || bytes.contains(&b'/') {
+        return Err(einval());
+    }
+    Ok(())
+}
+
 pub fn relative_path<'a>(path: &'a CStr, prefix: &CStr) -> io::Result<&'a CStr> {
     let mut relative_path = path
         .to_bytes_with_nul()

@@ -20,7 +20,8 @@ if (typeof window !== 'undefined') {
 
 export function isMockEnabled(): boolean {
   try {
-    if (import.meta.env.VITE_USE_MOCK === '1' || import.meta.env.VITE_USE_MOCK === 'true') return true;
+    if (import.meta.env.VITE_USE_MOCK === '1' || import.meta.env.VITE_USE_MOCK === 'true')
+      return true;
   } catch {
     /* ignore */
   }

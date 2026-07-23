@@ -52,6 +52,7 @@ BINARIES := \
 	cubeapi \
 	cubelet \
 	cubemaster \
+	cubeops \
 	cubevsmapdump \
 	network-agent \
 	shim \
@@ -107,7 +108,16 @@ help:
 	@printf "  agent         Build cube-agent in Docker\n"
 	@printf "  cubeapi       Build CubeAPI (cube-api) in Docker\n"
 	@printf "  cube-api      Alias of cubeapi\n"
+	@printf "  cubeops       Build CubeOps in Docker\n"
+	@printf "  cubeops-test  Run CubeOps unit tests in Docker\n"
 	@printf "  shim          Build containerd-shim-cube-rs and cube-runtime in Docker\n"
+	@printf "  cubemaster-test Run CubeMaster unit tests in Docker\n"
+	@printf "  cubelet-test  Run Cubelet unit tests in Docker\n"
+	@printf "  cube-proxy-test Run CubeProxy unit tests locally\n"
+	@printf "  cube-api-test Run CubeAPI unit tests in Docker\n"
+	@printf "  cubeops-test  Run CubeOps unit tests in Docker\n"
+	@printf "  shim-test     Run CubeShim unit tests in Docker\n"
+	@printf "  network-agent-test Run network-agent unit tests in Docker\n"
 	@printf "  guest-kernel  Build guest kernel vmlinux/Image (KERNEL_SRC=...; native or cross x86_64<->aarch64)\n"
 	@printf "  all           Build cubemaster, cubelet, network-agent and cubevsmapdump in Docker\n"
 	@printf "  manual-release Build binaries and package manual update tarball\n"
@@ -117,6 +127,7 @@ help:
 	@printf "  web-build     Build WebUI static assets\n"
 	@printf "  web-preview   Preview built WebUI assets\n"
 	@printf "  web-lint      Run WebUI lint checks\n"
+	@printf "  web-fmt       Format WebUI sources\n"
 	@printf "  fmt            Format code in all component directories\n"
 	@printf "  web-api-sync  Export OpenAPI and regenerate WebUI schema types\n"
 	@printf "  web-sync-dev-env Build and deploy WebUI into dev-env VM\n"
@@ -168,7 +179,9 @@ builder-shell: prepare-builder-home prepare-tmp-git-credentials
 
 .PHONY: builder-run
 builder-run: prepare-builder-home prepare-tmp-git-credentials
-	@test -n "$(strip $(BUILDER_CMD))" || { echo "BUILDER_CMD must not be empty"; exit 1; }
+ifeq ($(strip $(BUILDER_CMD)),)
+	$(error BUILDER_CMD must not be empty)
+endif
 	docker run --rm -i \
 		--user "$(UID):$(GID)" \
 		-e HOME=$(BUILDER_CONTAINER_HOME) \
@@ -260,6 +273,39 @@ cubeapi: builder-image
 .PHONY: cube-api
 cube-api: cubeapi
 
+.PHONY: cubeops
+cubeops: builder-image
+	@mkdir -p "$(OUTPUT_DIR)"
+	$(MAKE) builder-run BUILDER_CMD="mkdir -p /workspace/_output/bin && cd /workspace/CubeOps && go mod download && CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -ldflags '-s -w -X main.Version=$(CUBE_VERSION) -X main.Commit=$(CUBE_COMMIT) -X main.BuildTime=$(CUBE_BUILD_TIME)' -o /workspace/_output/bin/cubeops ./cmd/cubeops"
+
+.PHONY: cubeops-test
+cubeops-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeOps && go mod download && go test ./...'
+
+.PHONY: cubemaster-test
+cubemaster-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeMaster && go mod download && make test'
+
+.PHONY: cubelet-test
+cubelet-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && make test'
+
+.PHONY: network-agent-test
+network-agent-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/network-agent && go mod download && make test'
+
+.PHONY: cube-proxy-test
+cube-proxy-test:
+	$(MAKE) -C CubeProxy test
+
+.PHONY: cube-api-test
+cube-api-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeAPI && make test'
+
+.PHONY: shim-test
+shim-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeShim && make test'
+
 .PHONY: shim
 shim: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
@@ -317,6 +363,10 @@ web-preview:
 web-lint:
 	cd "$(WEB_DIR)" && npm run lint
 
+.PHONY: web-fmt
+web-fmt:
+	@$(MAKE) -C web fmt
+
 .PHONY: web-api-sync
 web-api-sync:
 	cd "$(WEB_DIR)" && npm run api:sync
@@ -341,9 +391,25 @@ fmt:
 	@$(MAKE) -C cubelog fmt
 	@printf '  %-8s %s\n' "FMT" "CubeMaster"
 	@$(MAKE) -C CubeMaster fmt
+	@printf '  %-8s %s\n' "FMT" "CubeNet"
+	@$(MAKE) -C CubeNet fmt
+	@printf '  %-8s %s\n' "FMT" "CubeOps"
+	@$(MAKE) -C CubeOps fmt
 	@printf '  %-8s %s\n' "FMT" "CubeShim"
 	@$(MAKE) -C CubeShim fmt
+	@printf '  %-8s %s\n' "FMT" "cube-lifecycle-manager"
+	@$(MAKE) -C cube-lifecycle-manager fmt
 	@printf '  %-8s %s\n' "FMT" "hypervisor"
 	@$(MAKE) -C hypervisor fmt
 	@printf '  %-8s %s\n' "FMT" "network-agent"
 	@$(MAKE) -C network-agent fmt
+	@printf '  %-8s %s\n' "FMT" "sdk/go"
+	@$(MAKE) -C sdk/go fmt
+	@printf '  %-8s %s\n' "FMT" "examples/cube-bench"
+	@$(MAKE) -C examples/cube-bench fmt
+	@printf '  %-8s %s\n' "FMT" "web"
+	@if command -v npm >/dev/null 2>&1; then \
+		$(MAKE) -C web fmt; \
+	else \
+		printf '  %-8s %s\n' "SKIP" "web (npm not available)"; \
+	fi

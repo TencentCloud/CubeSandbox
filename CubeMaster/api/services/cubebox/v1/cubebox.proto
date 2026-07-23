@@ -503,6 +503,21 @@ message  VolumeSource {
   HostDirVolumeSources host_dir_volumes = 7;
   // image volume source for image volume mount
   cubelet.services.images.v1.ImageVolumeSource image = 9;
+  // plugin_volume delegates provisioning to a named external VolumePlugin
+  // registered in Cubelet's volume.Manager.  Field number matches
+  // Cubelet's cubebox.proto to ensure wire compatibility.
+  PluginVolumeSource plugin_volume = 11;
+}
+
+// PluginVolumeSource selects an external volume plugin by driver name.
+// Mirrors cubelet.services.volumeplugin.v1.PluginVolumeSource for
+// wire-format compatibility (same field numbers).
+message PluginVolumeSource {
+  // driver is the registered plugin name (e.g. "cos", "nfs").
+  string driver = 1;
+  // options are driver-specific key-value pairs forwarded to the plugin.
+  // MUST include "volume_id".
+  map<string, string> options = 2;
 }
 
 // Volume represents a named volume in a pod that may be accessed by any container in the pod.

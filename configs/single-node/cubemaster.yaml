@@ -100,3 +100,9 @@ scheduler:
       - "mem"
       - "template_locality"
       - "realtime_create_num"
+
+# Volume plugin (COS binary reference). Credentials: CubeMaster/plugin/volume-cos.conf
+volume_plugins:
+  - name: cos
+    type: binary
+    binary_path: /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-cos

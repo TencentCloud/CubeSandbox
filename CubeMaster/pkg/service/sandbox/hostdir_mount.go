@@ -122,3 +122,57 @@ func validateHostPath(hostPath string) (string, error) {
 	}
 	return "", fmt.Errorf("hostPath %q is not within an allowed mount prefix", hostPath)
 }
+
+// AnnotationPluginVolumeMounts is the annotation key CubeAPI uses to forward
+// VolumeMount entries for plugin_volume volumes.  The value is a JSON array of
+// {name, container_path, readonly?} objects.
+const AnnotationPluginVolumeMounts = "plugin-volume-mounts"
+
+// pluginVolumeMountEntry mirrors the VolumeMount struct sent by CubeAPI.
+type pluginVolumeMountEntry struct {
+	Name          string `json:"name"`
+	ContainerPath string `json:"container_path"`
+	Readonly      bool   `json:"readonly,omitempty"`
+}
+
+// injectPluginVolumeMounts reads the "plugin-volume-mounts" annotation and
+// appends the corresponding VolumeMounts to every container in the request.
+// This is the counterpart to CubeAPI's annotation-based forwarding of
+// volume_mounts for plugin_volume volumes.
+func injectPluginVolumeMounts(ctx context.Context, req *types.CreateCubeSandboxReq) error {
+	if req.Annotations == nil {
+		return nil
+	}
+	raw, ok := req.Annotations[AnnotationPluginVolumeMounts]
+	if !ok || raw == "" {
+		return nil
+	}
+
+	var entries []pluginVolumeMountEntry
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		return fmt.Errorf("injectPluginVolumeMounts: parse annotation: %w", err)
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+
+	log.G(ctx).Infof("[plugin-volume] injectPluginVolumeMounts: %d mount(s)", len(entries))
+
+	for i := range req.Containers {
+		ctr := req.Containers[i]
+		if ctr == nil {
+			continue
+		}
+		for _, e := range entries {
+			vm := &cubeboxv1.VolumeMounts{
+				Name:          e.Name,
+				ContainerPath: e.ContainerPath,
+				Readonly:      e.Readonly,
+			}
+			ctr.VolumeMounts = append(ctr.VolumeMounts, vm)
+			log.G(ctx).Infof("[plugin-volume] injected VolumeMount %q → %s (ro=%v) into container %s",
+				e.Name, e.ContainerPath, e.Readonly, ctr.Name)
+		}
+	}
+	return nil
+}

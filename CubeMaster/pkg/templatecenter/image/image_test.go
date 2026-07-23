@@ -606,13 +606,14 @@ func TestValidateImageRef(t *testing.T) {
 	valid := []string{
 		"docker://registry.example.com/image:latest",
 		"registry.example.com:5000/ns/app:1.2.3",
+		"nginx",
 		"library/nginx",
 		"library/nginx@sha256:" + strings.Repeat("a", 64),
 		"reg.io/my_app.name/sub-component:tag_1.0",
 	}
 	for _, ref := range valid {
-		if err := validateImageRef(ref); err != nil {
-			t.Errorf("validateImageRef(%q) returned error, want nil: %v", ref, err)
+		if err := ValidateImageRef(ref); err != nil {
+			t.Errorf("ValidateImageRef(%q) returned error, want nil: %v", ref, err)
 		}
 	}
 
@@ -627,11 +628,81 @@ func TestValidateImageRef(t *testing.T) {
 		"image;rm -rf /",
 		"image$(whoami)",
 		"image`whoami`",
+		"library/nginx:",
+		"library/nginx@sha256:not-a-digest",
+		"docker://docker://library/nginx",
 	}
 	for _, ref := range invalid {
-		if err := validateImageRef(ref); err == nil {
-			t.Errorf("validateImageRef(%q) returned nil, want error", ref)
+		if err := ValidateImageRef(ref); err == nil {
+			t.Errorf("ValidateImageRef(%q) returned nil, want error", ref)
 		}
+	}
+}
+
+func TestPrepareDockerSourceRejectsInvalidImageRefBeforeEngineAccess(t *testing.T) {
+	original := newEngineClient
+	engineCalled := false
+	newEngineClient = func() (engineClient, error) {
+		engineCalled = true
+		return nil, errors.New("must not be called")
+	}
+	t.Cleanup(func() {
+		newEngineClient = original
+	})
+
+	_, err := prepareDockerSource(context.Background(), SourceSpec{ImageRef: "docker://--help"})
+	if err == nil || !strings.Contains(err.Error(), "invalid image reference") {
+		t.Fatalf("prepareDockerSource error=%v, want validation failure", err)
+	}
+	if engineCalled {
+		t.Fatal("engine client was accessed before image reference validation")
+	}
+}
+
+func TestDockerLoginTerminatesOptionsBeforeRegistry(t *testing.T) {
+	tmpDir := t.TempDir()
+	argsFile := filepath.Join(tmpDir, "args")
+	stdinFile := filepath.Join(tmpDir, "stdin")
+	t.Setenv("DOCKER_ARGS_FILE", argsFile)
+	t.Setenv("DOCKER_STDIN_FILE", stdinFile)
+	t.Setenv("PATH", tmpDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	installFakeCommand(t, tmpDir, "docker", `printf '%s\n' "$@" > "$DOCKER_ARGS_FILE"
+cat > "$DOCKER_STDIN_FILE"`)
+
+	err := dockerLogin(
+		context.Background(),
+		"/tmp/cubemaster-docker-config",
+		"registry.example.com/ns/app:latest",
+		"-v",
+		"s3cret",
+	)
+	if err != nil {
+		t.Fatalf("dockerLogin failed: %v", err)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read docker args: %v", err)
+	}
+	wantArgs := strings.Join([]string{
+		"--config",
+		"/tmp/cubemaster-docker-config",
+		"login",
+		"-u",
+		"-v",
+		"--password-stdin",
+		"--",
+		"registry.example.com",
+		"",
+	}, "\n")
+	if string(args) != wantArgs {
+		t.Fatalf("docker args=%q, want %q", string(args), wantArgs)
+	}
+	stdin, err := os.ReadFile(stdinFile)
+	if err != nil {
+		t.Fatalf("read docker stdin: %v", err)
+	}
+	if string(stdin) != "s3cret" {
+		t.Fatalf("docker stdin=%q, want password only", string(stdin))
 	}
 }
 
@@ -1106,7 +1177,7 @@ func TestPrepareLocalSourceRejectsInvalidImageRef(t *testing.T) {
 			t.Errorf("PrepareLocalSource(%q) returned nil error, want validation failure", ref)
 			continue
 		}
-		// validateImageRef returns "empty image reference" for blank refs
+		// ValidateImageRef returns "empty image reference" for blank refs
 		// and "invalid image reference" for refs with forbidden characters.
 		if !strings.Contains(err.Error(), "invalid image reference") && !strings.Contains(err.Error(), "empty image reference") {
 			t.Errorf("PrepareLocalSource(%q) error=%v, want validation failure", ref, err)

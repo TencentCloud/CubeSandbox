@@ -153,6 +153,14 @@ Two layers can be combined inside `network`:
 - **L3/L4** — `allowOut` / `denyOut` lists of CIDRs or hostnames.
 - **L7** — `rules` for host / path / SNI matching, audit, and credential
   injection using the typed `Rule` / `Match` / `Action` / `Inject` shapes.
+- **Inbound Host** — `maskRequestHost` customizes the Host CubeProxy forwards
+  to user services; `${PORT}` expands to the requested sandbox port.
+
+```ts
+const sb = await Sandbox.create({
+  network: { maskRequestHost: "localhost:${PORT}" },
+});
+```
 
 ```ts
 import { Sandbox, type Rule } from "@cubesandbox/sdk";

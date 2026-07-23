@@ -37,13 +37,14 @@ type ResourceSnapshot struct {
 
 // ComponentVersion mirrors the cubelet-side masterclient.ComponentVersion.
 // It carries the real version of one component installed on a node. Source is
-// one of "manifest" | "binary" | "file".
+// one of "manifest" | "binary" | "file" | "component-json".
 type ComponentVersion struct {
 	Component string `json:"component"`
 	Version   string `json:"version,omitempty"`
 	Commit    string `json:"commit,omitempty"`
 	BuildTime string `json:"build_time,omitempty"`
 	Source    string `json:"source,omitempty"`
+	Variant   string `json:"variant,omitempty"` // kernel: bm|pvm
 }
 
 type ContainerImage struct {
@@ -76,6 +77,7 @@ type RegisterNodeRequest struct {
 	CreateConcurrentNum int64              `json:"create_concurrent_num,omitempty"`
 	MaxMvmNum           int64              `json:"max_mvm_num,omitempty"`
 	Versions            []ComponentVersion `json:"versions,omitempty"`
+	InventoryIncomplete bool               `json:"inventory_incomplete,omitempty"`
 }
 
 type UpdateNodeStatusRequest struct {
@@ -89,7 +91,8 @@ type UpdateNodeStatusRequest struct {
 	DiskUsage  *DiskUsage          `json:"disk_usage,omitempty"`
 	MetricTime time.Time           `json:"metric_time,omitempty"`
 
-	Versions []ComponentVersion `json:"versions,omitempty"`
+	Versions            []ComponentVersion `json:"versions,omitempty"`
+	InventoryIncomplete bool               `json:"inventory_incomplete,omitempty"`
 }
 
 // AllocatedResources is cubelet-side aggregation of sandbox-quota CPU /
@@ -284,7 +287,7 @@ func RegisterNode(ctx context.Context, req *RegisterNodeRequest) (*NodeSnapshot,
 	applyCurrentHealth(snap, time.Now())
 	global.mu.Unlock()
 	syncLocalcache(snap)
-	global.persistVersions(ctx, req.NodeID, req.Versions)
+	global.persistVersions(ctx, req.NodeID, req.Versions, req.InventoryIncomplete)
 	return cloneSnapshot(snap), nil
 }
 
@@ -335,51 +338,101 @@ func UpdateNodeStatus(ctx context.Context, nodeID string, req *UpdateNodeStatusR
 	// hundreds of nodes would otherwise dominate write traffic, and Redis
 	// already provides the cross-replica fan-out used by the scheduler.
 	fanOutResourceMetric(ctx, nodeID, req)
-	global.persistVersions(ctx, nodeID, req.Versions)
+	global.persistVersions(ctx, nodeID, req.Versions, req.InventoryIncomplete)
 	return cloneSnapshot(snap), nil
 }
+
+// incompleteVersionsHashTag is appended to the content hash when the report
+// is inventory-incomplete, so a later complete report with the same merge
+// result still triggers a write (and can hard-delete stale rows).
+const incompleteVersionsHashTag = "|incomplete"
 
 // persistVersions records the node's component versions, skipping the DB
 // write entirely when the reported set is unchanged (content-hash compare
 // against the in-memory snapshot). This keeps the 10s heartbeat from turning
 // slow-changing version data into a MySQL write storm.
-func (s *service) persistVersions(ctx context.Context, nodeID string, versions []ComponentVersion) {
-	s.persistVersionsWithWriter(ctx, nodeID, versions, s.writeVersions)
+//
+// When inventoryIncomplete is true, missing components are not deleted from
+// the DB (upsert-only) so a transient collection gap cannot wipe history.
+// The skip-hash then compares against merge(prev, reported) so incomplete
+// heartbeats that do not change the effective inventory are no-ops.
+func (s *service) persistVersions(ctx context.Context, nodeID string, versions []ComponentVersion, inventoryIncomplete bool) {
+	s.persistVersionsWithWriter(ctx, nodeID, versions, inventoryIncomplete, s.writeVersions)
 }
 
 func (s *service) persistVersionsWithWriter(
 	ctx context.Context,
 	nodeID string,
 	versions []ComponentVersion,
-	writer func(string, []ComponentVersion) error,
+	inventoryIncomplete bool,
+	writer func(string, []ComponentVersion, bool) error,
 ) {
 	if len(versions) == 0 {
 		return
 	}
 	unlock := s.lockVersionWrite(nodeID)
 	defer unlock()
-	h := versionsHash(versions)
 	snap := s.ensureNode(nodeID)
 	s.mu.RLock()
-	unchanged := snap.versionsHash == h
+	prevVersions := append([]ComponentVersion(nil), snap.Versions...)
+	prevHash := snap.versionsHash
 	prevCompat := compatRelevantVersions(snap.Versions)
 	s.mu.RUnlock()
-	if unchanged {
+
+	// Complete reports hash the payload as-is. Incomplete reports hash the
+	// merge with the previous snapshot so a partial collect does not look
+	// like a wholesale version change (and does not delete absent keys).
+	var h string
+	var merged []ComponentVersion
+	if inventoryIncomplete {
+		merged = mergeComponentVersions(prevVersions, versions)
+		h = versionsHash(merged) + incompleteVersionsHashTag
+	} else {
+		h = versionsHash(versions)
+	}
+	if prevHash == h {
 		log.G(ctx).Debugf("version_write_skipped node=%s", nodeID)
 		return
 	}
-	if err := writer(nodeID, versions); err != nil {
+	if err := writer(nodeID, versions, inventoryIncomplete); err != nil {
 		log.G(ctx).Warnf("write node component versions failed for %s: %v", nodeID, err)
 		return
 	}
 	s.mu.Lock()
-	snap.Versions = append([]ComponentVersion(nil), versions...)
-	snap.versionsHash = h
+	if inventoryIncomplete {
+		snap.Versions = merged
+		snap.versionsHash = h
+	} else {
+		snap.Versions = append([]ComponentVersion(nil), versions...)
+		snap.versionsHash = h
+	}
 	s.mu.Unlock()
-	log.G(ctx).Debugf("version_write_applied node=%s components=%d", nodeID, len(versions))
-	if OnGuestAgentVersionChanged != nil && compatVersionsChanged(prevCompat, compatRelevantVersions(versions)) {
+	log.G(ctx).Debugf("version_write_applied node=%s components=%d incomplete=%v", nodeID, len(versions), inventoryIncomplete)
+	if OnGuestAgentVersionChanged != nil && compatVersionsChanged(prevCompat, compatRelevantVersions(snap.Versions)) {
 		go OnGuestAgentVersionChanged(nodeID)
 	}
+}
+
+func mergeComponentVersions(prev, next []ComponentVersion) []ComponentVersion {
+	byName := make(map[string]ComponentVersion, len(prev)+len(next))
+	for _, v := range prev {
+		if v.Component == "" {
+			continue
+		}
+		byName[v.Component] = v
+	}
+	for _, v := range next {
+		if v.Component == "" {
+			continue
+		}
+		byName[v.Component] = v
+	}
+	out := make([]ComponentVersion, 0, len(byName))
+	for _, v := range byName {
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Component < out[j].Component })
+	return out
 }
 
 func (s *service) lockVersionWrite(nodeID string) func() {
@@ -389,11 +442,10 @@ func (s *service) lockVersionWrite(nodeID string) func() {
 	return lock.Unlock
 }
 
-// writeVersions upserts the reported component rows and physically removes
-// any component previously recorded for the node but absent from this report.
-// The table carries no soft-delete column, so Delete is a hard delete by
-// design (see models.NodeComponentVersion).
-func (s *service) writeVersions(nodeID string, versions []ComponentVersion) error {
+// writeVersions upserts the reported component rows. When inventoryIncomplete
+// is false, physically removes any component previously recorded for the node
+// but absent from this report. When true, only upserts (plan M0).
+func (s *service) writeVersions(nodeID string, versions []ComponentVersion, inventoryIncomplete bool) error {
 	now := time.Now().Unix()
 	rows := make([]*models.NodeComponentVersion, 0, len(versions))
 	keep := make([]string, 0, len(versions))
@@ -423,6 +475,9 @@ func (s *service) writeVersions(nodeID string, versions []ComponentVersion) erro
 				return err
 			}
 		}
+		if inventoryIncomplete {
+			return nil
+		}
 		del := tx.Where("node_id = ?", nodeID)
 		if len(keep) > 0 {
 			del = del.Where("component NOT IN ?", keep)
@@ -441,7 +496,7 @@ func versionsHash(versions []ComponentVersion) string {
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Component < sorted[j].Component })
 	h := fnv.New64a()
 	for _, v := range sorted {
-		fmt.Fprintf(h, "%s|%s|%s|%s|%s\n", v.Component, v.Version, v.Commit, v.BuildTime, v.Source)
+		fmt.Fprintf(h, "%s|%s|%s|%s|%s|%s\n", v.Component, v.Version, v.Commit, v.BuildTime, v.Source, v.Variant)
 	}
 	return strconv.FormatUint(h.Sum64(), 16)
 }
@@ -886,18 +941,52 @@ func (s *service) reload() error {
 	return nil
 }
 
-// applyReloadResult merges a DB snapshot (next) into the live in-memory map.
-// Registration fields take the DB value (same eventual-consistency trade-off as
-// other labels). Status/heartbeat keep in-memory when fresher. After unlocking,
-// nodes whose cordon state changed are synced to localcache.
+// applyReloadResult merges a DB snapshot (next) into the live in-memory map and
+// then re-syncs node health into localcache for every node the reload touched.
+//
+// Registration fields and versions always take the DB value; status/heartbeat
+// fields keep the in-memory value when it is fresher than the DB snapshot.
+//
+// The re-sync pushes ONLY the scheduler node cache (health, capacity, cordon
+// state); see syncLocalcacheNodeHealth. Template locality is deliberately left
+// to templatecenter, the authoritative owner of the imageCache (startup
+// warmReadyTemplateLocality + on-demand EnsureTemplateLocalityReady DB fallback).
+//
+// Why node health must be re-synced here: a replica that only learned a node via
+// DB reload (it registered/heartbeated on another replica) otherwise kept an
+// empty healthy-node set for it. EnsureTemplateLocalityReady matches a DB-Ready
+// template replica against localcache's healthy nodes, so with the node absent
+// it could not match and sandbox creation failed with "template has no ready
+// replica" (130400). Pushing node health here lets that DB fallback match and
+// self-heal template locality on demand.
 func (s *service) applyReloadResult(next map[string]*NodeSnapshot) {
-	toSync := make([]*NodeSnapshot, 0)
+	syncSnaps := s.mergeReloadResult(next)
 
+	// s.ready is set true at the end of Init, after the initial reload and
+	// before localcache.Init. The very first reload therefore skips the sync
+	// (localcache caches do not exist yet); localcache.Init then loads all nodes
+	// from the DB itself. Periodic loopReload runs long after both packages are
+	// initialised.
+	if !s.ready {
+		return
+	}
+	// Sync outside s.mu (localcache has its own locks).
+	for _, snap := range syncSnaps {
+		syncNodeHealthFn(snap)
+	}
+}
+
+// mergeReloadResult merges the DB reload snapshot into the in-memory node map
+// under s.mu and returns a clone of every touched node for the caller to sync
+// into localcache outside the lock. The critical section uses
+// defer s.mu.Unlock() so a panic in the merge loop cannot leak the lock and
+// silently deadlock subsequent register/heartbeat handlers.
+func (s *service) mergeReloadResult(next map[string]*NodeSnapshot) []*NodeSnapshot {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	syncSnaps := make([]*NodeSnapshot, 0, len(next))
 	for nodeID, newSnap := range next {
 		if existing, ok := s.nodes[nodeID]; ok {
-			prevDisabled := snapshotSchedulingDisabled(existing)
-
 			existing.Labels = cloneStringMap(newSnap.Labels)
 			existing.labelsJSONCorrupt = newSnap.labelsJSONCorrupt
 			existing.Capacity = newSnap.Capacity
@@ -920,22 +1009,13 @@ func (s *service) applyReloadResult(next map[string]*NodeSnapshot) {
 				existing.ReportedReady = newSnap.ReportedReady
 			}
 			applyCurrentHealth(existing, time.Now())
-
-			if prevDisabled != snapshotSchedulingDisabled(existing) {
-				toSync = append(toSync, cloneSnapshot(existing))
-			}
+			syncSnaps = append(syncSnaps, cloneSnapshot(existing))
 		} else {
 			s.nodes[nodeID] = newSnap
+			syncSnaps = append(syncSnaps, cloneSnapshot(newSnap))
 		}
 	}
-	s.mu.Unlock()
-
-	if !s.ready {
-		return
-	}
-	for _, snap := range toSync {
-		syncLocalcache(snap)
-	}
+	return syncSnaps
 }
 
 func (s *service) loopReload(ctx context.Context) {
@@ -1040,6 +1120,24 @@ func toSchedulerNode(snap *NodeSnapshot) *node.Node {
 func syncLocalcache(snap *NodeSnapshot) {
 	localcache.UpsertNode(toSchedulerNode(snap))
 	localcache.SyncNodeTemplates(snap.NodeID, templateIDsFromLocalTemplates(snap.LocalTemplates))
+}
+
+// syncNodeHealthFn is the reload -> localcache sync hook invoked by
+// applyReloadResult for every touched node. It is a package var (not a direct
+// call to syncLocalcacheNodeHealth) so unit tests can observe the sync path
+// without initialising the global localcache singleton.
+var syncNodeHealthFn = syncLocalcacheNodeHealth
+
+// syncLocalcacheNodeHealth pushes only the scheduler node cache (health,
+// capacity, cordon state) into localcache. Unlike syncLocalcache it deliberately
+// does NOT call SyncNodeTemplates: template locality lives in the imageCache,
+// which templatecenter owns authoritatively (warmReadyTemplateLocality at
+// startup + EnsureTemplateLocalityReady's DB fallback on demand). The periodic
+// reload only needs the node itself to be present/healthy so that DB fallback
+// can match a ready template replica to it; having reload also write the
+// imageCache would race that authoritative owner.
+func syncLocalcacheNodeHealth(snap *NodeSnapshot) {
+	localcache.UpsertNode(toSchedulerNode(snap))
 }
 
 func templateIDsFromLocalTemplates(localTemplates []LocalTemplate) []string {

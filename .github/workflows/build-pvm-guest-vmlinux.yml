@@ -141,6 +141,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          install -D -m 0644 \
+            pvm-guest-release-assets/vmlinux-pvm \
+            pvm-guest-release-assets/vmlinux-pvm-amd64
           gh release upload "${GITHUB_REF_NAME}" \
             pvm-guest-release-assets/vmlinux-pvm \
+            pvm-guest-release-assets/vmlinux-pvm-amd64 \
             --clobber

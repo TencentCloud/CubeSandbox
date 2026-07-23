@@ -35,8 +35,8 @@ function declaredVersionsFor(row: ComponentRow): string[] {
     row.declaredVersions && row.declaredVersions.length > 0
       ? row.declaredVersions
       : row.declaredVersion
-      ? [row.declaredVersion]
-      : [];
+        ? [row.declaredVersion]
+        : [];
   return versions.filter((v) => v && v !== 'unknown');
 }
 
@@ -77,11 +77,11 @@ function stripPlatformVersionSuffix(version: string): string {
 }
 
 function rowHasUndeclaredVersion(row: ComponentRow): boolean {
-  return row.versions.some((g) => isVersionUndeclared(row, g.version));
+  return (row.versions ?? []).some((g) => isVersionUndeclared(row, g.version));
 }
 
 function hasReleaseDeclaration(rows: ComponentRow[]): boolean {
-	return rows.some((row) => declaredVersionsFor(row).length > 0);
+  return rows.some((row) => declaredVersionsFor(row).length > 0);
 }
 
 function displayVersionIdentity(version: string): string {
@@ -116,7 +116,11 @@ export default function VersionsPage() {
     const reporting = nodes.filter((n) => n.healthy).length;
     const multiVersion = components.filter((c) => !c.consistent).length;
     const undeclared = components.filter(rowHasUndeclaredVersion).length;
-    return { multiVersionCount: multiVersion, undeclaredCount: undeclared, reportingCount: reporting };
+    return {
+      multiVersionCount: multiVersion,
+      undeclaredCount: undeclared,
+      reportingCount: reporting,
+    };
   }, [components, nodes]);
 
   return (
@@ -237,13 +241,12 @@ export default function VersionsPage() {
 
           {/* Components section */}
           {components.length > 0 ? (
-          <ComponentsSection components={components} hasReleaseDeclaration={hasReleaseDeclaration(components)} />
-          ) : (
-            <EmptyState
-              icon={PackageOpen}
-              title={t('empty')}
-              hint={t('emptyHint')}
+            <ComponentsSection
+              components={components}
+              hasReleaseDeclaration={hasReleaseDeclaration(components)}
             />
+          ) : (
+            <EmptyState icon={PackageOpen} title={t('empty')} hint={t('emptyHint')} />
           )}
 
           {/* Node × Component matrix */}
@@ -275,10 +278,10 @@ function KpiCard({
     tone === 'ok'
       ? 'text-cube-ok'
       : tone === 'warn'
-      ? 'text-cube-warn'
-      : tone === 'err'
-      ? 'text-cube-err'
-      : 'text-foreground';
+        ? 'text-cube-warn'
+        : tone === 'err'
+          ? 'text-cube-err'
+          : 'text-foreground';
   return (
     <div className="rounded-xl border border-border/60 bg-card/40 p-4">
       <div className="text-xs uppercase tracking-wider text-muted-foreground/70">{label}</div>
@@ -293,11 +296,11 @@ function KpiCard({
 // ── Components section ──────────────────────────────────────────────────────
 
 function ComponentsSection({
-	components,
-	hasReleaseDeclaration,
+  components,
+  hasReleaseDeclaration,
 }: {
-	components: ComponentRow[];
-	hasReleaseDeclaration: boolean;
+  components: ComponentRow[];
+  hasReleaseDeclaration: boolean;
 }) {
   const { t } = useTranslation('versions');
   const [query, setQuery] = useState('');
@@ -339,7 +342,11 @@ function ComponentsSection({
             options={[
               { value: 'all', label: t('filter.all'), count: counts.all },
               { value: 'consistent', label: t('filter.consistent'), count: counts.consistent },
-              { value: 'multiVersion', label: t('filter.multiVersion'), count: counts.multiVersion },
+              {
+                value: 'multiVersion',
+                label: t('filter.multiVersion'),
+                count: counts.multiVersion,
+              },
               { value: 'undeclared', label: t('filter.undeclared'), count: counts.undeclared },
             ]}
           />
@@ -352,9 +359,7 @@ function ComponentsSection({
             row={c}
             hasReleaseDeclaration={hasReleaseDeclaration}
             expanded={expanded === c.component}
-            onToggle={() =>
-              setExpanded((prev) => (prev === c.component ? null : c.component))
-            }
+            onToggle={() => setExpanded((prev) => (prev === c.component ? null : c.component))}
           />
         ))}
         {filtered.length === 0 && (
@@ -367,12 +372,12 @@ function ComponentsSection({
 
 function ComponentRowItem({
   row,
-	hasReleaseDeclaration,
+  hasReleaseDeclaration,
   expanded,
   onToggle,
 }: {
   row: ComponentRow;
-	hasReleaseDeclaration: boolean;
+  hasReleaseDeclaration: boolean;
   expanded: boolean;
   onToggle: () => void;
 }) {
@@ -429,8 +434,8 @@ function ComponentRowItem({
               const chipClass = undeclared
                 ? 'border-cube-warn/40 bg-cube-warn/[0.08] text-cube-warn'
                 : noRef
-                ? 'border-cube-mute/30 bg-cube-mute/[0.06] text-foreground/80'
-                : 'border-cube-ok/30 bg-cube-ok/[0.06] text-foreground/80';
+                  ? 'border-cube-mute/30 bg-cube-mute/[0.06] text-foreground/80'
+                  : 'border-cube-ok/30 bg-cube-ok/[0.06] text-foreground/80';
               return (
                 <span
                   key={g.version}
@@ -509,7 +514,8 @@ function MatrixSection({ nodes, components }: { nodes: NodeRow[]; components: Co
   );
   const componentNames = useMemo(() => components.map((c) => c.component), [components]);
   const componentsWithDeclaration = useMemo(
-    () => new Set(components.filter((c) => declaredVersionsFor(c).length > 0).map((c) => c.component)),
+    () =>
+      new Set(components.filter((c) => declaredVersionsFor(c).length > 0).map((c) => c.component)),
     [components],
   );
 
@@ -517,13 +523,16 @@ function MatrixSection({ nodes, components }: { nodes: NodeRow[]; components: Co
     const q = query.trim().toLowerCase();
     return nodes
       .filter((n) => {
-        if (q && !n.nodeID.toLowerCase().includes(q)) return false;
+        const nodeID = n.nodeID ?? '';
+        if (q && !nodeID.toLowerCase().includes(q)) return false;
         if (filter === 'healthy' && !n.healthy) return false;
         if (filter === 'notReady' && n.healthy) return false;
         return true;
       })
       .sort((a, b) => {
-        if (sortBy.col == null) return a.nodeID.localeCompare(b.nodeID);
+        const aID = a.nodeID ?? '';
+        const bID = b.nodeID ?? '';
+        if (sortBy.col == null) return aID.localeCompare(bID);
         const aEntry = a.components.find((e) => e.component === sortBy.col);
         const bEntry = b.components.find((e) => e.component === sortBy.col);
         const av = aEntry?.version ?? '';
@@ -561,10 +570,7 @@ function MatrixSection({ nodes, components }: { nodes: NodeRow[]; components: Co
               {componentNames.map((name) => {
                 const active = sortBy.col === name;
                 return (
-                  <th
-                    key={name}
-                    className="px-4 py-3 font-mono font-medium whitespace-nowrap"
-                  >
+                  <th key={name} className="px-4 py-3 font-mono font-medium whitespace-nowrap">
                     <button
                       onClick={() =>
                         setSortBy((s) =>
@@ -581,9 +587,7 @@ function MatrixSection({ nodes, components }: { nodes: NodeRow[]; components: Co
                     >
                       {name}
                       {active && (
-                        <span className="text-cube-info">
-                          {sortBy.dir === 'asc' ? '↑' : '↓'}
-                        </span>
+                        <span className="text-cube-info">{sortBy.dir === 'asc' ? '↑' : '↓'}</span>
                       )}
                     </button>
                   </th>
@@ -593,10 +597,11 @@ function MatrixSection({ nodes, components }: { nodes: NodeRow[]; components: Co
           </thead>
           <tbody className="divide-y divide-border/40">
             {filtered.map((n) => {
-              const byComponent = new Map(n.components.map((e) => [e.component, e]));
+              const nodeID = n.nodeID ?? '';
+              const byComponent = new Map((n.components ?? []).map((e) => [e.component, e]));
               return (
                 <tr
-                  key={n.nodeID}
+                  key={nodeID}
                   className={cn(
                     'group transition-colors hover:bg-muted/40',
                     !n.healthy && 'bg-cube-err/[0.04]',
@@ -604,7 +609,7 @@ function MatrixSection({ nodes, components }: { nodes: NodeRow[]; components: Co
                 >
                   <td className="sticky left-0 z-10 bg-card/40 px-4 py-3 group-hover:bg-muted/40">
                     <Link
-                      to={`/nodes/${n.nodeID}`}
+                      to={`/nodes/${nodeID}`}
                       className="flex items-center gap-2 text-foreground/90 hover:text-cube-info"
                     >
                       <span
@@ -613,7 +618,7 @@ function MatrixSection({ nodes, components }: { nodes: NodeRow[]; components: Co
                           n.healthy ? 'bg-cube-ok' : 'bg-cube-err',
                         )}
                       />
-                      <MonoId size="sm">{n.nodeID}</MonoId>
+                      <MonoId size="sm">{nodeID}</MonoId>
                       <ChevronRight
                         size={11}
                         className="ml-0.5 text-muted-foreground/30 group-hover:text-cube-info"
@@ -622,7 +627,8 @@ function MatrixSection({ nodes, components }: { nodes: NodeRow[]; components: Co
                   </td>
                   {componentNames.map((name) => {
                     const entry = byComponent.get(name);
-                    const undeclared = !!entry && componentsWithDeclaration.has(name) && !entry.declared;
+                    const undeclared =
+                      !!entry && componentsWithDeclaration.has(name) && !entry.declared;
                     if (!entry) {
                       return (
                         <td
@@ -636,10 +642,7 @@ function MatrixSection({ nodes, components }: { nodes: NodeRow[]; components: Co
                     return (
                       <td
                         key={name}
-                        className={cn(
-                          'px-4 py-3',
-                          undeclared && 'border-l-2 border-cube-warn/50',
-                        )}
+                        className={cn('px-4 py-3', undeclared && 'border-l-2 border-cube-warn/50')}
                       >
                         <span
                           className={cn(
@@ -755,9 +758,7 @@ function SearchAndFilter<T extends string>({
               <span
                 className={cn(
                   'rounded px-1 text-[10px] tabular-nums',
-                  active
-                    ? 'bg-cube-info/15 text-cube-info'
-                    : 'bg-muted text-muted-foreground/80',
+                  active ? 'bg-cube-info/15 text-cube-info' : 'bg-muted text-muted-foreground/80',
                 )}
               >
                 {opt.count}

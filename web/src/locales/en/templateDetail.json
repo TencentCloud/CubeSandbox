@@ -16,6 +16,7 @@
   },
   "fields": {
     "templateID": "Template ID",
+    "alias": "Alias",
     "status": "Status",
     "instanceType": "Instance Type",
     "version": "Version",

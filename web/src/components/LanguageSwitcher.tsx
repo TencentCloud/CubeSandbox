@@ -22,7 +22,7 @@ export function LanguageSwitcher() {
           className={cn(
             'flex h-9 items-center gap-1.5 rounded-lg border border-border/60 bg-muted/40 px-3',
             'text-sm text-muted-foreground transition hover:border-primary/30 hover:bg-muted/70',
-            'focus:outline-none'
+            'focus:outline-none',
           )}
           aria-label="Switch language"
         >

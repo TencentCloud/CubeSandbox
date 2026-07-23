@@ -140,6 +140,24 @@ func cleanupTemplateReplicasOnNodes(ctx context.Context, templateID string, repl
 }
 
 func distributeRootfsArtifact(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string) ([]*node.Node, int32, int32, int32, error) {
+	// Defense-in-depth: refuse to push a CreateImage to cubelets when the
+	// artifact record is obviously incomplete. Without this guard the call
+	// proceeds with ext4_size_bytes=0 / download_token=""; cubelet then
+	// tries to pull with an empty token against a URL that falls back to
+	// os.Hostname() (buildDownloadURL) and reports "invalid size:0", which
+	// marks the template FAILED and masks the real cause (concurrent build
+	// race; see artifactBuildLocks). Fail here with a clear diagnostic
+	// instead.
+	if artifact == nil {
+		return nil, 0, 0, 0, fmt.Errorf("distributeRootfsArtifact: artifact is nil")
+	}
+	if artifact.Status != ArtifactStatusReady || artifact.Ext4SizeBytes == 0 || strings.TrimSpace(artifact.Ext4SHA256) == "" || strings.TrimSpace(artifact.DownloadToken) == "" || strings.TrimSpace(artifact.MasterNodeIP) == "" {
+		return nil, 0, 0, 0, fmt.Errorf(
+			"artifact %s is not ready for distribution (status=%s size_bytes=%d sha256_set=%t token_set=%t master_node_ip=%q); template build likely did not complete — check cubemaster logs for buildRootfsArtifact errors",
+			artifact.ArtifactID, artifact.Status, artifact.Ext4SizeBytes,
+			strings.TrimSpace(artifact.Ext4SHA256) != "", strings.TrimSpace(artifact.DownloadToken) != "", artifact.MasterNodeIP,
+		)
+	}
 	targets, err := resolveTemplateNodes(req.InstanceType, req.DistributionScope)
 	if err != nil {
 		return nil, 0, 0, 0, err

@@ -108,6 +108,33 @@ sandbox.kill()
 
 `kill()` is **irreversible**: unlike pause, a killed sandbox cannot be brought back, even when `lifecycle.on_timeout="pause"` was set — `kill()` always wins and discards the snapshot.
 
+### Deleting a Paused Sandbox
+
+Both `kill()` and `DELETE /sandboxes/{sandboxID}` can delete sandboxes in the `running` or `paused` state.
+
+When deleting a `paused` sandbox, CubeSandbox first restores its runtime, then runs the standard destroy flow. This can take longer than deleting a `running` sandbox. The API remains synchronous: it returns `204 No Content` only after the sandbox and its resources have been cleaned up.
+
+The internal restore is only used to complete deletion. It is not treated as a separate resume operation:
+
+- It does not emit a `sandbox.resumed` lifecycle event.
+- It does not reset the idle timeout.
+- It does not change the synchronous DELETE semantics.
+
+To leave enough time for the destroy flow, the internal restore runs for at most five seconds. If the request does not have enough time left for restore and destroy, CubeSandbox returns a retryable error before starting destroy.
+
+When deleting a `paused` sandbox, the following responses are possible:
+
+- **`204 No Content`**: The sandbox and its resources have been cleaned up.
+- **`409 Conflict`**: The restore did not pass the resource admission check, for example because the node lacks capacity or the sandbox is missing required resource metadata. The sandbox remains `paused`. Follow the diagnostic in the response: retry after capacity is released, or repair or recreate the sandbox when resource metadata is missing.
+- **`503 Service Unavailable` + `Retry-After: 2`**: The sandbox is entering the paused state, or another lifecycle operation has not completed. Wait at least two seconds before retrying.
+- **`503 Service Unavailable` + `Retry-After: 5`**: The pre-delete restore or state preparation did not finish within its time budget, or too little time remains to start the destroy flow. Check the sandbox state and wait at least five seconds before retrying.
+
+`Retry-After` is in seconds and tells the client when to retry. It does not mean that CubeSandbox continues deletion or starts a background retry.
+
+Existing `404 Not Found`, `408 Request Timeout`, and `running` sandbox delete behavior remain unchanged.
+
+If the restore reports an error but the runtime confirms that the sandbox is already `running`, CubeSandbox continues with destroy. A later destroy failure uses the existing destroy error semantics; the sandbox is not paused again and no background cleanup task is created.
+
 ## Explicit Pause / Resume
 
 ```python

@@ -37,8 +37,11 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/task"
+	volrefcount "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/refcount"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
+
+var setSandboxProxyMapFn = localcache.SetSandboxProxyMap
 
 type createSandboxContext struct {
 	selctx           *selctx.SelectorCtx
@@ -307,6 +310,9 @@ func (c *createSandboxContext) dealSuccResult() {
 				c.masterRsp.ExtInfo[constants.CubeExtNumaKey] = string(v)
 			}
 		}
+		// Apply any node-level volume ref-count transitions (0→1) reported by
+		// Cubelet so the volume DB knows how many nodes reference each volume.
+		volrefcount.ApplyFromExtInfo(c.ctx, c.cubeletRsp.GetExtInfo())
 		if config.GetConfig().CubeletConf.EnableExposedPort {
 			if c.cubeletRsp.GetPortMappings() != nil {
 				c.cubeletRspPorts = make(map[string]string)
@@ -569,10 +575,17 @@ func (c *createSandboxContext) setProxyToRedis() error {
 		// pre-feature behavior intact. Only an explicit false unlocks the
 		// per-sandbox token flow.
 		allowPublic := true
-		if origReq := createOriginRequestFromContext(c.ctx); origReq != nil &&
+		origReq := createOriginRequestFromContext(c.ctx)
+		if origReq != nil &&
 			origReq.CubeNetworkConfig != nil &&
 			origReq.CubeNetworkConfig.AllowPublicTraffic != nil {
 			allowPublic = *origReq.CubeNetworkConfig.AllowPublicTraffic
+		}
+		maskRequestHost := ""
+		if origReq != nil &&
+			origReq.CubeNetworkConfig != nil &&
+			origReq.CubeNetworkConfig.MaskRequestHost != nil {
+			maskRequestHost = *origReq.CubeNetworkConfig.MaskRequestHost
 		}
 		var token string
 		if !allowPublic {
@@ -588,13 +601,14 @@ func (c *createSandboxContext) setProxyToRedis() error {
 			CreatedAt:          strconv.FormatInt(time.Now().UnixNano(), 10),
 			AllowPublicTraffic: allowPublic,
 			TrafficAccessToken: token,
+			MaskRequestHost:    maskRequestHost,
 		}
 
 		if config.GetConfig().CubeletConf.EnableExposedPort {
 			proxy.ContainerToHostPorts = c.cubeletRspPorts
 		}
 
-		if err := localcache.SetSandboxProxyMap(c.ctx, proxy); err != nil {
+		if err := setSandboxProxyMapFn(c.ctx, proxy); err != nil {
 			return err
 		}
 		// Surface the token to the master response only after the proxy

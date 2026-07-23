@@ -84,6 +84,41 @@ func (s *Store) PublishDelete(ctx context.Context, sandboxID string) {
 	}
 }
 
+// PublishState emits an OpState event announcing that the sandbox has
+// transitioned to a new terminal runtime state (paused or running) as a
+// result of a successful pause / resume RPC.
+//
+// Unlike PublishCreate/Update this deliberately does NOT touch MetaKey:
+// runtime state is tracked separately by the CLM via per-sandbox state
+// keys, and stuffing state into the meta snapshot would blur the "meta is
+// stable" invariant that consumers rely on for restart bootstrap.
+//
+// Only the two terminal states are broadcast — transition markers
+// ("pausing", "resuming") stay private to the CLM. Invalid values are
+// warned and dropped rather than propagated.
+func (s *Store) PublishState(ctx context.Context, sandboxID, state, source string) {
+	if s == nil || !s.enabled.Load() || s.doer == nil || sandboxID == "" {
+		return
+	}
+	if state != StatePaused && state != StateRunning {
+		log.G(ctx).Warnf("lifecycle: PublishState sandbox=%s invalid state %q; dropped",
+			sandboxID, state)
+		return
+	}
+	payload, err := json.Marshal(StatePayload{
+		State:  state,
+		Actor:  ActorCubeMaster,
+		Source: source,
+	})
+	if err != nil {
+		log.G(ctx).Warnf("lifecycle: marshal state payload sandbox=%s: %v", sandboxID, err)
+		return
+	}
+	if _, err := s.xadd(OpState, sandboxID, payload); err != nil {
+		log.G(ctx).Warnf("lifecycle: XADD state %s failed: %v", sandboxID, err)
+	}
+}
+
 // PublishUpdate refreshes the snapshot for an already-existing sandbox: HSET
 // the new meta JSON, then XADD an OpUpdate event. Used by set_timeout /
 // refresh when only mutable fields (TimeoutSeconds, CreatedAt, EndAt) change.

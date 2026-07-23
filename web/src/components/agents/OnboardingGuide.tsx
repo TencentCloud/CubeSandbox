@@ -51,7 +51,11 @@ export function OnboardingGuide({
           title={t('onboarding.steps.apiKey.title')}
           desc={t('onboarding.steps.apiKey.desc')}
           action={
-            <Button size="sm" variant={apiKeyConfigured ? 'outline' : 'default'} onClick={onConfigureApiKey}>
+            <Button
+              size="sm"
+              variant={apiKeyConfigured ? 'outline' : 'default'}
+              onClick={onConfigureApiKey}
+            >
               {apiKeyConfigured
                 ? t('onboarding.steps.apiKey.doneAction')
                 : t('onboarding.steps.apiKey.action')}
@@ -101,7 +105,7 @@ function Step({
           'flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-semibold',
           done
             ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300'
-            : 'bg-muted text-muted-foreground'
+            : 'bg-muted text-muted-foreground',
         )}
       >
         {done ? <Check size={16} /> : index}

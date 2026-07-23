@@ -67,7 +67,7 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 		return rsp, nil
 	}
 
-	unlock := s.updateSandboxLocks.Lock(req.GetSandboxID())
+	unlock := s.sandboxLifecycleLocks.Lock(req.GetSandboxID())
 	defer unlock()
 
 	stepLog := log.G(ctx).WithFields(CubeLog.Fields{

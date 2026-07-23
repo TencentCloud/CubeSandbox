@@ -7,20 +7,22 @@ package cube
 import (
 	"errors"
 	"io"
-	"net/http"
 	"strconv"
 	"strings"
 
+	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
-func handleListAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
+func handleListAction(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
 	rsp := &types.ListCubeSandboxRes{
 		Ret: &types.Ret{
 			RetCode: int(errorcode.ErrorCode_Success),
@@ -32,24 +34,23 @@ func handleListAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.Reques
 	}()
 	req := &types.ListCubeSandboxReq{}
 
-	err := utils.DecodeHttpBody(r.Body, req)
+	err := utils.DecodeHttpBody(c.Request.Body, req)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
-			querys := r.URL.Query()
-			req.RequestID = querys.Get("requestID")
-			req.HostID = querys.Get("host_id")
-			req.InstanceType = querys.Get("instance_type")
-			idx, err := strconv.ParseInt(querys.Get("start_idx"), 10, 64)
+			req.RequestID = c.Query("requestID")
+			req.HostID = c.Query("host_id")
+			req.InstanceType = c.Query("instance_type")
+			idx, err := strconv.ParseInt(c.Query("start_idx"), 10, 64)
 			if err == nil {
 				req.StartIdx = int(idx)
 			}
-			num, err := strconv.ParseInt(querys.Get("size"), 10, 64)
+			num, err := strconv.ParseInt(c.Query("size"), 10, 64)
 			if err == nil {
 				req.Size = int(num)
 			}
 
 			filters := make(map[string]string)
-			filterParams := querys.Get("filter.label_selector")
+			filterParams := c.Query("filter.label_selector")
 			for _, labels := range strings.Split(filterParams, ",") {
 				if len(labels) > 0 {
 					kv := strings.Split(labels, "=")
@@ -66,7 +67,8 @@ func handleListAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.Reques
 		} else {
 			rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
 			rsp.Ret.RetMsg = err.Error()
-			return rsp
+			common.WriteListAPI(c, rsp)
+			return
 		}
 	}
 
@@ -75,10 +77,10 @@ func handleListAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.Reques
 		req.InstanceType = cubebox.InstanceType_cubebox.String()
 	}
 	rt.InstanceType = req.InstanceType
-	ctx := log.WithLogger(r.Context(), log.G(r.Context()).WithFields(map[string]any{
+	ctx := log.WithLogger(c.Request.Context(), log.G(c.Request.Context()).WithFields(map[string]any{
 		"RequestId":    req.RequestID,
 		"InstanceType": req.InstanceType,
 	}))
 	rsp = sandbox.ListSandbox(ctx, req)
-	return rsp
+	common.WriteListAPI(c, rsp)
 }

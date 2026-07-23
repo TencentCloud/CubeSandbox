@@ -53,7 +53,7 @@ Cubelet defaults to a fairly quiet `warn` log level, so normal operation won't p
 | CubeShim | Stats log | `/data/log/CubeShim/cube-shim-stat.log` | `tail -F` |
 | Hypervisor (VMM) | VMM creation log | `/data/log/CubeVmm/vmm.log` | `tail -F` |
 | network-agent | Business request log | `/data/log/network-agent/network-agent-req.log` | `tail -F` |
-| cube-proxy | Access/error/sidecar logs (inside container) | container-internal `/data/log/cube-proxy/{access,error,sidecar}.log` | `docker exec <container> tail ...` (see below) |
+| cube-proxy | Access/error logs | `/data/log/cube-proxy/{access,error}.log` | `tail -F` (see below) |
 | Sandbox container | init process stdout/stderr | `/data/cubelet/state/io.containerd.runtime.v2.task/default/<sandbox-id>/{stdout,stderr}` (inside Cubelet's mount namespace) | `cubecli logs <sandbox-id>` (see below) |
 | Template build | Build container stdout/stderr | `/data/log/template/<template-id>_0/{stdout,stderr}` (host filesystem) | `cubecli logs --tpl <template-id>` |
 
@@ -118,23 +118,21 @@ Filtering by `InstanceId` (the sandbox ID) gets you the full kernel boot output 
 `console=hvc0` is the VM's serial console; every kernel `printk` goes through it. CubeShim forwards that console stream straight into its own log pipeline (sharing the same writer as its ordinary request logs), so reading the guest kernel log is just a `grep` on `cube-shim-req.log` — no extra mount or debug tool needed.
 :::
 
-### 4. cube-proxy's in-container logs
+### 4. cube-proxy host logs
 
-`cube-proxy` is an OpenResty-based nginx container. Its logs live inside the container at `/data/log/cube-proxy/`, **not on the host filesystem**, so you need `docker exec` to read them:
+`cube-proxy` is an OpenResty-based nginx container. The one-click deployment bind-mounts the host directory `/data/log/cube-proxy/` into the container at the same path, so read the logs directly from the host:
 
 ```bash
-docker exec -it cube-proxy tail /data/log/cube-proxy/error.log
-docker exec -it cube-proxy tail /data/log/cube-proxy/sidecar.log
-docker exec -it cube-proxy tail /data/log/cube-proxy/access.log
+tail -F /data/log/cube-proxy/error.log
+tail -F /data/log/cube-proxy/access.log
 ```
 
-The container name is fixed at `cube-proxy` (created by systemd via `docker create`); you can confirm the actual container name/ID with `docker ps` first if needed.
+The container uses the same `/data/log/cube-proxy/` path, backed by the host directory.
 
 | File | Content |
 |---|---|
 | `access.log` | nginx access log |
 | `error.log` | nginx error log |
-| `sidecar.log` | cube-proxy sidecar logic (auth/routing, etc.) |
 
 ### 5. Enabling Cubelet debug-level logging
 

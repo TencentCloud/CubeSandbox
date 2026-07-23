@@ -16,6 +16,7 @@ use crate::{
     error::{AppError, AppResult},
     models::{
         ApiError, CreateTemplateRequest, ListTemplatesQuery, RebuildTemplateRequest,
+        TemplateAliasLookupResponse, TemplateBuildJob, TemplateBuildStatus,
         TemplateCompatAdoptResponseView, TemplateCompatMatrixView, TemplateDetail, TemplateSummary,
     },
     state::AppState,
@@ -61,6 +62,33 @@ pub async fn get_template(
 ) -> AppResult<impl IntoResponse> {
     let detail = state.services.templates.get_template(&template_id).await?;
     Ok((StatusCode::OK, Json(detail)))
+}
+
+// ─── GET /templates/aliases/:alias ───────────────────────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/templates/aliases/{alias}",
+    params(
+        ("alias" = String, Path, description = "Template alias")
+    ),
+    responses(
+        (status = 200, description = "Template alias lookup", body = TemplateAliasLookupResponse),
+        (status = 400, description = "Invalid alias", body = ApiError),
+        (status = 404, description = "Template alias not found", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn get_template_by_alias(
+    State(state): State<AppState>,
+    Path(alias): Path<String>,
+) -> AppResult<impl IntoResponse> {
+    let out = state
+        .services
+        .templates
+        .get_template_by_alias(&alias)
+        .await?;
+    Ok((StatusCode::OK, Json(out)))
 }
 
 // ─── GET /templates/compat ────────────────────────────────────────────────────
@@ -109,6 +137,16 @@ pub async fn adopt_template_compat_baseline(
 
 // ─── POST /templates ──────────────────────────────────────────────────────────
 
+#[utoipa::path(
+    post,
+    path = "/templates",
+    request_body = CreateTemplateRequest,
+    responses(
+        (status = 202, description = "Template build job accepted", body = TemplateBuildJob),
+        (status = 400, description = "Invalid request (bad alias, missing image, etc.)", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
 pub async fn create_template(
     State(state): State<AppState>,
     Json(body): Json<CreateTemplateRequest>,
@@ -119,6 +157,19 @@ pub async fn create_template(
 
 // ─── POST /templates/:templateID (rebuild) ────────────────────────────────────
 
+#[utoipa::path(
+    post,
+    path = "/templates/{templateID}",
+    params(
+        ("templateID" = String, Path, description = "Template identifier")
+    ),
+    request_body = RebuildTemplateRequest,
+    responses(
+        (status = 202, description = "Rebuild job accepted", body = TemplateBuildJob),
+        (status = 404, description = "Template not found", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
 pub async fn rebuild_template(
     State(state): State<AppState>,
     Path(template_id): Path<String>,
@@ -134,6 +185,16 @@ pub async fn rebuild_template(
 
 // ─── PATCH /templates/:templateID ─────────────────────────────────────────────
 
+#[utoipa::path(
+    patch,
+    path = "/templates/{templateID}",
+    params(
+        ("templateID" = String, Path, description = "Template identifier")
+    ),
+    responses(
+        (status = 501, description = "Not implemented; use POST /templates/{id} to rebuild", body = ApiError)
+    )
+)]
 pub async fn update_template(
     State(_): State<AppState>,
     Path(_template_id): Path<String>,
@@ -157,6 +218,20 @@ pub struct DeleteTemplateQuery {
     pub sync: Option<bool>,
 }
 
+#[utoipa::path(
+    delete,
+    path = "/templates/{templateID}",
+    params(
+        ("templateID" = String, Path, description = "Template identifier or alias"),
+        ("instance_type" = Option<String>, Query, description = "CubeMaster instance_type filter"),
+        ("sync" = Option<bool>, Query, description = "Wait for deletion to complete before returning")
+    ),
+    responses(
+        (status = 204, description = "Template deleted"),
+        (status = 404, description = "Template not found", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
 pub async fn delete_template(
     State(state): State<AppState>,
     Path(template_id): Path<String>,
@@ -174,53 +249,35 @@ pub async fn delete_template(
         if let Ok(value) = HeaderValue::from_str(&resp.operation_id) {
             headers.insert("x-operation-id", value);
         }
-        reverse_sync_agenthub_template(&state, &template_id).await;
         return Ok((StatusCode::NO_CONTENT, headers).into_response());
     }
-
+    // Alias resolution happens at the CubeMaster layer (deleteTemplate
+    // calls resolveTemplateIdentifierFn). CubeAPI no longer performs
+    // AgentHub reverse-sync (removed when this branch was rebased onto
+    // master, which includes the #984 refactoring).
     state
         .services
         .templates
         .delete_template(template_id.clone(), params.instance_type, params.sync)
         .await?;
-
-    reverse_sync_agenthub_template(&state, &template_id).await;
-
     Ok(StatusCode::NO_CONTENT.into_response())
-}
-
-// reverse_sync_agenthub_template best-effort soft-deletes any AgentHub template
-// registration backed by the just-deleted infrastructure template/snapshot
-// (FIX-5b, L15/H5). It keeps the AgentHub registry from referencing a snapshot
-// that no longer exists. Failures are logged, never propagated, so they cannot
-// block the primary deletion.
-async fn reverse_sync_agenthub_template(state: &AppState, id: &str) {
-    let Some(store) = state.agenthub_store.as_ref() else {
-        return;
-    };
-    match store
-        .find_template_ids_by_template_or_source_snapshot(id)
-        .await
-    {
-        Ok(template_ids) => {
-            for template_id in template_ids {
-                if let Err(e) = store.soft_delete_template(&template_id).await {
-                    tracing::warn!(
-                        "reverse sync: failed to soft-delete AgentHub template {}: {}",
-                        template_id,
-                        e
-                    );
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!("reverse sync: query AgentHub templates failed: {}", e);
-        }
-    }
 }
 
 // ─── POST /templates/:templateID/builds/:buildID ──────────────────────────────
 
+#[utoipa::path(
+    post,
+    path = "/templates/{templateID}/builds/{buildID}",
+    params(
+        ("templateID" = String, Path, description = "Template identifier"),
+        ("buildID" = String, Path, description = "Build identifier")
+    ),
+    responses(
+        (status = 202, description = "Build started", body = TemplateBuildJob),
+        (status = 404, description = "Template or build not found", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
 pub async fn start_template_build(
     State(state): State<AppState>,
     Path((template_id, _build_id)): Path<(String, String)>,
@@ -242,6 +299,19 @@ pub struct BuildStatusQuery {
     pub logs_offset: i32,
 }
 
+#[utoipa::path(
+    get,
+    path = "/templates/{templateID}/builds/{buildID}/status",
+    params(
+        ("templateID" = String, Path, description = "Template identifier"),
+        ("buildID" = String, Path, description = "Build identifier")
+    ),
+    responses(
+        (status = 200, description = "Build status", body = TemplateBuildStatus),
+        (status = 404, description = "Template or build not found", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
 pub async fn get_template_build_status(
     State(state): State<AppState>,
     Path((template_id, build_id)): Path<(String, String)>,
@@ -270,6 +340,19 @@ fn default_log_limit() -> i32 {
     100
 }
 
+#[utoipa::path(
+    get,
+    path = "/templates/{templateID}/builds/{buildID}/logs",
+    params(
+        ("templateID" = String, Path, description = "Template identifier"),
+        ("buildID" = String, Path, description = "Build identifier")
+    ),
+    responses(
+        (status = 200, description = "Build logs (JSON)"),
+        (status = 404, description = "Build not found", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
 pub async fn get_template_build_logs(
     State(state): State<AppState>,
     Path((_template_id, build_id)): Path<(String, String)>,

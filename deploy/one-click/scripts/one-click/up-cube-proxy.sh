@@ -21,6 +21,7 @@ CUBE_PROXY_ENABLE="${CUBE_PROXY_ENABLE:-1}"
 [[ "${CUBE_PROXY_ENABLE}" == "1" ]] || die "CUBE_PROXY_ENABLE must be 1; cube proxy is required in one-click deployment"
 
 PROXY_DIR="${TOOLBOX_ROOT}/cubeproxy"
+CUBE_PROXY_LOG_DIR="/data/log/cube-proxy"
 CUBE_PROXY_CERT_DIR="${CUBE_PROXY_CERT_DIR:-${PROXY_DIR}/certs}"
 CERT_DIR="${CUBE_PROXY_CERT_DIR}"
 GLOBAL_TEMPLATE="${PROXY_DIR}/global.conf.template"
@@ -34,14 +35,14 @@ COMPOSE_FILE="${PROXY_DIR}/docker-compose.yaml"
 #   3. default    → int.tencentcloudcr.com (overseas/international)
 #
 # The image is published by CubeProxy/Makefile's `make push` to both
-# registries under the same :v0.5.1 tag; either default resolves
+# registries under the same :v0.6.0-rc1 tag; either default resolves
 # to whatever the operator most recently published.
 #
 # Compatibility: CUBE_PROXY_IMAGE_TAG is deprecated (local compose build era).
 # A non-default leftover value is honored once with a warning; the old default
 # cube-proxy:one-click is ignored so upgrades adopt the pre-published image.
-CUBE_PROXY_IMAGE_INT_DEFAULT="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-proxy:v0.5.1"
-CUBE_PROXY_IMAGE_CN_DEFAULT="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-proxy:v0.5.1"
+CUBE_PROXY_IMAGE_INT_DEFAULT="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-proxy:v0.6.0-rc1"
+CUBE_PROXY_IMAGE_CN_DEFAULT="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-proxy:v0.6.0-rc1"
 if [[ -z "${CUBE_SANDBOX_CUBE_PROXY_IMAGE:-}" && -n "${CUBE_PROXY_IMAGE_TAG:-}" ]]; then
   if [[ "${CUBE_PROXY_IMAGE_TAG}" == "cube-proxy:one-click" ]]; then
     log "CUBE_PROXY_IMAGE_TAG=cube-proxy:one-click is deprecated and ignored; set CUBE_SANDBOX_CUBE_PROXY_IMAGE or MIRROR to select the pre-published cube-proxy image"
@@ -106,6 +107,7 @@ MKCERT_BUNDLED_BIN="${TOOLBOX_ROOT}/support/bin/mkcert"
 PREPARE_ONLY="${ONE_CLICK_PREPARE_ONLY:-0}"
 
 ensure_dir "${PROXY_DIR}"
+mkdir -p "${CUBE_PROXY_LOG_DIR}"
 mkdir -p "${CERT_DIR}"
 ensure_file "${GLOBAL_TEMPLATE}"
 ensure_file "${COMPOSE_TEMPLATE}"
