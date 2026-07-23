@@ -49,3 +49,4 @@ lang: en-US
 | Title | Author     | Date | Tags |
 | --- |------------| --- | --- |
 | [trpc-agent-go: A Secure Code Execution Backend Powered by Cube Sandbox](./trpc-agent-go.md) | joeyczheng | 2026-06-03 | agent, code-execution, e2b, golang |
+| [Cube-Powered Internal Evaluation Runner](./cube-internal-eval-runner.md) | March-77 | 2026-07-23 | evaluation, e2b, platform |

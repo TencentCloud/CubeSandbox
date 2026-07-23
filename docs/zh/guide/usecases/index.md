@@ -49,3 +49,4 @@ lang: zh-CN
 | 标题 | 作者         | 日期 | 标签 |
 | --- |------------| --- | --- |
 | [trpc-agent-go：基于 Cube Sandbox 的安全代码执行后端](./trpc-agent-go.md) | joeyczheng | 2026-06-03 | agent, code-execution, e2b, golang |
+| [Cube-Powered Internal Evaluation Runner](./cube-internal-eval-runner.md) | March-77 | 2026-07-23 | evaluation, e2b, platform |

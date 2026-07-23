@@ -48,3 +48,4 @@ lang: zh-CN
 | 标题 | 作者 | 日期 | 标签 |
 | --- | --- | --- | --- |
 | [Pi Agent 集成指南](./pi-agent.md) | chaojixinren | 2026-07-01 | integration, pi-agent, coding-agent, agent |
+| [LangChain 集成指南](./langchain.md) | March-77 | 2026-07-23 | integration, langchain |

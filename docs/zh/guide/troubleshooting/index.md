@@ -58,4 +58,5 @@ lang: zh-CN
 | [沙箱网段和局域网冲突导致创建模板超时](./local-network-cidr-conflict.md) | luzhixing12345 | 2026-05-20 | deployment, networking, one-click |
 | [Host Mount 写入时报 Permission Denied](./host-mount-permissions.md) | barry166 | 2026-06-14 | runtime, host-mount, permissions |
 | [如何查看 CubeSandbox 各组件日志（含 cubecli logs 与 guest kernel log）](./component-log-locations.md) | ls-ggg | 2026-07-15 | logging, cubelet, cubeshim, operations |
+| [旧内核上模板加载失败](./template-load-fails-on-legacy-kernels.md) | March-77 | 2026-07-23 | troubleshooting, virtualization, startup |
 | _在这里补充你的文章_ | - | - | - |
