@@ -59,6 +59,11 @@ cubemastercli tpl create-from-image \
 
 将生成的 template ID 设置为 `CUBE_TEMPLATE_ID`。
 
+`cases/network/test_mask_request_host.py` 会额外临时创建一个也暴露 `8765`
+端口的模板（在 `CUBE_PROXY_NODE_IP=127.0.0.1` 走跨节点映射路径时需要）。
+可用 `SDK_E2E_MASK_HOST_TEMPLATE_IMAGE` 或 `CUBE_TEMPLATE_E2E_IMAGE` 覆盖镜像。
+整套 suite 的 preflight 仍需要一个已 READY 的 `CUBE_TEMPLATE_ID`。
+
 ## 快速开始
 
 ```bash

@@ -61,6 +61,12 @@ cubemastercli tpl create-from-image \
 
 Use the generated template ID as `CUBE_TEMPLATE_ID` in the commands below.
 
+`cases/network/test_mask_request_host.py` additionally builds a temporary
+template that also exposes port `8765` (needed for CubeProxy port mapping when
+requests hit the proxy via `CUBE_PROXY_NODE_IP=127.0.0.1`). Override the image
+with `SDK_E2E_MASK_HOST_TEMPLATE_IMAGE` or `CUBE_TEMPLATE_E2E_IMAGE` if needed.
+The suite still requires a ready `CUBE_TEMPLATE_ID` for preflight.
+
 ## Quick Start
 
 ```bash
