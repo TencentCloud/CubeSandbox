@@ -236,15 +236,74 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
 
     let file_logger = FileLogger::new(cfg.log_dir.clone(), cfg.log_prefix.clone()).await?;
 
-    // FilteredLogger gates by level → MultiLogger fans out to file (+ future backends)
-    let logger: logging::ArcLogger = arc(FilteredLogger::new(
-        arc(
-            MultiLogger::new().add(arc(file_logger)), // Uncomment to add more backends:
-                                                      // .add(arc(logging::http::HttpLogger::new(Default::default())))
-                                                      // .add(arc(logging::otlp::OtlpLogger::new()))
-        ),
-        min_level,
-    ));
+    let mut multi = MultiLogger::new().add(arc(file_logger));
+
+    // ── Conditional: Webhook (HttpLogger) ───────────────────────────────
+    if !cfg.webhook_urls.trim().is_empty() {
+        use logging::http::{HttpLogger, HttpLoggerConfig};
+        use std::collections::HashSet;
+
+        let targets: Vec<String> = cfg
+            .webhook_urls
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if !targets.is_empty() {
+            // HTTPS warning for non-loopback plaintext URLs
+            for url in &targets {
+                let host = url
+                    .strip_prefix("https://")
+                    .or_else(|| url.strip_prefix("http://"))
+                    .unwrap_or(url)
+                    .split('/')
+                    .next()
+                    .unwrap_or(url);
+                let is_loopback = host == "localhost"
+                    || host == "127.0.0.1"
+                    || host == "::1"
+                    || host.starts_with("[::1]");
+                if !url.starts_with("https://") && !is_loopback {
+                    tracing::warn!("webhook URL uses HTTP (not HTTPS): {host}", host = host);
+                }
+            }
+
+            let subscribed_events: HashSet<String> = cfg
+                .webhook_events
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            if subscribed_events.is_empty() {
+                tracing::info!("webhook: no event filter configured, subscribing to all events");
+            }
+
+            let target_count = targets.len();
+
+            let webhook_config = HttpLoggerConfig {
+                targets,
+                subscribed_events,
+                secret: cfg.webhook_secret.clone(),
+                max_concurrency: 64,
+                http_client: reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()
+                    .expect("failed to build webhook HTTP client"),
+            };
+            multi = multi.add(arc(HttpLogger::new(webhook_config)));
+            tracing::info!(
+                webhook_target_count = target_count,
+                webhook_events = %cfg.webhook_events,
+                signing = !cfg.webhook_secret.is_empty(),
+                "webhook logger enabled"
+            );
+        }
+    }
+
+    // FilteredLogger gates by level → MultiLogger fans out
+    let logger: logging::ArcLogger = arc(FilteredLogger::new(arc(multi), min_level));
 
     tracing::info!(
         log_dir = %cfg.log_dir,
