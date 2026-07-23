@@ -68,6 +68,8 @@ replace github.com/tencentcloud/CubeSandbox/Cubelet => ../../../../Cubelet
 
 Requires **Go 1.24+** (`go.mod` declares `go 1.24.8`).
 
+> For Kubernetes / Terraform deployments, configure `volume-cos.conf` yourself using native cluster mechanisms. The steps below use bare-metal paths as examples.
+
 ```bash
 PREFIX=/usr/local/services/cubetoolbox/CubeMaster/plugin
 mkdir -p "$PREFIX"

@@ -81,6 +81,8 @@ sudo install -m 0755 /tmp/cube-volume-cos.sh "$PREFIX/Cubelet/plugin/cube-volume
 
 ### 2. 创建配置文件
 
+> Kubernetes / Terraform 部署时，`volume-cos.conf` 由用户自行按集群原生方式完成；下文以 one-click / 裸机路径为例。
+
 与插件脚本同目录（CubeMaster / Cubelet 各一份；分节点部署时在对应节点编辑）：
 
 ```bash

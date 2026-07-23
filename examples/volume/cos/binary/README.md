@@ -83,6 +83,8 @@ sudo install -m 0755 /tmp/cube-volume-cos.sh "$PREFIX/Cubelet/plugin/cube-volume
 
 ### 2. Create config file
 
+> For Kubernetes / Terraform deployments, configure `volume-cos.conf` yourself using native cluster mechanisms. The steps below use one-click / bare-metal paths as examples.
+
 Same directory as the plugin binary (one file per node; edit on each host when roles are split):
 
 ```bash

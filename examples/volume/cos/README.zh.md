@@ -29,7 +29,7 @@
 **单机开发**：CubeMaster 与 Cubelet 在同一台机器上时，依赖装在一台即可。  
 **多机部署**：各工具装在哪台见 [§1 安装依赖](#1-安装依赖) 表格。
 
-> **架构限制**：不支持 ARM / aarch64（官方 cosfs 仅提供 x86_64 / amd64 包）。
+> **架构限制**：官方 cosfs 不支持 ARM / aarch64（仅提供 x86_64 / amd64 包）。可自行尝试用 s3fs 替代。
 
 ---
 
@@ -113,6 +113,8 @@ printf '%s' '{"ok":true}' | jq -r '.ok'   # 应输出 true
 ---
 
 ## 2. 安装插件与 COS 凭证
+
+> Kubernetes / Terraform 部署时，插件与 `volume-cos.conf` 等配置由用户自行按集群原生方式完成；下文以 one-click / 裸机路径为例。
 
 一键部署（one-click）会把 binary 插件分别放到 **`/usr/local/services/cubetoolbox/CubeMaster/plugin/`**（Controller）与 **`/usr/local/services/cubetoolbox/Cubelet/plugin/`**（Node），并在各目录从 `volume-cos.conf.example` 生成 `volume-cos.conf`。安装后只需在对应节点编辑凭证：
 

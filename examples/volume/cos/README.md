@@ -31,7 +31,7 @@ This guide is for **first-time Volume Plugin users**: follow the steps in order 
 **Single-machine dev:** CubeMaster and Cubelet on one host — install deps once.  
 **Multi-node:** See the table in [§1 Install dependencies](#1-install-dependencies).
 
-> **Architecture:** ARM / aarch64 is not supported (official cosfs packages are x86_64 / amd64 only).
+> **Architecture:** Official cosfs does not support ARM / aarch64 (x86_64 / amd64 packages only). You may try s3fs as an alternative on your own.
 
 ---
 
@@ -115,6 +115,8 @@ The install script runs similar checks when using `--cosfs` / `--coscmd` / `--jq
 ---
 
 ## 2. Install plugin and COS credentials
+
+> For Kubernetes / Terraform deployments, configure the plugin and `volume-cos.conf` yourself using native cluster mechanisms. The steps below use one-click / bare-metal paths as examples.
 
 One-click install places the binary plugin under **`/usr/local/services/cubetoolbox/CubeMaster/plugin/`** (Controller) and **`/usr/local/services/cubetoolbox/Cubelet/plugin/`** (Node), and seeds `volume-cos.conf` from `volume-cos.conf.example` in each directory. After install, edit credentials on the matching node:
 
