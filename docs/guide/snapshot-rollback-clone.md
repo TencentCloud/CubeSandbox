@@ -2,7 +2,7 @@
 
 This guide covers three advanced APIs provided by the Cube Sandbox Python SDK:
 
-- **Snapshot**: Persists the complete state (memory + filesystem) of a running sandbox as a reusable image. The snapshot can later be used to spawn new sandboxes or trigger a rollback.
+- **Snapshot**: Persists the complete state (memory + filesystem) of a running sandbox as a reusable image. The snapshot can later be used to spawn new sandboxes or trigger a rollback. A snapshot may also be memory-less — for example one registered from an imported disk artifact — in which case restoring it cold-boots a fresh guest on the snapshot filesystem instead of resuming execution.
 - **Clone**: Calls `clone()` on a running sandbox to immediately derive N fully independent copies. Each copy starts from the source sandbox's current state and runs in isolation.
 - **Rollback**: Restores a running sandbox to a previously captured snapshot state in place — the sandbox ID stays the same and execution can continue right away.
 
@@ -136,6 +136,31 @@ with Sandbox.create(template=new_snap.snapshot_id) as forked:
     out = forked.run_code("print(open('/tmp/v.txt').read())").logs.stdout[0]
     assert out.strip() == "v3"
 ```
+
+## Importing a disk-only snapshot (operators)
+
+`POST /cube/snapshot/import` (CubeMaster internal API) registers a snapshot from a writable-layer disk artifact staged on a node — for example one exported from another node — without a running sandbox. The resulting snapshot carries no memory image: restoring it cold-boots a fresh guest on the imported filesystem, and rollback to it is rejected.
+
+```bash
+curl -X POST "$CUBE_MASTER_URL/cube/snapshot/import" -d '{
+  "request_id": "import-1",
+  "host_ip": "10.0.0.8",
+  "rootfs_source_path": "/data/cubelet/storage/import/rootfs.vol",
+  "create_spec": {"containers": [{"name": "c0", "image": {"image": "ubuntu:22.04"},
+                  "resources": {"cpu": "1", "mem": "1Gi"},
+                  "volume_mounts": [{"name": "tmp", "container_path": "/"}]}],
+                  "volumes": [{"name": "tmp", "volume_source": {"empty_dir": {"size_limit": "1Gi"}}}]}
+}'
+```
+
+Operator contract:
+
+- The artifact must be a regular file under `<data_path>/import/` on the target node, on the same filesystem as cubelet's volume storage (its content is reflinked, not copied).
+- The artifact must contain exactly one overlay upper layout (`.../upper` + `.../work`), as produced by exporting a sandbox writable layer. The platform exports it as `disk/<container-id>/{upper,work}` (two directory levels); detection scans at most that deep.
+- `create_spec` must declare exactly one container: the artifact carries a single overlay upper layer, so it can back exactly one container's writable rootfs.
+- `create_spec`'s image **must** be the image the artifact's writable layer was built over; this is not validated and a mismatch produces a corrupt-looking filesystem at restore.
+- The staged artifact is not consumed: remove it after a successful import.
+- `request_id` is idempotent for a successful import: retrying the same request returns the already-imported snapshot instead of importing twice. A failed import is terminal for that `request_id`, and retrying it returns the recorded failure, so retry with a fresh one.
 
 ## Best practices
 

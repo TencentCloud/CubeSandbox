@@ -26,6 +26,7 @@ pub const ANNO_VM_KERNEL: &str = "cube.vm.kernel.path";
 pub const ANNO_VM_KERNEL_CMDLINE_APPEND: &str = "cube.vm.kernel.cmdline.append";
 pub const ANNO_SNAPSHOT_BASE: &str = "cube.vm.snapshot.base.path";
 pub const ANNO_SNAPSHOT_MEMORY_VOL_URL: &str = "cube.vm.snapshot.memory_vol_url";
+pub const ANNO_SNAPSHOT_DISK_ONLY: &str = "cube.vm.snapshot.disk_only";
 pub const ANNO_APP_SNAPSHOT_CREATE: &str = "cube.appsnapshot.create";
 pub const ANNO_APP_SNAPSHOT_RESTORE: &str = "cube.appsnapshot.restore";
 
@@ -47,6 +48,7 @@ pub struct Config {
     pub kernel: String,
     pub snapshot_base: String,
     pub snapshot_memory_vol_url: Option<String>,
+    pub snapshot_disk_only: bool,
     pub fs: Option<Fs>,
     pub virtiofs: Vec<VirtioFs>,
     pub vips: String,
@@ -120,6 +122,10 @@ impl Config {
             .get(ANNO_SNAPSHOT_MEMORY_VOL_URL)
             .map(|x| x.trim().to_string())
             .filter(|x| !x.is_empty());
+        let snapshot_disk_only = anno
+            .get(ANNO_SNAPSHOT_DISK_ONLY)
+            .map(|x| x.trim().eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
         let fs = {
             if let Some(opt_fs) = anno.get(ANNO_VMM_FS) {
@@ -206,6 +212,7 @@ impl Config {
             kernel,
             snapshot_base,
             snapshot_memory_vol_url,
+            snapshot_disk_only,
             fs,
             virtiofs,
             vips: cube_vips,

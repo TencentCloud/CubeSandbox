@@ -819,18 +819,21 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (retEr
 		}
 		return err
 	})
+	var restoreDiskOnly bool
 	eg.Go(func() error {
-		url, err := l.prefetchRestoreMemoryVolURL(groupCtx, opts)
+		url, diskOnly, err := l.prefetchRestoreMemoryVolURL(groupCtx, opts)
 		if err != nil {
 			return err
 		}
 		restoreMemoryVolURL = url
+		restoreDiskOnly = diskOnly
 		return nil
 	})
 	if err = eg.Wait(); err != nil {
 		return ret.WrapWithDefaultError(err, errorcode.ErrorCode_CreateStorageFailed)
 	}
 	result.RestoreMemoryVolURL = restoreMemoryVolURL
+	result.RestoreDiskOnly = restoreDiskOnly
 
 	start := time.Now()
 	err = l.writeBackendFileInfo(ctx, opts.SandboxID, result)
@@ -900,16 +903,19 @@ func (l *local) cleanupCreateResult(ctx context.Context, result *StorageInfo) er
 	return errs
 }
 
-func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.CreateContext) (string, error) {
+// The second return value reports a positive disk-only determination: the
+// catalog was read and the snapshot genuinely carries no memory image. An empty
+// URL on its own does not mean that, so callers must not infer it.
+func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.CreateContext) (string, bool, error) {
 	if opts == nil || opts.ReqInfo == nil || opts.IsCreateSnapshot() {
-		return "", nil
+		return "", false, nil
 	}
 	if _, ok := opts.GetSnapshotTemplateID(); !ok {
-		return "", nil
+		return "", false, nil
 	}
 	annotations := opts.ReqInfo.GetAnnotations()
 	if existingURL := strings.TrimSpace(annotations[constants.AnnotationVMSnapshotMemoryVolURL]); existingURL != "" {
-		return existingURL, nil
+		return existingURL, false, nil
 	}
 	// v4: cubelet is the sole physical authority for snapshot/template memory
 	// volumes. Master passes only logical ids in annotations; we resolve the
@@ -918,68 +924,77 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 	// longer trusted - they may be stale or empty after the master-thin
 	// refactor. fail-fast on catalog miss so create-from-snapshot does not
 	// silently degrade to a cold start.
-	volumeName, volumeKind, err := l.resolveSnapshotMemoryVolFromCatalog(ctx, annotations)
+	volumeName, volumeKind, diskOnly, err := l.resolveSnapshotMemoryVolFromCatalog(ctx, annotations)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if volumeName == "" {
-		return "", nil
+		return "", diskOnly, nil
 	}
 	normalizedKind, err := normalizeCowKind(volumeKind)
 	if err != nil {
-		return "", fmt.Errorf("invalid snapshot memory volume kind %q: %w", volumeKind, err)
+		return "", false, fmt.Errorf("invalid snapshot memory volume kind %q: %w", volumeKind, err)
 	}
 	if err := l.ensureCowManager(); err != nil {
-		return "", err
+		return "", false, err
 	}
 	if l.cowManager == nil {
-		return "", fmt.Errorf("cubecow manager not initialized for snapshot memory volume %s", volumeName)
+		return "", false, fmt.Errorf("cubecow manager not initialized for snapshot memory volume %s", volumeName)
 	}
 	devPath, err := l.cowManager.ResolveDevPath(ctx, volumeName, normalizedKind)
 	if err != nil {
-		return "", fmt.Errorf("resolve snapshot memory volume %s: %w", volumeName, err)
+		return "", false, fmt.Errorf("resolve snapshot memory volume %s: %w", volumeName, err)
 	}
-	return cowFileURLFromPath(devPath), nil
+	return cowFileURLFromPath(devPath), false, nil
 }
 
 // resolveSnapshotMemoryVolFromCatalog returns the (memory_vol, memory_kind)
 // pair for the snapshot or template referenced by annotations, looking it up
-// in cubelet's local catalog.
+// in cubelet's local catalog, plus whether the entry declares itself
+// memory-less.
 //
 // Semantics:
-//   - No logical id annotation -> ("", "", nil): non-snapshot create path,
-//     caller skips memory prefetch entirely.
+//   - No logical id annotation -> ("", "", false, nil): non-snapshot create
+//     path, caller skips memory prefetch entirely.
 //   - Logical id present, catalog miss -> error: deliberately fails the
 //     surrounding create flow rather than silently degrading to a cold start
 //     for what was meant to be a memory-snapshot restore.
-//   - Logical id present, catalog hit with empty memory_vol -> ("", "", nil):
-//     the snapshot/template legitimately has no memory image (e.g. rootfs-only
-//     template), so memory prefetch is correctly a no-op.
+//   - Logical id present, catalog hit with empty memory_vol and disk_only set
+//     -> ("", "", true, nil): the snapshot has no memory image by design, so
+//     memory prefetch is correctly a no-op and the restore cold-boots.
+//   - Logical id present, catalog hit with empty memory_vol and no disk_only
+//     -> ("", "", false, nil): the memory reference is unknown rather than
+//     absent, so the caller keeps failing the restore instead of cold-booting
+//     a guest whose memory state was meant to be resumed.
 //   - Logical id present, catalog hit with memory_vol -> normal restore.
-func (l *local) resolveSnapshotMemoryVolFromCatalog(ctx context.Context, annotations map[string]string) (string, string, error) {
+func (l *local) resolveSnapshotMemoryVolFromCatalog(ctx context.Context, annotations map[string]string) (string, string, bool, error) {
 	logicalID := strings.TrimSpace(annotations[constants.MasterAnnotationRuntimeSnapshotID])
 	if logicalID == "" {
 		logicalID = strings.TrimSpace(annotations[constants.MasterAnnotationAppSnapshotTemplateID])
 	}
 	if logicalID == "" {
-		return "", "", nil
+		return "", "", false, nil
 	}
 	entry, err := GetLocalSnapshot(ctx, logicalID)
 	if err != nil {
-		return "", "", fmt.Errorf("resolve snapshot %s from local catalog: %w", logicalID, err)
+		return "", "", false, fmt.Errorf("resolve snapshot %s from local catalog: %w", logicalID, err)
 	}
 	if entry == nil {
-		return "", "", fmt.Errorf("snapshot %s missing from local catalog", logicalID)
+		return "", "", false, fmt.Errorf("snapshot %s missing from local catalog", logicalID)
 	}
 	volumeName := strings.TrimSpace(entry.MemoryVol)
 	if volumeName == "" {
-		return "", "", nil
+		// Only an entry that recorded itself memory-less at write time may
+		// cold-boot. A blank MemoryVol anywhere else is a stale or partial
+		// record whose memory reference is unknown, so it stays "not disk-only"
+		// and the restore path fails loudly instead.
+		return "", "", entry.DiskOnly, nil
 	}
 	volumeKind := strings.TrimSpace(entry.MemoryKind)
 	if volumeKind == "" {
 		volumeKind = CowKindVolume
 	}
-	return volumeName, volumeKind, nil
+	return volumeName, volumeKind, false, nil
 }
 
 func cowFileURLFromPath(value string) string {
@@ -1556,6 +1571,20 @@ func GetPCIDiskInfo(ctx context.Context, id string) (*disk.CubePCIDiskInfo, erro
 	return info.CubePCIDiskInfo, nil
 }
 
+// DiskOnlyRestore reports whether a resolved StorageInfo marks a snapshot
+// restore as disk-only, and returns the memory volume URL otherwise. The flag
+// is set only where the catalog was read and reported no memory image, so an
+// empty URL from an unresolved or untyped storageInfo is never mistaken for an
+// intentional disk-only restore: those keep their explicit failure modes
+// instead of cold-booting.
+func DiskOnlyRestore(storageInfo any) (bool, string) {
+	info, ok := storageInfo.(*StorageInfo)
+	if !ok || info == nil {
+		return false, ""
+	}
+	return info.RestoreDiskOnly, strings.TrimSpace(info.RestoreMemoryVolURL)
+}
+
 type BackendFileInfo struct {
 	Name string
 
@@ -1600,6 +1629,11 @@ type StorageInfo struct {
 	HostDirBackendInfos map[string]*HostDirBackendInfo `json:"hostDirBackendInfos,omitempty"`
 
 	RestoreMemoryVolURL string `json:"-"`
+
+	// RestoreDiskOnly records that the catalog was read and the snapshot being
+	// restored genuinely carries no memory image. Kept separate from an empty
+	// RestoreMemoryVolURL, which also covers "not resolved".
+	RestoreDiskOnly bool `json:"-"`
 
 	// PluginVolumeBackendInfos records the result of every plugin_volume attach.
 	// Keyed by Volume.name (the RunCubeSandboxRequest name, not volumeID).

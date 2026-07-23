@@ -33,6 +33,7 @@ var (
 	rollbackSnapshotFn     = templatecenter.RollbackSandboxToSnapshot
 	getSnapshotOperationFn = templatecenter.GetSnapshotOperation
 	resolveSnapshotHostFn  = resolveSandboxHost
+	importSnapshotFn       = templatecenter.ImportSnapshot
 )
 
 const snapshotResponseWriteDeadlineBuffer = 30 * time.Second

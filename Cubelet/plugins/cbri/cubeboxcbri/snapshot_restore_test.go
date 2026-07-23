@@ -5,11 +5,15 @@
 package cubeboxcbri
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+	cubeimages "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
@@ -184,21 +188,6 @@ func TestResolveSnapshotPathsNormalizesTemporarySpecPath(t *testing.T) {
 	}
 }
 
-func TestSnapshotRestoreMemoryVolURLFromStorageInfo(t *testing.T) {
-	t.Parallel()
-
-	flowOpts := &workflow.CreateContext{
-		StorageInfo: &storage.StorageInfo{
-			RestoreMemoryVolURL: "file:///dev/mapper/prefetched-memory",
-		},
-	}
-
-	got := snapshotRestoreMemoryVolURLFromStorageInfo(flowOpts)
-	if got != "file:///dev/mapper/prefetched-memory" {
-		t.Fatalf("snapshotRestoreMemoryVolURLFromStorageInfo=%q", got)
-	}
-}
-
 func TestSnapshotRestoreContainerIDUsesMetadataWhenPresent(t *testing.T) {
 	t.Parallel()
 
@@ -221,4 +210,79 @@ func TestSnapshotRestoreContainerIDFallsBackToSnapshotID(t *testing.T) {
 	if got != "snap-123_0" {
 		t.Fatalf("snapshotRestoreContainerID=%q, want %q", got, "snap-123_0")
 	}
+}
+
+func TestCreateSandboxDiskOnlyRestoreColdBoots(t *testing.T) {
+	t.Parallel()
+
+	plugin := newTestCubeboxPlugin(t)
+	artifactID := "artifact-diskonly"
+	targetKernelPath := plugin.getKernelFilePath(artifactID)
+	writeTestFile(t, targetKernelPath, []byte("kernel"))
+	writeKernelVersion(t, targetKernelPath, []byte("kernel"))
+
+	flowOpts := &workflow.CreateContext{
+		ReqInfo: &cubebox.RunCubeSandboxRequest{
+			InstanceType: cubebox.InstanceType_cubebox.String(),
+			Annotations: map[string]string{
+				constants.MasterAnnotationAppSnapshotTemplateID: "snap-imported",
+				constants.MasterAnnotationAppSnapshotVersion:    "v2",
+			},
+			Containers: []*cubebox.ContainerConfig{
+				{
+					Resources: &cubebox.Resource{Cpu: "1000m", Mem: "1000Mi"},
+					Image: &cubeimages.ImageSpec{
+						Image:        artifactID,
+						StorageMedia: cubeimages.ImageStorageMediaType_ext4.String(),
+					},
+				},
+			},
+		},
+		StorageInfo: &storage.StorageInfo{RestoreDiskOnly: true},
+	}
+	ctx := constants.WithAppImageID(context.Background(), artifactID)
+
+	specOpts, err := plugin.CreateSandbox(ctx, flowOpts)
+	require.NoError(t, err)
+
+	spec := applySpecOpts(t, ctx, specOpts)
+	require.Equal(t, "true", spec.Annotations[constants.AnnotationAppSnapshotRestore])
+	require.Equal(t, "true", spec.Annotations[constants.AnnotationVMSnapshotDiskOnly])
+	require.NotContains(t, spec.Annotations, constants.AnnotationVMSnapshotPath)
+	require.NotContains(t, spec.Annotations, constants.AnnotationVMSnapshotMemoryVolURL)
+	require.NotContains(t, spec.Annotations, constants.AnnotationAppSnapshotContainerID)
+	require.Equal(t, targetKernelPath, spec.Annotations[constants.AnnotationsVMKernelPath])
+}
+
+func TestCreateSandboxRestoreWithoutStorageInfoFails(t *testing.T) {
+	t.Parallel()
+
+	plugin := newTestCubeboxPlugin(t)
+	artifactID := "artifact-unresolved"
+	targetKernelPath := plugin.getKernelFilePath(artifactID)
+	writeTestFile(t, targetKernelPath, []byte("kernel"))
+	writeKernelVersion(t, targetKernelPath, []byte("kernel"))
+
+	flowOpts := &workflow.CreateContext{
+		ReqInfo: &cubebox.RunCubeSandboxRequest{
+			InstanceType: cubebox.InstanceType_cubebox.String(),
+			Annotations: map[string]string{
+				constants.MasterAnnotationAppSnapshotTemplateID: "snap-unresolved",
+				constants.MasterAnnotationAppSnapshotVersion:    "v2",
+			},
+			Containers: []*cubebox.ContainerConfig{
+				{
+					Resources: &cubebox.Resource{Cpu: "1000m", Mem: "1000Mi"},
+					Image: &cubeimages.ImageSpec{
+						Image:        artifactID,
+						StorageMedia: cubeimages.ImageStorageMediaType_ext4.String(),
+					},
+				},
+			},
+		},
+	}
+	ctx := constants.WithAppImageID(context.Background(), artifactID)
+
+	_, err := plugin.CreateSandbox(ctx, flowOpts)
+	require.ErrorContains(t, err, "missing prefetched memory volume")
 }

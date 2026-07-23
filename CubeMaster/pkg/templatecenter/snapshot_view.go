@@ -298,6 +298,8 @@ func normalizeSnapshotOperationName(operation string) string {
 	switch strings.ToUpper(strings.TrimSpace(operation)) {
 	case JobOperationSnapshotCreate:
 		return "CREATE"
+	case JobOperationSnapshotImport:
+		return "IMPORT"
 	case JobOperationSnapshotRollback:
 		return "ROLLBACK"
 	case JobOperationSnapshotDelete:

@@ -186,7 +186,8 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 	}
 
 	l.storeNumaQueues(ctx, sandBox, flowOpts)
-	if snapshotID, ok := flowOpts.GetSnapshotTemplateID(); ok && flowOpts.IsRetoreSnapshot() {
+	// Both bindings are memory-image bases; a disk-only restore has none.
+	if snapshotID, ok := flowOpts.GetSnapshotTemplateID(); ok && flowOpts.IsRetoreSnapshot() && !diskOnlyRestore(flowOpts) {
 		now := time.Now().UTC()
 		setRuntimeSnapshotBindingLabels(sandBox, snapshotID, now)
 		// Also stamp the restore-base label. Commit will advance the
@@ -413,7 +414,9 @@ func (l *local) genSandboxOptions(ctx context.Context, realReq *cubebox.RunCubeS
 		err                  error
 	)
 
-	if !flowOpts.IsRetoreSnapshot() {
+	// A resumed guest keeps the overlay mounts captured in the memory image;
+	// a disk-only cold boot re-mounts the overlay and needs the image lowerdirs.
+	if !flowOpts.IsRetoreSnapshot() || diskOnlyRestore(flowOpts) {
 		additionalSandboxOpt, err = WithCubeFsAnnotation(ctx, realReq, sandBox)
 		if err != nil {
 			return nil, fmt.Errorf("failed to set cube fs annotation opt: %w", err)
@@ -445,6 +448,14 @@ func (l *local) genSandboxOptions(ctx context.Context, realReq *cubebox.RunCubeS
 		return nil, fmt.Errorf("failed to generate image reference for cubebox: %w", err)
 	}
 	return additionalSandboxOpt, nil
+}
+
+func diskOnlyRestore(flowOpts *workflow.CreateContext) bool {
+	if flowOpts == nil || !flowOpts.IsRetoreSnapshot() {
+		return false
+	}
+	diskOnly, _ := storage.DiskOnlyRestore(flowOpts.StorageInfo)
+	return diskOnly
 }
 
 func sandboxDNSServersFromContainers(realReq *cubebox.RunCubeSandboxRequest) ([]string, error) {
@@ -1138,10 +1149,34 @@ func (l *local) prepareWritableRootfs(ctx context.Context, flowOpts *workflow.Cr
 		return nil, fmt.Errorf("writable rootfs should provide RunCubeSandboxRequest.volumes param")
 	}
 
+	subdir := "disk/" + containerReq.GetId()
+	if templateID, ok := flowOpts.GetSnapshotTemplateID(); ok && diskOnlyRestore(flowOpts) {
+		// A snapshot rootfs carries the exporting sandbox's overlay upper path.
+		// The default names the container id generated for this restore, which
+		// cannot exist inside an artifact produced earlier, so falling back to
+		// it would cold-boot a healthy-looking sandbox on an empty writable
+		// layer with the snapshot data left unmounted.
+		entry, err := storage.GetLocalSnapshot(ctx, templateID)
+		if err != nil {
+			return nil, fmt.Errorf("read snapshot catalog for wlayer subdir: %w", err)
+		}
+		ov := strings.TrimSpace(entry.WlayerSubdir)
+		if ov == "" {
+			return nil, fmt.Errorf("snapshot %s records no wlayer_subdir: a disk-only restore cannot locate the imported writable layer", templateID)
+		}
+		// Reject only an actual escape: a single path segment may legitimately
+		// contain dots, so match on the cleaned value rather than the substring.
+		cleaned := filepath.Clean(ov)
+		if filepath.IsAbs(cleaned) || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("invalid snapshot wlayer_subdir %q", ov)
+		}
+		subdir = cleaned
+	}
+
 	annotations := make(map[string]string)
 	annotations[constants.AnnotationsRootfsWritableKey] = blkPath
-	annotations[constants.AnnotationsRootfsWlayerSubdir] = "disk/" + containerReq.GetId()
-	log.G(ctx).Debugf("writable rootfs:%+v", blkPath)
+	annotations[constants.AnnotationsRootfsWlayerSubdir] = subdir
+	log.G(ctx).Debugf("writable rootfs:%+v subdir:%s", blkPath, subdir)
 
 	return oci.WithAnnotations(annotations), nil
 }

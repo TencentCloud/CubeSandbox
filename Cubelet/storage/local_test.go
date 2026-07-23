@@ -269,6 +269,19 @@ func (m *fakeCowVolumeManager) CreateTemplateBuildRootfs(ctx context.Context, te
 	return &cowVolume{VolumeName: name, Kind: cowKindVolume, Gen: 0, FilePath: path}, nil
 }
 
+func (m *fakeCowVolumeManager) CreateRawVolume(ctx context.Context, name string, sizeBytes uint64) (*cowVolume, error) {
+	_ = ctx
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	path := fmt.Sprintf("/dev/mapper/%s", name)
+	if m.resolvePaths != nil {
+		if v, ok := m.resolvePaths[name]; ok {
+			path = v
+		}
+	}
+	return &cowVolume{VolumeName: name, Kind: cowKindVolume, Gen: 0, FilePath: path}, nil
+}
+
 func (m *fakeCowVolumeManager) CommitTemplateRootfs(ctx context.Context, sourceName, templateID string) (*cowVolume, error) {
 	_ = ctx
 	m.mu.Lock()
