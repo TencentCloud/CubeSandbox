@@ -98,6 +98,7 @@ func TestListSandboxEmptyResultClassification(t *testing.T) {
 		rsp := ListSandbox(context.Background(), &types.ListCubeSandboxReq{StartIdx: 5, Size: 10})
 
 		assert.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
+		assert.Equal(t, "Success", rsp.Ret.RetMsg)
 		assert.Empty(t, rsp.Data)
 	})
 }
