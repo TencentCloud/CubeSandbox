@@ -34,7 +34,7 @@ type TemplateInfo struct {
 	ImageInfo           string   `json:"imageInfo,omitempty"`
 	JobID               string   `json:"jobID,omitempty"`
 	NetworkType         string   `json:"networkType,omitempty"`
-	AllowInternetAccess *bool   `json:"allowInternetAccess,omitempty"`
+	AllowInternetAccess *bool    `json:"allowInternetAccess,omitempty"`
 }
 
 // UnmarshalJSON populates Name from aliases[0] when the server omits the
