@@ -1,0 +1,11 @@
+{
+  "name": "cubesandbox/php-composer-api",
+  "description": "Minimal stateful PHP API for the CubeSandbox PHP + Composer example.",
+  "type": "project",
+  "require": {
+    "php": ">=8.1"
+  },
+  "config": {
+    "sort-packages": true
+  }
+}
