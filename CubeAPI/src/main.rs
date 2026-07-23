@@ -115,6 +115,24 @@ struct Cli {
     #[arg(long, value_name = "DOMAIN")]
     sandbox_domain: Option<String>,
 
+    /// Comma-separated webhook endpoint URLs (default: "" = disabled).
+    ///
+    /// Overrides the CUBE_WEBHOOK_URLS environment variable.
+    #[arg(long, value_name = "URLS")]
+    webhook_urls: Option<String>,
+
+    /// Comma-separated webhook event types to subscribe to.
+    ///
+    /// Overrides the CUBE_WEBHOOK_EVENTS environment variable.
+    #[arg(long, value_name = "EVENTS")]
+    webhook_events: Option<String>,
+
+    /// Shared secret for HMAC-SHA256 webhook signing.
+    ///
+    /// Overrides the CUBE_WEBHOOK_SECRET environment variable.
+    #[arg(long, value_name = "SECRET")]
+    webhook_secret: Option<String>,
+
     /// Export the current OpenAPI spec to a YAML file and exit.
     #[arg(long, value_name = "PATH")]
     export_openapi: Option<String>,
@@ -166,6 +184,15 @@ fn main() -> anyhow::Result<()> {
     }
     if let Some(v) = cli.sandbox_domain {
         cfg.sandbox_domain = v;
+    }
+    if let Some(v) = cli.webhook_urls {
+        cfg.webhook_urls = v;
+    }
+    if let Some(v) = cli.webhook_events {
+        cfg.webhook_events = v;
+    }
+    if let Some(v) = cli.webhook_secret {
+        cfg.webhook_secret = v;
     }
 
     // ── Tracing (stdout) ───────────────────────────────────────────────────

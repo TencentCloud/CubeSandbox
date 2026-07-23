@@ -76,6 +76,18 @@ pub struct ServerConfig {
     /// Env var: CUBE_API_KEY
     #[serde(default)]
     pub cube_api_key: Option<String>,
+
+    /// Comma-separated webhook endpoint URLs. Env var: CUBE_WEBHOOK_URLS (default "" = disabled)
+    #[serde(default = "default_webhook_urls")]
+    pub webhook_urls: String,
+
+    /// Comma-separated event types to deliver. Env var: CUBE_WEBHOOK_EVENTS.
+    #[serde(default = "default_webhook_events")]
+    pub webhook_events: String,
+
+    /// Shared secret for HMAC-SHA256 signing. Env var: CUBE_WEBHOOK_SECRET (default "" = no signing)
+    #[serde(default = "default_webhook_secret")]
+    pub webhook_secret: String,
 }
 
 fn default_bind() -> String {
@@ -109,6 +121,17 @@ fn default_log_dir() -> String {
 fn default_log_prefix() -> String {
     "cube-api".to_string()
 }
+fn default_webhook_urls() -> String {
+    std::env::var("CUBE_WEBHOOK_URLS").unwrap_or_default()
+}
+fn default_webhook_events() -> String {
+    std::env::var("CUBE_WEBHOOK_EVENTS").unwrap_or_else(|_| {
+        "sandbox.created,sandbox.deleted,sandbox.paused,sandbox.resumed".to_string()
+    })
+}
+fn default_webhook_secret() -> String {
+    std::env::var("CUBE_WEBHOOK_SECRET").unwrap_or_default()
+}
 
 impl ServerConfig {
     pub fn from_env() -> anyhow::Result<Self> {
@@ -135,6 +158,9 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             cube_api_key: std::env::var("CUBE_API_KEY").ok().filter(|s| !s.is_empty()),
+            webhook_urls: default_webhook_urls(),
+            webhook_events: default_webhook_events(),
+            webhook_secret: default_webhook_secret(),
         }
     }
 }
