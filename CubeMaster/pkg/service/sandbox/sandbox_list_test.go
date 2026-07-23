@@ -7,6 +7,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -85,16 +87,9 @@ func TestListSandboxEmptyResultClassification(t *testing.T) {
 
 		rsp := ListSandbox(context.Background(), &types.ListCubeSandboxReq{StartIdx: 1, Size: 10})
 
-		if rsp.Ret.RetCode != int(errorcode.ErrorCode_CubeletUnHealthy) {
-			t.Fatalf("RetCode=%d, want CubeletUnHealthy(%d)",
-				rsp.Ret.RetCode, int(errorcode.ErrorCode_CubeletUnHealthy))
-		}
-		if len(rsp.Data) != 0 {
-			t.Fatalf("Data=%v, want empty", rsp.Data)
-		}
-		if rsp.Ret.RetMsg != "CubeletUnHealthy" {
-			t.Fatalf("RetMsg=%q, want CubeletUnHealthy", rsp.Ret.RetMsg)
-		}
+		assert.Equal(t, int(errorcode.ErrorCode_CubeletUnHealthy), rsp.Ret.RetCode)
+		assert.Equal(t, "CubeletUnHealthy", rsp.Ret.RetMsg)
+		assert.Empty(t, rsp.Data)
 	})
 
 	t.Run("paginating past the last node keeps Success with an empty page", func(t *testing.T) {
@@ -102,11 +97,7 @@ func TestListSandboxEmptyResultClassification(t *testing.T) {
 
 		rsp := ListSandbox(context.Background(), &types.ListCubeSandboxReq{StartIdx: 5, Size: 10})
 
-		if rsp.Ret.RetCode != int(errorcode.ErrorCode_Success) {
-			t.Fatalf("RetCode=%d, want Success", rsp.Ret.RetCode)
-		}
-		if len(rsp.Data) != 0 {
-			t.Fatalf("Data=%v, want empty page", rsp.Data)
-		}
+		assert.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
+		assert.Empty(t, rsp.Data)
 	})
 }

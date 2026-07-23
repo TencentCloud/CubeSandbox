@@ -101,10 +101,15 @@ func ListSandbox(ctx context.Context, req *types.ListCubeSandboxReq) (rsp *types
 			// list cannot be authoritatively answered, and "Success + empty" is
 			// indistinguishable from "there are genuinely no sandboxes" — a
 			// caller reconciling its inventory against this list would treat
-			// the transient outage as mass deletion. Return the retryable
-			// CubeletUnHealthy instead, mirroring GetSandbox's handling of
-			// unhealthy nodes. Paginating past the last node while nodes are
-			// still registered keeps returning an empty Success page.
+			// the transient outage as mass deletion. Return CubeletUnHealthy
+			// instead, mirroring GetSandbox's handling of unhealthy nodes.
+			// "Retryable" here means from the API consumer's perspective (the
+			// condition is transient); the code is deliberately not added to
+			// the internal cubeCodeRetryMap that drives task-level retries —
+			// operators can opt it in via CubeletConf.RetryCode now that
+			// 130408 is registered in errorCode_value. Paginating past the
+			// last node while nodes are still registered keeps returning an
+			// empty Success page.
 			rsp.Ret.RetCode = int(errorcode.ErrorCode_CubeletUnHealthy)
 			rsp.Ret.RetMsg = errorcode.ErrorCode_CubeletUnHealthy.String()
 		}
