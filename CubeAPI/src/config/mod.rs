@@ -76,6 +76,41 @@ pub struct ServerConfig {
     /// Env var: CUBE_API_KEY
     #[serde(default)]
     pub cube_api_key: Option<String>,
+
+    /// Comma-separated webhook endpoint URLs. Env var: WEBHOOK_URLS
+    /// (or CUBE_API_WEBHOOK_URLS).
+    #[serde(default = "default_webhook_urls")]
+    pub webhook_urls: String,
+
+    /// Comma-separated event names delivered to every configured endpoint.
+    /// Env var: WEBHOOK_EVENTS (or CUBE_API_WEBHOOK_EVENTS).
+    #[serde(default = "default_webhook_events")]
+    pub webhook_events: String,
+
+    /// Optional HMAC-SHA256 secret for webhook signatures. Env var:
+    /// WEBHOOK_SECRET (or CUBE_API_WEBHOOK_SECRET).
+    #[serde(default = "default_webhook_secret")]
+    pub webhook_secret: Option<String>,
+
+    /// Maximum number of queued events per webhook worker. Env var:
+    /// WEBHOOK_QUEUE_SIZE (or CUBE_API_WEBHOOK_QUEUE_SIZE).
+    #[serde(default = "default_webhook_queue_size")]
+    pub webhook_queue_size: usize,
+
+    /// Number of retries after the initial webhook attempt. Env var:
+    /// WEBHOOK_MAX_RETRIES (or CUBE_API_WEBHOOK_MAX_RETRIES).
+    #[serde(default = "default_webhook_max_retries")]
+    pub webhook_max_retries: u32,
+
+    /// Base delay for exponential retry backoff, in milliseconds. Env var:
+    /// WEBHOOK_RETRY_BASE_MS (or CUBE_API_WEBHOOK_RETRY_BASE_MS).
+    #[serde(default = "default_webhook_retry_base_ms")]
+    pub webhook_retry_base_ms: u64,
+
+    /// Per-request webhook timeout, in seconds. Env var:
+    /// WEBHOOK_REQUEST_TIMEOUT_SECS (or CUBE_API_WEBHOOK_REQUEST_TIMEOUT_SECS).
+    #[serde(default = "default_webhook_request_timeout_secs")]
+    pub webhook_request_timeout_secs: u64,
 }
 
 fn default_bind() -> String {
@@ -110,6 +145,79 @@ fn default_log_prefix() -> String {
     "cube-api".to_string()
 }
 
+fn env_string(primary: &str, alias: &str, default: &str) -> String {
+    std::env::var(primary)
+        .or_else(|_| std::env::var(alias))
+        .unwrap_or_else(|_| default.to_string())
+}
+
+fn default_webhook_urls() -> String {
+    env_string("WEBHOOK_URLS", "CUBE_API_WEBHOOK_URLS", "")
+}
+
+fn default_webhook_events() -> String {
+    env_string(
+        "WEBHOOK_EVENTS",
+        "CUBE_API_WEBHOOK_EVENTS",
+        "sandbox.created,sandbox.deleted,sandbox.paused,sandbox.resumed",
+    )
+}
+
+fn default_webhook_secret() -> Option<String> {
+    std::env::var("WEBHOOK_SECRET")
+        .or_else(|_| std::env::var("CUBE_API_WEBHOOK_SECRET"))
+        .ok()
+        .filter(|value| !value.is_empty())
+}
+
+fn parse_env_usize(primary: &str, alias: &str, default: usize) -> usize {
+    std::env::var(primary)
+        .or_else(|_| std::env::var(alias))
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+fn parse_env_u32(primary: &str, alias: &str, default: u32) -> u32 {
+    std::env::var(primary)
+        .or_else(|_| std::env::var(alias))
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+fn parse_env_u64(primary: &str, alias: &str, default: u64) -> u64 {
+    std::env::var(primary)
+        .or_else(|_| std::env::var(alias))
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+fn default_webhook_queue_size() -> usize {
+    parse_env_usize("WEBHOOK_QUEUE_SIZE", "CUBE_API_WEBHOOK_QUEUE_SIZE", 1024)
+}
+
+fn default_webhook_max_retries() -> u32 {
+    parse_env_u32("WEBHOOK_MAX_RETRIES", "CUBE_API_WEBHOOK_MAX_RETRIES", 3)
+}
+
+fn default_webhook_retry_base_ms() -> u64 {
+    parse_env_u64(
+        "WEBHOOK_RETRY_BASE_MS",
+        "CUBE_API_WEBHOOK_RETRY_BASE_MS",
+        250,
+    )
+}
+
+fn default_webhook_request_timeout_secs() -> u64 {
+    parse_env_u64(
+        "WEBHOOK_REQUEST_TIMEOUT_SECS",
+        "CUBE_API_WEBHOOK_REQUEST_TIMEOUT_SECS",
+        5,
+    )
+}
+
 impl ServerConfig {
     pub fn from_env() -> anyhow::Result<Self> {
         let _ = dotenvy::dotenv();
@@ -135,6 +243,13 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             cube_api_key: std::env::var("CUBE_API_KEY").ok().filter(|s| !s.is_empty()),
+            webhook_urls: default_webhook_urls(),
+            webhook_events: default_webhook_events(),
+            webhook_secret: default_webhook_secret(),
+            webhook_queue_size: default_webhook_queue_size(),
+            webhook_max_retries: default_webhook_max_retries(),
+            webhook_retry_base_ms: default_webhook_retry_base_ms(),
+            webhook_request_timeout_secs: default_webhook_request_timeout_secs(),
         }
     }
 }

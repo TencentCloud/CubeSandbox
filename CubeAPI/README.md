@@ -72,6 +72,18 @@ cargo build --release
 | `CUBE_API_SANDBOX_DOMAIN` | `cube.app` | Domain returned in sandbox API responses |
 | `AUTH_CALLBACK_URL` | *(unset)* | External auth callback URL (callback mode) |
 | `CUBE_API_KEY` | *(unset)* | Built-in API key for simple auth (simple-key mode) |
+| `WEBHOOK_URLS` | *(unset)* | Comma-separated HTTP(S) endpoints for sandbox lifecycle webhooks |
+| `WEBHOOK_EVENTS` | `sandbox.created,sandbox.deleted,sandbox.paused,sandbox.resumed` | Comma-separated event subscription filter; use `*` for all structured events |
+| `WEBHOOK_SECRET` | *(unset)* | Optional HMAC-SHA256 signing secret |
+| `WEBHOOK_QUEUE_SIZE` | `1024` | Maximum queued webhook events before new events are dropped and logged |
+| `WEBHOOK_MAX_RETRIES` | `3` | Retries after the initial request for transient failures |
+| `WEBHOOK_RETRY_BASE_MS` | `250` | Initial exponential retry delay in milliseconds |
+| `WEBHOOK_REQUEST_TIMEOUT_SECS` | `5` | Timeout for each webhook HTTP request |
+
+The `CUBE_API_WEBHOOK_*` names are accepted aliases for deployments that keep
+all CubeAPI settings under a common prefix. See the bilingual
+[Webhook integration guide](../docs/guide/integrations/webhooks.md) for the
+payload, signature, receiver example, and WeCom integration pattern.
 
 ### Authentication
 
@@ -161,4 +173,3 @@ python pause.py
 python create_with_mount.py
 python browser.py
 python test.py
-
