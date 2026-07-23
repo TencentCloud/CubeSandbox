@@ -700,7 +700,7 @@ ensure_recycle_bin_cleared() {
 #     3) delete the instance together with its auto-created COS backend bucket
 #        (DeleteInstance --DeleteBucket true) — this also removes the instance's
 #        tokens and VPC attachments.
-#   Why not just terraform? build_images.sh pushes the four component images into
+#   Why not just terraform? build_images.sh pushes the component images into
 #   the namespace as repositories that are NOT tracked by Terraform, so
 #   `terraform destroy` of tencentcloud_tcr_namespace is rejected with
 #   FailedOperation.PreconditionFailed ("the project contains repositories, can

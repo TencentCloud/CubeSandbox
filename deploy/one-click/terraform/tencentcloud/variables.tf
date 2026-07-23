@@ -299,6 +299,12 @@ variable "cubeapi_image" {
   default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-api:v0.6.0-rc1"
 }
 
+variable "cubeops_image" {
+  description = "Full cube-ops image override."
+  type        = string
+  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-ops:v0.6.0-rc1"
+}
+
 variable "cubeproxy_image" {
   description = "Full cube-proxy image override."
   type        = string
@@ -346,6 +352,17 @@ variable "cube_api_replicas" {
   validation {
     condition     = var.cube_api_replicas >= 1 && floor(var.cube_api_replicas) == var.cube_api_replicas
     error_message = "cube_api_replicas must be an integer >= 1."
+  }
+}
+
+variable "cube_ops_replicas" {
+  description = "cube-ops Deployment replica count"
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.cube_ops_replicas >= 1 && floor(var.cube_ops_replicas) == var.cube_ops_replicas
+    error_message = "cube_ops_replicas must be an integer >= 1."
   }
 }
 

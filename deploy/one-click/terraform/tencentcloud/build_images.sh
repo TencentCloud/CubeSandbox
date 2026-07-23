@@ -15,20 +15,21 @@
 #   tar xzf assets/package/sandbox-package.tar.gz -C assets/package/
 #   assets/package/sandbox-package/terraform/tencentcloud/build_images.sh
 #
-# It builds five images straight from the package contents:
+# It builds six images straight from the package contents:
 #   cube-api                <- CubeAPI/Dockerfile          (prebuilt CubeAPI/bin/cube-api)
+#   cube-ops                <- CubeOps/Dockerfile          (prebuilt CubeOps/bin/cubeops)
 #   cubemaster              <- CubeMaster/Dockerfile       (prebuilt CubeMaster/bin/cubemaster)
 #   cubeproxy               <- cubeproxy/build-context/Dockerfile
 #   cube-lifecycle-manager  <- cube-lifecycle-manager/build-context/Dockerfile
 #   cube-webui              <- webui/Dockerfile.package    (prebuilt webui/dist)
 #
 # Selecting images:
-#   build_images.sh                       # all five (default)
+#   build_images.sh                       # all six (default)
 #   build_images.sh cube-api cube-webui   # only the listed ones
 #
 # Options / environment:
 #   --push | PUSH=1            also `docker push` each image after building
-#   TAG=...                    shared image tag for ALL four images (default latest)
+#   TAG=...                    shared image tag for ALL component images (default latest)
 #   REGISTRY=...               registry host (default cube-sandbox-image.tencentcloudcr.com)
 #   NAMESPACE=...              registry namespace (default cluster for standalone use).
 #                              When pushing to the TCR created by this deployment,
@@ -36,6 +37,7 @@
 #                              (`cubesandbox-cluster`, from `terraform output
 #                              tcr_namespace`); set NAMESPACE to match for manual runs.
 #   CUBE_API_IMAGE=...         fully-qualified ref overrides (per component);
+#   CUBE_OPS_IMAGE=...
 #   CUBE_MASTER_IMAGE=...      default to ${REGISTRY}/${NAMESPACE}/<name>:${TAG},
 #   CUBE_PROXY_IMAGE=...       matching terraform/tencentcloud (var.image_tag) so
 #   CUBE_LCM_IMAGE=...
@@ -66,12 +68,13 @@ PKG_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 REGISTRY="${REGISTRY:-cube-sandbox-cn.tencentcloudcr.com}"
 NAMESPACE="${NAMESPACE:-cube-sandbox}"
-# One shared, externally overridable tag for all four component images. Keep in
+# One shared, externally overridable tag for all component images. Keep in
 # sync with terraform/tencentcloud (var.image_tag) so the default TKE deployment
 # consumes exactly what this script builds.
 TAG="${TAG:-v0.6.0-rc1}"
 
 CUBE_API_IMAGE="${CUBE_API_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-api:${TAG}}"
+CUBE_OPS_IMAGE="${CUBE_OPS_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-ops:${TAG}}"
 CUBE_MASTER_IMAGE="${CUBE_MASTER_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-master:${TAG}}"
 CUBE_PROXY_IMAGE="${CUBE_PROXY_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-proxy:${TAG}}"
 CUBE_LCM_IMAGE="${CUBE_LCM_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-lifecycle-manager:${TAG}}"
@@ -228,6 +231,11 @@ build_cube_api() {
 		"${PKG_ROOT}/CubeAPI/Dockerfile" "${PKG_ROOT}/CubeAPI"
 }
 
+build_cube_ops() {
+	docker_build "${CUBE_OPS_IMAGE}" \
+		"${PKG_ROOT}/CubeOps/Dockerfile" "${PKG_ROOT}/CubeOps"
+}
+
 build_cube_master() {
 	docker_build "${CUBE_MASTER_IMAGE}" \
 		"${PKG_ROOT}/CubeMaster/Dockerfile" "${PKG_ROOT}/CubeMaster"
@@ -258,8 +266,9 @@ main() {
 		case "${arg}" in
 		-h | --help) usage 0 ;;
 		--push) PUSH=1 ;;
-		all) targets+=(cube-api cube-master cube-proxy cube-lifecycle-manager cube-webui) ;;
+		all) targets+=(cube-api cube-ops cube-master cube-proxy cube-lifecycle-manager cube-webui) ;;
 		cube-api | cubeapi) targets+=(cube-api) ;;
+		cube-ops | cubeops | ops) targets+=(cube-ops) ;;
 		cube-master | cubemaster | master) targets+=(cube-master) ;;
 		cube-proxy | cubeproxy | proxy) targets+=(cube-proxy) ;;
 		cube-lifecycle-manager | lifecycle-manager | lcm) targets+=(cube-lifecycle-manager) ;;
@@ -269,7 +278,7 @@ main() {
 	done
 
 	if [[ "${#targets[@]}" -eq 0 ]]; then
-		targets=(cube-api cube-master cube-proxy cube-lifecycle-manager cube-webui)
+		targets=(cube-api cube-ops cube-master cube-proxy cube-lifecycle-manager cube-webui)
 	fi
 
 	command -v docker >/dev/null 2>&1 || die "docker is required but was not found in PATH"
@@ -279,6 +288,7 @@ main() {
 	for t in "${targets[@]}"; do
 		case "${t}" in
 		cube-api) build_cube_api ;;
+		cube-ops) build_cube_ops ;;
 		cube-master) build_cube_master ;;
 		cube-proxy) build_cube_proxy ;;
 		cube-lifecycle-manager) build_cube_lifecycle_manager ;;

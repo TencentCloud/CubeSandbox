@@ -543,7 +543,10 @@ copy_file "${ROOT_DIR}/configs/single-node/network-agent.yaml" "${PACKAGE_ROOT}/
 copy_dir_contents "${SCRIPT_DIR}/CubeAPI" "${PACKAGE_ROOT}/CubeAPI"
 copy_file "${CORE_BIN_DIR}/cube-api" "${PACKAGE_ROOT}/CubeAPI/bin/cube-api"
 
-# CubeOps binary — admin/ops API (Go), depends on CubeDB via go.mod replace.
+# Lay down the one-click CubeOps package Dockerfile first, then copy the binary
+# on top so terraform/tencentcloud/build_images.sh can build cube-ops from the
+# extracted sandbox-package without the full source tree.
+copy_dir_contents "${SCRIPT_DIR}/CubeOps" "${PACKAGE_ROOT}/CubeOps"
 copy_file "${CORE_BIN_DIR}/cubeops" "${PACKAGE_ROOT}/CubeOps/bin/cubeops"
 
 # Same ordering for CubeMaster so cubemaster/cubemastercli binaries survive the
