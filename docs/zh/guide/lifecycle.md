@@ -90,7 +90,9 @@ print(info)
 # }
 ```
 
-`endAt` 表示按当前 `timeout` 估算的下一次超时时间。每次接收到新请求或调用 `set_timeout`（若有），`endAt` 会被刷新。对于**永不超时**的沙箱没有截止时间，因此响应中会**省略** `endAt`，而不是把它渲染成等于 `startedAt`。
+`endAt` 表示按当前 `timeout` 估算的下一次超时时间。每次接收到新请求或调用 `set_timeout`（若有），`endAt` 会被刷新。对于**永不超时**的沙箱没有截止时间，因此 Cube 原生响应中会**省略** `endAt`，而不是把它渲染成等于 `startedAt`。
+
+为了兼容 E2B SDK，当请求来自 E2B SDK 时，CubeAPI 会对永不超时的沙箱信息做特殊处理。如果沙箱通过 `timeout=-1` 创建或恢复，CubeMaster 会存储 `end_at=0`，CubeAPI 内部会把它视为 `None`；但 E2B SDK 的模型要求 `endAt` 必须是合法 datetime。因此在面向 E2B SDK 的响应路径里，CubeAPI 会返回远未来哨兵值 `9999-12-31T23:59:59Z`，而不是省略 `endAt`。请求不会被拒绝；`-1` 仍然表示永不超时。
 
 ## 列出运行中的沙箱
 

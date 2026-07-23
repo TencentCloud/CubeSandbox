@@ -4,22 +4,68 @@
 
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{header::USER_AGENT, HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
+use chrono::{DateTime, Utc};
 use validator::Validate;
 
 use crate::{
     error::{AppError, AppResult},
     logging::{LogEvent, LogLevel},
     models::{
-        ApiError, ConnectSandbox, ListSandboxesQuery, ListSandboxesV2Query, NewSandbox,
-        RefreshRequest, ResumedSandbox, Sandbox, SandboxDetail, SandboxLogsQuery,
+        ApiError, ConnectSandbox, ListSandboxesQuery, ListSandboxesV2Query, ListedSandbox,
+        NewSandbox, RefreshRequest, ResumedSandbox, Sandbox, SandboxDetail, SandboxLogsQuery,
         SandboxLogsV2Query, SandboxLogsV2Response, SetTimeoutRequest,
     },
     state::AppState,
 };
+
+// CubeSandbox represents a never-timeout sandbox as `end_at=None`, which the
+// public Cube response serializes by omitting `endAt`. The E2B Python SDK's
+// generated SandboxDetail/ListedSandbox models require `endAt` to be a valid
+// datetime string, so E2B SDK callers get a far-future sentinel at the handler
+// boundary while Cube-native callers keep the no-deadline shape.
+const E2B_NEVER_TIMEOUT_END_AT_RFC3339: &str = "9999-12-31T23:59:59Z";
+
+fn is_e2b_sdk_request(headers: &HeaderMap) -> bool {
+    // E2B SDKs identify API requests through User-Agent. Keep this compatibility
+    // branch narrow so curl, Cube SDKs, and other clients preserve Cube's
+    // native omitted-endAt semantics for never-timeout sandboxes.
+    headers
+        .get(USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            let user_agent = value.to_ascii_lowercase();
+            user_agent.contains("e2b-python-sdk/") || user_agent.contains("e2b-code-interpreter/")
+        })
+        .unwrap_or(false)
+}
+
+fn e2b_never_timeout_end_at() -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(E2B_NEVER_TIMEOUT_END_AT_RFC3339)
+        .expect("E2B never-timeout sentinel must be valid RFC3339")
+        .with_timezone(&Utc)
+}
+
+fn apply_e2b_sandbox_detail_compat(headers: &HeaderMap, detail: &mut SandboxDetail) {
+    if is_e2b_sdk_request(headers) && detail.end_at.is_none() {
+        detail.end_at = Some(e2b_never_timeout_end_at());
+    }
+}
+
+fn apply_e2b_listed_sandbox_compat(headers: &HeaderMap, sandboxes: &mut [ListedSandbox]) {
+    if !is_e2b_sdk_request(headers) {
+        return;
+    }
+
+    for sandbox in sandboxes {
+        if sandbox.end_at.is_none() {
+            sandbox.end_at = Some(e2b_never_timeout_end_at());
+        }
+    }
+}
 
 // ─── GET /sandboxes ───────────────────────────────────────────────────────────
 
@@ -34,6 +80,7 @@ use crate::{
 )]
 pub async fn list_sandboxes(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<ListSandboxesQuery>,
 ) -> AppResult<impl IntoResponse> {
     state
@@ -51,7 +98,8 @@ pub async fn list_sandboxes(
         .list(params.metadata.as_deref(), None, 200)
         .await
     {
-        Ok(list) => {
+        Ok(mut list) => {
+            apply_e2b_listed_sandbox_compat(&headers, &mut list);
             state
                 .logger
                 .log(
@@ -91,6 +139,7 @@ pub async fn list_sandboxes(
 )]
 pub async fn list_sandboxes_v2(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<ListSandboxesV2Query>,
 ) -> AppResult<impl IntoResponse> {
     state
@@ -103,7 +152,7 @@ pub async fn list_sandboxes_v2(
         )
         .await;
 
-    let list = state
+    let mut list = state
         .services
         .sandboxes
         .list(
@@ -112,6 +161,7 @@ pub async fn list_sandboxes_v2(
             params.limit,
         )
         .await?;
+    apply_e2b_listed_sandbox_compat(&headers, &mut list);
 
     state
         .logger
@@ -140,6 +190,7 @@ pub async fn list_sandboxes_v2(
 )]
 pub async fn get_sandbox(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(sandbox_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
     state
@@ -151,7 +202,8 @@ pub async fn get_sandbox(
         )
         .await;
 
-    let detail = state.services.sandboxes.get_sandbox(&sandbox_id).await?;
+    let mut detail = state.services.sandboxes.get_sandbox(&sandbox_id).await?;
+    apply_e2b_sandbox_detail_compat(&headers, &mut detail);
     state
         .logger
         .log(
@@ -574,4 +626,114 @@ pub async fn refresh_sandbox(
         )
         .await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        apply_e2b_listed_sandbox_compat, apply_e2b_sandbox_detail_compat,
+        E2B_NEVER_TIMEOUT_END_AT_RFC3339, USER_AGENT,
+    };
+    use crate::models::{ListedSandbox, SandboxDetail, SandboxState};
+    use axum::http::{HeaderMap, HeaderValue};
+    use chrono::TimeZone;
+
+    fn sandbox_detail_without_end_at() -> SandboxDetail {
+        SandboxDetail {
+            template_id: "tpl-test".to_string(),
+            alias: None,
+            sandbox_id: "sbx-test".to_string(),
+            client_id: "node-test".to_string(),
+            started_at: chrono::Utc
+                .timestamp_opt(1_800_000_000, 0)
+                .single()
+                .expect("valid timestamp"),
+            end_at: None,
+            envd_version: "0.5.11".to_string(),
+            envd_access_token: None,
+            domain: Some("cube.app".to_string()),
+            cpu_count: 2,
+            memory_mb: 2000,
+            disk_size_mb: Some(0),
+            metadata: None,
+            state: SandboxState::Running,
+            volume_mounts: None,
+        }
+    }
+
+    fn listed_sandbox_without_end_at() -> ListedSandbox {
+        ListedSandbox {
+            template_id: "tpl-test".to_string(),
+            alias: None,
+            sandbox_id: "sbx-test".to_string(),
+            client_id: "node-test".to_string(),
+            started_at: chrono::Utc
+                .timestamp_opt(1_800_000_000, 0)
+                .single()
+                .expect("valid timestamp"),
+            end_at: None,
+            cpu_count: 2,
+            memory_mb: 2000,
+            disk_size_mb: Some(0),
+            metadata: None,
+            state: SandboxState::Running,
+            envd_version: "0.5.11".to_string(),
+            volume_mounts: None,
+        }
+    }
+
+    fn e2b_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            USER_AGENT,
+            HeaderValue::from_static("e2b-python-sdk/2.34.0"),
+        );
+        headers
+    }
+
+    #[test]
+    fn e2b_sandbox_detail_compat_adds_end_at_for_never_timeout() {
+        let mut detail = sandbox_detail_without_end_at();
+
+        apply_e2b_sandbox_detail_compat(&e2b_headers(), &mut detail);
+
+        let json = serde_json::to_value(detail).expect("detail should serialize");
+        assert_eq!(json["endAt"], E2B_NEVER_TIMEOUT_END_AT_RFC3339);
+    }
+
+    #[test]
+    fn non_e2b_sandbox_detail_keeps_end_at_omitted_for_never_timeout() {
+        let mut detail = sandbox_detail_without_end_at();
+
+        apply_e2b_sandbox_detail_compat(&HeaderMap::new(), &mut detail);
+
+        let json = serde_json::to_value(detail).expect("detail should serialize");
+        assert!(!json
+            .as_object()
+            .expect("detail should serialize as object")
+            .contains_key("endAt"));
+    }
+
+    #[test]
+    fn e2b_listed_sandbox_compat_adds_end_at_for_never_timeout() {
+        let mut sandboxes = vec![listed_sandbox_without_end_at()];
+
+        apply_e2b_listed_sandbox_compat(&e2b_headers(), &mut sandboxes);
+
+        let json = serde_json::to_value(&sandboxes[0]).expect("listed sandbox should serialize");
+        assert_eq!(json["endAt"], E2B_NEVER_TIMEOUT_END_AT_RFC3339);
+    }
+
+    #[test]
+    fn non_e2b_listed_sandbox_keeps_end_at_omitted_for_never_timeout() {
+        let mut sandboxes = vec![listed_sandbox_without_end_at()];
+
+        apply_e2b_listed_sandbox_compat(&HeaderMap::new(), &mut sandboxes);
+
+        let json = serde_json::to_value(&sandboxes[0]).expect("listed sandbox should serialize");
+        assert!(!json
+            .as_object()
+            .expect("listed sandbox should serialize as object")
+            .contains_key("endAt"));
+    }
 }

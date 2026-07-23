@@ -91,7 +91,9 @@ print(info)
 # }
 ```
 
-`endAt` is the projected next-timeout instant given the current `timeout`. It is refreshed every time the sandbox receives a request (or when you call `set_timeout`, when available). For **never-timeout** sandboxes there is no deadline, so `endAt` is **omitted** from the response rather than reported as equal to `startedAt`.
+`endAt` is the projected next-timeout instant given the current `timeout`. It is refreshed every time the sandbox receives a request (or when you call `set_timeout`, when available). For **never-timeout** sandboxes there is no deadline, so Cube-native responses **omit** `endAt` rather than reporting it as equal to `startedAt`.
+
+For E2B SDK compatibility, CubeAPI handles never-timeout sandbox info differently when the request comes from an E2B SDK. If a sandbox was created or resumed with `timeout=-1`, CubeMaster stores `end_at=0` and CubeAPI internally treats that as `None`; however, E2B SDK models require `endAt` to be a valid datetime. In that E2B-facing response path, CubeAPI returns the far-future sentinel `9999-12-31T23:59:59Z` instead of omitting `endAt`. The request is not rejected; `-1` still means never-timeout.
 
 ## List Running Sandboxes
 
