@@ -88,6 +88,7 @@ export class TemplateBuild {
 export class TemplateInfo {
   templateId: string;
   name: string;
+  aliases: string[];
   instanceType: string;
   version: string;
   status: string;
@@ -107,6 +108,7 @@ export class TemplateInfo {
   constructor(fields: Partial<TemplateInfo> = {}) {
     this.templateId = fields.templateId ?? "";
     this.name = fields.name ?? "";
+    this.aliases = fields.aliases ?? [];
     this.instanceType = fields.instanceType ?? "";
     this.version = fields.version ?? "";
     this.status = fields.status ?? "";
@@ -129,6 +131,7 @@ export class TemplateInfo {
     return new TemplateInfo({
       templateId: data.templateID ?? data.template_id ?? "",
       name: data.name || (aliases.length ? aliases[0] : "") || "",
+      aliases,
       instanceType: data.instanceType ?? data.instance_type ?? "",
       version: data.version ?? "",
       status: data.status ?? "",
@@ -154,6 +157,7 @@ export class TemplateInfo {
 /** Options for {@link Template.build}. */
 export interface TemplateBuildOptions {
   image?: string;
+  name?: string;
   dockerfile?: string;
   startCmd?: string;
   instanceType?: string;
@@ -229,6 +233,7 @@ export class Template {
 
     const cfg = resolveConfig(options.config);
     const payload: Record<string, unknown> = { image: options.image.trim() };
+    if (options.name !== undefined) payload.name = options.name;
     if (options.instanceType !== undefined) payload.instanceType = options.instanceType;
     if (options.writableLayerSize !== undefined) {
       payload.writableLayerSize = options.writableLayerSize;

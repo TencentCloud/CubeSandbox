@@ -1466,6 +1466,104 @@ func TestGetTemplateParsesNetworkFields(t *testing.T) {
 	}
 }
 
+func TestBuildTemplateForwardsName(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/templates" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprint(w, `{"jobID":"job-name","templateID":"tpl-name","status":"accepted"}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	if _, err := client.BuildTemplate(context.Background(), BuildTemplateOptions{
+		Image: "python:3.11-slim",
+		Name:  "my-alias",
+	}); err != nil {
+		t.Fatalf("BuildTemplate returned error: %v", err)
+	}
+	assertString(t, got, "name", "my-alias")
+	assertString(t, got, "image", "python:3.11-slim")
+}
+
+func TestBuildTemplateOmitsNameWhenBlank(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprint(w, `{"jobID":"j","templateID":"t","status":"accepted"}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	if _, err := client.BuildTemplate(context.Background(), BuildTemplateOptions{
+		Image: "python:3.11-slim",
+		Name:  "   ",
+	}); err != nil {
+		t.Fatalf("BuildTemplate returned error: %v", err)
+	}
+	if _, ok := got["name"]; ok {
+		t.Fatalf("name should be omitted when blank: %#v", got)
+	}
+}
+
+func TestGetTemplateParsesNameAndAliases(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/templates/tpl-alias" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{
+			"templateID":"tpl-alias",
+			"name":"my-alias",
+			"aliases":["my-alias"],
+			"status":"READY"
+		}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	info, err := client.GetTemplate(context.Background(), "tpl-alias")
+	if err != nil {
+		t.Fatalf("GetTemplate returned error: %v", err)
+	}
+	if info.Name != "my-alias" {
+		t.Fatalf("Name=%q, want my-alias", info.Name)
+	}
+	if len(info.Aliases) != 1 || info.Aliases[0] != "my-alias" {
+		t.Fatalf("Aliases=%#v, want [my-alias]", info.Aliases)
+	}
+}
+
+func TestGetTemplateFallsBackToFirstAliasForName(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"templateID":"tpl-fb","aliases":["fallback-alias"],"status":"READY"}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	info, err := client.GetTemplate(context.Background(), "tpl-fb")
+	if err != nil {
+		t.Fatalf("GetTemplate returned error: %v", err)
+	}
+	if info.Name != "fallback-alias" {
+		t.Fatalf("Name=%q, want fallback-alias (from aliases[0])", info.Name)
+	}
+	if len(info.Aliases) != 1 || info.Aliases[0] != "fallback-alias" {
+		t.Fatalf("Aliases=%#v", info.Aliases)
+	}
+}
+
 // ── SetTimeout ─────────────────────────────────────────────────────────────
 
 func TestSetTimeoutWireValues(t *testing.T) {

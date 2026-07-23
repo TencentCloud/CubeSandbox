@@ -2302,8 +2302,40 @@ class TestTemplateAPI:
         })
         assert info.template_id == "tpl-test"
         assert info.name == ""
+        assert info.aliases == []
         assert info.network_type == "tap"
         assert info.allow_internet_access is True
+
+    def test_template_info_from_dict_exposes_aliases_and_name_fallback(self):
+        info = TemplateInfo.from_dict({
+            "templateID": "tpl-alias",
+            "aliases": ["my-alias"],
+        })
+        assert info.aliases == ["my-alias"]
+        assert info.name == "my-alias"
+
+    def test_template_info_from_dict_prefers_explicit_name_over_alias(self):
+        info = TemplateInfo.from_dict({
+            "templateID": "tpl-named",
+            "name": "explicit-name",
+            "aliases": ["alias-name"],
+        })
+        assert info.name == "explicit-name"
+        assert info.aliases == ["alias-name"]
+
+    def test_build_forwards_name_into_payload(self):
+        body = {"jobID": "job-name", "templateID": "tpl-name", "status": "accepted"}
+        with patch("requests.Session.post", return_value=mock_response(body)) as post:
+            Template.build(image="python:3.11-slim", name="my-alias", config=make_config())
+        sent = post.call_args.kwargs["json"]
+        assert sent["name"] == "my-alias"
+        assert sent["image"] == "python:3.11-slim"
+
+    def test_build_omits_name_when_none(self):
+        body = {"jobID": "j", "templateID": "t", "status": "accepted"}
+        with patch("requests.Session.post", return_value=mock_response(body)) as post:
+            Template.build(image="python:3.11-slim", config=make_config())
+        assert "name" not in post.call_args.kwargs["json"]
 
     def test_template_get_parses_network_fields(self):
         body = {

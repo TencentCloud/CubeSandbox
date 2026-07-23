@@ -5,6 +5,7 @@ package cubesandbox
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -22,16 +23,33 @@ type TemplateBuildJob struct {
 }
 
 type TemplateInfo struct {
-	TemplateID          string `json:"templateID"`
-	InstanceType        string `json:"instanceType,omitempty"`
-	Version             string `json:"version,omitempty"`
-	Status              string `json:"status,omitempty"`
-	LastError           string `json:"lastError,omitempty"`
-	CreatedAt           string `json:"createdAt,omitempty"`
-	ImageInfo           string `json:"imageInfo,omitempty"`
-	JobID               string `json:"jobID,omitempty"`
-	NetworkType         string `json:"networkType,omitempty"`
-	AllowInternetAccess *bool  `json:"allowInternetAccess,omitempty"`
+	TemplateID          string   `json:"templateID"`
+	Name                string   `json:"name,omitempty"`
+	Aliases             []string `json:"aliases,omitempty"`
+	InstanceType        string   `json:"instanceType,omitempty"`
+	Version             string   `json:"version,omitempty"`
+	Status              string   `json:"status,omitempty"`
+	LastError           string   `json:"lastError,omitempty"`
+	CreatedAt           string   `json:"createdAt,omitempty"`
+	ImageInfo           string   `json:"imageInfo,omitempty"`
+	JobID               string   `json:"jobID,omitempty"`
+	NetworkType         string   `json:"networkType,omitempty"`
+	AllowInternetAccess *bool   `json:"allowInternetAccess,omitempty"`
+}
+
+// UnmarshalJSON populates Name from aliases[0] when the server omits the
+// top-level name field (CubeSandbox returns only the aliases array).
+func (t *TemplateInfo) UnmarshalJSON(data []byte) error {
+	type alias TemplateInfo
+	var tmp alias
+	if err := json.Unmarshal(data, &tmp); err != nil {
+		return err
+	}
+	if tmp.Name == "" && len(tmp.Aliases) > 0 {
+		tmp.Name = tmp.Aliases[0]
+	}
+	*t = TemplateInfo(tmp)
+	return nil
 }
 
 type TemplateBuildStatus struct {
@@ -44,6 +62,7 @@ type TemplateBuildStatus struct {
 
 type BuildTemplateOptions struct {
 	Image               string
+	Name                string
 	InstanceType        string
 	WritableLayerSize   string
 	ExposedPorts        []uint16
@@ -142,6 +161,9 @@ func buildTemplatePayload(opts BuildTemplateOptions) (map[string]any, error) {
 
 	payload := map[string]any{
 		"image": image,
+	}
+	if name := strings.TrimSpace(opts.Name); name != "" {
+		payload["name"] = name
 	}
 	if instanceType := strings.TrimSpace(opts.InstanceType); instanceType != "" {
 		payload["instanceType"] = instanceType
