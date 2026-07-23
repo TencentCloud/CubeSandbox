@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/containerd/cgroups/v3/cgroup2"
+	cgroup2stats "github.com/containerd/cgroups/v3/cgroup2/stats"
 	"github.com/hashicorp/go-multierror"
 	"k8s.io/apimachinery/pkg/api/resource"
 
@@ -375,4 +377,101 @@ func (h *handler) GetAllocatedMem(group string) int64 {
 		return 0
 	}
 	return int64(mem)
+}
+
+func (h *handler) UsageSnapshot(ctx context.Context, group string) (handle.UsageSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return handle.UsageSnapshot{}, err
+	}
+	m, err := cgroup2.Load(group, cgroup2.WithMountpoint(h.root))
+	if err != nil {
+		return handle.UsageSnapshot{}, fmt.Errorf("load cgroup v2 %q: %w", group, err)
+	}
+	metrics, err := m.Stat()
+	if err != nil {
+		return handle.UsageSnapshot{}, fmt.Errorf("read cgroup v2 usage for %q: %w", group, err)
+	}
+	cpuLimit, err := h.readCPULimit(group)
+	if err != nil {
+		return handle.UsageSnapshot{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return handle.UsageSnapshot{}, err
+	}
+	return usageSnapshotFromMetrics(metrics, cpuLimit)
+}
+
+func (h *handler) readCPULimit(group string) (handle.CPULimit, error) {
+	raw, err := os.ReadFile(path.Join(h.root, group, "cpu.max"))
+	if err != nil {
+		return handle.CPULimit{}, fmt.Errorf("read cgroup v2 CPU limit for %q: %w", group, err)
+	}
+	fields := strings.Fields(string(raw))
+	if len(fields) != 2 {
+		return handle.CPULimit{}, fmt.Errorf("parse cgroup v2 CPU limit for %q: %q", group, strings.TrimSpace(string(raw)))
+	}
+	period, err := strconv.ParseUint(fields[1], 10, 64)
+	if err != nil || period == 0 {
+		return handle.CPULimit{}, fmt.Errorf("parse cgroup v2 CPU period for %q: %q", group, fields[1])
+	}
+	if fields[0] == "max" {
+		return handle.CPULimit{PeriodUS: period, Unlimited: true}, nil
+	}
+	quota, err := strconv.ParseUint(fields[0], 10, 64)
+	if err != nil {
+		return handle.CPULimit{}, fmt.Errorf("parse cgroup v2 CPU quota for %q: %q", group, fields[0])
+	}
+	return handle.CPULimit{QuotaUS: quota, PeriodUS: period}, nil
+}
+
+func usageSnapshotFromMetrics(metrics *cgroup2stats.Metrics, cpuLimit handle.CPULimit) (handle.UsageSnapshot, error) {
+	if metrics == nil || metrics.GetCPU() == nil {
+		return handle.UsageSnapshot{}, fmt.Errorf("cgroup v2 CPU usage is incomplete")
+	}
+	if metrics.GetMemory() == nil {
+		return handle.UsageSnapshot{}, fmt.Errorf("cgroup v2 memory usage is incomplete")
+	}
+	cpu := metrics.GetCPU()
+	usage, err := microsecondsToNanoseconds(cpu.GetUsageUsec())
+	if err != nil {
+		return handle.UsageSnapshot{}, fmt.Errorf("convert cgroup v2 CPU usage: %w", err)
+	}
+	user, err := microsecondsToNanoseconds(cpu.GetUserUsec())
+	if err != nil {
+		return handle.UsageSnapshot{}, fmt.Errorf("convert cgroup v2 CPU user usage: %w", err)
+	}
+	system, err := microsecondsToNanoseconds(cpu.GetSystemUsec())
+	if err != nil {
+		return handle.UsageSnapshot{}, fmt.Errorf("convert cgroup v2 CPU system usage: %w", err)
+	}
+	throttled, err := microsecondsToNanoseconds(cpu.GetThrottledUsec())
+	if err != nil {
+		return handle.UsageSnapshot{}, fmt.Errorf("convert cgroup v2 CPU throttled time: %w", err)
+	}
+	memory := metrics.GetMemory()
+	limit := handle.ResourceLimit{Value: memory.GetUsageLimit()}
+	if limit.Value == math.MaxUint64 {
+		limit.Value = 0
+		limit.Unlimited = true
+	}
+	events := metrics.GetMemoryEvents()
+	return handle.UsageSnapshot{
+		CPUUsageTotalNS:          usage,
+		CPUUserTotalNS:           user,
+		CPUSystemTotalNS:         system,
+		CPUThrottledTotalNS:      throttled,
+		CPUPeriodsTotal:          cpu.GetNrPeriods(),
+		CPUThrottledPeriodsTotal: cpu.GetNrThrottled(),
+		CPULimit:                 cpuLimit,
+		MemoryCurrentBytes:       memory.GetUsage(),
+		MemoryLimit:              limit,
+		MemoryFailuresTotal:      events.GetMax(),
+	}, nil
+}
+
+func microsecondsToNanoseconds(value uint64) (uint64, error) {
+	if value > math.MaxUint64/1000 {
+		return 0, fmt.Errorf("microsecond value %d overflows nanoseconds", value)
+	}
+	return value * 1000, nil
 }

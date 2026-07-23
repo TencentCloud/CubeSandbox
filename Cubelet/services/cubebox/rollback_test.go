@@ -7,6 +7,7 @@ package cubebox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -93,6 +94,96 @@ func TestSetSandboxRollingBackTogglesEveryContainerStatus(t *testing.T) {
 func TestSetSandboxRollingBackHandlesNilCubebox(t *testing.T) {
 	require.NotPanics(t, func() { setSandboxRollingBack(nil, true) })
 	require.NotPanics(t, func() { setSandboxRollingBack(nil, false) })
+}
+
+func TestRunRollbackWithPreparedGuestMetricsOrdersPreparationBeforeRestore(t *testing.T) {
+	cb := newCubeboxWithStatusForTest("sb-order", cubeboxstore.Status{StartedAt: 1})
+	steps := make([]string, 0, 2)
+
+	err := runRollbackWithPreparedGuestMetrics(
+		cb,
+		func() error {
+			steps = append(steps, "preflight")
+			return nil
+		},
+		func() error {
+			require.True(t, cb.GetStatus().Get().RollingBack)
+			steps = append(steps, "prepare")
+			return nil
+		},
+		func() error {
+			require.True(t, cb.GetStatus().Get().RollingBack)
+			steps = append(steps, "restore")
+			return nil
+		},
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"preflight", "prepare", "restore"}, steps)
+	require.False(t, cb.GetStatus().Get().RollingBack)
+}
+
+func TestRunRollbackWithPreparedGuestMetricsStopsBeforeRestoreWhenPreparationFails(t *testing.T) {
+	cb := newCubeboxWithStatusForTest("sb-prepare-fail", cubeboxstore.Status{StartedAt: 1})
+	restoreCalled := false
+
+	err := runRollbackWithPreparedGuestMetrics(
+		cb,
+		func() error { return nil },
+		func() error { return errors.New("metadata unavailable") },
+		func() error {
+			restoreCalled = true
+			return nil
+		},
+	)
+
+	require.ErrorContains(t, err, "prepare guest metrics epoch")
+	require.False(t, restoreCalled)
+	require.False(t, cb.GetStatus().Get().RollingBack)
+}
+
+func TestRunRollbackWithPreparedGuestMetricsKeepsCurrentEpochWhenPreflightFails(t *testing.T) {
+	cb := newCubeboxWithStatusForTest("sb-preflight-fail", cubeboxstore.Status{StartedAt: 1})
+	startedAt := time.Date(2026, time.July, 21, 1, 0, 0, 0, time.UTC)
+	require.NoError(t, cb.BeginGuestMetricsEpoch(cubeboxstore.GuestMetricsEpochFreshCreate, startedAt))
+	previous := cb.GuestMetricsEpochCopy()
+	prepareCalled := false
+	restoreCalled := false
+
+	err := runRollbackWithPreparedGuestMetrics(
+		cb,
+		func() error { return errors.New("task is unavailable") },
+		func() error {
+			prepareCalled = true
+			return cb.PrepareRollbackGuestMetricsEpoch(startedAt.Add(time.Minute))
+		},
+		func() error {
+			restoreCalled = true
+			return nil
+		},
+	)
+
+	require.ErrorContains(t, err, "preflight sandbox runtime rollback")
+	require.False(t, prepareCalled)
+	require.False(t, restoreCalled)
+	require.Equal(t, previous, cb.GuestMetricsEpochCopy())
+	require.False(t, cb.GetStatus().Get().RollingBack)
+}
+
+func TestRunRollbackWithPreparedGuestMetricsKeepsPreparedEpochOnRestoreFailure(t *testing.T) {
+	cb := newCubeboxWithStatusForTest("sb-restore-fail", cubeboxstore.Status{StartedAt: 1})
+	startedAt := time.Date(2026, time.July, 21, 1, 0, 0, 0, time.UTC)
+
+	err := runRollbackWithPreparedGuestMetrics(
+		cb,
+		func() error { return nil },
+		func() error { return cb.PrepareRollbackGuestMetricsEpoch(startedAt) },
+		func() error { return errors.New("shim restore failed after runtime mutation") },
+	)
+
+	require.ErrorContains(t, err, "restore sandbox runtime")
+	require.Equal(t, cubeboxstore.GuestMetricsEpochPrepared, cb.GuestMetricsEpochCopy().State)
+	require.False(t, cb.GetStatus().Get().RollingBack)
 }
 
 func TestResetSandboxStatusAfterRollbackScrubsTerminatedMarkers(t *testing.T) {

@@ -148,6 +148,13 @@ type CubeBox struct {
 
 	ImageReferences map[string]ImageReference
 
+	HostMetricsBaseline                    *HostMetricsBaseline `json:"host_metrics_baseline,omitempty"`
+	HostMetricsBaselineMissingAtAssignment bool                 `json:"host_metrics_baseline_missing_at_assignment,omitempty"`
+	hostMetricsBaselineLock                sync.RWMutex         `json:"-"`
+
+	GuestMetricsEpoch     *GuestMetricsEpoch `json:"guest_metrics_epoch,omitempty"`
+	guestMetricsEpochLock sync.RWMutex       `json:"-"`
+
 	sync.RWMutex `json:"-"`
 }
 

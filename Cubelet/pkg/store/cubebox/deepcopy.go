@@ -21,18 +21,19 @@ func (cb *CubeBox) DeepCopy() *CubeBox {
 	}
 
 	copied := &CubeBox{
-		Metadata:           cb.Metadata.DeepCopy(),
-		Namespace:          cb.Namespace,
-		AppID:              cb.AppID,
-		IP:                 cb.IP,
-		CGroupPath:         cb.CGroupPath,
-		FirstContainerName: cb.FirstContainerName,
-		NumaNode:           cb.NumaNode,
-		Queues:             cb.Queues,
-		Endpoint:           cb.Endpoint,
-		Version:            cb.Version,
-		RequestSource:      cb.RequestSource,
-		UserDeleteMark:     cb.UserDeleteMark.DeepCopy(),
+		Metadata:                               cb.Metadata.DeepCopy(),
+		Namespace:                              cb.Namespace,
+		AppID:                                  cb.AppID,
+		IP:                                     cb.IP,
+		CGroupPath:                             cb.CGroupPath,
+		FirstContainerName:                     cb.FirstContainerName,
+		NumaNode:                               cb.NumaNode,
+		Queues:                                 cb.Queues,
+		Endpoint:                               cb.Endpoint,
+		Version:                                cb.Version,
+		RequestSource:                          cb.RequestSource,
+		UserDeleteMark:                         cb.UserDeleteMark.DeepCopy(),
+		HostMetricsBaselineMissingAtAssignment: cb.HostMetricsBaselineMissingAtAssignment,
 	}
 
 	if cb.PortMappings != nil {
@@ -110,6 +111,9 @@ func (cb *CubeBox) DeepCopy() *CubeBox {
 			copied.ImageReferences[k] = v.DeepCopy()
 		}
 	}
+
+	copied.HostMetricsBaseline = cb.HostMetricsBaselineCopy()
+	copied.GuestMetricsEpoch = cb.GuestMetricsEpochCopy()
 
 	return copied
 }

@@ -15,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -65,6 +66,8 @@ var (
 	defaultHostCpuOverhead         = "0"
 	defaultHostMemoryOverhead      = "24Mi"
 	defaultCubeMsgMemoryOverhead   = "16Mi"
+	hostMetricsBaselineAttempts    = 3
+	hostMetricsBaselineRetryDelay  = 10 * time.Millisecond
 
 	cubeletCgroup = "/cube_sandbox/cubelet"
 
@@ -348,6 +351,11 @@ func (l *CgPlugin) Create(ctx context.Context, opts *workflow.CreateContext) (er
 	if err != nil {
 		return ret.Errorf(errorcode.ErrorCode_CreateCgroupFailed, "%s", err)
 	}
+	cgroupPath := MakeCgroupPathByID(*fullCgID)
+	baseline, err := l.hostMetricsBaselineAtAssignment(ctx, cgroupPath)
+	if err != nil {
+		log.G(ctx).Warnf("capture host metrics baseline for cgroup assignment %s: %v", cgroupPath, err)
+	}
 	cgIDStr := strconv.Itoa(int(*fullCgID))
 	err = l.db.Set(bucket, opts.GetSandboxID(), []byte(cgIDStr))
 	if err != nil {
@@ -355,10 +363,12 @@ func (l *CgPlugin) Create(ctx context.Context, opts *workflow.CreateContext) (er
 	}
 
 	opts.CgroupInfo = &Info{
-		CgroupID:         MakeCgroupPathByID(*fullCgID),
-		ResourceQuantity: *resourceQuantity,
-		VmSnapshotSpec:   vmSnapshotSpec,
-		UsePoolV2:        usePoolV2,
+		CgroupID:                               cgroupPath,
+		ResourceQuantity:                       *resourceQuantity,
+		VmSnapshotSpec:                         vmSnapshotSpec,
+		UsePoolV2:                              usePoolV2,
+		HostMetricsBaseline:                    baseline,
+		HostMetricsBaselineMissingAtAssignment: baseline == nil,
 	}
 
 	return nil
@@ -481,14 +491,69 @@ func (l *CgPlugin) CollectMetric(ctx context.Context) *CgroupMetrics {
 	return metrics
 }
 
+// UsageSnapshot reads the host cgroup usage for one persisted CubeBox group.
+// The same pool handle that owns the group path also owns its Linux ABI reader.
+func (l *CgPlugin) UsageSnapshot(ctx context.Context, group string) (handle.UsageSnapshot, error) {
+	group = path.Clean(group)
+	if group == "." || group == "/" {
+		return handle.UsageSnapshot{}, fmt.Errorf("host cgroup path is required")
+	}
+	switch {
+	case group == handle.DefaultPathPoolV1 || strings.HasPrefix(group, handle.DefaultPathPoolV1+string(os.PathSeparator)):
+		return l.poolV1Handle.UsageSnapshot(ctx, group)
+	case group == handle.DefaultPathPoolV2 || strings.HasPrefix(group, handle.DefaultPathPoolV2+string(os.PathSeparator)):
+		return l.poolV2Handle.UsageSnapshot(ctx, group)
+	default:
+		return handle.UsageSnapshot{}, fmt.Errorf("host cgroup path %q is outside CubeSandbox pools", group)
+	}
+}
+
+func (l *CgPlugin) hostMetricsBaselineAtAssignment(ctx context.Context, group string) (*cubeboxstore.HostMetricsBaseline, error) {
+	var usage handle.UsageSnapshot
+	var err error
+	for attempt := 1; attempt <= hostMetricsBaselineAttempts; attempt++ {
+		usage, err = l.UsageSnapshot(ctx, group)
+		if err == nil {
+			break
+		}
+		if attempt == hostMetricsBaselineAttempts {
+			return nil, err
+		}
+		timer := time.NewTimer(hostMetricsBaselineRetryDelay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return &cubeboxstore.HostMetricsBaseline{
+		CGroupPath:               group,
+		CPUUsageTotalNS:          usage.CPUUsageTotalNS,
+		CPUUserTotalNS:           usage.CPUUserTotalNS,
+		CPUSystemTotalNS:         usage.CPUSystemTotalNS,
+		CPUThrottledTotalNS:      usage.CPUThrottledTotalNS,
+		CPUPeriodsTotal:          usage.CPUPeriodsTotal,
+		CPUThrottledPeriodsTotal: usage.CPUThrottledPeriodsTotal,
+		MemoryFailuresTotal:      usage.MemoryFailuresTotal,
+	}, nil
+}
+
 func ceilMemQuota(q resource.Quantity) resource.Quantity {
 	f := math.Ceil(float64(q.Value())/1024/1024) * 1024 * 1024
 	return *resource.NewQuantity(int64(f), resource.BinarySI)
 }
 
 type Info struct {
-	CgroupID         string
-	ResourceQuantity cubeboxstore.ResourceWithOverHead
-	VmSnapshotSpec   CubeVMMResource
-	UsePoolV2        bool
+	CgroupID                               string
+	ResourceQuantity                       cubeboxstore.ResourceWithOverHead
+	VmSnapshotSpec                         CubeVMMResource
+	UsePoolV2                              bool
+	HostMetricsBaseline                    *cubeboxstore.HostMetricsBaseline
+	HostMetricsBaselineMissingAtAssignment bool
 }

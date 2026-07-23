@@ -144,19 +144,38 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 		return rsp, nil
 	}
 
-	// Mark the cubebox as rolling-back BEFORE entering the shim. While
-	// updateShimForRollback runs the shim holds its sandbox mutex doing
-	// delete_vm + resume_vm_with_config; concurrent DeadGC heartbeats
-	// calling task.Status() will time out or return Unknown and would
-	// otherwise stamp the in-memory Status with Unknown=true / FinishedAt=now,
-	// breaking a follow-up pause. The flag is cleared in the deferred unset
-	// regardless of outcome; see scanDeadContainer for the matching skip.
-	setSandboxRollingBack(cb, true)
-	defer setSandboxRollingBack(cb, false)
-
-	if err := s.updateShimForRollback(ctx, cb, restoreConfig); err != nil {
+	rollbackTime := time.Now().UTC()
+	var rollbackTask containerd.Task
+	var rollbackTaskContext context.Context
+	if err := runRollbackWithPreparedGuestMetrics(
+		cb,
+		func() error {
+			rollbackTaskContext, rollbackTask, err = s.taskForRollback(ctx, cb)
+			return err
+		},
+		func() error {
+			return prepareAndPersistRollbackGuestMetricsEpoch(
+				ctx,
+				s.cubeboxMgr.cubeboxManger,
+				cb,
+				rollbackTime,
+			)
+		},
+		func() error {
+			err := updateTaskForRollback(rollbackTaskContext, rollbackTask, restoreConfig)
+			if err != nil {
+				epoch := cb.GuestMetricsEpochCopy()
+				generation := uint64(0)
+				if epoch != nil {
+					generation = epoch.Generation
+				}
+				stepLog.Errorf("rollback runtime restore failed after task update dispatch; guest workload metrics remain unavailable until a later rollback succeeds or the sandbox is deleted and recreated: epochGeneration=%d: %v", generation, err)
+			}
+			return err
+		},
+	); err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		rsp.Ret.RetMsg = fmt.Sprintf("failed to update shim for rollback: %v", err)
+		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
 	cleanupNewRootfs = false
@@ -182,13 +201,15 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	rsp.RootfsDev = newRootfs.DevPath
 	rsp.NewGen = newRootfs.Gen
 	rsp.MemoryVol = refs.Memory.Name
-	rollbackTime := time.Now().UTC()
-	setRuntimeSnapshotBindingLabels(cb, req.GetSnapshotID(), rollbackTime)
-	// Rollback restarts the VM from req.SnapshotID, so this is also the
-	// new last-restore base. Update both labels here; the existing
-	// SyncByID call below covers the persistence for both.
-	setRuntimeRestoreBaseLabels(cb, req.GetSnapshotID(), rollbackTime)
-
+	if err := activateAndPersistRollbackGuestMetricsEpoch(
+		ctx,
+		s.cubeboxMgr.cubeboxManger,
+		cb,
+		req.GetSnapshotID(),
+		time.Now().UTC(),
+	); err != nil {
+		stepLog.Warnf("rollback succeeded but guest metrics epoch remains pending or prepared: %v", err)
+	}
 	if err := storage.DeleteCowObject(ctx, currentRootfs.Name, currentRootfs.Kind); err != nil {
 		rsp.OldRootfsDeleted = false
 		rsp.Ret.RetMsg = fmt.Sprintf("rollback succeeded; old rootfs cleanup deferred: %v", err)
@@ -197,9 +218,28 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 		rsp.OldRootfsDeleted = true
 	}
 
-	s.cubeboxMgr.cubeboxManger.SyncByID(ctx, cb.ID)
 	stepLog.Infof("RollbackSandbox completed successfully: newRootfs=%s oldRootfs=%s oldDeleted=%t", rsp.RootfsVol, rsp.OldRootfsVol, rsp.OldRootfsDeleted)
 	return rsp, nil
+}
+
+func runRollbackWithPreparedGuestMetrics(
+	cb *cubeboxstore.CubeBox,
+	preflight func() error,
+	prepare func() error,
+	restore func() error,
+) error {
+	setSandboxRollingBack(cb, true)
+	defer setSandboxRollingBack(cb, false)
+	if err := preflight(); err != nil {
+		return fmt.Errorf("preflight sandbox runtime rollback: %w", err)
+	}
+	if err := prepare(); err != nil {
+		return fmt.Errorf("prepare guest metrics epoch for rollback: %w", err)
+	}
+	if err := restore(); err != nil {
+		return fmt.Errorf("restore sandbox runtime: %w", err)
+	}
+	return nil
 }
 
 func validateRollbackSandboxRequest(req *cubebox.RollbackSandboxRequest) error {
@@ -391,7 +431,7 @@ func setSandboxRollingBack(cb *cubeboxstore.CubeBox, rollingBack bool) {
 	}
 }
 
-func (s *service) updateShimForRollback(ctx context.Context, cb *cubeboxstore.CubeBox, restoreConfig string) error {
+func (s *service) taskForRollback(ctx context.Context, cb *cubeboxstore.CubeBox) (context.Context, containerd.Task, error) {
 	ns := cb.Namespace
 	if ns == "" {
 		ns = namespaces.Default
@@ -399,11 +439,18 @@ func (s *service) updateShimForRollback(ctx context.Context, cb *cubeboxstore.Cu
 	ctx = namespaces.WithNamespace(ctx, ns)
 	firstContainer := cb.FirstContainer()
 	if firstContainer == nil || firstContainer.Container == nil {
-		return fmt.Errorf("sandbox %s has no first container task", cb.ID)
+		return nil, nil, fmt.Errorf("sandbox %s has no first container task", cb.ID)
 	}
 	task, err := firstContainer.Container.Task(ctx, nil)
 	if err != nil {
-		return err
+		return nil, nil, err
+	}
+	return ctx, task, nil
+}
+
+func updateTaskForRollback(ctx context.Context, task containerd.Task, restoreConfig string) error {
+	if task == nil {
+		return fmt.Errorf("rollback task is required")
 	}
 	return task.Update(ctx, containerd.WithAnnotations(map[string]string{
 		shimUpdateActionAnnotation:          shimUpdateRollbackAction,

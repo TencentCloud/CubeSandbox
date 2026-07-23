@@ -30,6 +30,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/volumefile"
+	cgroupp "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cgroup"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/images"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
@@ -852,6 +853,37 @@ func TestDeepCopyStringMap(t *testing.T) {
 			tt.validate(t, tt.input, result)
 		})
 	}
+}
+
+func TestApplyCgroupInfoToCubeBoxCopiesAssignmentBaseline(t *testing.T) {
+	baseline := &cubeboxstore.HostMetricsBaseline{
+		CGroupPath:      "/cube_sandbox/sandbox/7",
+		CPUUsageTotalNS: 100,
+	}
+	info := &cgroupp.Info{
+		CgroupID:            baseline.CGroupPath,
+		HostMetricsBaseline: baseline,
+	}
+	cb := &cubeboxstore.CubeBox{}
+
+	applyCgroupInfoToCubeBox(cb, info)
+
+	require.Equal(t, baseline.CGroupPath, cb.CGroupPath)
+	require.Equal(t, baseline, cb.HostMetricsBaselineCopy())
+	require.NotSame(t, baseline, cb.HostMetricsBaselineCopy())
+	require.False(t, cb.HostMetricsBaselineMissingAtAssignment)
+}
+
+func TestApplyCgroupInfoToCubeBoxMarksMissingAssignmentBaseline(t *testing.T) {
+	cb := &cubeboxstore.CubeBox{}
+
+	applyCgroupInfoToCubeBox(cb, &cgroupp.Info{
+		CgroupID:                               "/cube_sandbox/sandbox/8",
+		HostMetricsBaselineMissingAtAssignment: true,
+	})
+
+	require.Nil(t, cb.HostMetricsBaselineCopy())
+	require.True(t, cb.HostMetricsBaselineMissingAtAssignment)
 }
 
 func TestPrepareImagePmems(t *testing.T) {

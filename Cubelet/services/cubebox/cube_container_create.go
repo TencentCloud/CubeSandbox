@@ -132,6 +132,20 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 		}
 	}
 
+	sandBox, err := l.cubeboxManger.Get(ctx, opts.GetSandboxID())
+	if err != nil {
+		log.G(ctx).Warnf("sandbox created but guest metrics epoch cannot be initialized: %v", err)
+		return nil
+	}
+	if err := beginFreshGuestMetricsEpochBestEffort(
+		ctx,
+		l.cubeboxManger,
+		sandBox,
+		time.Now().UTC(),
+	); err != nil {
+		log.G(ctx).Warnf("sandbox created but guest metrics epoch is not yet persisted: %v", err)
+	}
+
 	return nil
 }
 
@@ -201,8 +215,7 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 
 	cgInfo, cgSet := flowOpts.CgroupInfo.(*cgroupp.Info)
 	if cgSet {
-		sandBox.ResourceWithOverHead = &cgInfo.ResourceQuantity
-		sandBox.CGroupPath = cgInfo.CgroupID
+		applyCgroupInfoToCubeBox(sandBox, cgInfo)
 	}
 
 	sandBox.Metadata.AddLabels(l.genListFilterLabels(ctx, realReq, sandBox))
@@ -374,6 +387,16 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 	}
 
 	return nil
+}
+
+func applyCgroupInfoToCubeBox(sandBox *cubeboxstore.CubeBox, info *cgroupp.Info) {
+	if sandBox == nil || info == nil {
+		return
+	}
+	sandBox.ResourceWithOverHead = &info.ResourceQuantity
+	sandBox.CGroupPath = info.CgroupID
+	sandBox.RestoreHostMetricsBaseline(info.HostMetricsBaseline)
+	sandBox.HostMetricsBaselineMissingAtAssignment = info.HostMetricsBaselineMissingAtAssignment
 }
 
 func (l *local) cleanupAfterEnvdInitFailure(flowOpts *workflow.CreateContext,

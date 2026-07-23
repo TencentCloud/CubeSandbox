@@ -23,6 +23,7 @@ type Interface interface {
 	CleanForReuse(ctx context.Context, group string) error
 	GetAllocatedCpuNum(group string) int
 	GetAllocatedMem(group string) int64
+	UsageSnapshot(ctx context.Context, group string) (UsageSnapshot, error)
 }
 
 const (

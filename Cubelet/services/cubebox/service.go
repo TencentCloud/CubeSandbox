@@ -1009,7 +1009,7 @@ func scanDeadContainer(ctx context.Context, dc []*cubeboxstore.CubeBox, client *
 		// Unknown=true, making the sandbox appear Terminated and triggering a
 		// spurious Destroy cascade.
 		//
-		// The same race exists for snapshot rollback: while updateShimForRollback
+		// The same race exists for snapshot rollback: while updateTaskForRollback
 		// runs, the shim holds its sandbox mutex doing delete_vm +
 		// resume_vm_with_config and ttrpc state() either times out or returns
 		// task status=Unknown. RollbackSandbox sets RollingBack on every
