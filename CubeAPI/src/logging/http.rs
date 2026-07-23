@@ -259,12 +259,15 @@ fn sign_payload(secret: &str, body: &[u8]) -> String {
 }
 
 /// Extract host portion from a URL for safe logging.
-fn redact_url(url: &str) -> &str {
+/// Strips scheme, userinfo, path, query, and fragment.
+pub(crate) fn redact_url(url: &str) -> &str {
     // Strip scheme
     let s = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
         .unwrap_or(url);
+    // Strip userinfo (user:pass@host → host)
+    let s = s.rsplit('@').next().unwrap_or(s);
     // Strip path / query / fragment
     s.split('/').next().unwrap_or(s)
 }
@@ -385,6 +388,19 @@ mod tests {
             "127.0.0.1:9090"
         );
         assert_eq!(redact_url("https://example.com"), "example.com");
+    }
+
+    #[test]
+    fn redact_url_removes_userinfo() {
+        assert_eq!(
+            redact_url("http://user:pass@example.com:8080/webhook"),
+            "example.com:8080"
+        );
+        // No userinfo present — should still work
+        assert_eq!(
+            redact_url("https://hooks.example.com/webhook"),
+            "hooks.example.com"
+        );
     }
 
     #[tokio::test]

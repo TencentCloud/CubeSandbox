@@ -253,13 +253,7 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
         if !targets.is_empty() {
             // HTTPS warning for non-loopback plaintext URLs
             for url in &targets {
-                let host = url
-                    .strip_prefix("https://")
-                    .or_else(|| url.strip_prefix("http://"))
-                    .unwrap_or(url)
-                    .split('/')
-                    .next()
-                    .unwrap_or(url);
+                let host = logging::http::redact_url(url);
                 let is_loopback = host == "localhost"
                     || host == "127.0.0.1"
                     || host == "::1"
