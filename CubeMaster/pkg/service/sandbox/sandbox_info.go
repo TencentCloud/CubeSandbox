@@ -6,6 +6,7 @@ package sandbox
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -171,6 +172,7 @@ func doget(ctx context.Context, calleep string, cubeletReq *cubebox.ListCubeSand
 				Mem:         container.GetResources().GetMem(),
 				Type:        container.GetType(),
 				PauseAt:     container.GetPausedAt(),
+				EnvdPort:    envdPortFromLabels(container.GetLabels()),
 			}
 			one.Containers = append(one.Containers, containerInfo)
 		}
@@ -232,4 +234,14 @@ func getContainerName(label map[string]string) string {
 		return name
 	}
 	return ""
+}
+
+// envdPortFromLabels parses the envd port recorded by Cubelet in the
+// container labels; it returns 0 when the label is missing or unparseable.
+func envdPortFromLabels(labels map[string]string) int32 {
+	port, err := strconv.Atoi(labels[constants.LabelContainerEnvdPort])
+	if err != nil {
+		return 0
+	}
+	return int32(port)
 }

@@ -595,6 +595,7 @@ type ContainerInfo struct {
 	Mem         string `json:"mem,omitempty"`
 	Type        string `json:"type,omitempty"`
 	PauseAt     int64  `json:"pause_at,omitempty"`
+	EnvdPort    int32  `json:"envd_port,omitempty"`
 }
 
 type CreateImageReq struct {

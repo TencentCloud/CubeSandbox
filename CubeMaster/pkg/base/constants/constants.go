@@ -256,6 +256,11 @@ const (
 	LabelSchedulingDisabled = "cube.cloud.tencentcloud.com/scheduling-disabled"
 	// LabelSchedulingDisabledValue is the only legal value for LabelSchedulingDisabled.
 	LabelSchedulingDisabledValue = "true"
+
+	// LabelContainerEnvdPort records the final envd listen port of a container.
+	// It is written by Cubelet on container metadata (Cubelet side:
+	// constants.LabelContainerEnvdPort) and mirrored here for sandbox info.
+	LabelContainerEnvdPort = "cube.envd-port"
 )
 
 const (
