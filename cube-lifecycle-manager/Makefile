@@ -1,4 +1,4 @@
-IMAGE_TAG           ?= v0.6.0-rc3
+IMAGE_TAG           ?= v0.6.0
 IMAGE_LOCAL         := cube-lifecycle-manager
 CUBE_VERSION        ?= $(IMAGE_TAG)
 CUBE_COMMIT         ?= $(shell git rev-parse HEAD | cut -c1-8)

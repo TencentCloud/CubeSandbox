@@ -71,7 +71,7 @@ NAMESPACE="${NAMESPACE:-cube-sandbox}"
 # One shared, externally overridable tag for all component images. Keep in
 # sync with terraform/tencentcloud (var.image_tag) so the default TKE deployment
 # consumes exactly what this script builds.
-TAG="${TAG:-v0.6.0-rc3}"
+TAG="${TAG:-v0.6.0}"
 
 CUBE_API_IMAGE="${CUBE_API_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-api:${TAG}}"
 CUBE_OPS_IMAGE="${CUBE_OPS_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-ops:${TAG}}"
