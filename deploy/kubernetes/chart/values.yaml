@@ -883,6 +883,7 @@ bootstrap:
     checkMemory: true
     minMemoryKB: "7500000"
     checkCgroupCPU: true
+    checkBPFFS: true
     checkGlibc: true
     checkCIDR: true
     checkCubecowDeps: true

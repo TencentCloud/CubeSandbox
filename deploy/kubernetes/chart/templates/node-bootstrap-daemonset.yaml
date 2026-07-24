@@ -147,6 +147,8 @@ spec:
               value: {{ .Values.bootstrap.nodeInit.minMemoryKB | quote }}
             - name: CHECK_CGROUP_CPU
               value: {{ .Values.bootstrap.nodeInit.checkCgroupCPU | quote }}
+            - name: CHECK_BPF_FS
+              value: {{ .Values.bootstrap.nodeInit.checkBPFFS | quote }}
             - name: CHECK_GLIBC
               value: {{ .Values.bootstrap.nodeInit.checkGlibc | quote }}
             - name: CHECK_CIDR
