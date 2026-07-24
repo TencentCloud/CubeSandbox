@@ -1,6 +1,6 @@
 ---
 title: Claude Code Integration Guide
-author: ysr
+author: YYYSSSRRR
 date: 2026-07-21
 tags:
   - integration

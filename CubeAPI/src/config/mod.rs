@@ -76,6 +76,39 @@ pub struct ServerConfig {
     /// Env var: CUBE_API_KEY
     #[serde(default)]
     pub cube_api_key: Option<String>,
+
+    /// Webhook target URLs, comma-separated.
+    ///
+    /// When set, sandbox lifecycle events are POSTed to these URLs as JSON.
+    /// Multiple URLs can be specified: "https://hook.a.com,https://hook.b.com"
+    /// All URLs receive the same events (filtered by `webhook_events`).
+    ///
+    /// Env var: CUBE_API_WEBHOOK_URLS
+    #[serde(default = "default_webhook_urls")]
+    pub webhook_urls: String,
+
+    /// Webhook event type filter, comma-separated.
+    ///
+    /// Specifies which events trigger webhook delivery. Supported values:
+    ///   sandbox.created, sandbox.deleted, sandbox.paused, sandbox.resumed
+    /// Use "*" or leave empty to receive all events.
+    ///
+    /// Example: "sandbox.created,sandbox.deleted" receives only create/delete.
+    ///
+    /// Env var: CUBE_API_WEBHOOK_EVENTS (default: "*")
+    #[serde(default = "default_webhook_events")]
+    pub webhook_events: String,
+
+    /// Optional HMAC-SHA256 secret key for webhook payload signing.
+    ///
+    /// When set, every webhook POST includes a `X-Cube-Signature-256` header:
+    ///   sha256=<hex-encoded-hmac>
+    /// The receiver verifies the signature to confirm the payload is from CubeAPI
+    /// and has not been tampered with.
+    ///
+    /// Env var: CUBE_API_WEBHOOK_SECRET
+    #[serde(default = "default_webhook_secret")]
+    pub webhook_secret: Option<String>,
 }
 
 fn default_bind() -> String {
@@ -110,6 +143,18 @@ fn default_log_prefix() -> String {
     "cube-api".to_string()
 }
 
+fn default_webhook_urls() -> String {
+    std::env::var("CUBE_API_WEBHOOK_URLS").unwrap_or_default()
+}
+
+fn default_webhook_events() -> String {
+    std::env::var("CUBE_API_WEBHOOK_EVENTS").unwrap_or_else(|_| "*".to_string())
+}
+
+fn default_webhook_secret() -> Option<String> {
+    std::env::var("CUBE_API_WEBHOOK_SECRET").ok().filter(|s| !s.is_empty())
+}
+
 impl ServerConfig {
     pub fn from_env() -> anyhow::Result<Self> {
         let _ = dotenvy::dotenv();
@@ -135,6 +180,9 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             cube_api_key: std::env::var("CUBE_API_KEY").ok().filter(|s| !s.is_empty()),
+            webhook_urls: default_webhook_urls(),
+            webhook_events: default_webhook_events(),
+            webhook_secret: std::env::var("CUBE_API_WEBHOOK_SECRET").ok().filter(|s| !s.is_empty()),
         }
     }
 }
