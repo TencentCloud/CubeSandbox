@@ -44,3 +44,9 @@ const (
 const (
 	LabelInstanceType = "cube.cloud.tencentcloud.com/instance-type"
 )
+
+const (
+	// LabelContainerEnvdPort records the final envd listen port of a container
+	// on its metadata, so upper layers can query it deterministically.
+	LabelContainerEnvdPort = "cube.envd-port"
+)

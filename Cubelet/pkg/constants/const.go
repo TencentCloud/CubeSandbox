@@ -355,6 +355,13 @@ const (
 	CubeDefaultNamespace = "default"
 )
 
+const (
+	// DefaultEnvdPort is the default listen port of envd inside the pod
+	// container; the container created at index i uses DefaultEnvdPort+i
+	// unless the user sets ENVD_PORT explicitly.
+	DefaultEnvdPort = 49983
+)
+
 var (
 	DeviceDefaultFileMode        = os.FileMode(0o666)
 	ALLUid                uint32 = 0xffffffff

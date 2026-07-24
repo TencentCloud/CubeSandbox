@@ -77,11 +77,79 @@ const (
 
 	K8sEmptyDirPath        = "kubernetes.io~empty-dir"
 	envdInitCleanupTimeout = 10 * time.Second
+
+	// envdPortEnvKey is the env var the cube-base entrypoint reads to pick
+	// the envd listen port inside a container.
+	envdPortEnvKey = "ENVD_PORT"
 )
 
 func init() {
 	typeurl.Register(&cubeboxstore.CubeBox{},
 		"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox", "CubeBox")
+}
+
+// maxEnvdPort is the highest valid envd listen port.
+const maxEnvdPort = 65535
+
+// validateExplicitEnvdPorts pre-validates every user-provided ENVD_PORT in
+// the sandbox before any container is created: each value must be an integer
+// in [1, 65535] and ports must be unique across containers. It returns the
+// set of explicitly claimed ports so that default allocation can skip them.
+// An invalid or duplicate value fails the creation instead of being silently
+// replaced by the default.
+func validateExplicitEnvdPorts(containers []*cubebox.ContainerConfig) (map[int]struct{}, error) {
+	used := make(map[int]struct{})
+	for i, c := range containers {
+		for _, kv := range c.GetEnvs() {
+			if kv == nil || kv.Key != envdPortEnvKey {
+				continue
+			}
+			p, err := strconv.Atoi(kv.Value)
+			if err != nil || p < 1 || p > maxEnvdPort {
+				return nil, fmt.Errorf("invalid ENVD_PORT %q for container %q (index %d): "+
+					"must be an integer between 1 and %d", kv.Value, c.GetName(), i, maxEnvdPort)
+			}
+			if _, dup := used[p]; dup {
+				return nil, fmt.Errorf("duplicate ENVD_PORT %d for container %q (index %d): "+
+					"port already used by another container in this sandbox", p, c.GetName(), i)
+			}
+			used[p] = struct{}{}
+			break
+		}
+	}
+	return used, nil
+}
+
+// resolveEnvdPort decides the envd listen port for the container created at
+// index. A valid user-provided ENVD_PORT wins and is kept as-is; an
+// out-of-range or unparseable value fails the creation instead of being
+// silently replaced by the default. Otherwise the port defaults to
+// DefaultEnvdPort+index, skipping ports already claimed within the same
+// sandbox (explicitly, or by an earlier default allocation); when
+// DefaultEnvdPort+index itself exceeds maxEnvdPort, or no port remains, the
+// creation fails.
+func resolveEnvdPort(envs []*cubebox.KeyValue, index int, used map[int]struct{}) (port int, needInject bool, err error) {
+	for _, kv := range envs {
+		if kv == nil || kv.Key != envdPortEnvKey {
+			continue
+		}
+		p, aerr := strconv.Atoi(kv.Value)
+		if aerr != nil || p < 1 || p > maxEnvdPort {
+			return 0, false, fmt.Errorf("invalid ENVD_PORT %q for container at index %d: "+
+				"must be an integer between 1 and %d", kv.Value, index, maxEnvdPort)
+		}
+		return p, false, nil
+	}
+	p := constants.DefaultEnvdPort + index
+	for p <= maxEnvdPort {
+		if _, taken := used[p]; !taken {
+			used[p] = struct{}{}
+			return p, true, nil
+		}
+		p++
+	}
+	return 0, false, fmt.Errorf("no available envd port for container at index %d: "+
+		"default port allocation starting at %d exceeded %d", index, constants.DefaultEnvdPort+index, maxEnvdPort)
 }
 
 func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error {
@@ -227,6 +295,13 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 			Value: c.Id,
 		})
 	}
+	// First pass: validate all user-provided ENVD_PORT values (range +
+	// sandbox-wide uniqueness) before creating anything, so a bad value
+	// fails fast instead of silently falling back to a default port.
+	usedEnvdPorts, err := validateExplicitEnvdPorts(realReq.Containers)
+	if err != nil {
+		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
+	}
 	for i, cntrReq := range realReq.Containers {
 		ci, err := sandBox.Get(cntrReq.Id)
 		if err != nil {
@@ -241,6 +316,15 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 		ctxTmp = constants.WithFuncType(ctxTmp, ci.InstanceType)
 
 		cntrReq.Envs = append(cntrReq.Envs, containerNameArray...)
+
+		envdPort, needInject, err := resolveEnvdPort(cntrReq.Envs, i, usedEnvdPorts)
+		if err != nil {
+			return ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
+		}
+		if needInject {
+			cntrReq.Envs = append(cntrReq.Envs, &cubebox.KeyValue{Key: envdPortEnvKey, Value: strconv.Itoa(envdPort)})
+		}
+		ci.AddLabels(map[string]string{constants.LabelContainerEnvdPort: strconv.Itoa(envdPort)})
 
 		start := time.Now()
 

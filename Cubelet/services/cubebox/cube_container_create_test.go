@@ -1173,3 +1173,224 @@ func TestTransformError(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveEnvdPort(t *testing.T) {
+	tests := []struct {
+		name           string
+		envs           []*cubebox.KeyValue
+		index          int
+		used           map[int]struct{}
+		wantPort       int
+		wantNeedInject bool
+		wantErr        string
+	}{
+		{
+			name:           "default injection for pod container",
+			envs:           nil,
+			index:          0,
+			wantPort:       constants.DefaultEnvdPort,
+			wantNeedInject: true,
+		},
+		{
+			name:           "default injection for second container",
+			envs:           nil,
+			index:          1,
+			wantPort:       constants.DefaultEnvdPort + 1,
+			wantNeedInject: true,
+		},
+		{
+			name:           "default injection for third container",
+			envs:           nil,
+			index:          2,
+			wantPort:       constants.DefaultEnvdPort + 2,
+			wantNeedInject: true,
+		},
+		{
+			name: "user provided ENVD_PORT is kept",
+			envs: []*cubebox.KeyValue{
+				{Key: "FOO", Value: "bar"},
+				{Key: "ENVD_PORT", Value: "50000"},
+			},
+			index:          1,
+			wantPort:       50000,
+			wantNeedInject: false,
+		},
+		{
+			name: "user provided ENVD_PORT at upper boundary is kept",
+			envs: []*cubebox.KeyValue{
+				{Key: "ENVD_PORT", Value: "65535"},
+			},
+			index:          1,
+			wantPort:       65535,
+			wantNeedInject: false,
+		},
+		{
+			name: "non-numeric user ENVD_PORT fails",
+			envs: []*cubebox.KeyValue{
+				{Key: "ENVD_PORT", Value: "not-a-port"},
+			},
+			index:   2,
+			wantErr: "invalid ENVD_PORT",
+		},
+		{
+			name: "empty user ENVD_PORT fails",
+			envs: []*cubebox.KeyValue{
+				{Key: "ENVD_PORT", Value: ""},
+			},
+			index:   0,
+			wantErr: "invalid ENVD_PORT",
+		},
+		{
+			name: "zero user ENVD_PORT fails",
+			envs: []*cubebox.KeyValue{
+				{Key: "ENVD_PORT", Value: "0"},
+			},
+			index:   0,
+			wantErr: "invalid ENVD_PORT",
+		},
+		{
+			name: "negative user ENVD_PORT fails",
+			envs: []*cubebox.KeyValue{
+				{Key: "ENVD_PORT", Value: "-1"},
+			},
+			index:   0,
+			wantErr: "invalid ENVD_PORT",
+		},
+		{
+			name: "user ENVD_PORT above 65535 fails",
+			envs: []*cubebox.KeyValue{
+				{Key: "ENVD_PORT", Value: "65536"},
+			},
+			index:   0,
+			wantErr: "invalid ENVD_PORT",
+		},
+		{
+			name: "nil entries are skipped",
+			envs: []*cubebox.KeyValue{
+				nil,
+				{Key: "ENVD_PORT", Value: "50001"},
+			},
+			index:          0,
+			wantPort:       50001,
+			wantNeedInject: false,
+		},
+		{
+			name:           "default port skips slot claimed by another container",
+			envs:           nil,
+			index:          0,
+			used:           map[int]struct{}{constants.DefaultEnvdPort: {}},
+			wantPort:       constants.DefaultEnvdPort + 1,
+			wantNeedInject: true,
+		},
+		{
+			name:           "default port skips multiple claimed slots",
+			envs:           nil,
+			index:          0,
+			used:           map[int]struct{}{constants.DefaultEnvdPort: {}, constants.DefaultEnvdPort + 1: {}},
+			wantPort:       constants.DefaultEnvdPort + 2,
+			wantNeedInject: true,
+		},
+		{
+			name:    "default port overflow beyond 65535 fails",
+			envs:    nil,
+			index:   65535 - constants.DefaultEnvdPort + 1, // DefaultEnvdPort+index == 65536
+			wantErr: "no available envd port",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			used := make(map[int]struct{}, len(tt.used))
+			for p := range tt.used {
+				used[p] = struct{}{}
+			}
+			port, needInject, err := resolveEnvdPort(tt.envs, tt.index, used)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantPort, port)
+			assert.Equal(t, tt.wantNeedInject, needInject)
+		})
+	}
+}
+
+func TestValidateExplicitEnvdPorts(t *testing.T) {
+	tests := []struct {
+		name       string
+		containers []*cubebox.ContainerConfig
+		wantUsed   []int
+		wantErr    string
+	}{
+		{
+			name: "no explicit ports",
+			containers: []*cubebox.ContainerConfig{
+				{Name: "pod"},
+				{Name: "app"},
+			},
+			wantUsed: nil,
+		},
+		{
+			name: "valid explicit ports are collected",
+			containers: []*cubebox.ContainerConfig{
+				{Name: "pod", Envs: []*cubebox.KeyValue{{Key: "ENVD_PORT", Value: "8080"}}},
+				{Name: "app", Envs: []*cubebox.KeyValue{{Key: "ENVD_PORT", Value: "65535"}}},
+			},
+			wantUsed: []int{8080, 65535},
+		},
+		{
+			name: "zero port fails",
+			containers: []*cubebox.ContainerConfig{
+				{Name: "pod", Envs: []*cubebox.KeyValue{{Key: "ENVD_PORT", Value: "0"}}},
+			},
+			wantErr: `invalid ENVD_PORT "0" for container "pod" (index 0)`,
+		},
+		{
+			name: "negative port fails",
+			containers: []*cubebox.ContainerConfig{
+				{Name: "pod", Envs: []*cubebox.KeyValue{{Key: "ENVD_PORT", Value: "-1"}}},
+			},
+			wantErr: "invalid ENVD_PORT",
+		},
+		{
+			name: "port above 65535 fails",
+			containers: []*cubebox.ContainerConfig{
+				{Name: "app", Envs: []*cubebox.KeyValue{{Key: "ENVD_PORT", Value: "65536"}}},
+			},
+			wantErr: "invalid ENVD_PORT",
+		},
+		{
+			name: "non-numeric port fails",
+			containers: []*cubebox.ContainerConfig{
+				{Name: "app", Envs: []*cubebox.KeyValue{{Key: "ENVD_PORT", Value: "abc"}}},
+			},
+			wantErr: "invalid ENVD_PORT",
+		},
+		{
+			name: "duplicate explicit ports across containers fail",
+			containers: []*cubebox.ContainerConfig{
+				{Name: "pod", Envs: []*cubebox.KeyValue{{Key: "ENVD_PORT", Value: "8080"}}},
+				{Name: "app", Envs: []*cubebox.KeyValue{{Key: "ENVD_PORT", Value: "8080"}}},
+			},
+			wantErr: `duplicate ENVD_PORT 8080 for container "app" (index 1)`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			used, err := validateExplicitEnvdPorts(tt.containers)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Len(t, used, len(tt.wantUsed))
+			for _, p := range tt.wantUsed {
+				assert.Contains(t, used, p)
+			}
+		})
+	}
+}
