@@ -609,6 +609,18 @@ COS 插件的手动测试命令见 [`examples/volume/cos/README.zh.md`](https://
 | FUSE 挂载成功但沙箱内看不到 | 挂载在宿主机 mntns 而非 Cubelet mntns | 确保插件由 Cubelet fork，不要手动在宿主机 mount |
 | attach 成功但 detach 泄漏 | `ref_count > 0` 时误卸载了共享 FUSE | 检查 detach 逻辑是否遵守 RefCount 语义 |
 
+## 兼容性说明
+
+Volume 依赖 CubeMaster 与 Cubelet **双侧**均升级到支持 Volume 插件的版本。滚动升级期间：
+
+| CubeMaster | Cubelet | Volume 创建 / 删除 | 沙箱 `volumeMounts` |
+|---|---|---|---|
+| 新 | 新 | 可用 | 可用 |
+| 新 | 旧（如 v0.5.x） | 可用 | 不生效（创建不因此失败，但不会挂载） |
+| 旧（如 v0.5.x） | 新 / 旧 | 不可用 | 不可用；勿传 `volumeMounts`，普通创建不受影响 |
+
+混合版本时勿假设旧节点已挂载成功；需要挂载效果时，请确认调度到的 Cubelet 已升级。
+
 ---
 
 ## 已知限制与路线图

@@ -527,15 +527,17 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --clobber
 
-  # Build one-click bundles after per-arch kernel assets are on the Release
-  # (consumed via gh release download). Runs in parallel with
-  # release_docker_images; publish_one_click_* uploads only after images
-  # (including CN sync) are published.
+  # Build one-click bundles after per-arch kernel + guest assets are on the
+  # Release. Guest image is reused from cube-guest-image-*.tar.gz (same asset
+  # as release_docker_images / cube-guest) via ONE_CLICK_GUEST_IMAGE_TAR so
+  # the one-click package stays consistent with published docker images.
+  # publish_one_click_* still waits for release_docker_images (incl. CN sync).
   build_one_click_amd64:
     name: Build one-click bundle (amd64)
     runs-on: ubuntu-latest
     needs:
       - publish_kernel_amd64
+      - publish_guest_release_assets
     env:
       VMLINUX_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/vmlinux
       PVM_VMLINUX_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/vmlinux-pvm
@@ -580,6 +582,20 @@ jobs:
           file "${VMLINUX_RELEASE_PATH}"
           file "${PVM_VMLINUX_RELEASE_PATH}"
 
+      - name: Download guest image from Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf downloaded-guest
+          mkdir -p downloaded-guest
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "cube-guest-image-amd64.tar.gz" \
+            --dir downloaded-guest
+          test -f downloaded-guest/cube-guest-image-amd64.tar.gz
+          ls -lh downloaded-guest/cube-guest-image-amd64.tar.gz
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -596,6 +612,7 @@ jobs:
           CUBE_VERSION: ${{ github.ref_name }}
           CUBE_COMMIT: ${{ github.sha }}
           ONE_CLICK_DIST_VERSION: ${{ github.ref_name }}-amd64
+          ONE_CLICK_GUEST_IMAGE_TAR: ${{ github.workspace }}/downloaded-guest/cube-guest-image-amd64.tar.gz
         run: CUBE_BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" ./deploy/one-click/build-release-bundle-builder.sh
 
       - name: Upload one-click bundle artifact
@@ -635,6 +652,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     needs:
       - publish_kernel_arm64
+      - publish_guest_release_assets
     env:
       VMLINUX_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/vmlinux
 
@@ -672,6 +690,20 @@ jobs:
           test -f "${VMLINUX_RELEASE_PATH}"
           file "${VMLINUX_RELEASE_PATH}"
 
+      - name: Download guest image from Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf downloaded-guest
+          mkdir -p downloaded-guest
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "cube-guest-image-arm64.tar.gz" \
+            --dir downloaded-guest
+          test -f downloaded-guest/cube-guest-image-arm64.tar.gz
+          ls -lh downloaded-guest/cube-guest-image-arm64.tar.gz
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -688,6 +720,7 @@ jobs:
           CUBE_VERSION: ${{ github.ref_name }}
           CUBE_COMMIT: ${{ github.sha }}
           ONE_CLICK_DIST_VERSION: ${{ github.ref_name }}-arm64
+          ONE_CLICK_GUEST_IMAGE_TAR: ${{ github.workspace }}/downloaded-guest/cube-guest-image-arm64.tar.gz
         run: CUBE_BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" ./deploy/one-click/build-release-bundle-builder.sh
 
       - name: Upload one-click bundle artifact

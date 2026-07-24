@@ -718,11 +718,6 @@ func checkAndGetVolumes(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSan
 				return fmt.Errorf("volume name must not be empty")
 			}
 
-			v := &cubebox.Volume{
-				Name:         e.Name,
-				VolumeSource: &cubebox.VolumeSource{},
-			}
-
 			// Identify plugin volumes by name appearing in plugin-volume-mounts
 			// annotation, or by having a nil VolumeSource.
 			if e.VolumeSource == nil || pluginVolumeNames[e.Name] {
@@ -733,11 +728,18 @@ func checkAndGetVolumes(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSan
 				if err := appendPluginVolumeSourceAnnotation(req, e.Name, record.Driver, record.PrivateData); err != nil {
 					return fmt.Errorf("volume [%s]: annotation: %w", e.Name, err)
 				}
-				v.VolumeSource.EmptyDir = &cubebox.EmptyDirVolumeSource{
-					SizeLimit: "1Gi",
-				}
-				out.Volumes = append(out.Volumes, v)
+				// Compatibility with older Cubelets: do NOT inject
+				// EmptyDir(StorageMediumDefault) as a placeholder. Pre-plugin
+				// Cubelets treat every Default EmptyDir as a rootfs derive
+				// (sb-<id>-rootfs-gen0); a second Default EmptyDir then collides
+				// with cube_rootfs_rw ("cubecow object already exists").
+				out.Volumes = append(out.Volumes, pluginVolumeWireVolume(e.Name))
 				continue
+			}
+
+			v := &cubebox.Volume{
+				Name:         e.Name,
+				VolumeSource: &cubebox.VolumeSource{},
 			}
 
 			if e.VolumeSource.EmptyDir != nil {
@@ -1064,6 +1066,16 @@ func checkAndGetContainerHooks(out *cubebox.ContainerConfig, in *types.Container
 		}
 	}
 	return nil
+}
+
+// pluginVolumeWireVolume is the Cubelet-facing Volume shape for a plugin volume.
+// VolumeSource is intentionally empty: do not use EmptyDir(StorageMediumDefault)
+// placeholders (see checkAndGetVolumes).
+func pluginVolumeWireVolume(name string) *cubebox.Volume {
+	return &cubebox.Volume{
+		Name:         name,
+		VolumeSource: &cubebox.VolumeSource{},
+	}
 }
 
 // appendPluginVolumeSourceAnnotation records name+driver(+private_data) for a

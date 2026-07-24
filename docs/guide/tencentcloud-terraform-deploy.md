@@ -1,6 +1,6 @@
 # Tencent Cloud Cluster Deployment (Terraform)
 
-This guide explains how to use the Terraform deployer shipped in the release bundle to stand up a **clustered** Cube Sandbox on Tencent Cloud in one shot: a managed TKE control plane running `cube-master` / `cube-api` / `cube-proxy` / `cube-lifecycle-manager` / `cube-webui`, backed by cloud MySQL + Redis, with one or more CVM PVM compute nodes. A jumpserver (SSH on port `443`) acts as the build host and the bastion for the otherwise-private VPC.
+This guide explains how to use the Terraform deployer shipped in the release bundle to stand up a **clustered** Cube Sandbox on Tencent Cloud in one shot: a managed TKE control plane running `cube-master` / `cube-api` / `cube-ops` / `cube-proxy` / `cube-lifecycle-manager` / `cube-webui`, backed by cloud MySQL + Redis, with one or more CVM PVM compute nodes. A jumpserver (SSH on port `443`) acts as the build host and the bastion for the otherwise-private VPC.
 
 ::: tip Network Hardening
 Network hardening for the cluster deployment is handled by **Tencent Cloud security groups**: the deployer creates **4 per-role security groups** (jumpserver / compute / TKE pod / CLB), each opening only the ingress that role actually needs on a least-privilege basis (compute and TKE nodes get no public ingress at all), and assigns no public IP to compute nodes. **The default is internal mode** (`TENCENTCLOUD_ENABLE_PUBLIC_NETWORK='false'`): the three user-facing services — WebUI / cube-api / cube-proxy — are fronted by **VPC-internal CLBs**, reachable only from inside the VPC (via the jumpserver / VPN) with no public exposure. To allow public access, explicitly set `TENCENTCLOUD_ENABLE_PUBLIC_NETWORK='true'` to switch them to public CLBs. To tighten further, adjust the inbound/outbound rules of each individual group (`cubesandbox-sg-jumpserver` / `cubesandbox-sg-compute` / `cubesandbox-sg-tke-pod` / `cubesandbox-sg-clb`) as needed in the [Tencent Cloud security group console](https://console.cloud.tencent.com/vpc/securitygroup). **When public mode is enabled**, also see [Hardening the Public-Facing Services](#hardening-the-public-facing-services).
@@ -33,8 +33,9 @@ This deployment uses cloud resources to **quickly stand up a highly-available Cu
   │  │ Compute CVM ×N   │       │  TKE managed cluster      │
   │  │  Cubelet         │       │  cube-master (×1)         │
   │  │  network-agent   │       │  cube-api (×1)            │
-  │  │  CubeEgress      │       │  cube-proxy (×1)          │
-  │  └──────────────────┘       │  cube-lifecycle-manager   │
+  │  │  CubeEgress      │       │  cube-ops (×1)            │
+  │  └──────────────────┘       │  cube-proxy (×1)          │
+  │                             │  cube-lifecycle-manager   │
   │                             │  cube-webui (×1)          │
   │                             └───┬─────────────┬─────────┘
   │                                 │             │         │
@@ -57,7 +58,7 @@ This deployment uses cloud resources to **quickly stand up a highly-available Cu
 |-----------|------|-------|
 | Jumpserver | CVM (public IP, SSH 443) | Build host (TCR mode) and bastion into the private VPC |
 | Load balancer | CLB (internal/public) | Fronts `cube-api` / `cube-proxy` / `cube-webui`; internal mode by default, user traffic entry point |
-| Control plane | Managed TKE cluster | Runs `cube-master` / `cube-api` / `cube-proxy` / `cube-lifecycle-manager` / `cube-webui` |
+| Control plane | Managed TKE cluster | Runs `cube-master` / `cube-api` / `cube-ops` / `cube-proxy` / `cube-lifecycle-manager` / `cube-webui` |
 | Compute node | CVM PVM | Runs `Cubelet` / `network-agent` / `CubeEgress`; **actually hosts sandboxes** |
 | Database | Cloud MySQL 8.0 + Redis 7.0 | VPC-internal only, no public access |
 | Shared storage | CFS (General Standard NFS, **optional**) | When `USE_CFS=true` and cubemaster has multiple replicas, ReadWriteMany share for `/data/CubeMaster/storage` |
@@ -85,7 +86,7 @@ Matching `env.example` / `variables.tf`, the **default is public images + single
 
 **Advanced modes:**
 
-- `TENCENTCLOUD_USE_TCR=true`: create TCR and build/push the five component images on the jumpserver.
+- `TENCENTCLOUD_USE_TCR=true`: create TCR and build/push the six component images on the jumpserver.
 - `TENCENTCLOUD_USE_CFS=true` with `TENCENTCLOUD_CUBEMASTER_REPLICAS>1`: create CFS for cubemaster multi-replica shared storage.
 - `TENCENTCLOUD_CUBE_PROXY_REPLICAS>1`: run cube-proxy with multiple replicas behind the same CLB.
 
@@ -273,7 +274,7 @@ See [Configuration](#configuration) below for the meaning and defaults of each `
 2. Generates an SSH key pair under `terraform/tencentcloud/.ssh/` if none exists.
 3. Generates the cube-proxy TLS certificate (`cube.app` / `*.cube.app`) on the jumpserver with the bundled `mkcert`, downloading it to `terraform/tencentcloud/cubeproxy-certs/` for the Secret mount.
 4. **Default mode** (`USE_TCR=false`): pull public pre-built images and deploy TKE addons and CVM compute nodes (2 by default).
-5. **TCR mode** (`USE_TCR=true`): create TCR, build and push the five component images on the jumpserver, then deploy TKE and compute nodes.
+5. **TCR mode** (`USE_TCR=true`): create TCR, build and push the six component images on the jumpserver, then deploy TKE and compute nodes.
 
 ## Configuration
 
@@ -317,6 +318,7 @@ export TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS=1
 | `TENCENTCLOUD_CUBE_DB` / `TENCENTCLOUD_CUBE_USER` / `TENCENTCLOUD_CUBE_PASSWORD` | `cube_mvp` / `cube` / demo | Application DB name / account / password |
 | `TENCENTCLOUD_CUBEMASTER_REPLICAS` | `1` | cube-master replica count |
 | `TENCENTCLOUD_CUBE_API_REPLICAS` | `1` | cube-api replica count |
+| `TENCENTCLOUD_CUBE_OPS_REPLICAS` | `1` | cube-ops replica count. cube-webui routes `/opsapi/` and `/cubeapi/v1/` through this internal service |
 | `TENCENTCLOUD_CUBE_PROXY_REPLICAS` | `1` | cube-proxy replica count. Values greater than `1` are supported; each replica registers in Redis for cube-lifecycle-manager discovery |
 | `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS` | `1` | cube-lifecycle-manager replica count. Keep `1` unless CLM HA behavior has been validated for your deployment |
 | `TENCENTCLOUD_CUBE_WEBUI_REPLICAS` | `1` | cube-webui replica count |
@@ -355,7 +357,7 @@ The default deployment provisions **2× 4C8G compute nodes** (`SA9.MEDIUM8`, 200
 | Compute node (PVM) | `SA9.MEDIUM8` | 4C8G + 200GB data disk | 2 |
 | TKE Worker | `SA9.LARGE8` | 4C8G | 2 (`worker_config.count`) |
 | Jumpserver | `SA9.MEDIUM4` | 2C4G | 1 |
-| Control-plane Pods | — | cubemaster / cube-api / cube-proxy / cube-lifecycle-manager / cube-webui ×1 each | on TKE workers |
+| Control-plane Pods | — | cubemaster / cube-api / cube-ops / cube-proxy / cube-lifecycle-manager / cube-webui ×1 each | on TKE workers |
 
 ::: warning
 The default configuration is only suitable for functional validation and small-scale evaluation. For large-scale production usage, you **must adjust the compute node and TKE node specs and counts**, otherwise you will encounter CPU/memory exhaustion, Pod scheduling failures, and sandbox creation timeouts.

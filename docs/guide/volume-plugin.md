@@ -611,6 +611,18 @@ For COS-specific manual tests, see [`examples/volume/cos/README.md`](https://git
 | FUSE OK but invisible in sandbox | Mount in host mntns, not Cubelet mntns | Let Cubelet fork the plugin |
 | Detach leak after attach | Unmount shared FUSE when `ref_count > 0` | Follow RefCount semantics |
 
+## Compatibility Notes
+
+Volume requires **both** CubeMaster and Cubelet to be on a release that supports the Volume Plugin. During a rolling upgrade:
+
+| CubeMaster | Cubelet | Volume create / delete | Sandbox `volumeMounts` |
+|---|---|---|---|
+| New | New | Supported | Supported |
+| New | Old (e.g. v0.5.x) | Supported | No-op (create must not fail; the volume is not mounted) |
+| Old (e.g. v0.5.x) | New / old | Unsupported | Unsupported; do not send `volumeMounts` — plain create is unaffected |
+
+Do not assume mounts succeed on old nodes; schedule onto an upgraded Cubelet when you need mount behavior.
+
 ---
 
 ## Known Limitations and Roadmap

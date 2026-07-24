@@ -11,7 +11,7 @@
 # toggles below are env-only (not prompted); defaults are shown in parentheses:
 #
 #   TENCENTCLOUD_VERBOSE                 verbose terraform logs (interactive: off, non-interactive: on)
-#   TENCENTCLOUD_BUILD_IMAGES            build+push the four component images on the jumpserver (1); 0 reuses pushed images
+#   TENCENTCLOUD_BUILD_IMAGES            build+push the component images on the jumpserver (1); 0 reuses pushed images
 #   TENCENTCLOUD_REINSTALL               force re-run the compute-node install even if already installed (0)
 #   TENCENTCLOUD_RESET_DB                drop+recreate the cube database on this run (0)
 #   TENCENTCLOUD_ALLOW_INSECURE_DEFAULTS allow the built-in demo passwords on a non-interactive run (0)
@@ -879,6 +879,7 @@ setup_env() {
 	export TF_VAR_image_namespace="${TENCENTCLOUD_IMAGE_NAMESPACE:-cube-sandbox}"
 	export TF_VAR_cubemaster_image="${TENCENTCLOUD_CUBEMASTER_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-master:${CUBE_IMAGE_TAG}}"
 	export TF_VAR_cubeapi_image="${TENCENTCLOUD_CUBEAPI_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-api:${CUBE_IMAGE_TAG}}"
+	export TF_VAR_cubeops_image="${TENCENTCLOUD_CUBEOPS_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-ops:${CUBE_IMAGE_TAG}}"
 	export TF_VAR_cubeproxy_image="${TENCENTCLOUD_CUBEPROXY_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-proxy:${CUBE_IMAGE_TAG}}"
 	export TF_VAR_webui_image="${TENCENTCLOUD_WEBUI_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-webui:${CUBE_IMAGE_TAG}}"
 	export TF_VAR_cube_lifecycle_manager_image="${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager:${CUBE_IMAGE_TAG}}"
@@ -889,6 +890,7 @@ setup_env() {
 	export TF_VAR_tke_node_count="$TKE_NODE_COUNT"
 	export TF_VAR_cubemaster_replicas="${TENCENTCLOUD_CUBEMASTER_REPLICAS:-1}"
 	export TF_VAR_cube_api_replicas="${TENCENTCLOUD_CUBE_API_REPLICAS:-1}"
+	export TF_VAR_cube_ops_replicas="${TENCENTCLOUD_CUBE_OPS_REPLICAS:-1}"
 	export TF_VAR_cube_proxy_replicas="${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-1}"
 	export TF_VAR_cube_lifecycle_manager_replicas="${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS:-1}"
 	export TF_VAR_cube_webui_replicas="${TENCENTCLOUD_CUBE_WEBUI_REPLICAS:-1}"
@@ -1207,7 +1209,7 @@ ensure_js_bundle() {
 
 # ---------------------------------------------------------------
 # _ensure_js_package — ensure sandbox-package is already extracted on the jumpserver
-#   sandbox-package contains build_images.sh and the Dockerfiles + precompiled artifacts for the four components.
+#   sandbox-package contains build_images.sh and the Dockerfiles + precompiled artifacts for the components.
 #   On success, print the remote package root directory (/tmp/cube-package/sandbox-package) to stdout;
 #   on failure, print an empty string and return 1.
 # ---------------------------------------------------------------
@@ -1391,7 +1393,7 @@ cache_base_images() {
 }
 
 # ---------------------------------------------------------------
-# build_and_push_images — build the four component images on the jumpserver and push them to the TCR created this run
+# build_and_push_images — build the component images on the jumpserver and push them to the TCR created this run
 #   TKE addons then use these images directly (see local.image_registry in tke-addons.tf).
 #   The jumpserver already has docker installed, holds the TCR token, and is in the same VPC as the TCR, making it a natural build machine.
 #   build_images.sh is executed ON the jumpserver (over SSH) to build and push.
@@ -1456,7 +1458,7 @@ build_and_push_images() {
 
 	# 4) Build and push (REGISTRY/NAMESPACE/TAG match the defaults in tke-addons.tf)
 	echo -e "  ${CYAN}Running build_images.sh on the jumpserver: building & pushing${NC}"
-	echo -e "  ${CYAN}  cubemaster/cube-api/cubeproxy/cube-lifecycle-manager/cube-webui → ${reg}/${ns} (tag=${tag})...${NC}"
+	echo -e "  ${CYAN}  cubemaster/cube-api/cube-ops/cubeproxy/cube-lifecycle-manager/cube-webui → ${reg}/${ns} (tag=${tag})...${NC}"
 	echo -e "  ${YELLOW}  (docker build produces a lot of output, please be patient)${NC}"
 	if "${js_ssh[@]}" root@"${js_pub_ip}" \
 		"REGISTRY='${reg}' NAMESPACE='${ns}' TAG='${tag}' PUSH=1 bash '${pkg_root}/terraform/tencentcloud/build_images.sh' all"; then
@@ -4205,6 +4207,7 @@ TENCENTCLOUD_IMAGE_REGISTRY='${TF_VAR_image_registry:-${TENCENTCLOUD_IMAGE_REGIS
 TENCENTCLOUD_IMAGE_NAMESPACE='${TF_VAR_image_namespace:-${TENCENTCLOUD_IMAGE_NAMESPACE:-cube-sandbox}}'
 TENCENTCLOUD_CUBEMASTER_IMAGE='${TF_VAR_cubemaster_image:-${TENCENTCLOUD_CUBEMASTER_IMAGE:-}}'
 TENCENTCLOUD_CUBEAPI_IMAGE='${TF_VAR_cubeapi_image:-${TENCENTCLOUD_CUBEAPI_IMAGE:-}}'
+TENCENTCLOUD_CUBEOPS_IMAGE='${TF_VAR_cubeops_image:-${TENCENTCLOUD_CUBEOPS_IMAGE:-}}'
 TENCENTCLOUD_CUBEPROXY_IMAGE='${TF_VAR_cubeproxy_image:-${TENCENTCLOUD_CUBEPROXY_IMAGE:-}}'
 TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_IMAGE='${TF_VAR_cube_lifecycle_manager_image:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_IMAGE:-}}'
 TENCENTCLOUD_WEBUI_IMAGE='${TF_VAR_webui_image:-${TENCENTCLOUD_WEBUI_IMAGE:-}}'
@@ -4212,6 +4215,7 @@ TENCENTCLOUD_TKE_CLUSTER_VERSION='${TKE_CLUSTER_VERSION:-1.34.1}'
 TENCENTCLOUD_TKE_NODE_COUNT='${TKE_NODE_COUNT:-2}'
 TENCENTCLOUD_CUBEMASTER_REPLICAS='${TENCENTCLOUD_CUBEMASTER_REPLICAS:-1}'
 TENCENTCLOUD_CUBE_API_REPLICAS='${TF_VAR_cube_api_replicas:-${TENCENTCLOUD_CUBE_API_REPLICAS:-1}}'
+TENCENTCLOUD_CUBE_OPS_REPLICAS='${TF_VAR_cube_ops_replicas:-${TENCENTCLOUD_CUBE_OPS_REPLICAS:-1}}'
 TENCENTCLOUD_CUBE_PROXY_REPLICAS='${TF_VAR_cube_proxy_replicas:-${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-1}}'
 TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS='${TF_VAR_cube_lifecycle_manager_replicas:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS:-1}}'
 TENCENTCLOUD_CUBE_WEBUI_REPLICAS='${TF_VAR_cube_webui_replicas:-${TENCENTCLOUD_CUBE_WEBUI_REPLICAS:-1}}'
@@ -4419,11 +4423,13 @@ write_resolved_tfvars_file() {
 		--arg image_namespace "${TF_VAR_image_namespace:-${TENCENTCLOUD_IMAGE_NAMESPACE:-cube-sandbox}}" \
 		--arg cubemaster_image "${TF_VAR_cubemaster_image:-${TENCENTCLOUD_CUBEMASTER_IMAGE:-}}" \
 		--arg cubeapi_image "${TF_VAR_cubeapi_image:-${TENCENTCLOUD_CUBEAPI_IMAGE:-}}" \
+		--arg cubeops_image "${TF_VAR_cubeops_image:-${TENCENTCLOUD_CUBEOPS_IMAGE:-}}" \
 		--arg cubeproxy_image "${TF_VAR_cubeproxy_image:-${TENCENTCLOUD_CUBEPROXY_IMAGE:-}}" \
 		--arg cube_lifecycle_manager_image "${TF_VAR_cube_lifecycle_manager_image:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_IMAGE:-}}" \
 		--arg webui_image "${TF_VAR_webui_image:-${TENCENTCLOUD_WEBUI_IMAGE:-}}" \
 		--argjson cubemaster_replicas "$(_number_or_default "${TF_VAR_cubemaster_replicas:-${TENCENTCLOUD_CUBEMASTER_REPLICAS:-1}}" 1)" \
 		--argjson cube_api_replicas "$(_number_or_default "${TF_VAR_cube_api_replicas:-${TENCENTCLOUD_CUBE_API_REPLICAS:-1}}" 1)" \
+		--argjson cube_ops_replicas "$(_number_or_default "${TF_VAR_cube_ops_replicas:-${TENCENTCLOUD_CUBE_OPS_REPLICAS:-1}}" 1)" \
 		--argjson cube_proxy_replicas "$(_number_or_default "${TF_VAR_cube_proxy_replicas:-${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-1}}" 1)" \
 		--argjson cube_lifecycle_manager_replicas "$(_number_or_default "${TF_VAR_cube_lifecycle_manager_replicas:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS:-1}}" 1)" \
 		--argjson cube_webui_replicas "$(_number_or_default "${TF_VAR_cube_webui_replicas:-${TENCENTCLOUD_CUBE_WEBUI_REPLICAS:-1}}" 1)" \
@@ -4468,11 +4474,13 @@ write_resolved_tfvars_file() {
 			image_namespace: $image_namespace,
 			cubemaster_image: $cubemaster_image,
 			cubeapi_image: $cubeapi_image,
+			cubeops_image: $cubeops_image,
 			cubeproxy_image: $cubeproxy_image,
 			cube_lifecycle_manager_image: $cube_lifecycle_manager_image,
 			webui_image: $webui_image,
 			cubemaster_replicas: $cubemaster_replicas,
 			cube_api_replicas: $cube_api_replicas,
+			cube_ops_replicas: $cube_ops_replicas,
 			cube_proxy_replicas: $cube_proxy_replicas,
 			cube_lifecycle_manager_replicas: $cube_lifecycle_manager_replicas,
 			cube_webui_replicas: $cube_webui_replicas,
@@ -4834,7 +4842,7 @@ wait_jumpserver_ready() {
 # ---------------------------------------------------------------
 # _reconcile_addons — before the STEP 3 terraform apply, make the cluster match
 #   what terraform is about to create, via the jumpserver's kubectl:
-#     • ALWAYS delete the four component Deployments, so they are recreated with
+#     • ALWAYS delete the component Deployments, so they are recreated with
 #       the freshly built/pushed images (the user's "delete then redeploy" intent).
 #     • Delete a Service/ConfigMap/Secret ONLY when it exists in the cluster but
 #       is MISSING from terraform state (state drift). Such drift makes the apply
@@ -4860,11 +4868,13 @@ kubernetes_config_map.cubeproxy_nginx_conf|-n cubesandbox delete configmap cubep
 kubernetes_config_map.cube_webui_nginx_conf|-n cubesandbox delete configmap cube-webui-nginx-conf
 kubernetes_service.cubemaster|-n cubesandbox delete svc cubemaster
 kubernetes_service.cube_api|-n cubesandbox delete svc cube-api
+kubernetes_service.cube_ops|-n cubesandbox delete svc cube-ops
 kubernetes_service.cube_lifecycle_manager|-n cubesandbox delete svc cube-lifecycle-manager
 kubernetes_service.cube_proxy|-n cubesandbox delete svc cube-proxy
 kubernetes_service.cube_webui|-n cubesandbox delete svc cube-webui
 kubernetes_deployment.cubemaster|-n cubesandbox delete deploy cubemaster
 kubernetes_deployment.cube_api|-n cubesandbox delete deploy cube-api
+kubernetes_deployment.cube_ops|-n cubesandbox delete deploy cube-ops
 kubernetes_deployment.cube_lifecycle_manager|-n cubesandbox delete deploy cube-lifecycle-manager
 kubernetes_deployment.cube_proxy|-n cubesandbox delete deploy cube-proxy
 kubernetes_deployment.cube_webui|-n cubesandbox delete deploy cube-webui
@@ -4898,13 +4908,13 @@ EOF
 # ---------------------------------------------------------------
 # phase7_health_check — synchronously verify the cluster components are healthy
 #   after the TKE addons have been deployed: wait for the cube-master, cube-api,
-#   cube-lifecycle-manager, cube-proxy and cube-webui Deployments to roll out, then probe the HTTP
+#   cube-ops, cube-lifecycle-manager, cube-proxy and cube-webui Deployments to roll out, then probe the HTTP
 #   health endpoints of cube-master and cube-api through their CLBs (reachable
 #   from the jumpserver). Returns 0 only when every component is healthy, so the
 #   orchestrator can fail-fast.
 # ---------------------------------------------------------------
 phase7_health_check() {
-	banner "Step: Health check — cube-master / cube-api / cube-lifecycle-manager / cube-proxy / cube-webui"
+	banner "Step: Health check — cube-master / cube-api / cube-ops / cube-lifecycle-manager / cube-proxy / cube-webui"
 
 	local ns="cubesandbox"
 	# The namespace must be present (created by the addons apply in Step 6).
@@ -4925,7 +4935,7 @@ phase7_health_check() {
 	# ---- 1) Wait for each Deployment to roll out (synchronous, fail-fast) ---
 	#     On failure, dump pod state + events + container logs to explain why.
 	local dep out ready ok=1
-	for dep in cubemaster cube-api cube-lifecycle-manager cube-proxy cube-webui; do
+	for dep in cubemaster cube-api cube-ops cube-lifecycle-manager cube-proxy cube-webui; do
 		echo -e "  ${CYAN}▶ deployment/${dep}: waiting for rollout (timeout 300s)...${NC}"
 		out=$(_js_kubectl -n "${ns}" rollout status deploy/"${dep}" --timeout=300s 2>&1)
 		if echo "$out" | grep -qi "successfully rolled out"; then
@@ -5420,6 +5430,8 @@ main() {
 		kubernetes_service.cubemaster[0]
 		kubernetes_deployment.cube_api[0]
 		kubernetes_service.cube_api[0]
+		kubernetes_deployment.cube_ops[0]
+		kubernetes_service.cube_ops[0]
 		kubernetes_secret.cube_lifecycle_manager_conf[0]
 		kubernetes_deployment.cube_lifecycle_manager[0]
 		kubernetes_service.cube_lifecycle_manager[0]
@@ -5446,7 +5458,7 @@ main() {
 	# Restart the Deployments so any ConfigMap changes take effect.
 	if _js_kubectl get ns cubesandbox 2>/dev/null | grep -q Active; then
 		echo -e "  ${CYAN}Restarting Deployments...${NC}"
-		for _dep in cubemaster cube-api cube-lifecycle-manager cube-proxy cube-webui; do
+		for _dep in cubemaster cube-api cube-ops cube-lifecycle-manager cube-proxy cube-webui; do
 			_js_kubectl -n cubesandbox rollout restart deploy ${_dep} 2>/dev/null || true
 		done
 	fi
