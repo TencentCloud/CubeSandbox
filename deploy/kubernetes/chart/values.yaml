@@ -26,90 +26,90 @@ images:
   # Bootstrap DaemonSet init: installs/configures PVM host kernel and may reboot the host.
   pvmHostBootstrap:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-pvm-host-bootstrap
-    tag: v0.6.0-rc1
+    tag: v0.6.0-rc3
     pullPolicy: IfNotPresent
 
   # Bootstrap DaemonSet init: validates KVM/XFS, prepares host directories, checks CubeMaster reachability.
   nodeInit:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-node-init
-    tag: v0.6.0-rc1
+    tag: v0.6.0-rc3
     pullPolicy: IfNotPresent
 
   # Big Pod wait-node-prep initContainer + bootstrap write-ready/hold.
   waitNodePrep:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-wait-node-prep
-    tag: v0.6.0-rc1
+    tag: v0.6.0-rc3
     pullPolicy: IfNotPresent
 
   # Big Pod per-component runtime images.
   cubelet:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cubelet
-    tag: v0.6.0-rc1
+    tag: v0.6.0-rc3
     pullPolicy: IfNotPresent
 
   networkAgent:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/network-agent
-    tag: v0.6.0-rc1
+    tag: v0.6.0-rc3
     pullPolicy: IfNotPresent
 
   cubeShim:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-shim
-    tag: v0.6.0-rc1
+    tag: v0.6.0-rc3
     pullPolicy: IfNotPresent
 
   cubeKernel:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-kernel
-    tag: v0.6.0-rc1
+    tag: v0.6.0-rc3
     pullPolicy: IfNotPresent
 
   cubeGuest:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-guest
-    tag: v0.6.0-rc1
+    tag: v0.6.0-rc3
     pullPolicy: IfNotPresent
 
   master:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-master
-    tag: v0.6.0-rc1
+    tag: v0.6.0-rc3
     pullPolicy: IfNotPresent
 
   api:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-api
-    tag: v0.6.0-rc1
+    tag: v0.6.0-rc3
     pullPolicy: IfNotPresent
 
   ops:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-ops
-    tag: v0.6.0-rc1
+    tag: v0.6.0-rc3
     pullPolicy: IfNotPresent
 
   cubemastercli:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cubemastercli
-    tag: v0.6.0-rc1
+    tag: v0.6.0-rc3
     pullPolicy: IfNotPresent
 
   proxy:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-proxy
-    tag: v0.6.0-rc1
+    tag: v0.6.0-rc3
     pullPolicy: IfNotPresent
 
   lifecycleManager:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager
-    tag: v0.6.0-rc1
+    tag: v0.6.0-rc3
     pullPolicy: IfNotPresent
 
   cubeEgress:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-egress
-    tag: v0.6.0-rc1
+    tag: v0.6.0-rc3
     pullPolicy: IfNotPresent
 
   cubeEgressNet:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-egress-net
-    tag: v0.6.0-rc1
+    tag: v0.6.0-rc3
     pullPolicy: IfNotPresent
 
   webui:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-webui
-    tag: v0.6.0-rc1
+    tag: v0.6.0-rc3
     pullPolicy: IfNotPresent
 
   # Used by the post-install Job that merges *.cubeProxy.domain into cluster CoreDNS.

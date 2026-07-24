@@ -5,7 +5,7 @@ This directory contains image build definitions used by the Kubernetes/TKE chart
 ## Build entrypoint
 
 ```bash
-PUSH=1 REGISTRY=cube-sandbox-int.tencentcloudcr.com/cube-sandbox IMAGE_TAG=v0.6.0-rc1 ./deploy/kubernetes/images/build-cube-images.sh
+PUSH=1 REGISTRY=cube-sandbox-int.tencentcloudcr.com/cube-sandbox IMAGE_TAG=v0.6.0-rc3 ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
 Before a real release, run `scripts/bump-image.sh vX.Y.Z` so hard-coded tags
@@ -18,7 +18,7 @@ Use `NO_CACHE=1` when every Docker image layer must be rebuilt instead of
 using Docker's build cache:
 
 ```bash
-NO_CACHE=1 PUSH=1 REGISTRY=cube-sandbox-int.tencentcloudcr.com/cube-sandbox IMAGE_TAG=v0.6.0-rc1 ./deploy/kubernetes/images/build-cube-images.sh
+NO_CACHE=1 PUSH=1 REGISTRY=cube-sandbox-int.tencentcloudcr.com/cube-sandbox IMAGE_TAG=v0.6.0-rc3 ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
 The script defaults its temporary `BUILD_ROOT` to
@@ -68,7 +68,7 @@ CUBE_KERNEL_VMLINUX=/path/to/vmlinux \
 ONE_CLICK_ARCH=arm64 CUBE_KERNEL_VMLINUX=/path/to/vmlinux \
   IMAGE_TAG=dev ./deploy/kubernetes/images/build-cube-images.sh cube-kernel
 
-IMAGE_TAG=v0.6.0-rc1 ./deploy/kubernetes/images/build-cube-images.sh cube-kernel
+IMAGE_TAG=v0.6.0-rc3 ./deploy/kubernetes/images/build-cube-images.sh cube-kernel
 ```
 
 `cube-guest` does not use the one-click package. It stages guest rootfs from:
@@ -83,7 +83,7 @@ IMAGE_TAG=v0.6.0-rc1 ./deploy/kubernetes/images/build-cube-images.sh cube-kernel
 CUBE_GUEST_IMAGE_DIR=/path/to/cube-image IMAGE_TAG=dev \
   ./deploy/kubernetes/images/build-cube-images.sh cube-guest
 
-IMAGE_TAG=v0.6.0-rc1 ./deploy/kubernetes/images/build-cube-images.sh cube-guest
+IMAGE_TAG=v0.6.0-rc3 ./deploy/kubernetes/images/build-cube-images.sh cube-guest
 ```
 
 ## Pinning source to a release tag
@@ -144,7 +144,7 @@ entrypoint into it:
 
 ```bash
 CUBE_NODE_BASE_IMAGE=ccr.ccs.tencentyun.com/pavleli/cube-node:v0.4.0-cubevsfix-20260627 \
-  PUSH=1 REGISTRY=cube-sandbox-int.tencentcloudcr.com/cube-sandbox IMAGE_TAG=v0.6.0-rc1 \
+  PUSH=1 REGISTRY=cube-sandbox-int.tencentcloudcr.com/cube-sandbox IMAGE_TAG=v0.6.0-rc3 \
   ./deploy/kubernetes/images/build-cube-images.sh
 ```
 

@@ -27,10 +27,10 @@ require_cmd docker
 #   3. default    → int.tencentcloudcr.com (overseas/international)
 #
 # Production-pushed by CubeEgress/Makefile's `make push` to BOTH repos
-# under the :v0.6.0-rc1 tag, so either default resolves to the same digest
+# under the :v0.6.0-rc3 tag, so either default resolves to the same digest
 # the operator most recently published.
-CUBE_EGRESS_IMAGE_INT_DEFAULT="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-egress:v0.6.0-rc1"
-CUBE_EGRESS_IMAGE_CN_DEFAULT="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-egress:v0.6.0-rc1"
+CUBE_EGRESS_IMAGE_INT_DEFAULT="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-egress:v0.6.0-rc3"
+CUBE_EGRESS_IMAGE_CN_DEFAULT="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-egress:v0.6.0-rc3"
 if [[ -n "${CUBE_SANDBOX_CUBE_EGRESS_IMAGE:-}" ]]; then
   CUBE_EGRESS_IMAGE="${CUBE_SANDBOX_CUBE_EGRESS_IMAGE}"
 elif [[ "${MIRROR:-}" == "cn" ]]; then

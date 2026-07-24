@@ -183,9 +183,9 @@ Examples:
   SOURCE_REF="" IMAGE_TAG=dev $0 cube-shim
   CUBE_KERNEL_VMLINUX=/path/vmlinux CUBE_KERNEL_PVM_VMLINUX=/path/vmlinux-pvm \\
     IMAGE_TAG=dev $0 cube-kernel
-  IMAGE_TAG=v0.6.0-rc1 $0 cube-kernel
+  IMAGE_TAG=v0.6.0-rc3 $0 cube-kernel
   CUBE_GUEST_IMAGE_DIR=/path/to/cube-image IMAGE_TAG=dev $0 cube-guest
-  IMAGE_TAG=v0.6.0-rc1 $0 cube-guest
+  IMAGE_TAG=v0.6.0-rc3 $0 cube-guest
   SOURCE_REF="" IMAGE_TAG=dev $0 cube-api
   SOURCE_REF="" IMAGE_TAG=dev $0 cube-ops
 

@@ -424,7 +424,7 @@ PVC/PV 是否删除取决于实际 StorageClass 的 `reclaimPolicy`（TKE 的 `c
 
 ```bash
 ONE_CLICK_ARCH=arm64 \
-PUSH=1 REGISTRY=<your-registry> IMAGE_TAG=v0.6.0-rc1 \
+PUSH=1 REGISTRY=<your-registry> IMAGE_TAG=v0.6.0-rc3 \
 ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
