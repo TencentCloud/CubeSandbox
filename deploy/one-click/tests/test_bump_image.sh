@@ -65,23 +65,23 @@ check "${CURRENT}" || fail "--check ${CURRENT} should pass on the seeded tree"
 if check v9.9.9; then fail "--check v9.9.9 should fail when files are at ${CURRENT}"; fi
 
 # 2. bump rewrites every format; afterwards the new version passes and the old fails.
-bump v0.6.0 || fail "bump v0.6.0 failed"
-check v0.6.0 || fail "--check v0.6.0 should pass after bumping"
-if check "${CURRENT}"; then fail "--check ${CURRENT} should fail after bumping to v0.6.0"; fi
+bump v0.7.0 || fail "bump v0.7.0 failed"
+check v0.7.0 || fail "--check v0.7.0 should pass after bumping"
+if check "${CURRENT}"; then fail "--check ${CURRENT} should fail after bumping to v0.7.0"; fi
 
 # 2b. chart values.yaml component tags move; third-party tags stay put.
 component_tags="$(grep -E '^\s+tag:\s+v[0-9]' "${WORK}/deploy/kubernetes/chart/values.yaml" || true)"
 [[ -n "${component_tags}" ]] || fail "values.yaml should still have component tag: v… lines after bump"
 while IFS= read -r line; do
 	[[ -z "${line}" ]] && continue
-	echo "${line}" | grep -qE "tag:\s+v0\.6\.0$" || fail "values.yaml component tag not bumped: ${line}"
+	echo "${line}" | grep -qE "tag:\s+v0\.7\.0$" || fail "values.yaml component tag not bumped: ${line}"
 done <<<"${component_tags}"
 grep -qE 'tag:\s+"1\.28\.15"' "${WORK}/deploy/kubernetes/chart/values.yaml" \
 	|| fail "values.yaml kubectl third-party tag must remain \"1.28.15\""
 
 # 3. reverse scan catches a stray tag in a NEW file that is not in the bump list.
 (cd "${WORK}" && printf 'IMAGE_TAG ?= v1.2.3\n' >stray.mk && git add -N stray.mk)
-if check v0.6.0; then fail "reverse scan should catch a stray tag in a new file"; fi
+if check v0.7.0; then fail "reverse scan should catch a stray tag in a new file"; fi
 (cd "${WORK}" && rm -f stray.mk && git reset -q -- stray.mk 2>/dev/null || true)
 
 # 4. a non-image v-semver is left untouched by bump (variables.tf line guard).
