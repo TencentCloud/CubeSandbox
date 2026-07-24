@@ -222,12 +222,32 @@ tolerations:
 {{- end -}}
 
 {{/*
+Upstream for the WebUI terminal WebSocket route
+(/cubeapi/v1/sandboxes/<id>/terminal/ws). The generic /cubeapi/v1/ SDK
+traffic goes to CubeOps, but CubeOps has no terminal route — the terminal
+WebSocket must reach CubeAPI directly. Empty when CubeAPI is not deployed
+(controlPlane.api.enabled=false), in which case the WebUI nginx config omits
+the terminal location and the web terminal is unavailable.
+*/}}
+{{- define "cube.webuiApiUpstream" -}}
+{{- $override := dig "apiUpstream" "" (default dict .Values.webui) | trimSuffix "/" -}}
+{{- if $override -}}
+{{- $override -}}
+{{- else if and .Values.controlPlane.enabled .Values.controlPlane.api.enabled -}}
+{{- include "cube.apiEndpoint" . -}}
+{{- else -}}
+{{- "" -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 WebUI OpenResty config: static SPA + /opsapi|/cubeapi/v1/SDK → CubeOps, optional /sandbox/ → CubeProxy.
 Rendered into cube-webui-config and checksum'd so edits roll the Deployment.
 */}}
 {{- define "cube.webuiNginxConf" -}}
 {{- $opsUpstream := include "cube.opsUpstream" . -}}
 {{- $proxyUpstream := include "cube.webuiProxyUpstream" . -}}
+{{- $apiUpstream := include "cube.webuiApiUpstream" . -}}
 worker_processes auto;
 
 events {
@@ -289,6 +309,33 @@ http {
 
             proxy_pass {{ $opsUpstream }}/api/;
         }
+
+        {{- if $apiUpstream }}
+        # Web terminal WebSocket → CubeAPI direct. The generic /cubeapi/v1/
+        # location below rewrites SDK calls to CubeOps, which has no terminal
+        # route, so the terminal path needs this more specific regex location
+        # (regex beats prefix match) that keeps the URI and upgrades the
+        # connection. CubeAPI enforces its own idle timeout
+        # (TERMINAL_IDLE_TIMEOUT_SECS, default 1800s); proxy_read_timeout must
+        # stay comfortably above it, hence 7206s like /sandbox/.
+        location ~ ^/cubeapi/v1/sandboxes/[^/]+/terminal/ws$ {
+            proxy_http_version 1.1;
+            proxy_set_header Host $http_host;
+            proxy_set_header X-Real-IP $remote_addr;
+            # Overwrite (not append) X-Forwarded-For: CubeAPI records the
+            # first XFF value in the terminal audit log, and
+            # $proxy_add_x_forwarded_for would let a client prepend a
+            # spoofed address to its own header.
+            proxy_set_header X-Forwarded-For $remote_addr;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+            proxy_read_timeout 7206s;
+            proxy_send_timeout 7206s;
+
+            proxy_pass {{ $apiUpstream }};
+        }
+        {{- end }}
 
         location /cubeapi/v1/ {
             proxy_http_version 1.1;

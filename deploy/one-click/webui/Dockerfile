@@ -61,24 +61,28 @@ RUN sed -i 's#https\?://dl-cdn.alpinelinux.org#http://mirrors.tencent.com#g' /et
 #   WEB_UI_UPSTREAM        → cubeops    (the /health backend, port 3010)
 #   SANDBOX_PROXY_UPSTREAM → cube-proxy (the /sandbox/ backend, port 80)
 #   CUBE_OPS_UPSTREAM      → cubeops    (the /opsapi/ + SDK backend, port 3010)
+#   CUBE_API_UPSTREAM      → cube-api   (the terminal WebSocket backend, port 3000)
 ARG WEB_UI_UPSTREAM=http://host.docker.internal:3010
 ARG SANDBOX_PROXY_UPSTREAM=http://host.docker.internal:80
 ARG CUBE_OPS_UPSTREAM=http://host.docker.internal:3010
+ARG CUBE_API_UPSTREAM=http://host.docker.internal:3000
 
 COPY --from=builder /app/dist /usr/share/nginx/html
 COPY deploy/one-click/webui/nginx.conf /usr/local/openresty/nginx/conf/nginx.conf
 
 # Escape sed-significant characters (& # \) so an upstream URL passed via
-# --build-arg cannot corrupt the sed substitution. nginx.conf carries TWO
-# placeholders (cube-api and cube-proxy); both MUST be substituted, otherwise
-# OpenResty refuses to start with "invalid URL prefix". The grep guard fails the
-# build loudly if any placeholder is left behind.
+# --build-arg cannot corrupt the sed substitution. nginx.conf carries upstream
+# placeholders; all MUST be substituted, otherwise OpenResty refuses to start
+# with "invalid URL prefix". The grep guard fails the build loudly if any
+# placeholder is left behind.
 RUN upstream_escaped=$(printf '%s' "${WEB_UI_UPSTREAM}" | sed -e 's/[&#\\]/\\&/g') \
     && sandbox_upstream_escaped=$(printf '%s' "${SANDBOX_PROXY_UPSTREAM}" | sed -e 's/[&#\\]/\\&/g') \
     && cube_ops_upstream_escaped=$(printf '%s' "${CUBE_OPS_UPSTREAM}" | sed -e 's/[&#\\]/\\&/g') \
+    && cube_api_upstream_escaped=$(printf '%s' "${CUBE_API_UPSTREAM}" | sed -e 's/[&#\\]/\\&/g') \
     && sed -i "s#__WEB_UI_UPSTREAM__#${upstream_escaped}#g" /usr/local/openresty/nginx/conf/nginx.conf \
     && sed -i "s#__SANDBOX_PROXY_UPSTREAM__#${sandbox_upstream_escaped}#g" /usr/local/openresty/nginx/conf/nginx.conf \
     && sed -i "s#__CUBE_OPS_UPSTREAM__#${cube_ops_upstream_escaped}#g" /usr/local/openresty/nginx/conf/nginx.conf \
+    && sed -i "s#__CUBE_API_UPSTREAM__#${cube_api_upstream_escaped}#g" /usr/local/openresty/nginx/conf/nginx.conf \
     && if grep -Eq '__[A-Z_]+__' /usr/local/openresty/nginx/conf/nginx.conf; then \
            echo "FATAL: unsubstituted placeholder remains in nginx.conf" >&2; exit 1; \
        fi

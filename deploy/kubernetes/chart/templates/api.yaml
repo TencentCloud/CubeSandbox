@@ -59,6 +59,23 @@ spec:
               value: {{ .Values.mysql.database | quote }}
             - name: CUBE_API_SANDBOX_DOMAIN
               value: {{ .Values.controlPlane.api.sandboxDomain | quote }}
+            {{- $authCallback := .Values.controlPlane.api.authCallbackUrl | default "off" }}
+            {{- if and (ne $authCallback "off") (or (ne $authCallback "auto") (eq (include "cube.opsEnabled" .) "true")) }}
+            # Unified auth callback, opt-in via controlPlane.api.authCallbackUrl.
+            # "auto" points at the co-deployed CubeOps JWT verifier; a custom
+            # URL is used verbatim. "auto" with cubeOps disabled emits
+            # nothing (CubeAPI then runs open, and the terminal stays
+            # fail-closed).
+            - name: AUTH_CALLBACK_URL
+              value: {{ ternary $authCallback (printf "%s/api/v1/auth/verify" (include "cube.opsUpstream" .)) (ne $authCallback "auto") | quote }}
+            {{- end }}
+            {{- if eq (include "cube.proxyEnabled" .) "true" }}
+            # Web terminal reaches envd inside sandboxes through CubeProxy
+            # (Host-header routing); the default http://127.0.0.1 only works
+            # for one-click where CubeProxy shares the host network.
+            - name: SANDBOX_PROXY_URL
+              value: {{ printf "http://%s:%v" (include "cube.proxyServiceFQDN" .) .Values.cubeProxy.ports.http.containerPort | quote }}
+            {{- end }}
             {{- with .Values.controlPlane.api.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

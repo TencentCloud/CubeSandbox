@@ -28,6 +28,8 @@ WEB_UI_UPSTREAM="${WEB_UI_UPSTREAM:-http://host.docker.internal:3010}"
 SANDBOX_PROXY_UPSTREAM="${SANDBOX_PROXY_UPSTREAM:-http://host.docker.internal:80}"
 # CubeOps (admin/ops API, port 3010) for /opsapi/ and SDK path forwarding.
 CUBE_OPS_UPSTREAM="${CUBE_OPS_UPSTREAM:-http://host.docker.internal:3010}"
+# CubeAPI (E2B SDK + web terminal WebSocket, port 3000) for the terminal route.
+CUBE_API_UPSTREAM="${CUBE_API_UPSTREAM:-http://host.docker.internal:3000}"
 COMPOSE_DETACH="${ONE_CLICK_COMPOSE_DETACH:-1}"
 PREPARE_ONLY="${ONE_CLICK_PREPARE_ONLY:-0}"
 
@@ -73,6 +75,7 @@ WEB_UI_HOST_PORT_ESCAPED="$(escape_sed "${WEB_UI_HOST_PORT}" '#')"
 WEB_UI_UPSTREAM_ESCAPED="$(escape_sed "${WEB_UI_UPSTREAM}" '#')"
 SANDBOX_PROXY_UPSTREAM_ESCAPED="$(escape_sed "${SANDBOX_PROXY_UPSTREAM}" '#')"
 CUBE_OPS_UPSTREAM_ESCAPED="$(escape_sed "${CUBE_OPS_UPSTREAM}" '#')"
+CUBE_API_UPSTREAM_ESCAPED="$(escape_sed "${CUBE_API_UPSTREAM}" '#')"
 WEB_UI_IMAGE_ESCAPED="$(escape_sed "${WEB_UI_IMAGE}" '#')"
 WEB_UI_CONTAINER_NAME_ESCAPED="$(escape_sed "${WEB_UI_CONTAINER_NAME}" '#')"
 WEB_UI_DIST_DIR_ESCAPED="$(escape_sed "${WEB_UI_DIST_DIR}" '#')"
@@ -84,7 +87,8 @@ render_template_atomic \
   -e "s#__WEB_UI_HOST_PORT__#${WEB_UI_HOST_PORT_ESCAPED}#g" \
   -e "s#__WEB_UI_UPSTREAM__#${WEB_UI_UPSTREAM_ESCAPED}#g" \
   -e "s#__SANDBOX_PROXY_UPSTREAM__#${SANDBOX_PROXY_UPSTREAM_ESCAPED}#g" \
-  -e "s#__CUBE_OPS_UPSTREAM__#${CUBE_OPS_UPSTREAM_ESCAPED}#g"
+  -e "s#__CUBE_OPS_UPSTREAM__#${CUBE_OPS_UPSTREAM_ESCAPED}#g" \
+  -e "s#__CUBE_API_UPSTREAM__#${CUBE_API_UPSTREAM_ESCAPED}#g"
 
 render_template_atomic \
   "${COMPOSE_TEMPLATE}" \
@@ -127,10 +131,14 @@ wait_for_http "http://${cubemaster_addr}/notify/health" 30 1 \
 #   /sandboxes, /templates, /snapshots → CubeOps :3010 (JWT auth, SDK proxy
 #                        that calls CubeMaster HTTP REST directly, NOT CubeAPI)
 #   /cubeapi/v1/*       → CubeOps :3010 (rewrite to /api/v1/sdk/*)
+#   /cubeapi/v1/sandboxes/*/terminal/ws → CubeAPI :3000 (WebSocket terminal;
+#                        CubeOps has no terminal route, so this more specific
+#                        regex location bypasses the SDK rewrite above)
 #   /health             → CubeOps :3010 (health check, no auth)
 #   /sandbox/*          → CubeProxy :80 (sandbox traffic)
-# CubeAPI (:3000) serves external E2B SDK clients only; WebUI does not depend
-# on it for any operation, including /health.
+# Apart from the terminal WebSocket, CubeAPI (:3000) serves external E2B SDK
+# clients only; WebUI does not depend on it for anything else, including
+# /health.
 cube_ops_bind="${CUBE_OPS_BIND:-0.0.0.0:3010}"
 cube_ops_port="${cube_ops_bind##*:}"
 wait_for_http "http://127.0.0.1:${cube_ops_port}/health" 30 1 \

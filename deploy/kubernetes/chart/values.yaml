@@ -267,6 +267,13 @@ controlPlane:
     env: []
     bind: "0.0.0.0:3000"
     sandboxDomain: "cube.app"
+    # Auth callback for CubeAPI's unified auth (all routes, incl. the web
+    # terminal). "off" (default) runs CubeAPI without authentication — the
+    # web terminal then fails closed unless TERMINAL_ALLOW_UNAUTHENTICATED=
+    # true is set via env. "auto" wires the co-deployed CubeOps JWT verifier
+    # (POST /api/v1/auth/verify) when cubeOps is enabled; any other value is
+    # used verbatim as the callback URL.
+    authCallbackUrl: "off"
     service:
       type: ClusterIP
       port: 3000
@@ -327,6 +334,11 @@ webui:
   # Optional overrides (empty = chart-managed Service FQDNs).
   opsUpstream: ""
   proxyUpstream: ""
+  # CubeAPI upstream for the web terminal WebSocket route
+  # (/cubeapi/v1/sandboxes/*/terminal/ws). Empty = chart-managed cube-api
+  # Service; the terminal location is omitted entirely when
+  # controlPlane.api.enabled=false.
+  apiUpstream: ""
   resources: {}
 
 cubeOps:

@@ -22,6 +22,11 @@ export CUBE_API_SANDBOX_DOMAIN="${CUBE_API_SANDBOX_DOMAIN:-cube.app}"
 if [[ -n "${CUBE_MASTER_ADDR:-}" ]]; then
   export CUBE_MASTER_ADDR
 fi
+# Auth callback is opt-in. To authenticate CubeAPI (incl. the web terminal)
+# with the WebUI login JWT, set e.g.
+#   AUTH_CALLBACK_URL=http://127.0.0.1:3010/api/v1/auth/verify
+# Without an auth backend the web terminal fails closed; set
+# TERMINAL_ALLOW_UNAUTHENTICATED=true to allow unauthenticated terminals.
 if [[ -n "${AUTH_CALLBACK_URL:-}" ]]; then
   export AUTH_CALLBACK_URL
 fi

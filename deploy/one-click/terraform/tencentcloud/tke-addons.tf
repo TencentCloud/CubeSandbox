@@ -1263,23 +1263,28 @@ resource "kubernetes_config_map" "cube_webui_nginx_conf" {
     # (VPC) network via their Service ClusterIPs instead of the public CLB IPs:
     #   __WEB_UI_UPSTREAM__        → cube-ops   (the /health backend, port 3010)
     #   __SANDBOX_PROXY_UPSTREAM__ → cube-proxy (the /sandbox/ backend, port 80)
+    #   __CUBE_API_UPSTREAM__      → cube-api   (terminal WebSocket, port 3000)
     #   __CUBE_OPS_UPSTREAM__      → cube-ops   (the /opsapi/ + SDK backend, port 3010)
     "nginx.conf" = replace(
       replace(
         replace(
-          local.webui_nginx_conf,
-          "__WEB_UI_UPSTREAM__",
-          "http://${kubernetes_service.cube_ops[0].spec[0].cluster_ip}:3010"
+          replace(
+            local.webui_nginx_conf,
+            "__WEB_UI_UPSTREAM__",
+            "http://${kubernetes_service.cube_ops[0].spec[0].cluster_ip}:3010"
+          ),
+          "__SANDBOX_PROXY_UPSTREAM__",
+          "http://${kubernetes_service.cube_proxy[0].spec[0].cluster_ip}"
         ),
-        "__SANDBOX_PROXY_UPSTREAM__",
-        "http://${kubernetes_service.cube_proxy[0].spec[0].cluster_ip}"
+        "__CUBE_API_UPSTREAM__",
+        "http://${kubernetes_service.cube_api[0].spec[0].cluster_ip}:3000"
       ),
       "__CUBE_OPS_UPSTREAM__",
       "http://${kubernetes_service.cube_ops[0].spec[0].cluster_ip}:3010"
     )
   }
 
-  depends_on = [kubernetes_service.cube_ops, kubernetes_service.cube_proxy]
+  depends_on = [kubernetes_service.cube_api, kubernetes_service.cube_ops, kubernetes_service.cube_proxy]
 }
 
 resource "kubernetes_deployment" "cube_webui" {
