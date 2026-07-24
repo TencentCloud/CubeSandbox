@@ -3,6 +3,13 @@ run-name: Build vmlinux ${{ inputs.kernel_arch || 'all' }}
 
 on:
   push:
+    # Restrict to branch pushes + release tags (v*). Without branches/tags,
+    # any tag push (e.g. python-sdk-v*, go-sdk-v*) would also trigger, and
+    # path filters are not evaluated for tag pushes.
+    branches:
+      - '**'
+    tags:
+      - 'v*'
     paths:
       - 'configs/kernel-oc9.aarch64.config'
       - 'configs/kernel-oc9.x86_64.config'
