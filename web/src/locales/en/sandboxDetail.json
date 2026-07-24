@@ -45,6 +45,29 @@
     "pause": "Pause",
     "kill": "Kill"
   },
+  "terminal": {
+    "open": "Open terminal",
+    "container": "Terminal container",
+    "requiresRunning": "Terminal is available only while the sandbox is running.",
+    "title": "Terminal · {{id}}",
+    "connecting": "Opening terminal session...",
+    "connected": "Connected to shell process {{pid}}.",
+    "closed": "Terminal session closed (exit {{code}}).",
+    "error": "Terminal error: {{message}}",
+    "socketError": "Terminal connection failed.",
+    "pid": "PID {{pid}}",
+    "noPid": "Waiting for shell",
+    "reconnect": "Reconnect",
+    "fullscreen": "Toggle fullscreen",
+    "close": "Close",
+    "state": {
+      "idle": "Idle",
+      "connecting": "Connecting",
+      "connected": "Connected",
+      "closed": "Closed",
+      "error": "Error"
+    }
+  },
   "errors": {
     "unknown": "Unknown error",
     "actionFailed": "Action failed: {{message}}",

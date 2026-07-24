@@ -45,6 +45,29 @@
     "pause": "暂停",
     "kill": "终止"
   },
+  "terminal": {
+    "open": "打开终端",
+    "container": "终端容器",
+    "requiresRunning": "仅运行中的沙箱可以打开终端。",
+    "title": "终端 · {{id}}",
+    "connecting": "正在打开终端会话...",
+    "connected": "已连接到 shell 进程 {{pid}}。",
+    "closed": "终端会话已关闭 (退出码 {{code}})。",
+    "error": "终端错误: {{message}}",
+    "socketError": "终端连接失败。",
+    "pid": "PID {{pid}}",
+    "noPid": "等待 shell",
+    "reconnect": "重新连接",
+    "fullscreen": "切换全屏",
+    "close": "关闭",
+    "state": {
+      "idle": "空闲",
+      "connecting": "连接中",
+      "connected": "已连接",
+      "closed": "已关闭",
+      "error": "错误"
+    }
+  },
   "errors": {
     "unknown": "未知错误",
     "actionFailed": "操作失败: {{message}}",

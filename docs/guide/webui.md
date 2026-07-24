@@ -111,6 +111,40 @@ The Command Palette's ⌘K input box and the topbar have quick toggles for the s
 **Why a separate Dashboard, not just curl?**
 Most operations (create-from-image, version matrix, node triage) are easier to discover and visualize in a UI. For automation, the Dashboard is just a thin client — every page is a call to `/cubeapi/v1/*`, which is the same E2B-compatible REST API you can hit with `curl` or the E2B SDK.
 
+## Web Terminal
+
+Running sandboxes expose an **Open terminal** action from the sandbox list and
+detail page. The Dashboard first asks CubeOps for a short-lived terminal grant,
+then opens a same-origin WebSocket to the CubeOps terminal gateway. CubeOps
+validates the sandbox state and bridges the session to the sandbox's
+interactive PTY API.
+
+Requirements:
+
+- The sandbox must be in the `running` state. Paused or ended sandboxes cannot
+  open a shell until they are resumed or recreated.
+- The browser only needs the Dashboard origin, for example
+  `http://<control-node-ip>:12088`. Do not expose CubeOps `:3010` directly.
+- The WebSocket path is `/sandboxes/<sandbox-id>/terminal` and must be proxied
+  with `Upgrade` / `Connection` headers when you place another reverse proxy in
+  front of the Dashboard.
+- Authenticated deployments never put the access token in the WebSocket URL.
+  The browser uses its normal JWT session to request a 60-second, single-use
+  grant from CubeOps, then sends that grant as a WebSocket subprotocol.
+- Terminal grants are stored in CubeOps memory. Run a single CubeOps replica or
+  configure sticky routing for deployments with multiple replicas.
+- CubeOps writes audit logs for grant creation, session open, close, and errors
+  with operator, session ID, sandbox ID, and container ID. Terminal input and
+  output are not logged.
+
+Basic verification:
+
+1. Create a sandbox from a `READY` template.
+2. Open **Sandboxes**, choose a running sandbox, and click **Open terminal**.
+3. Run `pwd`, `ls`, or `echo hello` and confirm output appears in the terminal.
+4. Resize the terminal dialog and confirm the shell layout follows the new size.
+5. Pause the sandbox and confirm the terminal action is disabled.
+
 **Does the Dashboard store my data?**
 It stores only one thing in your browser: the API key under `localStorage.cube.apiKey`. All other state (templates, sandboxes, logs) lives on the cluster.
 

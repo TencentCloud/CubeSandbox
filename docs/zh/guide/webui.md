@@ -105,6 +105,36 @@ Dashboard 对键盘很友好。最常用的三个：
 **为什么还要单独做个 Dashboard，不能直接用 curl 吗？**
 绝大多数操作（从镜像创建模板、看版本矩阵、排查节点）在 UI 里更容易发现和理解。Dashboard 本质上只是 CubeAPI 的一个轻量客户端——每个页面背后都是一次 `/cubeapi/v1/*` 请求，这跟 E2B SDK、`curl` 调的是同一个 E2B 兼容 REST API。
 
+## Web Terminal
+
+运行中的沙箱会在列表页和详情页显示 **打开终端** 操作。浏览器会连接
+CubeOps 申请一个短时终端 grant，然后通过同源 WebSocket 连接 CubeOps
+终端网关。CubeOps 会校验沙箱状态，再把会话桥接到沙箱内的交互式 PTY
+API。
+
+使用条件：
+
+- 沙箱必须处于 `running` 状态。已暂停或已结束的沙箱需要先恢复或重新创建。
+- 浏览器只需要访问 Dashboard 同源地址，例如
+  `http://<控制节点IP>:12088`。不要把 CubeOps 的 `:3010` 直接暴露到公网。
+- WebSocket 路径是 `/sandboxes/<sandbox-id>/terminal`。如果你在 Dashboard
+  前面再加一层反向代理，需要转发 `Upgrade` / `Connection` 头。
+- 开启鉴权时，access token 不会出现在 WebSocket URL 里。浏览器先用正常
+  JWT 会话向 CubeOps 申请 60 秒有效、单次使用的 grant，再把 grant 作为
+  WebSocket subprotocol 发送。
+- 终端 grant 保存在 CubeOps 进程内存里。多副本部署时请使用单个 CubeOps
+  replica，或配置 sticky routing。
+- CubeOps 会记录 grant 创建、会话打开、关闭和错误的审计日志，字段包括
+  operator、session ID、sandbox ID、container ID；不会记录终端输入输出。
+
+基础验证：
+
+1. 使用 `READY` 模板创建一个沙箱。
+2. 打开 **Sandboxes**，选择运行中的沙箱并点击 **打开终端**。
+3. 执行 `pwd`、`ls` 或 `echo hello`，确认终端正常显示输出。
+4. 调整终端弹窗大小，确认 shell 布局会随窗口尺寸同步变化。
+5. 暂停沙箱，确认终端入口被禁用。
+
 **Dashboard 会保存我的数据吗？**
 只会在浏览器里保存一样东西：`localStorage.cube.apiKey` 里的 API Key。其他所有状态（模板、沙箱、日志）都在集群上。
 

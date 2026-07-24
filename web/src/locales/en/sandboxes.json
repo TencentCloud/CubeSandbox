@@ -25,7 +25,9 @@
   "actions": {
     "resume": "Resume",
     "pause": "Pause",
-    "kill": "Kill"
+    "kill": "Kill",
+    "terminal": "Open terminal",
+    "terminalDisabled": "Terminal is available only while the sandbox is running."
   },
   "errors": {
     "unknown": "Unknown error",

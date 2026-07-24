@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Tencent. All rights reserved.
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useParams, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -12,10 +12,11 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 
 import { Skeleton } from '@/components/ui/skeleton';
-import { ArrowLeft, Pause, Play, Trash2, RefreshCw } from 'lucide-react';
+import { ArrowLeft, Pause, Play, Trash2, RefreshCw, Terminal } from 'lucide-react';
 import { cn, formatBytes, formatRelative } from '@/lib/utils';
 import { formatSandboxActionError } from '@/lib/sandboxActionError';
 import { SandboxActionErrorBanner } from '@/components/SandboxActionErrorBanner';
+import { SandboxTerminalDialog } from '@/components/SandboxTerminalDialog';
 
 // ── Log level colors ────────────────────────────────────────────────────────
 const LEVEL_CLASS: Record<string, string> = {
@@ -77,6 +78,8 @@ export default function SandboxDetailPage() {
   }, [logs.data]);
 
   const [actionError, setActionError] = useState<string | null>(null);
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  const [terminalContainerID, setTerminalContainerID] = useState('');
   const onLifecycleError = (err: unknown) => {
     setActionError(formatSandboxActionError(err, t));
   };
@@ -111,6 +114,19 @@ export default function SandboxDetailPage() {
   });
 
   const state = data?.state ?? (isLoading ? 'loading' : 'unknown');
+  const terminalContainers = useMemo(
+    () => data?.containers?.filter((container) => container.state === 'running') ?? [],
+    [data?.containers],
+  );
+  useEffect(() => {
+    if (terminalContainers.length === 0) {
+      setTerminalContainerID('');
+      return;
+    }
+    if (!terminalContainers.some((container) => container.containerID === terminalContainerID)) {
+      setTerminalContainerID(terminalContainers[0].containerID);
+    }
+  }, [terminalContainers, terminalContainerID]);
   const tone =
     state === 'paused' || state === 'pausing' ? 'warn' : state === 'running' ? 'ok' : 'mute';
   const entries = logs.data?.logs ?? [];
@@ -219,6 +235,29 @@ export default function SandboxDetailPage() {
         </div>
         {data ? (
           <div className="flex gap-2">
+            {terminalContainers.length > 1 ? (
+              <select
+                className="h-9 rounded-md border border-input bg-background/50 px-2 text-sm"
+                value={terminalContainerID}
+                onChange={(event) => setTerminalContainerID(event.target.value)}
+                disabled={state !== 'running'}
+                title={t('terminal.container')}
+              >
+                {terminalContainers.map((container) => (
+                  <option key={container.containerID} value={container.containerID}>
+                    {container.containerID}
+                  </option>
+                ))}
+              </select>
+            ) : null}
+            <Button
+              variant="outline"
+              onClick={() => setTerminalOpen(true)}
+              disabled={state !== 'running'}
+              title={state === 'running' ? t('terminal.open') : t('terminal.requiresRunning')}
+            >
+              <Terminal size={14} /> {t('terminal.open')}
+            </Button>
             {state === 'paused' ? (
               <Button variant="outline" onClick={() => resume.mutate()} disabled={resume.isPending}>
                 <Play size={14} /> {t('actions.resume')}
@@ -236,6 +275,12 @@ export default function SandboxDetailPage() {
       </div>
 
       <SandboxActionErrorBanner message={actionError} onDismiss={() => setActionError(null)} />
+      <SandboxTerminalDialog
+        sandboxID={sandboxID}
+        containerID={terminalContainerID || undefined}
+        open={terminalOpen}
+        onOpenChange={setTerminalOpen}
+      />
       {detail.isError && data ? (
         <div className="rounded-md border border-cube-warn/30 bg-cube-warn/10 px-3 py-2 text-sm text-cube-warn">
           {t('refreshFailed')}
