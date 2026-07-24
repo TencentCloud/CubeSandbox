@@ -67,6 +67,18 @@ Cube API Server sends a `POST` to your callback URL with the following headers:
 
 The two credential headers are mutually exclusive. Your callback receives whichever one the client sent.
 
+## Callback Response: Operator Identity (Optional)
+
+On an allow decision (HTTP 200), your callback may include the response header:
+
+| Header | Value |
+|--------|-------|
+| `X-Auth-User` | The authenticated operator's identity (e.g. username or email) |
+
+Today this header is consumed by the **web terminal** endpoint for audit attribution: its session audit log records the operator alongside the sandbox ID, container, and client IP. When the header is absent and the credential is a Bearer JWT, the terminal parses the token's `username` / `sub` / `preferred_username` / `name` claim *after* your callback has authorized the token (never for the auth decision itself) and records it separately as `claimed_user` with `identity_source=unverified_jwt_claim` — a self-asserted hint rather than a verified identity; the authoritative `user` field (`identity_source=auth_callback`) is filled only from `X-Auth-User`. In simple-key and no-auth deployments no identity is available and both fields stay empty.
+
+**Built-in verifier:** CubeOps ships a ready-made callback at `POST /api/v1/auth/verify` that validates the WebUI login JWT and returns the verified username in `X-Auth-User`. The bundled deployments ship it **opt-in**: in one-click, export `AUTH_CALLBACK_URL=http://127.0.0.1:3010/api/v1/auth/verify` before starting CubeAPI; in Helm, set `controlPlane.api.authCallbackUrl: "auto"` (pointing at the CubeOps Service) or a custom URL. Without an auth backend the terminal endpoint fails closed unless `TERMINAL_ALLOW_UNAUTHENTICATED=true`.
+
 ::: warning Validate both path **and** method
 Multiple HTTP methods are mounted on the same path — for example, `/templates/:id` handles `GET` (read), `POST` (rebuild), `DELETE` (delete), and `PATCH` (update). A callback that only whitelists by path cannot distinguish a read from a destructive operation: a caller with read-only access could escalate to delete or overwrite a template.
 
