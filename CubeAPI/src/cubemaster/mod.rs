@@ -1160,6 +1160,37 @@ pub struct GetSandboxContainerItem {
     pub kind: String,
     #[serde(default)]
     pub pause_at: i64,
+    /// Port this container's envd listens on inside the sandbox (Cubelet
+    /// reports it via the `cube.envd-port` label). Emitted with `omitempty`
+    /// by CubeMaster, so a missing field — and, normalized below, an
+    /// explicit 0 — both mean "no terminal endpoint".
+    #[serde(default, deserialize_with = "deserialize_optional_envd_port")]
+    pub envd_port: Option<u16>,
+}
+
+/// Deserialize the per-container envd port, treating a missing field or an
+/// explicit 0 as "no terminal endpoint" (None).
+fn deserialize_optional_envd_port<'de, D>(deserializer: D) -> Result<Option<u16>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<u64>::deserialize(deserializer)?
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port > 0))
+}
+
+/// One container of a sandbox as reported by CubeMaster, reduced to what
+/// consumers need for terminal routing and API responses.
+#[derive(Debug, Clone)]
+pub struct SandboxContainer {
+    pub name: String,
+    pub container_id: String,
+    /// CubeMaster container type; "sandbox" marks the primary container.
+    pub kind: String,
+    /// envd port for this container (49983 + container index); None when the
+    /// container exposes no terminal endpoint (e.g. a sidecar of a sandbox
+    /// created before per-container envd ports existed).
+    pub envd_port: Option<u16>,
 }
 
 /// Normalized sandbox detail used by handlers (built from GetSandboxDataItem).
@@ -1178,6 +1209,7 @@ pub struct SandboxDetail {
     pub disk_size_mb: i32,
     pub annotations: HashMap<String, String>,
     pub labels: HashMap<String, String>,
+    pub containers: Vec<SandboxContainer>,
 }
 
 fn parse_cpu_millicores(s: &str) -> i32 {
@@ -1342,6 +1374,16 @@ impl GetSandboxResponse {
             _ => SandboxStatus::Unknown,
         };
         let template_id = extract_template_id(&item.template_id, &item.annotations, &item.labels);
+        let containers = item
+            .containers
+            .iter()
+            .map(|c| SandboxContainer {
+                name: c.name.clone(),
+                container_id: c.container_id.clone(),
+                kind: c.kind.clone(),
+                envd_port: c.envd_port,
+            })
+            .collect();
         let sid = item.sandbox_id;
         Some(SandboxDetail {
             sandbox_id: sid.clone(),
@@ -1356,6 +1398,7 @@ impl GetSandboxResponse {
             disk_size_mb: 0,
             annotations: item.annotations,
             labels: item.labels,
+            containers,
         })
     }
 }

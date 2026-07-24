@@ -1,1 +1,4 @@
 /target
+
+# Local build aids, not for upstream (Dockerfile.incremental.local etc.)
+Dockerfile.*.local

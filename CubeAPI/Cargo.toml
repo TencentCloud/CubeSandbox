@@ -71,6 +71,9 @@ governor = { version = "0.6", features = ["dashmap"] }
 # connection pool built-in, rustls for TLS
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
+# ── Base64 (terminal PTY output re-chunking) ──────────────────────────────
+base64 = "0.22.1"
+
 # ── Validation ────────────────────────────────────────────────────────────
 validator = { version = "0.16", features = ["derive"] }
 
@@ -88,6 +91,10 @@ utoipa = { version = "5.4.0", features = ["chrono", "uuid", "yaml"] }
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.4" }
 axum-test = "14"
+# WebSocket client for terminal endpoint tests (same version axum's "ws"
+# feature already pins in Cargo.lock).
+tokio-tungstenite = "0.24"
+base64 = "0.22.1"
 
 [profile.release]
 # Maximize single-binary performance

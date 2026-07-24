@@ -8,6 +8,28 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use std::time::Duration;
+
+/// Total deadline for one auth-callback round trip. A hung callback must not
+/// park the request (or a WebSocket handshake) forever; 10 s matches the
+/// per-call deadline used for envd requests in the terminal handler.
+pub(crate) const AUTH_CALLBACK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Constant-time string comparison for credential checks. Always walks the
+/// full length of both inputs — including when the lengths differ (the wrap
+/// keeps the loop running) — so the timing does not reveal where the first
+/// mismatch was. The length itself is still observable, which is accepted
+/// practice for API-key comparisons.
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let mut diff = a.len() ^ b.len();
+    for i in 0..a.len().max(b.len()) {
+        let x = if a.is_empty() { 0 } else { a[i % a.len()] };
+        let y = if b.is_empty() { 0 } else { b[i % b.len()] };
+        diff |= usize::from(x ^ y);
+    }
+    diff == 0
+}
 
 /// Auth credential extracted from the request headers.
 #[derive(Debug)]
@@ -103,7 +125,7 @@ pub async fn unified_auth(
                     AuthCredential::Bearer(t) => t.as_str(),
                     AuthCredential::ApiKey(k) => k.as_str(),
                 };
-                if provided != expected_key {
+                if !constant_time_eq(provided, expected_key) {
                     tracing::warn!(
                         path = %request.uri().path(),
                         method = %request.method(),
@@ -149,10 +171,19 @@ pub async fn unified_auth(
         AuthCredential::ApiKey(key) => req_builder.header("X-API-Key", key.as_str()),
     };
 
-    let callback_resp = req_builder.send().await.map_err(|e| {
-        tracing::error!(error = %e, callback_url = %callback_url, "auth callback request failed");
-        AppError::Internal(anyhow::anyhow!("Auth callback unreachable: {}", e))
-    })?;
+    let callback_resp = tokio::time::timeout(AUTH_CALLBACK_TIMEOUT, req_builder.send())
+        .await
+        .map_err(|_| {
+            tracing::error!(callback_url = %callback_url, "auth callback request timed out");
+            AppError::Internal(anyhow::anyhow!(
+                "Auth callback timed out after {:?}",
+                AUTH_CALLBACK_TIMEOUT
+            ))
+        })?
+        .map_err(|e| {
+            tracing::error!(error = %e, callback_url = %callback_url, "auth callback request failed");
+            AppError::Internal(anyhow::anyhow!("Auth callback unreachable: {}", e))
+        })?;
 
     let auth_type = match &credential {
         AuthCredential::Bearer(_) => "bearer",
@@ -460,5 +491,57 @@ mod tests {
     async fn simple_key_empty_passthrough() {
         let server = build_test_server_with_api_key("").await;
         server.get("/sandboxes/abc").await.assert_status_ok();
+    }
+
+    // ── Constant-time comparison ─────────────────────────────────────────
+
+    #[test]
+    fn constant_time_eq_matches_only_identical_strings() {
+        assert!(constant_time_eq("", ""));
+        assert!(constant_time_eq("secret-123", "secret-123"));
+        assert!(!constant_time_eq("secret-123", "secret-124"));
+        // Different lengths must still return false (and not panic).
+        assert!(!constant_time_eq("secret-123", "secret"));
+        assert!(!constant_time_eq("sec", "secret-123"));
+        assert!(!constant_time_eq("", "secret-123"));
+        assert!(!constant_time_eq("secret-123", ""));
+        // Non-ASCII / multibyte content compares by bytes.
+        assert!(constant_time_eq("密钥", "密钥"));
+        assert!(!constant_time_eq("密钥", "密码"));
+    }
+
+    /// A hung auth callback must not park the request forever: the middleware
+    /// bounds the callback round trip with AUTH_CALLBACK_TIMEOUT and surfaces
+    /// a 500 once the deadline fires.
+    #[tokio::test]
+    async fn hanging_callback_times_out() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/auth",
+            any(|| async {
+                std::future::pending::<()>().await;
+                #[allow(unreachable_code)]
+                axum::http::Response::new(Body::empty())
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let server = build_test_server_with_callback(&format!("http://{}/auth", addr)).await;
+        let response = server
+            .get("/templates/abc")
+            .add_header(
+                axum::http::header::HeaderName::from_static("x-api-key"),
+                axum::http::HeaderValue::from_static("key"),
+            )
+            .await;
+        response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            response.text().contains("timed out"),
+            "expected a timeout error, got: {}",
+            response.text()
+        );
     }
 }

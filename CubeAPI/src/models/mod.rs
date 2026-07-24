@@ -316,6 +316,25 @@ pub struct SandboxDetail {
     pub state: SandboxState,
     #[serde(rename = "volumeMounts", skip_serializing_if = "Option::is_none")]
     pub volume_mounts: Option<Vec<SandboxVolumeMount>>,
+    /// Containers of the sandbox with their envd (terminal) endpoints.
+    /// Omitted when CubeMaster reports no container list.
+    #[serde(rename = "containers", skip_serializing_if = "Option::is_none")]
+    pub containers: Option<Vec<SandboxContainerInfo>>,
+}
+
+/// One container of a sandbox in GET /sandboxes/{sandboxID}. `envdPort` is
+/// the port this container's envd listens on inside the sandbox; absent when
+/// the container exposes no terminal endpoint (e.g. a sidecar of a sandbox
+/// created before per-container envd ports existed).
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct SandboxContainerInfo {
+    pub name: String,
+    #[serde(rename = "containerID")]
+    pub container_id: String,
+    /// CubeMaster container type; "sandbox" marks the primary container.
+    pub kind: String,
+    #[serde(rename = "envdPort", skip_serializing_if = "Option::is_none")]
+    pub envd_port: Option<u16>,
 }
 
 // ─── Sandbox — pause/resume/connect/snapshot ──────────────────────────────

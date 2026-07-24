@@ -18,8 +18,10 @@ pub enum AppError {
     #[error("unauthorized: {0}")]
     Unauthorized(String),
 
+    #[error("forbidden: {0}")]
+    Forbidden(String),
+
     #[error("bad request: {0}")]
-    #[allow(dead_code)]
     BadRequest(String),
 
     #[error("internal error: {0}")]
@@ -60,6 +62,9 @@ impl IntoResponse for AppError {
             }
             AppError::Unauthorized(msg) => {
                 (StatusCode::UNAUTHORIZED, Json(ApiError::new(401, msg))).into_response()
+            }
+            AppError::Forbidden(msg) => {
+                (StatusCode::FORBIDDEN, Json(ApiError::new(403, msg))).into_response()
             }
             AppError::BadRequest(msg) => {
                 (StatusCode::BAD_REQUEST, Json(ApiError::new(400, msg))).into_response()

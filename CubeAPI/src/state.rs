@@ -3,6 +3,7 @@
 //
 
 use crate::cubemaster::CubeMasterClient;
+use crate::handlers::terminal::TerminalSessionTracker;
 use crate::logging::ArcLogger;
 use crate::services::AppServices;
 use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
@@ -28,6 +29,10 @@ pub struct AppState {
 
     /// Server config snapshot.
     pub config: Arc<crate::config::ServerConfig>,
+
+    /// Live interactive-terminal session counters backing the per-sandbox
+    /// concurrent-session cap on the terminal WebSocket endpoint.
+    pub terminal_sessions: TerminalSessionTracker,
 }
 
 impl AppState {
@@ -54,6 +59,7 @@ impl AppState {
             services,
             logger,
             config: Arc::new(config),
+            terminal_sessions: TerminalSessionTracker::default(),
         }
     }
 }

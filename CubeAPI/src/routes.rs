@@ -3,6 +3,7 @@
 //
 
 use axum::{
+    extract::Request,
     middleware,
     routing::{delete, get, patch, post},
     Router,
@@ -18,7 +19,7 @@ use tower_http::{
 };
 
 use crate::{
-    handlers::{health, sandboxes, snapshots, templates, volumes},
+    handlers::{health, sandboxes, snapshots, templates, terminal, volumes},
     middleware::{auth::unified_auth, rate_limit::rate_limit},
     state::AppState,
 };
@@ -51,10 +52,15 @@ pub fn build_router(state: AppState) -> Router {
         Router::new().merge(build_e2b_snapshot_long_router(&state, auth_configured)),
         SNAPSHOT_LONG_ROUTE_TIMEOUT,
     );
+    let terminal_router = apply_ws_layers(Router::new().nest(
+        "/cubeapi/v1",
+        build_terminal_router(&state, auth_configured),
+    ));
 
     Router::new()
         .merge(standard_router)
         .merge(snapshot_long_router)
+        .merge(terminal_router)
         .with_state(state)
 }
 
@@ -219,6 +225,56 @@ fn apply_http_layers(router: Router<AppState>, timeout: Duration) -> Router<AppS
     )
 }
 
+/// TraceLayer span for the WebSocket terminal route. Mirrors
+/// `DefaultMakeSpan` but records only the URI *path*: the default span logs
+/// the full URI including the query string, and the terminal handshake may
+/// carry the auth credential as `?token=...`, which must not land in access
+/// logs.
+fn terminal_log_span(request: &Request) -> tracing::Span {
+    tracing::debug_span!(
+        "request",
+        method = %request.method(),
+        uri = %request.uri().path(),
+        version = ?request.version(),
+    )
+}
+
+/// Layers for the WebSocket terminal route: identical to `apply_http_layers`
+/// but WITHOUT `TimeoutLayer` — a response timeout would kill the long-lived
+/// hijacked connection (sessions legitimately stay open for hours; the
+/// handler enforces its own idle timeout instead).
+///
+/// Auth is also deliberately not applied here: browsers cannot set headers
+/// on WebSocket handshakes, so the handler validates the credential itself
+/// (mirroring the callback / simple-key logic of `unified_auth`).
+fn apply_ws_layers(router: Router<AppState>) -> Router<AppState> {
+    router.layer(
+        ServiceBuilder::new()
+            .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+            .layer(TraceLayer::new_for_http().make_span_with(terminal_log_span))
+            .layer(CompressionLayer::new())
+            .layer(CorsLayer::permissive()),
+    )
+}
+
+/// Interactive terminal WebSocket. Long-lived by nature, so it lives on its
+/// own router without the 30 s `TimeoutLayer` (see `apply_ws_layers`).
+///
+/// Auth itself runs inside the handler (see above), but the handshake gets
+/// the same per-key rate limit as the other sandbox routes whenever auth is
+/// configured.
+fn build_terminal_router(state: &AppState, auth_configured: bool) -> Router<AppState> {
+    let routes = Router::new().route(
+        "/sandboxes/:sandboxID/terminal/ws",
+        get(terminal::terminal_ws),
+    );
+    if auth_configured {
+        routes.layer(middleware::from_fn_with_state(state.clone(), rate_limit))
+    } else {
+        routes
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::build_router;
@@ -342,6 +398,63 @@ mod tests {
             resp.status_code(),
             StatusCode::NOT_FOUND,
             "alias route should be mounted as its own route, not swallowed by /templates/:templateID"
+        );
+    }
+
+    /// The terminal route's trace span must record only the URI path: the
+    /// handshake may carry the auth credential as `?token=...`, and the
+    /// default `TraceLayer` span would write the full URI (token included)
+    /// into access logs.
+    #[test]
+    fn terminal_log_span_omits_query_string() {
+        use std::sync::{Arc, Mutex};
+
+        /// In-memory log sink for the fmt subscriber.
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("capture lock").extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+            type Writer = Capture;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let request = axum::extract::Request::builder()
+                .method("GET")
+                .uri("/cubeapi/v1/sandboxes/sb-1/terminal/ws?token=super-secret-token")
+                .body(axum::body::Body::empty())
+                .expect("request should build");
+            let span = super::terminal_log_span(&request);
+            span.in_scope(|| tracing::info!("test event"));
+        });
+
+        let logs =
+            String::from_utf8(capture.0.lock().expect("capture lock").clone()).expect("utf8 logs");
+        assert!(
+            logs.contains("/cubeapi/v1/sandboxes/sb-1/terminal/ws"),
+            "span should record the request path: {logs}"
+        );
+        assert!(
+            !logs.contains("super-secret-token"),
+            "query-string token must not appear in the span: {logs}"
         );
     }
 
