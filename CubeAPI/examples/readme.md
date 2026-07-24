@@ -6,3 +6,4 @@ See the top-level [examples/](../../examples/) directory for standalone, runnabl
 - [network-policy](../../examples/network-policy/) — control outbound network access
 - [browser-sandbox](../../examples/browser-sandbox/) — Playwright browser automation via CDP
 - [code-sandbox-quickstart](../../examples/code-sandbox-quickstart/) — basic sandbox operations
+- [webhook-receiver](../../examples/webhook-receiver/) — receive and inspect sandbox lifecycle events
