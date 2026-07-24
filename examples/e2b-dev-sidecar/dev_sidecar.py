@@ -27,6 +27,9 @@ HOP_BY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
+# ClientSession auto-decompresses these by default but preserves the
+# upstream Content-Encoding response header.
+AUTO_DECOMPRESSED_ENCODINGS = {"deflate", "gzip"}
 WEBSOCKET_REQUEST_HEADERS = {
     hdrs.CONNECTION,
     hdrs.SEC_WEBSOCKET_ACCEPT,
@@ -164,9 +167,15 @@ async def _stream_http_proxy(
         allow_redirects=False,
     ) as upstream:
         response = web.StreamResponse(status=upstream.status, reason=upstream.reason)
+        content_encoding = upstream.headers.get(hdrs.CONTENT_ENCODING, "").lower()
         for key, value in upstream.headers.items():
             lowered = key.lower()
             if lowered in HOP_BY_HOP_HEADERS or lowered == "content-length":
+                continue
+            if (
+                lowered == "content-encoding"
+                and content_encoding in AUTO_DECOMPRESSED_ENCODINGS
+            ):
                 continue
             response.headers[key] = value
 

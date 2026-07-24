@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import gzip
 import importlib
 import json
 import os
 import sys
+import zlib
 from pathlib import Path
 
 import httpx
@@ -184,6 +186,101 @@ async def test_http_proxy_forwards_path_query_body_and_host(monkeypatch, dev_sid
             "path_qs": "/api/v1/run?hello=1",
             "body": "payload",
         }
+    finally:
+        await sidecar_runner.cleanup()
+        await upstream_runner.cleanup()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "content_type"),
+    [
+        ("/files", "text/plain"),
+        ("/process.Process/Start", "application/connect+proto"),
+    ],
+    ids=["file", "connect"],
+)
+@pytest.mark.parametrize(
+    ("content_encoding", "compress"),
+    [("gzip", gzip.compress), ("deflate", zlib.compress)],
+    ids=["gzip", "deflate"],
+)
+async def test_http_proxy_removes_headers_for_auto_decompressed_response(
+    monkeypatch, dev_sidecar, path, content_type, content_encoding, compress
+):
+    payload = ("cube-sidecar-gzip-response\n" * 128).encode()
+    compressed_payload = compress(payload)
+
+    async def upstream_handler(_request: web.Request) -> web.Response:
+        return web.Response(
+            body=compressed_payload,
+            headers={
+                "Content-Encoding": content_encoding,
+                "Content-Length": str(len(compressed_payload)),
+                "Content-Type": content_type,
+            },
+        )
+
+    upstream = web.Application()
+    upstream.router.add_get("/{tail:.*}", upstream_handler)
+    upstream_runner, upstream_url = await _start_web_app(upstream)
+
+    monkeypatch.setenv("CUBE_REMOTE_PROXY_BASE", upstream_url)
+    monkeypatch.setenv("CUBE_REMOTE_SANDBOX_DOMAIN", "cube.app")
+    sidecar_runner, sidecar_url = await _start_web_app(dev_sidecar.build_app())
+
+    try:
+        async with httpx.AsyncClient(trust_env=False) as client:
+            response = await client.get(
+                f"{sidecar_url}/sandboxes/router/sbx-1/49983{path}"
+            )
+
+        assert response.status_code == 200
+        assert response.content == payload
+        assert "Content-Encoding" not in response.headers
+        assert "Content-Length" not in response.headers
+    finally:
+        await sidecar_runner.cleanup()
+        await upstream_runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_http_proxy_preserves_unsupported_content_encoding(
+    monkeypatch, dev_sidecar
+):
+    payload = b"custom-encoded-response"
+
+    async def upstream_handler(_request: web.Request) -> web.Response:
+        return web.Response(
+            body=payload,
+            headers={
+                "Content-Encoding": "x-custom",
+                "Content-Length": str(len(payload)),
+                "Content-Type": "application/octet-stream",
+            },
+        )
+
+    upstream = web.Application()
+    upstream.router.add_get("/{tail:.*}", upstream_handler)
+    upstream_runner, upstream_url = await _start_web_app(upstream)
+
+    monkeypatch.setenv("CUBE_REMOTE_PROXY_BASE", upstream_url)
+    monkeypatch.setenv("CUBE_REMOTE_SANDBOX_DOMAIN", "cube.app")
+    sidecar_runner, sidecar_url = await _start_web_app(dev_sidecar.build_app())
+
+    try:
+        async with httpx.AsyncClient(trust_env=False) as client:
+            async with client.stream(
+                "GET", f"{sidecar_url}/sandboxes/router/sbx-1/8080/data"
+            ) as response:
+                response_body = b"".join(
+                    [chunk async for chunk in response.aiter_raw()]
+                )
+
+        assert response.status_code == 200
+        assert response.headers["Content-Encoding"] == "x-custom"
+        assert "Content-Length" not in response.headers
+        assert response_body == payload
     finally:
         await sidecar_runner.cleanup()
         await upstream_runner.cleanup()
