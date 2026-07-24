@@ -61,20 +61,27 @@ spec:
             *) api_base="http://${api_endpoint}" ;;
           esac
           curl --connect-timeout 5 --max-time 15 -fsS "${api_base%/}/health"
-
-          {{- if .Values.cubeNode.enabled }}
-          echo '[health-test] check node registration'
-          nodes_json="$(curl --connect-timeout 5 --max-time 15 -fsS "${api_base%/}/cubeapi/v1/nodes")"
-          printf '%s\n' "${nodes_json}"
-          healthy_nodes="$(printf '%s\n' "${nodes_json}" | grep -o '"healthy"[[:space:]]*:[[:space:]]*true' | wc -l | tr -d ' ')"
-          node_ids="$(printf '%s\n' "${nodes_json}" | grep -o '"nodeID"[[:space:]]*:' | wc -l | tr -d ' ')"
-          test "${healthy_nodes}" -ge 1
-          test "${node_ids}" -ge 1
-          {{- else }}
-          echo '[health-test] skip node registration: cubeNode.enabled=false'
-          {{- end }}
           {{- else }}
           echo '[health-test] skip CubeAPI: no internal API and externalControlPlane.apiEndpoint is empty'
+          {{- end }}
+
+          {{- if and .Values.cubeNode.enabled (or $internalMaster .Values.externalControlPlane.enabled) }}
+          echo '[health-test] check node registration via CubeMaster'
+          master_endpoint={{ include "cube.masterEndpoint" . | quote }}
+          case "${master_endpoint}" in
+            http://*|https://*) master_base="${master_endpoint}" ;;
+            *) master_base="http://${master_endpoint}" ;;
+          esac
+          nodes_json="$(curl --connect-timeout 5 --max-time 15 -fsS "${master_base%/}/internal/meta/nodes")"
+          printf '%s\n' "${nodes_json}"
+          healthy_nodes="$(printf '%s\n' "${nodes_json}" | grep -o '"healthy"[[:space:]]*:[[:space:]]*true' | wc -l | tr -d ' ')"
+          node_ids="$(printf '%s\n' "${nodes_json}" | grep -o '"node_id"[[:space:]]*:' | wc -l | tr -d ' ')"
+          test "${healthy_nodes}" -ge 1
+          test "${node_ids}" -ge 1
+          {{- else if .Values.cubeNode.enabled }}
+          echo '[health-test] skip node registration: no internal or external CubeMaster'
+          {{- else }}
+          echo '[health-test] skip node registration: cubeNode.enabled=false'
           {{- end }}
 
           {{- if and .Values.webui.enabled $internalOps }}
