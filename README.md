@@ -55,6 +55,22 @@ Cube Sandbox is a high-performance, out-of-the-box secure sandbox service built 
 <table>
   <tr>
     <td align="right" valign="top" width="100">
+      <a href="./docs/changelog/v0.6.0.md">
+        <img src="https://img.shields.io/badge/v0.6.0-2026.07.24-fd7e14?style=flat-square" alt="v0.6.0" />
+      </a>
+    </td>
+    <td valign="top">
+      <strong>v0.6: K8s deploy, Volume framework, template aliases</strong><br/>
+      <b>K8s deploy</b> — Deploy Cube control-plane components and compute nodes on Kubernetes<br/>
+      <b>Volume framework</b> — E2B-compatible Volume framework that lets users plug in custom backend storage<br/>
+      <b>Template aliases</b> — Set an alias when creating a template, and create sandboxes by specifying that alias.<br/>
+      <a href="./docs/changelog/v0.6.0.md">Changelog →</a> ·
+      <a href="./docs/guide/kubernetes/">K8s deploy →</a> ·
+      <a href="./docs/guide/volume-plugin.md">Volume plugin →</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="right" valign="top" width="100">
       <a href="./docs/changelog/v0.5.0.md">
         <img src="https://img.shields.io/badge/v0.5.0-2026.07.03-dc3545?style=flat-square" alt="v0.5.0" />
       </a>
