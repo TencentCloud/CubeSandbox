@@ -106,6 +106,13 @@ func (f *fakeTokenIssuer) VerifyRefreshToken(token string) (*RefreshClaims, erro
 	return &RefreshClaims{Username: username, TokenID: tokenID}, nil
 }
 
+func (f *fakeTokenIssuer) VerifyAccessTokenUser(token string) (string, error) {
+	if len(token) < 7 || token[:7] != "access-" {
+		return "", errors.New("invalid access token")
+	}
+	return token[7:], nil
+}
+
 func (f *fakeTokenIssuer) AccessTTL() time.Duration { return f.accessTTL }
 
 func newTestAuthService(t *testing.T) (*AuthService, *fakeUserStore) {

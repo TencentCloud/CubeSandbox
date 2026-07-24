@@ -28,11 +28,12 @@ func NewHandler(svc *service.AuthService) *Handler {
 }
 
 // RegisterPublic installs the auth routes that don't require a valid JWT
-// (login + refresh) on the given router group.
+// (login + refresh + the CubeAPI auth callback) on the given router group.
 func (h *Handler) RegisterPublic(r *gin.RouterGroup) {
 	//rate-limit login to protect weak default credentials.
 	r.POST("/auth/login", LoginRateLimit(), h.Login)
 	r.POST("/auth/refresh", h.Refresh)
+	r.POST("/auth/verify", h.Verify)
 }
 
 // RegisterAuthed installs the auth routes that require a valid JWT
@@ -113,6 +114,36 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 		// mapping can be added by wrapping with sentinel errors if needed.
 		httputil.WriteError(c, http.StatusInternalServerError, err.Error())
 	}
+}
+
+// Verify handles POST /auth/verify — the auth-callback endpoint that
+// CubeAPI (via AUTH_CALLBACK_URL) calls to authenticate requests it proxies,
+// most notably the WebUI terminal WebSocket (see docs/guide/authentication.md).
+//
+// The endpoint authenticates only: CubeOps has a single admin identity and
+// makes no per-path/per-method authorization decision, so the X-Request-Path
+// and X-Request-Method headers CubeAPI forwards are accepted but ignored.
+// X-API-Key is not supported — CubeOps only recognises its own JWTs, so a
+// request carrying only X-API-Key is rejected like a missing token.
+//
+// On success it answers 200 with an empty JSON body and the authenticated
+// username in the X-Auth-User response header (consumed by CubeAPI for
+// terminal audit attribution). On any failure it answers 401 with a generic
+// message that does not distinguish a missing token from an invalid one.
+//
+// No rate limiter is attached: LoginRateLimit is failure-driven and only the
+// Login handler records failures, so installing it here would be a no-op.
+// Unlike password guessing against /auth/login, brute-forcing a signed JWT
+// is not a realistic threat.
+func (h *Handler) Verify(c *gin.Context) {
+	tokenStr := extractBearerToken(c.GetHeader("Authorization"))
+	username, err := h.svc.VerifyAccessToken(c.Request.Context(), tokenStr)
+	if err != nil {
+		httputil.WriteError(c, http.StatusUnauthorized, "missing or invalid credentials")
+		return
+	}
+	c.Header("X-Auth-User", username)
+	httputil.WriteJSON(c, http.StatusOK, gin.H{})
 }
 
 // Refresh handles POST /auth/refresh.

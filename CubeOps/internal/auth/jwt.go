@@ -130,6 +130,19 @@ func (m *JWTManager) VerifyAccessToken(tokenStr string) (*AccessClaims, error) {
 	return claims, nil
 }
 
+// VerifyAccessTokenUser verifies an access token and returns only the
+// username it was issued to. It exists so the service layer — which cannot
+// import this package without an import cycle — can verify access tokens
+// through the service.TokenIssuer interface. Refresh tokens are rejected,
+// exactly as in VerifyAccessToken.
+func (m *JWTManager) VerifyAccessTokenUser(tokenStr string) (string, error) {
+	claims, err := m.VerifyAccessToken(tokenStr)
+	if err != nil {
+		return "", err
+	}
+	return claims.Username, nil
+}
+
 // VerifyRefreshToken parses and validates a refresh token and returns the
 // service-layer claim DTO. We return *service.RefreshClaims (instead of
 // *RefreshClaims) so the service package can depend on its own types rather

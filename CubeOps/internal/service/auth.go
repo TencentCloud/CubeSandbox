@@ -34,6 +34,10 @@ type TokenIssuer interface {
 	GenerateAccessToken(username string) (string, error)
 	GenerateRefreshToken(username string) (string, string, error)
 	VerifyRefreshToken(token string) (*RefreshClaims, error)
+	// VerifyAccessTokenUser verifies an access token and returns the
+	// username it was issued to. It returns only the identity (not the full
+	// claims) so this interface stays free of auth-package types.
+	VerifyAccessTokenUser(token string) (string, error)
 	AccessTTL() time.Duration
 }
 
@@ -159,6 +163,28 @@ func (s *AuthService) Refresh(ctx context.Context, refreshToken string) (string,
 		_ = err
 	}
 	return accessToken, newRefreshToken, nil
+}
+
+// VerifyAccessToken validates a CubeOps access token and returns the
+// username it was issued to.
+//
+// It powers the POST /api/v1/auth/verify callback endpoint that CubeAPI
+// (via AUTH_CALLBACK_URL) calls to authenticate requests it proxies — most
+// notably the WebUI terminal WebSocket. The endpoint is authentication-only,
+// so the result is just the identity.
+//
+// Any verification failure (missing, malformed, expired, or a refresh token
+// presented as an access token) maps to ErrUnauthenticated so the HTTP layer
+// can answer 401 without leaking why the token was rejected.
+func (s *AuthService) VerifyAccessToken(_ context.Context, token string) (string, error) {
+	if token == "" {
+		return "", ErrUnauthenticated
+	}
+	username, err := s.jm.VerifyAccessTokenUser(token)
+	if err != nil {
+		return "", ErrUnauthenticated
+	}
+	return username, nil
 }
 
 // ChangePassword updates the password for the authenticated user.
