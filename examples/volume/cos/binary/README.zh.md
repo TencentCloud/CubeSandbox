@@ -14,13 +14,13 @@
 | 步骤 | 内容 |
 |------|------|
 | 1 | 完成 [../README.zh.md — 前置条件](../README.zh.md#前置条件) |
-| 2 | **Cubelet 节点**：cosfs — [§1 安装与校验](../README.zh.md#1-安装依赖) |
+| 2 | **Cubelet 节点**：cosfs + jq — [§1 安装与校验](../README.zh.md#1-安装依赖) |
 | 3 | **CubeMaster 节点**：coscmd + jq — [§1](../README.zh.md#1-安装依赖) |
 | 4 | 部署本目录 [cube-volume-cos.sh](cube-volume-cos.sh) 与 `volume-cos.conf` — [§2](../README.zh.md#2-安装插件与-cos-凭证) |
 | 5 | 配置 CubeMaster + Cubelet — [§3–§5](../README.zh.md#3-配置-cubemaster) |
 | 6 | SDK 验证 — [§6–§7](../README.zh.md#6-准备-sdk-环境) |
 
-**本示例依赖**：CubeMaster 侧 [coscmd](https://cloud.tencent.com/document/product/436/6883)；Cubelet 侧 [cosfs](https://cloud.tencent.com/document/product/436/10976)。不使用 COS Go SDK（见 [rpc](../rpc/)）。依赖安装见 [../README.zh.md §1](../README.zh.md#1-安装依赖)。
+**本示例依赖**：CubeMaster 侧 [coscmd](https://cloud.tencent.com/document/product/436/10976) + **jq**；Cubelet 侧 [cosfs](https://cloud.tencent.com/document/product/436/6883) + **jq**。不使用 COS Go SDK（见 [rpc](../rpc/)）。依赖安装见 [../README.zh.md §1](../README.zh.md#1-安装依赖)。
 
 ---
 
@@ -430,8 +430,8 @@ ln -sf /opt/coscmd-venv/bin/coscmd /usr/local/bin/coscmd
 ## 参考链接
 
 - 插件源码：[cube-volume-cos.sh](cube-volume-cos.sh)
-- cosfs：[对象存储 cosfs 工具](https://cloud.tencent.com/document/product/436/10976)
-- coscmd：[COSCMD 工具](https://cloud.tencent.com/document/product/436/6883)
+- cosfs：[对象存储 cosfs 工具](https://cloud.tencent.com/document/product/436/6883)
+- coscmd：[COSCMD 工具](https://cloud.tencent.com/document/product/436/10976)
 - COS Go SDK（rpc 示例用）：[Go SDK 快速入门](https://cloud.tencent.com/document/product/436/31215)
 - rpc 类型示例：[../rpc/](../rpc/)
 - Binary plugin 驱动：[Cubelet/plugins/volume/binary/driver.go](../../../../Cubelet/plugins/volume/binary/driver.go)

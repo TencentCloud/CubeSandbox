@@ -39,9 +39,9 @@
 
 | 工具 | 安装节点 | 用途（Hook） | 插件类型 |
 |------|----------|--------------|----------|
-| **[cosfs](https://cloud.tencent.com/document/product/436/10976)** | **Cubelet** | attach / detach（FUSE 挂载 COS） | binary、rpc **都需要** |
-| **[coscmd](https://cloud.tencent.com/document/product/436/6883)** | **CubeMaster** | create / destroy（在 COS 上建/删目录） | 仅 **binary** |
-| **jq** | **CubeMaster**（与 coscmd 同机） | binary 插件构造 stdout JSON | 仅 **binary** |
+| **[cosfs](https://cloud.tencent.com/document/product/436/6883)** | **Cubelet** | attach / detach（FUSE 挂载 COS） | binary、rpc **都需要** |
+| **[coscmd](https://cloud.tencent.com/document/product/436/10976)** | **CubeMaster** | create / destroy（在 COS 上建/删目录） | 仅 **binary** |
+| **jq** | **CubeMaster** 与 **Cubelet** | binary 插件构造 / 解析 stdout JSON（create/destroy 与 attach/detach） | 仅 **binary** |
 | COS Go SDK | 编译 rpc 插件的机器 | create / destroy | 仅 **rpc**（`go build` 时拉取，见 [rpc 路径](#rpc-路径可选)） |
 
 > **rpc 插件**：Cubelet 节点仍须 cosfs；**不需要** coscmd / jq。Controller 逻辑在 `cube-volume-cos-rpc` 进程内，用 Go SDK 访问 COS。
@@ -55,7 +55,7 @@
 **Cubelet 节点：**
 
 ```bash
-sudo /usr/local/services/cubetoolbox/Cubelet/plugin/install-deps.sh --cosfs
+sudo /usr/local/services/cubetoolbox/Cubelet/plugin/install-deps.sh --cosfs --jq
 ```
 
 **CubeMaster 节点：**
@@ -78,8 +78,8 @@ sudo /usr/local/services/cubetoolbox/Cubelet/plugin/install-deps.sh --all
 
 | 工具 | 腾讯云官方安装文档 |
 |------|-------------------|
-| cosfs | [对象存储 cosfs 工具](https://cloud.tencent.com/document/product/436/10976) |
-| coscmd | [COSCMD 工具](https://cloud.tencent.com/document/product/436/6883) |
+| cosfs | [对象存储 cosfs 工具](https://cloud.tencent.com/document/product/436/6883) |
+| coscmd | [COSCMD 工具](https://cloud.tencent.com/document/product/436/10976) |
 | jq | 系统包管理器：`yum install jq` / `apt install jq`（无单独腾讯云文档） |
 
 ### 安装成功怎么验？
@@ -101,7 +101,7 @@ which cosfs && cosfs --version
 which coscmd && coscmd --version
 ```
 
-**CubeMaster 节点 — jq**（binary）
+**CubeMaster / Cubelet 节点 — jq**（binary；两侧都要有）
 
 ```bash
 which jq && jq --version
@@ -394,7 +394,7 @@ COS binary/rpc 示例在 `volume-cos.conf` 中**固定一个 `BUCKET`**，所有
 
 | 步骤 | 与 binary 的差异 |
 |------|------------------|
-| 依赖 | **Cubelet 节点**：仅 [cosfs](https://cloud.tencent.com/document/product/436/10976)（[§1 安装与校验](#1-安装依赖)）；**不需要** coscmd / jq |
+| 依赖 | **Cubelet 节点**：仅 [cosfs](https://cloud.tencent.com/document/product/436/6883)（[§1 安装与校验](#1-安装依赖)）；**不需要** coscmd / jq |
 | 插件 | `go build` 得到 `cube-volume-cos-rpc`，并配置 systemd 常驻 |
 | CubeMaster / Cubelet | `type: rpc`，`name: cos-rpc`，`socket_path: /run/cube-volume-cos-rpc.sock`（与插件 `SOCKET` 相同） |
 | SDK | `Volume.create("x", driver="cos-rpc")` |

@@ -5,12 +5,12 @@
 # Source: examples/volume/cos/install-deps.sh
 #
 # Where to run (multi-node):
-#   cosfs  → Cubelet     attach/detach   binary + rpc
-#   coscmd → CubeMaster  create/destroy  binary only
-#   jq     → CubeMaster  binary JSON     binary only
+#   cosfs  → Cubelet                attach/detach   binary + rpc
+#   coscmd → CubeMaster             create/destroy  binary only
+#   jq     → CubeMaster + Cubelet   binary JSON     binary only
 #
 # Usage:
-#   sudo .../Cubelet/plugin/install-deps.sh --cosfs
+#   sudo .../Cubelet/plugin/install-deps.sh --cosfs --jq
 #   sudo .../CubeMaster/plugin/install-deps.sh --coscmd --jq
 #   sudo .../Cubelet/plugin/install-deps.sh --all           # single-node
 #   ./install-deps.sh --all --check-only
@@ -33,13 +33,13 @@
 #     platform:tlN  → TencentOS Server N (e.g. tl4); treat as modern EL8+ cosfs
 #
 # Official docs:
-#   cosfs:  https://cloud.tencent.com/document/product/436/10976
-#   coscmd: https://cloud.tencent.com/document/product/436/6883
+#   cosfs:  https://cloud.tencent.com/document/product/436/6883
+#   coscmd: https://cloud.tencent.com/document/product/436/10976
 
 set -euo pipefail
 
-COSFS_DOC="https://cloud.tencent.com/document/product/436/10976"
-COSCMD_DOC="https://cloud.tencent.com/document/product/436/6883"
+COSFS_DOC="https://cloud.tencent.com/document/product/436/6883"
+COSCMD_DOC="https://cloud.tencent.com/document/product/436/10976"
 COSFS_RELEASE="v1.0.25"
 COSFS_BASE_URL="https://github.com/tencentyun/cosfs/releases/download/${COSFS_RELEASE}"
 
