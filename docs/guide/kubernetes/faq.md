@@ -260,7 +260,7 @@ A common cause is inability to reach CubeMaster (network / DNS).
 ### Rough limits on sandboxes per node?
 
 1. **Memory**: roughly hundreds of MB to several GB per sandbox
-2. **Disk**: CoW rootfs; depends on `/data/cubelet` capacity (default loopback is only **25G**; see [Install · Compute node data disk](./install.md#compute-node-data-disk-datacubelet))
+2. **Disk**: CoW rootfs; depends on `/data/cubelet` capacity (default loopback is only **25G**; see [Install · Compute node data disk](./install.md#_8-2-compute-node-data-disk-configuration))
 3. **KVM count**: typically at most hundreds per machine, subject to kernel parameters
 
 `Pause` can drive inactive sandbox CPU/RSS near 0 (disk is not released). Operationally: Pause after N minutes idle, Destroy after longer.
@@ -272,7 +272,7 @@ Default `bootstrap.nodeInit.dataCubelet.loopback.size` is `25G`; on first run bo
 - **Not yet installed / image file does not exist**: change `size` in values (e.g. `200G`) and reinstall or re-run bootstrap.
 - **Image already created**: changing values again **does not** auto-expand. In production, prefer disabling loopback and using a pre-mounted large XFS disk; if you must rebuild loopback, delete the old img in a maintenance window (this clears data at that path).
 
-Config examples: [Helm Install · Compute node data disk](./install.md#compute-node-data-disk-datacubelet).
+Config examples: [Helm Install · Compute node data disk](./install.md#_8-2-compute-node-data-disk-configuration).
 
 ### How do I disable PVM on a node?
 

@@ -260,7 +260,7 @@ kubectl -n cube-system logs -l app.kubernetes.io/component=cube-node -c cubelet 
 ### 单节点沙箱数量大概卡在哪？
 
 1. **内存**：每沙箱约数百 MB～数 GB
-2. **磁盘**：CoW rootfs，看 `/data/cubelet` 容量（默认 loopback 仅 **25G**，见[安装 · 计算节点数据盘](./install.md#计算节点数据盘datacubelet)）
+2. **磁盘**：CoW rootfs，看 `/data/cubelet` 容量（默认 loopback 仅 **25G**，见[安装 · 计算节点数据盘](./install.md#_8-2-计算节点数据盘配置)）
 3. **KVM 数量**：单机通常最多数百级，受内核参数影响
 
 `Pause` 可把非活跃沙箱的 CPU/RSS 压到接近 0（盘不释放）。运营上常：闲置 N 分钟 Pause，更久 Destroy。
@@ -272,7 +272,7 @@ kubectl -n cube-system logs -l app.kubernetes.io/component=cube-node -c cubelet 
 - **尚未装过 / 镜像文件还不存在**：在 values 里改 `size`（如 `200G`）后重装或重跑 bootstrap 即可。
 - **镜像已经建好**：再改 values **不会**自动扩容。生产建议关掉 loopback，改用预挂载的大容量 XFS 盘；若必须重建 loopback，需维护窗口删旧 img（会清空该路径数据）。
 
-配置示例见 [Helm 安装 · 计算节点数据盘](./install.md#计算节点数据盘datacubelet)。
+配置示例见 [Helm 安装 · 计算节点数据盘](./install.md#_8-2-计算节点数据盘配置)。
 
 ### 怎么关掉某台节点的 PVM？
 
