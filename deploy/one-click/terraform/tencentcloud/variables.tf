@@ -302,7 +302,7 @@ variable "cubeapi_image" {
 variable "cubeops_image" {
   description = "Full cube-ops image override."
   type        = string
-  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-ops:v0.6.0-rc1"
+  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-ops:v0.6.0-rc3"
 }
 
 variable "cubeproxy_image" {
