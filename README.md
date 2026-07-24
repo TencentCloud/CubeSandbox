@@ -127,53 +127,54 @@ Cube Sandbox is a high-performance, out-of-the-box secure sandbox service built 
 <table align="center">
   <tr align="center" valign="top">
     <td width="33%">
-      <strong>⚡ Sub-60ms boot · High density · Auto pause/resume</strong><br/><br/>
-      Average &lt;60ms cold start, &lt;5MB overhead per instance — run thousands of Agents on one node. Supports automatic sandbox pause and resume for cost optimization<br/><br/>
+      <strong>⚡ Ultra-fast Startup</strong><br/><br/>
+      Resource pooling and snapshot cloning skip all cold-start overhead. Average &lt;60ms cold start — sandbox creation faster than a blink.<br/><br/>
       <a href="./docs/guide/quickstart.md">Quick start →</a>
     </td>
     <td width="33%">
-      <strong>🔒 Hardware-level isolation</strong><br/><br/>
-      Each sandbox gets its own Guest OS kernel — no Docker shared-kernel escapes; run untrusted LLM-generated code safely<br/><br/>
+      <strong>🔒 Hardware Isolation</strong><br/><br/>
+      Every sandbox runs a dedicated OS kernel in its own MicroVM.<br/><br/>
       <a href="./docs/architecture/overview.md">Architecture →</a>
     </td>
     <td width="33%">
-      <strong>🔌 Seamless E2B migration</strong><br/><br/>
-      Native E2B SDK compatibility — swap one URL env var, zero business code changes<br/><br/>
+      <strong>🔌 E2B SDK Compatible</strong><br/><br/>
+      Compatible with E2B SDK interface. Switch from E2B Cloud seamlessly by changing one environment variable — zero client code changes.<br/><br/>
       <a href="./docs/guide/tutorials/examples.md">Examples →</a>
     </td>
   </tr>
   <tr align="center" valign="top">
     <td width="33%">
-      <strong>🖥️ Web console</strong><br/><br/>
-      Manage sandboxes, templates, nodes, and version matrix in the browser — open <code>:12088</code> right after install<br/><br/>
-      <a href="./docs/guide/webui.md">WebUI guide →</a>
+      <strong>📦 High-density Deployment</strong><br/><br/>
+      &lt;5MB overhead per sandbox enables thousands of instances per server via kernel sharing and Copy-on-Write (CoW). Supports automatic sandbox pause and resume, further improving deployment density and cost optimization.<br/><br/>
+      <a href="./docs/guide/quickstart.md">Quick start →</a>
     </td>
     <td width="33%">
-      <strong>🔐 Credential vault</strong><br/><br/>
-      Agents call LLMs and external APIs as usual — keys never enter the sandbox, model context, or logs<br/><br/>
+      <strong>🛡️ Network Security</strong><br/><br/>
+      eBPF-based inter-sandbox isolation and egress filtering at kernel level; built-in L7 security proxy enables per-domain/path/method policies with automatic credential injection — secrets never visible to sandbox code.<br/><br/>
       <a href="./docs/guide/security-proxy.md">Security proxy guide →</a>
     </td>
     <td width="33%">
-      <strong>🛡️ Egress control</strong><br/><br/>
-      Domain allowlists, instant block on unauthorized egress, full audit logs for compliance<br/><br/>
-      <a href="./docs/guide/security-proxy.md">Security proxy guide →</a>
+      <strong>📸 Flexible State Management</strong><br/><br/>
+      High-frequency snapshot and rollback at hundred-millisecond granularity. Create checkpoints on running sandboxes, roll back to any saved state at any time, or fork from a specific state to explore in parallel.<br/><br/>
+      <a href="./docs/changelog/v0.3.0.md">v0.3 changelog →</a>
     </td>
   </tr>
   <tr align="center" valign="top">
     <td width="33%">
-      <strong>📸 Snapshot · Clone · Rollback</strong><br/><br/>
-      Hundred-millisecond checkpoints on running sandboxes — roll back or fork from any saved state<br/><br/>
-      <a href="./docs/changelog/v0.3.0.md">v0.3 changelog →</a>
+      <strong>💾 Volume Framework</strong><br/><br/>
+      E2B-compatible Volume framework that lets users plug in custom backend storage solutions. Volumes have an independent lifecycle and can be shared across sandboxes.<br/><br/>
+      <a href="./docs/guide/volume-plugin.md">Volume plugin →</a>
     </td>
     <td width="33%">
-      <strong>📦 Template system</strong><br/><br/>
-      Turn OCI images into templates in one step, install official presets from the Template Store, auto-distribute across nodes<br/><br/>
-      <a href="./docs/guide/templates.md">Templates guide →</a>
+      <strong>🚀 Production Deployment</strong><br/><br/>
+      Deploy production clusters on Tencent Cloud with one click using Terraform. Also supports deployment on standard Kubernetes clusters (preview).<br/><br/>
+      <a href="./docs/guide/tencentcloud-terraform-deploy.md">Terraform deploy →</a> ·
+      <a href="./docs/guide/kubernetes/">K8s deploy →</a>
     </td>
     <td width="33%">
-      <strong>🤖 AgentHub digital assistants</strong><br/><br/>
-      Spin up OpenClaw assistants in one click — snapshots, rollback, and assistant template publishing<br/><br/>
-      <a href="./docs/guide/digital-assistant.md">Digital assistant →</a>
+      <strong>💪 ARM Architecture Support</strong><br/><br/>
+      Full native ARM64 support across compilation, build, and deployment workflows.<br/><br/>
+      <a href="./docs/guide/bare-metal-deploy.md">Bare-metal deploy →</a>
     </td>
   </tr>
 </table>
@@ -399,8 +400,7 @@ We welcome contributions of all kinds—whether it's a bug report, feature sugge
 
 | Feature | Description |
 |---|---|
-| **Kubernetes-Native Deployment** | Deploy and operate CubeSandbox entirely within a K8s cluster using CRDs, operators, and native scheduling — no out-of-band orchestration |
-| **Volume Support** | Persistent and shared volume support compatible with the E2B volume protocol |
+| **Kubernetes-Native Deployment** | Evolve from Helm-based deployment toward CRD- and Operator-centric native management, with smooth upgrade capabilities |
 | **Cross-Node Pause & Resume** | Suspend a sandbox on one node and resume it on another with full memory and filesystem state preserved |
 | **E2B API Compatibility** | Close remaining gaps with the E2B specification for full drop-in compatibility |
 | **Control Plane / Data Plane Separation** | Decouple the control plane from the data plane so control plane upgrades or failures never affect sandboxes already in flight |
