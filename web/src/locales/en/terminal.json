@@ -1,0 +1,22 @@
+{
+  "title": "Terminal",
+  "description": "Interactive shell session for sandbox {{id}}",
+  "openTerminal": "Open Terminal",
+  "openDisabled": "Terminal is available only while the sandbox is running",
+  "status": {
+    "connecting": "Connecting…",
+    "ready": "Connected",
+    "disconnected": "Disconnected",
+    "exited": "Terminal exited",
+    "error": "Connection error"
+  },
+  "exitCode": "Shell exited with code {{code}}",
+  "container": "Container",
+  "selectContainer": "Select container",
+  "reconnect": "Reconnect",
+  "close": "Close",
+  "fullscreen": "Toggle fullscreen",
+  "fontSizeIncrease": "Increase font size",
+  "fontSizeDecrease": "Decrease font size",
+  "pasteHint": "Select to copy · Ctrl+Shift+V or right-click to paste"
+}

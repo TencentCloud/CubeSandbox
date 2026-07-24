@@ -142,7 +142,7 @@ export interface paths {
         };
         get: operations["list_templates"];
         put?: never;
-        post?: never;
+        post: operations["create_template"];
         delete?: never;
         options?: never;
         head?: never;
@@ -205,6 +205,54 @@ export interface paths {
             cookie?: never;
         };
         get: operations["get_template"];
+        put?: never;
+        post: operations["rebuild_template"];
+        delete: operations["delete_template"];
+        options?: never;
+        head?: never;
+        patch: operations["update_template"];
+        trace?: never;
+    };
+    "/templates/{templateID}/builds/{buildID}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["start_template_build"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/templates/{templateID}/builds/{buildID}/logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_template_build_logs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/templates/{templateID}/builds/{buildID}/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_template_build_status"];
         put?: never;
         post?: never;
         delete?: never;
@@ -310,6 +358,72 @@ export interface components {
             commit?: string;
             version: string;
         };
+        /** @description Body for POST /templates (create from image). */
+        CreateTemplateRequest: {
+            /** @description Deprecated E2B template alias. Used when `name` is absent or blank. */
+            alias?: string | null;
+            /** @description Allow internet (public) access. */
+            allowInternetAccess?: boolean | null;
+            /** @description Allowed outbound CIDRs for CubeVS egress policy. */
+            allowOut?: string[] | null;
+            /** @description Override container CMD args. */
+            args?: string[] | null;
+            /** @description Override container ENTRYPOINT. */
+            command?: string[] | null;
+            /**
+             * Format: int32
+             * @description CPU in millicores, e.g. 2000 means 2000m.
+             */
+            cpu?: number | null;
+            /** @description Denied outbound CIDRs for CubeVS egress policy. */
+            denyOut?: string[] | null;
+            /** @description Container DNS nameservers. */
+            dns?: string[] | null;
+            /** @description Environment variables as "KEY=VALUE" strings. */
+            env?: string[] | null;
+            /** @description Ports the container listens on. */
+            exposedPorts?: number[] | null;
+            /** @description Container image reference, e.g. `registry.example.com/code:latest`. */
+            image: string;
+            instanceType?: string | null;
+            /**
+             * Format: int32
+             * @description Memory in MiB, e.g. 2000.
+             */
+            memory?: number | null;
+            /**
+             * @description E2B v3 template name. A tag suffix after ':' is accepted by CubeAPI but
+             *     only the name portion is forwarded as the CubeMaster alias.
+             */
+            name?: string | null;
+            /** @description Network mode, e.g. "tap". */
+            networkType?: string | null;
+            /** @description Limit template distribution to these node IDs or host IPs. */
+            nodes?: string[] | null;
+            /** @description HTTP probe path, e.g. "/health". Defaults to "/health" when `probePort` is set. */
+            probePath?: string | null;
+            /**
+             * Format: int32
+             * @description HTTP probe port.
+             */
+            probePort?: number | null;
+            /** @description Registry password for private source images. */
+            registryPassword?: string | null;
+            /** @description Registry username for private source images. */
+            registryUsername?: string | null;
+            /**
+             * @description Deprecated and ignored. Template IDs are always generated server-side
+             *     with the `tpl-` prefix; clients must use the returned `templateID`.
+             */
+            templateID?: string;
+            /**
+             * @description Whether CubeMaster bakes the CubeEgress root CA into the template rootfs.
+             *     Omitted or null defaults to true on CubeMaster.
+             */
+            with_cube_ca?: boolean | null;
+            /** @description Writable layer size for the rootfs, e.g. "1G". */
+            writableLayerSize?: string | null;
+        };
         HashMap: {
             [key: string]: string;
         };
@@ -321,8 +435,8 @@ export interface components {
         ListedSandbox: {
             alias?: string | null;
             clientID: string;
-            /** K8s-style millicores string, e.g. "2000m" (= 2 vCPU), "128m" (= 0.128 vCPU). */
-            cpuCount: string;
+            /** Format: int32 */
+            cpuCount: number;
             /** Format: int32 */
             diskSizeMB?: number | null;
             /** Format: date-time */
@@ -409,6 +523,10 @@ export interface components {
             quotaMemMB: number;
             versions?: components["schemas"]["ComponentVersionView"][];
         };
+        /** @description Body for POST /templates/:id (rebuild). */
+        RebuildTemplateRequest: {
+            [key: string]: unknown;
+        };
         /** @description Request body for POST /sandboxes/{id}/resume (deprecated). */
         ResumedSandbox: {
             autoPause?: boolean;
@@ -429,12 +547,31 @@ export interface components {
             templateID: string;
             trafficAccessToken?: string | null;
         };
+        /**
+         * @description One container of a sandbox in GET /sandboxes/{sandboxID}. `envdPort` is
+         *     the port this container's envd listens on inside the sandbox; absent when
+         *     the container exposes no terminal endpoint (e.g. a sidecar of a sandbox
+         *     created before per-container envd ports existed).
+         */
+        SandboxContainerInfo: {
+            containerID: string;
+            /** Format: int32 */
+            envdPort?: number | null;
+            /** @description CubeMaster container type; "sandbox" marks the primary container. */
+            kind: string;
+            name: string;
+        };
         /** @description Detailed sandbox info returned by GET /sandboxes/{sandboxID}. */
         SandboxDetail: {
             alias?: string | null;
             clientID: string;
-            /** K8s-style millicores string, e.g. "2000m" (= 2 vCPU), "128m" (= 0.128 vCPU). */
-            cpuCount: string;
+            /**
+             * @description Containers of the sandbox with their envd (terminal) endpoints.
+             *     Omitted when CubeMaster reports no container list.
+             */
+            containers?: components["schemas"]["SandboxContainerInfo"][] | null;
+            /** Format: int32 */
+            cpuCount: number;
             /** Format: int32 */
             diskSizeMB?: number | null;
             domain?: string | null;
@@ -478,6 +615,25 @@ export interface components {
         };
         TemplateAliasLookupResponse: {
             public: boolean;
+            templateID: string;
+        };
+        /** @description Job envelope returned by create / rebuild. */
+        TemplateBuildJob: {
+            errorMessage?: string;
+            jobID: string;
+            phase: string;
+            /** Format: int32 */
+            progress: number;
+            status: string;
+            templateID: string;
+        };
+        /** @description Response for GET /templates/:id/builds/:bid/status */
+        TemplateBuildStatus: {
+            buildID: string;
+            message: string;
+            /** Format: int32 */
+            progress: number;
+            status: string;
             templateID: string;
         };
         TemplateCompatAdoptResponseView: {
@@ -808,9 +964,36 @@ export interface operations {
                     "application/json": components["schemas"]["ApiError"];
                 };
             };
+            /** @description The existing standard API request timeout expired before the synchronous delete completed */
+            408: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Paused sandbox cannot be admitted for internal resume because node capacity or resource metadata is unavailable */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
             /** @description Unexpected backend error */
             500: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Sandbox is pausing or another lifecycle operation is in progress (Retry-After 2); the Cubelet RPC has too little remaining time or its internal resume could not be completed (Retry-After 5) */
+            503: {
+                headers: {
+                    /** @description Seconds a client should wait before retrying DELETE */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -947,6 +1130,48 @@ export interface operations {
             };
             /** @description Template endpoint unavailable */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    create_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateTemplateRequest"];
+            };
+        };
+        responses: {
+            /** @description Template build job accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateBuildJob"];
+                };
+            };
+            /** @description Invalid request (bad alias, missing image, etc.) */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1107,6 +1332,245 @@ export interface operations {
                 };
             };
             /** @description Template not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    rebuild_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Template identifier */
+                templateID: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RebuildTemplateRequest"];
+            };
+        };
+        responses: {
+            /** @description Rebuild job accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateBuildJob"];
+                };
+            };
+            /** @description Template not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    delete_template: {
+        parameters: {
+            query?: {
+                /** @description CubeMaster instance_type filter */
+                instance_type?: string;
+                /** @description Wait for deletion to complete before returning */
+                sync?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Template identifier or alias */
+                templateID: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Template deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Template not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    update_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Template identifier */
+                templateID: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Not implemented; use POST /templates/{id} to rebuild */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    start_template_build: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Template identifier */
+                templateID: string;
+                /** @description Build identifier */
+                buildID: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Build started */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateBuildJob"];
+                };
+            };
+            /** @description Template or build not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    get_template_build_logs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Template identifier */
+                templateID: string;
+                /** @description Build identifier */
+                buildID: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Build logs (JSON) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Build not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    get_template_build_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Template identifier */
+                templateID: string;
+                /** @description Build identifier */
+                buildID: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Build status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateBuildStatus"];
+                };
+            };
+            /** @description Template or build not found */
             404: {
                 headers: {
                     [name: string]: unknown;

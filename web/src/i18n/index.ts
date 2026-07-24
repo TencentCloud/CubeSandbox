@@ -38,6 +38,7 @@ i18n
       'store',
       'agentHub',
       'auth',
+      'terminal',
     ],
     interpolation: {
       escapeValue: false,

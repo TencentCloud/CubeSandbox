@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Tencent. All rights reserved.
 
+/// <reference types="vitest/config" />
+
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -59,5 +61,12 @@ export default defineConfig({
       // Legacy /cubeapi proxy for backward compat during transition
       '/cubeapi': 'http://127.0.0.1:3000',
     },
+  },
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: ['./src/test/setup.ts'],
+    // xterm.js ships CSS imports; leave them to vite's transform pipeline.
+    css: false,
   },
 });

@@ -27,7 +27,7 @@ function buildSandboxes(): ListedSandboxDto[] {
       clientID: 'ops-east-1',
       startedAt: ago(137),
       endAt: later(3200),
-      cpuCount: '4000m',
+      cpuCount: 4000,
       memoryMB: 8192,
       diskSizeMB: 10_240,
       metadata: { project: 'data-pipeline', owner: 'ops@cube.dev', region: 'cn-shanghai' },
@@ -42,7 +42,7 @@ function buildSandboxes(): ListedSandboxDto[] {
       clientID: 'frontend-ci',
       startedAt: ago(32),
       endAt: later(1700),
-      cpuCount: '2000m',
+      cpuCount: 2000,
       memoryMB: 4096,
       diskSizeMB: 8192,
       metadata: { branch: 'feat/dashboard-ui' },
@@ -56,7 +56,7 @@ function buildSandboxes(): ListedSandboxDto[] {
       clientID: 'research',
       startedAt: ago(6200),
       endAt: later(800),
-      cpuCount: '2000m',
+      cpuCount: 2000,
       memoryMB: 2048,
       diskSizeMB: 4096,
       metadata: { paused_reason: 'manual' },
@@ -70,7 +70,7 @@ function buildSandboxes(): ListedSandboxDto[] {
       clientID: 'stage-cluster',
       startedAt: ago(48),
       endAt: later(3400),
-      cpuCount: '2000m',
+      cpuCount: 2000,
       memoryMB: 4096,
       diskSizeMB: 8192,
       metadata: { deployment: 'canary-0.3' },
@@ -259,6 +259,15 @@ export function getSandboxDetail(sandboxID: string): SandboxDetailDto | undefine
     ...clone(sandbox),
     envdAccessToken: `eat_${sandbox.sandboxID.slice(-8)}`,
     domain: 'cube.local',
+    // Single primary container, matching the multi-container SandboxDetail shape.
+    containers: [
+      {
+        name: 'sandbox',
+        containerID: `ctr_${sandbox.sandboxID.slice(-8)}`,
+        kind: 'sandbox',
+        envdPort: 49983,
+      },
+    ],
   };
 }
 
@@ -595,7 +604,7 @@ export function createSandbox(body: {
     clientID: 'dashboard',
     startedAt: new Date().toISOString(),
     endAt: later(body.timeout ?? 300),
-    cpuCount: '2000m',
+    cpuCount: 2000,
     memoryMB: 4096,
     diskSizeMB: 8192,
     metadata: body.metadata ?? {},

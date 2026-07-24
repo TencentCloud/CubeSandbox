@@ -86,6 +86,43 @@ async function refreshAccessToken(): Promise<string | null> {
   return null;
 }
 
+// Refresh margin: a token expiring within this window counts as stale.
+const REFRESH_SKEW_MS = 30_000;
+
+// Reads `exp` from the JWT payload without verifying the signature — the
+// server remains the authority; this only decides whether a refresh is worth
+// attempting before a non-HTTP caller uses the token.
+function accessTokenExpiring(token: string): boolean {
+  try {
+    const seg = token.split('.')[1];
+    const b64 = seg.replace(/-/g, '+').replace(/_/g, '/');
+    const payload = JSON.parse(atob(b64 + '='.repeat((4 - (b64.length % 4)) % 4))) as {
+      exp?: number;
+    };
+    return typeof payload.exp === 'number' && payload.exp * 1000 <= Date.now() + REFRESH_SKEW_MS;
+  } catch {
+    return false; // not a JWT — let the server judge the token as-is
+  }
+}
+
+// Token freshness for callers that bypass the HTTP layer. The terminal
+// WebSocket cannot carry an Authorization header (browser limitation) and
+// sends the token as a subprotocol, so api()/ops()'s 401 auto-refresh never
+// runs for it; refreshing here keeps a long-idle page from failing the WS
+// handshake on an expired token. Resolves to null when there is no token
+// (auth-disabled deployments) or the refresh failed.
+export async function ensureFreshToken(): Promise<string | null> {
+  const token = getAccessToken();
+  if (!token) return null;
+  if (!accessTokenExpiring(token)) return token;
+  if (!refreshing) {
+    refreshing = refreshAccessToken().finally(() => {
+      refreshing = null;
+    });
+  }
+  return refreshing;
+}
+
 // --- SDK API (CubeAPI via CubeOps proxy, JWT Bearer auth) ---
 
 export async function api<T = unknown>(path: string, init: ApiInit = {}): Promise<T> {
