@@ -81,11 +81,15 @@ export function SandboxTerminalDialog({
     socketRef.current = socket;
     const pendingFrames: TerminalFrame[] = [];
     const maxPendingFrames = 16;
+    let inputDropNotified = false;
     const send = (frame: TerminalFrame) => {
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify(frame));
       } else if (socket.readyState === WebSocket.CONNECTING && pendingFrames.length < maxPendingFrames) {
         pendingFrames.push(frame);
+      } else if (frame.type === 'input' && !inputDropNotified) {
+        inputDropNotified = true;
+        terminal.writeln('\r\n\x1b[33mInput was ignored while the terminal was unavailable.\x1b[0m');
       }
     };
 

@@ -10,7 +10,7 @@ use std::{
 
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{CloseFrame as AxumCloseFrame, Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
     },
     http::{header::SEC_WEBSOCKET_PROTOCOL, HeaderMap, StatusCode},
@@ -21,7 +21,10 @@ use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio_tungstenite::{
     connect_async,
-    tungstenite::{client::IntoClientRequest, protocol::Message as TungsteniteMessage},
+    tungstenite::{
+        client::IntoClientRequest,
+        protocol::{CloseFrame as TungsteniteCloseFrame, Message as TungsteniteMessage},
+    },
 };
 use validator::Validate;
 
@@ -478,7 +481,12 @@ fn to_master_message(message: Message) -> Option<TungsteniteMessage> {
         Message::Binary(value) => Some(TungsteniteMessage::Binary(value)),
         Message::Ping(value) => Some(TungsteniteMessage::Ping(value)),
         Message::Pong(value) => Some(TungsteniteMessage::Pong(value)),
-        Message::Close(_) => Some(TungsteniteMessage::Close(None)),
+        Message::Close(frame) => Some(TungsteniteMessage::Close(frame.map(|frame| {
+            TungsteniteCloseFrame {
+                code: frame.code.into(),
+                reason: frame.reason.into_owned().into(),
+            }
+        }))),
     }
 }
 
@@ -488,7 +496,12 @@ fn to_browser_message(message: TungsteniteMessage) -> Option<Message> {
         TungsteniteMessage::Binary(value) => Some(Message::Binary(value.into())),
         TungsteniteMessage::Ping(value) => Some(Message::Ping(value.into())),
         TungsteniteMessage::Pong(value) => Some(Message::Pong(value.into())),
-        TungsteniteMessage::Close(_) => Some(Message::Close(None)),
+        TungsteniteMessage::Close(frame) => Some(Message::Close(frame.map(|frame| {
+            AxumCloseFrame {
+                code: frame.code.into(),
+                reason: frame.reason.into_owned().into(),
+            }
+        }))),
         TungsteniteMessage::Frame(_) => None,
     }
 }
@@ -570,14 +583,27 @@ mod terminal_tests {
 
     #[test]
     fn terminal_close_frames_are_forwarded() {
-        assert!(matches!(
-            to_master_message(Message::Close(None)),
-            Some(TungsteniteMessage::Close(None))
-        ));
-        assert!(matches!(
-            to_browser_message(TungsteniteMessage::Close(None)),
-            Some(Message::Close(None))
-        ));
+        let master = to_master_message(Message::Close(Some(AxumCloseFrame {
+            code: 1001,
+            reason: "browser leaving".into(),
+        })));
+        let Some(TungsteniteMessage::Close(Some(master))) = master else {
+            panic!("browser close frame was not forwarded");
+        };
+        assert_eq!(u16::from(master.code), 1001);
+        assert_eq!(master.reason, "browser leaving");
+
+        let browser = to_browser_message(TungsteniteMessage::Close(Some(
+            TungsteniteCloseFrame {
+                code: 1011_u16.into(),
+                reason: "backend failed".into(),
+            },
+        )));
+        let Some(Message::Close(Some(browser))) = browser else {
+            panic!("backend close frame was not forwarded");
+        };
+        assert_eq!(browser.code, 1011);
+        assert_eq!(browser.reason, "backend failed");
     }
 
     #[test]
