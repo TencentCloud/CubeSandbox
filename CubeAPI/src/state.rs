@@ -11,6 +11,9 @@ use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
+/// Process-local limiter scoped to one `AppState` and one CubeAPI lifetime.
+/// A restart discards all counts; permits must not be carried across reloaded
+/// application state.
 #[derive(Clone)]
 pub struct TerminalSessionLimiter {
     counts: Arc<DashMap<String, usize>>,

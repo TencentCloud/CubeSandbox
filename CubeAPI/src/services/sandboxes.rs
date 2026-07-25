@@ -28,6 +28,7 @@ const RET_CODE_HTTP_OK: i32 = 200;
 const RET_CODE_NOT_FOUND: i32 = 130404;
 const RET_CODE_CONFLICT: i32 = 130409;
 const RET_CODE_MASTER_INTERNAL: i32 = 130593;
+const CONTAINER_STATUS_RUNNING: i32 = 1;
 const HOSTDIR_MOUNT_KEY: &str = "host-mount";
 const ENV_VAR_NAME_MAX_LEN: usize = 256;
 const ENV_VAR_VALUE_MAX_LEN: usize = 4096;
@@ -797,7 +798,9 @@ fn parse_state_filter(value: Option<&str>) -> Option<SandboxState> {
 }
 
 fn is_terminal_target(container: &GetSandboxContainerItem) -> bool {
-    container.kind == "workload" && !container.container_id.is_empty() && container.status == 1
+    container.kind == "workload"
+        && !container.container_id.is_empty()
+        && container.status == CONTAINER_STATUS_RUNNING
 }
 
 fn is_success_ret_code(ret_code: i32) -> bool {

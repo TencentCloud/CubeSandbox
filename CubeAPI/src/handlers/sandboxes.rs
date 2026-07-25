@@ -2,6 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
+
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -177,6 +182,13 @@ pub async fn sandbox_terminal(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> AppResult<impl IntoResponse> {
+    let rate_limit_key = terminal_rate_limit_key(&headers);
+    if state.rate_limiter.check_key(&rate_limit_key).is_err() {
+        log_terminal_rejection(&state, &sandbox_id, "unknown", "rate_limit").await;
+        return Err(crate::error::AppError::TooManyRequests(
+            "Terminal rate limit exceeded. Slow down.".to_string(),
+        ));
+    }
     let operator = match terminal_operator(&state, &headers).await {
         Ok(operator) => operator,
         Err(error) => {
@@ -219,7 +231,7 @@ pub async fn sandbox_terminal(
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TerminalOpenFrame {
     #[serde(rename = "type")]
     frame_type: String,
@@ -276,15 +288,7 @@ async fn terminal_operator(state: &AppState, headers: &HeaderMap) -> AppResult<S
             "terminal requires WebUI session authentication".to_string(),
         ));
     };
-    let protocol = headers
-        .get(SEC_WEBSOCKET_PROTOCOL)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-    let token = protocol
-        .split(',')
-        .map(str::trim)
-        .find(|value| *value != TERMINAL_SUBPROTOCOL)
-        .filter(|value| !value.is_empty());
+    let token = terminal_session_token(headers);
     let Some(token) = token else {
         return Err(crate::error::AppError::Unauthorized(
             "terminal session token is required".to_string(),
@@ -303,6 +307,26 @@ async fn terminal_operator(state: &AppState, headers: &HeaderMap) -> AppResult<S
                 "terminal session is invalid or expired".to_string(),
             )
         })
+}
+
+fn terminal_session_token(headers: &HeaderMap) -> Option<&str> {
+    let protocol = headers
+        .get(SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    protocol
+        .split(',')
+        .map(str::trim)
+        .find(|value| *value != TERMINAL_SUBPROTOCOL)
+        .filter(|value| !value.is_empty())
+}
+
+fn terminal_rate_limit_key(headers: &HeaderMap) -> String {
+    let mut hasher = DefaultHasher::new();
+    terminal_session_token(headers)
+        .unwrap_or("anonymous")
+        .hash(&mut hasher);
+    format!("terminal:{:016x}", hasher.finish())
 }
 
 async fn log_terminal_rejection(
@@ -487,7 +511,7 @@ mod terminal_tests {
     #[test]
     fn terminal_open_frame_forwards_only_allowed_fields() {
         let message = Message::Text(
-            r#"{"type":"open","sandboxId":"sandbox-1","containerId":"main","cols":120,"rows":40,"args":["/bin/bash"],"env":["TOKEN=secret"]}"#
+            r#"{"type":"open","sandboxId":"sandbox-1","containerId":"main","cols":120,"rows":40}"#
                 .into(),
         );
         let frame = terminal_open_target(&message, "sandbox-1").unwrap();
@@ -500,6 +524,33 @@ mod terminal_tests {
         assert_eq!(payload["rows"], 40);
         assert!(payload.get("args").is_none());
         assert!(payload.get("env").is_none());
+    }
+
+    #[test]
+    fn terminal_open_frame_rejects_unknown_fields() {
+        let message = Message::Text(
+            r#"{"type":"open","sandboxId":"sandbox-1","containerId":"main","args":["/bin/bash"]}"#
+                .into(),
+        );
+        assert_eq!(
+            terminal_open_target(&message, "sandbox-1"),
+            Err("invalid terminal open frame")
+        );
+    }
+
+    #[test]
+    fn terminal_rate_limit_key_is_stable_without_retaining_token() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            SEC_WEBSOCKET_PROTOCOL,
+            "cube-terminal, session-secret".parse().unwrap(),
+        );
+        let first = terminal_rate_limit_key(&headers);
+        let second = terminal_rate_limit_key(&headers);
+
+        assert_eq!(first, second);
+        assert!(first.starts_with("terminal:"));
+        assert!(!first.contains("session-secret"));
     }
 }
 

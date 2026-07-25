@@ -79,13 +79,27 @@ export function SandboxTerminalDialog({
       ? new WebSocket(terminalSocketUrl(sandboxId), ['cube-terminal', sessionToken])
       : new WebSocket(terminalSocketUrl(sandboxId), ['cube-terminal']);
     socketRef.current = socket;
+    const pendingFrames: TerminalFrame[] = [];
+    const maxPendingFrames = 16;
     const send = (frame: TerminalFrame) => {
-      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(frame));
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify(frame));
+      } else if (socket.readyState === WebSocket.CONNECTING && pendingFrames.length < maxPendingFrames) {
+        pendingFrames.push(frame);
+      }
     };
 
     socket.onopen = () => {
       setStatus('connected');
-      send({ type: 'open', sandboxId, containerId: target.containerID, cols: terminal.cols, rows: terminal.rows });
+      const openFrame: TerminalFrame = {
+        type: 'open',
+        sandboxId,
+        containerId: target.containerID,
+        cols: terminal.cols,
+        rows: terminal.rows,
+      };
+      socket.send(JSON.stringify(openFrame));
+      pendingFrames.splice(0).forEach(send);
     };
     socket.onmessage = (event) => {
       const receive = (data: string) => {
@@ -100,7 +114,9 @@ export function SandboxTerminalDialog({
       else if (event.data instanceof Blob) void event.data.text().then(receive);
     };
     socket.onerror = () => terminal.writeln('\r\n\x1b[31mTerminal connection failed.\x1b[0m');
+    let keepalive: number | undefined;
     socket.onclose = () => {
+      if (keepalive !== undefined) window.clearInterval(keepalive);
       setStatus('disconnected');
       terminal.writeln('\r\n\x1b[90mTerminal session closed.\x1b[0m');
     };
@@ -117,10 +133,10 @@ export function SandboxTerminalDialog({
     const observer = new ResizeObserver(resize);
     observer.observe(hostRef.current);
 
-    const keepalive = window.setInterval(() => send({ type: 'keepalive' } as TerminalFrame), 20_000);
+    keepalive = window.setInterval(() => send({ type: 'keepalive' } as TerminalFrame), 20_000);
 
     return () => {
-      window.clearInterval(keepalive);
+      if (keepalive !== undefined) window.clearInterval(keepalive);
       window.clearTimeout(resizeTimer);
       observer.disconnect();
       disposable.dispose();

@@ -60,6 +60,7 @@ type terminalServerFrame struct {
 // sandbox/container; later frames can only carry input, resize, or keepalive.
 func TerminalWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 	if !terminalGatewayAuthorized(r) {
+		log.G(r.Context()).Warn("terminal gateway authorization failed")
 		http.Error(w, "terminal gateway is not authorized", http.StatusUnauthorized)
 		return
 	}
