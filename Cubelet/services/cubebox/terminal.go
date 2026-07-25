@@ -88,7 +88,7 @@ func (s *service) AttachTerminal(stream cubebox.CubeboxMgr_AttachTerminalServer)
 	}
 	task, err := container.Container.Task(ctx, nil)
 	if err != nil {
-		return status.Errorf(codes.FailedPrecondition, "container is not running: %v", err)
+		return status.Errorf(codes.FailedPrecondition, "container task is not available: %v", err)
 	}
 
 	processSpec, err := terminalProcessSpec(ctx, task, open)
