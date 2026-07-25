@@ -223,6 +223,10 @@ func readTerminalFrame(conn *websocket.Conn, frame *terminalClientFrame) error {
 	if messageType != websocket.TextMessage {
 		return errors.New("terminal frames must be JSON text")
 	}
+	if len(data) == 1 && data[0] == 'K' {
+		*frame = terminalClientFrame{Type: "keepalive"}
+		return nil
+	}
 	if err := json.Unmarshal(data, frame); err != nil {
 		return errors.New("invalid terminal frame")
 	}

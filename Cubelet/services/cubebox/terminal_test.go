@@ -102,10 +102,11 @@ func TestResizeTerminalForwardsNonZeroDimensions(t *testing.T) {
 
 	require.NoError(t, resizeTerminal(context.Background(), process, 120, 40))
 	require.NoError(t, resizeTerminal(context.Background(), process, 0, 40))
+	require.NoError(t, resizeTerminal(context.Background(), process, 9999999, 9999999))
 
 	process.mu.Lock()
 	defer process.mu.Unlock()
-	assert.Equal(t, [][2]uint32{{120, 40}}, process.resizeCalls)
+	assert.Equal(t, [][2]uint32{{120, 40}, {terminalMaxCols, terminalMaxRows}}, process.resizeCalls)
 }
 
 func TestMergeTerminalEnvOverridesByName(t *testing.T) {

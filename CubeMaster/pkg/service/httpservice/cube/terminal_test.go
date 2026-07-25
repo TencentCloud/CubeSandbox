@@ -70,3 +70,39 @@ func TestReadTerminalFrameTreatsNormalCloseAsEOF(t *testing.T) {
 		t.Fatal("timed out waiting for close frame")
 	}
 }
+
+func TestReadTerminalFrameRecognizesCompactKeepalive(t *testing.T) {
+	result := make(chan terminalClientFrame, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var frame terminalClientFrame
+		if readTerminalFrame(conn, &frame) == nil {
+			result <- frame
+		}
+	}))
+	defer server.Close()
+
+	url := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.WriteMessage(websocket.TextMessage, []byte{'K'}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case frame := <-result:
+		if frame.Type != "keepalive" {
+			t.Fatalf("frame type = %q, want keepalive", frame.Type)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for keepalive frame")
+	}
+}

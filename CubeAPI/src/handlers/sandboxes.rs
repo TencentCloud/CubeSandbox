@@ -3,7 +3,7 @@
 //
 
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{hash_map::DefaultHasher, HashSet},
     hash::{Hash, Hasher},
     time::Duration,
 };
@@ -34,7 +34,7 @@ use crate::{
     models::{
         ApiError, ConnectSandbox, ListSandboxesQuery, ListSandboxesV2Query, NewSandbox,
         RefreshRequest, ResumedSandbox, Sandbox, SandboxDetail, SandboxLogsQuery,
-        SandboxLogsV2Query, SandboxLogsV2Response, SetTimeoutRequest,
+        SandboxLogsV2Query, SandboxLogsV2Response, SandboxState, SetTimeoutRequest,
     },
     state::AppState,
 };
@@ -175,6 +175,8 @@ pub async fn get_sandbox(
 // ─── GET /sandboxes/:sandboxID/terminal/ws ────────────────────────────────
 
 const TERMINAL_MAX_FRAME_SIZE: usize = 64 * 1024;
+const TERMINAL_MAX_COLS: u32 = 512;
+const TERMINAL_MAX_ROWS: u32 = 256;
 const TERMINAL_SUBPROTOCOL: &str = "cube-terminal";
 const TERMINAL_BROWSER_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -212,9 +214,29 @@ pub async fn sandbox_terminal(
             "terminal gateway is not configured".to_string(),
         ));
     };
-    if let Err(error) = state.services.sandboxes.get_sandbox(&sandbox_id).await {
-        log_terminal_rejection(&state, &sandbox_id, &operator, "sandbox_unavailable").await;
-        return Err(error);
+    let detail = match state.services.sandboxes.get_sandbox(&sandbox_id).await {
+        Ok(detail) => detail,
+        Err(error) => {
+            log_terminal_rejection(&state, &sandbox_id, &operator, "sandbox_unavailable").await;
+            return Err(error);
+        }
+    };
+    if detail.state != SandboxState::Running {
+        log_terminal_rejection(&state, &sandbox_id, &operator, "sandbox_not_running").await;
+        return Err(crate::error::AppError::Conflict(
+            "sandbox must be running to open a terminal".to_string(),
+        ));
+    }
+    let terminal_targets: HashSet<String> = detail
+        .terminal_targets
+        .into_iter()
+        .map(|target| target.container_id)
+        .collect();
+    if terminal_targets.is_empty() {
+        log_terminal_rejection(&state, &sandbox_id, &operator, "no_terminal_target").await;
+        return Err(crate::error::AppError::Conflict(
+            "sandbox has no running workload container".to_string(),
+        ));
     }
     let Some(session_permit) = state.terminal_sessions.try_acquire(&sandbox_id) else {
         log_terminal_rejection(&state, &sandbox_id, &operator, "session_limit").await;
@@ -233,6 +255,7 @@ pub async fn sandbox_terminal(
                 sandbox_id,
                 gateway_token,
                 operator,
+                terminal_targets,
                 session_permit,
             )
             .await;
@@ -266,6 +289,9 @@ fn terminal_open_target(
     }
     if frame.sandbox_id != expected_sandbox_id {
         return Err("terminal sandbox does not match request path");
+    }
+    if frame.cols > TERMINAL_MAX_COLS || frame.rows > TERMINAL_MAX_ROWS {
+        return Err("terminal dimensions exceed supported limits");
     }
     Ok(frame)
 }
@@ -330,6 +356,8 @@ fn terminal_session_token(headers: &HeaderMap) -> Option<&str> {
 }
 
 fn terminal_rate_limit_key(headers: &HeaderMap) -> String {
+    // This is only a process-local bucket key; authentication is performed
+    // separately, and hashing here avoids retaining the raw session token.
     let mut hasher = DefaultHasher::new();
     terminal_session_token(headers)
         .unwrap_or("anonymous")
@@ -360,8 +388,41 @@ async fn proxy_terminal(
     sandbox_id: String,
     gateway_token: String,
     operator: String,
+    terminal_targets: HashSet<String>,
     _session_permit: crate::state::TerminalSessionPermit,
 ) {
+    let mut browser = browser;
+    let opening = match browser.next().await {
+        Some(Ok(message)) => match terminal_open_target(&message, &sandbox_id) {
+            Ok(frame) if terminal_targets.contains(&frame.container_id) => frame,
+            Ok(_) => {
+                log_terminal_rejection(
+                    &state,
+                    &sandbox_id,
+                    &operator,
+                    "invalid_container_target",
+                )
+                .await;
+                let _ = tokio::time::timeout(
+                    TERMINAL_BROWSER_WRITE_TIMEOUT,
+                    browser.send(terminal_error("terminal target is not available")),
+                )
+                .await;
+                return;
+            }
+            Err(error) => {
+                log_terminal_rejection(&state, &sandbox_id, &operator, "invalid_open_frame")
+                    .await;
+                let _ = tokio::time::timeout(
+                    TERMINAL_BROWSER_WRITE_TIMEOUT,
+                    browser.send(terminal_error(error)),
+                )
+                .await;
+                return;
+            }
+        },
+        _ => return,
+    };
     let master_url = state
         .config
         .cubemaster_url
@@ -398,49 +459,31 @@ async fn proxy_terminal(
     };
     let (mut browser_tx, mut browser_rx) = browser.split();
     let (mut master_tx, mut master_rx) = master.split();
-    let mut container_id = None;
+    if master_tx
+        .send(sanitized_terminal_open_message(&opening))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Info, "terminal.session.open")
+                .field("sandbox_id", &sandbox_id)
+                .field("container_id", &opening.container_id)
+                .field("operator", &operator),
+        )
+        .await;
+    let container_id = opening.container_id;
     loop {
         tokio::select! {
             incoming = browser_rx.next() => match incoming {
                 Some(Ok(message)) => {
-                    let opening = if container_id.is_none() {
-                        match terminal_open_target(&message, &sandbox_id) {
-                            Ok(frame) => Some(frame),
-                            Err(error) => {
-                                log_terminal_rejection(
-                                    &state,
-                                    &sandbox_id,
-                                    &operator,
-                                    "invalid_open_frame",
-                                )
-                                .await;
-                                let _ = tokio::time::timeout(
-                                    TERMINAL_BROWSER_WRITE_TIMEOUT,
-                                    browser_tx.send(terminal_error(error)),
-                                )
-                                .await;
-                                break;
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                    let outgoing = opening
-                        .as_ref()
-                        .map(sanitized_terminal_open_message)
-                        .or_else(|| to_master_message(message));
+                    let outgoing = to_master_message(message);
                     match outgoing {
                         Some(message) => {
                             if master_tx.send(message).await.is_err() { break; }
-                            if let Some(opening) = opening {
-                                state.logger.log(
-                                    LogEvent::new(LogLevel::Info, "terminal.session.open")
-                                        .field("sandbox_id", &sandbox_id)
-                                        .field("container_id", &opening.container_id)
-                                        .field("operator", &operator),
-                                ).await;
-                                container_id = Some(opening.container_id);
-                            }
                         },
                         None => break,
                     }
@@ -462,17 +505,15 @@ async fn proxy_terminal(
             },
         }
     }
-    if let Some(container_id) = container_id {
-        state
-            .logger
-            .log(
-                LogEvent::new(LogLevel::Info, "terminal.session.close")
-                    .field("sandbox_id", &sandbox_id)
-                    .field("container_id", &container_id)
-                    .field("operator", &operator),
-            )
-            .await;
-    }
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Info, "terminal.session.close")
+                .field("sandbox_id", &sandbox_id)
+                .field("container_id", &container_id)
+                .field("operator", &operator),
+        )
+        .await;
 }
 
 fn to_master_message(message: Message) -> Option<TungsteniteMessage> {
@@ -554,6 +595,9 @@ mod terminal_tests {
         assert!(payload.get("env").is_none());
     }
 
+    /// CubeAPI deliberately rejects process arguments, environment overrides,
+    /// and cwd at deserialization; sanitization only forwards the workload
+    /// target and TTY size selected by the browser.
     #[test]
     fn terminal_open_frame_rejects_unknown_fields() {
         let message = Message::Text(
@@ -563,6 +607,18 @@ mod terminal_tests {
         assert_eq!(
             terminal_open_target(&message, "sandbox-1"),
             Err("invalid terminal open frame")
+        );
+    }
+
+    #[test]
+    fn terminal_open_frame_rejects_oversized_dimensions() {
+        let message = Message::Text(
+            r#"{"type":"open","sandboxId":"sandbox-1","containerId":"main","cols":513,"rows":40}"#
+                .into(),
+        );
+        assert_eq!(
+            terminal_open_target(&message, "sandbox-1"),
+            Err("terminal dimensions exceed supported limits")
         );
     }
 

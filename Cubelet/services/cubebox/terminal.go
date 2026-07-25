@@ -30,6 +30,8 @@ const (
 	terminalFIFODir               = "/data/cubelet/fifo"
 	terminalMaxStdinFrame         = 64 * 1024
 	terminalStdinQueueDepth       = 8
+	terminalMaxCols               = 512
+	terminalMaxRows               = 256
 )
 
 // terminalStreamWriter serializes container stdout/stderr into the gRPC stream.
@@ -283,6 +285,12 @@ func mergeTerminalEnv(base, overrides []string) []string {
 func resizeTerminal(ctx context.Context, process containerd.Process, cols, rows uint32) error {
 	if cols == 0 || rows == 0 {
 		return nil
+	}
+	if cols > terminalMaxCols {
+		cols = terminalMaxCols
+	}
+	if rows > terminalMaxRows {
+		rows = terminalMaxRows
 	}
 	return process.Resize(ctx, cols, rows)
 }
