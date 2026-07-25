@@ -802,6 +802,8 @@ message TerminalClientMessage {
 }
 
 message TerminalOpenRequest {
+  // Reserved as a stable correlation identifier for future distributed tracing
+  // across gateway, CubeMaster, and Cubelet; not an idempotency or cancellation key.
   string request_id = 1;
   string sandbox_id = 2;
   string container_id = 3;

@@ -178,6 +178,7 @@ const TERMINAL_MAX_FRAME_SIZE: usize = 64 * 1024;
 const TERMINAL_MAX_COLS: u32 = 512;
 const TERMINAL_MAX_ROWS: u32 = 256;
 const TERMINAL_SUBPROTOCOL: &str = "cube-terminal";
+const TERMINAL_BROWSER_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 const TERMINAL_BROWSER_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Upgrades an authenticated browser terminal session and proxies it to the
@@ -392,36 +393,46 @@ async fn proxy_terminal(
     _session_permit: crate::state::TerminalSessionPermit,
 ) {
     let mut browser = browser;
-    let opening = match browser.next().await {
-        Some(Ok(message)) => match terminal_open_target(&message, &sandbox_id) {
-            Ok(frame) if terminal_targets.contains(&frame.container_id) => frame,
-            Ok(_) => {
-                log_terminal_rejection(
-                    &state,
-                    &sandbox_id,
-                    &operator,
-                    "invalid_container_target",
-                )
-                .await;
-                let _ = tokio::time::timeout(
-                    TERMINAL_BROWSER_WRITE_TIMEOUT,
-                    browser.send(terminal_error("terminal target is not available")),
-                )
-                .await;
-                return;
-            }
-            Err(error) => {
-                log_terminal_rejection(&state, &sandbox_id, &operator, "invalid_open_frame")
-                    .await;
-                let _ = tokio::time::timeout(
-                    TERMINAL_BROWSER_WRITE_TIMEOUT,
-                    browser.send(terminal_error(error)),
-                )
-                .await;
-                return;
-            }
-        },
+    let first_message =
+        match tokio::time::timeout(TERMINAL_BROWSER_OPEN_TIMEOUT, browser.next()).await {
+        Ok(Some(Ok(message))) => message,
+        Err(_) => {
+            log_terminal_rejection(&state, &sandbox_id, &operator, "open_frame_timeout").await;
+            let _ = tokio::time::timeout(
+                TERMINAL_BROWSER_WRITE_TIMEOUT,
+                browser.send(terminal_error("terminal open frame timed out")),
+            )
+            .await;
+            return;
+        }
         _ => return,
+    };
+    let opening = match terminal_open_target(&first_message, &sandbox_id) {
+        Ok(frame) if terminal_targets.contains(&frame.container_id) => frame,
+        Ok(_) => {
+            log_terminal_rejection(
+                &state,
+                &sandbox_id,
+                &operator,
+                "invalid_container_target",
+            )
+            .await;
+            let _ = tokio::time::timeout(
+                TERMINAL_BROWSER_WRITE_TIMEOUT,
+                browser.send(terminal_error("terminal target is not available")),
+            )
+            .await;
+            return;
+        }
+        Err(error) => {
+            log_terminal_rejection(&state, &sandbox_id, &operator, "invalid_open_frame").await;
+            let _ = tokio::time::timeout(
+                TERMINAL_BROWSER_WRITE_TIMEOUT,
+                browser.send(terminal_error(error)),
+            )
+            .await;
+            return;
+        }
     };
     let master_url = state
         .config

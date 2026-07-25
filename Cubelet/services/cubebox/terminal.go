@@ -122,8 +122,9 @@ func (s *service) AttachTerminal(stream cubebox.CubeboxMgr_AttachTerminalServer)
 		return status.Errorf(codes.Internal, "create terminal process: %v", err)
 	}
 	var processExited atomic.Bool
+	processStarted := false
 	defer func() {
-		cleanupTerminalProcess(ctx, process, processExited.Load())
+		cleanupTerminalProcess(ctx, process, processStarted, processExited.Load())
 	}()
 
 	exitStatus, err := process.Wait(ctx)
@@ -133,6 +134,7 @@ func (s *service) AttachTerminal(stream cubebox.CubeboxMgr_AttachTerminalServer)
 	if err := process.Start(ctx); err != nil {
 		return status.Errorf(codes.Internal, "start terminal process: %v", err)
 	}
+	processStarted = true
 	if err := resizeTerminal(ctx, process, open.GetCols(), open.GetRows()); err != nil {
 		return status.Errorf(codes.Internal, "resize terminal: %v", err)
 	}
@@ -200,7 +202,12 @@ func enqueueTerminalStdin(queue chan<- []byte, data []byte) error {
 	}
 }
 
-func cleanupTerminalProcess(ctx context.Context, process containerd.Process, processExited bool) {
+func cleanupTerminalProcess(
+	ctx context.Context,
+	process containerd.Process,
+	processStarted bool,
+	processExited bool,
+) {
 	namespace, ok := namespaces.Namespace(ctx)
 	if !ok {
 		namespace = namespaces.Default
@@ -211,7 +218,7 @@ func cleanupTerminalProcess(ctx context.Context, process containerd.Process, pro
 	)
 	defer cancel()
 
-	if !processExited {
+	if processStarted && !processExited {
 		exitStatus, err := process.Wait(cleanupCtx)
 		if err != nil {
 			log.G(cleanupCtx).Warnf("terminal: wait for exec process cleanup failed: %v", err)

@@ -76,7 +76,7 @@ func (p *stubTerminalProcess) Resize(_ context.Context, width, height uint32) er
 func TestCleanupTerminalProcessKillsWaitsAndDeletesActiveProcess(t *testing.T) {
 	process := newStubTerminalProcess()
 
-	cleanupTerminalProcess(context.Background(), process, false)
+	cleanupTerminalProcess(context.Background(), process, true, false)
 
 	process.mu.Lock()
 	defer process.mu.Unlock()
@@ -88,7 +88,19 @@ func TestCleanupTerminalProcessKillsWaitsAndDeletesActiveProcess(t *testing.T) {
 func TestCleanupTerminalProcessOnlyDeletesExitedProcess(t *testing.T) {
 	process := newStubTerminalProcess()
 
-	cleanupTerminalProcess(context.Background(), process, true)
+	cleanupTerminalProcess(context.Background(), process, true, true)
+
+	process.mu.Lock()
+	defer process.mu.Unlock()
+	assert.Zero(t, process.waitCalls)
+	assert.Zero(t, process.killCalls)
+	assert.Equal(t, 1, process.deleteCalls)
+}
+
+func TestCleanupTerminalProcessOnlyDeletesUnstartedProcess(t *testing.T) {
+	process := newStubTerminalProcess()
+
+	cleanupTerminalProcess(context.Background(), process, false, false)
 
 	process.mu.Lock()
 	defer process.mu.Unlock()
