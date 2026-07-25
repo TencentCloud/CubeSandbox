@@ -21,18 +21,35 @@ type Selector interface {
 
 func NewSelector() []Selector {
 	conf := config.GetConfig().Scheduler
-	if conf == nil || conf.Filter == nil {
+	if conf == nil {
 		return []Selector{}
 	}
+	return buildSelectors(conf)
+}
+
+func buildSelectors(conf *config.WrapperSchedulerConf) []Selector {
 	ss := make([]Selector, 0)
-	for _, name := range conf.Filter.EnableFilters {
+	enableFilters := []string(nil)
+	if conf.Filter != nil {
+		enableFilters = conf.Filter.EnableFilters
+	}
+	seen := make(map[string]struct{}, len(enableFilters)+1)
+	for _, name := range enableFilters {
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
 
 		fn := reflect.ValueOf(filters[name])
-
 		if !fn.IsValid() {
 			continue
 		}
 		ss = append(ss, fn.Call(nil)[0].Interface().(Selector))
+	}
+	if conf.ScarceResourceFilterEnabled() {
+		if _, ok := seen["scarce_resource"]; !ok {
+			ss = append(ss, NewScarceResourceFilter())
+		}
 	}
 	return ss
 }
@@ -44,4 +61,5 @@ var filters = map[string]interface{}{
 	"realtime_create_num": NewRealtimecreatelimit,
 	"disk":                NewDiskFilter,
 	"thirtparty":          NewThirtpartyFilter,
+	"scarce_resource":     NewScarceResourceFilter,
 }

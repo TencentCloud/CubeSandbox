@@ -322,3 +322,44 @@ func TestGetAllowedHostMountPrefixes_DefaultDefensiveCopy(t *testing.T) {
 	got2 := GetAllowedHostMountPrefixes()
 	assert.Equal(t, "/data/shared/", got2[0])
 }
+
+func TestScarceResourceFilterConfDefaults(t *testing.T) {
+	disabled := (&ScarceResourceFilterConf{Enable: false}).EffectiveResources()
+	assert.Nil(t, disabled)
+
+	enabled := (&ScarceResourceFilterConf{Enable: true}).EffectiveResources()
+	assert.Len(t, enabled, 1)
+	assert.Equal(t, "gpu", enabled[0].LabelKey)
+	assert.Equal(t, []string{"true"}, enabled[0].LabelValues)
+
+	custom := (&ScarceResourceFilterConf{
+		Enable: true,
+		Resources: []ScarceResourceDef{{
+			LabelKey:    "npu",
+			LabelValues: []string{"910b"},
+		}},
+	}).EffectiveResources()
+	assert.Len(t, custom, 1)
+	assert.Equal(t, "npu", custom[0].LabelKey)
+}
+
+func TestScarceResourceFilterConfEffectiveResourcesDefensiveCopy(t *testing.T) {
+	conf := &ScarceResourceFilterConf{
+		Enable: true,
+		Resources: []ScarceResourceDef{{
+			LabelKey:    "gpu",
+			LabelValues: []string{"true"},
+		}},
+	}
+	got := conf.EffectiveResources()
+	got[0].LabelValues[0] = "hacked"
+	assert.Equal(t, "true", conf.Resources[0].LabelValues[0])
+}
+
+func TestSchedulerConfScarceResourceFilterEnabled(t *testing.T) {
+	sconf := &SchedulerConf{
+		ScarceResourceFilter: &ScarceResourceFilterConf{Enable: true},
+	}
+	assert.True(t, sconf.ScarceResourceFilterEnabled())
+	assert.Len(t, sconf.EffectiveScarceResources(), 1)
+}

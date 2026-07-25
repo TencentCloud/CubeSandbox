@@ -110,3 +110,18 @@ scheduler:
       - "mem"
       - "template_locality"
       - "realtime_create_num"
+  # Scarce-resource avoidance (SRA): keep sandboxes that do not request a scarce
+  # resource (for example GPU) off nodes labeled with that resource. Disabled by
+  # default; set scarce_resource_filter.enable to true. The scarce_resource
+  # filter is registered automatically when enabled (no need to list it below).
+  # GPU sandboxes must declare demand via com.nodeaffinity.selector (e.g.
+  # [{"key":"gpu","operator":"Exists"}]); also add "gpu" to
+  # node_affinity_selector_allowed_keys below when enabling SRA for GPU workloads.
+  # node_affinity_selector_allowed_keys:
+  #   - gpu
+  # scarce_resource_filter:
+  #   enable: true
+  #   resources:
+  #     - label_key: gpu
+  #       label_values: ["true"]   # set explicit values for custom resources;
+  #                               # empty label_values: gpu-only false/0 negation

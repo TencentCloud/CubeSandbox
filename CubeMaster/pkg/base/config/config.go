@@ -205,6 +205,7 @@ type SchedulerConf struct {
 	ThirtpartyFilterInstanceType     map[string]bool                   `yaml:"thirtparty_filter_instance_type"`
 	InstanceTypeConf                 map[string]InstanceTypeConf       `yaml:"instance_type_conf"`
 	NodeAffinitySelectorAllowedKeys  []string                          `yaml:"node_affinity_selector_allowed_keys"`
+	ScarceResourceFilter             *ScarceResourceFilterConf         `yaml:"scarce_resource_filter"`
 
 	// IgnoreRedisAllocation, when true, makes the scheduler ignore the
 	// per-node allocated CPU/Mem usage recorded in Redis (treat allocated as
@@ -498,6 +499,56 @@ func (s *SchedulerConf) GetEffectiveNodeMaxMemReservedInMB(instanceType string, 
 
 type SchedulerFilterConf struct {
 	EnableFilters []string `yaml:"enable_filters"`
+}
+
+// ScarceResourceFilterConf keeps non-requesting sandboxes off nodes that carry
+// scarce-resource labels (for example GPU). Disabled by default.
+type ScarceResourceFilterConf struct {
+	Enable    bool                 `yaml:"enable"`
+	Resources []ScarceResourceDef  `yaml:"resources"`
+}
+
+// ScarceResourceDef identifies a node label that marks scarce capacity.
+// When LabelValues is empty, any present non-empty label value counts as scarce.
+// For label_key "gpu" only, "false" and "0" are treated as non-scarce. Custom
+// resources should set explicit label_values (recommended for all non-GPU keys).
+type ScarceResourceDef struct {
+	LabelKey    string   `yaml:"label_key"`
+	LabelValues []string `yaml:"label_values"`
+}
+
+func (c *ScarceResourceFilterConf) EffectiveResources() []ScarceResourceDef {
+	if c == nil || !c.Enable {
+		return nil
+	}
+	if len(c.Resources) == 0 {
+		return []ScarceResourceDef{{
+			LabelKey:    "gpu",
+			LabelValues: []string{"true"},
+		}}
+	}
+	out := make([]ScarceResourceDef, len(c.Resources))
+	for i, def := range c.Resources {
+		out[i] = def
+		if def.LabelValues != nil {
+			out[i].LabelValues = append([]string(nil), def.LabelValues...)
+		}
+	}
+	return out
+}
+
+func (s *SchedulerConf) ScarceResourceFilterEnabled() bool {
+	return s != nil && s.ScarceResourceFilter != nil && s.ScarceResourceFilter.Enable
+}
+
+func (s *SchedulerConf) EffectiveScarceResources() []ScarceResourceDef {
+	if s == nil {
+		return nil
+	}
+	if s.ScarceResourceFilter == nil {
+		return nil
+	}
+	return s.ScarceResourceFilter.EffectiveResources()
 }
 
 type PostScoreConf struct {

@@ -20,6 +20,11 @@ type NodeLabels interface {
 
 type NodeSelector interface {
 	Match(node NodeLabels) bool
+	// Terms returns a copy of selector terms for inspection (for example
+	// scarce-resource detection). The outer term slice and each
+	// MatchExpressions / MatchFields slice are copied; NodeSelectorRequirement.Values
+	// maps are shared and must be treated as read-only by callers.
+	Terms() []NodeSelectorTerm
 }
 
 type PreferredSchedulingTerms interface {
@@ -45,6 +50,76 @@ func (w *wrapNodeSelector) Match(n NodeLabels) bool {
 		return true
 	}
 	return w.nodeselector.Match(labels.Set(n.Labels()))
+}
+
+func (w *wrapNodeSelector) Terms() []NodeSelectorTerm {
+	if w.nodeselector == nil || len(w.nodeselector.terms) == 0 {
+		return nil
+	}
+	return cloneNodeSelectorTerms(w.nodeselector.terms)
+}
+
+func cloneNodeSelectorTerms(terms []NodeSelectorTerm) []NodeSelectorTerm {
+	out := make([]NodeSelectorTerm, len(terms))
+	copy(out, terms)
+	for i := range out {
+		out[i].MatchExpressions = cloneNodeSelectorRequirements(out[i].MatchExpressions)
+		out[i].MatchFields = cloneNodeSelectorRequirements(out[i].MatchFields)
+	}
+	return out
+}
+
+func cloneNodeSelectorRequirements(reqs []NodeSelectorRequirement) []NodeSelectorRequirement {
+	if len(reqs) == 0 {
+		return nil
+	}
+	out := make([]NodeSelectorRequirement, len(reqs))
+	copy(out, reqs)
+	return out
+}
+
+// RequiresLabelKey reports whether ns contains a positive requirement for key:
+// Exists on key, or In on key with a value in scarceValues (any In on key when
+// scarceValues is empty).
+func RequiresLabelKey(ns NodeSelector, key string, scarceValues []string) bool {
+	if ns == nil || key == "" {
+		return false
+	}
+	for _, term := range ns.Terms() {
+		for _, req := range term.MatchExpressions {
+			if expressionRequiresLabelKey(req, key, scarceValues) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func expressionRequiresLabelKey(req NodeSelectorRequirement, key string, scarceValues []string) bool {
+	if req.Key != key {
+		return false
+	}
+	switch req.Operator {
+	case NodeSelectorOpExists:
+		return true
+	case NodeSelectorOpIn:
+		if len(scarceValues) == 0 {
+			return len(req.Values) > 0
+		}
+		for _, want := range scarceValues {
+			if _, ok := req.Values[want]; ok {
+				return true
+			}
+		}
+		return false
+	case NodeSelectorOpGt, NodeSelectorOpLt:
+		// TODO: Gt/Lt are not treated as positive scarce-resource requirements.
+		// Match() only supports these operators on memory-size/cpu-cores; a selector
+		// like gpu Gt "0" would not bypass SRA until explicitly implemented.
+		return false
+	default:
+		return false
+	}
 }
 
 type lazyErrorNodeSelector struct {

@@ -14,6 +14,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/scarceresource"
 )
 
 type backofffilter struct {
@@ -86,6 +87,8 @@ func (l *backofffilter) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error
 
 		newNodes.Append(n)
 	}
+	// Backoff retry skips the normal filter chain; apply SRA here as well.
+	newNodes = scarceresource.FilterNodes(selCtx, newNodes, l.ID()+"/scarce_resource", selCtx.Affinity.BackoffNodeSelector)
 	if log.IsDebug() {
 		log.G(selCtx.Ctx).Debugf("%v select:%v", l.ID(), newNodes.String())
 	} else {
