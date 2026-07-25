@@ -35,7 +35,8 @@ func TestTerminalGatewayAuthorization(t *testing.T) {
 func TestReadTerminalFrameTreatsNormalCloseAsEOF(t *testing.T) {
 	result := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := terminalUpgrader.Upgrade(w, r, nil)
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			result <- err
 			return

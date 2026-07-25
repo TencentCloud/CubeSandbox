@@ -32,14 +32,6 @@ const (
 	terminalOpenError      = "unable to open terminal"
 )
 
-var terminalUpgrader = websocket.Upgrader{
-	// This is an authenticated server-to-server hop, so the browser Origin is
-	// not an authorization boundary and CubeAPI may omit it. CubeMaster must
-	// remain on a private network: exposing this endpoint would let a client
-	// with a stolen gateway token connect from any browser origin.
-	CheckOrigin: func(*http.Request) bool { return true },
-}
-
 type terminalClientFrame struct {
 	Type        string `json:"type"`
 	SandboxID   string `json:"sandboxId,omitempty"`
@@ -65,7 +57,13 @@ func TerminalWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "terminal gateway is not authorized", http.StatusUnauthorized)
 		return
 	}
-	conn, err := terminalUpgrader.Upgrade(w, r, nil)
+	// This is an authenticated server-to-server hop, so the browser Origin is
+	// not an authorization boundary and CubeAPI may omit it. Keep the permissive
+	// upgrader local so no other handler can inherit this policy accidentally.
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(*http.Request) bool { return true },
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
