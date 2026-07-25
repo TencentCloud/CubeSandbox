@@ -14,8 +14,7 @@ import { getSessionToken } from '@/lib/session';
 type TerminalFrame =
   | { type: 'open'; sandboxId: string; containerId: string; cols: number; rows: number }
   | { type: 'input'; data: string }
-  | { type: 'resize'; cols: number; rows: number }
-  | { type: 'keepalive' };
+  | { type: 'resize'; cols: number; rows: number };
 
 function terminalSocketUrl(sandboxId: string): string {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -137,7 +136,9 @@ export function SandboxTerminalDialog({
     const observer = new ResizeObserver(resize);
     observer.observe(hostRef.current);
 
-    keepalive = window.setInterval(() => send({ type: 'keepalive' }), 20_000);
+    keepalive = window.setInterval(() => {
+      if (socket.readyState === WebSocket.OPEN) socket.send('K');
+    }, 20_000);
 
     return () => {
       if (keepalive !== undefined) window.clearInterval(keepalive);
