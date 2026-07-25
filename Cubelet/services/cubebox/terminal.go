@@ -127,6 +127,8 @@ func (s *service) AttachTerminal(stream cubebox.CubeboxMgr_AttachTerminalServer)
 		cleanupTerminalProcess(ctx, process, processStarted, processExited.Load())
 	}()
 
+	// containerd requires subscribing with Wait before Start so a short-lived
+	// exec cannot exit before its notification channel is registered.
 	exitStatus, err := process.Wait(ctx)
 	if err != nil {
 		return status.Errorf(codes.Internal, "wait for terminal process: %v", err)

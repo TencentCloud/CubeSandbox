@@ -11,10 +11,13 @@ import { Maximize2, RefreshCw, TerminalSquare, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { getSessionToken } from '@/lib/session';
 
+/** JSON terminal frames; keepalive uses a compact K text frame decoded before JSON by CubeMaster. */
 type TerminalFrame =
   | { type: 'open'; sandboxId: string; containerId: string; cols: number; rows: number }
   | { type: 'input'; data: string }
   | { type: 'resize'; cols: number; rows: number };
+
+const TERMINAL_KEEPALIVE_FRAME = 'K';
 
 function terminalSocketUrl(sandboxId: string): string {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -137,7 +140,7 @@ export function SandboxTerminalDialog({
     observer.observe(hostRef.current);
 
     keepalive = window.setInterval(() => {
-      if (socket.readyState === WebSocket.OPEN) socket.send('K');
+      if (socket.readyState === WebSocket.OPEN) socket.send(TERMINAL_KEEPALIVE_FRAME);
     }, 20_000);
 
     return () => {
