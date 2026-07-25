@@ -14,6 +14,8 @@ import (
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type stubTerminalProcess struct {
@@ -111,4 +113,19 @@ func TestMergeTerminalEnvOverridesByName(t *testing.T) {
 	)
 
 	assert.ElementsMatch(t, []string{"PATH=/usr/bin", "TERM=xterm-256color", "LANG=C.UTF-8"}, merged)
+}
+
+func TestEnqueueTerminalStdinIsBoundedAndCopiesFrames(t *testing.T) {
+	queue := make(chan []byte, 1)
+	frame := []byte("input")
+	require.NoError(t, enqueueTerminalStdin(queue, frame))
+	frame[0] = 'X'
+	assert.Equal(t, "input", string(<-queue))
+
+	require.NoError(t, enqueueTerminalStdin(queue, []byte("queued")))
+	err := enqueueTerminalStdin(queue, []byte("overflow"))
+	assert.Equal(t, codes.ResourceExhausted, status.Code(err))
+
+	err = enqueueTerminalStdin(queue, make([]byte, terminalMaxStdinFrame+1))
+	assert.Equal(t, codes.ResourceExhausted, status.Code(err))
 }

@@ -166,6 +166,7 @@ pub async fn get_sandbox(
 // ─── GET /sandboxes/:sandboxID/terminal/ws ────────────────────────────────
 
 const TERMINAL_MAX_FRAME_SIZE: usize = 64 * 1024;
+const TERMINAL_SUBPROTOCOL: &str = "cube-terminal";
 
 /// Upgrades an authenticated browser terminal session and proxies it to the
 /// private CubeMaster terminal endpoint. The browser never receives the
@@ -176,25 +177,32 @@ pub async fn sandbox_terminal(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> AppResult<impl IntoResponse> {
-    let operator = terminal_operator(&state, &headers).await?;
-    let gateway_token = state.config.terminal_gateway_token.clone().ok_or_else(|| {
-        crate::error::AppError::ServiceUnavailable("terminal gateway is not configured".to_string())
-    })?;
-    if gateway_token.trim().is_empty() {
+    let operator = match terminal_operator(&state, &headers).await {
+        Ok(operator) => operator,
+        Err(error) => {
+            log_terminal_rejection(&state, &sandbox_id, "unknown", "authentication_failed").await;
+            return Err(error);
+        }
+    };
+    let Some(gateway_token) = state
+        .config
+        .terminal_gateway_token
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        log_terminal_rejection(&state, &sandbox_id, &operator, "gateway_unavailable").await;
         return Err(crate::error::AppError::ServiceUnavailable(
             "terminal gateway is not configured".to_string(),
         ));
-    }
-    let session_permit = state
-        .terminal_sessions
-        .try_acquire(&sandbox_id)
-        .ok_or_else(|| {
-            crate::error::AppError::TooManyRequests(
-                "terminal session limit reached for sandbox".to_string(),
-            )
-        })?;
+    };
+    let Some(session_permit) = state.terminal_sessions.try_acquire(&sandbox_id) else {
+        log_terminal_rejection(&state, &sandbox_id, &operator, "session_limit").await;
+        return Err(crate::error::AppError::TooManyRequests(
+            "terminal session limit reached for sandbox".to_string(),
+        ));
+    };
     Ok(ws
-        .protocols(["cube-terminal"])
+        .protocols([TERMINAL_SUBPROTOCOL])
         .max_message_size(TERMINAL_MAX_FRAME_SIZE)
         .max_frame_size(TERMINAL_MAX_FRAME_SIZE)
         .on_upgrade(move |socket| async move {
@@ -275,7 +283,7 @@ async fn terminal_operator(state: &AppState, headers: &HeaderMap) -> AppResult<S
     let token = protocol
         .split(',')
         .map(str::trim)
-        .find(|value| *value != "cube-terminal")
+        .find(|value| *value != TERMINAL_SUBPROTOCOL)
         .filter(|value| !value.is_empty());
     let Some(token) = token else {
         return Err(crate::error::AppError::Unauthorized(
@@ -297,6 +305,23 @@ async fn terminal_operator(state: &AppState, headers: &HeaderMap) -> AppResult<S
         })
 }
 
+async fn log_terminal_rejection(
+    state: &AppState,
+    sandbox_id: &str,
+    operator: &str,
+    reason: &str,
+) {
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Warn, "terminal.session.reject")
+                .field("sandbox_id", sandbox_id)
+                .field("operator", operator)
+                .field("reason", reason),
+        )
+        .await;
+}
+
 async fn proxy_terminal(
     browser: WebSocket,
     state: AppState,
@@ -315,6 +340,7 @@ async fn proxy_terminal(
         Ok(request) => request,
         Err(error) => {
             tracing::error!(%error, sandbox_id, "terminal: invalid CubeMaster websocket URL");
+            log_terminal_rejection(&state, &sandbox_id, &operator, "invalid_backend_url").await;
             return;
         }
     };
@@ -326,6 +352,7 @@ async fn proxy_terminal(
         }
         Err(_) => {
             tracing::error!(sandbox_id, "terminal: invalid terminal gateway token");
+            log_terminal_rejection(&state, &sandbox_id, &operator, "invalid_gateway_token").await;
             return;
         }
     }
@@ -333,6 +360,7 @@ async fn proxy_terminal(
         Ok(connection) => connection,
         Err(error) => {
             tracing::warn!(%error, sandbox_id, operator, "terminal: CubeMaster connection failed");
+            log_terminal_rejection(&state, &sandbox_id, &operator, "backend_unavailable").await;
             return;
         }
     };
@@ -347,6 +375,13 @@ async fn proxy_terminal(
                         match terminal_open_target(&message, &sandbox_id) {
                             Ok(frame) => Some(frame),
                             Err(error) => {
+                                log_terminal_rejection(
+                                    &state,
+                                    &sandbox_id,
+                                    &operator,
+                                    "invalid_open_frame",
+                                )
+                                .await;
                                 let _ = browser_tx.send(terminal_error(error)).await;
                                 break;
                             }

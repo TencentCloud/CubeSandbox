@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -23,7 +24,12 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-const terminalProcessCleanupTimeout = 5 * time.Second
+const (
+	terminalProcessCleanupTimeout = 5 * time.Second
+	terminalFIFODir               = "/data/cubelet/fifo"
+	terminalMaxStdinFrame         = 64 * 1024
+	terminalStdinQueueDepth       = 8
+)
 
 // terminalStreamWriter serializes container stdout/stderr into the gRPC stream.
 // containerd may copy both pipes concurrently, while gRPC permits only one
@@ -61,7 +67,10 @@ func (s *service) AttachTerminal(stream cubebox.CubeboxMgr_AttachTerminalServer)
 		return status.Error(codes.InvalidArgument, "terminal open frame must provide sandbox_id and container_id")
 	}
 
-	ctx := namespaces.WithNamespace(stream.Context(), namespaces.Default)
+	ctx, cancel := context.WithCancel(
+		namespaces.WithNamespace(stream.Context(), namespaces.Default),
+	)
+	defer cancel()
 	sandbox, err := s.cubeboxMgr.cubeboxManger.Get(ctx, open.GetSandboxId())
 	if err != nil {
 		return status.Errorf(codes.NotFound, "sandbox %q not found: %v", open.GetSandboxId(), err)
@@ -85,15 +94,30 @@ func (s *service) AttachTerminal(stream cubebox.CubeboxMgr_AttachTerminalServer)
 	stdinReader, stdinWriter := io.Pipe()
 	defer stdinReader.Close()
 	defer stdinWriter.Close()
+	stdinQueue := make(chan []byte, terminalStdinQueueDepth)
+	stdinErr := make(chan error, 1)
+	go func() {
+		for {
+			select {
+			case data := <-stdinQueue:
+				if _, writeErr := stdinWriter.Write(data); writeErr != nil {
+					stdinErr <- writeErr
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 	output := &terminalStreamWriter{stream: stream}
 	process, err := task.Exec(ctx, "cubelet-terminal-"+uuid.NewString(), processSpec,
-		cio.NewCreator(cio.WithStreams(stdinReader, output, output), cio.WithTerminal, cio.WithFIFODir("/data/cubelet/fifo")))
+		cio.NewCreator(cio.WithStreams(stdinReader, output, output), cio.WithTerminal, cio.WithFIFODir(terminalFIFODir)))
 	if err != nil {
 		return status.Errorf(codes.Internal, "create terminal process: %v", err)
 	}
-	processExited := false
+	var processExited atomic.Bool
 	defer func() {
-		cleanupTerminalProcess(ctx, process, processExited)
+		cleanupTerminalProcess(ctx, process, processExited.Load())
 	}()
 
 	exitStatus, err := process.Wait(ctx)
@@ -117,7 +141,7 @@ func (s *service) AttachTerminal(stream cubebox.CubeboxMgr_AttachTerminalServer)
 			}
 			switch payload := frame.GetPayload().(type) {
 			case *cubebox.TerminalClientMessage_Stdin:
-				if _, receiveErr = stdinWriter.Write(payload.Stdin); receiveErr != nil {
+				if receiveErr = enqueueTerminalStdin(stdinQueue, payload.Stdin); receiveErr != nil {
 					recvErr <- receiveErr
 					return
 				}
@@ -135,7 +159,7 @@ func (s *service) AttachTerminal(stream cubebox.CubeboxMgr_AttachTerminalServer)
 
 	select {
 	case result := <-exitStatus:
-		processExited = true
+		processExited.Store(true)
 		process.IO().Wait()
 		code, _, resultErr := result.Result()
 		if resultErr != nil {
@@ -149,8 +173,24 @@ func (s *service) AttachTerminal(stream cubebox.CubeboxMgr_AttachTerminalServer)
 			return nil
 		}
 		return receiveErr
+	case writeErr := <-stdinErr:
+		return writeErr
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+func enqueueTerminalStdin(queue chan<- []byte, data []byte) error {
+	if len(data) > terminalMaxStdinFrame {
+		return status.Errorf(codes.ResourceExhausted,
+			"terminal stdin frame exceeds %d bytes", terminalMaxStdinFrame)
+	}
+	cloned := append([]byte(nil), data...)
+	select {
+	case queue <- cloned:
+		return nil
+	default:
+		return status.Error(codes.ResourceExhausted, "terminal stdin queue is full")
 	}
 }
 

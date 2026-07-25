@@ -39,11 +39,19 @@ middleware also protects the route when an auth callback is configured.
 CubeAPI emits `terminal.session.open` and `terminal.session.close` audit events
 with the operator, sandbox ID, and container ID. The URL sandbox ID must match
 the first protocol frame, and `open` is emitted only after that frame reaches
-CubeMaster; failed upgrades and backend connection attempts do not create an
-open audit record. Each terminal is a separate Cubelet TTY process, so multiple
-sessions and sandboxes remain isolated. CubeAPI rejects sessions above
+CubeMaster. Authentication failures, session-limit rejections, malformed open
+frames, and backend connection failures emit `terminal.session.reject` with a
+stable reason but never include credentials. Each terminal is a separate
+Cubelet TTY process, so multiple sessions and sandboxes remain isolated.
+CubeAPI rejects sessions above
 `TERMINAL_MAX_SESSIONS_PER_SANDBOX` with HTTP 429. The limit is process-local,
 so multiply it by the number of CubeAPI replicas when sizing a deployment.
+
+The current WebUI session is a cluster-administrator identity. CubeSandbox does
+not yet attach an owner or tenant to a sandbox, so this terminal endpoint does
+not claim per-sandbox tenant authorization. Do not expose the cluster-global
+WebUI to mutually untrusted tenants; deployments that add sandbox ownership
+must enforce that ownership before the WebSocket upgrade.
 
 ## Validation checklist
 

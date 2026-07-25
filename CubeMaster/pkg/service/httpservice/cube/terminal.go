@@ -5,6 +5,8 @@ package cube
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -74,6 +76,9 @@ func TerminalWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 
 	var first terminalClientFrame
 	if err := readTerminalFrame(conn, &first); err != nil {
+		if errors.Is(err, io.EOF) {
+			return
+		}
 		writeTerminalFrame(conn, terminalServerFrame{Type: "error", Message: err.Error()})
 		return
 	}
@@ -191,13 +196,28 @@ func terminalGatewayAuthorized(r *http.Request) bool {
 }
 
 func terminalGatewayAuthorizedWithToken(r *http.Request, expected string) bool {
-	return expected != "" && r.Header.Get("X-Cube-Terminal-Gateway") == expected
+	if expected == "" {
+		return false
+	}
+	actualHash := sha256.Sum256([]byte(r.Header.Get("X-Cube-Terminal-Gateway")))
+	expectedHash := sha256.Sum256([]byte(expected))
+	return subtle.ConstantTimeCompare(actualHash[:], expectedHash[:]) == 1
 }
 
 func readTerminalFrame(conn *websocket.Conn, frame *terminalClientFrame) error {
 	messageType, data, err := conn.ReadMessage()
 	if err != nil {
+		if websocket.IsCloseError(err,
+			websocket.CloseNormalClosure,
+			websocket.CloseGoingAway,
+			websocket.CloseNoStatusReceived,
+		) {
+			return io.EOF
+		}
 		return err
+	}
+	if messageType == websocket.CloseMessage {
+		return io.EOF
 	}
 	if messageType != websocket.TextMessage {
 		return errors.New("terminal frames must be JSON text")
