@@ -5,12 +5,14 @@
 package cubebox
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"log"
 	"math/rand"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"text/tabwriter"
@@ -19,6 +21,7 @@ import (
 	"github.com/google/uuid"
 	commands "github.com/tencentcloud/CubeSandbox/CubeMaster/cmd/cubemastercli/commands"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/urfave/cli"
 )
@@ -28,12 +31,26 @@ type nodeResponse struct {
 	Data []*node.Node `json:"data,omitempty"`
 }
 
+type nodeMetaResponse struct {
+	Ret  *types.Ret             `json:"ret,omitempty"`
+	Data *nodemeta.NodeSnapshot `json:"data,omitempty"`
+}
+
+var nodeIsolationFlags = []cli.Flag{
+	cli.BoolFlag{
+		Name:  "json",
+		Usage: "print raw json response",
+	},
+}
+
 var NodeCommand = cli.Command{
 	Name:    "node",
 	Aliases: []string{"nodes"},
-	Usage:   "list cubemaster nodes and status",
+	Usage:   "list / isolate / unisolate cubemaster nodes",
 	Subcommands: cli.Commands{
 		NodeListCommand,
+		NodeIsolateCommand,
+		NodeUnisolateCommand,
 	},
 }
 
@@ -97,6 +114,90 @@ var NodeListCommand = cli.Command{
 	},
 }
 
+var NodeIsolateCommand = cli.Command{
+	Name:      "isolate",
+	Usage:     "cordon node(s) (block new sandbox scheduling; existing sandboxes unaffected)",
+	ArgsUsage: "<node-id> [node-id ...]",
+	Flags:     nodeIsolationFlags,
+	Action: func(c *cli.Context) error {
+		return doNodeIsolation(c, http.MethodPut)
+	},
+}
+
+var NodeUnisolateCommand = cli.Command{
+	Name:      "unisolate",
+	Usage:     "remove cordon so the node(s) can receive new sandboxes",
+	ArgsUsage: "<node-id> [node-id ...]",
+	Flags:     nodeIsolationFlags,
+	Action: func(c *cli.Context) error {
+		return doNodeIsolation(c, http.MethodDelete)
+	},
+}
+
+func doNodeIsolation(c *cli.Context, method string) error {
+	if c.NArg() == 0 {
+		cmd := "unisolate"
+		if method == http.MethodPut {
+			cmd = "isolate"
+		}
+		_ = cli.ShowCommandHelp(c, cmd)
+		return errors.New("node id is required")
+	}
+	serverList = getServerAddrs(c)
+	if len(serverList) == 0 {
+		return errors.New("no server addr")
+	}
+	port = c.GlobalString("port")
+
+	var opErr error
+	for _, nodeID := range c.Args() {
+		if err := isolateOneNode(c, method, nodeID); err != nil {
+			log.Printf("%s failed: %s %s\n", isolationAction(method), nodeID, err.Error())
+			opErr = errors.Join(opErr, fmt.Errorf("%s: %w", nodeID, err))
+			continue
+		}
+	}
+	return opErr
+}
+
+func isolationAction(method string) string {
+	if method == http.MethodPut {
+		return "isolated"
+	}
+	return "unisolated"
+}
+
+func isolateOneNode(c *cli.Context, method, nodeID string) error {
+	requestID := uuid.New().String()
+	host := serverList[rand.Int()%len(serverList)]
+	u := &url.URL{
+		Scheme: "http",
+		Host:   net.JoinHostPort(host, port),
+		Path:   "/internal/meta/nodes/" + url.PathEscape(nodeID) + "/isolation",
+	}
+	rsp := &nodeMetaResponse{}
+	if err := doHttpReq(c, u.String(), method, requestID, bytes.NewReader(nil), rsp); err != nil {
+		return err
+	}
+	if rsp.Ret == nil {
+		return errors.New("empty response")
+	}
+	if rsp.Ret.RetCode != 200 {
+		return errors.New(rsp.Ret.RetMsg)
+	}
+	if c.Bool("json") {
+		commands.PrintAsJSON(rsp)
+		return nil
+	}
+	disabled := false
+	if rsp.Data != nil {
+		disabled = rsp.Data.SchedulingDisabled
+		nodeID = rsp.Data.NodeID
+	}
+	fmt.Printf("node %s %s: scheduling_disabled=%t\n", nodeID, isolationAction(method), disabled)
+	return nil
+}
+
 func printNodeSummary(nodes []*node.Node, scoreOnly bool) {
 	w := tabwriter.NewWriter(os.Stdout, 4, 8, 4, ' ', 0)
 	if scoreOnly {
@@ -111,10 +212,11 @@ func printNodeSummary(nodes []*node.Node, scoreOnly bool) {
 		_ = w.Flush()
 		return
 	}
-	fmt.Fprintln(w, "NODE_ID\tNODE_IP\tINSTANCE_TYPE\tZONE\tCPU_TYPE\tHEALTHY\tHOST_STATUS")
+	fmt.Fprintln(w, "NODE_ID\tNODE_IP\tINSTANCE_TYPE\tZONE\tCPU_TYPE\tHEALTHY\tSCHEDULING_DISABLED\tHOST_STATUS")
 	for _, item := range nodes {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%t\t%s\n",
-			item.ID(), item.HostIP(), item.InstanceType, item.Zone, item.CPUType, item.Healthy, item.HostStatus,
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%t\t%t\t%s\n",
+			item.ID(), item.HostIP(), item.InstanceType, item.Zone, item.CPUType, item.Healthy,
+			item.SchedulingDisabled(), item.HostStatus,
 		)
 	}
 	_ = w.Flush()

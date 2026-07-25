@@ -29,7 +29,9 @@ mkdir -p \
   /data/log/CubeShim \
   /data/log/CubeVmm \
   /data/cube-shim/disks \
-  /data/snapshot_pack/disks
+  /data/snapshot_pack/disks \
+  /data/cube-shared \
+  /data/cube-shared/volume
 
 if [[ -f "${PID_FILE}" ]]; then
   existing_pid="$(<"${PID_FILE}")"

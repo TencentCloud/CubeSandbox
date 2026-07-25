@@ -4,12 +4,14 @@
 #
 # Single source of truth for the release image tag hard-coded across the
 # one-click deployment surface (terraform defaults, systemd launcher, env
-# examples, CubeEgress Makefile, install docs).
+# examples, CubeEgress Makefile, install docs), the Helm chart defaults
+# (deploy/kubernetes/chart/values.yaml component image tags), and the
+# kubernetes image-build docs / usage examples (IMAGE_TAG= / CUBE_VERSION=).
 #
 # Run it before tagging a release to bump every hard-coded cube-* component
 # image tag to the target version; the release workflow runs it with --check to
 # fail fast when any of those defaults drift from the pushed git tag, so a
-# published bundle can never reference an image tag that was not built.
+# published bundle / chart can never reference an image tag that was not built.
 #
 # Usage:
 #   scripts/bump-image.sh <version>          # rewrite hard-coded tags to <version>
@@ -27,9 +29,10 @@ set -euo pipefail
 PERL_SEMVER='v\d+\.\d+\.\d+(?:[-.][0-9A-Za-z.]+)?'
 ERE_SEMVER='v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?'
 
-# Component images that follow the release version. openresty-tproxy is
-# deliberately excluded: its tag tracks the OpenResty version, not the release.
-COMPONENTS='cube-egress|cube-master|cube-api|cube-proxy|webui|cube-lifecycle-manager'
+# Component images that follow the release version (chart + one-click / CI).
+# openresty-tproxy is deliberately excluded: its tag tracks the OpenResty
+# version, not the release. 
+COMPONENTS='cube-egress|cube-egress-net|cube-master|cubemastercli|cube-api|cube-ops|cube-proxy|cube-webui|cube-lifecycle-manager|cubelet|network-agent|cube-shim|cube-kernel|cube-guest|cube-node-init|cube-wait-node-prep|cube-pvm-host-bootstrap'
 
 usage() {
 	sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -111,6 +114,22 @@ edit_expr() {
 	deploy/one-click/terraform/tencentcloud/env.example)
 		echo "s{${PERL_SEMVER}}{\$ENV{VER}}g if /IMAGE/;"
 		;;
+	deploy/kubernetes/chart/values.yaml)
+		# Only rewrite unquoted release tags (tag: vX.Y.Z). Third-party pins
+		# use quoted non-v tags (e.g. "1.28.15", "8.0") and are left alone.
+		echo "s{(^\\s+tag:\\s+)${PERL_SEMVER}}{\$1\$ENV{VER}}"
+		;;
+	deploy/kubernetes/images/build-cube-images.sh | \
+		deploy/kubernetes/images/README.md | \
+		deploy/kubernetes/chart/README.md | \
+		deploy/one-click/build-guest-image.sh | \
+		docs/guide/kubernetes/faq.md | \
+		docs/zh/guide/kubernetes/faq.md)
+		# Docs / usage examples that hard-code IMAGE_TAG=vX or CUBE_VERSION=vX.
+		# Leave non-semver placeholders alone (e.g. IMAGE_TAG=dev) and do not
+		# touch unrelated tags on the same line (e.g. cube-node:v0.4.0-...).
+		echo "s{((?:IMAGE_TAG|CUBE_VERSION)=)${PERL_SEMVER}}{\$1\$ENV{VER}}g"
+		;;
 	*)
 		echo "error: no edit rule for $1" >&2
 		exit 3
@@ -134,6 +153,13 @@ FILES=(
 	deploy/one-click/README_zh.md
 	docs/guide/tencentcloud-terraform-deploy.md
 	docs/zh/guide/tencentcloud-terraform-deploy.md
+	deploy/kubernetes/chart/values.yaml
+	deploy/kubernetes/images/build-cube-images.sh
+	deploy/kubernetes/images/README.md
+	deploy/kubernetes/chart/README.md
+	deploy/one-click/build-guest-image.sh
+	docs/guide/kubernetes/faq.md
+	docs/zh/guide/kubernetes/faq.md
 )
 
 do_bump() {

@@ -15,6 +15,11 @@ ARG RUST_TOOLCHAIN_AGENT=1.89
 ARG GITHUB_ACTIONS=false
 ARG RUSTUP_DIST_SERVER=https://rsproxy.cn
 ARG RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
+# Base URL of a China-reachable LLVM apt mirror (e.g. set via `make builder-image
+# MIRROR=cn`). When set, the llvm.sh installer script and the clang-14 apt packages
+# are sourced from this mirror; empty uses upstream apt.llvm.org. The LLVM GPG
+# signing key is always fetched from apt.llvm.org regardless of this value.
+ARG LLVM_MIRROR_BASE=
 ARG TARGETARCH
 
 ENV LANG=C.UTF-8 \
@@ -118,8 +123,19 @@ RUN . /etc/buildenv \
        apt-get install -y gcc-x86-64-linux-gnu; \
     fi \
     && rm -rf /var/lib/apt/lists/*
-# Install clang-14
-RUN wget -O - https://apt.llvm.org/llvm.sh | bash -s -- 14 && apt-get install -y llvm-14 \
+# Install clang-14. With LLVM_MIRROR_BASE set, fetch llvm.sh from the mirror and
+# pass `-m` so the apt repo/packages resolve to the mirror too (the upstream
+# script otherwise hardcodes BASE_URL=apt.llvm.org). Note: llvm.sh always fetches
+# the GPG signing key from apt.llvm.org (that URL is hardcoded and the mirror does
+# not serve the key), so apt.llvm.org must remain reachable for the key request.
+RUN set -eux; \
+    if [ -n "${LLVM_MIRROR_BASE}" ]; then \
+        script_url="${LLVM_MIRROR_BASE}/llvm.sh"; set -- 14 -m "${LLVM_MIRROR_BASE}"; \
+    else \
+        script_url="https://apt.llvm.org/llvm.sh"; set -- 14; \
+    fi; \
+    wget -O /tmp/llvm.sh "${script_url}"; bash /tmp/llvm.sh "$@"; rm -f /tmp/llvm.sh; \
+    apt-get install -y llvm-14 \
     && rm -rf /var/lib/apt/lists/* && clang-14 --version && llvm-strip-14 --version \
     && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100 \
     && update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 100 \

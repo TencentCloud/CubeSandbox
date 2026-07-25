@@ -24,10 +24,15 @@ func TestSchemaConstants(t *testing.T) {
 		{"OpCreate", OpCreate, "create"},
 		{"OpDelete", OpDelete, "delete"},
 		{"OpUpdate", OpUpdate, "update"},
+		{"OpState", OpState, "state"},
 		{"FieldOp", FieldOp, "op"},
 		{"FieldSandboxID", FieldSandboxID, "sandbox_id"},
 		{"FieldPayload", FieldPayload, "payload"},
 		{"FieldTimestamp", FieldTimestamp, "ts"},
+		{"StatePaused", StatePaused, "paused"},
+		{"StateRunning", StateRunning, "running"},
+		{"ActorCubeMaster", ActorCubeMaster, "cubemaster"},
+		{"ActorCLM", ActorCLM, "clm"},
 	}
 	for _, c := range cases {
 		if c.got != c.want {

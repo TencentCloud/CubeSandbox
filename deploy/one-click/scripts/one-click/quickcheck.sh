@@ -285,6 +285,7 @@ quickcheck_main() {
   MASTER_ADDR="$(resolve_control_plane_cubemaster_addr)"
   local NA_HEALTH_ADDR="${NETWORK_AGENT_HEALTH_ADDR:-127.0.0.1:19090}"
   local CUBE_API_HEALTH_ADDR="${CUBE_API_HEALTH_ADDR:-127.0.0.1:3000}"
+  local CUBE_OPS_HEALTH_ADDR="${CUBE_OPS_HEALTH_ADDR:-127.0.0.1:3010}"
   local ROLE
   ROLE="$(one_click_deploy_role)"
   local NODE_ID="${CUBE_SANDBOX_NODE_IP:-}"
@@ -302,6 +303,7 @@ quickcheck_main() {
   validate_host_port "${NA_HEALTH_ADDR}" "NETWORK_AGENT_HEALTH_ADDR"
   if [[ "${ROLE}" != "compute" ]]; then
     validate_host_port "${CUBE_API_HEALTH_ADDR}" "CUBE_API_HEALTH_ADDR"
+    validate_host_port "${CUBE_OPS_HEALTH_ADDR}" "CUBE_OPS_HEALTH_ADDR"
   fi
 
   quickcheck_init_budget
@@ -311,6 +313,7 @@ quickcheck_main() {
   echo "[quickcheck] network-agent-health=${NA_HEALTH_ADDR}"
   if [[ "${ROLE}" != "compute" ]]; then
     echo "[quickcheck] cube-api-health=${CUBE_API_HEALTH_ADDR}"
+    echo "[quickcheck] cubeops-health=${CUBE_OPS_HEALTH_ADDR}"
   fi
 
   echo "[quickcheck] check systemd units"
@@ -329,6 +332,7 @@ quickcheck_main() {
     fi
     check_unit_active cube-sandbox-cubemaster.service
     check_unit_active cube-sandbox-cube-api.service
+    check_unit_active cube-sandbox-cubeops.service
     check_unit_active cube-sandbox-cube-proxy.service
     check_unit_active cube-sandbox-coredns.service
     check_unit_active cube-sandbox-dns.service
@@ -372,13 +376,17 @@ quickcheck_main() {
     check_file "${TOOLBOX_ROOT}/cube-kernel-scf/vmlinux"
     check_file "${TOOLBOX_ROOT}/cube-image/cube-guest-image-cpu.img"
   else
-    echo "[quickcheck] 4/5 check cube-api /health"
+    echo "[quickcheck] 4/6 check cube-api /health"
     check_http "http://${CUBE_API_HEALTH_ADDR}/health"
 
-    echo "[quickcheck] 5/5 check essential sockets and config"
+    echo "[quickcheck] 5/6 check cubeops /health"
+    check_http "http://${CUBE_OPS_HEALTH_ADDR}/health"
+
+    echo "[quickcheck] 6/6 check essential sockets and config"
     check_socket "/data/cubelet/cubelet.sock"
     check_socket "/tmp/cube/network-agent-grpc.sock"
     check_executable "${TOOLBOX_ROOT}/CubeAPI/bin/cube-api"
+    check_executable "${TOOLBOX_ROOT}/CubeOps/bin/cubeops"
     check_file "${TOOLBOX_ROOT}/CubeMaster/conf.yaml"
     check_file "${TOOLBOX_ROOT}/Cubelet/config/config.toml"
     check_file "${TOOLBOX_ROOT}/Cubelet/dynamicconf/conf.yaml"

@@ -24,7 +24,9 @@ Cube Sandbox is a **purpose-built infrastructure for AI Agents** — a productio
 
 * **📦 Template System**: Turn OCI images into templates in one step, install presets from the Template Store, auto-distribute across nodes.
 
-* **📦 Ready Out of the Box**: No complex dependencies. A minimal deployment script gets a full environment running in minutes.
+* **📦 Ready Out of the Box**: No complex dependencies. A minimal deployment script gets a full environment running in minutes. Supports bare-metal deployment, Kubernetes cluster deployment, and Terraform-based deployment on Tencent Cloud.
+
+* **💾 Volume Framework**: CubeSandbox provides an E2B-compatible Volume framework that lets users plug in custom backend storage solutions while remaining compatible with the E2B standard.
 
 ## CubeSandbox vs Alternatives
 
@@ -46,6 +48,7 @@ Cube Sandbox is a **purpose-built infrastructure for AI Agents** — a productio
 * [Digital Assistant (AgentHub)](./digital-assistant.md) — host and manage AI Agent instances.
 * [Self-Build Deployment](./self-build-deploy.md) — single-machine deployment reference.
 * [Multi-Node Cluster Deployment](./multi-node-deploy.md) — scale beyond a single machine.
+* [Kubernetes Deployment](./kubernetes/) — install with Helm on an existing K8s cluster.
 * [Creating Templates from OCI Images](./tutorials/template-from-image.md) — step-by-step template guide.
 * [WebUI Console](./webui.md) — visual management right after install.
 * [Security Proxy & Credential Vault](./security-proxy.md) — CubeEgress domain filtering and auditing.

@@ -8,12 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"regexp"
 	"sort"
 	"strings"
 
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter/image"
 )
 
 func resolveTemplateNodes(instanceType string, scope []string) ([]*node.Node, error) {
@@ -72,21 +74,26 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 	if req.Request == nil || strings.TrimSpace(req.RequestID) == "" {
 		return nil, errors.New("requestID is required")
 	}
-	if strings.TrimSpace(req.SourceImageRef) == "" {
+	sourceImageRef := strings.TrimSpace(req.SourceImageRef)
+	if sourceImageRef == "" {
 		return nil, errors.New("source_image_ref is required")
 	}
-	if strings.HasPrefix(strings.TrimSpace(req.SourceImageRef), "-") {
-		return nil, errors.New("source_image_ref must not start with '-'")
+	if err := image.ValidateImageRef(sourceImageRef); err != nil {
+		return nil, fmt.Errorf("source_image_ref: %w", err)
 	}
 	if strings.TrimSpace(req.WritableLayerSize) == "" {
 		return nil, errors.New("writable_layer_size is required")
 	}
 	cloned := *req
+	cloned.SourceImageRef = sourceImageRef
 	exposedPorts, err := normalizeTemplateExposedPorts(req.ExposedPorts)
 	if err != nil {
 		return nil, err
 	}
 	cloned.ExposedPorts = exposedPorts
+	if err := validateTemplateAlias(cloned.Alias); err != nil {
+		return nil, err
+	}
 	// Always auto-generate the template ID. Users are not allowed to set
 	// custom template IDs because the snapshot system depends on the
 	// tpl- / snap- prefix convention for storage naming and identification.
@@ -97,10 +104,36 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 	if cloned.NetworkType == "" {
 		cloned.NetworkType = cubeboxv1.NetworkType_tap.String()
 	}
+	if cloned.EnableIvshmem != nil && !*cloned.EnableIvshmem {
+		cloned.EnableIvshmem = nil
+	}
 	if err := validateTemplateCubeNetworkConfig(cloned.CubeNetworkConfig); err != nil {
 		return nil, err
 	}
 	return &cloned, nil
+}
+
+// aliasValidationRe matches the allowed alias charset: lowercase alphanumeric
+// and hyphens, starting with an alphanumeric character, max 64 characters.
+var aliasValidationRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+
+// validateTemplateAlias validates that an alias conforms to the required
+// format: lowercase alphanumeric and hyphens only, must start with an
+// alphanumeric character, max 64 characters, and must NOT collide with the
+// template ID prefix convention (tpl-/snap-). An empty alias is valid (no
+// alias requested).
+func validateTemplateAlias(alias string) error {
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return nil
+	}
+	if hasValidTemplateIDPrefix(alias) {
+		return fmt.Errorf("alias %q must not start with 'tpl-' or 'snap-'", alias)
+	}
+	if !aliasValidationRe.MatchString(alias) {
+		return fmt.Errorf("alias %q is invalid: must match ^[a-z0-9][a-z0-9-]{0,63}$ (lowercase alphanumeric and hyphens, max 64 chars)", alias)
+	}
+	return nil
 }
 
 func validateTemplateCubeNetworkConfig(cfg *types.CubeNetworkConfig) error {

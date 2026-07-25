@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cubesandbox"
-version = "0.5.0"
+version = "0.6.0"
 description = "Python SDK for CubeSandbox"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.9"

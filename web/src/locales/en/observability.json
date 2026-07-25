@@ -28,7 +28,7 @@
   },
   "api": {
     "title": "API Monitor",
-    "desc": "CubeAPI gateway connectivity and rate-limit config",
+    "desc": "CubeOps gateway connectivity and rate-limit config",
     "rateLimit": "Rate Limit",
     "auth": "Auth",
     "authOn": "Enabled",

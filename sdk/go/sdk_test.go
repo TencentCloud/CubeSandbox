@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -620,8 +621,18 @@ func TestCommandsRunUsesEnvdProcessStart(t *testing.T) {
 		}
 		gotHost = r.Host
 		gotHeaders = r.Header.Clone()
-		if err := json.NewDecoder(r.Body).Decode(&gotPayload); err != nil {
-			t.Fatalf("decode payload: %v", err)
+		body, _ := io.ReadAll(r.Body)
+		if len(body) < 5 {
+			t.Fatalf("request body too short for a Connect envelope: %d bytes", len(body))
+		}
+		if body[0] != 0 {
+			t.Fatalf("Connect envelope flags=%d, want 0", body[0])
+		}
+		if n := binary.BigEndian.Uint32(body[1:5]); int(n) != len(body)-5 {
+			t.Fatalf("Connect envelope length=%d, want %d", n, len(body)-5)
+		}
+		if err := json.Unmarshal(body[5:], &gotPayload); err != nil {
+			t.Fatalf("decode enveloped payload: %v", err)
 		}
 		w.Header().Set("Content-Type", connectContentType)
 		w.Write(connectEnvelope(0, `{"event":{"start":{"pid":123}}}`))
@@ -661,6 +672,9 @@ func TestCommandsRunUsesEnvdProcessStart(t *testing.T) {
 	if gotHeaders.Get("Content-Type") != connectContentType || gotHeaders.Get("Connect-Protocol-Version") != connectProtocolVersion {
 		t.Fatalf("connect headers=%#v", gotHeaders)
 	}
+	if gotHeaders.Get("Connect-Content-Encoding") != "identity" {
+		t.Fatalf("Connect-Content-Encoding=%q, want identity", gotHeaders.Get("Connect-Content-Encoding"))
+	}
 	if gotHeaders.Get("Connect-Timeout-Ms") != "1500" || gotHeaders.Get("X-Access-Token") != "envd-token" {
 		t.Fatalf("headers=%#v", gotHeaders)
 	}
@@ -680,6 +694,67 @@ func TestCommandsRunUsesEnvdProcessStart(t *testing.T) {
 		t.Fatalf("stdin=%#v", gotPayload["stdin"])
 	}
 	if result.Stdout != "cmd-out\n" || result.Stderr != "cmd-err\n" || result.ExitCode != 7 {
+		t.Fatalf("result=%#v", result)
+	}
+}
+
+func TestProcessEndEventExitCode(t *testing.T) {
+	i := func(v int) *int { return &v }
+	cases := []struct {
+		name string
+		end  processEndEvent
+		code int
+		ok   bool
+	}{
+		{"explicit camelCase", processEndEvent{ExitCode: i(3), Exited: true, Status: "exit status 3"}, 3, true},
+		{"explicit snake_case", processEndEvent{ExitCodeSnake: i(9), Exited: true}, 9, true},
+		{"explicit zero present", processEndEvent{ExitCode: i(0), Exited: true, Status: "exit status 0"}, 0, true},
+		// proto3 JSON omits a zero-valued exitCode: exit-0 arrives as status only.
+		{"exit-0 status only", processEndEvent{Exited: true, Status: "exit status 0"}, 0, true},
+		{"nonzero status only", processEndEvent{Exited: true, Status: "exit status 5"}, 5, true},
+		{"exited flag only", processEndEvent{Exited: true}, 0, true},
+		{"unparsable status but exited", processEndEvent{Exited: true, Status: "signal: killed"}, 0, true},
+		{"nothing", processEndEvent{}, 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := tc.end.exitCode()
+			if ok != tc.ok || got != tc.code {
+				t.Fatalf("exitCode()=(%d,%v), want (%d,%v)", got, ok, tc.code, tc.ok)
+			}
+		})
+	}
+}
+
+func TestCommandsRunExitZeroStatusOnly(t *testing.T) {
+	// Reproduces envd's real exit-0 end event: proto3 JSON drops the zero-valued
+	// exitCode, leaving only status/exited. Commands.Run must still succeed.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/process.Process/Start" {
+			t.Fatalf("request=%s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", connectContentType)
+		w.Write(connectEnvelope(0, `{"event":{"start":{"pid":7}}}`))
+		w.Write(connectEnvelope(0, fmt.Sprintf(`{"event":{"data":{"stdout":%q}}}`, base64.StdEncoding.EncodeToString([]byte("ok\n")))))
+		w.Write(connectEnvelope(0, `{"event":{"end":{"exited":true,"status":"exit status 0"}}}`))
+		w.Write(connectEnvelope(connectEndStreamFlag, `{}`))
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{
+		ProxyNodeIP:    host,
+		ProxyPortHTTP:  port,
+		SandboxDomain:  "cube.test",
+		RequestTimeout: time.Second,
+	})
+	sb := &Sandbox{client: client, SandboxID: "sb-proc", TemplateID: "tpl-test", EnvdAccessToken: "t"}
+
+	result, err := sb.Commands().Run(context.Background(), "true", CommandOptions{Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.ExitCode != 0 || result.Stdout != "ok\n" {
 		t.Fatalf("result=%#v", result)
 	}
 }

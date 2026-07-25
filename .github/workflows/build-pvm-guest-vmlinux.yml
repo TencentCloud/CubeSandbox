@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 env:
-  PVM_KERNEL_TAG: 6.6.69-1.cubesandbox
+  PVM_KERNEL_TAG: 6.6.69-1.2.cubesandbox
   PVM_VMLINUX_CACHE_PATH: kernel-cache/vmlinux-pvm
 
 jobs:
@@ -141,6 +141,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${GITHUB_REF_NAME}" \
+          install -D -m 0644 \
             pvm-guest-release-assets/vmlinux-pvm \
+            pvm-guest-release-assets/vmlinux-pvm-amd64
+          gh release upload "${GITHUB_REF_NAME}" \
+            pvm-guest-release-assets/vmlinux-pvm-amd64 \
             --clobber

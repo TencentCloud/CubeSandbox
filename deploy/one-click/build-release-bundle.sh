@@ -47,6 +47,7 @@ DIST_TAR="${SCRIPT_DIR}/dist/cube-sandbox-one-click-${DIST_VERSION}.tar.gz"
 CUBEMASTER_BUILD_MODE="${ONE_CLICK_CUBEMASTER_BUILD_MODE:-local}"
 CUBELET_BUILD_MODE="${ONE_CLICK_CUBELET_BUILD_MODE:-local}"
 API_BUILD_MODE="${ONE_CLICK_CUBE_API_BUILD_MODE:-local}"
+CUBE_OPS_BUILD_MODE="${ONE_CLICK_CUBE_OPS_BUILD_MODE:-local}"
 NETWORK_AGENT_BUILD_MODE="${ONE_CLICK_NETWORK_AGENT_BUILD_MODE:-local}"
 CUBEVSMAPDUMP_BUILD_MODE="${ONE_CLICK_CUBEVSMAPDUMP_BUILD_MODE:-local}"
 
@@ -55,6 +56,7 @@ CUBEMASTERCLI_BIN_OVERRIDE="${ONE_CLICK_CUBEMASTERCLI_BIN:-}"
 CUBELET_BIN_OVERRIDE="${ONE_CLICK_CUBELET_BIN:-}"
 CUBECLI_BIN_OVERRIDE="${ONE_CLICK_CUBECLI_BIN:-}"
 API_BIN_OVERRIDE="${ONE_CLICK_CUBE_API_BIN:-}"
+CUBE_OPS_BIN_OVERRIDE="${ONE_CLICK_CUBE_OPS_BIN:-}"
 NETWORK_AGENT_BIN_OVERRIDE="${ONE_CLICK_NETWORK_AGENT_BIN:-}"
 CUBEVSMAPDUMP_BIN_OVERRIDE="${ONE_CLICK_CUBEVSMAPDUMP_BIN:-}"
 
@@ -280,6 +282,14 @@ components["cube-api"] = {
     "digest_sha256": required_sha256(os.path.join(core_bin_dir, "cube-api")),
 }
 
+# ── cubeops from CORE_BIN_DIR ──
+components["cubeops"] = {
+    "version": cube_version,
+    "commit": cube_commit,
+    "build_time": cube_build_time,
+    "digest_sha256": required_sha256(os.path.join(core_bin_dir, "cubeops")),
+}
+
 # ── Rust binaries from build-vm-assets.sh ──
 components["cube-agent"] = {
     "version": cube_version,
@@ -484,6 +494,10 @@ build_or_copy_rust_binary \
   "${ROOT_DIR}/CubeAPI" "${API_BUILD_MODE}" \
   "${CORE_BIN_DIR}/cube-api"
 build_or_copy_go_binary \
+  "cubeops" "${CUBE_OPS_BIN_OVERRIDE}" \
+  "${ROOT_DIR}/CubeOps" "${CUBE_OPS_BUILD_MODE}" \
+  "${CORE_BIN_DIR}/cubeops" ./cmd/cubeops
+build_or_copy_go_binary \
   "network-agent" "${NETWORK_AGENT_BIN_OVERRIDE}" \
   "${ROOT_DIR}/network-agent" "${NETWORK_AGENT_BUILD_MODE}" \
   "${CORE_BIN_DIR}/network-agent" ./cmd/network-agent "${NETAGENT_VERSION_PKG}"
@@ -496,8 +510,11 @@ mkdir -p \
   "${PACKAGE_ROOT}/network-agent/bin" \
   "${PACKAGE_ROOT}/network-agent/state" \
   "${PACKAGE_ROOT}/CubeAPI/bin" \
+  "${PACKAGE_ROOT}/CubeOps/bin" \
   "${PACKAGE_ROOT}/CubeMaster/bin" \
+  "${PACKAGE_ROOT}/CubeMaster/plugin" \
   "${PACKAGE_ROOT}/Cubelet/bin" \
+  "${PACKAGE_ROOT}/Cubelet/plugin" \
   "${PACKAGE_ROOT}/Cubelet/config" \
   "${PACKAGE_ROOT}/Cubelet/dynamicconf" \
   "${PACKAGE_ROOT}/cubeproxy" \
@@ -526,12 +543,22 @@ copy_file "${ROOT_DIR}/configs/single-node/network-agent.yaml" "${PACKAGE_ROOT}/
 copy_dir_contents "${SCRIPT_DIR}/CubeAPI" "${PACKAGE_ROOT}/CubeAPI"
 copy_file "${CORE_BIN_DIR}/cube-api" "${PACKAGE_ROOT}/CubeAPI/bin/cube-api"
 
+# Lay down the one-click CubeOps package Dockerfile first, then copy the binary
+# on top so terraform/tencentcloud/build_images.sh can build cube-ops from the
+# extracted sandbox-package without the full source tree.
+copy_dir_contents "${SCRIPT_DIR}/CubeOps" "${PACKAGE_ROOT}/CubeOps"
+copy_file "${CORE_BIN_DIR}/cubeops" "${PACKAGE_ROOT}/CubeOps/bin/cubeops"
+
 # Same ordering for CubeMaster so cubemaster/cubemastercli binaries survive the
 # copy_dir_contents wipe and coexist with the one-click CubeMaster assets.
 copy_dir_contents "${SCRIPT_DIR}/CubeMaster" "${PACKAGE_ROOT}/CubeMaster"
 copy_file "${CORE_BIN_DIR}/cubemaster" "${PACKAGE_ROOT}/CubeMaster/bin/cubemaster"
 copy_file "${CORE_BIN_DIR}/cubemastercli" "${PACKAGE_ROOT}/CubeMaster/bin/cubemastercli"
 copy_file "${ROOT_DIR}/configs/single-node/cubemaster.yaml" "${PACKAGE_ROOT}/CubeMaster/conf.yaml"
+# CubeMaster/Dockerfile COPY's this from the package CubeMaster/ context.
+copy_file "${ROOT_DIR}/deploy/scripts/docker-install-volume-deps.sh" \
+  "${PACKAGE_ROOT}/CubeMaster/docker-install-volume-deps.sh"
+chmod +x "${PACKAGE_ROOT}/CubeMaster/docker-install-volume-deps.sh"
 
 copy_file "${CORE_BIN_DIR}/cubelet" "${PACKAGE_ROOT}/Cubelet/bin/cubelet"
 copy_file "${CORE_BIN_DIR}/cubecli" "${PACKAGE_ROOT}/Cubelet/bin/cubecli"
@@ -545,6 +572,22 @@ if [[ -f "${ROOT_DIR}/Cubelet/contrib/cubelet-code-deploy.sh" ]]; then
 fi
 copy_dir_contents "${ROOT_DIR}/Cubelet/config" "${PACKAGE_ROOT}/Cubelet/config"
 copy_dir_contents "${ROOT_DIR}/Cubelet/dynamicconf" "${PACKAGE_ROOT}/Cubelet/dynamicconf"
+
+VOLUME_COS_PLUGIN_SRC="${ROOT_DIR}/examples/volume/cos/binary/cube-volume-cos.sh"
+VOLUME_COS_CONF_EXAMPLE="${ROOT_DIR}/examples/volume/cos/volume-cos.conf.example"
+VOLUME_COS_INSTALL_DEPS="${ROOT_DIR}/examples/volume/cos/install-deps.sh"
+ensure_file "${VOLUME_COS_PLUGIN_SRC}"
+ensure_file "${VOLUME_COS_CONF_EXAMPLE}"
+ensure_file "${VOLUME_COS_INSTALL_DEPS}"
+copy_file "${VOLUME_COS_PLUGIN_SRC}" "${PACKAGE_ROOT}/CubeMaster/plugin/cube-volume-cos"
+copy_file "${VOLUME_COS_PLUGIN_SRC}" "${PACKAGE_ROOT}/Cubelet/plugin/cube-volume-cos"
+chmod +x "${PACKAGE_ROOT}/CubeMaster/plugin/cube-volume-cos" "${PACKAGE_ROOT}/Cubelet/plugin/cube-volume-cos"
+copy_file "${VOLUME_COS_CONF_EXAMPLE}" "${PACKAGE_ROOT}/CubeMaster/plugin/volume-cos.conf.example"
+copy_file "${VOLUME_COS_CONF_EXAMPLE}" "${PACKAGE_ROOT}/Cubelet/plugin/volume-cos.conf.example"
+# Host-side COS deps installer (cosfs/coscmd/jq); docs run it from plugin/.
+copy_file "${VOLUME_COS_INSTALL_DEPS}" "${PACKAGE_ROOT}/CubeMaster/plugin/install-deps.sh"
+copy_file "${VOLUME_COS_INSTALL_DEPS}" "${PACKAGE_ROOT}/Cubelet/plugin/install-deps.sh"
+chmod +x "${PACKAGE_ROOT}/CubeMaster/plugin/install-deps.sh" "${PACKAGE_ROOT}/Cubelet/plugin/install-deps.sh"
 
 copy_dir_contents "${CUBE_PROXY_TEMPLATE_DIR}" "${PACKAGE_ROOT}/cubeproxy"
 copy_dir_contents "${CUBE_COREDNS_TEMPLATE_DIR}" "${PACKAGE_ROOT}/coredns"

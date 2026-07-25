@@ -18,8 +18,8 @@ import (
 )
 
 func WriteResponse(w http.ResponseWriter, code int, data interface{}) {
-	w.WriteHeader(code)
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
 	d, _ := FastestJsoniter.Marshal(data)
 	w.Write(d)
 }
@@ -42,8 +42,8 @@ func WriteListResponse(w http.ResponseWriter, code int, data interface{}) {
 		})
 		return
 	}
-	w.WriteHeader(code)
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
 	w.Write(buffer.Bytes())
 }
 

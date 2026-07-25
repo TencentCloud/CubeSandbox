@@ -5,7 +5,8 @@ import { useEffect, useState } from 'react';
 import { Navigate, Outlet, useLocation } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
 import { authApi } from '@/api/client';
-import { getLastAuthStatus, setLastAuthStatus } from '@/lib/session';
+import { ApiError } from '@/lib/api';
+import { clearSession, getLastAuthStatus, setLastAuthStatus } from '@/lib/session';
 
 type GuardState = 'checking' | 'allowed' | 'guest';
 
@@ -28,10 +29,19 @@ export function AuthGuard() {
         setLastAuthStatus(nextState);
         setState(nextState);
       })
-      .catch(() => {
+      .catch((err) => {
+        if (cancelled) return;
+        // A 401 means both the access token and any refresh token are no
+        // longer usable (for example after a password change). Do not trust
+        // the cached "allowed" state in this case.
+        if (err instanceof ApiError && err.status === 401) {
+          clearSession();
+          setState('guest');
+          return;
+        }
         // Keep previously verified sessions usable during transient backend
         // errors, but do not grant access when there is no verified state.
-        if (!cancelled) setState(getLastAuthStatus() ?? 'guest');
+        setState(getLastAuthStatus() ?? 'guest');
       });
     return () => {
       cancelled = true;

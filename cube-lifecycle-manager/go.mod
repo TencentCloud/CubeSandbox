@@ -3,6 +3,7 @@ module github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager
 go 1.25.7
 
 require (
+	github.com/cenkalti/backoff/v7 v7.0.0
 	github.com/google/uuid v1.6.0
 	github.com/redis/go-redis/v9 v9.20.0
 	go.uber.org/zap v1.28.0

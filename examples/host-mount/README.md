@@ -187,8 +187,9 @@ with Sandbox.create(
 
 | Step | What happens |
 |------|-------------|
-| `Sandbox.create(metadata=...)` | CubeAPI passes the `host-mount` JSON to Cubelet |
-| Cubelet receives the request | Parses the mount list and performs bind-mounts before booting the VM |
+| `Sandbox.create(metadata=...)` | CubeAPI lifts `metadata["host-mount"]` onto the sandbox annotation of the same name |
+| CubeMaster validates | Parses the mount list, checks each `hostPath` against the allowed prefixes, and injects the volumes/volume-mounts into the sandbox spec |
+| Cubelet mounts | Bind-mounts each validated `hostPath` before booting the VM |
 | VM boots | The paths appear inside the sandbox at the specified `mountPath` locations |
 | Read-only mount | The kernel enforces `MS_RDONLY`; writes are rejected with `EROFS` |
 
@@ -197,7 +198,7 @@ with Sandbox.create(
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
 | `hostPath "..." is not within an allowed mount prefix` | `hostPath` is outside the configured allowed prefixes | Move data under `/data/shared/`, or update `allowed_host_mount_prefixes` as described in `docs/guide/persistent-storage.md` |
-| `No such file or directory` inside sandbox | `hostPath` does not exist on the Cubelet node | Create the directory on the node before running |
+| Sandbox creation fails with a `bind mount ... ->` error | `hostPath` does not exist on the Cubelet node (Cubelet bind-mounts the source directly and does not create it) | Create the directory on the node before creating the sandbox |
 | `Read-only file system` when writing to `/mnt/ro/...` | Mounted with `readOnly: true` | Set that mount to `readOnly: false`, or write to the read-write sandbox path `/mnt/rw/...` instead |
 | `Template not found` | Wrong template ID | Run `cubemastercli tpl list` |
 | `Connection refused` | CubeAPI not reachable | Check `E2B_API_URL` and that port 3000 is open |

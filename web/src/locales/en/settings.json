@@ -18,13 +18,13 @@
   },
   "cluster": {
     "title": "Cluster Connection",
-    "desc": "View information about the connected CubeAPI instance.",
+    "desc": "View information about the connected CubeOps instance.",
     "endpoint": "API Endpoint",
-    "endpointDesc": "The public-facing CubeAPI address. Configure via CUBE_API_PUBLIC_HOST env var at startup.",
+    "endpointDesc": "The public-facing CubeOps ops API address. Configure via CUBE_OPS_PUBLIC_HOST env var at startup.",
     "test": "Test",
     "connected": "Connected",
     "runtime": "Runtime Config",
-    "runtimeDesc": "Read-only runtime information from CubeAPI.",
+    "runtimeDesc": "Read-only runtime information from CubeOps.",
     "sandboxDomain": "Sandbox Domain",
     "instanceType": "Default Instance Type",
     "rateLimit": "Rate Limit",
@@ -48,14 +48,13 @@
     "goOverview": "Go to Overview",
     "goSandboxes": "Go to Sandboxes",
     "goTemplates": "Go to Templates",
-    "goNodes": "Go to Nodes",
-    "goKeys": "Go to API Keys"
+    "goNodes": "Go to Nodes"
   },
   "about": {
     "title": "About",
     "desc": "Version and related links.",
     "version": "Version",
-    "cubeApi": "CubeAPI Endpoint",
+    "cubeApi": "CubeOps Endpoint",
     "instanceType": "Default Instance Type",
     "docs": "Docs"
   }

@@ -7,7 +7,7 @@ use crate::coredump::{
     CoredumpMemoryRegion, CoredumpMemoryRegions, DumpState, GuestDebuggableError,
 };
 use crate::migration::{memory_blob_to_path, url_to_path};
-use crate::pagemap_anon::filter_memory_ranges_by_pagemap_anon;
+use crate::pagemap_anon::{filter_memory_ranges_by_pagemap_anon, host_page_size};
 use crate::soft_dirty::{
     clear_soft_dirty, filter_memory_ranges_by_anon_and_soft_dirty, probe_soft_dirty_support,
 };
@@ -27,7 +27,6 @@ use devices::ioapic;
 use hypervisor::HypervisorVmError;
 #[cfg(target_arch = "x86_64")]
 use libc::{MAP_NORESERVE, MAP_POPULATE, MAP_SHARED, PROT_READ, PROT_WRITE};
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "guest_debug")]
 use std::collections::BTreeMap;
@@ -195,20 +194,8 @@ const PLATFORM_DEVICE_AREA_SIZE: u64 = 1 << 20;
 // KVM's dirty log and vm-memory's AtomicBitmap both size their bitmaps with one
 // bit per host page (via sysconf(_SC_PAGESIZE)), so interpreting those bitmaps
 // must use the same granularity: 4 KiB on x86_64, 64 KiB on some ARM64 hosts.
-// The value is fixed for the process lifetime, so probe it once and cache it to
-// keep sysconf() off the hot dirty-log path.
-static HOST_PAGE_SIZE: Lazy<u64> = Lazy::new(|| {
-    // Trivially safe: sysconf(_SC_PAGESIZE) takes no pointer argument.
-    let ret = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    // POSIX returns -1 on failure; a non-positive page size would corrupt the
-    // dirty-log bitmap granularity. The checked conversion keeps this invariant
-    // self-documenting and rejects any negative value regardless of build mode.
-    u64::try_from(ret).expect("sysconf(_SC_PAGESIZE) returned non-positive value")
-});
-
-fn host_page_size() -> u64 {
-    *HOST_PAGE_SIZE
-}
+// This reuses `pagemap_anon::host_page_size()` (cached, probed once) so the
+// whole crate shares a single source of truth for the host page size.
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct HotPlugState {

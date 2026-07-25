@@ -27,4 +27,8 @@ type SandboxProxyMap struct {
 	// otherwise. Lifecycle is bound to the sandbox — no rotation, cleared
 	// when the proxy entry is deleted.
 	TrafficAccessToken string `json:"TrafficAccessToken,omitempty"`
+
+	// MaskRequestHost is the unexpanded per-sandbox Host authority template
+	// CubeProxy applies to non-envd user-service requests.
+	MaskRequestHost string `json:"MaskRequestHost,omitempty"`
 }

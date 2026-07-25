@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
@@ -36,42 +38,22 @@ var caServableFiles = map[string]struct{}{
 	"cube-root-ca.key": {},
 }
 
-// handleCADownloadAction serves the CubeEgress root CA materials
-// (cube-root-ca.crt / cube-root-ca.key) to compute nodes that need to
-// run their own CubeEgress instance against templates baked with the
-// same CA.
-//
-// Path: /cube/ca/<filename>. Other names → 404.
-//
-// Auth: NONE today. Anyone reachable on the master HTTP port can pull
-// the MITM private key. Acceptable iff the master HTTP port is
-// reachable only from inside the cluster network (the typical
-// one-click deployment). Production hardening — bearer token in a
-// header, request-source ACL, or mTLS — should land before this
-// endpoint is exposed to anything wider; a verifyAuth(r) hook is the
-// natural place to add it.
-func handleCADownloadAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		return &types.Res{
-			Ret: &types.Ret{
-				RetCode: int(errorcode.ErrorCode_MasterParamsError),
-				RetMsg:  http.StatusText(http.StatusMethodNotAllowed),
-			},
-		}
-	}
-
-	// Trim and basename so a malicious caller can't request
-	// /cube/ca/../../etc/passwd. filepath.Base alone normalises any
-	// traversal attempt to a single path element; the allow-list then
+// openCAFile resolves, opens, and stats the requested CA file and writes the
+// common Content-Type/Length headers. On error it writes the API error
+// response and returns ok=false. On success the caller owns file (must Close).
+func openCAFile(c *gin.Context) (filename string, file *os.File, stat os.FileInfo, ok bool) {
+	// The filename is a gin path param (:filename), so it is already a
+	// single path segment; the allow-list below is the real boundary and
 	// rejects anything not on the documented list.
-	requested := filepath.Base(filepath.Clean(r.URL.Path))
-	if _, ok := caServableFiles[requested]; !ok {
-		return &types.Res{
+	requested := c.Param("filename")
+	if _, allow := caServableFiles[requested]; !allow {
+		common.WriteAPI(c, &types.Res{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_NotFound),
 				RetMsg:  http.StatusText(http.StatusNotFound),
 			},
-		}
+		})
+		return "", nil, nil, false
 	}
 
 	fullPath := filepath.Join(caRootDir, requested)
@@ -86,36 +68,67 @@ func handleCADownloadAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.
 		if errors.Is(err, os.ErrNotExist) {
 			retCode = int(errorcode.ErrorCode_NotFound)
 		}
-		return &types.Res{
+		common.WriteAPI(c, &types.Res{
 			Ret: &types.Ret{
 				RetCode: retCode,
 				RetMsg:  err.Error(),
 			},
-		}
+		})
+		return "", nil, nil, false
 	}
-	defer f.Close()
 
-	stat, err := f.Stat()
+	st, err := f.Stat()
 	if err != nil {
-		return &types.Res{
+		f.Close()
+		common.WriteAPI(c, &types.Res{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterInternalError),
 				RetMsg:  err.Error(),
 			},
-		}
+		})
+		return "", nil, nil, false
 	}
 
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.FormatInt(stat.Size(), 10))
-	if r.Method == http.MethodHead {
-		rt.RetCode = int64(errorcode.ErrorCode_Success)
-		return nil
+	c.Writer.Header().Set("Content-Type", "application/octet-stream")
+	c.Writer.Header().Set("Content-Length", strconv.FormatInt(st.Size(), 10))
+	return requested, f, st, true
+}
+
+// downloadCAGinHandler (GET) and headCAGinHandler (HEAD) serve the CubeEgress
+// root CA materials (cube-root-ca.crt / cube-root-ca.key) to compute nodes
+// that need to run their own CubeEgress instance against templates baked with
+// the same CA.
+//
+// Path: /cube/ca/<filename>. Other names → 404.
+//
+// Auth: NONE today. Anyone reachable on the master HTTP port can pull
+// the MITM private key. Acceptable iff the master HTTP port is
+// reachable only from inside the cluster network (the typical
+// one-click deployments). Production hardening — bearer token in a
+// header, request-source ACL, or mTLS — should land before this
+// endpoint is exposed to anything wider; a verifyAuth(r) hook is the
+// natural place to add it.
+func downloadCAGinHandler(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	requested, f, stat, ok := openCAFile(c)
+	if !ok {
+		return
 	}
+	defer f.Close()
 	// http.ServeContent gives us range support for free; the CA files
 	// are tiny (sub-kilobyte) so range isn't load-bearing, but it
 	// keeps the response handling consistent with the artifact
 	// download endpoint.
-	http.ServeContent(w, r, requested, stat.ModTime(), f)
+	http.ServeContent(c.Writer, c.Request, requested, stat.ModTime(), f)
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
-	return nil
+}
+
+func headCAGinHandler(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	_, f, _, ok := openCAFile(c)
+	if !ok {
+		return
+	}
+	f.Close()
+	rt.RetCode = int64(errorcode.ErrorCode_Success)
 }

@@ -18,7 +18,7 @@ func exportImageRootfs(ctx context.Context, source *PreparedSource, destRootfsDi
 		return errors.New("resolved source image is nil")
 	}
 	if source.ExportMode != ExportModeNative {
-		if err := validateImageRef(source.LocalRef); err != nil {
+		if err := ValidateImageRef(source.LocalRef); err != nil {
 			return err
 		}
 	}
@@ -135,7 +135,7 @@ func dockerExportImageRootfs(ctx context.Context, source *PreparedSource, destRo
 	// Use context.Background() so that cleanup runs even after request ctx is cancelled.
 	cleanupCtx := context.Background()
 	defer func() {
-		_ = dockerRun(cleanupCtx, "", "rm", "-f", containerID)
+		_ = dockerRun(cleanupCtx, "", "rm", "-f", "--", containerID)
 	}()
 
 	if err := os.RemoveAll(destRootfsDir); err != nil { // NOCC:Path Traversal()

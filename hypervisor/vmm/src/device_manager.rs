@@ -2821,7 +2821,11 @@ impl DeviceManager {
         let mmap_region = MmapRegion::build(
             Some(FileOffset::new(cloned_file, 0)),
             region_size as usize,
-            PROT_READ | PROT_WRITE,
+            if pmem_cfg.discard_writes {
+                PROT_READ
+            } else {
+                PROT_READ | PROT_WRITE
+            },
             MAP_NORESERVE
                 | if pmem_cfg.discard_writes {
                     MAP_PRIVATE
@@ -2836,7 +2840,14 @@ impl DeviceManager {
             .memory_manager
             .lock()
             .unwrap()
-            .create_userspace_mapping(region_base, region_size, host_addr, false, false, false)
+            .create_userspace_mapping(
+                region_base,
+                region_size,
+                host_addr,
+                false,
+                pmem_cfg.discard_writes,
+                false,
+            )
             .map_err(DeviceManagerError::MemoryManager)?;
 
         // Wrap the MmapRegion into a GuestRegionMmap so it can be inserted

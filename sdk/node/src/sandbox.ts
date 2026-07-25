@@ -31,6 +31,8 @@ export interface NetworkOptions {
   allowOut?: string[];
   denyOut?: string[];
   allowPublicTraffic?: boolean;
+  /** Host authority forwarded to user services. `${PORT}` expands per request. */
+  maskRequestHost?: string;
   rules?: NetworkRules;
 }
 
@@ -345,6 +347,9 @@ export class Sandbox {
       if (net.denyOut !== undefined) wire.denyOut = net.denyOut;
       if (net.allowPublicTraffic !== undefined) {
         wire.allowPublicTraffic = net.allowPublicTraffic;
+      }
+      if (net.maskRequestHost !== undefined) {
+        wire.maskRequestHost = net.maskRequestHost;
       }
       if (net.rules) {
         const normalized = normalizeRulesArg(net.rules);

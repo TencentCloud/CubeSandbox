@@ -175,19 +175,21 @@ cubemastercli tpl list --json | jq '.data[].template_id'
 ### 查看单个模板详情
 
 ```bash
-cubemastercli tpl info --template-id tpl-748094d2f2374b0a8a37e6ec
+cubemastercli tpl info tpl-748094d2f2374b0a8a37e6ec
 ```
+
+模板 ID 既可以用位置参数传入（与 docker/kubectl 风格一致），也可以继续使用 `--template-id`，两种写法等价。
 
 需要机器可读输出时，加上 `--json`：
 
 ```bash
-cubemastercli tpl info --template-id tpl-748094d2f2374b0a8a37e6ec --json
+cubemastercli tpl info tpl-748094d2f2374b0a8a37e6ec --json
 ```
 
 如果想查看模板里保存的创建请求体，可再加 `--include-request`：
 
 ```bash
-cubemastercli tpl info --template-id tpl-748094d2f2374b0a8a37e6ec --json --include-request
+cubemastercli tpl info tpl-748094d2f2374b0a8a37e6ec --json --include-request
 ```
 
 如果想预览创建沙箱时最终生效的请求，可使用：
@@ -203,7 +205,7 @@ cubemastercli tpl render --template-id tpl-748094d2f2374b0a8a37e6ec --json
 ## 删除模板
 
 ```bash
-cubemastercli tpl delete --template-id tpl-748094d2f2374b0a8a37e6ec
+cubemastercli tpl delete tpl-748094d2f2374b0a8a37e6ec
 ```
 
 成功后输出：

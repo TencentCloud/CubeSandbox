@@ -36,68 +36,79 @@ export default function NodesPage() {
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         {data?.map((n) => (
-          <Link key={n.nodeID} to={`/nodes/${n.nodeID}`} className="block hover:opacity-90 transition-opacity">
+          <Link
+            key={n.nodeID}
+            to={`/nodes/${n.nodeID}`}
+            className="block hover:opacity-90 transition-opacity"
+          >
             <Card className="panel-hover h-full">
-            <CardHeader>
-              <div className="flex items-center gap-3">
-                <span className="flex h-9 w-9 items-center justify-center rounded-md bg-muted text-muted-foreground">
-                  <Server size={16} />
-                </span>
-                <div className="min-w-0">
-                  <CardTitle className="flex items-center gap-2">
-                    <span className="relative flex h-2 w-2 shrink-0">
-                      {n.status.toLowerCase() === 'ready' && (
-                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-60" />
-                      )}
-                      <span className={cn('relative inline-flex rounded-full h-2 w-2', n.status.toLowerCase() === 'ready' ? 'bg-green-400' : 'bg-amber-400')} />
-                    </span>
-                    {n.hostname && n.hostname !== n.nodeID ? n.hostname : n.nodeID}
-                  </CardTitle>
-                  {n.hostname && n.hostname !== n.nodeID && (
-                    <CardDescription className="font-mono text-xs">{n.nodeID}</CardDescription>
-                  )}
-                </div>
-              </div>
-            </CardHeader>
-
-            <div className="mt-2 grid grid-cols-2 gap-4 text-xs">
-              <Meter
-                icon={<Cpu size={13} />}
-                label={t('cpu')}
-                pct={n.saturationPct}
-                detail={`${((n.resources.totalCpuMilli - n.resources.allocatableCpuMilli) / 1000).toFixed(1)} / ${(n.resources.totalCpuMilli / 1000).toFixed(1)} cores`}
-              />
-              <Meter
-                icon={<HardDrive size={13} />}
-                label={t('memory')}
-                pct={
-                  n.resources.totalMemoryMB > 0
-                    ? Math.round(
-                        ((n.resources.totalMemoryMB - n.resources.allocatableMemoryMB) /
-                          n.resources.totalMemoryMB) *
-                          100
-                      )
-                    : 0
-                }
-                detail={`${(((n.resources.totalMemoryMB - n.resources.allocatableMemoryMB) / 1024)).toFixed(1)} / ${(n.resources.totalMemoryMB / 1024).toFixed(1)} GiB`}
-              />
-            </div>
-
-            {n.conditions && n.conditions.length > 0 && (
-              <div className="mt-4 space-y-1 border-t border-border/60 pt-3">
-                {n.conditions.slice(0, 3).map((c, i) => (
-                  <div key={i} className="flex items-center justify-between text-xs">
-                    <span className="text-muted-foreground">{c.type}</span>
-                    <span className="flex items-center gap-2">
-                      <Badge tone={c.status === 'True' ? 'ok' : 'warn'}>{c.status}</Badge>
-                      <span className="text-muted-foreground">{formatRelative(c.lastTransitionTime)}</span>
-                    </span>
+              <CardHeader>
+                <div className="flex items-center gap-3">
+                  <span className="flex h-9 w-9 items-center justify-center rounded-md bg-muted text-muted-foreground">
+                    <Server size={16} />
+                  </span>
+                  <div className="min-w-0">
+                    <CardTitle className="flex items-center gap-2">
+                      <span className="relative flex h-2 w-2 shrink-0">
+                        {n.status.toLowerCase() === 'ready' && (
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-60" />
+                        )}
+                        <span
+                          className={cn(
+                            'relative inline-flex rounded-full h-2 w-2',
+                            n.status.toLowerCase() === 'ready' ? 'bg-green-400' : 'bg-amber-400',
+                          )}
+                        />
+                      </span>
+                      {n.hostname && n.hostname !== n.nodeID ? n.hostname : n.nodeID}
+                    </CardTitle>
+                    {n.hostname && n.hostname !== n.nodeID && (
+                      <CardDescription className="font-mono text-xs">{n.nodeID}</CardDescription>
+                    )}
                   </div>
-                ))}
+                </div>
+              </CardHeader>
+
+              <div className="mt-2 grid grid-cols-2 gap-4 text-xs">
+                <Meter
+                  icon={<Cpu size={13} />}
+                  label={t('cpu')}
+                  pct={n.saturationPct}
+                  detail={`${((n.resources.totalCpuMilli - n.resources.allocatableCpuMilli) / 1000).toFixed(1)} / ${(n.resources.totalCpuMilli / 1000).toFixed(1)} cores`}
+                />
+                <Meter
+                  icon={<HardDrive size={13} />}
+                  label={t('memory')}
+                  pct={
+                    n.resources.totalMemoryMB > 0
+                      ? Math.round(
+                          ((n.resources.totalMemoryMB - n.resources.allocatableMemoryMB) /
+                            n.resources.totalMemoryMB) *
+                            100,
+                        )
+                      : 0
+                  }
+                  detail={`${((n.resources.totalMemoryMB - n.resources.allocatableMemoryMB) / 1024).toFixed(1)} / ${(n.resources.totalMemoryMB / 1024).toFixed(1)} GiB`}
+                />
               </div>
-            )}
-          </Card>
-            </Link>
+
+              {n.conditions && n.conditions.length > 0 && (
+                <div className="mt-4 space-y-1 border-t border-border/60 pt-3">
+                  {n.conditions.slice(0, 3).map((c, i) => (
+                    <div key={i} className="flex items-center justify-between text-xs">
+                      <span className="text-muted-foreground">{c.type}</span>
+                      <span className="flex items-center gap-2">
+                        <Badge tone={c.status === 'True' ? 'ok' : 'warn'}>{c.status}</Badge>
+                        <span className="text-muted-foreground">
+                          {formatRelative(c.lastTransitionTime)}
+                        </span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+          </Link>
         ))}
       </div>
 
@@ -121,11 +132,19 @@ function Meter({
   pct: number;
   detail: string;
 }) {
-  const tone = pct > 85 ? 'from-cube-err/80 to-cube-err' : pct > 65 ? 'from-cube-warn/80 to-cube-warn' : 'from-primary/70 to-cube-accent';
+  const tone =
+    pct > 85
+      ? 'from-cube-err/80 to-cube-err'
+      : pct > 65
+        ? 'from-cube-warn/80 to-cube-warn'
+        : 'from-primary/70 to-cube-accent';
   return (
     <div>
       <div className="flex items-center justify-between text-muted-foreground">
-        <span className="flex items-center gap-1.5">{icon}{label}</span>
+        <span className="flex items-center gap-1.5">
+          {icon}
+          {label}
+        </span>
         <span className="text-foreground text-num">{pct}%</span>
       </div>
       <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">

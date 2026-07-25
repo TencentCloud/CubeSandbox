@@ -341,7 +341,7 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 		failRedoTemplateImageJob(ctx, jobID, resumePhase, err.Error())
 		return
 	}
-	if _, err := ensureTemplateDefinition(ctx, req.TemplateID, storedReq, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations)); err != nil {
+	if _, err := ensureTemplateDefinitionWithOptions(ctx, req.TemplateID, storedReq, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), definitionCreateOptions{}); err != nil {
 		failRedoTemplateImageJob(ctx, jobID, resumePhase, err.Error())
 		return
 	}
@@ -379,12 +379,25 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 		})
 		return
 	}
-	resultPayload, _ := json.Marshal(info)
 	finalStatus := JobStatusReady
 	finalPhase := JobPhaseReady
 	if info.Status == StatusFailed {
 		finalStatus = JobStatusFailed
 		finalPhase = JobPhaseSnapshotting
+	}
+	// Claim alias after READY via the shared helper.
+	claimWarning := ""
+	if info.Status != StatusFailed {
+		warning, displayName := claimAliasAfterReady(ctx, req.TemplateID, sourceReq.Alias)
+		claimWarning = warning
+		if displayName != "" {
+			info.DisplayName = displayName
+		}
+	}
+	resultPayload, _ := json.Marshal(info)
+	errorMessage := info.LastError
+	if errorMessage == "" && claimWarning != "" {
+		errorMessage = claimWarning
 	}
 	_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 		"status":          finalStatus,
@@ -394,6 +407,6 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 		"artifact_status": artifact.Status,
 		"template_status": info.Status,
 		"result_json":     string(resultPayload),
-		"error_message":   info.LastError,
+		"error_message":   errorMessage,
 	})
 }

@@ -608,11 +608,11 @@ print(os.environ['RUNTIME_VAR'])
 cubemastercli tpl list
 cubemastercli tpl list -o wide
 
-# 查看模板详情
-cubemastercli tpl info --template-id <template_id>
+# 查看模板详情（模板 ID 用位置参数传入，等价于 --template-id）
+cubemastercli tpl info <template_id>
 
 # 删除模板
-cubemastercli tpl delete --template-id <template_id>
+cubemastercli tpl delete <template_id>
 
 # 必要环境变量（使用 SDK 时）
 export CUBE_TEMPLATE_ID=<template_id>

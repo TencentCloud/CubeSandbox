@@ -678,6 +678,9 @@ impl Vmm {
             if let Some(pmems) = &restore_cfg.pmem {
                 vm_config.update_pmem(pmems);
             }
+            if let Some(ivshmem) = &restore_cfg.ivshmem {
+                vm_config.update_ivshmem(ivshmem);
+            }
             vm_config.memory.dirty_log = restore_cfg.dirty_log;
 
             vm_config

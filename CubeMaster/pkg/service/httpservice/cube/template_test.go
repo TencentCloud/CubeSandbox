@@ -64,7 +64,7 @@ func TestDeleteTemplateMapsAttemptInProgressToConflict(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/cube/template", strings.NewReader(`{"RequestID":"req-1","template_id":"tpl-1"}`))
 	rt := &CubeLog.RequestTrace{}
-	resp := deleteTemplate(httptest.NewRecorder(), req, rt)
+	resp := deleteTemplate(req, rt)
 
 	got, ok := resp.(*templateResponse)
 	if !ok {
@@ -86,7 +86,7 @@ func TestDeleteTemplateMapsCleanupLocatorMissingToNotFound(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/cube/template", strings.NewReader(`{"RequestID":"req-2","template_id":"tpl-2"}`))
 	rt := &CubeLog.RequestTrace{}
-	resp := deleteTemplate(httptest.NewRecorder(), req, rt)
+	resp := deleteTemplate(req, rt)
 
 	got, ok := resp.(*templateResponse)
 	if !ok {
@@ -108,7 +108,7 @@ func TestDeleteTemplateSuccessResponse(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/cube/template", strings.NewReader(`{"RequestID":"req-3","template_id":"tpl-3","instance_type":"cubebox"}`))
 	rt := &CubeLog.RequestTrace{}
-	resp := deleteTemplate(httptest.NewRecorder(), req, rt)
+	resp := deleteTemplate(req, rt)
 
 	got, ok := resp.(*templateResponse)
 	if !ok {
@@ -128,7 +128,7 @@ func fmtWrapped(base error, msg string) error {
 func TestDeleteTemplateRejectsMissingTemplateID(t *testing.T) {
 	req := httptest.NewRequest(http.MethodDelete, "/cube/template", strings.NewReader(`{"RequestID":"req-4"}`))
 	rt := &CubeLog.RequestTrace{}
-	resp := deleteTemplate(httptest.NewRecorder(), req, rt)
+	resp := deleteTemplate(req, rt)
 
 	got, ok := resp.(*templateResponse)
 	if !ok {
@@ -154,10 +154,15 @@ func TestDeleteTemplateRequestBodyUsesTemplateDeleteRequestSchema(t *testing.T) 
 func TestGetTemplateIncludeRequest(t *testing.T) {
 	origGetTemplateInfoFn := getTemplateInfoFn
 	origGetTemplateRequestFn := getTemplateRequestFn
+	origResolveTemplateIdentifierFn := resolveTemplateIdentifierFn
 	t.Cleanup(func() {
 		getTemplateInfoFn = origGetTemplateInfoFn
 		getTemplateRequestFn = origGetTemplateRequestFn
+		resolveTemplateIdentifierFn = origResolveTemplateIdentifierFn
 	})
+	resolveTemplateIdentifierFn = func(ctx context.Context, identifier string) (string, error) {
+		return identifier, nil
+	}
 	getTemplateInfoFn = func(ctx context.Context, templateID string) (*templatecenter.TemplateInfo, error) {
 		return &templatecenter.TemplateInfo{
 			TemplateID:   templateID,
@@ -177,7 +182,7 @@ func TestGetTemplateIncludeRequest(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/cube/template?template_id=tpl-include&include_request=true", nil)
 	rt := &CubeLog.RequestTrace{}
-	resp := getTemplate(httptest.NewRecorder(), req, rt)
+	resp := getTemplate(req, rt)
 
 	got, ok := resp.(*templateResponse)
 	if !ok {
@@ -190,11 +195,66 @@ func TestGetTemplateIncludeRequest(t *testing.T) {
 	assert.Equal(t, int64(errorcode.ErrorCode_Success), rt.RetCode)
 }
 
-func TestGetTemplateIncludesDisplayMetadata(t *testing.T) {
+func TestGetTemplateResolvesAliasBeforeLookup(t *testing.T) {
 	origGetTemplateInfoFn := getTemplateInfoFn
+	origGetTemplateRequestFn := getTemplateRequestFn
+	origResolveTemplateIdentifierFn := resolveTemplateIdentifierFn
 	t.Cleanup(func() {
 		getTemplateInfoFn = origGetTemplateInfoFn
+		getTemplateRequestFn = origGetTemplateRequestFn
+		resolveTemplateIdentifierFn = origResolveTemplateIdentifierFn
 	})
+
+	resolveTemplateIdentifierFn = func(ctx context.Context, identifier string) (string, error) {
+		assert.Equal(t, "stable-python", identifier)
+		return "tpl-resolved", nil
+	}
+	getTemplateInfoFn = func(ctx context.Context, templateID string) (*templatecenter.TemplateInfo, error) {
+		assert.Equal(t, "tpl-resolved", templateID)
+		return &templatecenter.TemplateInfo{
+			TemplateID:   templateID,
+			InstanceType: "cubebox",
+			Version:      "v2",
+			Status:       "READY",
+			DisplayName:  "stable-python",
+		}, nil
+	}
+	getTemplateRequestFn = func(ctx context.Context, templateID string) (*types.CreateCubeSandboxReq, error) {
+		assert.Equal(t, "tpl-resolved", templateID)
+		return &types.CreateCubeSandboxReq{
+			Request: &types.Request{RequestID: "req-preview"},
+			Annotations: map[string]string{
+				constants.CubeAnnotationAppSnapshotTemplateID: templateID,
+			},
+		}, nil
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/cube/template?template_id=stable-python&include_request=true", nil)
+	rt := &CubeLog.RequestTrace{}
+	resp := getTemplate(req, rt)
+
+	got, ok := resp.(*templateResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_Success), got.Ret.RetCode)
+	assert.Equal(t, "tpl-resolved", got.TemplateID)
+	assert.Equal(t, "stable-python", got.DisplayName)
+	if assert.NotNil(t, got.CreateRequest) {
+		assert.Equal(t, "tpl-resolved", got.CreateRequest.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
+	}
+}
+
+func TestGetTemplateIncludesDisplayMetadata(t *testing.T) {
+	origGetTemplateInfoFn := getTemplateInfoFn
+	origResolveTemplateIdentifierFn := resolveTemplateIdentifierFn
+	t.Cleanup(func() {
+		getTemplateInfoFn = origGetTemplateInfoFn
+		resolveTemplateIdentifierFn = origResolveTemplateIdentifierFn
+	})
+	resolveTemplateIdentifierFn = func(ctx context.Context, identifier string) (string, error) {
+		return identifier, nil
+	}
 	getTemplateInfoFn = func(ctx context.Context, templateID string) (*templatecenter.TemplateInfo, error) {
 		return &templatecenter.TemplateInfo{
 			TemplateID:   templateID,
@@ -209,7 +269,7 @@ func TestGetTemplateIncludesDisplayMetadata(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/cube/template?template_id=tpl-metadata", nil)
 	rt := &CubeLog.RequestTrace{}
-	resp := getTemplate(httptest.NewRecorder(), req, rt)
+	resp := getTemplate(req, rt)
 
 	got, ok := resp.(*templateResponse)
 	if !ok {

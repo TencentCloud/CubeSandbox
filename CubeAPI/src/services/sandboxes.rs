@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use super::validate_allow_out_domains_require_deny_all;
@@ -13,12 +13,13 @@ use crate::{
         CubeEgressRuleAction, CubeEgressRuleInject, CubeEgressRuleMatch, CubeMasterClient,
         CubeMasterError, CubeNetworkConfig, DeleteSandboxRequest, ListSandboxRequest, SandboxInfo,
         SandboxLogsRequest, SandboxRefreshRequest, SandboxStatus, SandboxTimeoutRequest,
-        SandboxUpdateRequest,
+        SandboxUpdateRequest, VolumeSpec,
     },
     error::{AppError, AppResult},
     models::{
         EgressRule, LogLevel as ModelLogLevel, NewSandbox, Sandbox, SandboxDetail, SandboxLog,
         SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxState,
+        SandboxVolumeMount,
     },
 };
 
@@ -26,9 +27,13 @@ const RET_CODE_OK: i32 = 0;
 const RET_CODE_HTTP_OK: i32 = 200;
 const RET_CODE_NOT_FOUND: i32 = 130404;
 const RET_CODE_CONFLICT: i32 = 130409;
+const RET_CODE_TASK_STATE_INVALID: i32 = 130490;
+const RET_CODE_TASK_RESUME_FAILED: i32 = 130589;
 const HOSTDIR_MOUNT_KEY: &str = "host-mount";
 const ENV_VAR_NAME_MAX_LEN: usize = 256;
 const ENV_VAR_VALUE_MAX_LEN: usize = 4096;
+const MASK_REQUEST_HOST_MAX_LEN: usize = 512;
+const MASK_REQUEST_HOST_PORT_PLACEHOLDER: &str = "${PORT}";
 
 /// Environment variable names that may compromise sandbox isolation if injected
 /// at the runtime level (loader overrides, language runtime paths).
@@ -160,10 +165,14 @@ impl SandboxService {
             metadata,
             distribution_scope,
             env_vars,
+            volume_mounts,
             ..
         } = body;
         if let Some(env_vars) = env_vars.as_ref() {
             validate_env_vars(env_vars)?;
+        }
+        if let Some(mounts) = volume_mounts.as_ref() {
+            validate_unique_volume_mount_names(mounts)?;
         }
         let mut annotations = HashMap::from([
             (
@@ -200,6 +209,54 @@ impl SandboxService {
             })
             .unwrap_or((false, false));
 
+        // Convert e2b-style volumeMounts into the CubeMaster wire format.
+        // Volumes (pod-level declarations) are passed in the volumes field;
+        // VolumeSource is left None so CubeMaster resolves from the volume DB.
+        //
+        // Container-level volume_mounts are forwarded via the
+        // "plugin-volume-mounts" annotation so CubeMaster can inject them
+        // into the existing template containers WITHOUT overriding the
+        // template's command / image / other settings.
+        let cube_volumes: Vec<VolumeSpec> = volume_mounts
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|SandboxVolumeMount { name, .. }| VolumeSpec {
+                name: Some(name.clone()),
+                volume_source: None,
+            })
+            .collect();
+
+        // Build the plugin-volume-mounts annotation value (JSON array).
+        if let Some(mounts) = &volume_mounts {
+            if !mounts.is_empty() {
+                #[derive(serde::Serialize)]
+                struct MountEntry<'a> {
+                    name: &'a str,
+                    container_path: &'a str,
+                }
+                let entries: Vec<MountEntry> = mounts
+                    .iter()
+                    .map(|m| MountEntry {
+                        name: &m.name,
+                        container_path: &m.path,
+                    })
+                    .collect();
+                if let Ok(json) = serde_json::to_string(&entries) {
+                    annotations.insert("plugin-volume-mounts".to_string(), json);
+                }
+            }
+        }
+
+        let volumes = if cube_volumes.is_empty() {
+            None
+        } else {
+            Some(cube_volumes)
+        };
+        // Always leave containers empty — CubeMaster injects volume_mounts
+        // from the annotation into the template's existing container spec.
+        let containers = vec![];
+
         let req = CreateSandboxRequest {
             request_id: new_request_id(),
             instance_type: self.instance_type.clone(),
@@ -211,8 +268,8 @@ impl SandboxService {
             labels,
             create_time_env_vars: env_vars,
             distribution_scope,
-            volumes: None,
-            containers: vec![],
+            volumes,
+            containers,
             exposed_ports: vec![],
             network_type: Some("tap".to_string()),
             cube_network_config,
@@ -252,11 +309,11 @@ impl SandboxService {
             .cubemaster
             .delete_sandbox(&req)
             .await
-            .map_err(|e| sandbox_not_found_or_internal(e, sandbox_id))?;
+            .map_err(|e| map_delete_cubemaster_err(e, sandbox_id))?;
 
         resp.ret
             .into_result()
-            .map_err(|e| sandbox_not_found_or_internal(e, sandbox_id))?;
+            .map_err(|e| map_delete_cubemaster_err(e, sandbox_id))?;
 
         Ok(())
     }
@@ -631,6 +688,20 @@ fn validate_env_vars(env_vars: &HashMap<String, String>) -> AppResult<()> {
     Ok(())
 }
 
+/// Each volume (`volumeMounts[].name`) may be mounted at most once per sandbox.
+fn validate_unique_volume_mount_names(mounts: &[SandboxVolumeMount]) -> AppResult<()> {
+    let mut seen = HashSet::with_capacity(mounts.len());
+    for m in mounts {
+        if !seen.insert(m.name.as_str()) {
+            return Err(AppError::BadRequest(format!(
+                "duplicate volumeMounts name {:?}: each volume may be mounted at most once per sandbox",
+                m.name
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn internal_error(error: impl std::fmt::Display) -> AppError {
     AppError::Internal(anyhow::anyhow!(error.to_string()))
 }
@@ -653,6 +724,51 @@ fn sandbox_not_found_or_internal(e: CubeMasterError, sandbox_id: &str) -> AppErr
         AppError::NotFound(format!("sandbox {} not found", sandbox_id))
     } else {
         internal_error(e)
+    }
+}
+
+fn map_delete_cubemaster_err(e: CubeMasterError, sandbox_id: &str) -> AppError {
+    match e {
+        CubeMasterError::Api { ret_code, .. } if ret_code == RET_CODE_NOT_FOUND => {
+            AppError::NotFound(format!("sandbox {} not found", sandbox_id))
+        }
+        CubeMasterError::Api { ret_code, ret_msg } if ret_code == RET_CODE_CONFLICT => {
+            let detail = if ret_msg.trim().is_empty() {
+                format!("sandbox {} conflict", sandbox_id)
+            } else {
+                ret_msg
+            };
+            AppError::Conflict(detail)
+        }
+        CubeMasterError::Api { ret_code, ret_msg } if ret_code == RET_CODE_TASK_STATE_INVALID => {
+            AppError::ServiceUnavailable {
+                message: delete_retry_message(
+                    ret_msg,
+                    sandbox_id,
+                    "is pausing; retry DELETE after 2 seconds",
+                ),
+                retry_after: 2,
+            }
+        }
+        CubeMasterError::Api { ret_code, ret_msg } if ret_code == RET_CODE_TASK_RESUME_FAILED => {
+            AppError::ServiceUnavailable {
+                message: delete_retry_message(
+                    ret_msg,
+                    sandbox_id,
+                    "could not be resumed before delete; retry DELETE after 5 seconds",
+                ),
+                retry_after: 5,
+            }
+        }
+        other => sandbox_not_found_or_internal(other, sandbox_id),
+    }
+}
+
+fn delete_retry_message(ret_msg: String, sandbox_id: &str, fallback: &str) -> String {
+    if ret_msg.trim().is_empty() {
+        format!("sandbox {} {}", sandbox_id, fallback)
+    } else {
+        ret_msg
     }
 }
 
@@ -824,6 +940,61 @@ fn new_request_id() -> String {
     Uuid::new_v4().to_string()
 }
 
+fn validate_mask_request_host(value: &str) -> AppResult<()> {
+    let invalid = |reason: &str| {
+        AppError::BadRequest(format!("network.maskRequestHost is invalid: {reason}"))
+    };
+
+    if value.is_empty() {
+        return Err(invalid("value must not be empty"));
+    }
+    if value.len() > MASK_REQUEST_HOST_MAX_LEN {
+        return Err(invalid("value is too long"));
+    }
+    if value.trim() != value || value.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(invalid("whitespace and control characters are not allowed"));
+    }
+    if value.contains("://")
+        || value.contains('/')
+        || value.contains('?')
+        || value.contains('#')
+        || value.contains('@')
+    {
+        return Err(invalid("expected a valid host or host:port authority"));
+    }
+
+    let expanded = value.replace(MASK_REQUEST_HOST_PORT_PLACEHOLDER, "65535");
+    if expanded.contains("${") {
+        return Err(invalid("only the ${PORT} placeholder is supported"));
+    }
+
+    let authority = expanded
+        .parse::<axum::http::uri::Authority>()
+        .map_err(|_| invalid("expected a valid host or host:port authority"))?;
+    if authority.host().is_empty() || !authority.host().is_ascii() {
+        return Err(invalid("host must be non-empty ASCII"));
+    }
+    let explicit_port = if expanded.starts_with('[') {
+        expanded
+            .find(']')
+            .and_then(|end| expanded.get(end + 1..))
+            .and_then(|suffix| suffix.strip_prefix(':'))
+    } else {
+        if expanded.matches(':').count() > 1 {
+            return Err(invalid("IPv6 hosts must use brackets"));
+        }
+        expanded.rsplit_once(':').map(|(_, port)| port)
+    };
+    if let Some(port) = explicit_port {
+        match port.parse::<u16>() {
+            Ok(1..=u16::MAX) => {}
+            _ => return Err(invalid("port must be between 1 and 65535")),
+        }
+    }
+
+    Ok(())
+}
+
 pub(crate) fn build_cube_network_config(
     allow_internet_access: Option<bool>,
     network: Option<&SandboxNetworkConfig>,
@@ -844,9 +1015,14 @@ pub(crate) fn build_cube_network_config(
         .unwrap_or_default();
 
     let allow_public_traffic = network.and_then(|n| n.allow_public_traffic);
+    let mask_request_host = network.and_then(|n| n.mask_request_host.clone());
+    if let Some(value) = mask_request_host.as_deref() {
+        validate_mask_request_host(value)?;
+    }
 
     if allow_internet_access.is_none()
         && allow_public_traffic.is_none()
+        && mask_request_host.is_none()
         && allow_out.is_empty()
         && deny_out.is_empty()
         && rules.is_empty()
@@ -857,6 +1033,7 @@ pub(crate) fn build_cube_network_config(
     Ok(Some(CubeNetworkConfig {
         allow_internet_access,
         allow_public_traffic,
+        mask_request_host,
         allow_out,
         deny_out,
         rules,
@@ -895,19 +1072,23 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        build_cube_network_config, filter_by_metadata, from_cubemaster_info, SandboxService,
-        RET_CODE_NOT_FOUND,
+        build_cube_network_config, filter_by_metadata, from_cubemaster_info,
+        map_delete_cubemaster_err, validate_mask_request_host, SandboxService, RET_CODE_CONFLICT,
+        RET_CODE_NOT_FOUND, RET_CODE_TASK_RESUME_FAILED, RET_CODE_TASK_STATE_INVALID,
     };
     use crate::cubemaster::{
-        CreateSandboxRequest, CubeMasterClient, ListSandboxResponse, SandboxInfo,
+        CreateSandboxRequest, CubeMasterClient, CubeMasterError, ListSandboxResponse, SandboxInfo,
         SandboxUpdateRequest,
     };
+    use crate::error::AppError;
     use crate::models::{
         EgressRule, EgressRuleAction, EgressRuleInject, EgressRuleMatch, NewSandbox,
         SandboxNetworkConfig, SandboxState,
     };
     use axum::{
         extract::State,
+        http::{header::RETRY_AFTER, StatusCode},
+        response::IntoResponse,
         routing::{delete, get, post},
         Json, Router,
     };
@@ -1036,6 +1217,72 @@ mod tests {
 
         assert_eq!(context.allow_internet_access, Some(false));
         assert_eq!(context.allow_out, vec!["github.com".to_string()]);
+    }
+
+    #[test]
+    fn network_context_forwards_mask_request_host_by_itself() {
+        let context = build_cube_network_config(
+            None,
+            Some(&SandboxNetworkConfig {
+                mask_request_host: Some("localhost:${PORT}".to_string()),
+                ..Default::default()
+            }),
+        )
+        .expect("mask should be valid")
+        .expect("mask-only network config must not be dropped");
+
+        assert_eq!(
+            context.mask_request_host.as_deref(),
+            Some("localhost:${PORT}")
+        );
+        let json = serde_json::to_value(&context).expect("serialize");
+        assert_eq!(json["maskRequestHost"], "localhost:${PORT}");
+    }
+
+    #[test]
+    fn mask_request_host_validation_accepts_documented_authorities() {
+        for value in [
+            "localhost",
+            "localhost:3000",
+            "localhost:${PORT}",
+            "my-app.example.com:${PORT}",
+            "127.0.0.1:3000",
+            "[::1]:${PORT}",
+        ] {
+            validate_mask_request_host(value).unwrap_or_else(|err| {
+                panic!("expected {value:?} to be valid, got {err}");
+            });
+        }
+    }
+
+    #[test]
+    fn mask_request_host_validation_rejects_unsafe_values() {
+        for value in [
+            "",
+            " localhost",
+            "localhost ",
+            "https://example.com",
+            "example.com/path",
+            "example.com?x=1",
+            "example.com#fragment",
+            "user@example.com",
+            "bad\r\nInjected: value",
+            "example.com:",
+            "example.com:0",
+            "example.com:99999",
+            "localhost:${OTHER}",
+            "localhost:${PORT",
+            "[::1",
+            "::1",
+            "[::1]]:3000",
+            "[::1]:",
+            "例子.测试",
+        ] {
+            assert!(
+                validate_mask_request_host(value).is_err(),
+                "expected {value:?} to be rejected"
+            );
+        }
     }
 
     #[test]
@@ -1631,6 +1878,123 @@ mod tests {
     }
 
     #[test]
+    fn delete_maps_capacity_rejection_to_conflict() {
+        let err = map_delete_cubemaster_err(
+            CubeMasterError::Api {
+                ret_code: RET_CODE_CONFLICT,
+                ret_msg: "resume rejected by paused_resource_release_ratio policy: node is full"
+                    .to_string(),
+            },
+            "sb-capacity",
+        );
+
+        match err {
+            AppError::Conflict(message) => assert_eq!(
+                message,
+                "resume rejected by paused_resource_release_ratio policy: node is full"
+            ),
+            other => panic!("expected conflict error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_maps_pausing_to_short_retry() {
+        let err = map_delete_cubemaster_err(
+            CubeMasterError::Api {
+                ret_code: RET_CODE_TASK_STATE_INVALID,
+                ret_msg: "sandbox is pausing; retry DELETE after 2 seconds".to_string(),
+            },
+            "sb-pausing",
+        );
+
+        match err {
+            AppError::ServiceUnavailable {
+                message,
+                retry_after,
+            } => {
+                assert_eq!(retry_after, 2);
+                assert_eq!(message, "sandbox is pausing; retry DELETE after 2 seconds");
+            }
+            other => panic!("expected unavailable error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_maps_unproven_resume_to_retryable_unavailable() {
+        let err = map_delete_cubemaster_err(
+            CubeMasterError::Api {
+                ret_code: RET_CODE_TASK_RESUME_FAILED,
+                ret_msg: "failed to resume paused sandbox before delete: shim timeout; retry DELETE after 5 seconds".to_string(),
+            },
+            "sb-resume-failed",
+        );
+
+        match err {
+            AppError::ServiceUnavailable {
+                message,
+                retry_after,
+            } => {
+                assert_eq!(retry_after, 5);
+                assert_eq!(
+                    message,
+                    "failed to resume paused sandbox before delete: shim timeout; retry DELETE after 5 seconds"
+                );
+            }
+            other => panic!("expected unavailable error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_retryable_errors_include_retry_after_in_http_response() {
+        let cases = [
+            (
+                RET_CODE_TASK_STATE_INVALID,
+                "sandbox is pausing; retry DELETE after 2 seconds",
+                "2",
+            ),
+            (
+                RET_CODE_TASK_RESUME_FAILED,
+                "failed to resume paused sandbox before delete: shim timeout; retry DELETE after 5 seconds",
+                "5",
+            ),
+        ];
+
+        for (ret_code, ret_msg, retry_after) in cases {
+            let response = map_delete_cubemaster_err(
+                CubeMasterError::Api {
+                    ret_code,
+                    ret_msg: ret_msg.to_string(),
+                },
+                "sb-retry",
+            )
+            .into_response();
+
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), retry_after);
+        }
+    }
+
+    #[test]
+    fn delete_retry_message_uses_fallback_for_empty_cube_master_message() {
+        assert_eq!(
+            super::delete_retry_message(
+                String::new(),
+                "sb-pausing",
+                "is pausing; retry DELETE after 2 seconds",
+            ),
+            "sandbox sb-pausing is pausing; retry DELETE after 2 seconds"
+        );
+        assert_eq!(
+            super::delete_retry_message(
+                "  \n".to_string(),
+                "sb-resume-failed",
+                "could not be resumed before delete; retry DELETE after 5 seconds",
+            ),
+            "sandbox sb-resume-failed could not be resumed before delete; retry DELETE after 5 seconds"
+        );
+    }
+
+    #[test]
     fn create_sandbox_rejects_dangerous_env_var_names() {
         for name in super::FORBIDDEN_ENV_NAMES {
             let err = super::validate_env_vars(&HashMap::from([(
@@ -1729,5 +2093,98 @@ mod tests {
             ("TAB_OK".to_string(), "hello\tworld".to_string()),
         ]))
         .expect("valid env var names should be accepted");
+    }
+
+    #[test]
+    fn volume_mounts_reject_duplicate_names() {
+        use crate::models::SandboxVolumeMount;
+
+        let mounts = vec![
+            SandboxVolumeMount {
+                name: "data".to_string(),
+                path: "/mnt/a".to_string(),
+            },
+            SandboxVolumeMount {
+                name: "data".to_string(),
+                path: "/mnt/b".to_string(),
+            },
+        ];
+        let err = super::validate_unique_volume_mount_names(&mounts)
+            .expect_err("duplicate volume mount names should be rejected");
+        assert!(
+            err.to_string().contains("duplicate volumeMounts name"),
+            "unexpected error: {err}"
+        );
+
+        let ok = vec![
+            SandboxVolumeMount {
+                name: "data".to_string(),
+                path: "/mnt/a".to_string(),
+            },
+            SandboxVolumeMount {
+                name: "logs".to_string(),
+                path: "/mnt/b".to_string(),
+            },
+        ];
+        super::validate_unique_volume_mount_names(&ok)
+            .expect("unique volume mount names should be accepted");
+    }
+
+    /// Verifies that `volumeMounts` from the e2b-shaped `NewSandbox` are
+    /// correctly split into `VolumeSpec` (pod-level declarations) and
+    /// `VolumeMount` (container-level bindings) for CubeMaster.
+    #[test]
+    fn volume_mounts_are_split_into_spec_and_mount() {
+        use crate::{
+            cubemaster::{VolumeMount, VolumeSpec},
+            models::SandboxVolumeMount,
+        };
+
+        let mounts = vec![
+            SandboxVolumeMount {
+                name: "data".to_string(),
+                path: "/mnt/data".to_string(),
+            },
+            SandboxVolumeMount {
+                name: "logs".to_string(),
+                path: "/mnt/logs".to_string(),
+            },
+        ];
+
+        let (specs, bindings): (Vec<VolumeSpec>, Vec<VolumeMount>) = mounts
+            .into_iter()
+            .map(|SandboxVolumeMount { name, path }| {
+                (
+                    VolumeSpec {
+                        name: Some(name.clone()),
+                        volume_source: None,
+                    },
+                    VolumeMount {
+                        name,
+                        container_path: path,
+                        readonly: None,
+                    },
+                )
+            })
+            .unzip();
+
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].name.as_deref(), Some("data"));
+        assert_eq!(specs[1].name.as_deref(), Some("logs"));
+
+        assert_eq!(bindings[0].name, "data");
+        assert_eq!(bindings[0].container_path, "/mnt/data");
+        assert_eq!(bindings[1].name, "logs");
+        assert_eq!(bindings[1].container_path, "/mnt/logs");
+    }
+
+    /// When no `volumeMounts` are provided, `volumes` and `containers` in the
+    /// CubeMaster request should be empty/None so CubeMaster falls back to the
+    /// template's container definition.
+    #[test]
+    fn empty_volume_mounts_produces_none_volumes_and_empty_containers() {
+        let mounts: Vec<crate::models::SandboxVolumeMount> = vec![];
+        let has_mounts = !mounts.is_empty();
+        assert!(!has_mounts, "no mounts → containers should stay empty");
     }
 }

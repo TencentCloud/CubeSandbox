@@ -174,7 +174,7 @@ make web-api-sync
 | Symptom | Fix |
 |---|---|
 | `docker: Cannot connect` | Docker daemon not running. `sudo systemctl start docker` |
-| `make: *** [builder-image] Error` | Docker build failed. Check network, retry with `make builder-image BUILDER_FORCE_REBUILD=1` |
+| `make: *** [builder-image] Error` | Docker build failed. Check network, retry with `make builder-image BUILDER_FORCE_REBUILD=1`. From China, add `MIRROR=cn` to fetch the llvm.sh installer and clang-14 apt packages from a China mirror (the LLVM GPG key still comes from apt.llvm.org) |
 | `error: protoc not installed` inside builder | Builder image is outdated. Rebuild: `make builder-image BUILDER_FORCE_REBUILD=1` |
 | `go: no such tool "covdata"` | Don't use `-coverprofile` flag with `make test` in CubeMaster. Use raw `go test` instead. |
 | `cargo: command not found` on host | Rust builds run inside Docker. Use `make <target>`, not raw `cargo`. |

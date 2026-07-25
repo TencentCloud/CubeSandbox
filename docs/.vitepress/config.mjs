@@ -113,6 +113,18 @@ export default withMermaid(defineConfig({
                 { text: 'PVM Deployment', link: '/guide/pvm-deploy' },
                 { text: 'Bare-Metal Deployment', link: '/guide/bare-metal-deploy' },
                 { text: 'Multi-Node Cluster', link: '/guide/multi-node-deploy' },
+                {
+                  text: 'Kubernetes Deployment',
+                  link: '/guide/kubernetes/',
+                  collapsed: true,
+                  items: [
+                    { text: 'Overview', link: '/guide/kubernetes/' },
+                    { text: 'Helm Install', link: '/guide/kubernetes/install' },
+                    { text: 'Architecture', link: '/guide/kubernetes/architecture' },
+                    { text: 'Upgrade', link: '/guide/kubernetes/upgrade' },
+                    { text: 'FAQ', link: '/guide/kubernetes/faq' }
+                  ]
+                },
                 { text: 'Tencent Cloud Cluster (Terraform)', link: '/guide/tencentcloud-terraform-deploy' },
                 { text: 'Self-Build Deployment', link: '/guide/self-build-deploy' },
                 { text: 'Development Environment (QEMU VM)', link: '/guide/dev-environment' }
@@ -149,7 +161,8 @@ export default withMermaid(defineConfig({
             {
               text: 'Storage',
               items: [
-                { text: 'Persistent Storage (Host Mount)', link: '/guide/persistent-storage' }
+                { text: 'Persistent Storage (Host Mount)', link: '/guide/persistent-storage' },
+                { text: 'Volume Plugin Development', link: '/guide/volume-plugin' }
               ]
             },
             {
@@ -157,6 +170,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: 'WebUI Dashboard', link: '/guide/webui' },
                 { text: 'Service Management & Logs', link: '/guide/service-management' },
+                { text: 'Node Isolation', link: '/guide/node-isolation' },
                 { text: 'Sandbox Logs', link: '/guide/sandbox-logs' },
                 { text: 'Webhook Event Notifications', link: '/guide/webhooks' },
                 { text: 'Template Inspection & Request Preview', link: '/guide/template-inspection-and-preview' },
@@ -189,6 +203,7 @@ export default withMermaid(defineConfig({
                     { text: 'trpc-agent-go', link: '/guide/usecases/trpc-agent-go' }
                   ]
                 },
+                { text: 'Cube 100 Program', link: '/guide/cube100' },
                 { text: 'Integrations', link: '/guide/integrations/' }
               ]
             },
@@ -248,6 +263,18 @@ export default withMermaid(defineConfig({
                 { text: 'PVM部署', link: '/zh/guide/pvm-deploy' },
                 { text: '裸金属/物理机部署', link: '/zh/guide/bare-metal-deploy' },
                 { text: '多机集群部署', link: '/zh/guide/multi-node-deploy' },
+                {
+                  text: 'Kubernetes 部署',
+                  link: '/zh/guide/kubernetes/',
+                  collapsed: true,
+                  items: [
+                    { text: '概览', link: '/zh/guide/kubernetes/' },
+                    { text: 'Helm 安装', link: '/zh/guide/kubernetes/install' },
+                    { text: '架构说明', link: '/zh/guide/kubernetes/architecture' },
+                    { text: '升级', link: '/zh/guide/kubernetes/upgrade' },
+                    { text: '常见问题', link: '/zh/guide/kubernetes/faq' }
+                  ]
+                },
                 { text: '腾讯云集群部署（Terraform）', link: '/zh/guide/tencentcloud-terraform-deploy' },
                 { text: '本地构建部署', link: '/zh/guide/self-build-deploy' },
                 { text: '开发环境（QEMU 虚机）', link: '/zh/guide/dev-environment' }
@@ -284,7 +311,8 @@ export default withMermaid(defineConfig({
             {
               text: '存储',
               items: [
-                { text: '持久化存储（Host Mount）', link: '/zh/guide/persistent-storage' }
+                { text: '持久化存储（Host Mount）', link: '/zh/guide/persistent-storage' },
+                { text: 'Volume 插件开发', link: '/zh/guide/volume-plugin' }
               ]
             },
             {
@@ -292,6 +320,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: 'WebUI 控制台', link: '/zh/guide/webui' },
                 { text: '服务管理与日志', link: '/zh/guide/service-management' },
+                { text: '隔离节点', link: '/zh/guide/node-isolation' },
                 { text: '沙箱日志', link: '/zh/guide/sandbox-logs' },
                 { text: 'Webhook 事件通知', link: '/zh/guide/webhooks' },
                 { text: '模板检查与请求预览', link: '/zh/guide/template-inspection-and-preview' },
@@ -324,6 +353,7 @@ export default withMermaid(defineConfig({
                     { text: 'trpc-agent-go', link: '/zh/guide/usecases/trpc-agent-go' }
                   ]
                 },
+                { text: 'Cube 100 计划', link: '/zh/guide/cube100' },
                 { text: '生态集成', link: '/zh/guide/integrations/' }
               ]
             },
