@@ -181,7 +181,8 @@ func TerminalWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			case "keepalive":
-				// The reader refreshed the idle deadline; no backend operation needed.
+				// readTerminalFrame succeeded and the reader goroutine refreshed
+				// the idle deadline; no backend operation is needed.
 			default:
 				_ = write(terminalServerFrame{Type: "error", Message: "unsupported terminal frame"})
 				return

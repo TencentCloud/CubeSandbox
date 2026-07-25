@@ -209,6 +209,10 @@ pub async fn sandbox_terminal(
             "terminal gateway is not configured".to_string(),
         ));
     };
+    if let Err(error) = state.services.sandboxes.get_sandbox(&sandbox_id).await {
+        log_terminal_rejection(&state, &sandbox_id, &operator, "sandbox_unavailable").await;
+        return Err(error);
+    }
     let Some(session_permit) = state.terminal_sessions.try_acquire(&sandbox_id) else {
         log_terminal_rejection(&state, &sandbox_id, &operator, "session_limit").await;
         return Err(crate::error::AppError::TooManyRequests(
@@ -474,7 +478,7 @@ fn to_master_message(message: Message) -> Option<TungsteniteMessage> {
         Message::Binary(value) => Some(TungsteniteMessage::Binary(value)),
         Message::Ping(value) => Some(TungsteniteMessage::Ping(value)),
         Message::Pong(value) => Some(TungsteniteMessage::Pong(value)),
-        Message::Close(_) => None,
+        Message::Close(_) => Some(TungsteniteMessage::Close(None)),
     }
 }
 
@@ -484,7 +488,7 @@ fn to_browser_message(message: TungsteniteMessage) -> Option<Message> {
         TungsteniteMessage::Binary(value) => Some(Message::Binary(value.into())),
         TungsteniteMessage::Ping(value) => Some(Message::Ping(value.into())),
         TungsteniteMessage::Pong(value) => Some(Message::Pong(value.into())),
-        TungsteniteMessage::Close(_) => None,
+        TungsteniteMessage::Close(_) => Some(Message::Close(None)),
         TungsteniteMessage::Frame(_) => None,
     }
 }
@@ -562,6 +566,18 @@ mod terminal_tests {
         assert_eq!(first, second);
         assert!(first.starts_with("terminal:"));
         assert!(!first.contains("session-secret"));
+    }
+
+    #[test]
+    fn terminal_close_frames_are_forwarded() {
+        assert!(matches!(
+            to_master_message(Message::Close(None)),
+            Some(TungsteniteMessage::Close(None))
+        ));
+        assert!(matches!(
+            to_browser_message(TungsteniteMessage::Close(None)),
+            Some(Message::Close(None))
+        ));
     }
 
     #[test]

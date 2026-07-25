@@ -39,10 +39,13 @@ middleware also protects the route when an auth callback is configured.
 CubeAPI emits `terminal.session.open` and `terminal.session.close` audit events
 with the operator, sandbox ID, and container ID. The URL sandbox ID must match
 the first protocol frame, and `open` is emitted only after that frame reaches
-CubeMaster. Authentication failures, session-limit rejections, malformed open
-frames, and backend connection failures emit `terminal.session.reject` with a
-stable reason but never include credentials. Each terminal is a separate
-Cubelet TTY process, so multiple sessions and sandboxes remain isolated.
+CubeMaster. It records proxy acceptance, not confirmation that Cubelet has
+created the exec process; a later backend rejection is returned as an error and
+followed by `close`. Authentication failures, session-limit rejections,
+malformed open frames, and backend connection failures emit
+`terminal.session.reject` with a stable reason but never include credentials.
+Each terminal is a separate Cubelet TTY process, so multiple sessions and
+sandboxes remain isolated.
 CubeAPI rejects sessions above
 `TERMINAL_MAX_SESSIONS_PER_SANDBOX` with HTTP 429. The limit is process-local,
 so multiply it by the number of CubeAPI replicas when sizing a deployment.
