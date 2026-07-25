@@ -186,7 +186,7 @@ pub async fn sandbox_terminal(
 ) -> AppResult<impl IntoResponse> {
     let rate_limit_key = terminal_rate_limit_key(&headers);
     if state.rate_limiter.check_key(&rate_limit_key).is_err() {
-        log_terminal_rejection(&state, &sandbox_id, "unknown", "rate_limit").await;
+        log_terminal_rejection(&state, &sandbox_id, "unauthenticated", "rate_limit").await;
         return Err(crate::error::AppError::TooManyRequests(
             "Terminal rate limit exceeded. Slow down.".to_string(),
         ));

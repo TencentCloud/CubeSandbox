@@ -114,7 +114,7 @@ func TestMergeTerminalEnvOverridesByName(t *testing.T) {
 		[]string{"TERM=xterm-256color", "LANG=C.UTF-8"},
 	)
 
-	assert.Equal(t, []string{"LANG=C.UTF-8", "PATH=/usr/bin", "TERM=xterm-256color"}, merged)
+	assert.Equal(t, []string{"PATH=/usr/bin", "TERM=xterm-256color", "LANG=C.UTF-8"}, merged)
 }
 
 func TestTerminalProcessFromSpecDoesNotMutateBase(t *testing.T) {

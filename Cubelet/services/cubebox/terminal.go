@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"slices"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -83,6 +82,9 @@ func (s *service) AttachTerminal(stream cubebox.CubeboxMgr_AttachTerminalServer)
 	container, err := sandbox.Get(open.GetContainerId())
 	if err != nil {
 		return status.Errorf(codes.NotFound, "container %q not found: %v", open.GetContainerId(), err)
+	}
+	if container.IsPod {
+		return status.Error(codes.PermissionDenied, "terminal target must be a workload container")
 	}
 	task, err := container.Container.Task(ctx, nil)
 	if err != nil {
@@ -254,25 +256,27 @@ func terminalProcessFromSpec(base *specs.Process, open *cubebox.TerminalOpenRequ
 }
 
 func mergeTerminalEnv(base, overrides []string) []string {
-	values := make(map[string]string, len(base)+len(overrides))
-	for _, value := range append(append([]string(nil), base...), overrides...) {
-		for index, char := range value {
-			if char == '=' {
-				values[value[:index]] = value[index+1:]
+	merged := make([]string, 0, len(base)+len(overrides))
+	indices := make(map[string]int, len(base)+len(overrides))
+	apply := func(entries []string) {
+		for _, value := range entries {
+			for index, char := range value {
+				if char != '=' {
+					continue
+				}
+				key := value[:index]
+				if existing, ok := indices[key]; ok {
+					merged[existing] = value
+				} else {
+					indices[key] = len(merged)
+					merged = append(merged, value)
+				}
 				break
 			}
 		}
 	}
-	merged := make([]string, 0, len(values))
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		value := values[key]
-		merged = append(merged, fmt.Sprintf("%s=%s", key, value))
-	}
+	apply(base)
+	apply(overrides)
 	return merged
 }
 
