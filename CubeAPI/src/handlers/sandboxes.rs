@@ -310,12 +310,11 @@ async fn terminal_operator(state: &AppState, headers: &HeaderMap) -> AppResult<S
 }
 
 fn terminal_session_token(headers: &HeaderMap) -> Option<&str> {
-    let protocol = headers
-        .get(SEC_WEBSOCKET_PROTOCOL)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-    protocol
-        .split(',')
+    headers
+        .get_all(SEC_WEBSOCKET_PROTOCOL)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|protocol| protocol.split(','))
         .map(str::trim)
         .find(|value| *value != TERMINAL_SUBPROTOCOL)
         .filter(|value| !value.is_empty())
@@ -551,6 +550,15 @@ mod terminal_tests {
         assert_eq!(first, second);
         assert!(first.starts_with("terminal:"));
         assert!(!first.contains("session-secret"));
+    }
+
+    #[test]
+    fn terminal_session_token_accepts_multiple_protocol_headers() {
+        let mut headers = HeaderMap::new();
+        headers.append(SEC_WEBSOCKET_PROTOCOL, "cube-terminal".parse().unwrap());
+        headers.append(SEC_WEBSOCKET_PROTOCOL, "session-secret".parse().unwrap());
+
+        assert_eq!(terminal_session_token(&headers), Some("session-secret"));
     }
 }
 
