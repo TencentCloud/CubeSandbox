@@ -11,9 +11,8 @@
 package cubebox
 
 import (
-	v12 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
+	v11 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	v1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
-	v11 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/volumeplugin/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -2540,11 +2539,7 @@ type VolumeSource struct {
 	// host_dir_volumes shares host directories into the container via virtiofs.
 	HostDirVolumes *HostDirVolumeSources `protobuf:"bytes,7,opt,name=host_dir_volumes,json=hostDirVolumes,proto3" json:"host_dir_volumes,omitempty"`
 	// image volume source for image volume mount
-	Image *v1.ImageVolumeSource `protobuf:"bytes,9,opt,name=image,proto3" json:"image,omitempty"`
-	// plugin_volume delegates provisioning to a named external VolumePlugin
-	// (built-in, binary or RPC).  All other fields above are handled by the
-	// existing storage pipeline and are NOT routed through the plugin framework.
-	PluginVolume  *v11.PluginVolumeSource `protobuf:"bytes,11,opt,name=plugin_volume,json=pluginVolume,proto3" json:"plugin_volume,omitempty"`
+	Image         *v1.ImageVolumeSource `protobuf:"bytes,9,opt,name=image,proto3" json:"image,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2607,12 +2602,6 @@ func (x *VolumeSource) GetImage() *v1.ImageVolumeSource {
 	return nil
 }
 
-func (x *VolumeSource) GetPluginVolume() *v11.PluginVolumeSource {
-	if x != nil {
-		return x.PluginVolume
-	}
-	return nil
-}
 
 // Volume represents a named volume in a pod that may be accessed by any container in the pod.
 type Volume struct {
@@ -6980,7 +6969,7 @@ var File_api_services_cubebox_v1_cubebox_proto protoreflect.FileDescriptor
 
 const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\n" +
-	"%api/services/cubebox/v1/cubebox.proto\x12\x1bcubelet.services.cubebox.v1\x1a)api/services/errorcode/v1/errorcode.proto\x1a#api/services/images/v1/images.proto\x1a/api/services/volumeplugin/v1/volumeplugin.proto\"a\n" +
+		"%api/services/cubebox/v1/cubebox.proto\x12\x1bcubelet.services.cubebox.v1\x1a)api/services/errorcode/v1/errorcode.proto\x1a#api/services/images/v1/images.proto\"a\n" +
 	"\rSELinuxOption\x12\x12\n" +
 	"\x04user\x18\x01 \x01(\tR\x04user\x12\x12\n" +
 	"\x04role\x18\x02 \x01(\tR\x04role\x12\x12\n" +
@@ -7152,13 +7141,12 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1b\n" +
 	"\thost_path\x18\x02 \x01(\tR\bhostPath\"i\n" +
 	"\x14HostDirVolumeSources\x12Q\n" +
-	"\x0evolume_sources\x18\x01 \x03(\v2*.cubelet.services.cubebox.v1.HostDirSourceR\rvolumeSources\"\xb4\x03\n" +
-	"\fVolumeSource\x12N\n" +
-	"\tempty_dir\x18\x01 \x01(\v21.cubelet.services.cubebox.v1.EmptyDirVolumeSourceR\bemptyDir\x12W\n" +
-	"\fsandbox_path\x18\x05 \x01(\v24.cubelet.services.cubebox.v1.SandboxPathVolumeSourceR\vsandboxPath\x12[\n" +
-	"\x10host_dir_volumes\x18\a \x01(\v21.cubelet.services.cubebox.v1.HostDirVolumeSourcesR\x0ehostDirVolumes\x12C\n" +
-	"\x05image\x18\t \x01(\v2-.cubelet.services.images.v1.ImageVolumeSourceR\x05image\x12Y\n" +
-	"\rplugin_volume\x18\v \x01(\v24.cubelet.services.volumeplugin.v1.PluginVolumeSourceR\fpluginVolume\"l\n" +
+		"\x0evolume_sources\x18\x01 \x03(\v2*.cubelet.services.cubebox.v1.HostDirSourceR\rvolumeSources\"l\n" +
+		"\fVolumeSource\x12N\n" +
+		"\tempty_dir\x18\x01 \x01(\v21.cubelet.services.cubebox.v1.EmptyDirVolumeSourceR\bemptyDir\x12W\n" +
+		"\fsandbox_path\x18\x05 \x01(\v24.cubelet.services.cubebox.v1.SandboxPathVolumeSourceR\vsandboxPath\x12[\n" +
+		"\x10host_dir_volumes\x18\a \x01(\v21.cubelet.services.cubebox.v1.HostDirVolumeSourcesR\x0ehostDirVolumes\x12C\n" +
+		"\x05image\x18\t \x01(\v2-.cubelet.services.images.v1.ImageVolumeSourceR\x05image\"l\n" +
 	"\x06Volume\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12N\n" +
 	"\rvolume_source\x18\x02 \x01(\v2).cubelet.services.cubebox.v1.VolumeSourceR\fvolumeSource\"\xad\x06\n" +
@@ -7737,8 +7725,7 @@ var file_api_services_cubebox_v1_cubebox_proto_goTypes = []any{
 	nil,                                       // 105: cubelet.services.cubebox.v1.GetStorageMetricsResponse.MetricsEntry
 	(*v1.ImageSpec)(nil),                      // 106: cubelet.services.images.v1.ImageSpec
 	(*v1.ImageVolumeSource)(nil),              // 107: cubelet.services.images.v1.ImageVolumeSource
-	(*v11.PluginVolumeSource)(nil),            // 108: cubelet.services.volumeplugin.v1.PluginVolumeSource
-	(*v12.Ret)(nil),                           // 109: cubelet.services.errorcode.v1.Ret
+	(*v11.Ret)(nil),                           // 109: cubelet.services.errorcode.v1.Ret
 }
 var file_api_services_cubebox_v1_cubebox_proto_depIdxs = []int32{
 	7,   // 0: cubelet.services.cubebox.v1.ContainerSecurityContext.capabilities:type_name -> cubelet.services.cubebox.v1.Capability
@@ -7781,14 +7768,13 @@ var file_api_services_cubebox_v1_cubebox_proto_depIdxs = []int32{
 	34,  // 37: cubelet.services.cubebox.v1.VolumeSource.sandbox_path:type_name -> cubelet.services.cubebox.v1.SandboxPathVolumeSource
 	36,  // 38: cubelet.services.cubebox.v1.VolumeSource.host_dir_volumes:type_name -> cubelet.services.cubebox.v1.HostDirVolumeSources
 	107, // 39: cubelet.services.cubebox.v1.VolumeSource.image:type_name -> cubelet.services.images.v1.ImageVolumeSource
-	108, // 40: cubelet.services.cubebox.v1.VolumeSource.plugin_volume:type_name -> cubelet.services.volumeplugin.v1.PluginVolumeSource
 	37,  // 41: cubelet.services.cubebox.v1.Volume.volume_source:type_name -> cubelet.services.cubebox.v1.VolumeSource
 	38,  // 42: cubelet.services.cubebox.v1.RunCubeSandboxRequest.volumes:type_name -> cubelet.services.cubebox.v1.Volume
 	26,  // 43: cubelet.services.cubebox.v1.RunCubeSandboxRequest.containers:type_name -> cubelet.services.cubebox.v1.ContainerConfig
 	96,  // 44: cubelet.services.cubebox.v1.RunCubeSandboxRequest.annotations:type_name -> cubelet.services.cubebox.v1.RunCubeSandboxRequest.AnnotationsEntry
 	97,  // 45: cubelet.services.cubebox.v1.RunCubeSandboxRequest.labels:type_name -> cubelet.services.cubebox.v1.RunCubeSandboxRequest.LabelsEntry
 	42,  // 46: cubelet.services.cubebox.v1.RunCubeSandboxRequest.cube_network_config:type_name -> cubelet.services.cubebox.v1.CubeNetworkConfig
-	109, // 47: cubelet.services.cubebox.v1.RunCubeSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	108, // 47: cubelet.services.cubebox.v1.RunCubeSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
 	98,  // 48: cubelet.services.cubebox.v1.RunCubeSandboxResponse.ext_info:type_name -> cubelet.services.cubebox.v1.RunCubeSandboxResponse.ExtInfoEntry
 	41,  // 49: cubelet.services.cubebox.v1.RunCubeSandboxResponse.port_mappings:type_name -> cubelet.services.cubebox.v1.PortMapping
 	43,  // 50: cubelet.services.cubebox.v1.CubeNetworkConfig.rules:type_name -> cubelet.services.cubebox.v1.EgressRule
@@ -7797,7 +7783,7 @@ var file_api_services_cubebox_v1_cubebox_proto_depIdxs = []int32{
 	46,  // 53: cubelet.services.cubebox.v1.EgressRuleAction.inject:type_name -> cubelet.services.cubebox.v1.EgressRuleInject
 	99,  // 54: cubelet.services.cubebox.v1.DestroyCubeSandboxRequest.annotations:type_name -> cubelet.services.cubebox.v1.DestroyCubeSandboxRequest.AnnotationsEntry
 	52,  // 55: cubelet.services.cubebox.v1.DestroyCubeSandboxRequest.filter:type_name -> cubelet.services.cubebox.v1.CubeSandboxFilter
-	109, // 56: cubelet.services.cubebox.v1.DestroyCubeSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	108, // 56: cubelet.services.cubebox.v1.DestroyCubeSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
 	100, // 57: cubelet.services.cubebox.v1.DestroyCubeSandboxResponse.ext_info:type_name -> cubelet.services.cubebox.v1.DestroyCubeSandboxResponse.ExtInfoEntry
 	50,  // 58: cubelet.services.cubebox.v1.CubeSandbox.containers:type_name -> cubelet.services.cubebox.v1.Container
 	41,  // 59: cubelet.services.cubebox.v1.CubeSandbox.port_mappings:type_name -> cubelet.services.cubebox.v1.PortMapping
@@ -7812,27 +7798,27 @@ var file_api_services_cubebox_v1_cubebox_proto_depIdxs = []int32{
 	58,  // 68: cubelet.services.cubebox.v1.ListCubeSandboxRequest.option:type_name -> cubelet.services.cubebox.v1.ListCubeSandboxOption
 	49,  // 69: cubelet.services.cubebox.v1.ListCubeSandboxResponse.items:type_name -> cubelet.services.cubebox.v1.CubeSandbox
 	104, // 70: cubelet.services.cubebox.v1.UpdateCubeSandboxRequest.annotations:type_name -> cubelet.services.cubebox.v1.UpdateCubeSandboxRequest.AnnotationsEntry
-	109, // 71: cubelet.services.cubebox.v1.UpdateCubeSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	109, // 72: cubelet.services.cubebox.v1.ExecCubeSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	108, // 71: cubelet.services.cubebox.v1.UpdateCubeSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	108, // 72: cubelet.services.cubebox.v1.ExecCubeSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
 	39,  // 73: cubelet.services.cubebox.v1.AppSnapshotRequest.create_request:type_name -> cubelet.services.cubebox.v1.RunCubeSandboxRequest
-	109, // 74: cubelet.services.cubebox.v1.AppSnapshotResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	109, // 75: cubelet.services.cubebox.v1.CommitSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	109, // 76: cubelet.services.cubebox.v1.RollbackSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	108, // 74: cubelet.services.cubebox.v1.AppSnapshotResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	108, // 75: cubelet.services.cubebox.v1.CommitSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	108, // 76: cubelet.services.cubebox.v1.RollbackSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
 	67,  // 77: cubelet.services.cubebox.v1.CleanupTemplateRequest.objects:type_name -> cubelet.services.cubebox.v1.CowObjectRef
-	109, // 78: cubelet.services.cubebox.v1.CleanupTemplateResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	108, // 78: cubelet.services.cubebox.v1.CleanupTemplateResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
 	67,  // 79: cubelet.services.cubebox.v1.ListSandboxSnapshotsRequest.objects:type_name -> cubelet.services.cubebox.v1.CowObjectRef
-	109, // 80: cubelet.services.cubebox.v1.ListSandboxSnapshotsResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	108, // 80: cubelet.services.cubebox.v1.ListSandboxSnapshotsResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
 	71,  // 81: cubelet.services.cubebox.v1.ListSandboxSnapshotsResponse.objects:type_name -> cubelet.services.cubebox.v1.CowObjectStatus
-	109, // 82: cubelet.services.cubebox.v1.ListLocalSnapshotsResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	108, // 82: cubelet.services.cubebox.v1.ListLocalSnapshotsResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
 	74,  // 83: cubelet.services.cubebox.v1.ListLocalSnapshotsResponse.snapshots:type_name -> cubelet.services.cubebox.v1.LocalSnapshotInfo
-	109, // 84: cubelet.services.cubebox.v1.GetLocalSnapshotResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	108, // 84: cubelet.services.cubebox.v1.GetLocalSnapshotResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
 	74,  // 85: cubelet.services.cubebox.v1.GetLocalSnapshotResponse.snapshot:type_name -> cubelet.services.cubebox.v1.LocalSnapshotInfo
-	109, // 86: cubelet.services.cubebox.v1.GetStorageMetricsResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	108, // 86: cubelet.services.cubebox.v1.GetStorageMetricsResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
 	105, // 87: cubelet.services.cubebox.v1.GetStorageMetricsResponse.metrics:type_name -> cubelet.services.cubebox.v1.GetStorageMetricsResponse.MetricsEntry
 	80,  // 88: cubelet.services.cubebox.v1.SandboxStorageInfo.volumes:type_name -> cubelet.services.cubebox.v1.StorageVolumeInfo
-	109, // 89: cubelet.services.cubebox.v1.InspectStorageVolumesResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	108, // 89: cubelet.services.cubebox.v1.InspectStorageVolumesResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
 	81,  // 90: cubelet.services.cubebox.v1.InspectStorageVolumesResponse.sandboxes:type_name -> cubelet.services.cubebox.v1.SandboxStorageInfo
-	109, // 91: cubelet.services.cubebox.v1.CleanupOrphanStorageFilesResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	108, // 91: cubelet.services.cubebox.v1.CleanupOrphanStorageFilesResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
 	85,  // 92: cubelet.services.cubebox.v1.CleanupOrphanStorageFilesResponse.orphans:type_name -> cubelet.services.cubebox.v1.StorageOrphanEntry
 	88,  // 93: cubelet.services.cubebox.v1.TerminalMessage.open:type_name -> cubelet.services.cubebox.v1.TerminalOpen
 	89,  // 94: cubelet.services.cubebox.v1.TerminalMessage.resize:type_name -> cubelet.services.cubebox.v1.TerminalResize
@@ -7872,7 +7858,7 @@ var file_api_services_cubebox_v1_cubebox_proto_depIdxs = []int32{
 	79,  // 128: cubelet.services.cubebox.v1.CubeboxMgr.GetStorageMetrics:output_type -> cubelet.services.cubebox.v1.GetStorageMetricsResponse
 	83,  // 129: cubelet.services.cubebox.v1.CubeboxMgr.InspectStorageVolumes:output_type -> cubelet.services.cubebox.v1.InspectStorageVolumesResponse
 	86,  // 130: cubelet.services.cubebox.v1.CubeboxMgr.CleanupOrphanStorageFiles:output_type -> cubelet.services.cubebox.v1.CleanupOrphanStorageFilesResponse
-	115, // [115:131] is the sub-list for method output_type
+	114, // [115:131] is the sub-list for method output_type
 	99,  // [99:115] is the sub-list for method input_type
 	99,  // [99:99] is the sub-list for extension type_name
 	99,  // [99:99] is the sub-list for extension extendee

@@ -6,6 +6,7 @@ package cube
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -50,10 +51,13 @@ func terminalGatewayAllowed(r *http.Request) bool {
 	}
 	expected := os.Getenv(terminalGatewayTokenEnv)
 	provided := r.Header.Get(terminalGatewayTokenHeader)
-	if expected == "" || len(expected) != len(provided) {
+	if expected == "" {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(expected), []byte(provided)) == 1
+	expectedHash := sha256.Sum256([]byte(expected))
+	providedHash := sha256.Sum256([]byte(provided))
+	return subtle.ConstantTimeCompare(expectedHash[:], providedHash[:]) == 1 &&
+		subtle.ConstantTimeEq(int32(len(expected)), int32(len(provided))) == 1
 }
 
 type terminalOpenControl struct {
@@ -219,10 +223,16 @@ func relayTerminal(
 	writer *lockedWebSocketWriter,
 	stream terminalGRPCStream,
 ) string {
+	var closeOnce sync.Once
+	closeWebSocket := func() {
+		closeOnce.Do(func() {
+			_ = conn.Close()
+		})
+	}
 	grpcDone := make(chan string, 1)
 	go func() {
 		grpcDone <- relayTerminalOutput(writer, stream)
-		_ = conn.Close()
+		closeWebSocket()
 	}()
 
 	wsDone := make(chan string, 1)
@@ -230,11 +240,14 @@ func relayTerminal(
 
 	select {
 	case reason := <-grpcDone:
+		closeWebSocket()
 		return reason
 	case reason := <-wsDone:
 		_ = stream.Send(&cubebox.TerminalMessage{Message: &cubebox.TerminalMessage_Close{Close: &cubebox.TerminalClose{}}})
+		closeWebSocket()
 		return reason
 	case <-ctx.Done():
+		closeWebSocket()
 		return "closed: request context canceled"
 	}
 }

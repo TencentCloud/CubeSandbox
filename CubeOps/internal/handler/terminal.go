@@ -5,6 +5,7 @@ package handler
 
 import (
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -86,11 +87,7 @@ func (s *terminalTicketStore) issue(ticket terminalTicket) (string, error) {
 	defer s.mu.Unlock()
 
 	now := s.now()
-	for token, existing := range s.tickets {
-		if !existing.ExpiresAt.After(now) {
-			delete(s.tickets, token)
-		}
-	}
+	s.pruneExpiredLocked(now)
 	if len(s.tickets) >= terminalMaxTickets {
 		return "", errors.New("too many pending terminal tickets")
 	}
@@ -117,14 +114,23 @@ func (s *terminalTicketStore) claim(token, sandboxID string) (terminalTicket, er
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.pruneExpiredLocked(s.now())
 	ticket, ok := s.tickets[token]
 	if ok {
 		delete(s.tickets, token)
 	}
-	if !ok || !ticket.ExpiresAt.After(s.now()) || ticket.SandboxID != sandboxID {
+	if !ok || ticket.SandboxID != sandboxID {
 		return terminalTicket{}, errors.New("terminal ticket is invalid or expired")
 	}
 	return ticket, nil
+}
+
+func (s *terminalTicketStore) pruneExpiredLocked(now time.Time) {
+	for token, existing := range s.tickets {
+		if !existing.ExpiresAt.After(now) {
+			delete(s.tickets, token)
+		}
+	}
 }
 
 // TerminalGateway owns browser authentication and relays terminal traffic to
@@ -153,6 +159,7 @@ func NewTerminalGateway(cm CubeMasterClient, masterAddr, gatewayToken string) *T
 			HandshakeTimeout: terminalOpenTimeout,
 			ReadBufferSize:   32 * 1024,
 			WriteBufferSize:  32 * 1024,
+			TLSClientConfig:  &tls.Config{MinVersion: tls.VersionTLS12},
 		},
 	}
 }
@@ -291,7 +298,6 @@ func (h *TerminalGateway) OpenWebSocket(c *gin.Context) {
 		"requestID":   "cubeops-terminal-" + uuid.NewString(),
 		"sandboxID":   ticket.SandboxID,
 		"containerID": ticket.ContainerID,
-		"args":        []string{"/bin/sh"},
 		"cwd":         ticket.CWD,
 		"env":         env,
 		"cols":        ticket.Cols,

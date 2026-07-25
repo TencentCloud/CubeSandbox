@@ -67,6 +67,37 @@ func TestTerminalTicketExpires(t *testing.T) {
 	}
 }
 
+func TestTerminalTicketClaimPrunesExpiredTickets(t *testing.T) {
+	store := newTerminalTicketStore()
+	now := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+
+	expired, err := store.issue(terminalTicket{
+		SandboxID: "sandbox-a",
+		CreatedBy: "sam",
+		ExpiresAt: now.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("issue expired ticket candidate: %v", err)
+	}
+	valid, err := store.issue(terminalTicket{
+		SandboxID: "sandbox-a",
+		CreatedBy: "sam",
+		ExpiresAt: now.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("issue valid ticket: %v", err)
+	}
+
+	now = now.Add(2 * time.Second)
+	if _, err := store.claim(valid, "sandbox-a"); err != nil {
+		t.Fatalf("claim valid ticket: %v", err)
+	}
+	if _, ok := store.tickets[expired]; ok {
+		t.Fatal("claim should prune expired pending tickets")
+	}
+}
+
 func TestValidateTerminalTicketRequest(t *testing.T) {
 	valid := &terminalTicketRequest{
 		User: "root",
