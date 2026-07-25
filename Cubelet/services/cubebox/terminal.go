@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -231,17 +233,24 @@ func terminalProcessSpec(ctx context.Context, task containerd.Task, open *cubebo
 	if err != nil {
 		return nil, err
 	}
-	process := spec.Process
+	if spec.Process == nil {
+		return nil, fmt.Errorf("container process spec is nil")
+	}
+	return terminalProcessFromSpec(spec.Process, open), nil
+}
+
+func terminalProcessFromSpec(base *specs.Process, open *cubebox.TerminalOpenRequest) *specs.Process {
+	process := *base
 	process.Terminal = true
-	process.Args = open.GetArgs()
+	process.Args = slices.Clone(open.GetArgs())
 	if len(process.Args) == 0 {
 		process.Args = []string{"/bin/sh"}
 	}
 	if open.GetCwd() != "" {
 		process.Cwd = open.GetCwd()
 	}
-	process.Env = mergeTerminalEnv(spec.Process.Env, open.GetEnv())
-	return process, nil
+	process.Env = mergeTerminalEnv(base.Env, open.GetEnv())
+	return &process
 }
 
 func mergeTerminalEnv(base, overrides []string) []string {
@@ -255,7 +264,13 @@ func mergeTerminalEnv(base, overrides []string) []string {
 		}
 	}
 	merged := make([]string, 0, len(values))
-	for key, value := range values {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value := values[key]
 		merged = append(merged, fmt.Sprintf("%s=%s", key, value))
 	}
 	return merged

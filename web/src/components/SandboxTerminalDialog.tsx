@@ -133,7 +133,7 @@ export function SandboxTerminalDialog({
     const observer = new ResizeObserver(resize);
     observer.observe(hostRef.current);
 
-    keepalive = window.setInterval(() => send({ type: 'keepalive' } as TerminalFrame), 20_000);
+    keepalive = window.setInterval(() => send({ type: 'keepalive' }), 20_000);
 
     return () => {
       if (keepalive !== undefined) window.clearInterval(keepalive);

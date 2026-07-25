@@ -5,6 +5,7 @@
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
+    time::Duration,
 };
 
 use axum::{
@@ -172,6 +173,7 @@ pub async fn get_sandbox(
 
 const TERMINAL_MAX_FRAME_SIZE: usize = 64 * 1024;
 const TERMINAL_SUBPROTOCOL: &str = "cube-terminal";
+const TERMINAL_BROWSER_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Upgrades an authenticated browser terminal session and proxies it to the
 /// private CubeMaster terminal endpoint. The browser never receives the
@@ -405,7 +407,11 @@ async fn proxy_terminal(
                                     "invalid_open_frame",
                                 )
                                 .await;
-                                let _ = browser_tx.send(terminal_error(error)).await;
+                                let _ = tokio::time::timeout(
+                                    TERMINAL_BROWSER_WRITE_TIMEOUT,
+                                    browser_tx.send(terminal_error(error)),
+                                )
+                                .await;
                                 break;
                             }
                         }
@@ -436,7 +442,13 @@ async fn proxy_terminal(
             },
             incoming = master_rx.next() => match incoming {
                 Some(Ok(message)) => match to_browser_message(message) {
-                    Some(message) => if browser_tx.send(message).await.is_err() { break; },
+                    Some(message) => {
+                        let send_result = tokio::time::timeout(
+                            TERMINAL_BROWSER_WRITE_TIMEOUT,
+                            browser_tx.send(message),
+                        ).await;
+                        if !matches!(send_result, Ok(Ok(()))) { break; }
+                    },
                     None => break,
                 },
                 _ => break,

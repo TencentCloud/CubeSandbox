@@ -25,10 +25,11 @@ import (
 )
 
 const (
-	terminalIdleTimeout  = 30 * time.Minute
-	terminalWriteTimeout = 10 * time.Second
-	terminalMaxFrame     = 64 * 1024
-	terminalOpenError    = "unable to open terminal"
+	terminalIdleTimeout    = 30 * time.Minute
+	terminalWriteTimeout   = 10 * time.Second
+	terminalConnectTimeout = 15 * time.Second
+	terminalMaxFrame       = 64 * 1024
+	terminalOpenError      = "unable to open terminal"
 )
 
 var terminalUpgrader = websocket.Upgrader{
@@ -247,14 +248,49 @@ func terminalSandboxHost(ctx context.Context, sandboxID string) (string, bool) {
 }
 
 func openTerminalStream(ctx context.Context, hostIP string) (cubebox.CubeboxMgr_AttachTerminalClient, func(), error) {
-	conn, err := grpcconn.GetWorkerConn(ctx, cubelet.GetCubeletAddr(hostIP))
+	deadline := time.Now().Add(terminalConnectTimeout)
+	connectCtx, cancelConnect := context.WithDeadline(ctx, deadline)
+	conn, err := grpcconn.GetWorkerConn(connectCtx, cubelet.GetCubeletAddr(hostIP))
+	cancelConnect()
 	if err != nil {
 		return nil, func() {}, err
 	}
-	stream, err := cubebox.NewCubeboxMgrClient(conn.Value()).AttachTerminal(ctx)
-	if err != nil {
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	type streamResult struct {
+		stream cubebox.CubeboxMgr_AttachTerminalClient
+		err    error
+	}
+	result := make(chan streamResult, 1)
+	go func() {
+		stream, streamErr := cubebox.NewCubeboxMgrClient(conn.Value()).AttachTerminal(streamCtx)
+		result <- streamResult{stream: stream, err: streamErr}
+	}()
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		cancelStream()
 		conn.Close()
-		return nil, func() {}, err
+		return nil, func() {}, context.DeadlineExceeded
 	}
-	return stream, func() { _ = conn.Close() }, nil
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	select {
+	case opened := <-result:
+		if opened.err != nil {
+			cancelStream()
+			conn.Close()
+			return nil, func() {}, opened.err
+		}
+		return opened.stream, func() {
+			cancelStream()
+			_ = conn.Close()
+		}, nil
+	case <-timer.C:
+		cancelStream()
+		conn.Close()
+		return nil, func() {}, context.DeadlineExceeded
+	case <-ctx.Done():
+		cancelStream()
+		conn.Close()
+		return nil, func() {}, ctx.Err()
+	}
 }

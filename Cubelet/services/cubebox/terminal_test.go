@@ -12,8 +12,10 @@ import (
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/cio"
+	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -112,7 +114,29 @@ func TestMergeTerminalEnvOverridesByName(t *testing.T) {
 		[]string{"TERM=xterm-256color", "LANG=C.UTF-8"},
 	)
 
-	assert.ElementsMatch(t, []string{"PATH=/usr/bin", "TERM=xterm-256color", "LANG=C.UTF-8"}, merged)
+	assert.Equal(t, []string{"LANG=C.UTF-8", "PATH=/usr/bin", "TERM=xterm-256color"}, merged)
+}
+
+func TestTerminalProcessFromSpecDoesNotMutateBase(t *testing.T) {
+	base := &specs.Process{
+		Args: []string{"original"},
+		Env:  []string{"PATH=/usr/bin", "TERM=xterm"},
+		Cwd:  "/original",
+	}
+	open := &cubebox.TerminalOpenRequest{
+		Args: []string{"/bin/bash"},
+		Env:  []string{"TERM=xterm-256color"},
+		Cwd:  "/workspace",
+	}
+
+	process := terminalProcessFromSpec(base, open)
+	assert.Equal(t, []string{"original"}, base.Args)
+	assert.Equal(t, []string{"PATH=/usr/bin", "TERM=xterm"}, base.Env)
+	assert.Equal(t, "/original", base.Cwd)
+	assert.Equal(t, []string{"/bin/bash"}, process.Args)
+	assert.Equal(t, []string{"PATH=/usr/bin", "TERM=xterm-256color"}, process.Env)
+	assert.Equal(t, "/workspace", process.Cwd)
+	assert.True(t, process.Terminal)
 }
 
 func TestEnqueueTerminalStdinIsBoundedAndCopiesFrames(t *testing.T) {
