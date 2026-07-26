@@ -93,7 +93,9 @@ The terminal supports:
 - automatic process cleanup when the browser disconnects or the session idles
 
 Terminal sessions currently open as `root`; other execution users are rejected
-when the ticket is created.
+when the ticket is created. Non-root terminal identities require an authorization
+contract to be propagated through CubeOps, CubeMaster, and Cubelet and are not
+silently inferred from the container image.
 
 ::: tip Terminal access is ticket-based
 Browsers cannot attach arbitrary `Authorization` headers to a WebSocket upgrade.
@@ -102,11 +104,19 @@ request first, issues a one-time ticket with a short TTL, and validates that
 ticket during the WebSocket upgrade.
 :::
 
+CubeOps limits pending tickets to 8 per user, ticket creation to 20 per user
+per minute, and active terminal sessions to 4 per user, 8 per sandbox, and 64
+per CubeOps process. Excess requests receive HTTP `429`.
+
 CubeOps must be able to reach CubeMaster's internal HTTP address configured by
 `CUBE_MASTER_ADDR`. Both services must receive the same
 `CUBE_TERMINAL_GATEWAY_TOKEN`; the one-click installer and Helm chart generate
 and preserve this secret automatically. CubeMaster rejects browser-originated
 connections and internal connections without the shared token.
+
+Terminal tickets and active-session counters are held in CubeOps process memory.
+Deployments with more than one CubeOps replica must use sticky routing from
+ticket creation through the WebSocket upgrade, or keep CubeOps at one replica.
 
 Terminal audit events are emitted as structured logs:
 
@@ -114,7 +124,7 @@ Terminal audit events are emitted as structured logs:
 | --- | --- |
 | `terminal ticket issued` | `sandbox_id`, `container_id`, `username` |
 | `terminal session opened` | `sandbox_id`, `container_id`, `session_id`, `username` |
-| `terminal session closed` | `sandbox_id`, `container_id`, `session_id`, `username`, `reason` |
+| `terminal session closed` | `sandbox_id`, `container_id`, `session_id`, `username`, `reason`, `duration_ms` |
 
 ::: tip Container targeting
 When CubeOps receives container metadata from CubeMaster, the Dashboard shows a

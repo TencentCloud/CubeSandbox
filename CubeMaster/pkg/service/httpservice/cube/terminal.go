@@ -82,6 +82,12 @@ type terminalControl struct {
 }
 
 func handleTerminalGinAction(c *gin.Context) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			log.G(c.Request.Context()).Errorf("terminal handler panic: %v", recovered)
+			c.Abort()
+		}
+	}()
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
 	handleTerminalAction(c.Writer, c.Request, rt)
 }
@@ -116,14 +122,16 @@ func handleTerminalAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.Re
 
 	hostIP, err := resolveTerminalHost(r.Context(), open.SandboxID)
 	if err != nil {
-		_ = writer.control(terminalControl{Type: "error", Message: err.Error()})
-		logTerminalAudit(r.Context(), open.RequestID, open.SandboxID, open.ContainerID, "", "rejected: "+err.Error())
+		_ = writer.control(terminalControl{Type: "error", Message: "terminal target is unavailable"})
+		log.G(r.Context()).Errorf("resolve terminal host for sandbox %s: %v", open.SandboxID, err)
+		logTerminalAudit(r.Context(), open.RequestID, open.SandboxID, open.ContainerID, "", "rejected: terminal target unavailable")
 		return
 	}
 	endpoint := cubelet.GetCubeletAddr(hostIP)
 	stream, err := cubelet.OpenTerminal(r.Context(), endpoint)
 	if err != nil {
-		_ = writer.control(terminalControl{Type: "error", Message: fmt.Sprintf("failed to connect to cubelet: %v", err)})
+		_ = writer.control(terminalControl{Type: "error", Message: "terminal backend is unavailable"})
+		log.G(r.Context()).Errorf("connect terminal backend for sandbox %s: %v", open.SandboxID, err)
 		logTerminalAudit(r.Context(), open.RequestID, open.SandboxID, open.ContainerID, hostIP, "rejected: cubelet connection failed")
 		return
 	}
@@ -139,7 +147,8 @@ func handleTerminalAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.Re
 		Cols:        open.Cols,
 		Rows:        open.Rows,
 	}}}); err != nil {
-		_ = writer.control(terminalControl{Type: "error", Message: fmt.Sprintf("failed to open cubelet terminal: %v", err)})
+		_ = writer.control(terminalControl{Type: "error", Message: "failed to open terminal session"})
+		log.G(r.Context()).Errorf("open terminal session for sandbox %s: %v", open.SandboxID, err)
 		return
 	}
 
@@ -231,12 +240,18 @@ func relayTerminal(
 	}
 	grpcDone := make(chan string, 1)
 	go func() {
-		grpcDone <- relayTerminalOutput(writer, stream)
+		grpcDone <- runTerminalRelay(ctx, "output", func() string {
+			return relayTerminalOutput(ctx, writer, stream)
+		})
 		closeWebSocket()
 	}()
 
 	wsDone := make(chan string, 1)
-	go func() { wsDone <- relayTerminalInput(conn, writer, stream) }()
+	go func() {
+		wsDone <- runTerminalRelay(ctx, "input", func() string {
+			return relayTerminalInput(conn, writer, stream)
+		})
+	}()
 
 	select {
 	case reason := <-grpcDone:
@@ -250,6 +265,16 @@ func relayTerminal(
 		closeWebSocket()
 		return "closed: request context canceled"
 	}
+}
+
+func runTerminalRelay(ctx context.Context, direction string, relay func() string) (reason string) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			log.G(ctx).Errorf("terminal %s relay panic: %v", direction, recovered)
+			reason = "closed: terminal relay failure"
+		}
+	}()
+	return relay()
 }
 
 func relayTerminalInput(conn *websocket.Conn, writer *lockedWebSocketWriter, stream terminalGRPCStream) string {
@@ -292,12 +317,13 @@ func relayTerminalInput(conn *websocket.Conn, writer *lockedWebSocketWriter, str
 	}
 }
 
-func relayTerminalOutput(writer *lockedWebSocketWriter, stream terminalGRPCStream) string {
+func relayTerminalOutput(ctx context.Context, writer *lockedWebSocketWriter, stream terminalGRPCStream) string {
 	for {
 		message, err := stream.Recv()
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
-				_ = writer.control(terminalControl{Type: "error", Message: err.Error()})
+				_ = writer.control(terminalControl{Type: "error", Message: "terminal backend disconnected"})
+				log.G(ctx).Errorf("receive terminal backend output: %v", err)
 				return "closed: cubelet stream error"
 			}
 			return "closed: cubelet stream ended"
@@ -315,7 +341,8 @@ func relayTerminalOutput(writer *lockedWebSocketWriter, stream terminalGRPCStrea
 			_ = writer.control(terminalControl{Type: "exit", Code: payload.Exit.Code})
 			return fmt.Sprintf("closed: process exited with code %d", payload.Exit.Code)
 		case *cubebox.TerminalMessage_Error:
-			_ = writer.control(terminalControl{Type: "error", Message: payload.Error.Message})
+			_ = writer.control(terminalControl{Type: "error", Message: "terminal process failed"})
+			log.G(ctx).Errorf("terminal process failed: %s", payload.Error.Message)
 			return "closed: cubelet terminal error"
 		}
 	}

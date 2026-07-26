@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -95,6 +96,85 @@ func TestTerminalTicketClaimPrunesExpiredTickets(t *testing.T) {
 	}
 	if _, ok := store.tickets[expired]; ok {
 		t.Fatal("claim should prune expired pending tickets")
+	}
+}
+
+func TestTerminalTicketRateLimitPerUser(t *testing.T) {
+	store := newTerminalTicketStore()
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+
+	for i := 0; i < terminalMaxTicketsPerWindow; i++ {
+		token, err := store.issue(terminalTicket{
+			SandboxID: "sandbox-a",
+			CreatedBy: "sam",
+			ExpiresAt: now.Add(terminalTicketTTL),
+		})
+		if err != nil {
+			t.Fatalf("issue ticket %d: %v", i, err)
+		}
+		if _, err := store.claim(token, "sandbox-a"); err != nil {
+			t.Fatalf("claim ticket %d: %v", i, err)
+		}
+	}
+
+	if _, err := store.issue(terminalTicket{
+		SandboxID: "sandbox-a",
+		CreatedBy: "sam",
+		ExpiresAt: now.Add(terminalTicketTTL),
+	}); err == nil {
+		t.Fatal("ticket creation above the per-user rate should be rejected")
+	}
+
+	now = now.Add(terminalTicketRateWindow + time.Nanosecond)
+	if _, err := store.issue(terminalTicket{
+		SandboxID: "sandbox-a",
+		CreatedBy: "sam",
+		ExpiresAt: now.Add(terminalTicketTTL),
+	}); err != nil {
+		t.Fatalf("ticket rate should reset after the window: %v", err)
+	}
+}
+
+func TestTerminalSessionLimiterPerUser(t *testing.T) {
+	limiter := newTerminalSessionLimiter()
+	releases := make([]func(), 0, terminalMaxSessionsPerUser)
+	for i := 0; i < terminalMaxSessionsPerUser; i++ {
+		release, err := limiter.acquire("sam", fmt.Sprintf("sandbox-%d", i))
+		if err != nil {
+			t.Fatalf("acquire session %d: %v", i, err)
+		}
+		releases = append(releases, release)
+	}
+	if _, err := limiter.acquire("sam", "sandbox-extra"); err == nil {
+		t.Fatal("session above the per-user limit should be rejected")
+	}
+
+	releases[0]()
+	releases[0]()
+	if _, err := limiter.acquire("sam", "sandbox-extra"); err != nil {
+		t.Fatalf("released session should restore capacity: %v", err)
+	}
+}
+
+func TestTerminalSessionLimiterPerSandbox(t *testing.T) {
+	limiter := newTerminalSessionLimiter()
+	for i := 0; i < terminalMaxSessionsPerSandbox; i++ {
+		if _, err := limiter.acquire(fmt.Sprintf("user-%d", i), "sandbox-a"); err != nil {
+			t.Fatalf("acquire session %d: %v", i, err)
+		}
+	}
+	if _, err := limiter.acquire("user-extra", "sandbox-a"); err == nil {
+		t.Fatal("session above the per-sandbox limit should be rejected")
+	}
+}
+
+func TestRunCubeOpsTerminalRelayRecoversPanic(t *testing.T) {
+	reason := runCubeOpsTerminalRelay("test", func() string {
+		panic("relay failed")
+	})
+	if reason != terminalCloseRelayFailure {
+		t.Fatalf("unexpected panic close reason %q", reason)
 	}
 }
 

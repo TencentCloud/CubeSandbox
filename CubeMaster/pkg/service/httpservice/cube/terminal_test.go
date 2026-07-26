@@ -5,6 +5,7 @@
 package cube
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -30,6 +31,15 @@ func TestTerminalWebSocketRequiresGatewayToken(t *testing.T) {
 	request.Header.Set("Origin", "https://dashboard.example.com")
 	if terminalUpgrader.CheckOrigin(request) {
 		t.Fatal("browser-originated connection should be rejected even with gateway token")
+	}
+}
+
+func TestRunTerminalRelayRecoversPanic(t *testing.T) {
+	reason := runTerminalRelay(context.Background(), "test", func() string {
+		panic("relay failed")
+	})
+	if reason != "closed: terminal relay failure" {
+		t.Fatalf("unexpected panic close reason %q", reason)
 	}
 }
 

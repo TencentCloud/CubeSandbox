@@ -28,18 +28,32 @@ import (
 )
 
 const (
-	terminalGatewayTokenHeader = "X-Cube-Terminal-Token"
-	terminalTicketTTL          = 60 * time.Second
-	terminalFrameLimit         = 256 * 1024
-	terminalOpenTimeout        = 15 * time.Second
-	terminalWriteTimeout       = 15 * time.Second
-	terminalIdleTimeout        = 30 * time.Minute
-	terminalMaxDimension       = 1000
-	terminalMaxCWDBytes        = 4096
-	terminalMaxEnvEntries      = 128
-	terminalMaxEnvBytes        = 32 * 1024
-	terminalMaxTickets         = 256
-	terminalMaxTicketsPerUser  = 8
+	terminalGatewayTokenHeader    = "X-Cube-Terminal-Token"
+	terminalTicketTTL             = 60 * time.Second
+	terminalFrameLimit            = 256 * 1024
+	terminalOpenTimeout           = 15 * time.Second
+	terminalWriteTimeout          = 15 * time.Second
+	terminalIdleTimeout           = 30 * time.Minute
+	terminalMaxDimension          = 1000
+	terminalMaxCWDBytes           = 4096
+	terminalMaxEnvEntries         = 128
+	terminalMaxEnvBytes           = 32 * 1024
+	terminalMaxTickets            = 256
+	terminalMaxTicketsPerUser     = 8
+	terminalTicketRateWindow      = time.Minute
+	terminalMaxTicketsPerWindow   = 20
+	terminalMaxSessions           = 64
+	terminalMaxSessionsPerUser    = 4
+	terminalMaxSessionsPerSandbox = 8
+)
+
+const (
+	terminalCloseBrowserDisconnected = "browser disconnected"
+	terminalCloseBackendDisconnected = "terminal backend disconnected"
+	terminalCloseIdleTimeout         = "idle timeout"
+	terminalCloseProcessExited       = "terminal process exited"
+	terminalCloseBackendError        = "terminal backend error"
+	terminalCloseRelayFailure        = "terminal relay failure"
 )
 
 type terminalTicketRequest struct {
@@ -70,15 +84,17 @@ type terminalTicket struct {
 }
 
 type terminalTicketStore struct {
-	mu      sync.Mutex
-	tickets map[string]terminalTicket
-	now     func() time.Time
+	mu           sync.Mutex
+	tickets      map[string]terminalTicket
+	issuedByUser map[string][]time.Time
+	now          func() time.Time
 }
 
 func newTerminalTicketStore() *terminalTicketStore {
 	return &terminalTicketStore{
-		tickets: make(map[string]terminalTicket),
-		now:     time.Now,
+		tickets:      make(map[string]terminalTicket),
+		issuedByUser: make(map[string][]time.Time),
+		now:          time.Now,
 	}
 }
 
@@ -88,6 +104,7 @@ func (s *terminalTicketStore) issue(ticket terminalTicket) (string, error) {
 
 	now := s.now()
 	s.pruneExpiredLocked(now)
+	s.pruneIssueHistoryLocked(now)
 	if len(s.tickets) >= terminalMaxTickets {
 		return "", errors.New("too many pending terminal tickets")
 	}
@@ -100,6 +117,9 @@ func (s *terminalTicketStore) issue(ticket terminalTicket) (string, error) {
 	if pendingForUser >= terminalMaxTicketsPerUser {
 		return "", errors.New("too many pending terminal tickets for this user")
 	}
+	if len(s.issuedByUser[ticket.CreatedBy]) >= terminalMaxTicketsPerWindow {
+		return "", errors.New("terminal ticket rate limit exceeded for this user")
+	}
 
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
@@ -107,6 +127,7 @@ func (s *terminalTicketStore) issue(ticket terminalTicket) (string, error) {
 	}
 	token := base64.RawURLEncoding.EncodeToString(raw)
 	s.tickets[token] = ticket
+	s.issuedByUser[ticket.CreatedBy] = append(s.issuedByUser[ticket.CreatedBy], now)
 	return token, nil
 }
 
@@ -133,6 +154,73 @@ func (s *terminalTicketStore) pruneExpiredLocked(now time.Time) {
 	}
 }
 
+func (s *terminalTicketStore) pruneIssueHistoryLocked(now time.Time) {
+	cutoff := now.Add(-terminalTicketRateWindow)
+	for username, issuedAt := range s.issuedByUser {
+		firstCurrent := 0
+		for firstCurrent < len(issuedAt) && !issuedAt[firstCurrent].After(cutoff) {
+			firstCurrent++
+		}
+		if firstCurrent == len(issuedAt) {
+			delete(s.issuedByUser, username)
+			continue
+		}
+		s.issuedByUser[username] = issuedAt[firstCurrent:]
+	}
+}
+
+type terminalSessionLimiter struct {
+	mu        sync.Mutex
+	total     int
+	byUser    map[string]int
+	bySandbox map[string]int
+}
+
+func newTerminalSessionLimiter() *terminalSessionLimiter {
+	return &terminalSessionLimiter{
+		byUser:    make(map[string]int),
+		bySandbox: make(map[string]int),
+	}
+}
+
+func (l *terminalSessionLimiter) acquire(username, sandboxID string) (func(), error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.total >= terminalMaxSessions {
+		return nil, errors.New("terminal session capacity reached")
+	}
+	if l.byUser[username] >= terminalMaxSessionsPerUser {
+		return nil, errors.New("too many active terminal sessions for this user")
+	}
+	if l.bySandbox[sandboxID] >= terminalMaxSessionsPerSandbox {
+		return nil, errors.New("too many active terminal sessions for this sandbox")
+	}
+
+	l.total++
+	l.byUser[username]++
+	l.bySandbox[sandboxID]++
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.mu.Lock()
+			defer l.mu.Unlock()
+			l.total--
+			decrementTerminalSessionCount(l.byUser, username)
+			decrementTerminalSessionCount(l.bySandbox, sandboxID)
+		})
+	}, nil
+}
+
+func decrementTerminalSessionCount(counts map[string]int, key string) {
+	if counts[key] <= 1 {
+		delete(counts, key)
+		return
+	}
+	counts[key]--
+}
+
 // TerminalGateway owns browser authentication and relays terminal traffic to
 // CubeMaster. CubeAPI is intentionally not part of this ops-only flow.
 type TerminalGateway struct {
@@ -140,6 +228,7 @@ type TerminalGateway struct {
 	masterAddr   string
 	gatewayToken string
 	tickets      *terminalTicketStore
+	sessions     *terminalSessionLimiter
 	upgrader     websocket.Upgrader
 	dialer       websocket.Dialer
 }
@@ -150,6 +239,7 @@ func NewTerminalGateway(cm CubeMasterClient, masterAddr, gatewayToken string) *T
 		masterAddr:   masterAddr,
 		gatewayToken: gatewayToken,
 		tickets:      newTerminalTicketStore(),
+		sessions:     newTerminalSessionLimiter(),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  32 * 1024,
 			WriteBufferSize: 32 * 1024,
@@ -264,6 +354,12 @@ func (h *TerminalGateway) OpenWebSocket(c *gin.Context) {
 		httputil.WriteError(c, http.StatusUnauthorized, err.Error())
 		return
 	}
+	releaseSession, err := h.sessions.acquire(ticket.CreatedBy, ticket.SandboxID)
+	if err != nil {
+		httputil.WriteError(c, http.StatusTooManyRequests, err.Error())
+		return
+	}
+	defer releaseSession()
 
 	browser, err := h.upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
@@ -325,6 +421,7 @@ func (h *TerminalGateway) OpenWebSocket(c *gin.Context) {
 		"username", ticket.CreatedBy,
 		"session_id", sessionID,
 	)
+	openedAt := time.Now()
 
 	browserWriter := &lockedTerminalWriter{conn: browser}
 	backendWriter := &lockedTerminalWriter{conn: backend}
@@ -332,9 +429,28 @@ func (h *TerminalGateway) OpenWebSocket(c *gin.Context) {
 	backend.SetPingHandler(func(data string) error { return backendWriter.pong([]byte(data)) })
 
 	done := make(chan string, 2)
-	go func() { done <- relayTerminalBrowserToBackend(browser, browserWriter, backendWriter) }()
-	go func() { done <- relayTerminalBackendToBrowser(backend, browserWriter) }()
+	go func() {
+		done <- runCubeOpsTerminalRelay("browser-to-backend", func() string {
+			return relayTerminalBrowserToBackend(browser, browserWriter, backendWriter)
+		})
+	}()
+	go func() {
+		done <- runCubeOpsTerminalRelay("backend-to-browser", func() string {
+			return relayTerminalBackendToBrowser(backend, browserWriter)
+		})
+	}()
 	reason := <-done
+	switch reason {
+	case terminalCloseIdleTimeout:
+		_ = browserWriter.control(map[string]interface{}{
+			"type":               "idleTimeout",
+			"idleTimeoutSeconds": int(terminalIdleTimeout.Seconds()),
+		})
+	case terminalCloseBackendDisconnected:
+		_ = browserWriter.control(map[string]interface{}{"type": "streamEnd"})
+	case terminalCloseRelayFailure:
+		_ = browserWriter.control(map[string]interface{}{"type": "error", "message": "terminal relay failed"})
+	}
 	_ = backendWriter.text([]byte(`{"type":"close"}`))
 	_ = backendWriter.close()
 	_ = browserWriter.close()
@@ -345,7 +461,18 @@ func (h *TerminalGateway) OpenWebSocket(c *gin.Context) {
 		"username", ticket.CreatedBy,
 		"session_id", sessionID,
 		"reason", reason,
+		"duration_ms", time.Since(openedAt).Milliseconds(),
 	)
+}
+
+func runCubeOpsTerminalRelay(direction string, relay func() string) (reason string) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			slog.Error("terminal relay panic", "direction", direction, "panic", recovered)
+			reason = terminalCloseRelayFailure
+		}
+	}()
+	return relay()
 }
 
 func validateTerminalTicketRequest(body *terminalTicketRequest) error {
@@ -545,7 +672,10 @@ func relayTerminalBrowserToBackend(browser *websocket.Conn, browserWriter, backe
 		_ = browser.SetReadDeadline(time.Now().Add(terminalIdleTimeout))
 		messageType, payload, err := browser.ReadMessage()
 		if err != nil {
-			return "browser disconnected"
+			if isTerminalTimeout(err) {
+				return terminalCloseIdleTimeout
+			}
+			return terminalCloseBrowserDisconnected
 		}
 		switch messageType {
 		case websocket.BinaryMessage:
@@ -596,7 +726,10 @@ func relayTerminalBackendToBrowser(backend *websocket.Conn, browserWriter *locke
 		_ = backend.SetReadDeadline(time.Now().Add(terminalIdleTimeout))
 		messageType, payload, err := backend.ReadMessage()
 		if err != nil {
-			return "terminal backend disconnected"
+			if isTerminalTimeout(err) {
+				return terminalCloseIdleTimeout
+			}
+			return terminalCloseBackendDisconnected
 		}
 		switch messageType {
 		case websocket.BinaryMessage:
@@ -619,15 +752,20 @@ func relayTerminalBackendToBrowser(backend *websocket.Conn, browserWriter *locke
 			switch control.Type {
 			case "exit":
 				_ = browserWriter.control(map[string]interface{}{"type": "exit", "exitCode": control.Code})
-				return "terminal process exited"
+				return terminalCloseProcessExited
 			case "error":
 				_ = browserWriter.control(map[string]interface{}{"type": "error", "message": control.Message})
-				return "terminal backend error"
+				return terminalCloseBackendError
 			case "heartbeat":
 				// The heartbeat is only an activity signal.
 			}
 		}
 	}
+}
+
+func isTerminalTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 type lockedTerminalWriter struct {

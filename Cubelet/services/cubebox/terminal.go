@@ -79,6 +79,7 @@ func (s *service) Terminal(stream grpc.BidiStreamingServer[cubebox.TerminalMessa
 	processSpec.Env = terminalEnv(processSpec.Env)
 	// Web terminal tickets currently authorize a root shell. Keep that contract
 	// explicit instead of inheriting an image's non-root default user.
+	// TODO: propagate an authorized execution identity before enabling non-root users.
 	processSpec.User.UID = 0
 	processSpec.User.GID = 0
 	processSpec.User.AdditionalGids = nil
