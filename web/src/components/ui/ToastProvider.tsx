@@ -26,12 +26,12 @@ export function ToastProvider() {
 
   const addToast = useCallback((message: string, type: ToastType = 'success') => {
     const id = ++_id;
-    setToasts(prev => [...prev, { id, message, type, visible: true }]);
+    setToasts((prev) => [...prev, { id, message, type, visible: true }]);
     setTimeout(() => {
-      setToasts(prev => prev.map(t => t.id === id ? { ...t, visible: false } : t));
+      setToasts((prev) => prev.map((t) => (t.id === id ? { ...t, visible: false } : t)));
     }, 1400);
     setTimeout(() => {
-      setToasts(prev => prev.filter(t => t.id !== id));
+      setToasts((prev) => prev.filter((t) => t.id !== id));
     }, 1700);
   }, []);
 
@@ -48,7 +48,7 @@ export function ToastProvider() {
 
   return (
     <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[9999] flex flex-col items-center gap-2 pointer-events-none">
-      {toasts.map(t => (
+      {toasts.map((t) => (
         <div
           key={t.id}
           className={cn(
@@ -60,10 +60,11 @@ export function ToastProvider() {
             t.visible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-2',
           )}
         >
-          {t.type === 'warn'
-            ? <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-            : <Check className="h-3.5 w-3.5 shrink-0" />
-          }
+          {t.type === 'warn' ? (
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+          ) : (
+            <Check className="h-3.5 w-3.5 shrink-0" />
+          )}
           <span>{t.message}</span>
         </div>
       ))}

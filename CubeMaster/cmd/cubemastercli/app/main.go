@@ -60,6 +60,7 @@ func New() *cli.App {
 		cubebox.OperationCommand,
 		cubebox.NodeCommand,
 		cubebox.TemplateCommand,
+		cubebox.VolumeCommand,
 		cubebox.ListInventoryCommand,
 	}, extraCmds...)
 	app.Before = func(context *cli.Context) error {

@@ -1039,6 +1039,7 @@ assert_safe_install_prefix "${INSTALL_PREFIX}"
 rm -rf \
   "${INSTALL_PREFIX}/network-agent" \
   "${INSTALL_PREFIX}/CubeAPI" \
+  "${INSTALL_PREFIX}/CubeOps" \
   "${INSTALL_PREFIX}/CubeMaster" \
   "${INSTALL_PREFIX}/Cubelet" \
   "${INSTALL_PREFIX}/cubeproxy" \
@@ -1073,6 +1074,12 @@ fi
 
 select_installed_kernel_vmlinux
 
+prepare_volume_plugin_install \
+  "${INSTALL_PREFIX}" \
+  "${INSTALL_MODE}" \
+  "${UPGRADE_BACKUP_DIR}" \
+  "${DEPLOY_ROLE}"
+
 mkdir -p \
   "${INSTALL_PREFIX}/cube-vs/network" \
   "${INSTALL_PREFIX}/cube-snapshot" \
@@ -1080,11 +1087,15 @@ mkdir -p \
   /data/log/CubeShim \
   /data/log/CubeVmm \
   /data/cube-shim/disks \
-  /data/snapshot_pack/disks
+  /data/snapshot_pack/disks \
+  /data/cube-shared \
+  /data/cube-shared/volume \
+  /data/shared
 
 if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
   mkdir -p \
     /data/log/CubeAPI \
+    /data/log/CubeOps \
     /data/log/CubeMaster \
     /data/log/cube-proxy
 fi
@@ -1225,6 +1236,7 @@ fi
 
 if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
   chmod +x "${INSTALL_PREFIX}/CubeAPI/bin/cube-api"
+  chmod +x "${INSTALL_PREFIX}/CubeOps/bin/cubeops"
   chmod +x "${INSTALL_PREFIX}/CubeMaster/bin/cubemaster" "${INSTALL_PREFIX}/CubeMaster/bin/cubemastercli"
 fi
 

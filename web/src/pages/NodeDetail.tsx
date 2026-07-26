@@ -13,10 +13,7 @@ import { cn, formatRelative } from '@/lib/utils';
 // ── Resource bar ──────────────────────────────────────────────────────────────
 
 function ResourceBar({ pct }: { pct: number }) {
-  const color =
-    pct > 85 ? 'bg-cube-err' :
-    pct > 65 ? 'bg-cube-warn' :
-    'bg-cube-ok';
+  const color = pct > 85 ? 'bg-cube-err' : pct > 65 ? 'bg-cube-warn' : 'bg-cube-ok';
   return (
     <div className="h-1 w-full rounded-full bg-white/8 overflow-hidden">
       <div
@@ -42,17 +39,17 @@ function KpiCard({
   total: string;
   unit: string;
 }) {
-  const color =
-    pct > 85 ? 'text-cube-err' :
-    pct > 65 ? 'text-cube-warn' :
-    'text-foreground';
+  const color = pct > 85 ? 'text-cube-err' : pct > 65 ? 'text-cube-warn' : 'text-foreground';
 
   return (
     <div className="rounded-xl border border-border/60 bg-card/40 p-4 space-y-3">
-      <div className="text-xs text-muted-foreground tracking-wider uppercase font-medium">{label}</div>
+      <div className="text-xs text-muted-foreground tracking-wider uppercase font-medium">
+        {label}
+      </div>
       <div className="flex items-end justify-between gap-2">
         <span className={cn('text-3xl font-semibold tabular-nums leading-none', color)}>
-          {pct}<span className="text-base font-normal text-muted-foreground ml-0.5">%</span>
+          {pct}
+          <span className="text-base font-normal text-muted-foreground ml-0.5">%</span>
         </span>
         <span className="text-sm text-muted-foreground pb-0.5 text-num">
           {used} / {total} {unit}
@@ -65,11 +62,21 @@ function KpiCard({
 
 // ── Section wrapper ───────────────────────────────────────────────────────────
 
-function Section({ title, children, action }: { title: string; children: React.ReactNode; action?: React.ReactNode }) {
+function Section({
+  title,
+  children,
+  action,
+}: {
+  title: string;
+  children: React.ReactNode;
+  action?: React.ReactNode;
+}) {
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <span className="text-sm font-medium uppercase tracking-wider text-muted-foreground">{title}</span>
+        <span className="text-sm font-medium uppercase tracking-wider text-muted-foreground">
+          {title}
+        </span>
         {action}
       </div>
       {children}
@@ -90,24 +97,52 @@ function StatRow({ label, value, mono }: { label: string; value?: string | null;
 
 // ── Condition row ─────────────────────────────────────────────────────────────
 
-function ConditionRow({ type, status, reason, message, time }: {
-  type: string; status: string; reason?: string; message?: string; time?: string | null;
+function ConditionRow({
+  type,
+  status,
+  reason,
+  message,
+  time,
+}: {
+  type: string;
+  status: string;
+  reason?: string;
+  message?: string;
+  time?: string | null;
 }) {
   const ok = status === 'True';
   return (
     <div className="flex items-start justify-between gap-4 py-2.5 border-b border-white/5 last:border-0">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <span className={cn('inline-block h-1.5 w-1.5 rounded-full shrink-0', ok ? 'bg-cube-ok' : 'bg-cube-warn')} />
+          <span
+            className={cn(
+              'inline-block h-1.5 w-1.5 rounded-full shrink-0',
+              ok ? 'bg-cube-ok' : 'bg-cube-warn',
+            )}
+          />
           <span className="text-base font-medium">{type}</span>
-          <span className={cn('text-xs font-medium px-1.5 py-0.5 rounded border',
-            ok ? 'text-cube-ok border-cube-ok/30 bg-cube-ok/5' : 'text-cube-warn border-cube-warn/30 bg-cube-warn/5'
-          )}>{status}</span>
+          <span
+            className={cn(
+              'text-xs font-medium px-1.5 py-0.5 rounded border',
+              ok
+                ? 'text-cube-ok border-cube-ok/30 bg-cube-ok/5'
+                : 'text-cube-warn border-cube-warn/30 bg-cube-warn/5',
+            )}
+          >
+            {status}
+          </span>
         </div>
         {reason && <p className="mt-0.5 text-sm text-muted-foreground pl-3.5">{reason}</p>}
-        {message && <p className="mt-0.5 text-xs text-muted-foreground/60 break-all pl-3.5">{message}</p>}
+        {message && (
+          <p className="mt-0.5 text-xs text-muted-foreground/60 break-all pl-3.5">{message}</p>
+        )}
       </div>
-      {time && <span className="shrink-0 text-xs text-muted-foreground/60 mt-0.5">{formatRelative(time)}</span>}
+      {time && (
+        <span className="shrink-0 text-xs text-muted-foreground/60 mt-0.5">
+          {formatRelative(time)}
+        </span>
+      )}
     </div>
   );
 }
@@ -141,13 +176,13 @@ export default function NodeDetailPage() {
 
   // local templates with READY or RUNNING status only
   const localTemplateIDs = new Set(data?.localTemplates ?? []);
-  const visibleLocalTemplates = (allTemplates ?? [])
-    .filter(t => localTemplateIDs.has(t.templateID) &&
-      ['READY', 'RUNNING'].includes((t.status ?? '').toUpperCase()));
-
-  const nodeSandboxes = (allSandboxes ?? []).filter(
-    (sb) => sb.clientID === data?.address,
+  const visibleLocalTemplates = (allTemplates ?? []).filter(
+    (t) =>
+      localTemplateIDs.has(t.templateID) &&
+      ['READY', 'RUNNING'].includes((t.status ?? '').toUpperCase()),
   );
+
+  const nodeSandboxes = (allSandboxes ?? []).filter((sb) => sb.clientID === data?.address);
 
   if (isLoading) {
     return (
@@ -162,7 +197,10 @@ export default function NodeDetailPage() {
   if (isError || !data) {
     return (
       <div>
-        <Link to="/nodes" className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground mb-6">
+        <Link
+          to="/nodes"
+          className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground mb-6"
+        >
           <ArrowLeft className="h-4 w-4" /> {t('backToNodes')}
         </Link>
         <p className="text-sm text-muted-foreground">{t('notFound')}</p>
@@ -178,7 +216,10 @@ export default function NodeDetailPage() {
   return (
     <div className="animate-fade-in space-y-8">
       {/* back */}
-      <Link to="/nodes" className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors">
+      <Link
+        to="/nodes"
+        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+      >
         <ArrowLeft className="h-4 w-4" /> {t('backToNodes')}
       </Link>
 
@@ -188,10 +229,19 @@ export default function NodeDetailPage() {
           <div className="flex items-center gap-2.5">
             {/* live indicator */}
             <span className="relative flex h-2 w-2">
-              {isReady && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cube-ok opacity-60" />}
-              <span className={cn('relative inline-flex rounded-full h-2 w-2', isReady ? 'bg-cube-ok' : 'bg-cube-warn')} />
+              {isReady && (
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cube-ok opacity-60" />
+              )}
+              <span
+                className={cn(
+                  'relative inline-flex rounded-full h-2 w-2',
+                  isReady ? 'bg-cube-ok' : 'bg-cube-warn',
+                )}
+              />
             </span>
-            <h1 className="text-2xl font-semibold tracking-tight">{data.hostname ?? data.nodeID}</h1>
+            <h1 className="text-2xl font-semibold tracking-tight">
+              {data.hostname ?? data.nodeID}
+            </h1>
           </div>
           <div className="flex items-center gap-3 pl-4.5">
             <span className="font-mono text-sm text-muted-foreground/70">{data.nodeID}</span>
@@ -211,7 +261,9 @@ export default function NodeDetailPage() {
         </div>
         <div className="flex items-center gap-2 shrink-0 pt-1">
           <Activity size={13} className="text-muted-foreground/50" />
-          <span className="text-sm text-muted-foreground">{formatRelative(data.heartbeatTime)}</span>
+          <span className="text-sm text-muted-foreground">
+            {formatRelative(data.heartbeatTime)}
+          </span>
         </div>
       </div>
 
@@ -237,15 +289,27 @@ export default function NodeDetailPage() {
         {/* meta stats */}
         <div className="rounded-xl border border-border/60 bg-card/40 px-6 py-4 mt-1 grid grid-cols-3 divide-x divide-border/40">
           {[
-            { label: t('fields.allocCpu'), value: `${(data.resources.allocatableCpuMilli / 1000).toFixed(1)}`, unit: 'cores' },
-            { label: t('fields.allocMem'), value: `${(data.resources.allocatableMemoryMB / 1024).toFixed(1)}`, unit: 'GiB' },
+            {
+              label: t('fields.allocCpu'),
+              value: `${(data.resources.allocatableCpuMilli / 1000).toFixed(1)}`,
+              unit: 'cores',
+            },
+            {
+              label: t('fields.allocMem'),
+              value: `${(data.resources.allocatableMemoryMB / 1024).toFixed(1)}`,
+              unit: 'GiB',
+            },
             { label: t('fields.maxMvmSlots'), value: String(data.resources.maxMvmSlots), unit: '' },
           ].map(({ label, value, unit }) => (
             <div key={label} className="flex flex-col gap-1 px-5 first:pl-0 last:pr-0">
-              <span className="text-xs uppercase tracking-wider text-muted-foreground/70 font-medium">{label}</span>
+              <span className="text-xs uppercase tracking-wider text-muted-foreground/70 font-medium">
+                {label}
+              </span>
               <span className="text-xl font-semibold tabular-nums">
                 {value}
-                {unit && <span className="text-sm font-normal text-muted-foreground ml-1.5">{unit}</span>}
+                {unit && (
+                  <span className="text-sm font-normal text-muted-foreground ml-1.5">{unit}</span>
+                )}
               </span>
             </div>
           ))}
@@ -283,7 +347,9 @@ export default function NodeDetailPage() {
                 <div className="flex items-center gap-3 text-right">
                   <span className="font-mono text-sm text-foreground/80">{v.version || '—'}</span>
                   {v.commit && (
-                    <span className="font-mono text-xs text-muted-foreground/60">{v.commit.slice(0, 12)}</span>
+                    <span className="font-mono text-xs text-muted-foreground/60">
+                      {v.commit.slice(0, 12)}
+                    </span>
                   )}
                 </div>
               </div>
@@ -314,9 +380,9 @@ export default function NodeDetailPage() {
       <Section
         title={t('section.sandboxes')}
         action={
-          nodeSandboxes.length > 0
-            ? <span className="text-sm text-muted-foreground">{nodeSandboxes.length} running</span>
-            : undefined
+          nodeSandboxes.length > 0 ? (
+            <span className="text-sm text-muted-foreground">{nodeSandboxes.length} running</span>
+          ) : undefined
         }
       >
         {sandboxesLoading ? (
@@ -333,20 +399,39 @@ export default function NodeDetailPage() {
               >
                 <div className="flex items-center gap-2.5 min-w-0">
                   <Box size={12} className="shrink-0 text-muted-foreground/50" />
-                  <span className="font-mono text-sm text-foreground/80 truncate">{sb.sandboxID}</span>
-                  <span className="text-sm text-muted-foreground/50 truncate hidden sm:block">{sb.templateID}</span>
+                  <span className="font-mono text-sm text-foreground/80 truncate">
+                    {sb.sandboxID}
+                  </span>
+                  <span className="text-sm text-muted-foreground/50 truncate hidden sm:block">
+                    {sb.templateID}
+                  </span>
                 </div>
                 <div className="flex items-center gap-3 shrink-0">
-                  <span className={cn(
-                    'inline-flex items-center gap-1.5 text-sm font-medium',
-                    sb.state === 'running' ? 'text-cube-ok' : sb.state === 'paused' ? 'text-cube-warn' : 'text-muted-foreground'
-                  )}>
-                    <span className={cn('h-1.5 w-1.5 rounded-full',
-                      sb.state === 'running' ? 'bg-cube-ok' : sb.state === 'paused' ? 'bg-cube-warn' : 'bg-muted-foreground'
-                    )} />
+                  <span
+                    className={cn(
+                      'inline-flex items-center gap-1.5 text-sm font-medium',
+                      sb.state === 'running'
+                        ? 'text-cube-ok'
+                        : sb.state === 'paused'
+                          ? 'text-cube-warn'
+                          : 'text-muted-foreground',
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        'h-1.5 w-1.5 rounded-full',
+                        sb.state === 'running'
+                          ? 'bg-cube-ok'
+                          : sb.state === 'paused'
+                            ? 'bg-cube-warn'
+                            : 'bg-muted-foreground',
+                      )}
+                    />
                     {sb.state}
                   </span>
-                  <span className="text-sm text-muted-foreground/60">{formatRelative(sb.startedAt)}</span>
+                  <span className="text-sm text-muted-foreground/60">
+                    {formatRelative(sb.startedAt)}
+                  </span>
                 </div>
               </Link>
             ))}

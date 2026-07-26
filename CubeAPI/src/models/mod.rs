@@ -56,6 +56,8 @@ pub struct SandboxNetworkConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub deny_out: Option<Vec<String>>,
+    /// Host authority forwarded to user services by CubeProxy. `${PORT}` is
+    /// expanded to the requested sandbox port; envd traffic is exempt.
     #[serde(rename = "maskRequestHost", skip_serializing_if = "Option::is_none")]
     pub mask_request_host: Option<String>,
     /// L7 egress rules, evaluated first-match-wins in list order.
@@ -548,7 +550,10 @@ fn default_page_limit() -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{NewSandbox, SandboxNetworkConfig, SetTimeoutRequest};
+    use super::{
+        CreateTemplateRequest, NewSandbox, SandboxNetworkConfig, SetTimeoutRequest,
+        TemplateAliasLookupResponse,
+    };
     use validator::Validate;
 
     #[test]
@@ -583,7 +588,8 @@ mod tests {
     fn sandbox_network_config_accepts_snake_case_policy_fields() {
         let cfg: SandboxNetworkConfig = serde_json::from_value(serde_json::json!({
             "allow_out": ["api.example.com", "8.8.8.8"],
-            "deny_out": ["0.0.0.0/0"]
+            "deny_out": ["0.0.0.0/0"],
+            "maskRequestHost": "localhost:${PORT}"
         }))
         .expect("network config should deserialize");
 
@@ -592,6 +598,7 @@ mod tests {
             Some(vec!["api.example.com".to_string(), "8.8.8.8".to_string()])
         );
         assert_eq!(cfg.deny_out, Some(vec!["0.0.0.0/0".to_string()]));
+        assert_eq!(cfg.mask_request_host.as_deref(), Some("localhost:${PORT}"));
     }
 
     #[test]
@@ -612,6 +619,31 @@ mod tests {
             Some("value")
         );
     }
+
+    #[test]
+    fn create_template_request_accepts_name_and_alias() {
+        let req: CreateTemplateRequest = serde_json::from_value(serde_json::json!({
+            "name": "stable-python:v1",
+            "alias": "legacy-python",
+            "image": "python:3.11"
+        }))
+        .expect("create template request should deserialize");
+
+        assert_eq!(req.name.as_deref(), Some("stable-python:v1"));
+        assert_eq!(req.alias.as_deref(), Some("legacy-python"));
+    }
+
+    #[test]
+    fn template_alias_lookup_response_serializes_e2b_shape() {
+        let resp = TemplateAliasLookupResponse {
+            template_id: "tpl-abc".to_string(),
+            public: true,
+        };
+
+        let json = serde_json::to_value(resp).expect("response should serialize");
+        assert_eq!(json["templateID"], "tpl-abc");
+        assert_eq!(json["public"], true);
+    }
 }
 
 // ─── Templates ─────────────────────────────────────────────────────────────
@@ -631,6 +663,7 @@ pub struct ListTemplatesQuery {
 pub struct TemplateSummary {
     #[serde(rename = "templateID")]
     pub template_id: String,
+    pub public: bool,
     #[serde(rename = "instanceType", skip_serializing_if = "Option::is_none")]
     pub instance_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -645,6 +678,9 @@ pub struct TemplateSummary {
     /// Latest create/rebuild job id for the template.
     #[serde(rename = "jobID", skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
+    /// E2B template aliases. CubeSandbox has no namespace model, so this
+    /// mirrors the stable alias when one is configured.
+    pub aliases: Vec<String>,
 }
 
 /// Detailed template response (GET /templates/:id).
@@ -652,6 +688,7 @@ pub struct TemplateSummary {
 pub struct TemplateDetail {
     #[serde(rename = "templateID")]
     pub template_id: String,
+    pub public: bool,
     #[serde(rename = "instanceType", skip_serializing_if = "Option::is_none")]
     pub instance_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -659,6 +696,8 @@ pub struct TemplateDetail {
     pub status: String,
     #[serde(rename = "lastError", skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    #[serde(rename = "createdAt", skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
     pub replicas: Vec<serde_json::Value>,
     #[serde(rename = "createRequest", skip_serializing_if = "Option::is_none")]
     pub create_request: Option<serde_json::Value>,
@@ -674,6 +713,9 @@ pub struct TemplateDetail {
     /// Latest create/rebuild job id for the template.
     #[serde(rename = "jobID", skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
+    /// E2B template aliases. CubeSandbox has no namespace model, so this
+    /// mirrors the stable alias when one is configured.
+    pub aliases: Vec<String>,
 }
 
 /// Body for POST /templates (create from image).
@@ -684,6 +726,13 @@ pub struct CreateTemplateRequest {
     #[serde(rename = "templateID", default)]
     #[allow(dead_code)]
     pub template_id: String,
+    /// E2B v3 template name. A tag suffix after ':' is accepted by CubeAPI but
+    /// only the name portion is forwarded as the CubeMaster alias.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Deprecated E2B template alias. Used when `name` is absent or blank.
+    #[serde(default)]
+    pub alias: Option<String>,
     #[serde(rename = "instanceType", default)]
     pub instance_type: Option<String>,
     /// Container image reference, e.g. `registry.example.com/code:latest`.
@@ -740,6 +789,9 @@ pub struct CreateTemplateRequest {
     /// Denied outbound CIDRs for CubeVS egress policy.
     #[serde(rename = "denyOut", default)]
     pub deny_out: Option<Vec<String>>,
+    /// Enable ivshmem when building the template snapshot.
+    #[serde(rename = "enableIvshmem", default)]
+    pub enable_ivshmem: Option<bool>,
     /// Whether CubeMaster bakes the CubeEgress root CA into the template rootfs.
     /// Omitted or null defaults to true on CubeMaster.
     #[serde(rename = "with_cube_ca", default)]
@@ -751,6 +803,13 @@ pub struct CreateTemplateRequest {
 pub struct RebuildTemplateRequest {
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TemplateAliasLookupResponse {
+    #[serde(rename = "templateID")]
+    pub template_id: String,
+    pub public: bool,
 }
 
 /// Job envelope returned by create / rebuild.
@@ -1000,4 +1059,60 @@ pub struct VersionMatrixView {
     pub control_plane: ControlPlaneVersionView,
     pub components: Vec<ComponentMatrixRowView>,
     pub nodes: Vec<NodeVersionRowView>,
+}
+
+// ─── Volume API models ──────────────────────────────────────────────────────
+
+/// Maximum length of a customer-supplied volume `name` (matches `t_cube_volume.name`).
+pub const MAX_VOLUME_NAME_LEN: usize = 128;
+
+/// Request body for POST /volumes.
+///
+/// `name` must match `^[a-zA-Z0-9_-]+$` and be at most [`MAX_VOLUME_NAME_LEN`] characters
+/// (validated in the handler).
+/// `driver` selects the Controller Hook Plugin in CubeMaster; omit to use the
+/// default plugin configured in CubeMaster.
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone)]
+pub struct NewVolume {
+    /// Human-readable name for the volume. Optional;
+    /// if omitted a UUIDv4 is generated and used as both name and volume_id.
+    #[serde(default)]
+    pub name: String,
+    /// Plugin/driver to use, e.g. "nfs", "cos", "host-mount".
+    /// Omit to use CubeMaster's default plugin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
+}
+
+impl NewVolume {
+    /// Returns true iff `name` matches `^[a-zA-Z0-9_-]+$` and is within length limit.
+    pub fn name_is_valid(&self) -> bool {
+        !self.name.is_empty()
+            && self.name.len() <= MAX_VOLUME_NAME_LEN
+            && self
+                .name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    }
+}
+
+/// Volume descriptor returned in list responses (no token).
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone)]
+pub struct Volume {
+    #[serde(rename = "volumeID")]
+    pub volume_id: String,
+    pub name: String,
+}
+
+/// Volume descriptor with auth token — returned on create / get-single.
+/// E2B SDK requires `token` to always be present (non-optional); use empty
+/// string when the plugin does not return a token.
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone)]
+pub struct VolumeAndToken {
+    #[serde(rename = "volumeID")]
+    pub volume_id: String,
+    pub name: String,
+    /// Auth token returned by the volume plugin. Empty string when not applicable.
+    #[serde(default)]
+    pub token: String,
 }

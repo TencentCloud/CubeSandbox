@@ -59,6 +59,7 @@ rm -f \
   "${PREBUILT_DIR}/cubelet" \
   "${PREBUILT_DIR}/cubecli" \
   "${PREBUILT_DIR}/cube-api" \
+  "${PREBUILT_DIR}/cubeops" \
   "${PREBUILT_DIR}/network-agent" \
   "${PREBUILT_DIR}/cubevsmapdump" \
   "${PREBUILT_DIR}/cube-agent" \
@@ -81,6 +82,9 @@ install -m 0755 /workspace/_output/bin/cubecli "${PREBUILT_DIR}/cubecli"
 echo "[one-click] building cube-api in builder" >&2
 (cd /workspace/CubeAPI && cargo build --release --locked)
 install -m 0755 /workspace/CubeAPI/target/release/cube-api "${PREBUILT_DIR}/cube-api"
+
+echo "[one-click] building cubeops in builder" >&2
+(cd /workspace/CubeOps && go mod download && go build -ldflags "-s -w" -o "${PREBUILT_DIR}/cubeops" ./cmd/cubeops)
 
 echo "[one-click] building network-agent in builder" >&2
 (cd /workspace/CubeNet && make -C cubevs gen && cd /workspace/network-agent && go build -ldflags "${NETAGENT_LDFLAGS}" -o "${PREBUILT_DIR}/network-agent" ./cmd/network-agent)
@@ -118,6 +122,7 @@ for artifact in \
   cubelet \
   cubecli \
   cube-api \
+  cubeops \
   network-agent \
   cubevsmapdump \
   cube-agent \
@@ -133,6 +138,7 @@ ONE_CLICK_CUBEMASTERCLI_BIN="${PREBUILT_DIR}/cubemastercli" \
 ONE_CLICK_CUBELET_BIN="${PREBUILT_DIR}/cubelet" \
 ONE_CLICK_CUBECLI_BIN="${PREBUILT_DIR}/cubecli" \
 ONE_CLICK_CUBE_API_BIN="${PREBUILT_DIR}/cube-api" \
+ONE_CLICK_CUBE_OPS_BIN="${PREBUILT_DIR}/cubeops" \
 ONE_CLICK_NETWORK_AGENT_BIN="${PREBUILT_DIR}/network-agent" \
 ONE_CLICK_CUBEVSMAPDUMP_BIN="${PREBUILT_DIR}/cubevsmapdump" \
 ONE_CLICK_CUBE_AGENT_BIN="${PREBUILT_DIR}/cube-agent" \

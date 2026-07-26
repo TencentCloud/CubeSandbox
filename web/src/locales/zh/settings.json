@@ -18,13 +18,13 @@
   },
   "cluster": {
     "title": "集群连接",
-    "desc": "查看当前连接的 CubeAPI 实例信息。",
+    "desc": "查看当前连接的 CubeOps 实例信息。",
     "endpoint": "API 端点",
-    "endpointDesc": "CubeAPI的对外访问地址。启动时通过CUBE_API_PUBLIC_HOST环境变量配置。",
+    "endpointDesc": "CubeOps 的对外访问地址。启动时通过 CUBE_OPS_PUBLIC_HOST 环境变量配置。",
     "test": "测试连接",
     "connected": "连接正常",
     "runtime": "运行时配置",
-    "runtimeDesc": "来自 CubeAPI 的运行时只读信息。",
+    "runtimeDesc": "来自 CubeOps 的运行时只读信息。",
     "sandboxDomain": "沙箱域名",
     "instanceType": "默认实例类型",
     "rateLimit": "限流策略",
@@ -48,14 +48,13 @@
     "goOverview": "跳转 概览",
     "goSandboxes": "跳转 沙箱列表",
     "goTemplates": "跳转 模板列表",
-    "goNodes": "跳转 节点列表",
-    "goKeys": "跳转 API 密钥"
+    "goNodes": "跳转 节点列表"
   },
   "about": {
     "title": "关于",
     "desc": "版本信息与相关链接。",
     "version": "版本",
-    "cubeApi": "CubeAPI 地址",
+    "cubeApi": "CubeOps 地址",
     "instanceType": "默认实例类型",
     "docs": "文档"
   }

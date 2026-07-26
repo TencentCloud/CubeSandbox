@@ -11,7 +11,6 @@ import {
   Network,
   Activity,
   Bot,
-  KeyRound,
   Settings,
   Store,
   Layers,
@@ -28,7 +27,6 @@ const NAV_ITEMS = [
   { to: '/versions', icon: Layers, key: 'versions' },
   { to: '/network', icon: Network, key: 'network' },
   { to: '/observability', icon: Activity, key: 'observability' },
-  { to: '/keys', icon: KeyRound, key: 'apiKeys' },
   { to: '/store', icon: Store, key: 'store' },
   { to: '/agenthub', icon: Bot, key: 'agentHub' },
   { to: '/settings', icon: Settings, key: 'settings' },
@@ -56,7 +54,7 @@ export function Rail() {
               className={cn(
                 'group relative flex h-10 w-10 items-center justify-center rounded-lg text-muted-foreground transition-all duration-150 ease-cube',
                 'hover:bg-muted hover:text-foreground',
-                active && 'bg-primary/15 text-primary ring-1 ring-primary/30'
+                active && 'bg-primary/15 text-primary ring-1 ring-primary/30',
               )}
             >
               <Icon size={18} strokeWidth={1.75} />

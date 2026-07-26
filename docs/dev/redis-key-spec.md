@@ -88,6 +88,9 @@ The following are the standard keys currently registered in the system (`v1`). N
 | `HostIP` | Host IP |
 | `SandboxIP` | Sandbox internal IP (optional) |
 | `CreatedAt` | Creation time |
+| `AllowPublicTraffic` | Whether the public URL is accessible without a traffic token |
+| `TrafficAccessToken` | Private public-URL access token (optional) |
+| `MaskRequestHost` | Host template CubeProxy forwards to user services (optional; `${PORT}` expands per request) |
 | `{containerPort}` | Container port → host mapped port (dynamic field) |
 
 **`instance:info`** (instance info)

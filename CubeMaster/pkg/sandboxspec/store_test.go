@@ -62,3 +62,18 @@ func TestCanonicalizeRequestHandlesNilAnnotations(t *testing.T) {
 	assert.Empty(t, out.Annotations)
 	assert.Empty(t, out.Labels)
 }
+
+func TestCanonicalizeRequestPreservesMaskRequestHost(t *testing.T) {
+	mask := "localhost:${PORT}"
+	out, err := CanonicalizeRequest(&sandboxtypes.CreateCubeSandboxReq{
+		InstanceType: "cubebox",
+		CubeNetworkConfig: &sandboxtypes.CubeNetworkConfig{
+			MaskRequestHost: &mask,
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, out.CubeNetworkConfig)
+	require.NotNil(t, out.CubeNetworkConfig.MaskRequestHost)
+	assert.Equal(t, mask, *out.CubeNetworkConfig.MaskRequestHost)
+	assert.NotSame(t, &mask, out.CubeNetworkConfig.MaskRequestHost)
+}

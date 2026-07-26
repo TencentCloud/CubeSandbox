@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Build-context filter for Cubelet/Dockerfile (context = repository root).
+# The repo-root .dockerignore is tailored to docker/Dockerfile.builder and would
+# exclude Cubelet/ without these overrides.
+**
+!Cubelet
+!Cubelet/**
+!cubelog
+!cubelog/**
+!cubecow
+!cubecow/**
+!deploy
+!deploy/scripts
+!deploy/scripts/docker-install-volume-deps.sh
+!deploy/kubernetes
+!deploy/kubernetes/images
+!deploy/kubernetes/images/scripts
+!deploy/kubernetes/images/scripts/component-entrypoint.sh
+!examples
+!examples/volume
+!examples/volume/cos
+!examples/volume/cos/binary
+!examples/volume/cos/binary/**
+!examples/volume/cos/volume-cos.conf.example

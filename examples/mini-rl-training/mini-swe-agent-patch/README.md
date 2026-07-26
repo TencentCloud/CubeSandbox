@@ -15,7 +15,7 @@
 安装 mini-swe-agent 后，运行 patch 脚本将改动文件覆盖到 site-packages：
 
 ```bash
-pip install mini-swe-agent[extra]
+pip install 'mini-swe-agent[extra]'
 bash install.sh
 ```
 

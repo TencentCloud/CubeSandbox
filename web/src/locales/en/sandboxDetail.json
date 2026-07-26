@@ -11,11 +11,29 @@
   "logsEmpty": "No log entries yet.",
   "logsEntries": "entries",
   "logsRefresh": "Refresh now",
+  "logsUnavailable": "The sandbox has ended. Log polling has stopped.",
+  "logsError": "Failed to load logs. Try again later.",
+  "refreshFailed": "Status refresh failed. Showing the last successfully fetched data.",
+  "backToList": "Back to sandboxes",
+  "unavailable": {
+    "title": "Sandbox ended",
+    "badge": "Ended",
+    "description": "The sandbox may have expired or been deleted by another operation."
+  },
+  "notFound": {
+    "title": "Sandbox not found",
+    "description": "Check the sandbox ID or confirm that the sandbox has not been deleted."
+  },
+  "loadError": {
+    "title": "Failed to load sandbox details",
+    "description": "The sandbox details are temporarily unavailable. Check your connection and retry."
+  },
   "fields": {
     "vcpu": "vCPU",
     "memory": "Memory",
     "client": "Client",
     "alias": "Alias",
+    "template": "Template",
     "ends": "Ends",
     "domain": "Domain",
     "started": "Started",

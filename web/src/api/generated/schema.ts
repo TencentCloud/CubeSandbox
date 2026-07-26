@@ -149,6 +149,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/templates/aliases/{alias}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_template_by_alias"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/templates/compat": {
         parameters: {
             query?: never;
@@ -305,8 +321,8 @@ export interface components {
         ListedSandbox: {
             alias?: string | null;
             clientID: string;
-            /** Format: int32 */
-            cpuCount: number;
+            /** K8s-style millicores string, e.g. "2000m" (= 2 vCPU), "128m" (= 0.128 vCPU). */
+            cpuCount: string;
             /** Format: int32 */
             diskSizeMB?: number | null;
             /** Format: date-time */
@@ -417,8 +433,8 @@ export interface components {
         SandboxDetail: {
             alias?: string | null;
             clientID: string;
-            /** Format: int32 */
-            cpuCount: number;
+            /** K8s-style millicores string, e.g. "2000m" (= 2 vCPU), "128m" (= 0.128 vCPU). */
+            cpuCount: string;
             /** Format: int32 */
             diskSizeMB?: number | null;
             domain?: string | null;
@@ -460,6 +476,10 @@ export interface components {
             name: string;
             path: string;
         };
+        TemplateAliasLookupResponse: {
+            public: boolean;
+            templateID: string;
+        };
         TemplateCompatAdoptResponseView: {
             /** Format: int32 */
             updated: number;
@@ -488,15 +508,22 @@ export interface components {
         };
         /** @description Detailed template response (GET /templates/:id). */
         TemplateDetail: {
+            /**
+             * @description E2B template aliases. CubeSandbox has no namespace model, so this
+             *     mirrors the stable alias when one is configured.
+             */
+            aliases: string[];
             /** @description Whether public internet access is allowed for sandboxes from this template. */
             allowInternetAccess?: boolean | null;
             createRequest?: unknown;
+            createdAt?: string | null;
+            instanceType?: string | null;
             /** @description Latest create/rebuild job id for the template. */
             jobID?: string | null;
-            instanceType?: string | null;
             lastError?: string | null;
             /** @description Network type used when the template was created, e.g. "tap". */
             networkType?: string | null;
+            public: boolean;
             replicas: unknown[];
             status: string;
             templateID: string;
@@ -515,15 +542,21 @@ export interface components {
         };
         /** @description Summary row returned by GET /templates. */
         TemplateSummary: {
+            /**
+             * @description E2B template aliases. CubeSandbox has no namespace model, so this
+             *     mirrors the stable alias when one is configured.
+             */
+            aliases: string[];
             createdAt?: string | null;
             imageInfo?: string | null;
             instanceType?: string | null;
+            /** @description Latest create/rebuild job id for the template. */
+            jobID?: string | null;
             lastError?: string | null;
+            public: boolean;
             status: string;
             templateID: string;
             version?: string | null;
-            /** @description Latest create/rebuild job id for the template. */
-            jobID?: string | null;
         };
         /** @description Full node x component version matrix. */
         VersionMatrixView: {
@@ -913,6 +946,56 @@ export interface operations {
                 };
             };
             /** @description Template endpoint unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    get_template_by_alias: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Template alias */
+                alias: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Template alias lookup */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateAliasLookupResponse"];
+                };
+            };
+            /** @description Invalid alias */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Template alias not found */
             404: {
                 headers: {
                     [name: string]: unknown;

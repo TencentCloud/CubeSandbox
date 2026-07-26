@@ -25,6 +25,10 @@ A host mount maps an **absolute path on the sandbox host node** to a **path insi
 | **Path restriction** | `hostPath` must be under an allowed directory prefix (default `/data/shared/`) |
 | **Compatibility** | Works with both E2B SDK (`e2b_code_interpreter`) and Cube SDK (`cubesandbox`) |
 
+::: tip Volume Plugin (e2b Volume API)
+For **user-scoped persistent volumes** (`POST /volumes` + `volumeMounts`) backed by COS, NFS, etc., see the [Volume Plugin Development guide](./volume-plugin.md). Host Mount is best for pre-existing directories on the node; Volume Plugins fit cloud storage and e2b-compatible volume lifecycle.
+:::
+
 ## Use Cases
 
 - **Large datasets** — mount a multi-GB dataset directory into many sandboxes without copying
@@ -362,6 +366,63 @@ Even if a sandbox attempts to access another tenant's path (e.g. via traversal),
 | Directory layout | Isolated subdirectory per tenant; each sandbox only mounts its own path | Structural data isolation; tenants cannot see each other |
 | Application | Platform code constructs paths; user input is not trusted | Tenant isolation under normal operation |
 | OS | Directory owner/mode permissions | Last-resort protection against any bypass |
+
+## Nested Mounts: Shared Read, Writer-Scoped
+
+A nested mount is a pair of mounts where one `mountPath` is below another. This is useful when a group shares one workspace but each sandbox should only write to its own subdirectory. The group can represent an Agent Team, project, department, or tenant; Cube Sandbox does not manage that membership.
+
+For example, an Agent Team can use this host layout:
+
+```text
+/data/shared/tenant-a/team-blue/
+├── shared-input.txt
+└── members/
+    ├── agent-a/
+    └── agent-b/
+```
+
+Agent A receives the shared workspace as read-only, then its own directory as a nested read-write mount:
+
+```python
+import json
+
+mounts = json.dumps([
+    {
+        "hostPath": "/data/shared/tenant-a/team-blue",
+        "mountPath": "/workspace",
+        "readOnly": True,
+    },
+    {
+        "hostPath": "/data/shared/tenant-a/team-blue/members/agent-a",
+        "mountPath": "/workspace/members/agent-a",
+        "readOnly": False,
+    },
+])
+```
+
+Agent B uses the same read-only parent and mounts only `members/agent-b` as read-write. Agents can use different sandbox templates; the storage layout and access modes remain the same.
+
+| Path visible to Agent A | Read | Write | Why |
+|-------------------------|------|-------|-----|
+| `/workspace/shared-input.txt` | Yes | No | Provided by the shared read-only parent |
+| `/workspace/members/agent-a/` | Yes | Yes | Replaced at that path by Agent A's read-write child mount |
+| `/workspace/members/agent-b/` | Yes | No | Still provided by the shared read-only parent |
+| Another tenant's workspace | No | No | Its host path is not mounted into this sandbox |
+
+This is a **shared-readable, writer-scoped** model. “Writer-scoped” means only the selected sandbox receives a writable mount for that directory; it does not make the directory unreadable to peers when the read-only parent exposes it.
+
+### Mount Semantics and Constraints
+
+- During AppSnapshot restore, Cubelet applies parent destinations before nested destinations, regardless of the descriptor order. This prevents a later parent mount from hiding an already-mounted child. Unrelated paths have a deterministic order but no parent-child meaning.
+- A child mount shadows the parent at that exact subtree; the two directory views are not merged. Files from the parent at the child destination are hidden while the child mount is active.
+- `readOnly` applies to each mount independently, but normal Linux UID, GID, mode, and ACL checks still apply. A read-write child can still return `Permission denied` if its host permissions reject the sandbox user.
+- Prefer one read-only parent and explicit read-write children. Avoid duplicate destinations and overlapping writable mounts, because ownership and the visible result become difficult to reason about.
+- Use canonical absolute `mountPath` values without `.` or `..` segments. Do not rely on input order to resolve overlapping destinations.
+- Host mounts are node-local and remain outside the sandbox snapshot. On restore, every `hostPath` must be available on the scheduled node; use a shared filesystem at the same path on every node when required.
+
+::: warning Authorization boundary
+The platform calling `Sandbox.create()` must derive `hostPath` from the authenticated sandbox owner and the applicable group boundary, such as a tenant, team, or project. Do not accept an arbitrary host path from the user, and do not mount a global root such as `/data/shared/tenants/` into a tenant sandbox: a read-only mount prevents writes but does not prevent the sandbox from reading other tenants' data.
+:::
 
 ## Best Practices
 

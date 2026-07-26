@@ -62,7 +62,9 @@ export function MetricValue({
 }) {
   return (
     <span className={cn('inline-flex items-baseline gap-1 text-num', sizeMap[size], className)}>
-      <span className={emphasis === 'strong' ? 'font-semibold text-foreground' : 'text-foreground/90'}>
+      <span
+        className={emphasis === 'strong' ? 'font-semibold text-foreground' : 'text-foreground/90'}
+      >
         {value}
       </span>
       {unit ? <span className="text-muted-foreground">{unit}</span> : null}

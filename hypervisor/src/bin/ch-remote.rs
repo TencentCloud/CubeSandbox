@@ -694,7 +694,7 @@ fn main() {
                         .long("snapshot-type")
                         .help("Snapshot type: 'full', 'incremental' (saves only CoW anonymous pages) or 'soft-dirty' (true delta of pages written since the previous soft-dirty snapshot; falls back to 'incremental' on kernels without CONFIG_MEM_SOFT_DIRTY)")
                         .num_args(1)
-                        .default_value("incremental"),
+                        .default_value("full"),
                 )
                 .arg(
                     Arg::new("memory_vol_url")
@@ -725,7 +725,7 @@ fn main() {
                         .long("snapshot-type")
                         .help("Snapshot type: 'full', 'incremental' (saves only CoW anonymous pages) or 'soft-dirty' (true delta of pages written since the previous soft-dirty snapshot; falls back to 'incremental' on kernels without CONFIG_MEM_SOFT_DIRTY)")
                         .num_args(1)
-                        .default_value("incremental"),
+                        .default_value("full"),
                 )
                 .arg(
                     Arg::new("memory_vol_url")

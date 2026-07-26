@@ -584,15 +584,15 @@ func TestEnsureReleaseEnsureReusesTapFromPool(t *testing.T) {
 	if _, err := svc.ReleaseNetwork(t.Context(), &ReleaseNetworkRequest{SandboxID: "sandbox-1"}); err != nil {
 		t.Fatalf("ReleaseNetwork error=%v", err)
 	}
-	if len(svc.tapPool) != 0 {
-		t.Fatalf("tapPool len=%d, want 0 before async preparation", len(svc.tapPool))
-	}
-	if len(svc.abnormalTapPool) != 1 {
-		t.Fatalf("abnormalTapPool len=%d, want 1 pending async preparation", len(svc.abnormalTapPool))
-	}
-	svc.handleAbnormalTaps()
+	// On the success path releaseState prepares and stages the recycled tap
+	// synchronously (prepareAndStageTapForPool), so it lands directly in the
+	// free pool. Only a preparation *failure* defers it into abnormalTapPool
+	// (see TestReleaseNetworkQueuesTapWhenPoolPrepareFails).
 	if len(svc.tapPool) != 1 {
-		t.Fatalf("tapPool len=%d, want 1", len(svc.tapPool))
+		t.Fatalf("tapPool len=%d, want 1 (recycled tap staged synchronously on release)", len(svc.tapPool))
+	}
+	if len(svc.abnormalTapPool) != 0 {
+		t.Fatalf("abnormalTapPool len=%d, want 0 (no preparation failure to defer)", len(svc.abnormalTapPool))
 	}
 	second, err := svc.EnsureNetwork(t.Context(), &EnsureNetworkRequest{SandboxID: "sandbox-2"})
 	if err != nil {

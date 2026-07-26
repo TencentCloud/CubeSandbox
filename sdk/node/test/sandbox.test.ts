@@ -165,12 +165,17 @@ describe("Sandbox.create", () => {
   it("maps network allowOut / denyOut", async () => {
     setHandler(() => ({ status: 201, json: SANDBOX_DATA }));
     const sb = await Sandbox.create({
-      network: { allowOut: ["8.8.8.8/32"], denyOut: ["0.0.0.0/0"] },
+      network: {
+        allowOut: ["8.8.8.8/32"],
+        denyOut: ["0.0.0.0/0"],
+        maskRequestHost: "localhost:${PORT}",
+      },
       config: makeConfig(),
     });
     const body = JSON.parse(requests[0].body.toString());
     expect(body.network.allowOut).toEqual(["8.8.8.8/32"]);
     expect(body.network.denyOut).toEqual(["0.0.0.0/0"]);
+    expect(body.network.maskRequestHost).toBe("localhost:${PORT}");
     sb.close();
   });
 

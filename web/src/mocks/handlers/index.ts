@@ -71,7 +71,9 @@ export const handlers = [
   http.get('/cubeapi/v1/templates/:templateID', async ({ params }) => {
     await mockDelay();
     const template = getTemplate(String(params.templateID));
-    return template ? HttpResponse.json(template) : notFound(`template ${params.templateID} not found`);
+    return template
+      ? HttpResponse.json(template)
+      : notFound(`template ${params.templateID} not found`);
   }),
 
   http.get('/cubeapi/v1/v2/sandboxes', async ({ request }) => {
@@ -121,7 +123,7 @@ export const handlers = [
 
   http.post('/cubeapi/v1/sandboxes', async ({ request }) => {
     await mockDelay();
-    const body = await request.json() as {
+    const body = (await request.json()) as {
       templateID: string;
       timeout?: number;
       alias?: string;

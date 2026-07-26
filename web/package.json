@@ -8,6 +8,7 @@
     "build": "tsc -b --noEmit && vite build",
     "preview": "vite preview",
     "lint": "tsc -b --noEmit",
+    "fmt": "prettier --write .",
     "api:export": "cargo run --manifest-path ../CubeAPI/Cargo.toml -- --export-openapi ../openapi.yml",
     "api:generate": "openapi-typescript ../openapi.yml -o src/api/generated/schema.ts",
     "api:sync": "npm run api:export && npm run api:generate"
@@ -52,6 +53,7 @@
     "msw": "^2.13.5",
     "openapi-typescript": "^7.13.0",
     "postcss": "^8.4.47",
+    "prettier": "^3.9.5",
     "tailwindcss": "^3.4.14",
     "typescript": "^5.6.3",
     "vite": "^6.4.2"

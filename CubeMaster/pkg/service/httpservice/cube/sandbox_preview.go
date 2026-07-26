@@ -7,13 +7,15 @@ package cube
 import (
 	"net/http"
 
+	"github.com/gin-gonic/gin"
 	jsoniter "github.com/json-iterator/go"
 	api "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
 var previewConstructCubeletReqFn = sandbox.ConstructCubeletReq
@@ -26,20 +28,12 @@ type sandboxPreviewResponse struct {
 	CubeletRequest *api.RunCubeSandboxRequest  `json:"cubelet_request,omitempty"`
 }
 
-func handleSandboxPreviewAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	if r.Method != http.MethodPost {
-		return &types.Res{
-			Ret: &types.Ret{
-				RetCode: int(errorcode.ErrorCode_MasterParamsError),
-				RetMsg:  http.StatusText(http.StatusMethodNotAllowed),
-			},
-		}
-	}
-	return previewSandbox(w, r, rt)
+func handleSandboxPreviewAction(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	common.WriteAPI(c, previewSandbox(c.Request, rt))
 }
 
-func previewSandbox(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	_ = w
+func previewSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	req, err := constructCreateReq(r)
 	if err != nil {
 		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)

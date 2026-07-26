@@ -3,7 +3,6 @@
 //
 
 use crate::cubemaster::CubeMasterClient;
-use crate::db::AgentHubStore;
 use crate::logging::ArcLogger;
 use crate::services::AppServices;
 use dashmap::{mapref::entry::Entry, DashMap};
@@ -79,9 +78,6 @@ pub struct AppState {
     /// Server config snapshot.
     pub config: Arc<crate::config::ServerConfig>,
 
-    /// Optional database-backed AgentHub instance store.
-    pub agenthub_store: Option<AgentHubStore>,
-
     /// Process-local active terminal session limit keyed by sandbox ID.
     pub terminal_sessions: TerminalSessionLimiter,
 }
@@ -102,23 +98,9 @@ impl AppState {
             .expect("failed to build HTTP client");
 
         let cubemaster = CubeMasterClient::new(config.cubemaster_url.clone(), http_client.clone());
-        let services = AppServices::new(&config, cubemaster.clone());
-        let agenthub_store = match config
-            .database_url
-            .as_deref()
-            .filter(|v| !v.trim().is_empty())
-        {
-            Some(url) => match AgentHubStore::connect(url).await {
-                Ok(store) => Some(store),
-                Err(err) => {
-                    tracing::warn!(error = %err, "agenthub database disabled");
-                    None
-                }
-            },
-            None => None,
-        };
         let terminal_sessions =
             TerminalSessionLimiter::new(config.terminal_max_sessions_per_sandbox);
+        let services = AppServices::new(&config, cubemaster);
 
         Self {
             rate_limiter,
@@ -126,7 +108,6 @@ impl AppState {
             services,
             logger,
             config: Arc::new(config),
-            agenthub_store,
             terminal_sessions,
         }
     }

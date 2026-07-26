@@ -1,6 +1,13 @@
 # Rust build artifacts (per-module)
 **/target/
 
+# Go build artifacts
+CubeOps/bin/
+
+# Go workspace (local-only, do not commit)
+/go.work
+/go.work.sum
+
 # IDE
 .idea/
 .vscode/
@@ -25,6 +32,7 @@ runtime/agent/src/version.rs
 # Python cache and compiled binaries in examples
 API/examples/__pycache__/
 API/examples/go/go
+CubeAPI/examples/log.txt
 
 # OpenAI Agents SDK examples (runtime artifacts)
 examples/openai-agents-example/__pycache__/
@@ -44,10 +52,18 @@ docs/webui-init.md
 docs/dev-log.md
 docs/image-1.png
 docs/image.png
+docs/design/
 
+# Keep the SDK compatibility E2E suite tracked while ignoring other test
+# directories and its generated local pytest cache.
 __pycache__
 /design
 /plan
-/tests
+/tests/*
+!/tests/e2e/
+/tests/e2e/*
+!/tests/e2e/sdk_compat/
+!/tests/e2e/sdk_compat/**
+/tests/e2e/sdk_compat/.pytest_cache/
 
 web/tsconfig.tsbuildinfo

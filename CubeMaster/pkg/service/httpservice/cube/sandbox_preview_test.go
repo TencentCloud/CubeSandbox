@@ -11,10 +11,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
@@ -57,7 +60,7 @@ func TestPreviewSandboxReturnsResolvedRequests(t *testing.T) {
 		}
 	}`))
 	rt := &CubeLog.RequestTrace{}
-	resp := previewSandbox(httptest.NewRecorder(), req, rt)
+	resp := previewSandbox(req, rt)
 
 	got, ok := resp.(*sandboxPreviewResponse)
 	if !ok {
@@ -80,11 +83,13 @@ func TestPreviewSandboxReturnsResolvedRequests(t *testing.T) {
 
 func TestHandleSandboxPreviewRejectsGet(t *testing.T) {
 	rt := &CubeLog.RequestTrace{}
-	resp := handleSandboxPreviewAction(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/cube/sandbox/preview", nil), rt)
+	ctx := CubeLog.WithRequestTrace(context.Background(), rt)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/cube/sandbox/preview", nil).WithContext(ctx)
+	handleSandboxPreviewAction(c)
 
-	got, ok := resp.(*types.Res)
-	if !ok {
-		t.Fatalf("unexpected response type %T", resp)
-	}
+	var got types.Res
+	require.NoError(t, common.FastestJsoniter.Unmarshal(w.Body.Bytes(), &got))
 	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Ret.RetCode)
 }

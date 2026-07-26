@@ -14,7 +14,7 @@
 #
 # Example:
 #   scripts/new-migration.sh add_foo_column
-#   -> CubeMaster/pkg/base/dao/migrate/migrations/mysql/20260622143000_add_foo_column.sql
+#   -> CubeDB/migrate/migrations/mysql/20260622143000_add_foo_column.sql
 
 set -euo pipefail
 
@@ -34,7 +34,7 @@ fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
-mysql_dir="${repo_root}/CubeMaster/pkg/base/dao/migrate/migrations/mysql"
+mysql_dir="${repo_root}/CubeDB/migrate/migrations/mysql"
 
 if [[ ! -d "${mysql_dir}" ]]; then
   echo "error: migrations dir not found: ${mysql_dir}" >&2

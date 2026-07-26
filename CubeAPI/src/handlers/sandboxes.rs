@@ -211,9 +211,10 @@ pub async fn sandbox_terminal(
         .filter(|value| !value.trim().is_empty())
     else {
         log_terminal_rejection(&state, &sandbox_id, &operator, "gateway_unavailable").await;
-        return Err(crate::error::AppError::ServiceUnavailable(
-            "terminal gateway is not configured".to_string(),
-        ));
+        return Err(crate::error::AppError::ServiceUnavailable {
+            message: "terminal gateway is not configured".to_string(),
+            retry_after: 0,
+        });
     };
     let detail = match state.services.sandboxes.get_sandbox(&sandbox_id).await {
         Ok(detail) => detail,
@@ -318,31 +319,64 @@ fn terminal_error(message: &str) -> Message {
     )
 }
 
+/// Identifies the operator behind a browser terminal session. Browsers cannot
+/// set headers on a WebSocket upgrade, so the credential travels as a
+/// `Sec-WebSocket-Protocol` token and is validated here with the same rules
+/// `unified_auth` applies to HTTP requests: forward to `auth_callback_url`
+/// when callback auth is configured, compare against `cube_api_key` in
+/// simple-key mode, and allow the session when neither is set.
 async fn terminal_operator(state: &AppState, headers: &HeaderMap) -> AppResult<String> {
-    let Some(store) = &state.agenthub_store else {
-        return Err(crate::error::AppError::ServiceUnavailable(
-            "terminal requires WebUI session authentication".to_string(),
-        ));
-    };
-    let token = terminal_session_token(headers);
-    let Some(token) = token else {
-        return Err(crate::error::AppError::Unauthorized(
-            "terminal session token is required".to_string(),
-        ));
-    };
-    store
-        .validate_session(token)
-        .await
-        .map_err(|error| {
-            crate::error::AppError::Internal(anyhow::anyhow!(
-                "failed to validate terminal session: {error}"
-            ))
-        })?
-        .ok_or_else(|| {
-            crate::error::AppError::Unauthorized(
+    let callback_url = state
+        .config
+        .auth_callback_url
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    let api_key = state
+        .config
+        .cube_api_key
+        .as_deref()
+        .filter(|value| !value.is_empty());
+
+    if callback_url.is_none() && api_key.is_none() {
+        // No auth configured: every request passes through, mirroring
+        // unified_auth's no-auth mode.
+        return Ok("anonymous".to_string());
+    }
+
+    let token = terminal_session_token(headers).ok_or_else(|| {
+        crate::error::AppError::Unauthorized("terminal session token is required".to_string())
+    })?;
+
+    if let Some(callback_url) = callback_url {
+        let response = state
+            .http_client
+            .post(callback_url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("X-Request-Path", "/sandboxes/terminal/ws")
+            .header("X-Request-Method", "GET")
+            .send()
+            .await
+            .map_err(|error| {
+                crate::error::AppError::Internal(anyhow::anyhow!(
+                    "failed to validate terminal session: {error}"
+                ))
+            })?;
+        return if response.status() == StatusCode::OK {
+            Ok("callback".to_string())
+        } else {
+            Err(crate::error::AppError::Unauthorized(
                 "terminal session is invalid or expired".to_string(),
-            )
-        })
+            ))
+        };
+    }
+
+    if api_key == Some(token) {
+        Ok("api-key".to_string())
+    } else {
+        Err(crate::error::AppError::Unauthorized(
+            "terminal session is invalid or expired".to_string(),
+        ))
+    }
 }
 
 fn terminal_session_token(headers: &HeaderMap) -> Option<&str> {
@@ -728,6 +762,13 @@ pub async fn create_sandbox(
     responses(
         (status = 204, description = "Sandbox deleted"),
         (status = 404, description = "Sandbox not found", body = ApiError),
+        (status = 408, description = "The existing standard API request timeout expired before the synchronous delete completed"),
+        (status = 409, description = "Paused sandbox cannot be admitted for internal resume because node capacity or resource metadata is unavailable", body = ApiError),
+        (status = 503, description = "Sandbox is pausing, another lifecycle operation is in progress, the Cubelet RPC has too little remaining time, or its internal resume could not be completed", body = ApiError,
+            headers(
+                ("Retry-After" = u64, description = "Seconds a client should wait before retrying DELETE")
+            )
+        ),
         (status = 500, description = "Unexpected backend error", body = ApiError)
     )
 )]

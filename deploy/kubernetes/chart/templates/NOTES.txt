@@ -1,0 +1,118 @@
+{{/* Helm TrimSpace strips leading whitespace from NOTES; keep a non-space first line. */ -}}
+CubeSandbox
+
+  ____      _          ____                  _ _
+ / ___|   _| |__   ___/ ___|  __ _ _ __   __| | |__   _____  __
+| |  | | | | '_ \ / _ \___ \ / _` | '_ \ / _` | '_ \ / _ \ \/ /
+| |__| |_| | |_) |  __/___) | (_| | | | | (_| | |_) | (_) >  <
+ \____\__,_|_.__/ \___|____/ \__,_|_| |_|\__,_|_.__/ \___/_/\_\
+
+CubeSandbox is installed.
+
+Release: {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+
+Persistence (CubeMaster / MySQL / Redis):
+{{- if or .Values.controlPlane.master.persistence.hostPath .Values.mysql.persistence.hostPath .Values.redis.persistence.hostPath }}
+  mode: hostPath (at least one component)
+{{- else }}
+{{- $sc := include "cube.persistenceStorageClassName" (dict "root" . "component" .Values.controlPlane.master.persistence) }}
+{{- if $sc }}
+  storageClassName: {{ $sc }} (explicit; component-level overrides top-level persistence.storageClassName)
+{{- else }}
+  storageClassName: <cluster default> (no chart-owned StorageClass unless storageClass.create=true / values-tke.yaml)
+{{- end }}
+{{- end }}
+
+{{- if .Values.controlPlane.enabled }}
+Control plane:
+  CubeMaster Service: {{ include "cube.masterName" . }}:{{ .Values.controlPlane.master.service.port }}
+{{- if .Values.controlPlane.api.enabled }}
+  CubeAPI Service:    {{ include "cube.apiName" . }}:{{ .Values.controlPlane.api.service.port }} (external E2B SDK)
+{{- end }}
+{{- if eq (include "cube.opsEnabled" .) "true" }}
+  CubeOps Service:    {{ include "cube.opsName" . }}:{{ .Values.cubeOps.service.port }} (WebUI /opsapi + SDK)
+{{- end }}
+{{- if and .Values.webui.enabled (eq (include "cube.opsEnabled" .) "true") }}
+  WebUI Service:      {{ include "cube.webuiName" . }}:{{ .Values.webui.service.port }}
+{{- end }}
+{{- if eq (include "cube.cubemastercliEnabled" .) "true" }}
+  cubemastercli Deployment: {{ include "cube.cubemastercliName" . }}
+{{- end }}
+{{- else if .Values.externalControlPlane.enabled }}
+External control plane:
+  CubeMaster Endpoint: {{ .Values.externalControlPlane.masterEndpoint }}
+{{- if .Values.externalControlPlane.apiEndpoint }}
+  CubeAPI Endpoint:    {{ .Values.externalControlPlane.apiEndpoint }}
+{{- end }}
+{{- if eq (include "cube.cubemastercliEnabled" .) "true" }}
+  cubemastercli Deployment: {{ include "cube.cubemastercliName" . }}
+{{- end }}
+{{- end }}
+{{- if eq (include "cube.configureClusterDNS" .) "true" }}
+  Cluster DNS: *.{{ .Values.cubeProxy.domain }} -> {{ include "cube.proxyServiceFQDN" . }} (patched into kube-system/coredns)
+{{- end }}
+
+Cube Node DaemonSet:
+  {{ include "cube.nodeName" . }}
+{{- if .Values.cubeNode.dns.sandbox.followNodeDns }}
+  Sandbox guest DNS: follow node / cluster DNS
+{{- end }}
+{{- if eq (include "cube.proxyEnabled" .) "true" }}
+
+Cube Proxy Deployment:
+  {{ include "cube.proxyName" . }}
+  Service ({{ .Values.cubeProxy.service.type | default "ClusterIP" }}): {{ include "cube.proxyServiceFQDN" . }}:{{ .Values.cubeProxy.ports.http.containerPort }}/{{ .Values.cubeProxy.ports.https.containerPort }}
+{{- if .Values.cubeProxy.ingress.enabled }}
+  Ingress: {{ include "cube.proxyName" . }} (TLS passthrough → CubeProxy; point external DNS at the Ingress)
+{{- end }}
+{{- if eq (include "cube.lifecycleManagerEnabled" .) "true" }}
+  Lifecycle Manager: {{ include "cube.lifecycleManagerName" . }}:{{ .Values.lifecycleManager.service.port }}
+{{- end }}
+{{- end }}
+
+{{- /* Status facts: past-tense / current config — not failure messages. */}}
+Status:
+{{- if .Values.cubeNode.enabled }}
+  Cubevs CIDR: {{ .Values.cubeNode.network.cidr | default "packaged Cubelet default" }} (preflight already ran this install/upgrade)
+{{- end }}
+{{- if eq (include "cube.startupGateEnabled" .) "true" }}
+  PVM startup gate: on
+{{- end }}
+{{- if .Values.bootstrap.pvmHostKernel.enabled }}
+
+WARNING (host change; helm rollback does NOT undo kernel/GRUB):
+  With bootstrap.pvmHostKernel.enabled=true, this release may install a host kernel
+  and reboot nodes labeled allow-pvm-bootstrap (via cube-node-pvm).
+{{- end }}
+
+Useful commands:
+  kubectl get pods -n {{ .Release.Namespace }} -o wide
+  kubectl get daemonset -n {{ .Release.Namespace }} {{ include "cube.nodeName" . }}
+  kubectl get daemonset -n {{ .Release.Namespace }} {{ include "cube.nodeBootstrapName" . }}
+  kubectl get daemonset -n {{ .Release.Namespace }} {{ include "cube.nodeInstallerName" . }}
+{{- if .Values.bootstrap.pvmHostKernel.enabled }}
+  kubectl get daemonset -n {{ .Release.Namespace }} {{ include "cube.nodePvmName" . }}
+{{- end }}
+{{- if eq (include "cube.proxyEnabled" .) "true" }}
+  kubectl get deploy -n {{ .Release.Namespace }} {{ include "cube.proxyName" . }}
+{{- end }}
+{{- if .Values.bootstrap.pvmHostKernel.enabled }}
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node-pvm -c pvm-host-bootstrap --tail=100
+{{- end }}
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node-bootstrap -c wait-pvm-host --tail=100
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node-bootstrap -c cube-node-init --tail=100
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node -c wait-node-prep --tail=100
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node -c cubelet --tail=100
+{{- if eq (include "cube.cubemastercliEnabled" .) "true" }}
+  kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.cubemastercliName" . }} -- cubemastercli --help
+  kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.cubemastercliName" . }} -- sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
+{{- end }}
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }} --timeout 20m
+{{- if .Values.diagnostics.enabled }}
+  kubectl get configmap -n {{ .Release.Namespace }} {{ include "cube.fullname" . }}-diagnostics -o jsonpath='{.data.cube-diag-k8s\.sh}' > /tmp/cube-diag-k8s.sh
+  sh /tmp/cube-diag-k8s.sh {{ .Release.Namespace }} {{ .Release.Name }}
+{{- end }}
+
+Docs: https://cubesandbox.com/guide/kubernetes/ (Install · Architecture · Upgrade · FAQ)
+      https://cubesandbox.com/zh/guide/kubernetes/ (中文)

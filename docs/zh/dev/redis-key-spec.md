@@ -88,6 +88,9 @@ cube:{ver}:{scope}:{resource}[:{sub}...]:{id}
 | `HostIP` | 宿主机 IP |
 | `SandboxIP` | 沙箱内网 IP（可选） |
 | `CreatedAt` | 创建时间 |
+| `AllowPublicTraffic` | public URL 是否无需访问令牌 |
+| `TrafficAccessToken` | public URL 私有访问令牌（可选） |
+| `MaskRequestHost` | CubeProxy 转发给用户服务的 Host 模板（可选，`${PORT}` 按请求展开） |
 | `{containerPort}` | 容器端口 → 宿主机映射端口（动态 field） |
 
 **`instance:info`**（实例信息）

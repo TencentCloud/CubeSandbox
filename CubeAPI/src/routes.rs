@@ -4,7 +4,7 @@
 
 use axum::{
     middleware,
-    routing::{delete, get, patch, post, put},
+    routing::{delete, get, patch, post},
     Router,
 };
 use std::time::Duration;
@@ -18,7 +18,7 @@ use tower_http::{
 };
 
 use crate::{
-    handlers::{agenthub, auth, cluster, config, health, sandboxes, snapshots, store, templates},
+    handlers::{health, sandboxes, snapshots, templates, volumes},
     middleware::{auth::unified_auth, rate_limit::rate_limit},
     state::AppState,
 };
@@ -28,13 +28,7 @@ const DEFAULT_ROUTE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Timeout budget for routes that front a *synchronous* CubeMaster operation
 /// which can legitimately take well beyond the default 30 s — currently
 /// snapshot create (`POST /sandboxes/:id/snapshots`) and snapshot/template
-/// delete (`DELETE /templates/:id`).  CubeMaster waits up to its own
-/// `SnapshotOperationTimeout` (15 min) for the underlying job to settle into
-/// a terminal state; 240 s here covers ~99% of realistic LVM/cubelet
-/// cleanup paths while keeping a hard ceiling so a wedged backend cannot
-/// hang the API thread forever.  See
-/// the contract: snapshot operations are synchronous — CubeAPI waits
-/// for a terminal state and does not expose a polling interface.
+/// delete (`DELETE /templates/:id`).
 const SNAPSHOT_LONG_ROUTE_TIMEOUT: Duration = Duration::from_secs(240);
 
 pub fn build_router(state: AppState) -> Router {
@@ -42,20 +36,19 @@ pub fn build_router(state: AppState) -> Router {
         .config
         .auth_callback_url
         .as_deref()
-        .is_some_and(|u| !u.is_empty());
+        .is_some_and(|u| !u.is_empty())
+        || state
+            .config
+            .cube_api_key
+            .as_deref()
+            .is_some_and(|k| !k.is_empty());
+
     let standard_router = apply_http_layers(
-        Router::new()
-            .merge(build_e2b_router(&state, auth_configured))
-            .nest("/cubeapi/v1", build_cubeapi_router(&state, auth_configured)),
+        Router::new().merge(build_e2b_router(&state, auth_configured)),
         DEFAULT_ROUTE_TIMEOUT,
     );
     let snapshot_long_router = apply_http_layers(
-        Router::new()
-            .merge(build_e2b_snapshot_long_router(&state, auth_configured))
-            .nest(
-                "/cubeapi/v1",
-                build_cubeapi_snapshot_long_router(&state, auth_configured),
-            ),
+        Router::new().merge(build_e2b_snapshot_long_router(&state, auth_configured)),
         SNAPSHOT_LONG_ROUTE_TIMEOUT,
     );
 
@@ -70,6 +63,7 @@ fn build_e2b_router(state: &AppState, auth_configured: bool) -> Router<AppState>
         .route("/health", get(health::health))
         .merge(build_sandbox_routes(state, auth_configured))
         .merge(build_template_routes(state, auth_configured))
+        .merge(build_volume_routes(state, auth_configured))
 }
 
 /// Routes that need the longer 240 s timeout when surfaced under the e2b
@@ -78,39 +72,6 @@ fn build_e2b_snapshot_long_router(state: &AppState, auth_configured: bool) -> Ro
     Router::new()
         .merge(build_long_sandbox_routes(state, auth_configured))
         .merge(build_long_template_routes(state, auth_configured))
-}
-
-fn build_cubeapi_router(state: &AppState, auth_configured: bool) -> Router<AppState> {
-    Router::new()
-        .route("/health", get(health::health))
-        .merge(build_auth_routes(state))
-        .merge(build_sandbox_routes(state, auth_configured))
-        .merge(build_template_routes(state, auth_configured))
-        .merge(build_cluster_routes(state, auth_configured))
-        .merge(build_agenthub_routes(state, auth_configured))
-}
-
-/// WebUI login routes. These are intentionally left unauthenticated (like
-/// `/health`) so the login/session flow itself is always reachable.
-fn build_auth_routes(state: &AppState) -> Router<AppState> {
-    let rate_limited_routes = Router::new()
-        .route("/auth/login", post(auth::login))
-        .route("/auth/change-password", post(auth::change_password));
-    let open_routes = Router::new()
-        .route("/auth/logout", post(auth::logout))
-        .route("/auth/session", get(auth::session))
-        .merge(
-            rate_limited_routes.layer(middleware::from_fn_with_state(state.clone(), rate_limit)),
-        );
-    open_routes
-}
-
-/// Same long-budget routes mounted under the `/cubeapi/v1` prefix.
-fn build_cubeapi_snapshot_long_router(state: &AppState, auth_configured: bool) -> Router<AppState> {
-    Router::new()
-        .merge(build_long_sandbox_routes(state, auth_configured))
-        .merge(build_long_template_routes(state, auth_configured))
-        .merge(build_long_agenthub_routes(state, auth_configured))
 }
 
 fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
@@ -157,12 +118,7 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
     with_auth_and_rate_limit(routes, state, auth_configured)
 }
 
-/// Sandbox-rooted routes that must run on the long (240 s) budget.  Snapshot
-/// creation goes through `cubelet.CommitSandbox` and can run for tens of
-/// seconds on large rootfs.  Rollback shares the same synchronous-terminal
-/// contract on CubeMaster (`POST /cube/sandbox/{id}/rollback`) and can wait
-/// for cubelet to restore memory + rootfs from a snapshot, so it lives on
-/// the long router for the same reason as create / delete.
+/// Sandbox-rooted routes that must run on the long (240 s) budget.
 fn build_long_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
     let routes = Router::new()
         .route(
@@ -178,15 +134,6 @@ fn build_long_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<
 }
 
 fn build_template_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
-    // NOTE: `DELETE /templates/:templateID` is intentionally NOT routed here.
-    // It dispatches to either `SnapshotService::delete` (synchronous through
-    // CubeMaster, can wait for cubelet LVM/metadata cleanup) or
-    // `templates.delete_template` (also synchronous on the master side), both
-    // of which can legitimately exceed the 30 s default budget under load.
-    // It lives in `build_long_template_routes` instead, which is mounted on
-    // `snapshot_long_router` (240 s).  Keeping it here would re-introduce the
-    // 30 s "the API gave up but the master is still deleting" race we just
-    // closed off when we promoted the master path to a synchronous contract.
     let routes = Router::new()
         .route("/templates", get(templates::list_templates))
         .route("/templates", post(templates::create_template))
@@ -194,6 +141,10 @@ fn build_template_routes(state: &AppState, auth_configured: bool) -> Router<AppS
         .route(
             "/templates/compat/:templateID/adopt-baseline",
             post(templates::adopt_template_compat_baseline),
+        )
+        .route(
+            "/templates/aliases/:alias",
+            get(templates::get_template_by_alias),
         )
         .route("/templates/:templateID", get(templates::get_template))
         .route("/templates/:templateID", post(templates::rebuild_template))
@@ -214,116 +165,22 @@ fn build_template_routes(state: &AppState, auth_configured: bool) -> Router<AppS
     with_auth(routes, state, auth_configured)
 }
 
-/// Template/snapshot deletion lives on the long (240 s) router because it is
-/// fronted by CubeMaster's *synchronous* `DELETE /cube/snapshot/{id}` (or
-/// `/cube/template`), both of which can wait for cubelet to physically tear
-/// down LVM volumes and replica metadata before responding.
+/// Template/snapshot deletion lives on the long (240 s) router.
 fn build_long_template_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
     let routes = Router::new().route("/templates/:templateID", delete(templates::delete_template));
 
     with_auth(routes, state, auth_configured)
 }
 
-fn build_long_agenthub_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
+fn build_volume_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
     let routes = Router::new()
         .route(
-            "/agenthub/instances/:agentID/snapshots",
-            get(agenthub::list_agent_snapshots).post(agenthub::create_agent_snapshot),
+            "/volumes",
+            get(volumes::list_volumes).post(volumes::create_volume),
         )
         .route(
-            "/agenthub/instances/:agentID/snapshots/:snapshotID",
-            delete(agenthub::delete_agent_snapshot).patch(agenthub::update_agent_snapshot),
-        )
-        .route(
-            "/agenthub/instances/:agentID/rollback",
-            post(agenthub::rollback_agent_to_snapshot),
-        )
-        .route(
-            "/agenthub/instances/:agentID/recover",
-            post(agenthub::recover_agent_openclaw),
-        )
-        .route(
-            "/agenthub/instances/:agentID/clone",
-            post(agenthub::clone_agent_instance),
-        )
-        .route(
-            "/agenthub/instances/:agentID/publish-template",
-            post(agenthub::publish_agent_template),
-        );
-
-    with_auth(routes, state, auth_configured)
-}
-
-fn build_cluster_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
-    let routes = Router::new()
-        .route("/cluster/overview", get(cluster::cluster_overview))
-        .route("/cluster/versions", get(cluster::cluster_versions))
-        .route("/nodes", get(cluster::list_nodes))
-        .route("/nodes/:nodeID", get(cluster::get_node))
-        .route("/config", get(config::get_config))
-        .route("/store/meta", get(store::get_store_meta))
-        .route(
-            "/store/refresh",
-            axum::routing::post(store::refresh_store_meta),
-        );
-
-    with_auth(routes, state, auth_configured)
-}
-
-fn build_agenthub_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
-    let routes = Router::new()
-        .route(
-            "/agenthub/instances",
-            get(agenthub::list_agent_instances).post(agenthub::create_agent_instance),
-        )
-        .route("/agenthub/templates", get(agenthub::list_agent_templates))
-        .route(
-            "/agenthub/templates/market",
-            post(agenthub::register_market_agent_template),
-        )
-        .route(
-            "/agenthub/templates/:templateID",
-            patch(agenthub::update_agent_template).delete(agenthub::delete_agent_template),
-        )
-        .route(
-            "/agenthub/instances/:agentID",
-            delete(agenthub::delete_agent_instance),
-        )
-        .route(
-            "/agenthub/instances/:agentID/restart",
-            post(agenthub::restart_agent_openclaw),
-        )
-        .route(
-            "/agenthub/instances/:agentID/operations",
-            get(agenthub::list_agent_operations),
-        )
-        .route(
-            "/agenthub/instances/:agentID/gateway/health",
-            get(agenthub::get_agent_gateway_health),
-        )
-        .route(
-            "/agenthub/instances/:agentID/pause",
-            post(agenthub::pause_agent_openclaw),
-        )
-        .route(
-            "/agenthub/instances/:agentID/resume",
-            post(agenthub::resume_agent_openclaw),
-        )
-        .route(
-            "/agenthub/instances/:agentID/upgrade",
-            post(agenthub::upgrade_agent_openclaw),
-        )
-        .route(
-            "/agenthub/instances/:agentID/model",
-            put(agenthub::update_agent_model),
-        )
-        .route(
-            "/agenthub/instances/:agentID/wecom",
-            get(agenthub::get_agent_wecom_config).put(agenthub::update_agent_wecom_config),
-        )
-        .route(
-            "/agenthub/settings",
-            get(agenthub::get_agent_settings).put(agenthub::update_agent_settings),
+            "/volumes/:volumeID",
+            get(volumes::get_volume).delete(volumes::delete_volume),
         );
 
     with_auth(routes, state, auth_configured)
@@ -374,8 +231,14 @@ mod tests {
         logging::{arc, noop::NoopLogger},
         state::AppState,
     };
-    use axum::http::StatusCode;
+    use axum::{
+        extract::Json,
+        http::{header::RETRY_AFTER, StatusCode},
+        routing::delete,
+        Router,
+    };
     use axum_test::TestServer;
+    use serde_json::Value;
 
     async fn test_server() -> TestServer {
         let mut config = ServerConfig::default();
@@ -383,6 +246,80 @@ mod tests {
 
         let state = AppState::new(config, arc(NoopLogger)).await;
         TestServer::new(build_router(state)).expect("router should build")
+    }
+
+    #[tokio::test]
+    async fn delete_paused_sandbox_maps_business_errors_from_cubemaster() {
+        async fn delete_handler(Json(request): Json<Value>) -> Json<Value> {
+            let sandbox_id = request["sandbox_id"].as_str().unwrap_or_default();
+            let (ret_code, ret_msg) = match sandbox_id {
+                "sb-pausing" => (130490, "sandbox is pausing; retry DELETE after 2 seconds"),
+                "sb-resume-failed" => (
+                    130589,
+                    "failed to resume paused sandbox before delete: shim timeout; retry DELETE after 5 seconds",
+                ),
+                "sb-capacity" => (
+                    130409,
+                    "resume rejected by paused_resource_release_ratio policy: node is full",
+                ),
+                _ => panic!("unexpected sandbox id: {sandbox_id}"),
+            };
+
+            Json(serde_json::json!({
+                "requestID": "delete-request",
+                "sandbox_id": sandbox_id,
+                "ret": { "ret_code": ret_code, "ret_msg": ret_msg },
+            }))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock CubeMaster listener should bind");
+        let address = listener.local_addr().expect("mock CubeMaster address");
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/cube/sandbox", delete(delete_handler)),
+            )
+            .await
+            .expect("mock CubeMaster server should run");
+        });
+
+        let mut config = ServerConfig::default();
+        config.cubemaster_url = format!("http://{address}");
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        let server = TestServer::new(build_router(state)).expect("router should build");
+
+        for (sandbox_id, retry_after, message) in [
+            (
+                "sb-pausing",
+                "2",
+                "sandbox is pausing; retry DELETE after 2 seconds",
+            ),
+            (
+                "sb-resume-failed",
+                "5",
+                "failed to resume paused sandbox before delete: shim timeout; retry DELETE after 5 seconds",
+            ),
+        ] {
+            let response = server.delete(&format!("/sandboxes/{sandbox_id}")).await;
+
+            assert_eq!(response.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.header(RETRY_AFTER), retry_after);
+            let error: crate::models::ApiError = response.json();
+            assert_eq!(error.code, 503);
+            assert_eq!(error.message, message);
+        }
+
+        let response = server.delete("/sandboxes/sb-capacity").await;
+
+        assert_eq!(response.status_code(), StatusCode::CONFLICT);
+        let error: crate::models::ApiError = response.json();
+        assert_eq!(error.code, 409);
+        assert_eq!(
+            error.message,
+            "resume rejected by paused_resource_release_ratio policy: node is full"
+        );
     }
 
     #[tokio::test]
@@ -401,50 +338,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn serves_web_routes_under_cubeapi_prefix() {
+    async fn template_alias_route_is_mounted_before_template_id_route() {
         let server = test_server().await;
 
-        server.get("/cubeapi/v1/health").await.assert_status_ok();
+        let resp = server.get("/templates/aliases/stable-python").await;
         assert_ne!(
-            server.get("/cubeapi/v1/v2/sandboxes").await.status_code(),
-            StatusCode::NOT_FOUND
+            resp.status_code(),
+            StatusCode::NOT_FOUND,
+            "alias route should be mounted as its own route, not swallowed by /templates/:templateID"
         );
-        assert_ne!(
-            server.get("/cubeapi/v1/templates").await.status_code(),
-            StatusCode::NOT_FOUND
-        );
-        assert_ne!(
-            server
-                .get("/cubeapi/v1/cluster/overview")
-                .await
-                .status_code(),
-            StatusCode::NOT_FOUND
-        );
-    }
-
-    #[tokio::test]
-    async fn auth_login_route_is_rate_limited_without_auth_middleware() {
-        let mut config = ServerConfig::default();
-        config.cubemaster_url = "http://127.0.0.1:9".to_string();
-        config.rate_limit_per_sec = 1;
-        let state = AppState::new(config, arc(NoopLogger)).await;
-        let server = TestServer::new(build_router(state)).expect("router should build");
-        let login_body = serde_json::json!({
-            "username": "admin",
-            "password": "admin"
-        });
-
-        let first = server
-            .post("/cubeapi/v1/auth/login")
-            .json(&login_body)
-            .await;
-        assert_ne!(first.status_code(), StatusCode::TOO_MANY_REQUESTS);
-
-        server
-            .post("/cubeapi/v1/auth/login")
-            .json(&login_body)
-            .await
-            .assert_status(StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]
