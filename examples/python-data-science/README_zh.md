@@ -8,7 +8,7 @@
 2. **有状态代码解释器工作区**：第一轮分析在 `/tmp/cubesandbox-incident-rca/state` 写入中间状态。
 3. **快照 checkpoint 与 fork**：客户端为第一轮工作区创建 snapshot，从该 checkpoint 启动一个新沙箱，验证状态继承后在 fork 沙箱中执行第二轮分析。
 4. **Matplotlib 中文渲染**：镜像内安装 `fonts-wqy-zenhei`，分析脚本配置 Matplotlib 使用 `WenQuanYi Zen Hei`，避免中文标题和坐标轴显示成方块。
-5. **动态安装第三方包**：客户端在运行中的沙箱里执行 `pip3 install emoji humanize`，随后在第二轮分析中立即导入并参与报告生成。
+5. **动态安装第三方包**：客户端在运行中的沙箱里安装锁定版本的 `emoji` 和 `humanize`，随后在第二轮分析中立即导入并参与报告生成。
 6. **多文件输入和打包输出**：沙箱生成中文事故图、Markdown RCA 报告、SLO 汇总 CSV、部署关联 JSON、manifest JSON，并在沙箱内打成 tarball 供宿主机下载。
 
 ## 可复用模板模式
@@ -33,9 +33,10 @@ RCA 场景是一个具体示例，但模板模式可以复用于其他代码解�
 - `deployments.json`：用于关联分析的部署事件。
 - `alerts.csv`：从监控系统导出的告警时间线。
 - `runbook.json`：SLO 阈值和事故处理策略提示。
-- `round1_detect.py`: first-round anomaly detection program uploaded into the sandbox.
-- `round2_rca.py`: second-round RCA/report packaging program uploaded into the forked sandbox.
+- `round1_detect.py`：上传到沙箱中的第一轮异常检测程序。
+- `round2_rca.py`：上传到 fork 沙箱中的第二轮 RCA 与报告打包程序。
 - `test_data_science.py`：端到端客户端，负责创建沙箱、上传文件、执行两轮分析、下载结果包，并验证 manifest。
+- `test_data_science_unit.py`：覆盖沙箱 ID 解析与安全归档解压的离线测试。
 - `env.example`：本地 CubeSandbox API/proxy 配置和模板 ID 占位符。
 
 ## 步骤 1：构建镜像
@@ -69,6 +70,12 @@ cubemastercli tpl create-from-image \
 
 ```bash
 pip3 install -r requirements.txt
+```
+
+连接集群前可以先运行聚焦离线测试：
+
+```bash
+pytest -q test_data_science_unit.py
 ```
 
 复制 `.env` 并填入模板 ID：

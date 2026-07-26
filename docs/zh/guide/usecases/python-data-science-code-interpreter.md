@@ -31,7 +31,7 @@ AI Agent 越来越多地参与 SRE 和平台团队的事故排查。线上异常
 
 ## 基于 Cube Sandbox 的方案
 
-模板基于 `ghcr.io/tencentcloud/cubesandbox-base:latest` 构建，安装 Python 数据科学环境和 `fonts-wqy-zenhei` 中文字体。示例通过 E2B 兼容 SDK 启动沙箱，并上传：
+模板基于 digest 固定的 `ghcr.io/tencentcloud/cubesandbox-base:latest` 构建，安装锁定版本的 Python 数据科学环境和 `fonts-wqy-zenhei` 中文字体。示例通过 E2B 兼容 SDK 启动沙箱，并上传：
 
 - `incident_metrics.csv`：服务时间序列指标；
 - `deployments.json`：部署事件；

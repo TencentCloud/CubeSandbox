@@ -29,6 +29,7 @@ REMOTE_ARCHIVE = "/tmp/cubesandbox-incident-rca-results.tar.gz"
 LOCAL_OUTPUT_DIR = EXAMPLE_DIR / "output"
 LOCAL_ARCHIVE = LOCAL_OUTPUT_DIR / "cubesandbox-incident-rca-results.tar.gz"
 SNAPSHOT_NAME = "incident-rca-round1-checkpoint"
+DYNAMIC_PACKAGES = ("emoji==2.14.1", "humanize==4.11.0")
 SANDBOX_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 SANDBOX_ID_WITH_CLIENT_RE = re.compile(r"^([0-9a-f]{32})-[0-9a-f-]{36}$")
 
@@ -197,11 +198,12 @@ def main() -> None:
         print("Uploaded metrics, deployments, alerts, runbook, and two analysis rounds")
 
         print("\n--- Step 2: Dynamically install follow-up analysis dependencies ---")
-        install = sandbox.commands.run("pip3 install --no-cache-dir emoji humanize")
+        packages = " ".join(DYNAMIC_PACKAGES)
+        install = sandbox.commands.run(f"pip3 install --no-cache-dir {packages}")
         if install.exit_code != 0:
             print(install.stderr)
-            raise RuntimeError("Failed to install dynamic dependencies: emoji humanize")
-        print("[Success] Installed emoji and humanize inside the running sandbox")
+            raise RuntimeError(f"Failed to install dynamic dependencies: {packages}")
+        print(f"[Success] Installed {packages} inside the running sandbox")
 
         print("\n--- Step 3: Round 1 anomaly detection writes sandbox state ---")
         round1 = sandbox.commands.run(f"python3 {REMOTE_WORKDIR}/round1_detect.py")

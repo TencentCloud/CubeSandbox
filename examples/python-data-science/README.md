@@ -8,7 +8,7 @@ This example shows how to build and verify a reusable CubeSandbox template for A
 2. **Stateful code-interpreter workspace**: round 1 writes intermediate state under `/tmp/cubesandbox-incident-rca/state`.
 3. **Snapshot checkpoint and fork**: the client snapshots the round 1 workspace, starts a fresh sandbox from that checkpoint, verifies the inherited state, and runs round 2 in the forked sandbox.
 4. **Chinese Matplotlib rendering**: the image installs `fonts-wqy-zenhei` and the analysis script configures Matplotlib to use `WenQuanYi Zen Hei`, so Chinese chart titles and labels render correctly.
-5. **Dynamic package installation**: the client installs `emoji` and `humanize` with `pip3 install` inside the running sandbox, then imports them in the follow-up analysis round.
+5. **Dynamic package installation**: the client installs version-pinned `emoji` and `humanize` packages with `pip3 install` inside the running sandbox, then imports them in the follow-up analysis round.
 6. **Multi-file input and packaged output**: the sandbox generates a Chinese incident chart, Markdown RCA report, SLO summary CSV, deployment-correlation JSON, manifest JSON, and a downloadable tarball.
 
 ## Reusable Template Pattern
@@ -36,6 +36,7 @@ The runtime `pip3 install emoji humanize` step demonstrates the interactive code
 - `round1_detect.py`: first-round anomaly detection program uploaded into the sandbox.
 - `round2_rca.py`: second-round RCA/report packaging program uploaded into the forked sandbox.
 - `test_data_science.py`: end-to-end client that creates a sandbox, uploads files, runs two analysis rounds, downloads the result archive, and validates the manifest.
+- `test_data_science_unit.py`: offline coverage for sandbox ID parsing and safe archive extraction.
 - `env.example`: local CubeSandbox API/proxy settings and template ID placeholder.
 
 ## Step 1: Build the Image
@@ -69,6 +70,12 @@ Install client requirements:
 
 ```bash
 pip3 install -r requirements.txt
+```
+
+Run the focused offline tests before using a cluster:
+
+```bash
+pytest -q test_data_science_unit.py
 ```
 
 Create `.env` and set the template ID:

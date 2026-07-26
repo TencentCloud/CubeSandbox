@@ -1,4 +1,5 @@
-aiohttp>=3.9
+aiohttp==3.14.1
 e2b==1.0.1
-httpx>=0.27
+httpx==0.27.2
+pytest==8.3.5
 python-dotenv==1.0.1

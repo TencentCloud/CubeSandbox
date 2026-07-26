@@ -31,7 +31,7 @@ The `examples/python-data-science` template demonstrates this workflow inside Cu
 
 ## Solution with Cube Sandbox
 
-The template builds from `ghcr.io/tencentcloud/cubesandbox-base:latest` and installs a Python data-science stack plus `fonts-wqy-zenhei`. The demo starts a sandbox through the E2B-compatible SDK and uploads:
+The template builds from a digest-pinned `ghcr.io/tencentcloud/cubesandbox-base:latest` and installs a version-pinned Python data-science stack plus `fonts-wqy-zenhei`. The demo starts a sandbox through the E2B-compatible SDK and uploads:
 
 - `incident_metrics.csv`: time-series service metrics,
 - `deployments.json`: deployment events,
