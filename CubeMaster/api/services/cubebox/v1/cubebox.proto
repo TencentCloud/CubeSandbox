@@ -18,6 +18,18 @@ service CubeboxMgr {
   rpc List(ListCubeSandboxRequest) returns (ListCubeSandboxResponse);
   rpc Update(UpdateCubeSandboxRequest) returns (UpdateCubeSandboxResponse);
   rpc Exec(ExecCubeSandboxRequest) returns (ExecCubeSandboxResponse);
+  // Terminal opens a bidirectional interactive TTY session against a container
+  // inside a running cubebox.
+  //
+  // Exec above is unary and fire-and-forget: it starts the process with dummy
+  // IO and returns as soon as the process is started, so it cannot carry
+  // continuous stdin, incremental stdout, window resizes, TTY signal semantics
+  // or the asynchronous exit status. Terminal keeps a stream open for the whole
+  // session instead, which makes cubelet the single owner of the PTY lifecycle
+  // (create, resize, kill, wait, delete) and lets it reclaim the exec process
+  // when the caller goes away. Process spec derivation and the containerd
+  // Task.Exec execution path are shared with Exec; only the transport differs.
+  rpc Terminal(stream TerminalClientFrame) returns (stream TerminalServerFrame);
   // AppSnapshot creates a cubebox, makes an app snapshot, and destroys the cubebox.
   // Required annotations:
   //   - cube.master.appsnapshot.create: "true"
@@ -801,6 +813,120 @@ message ExecCubeSandboxResponse {
   string requestID     = 1;
   // Ret.
   cubelet.services.errorcode.v1.Ret ret   = 2;
+}
+
+// TerminalClientFrame is one message from the terminal caller to cubelet.
+// The first frame of a stream MUST carry `open`; any other leading frame is a
+// protocol violation and the stream is rejected.
+message TerminalClientFrame {
+  oneof frame {
+    // open starts the session. Only valid as the first frame.
+    TerminalOpen open = 1;
+    // stdin carries raw bytes typed by the user. Frames larger than the
+    // negotiated limit (64 KiB) are rejected.
+    bytes stdin = 2;
+    // resize reports a new terminal window size.
+    TerminalResize resize = 3;
+    // close asks cubelet to terminate the session with the given reason.
+    TerminalClose close = 4;
+  }
+}
+
+// TerminalOpen carries everything cubelet needs to resolve the target and
+// start a PTY. Cubelet re-resolves the target itself and never trusts a raw
+// runtime process id supplied by the caller.
+message TerminalOpen {
+  // requestID reqID, for cross-service log correlation.
+  string request_id = 1;
+  // ID of the sandbox that hosts the target container.
+  string sandbox_id = 2;
+  // ID of the container to attach to. Empty selects the sandbox's first
+  // (primary) container.
+  string container_id = 3;
+  // Initial terminal width in columns.
+  uint32 cols = 4;
+  // Initial terminal height in rows.
+  uint32 rows = 5;
+  // Session identifier minted by the caller, used as the audit key and as the
+  // basis of the containerd exec id.
+  string session_id = 6;
+  // resume, when set, re-attaches to a session that is still within its
+  // detached grace window instead of starting a new PTY.
+  TerminalResume resume = 7;
+}
+
+// TerminalResume re-attaches to an existing session after a transport failure.
+message TerminalResume {
+  // ID of the session to re-attach to.
+  string session_id = 1;
+  // Absolute stdout offset the client has already consumed. Cubelet replays
+  // from max(last_offset, buffer_start).
+  uint64 last_offset = 2;
+}
+
+// TerminalResize reports the terminal window size.
+message TerminalResize {
+  // Terminal width in columns.
+  uint32 cols = 1;
+  // Terminal height in rows.
+  uint32 rows = 2;
+}
+
+// TerminalClose terminates a session. Sent by either side.
+message TerminalClose {
+  // Stable close reason, e.g. "USER_CLOSED" / "IDLE_TIMEOUT" /
+  // "SANDBOX_TRANSITION". Never carries internal addresses or paths.
+  string reason = 1;
+}
+
+// TerminalServerFrame is one message from cubelet to the terminal caller.
+message TerminalServerFrame {
+  oneof frame {
+    // opened acknowledges that the PTY is running. Always the first frame.
+    TerminalOpened opened = 1;
+    // stdout carries terminal output. Under a TTY stderr is merged into it.
+    TerminalStdout stdout = 2;
+    // exit reports the shell's exit status.
+    TerminalExit exit = 3;
+    // error reports a stable failure code before or during the session.
+    TerminalError error = 4;
+    // close reports that cubelet terminated the session.
+    TerminalClose close = 5;
+  }
+}
+
+// TerminalOpened acknowledges a started session.
+message TerminalOpened {
+  // ID of the established session, echoed for correlation.
+  string session_id = 1;
+  // Absolute stdout offset the following stdout frames start from. Non-zero
+  // only when resuming.
+  uint64 replay_from = 2;
+  // True when the resume cursor fell behind the replay buffer and some output
+  // was dropped.
+  bool replay_truncated = 3;
+}
+
+// TerminalStdout carries a chunk of terminal output.
+message TerminalStdout {
+  // Raw output bytes.
+  bytes data = 1;
+  // Absolute offset of the first byte of `data` within the session's output
+  // stream, used as the resume cursor.
+  uint64 offset = 2;
+}
+
+// TerminalExit reports the exit status of the shell process.
+message TerminalExit {
+  // Process exit code.
+  int32 exit_code = 1;
+}
+
+// TerminalError reports a failure with a stable, client-safe code.
+message TerminalError {
+  // Stable error code, e.g. "TARGET_NOT_RUNNING" / "SHELL_NOT_FOUND" /
+  // "LIMIT_EXCEEDED". Never carries internal addresses, paths or credentials.
+  string code = 1;
 }
 
 // AppSnapshotRequest is the request for creating an app snapshot.
