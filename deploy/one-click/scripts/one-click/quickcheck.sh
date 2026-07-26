@@ -30,7 +30,7 @@ source "${SCRIPT_DIR}/common.sh"
 # units with no prior readiness wait, so the budget must cover the cumulative
 # time for units to activate, sockets to bind, health endpoints to serve, and
 # (on compute) the node to register with a remote cubemaster.
-QUICKCHECK_READY_TIMEOUT_DEFAULT=120
+QUICKCHECK_READY_TIMEOUT_DEFAULT=900
 QUICKCHECK_READY_INTERVAL_DEFAULT=2
 # Upper clamp so a typo/overflow cannot turn the budget into an effectively
 # infinite wait.

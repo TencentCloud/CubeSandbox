@@ -15,4 +15,4 @@ if command -v resolvectl >/dev/null 2>&1; then
   COREDNS_BIND_ADDR="${RESOLVED_COREDNS_BIND_ADDR}"
 fi
 
-wait_for_udp_port "${COREDNS_BIND_ADDR}" 53 30 1 || die "coredns udp port not ready"
+wait_for_udp_port "${COREDNS_BIND_ADDR}" 53 300 1 || die "coredns udp port not ready"

@@ -8,4 +8,4 @@ source "${SCRIPT_DIR}/common.sh"
 if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST:-}" ]]; then
   exit 0
 fi
-wait_for_container_health "${CUBE_SANDBOX_MYSQL_CONTAINER:-cube-sandbox-mysql}" 40 2 || die "mysql container not ready"
+wait_for_container_health "${CUBE_SANDBOX_MYSQL_CONTAINER:-cube-sandbox-mysql}" 240 2 || die "mysql container not ready"

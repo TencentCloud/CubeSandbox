@@ -19,7 +19,7 @@ Restart=on-failure
 RestartSec=2s
 # MySQL first-run init can take a while; graceful shutdown also needs room
 # (InnoDB checkpoint). Override short distro defaults explicitly.
-TimeoutStartSec=180s
+TimeoutStartSec=900s
 TimeoutStopSec=60s
 
 [Install]

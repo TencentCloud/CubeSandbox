@@ -18,7 +18,7 @@ ExecStop=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/redis-sto
 Restart=on-failure
 RestartSec=2s
 # Override short distro defaults explicitly.
-TimeoutStartSec=60s
+TimeoutStartSec=900s
 TimeoutStopSec=30s
 
 [Install]

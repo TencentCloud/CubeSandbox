@@ -8,4 +8,4 @@ source "${SCRIPT_DIR}/common.sh"
 if [[ -n "${CUBE_EXTERNAL_REDIS_HOST:-}" ]]; then
   exit 0
 fi
-wait_for_container_health "${CUBE_SANDBOX_REDIS_CONTAINER:-cube-sandbox-redis}" 40 2 || die "redis container not ready"
+wait_for_container_health "${CUBE_SANDBOX_REDIS_CONTAINER:-cube-sandbox-redis}" 240 2 || die "redis container not ready"
