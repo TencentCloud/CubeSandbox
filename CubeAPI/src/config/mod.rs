@@ -81,7 +81,7 @@ pub struct ServerConfig {
     /// Webhook configuration for event notifications.
     ///
     /// Loaded from `WEBHOOK_*` environment variables.
-    #[serde(skip)]
+    #[serde(default)]
     pub webhook: WebhookConfig,
 }
 
@@ -120,10 +120,11 @@ fn default_log_prefix() -> String {
 impl ServerConfig {
     pub fn from_env() -> anyhow::Result<Self> {
         let _ = dotenvy::dotenv();
-        let cfg = config::Config::builder()
+        let mut cfg: Self = config::Config::builder()
             .add_source(config::Environment::default().separator("__"))
             .build()?
             .try_deserialize()?;
+        cfg.webhook = WebhookConfig::from_env();
         Ok(cfg)
     }
 }
