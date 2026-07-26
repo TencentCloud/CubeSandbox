@@ -5,6 +5,7 @@
 use crate::cubemaster::CubeMasterClient;
 use crate::logging::ArcLogger;
 use crate::services::AppServices;
+use crate::webhook::WebhookDispatcher;
 use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -28,6 +29,9 @@ pub struct AppState {
 
     /// Server config snapshot.
     pub config: Arc<crate::config::ServerConfig>,
+
+    /// Webhook event dispatcher (None when no endpoints configured).
+    pub webhook: Option<WebhookDispatcher>,
 }
 
 impl AppState {
@@ -48,12 +52,15 @@ impl AppState {
         let cubemaster = CubeMasterClient::new(config.cubemaster_url.clone(), http_client.clone());
         let services = AppServices::new(&config, cubemaster);
 
+        let webhook = WebhookDispatcher::new(config.webhook.clone(), http_client.clone());
+
         Self {
             rate_limiter,
             http_client,
             services,
             logger,
             config: Arc::new(config),
+            webhook,
         }
     }
 }

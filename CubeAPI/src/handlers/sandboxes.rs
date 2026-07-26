@@ -185,6 +185,10 @@ pub async fn create_sandbox(
         )
         .await;
 
+    if let Some(ref webhook) = state.webhook {
+        webhook.dispatch("sandbox.created", &sandbox_id, Some(template_id.clone()));
+    }
+
     Ok((StatusCode::CREATED, Json(created)))
 }
 
@@ -229,6 +233,11 @@ pub async fn kill_sandbox(
         .logger
         .log(LogEvent::new(LogLevel::Info, "sandbox.deleted").field("sandbox_id", &sandbox_id))
         .await;
+
+    if let Some(ref webhook) = state.webhook {
+        webhook.dispatch("sandbox.deleted", &sandbox_id, None);
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -267,6 +276,11 @@ pub async fn pause_sandbox(
         .logger
         .log(LogEvent::new(LogLevel::Info, "sandbox.paused").field("sandbox_id", &sandbox_id))
         .await;
+
+    if let Some(ref webhook) = state.webhook {
+        webhook.dispatch("sandbox.paused", &sandbox_id, None);
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -312,6 +326,10 @@ pub async fn resume_sandbox(
         .logger
         .log(LogEvent::new(LogLevel::Info, "sandbox.resumed").field("sandbox_id", &sandbox_id))
         .await;
+
+    if let Some(ref webhook) = state.webhook {
+        webhook.dispatch("sandbox.resumed", &sandbox_id, None);
+    }
 
     Ok((StatusCode::CREATED, Json(sandbox)))
 }

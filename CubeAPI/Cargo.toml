@@ -77,6 +77,11 @@ validator = { version = "0.16", features = ["derive"] }
 # ── Async trait support ───────────────────────────────────────────────────
 async-trait = "0.1"
 
+# ── Webhook signing ───────────────────────────────────────────────────────
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+
 # ── CLI argument parsing ──────────────────────────────────────────────────
 clap = { version = "4", features = ["derive"] }
 utoipa = { version = "5.4.0", features = ["chrono", "uuid", "yaml"] }

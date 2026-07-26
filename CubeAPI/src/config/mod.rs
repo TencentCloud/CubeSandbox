@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+use crate::webhook::WebhookConfig;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -76,6 +77,12 @@ pub struct ServerConfig {
     /// Env var: CUBE_API_KEY
     #[serde(default)]
     pub cube_api_key: Option<String>,
+
+    /// Webhook configuration for event notifications.
+    ///
+    /// Loaded from `WEBHOOK_*` environment variables.
+    #[serde(skip)]
+    pub webhook: WebhookConfig,
 }
 
 fn default_bind() -> String {
@@ -135,6 +142,7 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             cube_api_key: std::env::var("CUBE_API_KEY").ok().filter(|s| !s.is_empty()),
+            webhook: WebhookConfig::from_env(),
         }
     }
 }
