@@ -4,6 +4,9 @@
 # Go build artifacts
 CubeOps/bin/
 
+# Java compilation artifacts (e.g. running javac locally in examples/)
+*.class
+
 # Go workspace (local-only, do not commit)
 /go.work
 /go.work.sum

@@ -45,6 +45,9 @@ Tests use only JDK built-in APIs (`java.net.http.HttpClient`,
 The concurrent-request test fires 32 simultaneous GET requests to verify
 the thread-pool executor handles parallel load correctly.
 
+`javac` leaves `*.class` files in this directory; they are covered by the
+repo's `.gitignore`, or you can remove them afterwards with `rm -f *.class`.
+
 ## Run & verify locally
 
 ```bash

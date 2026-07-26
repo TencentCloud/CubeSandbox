@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -40,9 +42,14 @@ func main() {
 func configuredPort() string {
 	port := os.Getenv("APP_PORT")
 	if port == "" {
-		port = "8080"
+		return "8080"
 	}
-	return port
+	// Mirror the Java template: accept only a numeric port in 1–65535,
+	// fall back to 8080 otherwise.
+	if n, err := strconv.Atoi(strings.TrimSpace(port)); err == nil && n > 0 && n <= 65535 {
+		return strconv.Itoa(n)
+	}
+	return "8080"
 }
 
 func handleRootForPort(w http.ResponseWriter, r *http.Request, port string) {

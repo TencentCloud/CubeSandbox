@@ -61,6 +61,16 @@ func TestHandleRootDefaultsToPort8080(t *testing.T) {
 	}
 }
 
+func TestConfiguredPortFallsBackOnInvalidValue(t *testing.T) {
+	for _, value := range []string{"abc", "0", "65536", "-1"} {
+		t.Setenv("APP_PORT", value)
+
+		if port := configuredPort(); port != "8080" {
+			t.Errorf("configuredPort() with APP_PORT=%q = %q, want %q", value, port, "8080")
+		}
+	}
+}
+
 func TestHandleHealthReturnsOKWithEmptyBody(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
