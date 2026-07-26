@@ -66,6 +66,12 @@ cubemastercli tpl create-from-image \
 pip3 install -r requirements.txt
 ```
 
+运行 20 个聚焦 Spring Boot 与任务状态的测试：
+
+```bash
+mvn test
+```
+
 创建 `.env` 并填写模板 ID：
 
 ```bash

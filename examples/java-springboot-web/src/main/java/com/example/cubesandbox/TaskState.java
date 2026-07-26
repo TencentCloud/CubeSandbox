@@ -149,9 +149,11 @@ public class TaskState {
     }
 
     private void writeTasks(Map<String, Map<String, Object>> tasks) {
+        Path tempFile = null;
+        ResponseStatusException failure = null;
         try {
             Files.createDirectories(stateDir);
-            Path tempFile = Files.createTempFile(stateDir, "tasks", ".json.tmp");
+            tempFile = Files.createTempFile(stateDir, "tasks", ".json.tmp");
             objectMapper.writerWithDefaultPrettyPrinter().writeValue(tempFile.toFile(), tasks);
             try {
                 stateFileMover.move(
@@ -163,7 +165,24 @@ public class TaskState {
                 stateFileMover.move(tempFile, stateFile, StandardCopyOption.REPLACE_EXISTING);
             }
         } catch (IOException e) {
-            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to write task state", e);
+            failure =
+                    new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to write task state", e);
+            throw failure;
+        } finally {
+            if (tempFile != null) {
+                try {
+                    Files.deleteIfExists(tempFile);
+                } catch (IOException cleanupError) {
+                    if (failure != null) {
+                        failure.addSuppressed(cleanupError);
+                    } else {
+                        throw new ResponseStatusException(
+                                HttpStatus.INTERNAL_SERVER_ERROR,
+                                "Failed to clean up temporary task state",
+                                cleanupError);
+                    }
+                }
+            }
         }
     }
 

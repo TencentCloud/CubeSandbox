@@ -78,6 +78,12 @@ Install the local client dependencies:
 pip3 install -r requirements.txt
 ```
 
+Run the 20 focused Spring Boot and task-state tests:
+
+```bash
+mvn test
+```
+
 Create `.env` and set the template ID:
 
 ```bash

@@ -96,6 +96,13 @@ def _run_checked(sandbox, command: str, description: str) -> str:
     return result.stdout
 
 
+def _maven_cache_check_command() -> str:
+    return (
+        f"test -d {REMOTE_MAVEN_REPO} && "
+        f"find -L {REMOTE_MAVEN_REPO} -type f -print -quit | grep ."
+    )
+
+
 def _write_sandbox_text_file(sandbox, remote_path: str, local_path: Path) -> None:
     sandbox.files.write(remote_path, local_path.read_text(encoding="utf-8"))
 
@@ -253,7 +260,7 @@ def _run_workflow(client: httpx.Client, sandbox_class, template_id: str, api_url
 
         cache_check = _run_checked(
             sandbox,
-            f"test -d {REMOTE_MAVEN_REPO} && find {REMOTE_MAVEN_REPO} -type f -print -quit | grep .",
+            _maven_cache_check_command(),
             "verify Maven cache",
         ).strip()
         artifact_check = _run_checked(
@@ -304,7 +311,7 @@ def _run_workflow(client: httpx.Client, sandbox_class, template_id: str, api_url
             print("\n--- Step 6: Verify cache, jar, and state inheritance in the fork ---")
             _run_checked(
                 forked_sandbox,
-                f"test -d {REMOTE_MAVEN_REPO} && find {REMOTE_MAVEN_REPO} -type f -print -quit | grep .",
+                _maven_cache_check_command(),
                 "verify forked Maven cache",
             )
             _run_checked(

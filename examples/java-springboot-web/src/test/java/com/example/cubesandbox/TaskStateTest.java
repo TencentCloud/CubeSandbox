@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -191,6 +192,26 @@ class TaskStateTest {
 
         assertThat(attemptedAtomicMove).isTrue();
         assertThat(readTasks()).containsKey((String) created.get("id"));
+    }
+
+    @Test
+    void createTaskCleansUpTemporaryFileWhenMoveFails() throws Exception {
+        TaskState taskState = TaskState.forStateDir(
+                objectMapper,
+                tempDir,
+                (source, target, options) -> {
+                    throw new IOException("forced move failure");
+                });
+
+        assertThatThrownBy(() -> taskState.createTask(new CreateTaskRequest("failed write", null)))
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        ex -> assertThat(ex.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR));
+
+        try (var files = Files.list(tempDir)) {
+            assertThat(files.map(path -> path.getFileName().toString()))
+                    .noneMatch(name -> name.endsWith(".json.tmp"));
+        }
     }
 
     @Test
