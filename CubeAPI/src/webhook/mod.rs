@@ -320,7 +320,9 @@ async fn deliver_with_retry(
 
     for attempt in 0..=retry_max {
         if attempt > 0 {
-            let backoff_ms = retry_base_ms * (1u64 << (attempt - 1));
+            let backoff_ms = retry_base_ms
+                .saturating_mul(1u64 << (attempt - 1).min(31))
+                .min(60_000); // cap at 1 minute
             tracing::warn!(
                 endpoint = %endpoint,
                 attempt = attempt,
