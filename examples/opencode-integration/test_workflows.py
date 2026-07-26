@@ -288,6 +288,7 @@ class NetworkWorkflowTest(WorkflowTestCase):
             patch.object(network_policy, "load_local_dotenv"),
             patch.object(network_policy, "parse_args", return_value=args or network_args()),
             patch.object(network_policy, "required", return_value="configured"),
+            patch.object(network_policy, "require_native_sdk_env"),
             patch.object(network_policy, "opencode_model", return_value="deepseek/deepseek-chat"),
             patch.object(network_policy, "opencode_provider", return_value="deepseek"),
             patch.object(network_policy, "require_provider_key", return_value="real-secret"),
@@ -353,6 +354,7 @@ class CheckpointForkWorkflowTest(WorkflowTestCase):
             patch.object(checkpoint_fork_opencode, "load_local_dotenv"),
             patch.object(checkpoint_fork_opencode, "parse_args", return_value=checkpoint_args()),
             patch.object(checkpoint_fork_opencode, "required", return_value="configured"),
+            patch.object(checkpoint_fork_opencode, "require_native_sdk_env"),
             patch.object(
                 checkpoint_fork_opencode,
                 "opencode_model",
@@ -366,15 +368,23 @@ class CheckpointForkWorkflowTest(WorkflowTestCase):
             ),
             patch.object(
                 checkpoint_fork_opencode,
+                "opencode_llm_host",
+                return_value="api.deepseek.com",
+            ),
+            patch.object(
+                checkpoint_fork_opencode,
                 "provider_key_name",
                 return_value="DEEPSEEK_API_KEY",
             ),
             patch.object(
                 checkpoint_fork_opencode,
                 "build_opencode_env",
-                return_value={"DEEPSEEK_API_KEY": "real-secret"},
+                return_value={},
             ),
-            patch.object(checkpoint_fork_opencode, "warn_direct_secret_env"),
+            patch.object(checkpoint_fork_opencode, "build_rules", return_value=["rule"]),
+            patch.object(checkpoint_fork_opencode, "verify_key_not_in_vm"),
+            patch.object(checkpoint_fork_opencode, "verify_placeholder_env"),
+            patch.object(checkpoint_fork_opencode, "verify_non_llm_blocked"),
             patch.object(
                 checkpoint_fork_opencode,
                 "create_sandbox",
@@ -395,12 +405,37 @@ class CheckpointForkWorkflowTest(WorkflowTestCase):
         with ExitStack() as stack:
             entered = enter_patches(stack, patches)
             self.assertEqual(checkpoint_fork_opencode.main(), 0)
-        create = entered[9]
-        delete = entered[10]
+        create = entered[14]
+        delete = entered[15]
         self.assertEqual(source.snapshot_calls, 1)
         self.assertEqual(
             create.call_args_list,
-            [call("tpl-test", 1800), call("snap-test", 1800)],
+            [
+                call("tpl-test", ["rule"], 1800),
+                call("snap-test", ["rule"], 1800),
+            ],
+        )
+        entered[9].assert_called_once_with(include_secrets=False)
+        secure_env = {
+            "DEEPSEEK_API_KEY": checkpoint_fork_opencode.PLACEHOLDER_KEY
+        }
+        self.assertEqual(
+            entered[11].call_args_list,
+            [
+                call(source, "DEEPSEEK_API_KEY"),
+                call(forked, "DEEPSEEK_API_KEY"),
+            ],
+        )
+        self.assertEqual(
+            entered[12].call_args_list,
+            [
+                call(source, "DEEPSEEK_API_KEY", secure_env),
+                call(forked, "DEEPSEEK_API_KEY", secure_env),
+            ],
+        )
+        self.assertEqual(
+            entered[13].call_args_list,
+            [call(source), call(forked)],
         )
         self.assertEqual(source.kill_calls, 1)
         self.assertEqual(forked.kill_calls, 1)
@@ -419,9 +454,28 @@ class CheckpointForkWorkflowTest(WorkflowTestCase):
             entered = enter_patches(stack, patches)
             with self.assertRaisesRegex(RuntimeError, "fork create failed"):
                 checkpoint_fork_opencode.main()
-        delete = entered[10]
+        delete = entered[15]
         self.assertEqual(source.kill_calls, 1)
         delete.assert_called_once_with("snap-test")
+
+    def test_reused_source_id_rejects_fork_and_cleans_everything(self) -> None:
+        source = FakeSandbox(
+            "same-sb",
+            FakeResult(),
+            FakeResult(),
+            FakeResult(stdout="OPENCODE_CHECKPOINT_READY"),
+        )
+        forked = FakeSandbox("same-sb")
+        patches = self.common_patches(source, forked)
+
+        with ExitStack() as stack:
+            entered = enter_patches(stack, patches)
+            with self.assertRaisesRegex(RuntimeError, "reused the source sandbox ID"):
+                checkpoint_fork_opencode.main()
+
+        self.assertEqual(source.kill_calls, 1)
+        self.assertEqual(forked.kill_calls, 1)
+        entered[15].assert_called_once_with("snap-test")
 
 
 if __name__ == "__main__":

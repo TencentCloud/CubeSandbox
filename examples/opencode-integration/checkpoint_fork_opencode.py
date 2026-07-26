@@ -11,18 +11,27 @@ import os
 import shlex
 import sys
 
-from cubesandbox import Sandbox
+from cubesandbox import Rule, Sandbox
 
 from _opencode_common import (
     ensure_success,
     run_command,
     sandbox_identifier,
-    warn_direct_secret_env,
+)
+from egress_policy import (
+    PLACEHOLDER_KEY,
+    build_rules,
+    create_sandbox as create_restricted_sandbox,
+    require_native_sdk_env,
+    verify_key_not_in_vm,
+    verify_non_llm_blocked,
+    verify_placeholder_env,
 )
 from env_utils import (
     build_opencode_env,
     int_env,
     load_local_dotenv,
+    opencode_llm_host,
     opencode_command,
     opencode_config_json,
     opencode_model,
@@ -69,8 +78,16 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def create_sandbox(template_id: str, timeout: int) -> Sandbox:
-    return Sandbox.create(template=template_id, timeout=timeout)
+def create_sandbox(template_id: str, rules: list[Rule], timeout: int) -> Sandbox:
+    return create_restricted_sandbox(template_id, rules, timeout)
+
+
+def verify_restricted_environment(
+    sandbox: Sandbox, key_name: str, envs: dict[str, str]
+) -> None:
+    verify_key_not_in_vm(sandbox, key_name)
+    verify_placeholder_env(sandbox, key_name, envs)
+    verify_non_llm_blocked(sandbox)
 
 
 def seed_project(sandbox: Sandbox, workspace: str) -> None:
@@ -166,20 +183,29 @@ def main() -> int:
     args = parse_args()
 
     template_id = args.template or required("CUBE_TEMPLATE_ID")
+    require_native_sdk_env()
     model = opencode_model()
     provider = opencode_provider(model)
-    require_provider_key(provider)
+    secret = require_provider_key(provider)
+    host = opencode_llm_host(provider)
+    if not host:
+        raise SystemExit("Set OPENCODE_LLM_HOST or OPENCODE_BASE_URL for this provider.")
+
     key_name = provider_key_name(provider)
-    warn_direct_secret_env(key_name)
-    envs = build_opencode_env(include_secrets=True)
+    envs = build_opencode_env(include_secrets=False)
+    envs[key_name] = PLACEHOLDER_KEY
+    rules = build_rules(provider, host, secret)
 
     source = None
     forked = None
     snapshot_id = None
+    source_id = None
     try:
         print(f"Creating source sandbox from template: {template_id}")
-        source = create_sandbox(template_id, args.sandbox_timeout)
-        print(f"Source sandbox ready: {sandbox_identifier(source)}")
+        source = create_sandbox(template_id, rules, args.sandbox_timeout)
+        source_id = sandbox_identifier(source)
+        print(f"Source sandbox ready: {source_id}")
+        verify_restricted_environment(source, key_name, envs)
 
         seed_project(source, args.workspace)
 
@@ -200,8 +226,12 @@ def main() -> int:
         snapshot_id = snapshot.snapshot_id
         print(f"Checkpoint created: {snapshot_id}")
 
-        forked = create_sandbox(snapshot_id, args.sandbox_timeout)
-        print(f"Forked sandbox ready: {sandbox_identifier(forked)}")
+        forked = create_sandbox(snapshot_id, rules, args.sandbox_timeout)
+        forked_id = sandbox_identifier(forked)
+        if forked_id == source_id:
+            raise RuntimeError("Forked sandbox unexpectedly reused the source sandbox ID")
+        print(f"Forked sandbox ready: {forked_id}")
+        verify_restricted_environment(forked, key_name, envs)
         verify_checkpoint_state(forked, args.workspace)
 
         print("\n=== Turn 2: continue inside the fork ===\n")

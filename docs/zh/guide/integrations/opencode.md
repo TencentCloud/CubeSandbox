@@ -24,7 +24,7 @@ lang: zh-CN
 |---|---|
 | OpenCode CLI | 通过 `OPENCODE_VERSION` 固定的 `opencode-ai` 1.17.13 |
 | Node.js | Node.js 官方 22.23.1 归档，经过 SHA-256 校验 |
-| CubeSandbox 基础镜像 | `ghcr.io/tencentcloud/cubesandbox-base:2026.16` |
+| CubeSandbox 基础镜像 | `ghcr.io/tencentcloud/cubesandbox-base:2026.16`，通过 digest 固定 |
 | 宿主端 SDK | `e2b==2.7.0`、`cubesandbox==0.3.0` |
 | CubeSandbox 平台 | pause/resume 需要 `>=0.3.0`；header 注入需要 CubeEgress |
 
@@ -107,7 +107,8 @@ OPENAI_API_KEY=<provider-key>
 如果使用本仓库的 `dev-env/` VM 验证，设置 `CUBE_DEV_SIDECAR=1`，让宿主端 SDK
 通过 `examples/e2b-dev-sidecar` 转发 sandbox 流量。
 
-`network_policy.py` 使用原生 `cubesandbox` SDK。用 `dev-env/` 跑这个脚本时，还需要设置：
+`network_policy.py` 和 `checkpoint_fork_opencode.py` 使用原生 `cubesandbox` SDK。
+用 `dev-env/` 跑任一脚本时，还需要设置：
 
 ```bash
 CUBE_API_URL=http://127.0.0.1:13000
@@ -147,8 +148,9 @@ python3 checkpoint_fork_opencode.py
 该流程在 source sandbox 中运行 OpenCode，在第一轮后创建显式 snapshot，使用
 `template=snapshot_id` 启动新 sandbox，并在 fork 中继续同一个 OpenCode 会话。
 它证明 workspace 和 OpenCode 状态已继承、source 与 fork 相互独立，最后删除临时
-snapshot。该 checkpoint/fork demo 使用与基础 run/resume demo 相同的直接 provider
-环境变量方式；默认拒绝出网与 CubeEgress 凭证注入路径由 `network_policy.py` 验证。
+snapshot。两个 sandbox 都使用默认拒绝出网与同一条 LLM host 放行规则；真实 provider
+凭证由 CubeEgress 在链路上注入。脚本会验证两次 OpenCode 命令环境中都只有占位 key，
+且无关 host 始终被阻断。
 
 ### 7. 限制出网并注入凭证
 
@@ -225,7 +227,7 @@ Rule(
 在 `examples/opencode-integration` 下执行：
 
 ```bash
-python3 -m py_compile env_utils.py _opencode_common.py run_opencode.py resume_opencode.py checkpoint_fork_opencode.py network_policy.py
+python3 -m py_compile env_utils.py _opencode_common.py egress_policy.py run_opencode.py resume_opencode.py checkpoint_fork_opencode.py network_policy.py
 python3 -m unittest discover . -p 'test_*.py'
 bash -n build-template.sh
 docker build --platform linux/amd64 -t opencode-cube:verify .

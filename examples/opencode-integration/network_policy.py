@@ -11,9 +11,18 @@ import os
 import shlex
 import sys
 
-from cubesandbox import Action, Inject, Match, Rule, Sandbox
+from cubesandbox import Sandbox
 
 from _opencode_common import ensure_success, run_command, sandbox_identifier
+from egress_policy import (
+    PLACEHOLDER_KEY,
+    build_rules,
+    create_sandbox,
+    require_native_sdk_env,
+    verify_key_not_in_vm,
+    verify_non_llm_blocked,
+    verify_placeholder_env,
+)
 from env_utils import (
     build_opencode_env,
     int_env,
@@ -24,14 +33,12 @@ from env_utils import (
     opencode_model,
     opencode_provider,
     opencode_workspace,
-    provider_inject,
     provider_key_name,
     require_provider_key,
     required,
     shell_join,
 )
 
-PLACEHOLDER_KEY = "cube-egress-managed-placeholder"
 DEFAULT_PROMPT = (
     "Create {workspace}/egress_check.md containing exactly OPENCODE_EGRESS_OK. "
     "Use the write tool or shell redirection, then stop only after the file exists."
@@ -64,20 +71,6 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def build_rules(provider: str, host: str, secret: str) -> list[Rule]:
-    return [
-        Rule(
-            name=f"allow_{provider}_llm",
-            match=Match(scheme="https", sni=host, host=host),
-            action=Action(
-                allow=True,
-                audit="metadata",
-                inject=[Inject(**spec) for spec in provider_inject(provider, secret)],
-            ),
-        )
-    ]
-
-
 def seed_workspace(sandbox: Sandbox, workspace: str) -> None:
     quoted_workspace = shlex.quote(workspace)
     command = f"""mkdir -p {quoted_workspace}
@@ -87,57 +80,6 @@ EOF
 """
     result = run_command(sandbox, command, timeout=60)
     ensure_success(result, "seed egress workspace")
-
-
-def create_sandbox(template_id: str, rules: list[Rule], timeout: int) -> Sandbox:
-    return Sandbox.create(
-        template=template_id,
-        allow_internet_access=False,
-        network={"rules": rules},
-        timeout=timeout,
-    )
-
-
-def verify_key_not_in_vm(sandbox: Sandbox, key_name: str) -> None:
-    command = f"printenv {shlex.quote(key_name)} || echo '<unset>'"
-    result = run_command(sandbox, command, timeout=30)
-    ensure_success(result, "read provider key inside sandbox")
-    value = getattr(result, "stdout", "").strip()
-    if value != "<unset>":
-        raise SystemExit(
-            f"Security check failed: {key_name} exists in the sandbox's global environment."
-        )
-    print(f"In-VM global {key_name}: '<unset>' (real secret stays in CubeEgress)")
-
-
-def verify_placeholder_env(
-    sandbox: Sandbox, key_name: str, envs: dict[str, str]
-) -> None:
-    command = f"printenv {shlex.quote(key_name)}"
-    result = run_command(sandbox, command, envs=envs, timeout=30)
-    ensure_success(result, "verify provider placeholder inside the agent command")
-    value = getattr(result, "stdout", "").strip()
-    if value != PLACEHOLDER_KEY:
-        raise SystemExit(
-            f"Security check failed: {key_name} was not replaced by the CubeEgress placeholder."
-        )
-    print(f"Agent command {key_name}: '<placeholder>'")
-
-
-def verify_non_llm_blocked(sandbox: Sandbox) -> None:
-    command = (
-        "curl -s -o /dev/null -w '%{http_code}' --max-time 8 https://example.com "
-        "|| echo blocked"
-    )
-    result = run_command(sandbox, command, timeout=30)
-    status = getattr(result, "stdout", "").strip()
-    blocked = status == "403" or status.endswith("blocked")
-    if not blocked:
-        raise SystemExit(
-            "Security check failed: non-LLM host example.com was reachable "
-            f"(curl status {status or '<empty>'})."
-        )
-    print(f"Non-LLM host example.com: {status or 'blocked'} (blocked as expected)")
 
 
 def verify_agent_output(sandbox: Sandbox, workspace: str) -> None:
@@ -160,11 +102,6 @@ def print_command_output(result) -> None:
         print(stdout)
     if stderr:
         print(stderr, file=sys.stderr)
-
-
-def require_native_sdk_env() -> None:
-    required("CUBE_API_URL")
-    required("CUBE_PROXY_NODE_IP")
 
 
 def main() -> int:

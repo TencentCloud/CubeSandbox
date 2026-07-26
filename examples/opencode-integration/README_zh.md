@@ -16,6 +16,7 @@ opencode-integration/
 |-- build-template.sh       # 打印 docker/cubemastercli 命令
 |-- env_utils.py            # provider、model、env、命令构造 helper
 |-- _opencode_common.py     # 沙箱命令 helper
+|-- egress_policy.py        # 共享的默认拒绝出网与 CubeEgress helper
 |-- run_opencode.py         # 一次性编码任务 demo
 |-- resume_opencode.py      # pause/resume 会话保持 demo
 |-- checkpoint_fork_opencode.py # checkpoint、fork、继续任务 demo
@@ -44,7 +45,7 @@ docker build --platform linux/amd64 -t <registry>/opencode-cube:latest .
 docker push <registry>/opencode-cube:latest
 ```
 
-镜像基于 `ghcr.io/tencentcloud/cubesandbox-base:2026.16`，安装经过 SHA-256
+镜像基于 digest 固定的 `ghcr.io/tencentcloud/cubesandbox-base:2026.16`，安装经过 SHA-256
 校验的 Node.js 22.23.1 和 OpenCode 1.17.13。
 
 ## 2. 注册 CubeSandbox 模板
@@ -76,8 +77,8 @@ pip install -r requirements.txt
 | `CUBE_TEMPLATE_ID` | 第 2 步创建的模板 ID |
 | `OPENCODE_MODEL` | `provider/model` 形式的 OpenCode 模型 |
 | `<PROVIDER>_API_KEY` | 与 provider 前缀匹配的 API key |
-| `CUBE_API_URL` | `network_policy.py` 必填；原生 CubeSandbox SDK 的 CubeAPI 地址 |
-| `CUBE_PROXY_NODE_IP` | `network_policy.py` 必填；命令流使用的 CubeProxy IP |
+| `CUBE_API_URL` | 受限出网和 checkpoint/fork 流程必填；原生 CubeSandbox SDK 的 CubeAPI 地址 |
+| `CUBE_PROXY_NODE_IP` | 受限出网和 checkpoint/fork 流程必填；命令流使用的 CubeProxy IP |
 
 如需使用 OpenAI-compatible 自定义端点，设置 `OPENCODE_BASE_URL`。如果未设置，
 脚本也接受 provider-specific 变量，例如 `OPENAI_BASE_URL`。脚本会在沙箱
@@ -91,9 +92,9 @@ CUBE_DEV_SIDECAR=1
 
 sidecar 会 patch E2B SDK，让 sandbox 流量走 dev-env 的 CubeProxy 端口转发。
 
-`network_policy.py` 使用原生 `cubesandbox` SDK，而不是 E2B SDK，所以会读取
-`CUBE_API_URL` 和 `CUBE_PROXY_NODE_IP`。用 `dev-env/` 跑这个脚本时，使用下面的
-原生 SDK API 和代理端口转发变量：
+`network_policy.py` 和 `checkpoint_fork_opencode.py` 使用原生 `cubesandbox`
+SDK，而不是 E2B SDK，所以会读取 `CUBE_API_URL` 和 `CUBE_PROXY_NODE_IP`。
+用 `dev-env/` 跑任一脚本时，使用下面的原生 SDK API 和代理端口转发变量：
 
 ```bash
 CUBE_API_URL=http://127.0.0.1:13000
@@ -131,9 +132,9 @@ python3 checkpoint_fork_opencode.py
 该流程在 source sandbox 中运行 OpenCode，创建显式 checkpoint，再从该 checkpoint
 启动一个新 sandbox，并在 fork 中继续同一个 OpenCode 会话。脚本验证 workspace 和
 OpenCode 状态已继承、sandbox ID 相互独立、测试通过且结果包含 `OPENCODE_FORK_OK`，
-最后清理两个 sandbox 和临时 checkpoint。它使用与 `run_opencode.py`、
-`resume_opencode.py` 相同的直接 provider 环境变量方式；默认拒绝出网与 CubeEgress
-凭证注入路径由 `network_policy.py` 验证。
+最后清理两个 sandbox 和临时 checkpoint。source 与 fork 都使用默认拒绝出网和同一条
+LLM host 放行规则；真实 provider key 由 CubeEgress 在链路上注入，OpenCode 命令环境
+中只有占位值。脚本会在两个 sandbox 中分别验证 secret 与网络策略不变量。
 
 ## 7. 受限出网模式
 
@@ -161,7 +162,7 @@ python3 network_policy.py --skip-agent
 ## 验证
 
 ```bash
-python3 -m py_compile env_utils.py _opencode_common.py run_opencode.py resume_opencode.py checkpoint_fork_opencode.py network_policy.py
+python3 -m py_compile env_utils.py _opencode_common.py egress_policy.py run_opencode.py resume_opencode.py checkpoint_fork_opencode.py network_policy.py
 python3 -m unittest discover . -p 'test_*.py'
 bash -n build-template.sh
 ```

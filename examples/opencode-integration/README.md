@@ -16,6 +16,7 @@ opencode-integration/
 |-- build-template.sh       # Prints docker/cubemastercli commands
 |-- env_utils.py            # Provider, model, env, and command helpers
 |-- _opencode_common.py     # Sandbox command helpers
+|-- egress_policy.py        # Shared default-deny CubeEgress helpers
 |-- run_opencode.py         # One-shot coding-agent demo
 |-- resume_opencode.py      # pause/resume session persistence demo
 |-- checkpoint_fork_opencode.py # checkpoint, fork, and continue demo
@@ -45,7 +46,7 @@ docker push <registry>/opencode-cube:latest
 ```
 
 The image installs checksum-verified Node.js 22.23.1 and OpenCode 1.17.13 on top
-of `ghcr.io/tencentcloud/cubesandbox-base:2026.16`.
+of a digest-pinned `ghcr.io/tencentcloud/cubesandbox-base:2026.16`.
 
 ## 2. Register a CubeSandbox template
 
@@ -77,8 +78,8 @@ Required values:
 | `CUBE_TEMPLATE_ID` | Template ID created in step 2 |
 | `OPENCODE_MODEL` | OpenCode model in `provider/model` form |
 | `<PROVIDER>_API_KEY` | API key matching the provider prefix |
-| `CUBE_API_URL` | Required for `network_policy.py`; native CubeSandbox SDK CubeAPI URL |
-| `CUBE_PROXY_NODE_IP` | Required for `network_policy.py`; CubeProxy IP used for command streams |
+| `CUBE_API_URL` | Required for the restricted-egress and checkpoint/fork workflows; native CubeSandbox SDK CubeAPI URL |
+| `CUBE_PROXY_NODE_IP` | Required for the restricted-egress and checkpoint/fork workflows; CubeProxy IP used for command streams |
 
 Use `OPENCODE_BASE_URL` for OpenAI-compatible custom endpoints. If it is not
 set, the scripts also accept provider-specific variables such as
@@ -95,9 +96,10 @@ CUBE_DEV_SIDECAR=1
 The sidecar patches the E2B SDK so sandbox traffic is routed through the
 dev-env CubeProxy port forwards.
 
-`network_policy.py` uses the native `cubesandbox` SDK instead of the E2B SDK, so
-it reads `CUBE_API_URL` and `CUBE_PROXY_NODE_IP`. When running that script
-against `dev-env/`, use the forwarded native SDK API and proxy variables:
+`network_policy.py` and `checkpoint_fork_opencode.py` use the native
+`cubesandbox` SDK instead of the E2B SDK, so they read `CUBE_API_URL` and
+`CUBE_PROXY_NODE_IP`. When running either script against `dev-env/`, use the
+forwarded native SDK API and proxy variables:
 
 ```bash
 CUBE_API_URL=http://127.0.0.1:13000
@@ -137,9 +139,11 @@ This workflow runs OpenCode in a source sandbox, creates an explicit checkpoint,
 starts a new sandbox from that checkpoint, and continues the same OpenCode
 session in the fork. It verifies inherited workspace and OpenCode state,
 independent sandbox IDs, passing tests, and `OPENCODE_FORK_OK`, then deletes
-both sandboxes and the temporary checkpoint. It uses the same direct provider
-environment style as `run_opencode.py` and `resume_opencode.py`; use
-`network_policy.py` for the default-deny CubeEgress credential-injection path.
+both sandboxes and the temporary checkpoint. Both source and fork use
+default-deny egress with the same LLM-host allow rule. CubeEgress injects the
+real provider credential on the wire while each OpenCode command sees only a
+placeholder. The workflow verifies the secret and network invariants before
+running OpenCode in both sandboxes.
 
 ## 7. Run with restricted egress
 
@@ -169,7 +173,7 @@ python3 network_policy.py --skip-agent
 ## Validation
 
 ```bash
-python3 -m py_compile env_utils.py _opencode_common.py run_opencode.py resume_opencode.py checkpoint_fork_opencode.py network_policy.py
+python3 -m py_compile env_utils.py _opencode_common.py egress_policy.py run_opencode.py resume_opencode.py checkpoint_fork_opencode.py network_policy.py
 python3 -m unittest discover . -p 'test_*.py'
 bash -n build-template.sh
 ```

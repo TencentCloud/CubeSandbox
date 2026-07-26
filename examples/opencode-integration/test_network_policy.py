@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import network_policy
+import egress_policy
 
 
 @dataclass
@@ -30,7 +30,7 @@ class NetworkPolicyTest(unittest.TestCase):
         }
         with patch.dict(os.environ, env, clear=True):
             with self.assertRaisesRegex(SystemExit, "CUBE_API_URL"):
-                network_policy.require_native_sdk_env()
+                egress_policy.require_native_sdk_env()
 
     def test_accepts_native_cubesandbox_sdk_env(self) -> None:
         env = {
@@ -38,35 +38,35 @@ class NetworkPolicyTest(unittest.TestCase):
             "CUBE_PROXY_NODE_IP": "127.0.0.1",
         }
         with patch.dict(os.environ, env, clear=True):
-            network_policy.require_native_sdk_env()
+            egress_policy.require_native_sdk_env()
 
     def test_key_must_be_absent_from_global_vm_environment(self) -> None:
         with patch.object(
-            network_policy, "run_command", return_value=FakeResult(stdout="<unset>\n")
+            egress_policy, "run_command", return_value=FakeResult(stdout="<unset>\n")
         ):
-            network_policy.verify_key_not_in_vm(object(), "OPENAI_API_KEY")
+            egress_policy.verify_key_not_in_vm(object(), "OPENAI_API_KEY")
 
         with patch.object(
-            network_policy, "run_command", return_value=FakeResult(stdout="unexpected\n")
+            egress_policy, "run_command", return_value=FakeResult(stdout="unexpected\n")
         ):
             with self.assertRaisesRegex(SystemExit, "global environment"):
-                network_policy.verify_key_not_in_vm(object(), "OPENAI_API_KEY")
+                egress_policy.verify_key_not_in_vm(object(), "OPENAI_API_KEY")
 
     def test_agent_command_must_receive_only_placeholder(self) -> None:
-        envs = {"OPENAI_API_KEY": network_policy.PLACEHOLDER_KEY}
+        envs = {"OPENAI_API_KEY": egress_policy.PLACEHOLDER_KEY}
         with patch.object(
-            network_policy,
+            egress_policy,
             "run_command",
-            return_value=FakeResult(stdout=f"{network_policy.PLACEHOLDER_KEY}\n"),
+            return_value=FakeResult(stdout=f"{egress_policy.PLACEHOLDER_KEY}\n"),
         ) as run:
-            network_policy.verify_placeholder_env(object(), "OPENAI_API_KEY", envs)
+            egress_policy.verify_placeholder_env(object(), "OPENAI_API_KEY", envs)
         self.assertEqual(run.call_args.kwargs["envs"], envs)
 
         with patch.object(
-            network_policy, "run_command", return_value=FakeResult(stdout="wrong\n")
+            egress_policy, "run_command", return_value=FakeResult(stdout="wrong\n")
         ):
             with self.assertRaisesRegex(SystemExit, "placeholder"):
-                network_policy.verify_placeholder_env(
+                egress_policy.verify_placeholder_env(
                     object(), "OPENAI_API_KEY", envs
                 )
 
@@ -74,21 +74,21 @@ class NetworkPolicyTest(unittest.TestCase):
         for status in ("403\n", "000blocked\n"):
             with self.subTest(status=status):
                 with patch.object(
-                    network_policy,
+                    egress_policy,
                     "run_command",
                     return_value=FakeResult(stdout=status),
                 ):
-                    network_policy.verify_non_llm_blocked(object())
+                    egress_policy.verify_non_llm_blocked(object())
 
         with patch.object(
-            network_policy, "run_command", return_value=FakeResult(stdout="200")
+            egress_policy, "run_command", return_value=FakeResult(stdout="200")
         ):
             with self.assertRaisesRegex(SystemExit, "was reachable"):
-                network_policy.verify_non_llm_blocked(object())
+                egress_policy.verify_non_llm_blocked(object())
 
     def test_create_sandbox_keeps_default_deny_enabled(self) -> None:
-        with patch.object(network_policy.Sandbox, "create", return_value="sandbox") as create:
-            result = network_policy.create_sandbox("tpl-test", ["rule"], 1800)
+        with patch.object(egress_policy.Sandbox, "create", return_value="sandbox") as create:
+            result = egress_policy.create_sandbox("tpl-test", ["rule"], 1800)
         self.assertEqual(result, "sandbox")
         create.assert_called_once_with(
             template="tpl-test",

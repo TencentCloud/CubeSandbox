@@ -25,7 +25,7 @@ project.
 |---|---|
 | OpenCode CLI | `opencode-ai` 1.17.13, pinned by `OPENCODE_VERSION` |
 | Node.js | 22.23.1 official archive, verified with SHA-256 |
-| CubeSandbox base image | `ghcr.io/tencentcloud/cubesandbox-base:2026.16` |
+| CubeSandbox base image | `ghcr.io/tencentcloud/cubesandbox-base:2026.16`, pinned by digest |
 | Host SDKs | `e2b==2.7.0`, `cubesandbox==0.3.0` |
 | CubeSandbox platform | `>=0.3.0` for pause/resume; CubeEgress required for header injection |
 
@@ -112,8 +112,8 @@ When validating against the repository's `dev-env/` VM, set
 `CUBE_DEV_SIDECAR=1` so the host-side SDK routes sandbox traffic through
 `examples/e2b-dev-sidecar`.
 
-`network_policy.py` uses the native `cubesandbox` SDK. When running that script
-against `dev-env/`, also set:
+`network_policy.py` and `checkpoint_fork_opencode.py` use the native
+`cubesandbox` SDK. When running either script against `dev-env/`, also set:
 
 ```bash
 CUBE_API_URL=http://127.0.0.1:13000
@@ -155,9 +155,10 @@ This workflow runs OpenCode in a source sandbox, creates an explicit snapshot
 after turn 1, starts a new sandbox with `template=snapshot_id`, and continues
 the same OpenCode session in the fork. It proves the workspace and OpenCode
 state were inherited while the source and fork remain independent, then deletes
-the temporary snapshot. This checkpoint/fork demo uses the same direct provider
-environment style as the basic run/resume demos; use `network_policy.py` for
-the default-deny CubeEgress credential-injection path.
+the temporary snapshot. Both sandboxes use default-deny egress and the same
+LLM-host allow rule. CubeEgress injects the real provider credential on the
+wire, and the workflow verifies that both OpenCode commands receive only a
+placeholder key while unrelated hosts remain blocked.
 
 ### 7. Restrict egress and inject credentials
 
@@ -240,7 +241,7 @@ Rule(
 From `examples/opencode-integration`:
 
 ```bash
-python3 -m py_compile env_utils.py _opencode_common.py run_opencode.py resume_opencode.py checkpoint_fork_opencode.py network_policy.py
+python3 -m py_compile env_utils.py _opencode_common.py egress_policy.py run_opencode.py resume_opencode.py checkpoint_fork_opencode.py network_policy.py
 python3 -m unittest discover . -p 'test_*.py'
 bash -n build-template.sh
 docker build --platform linux/amd64 -t opencode-cube:verify .
