@@ -263,6 +263,9 @@ func terminalProcessFromSpec(base *specs.Process, open *cubebox.TerminalOpenRequ
 		process.Cwd = open.GetCwd()
 	}
 	process.Env = mergeTerminalEnv(base.Env, open.GetEnv())
+	// The struct copy above shares slice backing arrays with base; clone the
+	// remaining mutable slice so later overrides can never mutate the base spec.
+	process.Rlimits = slices.Clone(base.Rlimits)
 	return &process
 }
 

@@ -132,9 +132,10 @@ func TestMergeTerminalEnvOverridesByName(t *testing.T) {
 
 func TestTerminalProcessFromSpecDoesNotMutateBase(t *testing.T) {
 	base := &specs.Process{
-		Args: []string{"original"},
-		Env:  []string{"PATH=/usr/bin", "TERM=xterm"},
-		Cwd:  "/original",
+		Args:    []string{"original"},
+		Env:     []string{"PATH=/usr/bin", "TERM=xterm"},
+		Cwd:     "/original",
+		Rlimits: []specs.POSIXRlimit{{Type: "RLIMIT_NOFILE", Hard: 1024, Soft: 1024}},
 	}
 	open := &cubebox.TerminalOpenRequest{
 		Args: []string{"/bin/bash"},
@@ -150,6 +151,9 @@ func TestTerminalProcessFromSpecDoesNotMutateBase(t *testing.T) {
 	assert.Equal(t, []string{"PATH=/usr/bin", "TERM=xterm-256color"}, process.Env)
 	assert.Equal(t, "/workspace", process.Cwd)
 	assert.True(t, process.Terminal)
+
+	process.Rlimits[0].Soft = 512
+	assert.Equal(t, uint64(1024), base.Rlimits[0].Soft)
 }
 
 func TestEnqueueTerminalStdinIsBoundedAndCopiesFrames(t *testing.T) {

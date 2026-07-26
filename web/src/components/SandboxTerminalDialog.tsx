@@ -83,15 +83,16 @@ export function SandboxTerminalDialog({
     socketRef.current = socket;
     const pendingFrames: TerminalFrame[] = [];
     const maxPendingFrames = 16;
-    let inputDropNotified = false;
+    let dropNotified = false;
     const send = (frame: TerminalFrame) => {
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify(frame));
       } else if (socket.readyState === WebSocket.CONNECTING && pendingFrames.length < maxPendingFrames) {
         pendingFrames.push(frame);
-      } else if (frame.type === 'input' && !inputDropNotified) {
-        inputDropNotified = true;
-        terminal.writeln('\r\n\x1b[33mInput was ignored while the terminal was unavailable.\x1b[0m');
+      } else if (!dropNotified) {
+        // Queue full (or socket unavailable): any frame type may be dropped, notify once.
+        dropNotified = true;
+        terminal.writeln('\r\n\x1b[33mSome terminal input was ignored while the terminal was unavailable.\x1b[0m');
       }
     };
 
@@ -153,7 +154,7 @@ export function SandboxTerminalDialog({
       terminal.dispose();
       setStatus('connecting');
     };
-  }, [open, sandboxId, containerId, connectionNonce]);
+  }, [open, sandboxId, targets, containerId, connectionNonce]);
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>

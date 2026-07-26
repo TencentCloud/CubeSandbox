@@ -1,5 +1,8 @@
 common:
   http_port: 8089
+  # Shared secret between CubeAPI and CubeMaster for the terminal WebSocket.
+  # Placeholder replaced at deploy time by deploy/one-click/install.sh from
+  # $TERMINAL_GATEWAY_TOKEN. Never commit a real token into this file.
   terminal_gateway_token: "__TERMINAL_GATEWAY_TOKEN__"
   # Listen address; 0.0.0.0 = all interfaces. Set to 127.0.0.1 to harden a
   # single all-in-one node (breaks compute nodes / host-net proxy reaching it).
