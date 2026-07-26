@@ -10,6 +10,7 @@ filesystem/    file API and shell interoperability
 lifecycle/     create, pause, resume, connect, and kill
 network/       create-time egress policy
 run_code/      interpreter output and kernel state
+volume/        Volume Plugin CRUD and sandbox volumeMounts bind/unbind
 ```
 
 Create a new domain only when the behavior has a distinct API, capability
@@ -111,6 +112,19 @@ Platform lifecycle cases normally use `slow` and `requires_cubeproxy`:
 ```bash
 SDK_E2E_PLATFORM_LIFECYCLE=true \
 pytest --run-e2e --sdk-e2e-trace cases/lifecycle/test_auto_lifecycle.py
+```
+
+Volume Plugin cases use the `volume` marker and stay skipped unless
+`SDK_E2E_VOLUME_PLUGIN=true`. Create the volume first, then pass dynamic
+`volumeMounts` through `create_adapter(..., create_options=...)` — do not
+hard-code a volume ID in `sandbox_create_options`. Deploy and configure the
+plugin manually first:
+https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.md
+(`cubesandbox` >= 0.6.0).
+
+```bash
+SDK_E2E_VOLUME_PLUGIN=true \
+pytest --run-e2e -m volume --sdk-e2e-backends=cubesandbox
 ```
 
 Prefer lifecycle helpers over fixed sleeps. Let the fixture clean up the

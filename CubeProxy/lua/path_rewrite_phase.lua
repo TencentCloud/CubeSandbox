@@ -9,6 +9,7 @@
 local utils = require "utils"
 local sb = require "sandbox_backend"
 local state = require "sandbox_state"
+local request_host = require "request_host"
 
 local uri = ngx.var.uri or ""
 local ins_id, container_port, rest = uri:match("^/sandbox/([%w_%-]+)/(%d+)(/?.*)$")
@@ -40,6 +41,7 @@ ngx.req.set_uri(rest, false)
 -- feature is disabled or the sandbox isn't tracked.
 state.gate(ins_id)
 
-local host_ip, host_port = sb.resolve_backend(ins_id, container_port)
+local host_ip, host_port, mask_request_host = sb.resolve_backend(ins_id, container_port)
 ngx.var.backend_ip = host_ip
 ngx.var.backend_port = host_port
+request_host.apply(mask_request_host, container_port)

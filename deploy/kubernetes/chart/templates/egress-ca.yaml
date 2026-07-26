@@ -1,0 +1,58 @@
+{{- if and .Values.cubeEgress.enabled (ne .Values.cubeEgress.ca.mode "existingSecret") }}
+{{- $secretName := include "cube.egressCASecretName" . -}}
+{{- if eq .Values.cubeEgress.ca.mode "inline" }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-egress
+    app.kubernetes.io/part-of: cube-egress
+type: Opaque
+stringData:
+  {{ .Values.cubeEgress.ca.rootCertKey | quote }}: |-
+{{ .Values.cubeEgress.ca.inline.rootCert | nindent 4 }}
+  {{ .Values.cubeEgress.ca.rootKeyKey | quote }}: |-
+{{ .Values.cubeEgress.ca.inline.rootKey | nindent 4 }}
+  {{ .Values.cubeEgress.ca.placeholderCertKey | quote }}: |-
+{{ .Values.cubeEgress.ca.inline.placeholderCert | nindent 4 }}
+  {{ .Values.cubeEgress.ca.placeholderKeyKey | quote }}: |-
+{{ .Values.cubeEgress.ca.inline.placeholderKey | nindent 4 }}
+{{- else if eq .Values.cubeEgress.ca.mode "selfSigned" }}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $secretName -}}
+{{- $rootCertKey := .Values.cubeEgress.ca.rootCertKey -}}
+{{- $rootKeyKey := .Values.cubeEgress.ca.rootKeyKey -}}
+{{- $placeholderCertKey := .Values.cubeEgress.ca.placeholderCertKey -}}
+{{- $placeholderKeyKey := .Values.cubeEgress.ca.placeholderKeyKey -}}
+{{- $hasExisting := and $existing (hasKey $existing.data $rootCertKey) (hasKey $existing.data $rootKeyKey) (hasKey $existing.data $placeholderCertKey) (hasKey $existing.data $placeholderKeyKey) -}}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-egress
+    app.kubernetes.io/part-of: cube-egress
+type: Opaque
+{{ if $hasExisting }}
+data:
+  {{ $rootCertKey | quote }}: {{ index $existing.data $rootCertKey | quote }}
+  {{ $rootKeyKey | quote }}: {{ index $existing.data $rootKeyKey | quote }}
+  {{ $placeholderCertKey | quote }}: {{ index $existing.data $placeholderCertKey | quote }}
+  {{ $placeholderKeyKey | quote }}: {{ index $existing.data $placeholderKeyKey | quote }}
+{{- else }}
+{{- $ca := genCA .Values.cubeEgress.ca.selfSigned.caCommonName (int .Values.cubeEgress.ca.selfSigned.caValidityDays) -}}
+{{- $placeholder := genSelfSignedCert .Values.cubeEgress.ca.selfSigned.placeholderCommonName nil nil (int .Values.cubeEgress.ca.selfSigned.placeholderValidityDays) -}}
+stringData:
+  {{ $rootCertKey | quote }}: |-
+{{ $ca.Cert | nindent 4 }}
+  {{ $rootKeyKey | quote }}: |-
+{{ $ca.Key | nindent 4 }}
+  {{ $placeholderCertKey | quote }}: |-
+{{ $placeholder.Cert | nindent 4 }}
+  {{ $placeholderKeyKey | quote }}: |-
+{{ $placeholder.Key | nindent 4 }}
+{{- end }}
+{{- end }}
+{{- end }}

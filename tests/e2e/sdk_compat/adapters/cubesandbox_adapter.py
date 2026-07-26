@@ -124,6 +124,22 @@ class CubeSandboxAdapter(SandboxAdapter):
     def resume_or_connect(self, *, timeout: int = 60) -> "CubeSandboxAdapter":
         return type(self).connect(self.sandbox_id, self._e2e_config or SdkE2EConfig.from_env())
 
+    def get_host(self, port: int) -> str:
+        return str(self._sandbox.get_host(port))
+
+    def traffic_access_token(self) -> str | None:
+        token = getattr(self._sandbox, "traffic_access_token", None)
+        if token:
+            return str(token)
+        try:
+            raw = self.info().raw
+        except Exception:  # noqa: BLE001 - token lookup should degrade gracefully
+            return None
+        for key in ("traffic_access_token", "trafficAccessToken"):
+            if key in raw and raw[key]:
+                return str(raw[key])
+        return None
+
     def kill(self) -> None:
         self._sandbox.kill()
 

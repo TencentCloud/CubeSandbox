@@ -36,6 +36,47 @@ func ensureSandboxTestConfig(t *testing.T) *config.Config {
 	return cfg
 }
 
+func TestValidateMaskRequestHost(t *testing.T) {
+	for _, value := range []string{
+		"localhost",
+		"localhost:3000",
+		"localhost:${PORT}",
+		"my-app.example.com:${PORT}",
+		"127.0.0.1:3000",
+		"[::1]:${PORT}",
+	} {
+		t.Run("valid_"+value, func(t *testing.T) {
+			assert.NoError(t, validateMaskRequestHost(value))
+		})
+	}
+
+	for _, value := range []string{
+		"",
+		" localhost",
+		"localhost ",
+		"https://example.com",
+		"example.com/path",
+		"example.com?x=1",
+		"example.com#fragment",
+		"user@example.com",
+		"bad\r\nInjected: value",
+		"example.com:",
+		"example.com:0",
+		"example.com:99999",
+		"localhost:${OTHER}",
+		"localhost:${PORT",
+		"[::1",
+		"::1",
+		"[::1]]:3000",
+		"[::1]:",
+		"例子.测试",
+	} {
+		t.Run("invalid_"+value, func(t *testing.T) {
+			assert.Error(t, validateMaskRequestHost(value))
+		})
+	}
+}
+
 func Test_checkAndGetHostDirVolumeSource(t *testing.T) {
 	type args struct {
 		src *types.HostDirVolumeSources

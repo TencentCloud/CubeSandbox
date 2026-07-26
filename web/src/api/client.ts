@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Tencent. All rights reserved.
 
-import { api } from '@/lib/api';
+import { api, ops, setTokens, clearTokens } from '@/lib/api';
 import type { components } from './generated/schema';
 
 export type ClusterOverviewDto = components['schemas']['ClusterOverview'];
@@ -39,6 +39,8 @@ export interface TemplateDetail extends TemplateSummary {
   createRequest?: unknown;
   networkType?: string | null;
   allowInternetAccess?: boolean | null;
+  /** Maps from dto.aliases[0] — CubeMaster returns the template alias as `aliases: string[]`. */
+  displayName?: string | null;
 }
 
 export interface TemplateCompatSummary {
@@ -129,7 +131,8 @@ function mapTemplateSummary(dto: TemplateSummaryDto): TemplateSummary {
     imageInfo: dto.imageInfo,
     jobID: dto.jobID ?? null,
     networkType: (dto as unknown as { networkType?: string }).networkType ?? null,
-    allowInternetAccess: (dto as unknown as { allowInternetAccess?: boolean }).allowInternetAccess ?? null,
+    allowInternetAccess:
+      (dto as unknown as { allowInternetAccess?: boolean }).allowInternetAccess ?? null,
   };
 }
 
@@ -146,7 +149,12 @@ function mapTemplateDetail(dto: TemplateDetailDto): TemplateDetail {
     createRequest: dto.createRequest,
     jobID: (dto as unknown as { jobID?: string }).jobID ?? null,
     networkType: (dto as unknown as { networkType?: string }).networkType ?? null,
-    allowInternetAccess: (dto as unknown as { allowInternetAccess?: boolean }).allowInternetAccess ?? null,
+    allowInternetAccess:
+      (dto as unknown as { allowInternetAccess?: boolean }).allowInternetAccess ?? null,
+    displayName:
+      dto.aliases?.[0]?.trim() ||
+      (dto as unknown as { displayName?: string }).displayName?.trim() ||
+      null,
   };
 }
 
@@ -165,7 +173,8 @@ function mapNode(dto: ApiNodeView): ClusterNodeView {
       maxMvmSlots: dto.maxMvmSlots,
       quotaCpu: (dto as unknown as { quotaCpu?: number }).quotaCpu ?? 0,
       quotaMemMB: (dto as unknown as { quotaMemMB?: number }).quotaMemMB ?? 0,
-      createConcurrentNum: (dto as unknown as { createConcurrentNum?: number }).createConcurrentNum ?? 0,
+      createConcurrentNum:
+        (dto as unknown as { createConcurrentNum?: number }).createConcurrentNum ?? 0,
     },
     conditions: dto.conditions?.map((condition) => ({
       type: condition.type,
@@ -189,8 +198,12 @@ const DEFAULT_RESUME_BODY: SandboxResumeRequest = {
 };
 
 export const sandboxApi = {
-  list: (params?: { metadata?: string; state?: RunningSandbox['state']; nextToken?: string; limit?: number }) =>
-    api<ListedSandboxDto[]>('/v2/sandboxes', { params }).then((items) => items.map(mapSandbox)),
+  list: (params?: {
+    metadata?: string;
+    state?: RunningSandbox['state'];
+    nextToken?: string;
+    limit?: number;
+  }) => api<ListedSandboxDto[]>('/v2/sandboxes', { params }).then((items) => items.map(mapSandbox)),
   get: (id: string) => api<SandboxDetailDto>(`/sandboxes/${id}`).then(mapSandboxDetail),
   kill: (id: string) => api<void>(`/sandboxes/${id}`, { method: 'DELETE' }),
   pause: (id: string) => api<void>(`/sandboxes/${id}/pause`, { method: 'POST' }),
@@ -200,14 +213,13 @@ export const sandboxApi = {
       body: JSON.stringify(body),
     }).then(() => undefined),
   setTimeout: (id: string, seconds: number) =>
-    api<void>(`/sandboxes/${id}/timeout`, { method: 'POST', body: JSON.stringify({ timeout: seconds }) }),
+    api<void>(`/sandboxes/${id}/timeout`, {
+      method: 'POST',
+      body: JSON.stringify({ timeout: seconds }),
+    }),
   logs: (id: string, params?: { cursor?: number; limit?: number; direction?: string }) =>
     api<SandboxLogsDto>(`/v2/sandboxes/${id}/logs`, { params }),
-  create: (body: {
-    templateID: string;
-    timeout?: number;
-    metadata?: Record<string, string>;
-  }) =>
+  create: (body: { templateID: string; timeout?: number; metadata?: Record<string, string> }) =>
     api<SandboxSessionDto>('/sandboxes', {
       method: 'POST',
       body: JSON.stringify(body),
@@ -215,7 +227,8 @@ export const sandboxApi = {
 };
 
 export const templateApi = {
-  list: () => api<TemplateSummaryDto[]>('/templates').then((items) => items.map(mapTemplateSummary)),
+  list: () =>
+    api<TemplateSummaryDto[]>('/templates').then((items) => items.map(mapTemplateSummary)),
   get: (id: string) => api<TemplateDetailDto>(`/templates/${id}`).then(mapTemplateDetail),
   create: (body: {
     templateID?: string;
@@ -240,32 +253,41 @@ export const templateApi = {
     denyOut?: string[];
     with_cube_ca?: boolean;
   }) => api<unknown>('/templates', { method: 'POST', body: JSON.stringify(body) }),
-  rebuild: (id: string) => api<unknown>(`/templates/${id}`, { method: 'POST', body: JSON.stringify({}) }),
+  rebuild: (id: string) =>
+    api<unknown>(`/templates/${id}`, { method: 'POST', body: JSON.stringify({}) }),
   getBuildStatus: (id: string, buildID: string) =>
     api<unknown>(`/templates/${id}/builds/${buildID}/status`),
   getBuildLogs: (id: string, buildID: string) =>
-    api<{ lines?: string[]; status?: string; progress?: number }>(`/templates/${id}/builds/${buildID}/logs`),
-  remove: (id: string) => api<void>(`/templates/${id}`, { method: 'DELETE' }),
+    api<{ lines?: string[]; status?: string; progress?: number }>(
+      `/templates/${id}/builds/${buildID}/logs`,
+    ),
+  remove: (id: string) =>
+    api<void>(`/templates/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      params: { sync: true },
+    }),
   compat: () => api<TemplateCompatMatrix>('/templates/compat'),
   adoptCompatBaseline: (id: string) =>
     api<{ updated: number }>(`/templates/compat/${id}/adopt-baseline`, { method: 'POST' }),
 };
 
 export const versionApi = {
-  matrix: () => api<VersionMatrixDto>('/cluster/versions'),
+  matrix: () => ops<VersionMatrixDto>('/cluster/versions'),
 };
 
 export const clusterApi = {
-  overview: () => api<ClusterOverviewDto>('/cluster/overview'),
-  nodes: () => api<ApiNodeView[]>('/nodes').then((items) => items.map(mapNode)),
-  node: (id: string) => api<ApiNodeView>(`/nodes/${id}`).then(mapNode),
-  config: () => api<{
-    apiEndpoint: string;
-    rateLimitPerSec: number;
-    authEnabled: boolean;
-    sandboxDomain: string;
-    instanceType: string;
-  }>('/config'),
+  overview: () => ops<ClusterOverviewDto>('/cluster/overview'),
+  nodes: () => ops<ApiNodeView[]>('/nodes').then((items) => items.map(mapNode)),
+  node: (id: string) => ops<ApiNodeView>(`/nodes/${id}`).then(mapNode),
+  config: () =>
+    ops<{
+      apiEndpoint: string;
+      opsApiEndpoint: string;
+      rateLimitPerSec: number;
+      authEnabled: boolean;
+      sandboxDomain: string;
+      instanceType: string;
+    }>('/config'),
 };
 
 export interface ImageMeta {
@@ -281,8 +303,8 @@ export interface StoreMeta {
 }
 
 export const storeApi = {
-  meta: () => api<StoreMeta>('/store/meta'),
-  refresh: () => api<StoreMeta>('/store/refresh', { method: 'POST' }),
+  meta: () => ops<StoreMeta>('/store/meta'),
+  refresh: () => ops<StoreMeta>('/store/refresh', { method: 'POST' }),
 };
 
 export interface AgentInstanceDto {
@@ -406,18 +428,27 @@ export interface SessionDto {
 }
 
 export interface LoginResponseDto {
-  token: string;
+  accessToken: string;
+  refreshToken: string;
   username: string;
   expiresInSecs: number;
 }
 
 export const authApi = {
-  session: () => api<SessionDto>('/auth/session'),
+  session: () => ops<SessionDto>('/auth/session'),
   login: (body: { username: string; password: string }) =>
-    api<LoginResponseDto>('/auth/login', { method: 'POST', body: JSON.stringify(body) }),
-  logout: () => api<void>('/auth/logout', { method: 'POST' }),
+    ops<LoginResponseDto>('/auth/login', { method: 'POST', body: JSON.stringify(body) }).then(
+      (resp) => {
+        setTokens(resp.accessToken, resp.refreshToken);
+        return resp;
+      },
+    ),
+  logout: () => {
+    clearTokens();
+    return ops<void>('/auth/logout', { method: 'POST' });
+  },
   changePassword: (body: { username: string; oldPassword: string; newPassword: string }) =>
-    api<void>('/auth/change-password', { method: 'POST', body: JSON.stringify(body) }),
+    ops<void>('/auth/change-password', { method: 'POST', body: JSON.stringify(body) }),
 };
 
 export interface AgentSettingsDto {
@@ -452,8 +483,8 @@ export interface AgentSettingsDto {
 }
 
 export const agentHubApi = {
-  list: () => api<AgentInstanceDto[]>('/agenthub/instances'),
-  listTemplates: () => api<AgentTemplateDto[]>('/agenthub/templates'),
+  list: () => ops<AgentInstanceDto[]>('/agenthub/instances'),
+  listTemplates: () => ops<AgentTemplateDto[]>('/agenthub/templates'),
   registerMarketTemplate: (body: {
     templateId: string;
     name?: string;
@@ -461,11 +492,11 @@ export const agentHubApi = {
     version?: string;
     recommended?: boolean;
   }) =>
-    api<AgentTemplateDto>('/agenthub/templates/market', {
+    ops<AgentTemplateDto>('/agenthub/templates/market', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
-  getSettings: () => api<AgentSettingsDto>('/agenthub/settings'),
+  getSettings: () => ops<AgentSettingsDto>('/agenthub/settings'),
   updateSettings: (body: {
     deepseekApiKey?: string;
     llmProvider?: string;
@@ -475,7 +506,7 @@ export const agentHubApi = {
     llmCredentialMode?: 'egress' | 'env';
     gatewayDomain?: string;
   }) =>
-    api<AgentSettingsDto>('/agenthub/settings', {
+    ops<AgentSettingsDto>('/agenthub/settings', {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
@@ -489,88 +520,97 @@ export const agentHubApi = {
     botId?: string;
     botSecret?: string;
   }) =>
-    api<AgentInstanceDto>('/agenthub/instances', {
+    ops<AgentInstanceDto>('/agenthub/instances', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
   delete: (id: string) =>
-    api<void>(`/agenthub/instances/${encodeURIComponent(id)}`, {
+    ops<void>(`/agenthub/instances/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     }),
   restart: (id: string) =>
-    api<AgentSetupResultDto>(`/agenthub/instances/${encodeURIComponent(id)}/restart`, {
+    ops<AgentSetupResultDto>(`/agenthub/instances/${encodeURIComponent(id)}/restart`, {
       method: 'POST',
     }),
   pause: (id: string) =>
-    api<AgentInstanceDto>(`/agenthub/instances/${encodeURIComponent(id)}/pause`, {
+    ops<AgentInstanceDto>(`/agenthub/instances/${encodeURIComponent(id)}/pause`, {
       method: 'POST',
     }),
   resume: (id: string) =>
-    api<AgentInstanceDto>(`/agenthub/instances/${encodeURIComponent(id)}/resume`, {
+    ops<AgentInstanceDto>(`/agenthub/instances/${encodeURIComponent(id)}/resume`, {
       method: 'POST',
     }),
   upgrade: (id: string) =>
-    api<AgentSetupResultDto>(`/agenthub/instances/${encodeURIComponent(id)}/upgrade`, {
+    ops<AgentSetupResultDto>(`/agenthub/instances/${encodeURIComponent(id)}/upgrade`, {
       method: 'POST',
     }),
   updateModel: (id: string, body: { model: string }) =>
-    api<AgentInstanceDto>(`/agenthub/instances/${encodeURIComponent(id)}/model`, {
+    ops<AgentInstanceDto>(`/agenthub/instances/${encodeURIComponent(id)}/model`, {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
   updateWecomConfig: (id: string, body: { botId: string; botSecret: string }) =>
-    api<AgentInstanceDto>(`/agenthub/instances/${encodeURIComponent(id)}/wecom`, {
+    ops<AgentInstanceDto>(`/agenthub/instances/${encodeURIComponent(id)}/wecom`, {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
   getWecomConfig: (id: string) =>
-    api<AgentWeComConfigDto | null>(`/agenthub/instances/${encodeURIComponent(id)}/wecom`),
+    ops<AgentWeComConfigDto | null>(`/agenthub/instances/${encodeURIComponent(id)}/wecom`),
   getGatewayHealth: (id: string) =>
-    api<AgentGatewayHealthDto>(`/agenthub/instances/${encodeURIComponent(id)}/gateway/health`),
+    ops<AgentGatewayHealthDto>(`/agenthub/instances/${encodeURIComponent(id)}/gateway/health`),
   listOperations: (id: string) =>
-    api<AgentOperationDto[]>(`/agenthub/instances/${encodeURIComponent(id)}/operations`),
+    ops<AgentOperationDto[]>(`/agenthub/instances/${encodeURIComponent(id)}/operations`),
   listSnapshots: (id: string) =>
-    api<AgentSnapshotDto[]>(`/agenthub/instances/${encodeURIComponent(id)}/snapshots`),
+    ops<AgentSnapshotDto[]>(`/agenthub/instances/${encodeURIComponent(id)}/snapshots`),
   createSnapshot: (id: string, body: { name?: string }) =>
-    api<AgentSnapshotJobDto>(`/agenthub/instances/${encodeURIComponent(id)}/snapshots`, {
+    ops<AgentSnapshotJobDto>(`/agenthub/instances/${encodeURIComponent(id)}/snapshots`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
   deleteSnapshot: (id: string, snapshotId: string) =>
-    api<void>(`/agenthub/instances/${encodeURIComponent(id)}/snapshots/${encodeURIComponent(snapshotId)}`, {
-      method: 'DELETE',
-    }),
+    ops<void>(
+      `/agenthub/instances/${encodeURIComponent(id)}/snapshots/${encodeURIComponent(snapshotId)}`,
+      {
+        method: 'DELETE',
+      },
+    ),
   updateSnapshot: (id: string, snapshotId: string, body: { name?: string; isHealthy?: boolean }) =>
-    api<void>(`/agenthub/instances/${encodeURIComponent(id)}/snapshots/${encodeURIComponent(snapshotId)}`, {
-      method: 'PATCH',
-      body: JSON.stringify(body),
-    }),
+    ops<void>(
+      `/agenthub/instances/${encodeURIComponent(id)}/snapshots/${encodeURIComponent(snapshotId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      },
+    ),
   recover: (id: string) =>
-    api<AgentRecoverResponseDto>(`/agenthub/instances/${encodeURIComponent(id)}/recover`, {
+    ops<AgentRecoverResponseDto>(`/agenthub/instances/${encodeURIComponent(id)}/recover`, {
       method: 'POST',
     }),
   rollback: (id: string, body: { snapshotId: string }) =>
-    api<AgentRollbackResponseDto>(`/agenthub/instances/${encodeURIComponent(id)}/rollback`, {
+    ops<AgentRollbackResponseDto>(`/agenthub/instances/${encodeURIComponent(id)}/rollback`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
   clone: (id: string, body: { name?: string; snapshotId?: string }) =>
-    api<AgentInstanceDto>(`/agenthub/instances/${encodeURIComponent(id)}/clone`, {
+    ops<AgentInstanceDto>(`/agenthub/instances/${encodeURIComponent(id)}/clone`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
   publishTemplate: (id: string, body: { name?: string; snapshotId?: string }) =>
-    api<AgentPublishTemplateResponseDto>(`/agenthub/instances/${encodeURIComponent(id)}/publish-template`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    }),
+    ops<AgentPublishTemplateResponseDto>(
+      `/agenthub/instances/${encodeURIComponent(id)}/publish-template`,
+      {
+        method: 'POST',
+        body: JSON.stringify(body),
+      },
+    ),
   updateTemplate: (templateId: string, body: { name?: string; recommended?: boolean }) =>
-    api<void>(`/agenthub/templates/${encodeURIComponent(templateId)}`, {
+    ops<void>(`/agenthub/templates/${encodeURIComponent(templateId)}`, {
       method: 'PATCH',
       body: JSON.stringify(body),
     }),
   deleteTemplate: (templateId: string) =>
-    api<void>(`/agenthub/templates/${encodeURIComponent(templateId)}`, {
+    ops<void>(`/agenthub/templates/${encodeURIComponent(templateId)}`, {
       method: 'DELETE',
     }),
 };

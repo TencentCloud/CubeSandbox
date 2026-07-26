@@ -25,6 +25,7 @@ var Command = cli.Command{
 		StorageCommand,
 		OperationCommand,
 		TemplateCommand,
+		VolumeCommand,
 	},
 }
 

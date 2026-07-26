@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Build-context filter for CubeMaster/docker/Dockerfile.cubemastercli
+# (context = repository root). Same sibling modules as CubeMaster/docker/Dockerfile;
+# no deploy/scripts (CLI image has no volume-deps installer).
+**
+!CubeMaster
+!CubeMaster/**
+!cubelog
+!cubelog/**
+!CubeDB
+!CubeDB/**
+!Cubelet
+!Cubelet/**

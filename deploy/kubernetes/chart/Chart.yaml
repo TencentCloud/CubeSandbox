@@ -1,0 +1,14 @@
+apiVersion: v2
+name: cube
+description: CubeSandbox on Kubernetes/TKE Helm chart with separate control-plane, node, proxy, and host bootstrap images.
+type: application
+version: 0.5.1
+appVersion: "0.5.1"
+home: https://github.com/TencentCloud/CubeSandbox
+keywords:
+  - cubesandbox
+  - pvm
+  - sandbox
+  - tke
+maintainers:
+  - name: CubeSandbox maintainers

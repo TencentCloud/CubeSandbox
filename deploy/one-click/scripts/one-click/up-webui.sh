@@ -23,9 +23,11 @@ fi
 WEB_UI_IMAGE="${WEB_UI_IMAGE:-cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat}"
 WEB_UI_CONTAINER_NAME="${WEB_UI_CONTAINER_NAME:-cube-webui}"
 WEB_UI_HOST_PORT="${WEB_UI_HOST_PORT:-12088}"
-WEB_UI_UPSTREAM="${WEB_UI_UPSTREAM:-http://host.docker.internal:3000}"
+WEB_UI_UPSTREAM="${WEB_UI_UPSTREAM:-http://host.docker.internal:3010}"
 # cube-proxy (host network, port 80) for same-origin /sandbox/ forwarding.
 SANDBOX_PROXY_UPSTREAM="${SANDBOX_PROXY_UPSTREAM:-http://host.docker.internal:80}"
+# CubeOps (admin/ops API, port 3010) for /opsapi/ and SDK path forwarding.
+CUBE_OPS_UPSTREAM="${CUBE_OPS_UPSTREAM:-http://host.docker.internal:3010}"
 COMPOSE_DETACH="${ONE_CLICK_COMPOSE_DETACH:-1}"
 PREPARE_ONLY="${ONE_CLICK_PREPARE_ONLY:-0}"
 
@@ -70,6 +72,7 @@ wait_for_tcp_port() {
 WEB_UI_HOST_PORT_ESCAPED="$(escape_sed "${WEB_UI_HOST_PORT}" '#')"
 WEB_UI_UPSTREAM_ESCAPED="$(escape_sed "${WEB_UI_UPSTREAM}" '#')"
 SANDBOX_PROXY_UPSTREAM_ESCAPED="$(escape_sed "${SANDBOX_PROXY_UPSTREAM}" '#')"
+CUBE_OPS_UPSTREAM_ESCAPED="$(escape_sed "${CUBE_OPS_UPSTREAM}" '#')"
 WEB_UI_IMAGE_ESCAPED="$(escape_sed "${WEB_UI_IMAGE}" '#')"
 WEB_UI_CONTAINER_NAME_ESCAPED="$(escape_sed "${WEB_UI_CONTAINER_NAME}" '#')"
 WEB_UI_DIST_DIR_ESCAPED="$(escape_sed "${WEB_UI_DIST_DIR}" '#')"
@@ -80,7 +83,8 @@ render_template_atomic \
   "${NGINX_CONF}" \
   -e "s#__WEB_UI_HOST_PORT__#${WEB_UI_HOST_PORT_ESCAPED}#g" \
   -e "s#__WEB_UI_UPSTREAM__#${WEB_UI_UPSTREAM_ESCAPED}#g" \
-  -e "s#__SANDBOX_PROXY_UPSTREAM__#${SANDBOX_PROXY_UPSTREAM_ESCAPED}#g"
+  -e "s#__SANDBOX_PROXY_UPSTREAM__#${SANDBOX_PROXY_UPSTREAM_ESCAPED}#g" \
+  -e "s#__CUBE_OPS_UPSTREAM__#${CUBE_OPS_UPSTREAM_ESCAPED}#g"
 
 render_template_atomic \
   "${COMPOSE_TEMPLATE}" \
@@ -112,5 +116,22 @@ log "webui listening on ${WEB_UI_HOST_PORT}"
 
 wait_for_http "http://127.0.0.1:${WEB_UI_HOST_PORT}/" 30 1 \
   || die "webui index did not become ready"
-wait_for_http "http://127.0.0.1:${WEB_UI_HOST_PORT}/cubeapi/v1/health" 30 1 \
-  || die "webui could not reach cube-api through /cubeapi"
+# CubeMaster health — the core scheduler must be up before WebUI starts
+# accepting requests, since CubeOps proxies SDK calls to CubeMaster HTTP REST.
+cubemaster_addr="${CUBEMASTER_ADDR:-127.0.0.1:8089}"
+wait_for_http "http://${cubemaster_addr}/notify/health" 30 1 \
+  || die "cubemaster health not ready at ${cubemaster_addr}"
+# CubeOps health (direct, not via nginx) — the admin/ops backend must be up.
+# WebUI backend architecture:
+#   /opsapi/*           → CubeOps :3010 (JWT auth, admin/ops API)
+#   /sandboxes, /templates, /snapshots → CubeOps :3010 (JWT auth, SDK proxy
+#                        that calls CubeMaster HTTP REST directly, NOT CubeAPI)
+#   /cubeapi/v1/*       → CubeOps :3010 (rewrite to /api/v1/sdk/*)
+#   /health             → CubeOps :3010 (health check, no auth)
+#   /sandbox/*          → CubeProxy :80 (sandbox traffic)
+# CubeAPI (:3000) serves external E2B SDK clients only; WebUI does not depend
+# on it for any operation, including /health.
+cube_ops_bind="${CUBE_OPS_BIND:-0.0.0.0:3010}"
+cube_ops_port="${cube_ops_bind##*:}"
+wait_for_http "http://127.0.0.1:${cube_ops_port}/health" 30 1 \
+  || die "cubeops health not ready"

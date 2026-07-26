@@ -92,6 +92,18 @@ class TracingSandboxAdapter(SandboxAdapter):
             lambda: self._wrapped.run_code(code, timeout=timeout),
         )
 
+    def get_host(self, port: int) -> str:
+        return self._trace.capture(
+            "get_host",
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+                "port": port,
+            },
+            lambda: self._wrapped.get_host(port),
+            output=lambda host: {"host": host},
+        )
+
     def pause(self, *, timeout: int = 60) -> None:
         return self._trace.capture(
             "pause",
@@ -116,6 +128,28 @@ class TracingSandboxAdapter(SandboxAdapter):
             output=lambda result: {"sandbox_id": result.sandbox_id},
         )
         return wrap_adapter(resumed, self._trace)
+
+    def get_host(self, port: int) -> str:
+        return self._trace.capture(
+            "get_host",
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+                "port": port,
+            },
+            lambda: self._wrapped.get_host(port),
+        )
+
+    def traffic_access_token(self) -> str | None:
+        return self._trace.capture(
+            "traffic_access_token",
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+            },
+            self._wrapped.traffic_access_token,
+            output=lambda token: {"token_present": bool(token)},
+        )
 
     def kill(self) -> None:
         return self._trace.capture(

@@ -3,18 +3,19 @@
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
 from framework.assertions import assert_code_ok, assert_command_ok
-from framework.capabilities import LIFECYCLE, PLATFORM_LIFECYCLE, RUN_CODE
+from framework.capabilities import LIFECYCLE, PAUSE_RESUME, PLATFORM_LIFECYCLE, RUN_CODE
 from framework.lifecycle import (
     PLATFORM_LIFECYCLE_SKIP_REASON,
     fetch_state,
+    idle_past_timeout,
     managed_control_sandbox,
+    sandbox_listed,
     wait_for_platform_destroy,
     wait_for_platform_pause,
+    wait_until_paused,
     wait_until_running,
 )
 
@@ -41,23 +42,27 @@ print(f"pi_approx={pi_approx:.10f}")
 _CHECKPOINT = "/tmp/sdk-compat-auto-lifecycle.txt"
 
 
-def _wait_for_command_ready(adapter, config) -> None:
-    deadline = time.monotonic() + config.default_timeout
-    last_error = None
-    while time.monotonic() < deadline:
-        try:
-            result = adapter.run_command(
-                "true",
-                timeout=min(config.command_timeout, 5),
-            )
-            assert_command_ok(result)
-            return
-        except Exception as exc:  # noqa: BLE001 - readiness may fail transiently
-            last_error = exc
-            time.sleep(1)
-    raise AssertionError(
-        f"sandbox did not accept commands within {config.default_timeout}s: {last_error}"
+def _assert_manual_pause_survives_lifecycle_timeout(
+    adapter,
+    backend,
+    config,
+) -> None:
+    result = adapter.run_command(
+        "printf manual-pause-before-timeout",
+        timeout=config.command_timeout,
     )
+    assert_command_ok(result)
+
+    adapter.pause(timeout=config.default_timeout)
+    assert wait_until_paused(adapter, timeout=config.default_timeout) == "paused"
+
+    idle_past_timeout(
+        config.platform_lifecycle_idle_timeout,
+        margin=config.platform_lifecycle_wait_margin,
+    )
+
+    assert fetch_state(adapter) == "paused"
+    assert sandbox_listed(adapter.sandbox_id, backend, config) is True
 
 
 @pytest.mark.requires_capability(RUN_CODE)
@@ -110,7 +115,6 @@ def test_lifecycle_auto_pause_manual_connect_allows_command_and_run_code(
             resumed,
             timeout=sdk_e2e_config.default_timeout,
         ) == "running"
-        _wait_for_command_ready(resumed, sdk_e2e_config)
 
         command = resumed.run_command(
             "printf manual-connect",
@@ -199,6 +203,40 @@ def test_lifecycle_auto_resume_is_reentrant(sdk_sandbox, sdk_e2e_config):
         else:
             assert_code_ok(result)
             assert result.text == expected_value
+
+
+@pytest.mark.requires_capability(PAUSE_RESUME)
+@pytest.mark.requires_capability(PLATFORM_LIFECYCLE)
+@pytest.mark.sandbox_create_options(
+    lifecycle={"on_timeout": "pause", "auto_resume": False},
+)
+def test_manual_pause_before_auto_pause_timeout_remains_paused(
+    sdk_sandbox,
+    sdk_backend,
+    sdk_e2e_config,
+):
+    _assert_manual_pause_survives_lifecycle_timeout(
+        sdk_sandbox,
+        sdk_backend,
+        sdk_e2e_config,
+    )
+
+
+@pytest.mark.requires_capability(PAUSE_RESUME)
+@pytest.mark.requires_capability(PLATFORM_LIFECYCLE)
+@pytest.mark.sandbox_create_options(lifecycle={"on_timeout": "kill"})
+def test_manual_pause_before_auto_kill_timeout_remains_paused(
+    sdk_sandbox,
+    sdk_backend,
+    sdk_e2e_config,
+):
+    # TODO: Once auto-kill supports deleting explicitly paused sandboxes,
+    # change this regression to expect a terminal state and an absent listing.
+    _assert_manual_pause_survives_lifecycle_timeout(
+        sdk_sandbox,
+        sdk_backend,
+        sdk_e2e_config,
+    )
 
 
 @pytest.mark.sandbox_create_options(lifecycle={"on_timeout": "kill"})

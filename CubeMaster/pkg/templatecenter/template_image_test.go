@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/agiledragon/gomonkey/v2"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
@@ -46,6 +48,46 @@ func TestNormalizeTemplateImageRequestDefaults(t *testing.T) {
 	}
 	if !strings.HasPrefix(req.TemplateID, "tpl-") {
 		t.Fatalf("unexpected generated TemplateID: %q", req.TemplateID)
+	}
+}
+
+func TestNormalizeTemplateImageRequestTrimsAndValidatesSourceImageRef(t *testing.T) {
+	req, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "  registry.example.com:5000/ns/app:1.2.3  ",
+		WritableLayerSize: "20Gi",
+	})
+	if err != nil {
+		t.Fatalf("normalizeTemplateImageRequest failed: %v", err)
+	}
+	if req.SourceImageRef != "registry.example.com:5000/ns/app:1.2.3" {
+		t.Fatalf("SourceImageRef=%q, want trimmed reference", req.SourceImageRef)
+	}
+}
+
+func TestNormalizeTemplateImageRequestRejectsInvalidSourceImageRef(t *testing.T) {
+	invalidRefs := []string{
+		"",
+		"--help",
+		"-v",
+		"docker://--help",
+		"registry.example.com/image --authfile /etc/shadow",
+		"registry.example.com/image\n--flag",
+		"image;rm",
+		"library/nginx:",
+		"library/nginx@sha256:not-a-digest",
+	}
+	for _, imageRef := range invalidRefs {
+		t.Run(imageRef, func(t *testing.T) {
+			_, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+				Request:           &types.Request{RequestID: "req-1"},
+				SourceImageRef:    imageRef,
+				WritableLayerSize: "20Gi",
+			})
+			if err == nil || !strings.Contains(err.Error(), "source_image_ref") {
+				t.Fatalf("normalizeTemplateImageRequest(%q) error=%v, want source_image_ref validation error", imageRef, err)
+			}
+		})
 	}
 }
 
@@ -602,6 +644,7 @@ func TestGenerateTemplateCreateRequestClonesCubeNetworkRules(t *testing.T) {
 	scheme := "https"
 	audit := "log-only"
 	format := "bearer %s"
+	maskRequestHost := "localhost:${PORT}"
 	req := &types.CreateTemplateFromImageReq{
 		Request:           &types.Request{RequestID: "req-1"},
 		SourceImageRef:    "docker.io/library/nginx:latest",
@@ -611,6 +654,7 @@ func TestGenerateTemplateCreateRequestClonesCubeNetworkRules(t *testing.T) {
 		NetworkType:       cubeboxv1.NetworkType_tap.String(),
 		CubeNetworkConfig: &types.CubeNetworkConfig{
 			AllowInternetAccess: &allowInternetAccess,
+			MaskRequestHost:     &maskRequestHost,
 			Rules: []*types.EgressRule{{
 				Name: "allow-api",
 				Match: &types.EgressRuleMatch{
@@ -641,12 +685,11 @@ func TestGenerateTemplateCreateRequestClonesCubeNetworkRules(t *testing.T) {
 	}
 
 	got, err := generateTemplateCreateRequest(req, artifact, image.DockerImageConfig{}, "http://master.example")
-	if err != nil {
-		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
-	}
-	if got.CubeNetworkConfig == nil {
-		t.Fatal("expected CubeNetworkConfig to be propagated")
-	}
+	require.NoError(t, err)
+	require.NotNil(t, got.CubeNetworkConfig)
+	require.NotNil(t, got.CubeNetworkConfig.MaskRequestHost)
+	assert.Equal(t, maskRequestHost, *got.CubeNetworkConfig.MaskRequestHost)
+	assert.NotSame(t, req.CubeNetworkConfig.MaskRequestHost, got.CubeNetworkConfig.MaskRequestHost)
 	if len(got.CubeNetworkConfig.Rules) != 1 {
 		t.Fatalf("expected 1 egress rule, got %d", len(got.CubeNetworkConfig.Rules))
 	}
@@ -1438,7 +1481,7 @@ func TestRunRedoTemplateImageJobRegeneratesRequestForRedoTemplateID(t *testing.T
 		}
 		return nil
 	})
-	patches.ApplyFunc(ensureTemplateDefinition, func(ctx context.Context, templateID string, storedReq *types.CreateCubeSandboxReq, instanceType, version string) (bool, error) {
+	patches.ApplyFunc(ensureTemplateDefinitionWithOptions, func(ctx context.Context, templateID string, storedReq *types.CreateCubeSandboxReq, instanceType, version string, _ definitionCreateOptions) (bool, error) {
 		if templateID != redoTemplateID {
 			t.Fatalf("definition templateID = %q, want %q", templateID, redoTemplateID)
 		}

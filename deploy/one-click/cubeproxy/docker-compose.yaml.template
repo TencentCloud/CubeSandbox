@@ -22,6 +22,7 @@ services:
       CUBE_PROXY_REGISTRY_REDIS_PASSWORD: "__CUBE_PROXY_REGISTRY_REDIS_PASSWORD__"
       CUBE_PROXY_REGISTRY_REDIS_DB: "__CUBE_PROXY_REGISTRY_REDIS_DB__"
     volumes:
+      - /data/log/cube-proxy:/data/log/cube-proxy
       - __CUBE_PROXY_CERT_DIR__:/usr/local/openresty/nginx/certs:ro
       - __CUBE_PROXY_GLOBAL_CONF__:/usr/local/openresty/nginx/conf/global/global.conf:ro
       - __CUBE_PROXY_NGINX_CONF__:/usr/local/openresty/nginx/conf/nginx.conf:ro

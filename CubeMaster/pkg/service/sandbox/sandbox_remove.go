@@ -22,6 +22,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/task"
+	volrefcount "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/refcount"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
@@ -34,6 +35,18 @@ func DestroySandbox(ctx context.Context, req *types.DeleteCubeSandboxReq) (rsp *
 			RetMsg:  errorcode.ErrorCode_Success.String(),
 		},
 	}
+	if req.SandboxID == "" {
+		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
+		rsp.Ret.RetMsg = "should provide sandbox id"
+		return
+	}
+	// Resolve before config-dependent work so invalid / ambiguous IDs fail fast.
+	if ret := normalizeSandboxIDInReq(ctx, &req.SandboxID); ret != nil {
+		rsp.Ret = ret
+		return
+	}
+	rsp.SandboxID = req.SandboxID
+
 	destroyReq := &cubebox.DestroyCubeSandboxRequest{
 		RequestID:   req.RequestID,
 		SandboxID:   req.SandboxID,
@@ -85,11 +98,6 @@ func DestroySandbox(ctx context.Context, req *types.DeleteCubeSandboxReq) (rsp *
 	if config.GetConfig().Common.MockCreateDirect {
 		return
 	}
-	if req.SandboxID == "" {
-		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
-		rsp.Ret.RetMsg = "should provide sandbox id"
-		return
-	}
 
 	switch req.InstanceType {
 	case cubebox.InstanceType_cubebox.String():
@@ -100,8 +108,7 @@ func DestroySandbox(ctx context.Context, req *types.DeleteCubeSandboxReq) (rsp *
 		}
 		if req.Sync {
 			if err := callCubelet(ctx, t.CallEp, destroyReq); err != nil {
-				rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterInternalError)
-				rsp.Ret.RetMsg = err.Error()
+				setSyncDestroyFailure(rsp, err)
 			}
 			return
 		}
@@ -115,6 +122,30 @@ func DestroySandbox(ctx context.Context, req *types.DeleteCubeSandboxReq) (rsp *
 		rsp.Ret.RetMsg = err.Error()
 	}
 	return
+}
+
+func setSyncDestroyFailure(rsp *types.DeleteCubeSandboxRes, err error) {
+	if status, ok := ret.FromError(err); ok && isDeleteAutoResumeBusinessCode(status.Code()) {
+		rsp.Ret.RetCode = int(status.Code())
+		rsp.Ret.RetMsg = status.Message()
+		return
+	}
+
+	// Keep the existing sync-delete contract for every other failure, including
+	// typed connection errors constructed by the Cubelet client wrapper.
+	rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterInternalError)
+	rsp.Ret.RetMsg = err.Error()
+}
+
+func isDeleteAutoResumeBusinessCode(code errorcode.ErrorCode) bool {
+	switch code {
+	case errorcode.ErrorCode_Conflict,
+		errorcode.MasterCode(cubeleterrorcode.ErrorCode_TaskStateInvalid),
+		errorcode.MasterCode(cubeleterrorcode.ErrorCode_TaskResumeFailed):
+		return true
+	default:
+		return false
+	}
 }
 
 func dealScfSandbox(ctx context.Context, req *types.DeleteCubeSandboxReq, t *task.Task) bool {
@@ -167,6 +198,9 @@ func callCubelet(ctx context.Context, callEp string, req *cubebox.DestroyCubeSan
 			log.G(ctx).Errorf("Destroy error:%+v", rsp)
 			return ret.Err(errorcode.MasterCode(rsp.GetRet().GetRetCode()), rsp.GetRet().GetRetMsg())
 		}
+		// Apply any node-level volume ref-count transitions (1→0) reported by
+		// Cubelet so the volume DB releases the reference held by this node.
+		volrefcount.ApplyFromExtInfo(ctx, rsp.GetExtInfo())
 	}
 
 	err := localcache.DeleteSandboxProxyMap(ctx, req.GetSandboxID())

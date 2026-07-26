@@ -17,8 +17,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
-func deleteSandbox(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	_ = w
+func deleteSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	req := &types.DeleteCubeSandboxReq{}
 	if err := utils.DecodeHttpBody(r.Body, req); err != nil {
 		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)

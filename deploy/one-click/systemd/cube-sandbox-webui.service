@@ -1,8 +1,8 @@
 [Unit]
 Description=Cube Sandbox Web UI container
-After=docker.service network-online.target cube-sandbox-cube-api.service
+After=docker.service network-online.target cube-sandbox-cubemaster.service cube-sandbox-cubeops.service
 Requires=docker.service
-Wants=network-online.target cube-sandbox-cube-api.service
+Wants=network-online.target cube-sandbox-cubemaster.service cube-sandbox-cubeops.service
 ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
 PartOf=cube-sandbox-control.target
 

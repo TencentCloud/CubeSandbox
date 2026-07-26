@@ -53,9 +53,11 @@ APP_VERSION ?= $(CUBE_VERSION)
 GIT_COMMIT_SHORT ?= $(shell echo $(CUBE_COMMIT) | cut -c1-7)
 TAG?=release-$(APP_VERSION)-$(GIT_COMMIT_SHORT)-$(DATE)
 DEVTAG?=dev-$(APP_VERSION)-$(GIT_COMMIT_SHORT)-$(DATE)
-# COVERAGE_PACKAGES is the coverage we care about.
+# COVERAGE_PACKAGES keeps the default test target focused on unit-style packages.
+# Integration tests have their own dedicated entrypoints below.
 COVERAGE_PACKAGES=$(shell go list ./... \
-	| grep -v github.com/tencentcloud/CubeSandbox/CubeMaster/cmd )
+	| grep -v github.com/tencentcloud/CubeSandbox/CubeMaster/cmd \
+	| grep -v github.com/tencentcloud/CubeSandbox/CubeMaster/integration )
 
 
 .PHONY: build deps check-proto-tools fmt lint clean
@@ -97,7 +99,8 @@ test:
 	$(Q)go clean -testcache
 	$(Q)mkdir -p coverage
 	@( for pkg in ${COVERAGE_PACKAGES}; do \
-		CI=true && export CUBE_MASTER_CONFIG_PATH=`pwd`/test/conf.yaml && go test -v -timeout=20m ${TEST_FLAGS} \
+		if [ -f "$(ROOT_DIR)/test/conf.yaml" ]; then export CUBE_MASTER_CONFIG_PATH="$(ROOT_DIR)/test/conf.yaml"; fi; \
+		CI=true && go test -v -timeout=20m ${TEST_FLAGS} \
 			-coverprofile=coverage/unit-test-`echo $$pkg | tr "/" "_"`.cov \
 			$$pkg || exit 1 ;\
 	done )
@@ -115,10 +118,10 @@ view:
 
 
 testlocal:
-	@export CUBE_MASTER_CONFIG_PATH=`pwd`/test/conf.yaml && go test -v -timeout=24h -gcflags=all=-l  ./integration/... -run=$(tt)
+	@export CUBE_MASTER_CONFIG_PATH="$(ROOT_DIR)/test/conf.yaml" && go test -v -timeout=24h -gcflags=all=-l  ./integration/... -run=$(tt)
 
 testtt:
-	@export CUBE_MASTER_CONFIG_PATH=`pwd`/test/conf.yaml && go test -v -timeout=24h -gcflags=all=-l ./integration/... -run $(tt)
+	@export CUBE_MASTER_CONFIG_PATH="$(ROOT_DIR)/test/conf.yaml" && go test -v -timeout=24h -gcflags=all=-l ./integration/... -run $(tt)
 
 proto: check-proto-tools
 	$(call msg,Generate proto)

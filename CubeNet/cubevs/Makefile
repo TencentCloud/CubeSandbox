@@ -27,6 +27,11 @@ gen:
 	$(call msg,GENERATE BPF)
 	$(Q)go generate ./...
 
+.PHONY: fmt
+fmt:
+	$(call msg,FORMAT)
+	$(Q)go fmt ./...
+
 .PHONY: lint
 lint:
 	$(call msg,RUN LINTERS)

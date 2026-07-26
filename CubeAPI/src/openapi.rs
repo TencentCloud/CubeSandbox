@@ -12,13 +12,11 @@ use utoipa::{
 use crate::{
     handlers,
     models::{
-        ApiError, ClusterOverview, ComponentMatrixRowView, ComponentVersionGroupView,
-        ComponentVersionView, ControlPlaneVersionView, NodeComponentEntryView, NodeConditionView,
-        NodeResourcesView, NodeVersionRowView, NodeView, ResumedSandbox, Sandbox, SandboxDetail,
-        SandboxLogEntry, SandboxLogsV2Response, SandboxState, SandboxVolumeMount,
+        ApiError, CreateTemplateRequest, RebuildTemplateRequest, ResumedSandbox, Sandbox,
+        SandboxDetail, SandboxLogEntry, SandboxLogsV2Response, SandboxState, SandboxVolumeMount,
+        TemplateAliasLookupResponse, TemplateBuildJob, TemplateBuildStatus,
         TemplateCompatAdoptResponseView, TemplateCompatMatrixView, TemplateCompatRowView,
         TemplateCompatSummaryView, TemplateDetail, TemplateNodeCompatView, TemplateSummary,
-        VersionMatrixView,
     },
 };
 
@@ -48,16 +46,20 @@ impl Modify for SecurityAddon {
     info(
         title = "CubeAPI",
         version = "0.1.0",
-        description = "OpenAPI contract for the CubeSandbox dashboard surface."
+        description = "E2B-compatible sandbox API server."
     ),
     paths(
         handlers::health::health,
-        handlers::cluster::cluster_overview,
-        handlers::cluster::cluster_versions,
-        handlers::cluster::list_nodes,
-        handlers::cluster::get_node,
         handlers::templates::list_templates,
         handlers::templates::get_template,
+        handlers::templates::get_template_by_alias,
+        handlers::templates::create_template,
+        handlers::templates::rebuild_template,
+        handlers::templates::update_template,
+        handlers::templates::delete_template,
+        handlers::templates::start_template_build,
+        handlers::templates::get_template_build_status,
+        handlers::templates::get_template_build_logs,
         handlers::templates::template_compat,
         handlers::templates::adopt_template_compat_baseline,
         handlers::sandboxes::list_sandboxes_v2,
@@ -70,19 +72,13 @@ impl Modify for SecurityAddon {
     components(schemas(
         ApiError,
         handlers::health::HealthResponse,
-        ClusterOverview,
-        NodeResourcesView,
-        NodeConditionView,
-        NodeView,
-        ComponentVersionView,
-        ControlPlaneVersionView,
-        ComponentVersionGroupView,
-        ComponentMatrixRowView,
-        NodeComponentEntryView,
-        NodeVersionRowView,
-        VersionMatrixView,
         TemplateSummary,
         TemplateDetail,
+        TemplateAliasLookupResponse,
+        TemplateBuildJob,
+        TemplateBuildStatus,
+        CreateTemplateRequest,
+        RebuildTemplateRequest,
         TemplateCompatSummaryView,
         TemplateNodeCompatView,
         TemplateCompatRowView,
@@ -98,12 +94,8 @@ impl Modify for SecurityAddon {
         SandboxLogsV2Response
     )),
     modifiers(&SecurityAddon),
-    servers(
-        (url = "/cubeapi/v1", description = "CubeAPI dashboard surface")
-    ),
     tags(
         (name = "health", description = "Health and liveness"),
-        (name = "cluster", description = "Cluster and node inventory"),
         (name = "templates", description = "Template catalog"),
         (name = "sandboxes", description = "Sandbox lifecycle and logs")
     )

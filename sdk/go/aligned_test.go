@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestCreateSerializesPolicyAndPublicTraffic(t *testing.T) {
@@ -26,10 +28,12 @@ func TestCreateSerializesPolicyAndPublicTraffic(t *testing.T) {
 	defer server.Close()
 
 	allowPublic := false
+	maskRequestHost := "localhost:${PORT}"
 	client := NewClient(Config{APIURL: server.URL, TemplateID: "tpl-env", Timeout: 300 * time.Second})
 	_, err := client.Create(context.Background(), CreateOptions{
 		Network: NetworkOptions{
 			AllowPublicTraffic: &allowPublic,
+			MaskRequestHost:    &maskRequestHost,
 			AllowOut:           []string{"172.67.0.0/16"},
 			Rules: []Rule{{
 				Name:   "gh",
@@ -49,6 +53,7 @@ func TestCreateSerializesPolicyAndPublicTraffic(t *testing.T) {
 	if network["allowPublicTraffic"] != false {
 		t.Fatalf("allowPublicTraffic=%#v, want false", network["allowPublicTraffic"])
 	}
+	require.Equal(t, maskRequestHost, network["maskRequestHost"])
 	rules, ok := network["rules"].([]any)
 	if !ok || len(rules) != 1 {
 		t.Fatalf("rules=%#v", network["rules"])

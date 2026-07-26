@@ -1,4 +1,4 @@
-IMAGE_TAG           ?= v0.5.1
+IMAGE_TAG           ?= v0.6.0
 IMAGE_LOCAL         := cube-lifecycle-manager
 CUBE_VERSION        ?= $(IMAGE_TAG)
 CUBE_COMMIT         ?= $(shell git rev-parse HEAD | cut -c1-8)
@@ -63,6 +63,10 @@ manifest:
 			docker manifest rm $$image:$$tag; \
 		done; \
 	done
+
+.PHONY: fmt
+fmt:
+	$(Q)go fmt ./...
 
 .PHONY: test
 test:

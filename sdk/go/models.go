@@ -50,6 +50,9 @@ type NetworkOptions struct {
 	AllowOut           []string
 	DenyOut            []string
 	Rules              []Rule
+	// MaskRequestHost is the Host authority forwarded to user services.
+	// ${PORT} expands to the requested sandbox port.
+	MaskRequestHost *string
 }
 
 type CreateOptions struct {

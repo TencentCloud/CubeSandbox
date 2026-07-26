@@ -181,6 +181,22 @@
   
     - [Version](#cubelet-services-version-v1-Version)
   
+- [api/services/volumeplugin/v1/volumeplugin.proto](#api_services_volumeplugin_v1_volumeplugin-proto)
+    - [AttachRequest](#cubelet-services-volumeplugin-v1-AttachRequest)
+    - [AttachResponse](#cubelet-services-volumeplugin-v1-AttachResponse)
+    - [AttachResponse.MetadataEntry](#cubelet-services-volumeplugin-v1-AttachResponse-MetadataEntry)
+    - [CreateRequest](#cubelet-services-volumeplugin-v1-CreateRequest)
+    - [CreateResponse](#cubelet-services-volumeplugin-v1-CreateResponse)
+    - [DestroyRequest](#cubelet-services-volumeplugin-v1-DestroyRequest)
+    - [DestroyResponse](#cubelet-services-volumeplugin-v1-DestroyResponse)
+    - [DetachRequest](#cubelet-services-volumeplugin-v1-DetachRequest)
+    - [DetachRequest.MetadataEntry](#cubelet-services-volumeplugin-v1-DetachRequest-MetadataEntry)
+    - [DetachResponse](#cubelet-services-volumeplugin-v1-DetachResponse)
+    - [PluginVolumeSource](#cubelet-services-volumeplugin-v1-PluginVolumeSource)
+  
+    - [VolumeControllerService](#cubelet-services-volumeplugin-v1-VolumeControllerService)
+    - [VolumePluginService](#cubelet-services-volumeplugin-v1-VolumePluginService)
+  
 - [api/types/v1/descriptor.proto](#api_types_v1_descriptor-proto)
     - [Descriptor](#cubelet-types-Descriptor)
     - [Descriptor.AnnotationsEntry](#cubelet-types-Descriptor-AnnotationsEntry)
@@ -1884,6 +1900,7 @@ Only one of its members may be specified.
 | sandbox_path | [SandboxPathVolumeSource](#cubelet-services-cubebox-v1-SandboxPathVolumeSource) |  |  |
 | host_dir_volumes | [HostDirVolumeSources](#cubelet-services-cubebox-v1-HostDirVolumeSources) |  | host_dir_volumes shares host directories into the container via virtiofs. |
 | image | [cubelet.services.images.v1.ImageVolumeSource](#cubelet-services-images-v1-ImageVolumeSource) |  | image volume source for image volume mount |
+| plugin_volume | [cubelet.services.volumeplugin.v1.PluginVolumeSource](#cubelet-services-volumeplugin-v1-PluginVolumeSource) |  | plugin_volume delegates provisioning to a named external VolumePlugin (built-in, binary or RPC). All other fields above are handled by the existing storage pipeline and are NOT routed through the plugin framework. |
 
 
 
@@ -3035,6 +3052,217 @@ Service for machine level operations.
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
 | Version | [.google.protobuf.Empty](#google-protobuf-Empty) | [VersionResponse](#cubelet-services-version-v1-VersionResponse) |  |
+
+ 
+
+
+
+<a name="api_services_volumeplugin_v1_volumeplugin-proto"></a>
+<p align="right"><a href="#top">Top</a></p>
+
+## api/services/volumeplugin/v1/volumeplugin.proto
+
+
+
+<a name="cubelet-services-volumeplugin-v1-AttachRequest"></a>
+
+### AttachRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| sandbox_id | [string](#string) |  | sandbox_id is the sandbox being created. |
+| namespace | [string](#string) |  | namespace is the containerd namespace. |
+| volume_id | [string](#string) |  | volume_id is the CubeMaster VolumeRecord identifier. Used as the ref-count DB key for cross-sandbox deduplication. |
+| volume_base_dir | [string](#string) |  | volume_base_dir is the parent directory that Cubelet requires the plugin to mount this volume under. The plugin MUST return a host_path located inside this directory (typically &#34;&lt;volume_base_dir&gt;/&lt;plugin&gt;-&lt;volume_id&gt;&#34;). Cubelet rejects the attach if host_path is not within volume_base_dir. |
+| ref_count | [int64](#int64) |  | ref_count is the number of sandboxes already attached to this volume BEFORE this call (i.e. the pre-attach count). 0 → first attach; plugin should perform host-level setup. |
+| private_data | [string](#string) |  | private_data is opaque plugin state returned by Create and persisted in t_cube_volume. CubeMaster forwards it on sandbox create so Attach can reuse Create-time context without a second control-plane round-trip. Max length: 1024 bytes. May be empty. |
+
+
+
+
+
+
+<a name="cubelet-services-volumeplugin-v1-AttachResponse"></a>
+
+### AttachResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| host_path | [string](#string) |  | host_path is the host-side path cubelet exposes into the VM. |
+| metadata | [AttachResponse.MetadataEntry](#cubelet-services-volumeplugin-v1-AttachResponse-MetadataEntry) | repeated | metadata is opaque key-value data cubelet persists and passes back unchanged to Detach. |
+
+
+
+
+
+
+<a name="cubelet-services-volumeplugin-v1-AttachResponse-MetadataEntry"></a>
+
+### AttachResponse.MetadataEntry
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| key | [string](#string) |  |  |
+| value | [string](#string) |  |  |
+
+
+
+
+
+
+<a name="cubelet-services-volumeplugin-v1-CreateRequest"></a>
+
+### CreateRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| volume_id | [string](#string) |  | volume_id is the stable identifier assigned by CubeMaster. |
+| name | [string](#string) |  | name is the human-readable label. |
+
+
+
+
+
+
+<a name="cubelet-services-volumeplugin-v1-CreateResponse"></a>
+
+### CreateResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| token | [string](#string) |  | token is an optional credential for volume-content access. volume_id and name come from the CreateRequest; plugins must not echo them. |
+| private_data | [string](#string) |  | private_data is opaque plugin state persisted in t_cube_volume and forwarded to Attach on sandbox create. Not returned to API/SDK clients. Max length: 1024 bytes. May be empty. |
+
+
+
+
+
+
+<a name="cubelet-services-volumeplugin-v1-DestroyRequest"></a>
+
+### DestroyRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| volume_id | [string](#string) |  |  |
+
+
+
+
+
+
+<a name="cubelet-services-volumeplugin-v1-DestroyResponse"></a>
+
+### DestroyResponse
+
+
+
+
+
+
+
+<a name="cubelet-services-volumeplugin-v1-DetachRequest"></a>
+
+### DetachRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| sandbox_id | [string](#string) |  |  |
+| namespace | [string](#string) |  |  |
+| volume_id | [string](#string) |  |  |
+| metadata | [DetachRequest.MetadataEntry](#cubelet-services-volumeplugin-v1-DetachRequest-MetadataEntry) | repeated | metadata is the exact map returned by the corresponding Attach call. |
+| ref_count | [int64](#int64) |  | ref_count is the number of sandboxes still attached AFTER this call (i.e. the post-detach count). 0 → last detach; plugin should tear down host-level resources. |
+
+
+
+
+
+
+<a name="cubelet-services-volumeplugin-v1-DetachRequest-MetadataEntry"></a>
+
+### DetachRequest.MetadataEntry
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| key | [string](#string) |  |  |
+| value | [string](#string) |  |  |
+
+
+
+
+
+
+<a name="cubelet-services-volumeplugin-v1-DetachResponse"></a>
+
+### DetachResponse
+
+
+
+
+
+
+
+<a name="cubelet-services-volumeplugin-v1-PluginVolumeSource"></a>
+
+### PluginVolumeSource
+PluginVolumeSource selects an external volume plugin by driver name.
+Embedded in cubebox.VolumeSource.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| driver | [string](#string) |  | driver is the registered plugin name (e.g. &#34;nfs&#34;, &#34;s3fuse&#34;, &#34;cfs&#34;). Must match VolumePlugin.Name() on the Cubelet node. |
+
+
+
+
+
+ 
+
+ 
+
+ 
+
+
+<a name="cubelet-services-volumeplugin-v1-VolumeControllerService"></a>
+
+### VolumeControllerService
+VolumeControllerService is the gRPC interface for CubeMaster Controller hooks.
+RPC-type plugins implement this service alongside VolumePluginService (Node).
+
+| Method Name | Request Type | Response Type | Description |
+| ----------- | ------------ | ------------- | ------------|
+| Create | [CreateRequest](#cubelet-services-volumeplugin-v1-CreateRequest) | [CreateResponse](#cubelet-services-volumeplugin-v1-CreateResponse) | Create provisions a new volume in the backend storage. |
+| Destroy | [DestroyRequest](#cubelet-services-volumeplugin-v1-DestroyRequest) | [DestroyResponse](#cubelet-services-volumeplugin-v1-DestroyResponse) | Destroy permanently deletes a volume and its backend data. |
+
+
+<a name="cubelet-services-volumeplugin-v1-VolumePluginService"></a>
+
+### VolumePluginService
+VolumePluginService is the gRPC interface implemented by RPC-type plugins.
+The Cubelet VolumePlugin framework calls these RPCs instead of forking a
+subprocess.
+
+| Method Name | Request Type | Response Type | Description |
+| ----------- | ------------ | ------------- | ------------|
+| Attach | [AttachRequest](#cubelet-services-volumeplugin-v1-AttachRequest) | [AttachResponse](#cubelet-services-volumeplugin-v1-AttachResponse) | Attach provisions the volume on the host and returns attach metadata. Cubelet stores the returned metadata and passes it back unchanged on Detach. |
+| Detach | [DetachRequest](#cubelet-services-volumeplugin-v1-DetachRequest) | [DetachResponse](#cubelet-services-volumeplugin-v1-DetachResponse) | Detach tears down a previously attached volume. |
 
  
 

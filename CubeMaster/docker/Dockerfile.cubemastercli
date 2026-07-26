@@ -1,0 +1,103 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Multi-stage build for cubemastercli (K8s operational CLI Pod).
+#
+# Build context MUST be the repository root:
+#   docker build -f CubeMaster/docker/Dockerfile.cubemastercli -t cubemastercli:TAG .
+#
+# See .github/workflows/release-docker-images.yml.
+
+# ── Build stage ────────────────────────────────────────────────────────────────
+FROM golang:1.25-bookworm AS builder
+ARG TARGETARCH
+ARG CUBE_VERSION=0.0.0-dev
+ARG CUBE_COMMIT=unknown
+ARG CUBE_BUILD_TIME=unknown
+
+WORKDIR /src
+
+COPY CubeMaster/go.mod CubeMaster/go.sum ./
+COPY cubelog/go.mod cubelog/go.sum /cubelog/
+COPY CubeDB/go.mod CubeDB/go.sum /CubeDB/
+COPY Cubelet/go.mod Cubelet/go.sum /Cubelet/
+RUN go mod download
+
+COPY CubeMaster/ ./
+COPY cubelog/ /cubelog/
+COPY CubeDB/ /CubeDB/
+COPY Cubelet/ /Cubelet/
+
+ENV CGO_ENABLED=0
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) goarch=amd64 ;; \
+      arm64) goarch=arm64 ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    GOOS=linux GOARCH="${goarch}" go build -o /out/cubemastercli \
+      -ldflags "-s -w \
+        -X 'github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version.Version=${CUBE_VERSION}' \
+        -X 'github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version.Commit=${CUBE_COMMIT}' \
+        -X 'github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version.BuildTime=${CUBE_BUILD_TIME}'" \
+      ./cmd/cubemastercli
+
+# ── Runtime stage ──────────────────────────────────────────────────────────────
+FROM ubuntu:24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && update-ca-certificates
+
+COPY --from=builder --chmod=0755 /out/cubemastercli /usr/local/bin/cubemastercli
+
+# Fail early if the binary cannot exec in this image.
+RUN ["/usr/local/bin/cubemastercli", "--help"]
+
+# Interactive bash helper for kubectl exec -it ... -- bash:
+# inject CUBEMASTERCLI_ADDRESS / CUBEMASTERCLI_PORT when flags are omitted.
+# Non-interactive commands still execute the original binary unchanged.
+RUN { \
+        printf '%s\n' \
+          '# Cube cubemastercli interactive defaults.' \
+          '# This is intentionally a bash interactive helper, not a wrapper binary:' \
+          '# - kubectl exec -it ... -- bash can run cubemastercli list directly.' \
+          '# - non-interactive commands still execute the original binary unchanged.' \
+          '__cube_cubemastercli_has_flag() {' \
+          '    local flag="$1"' \
+          '    shift' \
+          '' \
+          '    while [ "$#" -gt 0 ]; do' \
+          '        case "$1" in' \
+          '            "${flag}"|"${flag}"=*)' \
+          '                return 0' \
+          '                ;;' \
+          '        esac' \
+          '        shift' \
+          '    done' \
+          '' \
+          '    return 1' \
+          '}' \
+          '' \
+          'cubemastercli() {' \
+          '    local args=()' \
+          '' \
+          '    if [ -n "${CUBEMASTERCLI_ADDRESS:-}" ] && ! __cube_cubemastercli_has_flag "--address" "$@"; then' \
+          '        args+=(--address "${CUBEMASTERCLI_ADDRESS}")' \
+          '    fi' \
+          '' \
+          '    if [ -n "${CUBEMASTERCLI_PORT:-}" ] && ! __cube_cubemastercli_has_flag "--port" "$@"; then' \
+          '        args+=(--port "${CUBEMASTERCLI_PORT}")' \
+          '    fi' \
+          '' \
+          '    command /usr/local/bin/cubemastercli "${args[@]}" "$@"' \
+          '}'; \
+      } >/etc/cubemastercli-interactive.bashrc \
+    && printf '\n%s\n' '[ -f /etc/cubemastercli-interactive.bashrc ] && . /etc/cubemastercli-interactive.bashrc' >>/root/.bashrc
+
+CMD ["sleep", "infinity"]
