@@ -186,7 +186,7 @@ pub async fn create_sandbox(
         .await;
 
     if let Some(ref webhook) = state.webhook {
-        webhook.dispatch("sandbox.created", &sandbox_id, Some(template_id.clone()));
+        webhook.dispatch("sandbox.created", &sandbox_id, Some(&template_id));
     }
 
     Ok((StatusCode::CREATED, Json(created)))

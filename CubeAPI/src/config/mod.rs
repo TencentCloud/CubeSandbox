@@ -81,7 +81,9 @@ pub struct ServerConfig {
     /// Webhook configuration for event notifications.
     ///
     /// Loaded from `WEBHOOK_*` environment variables.
-    #[serde(default)]
+    /// Skipped in config-crate deserialization to avoid conflicts with
+    /// `WEBHOOK__*` env vars; always populated via `WebhookConfig::from_env()`.
+    #[serde(skip)]
     pub webhook: WebhookConfig,
 }
 
@@ -143,7 +145,7 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             cube_api_key: std::env::var("CUBE_API_KEY").ok().filter(|s| !s.is_empty()),
-            webhook: WebhookConfig::from_env(),
+            webhook: WebhookConfig::default(),
         }
     }
 }

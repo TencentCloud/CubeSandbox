@@ -99,6 +99,16 @@ impl WebhookConfig {
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
+                .filter(|s| {
+                    let valid = s.starts_with("http://") || s.starts_with("https://");
+                    if !valid {
+                        tracing::warn!(
+                            "WEBHOOK_ENDPOINTS: ignoring invalid URL \"{}\" (must start with http:// or https://)",
+                            s
+                        );
+                    }
+                    valid
+                })
                 .collect();
         }
 
@@ -206,11 +216,11 @@ impl WebhookDispatcher {
     /// The caller (typically an API handler) is never blocked.
     pub fn dispatch(
         &self,
-        event_type: impl Into<String>,
-        sandbox_id: impl Into<String>,
-        template_id: Option<String>,
+        event_type: &str,
+        sandbox_id: &str,
+        template_id: Option<&str>,
     ) {
-        let event_type = event_type.into();
+        let event_type = event_type.to_string();
 
         if !self.config.should_deliver(&event_type) {
             return;
@@ -219,25 +229,15 @@ impl WebhookDispatcher {
         let payload = WebhookPayload {
             event: event_type,
             timestamp: Utc::now(),
-            sandbox_id: sandbox_id.into(),
-            template_id,
+            sandbox_id: sandbox_id.to_string(),
+            template_id: template_id.map(|s| s.to_string()),
         };
 
         let config = Arc::clone(&self.config);
         let client = self.client.clone();
 
-        let handle = tokio::spawn(async move {
-            deliver_to_all(&config, &client, &payload).await;
-        });
         tokio::spawn(async move {
-            if let Err(e) = handle.await {
-                tracing::error!(
-                    ?e,
-                    event = %payload.event,
-                    sandbox_id = %payload.sandbox_id,
-                    "webhook: dispatch task panicked"
-                );
-            }
+            deliver_to_all(&config, &client, &payload).await;
         });
     }
 }
@@ -269,7 +269,9 @@ async fn deliver_to_all(
         let retry_max = config.retry_max;
         let retry_base_ms = config.retry_base_ms;
 
-        let handle = tokio::spawn(async move {
+        let event_type = payload.event.clone();
+        let sandbox_id = payload.sandbox_id.clone();
+        tokio::spawn(async move {
             deliver_with_retry(
                 &client,
                 &endpoint,
@@ -277,17 +279,10 @@ async fn deliver_to_all(
                 signature.as_deref(),
                 retry_max,
                 retry_base_ms,
+                &event_type,
+                &sandbox_id,
             )
             .await;
-        });
-        tokio::spawn(async move {
-            if let Err(e) = handle.await {
-                tracing::error!(
-                    ?e,
-                    endpoint = %endpoint,
-                    "webhook: per-endpoint delivery task panicked"
-                );
-            }
         });
     }
 }
@@ -300,23 +295,10 @@ async fn deliver_with_retry(
     signature: Option<&str>,
     retry_max: u32,
     retry_base_ms: u64,
+    event_type: &str,
+    sandbox_id: &str,
 ) {
-    let event_info: String =
-        if let Ok(payload) = serde_json::from_slice::<serde_json::Value>(body) {
-            format!(
-                "event={} sandbox_id={}",
-                payload
-                    .get("event")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?"),
-                payload
-                    .get("sandbox_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?")
-            )
-        } else {
-            "unknown".to_string()
-        };
+    let event_info = format!("event={} sandbox_id={}", event_type, sandbox_id);
 
     for attempt in 0..=retry_max {
         if attempt > 0 {
@@ -337,6 +319,7 @@ async fn deliver_with_retry(
             .post(endpoint)
             .header("Content-Type", "application/json")
             .header("User-Agent", "CubeSandbox-Webhook/1.0")
+            .timeout(Duration::from_secs(30))
             .body(body.to_vec());
 
         if let Some(sig) = signature {
