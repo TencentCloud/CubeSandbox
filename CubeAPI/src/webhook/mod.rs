@@ -118,14 +118,22 @@ impl WebhookConfig {
         }
 
         if let Ok(val) = std::env::var("WEBHOOK_RETRY_MAX") {
-            if let Ok(n) = val.trim().parse::<u32>() {
-                cfg.retry_max = n;
+            match val.trim().parse::<u32>() {
+                Ok(n) => cfg.retry_max = n,
+                Err(_) => tracing::warn!(
+                    "WEBHOOK_RETRY_MAX: invalid value \"{}\", using default {}",
+                    val, cfg.retry_max
+                ),
             }
         }
 
         if let Ok(val) = std::env::var("WEBHOOK_RETRY_BASE_MS") {
-            if let Ok(n) = val.trim().parse::<u64>() {
-                cfg.retry_base_ms = n;
+            match val.trim().parse::<u64>() {
+                Ok(n) => cfg.retry_base_ms = n,
+                Err(_) => tracing::warn!(
+                    "WEBHOOK_RETRY_BASE_MS: invalid value \"{}\", using default {}",
+                    val, cfg.retry_base_ms
+                ),
             }
         }
 
@@ -218,8 +226,18 @@ impl WebhookDispatcher {
         let config = Arc::clone(&self.config);
         let client = self.client.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             deliver_to_all(&config, &client, &payload).await;
+        });
+        tokio::spawn(async move {
+            if let Err(e) = handle.await {
+                tracing::error!(
+                    ?e,
+                    event = %payload.event,
+                    sandbox_id = %payload.sandbox_id,
+                    "webhook: dispatch task panicked"
+                );
+            }
         });
     }
 }
@@ -251,7 +269,7 @@ async fn deliver_to_all(
         let retry_max = config.retry_max;
         let retry_base_ms = config.retry_base_ms;
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             deliver_with_retry(
                 &client,
                 &endpoint,
@@ -261,6 +279,15 @@ async fn deliver_to_all(
                 retry_base_ms,
             )
             .await;
+        });
+        tokio::spawn(async move {
+            if let Err(e) = handle.await {
+                tracing::error!(
+                    ?e,
+                    endpoint = %endpoint,
+                    "webhook: per-endpoint delivery task panicked"
+                );
+            }
         });
     }
 }
