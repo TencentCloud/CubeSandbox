@@ -59,7 +59,6 @@ export function SandboxTerminalDialog({ sandboxId, open, onOpenChange, restoreKe
   const fitRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const resizeTimerRef = useRef<number | null>(null);
-  const keyboardPasteAtRef = useRef(0);
   const [status, setStatus] = useState<ConnectionState>('idle');
   const [error, setError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -166,28 +165,11 @@ export function SandboxTerminalDialog({ sandboxId, open, onOpenChange, restoreKe
     };
 
     const dataDisposable = term.onData(sendTerminalInput);
-    term.attachCustomKeyEventHandler((event) => {
-      if (
-        event.type === 'keydown'
-        && (event.ctrlKey || event.metaKey)
-        && event.key.toLowerCase() === 'v'
-      ) {
-        keyboardPasteAtRef.current = Date.now();
-        void navigator.clipboard?.readText?.()
-          .then((text) => {
-            if (text.length > 0) sendTerminalInput(text);
-          })
-          .catch(() => undefined);
-        return false;
-      }
-      return true;
-    });
     const pasteListener = (event: ClipboardEvent) => {
       const text = event.clipboardData?.getData('text/plain') ?? '';
       if (text.length > 0) {
         event.preventDefault();
         event.stopPropagation();
-        if (Date.now() - keyboardPasteAtRef.current < 400) return;
         sendTerminalInput(text);
       }
     };
@@ -289,7 +271,6 @@ export function SandboxTerminalDialog({ sandboxId, open, onOpenChange, restoreKe
       resizeObserver.disconnect();
       mountElement.removeEventListener('paste', pasteListener, true);
       dataDisposable.dispose();
-      term.attachCustomKeyEventHandler(() => true);
       resizeDisposable.dispose();
       if (resizeTimerRef.current !== null) {
         window.clearTimeout(resizeTimerRef.current);

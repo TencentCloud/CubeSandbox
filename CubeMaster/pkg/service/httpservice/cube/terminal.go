@@ -101,6 +101,10 @@ func handleTerminalAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.Re
 		http.Error(w, "terminal requires a WebSocket upgrade", http.StatusBadRequest)
 		return
 	}
+	if !terminalGatewayAllowed(r) {
+		http.Error(w, "terminal gateway authorization failed", http.StatusForbidden)
+		return
+	}
 
 	conn, err := terminalUpgrader.Upgrade(w, r, nil)
 	if err != nil {

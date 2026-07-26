@@ -34,6 +34,21 @@ func TestTerminalWebSocketRequiresGatewayToken(t *testing.T) {
 	}
 }
 
+func TestTerminalHandlerRejectsInvalidGatewayTokenBeforeUpgrade(t *testing.T) {
+	t.Setenv(terminalGatewayTokenEnv, "shared-terminal-secret")
+	request := httptest.NewRequest(http.MethodGet, "http://master/cube/sandbox/terminal", nil)
+	request.Header.Set("Connection", "Upgrade")
+	request.Header.Set("Upgrade", "websocket")
+	request.Header.Set(terminalGatewayTokenHeader, "wrong-secret")
+	response := httptest.NewRecorder()
+
+	handleTerminalAction(response, request, nil)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("unexpected status %d, want %d", response.Code, http.StatusForbidden)
+	}
+}
+
 func TestRunTerminalRelayRecoversPanic(t *testing.T) {
 	reason := runTerminalRelay(context.Background(), "test", func() string {
 		panic("relay failed")
