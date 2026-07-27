@@ -10,7 +10,7 @@
 //! a lightweight log sink with bounded flush latency.
 
 use super::{LogEvent, Logger};
-use anyhow::{anyhow, bail, Context};
+use anyhow::{bail, Context};
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
 use reqwest::{
@@ -681,9 +681,8 @@ fn backoff_duration(delivery: &DeliveryConfig, failed_attempt: usize) -> Duratio
 }
 
 fn signature_header(secret: &str, body: &[u8]) -> String {
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-        .map_err(|err| anyhow!(err))
-        .expect("HMAC accepts any key length");
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(body);
     format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
 }
