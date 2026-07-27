@@ -19,20 +19,26 @@
 //   server → client: {"type":"ready","pid":42}
 //                    {"type":"output","data":"<base64>"}
 //                    {"type":"exit","exitCode":0}
+//                    {"type":"warning","code":"bad_input","message":"..."}
 //                    {"type":"error","code":"idle_timeout","message":"..."}
 //                    {"type":"pong"}
 //
-// Raw binary WebSocket frames are also accepted as terminal input, so thin
-// clients can skip the JSON framing for the hot path.
+// `warning` frames are non-fatal (the session stays open); `error` frames are
+// terminal. Raw binary WebSocket frames are also accepted as terminal input,
+// so thin clients can skip the JSON framing for the hot path.
 //
-// Authentication happens *in the handler* rather than via the `unified_auth`
-// middleware because browsers cannot attach headers to WebSocket upgrades:
-// credentials are accepted from the usual headers (non-browser clients) or
-// from query parameters (`sessionToken`, `apiKey`, `bearerToken`). Both the
-// optional auth callback and the optional WebUI session store are enforced
-// when configured. Every session start/close is written to the structured
-// audit log (`terminal.session.started` / `terminal.session.closed`).
+// Authentication. Browsers cannot attach headers to a WebSocket upgrade and
+// anything in the WebSocket URL is logged by proxies/load balancers, so the
+// WebUI first calls `POST .../terminal/ticket` (authenticated like every
+// other REST route) to mint a short-lived, single-use ticket, then opens the
+// socket with `?ticket=...`. Non-browser clients may instead present the
+// usual `Authorization: Bearer` / `X-API-Key` / `X-Session-Token` headers
+// directly on the upgrade. Both the optional auth callback and the optional
+// WebUI session store are enforced. Every session start/close is written to
+// the structured audit log (`terminal.session.started` /
+// `terminal.session.closed`).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
@@ -42,11 +48,14 @@ use axum::{
     },
     http::HeaderMap,
     response::Response,
+    Json,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use futures::StreamExt;
+use dashmap::DashMap;
+use futures::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::Instant;
 
 use crate::{
@@ -68,23 +77,75 @@ const IDLE_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 /// Bounds for the client-requested terminal geometry.
 const MAX_ROWS: u16 = 512;
 const MAX_COLS: u16 = 1024;
+/// Largest single Connect frame the decoder will buffer from the sandbox
+/// stream. The length prefix is attacker-influenceable via the proxy path, so
+/// a frame claiming more than this is rejected instead of allocated.
+const MAX_CONNECT_FRAME_BYTES: usize = 1 << 20; // 1 MiB
+/// Generic message sent to the browser when the sandbox backend fails, so raw
+/// envd/proxy error detail is logged server-side but never leaked to the UI.
+const GENERIC_BACKEND_ERROR: &str = "terminal backend error";
+
+// ─── One-time tickets ────────────────────────────────────────────────────────
+
+/// A single-use authorization for a terminal WebSocket upgrade. Minted by the
+/// authenticated `terminal_ticket` handler and consumed once by `terminal_ws`.
+#[derive(Debug, Clone)]
+pub struct TerminalTicket {
+    sandbox_id: String,
+    operator: String,
+    guest_user: String,
+    expires_at: Instant,
+}
+
+/// Process-wide store of outstanding terminal tickets, keyed by ticket id.
+#[derive(Clone, Default)]
+pub struct TerminalTickets(Arc<DashMap<String, TerminalTicket>>);
+
+impl TerminalTickets {
+    fn insert(&self, id: String, ticket: TerminalTicket) {
+        self.0.insert(id, ticket);
+    }
+
+    /// Remove and return the ticket, dropping it if it has expired. Also
+    /// opportunistically evicts other expired tickets so the map cannot grow
+    /// without bound when sockets are never opened.
+    fn take_valid(&self, id: &str) -> Option<TerminalTicket> {
+        let now = Instant::now();
+        self.0.retain(|_, t| t.expires_at > now);
+        self.0.remove(id).map(|(_, t)| t).filter(|t| t.expires_at > now)
+    }
+}
 
 // ─── Query / wire messages ──────────────────────────────────────────────────
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalQuery {
-    /// WebUI session token (browser WS cannot set `X-Session-Token`).
-    pub session_token: Option<String>,
-    /// API key for the auth callback (browser WS cannot set `X-API-Key`).
-    pub api_key: Option<String>,
-    /// Bearer token for the auth callback.
-    pub bearer_token: Option<String>,
+    /// One-time ticket minted by `POST .../terminal/ticket`. Preferred for
+    /// browsers, which cannot set auth headers on a WebSocket upgrade.
+    pub ticket: Option<String>,
     /// Initial terminal size; defaults to 80x24, clamped server-side.
     pub cols: Option<u16>,
     pub rows: Option<u16>,
     /// Sandbox user the shell runs as (envd user), default `root`.
+    /// Ignored when a ticket is used (the ticket carries the user).
     pub user: Option<String>,
+}
+
+/// Query for `POST .../terminal/ticket`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TicketQuery {
+    /// Sandbox user the shell should run as (envd user), default `root`.
+    pub user: Option<String>,
+}
+
+/// Response of `POST .../terminal/ticket`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TicketResponse {
+    pub ticket: String,
+    pub expires_in_secs: u64,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -114,6 +175,12 @@ enum ServerMessage {
     Exit {
         exit_code: Option<i64>,
     },
+    /// Non-fatal notice (e.g. a bad input frame was ignored). The session
+    /// stays open; the client should surface it without tearing down.
+    Warning {
+        code: String,
+        message: String,
+    },
     /// Terminal session ends abnormally; `code` is machine-readable.
     Error {
         code: String,
@@ -124,14 +191,52 @@ enum ServerMessage {
 
 impl ServerMessage {
     fn to_ws(&self) -> Message {
-        Message::Text(serde_json::to_string(self).expect("server message serializes"))
+        // These variants always serialize; fall back to a fixed error frame
+        // rather than panicking so the bridge task can never abort mid-session.
+        Message::Text(serde_json::to_string(self).unwrap_or_else(|_| {
+            r#"{"type":"error","code":"internal","message":"terminal backend error"}"#.to_string()
+        }))
     }
 }
 
-// ─── HTTP entry point ────────────────────────────────────────────────────────
+// ─── HTTP entry points ───────────────────────────────────────────────────────
 
-/// `GET /sandboxes/:sandboxID/terminal` — authenticated WebSocket upgrade to
-/// an interactive shell in a *running* sandbox.
+/// `POST /sandboxes/:sandboxID/terminal/ticket` — authenticate the caller and
+/// mint a short-lived, single-use ticket for the terminal WebSocket. This lets
+/// the browser keep its real credentials in headers (a normal `fetch`) instead
+/// of putting them in the WebSocket URL, which proxies and load balancers log.
+pub async fn terminal_ticket(
+    State(state): State<AppState>,
+    Path(sandbox_id): Path<String>,
+    Query(query): Query<TicketQuery>,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+) -> AppResult<Json<TicketResponse>> {
+    validate_sandbox_id(&sandbox_id)?;
+    let guest_user = validate_guest_user(query.user.as_deref())?;
+    let operator = authorize(&state, &headers, uri.path()).await?;
+    ensure_running(&state, &sandbox_id, &operator).await?;
+
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let ttl = state.config.terminal_ticket_ttl_secs.max(1);
+    state.terminal_tickets.insert(
+        id.clone(),
+        TerminalTicket {
+            sandbox_id,
+            operator,
+            guest_user,
+            expires_at: Instant::now() + Duration::from_secs(ttl),
+        },
+    );
+    Ok(Json(TicketResponse {
+        ticket: id,
+        expires_in_secs: ttl,
+    }))
+}
+
+/// `GET /sandboxes/:sandboxID/terminal` — authorized WebSocket upgrade to an
+/// interactive shell in a *running* sandbox. Authorization is either a
+/// one-time `?ticket=` (browser path) or request headers (non-browser path).
 pub async fn terminal_ws(
     State(state): State<AppState>,
     Path(sandbox_id): Path<String>,
@@ -141,30 +246,52 @@ pub async fn terminal_ws(
     ws: WebSocketUpgrade,
 ) -> AppResult<Response> {
     validate_sandbox_id(&sandbox_id)?;
-    let guest_user = validate_guest_user(query.user.as_deref())?;
 
-    let operator = authorize(&state, &headers, &query, uri.path()).await?;
+    // Resolve the operator + guest user from a ticket when present, otherwise
+    // fall back to header credentials. A ticket is bound to one sandbox.
+    let (operator, guest_user) = match query.ticket.as_deref() {
+        Some(raw) => {
+            let ticket = state
+                .terminal_tickets
+                .take_valid(raw.trim())
+                .filter(|t| t.sandbox_id == sandbox_id)
+                .ok_or_else(|| {
+                    AppError::Unauthorized("invalid or expired terminal ticket".to_string())
+                })?;
+            (ticket.operator, ticket.guest_user)
+        }
+        None => {
+            let operator = authorize(&state, &headers, uri.path()).await?;
+            (operator, validate_guest_user(query.user.as_deref())?)
+        }
+    };
 
-    let detail = state.services.sandboxes.get_sandbox(&sandbox_id).await?;
-    if detail.state != SandboxState::Running {
-        state
-            .logger
-            .log(
-                LogEvent::new(LogLevel::Warn, "terminal.session.rejected")
-                    .field("sandbox_id", &sandbox_id)
-                    .field("operator", &operator)
-                    .field_value("state", &detail.state),
-            )
-            .await;
-        return Err(AppError::Conflict(format!(
-            "sandbox {} is not running (state: {:?}); terminal login requires a running sandbox",
-            sandbox_id, detail.state
-        )));
-    }
+    let detail = ensure_running(&state, &sandbox_id, &operator).await?;
     let domain = detail
         .domain
         .filter(|d| !d.trim().is_empty())
         .unwrap_or_else(|| state.config.sandbox_domain.clone());
+
+    // Bound the number of concurrent terminals server-wide. The permit is
+    // moved into the session and released when the socket closes.
+    let permit = match state.terminal_sessions.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            state
+                .logger
+                .log(
+                    LogEvent::new(LogLevel::Warn, "terminal.session.rejected")
+                        .field("sandbox_id", &sandbox_id)
+                        .field("operator", &operator)
+                        .field("reason", "max_sessions"),
+                )
+                .await;
+            return Err(AppError::ServiceUnavailable {
+                message: "too many active terminal sessions; try again shortly".to_string(),
+                retry_after: 5,
+            });
+        }
+    };
 
     let size = PtySize {
         rows: query.rows.unwrap_or(24).clamp(1, MAX_ROWS),
@@ -195,8 +322,34 @@ pub async fn terminal_ws(
         guest_user,
         size,
         idle_timeout,
+        _permit: permit,
     };
     Ok(ws.on_upgrade(move |socket| run_session(socket, ctx)))
+}
+
+/// Fetch the sandbox and require it to be running, auditing rejections.
+async fn ensure_running(
+    state: &AppState,
+    sandbox_id: &str,
+    operator: &str,
+) -> AppResult<crate::models::SandboxDetail> {
+    let detail = state.services.sandboxes.get_sandbox(sandbox_id).await?;
+    if detail.state != SandboxState::Running {
+        state
+            .logger
+            .log(
+                LogEvent::new(LogLevel::Warn, "terminal.session.rejected")
+                    .field("sandbox_id", sandbox_id)
+                    .field("operator", operator)
+                    .field_value("state", &detail.state),
+            )
+            .await;
+        return Err(AppError::Conflict(format!(
+            "sandbox {} is not running (state: {:?}); terminal login requires a running sandbox",
+            sandbox_id, detail.state
+        )));
+    }
+    Ok(detail)
 }
 
 fn validate_sandbox_id(id: &str) -> AppResult<()> {
@@ -233,22 +386,18 @@ fn validate_guest_user(user: Option<&str>) -> AppResult<String> {
 // ─── Authentication ──────────────────────────────────────────────────────────
 
 /// Enforce every configured auth mechanism and return the operator identity
-/// for the audit trail.
+/// for the audit trail. Credentials come from request *headers* only — the
+/// browser path authenticates the ticket-mint call (a normal `fetch`), so no
+/// credential ever needs to travel in a WebSocket URL.
 ///
-/// - When `auth_callback_url` is configured, a Bearer token or API key is
-///   required (header or query parameter) and validated via the callback,
-///   mirroring `middleware::auth::unified_auth`.
-/// - When the WebUI session store (database) is configured, a valid session
-///   token is required (`X-Session-Token` header or `sessionToken` query
-///   parameter) and resolves to the logged-in username.
+/// - When `auth_callback_url` is configured, a Bearer token or API key
+///   (`Authorization: Bearer` / `X-API-Key`) is required and validated via the
+///   callback, mirroring `middleware::auth::unified_auth`.
+/// - When the WebUI session store (database) is configured, a valid
+///   `X-Session-Token` is required and resolves to the logged-in username.
 /// - With neither configured the platform runs open (same posture as every
 ///   other route) and the operator is recorded as `anonymous`.
-async fn authorize(
-    state: &AppState,
-    headers: &HeaderMap,
-    query: &TerminalQuery,
-    request_path: &str,
-) -> AppResult<String> {
+async fn authorize(state: &AppState, headers: &HeaderMap, request_path: &str) -> AppResult<String> {
     let mut operator: Option<String> = None;
 
     if let Some(callback_url) = state
@@ -257,10 +406,10 @@ async fn authorize(
         .as_deref()
         .filter(|u| !u.is_empty())
     {
-        let credential = extract_api_credential(headers, query).ok_or_else(|| {
+        let credential = extract_api_credential(headers).ok_or_else(|| {
             AppError::Unauthorized(
-                "Missing authentication: provide 'Authorization: Bearer <token>' / \
-                 'X-API-Key: <key>' headers or 'bearerToken' / 'apiKey' query parameters"
+                "Missing authentication: provide an 'Authorization: Bearer <token>' or \
+                 'X-API-Key: <key>' header"
                     .to_string(),
             )
         })?;
@@ -295,9 +444,9 @@ async fn authorize(
     }
 
     if let Some(store) = &state.agenthub_store {
-        let token = session_token(headers, query).ok_or_else(|| {
+        let token = session_token(headers).ok_or_else(|| {
             AppError::Unauthorized(
-                "terminal login requires a WebUI session; pass 'sessionToken'".to_string(),
+                "terminal login requires a WebUI session; send 'X-Session-Token'".to_string(),
             )
         })?;
         let username = store
@@ -318,7 +467,7 @@ enum ApiCredential {
     ApiKey(String),
 }
 
-fn extract_api_credential(headers: &HeaderMap, query: &TerminalQuery) -> Option<ApiCredential> {
+fn extract_api_credential(headers: &HeaderMap) -> Option<ApiCredential> {
     if let Some(token) = headers
         .get("Authorization")
         .and_then(|v| v.to_str().ok())
@@ -336,39 +485,15 @@ fn extract_api_credential(headers: &HeaderMap, query: &TerminalQuery) -> Option<
     {
         return Some(ApiCredential::ApiKey(key.to_string()));
     }
-    if let Some(token) = query
-        .bearer_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        return Some(ApiCredential::Bearer(token.to_string()));
-    }
-    if let Some(key) = query
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        return Some(ApiCredential::ApiKey(key.to_string()));
-    }
     None
 }
 
-fn session_token(headers: &HeaderMap, query: &TerminalQuery) -> Option<String> {
+fn session_token(headers: &HeaderMap) -> Option<String> {
     headers
         .get("x-session-token")
         .and_then(|v| v.to_str().ok())
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
-        .or_else(|| {
-            query
-                .session_token
-                .as_deref()
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-                .map(str::to_string)
-        })
 }
 
 // ─── envd PTY client ─────────────────────────────────────────────────────────
@@ -455,7 +580,7 @@ impl EnvdPtyClient {
             let Some(chunk) = chunk else {
                 anyhow::bail!("PTY stream closed before start event");
             };
-            let frames = decoder.push(&chunk?);
+            let frames = decoder.push(&chunk?).map_err(|e| anyhow::anyhow!(e))?;
             let Some(frame) = frames.into_iter().next() else {
                 continue;
             };
@@ -550,7 +675,11 @@ struct ConnectFrameDecoder {
 }
 
 impl ConnectFrameDecoder {
-    fn push(&mut self, data: &[u8]) -> Vec<ConnectFrame> {
+    /// Feed a chunk and return any complete frames. Returns `Err` if a frame
+    /// header advertises a payload larger than `MAX_CONNECT_FRAME_BYTES`, so a
+    /// crafted length cannot drive unbounded allocation; the caller tears the
+    /// session down on error.
+    fn push(&mut self, data: &[u8]) -> Result<Vec<ConnectFrame>, String> {
         self.buf.extend_from_slice(data);
         let mut frames = Vec::new();
         loop {
@@ -559,6 +688,13 @@ impl ConnectFrameDecoder {
             }
             let len =
                 u32::from_be_bytes([self.buf[1], self.buf[2], self.buf[3], self.buf[4]]) as usize;
+            if len > MAX_CONNECT_FRAME_BYTES {
+                self.buf.clear();
+                return Err(format!(
+                    "connect frame length {} exceeds {} byte cap",
+                    len, MAX_CONNECT_FRAME_BYTES
+                ));
+            }
             if self.buf.len() < 5 + len {
                 break;
             }
@@ -567,7 +703,7 @@ impl ConnectFrameDecoder {
             self.buf.drain(..5 + len);
             frames.push(ConnectFrame { flags, payload });
         }
-        frames
+        Ok(frames)
     }
 }
 
@@ -582,6 +718,9 @@ struct SessionContext {
     guest_user: String,
     size: PtySize,
     idle_timeout: Duration,
+    // Held for the lifetime of the session; dropping it frees a slot in the
+    // server-wide terminal semaphore. Never read directly.
+    _permit: OwnedSemaphorePermit,
 }
 
 /// Why a session ended — recorded verbatim in the audit log.
@@ -593,6 +732,7 @@ enum CloseReason {
     EnvdError,
     EnvdStreamEnded,
     StartFailed,
+    Panicked,
 }
 
 impl CloseReason {
@@ -604,6 +744,7 @@ impl CloseReason {
             CloseReason::EnvdError => "envd_error",
             CloseReason::EnvdStreamEnded => "envd_stream_ended",
             CloseReason::StartFailed => "start_failed",
+            CloseReason::Panicked => "panicked",
         }
     }
 }
@@ -620,6 +761,7 @@ async fn run_session(mut socket: WebSocket, ctx: SessionContext) {
     let (pid, stream) = match envd.start(ctx.size).await {
         Ok(started) => started,
         Err(err) => {
+            // Log the real cause; tell the client only that it failed.
             tracing::warn!(
                 sandbox_id = %ctx.sandbox_id,
                 error = %err,
@@ -629,7 +771,7 @@ async fn run_session(mut socket: WebSocket, ctx: SessionContext) {
                 .send(
                     ServerMessage::Error {
                         code: CloseReason::StartFailed.as_str().to_string(),
-                        message: format!("failed to start terminal: {}", err),
+                        message: "failed to start terminal".to_string(),
                     }
                     .to_ws(),
                 )
@@ -645,27 +787,51 @@ async fn run_session(mut socket: WebSocket, ctx: SessionContext) {
         .await
         .is_err()
     {
-        let _ = envd.kill(pid).await;
+        reap_pty(&envd, &ctx, pid).await;
         audit_close(&ctx, Some(pid), CloseReason::ClientDisconnected, started).await;
         return;
     }
 
-    let reason = bridge(&mut socket, &envd, pid, stream, ctx.idle_timeout).await;
+    // Guard the pump against panics so the PTY is always reaped: a panic in
+    // the bridge task would otherwise be swallowed by Tokio, dropping the task
+    // without killing the shell.
+    let reason = match std::panic::AssertUnwindSafe(bridge(
+        &mut socket,
+        &envd,
+        pid,
+        stream,
+        ctx.idle_timeout,
+    ))
+    .catch_unwind()
+    .await
+    {
+        Ok(reason) => reason,
+        Err(_) => {
+            tracing::error!(sandbox_id = %ctx.sandbox_id, pid, "web terminal: bridge task panicked");
+            CloseReason::Panicked
+        }
+    };
 
     // The shell keeps running inside the sandbox unless it exited by itself;
-    // reap it so closed browser tabs do not leak PTY processes.
+    // reap it so closed browser tabs / crashes do not leak PTY processes.
     if reason != CloseReason::ProcessExit {
-        if let Err(err) = envd.kill(pid).await {
-            tracing::debug!(
-                sandbox_id = %ctx.sandbox_id,
-                pid,
-                error = %err,
-                "web terminal: PTY kill on close failed"
-            );
-        }
+        reap_pty(&envd, &ctx, pid).await;
     }
     let _ = socket.close().await;
     audit_close(&ctx, Some(pid), reason, started).await;
+}
+
+/// SIGKILL the PTY, surfacing failures at warn level so a leaked shell is
+/// visible in monitoring rather than hidden at debug.
+async fn reap_pty(envd: &EnvdPtyClient, ctx: &SessionContext, pid: u32) {
+    if let Err(err) = envd.kill(pid).await {
+        tracing::warn!(
+            sandbox_id = %ctx.sandbox_id,
+            pid,
+            error = %err,
+            "web terminal: PTY kill on close failed; shell may be orphaned in the sandbox"
+        );
+    }
 }
 
 /// Pump events between the WebSocket and the envd PTY until either side
@@ -691,17 +857,30 @@ async fn bridge(
                 let chunk = match chunk {
                     Ok(chunk) => chunk,
                     Err(err) => {
+                        tracing::warn!(pid, error = %err, "web terminal: sandbox stream failed");
                         let _ = send_error(socket, CloseReason::EnvdError,
-                            format!("terminal stream failed: {}", err)).await;
+                            GENERIC_BACKEND_ERROR.to_string()).await;
                         return CloseReason::EnvdError;
                     }
                 };
-                for frame in decoder.push(&chunk) {
+                let frames = match decoder.push(&chunk) {
+                    Ok(frames) => frames,
+                    Err(err) => {
+                        // Oversized/hostile frame length — log detail, tell the
+                        // client only that the backend errored.
+                        tracing::warn!(pid, error = %err, "web terminal: rejecting sandbox frame");
+                        let _ = send_error(socket, CloseReason::EnvdError,
+                            GENERIC_BACKEND_ERROR.to_string()).await;
+                        return CloseReason::EnvdError;
+                    }
+                };
+                for frame in frames {
                     if frame.flags & CONNECT_END_STREAM_FLAG != 0 {
                         let end: Value = serde_json::from_slice(&frame.payload).unwrap_or_default();
                         if end.get("error").is_some() {
+                            tracing::warn!(pid, detail = %end, "web terminal: sandbox reported stream error");
                             let _ = send_error(socket, CloseReason::EnvdError,
-                                format!("terminal backend error: {}", end)).await;
+                                GENERIC_BACKEND_ERROR.to_string()).await;
                             return CloseReason::EnvdError;
                         }
                         return CloseReason::EnvdStreamEnded;
@@ -739,13 +918,16 @@ async fn bridge(
                             Ok(ClientMessage::Input { data }) => {
                                 last_activity = Instant::now();
                                 let Ok(bytes) = BASE64.decode(data.as_bytes()) else {
-                                    let _ = send_error(socket, CloseReason::EnvdError,
-                                        "input payload is not valid base64".to_string()).await;
+                                    // Client-side framing bug: warn (non-fatal),
+                                    // keep the session open.
+                                    let _ = send_warning(socket, "bad_input",
+                                        "ignored input frame: payload is not valid base64").await;
                                     continue;
                                 };
                                 if let Err(err) = envd.send_input(pid, &bytes).await {
+                                    tracing::warn!(pid, error = %err, "web terminal: forward input failed");
                                     let _ = send_error(socket, CloseReason::EnvdError,
-                                        format!("failed to forward input: {}", err)).await;
+                                        GENERIC_BACKEND_ERROR.to_string()).await;
                                     return CloseReason::EnvdError;
                                 }
                             }
@@ -766,19 +948,18 @@ async fn bridge(
                                 }
                             }
                             Err(_) => {
-                                // Tolerate unknown/bad frames: report and continue.
-                                let _ = socket.send(ServerMessage::Error {
-                                    code: "bad_message".to_string(),
-                                    message: "unrecognized terminal message".to_string(),
-                                }.to_ws()).await;
+                                // Unknown/bad frame: non-fatal warning, keep going.
+                                let _ = send_warning(socket, "bad_message",
+                                    "ignored unrecognized terminal message").await;
                             }
                         }
                     }
                     Message::Binary(bytes) => {
                         last_activity = Instant::now();
                         if let Err(err) = envd.send_input(pid, &bytes).await {
+                            tracing::warn!(pid, error = %err, "web terminal: forward input failed");
                             let _ = send_error(socket, CloseReason::EnvdError,
-                                format!("failed to forward input: {}", err)).await;
+                                GENERIC_BACKEND_ERROR.to_string()).await;
                             return CloseReason::EnvdError;
                         }
                     }
@@ -810,6 +991,22 @@ async fn send_error(
             ServerMessage::Error {
                 code: code.as_str().to_string(),
                 message,
+            }
+            .to_ws(),
+        )
+        .await
+}
+
+async fn send_warning(
+    socket: &mut WebSocket,
+    code: &str,
+    message: &str,
+) -> Result<(), axum::Error> {
+    socket
+        .send(
+            ServerMessage::Warning {
+                code: code.to_string(),
+                message: message.to_string(),
             }
             .to_ws(),
         )
@@ -885,8 +1082,8 @@ mod tests {
         let bytes = frame_bytes(0, br#"{"event":1}"#);
         let (a, b) = bytes.split_at(3);
 
-        assert!(decoder.push(a).is_empty());
-        let frames = decoder.push(b);
+        assert!(decoder.push(a).unwrap().is_empty());
+        let frames = decoder.push(b).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].flags, 0);
         assert_eq!(frames[0].payload, br#"{"event":1}"#);
@@ -898,7 +1095,7 @@ mod tests {
         let mut bytes = frame_bytes(0, b"one");
         bytes.extend_from_slice(&frame_bytes(CONNECT_END_STREAM_FLAG, b"{}"));
 
-        let frames = decoder.push(&bytes);
+        let frames = decoder.push(&bytes).unwrap();
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].payload, b"one");
         assert_eq!(
@@ -910,11 +1107,25 @@ mod tests {
     #[test]
     fn decoder_buffers_partial_header() {
         let mut decoder = ConnectFrameDecoder::default();
-        assert!(decoder.push(&[0, 0]).is_empty());
-        assert!(decoder.push(&[0, 0]).is_empty());
-        let frames = decoder.push(&[1, b'x']);
+        assert!(decoder.push(&[0, 0]).unwrap().is_empty());
+        assert!(decoder.push(&[0, 0]).unwrap().is_empty());
+        let frames = decoder.push(&[1, b'x']).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].payload, b"x");
+    }
+
+    #[test]
+    fn decoder_rejects_oversized_frame() {
+        let mut decoder = ConnectFrameDecoder::default();
+        // Header claims a payload larger than the cap: reject without buffering.
+        let mut header = vec![0u8];
+        header.extend_from_slice(&((MAX_CONNECT_FRAME_BYTES as u32) + 1).to_be_bytes());
+        let err = decoder.push(&header).unwrap_err();
+        assert!(err.contains("exceeds"));
+        // Buffer was cleared, so the decoder recovers for subsequent frames.
+        let frames = decoder.push(&frame_bytes(0, b"ok")).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].payload, b"ok");
     }
 
     // ── Wire messages ────────────────────────────────────────────────────────
@@ -971,19 +1182,28 @@ mod tests {
     }
 
     #[test]
-    fn session_token_prefers_header_over_query() {
+    fn session_token_read_from_header_only() {
         let mut headers = HeaderMap::new();
         headers.insert("x-session-token", "from-header".parse().unwrap());
-        let query = TerminalQuery {
-            session_token: Some("from-query".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(session_token(&headers, &query).unwrap(), "from-header");
-        assert_eq!(
-            session_token(&HeaderMap::new(), &query).unwrap(),
-            "from-query"
-        );
-        assert!(session_token(&HeaderMap::new(), &TerminalQuery::default()).is_none());
+        assert_eq!(session_token(&headers).unwrap(), "from-header");
+        assert!(session_token(&HeaderMap::new()).is_none());
+    }
+
+    #[test]
+    fn api_credential_read_from_header_only() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Authorization", "Bearer tok-123".parse().unwrap());
+        assert!(matches!(
+            extract_api_credential(&headers),
+            Some(ApiCredential::Bearer(t)) if t == "tok-123"
+        ));
+        let mut headers = HeaderMap::new();
+        headers.insert("X-API-Key", "key-9".parse().unwrap());
+        assert!(matches!(
+            extract_api_credential(&headers),
+            Some(ApiCredential::ApiKey(k)) if k == "key-9"
+        ));
+        assert!(extract_api_credential(&HeaderMap::new()).is_none());
     }
 
     // ── Mock backends ────────────────────────────────────────────────────────
@@ -1274,10 +1494,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_enforces_auth_callback_with_query_credentials() {
+    async fn terminal_ticket_flow_enforces_auth_then_authorizes_ws() {
         let _guard = PROXY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-        // Callback that accepts only key "good-key" and records the path.
+        // Callback that accepts only key "good-key" and records path+method.
         let seen = Arc::new(tokio::sync::Mutex::new(Vec::<(String, String)>::new()));
         let seen_cb = seen.clone();
         let cb_app = Router::new().route(
@@ -1320,9 +1540,28 @@ mod tests {
         config.database_url = None;
         let addr = spawn_api(config).await;
 
-        // No credential at all → 401 before any backend call.
-        let bare = format!("ws://{}/cubeapi/v1/sandboxes/sb-1/terminal", addr);
-        match tokio_tungstenite::connect_async(&bare)
+        let http = reqwest::Client::new();
+        let ticket_url = format!("http://{}/cubeapi/v1/sandboxes/sb-1/terminal/ticket", addr);
+
+        // Ticket mint without a credential → 401 (headers carry the secret).
+        let resp = http.post(&ticket_url).send().await.unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        // Rejected credential → 401.
+        let resp = http
+            .post(&ticket_url)
+            .header("X-API-Key", "bad-key")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        // A WebSocket with a bogus ticket is rejected.
+        let bogus = format!(
+            "ws://{}/cubeapi/v1/sandboxes/sb-1/terminal?ticket=nope",
+            addr
+        );
+        match tokio_tungstenite::connect_async(&bogus)
             .await
             .expect_err("must reject")
         {
@@ -1330,29 +1569,132 @@ mod tests {
             other => panic!("expected 401, got {:?}", other),
         }
 
-        // Rejected credential (via query param, as a browser would send it) → 401.
-        let bad = format!("{}?apiKey=bad-key", bare);
-        match tokio_tungstenite::connect_async(&bad)
+        // Accepted credential mints a ticket; the WS then reaches ready.
+        let resp = http
+            .post(&ticket_url)
+            .header("X-API-Key", "good-key")
+            .send()
             .await
-            .expect_err("must reject")
-        {
-            tungstenite::Error::Http(resp) => assert_eq!(resp.status(), StatusCode::UNAUTHORIZED),
-            other => panic!("expected 401, got {:?}", other),
-        }
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let ticket = resp.json::<serde_json::Value>().await.unwrap();
+        let id = ticket["ticket"].as_str().unwrap().to_string();
 
-        // Accepted credential → session reaches the PTY ready message.
-        let good = format!("{}?apiKey=good-key", bare);
-        let (mut ws, _) = tokio_tungstenite::connect_async(&good)
+        let ws_url = format!(
+            "ws://{}/cubeapi/v1/sandboxes/sb-1/terminal?ticket={}",
+            addr, id
+        );
+        let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url)
             .await
             .expect("ws connect");
         let ready = next_json(&mut ws).await;
         assert_eq!(ready["type"], "ready");
         ws.close(None).await.unwrap();
 
+        // A ticket is single-use: reusing it fails.
+        match tokio_tungstenite::connect_async(&ws_url)
+            .await
+            .expect_err("ticket must be single-use")
+        {
+            tungstenite::Error::Http(resp) => assert_eq!(resp.status(), StatusCode::UNAUTHORIZED),
+            other => panic!("expected 401 on ticket reuse, got {:?}", other),
+        }
+
         let seen = seen.lock().await;
         assert!(seen.iter().any(|(key, path)| {
-            key == "good-key" && path == "/cubeapi/v1/sandboxes/sb-1/terminal"
+            key == "good-key" && path == "/cubeapi/v1/sandboxes/sb-1/terminal/ticket"
         }));
+
+        std::env::remove_var("AGENTHUB_SANDBOX_PROXY_URL");
+    }
+
+    #[tokio::test]
+    async fn terminal_bad_input_is_non_fatal_warning() {
+        let _guard = PROXY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let calls = Arc::new(tokio::sync::Mutex::new(EnvdCalls::default()));
+        let envd_url = spawn_mock_envd(calls).await;
+        std::env::set_var("AGENTHUB_SANDBOX_PROXY_URL", &envd_url);
+
+        let mut config = ServerConfig::default();
+        config.cubemaster_url = spawn_mock_cubemaster(1).await;
+        config.database_url = None;
+        let addr = spawn_api(config).await;
+
+        let url = format!("ws://{}/cubeapi/v1/sandboxes/sb-warn/terminal", addr);
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("ws connect");
+        assert_eq!(next_json(&mut ws).await["type"], "ready");
+        assert_eq!(next_json(&mut ws).await["type"], "output");
+
+        // Invalid base64 must yield a non-fatal warning, not a terminal error.
+        ws.send(tungstenite::Message::Text(
+            serde_json::json!({"type": "input", "data": "!!!not-base64!!!"}).to_string(),
+        ))
+        .await
+        .unwrap();
+        let warn = next_json(&mut ws).await;
+        assert_eq!(warn["type"], "warning");
+        assert_eq!(warn["code"], "bad_input");
+
+        // The session is still alive: a ping is still answered.
+        ws.send(tungstenite::Message::Text(
+            serde_json::json!({"type": "ping"}).to_string(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(next_json(&mut ws).await["type"], "pong");
+
+        ws.close(None).await.unwrap();
+        std::env::remove_var("AGENTHUB_SANDBOX_PROXY_URL");
+    }
+
+    #[tokio::test]
+    async fn terminal_enforces_max_sessions() {
+        let _guard = PROXY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let calls = Arc::new(tokio::sync::Mutex::new(EnvdCalls::default()));
+        let envd_url = spawn_mock_envd(calls).await;
+        std::env::set_var("AGENTHUB_SANDBOX_PROXY_URL", &envd_url);
+
+        let mut config = ServerConfig::default();
+        config.cubemaster_url = spawn_mock_cubemaster(1).await;
+        config.database_url = None;
+        config.terminal_max_sessions = 1; // only one concurrent terminal
+        let addr = spawn_api(config).await;
+
+        let url = format!("ws://{}/cubeapi/v1/sandboxes/sb-cap/terminal", addr);
+        let (mut ws1, _) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("first ws connect");
+        assert_eq!(next_json(&mut ws1).await["type"], "ready");
+
+        // Second concurrent session is rejected with 503 by the semaphore.
+        match tokio_tungstenite::connect_async(&url)
+            .await
+            .expect_err("second session must be rejected")
+        {
+            tungstenite::Error::Http(resp) => {
+                assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE)
+            }
+            other => panic!("expected 503, got {:?}", other),
+        }
+
+        // After the first closes and frees its permit, a new one succeeds.
+        ws1.close(None).await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match tokio_tungstenite::connect_async(&url).await {
+                Ok((mut ws2, _)) => {
+                    assert_eq!(next_json(&mut ws2).await["type"], "ready");
+                    ws2.close(None).await.unwrap();
+                    break;
+                }
+                Err(_) if Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(e) => panic!("permit was not released: {:?}", e),
+            }
+        }
 
         std::env::remove_var("AGENTHUB_SANDBOX_PROXY_URL");
     }

@@ -3,12 +3,15 @@
 
 // Interactive Web Terminal panel.
 //
-// Opens a WebSocket to `GET /cubeapi/v1/sandboxes/:id/terminal` (see
-// `CubeAPI/src/handlers/terminal.rs`) and wires it to an xterm.js instance:
-// keystrokes and paste are base64-framed to the PTY, PTY output is decoded
-// back, and window/resize changes are synchronized both ways. Because a
-// browser cannot attach auth headers to a WebSocket upgrade, the stored
-// session/API credentials are passed as query parameters.
+// Auth flow (see `CubeAPI/src/handlers/terminal.rs`): the browser first calls
+// `POST /cubeapi/v1/sandboxes/:id/terminal/ticket` through the normal `api`
+// wrapper (which sends the X-API-Key / X-Session-Token headers), receives a
+// short-lived single-use ticket, then opens the WebSocket with `?ticket=...`.
+// Credentials never travel in the WebSocket URL, which proxies/LBs would log.
+//
+// Once connected the socket is wired to an xterm.js instance: keystrokes and
+// paste are base64-framed to the PTY, PTY output is decoded back, and window
+// resizes are synchronized both ways.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -17,6 +20,7 @@ import { X, TerminalSquare, RotateCw, Maximize2, Minimize2 } from 'lucide-react'
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
+import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 interface Props {
@@ -26,6 +30,11 @@ interface Props {
 }
 
 type Status = 'connecting' | 'ready' | 'closed' | 'error';
+
+interface TicketResponse {
+  ticket: string;
+  expiresInSecs: number;
+}
 
 // Base64 helpers scoped to UTF-8, so multibyte input/paste round-trips safely.
 function encodeBase64(data: string): string {
@@ -42,18 +51,12 @@ function decodeBase64(data: string): Uint8Array {
   return bytes;
 }
 
-function terminalWsUrl(sandboxID: string): string {
+function terminalWsUrl(sandboxID: string, ticket: string): string {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const params = new URLSearchParams();
-  const apiKey = localStorage.getItem('cube.apiKey');
-  const session = localStorage.getItem('cube.session');
-  if (apiKey) params.set('apiKey', apiKey);
-  if (session) params.set('sessionToken', session);
-  const query = params.toString();
   const base = `${proto}//${window.location.host}/cubeapi/v1/sandboxes/${encodeURIComponent(
     sandboxID,
   )}/terminal`;
-  return query ? `${base}?${query}` : base;
+  return `${base}?ticket=${encodeURIComponent(ticket)}`;
 }
 
 export function SandboxTerminalDialog({ open, onOpenChange, sandboxID }: Props) {
@@ -100,68 +103,106 @@ export function SandboxTerminalDialog({ open, onOpenChange, sandboxID }: Props) 
     termRef.current = term;
     fitRef.current = fit;
 
+    // `disposed` guards every async callback so a late ticket response or a
+    // message arriving after cleanup never touches a disposed terminal.
+    let disposed = false;
+    let ws: WebSocket | null = null;
+
+    const detachSocket = (socket: WebSocket) => {
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onerror = null;
+      socket.onclose = null;
+    };
+
     setStatus('connecting');
     setStatusDetail('');
-    const ws = new WebSocket(terminalWsUrl(sandboxID));
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      // The backend sends `ready` once the PTY is live; keep "connecting"
-      // until then so the status reflects the actual shell, not just the WS.
-    };
-
-    ws.onmessage = (event) => {
-      let msg: { type?: string; data?: string; message?: string; exitCode?: number | null };
-      try {
-        msg = JSON.parse(typeof event.data === 'string' ? event.data : '');
-      } catch {
-        return;
-      }
-      switch (msg.type) {
-        case 'ready':
-          setStatus('ready');
-          // Sync the real geometry to the freshly-started PTY.
-          sendResize();
-          break;
-        case 'output':
-          if (msg.data) term.write(decoderRef.current.decode(decodeBase64(msg.data)));
-          break;
-        case 'exit':
-          setStatus('closed');
-          setStatusDetail(t('terminal.exited', { code: msg.exitCode ?? 0 }));
-          term.write(`\r\n\x1b[90m${t('terminal.exited', { code: msg.exitCode ?? 0 })}\x1b[0m\r\n`);
-          break;
-        case 'error':
-          setStatus('error');
-          setStatusDetail(msg.message ?? t('terminal.status.error'));
-          term.write(`\r\n\x1b[31m${msg.message ?? t('terminal.status.error')}\x1b[0m\r\n`);
-          break;
-        default:
-          break;
-      }
-    };
-
-    ws.onerror = () => {
-      setStatus('error');
-      setStatusDetail(t('terminal.status.error'));
-    };
-
-    ws.onclose = () => {
-      setStatus((prev) => (prev === 'ready' || prev === 'connecting' ? 'closed' : prev));
-    };
 
     const inputSub = term.onData((data) => {
-      if (ws.readyState === WebSocket.OPEN) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'input', data: encodeBase64(data) }));
       }
     });
     const resizeSub = term.onResize(() => sendResize());
 
+    (async () => {
+      let ticket: string;
+      try {
+        const resp = await api<TicketResponse>(`/sandboxes/${sandboxID}/terminal/ticket`, {
+          method: 'POST',
+        });
+        ticket = resp.ticket;
+      } catch (err) {
+        if (disposed) return;
+        setStatus('error');
+        setStatusDetail(err instanceof Error ? err.message : t('terminal.status.error'));
+        return;
+      }
+      if (disposed) return;
+
+      const socket = new WebSocket(terminalWsUrl(sandboxID, ticket));
+      ws = socket;
+      wsRef.current = socket;
+
+      socket.onmessage = (event) => {
+        if (disposed) return;
+        let msg: { type?: string; data?: string; message?: string; exitCode?: number | null };
+        try {
+          msg = JSON.parse(typeof event.data === 'string' ? event.data : '');
+        } catch {
+          return;
+        }
+        switch (msg.type) {
+          case 'ready':
+            setStatus('ready');
+            sendResize();
+            break;
+          case 'output':
+            if (msg.data) term.write(decoderRef.current.decode(decodeBase64(msg.data)));
+            break;
+          case 'warning':
+            // Non-fatal: surface briefly but keep the session open.
+            setStatusDetail(msg.message ?? '');
+            break;
+          case 'exit':
+            setStatus('closed');
+            setStatusDetail(t('terminal.exited', { code: msg.exitCode ?? 0 }));
+            term.write(
+              `\r\n\x1b[90m${t('terminal.exited', { code: msg.exitCode ?? 0 })}\x1b[0m\r\n`,
+            );
+            break;
+          case 'error':
+            setStatus('error');
+            setStatusDetail(msg.message ?? t('terminal.status.error'));
+            term.write(`\r\n\x1b[31m${msg.message ?? t('terminal.status.error')}\x1b[0m\r\n`);
+            break;
+          default:
+            break;
+        }
+      };
+
+      socket.onerror = () => {
+        if (disposed) return;
+        setStatus('error');
+        setStatusDetail(t('terminal.status.error'));
+      };
+
+      socket.onclose = () => {
+        if (disposed) return;
+        setStatus((prev) => (prev === 'ready' || prev === 'connecting' ? 'closed' : prev));
+      };
+    })();
+
     return () => {
+      disposed = true;
       inputSub.dispose();
       resizeSub.dispose();
-      ws.onclose = null;
-      ws.close();
+      if (ws) {
+        // Null every handler before closing so a message/close/error firing
+        // after term.dispose() cannot call into a disposed xterm instance.
+        detachSocket(ws);
+        ws.close();
+      }
       wsRef.current = null;
       term.dispose();
       termRef.current = null;
