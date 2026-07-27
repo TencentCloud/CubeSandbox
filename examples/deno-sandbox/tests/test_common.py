@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 EXAMPLE_DIR = Path(__file__).resolve().parents[1]
+FAKE_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 COMMON_SPEC = spec_from_file_location("deno_sandbox_common", EXAMPLE_DIR / "common.py")
 if COMMON_SPEC is None or COMMON_SPEC.loader is None:
     raise RuntimeError("Could not load the Deno sandbox common.py module")
@@ -43,7 +44,7 @@ class FakeCommands:
 
     def run(self, command: str, **_kwargs: object) -> SimpleNamespace:
         self.command = command
-        return SimpleNamespace(exit_code=0, stdout=f"{'a' * 64}\n", stderr="")
+        return SimpleNamespace(exit_code=0, stdout=f"{FAKE_SHA256}\n", stderr="")
 
 
 class FakeCommandSandbox:
@@ -87,7 +88,7 @@ class CommonTests(unittest.TestCase):
     def test_public_egress_check_targets_a_public_tcp_endpoint(self) -> None:
         sandbox = FakeCommandSandbox()
 
-        self.assertEqual(common.assert_public_egress_blocked(sandbox), "a" * 64)
+        self.assertEqual(common.assert_public_egress_blocked(sandbox), FAKE_SHA256)
         self.assertIn("/dev/tcp/127.0.0.1/49983", sandbox.commands.command)
         self.assertIn("/dev/tcp/1.1.1.1/80", sandbox.commands.command)
         self.assertIn("timeout 5", sandbox.commands.command)
@@ -147,10 +148,24 @@ class CommonTests(unittest.TestCase):
     def test_cache_fingerprint_uses_the_fixed_cache_path(self) -> None:
         sandbox = FakeCommandSandbox()
 
-        self.assertEqual(common.cache_fingerprint(sandbox), "a" * 64)
+        self.assertEqual(common.cache_fingerprint(sandbox), FAKE_SHA256)
         self.assertIn(common.DENO_CACHE_DIR, sandbox.commands.command)
         self.assertNotIn("$DENO_DIR", sandbox.commands.command)
         self.assertIn("-print -quit | grep -q .", sandbox.commands.command)
+
+    def test_start_service_validates_the_pid_command_line(self) -> None:
+        sandbox = FakeCommandSandbox()
+        sandbox.commands.run = Mock(
+            return_value=SimpleNamespace(exit_code=0, stdout="1234\n", stderr="")
+        )
+
+        self.assertEqual(common.start_service(sandbox), 1234)
+        command = sandbox.commands.run.call_args.args[0]
+        self.assertIn('case "$pid" in', command)
+        self.assertIn('kill -0 "$pid"', command)
+        self.assertIn('"/proc/$pid/cmdline"', command)
+        self.assertIn("grep -Fq 'deno task start'", command)
+        self.assertIn("printf '%s\\n'", command)
 
 
 if __name__ == "__main__":

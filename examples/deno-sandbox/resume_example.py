@@ -62,6 +62,7 @@ def main() -> int:
         if sandbox_identifier(resumed) != sandbox_id:
             raise RuntimeError("CubeSandbox connected to an unexpected sandbox")
 
+        # The create-time handle retains the traffic token required by CubeProxy.
         wait_for_app(sandbox, timeout=args.poll_timeout)
 
         after_state = counter_request(sandbox)

@@ -107,17 +107,29 @@ def run_checked(
 
 
 def start_service(sandbox: Any) -> int:
-    """Start the Deno service once and return its in-sandbox PID."""
-    command = (
-        f"if test -s {shlex.quote(APP_PID_FILE)} "
-        f'&& kill -0 "$(cat {shlex.quote(APP_PID_FILE)})" 2>/dev/null; then '
-        f"cat {shlex.quote(APP_PID_FILE)}; "
-        "else "
-        f"nohup deno task start </dev/null >{shlex.quote(APP_LOG_FILE)} 2>&1 & "
-        f"pid=$!; printf '%s\\n' \"$pid\" >{shlex.quote(APP_PID_FILE)}; "
-        "printf '%s\\n' \"$pid\"; "
-        "fi"
-    )
+    """Start the Deno service once, rejecting stale or recycled PID files."""
+    pid_file = shlex.quote(APP_PID_FILE)
+    log_file = shlex.quote(APP_LOG_FILE)
+    command = f"""\
+pid=''
+if test -s {pid_file}; then
+  pid=$(cat {pid_file})
+fi
+case "$pid" in
+  ''|*[!0-9]*) pid='' ;;
+esac
+if test -n "$pid" \
+  && kill -0 "$pid" 2>/dev/null \
+  && test -r "/proc/$pid/cmdline" \
+  && tr '\\0' ' ' <"/proc/$pid/cmdline" | grep -Fq 'deno task start'; then
+  printf '%s\\n' "$pid"
+else
+  nohup deno task start </dev/null >{log_file} 2>&1 &
+  pid=$!
+  printf '%s\\n' "$pid" >{pid_file}
+  printf '%s\\n' "$pid"
+fi
+"""
     result = run_checked(
         sandbox,
         command,
