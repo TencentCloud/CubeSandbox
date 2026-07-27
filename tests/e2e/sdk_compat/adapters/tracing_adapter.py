@@ -167,6 +167,43 @@ class TracingSandboxAdapter(SandboxAdapter):
             output=lambda _: {"closed": True},
         )
 
+    # --- 0.6.0 filesystem methods (forward to wrapped) ---
+    def file_exists(self, path: str, *, user: str = "root") -> bool:
+        return self._trace.capture(
+            "file_exists",
+            {"backend": self.backend, "sandbox_id": self.sandbox_id, "path": path, "user": user},
+            lambda: self._wrapped.file_exists(path, user=user),
+        )
+
+    def list_dir(self, path: str, *, user: str = "root"):
+        return self._trace.capture(
+            "list_dir",
+            {"backend": self.backend, "sandbox_id": self.sandbox_id, "path": path, "user": user},
+            lambda: self._wrapped.list_dir(path, user=user),
+        )
+
+    def make_dir(self, path: str, *, user: str = "root"):
+        return self._trace.capture(
+            "make_dir",
+            {"backend": self.backend, "sandbox_id": self.sandbox_id, "path": path, "user": user},
+            lambda: self._wrapped.make_dir(path, user=user),
+        )
+
+    def remove_file(self, path: str, *, user: str = "root") -> None:
+        return self._trace.capture(
+            "remove_file",
+            {"backend": self.backend, "sandbox_id": self.sandbox_id, "path": path, "user": user},
+            lambda: self._wrapped.remove_file(path, user=user),
+        )
+
+    def rename_file(self, old_path: str, new_path: str, *, user: str = "root"):
+        return self._trace.capture(
+            "rename_file",
+            {"backend": self.backend, "sandbox_id": self.sandbox_id,
+             "old_path": old_path, "new_path": new_path, "user": user},
+            lambda: self._wrapped.rename_file(old_path, new_path, user=user),
+        )
+
 
 def wrap_adapter(adapter: SandboxAdapter, trace: TraceCollector | None) -> SandboxAdapter:
     if trace is None or isinstance(adapter, TracingSandboxAdapter):

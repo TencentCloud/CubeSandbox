@@ -143,6 +143,22 @@ class CubeSandboxAdapter(SandboxAdapter):
     def kill(self) -> None:
         self._sandbox.kill()
 
+    # --- 0.6.0 filesystem methods (for test_user_isolation coverage) ---
+    def file_exists(self, path: str, *, user: str = "root") -> bool:
+        return self._sandbox.files.exists(path, user=user)
+
+    def list_dir(self, path: str, *, user: str = "root") -> list[dict[str, Any]]:
+        return self._sandbox.files.list(path, user=user)
+
+    def make_dir(self, path: str, *, user: str = "root") -> dict[str, Any]:
+        return self._sandbox.files.make_dir(path, user=user)
+
+    def remove_file(self, path: str, *, user: str = "root") -> None:
+        self._sandbox.files.remove(path, user=user)
+
+    def rename_file(self, old_path: str, new_path: str, *, user: str = "root") -> dict[str, Any]:
+        return self._sandbox.files.rename(old_path, new_path, user=user)
+
 
 def _normalize_log_lines(items: Any) -> list[str]:
     return [str(getattr(item, "line", item)) for item in items or []]

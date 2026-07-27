@@ -37,15 +37,25 @@ class Filesystem:
             headers["X-Access-Token"] = access_token
         return headers
 
-    def _filesystem_rpc(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _filesystem_rpc(
+        self, method: str, payload: dict[str, Any], *, user: str | None = None
+    ) -> dict[str, Any]:
         self._ensure_client()
         headers = self._base_headers()
         headers["Content-Type"] = "application/json"
         headers["Connect-Protocol-Version"] = CONNECT_PROTOCOL_VERSION
 
+        params: dict[str, str] = {}
+        # Only send username when explicitly requested — the RPC endpoints
+        # may not accept it yet, so we default to envd's built-in behaviour
+        # for backward compatibility.
+        if user is not None:
+            params["username"] = user
+
         resp = self._sandbox._client.post(
             f"http://{self._sandbox.get_host(ENVD_PORT)}/filesystem.Filesystem/{method}",
             json=payload,
+            params=params,
             headers=headers,
         )
         if resp.status_code >= 400:
@@ -140,36 +150,38 @@ class Filesystem:
                 ) from e
         return len(files)
 
-    def list(self, path: str) -> list[dict[str, Any]]:
+    def list(self, path: str, *, user: str | None = None) -> list[dict[str, Any]]:
         """List entries in a directory."""
-        result = self._filesystem_rpc("ListDir", {"path": path})
+        result = self._filesystem_rpc("ListDir", {"path": path}, user=user)
         return result.get("entries", [])
 
-    def stat(self, path: str) -> dict[str, Any]:
+    def stat(self, path: str, *, user: str | None = None) -> dict[str, Any]:
         """Return metadata for a file or directory."""
-        result = self._filesystem_rpc("Stat", {"path": path})
+        result = self._filesystem_rpc("Stat", {"path": path}, user=user)
         return result.get("entry", {})
 
-    def exists(self, path: str) -> bool:
+    def exists(self, path: str, *, user: str | None = None) -> bool:
         """Return True if the path exists inside the sandbox."""
         try:
-            self.stat(path)
+            self.stat(path, user=user)
             return True
         except FilesystemNotFoundError:
             return False
 
-    def remove(self, path: str) -> None:
+    def remove(self, path: str, *, user: str | None = None) -> None:
         """Delete a file or directory inside the sandbox."""
-        self._filesystem_rpc("Remove", {"path": path})
+        self._filesystem_rpc("Remove", {"path": path}, user=user)
 
-    def rename(self, old_path: str, new_path: str) -> dict[str, Any]:
+    def rename(self, old_path: str, new_path: str, *, user: str | None = None) -> dict[str, Any]:
         """Move or rename a file or directory."""
-        result = self._filesystem_rpc("Move", {"source": old_path, "destination": new_path})
+        result = self._filesystem_rpc(
+            "Move", {"source": old_path, "destination": new_path}, user=user
+        )
         return result.get("entry", {})
 
-    def make_dir(self, path: str) -> dict[str, Any]:
+    def make_dir(self, path: str, *, user: str | None = None) -> dict[str, Any]:
         """Create a directory inside the sandbox."""
-        result = self._filesystem_rpc("MakeDir", {"path": path})
+        result = self._filesystem_rpc("MakeDir", {"path": path}, user=user)
         return result.get("entry", {})
 
     def watch_dir(self, path: str) -> Watcher:

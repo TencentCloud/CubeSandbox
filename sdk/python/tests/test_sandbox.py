@@ -134,6 +134,47 @@ class TestCreate:
         body = m.call_args.kwargs["json"]
         assert body["envVars"] == {"FOO": "bar"}
 
+    def test_create_envs_alias_only_envs(self):
+        # E2B parity: `envs` is an alias for `env_vars`. When passed alone,
+        # it must reach the wire as `envVars` (the only field the server
+        # understands). Guards against a silent regression where `envs`
+        # leaks through **kwargs as the wrong field name.
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(envs={"FOO": "bar"}, config=make_config())
+        body = m.call_args.kwargs["json"]
+        assert body["envVars"] == {"FOO": "bar"}
+        assert "envs" not in body  # raw alias must not leak through
+
+    def test_create_envs_alias_both_equal(self):
+        # Passing both `env_vars` and `envs` with the same value is allowed
+        # (it's how E2B docs document the alias) and must produce one
+        # `envVars` entry on the wire.
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(env_vars={"FOO": "bar"}, envs={"FOO": "bar"},
+                           config=make_config())
+        body = m.call_args.kwargs["json"]
+        assert body["envVars"] == {"FOO": "bar"}
+
+    def test_create_envs_alias_mismatch_raises_value_error(self):
+        # `env_vars` and `envs` both passed but disagreeing must raise at
+        # call time so the mistake is caught before the sandbox is created.
+        with patch("requests.Session.post") as m:
+            with pytest.raises(ValueError, match="env_vars and envs conflict"):
+                Sandbox.create(env_vars={"FOO": "bar"}, envs={"FOO": "baz"},
+                               config=make_config())
+        # Critical: no network call was issued.
+        m.assert_not_called()
+
+    def test_create_no_env_args_omits_envVars(self):
+        # Without any env args, `envVars` must be absent from the payload
+        # (don't default to an empty dict — let the server apply its own
+        # default). Guards against the envs-alias refactor accidentally
+        # inserting `payload["envVars"] = {}`.
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(config=make_config())
+        body = m.call_args.kwargs["json"]
+        assert "envVars" not in body
+
     def test_create_sends_metadata(self):
         meta = {"network-policy": "deny-all"}
         with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
@@ -1171,6 +1212,70 @@ class TestCommands:
         assert seen["payload"]["process"]["envs"] == {"A": "B"}
         assert seen["payload"]["process"]["args"] == ["-l", "-c", "echo hello"]
 
+    def test_run_default_cwd_is_root(self):
+        # When the caller omits `cwd`, we must default to `/` (not the
+        # user's home directory). envd on the nobody user has `/nonexistent`
+        # as $HOME and rejects the request with "cwd does not exist".
+        sb = make_sandbox()
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["payload"] = decode_connect_payload(request.content)
+            body = b"".join([
+                connect_envelope(0, '{"event":{"end":{"exitCode":0,"exited":true}}}'),
+                connect_envelope(0x02, "{}"),
+            ])
+            return httpx.Response(200, stream=httpx.ByteStream(body))
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            sb.commands.run("true")
+
+        assert seen["payload"]["process"]["cwd"] == "/"
+
+    def test_run_explicit_cwd_is_honoured(self):
+        # `cwd="/work"` is a no-op compared to the default here, but the
+        # explicit-cwd path goes through `cwd or "/"` and we want a guard
+        # against the truthiness check accidentally swallowing a valid
+        # falsy-looking-but-real path.
+        sb = make_sandbox()
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["payload"] = decode_connect_payload(request.content)
+            body = b"".join([
+                connect_envelope(0, '{"event":{"end":{"exitCode":0,"exited":true}}}'),
+                connect_envelope(0x02, "{}"),
+            ])
+            return httpx.Response(200, stream=httpx.ByteStream(body))
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            sb.commands.run("true", cwd="/work")
+
+        assert seen["payload"]["process"]["cwd"] == "/work"
+
+    def test_run_empty_cwd_uses_root(self):
+        # `cwd=""` must be treated the same as `cwd=None` — falling back
+        # to `/`. This matches E2B's behaviour and prevents silent breakage
+        # when callers pass a value computed from an empty env var.
+        sb = make_sandbox()
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["payload"] = decode_connect_payload(request.content)
+            body = b"".join([
+                connect_envelope(0, '{"event":{"end":{"exitCode":0,"exited":true}}}'),
+                connect_envelope(0x02, "{}"),
+            ])
+            return httpx.Response(200, stream=httpx.ByteStream(body))
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            sb.commands.run("true", cwd="")
+
+        assert seen["payload"]["process"]["cwd"] == "/"
+
     def test_run_stderr_event(self):
         sb = make_sandbox()
 
@@ -1187,10 +1292,7 @@ class TestCommands:
             return httpx.Response(200, stream=httpx.ByteStream(body))
 
         client = httpx.Client(transport=httpx.MockTransport(handler))
-        with (
-            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
-            patch.object(sb, "_build_data_client", return_value=client),
-        ):
+        with patch.object(sb, "_build_data_client", return_value=client):
             result = sb.commands.run("echo warn >&2")
 
         assert result.stdout == ""
@@ -1211,10 +1313,7 @@ class TestCommands:
             return httpx.Response(200, stream=httpx.ByteStream(body))
 
         client = httpx.Client(transport=httpx.MockTransport(handler))
-        with (
-            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
-            patch.object(sb, "_build_data_client", return_value=client),
-        ):
+        with patch.object(sb, "_build_data_client", return_value=client):
             result = sb.commands.run("false")
         assert result.exit_code == 1
 
@@ -1232,10 +1331,7 @@ class TestCommands:
             return httpx.Response(200, stream=httpx.ByteStream(body))
 
         client = httpx.Client(transport=httpx.MockTransport(handler))
-        with (
-            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
-            patch.object(sb, "_build_data_client", return_value=client),
-        ):
+        with patch.object(sb, "_build_data_client", return_value=client):
             result = sb.commands.run("false")
         assert result.exit_code == 7
 
@@ -1256,39 +1352,10 @@ class TestCommands:
             return httpx.Response(200, stream=httpx.ByteStream(body))
 
         client = httpx.Client(transport=httpx.MockTransport(handler))
-        with (
-            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
-            patch.object(sb, "_build_data_client", return_value=client),
-        ):
+        with patch.object(sb, "_build_data_client", return_value=client):
             result = sb.commands.run("kill")
         assert result.exit_code == 137
 
-    def test_collect_process_events_prefers_status_when_exit_code_unset(self):
-        class End:
-            exit_code = 0
-            status = "exit status 7"
-            exited = True
-            error = ""
-
-            def HasField(self, name):
-                return False
-
-        class Event:
-            end = End()
-
-            def HasField(self, name):
-                return name == "end"
-
-        class Response:
-            event = Event()
-
-            def HasField(self, name):
-                return name == "event"
-
-        result = _collect_process_events([Response()])
-        assert result.exit_code == 7
-
-    def test_run_timeout_forwarded(self):
         sb = make_sandbox()
         seen = {}
 
@@ -1304,10 +1371,7 @@ class TestCommands:
             return httpx.Response(200, stream=httpx.ByteStream(body))
 
         client = httpx.Client(transport=httpx.MockTransport(handler))
-        with (
-            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
-            patch.object(sb, "_build_data_client", return_value=client),
-        ):
+        with patch.object(sb, "_build_data_client", return_value=client):
             sb.commands.run("sleep 1", timeout=5.0)
         assert seen["headers"]["connect-timeout-ms"] == "5000"
 
@@ -1318,10 +1382,7 @@ class TestCommands:
             return httpx.Response(400, json={"message": "sandbox is not ready"})
 
         client = httpx.Client(transport=httpx.MockTransport(handler))
-        with (
-            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
-            patch.object(sb, "_build_data_client", return_value=client),
-        ):
+        with patch.object(sb, "_build_data_client", return_value=client):
             with pytest.raises(RuntimeError, match="HTTP 400: sandbox is not ready"):
                 sb.commands.run("echo hello")
 
@@ -1675,6 +1736,67 @@ class TestFilesystem:
 
     def test_files_property(self):
         assert isinstance(make_sandbox().files, Filesystem)
+
+    # ── user= parameter on the 6 RPC methods ─────────────────────────────
+    # All 6 methods (list/stat/remove/rename/make_dir/exists) go through
+    # `_filesystem_rpc` and must forward `user` to the wire as
+    # `?username=<value>` when the caller passes one. When `user` is
+    # omitted (the default), no `username` query parameter must be
+    # sent — backward-compatible behaviour for older envd versions that
+    # don't accept `?username=`. These tests are parametrised over the
+    # method name and positional args so the 6x2 matrix is covered by
+    # 12 cases without 12 near-duplicate bodies.
+
+    _RPC_OK = {
+        "list":     {"entries": []},
+        "stat":     {"entry": {"path": "/tmp/x"}},
+        "remove":   {},
+        "rename":   {"entry": {"path": "/tmp/b"}},
+        "make_dir": {"entry": {"path": "/tmp/dir"}},
+        "exists":   {"entry": {"path": "/tmp/foo"}},
+    }
+    _RPC_CALLS = [
+        ("list",     ("/tmp",)),
+        ("stat",     ("/tmp",)),
+        ("remove",   ("/tmp/foo",)),
+        ("rename",   ("/tmp/a", "/tmp/b")),
+        ("make_dir", ("/tmp/dir",)),
+        ("exists",   ("/tmp/foo",)),
+    ]
+
+    @pytest.mark.parametrize("method,args", _RPC_CALLS)
+    def test_filesystem_method_with_user_sends_username(self, method, args):
+        sb = make_sandbox()
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["query"] = dict(request.url.params)
+            return httpx.Response(200, json=self._RPC_OK[method])
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            getattr(sb.files, method)(*args, user="nobody")
+
+        assert seen["query"].get("username") == "nobody", (
+            f"{method} with user='nobody' must send ?username=nobody"
+        )
+
+    @pytest.mark.parametrize("method,args", _RPC_CALLS)
+    def test_filesystem_method_without_user_omits_username(self, method, args):
+        sb = make_sandbox()
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["query"] = dict(request.url.params)
+            return httpx.Response(200, json=self._RPC_OK[method])
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            getattr(sb.files, method)(*args)
+
+        assert "username" not in seen["query"], (
+            f"{method} without user must NOT send ?username= (backward-compat)"
+        )
 
 
 # ── IPOverrideTransport ───────────────────────────────────────────────────────

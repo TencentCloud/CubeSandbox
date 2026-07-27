@@ -154,6 +154,7 @@ class Sandbox:
         *,
         timeout: int | None = None,
         env_vars: Dict[str, str] | None = None,
+        envs: Dict[str, str] | None = None,
         metadata: Dict[str, str] | None = None,
         allow_internet_access: bool = True,
         network: Dict[str, Any] | None = None,
@@ -169,6 +170,10 @@ class Sandbox:
             timeout: Sandbox idle timeout in seconds (``None`` omits the field).
                 See ``docs/guide/lifecycle.md``.
             env_vars: Environment variables injected into the sandbox.
+            envs: Alias for ``env_vars`` for E2B-API parity. When both are
+                provided, they must be equal; otherwise a ``ValueError`` is
+                raised at call time so the mismatch is caught before the
+                sandbox is created.
             metadata: Arbitrary key-value metadata (e.g. network-policy, host-mount).
             allow_internet_access: When ``False``, the sandbox is blocked from
                 making outbound traffic to the public internet.
@@ -227,8 +232,14 @@ class Sandbox:
         payload: dict = {"templateID": tpl}
         if timeout is not None:
             payload["timeout"] = timeout
-        if env_vars:
-            payload["envVars"] = env_vars
+        if env_vars is not None and envs is not None and env_vars != envs:
+            raise ValueError(
+                f"env_vars and envs conflict: {env_vars!r} != {envs!r}. "
+                "Use only one, or pass equal values."
+            )
+        effective_envs = env_vars if env_vars is not None else envs
+        if effective_envs:
+            payload["envVars"] = effective_envs
         if metadata:
             payload["metadata"] = metadata
         if not allow_internet_access:

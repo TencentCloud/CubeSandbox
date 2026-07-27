@@ -138,8 +138,10 @@ class Commands:
             },
             "stdin": False,
         }
-        if cwd:
-            payload["process"]["cwd"] = cwd
+        # Default to / — the user's home directory may not exist (e.g.
+        # nobody → /nonexistent on some images), which causes envd to
+        # reject the request with "cwd does not exist".
+        payload["process"]["cwd"] = cwd or "/"
 
         headers = {
             "Content-Type": CONNECT_CONTENT_TYPE,
