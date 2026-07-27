@@ -46,6 +46,23 @@ over HTTP** to determine when it is ready.  This means:
 Failing to expose an HTTP server or passing wrong probe parameters will cause
 the template creation to time out.
 
+### Sandbox readiness
+
+The probed port is also the readiness contract for sandboxes: because the
+template only becomes ready once the probe returns HTTP 2xx, a **running**
+sandbox created from that template is expected to serve that port immediately.
+Clients do not need to wait or retry after `create` returns, and the same holds
+for sandboxes brought back by resume or auto-resume.
+
+Two limits are worth knowing:
+
+- **Only the probed port is covered.** A service on a port that is exposed but
+  not probed may still be starting up when the sandbox begins serving traffic;
+  if you need that readiness guarantee, probe that port instead.
+- **The service itself must be healthy.** The guarantee is about the platform
+  making the port reachable — a service that crashes or stops listening inside
+  a running sandbox is unreachable until it recovers.
+
 ---
 
 ## Step 1 — Create the Template
