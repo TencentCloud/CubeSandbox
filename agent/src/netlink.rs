@@ -855,7 +855,8 @@ mod tests {
     use netlink_packet_route::link::LinkHeader;
 
     use super::*;
-    use crate::skip_if_not_root;
+    use crate::{skip_if_no_cap, skip_if_not_root};
+    use capctl::caps::Cap;
     use std::iter;
     use std::process::Command;
 
@@ -889,6 +890,8 @@ mod tests {
     #[tokio::test]
     async fn link_up() {
         skip_if_not_root!();
+        // Bringing a link up requires CAP_NET_ADMIN.
+        skip_if_no_cap!(Cap::NET_ADMIN);
 
         let handle = Handle::new().unwrap();
         let link = handle.find_link(LinkFilter::Name("lo")).await.unwrap();
@@ -968,6 +971,8 @@ mod tests {
     #[tokio::test]
     async fn add_delete_addresses() {
         skip_if_not_root!();
+        // Adding/removing link addresses requires CAP_NET_ADMIN.
+        skip_if_no_cap!(Cap::NET_ADMIN);
 
         let list = vec![
             IpNetwork::from_str("169.254.1.1/31").unwrap(),
@@ -1064,6 +1069,8 @@ mod tests {
     #[tokio::test]
     async fn test_add_one_arp_neighbor() {
         skip_if_not_root!();
+        // Creating a dummy interface and ARP entries requires CAP_NET_ADMIN.
+        skip_if_no_cap!(Cap::NET_ADMIN);
 
         let mac = "6a:92:3a:59:70:aa";
         let to_ip = "169.254.1.1";

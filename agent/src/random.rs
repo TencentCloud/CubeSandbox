@@ -53,13 +53,17 @@ pub fn reseed_rng(data: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skip_if_not_root;
+    use crate::{skip_if_no_cap, skip_if_not_root};
+    use capctl::caps::Cap;
     use std::fs::File;
     use std::io::prelude::*;
 
     #[test]
     fn test_reseed_rng() {
         skip_if_not_root!();
+        // The RNDADDTOENTCNT/RNDRESEEDCRNG ioctls require CAP_SYS_ADMIN, which
+        // root may lack inside a container.
+        skip_if_no_cap!(Cap::SYS_ADMIN);
         const POOL_SIZE: usize = 512;
         let mut f = File::open("/dev/urandom").unwrap();
         let mut seed = [0; POOL_SIZE];
@@ -79,7 +83,9 @@ mod tests {
         // Ensure the buffer was filled.
         assert!(n == POOL_SIZE);
         let ret = reseed_rng(&seed);
-        if nix::unistd::Uid::effective().is_root() {
+        // Reseeding succeeds only with CAP_SYS_ADMIN; being uid 0 is not enough
+        // when the capability has been dropped (e.g. inside a container).
+        if crate::test_utils::test_utils::have_effective_cap(Cap::SYS_ADMIN) {
             assert!(ret.is_ok());
         } else {
             assert!(ret.is_err());

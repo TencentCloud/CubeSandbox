@@ -187,13 +187,16 @@ impl fmt::Debug for NamespaceType {
 #[cfg(test)]
 mod tests {
     use super::{Namespace, NamespaceType};
-    use crate::{mount::remove_mounts, skip_if_not_root};
+    use crate::{mount::remove_mounts, skip_if_no_cap, skip_if_not_root};
+    use capctl::caps::Cap;
     use nix::sched::CloneFlags;
     use tempfile::Builder;
 
     #[tokio::test]
     async fn test_setup_persistent_ns() {
         skip_if_not_root!();
+        // Creating and bind-mounting persistent namespaces needs CAP_SYS_ADMIN.
+        skip_if_no_cap!(Cap::SYS_ADMIN);
         // Create dummy logger and temp folder.
         let logger = slog::Logger::root(slog::Discard, o!());
         let tmpdir = Builder::new().prefix("ipc").tempdir().unwrap();

@@ -2420,8 +2420,9 @@ mod tests {
     use super::*;
     use crate::{
         assert_result, namespace::Namespace, protocols::agent_ttrpc::AgentService as _,
-        skip_if_not_root,
+        skip_if_no_cap, skip_if_not_root,
     };
+    use capctl::caps::Cap;
 
     fn mk_ttrpc_context() -> TtrpcContext {
         TtrpcContext {
@@ -2541,6 +2542,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_do_write_stream() {
+        // Only the create_container cases build a cgroup (which needs a
+        // writable cgroup filesystem); the invalid-container-id and
+        // cannot-get-writer cases exercise pure pipe I/O and stay covered
+        // even when /sys/fs/cgroup is read-only.
+        let have_cgroupfs = crate::test_utils::test_utils::cgroupfs_writable();
+
         #[derive(Debug)]
         struct TestData<'a> {
             create_container: bool,
@@ -2613,6 +2620,14 @@ mod tests {
 
         for (i, d) in tests.iter().enumerate() {
             let msg = format!("test[{}]: {:?}", i, d);
+
+            if d.create_container && !have_cgroupfs {
+                println!(
+                    "INFO: skipping {} which needs a writable cgroup filesystem",
+                    msg
+                );
+                continue;
+            }
 
             let logger = slog::Logger::root(slog::Discard, o!());
             let mut sandbox = Sandbox::new(&logger).unwrap();
@@ -3052,6 +3067,8 @@ OtherField:other
     #[tokio::test]
     async fn test_volume_capacity_stats() {
         skip_if_not_root!();
+        // The test mounts a tmpfs, needing CAP_SYS_ADMIN.
+        skip_if_no_cap!(Cap::SYS_ADMIN);
 
         // Verify error if path does not exist
         assert!(get_volume_capacity_stats("/does-not-exist").is_err());
@@ -3082,6 +3099,8 @@ OtherField:other
     #[tokio::test]
     async fn test_get_volume_inode_stats() {
         skip_if_not_root!();
+        // The test mounts a tmpfs, needing CAP_SYS_ADMIN.
+        skip_if_no_cap!(Cap::SYS_ADMIN);
 
         // Verify error if path does not exist
         assert!(get_volume_inode_stats("/does-not-exist").is_err());
@@ -3114,6 +3133,8 @@ OtherField:other
     #[tokio::test]
     async fn test_ip_tables() {
         skip_if_not_root!();
+        // The test unshares a network namespace, needing CAP_SYS_ADMIN.
+        skip_if_no_cap!(Cap::SYS_ADMIN);
 
         let logger = slog::Logger::root(slog::Discard, o!());
         let sandbox = Sandbox::new(&logger).unwrap();
