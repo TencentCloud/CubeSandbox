@@ -33,6 +33,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/docker/go-metrics"
 	"github.com/gin-gonic/gin"
@@ -168,6 +169,9 @@ func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
 		if service, ok := instance.(tcpService); ok {
 			tcpServices = append(tcpServices, service)
 		}
+		if service, ok := instance.(shutdownService); ok {
+			s.shutdownServices = append(s.shutdownServices, service)
+		}
 	}
 	if len(criticalPluginErrs) > 0 {
 		return nil, fmt.Errorf("critical cubelet plugins failed to initialize: %s", strings.Join(criticalPluginErrs, "; "))
@@ -196,12 +200,17 @@ func isCriticalCubeletPlugin(id string) bool {
 
 type Server struct {
 	*containerdserver.Server
-	operationServer *OperationServer
-	tcpServer       *grpc.Server
-	tapProvider     *tapProvider
-	metricServer    http.Handler
-	config          *srvconfig.Config
-	stopCh          chan struct{}
+	operationServer  *OperationServer
+	tcpServer        *grpc.Server
+	tapProvider      *tapProvider
+	metricServer     http.Handler
+	config           *srvconfig.Config
+	stopCh           chan struct{}
+	shutdownServices []shutdownService
+}
+
+type shutdownService interface {
+	Shutdown(context.Context) error
 }
 
 func (s *Server) ServeOperation(l net.Listener) error {
@@ -323,6 +332,13 @@ func (s *Server) Stop() {
 	ppid := os.Getpid()
 	log.L.Errorf("cubelet server stopped gracefully begin, pid %v", ppid)
 	CubeLog.WithContext(context.Background()).Errorf("cubelet server stopped gracefully begin, pid %v", ppid)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	for _, service := range s.shutdownServices {
+		if err := service.Shutdown(shutdownCtx); err != nil {
+			log.G(context.Background()).WithError(err).Warn("cubelet service shutdown incomplete")
+		}
+	}
+	shutdownCancel()
 
 	graceFulJobs := []func(){
 		func() {

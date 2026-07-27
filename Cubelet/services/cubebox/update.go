@@ -24,6 +24,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/services/cubebox/terminalcore"
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
@@ -141,6 +142,18 @@ func (s *service) UpdateWithPause(ctx context.Context, req *cubebox.UpdateCubeSa
 		rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
 		return rsp, nil
 	}
+	terminalDrained := false
+	if err := s.drainTerminalSandbox(ctx, req.SandboxID, terminalcore.CloseSandboxTransition); err != nil {
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to drain terminal sessions: %v", err)
+		rsp.Ret.RetCode = errorcode.ErrorCode_TaskPauseFailed
+		return rsp, nil
+	}
+	terminalDrained = true
+	defer func() {
+		if terminalDrained && !sb.GetStatus().IsPaused() {
+			s.allowTerminalSandbox(req.SandboxID)
+		}
+	}()
 
 	ns := sb.Namespace
 	if ns == "" {
@@ -234,6 +247,9 @@ func (s *service) UpdateWithResume(ctx context.Context, req *cubebox.UpdateCubeS
 		reconcileDeadline: now.Add(taskResumeTimeout + reconcileStatusTimeout),
 		persist:           true,
 	})
+	if result.running {
+		s.allowTerminalSandbox(req.SandboxID)
+	}
 	// Preserve the explicit Resume contract: an RPC error remains visible to
 	// its caller even when reconciliation has already converged the local state
 	// to RUNNING. Delete has a different terminal goal and handles that result
