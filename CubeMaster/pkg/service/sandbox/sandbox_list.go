@@ -41,6 +41,13 @@ var (
 // service outage from the legitimate end of pagination; probing the first page
 // disambiguates using the same source (and instance-type fallback) as the
 // paged read.
+//
+// No explicit health check is needed here: the source RangeDBHost pages over,
+// localcache's sortedNodesByClusters, only ever holds healthy nodes —
+// appendSortedNodes skips !n.Healthy, updateSortedNodes removes a node as soon
+// as it turns unhealthy, and the reported-not-ready path calls delSortedNodes.
+// So "every node unhealthy" already reduces to an empty list here and is
+// reported as CubeletUnHealthy, matching GetSandbox's per-node n.Healthy check.
 func hasAnyDBHost(instanceType string) bool {
 	firstPage, _ := rangeDBHostFn(1, 1, instanceType)
 	return len(firstPage) != 0
