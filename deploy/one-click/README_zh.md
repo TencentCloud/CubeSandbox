@@ -17,8 +17,21 @@
 - `smoke.sh`：执行基础健康检查。
 - `env.example`：构建机和目标机共用的环境变量模板。
 - `lib/common.sh`：公共 shell 函数。
-- `scripts/one-click/`：systemd 托管部署安装后使用的校验与维护辅助脚本。
+- `scripts/one-click/`：混合用途的历史目录，包含已废弃的聚合入口、兼容脚本，以及 systemd 和 Terraform 仍在调用的 helper；详见下方“脚本支持状态”。
 - `terraform/tencentcloud/`：在腾讯云上部署**集群版** CubeSandbox 的 Terraform 部署器（TKE 控制面 + CVM 计算节点）。`create.sh` 为入口，`destroy.sh` 负责整体销毁。这些文件同时位于发布包顶层和 `sandbox-package` 内（见“腾讯云集群部署”）。
+
+### 脚本支持状态
+
+不能把 `scripts/one-click/` 下的所有脚本都视为已废弃。当前状态如下：
+
+| 状态 | 脚本 | 用法 |
+|---|---|---|
+| 已废弃的服务管理入口 | `up-with-deps.sh`、`down-with-deps.sh` | 不再用于日常启动、停止或开机管理；请改用 `cube-sandbox-control.target` 或 `cube-sandbox-compute.target`。 |
+| 为兼容保留的旧实现 | `up.sh`、`down-local.sh`、`up-dns.sh`、`down-dns.sh`、`coredns-compose-lib.sh` | 不作为受支持的运维接口直接调用。 |
+| 当前仍在使用的内部 helper | 组件级 up/down、compose-lib、`quickcheck.sh` 以及 compute/egress 兼容脚本 | 当前 systemd unit、诊断流程或 Terraform compute 流程仍会调用，不能把它们作为实现 helper 标记为已废弃。 |
+
+安装器探测旧安装目录中的 `down-with-deps.sh`，只是为了接管 pre-systemd
+部署的升级兼容机制，并不代表该脚本仍是受支持的用户入口。
 
 ## 支持的操作系统
 

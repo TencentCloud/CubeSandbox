@@ -2,16 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Tencent. All rights reserved.
 #
-# cube-autostart.sh — Manage the CubeSandbox one-click autostart systemd unit.
+# cube-autostart.sh — Manage CubeSandbox's systemd target inside the dev VM.
 #
-# The unit file (cube-sandbox-oneclick.service) is installed into the guest by
-# prepare_image.sh but left disabled. This script is the user-facing entry
-# point to enable / disable / inspect it, so that cube components restart
-# automatically after a VM reboot.
+# The one-click installer owns cube-sandbox-control.target and its component
+# units. This script is the host-side entry point for enabling, disabling, and
+# inspecting that target. It also disables the legacy dev-env unit when found.
 #
 # Subcommands:
-#   enable     (default) Enable and start the unit; prompts for confirmation
-#   disable    Stop and disable the unit
+#   enable     (default) Enable and restart the target; prompts for confirmation
+#   disable    Stop and disable the target
 #   status     Print is-enabled / is-active and full systemctl status
 #   -h|--help  Show usage
 #
@@ -24,7 +23,7 @@
 # Common environment variables:
 #   VM_USER, VM_PASSWORD       Guest credentials (default: opencloudos / opencloudos)
 #   SSH_HOST, SSH_PORT         Host-side forward target (default: 127.0.0.1:10022)
-#   UNIT_NAME                  systemd unit name (default: cube-sandbox-oneclick.service)
+#   UNIT_NAME                  systemd target name (default: cube-sandbox-control.target)
 #   ASSUME_YES                 Skip interactive confirmation when set to 1
 #   STOP_NOW                   On disable, also stop the unit (default: 1)
 
@@ -38,7 +37,8 @@ VM_PASSWORD="${VM_PASSWORD:-opencloudos}"
 SSH_HOST="${SSH_HOST:-127.0.0.1}"
 SSH_PORT="${SSH_PORT:-10022}"
 
-UNIT_NAME="${UNIT_NAME:-cube-sandbox-oneclick.service}"
+UNIT_NAME="${UNIT_NAME:-cube-sandbox-control.target}"
+LEGACY_UNIT_NAME="cube-sandbox-oneclick.service"
 ASSUME_YES="${ASSUME_YES:-0}"
 STOP_NOW="${STOP_NOW:-1}"
 
@@ -78,9 +78,9 @@ usage() {
 Usage: $(basename "$0") [enable|disable|status]
 
 Subcommands:
-  enable   (default)  Enable and start ${UNIT_NAME} inside the guest, so
+  enable   (default)  Enable and restart ${UNIT_NAME} inside the guest, so
                       cube components come back automatically on every boot.
-  disable             Disable the unit. By default also stops it now
+  disable             Disable the target. By default also stops it now
                       (set STOP_NOW=0 to leave running services up).
   status              Show is-enabled / is-active and the latest status.
 
@@ -124,6 +124,12 @@ case "${ACTION}" in
     ;;
 esac
 
+if [[ "${UNIT_NAME}" == "${LEGACY_UNIT_NAME}" ]]; then
+  log_error "${LEGACY_UNIT_NAME} is deprecated and cannot be selected with UNIT_NAME."
+  log_error "Use cube-sandbox-control.target instead."
+  exit 1
+fi
+
 need_cmd ssh
 need_cmd setsid
 
@@ -155,45 +161,68 @@ run_ssh() {
   setsid -w ssh "${SSH_OPTS[@]}" "${VM_USER}@${SSH_HOST}" "$@"
 }
 
+unit_exists() {
+  run_ssh "sudo systemctl cat '$1'" >/dev/null 2>&1
+}
+
 log_info "Target VM : ${VM_USER}@${SSH_HOST}:${SSH_PORT}"
 log_info "Unit      : ${UNIT_NAME}"
 log_info "Action    : ${ACTION}"
 
 case "${ACTION}" in
   enable)
-    if ! run_ssh "sudo systemctl cat '${UNIT_NAME}'" >/dev/null 2>&1; then
+    if ! unit_exists "${UNIT_NAME}"; then
       log_error "Unit ${UNIT_NAME} not found inside the guest."
-      log_error "Run prepare_image.sh (with SETUP_AUTOSTART=1, the default) first,"
-      log_error "or manually run dev-env/internal/setup_autostart.sh inside the VM."
+      log_error "Please install CubeSandbox inside the VM with the one-click installer first."
       exit 1
     fi
 
     if run_ssh "sudo systemctl is-enabled '${UNIT_NAME}'" >/dev/null 2>&1; then
-      log_warn "${UNIT_NAME} is already enabled. Re-running enable --now is safe."
+      log_warn "${UNIT_NAME} is already enabled; it will still be restarted."
     fi
 
-    if ! confirm "Enable ${UNIT_NAME} on boot? It will run up-with-deps.sh on every boot."; then
+    if ! confirm "Enable ${UNIT_NAME} on boot and restart the CubeSandbox services now?"; then
       log_warn "Aborted by user."
       exit 1
     fi
 
-    log_info "Enabling and starting ${UNIT_NAME}..."
-    run_ssh "sudo systemctl enable --now '${UNIT_NAME}'"
-    log_success "${UNIT_NAME} enabled and started"
+    if unit_exists "${LEGACY_UNIT_NAME}"; then
+      log_info "Disabling legacy unit ${LEGACY_UNIT_NAME}..."
+      run_ssh "sudo systemctl disable '${LEGACY_UNIT_NAME}'"
+
+      if run_ssh "sudo systemctl is-active '${LEGACY_UNIT_NAME}'" >/dev/null 2>&1; then
+        log_info "Stopping ${UNIT_NAME} before the active legacy unit..."
+        run_ssh "sudo systemctl stop '${UNIT_NAME}'"
+        run_ssh "sudo systemctl stop '${LEGACY_UNIT_NAME}'"
+      fi
+
+      run_ssh "sudo systemctl reset-failed '${LEGACY_UNIT_NAME}'"
+      log_success "Legacy unit ${LEGACY_UNIT_NAME} disabled"
+    fi
+
+    log_info "Enabling and restarting ${UNIT_NAME}..."
+    run_ssh "sudo systemctl enable '${UNIT_NAME}'"
+    run_ssh "sudo systemctl restart '${UNIT_NAME}'"
+    log_success "${UNIT_NAME} enabled and restarted"
 
     log_info "Current status:"
     run_ssh "sudo systemctl --no-pager --full status '${UNIT_NAME}'" || true
     ;;
 
   disable)
-    if ! run_ssh "sudo systemctl cat '${UNIT_NAME}'" >/dev/null 2>&1; then
-      log_warn "Unit ${UNIT_NAME} not found inside the guest, nothing to disable."
+    target_exists=0
+    legacy_exists=0
+    unit_exists "${UNIT_NAME}" && target_exists=1
+    unit_exists "${LEGACY_UNIT_NAME}" && legacy_exists=1
+
+    if [[ "${target_exists}" == "0" && "${legacy_exists}" == "0" ]]; then
+      log_warn "Neither ${UNIT_NAME} nor ${LEGACY_UNIT_NAME} exists inside the guest."
       exit 0
     fi
 
-    local_prompt="Disable ${UNIT_NAME}?"
+    local_prompt="Disable CubeSandbox autostart (${UNIT_NAME} and any legacy unit)?"
     if [[ "${STOP_NOW}" == "1" ]]; then
-      local_prompt+=" It will also stop the unit (running cube components will be torn down)."
+      local_prompt+=" It will also stop the running CubeSandbox services."
     fi
 
     if ! confirm "${local_prompt}"; then
@@ -201,26 +230,54 @@ case "${ACTION}" in
       exit 1
     fi
 
-    if [[ "${STOP_NOW}" == "1" ]]; then
-      log_info "Disabling and stopping ${UNIT_NAME}..."
-      run_ssh "sudo systemctl disable --now '${UNIT_NAME}'"
-    else
-      log_info "Disabling ${UNIT_NAME} (leaving it running for now)..."
+    if [[ "${target_exists}" == "1" ]]; then
       run_ssh "sudo systemctl disable '${UNIT_NAME}'"
     fi
-    log_success "${UNIT_NAME} disabled"
+    if [[ "${legacy_exists}" == "1" ]]; then
+      run_ssh "sudo systemctl disable '${LEGACY_UNIT_NAME}'"
+    fi
+
+    if [[ "${STOP_NOW}" == "1" ]]; then
+      if [[ "${target_exists}" == "1" ]]; then
+        log_info "Stopping ${UNIT_NAME}..."
+        run_ssh "sudo systemctl stop '${UNIT_NAME}'"
+      fi
+      if [[ "${legacy_exists}" == "1" ]] \
+        && run_ssh "sudo systemctl is-active '${LEGACY_UNIT_NAME}'" >/dev/null 2>&1; then
+        log_info "Stopping legacy unit ${LEGACY_UNIT_NAME}..."
+        run_ssh "sudo systemctl stop '${LEGACY_UNIT_NAME}'"
+      fi
+    else
+      log_info "Units disabled; running services were left unchanged."
+    fi
+    log_success "CubeSandbox autostart disabled"
     ;;
 
   status)
-    if ! run_ssh "sudo systemctl cat '${UNIT_NAME}'" >/dev/null 2>&1; then
+    target_exists=0
+    if unit_exists "${UNIT_NAME}"; then
+      target_exists=1
+      enabled_state="$(run_ssh "sudo systemctl is-enabled '${UNIT_NAME}'" 2>/dev/null || true)"
+      active_state="$(run_ssh "sudo systemctl is-active '${UNIT_NAME}'" 2>/dev/null || true)"
+      log_info "is-enabled : ${enabled_state:-unknown}"
+      log_info "is-active  : ${active_state:-unknown}"
+      run_ssh "sudo systemctl --no-pager --full status '${UNIT_NAME}'" || true
+    else
       log_warn "Unit ${UNIT_NAME} not found inside the guest."
-      exit 0
     fi
 
-    enabled_state="$(run_ssh "sudo systemctl is-enabled '${UNIT_NAME}'" 2>/dev/null || true)"
-    active_state="$(run_ssh "sudo systemctl is-active '${UNIT_NAME}'" 2>/dev/null || true)"
-    log_info "is-enabled : ${enabled_state:-unknown}"
-    log_info "is-active  : ${active_state:-unknown}"
-    run_ssh "sudo systemctl --no-pager --full status '${UNIT_NAME}'" || true
+    if unit_exists "${LEGACY_UNIT_NAME}"; then
+      legacy_enabled_state="$(run_ssh "sudo systemctl is-enabled '${LEGACY_UNIT_NAME}'" 2>/dev/null || true)"
+      legacy_active_state="$(run_ssh "sudo systemctl is-active '${LEGACY_UNIT_NAME}'" 2>/dev/null || true)"
+      legacy_failed_state="$(run_ssh "sudo systemctl is-failed '${LEGACY_UNIT_NAME}'" 2>/dev/null || true)"
+      if [[ "${legacy_enabled_state}" == "enabled" \
+        || "${legacy_active_state}" == "active" \
+        || "${legacy_failed_state}" == "failed" ]]; then
+        log_warn \
+          "Legacy unit ${LEGACY_UNIT_NAME} still needs cleanup (enabled=${legacy_enabled_state:-unknown}, active=${legacy_active_state:-unknown}, failed=${legacy_failed_state:-unknown})."
+      fi
+    fi
+
+    [[ "${target_exists}" == "1" ]] || exit 0
     ;;
 esac

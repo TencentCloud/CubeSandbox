@@ -11,8 +11,27 @@ After reading this page you will know:
 - How to stop / restart the whole stack cleanly
 
 ::: tip Scope
-This page targets the **systemd-managed** one-click installer. If your machine still uses the legacy `up-with-deps.sh` / `down-with-deps.sh` scripts as the daily entry point, that is the pre-systemd version — re-running the latest one-click installer will migrate it to systemd automatically (the installer detects and takes over the old layout).
+This page targets the **systemd-managed** one-click installer. The aggregate
+`up-with-deps.sh` and `down-with-deps.sh` entry points are deprecated and must
+not be used for daily start, stop, or boot management. Re-running the latest
+one-click installer migrates a pre-systemd installation automatically. Its
+lookup of the old installed `down-with-deps.sh` is only an upgrade takeover
+mechanism, not a supported operator interface.
 :::
+
+### Legacy script status
+
+The `scripts/one-click/` directory is mixed-purpose:
+
+- Deprecated operator entry points: `up-with-deps.sh`, `down-with-deps.sh`.
+- Legacy internals retained for compatibility: `up.sh`, `down-local.sh`,
+  `up-dns.sh`, `down-dns.sh`, `coredns-compose-lib.sh`.
+- Active implementation helpers: component-level up/down and compose-lib
+  scripts, `quickcheck.sh`, and compute/egress scripts that still have systemd
+  or Terraform callers.
+
+Operate the stack through `cube-sandbox-control.target` on a control node or
+`cube-sandbox-compute.target` on a compute node.
 
 ## TL;DR cheat-sheet
 

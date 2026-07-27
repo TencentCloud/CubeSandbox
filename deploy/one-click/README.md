@@ -17,8 +17,23 @@ This directory is used to build and deliver the single-machine one-click release
 - `smoke.sh`: Runs basic health checks.
 - `env.example`: Shared environment variable template for both the build machine and the target machine.
 - `lib/common.sh`: Common shell utility functions.
-- `scripts/one-click/`: Validation and maintenance helpers used by the systemd-managed deployment after installation.
+- `scripts/one-click/`: Mixed-purpose historical directory containing deprecated aggregate entry points, compatibility scripts, and helpers still used by systemd and Terraform. See "Script support status" below.
 - `terraform/tencentcloud/`: Terraform deployer for a **clustered** CubeSandbox on Tencent Cloud (TKE control plane + CVM compute nodes). `create.sh` is the entry point; `destroy.sh` tears everything down. These files are shipped both at the release-bundle top level and inside `sandbox-package` (see "Tencent Cloud Cluster Deployment").
+
+### Script support status
+
+Do not treat every script under `scripts/one-click/` as deprecated. The current
+status is:
+
+| Status | Scripts | Usage |
+|---|---|---|
+| Deprecated service-management entry points | `up-with-deps.sh`, `down-with-deps.sh` | Do not use these for daily start, stop, or boot management. Use `cube-sandbox-control.target` or `cube-sandbox-compute.target`. |
+| Legacy internals retained for compatibility | `up.sh`, `down-local.sh`, `up-dns.sh`, `down-dns.sh`, `coredns-compose-lib.sh` | Not supported as direct operator interfaces. |
+| Active internal helpers | Component-level up/down scripts, compose-lib helpers, `quickcheck.sh`, and compute/egress compatibility scripts | Still called by current systemd units, diagnostics, or the Terraform compute flow; they are not deprecated as implementation helpers. |
+
+The installer's lookup of `down-with-deps.sh` in an existing installation is
+only an upgrade takeover mechanism for pre-systemd deployments. It does not
+make that script a supported operator entry point.
 
 ## Supported Operating Systems
 

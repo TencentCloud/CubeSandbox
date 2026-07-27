@@ -45,35 +45,38 @@ cat /sys/module/kvm_intel/parameters/nested   # or kvm_amd, expect Y / 1
 
 Five steps. Run them in order.
 
+Run the host-side dev-env helpers with `sudo` so the qcow2 image, askpass
+helper, and other `.workdir` files keep consistent ownership. Build commands
+such as `make all` should still run as the regular user.
+
 ### Step 1 &nbsp; Prepare the VM image &nbsp; *(one-off, ~10 min)*
 
 ```bash
-./prepare_image.sh
+sudo ./prepare_image.sh
 ```
 
 Downloads the OpenCloudOS 9 cloud image, resizes it to 100G, and runs
-the in-guest setup (grow rootfs, relax SELinux, fix PATH, install login
-banner, install the autostart systemd unit). When it finishes the VM is
-shut down.
+the in-guest setup (grow rootfs, relax SELinux, fix PATH, and install the
+login banner). When it finishes the VM is shut down.
 
 You only need this on first setup or after deleting `.workdir/`.
 
 ### Step 2 &nbsp; Boot the VM &nbsp; *(terminal A)*
 
 ```bash
-./run_vm.sh
+sudo ./run_vm.sh
 ```
 
 QEMU's serial console stays attached to this terminal. Do not quit QEMU
 with `Ctrl+a` then `x`; that is abrupt and can corrupt the guest. In
-another terminal run `./login.sh`, then run `poweroff` inside the guest.
+another terminal run `sudo ./login.sh`, then run `poweroff` inside the guest.
 After the guest shuts down, `run_vm.sh` in this terminal usually exits on
 its own.
 
 ### Step 3 &nbsp; Log in &nbsp; *(terminal B)*
 
 ```bash
-./login.sh
+sudo ./login.sh
 ```
 
 You land in a root shell inside the guest. Password handling is
@@ -100,24 +103,23 @@ You should see `OK`. Cube Sandbox is now running.
 
 ## Make it survive a reboot &nbsp; *(one-off, strongly recommended)*
 
-By default the cube components are launched as bare processes — they do
-**not** come back after the VM reboots. To let `systemd` bring them up
-on every boot, run **on the host** after Step 5:
+The one-click installer installs and enables `cube-sandbox-control.target`.
+To verify that state and migrate an older dev VM away from the deprecated
+`cube-sandbox-oneclick.service`, run **on the host** after Step 5:
 
 ```bash
-./cube-autostart.sh            # default subcommand: enable
+sudo ./cube-autostart.sh            # default subcommand: enable
 ```
 
-This asks for confirmation, then enables `cube-sandbox-oneclick.service`
-inside the guest. From now on every boot will run `up-with-deps.sh`,
-which brings MySQL/Redis, cube-proxy, coredns, network-agent,
-cubemaster, cube-api and cubelet up together.
+This asks for confirmation, disables the legacy unit if it exists, then enables
+and restarts `cube-sandbox-control.target`. The target owns the component
+systemd services and brings them back after a reboot.
 
 Other subcommands:
 
 ```bash
-./cube-autostart.sh status     # show is-enabled / is-active
-./cube-autostart.sh disable    # roll back
+sudo ./cube-autostart.sh status     # show is-enabled / is-active
+sudo ./cube-autostart.sh disable    # disable autostart
 ```
 
 ## Develop: edit code, push to VM, see results
@@ -127,14 +129,14 @@ This is the main reason `dev-env/` exists.
 Recommended terminal setup:
 
 ```bash
-./login.sh    # keep this shell open; by default it lands in a root shell
+sudo ./login.sh    # keep this shell open; by default it lands in a root shell
 ```
 
 Then iterate from your host shell:
 
 ```bash
 make all
-./sync_to_vm.sh bin cubelet cubemaster
+sudo ./sync_to_vm.sh bin cubelet cubemaster
 ```
 
 `sync_to_vm.sh` now has a single job: copy files into the VM. It does not
@@ -142,32 +144,33 @@ build on the host, restart services, run `quickcheck.sh`, or roll back
 automatically.
 
 After the copy finishes, paste the printed restart command into your
-`./login.sh` session:
+`sudo ./login.sh` session:
 
 ```bash
-systemctl restart cube-sandbox-oneclick.service
+systemctl restart cube-sandbox-control.target
 ```
 
 Useful examples:
 
 ```bash
 # Sync all known binaries from _output/bin/
-./sync_to_vm.sh bin
+sudo ./sync_to_vm.sh bin
 
 # Sync only specific components
-./sync_to_vm.sh bin cubemaster cubelet
+sudo ./sync_to_vm.sh bin cubemaster cubelet
 
 # Push arbitrary files into the guest
-./sync_to_vm.sh files --remote-dir /tmp ./configs/foo.toml
+sudo ./sync_to_vm.sh files --remote-dir /tmp ./configs/foo.toml
 
-# Build and deploy the WebUI into the guest
-make -C .. web-sync-dev-env
+# Build the WebUI as the regular user, then deploy it with .workdir access
+make -C .. web-build
+sudo env WEB_SYNC_BUILD=0 ./internal/sync_web_to_vm.sh
 ```
 
 The previous binary is still kept on the VM as `*.bak`, but the script no
 longer surfaces rollback or verification steps in its output.
 
-Prerequisite: Step 4 finished and (recommended) `./cube-autostart.sh`
+Prerequisite: Step 4 finished and (recommended) `sudo ./cube-autostart.sh`
 has been run.
 
 ## Manual release flow
@@ -176,12 +179,12 @@ From your host shell:
 
 ```bash
 make manual-release
-./sync_to_vm.sh files \
+sudo ./sync_to_vm.sh files \
   _output/release/cube-manual-update-*.tar.gz \
   deploy/one-click/deploy-manual.sh
 ```
 
-Then in your `./login.sh` session:
+Then in your `sudo ./login.sh` session:
 
 ```bash
 bash /tmp/deploy-manual.sh /tmp/cube-manual-update-*.tar.gz
@@ -190,7 +193,7 @@ bash /tmp/deploy-manual.sh /tmp/cube-manual-update-*.tar.gz
 ## Collect logs from the VM
 
 ```bash
-./copy_logs.sh
+sudo ./copy_logs.sh
 ```
 
 Tarballs `/data/log` from inside the guest and drops it next to this
@@ -201,10 +204,10 @@ README as `data-log-<timestamp>.tar.gz`.
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
 | No `/dev/kvm` inside the guest | Nested KVM disabled on the host | Enable nested virtualization on the host, then reboot the VM |
-| `./login.sh` fails to connect | VM not booted yet, or host port 10022 is busy | Check that `./run_vm.sh` is still running, or set `SSH_PORT` |
+| `sudo ./login.sh` fails to connect | VM not booted yet, or host port 10022 is busy | Check that `sudo ./run_vm.sh` is still running, or set `SSH_PORT` |
 | `df -h /` inside the guest is still small | `prepare_image.sh` never finished the auto-grow step | Inspect `.workdir/qemu-serial.log`, then `scp internal/grow_rootfs.sh` into the guest and run it manually |
-| Host port 13000 / 11080 / 11443 / 12088 already taken | Some other service binds the forwarded dev-env ports | Start with `CUBE_API_PORT=23000 CUBE_PROXY_HTTP_PORT=21080 CUBE_PROXY_HTTPS_PORT=21443 WEB_UI_PORT=22088 ./run_vm.sh` |
-| Cube components gone after VM reboot | Autostart not enabled | Run `./cube-autostart.sh` once |
+| Host port 13000 / 11080 / 11443 / 12088 already taken | Some other service binds the forwarded dev-env ports | Start with `sudo env CUBE_API_PORT=23000 CUBE_PROXY_HTTP_PORT=21080 CUBE_PROXY_HTTPS_PORT=21443 WEB_UI_PORT=22088 ./run_vm.sh` |
+| Cube components gone after VM reboot | The official target is not enabled or a legacy unit still conflicts with it | Run `sudo ./cube-autostart.sh` once |
 | New binaries fail after restart | The new build is bad, or `quickcheck` fails when you run it manually | Check `/data/log/` in the guest, and if needed restore the previous `*.bak` binary manually before restarting again |
 
 ## Reference
@@ -217,18 +220,19 @@ dev-env/
 ├── prepare_image.sh        # Step 1
 ├── run_vm.sh               # Step 2
 ├── login.sh                # Step 3
-├── cube-autostart.sh       # enable / disable / status the systemd autostart unit
+├── cube-autostart.sh       # enable / disable / status the official systemd target
 ├── sync_to_vm.sh           # Copy host artifacts into the guest (no build/restart)
 ├── copy_logs.sh            # Pull /data/log from the guest
 └── internal/               # Run inside the guest by prepare_image.sh
     ├── grow_rootfs.sh         # grow rootfs to qcow2 virtual size
     ├── setup_selinux.sh       # SELinux -> permissive (docker bind mount)
     ├── setup_path.sh          # /usr/local/{sbin,bin} on PATH
-    ├── setup_banner.sh        # /etc/profile.d/ login banner
-    └── setup_autostart.sh     # install cube-sandbox-oneclick.service (NOT enabled)
+    └── setup_banner.sh        # /etc/profile.d/ login banner
 ```
 
 Generated artifacts (qcow2, pid file, serial log) live in `.workdir/`.
+`internal/setup_autostart.sh` is retained as a deprecated compatibility
+artifact, but `prepare_image.sh` no longer uploads or runs it.
 
 ### Environment variables
 
@@ -237,7 +241,6 @@ Generated artifacts (qcow2, pid file, serial log) live in `.workdir/`.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AUTO_BOOT` | `1` | Boot the VM and run guest-side setup. `0` skips it (download + resize only). |
-| `SETUP_AUTOSTART` | `1` | Install the systemd autostart unit (still **not** enabled). `0` skips. |
 | `IMAGE_URL` | OpenCloudOS 9 | Override the source qcow2 URL. |
 | `TARGET_SIZE` | `100G` | Final qcow2 virtual size. |
 | `SSH_PORT` | `10022` | Host port forwarded to guest 22. |
@@ -267,7 +270,7 @@ Generated artifacts (qcow2, pid file, serial log) live in `.workdir/`.
 |----------|---------|-------------|
 | `ASSUME_YES` | `0` | `1` skips the interactive confirmation. |
 | `STOP_NOW` | `1` | `disable` only: `0` disables on next boot but leaves running services up. |
-| `UNIT_NAME` | `cube-sandbox-oneclick.service` | Override the unit name. |
+| `UNIT_NAME` | `cube-sandbox-control.target` | Override the managed target. The deprecated legacy unit is rejected. |
 
 Subcommands: `enable` (default), `disable`, `status`.
 
@@ -275,7 +278,7 @@ Subcommands: `enable` (default), `disable`, `status`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `UNIT_NAME` | `cube-sandbox-oneclick.service` | Unit name shown in the final restart hint. |
+| `UNIT_NAME` | `cube-sandbox-control.target` | Unit name shown in the final restart hint. |
 | `OUTPUT_BIN_DIR` | `_output/bin` | Where `bin` mode reads host-side binaries from. |
 
 Subcommands:

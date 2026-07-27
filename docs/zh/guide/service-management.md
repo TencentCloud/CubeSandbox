@@ -11,8 +11,26 @@
 - 完整下线 / 重启整机栈的姿势
 
 ::: tip 适用范围
-本页对应**新版（systemd 托管）的一键安装包**。如果你的机器上还能看到 `up-with-deps.sh` / `down-with-deps.sh` 这类脚本作为日常入口，那是 pre-systemd 老版本，重新执行最新一键安装包即可平滑升级（安装器内置了对老部署的接管逻辑）。
+本页对应**新版（systemd 托管）的一键安装包**。聚合入口
+`up-with-deps.sh` 和 `down-with-deps.sh` 已废弃，不能再用于日常启动、停止
+或开机管理。重新执行最新一键安装包会自动迁移 pre-systemd 安装；安装器对
+旧安装目录中 `down-with-deps.sh` 的探测仅用于升级接管，不代表它仍是受支持
+的运维接口。
 :::
+
+### 遗留脚本状态
+
+`scripts/one-click/` 是混合用途的历史目录：
+
+- 已废弃的运维入口：`up-with-deps.sh`、`down-with-deps.sh`。
+- 为兼容保留的旧实现：`up.sh`、`down-local.sh`、`up-dns.sh`、
+  `down-dns.sh`、`coredns-compose-lib.sh`。
+- 当前仍在使用的实现 helper：组件级 up/down 和 compose-lib 脚本、
+  `quickcheck.sh`，以及仍有 systemd 或 Terraform 调用者的 compute/egress
+  脚本。
+
+控制节点应通过 `cube-sandbox-control.target` 管理整套服务，计算节点使用
+`cube-sandbox-compute.target`。
 
 ## TL;DR 一分钟备忘
 

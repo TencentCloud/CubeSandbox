@@ -19,7 +19,7 @@ SSH_HOST="${SSH_HOST:-127.0.0.1}"
 SSH_PORT="${SSH_PORT:-10022}"
 
 TOOLBOX_ROOT="${TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
-UNIT_NAME="${UNIT_NAME:-cube-sandbox-oneclick.service}"
+UNIT_NAME="${UNIT_NAME:-cube-sandbox-control.target}"
 OUTPUT_BIN_DIR="${OUTPUT_BIN_DIR:-${REPO_ROOT}/_output/bin}"
 
 ASKPASS_SCRIPT="${WORK_DIR}/.ssh-askpass.sh"
