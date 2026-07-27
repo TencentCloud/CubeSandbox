@@ -4,7 +4,7 @@
 import { fetch, type Dispatcher } from "undici";
 
 import { Commands } from "./commands.js";
-import { Config, DEFAULT_SANDBOX_TIMEOUT_S, resolveConfig, type ConfigOptions } from "./config.js";
+import { Config, resolveConfig, type ConfigOptions } from "./config.js";
 import {
   ApiError,
   AuthenticationError,
@@ -352,10 +352,10 @@ export class Sandbox {
       );
     }
 
-    const payload: Record<string, unknown> = {
-      templateID: tpl,
-      timeout: options.timeout ?? cfg.timeout,
-    };
+    const payload: Record<string, unknown> = { templateID: tpl };
+    if (options.timeout !== undefined) {
+      payload.timeout = options.timeout;
+    }
     if (options.envVars) {
       payload.envVars = options.envVars;
     }
@@ -416,7 +416,7 @@ export class Sandbox {
     const resp = await controlFetch(cfg, `${cfg.apiUrl}/sandboxes/${sandboxId}/connect`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ timeout: cfg.timeout }),
+      body: JSON.stringify({}),
     });
     await checkControlResponse(resp);
     return new Sandbox((await resp.json()) as Record<string, any>, cfg);
@@ -570,11 +570,15 @@ export class Sandbox {
    * @deprecated Use {@link Sandbox.connect} which auto-resumes and returns a
    * fresh instance.
    */
-  async resume(timeout = DEFAULT_SANDBOX_TIMEOUT_S): Promise<void> {
+  async resume(timeout?: number): Promise<void> {
+    const payload: Record<string, unknown> = {};
+    if (timeout !== undefined) {
+      payload.timeout = timeout;
+    }
     const resp = await controlFetch(this.config, `${this.config.apiUrl}/sandboxes/${this.sandboxId}/resume`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ timeout }),
+      body: JSON.stringify(payload),
     });
     await checkControlResponse(resp);
   }
