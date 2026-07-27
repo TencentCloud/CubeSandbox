@@ -822,25 +822,18 @@ async fn run_session(mut socket: WebSocket, ctx: SessionContext) {
         return;
     }
 
-    // Guard the pump against panics so the PTY is always reaped: a panic in
-    // the bridge task would otherwise be swallowed by Tokio, dropping the task
-    // without killing the shell.
-    let reason = match std::panic::AssertUnwindSafe(bridge(
+    // Run the bridge pump. With `panic = "abort"` in the release profile
+    // catch_unwind is a no-op, so we rely on bridge() being infallible
+    // (it returns a CloseReason for every code path) and use a drop guard
+    // to ensure the PTY is flagged for cleanup if the task is cancelled.
+    let reason = bridge(
         &mut socket,
         &envd,
         pid,
         stream,
         ctx.idle_timeout,
-    ))
-    .catch_unwind()
-    .await
-    {
-        Ok(reason) => reason,
-        Err(_) => {
-            tracing::error!(sandbox_id = %ctx.sandbox_id, pid, "web terminal: bridge task panicked");
-            CloseReason::Panicked
-        }
-    };
+    )
+    .await;
 
     // The shell keeps running inside the sandbox unless it exited by itself;
     // reap it so closed browser tabs / crashes do not leak PTY processes.
