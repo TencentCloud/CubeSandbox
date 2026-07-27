@@ -871,6 +871,55 @@ impl Container {
         Ok(())
     }
 
+    pub async fn resize_pty(&mut self, exec_id: &String, width: u32, height: u32) -> Result<()> {
+        let terminal = if exec_id.is_empty() {
+            self.info.terminal
+        } else {
+            let execs = self.execs.lock().await;
+            let exec = execs.get(exec_id).ok_or_else(|| {
+                Error::NotFoundError(format!(
+                    "Exec id:{} not found, container:{}",
+                    exec_id, &self.real_id
+                ))
+            })?;
+            exec.tty.terminal
+        };
+
+        if !terminal {
+            return Err(Error::InvalidArgument(format!(
+                "process is not a terminal, container:{}, exec:{}",
+                &self.real_id, exec_id
+            )));
+        }
+
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| Error::Other("agent client is unavailable".to_string()))?
+            .lock()
+            .await;
+        let req = build_tty_win_resize_request(&self.id, exec_id, width, height);
+        client
+            .tty_win_resize(self.ctx.clone(), &req)
+            .await
+            .map_err(|e| {
+                Error::Other(format!(
+                    "resize terminal container:{} exec:{} to {}x{} failed:{}",
+                    &self.real_id, exec_id, width, height, e
+                ))
+            })?;
+        drop(client);
+
+        if !exec_id.is_empty() {
+            let mut execs = self.execs.lock().await;
+            if let Some(exec) = execs.get_mut(exec_id) {
+                exec.tty.width = width;
+                exec.tty.height = height;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn destroy_exec(&mut self, exec_id: &String) -> CResult<(u32, DateTime<Utc>)> {
         let mut exit_code = 255;
         let mut exit_tm = Utc::now();
@@ -961,5 +1010,35 @@ impl Container {
 
     pub fn get_id(&self) -> String {
         self.id.clone()
+    }
+}
+
+fn build_tty_win_resize_request(
+    container_id: &str,
+    exec_id: &str,
+    width: u32,
+    height: u32,
+) -> agent::TtyWinResizeRequest {
+    agent::TtyWinResizeRequest {
+        container_id: container_id.to_string(),
+        exec_id: exec_id.to_string(),
+        row: height,
+        column: width,
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_tty_win_resize_request;
+
+    #[test]
+    fn tty_resize_request_maps_containerd_dimensions_to_agent_rows_and_columns() {
+        let req = build_tty_win_resize_request("container-id", "exec-id", 100, 40);
+
+        assert_eq!(req.container_id, "container-id");
+        assert_eq!(req.exec_id, "exec-id");
+        assert_eq!(req.row, 40);
+        assert_eq!(req.column, 100);
     }
 }

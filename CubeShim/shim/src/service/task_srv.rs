@@ -558,8 +558,30 @@ impl Task for TaskService {
     async fn resize_pty(
         &self,
         _ctx: &TtrpcContext,
-        _req: api::ResizePtyRequest,
+        req: api::ResizePtyRequest,
     ) -> TtrpcResult<api::Empty> {
+        validate_pty_size(req.width, req.height)?;
+        infof!(
+            self.log,
+            "resize pty request, id:{}, execid:{}, width:{}, height:{}",
+            req.id(),
+            req.exec_id(),
+            req.width,
+            req.height
+        );
+
+        let sb = self.sandbox.lock().await;
+        if sb.paused().await {
+            errf!(self.log, "sandbox not in normal state");
+            return Err(Others("sandbox not in normal state".to_string()));
+        }
+        sb.resize_pty(&req.id, &req.exec_id, req.width, req.height)
+            .await
+            .map_err(|e| {
+                errf!(self.log, "resize pty failed:{}", e);
+                e
+            })?;
+
         Ok(api::Empty::default())
     }
 
@@ -630,6 +652,22 @@ fn is_internal_probe_exec_id(exec_id: &str) -> bool {
     exec_id.starts_with(INTERNAL_PROBE_EXEC_ID_PREFIX)
 }
 
+fn validate_pty_size(width: u32, height: u32) -> TtrpcResult<()> {
+    if width == 0 || height == 0 {
+        return Err(Others(format!(
+            "terminal width and height must be positive, got {}x{}",
+            width, height
+        )));
+    }
+    if width > u16::MAX as u32 || height > u16::MAX as u32 {
+        return Err(Others(format!(
+            "terminal dimensions exceed the guest PTY limit, got {}x{}",
+            width, height
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -643,6 +681,15 @@ mod tests {
         assert!(!is_internal_probe_exec_id(
             "user-cubesandbox-internal-probe-4e7d6a"
         ));
+    }
+
+    #[test]
+    fn terminal_dimensions_must_fit_the_guest_pty() {
+        assert!(validate_pty_size(80, 24).is_ok());
+        assert!(validate_pty_size(0, 24).is_err());
+        assert!(validate_pty_size(80, 0).is_err());
+        assert!(validate_pty_size(u16::MAX as u32 + 1, 24).is_err());
+        assert!(validate_pty_size(80, u16::MAX as u32 + 1).is_err());
     }
 }
 
