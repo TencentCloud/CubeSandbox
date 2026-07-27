@@ -4,11 +4,12 @@
 from __future__ import annotations
 
 import os
+import sys
 import unittest
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 EXAMPLE_DIR = Path(__file__).resolve().parents[1]
 COMMON_SPEC = spec_from_file_location("deno_sandbox_common", EXAMPLE_DIR / "common.py")
@@ -16,6 +17,15 @@ if COMMON_SPEC is None or COMMON_SPEC.loader is None:
     raise RuntimeError("Could not load the Deno sandbox common.py module")
 common = module_from_spec(COMMON_SPEC)
 COMMON_SPEC.loader.exec_module(common)
+
+RESUME_SPEC = spec_from_file_location(
+    "deno_sandbox_resume_example", EXAMPLE_DIR / "resume_example.py"
+)
+if RESUME_SPEC is None or RESUME_SPEC.loader is None:
+    raise RuntimeError("Could not load the Deno sandbox resume_example.py module")
+resume_example = module_from_spec(RESUME_SPEC)
+with patch.dict(sys.modules, {"common": common}):
+    RESUME_SPEC.loader.exec_module(resume_example)
 
 
 class FakeSandbox:
@@ -88,6 +98,22 @@ class CommonTests(unittest.TestCase):
     def test_sandbox_identifier_rejects_missing_id(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "no sandbox_id"):
             common.sandbox_identifier(SimpleNamespace(sandbox_id=""))
+
+    def test_resume_example_kills_sandbox_if_identifier_is_invalid(self) -> None:
+        sandbox = SimpleNamespace(sandbox_id="", kill=Mock())
+        args = SimpleNamespace(template="tpl-deno", timeout=600, poll_timeout=60)
+
+        with (
+            patch("builtins.print"),
+            patch.object(resume_example, "load_environment"),
+            patch.object(resume_example, "parse_args", return_value=args),
+            patch.object(resume_example, "required", return_value="configured"),
+            patch.object(resume_example.Sandbox, "create", return_value=sandbox),
+            self.assertRaisesRegex(RuntimeError, "no sandbox_id"),
+        ):
+            resume_example.main()
+
+        sandbox.kill.assert_called_once_with()
 
     def test_required_rejects_empty_value(self) -> None:
         with (

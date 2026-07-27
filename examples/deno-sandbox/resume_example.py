@@ -39,9 +39,10 @@ def main() -> int:
     template_id = args.template or required("CUBE_TEMPLATE_ID")
 
     sandbox = Sandbox.create(**sandbox_create_options(template_id, args.timeout))
-    sandbox_id = sandbox_identifier(sandbox)
+    sandbox_id = "<unknown>"
 
     try:
+        sandbox_id = sandbox_identifier(sandbox)
         print(f"Sandbox ready: {sandbox_id}")
         start_service(sandbox)
         wait_for_app(sandbox, timeout=args.poll_timeout)
