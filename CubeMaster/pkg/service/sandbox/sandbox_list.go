@@ -36,18 +36,11 @@ var (
 )
 
 // hasAnyDBHost reports whether the node source ListSandbox pages over has any
-// entry at all. IndexByPage collapses "empty list" and "start index past the
-// last node" into the same nil result, so an empty page alone cannot tell a
-// service outage from the legitimate end of pagination; probing the first page
-// disambiguates using the same source (and instance-type fallback) as the
-// paged read.
-//
-// No explicit health check is needed here: the source RangeDBHost pages over,
-// localcache's sortedNodesByClusters, only ever holds healthy nodes —
-// appendSortedNodes skips !n.Healthy, updateSortedNodes removes a node as soon
-// as it turns unhealthy, and the reported-not-ready path calls delSortedNodes.
-// So "every node unhealthy" already reduces to an empty list here and is
-// reported as CubeletUnHealthy, matching GetSandbox's per-node n.Healthy check.
+// entry at all: IndexByPage returns nil both for an empty list and for a start
+// index past the last node, so an empty page alone cannot tell a service outage
+// from the end of pagination. The source only ever holds healthy nodes (see
+// TestRangeDBHostDropsNodeWhoseHealthLapses), so "no entry at all" covers the
+// all-unhealthy case too.
 func hasAnyDBHost(instanceType string) bool {
 	firstPage, _ := rangeDBHostFn(1, 1, instanceType)
 	return len(firstPage) != 0
@@ -103,20 +96,10 @@ func ListSandbox(ctx context.Context, req *types.ListCubeSandboxReq) (rsp *types
 
 	if len(nodeList) == 0 {
 		if req.HostID == "" && !hasAnyDBHost(req.InstanceType) {
-			// Fail loud instead of fail-open: with no queryable nodes at all
-			// (e.g. the only cubelet's health registration briefly lapsed) the
-			// list cannot be authoritatively answered, and "Success + empty" is
-			// indistinguishable from "there are genuinely no sandboxes" — a
-			// caller reconciling its inventory against this list would treat
-			// the transient outage as mass deletion. Return CubeletUnHealthy
-			// instead, mirroring GetSandbox's handling of unhealthy nodes.
-			// "Retryable" here means from the API consumer's perspective (the
-			// condition is transient); the code is deliberately not added to
-			// the internal cubeCodeRetryMap that drives task-level retries —
-			// operators can opt it in via CubeletConf.RetryCode now that
-			// 130408 is registered in errorCode_value. Paginating past the
-			// last node while nodes are still registered keeps returning an
-			// empty Success page.
+			// No queryable node at all: "Success + empty" is indistinguishable
+			// from "there are genuinely no sandboxes", so a caller reconciling
+			// its inventory would read a transient outage as mass deletion.
+			// Fail loud instead, as GetSandbox already does.
 			rsp.Ret.RetCode = int(errorcode.ErrorCode_CubeletUnHealthy)
 			rsp.Ret.RetMsg = errorcode.ErrorCode_CubeletUnHealthy.String()
 		}
