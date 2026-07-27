@@ -215,6 +215,8 @@ pause/resume 会保留 MicroVM 文件系统和进程状态；kill 是终止操�
   `deno.json`、`deno.lock`，然后重建镜像。
 - Dockerfile 使用官方配套 `.sha256sum` 校验 Deno Release 文件后才安装。
 - 服务以 UID `1000` 运行，只能监听 `0.0.0.0:8000`，只可读写自己的数据目录。
+- `test` 任务仅因 `Deno.makeTempDir()` 会生成运行时路径而授予不限定路径的读写权限；
+  生产用 `start` 任务仍只允许访问 `/workspace/deno-app/data`。
 - 两个 SDK 脚本均设置 `allow_internet_access=False`，Deno 运行时默认无法访问公网。
 - 两个 SDK 脚本均设置 `network={"allow_public_traffic": False}`；CubeProxy 要求每个
   请求携带临时的 `e2b-traffic-access-token`，辅助函数不会记录该令牌。

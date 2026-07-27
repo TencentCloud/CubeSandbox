@@ -47,8 +47,10 @@ def sandbox_create_options(template_id: str, timeout: int) -> dict[str, Any]:
 
 def sandbox_identifier(sandbox: Any) -> str:
     value = getattr(sandbox, "sandbox_id", None)
+    if value is None:
+        value = getattr(sandbox, "id", None)
     if not isinstance(value, str) or not value:
-        raise RuntimeError("CubeSandbox SDK returned no sandbox_id")
+        raise RuntimeError("CubeSandbox SDK returned no sandbox_id or id")
     return value
 
 
@@ -107,7 +109,12 @@ def run_checked(
 
 
 def start_service(sandbox: Any) -> int:
-    """Start the Deno service once, rejecting stale or recycled PID files."""
+    """Start Deno once, with a best-effort PID identity check.
+
+    A PID could theoretically be recycled between checks. The isolated,
+    single-user MicroVM process model keeps that TOCTOU window negligible for
+    this example.
+    """
     pid_file = shlex.quote(APP_PID_FILE)
     log_file = shlex.quote(APP_LOG_FILE)
     command = f"""\

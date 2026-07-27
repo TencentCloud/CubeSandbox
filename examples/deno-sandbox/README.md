@@ -233,6 +233,9 @@ sandbox is terminal and is not a persistence mechanism.
   `.sha256sum` before installing the binary.
 - The service runs as UID `1000` and receives network access only for
   `0.0.0.0:8000`, plus read/write access only to its data directory.
+- The `test` task grants unscoped read/write permissions only because
+  `Deno.makeTempDir()` selects a runtime-generated path. The production `start`
+  task remains scoped to `/workspace/deno-app/data`.
 - Both SDK scripts set `allow_internet_access=False`, so the Deno runtime cannot
   reach the public Internet by default.
 - Both SDK scripts set `network={"allow_public_traffic": False}`. CubeProxy

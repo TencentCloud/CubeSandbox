@@ -97,8 +97,22 @@ class CommonTests(unittest.TestCase):
         self.assertIn("local envd port 49983", sandbox.commands.command)
 
     def test_sandbox_identifier_rejects_missing_id(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "no sandbox_id"):
+        with self.assertRaisesRegex(RuntimeError, "no sandbox_id or id"):
             common.sandbox_identifier(SimpleNamespace(sandbox_id=""))
+
+    def test_sandbox_identifier_supports_sdk_id_alias(self) -> None:
+        self.assertEqual(
+            common.sandbox_identifier(SimpleNamespace(id="sandbox-alias")),
+            "sandbox-alias",
+        )
+
+    def test_sandbox_identifier_prefers_canonical_attribute(self) -> None:
+        self.assertEqual(
+            common.sandbox_identifier(
+                SimpleNamespace(sandbox_id="sandbox-canonical", id="sandbox-alias")
+            ),
+            "sandbox-canonical",
+        )
 
     def test_resume_example_kills_sandbox_if_identifier_is_invalid(self) -> None:
         sandbox = SimpleNamespace(sandbox_id="", kill=Mock())
