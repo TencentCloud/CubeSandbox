@@ -1281,6 +1281,10 @@ func (l *local) destroy(ctx context.Context, info *StorageInfo, opts *workflow.D
 		errs = errors.Join(errs, err)
 	}
 
+	if err := l.cleanupHostDirVolumes(ctx, info); err != nil {
+		errs = errors.Join(errs, err)
+	}
+
 	if errs != nil {
 		return ret.Err(errorcode.ErrorCode_DestroyStorageFailed, errs.Error())
 	}
