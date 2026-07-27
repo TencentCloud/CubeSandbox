@@ -795,6 +795,10 @@ pub struct CubeNetworkConfig {
     /// Denied outbound CIDRs blacklist.
     #[serde(rename = "denyOut", skip_serializing_if = "Vec::is_empty")]
     pub deny_out: Vec<String>,
+    /// When true, drop DNS A queries whose domain is absent from allow_out.
+    /// Maps to CubeMaster dnsEnforceQuery.
+    #[serde(rename = "dnsEnforceQuery", skip_serializing_if = "Option::is_none")]
+    pub dns_enforce_query: Option<bool>,
 
     /// L7 egress rules, evaluated first-match-wins in list order.
     #[serde(skip_serializing_if = "Vec::is_empty")]

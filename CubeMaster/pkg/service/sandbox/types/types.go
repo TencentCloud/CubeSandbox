@@ -139,10 +139,13 @@ type CubeNetworkConfig struct {
 	// server-side default (true / publicly reachable). false makes the
 	// sandbox require a matching traffic-access-token header on every
 	// request hitting CubeProxy. See plan/restrict-public-access.md.
-	AllowPublicTraffic *bool         `json:"allowPublicTraffic,omitempty"`
-	AllowOut           []string      `json:"allowOut,omitempty"`
-	DenyOut            []string      `json:"denyOut,omitempty"`
-	Rules              []*EgressRule `json:"rules,omitempty"`
+	AllowPublicTraffic *bool    `json:"allowPublicTraffic,omitempty"`
+	AllowOut           []string `json:"allowOut,omitempty"`
+	DenyOut            []string `json:"denyOut,omitempty"`
+	// DnsEnforceQuery drops DNS A queries whose domain is absent from
+	// allow_out, closing the DNS resolution side-channel. nil = server default (off).
+	DnsEnforceQuery *bool         `json:"dnsEnforceQuery,omitempty"`
+	Rules           []*EgressRule `json:"rules,omitempty"`
 	// MaskRequestHost is an ingress-only Host authority template consumed by
 	// CubeProxy. It is intentionally not forwarded to Cubelet.
 	MaskRequestHost *string `json:"maskRequestHost,omitempty"`
@@ -192,6 +195,7 @@ func (c *CubeNetworkConfig) DeepCopy() *CubeNetworkConfig {
 		AllowPublicTraffic:  cloneBoolPtr(c.AllowPublicTraffic),
 		AllowOut:            append([]string(nil), c.AllowOut...),
 		DenyOut:             append([]string(nil), c.DenyOut...),
+		DnsEnforceQuery:     cloneBoolPtr(c.DnsEnforceQuery),
 		MaskRequestHost:     cloneStringPtr(c.MaskRequestHost),
 	}
 	if len(c.Rules) > 0 {

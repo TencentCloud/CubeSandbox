@@ -983,6 +983,10 @@ func cloneCubeNetworkConfig(in *CubeNetworkConfig) *CubeNetworkConfig {
 		v := *in.AllowInternetAccess
 		out.AllowInternetAccess = &v
 	}
+	if in.DnsEnforceQuery != nil {
+		v := *in.DnsEnforceQuery
+		out.DnsEnforceQuery = &v
+	}
 	return out
 }
 
@@ -1109,6 +1113,9 @@ func cubeVSTapRegistration(cfg *CubeNetworkConfig) cubevs.MVMOptions {
 	if len(cfg.DenyOut) > 0 {
 		denyOut := append([]string(nil), cfg.DenyOut...)
 		opts.DenyOut = &denyOut
+	}
+	if cfg.DnsEnforceQuery != nil {
+		opts.DNSEnforceQuery = cfg.DnsEnforceQuery
 	}
 	return opts
 }

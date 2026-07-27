@@ -156,6 +156,9 @@ message CubeNetworkConfig {
   repeated string deny_out = 3;
   // L7 egress rules, evaluated first-match-wins in list order.
   repeated EgressRule rules = 4;
+  // When true, drop DNS A queries whose domain is absent from allow_out,
+  // closing the DNS resolution side-channel. Implies learning. Defaults to false.
+  optional bool dns_enforce_query = 5;
 }
 
 message EgressRule {

@@ -312,6 +312,10 @@ func mapCubeNetworkConfigFromProto(item *networkagentv1.CubeNetworkConfig) *serv
 		v := item.GetAllowInternetAccess()
 		out.AllowInternetAccess = &v
 	}
+	if item.DnsEnforceQuery != nil {
+		v := item.GetDnsEnforceQuery()
+		out.DnsEnforceQuery = &v
+	}
 	return out
 }
 

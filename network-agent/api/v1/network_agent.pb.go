@@ -1219,9 +1219,12 @@ type CubeNetworkConfig struct {
 	AllowOut            []string               `protobuf:"bytes,2,rep,name=allow_out,json=allowOut,proto3" json:"allow_out,omitempty"`
 	DenyOut             []string               `protobuf:"bytes,3,rep,name=deny_out,json=denyOut,proto3" json:"deny_out,omitempty"`
 	// L7 egress rules, evaluated first-match-wins in list order.
-	Rules         []*EgressRule `protobuf:"bytes,4,rep,name=rules,proto3" json:"rules,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Rules []*EgressRule `protobuf:"bytes,4,rep,name=rules,proto3" json:"rules,omitempty"`
+	// When true, drop DNS A queries whose domain is absent from allow_out,
+	// closing the DNS resolution side-channel. Implies learning. Defaults to false.
+	DnsEnforceQuery *bool `protobuf:"varint,5,opt,name=dns_enforce_query,json=dnsEnforceQuery,proto3,oneof" json:"dns_enforce_query,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *CubeNetworkConfig) Reset() {
@@ -1280,6 +1283,13 @@ func (x *CubeNetworkConfig) GetRules() []*EgressRule {
 		return x.Rules
 	}
 	return nil
+}
+
+func (x *CubeNetworkConfig) GetDnsEnforceQuery() bool {
+	if x != nil && x.DnsEnforceQuery != nil {
+		return *x.DnsEnforceQuery
+	}
+	return false
 }
 
 type EgressRule struct {
@@ -1677,13 +1687,15 @@ const file_api_v1_network_agent_proto_rawDesc = "" +
 	"\x02ip\x18\x01 \x01(\tR\x02ip\x12\x1f\n" +
 	"\vmac_address\x18\x02 \x01(\tR\n" +
 	"macAddress\x12\x16\n" +
-	"\x06device\x18\x03 \x01(\tR\x06device\"\xd6\x01\n" +
+	"\x06device\x18\x03 \x01(\tR\x06device\"\x9d\x02\n" +
 	"\x11CubeNetworkConfig\x127\n" +
 	"\x15allow_internet_access\x18\x01 \x01(\bH\x00R\x13allowInternetAccess\x88\x01\x01\x12\x1b\n" +
 	"\tallow_out\x18\x02 \x03(\tR\ballowOut\x12\x19\n" +
 	"\bdeny_out\x18\x03 \x03(\tR\adenyOut\x126\n" +
-	"\x05rules\x18\x04 \x03(\v2 .network_agent.api.v1.EgressRuleR\x05rulesB\x18\n" +
-	"\x16_allow_internet_access\"\xbc\x01\n" +
+	"\x05rules\x18\x04 \x03(\v2 .network_agent.api.v1.EgressRuleR\x05rules\x12/\n" +
+	"\x11dns_enforce_query\x18\x05 \x01(\bH\x01R\x0fdnsEnforceQuery\x88\x01\x01B\x18\n" +
+	"\x16_allow_internet_accessB\x14\n" +
+	"\x12_dns_enforce_query\"\xbc\x01\n" +
 	"\n" +
 	"EgressRule\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12@\n" +

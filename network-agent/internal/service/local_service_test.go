@@ -43,6 +43,28 @@ func TestCubeVSTapRegistrationBlockAll(t *testing.T) {
 	}
 }
 
+func TestCubeVSTapRegistrationDNSEnforceQuery(t *testing.T) {
+	// When set true, the field must flow through to cubevs MVMOptions.
+	t.Run("set true propagates", func(t *testing.T) {
+		opts := cubeVSTapRegistration(&CubeNetworkConfig{
+			AllowOut:        []string{"api.example.com"},
+			DnsEnforceQuery: boolPtr(true),
+		})
+		if opts.DNSEnforceQuery == nil || !*opts.DNSEnforceQuery {
+			t.Fatalf("opts.DNSEnforceQuery=%v, want true", opts.DNSEnforceQuery)
+		}
+	})
+	// Default (nil) must stay off — no behavior change for existing callers.
+	t.Run("nil stays off", func(t *testing.T) {
+		opts := cubeVSTapRegistration(&CubeNetworkConfig{
+			AllowOut: []string{"api.example.com"},
+		})
+		if opts.DNSEnforceQuery != nil {
+			t.Fatalf("opts.DNSEnforceQuery=%v, want nil (off)", opts.DNSEnforceQuery)
+		}
+	})
+}
+
 func TestCubeVSTapRegistrationExtractsL7AllowOut(t *testing.T) {
 	sni := "API.Example.COM."
 	sniWildcard := "*.SNI.Example.COM"

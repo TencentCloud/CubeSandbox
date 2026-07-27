@@ -121,6 +121,7 @@ type CubeNetworkConfig struct {
 	AllowInternetAccess *bool         `json:"allowInternetAccess,omitempty"`
 	AllowOut            []string      `json:"allowOut,omitempty"`
 	DenyOut             []string      `json:"denyOut,omitempty"`
+	DnsEnforceQuery     *bool         `json:"dnsEnforceQuery,omitempty"`
 	Rules               []*EgressRule `json:"rules,omitempty"`
 }
 

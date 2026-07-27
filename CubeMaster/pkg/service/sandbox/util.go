@@ -290,6 +290,10 @@ func mapCubeNetworkConfig(in *types.CubeNetworkConfig) *cubebox.CubeNetworkConfi
 		allowInternetAccess := *in.AllowInternetAccess
 		out.AllowInternetAccess = &allowInternetAccess
 	}
+	if in.DnsEnforceQuery != nil {
+		dnsEnforceQuery := *in.DnsEnforceQuery
+		out.DnsEnforceQuery = &dnsEnforceQuery
+	}
 	return out
 }
 
@@ -356,7 +360,11 @@ func formatConstructCubeNetworkConfig(in *cubebox.CubeNetworkConfig) string {
 	if in.AllowInternetAccess != nil {
 		allowInternetAccess = fmt.Sprintf("%t", in.GetAllowInternetAccess())
 	}
-	return fmt.Sprintf("allow_internet_access=%s allow_out=%v deny_out=%v rules=%d", allowInternetAccess, in.GetAllowOut(), in.GetDenyOut(), len(in.GetRules()))
+	dnsEnforceQuery := "default(false)"
+	if in.DnsEnforceQuery != nil {
+		dnsEnforceQuery = fmt.Sprintf("%t", in.GetDnsEnforceQuery())
+	}
+	return fmt.Sprintf("allow_internet_access=%s dns_enforce_query=%s allow_out=%v deny_out=%v rules=%d", allowInternetAccess, dnsEnforceQuery, in.GetAllowOut(), in.GetDenyOut(), len(in.GetRules()))
 }
 
 func getExposedPorts(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSandboxRequest) error {

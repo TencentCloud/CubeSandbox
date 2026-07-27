@@ -1007,6 +1007,7 @@ pub(crate) fn build_cube_network_config(
 
     let allow_public_traffic = network.and_then(|n| n.allow_public_traffic);
     let mask_request_host = network.and_then(|n| n.mask_request_host.clone());
+    let dns_enforce_query = network.and_then(|n| n.dns_enforce_query);
     if let Some(value) = mask_request_host.as_deref() {
         validate_mask_request_host(value)?;
     }
@@ -1017,6 +1018,7 @@ pub(crate) fn build_cube_network_config(
         && allow_out.is_empty()
         && deny_out.is_empty()
         && rules.is_empty()
+        && dns_enforce_query.is_none()
     {
         return Ok(None);
     }
@@ -1027,6 +1029,7 @@ pub(crate) fn build_cube_network_config(
         mask_request_host,
         allow_out,
         deny_out,
+        dns_enforce_query,
         rules,
     }))
 }
@@ -1110,6 +1113,7 @@ mod tests {
                 allow_public_traffic: Some(true),
                 allow_out: Some(vec!["github.com".to_string()]),
                 deny_out: Some(vec!["0.0.0.0/0".to_string()]),
+                dns_enforce_query: None,
                 mask_request_host: None,
                 rules: None,
             }),
@@ -1195,6 +1199,7 @@ mod tests {
                 allow_public_traffic: None,
                 allow_out: Some(vec!["api.example.com".to_string()]),
                 deny_out: Some(vec!["203.0.113.0/24".to_string()]),
+                dns_enforce_query: None,
                 mask_request_host: None,
                 rules: None,
             }),
@@ -1214,6 +1219,7 @@ mod tests {
                 allow_public_traffic: Some(false),
                 allow_out: Some(vec!["api.example.com".to_string()]),
                 deny_out: None,
+                dns_enforce_query: None,
                 mask_request_host: None,
                 rules: None,
             }),
@@ -1233,6 +1239,7 @@ mod tests {
                 allow_public_traffic: Some(true),
                 allow_out: Some(vec!["api.example.com".to_string()]),
                 deny_out: None,
+                dns_enforce_query: None,
                 mask_request_host: None,
                 rules: None,
             }),
@@ -1252,6 +1259,7 @@ mod tests {
                 allow_public_traffic: None,
                 allow_out: None,
                 deny_out: None,
+                dns_enforce_query: None,
                 mask_request_host: None,
                 rules: Some(vec![EgressRule {
                     name: "deepseek_api".to_string(),
@@ -1300,6 +1308,7 @@ mod tests {
                 allow_public_traffic: None,
                 allow_out: None,
                 deny_out: None,
+                dns_enforce_query: None,
                 mask_request_host: None,
                 rules: Some(vec![EgressRule {
                     name: "r1".to_string(),
@@ -1327,6 +1336,28 @@ mod tests {
         // None fields are skipped on the wire.
         assert!(rule["action"].get("audit").is_none());
         assert!(rule["action"].get("inject").is_none());
+    }
+
+    #[test]
+    fn network_dns_enforce_query_serializes_to_wire() {
+        let context = build_cube_network_config(
+            None,
+            Some(&SandboxNetworkConfig {
+                allow_out: Some(vec!["api.github.com".to_string()]),
+                deny_out: Some(vec!["0.0.0.0/0".to_string()]),
+                dns_enforce_query: Some(true),
+                ..Default::default()
+            }),
+        )
+        .expect("network config should be valid")
+        .expect("context should exist");
+        assert_eq!(context.dns_enforce_query, Some(true));
+        let json = serde_json::to_value(&context).expect("serialize");
+        assert_eq!(
+            json["dnsEnforceQuery"], true,
+            "dnsEnforceQuery must serialize to wire"
+        );
+        assert_eq!(json["allowOut"][0], "api.github.com");
     }
 
     #[test]

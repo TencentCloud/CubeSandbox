@@ -77,3 +77,24 @@ func TestUnixEndpointHealth(t *testing.T) {
 	}
 	<-done
 }
+
+func TestMapCubeNetworkConfigFromProtoDNSEnforceQuery(t *testing.T) {
+	t.Run("enforce flows through", func(t *testing.T) {
+		enforce := true
+		out := mapCubeNetworkConfigFromProto(&networkagentv1.CubeNetworkConfig{
+			AllowOut:        []string{"api.example.com"},
+			DnsEnforceQuery: &enforce,
+		})
+		if out == nil || out.DnsEnforceQuery == nil || !*out.DnsEnforceQuery {
+			t.Fatalf("DnsEnforceQuery=%v, want true", out)
+		}
+	})
+	t.Run("nil stays nil", func(t *testing.T) {
+		out := mapCubeNetworkConfigFromProto(&networkagentv1.CubeNetworkConfig{
+			AllowOut: []string{"api.example.com"},
+		})
+		if out == nil || out.DnsEnforceQuery != nil {
+			t.Fatalf("DnsEnforceQuery=%v, want nil", out)
+		}
+	})
+}

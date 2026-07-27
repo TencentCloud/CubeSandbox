@@ -56,6 +56,14 @@ pub struct SandboxNetworkConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub deny_out: Option<Vec<String>>,
+    /// When true, drop DNS A queries whose domain is absent from allow_out,
+    /// closing the DNS resolution side-channel. Implies learning.
+    #[serde(
+        rename = "dnsEnforceQuery",
+        alias = "dns_enforce_query",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub dns_enforce_query: Option<bool>,
     /// Host authority forwarded to user services by CubeProxy. `${PORT}` is
     /// expanded to the requested sandbox port; envd traffic is exempt.
     #[serde(rename = "maskRequestHost", skip_serializing_if = "Option::is_none")]
@@ -1102,4 +1110,23 @@ pub struct VolumeAndToken {
     /// Auth token returned by the volume plugin. Empty string when not applicable.
     #[serde(default)]
     pub token: String,
+}
+
+#[cfg(test)]
+mod dns_enforce_tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_network_config_deserializes_dns_enforce_query_camel() {
+        let json = r#"{"dnsEnforceQuery": true, "allowOut": ["x.com"]}"#;
+        let cfg: SandboxNetworkConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.dns_enforce_query, Some(true));
+    }
+
+    #[test]
+    fn sandbox_network_config_deserializes_dns_enforce_query_snake() {
+        let json = r#"{"dns_enforce_query": true}"#;
+        let cfg: SandboxNetworkConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.dns_enforce_query, Some(true));
+    }
 }

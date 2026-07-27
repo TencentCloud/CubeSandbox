@@ -273,6 +273,7 @@ func mapCubeNetworkConfigToProto(in *CubeNetworkConfig) *networkagentv1.CubeNetw
 		AllowInternetAccess: in.AllowInternetAccess,
 		AllowOut:            in.AllowOut,
 		DenyOut:             in.DenyOut,
+		DnsEnforceQuery:     in.DnsEnforceQuery,
 		Rules:               mapEgressRulesToProto(in.Rules),
 	}
 	return out

@@ -554,6 +554,10 @@ func mapRunRequestCubeNetworkConfig(in *cubebox.CubeNetworkConfig) *networkagent
 		allowInternetAccess := in.GetAllowInternetAccess()
 		out.AllowInternetAccess = &allowInternetAccess
 	}
+	if in.DnsEnforceQuery != nil {
+		dnsEnforceQuery := in.GetDnsEnforceQuery()
+		out.DnsEnforceQuery = &dnsEnforceQuery
+	}
 	return out
 }
 
@@ -838,6 +842,10 @@ func cloneNetworkAgentCubeNetworkConfig(cfg *networkagentclient.CubeNetworkConfi
 	if cfg.AllowInternetAccess != nil {
 		v := *cfg.AllowInternetAccess
 		out.AllowInternetAccess = &v
+	}
+	if cfg.DnsEnforceQuery != nil {
+		v := *cfg.DnsEnforceQuery
+		out.DnsEnforceQuery = &v
 	}
 	return out
 }

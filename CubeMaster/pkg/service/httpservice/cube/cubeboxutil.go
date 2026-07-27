@@ -288,6 +288,10 @@ func mergeCubeNetworkConfigs(templateCfg *types.CubeNetworkConfig, requestCfg *t
 		maskRequestHost := *requestCfg.MaskRequestHost
 		out.MaskRequestHost = &maskRequestHost
 	}
+	if requestCfg.DnsEnforceQuery != nil {
+		dnsEnforceQuery := *requestCfg.DnsEnforceQuery
+		out.DnsEnforceQuery = &dnsEnforceQuery
+	}
 	if len(requestCfg.AllowOut) > 0 {
 		out.AllowOut = appendUniqueCIDRs(out.AllowOut, requestCfg.AllowOut)
 	}
