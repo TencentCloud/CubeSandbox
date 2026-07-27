@@ -250,6 +250,53 @@ func TestBuildNetPolicyPlanBlockAllKeepsDefaultDenyOutOnReplace(t *testing.T) {
 	}
 }
 
+func TestBuildNetPolicyPlanDNSEnforceQuery(t *testing.T) {
+	t.Run("enforce implies learning with allow domains", func(t *testing.T) {
+		allowOut := []string{"api.example.com"}
+		enforce := true
+		plan, err := buildNetPolicyPlan(MVMOptions{
+			AllowOut:        &allowOut,
+			DNSEnforceQuery: &enforce,
+		})
+		if err != nil {
+			t.Fatalf("buildNetPolicyPlan returned error: %v", err)
+		}
+		want := uint8(dnsPolicyFlagLearningEnabled) | uint8(dnsPolicyFlagEnforceQuery)
+		if plan.dnsPolicyFlags != want {
+			t.Fatalf("dnsPolicyFlags=%d, want %d", plan.dnsPolicyFlags, want)
+		}
+		if !dnsPolicyEnforceQuery(plan.dnsPolicyFlags) {
+			t.Fatalf("dnsPolicyEnforceQuery reported false, want true")
+		}
+	})
+
+	t.Run("enforce without allow domains still sets both bits", func(t *testing.T) {
+		enforce := true
+		plan, err := buildNetPolicyPlan(MVMOptions{DNSEnforceQuery: &enforce})
+		if err != nil {
+			t.Fatalf("buildNetPolicyPlan returned error: %v", err)
+		}
+		want := uint8(dnsPolicyFlagLearningEnabled) | uint8(dnsPolicyFlagEnforceQuery)
+		if plan.dnsPolicyFlags != want {
+			t.Fatalf("dnsPolicyFlags=%d, want %d", plan.dnsPolicyFlags, want)
+		}
+	})
+
+	t.Run("default keeps learning only", func(t *testing.T) {
+		allowOut := []string{"api.example.com"}
+		plan, err := buildNetPolicyPlan(MVMOptions{AllowOut: &allowOut})
+		if err != nil {
+			t.Fatalf("buildNetPolicyPlan returned error: %v", err)
+		}
+		if plan.dnsPolicyFlags != uint8(dnsPolicyFlagLearningEnabled) {
+			t.Fatalf("dnsPolicyFlags=%d, want learning only", plan.dnsPolicyFlags)
+		}
+		if dnsPolicyEnforceQuery(plan.dnsPolicyFlags) {
+			t.Fatalf("dnsPolicyEnforceQuery reported true, want false")
+		}
+	})
+}
+
 func TestPolicyEntryBuildersRejectBlankCIDR(t *testing.T) {
 	tests := []struct {
 		name string

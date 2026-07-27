@@ -356,11 +356,18 @@ func buildNetPolicyPlan(opts MVMOptions) (*netPolicyPlan, error) {
 		return nil, err
 	}
 
+	dnsPolicyFlags := dnsPolicyFlagsForDomains(dnsAllowDomains, l7DNSAllowDomains)
+	// Enforce mode drops DNS A queries whose domain is absent from dns_allow.
+	// It implies learning so matched domains still resolve and learn IPs.
+	if opts.DNSEnforceQuery != nil && *opts.DNSEnforceQuery {
+		dnsPolicyFlags |= uint8(dnsPolicyFlagLearningEnabled) | uint8(dnsPolicyFlagEnforceQuery)
+	}
+
 	plan := &netPolicyPlan{
 		allowOutEntries: allowOutEntries,
 		dnsAllowRules:   dnsAllowRules,
 		denyOutEntries:  denyOutEntries,
-		dnsPolicyFlags:  dnsPolicyFlagsForDomains(dnsAllowDomains, l7DNSAllowDomains),
+		dnsPolicyFlags:  dnsPolicyFlags,
 	}
 	if err := validateNetPolicyPlan(plan); err != nil {
 		return nil, err
@@ -471,6 +478,10 @@ func dnsPolicyFlagsForDomains(allowDomains, l7Domains []string) uint8 {
 
 func dnsPolicyLearningEnabled(flags uint8) bool {
 	return flags&uint8(dnsPolicyFlagLearningEnabled) != 0
+}
+
+func dnsPolicyEnforceQuery(flags uint8) bool {
+	return flags&uint8(dnsPolicyFlagEnforceQuery) != 0
 }
 
 func setDNSPolicyFlags(ifindex uint32, flags uint8) error {

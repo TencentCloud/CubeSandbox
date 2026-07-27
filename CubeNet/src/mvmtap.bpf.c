@@ -794,6 +794,10 @@ static __always_inline bool dns_policy_enabled(const struct mvm_meta *mvm_meta)
 {
 	return mvm_meta && mvm_meta->dns_policy_flags;
 }
+static __always_inline bool dns_policy_enforce_query(const struct mvm_meta *mvm_meta)
+{
+	return mvm_meta && (mvm_meta->dns_policy_flags & DNS_POLICY_FLAG_ENFORCE_QUERY);
+}
 
 /* Parse one DNS QNAME chunk and dispatch to reverse or finish stage. */
 SEC("tc")
@@ -892,8 +896,11 @@ int dns_finish(struct __sk_buff *skb)
 		return finish_udp_nat(skb, mvm_meta);
 
 	matched = dns_allow_match_value(inner_map, question);
-	if (!matched)
+	if (!matched) {
+		if (dns_policy_enforce_query(mvm_meta))
+			return TC_ACT_SHOT;
 		return finish_udp_nat(skb, mvm_meta);
+	}
 
 	dns_track_allowed_query(skb, state, matched->flags, qname_hash);
 	return finish_udp_nat(skb, mvm_meta);

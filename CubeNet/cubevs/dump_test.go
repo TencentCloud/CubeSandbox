@@ -90,6 +90,7 @@ func TestApplyDNSPolicyModeDump(t *testing.T) {
 		flags        uint8
 		wantEnabled  bool
 		wantLearning bool
+		wantEnforce  bool
 	}{
 		{
 			name: "disabled",
@@ -99,6 +100,13 @@ func TestApplyDNSPolicyModeDump(t *testing.T) {
 			flags:        dnsPolicyFlagLearningEnabled,
 			wantEnabled:  true,
 			wantLearning: true,
+		},
+		{
+			name:         "enforce with learning",
+			flags:        dnsPolicyFlagLearningEnabled | dnsPolicyFlagEnforceQuery,
+			wantEnabled:  true,
+			wantLearning: true,
+			wantEnforce:  true,
 		},
 	}
 
@@ -112,6 +120,9 @@ func TestApplyDNSPolicyModeDump(t *testing.T) {
 			}
 			if result.LearningEnabled != tt.wantLearning {
 				t.Fatalf("LearningEnabled=%v, want %v", result.LearningEnabled, tt.wantLearning)
+			}
+			if result.EnforceEnabled != tt.wantEnforce {
+				t.Fatalf("EnforceEnabled=%v, want %v", result.EnforceEnabled, tt.wantEnforce)
 			}
 			if result.Flags != tt.flags {
 				t.Fatalf("Flags=%d, want %d", result.Flags, tt.flags)

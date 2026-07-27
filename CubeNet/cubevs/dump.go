@@ -42,6 +42,7 @@ type MVMMetadataDump struct {
 	ID             string `json:"id"`
 	DNSPolicyFlags uint8  `json:"dns_policy_flags"`
 	DNSLearning    bool   `json:"dns_learning_enabled"`
+	DNSEnforce     bool   `json:"dns_enforce_query"`
 }
 
 type RemotePortMappingDump struct {
@@ -131,6 +132,7 @@ type DNSAllowMapDump struct {
 	Ifindex         uint32             `json:"ifindex"`
 	Enabled         bool               `json:"enabled"`
 	LearningEnabled bool               `json:"learning_enabled"`
+	EnforceEnabled  bool               `json:"enforce_enabled"`
 	Flags           uint8              `json:"flags"`
 	Rules           []DNSAllowRuleDump `json:"rules"`
 }
@@ -295,6 +297,7 @@ func dumpIfindexToMVMMetadata(opts DumpOptions, _ uint64) (any, error) {
 			ID:             bytesToString(meta.UUID[:]),
 			DNSPolicyFlags: meta.DNSPolicyFlags,
 			DNSLearning:    dnsPolicyLearningEnabled(meta.DNSPolicyFlags),
+			DNSEnforce:     dnsPolicyEnforceQuery(meta.DNSPolicyFlags),
 		})
 	}
 	return entries, wrapIterErr(iter.Err(), MapNameIfindexToMVMMetadata)
@@ -630,6 +633,7 @@ func dumpDNSAllowInnerMap(innerMapID uint32) (DNSAllowMapDump, error) {
 func applyDNSPolicyModeDump(result *DNSAllowMapDump, flags uint8) {
 	result.Enabled = flags != 0
 	result.LearningEnabled = dnsPolicyLearningEnabled(flags)
+	result.EnforceEnabled = dnsPolicyEnforceQuery(flags)
 	result.Flags = flags
 }
 

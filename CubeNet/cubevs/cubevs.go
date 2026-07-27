@@ -126,6 +126,7 @@ const (
 	maxDNSNameLen      = 256
 	// DNS policy flags. Must match src/cubevs.h.
 	dnsPolicyFlagLearningEnabled = 1 << 0
+	dnsPolicyFlagEnforceQuery    = 1 << 1
 	// Network policy flags. Must match src/cubevs.h.
 	netPolicyFlagL7Required = 1 << 0
 	// Network policy value marker. Must match src/cubevs.h.

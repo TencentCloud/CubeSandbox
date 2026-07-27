@@ -13,6 +13,7 @@ type MVMOptions struct {
 	AllowOut            *[]string // CIDR, IP, or domain
 	L7AllowOut          *[]string // CIDR, IP, or domain that requires L7 policy handling
 	DenyOut             *[]string // CIDR or IP
+	DNSEnforceQuery     *bool     // when true, drop DNS A queries whose domain is absent from dns_allow
 }
 
 // ListTAPDevices lists all TAP devices that managed by CubeVS.
