@@ -10,11 +10,6 @@ use axum::{
     response::Response,
 };
 
-/// Subprotocol prefix browsers use to carry the terminal auth token
-/// (`Sec-WebSocket-Protocol: cube-terminal.<token>`). Kept in sync with
-/// `TOKEN_SUBPROTOCOL_PREFIX` in `handlers::terminal`.
-const TOKEN_SUBPROTOCOL_PREFIX: &str = "cube-terminal.";
-
 /// Per-API-key token bucket rate limiter middleware.
 /// Derives the bucket key from the request credential and checks the shared
 /// governor limiter. Returns 429 if the key has exceeded its quota.
@@ -47,11 +42,11 @@ pub async fn rate_limit(
 /// tradeoff for marginal benefit once IP limiting and session caps apply.
 ///
 /// All other routes keep the existing credential keying, mirroring the
-/// credential precedence of `unified_auth` / `handshake_credential`: a
-/// Bearer-shaped credential (the terminal subprotocol token, then the
-/// `token` query param) wins over `X-API-Key`; with no credential at all
-/// the key is "anonymous". The credential is used only as the in-memory
-/// limiter key; it is never logged.
+/// credential precedence of `unified_auth`: the `token` query param wins
+/// over `X-API-Key`; with no credential at all the key is "anonymous".
+/// `Sec-WebSocket-Protocol` is meaningful only on the terminal route and is
+/// deliberately ignored elsewhere. The credential is used only as the
+/// in-memory limiter key; it is never logged.
 fn rate_limit_key(request: &Request) -> String {
     let headers = request.headers();
 
@@ -59,23 +54,8 @@ fn rate_limit_key(request: &Request) -> String {
         return client_ip_key(headers);
     }
 
-    // Browser terminal handshake: `cube-terminal.<token>` subprotocol.
-    if let Some(token) = headers
-        .get("sec-websocket-protocol")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| {
-            v.split(',')
-                .map(str::trim)
-                .find_map(|p| p.strip_prefix(TOKEN_SUBPROTOCOL_PREFIX))
-                .filter(|t| !t.is_empty())
-        })
-    {
-        return token.to_string();
-    }
-
-    // Non-browser terminal clients: `?token=` query param. The raw
-    // (still percent-encoded) value is good enough as a bucket key — the
-    // same client encodes it the same way on every request.
+    // The raw (still percent-encoded) query value is good enough as a bucket
+    // key — the same client encodes it the same way on every request.
     if let Some(token) = query_param(request.uri().query().unwrap_or(""), "token") {
         return token.to_string();
     }
@@ -201,14 +181,18 @@ mod tests {
     }
 
     #[test]
-    fn non_terminal_path_keeps_credential_keying() {
+    fn non_terminal_path_ignores_terminal_subprotocol() {
         // A `/sandboxes/` route that is NOT the terminal WebSocket still
-        // keys on the credential, exactly as before.
+        // keys on its HTTP credential even if an unrelated client supplies
+        // a terminal-style WebSocket subprotocol header.
         let req = request(
-            "/cubeapi/v1/sandboxes/sb-1?token=tok-2",
-            &[("sec-websocket-protocol", "cube-terminal.tok-1")],
+            "/cubeapi/v1/sandboxes/sb-1",
+            &[
+                ("sec-websocket-protocol", "cube-terminal.tok-1"),
+                ("x-api-key", "api-key-1"),
+            ],
         );
-        assert_eq!(rate_limit_key(&req), "tok-1");
+        assert_eq!(rate_limit_key(&req), "api-key-1");
     }
 
     #[test]

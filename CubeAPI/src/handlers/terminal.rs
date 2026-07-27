@@ -290,11 +290,12 @@ impl ServerMessage {
 
 /// Shared live-session counters backing the concurrent-session caps (per
 /// sandbox and global). Lives on `AppState` so every handler clone sees the
-/// same counts. Uses Tokio's async Mutex so contended updates never block a
-/// runtime worker thread.
+/// same counts. The critical section is synchronous and contains only a few
+/// in-memory counter updates, which lets the RAII guard release its slot
+/// directly in `Drop` without relying on a spawned async cleanup task.
 #[derive(Clone, Default)]
 pub struct TerminalSessionTracker {
-    inner: std::sync::Arc<tokio::sync::Mutex<TerminalSessionCounts>>,
+    inner: std::sync::Arc<std::sync::Mutex<TerminalSessionCounts>>,
 }
 
 #[derive(Default)]
@@ -314,13 +315,16 @@ impl TerminalSessionTracker {
     /// Take a session slot for `sandbox_id`, or report which cap is full.
     /// The returned guard releases the slot exactly once on drop, covering
     /// every session exit path.
-    async fn acquire(
+    fn acquire(
         &self,
         sandbox_id: &str,
         max_per_sandbox: usize,
         max_global: usize,
     ) -> Result<TerminalSessionGuard, SessionCap> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if inner.total >= max_global {
             return Err(SessionCap::Global);
         }
@@ -345,19 +349,12 @@ struct TerminalSessionGuard {
 
 impl Drop for TerminalSessionGuard {
     fn drop(&mut self) {
-        // Drop cannot await. Fast-path the uncontended update; if another
-        // task owns the mutex, complete it asynchronously instead of ever
-        // blocking a Tokio worker thread.
-        if let Ok(mut inner) = self.tracker.inner.try_lock() {
-            release_session_slot(&mut inner, &self.sandbox_id);
-            return;
-        }
-        let tracker = self.tracker.clone();
-        let sandbox_id = self.sandbox_id.clone();
-        tokio::spawn(async move {
-            let mut inner = tracker.inner.lock().await;
-            release_session_slot(&mut inner, &sandbox_id);
-        });
+        let mut inner = self
+            .tracker
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        release_session_slot(&mut inner, &self.sandbox_id);
     }
 }
 
@@ -788,7 +785,6 @@ pub async fn terminal_ws(
     let session_guard = match state
         .terminal_sessions
         .acquire(&sandbox_id, max_sessions, max_global)
-        .await
     {
         Ok(guard) => guard,
         Err(cap) => {
@@ -1772,7 +1768,7 @@ async fn pump_loop(
                             let _ = ws_send(
                                 ws_tx,
                                 ServerMessage::Error {
-                                    message: format!("terminal process is unavailable: {}", err),
+                                    message: "terminal process is unavailable".to_string(),
                                 }
                                 .to_message(),
                             )
@@ -3048,6 +3044,11 @@ mod tests {
         };
         let error: Value = serde_json::from_str(&text).expect("message JSON");
         assert_eq!(error["type"], json!("error"));
+        assert_eq!(
+            error["message"],
+            json!("terminal process is unavailable"),
+            "client error must not expose envd failure details"
+        );
 
         // The error path still reaps the shell afterwards.
         let signal =
@@ -3173,37 +3174,27 @@ mod tests {
 
     // ── Session tracker caps ──────────────────────────────────────────────
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn session_tracker_enforces_per_sandbox_and_global_caps() {
+    #[test]
+    fn session_tracker_enforces_per_sandbox_and_global_caps() {
         let tracker = TerminalSessionTracker::default();
 
         // Per-sandbox cap: max 1 for sb-a, global has room.
-        let a1 = tracker
-            .acquire("sb-a", 1, 10)
-            .await
-            .expect("first sb-a session");
+        let a1 = tracker.acquire("sb-a", 1, 10).expect("first sb-a session");
         assert!(
-            matches!(
-                tracker.acquire("sb-a", 1, 10).await,
-                Err(SessionCap::PerSandbox)
-            ),
+            matches!(tracker.acquire("sb-a", 1, 10), Err(SessionCap::PerSandbox)),
             "second sb-a session must hit the per-sandbox cap"
         );
         drop(a1);
         let _a1 = tracker
             .acquire("sb-a", 1, 10)
-            .await
             .expect("per-sandbox slot released on drop");
 
         // Global cap: with one live session and max_global = 2, one more
         // session fits anywhere; the next is rejected even on a fresh
         // sandbox.
-        let _b1 = tracker
-            .acquire("sb-b", 5, 2)
-            .await
-            .expect("second global slot");
+        let _b1 = tracker.acquire("sb-b", 5, 2).expect("second global slot");
         assert!(
-            matches!(tracker.acquire("sb-c", 5, 2).await, Err(SessionCap::Global)),
+            matches!(tracker.acquire("sb-c", 5, 2), Err(SessionCap::Global)),
             "fresh sandbox must still hit the global cap"
         );
     }
