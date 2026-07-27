@@ -152,7 +152,10 @@ mod tests {
         let req = request(
             "/cubeapi/v1/sandboxes/sb-1/terminal/ws",
             &[
-                ("sec-websocket-protocol", "cube-terminal, cube-terminal.tok-1"),
+                (
+                    "sec-websocket-protocol",
+                    "cube-terminal, cube-terminal.tok-1",
+                ),
                 ("x-forwarded-for", "203.0.113.7, 10.0.0.1"),
             ],
         );

@@ -290,11 +290,11 @@ impl ServerMessage {
 
 /// Shared live-session counters backing the concurrent-session caps (per
 /// sandbox and global). Lives on `AppState` so every handler clone sees the
-/// same counts. Uses a std Mutex, held only for a map update and never
-/// across `.await`.
+/// same counts. Uses Tokio's async Mutex so contended updates never block a
+/// runtime worker thread.
 #[derive(Clone, Default)]
 pub struct TerminalSessionTracker {
-    inner: std::sync::Arc<std::sync::Mutex<TerminalSessionCounts>>,
+    inner: std::sync::Arc<tokio::sync::Mutex<TerminalSessionCounts>>,
 }
 
 #[derive(Default)]
@@ -314,16 +314,13 @@ impl TerminalSessionTracker {
     /// Take a session slot for `sandbox_id`, or report which cap is full.
     /// The returned guard releases the slot exactly once on drop, covering
     /// every session exit path.
-    fn acquire(
+    async fn acquire(
         &self,
         sandbox_id: &str,
         max_per_sandbox: usize,
         max_global: usize,
     ) -> Result<TerminalSessionGuard, SessionCap> {
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut inner = self.inner.lock().await;
         if inner.total >= max_global {
             return Err(SessionCap::Global);
         }
@@ -348,17 +345,28 @@ struct TerminalSessionGuard {
 
 impl Drop for TerminalSessionGuard {
     fn drop(&mut self) {
-        let mut inner = self
-            .tracker
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        inner.total = inner.total.saturating_sub(1);
-        if let Some(count) = inner.per_sandbox.get_mut(&self.sandbox_id) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                inner.per_sandbox.remove(&self.sandbox_id);
-            }
+        // Drop cannot await. Fast-path the uncontended update; if another
+        // task owns the mutex, complete it asynchronously instead of ever
+        // blocking a Tokio worker thread.
+        if let Ok(mut inner) = self.tracker.inner.try_lock() {
+            release_session_slot(&mut inner, &self.sandbox_id);
+            return;
+        }
+        let tracker = self.tracker.clone();
+        let sandbox_id = self.sandbox_id.clone();
+        tokio::spawn(async move {
+            let mut inner = tracker.inner.lock().await;
+            release_session_slot(&mut inner, &sandbox_id);
+        });
+    }
+}
+
+fn release_session_slot(inner: &mut TerminalSessionCounts, sandbox_id: &str) {
+    inner.total = inner.total.saturating_sub(1);
+    if let Some(count) = inner.per_sandbox.get_mut(sandbox_id) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            inner.per_sandbox.remove(sandbox_id);
         }
     }
 }
@@ -598,6 +606,8 @@ fn origin_matches_host(headers: &HeaderMap) -> bool {
 
 /// Default port for Origin schemes that imply one.
 fn scheme_default_port(scheme: &str) -> Option<u16> {
+    // Browsers use http(s) in Origin even for WebSocket handshakes. The
+    // ws/wss cases keep this normalization useful for non-browser clients.
     if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("ws") {
         Some(80)
     } else if scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("wss") {
@@ -750,36 +760,35 @@ pub async fn terminal_ws(
     // Resolve the target container's envd port before the upgrade so an
     // unknown container (404) or one without a terminal endpoint (409) gets
     // a proper HTTP status.
-    let envd_port = match resolve_envd_port(
-        &detail.containers,
-        &sandbox_id,
-        query.container.as_deref(),
-    ) {
-        Ok(port) => port,
-        Err(err) => {
-            audit_log(
-                "rejected",
-                &sandbox_id,
-                query.container.as_deref(),
-                None,
-                &identity,
-                client_ip.as_deref(),
-                Some("container-unavailable"),
-            );
-            return Err(err);
-        }
-    };
+    let envd_port =
+        match resolve_envd_port(&detail.containers, &sandbox_id, query.container.as_deref()) {
+            Ok(port) => port,
+            Err(err) => {
+                audit_log(
+                    "rejected",
+                    &sandbox_id,
+                    query.container.as_deref(),
+                    None,
+                    &identity,
+                    client_ip.as_deref(),
+                    Some("container-unavailable"),
+                );
+                return Err(err);
+            }
+        };
     // Audit trails record the resolved container ID, falling back to the raw
     // selector when it did not match any container.
-    let audit_container = select_container(&detail.containers, &sandbox_id, query.container.as_deref())
-        .map(|c| c.container_id.clone())
-        .or_else(|| query.container.clone());
+    let audit_container =
+        select_container(&detail.containers, &sandbox_id, query.container.as_deref())
+            .map(|c| c.container_id.clone())
+            .or_else(|| query.container.clone());
 
     let max_sessions = state.config.terminal_max_sessions_per_sandbox.max(1);
     let max_global = state.config.terminal_max_sessions_global.max(1);
     let session_guard = match state
         .terminal_sessions
         .acquire(&sandbox_id, max_sessions, max_global)
+        .await
     {
         Ok(guard) => guard,
         Err(cap) => {
@@ -797,9 +806,7 @@ pub async fn terminal_ws(
                     "sandbox {} already has {} terminal sessions",
                     sandbox_id, max_sessions
                 ),
-                SessionCap::Global => {
-                    "global terminal session limit reached".to_string()
-                }
+                SessionCap::Global => "global terminal session limit reached".to_string(),
             };
             return Err(AppError::TooManyRequests(message));
         }
@@ -952,6 +959,11 @@ async fn authenticate(
     {
         let credential =
             credential.ok_or_else(|| AppError::Unauthorized(MISSING_CREDENTIAL.to_string()))?;
+        if !is_forwardable_header_value(credential.secret()) {
+            return Err(AppError::Unauthorized(
+                "Invalid API key or token".to_string(),
+            ));
+        }
         if !constant_time_eq(credential.secret(), expected_key) {
             return Err(AppError::Unauthorized(
                 "Invalid API key or token".to_string(),
@@ -1202,8 +1214,11 @@ async fn envd_start(
 ) -> AppResult<ConnectFrameReader> {
     let payload = json!({
         "process": {
-            "cmd": "/bin/bash",
-            "args": ["-i", "-l"],
+            // `/bin/sh` is the portable entry point. It prefers an
+            // interactive login bash when installed, then replaces itself
+            // with an interactive POSIX shell on minimal images.
+            "cmd": "/bin/sh",
+            "args": ["-c", "exec /bin/bash -il 2>/dev/null || exec /bin/sh -i"],
             "envs": {
                 "TERM": "xterm-256color",
                 "LANG": "C.UTF-8",
@@ -1752,7 +1767,18 @@ async fn pump_loop(
                     }
                     Some(Ok(Message::Text(text))) => {
                         reset_idle(idle.as_mut());
-                        handle_client_message(state, host, pid, &text).await;
+                        if let Err(err) = handle_client_message(state, host, pid, &text).await {
+                            tracing::warn!(pid = pid, error = %err, "terminal: envd call failed");
+                            let _ = ws_send(
+                                ws_tx,
+                                ServerMessage::Error {
+                                    message: format!("terminal process is unavailable: {}", err),
+                                }
+                                .to_message(),
+                            )
+                            .await;
+                            return CloseReason::Error;
+                        }
                     }
                     // Binary / ping / pong frames carry no terminal meaning,
                     // but still count as client liveness.
@@ -1774,12 +1800,17 @@ async fn pump_loop(
     }
 }
 
-/// Handle one client text message. envd call errors are tolerated (logged)
-/// because the process may have already exited.
-async fn handle_client_message(state: &AppState, host: &str, pid: i64, text: &str) {
+/// Handle one client text message. Malformed messages are ignored; envd
+/// failures are returned so the client can be told the terminal is gone.
+async fn handle_client_message(
+    state: &AppState,
+    host: &str,
+    pid: i64,
+    text: &str,
+) -> AppResult<()> {
     let msg: ClientMessage = match serde_json::from_str(text) {
         Ok(msg) => msg,
-        Err(_) => return,
+        Err(_) => return Ok(()),
     };
     let result = match msg {
         ClientMessage::Input { data } => {
@@ -1807,9 +1838,7 @@ async fn handle_client_message(state: &AppState, host: &str, pid: i64, text: &st
             .await
         }
     };
-    if let Err(err) = result {
-        tracing::debug!(pid = pid, error = %err, "terminal: envd call failed");
-    }
+    result
 }
 
 #[cfg(test)]
@@ -1900,10 +1929,7 @@ mod tests {
         let payload: Value = serde_json::from_slice(&body[5..]).expect("start payload JSON");
         mock.spy.lock().await.start_payload = Some(payload);
 
-        if mock
-            .hang_start
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
+        if mock.hang_start.load(std::sync::atomic::Ordering::Relaxed) {
             // A hung envd never answers; the client's ENVD_CALL_TIMEOUT is
             // what unblocks the session (and triggers the tag-based orphan
             // cleanup, which this mock answers via the Connect route).
@@ -2176,6 +2202,23 @@ mod tests {
         }
     }
 
+    async fn wait_for_connect_with_tag(spy: &Arc<Mutex<EnvdSpy>>, tag: &str) -> Value {
+        let tag = tag.to_string();
+        wait_for_recorded(move || {
+            let spy = spy.clone();
+            let tag = tag.clone();
+            Box::pin(async move {
+                spy.lock()
+                    .await
+                    .connect
+                    .iter()
+                    .find(|payload| payload["process"]["tag"] == tag)
+                    .cloned()
+            })
+        })
+        .await
+    }
+
     type ConnectResult = Result<
         (
             tokio_tungstenite::WebSocketStream<
@@ -2201,7 +2244,11 @@ mod tests {
     /// header value. Returns the response head and the still-open TCP stream
     /// so callers can assert on the status line before (maybe) continuing as
     /// a WebSocket.
-    async fn raw_handshake(app: &str, query: &str, protocols: &str) -> (String, tokio::net::TcpStream) {
+    async fn raw_handshake(
+        app: &str,
+        query: &str,
+        protocols: &str,
+    ) -> (String, tokio::net::TcpStream) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let url = ws_url(app, query);
@@ -2289,7 +2336,7 @@ mod tests {
 
     // ── Tests ─────────────────────────────────────────────────────────────
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn happy_path_bridges_ws_and_envd_pty() {
         let (proxy_url, mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -2311,7 +2358,11 @@ mod tests {
             .clone()
             .expect("start payload recorded");
         assert_eq!(start["pty"]["size"], json!({"rows": 30, "cols": 100}));
-        assert_eq!(start["process"]["cmd"], json!("/bin/bash"));
+        assert_eq!(start["process"]["cmd"], json!("/bin/sh"));
+        assert_eq!(
+            start["process"]["args"],
+            json!(["-c", "exec /bin/bash -il 2>/dev/null || exec /bin/sh -i"])
+        );
         // The Start request carries a unique tag for orphan recovery.
         assert!(
             start["tag"]
@@ -2369,7 +2420,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn client_disconnect_kills_the_shell() {
         let (proxy_url, mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -2388,7 +2439,7 @@ mod tests {
         assert_eq!(signal["process"]["pid"], json!(MOCK_PID));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn idle_timeout_terminates_session() {
         let (proxy_url, mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -2420,7 +2471,7 @@ mod tests {
         assert_eq!(signal["signal"], json!("SIGNAL_SIGKILL"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn output_activity_extends_idle_timeout() {
         let (proxy_url, mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -2462,7 +2513,7 @@ mod tests {
         assert_eq!(signal["signal"], json!("SIGNAL_SIGKILL"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn token_subprotocol_without_base_is_rejected() {
         let (proxy_url, _mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -2479,7 +2530,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn rejects_when_callback_auth_fails_or_token_missing() {
         let (proxy_url, _mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -2500,7 +2551,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn callback_auth_forwards_path_method_and_bearer_token() {
         let (proxy_url, _mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -2533,7 +2584,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn rejects_sandbox_that_is_not_running() {
         let (proxy_url, _mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_PAUSED).await;
@@ -2542,7 +2593,7 @@ mod tests {
         expect_upgrade_error(connect_async(ws_url(&app, "")).await, StatusCode::CONFLICT);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn rejects_unknown_sandbox() {
         let (proxy_url, _mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master_not_found().await;
@@ -2551,7 +2602,7 @@ mod tests {
         expect_upgrade_error(connect_async(ws_url(&app, "")).await, StatusCode::NOT_FOUND);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn subprotocol_token_authenticates_without_query_param() {
         let (proxy_url, _mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -2645,13 +2696,19 @@ mod tests {
 
         // Exact whitelist entries match, regardless of the request Host.
         assert!(check(Some("https://cube.example.com"), "10.0.0.1:3000"));
-        assert!(check(Some("https://admin.example.com:8443"), "10.0.0.1:3000"));
+        assert!(check(
+            Some("https://admin.example.com:8443"),
+            "10.0.0.1:3000"
+        ));
         // Comparison normalizes case (scheme/host) and surrounding space.
         assert!(check(Some("HTTPS://CUBE.example.COM"), "10.0.0.1:3000"));
         assert!(check(Some(" https://cube.example.com "), "10.0.0.1:3000"));
         // Same host, wrong scheme or port: no Host-match fallback.
         assert!(!check(Some("http://cube.example.com"), "cube.example.com"));
-        assert!(!check(Some("https://cube.example.com:443"), "10.0.0.1:3000"));
+        assert!(!check(
+            Some("https://cube.example.com:443"),
+            "10.0.0.1:3000"
+        ));
         assert!(!check(Some("https://admin.example.com"), "10.0.0.1:3000"));
         // A Host-matching Origin that is not whitelisted is rejected.
         assert!(!check(Some("http://10.0.0.1:3000"), "10.0.0.1:3000"));
@@ -2766,7 +2823,7 @@ mod tests {
         )
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn authenticate_uses_callback_x_auth_user_header() {
         let (url, _) =
             spawn_auth_callback_with_headers(StatusCode::OK, &[("x-auth-user", "bob")]).await;
@@ -2781,7 +2838,7 @@ mod tests {
         assert_eq!(identity.claimed_user, None);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn authenticate_falls_back_to_jwt_username_claim() {
         let (url, _) = spawn_auth_callback(StatusCode::OK).await;
         let state = auth_state(&url).await;
@@ -2795,7 +2852,7 @@ mod tests {
         assert_eq!(identity.claimed_user.as_deref(), Some("alice"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn authenticate_falls_back_to_jwt_sub_claim() {
         let (url, _) = spawn_auth_callback(StatusCode::OK).await;
         let state = auth_state(&url).await;
@@ -2808,7 +2865,7 @@ mod tests {
         assert_eq!(identity.claimed_user.as_deref(), Some("carol"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn authenticate_without_identity_source_still_allows() {
         let (url, _) = spawn_auth_callback(StatusCode::OK).await;
         let state = auth_state(&url).await;
@@ -2838,7 +2895,7 @@ mod tests {
         assert_eq!(identity.claimed_user, None);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn authenticate_prefers_callback_header_over_jwt_claims() {
         let (url, _) =
             spawn_auth_callback_with_headers(StatusCode::OK, &[("x-auth-user", "bob")]).await;
@@ -2852,7 +2909,7 @@ mod tests {
         assert_eq!(identity.claimed_user, None);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn origin_mismatch_is_forbidden_before_upgrade() {
         let (proxy_url, _mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -2865,7 +2922,7 @@ mod tests {
         expect_upgrade_error(connect_async(request).await, StatusCode::FORBIDDEN);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn matching_origin_upgrades() {
         let (proxy_url, _mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -2891,7 +2948,7 @@ mod tests {
         expect_upgrade_error(connect_async(request).await, StatusCode::FORBIDDEN);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn per_sandbox_session_cap_returns_429() {
         let (proxy_url, _mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -2929,7 +2986,7 @@ mod tests {
         assert_eq!(ready["type"], json!("ready"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn oversized_client_message_terminates_session() {
         let (proxy_url, mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -2956,8 +3013,8 @@ mod tests {
         assert!(mock.spy.lock().await.send_input.is_empty());
     }
 
-    #[tokio::test]
-    async fn hung_envd_call_times_out_and_the_pump_survives() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hung_envd_call_reports_an_error_and_reaps_the_session() {
         let hanging = MockEnvd::default();
         hanging
             .hang_send_input
@@ -2972,10 +3029,8 @@ mod tests {
         let ready = recv_json(&mut ws).await;
         assert_eq!(ready["type"], json!("ready"));
 
-        // This input hangs inside envd forever. The envd call deadline
-        // (ENVD_CALL_TIMEOUT) must bound the stall: afterwards the pump
-        // must keep pumping instead of wedging the select loop (idle timer,
-        // disconnect detection, output reads).
+        // This input hangs inside envd forever. The envd call deadline must
+        // bound the stall and tell the client that its terminal is gone.
         let input_b64 = BASE64.encode("echo hi\n");
         ws.send(tungstenite::Message::Text(
             json!({"type": "input", "data": input_b64}).to_string(),
@@ -2983,29 +3038,24 @@ mod tests {
         .await
         .expect("send input");
 
-        // Shell output produced while SendInput is stuck must still be
-        // delivered once the deadline fires.
-        mock.push_frame(json!({"event": {"data": {"pty": BASE64.encode("tick")}}}))
-            .await;
         let msg = tokio::time::timeout(ENVD_CALL_TIMEOUT + Duration::from_secs(15), ws.next())
             .await
-            .expect("pump must recover after the envd call deadline")
+            .expect("client must be notified after the envd call deadline")
             .expect("ws stream ended unexpectedly")
             .expect("ws read error");
         let tungstenite::Message::Text(text) = msg else {
             panic!("expected text message, got {:?}", msg);
         };
-        let output: Value = serde_json::from_str(&text).expect("message JSON");
-        assert_eq!(output["type"], json!("output"));
+        let error: Value = serde_json::from_str(&text).expect("message JSON");
+        assert_eq!(error["type"], json!("error"));
 
-        // And teardown still reaps the shell afterwards.
-        ws.close(None).await.expect("close websocket");
+        // The error path still reaps the shell afterwards.
         let signal =
             wait_for_recorded(first_of(&mock.spy, |s| s.send_signal.first().cloned())).await;
         assert_eq!(signal["signal"], json!("SIGNAL_SIGKILL"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn handshake_is_rate_limited_when_auth_is_configured() {
         let (proxy_url, _mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -3028,7 +3078,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn callback_auth_accepts_x_api_key_header() {
         let (proxy_url, _mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -3061,7 +3111,7 @@ mod tests {
         assert_eq!(header("authorization"), None);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn bearer_token_takes_priority_over_x_api_key() {
         let (proxy_url, _mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -3096,7 +3146,7 @@ mod tests {
         assert_eq!(header("x-api-key"), None);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn simple_key_auth_accepts_x_api_key_header() {
         let (proxy_url, _mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -3123,17 +3173,18 @@ mod tests {
 
     // ── Session tracker caps ──────────────────────────────────────────────
 
-    #[test]
-    fn session_tracker_enforces_per_sandbox_and_global_caps() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn session_tracker_enforces_per_sandbox_and_global_caps() {
         let tracker = TerminalSessionTracker::default();
 
         // Per-sandbox cap: max 1 for sb-a, global has room.
         let a1 = tracker
             .acquire("sb-a", 1, 10)
+            .await
             .expect("first sb-a session");
         assert!(
             matches!(
-                tracker.acquire("sb-a", 1, 10),
+                tracker.acquire("sb-a", 1, 10).await,
                 Err(SessionCap::PerSandbox)
             ),
             "second sb-a session must hit the per-sandbox cap"
@@ -3141,6 +3192,7 @@ mod tests {
         drop(a1);
         let _a1 = tracker
             .acquire("sb-a", 1, 10)
+            .await
             .expect("per-sandbox slot released on drop");
 
         // Global cap: with one live session and max_global = 2, one more
@@ -3148,14 +3200,15 @@ mod tests {
         // sandbox.
         let _b1 = tracker
             .acquire("sb-b", 5, 2)
+            .await
             .expect("second global slot");
         assert!(
-            matches!(tracker.acquire("sb-c", 5, 2), Err(SessionCap::Global)),
+            matches!(tracker.acquire("sb-c", 5, 2).await, Err(SessionCap::Global)),
             "fresh sandbox must still hit the global cap"
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn global_session_cap_returns_429() {
         let (proxy_url, _mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -3182,7 +3235,7 @@ mod tests {
     /// envd accepts the Start request (the shell may already be running) but
     /// never responds before ENVD_CALL_TIMEOUT: the session must fail and the
     /// recovery path must reconnect by tag to learn the pid and SIGKILL it.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn hung_start_reaps_orphaned_shell_via_tag() {
         let hanging = MockEnvd::default();
         hanging
@@ -3211,8 +3264,6 @@ mod tests {
 
         // The orphan cleanup reconnects with the same tag the Start request
         // carried and kills the recovered pid.
-        let connect =
-            wait_for_recorded(first_of(&mock.spy, |s| s.connect.first().cloned())).await;
         let start = mock
             .spy
             .lock()
@@ -3220,6 +3271,11 @@ mod tests {
             .start_payload
             .clone()
             .expect("start payload recorded");
+        let connect = wait_for_connect_with_tag(
+            &mock.spy,
+            start["tag"].as_str().expect("start payload carries a tag"),
+        )
+        .await;
         assert_eq!(connect["process"]["tag"], start["tag"]);
 
         let signal =
@@ -3232,7 +3288,7 @@ mod tests {
 
     /// The Start stream opens but ends before the start event: same orphan
     /// window, same tag-based reaping, without the 10 s start deadline.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn truncated_start_stream_reaps_orphaned_shell_via_tag() {
         let truncating = MockEnvd::default();
         truncating
@@ -3248,8 +3304,6 @@ mod tests {
         let error = recv_json(&mut ws).await;
         assert_eq!(error["type"], json!("error"));
 
-        let connect =
-            wait_for_recorded(first_of(&mock.spy, |s| s.connect.first().cloned())).await;
         let start = mock
             .spy
             .lock()
@@ -3257,6 +3311,11 @@ mod tests {
             .start_payload
             .clone()
             .expect("start payload recorded");
+        let connect = wait_for_connect_with_tag(
+            &mock.spy,
+            start["tag"].as_str().expect("start payload carries a tag"),
+        )
+        .await;
         assert_eq!(connect["process"]["tag"], start["tag"]);
 
         let signal =
@@ -3272,7 +3331,7 @@ mod tests {
     /// A single envd frame carrying more PTY output than one client message
     /// may hold is re-chunked: every output message stays within the 64 KiB
     /// cap and decodes independently; concatenated they equal the original.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn large_pty_output_is_chunked_within_message_cap() {
         let (proxy_url, mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -3307,7 +3366,7 @@ mod tests {
     /// An envd frame header claiming more than the 4 MiB cap is a stream
     /// error: the session ends through the normal teardown path (error frame
     /// to the client, SIGKILL to the shell) instead of buffering unboundedly.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn oversized_envd_frame_terminates_session() {
         let (proxy_url, mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -3338,7 +3397,7 @@ mod tests {
     /// A bare `cube-terminal.` subprotocol carries no token; the handshake
     /// must fall back to the `token` query param instead of treating the
     /// empty string as the credential.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn empty_token_subprotocol_falls_back_to_query_token() {
         let (proxy_url, _mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -3376,7 +3435,7 @@ mod tests {
     /// A query token carrying control characters (percent-decoded newline)
     /// cannot be forwarded as a header value; it must be rejected with 401
     /// instead of surfacing as a 500 "Auth callback unreachable".
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn control_char_query_token_is_rejected_with_401() {
         let (proxy_url, _mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -3395,7 +3454,7 @@ mod tests {
 
     /// A hung auth callback must not park the WebSocket handshake forever:
     /// AUTH_CALLBACK_TIMEOUT bounds it and the handshake fails with a 500.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn hanging_auth_callback_times_out_handshake() {
         let (proxy_url, _mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -3416,7 +3475,7 @@ mod tests {
     /// token: forged or rotated tokens from one client share a single bucket
     /// and cannot mint fresh quota (which would also grow the limiter map
     /// without bound).
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn rate_limit_buckets_terminal_handshakes_per_ip() {
         let (proxy_url, _mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -3442,7 +3501,7 @@ mod tests {
     /// Without any auth backend the terminal endpoint fails closed: the
     /// handshake is rejected with 403 unless the operator explicitly opts
     /// into unauthenticated access.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn open_mode_terminal_is_rejected_by_default() {
         let (proxy_url, _mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -3457,7 +3516,7 @@ mod tests {
     /// With the explicit opt-in the open-mode terminal works as before
     /// (covered by the rest of the suite via `test_config`, restated here
     /// against the same default-reject setup).
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn open_mode_terminal_allowed_when_explicitly_enabled() {
         let (proxy_url, _mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -3474,7 +3533,7 @@ mod tests {
     /// `terminal_token_query_param` is off (the secure default): the
     /// handshake authenticates as if the parameter were absent, and the
     /// `Authorization: Bearer` header becomes the non-browser transport.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn query_token_param_is_ignored_when_disabled() {
         let (proxy_url, _mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;
@@ -3513,7 +3572,7 @@ mod tests {
 
     /// Credential priority: the subprotocol token beats the Authorization
     /// header, which beats the (enabled) query param.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn credential_priority_subprotocol_then_authorization_then_query() {
         let (proxy_url, _mock) = spawn_mock_envd().await;
         let master_url = spawn_mock_master(STATUS_RUNNING).await;

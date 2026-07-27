@@ -80,7 +80,8 @@ pub struct ServerConfig {
     /// Base URL of CubeProxy used to reach envd inside sandboxes via
     /// Host-header routing (`<port>-<sandboxID>.<domain>`).
     ///
-    /// Env var: `SANDBOX_PROXY_URL` (default "http://127.0.0.1").
+    /// Env var: `SANDBOX_PROXY_URL` (default "http://127.0.0.1"), read once
+    /// while the server configuration is initialized.
     #[serde(default = "default_sandbox_proxy_url")]
     pub sandbox_proxy_url: String,
 

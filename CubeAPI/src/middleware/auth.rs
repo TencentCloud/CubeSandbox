@@ -9,6 +9,7 @@ use axum::{
     response::Response,
 };
 use std::time::Duration;
+use subtle::ConstantTimeEq;
 
 /// Total deadline for one auth-callback round trip. A hung callback must not
 /// park the request (or a WebSocket handshake) forever; 10 s matches the
@@ -21,14 +22,7 @@ pub(crate) const AUTH_CALLBACK_TIMEOUT: Duration = Duration::from_secs(10);
 /// mismatch was. The length itself is still observable, which is accepted
 /// practice for API-key comparisons.
 pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    let mut diff = a.len() ^ b.len();
-    for i in 0..a.len().max(b.len()) {
-        let x = if a.is_empty() { 0 } else { a[i % a.len()] };
-        let y = if b.is_empty() { 0 } else { b[i % b.len()] };
-        diff |= usize::from(x ^ y);
-    }
-    diff == 0
+    a.as_bytes().ct_eq(b.as_bytes()).into()
 }
 
 /// Auth credential extracted from the request headers.
