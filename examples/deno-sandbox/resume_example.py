@@ -85,6 +85,8 @@ def main() -> int:
         return 0
     finally:
         try:
+            # Both handles identify the same sandbox; killing the original
+            # handle also terminates the sandbox referenced by resumed.
             sandbox.kill()
             print(f"Sandbox {sandbox_id} killed.")
         except Exception as exc:  # noqa: BLE001 - cleanup must not mask the test result

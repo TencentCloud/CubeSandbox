@@ -140,6 +140,10 @@ class CommonTests(unittest.TestCase):
         self.assertIn("out", str(raised.exception))
         self.assertIn("err", str(raised.exception))
 
+    def test_ensure_success_rejects_result_without_exit_code(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "returned no exit_code"):
+            common.ensure_success(SimpleNamespace(), "demo")
+
     def test_cache_fingerprint_uses_the_fixed_cache_path(self) -> None:
         sandbox = FakeCommandSandbox()
 

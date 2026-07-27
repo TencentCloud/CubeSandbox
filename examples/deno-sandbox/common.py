@@ -76,12 +76,14 @@ def tls_verify() -> str | bool:
 
 
 def ensure_success(result: Any, action: str) -> Any:
-    if getattr(result, "exit_code", 1) != 0:
+    exit_code = getattr(result, "exit_code", None)
+    if exit_code is None:
+        raise RuntimeError(f"{action} returned no exit_code")
+    if exit_code != 0:
         stdout = getattr(result, "stdout", "")
         stderr = getattr(result, "stderr", "")
         raise RuntimeError(
-            f"{action} failed (exit={getattr(result, 'exit_code', None)}):\n"
-            f"stdout:\n{stdout}\nstderr:\n{stderr}"
+            f"{action} failed (exit={exit_code}):\nstdout:\n{stdout}\nstderr:\n{stderr}"
         )
     return result
 
