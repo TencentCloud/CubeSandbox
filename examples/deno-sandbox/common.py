@@ -176,8 +176,14 @@ def assert_public_egress_blocked(sandbox: Any) -> str:
     """Prove that the sandbox cannot open a TCP connection to a public IP."""
     command = """\
 set -eu
-command -v bash >/dev/null
-command -v timeout >/dev/null
+if ! command -v bash >/dev/null 2>&1; then
+  echo 'bash is required to verify the public egress policy' >&2
+  exit 2
+fi
+if ! command -v timeout >/dev/null 2>&1; then
+  echo 'timeout is required to verify the public egress policy' >&2
+  exit 2
+fi
 if timeout 5 bash -c '</dev/null >/dev/tcp/1.1.1.1/80' 2>/dev/null; then
   echo 'unexpected public egress access' >&2
   exit 1

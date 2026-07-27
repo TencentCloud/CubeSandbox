@@ -54,12 +54,12 @@ def main() -> int:
         sandbox.pause(wait=True, timeout=60)
 
         print(f"Reconnecting to {sandbox_id}...")
-        connected = Sandbox.connect(sandbox_id=sandbox_id)
-        if sandbox_identifier(connected) != sandbox_id:
+        # connect() resumes the VM. Use its returned handle only to validate the
+        # identity; the original create-time handle retains the traffic token.
+        resumed = Sandbox.connect(sandbox_id=sandbox_id)
+        if sandbox_identifier(resumed) != sandbox_id:
             raise RuntimeError("CubeSandbox connected to an unexpected sandbox")
 
-        # Cube only returns the traffic token on create. Keep using the original
-        # token-bearing handle for data-plane requests after connect resumes the VM.
         wait_for_app(sandbox, timeout=args.poll_timeout)
 
         after_state = counter_request(sandbox)

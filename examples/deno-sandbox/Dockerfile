@@ -16,7 +16,7 @@ ARG TARGETARCH
 # official x64/arm64 asset, verify its matching checksum, and remove all build
 # utilities from the final layer.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl unzip \
+    && apt-get install -y --no-install-recommends ca-certificates curl util-linux unzip \
     && arch="${TARGETARCH:-$(uname -m)}" \
     && case "${arch}" in \
          amd64|x86_64) deno_arch="x86_64" ;; \
