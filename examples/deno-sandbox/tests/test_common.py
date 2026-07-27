@@ -78,10 +78,12 @@ class CommonTests(unittest.TestCase):
         sandbox = FakeCommandSandbox()
 
         self.assertEqual(common.assert_public_egress_blocked(sandbox), "a" * 64)
+        self.assertIn("/dev/tcp/127.0.0.1/49983", sandbox.commands.command)
         self.assertIn("/dev/tcp/1.1.1.1/80", sandbox.commands.command)
         self.assertIn("timeout 5", sandbox.commands.command)
         self.assertIn("bash is required", sandbox.commands.command)
         self.assertIn("timeout is required", sandbox.commands.command)
+        self.assertIn("local envd port 49983", sandbox.commands.command)
 
     def test_sandbox_identifier_rejects_missing_id(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "no sandbox_id"):

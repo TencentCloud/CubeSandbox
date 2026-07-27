@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 
 APP_DIR = "/workspace/deno-app"
 APP_PORT = 8000
+ENVD_PORT = 49983
 APP_PID_FILE = "/tmp/cube-deno-app.pid"
 APP_LOG_FILE = "/tmp/cube-deno-app.log"
 DENO_CACHE_DIR = "/home/user/.cache/deno"
@@ -173,8 +174,8 @@ def assert_public_access_restricted(sandbox: Any) -> int:
 
 
 def assert_public_egress_blocked(sandbox: Any) -> str:
-    """Prove that the sandbox cannot open a TCP connection to a public IP."""
-    command = """\
+    """Prove public TCP is blocked after validating bash /dev/tcp locally."""
+    command = f"""\
 set -eu
 if ! command -v bash >/dev/null 2>&1; then
   echo 'bash is required to verify the public egress policy' >&2
@@ -182,6 +183,10 @@ if ! command -v bash >/dev/null 2>&1; then
 fi
 if ! command -v timeout >/dev/null 2>&1; then
   echo 'timeout is required to verify the public egress policy' >&2
+  exit 2
+fi
+if ! timeout 5 bash -c '</dev/null >/dev/tcp/127.0.0.1/{ENVD_PORT}' 2>/dev/null; then
+  echo 'bash /dev/tcp support check failed against local envd port {ENVD_PORT}' >&2
   exit 2
 fi
 if timeout 5 bash -c '</dev/null >/dev/tcp/1.1.1.1/80' 2>/dev/null; then

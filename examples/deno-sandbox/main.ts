@@ -42,6 +42,10 @@ export class CounterStore {
     }
   }
 
+  /**
+   * Persist one increment. A failed write rejects this call and is not retried;
+   * later calls continue from the last successfully persisted state.
+   */
   increment(): Promise<CounterState> {
     const operation = this.#pending.then(async () => {
       const current = await this.read();
