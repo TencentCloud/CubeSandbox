@@ -1,0 +1,14 @@
+.env
+.gitignore
+.pytest_cache
+.ruff_cache
+.venv
+__pycache__
+*.py[cod]
+README.md
+README_zh.md
+requirements.txt
+run_example.py
+resume_example.py
+common.py
+tests

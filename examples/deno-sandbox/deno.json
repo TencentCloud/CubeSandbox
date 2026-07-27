@@ -1,0 +1,15 @@
+{
+  "imports": {
+    "@std/assert": "jsr:@std/assert@1.0.19",
+    "@std/path": "jsr:@std/path@1.1.6"
+  },
+  "tasks": {
+    "cache": "deno cache --frozen main.ts main_test.ts",
+    "check": "deno check --frozen main.ts main_test.ts",
+    "fmt": "deno fmt --check deno.json main.ts main_test.ts",
+    "lint": "deno lint main.ts main_test.ts",
+    "start": "deno run --frozen --allow-net=0.0.0.0:8000 --allow-read=/workspace/deno-app/data --allow-write=/workspace/deno-app/data main.ts",
+    "test": "deno test --frozen --allow-read --allow-write main_test.ts",
+    "verify": "deno task fmt && deno task lint && deno task check && deno task test"
+  }
+}
