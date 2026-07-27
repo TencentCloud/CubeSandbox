@@ -54,8 +54,9 @@ def main() -> int:
         sandbox.pause(wait=True, timeout=60)
 
         print(f"Reconnecting to {sandbox_id}...")
-        # connect() resumes the VM. Use its returned handle only to validate the
-        # identity; the original create-time handle retains the traffic token.
+        # connect() resumes the VM and returns a handle for SDK operations. Keep
+        # the original create-time handle for CubeProxy requests because only it
+        # carries the traffic token.
         resumed = Sandbox.connect(sandbox_id=sandbox_id)
         if sandbox_identifier(resumed) != sandbox_id:
             raise RuntimeError("CubeSandbox connected to an unexpected sandbox")
@@ -63,7 +64,7 @@ def main() -> int:
         wait_for_app(sandbox, timeout=args.poll_timeout)
 
         after_state = counter_request(sandbox)
-        after_cache = cache_fingerprint(sandbox)
+        after_cache = cache_fingerprint(resumed)
         if after_state != before_state:
             raise RuntimeError(
                 f"Counter changed across pause/resume: {before_state!r} -> {after_state!r}"
