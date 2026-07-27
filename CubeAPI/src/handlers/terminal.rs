@@ -214,7 +214,7 @@ pub async fn terminal_ticket(
 ) -> AppResult<Json<TicketResponse>> {
     validate_sandbox_id(&sandbox_id)?;
     let guest_user = validate_guest_user(query.user.as_deref())?;
-    let operator = authorize(&state, &headers, uri.path()).await?;
+    let operator = authorize(&state, &headers, uri.path(), "POST").await?;
     ensure_running(&state, &sandbox_id, &operator).await?;
 
     let id = uuid::Uuid::new_v4().simple().to_string();
@@ -261,7 +261,7 @@ pub async fn terminal_ws(
             (ticket.operator, ticket.guest_user)
         }
         None => {
-            let operator = authorize(&state, &headers, uri.path()).await?;
+            let operator = authorize(&state, &headers, uri.path(), "GET").await?;
             (operator, validate_guest_user(query.user.as_deref())?)
         }
     };
@@ -397,7 +397,12 @@ fn validate_guest_user(user: Option<&str>) -> AppResult<String> {
 ///   `X-Session-Token` is required and resolves to the logged-in username.
 /// - With neither configured the platform runs open (same posture as every
 ///   other route) and the operator is recorded as `anonymous`.
-async fn authorize(state: &AppState, headers: &HeaderMap, request_path: &str) -> AppResult<String> {
+async fn authorize(
+    state: &AppState,
+    headers: &HeaderMap,
+    request_path: &str,
+    request_method: &str,
+) -> AppResult<String> {
     let mut operator: Option<String> = None;
 
     if let Some(callback_url) = state
@@ -418,7 +423,7 @@ async fn authorize(state: &AppState, headers: &HeaderMap, request_path: &str) ->
             .http_client
             .post(callback_url)
             .header("X-Request-Path", request_path)
-            .header("X-Request-Method", "GET");
+            .header("X-Request-Method", request_method);
         let req = match &credential {
             ApiCredential::Bearer(token) => {
                 req.header("Authorization", format!("Bearer {}", token))
@@ -432,6 +437,31 @@ async fn authorize(state: &AppState, headers: &HeaderMap, request_path: &str) ->
         if resp.status().as_u16() != 200 {
             return Err(AppError::Unauthorized(
                 "Authentication rejected by callback".to_string(),
+            ));
+        }
+        operator = Some(
+            match credential {
+                ApiCredential::Bearer(_) => "bearer",
+                ApiCredential::ApiKey(_) => "api-key",
+            }
+            .to_string(),
+        );
+    } else if let Some(expected_key) = state.config.cube_api_key.as_deref().filter(|k| !k.is_empty())
+    {
+        let credential = extract_api_credential(headers).ok_or_else(|| {
+            AppError::Unauthorized(
+                "Missing authentication: provide an 'Authorization: Bearer <token>' or \
+                 'X-API-Key: <key>' header"
+                    .to_string(),
+            )
+        })?;
+        let provided = match &credential {
+            ApiCredential::Bearer(t) => t.as_str(),
+            ApiCredential::ApiKey(k) => k.as_str(),
+        };
+        if provided != expected_key {
+            return Err(AppError::Unauthorized(
+                "Invalid API key or token".to_string(),
             ));
         }
         operator = Some(

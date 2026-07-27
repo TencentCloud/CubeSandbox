@@ -3,11 +3,19 @@
 //
 
 use crate::cubemaster::CubeMasterClient;
+use crate::handlers::terminal::TerminalTickets;
 use crate::logging::ArcLogger;
 use crate::services::AppServices;
 use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use std::num::NonZeroU32;
 use std::sync::Arc;
+
+/// Optional WebUI session store for validating `X-Session-Token` headers.
+/// Implementors provide a database-backed session lookup.
+#[async_trait::async_trait]
+pub trait SessionStore: Send + Sync {
+    async fn validate_session(&self, token: &str) -> anyhow::Result<Option<String>>;
+}
 
 /// Shared application state passed to every handler via Axum's `State` extractor.
 /// All fields must be cheap to clone (Arc / DashMap / etc.) — Axum clones State
@@ -28,6 +36,16 @@ pub struct AppState {
 
     /// Server config snapshot.
     pub config: Arc<crate::config::ServerConfig>,
+
+    /// Process-wide store of outstanding terminal tickets.
+    pub terminal_tickets: TerminalTickets,
+
+    /// Bounds the number of concurrent terminal sessions server-wide.
+    pub terminal_sessions: Arc<tokio::sync::Semaphore>,
+
+    /// Optional WebUI session store (database-backed). When set, terminal
+    /// handlers require a valid `X-Session-Token` header.
+    pub agenthub_store: Option<Arc<dyn SessionStore>>,
 }
 
 impl AppState {
@@ -48,12 +66,18 @@ impl AppState {
         let cubemaster = CubeMasterClient::new(config.cubemaster_url.clone(), http_client.clone());
         let services = AppServices::new(&config, cubemaster);
 
+        let terminal_sessions =
+            Arc::new(tokio::sync::Semaphore::new(config.terminal_max_sessions.max(1)));
+
         Self {
             rate_limiter,
             http_client,
             services,
             logger,
             config: Arc::new(config),
+            terminal_tickets: TerminalTickets::default(),
+            terminal_sessions,
+            agenthub_store: None,
         }
     }
 }

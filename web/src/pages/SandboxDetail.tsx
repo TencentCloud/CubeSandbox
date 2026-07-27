@@ -79,6 +79,15 @@ export default function SandboxDetailPage() {
 
   const [actionError, setActionError] = useState<string | null>(null);
   const [terminalOpen, setTerminalOpen] = useState(false);
+
+  const prevStateRef = useRef(state);
+  useEffect(() => {
+    if (prevStateRef.current === 'running' && state !== 'running') {
+      setTerminalOpen(false);
+    }
+    prevStateRef.current = state;
+  }, [state]);
+
   const onLifecycleError = (err: unknown) => {
     setActionError(formatSandboxActionError(err, t));
   };
