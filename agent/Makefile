@@ -155,7 +155,7 @@ clean:
 	@rm -f $(GENERATED_FILES)
 
 ##TARGET test: run tests
-test:
+test: $(GENERATED_FILES)
 	@cargo test --all $(EXTRA_RUSTFEATURES) -- --nocapture
 
 ##TARGET fmt: format code
