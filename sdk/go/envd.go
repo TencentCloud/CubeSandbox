@@ -223,6 +223,7 @@ func (s *Sandbox) newEnvdRequest(ctx context.Context, method, path string, query
 	if s.EnvdAccessToken != "" {
 		req.Header.Set("X-Access-Token", s.EnvdAccessToken)
 	}
+	s.addTrafficTokenHeaders(req)
 	return req, nil
 }
 

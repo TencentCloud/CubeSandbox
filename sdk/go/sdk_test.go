@@ -447,6 +447,8 @@ func TestParseLineAcceptsStringTraceback(t *testing.T) {
 
 func TestRunCodeUsesProxyNodeIPAndPreservesHost(t *testing.T) {
 	var gotHost string
+	var gotE2BToken string
+	var gotCubeToken string
 	var gotPayload map[string]any
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -454,6 +456,8 @@ func TestRunCodeUsesProxyNodeIPAndPreservesHost(t *testing.T) {
 			t.Fatalf("request=%s %s", r.Method, r.URL.Path)
 		}
 		gotHost = r.Host
+		gotE2BToken = r.Header.Get("e2b-traffic-access-token")
+		gotCubeToken = r.Header.Get("cube-traffic-access-token")
 		if err := json.NewDecoder(r.Body).Decode(&gotPayload); err != nil {
 			t.Fatalf("decode payload: %v", err)
 		}
@@ -474,7 +478,7 @@ func TestRunCodeUsesProxyNodeIPAndPreservesHost(t *testing.T) {
 		RequestTimeout: time.Second,
 		Timeout:        300 * time.Second,
 	})
-	sb := &Sandbox{client: client, SandboxID: "sb-proxy", TemplateID: "tpl-test"}
+	sb := &Sandbox{client: client, SandboxID: "sb-proxy", TemplateID: "tpl-test", TrafficAccessToken: "traffic-token"}
 
 	var stdout []string
 	execution, err := sb.RunCode(context.Background(), "1 + 1", RunCodeOptions{
@@ -490,6 +494,9 @@ func TestRunCodeUsesProxyNodeIPAndPreservesHost(t *testing.T) {
 
 	if gotHost != "49999-sb-proxy.cube.test" {
 		t.Fatalf("Host=%q", gotHost)
+	}
+	if gotE2BToken != "traffic-token" || gotCubeToken != "traffic-token" {
+		t.Fatalf("traffic tokens=%q/%q, want traffic-token", gotE2BToken, gotCubeToken)
 	}
 	assertString(t, gotPayload, "code", "1 + 1")
 	assertString(t, gotPayload, "language", "python")
@@ -651,10 +658,11 @@ func TestCommandsRunUsesEnvdProcessStart(t *testing.T) {
 		RequestTimeout: time.Second,
 	})
 	sb := &Sandbox{
-		client:          client,
-		SandboxID:       "sb-proc",
-		TemplateID:      "tpl-test",
-		EnvdAccessToken: "envd-token",
+		client:             client,
+		SandboxID:          "sb-proc",
+		TemplateID:         "tpl-test",
+		EnvdAccessToken:    "envd-token",
+		TrafficAccessToken: "traffic-token",
 	}
 
 	result, err := sb.Commands().Run(context.Background(), "echo hello", CommandOptions{
@@ -677,6 +685,9 @@ func TestCommandsRunUsesEnvdProcessStart(t *testing.T) {
 	}
 	if gotHeaders.Get("Connect-Timeout-Ms") != "1500" || gotHeaders.Get("X-Access-Token") != "envd-token" {
 		t.Fatalf("headers=%#v", gotHeaders)
+	}
+	if gotHeaders.Get("e2b-traffic-access-token") != "traffic-token" || gotHeaders.Get("cube-traffic-access-token") != "traffic-token" {
+		t.Fatalf("traffic headers=%#v", gotHeaders)
 	}
 
 	processPayload, ok := gotPayload["process"].(map[string]any)
@@ -763,6 +774,8 @@ func TestFilesReadUsesEnvdHTTPFileAPI(t *testing.T) {
 	var gotHost string
 	var gotPath string
 	var gotToken string
+	var gotE2BToken string
+	var gotCubeToken string
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/files" {
@@ -771,6 +784,8 @@ func TestFilesReadUsesEnvdHTTPFileAPI(t *testing.T) {
 		gotHost = r.Host
 		gotPath = r.URL.Query().Get("path")
 		gotToken = r.Header.Get("X-Access-Token")
+		gotE2BToken = r.Header.Get("e2b-traffic-access-token")
+		gotCubeToken = r.Header.Get("cube-traffic-access-token")
 		fmt.Fprint(w, "file content")
 	}))
 	defer server.Close()
@@ -783,10 +798,11 @@ func TestFilesReadUsesEnvdHTTPFileAPI(t *testing.T) {
 		RequestTimeout: time.Second,
 	})
 	sb := &Sandbox{
-		client:          client,
-		SandboxID:       "sb-files",
-		TemplateID:      "tpl-test",
-		EnvdAccessToken: "envd-token",
+		client:             client,
+		SandboxID:          "sb-files",
+		TemplateID:         "tpl-test",
+		EnvdAccessToken:    "envd-token",
+		TrafficAccessToken: "traffic-token",
 	}
 
 	content, err := sb.Files().Read(context.Background(), "/tmp/foo bar.txt")
@@ -798,6 +814,9 @@ func TestFilesReadUsesEnvdHTTPFileAPI(t *testing.T) {
 	}
 	if gotHost != "49983-sb-files.cube.test" || gotPath != "/tmp/foo bar.txt" || gotToken != "envd-token" {
 		t.Fatalf("host/path/token=%q/%q/%q", gotHost, gotPath, gotToken)
+	}
+	if gotE2BToken != "traffic-token" || gotCubeToken != "traffic-token" {
+		t.Fatalf("traffic tokens=%q/%q, want traffic-token", gotE2BToken, gotCubeToken)
 	}
 }
 
