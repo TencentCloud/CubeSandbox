@@ -1,5 +1,6 @@
 .pytest_cache/
 .venv/
+.venv-matrix/
 .env
 *.env.local
 **/__pycache__/

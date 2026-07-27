@@ -161,6 +161,46 @@ export SDK_E2E_BACKENDS=e2b,cubesandbox
 pytest --run-e2e
 ```
 
+## E2B 版本矩阵
+
+同一个环境里同一个包只能装一个版本，因此上面的执行方式只能验证“当前恰好装着的那个”
+E2B SDK 版本。如果要给出**受支持的版本区间**，使用
+`scripts/run_e2b_version_matrix.py`：它为每一条固定的 pip 依赖创建独立虚拟环境，在
+同一套用例选择、同一个实时后端上分别执行，最后汇总成一张表：
+
+```bash
+export CUBE_API_URL=http://127.0.0.1:3000
+export CUBE_TEMPLATE_ID=tpl-xxxxxxxxxxxxxxxxxxxxxxxx
+export E2B_API_KEY=<目标环境接受的 API key>
+
+python3 scripts/run_e2b_version_matrix.py --label v0.6.0
+```
+
+版本列表维护在 `e2b-versions.txt`，每行一条 pip 依赖；E2B 发布新的 minor 版本时更新
+该文件即可。结果写入 `reports/e2b-matrix/matrix.md`（可直接发布，例如随 release notes
+一起发出）和 `matrix.json`（机器可读），并按版本列出失败的用例 ID。
+
+```bash
+# 只打印执行计划，不创建环境、不跑测试
+python3 scripts/run_e2b_version_matrix.py --dry-run
+
+# 临时指定版本、扩大用例范围、只出报告不作为门禁
+python3 scripts/run_e2b_version_matrix.py \
+  --spec 'e2b==2.29.5' --spec 'e2b==2.35.0' \
+  -m "smoke or p0 or p1" --exit-zero
+
+# 核心 SDK 与 code interpreter 包配对安装
+python3 scripts/run_e2b_version_matrix.py --spec 'e2b==2.29.5 e2b-code-interpreter==2.9.0'
+```
+
+注意事项：
+
+- 未安装 `e2b-code-interpreter` 的行无法执行 `run_code` 用例。脚本会为该行自动排除这些
+  用例，并在表格的 Notes 列中写明，而不是在悄悄缩小覆盖面的情况下报绿。
+- 虚拟环境缓存在 `.venv-matrix/` 下并会复用，需要重建时加 `--recreate`。
+- 只要有任一版本失败，退出码即非 0，可直接用作发布门禁；仅出报告时使用 `--exit-zero`。
+- 透传给 pytest 的参数需要连着写短横线，例如 `--pytest-arg=-x`。
+
 ## 环境变量
 
 测试会自动加载 `tests/e2e/sdk_compat/.env`。已经在 shell 中导出的变量
@@ -358,7 +398,9 @@ tests/e2e/sdk_compat/
   framework/      配置、preflight、capability、清理、报告
   cases/          按 capability domain 划分的后端无关用例
   docs/           框架设计、用例编写、覆盖盘点与优化建议
+  scripts/        驱动 pytest 的执行脚本，例如 E2B 版本矩阵
   reports/        本地 JSONL 报告
+  e2b-versions.txt  版本矩阵声明支持的 E2B SDK 版本
   README.md
   README_zh.md
 ```

@@ -1,0 +1,23 @@
+# E2B Python SDK versions exercised by scripts/run_e2b_version_matrix.py.
+#
+# One pip requirement per line; blank lines and '#' comments are ignored. A line
+# may install more than one package, e.g.:
+#
+#   e2b==2.29.5 e2b-code-interpreter==2.9.0
+#
+# When a row does not install e2b-code-interpreter, the runner deselects the
+# run_code cases for that row and says so in the generated table.
+#
+# Keep the list short and meaningful — the point is to state a supported range,
+# not to test every release:
+#   * an old known-good version, so regressions in the compatibility surface show up
+#   * versions consumers reported problems with
+#   * the current latest
+#
+# Update this file when a new E2B minor ships, and publish the generated
+# reports/e2b-matrix/matrix.md with the CubeSandbox release notes.
+
+e2b==2.21.0
+e2b==2.26.0
+e2b==2.29.5
+e2b==2.35.0

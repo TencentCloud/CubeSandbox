@@ -176,6 +176,51 @@ export SDK_E2E_BACKENDS=e2b,cubesandbox
 pytest --run-e2e
 ```
 
+## E2B Version Matrix
+
+A single environment can only hold one version of a package, so the runs above
+validate whichever E2B SDK version happens to be installed. To state a
+*supported range* instead, `scripts/run_e2b_version_matrix.py` builds one
+virtualenv per pinned requirement, runs the same case selection against the same
+live backend in each, and merges the outcomes into one table:
+
+```bash
+export CUBE_API_URL=http://127.0.0.1:3000
+export CUBE_TEMPLATE_ID=tpl-xxxxxxxxxxxxxxxxxxxxxxxx
+export E2B_API_KEY=<api-key-accepted-by-your-endpoint>
+
+python3 scripts/run_e2b_version_matrix.py --label v0.6.0
+```
+
+The versions live in `e2b-versions.txt`, one pip requirement per line; edit that
+file when a new E2B minor ships. Results are written to
+`reports/e2b-matrix/matrix.md` (publishable as-is, e.g. with the release notes)
+and `matrix.json` (machine readable), with failing case IDs listed per version.
+
+```bash
+# Preview the plan without creating environments or running tests
+python3 scripts/run_e2b_version_matrix.py --dry-run
+
+# One-off versions, wider selection, report instead of gate
+python3 scripts/run_e2b_version_matrix.py \
+  --spec 'e2b==2.29.5' --spec 'e2b==2.35.0' \
+  -m "smoke or p0 or p1" --exit-zero
+
+# Pair the core SDK with the code interpreter package
+python3 scripts/run_e2b_version_matrix.py --spec 'e2b==2.29.5 e2b-code-interpreter==2.9.0'
+```
+
+Notes:
+
+- A row that does not install `e2b-code-interpreter` cannot run the `run_code`
+  cases. The runner deselects them for that row and says so in the table's Notes
+  column, rather than reporting a green row on quietly reduced coverage.
+- Virtualenvs are cached in `.venv-matrix/` and reused; pass `--recreate` to
+  rebuild them.
+- The exit code is non-zero when any version fails, so the matrix can gate a
+  release job; use `--exit-zero` for report-only runs.
+- Extra pytest flags need the dash attached, e.g. `--pytest-arg=-x`.
+
 ## Environment
 
 The suite automatically loads `tests/e2e/sdk_compat/.env` if the file exists.
@@ -374,7 +419,9 @@ tests/e2e/sdk_compat/
   adapters/      # SDK-specific shims over a shared adapter interface
   framework/     # config, preflight, capability flags, cleanup, reporting
   cases/         # backend-neutral cases split by capability domain
+  scripts/       # runners that drive pytest, e.g. the E2B version matrix
   reports/       # local JSONL events, ignored except reports/.gitignore
+  e2b-versions.txt  # E2B SDK versions the matrix runner declares support for
 ```
 
 Current capability domains:
