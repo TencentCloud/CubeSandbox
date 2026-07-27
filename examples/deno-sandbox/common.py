@@ -244,12 +244,18 @@ def counter_request(sandbox: Any, method: str = "GET") -> dict[str, int]:
 def cache_fingerprint(sandbox: Any) -> str:
     """Hash all cached dependency contents to prove cache persistence."""
     cache_dir = shlex.quote(DENO_CACHE_DIR)
-    command = (
-        f"test -d {cache_dir} "
-        f"&& find {cache_dir} -type f -print -quit | grep -q . "
-        f"&& find {cache_dir} -type f -print0 "
-        "| sort -z | xargs -0 -r sha256sum | sha256sum | cut -d' ' -f1"
-    )
+    command = f"""\
+for tool in find grep sort xargs sha256sum cut; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    printf '%s\\n' "$tool is required to fingerprint the Deno dependency cache" >&2
+    exit 2
+  fi
+done
+test -d {cache_dir} \
+  && find {cache_dir} -type f -print -quit | grep -q . \
+  && find {cache_dir} -type f -print0 \
+  | sort -z | xargs -0 -r sha256sum | sha256sum | cut -d' ' -f1
+"""
     result = run_checked(
         sandbox,
         command,

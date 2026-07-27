@@ -13,15 +13,19 @@ from unittest.mock import Mock, patch
 
 EXAMPLE_DIR = Path(__file__).resolve().parents[1]
 FAKE_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-COMMON_SPEC = spec_from_file_location("deno_sandbox_common", EXAMPLE_DIR / "common.py")
+COMMON_PATH = EXAMPLE_DIR / "common.py"
+if not COMMON_PATH.is_file():
+    raise RuntimeError(f"Could not find the Deno sandbox helper: {COMMON_PATH}")
+COMMON_SPEC = spec_from_file_location("deno_sandbox_common", COMMON_PATH)
 if COMMON_SPEC is None or COMMON_SPEC.loader is None:
     raise RuntimeError("Could not load the Deno sandbox common.py module")
 common = module_from_spec(COMMON_SPEC)
 COMMON_SPEC.loader.exec_module(common)
 
-RESUME_SPEC = spec_from_file_location(
-    "deno_sandbox_resume_example", EXAMPLE_DIR / "resume_example.py"
-)
+RESUME_PATH = EXAMPLE_DIR / "resume_example.py"
+if not RESUME_PATH.is_file():
+    raise RuntimeError(f"Could not find the Deno resume example: {RESUME_PATH}")
+RESUME_SPEC = spec_from_file_location("deno_sandbox_resume_example", RESUME_PATH)
 if RESUME_SPEC is None or RESUME_SPEC.loader is None:
     raise RuntimeError("Could not load the Deno sandbox resume_example.py module")
 resume_example = module_from_spec(RESUME_SPEC)
@@ -166,6 +170,15 @@ class CommonTests(unittest.TestCase):
         self.assertIn(common.DENO_CACHE_DIR, sandbox.commands.command)
         self.assertNotIn("$DENO_DIR", sandbox.commands.command)
         self.assertIn("-print -quit | grep -q .", sandbox.commands.command)
+        self.assertIn(
+            "for tool in find grep sort xargs sha256sum cut",
+            sandbox.commands.command,
+        )
+        self.assertIn('command -v "$tool"', sandbox.commands.command)
+        self.assertIn(
+            "$tool is required to fingerprint the Deno dependency cache",
+            sandbox.commands.command,
+        )
 
     def test_start_service_validates_the_pid_command_line(self) -> None:
         sandbox = FakeCommandSandbox()
