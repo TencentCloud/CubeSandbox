@@ -9,7 +9,7 @@ import unittest
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 EXAMPLE_DIR = Path(__file__).resolve().parents[1]
 FAKE_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -132,6 +132,44 @@ class CommonTests(unittest.TestCase):
         ):
             resume_example.main()
 
+        sandbox.kill.assert_called_once_with()
+
+    def test_resume_example_keeps_token_bearing_handle_for_sdk_requests(self) -> None:
+        sandbox = SimpleNamespace(
+            sandbox_id="sandbox-resume",
+            pause=Mock(),
+            kill=Mock(),
+        )
+        resumed = SimpleNamespace(sandbox_id="sandbox-resume")
+        args = SimpleNamespace(template="tpl-deno", timeout=600, poll_timeout=60)
+
+        with (
+            patch("builtins.print"),
+            patch.object(resume_example, "load_environment"),
+            patch.object(resume_example, "parse_args", return_value=args),
+            patch.object(resume_example, "required", return_value="configured"),
+            patch.object(resume_example.Sandbox, "create", return_value=sandbox),
+            patch.object(
+                resume_example.Sandbox, "connect", return_value=resumed
+            ) as connect,
+            patch.object(resume_example, "start_service"),
+            patch.object(resume_example, "wait_for_app"),
+            patch.object(
+                resume_example,
+                "counter_request",
+                side_effect=[{"counter": 1}, {"counter": 1}, {"counter": 2}],
+            ),
+            patch.object(
+                resume_example,
+                "cache_fingerprint",
+                side_effect=[FAKE_SHA256, FAKE_SHA256],
+            ) as fingerprint,
+        ):
+            self.assertEqual(resume_example.main(), 0)
+
+        self.assertEqual(fingerprint.call_args_list, [call(sandbox), call(sandbox)])
+        sandbox.pause.assert_called_once_with(wait=True, timeout=60)
+        connect.assert_called_once_with(sandbox_id="sandbox-resume")
         sandbox.kill.assert_called_once_with()
 
     def test_required_rejects_empty_value(self) -> None:

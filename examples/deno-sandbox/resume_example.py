@@ -66,7 +66,7 @@ def main() -> int:
         wait_for_app(sandbox, timeout=args.poll_timeout)
 
         after_state = counter_request(sandbox)
-        after_cache = cache_fingerprint(resumed)
+        after_cache = cache_fingerprint(sandbox)
         if after_state != before_state:
             raise RuntimeError(
                 f"Counter changed across pause/resume: {before_state!r} -> {after_state!r}"
