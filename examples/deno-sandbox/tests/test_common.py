@@ -43,17 +43,18 @@ class FakeSandbox:
 
 
 class FakeCommands:
-    def __init__(self) -> None:
+    def __init__(self, *, stdout: str = f"{FAKE_SHA256}\n") -> None:
         self.command = ""
+        self.stdout = stdout
 
     def run(self, command: str, **_kwargs: object) -> SimpleNamespace:
         self.command = command
-        return SimpleNamespace(exit_code=0, stdout=f"{FAKE_SHA256}\n", stderr="")
+        return SimpleNamespace(exit_code=0, stdout=self.stdout, stderr="")
 
 
 class FakeCommandSandbox:
-    def __init__(self) -> None:
-        self.commands = FakeCommands()
+    def __init__(self, *, stdout: str = f"{FAKE_SHA256}\n") -> None:
+        self.commands = FakeCommands(stdout=stdout)
 
 
 class CommonTests(unittest.TestCase):
@@ -90,9 +91,11 @@ class CommonTests(unittest.TestCase):
             common.assert_public_access_restricted(FakeSandbox())
 
     def test_public_egress_check_targets_a_public_tcp_endpoint(self) -> None:
-        sandbox = FakeCommandSandbox()
+        sandbox = FakeCommandSandbox(stdout="public egress blocked\n")
 
-        self.assertEqual(common.assert_public_egress_blocked(sandbox), FAKE_SHA256)
+        self.assertEqual(
+            common.assert_public_egress_blocked(sandbox), "public egress blocked"
+        )
         self.assertIn("/dev/tcp/127.0.0.1/49983", sandbox.commands.command)
         self.assertIn("/dev/tcp/1.1.1.1/80", sandbox.commands.command)
         self.assertIn("timeout 5", sandbox.commands.command)
@@ -224,13 +227,10 @@ class CommonTests(unittest.TestCase):
         self.assertIn("LC_ALL=C sort -z", sandbox.commands.command)
 
     def test_start_service_validates_the_pid_command_line(self) -> None:
-        sandbox = FakeCommandSandbox()
-        sandbox.commands.run = Mock(
-            return_value=SimpleNamespace(exit_code=0, stdout="1234\n", stderr="")
-        )
+        sandbox = FakeCommandSandbox(stdout="1234\n")
 
         self.assertEqual(common.start_service(sandbox), 1234)
-        command = sandbox.commands.run.call_args.args[0]
+        command = sandbox.commands.command
         self.assertIn('case "$pid" in', command)
         self.assertIn('kill -0 "$pid"', command)
         self.assertIn('"/proc/$pid/cmdline"', command)
