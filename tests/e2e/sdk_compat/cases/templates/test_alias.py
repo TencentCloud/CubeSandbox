@@ -23,6 +23,8 @@ import requests
 from cubesandbox import Config, Template
 from cubesandbox._exceptions import ApiError, TemplateNotFoundError
 
+from framework.auth import auth_headers
+
 pytestmark = [
     pytest.mark.e2e,
     pytest.mark.sdk_compat,
@@ -109,8 +111,12 @@ def test_template_create_from_image_and_cleanup(sdk_backend, sdk_e2e_config):
 
 def test_template_alias_dedicated_endpoint_rejects_invalid(sdk_e2e_config):
     """GET /templates/aliases/:alias returns 400 for invalid formats."""
+    headers = auth_headers()
     for invalid in ["UPPER", "tpl-hijack", "snap-hijack", "a" * 65]:
-        resp = requests.get(f"{sdk_e2e_config.cube_api_url}/templates/aliases/{invalid}")
+        resp = requests.get(
+            f"{sdk_e2e_config.cube_api_url}/templates/aliases/{invalid}",
+            headers=headers,
+        )
         assert resp.status_code == 400
 
 
@@ -149,7 +155,10 @@ def test_template_alias_dedicated_lookup_endpoint(sdk_backend, sdk_e2e_config):
         job = Template.build(name=alias, image=DEFAULT_IMAGE, writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE, config=cfg)
         created_id = job.template_id
         _wait_for_ready(created_id, cfg)
-        resp = requests.get(f"{sdk_e2e_config.cube_api_url}/templates/aliases/{alias}")
+        resp = requests.get(
+            f"{sdk_e2e_config.cube_api_url}/templates/aliases/{alias}",
+            headers=auth_headers(),
+        )
         assert resp.status_code == 200
         assert resp.json()["templateID"] == created_id
     finally:
