@@ -110,4 +110,17 @@ assert_recreate_change_detected network \
   --set-string cubeNode.network.ethName=eth9
 assert_recreate_change_detected egress \
   --set cubeEgress.enabled=false
+
+entrypoint="${CHART_DIR}/../images/scripts/component-entrypoint.sh"
+grep -q 'move_pid_to_host_cgroups' "${entrypoint}"
+grep -q 'CUBE_HOST_CGROUP_NAME' "${entrypoint}"
+grep -q 'kill -STOP.*BASHPID' "${entrypoint}"
+grep -q 'stop_legacy_network_agents' "${entrypoint}"
+grep -q 'stopping legacy standalone network-agent' "${entrypoint}"
+if grep -q 'kill -TERM.*network-agent.pid' \
+  "${CHART_DIR}/templates/node-daemonset.yaml"; then
+  echo "Big Pod must preserve the host network-agent during replacement" >&2
+  exit 1
+fi
+
 echo "Big Pod template stability guard passed"

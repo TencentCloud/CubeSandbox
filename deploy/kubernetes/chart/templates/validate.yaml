@@ -66,7 +66,7 @@
 {{- fail "cubeNode.placeholderSlots was removed; Big Pod no longer reserves cube-slot-1..6. Remove cubeNode.placeholderSlots from your values." }}
 {{- end }}
 {{- if hasKey .Values.security "hostNetwork" }}
-{{- fail "security.hostNetwork was removed; cube-node always runs on the Pod network. Remove security.hostNetwork from your values." }}
+{{- fail "security.hostNetwork is not configurable; cube-node always uses the host network. Remove security.hostNetwork from your values." }}
 {{- end }}
 {{- if hasKey .Values.cubeNode "useAdvancedDaemonSet" }}
 {{- fail "cubeNode.useAdvancedDaemonSet was removed; cube-node uses a native apps/v1 DaemonSet. Remove cubeNode.useAdvancedDaemonSet from your values." }}
@@ -226,6 +226,36 @@
 {{- end }}
 {{- if and .Values.cubeEgress.network.enabled (not .Values.cubeEgress.network.ingressInterface) }}
 {{- fail "cubeEgress.network.enabled=true requires cubeEgress.network.ingressInterface" }}
+{{- end }}
+{{- end }}
+{{- if .Values.egressProxy.enabled }}
+{{- if not .Values.cubeNode.network.cubeRouter.enabled }}
+{{- fail "egressProxy.enabled=true requires cubeNode.network.cubeRouter.enabled=true" }}
+{{- end }}
+{{- if lt (len .Values.egressProxy.clusterCIDRs) 1 }}
+{{- fail "egressProxy.enabled=true requires at least one egressProxy.clusterCIDRs entry" }}
+{{- end }}
+{{- if gt (len .Values.egressProxy.clusterCIDRs) 32 }}
+{{- fail "egressProxy.clusterCIDRs supports at most 32 entries" }}
+{{- end }}
+{{- $seenClusterCIDRs := dict }}
+{{- range .Values.egressProxy.clusterCIDRs }}
+{{- if not (regexMatch `^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/([0-9]|[12][0-9]|3[0-2])$` .) }}
+{{- fail (printf "egressProxy.clusterCIDRs contains an invalid IPv4 CIDR: %s" .) }}
+{{- end }}
+{{- if hasKey $seenClusterCIDRs . }}
+{{- fail (printf "egressProxy.clusterCIDRs contains a duplicate entry: %s" .) }}
+{{- end }}
+{{- $_ := set $seenClusterCIDRs . true }}
+{{- end }}
+{{- if and .Values.cubeEgress.enabled .Values.cubeEgress.network.enabled }}
+{{- fail "egressProxy.enabled=true is incompatible with cubeEgress.network.enabled=true; both own sandbox routing rules" }}
+{{- end }}
+{{- if not .Values.images.egressConfigurer.repository }}
+{{- fail "egressProxy.enabled=true requires images.egressConfigurer.repository" }}
+{{- end }}
+{{- if not .Values.images.egressProxy.repository }}
+{{- fail "egressProxy.enabled=true requires images.egressProxy.repository" }}
 {{- end }}
 {{- end }}
 {{- if .Values.volumeCos.enabled }}

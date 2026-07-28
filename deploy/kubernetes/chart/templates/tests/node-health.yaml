@@ -119,7 +119,22 @@ spec:
             | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' \
             | awk -F'"' '{print $4}')"
           echo "${container_names}" | grep -qxF 'cube-egress'
+          {{- if .Values.cubeEgress.network.enabled }}
           echo "${container_names}" | grep -qxF 'cube-egress-net'
+          {{- end }}
+          {{- end }}
+
+          {{- if .Values.egressProxy.enabled }}
+          echo '[health-test] check EgressProxy DaemonSet readiness'
+          egress_ns=cube-egress
+          for egress_ds in \
+            {{ include "cube.fullname" . }}-egress-configurer \
+            {{ include "cube.fullname" . }}-egress-proxy-primary \
+            {{ include "cube.fullname" . }}-egress-proxy-standby; do
+            egress_ds_json="$(kget "/apis/apps/v1/namespaces/${egress_ns}/daemonsets/${egress_ds}")"
+            printf '%s\n' "${egress_ds_json}" | grep -Eq '"numberReady"[[:space:]]*:[[:space:]]*[1-9]'
+            printf '%s\n' "${egress_ds_json}" | grep -Eq '"desiredNumberScheduled"[[:space:]]*:[[:space:]]*[1-9]'
+          done
           {{- end }}
 {{ if eq (include "cube.cubemastercliEnabled" .) "true" }}
 ---
@@ -257,6 +272,11 @@ spec:
       imagePullPolicy: {{ .Values.helmTest.image.pullPolicy }}
       env:
         {{- include "cube.timezoneEnv" . | nindent 8 }}
+        - name: CUBE_PROXY_ADMIN_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "cube.secretName" . }}
+              key: cube-admin-token
       command:
         - sh
         - -ec

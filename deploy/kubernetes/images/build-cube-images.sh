@@ -96,6 +96,8 @@ ALL_IMAGES=(
   cube-lifecycle-manager
   cube-egress
   cube-egress-net
+  cube-egress-configurer
+  cube-egress-proxy
   cube-webui
   cubelet
   cube-shim
@@ -123,6 +125,8 @@ SOURCE_IMAGES=(
   cube-lifecycle-manager
   cube-egress
   cube-egress-net
+  cube-egress-configurer
+  cube-egress-proxy
   cube-webui
 )
 
@@ -390,6 +394,9 @@ ensure_source_tree() {
   fi
   if should_build cube-shim; then
     SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} CubeShim hypervisor deploy/one-click/config-cube.toml deploy/kubernetes/images/scripts"
+  fi
+  if should_build cube-egress-configurer || should_build cube-egress-proxy; then
+    SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} EgressProxy"
   fi
   if should_build cube-ops; then
     SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} CubeOps"
@@ -738,6 +745,24 @@ build_cube_egress_image() {
   record_built cube-egress
 }
 
+build_cube_egress_configurer_image() {
+  [[ -f "${REPO_ROOT}/EgressProxy/Dockerfile.configurer" ]] \
+    || fail "missing EgressProxy/Dockerfile.configurer in ${REPO_ROOT}"
+  build_image cube-egress-configurer \
+    "${REPO_ROOT}/EgressProxy" \
+    "${REPO_ROOT}/EgressProxy/Dockerfile.configurer"
+  record_built cube-egress-configurer
+}
+
+build_cube_egress_proxy_image() {
+  [[ -f "${REPO_ROOT}/EgressProxy/Dockerfile.proxy" ]] \
+    || fail "missing EgressProxy/Dockerfile.proxy in ${REPO_ROOT}"
+  build_image cube-egress-proxy \
+    "${REPO_ROOT}/EgressProxy" \
+    "${REPO_ROOT}/EgressProxy/Dockerfile.proxy"
+  record_built cube-egress-proxy
+}
+
 build_cube_node_from_base_image() {
   local ctx
   local dockerfile
@@ -1066,6 +1091,16 @@ run_selected_builds() {
     copy_cube_egress_net_context "${ctx}"
     build_image cube-egress-net "${ctx}"
     record_built cube-egress-net
+  fi
+
+  if should_build cube-egress-configurer; then
+    ensure_source_tree
+    build_cube_egress_configurer_image
+  fi
+
+  if should_build cube-egress-proxy; then
+    ensure_source_tree
+    build_cube_egress_proxy_image
   fi
 
   if should_build cube-webui; then
