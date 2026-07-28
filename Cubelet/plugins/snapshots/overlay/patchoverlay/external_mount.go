@@ -196,6 +196,10 @@ func (o *snapshotter) getCleanupRefDirectories(ctx context.Context) ([]string, e
 	err := storage.WalkInfo(ctx, func(ctx context.Context, info snapshots.Info) error {
 		sname, err := parseSnapshotName(info.Name)
 		if err != nil {
+			// Fail closed: a snapshot name we cannot parse leaves snapshotMap
+			// incomplete, so continuing could treat a live ref directory as an
+			// orphan and unmount/delete it. Abort the whole cleanup round
+			// instead of skipping the bad record.
 			logEntry.WithError(err).Warnf("failed to parse snapshot name: %s", info.Name)
 			return err
 		}

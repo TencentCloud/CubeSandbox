@@ -220,9 +220,10 @@ func (cb *CubeBox) DeleteContainer(id string) {
 	if cb.ContainersMap == nil {
 		return
 	}
-	if container, err := cb.ContainersMap.Get(id); err == nil {
-		container.MarkDeleted()
-	}
+	// Hard-delete from the map: every caller Syncs/Updates the store right
+	// after and no code path looks the container up again to read its
+	// MarkDeleted marker, so there is nothing to soft-delete for.
+	cb.ContainersMap.DeleteContainer(id)
 }
 
 func (cb *CubeBox) All() map[string]*Container {

@@ -14,6 +14,7 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/distribution/reference"
 	"github.com/hashicorp/go-multierror"
+	imagedigest "github.com/opencontainers/go-digest"
 	"k8s.io/apimachinery/pkg/util/sets"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
@@ -312,11 +313,16 @@ func (m *imageGCManager) updateImageInUse(ctx context.Context) (map[string]*inus
 
 			named := checkImageCosTypeID(ctr.Labels)
 			if named == "" {
-				namedS, err := reference.ParseDockerRef(ctr.GetImage())
-				if err != nil {
-					continue
+				image := ctr.GetImage()
+				if _, err := imagedigest.Parse(image); err == nil {
+					named = image
+				} else {
+					namedS, err := reference.ParseDockerRef(image)
+					if err != nil {
+						continue
+					}
+					named = namedS.String()
 				}
-				named = namedS.String()
 			}
 
 			image, err := m.criImage.LocalResolve(nsCtx, named)
@@ -358,9 +364,9 @@ func (m *imageGCManager) updateImageInUse(ctx context.Context) (map[string]*inus
 		return nil, fmt.Errorf("list namespaces: %w", err)
 	}
 
+	currentImages := sets.NewString()
 	for _, ns := range nses {
 		nsCtx := namespaces.WithNamespace(ctx, ns)
-		currentImages := sets.NewString()
 		nsImages, err := m.criImage.ListImage(nsCtx)
 		if err != nil && !errdefs.IsNotFound(err) {
 			return nil, fmt.Errorf("list images in namespace %q: %w", ns, err)
@@ -392,12 +398,12 @@ func (m *imageGCManager) updateImageInUse(ctx context.Context) (map[string]*inus
 			}
 			m.imageRecords[key] = record
 		}
+	}
 
-		for key, image := range m.imageRecords {
-			if !currentImages.Has(key) {
-				log.G(ctx).Warnf("image %q is no longer present, removing from records", image.ID())
-				delete(m.imageRecords, key)
-			}
+	for key, image := range m.imageRecords {
+		if !currentImages.Has(key) {
+			log.G(ctx).Warnf("image %q is no longer present, removing from records", image.ID())
+			delete(m.imageRecords, key)
 		}
 	}
 

@@ -46,7 +46,6 @@ import (
 	imagestore "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/image"
 	snapshotstore "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/snapshot"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/kmutex"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/multimeta"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
@@ -210,28 +209,17 @@ func NewService(config criconfig.ImageConfig, options *CRIImageServiceOptions) (
 }
 
 func (c *CubeImageService) LocalResolve(ctx context.Context, refOrID string) (imagestore.Image, error) {
-	ir := constants.GetImageSpec(ctx)
-	if ir != nil {
-		_ = refOrID
-	}
-
 	getImageID := func(refOrId string) string {
 		if _, err := imagedigest.Parse(refOrID); err == nil {
 			return refOrID
 		}
 		return func(ref string) string {
 
-			normalized, err := reference.ParseNormalizedNamed(ref)
+			normalized, err := reference.ParseDockerRef(ref)
 			if err != nil {
 				return ""
 			}
-
-			if named, ok := normalized.(reference.Digested); ok {
-				ref = named.Digest().String()
-			} else {
-				ref = normalized.String()
-			}
-			id, err := c.imageStore.Resolve(ctx, ref)
+			id, err := c.imageStore.Resolve(ctx, normalized.String())
 			if err != nil {
 				return ""
 			}

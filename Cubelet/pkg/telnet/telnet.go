@@ -151,7 +151,7 @@ func wrapError(err error, code errorcode.ErrorCode) error {
 	if ok {
 		return err
 	}
-	return ret.Errorf(code, err.Error())
+	return ret.Errorf(code, "%s", err.Error())
 }
 
 func Telnet(ctx context.Context, p *ProbeConfig) chan error {
@@ -274,8 +274,8 @@ func doHTTPGet(req *http.Request, timeout time.Duration, instanceType string) (e
 	}
 
 	if res.StatusCode >= http.StatusInternalServerError {
-		return ret.Errorf(errorcode.ErrorCode(pRes.ErrorCode), pRes.ErrorMsg), true
+		return ret.Errorf(errorcode.ErrorCode(pRes.ErrorCode), "%s", pRes.ErrorMsg), true
 	}
 
-	return ret.Errorf(errorcode.ErrorCode(pRes.ErrorCode), pRes.ErrorMsg), false
+	return ret.Errorf(errorcode.ErrorCode(pRes.ErrorCode), "%s", pRes.ErrorMsg), false
 }

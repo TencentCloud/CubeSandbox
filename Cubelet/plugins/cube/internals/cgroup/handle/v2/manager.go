@@ -217,6 +217,10 @@ func (h *handler) Update(ctx context.Context, group string, cpu, mem resource.Qu
 }
 
 func (h *handler) Delete(ctx context.Context, group string) error {
+	if _, err := os.Stat(path.Join(h.root, group)); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+
 	m, err := cgroup2.Load(group, cgroup2.WithMountpoint(h.root))
 	if err != nil {
 		return err

@@ -21,6 +21,7 @@
 package runtime
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -36,6 +37,7 @@ import (
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/containerd/v2/plugins"
 	"github.com/containerd/containerd/v2/plugins/services/warning"
+	"github.com/containerd/containerd/v2/version"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
 	cubeconfig "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/config"
@@ -53,8 +55,108 @@ func init() {
 		Requires: []plugin.Type{
 			plugins.WarningPlugin,
 		},
-		InitFn: initCRIRuntime,
+		InitFn:          initCRIRuntime,
+		ConfigMigration: configMigration,
 	})
+}
+
+func configMigration(ctx context.Context, configVersion int, pluginConfigs map[string]interface{}) error {
+	if configVersion >= version.ConfigVersion {
+		return nil
+	}
+	original, ok := pluginConfigs[string(plugins.GRPCPlugin)+".cri"]
+	if !ok {
+		return nil
+	}
+	src, ok := original.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	// Migrate into this plugin's own registration key
+	// (constants.CubeServicePlugin + ".runtime"), not containerd's built-in
+	// io.containerd.cri.v1.runtime, which this plugin never reads.
+	dstKey := string(constants.CubeServicePlugin) + ".runtime"
+	var dst map[string]interface{}
+	if updated, ok := pluginConfigs[dstKey].(map[string]interface{}); ok {
+		dst = updated
+	} else {
+		dst = map[string]interface{}{}
+	}
+
+	migrateConfig(dst, src)
+	pluginConfigs[dstKey] = dst
+	return nil
+}
+
+func migrateConfig(dst, src map[string]interface{}) {
+	// Keys owned by the images plugin (migrated by its own ConfigMigration) or
+	// by the stream server are dropped here so the runtime config keeps only
+	// runtime-relevant settings. Everything else carries over unless the
+	// destination already defines it.
+	for k, v := range src {
+		switch k {
+		case "containerd":
+			continue
+		case
+			"sandbox_image",
+			"registry",
+			"image_decryption",
+			"max_concurrent_downloads",
+			"image_pull_progress_timeout",
+			"image_pull_with_sync_fs",
+			"stats_collect_period":
+			continue
+		case
+			"disable_tcp_service",
+			"stream_server_address",
+			"stream_server_port",
+			"stream_idle_timeout",
+			"enable_tls_streaming",
+			"x509_key_pair_streaming":
+			continue
+		default:
+			if _, ok := dst[k]; !ok {
+				dst[k] = v
+			}
+		}
+	}
+
+	containerdConf, ok := src["containerd"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	newContainerdConf, ok := dst["containerd"].(map[string]interface{})
+	if !ok {
+		newContainerdConf = map[string]interface{}{}
+	}
+	for k, v := range containerdConf {
+		switch k {
+		case "snapshotter", "disable_snapshot_annotations", "discard_unpacked_layers":
+			continue
+		default:
+			if _, ok := newContainerdConf[k]; !ok {
+				newContainerdConf[k] = v
+			}
+		}
+	}
+	dst["containerd"] = newContainerdConf
+
+	runtimes, ok := newContainerdConf["runtimes"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	for _, v := range runtimes {
+		runtimeConf, ok := v.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if sandboxMode, ok := runtimeConf["sandbox_mode"]; ok {
+			if _, ok := runtimeConf["sandboxer"]; !ok {
+				runtimeConf["sandboxer"] = sandboxMode
+				delete(runtimeConf, "sandbox_mode")
+			}
+		}
+	}
 }
 
 func initCRIRuntime(ic *plugin.InitContext) (interface{}, error) {

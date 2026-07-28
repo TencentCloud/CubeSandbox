@@ -46,6 +46,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/capability"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/cgroup"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/command"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/disk"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/env"
 	localnetfile "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/netfile"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/pmem"
@@ -1482,8 +1483,37 @@ func (l *local) prepareSandboxPathVolume(ctx context.Context, c *cubebox.Contain
 func (l *local) prepareVolumeAnnotations(ctx context.Context, opts *workflow.CreateContext,
 ) ([]oci.SpecOpts, error) {
 	_ = ctx
-	_ = opts
-	return nil, nil
+	if opts == nil || opts.StorageInfo == nil {
+		return nil, nil
+	}
+	sInfo, ok := opts.StorageInfo.(*storage.StorageInfo)
+	if !ok {
+		return nil, nil
+	}
+
+	hasSystemDisk := sInfo.CubePCISystemDiskInfo != nil
+	hasDataDisks := sInfo.CubePCIDiskInfo != nil && len(sInfo.CubePCIDiskInfo.PCIDisks) > 0
+	if !hasSystemDisk && !hasDataDisks {
+		return nil, nil
+	}
+
+	// CubeShim deserializes this annotation as a flat JSON array
+	// (Vec<DeviceDisk>) in sandbox/config.rs; the system disk leads so its
+	// index is stable, followed by the data disks in order.
+	vfioDisks := make([]disk.CubePCIDisk, 0, 1)
+	if hasSystemDisk {
+		vfioDisks = append(vfioDisks, sInfo.CubePCISystemDiskInfo.PCISystemDisk)
+	}
+	if hasDataDisks {
+		vfioDisks = append(vfioDisks, sInfo.CubePCIDiskInfo.PCIDisks...)
+	}
+	b, err := jsoniter.Marshal(vfioDisks)
+	if err != nil {
+		return nil, fmt.Errorf("marshal vfio disk info failed: %w", err)
+	}
+	return []oci.SpecOpts{oci.WithAnnotations(map[string]string{
+		constants.AnnotationsVFIODisk: string(b),
+	})}, nil
 }
 
 func isImageStorageMediaType(containerReq *cubebox.ContainerConfig, mediaType cubeimages.ImageStorageMediaType) bool {
@@ -1507,6 +1537,10 @@ func (l *local) storeNumaQueues(ctx context.Context, cubebox *cubeboxstore.CubeB
 	if opts.NetworkInfo != nil {
 		cubebox.Queues += opts.NetworkInfo.GetNICQueues()
 	}
+	if cubebox.Labels == nil {
+		cubebox.Labels = make(map[string]string)
+	}
+	cubebox.Labels[constants.LabelNumaNode] = fmt.Sprintf("%d", cubebox.NumaNode)
 }
 
 func withRuntimePathOpt(cubebox *cubeboxstore.CubeBox) containerd.NewTaskOpts {

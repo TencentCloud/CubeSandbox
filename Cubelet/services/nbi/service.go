@@ -92,7 +92,7 @@ func (s *CubeAPIServer) InitHost(ctx context.Context, in *pb.InitRequest) (*pb.I
 		if !ret.IsSuccessCode(rsp.GetCode()) {
 			cubelogCode = CubeLog.CodeInternalError
 			CubeLog.WithContext(ctx).Errorf("InitHost fail:%+v", rsp)
-			workflow.RecordCreateMetric(ctx, fmt.Errorf(rsp.Message), constants.CubeboxServiceID.ID(), time.Since(start))
+			workflow.RecordCreateMetric(ctx, fmt.Errorf("%s", rsp.Message), constants.CubeboxServiceID.ID(), time.Since(start))
 		} else {
 			workflow.RecordCreateMetric(ctx, nil, constants.CubeboxServiceID.ID(), time.Since(start))
 		}
