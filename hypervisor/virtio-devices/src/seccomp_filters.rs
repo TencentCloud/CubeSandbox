@@ -90,6 +90,13 @@ fn virtio_block_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
         (libc::SYS_getrandom, vec![]),
         (libc::SYS_io_uring_enter, vec![]),
         (libc::SYS_lseek, vec![]),
+        // before_pause() drains in-flight IO via libc::poll; glibc maps this
+        // to SYS_poll on x86_64 and SYS_ppoll on aarch64. Without these a
+        // pause-snapshot raises SIGSYS when seccomp is not Allow.
+        #[cfg(target_arch = "x86_64")]
+        (libc::SYS_poll, vec![]),
+        #[cfg(target_arch = "aarch64")]
+        (libc::SYS_ppoll, vec![]),
         (libc::SYS_prctl, vec![]),
         (libc::SYS_pread64, vec![]),
         (libc::SYS_preadv, vec![]),
