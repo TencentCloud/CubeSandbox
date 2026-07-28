@@ -171,6 +171,9 @@ test_enable_migrates_active_legacy_unit() {
     FAKE_LEGACY_ACTIVE=1 \
     FAKE_LEGACY_FAILED=0
 
+  assert_contains "${output}" "Pausing CubeSandbox services for a clean handoff from the legacy unit"
+  assert_contains "${output}" "Legacy unit cube-sandbox-oneclick.service cleaned up"
+  assert_not_contains "${output}" "Stopping cube-sandbox-control.target before the active legacy unit"
   assert_contains "${SSH_LOG}" "sudo systemctl disable 'cube-sandbox-oneclick.service'"
   assert_contains "${SSH_LOG}" "sudo systemctl stop 'cube-sandbox-control.target'"
   assert_contains "${SSH_LOG}" "sudo systemctl stop 'cube-sandbox-oneclick.service'"

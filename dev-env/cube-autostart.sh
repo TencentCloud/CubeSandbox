@@ -191,13 +191,13 @@ case "${ACTION}" in
       run_ssh "sudo systemctl disable '${LEGACY_UNIT_NAME}'"
 
       if run_ssh "sudo systemctl is-active '${LEGACY_UNIT_NAME}'" >/dev/null 2>&1; then
-        log_info "Stopping ${UNIT_NAME} before the active legacy unit..."
+        log_info "Pausing CubeSandbox services for a clean handoff from the legacy unit..."
         run_ssh "sudo systemctl stop '${UNIT_NAME}'"
         run_ssh "sudo systemctl stop '${LEGACY_UNIT_NAME}'"
       fi
 
       run_ssh "sudo systemctl reset-failed '${LEGACY_UNIT_NAME}'"
-      log_success "Legacy unit ${LEGACY_UNIT_NAME} disabled"
+      log_success "Legacy unit ${LEGACY_UNIT_NAME} cleaned up"
     fi
 
     log_info "Enabling and restarting ${UNIT_NAME}..."
