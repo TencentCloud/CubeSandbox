@@ -14,6 +14,7 @@ import (
 	"github.com/containerd/containerd/v2/core/containers"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
+	jsoniter "github.com/json-iterator/go"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/assert"
@@ -609,6 +610,10 @@ func TestPrepareVolumeAnnotations(t *testing.T) {
 		name      string
 		opts      *workflow.CreateContext
 		expectNil bool
+		// wantDiskIDs are the disk IDs expected, in order, after deserializing
+		// the annotation against the CubeShim consumer shape; empty when
+		// expectNil is true.
+		wantDiskIDs []string
 	}{
 		{
 			name: "no storage info",
@@ -635,7 +640,8 @@ func TestPrepareVolumeAnnotations(t *testing.T) {
 					},
 				},
 			},
-			expectNil: false,
+			expectNil:   false,
+			wantDiskIDs: []string{"sys-disk-1"},
 		},
 		{
 			name: "storage info with data disks",
@@ -650,7 +656,28 @@ func TestPrepareVolumeAnnotations(t *testing.T) {
 					},
 				},
 			},
-			expectNil: false,
+			expectNil:   false,
+			wantDiskIDs: []string{"data-disk-1"},
+		},
+		{
+			name: "system disk leads, then data disks in order",
+			opts: &workflow.CreateContext{
+				StorageInfo: &storage.StorageInfo{
+					CubePCISystemDiskInfo: &disk.CubePCISystemDiskInfo{
+						PCISystemDisk: disk.CubePCIDisk{
+							ID: "sys-disk-1",
+						},
+					},
+					CubePCIDiskInfo: &disk.CubePCIDiskInfo{
+						PCIDisks: []disk.CubePCIDisk{
+							{ID: "data-disk-1"},
+							{ID: "data-disk-2"},
+						},
+					},
+				},
+			},
+			expectNil:   false,
+			wantDiskIDs: []string{"sys-disk-1", "data-disk-1", "data-disk-2"},
 		},
 	}
 
@@ -665,10 +692,31 @@ func TestPrepareVolumeAnnotations(t *testing.T) {
 
 			if tt.expectNil {
 				assert.Nil(t, opts)
-			} else {
-				assert.NotNil(t, opts)
-				assert.Greater(t, len(opts), 0)
+				return
 			}
+			require.NotEmpty(t, opts)
+
+			// Apply the returned SpecOpts to an empty spec so we verify the
+			// annotation key and marshalled payload actually reach the OCI spec,
+			// not just that some opt was produced.
+			spec := &oci.Spec{}
+			for _, o := range opts {
+				require.NoError(t, o(ctx, nil, &containers.Container{}, spec))
+			}
+			payload, ok := spec.Annotations[constants.AnnotationsVFIODisk]
+			require.True(t, ok, "expected annotation %q to be set", constants.AnnotationsVFIODisk)
+
+			// Deserialize against the same flat-array shape CubeShim consumes
+			// (Vec<DeviceDisk>), so a divergence from the consumer contract
+			// fails here rather than at shim config-parse time.
+			var decoded []disk.CubePCIDisk
+			require.NoError(t, jsoniter.Unmarshal([]byte(payload), &decoded),
+				"annotation must deserialize as a flat disk array")
+			gotIDs := make([]string, 0, len(decoded))
+			for _, d := range decoded {
+				gotIDs = append(gotIDs, d.ID)
+			}
+			assert.Equal(t, tt.wantDiskIDs, gotIDs)
 		})
 	}
 }

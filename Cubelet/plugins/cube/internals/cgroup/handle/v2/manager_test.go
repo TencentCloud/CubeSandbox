@@ -24,6 +24,13 @@ func checkCgroupMode(t *testing.T) {
 	if cgroups.Mode() == cgroups.Legacy {
 		t.Skipf("System running in cgroupv1 mode")
 	}
+	probe := path.Join(handle.RootMountPoint, "cubelet_cgroupv2_writable_probe")
+	// A leftover probe dir (crashed or concurrent run) still proves the root is
+	// writable, so treat ErrExist as success rather than a false skip.
+	if err := os.Mkdir(probe, 0755); err != nil && !os.IsExist(err) {
+		t.Skipf("cgroup2 root %q is not writable: %v", handle.RootMountPoint, err)
+	}
+	_ = os.RemoveAll(probe)
 }
 
 func checkValue(t *testing.T, path string, expected string) {

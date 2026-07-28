@@ -95,6 +95,10 @@ WITH_TESTS=(
 	# toolchain is sufficient and skipping the container is faster.
 	"cubelog|Go|0|cd cubelog && go test -short ./..."
 	"cubedb|Go|0|cd CubeDB && go mod download && go test ./..."
+	# cubelet runs only ./pkg/... here; the cgroupfs/host-cap-dependent tests
+	# live under ./plugins/... and ./services/... and are not in this set, so
+	# the pkg tests are self-contained in the builder.
+	"cubelet|Go|0|make builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && make proto && go test -short ./pkg/...'"
 )
 
 GATED_TESTS=(
