@@ -34,6 +34,7 @@ RUN apt-get update \
     && rm -rf /tmp/deno-bin "/tmp/${archive}" "/tmp/${archive}.sha256sum" \
     && apt-get purge -y curl unzip \
     && apt-get autoremove -y \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 ENV DENO_DIR=/home/user/.cache/deno \

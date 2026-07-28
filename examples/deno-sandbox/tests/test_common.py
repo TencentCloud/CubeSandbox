@@ -158,7 +158,7 @@ class CommonTests(unittest.TestCase):
                 resume_example,
                 "counter_request",
                 side_effect=[{"counter": 1}, {"counter": 1}, {"counter": 2}],
-            ),
+            ) as counter_request,
             patch.object(
                 resume_example,
                 "cache_fingerprint",
@@ -168,6 +168,10 @@ class CommonTests(unittest.TestCase):
             self.assertEqual(resume_example.main(), 0)
 
         self.assertEqual(fingerprint.call_args_list, [call(sandbox), call(sandbox)])
+        self.assertEqual(
+            counter_request.call_args_list,
+            [call(sandbox, "POST"), call(sandbox), call(sandbox, "POST")],
+        )
         sandbox.pause.assert_called_once_with(wait=True, timeout=60)
         connect.assert_called_once_with(sandbox_id="sandbox-resume")
         sandbox.kill.assert_called_once_with()
