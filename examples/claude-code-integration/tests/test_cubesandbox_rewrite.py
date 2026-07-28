@@ -239,3 +239,59 @@ def test_invalid_session_and_cwd_types_are_not_quoted():
     )
     assert "--session=default" in argv
     assert not any(argument.startswith("--mount=") for argument in argv)
+
+
+# ── Idempotency: never wrap a command the hook already rewrote ─────────
+
+
+def test_wrapper_by_script_path_is_passed_through():
+    """A command that is already the hook's own wrapper (matched by the full
+    executor path) must pass through unchanged, or the executor would run
+    inside the executor."""
+    command = shlex.join(
+        [sys.executable, str(hook.EXEC_SCRIPT), "--session=s", "--", "echo hi"]
+    )
+    payload = {"tool_name": "Bash", "tool_input": {"command": command}}
+    assert hook.rewrite_payload(payload) is None
+
+
+def test_wrapper_by_script_basename_is_passed_through():
+    """The executor is recognized by basename too, so a bare-name invocation
+    is still treated as already-wrapped."""
+    command = f"python {hook.EXEC_SCRIPT.name} --session=s -- 'echo hi'"
+    payload = {"tool_name": "Bash", "tool_input": {"command": command}}
+    assert hook.rewrite_payload(payload) is None
+
+
+def test_newline_injection_is_not_mistaken_for_wrapper():
+    """An unquoted newline after an interpreter token must NOT be read as an
+    existing wrapper — the whole string is wrapped as one quoted argument so
+    the second line can never execute on the host."""
+    command = f"{sys.executable}\nrm -rf /"
+    argv = shlex.split(
+        _updated_input({"tool_name": "Bash", "tool_input": {"command": command}})[
+            "command"
+        ]
+    )
+    assert argv[:2] == [sys.executable, str(hook.EXEC_SCRIPT)]
+    assert argv[-1] == command
+
+
+def test_unparseable_command_is_wrapped_not_treated_as_wrapper():
+    """Unbalanced quotes make shlex raise; _already_wrapped fails safe to
+    False, so the command is wrapped rather than passed through."""
+    command = "echo 'unbalanced"
+    argv = shlex.split(
+        _updated_input({"tool_name": "Bash", "tool_input": {"command": command}})[
+            "command"
+        ]
+    )
+    assert argv[-1] == command
+
+
+def test_lookalike_executor_name_is_still_wrapped():
+    """A different script whose name merely contains the executor name is not
+    the wrapper and must still be sandboxed."""
+    command = "python cubesandbox_exec_helper.py --do-stuff"
+    payload = {"tool_name": "Bash", "tool_input": {"command": command}}
+    assert hook.rewrite_payload(payload) is not None

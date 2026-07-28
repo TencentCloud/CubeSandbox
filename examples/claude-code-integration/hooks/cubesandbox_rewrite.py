@@ -20,6 +20,35 @@ class HookInputError(ValueError):
     """Raised when a matched Bash hook payload cannot be rewritten safely."""
 
 
+def _already_wrapped(command: str) -> bool:
+    """Return True if *command* is already a hook-rewritten invocation.
+
+    The hook wraps every Bash command as::
+
+        <python> <.../cubesandbox_exec.py> --session=... -- <original command>
+
+    If Claude Code (or the user) ever feeds such a command back through the
+    hook, wrapping it a second time would run the executor inside the
+    executor.  We detect our own wrapper by tokenizing with ``shlex`` and
+    matching the executor script among the leading tokens.
+
+    Fails safe: anything we cannot confidently parse as an existing wrapper
+    returns ``False`` so the caller wraps it (the secure default).  A command
+    carrying an unquoted newline (e.g. ``python\\nrm -rf /``) tokenizes such
+    that the executor script is absent, so it is wrapped as a single quoted
+    argument rather than mistaken for an already-wrapped call.
+    """
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    exec_name = EXEC_SCRIPT.name
+    for token in tokens[:2]:
+        if token == str(EXEC_SCRIPT) or token.rsplit("/", 1)[-1] == exec_name:
+            return True
+    return False
+
+
 def rewrite_payload(payload: Any) -> Optional[Dict[str, Any]]:
     """Return a Claude hook response for a valid Bash tool payload."""
     if not isinstance(payload, dict):
@@ -38,6 +67,11 @@ def rewrite_payload(payload: Any) -> Optional[Dict[str, Any]]:
     command = tool_input.get("command")
     if not isinstance(command, str):
         raise HookInputError("Bash tool_input.command must be a string")
+
+    # Idempotency: never wrap a command the hook already rewrote, otherwise
+    # the executor would run inside the executor.
+    if _already_wrapped(command):
+        return None
 
     raw_session = payload.get("session_id")
     session_id = (

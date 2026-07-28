@@ -1,150 +1,101 @@
-# Claude Code 与 CubeSandbox 集成
+# Claude Code + CubeSandbox —— 透明隔离 Bash
 
 [English](./README.md)
 
-可以在 **CubeSandbox** MicroVM 中运行 [Claude Code](https://docs.anthropic.com/en/docs/claude-code)，也可以让 Claude Code 留在宿主机，将它的 Bash 命令透明转发到 MicroVM 中执行。
+让 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) 继续跑在你的宿主机上,
+但把它执行的**每一条 Bash 命令**透明地转发进隔离的 **CubeSandbox** MicroVM 里执行。
+一个 `PreToolUse` hook 会在每次 `Bash` 工具调用执行前将其改写 —— 模型完全感知不到沙箱层,
+也不需要改变任何使用方式。
 
 ```
-宿主机
-    │  Python SDK (e2b-code-interpreter)
-    ▼
-CubeAPI (端口 3000)
+Claude Code(宿主机)
+    ├── Read / Write / Edit ─────────────► 宿主机项目文件
     │
-    ▼
-CubeMaster ──► Cubelet ──► KVM MicroVM
-                               │
-                           Claude Code CLI
-                               │
-                           npm / Node.js
+    └── Bash ──► PreToolUse hook ──► cubesandbox_exec ──► CubeAPI ──► MicroVM
+                 (cubesandbox_rewrite.py)                 (:3000)     └─ 按会话复用
 ```
 
-## 核心特性
+只有 `Bash` 工具被转发。`Read`、`Write`、`Edit` 仍在宿主机上操作文件,所以 Claude Code
+在本地编辑你的项目,而它的 shell 命令跑在独立的内核 / 文件系统 / 网络里。
 
-| 特性 | 说明 |
+## 为什么用 hook
+
+基于 MCP 或 SDK 的沙箱依赖 agent *主动选择*沙箱工具;一条普通的 `Bash` 调用仍会落到宿主机上。
+`PreToolUse` hook 堵住了这个缺口:它拦截工具调用本身,因此对 Bash 而言隔离是**透明且完整**的
+—— 没有任何命令能绕过它。
+
+| 特性 | 行为 |
 |------|------|
-| **隔离执行** | 每个 Claude Code 会话在独立 MicroVM 中运行 |
-| **E2B 兼容** | 使用标准 E2B SDK，兼容所有 E2B 客户端 |
-| **快照持久化** | 暂停/恢复 Claude Code 会话，完整保留上下文 |
-| **安全密钥注入** | CubeEgress 在线路上注入 API 密钥，沙箱内无真实凭证 |
-| **网络策略** | 默认拒绝出口流量，仅放行 LLM API 地址 |
-| **透明 Bash 隔离** | 可选 `PreToolUse` Hook 将宿主机 Claude Code 的 Bash 调用转发到可复用沙箱 |
+| **透明** | 模型发起普通的 `Bash` 调用,由 hook 改写。无需改 prompt 或工具。 |
+| **按会话复用沙箱** | 每个 Claude Code `session_id` 复用一个 MicroVM,同一会话的命令共享状态。 |
+| **shell 状态延续** | 同一会话内,`cd` 和导出的环境变量在多次 Bash 调用间保留。 |
+| **只读挂载宿主项目** | 会话首次调用可把项目按相同路径只读挂载,沙箱命令可读取(不可修改)宿主文件。 |
+| **fail-closed** | 若无法安全改写,hook 以非零退出**阻断**命令,而不是放它到宿主机执行。 |
+| **防注入** | 原命令作为单个 `shlex` 引用参数传入,shell 元字符和换行都无法越出到宿主机。 |
+
+## 前置条件
+
+- 运行中的 CubeSandbox 部署(CubeAPI 可达,如 `http://127.0.0.1:3000`)
+- 运行 Claude Code 的宿主机上有 Python 3.9+
+- 一个用于创建沙箱的 CubeSandbox 模板(`cubemastercli tpl list`)
 
 ## 快速开始
 
-需要 Python 3.9 或更高版本。
-
-### 第一步 — 构建模板
-
-构建预装 Claude Code 的沙箱镜像：
-
-```bash
-docker build -t claude-code-sandbox:v1 .
-cubemastercli tpl create-from-image \
-  --image claude-code-sandbox:v1 \
-  --writable-layer-size 2G \
-  --expose-port 49999 \
-  --probe 49999
-```
-
-### 第二步 — 配置环境
+### 1 —— 安装依赖并配置
 
 ```bash
 python3 -m pip install -r requirements.txt
 cp .env.example .env
-# 编辑 .env 填入 API 密钥和模板 ID
+# 编辑 .env:设置 CUBE_API_URL / E2B_API_URL 和 CUBE_TEMPLATE_ID
 ```
 
-### 第三步 — 运行 Claude Code
-
-```bash
-# 单次执行
-python run_claude_code.py "写一个打印斐波那契数列的 Python 函数"
-
-# 安全网络策略（推荐生产环境使用）
-python network_policy.py "用一段话解释什么是 Unix pipe"
-
-# 暂停/恢复长时间任务
-python resume_claude_code.py "创建一个简单的 Python Web 服务"
-```
-
-## 目录结构
-
-```
-claude-code-integration/
-├── Dockerfile              # 构建预装 Claude Code 的沙箱镜像
-├── run_claude_code.py      # 单次执行入口
-├── resume_claude_code.py   # 暂停与恢复示例
-├── network_policy.py       # 默认拒绝出口与凭据注入
-├── env_utils.py            # 提供商和命令构造工具
-├── _common.py              # 共用沙箱初始化与命令执行工具
-├── mcp_server.py           # 可选 MCP 服务
-├── sandbox_exec.py         # 独立沙箱执行工具
-├── hooks/                  # 宿主机 Claude Code PreToolUse Hook 与安装脚本
-│   ├── cubesandbox_exec.py
-│   ├── cubesandbox_rewrite.py
-│   └── install.sh
-├── tests/                  # 自动化测试
-│   ├── conftest.py
-│   ├── test_common.py
-│   ├── test_cubesandbox_exec.py
-│   ├── test_cubesandbox_rewrite.py
-│   ├── test_env_utils.py
-│   ├── test_hook_install.py
-│   ├── test_mcp_server.py
-│   └── test_sandbox_exec.py
-├── requirements.txt        # Python 依赖
-├── .env.example            # 配置模板
-├── .gitignore
-├── TROUBLESHOOTING.md      # 详细故障排查
-├── README.md               # 英文文档
-└── README_zh.md            # 本文档
-```
-
-## 使用场景
-
-### 场景 A：隔离代码开发
-
-Claude Code 在沙箱内编辑文件、运行命令，不影响宿主机环境。适合：
-- 安全审查不确定的代码
-- 在隔离环境中测试 AI 生成的代码
-- 为每个项目创建独立的开发环境
-
-### 场景 B：断点续跑
-
-利用 CubeSandbox 快照能力，将长时间运行的 Claude Code 任务暂停保存，需要时恢复继续。
-
-### 场景 C：代码执行与结果回收
-
-让编排系统按需拉起沙箱执行 Claude Code 生成的代码，收集结果后销毁沙箱。
-
-### 场景 D：宿主机 Claude Code + `PreToolUse` Hook
-
-该方案让 Claude Code 留在宿主机，并将每个 Claude Code `Bash` 工具调用改写后通过原生 CubeSandbox SDK 执行：
-
-```
-Claude Code（宿主机）
-    |-- Read / Write / Edit ----------> 宿主机项目
-    |
-    `-- Bash --> PreToolUse Hook --> CubeAPI --> 可复用 MicroVM
-                                                `-- 只读挂载项目目录
-```
-
-完成第二步后安装 Hook，并重启 Claude Code：
+### 2 —— 安装 hook
 
 ```bash
 cd hooks
 ./install.sh
 ```
 
-安装脚本会在不覆盖其他配置的前提下更新 `~/.claude/settings.json`，并且只把 `../.env` 中白名单内的 `CUBE_*` 配置写入 Hook 配置，不会复制模型提供商的 API 密钥。
+安装脚本会把 hook 注册进 `~/.claude/settings.json`,**不**覆盖你其它设置,并且只把 `../.env`
+里白名单内的 `CUBE_*` 值复制进 hook 配置。重启 Claude Code 以加载 hook。
 
-Hook 按 Claude Code `session_id` 复用沙箱，默认在 `~/.cache/cubesandbox-hook/` 保存会话与沙箱的映射，并在多次 Bash 调用间保留 `cd` 和导出的环境变量。
+### 3 —— 照常使用 Claude Code
 
-首次执行 Bash 时，项目目录可以相同路径**只读**挂载进沙箱。沙箱命令可以读取宿主机项目，但不能编辑项目文件或向其中写入构建产物。Claude Code 的 `Read`、`Write`、`Edit` 工具仍在宿主机执行；该 Hook 只覆盖 `Bash`。
+直接用 Claude Code。它发出的每条 Bash 命令现在都在 MicroVM 内执行:
 
-`hostPath` 在调度到的 Cubelet 节点上解析，而不是在运行 Claude Code 的机器上解析。因此，只有 Claude Code 与 Cubelet 位于同一节点，或项目已通过共享存储/同步机制存在于每个候选 Cubelet 的相同绝对路径时，才能得到一致文件视图。Hook 不会把本地项目上传或同步到远端部署；不要直接放行只存在于客户端、但可能在 Cubelet 上指向其他数据的路径。
+```
+> 执行 `uname -a && whoami`,告诉我它在哪运行
+```
 
-项目路径必须在 CubeMaster 的允许列表中：
+命令在沙箱里运行(不同内核、沙箱用户),而 Claude Code 的文件编辑仍在你的宿主机上。
+
+## 工作原理
+
+1. **`cubesandbox_rewrite.py`**(hook)接收 `PreToolUse` JSON。对 `Bash` 调用,它把
+   `tool_input.command` 改写为:
+
+   ```
+   <python> <hooks>/cubesandbox_exec.py --session=<id> --mount=<cwd> --timeout=<秒> -- <原命令>
+   ```
+
+   并通过 `updatedInput` 返回。原命令是单个引用参数,里面的内容无法在宿主机执行。非 `Bash`
+   工具原样放行;已经被包裹过的命令不再重复包裹。
+
+2. **`cubesandbox_exec.py`**(执行器)按 `session_id` 复用一个沙箱(映射存于
+   `~/.cache/cubesandbox-hook/`,由每会话文件锁保护),重放持久化的工作目录与环境变量,
+   在 MicroVM 内运行命令,并回传 stdout/stderr 和退出码。
+
+## 宿主项目挂载
+
+会话的首次 Bash 调用可把 Claude Code 的项目目录按相同绝对路径**只读**挂载进沙箱 ——
+沙箱命令可读取宿主项目文件,但不能修改或往里写构建产物。
+
+`hostPath` 在被调度到的 Cubelet 节点上解析,而非运行 Claude Code 的机器。因此只有当
+Claude Code 与该 Cubelet 同机、或项目已经以相同绝对路径存在于每个可调度 Cubelet 上时,
+这种共享视图才成立。hook 绝不会把本地项目上传或同步到远端部署 —— 不要把一个仅客户端存在、
+在 Cubelet 上可能指向无关数据的路径加入白名单。
+
+项目路径必须被 CubeMaster 允许:
 
 ```yaml
 extra_conf:
@@ -153,23 +104,55 @@ extra_conf:
     - "/home/you/projects/"
 ```
 
-如果挂载被拒绝，命令会降级到没有挂载的独立沙箱中执行。Bash 仍然隔离，但无法再与宿主机文件工具保持一致的文件视图。
+若挂载被拒,执行会回退到无挂载的隔离沙箱:Bash 仍然隔离,但不再与 Claude Code 宿主侧文件
+工具共享文件视图。
 
-开始无关任务前可以重置指定会话；卸载前也应先重置仍在使用的沙箱：
+## 重置与卸载
 
 ```bash
+# 丢弃某会话绑定的沙箱(下次调用重新创建)
 python3 ~/.claude/hooks/cubesandbox_exec.py --reset --session <session-id>
 
+# 从 ~/.claude/settings.json 移除 hook
 cd hooks
 ./install.sh --uninstall
 ```
 
-## 常见问题
+## 目录结构
 
-| 问题 | 可能原因 | 解决方法 |
-|------|----------|----------|
-| `claude: command not found` | 模板未安装 Claude Code | 使用 Dockerfile 构建镜像或启动时安装 |
-| `ANTHROPIC_AUTH_TOKEN not set` | 缺少 `.env` 配置 | 执行 `cp .env.example .env` 并填写密钥 |
-| SSL 证书错误 | CubeProxy HTTPS 缺少 CA 证书 | 设置 `SSL_CERT_FILE` 或 `NODE_EXTRA_CA_CERTS` |
-| 连接 LLM API 超时 | 出口策略拦截 | 检查 `resolve_llm_host()` 返回的主机名 |
-| `Template not found` | 模板 ID 错误 | 执行 `cubemastercli tpl list` 检查 |
+```
+claude-code-integration/
+├── hooks/
+│   ├── cubesandbox_rewrite.py   # PreToolUse hook:把 Bash 改写为沙箱执行
+│   ├── cubesandbox_exec.py      # 执行器:按会话复用 MicroVM + 状态持久化
+│   └── install.sh               # 幂等安装 / 卸载
+├── tests/
+│   ├── conftest.py
+│   ├── test_cubesandbox_rewrite.py
+│   ├── test_cubesandbox_exec.py
+│   └── test_hook_install.py
+├── requirements.txt
+├── .env.example
+├── TROUBLESHOOTING.md
+├── README.md
+└── README_zh.md                 # 本文件
+```
+
+## 测试
+
+```bash
+python3 -m pip install -r requirements.txt pytest
+pytest tests
+```
+
+## 排错
+
+| 现象 | 可能原因 | 处理 |
+|------|---------|------|
+| Bash 命令仍在宿主机执行 | hook 未注册 / Claude Code 未重启 | 重新执行 `hooks/install.sh` 并重启 Claude Code |
+| `CUBE_TEMPLATE_ID is not set` | `.env` 缺模板 | 设置 `CUBE_TEMPLATE_ID`(见 `cubemastercli tpl list`) |
+| `the cubesandbox SDK is required` | 未装依赖 | `pip install -r requirements.txt` |
+| `Template not found` | 模板 ID 错误 | 检查 `cubemastercli tpl list` |
+| 挂载被拒(警告) | 路径不在 `allowed_host_mount_prefixes` | 在 CubeMaster `extra_conf` 加前缀,或接受无挂载回退 |
+
+更多见 [TROUBLESHOOTING.md](./TROUBLESHOOTING.md)。
