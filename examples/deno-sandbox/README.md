@@ -77,7 +77,7 @@ docker run --rm \
   task verify
 ```
 
-`deno task verify` checks formatting, lint rules, types, and five focused
+`deno task verify` checks formatting, lint rules, types, and seven focused
 tests. The Docker build runs the same command and fails if any check fails.
 
 To exercise the service locally:
@@ -233,9 +233,9 @@ sandbox is terminal and is not a persistence mechanism.
   `.sha256sum` before installing the binary.
 - The service runs as UID `1000` and receives network access only for
   `0.0.0.0:8000`, plus read/write access only to its data directory.
-- The `test` task grants unscoped read/write permissions only because
-  `Deno.makeTempDir()` selects a runtime-generated path. The production `start`
-  task remains scoped to `/workspace/deno-app/data`.
+- The `test` task creates temporary state under the current workspace and scopes
+  read/write permissions to `.`. The production `start` task remains scoped to
+  `/workspace/deno-app/data`.
 - Both SDK scripts set `allow_internet_access=False`, so the Deno runtime cannot
   reach the public Internet by default.
 - Both SDK scripts set `network={"allow_public_traffic": False}`. CubeProxy
@@ -253,7 +253,9 @@ sandbox is terminal and is not a persistence mechanism.
 - The official `cubesandbox-base:2026.16` image currently has only a
   `linux/amd64` manifest, so the default build cannot produce an arm64 image.
 - `/counter` is a single-process file store whose writes are serialized only
-  inside the current Deno process. It is not a database and is unsuitable for
+  inside the current Deno process and atomically replace the state file. Invalid
+  or externally corrupted state fails closed and requires operator repair; it
+  is never silently reset. This is not a database and is unsuitable for
   multi-process or high-throughput production workloads.
 - The application is started on demand by the SDK scripts. Template readiness
   proves that `envd` is available, not that port `8000` is already listening.

@@ -70,7 +70,7 @@ docker run --rm \
   task verify
 ```
 
-`deno task verify` 会依次执行格式检查、lint、类型检查和 5 个专项测试。
+`deno task verify` 会依次执行格式检查、lint、类型检查和 7 个专项测试。
 Dockerfile 在构建时也会运行相同命令，任一检查失败都会终止构建。
 
 可在本机启动服务进行验证：
@@ -215,8 +215,8 @@ pause/resume 会保留 MicroVM 文件系统和进程状态；kill 是终止操�
   `deno.json`、`deno.lock`，然后重建镜像。
 - Dockerfile 使用官方配套 `.sha256sum` 校验 Deno Release 文件后才安装。
 - 服务以 UID `1000` 运行，只能监听 `0.0.0.0:8000`，只可读写自己的数据目录。
-- `test` 任务仅因 `Deno.makeTempDir()` 会生成运行时路径而授予不限定路径的读写权限；
-  生产用 `start` 任务仍只允许访问 `/workspace/deno-app/data`。
+- `test` 任务在当前工作区内创建临时状态，并将读写权限限定为 `.`；生产用 `start`
+  任务仍只允许访问 `/workspace/deno-app/data`。
 - 两个 SDK 脚本均设置 `allow_internet_access=False`，Deno 运行时默认无法访问公网。
 - 两个 SDK 脚本均设置 `network={"allow_public_traffic": False}`；CubeProxy 要求每个
   请求携带临时的 `e2b-traffic-access-token`，辅助函数不会记录该令牌。
@@ -228,8 +228,9 @@ pause/resume 会保留 MicroVM 文件系统和进程状态；kill 是终止操�
 
 - 官方 `cubesandbox-base:2026.16` 当前只有 `linux/amd64` manifest；默认构建不能
   生成 arm64 镜像。
-- `/counter` 使用单进程文件存储，只在当前 Deno 进程内串行化写入；它不是数据库，
-  不适合多进程或高吞吐生产负载。
+- `/counter` 使用单进程文件存储，只在当前 Deno 进程内串行化写入，并以原子替换
+  更新状态文件。无效或被外部破坏的状态会以失败结束并要求人工修复，绝不会静默
+  重置；它不是数据库，不适合多进程或高吞吐生产负载。
 - 应用服务由 SDK 脚本按需启动，模板就绪只代表 `envd` 可用，不代表端口 `8000`
   已开始监听。
 - pause/resume 依赖部署版本和节点后端支持；与外部对端建立的 TCP 连接不会保证跨

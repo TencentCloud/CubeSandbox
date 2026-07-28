@@ -37,6 +37,9 @@ RUN apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# Keep util-linux: the separate cache/verify layer below requires runuser.
+# Purging it there would not reduce the size of this installation layer.
+
 ENV DENO_DIR=/home/user/.cache/deno \
     DENO_NO_UPDATE_CHECK=1
 

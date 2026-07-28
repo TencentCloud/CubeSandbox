@@ -9,7 +9,7 @@
     "fmt": "deno fmt --check deno.json main.ts main_test.ts",
     "lint": "deno lint main.ts main_test.ts",
     "start": "deno run --frozen --allow-net=0.0.0.0:8000 --allow-read=/workspace/deno-app/data --allow-write=/workspace/deno-app/data main.ts",
-    "test": "deno test --frozen --allow-read --allow-write main_test.ts",
+    "test": "deno test --frozen --allow-read=. --allow-write=. main_test.ts",
     "verify": "deno task fmt && deno task lint && deno task check && deno task test"
   }
 }

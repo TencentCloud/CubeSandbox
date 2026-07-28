@@ -19,27 +19,36 @@ export class CounterStore {
   }
 
   async read(): Promise<CounterState> {
+    let serialized: string;
     try {
-      const parsed: unknown = JSON.parse(
-        await Deno.readTextFile(this.#stateFile),
-      );
-      const counter = typeof parsed === "object" && parsed !== null &&
-          "counter" in parsed
-        ? parsed.counter
-        : undefined;
-      if (
-        typeof counter !== "number" ||
-        !Number.isSafeInteger(counter) || counter < 0
-      ) {
-        throw new Error(`Invalid counter state in ${this.#stateFile}`);
-      }
-      return { counter };
+      serialized = await Deno.readTextFile(this.#stateFile);
     } catch (error) {
       if (error instanceof Deno.errors.NotFound) {
         return { counter: 0 };
       }
       throw error;
     }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(serialized);
+    } catch (error) {
+      throw new Error(`Invalid JSON counter state in ${this.#stateFile}`, {
+        cause: error,
+      });
+    }
+
+    const counter = typeof parsed === "object" && parsed !== null &&
+        "counter" in parsed
+      ? parsed.counter
+      : undefined;
+    if (
+      typeof counter !== "number" ||
+      !Number.isSafeInteger(counter) || counter < 0
+    ) {
+      throw new Error(`Invalid counter state in ${this.#stateFile}`);
+    }
+    return { counter };
   }
 
   /**
@@ -51,10 +60,26 @@ export class CounterStore {
       const current = await this.read();
       const next = { counter: current.counter + 1 };
       await Deno.mkdir(dirname(this.#stateFile), { recursive: true });
-      await Deno.writeTextFile(
-        this.#stateFile,
-        `${JSON.stringify(next, null, 2)}\n`,
-      );
+      const temporaryFile = `${this.#stateFile}.tmp`;
+      try {
+        await Deno.writeTextFile(
+          temporaryFile,
+          `${JSON.stringify(next, null, 2)}\n`,
+        );
+        await Deno.rename(temporaryFile, this.#stateFile);
+      } catch (error) {
+        try {
+          await Deno.remove(temporaryFile);
+        } catch (cleanupError) {
+          if (!(cleanupError instanceof Deno.errors.NotFound)) {
+            console.warn(
+              `Failed to remove temporary counter state ${temporaryFile}`,
+              cleanupError,
+            );
+          }
+        }
+        throw error;
+      }
       return next;
     });
 

@@ -2,5 +2,6 @@
 .venv/
 .pytest_cache/
 .ruff_cache/
+.cube-deno-*/
 __pycache__/
 *.py[cod]

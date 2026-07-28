@@ -2,6 +2,7 @@
 .gitignore
 .pytest_cache
 .ruff_cache
+.cube-deno-*
 .venv
 __pycache__
 *.py[cod]

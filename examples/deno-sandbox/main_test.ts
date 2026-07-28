@@ -1,10 +1,13 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import { CounterStore, createHandler } from "./main.ts";
 
 async function withStore(
   test: (store: CounterStore, stateFile: string) => Promise<void>,
 ): Promise<void> {
-  const directory = await Deno.makeTempDir({ prefix: "cube-deno-" });
+  const directory = await Deno.makeTempDir({
+    dir: ".",
+    prefix: ".cube-deno-",
+  });
   try {
     await test(
       new CounterStore(`${directory}/counter.json`),
@@ -68,6 +71,37 @@ Deno.test("concurrent increments are serialized", async () => {
 
     assertEquals(responses.every((response) => response.status === 200), true);
     assertEquals(finalState, { counter: 20 });
+  });
+});
+
+Deno.test("failed atomic write preserves state and the queue recovers", async () => {
+  await withStore(async (store, stateFile) => {
+    assertEquals(await store.increment(), { counter: 1 });
+    await Deno.mkdir(`${stateFile}.tmp`);
+
+    await assertRejects(() => store.increment());
+    assertEquals(await store.read(), { counter: 1 });
+    assertEquals(await store.increment(), { counter: 2 });
+  });
+});
+
+Deno.test("corrupt state fails closed and the queue recovers after repair", async () => {
+  await withStore(async (store, stateFile) => {
+    await Deno.writeTextFile(stateFile, "{not-json");
+
+    await assertRejects(
+      () => store.increment(),
+      Error,
+      `Invalid JSON counter state in ${stateFile}`,
+    );
+    assertEquals(await Deno.readTextFile(stateFile), "{not-json");
+
+    await Deno.writeTextFile(stateFile, '{"counter": 4}\n');
+    assertEquals(await store.increment(), { counter: 5 });
+    assertEquals(
+      JSON.parse(await Deno.readTextFile(stateFile)),
+      { counter: 5 },
+    );
   });
 });
 
