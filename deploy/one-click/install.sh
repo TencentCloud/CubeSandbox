@@ -260,8 +260,18 @@ restore_selinux_contexts() {
     return 0
   fi
 
+  # cubeletmnt/mnt is a bind mount of /proc/<pid>/ns/mnt created by cubelet
+  # (Cubelet/cmd/cubelet/main.go, newCubeMnt). procfs does not support xattrs,
+  # so restorecon fails with "Operation not permitted" on upgrades where
+  # cubelet is already running.  The path is hardcoded in the Go constant
+  # CubeMntNsDirPath as ${INSTALL_PREFIX}/cubeletmnt.
+  local -a exclude_args=()
+  if mountpoint -q "${INSTALL_PREFIX}/cubeletmnt" 2>/dev/null; then
+    exclude_args+=(-e "${INSTALL_PREFIX}/cubeletmnt")
+  fi
+
   log "restoring SELinux contexts under ${INSTALL_PREFIX}"
-  restorecon -R "${INSTALL_PREFIX}"
+  restorecon -R "${exclude_args[@]}" "${INSTALL_PREFIX}"
 }
 
 one_click_runtime_file_paths() {
