@@ -15,6 +15,7 @@ import shlex
 import stat
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
@@ -201,7 +202,7 @@ def _session_lock(session_id: str) -> Iterator[None]:
 
 
 def _connect(sandbox_id: str) -> Any:
-    """Reconnect and refresh the sandbox TTL through the SDK connect call."""
+    """Reconnect to fetch data-plane metadata and verify the sandbox lives."""
     return Sandbox.connect(sandbox_id, config=Config(timeout=SANDBOX_TTL))
 
 
@@ -224,8 +225,17 @@ def _create_sandbox(mount: Optional[str]) -> Any:
     return Sandbox.create(TEMPLATE_ID, timeout=SANDBOX_TTL)
 
 
-def _try_cached_sandbox(session_id: str) -> Optional[Any]:
-    sandbox_id = _load_state(session_id).get("sandbox_id")
+def _valid_state_token(token: Any) -> bool:
+    """Return True for a token that is safe to interpolate into shell code."""
+    return (
+        isinstance(token, str)
+        and bool(token)
+        and all(character.isalnum() or character in "-_" for character in token)
+    )
+
+
+def _try_cached_sandbox(state: Dict[str, Any]) -> Optional[Any]:
+    sandbox_id = state.get("sandbox_id")
     if not isinstance(sandbox_id, str) or not sandbox_id:
         return None
     try:
@@ -240,6 +250,10 @@ def _try_cached_sandbox(session_id: str) -> Optional[Any]:
         )
         return None
     except Exception as exc:
+        # Transport-level failures (requests/httpx) land here and should fall
+        # back to a fresh sandbox, but so would a programming error — keep it
+        # diagnosable instead of masking it behind the generic warning.
+        traceback.print_exc()
         print(
             f"[cubesandbox-exec] warning: reconnect failed ({exc}); "
             "creating a new sandbox",
@@ -249,33 +263,64 @@ def _try_cached_sandbox(session_id: str) -> Optional[Any]:
 
 
 def _get_sandbox_locked(session_id: str, mount: Optional[str]) -> Any:
-    """Return the session sandbox while the caller holds its session lock."""
-    sandbox = _try_cached_sandbox(session_id)
+    """Return ``(sandbox, state)`` while the caller holds the session lock."""
+    state = _load_state(session_id)
+    sandbox_id = state.get("sandbox_id")
+    if (
+        isinstance(sandbox_id, str)
+        and sandbox_id
+        and not _valid_state_token(state.get("state_token"))
+    ):
+        # State from an older hook version or a hand-edited file: the token
+        # cannot be trusted in shell code, so destroy the recorded sandbox
+        # and start fresh instead of failing every subsequent run.
+        print(
+            "[cubesandbox-exec] warning: cached sandbox state is invalid; "
+            "recreating the sandbox",
+            file=sys.stderr,
+        )
+        with contextlib.suppress(Exception):
+            _connect(sandbox_id).kill()
+        _clear_state(session_id)
+        state = {}
+
+    sandbox = _try_cached_sandbox(state)
     if sandbox is not None:
-        return sandbox
+        return sandbox, state
 
     if not TEMPLATE_ID:
         raise BootstrapError("CUBE_TEMPLATE_ID is not set")
 
     sandbox = _create_sandbox(mount)
-    _save_state(
-        session_id,
-        {
-            "sandbox_id": sandbox.sandbox_id,
-            "mount": mount,
-            "state_token": secrets.token_urlsafe(24),
-        },
-    )
-    return sandbox
+    state = {
+        "sandbox_id": sandbox.sandbox_id,
+        "mount": mount,
+        "state_token": secrets.token_urlsafe(24),
+    }
+    try:
+        _save_state(session_id, state)
+    except Exception:
+        # Never leak the just-created sandbox when its ID cannot be recorded.
+        with contextlib.suppress(Exception):
+            sandbox.kill()
+        raise
+    return sandbox, state
 
 
 def get_sandbox(session_id: str, mount: Optional[str]) -> Any:
     with _session_lock(session_id):
-        return _get_sandbox_locked(session_id, mount)
+        sandbox, _state = _get_sandbox_locked(session_id, mount)
+        return sandbox
 
 
 def _state_shell(command: str, state_token: str, mount: Optional[str]) -> str:
-    """Wrap a command so its cwd and exported environment persist."""
+    """Wrap a command so its cwd and exported environment persist.
+
+    The returned snippet runs inside the sandbox. Every interpolated value
+    is ``shlex.quote``d and the caller restricts ``state_token`` to
+    ``[A-Za-z0-9_-]``, so the original command stays exactly one quoted
+    argument and cannot break out onto the surrounding shell.
+    """
     state_dir = f"/tmp/.cubesandbox-state-{state_token}"
     cwd_file = f"{state_dir}/cwd"
     env_file = f"{state_dir}/env"
@@ -286,20 +331,34 @@ def _state_shell(command: str, state_token: str, mount: Optional[str]) -> str:
     command_q = shlex.quote(command)
 
     return (
+        # State files must stay private to the sandbox user.
         f"umask 077; mkdir -p -- {state_dir_q}; "
+        # Bail out if the state directory was replaced by a symlink.
         f"[ -d {state_dir_q} ] && [ ! -L {state_dir_q} ] || exit 1; "
+        # Restore the persisted environment unless the env file is a link.
         f"if [ -f {env_file_q} ] && [ ! -L {env_file_q} ]; then "
         f"source {env_file_q} >/dev/null 2>&1; fi; "
+        # Restore the previous cwd, falling back to the mount, then $HOME.
         f"if [ -f {cwd_file_q} ] && [ ! -L {cwd_file_q} ]; then "
         f'cd -- "$(cat -- {cwd_file_q})" 2>/dev/null || '
         f'cd -- {default_cwd} 2>/dev/null || cd -- "$HOME" || exit 1; '
         f'else cd -- {default_cwd} 2>/dev/null || cd -- "$HOME" || exit 1; fi; '
+        # Run the original command as exactly one quoted argument.
         f"eval -- {command_q}\n"
+        # Capture the exit status BEFORE any state bookkeeping clobbers $?.
         "__CBX_STATUS__=$?; "
+        # Persist cwd/env for the next call. The guard writes only over a
+        # missing file or a regular non-link file — never through a symlink
+        # a previous command may have planted.
         f"if [ ! -e {cwd_file_q} ] || [ -f {cwd_file_q} ] && [ ! -L {cwd_file_q} ]; "
         f"then pwd > {cwd_file_q} 2>/dev/null; fi; "
+        # `export -p` output is shell-generated, so re-sourcing it cannot
+        # smuggle new syntax; still scrub the variables that would
+        # re-execute attacker-controlled code on every later command.
         f"if [ ! -e {env_file_q} ] || [ -f {env_file_q} ] && [ ! -L {env_file_q} ]; "
-        f"then export -p > {env_file_q} 2>/dev/null; fi; "
+        f"then export -p 2>/dev/null | "
+        f"grep -v -E '^(declare -x|export) (BASH_ENV|ENV|LD_PRELOAD|PROMPT_COMMAND)=' "
+        f"> {env_file_q}; fi; "
         'exit "$__CBX_STATUS__"'
     )
 
@@ -310,28 +369,23 @@ def run(
     timeout: Optional[float],
     mount: Optional[str],
 ) -> int:
-    with _session_lock(session_id):
-        sandbox = _get_sandbox_locked(session_id, mount)
-        state_token = _load_state(session_id).get("state_token")
-        if (
-            not isinstance(state_token, str)
-            or not state_token
-            or not all(
-                character.isalnum() or character in "-_" for character in state_token
-            )
-        ):
-            print("[cubesandbox-exec] error: sandbox state is invalid", file=sys.stderr)
-            return 1
-
-        try:
+    try:
+        with _session_lock(session_id):
+            sandbox, state = _get_sandbox_locked(session_id, mount)
             result = sandbox.commands.run(
-                _state_shell(command, state_token, mount),
+                _state_shell(command, state["state_token"], mount),
                 timeout=timeout,
                 user=SANDBOX_USER,
             )
-        except CubeSandboxError as exc:
-            print(f"[cubesandbox-exec] error: {exc}", file=sys.stderr)
-            return 1
+    except BootstrapError:
+        raise
+    except (CubeSandboxError, RuntimeError, OSError) as exc:
+        # The SDK raises RuntimeError for execution failures, requests
+        # transport errors are OSError subclasses, and local state setup can
+        # raise OSError too — report all of them as one-line errors instead
+        # of tracebacks.
+        print(f"[cubesandbox-exec] error: {exc}", file=sys.stderr)
+        return 1
 
     if result.stdout:
         sys.stdout.write(result.stdout)
@@ -342,13 +396,15 @@ def run(
 
 def reset(session_id: str) -> None:
     with _session_lock(session_id):
-        sandbox_id = _load_state(session_id).get("sandbox_id")
-        if isinstance(sandbox_id, str) and sandbox_id:
-            try:
-                _connect(sandbox_id).kill()
-            except CubeSandboxError:
-                pass
-        _clear_state(session_id)
+        try:
+            sandbox_id = _load_state(session_id).get("sandbox_id")
+            if isinstance(sandbox_id, str) and sandbox_id:
+                try:
+                    _connect(sandbox_id).kill()
+                except Exception:
+                    pass  # best-effort kill; state is cleared regardless
+        finally:
+            _clear_state(session_id)
     print(f"[cubesandbox-exec] sandbox for session {session_id!r} destroyed")
 
 
@@ -411,6 +467,14 @@ def main() -> int:
     except BootstrapError as exc:
         print(f"[cubesandbox-exec] error: {exc}", file=sys.stderr)
         return 127
+    except Exception as exc:
+        # A hook must never dump a raw traceback into the Claude Code
+        # transcript; keep the exception type so it stays diagnosable.
+        print(
+            f"[cubesandbox-exec] error: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
 
 
 if __name__ == "__main__":

@@ -82,7 +82,7 @@ def test_state_read_rejects_symlink(executor, tmp_path):
     assert executor._load_state("session") == {}
 
 
-def test_cached_sandbox_connect_refreshes_ttl(executor):
+def test_cached_sandbox_is_reused_via_connect(executor):
     executor._save_state(
         "session",
         {"sandbox_id": "sb-existing", "state_token": "token"},
@@ -121,12 +121,40 @@ def test_expired_cache_is_recreated(executor):
     assert executor._load_state("session")["sandbox_id"] == "sb-fresh"
 
 
+def test_sdk_reconnect_error_falls_back_without_traceback(executor, capsys):
+    executor.Sandbox.connect.side_effect = executor.CubeSandboxError("api broken")
+
+    assert executor._try_cached_sandbox({"sandbox_id": "sb-cached"}) is None
+    captured = capsys.readouterr()
+    assert "creating a new sandbox" in captured.err
+    assert "Traceback" not in captured.err
+
+
 def test_unexpected_reconnect_error_falls_back(executor, capsys):
-    executor._save_state("session", {"sandbox_id": "sb-cached"})
     executor.Sandbox.connect.side_effect = ConnectionError("network down")
 
-    assert executor._try_cached_sandbox("session") is None
-    assert "creating a new sandbox" in capsys.readouterr().err
+    assert executor._try_cached_sandbox({"sandbox_id": "sb-cached"}) is None
+    captured = capsys.readouterr()
+    assert "creating a new sandbox" in captured.err
+    # Non-SDK errors keep their traceback so bugs stay diagnosable.
+    assert "Traceback" in captured.err
+
+
+def test_invalid_cached_token_is_rebuilt(executor, capsys):
+    """A cached sandbox whose state_token is missing/unsafe must not wedge
+    the session: the old sandbox is destroyed and a fresh one is created."""
+    executor._save_state("session", {"sandbox_id": "sb-stale"})
+    stale = MagicMock()
+    executor.Sandbox.connect.return_value = stale
+    created = MagicMock(sandbox_id="sb-fresh")
+    executor.Sandbox.create.return_value = created
+
+    assert executor.get_sandbox("session", None) is created
+    stale.kill.assert_called_once_with()
+    state = executor._load_state("session")
+    assert state["sandbox_id"] == "sb-fresh"
+    assert state["state_token"]
+    assert "recreating the sandbox" in capsys.readouterr().err
 
 
 def test_mount_is_read_only_and_api_rejection_falls_back(executor, capsys):
@@ -144,10 +172,6 @@ def test_mount_is_read_only_and_api_rejection_falls_back(executor, capsys):
 
 
 def test_run_propagates_output_exit_and_timeout(executor, monkeypatch, capsys):
-    executor._save_state(
-        "session",
-        {"sandbox_id": "sb", "state_token": "safe_token-123"},
-    )
     sandbox = MagicMock()
     sandbox.commands.run.return_value = SimpleNamespace(
         stdout="standard output\n",
@@ -155,7 +179,9 @@ def test_run_propagates_output_exit_and_timeout(executor, monkeypatch, capsys):
         exit_code=23,
     )
     monkeypatch.setattr(
-        executor, "_get_sandbox_locked", MagicMock(return_value=sandbox)
+        executor,
+        "_get_sandbox_locked",
+        MagicMock(return_value=(sandbox, {"state_token": "safe_token-123"})),
     )
 
     assert executor.run("printf ok", "session", 3.5, "/project") == 23
@@ -167,14 +193,45 @@ def test_run_propagates_output_exit_and_timeout(executor, monkeypatch, capsys):
     assert "eval -- 'printf ok'" in call.args[0]
 
 
-def test_parallel_runs_for_one_session_are_serialized(executor, monkeypatch):
-    executor._save_state(
-        "session",
-        {"sandbox_id": "sb", "state_token": "safe-token"},
+def test_run_reports_execution_failure_without_traceback(executor, monkeypatch, capsys):
+    """The SDK raises RuntimeError (not CubeSandboxError) for execution
+    failures such as timeouts; run() must report a clean one-line error."""
+    sandbox = MagicMock()
+    sandbox.commands.run.side_effect = RuntimeError("process failed: killed")
+    monkeypatch.setattr(
+        executor,
+        "_get_sandbox_locked",
+        MagicMock(return_value=(sandbox, {"state_token": "safe_token-123"})),
     )
+
+    assert executor.run("printf ok", "session", 3.5, None) == 1
+    captured = capsys.readouterr()
+    assert "[cubesandbox-exec] error: process failed: killed" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_run_kills_orphan_when_state_save_fails(executor, monkeypatch, capsys):
+    """If the new sandbox ID cannot be persisted, the sandbox is killed
+    instead of leaking until TTL expiry."""
+    created = MagicMock(sandbox_id="sb-orphan")
+    executor.Sandbox.create.return_value = created
+
+    def fail_save(session_id, state):
+        raise OSError("state dir is read-only")
+
+    monkeypatch.setattr(executor, "_save_state", fail_save)
+
+    assert executor.run("printf ok", "session", 3.5, None) == 1
+    created.kill.assert_called_once_with()
+    assert "state dir is read-only" in capsys.readouterr().err
+
+
+def test_parallel_runs_for_one_session_are_serialized(executor, monkeypatch):
     sandbox = MagicMock()
     monkeypatch.setattr(
-        executor, "_get_sandbox_locked", MagicMock(return_value=sandbox)
+        executor,
+        "_get_sandbox_locked",
+        MagicMock(return_value=(sandbox, {"state_token": "safe-token"})),
     )
 
     session_mutex = threading.Lock()
@@ -270,6 +327,44 @@ def test_state_shell_persists_cwd_and_exports_and_quotes_mount(executor, tmp_pat
         shutil.rmtree(state_dir, ignore_errors=True)
 
 
+def test_state_shell_scrubs_self_executing_exports(executor, tmp_path):
+    """BASH_ENV and friends would re-execute code on every later command of
+    the session; they must be scrubbed from the persisted environment while
+    ordinary exports survive."""
+    state_token = "scrub-state-token"
+    state_dir = Path("/tmp") / (".cubesandbox-state-" + state_token)
+    shutil.rmtree(state_dir, ignore_errors=True)
+    evil = tmp_path / "evil.sh"
+    evil.write_text("touch scrub-pwned\n", encoding="utf-8")
+    try:
+        first = executor._state_shell(
+            "export BASH_ENV="
+            + str(evil)
+            + " PROMPT_COMMAND='touch scrub-pwned' LD_PRELOAD=/tmp/evil.so"
+            + " KEEP_ME=yes",
+            state_token,
+            None,
+        )
+        subprocess.run(["bash", "-c", first], cwd=tmp_path, check=True)
+
+        second = executor._state_shell(
+            'printf \'%s|%s\' "${BASH_ENV:-unset}" "${KEEP_ME:-unset}"',
+            state_token,
+            None,
+        )
+        completed = subprocess.run(
+            ["bash", "-c", second],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert completed.stdout == "unset|yes"
+        assert not (tmp_path / "scrub-pwned").exists()
+    finally:
+        shutil.rmtree(state_dir, ignore_errors=True)
+
+
 def test_reset_kills_cached_sandbox_and_clears_state(executor, monkeypatch):
     executor._save_state("session", {"sandbox_id": "sb-reset"})
     sandbox = MagicMock()
@@ -300,6 +395,17 @@ def test_reset_kills_cached_sandbox_and_clears_state(executor, monkeypatch):
     executor.reset("session")
 
     sandbox.kill.assert_called_once_with()
+    assert executor._load_state("session") == {}
+
+
+def test_reset_clears_state_when_kill_fails(executor):
+    """An unreachable API (non-SDK error) must not wedge reset(): the stale
+    sandbox ID is dropped from state regardless."""
+    executor._save_state("session", {"sandbox_id": "sb-gone"})
+    executor.Sandbox.connect.side_effect = ConnectionError("api unreachable")
+
+    executor.reset("session")
+
     assert executor._load_state("session") == {}
 
 

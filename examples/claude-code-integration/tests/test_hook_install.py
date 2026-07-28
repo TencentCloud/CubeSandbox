@@ -157,3 +157,103 @@ def test_invalid_settings_schema_fails_clearly(
 
     assert completed.returncode != 0
     assert message in completed.stderr
+
+
+def test_malformed_settings_json_fails_clearly(installer_tree, tmp_path):
+    _, source_hooks = installer_tree
+    home = tmp_path / "home"
+    claude_dir = home / ".claude"
+    claude_dir.mkdir(parents=True)
+    (claude_dir / "settings.json").write_text("{not-json", encoding="utf-8")
+
+    completed = _run_installer(
+        source_hooks / "install.sh", claude_dir, home, check=False
+    )
+
+    assert completed.returncode != 0
+    assert "settings.json is not valid JSON" in completed.stderr
+    assert "Traceback" not in completed.stderr
+
+
+def test_reinstall_without_source_env_keeps_installed_config(installer_tree, tmp_path):
+    integration, source_hooks = installer_tree
+    (integration / ".env").write_text(
+        "CUBE_API_URL=http://cube.example\nCUBE_TEMPLATE_ID=tpl-keep\n",
+        encoding="utf-8",
+    )
+    home = tmp_path / "home"
+    claude_dir = home / ".claude"
+    installer = source_hooks / "install.sh"
+
+    _run_installer(installer, claude_dir, home)
+    installed_config = claude_dir / "hooks" / "cubesandbox.env"
+    assert dotenv_values(installed_config)["CUBE_TEMPLATE_ID"] == "tpl-keep"
+
+    (integration / ".env").unlink()
+    completed = _run_installer(installer, claude_dir, home)
+
+    assert "keeping existing" in completed.stderr
+    assert dotenv_values(installed_config)["CUBE_TEMPLATE_ID"] == "tpl-keep"
+
+
+def test_stale_hook_path_is_replaced_on_install(installer_tree, tmp_path):
+    """A hook entry recorded from a previous checkout location must be
+    updated in place instead of leaving a stale blocking entry behind."""
+    _, source_hooks = installer_tree
+    home = tmp_path / "home"
+    claude_dir = home / ".claude"
+    claude_dir.mkdir(parents=True)
+    settings_path = claude_dir / "settings.json"
+    stale_command = "/old/checkout/hooks/cubesandbox_rewrite.py || exit 2"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [{"type": "command", "command": stale_command}],
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _run_installer(source_hooks / "install.sh", claude_dir, home)
+
+    installed = json.loads(settings_path.read_text(encoding="utf-8"))
+    commands = [
+        item["command"] for item in installed["hooks"]["PreToolUse"][0]["hooks"]
+    ]
+    expected = (
+        f"{shlex.quote(str(claude_dir / 'hooks' / 'cubesandbox_rewrite.py'))} || exit 2"
+    )
+    assert commands == [expected]
+
+
+def test_symlinked_settings_is_written_through(installer_tree, tmp_path):
+    """Dotfile-managed (symlinked) settings.json must stay a symlink; the
+    target receives the update."""
+    _, source_hooks = installer_tree
+    home = tmp_path / "home"
+    claude_dir = home / ".claude"
+    claude_dir.mkdir(parents=True)
+    target = tmp_path / "dotfiles" / "settings.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps({"theme": "dark"}), encoding="utf-8")
+    link = claude_dir / "settings.json"
+    link.symlink_to(target)
+
+    _run_installer(source_hooks / "install.sh", claude_dir, home)
+
+    assert link.is_symlink()
+    installed = json.loads(target.read_text(encoding="utf-8"))
+    assert installed["theme"] == "dark"
+    commands = [
+        item["command"]
+        for group in installed["hooks"]["PreToolUse"]
+        for item in group["hooks"]
+    ]
+    assert any("cubesandbox_rewrite.py" in command for command in commands)

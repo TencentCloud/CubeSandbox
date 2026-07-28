@@ -26,6 +26,10 @@ from pathlib import Path
 
 action = sys.argv[1]
 settings_path = Path(sys.argv[2])
+# Resolve a symlinked settings.json (dotfile tools like stow/chezmoi) so the
+# atomic replace below writes through to the target instead of silently
+# detaching the user's link.
+settings_path = Path(os.path.realpath(settings_path))
 direct_command = shlex.quote(sys.argv[3])
 hook_command = f"{direct_command} || exit 2"
 
@@ -66,7 +70,10 @@ try:
 
     data = {}
     if settings_path.exists() and settings_path.stat().st_size:
-        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        try:
+            data = json.loads(settings_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"settings.json is not valid JSON: {exc}")
     if not isinstance(data, dict):
         raise SystemExit("settings.json must contain a JSON object")
 
@@ -94,10 +101,17 @@ try:
             for item in group_hooks:
                 if not isinstance(item, dict):
                     continue
-                if item.get("command") == direct_command:
-                    item["command"] = hook_command
+                item_command = item.get("command")
+                if not isinstance(item_command, str):
+                    continue
+                if item_command == hook_command:
                     found = True
-                elif item.get("command") == hook_command:
+                elif item_command == direct_command or (
+                    "cubesandbox_rewrite.py" in item_command
+                ):
+                    # Legacy form without the fail-closed backstop, or the
+                    # same hook installed from a stale path (repo moved).
+                    item["command"] = hook_command
                     found = True
             if not found:
                 group_hooks.append(entry)
@@ -116,7 +130,11 @@ try:
                     for item in group_hooks
                     if not (
                         isinstance(item, dict)
-                        and item.get("command") in removable_commands
+                        and isinstance(item.get("command"), str)
+                        and (
+                            item["command"] in removable_commands
+                            or "cubesandbox_rewrite.py" in item["command"]
+                        )
                     )
                 ]
         hooks["PreToolUse"] = [
@@ -159,6 +177,17 @@ allowed = (
 source = Path(sys.argv[1])
 destination = Path(sys.argv[2])
 values = dotenv_values(source) if source.is_file() else {}
+filtered = {key: values[key] for key in allowed if isinstance(values.get(key), str)}
+
+if not filtered and destination.is_file():
+    # Re-installing after the source .env was removed must not wipe a
+    # working installed configuration.
+    print(
+        f"note: no CubeSandbox values in {source}; "
+        f"keeping existing {destination}",
+        file=sys.stderr,
+    )
+    raise SystemExit(0)
 
 destination.parent.mkdir(parents=True, exist_ok=True)
 descriptor, temporary_name = tempfile.mkstemp(
@@ -170,10 +199,8 @@ os.close(descriptor)
 temporary = Path(temporary_name)
 try:
     os.chmod(temporary, 0o600)
-    for key in allowed:
-        value = values.get(key)
-        if isinstance(value, str):
-            set_key(str(temporary), key, value, quote_mode="always")
+    for key, value in filtered.items():
+        set_key(str(temporary), key, value, quote_mode="always")
     os.replace(temporary, destination)
     os.chmod(destination, 0o600)
 finally:
@@ -188,8 +215,14 @@ if [[ "${1:-}" == "--uninstall" ]]; then
         exit 1
     }
     update_hook uninstall
-    rm -f "$REWRITE_HOOK_PATH" "$EXEC_SCRIPT_PATH" "$CONFIG_PATH"
+    rm -f "$REWRITE_HOOK_PATH" "$EXEC_SCRIPT_PATH" "$CONFIG_PATH" \
+        "$CLAUDE_DIR/.$(basename "$SETTINGS_FILE").cubesandbox.lock"
     echo "CubeSandbox Claude Code hook uninstalled."
+    DEFAULT_STATE_DIR="$HOME/.cache/cubesandbox-hook"
+    if compgen -G "$DEFAULT_STATE_DIR/*.json" >/dev/null 2>&1; then
+        echo "note: cached sandbox state remains in $DEFAULT_STATE_DIR; any running" >&2
+        echo "      sandboxes expire with their TTL. Remove the directory to discard it." >&2
+    fi
     exit 0
 fi
 

@@ -32,6 +32,8 @@ Claude Code(宿主机)
 | **只读挂载宿主项目** | 会话首次调用可把项目按相同路径只读挂载,沙箱命令可读取(不可修改)宿主文件。 |
 | **fail-closed** | 若无法安全改写,hook 以非零退出**阻断**命令,而不是放它到宿主机执行。 |
 | **防注入** | 原命令作为单个 `shlex` 引用参数传入,shell 元字符和换行都无法越出到宿主机。 |
+| **无条件改写** | 每条 Bash 调用都会被改写;已包裹的执行器调用若再次经过 hook,只会在沙箱内失败,绝不会落到宿主机。 |
+| **自动批准** | hook 对改写后的 Bash 调用返回 `permissionDecision: "allow"`,Claude Code 的逐命令确认提示被抑制;请相应使用 `--permission-mode` / hooks 策略。 |
 
 ## 前置条件
 
@@ -46,7 +48,7 @@ Claude Code(宿主机)
 ```bash
 python3 -m pip install -r requirements.txt
 cp .env.example .env
-# 编辑 .env:设置 CUBE_API_URL / E2B_API_URL 和 CUBE_TEMPLATE_ID
+# 编辑 .env:设置 CUBE_API_URL 和 CUBE_TEMPLATE_ID
 ```
 
 ### 2 —— 安装 hook
@@ -79,11 +81,13 @@ cd hooks
    ```
 
    并通过 `updatedInput` 返回。原命令是单个引用参数,里面的内容无法在宿主机执行。非 `Bash`
-   工具原样放行;已经被包裹过的命令不再重复包裹。
+   工具原样放行。hook 无条件改写每一条 Bash 命令;已包裹的执行器调用若再次经过 hook,
+   只会在沙箱内失败,绝不会落到宿主机。
 
 2. **`cubesandbox_exec.py`**(执行器)按 `session_id` 复用一个沙箱(映射存于
    `~/.cache/cubesandbox-hook/`,由每会话文件锁保护),重放持久化的工作目录与环境变量,
-   在 MicroVM 内运行命令,并回传 stdout/stderr 和退出码。
+   在 MicroVM 内运行命令,并在命令结束后返回 stdout/stderr 和退出码(缓冲返回,非流式)。
+   同一会话内并发的 Bash 调用会经每会话锁串行执行 —— 一次只跑一条,不并行。
 
 ## 宿主项目挂载
 
@@ -150,7 +154,7 @@ pytest tests
 | 现象 | 可能原因 | 处理 |
 |------|---------|------|
 | Bash 命令仍在宿主机执行 | hook 未注册 / Claude Code 未重启 | 重新执行 `hooks/install.sh` 并重启 Claude Code |
-| `CUBE_TEMPLATE_ID is not set` | `.env` 缺模板 | 设置 `CUBE_TEMPLATE_ID`(见 `cubemastercli tpl list`) |
+| `CUBE_TEMPLATE_ID is not set` | `.env` 缺模板 | 设置 `CUBE_TEMPLATE_ID`(见 `cubemastercli tpl list`),然后重新运行 `hooks/install.sh` |
 | `the cubesandbox SDK is required` | 未装依赖 | `pip install -r requirements.txt` |
 | `Template not found` | 模板 ID 错误 | 检查 `cubemastercli tpl list` |
 | 挂载被拒(警告) | 路径不在 `allowed_host_mount_prefixes` | 在 CubeMaster `extra_conf` 加前缀,或接受无挂载回退 |

@@ -241,32 +241,61 @@ def test_invalid_session_and_cwd_types_are_not_quoted():
     assert not any(argument.startswith("--mount=") for argument in argv)
 
 
-# ── Idempotency: never wrap a command the hook already rewrote ─────────
+def test_response_allows_with_reason_and_preserves_fields():
+    response = hook.rewrite_payload(
+        {"session_id": "s", "tool_name": "Bash", "tool_input": {"command": "true"}}
+    )
+
+    output = response["hookSpecificOutput"]
+    assert output["hookEventName"] == "PreToolUse"
+    assert output["permissionDecision"] == "allow"
+    assert output["permissionDecisionReason"]
 
 
-def test_wrapper_by_script_path_is_passed_through():
-    """A command that is already the hook's own wrapper (matched by the full
-    executor path) must pass through unchanged, or the executor would run
-    inside the executor."""
+# ── No passthrough: every Bash command is wrapped, no exceptions ────────
+
+
+def test_executor_invocation_is_wrapped_again():
+    """A command that is already the hook's own wrapper must be wrapped
+    again: the inner executor path only exists on the host, so it fails
+    inside the sandbox instead of ever running unsandboxed."""
     command = shlex.join(
         [sys.executable, str(hook.EXEC_SCRIPT), "--session=s", "--", "echo hi"]
     )
-    payload = {"tool_name": "Bash", "tool_input": {"command": command}}
-    assert hook.rewrite_payload(payload) is None
+    argv = shlex.split(
+        _updated_input({"tool_name": "Bash", "tool_input": {"command": command}})[
+            "command"
+        ]
+    )
+    assert argv[:2] == [sys.executable, str(hook.EXEC_SCRIPT)]
+    assert argv[-1] == command
 
 
-def test_wrapper_by_script_basename_is_passed_through():
-    """The executor is recognized by basename too, so a bare-name invocation
-    is still treated as already-wrapped."""
-    command = f"python {hook.EXEC_SCRIPT.name} --session=s -- 'echo hi'"
-    payload = {"tool_name": "Bash", "tool_input": {"command": command}}
-    assert hook.rewrite_payload(payload) is None
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat cubesandbox_exec.py",
+        "less ~/.claude/hooks/cubesandbox_exec.py",
+        "true cubesandbox_exec.py && echo host-side",
+        "python cubesandbox_exec.py --session s -- 'echo nested'",
+    ],
+)
+def test_executor_name_in_command_is_still_wrapped(command):
+    """Merely naming the executor script (even as the first token, even in a
+    chain) must not pass the command through to the host."""
+    argv = shlex.split(
+        _updated_input({"tool_name": "Bash", "tool_input": {"command": command}})[
+            "command"
+        ]
+    )
+    assert argv[:2] == [sys.executable, str(hook.EXEC_SCRIPT)]
+    assert argv[-1] == command
 
 
-def test_newline_injection_is_not_mistaken_for_wrapper():
-    """An unquoted newline after an interpreter token must NOT be read as an
-    existing wrapper — the whole string is wrapped as one quoted argument so
-    the second line can never execute on the host."""
+def test_newline_injection_is_one_quoted_argument():
+    """An unquoted newline after an interpreter token must stay inside the
+    single quoted argument so the second line can never execute on the
+    host."""
     command = f"{sys.executable}\nrm -rf /"
     argv = shlex.split(
         _updated_input({"tool_name": "Bash", "tool_input": {"command": command}})[
@@ -277,9 +306,9 @@ def test_newline_injection_is_not_mistaken_for_wrapper():
     assert argv[-1] == command
 
 
-def test_unparseable_command_is_wrapped_not_treated_as_wrapper():
-    """Unbalanced quotes make shlex raise; _already_wrapped fails safe to
-    False, so the command is wrapped rather than passed through."""
+def test_unparseable_command_is_wrapped():
+    """Unbalanced quotes make shlex raise at execution time; the hook still
+    wraps the command as one quoted argument rather than passing it through."""
     command = "echo 'unbalanced"
     argv = shlex.split(
         _updated_input({"tool_name": "Bash", "tool_input": {"command": command}})[

@@ -11,6 +11,8 @@ lang: zh-CN
 
 # Claude Code
 
+[English](../../../guide/integrations/claude-code.md)
+
 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) 是 Anthropic 出品的、基于终端的 AI 编码 agent,它在终端里执行命令、编辑文件、运行代码。
 
 本指南介绍如何让 Claude Code 继续跑在**你的宿主机**上,同时用一个 `PreToolUse` hook 把它执行的**每一条 Bash 命令**透明转发进隔离的 CubeSandbox MicroVM。模型完全感知不到沙箱层,也无需改动 prompt 或使用方式。
@@ -31,6 +33,14 @@ Claude Code(宿主机)
 
 只有 `Bash` 工具被转发。`Read`、`Write`、`Edit` 仍在宿主机上操作文件,所以 Claude Code 在本地编辑你的项目,而它的 shell 命令跑在独立的内核 / 文件系统 / 网络里。
 
+## 集成对象与版本
+
+| 组件 | 版本 |
+|---|---|
+| Claude Code | 任意支持 `PreToolUse` hook 的版本 |
+| cubesandbox Python SDK | 通过 `requirements.txt` 安装 |
+| Python | 运行 Claude Code 的宿主机上需 3.9+ |
+
 ## 前置条件
 
 - 运行中的 [CubeSandbox 部署](/zh/guide/quickstart),CubeAPI 可达(如 `http://127.0.0.1:3000`)
@@ -46,6 +56,7 @@ cubemastercli tpl create-from-image \
   --image cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
   --writable-layer-size 2G \
   --expose-port 49999 \
+  --expose-port 49983 \
   --probe 49999
 ```
 
@@ -58,7 +69,7 @@ cubemastercli tpl create-from-image \
 ```bash
 python3 -m pip install -r requirements.txt
 cp .env.example .env
-# 在 .env 里设置 CUBE_API_URL / E2B_API_URL 和 CUBE_TEMPLATE_ID
+# 在 .env 里设置 CUBE_API_URL 和 CUBE_TEMPLATE_ID
 
 cd hooks
 ./install.sh
@@ -70,9 +81,9 @@ cd hooks
 
 ## 工作原理
 
-1. **`cubesandbox_rewrite.py`**(hook)接收 `PreToolUse` 载荷。对 `Bash` 调用,它把 `tool_input.command` 改写为对执行器的调用,原命令作为单个 `shlex` 引用参数传入,并通过 `updatedInput` 返回。原命令里的任何内容都无法在宿主机执行。非 `Bash` 工具原样放行;已被包裹的命令不再重复包裹(幂等)。
+1. **`cubesandbox_rewrite.py`**(hook)接收 `PreToolUse` 载荷。对 `Bash` 调用,它把 `tool_input.command` 改写为对执行器的调用,原命令作为单个 `shlex` 引用参数传入,并通过 `updatedInput` 返回。原命令里的任何内容都无法在宿主机执行。非 `Bash` 工具原样放行。hook 无条件改写**每一条** Bash 命令;若把已包裹的执行器调用再次喂回 hook,嵌套调用只会在沙箱内失败(沙箱内不存在宿主 hook 路径),绝不会落到宿主机。
 
-2. **`cubesandbox_exec.py`**(执行器)按 Claude Code `session_id` 复用一个沙箱(映射存于 `~/.cache/cubesandbox-hook/`,由每会话文件锁保护),重放持久化的工作目录与导出的环境变量,在 MicroVM 内运行命令,并回传 stdout/stderr 和退出码。
+2. **`cubesandbox_exec.py`**(执行器)按 Claude Code `session_id` 复用一个沙箱(映射存于 `~/.cache/cubesandbox-hook/`,由每会话文件锁保护),重放持久化的工作目录与导出的环境变量,在 MicroVM 内运行命令,并在命令结束后返回 stdout/stderr 和退出码(缓冲返回,非流式)。
 
 ## 宿主项目挂载
 
@@ -93,7 +104,8 @@ extra_conf:
 
 - **fail-closed** —— 无法安全改写时以非零退出**阻断**命令,而不是放它到宿主机执行。
 - **防注入** —— 原命令作为单个 `shlex` 引用参数传入,shell 元字符和换行无法越出到宿主机。
-- **幂等** —— 已被包裹的命令不会二次包裹,避免"执行器套执行器"。
+- **无条件改写** —— 每条 Bash 调用都会被改写;已包裹的执行器调用若再次经过 hook,只会在沙箱内失败(沙箱内不存在宿主 hook 路径),绝不会落到宿主机。
+- **自动批准** —— hook 对改写后的 Bash 调用返回 `permissionDecision: "allow"`,Claude Code 的逐命令确认提示被抑制;请相应使用 `--permission-mode` / hooks 策略。
 - **凭据不外泄** —— 安装脚本只把白名单 `CUBE_*` 值写入 hook 配置。
 
 ## 重置与卸载
@@ -106,6 +118,45 @@ python3 ~/.claude/hooks/cubesandbox_exec.py --reset --session <session-id>
 cd hooks
 ./install.sh --uninstall
 ```
+
+## 关键代码片段
+
+### `~/.claude/settings.json` 中的 hook matcher
+
+安装脚本会把类似下面的 `Bash` matcher 组合并进你的 settings(command 为你的绝对 home 路径):
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/you/.claude/hooks/cubesandbox_rewrite.py || exit 2"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### 手动测试 hook
+
+```bash
+echo '{"tool_name":"Bash","cwd":"/tmp","session_id":"t","tool_input":{"command":"whoami"}}' \
+  | python3 ~/.claude/hooks/cubesandbox_rewrite.py
+```
+
+## 注意事项
+
+- **Read/Write/Edit 仍在宿主机。** 只有 `Bash` 工具调用被转发;Claude Code 的文件编辑仍落在宿主项目文件上。
+- **同会话 Bash 串行。** 同一会话内并发的 Bash 调用会经每会话锁串行执行 —— 一次只跑一条,不并行。
+- **输出为缓冲返回。** stdout/stderr 在命令结束后才返回;长时间运行的命令没有增量输出。
+- **自动批准。** hook 对改写后的 Bash 调用返回 `permissionDecision: "allow"`,Claude Code 的逐命令确认提示被抑制 —— 请相应设置 `--permission-mode` / hooks 策略。
+- **持久环境变量会被清理。** 导出的环境变量在命令间保留,但 `BASH_ENV`、`ENV`、`LD_PRELOAD`、`PROMPT_COMMAND` 会从持久化环境中被清除。
 
 ## 排错
 
@@ -122,7 +173,7 @@ echo '{"tool_name":"Bash","cwd":"/tmp","session_id":"t","tool_input":{"command":
 
 把依赖装进 Claude Code 使用的 Python 环境:`pip install -r requirements.txt`。
 
-### `CUBE_TEMPLATE_ID is not set` / `Template Not Found`
+### `CUBE_TEMPLATE_ID is not set` / `Template not found`
 
 在 `.env` 里把 `CUBE_TEMPLATE_ID` 设为一个 `READY` 模板(`cubemastercli tpl list`),然后重新运行 `hooks/install.sh`。
 
@@ -138,3 +189,9 @@ echo '{"tool_name":"Bash","cwd":"/tmp","session_id":"t","tool_input":{"command":
 - `hooks/cubesandbox_exec.py` —— 执行器:按会话复用 MicroVM、shell 状态持久化
 - `hooks/install.sh` —— 幂等安装 / 卸载
 - `tests/` —— hook 改写、执行器、安装生命周期的测试
+
+## 参考
+
+- Claude Code hooks 文档:<https://docs.anthropic.com/en/docs/claude-code/hooks>
+- 可运行示例:[`examples/claude-code-integration/`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/claude-code-integration)
+- 项目快速开始:[快速开始](/zh/guide/quickstart)

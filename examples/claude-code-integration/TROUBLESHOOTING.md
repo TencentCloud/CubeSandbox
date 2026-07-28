@@ -61,7 +61,10 @@ Error checking cpu feature compatibility: CpuidCheckCompatibility
 sudo cubemastercli tpl delete --template-id <旧模板ID>
 sudo cubemastercli tpl create-from-image \
   --image cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
-  --writable-layer-size 2G --expose-port 49999 --probe 49999
+  --writable-layer-size 2G \
+  --expose-port 49999 \
+  --expose-port 49983 \
+  --probe 49999
 ```
 
 **教训**:模板快照与 CPU 特性绑定,系统升级/重启后可能需要重建。
@@ -125,5 +128,6 @@ python3 ~/.claude/hooks/cubesandbox_exec.py --reset --session <session-id>
 
 - **fail-closed**:hook 无法安全改写时以非零退出**阻断**命令,绝不放行到宿主机。
 - **防注入**:原命令作为单个 `shlex` 引用参数传入执行器,shell 元字符和换行无法越出。
-- **幂等**:已被 hook 包裹过的命令不会二次包裹(避免"执行器套执行器")。
+- **无条件改写**:每条 Bash 调用都会被改写;已包裹的执行器调用若再次经过 hook,只会在沙箱内失败(沙箱内不存在宿主 hook 路径),绝不会落到宿主机。
+- **自动批准**:hook 对改写后的 Bash 调用返回 `permissionDecision: "allow"`,Claude Code 的逐命令确认提示被抑制;请相应使用 `--permission-mode` / hooks 策略。
 - **凭据不外泄**:安装脚本只复制白名单 `CUBE_*` 值,不会把 provider API key 写进 hook 配置。

@@ -35,6 +35,8 @@ Bash — there is no path for a command to skip it.
 | **Read-only host mount** | The session's first call can mount the project at the same path, read-only, so sandbox commands can inspect (not mutate) host files. |
 | **Fail-closed** | If the hook cannot rewrite a call safely, it exits non-zero and blocks the command rather than letting it run on the host. |
 | **Injection-safe** | The original command is passed as a single `shlex`-quoted argument, so shell metacharacters and newlines can never break out onto the host. |
+| **Unconditional wrapping** | Every Bash call is rewritten; an already-wrapped executor invocation fed back through the hook simply fails inside the sandbox, never on the host. |
+| **Auto-approval** | The hook answers `permissionDecision: "allow"` for rewritten Bash calls, so Claude Code's per-command approval prompt is suppressed; use `--permission-mode` / hooks policy accordingly. |
 
 ## Prerequisites
 
@@ -49,7 +51,7 @@ Bash — there is no path for a command to skip it.
 ```bash
 python3 -m pip install -r requirements.txt
 cp .env.example .env
-# Edit .env: set CUBE_API_URL / E2B_API_URL and CUBE_TEMPLATE_ID
+# Edit .env: set CUBE_API_URL and CUBE_TEMPLATE_ID
 ```
 
 ### 2 — Install the hook
@@ -85,12 +87,17 @@ Claude Code's file edits stay on your host.
 
    and returns it via `updatedInput`. The original command is a single quoted
    argument, so nothing in it can execute on the host. Non-`Bash` tools pass
-   through untouched, and a command that is already wrapped is left alone.
+   through untouched. The hook wraps every Bash command unconditionally; an
+   already-wrapped executor invocation fed back through it simply fails inside
+   the sandbox, never on the host.
 
 2. **`cubesandbox_exec.py`** (the executor) reuses one sandbox per `session_id`
    (mapping stored under `~/.cache/cubesandbox-hook/`, guarded by a per-session
    file lock), replays the persisted working directory and environment, runs the
-   command in the MicroVM, and streams back stdout/stderr and the exit code.
+   command in the MicroVM, and returns stdout/stderr and the exit code after the
+   command finishes (buffered, not streamed). Concurrent Bash calls within one
+   session are serialized through the per-session lock — they run one at a time,
+   not in parallel.
 
 ## Host project mount
 
@@ -161,9 +168,9 @@ pytest tests
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
 | Bash commands still run on the host | Hook not registered / Claude Code not restarted | Re-run `hooks/install.sh`, restart Claude Code |
-| `CUBE_TEMPLATE_ID is not set` | Missing template in `.env` | Set `CUBE_TEMPLATE_ID` (see `cubemastercli tpl list`) |
+| `CUBE_TEMPLATE_ID is not set` | Missing template in `.env` | Set `CUBE_TEMPLATE_ID` (see `cubemastercli tpl list`), then re-run `hooks/install.sh` |
 | `the cubesandbox SDK is required` | Dependencies not installed | `pip install -r requirements.txt` |
 | `Template not found` | Wrong template ID | Check `cubemastercli tpl list` |
 | Host mount rejected (warning) | Path not in `allowed_host_mount_prefixes` | Add the prefix to CubeMaster `extra_conf`, or accept the no-mount fallback |
 
-See [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) for more.
+See [TROUBLESHOOTING.md (中文)](./TROUBLESHOOTING.md) for more.
