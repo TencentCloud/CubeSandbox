@@ -1,0 +1,114 @@
+{{- if .Values.egressProxy.enabled }}
+{{- $root := . -}}
+{{- range $role := list "primary" "standby" }}
+{{- $name := printf "%s-egress-proxy-%s" (include "cube.fullname" $root) $role -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ $name }}
+  namespace: cube-egress
+  labels:
+    {{- include "cube.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: egress-proxy
+    app.kubernetes.io/role: {{ $role }}
+spec:
+  updateStrategy:
+    # Primary and standby must never be rolled independently by two
+    # controllers at the same time. Operators replace standby Pods first,
+    # verify takeover, and then replace primary Pods.
+    type: OnDelete
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" $root | nindent 6 }}
+      app.kubernetes.io/component: egress-proxy
+      app.kubernetes.io/role: {{ $role }}
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" $root | nindent 8 }}
+        app.kubernetes.io/component: egress-proxy
+        app.kubernetes.io/role: {{ $role }}
+    spec:
+      hostNetwork: false
+      hostPID: true
+      automountServiceAccountToken: false
+      dnsPolicy: ClusterFirst
+      terminationGracePeriodSeconds: 30
+      {{- with $root.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "cube.computePlacement" $root | nindent 6 }}
+      initContainers:
+        - name: setup-veth
+          image: {{ include "cube.cubeImage" (dict "image" $root.Values.images.egressProxy "context" $root) | quote }}
+          imagePullPolicy: {{ $root.Values.images.egressProxy.pullPolicy }}
+          command:
+            - /opt/cube-egress/setup-veth.sh
+          securityContext:
+            runAsUser: 0
+            privileged: true
+            allowPrivilegeEscalation: true
+            readOnlyRootFilesystem: true
+          env:
+            - name: CUBE_EGRESS_ROLE
+              value: {{ $role | quote }}
+            - name: CUBE_ROUTER_NAT_IP
+              value: {{ $root.Values.cubeNode.network.cubeRouter.natIP | quote }}
+      containers:
+        - name: proxy
+          image: {{ include "cube.cubeImage" (dict "image" $root.Values.images.egressProxy "context" $root) | quote }}
+          imagePullPolicy: {{ $root.Values.images.egressProxy.pullPolicy }}
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_ADMIN
+            seccompProfile:
+              type: RuntimeDefault
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: CUBE_EGRESS_ROLE
+              value: {{ $role | quote }}
+            - name: CUBE_ROUTER_NAT_IP
+              value: {{ $root.Values.cubeNode.network.cubeRouter.natIP | quote }}
+          readinessProbe:
+            exec:
+              command:
+                - /opt/cube-egress/health.sh
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - /opt/cube-egress/health.sh
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "2"
+              memory: 512Mi
+          volumeMounts:
+            - name: run
+              mountPath: /run/cube-egress
+      volumes:
+        - name: run
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Mi
+---
+{{- end }}
+{{- end }}

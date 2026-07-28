@@ -46,12 +46,13 @@ cube-sandbox-int.tencentcloudcr.com,cube-sandbox-cn.tencentcloudcr.com
 {{- end -}}
 
 {{- /*
-Render "<repository>:<tag>" for a Cube-owned image. Call as:
+Render "<repository>@<digest>" when digest is set, otherwise
+"<repository>:<tag>", for a Cube-owned image. Call as:
   include "cube.cubeImage" (dict "image" .Values.images.master "context" $)
 When global.imageRegistry is set, the leading host of .repository is
 rewritten to it — but only if it is an official Cube TCR host
 (cube.officialImageRegistries); other repositories render unchanged.
-Without it the output is identical to cube.image.
+Without an override or digest the output is identical to cube.image.
 */}}
 {{- define "cube.cubeImage" -}}
 {{- $image := .image -}}
@@ -68,7 +69,12 @@ Without it the output is identical to cube.image.
     {{- $repo = printf "%s/%s" (trimSuffix "/" $override) $repo -}}
   {{- end -}}
 {{- end -}}
+{{- $digest := $image.digest | default "" -}}
+{{- if $digest -}}
+{{- printf "%s@%s" $repo $digest -}}
+{{- else -}}
 {{- printf "%s:%s" $repo $image.tag -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "cube.timezoneEnv" -}}

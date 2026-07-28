@@ -1,0 +1,93 @@
+{{- $root := . -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ printf "%s-egress-cleanup-uninstall" (include "cube.fullname" $root) }}
+  namespace: {{ $root.Release.Namespace }}
+  annotations:
+    helm.sh/hook: post-delete
+    helm.sh/hook-weight: "-20"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+  labels:
+    {{- include "cube.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: egress-cleanup
+spec:
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" $root | nindent 6 }}
+      app.kubernetes.io/component: egress-cleanup
+      app.kubernetes.io/cleanup-reason: uninstall
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" $root | nindent 8 }}
+        app.kubernetes.io/component: egress-cleanup
+        app.kubernetes.io/cleanup-reason: uninstall
+    spec:
+      hostNetwork: true
+      automountServiceAccountToken: false
+      dnsPolicy: ClusterFirstWithHostNet
+      restartPolicy: Always
+      {{- with $root.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "cube.computePlacement" $root | nindent 6 }}
+      containers:
+        - name: cleanup
+          image: {{ include "cube.cubeImage" (dict "image" $root.Values.images.egressConfigurer "context" $root) | quote }}
+          imagePullPolicy: {{ $root.Values.images.egressConfigurer.pullPolicy }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              /opt/cube-egress/cleanup.sh
+              touch /tmp/cleanup-complete
+              exec tail -f /dev/null
+          env:
+            - name: CUBE_ROUTER_NAT_IP
+              value: {{ $root.Values.cubeNode.network.cubeRouter.natIP | quote }}
+          readinessProbe:
+            # Helm waits for non-Job hook resources to become Ready before
+            # applying hook-succeeded. The sentinel therefore prevents the
+            # DaemonSet from being deleted until cleanup ran on every node.
+            exec:
+              command:
+                - test
+                - -f
+                - /tmp/cleanup-complete
+            periodSeconds: 2
+            failureThreshold: 30
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_ADMIN
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: run
+              mountPath: /run/cube-egress
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Mi
+        - name: run
+          emptyDir:
+            sizeLimit: 1Mi
+---

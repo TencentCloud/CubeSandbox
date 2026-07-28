@@ -65,6 +65,10 @@ spec:
               value: cubelet
             - name: CUBE_ROLE
               value: run
+            - name: CUBE_ROUTER_ENABLE
+              value: {{ ternary "1" "0" .Values.cubeNode.network.cubeRouter.enabled | quote }}
+            - name: CUBE_ROUTER_CIDR
+              value: {{ .Values.cubeNode.network.cubeRouter.cidr | quote }}
             {{- with .Values.cubeNode.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -221,6 +225,9 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+        {{- if not .Values.egressProxy.enabled }}
+        # cube-egress-net owns sandbox TPROXY rules. EgressProxy owns the same
+        # routing when enabled, so the helper is omitted in that mode.
         - name: cube-egress-net
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubeEgressNet "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.cubeEgressNet.pullPolicy }}
@@ -273,6 +280,7 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+        {{- end }}
         {{- if .Values.cubeS3lvol.enabled }}
         - name: cube-s3lvol
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubeS3lvol "context" $) | quote }}
