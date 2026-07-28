@@ -347,6 +347,9 @@ tests/e2e/sdk_compat/
 - `cases/volume/`：Volume Plugin CRUD 与 sandbox `volumeMounts` 绑定/解绑
   （需 `SDK_E2E_VOLUME_PLUGIN=true`；仅 CubeSandbox）。插件需手动部署并配置，
   且要求 `cubesandbox` >= 0.6.0。
+- `cases/auth/`：`CUBE_API_KEY` 简单密钥鉴权，针对 CubeAPI 控制面——
+  `X-API-Key`/`Bearer` 通过、错误/缺失返回 401、`/health` 豁免（仅 CubeSandbox）。
+  仅当服务端以 `CUBE_API_KEY` 启动且 runner 导出相同 key 时才运行，否则跳过。
 
 新增测试应保持后端无关，通过 capability marker 表达后端差异。
 
@@ -372,6 +375,8 @@ Capability marker：
   协调，未设置 `SDK_E2E_PLATFORM_LIFECYCLE=true` 时跳过；
 - `@pytest.mark.volume`：Volume Plugin 用例，未设置
   `SDK_E2E_VOLUME_PLUGIN=true` 时跳过。
+- `@pytest.mark.auth`：`CUBE_API_KEY` 简单密钥鉴权用例，未为 runner 设置
+  `CUBE_API_KEY` 或后端不支持 `auth_simple_key`（仅 CubeSandbox）时跳过。
 
 常用 capability 有 `lifecycle`、`commands`、`filesystem`、`run_code`。
 可选共享 capability 包括 `pause_resume`、`network_allow_deny`、

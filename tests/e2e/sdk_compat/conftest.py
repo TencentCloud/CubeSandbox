@@ -90,6 +90,7 @@ def pytest_configure(config: pytest.Config) -> None:
         "requires_code_interpreter: test requires a stateful Code Interpreter kernel",
         "requires_internet: test requires public internet access from the sandbox",
         "requires_cubeproxy: test requires CubeProxy routing to the sandbox",
+        "auth: CUBE_API_KEY simple-key authentication control-plane tests",
     ):
         config.addinivalue_line("markers", marker)
 

@@ -351,6 +351,10 @@ Current capability domains:
 - `cases/volume/`: Volume Plugin CRUD plus sandbox `volumeMounts` bind/unbind
   (opt-in via `SDK_E2E_VOLUME_PLUGIN=true`; CubeSandbox only). Requires a
   manually deployed/configured Volume Plugin and `cubesandbox` >= 0.6.0.
+- `cases/auth/`: `CUBE_API_KEY` simple-key authentication against the CubeAPI
+  control plane — `X-API-Key`/`Bearer` accept, wrong/missing 401, `/health`
+  exempt (CubeSandbox only). Skipped unless the server was started with
+  `CUBE_API_KEY` and the same key is exported for the runner.
 
 Keep new cases backend-neutral. Add backend-specific behavior through capability
 markers instead of branching inside test bodies. Future domains can be added next
@@ -373,6 +377,7 @@ Capability markers:
 - `@pytest.mark.sandbox_create_options(...)`: pass SDK create-time options such as `network`, `env_vars`, or `lifecycle`.
 - `@pytest.mark.requires_cubeproxy`: platform lifecycle cases that depend on cube-proxy and lifecycle-manager coordination. Skipped unless `SDK_E2E_PLATFORM_LIFECYCLE=true`.
 - `@pytest.mark.volume`: Volume Plugin cases. Skipped unless `SDK_E2E_VOLUME_PLUGIN=true`.
+- `@pytest.mark.auth`: `CUBE_API_KEY` simple-key auth cases. Skipped unless `CUBE_API_KEY` is set for the runner and the backend supports `auth_simple_key` (CubeSandbox only).
 - Common capabilities include `lifecycle`, `commands`, `filesystem`, and `run_code`.
 - Shared optional capabilities include `pause_resume`, `network_allow_deny`, and `network_public_access`.
 - `platform_lifecycle` is available only to CubeSandbox platform-managed lifecycle cases.
