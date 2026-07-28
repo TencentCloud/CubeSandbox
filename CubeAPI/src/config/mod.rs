@@ -186,7 +186,6 @@ impl ServerConfig {
         override_string("LOG_DIR", &mut cfg.log_dir);
         override_string("LOG_PREFIX", &mut cfg.log_prefix);
         cfg.auth_callback_url = optional_env("AUTH_CALLBACK_URL");
-        cfg.database_url = optional_env("DATABASE_URL").or_else(default_cube_sandbox_mysql_url);
         cfg.webhook = webhook_from_env()?;
         Ok(cfg)
     }
