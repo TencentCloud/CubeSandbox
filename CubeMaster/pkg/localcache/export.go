@@ -224,6 +224,39 @@ func NotifyEvent(e *Event) error {
 	}
 }
 
+// EvictNode synchronously removes every scheduler-local view owned by nodeID.
+// It is used after a node deletion commits and by metadata reloads on replicas
+// that observe the deleted registration later.
+func EvictNode(nodeID string) {
+	if nodeID == "" {
+		return
+	}
+	SyncNodeTemplates(nodeID, nil)
+	if l.templateNodeCache != nil {
+		l.templateNodeCache.Delete(nodeID)
+	}
+	if l.cache == nil {
+		return
+	}
+	if existing, ok := l.cache.Get(nodeID); ok {
+		if n, valid := existing.(*node.Node); valid {
+			l.delNodeCache(n)
+			return
+		}
+	}
+	l.cache.Delete(nodeID)
+	// The cache entry may already be gone while a stale pointer still remains
+	// in any instance-type list. Without the original node we cannot derive its
+	// cluster, so remove the ID from every list.
+	l.lockSortedNodes.Lock()
+	defer l.lockSortedNodes.Unlock()
+	candidate := &node.Node{InsID: nodeID}
+	for product, nodes := range l.sortedNodesByClusters {
+		nodes.Remove(candidate)
+		l.sortedNodesByClusters[product] = nodes
+	}
+}
+
 func SetSandboxProxyMap(ctx context.Context, proxyInfo *types.SandboxProxyMap) error {
 	return l.setByPassProsyToRedis(ctx, rediskey.SandboxProxy(proxyInfo.SandboxID), proxyInfo)
 }

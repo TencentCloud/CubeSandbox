@@ -457,10 +457,13 @@ func TestMergeReloadResultReturnsAllTouchedNodes(t *testing.T) {
 		},
 	}
 
-	syncSnaps := s.mergeReloadResult(next)
+	syncSnaps, evicted := s.mergeReloadResult(next)
 
 	if len(syncSnaps) != 2 {
 		t.Fatalf("mergeReloadResult returned %d snaps, want 2 (every touched node)", len(syncSnaps))
+	}
+	if len(evicted) != 0 {
+		t.Fatalf("mergeReloadResult returned unexpected evictions: %v", evicted)
 	}
 
 	byID := make(map[string]*NodeSnapshot, len(syncSnaps))

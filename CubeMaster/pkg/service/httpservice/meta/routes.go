@@ -15,6 +15,7 @@ func RegisterMetaRoutes(g *gin.RouterGroup) {
 	g.GET(versionMatrixAction, versionMatrixGinHandler)
 	g.GET(templateComponentVersionsAction, templateComponentVersionsGinHandler)
 	g.GET(nodeAction, getNodeGinHandler)
+	g.DELETE(nodeAction, deleteNodeGinHandler)
 	g.POST(nodeStatusAction, updateNodeStatusGinHandler)
 	g.POST(nodeLabelsAction, updateNodeLabelsGinHandler)
 	g.DELETE(nodeLabelsAction, deleteNodeLabelGinHandler)

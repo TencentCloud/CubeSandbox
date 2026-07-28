@@ -205,3 +205,54 @@ func TestPrintNodeSummaryScoreOnlyKeepsScoreColumns(t *testing.T) {
 		}
 	}
 }
+
+func TestNodeDeleteURLAddsForceQuery(t *testing.T) {
+	normal := nodeDeleteURL("127.0.0.1", "8089", "node/a", false)
+	if normal.Query().Has("force") {
+		t.Fatalf("normal delete unexpectedly has force query: %s", normal)
+	}
+	if normal.EscapedPath() != "/internal/meta/nodes/node%2Fa" {
+		t.Fatalf("node ID path was not escaped: %s", normal.EscapedPath())
+	}
+
+	forced := nodeDeleteURL("127.0.0.1", "8089", "node/a", true)
+	if forced.Query().Get("force") != "true" {
+		t.Fatalf("forced delete missing force=true query: %s", forced)
+	}
+}
+
+func TestConfirmForceNodeDeletion(t *testing.T) {
+	t.Run("normal deletion does not prompt", func(t *testing.T) {
+		called := false
+		if !confirmForceNodeDeletion(false, func(string, int) bool {
+			called = true
+			return false
+		}) {
+			t.Fatal("normal deletion should proceed without confirmation")
+		}
+		if called {
+			t.Fatal("normal deletion unexpectedly requested confirmation")
+		}
+	})
+
+	t.Run("force deletion warns and respects rejection", func(t *testing.T) {
+		var prompt string
+		var tries int
+		confirmed := confirmForceNodeDeletion(true, func(message string, attempts int) bool {
+			prompt = message
+			tries = attempts
+			return false
+		})
+		if confirmed {
+			t.Fatal("force deletion should stop when confirmation is rejected")
+		}
+		for _, wanted := range []string{"force deletion", "without considering", "sandboxes"} {
+			if !strings.Contains(prompt, wanted) {
+				t.Fatalf("prompt=%q, missing %q", prompt, wanted)
+			}
+		}
+		if tries != 3 {
+			t.Fatalf("tries=%d want 3", tries)
+		}
+	})
+}

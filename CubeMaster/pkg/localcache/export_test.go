@@ -157,6 +157,36 @@ func TestGetHealthyNodesByInstanceType(t *testing.T) {
 	}
 }
 
+func TestEvictNodeRemovesStaleEntryFromEveryCluster(t *testing.T) {
+	origNodesByClusters := l.sortedNodesByClusters
+	origCache := l.cache
+	origImageCache := l.imageCache
+	origTemplateNodeCache := l.templateNodeCache
+	defer func() {
+		l.sortedNodesByClusters = origNodesByClusters
+		l.cache = origCache
+		l.imageCache = origImageCache
+		l.templateNodeCache = origTemplateNodeCache
+	}()
+
+	stale := &node.Node{InsID: "deleted"}
+	l.cache = cache.New(0, 0)
+	l.imageCache = cache.New(0, 0)
+	l.templateNodeCache = cache.New(0, 0)
+	l.sortedNodesByClusters = map[string]node.NodeList{
+		"default": {stale},
+		"gpu":     {stale},
+	}
+
+	EvictNode("deleted")
+
+	for cluster, nodes := range l.sortedNodesByClusters {
+		if len(nodes) != 0 {
+			t.Fatalf("cluster %s still contains deleted node: %+v", cluster, nodes)
+		}
+	}
+}
+
 func TestSyncNodeTemplatesReconcilesHeartbeatState(t *testing.T) {
 	origCache := l.cache
 	origImageCache := l.imageCache
