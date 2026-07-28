@@ -254,7 +254,7 @@ done
 test -d {cache_dir} \
   && find {cache_dir} -type f -print -quit | grep -q . \
   && find {cache_dir} -type f -print0 \
-  | sort -z | xargs -0 -r sha256sum | sha256sum | cut -d' ' -f1
+  | LC_ALL=C sort -z | xargs -0 -r sha256sum | sha256sum | cut -d' ' -f1
 """
     result = run_checked(
         sandbox,

@@ -221,6 +221,7 @@ class CommonTests(unittest.TestCase):
             "$tool is required to fingerprint the Deno dependency cache",
             sandbox.commands.command,
         )
+        self.assertIn("LC_ALL=C sort -z", sandbox.commands.command)
 
     def test_start_service_validates_the_pid_command_line(self) -> None:
         sandbox = FakeCommandSandbox()
