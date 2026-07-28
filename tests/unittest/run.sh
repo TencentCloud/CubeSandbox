@@ -99,11 +99,25 @@ WITH_TESTS=(
 	# live under ./plugins/... and ./services/... and are not in this set, so
 	# the pkg tests are self-contained in the builder.
 	"cubelet|Go|0|make builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && make proto && go test -short ./pkg/...'"
+	# Only unit tests (--lib --bins) run here; the tests/integration.rs target
+	# needs a full VM (OS disk images, sudo/ip networking, VFIO, windows guest)
+	# and is excluded so `run.sh hypervisor` exercises the self-contained tests.
+	# This entry does NOT pass /dev/kvm into the builder, so the vmm/hypervisor
+	# crate tests that open /dev/kvm at runtime are never reached here — see
+	# `hypervisor-kvm` below for those.
+	"hypervisor|Rust|1|make builder-run BUILDER_CMD='cd /workspace/hypervisor && cargo test --features kvm --lib --bins'"
 )
 
 GATED_TESTS=(
-	"cubelet|Go|0|some pkg tests need a writable cgroupfs / host caps the builder lacks|make builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && make proto && go test -short ./pkg/...'"
-	"hypervisor|Rust|1|integration tests need a full VM (windows guest, RAM hotplug)|make builder-run BUILDER_CMD='cd /workspace/hypervisor && cargo test --features kvm'"
+	# hypervisor-kvm exercises the tests that need a real /dev/kvm at runtime:
+	# the `vmm` and `hypervisor` crate unit tests call hypervisor::new() /
+	# create_vm(), which fail without KVM (verified: 4/4 vmm cpu:: tests fail with
+	# no device, pass with it). The device is passed into the builder container via
+	# BUILDER_RUN_EXTRA_MOUNTS='--device /dev/kvm'. Scoped to these two crates
+	# rather than the whole workspace because a full --workspace test build trips a
+	# pre-existing `#![deny(missing_docs)]` error in the rate_limiter crate that is
+	# unrelated to KVM. needs_kvm=1 so `--no-kvm` skips it.
+	"hypervisor-kvm|Rust|1|runtime KVM tests need /dev/kvm passed into the builder (vmm+hypervisor crates)|make builder-run BUILDER_RUN_EXTRA_MOUNTS='--device /dev/kvm' BUILDER_CMD='cd /workspace/hypervisor && cargo test --features kvm -p vmm -p hypervisor --lib --bins'"
 )
 
 NO_TESTS=(
