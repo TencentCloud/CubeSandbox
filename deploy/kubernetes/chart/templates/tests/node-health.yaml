@@ -196,7 +196,7 @@ spec:
         - -ec
         - |
           echo '[health-test] check MySQL'
-          mysqladmin ping -h {{ include "cube.mysqlHost" . | quote }} -P {{ .Values.mysql.port }} -u{{ .Values.mysql.user | quote }} --silent
+          mysqladmin ping -h {{ include "cube.dbHost" . | quote }} -P {{ include "cube.dbPort" . }} -u{{ include "cube.dbUser" . | quote }} --silent
 {{- end }}
 {{ if eq (include "cube.redisBuiltinEnabled" .) "true" }}
 ---

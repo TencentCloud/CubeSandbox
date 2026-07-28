@@ -13,7 +13,7 @@ spec:
     app.kubernetes.io/component: mysql
   ports:
     - name: mysql
-      port: {{ .Values.mysql.port }}
+      port: {{ include "cube.dbPort" . }}
       targetPort: mysql
 ---
 apiVersion: apps/v1
@@ -49,9 +49,9 @@ spec:
                   name: {{ include "cube.secretName" . }}
                   key: mysql-root-password
             - name: MYSQL_DATABASE
-              value: {{ .Values.mysql.database | quote }}
+              value: {{ include "cube.dbName" . | quote }}
             - name: MYSQL_USER
-              value: {{ .Values.mysql.user | quote }}
+              value: {{ include "cube.dbUser" . | quote }}
             - name: MYSQL_PASSWORD
               valueFrom:
                 secretKeyRef:
