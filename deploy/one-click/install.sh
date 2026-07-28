@@ -260,8 +260,13 @@ restore_selinux_contexts() {
     return 0
   fi
 
+  local -a exclude_args=()
+  if mountpoint -q "${INSTALL_PREFIX}/cubeletmnt" 2>/dev/null; then
+    exclude_args+=(-e "${INSTALL_PREFIX}/cubeletmnt")
+  fi
+
   log "restoring SELinux contexts under ${INSTALL_PREFIX}"
-  restorecon -R "${INSTALL_PREFIX}"
+  restorecon -R "${exclude_args[@]}" "${INSTALL_PREFIX}"
 }
 
 one_click_runtime_file_paths() {
