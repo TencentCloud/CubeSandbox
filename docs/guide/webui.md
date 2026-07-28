@@ -78,59 +78,55 @@ On the **Sandboxes** list, or on a running sandbox detail page, click
 disabled because CubeOps only opens terminals for instances that are currently
 `running`.
 
-The Dashboard asks CubeOps for a short-lived, one-time terminal ticket, then
-upgrades to a same-origin WebSocket. CubeOps relays the authenticated session through
-CubeMaster and Cubelet to a containerd exec process in the selected container.
+The Dashboard asks CubeOps for a short-lived, signed terminal ticket, then
+upgrades to a same-origin WebSocket. CubeOps validates the selected running
+container and opens a PTY through envd's existing Process API and sandbox proxy.
+The terminal does not add a CubeMaster or Cubelet RPC.
 
 The terminal supports:
 
 - ANSI output, cursor control, copy/paste, and scrollback through xterm.js
 - stdin forwarding over WebSocket text frames with UTF-8-safe base64 payloads
-- terminal window resize propagation through CubeShim to the guest PTY
-- running-container selection when sandbox detail exposes multiple containers
+- terminal window resize through envd's existing PTY update operation
+- envd-backed running-container selection when sandbox detail exposes multiple containers
 - reconnect and fit controls in the terminal toolbar
 - session IDs, close reasons, duration, and operator fields in audit logs
 - automatic process cleanup when the browser disconnects or the session idles
 
-Terminal sessions currently open as `root`; other execution users are rejected
-when the ticket is created. Non-root terminal identities require an authorization
-contract to be propagated through CubeOps, CubeMaster, and Cubelet and are not
-silently inferred from the container image.
+Terminal sessions currently open as `root`; the WebUI does not expose an
+execution-user override.
 
 ::: tip Terminal access is ticket-based
 Browsers cannot attach arbitrary `Authorization` headers to a WebSocket upgrade.
-CubeOps therefore authenticates the normal `POST /sandboxes/:id/terminal/tickets`
-request first, issues a one-time ticket with a short TTL, and validates that
-ticket during the WebSocket upgrade.
+CubeOps therefore authenticates the normal `POST /terminal/sandboxes/:id/tickets`
+request first, issues a narrowly scoped signed ticket with a 30-second TTL, and
+validates that ticket during the WebSocket upgrade. The browser sends the ticket
+as a WebSocket subprotocol value rather than placing the bearer credential in
+the request URL.
 :::
 
-CubeOps limits pending tickets to 8 per user, ticket creation to 20 per user
-per minute, and active terminal sessions to 4 per user, 8 per sandbox, and 64
-per CubeOps process. Excess requests receive HTTP `429`.
+CubeOps uses the deployment's existing JWT signing secret for terminal tickets.
+The secret is shared by replicas through the normal CubeOps bootstrap process,
+so a ticket issued by one replica can be accepted by another and no sticky
+routing is required. Each established WebSocket and envd stream remains owned
+by the replica that accepted that connection.
 
-CubeOps must be able to reach CubeMaster's internal HTTP address configured by
-`CUBE_MASTER_ADDR`. Both services must receive the same
-`CUBE_TERMINAL_GATEWAY_TOKEN`; the one-click installer and Helm chart generate
-and preserve this secret automatically. CubeMaster rejects browser-originated
-connections and internal connections without the shared token.
-
-Terminal tickets and active-session counters are held in CubeOps process memory.
-Deployments with more than one CubeOps replica must use sticky routing from
-ticket creation through the WebSocket upgrade, or keep CubeOps at one replica.
+CubeOps uses `CUBE_MASTER_ADDR` only to validate sandbox and container state.
+Terminal data uses the same envd sandbox proxy path as other CubeOps operations;
+`AGENTHUB_SANDBOX_PROXY_URL` can override the local proxy address.
 
 Terminal audit events are emitted as structured logs:
 
 | Event | Important fields |
 | --- | --- |
-| `terminal ticket issued` | `sandbox_id`, `container_id`, `username` |
-| `terminal session opened` | `sandbox_id`, `container_id`, `session_id`, `username` |
-| `terminal session closed` | `sandbox_id`, `container_id`, `session_id`, `username`, `reason`, `duration_ms` |
+| `terminal ticket issued` | `sandbox_id`, `container_id`, `username`, `ticket_id` |
+| `terminal session opened` | `sandbox_id`, `container_id`, `session_id`, `username`, `pid` |
+| `terminal session closed` | `sandbox_id`, `container_id`, `session_id`, `username`, `pid`, `reason`, `duration_ms` |
 
 ::: tip Container targeting
-When CubeOps receives container metadata from CubeMaster, the Dashboard shows a
-container selector and binds the selected `containerID` to the one-time ticket.
-Cubelet verifies that the container belongs to the sandbox before creating the
-PTY process in that exact container.
+When CubeOps receives container metadata from CubeMaster, the Dashboard shows
+the running containers that expose envd and binds the selected `containerID`
+into the signed ticket before opening the sandbox's PTY.
 :::
 
 ### 3.4 Log in (JWT authentication)

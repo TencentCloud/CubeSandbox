@@ -36,9 +36,6 @@ export interface TerminalTicketRequest {
   containerID?: string;
   rows?: number;
   cols?: number;
-  cwd?: string;
-  envs?: Record<string, string>;
-  user?: string;
 }
 
 export interface TerminalTicketResponse {
@@ -247,7 +244,7 @@ export const sandboxApi = {
   logs: (id: string, params?: { cursor?: number; limit?: number; direction?: string }) =>
     api<SandboxLogsDto>(`/v2/sandboxes/${id}/logs`, { params }),
   createTerminalTicket: (id: string, body: TerminalTicketRequest) =>
-    api<TerminalTicketResponse>(`/sandboxes/${id}/terminal/tickets`, {
+    ops<TerminalTicketResponse>(`/terminal/sandboxes/${id}/tickets`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),

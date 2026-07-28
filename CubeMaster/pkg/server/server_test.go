@@ -157,20 +157,3 @@ func TestMiddlewareSkippedOnNotFoundAndMethodMismatch(t *testing.T) {
 	assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
 	assert.Empty(t, w.Header().Get(mwHeader), "middleware must not run on method-mismatch (no auth on 405)")
 }
-
-func TestRegisterHandlersIncludesTerminalWebSocketRoute(t *testing.T) {
-	s := &internalHttp{router: mux.NewRouter()}
-	s.registerHandlers()
-
-	request := httptest.NewRequest(http.MethodGet, "/cube/sandbox/terminal", nil)
-	var match mux.RouteMatch
-	if !s.router.Match(request, &match) {
-		t.Fatal("GET /cube/sandbox/terminal did not match any route")
-	}
-
-	request = httptest.NewRequest(http.MethodPost, "/cube/sandbox/terminal", nil)
-	match = mux.RouteMatch{}
-	if s.router.Match(request, &match) {
-		t.Fatal("POST /cube/sandbox/terminal unexpectedly matched the WebSocket route")
-	}
-}

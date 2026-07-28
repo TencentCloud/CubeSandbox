@@ -156,7 +156,7 @@ export const handlers = [
     return logs ? HttpResponse.json(logs) : notFound(`sandbox ${params.sandboxID} not found`);
   }),
 
-  http.post('/cubeapi/v1/sandboxes/:sandboxID/terminal/tickets', async ({ params, request }) => {
+  http.post('/opsapi/v1/terminal/sandboxes/:sandboxID/tickets', async ({ params, request }) => {
     await mockDelay();
     const sandboxID = String(params.sandboxID);
     const sandbox = getSandboxDetail(sandboxID);
@@ -166,7 +166,7 @@ export const handlers = [
       {
         ticket: `mock-${sandboxID}`,
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
-        websocketUrl: `/cubeapi/v1/sandboxes/${sandboxID}/terminal/ws?ticket=mock-${sandboxID}`,
+        websocketUrl: `/opsapi/v1/terminal/sandboxes/${sandboxID}/ws`,
         containerID: body.containerID,
       },
       { status: 201 },

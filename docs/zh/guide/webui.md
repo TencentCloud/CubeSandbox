@@ -69,17 +69,17 @@ Dashboard 是一个静态前端，由 **控制节点** 上的 nginx 容器托管
 
 ### 3.3 打开交互式终端
 
-在 **Sandboxes** 列表或运行中沙箱的详情页点击 **Terminal**，即可打开浏览器内 Shell。沙箱包含多个运行中容器时，需要先选择目标容器。
+在 **Sandboxes** 列表或运行中沙箱的详情页点击 **Terminal**，即可打开浏览器内 Shell。沙箱包含多个提供 envd 的运行中容器时，需要先选择目标容器。
 
-Dashboard 会先向 CubeOps 申请一个短时、一次性的终端票据，再建立同源 WebSocket。经过鉴权的会话由 CubeOps 转发至 CubeMaster 和 Cubelet，最终在所选容器中创建 containerd exec PTY。Cubelet 会再次校验容器确实属于该沙箱。
+Dashboard 会先向 CubeOps 申请一个短时签名终端票据，再建立同源 WebSocket。CubeOps 校验所选容器处于运行状态，然后通过现有沙箱代理直接复用 envd Process API 创建 PTY；该链路不新增 CubeMaster 或 Cubelet RPC。
 
-终端支持 ANSI 输出、复制粘贴、滚动历史、窗口尺寸同步、重连、空闲超时和断连后的进程清理。窗口尺寸会经过 CubeShim 传递到 guest PTY，而不是只停留在 Web 层。
+终端支持 ANSI 输出、复制粘贴、滚动历史、窗口尺寸同步、重连、空闲超时和断连后的进程清理。窗口尺寸通过 envd 现有的 PTY Update 操作同步。
 
-终端当前以 `root` 用户启动；票据申请中的其他执行用户会被拒绝。
+终端当前以 `root` 用户启动；WebUI 不提供切换执行用户的入口。
 
-浏览器不能在 WebSocket 升级时自由附加 `Authorization` 请求头，因此 CubeOps 的票据申请接口负责 JWT 鉴权，WebSocket 只接受尚未使用且未过期的票据。CubeMaster 的内部终端端点还会拒绝浏览器来源的直连请求。
+浏览器不能在 WebSocket 升级时自由附加 `Authorization` 请求头，因此 CubeOps 的 `POST /terminal/sandboxes/:id/tickets` 接口负责 JWT 鉴权，并签发有效期 30 秒、仅能用于终端的签名票据。浏览器通过 WebSocket 子协议字段提交票据，而不是把凭据放进请求 URL；升级时会校验票据签名、用途、沙箱和有效期。
 
-CubeOps 需要能够访问 `CUBE_MASTER_ADDR` 配置的 CubeMaster 内部 HTTP 地址。CubeOps 与 CubeMaster 必须配置相同的 `CUBE_TERMINAL_GATEWAY_TOKEN`；一键安装脚本和 Helm Chart 会自动生成并在升级时保留这个密钥。CubeMaster 会拒绝浏览器直连以及没有该共享密钥的内部连接。
+终端票据使用 CubeOps 已有的 JWT 签名密钥。多个 CubeOps 副本通过现有启动流程共享该密钥，因此任一副本签发的票据都能由其他副本校验，不要求粘性路由。`CUBE_MASTER_ADDR` 只用于校验沙箱和容器状态；终端数据沿用现有 envd 沙箱代理，可通过 `AGENTHUB_SANDBOX_PROXY_URL` 覆盖代理地址。
 
 终端审计日志会记录 `sandbox_id`、`container_id`、`session_id`、操作者和关闭原因。
 

@@ -50,29 +50,15 @@ export default defineConfig({
         ws: true,
         rewrite: (path) => path.replace(/^\/opsapi/, '/api'),
       },
-      // SDK/E2B endpoints are served by CubeOps, which calls CubeMaster
-      // directly. Keep the browser paths identical to production nginx.
-      '/sandboxes': {
-        target: 'http://127.0.0.1:3010',
-        rewrite: (path) => `/api/v1/sdk${path}`,
-      },
-      '/v2/sandboxes': {
-        target: 'http://127.0.0.1:3010',
-        rewrite: (path) => `/api/v1/sdk${path}`,
-      },
-      '/templates': {
-        target: 'http://127.0.0.1:3010',
-        rewrite: (path) => `/api/v1/sdk${path}`,
-      },
-      '/snapshots': {
-        target: 'http://127.0.0.1:3010',
-        rewrite: (path) => `/api/v1/sdk${path}`,
-      },
-      '/health': 'http://127.0.0.1:3010',
-      '/cubeapi/v1': {
-        target: 'http://127.0.0.1:3010',
-        rewrite: (path) => path.replace(/^\/cubeapi\/v1/, '/api/v1/sdk'),
-      },
+      // CubeAPI (SDK/E2B endpoints) - proxy specific API paths to avoid
+      // conflicting with vite's own static file serving.
+      '/sandboxes': 'http://127.0.0.1:3000',
+      '/v2/sandboxes': 'http://127.0.0.1:3000',
+      '/templates': 'http://127.0.0.1:3000',
+      '/snapshots': 'http://127.0.0.1:3000',
+      '/health': 'http://127.0.0.1:3000',
+      // Legacy /cubeapi proxy for backward compat during transition
+      '/cubeapi': 'http://127.0.0.1:3000',
     },
   },
 });

@@ -39,11 +39,10 @@ spec:
               value: {{ .Values.cubeOps.bind | quote }}
             - name: CUBE_MASTER_ADDR
               value: {{ printf "http://%s" (include "cube.masterEndpoint" .) | quote }}
-            - name: CUBE_TERMINAL_GATEWAY_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "cube.secretName" . }}
-                  key: terminal-gateway-token
+            {{- if eq (include "cube.proxyEnabled" .) "true" }}
+            - name: AGENTHUB_SANDBOX_PROXY_URL
+              value: {{ printf "http://%s:%v" (include "cube.proxyServiceFQDN" .) .Values.cubeProxy.ports.http.containerPort | quote }}
+            {{- end }}
             - name: CUBE_SANDBOX_MYSQL_HOST
               value: {{ include "cube.mysqlHost" . | quote }}
             - name: CUBE_SANDBOX_MYSQL_PORT

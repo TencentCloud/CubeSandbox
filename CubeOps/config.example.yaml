@@ -38,9 +38,6 @@ refresh_ttl: "168h"
 
 # --- CubeMaster (the actual sandbox / cluster control plane) ---
 cubemaster_addr: "http://127.0.0.1:8089"
-# Shared secret used only for CubeOps-to-CubeMaster terminal WebSockets.
-# Prefer the CUBE_TERMINAL_GATEWAY_TOKEN environment variable in production.
-terminal_gateway_token: ""
 
 # --- CubeAPI (deprecated SDK proxy) ---
 cubeapi_url: "http://127.0.0.1:3000"

@@ -4,8 +4,7 @@
 package handler
 
 import (
-	"crypto/rand"
-	"crypto/tls"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,36 +14,33 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/httputil"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/service"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/translator"
 )
 
 const (
-	terminalGatewayTokenHeader    = "X-Cube-Terminal-Token"
-	terminalTicketTTL             = 60 * time.Second
-	terminalFrameLimit            = 256 * 1024
-	terminalOpenTimeout           = 15 * time.Second
-	terminalWriteTimeout          = 15 * time.Second
-	terminalIdleTimeout           = 30 * time.Minute
-	terminalMaxDimension          = 1000
-	terminalMaxCWDBytes           = 4096
-	terminalMaxEnvEntries         = 128
-	terminalMaxEnvBytes           = 32 * 1024
-	terminalMaxTickets            = 256
-	terminalMaxTicketsPerUser     = 8
-	terminalTicketRateWindow      = time.Minute
-	terminalMaxTicketsPerWindow   = 20
-	terminalMaxSessions           = 64
-	terminalMaxSessionsPerUser    = 4
-	terminalMaxSessionsPerSandbox = 8
+	terminalTicketTTL       = 30 * time.Second
+	terminalFrameLimit      = 256 * 1024
+	terminalWriteTimeout    = 15 * time.Second
+	terminalControlTimeout  = 10 * time.Second
+	terminalIdleTimeout     = 30 * time.Minute
+	terminalPingInterval    = 30 * time.Second
+	terminalTicketIssuer    = "cubeops"
+	terminalTicketAudience  = "cubeops-terminal"
+	terminalWSProtocol      = "cube-terminal-v1"
+	terminalDefaultRows     = 24
+	terminalDefaultCols     = 80
+	terminalMaximumEnvdRows = 200
+	terminalMaximumEnvdCols = 400
 )
 
 const (
@@ -57,12 +53,9 @@ const (
 )
 
 type terminalTicketRequest struct {
-	ContainerID string            `json:"containerID"`
-	Rows        uint32            `json:"rows"`
-	Cols        uint32            `json:"cols"`
-	CWD         string            `json:"cwd"`
-	Envs        map[string]string `json:"envs"`
-	User        string            `json:"user"`
+	ContainerID string `json:"containerID"`
+	Rows        uint32 `json:"rows"`
+	Cols        uint32 `json:"cols"`
 }
 
 type terminalTicketResponse struct {
@@ -72,184 +65,38 @@ type terminalTicketResponse struct {
 	ContainerID  string `json:"containerID,omitempty"`
 }
 
-type terminalTicket struct {
-	SandboxID   string
-	ContainerID string
-	CreatedBy   string
-	Rows        uint32
-	Cols        uint32
-	CWD         string
-	Envs        map[string]string
-	ExpiresAt   time.Time
+type terminalTicketClaims struct {
+	SandboxID   string `json:"sandbox_id"`
+	ContainerID string `json:"container_id"`
+	CreatedBy   string `json:"created_by"`
+	Rows        uint32 `json:"rows"`
+	Cols        uint32 `json:"cols"`
+	jwt.RegisteredClaims
 }
 
-type terminalTicketStore struct {
-	mu           sync.Mutex
-	tickets      map[string]terminalTicket
-	issuedByUser map[string][]time.Time
-	now          func() time.Time
-}
-
-func newTerminalTicketStore() *terminalTicketStore {
-	return &terminalTicketStore{
-		tickets:      make(map[string]terminalTicket),
-		issuedByUser: make(map[string][]time.Time),
-		now:          time.Now,
-	}
-}
-
-func (s *terminalTicketStore) issue(ticket terminalTicket) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	now := s.now()
-	s.pruneExpiredLocked(now)
-	s.pruneIssueHistoryLocked(now)
-	if len(s.tickets) >= terminalMaxTickets {
-		return "", errors.New("too many pending terminal tickets")
-	}
-	pendingForUser := 0
-	for _, existing := range s.tickets {
-		if existing.CreatedBy == ticket.CreatedBy {
-			pendingForUser++
-		}
-	}
-	if pendingForUser >= terminalMaxTicketsPerUser {
-		return "", errors.New("too many pending terminal tickets for this user")
-	}
-	if len(s.issuedByUser[ticket.CreatedBy]) >= terminalMaxTicketsPerWindow {
-		return "", errors.New("terminal ticket rate limit exceeded for this user")
-	}
-
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return "", fmt.Errorf("generate terminal ticket: %w", err)
-	}
-	token := base64.RawURLEncoding.EncodeToString(raw)
-	s.tickets[token] = ticket
-	s.issuedByUser[ticket.CreatedBy] = append(s.issuedByUser[ticket.CreatedBy], now)
-	return token, nil
-}
-
-func (s *terminalTicketStore) claim(token, sandboxID string) (terminalTicket, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.pruneExpiredLocked(s.now())
-	ticket, ok := s.tickets[token]
-	if ok {
-		delete(s.tickets, token)
-	}
-	if !ok || ticket.SandboxID != sandboxID {
-		return terminalTicket{}, errors.New("terminal ticket is invalid or expired")
-	}
-	return ticket, nil
-}
-
-func (s *terminalTicketStore) pruneExpiredLocked(now time.Time) {
-	for token, existing := range s.tickets {
-		if !existing.ExpiresAt.After(now) {
-			delete(s.tickets, token)
-		}
-	}
-}
-
-func (s *terminalTicketStore) pruneIssueHistoryLocked(now time.Time) {
-	cutoff := now.Add(-terminalTicketRateWindow)
-	for username, issuedAt := range s.issuedByUser {
-		firstCurrent := 0
-		for firstCurrent < len(issuedAt) && !issuedAt[firstCurrent].After(cutoff) {
-			firstCurrent++
-		}
-		if firstCurrent == len(issuedAt) {
-			delete(s.issuedByUser, username)
-			continue
-		}
-		s.issuedByUser[username] = issuedAt[firstCurrent:]
-	}
-}
-
-type terminalSessionLimiter struct {
-	mu        sync.Mutex
-	total     int
-	byUser    map[string]int
-	bySandbox map[string]int
-}
-
-func newTerminalSessionLimiter() *terminalSessionLimiter {
-	return &terminalSessionLimiter{
-		byUser:    make(map[string]int),
-		bySandbox: make(map[string]int),
-	}
-}
-
-func (l *terminalSessionLimiter) acquire(username, sandboxID string) (func(), error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	if l.total >= terminalMaxSessions {
-		return nil, errors.New("terminal session capacity reached")
-	}
-	if l.byUser[username] >= terminalMaxSessionsPerUser {
-		return nil, errors.New("too many active terminal sessions for this user")
-	}
-	if l.bySandbox[sandboxID] >= terminalMaxSessionsPerSandbox {
-		return nil, errors.New("too many active terminal sessions for this sandbox")
-	}
-
-	l.total++
-	l.byUser[username]++
-	l.bySandbox[sandboxID]++
-
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			l.mu.Lock()
-			defer l.mu.Unlock()
-			l.total--
-			decrementTerminalSessionCount(l.byUser, username)
-			decrementTerminalSessionCount(l.bySandbox, sandboxID)
-		})
-	}, nil
-}
-
-func decrementTerminalSessionCount(counts map[string]int, key string) {
-	if counts[key] <= 1 {
-		delete(counts, key)
-		return
-	}
-	counts[key]--
-}
-
-// TerminalGateway owns browser authentication and relays terminal traffic to
-// CubeMaster. CubeAPI is intentionally not part of this ops-only flow.
+// TerminalGateway owns browser authentication and talks directly to envd's
+// existing Process PTY API. Tickets are signed capabilities, so any CubeOps
+// replica can accept a WebSocket without sticky routing or shared process
+// memory.
 type TerminalGateway struct {
-	cm           CubeMasterClient
-	masterAddr   string
-	gatewayToken string
-	tickets      *terminalTicketStore
-	sessions     *terminalSessionLimiter
-	upgrader     websocket.Upgrader
-	dialer       websocket.Dialer
+	cm            CubeMasterClient
+	ticketSecret  []byte
+	sandboxDomain string
+	upgrader      websocket.Upgrader
+	envdHTTP      *http.Client
+	proxyBase     string
 }
 
-func NewTerminalGateway(cm CubeMasterClient, masterAddr, gatewayToken string) *TerminalGateway {
+func NewTerminalGateway(cm CubeMasterClient, ticketSecret, sandboxDomain string) *TerminalGateway {
 	return &TerminalGateway{
-		cm:           cm,
-		masterAddr:   masterAddr,
-		gatewayToken: gatewayToken,
-		tickets:      newTerminalTicketStore(),
-		sessions:     newTerminalSessionLimiter(),
+		cm:            cm,
+		ticketSecret:  []byte(ticketSecret),
+		sandboxDomain: strings.TrimSpace(sandboxDomain),
+		proxyBase:     service.EnvdProxyURL(),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  32 * 1024,
 			WriteBufferSize: 32 * 1024,
 			CheckOrigin:     terminalOriginAllowed,
-		},
-		dialer: websocket.Dialer{
-			HandshakeTimeout: terminalOpenTimeout,
-			ReadBufferSize:   32 * 1024,
-			WriteBufferSize:  32 * 1024,
-			TLSClientConfig:  &tls.Config{MinVersion: tls.VersionTLS12},
 		},
 	}
 }
@@ -259,12 +106,12 @@ func (h *TerminalGateway) RegisterPublic(r *gin.RouterGroup) {
 }
 
 func (h *TerminalGateway) RegisterAuthed(r *gin.RouterGroup) {
-	r.POST("/sandboxes/:id/terminal/tickets", h.CreateTicket)
+	r.POST("/terminal/sandboxes/:id/tickets", h.CreateTicket)
 }
 
 func (h *TerminalGateway) CreateTicket(c *gin.Context) {
-	if strings.TrimSpace(h.gatewayToken) == "" {
-		httputil.WriteError(c, http.StatusServiceUnavailable, "web terminal gateway is not configured")
+	if len(h.ticketSecret) == 0 || h.sandboxDomain == "" {
+		httputil.WriteError(c, http.StatusServiceUnavailable, "web terminal is not configured")
 		return
 	}
 
@@ -279,7 +126,8 @@ func (h *TerminalGateway) CreateTicket(c *gin.Context) {
 		httputil.WriteError(c, http.StatusBadRequest, "invalid terminal ticket request")
 		return
 	}
-	if err := validateTerminalTicketRequest(&body); err != nil {
+	rows, cols, err := terminalDimensions(body.Rows, body.Cols)
+	if err != nil {
 		httputil.WriteError(c, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -309,160 +157,279 @@ func (h *TerminalGateway) CreateTicket(c *gin.Context) {
 		return
 	}
 
-	rows, cols := terminalDimensions(body.Rows, body.Cols)
-	expiresAt := time.Now().Add(terminalTicketTTL)
-	ticket := terminalTicket{
+	now := time.Now()
+	expiresAt := now.Add(terminalTicketTTL)
+	claims := terminalTicketClaims{
 		SandboxID:   sandboxID,
 		ContainerID: containerID,
 		CreatedBy:   c.GetString("username"),
 		Rows:        rows,
 		Cols:        cols,
-		CWD:         strings.TrimSpace(body.CWD),
-		Envs:        cloneStrings(body.Envs),
-		ExpiresAt:   expiresAt,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        uuid.NewString(),
+			Issuer:    terminalTicketIssuer,
+			Audience:  jwt.ClaimStrings{terminalTicketAudience},
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now.Add(-time.Second)),
+			ExpiresAt: jwt.NewNumericDate(expiresAt),
+		},
 	}
-	token, err := h.tickets.issue(ticket)
+	token, err := signTerminalTicket(h.ticketSecret, claims)
 	if err != nil {
-		httputil.WriteError(c, http.StatusTooManyRequests, err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to issue terminal ticket")
 		return
 	}
 
 	slog.Info("terminal ticket issued",
 		"sandbox_id", sandboxID,
 		"container_id", containerID,
-		"username", ticket.CreatedBy,
+		"username", claims.CreatedBy,
+		"ticket_id", claims.ID,
 	)
 	httputil.WriteJSON(c, http.StatusCreated, terminalTicketResponse{
 		Ticket:       token,
 		ExpiresAt:    expiresAt.UTC().Format(time.RFC3339),
-		WebSocketURL: fmt.Sprintf("/opsapi/v1/terminal/sandboxes/%s/ws?ticket=%s", url.PathEscape(sandboxID), url.QueryEscape(token)),
+		WebSocketURL: fmt.Sprintf("/opsapi/v1/terminal/sandboxes/%s/ws", url.PathEscape(sandboxID)),
 		ContainerID:  containerID,
 	})
 }
 
 func (h *TerminalGateway) OpenWebSocket(c *gin.Context) {
-	if strings.TrimSpace(h.gatewayToken) == "" {
-		httputil.WriteError(c, http.StatusServiceUnavailable, "web terminal gateway is not configured")
+	if len(h.ticketSecret) == 0 || h.sandboxDomain == "" {
+		httputil.WriteError(c, http.StatusServiceUnavailable, "web terminal is not configured")
 		return
 	}
-	if !terminalOriginAllowed(c.Request) {
-		httputil.WriteError(c, http.StatusForbidden, "terminal websocket origin is not allowed")
-		return
-	}
-	ticket, err := h.tickets.claim(c.Query("ticket"), c.Param("id"))
+	rawTicket, err := terminalTicketFromProtocols(c.Request)
 	if err != nil {
-		httputil.WriteError(c, http.StatusUnauthorized, err.Error())
+		httputil.WriteError(c, http.StatusUnauthorized, "terminal ticket is invalid or expired")
 		return
 	}
-	releaseSession, err := h.sessions.acquire(ticket.CreatedBy, ticket.SandboxID)
-	if err != nil {
-		httputil.WriteError(c, http.StatusTooManyRequests, err.Error())
+	claims, err := parseTerminalTicket(h.ticketSecret, rawTicket)
+	if err != nil || claims.SandboxID != c.Param("id") {
+		httputil.WriteError(c, http.StatusUnauthorized, "terminal ticket is invalid or expired")
 		return
 	}
-	defer releaseSession()
 
-	browser, err := h.upgrader.Upgrade(c.Writer, c.Request, nil)
+	responseHeader := http.Header{}
+	responseHeader.Set("Sec-WebSocket-Protocol", terminalWSProtocol)
+	browser, err := h.upgrader.Upgrade(c.Writer, c.Request, responseHeader)
 	if err != nil {
 		return
 	}
 	defer browser.Close()
 	browser.SetReadLimit(terminalFrameLimit)
 
-	backendURL, err := cubeMasterTerminalURL(h.masterAddr)
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	defer cancel()
+	pty := service.NewEnvdPTYClient(h.envdHTTP, h.proxyBase, claims.SandboxID, h.sandboxDomain)
+	stream, err := pty.Start(ctx, service.EnvdPTYStartOptions{
+		Rows: claims.Rows,
+		Cols: claims.Cols,
+	})
 	if err != nil {
-		writeTerminalBrowserControl(browser, map[string]interface{}{"type": "error", "message": err.Error()})
+		_ = writeTerminalJSON(browser, map[string]interface{}{"type": "error", "message": "failed to start terminal session"})
+		slog.Warn("terminal envd start failed", "sandbox_id", claims.SandboxID, "error", err)
 		return
 	}
-	headers := http.Header{}
-	headers.Set(terminalGatewayTokenHeader, h.gatewayToken)
-	backend, _, err := h.dialer.DialContext(c.Request.Context(), backendURL, headers)
-	if err != nil {
-		writeTerminalBrowserControl(browser, map[string]interface{}{"type": "error", "message": "failed to connect terminal backend"})
-		slog.Warn("terminal backend connection failed", "sandbox_id", ticket.SandboxID, "error", err)
-		return
-	}
-	defer backend.Close()
-	backend.SetReadLimit(terminalFrameLimit)
+	defer stream.Close()
 
-	env := make([]string, 0, len(ticket.Envs))
-	for key, value := range ticket.Envs {
-		env = append(env, key+"="+value)
-	}
-	sort.Strings(env)
-	open := map[string]interface{}{
-		"type":        "open",
-		"requestID":   "cubeops-terminal-" + uuid.NewString(),
-		"sandboxID":   ticket.SandboxID,
-		"containerID": ticket.ContainerID,
-		"cwd":         ticket.CWD,
-		"env":         env,
-		"cols":        ticket.Cols,
-		"rows":        ticket.Rows,
-	}
-	if err := writeTerminalJSON(backend, open); err != nil {
-		writeTerminalBrowserControl(browser, map[string]interface{}{"type": "error", "message": "failed to open terminal backend"})
-		return
-	}
-	execID, err := awaitTerminalReady(backend)
+	pid, pending, err := awaitEnvdPTYStart(ctx, stream)
 	if err != nil {
-		writeTerminalBrowserControl(browser, map[string]interface{}{"type": "error", "message": err.Error()})
+		_ = writeTerminalJSON(browser, map[string]interface{}{"type": "error", "message": "terminal backend closed before ready"})
+		slog.Warn("terminal envd stream did not start", "sandbox_id", claims.SandboxID, "error", err)
 		return
 	}
 
 	sessionID := uuid.NewString()
-	if err := writeTerminalBrowserControl(browser, map[string]interface{}{
-		"type": "start", "execId": execID, "sessionId": sessionID,
+	browserWriter := &lockedTerminalWriter{conn: browser}
+	if err := browserWriter.control(map[string]interface{}{
+		"type":      "start",
+		"execId":    fmt.Sprintf("envd-%d", pid),
+		"sessionId": sessionID,
 	}); err != nil {
 		return
 	}
+	for _, event := range pending {
+		if len(event.Output) > 0 {
+			if err := writeEnvdPTYOutput(browserWriter, event.Output); err != nil {
+				return
+			}
+		}
+	}
+
 	slog.Info("terminal session opened",
-		"sandbox_id", ticket.SandboxID,
-		"container_id", ticket.ContainerID,
-		"username", ticket.CreatedBy,
+		"sandbox_id", claims.SandboxID,
+		"container_id", claims.ContainerID,
+		"username", claims.CreatedBy,
 		"session_id", sessionID,
+		"pid", pid,
 	)
 	openedAt := time.Now()
 
-	browserWriter := &lockedTerminalWriter{conn: browser}
-	backendWriter := &lockedTerminalWriter{conn: backend}
 	browser.SetPingHandler(func(data string) error { return browserWriter.pong([]byte(data)) })
-	backend.SetPingHandler(func(data string) error { return backendWriter.pong([]byte(data)) })
-
+	_ = browser.SetReadDeadline(time.Now().Add(2 * terminalPingInterval))
+	browser.SetPongHandler(func(string) error {
+		return browser.SetReadDeadline(time.Now().Add(2 * terminalPingInterval))
+	})
 	done := make(chan string, 2)
+	activity := make(chan struct{}, 1)
 	go func() {
-		done <- runCubeOpsTerminalRelay("browser-to-backend", func() string {
-			return relayTerminalBrowserToBackend(browser, browserWriter, backendWriter)
+		done <- runCubeOpsTerminalRelay("browser-to-envd", func() string {
+			return relayTerminalBrowserToEnvd(ctx, browser, browserWriter, pty, pid, activity)
 		})
 	}()
 	go func() {
-		done <- runCubeOpsTerminalRelay("backend-to-browser", func() string {
-			return relayTerminalBackendToBrowser(backend, browserWriter)
+		done <- runCubeOpsTerminalRelay("envd-to-browser", func() string {
+			return relayTerminalEnvdToBrowser(ctx, stream, browserWriter, activity)
 		})
 	}()
-	reason := <-done
-	switch reason {
-	case terminalCloseIdleTimeout:
-		_ = browserWriter.control(map[string]interface{}{
-			"type":               "idleTimeout",
-			"idleTimeoutSeconds": int(terminalIdleTimeout.Seconds()),
-		})
-	case terminalCloseBackendDisconnected:
-		_ = browserWriter.control(map[string]interface{}{"type": "streamEnd"})
-	case terminalCloseRelayFailure:
-		_ = browserWriter.control(map[string]interface{}{"type": "error", "message": "terminal relay failed"})
+
+	idleTimer := time.NewTimer(terminalIdleTimeout)
+	defer idleTimer.Stop()
+	pingTicker := time.NewTicker(terminalPingInterval)
+	defer pingTicker.Stop()
+	reason := terminalCloseRelayFailure
+	completedRelays := 0
+	selecting := true
+	for selecting {
+		select {
+		case reason = <-done:
+			completedRelays = 1
+			selecting = false
+		case <-activity:
+			resetTerminalTimer(idleTimer)
+		case <-idleTimer.C:
+			reason = terminalCloseIdleTimeout
+			_ = browserWriter.control(map[string]interface{}{
+				"type":               "idleTimeout",
+				"idleTimeoutSeconds": int(terminalIdleTimeout.Seconds()),
+			})
+			selecting = false
+		case <-pingTicker.C:
+			if err := browserWriter.ping(); err != nil {
+				reason = terminalCloseBrowserDisconnected
+				selecting = false
+			}
+		}
 	}
-	_ = backendWriter.text([]byte(`{"type":"close"}`))
-	_ = backendWriter.close()
+
+	cancel()
+	_ = stream.Close()
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), terminalControlTimeout)
+	_ = pty.Kill(cleanupCtx, pid)
+	cleanupCancel()
 	_ = browserWriter.close()
+	_ = browser.Close()
+	waitForTerminalRelays(done, completedRelays)
 
 	slog.Info("terminal session closed",
-		"sandbox_id", ticket.SandboxID,
-		"container_id", ticket.ContainerID,
-		"username", ticket.CreatedBy,
+		"sandbox_id", claims.SandboxID,
+		"container_id", claims.ContainerID,
+		"username", claims.CreatedBy,
 		"session_id", sessionID,
+		"pid", pid,
 		"reason", reason,
 		"duration_ms", time.Since(openedAt).Milliseconds(),
 	)
+}
+
+func terminalTicketFromProtocols(r *http.Request) (string, error) {
+	protocols := strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",")
+	if len(protocols) != 2 || strings.TrimSpace(protocols[0]) != terminalWSProtocol {
+		return "", errors.New("terminal websocket protocol is invalid")
+	}
+	ticket := strings.TrimSpace(protocols[1])
+	if ticket == "" {
+		return "", errors.New("terminal ticket is missing")
+	}
+	return ticket, nil
+}
+
+func waitForTerminalRelays(done <-chan string, completed int) {
+	timer := time.NewTimer(terminalControlTimeout)
+	defer timer.Stop()
+	for completed < 2 {
+		select {
+		case <-done:
+			completed++
+		case <-timer.C:
+			slog.Warn("terminal relay shutdown timed out", "remaining", 2-completed)
+			return
+		}
+	}
+}
+
+func signTerminalTicket(secret []byte, claims terminalTicketClaims) (string, error) {
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(secret)
+}
+
+func parseTerminalTicket(secret []byte, raw string) (*terminalTicketClaims, error) {
+	if len(secret) == 0 || strings.TrimSpace(raw) == "" {
+		return nil, errors.New("terminal ticket is missing")
+	}
+	claims := &terminalTicketClaims{}
+	token, err := jwt.ParseWithClaims(
+		raw,
+		claims,
+		func(token *jwt.Token) (interface{}, error) {
+			if token.Method != jwt.SigningMethodHS256 {
+				return nil, fmt.Errorf("unexpected terminal ticket signing method %q", token.Method.Alg())
+			}
+			return secret, nil
+		},
+		jwt.WithAudience(terminalTicketAudience),
+		jwt.WithExpirationRequired(),
+		jwt.WithIssuer(terminalTicketIssuer),
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+	)
+	if err != nil || !token.Valid {
+		return nil, errors.New("terminal ticket is invalid")
+	}
+	if claims.SandboxID == "" || claims.ContainerID == "" || claims.ID == "" {
+		return nil, errors.New("terminal ticket is incomplete")
+	}
+	return claims, nil
+}
+
+func awaitEnvdPTYStart(ctx context.Context, stream io.ReadCloser) (int, []service.EnvdPTYEvent, error) {
+	type result struct {
+		pid     int
+		pending []service.EnvdPTYEvent
+		err     error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		pending := make([]service.EnvdPTYEvent, 0, 2)
+		for {
+			event, err := service.ReadEnvdPTYEvent(stream)
+			if err != nil {
+				resultCh <- result{err: err}
+				return
+			}
+			if event.Started {
+				resultCh <- result{pid: event.PID, pending: pending}
+				return
+			}
+			if event.StreamEnd || event.Exited {
+				resultCh <- result{err: errors.New("envd PTY stream ended before start")}
+				return
+			}
+			pending = append(pending, event)
+		}
+	}()
+
+	timer := time.NewTimer(terminalControlTimeout)
+	defer timer.Stop()
+	select {
+	case started := <-resultCh:
+		return started.pid, started.pending, started.err
+	case <-ctx.Done():
+		_ = stream.Close()
+		return 0, nil, ctx.Err()
+	case <-timer.C:
+		_ = stream.Close()
+		return 0, nil, errors.New("timed out waiting for envd PTY start")
+	}
 }
 
 func runCubeOpsTerminalRelay(direction string, relay func() string) (reason string) {
@@ -475,44 +442,150 @@ func runCubeOpsTerminalRelay(direction string, relay func() string) (reason stri
 	return relay()
 }
 
-func validateTerminalTicketRequest(body *terminalTicketRequest) error {
-	if body == nil {
-		return errors.New("terminal ticket request is required")
-	}
-	body.User = strings.TrimSpace(body.User)
-	if body.User != "" && body.User != "root" {
-		return errors.New("web terminal currently supports only the root user")
-	}
-	if body.Rows > terminalMaxDimension || body.Cols > terminalMaxDimension {
-		return fmt.Errorf("terminal dimensions must not exceed %d", terminalMaxDimension)
-	}
-	if body.CWD != "" && (!strings.HasPrefix(body.CWD, "/") || len(body.CWD) > terminalMaxCWDBytes || strings.ContainsRune(body.CWD, '\x00')) {
-		return fmt.Errorf("terminal cwd must be absolute, at most %d bytes, and contain no NUL characters", terminalMaxCWDBytes)
-	}
-	if len(body.Envs) > terminalMaxEnvEntries {
-		return fmt.Errorf("terminal envs must contain at most %d entries", terminalMaxEnvEntries)
-	}
-	total := 0
-	for key, value := range body.Envs {
-		if key == "" || strings.ContainsAny(key, "=\x00") || strings.ContainsRune(value, '\x00') {
-			return errors.New("terminal environment keys must be non-empty and environment values must contain no NUL characters")
-		}
-		total += len(key) + len(value) + 1
-	}
-	if total > terminalMaxEnvBytes {
-		return fmt.Errorf("terminal envs exceed %d bytes", terminalMaxEnvBytes)
-	}
-	return nil
+type terminalBrowserMessage struct {
+	Type string `json:"type"`
+	Data string `json:"data"`
+	Rows uint32 `json:"rows"`
+	Cols uint32 `json:"cols"`
 }
 
-func terminalDimensions(rows, cols uint32) (uint32, uint32) {
+func relayTerminalBrowserToEnvd(
+	ctx context.Context,
+	browser *websocket.Conn,
+	writer *lockedTerminalWriter,
+	pty *service.EnvdPTYClient,
+	pid int,
+	activity chan<- struct{},
+) string {
+	for {
+		messageType, payload, err := browser.ReadMessage()
+		if err != nil {
+			return terminalCloseBrowserDisconnected
+		}
+		terminalActivity(activity)
+		if messageType == websocket.BinaryMessage {
+			if err := pty.SendInput(ctx, pid, payload); err != nil {
+				return terminalCloseBackendError
+			}
+			continue
+		}
+		if messageType != websocket.TextMessage {
+			continue
+		}
+
+		var message terminalBrowserMessage
+		if err := json.Unmarshal(payload, &message); err != nil {
+			_ = writer.control(map[string]interface{}{"type": "error", "message": "invalid terminal message"})
+			continue
+		}
+		switch message.Type {
+		case "input", "stdin":
+			if err := pty.SendInput(ctx, pid, []byte(message.Data)); err != nil {
+				return terminalCloseBackendError
+			}
+		case "inputBase64", "stdinBase64":
+			data, err := base64.StdEncoding.DecodeString(message.Data)
+			if err != nil {
+				_ = writer.control(map[string]interface{}{"type": "error", "message": "invalid terminal input base64"})
+				continue
+			}
+			if err := pty.SendInput(ctx, pid, data); err != nil {
+				return terminalCloseBackendError
+			}
+		case "resize":
+			rows, cols, err := terminalDimensions(message.Rows, message.Cols)
+			if err != nil {
+				_ = writer.control(map[string]interface{}{"type": "error", "message": err.Error()})
+				continue
+			}
+			if err := pty.Resize(ctx, pid, rows, cols); err != nil {
+				return terminalCloseBackendError
+			}
+		case "kill", "close":
+			return "browser requested close"
+		case "ping":
+			_ = writer.control(map[string]interface{}{"type": "heartbeat"})
+		default:
+			_ = writer.control(map[string]interface{}{"type": "error", "message": "unsupported terminal message"})
+		}
+	}
+}
+
+func relayTerminalEnvdToBrowser(
+	ctx context.Context,
+	stream io.Reader,
+	writer *lockedTerminalWriter,
+	activity chan<- struct{},
+) string {
+	for {
+		event, err := service.ReadEnvdPTYEvent(stream)
+		if err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, context.Canceled) || ctx.Err() != nil {
+				return terminalCloseBackendDisconnected
+			}
+			_ = writer.control(map[string]interface{}{"type": "error", "message": "terminal backend disconnected"})
+			return terminalCloseBackendError
+		}
+		terminalActivity(activity)
+		if len(event.Output) > 0 {
+			if err := writeEnvdPTYOutput(writer, event.Output); err != nil {
+				return terminalCloseBrowserDisconnected
+			}
+		}
+		if event.Exited {
+			_ = writer.control(map[string]interface{}{
+				"type":     "exit",
+				"exitCode": event.ExitCode,
+				"error":    event.Error,
+			})
+			return terminalCloseProcessExited
+		}
+		if event.StreamEnd {
+			_ = writer.control(map[string]interface{}{"type": "streamEnd"})
+			return terminalCloseBackendDisconnected
+		}
+	}
+}
+
+func writeEnvdPTYOutput(writer *lockedTerminalWriter, output []byte) error {
+	return writer.control(map[string]interface{}{
+		"type": "output",
+		"data": base64.StdEncoding.EncodeToString(output),
+	})
+}
+
+func terminalActivity(activity chan<- struct{}) {
+	select {
+	case activity <- struct{}{}:
+	default:
+	}
+}
+
+func resetTerminalTimer(timer *time.Timer) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(terminalIdleTimeout)
+}
+
+func terminalDimensions(rows, cols uint32) (uint32, uint32, error) {
 	if rows == 0 {
-		rows = 24
+		rows = terminalDefaultRows
 	}
 	if cols == 0 {
-		cols = 80
+		cols = terminalDefaultCols
 	}
-	return rows, cols
+	if rows > terminalMaximumEnvdRows || cols > terminalMaximumEnvdCols {
+		return 0, 0, fmt.Errorf(
+			"terminal dimensions must not exceed %d rows by %d columns",
+			terminalMaximumEnvdRows,
+			terminalMaximumEnvdCols,
+		)
+	}
+	return rows, cols, nil
 }
 
 func decodeTerminalSandboxDetail(raw json.RawMessage) (*translator.CMSandboxDetailItem, error) {
@@ -547,6 +620,12 @@ func selectTerminalContainer(detail *translator.CMSandboxDetailItem, requested s
 					Message: fmt.Sprintf("container %s in sandbox %s is not running", requested, detail.SandboxID),
 				}
 			}
+			if !terminalContainerSupportsEnvd(container) {
+				return "", &terminalStatusError{
+					Status:  http.StatusConflict,
+					Message: fmt.Sprintf("container %s in sandbox %s does not expose the envd PTY", requested, detail.SandboxID),
+				}
+			}
 			return container.ContainerID, nil
 		}
 		return "", &terminalStatusError{
@@ -559,7 +638,7 @@ func selectTerminalContainer(detail *translator.CMSandboxDetailItem, requested s
 	}
 	running := make([]translator.CMSandboxContainer, 0, len(detail.Containers))
 	for _, container := range detail.Containers {
-		if container.Status == 1 {
+		if container.Status == 1 && terminalContainerSupportsEnvd(container) {
 			running = append(running, container)
 		}
 	}
@@ -574,6 +653,10 @@ func selectTerminalContainer(detail *translator.CMSandboxDetailItem, requested s
 	default:
 		return "", errors.New("containerID is required when a sandbox has multiple running containers")
 	}
+}
+
+func terminalContainerSupportsEnvd(container translator.CMSandboxContainer) bool {
+	return container.Type == "" || container.Type == "sandbox"
 }
 
 func terminalOriginAllowed(r *http.Request) bool {
@@ -606,168 +689,6 @@ func isLoopbackHost(authority string) bool {
 	return strings.EqualFold(host, "localhost") || (ip != nil && ip.IsLoopback())
 }
 
-func cubeMasterTerminalURL(base string) (string, error) {
-	parsed, err := url.Parse(base)
-	if err != nil {
-		return "", fmt.Errorf("invalid CubeMaster URL: %w", err)
-	}
-	switch parsed.Scheme {
-	case "http":
-		parsed.Scheme = "ws"
-	case "https":
-		parsed.Scheme = "wss"
-	default:
-		return "", fmt.Errorf("unsupported CubeMaster URL scheme %q", parsed.Scheme)
-	}
-	parsed.Path = "/cube/sandbox/terminal"
-	parsed.RawPath = ""
-	parsed.RawQuery = ""
-	parsed.Fragment = ""
-	return parsed.String(), nil
-}
-
-func awaitTerminalReady(backend *websocket.Conn) (string, error) {
-	_ = backend.SetReadDeadline(time.Now().Add(terminalOpenTimeout))
-	defer backend.SetReadDeadline(time.Time{})
-	for {
-		messageType, payload, err := backend.ReadMessage()
-		if err != nil {
-			return "", fmt.Errorf("terminal backend closed before ready: %w", err)
-		}
-		if messageType != websocket.TextMessage {
-			continue
-		}
-		var control struct {
-			Type    string `json:"type"`
-			ExecID  string `json:"execID"`
-			Message string `json:"message"`
-		}
-		if err := json.Unmarshal(payload, &control); err != nil {
-			return "", errors.New("invalid terminal backend control message")
-		}
-		switch control.Type {
-		case "ready":
-			if control.ExecID == "" {
-				return "", errors.New("terminal backend ready message missing execID")
-			}
-			return control.ExecID, nil
-		case "error":
-			if control.Message == "" {
-				control.Message = "terminal backend rejected the session"
-			}
-			return "", errors.New(control.Message)
-		}
-	}
-}
-
-type terminalBrowserMessage struct {
-	Type string `json:"type"`
-	Data string `json:"data"`
-	Rows uint32 `json:"rows"`
-	Cols uint32 `json:"cols"`
-}
-
-func relayTerminalBrowserToBackend(browser *websocket.Conn, browserWriter, backendWriter *lockedTerminalWriter) string {
-	for {
-		_ = browser.SetReadDeadline(time.Now().Add(terminalIdleTimeout))
-		messageType, payload, err := browser.ReadMessage()
-		if err != nil {
-			if isTerminalTimeout(err) {
-				return terminalCloseIdleTimeout
-			}
-			return terminalCloseBrowserDisconnected
-		}
-		switch messageType {
-		case websocket.BinaryMessage:
-			if err := backendWriter.binary(payload); err != nil {
-				return "backend input failed"
-			}
-		case websocket.TextMessage:
-			var message terminalBrowserMessage
-			if err := json.Unmarshal(payload, &message); err != nil {
-				_ = browserWriter.control(map[string]interface{}{"type": "error", "message": "invalid terminal message"})
-				continue
-			}
-			switch message.Type {
-			case "input", "stdin":
-				if err := backendWriter.binary([]byte(message.Data)); err != nil {
-					return "backend input failed"
-				}
-			case "inputBase64", "stdinBase64":
-				data, err := base64.StdEncoding.DecodeString(message.Data)
-				if err != nil {
-					_ = browserWriter.control(map[string]interface{}{"type": "error", "message": "invalid terminal input base64"})
-					continue
-				}
-				if err := backendWriter.binary(data); err != nil {
-					return "backend input failed"
-				}
-			case "resize":
-				rows, cols := terminalDimensions(message.Rows, message.Cols)
-				rows = min(rows, terminalMaxDimension)
-				cols = min(cols, terminalMaxDimension)
-				if err := backendWriter.control(map[string]interface{}{"type": "resize", "rows": rows, "cols": cols}); err != nil {
-					return "backend resize failed"
-				}
-			case "kill":
-				_ = backendWriter.control(map[string]interface{}{"type": "close"})
-				return "browser requested close"
-			case "ping":
-				_ = backendWriter.control(map[string]interface{}{"type": "heartbeat"})
-			default:
-				_ = browserWriter.control(map[string]interface{}{"type": "error", "message": "unsupported terminal message"})
-			}
-		}
-	}
-}
-
-func relayTerminalBackendToBrowser(backend *websocket.Conn, browserWriter *lockedTerminalWriter) string {
-	for {
-		_ = backend.SetReadDeadline(time.Now().Add(terminalIdleTimeout))
-		messageType, payload, err := backend.ReadMessage()
-		if err != nil {
-			if isTerminalTimeout(err) {
-				return terminalCloseIdleTimeout
-			}
-			return terminalCloseBackendDisconnected
-		}
-		switch messageType {
-		case websocket.BinaryMessage:
-			if err := browserWriter.control(map[string]interface{}{
-				"type": "output",
-				"data": base64.StdEncoding.EncodeToString(payload),
-			}); err != nil {
-				return "browser output failed"
-			}
-		case websocket.TextMessage:
-			var control struct {
-				Type    string `json:"type"`
-				Code    uint32 `json:"code"`
-				Message string `json:"message"`
-			}
-			if err := json.Unmarshal(payload, &control); err != nil {
-				_ = browserWriter.control(map[string]interface{}{"type": "error", "message": "invalid terminal backend message"})
-				return "invalid backend message"
-			}
-			switch control.Type {
-			case "exit":
-				_ = browserWriter.control(map[string]interface{}{"type": "exit", "exitCode": control.Code})
-				return terminalCloseProcessExited
-			case "error":
-				_ = browserWriter.control(map[string]interface{}{"type": "error", "message": control.Message})
-				return terminalCloseBackendError
-			case "heartbeat":
-				// The heartbeat is only an activity signal.
-			}
-		}
-	}
-}
-
-func isTerminalTimeout(err error) bool {
-	var netErr net.Error
-	return errors.As(err, &netErr) && netErr.Timeout()
-}
-
 type lockedTerminalWriter struct {
 	conn *websocket.Conn
 	mu   sync.Mutex
@@ -778,21 +699,10 @@ func (w *lockedTerminalWriter) control(value interface{}) error {
 	if err != nil {
 		return err
 	}
-	return w.text(payload)
-}
-
-func (w *lockedTerminalWriter) text(payload []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	_ = w.conn.SetWriteDeadline(time.Now().Add(terminalWriteTimeout))
 	return w.conn.WriteMessage(websocket.TextMessage, payload)
-}
-
-func (w *lockedTerminalWriter) binary(payload []byte) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	_ = w.conn.SetWriteDeadline(time.Now().Add(terminalWriteTimeout))
-	return w.conn.WriteMessage(websocket.BinaryMessage, payload)
 }
 
 func (w *lockedTerminalWriter) pong(payload []byte) error {
@@ -801,10 +711,20 @@ func (w *lockedTerminalWriter) pong(payload []byte) error {
 	return w.conn.WriteControl(websocket.PongMessage, payload, time.Now().Add(terminalWriteTimeout))
 }
 
+func (w *lockedTerminalWriter) ping() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(terminalWriteTimeout))
+}
+
 func (w *lockedTerminalWriter) close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(terminalWriteTimeout))
+	return w.conn.WriteControl(
+		websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+		time.Now().Add(terminalWriteTimeout),
+	)
 }
 
 func writeTerminalJSON(conn *websocket.Conn, value interface{}) error {
@@ -814,16 +734,4 @@ func writeTerminalJSON(conn *websocket.Conn, value interface{}) error {
 	}
 	_ = conn.SetWriteDeadline(time.Now().Add(terminalWriteTimeout))
 	return conn.WriteMessage(websocket.TextMessage, payload)
-}
-
-func writeTerminalBrowserControl(conn *websocket.Conn, value interface{}) error {
-	return writeTerminalJSON(conn, value)
-}
-
-func cloneStrings(values map[string]string) map[string]string {
-	cloned := make(map[string]string, len(values))
-	for key, value := range values {
-		cloned[key] = value
-	}
-	return cloned
 }

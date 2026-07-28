@@ -14,7 +14,6 @@ import (
 	cubebox "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	imagesv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
-	grpcpool "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/grpc-middleware/pool"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet/grpcconn"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
@@ -208,34 +207,4 @@ func Exec(ctx context.Context, calleeEp string,
 		time.Duration(config.GetConfig().CubeletConf.CommonTimeoutInsec)*time.Second)
 	defer cancel()
 	return c.Exec(ctx, req)
-}
-
-// TerminalStream owns both the bidirectional RPC and its pooled connection.
-// The WebSocket relay must close it when the browser session finishes.
-type TerminalStream struct {
-	cubebox.CubeboxMgr_TerminalClient
-	conn   grpcpool.Conn
-	cancel context.CancelFunc
-}
-
-func (s *TerminalStream) Close() error {
-	_ = s.CloseSend()
-	s.cancel()
-	return s.conn.Close()
-}
-
-func OpenTerminal(ctx context.Context, calleeEp string) (*TerminalStream, error) {
-	conn, err := grpcconn.GetWorkerConn(ctx, calleeEp)
-	if err != nil {
-		return nil, ret.Err(errorcode.ErrorCode_ConnHostFailed, err.Error())
-	}
-	client := cubebox.NewCubeboxMgrClient(conn.Value())
-	streamCtx, cancel := context.WithCancel(ctx)
-	stream, err := client.Terminal(streamCtx)
-	if err != nil {
-		cancel()
-		_ = conn.Close()
-		return nil, err
-	}
-	return &TerminalStream{CubeboxMgr_TerminalClient: stream, conn: conn, cancel: cancel}, nil
 }

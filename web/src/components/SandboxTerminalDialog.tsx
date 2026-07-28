@@ -29,6 +29,7 @@ import { Button } from '@/components/ui/button';
 import { isMockEnabled } from '@/lib/mockFlag';
 import { cn } from '@/lib/utils';
 import {
+  TERMINAL_WEBSOCKET_PROTOCOL,
   decodeBase64Bytes,
   parseTerminalServerMessage,
   terminalInputFrame,
@@ -226,7 +227,10 @@ export function SandboxTerminalDialog({ sandboxId, open, onOpenChange, restoreKe
           term.write('$ ');
           return;
         }
-        const ws = new WebSocket(toTerminalWebSocketUrl(ticket.websocketUrl));
+        const ws = new WebSocket(toTerminalWebSocketUrl(ticket.websocketUrl), [
+          TERMINAL_WEBSOCKET_PROTOCOL,
+          ticket.ticket,
+        ]);
         wsRef.current = ws;
 
         ws.onopen = () => {
@@ -564,7 +568,10 @@ export function SandboxTerminalDialog({ sandboxId, open, onOpenChange, restoreKe
 
 function terminalContainers(containers?: SandboxContainer[] | null): SandboxContainer[] {
   return (containers ?? [])
-    .filter((container) => container.state === 'running')
+    .filter(
+      (container) =>
+        container.state === 'running' && (!container.kind || container.kind === 'sandbox'),
+    )
     .map((container) => ({
       ...container,
       containerID: container.containerID || container.name || '',

@@ -10,6 +10,8 @@ export type TerminalServerMessage =
   | { type: 'streamEnd' }
   | { type?: string; [key: string]: unknown };
 
+export const TERMINAL_WEBSOCKET_PROTOCOL = 'cube-terminal-v1';
+
 export function toTerminalWebSocketUrl(path: string, origin = window.location.origin): string {
   const url = new URL(path, origin);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';

@@ -54,8 +54,7 @@ type Config struct {
 	RefreshTTL time.Duration `yaml:"refresh_ttl"`
 
 	// CubeMaster
-	CubeMasterAddr       string `yaml:"cubemaster_addr"`
-	TerminalGatewayToken string `yaml:"terminal_gateway_token"`
+	CubeMasterAddr string `yaml:"cubemaster_addr"`
 
 	// CubeAPI (for SDK endpoint proxy)
 	CubeAPIURL string `yaml:"cubeapi_url"`
@@ -305,9 +304,6 @@ func overrideFromEnv(cfg *Config) {
 	}
 	if v := os.Getenv("CUBE_MASTER_ADDR"); v != "" {
 		cfg.CubeMasterAddr = v
-	}
-	if v := os.Getenv("CUBE_TERMINAL_GATEWAY_TOKEN"); v != "" {
-		cfg.TerminalGatewayToken = v
 	}
 	if v := os.Getenv("CUBE_API_URL"); v != "" {
 		cfg.CubeAPIURL = v
