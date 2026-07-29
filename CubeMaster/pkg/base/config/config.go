@@ -42,6 +42,7 @@ type Config struct {
 	ReqTemplateConf  *ReqTemplateConf      `yaml:"req_template_conf"`
 	HookWhitelist    *HookWhitelist        `yaml:"hook_whitelist"`
 	CubeEgressConf   *CubeEgressConf       `yaml:"cube_egress_conf"`
+	TerminalConf     *TerminalConf         `yaml:"terminal"`
 
 	// VolumePlugins lists external Controller Hook Plugin configurations.
 	// Types: binary (fork CLI) or rpc (gRPC VolumeControllerService).
@@ -110,6 +111,13 @@ type AuthConf struct {
 	Enable                   bool                         `yaml:"enable"`
 	SignatureExpireTimeInsec int64                        `yaml:"signature_expire_time_insec"`
 	SecretKeyMap             map[string]map[string]string `yaml:"secret_key_map"`
+}
+
+type TerminalConf struct {
+	InternalToken      string `yaml:"internal_token" json:"-"`
+	MaxFrameBytes      int    `yaml:"max_frame_bytes"`
+	WriteDeadlineInSec int    `yaml:"write_deadline_seconds"`
+	CloseTimeoutInSec  int    `yaml:"close_timeout_seconds"`
 }
 
 type Debug struct {
@@ -722,7 +730,7 @@ func Init() (*Config, error) {
 		return nil, fmt.Errorf("validate config fail:%v", err)
 	}
 	cfg = newCfg
-	fmt.Printf("cfg:%+v\n", utils.InterfaceToString(cfg))
+	fmt.Printf("cfg:%s\n", configLogString(cfg))
 	return newCfg, nil
 }
 
@@ -737,12 +745,12 @@ type listener struct {
 func (l *listener) OnEvent(data interface{}) {
 	conf, err := preHandle(data.(*Config))
 	if err != nil {
-		CubeLog.Fatalf("preHandle Config:%v fail:%v", data, err)
+		CubeLog.Fatalf("preHandle config fail:%v config:%s", err, configLogString(data.(*Config)))
 		return
 	}
 	err = validate(conf)
 	if err != nil {
-		CubeLog.Fatalf("validate Config:%v fail:%v", data, err)
+		CubeLog.Fatalf("validate config fail:%v config:%s", err, configLogString(data.(*Config)))
 		return
 	}
 	cfg = conf
@@ -766,6 +774,9 @@ func preHandle(config *Config) (*Config, error) {
 	}
 	if preHandleAuthConf(config) != nil {
 		return nil, errors.New("preHandleAuthConf failed")
+	}
+	if preHandleTerminalConf(config) != nil {
+		return nil, errors.New("preHandleTerminalConf failed")
 	}
 	return config, nil
 }
@@ -865,6 +876,67 @@ func preHandleAuthConf(config *Config) error {
 
 	return nil
 }
+
+func preHandleTerminalConf(config *Config) error {
+	if config.TerminalConf == nil {
+		config.TerminalConf = &TerminalConf{}
+	}
+	if config.TerminalConf.MaxFrameBytes == 0 {
+		config.TerminalConf.MaxFrameBytes = 64 << 10
+	}
+	if config.TerminalConf.WriteDeadlineInSec == 0 {
+		config.TerminalConf.WriteDeadlineInSec = 10
+	}
+	if config.TerminalConf.CloseTimeoutInSec == 0 {
+		config.TerminalConf.CloseTimeoutInSec = 15
+	}
+	return nil
+}
+
+const redactedConfigValue = "[REDACTED]"
+
+func configLogString(config *Config) string {
+	if config == nil {
+		return "null"
+	}
+	redacted := *config
+	if config.OssDBConfig != nil {
+		db := *config.OssDBConfig
+		db.Pwd = redactConfigValue(db.Pwd)
+		redacted.OssDBConfig = &db
+	}
+	if config.InstanceDBConfig != nil {
+		db := *config.InstanceDBConfig
+		db.Pwd = redactConfigValue(db.Pwd)
+		redacted.InstanceDBConfig = &db
+	}
+	if config.RedisConf != nil {
+		redis := *config.RedisConf
+		redis.Password = redactConfigValue(redis.Password)
+		redacted.RedisConf = &redis
+	}
+	if config.AuthConf != nil {
+		auth := *config.AuthConf
+		if len(auth.SecretKeyMap) > 0 {
+			auth.SecretKeyMap = nil
+		}
+		redacted.AuthConf = &auth
+	}
+	if config.TerminalConf != nil {
+		terminal := *config.TerminalConf
+		terminal.InternalToken = redactConfigValue(terminal.InternalToken)
+		redacted.TerminalConf = &terminal
+	}
+	return utils.InterfaceToString(&redacted)
+}
+
+func redactConfigValue(value string) string {
+	if value == "" {
+		return ""
+	}
+	return redactedConfigValue
+}
+
 func preHandleCubeletConf(config *Config) error {
 	if config.CubeletConf == nil {
 		config.CubeletConf = &CubeletConf{}
@@ -1160,6 +1232,14 @@ func validate(cfg *Config) error {
 		cleaned := filepath.Clean(p)
 		if cleaned == "/" || cleaned == "." || !filepath.IsAbs(p) {
 			return fmt.Errorf("allowed_host_mount_prefixes entry %q must be an absolute path and must not be root or empty", p)
+		}
+	}
+	if cfg.TerminalConf != nil {
+		if cfg.TerminalConf.MaxFrameBytes <= 0 || cfg.TerminalConf.MaxFrameBytes > 64<<10 {
+			return errors.New("terminal max_frame_bytes must be between 1 and 65536")
+		}
+		if cfg.TerminalConf.WriteDeadlineInSec <= 0 || cfg.TerminalConf.CloseTimeoutInSec <= 0 {
+			return errors.New("terminal relay deadlines must be positive")
 		}
 	}
 	return nil

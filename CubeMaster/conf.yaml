@@ -35,6 +35,14 @@ cubelet_conf:
 auth:
   enable: false
 
+terminal:
+  # Empty disables the internal Web Terminal relay until deployment injects
+  # the same secret into CubeOps and CubeMaster.
+  internal_token: ""
+  max_frame_bytes: 65536
+  write_deadline_seconds: 10
+  close_timeout_seconds: 15
+
 req_template_conf:
   whitelist_req_tag:
     WorkingDir: true

@@ -51,6 +51,88 @@ func TestInit(t *testing.T) {
 	assert.True(t, expectCpu.Equal(gotCpu))
 }
 
+func TestPreHandleTerminalConfDefaults(t *testing.T) {
+	c := &Config{}
+
+	assert.NoError(t, preHandleTerminalConf(c))
+	if assert.NotNil(t, c.TerminalConf) {
+		assert.Equal(t, 64<<10, c.TerminalConf.MaxFrameBytes)
+		assert.Equal(t, 10, c.TerminalConf.WriteDeadlineInSec)
+		assert.Equal(t, 15, c.TerminalConf.CloseTimeoutInSec)
+	}
+}
+
+func TestPreHandleTerminalConfPreservesExplicitValues(t *testing.T) {
+	c := &Config{TerminalConf: &TerminalConf{
+		InternalToken:      "internal-secret",
+		MaxFrameBytes:      32 << 10,
+		WriteDeadlineInSec: 7,
+		CloseTimeoutInSec:  9,
+	}}
+
+	assert.NoError(t, preHandleTerminalConf(c))
+	assert.Equal(t, "internal-secret", c.TerminalConf.InternalToken)
+	assert.Equal(t, 32<<10, c.TerminalConf.MaxFrameBytes)
+	assert.Equal(t, 7, c.TerminalConf.WriteDeadlineInSec)
+	assert.Equal(t, 9, c.TerminalConf.CloseTimeoutInSec)
+}
+
+func TestValidateTerminalConf(t *testing.T) {
+	tests := []struct {
+		name    string
+		conf    *TerminalConf
+		wantErr bool
+	}{
+		{name: "missing disables relay", conf: nil},
+		{name: "valid", conf: &TerminalConf{MaxFrameBytes: 64 << 10, WriteDeadlineInSec: 10, CloseTimeoutInSec: 15}},
+		{name: "zero frame limit", conf: &TerminalConf{WriteDeadlineInSec: 10, CloseTimeoutInSec: 15}, wantErr: true},
+		{name: "frame limit too large", conf: &TerminalConf{MaxFrameBytes: (64 << 10) + 1, WriteDeadlineInSec: 10, CloseTimeoutInSec: 15}, wantErr: true},
+		{name: "non-positive write deadline", conf: &TerminalConf{MaxFrameBytes: 64 << 10, CloseTimeoutInSec: 15}, wantErr: true},
+		{name: "non-positive close timeout", conf: &TerminalConf{MaxFrameBytes: 64 << 10, WriteDeadlineInSec: 10}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &Config{Log: &log.Conf{}, TerminalConf: tt.conf}
+			err := validate(c)
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
+
+func TestConfigLogStringRedactsSecretsWithoutMutatingConfig(t *testing.T) {
+	c := &Config{
+		OssDBConfig:      &DBConfig{Pwd: "oss-db-secret"},
+		InstanceDBConfig: &DBConfig{Pwd: "instance-db-secret"},
+		RedisConf:        &RedisConf{Password: "redis-secret"},
+		AuthConf: &AuthConf{SecretKeyMap: map[string]map[string]string{
+			"client": {"secret": "auth-secret"},
+		}},
+		TerminalConf: &TerminalConf{InternalToken: "terminal-secret"},
+	}
+
+	logged := configLogString(c)
+	for _, secret := range []string{
+		"oss-db-secret",
+		"instance-db-secret",
+		"redis-secret",
+		"auth-secret",
+		"terminal-secret",
+	} {
+		assert.NotContains(t, logged, secret)
+	}
+	assert.Contains(t, logged, redactedConfigValue)
+	assert.Equal(t, "oss-db-secret", c.OssDBConfig.Pwd)
+	assert.Equal(t, "instance-db-secret", c.InstanceDBConfig.Pwd)
+	assert.Equal(t, "redis-secret", c.RedisConf.Password)
+	assert.Equal(t, "auth-secret", c.AuthConf.SecretKeyMap["client"]["secret"])
+	assert.Equal(t, "terminal-secret", c.TerminalConf.InternalToken)
+}
+
 func TestGetEffectiveNodeMaxMemReservedInMBFallsBackForSmallNodes(t *testing.T) {
 	sconf := &SchedulerConf{
 		NodeMaxMemReservedInMB: 10 * 1024,

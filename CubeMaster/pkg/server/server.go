@@ -102,6 +102,8 @@ func NewInternalHttp(ctx context.Context, cfg *config.Config) (*internalHttp, er
 // previous gorilla/mux router-level middleware — while leaving the engine-level
 // NoRoute / NoMethod handlers bare.
 func (s *internalHttp) registerRoutes() {
+	inner.RegisterTerminalRoutes(s.engine.Group(inner.InnerURI()))
+
 	root := s.engine.Group("")
 	root.Use(middleware.GinRequestMiddleware())
 	root.GET("/metrics", gin.WrapH(promhttp.Handler()))
