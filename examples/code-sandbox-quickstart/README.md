@@ -134,6 +134,7 @@ hello cube
 | `tool_allowlist_deny.py` | Host argv tool allowlist — deny before `Sandbox.create` |
 | `tool_allowlist_allow.py` | Allowlisted command in MicroVM + `allow_internet_access=False` (gate ⊥ egress) |
 | `tool_allowlist_limits.py` | Threat model: shell-chain / path / interpreter limits (host-only) |
+| `tool_agent_loop.py` | Toy agent loop: gate every turn, health flat on deny, airgap + commands-only artifact |
 
 ### exec_code.py — Run Python Code
 
@@ -256,6 +257,9 @@ python tool_allowlist_deny.py
 
 # Allow: run in MicroVM under airgap
 python tool_allowlist_allow.py
+
+# Toy agent loop: mid-session deny, /health check, airgap probe, commands-only I/O
+python tool_agent_loop.py
 ```
 
 ### restrict_public_access.py — Require a Token on Every Public-URL Request
@@ -315,6 +319,7 @@ code-sandbox-quickstart/
 ├── tool_allowlist_deny.py     # Deny before Sandbox.create
 ├── tool_allowlist_allow.py    # Allowlisted cmd + airgap
 ├── tool_allowlist_limits.py   # Threat model / bypass limits (host-only)
+├── tool_agent_loop.py         # Toy agent propose → gate → MicroVM loop
 ├── requirements.txt           # Python dependencies
 └── .env.example               # Environment variable template
 ```
