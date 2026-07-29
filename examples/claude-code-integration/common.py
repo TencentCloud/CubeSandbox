@@ -111,7 +111,9 @@ def build_cc_env(include_secrets: bool = True) -> dict[str, str]:
 def cc_llm_host() -> str:
     explicit = os.environ.get("CC_LLM_HOST")
     if explicit:
-        return _host_from_url(explicit)
+        # CC_LLM_HOST is documented as a hostname (e.g. "api.anthropic.com"),
+        # not a URL — return it directly.
+        return explicit.strip()
     base_url = os.environ.get("ANTHROPIC_BASE_URL")
     if base_url:
         host = _host_from_url(base_url)
@@ -150,11 +152,11 @@ def cc_command(
         args.append("--verbose")
 
     if model:
-        args.extend(["--model", model])
+        args.extend(["--model", shlex.quote(model)])
     if effort:
-        args.extend(["--effort", effort])
+        args.extend(["--effort", shlex.quote(effort)])
     if permission_mode:
-        args.extend(["--permission-mode", permission_mode])
+        args.extend(["--permission-mode", shlex.quote(permission_mode)])
     if dangerously_skip_permissions:
         args.append("--dangerously-skip-permissions")
 
