@@ -1,0 +1,38 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "tokenhub/hy3",
+  "autoupdate": false,
+  "share": "disabled",
+  "provider": {
+    "tokenhub": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Tencent TokenHub",
+      "options": {
+        "baseURL": "{env:HY3_BASE_URL}",
+        "apiKey": "{env:HY3_API_KEY}"
+      },
+      "models": {
+        "hy3": {
+          "name": "Hy3"
+        }
+      }
+    }
+  },
+  "permission": {
+    "read": "allow",
+    "edit": "allow",
+    "list": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "external_directory": "deny",
+    "webfetch": "deny",
+    "websearch": "deny",
+    "bash": {
+      "*": "allow",
+      "git push *": "deny",
+      "git remote *": "deny",
+      "sudo *": "deny",
+      "rm -rf *": "deny"
+    }
+  }
+}
