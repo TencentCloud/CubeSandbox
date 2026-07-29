@@ -133,6 +133,7 @@ hello cube
 | `restrict_public_access.py` | `network={"allow_public_traffic": False}` — require a per-sandbox token on every public-URL request |
 | `tool_allowlist_deny.py` | Host argv tool allowlist — deny before `Sandbox.create` |
 | `tool_allowlist_allow.py` | Allowlisted command in MicroVM + `allow_internet_access=False` (gate ⊥ egress) |
+| `tool_allowlist_limits.py` | Threat model: shell-chain / path / interpreter limits (host-only) |
 
 ### exec_code.py — Run Python Code
 
@@ -235,11 +236,21 @@ python network_denylist.py
 
 ### Host argv tool allowlist
 
-Orthogonal to egress CIDR policy: refuse illegal tools on the **first argv
-token** before `Sandbox.create`. Interpreters are not in the default set;
-pass `enable_code_execution=True` only when guest arbitrary code is intended.
+Orthogonal to egress CIDR policy: refuse illegal tools on the host **before**
+`Sandbox.create`. Default set is tool-level only (no interpreters). Also
+rejects shell-chaining characters (`;|&`$` / newlines) so
+`echo ok; bash -c ...` cannot bypass a first-token-only mental model.
+
+**Threat model (read this):** this gate is **host policy**, not guest
+confinement. Allowlisting `cat` still permits `cat /etc/passwd` inside the
+MicroVM; stack `allow_internet_access=False`, short `timeout`, and least
+privilege on the allowlist. `enable_code_execution=True` is an explicit
+privilege escalation. Run `tool_allowlist_limits.py` for the cases.
 
 ```bash
+# Threat model / non-goals (no sandbox)
+python tool_allowlist_limits.py
+
 # Deny: no sandbox created
 python tool_allowlist_deny.py
 
@@ -303,6 +314,7 @@ code-sandbox-quickstart/
 ├── tool_allowlist.py          # Host argv tool allowlist gate
 ├── tool_allowlist_deny.py     # Deny before Sandbox.create
 ├── tool_allowlist_allow.py    # Allowlisted cmd + airgap
+├── tool_allowlist_limits.py   # Threat model / bypass limits (host-only)
 ├── requirements.txt           # Python dependencies
 └── .env.example               # Environment variable template
 ```

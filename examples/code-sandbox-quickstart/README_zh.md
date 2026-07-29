@@ -128,6 +128,7 @@ hello cube
 | `restrict_public_access.py` | `network={"allow_public_traffic": False}` — 公网 URL 必须携带 per-sandbox token 才可访问 |
 | `tool_allowlist_deny.py` | 宿主机 argv 工具白名单 — 非白名单命令在 `Sandbox.create` 前拒绝 |
 | `tool_allowlist_allow.py` | 白名单命令进 MicroVM，并叠加 `allow_internet_access=False`（门控 ⊥ 出口） |
+| `tool_allowlist_limits.py` | 威胁模型：shell 串联 / 路径二进制 / 解释器边界（纯宿主机） |
 
 ### exec_code.py — 运行 Python 代码
 
@@ -227,11 +228,20 @@ python network_denylist.py
 
 ### 宿主机 argv 工具白名单
 
-与出口 CIDR 策略正交：先在宿主机按**首个 argv**拒绝非法工具，再决定是否
-`Sandbox.create`。默认白名单不含解释器；需要 guest 任意代码执行时显式
-`enable_code_execution=True`。
+与出口 CIDR 策略正交：在宿主机于 `Sandbox.create` **之前**拒绝非法工具。
+默认集合仅含工具级二进制（不含解释器）；并拒绝 shell 串联字符
+（`;|&`$` / 换行），避免 `echo ok; bash -c ...` 绕过「只看首个 argv」的
+朴素模型。
+
+**威胁模型（请先读）：** 这是**宿主机策略**，不是 guest 内 confinement。
+白名单含 `cat` 时，`cat /etc/passwd` 仍可通过本门控——需叠加
+`allow_internet_access=False`、短 `timeout` 与最小白名单。
+`enable_code_execution=True` 是显式提权。细节见 `tool_allowlist_limits.py`。
 
 ```bash
+# 威胁模型 / 非目标（不建沙箱）
+python tool_allowlist_limits.py
+
 # 拒绝：不创建沙箱
 python tool_allowlist_deny.py
 
@@ -295,6 +305,7 @@ code-sandbox-quickstart/
 ├── tool_allowlist.py          # 宿主机 argv 工具白名单
 ├── tool_allowlist_deny.py     # 拒绝路径（不创建沙箱）
 ├── tool_allowlist_allow.py    # 放行 + 断网叠加
+├── tool_allowlist_limits.py   # 威胁模型 / 边界演示（纯宿主机）
 ├── requirements.txt           # Python 依赖
 └── .env.example               # 环境变量模板
 ```

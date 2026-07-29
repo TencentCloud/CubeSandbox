@@ -6,8 +6,21 @@
 Not a kernel/enforcement layer inside the MicroVM. Models how an agent host
 should refuse non-allowlisted tool invocations before Sandbox.commands.run().
 
-Default set is tool-level only. ``enable_code_execution=True`` is an explicit
-privilege escalation (adds ``CODE_EXECUTION_BINARIES``).
+Threat model (host policy only)
+-------------------------------
+In scope:
+  - Refuse tools whose first argv token is outside the allowlist
+  - Refuse path-style first tokens (``/bin/echo``, ``..\\\\echo``)
+  - Refuse shell-operator characters (``;|&`$`` / newlines) so
+    ``echo ok; bash -c ...`` cannot sneak past a first-token-only check
+    when the string later hits a shell
+
+Out of scope (stack separately):
+  - Guest confinement for an *allowlisted* binary (``cat /etc/passwd`` still
+    runs if ``cat`` is allowed — use MicroVM isolation + least privilege)
+  - Network egress (use ``allow_internet_access`` / CIDR policies)
+  - Interpreters: default set excludes them; ``enable_code_execution=True``
+    is an explicit privilege escalation (adds ``CODE_EXECUTION_BINARIES``)
 """
 
 from __future__ import annotations
@@ -30,9 +43,29 @@ DEFAULT_ALLOWED_BINARIES: frozenset[str] = frozenset(
 
 CODE_EXECUTION_BINARIES: frozenset[str] = frozenset({"python3"})
 
+# Shell chaining / expansion markers. Rejected up front so a naive
+# first-token check cannot be bypassed via ``echo ok; bash -c ...``.
+# Parentheses / redirects are not listed: tools like ``python3 -c 'print(1)'``
+# need ``()``, and residual redirect risk belongs with guest least-privilege.
+_SHELL_META_CHARS: frozenset[str] = frozenset(
+    {
+        ";",
+        "|",
+        "&",
+        "`",
+        "$",
+        "\n",
+        "\r",
+    }
+)
+
 
 class AllowlistDenied(PermissionError):
     """Raised when a command is not on the host-side tool allowlist."""
+
+
+def _has_shell_meta(command: str) -> bool:
+    return any(ch in command for ch in _SHELL_META_CHARS)
 
 
 def _split_argv(command: str) -> list[str] | None:
@@ -63,7 +96,11 @@ def is_allowlisted(
     *,
     enable_code_execution: bool = False,
 ) -> bool:
-    """True if the first argv token is on the effective allowlist."""
+    """True if the command string is acceptable under the host gate."""
+    if not command or not command.strip():
+        return False
+    if _has_shell_meta(command):
+        return False
     parts = _split_argv(command)
     if not parts:
         return False
@@ -89,6 +126,11 @@ def assert_allowlisted(
         allowed_binaries,
         enable_code_execution=enable_code_execution,
     ):
+        if _has_shell_meta(command):
+            raise AllowlistDenied(
+                "command contains shell metacharacters "
+                f"(host gate refuses shell chaining): {command!r}"
+            )
         parts = _split_argv(command)
         binary = parts[0] if parts else ""
         raise AllowlistDenied(
