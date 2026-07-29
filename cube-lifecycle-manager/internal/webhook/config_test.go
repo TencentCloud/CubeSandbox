@@ -46,6 +46,8 @@ func TestParseEndpoints_RejectsBadEntries(t *testing.T) {
 		"userinfo":       `[{"url": "https://user:pw@example.com/hook"}]`,
 		"short secret":   `[{"url": "https://example.com/hook", "secret": "short"}]`,
 		"trailing entry": `[{"url": "https://ok.example.com"}, {"url": "::bad::"}]`,
+		// A misspelled event name would silently never match; reject it.
+		"unknown event": `[{"url": "https://example.com/hook", "events": ["sandbox.creaetd"]}]`,
 	}
 	for name, raw := range cases {
 		if _, err := ParseEndpoints(raw); err == nil {
@@ -55,6 +57,15 @@ func TestParseEndpoints_RejectsBadEntries(t *testing.T) {
 	// A failure anywhere must not yield a partial list.
 	if endpoints, _ := ParseEndpoints(cases["trailing entry"]); endpoints != nil {
 		t.Fatal("partial endpoint list returned on error")
+	}
+}
+
+func TestParseEndpoints_AcceptsAllKnownEvents(t *testing.T) {
+	raw := `[{"url": "https://example.com/hook", "events": [
+		"sandbox.created", "sandbox.deleted", "sandbox.paused", "sandbox.resumed"
+	]}]`
+	if _, err := ParseEndpoints(raw); err != nil {
+		t.Fatalf("all known events must parse: %v", err)
 	}
 }
 

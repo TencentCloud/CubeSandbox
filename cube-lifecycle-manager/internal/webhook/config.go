@@ -70,10 +70,26 @@ func (e Endpoint) validate() error {
 	if u.User != nil {
 		return fmt.Errorf("URL must not contain userinfo credentials: %q", e.URL)
 	}
+	// A misspelled event name can never match a stream entry, so accepting
+	// it would leave a silently dead subscription. Fail fast instead.
+	for _, ev := range e.Events {
+		if !validEvents[ev] {
+			return fmt.Errorf("unknown event %q (valid: %s, %s, %s, %s)",
+				ev, EventCreated, EventDeleted, EventPaused, EventResumed)
+		}
+	}
 	if e.Secret != "" && len(e.Secret) < 16 {
 		return fmt.Errorf("secret must be at least 16 bytes")
 	}
 	return nil
+}
+
+// validEvents is the set of event names a subscription filter may use.
+var validEvents = map[string]bool{
+	EventCreated: true,
+	EventDeleted: true,
+	EventPaused:  true,
+	EventResumed: true,
 }
 
 // Subscribes reports whether the endpoint wants the named event. An empty
@@ -112,7 +128,9 @@ func (e Endpoint) Group() string {
 }
 
 // Label returns the endpoint URL sanitized for logs: credentials, query, and
-// fragment are stripped so tokens inside the URL never reach log output.
+// fragment are stripped so tokens inside the URL never reach log output. The
+// path is preserved by design so operators can tell endpoints apart in log
+// lines — do not embed secrets in the path; use the Secret field instead.
 func (e Endpoint) Label() string {
 	u, err := url.Parse(e.URL)
 	if err != nil {

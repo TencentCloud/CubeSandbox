@@ -25,6 +25,10 @@ class Receiver(BaseHTTPRequestHandler):
         if self.path != "/webhooks/cube":
             self.send_error(404, "not found")
             return
+        content_type = self.headers.get("Content-Type", "")
+        if content_type.split(";", 1)[0].strip().lower() != "application/json":
+            self.send_error(415, "unsupported content type")
+            return
         try:
             size = int(self.headers.get("Content-Length", ""))
         except ValueError:

@@ -60,6 +60,8 @@ export CUBE_LCM_WEBHOOK_ENDPOINTS='[
 ```
 
 - `events` is a filter; omit it (or pass `[]`) to subscribe to every event.
+  Names are validated at startup against the four known events, so a typo
+  fails fast instead of leaving a silently dead subscription.
 - `secret` is optional. When set (minimum 16 bytes), every request carries
   `X-Cube-Signature-256: sha256=<hex HMAC>` over the exact request body.
 
