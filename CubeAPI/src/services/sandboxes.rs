@@ -146,7 +146,7 @@ impl SandboxService {
             disk_size_mb: Some(d.disk_size_mb),
             metadata: optional_metadata(d.labels),
             state: sandbox_state_from_status(d.status),
-            volume_mounts: None,
+            volume_mounts: map_volume_mounts(&d.volume_mounts),
         })
     }
 
@@ -853,7 +853,30 @@ pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandb
         metadata: optional_metadata(s.labels),
         state: sandbox_state_from_str(&s.status),
         envd_version,
-        volume_mounts: None,
+        volume_mounts: map_volume_mounts(&s.volume_mounts),
+    }
+}
+
+pub(crate) fn map_volume_mounts(
+    mounts: &[crate::cubemaster::CubeVolumeMount],
+) -> Option<Vec<crate::models::SandboxVolumeMount>> {
+    if mounts.is_empty() {
+        return None;
+    }
+    let mapped: Vec<_> = mounts
+        .iter()
+        // Drop entries that have neither a logical name nor a container path.
+        .filter(|mount| !mount.name.is_empty() || !mount.container_path.is_empty())
+        .map(|mount| crate::models::SandboxVolumeMount {
+            name: mount.name.clone(),
+            path: mount.container_path.clone(),
+            read_only: mount.readonly,
+        })
+        .collect();
+    if mapped.is_empty() {
+        None
+    } else {
+        Some(mapped)
     }
 }
 
@@ -1067,12 +1090,13 @@ mod tests {
 
     use super::{
         build_cube_network_config, filter_by_metadata, from_cubemaster_info,
-        map_delete_cubemaster_err, validate_mask_request_host, SandboxService, RET_CODE_CONFLICT,
-        RET_CODE_NOT_FOUND, RET_CODE_TASK_RESUME_FAILED, RET_CODE_TASK_STATE_INVALID,
+        map_delete_cubemaster_err, map_volume_mounts, validate_mask_request_host, SandboxService,
+        RET_CODE_CONFLICT, RET_CODE_NOT_FOUND, RET_CODE_TASK_RESUME_FAILED,
+        RET_CODE_TASK_STATE_INVALID,
     };
     use crate::cubemaster::{
-        CreateSandboxRequest, CubeMasterClient, CubeMasterError, ListSandboxResponse, SandboxInfo,
-        SandboxUpdateRequest,
+        CreateSandboxRequest, CubeMasterClient, CubeMasterError, CubeVolumeMount,
+        ListSandboxResponse, SandboxInfo, SandboxUpdateRequest,
     };
     use crate::error::AppError;
     use crate::models::{
@@ -1088,6 +1112,36 @@ mod tests {
     };
     use serde_json::Value;
     use tokio::sync::Mutex;
+
+    #[test]
+    fn map_volume_mounts_returns_none_for_empty_input() {
+        assert!(map_volume_mounts(&[]).is_none());
+    }
+
+    #[test]
+    fn map_volume_mounts_skips_all_empty_entries() {
+        assert!(map_volume_mounts(&[CubeVolumeMount {
+            name: String::new(),
+            container_path: String::new(),
+            readonly: false,
+        }])
+        .is_none());
+    }
+
+    #[test]
+    fn map_volume_mounts_exposes_public_mount_fields() {
+        let mapped = map_volume_mounts(&[CubeVolumeMount {
+            name: "hostdir-0".to_string(),
+            container_path: "/mnt/data".to_string(),
+            readonly: true,
+        }])
+        .expect("mounts should map");
+
+        assert_eq!(mapped.len(), 1);
+        assert_eq!(mapped[0].name, "hostdir-0");
+        assert_eq!(mapped[0].path, "/mnt/data");
+        assert!(mapped[0].read_only);
+    }
 
     #[test]
     fn metadata_filter_matches_all_pairs() {
@@ -1346,6 +1400,7 @@ mod tests {
             template_id: "tpl-1".to_string(),
             annotations: HashMap::new(),
             labels: HashMap::new(),
+            volume_mounts: vec![],
         });
 
         assert_eq!(listed.cpu_count, 2);
@@ -2153,6 +2208,7 @@ mod tests {
                      name,
                      path,
                      read_only,
+                     ..
                  }| {
                     (
                         VolumeSpec {

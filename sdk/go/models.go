@@ -41,6 +41,8 @@ type SandboxInfo struct {
 type VolumeMount struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
+	// ReadOnly is false when the API omits the field (CubeAPI skips serializing false).
+	ReadOnly bool `json:"readOnly,omitempty"`
 }
 
 type NetworkOptions struct {

@@ -937,6 +937,56 @@ func TestSandboxInfoEndAtPresent(t *testing.T) {
 	}
 }
 
+func TestGetInfoDecodesVolumeMounts(t *testing.T) {
+	const sandboxID = "sb-mount-1"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/sandboxes/"+sandboxID {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		fmt.Fprint(w, `{"sandboxID":"sb-mount-1","templateID":"tpl-test","clientID":"client-1","startedAt":"2026-05-14T00:00:00Z","endAt":"2026-05-14T01:00:00Z","envdVersion":"0.0.1","domain":"cube.app","cpuCount":2,"memoryMB":512,"state":"running","volumeMounts":[{"name":"hostdir-0","path":"/mnt/data","readOnly":true}]}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, TemplateID: "tpl-test"})
+	sb := &Sandbox{client: client, SandboxID: sandboxID}
+	info, err := sb.GetInfo(context.Background())
+	if err != nil {
+		t.Fatalf("GetInfo: %v", err)
+	}
+	if len(info.VolumeMounts) != 1 {
+		t.Fatalf("VolumeMounts=%#v want len 1", info.VolumeMounts)
+	}
+	mount := info.VolumeMounts[0]
+	if mount.Name != "hostdir-0" || mount.Path != "/mnt/data" {
+		t.Fatalf("mount=%#v", mount)
+	}
+	if !mount.ReadOnly {
+		t.Fatalf("ReadOnly=%v want true", mount.ReadOnly)
+	}
+}
+
+func TestListDecodesVolumeMounts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/sandboxes" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		fmt.Fprint(w, `[{"sandboxID":"sb-mount-1","templateID":"tpl-test","clientID":"client-1","startedAt":"2026-05-14T00:00:00Z","endAt":"2026-05-14T01:00:00Z","envdVersion":"0.0.1","domain":"cube.app","cpuCount":2,"memoryMB":512,"state":"running","volumeMounts":[{"name":"hostdir-0","path":"/mnt/data","readOnly":true}]}]`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, TemplateID: "tpl-test"})
+	list, err := client.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 || len(list[0].VolumeMounts) != 1 {
+		t.Fatalf("List=%#v", list)
+	}
+	if list[0].VolumeMounts[0].Path != "/mnt/data" {
+		t.Fatalf("mount=%#v", list[0].VolumeMounts[0])
+	}
+}
+
 func serverHostPort(t *testing.T, rawURL string) (string, int) {
 	t.Helper()
 	parsed, err := url.Parse(rawURL)

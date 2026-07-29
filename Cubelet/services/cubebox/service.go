@@ -809,6 +809,10 @@ func toGRPCContainer(c *cubeboxstore.Container) *cubebox.Container {
 		cc.PausedAt = c.Status.Status.PausedAt
 	}
 
+	if mounts := c.Config.GetVolumeMounts(); len(mounts) > 0 {
+		cc.VolumeMounts = append(cc.VolumeMounts, mounts...)
+	}
+
 	if cc.Labels == nil {
 		cc.Labels = make(map[string]string)
 	}

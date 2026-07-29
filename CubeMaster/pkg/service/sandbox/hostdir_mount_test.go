@@ -210,3 +210,26 @@ func TestValidateHostPath(t *testing.T) {
 		})
 	}
 }
+
+func TestInjectHostDirMountsSetsHostPathOnVolumeMount(t *testing.T) {
+	req := &types.CreateCubeSandboxReq{
+		Annotations: map[string]string{
+			AnnotationHostDirMount: `[{"hostPath":"/data/shared/data","mountPath":"/mnt/data","readOnly":true}]`,
+		},
+		Containers: []*types.Container{{Name: "work"}},
+	}
+
+	if err := injectHostDirMounts(context.Background(), req); err != nil {
+		t.Fatalf("injectHostDirMounts() error=%v", err)
+	}
+	if len(req.Containers[0].VolumeMounts) != 1 {
+		t.Fatalf("volume mount count=%d want 1", len(req.Containers[0].VolumeMounts))
+	}
+	mount := req.Containers[0].VolumeMounts[0]
+	if mount.GetHostPath() != "/data/shared/data" {
+		t.Fatalf("HostPath=%q want /data/shared/data", mount.GetHostPath())
+	}
+	if mount.GetContainerPath() != "/mnt/data" || !mount.GetReadonly() {
+		t.Fatalf("unexpected mount: %+v", mount)
+	}
+}

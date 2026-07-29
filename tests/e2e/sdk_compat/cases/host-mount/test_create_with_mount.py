@@ -8,6 +8,10 @@ read-write and a read-only host directory mounted, verify both are visible
 inside the VM, that the read-only mount rejects writes, and that a hostPath
 outside the allowed prefix is rejected at create time (README section 1).
 
+Also asserts that sandbox info and list APIs expose the mounts as
+``volumeMounts`` (``name`` / ``path`` / ``readOnly``) after create.
+``hostPath`` is intentionally not part of the public contract.
+
 A host-mount ``hostPath`` must already exist on the Cubelet node: Cubelet
 bind-mounts it directly and does not create it. Only the allowed-prefix root is
 guaranteed to exist, so the ``_provision_host_dirs`` autouse fixture creates the
@@ -136,3 +140,69 @@ def test_disallowed_hostpath_rejected_at_create(sdk_backend, sdk_e2e_config):
     assert "is not within an allowed mount prefix" in message.lower(), (
         f"expected an allowed-prefix rejection message, got {message!r}"
     )
+
+
+def _mounts_by_path(raw: dict) -> dict[str, dict]:
+    mounts = raw.get("volumeMounts") or []
+    assert isinstance(mounts, list), f"volumeMounts should be a list, got {mounts!r}"
+    return {str(m.get("path")): m for m in mounts if isinstance(m, dict)}
+
+
+@pytest.mark.sandbox_create_options(metadata=_RW_RO_METADATA)
+def test_get_info_returns_volume_mounts(sdk_sandbox):
+    """GET /sandboxes/:id exposes host mounts as public volumeMounts fields."""
+    raw = sdk_sandbox.info().raw
+    by_path = _mounts_by_path(raw)
+
+    rw = by_path.get(_RW_MOUNT)
+    ro = by_path.get(_RO_MOUNT)
+    assert rw is not None and ro is not None, (
+        f"expected mounts for {_RW_MOUNT} and {_RO_MOUNT}, got volumeMounts={raw.get('volumeMounts')!r}"
+    )
+    assert "hostPath" not in rw and "hostPath" not in ro, (
+        f"hostPath must not be exposed publicly; rw={rw!r} ro={ro!r}"
+    )
+    # CubeAPI omits readOnly when false; treat missing as false.
+    assert bool(rw.get("readOnly")) is False, f"rw mount={rw!r}"
+    assert ro.get("readOnly") is True, f"ro mount={ro!r}"
+    assert rw.get("name") and ro.get("name"), f"rw={rw!r} ro={ro!r}"
+    assert "/" not in by_path and not any(
+        str(m.get("name", "")).startswith("cube_rootfs_") for m in (raw.get("volumeMounts") or [])
+    ), f"internal rootfs must not leak into volumeMounts={raw.get('volumeMounts')!r}"
+
+
+@pytest.mark.sandbox_create_options(metadata=_RW_RO_METADATA)
+def test_list_returns_volume_mounts(sdk_sandbox, sdk_backend, sdk_e2e_config):
+    """GET /sandboxes list includes the same volumeMounts as get_info."""
+    from adapters import list_sandboxes
+
+    listed = list_sandboxes(sdk_backend, sdk_e2e_config)
+    entry = next(
+        (
+            item
+            for item in listed
+            if isinstance(item, dict)
+            and item.get("sandboxID", item.get("sandbox_id")) == sdk_sandbox.sandbox_id
+        ),
+        None,
+    )
+    assert entry is not None, (
+        f"sandbox {sdk_sandbox.sandbox_id!r} missing from list ({len(listed)} entries)"
+    )
+
+    by_path = _mounts_by_path(entry)
+    rw = by_path.get(_RW_MOUNT)
+    ro = by_path.get(_RO_MOUNT)
+    assert rw is not None and ro is not None, (
+        f"expected mounts for {_RW_MOUNT} and {_RO_MOUNT}, got volumeMounts={entry.get('volumeMounts')!r}"
+    )
+    assert "hostPath" not in rw and "hostPath" not in ro, (
+        f"hostPath must not be exposed publicly; rw={rw!r} ro={ro!r}"
+    )
+    assert bool(rw.get("readOnly")) is False, f"rw mount={rw!r}"
+    assert ro.get("readOnly") is True, f"ro mount={ro!r}"
+    assert rw.get("name") and ro.get("name"), f"rw={rw!r} ro={ro!r}"
+    assert "/" not in by_path and not any(
+        str(m.get("name", "")).startswith("cube_rootfs_")
+        for m in (entry.get("volumeMounts") or [])
+    ), f"internal rootfs must not leak into volumeMounts={entry.get('volumeMounts')!r}"
