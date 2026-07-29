@@ -48,6 +48,8 @@ service CubeboxMgr {
   // CleanupOrphanStorageFiles scans configured emptydir format roots, drops
   // files that have no live sandbox owner, and reports the action taken.
   rpc CleanupOrphanStorageFiles(CleanupOrphanStorageFilesRequest) returns (CleanupOrphanStorageFilesResponse);
+  // GetSandboxEvents returns events from the Cubelet owning the sandbox.
+  rpc GetSandboxEvents(GetSandboxEventsRequest) returns (GetSandboxEventsResponse);
 }
 
 // SELinuxOption are the labels to be applied to the container.
@@ -1221,4 +1223,37 @@ message CleanupOrphanStorageFilesResponse {
   cubelet.services.errorcode.v1.Ret ret = 2;
   // Orphan files cubelet found (and possibly removed).
   repeated StorageOrphanEntry orphans = 3;
+}
+
+// GetSandboxEventsRequest queries a sandbox's newest node-local events.
+message GetSandboxEventsRequest {
+  // requestID reqID
+  string requestID = 1;
+  // Sandbox ID whose events should be returned. Required.
+  string sandboxID = 2;
+  // Limit caps the number of entries returned (default 200, max 1000).
+  int32 limit = 4;
+}
+
+// SandboxEvent is one parsed line from the per-sandbox shim req log.
+message SandboxEvent {
+  // RFC3339Nano timestamp as written by the shim.
+  string timestamp = 1;
+  // Log level. The shim req log does not carry a level, so this is always
+  // "info" for now; the field exists for forward compatibility.
+  string level = 2;
+  // Raw log content of the shim log line.
+  string message = 3;
+  // Module field from the shim log line (e.g. "Shim"). May be empty.
+  string module = 4;
+}
+
+// GetSandboxEventsResponse carries the newest matching events.
+message GetSandboxEventsResponse {
+  // requestID reqID
+  string requestID = 1;
+  // Ret.
+  cubelet.services.errorcode.v1.Ret ret = 2;
+  // Matching events, oldest first, up to limit entries.
+  repeated SandboxEvent events = 3;
 }

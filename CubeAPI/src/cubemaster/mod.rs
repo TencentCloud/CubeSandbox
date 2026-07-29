@@ -1563,8 +1563,6 @@ pub struct SandboxRefreshResponse {
 pub struct SandboxLogsRequest {
     #[serde(rename = "sandboxID")]
     pub sandbox_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<i64>,
     pub limit: i32,
 }
 

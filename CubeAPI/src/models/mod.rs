@@ -762,10 +762,8 @@ pub struct SandboxLogsQuery {
 #[into_params(parameter_in = Query)]
 #[allow(dead_code)]
 pub struct SandboxLogsV2Query {
-    pub cursor: Option<i64>,
     #[serde(default = "default_log_limit")]
     pub limit: i32,
-    pub direction: Option<String>,
 }
 
 fn default_log_limit() -> i32 {
