@@ -78,7 +78,8 @@ CubeSandbox MicroVM
 
 Dockerfile 继承官方 Cube 基础镜像，保留 `49983` 上的 envd，并复用基础镜像已有的
 `bash`、CA 证书与 `curl`，只安装新增编码工具。OpenCode x86-64 发布包与 SHA256
-均固定；非 `amd64` 构建会提前失败，而不会静默安装不兼容二进制：
+均固定；非 `amd64` 构建会提前失败，而不会静默安装不兼容二进制。`.dockerignore`
+使用白名单，只发送 Dockerfile 与 V1 配置，防止 `.env`、虚拟环境、测试和缓存进入构建上下文：
 
 ```bash
 IMAGE=<your-registry>/opencode-cube:1.18.9 PUSH=1 \
@@ -106,7 +107,8 @@ cubemastercli tpl watch --job-id <job_id>
 
 ### 3. 配置 OpenCode
 
-模板把下列配置放到 `/root/.config/opencode/opencode.json`：
+源码命名为 `opencode.v1.json`，显式绑定 OpenCode 1.x；Dockerfile 再把它复制到标准运行路径
+`/root/.config/opencode/opencode.json`：
 
 ```json
 {
@@ -173,6 +175,9 @@ opencode run \
 提权、外部目录与联网工具，并拒绝直接调用 `rm`、`/bin/rm`、`/usr/bin/rm` 与
 `command rm`。包装器和等价工具仍可能绕过命令模式，因此这些规则不能替代沙箱隔离。
 
+精简 JSONL 渲染器默认展示模型文本、工具与错误；传入 `--verbose-events` 可识别被省略的其他
+事件类型，`--raw` 则原样保留全部事件。
+
 ## API Key 注入
 
 ### 直接模式
@@ -191,7 +196,7 @@ result = sandbox.commands.run(
 ```
 
 这避免把凭据写入镜像。但 OpenCode 和子进程仍能读取环境变量，开放出口也允许外传，因此只适合
-本地评估，不适合多租户生产。
+本地评估，不适合多租户生产。驱动会在创建沙箱前把该警告输出到 stderr。
 
 ### CubeEgress 保险库模式
 
@@ -251,6 +256,9 @@ CubeEgress 仅对命中主机的请求替换为真实凭据；其他目的地被
 
 不要使用 `with Sandbox.create(...)` 包裹暂停恢复流程，退出上下文会直接 kill 沙箱。
 
+该驱动使用进程级直接注入，因此与修复示例一样输出开放出口警告。它证明的是持久化机制；生产使用
+前仍须与保险库出口控制组合。
+
 ## 典型场景与最佳实践
 
 - **隔离仓库修复**：把仓库放入 `/workspace`，只导出经人工审核的补丁和测试日志；
@@ -281,8 +289,9 @@ CubeEgress 仅对命中主机的请求替换为真实凭据；其他目的地被
 
 2026-07-29 已用固定的 OpenCode `1.18.9` 和真实 Hy3 完成文本请求及一次原生 `read`
 工具调用。离线测试覆盖 URL 校验、两阶段凭据边界、危险命令规则、模板依赖与架构约束、
-命令引用、旧版 SDK 参数回退、会话 ID 解析和 JSONL 展示。CubeEgress 与暂停恢复全链仍需
-在可访问的 CubeSandbox 集群中运行并保留证据后再合并。
+最小构建上下文、OpenCode V1 配置绑定、运行时安全警告、命令引用、旧版 SDK 参数回退、
+会话 ID 解析和详细 JSONL 诊断。CubeEgress 与暂停恢复全链仍需在可访问的 CubeSandbox
+集群中运行并保留证据后再合并。
 
 ## 参考
 

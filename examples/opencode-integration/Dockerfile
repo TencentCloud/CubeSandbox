@@ -48,7 +48,9 @@ ENV XDG_CONFIG_HOME=/root/.config \
     OPENCODE_DISABLE_DEFAULT_PLUGINS=1 \
     OPENCODE_DISABLE_LSP_DOWNLOAD=1
 
-COPY opencode.json /root/.config/opencode/opencode.json
+# The source name makes the OpenCode 1.x schema boundary explicit. OpenCode
+# still reads its standard runtime path inside the image.
+COPY opencode.v1.json /root/.config/opencode/opencode.json
 
 RUN mkdir -p \
         /workspace \

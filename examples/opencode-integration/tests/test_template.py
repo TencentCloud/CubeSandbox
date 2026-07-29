@@ -27,9 +27,24 @@ class TemplateTests(unittest.TestCase):
     def test_template_fails_fast_for_unpinned_architecture(self) -> None:
         dockerfile = (EXAMPLE / "Dockerfile").read_text(encoding="utf-8")
         self.assertTrue(dockerfile.startswith("# syntax=docker/dockerfile:1.8\n"))
+        self.assertIn("ARG OPENCODE_VERSION=1.18.9", dockerfile)
         self.assertIn("ARG TARGETARCH", dockerfile)
         self.assertIn("Unsupported TARGETARCH=", dockerfile)
         self.assertIn("opencode-linux-x64.tar.gz", dockerfile)
+        self.assertIn(
+            "COPY opencode.v1.json /root/.config/opencode/opencode.json",
+            dockerfile,
+        )
+
+    def test_docker_context_is_an_explicit_allowlist(self) -> None:
+        rules = [
+            line
+            for line in (EXAMPLE / ".dockerignore")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line and not line.startswith("#")
+        ]
+        self.assertEqual(rules, ["*", "!Dockerfile", "!opencode.v1.json"])
 
 
 if __name__ == "__main__":

@@ -65,6 +65,12 @@ def render_jsonl_line(line: str) -> None:
             print(f"     {str(state['error'])[:300]}")
     elif event_type == "error":
         print(f"  [error] {str(event.get('error', 'unknown error'))[:300]}")
+    elif os.environ.get("OPENCODE_STREAM_VERBOSE", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        print(f"  [event:{event_type or 'unknown'}] omitted", file=sys.stderr)
 
 
 def jsonl_render_writer() -> Callable[[object], None]:
@@ -106,7 +112,9 @@ def run_command(
     try:
         return sandbox.commands.run(command, **kwargs)
     except TypeError as exc:
-        if "envs" not in kwargs or "envs" not in str(exc):
+        if "envs" not in kwargs:
+            raise
+        if "envs" not in str(exc):
             raise
         kwargs["env"] = kwargs.pop("envs")
         return sandbox.commands.run(command, **kwargs)

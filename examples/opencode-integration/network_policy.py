@@ -52,6 +52,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--skip-agent", action="store_true")
     parser.add_argument("--raw", action="store_true")
+    parser.add_argument(
+        "--verbose-events",
+        action="store_true",
+        help="Show event types omitted by the concise JSONL renderer.",
+    )
     args = parser.parse_args()
     if args.prompt is None:
         args.prompt = DEFAULT_PROMPT.format(workspace=args.workspace)
@@ -150,15 +155,16 @@ def main() -> int:
     args = parse_args()
     if args.raw:
         os.environ["OPENCODE_STREAM_RAW"] = "1"
+    if args.verbose_events:
+        os.environ["OPENCODE_STREAM_VERBOSE"] = "1"
 
     template_id = args.template or required("CUBE_TEMPLATE_ID")
     required("E2B_API_URL")
     required("E2B_API_KEY")
     secret = required("HY3_API_KEY")
-    host = hy3_host()
-    rules = build_rules(host, secret)
-
     envs = build_opencode_env(include_secret=False)
+    host = hy3_host(envs["HY3_BASE_URL"])
+    rules = build_rules(host, secret)
     envs["HY3_API_KEY"] = PLACEHOLDER_KEY
     ca_bundle = os.environ.get("OPENCODE_CA_BUNDLE", DEFAULT_CA_BUNDLE)
     # The standalone OpenCode binary uses a JavaScript runtime. Set both common

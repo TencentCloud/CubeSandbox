@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -14,6 +15,10 @@ DEFAULT_BASE_URL = "https://tokenhub.tencentmaas.com/v1"
 DEFAULT_MODEL = "hy3"
 DEFAULT_WORKSPACE = "/workspace"
 DEFAULT_STATE_DIR = "/root/.local/share/opencode"
+DIRECT_MODE_WARNING = (
+    "[security] Direct mode injects HY3_API_KEY into the OpenCode process "
+    "while egress is open. Use network_policy.py for shared or production clusters."
+)
 
 
 def load_local_dotenv() -> None:
@@ -54,6 +59,10 @@ def int_env(name: str, default: int) -> int:
     return value
 
 
+def warn_direct_mode() -> None:
+    print(DIRECT_MODE_WARNING, file=sys.stderr)
+
+
 def hy3_model() -> str:
     model = optional("HY3_MODEL", DEFAULT_MODEL)
     if model != DEFAULT_MODEL:
@@ -75,8 +84,9 @@ def hy3_base_url() -> str:
     return value
 
 
-def hy3_host() -> str:
-    host = urlparse(hy3_base_url()).hostname
+def hy3_host(validated_base_url: str) -> str:
+    """Extract the host from a value already returned by hy3_base_url()."""
+    host = urlparse(validated_base_url).hostname
     if not host:
         raise SystemExit("Could not determine the host from HY3_BASE_URL")
     return host

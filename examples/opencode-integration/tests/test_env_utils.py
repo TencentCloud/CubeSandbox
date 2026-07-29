@@ -63,6 +63,13 @@ class EnvironmentTests(unittest.TestCase):
         ):
             env_utils.hy3_model()
 
+    def test_extracts_host_from_prevalidated_base_url(self) -> None:
+        base_url = "https://tokenhub.tencentmaas.com/v1"
+        self.assertEqual(
+            env_utils.hy3_host(base_url),
+            "tokenhub.tencentmaas.com",
+        )
+
 
 class CommandTests(unittest.TestCase):
     def test_command_quotes_prompt_and_session(self) -> None:
@@ -79,14 +86,14 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(args[-1], "fix it; echo unsafe")
 
     def test_example_config_has_no_literal_key(self) -> None:
-        config = json.loads((EXAMPLE / "opencode.json").read_text(encoding="utf-8"))
+        config = json.loads((EXAMPLE / "opencode.v1.json").read_text(encoding="utf-8"))
         options = config["provider"]["tokenhub"]["options"]
         self.assertEqual(options["apiKey"], "{env:HY3_API_KEY}")
         self.assertEqual(config["model"], "tokenhub/hy3")
         self.assertEqual(config["share"], "disabled")
 
     def test_destructive_command_rules_cover_direct_rm_variants(self) -> None:
-        config = json.loads((EXAMPLE / "opencode.json").read_text(encoding="utf-8"))
+        config = json.loads((EXAMPLE / "opencode.v1.json").read_text(encoding="utf-8"))
         rules = config["permission"]["bash"]
         self.assertEqual(next(iter(rules)), "*")
         for pattern in ("rm *", "/bin/rm *", "/usr/bin/rm *", "command rm *"):

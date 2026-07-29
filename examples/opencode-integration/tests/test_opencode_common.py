@@ -6,9 +6,11 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 EXAMPLE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(EXAMPLE))
@@ -22,12 +24,19 @@ from _opencode_common import (
 
 
 class FakeCommands:
-    def __init__(self, reject_envs: bool = False):
+    def __init__(
+        self,
+        reject_envs: bool = False,
+        failure: str | None = None,
+    ):
         self.reject_envs = reject_envs
+        self.failure = failure
         self.kwargs = None
 
     def run(self, command, **kwargs):
         del command
+        if self.failure:
+            raise TypeError(self.failure)
         if self.reject_envs and "envs" in kwargs:
             raise TypeError("unexpected keyword argument 'envs'")
         self.kwargs = kwargs
@@ -35,8 +44,12 @@ class FakeCommands:
 
 
 class FakeSandbox:
-    def __init__(self, reject_envs: bool = False):
-        self.commands = FakeCommands(reject_envs)
+    def __init__(
+        self,
+        reject_envs: bool = False,
+        failure: str | None = None,
+    ):
+        self.commands = FakeCommands(reject_envs, failure)
 
 
 class CommonHelperTests(unittest.TestCase):
@@ -63,6 +76,16 @@ class CommonHelperTests(unittest.TestCase):
         sandbox = FakeSandbox(reject_envs=True)
         run_command(sandbox, "true", envs={"A": "B"})
         self.assertEqual(sandbox.commands.kwargs["env"], {"A": "B"})
+
+    def test_does_not_mask_unrelated_type_error_with_envs(self) -> None:
+        sandbox = FakeSandbox(failure="unrelated type failure")
+        with self.assertRaisesRegex(TypeError, "unrelated"):
+            run_command(sandbox, "true", envs={"A": "B"})
+
+    def test_does_not_fallback_when_envs_were_not_passed(self) -> None:
+        sandbox = FakeSandbox(failure="unexpected keyword argument 'envs'")
+        with self.assertRaisesRegex(TypeError, "envs"):
+            run_command(sandbox, "true")
 
     def test_renderer_shows_text_and_tool_without_raw_json(self) -> None:
         stream = io.StringIO()
@@ -131,6 +154,15 @@ class CommonHelperTests(unittest.TestCase):
         write("first")
         write(" second")
         self.assertEqual(stream.getvalue(), "first second")
+
+    def test_verbose_renderer_reports_unknown_event_type(self) -> None:
+        stream = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {"OPENCODE_STREAM_VERBOSE": "1"}),
+            contextlib.redirect_stderr(stream),
+        ):
+            render_jsonl_line(json.dumps({"type": "future_event"}))
+        self.assertIn("[event:future_event] omitted", stream.getvalue())
 
 
 if __name__ == "__main__":

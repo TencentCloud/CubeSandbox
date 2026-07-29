@@ -21,6 +21,7 @@ from env_utils import (
     opencode_workspace,
     required,
     shell_join,
+    warn_direct_mode,
 )
 
 DEFAULT_PROMPT = """\
@@ -65,6 +66,11 @@ def parse_args() -> argparse.Namespace:
         "--raw",
         action="store_true",
         help="Stream raw OpenCode JSONL events.",
+    )
+    parser.add_argument(
+        "--verbose-events",
+        action="store_true",
+        help="Show event types omitted by the concise JSONL renderer.",
     )
     args = parser.parse_args()
     if args.prompt is None:
@@ -141,6 +147,8 @@ def main() -> int:
     args = parse_args()
     if args.raw:
         os.environ["OPENCODE_STREAM_RAW"] = "1"
+    if args.verbose_events:
+        os.environ["OPENCODE_STREAM_VERBOSE"] = "1"
 
     template_id = args.template or required("CUBE_TEMPLATE_ID")
     required("E2B_API_URL")
@@ -148,6 +156,7 @@ def main() -> int:
     opencode_env = build_opencode_env(include_secret=True)
     command = opencode_command(args.prompt)
 
+    warn_direct_mode()
     print(f"Creating sandbox from template: {template_id}")
     result = None
     # This simple flavor injects HY3_API_KEY only into the OpenCode process but

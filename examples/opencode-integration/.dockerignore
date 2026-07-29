@@ -1,0 +1,4 @@
+# The template needs only its build recipe and the pinned V1 configuration.
+*
+!Dockerfile
+!opencode.v1.json

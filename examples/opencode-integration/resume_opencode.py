@@ -27,6 +27,7 @@ from env_utils import (
     opencode_workspace,
     required,
     shell_join,
+    warn_direct_mode,
 )
 
 TURN_1 = """\
@@ -63,6 +64,11 @@ def parse_args() -> argparse.Namespace:
         default=int_env("OPENCODE_EXEC_TIMEOUT", 900),
     )
     parser.add_argument("--raw", action="store_true")
+    parser.add_argument(
+        "--verbose-events",
+        action="store_true",
+        help="Show event types omitted by the concise JSONL renderer.",
+    )
     return parser.parse_args()
 
 
@@ -115,12 +121,15 @@ def main() -> int:
     args = parse_args()
     if args.raw:
         os.environ["OPENCODE_STREAM_RAW"] = "1"
+    if args.verbose_events:
+        os.environ["OPENCODE_STREAM_VERBOSE"] = "1"
 
     template_id = args.template or required("CUBE_TEMPLATE_ID")
     required("E2B_API_URL")
     required("E2B_API_KEY")
     envs = build_opencode_env(include_secret=True)
 
+    warn_direct_mode()
     sandbox = Sandbox.create(template=template_id, timeout=args.sandbox_timeout)
     sandbox_id = sandbox_identifier(sandbox)
     try:

@@ -86,7 +86,9 @@ The Dockerfile uses the official Cube base image so envd remains available on
 port `49983`. It reuses the base image's `bash`, CA bundle, and `curl`, while
 installing only additional coding tools. The OpenCode x86-64 release tarball
 and SHA256 are both pinned; a non-`amd64` build fails early rather than
-installing an incompatible binary.
+installing an incompatible binary. A `.dockerignore` allowlist sends only the
+Dockerfile and V1 configuration, preventing `.env`, virtual environments,
+tests, and caches from entering the build context.
 
 ```bash
 IMAGE=<your-registry>/opencode-cube:1.18.9 PUSH=1 \
@@ -115,7 +117,8 @@ Record the `template_id` when the job reaches `READY`.
 
 ### 3. Configure OpenCode
 
-The template copies this configuration to
+The source file is named `opencode.v1.json` to bind it explicitly to OpenCode
+1.x. The Dockerfile copies it to OpenCode's standard runtime path,
 `/root/.config/opencode/opencode.json`:
 
 ```json
@@ -187,6 +190,10 @@ denies direct `rm`, `/bin/rm`, `/usr/bin/rm`, and `command rm` invocations.
 Wrappers and equivalent tools can still bypass command-pattern guardrails, so
 they do not replace sandbox isolation.
 
+The concise JSONL renderer shows model text, tools, and errors. Pass
+`--verbose-events` to identify other event types that were omitted, or `--raw`
+to preserve every event unchanged.
+
 ## Key Injection
 
 ### Direct mode
@@ -206,7 +213,8 @@ result = sandbox.commands.run(
 
 This avoids a credential file inside the image. However, OpenCode and any child
 process can read that environment, and open egress permits exfiltration. Use it
-for local evaluation, not multi-tenant production.
+for local evaluation, not multi-tenant production. The driver prints this
+warning to stderr before it creates a sandbox.
 
 ### CubeEgress vault mode
 
@@ -270,6 +278,10 @@ The script:
 Do not wrap this flow in `with Sandbox.create(...)`: leaving the context kills
 the sandbox and defeats pause/resume.
 
+This driver uses direct per-process key injection and therefore prints the same
+open-egress warning as the repair example. It demonstrates persistence; combine
+the pattern with vault egress controls before production use.
+
 ## Use Cases and Best Practices
 
 - **Isolated repository repair.** Clone or upload a repository into
@@ -307,10 +319,11 @@ the sandbox and defeats pause/resume.
 On 2026-07-29, the pinned OpenCode binary and configuration completed a live Hy3
 text request and a native `read` tool call. Offline tests cover URL validation,
 the two-stage vault secret boundary, destructive-command guardrails, template
-package/architecture invariants, command quoting, SDK compatibility fallback,
-session-ID parsing, and JSONL rendering. Full CubeEgress and pause/resume
-validation requires an accessible CubeSandbox deployment and should be
-recorded before merging.
+package/architecture/context invariants, the OpenCode V1 config binding,
+runtime security warnings, command quoting, SDK compatibility fallback,
+session-ID parsing, and verbose JSONL diagnostics. Full CubeEgress and
+pause/resume validation requires an accessible CubeSandbox deployment and
+should be recorded before merging.
 
 ## References
 

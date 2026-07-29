@@ -12,8 +12,9 @@ changes inside the isolated VM.
 ```text
 opencode-integration/
 ├── Dockerfile               # pinned Cube base + OpenCode binary
+├── .dockerignore            # build-context allowlist
 ├── build-template.sh        # reproducible amd64 build/push helper
-├── opencode.json            # Hy3 provider and bounded permissions
+├── opencode.v1.json         # OpenCode 1.x provider and permissions
 ├── .env.example             # host-only configuration template
 ├── env_utils.py             # URL/key validation and command builder
 ├── _opencode_common.py      # E2B command and JSONL helpers
@@ -56,7 +57,9 @@ IMAGE=<your-registry>/opencode-cube:1.18.9 PUSH=1 \
 The Dockerfile pins both the OpenCode release and its SHA256 digest. It reuses
 `bash`, `ca-certificates`, and `curl` from the Cube base instead of reinstalling
 them, and installs only the additional coding tools. The pinned OpenCode asset
-is x86-64, so a non-`amd64` build fails early with an explicit error.
+is x86-64, so a non-`amd64` build fails early with an explicit error. The
+`.dockerignore` allowlist sends only `Dockerfile` and `opencode.v1.json` to the
+builder, excluding `.env`, virtual environments, tests, and caches.
 
 The image also disables updates, sharing, external plugins, LSP downloads, and
 models.dev fetches so the runtime needs only the configured LLM host.
@@ -110,16 +113,22 @@ post-run test and Git diff, not on the model's prose.
 
 > The direct flavor leaves internet egress open. A compromised agent could
 > exfiltrate its process-level key. Use the vault flavor below on shared
-> clusters.
+> clusters. `run_opencode.py` repeats this warning at runtime before creating a
+> sandbox.
 
 ### Permission guard scope
 
-`opencode.json` denies direct `rm`, `/bin/rm`, `/usr/bin/rm`, and
+`opencode.v1.json` denies direct `rm`, `/bin/rm`, `/usr/bin/rm`, and
 `command rm` invocations, in addition to push, remote mutation, and privilege
 escalation commands. These are guardrails for accidental actions. Shell
 wrappers, aliases, scripts, or equivalent tools can express the same operation,
 so OpenCode permissions are not a security boundary. The disposable MicroVM,
 least-privilege credentials, and egress policy remain authoritative.
+
+The source filename intentionally binds this permission schema to OpenCode 1.x;
+the Dockerfile copies it to OpenCode's standard in-image `opencode.json` path.
+Use `--verbose-events` to show future JSONL event types omitted by the concise
+renderer, or `--raw` to stream every event unchanged.
 
 ## 4. Pause and resume
 
@@ -131,6 +140,8 @@ Turn 1 creates `plan.md`; the driver captures OpenCode's actual `sessionID`,
 pauses the MicroVM, reconnects, verifies both `/workspace` and
 `/root/.local/share/opencode`, then passes the same session ID into turn 2.
 The key is injected again per process and is not written into the image.
+This driver also uses direct mode and prints the same open-egress warning; it is
+a persistence demonstration, not the production credential pattern.
 
 ## 5. Default-deny egress and credential vault
 

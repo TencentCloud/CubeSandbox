@@ -11,8 +11,9 @@ OpenAI-compatible 模型端点。Agent 的文件编辑、命令执行和测试�
 ```text
 opencode-integration/
 ├── Dockerfile               # 固定 Cube 基础镜像与 OpenCode 二进制
+├── .dockerignore            # 构建上下文白名单
 ├── build-template.sh        # amd64 镜像构建/推送
-├── opencode.json            # Hy3 provider 与权限边界
+├── opencode.v1.json         # OpenCode 1.x provider 与权限边界
 ├── .env.example             # 仅主机使用的配置模板
 ├── env_utils.py             # URL/密钥校验与命令构造
 ├── _opencode_common.py      # E2B 命令与 JSONL 解析
@@ -54,7 +55,8 @@ IMAGE=<your-registry>/opencode-cube:1.18.9 PUSH=1 \
 
 Dockerfile 同时固定 OpenCode 版本和 SHA256，并直接复用 Cube 基础镜像已有的 `bash`、
 `ca-certificates` 与 `curl`，只安装新增的编码工具。固定的 OpenCode 发布包为 x86-64，
-因此非 `amd64` 构建会提前给出明确错误。
+因此非 `amd64` 构建会提前给出明确错误。`.dockerignore` 采用白名单，只向构建器发送
+`Dockerfile` 与 `opencode.v1.json`，排除 `.env`、虚拟环境、测试和缓存。
 
 镜像还关闭更新、会话分享、外部插件、LSP 下载与 models.dev 拉取，使运行时只需访问模型端点。
 
@@ -105,14 +107,18 @@ python -m venv .venv
 缺陷是均值函数误用整除。是否完成由测试与 Git diff 判断，不以模型自述为准。
 
 > 直接注入模式保持开放出口，受攻击的 Agent 仍可能外传进程内 Key。共享集群应使用第 5 节
-> 的保险库模式。
+> 的保险库模式。`run_opencode.py` 会在创建沙箱前再次输出该风险提示。
 
 ### 权限规则的边界
 
-`opencode.json` 除了拒绝推送、远程仓库修改与提权，还拒绝直接调用 `rm`、`/bin/rm`、
+`opencode.v1.json` 除了拒绝推送、远程仓库修改与提权，还拒绝直接调用 `rm`、`/bin/rm`、
 `/usr/bin/rm` 和 `command rm`。这些规则用于减少误操作，不是安全边界；shell 包装器、
 别名、脚本或等价工具仍可能表达相同操作。真正的约束仍是一次性 MicroVM、最小权限凭据与
 出口策略。
+
+源码文件名显式绑定 OpenCode 1.x 权限格式，Dockerfile 再把它复制到镜像内标准
+`opencode.json` 路径。可用 `--verbose-events` 显示精简渲染器忽略的未来 JSONL
+事件类型，或用 `--raw` 原样输出全部事件。
 
 ## 4. 暂停与恢复
 
@@ -123,6 +129,7 @@ python -m venv .venv
 第一轮创建 `plan.md` 并从真实 JSONL 中取得 `sessionID`；驱动暂停 MicroVM、重新连接，
 验证 `/workspace` 和 `/root/.local/share/opencode` 均保留，再用同一个会话 ID 执行
 第二轮。每轮单独注入 Key，镜像内不保存凭据。
+该驱动同样使用直接模式并输出开放出口警告；它用于证明状态持久化，不代表生产凭据方案。
 
 ## 5. 默认拒绝出口与凭据保险库
 
