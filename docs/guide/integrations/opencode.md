@@ -83,7 +83,10 @@ CubeSandbox MicroVM
 ### 1. Build the template
 
 The Dockerfile uses the official Cube base image so envd remains available on
-port `49983`. The OpenCode release tarball and SHA256 are both pinned.
+port `49983`. It reuses the base image's `bash`, CA bundle, and `curl`, while
+installing only additional coding tools. The OpenCode x86-64 release tarball
+and SHA256 are both pinned; a non-`amd64` build fails early rather than
+installing an incompatible binary.
 
 ```bash
 IMAGE=<your-registry>/opencode-cube:1.18.9 PUSH=1 \
@@ -179,8 +182,10 @@ opencode run \
 
 `--pure` suppresses external plugins. `--auto` is suitable here because the
 whole task is already inside a disposable MicroVM, but the shipped config still
-denies common push, privilege, external-directory, and network tools. It does
-not replace sandbox isolation.
+denies common push, privilege, external-directory, and network tools. It also
+denies direct `rm`, `/bin/rm`, `/usr/bin/rm`, and `command rm` invocations.
+Wrappers and equivalent tools can still bypass command-pattern guardrails, so
+they do not replace sandbox isolation.
 
 ## Key Injection
 
@@ -237,9 +242,11 @@ sandbox = Sandbox.create(
 )
 ```
 
-The VM receives `HY3_API_KEY=cube-egress-managed-placeholder` only. OpenCode
-creates a placeholder Authorization header, which CubeEgress replaces for the
-matched host. Other destinations are denied and audited.
+The script first verifies that the sandbox-wide environment has no
+`HY3_API_KEY`, then gives only the OpenCode child process
+`HY3_API_KEY=cube-egress-managed-placeholder`. OpenCode creates a placeholder
+Authorization header, which CubeEgress replaces for the matched host. Other
+destinations are denied and audited.
 
 The standalone runtime must trust the CubeEgress interception CA. The example
 sets both `SSL_CERT_FILE` and `NODE_EXTRA_CA_CERTS`; override
@@ -283,7 +290,8 @@ the sandbox and defeats pause/resume.
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `opencode: command not found` | Template predates the integration | Rebuild and re-register |
-| `tokenhub/hy3` not found | OpenCode V2 config used with V1 | Pin `1.18.9` and singular `provider` |
+| `Model not found: tokenhub/hy3` | OpenCode V2 config used with V1 | Pin `1.18.9` and singular `provider` |
+| `Unsupported TARGETARCH=...` | Non-amd64 build uses the x64 digest | Build the documented `linux/amd64` image |
 | Provider returns `401` | Key absent or vault inject mismatch | Check host `.env` or Authorization rule |
 | Provider returns `404` | Base URL lacks or duplicates `/v1` | Use the provider root ending once in `/v1` |
 | `403 Forbidden - CubeEgress` | LLM hostname does not match | Derive SNI/Host from `HY3_BASE_URL` |
@@ -298,10 +306,11 @@ the sandbox and defeats pause/resume.
 
 On 2026-07-29, the pinned OpenCode binary and configuration completed a live Hy3
 text request and a native `read` tool call. Offline tests cover URL validation,
-secret exclusion in vault mode, command quoting, SDK compatibility fallback,
+the two-stage vault secret boundary, destructive-command guardrails, template
+package/architecture invariants, command quoting, SDK compatibility fallback,
 session-ID parsing, and JSONL rendering. Full CubeEgress and pause/resume
-validation requires an accessible CubeSandbox deployment and should be recorded
-before merging.
+validation requires an accessible CubeSandbox deployment and should be
+recorded before merging.
 
 ## References
 

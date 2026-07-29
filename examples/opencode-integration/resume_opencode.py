@@ -74,7 +74,7 @@ def run_turn(
     envs: dict[str, str],
     timeout: int,
     session_id: str | None = None,
-):
+) -> object:
     result = run_command(
         sandbox,
         opencode_command(prompt, session_id=session_id),

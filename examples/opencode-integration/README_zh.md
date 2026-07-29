@@ -52,8 +52,11 @@ IMAGE=<your-registry>/opencode-cube:1.18.9 PUSH=1 \
   ./examples/opencode-integration/build-template.sh
 ```
 
-Dockerfile 同时固定 OpenCode 版本和 SHA256，并关闭更新、会话分享、外部插件、LSP 下载与
-models.dev 拉取，使运行时只需访问模型端点。
+Dockerfile 同时固定 OpenCode 版本和 SHA256，并直接复用 Cube 基础镜像已有的 `bash`、
+`ca-certificates` 与 `curl`，只安装新增的编码工具。固定的 OpenCode 发布包为 x86-64，
+因此非 `amd64` 构建会提前给出明确错误。
+
+镜像还关闭更新、会话分享、外部插件、LSP 下载与 models.dev 拉取，使运行时只需访问模型端点。
 
 ```bash
 cubemastercli tpl create-from-image \
@@ -104,6 +107,13 @@ python -m venv .venv
 > 直接注入模式保持开放出口，受攻击的 Agent 仍可能外传进程内 Key。共享集群应使用第 5 节
 > 的保险库模式。
 
+### 权限规则的边界
+
+`opencode.json` 除了拒绝推送、远程仓库修改与提权，还拒绝直接调用 `rm`、`/bin/rm`、
+`/usr/bin/rm` 和 `command rm`。这些规则用于减少误操作，不是安全边界；shell 包装器、
+别名、脚本或等价工具仍可能表达相同操作。真正的约束仍是一次性 MicroVM、最小权限凭据与
+出口策略。
+
 ## 4. 暂停与恢复
 
 ```bash
@@ -125,7 +135,8 @@ python -m venv .venv
 - `allow_internet_access=False`，默认拒绝所有出口；
 - 只允许从 `HY3_BASE_URL` 解析出的主机；
 - CubeEgress 在线路上注入 `Authorization: Bearer <secret>`；
-- VM 内只能看到无权限的占位 Key；
+- 主动证明沙箱全局环境中没有 Key；
+- 只有 OpenCode 子进程收到无权限的占位 Key；
 - 记录 TokenHub 请求元数据；
 - 主动验证无关站点被阻断。
 
@@ -137,7 +148,12 @@ CubeEgress 拦截 CA。路径不同可通过 `OPENCODE_CA_BUNDLE` 覆盖。
 ```bash
 python -m unittest discover -s tests -v
 python -m compileall -q .
-docker build --check .
+```
+
+若本机 Docker Buildx 为 `0.15.0+`，还可在不执行镜像构建的情况下检查 Dockerfile：
+
+```bash
+docker buildx build --check .
 ```
 
 2026-07-29 已用固定的 OpenCode `1.18.9` 和真实 Hy3 完成配置验证，并跑通一次原生
@@ -148,7 +164,8 @@ docker build --check .
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | `opencode: command not found` | 模板过旧 | 重新构建并注册镜像 |
-| 找不到 `tokenhub/hy3` | 混用了 V1/V2 配置 | 固定 `1.18.9` 与单数 `provider` |
+| `Model not found: tokenhub/hy3` | 混用了 V1/V2 配置 | 固定 `1.18.9` 与单数 `provider` |
+| `Unsupported TARGETARCH=...` | 用 x64 摘要构建非 amd64 镜像 | 使用文档规定的 `linux/amd64` |
 | `401` | 直接模式未传 Key 或保险库未注入 | 检查 `.env` 与 Authorization 规则 |
 | `404` | Base URL 路径错误 | 末尾只保留一个 `/v1` |
 | `403 Forbidden - CubeEgress` | 端点主机未匹配规则 | 从实际 `HY3_BASE_URL` 解析主机 |
@@ -163,3 +180,4 @@ docker build --check .
 - [快照、克隆与回滚](../../docs/zh/guide/snapshot-rollback-clone.md)
 - [安全代理](../../docs/zh/guide/security-proxy.md)
 - [OpenCode Providers](https://opencode.ai/docs/providers/)
+- [Docker 构建检查](https://docs.docker.com/build/checks/)

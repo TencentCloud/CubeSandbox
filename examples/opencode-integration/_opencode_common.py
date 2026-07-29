@@ -9,10 +9,10 @@ import json
 import os
 import sys
 from collections.abc import Callable
-from typing import Any
+from typing import Any, TextIO
 
 
-def stream_writer(stream) -> Callable[[object], None]:
+def stream_writer(stream: TextIO) -> Callable[[object], None]:
     def write(chunk: object) -> None:
         text = getattr(chunk, "line", chunk)
         stream.write(str(text))
@@ -28,7 +28,9 @@ def _tool_brief(part: dict[str, Any]) -> str:
     inputs = state.get("input")
     if not isinstance(inputs, dict):
         return ""
-    for key in ("command", "path", "pattern", "query", "filePath"):
+    # OpenCode emits filePath while URL-oriented tools emit url. Supporting
+    # both keeps the concise renderer useful across tool event variants.
+    for key in ("command", "path", "filePath", "pattern", "query", "url"):
         value = inputs.get(key)
         if value:
             return str(value).replace("\n", " ")[:120]
@@ -87,7 +89,7 @@ def run_command(
     timeout: float | None = None,
     stream: bool = False,
     user: str = "root",
-):
+) -> Any:
     kwargs: dict[str, Any] = {"user": user}
     if cwd is not None:
         kwargs["cwd"] = cwd

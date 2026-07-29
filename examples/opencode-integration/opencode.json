@@ -32,7 +32,10 @@
       "git push *": "deny",
       "git remote *": "deny",
       "sudo *": "deny",
-      "rm -rf *": "deny"
+      "rm *": "deny",
+      "/bin/rm *": "deny",
+      "/usr/bin/rm *": "deny",
+      "command rm *": "deny"
     }
   }
 }

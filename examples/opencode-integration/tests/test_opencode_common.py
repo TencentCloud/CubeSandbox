@@ -17,6 +17,7 @@ from _opencode_common import (
     extract_session_id,
     render_jsonl_line,
     run_command,
+    stream_writer,
 )
 
 
@@ -92,6 +93,44 @@ class CommonHelperTests(unittest.TestCase):
         self.assertIn("finished", rendered)
         self.assertIn("python3 -m unittest", rendered)
         self.assertNotIn('"sessionID"', rendered)
+
+    def test_renderer_supports_file_and_url_tool_event_keys(self) -> None:
+        stream = io.StringIO()
+        events = [
+            {
+                "type": "tool_use",
+                "part": {
+                    "tool": "read",
+                    "state": {
+                        "status": "completed",
+                        "input": {"filePath": "/workspace/stats.py"},
+                    },
+                },
+            },
+            {
+                "type": "tool_use",
+                "part": {
+                    "tool": "webfetch",
+                    "state": {
+                        "status": "completed",
+                        "input": {"url": "https://example.invalid/docs"},
+                    },
+                },
+            },
+        ]
+        with contextlib.redirect_stdout(stream):
+            for event in events:
+                render_jsonl_line(json.dumps(event))
+        rendered = stream.getvalue()
+        self.assertIn("/workspace/stats.py", rendered)
+        self.assertIn("https://example.invalid/docs", rendered)
+
+    def test_stream_writer_supports_text_streams(self) -> None:
+        stream = io.StringIO()
+        write = stream_writer(stream)
+        write("first")
+        write(" second")
+        self.assertEqual(stream.getvalue(), "first second")
 
 
 if __name__ == "__main__":

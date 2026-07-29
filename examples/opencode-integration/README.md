@@ -53,9 +53,13 @@ IMAGE=<your-registry>/opencode-cube:1.18.9 PUSH=1 \
   ./examples/opencode-integration/build-template.sh
 ```
 
-The Dockerfile pins both the OpenCode release and its SHA256 digest. It also
-disables updates, sharing, external plugins, LSP downloads, and models.dev
-fetches so the runtime needs only the configured LLM host.
+The Dockerfile pins both the OpenCode release and its SHA256 digest. It reuses
+`bash`, `ca-certificates`, and `curl` from the Cube base instead of reinstalling
+them, and installs only the additional coding tools. The pinned OpenCode asset
+is x86-64, so a non-`amd64` build fails early with an explicit error.
+
+The image also disables updates, sharing, external plugins, LSP downloads, and
+models.dev fetches so the runtime needs only the configured LLM host.
 
 ```bash
 cubemastercli tpl create-from-image \
@@ -108,6 +112,15 @@ post-run test and Git diff, not on the model's prose.
 > exfiltrate its process-level key. Use the vault flavor below on shared
 > clusters.
 
+### Permission guard scope
+
+`opencode.json` denies direct `rm`, `/bin/rm`, `/usr/bin/rm`, and
+`command rm` invocations, in addition to push, remote mutation, and privilege
+escalation commands. These are guardrails for accidental actions. Shell
+wrappers, aliases, scripts, or equivalent tools can express the same operation,
+so OpenCode permissions are not a security boundary. The disposable MicroVM,
+least-privilege credentials, and egress policy remain authoritative.
+
 ## 4. Pause and resume
 
 ```bash
@@ -130,7 +143,8 @@ This recommended flavor:
 - sets `allow_internet_access=False`;
 - allows only the host parsed from `HY3_BASE_URL`;
 - injects `Authorization: Bearer <secret>` inside CubeEgress;
-- gives the VM only a harmless placeholder key;
+- proves the sandbox-wide environment has no key;
+- gives only the OpenCode child process a harmless placeholder key;
 - audits the allowed TokenHub request metadata;
 - demonstrates that an unrelated host is blocked.
 
@@ -143,7 +157,13 @@ bundle so OpenCode trusts the CubeEgress interception CA. Override
 ```bash
 python -m unittest discover -s tests -v
 python -m compileall -q .
-docker build --check .
+```
+
+Optionally, Docker Buildx `0.15.0+` can lint the Dockerfile without executing
+the image build:
+
+```bash
+docker buildx build --check .
 ```
 
 The OpenCode config was also checked with the pinned `1.18.9` binary and a live
@@ -157,6 +177,7 @@ cluster.
 |---|---|---|
 | `opencode: command not found` | Old template | Rebuild and register this image |
 | `Model not found: tokenhub/hy3` | V1/V2 config mixed | Keep OpenCode `1.18.9` and singular `provider` |
+| `Unsupported TARGETARCH=...` | Building a non-amd64 image with the x64 digest | Use the documented `linux/amd64` platform |
 | `401` | Key missing in direct mode or inject rule absent | Check `.env`; for vault check the Authorization inject |
 | `404` | Base URL path is wrong | Keep exactly one trailing `/v1` |
 | `403 Forbidden - CubeEgress` | Host does not match the rule | Derive it from the actual `HY3_BASE_URL` |
@@ -171,3 +192,4 @@ cluster.
 - [Snapshot, clone, and rollback](../../docs/guide/snapshot-rollback-clone.md)
 - [Security proxy](../../docs/guide/security-proxy.md)
 - [OpenCode providers](https://opencode.ai/docs/providers/)
+- [Docker build checks](https://docs.docker.com/build/checks/)

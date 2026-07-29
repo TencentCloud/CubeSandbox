@@ -87,17 +87,36 @@ def create_sandbox(template_id: str, rules: list[Rule], timeout: int) -> Sandbox
     )
 
 
-def show_key_is_placeholder(sandbox: Sandbox) -> None:
-    result = run_command(
+def verify_secret_boundary(
+    sandbox: Sandbox,
+    process_env: dict[str, str],
+) -> None:
+    if process_env.get("HY3_API_KEY") != PLACEHOLDER_KEY:
+        raise SystemExit("OpenCode environment must contain only the placeholder key")
+
+    ambient = run_command(
         sandbox,
-        "printenv HY3_API_KEY || echo '<unset>'",
+        "printenv HY3_API_KEY || true",
         timeout=30,
     )
-    ensure_success(result, "inspect the in-VM key")
-    value = getattr(result, "stdout", "").strip()
+    ensure_success(ambient, "inspect the sandbox environment")
+    if getattr(ambient, "stdout", "").strip():
+        raise SystemExit(
+            "HY3_API_KEY unexpectedly exists in the sandbox-wide environment"
+        )
+
+    process = run_command(
+        sandbox,
+        "printenv HY3_API_KEY",
+        envs={"HY3_API_KEY": process_env["HY3_API_KEY"]},
+        timeout=30,
+    )
+    ensure_success(process, "inspect the OpenCode process placeholder")
+    value = getattr(process, "stdout", "").strip()
     if value != PLACEHOLDER_KEY:
-        raise SystemExit("Expected only the CubeEgress placeholder inside the VM")
-    print("In-VM HY3_API_KEY: placeholder only (real key remains in CubeEgress)")
+        raise SystemExit("Expected only the CubeEgress placeholder in the process")
+    print("Sandbox environment: no HY3_API_KEY")
+    print("OpenCode process: placeholder only (real key remains in CubeEgress)")
 
 
 def show_unrelated_host_is_blocked(sandbox: Sandbox) -> None:
@@ -152,7 +171,7 @@ def main() -> int:
     sandbox_id = sandbox_identifier(sandbox)
     try:
         print(f"Sandbox ready: {sandbox_id}")
-        show_key_is_placeholder(sandbox)
+        verify_secret_boundary(sandbox, envs)
         show_unrelated_host_is_blocked(sandbox)
 
         if args.skip_agent:

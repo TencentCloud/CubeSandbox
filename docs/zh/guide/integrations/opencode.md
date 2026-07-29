@@ -76,8 +76,9 @@ CubeSandbox MicroVM
 
 ### 1. 构建模板
 
-Dockerfile 继承官方 Cube 基础镜像，保留 `49983` 上的 envd；OpenCode 发布包与 SHA256
-均固定：
+Dockerfile 继承官方 Cube 基础镜像，保留 `49983` 上的 envd，并复用基础镜像已有的
+`bash`、CA 证书与 `curl`，只安装新增编码工具。OpenCode x86-64 发布包与 SHA256
+均固定；非 `amd64` 构建会提前失败，而不会静默安装不兼容二进制：
 
 ```bash
 IMAGE=<your-registry>/opencode-cube:1.18.9 PUSH=1 \
@@ -169,7 +170,8 @@ opencode run \
 ```
 
 `--pure` 禁止外部插件。`--auto` 在一次性 MicroVM 中免去交互审批，但配置仍拒绝常见 push、
-提权、外部目录与联网工具。它不能替代沙箱隔离。
+提权、外部目录与联网工具，并拒绝直接调用 `rm`、`/bin/rm`、`/usr/bin/rm` 与
+`command rm`。包装器和等价工具仍可能绕过命令模式，因此这些规则不能替代沙箱隔离。
 
 ## API Key 注入
 
@@ -225,8 +227,9 @@ sandbox = Sandbox.create(
 )
 ```
 
-VM 只接收 `HY3_API_KEY=cube-egress-managed-placeholder`。OpenCode 生成占位
-Authorization，CubeEgress 仅对命中主机的请求替换为真实凭据；其他目的地被拒绝并记录。
+脚本先验证沙箱全局环境中没有 `HY3_API_KEY`，再仅向 OpenCode 子进程传入
+`HY3_API_KEY=cube-egress-managed-placeholder`。OpenCode 生成占位 Authorization，
+CubeEgress 仅对命中主机的请求替换为真实凭据；其他目的地被拒绝并记录。
 
 独立 OpenCode 运行时必须信任 CubeEgress 拦截 CA。示例同时设置 `SSL_CERT_FILE` 与
 `NODE_EXTRA_CA_CERTS`，路径不同可覆盖 `OPENCODE_CA_BUNDLE`。
@@ -262,7 +265,8 @@ Authorization，CubeEgress 仅对命中主机的请求替换为真实凭据；�
 | 现象 | 可能原因 | 处理 |
 |---|---|---|
 | `opencode: command not found` | 模板早于本集成 | 重新构建并注册 |
-| 找不到 `tokenhub/hy3` | V1 混入了 V2 配置 | 固定 `1.18.9` 与单数 `provider` |
+| `Model not found: tokenhub/hy3` | V1 混入了 V2 配置 | 固定 `1.18.9` 与单数 `provider` |
+| `Unsupported TARGETARCH=...` | x64 摘要用于非 amd64 构建 | 使用文档规定的 `linux/amd64` |
 | 模型返回 `401` | 未注入 Key 或保险库规则错误 | 检查主机 `.env`/Authorization 注入 |
 | 模型返回 `404` | `/v1` 缺失或重复 | Base URL 只以一个 `/v1` 结尾 |
 | `403 Forbidden - CubeEgress` | 主机名未命中规则 | 从实际 `HY3_BASE_URL` 派生 SNI/Host |
@@ -276,9 +280,9 @@ Authorization，CubeEgress 仅对命中主机的请求替换为真实凭据；�
 ## 验证状态
 
 2026-07-29 已用固定的 OpenCode `1.18.9` 和真实 Hy3 完成文本请求及一次原生 `read`
-工具调用。离线测试覆盖 URL 校验、保险库模式的 secret 排除、命令引用、旧版 SDK 参数回退、
-会话 ID 解析和 JSONL 展示。CubeEgress 与暂停恢复全链仍需在可访问的 CubeSandbox 集群中
-运行并保留证据后再合并。
+工具调用。离线测试覆盖 URL 校验、两阶段凭据边界、危险命令规则、模板依赖与架构约束、
+命令引用、旧版 SDK 参数回退、会话 ID 解析和 JSONL 展示。CubeEgress 与暂停恢复全链仍需
+在可访问的 CubeSandbox 集群中运行并保留证据后再合并。
 
 ## 参考
 

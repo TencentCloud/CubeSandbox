@@ -31,13 +31,62 @@ class NetworkPolicyTests(unittest.TestCase):
         ):
             network_policy.show_unrelated_host_is_blocked(object())
 
-    def test_placeholder_is_required_inside_vm(self) -> None:
-        result = SimpleNamespace(stdout="real-secret", exit_code=0)
+    def test_secret_boundary_checks_ambient_and_process_environments(self) -> None:
+        results = [
+            SimpleNamespace(stdout="", exit_code=0),
+            SimpleNamespace(stdout=network_policy.PLACEHOLDER_KEY, exit_code=0),
+        ]
+        with patch.object(
+            network_policy,
+            "run_command",
+            side_effect=results,
+        ) as run:
+            network_policy.verify_secret_boundary(
+                object(),
+                {"HY3_API_KEY": network_policy.PLACEHOLDER_KEY},
+            )
+
+        self.assertNotIn("envs", run.call_args_list[0].kwargs)
+        self.assertEqual(
+            run.call_args_list[1].kwargs["envs"],
+            {"HY3_API_KEY": network_policy.PLACEHOLDER_KEY},
+        )
+
+    def test_rejects_secret_in_sandbox_wide_environment(self) -> None:
+        result = SimpleNamespace(stdout="unexpected-secret", exit_code=0)
         with (
             patch.object(network_policy, "run_command", return_value=result),
-            self.assertRaisesRegex(SystemExit, "Expected only"),
+            self.assertRaisesRegex(SystemExit, "sandbox-wide"),
         ):
-            network_policy.show_key_is_placeholder(object())
+            network_policy.verify_secret_boundary(
+                object(),
+                {"HY3_API_KEY": network_policy.PLACEHOLDER_KEY},
+            )
+
+    def test_placeholder_is_required_in_agent_process(self) -> None:
+        results = [
+            SimpleNamespace(stdout="", exit_code=0),
+            SimpleNamespace(stdout="wrong-value", exit_code=0),
+        ]
+        with (
+            patch.object(network_policy, "run_command", side_effect=results),
+            self.assertRaisesRegex(SystemExit, "placeholder"),
+        ):
+            network_policy.verify_secret_boundary(
+                object(),
+                {"HY3_API_KEY": network_policy.PLACEHOLDER_KEY},
+            )
+
+    def test_rejects_non_placeholder_agent_environment(self) -> None:
+        with (
+            patch.object(network_policy, "run_command") as run,
+            self.assertRaisesRegex(SystemExit, "placeholder"),
+        ):
+            network_policy.verify_secret_boundary(
+                object(),
+                {"HY3_API_KEY": "unexpected-value"},
+            )
+        run.assert_not_called()
 
 
 if __name__ == "__main__":

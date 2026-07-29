@@ -85,6 +85,14 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(config["model"], "tokenhub/hy3")
         self.assertEqual(config["share"], "disabled")
 
+    def test_destructive_command_rules_cover_direct_rm_variants(self) -> None:
+        config = json.loads((EXAMPLE / "opencode.json").read_text(encoding="utf-8"))
+        rules = config["permission"]["bash"]
+        self.assertEqual(next(iter(rules)), "*")
+        for pattern in ("rm *", "/bin/rm *", "/usr/bin/rm *", "command rm *"):
+            self.assertEqual(rules[pattern], "deny")
+        self.assertNotIn("rm -rf *", rules)
+
 
 if __name__ == "__main__":
     unittest.main()
