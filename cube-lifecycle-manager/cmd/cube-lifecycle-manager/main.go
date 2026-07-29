@@ -29,6 +29,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/resumer"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/statesync"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/sweeper"
+	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/webhook"
 )
 
 func main() {
@@ -182,6 +183,25 @@ func run() error {
 		Log:       logger.Named("statesync"),
 	}
 
+	// Outbound Webhook workers: one per configured endpoint, each with its
+	// own Redis consumer group so subscriptions are fully isolated from one
+	// another and from the auto-pause/resume loop above.
+	var webhookWorkers []*webhook.Worker
+	if len(cfg.WebhookEndpoints) > 0 {
+		delivery := webhook.DefaultDeliveryConfig()
+		delivery.MaxRetries = cfg.WebhookMaxRetries
+		delivery.Timeout = cfg.WebhookTimeout
+		delivery.RetryBase = cfg.WebhookRetryBase
+		deliverer := webhook.NewDeliverer(delivery, logger.Named("webhook"))
+		for _, ep := range cfg.WebhookEndpoints {
+			webhookWorkers = append(webhookWorkers,
+				webhook.NewWorker(ep, stream, deliverer, cfg.ConsumerName, cfg.StreamReadBlock, logger.Named("webhook")))
+		}
+		loopCount += len(webhookWorkers)
+		logger.Info("webhook delivery enabled",
+			zap.Int("endpoints", len(webhookWorkers)))
+	}
+
 	errs := make(chan error, loopCount)
 	go func() {
 		errs <- consumeStream(rootCtx, stream, pushClient, reg, cfg, stateSyncDeps, logger.Named("stream"))
@@ -191,6 +211,9 @@ func run() error {
 	go func() { errs <- apiSrv.Run(rootCtx) }()
 	if discSvc != nil {
 		go func() { errs <- discSvc.Run(rootCtx) }()
+	}
+	for _, w := range webhookWorkers {
+		go func() { errs <- w.Run(rootCtx) }()
 	}
 
 	// First loop to return wins; we cancel siblings via context and drain.

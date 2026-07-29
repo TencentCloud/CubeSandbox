@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/webhook"
 )
 
 // Config holds the cube-lifecycle-manager's runtime parameters. The shape is
@@ -76,6 +78,18 @@ type Config struct {
 	HeartbeatTTL time.Duration
 	// DiscoveryRefresh: cadence of the Redis heartbeat scan.
 	DiscoveryRefresh time.Duration
+
+	// Webhook endpoints receive outbound lifecycle event notifications
+	// (sandbox.created/deleted/paused/resumed). Empty disables the feature.
+	// Each endpoint gets its own Redis consumer group, so delivery is
+	// isolated per subscription and at-least-once across restarts.
+	WebhookEndpoints []webhook.Endpoint
+	// WebhookMaxRetries: retries after the initial delivery attempt.
+	WebhookMaxRetries int
+	// WebhookTimeout: per-attempt HTTP timeout for webhook delivery.
+	WebhookTimeout time.Duration
+	// WebhookRetryBase: initial exponential-backoff delay between attempts.
+	WebhookRetryBase time.Duration
 }
 
 // Default returns a config populated with safe defaults; callers then override
@@ -103,6 +117,11 @@ func Default() *Config {
 		UseStaticFleet:   false,
 		HeartbeatTTL:     15 * time.Second,
 		DiscoveryRefresh: 3 * time.Second,
+		// Webhook delivery defaults match the values the CubeAPI-side
+		// implementation used, so behaviour is familiar to operators.
+		WebhookMaxRetries: 3,
+		WebhookTimeout:    5 * time.Second,
+		WebhookRetryBase:  250 * time.Millisecond,
 	}
 }
 
@@ -204,6 +223,38 @@ func Load() (*Config, error) {
 			c.DiscoveryRefresh = d
 		}
 	}
+	if v := os.Getenv("CUBE_LCM_WEBHOOK_ENDPOINTS"); v != "" {
+		endpoints, err := webhook.ParseEndpoints(v)
+		if err != nil {
+			addErr("CUBE_LCM_WEBHOOK_ENDPOINTS", err)
+		} else {
+			c.WebhookEndpoints = endpoints
+		}
+	}
+	if v := os.Getenv("CUBE_LCM_WEBHOOK_MAX_RETRIES"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			addErr("CUBE_LCM_WEBHOOK_MAX_RETRIES", err)
+		} else if n < 0 {
+			addErr("CUBE_LCM_WEBHOOK_MAX_RETRIES", errors.New("must be >= 0"))
+		} else {
+			c.WebhookMaxRetries = n
+		}
+	}
+	if v := os.Getenv("CUBE_LCM_WEBHOOK_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err != nil {
+			addErr("CUBE_LCM_WEBHOOK_TIMEOUT", err)
+		} else {
+			c.WebhookTimeout = d
+		}
+	}
+	if v := os.Getenv("CUBE_LCM_WEBHOOK_RETRY_BASE"); v != "" {
+		if d, err := time.ParseDuration(v); err != nil {
+			addErr("CUBE_LCM_WEBHOOK_RETRY_BASE", err)
+		} else {
+			c.WebhookRetryBase = d
+		}
+	}
 
 	if c.ConsumerName == "" {
 		host, err := os.Hostname()
@@ -243,6 +294,14 @@ func (c *Config) Validate() error {
 	}
 	if c.LastActivePoll <= 0 {
 		return errors.New("last active poll must be > 0")
+	}
+	if len(c.WebhookEndpoints) > 0 {
+		if c.WebhookTimeout <= 0 {
+			return errors.New("webhook timeout must be > 0")
+		}
+		if c.WebhookRetryBase < 0 {
+			return errors.New("webhook retry base must be >= 0")
+		}
 	}
 	return nil
 }
