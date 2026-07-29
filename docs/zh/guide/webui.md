@@ -73,13 +73,15 @@ Dashboard 是一个静态前端，由 **控制节点** 上的 nginx 容器托管
 
 Dashboard 会先向 CubeOps 申请一个短时签名终端票据，再建立同源 WebSocket。CubeOps 校验所选容器处于运行状态，然后通过现有沙箱代理直接复用 envd Process API 创建 PTY；该链路不新增 CubeMaster 或 Cubelet RPC。
 
-终端支持 ANSI 输出、复制粘贴、滚动历史、窗口尺寸同步、重连、空闲超时和断连后的进程清理。窗口尺寸通过 envd 现有的 PTY Update 操作同步。
+终端支持 ANSI 输出、复制粘贴、滚动历史、窗口尺寸同步、重连、空闲超时和断连后的进程清理。`Ctrl/Cmd V` 用于粘贴；有文字选区时 `Ctrl/Cmd C` 用于复制，没有选区时则保留终端中断语义。窗口尺寸通过 envd 现有的 PTY Update 操作同步。
 
 终端当前以 `root` 用户启动；WebUI 不提供切换执行用户的入口。
 
 浏览器不能在 WebSocket 升级时自由附加 `Authorization` 请求头，因此 CubeOps 的 `POST /terminal/sandboxes/:id/tickets` 接口负责 JWT 鉴权，并签发有效期 30 秒、仅能用于终端的签名票据。浏览器通过 WebSocket 子协议字段提交票据，而不是把凭据放进请求 URL；升级时会校验票据签名、用途、沙箱和有效期。
 
 终端票据使用 CubeOps 已有的 JWT 签名密钥。多个 CubeOps 副本通过现有启动流程共享该密钥，因此任一副本签发的票据都能由其他副本校验，不要求粘性路由。`CUBE_MASTER_ADDR` 只用于校验沙箱和容器状态；终端数据沿用现有 envd 沙箱代理，可通过 `AGENTHUB_SANDBOX_PROXY_URL` 覆盖代理地址。
+
+每个 CubeOps 副本允许每位用户每分钟最多申请 12 个终端票据、每位用户最多保持 8 个活跃会话、每个沙箱最多保持 4 个活跃会话，并且单副本最多保持 64 个活跃会话。这些限制只约束单个副本的负载，不引入跨副本可变状态，终端票据仍可由任意副本无状态校验。
 
 终端审计日志会记录 `sandbox_id`、`container_id`、`session_id`、操作者和关闭原因。
 

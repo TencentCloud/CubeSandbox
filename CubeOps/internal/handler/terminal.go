@@ -79,20 +79,24 @@ type terminalTicketClaims struct {
 // replica can accept a WebSocket without sticky routing or shared process
 // memory.
 type TerminalGateway struct {
-	cm            CubeMasterClient
-	ticketSecret  []byte
-	sandboxDomain string
-	upgrader      websocket.Upgrader
-	envdHTTP      *http.Client
-	proxyBase     string
+	cm             CubeMasterClient
+	ticketSecret   []byte
+	sandboxDomain  string
+	upgrader       websocket.Upgrader
+	envdHTTP       *http.Client
+	proxyBase      string
+	ticketLimiter  *terminalTicketLimiter
+	sessionLimiter *terminalSessionLimiter
 }
 
 func NewTerminalGateway(cm CubeMasterClient, ticketSecret, sandboxDomain string) *TerminalGateway {
 	return &TerminalGateway{
-		cm:            cm,
-		ticketSecret:  []byte(ticketSecret),
-		sandboxDomain: strings.TrimSpace(sandboxDomain),
-		proxyBase:     service.EnvdProxyURL(),
+		cm:             cm,
+		ticketSecret:   []byte(ticketSecret),
+		sandboxDomain:  strings.TrimSpace(sandboxDomain),
+		proxyBase:      service.EnvdProxyURL(),
+		ticketLimiter:  newTerminalTicketLimiter(terminalTicketLimitPerUser, terminalTicketLimitWindow),
+		sessionLimiter: newTerminalSessionLimiter(terminalSessionLimitPerReplica, terminalSessionLimitPerUser, terminalSessionLimitPerSandbox),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  32 * 1024,
 			WriteBufferSize: 32 * 1024,
@@ -118,6 +122,16 @@ func (h *TerminalGateway) CreateTicket(c *gin.Context) {
 	sandboxID := strings.TrimSpace(c.Param("id"))
 	if sandboxID == "" {
 		httputil.WriteError(c, http.StatusBadRequest, "sandbox id is required")
+		return
+	}
+	username := strings.TrimSpace(c.GetString("username"))
+	if username == "" {
+		httputil.WriteError(c, http.StatusUnauthorized, "terminal user is not authenticated")
+		return
+	}
+	if !h.ticketLimiter.allow(username) {
+		c.Header("Retry-After", "60")
+		httputil.WriteError(c, http.StatusTooManyRequests, "terminal ticket request rate limit exceeded")
 		return
 	}
 
@@ -162,7 +176,7 @@ func (h *TerminalGateway) CreateTicket(c *gin.Context) {
 	claims := terminalTicketClaims{
 		SandboxID:   sandboxID,
 		ContainerID: containerID,
-		CreatedBy:   c.GetString("username"),
+		CreatedBy:   username,
 		Rows:        rows,
 		Cols:        cols,
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -209,6 +223,12 @@ func (h *TerminalGateway) OpenWebSocket(c *gin.Context) {
 		httputil.WriteError(c, http.StatusUnauthorized, "terminal ticket is invalid or expired")
 		return
 	}
+	releaseSession, ok := h.sessionLimiter.acquire(claims.CreatedBy, claims.SandboxID)
+	if !ok {
+		httputil.WriteError(c, http.StatusTooManyRequests, "terminal session limit reached")
+		return
+	}
+	defer releaseSession()
 
 	responseHeader := http.Header{}
 	responseHeader.Set("Sec-WebSocket-Protocol", terminalWSProtocol)
@@ -385,7 +405,7 @@ func parseTerminalTicket(secret []byte, raw string) (*terminalTicketClaims, erro
 	if err != nil || !token.Valid {
 		return nil, errors.New("terminal ticket is invalid")
 	}
-	if claims.SandboxID == "" || claims.ContainerID == "" || claims.ID == "" {
+	if claims.SandboxID == "" || claims.ContainerID == "" || claims.CreatedBy == "" || claims.ID == "" {
 		return nil, errors.New("terminal ticket is incomplete")
 	}
 	return claims, nil

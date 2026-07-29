@@ -86,6 +86,7 @@ The terminal does not add a CubeMaster or Cubelet RPC.
 The terminal supports:
 
 - ANSI output, cursor control, copy/paste, and scrollback through xterm.js
+- Desktop clipboard shortcuts: `Ctrl/Cmd V` pastes; `Ctrl/Cmd C` copies when text is selected and otherwise keeps the terminal interrupt behavior
 - stdin forwarding over WebSocket text frames with UTF-8-safe base64 payloads
 - terminal window resize through envd's existing PTY update operation
 - envd-backed running-container selection when sandbox detail exposes multiple containers
@@ -110,6 +111,11 @@ The secret is shared by replicas through the normal CubeOps bootstrap process,
 so a ticket issued by one replica can be accepted by another and no sticky
 routing is required. Each established WebSocket and envd stream remains owned
 by the replica that accepted that connection.
+
+Each CubeOps replica allows at most 12 terminal ticket requests per user per
+minute, 8 live sessions per user, 4 live sessions per sandbox, and 64 live
+sessions in total. These limits bound the load handled by one replica without
+adding shared mutable state; cross-replica ticket validation remains stateless.
 
 CubeOps uses `CUBE_MASTER_ADDR` only to validate sandbox and container state.
 Terminal data uses the same envd sandbox proxy path as other CubeOps operations;

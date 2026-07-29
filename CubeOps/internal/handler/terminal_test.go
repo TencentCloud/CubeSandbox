@@ -233,6 +233,57 @@ func TestCreateTerminalTicketHandler(t *testing.T) {
 	}
 }
 
+func TestCreateTerminalTicketRateLimitRunsBeforeCubeMasterLookup(t *testing.T) {
+	lookups := 0
+	cm := &fakeCM{
+		getSandbox: func(_ context.Context, _, _ string) (json.RawMessage, error) {
+			lookups++
+			return json.RawMessage(`{
+				"ret":{"ret_code":0},
+				"data":[{
+					"sandbox_id":"sandbox-a",
+					"status":1,
+					"containers":[{"container_id":"main","status":1,"type":"sandbox"}]
+				}]
+			}`), nil
+		},
+	}
+	gateway := NewTerminalGateway(cm, "shared-secret", "cube.test")
+	gateway.ticketLimiter = newTerminalTicketLimiter(1, time.Minute)
+	router := gin.New()
+	group := router.Group("/api/v1", func(c *gin.Context) {
+		c.Set("username", "sam")
+		c.Next()
+	})
+	gateway.RegisterAuthed(group)
+
+	send := func() *httptest.ResponseRecorder {
+		request := httptest.NewRequest(
+			http.MethodPost,
+			"/api/v1/terminal/sandboxes/sandbox-a/tickets",
+			bytes.NewBufferString(`{"containerID":"main","rows":24,"cols":80}`),
+		)
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		return response
+	}
+
+	if response := send(); response.Code != http.StatusCreated {
+		t.Fatalf("first status = %d, body = %s", response.Code, response.Body.String())
+	}
+	response := send()
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("limited status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if response.Header().Get("Retry-After") != "60" {
+		t.Fatalf("Retry-After = %q, want 60", response.Header().Get("Retry-After"))
+	}
+	if lookups != 1 {
+		t.Fatalf("CubeMaster lookups = %d, want 1", lookups)
+	}
+}
+
 func validTerminalClaims(expiresAt time.Time) terminalTicketClaims {
 	now := time.Now()
 	return terminalTicketClaims{

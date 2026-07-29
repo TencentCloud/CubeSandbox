@@ -40,6 +40,7 @@ import {
 
 type ConnectionState = 'idle' | 'connecting' | 'connected' | 'closed' | 'error';
 type TerminalFrame = { x: number; y: number; width: number; height: number };
+type TerminalResizeEdge = 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw';
 
 const MIN_TERMINAL_WIDTH = 520;
 const MIN_TERMINAL_HEIGHT = 360;
@@ -84,7 +85,8 @@ export function SandboxTerminalDialog({ sandboxId, open, onOpenChange, restoreKe
     const term = new XTerm({
       cursorBlink: true,
       convertEol: true,
-      fontFamily: '"JetBrains Mono Variable", "JetBrains Mono", ui-monospace, SFMono-Regular, monospace',
+      fontFamily:
+        '"JetBrains Mono Variable", "JetBrains Mono", ui-monospace, SFMono-Regular, monospace',
       fontSize: 13,
       lineHeight: 1.18,
       scrollback: 5000,
@@ -113,6 +115,15 @@ export function SandboxTerminalDialog({ sandboxId, open, onOpenChange, restoreKe
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
+    term.attachCustomKeyEventHandler((event) => {
+      const usesClipboardModifier = event.ctrlKey || event.metaKey;
+      if (!usesClipboardModifier || event.altKey) return true;
+
+      const key = event.key.toLowerCase();
+      if (key === 'v') return false;
+      if (key === 'c' && term.hasSelection()) return false;
+      return true;
+    });
     term.open(mountElement);
     term.focus();
     termRef.current = term;
@@ -165,16 +176,9 @@ export function SandboxTerminalDialog({ sandboxId, open, onOpenChange, restoreKe
       }
     };
 
+    // XTerm owns native paste so it can normalize line endings and bracketed
+    // paste before delivering the text through onData.
     const dataDisposable = term.onData(sendTerminalInput);
-    const pasteListener = (event: ClipboardEvent) => {
-      const text = event.clipboardData?.getData('text/plain') ?? '';
-      if (text.length > 0) {
-        event.preventDefault();
-        event.stopPropagation();
-        sendTerminalInput(text);
-      }
-    };
-    mountElement.addEventListener('paste', pasteListener, true);
     const resizeDisposable = term.onResize(({ rows, cols }) => {
       if (resizeTimerRef.current !== null) {
         window.clearTimeout(resizeTimerRef.current);
@@ -217,10 +221,12 @@ export function SandboxTerminalDialog({ sandboxId, open, onOpenChange, restoreKe
           setStatus('connected');
           setSessionId(`mock-${sandboxId}`);
           setExecId('mock-exec');
-          term.writeln(t('terminal.started', {
-            container: ticket.containerID ?? containerId ?? sandboxId,
-            execId: 'mock-exec',
-          }));
+          term.writeln(
+            t('terminal.started', {
+              container: ticket.containerID ?? containerId ?? sandboxId,
+              execId: 'mock-exec',
+            }),
+          );
           term.writeln(
             `Mock terminal attached to ${ticket.containerID ?? containerId ?? sandboxId}.`,
           );
@@ -250,9 +256,7 @@ export function SandboxTerminalDialog({ sandboxId, open, onOpenChange, restoreKe
         };
         ws.onclose = () => {
           if (disposed) return;
-          setStatus((prev) =>
-            prev === 'error' || prev === 'closed' ? prev : 'closed',
-          );
+          setStatus((prev) => (prev === 'error' || prev === 'closed' ? prev : 'closed'));
         };
         ws.onerror = () => {
           if (disposed) return;
@@ -273,7 +277,6 @@ export function SandboxTerminalDialog({ sandboxId, open, onOpenChange, restoreKe
     return () => {
       disposed = true;
       resizeObserver.disconnect();
-      mountElement.removeEventListener('paste', pasteListener, true);
       dataDisposable.dispose();
       resizeDisposable.dispose();
       if (resizeTimerRef.current !== null) {
@@ -304,10 +307,7 @@ export function SandboxTerminalDialog({ sandboxId, open, onOpenChange, restoreKe
     const observer = new ResizeObserver(() => {
       const rect = node.getBoundingClientRect();
       setFrame((value) => {
-        if (
-          Math.abs(value.width - rect.width) < 2
-          && Math.abs(value.height - rect.height) < 2
-        ) {
+        if (Math.abs(value.width - rect.width) < 2 && Math.abs(value.height - rect.height) < 2) {
           return value;
         }
         return clampTerminalFrame({
@@ -407,6 +407,37 @@ export function SandboxTerminalDialog({ sandboxId, open, onOpenChange, restoreKe
     window.addEventListener('pointercancel', stop);
   };
 
+  const startResize = (edge: TerminalResizeEdge, event: ReactPointerEvent<HTMLDivElement>) => {
+    if (maximized || event.button !== 0) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startFrame = frame;
+
+    const move = (moveEvent: PointerEvent) => {
+      setFrame(
+        resizeTerminalFrame(
+          startFrame,
+          edge,
+          moveEvent.clientX - startX,
+          moveEvent.clientY - startY,
+        ),
+      );
+    };
+    const stop = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('pointercancel', stop);
+      window.requestAnimationFrame(fit);
+    };
+
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', stop);
+    window.addEventListener('pointercancel', stop);
+  };
+
   return (
     <Dialog.Root modal={false} open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
@@ -415,9 +446,7 @@ export function SandboxTerminalDialog({ sandboxId, open, onOpenChange, restoreKe
           className={cn(
             'fixed z-50 flex min-h-0 min-w-0 max-w-[calc(100vw-1rem)] max-h-[calc(100vh-1rem)] flex-col overflow-hidden rounded-lg border border-border/70 bg-card shadow-2xl',
             minimized && 'pointer-events-none opacity-0',
-            maximized
-              ? 'inset-2 h-auto w-auto resize-none sm:inset-4'
-              : 'resize',
+            maximized ? 'inset-2 h-auto w-auto resize-none sm:inset-4' : 'resize-none',
           )}
           style={
             maximized
@@ -436,6 +465,58 @@ export function SandboxTerminalDialog({ sandboxId, open, onOpenChange, restoreKe
           }}
           onInteractOutside={(event) => event.preventDefault()}
         >
+          {!maximized ? (
+            <>
+              <div
+                aria-hidden="true"
+                data-terminal-resize="n"
+                className="absolute inset-x-3 top-0 z-[60] h-1.5 cursor-n-resize touch-none hover:bg-primary/30"
+                onPointerDown={(event) => startResize('n', event)}
+              />
+              <div
+                aria-hidden="true"
+                data-terminal-resize="e"
+                className="absolute bottom-3 right-0 top-3 z-[60] w-1.5 cursor-e-resize touch-none hover:bg-primary/30"
+                onPointerDown={(event) => startResize('e', event)}
+              />
+              <div
+                aria-hidden="true"
+                data-terminal-resize="s"
+                className="absolute bottom-0 inset-x-3 z-[60] h-1.5 cursor-s-resize touch-none hover:bg-primary/30"
+                onPointerDown={(event) => startResize('s', event)}
+              />
+              <div
+                aria-hidden="true"
+                data-terminal-resize="w"
+                className="absolute bottom-3 left-0 top-3 z-[60] w-1.5 cursor-w-resize touch-none hover:bg-primary/30"
+                onPointerDown={(event) => startResize('w', event)}
+              />
+              <div
+                aria-hidden="true"
+                data-terminal-resize="nw"
+                className="absolute left-0 top-0 z-[70] h-3 w-3 cursor-nwse-resize touch-none hover:bg-primary/40"
+                onPointerDown={(event) => startResize('nw', event)}
+              />
+              <div
+                aria-hidden="true"
+                data-terminal-resize="ne"
+                className="absolute right-0 top-0 z-[70] h-3 w-3 cursor-nesw-resize touch-none hover:bg-primary/40"
+                onPointerDown={(event) => startResize('ne', event)}
+              />
+              <div
+                aria-hidden="true"
+                data-terminal-resize="se"
+                className="absolute bottom-0 right-0 z-[70] h-3 w-3 cursor-nwse-resize touch-none hover:bg-primary/40"
+                onPointerDown={(event) => startResize('se', event)}
+              />
+              <div
+                aria-hidden="true"
+                data-terminal-resize="sw"
+                className="absolute bottom-0 left-0 z-[70] h-3 w-3 cursor-nesw-resize touch-none hover:bg-primary/40"
+                onPointerDown={(event) => startResize('sw', event)}
+              />
+            </>
+          ) : null}
           <div
             className={cn(
               'flex items-center gap-2 border-b border-border/60 px-3 py-2 sm:gap-3 sm:px-4 sm:py-3',
@@ -457,8 +538,12 @@ export function SandboxTerminalDialog({ sandboxId, open, onOpenChange, restoreKe
                   status === 'error' && 'bg-cube-err',
                 )}
               />
-              <span className="text-xs text-muted-foreground">{t(`terminal.status.${status}` as any)}</span>
-              <Dialog.Description className="sr-only">{t('terminal.description')}</Dialog.Description>
+              <span className="text-xs text-muted-foreground">
+                {t(`terminal.status.${status}` as any)}
+              </span>
+              <Dialog.Description className="sr-only">
+                {t('terminal.description')}
+              </Dialog.Description>
             </div>
             <div className="flex items-center gap-1">
               {containers.length > 1 ? (
@@ -509,7 +594,9 @@ export function SandboxTerminalDialog({ sandboxId, open, onOpenChange, restoreKe
                 size="icon"
                 variant="ghost"
                 title={maximized ? t('terminal.actions.restore') : t('terminal.actions.maximize')}
-                aria-label={maximized ? t('terminal.actions.restore') : t('terminal.actions.maximize')}
+                aria-label={
+                  maximized ? t('terminal.actions.restore') : t('terminal.actions.maximize')
+                }
                 onClick={toggleMaximized}
               >
                 {maximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
@@ -584,7 +671,10 @@ function selectContainer(
   selectedContainerId?: string,
 ): string | undefined {
   if (containers.length === 0) return undefined;
-  if (selectedContainerId && containers.some((container) => container.containerID === selectedContainerId)) {
+  if (
+    selectedContainerId &&
+    containers.some((container) => container.containerID === selectedContainerId)
+  ) {
     return selectedContainerId;
   }
   const sandboxContainer = containers.find((container) => container.kind === 'sandbox');
@@ -592,7 +682,8 @@ function selectContainer(
 }
 
 function formatContainerLabel(container: SandboxContainer): string {
-  const name = container.name && container.name !== container.containerID ? `${container.name} · ` : '';
+  const name =
+    container.name && container.name !== container.containerID ? `${container.name} · ` : '';
   const kind = container.kind ? ` · ${container.kind}` : '';
   return `${name}${container.containerID}${kind}`;
 }
@@ -633,6 +724,47 @@ function clampTerminalFrame(frame: TerminalFrame): TerminalFrame {
   };
 }
 
+function resizeTerminalFrame(
+  frame: TerminalFrame,
+  edge: TerminalResizeEdge,
+  deltaX: number,
+  deltaY: number,
+): TerminalFrame {
+  if (typeof window === 'undefined') return frame;
+
+  const maxWidth = Math.max(280, window.innerWidth - TERMINAL_MARGIN * 2);
+  const maxHeight = Math.max(240, window.innerHeight - TERMINAL_MARGIN * 2);
+  const minWidth = Math.min(MIN_TERMINAL_WIDTH, maxWidth);
+  const minHeight = Math.min(MIN_TERMINAL_HEIGHT, maxHeight);
+  const rightLimit = window.innerWidth - TERMINAL_MARGIN;
+  const bottomLimit = window.innerHeight - TERMINAL_MARGIN;
+
+  let left = frame.x;
+  let top = frame.y;
+  let right = frame.x + frame.width;
+  let bottom = frame.y + frame.height;
+
+  if (edge.includes('e')) {
+    right = Math.min(Math.max(right + deltaX, left + minWidth), rightLimit);
+  }
+  if (edge.includes('w')) {
+    left = Math.max(Math.min(left + deltaX, right - minWidth), TERMINAL_MARGIN);
+  }
+  if (edge.includes('s')) {
+    bottom = Math.min(Math.max(bottom + deltaY, top + minHeight), bottomLimit);
+  }
+  if (edge.includes('n')) {
+    top = Math.max(Math.min(top + deltaY, bottom - minHeight), TERMINAL_MARGIN);
+  }
+
+  return {
+    x: left,
+    y: top,
+    width: right - left,
+    height: bottom - top,
+  };
+}
+
 function handleServerMessage(
   term: XTerm,
   raw: string,
@@ -660,10 +792,12 @@ function handleServerMessage(
       setError(null);
       setSessionId(typeof msg.sessionId === 'string' ? msg.sessionId : null);
       setExecId(typeof msg.execId === 'string' ? msg.execId : null);
-      term.writeln(t('terminal.started', {
-        container: containerId,
-        execId: compactId(typeof msg.execId === 'string' ? msg.execId : null),
-      }));
+      term.writeln(
+        t('terminal.started', {
+          container: containerId,
+          execId: compactId(typeof msg.execId === 'string' ? msg.execId : null),
+        }),
+      );
       break;
     case 'output':
       if (typeof msg.data === 'string') term.write(decodeBase64Bytes(msg.data));
@@ -691,8 +825,7 @@ function handleServerMessage(
     case 'idleTimeout':
       setStatus('closed');
       {
-        const seconds =
-          typeof msg.idleTimeoutSeconds === 'number' ? msg.idleTimeoutSeconds : '-';
+        const seconds = typeof msg.idleTimeoutSeconds === 'number' ? msg.idleTimeoutSeconds : '-';
         const message = t('terminal.idleTimeout', { seconds });
         setError(message);
         term.writeln(`\r\n${message}`);
