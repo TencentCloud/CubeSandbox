@@ -41,9 +41,45 @@
     "envd": "envd"
   },
   "actions": {
+    "terminal": "Open Terminal",
     "resume": "Resume",
     "pause": "Pause",
     "kill": "Kill"
+  },
+  "terminal": {
+    "title": "Terminal · {{sandboxID}}",
+    "description": "Interactive terminal for the selected sandbox",
+    "mainContainerOnly": "Main container only",
+    "empty": "No terminal tabs are open.",
+    "unavailableLoading": "Terminal availability is being checked.",
+    "unavailableState": "Terminal is unavailable while the sandbox is {{state}}.",
+    "unavailableEnvd": "Terminal requires a running sandbox created from an envd-enabled template.",
+    "closeBeforePause": "Close all terminal tabs before pausing this sandbox.",
+    "status": {
+      "connecting": "Connecting…",
+      "connected": "Connected",
+      "closed": "Terminal closed",
+      "connectionLost": "Terminal connection lost. Reconnect to start a new shell.",
+      "connectionLostReason": "Terminal connection lost: {{reason}}. Reconnect to start a new shell.",
+      "error": "Terminal error",
+      "protocolError": "Invalid terminal protocol response",
+      "exited": "Process exited with code {{code}}",
+      "sessionLimit": "A sandbox can have at most 5 terminal tabs in this window.",
+      "clipboardError": "Clipboard access was denied by the browser.",
+      "newShell": "Starting a new shell…"
+    },
+    "tabs": {
+      "list": "Terminal sessions",
+      "label": "Shell {{index}}",
+      "new": "New terminal session",
+      "close": "Close {{label}}"
+    },
+    "actions": {
+      "copy": "Copy",
+      "paste": "Paste",
+      "reconnect": "Reconnect",
+      "close": "Close terminal"
+    }
   },
   "errors": {
     "unknown": "Unknown error",

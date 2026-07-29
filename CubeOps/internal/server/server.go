@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -20,11 +21,12 @@ import (
 
 // Server is the CubeOps HTTP server.
 type Server struct {
-	cfg     *config.Config
-	store   *store.Store
-	jm      *auth.JWTManager
-	httpSrv *http.Server
-	cm      *cubemaster.Client
+	cfg      *config.Config
+	store    *store.Store
+	jm       *auth.JWTManager
+	httpSrv  *http.Server
+	cm       *cubemaster.Client
+	terminal *handler.TerminalHandler
 }
 
 // New creates a new CubeOps server.
@@ -62,11 +64,16 @@ func (s *Server) Start() error {
 
 // Shutdown gracefully stops the server.
 func (s *Server) Shutdown(ctx context.Context) error {
-	if s.httpSrv == nil {
-		return nil
-	}
 	slog.Info("CubeOps shutting down")
-	return s.httpSrv.Shutdown(ctx)
+	var terminalErr error
+	if s.terminal != nil {
+		terminalErr = s.terminal.Shutdown(ctx)
+	}
+	var httpErr error
+	if s.httpSrv != nil {
+		httpErr = s.httpSrv.Shutdown(ctx)
+	}
+	return errors.Join(terminalErr, httpErr)
 }
 
 // buildRouter configures all routes on a gin engine.
@@ -92,6 +99,8 @@ func (s *Server) buildRouter() *gin.Engine {
 	storeH := handler.NewStoreHandler(handler.DefaultRegistryClient())
 	configH := handler.NewConfigHandler(s.cfg.Bind, 100, s.cfg.JWTSecret != "", s.cfg.SandboxDomain, "cubebox")
 	agenthubH := handler.NewAgentHubHandler(s.store, s.cm)
+	terminalH := handler.NewTerminalHandler(s.cm, s.jm, s.cfg)
+	s.terminal = terminalH
 	// SDK handler gets the AgentHubService so that E2B template/snapshot
 	// deletions can reverse-sync AgentHub registrations (matching the old
 	// Rust reverse_sync_agenthub_template that lived in CubeAPI).
@@ -100,6 +109,7 @@ func (s *Server) buildRouter() *gin.Engine {
 	// Public (no auth) routes — login + refresh.
 	public := r.Group("/api/v1")
 	authH.RegisterPublic(public)
+	terminalH.RegisterPublic(public)
 
 	// Authenticated routes. The session / logout / change-password endpoints
 	// are mounted here, behind the JWT middleware.
@@ -110,6 +120,7 @@ func (s *Server) buildRouter() *gin.Engine {
 	configH.Register(authed)
 	storeH.Register(authed)
 	agenthubH.Register(authed)
+	terminalH.RegisterAuthed(authed)
 
 	// SDK routes — mounted at both /api/v1/sdk and /api/v1/sdk/v2 because
 	// the WebUI and the E2B-compatible clients hit different prefixes.

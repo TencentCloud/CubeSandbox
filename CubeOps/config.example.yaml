@@ -47,3 +47,7 @@ redis_url: ""
 
 # --- Sandbox domain exposed to SDK clients via /config ---
 sandbox_domain: "cube.app"
+
+# --- Web terminal (CubeOps -> CubeProxy -> envd PTY) ---
+# This is a data-plane route; CubeAPI and Cubelet RPCs are not involved.
+sandbox_proxy_url: "http://127.0.0.1:80"

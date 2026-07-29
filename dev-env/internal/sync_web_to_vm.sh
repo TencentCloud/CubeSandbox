@@ -24,7 +24,9 @@ WEB_SYNC_BUILD="${WEB_SYNC_BUILD:-1}"
 WEB_UI_IMAGE="${WEB_UI_IMAGE:-cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat}"
 WEB_UI_CONTAINER_NAME="${WEB_UI_CONTAINER_NAME:-cube-webui}"
 WEB_UI_HOST_PORT="${WEB_UI_HOST_PORT:-12088}"
-WEB_UI_UPSTREAM="${WEB_UI_UPSTREAM:-http://host.docker.internal:3000}"
+WEB_UI_UPSTREAM="${WEB_UI_UPSTREAM:-http://host.docker.internal:3010}"
+SANDBOX_PROXY_UPSTREAM="${SANDBOX_PROXY_UPSTREAM:-http://host.docker.internal:80}"
+CUBE_OPS_UPSTREAM="${CUBE_OPS_UPSTREAM:-http://host.docker.internal:3010}"
 
 ASKPASS_SCRIPT="${WORK_DIR}/.ssh-askpass.sh"
 TMP_DIR="${WORK_DIR}/webui-sync"
@@ -66,6 +68,8 @@ Environment overrides:
   WEB_SYNC_BUILD        default: ${WEB_SYNC_BUILD} (set 0 to skip npm build)
   WEB_UI_HOST_PORT      default: ${WEB_UI_HOST_PORT}
   WEB_UI_UPSTREAM       default: ${WEB_UI_UPSTREAM}
+  SANDBOX_PROXY_UPSTREAM default: ${SANDBOX_PROXY_UPSTREAM}
+  CUBE_OPS_UPSTREAM     default: ${CUBE_OPS_UPSTREAM}
   WEB_UI_IMAGE          default: ${WEB_UI_IMAGE}
   WEB_UI_CONTAINER_NAME default: ${WEB_UI_CONTAINER_NAME}
   SSH_HOST, SSH_PORT    default: ${SSH_HOST}:${SSH_PORT}
@@ -171,6 +175,8 @@ cp "${REPO_ROOT}/deploy/one-click/webui/docker-compose.yaml.template" "${TMP_DIR
 
 sed \
   -e "s#__WEB_UI_UPSTREAM__#$(escape_sed "${WEB_UI_UPSTREAM}")#g" \
+  -e "s#__SANDBOX_PROXY_UPSTREAM__#$(escape_sed "${SANDBOX_PROXY_UPSTREAM}")#g" \
+  -e "s#__CUBE_OPS_UPSTREAM__#$(escape_sed "${CUBE_OPS_UPSTREAM}")#g" \
   "${TMP_DIR}/nginx.conf" > "${TMP_DIR}/nginx.generated.conf"
 
 sed \
@@ -204,9 +210,8 @@ run_ssh "
   sudo install -m 0644 '${REMOTE_STAGE_DIR}/nginx.generated.conf' '${REMOTE_WEBUI_DIR}/nginx.generated.conf'
   sudo install -m 0644 '${REMOTE_STAGE_DIR}/docker-compose.yaml.template' '${REMOTE_WEBUI_DIR}/docker-compose.yaml.template'
   sudo install -m 0644 '${REMOTE_STAGE_DIR}/docker-compose.yaml' '${REMOTE_WEBUI_DIR}/docker-compose.yaml'
-  cd '${REMOTE_WEBUI_DIR}'
-  sudo docker compose down --remove-orphans >/dev/null 2>&1 || true
-  sudo docker compose up -d
+  sudo systemctl restart cube-sandbox-webui.service
+  sudo systemctl is-active --quiet cube-sandbox-webui.service
   sudo rm -rf '${REMOTE_STAGE_DIR}'
 "
 
@@ -214,7 +219,7 @@ log_info "Checking WebUI from inside VM"
 run_ssh "
   set -e
   curl -fsS 'http://127.0.0.1:${WEB_UI_HOST_PORT}/' >/dev/null
-  curl -fsS 'http://127.0.0.1:${WEB_UI_HOST_PORT}/cubeapi/v1/health' >/dev/null
+  curl -fsS 'http://127.0.0.1:${WEB_UI_HOST_PORT}/health' >/dev/null
 "
 
 log_success "WebUI synced. Open: http://127.0.0.1:${WEB_UI_HOST_PORT}"

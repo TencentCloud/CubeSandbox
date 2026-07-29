@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 type ClientOption func(*Client)
@@ -87,6 +88,20 @@ func (c *Client) Connect(ctx context.Context, sandboxID string) (*Sandbox, error
 	}
 	c.attachSandbox(&sandbox)
 	return &sandbox, nil
+}
+
+// Attach returns a local handle for an existing sandbox without making a
+// control-plane request. It is intended for trusted backend components that
+// already validated the sandbox through their own control plane and only need
+// to use the SDK data-plane APIs (commands, files, PTY, and so on).
+func (c *Client) Attach(sandboxID string) (*Sandbox, error) {
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" {
+		return nil, fmt.Errorf("cubesandbox: sandbox ID is required")
+	}
+	sandbox := &Sandbox{SandboxID: sandboxID}
+	c.attachSandbox(sandbox)
+	return sandbox, nil
 }
 
 func (c *Client) List(ctx context.Context) ([]SandboxInfo, error) {

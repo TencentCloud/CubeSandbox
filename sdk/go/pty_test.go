@@ -137,9 +137,11 @@ func TestPtyCreateUserEnvsCwd(t *testing.T) {
 
 	sb := newPtyTestSandbox(t, server)
 	handle, err := sb.Pty().Create(context.Background(), PtySize{Rows: 10, Cols: 40}, PtyCreateOptions{
-		User: "app",
-		Cwd:  "/work",
-		Envs: map[string]string{"TERM": "vt100", "FOO": "bar"},
+		Command: "/bin/sh",
+		Args:    []string{"-l"},
+		User:    "app",
+		Cwd:     "/work",
+		Envs:    map[string]string{"TERM": "vt100", "FOO": "bar"},
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -153,6 +155,9 @@ func TestPtyCreateUserEnvsCwd(t *testing.T) {
 	}
 	var req ptyStartRequest
 	decodeEnvelopeJSON(t, gotBody, &req)
+	if req.Process.Cmd != "/bin/sh" || strings.Join(req.Process.Args, " ") != "-l" {
+		t.Fatalf("process=%q %v, want /bin/sh -l", req.Process.Cmd, req.Process.Args)
+	}
 	if req.Process.Cwd != "/work" {
 		t.Fatalf("cwd=%q", req.Process.Cwd)
 	}

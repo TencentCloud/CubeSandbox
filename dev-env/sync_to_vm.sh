@@ -67,7 +67,7 @@ Subcommands:
   -h, --help                    Show this help.
 
 Known components:
-  cubemaster, cubemastercli, cubelet, cubecli,
+  cubemaster, cubemastercli, cubelet, cubecli, cubeops,
   network-agent, cube-api, cube-runtime, containerd-shim-cube-rs
 
 Environment overrides:
@@ -157,6 +157,7 @@ component_remote_dir() {
   case "$1" in
     cubemaster|cubemastercli) printf '%s/CubeMaster/bin\n' "${TOOLBOX_ROOT}" ;;
     cubelet|cubecli) printf '%s/Cubelet/bin\n' "${TOOLBOX_ROOT}" ;;
+    cubeops) printf '%s/CubeOps/bin\n' "${TOOLBOX_ROOT}" ;;
     network-agent) printf '%s/network-agent/bin\n' "${TOOLBOX_ROOT}" ;;
     cube-api) printf '%s/CubeAPI/bin\n' "${TOOLBOX_ROOT}" ;;
     # Keep one-click's /usr/local/bin symlinks intact by updating the real install path.
@@ -168,6 +169,7 @@ component_remote_dir() {
 ALL_COMPONENTS=(
   cubemaster cubemastercli
   cubelet cubecli
+  cubeops
   network-agent
   cube-api
   cube-runtime containerd-shim-cube-rs

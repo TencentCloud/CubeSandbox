@@ -8,8 +8,10 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.2.2
 	github.com/google/go-containerregistry v0.21.6
 	github.com/google/uuid v1.6.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/ory/dockertest/v3 v3.12.0
 	github.com/tencentcloud/CubeSandbox/CubeDB v0.1.0
+	github.com/tencentcloud/CubeSandbox/sdk/go v0.0.0
 	github.com/tencentcloud/CubeSandbox/cubelog v0.1.1-0.20260113105508-a996703fa42f
 	golang.org/x/crypto v0.50.0
 	gorm.io/gorm v1.25.10
@@ -101,3 +103,5 @@ require (
 )
 
 replace github.com/tencentcloud/CubeSandbox/CubeDB => ../CubeDB
+
+replace github.com/tencentcloud/CubeSandbox/sdk/go => ../sdk/go
