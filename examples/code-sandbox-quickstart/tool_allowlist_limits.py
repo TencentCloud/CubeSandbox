@@ -57,10 +57,15 @@ print(
 expect_allowed("clean_echo", "echo agent-tool-allowlist-ok")
 
 # 6) Documentation-only: allowlisted tools are not confined by this gate
-assert is_allowlisted("cat /etc/passwd")
+if not is_allowlisted("cat /etc/passwd"):
+    raise SystemExit("expected cat /etc/passwd to pass argv gate (non-goal)")
 print(
     "[out_of_scope] cat /etc/passwd is allowlisted here — guest isolation "
     "(MicroVM) + path policy must cover that, not this argv gate"
 )
+
+# Residual (intentional): redirects are not shell-chaining meta for this demo.
+if not is_allowlisted("echo artifact-ok > /tmp/x"):
+    raise SystemExit("expected redirect form to remain allowlisted")
 
 print("LIMITS_DEMO_OK")

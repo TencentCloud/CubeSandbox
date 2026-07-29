@@ -1,0 +1,118 @@
+# Copyright (c) 2024 Tencent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Host-only unit tests for tool_allowlist (no cluster, no Sandbox).
+
+Run from this directory:
+
+    python -m unittest test_tool_allowlist.py -v
+
+These tests lock the *documented* threat model: what the gate claims to
+refuse, and one explicit non-goal (allowlisted cat is not path confinement).
+"""
+
+from __future__ import annotations
+
+import unittest
+
+from tool_allowlist import (
+    AllowlistDenied,
+    assert_allowlisted,
+    is_allowlisted,
+)
+
+
+class ToolAllowlistTests(unittest.TestCase):
+    def test_empty_and_whitespace_denied(self) -> None:
+        for cmd in ("", "   ", "\t"):
+            with self.subTest(cmd=cmd):
+                self.assertFalse(is_allowlisted(cmd))
+                with self.assertRaises(AllowlistDenied):
+                    assert_allowlisted(cmd)
+
+    def test_happy_path_echo(self) -> None:
+        cmd = "echo agent-tool-allowlist-ok"
+        self.assertTrue(is_allowlisted(cmd))
+        self.assertEqual(assert_allowlisted(cmd), cmd)
+
+    def test_unknown_binary_denied(self) -> None:
+        for cmd in ("bash -c id", "curl -s http://example.com", "busybox sh"):
+            with self.subTest(cmd=cmd):
+                self.assertFalse(is_allowlisted(cmd))
+                with self.assertRaises(AllowlistDenied) as ctx:
+                    assert_allowlisted(cmd)
+                self.assertIn("not on tool allowlist", str(ctx.exception))
+
+    def test_shell_metachar_chaining_denied(self) -> None:
+        # Naive first-token checks would accept these because argv0 is echo.
+        cases = (
+            "echo ok; bash -c id",
+            "echo ok | bash",
+            "echo ok & bash",
+            "echo `id`",
+            "echo $HOME",
+            "echo ok\nbash",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd):
+                self.assertFalse(is_allowlisted(cmd))
+                with self.assertRaises(AllowlistDenied) as ctx:
+                    assert_allowlisted(cmd)
+                self.assertIn("shell metacharacters", str(ctx.exception))
+
+    def test_path_style_argv0_denied(self) -> None:
+        for cmd in ("/bin/echo hi", "./echo hi", r"..\echo hi"):
+            with self.subTest(cmd=cmd):
+                self.assertFalse(is_allowlisted(cmd))
+                with self.assertRaises(AllowlistDenied):
+                    assert_allowlisted(cmd)
+
+    def test_python3_requires_explicit_flag(self) -> None:
+        cmd = "python3 -c 'print(1)'"
+        self.assertFalse(is_allowlisted(cmd))
+        with self.assertRaises(AllowlistDenied):
+            assert_allowlisted(cmd)
+        self.assertTrue(is_allowlisted(cmd, enable_code_execution=True))
+        self.assertEqual(
+            assert_allowlisted(cmd, enable_code_execution=True), cmd
+        )
+
+    def test_assert_tracks_is_allowlisted(self) -> None:
+        """assert_* must stay a thin wrapper — no divergent accept/deny."""
+        samples = (
+            "echo ok",
+            "bash -c id",
+            "echo ok; true",
+            "/bin/ls",
+            "python3 -c '1'",
+            "cat /tmp/x",
+        )
+        for cmd in samples:
+            with self.subTest(cmd=cmd):
+                ok = is_allowlisted(cmd)
+                if ok:
+                    self.assertEqual(assert_allowlisted(cmd), cmd)
+                else:
+                    with self.assertRaises(AllowlistDenied):
+                        assert_allowlisted(cmd)
+
+    def test_non_goal_allowlisted_cat_is_not_confinement(self) -> None:
+        # Honesty check: the gate does NOT implement path policy.
+        self.assertTrue(is_allowlisted("cat /etc/passwd"))
+
+    def test_residual_redirect_still_first_token_only(self) -> None:
+        # Documented residual: '>' is not treated as shell-chaining meta
+        # (agent loop writes artifacts with `echo ... > file`). Path policy
+        # remains out of scope for this host gate.
+        cmd = "echo artifact-ok > /tmp/agent_loop.txt"
+        self.assertTrue(is_allowlisted(cmd))
+        self.assertEqual(assert_allowlisted(cmd), cmd)
+
+    def test_unbalanced_quotes_denied(self) -> None:
+        self.assertFalse(is_allowlisted("echo 'unterminated"))
+        with self.assertRaises(AllowlistDenied):
+            assert_allowlisted("echo 'unterminated")
+
+
+if __name__ == "__main__":
+    unittest.main()

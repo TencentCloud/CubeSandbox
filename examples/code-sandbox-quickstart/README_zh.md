@@ -129,6 +129,7 @@ hello cube
 | `tool_allowlist_deny.py` | 宿主机 argv 工具白名单 — 非白名单命令在 `Sandbox.create` 前拒绝 |
 | `tool_allowlist_allow.py` | 白名单命令进 MicroVM，并叠加 `allow_internet_access=False`（门控 ⊥ 出口） |
 | `tool_allowlist_limits.py` | 威胁模型：shell 串联 / 路径二进制 / 解释器边界（纯宿主机） |
+| `test_tool_allowlist.py` | 门控宿主机单测（含写明的非目标） |
 | `tool_agent_loop.py` | 迷你 Agent 环：每轮门控、deny 时 health 不变、断网探测、仅 commands 写产物 |
 
 ### exec_code.py — 运行 Python 代码
@@ -243,6 +244,9 @@ python network_denylist.py
 # 威胁模型 / 非目标（不建沙箱）
 python tool_allowlist_limits.py
 
+# 纯宿主机单测（stdlib unittest，不连集群）
+python -m unittest test_tool_allowlist.py -v
+
 # 拒绝：不创建沙箱
 python tool_allowlist_deny.py
 
@@ -310,6 +314,7 @@ code-sandbox-quickstart/
 ├── tool_allowlist_deny.py     # 拒绝路径（不创建沙箱）
 ├── tool_allowlist_allow.py    # 放行 + 断网叠加
 ├── tool_allowlist_limits.py   # 威胁模型 / 边界演示（纯宿主机）
+├── test_tool_allowlist.py     # 门控宿主机单测
 ├── tool_agent_loop.py         # 迷你 Agent：propose → 门控 → MicroVM
 ├── requirements.txt           # Python 依赖
 └── .env.example               # 环境变量模板

@@ -134,6 +134,7 @@ hello cube
 | `tool_allowlist_deny.py` | Host argv tool allowlist — deny before `Sandbox.create` |
 | `tool_allowlist_allow.py` | Allowlisted command in MicroVM + `allow_internet_access=False` (gate ⊥ egress) |
 | `tool_allowlist_limits.py` | Threat model: shell-chain / path / interpreter limits (host-only) |
+| `test_tool_allowlist.py` | Host-only unittest for the gate (incl. documented non-goals) |
 | `tool_agent_loop.py` | Toy agent loop: gate every turn, health flat on deny, airgap + commands-only artifact |
 
 ### exec_code.py — Run Python Code
@@ -252,6 +253,9 @@ privilege escalation. Run `tool_allowlist_limits.py` for the cases.
 # Threat model / non-goals (no sandbox)
 python tool_allowlist_limits.py
 
+# Host-only unit tests (stdlib unittest; no cluster)
+python -m unittest test_tool_allowlist.py -v
+
 # Deny: no sandbox created
 python tool_allowlist_deny.py
 
@@ -319,6 +323,7 @@ code-sandbox-quickstart/
 ├── tool_allowlist_deny.py     # Deny before Sandbox.create
 ├── tool_allowlist_allow.py    # Allowlisted cmd + airgap
 ├── tool_allowlist_limits.py   # Threat model / bypass limits (host-only)
+├── test_tool_allowlist.py     # Host-only unittest for the gate
 ├── tool_agent_loop.py         # Toy agent propose → gate → MicroVM loop
 ├── requirements.txt           # Python dependencies
 └── .env.example               # Environment variable template
