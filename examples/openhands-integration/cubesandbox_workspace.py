@@ -158,8 +158,10 @@ class CubeSandboxWorkspace(RemoteWorkspace):
     _owns_sandbox: bool = PrivateAttr(default=False)
     # The platform's connect/resume API deliberately does not re-surface the
     # traffic token (CubeProxy validates it from Redis), so the client must
-    # preserve the original one across resume/re-attach.
-    _saved_traffic_token: str | None = PrivateAttr(default=None)
+    # preserve the original one across resume/re-attach. Kept as SecretStr so
+    # accidental repr/print shows a mask; unwrapped only at the header and
+    # persistence boundaries.
+    _saved_traffic_token: SecretStr | None = PrivateAttr(default=None)
 
     @model_validator(mode="before")
     @classmethod
@@ -177,7 +179,7 @@ class CubeSandboxWorkspace(RemoteWorkspace):
             sandbox = Sandbox.connect(self.sandbox_id)  # resumes if paused
             self._owns_sandbox = False
             if self.traffic_access_token is not None:
-                self._saved_traffic_token = self.traffic_access_token.get_secret_value()
+                self._saved_traffic_token = self.traffic_access_token
             logger.info(
                 "Attached to CubeSandbox %s in %.0f ms",
                 sandbox.sandbox_id,
@@ -203,7 +205,8 @@ class CubeSandboxWorkspace(RemoteWorkspace):
                 create_kwargs["network"] = network
             sandbox = Sandbox.create(**create_kwargs)
             self._owns_sandbox = True
-            self._saved_traffic_token = getattr(sandbox, "traffic_access_token", None)
+            raw_token = getattr(sandbox, "traffic_access_token", None)
+            self._saved_traffic_token = SecretStr(raw_token) if raw_token else None
             logger.info(
                 "Created CubeSandbox %s from template %s in %.0f ms",
                 sandbox.sandbox_id,
@@ -255,13 +258,14 @@ class CubeSandboxWorkspace(RemoteWorkspace):
 
     @property
     def _traffic_token(self) -> str | None:
-        return self._saved_traffic_token
+        token = self._saved_traffic_token
+        return token.get_secret_value() if token else None
 
     @property
     def traffic_token(self) -> str | None:
-        """The per-sandbox traffic token (persist it to re-attach to a
-        private sandbox from another process)."""
-        return self._saved_traffic_token
+        """The per-sandbox traffic token in plain text (persist it to
+        re-attach to a private sandbox from another process)."""
+        return self._traffic_token
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -385,7 +389,8 @@ class CubeSandboxWorkspace(RemoteWorkspace):
         # RemoteWorkspace.__exit__ only sends the completion callback and
         # BaseWorkspace.__exit__ is a documented no-op, so cleanup must be
         # explicit — and in a finally, so a failed callback cannot leak the
-        # sandbox.
+        # sandbox. Returning None is intentional: the parent contract also
+        # returns None (never True), so no exception suppression is discarded.
         try:
             super().__exit__(exc_type, exc_val, exc_tb)
         finally:
