@@ -65,7 +65,9 @@ def main() -> int:
     )
     sandbox_id = workspace.sandbox_id
     # Until the re-attach hand-off succeeds, any failure must reap the
-    # deliberately-kept sandbox — nobody else would.
+    # deliberately-kept sandbox — nobody else would. BaseException on purpose:
+    # Ctrl-C during the frozen-gap sleep is the likeliest interrupt, and it
+    # too must reap before propagating (the handler re-raises unconditionally).
     try:
         print(f"sandbox {sandbox_id} up, agent server at {workspace.host}")
 

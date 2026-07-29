@@ -38,15 +38,23 @@ Environment: the E2B-compatible client reads `E2B_API_URL` and `E2B_API_KEY`,
 the same convention as every other CubeSandbox example.
 """
 
+from __future__ import annotations
+
 import os
 import time
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any
 from urllib.request import Request, urlopen
 
 from e2b_code_interpreter import Sandbox
 from openhands.sdk.logger import get_logger
 from openhands.sdk.workspace import RemoteWorkspace
 from pydantic import Field, PrivateAttr, SecretStr, model_validator
+
+if TYPE_CHECKING:
+    # Runtime never imports this (typing.Self is 3.11+); with postponed
+    # annotations the `-> Self` hint below is never evaluated either, so the
+    # module imports on any interpreter the OpenHands SDK itself supports.
+    from typing import Self
 
 logger = get_logger(__name__)
 
@@ -209,17 +217,10 @@ class CubeSandboxWorkspace(RemoteWorkspace):
         # timeout, parent init error, or KeyboardInterrupt) must release it.
         # Sandboxes we created are killed; attached ones are left running.
         try:
-            # The platform proxy exposes in-sandbox ports as public hosts of
-            # the form "<port>-<sandbox-id>.<domain>" (see the quickstart
-            # mask-request-host example).
-            public_host = sandbox.get_host(self.agent_server_port)
             if not self.host:
-                port_suffix = ""
-                if self.proxy_http_port != 80 and ":" not in public_host:
-                    port_suffix = f":{self.proxy_http_port}"
                 # Same assignment idiom the SDK's own DockerWorkspace uses in
                 # its model_post_init.
-                object.__setattr__(self, "host", f"http://{public_host}{port_suffix}")
+                object.__setattr__(self, "host", self._public_url(sandbox))
 
             self._wait_for_ready(timeout=self.health_check_timeout)
             logger.info(
@@ -230,12 +231,25 @@ class CubeSandboxWorkspace(RemoteWorkspace):
 
             # Initialize the parent RemoteWorkspace against the live server.
             super().model_post_init(context)
-        except BaseException:
+        except BaseException:  # incl. KeyboardInterrupt — must not leak the sandbox
             if self._owns_sandbox:
                 self._kill_sandbox()
             else:
                 self._sandbox = None
             raise
+
+    def _public_url(self, sandbox: Sandbox) -> str:
+        """The agent server's URL through the platform proxy.
+
+        The proxy exposes in-sandbox ports as public hosts of the form
+        "<port>-<sandbox-id>.<domain>" (see the quickstart mask-request-host
+        example); the proxy's HTTP port is appended when it is not 80.
+        """
+        public_host = sandbox.get_host(self.agent_server_port)
+        port_suffix = ""
+        if self.proxy_http_port != 80 and ":" not in public_host:
+            port_suffix = f":{self.proxy_http_port}"
+        return f"http://{public_host}{port_suffix}"
 
     # ── Auth ──────────────────────────────────────────────────────────────
 
@@ -274,7 +288,10 @@ class CubeSandboxWorkspace(RemoteWorkspace):
         """Poll the agent server /ready endpoint until it reports readiness.
 
         /ready (unlike the liveness /health) returns non-2xx until the server
-        has fully finished initialization.
+        has fully finished initialization. Polls with urllib rather than the
+        parent's HTTP client: the first call happens during model_post_init,
+        before super().model_post_init() has set the client up. ``_headers``
+        (session key + traffic token) is honored on both stacks.
         """
         ready_url = f"{self.host.rstrip('/')}/ready"
         deadline = time.monotonic() + timeout
@@ -320,7 +337,14 @@ class CubeSandboxWorkspace(RemoteWorkspace):
         """Thaw a paused MicroVM and wait for the agent server to respond."""
         sandbox_id = self.sandbox.sandbox_id
         logger.info("Resuming sandbox %s", sandbox_id)
-        self._sandbox = Sandbox.connect(sandbox_id)
+        sandbox = Sandbox.connect(sandbox_id)
+        self._sandbox = sandbox
+        # Re-derive the proxied URL like the create path does, and drop the
+        # parent's cached HTTP client: its base_url is bound to the previous
+        # host, so refreshing the field alone would keep requests pinned to a
+        # stale address if the proxy scheme changed across the pause.
+        object.__setattr__(self, "host", self._public_url(sandbox))
+        self.reset_client()
         self._wait_for_ready(timeout=self.health_check_timeout)
         logger.info("Sandbox %s resumed", sandbox_id)
 

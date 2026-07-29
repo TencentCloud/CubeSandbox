@@ -39,9 +39,8 @@ RUN apt-get update \
 # so the same Dockerfile works on any base revision and on amd64/arm64 alike.
 # The installer URL and uv version are pinned for reproducible rebuilds.
 ARG UV_VERSION=0.11.33
-ADD https://astral.sh/uv/${UV_VERSION}/install.sh /tmp/uv-install.sh
-RUN UV_INSTALL_DIR=/usr/local/bin sh /tmp/uv-install.sh \
-    && rm /tmp/uv-install.sh
+RUN curl -fsSL "https://astral.sh/uv/${UV_VERSION}/install.sh" \
+    | UV_INSTALL_DIR=/usr/local/bin sh
 
 # UV_PYTHON_INSTALL_DIR must be world-readable: the venv's interpreter symlink
 # points into it, and the agent server runs as the unprivileged `user` account
