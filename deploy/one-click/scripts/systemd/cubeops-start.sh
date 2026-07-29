@@ -23,6 +23,9 @@ export CUBE_OPS_LOG_LEVEL="${CUBE_OPS_LOG_LEVEL:-info}"
 
 # CubeMaster address (same host in All-in-One mode).
 export CUBE_MASTER_ADDR="${CUBE_MASTER_ADDR:-http://127.0.0.1:8089}"
+# Shared with CubeMaster through a dedicated root-only file. A missing file
+# keeps the terminal gateway disabled until deployment wiring supplies it.
+load_terminal_internal_token
 
 # JWT configuration. JWT_SECRET left unset → CubeOps auto-generates and
 # persists it to t_system_setting on first boot (single-instance default).

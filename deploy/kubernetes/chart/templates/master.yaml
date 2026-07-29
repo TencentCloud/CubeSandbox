@@ -44,6 +44,11 @@ spec:
               value: /data/CubeMaster/storage
             - name: CUBE_NODE_IPS
               value: {{ join "," .Values.controlPlane.master.nodeIPs | quote }}
+            - name: CUBE_TERMINAL_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.terminalSecretName" . }}
+                  key: {{ .Values.terminal.secretKey }}
             {{- with .Values.controlPlane.master.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

@@ -120,6 +120,8 @@ type TerminalConf struct {
 	CloseTimeoutInSec  int    `yaml:"close_timeout_seconds"`
 }
 
+const terminalInternalTokenEnv = "CUBE_TERMINAL_INTERNAL_TOKEN"
+
 type Debug struct {
 	Address string `toml:"address"`
 }
@@ -881,6 +883,9 @@ func preHandleTerminalConf(config *Config) error {
 	if config.TerminalConf == nil {
 		config.TerminalConf = &TerminalConf{}
 	}
+	if token, ok := os.LookupEnv(terminalInternalTokenEnv); ok {
+		config.TerminalConf.InternalToken = token
+	}
 	if config.TerminalConf.MaxFrameBytes == 0 {
 		config.TerminalConf.MaxFrameBytes = 64 << 10
 	}
@@ -1235,6 +1240,9 @@ func validate(cfg *Config) error {
 		}
 	}
 	if cfg.TerminalConf != nil {
+		if tokenLength := len(cfg.TerminalConf.InternalToken); tokenLength > 0 && tokenLength < 16 {
+			return errors.New("terminal internal token must be empty or at least 16 bytes")
+		}
 		if cfg.TerminalConf.MaxFrameBytes <= 0 || cfg.TerminalConf.MaxFrameBytes > 64<<10 {
 			return errors.New("terminal max_frame_bytes must be between 1 and 65536")
 		}
