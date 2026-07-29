@@ -7,8 +7,10 @@ package cubelet
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	cubebox "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
@@ -207,4 +209,59 @@ func Exec(ctx context.Context, calleeEp string,
 		time.Duration(config.GetConfig().CubeletConf.CommonTimeoutInsec)*time.Second)
 	defer cancel()
 	return c.Exec(ctx, req)
+}
+
+// TerminalStream keeps the worker-pool reference alive for the complete bidi
+// stream lifetime. Unary actions release their reference when the RPC returns;
+// terminal streams must release it only after both relay directions stop.
+type TerminalStream struct {
+	cubebox.CubeboxMgr_TerminalClient
+	release func() error
+
+	closeSendOnce sync.Once
+	closeSendErr  error
+	closeOnce     sync.Once
+	closeErr      error
+}
+
+func Terminal(ctx context.Context, calleeEp string) (*TerminalStream, error) {
+	conn, err := grpcconn.GetWorkerConn(ctx, calleeEp)
+	if err != nil {
+		return nil, ret.Err(errorcode.ErrorCode_ConnHostFailed, err.Error())
+	}
+	client := cubebox.NewCubeboxMgrClient(conn.Value())
+	stream, err := client.Terminal(ctx)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return &TerminalStream{
+		CubeboxMgr_TerminalClient: stream,
+		release:                   conn.Close,
+	}, nil
+}
+
+func (s *TerminalStream) CloseSend() error {
+	if s == nil {
+		return nil
+	}
+	s.closeSendOnce.Do(func() {
+		s.closeSendErr = s.CubeboxMgr_TerminalClient.CloseSend()
+	})
+	return s.closeSendErr
+}
+
+func (s *TerminalStream) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.closeOnce.Do(func() {
+		closeSendErr := s.CloseSend()
+		var releaseErr error
+		if s.release != nil {
+			releaseErr = s.release()
+		}
+		s.closeErr = errors.Join(closeSendErr, releaseErr)
+	})
+	return s.closeErr
 }

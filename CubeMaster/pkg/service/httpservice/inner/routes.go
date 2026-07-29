@@ -18,6 +18,14 @@ func RegisterInnerRoutes(g *gin.RouterGroup) {
 	g.POST(FakeCreateAction, fakeCreateGinHandler)
 }
 
+// RegisterTerminalRoutes is intentionally separate from the legacy internal
+// route group. The terminal endpoint authenticates its own dedicated service
+// token and must not pass that credential through the signature middleware or
+// debug request dumps.
+func RegisterTerminalRoutes(g *gin.RouterGroup) {
+	g.GET(TerminalRelayAction, terminalRelayGinHandler)
+}
+
 // fakeCreateGinHandler preserves the legacy POST /internal/fake_create route.
 // The old mux inner.HttpHandler had no case for it, so it fell through to the
 // default branch → HTTP 200 + {ret:{ret_code:-1, ret_msg:"Not Found"}} (and ran

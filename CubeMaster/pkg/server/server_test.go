@@ -119,6 +119,27 @@ func TestQueryAndWsAreMethodAgnostic(t *testing.T) {
 	}
 }
 
+func TestTerminalRelayRouteRegistration(t *testing.T) {
+	engine := newTestEngine(t)
+	for _, route := range engine.Routes() {
+		if route.Method == http.MethodGet && route.Path == "/internal/terminal/relay" {
+			return
+		}
+	}
+	t.Fatal("GET /internal/terminal/relay route is not registered")
+}
+
+func TestTerminalRelayBypassesLegacyRequestMiddleware(t *testing.T) {
+	engine := newTestEngine(t)
+	req := httptest.NewRequest(http.MethodGet, "/internal/terminal/relay", nil)
+	w := httptest.NewRecorder()
+
+	engine.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Contains(t, w.Body.String(), "terminal relay is unavailable")
+}
+
 // TestMiddlewareSkippedOnNotFoundAndMethodMismatch proves the routing structure:
 // the request middleware (which contains checkAuth) runs on matched business
 // routes but is NOT invoked for unmatched-path (404) or method-mismatch (405)
