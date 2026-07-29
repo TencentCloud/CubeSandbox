@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	jsoniter "github.com/json-iterator/go"
 	api "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
@@ -44,6 +45,15 @@ func previewSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 					RetMsg:  err.Error(),
 				},
 			},
+		}
+	}
+	if err := rejectCallerSuppliedQos(req); err != nil {
+		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
+		return &sandboxPreviewResponse{
+			Res: &types.Res{Ret: &types.Ret{
+				RetCode: int(errorcode.ErrorCode_MasterParamsError),
+				RetMsg:  err.Error(),
+			}},
 		}
 	}
 
@@ -94,6 +104,7 @@ func previewSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 			APIRequest: apiReq,
 		}
 	}
+	responseMergedReq := sanitizeTemplateCreateRequest(mergedReq)
 
 	cubeletReqInput, err := cloneCreateReq(mergedReq)
 	if err != nil {
@@ -107,7 +118,7 @@ func previewSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 				},
 			},
 			APIRequest:    apiReq,
-			MergedRequest: mergedReq,
+			MergedRequest: responseMergedReq,
 		}
 	}
 	cubeletReq, err := previewConstructCubeletReqFn(ctx, cubeletReqInput)
@@ -122,8 +133,13 @@ func previewSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 				},
 			},
 			APIRequest:    apiReq,
-			MergedRequest: mergedReq,
+			MergedRequest: responseMergedReq,
 		}
+	}
+	if cubeletReq != nil {
+		delete(cubeletReq.Annotations, constants.CubeAnnotationsNetWork)
+		delete(cubeletReq.Annotations, constants.CubeAnnotationsBlkQos)
+		delete(cubeletReq.Annotations, constants.CubeAnnotationsFSQos)
 	}
 
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
@@ -136,7 +152,7 @@ func previewSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 			},
 		},
 		APIRequest:     apiReq,
-		MergedRequest:  mergedReq,
+		MergedRequest:  responseMergedReq,
 		CubeletRequest: cubeletReq,
 	}
 }

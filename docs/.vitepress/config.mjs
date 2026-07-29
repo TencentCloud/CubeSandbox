@@ -143,6 +143,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: 'Roadmap', link: '/guide/roadmap' },
                 { text: 'Sandbox Lifecycle', link: '/guide/lifecycle' },
+                { text: 'Sandbox QoS', link: '/guide/qos' },
                 { text: 'Templates Overview', link: '/guide/templates' },
                 { text: 'Snapshot, Rollback & Clone', link: '/guide/snapshot-rollback-clone' },
                 { text: 'Digital Assistant', link: '/guide/digital-assistant' },
@@ -298,6 +299,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: '路线图', link: '/zh/guide/roadmap' },
                 { text: '沙箱生命周期', link: '/zh/guide/lifecycle' },
+                { text: '沙箱 QoS', link: '/zh/guide/qos' },
                 { text: '模板概览', link: '/zh/guide/templates' },
                 { text: '快照、回滚与克隆', link: '/zh/guide/snapshot-rollback-clone' },
                 { text: '数字助手', link: '/zh/guide/digital-assistant' },

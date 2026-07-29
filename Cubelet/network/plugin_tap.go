@@ -225,11 +225,12 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (err e
 }
 
 func decodeNetRequest(raw string) (*NetRequest, error) {
-	req := &NetRequest{}
-	if raw != "" {
-		if err := utils.Decode(raw, req); err != nil {
-			return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "decode network params failed: %+v, raw: %s", err, raw)
-		}
+	if raw == "" {
+		return &NetRequest{}, nil
+	}
+	req, err := DecodeNetRequest(raw)
+	if err != nil {
+		return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "decode network params failed: %+v", err)
 	}
 	return req, nil
 }

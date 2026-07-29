@@ -797,7 +797,7 @@ func snapshotResourceFromInfo(info *templatecenter.SnapshotInfo) *snapshotResour
 		RuntimeRefCount:           info.RuntimeRefCount,
 		RuntimeRefSandboxes:       append([]string(nil), info.RuntimeRefSandboxes...),
 		Replicas:                  append([]templatecenter.ReplicaStatus(nil), info.Replicas...),
-		CreateRequest:             info.CreateRequest,
+		CreateRequest:             sanitizeTemplateCreateRequest(info.CreateRequest),
 	}
 }
 

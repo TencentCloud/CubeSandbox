@@ -87,3 +87,55 @@ func TestCreateSandboxKeepsOtherTemplateErrorsAsParamsError(t *testing.T) {
 	assert.Equal(t, assert.AnError.Error(), got.Ret.RetMsg)
 	assert.Equal(t, int64(errorcode.ErrorCode_MasterParamsError), rt.RetCode)
 }
+
+func TestCreateSandboxRejectsCallerSuppliedNetworkQosAnnotation(t *testing.T) {
+	origDealFn := createSandboxDealCubeboxCreateReqWithTemplateFn
+	origCreateFn := createSandboxRunFn
+	t.Cleanup(func() {
+		createSandboxDealCubeboxCreateReqWithTemplateFn = origDealFn
+		createSandboxRunFn = origCreateFn
+	})
+
+	createSandboxDealCubeboxCreateReqWithTemplateFn = func(context.Context, *types.CreateCubeSandboxReq) error {
+		t.Fatal("template resolution must not run for caller-supplied network qos")
+		return nil
+	}
+	createSandboxRunFn = func(context.Context, *types.CreateCubeSandboxReq) *types.CreateCubeSandboxRes {
+		t.Fatal("sandbox create must not run for caller-supplied network qos")
+		return nil
+	}
+
+	req := httptest.NewRequest("POST", "/cube/sandbox", strings.NewReader(`{
+		"requestID":"req-qos",
+		"annotations":{
+			"`+constants.CubeAnnotationAppSnapshotTemplateID+`":"tpl-1",
+			"`+constants.CubeAnnotationAppSnapshotTemplateVersion+`":"v2",
+			"`+constants.CubeAnnotationsNetWork+`":"{}"
+		}
+	}`))
+	rt := &CubeLog.RequestTrace{}
+	resp := createSandbox(req, rt)
+
+	got, ok := resp.(*types.Res)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Ret.RetCode)
+	assert.Contains(t, got.Ret.RetMsg, "template-managed")
+}
+
+func TestCreateSandboxRejectsCallerSuppliedBlockIOQosAnnotation(t *testing.T) {
+	req := httptest.NewRequest("POST", "/cube/sandbox", strings.NewReader(`{
+		"requestID":"req-qos",
+		"annotations":{"`+constants.CubeAnnotationsBlkQos+`":"{}"}
+	}`))
+	rt := &CubeLog.RequestTrace{}
+	resp := createSandbox(req, rt)
+
+	got, ok := resp.(*types.Res)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Ret.RetCode)
+	assert.Contains(t, got.Ret.RetMsg, "template-managed")
+}

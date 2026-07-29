@@ -19,6 +19,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
@@ -204,6 +206,11 @@ func decorateSandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq, rsp 
 	if req.SandboxID == "" {
 		return nil
 	}
+	if spec, err := sandboxspec.Get(ctx, req.SandboxID); err == nil && spec != nil {
+		decorateSandboxQos(rsp.Data, spec.Annotations)
+	} else {
+		decorateSandboxQosFromTemplate(ctx, rsp.Data)
+	}
 	proxyMap, ok := localcache.GetSandboxProxyMap(ctx, req.SandboxID)
 	if !ok || proxyMap == nil {
 		return nil
@@ -232,6 +239,39 @@ func decorateSandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq, rsp 
 		item.ExposedPortMode = endpoint.Mode
 	}
 	return nil
+}
+
+func decorateSandboxQos(items []*types.SandboxData, annotations map[string]string) {
+	configured, err := qos.ParseAnnotations(
+		annotations[constants.CubeAnnotationsNetWork],
+		annotations[constants.CubeAnnotationsBlkQos],
+	)
+	if err != nil || configured == nil {
+		return
+	}
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		item.ConfiguredQos = configured
+		item.QosApplied = qos.HasAppliedAnnotation(
+			annotations[constants.CubeAnnotationsNetWork],
+			annotations[constants.CubeAnnotationsBlkQos],
+		)
+	}
+}
+
+func decorateSandboxQosFromTemplate(ctx context.Context, items []*types.SandboxData) {
+	for _, item := range items {
+		if item == nil || item.ConfiguredQos != nil || item.TemplateID == "" {
+			continue
+		}
+		configured, err := lookupTemplateQos(ctx, item.TemplateID)
+		if err != nil || configured == nil {
+			continue
+		}
+		item.ConfiguredQos = configured
+	}
 }
 
 func getContainerName(label map[string]string) string {

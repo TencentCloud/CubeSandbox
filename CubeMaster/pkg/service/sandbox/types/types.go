@@ -10,6 +10,7 @@ import (
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	imagev1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
 )
 
 // NeverTimeout is the never-timeout idle TTL sentinel (-1).
@@ -603,6 +604,8 @@ type SandboxData struct {
 	RequestedContainerPort int32              `json:"requested_container_port,omitempty"`
 	EndAt                  int64              `json:"end_at,omitempty"`
 	VolumeMounts           []*VolumeMountInfo `json:"volume_mounts,omitempty"`
+	ConfiguredQos          *qos.Config        `json:"configured_qos,omitempty"`
+	QosApplied             bool               `json:"qos_applied,omitempty"`
 }
 
 // VolumeMountInfo is one container volume mount exposed in sandbox info/list APIs.
@@ -666,6 +669,7 @@ type CreateTemplateFromImageReq struct {
 	WritableLayerSize  string              `json:"writable_layer_size,omitempty"`
 	ExposedPorts       []int32             `json:"exposed_ports,omitempty"`
 	DistributionScope  []string            `json:"distribution_scope,omitempty"`
+	Qos                *qos.Config         `json:"qos,omitempty"`
 	ContainerOverrides *ContainerOverrides `json:"container_overrides,omitempty"`
 	Wait               bool                `json:"wait,omitempty"`
 

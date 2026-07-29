@@ -90,6 +90,31 @@ form:
 pytest --run-e2e --sdk-e2e-backends=cubesandbox
 ```
 
+## Template QoS E2E
+
+The QoS cases provision and clean up their own template and sandbox, so selecting this file alone does not require `CUBE_TEMPLATE_ID`. Set `CUBE_TEMPLATE_E2E_IMAGE` to an image that exposes envd on `49983` and responds to `/health` on `49999`.
+
+Run the control/runtime case:
+
+```bash
+CUBE_TEMPLATE_E2E_IMAGE=cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
+pytest --run-e2e cases/qos/test_template_qos.py::test_template_qos_control_and_runtime_state
+```
+
+Bandwidth tests require an iperf3 server reachable from the sandbox, and block I/O tests require a writable virtio-blk-backed filesystem. Start `iperf3 -s -p 5201`, set the server IP, and enable the dataplane opt-in:
+
+```bash
+CUBE_TEMPLATE_E2E_IMAGE=cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
+CUBE_QOS_IPERF_SERVER=10.0.0.10 \
+CUBE_QOS_DATAPLANE_E2E=1 \
+CUBE_QOS_E2E_INSTALL_TOOLS=1 \
+pytest --run-e2e -m "qos and not qos_node" cases/qos/test_template_qos.py
+```
+
+The pytest runner does not need `iperf3` or `fio`, but the sandbox does. Missing tools cause the affected case to skip unless `CUBE_QOS_E2E_INSTALL_TOOLS=1` is set; use `CUBE_QOS_E2E_INSTALL_COMMAND` to override installation. An IP-literal iperf server is automatically added to `allow_out` for a temporary template. A template reused through `CUBE_QOS_E2E_TEMPLATE_ID` must already allow the server and match the configured `CUBE_QOS_*` limits.
+
+The PPS case must run on the sandbox compute node because it reads the TAP counter. Set `CUBE_QOS_NODE_PPS_E2E=1`, set `CUBE_QOS_IPERF_SERVER` to the node IP reachable from the sandbox, and run `pytest --run-e2e -m qos_node cases/qos/test_template_qos.py`.
+
 ## Execution Scope
 
 Recommended scopes:

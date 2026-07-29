@@ -86,6 +86,31 @@ pytest --run-e2e
 pytest --run-e2e --sdk-e2e-backends=cubesandbox
 ```
 
+## 模板 QoS E2E
+
+QoS 用例会自行创建并清理模板和沙箱，因此单独运行该文件时不需要设置 `CUBE_TEMPLATE_ID`。`CUBE_TEMPLATE_E2E_IMAGE` 指定的镜像需要在 `49983` 端口提供 envd，并在 `49999` 端口响应 `/health`。
+
+运行配置与运行时状态用例：
+
+```bash
+CUBE_TEMPLATE_E2E_IMAGE=cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
+pytest --run-e2e cases/qos/test_template_qos.py::test_template_qos_control_and_runtime_state
+```
+
+带宽用例需要沙箱能够访问 iperf3 server，块设备 I/O 用例需要可写的 virtio-blk 文件系统。先执行 `iperf3 -s -p 5201`，再设置 server IP 并启用数据面测试：
+
+```bash
+CUBE_TEMPLATE_E2E_IMAGE=cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
+CUBE_QOS_IPERF_SERVER=10.0.0.10 \
+CUBE_QOS_DATAPLANE_E2E=1 \
+CUBE_QOS_E2E_INSTALL_TOOLS=1 \
+pytest --run-e2e -m "qos and not qos_node" cases/qos/test_template_qos.py
+```
+
+pytest runner 不需要安装 `iperf3` 或 `fio`，但沙箱中需要。命令缺失时，对应用例会跳过；设置 `CUBE_QOS_E2E_INSTALL_TOOLS=1` 后可以在沙箱内安装，也可以通过 `CUBE_QOS_E2E_INSTALL_COMMAND` 自定义安装命令。临时模板会自动把 IP 形式的 iperf3 server 加入 `allow_out`。通过 `CUBE_QOS_E2E_TEMPLATE_ID` 复用模板时，模板需要提前放通 server，并且 QoS 配置需要与 `CUBE_QOS_*` 环境变量一致。
+
+PPS 用例需要在沙箱所在计算节点运行，因为测试会读取 TAP 计数器。设置 `CUBE_QOS_NODE_PPS_E2E=1`，将 `CUBE_QOS_IPERF_SERVER` 设为沙箱可访问的节点 IP，然后执行 `pytest --run-e2e -m qos_node cases/qos/test_template_qos.py`。
+
 ## 执行范围
 
 ```bash

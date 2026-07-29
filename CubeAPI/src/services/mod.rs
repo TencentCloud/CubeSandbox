@@ -9,9 +9,40 @@ pub mod volumes;
 
 use crate::{
     config::ServerConfig,
-    cubemaster::CubeMasterClient,
+    cubemaster::{CubeBlockIoQosConfig, CubeMasterClient, CubeNetworkQosConfig, CubeQosConfig},
     error::{AppError, AppResult},
+    models::{BlockIoQosConfig, NetworkQosConfig, QosConfig},
 };
+
+impl From<CubeQosConfig> for QosConfig {
+    fn from(qos: CubeQosConfig) -> Self {
+        Self {
+            network: qos.network.map(|network| NetworkQosConfig {
+                bandwidth_mbps: (network.bandwidth_mbps > 0).then_some(network.bandwidth_mbps),
+                packets_per_second: network.packets_per_second,
+            }),
+            block_io: qos.block_io.map(|block_io| BlockIoQosConfig {
+                throughput_mibps: block_io.throughput_mibps,
+                iops: block_io.iops,
+            }),
+        }
+    }
+}
+
+impl From<&QosConfig> for CubeQosConfig {
+    fn from(qos: &QosConfig) -> Self {
+        Self {
+            network: qos.network.as_ref().map(|network| CubeNetworkQosConfig {
+                bandwidth_mbps: network.bandwidth_mbps.unwrap_or_default(),
+                packets_per_second: network.packets_per_second,
+            }),
+            block_io: qos.block_io.as_ref().map(|block_io| CubeBlockIoQosConfig {
+                throughput_mibps: block_io.throughput_mibps,
+                iops: block_io.iops,
+            }),
+        }
+    }
+}
 
 const DENY_ALL_IPV4_CIDR: &str = "0.0.0.0/0";
 const ALLOW_OUT_DOMAIN_REQUIRES_DENY_ALL: &str =
