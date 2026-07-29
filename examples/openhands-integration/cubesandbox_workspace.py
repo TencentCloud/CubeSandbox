@@ -246,7 +246,10 @@ class CubeSandboxWorkspace(RemoteWorkspace):
 
         The proxy exposes in-sandbox ports as public hosts of the form
         "<port>-<sandbox-id>.<domain>" (see the quickstart mask-request-host
-        example); the proxy's HTTP port is appended when it is not 80.
+        example); the proxy's HTTP port is appended when it is not 80. The
+        http scheme is intentional: cube-proxy serves plain HTTP here, and
+        TLS (if any) terminates at an upstream reverse proxy, not in this
+        URL.
         """
         public_host = sandbox.get_host(self.agent_server_port)
         port_suffix = ""
@@ -301,9 +304,12 @@ class CubeSandboxWorkspace(RemoteWorkspace):
         deadline = time.monotonic() + timeout
         last_error: Exception | None = None
         while time.monotonic() < deadline:
+            # Cap each attempt at the remaining overall budget so a
+            # health_check_timeout below 2 s is still honored exactly.
+            attempt_timeout = max(0.1, min(2.0, deadline - time.monotonic()))
             try:
                 request = Request(ready_url, headers=self._headers)
-                with urlopen(request, timeout=2.0) as resp:
+                with urlopen(request, timeout=attempt_timeout) as resp:
                     if 200 <= getattr(resp, "status", 200) < 300:
                         return
             except Exception as exc:  # noqa: BLE001 - retried until deadline
