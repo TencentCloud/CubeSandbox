@@ -45,6 +45,12 @@ func createSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
 		return rsp
 	}
+	if err := rejectCallerSuppliedQos(req); err != nil {
+		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
+		rsp.Ret.RetMsg = err.Error()
+		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
+		return rsp
+	}
 	rsp.RequestID = req.RequestID
 	rt.RequestID = req.RequestID
 	rt.InstanceType = req.InstanceType

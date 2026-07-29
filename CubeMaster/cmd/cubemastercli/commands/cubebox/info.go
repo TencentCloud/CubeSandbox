@@ -135,6 +135,15 @@ func printSandboxInfoBlock(w *tabwriter.Writer, sb *types.SandboxData) {
 			)
 		}
 	}
+	if sb.ConfiguredQos != nil && sb.ConfiguredQos.Network != nil {
+		fmt.Fprintf(w, "NETWORK_QOS\t%s\n", formatNetworkQosLimits(sb.ConfiguredQos.Network.BandwidthMbps, sb.ConfiguredQos.Network.PacketsPerSecond))
+	}
+	if sb.ConfiguredQos != nil && sb.ConfiguredQos.BlockIO != nil {
+		fmt.Fprintf(w, "BLOCK_IO_QOS\t%s\n", formatBlockIOQosLimits(sb.ConfiguredQos.BlockIO.ThroughputMiBps, sb.ConfiguredQos.BlockIO.IOPS))
+	}
+	if sb.ConfiguredQos != nil {
+		fmt.Fprintf(w, "QOS_APPLIED\t%t\n", sb.QosApplied)
+	}
 	if sb.ExposedPortEndpoint != "" {
 		fmt.Fprintf(w, "EXPOSED_PORT_MODE\t%s\n", displayValue(sb.ExposedPortMode))
 		fmt.Fprintf(w, "EXPOSED_ENDPOINT\t%s\n", displayValue(sb.ExposedPortEndpoint))
