@@ -193,10 +193,10 @@ they do not replace sandbox isolation.
 The concise JSONL renderer shows model text, tools, and errors. Pass
 `--verbose-events` to identify other event types that were omitted, or `--raw`
 to preserve every event unchanged.
-When an SDK accepts but does not invoke callback parameters, the compatibility
-layer replays collected stdout/stderr through the same handlers after command
-completion. Output and session capture remain correct, although display is no
-longer real-time.
+Some compatible SDKs accept callback parameters without invoking them. The
+compatibility layer then replays collected stdout/stderr through the same
+handlers after command completion. Output and session capture remain correct,
+although display is no longer real-time.
 
 ## Key Injection
 

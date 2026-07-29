@@ -32,11 +32,13 @@ class FakeCommands:
         failure: str | None = None,
         stdout_chunks: list[str] | None = None,
         result_stdout: str = "",
+        envs_error_message: str = "unexpected keyword argument 'envs'",
     ):
         self.reject_envs = reject_envs
         self.failure = failure
         self.stdout_chunks = stdout_chunks or []
         self.result_stdout = result_stdout
+        self.envs_error_message = envs_error_message
         self.kwargs = None
 
     def run(self, command, **kwargs):
@@ -44,7 +46,7 @@ class FakeCommands:
         if self.failure:
             raise TypeError(self.failure)
         if self.reject_envs and "envs" in kwargs:
-            raise TypeError("unexpected keyword argument 'envs'")
+            raise TypeError(self.envs_error_message)
         self.kwargs = kwargs
         on_stdout = kwargs.get("on_stdout")
         if on_stdout is not None:
@@ -64,12 +66,14 @@ class FakeSandbox:
         failure: str | None = None,
         stdout_chunks: list[str] | None = None,
         result_stdout: str = "",
+        envs_error_message: str = "unexpected keyword argument 'envs'",
     ):
         self.commands = FakeCommands(
-            reject_envs,
-            failure,
-            stdout_chunks,
-            result_stdout,
+            reject_envs=reject_envs,
+            failure=failure,
+            stdout_chunks=stdout_chunks,
+            result_stdout=result_stdout,
+            envs_error_message=envs_error_message,
         )
 
 
@@ -95,6 +99,14 @@ class CommonHelperTests(unittest.TestCase):
 
     def test_older_sdk_env_fallback(self) -> None:
         sandbox = FakeSandbox(reject_envs=True)
+        run_command(sandbox, "true", envs={"A": "B"})
+        self.assertEqual(sandbox.commands.kwargs["env"], {"A": "B"})
+
+    def test_older_sdk_env_fallback_accepts_double_quoted_error(self) -> None:
+        sandbox = FakeSandbox(
+            reject_envs=True,
+            envs_error_message='unexpected keyword argument "envs"',
+        )
         run_command(sandbox, "true", envs={"A": "B"})
         self.assertEqual(sandbox.commands.kwargs["env"], {"A": "B"})
 

@@ -27,6 +27,10 @@ class TemplateTests(unittest.TestCase):
     def test_template_fails_fast_for_unpinned_architecture(self) -> None:
         dockerfile = (EXAMPLE / "Dockerfile").read_text(encoding="utf-8")
         self.assertTrue(dockerfile.startswith("# syntax=docker/dockerfile:1.8\n"))
+        self.assertIn(
+            "ARG CUBE_BASE_IMAGE=ghcr.io/tencentcloud/cubesandbox-base:2026.16",
+            dockerfile,
+        )
         self.assertIn("ARG OPENCODE_VERSION=1.18.9", dockerfile)
         self.assertIn("ARG TARGETARCH", dockerfile)
         self.assertIn("Unsupported TARGETARCH=", dockerfile)

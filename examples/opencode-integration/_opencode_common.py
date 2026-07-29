@@ -44,7 +44,7 @@ def _notify_json_event(line: str, handler: JsonEventHandler | None) -> None:
         return
     try:
         event = json.loads(line)
-    except (TypeError, ValueError):
+    except ValueError:
         return
     if isinstance(event, dict):
         handler(event)
@@ -59,7 +59,7 @@ def render_jsonl_line(
         return
     try:
         event = json.loads(line)
-    except (TypeError, ValueError):
+    except ValueError:
         print(line)
         return
     if not isinstance(event, dict):
@@ -205,6 +205,8 @@ def run_command(
 
 def ensure_success(result: Any, action: str) -> None:
     exit_code = getattr(result, "exit_code", None)
+    # Match the existing Pi integration: older successful result shims may
+    # omit exit_code, while command/transport failures raise or return nonzero.
     if exit_code not in (None, 0):
         stdout = getattr(result, "stdout", "")
         stderr = getattr(result, "stderr", "")
@@ -223,7 +225,7 @@ def _session_ids_from_output(output: str) -> set[str]:
     for line in output.splitlines():
         try:
             event = json.loads(line)
-        except (TypeError, ValueError):
+        except ValueError:
             continue
         if isinstance(event, dict) and isinstance(event.get("sessionID"), str):
             session_ids.add(event["sessionID"])

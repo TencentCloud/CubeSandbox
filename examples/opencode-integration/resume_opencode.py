@@ -134,14 +134,17 @@ def main() -> int:
     envs = build_opencode_env(include_secret=True)
 
     warn_direct_mode()
-    sandbox = Sandbox.create(template=template_id, timeout=args.sandbox_timeout)
-    sandbox_id = sandbox_identifier(sandbox)
+    active_sandbox = Sandbox.create(
+        template=template_id,
+        timeout=args.sandbox_timeout,
+    )
+    sandbox_id = sandbox_identifier(active_sandbox)
     try:
         print(f"Sandbox ready: {sandbox_id}")
         turn_1 = TURN_1.format(workspace=args.workspace)
         session_capture = SessionIdCapture()
         result_1 = run_turn(
-            sandbox,
+            active_sandbox,
             workspace=args.workspace,
             prompt=turn_1,
             envs=envs,
@@ -151,30 +154,30 @@ def main() -> int:
         session_id = session_capture.resolve(getattr(result_1, "stdout", "") or "")
         print(f"OpenCode session: {session_id}")
 
-        paused = sandbox.pause()
+        paused = active_sandbox.pause()
         if isinstance(paused, str) and paused:
             sandbox_id = paused
         print(f"Paused. Resume handle: {sandbox_id}")
 
-        sandbox = Sandbox.connect(sandbox_id=sandbox_id)
+        active_sandbox = Sandbox.connect(sandbox_id=sandbox_id)
         print("Reconnected.")
-        verify_state(sandbox, args.workspace, args.state_dir)
+        verify_state(active_sandbox, args.workspace, args.state_dir)
 
         turn_2 = TURN_2.format(workspace=args.workspace)
         result_2 = run_turn(
-            sandbox,
+            active_sandbox,
             workspace=args.workspace,
             prompt=turn_2,
             envs=envs,
             timeout=args.exec_timeout,
             session_id=session_id,
         )
-        verify_continuation(sandbox, args.workspace)
+        verify_continuation(active_sandbox, args.workspace)
         exit_code = getattr(result_2, "exit_code", 0)
         return 0 if exit_code is None else int(exit_code)
     finally:
         try:
-            sandbox.kill()
+            active_sandbox.kill()
             print(f"Sandbox {sandbox_id} killed.")
         except Exception as exc:  # noqa: BLE001 - cleanup must not mask the task error
             print(f"Warning: failed to kill {sandbox_id}: {exc}", file=sys.stderr)
