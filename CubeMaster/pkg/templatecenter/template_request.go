@@ -18,6 +18,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	imagev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
@@ -32,6 +33,20 @@ func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplat
 		constants.CubeAnnotationRootfsArtifactID:           artifact.ArtifactID,
 		constants.CubeAnnotationWritableLayerSize:          req.WritableLayerSize,
 		constants.CubeAnnotationTemplateSpecFingerprint:    artifact.TemplateSpecFingerprint,
+	}
+	qosAnnotation, err := qos.MarshalAnnotation(req.Qos)
+	if err != nil {
+		return nil, err
+	}
+	if qosAnnotation != "" {
+		annotations[constants.CubeAnnotationsNetWork] = qosAnnotation
+	}
+	blockIOAnnotation, err := qos.MarshalBlockIOAnnotation(blockIOConfig(req.Qos))
+	if err != nil {
+		return nil, err
+	}
+	if blockIOAnnotation != "" {
+		annotations[constants.CubeAnnotationsBlkQos] = blockIOAnnotation
 	}
 	if ShouldInjectEnvdIntoTemplate(req) {
 		annotations[constants.CubeAnnotationsInjectEnvd] = constants.CubeAnnotationsInjectEnvdOptIn
@@ -145,6 +160,13 @@ func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplat
 		return nil, err
 	}
 	return out, nil
+}
+
+func blockIOConfig(config *qos.Config) *qos.BlockIOConfig {
+	if config == nil {
+		return nil
+	}
+	return config.BlockIO
 }
 
 func cloneCubeNetworkConfig(in *types.CubeNetworkConfig) *types.CubeNetworkConfig {

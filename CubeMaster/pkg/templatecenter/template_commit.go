@@ -169,18 +169,25 @@ func SubmitTemplateCommit(ctx context.Context, requestID, sandboxID, nodeID, nod
 }
 
 func prepareTemplateCommitRequest(ctx context.Context, requestID, sandboxID, templateID string, override *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.CreateCubeSandboxReq, error) {
-	var source *sandboxtypes.CreateCubeSandboxReq
-	var err error
-	if override == nil {
-		source, err = loadSandboxCreateRequestFn(ctx, sandboxID)
-	} else {
-		source, err = cloneCreateRequest(override)
-	}
+	base, err := loadSandboxCreateRequestFn(ctx, sandboxID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load sandbox create request for template commit: %w", err)
 	}
-	if source == nil {
+	if base == nil {
 		return nil, errors.New("sandbox create request is empty")
+	}
+
+	source := base
+	if override != nil {
+		source, err = cloneCreateRequest(override)
+		if err != nil {
+			return nil, err
+		}
+		// The public create_request response deliberately omits the
+		// template-managed QoS annotations. A commit override must recover
+		// them from the sandbox spec; failing that lookup must fail the
+		// commit instead of silently producing an unthrottled template.
+		inheritTemplateManagedQosAnnotations(source, base)
 	}
 	if source.Request == nil {
 		source.Request = &sandboxtypes.Request{}
@@ -191,6 +198,28 @@ func prepareTemplateCommitRequest(ctx context.Context, requestID, sandboxID, tem
 	}
 	source.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = strings.TrimSpace(templateID)
 	return source, nil
+}
+
+var templateManagedQosAnnotationKeys = []string{
+	constants.CubeAnnotationsNetWork,
+	constants.CubeAnnotationsBlkQos,
+}
+
+func inheritTemplateManagedQosAnnotations(dst, src *sandboxtypes.CreateCubeSandboxReq) {
+	if dst == nil || src == nil || src.Annotations == nil {
+		return
+	}
+	if dst.Annotations == nil {
+		dst.Annotations = make(map[string]string)
+	}
+	for _, key := range templateManagedQosAnnotationKeys {
+		if _, exists := dst.Annotations[key]; exists {
+			continue
+		}
+		if value, ok := src.Annotations[key]; ok {
+			dst.Annotations[key] = value
+		}
+	}
 }
 
 func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP string, createReq, storedReq *sandboxtypes.CreateCubeSandboxReq) {

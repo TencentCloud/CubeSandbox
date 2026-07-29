@@ -205,6 +205,7 @@ export default withMermaid(defineConfig({
               text: 'Core Concepts',
               items: [
                 { text: 'Sandbox Lifecycle', link: '/guide/lifecycle' },
+                { text: 'Sandbox QoS', link: '/guide/qos' },
                 { text: 'Templates Overview', link: '/guide/templates' },
                 { text: 'Snapshot, Rollback & Clone', link: '/guide/snapshot-rollback-clone' },
                 { text: 'Cross-Node Snapshots', link: '/guide/cross-node-snapshot' }
@@ -425,6 +426,7 @@ export default withMermaid(defineConfig({
               text: '核心概念',
               items: [
                 { text: '沙箱生命周期', link: '/zh/guide/lifecycle' },
+                { text: '沙箱 QoS', link: '/zh/guide/qos' },
                 { text: '模板概览', link: '/zh/guide/templates' },
                 { text: '快照、回滚与克隆', link: '/zh/guide/snapshot-rollback-clone' },
                 { text: '跨机快照', link: '/zh/guide/cross-node-snapshot' }

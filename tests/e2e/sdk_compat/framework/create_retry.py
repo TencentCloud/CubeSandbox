@@ -171,4 +171,3 @@ def _backoff_delay(attempt: int, backoff: float, backoff_max: float) -> float:
     if not math.isfinite(ceiling) or ceiling < 0.0:
         ceiling = 0.0
     return random.uniform(0.0, ceiling)
-

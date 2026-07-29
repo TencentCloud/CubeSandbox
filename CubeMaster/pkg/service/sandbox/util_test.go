@@ -391,3 +391,49 @@ func TestConstructCubeletReqStripsForgedPauseLabels(t *testing.T) {
 		t.Fatal("user annotation restore-base must not be re-added after strip")
 	}
 }
+
+func TestCheckAndGetAnnotationPreservesTemplateBlockQos(t *testing.T) {
+	cfg := ensureSandboxTestConfig(t)
+	origExtraConf := cfg.ExtraConf
+	cfg.ExtraConf = &config.ExtraConf{
+		BlkQos: `{"bandwidth":{"size":1048576,"refill_time":1000}}`,
+		FsQos:  `{}`,
+	}
+	t.Cleanup(func() { cfg.ExtraConf = origExtraConf })
+
+	templateBlockQos := `{"bandwidth":{"size":67108864,"refill_time":1000},"ops":{"size":1000,"refill_time":1000}}`
+	req := &types.CreateCubeSandboxReq{
+		Annotations: map[string]string{
+			constants.CubeAnnotationsBlkQos: templateBlockQos,
+		},
+	}
+	out := &cubebox.RunCubeSandboxRequest{Annotations: map[string]string{}}
+
+	if err := checkAndGetAnnotation(req, out); err != nil {
+		t.Fatalf("checkAndGetAnnotation error=%v", err)
+	}
+	if got := out.Annotations[constants.CubeAnnotationsBlkQos]; got != templateBlockQos {
+		t.Fatalf("block qos annotation=%q, want template value %q", got, templateBlockQos)
+	}
+}
+
+func TestCheckAndGetAnnotationUsesLegacyBlockQosWhenTemplateOmitsIt(t *testing.T) {
+	cfg := ensureSandboxTestConfig(t)
+	origExtraConf := cfg.ExtraConf
+	legacyBlockQos := `{"ops":{"size":500,"refill_time":1000}}`
+	cfg.ExtraConf = &config.ExtraConf{
+		BlkQos: legacyBlockQos,
+		FsQos:  `{}`,
+	}
+	t.Cleanup(func() { cfg.ExtraConf = origExtraConf })
+
+	req := &types.CreateCubeSandboxReq{Annotations: map[string]string{}}
+	out := &cubebox.RunCubeSandboxRequest{Annotations: map[string]string{}}
+
+	if err := checkAndGetAnnotation(req, out); err != nil {
+		t.Fatalf("checkAndGetAnnotation error=%v", err)
+	}
+	if got := out.Annotations[constants.CubeAnnotationsBlkQos]; got != legacyBlockQos {
+		t.Fatalf("block qos annotation=%q, want legacy value %q", got, legacyBlockQos)
+	}
+}
