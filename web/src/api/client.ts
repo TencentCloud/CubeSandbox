@@ -279,8 +279,16 @@ export const sandboxApi = {
       method: 'POST',
       body: JSON.stringify({ timeout: seconds }),
     }),
-  logs: (id: string, params?: { cursor?: number; limit?: number; direction?: string }) =>
-    api<SandboxLogsDto>(`/v2/sandboxes/${id}/logs`, { params }),
+  logs: (
+    id: string,
+    params?: {
+      cursor?: number;
+      cursorSeq?: number;
+      tail?: boolean;
+      limit?: number;
+      direction?: string;
+    },
+  ) => api<SandboxLogsDto>(`/v2/sandboxes/${id}/logs`, { params }),
   create: (body: { templateID: string; timeout?: number; metadata?: Record<string, string> }) =>
     api<SandboxSessionDto>('/sandboxes', {
       method: 'POST',

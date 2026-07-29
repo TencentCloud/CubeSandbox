@@ -49,6 +49,8 @@ const MASK_REQUEST_HOST_PORT_PLACEHOLDER: &str = "${PORT}";
 const MCP_MAX_SERVERS: usize = 64;
 const MCP_SERVER_NAME_MAX_LEN: usize = 128;
 const MCP_GITHUB_PREFIX: &str = "github/";
+/// Matches CubeMaster's maxLogLimit / Cubelet's maxEventLimit.
+const MAX_SANDBOX_LOG_LIMIT: i32 = 2000;
 
 /// Environment variable names that may compromise sandbox isolation if injected
 /// at the runtime level (loader overrides, language runtime paths).
@@ -874,7 +876,7 @@ impl SandboxService {
     ) -> AppResult<SandboxLogs> {
         match self
             .cubemaster
-            .get_sandbox_logs(&self.build_logs_request(sandbox_id, start, limit))
+            .get_sandbox_logs(&self.build_logs_request(sandbox_id, start, None, None, limit))
             .await
         {
             Ok(resp) => {
@@ -894,16 +896,10 @@ impl SandboxService {
                     log_entries: resp.logs.into_iter().map(to_log_entry).collect(),
                 })
             }
-            Err(e) if e.is_endpoint_missing() => Ok(SandboxLogs {
-                logs: vec![SandboxLog {
-                    timestamp: chrono::Utc::now(),
-                    line: "(log streaming not yet available — CubeMaster endpoint pending implementation)".to_string(),
-                }],
-                log_entries: vec![],
-            }),
-            Err(e) if e.is_not_found() => {
-                Err(AppError::NotFound(format!("sandbox {} not found", sandbox_id)))
-            }
+            Err(e) if e.is_not_found() => Err(AppError::NotFound(format!(
+                "sandbox {} not found",
+                sandbox_id
+            ))),
             Err(e) => Err(params_error_or_internal(e)),
         }
     }
@@ -912,11 +908,16 @@ impl SandboxService {
         &self,
         sandbox_id: &str,
         cursor: Option<i64>,
+        cursor_seq: Option<i64>,
+        tail: Option<bool>,
         limit: i32,
     ) -> AppResult<SandboxLogsV2Response> {
+        validate_log_cursor(cursor, cursor_seq, tail)?;
+        // Cap the upper bound only; limit<=0 is forwarded for the backend default.
+        let limit = limit.min(MAX_SANDBOX_LOG_LIMIT);
         match self
             .cubemaster
-            .get_sandbox_logs(&self.build_logs_request(sandbox_id, cursor, limit))
+            .get_sandbox_logs(&self.build_logs_request(sandbox_id, cursor, cursor_seq, tail, limit))
             .await
         {
             Ok(resp) => {
@@ -926,17 +927,11 @@ impl SandboxService {
 
                 Ok(SandboxLogsV2Response {
                     logs: resp.logs.into_iter().map(to_log_entry).collect(),
+                    next_cursor: (resp.next_cursor > 0).then_some(resp.next_cursor),
+                    next_cursor_seq: (resp.next_cursor > 0).then_some(resp.next_cursor_seq),
+                    has_more: resp.has_more,
                 })
             }
-            Err(e) if e.is_endpoint_missing() => Ok(SandboxLogsV2Response {
-                logs: vec![SandboxLogEntry {
-                    timestamp: chrono::Utc::now(),
-                    message: "(log streaming pending — CubeMaster endpoint not yet implemented)"
-                        .to_string(),
-                    level: ModelLogLevel::Info,
-                    fields: HashMap::new(),
-                }],
-            }),
             Err(e) if e.is_not_found() => Err(AppError::NotFound(format!(
                 "sandbox {} not found",
                 sandbox_id
@@ -1092,14 +1087,41 @@ impl SandboxService {
         &self,
         sandbox_id: &str,
         cursor: Option<i64>,
+        cursor_seq: Option<i64>,
+        tail: Option<bool>,
         limit: i32,
     ) -> SandboxLogsRequest {
         SandboxLogsRequest {
             sandbox_id: sandbox_id.to_string(),
             cursor,
+            cursor_seq,
+            tail,
             limit,
         }
     }
+}
+
+/// A bare cursor stays valid (lossy: same-ms events are skipped); cursorSeq needs a cursor; tail takes neither.
+fn validate_log_cursor(
+    cursor: Option<i64>,
+    cursor_seq: Option<i64>,
+    tail: Option<bool>,
+) -> AppResult<()> {
+    let has_cursor = cursor.is_some_and(|c| c > 0);
+    if tail == Some(true) && (has_cursor || cursor_seq.is_some()) {
+        return Err(AppError::BadRequest(
+            "tail is mutually exclusive with cursor and cursorSeq".to_string(),
+        ));
+    }
+    if cursor_seq.is_some_and(|s| s < 0) {
+        return Err(AppError::BadRequest("cursorSeq must be >= 0".to_string()));
+    }
+    if cursor_seq.is_some() && !has_cursor {
+        return Err(AppError::BadRequest(
+            "cursorSeq requires cursor".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn should_extend_connect_timeout(
@@ -1942,11 +1964,17 @@ fn to_log_entry(log: crate::cubemaster::SandboxLogLine) -> SandboxLogEntry {
         "error" => ModelLogLevel::Error,
         _ => ModelLogLevel::Info,
     };
+    let mut fields = HashMap::new();
+    if let Some(module) = log.module {
+        if !module.is_empty() {
+            fields.insert("module".to_string(), module);
+        }
+    }
     SandboxLogEntry {
         timestamp: log.timestamp,
         message: log.message,
         level,
-        fields: HashMap::new(),
+        fields,
     }
 }
 
@@ -3263,6 +3291,134 @@ mod tests {
             .await
             .expect_err("rejected logs request should not succeed");
         assert_bad_request(err, reason);
+    }
+
+    #[test]
+    fn validate_log_cursor_accepts_complete_bare_and_empty_cursors() {
+        assert!(super::validate_log_cursor(None, None, None).is_ok());
+        assert!(super::validate_log_cursor(None, None, Some(true)).is_ok());
+        assert!(super::validate_log_cursor(Some(1000), None, None).is_ok());
+        assert!(super::validate_log_cursor(Some(1000), Some(0), None).is_ok());
+        assert!(super::validate_log_cursor(Some(1000), Some(7), Some(false)).is_ok());
+    }
+
+    #[test]
+    fn validate_log_cursor_rejects_orphan_or_conflicting_cursors() {
+        for (cursor, seq, tail) in [
+            (None, Some(0), None),
+            (Some(1000), Some(-1), None),
+            (Some(1000), Some(0), Some(true)),
+            (Some(1000), None, Some(true)),
+            (None, Some(0), Some(true)),
+            (Some(0), Some(0), None),
+        ] {
+            let err = super::validate_log_cursor(cursor, seq, tail)
+                .expect_err("invalid cursor combination must be rejected");
+            assert!(
+                matches!(err, AppError::BadRequest(_)),
+                "{cursor:?}/{seq:?}/{tail:?} -> {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn get_logs_v2_forwards_cursor_seq_zero_and_returns_next_seq_zero() {
+        #[derive(Clone, Default)]
+        struct Capture {
+            body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn logs_handler(State(c): State<Capture>, Json(body): Json<Value>) -> Json<Value> {
+            *c.body.lock().await = Some(body);
+            Json(serde_json::json!({
+                "requestID": "req-1",
+                "ret": { "ret_code": 0, "ret_msg": "" },
+                "logs": [],
+                "nextCursor": 1784695200000_i64,
+                "nextCursorSeq": 0,
+                "hasMore": true
+            }))
+        }
+
+        let capture = Capture::default();
+        let service = spawn_fake_cubemaster(
+            Router::new()
+                .route("/cube/sandbox/logs", post(logs_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+
+        let page = service
+            .get_logs_v2("sbx-1", Some(1000), Some(0), None, 10)
+            .await
+            .expect("valid composite cursor should succeed");
+
+        let sent = capture.body.lock().await.clone().expect("request captured");
+        assert_eq!(sent["cursor"], 1000);
+        assert_eq!(
+            sent["cursorSeq"], 0,
+            "seq 0 must be serialized, not dropped"
+        );
+        assert_eq!(page.next_cursor, Some(1784695200000));
+        assert_eq!(
+            page.next_cursor_seq,
+            Some(0),
+            "seq 0 must survive the response"
+        );
+        let json = serde_json::to_value(&page).expect("response serializes");
+        assert_eq!(json["nextCursorSeq"], 0);
+    }
+
+    #[tokio::test]
+    async fn get_logs_v2_bare_cursor_keeps_the_ms_only_request() {
+        #[derive(Clone, Default)]
+        struct Capture {
+            body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn logs_handler(State(c): State<Capture>, Json(body): Json<Value>) -> Json<Value> {
+            *c.body.lock().await = Some(body);
+            Json(serde_json::json!({
+                "requestID": "req-1",
+                "ret": { "ret_code": 0, "ret_msg": "" },
+                "logs": [],
+                "nextCursor": 1784695200000_i64,
+                "nextCursorSeq": 3,
+                "hasMore": false
+            }))
+        }
+
+        let capture = Capture::default();
+        let service = spawn_fake_cubemaster(
+            Router::new()
+                .route("/cube/sandbox/logs", post(logs_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+
+        let page = service
+            .get_logs_v2("sbx-1", Some(1000), None, None, 10)
+            .await
+            .expect("a bare cursor stays valid");
+
+        let sent = capture.body.lock().await.clone().expect("request captured");
+        assert_eq!(sent["cursor"], 1000);
+        assert!(
+            sent.get("cursorSeq").is_none(),
+            "a bare cursor must not invent a cursorSeq: {sent}"
+        );
+        assert_eq!(page.next_cursor_seq, Some(3), "new fields stay available");
+    }
+
+    #[tokio::test]
+    async fn get_logs_v2_rejects_orphan_cursor_seq_before_calling_cubemaster() {
+        let service = spawn_fake_cubemaster(Router::new()).await;
+
+        let err = service
+            .get_logs_v2("sbx-1", None, Some(0), None, 10)
+            .await
+            .expect_err("cursorSeq without cursor must be rejected");
+        assert_bad_request(err, "cursorSeq requires cursor");
     }
 
     #[tokio::test]

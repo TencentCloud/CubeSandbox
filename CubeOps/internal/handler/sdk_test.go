@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1229,6 +1230,146 @@ func TestSDK_AdoptTemplateCompatBaseline(t *testing.T) {
 	// Verify the response contains the updated count.
 	if !strings.Contains(w.Body.String(), `"updated"`) {
 		t.Errorf("response body does not contain 'updated': %s", w.Body.String())
+	}
+}
+
+// TestSDK_GetSandboxLogs_ForwardsCursorSeq verifies cursorSeq (including 0) reaches CubeMaster.
+func TestSDK_GetSandboxLogs_ForwardsCursorSeq(t *testing.T) {
+	var got map[string]interface{}
+	cm := &fakeCM{getSandboxLogs: func(_ context.Context, body interface{}) (json.RawMessage, error) {
+		got = body.(map[string]interface{})
+		return json.RawMessage(`{"ret":{"ret_code":0},"logs":[]}`), nil
+	}}
+	r := newSDKRouter(t, cm)
+
+	status, _ := doJSON(t, r, "GET", "/api/v1/sdk/sandboxes/sb-1/logs?cursor=1000&cursorSeq=0&limit=5", "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if got["cursorSeq"] != int64(0) {
+		t.Fatalf("cursorSeq = %#v, want int64(0) forwarded", got["cursorSeq"])
+	}
+	if got["cursor"] != int64(1000) {
+		t.Fatalf("cursor = %#v, want int64(1000)", got["cursor"])
+	}
+
+	// Without cursorSeq the key must be absent so CubeMaster keeps the legacy path.
+	_, _ = doJSON(t, r, "GET", "/api/v1/sdk/sandboxes/sb-1/logs?cursor=1000", "")
+	if _, ok := got["cursorSeq"]; ok {
+		t.Fatalf("cursorSeq must be absent when not supplied, got %#v", got["cursorSeq"])
+	}
+}
+
+// TestSDK_GetSandboxLogs_RejectsInvalidCursorSeq verifies a bad cursorSeq is a 400,
+// not a silent fallback to the lossy ms-only cursor, and never reaches CubeMaster.
+func TestSDK_GetSandboxLogs_RejectsInvalidCursorSeq(t *testing.T) {
+	for _, seq := range []string{"bad", "1.5", "99999999999999999999"} {
+		t.Run(seq, func(t *testing.T) {
+			called := false
+			cm := &fakeCM{getSandboxLogs: func(context.Context, interface{}) (json.RawMessage, error) {
+				called = true
+				return json.RawMessage(`{"ret":{"ret_code":0}}`), nil
+			}}
+			r := newSDKRouter(t, cm)
+
+			status, _ := doJSON(t, r, "GET", "/api/v1/sdk/sandboxes/sb-1/logs?cursor=1000&cursorSeq="+seq, "")
+			if status != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", status)
+			}
+			if called {
+				t.Fatal("CubeMaster must not be called for an invalid cursorSeq")
+			}
+		})
+	}
+}
+
+// TestSDK_GetSandboxLogs_RejectsInvalidTail verifies a bad tail is a 400 and never reaches CubeMaster.
+func TestSDK_GetSandboxLogs_RejectsInvalidTail(t *testing.T) {
+	called := false
+	cm := &fakeCM{getSandboxLogs: func(context.Context, interface{}) (json.RawMessage, error) {
+		called = true
+		return json.RawMessage(`{"ret":{"ret_code":0}}`), nil
+	}}
+	r := newSDKRouter(t, cm)
+
+	status, _ := doJSON(t, r, "GET", "/api/v1/sdk/sandboxes/sb-1/logs?tail=notabool", "")
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", status)
+	}
+	if called {
+		t.Fatal("CubeMaster must not be called for an invalid tail")
+	}
+}
+
+// TestSDK_GetSandboxLogs_KeepsLenientLimitAndCursor pins the existing behaviour that
+// unparsable limit and cursor are ignored and the request is still forwarded.
+func TestSDK_GetSandboxLogs_KeepsLenientLimitAndCursor(t *testing.T) {
+	var got map[string]interface{}
+	cm := &fakeCM{getSandboxLogs: func(_ context.Context, body interface{}) (json.RawMessage, error) {
+		got = body.(map[string]interface{})
+		return json.RawMessage(`{"ret":{"ret_code":0},"logs":[]}`), nil
+	}}
+	r := newSDKRouter(t, cm)
+
+	status, _ := doJSON(t, r, "GET", "/api/v1/sdk/sandboxes/sb-1/logs?limit=0&cursor=abc", "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if got["limit"] != 200 {
+		t.Fatalf("limit = %#v, want the default 200", got["limit"])
+	}
+	if _, ok := got["cursor"]; ok {
+		t.Fatalf("an unparsable cursor must be dropped, got %#v", got["cursor"])
+	}
+
+	// No limit: the internal default matches CubeMaster's defaultLogLimit.
+	_, _ = doJSON(t, r, "GET", "/api/v1/sdk/sandboxes/sb-1/logs", "")
+	if got["limit"] != 200 {
+		t.Fatalf("default limit = %#v, want 200", got["limit"])
+	}
+}
+
+// TestSDK_GetSandboxLogs_MapsParamsErrorTo400 verifies CubeMaster's 130400 for an invalid
+// tail/cursor combination is a client error, matching CubeAPI, while other codes keep their mapping.
+func TestSDK_GetSandboxLogs_MapsParamsErrorTo400(t *testing.T) {
+	const msg = "tail and cursor are mutually exclusive"
+	for _, q := range []string{"tail=true&cursor=1000", "tail=true&cursor=1000&cursorSeq=0", "tail=true&cursorSeq=0"} {
+		t.Run(q, func(t *testing.T) {
+			cm := &fakeCM{getSandboxLogs: func(context.Context, interface{}) (json.RawMessage, error) {
+				return json.RawMessage(`{"ret":{"ret_code":130400,"ret_msg":"` + msg + `"}}`), nil
+			}}
+			r := newSDKRouter(t, cm)
+
+			status, body := doJSON(t, r, "GET", "/api/v1/sdk/sandboxes/sb-1/logs?"+q, "")
+			if status != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%v", status, body)
+			}
+			if body["error"] != msg {
+				t.Fatalf("error = %v, want %q", body["error"], msg)
+			}
+		})
+	}
+
+	for code, want := range map[int]int{130404: http.StatusNotFound, 130500: http.StatusBadGateway} {
+		cm := &fakeCM{getSandboxLogs: func(context.Context, interface{}) (json.RawMessage, error) {
+			return json.RawMessage(fmt.Sprintf(`{"ret":{"ret_code":%d,"ret_msg":"x"}}`, code)), nil
+		}}
+		status, _ := doJSON(t, newSDKRouter(t, cm), "GET", "/api/v1/sdk/sandboxes/sb-1/logs", "")
+		if status != want {
+			t.Fatalf("ret_code %d: status = %d, want %d", code, status, want)
+		}
+	}
+}
+
+// TestSDK_ParamsErrorStaysBadGatewayOnOtherRoutes pins that 130400 is not remapped globally:
+// elsewhere it is a catch-all that also carries server-side failures.
+func TestSDK_ParamsErrorStaysBadGatewayOnOtherRoutes(t *testing.T) {
+	cm := &fakeCM{deleteSandbox: func(context.Context, interface{}) (json.RawMessage, error) {
+		return json.RawMessage(`{"ret":{"ret_code":130400,"ret_msg":"gorm: database is locked"}}`), nil
+	}}
+	w := httptestRecorder(t, newSDKRouter(t, cm), "DELETE", "/api/v1/sdk/sandboxes/sb-1")
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", w.Code, w.Body.String())
 	}
 }
 

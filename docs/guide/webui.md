@@ -68,7 +68,7 @@ If any number is red, click into **Nodes** to see which host is unhappy.
 1. Click **Sandboxes** in the left rail, then **+ New sandbox** (top-right).
 2. Pick a template from the grid. Prefer a `READY` template. If it says **Needs rebuild**, open the template and click **Rebuild Template** before creating a sandbox. Other `READY` templates keep working after a node upgrade.
 3. (Optional) Add a few `meta` key/value pairs as labels.
-4. Click **Create**. Within a couple of seconds you'll be redirected to the sandbox's detail page, where you can watch its logs stream in real time.
+4. Click **Create**. Within a couple of seconds you'll be redirected to the sandbox's detail page, where the **Events** panel shows the sandbox's recent events (auto-refreshed every 10 seconds).
 
 To stop a sandbox, go to **Sandboxes**, find the row, and click the pause / kill button on the right.
 

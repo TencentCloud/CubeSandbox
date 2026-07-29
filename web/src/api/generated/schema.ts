@@ -1238,6 +1238,16 @@ export interface components {
         /** @description v2 log response. */
         SandboxLogsV2Response: {
             logs: components["schemas"]["SandboxLogEntry"][];
+            /** @description True when more matching entries exist beyond the returned page. */
+            hasMore?: boolean;
+            /**
+             * @description Last entry's ms timestamp; pass back as `cursor` with `nextCursorSeq`.
+             */
+            nextCursor?: number | null;
+            /**
+             * @description Last entry's index within its millisecond; pass back as `cursorSeq`. 0 is valid.
+             */
+            nextCursorSeq?: number | null;
         };
         /** @description Network configuration for sandbox egress/ingress control. */
         SandboxNetworkConfig: {
@@ -3146,8 +3156,15 @@ export interface operations {
     get_sandbox_logs_v2: {
         parameters: {
             query?: {
+                /** @description Previous `nextCursor`; without `cursorSeq` it skips every event in that millisecond. */
                 cursor?: number;
+                /** @description Previous `nextCursorSeq`; send with `cursor` so same-ms events are not skipped. */
+                cursorSeq?: number;
+                /** @description Max entries per page (default 1000, max 2000). */
                 limit?: number;
+                /** @description tail returns the newest entries; mutually exclusive with cursor and cursorSeq. */
+                tail?: boolean;
+                /** @description Accepted and ignored; kept so existing clients and generated types keep working. */
                 direction?: string;
             };
             header?: never;
@@ -3166,6 +3183,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SandboxLogsV2Response"];
+                };
+            };
+            /** @description Invalid cursor, cursorSeq or tail combination */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
                 };
             };
             /** @description Sandbox not found */

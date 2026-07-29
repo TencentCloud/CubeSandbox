@@ -1177,6 +1177,15 @@ pub struct SandboxLogs {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct SandboxLogsV2Response {
     pub logs: Vec<SandboxLogEntry>,
+    /// Last entry's ms timestamp; pass back as `cursor` with `nextCursorSeq`.
+    #[serde(rename = "nextCursor", skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<i64>,
+    /// Last entry's index within its millisecond; pass back as `cursorSeq`. 0 is valid.
+    #[serde(rename = "nextCursorSeq", skip_serializing_if = "Option::is_none")]
+    pub next_cursor_seq: Option<i64>,
+    /// True when more matching entries exist beyond the returned page.
+    #[serde(rename = "hasMore", default)]
+    pub has_more: bool,
 }
 
 /// Query params for v1 sandbox logs.
@@ -1191,14 +1200,24 @@ pub struct SandboxLogsQuery {
 /// Query params for v2 sandbox logs.
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
-#[allow(dead_code)]
 pub struct SandboxLogsV2Query {
+    /// Previous `nextCursor`; without `cursorSeq` it skips every event in that millisecond.
     pub cursor: Option<i64>,
+    /// Previous `nextCursorSeq`; send with `cursor` so same-ms events are not skipped.
+    #[serde(rename = "cursorSeq")]
+    pub cursor_seq: Option<i64>,
+    /// Max entries per page (default 1000, max 2000).
     #[serde(default = "default_log_limit")]
     pub limit: i32,
+    /// tail returns the newest entries; mutually exclusive with cursor and cursorSeq.
+    pub tail: Option<bool>,
+    /// Accepted and ignored; kept so existing clients and generated types keep working.
+    #[allow(dead_code)]
     pub direction: Option<String>,
 }
 
+/// Public v2 default; CubeMaster/Cubelet's internal default is 200. Both are
+/// established contracts — do not "align" them without a breaking-change note.
 fn default_log_limit() -> i32 {
     1000
 }

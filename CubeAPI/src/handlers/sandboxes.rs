@@ -630,6 +630,7 @@ pub async fn get_sandbox_logs(
     ),
     responses(
         (status = 200, description = "Structured sandbox logs", body = SandboxLogsV2Response),
+        (status = 400, description = "Invalid cursor, cursorSeq or tail combination", body = ApiError),
         (status = 404, description = "Sandbox not found", body = ApiError),
         (status = 500, description = "Unexpected backend error", body = ApiError)
     )
@@ -652,7 +653,13 @@ pub async fn get_sandbox_logs_v2(
     let logs = state
         .services
         .sandboxes
-        .get_logs_v2(&sandbox_id, params.cursor, params.limit)
+        .get_logs_v2(
+            &sandbox_id,
+            params.cursor,
+            params.cursor_seq,
+            params.tail,
+            params.limit,
+        )
         .await?;
     state
         .logger
