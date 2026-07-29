@@ -147,9 +147,9 @@ def create_sandbox(template_id: str, rules: list[Rule], timeout: int) -> Sandbox
     )
 
 
-def show_key_not_in_vm(sandbox: Sandbox) -> None:
+def show_key_not_in_vm(sandbox: Sandbox, sandbox_env: dict[str, str]) -> None:
     command = "printenv ANTHROPIC_API_KEY || echo '<unset>'"
-    result = run_command(sandbox, command, timeout=30)
+    result = run_command(sandbox, command, envs=sandbox_env, timeout=30)
     ensure_success(result, "read API key inside sandbox")
     value = getattr(result, "stdout", "").strip()
     print(f"In-VM ANTHROPIC_API_KEY: {value!r} (real secret stays in CubeEgress)")
@@ -206,7 +206,7 @@ def main() -> int:
     result = None
     try:
         print(f"Sandbox ready: {sandbox_id}\n")
-        show_key_not_in_vm(sandbox)
+        show_key_not_in_vm(sandbox, sandbox_env)
         show_non_llm_blocked(sandbox)
 
         if args.skip_agent:

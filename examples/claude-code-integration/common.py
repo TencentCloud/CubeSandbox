@@ -91,15 +91,12 @@ def require_api_key() -> str:
 
 def build_cc_env(include_secrets: bool = True) -> dict[str, str]:
     env: dict[str, str] = {}
-    for name in (
-        "ANTHROPIC_BASE_URL",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "NO_PROXY",
-    ):
-        value = os.environ.get(name)
-        if value:
-            env[name] = value
+    # Only forward ANTHROPIC_BASE_URL — proxy vars from the host machine are
+    # intentionally excluded: the host's proxy is unreachable from inside the
+    # sandbox, and all sandbox traffic routes through CubeEgress.
+    value = os.environ.get("ANTHROPIC_BASE_URL")
+    if value:
+        env["ANTHROPIC_BASE_URL"] = value
     if include_secrets:
         for name in (PROVIDER_KEY_NAME, "ANTHROPIC_AUTH_TOKEN"):
             value = os.environ.get(name)
