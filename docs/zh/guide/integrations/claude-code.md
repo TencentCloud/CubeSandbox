@@ -324,7 +324,7 @@ result = sandbox.commands.run(cmd, envs=cc_env, user="user", timeout=900)
 | 就绪探针超时 | 基础镜像不包含 envd | 确保 `FROM ghcr.io/tencentcloud/cubesandbox-base:2026.16` |
 | `pause()` / `connect()` 报错 | 平台版本过旧不支持快照 | 升级 CubeSandbox 平台 |
 | Claude Code 挂起无输出 | 在非 TTY 通道上启动了 TUI 模式 | 始终在 headless 模式使用 `-p` / `--print` |
-| Token 超限 | 任务规模超出配置的努力级别 | 降低 `--effort` 级别或拆分任务 |
+| Token 超限 | 任务规模超出配置的思考预算 | 降低 `--thinking` 预算或拆分为更小的子任务 |
 
 ## 参考资料
 

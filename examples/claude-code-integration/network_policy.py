@@ -188,6 +188,10 @@ def main() -> int:
 
     sandbox_env = build_cc_env(include_secrets=False)
     sandbox_env["ANTHROPIC_API_KEY"] = PLACEHOLDER_KEY
+    # The vault path routes all traffic through CubeEgress; proxy variables
+    # inside the VM would confuse Claude Code's request routing.
+    for proxy_var in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"):
+        sandbox_env.pop(proxy_var, None)
     # Let Node-based Claude Code trust the CubeEgress interception CA —
     # without this the vault path fails with TLS errors.
     sandbox_env["NODE_EXTRA_CA_CERTS"] = os.environ.get(
