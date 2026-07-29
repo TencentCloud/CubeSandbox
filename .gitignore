@@ -47,6 +47,11 @@ pvm-host-build/
 
 # Local workdir for one-off deploy / screenshot scripts
 .workdir/
+# Rhino Bird local planning / evidence (do not commit)
+.rhino/
+.tmp_*.py
+.tmp_*.sh
+.tmp_*.txt
 # Dev notes (local only)
 docs/webui-init.md
 docs/dev-log.md

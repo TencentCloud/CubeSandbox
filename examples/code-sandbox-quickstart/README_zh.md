@@ -126,6 +126,8 @@ hello cube
 | `network_allowlist.py` | `allow_out` — 白名单 CIDR，拦截其余所有出口 |
 | `network_denylist.py` | `deny_out` — 黑名单 CIDR，其余放行 |
 | `restrict_public_access.py` | `network={"allow_public_traffic": False}` — 公网 URL 必须携带 per-sandbox token 才可访问 |
+| `tool_allowlist_deny.py` | 宿主机 argv 工具白名单 — 非白名单命令在 `Sandbox.create` 前拒绝 |
+| `tool_allowlist_allow.py` | 白名单命令进 MicroVM，并叠加 `allow_internet_access=False`（门控 ⊥ 出口） |
 
 ### exec_code.py — 运行 Python 代码
 
@@ -223,6 +225,20 @@ python network_allowlist.py
 python network_denylist.py
 ```
 
+### 宿主机 argv 工具白名单
+
+与出口 CIDR 策略正交：先在宿主机按**首个 argv**拒绝非法工具，再决定是否
+`Sandbox.create`。默认白名单不含解释器；需要 guest 任意代码执行时显式
+`enable_code_execution=True`。
+
+```bash
+# 拒绝：不创建沙箱
+python tool_allowlist_deny.py
+
+# 放行：MicroVM 内执行，并叠加断网
+python tool_allowlist_allow.py
+```
+
 ### restrict_public_access.py — 限制公网 URL 访问
 
 默认情况下沙箱的公网 URL 任何知道地址的人都可访问。对敏感场景，可以在创建沙箱时
@@ -276,6 +292,9 @@ code-sandbox-quickstart/
 ├── network_allowlist.py       # 出口 CIDR 白名单
 ├── network_denylist.py        # 出口 CIDR 黑名单
 ├── restrict_public_access.py  # 公网 URL 鉴权 token
+├── tool_allowlist.py          # 宿主机 argv 工具白名单
+├── tool_allowlist_deny.py     # 拒绝路径（不创建沙箱）
+├── tool_allowlist_allow.py    # 放行 + 断网叠加
 ├── requirements.txt           # Python 依赖
 └── .env.example               # 环境变量模板
 ```

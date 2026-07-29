@@ -3,13 +3,11 @@
 
 """Host-side argv allowlist gate for agent tool commands.
 
-This is intentionally NOT a kernel/enforcement layer inside the MicroVM.
-It models how an agent host should refuse non-allowlisted tool invocations
-before they reach Sandbox.commands.run().
+Not a kernel/enforcement layer inside the MicroVM. Models how an agent host
+should refuse non-allowlisted tool invocations before Sandbox.commands.run().
 
-Capability note: the default set is tool-level only. Granting an interpreter
-(``enable_code_execution=True`` / ``CODE_EXECUTION_BINARIES``) is a privilege
-escalation to arbitrary guest code execution — not "just another binary".
+Default set is tool-level only. ``enable_code_execution=True`` is an explicit
+privilege escalation (adds ``CODE_EXECUTION_BINARIES``).
 """
 
 from __future__ import annotations
@@ -17,8 +15,6 @@ from __future__ import annotations
 import shlex
 from typing import Iterable
 
-
-# Default: narrow tool binaries (first argv token only). No interpreters.
 DEFAULT_ALLOWED_BINARIES: frozenset[str] = frozenset(
     {
         "echo",
@@ -32,8 +28,6 @@ DEFAULT_ALLOWED_BINARIES: frozenset[str] = frozenset(
     }
 )
 
-# Explicit capability escalation: arbitrary code execution inside the guest.
-# Prefer enable_code_execution=True at the call site over silently unioning this.
 CODE_EXECUTION_BINARIES: frozenset[str] = frozenset({"python3"})
 
 
@@ -42,7 +36,6 @@ class AllowlistDenied(PermissionError):
 
 
 def _split_argv(command: str) -> list[str] | None:
-    """Split command into argv tokens; return None if quoting is malformed."""
     try:
         return shlex.split(command)
     except ValueError:
@@ -70,19 +63,12 @@ def is_allowlisted(
     *,
     enable_code_execution: bool = False,
 ) -> bool:
-    """Return True if the first argv token is on the effective allowlist.
-
-    Empty / whitespace-only commands return False (predicate contract).
-    Malformed shell quoting (``shlex`` ``ValueError``) returns False — deny, do not crash.
-    Path-style first tokens (``/`` or ``\\``) return False.
-    """
+    """True if the first argv token is on the effective allowlist."""
     parts = _split_argv(command)
     if not parts:
         return False
     binary = parts[0]
-    # Reject path-style first tokens. Note: shlex.split() is POSIX-mode, so a bare
-    # unquoted Windows path like c:\Windows\... may lose backslashes before this
-    # check; quoted paths and Linux /path tokens are what this Linux demo covers.
+    # Path-style first tokens rejected. shlex is POSIX-mode on this Linux demo.
     if "/" in binary or "\\" in binary:
         return False
     allowed = _resolve_allowed(
@@ -97,19 +83,12 @@ def assert_allowlisted(
     *,
     enable_code_execution: bool = False,
 ) -> str:
-    """Return the command if allowlisted; otherwise raise AllowlistDenied.
-
-    Set ``enable_code_execution=True`` only when the caller intentionally
-    grants guest arbitrary code execution (adds ``CODE_EXECUTION_BINARIES``).
-
-    Parsing and path checks live in ``is_allowlisted`` so the two APIs cannot drift.
-    """
+    """Return command if allowlisted; otherwise raise AllowlistDenied."""
     if not is_allowlisted(
         command,
         allowed_binaries,
         enable_code_execution=enable_code_execution,
     ):
-        # One message shape for all denials (including empty / unparseable).
         parts = _split_argv(command)
         binary = parts[0] if parts else ""
         raise AllowlistDenied(

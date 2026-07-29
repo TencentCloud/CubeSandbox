@@ -131,6 +131,8 @@ hello cube
 | `network_allowlist.py` | `allow_out` — whitelist specific CIDRs, block everything else |
 | `network_denylist.py` | `deny_out` — block specific CIDRs, allow the rest |
 | `restrict_public_access.py` | `network={"allow_public_traffic": False}` — require a per-sandbox token on every public-URL request |
+| `tool_allowlist_deny.py` | Host argv tool allowlist — deny before `Sandbox.create` |
+| `tool_allowlist_allow.py` | Allowlisted command in MicroVM + `allow_internet_access=False` (gate ⊥ egress) |
 
 ### exec_code.py — Run Python Code
 
@@ -231,6 +233,20 @@ python network_allowlist.py
 python network_denylist.py
 ```
 
+### Host argv tool allowlist
+
+Orthogonal to egress CIDR policy: refuse illegal tools on the **first argv
+token** before `Sandbox.create`. Interpreters are not in the default set;
+pass `enable_code_execution=True` only when guest arbitrary code is intended.
+
+```bash
+# Deny: no sandbox created
+python tool_allowlist_deny.py
+
+# Allow: run in MicroVM under airgap
+python tool_allowlist_allow.py
+```
+
 ### restrict_public_access.py — Require a Token on Every Public-URL Request
 
 By default a sandbox's public URL is reachable by anyone who knows it. For
@@ -284,6 +300,9 @@ code-sandbox-quickstart/
 ├── network_allowlist.py       # Outbound CIDR allowlist
 ├── network_denylist.py        # Outbound CIDR denylist
 ├── restrict_public_access.py  # Token-gated public URL access
+├── tool_allowlist.py          # Host argv tool allowlist gate
+├── tool_allowlist_deny.py     # Deny before Sandbox.create
+├── tool_allowlist_allow.py    # Allowlisted cmd + airgap
 ├── requirements.txt           # Python dependencies
 └── .env.example               # Environment variable template
 ```

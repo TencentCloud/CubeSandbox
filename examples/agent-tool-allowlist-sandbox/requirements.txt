@@ -1,5 +1,0 @@
-e2b-code-interpreter>=2.4.1
-python-dotenv
-# Included in one file for convenience (needed by run_allowlisted_sidecar.py /
-# e2b-dev-sidecar). Core allow/deny scripts do not import aiohttp.
-aiohttp>=3.9
