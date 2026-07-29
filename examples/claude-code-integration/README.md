@@ -45,13 +45,13 @@ python network_policy.py
 |---|---|
 | `Dockerfile` | Node.js 24 + Claude Code CLI on `cubesandbox-base:2026.16` |
 | `.env.example` | Environment variable reference |
-| `requirements.txt` | Python dependencies (`e2b`, `cubesandbox`, `python-dotenv`) |
+| `requirements.txt` | Python dependencies (`e2b`, `cubesandbox`) |
+| `build-template.sh` | Build image → push → register as Cube template |
 | `run_claude_code.py` | One-shot headless Claude Code task |
 | `resume_claude_code.py` | Pause/resume persistence demo |
 | `network_policy.py` | CubeEgress credential vault (default-deny egress + on-the-wire key injection) |
-| `_cc_common.py` | Shared sandbox command helpers + JSON/JSONL output rendering |
-| `env_utils.py` | Environment variable utilities + CLI command builder |
-| `test_cli.py` | CLI verification test suite (run to validate Claude Code CLI behavior) |
+| `common.py` | SDK-agnostic sandbox command helpers + CLI command builder + output rendering |
+| `test_common.py` | Unit tests for `common.py` (12/12, standalone runner) |
 
 ## How It Works
 

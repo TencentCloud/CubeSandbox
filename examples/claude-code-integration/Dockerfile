@@ -17,7 +17,9 @@
 #     --probe       49983 \
 #     --probe-path  /health
 
-ARG CUBE_BASE_IMAGE=ghcr.nju.edu.cn/tencentcloud/cubesandbox-base:2026.16
+# For users in China, override with the NJU mirror:
+#   --build-arg CUBE_BASE_IMAGE=ghcr.nju.edu.cn/tencentcloud/cubesandbox-base:2026.16
+ARG CUBE_BASE_IMAGE=ghcr.io/tencentcloud/cubesandbox-base:2026.16
 FROM ${CUBE_BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -48,11 +50,12 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && npm cache clean --force \
     && rm -rf /root/.npm
 
-# Claude Code state directory (pre-created empty so no session leaks across
-# tenants; sessions are ephemeral and scoped to the sandbox lifecycle).
-ENV CLAUDE_CODE_STATE_DIR=/root/.claude
-
-RUN mkdir -p /workspace "${CLAUDE_CODE_STATE_DIR}"
+# Claude Code stores its state at $HOME/.claude by default, so the path
+# follows whichever user runs the process (e.g. /home/user/.claude for
+# headless automation, /root/.claude for root).  Sessions are ephemeral
+# and scoped to the sandbox lifecycle — each MicroVM boots from this
+# template snapshot, so no state leaks across tenants.
+RUN mkdir -p /workspace
 
 WORKDIR /workspace
 

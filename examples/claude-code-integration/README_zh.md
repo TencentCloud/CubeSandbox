@@ -44,13 +44,13 @@ python network_policy.py
 |---|---|
 | `Dockerfile` | 在 `cubesandbox-base:2026.16` 上安装 Node.js 24 + Claude Code CLI |
 | `.env.example` | 环境变量参考 |
-| `requirements.txt` | Python 依赖 (`e2b`, `cubesandbox`, `python-dotenv`) |
+| `requirements.txt` | Python 依赖 (`e2b`, `cubesandbox`) |
+| `build-template.sh` | 构建镜像 → 推送 → 注册为 Cube 模板 |
 | `run_claude_code.py` | 一次性 headless Claude Code 任务 |
 | `resume_claude_code.py` | 暂停/恢复持久化演示 |
 | `network_policy.py` | CubeEgress 凭证保险库（默认拒绝出口 + 在线密钥注入） |
-| `_cc_common.py` | 共享沙箱命令辅助函数 + JSON/JSONL 输出渲染 |
-| `env_utils.py` | 环境变量工具函数 + CLI 命令构建器 |
-| `test_cli.py` | CLI 验证测试套件（运行以验证 Claude Code CLI 行为） |
+| `common.py` | SDK 无关的沙箱命令辅助函数 + CLI 命令构建器 + 输出渲染 |
+| `test_common.py` | `common.py` 单元测试（12/12，可独立运行） |
 
 ## 工作原理
 
@@ -149,15 +149,6 @@ Claude Code 支持三种 `--output-format` 模式（均需配合 `-p`/`--print`�
   配额约束。使用 `--max-budget-usd` 限制每次会话的开销。
 - **状态目录。** `/root/.claude` 存放 Claude Code 会话状态。镜像中应保持为空，
   避免跨租户泄露会话信息。
-
-## 技术背景
-
-AI 编程 Agent（如 Claude Code、Pi、Gemini CLI）通常需要读写文件、执行命令和
-安装依赖包。直接在开发工作站上运行会混合 Agent 的爆炸半径和本地开发环境。
-CubeSandbox 通过 KVM MicroVM 提供硬件级隔离，每个会话拥有独立的客户内核。
-
-相关研究领域包括：微虚拟机安全隔离 (Firecracker/gVisor)、容器逃逸检测、
-基于 eBPF 的内核级沙箱、大语言模型工具调用的安全约束等。
 
 ## 参考资料
 
