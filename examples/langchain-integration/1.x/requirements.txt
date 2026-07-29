@@ -1,0 +1,10 @@
+# LangChain 1.x (modern langchain.agents.create_agent API) — requires Python 3.10+
+langchain>=1.3.14,<2.0
+langchain-openai>=1.0,<2.0
+# langchain.agents.create_agent builds its agent on LangGraph. Declared explicitly
+# so the sample is self-contained regardless of whether langchain pulls it in.
+langgraph>=0.2
+# Official CubeSandbox Python SDK (from cubesandbox import Sandbox).
+# >=0.6.0 for the envd-process commands/files API this demo relies on.
+cubesandbox>=0.6.0
+python-dotenv
