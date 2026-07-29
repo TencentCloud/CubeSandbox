@@ -11,15 +11,15 @@ use crate::{
     cubemaster::{
         datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeEgressRule,
         CubeEgressRuleAction, CubeEgressRuleInject, CubeEgressRuleMatch, CubeMasterClient,
-        CubeMasterError, CubeNetworkConfig, DeleteSandboxRequest, GetSandboxContainerItem,
-        ListSandboxRequest, SandboxInfo, SandboxLogsRequest, SandboxRefreshRequest, SandboxStatus,
-        SandboxTimeoutRequest, SandboxUpdateRequest, VolumeSpec,
+        CubeMasterError, CubeNetworkConfig, DeleteSandboxRequest, ListSandboxRequest, SandboxInfo,
+        SandboxLogsRequest, SandboxRefreshRequest, SandboxStatus, SandboxTimeoutRequest,
+        SandboxUpdateRequest, VolumeSpec,
     },
     error::{AppError, AppResult},
     models::{
         EgressRule, LogLevel as ModelLogLevel, NewSandbox, Sandbox, SandboxDetail, SandboxLog,
         SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxState,
-        SandboxVolumeMount, TerminalTarget,
+        SandboxVolumeMount,
     },
 };
 
@@ -27,7 +27,6 @@ const RET_CODE_OK: i32 = 0;
 const RET_CODE_HTTP_OK: i32 = 200;
 const RET_CODE_NOT_FOUND: i32 = 130404;
 const RET_CODE_CONFLICT: i32 = 130409;
-const CONTAINER_STATUS_RUNNING: i32 = 1;
 const RET_CODE_TASK_STATE_INVALID: i32 = 130490;
 const RET_CODE_TASK_RESUME_FAILED: i32 = 130589;
 const HOSTDIR_MOUNT_KEY: &str = "host-mount";
@@ -148,19 +147,6 @@ impl SandboxService {
             metadata: optional_metadata(d.labels),
             state: sandbox_state_from_status(d.status),
             volume_mounts: None,
-            terminal_targets: d
-                .containers
-                .iter()
-                .filter(|container| is_terminal_target(container))
-                .map(|container| TerminalTarget {
-                    container_id: container.container_id.clone(),
-                    name: if container.name.is_empty() {
-                        container.kind.clone()
-                    } else {
-                        container.name.clone()
-                    },
-                })
-                .collect(),
         })
     }
 
@@ -898,12 +884,6 @@ fn parse_state_filter(value: Option<&str>) -> Option<SandboxState> {
     }
 }
 
-fn is_terminal_target(container: &GetSandboxContainerItem) -> bool {
-    container.kind == "workload"
-        && !container.container_id.is_empty()
-        && container.status == CONTAINER_STATUS_RUNNING
-}
-
 fn is_success_ret_code(ret_code: i32) -> bool {
     matches!(ret_code, RET_CODE_OK | RET_CODE_HTTP_OK)
 }
@@ -1083,13 +1063,13 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        build_cube_network_config, filter_by_metadata, from_cubemaster_info, is_terminal_target,
+        build_cube_network_config, filter_by_metadata, from_cubemaster_info,
         map_delete_cubemaster_err, validate_mask_request_host, SandboxService, RET_CODE_CONFLICT,
         RET_CODE_NOT_FOUND, RET_CODE_TASK_RESUME_FAILED, RET_CODE_TASK_STATE_INVALID,
     };
     use crate::cubemaster::{
-        CreateSandboxRequest, CubeMasterClient, CubeMasterError, GetSandboxContainerItem,
-        ListSandboxResponse, SandboxInfo, SandboxUpdateRequest,
+        CreateSandboxRequest, CubeMasterClient, CubeMasterError, ListSandboxResponse, SandboxInfo,
+        SandboxUpdateRequest,
     };
     use crate::error::AppError;
     use crate::models::{
@@ -1105,34 +1085,6 @@ mod tests {
     };
     use serde_json::Value;
     use tokio::sync::Mutex;
-
-    fn terminal_container(kind: &str, status: i32, container_id: &str) -> GetSandboxContainerItem {
-        GetSandboxContainerItem {
-            name: String::new(),
-            container_id: container_id.to_string(),
-            status,
-            image: String::new(),
-            create_at: 0,
-            cpu: String::new(),
-            mem: String::new(),
-            kind: kind.to_string(),
-            pause_at: 0,
-        }
-    }
-
-    #[test]
-    fn terminal_targets_include_only_running_workload_containers() {
-        assert!(is_terminal_target(&terminal_container(
-            "workload", 1, "ctr-1"
-        )));
-        assert!(!is_terminal_target(&terminal_container(
-            "sandbox", 1, "infra-1"
-        )));
-        assert!(!is_terminal_target(&terminal_container(
-            "workload", 5, "ctr-2"
-        )));
-        assert!(!is_terminal_target(&terminal_container("workload", 1, "")));
-    }
 
     #[test]
     fn metadata_filter_matches_all_pairs() {

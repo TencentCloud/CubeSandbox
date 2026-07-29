@@ -69,10 +69,7 @@ type CommonConf struct {
 	HttpPort               int           `yaml:"http_port"`
 	// HttpBind is the HTTP listen address. Empty means 0.0.0.0 (all
 	// interfaces); set to 127.0.0.1 to keep the API loopback-only.
-	HttpBind string `yaml:"http_bind"`
-	// TerminalGatewayToken authorizes CubeAPI's internal terminal WebSocket
-	// bridge. An empty value keeps the terminal endpoint disabled.
-	TerminalGatewayToken            string            `yaml:"terminal_gateway_token"`
+	HttpBind                        string            `yaml:"http_bind"`
 	WriteTimeout                    int               `yaml:"http_writetimeout"`
 	ReadTimeout                     int               `yaml:"http_readtimeout"`
 	IdleTimeout                     int               `yaml:"http_idletimeout"`
@@ -1171,15 +1168,6 @@ func validate(cfg *Config) error {
 //go:noinline
 func GetConfig() *Config {
 	return cfg
-}
-
-// GetTerminalGatewayToken returns an empty value until configuration is loaded,
-// keeping the internal terminal endpoint disabled by default.
-func GetTerminalGatewayToken() string {
-	if cfg == nil || cfg.Common == nil {
-		return ""
-	}
-	return cfg.Common.TerminalGatewayToken
 }
 
 var defaultAllowedHostMountPrefixes = []string{"/data/shared/"}

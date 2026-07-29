@@ -60,16 +60,6 @@ pub struct ServerConfig {
     #[serde(default)]
     pub auth_callback_url: Option<String>,
 
-    /// Shared secret used only for CubeAPI -> CubeMaster terminal WebSocket
-    /// bridging. It must match CubeMaster common.terminal_gateway_token.
-    #[serde(default)]
-    pub terminal_gateway_token: Option<String>,
-
-    /// Maximum active Web terminal sessions handled by this CubeAPI process
-    /// for one sandbox.
-    #[serde(default = "default_terminal_max_sessions_per_sandbox")]
-    pub terminal_max_sessions_per_sandbox: usize,
-
     /// Built-in simple API key for lightweight authentication.
     ///
     /// When `auth_callback_url` is unset and this field is set, every request
@@ -119,13 +109,6 @@ fn default_log_dir() -> String {
 fn default_log_prefix() -> String {
     "cube-api".to_string()
 }
-fn default_terminal_max_sessions_per_sandbox() -> usize {
-    std::env::var("TERMINAL_MAX_SESSIONS_PER_SANDBOX")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(4)
-}
 
 impl ServerConfig {
     pub fn from_env() -> anyhow::Result<Self> {
@@ -151,8 +134,6 @@ impl Default for ServerConfig {
             log_dir: default_log_dir(),
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
-            terminal_gateway_token: std::env::var("TERMINAL_GATEWAY_TOKEN").ok(),
-            terminal_max_sessions_per_sandbox: default_terminal_max_sessions_per_sandbox(),
             cube_api_key: std::env::var("CUBE_API_KEY").ok().filter(|s| !s.is_empty()),
         }
     }

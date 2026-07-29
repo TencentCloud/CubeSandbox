@@ -221,7 +221,7 @@ export default function SandboxDetailPage() {
         </div>
         {data ? (
           <div className="flex gap-2">
-            <Button variant="outline" onClick={() => setTerminalOpen(true)} disabled={state !== 'running' || !data?.terminalTargets?.length}>
+            <Button variant="outline" onClick={() => setTerminalOpen(true)} disabled={state !== 'running'}>
               <Terminal size={14} /> {t('actions.terminal')}
             </Button>
             {state === 'paused' ? (
@@ -241,7 +241,7 @@ export default function SandboxDetailPage() {
       </div>
 
       <SandboxActionErrorBanner message={actionError} onDismiss={() => setActionError(null)} />
-      <SandboxTerminalDialog open={terminalOpen} sandboxId={sandboxID} targets={data?.terminalTargets ?? []} onOpenChange={setTerminalOpen} />
+      <SandboxTerminalDialog open={terminalOpen} sandboxId={sandboxID} onOpenChange={setTerminalOpen} />
       {detail.isError && data ? (
         <div className="rounded-md border border-cube-warn/30 bg-cube-warn/10 px-3 py-2 text-sm text-cube-warn">
           {t('refreshFailed')}

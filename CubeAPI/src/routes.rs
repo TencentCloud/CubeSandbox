@@ -82,10 +82,6 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
         .route("/sandboxes/:sandboxID", get(sandboxes::get_sandbox))
         .route("/sandboxes/:sandboxID", delete(sandboxes::kill_sandbox))
         .route(
-            "/sandboxes/:sandboxID/terminal/ws",
-            get(sandboxes::sandbox_terminal),
-        )
-        .route(
             "/sandboxes/:sandboxID/logs",
             get(sandboxes::get_sandbox_logs),
         )

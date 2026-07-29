@@ -36,9 +36,6 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	g.GET(SandboxLogsAction, handleSandboxLogsAction)
 	g.POST(SandboxLogsAction, handleSandboxLogsAction)
 
-	// Web terminal (server-to-server hop from CubeAPI; plain http.HandlerFunc)
-	g.GET(SandboxTerminalAction, gin.WrapF(TerminalWebSocketHandler))
-
 	// Image
 	g.POST(ImageAction, createImageGinHandler)
 	g.DELETE(ImageAction, deleteImageGinHandler)

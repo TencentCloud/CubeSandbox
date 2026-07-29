@@ -72,8 +72,6 @@ cargo build --release
 | `CUBE_API_SANDBOX_DOMAIN` | `cube.app` | Domain returned in sandbox API responses |
 | `AUTH_CALLBACK_URL` | *(unset)* | External auth callback URL (callback mode) |
 | `CUBE_API_KEY` | *(unset)* | Built-in API key for simple auth (simple-key mode) |
-| `TERMINAL_GATEWAY_TOKEN` | unset | Shared secret for the private CubeAPI to CubeMaster terminal hop |
-| `TERMINAL_MAX_SESSIONS_PER_SANDBOX` | `4` | Active Web terminal sessions per sandbox and CubeAPI process |
 
 ### Authentication
 

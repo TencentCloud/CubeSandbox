@@ -18,10 +18,6 @@ service CubeboxMgr {
   rpc List(ListCubeSandboxRequest) returns (ListCubeSandboxResponse);
   rpc Update(UpdateCubeSandboxRequest) returns (UpdateCubeSandboxResponse);
   rpc Exec(ExecCubeSandboxRequest) returns (ExecCubeSandboxResponse);
-  // AttachTerminal creates an interactive TTY process and streams terminal I/O.
-  // The first client frame must be an `open` frame; subsequent frames carry
-  // stdin bytes or terminal size updates. One stream maps to one process.
-  rpc AttachTerminal(stream TerminalClientMessage) returns (stream TerminalServerMessage);
   // AppSnapshot creates a cubebox, makes an app snapshot, and destroys the cubebox.
   // Required annotations:
   //   - cube.master.appsnapshot.create: "true"
@@ -805,50 +801,6 @@ message ExecCubeSandboxResponse {
   string requestID     = 1;
   // Ret.
   cubelet.services.errorcode.v1.Ret ret   = 2;
-}
-
-// Client-to-server frames for an interactive terminal session.
-message TerminalClientMessage {
-  oneof payload {
-    TerminalOpenRequest open = 1;
-    bytes stdin = 2;
-    TerminalResize resize = 3;
-  }
-}
-
-message TerminalOpenRequest {
-  // Reserved as a stable correlation identifier for future distributed tracing
-  // across gateway, CubeMaster, and Cubelet; not an idempotency or cancellation key.
-  string request_id = 1;
-  string sandbox_id = 2;
-  string container_id = 3;
-  repeated string args = 4;
-  repeated string env = 5;
-  string cwd = 6;
-  uint32 cols = 7;
-  uint32 rows = 8;
-}
-
-message TerminalResize {
-  uint32 cols = 1;
-  uint32 rows = 2;
-}
-
-// Server-to-client frames for an interactive terminal session.
-message TerminalServerMessage {
-  oneof payload {
-    bytes output = 1;
-    TerminalExit exit = 2;
-    TerminalError error = 3;
-  }
-}
-
-message TerminalExit {
-  int32 exit_code = 1;
-}
-
-message TerminalError {
-  string message = 1;
 }
 
 // AppSnapshotRequest is the request for creating an app snapshot.

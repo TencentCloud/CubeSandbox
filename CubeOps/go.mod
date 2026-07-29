@@ -8,6 +8,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.2.2
 	github.com/google/go-containerregistry v0.21.6
 	github.com/google/uuid v1.6.0
+	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/ory/dockertest/v3 v3.12.0
 	github.com/tencentcloud/CubeSandbox/CubeDB v0.1.0
 	github.com/tencentcloud/CubeSandbox/cubelog v0.1.1-0.20260113105508-a996703fa42f

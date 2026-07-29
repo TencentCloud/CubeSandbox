@@ -1,70 +1,72 @@
 # WebUI interactive terminal
 
-The sandbox details page exposes **Open terminal** only when CubeMaster reports
-at least one running, user workload container. The terminal runs inside that
-existing container; it does not mount a Docker socket or grant host access.
+The sandbox details page exposes **Open terminal** for a running sandbox. The
+terminal is an operational capability served entirely by **CubeOps**: it opens
+an interactive login shell inside the sandbox through the in-guest **envd**
+agent's `process.Process` PTY API — the same envd path CubeOps already uses to
+run commands. There is no dedicated terminal RPC on CubeMaster or Cubelet, and
+CubeAPI is not involved.
+
+```text
+WebUI / xterm.js
+      │  authenticated WebSocket ( /opsapi/v1/sdk/sandboxes/<id>/terminal/ws )
+      ▼
+CubeOps (JWT auth · audit · session limit · frame/idle limits)
+      │  envd Connect stream ( process.Process: Start / SendInput / Update / SendSignal )
+      ▼
+envd (in-guest) → PTY → workload shell
+```
 
 ## Deployment
 
-CubeAPI and CubeMaster must be upgraded together. Set the same randomly
-generated value in both services before starting them:
+No extra secret or cross-service token is required. CubeOps reaches envd exactly
+as it already does for command execution: over the sandbox proxy using the
+`<envd-port>-<sandboxId>.<sandbox_domain>` host, so `sandbox_domain` must be set
+correctly for CubeOps (it defaults to the same value used elsewhere).
 
-```yaml
-# CubeMaster/conf.yaml
-common:
-  terminal_gateway_token: replace-with-a-long-random-secret
-```
-
-```bash
-# CubeAPI environment
-TERMINAL_GATEWAY_TOKEN=replace-with-a-long-random-secret
-# Optional; defaults to four active sessions per sandbox and CubeAPI process.
-TERMINAL_MAX_SESSIONS_PER_SANDBOX=4
-```
-
-The CubeMaster terminal WebSocket stays disabled when this value is empty.
-Keep CubeMaster on a private network; browsers connect only to CubeAPI through
-the existing HTTPS/WSS proxy. CubeMaster intentionally accepts the CubeAPI
-server-to-server WebSocket without using browser Origin as an authorization
-signal, so its terminal endpoint must never be exposed directly.
+The only deployment requirement is that the ingress in front of CubeOps forwards
+the WebSocket upgrade for `/opsapi/`. The bundled WebUI nginx configs
+(`deploy/one-click/webui/nginx.conf`, the Helm chart, and the Terraform TKE
+addon) already set `Upgrade`/`Connection` on that location.
 
 ## Authentication and auditing
 
-The browser passes its existing WebUI session token using the WebSocket
-subprotocol header, never in a URL. Terminal access is disabled when the WebUI
-session store is unavailable. An absent, expired, or invalid session is rejected
-before the WebSocket is upgraded. Existing API-key/Bearer authentication
-middleware also protects the route when an auth callback is configured.
+A browser cannot set an `Authorization` header on a WebSocket upgrade, so the
+existing CubeOps JWT access token is carried as the second
+`Sec-WebSocket-Protocol` value (the first is the fixed `cube-terminal` marker),
+never in the URL. CubeOps verifies the token before the socket is upgraded and
+rejects an absent, expired, or invalid token with HTTP 401. Because the token
+lives in the WebUI origin's storage and is unreachable cross-origin, this also
+defeats cross-site WebSocket hijacking — the token is the authorization
+boundary, so `Origin` is not enforced.
 
-CubeAPI emits `terminal.session.open` and `terminal.session.close` audit events
-with the operator, sandbox ID, and container ID. The URL sandbox ID must match
-the first protocol frame, and `open` is emitted only after that frame reaches
-CubeMaster. It records proxy acceptance, not confirmation that Cubelet has
-created the exec process; a later backend rejection is returned as an error and
-followed by `close`. Authentication failures, session-limit rejections,
-malformed open frames, and backend connection failures emit
-`terminal.session.reject` with a stable reason but never include credentials.
-Each terminal is a separate Cubelet TTY process, so multiple sessions and
-sandboxes remain isolated.
-CubeAPI rejects sessions above
-`TERMINAL_MAX_SESSIONS_PER_SANDBOX` with HTTP 429. The limit is process-local,
-so multiply it by the number of CubeAPI replicas when sizing a deployment.
+CubeOps emits `terminal.session.open` and `terminal.session.close` audit log
+events with the operator (from the JWT) and the sandbox ID. Each session is an
+independent envd PTY process, so multiple sessions and sandboxes stay isolated.
+On disconnect CubeOps sends `SIGKILL` to the PTY so a lingering shell cannot
+block the sandbox.
+
+Limits (process-local; multiply by the number of CubeOps replicas when sizing):
+
+- Up to 4 concurrent sessions per sandbox; further sessions get HTTP 429.
+- 64 KiB maximum WebSocket frame.
+- 30 minute idle timeout.
 
 The current WebUI session is a cluster-administrator identity. CubeSandbox does
-not yet attach an owner or tenant to a sandbox, so this terminal endpoint does
-not claim per-sandbox tenant authorization. Do not expose the cluster-global
-WebUI to mutually untrusted tenants; deployments that add sandbox ownership
-must enforce that ownership before the WebSocket upgrade.
+not yet attach an owner or tenant to a sandbox, so this endpoint does not claim
+per-sandbox tenant authorization. Do not expose the cluster-global WebUI to
+mutually untrusted tenants; a deployment that adds sandbox ownership must enforce
+it before the upgrade.
 
 ## Validation checklist
 
-1. Open a running sandbox with a container target in WebUI.
-2. Run `ls`, `top`, and `ping`; verify ANSI output and copy/paste.
-3. Resize the dialog and verify the shell's terminal size changes.
+1. Open a running sandbox in the WebUI and click **Open terminal**.
+2. Run `id`, `ls`, `top`; verify ANSI output, cursor interaction, and copy/paste.
+3. Resize the dialog and verify `stty size` reflects the new rows/cols.
 4. Open two terminals against different sandboxes and verify output does not
    cross over.
-5. Pause a sandbox and verify its terminal button is disabled; try an expired
-   WebUI session and verify the WebSocket is rejected.
+5. Pause a sandbox and verify its terminal button is disabled; sign out (or use
+   an expired token) and verify the WebSocket is rejected before upgrade.
 
-Known limitation: automatic reconnect intentionally creates a new TTY session;
+Known limitation: automatic reconnect intentionally creates a new PTY session;
 it cannot resume an exited shell process.

@@ -55,12 +55,22 @@ locals {
       worker_processes auto;
       events { worker_connections 1024; }
       http {
+        map $http_upgrade $connection_upgrade { default upgrade; "" close; }
         server {
           listen 80;
           root /usr/share/nginx/html;
           index index.html;
           location ^~ /sandbox/ { proxy_pass __SANDBOX_PROXY_UPSTREAM__; }
-          location /opsapi/ { proxy_pass __CUBE_OPS_UPSTREAM__/api/; }
+          # /opsapi/ forwards the WebSocket upgrade for the sandbox terminal.
+          location /opsapi/ {
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+            proxy_read_timeout 1810s;
+            proxy_send_timeout 1810s;
+            proxy_pass __CUBE_OPS_UPSTREAM__/api/;
+          }
           location /cubeapi/v1/ {
             rewrite ^/cubeapi/v1/(.*)$ /api/v1/sdk/$1 break;
             proxy_pass __CUBE_OPS_UPSTREAM__;

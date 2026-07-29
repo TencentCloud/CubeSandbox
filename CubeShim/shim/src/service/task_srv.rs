@@ -558,26 +558,8 @@ impl Task for TaskService {
     async fn resize_pty(
         &self,
         _ctx: &TtrpcContext,
-        req: api::ResizePtyRequest,
+        _req: api::ResizePtyRequest,
     ) -> TtrpcResult<api::Empty> {
-        let sandbox = self.sandbox.lock().await;
-        if sandbox.paused().await {
-            errf!(self.log, "sandbox not in normal state");
-            return Err(Others("sandbox not in normal state".to_string()));
-        }
-        sandbox
-            .resize_pty(req.id(), req.exec_id(), req.width(), req.height())
-            .await
-            .map_err(|error| {
-                errf!(
-                    self.log,
-                    "resize pty failed, id:{}, execid:{}, error:{}",
-                    req.id(),
-                    req.exec_id(),
-                    error
-                );
-                Error::Other(format!("resize pty failed:{error}"))
-            })?;
         Ok(api::Empty::default())
     }
 

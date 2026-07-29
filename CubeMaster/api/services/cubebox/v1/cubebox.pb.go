@@ -86,11 +86,11 @@ func (MountPropagation) EnumDescriptor() ([]byte, []int) {
 type StorageMedium int32
 
 const (
-	//use blk device the default is for the node
+	// use blk device the default is for the node
 	StorageMedium_StorageMediumDefault StorageMedium = 0
-	//use memory (e.g. tmpfs on linux)
+	// use memory (e.g. tmpfs on linux)
 	StorageMedium_StorageMediumMemory StorageMedium = 1
-	//use cubemsg
+	// use cubemsg
 	StorageMedium_StorageMediumCubeMsg StorageMedium = 2
 )
 
@@ -2236,9 +2236,9 @@ func (x *SysCall) GetArgs() []*LinuxSeccompArg {
 // ref by https://kubernetes.io/zh-cn/docs/reference/kubernetes-api/common-definitions/quantity/#Quantity
 type Resource struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	//Cpu的限制，单位为core数
+	// Cpu的限制，单位为core数
 	Cpu string `protobuf:"bytes,1,opt,name=cpu,proto3" json:"cpu,omitempty"`
-	//内存限制，单位可以为字节
+	// 内存限制，单位可以为字节
 	Mem string `protobuf:"bytes,2,opt,name=mem,proto3" json:"mem,omitempty"`
 	// mvm内对容器的cpu限制，单位为core数
 	CpuLimit string `protobuf:"bytes,3,opt,name=cpu_limit,json=cpuLimit,proto3" json:"cpu_limit,omitempty"`
@@ -2539,11 +2539,7 @@ type VolumeSource struct {
 	// host_dir_volumes shares host directories into the container via virtiofs.
 	HostDirVolumes *HostDirVolumeSources `protobuf:"bytes,7,opt,name=host_dir_volumes,json=hostDirVolumes,proto3" json:"host_dir_volumes,omitempty"`
 	// image volume source for image volume mount
-	Image *v1.ImageVolumeSource `protobuf:"bytes,9,opt,name=image,proto3" json:"image,omitempty"`
-	// plugin_volume delegates provisioning to a named external VolumePlugin
-	// registered in Cubelet's volume.Manager.  Field number matches
-	// Cubelet's cubebox.proto to ensure wire compatibility.
-	PluginVolume  *PluginVolumeSource `protobuf:"bytes,11,opt,name=plugin_volume,json=pluginVolume,proto3" json:"plugin_volume,omitempty"`
+	Image         *v1.ImageVolumeSource `protobuf:"bytes,9,opt,name=image,proto3" json:"image,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2606,71 +2602,6 @@ func (x *VolumeSource) GetImage() *v1.ImageVolumeSource {
 	return nil
 }
 
-func (x *VolumeSource) GetPluginVolume() *PluginVolumeSource {
-	if x != nil {
-		return x.PluginVolume
-	}
-	return nil
-}
-
-// PluginVolumeSource selects an external volume plugin by driver name.
-// Mirrors cubelet.services.volumeplugin.v1.PluginVolumeSource for
-// wire-format compatibility (same field numbers).
-type PluginVolumeSource struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// driver is the registered plugin name (e.g. "cos", "nfs").
-	Driver string `protobuf:"bytes,1,opt,name=driver,proto3" json:"driver,omitempty"`
-	// options are driver-specific key-value pairs forwarded to the plugin.
-	// MUST include "volume_id".
-	Options       map[string]string `protobuf:"bytes,2,rep,name=options,proto3" json:"options,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *PluginVolumeSource) Reset() {
-	*x = PluginVolumeSource{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[32]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *PluginVolumeSource) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*PluginVolumeSource) ProtoMessage() {}
-
-func (x *PluginVolumeSource) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[32]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use PluginVolumeSource.ProtoReflect.Descriptor instead.
-func (*PluginVolumeSource) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{32}
-}
-
-func (x *PluginVolumeSource) GetDriver() string {
-	if x != nil {
-		return x.Driver
-	}
-	return ""
-}
-
-func (x *PluginVolumeSource) GetOptions() map[string]string {
-	if x != nil {
-		return x.Options
-	}
-	return nil
-}
-
 // Volume represents a named volume in a pod that may be accessed by any container in the pod.
 type Volume struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -2686,7 +2617,7 @@ type Volume struct {
 
 func (x *Volume) Reset() {
 	*x = Volume{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[33]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2698,7 +2629,7 @@ func (x *Volume) String() string {
 func (*Volume) ProtoMessage() {}
 
 func (x *Volume) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[33]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2711,7 +2642,7 @@ func (x *Volume) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Volume.ProtoReflect.Descriptor instead.
 func (*Volume) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{33}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *Volume) GetName() string {
@@ -2766,7 +2697,7 @@ type RunCubeSandboxRequest struct {
 
 func (x *RunCubeSandboxRequest) Reset() {
 	*x = RunCubeSandboxRequest{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[34]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2778,7 +2709,7 @@ func (x *RunCubeSandboxRequest) String() string {
 func (*RunCubeSandboxRequest) ProtoMessage() {}
 
 func (x *RunCubeSandboxRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[34]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2791,7 +2722,7 @@ func (x *RunCubeSandboxRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunCubeSandboxRequest.ProtoReflect.Descriptor instead.
 func (*RunCubeSandboxRequest) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{34}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *RunCubeSandboxRequest) GetRequestID() string {
@@ -2891,7 +2822,7 @@ type RunCubeSandboxResponse struct {
 
 func (x *RunCubeSandboxResponse) Reset() {
 	*x = RunCubeSandboxResponse{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[35]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2903,7 +2834,7 @@ func (x *RunCubeSandboxResponse) String() string {
 func (*RunCubeSandboxResponse) ProtoMessage() {}
 
 func (x *RunCubeSandboxResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[35]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2916,7 +2847,7 @@ func (x *RunCubeSandboxResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunCubeSandboxResponse.ProtoReflect.Descriptor instead.
 func (*RunCubeSandboxResponse) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{35}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *RunCubeSandboxResponse) GetRequestID() string {
@@ -2980,7 +2911,7 @@ type PortMapping struct {
 
 func (x *PortMapping) Reset() {
 	*x = PortMapping{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[36]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2992,7 +2923,7 @@ func (x *PortMapping) String() string {
 func (*PortMapping) ProtoMessage() {}
 
 func (x *PortMapping) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[36]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3005,7 +2936,7 @@ func (x *PortMapping) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PortMapping.ProtoReflect.Descriptor instead.
 func (*PortMapping) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{36}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *PortMapping) GetContainerPort() int32 {
@@ -3035,7 +2966,7 @@ type CubeNetworkConfig struct {
 
 func (x *CubeNetworkConfig) Reset() {
 	*x = CubeNetworkConfig{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[37]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3047,7 +2978,7 @@ func (x *CubeNetworkConfig) String() string {
 func (*CubeNetworkConfig) ProtoMessage() {}
 
 func (x *CubeNetworkConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[37]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3060,7 +2991,7 @@ func (x *CubeNetworkConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CubeNetworkConfig.ProtoReflect.Descriptor instead.
 func (*CubeNetworkConfig) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{37}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *CubeNetworkConfig) GetAllowInternetAccess() bool {
@@ -3102,7 +3033,7 @@ type EgressRule struct {
 
 func (x *EgressRule) Reset() {
 	*x = EgressRule{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[38]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3114,7 +3045,7 @@ func (x *EgressRule) String() string {
 func (*EgressRule) ProtoMessage() {}
 
 func (x *EgressRule) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[38]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3127,7 +3058,7 @@ func (x *EgressRule) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EgressRule.ProtoReflect.Descriptor instead.
 func (*EgressRule) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{38}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *EgressRule) GetName() string {
@@ -3164,7 +3095,7 @@ type EgressRuleMatch struct {
 
 func (x *EgressRuleMatch) Reset() {
 	*x = EgressRuleMatch{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[39]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3176,7 +3107,7 @@ func (x *EgressRuleMatch) String() string {
 func (*EgressRuleMatch) ProtoMessage() {}
 
 func (x *EgressRuleMatch) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[39]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3189,7 +3120,7 @@ func (x *EgressRuleMatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EgressRuleMatch.ProtoReflect.Descriptor instead.
 func (*EgressRuleMatch) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{39}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *EgressRuleMatch) GetSni() string {
@@ -3238,7 +3169,7 @@ type EgressRuleAction struct {
 
 func (x *EgressRuleAction) Reset() {
 	*x = EgressRuleAction{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[40]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3250,7 +3181,7 @@ func (x *EgressRuleAction) String() string {
 func (*EgressRuleAction) ProtoMessage() {}
 
 func (x *EgressRuleAction) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[40]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3263,7 +3194,7 @@ func (x *EgressRuleAction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EgressRuleAction.ProtoReflect.Descriptor instead.
 func (*EgressRuleAction) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{40}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *EgressRuleAction) GetAllow() bool {
@@ -3298,7 +3229,7 @@ type EgressRuleInject struct {
 
 func (x *EgressRuleInject) Reset() {
 	*x = EgressRuleInject{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[41]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3310,7 +3241,7 @@ func (x *EgressRuleInject) String() string {
 func (*EgressRuleInject) ProtoMessage() {}
 
 func (x *EgressRuleInject) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[41]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3323,7 +3254,7 @@ func (x *EgressRuleInject) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EgressRuleInject.ProtoReflect.Descriptor instead.
 func (*EgressRuleInject) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{41}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *EgressRuleInject) GetHeader() string {
@@ -3367,7 +3298,7 @@ type DestroyCubeSandboxRequest struct {
 
 func (x *DestroyCubeSandboxRequest) Reset() {
 	*x = DestroyCubeSandboxRequest{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[42]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3379,7 +3310,7 @@ func (x *DestroyCubeSandboxRequest) String() string {
 func (*DestroyCubeSandboxRequest) ProtoMessage() {}
 
 func (x *DestroyCubeSandboxRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[42]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3392,7 +3323,7 @@ func (x *DestroyCubeSandboxRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DestroyCubeSandboxRequest.ProtoReflect.Descriptor instead.
 func (*DestroyCubeSandboxRequest) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{42}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *DestroyCubeSandboxRequest) GetRequestID() string {
@@ -3438,7 +3369,7 @@ type DestroyCubeSandboxResponse struct {
 
 func (x *DestroyCubeSandboxResponse) Reset() {
 	*x = DestroyCubeSandboxResponse{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[43]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3450,7 +3381,7 @@ func (x *DestroyCubeSandboxResponse) String() string {
 func (*DestroyCubeSandboxResponse) ProtoMessage() {}
 
 func (x *DestroyCubeSandboxResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[43]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3463,7 +3394,7 @@ func (x *DestroyCubeSandboxResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DestroyCubeSandboxResponse.ProtoReflect.Descriptor instead.
 func (*DestroyCubeSandboxResponse) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{43}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *DestroyCubeSandboxResponse) GetRequestID() string {
@@ -3519,7 +3450,7 @@ type CubeSandbox struct {
 
 func (x *CubeSandbox) Reset() {
 	*x = CubeSandbox{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[44]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3531,7 +3462,7 @@ func (x *CubeSandbox) String() string {
 func (*CubeSandbox) ProtoMessage() {}
 
 func (x *CubeSandbox) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[44]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3544,7 +3475,7 @@ func (x *CubeSandbox) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CubeSandbox.ProtoReflect.Descriptor instead.
 func (*CubeSandbox) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{44}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *CubeSandbox) GetId() string {
@@ -3635,7 +3566,7 @@ type Container struct {
 
 func (x *Container) Reset() {
 	*x = Container{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[45]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3647,7 +3578,7 @@ func (x *Container) String() string {
 func (*Container) ProtoMessage() {}
 
 func (x *Container) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[45]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3660,7 +3591,7 @@ func (x *Container) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Container.ProtoReflect.Descriptor instead.
 func (*Container) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{45}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *Container) GetId() string {
@@ -3737,7 +3668,7 @@ type ContainerStateValue struct {
 
 func (x *ContainerStateValue) Reset() {
 	*x = ContainerStateValue{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[46]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3749,7 +3680,7 @@ func (x *ContainerStateValue) String() string {
 func (*ContainerStateValue) ProtoMessage() {}
 
 func (x *ContainerStateValue) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[46]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3762,7 +3693,7 @@ func (x *ContainerStateValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ContainerStateValue.ProtoReflect.Descriptor instead.
 func (*ContainerStateValue) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{46}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *ContainerStateValue) GetState() ContainerState {
@@ -3791,7 +3722,7 @@ type CubeSandboxFilter struct {
 
 func (x *CubeSandboxFilter) Reset() {
 	*x = CubeSandboxFilter{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[47]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3803,7 +3734,7 @@ func (x *CubeSandboxFilter) String() string {
 func (*CubeSandboxFilter) ProtoMessage() {}
 
 func (x *CubeSandboxFilter) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[47]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3816,7 +3747,7 @@ func (x *CubeSandboxFilter) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CubeSandboxFilter.ProtoReflect.Descriptor instead.
 func (*CubeSandboxFilter) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{47}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *CubeSandboxFilter) GetState() *ContainerStateValue {
@@ -3853,7 +3784,7 @@ type ListCubeSandboxRequest struct {
 
 func (x *ListCubeSandboxRequest) Reset() {
 	*x = ListCubeSandboxRequest{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[48]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3865,7 +3796,7 @@ func (x *ListCubeSandboxRequest) String() string {
 func (*ListCubeSandboxRequest) ProtoMessage() {}
 
 func (x *ListCubeSandboxRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[48]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3878,7 +3809,7 @@ func (x *ListCubeSandboxRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListCubeSandboxRequest.ProtoReflect.Descriptor instead.
 func (*ListCubeSandboxRequest) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{48}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *ListCubeSandboxRequest) GetId() string {
@@ -3912,7 +3843,7 @@ type ListCubeSandboxResponse struct {
 
 func (x *ListCubeSandboxResponse) Reset() {
 	*x = ListCubeSandboxResponse{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[49]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3924,7 +3855,7 @@ func (x *ListCubeSandboxResponse) String() string {
 func (*ListCubeSandboxResponse) ProtoMessage() {}
 
 func (x *ListCubeSandboxResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[49]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3937,7 +3868,7 @@ func (x *ListCubeSandboxResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListCubeSandboxResponse.ProtoReflect.Descriptor instead.
 func (*ListCubeSandboxResponse) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{49}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *ListCubeSandboxResponse) GetItems() []*CubeSandbox {
@@ -3964,7 +3895,7 @@ type UpdateCubeSandboxRequest struct {
 
 func (x *UpdateCubeSandboxRequest) Reset() {
 	*x = UpdateCubeSandboxRequest{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[50]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3976,7 +3907,7 @@ func (x *UpdateCubeSandboxRequest) String() string {
 func (*UpdateCubeSandboxRequest) ProtoMessage() {}
 
 func (x *UpdateCubeSandboxRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[50]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3989,7 +3920,7 @@ func (x *UpdateCubeSandboxRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateCubeSandboxRequest.ProtoReflect.Descriptor instead.
 func (*UpdateCubeSandboxRequest) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{50}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *UpdateCubeSandboxRequest) GetRequestID() string {
@@ -4025,7 +3956,7 @@ type UpdateCubeSandboxResponse struct {
 
 func (x *UpdateCubeSandboxResponse) Reset() {
 	*x = UpdateCubeSandboxResponse{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[51]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4037,7 +3968,7 @@ func (x *UpdateCubeSandboxResponse) String() string {
 func (*UpdateCubeSandboxResponse) ProtoMessage() {}
 
 func (x *UpdateCubeSandboxResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[51]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4050,7 +3981,7 @@ func (x *UpdateCubeSandboxResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateCubeSandboxResponse.ProtoReflect.Descriptor instead.
 func (*UpdateCubeSandboxResponse) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{51}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *UpdateCubeSandboxResponse) GetRequestID() string {
@@ -4082,7 +4013,7 @@ type IDMapping struct {
 
 func (x *IDMapping) Reset() {
 	*x = IDMapping{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[52]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4094,7 +4025,7 @@ func (x *IDMapping) String() string {
 func (*IDMapping) ProtoMessage() {}
 
 func (x *IDMapping) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[52]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4107,7 +4038,7 @@ func (x *IDMapping) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IDMapping.ProtoReflect.Descriptor instead.
 func (*IDMapping) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{52}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *IDMapping) GetHostId() uint32 {
@@ -4142,7 +4073,7 @@ type ListCubeSandboxOption struct {
 
 func (x *ListCubeSandboxOption) Reset() {
 	*x = ListCubeSandboxOption{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[53]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4154,7 +4085,7 @@ func (x *ListCubeSandboxOption) String() string {
 func (*ListCubeSandboxOption) ProtoMessage() {}
 
 func (x *ListCubeSandboxOption) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[53]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4167,7 +4098,7 @@ func (x *ListCubeSandboxOption) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListCubeSandboxOption.ProtoReflect.Descriptor instead.
 func (*ListCubeSandboxOption) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{53}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *ListCubeSandboxOption) GetPrivateWithCubeboxStore() bool {
@@ -4200,7 +4131,7 @@ type ExecCubeSandboxRequest struct {
 
 func (x *ExecCubeSandboxRequest) Reset() {
 	*x = ExecCubeSandboxRequest{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[54]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4212,7 +4143,7 @@ func (x *ExecCubeSandboxRequest) String() string {
 func (*ExecCubeSandboxRequest) ProtoMessage() {}
 
 func (x *ExecCubeSandboxRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[54]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4225,7 +4156,7 @@ func (x *ExecCubeSandboxRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecCubeSandboxRequest.ProtoReflect.Descriptor instead.
 func (*ExecCubeSandboxRequest) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{54}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *ExecCubeSandboxRequest) GetRequestID() string {
@@ -4289,7 +4220,7 @@ type ExecCubeSandboxResponse struct {
 
 func (x *ExecCubeSandboxResponse) Reset() {
 	*x = ExecCubeSandboxResponse{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[55]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4301,7 +4232,7 @@ func (x *ExecCubeSandboxResponse) String() string {
 func (*ExecCubeSandboxResponse) ProtoMessage() {}
 
 func (x *ExecCubeSandboxResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[55]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4314,7 +4245,7 @@ func (x *ExecCubeSandboxResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecCubeSandboxResponse.ProtoReflect.Descriptor instead.
 func (*ExecCubeSandboxResponse) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{55}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *ExecCubeSandboxResponse) GetRequestID() string {
@@ -4329,446 +4260,6 @@ func (x *ExecCubeSandboxResponse) GetRet() *v11.Ret {
 		return x.Ret
 	}
 	return nil
-}
-
-// Client-to-server frames for an interactive terminal session.
-type TerminalClientMessage struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Types that are valid to be assigned to Payload:
-	//
-	//	*TerminalClientMessage_Open
-	//	*TerminalClientMessage_Stdin
-	//	*TerminalClientMessage_Resize
-	Payload       isTerminalClientMessage_Payload `protobuf_oneof:"payload"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *TerminalClientMessage) Reset() {
-	*x = TerminalClientMessage{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[56]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *TerminalClientMessage) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*TerminalClientMessage) ProtoMessage() {}
-
-func (x *TerminalClientMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[56]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use TerminalClientMessage.ProtoReflect.Descriptor instead.
-func (*TerminalClientMessage) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{56}
-}
-
-func (x *TerminalClientMessage) GetPayload() isTerminalClientMessage_Payload {
-	if x != nil {
-		return x.Payload
-	}
-	return nil
-}
-
-func (x *TerminalClientMessage) GetOpen() *TerminalOpenRequest {
-	if x != nil {
-		if x, ok := x.Payload.(*TerminalClientMessage_Open); ok {
-			return x.Open
-		}
-	}
-	return nil
-}
-
-func (x *TerminalClientMessage) GetStdin() []byte {
-	if x != nil {
-		if x, ok := x.Payload.(*TerminalClientMessage_Stdin); ok {
-			return x.Stdin
-		}
-	}
-	return nil
-}
-
-func (x *TerminalClientMessage) GetResize() *TerminalResize {
-	if x != nil {
-		if x, ok := x.Payload.(*TerminalClientMessage_Resize); ok {
-			return x.Resize
-		}
-	}
-	return nil
-}
-
-type isTerminalClientMessage_Payload interface {
-	isTerminalClientMessage_Payload()
-}
-
-type TerminalClientMessage_Open struct {
-	Open *TerminalOpenRequest `protobuf:"bytes,1,opt,name=open,proto3,oneof"`
-}
-
-type TerminalClientMessage_Stdin struct {
-	Stdin []byte `protobuf:"bytes,2,opt,name=stdin,proto3,oneof"`
-}
-
-type TerminalClientMessage_Resize struct {
-	Resize *TerminalResize `protobuf:"bytes,3,opt,name=resize,proto3,oneof"`
-}
-
-func (*TerminalClientMessage_Open) isTerminalClientMessage_Payload() {}
-
-func (*TerminalClientMessage_Stdin) isTerminalClientMessage_Payload() {}
-
-func (*TerminalClientMessage_Resize) isTerminalClientMessage_Payload() {}
-
-type TerminalOpenRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Reserved as a stable correlation identifier for future distributed tracing
-	// across gateway, CubeMaster, and Cubelet; not an idempotency or cancellation key.
-	RequestId     string   `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
-	SandboxId     string   `protobuf:"bytes,2,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
-	ContainerId   string   `protobuf:"bytes,3,opt,name=container_id,json=containerId,proto3" json:"container_id,omitempty"`
-	Args          []string `protobuf:"bytes,4,rep,name=args,proto3" json:"args,omitempty"`
-	Env           []string `protobuf:"bytes,5,rep,name=env,proto3" json:"env,omitempty"`
-	Cwd           string   `protobuf:"bytes,6,opt,name=cwd,proto3" json:"cwd,omitempty"`
-	Cols          uint32   `protobuf:"varint,7,opt,name=cols,proto3" json:"cols,omitempty"`
-	Rows          uint32   `protobuf:"varint,8,opt,name=rows,proto3" json:"rows,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *TerminalOpenRequest) Reset() {
-	*x = TerminalOpenRequest{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[57]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *TerminalOpenRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*TerminalOpenRequest) ProtoMessage() {}
-
-func (x *TerminalOpenRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[57]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use TerminalOpenRequest.ProtoReflect.Descriptor instead.
-func (*TerminalOpenRequest) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{57}
-}
-
-func (x *TerminalOpenRequest) GetRequestId() string {
-	if x != nil {
-		return x.RequestId
-	}
-	return ""
-}
-
-func (x *TerminalOpenRequest) GetSandboxId() string {
-	if x != nil {
-		return x.SandboxId
-	}
-	return ""
-}
-
-func (x *TerminalOpenRequest) GetContainerId() string {
-	if x != nil {
-		return x.ContainerId
-	}
-	return ""
-}
-
-func (x *TerminalOpenRequest) GetArgs() []string {
-	if x != nil {
-		return x.Args
-	}
-	return nil
-}
-
-func (x *TerminalOpenRequest) GetEnv() []string {
-	if x != nil {
-		return x.Env
-	}
-	return nil
-}
-
-func (x *TerminalOpenRequest) GetCwd() string {
-	if x != nil {
-		return x.Cwd
-	}
-	return ""
-}
-
-func (x *TerminalOpenRequest) GetCols() uint32 {
-	if x != nil {
-		return x.Cols
-	}
-	return 0
-}
-
-func (x *TerminalOpenRequest) GetRows() uint32 {
-	if x != nil {
-		return x.Rows
-	}
-	return 0
-}
-
-type TerminalResize struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Cols          uint32                 `protobuf:"varint,1,opt,name=cols,proto3" json:"cols,omitempty"`
-	Rows          uint32                 `protobuf:"varint,2,opt,name=rows,proto3" json:"rows,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *TerminalResize) Reset() {
-	*x = TerminalResize{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[58]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *TerminalResize) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*TerminalResize) ProtoMessage() {}
-
-func (x *TerminalResize) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[58]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use TerminalResize.ProtoReflect.Descriptor instead.
-func (*TerminalResize) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{58}
-}
-
-func (x *TerminalResize) GetCols() uint32 {
-	if x != nil {
-		return x.Cols
-	}
-	return 0
-}
-
-func (x *TerminalResize) GetRows() uint32 {
-	if x != nil {
-		return x.Rows
-	}
-	return 0
-}
-
-// Server-to-client frames for an interactive terminal session.
-type TerminalServerMessage struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Types that are valid to be assigned to Payload:
-	//
-	//	*TerminalServerMessage_Output
-	//	*TerminalServerMessage_Exit
-	//	*TerminalServerMessage_Error
-	Payload       isTerminalServerMessage_Payload `protobuf_oneof:"payload"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *TerminalServerMessage) Reset() {
-	*x = TerminalServerMessage{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[59]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *TerminalServerMessage) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*TerminalServerMessage) ProtoMessage() {}
-
-func (x *TerminalServerMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[59]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use TerminalServerMessage.ProtoReflect.Descriptor instead.
-func (*TerminalServerMessage) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{59}
-}
-
-func (x *TerminalServerMessage) GetPayload() isTerminalServerMessage_Payload {
-	if x != nil {
-		return x.Payload
-	}
-	return nil
-}
-
-func (x *TerminalServerMessage) GetOutput() []byte {
-	if x != nil {
-		if x, ok := x.Payload.(*TerminalServerMessage_Output); ok {
-			return x.Output
-		}
-	}
-	return nil
-}
-
-func (x *TerminalServerMessage) GetExit() *TerminalExit {
-	if x != nil {
-		if x, ok := x.Payload.(*TerminalServerMessage_Exit); ok {
-			return x.Exit
-		}
-	}
-	return nil
-}
-
-func (x *TerminalServerMessage) GetError() *TerminalError {
-	if x != nil {
-		if x, ok := x.Payload.(*TerminalServerMessage_Error); ok {
-			return x.Error
-		}
-	}
-	return nil
-}
-
-type isTerminalServerMessage_Payload interface {
-	isTerminalServerMessage_Payload()
-}
-
-type TerminalServerMessage_Output struct {
-	Output []byte `protobuf:"bytes,1,opt,name=output,proto3,oneof"`
-}
-
-type TerminalServerMessage_Exit struct {
-	Exit *TerminalExit `protobuf:"bytes,2,opt,name=exit,proto3,oneof"`
-}
-
-type TerminalServerMessage_Error struct {
-	Error *TerminalError `protobuf:"bytes,3,opt,name=error,proto3,oneof"`
-}
-
-func (*TerminalServerMessage_Output) isTerminalServerMessage_Payload() {}
-
-func (*TerminalServerMessage_Exit) isTerminalServerMessage_Payload() {}
-
-func (*TerminalServerMessage_Error) isTerminalServerMessage_Payload() {}
-
-type TerminalExit struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ExitCode      int32                  `protobuf:"varint,1,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *TerminalExit) Reset() {
-	*x = TerminalExit{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[60]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *TerminalExit) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*TerminalExit) ProtoMessage() {}
-
-func (x *TerminalExit) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[60]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use TerminalExit.ProtoReflect.Descriptor instead.
-func (*TerminalExit) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{60}
-}
-
-func (x *TerminalExit) GetExitCode() int32 {
-	if x != nil {
-		return x.ExitCode
-	}
-	return 0
-}
-
-type TerminalError struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Message       string                 `protobuf:"bytes,1,opt,name=message,proto3" json:"message,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *TerminalError) Reset() {
-	*x = TerminalError{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[61]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *TerminalError) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*TerminalError) ProtoMessage() {}
-
-func (x *TerminalError) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[61]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use TerminalError.ProtoReflect.Descriptor instead.
-func (*TerminalError) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{61}
-}
-
-func (x *TerminalError) GetMessage() string {
-	if x != nil {
-		return x.Message
-	}
-	return ""
 }
 
 // AppSnapshotRequest is the request for creating an app snapshot.
@@ -4789,7 +4280,7 @@ type AppSnapshotRequest struct {
 
 func (x *AppSnapshotRequest) Reset() {
 	*x = AppSnapshotRequest{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[62]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4801,7 +4292,7 @@ func (x *AppSnapshotRequest) String() string {
 func (*AppSnapshotRequest) ProtoMessage() {}
 
 func (x *AppSnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[62]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4814,7 +4305,7 @@ func (x *AppSnapshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppSnapshotRequest.ProtoReflect.Descriptor instead.
 func (*AppSnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{62}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *AppSnapshotRequest) GetCreateRequest() *RunCubeSandboxRequest {
@@ -4868,7 +4359,7 @@ type AppSnapshotResponse struct {
 
 func (x *AppSnapshotResponse) Reset() {
 	*x = AppSnapshotResponse{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[63]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4880,7 +4371,7 @@ func (x *AppSnapshotResponse) String() string {
 func (*AppSnapshotResponse) ProtoMessage() {}
 
 func (x *AppSnapshotResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[63]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4893,7 +4384,7 @@ func (x *AppSnapshotResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppSnapshotResponse.ProtoReflect.Descriptor instead.
 func (*AppSnapshotResponse) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{63}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *AppSnapshotResponse) GetRequestID() string {
@@ -5010,7 +4501,7 @@ type CommitSandboxRequest struct {
 
 func (x *CommitSandboxRequest) Reset() {
 	*x = CommitSandboxRequest{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[64]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5022,7 +4513,7 @@ func (x *CommitSandboxRequest) String() string {
 func (*CommitSandboxRequest) ProtoMessage() {}
 
 func (x *CommitSandboxRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[64]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5035,7 +4526,7 @@ func (x *CommitSandboxRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitSandboxRequest.ProtoReflect.Descriptor instead.
 func (*CommitSandboxRequest) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{64}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *CommitSandboxRequest) GetRequestID() string {
@@ -5106,7 +4597,7 @@ type CommitSandboxResponse struct {
 
 func (x *CommitSandboxResponse) Reset() {
 	*x = CommitSandboxResponse{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[65]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5118,7 +4609,7 @@ func (x *CommitSandboxResponse) String() string {
 func (*CommitSandboxResponse) ProtoMessage() {}
 
 func (x *CommitSandboxResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[65]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5131,7 +4622,7 @@ func (x *CommitSandboxResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitSandboxResponse.ProtoReflect.Descriptor instead.
 func (*CommitSandboxResponse) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{65}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *CommitSandboxResponse) GetRequestID() string {
@@ -5274,7 +4765,7 @@ type RollbackSandboxRequest struct {
 
 func (x *RollbackSandboxRequest) Reset() {
 	*x = RollbackSandboxRequest{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[66]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5286,7 +4777,7 @@ func (x *RollbackSandboxRequest) String() string {
 func (*RollbackSandboxRequest) ProtoMessage() {}
 
 func (x *RollbackSandboxRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[66]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5299,7 +4790,7 @@ func (x *RollbackSandboxRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RollbackSandboxRequest.ProtoReflect.Descriptor instead.
 func (*RollbackSandboxRequest) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{66}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *RollbackSandboxRequest) GetRequestID() string {
@@ -5390,7 +4881,7 @@ type RollbackSandboxResponse struct {
 
 func (x *RollbackSandboxResponse) Reset() {
 	*x = RollbackSandboxResponse{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[67]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5402,7 +4893,7 @@ func (x *RollbackSandboxResponse) String() string {
 func (*RollbackSandboxResponse) ProtoMessage() {}
 
 func (x *RollbackSandboxResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[67]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5415,7 +4906,7 @@ func (x *RollbackSandboxResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RollbackSandboxResponse.ProtoReflect.Descriptor instead.
 func (*RollbackSandboxResponse) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{67}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *RollbackSandboxResponse) GetRequestID() string {
@@ -5509,7 +5000,7 @@ type CowObjectRef struct {
 
 func (x *CowObjectRef) Reset() {
 	*x = CowObjectRef{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[68]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5521,7 +5012,7 @@ func (x *CowObjectRef) String() string {
 func (*CowObjectRef) ProtoMessage() {}
 
 func (x *CowObjectRef) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[68]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5534,7 +5025,7 @@ func (x *CowObjectRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CowObjectRef.ProtoReflect.Descriptor instead.
 func (*CowObjectRef) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{68}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *CowObjectRef) GetName() string {
@@ -5578,7 +5069,7 @@ type CleanupTemplateRequest struct {
 
 func (x *CleanupTemplateRequest) Reset() {
 	*x = CleanupTemplateRequest{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[69]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5590,7 +5081,7 @@ func (x *CleanupTemplateRequest) String() string {
 func (*CleanupTemplateRequest) ProtoMessage() {}
 
 func (x *CleanupTemplateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[69]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5603,7 +5094,7 @@ func (x *CleanupTemplateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CleanupTemplateRequest.ProtoReflect.Descriptor instead.
 func (*CleanupTemplateRequest) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{69}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *CleanupTemplateRequest) GetRequestID() string {
@@ -5648,7 +5139,7 @@ type CleanupTemplateResponse struct {
 
 func (x *CleanupTemplateResponse) Reset() {
 	*x = CleanupTemplateResponse{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[70]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5660,7 +5151,7 @@ func (x *CleanupTemplateResponse) String() string {
 func (*CleanupTemplateResponse) ProtoMessage() {}
 
 func (x *CleanupTemplateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[70]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5673,7 +5164,7 @@ func (x *CleanupTemplateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CleanupTemplateResponse.ProtoReflect.Descriptor instead.
 func (*CleanupTemplateResponse) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{70}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *CleanupTemplateResponse) GetRequestID() string {
@@ -5713,7 +5204,7 @@ type ListSandboxSnapshotsRequest struct {
 
 func (x *ListSandboxSnapshotsRequest) Reset() {
 	*x = ListSandboxSnapshotsRequest{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[71]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5725,7 +5216,7 @@ func (x *ListSandboxSnapshotsRequest) String() string {
 func (*ListSandboxSnapshotsRequest) ProtoMessage() {}
 
 func (x *ListSandboxSnapshotsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[71]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5738,7 +5229,7 @@ func (x *ListSandboxSnapshotsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSandboxSnapshotsRequest.ProtoReflect.Descriptor instead.
 func (*ListSandboxSnapshotsRequest) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{71}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{64}
 }
 
 func (x *ListSandboxSnapshotsRequest) GetRequestID() string {
@@ -5791,7 +5282,7 @@ type CowObjectStatus struct {
 
 func (x *CowObjectStatus) Reset() {
 	*x = CowObjectStatus{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[72]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[65]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5803,7 +5294,7 @@ func (x *CowObjectStatus) String() string {
 func (*CowObjectStatus) ProtoMessage() {}
 
 func (x *CowObjectStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[72]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[65]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5816,7 +5307,7 @@ func (x *CowObjectStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CowObjectStatus.ProtoReflect.Descriptor instead.
 func (*CowObjectStatus) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{72}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{65}
 }
 
 func (x *CowObjectStatus) GetName() string {
@@ -5892,7 +5383,7 @@ type ListSandboxSnapshotsResponse struct {
 
 func (x *ListSandboxSnapshotsResponse) Reset() {
 	*x = ListSandboxSnapshotsResponse{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[73]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5904,7 +5395,7 @@ func (x *ListSandboxSnapshotsResponse) String() string {
 func (*ListSandboxSnapshotsResponse) ProtoMessage() {}
 
 func (x *ListSandboxSnapshotsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[73]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5917,7 +5408,7 @@ func (x *ListSandboxSnapshotsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSandboxSnapshotsResponse.ProtoReflect.Descriptor instead.
 func (*ListSandboxSnapshotsResponse) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{73}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{66}
 }
 
 func (x *ListSandboxSnapshotsResponse) GetRequestID() string {
@@ -5986,7 +5477,7 @@ type ListLocalSnapshotsRequest struct {
 
 func (x *ListLocalSnapshotsRequest) Reset() {
 	*x = ListLocalSnapshotsRequest{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[74]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[67]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5998,7 +5489,7 @@ func (x *ListLocalSnapshotsRequest) String() string {
 func (*ListLocalSnapshotsRequest) ProtoMessage() {}
 
 func (x *ListLocalSnapshotsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[74]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[67]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6011,7 +5502,7 @@ func (x *ListLocalSnapshotsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListLocalSnapshotsRequest.ProtoReflect.Descriptor instead.
 func (*ListLocalSnapshotsRequest) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{74}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{67}
 }
 
 func (x *ListLocalSnapshotsRequest) GetRequestID() string {
@@ -6059,7 +5550,7 @@ type LocalSnapshotInfo struct {
 
 func (x *LocalSnapshotInfo) Reset() {
 	*x = LocalSnapshotInfo{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[75]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[68]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6071,7 +5562,7 @@ func (x *LocalSnapshotInfo) String() string {
 func (*LocalSnapshotInfo) ProtoMessage() {}
 
 func (x *LocalSnapshotInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[75]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[68]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6084,7 +5575,7 @@ func (x *LocalSnapshotInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LocalSnapshotInfo.ProtoReflect.Descriptor instead.
 func (*LocalSnapshotInfo) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{75}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{68}
 }
 
 func (x *LocalSnapshotInfo) GetSnapshotID() string {
@@ -6199,7 +5690,7 @@ type ListLocalSnapshotsResponse struct {
 
 func (x *ListLocalSnapshotsResponse) Reset() {
 	*x = ListLocalSnapshotsResponse{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[76]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[69]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6211,7 +5702,7 @@ func (x *ListLocalSnapshotsResponse) String() string {
 func (*ListLocalSnapshotsResponse) ProtoMessage() {}
 
 func (x *ListLocalSnapshotsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[76]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[69]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6224,7 +5715,7 @@ func (x *ListLocalSnapshotsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListLocalSnapshotsResponse.ProtoReflect.Descriptor instead.
 func (*ListLocalSnapshotsResponse) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{76}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{69}
 }
 
 func (x *ListLocalSnapshotsResponse) GetRequestID() string {
@@ -6260,7 +5751,7 @@ type GetLocalSnapshotRequest struct {
 
 func (x *GetLocalSnapshotRequest) Reset() {
 	*x = GetLocalSnapshotRequest{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[77]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[70]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6272,7 +5763,7 @@ func (x *GetLocalSnapshotRequest) String() string {
 func (*GetLocalSnapshotRequest) ProtoMessage() {}
 
 func (x *GetLocalSnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[77]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[70]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6285,7 +5776,7 @@ func (x *GetLocalSnapshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetLocalSnapshotRequest.ProtoReflect.Descriptor instead.
 func (*GetLocalSnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{77}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{70}
 }
 
 func (x *GetLocalSnapshotRequest) GetRequestID() string {
@@ -6316,7 +5807,7 @@ type GetLocalSnapshotResponse struct {
 
 func (x *GetLocalSnapshotResponse) Reset() {
 	*x = GetLocalSnapshotResponse{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[78]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[71]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6328,7 +5819,7 @@ func (x *GetLocalSnapshotResponse) String() string {
 func (*GetLocalSnapshotResponse) ProtoMessage() {}
 
 func (x *GetLocalSnapshotResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[78]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[71]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6341,7 +5832,7 @@ func (x *GetLocalSnapshotResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetLocalSnapshotResponse.ProtoReflect.Descriptor instead.
 func (*GetLocalSnapshotResponse) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{78}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{71}
 }
 
 func (x *GetLocalSnapshotResponse) GetRequestID() string {
@@ -6375,7 +5866,7 @@ type GetStorageMetricsRequest struct {
 
 func (x *GetStorageMetricsRequest) Reset() {
 	*x = GetStorageMetricsRequest{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[79]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[72]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6387,7 +5878,7 @@ func (x *GetStorageMetricsRequest) String() string {
 func (*GetStorageMetricsRequest) ProtoMessage() {}
 
 func (x *GetStorageMetricsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[79]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[72]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6400,7 +5891,7 @@ func (x *GetStorageMetricsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetStorageMetricsRequest.ProtoReflect.Descriptor instead.
 func (*GetStorageMetricsRequest) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{79}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{72}
 }
 
 func (x *GetStorageMetricsRequest) GetRequestID() string {
@@ -6428,7 +5919,7 @@ type GetStorageMetricsResponse struct {
 
 func (x *GetStorageMetricsResponse) Reset() {
 	*x = GetStorageMetricsResponse{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[80]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[73]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6440,7 +5931,7 @@ func (x *GetStorageMetricsResponse) String() string {
 func (*GetStorageMetricsResponse) ProtoMessage() {}
 
 func (x *GetStorageMetricsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[80]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[73]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6453,7 +5944,7 @@ func (x *GetStorageMetricsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetStorageMetricsResponse.ProtoReflect.Descriptor instead.
 func (*GetStorageMetricsResponse) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{80}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{73}
 }
 
 func (x *GetStorageMetricsResponse) GetRequestID() string {
@@ -6507,7 +5998,7 @@ type StorageVolumeInfo struct {
 
 func (x *StorageVolumeInfo) Reset() {
 	*x = StorageVolumeInfo{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[81]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[74]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6519,7 +6010,7 @@ func (x *StorageVolumeInfo) String() string {
 func (*StorageVolumeInfo) ProtoMessage() {}
 
 func (x *StorageVolumeInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[81]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[74]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6532,7 +6023,7 @@ func (x *StorageVolumeInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StorageVolumeInfo.ProtoReflect.Descriptor instead.
 func (*StorageVolumeInfo) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{81}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{74}
 }
 
 func (x *StorageVolumeInfo) GetName() string {
@@ -6588,7 +6079,7 @@ type SandboxStorageInfo struct {
 
 func (x *SandboxStorageInfo) Reset() {
 	*x = SandboxStorageInfo{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[82]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[75]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6600,7 +6091,7 @@ func (x *SandboxStorageInfo) String() string {
 func (*SandboxStorageInfo) ProtoMessage() {}
 
 func (x *SandboxStorageInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[82]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[75]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6613,7 +6104,7 @@ func (x *SandboxStorageInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SandboxStorageInfo.ProtoReflect.Descriptor instead.
 func (*SandboxStorageInfo) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{82}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{75}
 }
 
 func (x *SandboxStorageInfo) GetNamespace() string {
@@ -6647,7 +6138,7 @@ type InspectStorageVolumesRequest struct {
 
 func (x *InspectStorageVolumesRequest) Reset() {
 	*x = InspectStorageVolumesRequest{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[83]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[76]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6659,7 +6150,7 @@ func (x *InspectStorageVolumesRequest) String() string {
 func (*InspectStorageVolumesRequest) ProtoMessage() {}
 
 func (x *InspectStorageVolumesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[83]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[76]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6672,7 +6163,7 @@ func (x *InspectStorageVolumesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InspectStorageVolumesRequest.ProtoReflect.Descriptor instead.
 func (*InspectStorageVolumesRequest) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{83}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{76}
 }
 
 func (x *InspectStorageVolumesRequest) GetRequestID() string {
@@ -6700,7 +6191,7 @@ type InspectStorageVolumesResponse struct {
 
 func (x *InspectStorageVolumesResponse) Reset() {
 	*x = InspectStorageVolumesResponse{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[84]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[77]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6712,7 +6203,7 @@ func (x *InspectStorageVolumesResponse) String() string {
 func (*InspectStorageVolumesResponse) ProtoMessage() {}
 
 func (x *InspectStorageVolumesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[84]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[77]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6725,7 +6216,7 @@ func (x *InspectStorageVolumesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InspectStorageVolumesResponse.ProtoReflect.Descriptor instead.
 func (*InspectStorageVolumesResponse) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{84}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{77}
 }
 
 func (x *InspectStorageVolumesResponse) GetRequestID() string {
@@ -6761,7 +6252,7 @@ type CleanupOrphanStorageFilesRequest struct {
 
 func (x *CleanupOrphanStorageFilesRequest) Reset() {
 	*x = CleanupOrphanStorageFilesRequest{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[85]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[78]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6773,7 +6264,7 @@ func (x *CleanupOrphanStorageFilesRequest) String() string {
 func (*CleanupOrphanStorageFilesRequest) ProtoMessage() {}
 
 func (x *CleanupOrphanStorageFilesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[85]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[78]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6786,7 +6277,7 @@ func (x *CleanupOrphanStorageFilesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CleanupOrphanStorageFilesRequest.ProtoReflect.Descriptor instead.
 func (*CleanupOrphanStorageFilesRequest) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{85}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{78}
 }
 
 func (x *CleanupOrphanStorageFilesRequest) GetRequestID() string {
@@ -6829,7 +6320,7 @@ type StorageOrphanEntry struct {
 
 func (x *StorageOrphanEntry) Reset() {
 	*x = StorageOrphanEntry{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[86]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[79]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6841,7 +6332,7 @@ func (x *StorageOrphanEntry) String() string {
 func (*StorageOrphanEntry) ProtoMessage() {}
 
 func (x *StorageOrphanEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[86]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[79]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6854,7 +6345,7 @@ func (x *StorageOrphanEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StorageOrphanEntry.ProtoReflect.Descriptor instead.
 func (*StorageOrphanEntry) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{86}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{79}
 }
 
 func (x *StorageOrphanEntry) GetFormat() string {
@@ -6896,7 +6387,7 @@ type CleanupOrphanStorageFilesResponse struct {
 
 func (x *CleanupOrphanStorageFilesResponse) Reset() {
 	*x = CleanupOrphanStorageFilesResponse{}
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[87]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[80]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6908,7 +6399,7 @@ func (x *CleanupOrphanStorageFilesResponse) String() string {
 func (*CleanupOrphanStorageFilesResponse) ProtoMessage() {}
 
 func (x *CleanupOrphanStorageFilesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[87]
+	mi := &file_api_services_cubebox_v1_cubebox_proto_msgTypes[80]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6921,7 +6412,7 @@ func (x *CleanupOrphanStorageFilesResponse) ProtoReflect() protoreflect.Message 
 
 // Deprecated: Use CleanupOrphanStorageFilesResponse.ProtoReflect.Descriptor instead.
 func (*CleanupOrphanStorageFilesResponse) Descriptor() ([]byte, []int) {
-	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{87}
+	return file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP(), []int{80}
 }
 
 func (x *CleanupOrphanStorageFilesResponse) GetRequestID() string {
@@ -7121,19 +6612,12 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1b\n" +
 	"\thost_path\x18\x02 \x01(\tR\bhostPath\"i\n" +
 	"\x14HostDirVolumeSources\x12Q\n" +
-	"\x0evolume_sources\x18\x01 \x03(\v2*.cubelet.services.cubebox.v1.HostDirSourceR\rvolumeSources\"\xaf\x03\n" +
+	"\x0evolume_sources\x18\x01 \x03(\v2*.cubelet.services.cubebox.v1.HostDirSourceR\rvolumeSources\"\xd9\x02\n" +
 	"\fVolumeSource\x12N\n" +
 	"\tempty_dir\x18\x01 \x01(\v21.cubelet.services.cubebox.v1.EmptyDirVolumeSourceR\bemptyDir\x12W\n" +
 	"\fsandbox_path\x18\x05 \x01(\v24.cubelet.services.cubebox.v1.SandboxPathVolumeSourceR\vsandboxPath\x12[\n" +
 	"\x10host_dir_volumes\x18\a \x01(\v21.cubelet.services.cubebox.v1.HostDirVolumeSourcesR\x0ehostDirVolumes\x12C\n" +
-	"\x05image\x18\t \x01(\v2-.cubelet.services.images.v1.ImageVolumeSourceR\x05image\x12T\n" +
-	"\rplugin_volume\x18\v \x01(\v2/.cubelet.services.cubebox.v1.PluginVolumeSourceR\fpluginVolume\"\xc0\x01\n" +
-	"\x12PluginVolumeSource\x12\x16\n" +
-	"\x06driver\x18\x01 \x01(\tR\x06driver\x12V\n" +
-	"\aoptions\x18\x02 \x03(\v2<.cubelet.services.cubebox.v1.PluginVolumeSource.OptionsEntryR\aoptions\x1a:\n" +
-	"\fOptionsEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"l\n" +
+	"\x05image\x18\t \x01(\v2-.cubelet.services.images.v1.ImageVolumeSourceR\x05image\"l\n" +
 	"\x06Volume\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12N\n" +
 	"\rvolume_source\x18\x02 \x01(\v2).cubelet.services.cubebox.v1.VolumeSourceR\fvolumeSource\"\xad\x06\n" +
@@ -7300,35 +6784,7 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\x03cwd\x18\v \x01(\tR\x03cwd\"m\n" +
 	"\x17ExecCubeSandboxResponse\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x124\n" +
-	"\x03ret\x18\x02 \x01(\v2\".cubelet.services.errorcode.v1.RetR\x03ret\"\xc9\x01\n" +
-	"\x15TerminalClientMessage\x12F\n" +
-	"\x04open\x18\x01 \x01(\v20.cubelet.services.cubebox.v1.TerminalOpenRequestH\x00R\x04open\x12\x16\n" +
-	"\x05stdin\x18\x02 \x01(\fH\x00R\x05stdin\x12E\n" +
-	"\x06resize\x18\x03 \x01(\v2+.cubelet.services.cubebox.v1.TerminalResizeH\x00R\x06resizeB\t\n" +
-	"\apayload\"\xd6\x01\n" +
-	"\x13TerminalOpenRequest\x12\x1d\n" +
-	"\n" +
-	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1d\n" +
-	"\n" +
-	"sandbox_id\x18\x02 \x01(\tR\tsandboxId\x12!\n" +
-	"\fcontainer_id\x18\x03 \x01(\tR\vcontainerId\x12\x12\n" +
-	"\x04args\x18\x04 \x03(\tR\x04args\x12\x10\n" +
-	"\x03env\x18\x05 \x03(\tR\x03env\x12\x10\n" +
-	"\x03cwd\x18\x06 \x01(\tR\x03cwd\x12\x12\n" +
-	"\x04cols\x18\a \x01(\rR\x04cols\x12\x12\n" +
-	"\x04rows\x18\b \x01(\rR\x04rows\"8\n" +
-	"\x0eTerminalResize\x12\x12\n" +
-	"\x04cols\x18\x01 \x01(\rR\x04cols\x12\x12\n" +
-	"\x04rows\x18\x02 \x01(\rR\x04rows\"\xc1\x01\n" +
-	"\x15TerminalServerMessage\x12\x18\n" +
-	"\x06output\x18\x01 \x01(\fH\x00R\x06output\x12?\n" +
-	"\x04exit\x18\x02 \x01(\v2).cubelet.services.cubebox.v1.TerminalExitH\x00R\x04exit\x12B\n" +
-	"\x05error\x18\x03 \x01(\v2*.cubelet.services.cubebox.v1.TerminalErrorH\x00R\x05errorB\t\n" +
-	"\apayload\"+\n" +
-	"\fTerminalExit\x12\x1b\n" +
-	"\texit_code\x18\x01 \x01(\x05R\bexitCode\")\n" +
-	"\rTerminalError\x12\x18\n" +
-	"\amessage\x18\x01 \x01(\tR\amessage\"\x92\x01\n" +
+	"\x03ret\x18\x02 \x01(\v2\".cubelet.services.errorcode.v1.RetR\x03ret\"\x92\x01\n" +
 	"\x12AppSnapshotRequest\x12Y\n" +
 	"\x0ecreate_request\x18\x01 \x01(\v22.cubelet.services.cubebox.v1.RunCubeSandboxRequestR\rcreateRequest\x12!\n" +
 	"\fsnapshot_dir\x18\x02 \x01(\tR\vsnapshotDir\"\x96\x04\n" +
@@ -7566,15 +7022,14 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\x10CONTAINER_EXITED\x10\x02\x12\x15\n" +
 	"\x11CONTAINER_UNKNOWN\x10\x03\x12\x15\n" +
 	"\x11CONTAINER_PAUSING\x10\x04\x12\x14\n" +
-	"\x10CONTAINER_PAUSED\x10\x052\x88\x10\n" +
+	"\x10CONTAINER_PAUSED\x10\x052\x8a\x0f\n" +
 	"\n" +
 	"CubeboxMgr\x12q\n" +
 	"\x06Create\x122.cubelet.services.cubebox.v1.RunCubeSandboxRequest\x1a3.cubelet.services.cubebox.v1.RunCubeSandboxResponse\x12z\n" +
 	"\aDestroy\x126.cubelet.services.cubebox.v1.DestroyCubeSandboxRequest\x1a7.cubelet.services.cubebox.v1.DestroyCubeSandboxResponse\x12q\n" +
 	"\x04List\x123.cubelet.services.cubebox.v1.ListCubeSandboxRequest\x1a4.cubelet.services.cubebox.v1.ListCubeSandboxResponse\x12w\n" +
 	"\x06Update\x125.cubelet.services.cubebox.v1.UpdateCubeSandboxRequest\x1a6.cubelet.services.cubebox.v1.UpdateCubeSandboxResponse\x12q\n" +
-	"\x04Exec\x123.cubelet.services.cubebox.v1.ExecCubeSandboxRequest\x1a4.cubelet.services.cubebox.v1.ExecCubeSandboxResponse\x12|\n" +
-	"\x0eAttachTerminal\x122.cubelet.services.cubebox.v1.TerminalClientMessage\x1a2.cubelet.services.cubebox.v1.TerminalServerMessage(\x010\x01\x12p\n" +
+	"\x04Exec\x123.cubelet.services.cubebox.v1.ExecCubeSandboxRequest\x1a4.cubelet.services.cubebox.v1.ExecCubeSandboxResponse\x12p\n" +
 	"\vAppSnapshot\x12/.cubelet.services.cubebox.v1.AppSnapshotRequest\x1a0.cubelet.services.cubebox.v1.AppSnapshotResponse\x12v\n" +
 	"\rCommitSandbox\x121.cubelet.services.cubebox.v1.CommitSandboxRequest\x1a2.cubelet.services.cubebox.v1.CommitSandboxResponse\x12|\n" +
 	"\x0fRollbackSandbox\x123.cubelet.services.cubebox.v1.RollbackSandboxRequest\x1a4.cubelet.services.cubebox.v1.RollbackSandboxResponse\x12|\n" +
@@ -7599,7 +7054,7 @@ func file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP() []byte {
 }
 
 var file_api_services_cubebox_v1_cubebox_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
-var file_api_services_cubebox_v1_cubebox_proto_msgTypes = make([]protoimpl.MessageInfo, 101)
+var file_api_services_cubebox_v1_cubebox_proto_msgTypes = make([]protoimpl.MessageInfo, 93)
 var file_api_services_cubebox_v1_cubebox_proto_goTypes = []any{
 	(MountPropagation)(0),                     // 0: cubelet.services.cubebox.v1.MountPropagation
 	(StorageMedium)(0),                        // 1: cubelet.services.cubebox.v1.StorageMedium
@@ -7639,86 +7094,78 @@ var file_api_services_cubebox_v1_cubebox_proto_goTypes = []any{
 	(*HostDirSource)(nil),                     // 35: cubelet.services.cubebox.v1.HostDirSource
 	(*HostDirVolumeSources)(nil),              // 36: cubelet.services.cubebox.v1.HostDirVolumeSources
 	(*VolumeSource)(nil),                      // 37: cubelet.services.cubebox.v1.VolumeSource
-	(*PluginVolumeSource)(nil),                // 38: cubelet.services.cubebox.v1.PluginVolumeSource
-	(*Volume)(nil),                            // 39: cubelet.services.cubebox.v1.Volume
-	(*RunCubeSandboxRequest)(nil),             // 40: cubelet.services.cubebox.v1.RunCubeSandboxRequest
-	(*RunCubeSandboxResponse)(nil),            // 41: cubelet.services.cubebox.v1.RunCubeSandboxResponse
-	(*PortMapping)(nil),                       // 42: cubelet.services.cubebox.v1.PortMapping
-	(*CubeNetworkConfig)(nil),                 // 43: cubelet.services.cubebox.v1.CubeNetworkConfig
-	(*EgressRule)(nil),                        // 44: cubelet.services.cubebox.v1.EgressRule
-	(*EgressRuleMatch)(nil),                   // 45: cubelet.services.cubebox.v1.EgressRuleMatch
-	(*EgressRuleAction)(nil),                  // 46: cubelet.services.cubebox.v1.EgressRuleAction
-	(*EgressRuleInject)(nil),                  // 47: cubelet.services.cubebox.v1.EgressRuleInject
-	(*DestroyCubeSandboxRequest)(nil),         // 48: cubelet.services.cubebox.v1.DestroyCubeSandboxRequest
-	(*DestroyCubeSandboxResponse)(nil),        // 49: cubelet.services.cubebox.v1.DestroyCubeSandboxResponse
-	(*CubeSandbox)(nil),                       // 50: cubelet.services.cubebox.v1.CubeSandbox
-	(*Container)(nil),                         // 51: cubelet.services.cubebox.v1.Container
-	(*ContainerStateValue)(nil),               // 52: cubelet.services.cubebox.v1.ContainerStateValue
-	(*CubeSandboxFilter)(nil),                 // 53: cubelet.services.cubebox.v1.CubeSandboxFilter
-	(*ListCubeSandboxRequest)(nil),            // 54: cubelet.services.cubebox.v1.ListCubeSandboxRequest
-	(*ListCubeSandboxResponse)(nil),           // 55: cubelet.services.cubebox.v1.ListCubeSandboxResponse
-	(*UpdateCubeSandboxRequest)(nil),          // 56: cubelet.services.cubebox.v1.UpdateCubeSandboxRequest
-	(*UpdateCubeSandboxResponse)(nil),         // 57: cubelet.services.cubebox.v1.UpdateCubeSandboxResponse
-	(*IDMapping)(nil),                         // 58: cubelet.services.cubebox.v1.IDMapping
-	(*ListCubeSandboxOption)(nil),             // 59: cubelet.services.cubebox.v1.ListCubeSandboxOption
-	(*ExecCubeSandboxRequest)(nil),            // 60: cubelet.services.cubebox.v1.ExecCubeSandboxRequest
-	(*ExecCubeSandboxResponse)(nil),           // 61: cubelet.services.cubebox.v1.ExecCubeSandboxResponse
-	(*TerminalClientMessage)(nil),             // 62: cubelet.services.cubebox.v1.TerminalClientMessage
-	(*TerminalOpenRequest)(nil),               // 63: cubelet.services.cubebox.v1.TerminalOpenRequest
-	(*TerminalResize)(nil),                    // 64: cubelet.services.cubebox.v1.TerminalResize
-	(*TerminalServerMessage)(nil),             // 65: cubelet.services.cubebox.v1.TerminalServerMessage
-	(*TerminalExit)(nil),                      // 66: cubelet.services.cubebox.v1.TerminalExit
-	(*TerminalError)(nil),                     // 67: cubelet.services.cubebox.v1.TerminalError
-	(*AppSnapshotRequest)(nil),                // 68: cubelet.services.cubebox.v1.AppSnapshotRequest
-	(*AppSnapshotResponse)(nil),               // 69: cubelet.services.cubebox.v1.AppSnapshotResponse
-	(*CommitSandboxRequest)(nil),              // 70: cubelet.services.cubebox.v1.CommitSandboxRequest
-	(*CommitSandboxResponse)(nil),             // 71: cubelet.services.cubebox.v1.CommitSandboxResponse
-	(*RollbackSandboxRequest)(nil),            // 72: cubelet.services.cubebox.v1.RollbackSandboxRequest
-	(*RollbackSandboxResponse)(nil),           // 73: cubelet.services.cubebox.v1.RollbackSandboxResponse
-	(*CowObjectRef)(nil),                      // 74: cubelet.services.cubebox.v1.CowObjectRef
-	(*CleanupTemplateRequest)(nil),            // 75: cubelet.services.cubebox.v1.CleanupTemplateRequest
-	(*CleanupTemplateResponse)(nil),           // 76: cubelet.services.cubebox.v1.CleanupTemplateResponse
-	(*ListSandboxSnapshotsRequest)(nil),       // 77: cubelet.services.cubebox.v1.ListSandboxSnapshotsRequest
-	(*CowObjectStatus)(nil),                   // 78: cubelet.services.cubebox.v1.CowObjectStatus
-	(*ListSandboxSnapshotsResponse)(nil),      // 79: cubelet.services.cubebox.v1.ListSandboxSnapshotsResponse
-	(*ListLocalSnapshotsRequest)(nil),         // 80: cubelet.services.cubebox.v1.ListLocalSnapshotsRequest
-	(*LocalSnapshotInfo)(nil),                 // 81: cubelet.services.cubebox.v1.LocalSnapshotInfo
-	(*ListLocalSnapshotsResponse)(nil),        // 82: cubelet.services.cubebox.v1.ListLocalSnapshotsResponse
-	(*GetLocalSnapshotRequest)(nil),           // 83: cubelet.services.cubebox.v1.GetLocalSnapshotRequest
-	(*GetLocalSnapshotResponse)(nil),          // 84: cubelet.services.cubebox.v1.GetLocalSnapshotResponse
-	(*GetStorageMetricsRequest)(nil),          // 85: cubelet.services.cubebox.v1.GetStorageMetricsRequest
-	(*GetStorageMetricsResponse)(nil),         // 86: cubelet.services.cubebox.v1.GetStorageMetricsResponse
-	(*StorageVolumeInfo)(nil),                 // 87: cubelet.services.cubebox.v1.StorageVolumeInfo
-	(*SandboxStorageInfo)(nil),                // 88: cubelet.services.cubebox.v1.SandboxStorageInfo
-	(*InspectStorageVolumesRequest)(nil),      // 89: cubelet.services.cubebox.v1.InspectStorageVolumesRequest
-	(*InspectStorageVolumesResponse)(nil),     // 90: cubelet.services.cubebox.v1.InspectStorageVolumesResponse
-	(*CleanupOrphanStorageFilesRequest)(nil),  // 91: cubelet.services.cubebox.v1.CleanupOrphanStorageFilesRequest
-	(*StorageOrphanEntry)(nil),                // 92: cubelet.services.cubebox.v1.StorageOrphanEntry
-	(*CleanupOrphanStorageFilesResponse)(nil), // 93: cubelet.services.cubebox.v1.CleanupOrphanStorageFilesResponse
-	nil,                          // 94: cubelet.services.cubebox.v1.ContainerConfig.SysctlsEntry
-	nil,                          // 95: cubelet.services.cubebox.v1.ContainerConfig.AnnotationsEntry
-	nil,                          // 96: cubelet.services.cubebox.v1.PluginVolumeSource.OptionsEntry
-	nil,                          // 97: cubelet.services.cubebox.v1.RunCubeSandboxRequest.AnnotationsEntry
-	nil,                          // 98: cubelet.services.cubebox.v1.RunCubeSandboxRequest.LabelsEntry
-	nil,                          // 99: cubelet.services.cubebox.v1.RunCubeSandboxResponse.ExtInfoEntry
-	nil,                          // 100: cubelet.services.cubebox.v1.DestroyCubeSandboxRequest.AnnotationsEntry
-	nil,                          // 101: cubelet.services.cubebox.v1.DestroyCubeSandboxResponse.ExtInfoEntry
-	nil,                          // 102: cubelet.services.cubebox.v1.CubeSandbox.LabelsEntry
-	nil,                          // 103: cubelet.services.cubebox.v1.Container.LabelsEntry
-	nil,                          // 104: cubelet.services.cubebox.v1.CubeSandboxFilter.LabelSelectorEntry
-	nil,                          // 105: cubelet.services.cubebox.v1.UpdateCubeSandboxRequest.AnnotationsEntry
-	nil,                          // 106: cubelet.services.cubebox.v1.GetStorageMetricsResponse.MetricsEntry
-	(*v1.ImageSpec)(nil),         // 107: cubelet.services.images.v1.ImageSpec
-	(*v1.ImageVolumeSource)(nil), // 108: cubelet.services.images.v1.ImageVolumeSource
-	(*v11.Ret)(nil),              // 109: cubelet.services.errorcode.v1.Ret
+	(*Volume)(nil),                            // 38: cubelet.services.cubebox.v1.Volume
+	(*RunCubeSandboxRequest)(nil),             // 39: cubelet.services.cubebox.v1.RunCubeSandboxRequest
+	(*RunCubeSandboxResponse)(nil),            // 40: cubelet.services.cubebox.v1.RunCubeSandboxResponse
+	(*PortMapping)(nil),                       // 41: cubelet.services.cubebox.v1.PortMapping
+	(*CubeNetworkConfig)(nil),                 // 42: cubelet.services.cubebox.v1.CubeNetworkConfig
+	(*EgressRule)(nil),                        // 43: cubelet.services.cubebox.v1.EgressRule
+	(*EgressRuleMatch)(nil),                   // 44: cubelet.services.cubebox.v1.EgressRuleMatch
+	(*EgressRuleAction)(nil),                  // 45: cubelet.services.cubebox.v1.EgressRuleAction
+	(*EgressRuleInject)(nil),                  // 46: cubelet.services.cubebox.v1.EgressRuleInject
+	(*DestroyCubeSandboxRequest)(nil),         // 47: cubelet.services.cubebox.v1.DestroyCubeSandboxRequest
+	(*DestroyCubeSandboxResponse)(nil),        // 48: cubelet.services.cubebox.v1.DestroyCubeSandboxResponse
+	(*CubeSandbox)(nil),                       // 49: cubelet.services.cubebox.v1.CubeSandbox
+	(*Container)(nil),                         // 50: cubelet.services.cubebox.v1.Container
+	(*ContainerStateValue)(nil),               // 51: cubelet.services.cubebox.v1.ContainerStateValue
+	(*CubeSandboxFilter)(nil),                 // 52: cubelet.services.cubebox.v1.CubeSandboxFilter
+	(*ListCubeSandboxRequest)(nil),            // 53: cubelet.services.cubebox.v1.ListCubeSandboxRequest
+	(*ListCubeSandboxResponse)(nil),           // 54: cubelet.services.cubebox.v1.ListCubeSandboxResponse
+	(*UpdateCubeSandboxRequest)(nil),          // 55: cubelet.services.cubebox.v1.UpdateCubeSandboxRequest
+	(*UpdateCubeSandboxResponse)(nil),         // 56: cubelet.services.cubebox.v1.UpdateCubeSandboxResponse
+	(*IDMapping)(nil),                         // 57: cubelet.services.cubebox.v1.IDMapping
+	(*ListCubeSandboxOption)(nil),             // 58: cubelet.services.cubebox.v1.ListCubeSandboxOption
+	(*ExecCubeSandboxRequest)(nil),            // 59: cubelet.services.cubebox.v1.ExecCubeSandboxRequest
+	(*ExecCubeSandboxResponse)(nil),           // 60: cubelet.services.cubebox.v1.ExecCubeSandboxResponse
+	(*AppSnapshotRequest)(nil),                // 61: cubelet.services.cubebox.v1.AppSnapshotRequest
+	(*AppSnapshotResponse)(nil),               // 62: cubelet.services.cubebox.v1.AppSnapshotResponse
+	(*CommitSandboxRequest)(nil),              // 63: cubelet.services.cubebox.v1.CommitSandboxRequest
+	(*CommitSandboxResponse)(nil),             // 64: cubelet.services.cubebox.v1.CommitSandboxResponse
+	(*RollbackSandboxRequest)(nil),            // 65: cubelet.services.cubebox.v1.RollbackSandboxRequest
+	(*RollbackSandboxResponse)(nil),           // 66: cubelet.services.cubebox.v1.RollbackSandboxResponse
+	(*CowObjectRef)(nil),                      // 67: cubelet.services.cubebox.v1.CowObjectRef
+	(*CleanupTemplateRequest)(nil),            // 68: cubelet.services.cubebox.v1.CleanupTemplateRequest
+	(*CleanupTemplateResponse)(nil),           // 69: cubelet.services.cubebox.v1.CleanupTemplateResponse
+	(*ListSandboxSnapshotsRequest)(nil),       // 70: cubelet.services.cubebox.v1.ListSandboxSnapshotsRequest
+	(*CowObjectStatus)(nil),                   // 71: cubelet.services.cubebox.v1.CowObjectStatus
+	(*ListSandboxSnapshotsResponse)(nil),      // 72: cubelet.services.cubebox.v1.ListSandboxSnapshotsResponse
+	(*ListLocalSnapshotsRequest)(nil),         // 73: cubelet.services.cubebox.v1.ListLocalSnapshotsRequest
+	(*LocalSnapshotInfo)(nil),                 // 74: cubelet.services.cubebox.v1.LocalSnapshotInfo
+	(*ListLocalSnapshotsResponse)(nil),        // 75: cubelet.services.cubebox.v1.ListLocalSnapshotsResponse
+	(*GetLocalSnapshotRequest)(nil),           // 76: cubelet.services.cubebox.v1.GetLocalSnapshotRequest
+	(*GetLocalSnapshotResponse)(nil),          // 77: cubelet.services.cubebox.v1.GetLocalSnapshotResponse
+	(*GetStorageMetricsRequest)(nil),          // 78: cubelet.services.cubebox.v1.GetStorageMetricsRequest
+	(*GetStorageMetricsResponse)(nil),         // 79: cubelet.services.cubebox.v1.GetStorageMetricsResponse
+	(*StorageVolumeInfo)(nil),                 // 80: cubelet.services.cubebox.v1.StorageVolumeInfo
+	(*SandboxStorageInfo)(nil),                // 81: cubelet.services.cubebox.v1.SandboxStorageInfo
+	(*InspectStorageVolumesRequest)(nil),      // 82: cubelet.services.cubebox.v1.InspectStorageVolumesRequest
+	(*InspectStorageVolumesResponse)(nil),     // 83: cubelet.services.cubebox.v1.InspectStorageVolumesResponse
+	(*CleanupOrphanStorageFilesRequest)(nil),  // 84: cubelet.services.cubebox.v1.CleanupOrphanStorageFilesRequest
+	(*StorageOrphanEntry)(nil),                // 85: cubelet.services.cubebox.v1.StorageOrphanEntry
+	(*CleanupOrphanStorageFilesResponse)(nil), // 86: cubelet.services.cubebox.v1.CleanupOrphanStorageFilesResponse
+	nil,                          // 87: cubelet.services.cubebox.v1.ContainerConfig.SysctlsEntry
+	nil,                          // 88: cubelet.services.cubebox.v1.ContainerConfig.AnnotationsEntry
+	nil,                          // 89: cubelet.services.cubebox.v1.RunCubeSandboxRequest.AnnotationsEntry
+	nil,                          // 90: cubelet.services.cubebox.v1.RunCubeSandboxRequest.LabelsEntry
+	nil,                          // 91: cubelet.services.cubebox.v1.RunCubeSandboxResponse.ExtInfoEntry
+	nil,                          // 92: cubelet.services.cubebox.v1.DestroyCubeSandboxRequest.AnnotationsEntry
+	nil,                          // 93: cubelet.services.cubebox.v1.DestroyCubeSandboxResponse.ExtInfoEntry
+	nil,                          // 94: cubelet.services.cubebox.v1.CubeSandbox.LabelsEntry
+	nil,                          // 95: cubelet.services.cubebox.v1.Container.LabelsEntry
+	nil,                          // 96: cubelet.services.cubebox.v1.CubeSandboxFilter.LabelSelectorEntry
+	nil,                          // 97: cubelet.services.cubebox.v1.UpdateCubeSandboxRequest.AnnotationsEntry
+	nil,                          // 98: cubelet.services.cubebox.v1.GetStorageMetricsResponse.MetricsEntry
+	(*v1.ImageSpec)(nil),         // 99: cubelet.services.images.v1.ImageSpec
+	(*v1.ImageVolumeSource)(nil), // 100: cubelet.services.images.v1.ImageVolumeSource
+	(*v11.Ret)(nil),              // 101: cubelet.services.errorcode.v1.Ret
 }
 var file_api_services_cubebox_v1_cubebox_proto_depIdxs = []int32{
 	7,   // 0: cubelet.services.cubebox.v1.ContainerSecurityContext.capabilities:type_name -> cubelet.services.cubebox.v1.Capability
 	8,   // 1: cubelet.services.cubebox.v1.ContainerSecurityContext.run_as_user:type_name -> cubelet.services.cubebox.v1.Int64Value
 	8,   // 2: cubelet.services.cubebox.v1.ContainerSecurityContext.run_as_group:type_name -> cubelet.services.cubebox.v1.Int64Value
 	0,   // 3: cubelet.services.cubebox.v1.VolumeMounts.propagation:type_name -> cubelet.services.cubebox.v1.MountPropagation
-	58,  // 4: cubelet.services.cubebox.v1.VolumeMounts.uidMappings:type_name -> cubelet.services.cubebox.v1.IDMapping
-	58,  // 5: cubelet.services.cubebox.v1.VolumeMounts.gidMappings:type_name -> cubelet.services.cubebox.v1.IDMapping
+	57,  // 4: cubelet.services.cubebox.v1.VolumeMounts.uidMappings:type_name -> cubelet.services.cubebox.v1.IDMapping
+	57,  // 5: cubelet.services.cubebox.v1.VolumeMounts.gidMappings:type_name -> cubelet.services.cubebox.v1.IDMapping
 	16,  // 6: cubelet.services.cubebox.v1.HTTPGetAction.http_headers:type_name -> cubelet.services.cubebox.v1.HTTPHeader
 	13,  // 7: cubelet.services.cubebox.v1.ProbeHandler.tcp_socket:type_name -> cubelet.services.cubebox.v1.TCPSocketAction
 	14,  // 8: cubelet.services.cubebox.v1.ProbeHandler.ping:type_name -> cubelet.services.cubebox.v1.PingAction
@@ -7728,17 +7175,17 @@ var file_api_services_cubebox_v1_cubebox_proto_depIdxs = []int32{
 	19,  // 12: cubelet.services.cubebox.v1.PreStop.lifecyle_handler:type_name -> cubelet.services.cubebox.v1.LifecycleHandler
 	19,  // 13: cubelet.services.cubebox.v1.PostStop.lifecyle_handler:type_name -> cubelet.services.cubebox.v1.LifecycleHandler
 	22,  // 14: cubelet.services.cubebox.v1.Hooks.Prestart:type_name -> cubelet.services.cubebox.v1.Hook
-	107, // 15: cubelet.services.cubebox.v1.ContainerConfig.image:type_name -> cubelet.services.images.v1.ImageSpec
+	99,  // 15: cubelet.services.cubebox.v1.ContainerConfig.image:type_name -> cubelet.services.images.v1.ImageSpec
 	24,  // 16: cubelet.services.cubebox.v1.ContainerConfig.envs:type_name -> cubelet.services.cubebox.v1.KeyValue
 	12,  // 17: cubelet.services.cubebox.v1.ContainerConfig.volume_mounts:type_name -> cubelet.services.cubebox.v1.VolumeMounts
 	11,  // 18: cubelet.services.cubebox.v1.ContainerConfig.r_limit:type_name -> cubelet.services.cubebox.v1.RLimit
 	32,  // 19: cubelet.services.cubebox.v1.ContainerConfig.resources:type_name -> cubelet.services.cubebox.v1.Resource
 	9,   // 20: cubelet.services.cubebox.v1.ContainerConfig.security_context:type_name -> cubelet.services.cubebox.v1.ContainerSecurityContext
 	18,  // 21: cubelet.services.cubebox.v1.ContainerConfig.probe:type_name -> cubelet.services.cubebox.v1.Probe
-	94,  // 22: cubelet.services.cubebox.v1.ContainerConfig.sysctls:type_name -> cubelet.services.cubebox.v1.ContainerConfig.SysctlsEntry
+	87,  // 22: cubelet.services.cubebox.v1.ContainerConfig.sysctls:type_name -> cubelet.services.cubebox.v1.ContainerConfig.SysctlsEntry
 	31,  // 23: cubelet.services.cubebox.v1.ContainerConfig.syscalls:type_name -> cubelet.services.cubebox.v1.SysCall
 	10,  // 24: cubelet.services.cubebox.v1.ContainerConfig.dns_config:type_name -> cubelet.services.cubebox.v1.DNSConfig
-	95,  // 25: cubelet.services.cubebox.v1.ContainerConfig.annotations:type_name -> cubelet.services.cubebox.v1.ContainerConfig.AnnotationsEntry
+	88,  // 25: cubelet.services.cubebox.v1.ContainerConfig.annotations:type_name -> cubelet.services.cubebox.v1.ContainerConfig.AnnotationsEntry
 	25,  // 26: cubelet.services.cubebox.v1.ContainerConfig.hostAliases:type_name -> cubelet.services.cubebox.v1.HostAlias
 	20,  // 27: cubelet.services.cubebox.v1.ContainerConfig.prestop:type_name -> cubelet.services.cubebox.v1.PreStop
 	21,  // 28: cubelet.services.cubebox.v1.ContainerConfig.poststop:type_name -> cubelet.services.cubebox.v1.PostStop
@@ -7752,102 +7199,94 @@ var file_api_services_cubebox_v1_cubebox_proto_depIdxs = []int32{
 	33,  // 36: cubelet.services.cubebox.v1.VolumeSource.empty_dir:type_name -> cubelet.services.cubebox.v1.EmptyDirVolumeSource
 	34,  // 37: cubelet.services.cubebox.v1.VolumeSource.sandbox_path:type_name -> cubelet.services.cubebox.v1.SandboxPathVolumeSource
 	36,  // 38: cubelet.services.cubebox.v1.VolumeSource.host_dir_volumes:type_name -> cubelet.services.cubebox.v1.HostDirVolumeSources
-	108, // 39: cubelet.services.cubebox.v1.VolumeSource.image:type_name -> cubelet.services.images.v1.ImageVolumeSource
-	38,  // 40: cubelet.services.cubebox.v1.VolumeSource.plugin_volume:type_name -> cubelet.services.cubebox.v1.PluginVolumeSource
-	96,  // 41: cubelet.services.cubebox.v1.PluginVolumeSource.options:type_name -> cubelet.services.cubebox.v1.PluginVolumeSource.OptionsEntry
-	37,  // 42: cubelet.services.cubebox.v1.Volume.volume_source:type_name -> cubelet.services.cubebox.v1.VolumeSource
-	39,  // 43: cubelet.services.cubebox.v1.RunCubeSandboxRequest.volumes:type_name -> cubelet.services.cubebox.v1.Volume
-	26,  // 44: cubelet.services.cubebox.v1.RunCubeSandboxRequest.containers:type_name -> cubelet.services.cubebox.v1.ContainerConfig
-	97,  // 45: cubelet.services.cubebox.v1.RunCubeSandboxRequest.annotations:type_name -> cubelet.services.cubebox.v1.RunCubeSandboxRequest.AnnotationsEntry
-	98,  // 46: cubelet.services.cubebox.v1.RunCubeSandboxRequest.labels:type_name -> cubelet.services.cubebox.v1.RunCubeSandboxRequest.LabelsEntry
-	43,  // 47: cubelet.services.cubebox.v1.RunCubeSandboxRequest.cube_network_config:type_name -> cubelet.services.cubebox.v1.CubeNetworkConfig
-	109, // 48: cubelet.services.cubebox.v1.RunCubeSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	99,  // 49: cubelet.services.cubebox.v1.RunCubeSandboxResponse.ext_info:type_name -> cubelet.services.cubebox.v1.RunCubeSandboxResponse.ExtInfoEntry
-	42,  // 50: cubelet.services.cubebox.v1.RunCubeSandboxResponse.port_mappings:type_name -> cubelet.services.cubebox.v1.PortMapping
-	44,  // 51: cubelet.services.cubebox.v1.CubeNetworkConfig.rules:type_name -> cubelet.services.cubebox.v1.EgressRule
-	45,  // 52: cubelet.services.cubebox.v1.EgressRule.match:type_name -> cubelet.services.cubebox.v1.EgressRuleMatch
-	46,  // 53: cubelet.services.cubebox.v1.EgressRule.action:type_name -> cubelet.services.cubebox.v1.EgressRuleAction
-	47,  // 54: cubelet.services.cubebox.v1.EgressRuleAction.inject:type_name -> cubelet.services.cubebox.v1.EgressRuleInject
-	100, // 55: cubelet.services.cubebox.v1.DestroyCubeSandboxRequest.annotations:type_name -> cubelet.services.cubebox.v1.DestroyCubeSandboxRequest.AnnotationsEntry
-	53,  // 56: cubelet.services.cubebox.v1.DestroyCubeSandboxRequest.filter:type_name -> cubelet.services.cubebox.v1.CubeSandboxFilter
-	109, // 57: cubelet.services.cubebox.v1.DestroyCubeSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	101, // 58: cubelet.services.cubebox.v1.DestroyCubeSandboxResponse.ext_info:type_name -> cubelet.services.cubebox.v1.DestroyCubeSandboxResponse.ExtInfoEntry
-	51,  // 59: cubelet.services.cubebox.v1.CubeSandbox.containers:type_name -> cubelet.services.cubebox.v1.Container
-	42,  // 60: cubelet.services.cubebox.v1.CubeSandbox.port_mappings:type_name -> cubelet.services.cubebox.v1.PortMapping
-	102, // 61: cubelet.services.cubebox.v1.CubeSandbox.labels:type_name -> cubelet.services.cubebox.v1.CubeSandbox.LabelsEntry
-	32,  // 62: cubelet.services.cubebox.v1.Container.resources:type_name -> cubelet.services.cubebox.v1.Resource
-	5,   // 63: cubelet.services.cubebox.v1.Container.state:type_name -> cubelet.services.cubebox.v1.ContainerState
-	103, // 64: cubelet.services.cubebox.v1.Container.labels:type_name -> cubelet.services.cubebox.v1.Container.LabelsEntry
-	5,   // 65: cubelet.services.cubebox.v1.ContainerStateValue.state:type_name -> cubelet.services.cubebox.v1.ContainerState
-	52,  // 66: cubelet.services.cubebox.v1.CubeSandboxFilter.state:type_name -> cubelet.services.cubebox.v1.ContainerStateValue
-	104, // 67: cubelet.services.cubebox.v1.CubeSandboxFilter.label_selector:type_name -> cubelet.services.cubebox.v1.CubeSandboxFilter.LabelSelectorEntry
-	53,  // 68: cubelet.services.cubebox.v1.ListCubeSandboxRequest.filter:type_name -> cubelet.services.cubebox.v1.CubeSandboxFilter
-	59,  // 69: cubelet.services.cubebox.v1.ListCubeSandboxRequest.option:type_name -> cubelet.services.cubebox.v1.ListCubeSandboxOption
-	50,  // 70: cubelet.services.cubebox.v1.ListCubeSandboxResponse.items:type_name -> cubelet.services.cubebox.v1.CubeSandbox
-	105, // 71: cubelet.services.cubebox.v1.UpdateCubeSandboxRequest.annotations:type_name -> cubelet.services.cubebox.v1.UpdateCubeSandboxRequest.AnnotationsEntry
-	109, // 72: cubelet.services.cubebox.v1.UpdateCubeSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	109, // 73: cubelet.services.cubebox.v1.ExecCubeSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	63,  // 74: cubelet.services.cubebox.v1.TerminalClientMessage.open:type_name -> cubelet.services.cubebox.v1.TerminalOpenRequest
-	64,  // 75: cubelet.services.cubebox.v1.TerminalClientMessage.resize:type_name -> cubelet.services.cubebox.v1.TerminalResize
-	66,  // 76: cubelet.services.cubebox.v1.TerminalServerMessage.exit:type_name -> cubelet.services.cubebox.v1.TerminalExit
-	67,  // 77: cubelet.services.cubebox.v1.TerminalServerMessage.error:type_name -> cubelet.services.cubebox.v1.TerminalError
-	40,  // 78: cubelet.services.cubebox.v1.AppSnapshotRequest.create_request:type_name -> cubelet.services.cubebox.v1.RunCubeSandboxRequest
-	109, // 79: cubelet.services.cubebox.v1.AppSnapshotResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	109, // 80: cubelet.services.cubebox.v1.CommitSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	109, // 81: cubelet.services.cubebox.v1.RollbackSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	74,  // 82: cubelet.services.cubebox.v1.CleanupTemplateRequest.objects:type_name -> cubelet.services.cubebox.v1.CowObjectRef
-	109, // 83: cubelet.services.cubebox.v1.CleanupTemplateResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	74,  // 84: cubelet.services.cubebox.v1.ListSandboxSnapshotsRequest.objects:type_name -> cubelet.services.cubebox.v1.CowObjectRef
-	109, // 85: cubelet.services.cubebox.v1.ListSandboxSnapshotsResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	78,  // 86: cubelet.services.cubebox.v1.ListSandboxSnapshotsResponse.objects:type_name -> cubelet.services.cubebox.v1.CowObjectStatus
-	109, // 87: cubelet.services.cubebox.v1.ListLocalSnapshotsResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	81,  // 88: cubelet.services.cubebox.v1.ListLocalSnapshotsResponse.snapshots:type_name -> cubelet.services.cubebox.v1.LocalSnapshotInfo
-	109, // 89: cubelet.services.cubebox.v1.GetLocalSnapshotResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	81,  // 90: cubelet.services.cubebox.v1.GetLocalSnapshotResponse.snapshot:type_name -> cubelet.services.cubebox.v1.LocalSnapshotInfo
-	109, // 91: cubelet.services.cubebox.v1.GetStorageMetricsResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	106, // 92: cubelet.services.cubebox.v1.GetStorageMetricsResponse.metrics:type_name -> cubelet.services.cubebox.v1.GetStorageMetricsResponse.MetricsEntry
-	87,  // 93: cubelet.services.cubebox.v1.SandboxStorageInfo.volumes:type_name -> cubelet.services.cubebox.v1.StorageVolumeInfo
-	109, // 94: cubelet.services.cubebox.v1.InspectStorageVolumesResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	88,  // 95: cubelet.services.cubebox.v1.InspectStorageVolumesResponse.sandboxes:type_name -> cubelet.services.cubebox.v1.SandboxStorageInfo
-	109, // 96: cubelet.services.cubebox.v1.CleanupOrphanStorageFilesResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	92,  // 97: cubelet.services.cubebox.v1.CleanupOrphanStorageFilesResponse.orphans:type_name -> cubelet.services.cubebox.v1.StorageOrphanEntry
-	40,  // 98: cubelet.services.cubebox.v1.CubeboxMgr.Create:input_type -> cubelet.services.cubebox.v1.RunCubeSandboxRequest
-	48,  // 99: cubelet.services.cubebox.v1.CubeboxMgr.Destroy:input_type -> cubelet.services.cubebox.v1.DestroyCubeSandboxRequest
-	54,  // 100: cubelet.services.cubebox.v1.CubeboxMgr.List:input_type -> cubelet.services.cubebox.v1.ListCubeSandboxRequest
-	56,  // 101: cubelet.services.cubebox.v1.CubeboxMgr.Update:input_type -> cubelet.services.cubebox.v1.UpdateCubeSandboxRequest
-	60,  // 102: cubelet.services.cubebox.v1.CubeboxMgr.Exec:input_type -> cubelet.services.cubebox.v1.ExecCubeSandboxRequest
-	62,  // 103: cubelet.services.cubebox.v1.CubeboxMgr.AttachTerminal:input_type -> cubelet.services.cubebox.v1.TerminalClientMessage
-	68,  // 104: cubelet.services.cubebox.v1.CubeboxMgr.AppSnapshot:input_type -> cubelet.services.cubebox.v1.AppSnapshotRequest
-	70,  // 105: cubelet.services.cubebox.v1.CubeboxMgr.CommitSandbox:input_type -> cubelet.services.cubebox.v1.CommitSandboxRequest
-	72,  // 106: cubelet.services.cubebox.v1.CubeboxMgr.RollbackSandbox:input_type -> cubelet.services.cubebox.v1.RollbackSandboxRequest
-	75,  // 107: cubelet.services.cubebox.v1.CubeboxMgr.CleanupTemplate:input_type -> cubelet.services.cubebox.v1.CleanupTemplateRequest
-	77,  // 108: cubelet.services.cubebox.v1.CubeboxMgr.ListSandboxSnapshots:input_type -> cubelet.services.cubebox.v1.ListSandboxSnapshotsRequest
-	80,  // 109: cubelet.services.cubebox.v1.CubeboxMgr.ListLocalSnapshots:input_type -> cubelet.services.cubebox.v1.ListLocalSnapshotsRequest
-	83,  // 110: cubelet.services.cubebox.v1.CubeboxMgr.GetLocalSnapshot:input_type -> cubelet.services.cubebox.v1.GetLocalSnapshotRequest
-	85,  // 111: cubelet.services.cubebox.v1.CubeboxMgr.GetStorageMetrics:input_type -> cubelet.services.cubebox.v1.GetStorageMetricsRequest
-	89,  // 112: cubelet.services.cubebox.v1.CubeboxMgr.InspectStorageVolumes:input_type -> cubelet.services.cubebox.v1.InspectStorageVolumesRequest
-	91,  // 113: cubelet.services.cubebox.v1.CubeboxMgr.CleanupOrphanStorageFiles:input_type -> cubelet.services.cubebox.v1.CleanupOrphanStorageFilesRequest
-	41,  // 114: cubelet.services.cubebox.v1.CubeboxMgr.Create:output_type -> cubelet.services.cubebox.v1.RunCubeSandboxResponse
-	49,  // 115: cubelet.services.cubebox.v1.CubeboxMgr.Destroy:output_type -> cubelet.services.cubebox.v1.DestroyCubeSandboxResponse
-	55,  // 116: cubelet.services.cubebox.v1.CubeboxMgr.List:output_type -> cubelet.services.cubebox.v1.ListCubeSandboxResponse
-	57,  // 117: cubelet.services.cubebox.v1.CubeboxMgr.Update:output_type -> cubelet.services.cubebox.v1.UpdateCubeSandboxResponse
-	61,  // 118: cubelet.services.cubebox.v1.CubeboxMgr.Exec:output_type -> cubelet.services.cubebox.v1.ExecCubeSandboxResponse
-	65,  // 119: cubelet.services.cubebox.v1.CubeboxMgr.AttachTerminal:output_type -> cubelet.services.cubebox.v1.TerminalServerMessage
-	69,  // 120: cubelet.services.cubebox.v1.CubeboxMgr.AppSnapshot:output_type -> cubelet.services.cubebox.v1.AppSnapshotResponse
-	71,  // 121: cubelet.services.cubebox.v1.CubeboxMgr.CommitSandbox:output_type -> cubelet.services.cubebox.v1.CommitSandboxResponse
-	73,  // 122: cubelet.services.cubebox.v1.CubeboxMgr.RollbackSandbox:output_type -> cubelet.services.cubebox.v1.RollbackSandboxResponse
-	76,  // 123: cubelet.services.cubebox.v1.CubeboxMgr.CleanupTemplate:output_type -> cubelet.services.cubebox.v1.CleanupTemplateResponse
-	79,  // 124: cubelet.services.cubebox.v1.CubeboxMgr.ListSandboxSnapshots:output_type -> cubelet.services.cubebox.v1.ListSandboxSnapshotsResponse
-	82,  // 125: cubelet.services.cubebox.v1.CubeboxMgr.ListLocalSnapshots:output_type -> cubelet.services.cubebox.v1.ListLocalSnapshotsResponse
-	84,  // 126: cubelet.services.cubebox.v1.CubeboxMgr.GetLocalSnapshot:output_type -> cubelet.services.cubebox.v1.GetLocalSnapshotResponse
-	86,  // 127: cubelet.services.cubebox.v1.CubeboxMgr.GetStorageMetrics:output_type -> cubelet.services.cubebox.v1.GetStorageMetricsResponse
-	90,  // 128: cubelet.services.cubebox.v1.CubeboxMgr.InspectStorageVolumes:output_type -> cubelet.services.cubebox.v1.InspectStorageVolumesResponse
-	93,  // 129: cubelet.services.cubebox.v1.CubeboxMgr.CleanupOrphanStorageFiles:output_type -> cubelet.services.cubebox.v1.CleanupOrphanStorageFilesResponse
-	114, // [114:130] is the sub-list for method output_type
-	98,  // [98:114] is the sub-list for method input_type
-	98,  // [98:98] is the sub-list for extension type_name
-	98,  // [98:98] is the sub-list for extension extendee
-	0,   // [0:98] is the sub-list for field type_name
+	100, // 39: cubelet.services.cubebox.v1.VolumeSource.image:type_name -> cubelet.services.images.v1.ImageVolumeSource
+	37,  // 40: cubelet.services.cubebox.v1.Volume.volume_source:type_name -> cubelet.services.cubebox.v1.VolumeSource
+	38,  // 41: cubelet.services.cubebox.v1.RunCubeSandboxRequest.volumes:type_name -> cubelet.services.cubebox.v1.Volume
+	26,  // 42: cubelet.services.cubebox.v1.RunCubeSandboxRequest.containers:type_name -> cubelet.services.cubebox.v1.ContainerConfig
+	89,  // 43: cubelet.services.cubebox.v1.RunCubeSandboxRequest.annotations:type_name -> cubelet.services.cubebox.v1.RunCubeSandboxRequest.AnnotationsEntry
+	90,  // 44: cubelet.services.cubebox.v1.RunCubeSandboxRequest.labels:type_name -> cubelet.services.cubebox.v1.RunCubeSandboxRequest.LabelsEntry
+	42,  // 45: cubelet.services.cubebox.v1.RunCubeSandboxRequest.cube_network_config:type_name -> cubelet.services.cubebox.v1.CubeNetworkConfig
+	101, // 46: cubelet.services.cubebox.v1.RunCubeSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	91,  // 47: cubelet.services.cubebox.v1.RunCubeSandboxResponse.ext_info:type_name -> cubelet.services.cubebox.v1.RunCubeSandboxResponse.ExtInfoEntry
+	41,  // 48: cubelet.services.cubebox.v1.RunCubeSandboxResponse.port_mappings:type_name -> cubelet.services.cubebox.v1.PortMapping
+	43,  // 49: cubelet.services.cubebox.v1.CubeNetworkConfig.rules:type_name -> cubelet.services.cubebox.v1.EgressRule
+	44,  // 50: cubelet.services.cubebox.v1.EgressRule.match:type_name -> cubelet.services.cubebox.v1.EgressRuleMatch
+	45,  // 51: cubelet.services.cubebox.v1.EgressRule.action:type_name -> cubelet.services.cubebox.v1.EgressRuleAction
+	46,  // 52: cubelet.services.cubebox.v1.EgressRuleAction.inject:type_name -> cubelet.services.cubebox.v1.EgressRuleInject
+	92,  // 53: cubelet.services.cubebox.v1.DestroyCubeSandboxRequest.annotations:type_name -> cubelet.services.cubebox.v1.DestroyCubeSandboxRequest.AnnotationsEntry
+	52,  // 54: cubelet.services.cubebox.v1.DestroyCubeSandboxRequest.filter:type_name -> cubelet.services.cubebox.v1.CubeSandboxFilter
+	101, // 55: cubelet.services.cubebox.v1.DestroyCubeSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	93,  // 56: cubelet.services.cubebox.v1.DestroyCubeSandboxResponse.ext_info:type_name -> cubelet.services.cubebox.v1.DestroyCubeSandboxResponse.ExtInfoEntry
+	50,  // 57: cubelet.services.cubebox.v1.CubeSandbox.containers:type_name -> cubelet.services.cubebox.v1.Container
+	41,  // 58: cubelet.services.cubebox.v1.CubeSandbox.port_mappings:type_name -> cubelet.services.cubebox.v1.PortMapping
+	94,  // 59: cubelet.services.cubebox.v1.CubeSandbox.labels:type_name -> cubelet.services.cubebox.v1.CubeSandbox.LabelsEntry
+	32,  // 60: cubelet.services.cubebox.v1.Container.resources:type_name -> cubelet.services.cubebox.v1.Resource
+	5,   // 61: cubelet.services.cubebox.v1.Container.state:type_name -> cubelet.services.cubebox.v1.ContainerState
+	95,  // 62: cubelet.services.cubebox.v1.Container.labels:type_name -> cubelet.services.cubebox.v1.Container.LabelsEntry
+	5,   // 63: cubelet.services.cubebox.v1.ContainerStateValue.state:type_name -> cubelet.services.cubebox.v1.ContainerState
+	51,  // 64: cubelet.services.cubebox.v1.CubeSandboxFilter.state:type_name -> cubelet.services.cubebox.v1.ContainerStateValue
+	96,  // 65: cubelet.services.cubebox.v1.CubeSandboxFilter.label_selector:type_name -> cubelet.services.cubebox.v1.CubeSandboxFilter.LabelSelectorEntry
+	52,  // 66: cubelet.services.cubebox.v1.ListCubeSandboxRequest.filter:type_name -> cubelet.services.cubebox.v1.CubeSandboxFilter
+	58,  // 67: cubelet.services.cubebox.v1.ListCubeSandboxRequest.option:type_name -> cubelet.services.cubebox.v1.ListCubeSandboxOption
+	49,  // 68: cubelet.services.cubebox.v1.ListCubeSandboxResponse.items:type_name -> cubelet.services.cubebox.v1.CubeSandbox
+	97,  // 69: cubelet.services.cubebox.v1.UpdateCubeSandboxRequest.annotations:type_name -> cubelet.services.cubebox.v1.UpdateCubeSandboxRequest.AnnotationsEntry
+	101, // 70: cubelet.services.cubebox.v1.UpdateCubeSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	101, // 71: cubelet.services.cubebox.v1.ExecCubeSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	39,  // 72: cubelet.services.cubebox.v1.AppSnapshotRequest.create_request:type_name -> cubelet.services.cubebox.v1.RunCubeSandboxRequest
+	101, // 73: cubelet.services.cubebox.v1.AppSnapshotResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	101, // 74: cubelet.services.cubebox.v1.CommitSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	101, // 75: cubelet.services.cubebox.v1.RollbackSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	67,  // 76: cubelet.services.cubebox.v1.CleanupTemplateRequest.objects:type_name -> cubelet.services.cubebox.v1.CowObjectRef
+	101, // 77: cubelet.services.cubebox.v1.CleanupTemplateResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	67,  // 78: cubelet.services.cubebox.v1.ListSandboxSnapshotsRequest.objects:type_name -> cubelet.services.cubebox.v1.CowObjectRef
+	101, // 79: cubelet.services.cubebox.v1.ListSandboxSnapshotsResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	71,  // 80: cubelet.services.cubebox.v1.ListSandboxSnapshotsResponse.objects:type_name -> cubelet.services.cubebox.v1.CowObjectStatus
+	101, // 81: cubelet.services.cubebox.v1.ListLocalSnapshotsResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	74,  // 82: cubelet.services.cubebox.v1.ListLocalSnapshotsResponse.snapshots:type_name -> cubelet.services.cubebox.v1.LocalSnapshotInfo
+	101, // 83: cubelet.services.cubebox.v1.GetLocalSnapshotResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	74,  // 84: cubelet.services.cubebox.v1.GetLocalSnapshotResponse.snapshot:type_name -> cubelet.services.cubebox.v1.LocalSnapshotInfo
+	101, // 85: cubelet.services.cubebox.v1.GetStorageMetricsResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	98,  // 86: cubelet.services.cubebox.v1.GetStorageMetricsResponse.metrics:type_name -> cubelet.services.cubebox.v1.GetStorageMetricsResponse.MetricsEntry
+	80,  // 87: cubelet.services.cubebox.v1.SandboxStorageInfo.volumes:type_name -> cubelet.services.cubebox.v1.StorageVolumeInfo
+	101, // 88: cubelet.services.cubebox.v1.InspectStorageVolumesResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	81,  // 89: cubelet.services.cubebox.v1.InspectStorageVolumesResponse.sandboxes:type_name -> cubelet.services.cubebox.v1.SandboxStorageInfo
+	101, // 90: cubelet.services.cubebox.v1.CleanupOrphanStorageFilesResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	85,  // 91: cubelet.services.cubebox.v1.CleanupOrphanStorageFilesResponse.orphans:type_name -> cubelet.services.cubebox.v1.StorageOrphanEntry
+	39,  // 92: cubelet.services.cubebox.v1.CubeboxMgr.Create:input_type -> cubelet.services.cubebox.v1.RunCubeSandboxRequest
+	47,  // 93: cubelet.services.cubebox.v1.CubeboxMgr.Destroy:input_type -> cubelet.services.cubebox.v1.DestroyCubeSandboxRequest
+	53,  // 94: cubelet.services.cubebox.v1.CubeboxMgr.List:input_type -> cubelet.services.cubebox.v1.ListCubeSandboxRequest
+	55,  // 95: cubelet.services.cubebox.v1.CubeboxMgr.Update:input_type -> cubelet.services.cubebox.v1.UpdateCubeSandboxRequest
+	59,  // 96: cubelet.services.cubebox.v1.CubeboxMgr.Exec:input_type -> cubelet.services.cubebox.v1.ExecCubeSandboxRequest
+	61,  // 97: cubelet.services.cubebox.v1.CubeboxMgr.AppSnapshot:input_type -> cubelet.services.cubebox.v1.AppSnapshotRequest
+	63,  // 98: cubelet.services.cubebox.v1.CubeboxMgr.CommitSandbox:input_type -> cubelet.services.cubebox.v1.CommitSandboxRequest
+	65,  // 99: cubelet.services.cubebox.v1.CubeboxMgr.RollbackSandbox:input_type -> cubelet.services.cubebox.v1.RollbackSandboxRequest
+	68,  // 100: cubelet.services.cubebox.v1.CubeboxMgr.CleanupTemplate:input_type -> cubelet.services.cubebox.v1.CleanupTemplateRequest
+	70,  // 101: cubelet.services.cubebox.v1.CubeboxMgr.ListSandboxSnapshots:input_type -> cubelet.services.cubebox.v1.ListSandboxSnapshotsRequest
+	73,  // 102: cubelet.services.cubebox.v1.CubeboxMgr.ListLocalSnapshots:input_type -> cubelet.services.cubebox.v1.ListLocalSnapshotsRequest
+	76,  // 103: cubelet.services.cubebox.v1.CubeboxMgr.GetLocalSnapshot:input_type -> cubelet.services.cubebox.v1.GetLocalSnapshotRequest
+	78,  // 104: cubelet.services.cubebox.v1.CubeboxMgr.GetStorageMetrics:input_type -> cubelet.services.cubebox.v1.GetStorageMetricsRequest
+	82,  // 105: cubelet.services.cubebox.v1.CubeboxMgr.InspectStorageVolumes:input_type -> cubelet.services.cubebox.v1.InspectStorageVolumesRequest
+	84,  // 106: cubelet.services.cubebox.v1.CubeboxMgr.CleanupOrphanStorageFiles:input_type -> cubelet.services.cubebox.v1.CleanupOrphanStorageFilesRequest
+	40,  // 107: cubelet.services.cubebox.v1.CubeboxMgr.Create:output_type -> cubelet.services.cubebox.v1.RunCubeSandboxResponse
+	48,  // 108: cubelet.services.cubebox.v1.CubeboxMgr.Destroy:output_type -> cubelet.services.cubebox.v1.DestroyCubeSandboxResponse
+	54,  // 109: cubelet.services.cubebox.v1.CubeboxMgr.List:output_type -> cubelet.services.cubebox.v1.ListCubeSandboxResponse
+	56,  // 110: cubelet.services.cubebox.v1.CubeboxMgr.Update:output_type -> cubelet.services.cubebox.v1.UpdateCubeSandboxResponse
+	60,  // 111: cubelet.services.cubebox.v1.CubeboxMgr.Exec:output_type -> cubelet.services.cubebox.v1.ExecCubeSandboxResponse
+	62,  // 112: cubelet.services.cubebox.v1.CubeboxMgr.AppSnapshot:output_type -> cubelet.services.cubebox.v1.AppSnapshotResponse
+	64,  // 113: cubelet.services.cubebox.v1.CubeboxMgr.CommitSandbox:output_type -> cubelet.services.cubebox.v1.CommitSandboxResponse
+	66,  // 114: cubelet.services.cubebox.v1.CubeboxMgr.RollbackSandbox:output_type -> cubelet.services.cubebox.v1.RollbackSandboxResponse
+	69,  // 115: cubelet.services.cubebox.v1.CubeboxMgr.CleanupTemplate:output_type -> cubelet.services.cubebox.v1.CleanupTemplateResponse
+	72,  // 116: cubelet.services.cubebox.v1.CubeboxMgr.ListSandboxSnapshots:output_type -> cubelet.services.cubebox.v1.ListSandboxSnapshotsResponse
+	75,  // 117: cubelet.services.cubebox.v1.CubeboxMgr.ListLocalSnapshots:output_type -> cubelet.services.cubebox.v1.ListLocalSnapshotsResponse
+	77,  // 118: cubelet.services.cubebox.v1.CubeboxMgr.GetLocalSnapshot:output_type -> cubelet.services.cubebox.v1.GetLocalSnapshotResponse
+	79,  // 119: cubelet.services.cubebox.v1.CubeboxMgr.GetStorageMetrics:output_type -> cubelet.services.cubebox.v1.GetStorageMetricsResponse
+	83,  // 120: cubelet.services.cubebox.v1.CubeboxMgr.InspectStorageVolumes:output_type -> cubelet.services.cubebox.v1.InspectStorageVolumesResponse
+	86,  // 121: cubelet.services.cubebox.v1.CubeboxMgr.CleanupOrphanStorageFiles:output_type -> cubelet.services.cubebox.v1.CleanupOrphanStorageFilesResponse
+	107, // [107:122] is the sub-list for method output_type
+	92,  // [92:107] is the sub-list for method input_type
+	92,  // [92:92] is the sub-list for extension type_name
+	92,  // [92:92] is the sub-list for extension extendee
+	0,   // [0:92] is the sub-list for field type_name
 }
 
 func init() { file_api_services_cubebox_v1_cubebox_proto_init() }
@@ -7858,30 +7297,20 @@ func file_api_services_cubebox_v1_cubebox_proto_init() {
 	file_api_services_cubebox_v1_cubebox_proto_msgTypes[9].OneofWrappers = []any{}
 	file_api_services_cubebox_v1_cubebox_proto_msgTypes[10].OneofWrappers = []any{}
 	file_api_services_cubebox_v1_cubebox_proto_msgTypes[16].OneofWrappers = []any{}
-	file_api_services_cubebox_v1_cubebox_proto_msgTypes[34].OneofWrappers = []any{}
+	file_api_services_cubebox_v1_cubebox_proto_msgTypes[33].OneofWrappers = []any{}
+	file_api_services_cubebox_v1_cubebox_proto_msgTypes[36].OneofWrappers = []any{}
 	file_api_services_cubebox_v1_cubebox_proto_msgTypes[37].OneofWrappers = []any{}
 	file_api_services_cubebox_v1_cubebox_proto_msgTypes[38].OneofWrappers = []any{}
 	file_api_services_cubebox_v1_cubebox_proto_msgTypes[39].OneofWrappers = []any{}
 	file_api_services_cubebox_v1_cubebox_proto_msgTypes[40].OneofWrappers = []any{}
-	file_api_services_cubebox_v1_cubebox_proto_msgTypes[41].OneofWrappers = []any{}
-	file_api_services_cubebox_v1_cubebox_proto_msgTypes[48].OneofWrappers = []any{}
-	file_api_services_cubebox_v1_cubebox_proto_msgTypes[56].OneofWrappers = []any{
-		(*TerminalClientMessage_Open)(nil),
-		(*TerminalClientMessage_Stdin)(nil),
-		(*TerminalClientMessage_Resize)(nil),
-	}
-	file_api_services_cubebox_v1_cubebox_proto_msgTypes[59].OneofWrappers = []any{
-		(*TerminalServerMessage_Output)(nil),
-		(*TerminalServerMessage_Exit)(nil),
-		(*TerminalServerMessage_Error)(nil),
-	}
+	file_api_services_cubebox_v1_cubebox_proto_msgTypes[47].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_services_cubebox_v1_cubebox_proto_rawDesc), len(file_api_services_cubebox_v1_cubebox_proto_rawDesc)),
 			NumEnums:      6,
-			NumMessages:   101,
+			NumMessages:   93,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

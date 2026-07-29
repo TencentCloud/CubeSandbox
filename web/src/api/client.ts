@@ -19,9 +19,7 @@ export type ComponentVersionDto = components['schemas']['ComponentVersionView'];
 
 export interface RunningSandbox extends ListedSandboxDto {}
 
-export interface SandboxDetail extends SandboxDetailDto {
-  terminalTargets?: Array<{ containerID: string; name: string }>;
-}
+export type SandboxDetail = SandboxDetailDto;
 
 export interface TemplateSummary {
   templateID: string;

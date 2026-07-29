@@ -119,6 +119,13 @@ func (s *Server) buildRouter() *gin.Engine {
 	sdkV2Group.GET("/sandboxes", sdkH.ListSandboxes)
 	sdkV2Group.GET("/sandboxes/:id/logs", sdkH.GetSandboxLogs)
 
+	// Interactive terminal WebSocket. Mounted OUTSIDE the bearer-header JWT
+	// middleware because a browser cannot set an Authorization header on a
+	// WebSocket upgrade; the handler validates the JWT carried in the
+	// Sec-WebSocket-Protocol subprotocol instead.
+	terminalH := handler.NewTerminalHandler(s.jm, s.cfg.SandboxDomain)
+	terminalH.Register(r.Group("/api/v1"))
+
 	return r
 }
 

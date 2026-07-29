@@ -11,43 +11,44 @@ import { Maximize2, RefreshCw, TerminalSquare, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { getSessionToken } from '@/lib/session';
 
-/** JSON terminal frames; keepalive uses a compact K text frame decoded before JSON by CubeMaster. */
+/**
+ * Terminal frames exchanged with CubeOps.
+ *
+ * Client → server: JSON text frames. A lone "K" text frame is a keepalive.
+ * Server → client: raw PTY output arrives as BINARY frames (written straight to
+ * xterm, so no lossy UTF-8 re-encoding); control events ({type:"error"|"exit"})
+ * arrive as JSON text.
+ */
 type TerminalFrame =
-  | { type: 'open'; sandboxId: string; containerId: string; cols: number; rows: number }
+  | { type: 'open'; sandboxId: string; cols: number; rows: number }
   | { type: 'input'; data: string }
   | { type: 'resize'; cols: number; rows: number };
 
 const TERMINAL_KEEPALIVE_FRAME = 'K';
+const TERMINAL_SUBPROTOCOL = 'cube-terminal';
 
 function terminalSocketUrl(sandboxId: string): string {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${protocol}//${window.location.host}/cubeapi/v1/sandboxes/${encodeURIComponent(sandboxId)}/terminal/ws`;
+  // CubeOps ops backend; `/opsapi` is proxied to CubeOps (dev) / routed by the
+  // gateway (prod). The terminal is served by CubeOps, not CubeAPI.
+  return `${protocol}//${window.location.host}/opsapi/v1/sdk/sandboxes/${encodeURIComponent(sandboxId)}/terminal/ws`;
 }
 
-/** A terminal panel that speaks the versioned JSON frame contract of the API gateway. */
+/** An xterm.js panel bridged to the sandbox's envd PTY via CubeOps. */
 export function SandboxTerminalDialog({
   open,
   sandboxId,
-  targets,
   onOpenChange,
 }: {
   open: boolean;
   sandboxId: string;
-  targets: Array<{ containerID: string; name: string }>;
   onOpenChange(open: boolean): void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
   const [fullScreen, setFullScreen] = useState(false);
-  const [containerId, setContainerId] = useState('');
   const [connectionNonce, setConnectionNonce] = useState(0);
-
-  useEffect(() => {
-    if (!targets.some((target) => target.containerID === containerId)) {
-      setContainerId(targets[0]?.containerID ?? '');
-    }
-  }, [containerId, targets]);
 
   useEffect(() => {
     if (!open || !hostRef.current) return;
@@ -71,16 +72,17 @@ export function SandboxTerminalDialog({
     fit.fit();
     terminal.writeln('\x1b[90mConnecting to sandbox terminal…\x1b[0m');
 
-    const target = targets.find((item) => item.containerID === containerId) ?? targets[0];
-    if (!target) {
-      terminal.writeln('\x1b[31mNo running container is available for terminal login.\x1b[0m');
+    // The CubeOps JWT rides in the subprotocol because a browser cannot set an
+    // Authorization header on a WebSocket upgrade.
+    const sessionToken = getSessionToken();
+    if (!sessionToken) {
+      terminal.writeln('\r\n\x1b[31mYou must be signed in to open a terminal.\x1b[0m');
       return () => terminal.dispose();
     }
-    const sessionToken = getSessionToken();
-    const socket = sessionToken
-      ? new WebSocket(terminalSocketUrl(sandboxId), ['cube-terminal', sessionToken])
-      : new WebSocket(terminalSocketUrl(sandboxId), ['cube-terminal']);
+    const socket = new WebSocket(terminalSocketUrl(sandboxId), [TERMINAL_SUBPROTOCOL, sessionToken]);
+    socket.binaryType = 'arraybuffer';
     socketRef.current = socket;
+
     const pendingFrames: TerminalFrame[] = [];
     const maxPendingFrames = 16;
     let dropNotified = false;
@@ -90,7 +92,6 @@ export function SandboxTerminalDialog({
       } else if (socket.readyState === WebSocket.CONNECTING && pendingFrames.length < maxPendingFrames) {
         pendingFrames.push(frame);
       } else if (!dropNotified) {
-        // Queue full (or socket unavailable): any frame type may be dropped, notify once.
         dropNotified = true;
         terminal.writeln('\r\n\x1b[33mSome terminal input was ignored while the terminal was unavailable.\x1b[0m');
       }
@@ -98,24 +99,25 @@ export function SandboxTerminalDialog({
 
     socket.onopen = () => {
       setStatus('connected');
-      const openFrame: TerminalFrame = {
-        type: 'open',
-        sandboxId,
-        containerId: target.containerID,
-        cols: terminal.cols,
-        rows: terminal.rows,
-      };
+      const openFrame: TerminalFrame = { type: 'open', sandboxId, cols: terminal.cols, rows: terminal.rows };
       socket.send(JSON.stringify(openFrame));
       pendingFrames.splice(0).forEach(send);
     };
     socket.onmessage = (event) => {
+      // Raw PTY output: binary frames written straight to xterm.
+      if (event.data instanceof ArrayBuffer) {
+        terminal.write(new Uint8Array(event.data));
+        return;
+      }
+      // Control events: JSON text frames.
       const receive = (data: string) => {
         try {
-          const frame = JSON.parse(data) as { type?: string; data?: string; message?: string };
-          if (frame.type === 'output') terminal.write(frame.data ?? '');
-          else if (frame.type === 'error') terminal.writeln(`\r\n\x1b[31m${frame.message ?? 'Terminal error'}\x1b[0m`);
+          const frame = JSON.parse(data) as { type?: string; message?: string };
+          if (frame.type === 'error') terminal.writeln(`\r\n\x1b[31m${frame.message ?? 'Terminal error'}\x1b[0m`);
           else if (frame.type === 'exit') terminal.writeln('\r\n\x1b[90mTerminal process exited.\x1b[0m');
-        } catch { terminal.write(data); }
+        } catch {
+          terminal.write(data);
+        }
       };
       if (typeof event.data === 'string') receive(event.data);
       else if (event.data instanceof Blob) void event.data.text().then(receive);
@@ -154,7 +156,7 @@ export function SandboxTerminalDialog({
       terminal.dispose();
       setStatus('connecting');
     };
-  }, [open, sandboxId, targets, containerId, connectionNonce]);
+  }, [open, sandboxId, connectionNonce]);
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -167,16 +169,6 @@ export function SandboxTerminalDialog({
               <Dialog.Title className="text-sm font-semibold">Sandbox terminal</Dialog.Title>
               <Dialog.Description className="truncate font-mono text-xs text-muted-foreground">{sandboxId}</Dialog.Description>
             </div>
-            {targets.length > 1 && (
-              <select
-                aria-label="Terminal container"
-                className="h-8 max-w-40 rounded-md border border-border bg-background px-2 text-xs"
-                value={containerId}
-                onChange={(event) => setContainerId(event.target.value)}
-              >
-                {targets.map((target) => <option key={target.containerID} value={target.containerID}>{target.name || target.containerID}</option>)}
-              </select>
-            )}
             <span className={`h-2 w-2 rounded-full ${status === 'connected' ? 'bg-cube-ok' : status === 'connecting' ? 'bg-cube-warn animate-pulse' : 'bg-muted-foreground'}`} aria-label={status} />
             {status === 'disconnected' && <Button size="sm" variant="ghost" onClick={() => setConnectionNonce((value) => value + 1)}><RefreshCw size={14} /> Reconnect</Button>}
             <Button size="icon" variant="ghost" title="Toggle fullscreen" onClick={() => setFullScreen((value) => !value)}><Maximize2 size={15} /></Button>
