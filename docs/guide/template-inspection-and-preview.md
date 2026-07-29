@@ -72,6 +72,7 @@ How to read `create_request`:
 - It is the request body stored with the template definition.
 - It is useful when you want to inspect what the template was originally built from or committed with.
 - It is not the final request for every future sandbox creation. Later user input can still be merged on top.
+- Internal `cube.master.net` and `cube.master.blk.qos` annotations are not included. Use the template's `configuredQos` to inspect QoS.
 
 ## Preview the Effective Sandbox Request
 
