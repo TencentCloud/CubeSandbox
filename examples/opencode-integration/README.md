@@ -129,6 +129,9 @@ The source filename intentionally binds this permission schema to OpenCode 1.x;
 the Dockerfile copies it to OpenCode's standard in-image `opencode.json` path.
 Use `--verbose-events` to show future JSONL event types omitted by the concise
 renderer, or `--raw` to stream every event unchanged.
+If a compatible SDK accepts but does not invoke stream callbacks, the adapter
+replays the collected stdout/stderr through the same renderer after completion;
+output remains visible, but it is buffered rather than real-time.
 
 ## 4. Pause and resume
 
@@ -136,10 +139,12 @@ renderer, or `--raw` to stream every event unchanged.
 .venv/bin/python resume_opencode.py
 ```
 
-Turn 1 creates `plan.md`; the driver captures OpenCode's actual `sessionID`,
-pauses the MicroVM, reconnects, verifies both `/workspace` and
-`/root/.local/share/opencode`, then passes the same session ID into turn 2.
-The key is injected again per process and is not written into the image.
+Turn 1 creates `plan.md`; the driver captures OpenCode's actual `sessionID`
+inside the streaming JSONL callback, with `result.stdout` used only as a
+compatibility fallback. It then pauses the MicroVM, reconnects, verifies both
+`/workspace` and `/root/.local/share/opencode`, and passes the same session ID
+into turn 2. The key is injected again per process and is not written into the
+image.
 This driver also uses direct mode and prints the same open-egress warning; it is
 a persistence demonstration, not the production credential pattern.
 

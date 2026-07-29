@@ -119,6 +119,8 @@ python -m venv .venv
 源码文件名显式绑定 OpenCode 1.x 权限格式，Dockerfile 再把它复制到镜像内标准
 `opencode.json` 路径。可用 `--verbose-events` 显示精简渲染器忽略的未来 JSONL
 事件类型，或用 `--raw` 原样输出全部事件。
+若兼容 SDK 接受但不触发流式回调，适配层会在命令结束后把已收集的 stdout/stderr 交给同一
+渲染器补放；输出仍可见，但会退化为非实时。
 
 ## 4. 暂停与恢复
 
@@ -126,9 +128,10 @@ python -m venv .venv
 .venv/bin/python resume_opencode.py
 ```
 
-第一轮创建 `plan.md` 并从真实 JSONL 中取得 `sessionID`；驱动暂停 MicroVM、重新连接，
-验证 `/workspace` 和 `/root/.local/share/opencode` 均保留，再用同一个会话 ID 执行
-第二轮。每轮单独注入 Key，镜像内不保存凭据。
+第一轮创建 `plan.md`，驱动在流式 JSONL 回调中同步捕获真实 `sessionID`，仅把
+`result.stdout` 作为兼容兜底；随后暂停 MicroVM、重新连接，验证 `/workspace` 和
+`/root/.local/share/opencode` 均保留，再用同一个会话 ID 执行第二轮。每轮单独注入 Key，
+镜像内不保存凭据。
 该驱动同样使用直接模式并输出开放出口警告；它用于证明状态持久化，不代表生产凭据方案。
 
 ## 5. 默认拒绝出口与凭据保险库

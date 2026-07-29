@@ -12,8 +12,8 @@ import shlex
 import sys
 
 from _opencode_common import (
+    SessionIdCapture,
     ensure_success,
-    extract_session_id,
     run_command,
     sandbox_identifier,
 )
@@ -80,6 +80,7 @@ def run_turn(
     envs: dict[str, str],
     timeout: int,
     session_id: str | None = None,
+    session_capture: SessionIdCapture | None = None,
 ) -> object:
     result = run_command(
         sandbox,
@@ -88,6 +89,9 @@ def run_turn(
         envs=envs,
         timeout=timeout,
         stream=True,
+        json_event_handler=(
+            session_capture.observe if session_capture is not None else None
+        ),
     )
     ensure_success(result, "run OpenCode turn")
     return result
@@ -135,14 +139,16 @@ def main() -> int:
     try:
         print(f"Sandbox ready: {sandbox_id}")
         turn_1 = TURN_1.format(workspace=args.workspace)
+        session_capture = SessionIdCapture()
         result_1 = run_turn(
             sandbox,
             workspace=args.workspace,
             prompt=turn_1,
             envs=envs,
             timeout=args.exec_timeout,
+            session_capture=session_capture,
         )
-        session_id = extract_session_id(getattr(result_1, "stdout", ""))
+        session_id = session_capture.resolve(getattr(result_1, "stdout", "") or "")
         print(f"OpenCode session: {session_id}")
 
         paused = sandbox.pause()

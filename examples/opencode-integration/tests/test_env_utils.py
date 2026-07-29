@@ -61,7 +61,31 @@ class EnvironmentTests(unittest.TestCase):
             mock.patch.dict(os.environ, {"HY3_MODEL": "other"}, clear=True),
             self.assertRaises(SystemExit),
         ):
-            env_utils.hy3_model()
+            env_utils.require_hy3_model()
+
+    def test_base_url_accepts_one_trailing_slash(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"HY3_BASE_URL": "https://tokenhub.example/v1/"},
+            clear=True,
+        ):
+            self.assertEqual(
+                env_utils.hy3_base_url(),
+                "https://tokenhub.example/v1",
+            )
+
+    def test_base_url_rejects_paths_beyond_v1(self) -> None:
+        for path in ("/v1/chat", "/proxy/v1"):
+            with (
+                self.subTest(path=path),
+                mock.patch.dict(
+                    os.environ,
+                    {"HY3_BASE_URL": f"https://tokenhub.example{path}"},
+                    clear=True,
+                ),
+                self.assertRaises(SystemExit),
+            ):
+                env_utils.hy3_base_url()
 
     def test_extracts_host_from_prevalidated_base_url(self) -> None:
         base_url = "https://tokenhub.tencentmaas.com/v1"

@@ -193,6 +193,10 @@ they do not replace sandbox isolation.
 The concise JSONL renderer shows model text, tools, and errors. Pass
 `--verbose-events` to identify other event types that were omitted, or `--raw`
 to preserve every event unchanged.
+When an SDK accepts but does not invoke callback parameters, the compatibility
+layer replays collected stdout/stderr through the same handlers after command
+completion. Output and session capture remain correct, although display is no
+longer real-time.
 
 ## Key Injection
 
@@ -268,7 +272,8 @@ sets both `SSL_CERT_FILE` and `NODE_EXTRA_CA_CERTS`; override
 
 The script:
 
-1. completes turn 1 and extracts the authoritative `sessionID` from JSONL;
+1. captures the authoritative `sessionID` as turn 1 JSONL chunks stream,
+   retaining `result.stdout` only as a compatibility fallback;
 2. calls `sandbox.pause()` after the agent process exits;
 3. reconnects with `Sandbox.connect(sandbox_id=...)`;
 4. verifies `/workspace/plan.md` and OpenCode's state directory;
@@ -321,9 +326,10 @@ text request and a native `read` tool call. Offline tests cover URL validation,
 the two-stage vault secret boundary, destructive-command guardrails, template
 package/architecture/context invariants, the OpenCode V1 config binding,
 runtime security warnings, command quoting, SDK compatibility fallback,
-session-ID parsing, and verbose JSONL diagnostics. Full CubeEgress and
-pause/resume validation requires an accessible CubeSandbox deployment and
-should be recorded before merging.
+multi-chunk session-ID capture with empty result stdout, callback-free SDK
+replay, and verbose JSONL diagnostics. Full CubeEgress and pause/resume
+validation requires an accessible CubeSandbox deployment and should be
+recorded before merging.
 
 ## References
 

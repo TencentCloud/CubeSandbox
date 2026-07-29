@@ -10,12 +10,14 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 EXAMPLE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(EXAMPLE))
 
 from _opencode_common import (
+    SessionIdCapture,
     extract_session_id,
     render_jsonl_line,
     run_command,
@@ -28,9 +30,13 @@ class FakeCommands:
         self,
         reject_envs: bool = False,
         failure: str | None = None,
+        stdout_chunks: list[str] | None = None,
+        result_stdout: str = "",
     ):
         self.reject_envs = reject_envs
         self.failure = failure
+        self.stdout_chunks = stdout_chunks or []
+        self.result_stdout = result_stdout
         self.kwargs = None
 
     def run(self, command, **kwargs):
@@ -40,7 +46,15 @@ class FakeCommands:
         if self.reject_envs and "envs" in kwargs:
             raise TypeError("unexpected keyword argument 'envs'")
         self.kwargs = kwargs
-        return object()
+        on_stdout = kwargs.get("on_stdout")
+        if on_stdout is not None:
+            for text in self.stdout_chunks:
+                on_stdout(SimpleNamespace(line=text))
+        return SimpleNamespace(
+            stdout=self.result_stdout,
+            stderr="",
+            exit_code=0,
+        )
 
 
 class FakeSandbox:
@@ -48,8 +62,15 @@ class FakeSandbox:
         self,
         reject_envs: bool = False,
         failure: str | None = None,
+        stdout_chunks: list[str] | None = None,
+        result_stdout: str = "",
     ):
-        self.commands = FakeCommands(reject_envs, failure)
+        self.commands = FakeCommands(
+            reject_envs,
+            failure,
+            stdout_chunks,
+            result_stdout,
+        )
 
 
 class CommonHelperTests(unittest.TestCase):
@@ -80,6 +101,11 @@ class CommonHelperTests(unittest.TestCase):
     def test_does_not_mask_unrelated_type_error_with_envs(self) -> None:
         sandbox = FakeSandbox(failure="unrelated type failure")
         with self.assertRaisesRegex(TypeError, "unrelated"):
+            run_command(sandbox, "true", envs={"A": "B"})
+
+    def test_does_not_mask_semantic_error_that_mentions_envs(self) -> None:
+        sandbox = FakeSandbox(failure="envs must contain only string values")
+        with self.assertRaisesRegex(TypeError, "string values"):
             run_command(sandbox, "true", envs={"A": "B"})
 
     def test_does_not_fallback_when_envs_were_not_passed(self) -> None:
@@ -163,6 +189,77 @@ class CommonHelperTests(unittest.TestCase):
         ):
             render_jsonl_line(json.dumps({"type": "future_event"}))
         self.assertIn("[event:future_event] omitted", stream.getvalue())
+
+    def test_streaming_capture_resolves_session_without_result_stdout(self) -> None:
+        payload = (
+            json.dumps(
+                {
+                    "type": "step_start",
+                    "sessionID": "ses_stream",
+                }
+            )
+            + "\n"
+        )
+        sandbox = FakeSandbox(
+            stdout_chunks=[payload[:11], payload[11:29], payload[29:]]
+        )
+        capture = SessionIdCapture()
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = run_command(
+                sandbox,
+                "opencode run",
+                stream=True,
+                json_event_handler=capture.observe,
+            )
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(capture.resolve(result.stdout), "ses_stream")
+
+    def test_result_stdout_is_replayed_when_sdk_ignores_callback(self) -> None:
+        payload = (
+            json.dumps(
+                {
+                    "type": "step_start",
+                    "sessionID": "ses_replayed",
+                }
+            )
+            + "\n"
+        )
+        sandbox = FakeSandbox(result_stdout=payload)
+        capture = SessionIdCapture()
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = run_command(
+                sandbox,
+                "opencode run",
+                stream=True,
+                json_event_handler=capture.observe,
+            )
+        self.assertEqual(capture.resolve(result.stdout), "ses_replayed")
+
+    def test_raw_streaming_still_captures_session_id(self) -> None:
+        payload = (
+            json.dumps(
+                {
+                    "type": "step_start",
+                    "sessionID": "ses_raw",
+                }
+            )
+            + "\n"
+        )
+        sandbox = FakeSandbox(stdout_chunks=[payload[:7], payload[7:]])
+        capture = SessionIdCapture()
+        raw_output = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {"OPENCODE_STREAM_RAW": "1"}),
+            contextlib.redirect_stdout(raw_output),
+        ):
+            result = run_command(
+                sandbox,
+                "opencode run",
+                stream=True,
+                json_event_handler=capture.observe,
+            )
+        self.assertEqual(raw_output.getvalue(), payload)
+        self.assertEqual(capture.resolve(result.stdout), "ses_raw")
 
 
 if __name__ == "__main__":

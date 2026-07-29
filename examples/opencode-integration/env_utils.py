@@ -63,7 +63,7 @@ def warn_direct_mode() -> None:
     print(DIRECT_MODE_WARNING, file=sys.stderr)
 
 
-def hy3_model() -> str:
+def require_hy3_model() -> str:
     model = optional("HY3_MODEL", DEFAULT_MODEL)
     if model != DEFAULT_MODEL:
         raise SystemExit("This example requires HY3_MODEL=hy3")
@@ -79,8 +79,8 @@ def hy3_base_url() -> str:
         raise SystemExit(
             "HY3_BASE_URL must not contain credentials, query, or fragment"
         )
-    if not parsed.path.endswith("/v1"):
-        raise SystemExit("HY3_BASE_URL must end with /v1")
+    if parsed.path.rstrip("/") != "/v1":
+        raise SystemExit("HY3_BASE_URL path must be exactly /v1")
     return value
 
 
@@ -100,7 +100,7 @@ def build_opencode_env(*, include_secret: bool) -> dict[str, str]:
     """Build the minimal environment passed to OpenCode inside the sandbox."""
     env = {
         "HY3_BASE_URL": hy3_base_url(),
-        "HY3_MODEL": hy3_model(),
+        "HY3_MODEL": require_hy3_model(),
         "OPENCODE_DISABLE_AUTOUPDATE": "1",
         "OPENCODE_DISABLE_SHARE": "1",
         "OPENCODE_DISABLE_MODELS_FETCH": "1",

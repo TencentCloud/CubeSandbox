@@ -177,6 +177,8 @@ opencode run \
 
 精简 JSONL 渲染器默认展示模型文本、工具与错误；传入 `--verbose-events` 可识别被省略的其他
 事件类型，`--raw` 则原样保留全部事件。
+若 SDK 接受但不触发回调参数，兼容层会在命令结束后把已收集的 stdout/stderr 交给同一处理器
+补放；输出与会话捕获保持正确，但显示会退化为非实时。
 
 ## API Key 注入
 
@@ -247,7 +249,7 @@ CubeEgress 仅对命中主机的请求替换为真实凭据；其他目的地被
 
 脚本按以下顺序工作：
 
-1. 完成第一轮并从 JSONL 提取真实 `sessionID`；
+1. 第一轮 JSONL 分块到达时同步捕获真实 `sessionID`，仅以 `result.stdout` 作兼容兜底；
 2. Agent 进程退出后执行 `sandbox.pause()`；
 3. 用 `Sandbox.connect(sandbox_id=...)` 恢复；
 4. 验证 `/workspace/plan.md` 与 OpenCode 状态目录；
@@ -290,8 +292,8 @@ CubeEgress 仅对命中主机的请求替换为真实凭据；其他目的地被
 2026-07-29 已用固定的 OpenCode `1.18.9` 和真实 Hy3 完成文本请求及一次原生 `read`
 工具调用。离线测试覆盖 URL 校验、两阶段凭据边界、危险命令规则、模板依赖与架构约束、
 最小构建上下文、OpenCode V1 配置绑定、运行时安全警告、命令引用、旧版 SDK 参数回退、
-会话 ID 解析和详细 JSONL 诊断。CubeEgress 与暂停恢复全链仍需在可访问的 CubeSandbox
-集群中运行并保留证据后再合并。
+多 chunk 且结果 stdout 为空时的会话 ID 捕获、不触发回调的 SDK 补放，以及详细 JSONL
+诊断。CubeEgress 与暂停恢复全链仍需在可访问的 CubeSandbox 集群中运行并保留证据后再合并。
 
 ## 参考
 
