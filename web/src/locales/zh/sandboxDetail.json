@@ -41,9 +41,45 @@
     "envd": "envd"
   },
   "actions": {
+    "terminal": "打开终端",
     "resume": "恢复",
     "pause": "暂停",
     "kill": "终止"
+  },
+  "terminal": {
+    "title": "终端 · {{sandboxID}}",
+    "description": "所选沙箱的交互式终端",
+    "mainContainerOnly": "当前仅支持主容器",
+    "empty": "当前没有打开的终端标签。",
+    "unavailableLoading": "正在检查终端可用性。",
+    "unavailableState": "沙箱处于 {{state}} 状态时无法使用终端。",
+    "unavailableEnvd": "终端要求沙箱正在运行，且模板已启用 envd。",
+    "closeBeforePause": "暂停沙箱前请先关闭全部终端标签。",
+    "status": {
+      "connecting": "正在连接…",
+      "connected": "已连接",
+      "closed": "终端已关闭",
+      "connectionLost": "终端连接已断开；重新连接将创建新的 shell。",
+      "connectionLostReason": "终端连接已断开：{{reason}}；重新连接将创建新的 shell。",
+      "error": "终端错误",
+      "protocolError": "终端协议响应无效",
+      "exited": "进程已退出，退出码 {{code}}",
+      "sessionLimit": "同一窗口中的沙箱终端标签最多为 5 个。",
+      "clipboardError": "浏览器拒绝了剪贴板访问。",
+      "newShell": "正在启动新的 shell…"
+    },
+    "tabs": {
+      "list": "终端会话",
+      "label": "Shell {{index}}",
+      "new": "新建终端会话",
+      "close": "关闭 {{label}}"
+    },
+    "actions": {
+      "copy": "复制",
+      "paste": "粘贴",
+      "reconnect": "重新连接",
+      "close": "关闭终端"
+    }
   },
   "errors": {
     "unknown": "未知错误",

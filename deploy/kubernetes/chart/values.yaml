@@ -338,6 +338,9 @@ cubeOps:
   bind: "0.0.0.0:3010"
   # Empty uses cubeProxy.domain for CUBE_API_SANDBOX_DOMAIN.
   sandboxDomain: ""
+  # Empty routes terminal envd traffic through the chart-managed CubeProxy
+  # Service. Override only when CubeProxy is external.
+  sandboxProxyURL: ""
   service:
     type: ClusterIP
     port: 3010

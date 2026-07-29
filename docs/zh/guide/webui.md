@@ -79,6 +79,27 @@ Dashboard 是一个静态前端，由 **控制节点** 上的 nginx 容器托管
 开启鉴权的人会生成它。完整流程见 [鉴权](./authentication.md)。
 :::
 
+### 3.4 打开浏览器终端
+
+沙箱详情页始终显示 **打开终端**。只有沙箱正在运行且带有模板构建阶段采集的 envd 能力元数据时才可点击；禁用状态会明确提示需要先恢复沙箱，还是需要用 envd 重新构建旧模板。
+
+打开弹窗时会自动创建第一个 `/bin/sh`。点击 **+** 可为同一沙箱创建最多 5 个独立标签；每个标签分别拥有 xterm、WebSocket、envd PTY 和 shell 进程，关闭单个标签不会影响其他标签。终端保留 ANSI 颜色、光标控制、自动 resize 和 5000 行回溯。
+
+- **复制**用于复制当前选区，**粘贴**用于向当前 shell 发送剪贴板文本；也可使用 `Ctrl/Cmd+Shift+C` 和 `Ctrl/Cmd+Shift+V`。
+- 异常断线后标签会保留并显示具体原因。点击 **重新连接**会申请新的 grant 并创建新的 shell，不会恢复原 PTY 的屏幕、工作目录或 shell 状态。
+- 生产默认终端 I/O 空闲超时为 30 分钟，单次会话最长 8 小时，WebSocket ping 周期为 30 秒。这些值是 CubeOps 内部运行参数，不属于公共 API 配置。
+- 第一阶段只进入主沙箱容器。在 envd 支持按容器启动 PTY 之前不会显示容器选择，也不会伪装成已经进入其他容器。
+
+终端属于 CubeOps 的运维能力。当前任何能够登录 CubeOps 的用户都可申请终端，项目暂不具备资源级 ACL。浏览器先通过已认证请求向 CubeOps 申请一个有效期一分钟、绑定沙箱的 JWT grant；grant 放在 WebSocket 子协议头而不是 URL 中，升级连接时 CubeOps 会再次校验沙箱状态。随后 CubeOps 经 CubeProxy 直接转发二进制终端流量到现有 envd PTY 数据面。整条链路不新增 CubeAPI 接口，也不新增 CubeMaster/Cubelet Terminal RPC。
+
+生产环境应使用 HTTPS。页面在 HTTPS 下会自动使用 `wss://`；WebUI/CubeOps 前的所有反向代理都必须保留 WebSocket Upgrade 请求头，并允许连接时长超过终端最大会话时长。CubeOps 多副本必须共享持久化的 JWT 密钥，因此申请 grant 和建立 WebSocket 可以落在不同副本上。
+
+CubeOps 会输出结构化的 `terminal.grant`、`terminal.started`、`terminal.ended` 和 `terminal.failed` 审计事件，其中包含会话 ID、操作者、沙箱、实际主容器、远端地址、时间、持续时长和关闭原因，但不会记录终端输入或输出。
+
+::: warning 生命周期操作
+打开的 envd PTY 属于活跃 exec 进程。执行暂停、快照、回滚、删除或进入自动暂停边界前，请先关闭全部终端标签，否则这些操作可能等待 exec 进程结束。
+:::
+
 ## 4. 键盘快捷键
 
 Dashboard 对键盘很友好。最常用的三个：

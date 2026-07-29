@@ -119,3 +119,61 @@ func TestS1_DifferentSecretsRejected(t *testing.T) {
 		t.Fatal("VerifyAccessToken accepted a token signed by a different secret (S1)")
 	}
 }
+
+func TestTerminalGrantCanBeVerifiedByAnotherReplica(t *testing.T) {
+	const secret = "shared-secret-32-bytes-long-enough"
+	issuer := auth.NewJWTManager(secret, 15*time.Minute, 168*time.Hour)
+	verifier := auth.NewJWTManager(secret, 15*time.Minute, 168*time.Hour)
+
+	grant, issued, err := issuer.GenerateTerminalGrant("operator", "sandbox-1", time.Minute)
+	if err != nil {
+		t.Fatalf("GenerateTerminalGrant: %v", err)
+	}
+	verified, err := verifier.VerifyTerminalGrant(grant)
+	if err != nil {
+		t.Fatalf("VerifyTerminalGrant on another replica: %v", err)
+	}
+	if verified.ID != issued.ID || verified.SandboxID != "sandbox-1" || verified.Subject != "operator" {
+		t.Fatalf("unexpected claims: %#v", verified)
+	}
+}
+
+func TestTerminalGrantIsIsolatedFromAccessTokens(t *testing.T) {
+	jm := newTestJWTManager()
+	grant, _, err := jm.GenerateTerminalGrant("admin", "sandbox-1", time.Minute)
+	if err != nil {
+		t.Fatalf("GenerateTerminalGrant: %v", err)
+	}
+	if _, err := jm.VerifyAccessToken(grant); err == nil {
+		t.Fatal("VerifyAccessToken accepted a terminal grant")
+	}
+	access, err := jm.GenerateAccessToken("admin")
+	if err != nil {
+		t.Fatalf("GenerateAccessToken: %v", err)
+	}
+	if _, err := jm.VerifyTerminalGrant(access); err == nil {
+		t.Fatal("VerifyTerminalGrant accepted an access token")
+	}
+	refresh, _, err := jm.GenerateRefreshToken("admin")
+	if err != nil {
+		t.Fatalf("GenerateRefreshToken: %v", err)
+	}
+	if _, err := jm.VerifyTerminalGrant(refresh); err == nil {
+		t.Fatal("VerifyTerminalGrant accepted a refresh token")
+	}
+	if _, err := jm.VerifyRefreshToken(grant); err == nil {
+		t.Fatal("VerifyRefreshToken accepted a terminal grant")
+	}
+}
+
+func TestExpiredTerminalGrantIsRejected(t *testing.T) {
+	jm := newTestJWTManager()
+	grant, _, err := jm.GenerateTerminalGrant("admin", "sandbox-1", time.Nanosecond)
+	if err != nil {
+		t.Fatalf("GenerateTerminalGrant: %v", err)
+	}
+	time.Sleep(time.Millisecond)
+	if _, err := jm.VerifyTerminalGrant(grant); err == nil {
+		t.Fatal("VerifyTerminalGrant accepted an expired grant")
+	}
+}

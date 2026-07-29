@@ -17,6 +17,7 @@ WORKDIR /build/CubeOps
 COPY CubeOps/go.mod CubeOps/go.sum ./
 COPY CubeDB /build/CubeDB
 COPY cubelog /build/cubelog
+COPY sdk/go /build/sdk/go
 RUN go mod download
 
 COPY CubeOps/ .

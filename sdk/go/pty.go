@@ -36,6 +36,10 @@ type PtySize struct {
 
 // PtyCreateOptions configures Pty.Create.
 type PtyCreateOptions struct {
+	// Command and Args select the interactive program. Empty Command keeps the
+	// SDK-compatible default of "/bin/bash" with arguments "-i -l".
+	Command string
+	Args    []string
 	// User authenticates the envd process call (Basic auth). Empty defaults to
 	// "root" to match the Python/Node SDKs.
 	User string
@@ -70,9 +74,10 @@ func (s *Sandbox) Pty() *Pty {
 	return &Pty{sandbox: s}
 }
 
-// Create starts a new PTY running an interactive login bash shell ("/bin/bash
-// -i -l") sized to size. The returned PtyHandle streams raw terminal output
-// until the process exits or the caller disconnects.
+// Create starts a new PTY sized to size. It runs Command and Args when supplied,
+// otherwise it uses the SDK-compatible interactive login shell
+// ("/bin/bash -i -l"). The returned PtyHandle streams raw terminal output until
+// the process exits or the caller disconnects.
 func (p *Pty) Create(ctx context.Context, size PtySize, opts PtyCreateOptions) (*PtyHandle, error) {
 	if p == nil || p.sandbox == nil {
 		return nil, fmt.Errorf("pty is not attached to a sandbox")
@@ -95,10 +100,17 @@ func (p *Pty) Create(ctx context.Context, size PtySize, opts PtyCreateOptions) (
 		timeout = defaultPtyTimeout
 	}
 
+	command := strings.TrimSpace(opts.Command)
+	args := opts.Args
+	if command == "" {
+		command = "/bin/bash"
+		args = []string{"-i", "-l"}
+	}
+
 	payload := ptyStartRequest{
 		Process: ptyProcessConfig{
-			Cmd:  "/bin/bash",
-			Args: []string{"-i", "-l"},
+			Cmd:  command,
+			Args: append([]string(nil), args...),
 			Envs: envs,
 			Cwd:  opts.Cwd,
 		},
@@ -238,9 +250,11 @@ func (h *PtyHandle) closeBody() error {
 }
 
 // Wait blocks until the PTY exits and returns its exit code. onData, if
-// non-nil, is invoked with each output chunk as it arrives. It returns an error
-// if the stream ended without an end event or if envd reported a PTY error
-// (e.g. the process was killed).
+// non-nil, is invoked with each output chunk as it arrives. Do not consume
+// Output concurrently with Wait; calling Wait after Output has closed is safe
+// and is useful for retrieving the final stream error. It returns an error if
+// the stream ended without an end event or if envd reported a PTY error (e.g.
+// the process was killed).
 func (h *PtyHandle) Wait(onData func([]byte)) (int, error) {
 	for chunk := range h.output {
 		if onData != nil {

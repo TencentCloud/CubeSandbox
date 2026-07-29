@@ -85,6 +85,60 @@ The Dashboard uses **JWT-based authentication** (since v0.6.0, replacing the old
 - Login is rate-limited: 5 failed attempts per minute per IP.
 :::
 
+### 3.4 Open a browser terminal
+
+The sandbox detail page always shows **Open Terminal**. It is enabled only when
+the sandbox is running and carries the envd capability metadata collected while
+its template was built. A disabled action explains whether the sandbox must be
+resumed or its legacy template must be rebuilt with envd.
+
+Opening the dialog creates the first `/bin/sh` automatically. Use **+** to open
+up to five independent tabs for the same sandbox. Every tab owns a separate
+xterm instance, WebSocket, envd PTY, and shell process; closing one tab does not
+affect the others. ANSI colors, cursor control, resize events, and 5,000 lines
+of scrollback are preserved.
+
+- **Copy** copies the current terminal selection. **Paste** sends clipboard
+  text to the active shell. `Ctrl/Cmd+Shift+C` and `Ctrl/Cmd+Shift+V` provide
+  the same operations.
+- An abnormal disconnect leaves the tab open with the reported reason.
+  **Reconnect** requests a fresh grant and starts a new shell; it does not
+  restore the previous PTY, screen, working directory, or shell state.
+- The production defaults are a 30-minute terminal I/O idle timeout, an
+  eight-hour maximum session duration, and a 30-second WebSocket ping period.
+  These values are internal CubeOps runtime parameters rather than public API
+  settings.
+- The first delivery intentionally opens only the primary sandbox container.
+  Container selection will remain unavailable until envd supports a
+  container-scoped PTY start request; the UI never pretends that another
+  container was selected.
+
+The terminal is an operational CubeOps capability. Any user who can log in to
+the current CubeOps deployment can request a terminal; CubeSandbox does not
+currently have resource-level ACLs. The authenticated browser first requests a
+one-minute, sandbox-bound JWT grant from CubeOps. The grant is carried in the
+WebSocket subprotocol header rather than the URL, and CubeOps validates the
+sandbox again during the upgrade. CubeOps then relays binary terminal traffic
+through CubeProxy to the existing envd PTY data plane. This path does not add a
+CubeAPI endpoint or a CubeMaster/Cubelet terminal RPC.
+
+Use HTTPS for production access. The browser automatically selects `wss://`
+under HTTPS, and every reverse proxy in front of WebUI/CubeOps must preserve
+WebSocket Upgrade headers and allow connections for longer than the configured
+maximum session duration. CubeOps replicas must share the persisted JWT secret,
+so the grant request and WebSocket upgrade may land on different replicas.
+
+CubeOps emits structured `terminal.grant`, `terminal.started`,
+`terminal.ended`, and `terminal.failed` audit events. They contain the session
+ID, operator, sandbox, actual primary container, remote address, timestamp,
+duration, and close reason, but never terminal input or output.
+
+::: warning Lifecycle operations
+An open envd PTY is an active exec process. Close all terminal tabs before
+pause, snapshot, rollback, deletion, or an auto-pause boundary; otherwise those
+operations may wait for the exec process to end.
+:::
+
 ## 4. Keyboard shortcuts
 
 The Dashboard is keyboard-friendly. The big three:

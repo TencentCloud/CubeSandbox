@@ -19,11 +19,13 @@ import (
 // VerifyAccessToken and accepted, turning it into a long-lived access
 // token.
 const (
-	tokenTypeAccess  = "access"
-	tokenTypeRefresh = "refresh"
+	tokenTypeAccess   = "access"
+	tokenTypeRefresh  = "refresh"
+	tokenTypeTerminal = "terminal"
 
-	audAccess  = "cubeops:access"  // audience for access tokens
-	audRefresh = "cubeops:refresh" // audience for refresh tokens
+	audAccess   = "cubeops:access"  // audience for access tokens
+	audRefresh  = "cubeops:refresh" // audience for refresh tokens
+	audTerminal = "cubeops:terminal"
 )
 
 // AccessClaims is the JWT claims for short-lived access tokens.
@@ -41,6 +43,14 @@ type RefreshClaims struct {
 	Username string `json:"username"`
 	TokenID  string `json:"tid"`
 	Typ      string `json:"typ"` // token type, always "refresh"
+}
+
+// TerminalClaims authorizes a narrowly scoped, short-lived WebSocket session.
+// The grant is stateless so any CubeOps replica sharing JWTSecret can verify it.
+type TerminalClaims struct {
+	jwt.RegisteredClaims
+	SandboxID string `json:"sandboxID"`
+	Typ       string `json:"typ"`
 }
 
 // JWTManager handles JWT signing and verification.
@@ -107,6 +117,34 @@ func (m *JWTManager) GenerateRefreshToken(username string) (string, string, erro
 	return signed, tokenID, nil
 }
 
+// GenerateTerminalGrant creates a narrowly scoped, short-lived terminal grant.
+// It is transported in the WebSocket subprotocol header rather than a URL so
+// reverse-proxy access logs do not capture credentials.
+func (m *JWTManager) GenerateTerminalGrant(username, sandboxID string, ttl time.Duration) (string, *TerminalClaims, error) {
+	if ttl <= 0 {
+		return "", nil, errors.New("terminal grant TTL must be positive")
+	}
+	now := time.Now()
+	claims := &TerminalClaims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        uuid.New().String(),
+			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now.Add(-5 * time.Second)),
+			Subject:   username,
+			Audience:  jwt.ClaimStrings{audTerminal},
+		},
+		SandboxID: sandboxID,
+		Typ:       tokenTypeTerminal,
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString(m.secret)
+	if err != nil {
+		return "", nil, err
+	}
+	return signed, claims, nil
+}
+
 // VerifyAccessToken parses and validates an access token. It rejects refresh
 // tokens by checking the "typ" claim and the audience, so a long-lived
 // refresh token cannot be used as an access token.
@@ -153,4 +191,29 @@ func (m *JWTManager) VerifyRefreshToken(tokenStr string) (*service.RefreshClaims
 		return nil, errors.New("not a refresh token")
 	}
 	return &service.RefreshClaims{Username: claims.Username, TokenID: claims.TokenID}, nil
+}
+
+// VerifyTerminalGrant validates a terminal-only JWT. Access and refresh
+// tokens are rejected by both audience and token type.
+func (m *JWTManager) VerifyTerminalGrant(tokenStr string) (*TerminalClaims, error) {
+	token, err := jwt.ParseWithClaims(tokenStr, &TerminalClaims{}, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+		}
+		return m.secret, nil
+	}, jwt.WithValidMethods([]string{"HS256"}), jwt.WithAudience(audTerminal))
+	if err != nil {
+		return nil, err
+	}
+	claims, ok := token.Claims.(*TerminalClaims)
+	if !ok || !token.Valid {
+		return nil, errors.New("invalid terminal grant")
+	}
+	if claims.Typ != tokenTypeTerminal ||
+		claims.SandboxID == "" ||
+		claims.Subject == "" ||
+		claims.ID == "" {
+		return nil, errors.New("invalid terminal grant claims")
+	}
+	return claims, nil
 }

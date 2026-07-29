@@ -11,3 +11,6 @@
 !CubeDB/**
 !cubelog
 !cubelog/**
+!sdk
+!sdk/go
+!sdk/go/**

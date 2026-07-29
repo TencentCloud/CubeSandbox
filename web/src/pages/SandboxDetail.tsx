@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Tencent. All rights reserved.
 
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useParams, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -12,10 +12,14 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 
 import { Skeleton } from '@/components/ui/skeleton';
-import { ArrowLeft, Pause, Play, Trash2, RefreshCw } from 'lucide-react';
+import { ArrowLeft, Pause, Play, Trash2, RefreshCw, TerminalSquare } from 'lucide-react';
 import { cn, formatBytes, formatRelative } from '@/lib/utils';
 import { formatSandboxActionError } from '@/lib/sandboxActionError';
 import { SandboxActionErrorBanner } from '@/components/SandboxActionErrorBanner';
+
+const TerminalDialog = lazy(() =>
+  import('@/components/TerminalDialog').then((module) => ({ default: module.TerminalDialog })),
+);
 
 // ── Log level colors ────────────────────────────────────────────────────────
 const LEVEL_CLASS: Record<string, string> = {
@@ -77,6 +81,8 @@ export default function SandboxDetailPage() {
   }, [logs.data]);
 
   const [actionError, setActionError] = useState<string | null>(null);
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  const [terminalSessionActive, setTerminalSessionActive] = useState(false);
   const onLifecycleError = (err: unknown) => {
     setActionError(formatSandboxActionError(err, t));
   };
@@ -111,6 +117,15 @@ export default function SandboxDetailPage() {
   });
 
   const state = data?.state ?? (isLoading ? 'loading' : 'unknown');
+  const terminalUnavailableReason =
+    isLoading || !data
+      ? t('terminal.unavailableLoading')
+      : state !== 'running'
+        ? t('terminal.unavailableState', { state })
+        : !data.envdVersion?.trim()
+          ? t('terminal.unavailableEnvd')
+          : '';
+  const terminalDisabled = Boolean(terminalUnavailableReason);
   const tone =
     state === 'paused' || state === 'pausing' ? 'warn' : state === 'running' ? 'ok' : 'mute';
   const entries = logs.data?.logs ?? [];
@@ -217,23 +232,55 @@ export default function SandboxDetailPage() {
             {data?.templateID ?? '—'} · {t('started', { time: formatRelative(data?.startedAt) })}
           </p>
         </div>
-        {data ? (
-          <div className="flex gap-2">
-            {state === 'paused' ? (
-              <Button variant="outline" onClick={() => resume.mutate()} disabled={resume.isPending}>
-                <Play size={14} /> {t('actions.resume')}
+        <div className="flex gap-2">
+          <Button
+            variant="outline"
+            onClick={() => setTerminalOpen(true)}
+            disabled={terminalDisabled}
+            title={terminalUnavailableReason || t('actions.terminal')}
+          >
+            <TerminalSquare size={14} /> {t('actions.terminal')}
+          </Button>
+          {data ? (
+            <>
+              {state === 'paused' ? (
+                <Button
+                  variant="outline"
+                  onClick={() => resume.mutate()}
+                  disabled={resume.isPending}
+                >
+                  <Play size={14} /> {t('actions.resume')}
+                </Button>
+              ) : (
+                <Button
+                  variant="outline"
+                  onClick={() => pause.mutate()}
+                  disabled={pause.isPending || terminalSessionActive}
+                  title={
+                    terminalSessionActive ? t('terminal.closeBeforePause') : t('actions.pause')
+                  }
+                >
+                  <Pause size={14} /> {t('actions.pause')}
+                </Button>
+              )}
+              <Button variant="destructive" onClick={() => kill.mutate()} disabled={kill.isPending}>
+                <Trash2 size={14} /> {t('actions.kill')}
               </Button>
-            ) : (
-              <Button variant="outline" onClick={() => pause.mutate()} disabled={pause.isPending}>
-                <Pause size={14} /> {t('actions.pause')}
-              </Button>
-            )}
-            <Button variant="destructive" onClick={() => kill.mutate()} disabled={kill.isPending}>
-              <Trash2 size={14} /> {t('actions.kill')}
-            </Button>
-          </div>
-        ) : null}
+            </>
+          ) : null}
+        </div>
       </div>
+
+      {terminalOpen ? (
+        <Suspense fallback={null}>
+          <TerminalDialog
+            open={terminalOpen}
+            onOpenChange={setTerminalOpen}
+            onSessionActiveChange={setTerminalSessionActive}
+            sandboxID={sandboxID}
+          />
+        </Suspense>
+      ) : null}
 
       <SandboxActionErrorBanner message={actionError} onDismiss={() => setActionError(null)} />
       {detail.isError && data ? (

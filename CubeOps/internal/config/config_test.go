@@ -24,6 +24,7 @@ database_url: "mysql://root:pass@127.0.0.1:3306/testdb"
 jwt_secret: "yaml-secret"
 access_ttl: "30m"
 refresh_ttl: "336h"
+sandbox_proxy_url: "http://proxy.internal:8080"
 `)
 	if err := os.WriteFile(yamlPath, yamlContent, 0o644); err != nil {
 		t.Fatalf("write yaml: %v", err)
@@ -48,6 +49,9 @@ refresh_ttl: "336h"
 	}
 	if cfg.JWTSecret != "yaml-secret" {
 		t.Errorf("JWTSecret = %q, want yaml-secret", cfg.JWTSecret)
+	}
+	if cfg.SandboxProxyURL != "http://proxy.internal:8080" {
+		t.Errorf("SandboxProxyURL = %q, want http://proxy.internal:8080", cfg.SandboxProxyURL)
 	}
 }
 
@@ -89,6 +93,9 @@ func TestLoad_NoYAML_UsesEnvAndDefaults(t *testing.T) {
 	}
 	if cfg.Bind != "127.0.0.1:3010" {
 		t.Errorf("Bind = %q, want default 127.0.0.1:3010", cfg.Bind)
+	}
+	if cfg.SandboxProxyURL != "http://127.0.0.1:80" {
+		t.Errorf("SandboxProxyURL = %q, want http://127.0.0.1:80", cfg.SandboxProxyURL)
 	}
 }
 

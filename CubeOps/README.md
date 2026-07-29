@@ -132,6 +132,7 @@ individual fields without editing the YAML file.
 | `DATABASE_URL` | *(required)* | MySQL connection URL. If unset, built from `CUBE_SANDBOX_MYSQL_{HOST,PORT,USER,PASSWORD,DB}` env vars. |
 | `CUBE_MASTER_ADDR` | `http://127.0.0.1:8089` | CubeMaster base URL |
 | `CUBE_API_SANDBOX_DOMAIN` | `cube.app` | Sandbox domain (used by SDK handler for sandbox URL construction) |
+| `CUBE_OPS_SANDBOX_PROXY_URL` | `http://127.0.0.1:80` | Internal CubeProxy URL used by the web terminal to reach envd. |
 | `REDIS_URL` | *(optional)* | Redis for JWT blacklist |
 
 **Resolution order**: environment variables > YAML file > built-in defaults.
@@ -158,6 +159,22 @@ RBAC is reserved for future use — currently any valid JWT grants full access.
 
 ### Cluster
 - `GET /api/v1/cluster/overview` — Cluster capacity overview
+
+### Web terminal
+
+- `POST /api/v1/terminal/sandboxes/:id/sessions` — issue a short-lived, target-bound terminal grant (access JWT required)
+- `GET /api/v1/terminal/sandboxes/:id/ws` — WebSocket relay to the existing envd PTY data plane
+
+Terminal grants are valid for one minute and signed with CubeOps' shared,
+database-persisted JWT secret. CubeOps validates the running, envd-enabled
+sandbox both before issuing the grant and when the same-origin WebSocket
+connects, then opens `/bin/sh` in the primary container through CubeProxy and
+the existing envd PTY data plane. Each browser tab gets a separate grant, PTY,
+and shell. Sessions close after 30 minutes without terminal I/O or eight hours
+total; CubeOps sends WebSocket pings every 30 seconds. Audit events record
+grant, start, end, and failure metadata without recording terminal contents.
+No CubeAPI handler or new CubeMaster/Cubelet RPC is required.
+
 - `GET /api/v1/cluster/versions` — Component version matrix
 - `GET /api/v1/nodes` — Node list
 - `GET /api/v1/nodes/{nodeID}` — Node detail

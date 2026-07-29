@@ -22,6 +22,24 @@ import (
 
 const testSandboxID = "sb-test-001"
 
+func TestAttachBuildsDataPlaneHandleWithoutControlRequest(t *testing.T) {
+	client := NewClient(Config{SandboxDomain: "sandbox.test"})
+
+	sandbox, err := client.Attach("  sb-existing  ")
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	if sandbox.SandboxID != "sb-existing" {
+		t.Fatalf("SandboxID=%q, want sb-existing", sandbox.SandboxID)
+	}
+	if got := sandbox.GetHost(EnvdPort); got != "49983-sb-existing.sandbox.test" {
+		t.Fatalf("GetHost=%q", got)
+	}
+	if _, err := client.Attach("  "); err == nil {
+		t.Fatal("Attach accepted an empty sandbox ID")
+	}
+}
+
 func TestNewConfigFromEnv(t *testing.T) {
 	clearEnv(t)
 

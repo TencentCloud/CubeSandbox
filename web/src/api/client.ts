@@ -21,6 +21,12 @@ export interface RunningSandbox extends ListedSandboxDto {}
 
 export interface SandboxDetail extends SandboxDetailDto {}
 
+export interface TerminalSessionResponse {
+  grant: string;
+  protocol: string;
+  websocketURL: string;
+}
+
 export interface TemplateSummary {
   templateID: string;
   instanceType?: string | null;
@@ -219,6 +225,10 @@ export const sandboxApi = {
     }),
   logs: (id: string, params?: { cursor?: number; limit?: number; direction?: string }) =>
     api<SandboxLogsDto>(`/v2/sandboxes/${id}/logs`, { params }),
+  createTerminalSession: (id: string) =>
+    ops<TerminalSessionResponse>(`/terminal/sandboxes/${encodeURIComponent(id)}/sessions`, {
+      method: 'POST',
+    }),
   create: (body: { templateID: string; timeout?: number; metadata?: Record<string, string> }) =>
     api<SandboxSessionDto>('/sandboxes', {
       method: 'POST',
