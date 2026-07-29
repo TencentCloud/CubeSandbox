@@ -122,6 +122,12 @@ help:
 	@printf "  cubeops-test  Run CubeOps unit tests in Docker\n"
 	@printf "  shim-test     Run CubeShim unit tests in Docker\n"
 	@printf "  network-agent-test Run network-agent unit tests in Docker\n"
+	@printf "  cubelog-test  Run cubelog unit tests on the host\n"
+	@printf "  cubedb-test   Run CubeDB unit tests on the host\n"
+	@printf "  cube-lifecycle-manager-test Run cube-lifecycle-manager unit tests in Docker\n"
+	@printf "  cubelet-pkg-test Run Cubelet ./pkg/... unit tests in Docker (no coverage)\n"
+	@printf "  agent-test    Run cube-agent unit tests in Docker\n"
+	@printf "  hypervisor-test Run hypervisor --lib --bins unit tests in Docker\n"
 	@printf "  guest-kernel  Build guest kernel vmlinux/Image (KERNEL_SRC=...; native or cross x86_64<->aarch64)\n"
 	@printf "  all           Build cubemaster, cubelet, network-agent and cubevsmapdump in Docker\n"
 	@printf "  manual-release Build binaries and package manual update tarball\n"
@@ -312,6 +318,41 @@ cube-api-test: builder-image
 .PHONY: shim-test
 shim-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeShim && make test'
+
+# cubelog/cubedb run on the host: both are pure Go with no CGO and no
+# builder-only deps, so the host toolchain is sufficient and skipping the
+# container is faster.
+.PHONY: cubelog-test
+cubelog-test:
+	cd cubelog && go test -short ./...
+
+.PHONY: cubedb-test
+cubedb-test:
+	cd CubeDB && go mod download && go test ./...
+
+.PHONY: cube-lifecycle-manager-test
+cube-lifecycle-manager-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/cube-lifecycle-manager && go mod download && go test ./...'
+
+# cubelet-pkg-test bypasses cubelet-test: that target runs `go test
+# -coverprofile`, and the builder's Go toolchain lacks the `covdata` tool, so
+# any coverage build fails. Run only ./pkg/... with -short (skips the
+# Redis/KVM-dependent cases), which is self-contained in the builder.
+.PHONY: cubelet-pkg-test
+cubelet-pkg-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && make proto && go test -short ./pkg/...'
+
+.PHONY: agent-test
+agent-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/agent && make test'
+
+# Only unit tests (--lib --bins) run here; the tests/integration.rs target
+# needs a full VM. This does not pass /dev/kvm into the builder, so the
+# runtime-KVM vmm tests are not reached (see tests/unittest/run.sh
+# hypervisor-kvm for those).
+.PHONY: hypervisor-test
+hypervisor-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/hypervisor && cargo test --features kvm --lib --bins'
 
 .PHONY: shim
 shim: builder-image
