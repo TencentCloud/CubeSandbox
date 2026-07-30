@@ -31,8 +31,12 @@ with Sandbox.create(
     result = sandbox.commands.run(command)
     print(result.stdout.strip())
 
-    # Prefer allowlisted `cat` over files.read: some proxy paths mishandle
-    # Content-Encoding on the files API (see e2b-dev-sidecar notes).
+    # Asymmetric I/O on purpose:
+    # - Write via files.write: default allowlist has no dedicated write tool;
+    #   `echo … > file` works but is a documented residual (arbitrary write),
+    #   so this demo uses the SDK files API for the write half.
+    # - Read via allowlisted `cat`: some proxy paths mishandle Content-Encoding
+    #   on files.read (see e2b-dev-sidecar notes).
     sandbox.files.write("/tmp/tool_out.txt", "artifact-ok\n")
     read_cmd = "cat /tmp/tool_out.txt"
     assert_allowlisted(read_cmd)

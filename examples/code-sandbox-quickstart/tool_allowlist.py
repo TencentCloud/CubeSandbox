@@ -69,8 +69,10 @@ def _has_shell_meta(command: str) -> bool:
 
 
 def _split_argv(command: str) -> list[str] | None:
+    # Force POSIX splitting: this gate models Linux MicroVM argv0 checks even
+    # if the controlling host Python happens to run on Windows.
     try:
-        return shlex.split(command)
+        return shlex.split(command, posix=True)
     except ValueError:
         return None
 
@@ -105,7 +107,7 @@ def is_allowlisted(
     if not parts:
         return False
     binary = parts[0]
-    # Path-style first tokens rejected. shlex is POSIX-mode on this Linux demo.
+    # Path-style first tokens rejected (POSIX argv0 model for Linux guests).
     if "/" in binary or "\\" in binary:
         return False
     allowed = _resolve_allowed(

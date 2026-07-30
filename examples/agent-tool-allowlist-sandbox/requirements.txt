@@ -1,0 +1,2 @@
+e2b-code-interpreter>=2.4.1
+python-dotenv

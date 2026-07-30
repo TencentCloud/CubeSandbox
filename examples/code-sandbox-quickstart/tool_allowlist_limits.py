@@ -65,7 +65,14 @@ print(
 )
 
 # Residual (intentional): redirects are not shell-chaining meta for this demo.
+# Security note: allowlisted `echo` + `>` is an *arbitrary guest file write*
+# vector (e.g. under /tmp or worse). This host gate does not stop that —
+# MicroVM isolation + least privilege on the allowlist must.
 if not is_allowlisted("echo artifact-ok > /tmp/x"):
     raise SystemExit("expected redirect form to remain allowlisted")
+print(
+    "[out_of_scope] echo … > file remains allowlisted — arbitrary guest "
+    "writes are a guest-isolation concern, not covered by argv gating"
+)
 
 print("LIMITS_DEMO_OK")

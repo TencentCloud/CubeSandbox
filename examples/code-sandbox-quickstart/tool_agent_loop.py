@@ -71,17 +71,15 @@ def run_gated(
         result = sandbox.commands.run(command)
         return result.stdout.strip(), int(result.exit_code)
     except Exception as exc:
-        # e2b may raise CommandExitException from a distinct import path;
-        # match by name + exit_code attribute so airgap probes can accept
-        # non-zero curl timeouts without depending on class identity.
-        if (
-            not allow_nonzero
-            or type(exc).__name__ != "CommandExitException"
-            or not hasattr(exc, "exit_code")
-        ):
+        # Duck-type on exit_code: e2b may raise CommandExitException from
+        # distinct import paths across SDK versions; avoid matching __name__.
+        if not allow_nonzero:
             raise
-        stdout = (getattr(exc, "stdout", None) or "").strip()
-        return stdout, int(exc.exit_code)
+        if hasattr(exc, "exit_code"):
+            stdout = (getattr(exc, "stdout", None) or "").strip()
+            return stdout, int(exc.exit_code)
+        raise
+
 
 
 # Pretend LLM proposals. Order is the story.
