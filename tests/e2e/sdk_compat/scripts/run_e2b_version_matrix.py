@@ -35,6 +35,7 @@ DEFAULT_VERSIONS_FILE = SUITE_ROOT / "e2b-versions.txt"
 DEFAULT_REPORT_DIR = SUITE_ROOT / "reports" / "e2b-matrix"
 DEFAULT_WORKDIR = SUITE_ROOT / ".venv-matrix"
 DEFAULT_MARKERS = "smoke or p0"
+READY_SENTINEL = ".venv-ready"
 REQUIRED_ENV = ("CUBE_API_URL", "CUBE_TEMPLATE_ID", "E2B_API_KEY")
 TRACKED_PACKAGES = ("e2b", "e2b-code-interpreter")
 
@@ -48,6 +49,7 @@ class RowResult:
     failed: int = 0
     skipped: int = 0
     duration_s: float = 0.0
+    setup_s: float = 0.0
     markers: str = ""
     failed_cases: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
@@ -106,8 +108,16 @@ def venv_python(venv_dir: Path) -> Path:
 
 
 def ensure_venv(venv_dir: Path, base_python: str, recreate: bool) -> Path:
+    """Return the interpreter of a usable venv, rebuilding it when in doubt.
+
+    A venv whose pip install was interrupted still has a working interpreter, so
+    the interpreter alone is not evidence that the packages are complete. The
+    READY_SENTINEL is written only after every install for that row succeeded;
+    when it is missing the directory is rebuilt rather than silently reused.
+    """
     python = venv_python(venv_dir)
-    if recreate and venv_dir.exists():
+    ready = venv_dir / READY_SENTINEL
+    if venv_dir.exists() and (recreate or not ready.exists()):
         shutil.rmtree(venv_dir)
     if not python.exists():
         venv_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -173,18 +183,20 @@ def run_row(spec: str, args: argparse.Namespace) -> RowResult:
         junit_path.unlink()
 
     print(f"\n=== {spec} ===", flush=True)
-    started = time.monotonic()
+    setup_started = time.monotonic()
     try:
         python = ensure_venv(venv_dir, args.python, args.recreate)
         pip_install(python, ["-r", str(SUITE_ROOT / "requirements.txt")])
         pip_install(python, spec.split())
+        (venv_dir / READY_SENTINEL).touch()
         row.installed = installed_versions(python)
     except subprocess.CalledProcessError as exc:
         row.status = "install-failed"
         row.detail = f"{exc.cmd} exited {exc.returncode}"
-        row.duration_s = round(time.monotonic() - started, 1)
+        row.setup_s = round(time.monotonic() - setup_started, 1)
         print(f"install failed: {row.detail}", file=sys.stderr, flush=True)
         return row
+    row.setup_s = round(time.monotonic() - setup_started, 1)
 
     markers = args.markers
     if "e2b-code-interpreter" not in row.installed:
@@ -192,8 +204,10 @@ def run_row(spec: str, args: argparse.Namespace) -> RowResult:
         row.notes.append("run_code deselected: e2b-code-interpreter not installed by this row")
     row.markers = markers
 
+    # The backend comes from --sdk-e2e-backends below; SdkE2EConfig.from_env
+    # only falls back to SDK_E2E_BACKENDS when the CLI option is absent, so
+    # setting it here would be dead ambient state inherited by subprocesses.
     env = dict(os.environ)
-    env["SDK_E2E_BACKENDS"] = "e2b"
     env["SDK_E2E_REPORT_DIR"] = str(row_report_dir / "events")
     command = [
         str(python),
@@ -207,8 +221,9 @@ def run_row(spec: str, args: argparse.Namespace) -> RowResult:
         *args.pytest_arg,
     ]
     print(f"$ {' '.join(command)}", flush=True)
+    test_started = time.monotonic()
     proc = subprocess.run(command, cwd=str(SUITE_ROOT), env=env)
-    row.duration_s = round(time.monotonic() - started, 1)
+    row.duration_s = round(time.monotonic() - test_started, 1)
 
     if not junit_path.exists():
         row.status = "error"
@@ -244,13 +259,13 @@ def render_markdown(rows: list[RowResult], args: argparse.Namespace, generated_a
         f"- Selection: `-m \"{args.markers}\"`",
         "- Backend: `e2b`",
         "",
-        "| Requirement | e2b | e2b-code-interpreter | Result | Passed | Failed | Skipped | Duration | Notes |",
-        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- |",
+        "| Requirement | e2b | e2b-code-interpreter | Result | Passed | Failed | Skipped | Tests | Setup | Notes |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for row in rows:
         notes = "; ".join([*row.notes, row.detail] if row.detail else row.notes) or "—"
         lines.append(
-            "| `{spec}` | {e2b} | {ci} | {status} | {passed} | {failed} | {skipped} | {duration}s | {notes} |".format(
+            "| `{spec}` | {e2b} | {ci} | {status} | {passed} | {failed} | {skipped} | {duration}s | {setup}s | {notes} |".format(
                 spec=row.spec,
                 e2b=row.installed.get("e2b", "—"),
                 ci=row.installed.get("e2b-code-interpreter", "—"),
@@ -259,9 +274,11 @@ def render_markdown(rows: list[RowResult], args: argparse.Namespace, generated_a
                 failed=row.failed,
                 skipped=row.skipped,
                 duration=row.duration_s,
+                setup=row.setup_s,
                 notes=notes,
             )
         )
+    lines += ["", "`Tests` is the pytest run only; `Setup` is venv creation plus pip install, which is network-bound and not comparable across runs."]
 
     failing = [row for row in rows if row.failed_cases]
     if failing:
