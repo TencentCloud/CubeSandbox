@@ -30,6 +30,11 @@ cubemastercli tpl create-from-image \
   --probe-path /health
 ```
 
+`--probe 49983 --probe-path /health` 指向基础镜像自带的 **envd**（继承
+entrypoint）；本 Dockerfile 只 `EXPOSE` 该端口，不另起健康检查服务。
+
+把 READY 模板 id 写入 `.env` 的 `CUBE_TEMPLATE_ID`。
+
 | 步骤 | 命令 | 期望 |
 |------|------|------|
 | 边界/单测/拒绝 | `tool_allowlist_limits.py` / unittest / `deny` | OK |

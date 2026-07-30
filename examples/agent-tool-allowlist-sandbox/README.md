@@ -48,6 +48,10 @@ cubemastercli tpl create-from-image \
   --probe-path /health
 ```
 
+`--probe 49983 --probe-path /health` targets **envd** from `cubesandbox-base`
+(inherited entrypoint); this Dockerfile only `EXPOSE`s that port and does not
+add its own health server.
+
 Put READY template id into `.env` as `CUBE_TEMPLATE_ID`.
 
 ### 2 — Run demos

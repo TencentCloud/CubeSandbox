@@ -4,6 +4,9 @@
 # Host demos allowlist "cube-tool" (and/or bare toolbox names); the wrapper
 # re-checks the real tool name inside the MicroVM.
 #
+# Inherited cube-entrypoint keeps envd on :49983 (/health). This Dockerfile
+# only EXPOSEs that port — it does not add a separate health server.
+#
 #   docker build -t agent-tool-allowlist-sandbox:latest .
 #
 # Base image already ships coreutils (echo/cat/…). Skip apt unless INSTALL_CURL=1.

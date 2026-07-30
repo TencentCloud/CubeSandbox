@@ -42,14 +42,14 @@ if ! grep -qxF -- "$tool" "$PROFILE"; then
   exit 1
 fi
 
-bin=$(command -v -- "$tool" 2>/dev/null || true)
+bin=$(command -v "$tool" 2>/dev/null || true)
 if [ -z "$bin" ]; then
   echo "cube-tool: tool not installed: ${tool}" >&2
   exit 127
 fi
 
 # Refuse path hijacks if command -v returned something unexpected.
-base=$(basename -- "$bin")
+base=$(basename "$bin")
 if [ "$base" != "$tool" ]; then
   echo "cube-tool: resolved binary basename mismatch: ${bin}" >&2
   exit 1
