@@ -108,6 +108,8 @@ def is_allowlisted(
         return False
     binary = parts[0]
     # Path-style first tokens rejected (POSIX argv0 model for Linux guests).
+    # ASCII `/` and `\` only — Unicode slash homoglyphs are out of scope for
+    # this demo gate (same class of residual as undocumented shell metas).
     if "/" in binary or "\\" in binary:
         return False
     allowed = _resolve_allowed(

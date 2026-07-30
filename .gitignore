@@ -55,12 +55,6 @@ docs/image-1.png
 docs/image.png
 docs/design/
 
-# Rhino Bird local planning / evidence (do not commit)
-.rhino/
-.tmp_*.py
-.tmp_*.sh
-.tmp_*.txt
-
 
 # Keep the SDK compatibility E2E suite tracked while ignoring other test
 # directories and its generated local pytest cache.

@@ -69,16 +69,15 @@ def run_gated(
     assert_allowlisted(command, allowed_binaries=allowed_binaries)
     try:
         result = sandbox.commands.run(command)
-        return result.stdout.strip(), int(result.exit_code)
     except Exception as exc:
-        # Duck-type on exit_code: e2b may raise CommandExitException from
-        # distinct import paths across SDK versions; avoid matching __name__.
-        if not allow_nonzero:
+        # Only absorb SDK *command* failures when explicitly allowed.
+        # Require exit_code so unrelated Exceptions still propagate.
+        # (KeyboardInterrupt/SystemExit are BaseException — not caught here.)
+        if not (allow_nonzero and hasattr(exc, "exit_code")):
             raise
-        if hasattr(exc, "exit_code"):
-            stdout = (getattr(exc, "stdout", None) or "").strip()
-            return stdout, int(exc.exit_code)
-        raise
+        stdout = (getattr(exc, "stdout", None) or "").strip()
+        return stdout, int(exc.exit_code)
+    return result.stdout.strip(), int(result.exit_code)
 
 
 

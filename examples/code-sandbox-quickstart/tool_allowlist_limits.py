@@ -56,7 +56,10 @@ print(
 # 5) Happy path still works
 expect_allowed("clean_echo", "echo agent-tool-allowlist-ok")
 
-# 6) Documentation-only: allowlisted tools are not confined by this gate
+# 6) Documented non-goal (regression lock): argv gate is NOT path confinement.
+# If a future change starts denying `cat /etc/passwd`, that belongs in a
+# *separate* guest/path policy layer — do not silently fold it into argv0
+# checks without updating the threat model + tests together.
 if not is_allowlisted("cat /etc/passwd"):
     raise SystemExit("expected cat /etc/passwd to pass argv gate (non-goal)")
 print(
