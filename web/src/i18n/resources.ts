@@ -8,6 +8,7 @@ import enCommand from '@/locales/en/command.json';
 import enOverview from '@/locales/en/overview.json';
 import enSandboxes from '@/locales/en/sandboxes.json';
 import enSandboxDetail from '@/locales/en/sandboxDetail.json';
+import enTerminal from '@/locales/en/terminal.json';
 import enTemplates from '@/locales/en/templates.json';
 import enTemplateDetail from '@/locales/en/templateDetail.json';
 import enNodes from '@/locales/en/nodes.json';
@@ -30,6 +31,7 @@ import zhCommand from '@/locales/zh/command.json';
 import zhOverview from '@/locales/zh/overview.json';
 import zhSandboxes from '@/locales/zh/sandboxes.json';
 import zhSandboxDetail from '@/locales/zh/sandboxDetail.json';
+import zhTerminal from '@/locales/zh/terminal.json';
 import zhTemplates from '@/locales/zh/templates.json';
 import zhTemplateDetail from '@/locales/zh/templateDetail.json';
 import zhNodes from '@/locales/zh/nodes.json';
@@ -54,6 +56,7 @@ export const resources = {
     overview: enOverview,
     sandboxes: enSandboxes,
     sandboxDetail: enSandboxDetail,
+    terminal: enTerminal,
     templates: enTemplates,
     templateDetail: enTemplateDetail,
     nodes: enNodes,
@@ -77,6 +80,7 @@ export const resources = {
     overview: zhOverview,
     sandboxes: zhSandboxes,
     sandboxDetail: zhSandboxDetail,
+    terminal: zhTerminal,
     templates: zhTemplates,
     templateDetail: zhTemplateDetail,
     nodes: zhNodes,
