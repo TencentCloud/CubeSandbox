@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -51,20 +52,6 @@ func TestSetTimeoutValidationRejectsNegative(t *testing.T) {
 	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), rsp.Ret.RetCode)
 }
 
-func TestRefreshValidationRejectsNonPositiveDuration(t *testing.T) {
-	for _, duration := range []int32{0, -1} {
-		rsp := Refresh(context.Background(), &types.RefreshSandboxRequest{
-			RequestID: "req-invalid-duration",
-			SandboxID: "sandbox-does-not-need-resolution",
-			Duration:  duration,
-		})
-
-		if rsp.Ret.RetCode != int(errorcode.ErrorCode_MasterParamsError) {
-			t.Fatalf("duration=%d should be rejected as params error, got ret=%+v", duration, rsp.Ret)
-		}
-	}
-}
-
 func TestTimeoutValidationPrecedesSandboxIDResolution(t *testing.T) {
 	const unresolvedSandboxID = " "
 	ctx := context.Background()
@@ -85,14 +72,15 @@ func TestTimeoutValidationPrecedesSandboxIDResolution(t *testing.T) {
 	})
 
 	t.Run("refresh", func(t *testing.T) {
+		duration := int32(0)
 		rsp := Refresh(ctx, &types.RefreshSandboxRequest{
 			RequestID: "req-invalid-duration-and-sandbox-id",
 			SandboxID: unresolvedSandboxID,
-			Duration:  0,
+			Duration:  &duration,
 		})
 
 		if rsp.Ret.RetCode != int(errorcode.ErrorCode_MasterParamsError) ||
-			rsp.Ret.RetMsg != "duration must be positive (seconds)" {
+			rsp.Ret.RetMsg != "duration must be -1 or positive" {
 			t.Fatalf("duration validation should take precedence, got ret=%+v", rsp.Ret)
 		}
 	})
@@ -124,7 +112,7 @@ func TestRefreshTimeoutMetaFallbackReturnsZeroForNeverTimeout(t *testing.T) {
 	assert.Equal(t, int64(0), endAt)
 }
 
-func TestRefreshValidationAllowsZero(t *testing.T) {
+func TestRefreshValidationRejectsZero(t *testing.T) {
 	const sandboxID = "sb-refresh-zero-validation"
 	localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{
 		SandboxID: sandboxID,
@@ -132,14 +120,14 @@ func TestRefreshValidationAllowsZero(t *testing.T) {
 	})
 	defer localcache.DeleteSandboxCache(sandboxID)
 
+	duration := int32(0)
 	rsp := Refresh(context.Background(), &types.RefreshSandboxRequest{
 		RequestID: "req-refresh-zero",
 		SandboxID: sandboxID,
-		Duration:  0,
+		Duration:  &duration,
 	})
 
-	assert.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
-	assert.Greater(t, rsp.EndAt, int64(0))
+	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), rsp.Ret.RetCode)
 }
 
 func TestRefreshValidationAllowsNeverTimeout(t *testing.T) {
@@ -150,13 +138,43 @@ func TestRefreshValidationAllowsNeverTimeout(t *testing.T) {
 	})
 	defer localcache.DeleteSandboxCache(sandboxID)
 
+	duration := int32(types.NeverTimeout)
 	rsp := Refresh(context.Background(), &types.RefreshSandboxRequest{
 		RequestID: "req-refresh-never",
 		SandboxID: sandboxID,
-		Duration:  types.NeverTimeout,
+		Duration:  &duration,
 	})
 
 	assert.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
+	assert.Equal(t, int64(0), rsp.EndAt, "never-timeout should return endAt=0")
+}
+
+func TestRefreshOmittedDurationUsesClusterDefault(t *testing.T) {
+	const sandboxID = "sb-refresh-default-validation"
+	localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{
+		SandboxID: sandboxID,
+		HostIP:    "127.0.0.1",
+	})
+	defer localcache.DeleteSandboxCache(sandboxID)
+
+	oldDefaultTimeout := config.GetConfig().CubeletConf.DefaultTimeoutInsec
+	config.GetConfig().CubeletConf.DefaultTimeoutInsec = 7200
+	defer func() {
+		config.GetConfig().CubeletConf.DefaultTimeoutInsec = oldDefaultTimeout
+	}()
+
+	provider := &recordingTimeoutProvider{}
+	SetTimeoutProvider(provider)
+	defer SetTimeoutProvider(nil)
+
+	rsp := Refresh(context.Background(), &types.RefreshSandboxRequest{
+		RequestID: "req-refresh-default",
+		SandboxID: sandboxID,
+	})
+
+	assert.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
+	assert.Equal(t, 1, provider.calls)
+	assert.Equal(t, 7200, provider.timeout)
 }
 
 func TestRefreshValidationRejectsInvalidNegative(t *testing.T) {
@@ -167,10 +185,11 @@ func TestRefreshValidationRejectsInvalidNegative(t *testing.T) {
 	})
 	defer localcache.DeleteSandboxCache(sandboxID)
 
+	duration := int32(-2)
 	rsp := Refresh(context.Background(), &types.RefreshSandboxRequest{
 		RequestID: "req-refresh-negative",
 		SandboxID: sandboxID,
-		Duration:  -2,
+		Duration:  &duration,
 	})
 
 	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), rsp.Ret.RetCode)

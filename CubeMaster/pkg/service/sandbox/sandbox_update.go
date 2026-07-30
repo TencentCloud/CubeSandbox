@@ -109,18 +109,24 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 	return
 }
 
-// publishUpdateTimeout syncs the requested timeout to the lifecycle
-// metadata channel after a successful sandbox resume. It is a
-// best-effort operation: failures are logged but do not affect the
+// publishUpdateTimeout starts a new lifecycle timeout window after a successful
+// sandbox resume. A non-zero Timeout replaces the stored timeout; nil or 0
+// preserves the stored timeout while moving its CreatedAt and EndAt forward
+// from the resume time. Metadata updates are best effort and never change the
 // resume response.
-//
-// Only acts on "resume" action with a non-nil Timeout. Pause
-// requests and resumes without an explicit Timeout are silently
-// skipped (preserving the existing timeout without rebasing the
-// idle clock).
 func publishUpdateTimeout(ctx context.Context, req *types.UpdateRequest) {
-	if req == nil || req.Action != "resume" || req.Timeout == nil {
+	if req == nil || req.Action != "resume" {
 		return
 	}
+	if req.Timeout == nil || *req.Timeout == 0 {
+		if p := getTimeoutProvider(); p != nil {
+			if _, err := p.RebaseTimeoutWindow(ctx, req.SandboxID); err != nil {
+				log.G(ctx).Warnf("lifecycle: RebaseTimeoutWindow sandbox=%s failed: %v", req.SandboxID, err)
+			}
+		}
+		return
+	}
+	// refreshTimeoutMeta updates lifecycle metadata through the timeout provider.
+	// Resume does not return endAt, so the computed value is intentionally ignored.
 	refreshTimeoutMeta(ctx, req.SandboxID, *req.Timeout)
 }

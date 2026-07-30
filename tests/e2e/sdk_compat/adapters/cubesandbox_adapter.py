@@ -128,6 +128,9 @@ class CubeSandboxAdapter(SandboxAdapter):
     def resume(self, *, timeout: int | None = None) -> None:
         self._sandbox.resume(timeout=timeout)
 
+    def set_timeout(self, timeout: int) -> None:
+        self._sandbox.set_timeout(timeout)
+
     def get_host(self, port: int) -> str:
         return str(self._sandbox.get_host(port))
 

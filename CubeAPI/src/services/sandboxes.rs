@@ -116,19 +116,7 @@ impl SandboxService {
 
     pub async fn get_sandbox(&self, sandbox_id: &str) -> AppResult<SandboxDetail> {
         let d = self.fetch_sandbox_detail(sandbox_id).await?;
-        let summary = self.fetch_sandbox_summary(sandbox_id, &d.host_id).await?;
-        let started_at = summary
-            .as_ref()
-            .and_then(|s| s.started_at.as_ref().cloned())
-            .or(d.started_at)
-            .unwrap_or_else(chrono::Utc::now);
-        // Leave end_at as None for never-timeout sandboxes (CubeMaster returns
-        // no end instant) instead of collapsing it onto started_at, which
-        // would read as "already expired".
-        let end_at = summary
-            .as_ref()
-            .and_then(|s| s.end_at.as_ref().cloned())
-            .or(d.end_at);
+        let started_at = d.started_at.unwrap_or_else(chrono::Utc::now);
 
         let envd_version = envd_version_from_annotations(&d.annotations);
         Ok(SandboxDetail {
@@ -137,7 +125,11 @@ impl SandboxService {
             sandbox_id: d.sandbox_id,
             client_id: d.host_id,
             started_at,
-            end_at,
+            // Preserve the /info response as one snapshot. A missing end_at can
+            // mean either no deadline or unresolved lifecycle metadata;
+            // timeout_seconds=-1 is the explicit never-timeout signal.
+            end_at: d.end_at,
+            timeout_seconds: d.timeout_seconds,
             envd_version,
             envd_access_token: None,
             domain: Some(self.sandbox_domain.clone()),
@@ -498,7 +490,7 @@ impl SandboxService {
         Ok(())
     }
 
-    pub async fn refresh(&self, sandbox_id: &str, duration: i32) -> AppResult<()> {
+    pub async fn refresh(&self, sandbox_id: &str, duration: Option<i32>) -> AppResult<()> {
         let req = SandboxRefreshRequest {
             request_id: new_request_id(),
             sandbox_id: sandbox_id.to_string(),
@@ -547,38 +539,6 @@ impl SandboxService {
 
         resp.into_first_sandbox(&self.instance_type)
             .ok_or_else(|| AppError::NotFound(format!("sandbox {} not found", sandbox_id)))
-    }
-
-    async fn fetch_sandbox_summary(
-        &self,
-        sandbox_id: &str,
-        host_id: &str,
-    ) -> AppResult<Option<SandboxInfo>> {
-        if host_id.trim().is_empty() {
-            return Ok(None);
-        }
-
-        let req = ListSandboxRequest {
-            request_id: new_request_id(),
-            instance_type: self.instance_type.clone(),
-            start_idx: None,
-            size: None,
-            host_id: Some(host_id.to_string()),
-            filter: None,
-        };
-
-        let resp = self
-            .cubemaster
-            .list_sandboxes(&req)
-            .await
-            .map_err(internal_error)?;
-
-        resp.ret.into_result().map_err(internal_error)?;
-
-        Ok(resp
-            .sandboxes
-            .into_iter()
-            .find(|sandbox| sandbox.sandbox_id == sandbox_id))
     }
 
     fn sandbox_response(
@@ -847,6 +807,7 @@ pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandb
         client_id: s.host_id,
         started_at,
         end_at: s.end_at,
+        timeout_seconds: s.timeout_seconds,
         cpu_count: s.cpu_count,
         memory_mb: s.memory_mb,
         disk_size_mb: Some(0),
@@ -1395,6 +1356,7 @@ mod tests {
             started_at: None,
             create_at: 0,
             end_at: None,
+            timeout_seconds: Some(-1),
             cpu_count: 2,
             memory_mb: 2048,
             template_id: "tpl-1".to_string(),
@@ -1406,6 +1368,7 @@ mod tests {
         assert_eq!(listed.cpu_count, 2);
         assert_eq!(listed.memory_mb, 2048);
         assert_eq!(listed.template_id, "tpl-1");
+        assert_eq!(listed.timeout_seconds, Some(-1));
     }
 
     #[test]

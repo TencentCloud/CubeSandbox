@@ -339,6 +339,13 @@ class E2BAdapter(SandboxAdapter):
         )
         self._sandbox = resumed.raw_sandbox
 
+    def set_timeout(self, timeout: int) -> None:
+        set_timeout = getattr(self._sandbox, "set_timeout", None)
+        if not callable(set_timeout):
+            raise RuntimeError("E2B sandbox object does not expose set_timeout()")
+        config = self._e2e_config or SdkE2EConfig.from_env()
+        set_timeout(timeout, **_e2b_api_params(config))
+
     def kill(self) -> None:
         for name in ("kill", "delete", "close"):
             method = getattr(self._sandbox, name, None)

@@ -178,7 +178,7 @@ func doget(ctx context.Context, calleep string, cubeletReq *cubebox.ListCubeSand
 		one.TemplateID = templateID
 		one.Annotations = buildAnnotationsFromLabels(sandboxLabels)
 		one.Labels = sandboxLabels
-		one.EndAt = LookupSandboxEndAt(ctx, sandbox.GetId())
+		one.EndAt, one.TimeoutSeconds = LookupSandboxTimeout(ctx, sandbox.GetId())
 		one.VolumeMounts = volumeMountsToContainerInfo(collectVolumeMountsFromContainers(sandbox.GetContainers()))
 		rsp.Data = append(rsp.Data, one)
 	}

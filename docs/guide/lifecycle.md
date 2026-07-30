@@ -95,6 +95,8 @@ print(info)
 
 For E2B SDK compatibility, CubeAPI handles never-timeout sandbox info differently when the request comes from an E2B SDK. If a sandbox was created or resumed with `timeout=-1`, CubeMaster stores `end_at=0` and CubeAPI internally treats that as `None`; however, E2B SDK models require `endAt` to be a valid datetime. In that E2B-facing response path, CubeAPI returns the far-future sentinel `9999-12-31T23:59:59Z` instead of omitting `endAt`. The request is not rejected; `-1` still means never-timeout.
 
+This compatibility path currently recognizes only requests whose `User-Agent` contains `e2b-python-sdk/`, `e2b-js-sdk/`, or `e2b-code-interpreter/` (case-insensitive). Requests with a missing or different `User-Agent`—including curl, Cube SDKs, `e2b-cli/`, and E2B SDKs that use another marker—retain Cube-native behavior and omit `endAt` for never-timeout sandboxes. Supporting another E2B client requires adding its stable `User-Agent` marker together with unit and SDK-compatibility E2E coverage.
+
 ## List Running Sandboxes
 
 ```python
@@ -214,7 +216,26 @@ When the client omits `timeout`, CubeMaster applies `cubelet_conf.default_timeou
 
 The repository ships with **no cluster-wide idle timeout** (`default_timeout_insec: -1`). Set a positive value (for example `300`) if you want the cluster to reclaim sandboxes that never pass an explicit `timeout`. Restart `cube-sandbox-cubemaster.service` after edits.
 
+::: warning Refresh with an omitted duration
+`POST /sandboxes/{sandboxID}/refreshes` applies `default_timeout_insec` when its `duration` field is omitted; it does not preserve the sandbox's current timeout. With the repository default of `-1` (or any non-positive configured value), an omitted `duration` changes the sandbox to never-timeout. Pass a positive `duration` when the refreshed sandbox must retain a finite idle TTL.
+:::
+
 `create_timeout_insec` in the same section is unrelated: it only bounds the create/scheduling RPC deadline, not sandbox idle TTL. See [Service management — CubeMaster settings](service-management.md#cubemaster-settings).
+
+### Timeout input behavior by API
+
+The result depends on both the API and the supplied value. "Restart countdown" means that a new idle countdown begins when the operation succeeds.
+
+| API | `< -1` | `-1` | `0` | Omitted | Positive `N` |
+|---|---|---|---|---|---|
+| `create_sandbox` | Treat as `-1`: never timeout | Never timeout | Expire immediately | Use `default_timeout_insec`; never timeout when the default is not positive | Set timeout to `N` seconds; start countdown after creation |
+| `set_timeout` | Reject (400) | Change to never timeout | Expire immediately | Not allowed; `timeout` is required | Change to `N` seconds; restart countdown |
+| `refresh` | Reject (400) | Change to never timeout | Reject (400) | Use `default_timeout_insec`; never timeout with the shipped default | Change to `N` seconds; restart countdown; no `3600`-second limit |
+| `resume` | Reject (400) | Resume; change to never timeout | Resume; preserve the current timeout and restart countdown | Resume; preserve the current timeout and restart countdown | Resume; change to `N` seconds and restart countdown |
+| `connect` (paused) | Reject (400) | Resume; change to never timeout | Resume; preserve the current timeout and restart countdown | Resume; preserve the current timeout and restart countdown | Resume; change to `N` seconds and restart countdown |
+| `connect` (running) | Reject (400) | Return the running sandbox; timeout unchanged | Return the running sandbox; timeout unchanged | Return the running sandbox; timeout unchanged | Return the running sandbox; timeout unchanged |
+
+### Runtime behavior and diagnostics
 
 - **Pause fidelity**: CPU registers, process memory, TCP state (with no external peer), and filesystem mutations all survive the snapshot. Outbound sockets the sandbox itself opened are dropped on pause and must be reopened by the application after resume.
 - **Cluster coordination**: auto-pause is driven by the `cube-lifecycle-manager` service that runs on the control node. It consumes lifecycle events CubeMaster publishes via Redis stream, discovers every live CubeProxy replica through a Redis-backed registration table, and broadcasts state to each of them. Cross-replica races are resolved by Redis `SETNX` state locks so the same sandbox is never paused or resumed twice concurrently.

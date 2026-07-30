@@ -271,10 +271,14 @@ pub struct ListedSandbox {
     pub client_id: String,
     #[serde(rename = "startedAt")]
     pub started_at: DateTime<Utc>,
-    /// Projected next-timeout instant. Omitted for never-timeout sandboxes
-    /// (no deadline) rather than being misreported as equal to startedAt.
+    /// Projected next-timeout instant. Omitted when the sandbox has no deadline
+    /// or lifecycle metadata cannot provide a reliable deadline.
     #[serde(rename = "endAt", skip_serializing_if = "Option::is_none")]
     pub end_at: Option<DateTime<Utc>>,
+    /// CubeMaster's internal timeout value. Used to distinguish an explicit
+    /// never-timeout value (-1) from an unresolved endAt; never serialized.
+    #[serde(skip)]
+    pub(crate) timeout_seconds: Option<i32>,
     #[serde(rename = "cpuCount")]
     pub cpu_count: i32,
     #[serde(rename = "memoryMB")]
@@ -303,10 +307,14 @@ pub struct SandboxDetail {
     pub client_id: String,
     #[serde(rename = "startedAt")]
     pub started_at: DateTime<Utc>,
-    /// Projected next-timeout instant. Omitted for never-timeout sandboxes
-    /// (no deadline) rather than being misreported as equal to startedAt.
+    /// Projected next-timeout instant. Omitted when the sandbox has no deadline
+    /// or lifecycle metadata cannot provide a reliable deadline.
     #[serde(rename = "endAt", skip_serializing_if = "Option::is_none")]
     pub end_at: Option<DateTime<Utc>>,
+    /// CubeMaster's internal timeout value. Used to distinguish an explicit
+    /// never-timeout value (-1) from an unresolved endAt; never serialized.
+    #[serde(skip)]
+    pub(crate) timeout_seconds: Option<i32>,
     #[serde(rename = "envdVersion")]
     pub envd_version: String,
     #[serde(rename = "envdAccessToken", skip_serializing_if = "Option::is_none")]
@@ -515,10 +523,28 @@ fn validate_timeout_value(timeout: i32) -> Result<(), validator::ValidationError
 /// Request body for POST /sandboxes/{id}/refreshes
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct RefreshRequest {
-    /// Refresh duration in seconds. If omitted, CubeAPI treats it as `0`,
-    /// which means immediate timeout. Use `-1` for never-timeout.
-    #[validate(range(min = -1, max = 3600))]
+    /// Refresh duration in seconds. If omitted, CubeMaster applies the cluster
+    /// default timeout; when that default is unset or non-positive, the sandbox
+    /// becomes never-timeout. Use `-1` to request never-timeout explicitly.
+    #[validate(custom(function = "validate_refresh_duration"))]
     pub duration: Option<i32>,
+}
+
+/// Validates refresh duration values.
+///
+/// Accepts:
+/// - any positive value: normal refresh TTL in seconds
+/// - `-1`: never-timeout sentinel
+///
+/// Rejects `0`; immediate timeout is only supported by set_timeout(0).
+fn validate_refresh_duration(duration: i32) -> Result<(), validator::ValidationError> {
+    if duration == -1 || duration > 0 {
+        Ok(())
+    } else {
+        Err(validator::ValidationError::new(
+            "refresh_duration_must_be_positive_or_never",
+        ))
+    }
 }
 
 // ─── Sandbox — list query ──────────────────────────────────────────────────
@@ -584,19 +610,17 @@ mod tests {
     }
 
     #[test]
-    fn refresh_request_accepts_never_zero_and_positive_duration() {
-        for duration in [-1, 0, 60, 3600] {
-            let req = RefreshRequest {
-                duration: Some(duration),
-            };
+    fn refresh_request_accepts_omitted_never_and_positive_duration() {
+        for duration in [None, Some(-1), Some(60), Some(7200)] {
+            let req = RefreshRequest { duration };
             req.validate()
-                .unwrap_or_else(|e| panic!("duration={duration} should be valid: {e}"));
+                .unwrap_or_else(|e| panic!("duration={duration:?} should be valid: {e}"));
         }
     }
 
     #[test]
-    fn refresh_request_rejects_out_of_range_duration() {
-        for duration in [-2, 3601] {
+    fn refresh_request_rejects_zero_and_invalid_negative_duration() {
+        for duration in [-2, 0] {
             let req = RefreshRequest {
                 duration: Some(duration),
             };

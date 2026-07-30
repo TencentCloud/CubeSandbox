@@ -1102,6 +1102,8 @@ pub struct SandboxInfo {
     pub create_at: i64,
     #[serde(default, deserialize_with = "deserialize_optional_datetime")]
     pub end_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub timeout_seconds: Option<i32>,
     #[serde(default, alias = "cpuCount")]
     pub cpu_count: i32,
     #[serde(default, alias = "memoryMB")]
@@ -1151,6 +1153,8 @@ pub struct GetSandboxDataItem {
     #[serde(default, deserialize_with = "deserialize_optional_datetime")]
     pub end_at: Option<DateTime<Utc>>,
     #[serde(default)]
+    pub timeout_seconds: Option<i32>,
+    #[serde(default)]
     pub volume_mounts: Vec<CubeVolumeMount>,
 }
 
@@ -1188,6 +1192,7 @@ pub struct SandboxDetail {
     pub template_id: String,
     pub started_at: Option<DateTime<Utc>>,
     pub end_at: Option<DateTime<Utc>>,
+    pub timeout_seconds: Option<i32>,
     pub cpu_count: i32,
     pub memory_mb: i32,
     pub disk_size_mb: i32,
@@ -1367,6 +1372,7 @@ impl GetSandboxResponse {
             template_id,
             started_at: primary_container.and_then(|c| datetime_from_unix_nanos(c.create_at)),
             end_at: item.end_at,
+            timeout_seconds: item.timeout_seconds,
             cpu_count,
             memory_mb,
             disk_size_mb: 0,
@@ -1397,8 +1403,9 @@ pub struct SandboxUpdateRequest {
     /// "pause" | "resume"
     #[serde(rename = "action")]
     pub action: String,
-    /// TTL in seconds for resume. None keeps the existing timeout; 0 requests
-    /// immediate timeout; -1 disables timeout.
+    /// Optional TTL in seconds for resume. None or 0 preserves the existing
+    /// timeout and starts a new idle-timeout window; -1 disables timeout;
+    /// positive values set a new TTL.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<i32>,
 }
@@ -1446,8 +1453,9 @@ pub struct SandboxRefreshRequest {
     pub sandbox_id: String,
     #[serde(rename = "instanceType")]
     pub instance_type: String,
-    /// Seconds to add onto the current endAt.
-    pub duration: i32,
+    /// Refresh duration in seconds. None lets CubeMaster apply the cluster default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2477,6 +2485,7 @@ mod tests {
                 "host_id": "host-1",
                 "status": 1,
                 "template_id": "tpl-1",
+                "timeout_seconds": -1,
                 "containers": [
                     {
                         "container_id": "workload-1",
@@ -2505,6 +2514,7 @@ mod tests {
         assert_eq!(detail.host_id, "host-1");
         assert_eq!(detail.cpu_count, 2);
         assert_eq!(detail.memory_mb, 2048);
+        assert_eq!(detail.timeout_seconds, Some(-1));
         assert_eq!(
             detail
                 .started_at

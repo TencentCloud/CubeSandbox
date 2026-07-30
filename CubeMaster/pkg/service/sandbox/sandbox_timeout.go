@@ -8,6 +8,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
@@ -63,9 +64,10 @@ func SetTimeout(ctx context.Context, req *types.SetTimeoutRequest) (rsp *types.S
 	return
 }
 
-// Refresh implements POST /cube/sandbox/refresh. Semantically identical to
-// SetTimeout: refresh(d) rebases the idle clock and sets TimeoutSeconds = d.
-// Duration accepts -1 for never-timeout, 0 for immediate timeout, or a positive TTL.
+// Refresh implements POST /cube/sandbox/refresh. Omitted duration falls back to
+// the cluster default timeout. Explicit duration accepts -1 for never-timeout
+// or a positive TTL; 0 is rejected because immediate timeout belongs to
+// SetTimeout.
 func Refresh(ctx context.Context, req *types.RefreshSandboxRequest) (rsp *types.RefreshSandboxRes) {
 	rsp = &types.RefreshSandboxRes{
 		RequestID: req.RequestID,
@@ -91,13 +93,19 @@ func Refresh(ctx context.Context, req *types.RefreshSandboxRequest) (rsp *types.
 		rsp.Ret.RetMsg = "should provide sandboxID"
 		return
 	}
-	if ret := normalizeSandboxIDInReq(ctx, &req.SandboxID); ret != nil {
-		rsp.Ret = ret
+	var duration int
+	if req.Duration == nil {
+		duration, _ = resolveTimeoutSeconds(nil, config.GetConfig().CubeletConf.DefaultTimeoutInsec)
+	} else {
+		duration = int(*req.Duration)
+	}
+	if duration == 0 || duration < types.NeverTimeout {
+		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
+		rsp.Ret.RetMsg = "duration must be -1 or positive"
 		return
 	}
-	if req.Duration < -1 || req.Duration > 3600 {
-		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
-		rsp.Ret.RetMsg = "duration must be in [-1, 3600]"
+	if ret := normalizeSandboxIDInReq(ctx, &req.SandboxID); ret != nil {
+		rsp.Ret = ret
 		return
 	}
 
@@ -107,7 +115,7 @@ func Refresh(ctx context.Context, req *types.RefreshSandboxRequest) (rsp *types.
 		return
 	}
 
-	endAt := refreshTimeoutMeta(ctx, req.SandboxID, int(req.Duration))
+	endAt := refreshTimeoutMeta(ctx, req.SandboxID, duration)
 	rsp.EndAt = endAt
 	return
 }
@@ -122,16 +130,27 @@ func sandboxExists(ctx context.Context, sandboxID string) bool {
 	return false
 }
 
+// refreshTimeoutMeta updates the lifecycle timeout record for sandboxID and
+// returns its new endAt as a Unix millisecond timestamp.
+//
+// When a provider is installed, RefreshTimeout must be called for every valid
+// timeout, including NeverTimeout (-1), because it both stores the new timeout
+// and publishes the lifecycle update. For a finite timeout, this function uses
+// the provider's positive endAt. For NeverTimeout, it ignores the provider's
+// endAt and returns 0 because -1 means that no deadline exists and 0 is the
+// canonical endAt representation. If the provider is unavailable, fails, or
+// returns no positive endAt, a finite timeout falls back to now() + timeout.
 func refreshTimeoutMeta(ctx context.Context, sandboxID string, timeoutSeconds int) int64 {
 	if p := getTimeoutProvider(); p != nil {
 		endAt, err := p.RefreshTimeout(ctx, sandboxID, timeoutSeconds)
 		if err != nil {
 			log.G(ctx).Warnf("lifecycle: RefreshTimeout sandbox=%s failed: %v", sandboxID, err)
-		} else if endAt > 0 {
+		} else if (timeoutSeconds != types.NeverTimeout) && endAt > 0 {
 			return endAt
 		}
 	}
-	if timeoutSeconds < 0 {
+	// All callers reject values below NeverTimeout before reaching this helper.
+	if timeoutSeconds == types.NeverTimeout {
 		return 0
 	}
 	return time.Now().UnixMilli() + int64(timeoutSeconds)*1000

@@ -186,23 +186,25 @@ func doOneList(ctx context.Context, req *types.ListCubeSandboxReq, tmpNode *node
 				}
 				labels := sandboxViewLabels(sandboxLabels, container.GetLabels())
 				templateID := templateIDFromLabels(labels)
+				endAt, timeoutSeconds := LookupSandboxTimeout(ctx, sandbox.GetId())
 				select {
 				case <-ctx.Done():
 					return
 				case resChan <- &types.SandboxBriefData{
-					SandboxID:   sandbox.GetId(),
-					HostID:      tmpNode.InsID,
-					Status:      int32(container.GetState()),
-					HostIP:      tmpNode.HostIP(),
-					TemplateID:  templateID,
-					CpuCount:    parseCPUCount(container.GetResources().GetCpu()),
-					MemoryMB:    parseMemoryMB(container.GetResources().GetMem()),
-					Annotations: buildAnnotationsFromLabels(labels),
-					Labels:      labels,
-					NameSpace:   sandbox.GetNamespace(),
-					CreateAt:    sandbox.GetCreatedAt(),
-					PauseAt:     container.GetPausedAt(),
-					EndAt:       LookupSandboxEndAt(ctx, sandbox.GetId()),
+					SandboxID:      sandbox.GetId(),
+					HostID:         tmpNode.InsID,
+					Status:         int32(container.GetState()),
+					HostIP:         tmpNode.HostIP(),
+					TemplateID:     templateID,
+					CpuCount:       parseCPUCount(container.GetResources().GetCpu()),
+					MemoryMB:       parseMemoryMB(container.GetResources().GetMem()),
+					Annotations:    buildAnnotationsFromLabels(labels),
+					Labels:         labels,
+					NameSpace:      sandbox.GetNamespace(),
+					CreateAt:       sandbox.GetCreatedAt(),
+					PauseAt:        container.GetPausedAt(),
+					EndAt:          endAt,
+					TimeoutSeconds: timeoutSeconds,
 					VolumeMounts: volumeMountsToContainerInfo(
 						collectVolumeMountsFromContainers(sandbox.GetContainers())),
 				}:
