@@ -33,6 +33,8 @@ jobs:
             --set-string mysql.password=test \
             --set-string mysql.rootPassword=test \
             --set-string redis.password=test >/dev/null
+      - name: Guard Web Terminal configuration and Secret wiring
+        run: sh deploy/kubernetes/chart/scripts/test-terminal-secret-wiring.sh
       - name: Enforce Big Pod template stability
         run: sh deploy/kubernetes/chart/scripts/test-big-pod-inplace-guard.sh
       - name: Guard PVM native DaemonSet GVK
