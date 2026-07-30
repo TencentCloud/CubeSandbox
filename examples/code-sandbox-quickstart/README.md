@@ -247,7 +247,9 @@ rejects shell-chaining characters (`;|&`$` / newlines) so
 confinement. Allowlisting `cat` still permits `cat /etc/passwd` inside the
 MicroVM; stack `allow_internet_access=False`, short `timeout`, and least
 privilege on the allowlist. `enable_code_execution=True` is an explicit
-privilege escalation. Run `tool_allowlist_limits.py` for the cases.
+privilege escalation. Adding binaries beyond the default set requires
+`extra_binaries=...` **and** `allow_unsafe_allowlist_extension=True` (no
+silent allowlist growth). Run `tool_allowlist_limits.py` for the cases.
 
 ```bash
 # Threat model / non-goals (no sandbox)

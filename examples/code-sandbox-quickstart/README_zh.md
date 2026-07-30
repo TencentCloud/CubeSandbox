@@ -238,7 +238,9 @@ python network_denylist.py
 **威胁模型（请先读）：** 这是**宿主机策略**，不是 guest 内 confinement。
 白名单含 `cat` 时，`cat /etc/passwd` 仍可通过本门控——需叠加
 `allow_internet_access=False`、短 `timeout` 与最小白名单。
-`enable_code_execution=True` 是显式提权。细节见 `tool_allowlist_limits.py`。
+`enable_code_execution=True` 是显式提权。默认集合之外的二进制必须同时传
+`extra_binaries=...` 与 `allow_unsafe_allowlist_extension=True`（禁止静默扩白名单）。
+细节见 `tool_allowlist_limits.py`。
 
 ```bash
 # 威胁模型 / 非目标（不建沙箱）

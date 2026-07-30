@@ -11,9 +11,8 @@ Threat model (host policy only)
 In scope:
   - Refuse tools whose first argv token is outside the allowlist
   - Refuse path-style first tokens (``/bin/echo``, ``..\\\\echo``)
-  - Refuse shell-operator characters (``;|&`$`` / newlines) so
-    ``echo ok; bash -c ...`` cannot sneak past a first-token-only check
-    when the string later hits a shell
+  - Refuse shell-operator / expansion characters (``;|&`$`` / newlines),
+    including variable expansion via ``$``
 
 Out of scope (stack separately):
   - Guest confinement for an *allowlisted* binary (``cat /etc/passwd`` still
@@ -21,6 +20,8 @@ Out of scope (stack separately):
   - Network egress (use ``allow_internet_access`` / CIDR policies)
   - Interpreters: default set excludes them; ``enable_code_execution=True``
     is an explicit privilege escalation (adds ``CODE_EXECUTION_BINARIES``)
+  - Growing the allowlist: pass ``extra_binaries`` only with
+    ``allow_unsafe_allowlist_extension=True`` (not a silent default)
 """
 
 from __future__ import annotations
@@ -65,6 +66,8 @@ class AllowlistDenied(PermissionError):
 
 
 def _has_shell_meta(command: str) -> bool:
+    # Conservative: scan the raw string before shlex, so quoted metas
+    # (e.g. ``echo 'safe; string'``) are also refused.
     return any(ch in command for ch in _SHELL_META_CHARS)
 
 
@@ -78,15 +81,20 @@ def _split_argv(command: str) -> list[str] | None:
 
 
 def _resolve_allowed(
-    allowed_binaries: Iterable[str] | None,
     *,
     enable_code_execution: bool,
+    extra_binaries: Iterable[str] | None,
+    allow_unsafe_allowlist_extension: bool,
 ) -> frozenset[str]:
-    base = (
-        frozenset(allowed_binaries)
-        if allowed_binaries is not None
-        else DEFAULT_ALLOWED_BINARIES
-    )
+    base = DEFAULT_ALLOWED_BINARIES
+    if extra_binaries:
+        extras = frozenset(extra_binaries)
+        if extras and not allow_unsafe_allowlist_extension:
+            raise ValueError(
+                "extra_binaries requires allow_unsafe_allowlist_extension=True "
+                "(refusing silent allowlist growth)"
+            )
+        base = base | extras
     if enable_code_execution:
         return base | CODE_EXECUTION_BINARIES
     return base
@@ -94,9 +102,10 @@ def _resolve_allowed(
 
 def is_allowlisted(
     command: str,
-    allowed_binaries: Iterable[str] | None = None,
     *,
     enable_code_execution: bool = False,
+    extra_binaries: Iterable[str] | None = None,
+    allow_unsafe_allowlist_extension: bool = False,
 ) -> bool:
     """True if the command string is acceptable under the host gate."""
     if not command or not command.strip():
@@ -113,22 +122,26 @@ def is_allowlisted(
     if "/" in binary or "\\" in binary:
         return False
     allowed = _resolve_allowed(
-        allowed_binaries, enable_code_execution=enable_code_execution
+        enable_code_execution=enable_code_execution,
+        extra_binaries=extra_binaries,
+        allow_unsafe_allowlist_extension=allow_unsafe_allowlist_extension,
     )
     return binary in allowed
 
 
 def assert_allowlisted(
     command: str,
-    allowed_binaries: Iterable[str] | None = None,
     *,
     enable_code_execution: bool = False,
+    extra_binaries: Iterable[str] | None = None,
+    allow_unsafe_allowlist_extension: bool = False,
 ) -> str:
     """Return command if allowlisted; otherwise raise AllowlistDenied."""
     if not is_allowlisted(
         command,
-        allowed_binaries,
         enable_code_execution=enable_code_execution,
+        extra_binaries=extra_binaries,
+        allow_unsafe_allowlist_extension=allow_unsafe_allowlist_extension,
     ):
         if _has_shell_meta(command):
             raise AllowlistDenied(

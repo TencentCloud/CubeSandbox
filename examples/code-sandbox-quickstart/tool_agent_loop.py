@@ -36,7 +36,6 @@ from e2b_code_interpreter import Sandbox
 from env_utils import load_local_dotenv
 from tool_allowlist import (
     AllowlistDenied,
-    DEFAULT_ALLOWED_BINARIES,
     assert_allowlisted,
 )
 
@@ -63,10 +62,15 @@ def run_gated(
     sandbox: Sandbox,
     command: str,
     *,
-    allowed_binaries: frozenset[str] | None = None,
+    extra_binaries: frozenset[str] | None = None,
+    allow_unsafe_allowlist_extension: bool = False,
     allow_nonzero: bool = False,
 ) -> tuple[str, int]:
-    assert_allowlisted(command, allowed_binaries=allowed_binaries)
+    assert_allowlisted(
+        command,
+        extra_binaries=extra_binaries,
+        allow_unsafe_allowlist_extension=allow_unsafe_allowlist_extension,
+    )
     try:
         result = sandbox.commands.run(command)
     except Exception as exc:
@@ -175,9 +179,13 @@ try:
     print("\n--- turn: airgap_probe ---")
     probe = "curl -s --max-time 3 https://example.com -o /dev/null"
     print(f"propose: {probe!r}")
-    curl_allow = DEFAULT_ALLOWED_BINARIES | frozenset({"curl"})
+    print("note: curl via allow_unsafe_allowlist_extension (not default API)")
     out, code = run_gated(
-        sandbox, probe, allowed_binaries=curl_allow, allow_nonzero=True
+        sandbox,
+        probe,
+        extra_binaries=frozenset({"curl"}),
+        allow_unsafe_allowlist_extension=True,
+        allow_nonzero=True,
     )
     print(f"observation: stdout={out!r} exit={code}")
     if code == 127 or "not found" in out.lower():

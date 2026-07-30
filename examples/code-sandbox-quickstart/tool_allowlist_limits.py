@@ -12,6 +12,7 @@ Cases:
   2) Path-style binary rejected
   3) Interpreters denied by default
   4) enable_code_execution=True is an explicit privilege escalation
+  4b) extra_binaries requires allow_unsafe_allowlist_extension=True
   5) Clean allowlisted command still accepted
   6) Reminder: allowlisting cat/ls is not guest least-privilege
 """
@@ -52,6 +53,22 @@ print(
     "  note: enable_code_execution=True ≈ full guest FS/process power; "
     "pair with airgap + short timeout in real agents"
 )
+
+# 4b) Extra binaries are not a silent default API
+try:
+    assert_allowlisted("curl -s https://example.com", extra_binaries={"curl"})
+except ValueError as exc:
+    print(f"[denied_as_expected] extra_without_unsafe_flag: {exc}")
+else:
+    raise SystemExit("expected ValueError when extending allowlist without unsafe flag")
+
+expect_allowed(
+    "curl_with_unsafe_flag",
+    "curl -s https://example.com",
+    extra_binaries={"curl"},
+    allow_unsafe_allowlist_extension=True,
+)
+print("  note: allow_unsafe_allowlist_extension=True is required to add binaries")
 
 # 5) Happy path still works
 expect_allowed("clean_echo", "echo agent-tool-allowlist-ok")

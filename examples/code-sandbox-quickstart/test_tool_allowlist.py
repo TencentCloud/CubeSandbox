@@ -77,6 +77,18 @@ class ToolAllowlistTests(unittest.TestCase):
             assert_allowlisted(cmd, enable_code_execution=True), cmd
         )
 
+    def test_extra_binaries_require_unsafe_flag(self) -> None:
+        cmd = "curl -s https://example.com"
+        with self.assertRaises(ValueError):
+            is_allowlisted(cmd, extra_binaries={"curl"})
+        self.assertTrue(
+            is_allowlisted(
+                cmd,
+                extra_binaries={"curl"},
+                allow_unsafe_allowlist_extension=True,
+            )
+        )
+
     def test_assert_tracks_is_allowlisted(self) -> None:
         """assert_* must stay a thin wrapper — no divergent accept/deny."""
         samples = (
