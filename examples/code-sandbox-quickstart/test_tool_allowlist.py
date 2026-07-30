@@ -110,8 +110,10 @@ class ToolAllowlistTests(unittest.TestCase):
 
     def test_unbalanced_quotes_denied(self) -> None:
         self.assertFalse(is_allowlisted("echo 'unterminated"))
-        with self.assertRaises(AllowlistDenied):
+        with self.assertRaises(AllowlistDenied) as ctx:
             assert_allowlisted("echo 'unterminated")
+        self.assertIn("could not be parsed", str(ctx.exception))
+        self.assertNotIn("''", str(ctx.exception))
 
 
 if __name__ == "__main__":

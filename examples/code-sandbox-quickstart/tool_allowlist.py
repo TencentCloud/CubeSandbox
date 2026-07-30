@@ -136,8 +136,11 @@ def assert_allowlisted(
                 f"(host gate refuses shell chaining): {command!r}"
             )
         parts = _split_argv(command)
-        binary = parts[0] if parts else ""
+        if parts is None:
+            raise AllowlistDenied(f"command could not be parsed: {command!r}")
+        if not parts:
+            raise AllowlistDenied(f"command is empty: {command!r}")
         raise AllowlistDenied(
-            f"command not on tool allowlist: {binary!r} (full: {command!r})"
+            f"command not on tool allowlist: {parts[0]!r} (full: {command!r})"
         )
     return command
