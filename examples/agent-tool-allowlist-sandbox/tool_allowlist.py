@@ -171,3 +171,18 @@ def assert_allowlisted(
             f"command not on tool allowlist: {binary!r} (full: {command!r})"
         )
     return command
+
+
+def coerce_exit_code(value: object, *, what: str = "command") -> int:
+    """Return int(exit_code) or raise RuntimeError preserving conversion context."""
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as err:
+        raise RuntimeError(f"{what} non-numeric exit_code: {value!r}") from err
+
+
+def exit_code_from_exc(exc: BaseException) -> int:
+    """Numeric exit_code from an SDK command failure, else re-raise ``exc``."""
+    if not hasattr(exc, "exit_code"):
+        raise exc
+    return coerce_exit_code(exc.exit_code, what="command failure")

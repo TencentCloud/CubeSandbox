@@ -37,6 +37,8 @@ from env_utils import load_local_dotenv
 from tool_allowlist import (
     AllowlistDenied,
     assert_allowlisted,
+    coerce_exit_code,
+    exit_code_from_exc,
 )
 
 load_local_dotenv()
@@ -80,21 +82,12 @@ def run_gated(
         # (KeyboardInterrupt/SystemExit are BaseException — not caught here.)
         if not (allow_nonzero and hasattr(exc, "exit_code")):
             raise
-        try:
-            code = int(exc.exit_code)
-        except (TypeError, ValueError):
-            raise RuntimeError(
-                f"command failed with non-numeric exit_code: {exc.exit_code!r}"
-            ) from exc
+        code = exit_code_from_exc(exc)
         stdout = (getattr(exc, "stdout", None) or "").strip()
         return stdout, code
-    try:
-        code = int(result.exit_code)
-    except (TypeError, ValueError) as err:
-        raise RuntimeError(
-            f"command returned non-numeric exit_code: {result.exit_code!r}"
-        ) from err
-    return result.stdout.strip(), code
+    return result.stdout.strip(), coerce_exit_code(
+        result.exit_code, what="command result"
+    )
 
 
 

@@ -14,19 +14,7 @@ import os
 from e2b_code_interpreter import Sandbox
 
 from env_utils import load_local_dotenv
-from tool_allowlist import AllowlistDenied, assert_allowlisted
-
-
-def _command_exit_code(exc: BaseException) -> int:
-    """Numeric exit_code from an SDK command failure, else re-raise ``exc``."""
-    if not hasattr(exc, "exit_code"):
-        raise exc
-    try:
-        return int(exc.exit_code)
-    except (TypeError, ValueError):
-        raise RuntimeError(
-            f"command failed with non-numeric exit_code: {exc.exit_code!r}"
-        ) from exc
+from tool_allowlist import AllowlistDenied, assert_allowlisted, coerce_exit_code, exit_code_from_exc
 
 
 def main() -> None:
@@ -79,14 +67,9 @@ def main() -> None:
         assert_allowlisted(deny_guest)
         try:
             result = sandbox.commands.run(deny_guest)
-            try:
-                code = int(result.exit_code)
-            except (TypeError, ValueError) as err:
-                raise RuntimeError(
-                    f"command returned non-numeric exit_code: {result.exit_code!r}"
-                ) from err
+            code = coerce_exit_code(result.exit_code, what="command result")
         except Exception as exc:
-            code = _command_exit_code(exc)
+            code = exit_code_from_exc(exc)
         if code == 0:
             raise SystemExit("cube-tool unexpectedly allowed bash")
         print(f"cube-tool bash denied: exit={code}")

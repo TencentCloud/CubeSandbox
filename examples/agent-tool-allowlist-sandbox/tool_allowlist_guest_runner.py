@@ -19,7 +19,12 @@ import os
 from e2b_code_interpreter import Sandbox
 
 from env_utils import load_local_dotenv
-from tool_allowlist import AllowlistDenied, assert_allowlisted
+from tool_allowlist import (
+    AllowlistDenied,
+    assert_allowlisted,
+    coerce_exit_code,
+    exit_code_from_exc,
+)
 
 load_local_dotenv()
 
@@ -30,12 +35,7 @@ def run_ok(sandbox: Sandbox, command: str) -> str:
     assert_allowlisted(command)
     result = sandbox.commands.run(command)
     out = (result.stdout or "").strip()
-    try:
-        code = int(result.exit_code)
-    except (TypeError, ValueError) as err:
-        raise RuntimeError(
-            f"command returned non-numeric exit_code: {result.exit_code!r}"
-        ) from err
+    code = coerce_exit_code(result.exit_code, what="command result")
     if code != 0:
         raise SystemExit(f"expected exit 0 for {command!r}, got {code} out={out!r}")
     return out
@@ -45,23 +45,11 @@ def run_expect_fail(sandbox: Sandbox, command: str) -> None:
     assert_allowlisted(command)
     try:
         result = sandbox.commands.run(command)
-        try:
-            code = int(result.exit_code)
-        except (TypeError, ValueError) as err:
-            raise RuntimeError(
-                f"command returned non-numeric exit_code: {result.exit_code!r}"
-            ) from err
+        code = coerce_exit_code(result.exit_code, what="command result")
         out = (result.stdout or "").strip()
         err = (getattr(result, "stderr", None) or "").strip()
     except Exception as exc:  # SDK may raise on non-zero
-        if not hasattr(exc, "exit_code"):
-            raise
-        try:
-            code = int(exc.exit_code)
-        except (TypeError, ValueError):
-            raise RuntimeError(
-                f"command failed with non-numeric exit_code: {exc.exit_code!r}"
-            ) from exc
+        code = exit_code_from_exc(exc)
         out = (getattr(exc, "stdout", None) or "").strip()
         err = (getattr(exc, "stderr", None) or "").strip()
     print(f"guest_deny observation: exit={code} stdout={out!r} stderr={err!r}")
