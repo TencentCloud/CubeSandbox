@@ -54,7 +54,8 @@ def health_sandbox_count() -> int:
         if "sandboxes" not in data:
             raise SystemExit(f"health payload missing sandboxes: {data!r}")
         return int(data["sandboxes"])
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError, TypeError) as exc:
+    except (urllib.error.URLError, json.JSONDecodeError, ValueError, TypeError) as exc:
+        # urlopen(timeout=…) surfaces timeouts as URLError, not TimeoutError.
         raise SystemExit(f"health check failed: {exc}") from exc
 
 
@@ -75,12 +76,16 @@ def run_gated(
         result = sandbox.commands.run(command)
     except Exception as exc:
         # Only absorb SDK *command* failures when explicitly allowed.
-        # Require exit_code so unrelated Exceptions still propagate.
+        # Require a numeric exit_code so unrelated Exceptions still propagate.
         # (KeyboardInterrupt/SystemExit are BaseException — not caught here.)
         if not (allow_nonzero and hasattr(exc, "exit_code")):
             raise
+        try:
+            code = int(exc.exit_code)
+        except (TypeError, ValueError):
+            raise
         stdout = (getattr(exc, "stdout", None) or "").strip()
-        return stdout, int(exc.exit_code)
+        return stdout, code
     return result.stdout.strip(), int(result.exit_code)
 
 

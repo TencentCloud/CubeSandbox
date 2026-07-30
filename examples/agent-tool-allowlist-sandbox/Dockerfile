@@ -18,9 +18,18 @@ RUN apt-get update \
          apt-get install -y --no-install-recommends curl; \
        fi \
     && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /etc/cube-sandbox \
-    && printf '%s\n' \
-        echo uname pwd ls cat head wc sha256sum \
-        > /etc/cube-sandbox/tool-profile.txt
+    && mkdir -p /etc/cube-sandbox
+
+# Heredoc avoids printf('%s') interpreting '%' in future tool names.
+COPY <<'EOF' /etc/cube-sandbox/tool-profile.txt
+echo
+uname
+pwd
+ls
+cat
+head
+wc
+sha256sum
+EOF
 
 EXPOSE 49983
