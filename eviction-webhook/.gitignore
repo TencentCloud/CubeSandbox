@@ -1,0 +1,6 @@
+# Build output
+/eviction-webhook
+
+# IDE
+.idea/
+.vscode/
