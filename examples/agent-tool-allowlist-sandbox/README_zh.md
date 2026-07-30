@@ -45,7 +45,9 @@ cubemastercli tpl create-from-image \
 
 ## 限制
 
-- 绕过 `cube-tool` 直接调 bash/路径二进制，不在 guest wrapper 范围内。
+- 基础镜像仍有 shell；绕过 `cube-tool` 直接调 bash/路径二进制，不在 guest wrapper 范围内。
 - 宿主白名单含裸 `cat` 时，`cat /etc/passwd` 仍过宿主门控。
+- 文档化残差（本门控不是 shell）：`echo … > file`（guest 写）、`cat < /etc/passwd`
+  （输入重定向）、以及 `*` / `?` 通配（可能由 guest shell 先展开）——此处不按串联元字符拦截。
 - 扩白名单需 `extra_binaries` + `allow_unsafe_allowlist_extension=True`。
 - Fan-out 会创建真实 VM，共享集群请保持小 `N`。

@@ -83,10 +83,18 @@ def run_gated(
         try:
             code = int(exc.exit_code)
         except (TypeError, ValueError):
-            raise
+            raise RuntimeError(
+                f"command failed with non-numeric exit_code: {exc.exit_code!r}"
+            ) from exc
         stdout = (getattr(exc, "stdout", None) or "").strip()
         return stdout, code
-    return result.stdout.strip(), int(result.exit_code)
+    try:
+        code = int(result.exit_code)
+    except (TypeError, ValueError) as err:
+        raise RuntimeError(
+            f"command returned non-numeric exit_code: {result.exit_code!r}"
+        ) from err
+    return result.stdout.strip(), code
 
 
 

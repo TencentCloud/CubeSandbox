@@ -53,10 +53,10 @@ try:
     if before != payload:
         raise SystemExit(f"unexpected before-pause content: {before!r}")
 
+    # Match code-sandbox-quickstart/pause.py: keep the create-time id;
+    # do not reinterpret pause() return values (SDK contract varies).
     print("action: sandbox.pause()")
-    paused = sandbox.pause()
-    if isinstance(paused, str) and paused:
-        sandbox_id = paused
+    sandbox.pause()
     print(f"paused handle: {sandbox_id}")
 
     print(f"action: Sandbox.connect({sandbox_id!r})")

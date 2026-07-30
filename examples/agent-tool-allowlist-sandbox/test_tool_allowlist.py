@@ -87,8 +87,9 @@ class ToolAllowlistTests(unittest.TestCase):
         for cmd in ("/bin/echo hi", "./echo hi", r"..\echo hi"):
             with self.subTest(cmd=cmd):
                 self.assertFalse(is_allowlisted(cmd))
-                with self.assertRaises(AllowlistDenied):
+                with self.assertRaises(AllowlistDenied) as ctx:
                     assert_allowlisted(cmd)
+                self.assertIn("path-style argv0", str(ctx.exception))
 
     def test_python3_requires_explicit_flag(self) -> None:
         cmd = "python3 -c 'print(1)'"

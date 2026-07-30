@@ -47,6 +47,8 @@ DEFAULT_ALLOWED_BINARIES: frozenset[str] = frozenset(
 )
 
 CODE_EXECUTION_BINARIES: frozenset[str] = frozenset({"python3"})
+# Intentionally bare ``python3`` only — versioned names like ``python3.11`` stay
+# denied unless added via extra_binaries + allow_unsafe_allowlist_extension.
 
 # Shell chaining / expansion markers. Rejected up front so a naive
 # first-token check cannot be bypassed via ``echo ok; bash -c ...``.
@@ -123,7 +125,10 @@ def is_allowlisted(
     # Path-style first tokens rejected (POSIX argv0 model for Linux guests).
     # ASCII `/` and `\` only — Unicode slash homoglyphs are out of scope for
     # this demo gate (same class of residual as undocumented shell metas).
-    if "/" in binary or "\\" in binary:
+    # Also refuse relative argv0 (``./echo``, ``../echo``). After posix
+    # ``shlex``, a Windows-style ``..\echo`` may collapse to ``..echo``;
+    # leading ``.`` still marks it as path-like.
+    if "/" in binary or "\\" in binary or binary.startswith("."):
         return False
     allowed = _resolve_allowed(
         enable_code_execution=enable_code_execution,
@@ -157,7 +162,12 @@ def assert_allowlisted(
             raise AllowlistDenied(f"command could not be parsed: {command!r}")
         if not parts:
             raise AllowlistDenied(f"command is empty: {command!r}")
+        binary = parts[0]
+        if "/" in binary or "\\" in binary or binary.startswith("."):
+            raise AllowlistDenied(
+                f"path-style argv0 refused: {binary!r} (full: {command!r})"
+            )
         raise AllowlistDenied(
-            f"command not on tool allowlist: {parts[0]!r} (full: {command!r})"
+            f"command not on tool allowlist: {binary!r} (full: {command!r})"
         )
     return command

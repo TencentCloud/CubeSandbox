@@ -101,6 +101,9 @@ prefer `cube-tool` so the guest profile is enforced.
 - Base image still has a shell; callers that bypass `cube-tool` are out of scope
   for the guest wrapper.
 - Allowlisting bare `cat` still permits `cat /etc/passwd` through the host gate.
+- Documented residuals (host gate is not a shell): `echo … > file` (guest write),
+  `cat < /etc/passwd` (input redirect), and glob chars `*` / `?` (guest shell
+  may expand them before the binary runs) — not treated as chaining metas here.
 - Growing the allowlist needs `extra_binaries` + `allow_unsafe_allowlist_extension=True`.
 - Default build does not apt-install curl.
 - Fan-out creates real VMs — keep `N` small.

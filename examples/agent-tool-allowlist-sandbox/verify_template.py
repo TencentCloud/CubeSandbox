@@ -10,23 +10,28 @@ Expect: host deny for bash, then tool-profile + echo → TEMPLATE_VERIFY_OK.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 from e2b_code_interpreter import Sandbox
 
 from env_utils import load_local_dotenv
 from tool_allowlist import AllowlistDenied, assert_allowlisted
 
-ROOT = Path(__file__).resolve().parent
+
+def _command_exit_code(exc: BaseException) -> int:
+    """Numeric exit_code from an SDK command failure, else re-raise ``exc``."""
+    if not hasattr(exc, "exit_code"):
+        raise exc
+    try:
+        return int(exc.exit_code)
+    except (TypeError, ValueError):
+        raise RuntimeError(
+            f"command failed with non-numeric exit_code: {exc.exit_code!r}"
+        ) from exc
 
 
 def main() -> None:
+    # Same .env policy as other demos: load nearby file, do not override shell env.
     load_local_dotenv()
-    local_env = ROOT / ".env"
-    if local_env.is_file():
-        from dotenv import load_dotenv
-
-        load_dotenv(local_env, override=True)
 
     template_id = os.environ["CUBE_TEMPLATE_ID"]
 
@@ -74,11 +79,14 @@ def main() -> None:
         assert_allowlisted(deny_guest)
         try:
             result = sandbox.commands.run(deny_guest)
-            code = int(result.exit_code)
+            try:
+                code = int(result.exit_code)
+            except (TypeError, ValueError) as err:
+                raise RuntimeError(
+                    f"command returned non-numeric exit_code: {result.exit_code!r}"
+                ) from err
         except Exception as exc:
-            if not hasattr(exc, "exit_code"):
-                raise
-            code = int(exc.exit_code)
+            code = _command_exit_code(exc)
         if code == 0:
             raise SystemExit("cube-tool unexpectedly allowed bash")
         print(f"cube-tool bash denied: exit={code}")
