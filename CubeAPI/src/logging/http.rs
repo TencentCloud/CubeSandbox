@@ -187,6 +187,17 @@ async fn run_dispatcher(
             }
         };
 
+        // One stable id per *logical event*, shared by every endpoint and
+        // reused across retries so receivers can deduplicate. It is assigned
+        // here — the moment the event is accepted for delivery — rather than
+        // inside the per-attempt retry loop, so any redelivery carries the
+        // same id and identifies the *same event*, not just the same retry
+        // sequence. (For at-least-once across a process restart the id must
+        // travel with a persisted copy of the event; that is the durable-sink
+        // follow-up. Assigning it at emission time is the prerequisite that
+        // makes such a durable sink possible.)
+        let delivery_id = Arc::new(uuid::Uuid::new_v4().to_string());
+
         // Snapshot the currently-subscribed endpoints (the read lock is
         // released before we start spawning delivery tasks).
         for endpoint in registry.matching(&event.event) {
@@ -195,8 +206,9 @@ async fn run_dispatcher(
             let client = client.clone();
             let body = body.clone();
             let event_name = event.event.clone();
+            let delivery_id = delivery_id.clone();
             tokio::spawn(async move {
-                deliver(&client, &endpoint, &event_name, &body).await;
+                deliver(&client, &endpoint, &event_name, &delivery_id, &body).await;
             });
         }
     }
@@ -271,20 +283,20 @@ fn sign(secret: &str, body: &[u8]) -> String {
 }
 
 /// Attempt delivery to a single endpoint with exponential-backoff retries.
+///
+/// `delivery_id` is the stable, event-level idempotency key assigned by the
+/// dispatcher (see [`run_dispatcher`]). It is echoed in `X-Cube-Delivery` on
+/// every attempt so a receiver that already processed an earlier attempt can
+/// recognise the retry as a duplicate.
 async fn deliver(
     client: &reqwest::Client,
     endpoint: &WebhookConfig,
     event_name: &str,
+    delivery_id: &str,
     body: &[u8],
 ) {
     let signature = endpoint.secret.as_deref().map(|s| sign(s, body));
     let timeout = Duration::from_millis(endpoint.timeout_ms);
-
-    // A stable id for this delivery, reused across every retry attempt so the
-    // receiver can deduplicate: if a delivery times out *after* the receiver
-    // already processed it, the retry carries the same `X-Cube-Delivery` id
-    // and the receiver can treat it as a duplicate.
-    let delivery_id = uuid::Uuid::new_v4().to_string();
 
     // First attempt + `max_retries` retries.
     for attempt in 0..=endpoint.max_retries {
@@ -293,7 +305,7 @@ async fn deliver(
             .timeout(timeout)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header("X-Cube-Event", event_name)
-            .header("X-Cube-Delivery", &delivery_id)
+            .header("X-Cube-Delivery", delivery_id)
             .body(body.to_vec());
         if let Some(sig) = &signature {
             req = req.header("X-Cube-Signature", sig);
@@ -445,12 +457,48 @@ mod tests {
         assert_eq!(got.body["template_id"], "tmpl-abc");
         assert!(got.body["timestamp"].is_string());
         assert!(got.signature.is_none());
-        // Every delivery carries a unique id for receiver-side dedup.
+        // Every event carries a stable id for receiver-side dedup.
         let delivery = got.delivery_header.expect("X-Cube-Delivery must be set");
         assert_eq!(
             delivery.len(),
             36,
             "delivery id should be a UUID string, got {delivery:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_event_shares_a_single_delivery_id_across_endpoints() {
+        // Two distinct endpoints both subscribed to the same event.
+        let (url_a, mut rx_a) = spawn_receiver().await;
+        let (url_b, mut rx_b) = spawn_receiver().await;
+        let logger = logger_for(vec![
+            WebhookConfig {
+                url: url_a,
+                events: vec!["sandbox.created".to_string()],
+                secret: None,
+                timeout_ms: 2000,
+                max_retries: 0,
+            },
+            WebhookConfig {
+                url: url_b,
+                events: vec!["sandbox.created".to_string()],
+                secret: None,
+                timeout_ms: 2000,
+                max_retries: 0,
+            },
+        ]);
+
+        logger.log(created_event("sbx-dedup")).await;
+
+        let a = recv_timeout(&mut rx_a).await.expect("endpoint A receives");
+        let b = recv_timeout(&mut rx_b).await.expect("endpoint B receives");
+        let id_a = a.delivery_header.expect("A has X-Cube-Delivery");
+        let id_b = b.delivery_header.expect("B has X-Cube-Delivery");
+        // The id identifies the *logical event*, so both endpoints see the
+        // same value — a receiver registered twice can dedup across them.
+        assert_eq!(
+            id_a, id_b,
+            "the same event must carry one delivery id across all endpoints"
         );
     }
 
