@@ -26,6 +26,7 @@ func metaEntry(t *testing.T, op, sid string, meta lifecycle.SandboxLifecycleMeta
 			lifecycle.FieldSandboxID: sid,
 			lifecycle.FieldPayload:   string(payload),
 			lifecycle.FieldTimestamp: "1700000000000",
+			lifecycle.FieldEventID:   "event-1",
 		},
 	}
 }
@@ -68,6 +69,9 @@ func TestDecodeEvent_Create(t *testing.T) {
 	}
 	if ev.Timestamp != 1700000000000 {
 		t.Fatalf("timestamp not decoded: %d", ev.Timestamp)
+	}
+	if ev.EventID != "event-1" {
+		t.Fatalf("event_id not decoded: %q", ev.EventID)
 	}
 }
 

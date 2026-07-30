@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 )
 
@@ -68,18 +69,30 @@ func (s *Store) PublishCreate(ctx context.Context, meta *SandboxLifecycleMeta) {
 	}
 }
 
-// PublishDelete drops the registry entry. Stream payload is empty; sidecars
-// only need the sandbox ID to evict.
+// PublishDelete drops the registry entry. The last metadata snapshot is copied
+// into the stream event when available so external consumers can include
+// template and host context; sidecars still only need the sandbox ID.
 func (s *Store) PublishDelete(ctx context.Context, sandboxID string) {
 	if s == nil || !s.enabled.Load() || s.doer == nil || sandboxID == "" {
 		return
+	}
+
+	var payload []byte
+	if meta, err := s.LoadMeta(ctx, sandboxID); err != nil {
+		log.G(ctx).Warnf("lifecycle: load delete meta %s failed: %v", sandboxID, err)
+	} else if meta != nil {
+		payload, err = json.Marshal(meta)
+		if err != nil {
+			log.G(ctx).Warnf("lifecycle: marshal delete meta %s failed: %v", sandboxID, err)
+			payload = nil
+		}
 	}
 
 	if _, err := s.doer.Do("HDEL", MetaKey, sandboxID); err != nil {
 		log.G(ctx).Warnf("lifecycle: HDEL %s %s failed: %v", MetaKey, sandboxID, err)
 	}
 
-	if _, err := s.xadd(OpDelete, sandboxID, nil); err != nil {
+	if _, err := s.xadd(OpDelete, sandboxID, payload); err != nil {
 		log.G(ctx).Warnf("lifecycle: XADD delete %s failed: %v", sandboxID, err)
 	}
 }
@@ -181,9 +194,9 @@ func (s *Store) LoadMeta(ctx context.Context, sandboxID string) (*SandboxLifecyc
 }
 
 // xadd builds an XADD ... MAXLEN ~ <N> * op <op> sandbox_id <id> [payload <p>]
-// ts <unix_ms> command and dispatches it.
+// ts <unix_ms> event_id <uuid> command and dispatches it.
 func (s *Store) xadd(op, sandboxID string, payload []byte) (interface{}, error) {
-	args := make([]interface{}, 0, 12)
+	args := make([]interface{}, 0, 14)
 	args = append(args,
 		EventStreamKey,
 		"MAXLEN", "~", strconv.Itoa(EventStreamMaxLen),
@@ -191,6 +204,7 @@ func (s *Store) xadd(op, sandboxID string, payload []byte) (interface{}, error) 
 		FieldOp, op,
 		FieldSandboxID, sandboxID,
 		FieldTimestamp, time.Now().UnixMilli(),
+		FieldEventID, uuid.NewString(),
 	)
 	if len(payload) > 0 {
 		args = append(args, FieldPayload, payload)

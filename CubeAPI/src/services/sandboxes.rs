@@ -16,7 +16,6 @@ use crate::{
         SandboxUpdateRequest, VolumeSpec,
     },
     error::{AppError, AppResult},
-    logging::{ArcLogger, LogEvent, LogLevel},
     models::{
         EgressRule, LogLevel as ModelLogLevel, NewSandbox, Sandbox, SandboxDetail, SandboxLog,
         SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxState,
@@ -67,7 +66,6 @@ pub struct SandboxService {
     cubemaster: CubeMasterClient,
     instance_type: String,
     sandbox_domain: String,
-    logger: ArcLogger,
 }
 
 impl SandboxService {
@@ -75,13 +73,11 @@ impl SandboxService {
         cubemaster: CubeMasterClient,
         instance_type: String,
         sandbox_domain: String,
-        logger: ArcLogger,
     ) -> Self {
         Self {
             cubemaster,
             instance_type,
             sandbox_domain,
-            logger,
         }
     }
 
@@ -285,8 +281,6 @@ impl SandboxService {
         resp.ret.into_result().map_err(internal_error)?;
 
         let envd_version = envd_version_from_annotations(&resp.ext_info);
-        self.log_lifecycle("sandbox.created", &resp.sandbox_id, Some(&template_id))
-            .await;
         Ok(self.sandbox_response(
             template_id,
             resp.sandbox_id,
@@ -316,8 +310,6 @@ impl SandboxService {
             .into_result()
             .map_err(|e| map_delete_cubemaster_err(e, sandbox_id))?;
 
-        self.log_lifecycle("sandbox.deleted", sandbox_id, None)
-            .await;
         Ok(())
     }
 
@@ -333,10 +325,7 @@ impl SandboxService {
             resp.ret.ret_msg,
             sandbox_id,
             "cannot be paused",
-        )?;
-
-        self.log_lifecycle("sandbox.paused", sandbox_id, None).await;
-        Ok(())
+        )
     }
 
     pub async fn resume_sandbox(
@@ -363,8 +352,6 @@ impl SandboxService {
         // which does not surface the traffic_access_token. The token only
         // matters at create time (so the caller can persist it); afterward
         // CubeProxy reads it directly from Redis. None here is correct.
-        self.log_lifecycle("sandbox.resumed", sandbox_id, Some(&d.template_id))
-            .await;
         Ok(self.sandbox_response(
             d.template_id,
             sandbox_id.to_string(),
@@ -381,8 +368,7 @@ impl SandboxService {
     ) -> AppResult<Sandbox> {
         let mut d = self.fetch_sandbox_detail(sandbox_id).await?;
 
-        let resumed = d.status == SandboxStatus::Paused;
-        if resumed {
+        if d.status == SandboxStatus::Paused {
             let resp = self
                 .cubemaster
                 .update_sandbox(&self.build_update_request(sandbox_id, "resume", timeout))
@@ -400,10 +386,6 @@ impl SandboxService {
         }
 
         let envd_version = envd_version_from_annotations(&d.annotations);
-        if resumed {
-            self.log_lifecycle("sandbox.resumed", sandbox_id, Some(&d.template_id))
-                .await;
-        }
         Ok(self.sandbox_response(
             d.template_id,
             sandbox_id.to_string(),
@@ -532,19 +514,6 @@ impl SandboxService {
             .map_err(|e| sandbox_not_found_or_internal(e, sandbox_id))?;
 
         Ok(())
-    }
-
-    async fn log_lifecycle(
-        &self,
-        event: &'static str,
-        sandbox_id: &str,
-        template_id: Option<&str>,
-    ) {
-        let mut event = LogEvent::new(LogLevel::Info, event).field("sandbox_id", sandbox_id);
-        if let Some(template_id) = template_id.filter(|value| !value.trim().is_empty()) {
-            event = event.field("template_id", template_id);
-        }
-        self.logger.log(event).await;
     }
 
     async fn fetch_sandbox_detail(
@@ -1091,8 +1060,7 @@ fn map_egress_rule(rule: &EgressRule) -> CubeEgressRule {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::collections::VecDeque;
-    use std::sync::{Arc, Mutex as StdMutex};
+    use std::sync::Arc;
 
     use super::{
         build_cube_network_config, filter_by_metadata, from_cubemaster_info,
@@ -1104,37 +1072,19 @@ mod tests {
         SandboxUpdateRequest,
     };
     use crate::error::AppError;
-    use crate::logging::{arc, LogEvent, Logger};
     use crate::models::{
         EgressRule, EgressRuleAction, EgressRuleInject, EgressRuleMatch, NewSandbox,
         SandboxNetworkConfig, SandboxState,
     };
-    use async_trait::async_trait;
     use axum::{
         extract::State,
         http::{header::RETRY_AFTER, StatusCode},
         response::IntoResponse,
-        routing::{delete, get, post},
+        routing::{delete, post},
         Json, Router,
     };
     use serde_json::Value;
     use tokio::sync::Mutex;
-
-    #[derive(Clone, Default)]
-    struct CapturingLogger {
-        events: Arc<StdMutex<Vec<LogEvent>>>,
-    }
-
-    #[async_trait]
-    impl Logger for CapturingLogger {
-        async fn log(&self, event: LogEvent) {
-            self.events.lock().unwrap().push(event);
-        }
-
-        fn name(&self) -> &'static str {
-            "capture"
-        }
-    }
 
     #[test]
     fn metadata_filter_matches_all_pairs() {
@@ -1676,7 +1626,6 @@ mod tests {
             CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
             "cubebox".to_string(),
             "cube.app".to_string(),
-            arc(CapturingLogger::default()),
         );
 
         let env_vars = HashMap::from([(
@@ -1756,7 +1705,6 @@ mod tests {
             CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
             "cubebox".to_string(),
             "cube.app".to_string(),
-            arc(CapturingLogger::default()),
         );
 
         let sandbox = service
@@ -1816,7 +1764,6 @@ mod tests {
             CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
             "cubebox".to_string(),
             "cube.app".to_string(),
-            arc(CapturingLogger::default()),
         );
 
         let err = service
@@ -2141,120 +2088,5 @@ mod tests {
         let mounts: Vec<crate::models::SandboxVolumeMount> = vec![];
         let has_mounts = !mounts.is_empty();
         assert!(!has_mounts, "no mounts → containers should stay empty");
-    }
-
-    #[tokio::test]
-    async fn service_emits_lifecycle_events_for_all_mutations() {
-        // The four detail responses cover resume, connect-from-paused (before
-        // and after), then connect-to-an-already-running sandbox respectively.
-        let statuses = Arc::new(StdMutex::new(VecDeque::from([1, 5, 1, 1])));
-        let app = Router::new()
-            .route(
-                "/cube/sandbox",
-                post(|| async {
-                    Json(serde_json::json!({
-                        "requestID": "request-1",
-                        "sandbox_id": "sandbox-1",
-                        "ret": {"ret_code": 0, "ret_msg": "ok"}
-                    }))
-                })
-                .delete(|| async {
-                    Json(serde_json::json!({
-                        "requestID": "request-1",
-                        "sandbox_id": "sandbox-1",
-                        "ret": {"ret_code": 0, "ret_msg": "ok"}
-                    }))
-                }),
-            )
-            .route(
-                "/cube/sandbox/update",
-                post(|| async {
-                    Json(serde_json::json!({
-                        "ret": {"ret_code": 0, "ret_msg": "ok"}
-                    }))
-                }),
-            )
-            .route(
-                "/cube/sandbox/info",
-                get({
-                    let statuses = statuses.clone();
-                    move || {
-                        let statuses = statuses.clone();
-                        async move {
-                            let status = statuses
-                                .lock()
-                                .unwrap()
-                                .pop_front()
-                                .expect("unexpected sandbox detail request");
-                            Json(serde_json::json!({
-                                "RequestID": "request-1",
-                                "ret": {"ret_code": 0, "ret_msg": "ok"},
-                                "data": [{
-                                    "sandbox_id": "sandbox-1",
-                                    "host_id": "host-1",
-                                    "status": status,
-                                    "template_id": "template-1",
-                                    "annotations": {},
-                                    "labels": {},
-                                    "containers": []
-                                }]
-                            }))
-                        }
-                    }
-                }),
-            );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-
-        let logger = CapturingLogger::default();
-        let service = SandboxService::new(
-            CubeMasterClient::new(
-                format!("http://{addr}"),
-                reqwest::Client::builder().no_proxy().build().unwrap(),
-            ),
-            "cubebox".to_string(),
-            "cube.local".to_string(),
-            arc(logger.clone()),
-        );
-        let create: crate::models::NewSandbox = serde_json::from_value(serde_json::json!({
-            "templateID": "template-1"
-        }))
-        .unwrap();
-
-        service.create_sandbox(create).await.unwrap();
-        service.pause_sandbox("sandbox-1").await.unwrap();
-        service.resume_sandbox("sandbox-1", Some(60)).await.unwrap();
-        service
-            .connect_sandbox("sandbox-1", Some(60))
-            .await
-            .unwrap();
-        service
-            .connect_sandbox("sandbox-1", Some(60))
-            .await
-            .unwrap();
-        service.kill_sandbox("sandbox-1").await.unwrap();
-
-        let events = logger.events.lock().unwrap();
-        let names: Vec<_> = events.iter().map(|event| event.event.as_str()).collect();
-        assert_eq!(
-            names,
-            [
-                "sandbox.created",
-                "sandbox.paused",
-                "sandbox.resumed",
-                "sandbox.resumed",
-                "sandbox.deleted",
-            ]
-        );
-        assert_eq!(
-            events[0].fields["template_id"],
-            serde_json::Value::String("template-1".to_string())
-        );
-        assert!(events.iter().all(|event| {
-            event.fields["sandbox_id"] == serde_json::Value::String("sandbox-1".to_string())
-        }));
     }
 }

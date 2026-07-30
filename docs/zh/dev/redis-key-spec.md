@@ -112,6 +112,19 @@ cube:{ver}:{scope}:{resource}[:{sub}...]:{id}
 | --- | --- |
 | `{sandboxID}` | JSON 编码的 `SandboxLifecycleMeta`（见 [`CubeMaster/pkg/lifecycle/schema.go`](https://github.com/tencentcloud/CubeSandbox/blob/master/CubeMaster/pkg/lifecycle/schema.go)） |
 
+**`sandbox:lifecycle:events`**（沙箱生命周期事件流，跨服务契约）
+
+| field | 含义 |
+| --- | --- |
+| `event_id` | CubeMaster 生成的稳定 UUID，用于跨系统幂等 |
+| `op` | 内部操作：`create`、`delete`、`update` 或 `state` |
+| `sandbox_id` | 沙箱 ID |
+| `ts` | Unix 毫秒事件时间 |
+| `payload` | 可选的 JSON metadata 或状态快照 |
+
+Redis Stream entry ID 只用于内部游标和排序；外部消费者必须使用
+`event_id` 作为事件身份。
+
 **`sandbox:lifecycle:state`**（暂停/恢复协调）
 
 | value | 含义 |

@@ -143,14 +143,19 @@ func onAfterCreate(ctx context.Context, sandboxID, hostID, hostIP string, req *s
 		EndAt:          projectedEndAt(now, timeoutSeconds),
 	}
 	if req.Annotations != nil {
-		// Template ID is conventionally carried via annotations from CubeAPI;
-		// the field is informational so we tolerate it being absent.
-		if v, ok := req.Annotations["template_id"]; ok {
-			meta.TemplateID = v
-		}
+		meta.TemplateID = templateIDFromAnnotations(req.Annotations)
 	}
 	store.PublishCreate(ctx, meta)
 	return nil
+}
+
+func templateIDFromAnnotations(annotations map[string]string) string {
+	// CubeAPI and CubeMaster use the namespaced key on the create wire. Keep
+	// the legacy short key as a fallback for older direct clients.
+	if templateID := annotations["cube.master.appsnapshot.template.id"]; templateID != "" {
+		return templateID
+	}
+	return annotations["template_id"]
 }
 
 func onAfterDestroy(ctx context.Context, sandboxID string) error {

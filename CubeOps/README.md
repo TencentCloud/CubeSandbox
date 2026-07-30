@@ -132,9 +132,26 @@ individual fields without editing the YAML file.
 | `DATABASE_URL` | *(required)* | MySQL connection URL. If unset, built from `CUBE_SANDBOX_MYSQL_{HOST,PORT,USER,PASSWORD,DB}` env vars. |
 | `CUBE_MASTER_ADDR` | `http://127.0.0.1:8089` | CubeMaster base URL |
 | `CUBE_API_SANDBOX_DOMAIN` | `cube.app` | Sandbox domain (used by SDK handler for sandbox URL construction) |
-| `REDIS_URL` | *(optional)* | Redis for JWT blacklist |
+| `REDIS_URL` | *(optional)* | Shared Redis URL; required when lifecycle Webhooks are enabled |
+| `CUBE_OPS_WEBHOOK_ENABLED` | `false` | Enable background lifecycle Webhook delivery |
+| `CUBE_OPS_WEBHOOK_ENDPOINTS` | *(empty)* | JSON array of endpoint name, URL, subscribed events and optional secret |
 
 **Resolution order**: environment variables > YAML file > built-in defaults.
+
+## Lifecycle Webhooks
+
+CubeOps consumes CubeMaster's existing
+`cube:v1:shared:sandbox:lifecycle:events` Redis Stream in the independent
+`cubeops-webhook` consumer group. It maps create/delete and paused/running
+state entries to `sandbox.created`, `sandbox.deleted`, `sandbox.paused` and
+`sandbox.resumed`, then performs filtering, optional HMAC-SHA256 signing and
+bounded exponential-backoff retries in background workers.
+
+CubeAPI is not involved in this delivery path. API requests therefore do not
+wait for receivers, and pending entries can be reclaimed by another CubeOps
+replica after a process restart. See
+[`docs/guide/webhook.md`](../docs/guide/webhook.md) for configuration,
+payloads, delivery semantics and the runnable receiver.
 
 ## Authentication
 

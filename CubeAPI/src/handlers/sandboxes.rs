@@ -176,6 +176,14 @@ pub async fn create_sandbox(
     let sandbox_id = created.sandbox_id.clone();
 
     tracing::info!(sandbox_id = %sandbox_id, template_id = %template_id, "create_sandbox: success");
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Info, "sandbox.created")
+                .field("sandbox_id", &sandbox_id)
+                .field("template_id", &template_id),
+        )
+        .await;
 
     Ok((StatusCode::CREATED, Json(created)))
 }
@@ -217,6 +225,10 @@ pub async fn kill_sandbox(
     state.services.sandboxes.kill_sandbox(&sandbox_id).await?;
 
     tracing::info!(sandbox_id = %sandbox_id, "kill_sandbox: success");
+    state
+        .logger
+        .log(LogEvent::new(LogLevel::Info, "sandbox.deleted").field("sandbox_id", &sandbox_id))
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -251,6 +263,10 @@ pub async fn pause_sandbox(
     state.services.sandboxes.pause_sandbox(&sandbox_id).await?;
 
     tracing::info!(sandbox_id = %sandbox_id, "pause_sandbox: success");
+    state
+        .logger
+        .log(LogEvent::new(LogLevel::Info, "sandbox.paused").field("sandbox_id", &sandbox_id))
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -292,6 +308,10 @@ pub async fn resume_sandbox(
         .await?;
 
     tracing::info!(sandbox_id = %sandbox_id, "resume_sandbox: success");
+    state
+        .logger
+        .log(LogEvent::new(LogLevel::Info, "sandbox.resumed").field("sandbox_id", &sandbox_id))
+        .await;
 
     Ok((StatusCode::CREATED, Json(sandbox)))
 }

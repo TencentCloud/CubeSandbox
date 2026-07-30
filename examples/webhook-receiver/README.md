@@ -1,140 +1,94 @@
 # CubeSandbox Webhook Receiver Example
 
-This example starts a small HTTP server for testing CubeAPI Webhook delivery.
-It uses only the Python standard library.
+This directory contains a Python standard-library receiver for CubeOps
+Webhook delivery. It validates the optional HMAC signature and can forward a
+text message to an Enterprise WeChat robot.
 
 ## Start the receiver
 
 ```bash
-cd examples/webhook-receiver
-python3 receiver.py --port 9000 --secret change-me
+python3 examples/webhook-receiver/receiver.py \
+  --port 9000 \
+  --secret change-me
 ```
 
-CubeAPI should point to:
+Configure CubeOps—not CubeAPI—to send to:
 
 ```text
 http://127.0.0.1:9000/webhook
 ```
 
-## CubeAPI config
+The complete YAML configuration is in
+[`docs/guide/webhook.md`](../../docs/guide/webhook.md).
 
-CubeAPI reads webhook config from environment variables. Start CubeAPI with:
+## Signature
 
-```bash
-export WEBHOOK__ENABLED=true
-export WEBHOOK__ENDPOINTS__0__NAME=local-receiver
-export WEBHOOK__ENDPOINTS__0__URL=http://127.0.0.1:9000/webhook
-export WEBHOOK__ENDPOINTS__0__EVENTS__0=sandbox.created
-export WEBHOOK__ENDPOINTS__0__EVENTS__1=sandbox.deleted
-export WEBHOOK__ENDPOINTS__0__EVENTS__2=sandbox.paused
-export WEBHOOK__ENDPOINTS__0__EVENTS__3=sandbox.resumed
-export WEBHOOK__ENDPOINTS__0__SECRET=change-me
-```
-
-## Signature verification
-
-CubeAPI signs requests when `secret` is configured:
+With `secret` configured, CubeOps sends:
 
 ```text
 X-Cube-Webhook-Timestamp: <unix seconds>
-X-Cube-Webhook-Signature: sha256=<hex hmac>
+X-Cube-Webhook-Signature: sha256=<HMAC-SHA256(timestamp + "." + raw_body)>
 ```
 
-The signed payload is:
+The receiver rejects invalid or stale signatures. Change the replay window
+with `--tolerance-seconds`.
 
-```text
-<timestamp>.<raw_body>
-```
+## Redis Stream smoke test
 
-The example receiver verifies the signature and rejects stale timestamps using `--tolerance-seconds`.
-
-## Enterprise WeChat forwarding
-
-Enterprise WeChat robot payloads are not compatible with the generic CubeSandbox Webhook payload. Use the receiver as a small adapter:
+With Redis and a webhook-enabled CubeOps already running:
 
 ```bash
-python3 receiver.py \
-  --port 9000 \
-  --secret change-me \
-  --wechat-webhook-url "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_KEY"
-```
-
-The receiver converts `event_id`, `event`, `sandbox_id`, `timestamp`, `template_id`, and host context into a text message before forwarding.
-
-## Local mock verification
-
-When a local host cannot run the CubeSandbox compute data plane, run the
-CubeAPI lifecycle webhook path against the included CubeMaster contract mock:
-
-```bash
+REDIS_URL='redis://:PASSWORD@127.0.0.1:6379/0' \
 ./examples/webhook-receiver/verify-local-mock.sh
 ```
 
-The script starts the mock, this receiver, and a locally built CubeAPI binary.
-It verifies create, pause, resume, and delete responses, then prints the four
-received webhook payloads. Set `CUBE_API_BIN` to override the default binary
-path (`CubeAPI/target/debug/cube-api`).
+The script starts the receiver and injects representative CubeMaster lifecycle
+entries into `cube:v1:shared:sandbox:lifecycle:events`. It expects four
+callbacks in create, pause, resume and delete order.
 
-## Real local-cluster verification
+This test does not start CubeOps because CubeOps requires the deployment
+database. It checks `/health` before injecting events.
 
-Run the shared real-cluster verifier from the CubeAPI/CubeMaster control node
-after the cluster services are healthy:
+## Real cluster
+
+On a one-click control node with the current CubeMaster and CubeOps installed:
 
 ```bash
 ./examples/webhook-receiver/verify-real-cluster.sh
 ```
 
-The verifier builds and installs the current CubeAPI binary by default,
-creates a template from
-`sandbox-code:latest`, and verifies signed `created`, `paused`, `resumed`, and
-`deleted` callbacks. It writes an evidence archive to
-`/tmp/cube-webhook-real.tar.gz`.
+The verifier temporarily configures the `cube-sandbox-cubeops.service` with a
+unique consumer group, runs a real create/pause/resume/delete sequence through
+CubeAPI, checks each signed callback before continuing, then restores the
+service configuration and prior CubeOps binary.
 
-The verifier does not start services, alter networking, or modify persistent
-webhook configuration. It waits for any healthy compute node registered in
-CubeMaster, so it can verify a multi-node cluster when run on its
-CubeAPI/CubeMaster control node.
-
-For a control node with non-default local addresses, configure the endpoints:
+## Enterprise WeChat
 
 ```bash
-CUBE_API_URL=http://10.0.0.10:3000 \
-CUBEMASTER_ADDRESS=10.0.0.10 \
-CUBEMASTER_PORT=8089 \
-./examples/webhook-receiver/verify-real-cluster.sh
+python3 examples/webhook-receiver/receiver.py \
+  --port 9000 \
+  --secret change-me \
+  --wechat-webhook-url \
+  "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_KEY"
 ```
 
-The receiver is local to the control node by default. When CubeAPI needs to
-reach a receiver on another host, bind it and publish its callback URL:
+The receiver converts the generic CubeSandbox payload to a WeChat text
+message. Keep this adapter between CubeOps and WeChat because robot payloads
+do not use the generic Webhook schema.
 
-```bash
-RECEIVER_HOST=0.0.0.0 \
-WEBHOOK_ENDPOINT_URL=http://10.0.0.20:9000/webhook \
-WEBHOOK_NO_PROXY=10.0.0.20,127.0.0.1,localhost \
-./examples/webhook-receiver/verify-real-cluster.sh
-```
-
-If the registry is only reachable through a configured host proxy, set it
-explicitly:
-
-```bash
-CUBEMASTER_PROXY=http://host.docker.internal:7897 \
-  ./examples/webhook-receiver/verify-real-cluster.sh
-```
-
-## Expected payload
+## Example payload
 
 ```json
 {
-  "event_id": "sandbox.created.sandbox-1.1782945600000000000",
+  "event_id": "80639f37-1b79-42c4-93ff-a33cd93c5eef",
   "event": "sandbox.created",
   "timestamp": "2026-07-01T20:00:00Z",
   "sandbox_id": "sandbox-1",
   "template_id": "template-1",
   "host_id": "node-1",
-  "host_ip": "10.0.0.1",
   "instance_type": "cubebox"
 }
 ```
 
-Use `event_id` for idempotency. Delivery is at-most-once with limited retries and is not persisted.
+Receivers must use `event_id` for idempotency because Redis pending recovery
+can cause duplicate delivery.

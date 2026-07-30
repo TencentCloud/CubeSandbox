@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
-# Runs CubeAPI lifecycle webhook verification without a CubeSandbox compute node.
+# Smoke-tests CubeOps delivery by injecting CubeMaster-compatible Redis events.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-API_BIN="${CUBE_API_BIN:-${ROOT_DIR}/CubeAPI/target/debug/cube-api}"
 RUN_DIR="${WEBHOOK_E2E_LOG_DIR:-$(mktemp -d /tmp/cubesandbox-webhook-e2e.XXXXXX)}"
-API_PORT="${WEBHOOK_E2E_API_PORT:-13000}"
-MOCK_PORT="${WEBHOOK_E2E_MOCK_PORT:-18089}"
+CUBE_OPS_URL="${CUBE_OPS_URL:-http://127.0.0.1:3010}"
+REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/0}"
 RECEIVER_PORT="${WEBHOOK_E2E_RECEIVER_PORT:-9000}"
+STREAM=cube:v1:shared:sandbox:lifecycle:events
 
 require_command() {
     command -v "$1" >/dev/null 2>&1 || {
@@ -18,75 +17,67 @@ require_command() {
 }
 
 cleanup() {
-    kill "${API_PID:-}" "${RECEIVER_PID:-}" "${MOCK_PID:-}" 2>/dev/null || true
-    wait "${API_PID:-}" "${RECEIVER_PID:-}" "${MOCK_PID:-}" 2>/dev/null || true
+    kill "${RECEIVER_PID:-}" 2>/dev/null || true
+    wait "${RECEIVER_PID:-}" 2>/dev/null || true
 }
 trap cleanup EXIT
 
 require_command curl
 require_command python3
-[[ -x "${API_BIN}" ]] || {
-    echo "CubeAPI binary not found: ${API_BIN}" >&2
-    echo "Build it first, for example: (cd CubeAPI && cargo build)" >&2
-    exit 1
-}
-
+require_command redis-cli
 mkdir -p "${RUN_DIR}"
-wait_for_http() {
-    local url="$1"
 
-    for _ in $(seq 1 50); do
-        curl -fsS "${url}" >/dev/null 2>&1 && return 0
-        sleep 0.1
-    done
-    echo "service did not become ready: ${url}" >&2
-    return 1
-}
-
-python3 "${SCRIPT_DIR}/cubemaster-mock.py" --port "${MOCK_PORT}" >"${RUN_DIR}/cubemaster-mock.log" 2>&1 &
-MOCK_PID=$!
-python3 "${SCRIPT_DIR}/receiver.py" --port "${RECEIVER_PORT}" --secret change-me >"${RUN_DIR}/receiver.log" 2>&1 &
+python3 "${SCRIPT_DIR}/receiver.py" --port "${RECEIVER_PORT}" --secret change-me \
+    >"${RUN_DIR}/receiver.log" 2>&1 &
 RECEIVER_PID=$!
-wait_for_http "http://127.0.0.1:${MOCK_PORT}/health"
-wait_for_http "http://127.0.0.1:${RECEIVER_PORT}/health"
 
-env \
-    CUBE_API_BIND="127.0.0.1:${API_PORT}" \
-    CUBE_API_SANDBOX_DOMAIN=cube.local \
-    CUBE_MASTER_ADDR="http://127.0.0.1:${MOCK_PORT}" \
-    LOG_DIR="${RUN_DIR}/cube-api-log" \
-    WEBHOOK__ENABLED=true \
-    WEBHOOK__ENDPOINTS__0__NAME=local-receiver \
-    WEBHOOK__ENDPOINTS__0__URL="http://127.0.0.1:${RECEIVER_PORT}/webhook" \
-    WEBHOOK__ENDPOINTS__0__EVENTS__0=sandbox.created \
-    WEBHOOK__ENDPOINTS__0__EVENTS__1=sandbox.deleted \
-    WEBHOOK__ENDPOINTS__0__EVENTS__2=sandbox.paused \
-    WEBHOOK__ENDPOINTS__0__EVENTS__3=sandbox.resumed \
-    WEBHOOK__ENDPOINTS__0__SECRET=change-me \
-    NO_PROXY=127.0.0.1,localhost \
-    "${API_BIN}" >"${RUN_DIR}/cube-api.log" 2>&1 &
-API_PID=$!
-
-wait_for_http "http://127.0.0.1:${API_PORT}/health"
-
-create="$(curl -fsS -X POST "http://127.0.0.1:${API_PORT}/sandboxes" \
-    -H 'Content-Type: application/json' -d '{"templateID":"tpl-local","timeout":120}')"
-sandbox_id="$(printf '%s' "${create}" | sed -n 's/.*"sandboxID":"\([^"]*\)".*/\1/p')"
-[[ "${sandbox_id}" == "mock-sandbox-1" ]]
-printf 'CREATE 200 %s\n' "${create}"
-curl -fsS -o /dev/null -w 'PAUSE %{http_code}\n' -X POST "http://127.0.0.1:${API_PORT}/sandboxes/${sandbox_id}/pause"
-curl -fsS -o /dev/null -w 'RESUME %{http_code}\n' -X POST "http://127.0.0.1:${API_PORT}/sandboxes/${sandbox_id}/resume" \
-    -H 'Content-Type: application/json' -d '{"timeout":120,"autoPause":false}'
-curl -fsS -o /dev/null -w 'DELETE %{http_code}\n' -X DELETE "http://127.0.0.1:${API_PORT}/sandboxes/${sandbox_id}"
-
-for _ in $(seq 1 30); do
-    [[ "$(grep -c '"event"' "${RUN_DIR}/receiver.log" || true)" -eq 4 ]] && break
+for _ in $(seq 1 50); do
+    curl -fsS "http://127.0.0.1:${RECEIVER_PORT}/health" >/dev/null 2>&1 && break
     sleep 0.1
 done
-[[ "$(grep -c '"event"' "${RUN_DIR}/receiver.log" || true)" -eq 4 ]]
+curl -fsS "${CUBE_OPS_URL}/health" >/dev/null
 
-echo
-echo "--- Receiver output ---"
+event_id() {
+    python3 -c 'import uuid; print(uuid.uuid4())'
+}
+
+now_ms() {
+    python3 -c 'import time; print(time.time_ns() // 1_000_000)'
+}
+
+redis-cli -u "${REDIS_URL}" XADD "${STREAM}" '*' \
+    op create sandbox_id sandbox-smoke ts "$(now_ms)" event_id "$(event_id)" \
+    payload '{"sandbox_id":"sandbox-smoke","template_id":"template-smoke","instance_type":"cubebox"}' >/dev/null
+redis-cli -u "${REDIS_URL}" XADD "${STREAM}" '*' \
+    op state sandbox_id sandbox-smoke ts "$(now_ms)" event_id "$(event_id)" \
+    payload '{"state":"paused","actor":"cubemaster","source":"smoke-test"}' >/dev/null
+redis-cli -u "${REDIS_URL}" XADD "${STREAM}" '*' \
+    op state sandbox_id sandbox-smoke ts "$(now_ms)" event_id "$(event_id)" \
+    payload '{"state":"running","actor":"cubemaster","source":"smoke-test"}' >/dev/null
+redis-cli -u "${REDIS_URL}" XADD "${STREAM}" '*' \
+    op delete sandbox_id sandbox-smoke ts "$(now_ms)" event_id "$(event_id)" >/dev/null
+
+for _ in $(seq 1 50); do
+    grep -oE '"event": "sandbox\.[^"]+"' "${RUN_DIR}/receiver.log" \
+        >"${RUN_DIR}/events.txt" || true
+    [[ "$(wc -l <"${RUN_DIR}/events.txt")" -ge 4 ]] && break
+    sleep 0.2
+done
+
+python3 - "${RUN_DIR}/events.txt" <<'PY'
+import sys
+
+expected = [
+    '"event": "sandbox.created"',
+    '"event": "sandbox.paused"',
+    '"event": "sandbox.resumed"',
+    '"event": "sandbox.deleted"',
+]
+actual = [line.strip() for line in open(sys.argv[1], encoding="utf-8")]
+if actual != expected:
+    raise SystemExit(f"Webhook events mismatch:\nexpected={expected}\nactual={actual}")
+print("CubeOps Webhook smoke test: PASS")
+PY
+
 cat "${RUN_DIR}/receiver.log"
-echo
 echo "Logs saved to: ${RUN_DIR}"

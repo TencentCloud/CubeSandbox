@@ -1,6 +1,25 @@
 # Webhook Event Notifications
 
-CubeAPI can send asynchronous HTTP callbacks when sandbox lifecycle events succeed.
+CubeSandbox can asynchronously notify HTTP endpoints after sandbox lifecycle
+changes. CubeMaster writes lifecycle events to the existing Redis Stream and
+CubeOps consumes them in a separate consumer group:
+
+```text
+CubeAPI / CubeOps control request
+              |
+              v
+         CubeMaster ----> cube:v1:shared:sandbox:lifecycle:events
+                                      |
+                                      v
+                                  CubeOps
+                         filter / sign / retry / log
+                                      |
+                                      v
+                              HTTP endpoint
+```
+
+CubeAPI is not part of Webhook delivery. An unavailable or slow receiver
+therefore cannot delay sandbox API requests.
 
 Supported events:
 
@@ -9,40 +28,68 @@ Supported events:
 - `sandbox.paused`
 - `sandbox.resumed`
 
-Webhook delivery runs outside the sandbox create, delete, pause, and resume main paths. Receiver timeout or network failure does not fail the sandbox API request.
+The internal lifecycle `update` operation is not exposed as a Webhook event.
 
-## CubeAPI Configuration
+## CubeOps configuration
 
-CubeAPI reads webhook settings from environment variables. Nested fields use `__` as the separator.
+Add the following to `/etc/cube/ops.yaml`, or to the file selected by
+`CUBE_OPS_CONFIG`:
 
-```bash
-export WEBHOOK__ENABLED=true
-export WEBHOOK__QUEUE_SIZE=1024
-export WEBHOOK__DELIVERY_CONCURRENCY=64
-export WEBHOOK__DEFAULT_TIMEOUT_MS=3000
-export WEBHOOK__DEFAULT_MAX_RETRIES=3
-export WEBHOOK__DEFAULT_INITIAL_BACKOFF_MS=200
-export WEBHOOK__DEFAULT_MAX_BACKOFF_MS=2000
-export WEBHOOK__ENDPOINTS__0__NAME=local-receiver
-export WEBHOOK__ENDPOINTS__0__URL=http://127.0.0.1:9000/webhook
-export WEBHOOK__ENDPOINTS__0__EVENTS__0=sandbox.created
-export WEBHOOK__ENDPOINTS__0__EVENTS__1=sandbox.deleted
-export WEBHOOK__ENDPOINTS__0__EVENTS__2=sandbox.paused
-export WEBHOOK__ENDPOINTS__0__EVENTS__3=sandbox.resumed
-export WEBHOOK__ENDPOINTS__0__SECRET=change-me
-export WEBHOOK__ENDPOINTS__0__TIMEOUT_MS=3000
-export WEBHOOK__ENDPOINTS__0__MAX_RETRIES=3
+```yaml
+redis_url: "redis://:PASSWORD@127.0.0.1:6379/0"
+
+webhook:
+  enabled: true
+  consumer_group: "cubeops-webhook"
+  # Leave consumer_name empty to generate a unique name per process.
+  consumer_name: ""
+  read_block: "5s"
+  pending_idle: "2m"
+  workers: 8
+  default_timeout: "3s"
+  default_max_retries: 3
+  initial_backoff: "200ms"
+  max_backoff: "2s"
+  endpoints:
+    - name: local-receiver
+      url: "http://127.0.0.1:9000/webhook"
+      events:
+        - sandbox.created
+        - sandbox.deleted
+        - sandbox.paused
+        - sandbox.resumed
+      secret: "change-me"
+      timeout: "3s"
+      max_retries: 3
 ```
 
-CubeAPI registers the HTTP webhook logger in `MultiLogger` at startup. Restart CubeAPI after changing endpoints, secrets, or retry values.
+Restart CubeOps after changing the static configuration. All replicas in one
+CubeOps deployment must use the same endpoint configuration because the
+consumer group distributes events between replicas.
 
-Endpoint URL validation only requires `http` or `https` scheme and a non-empty host. Private and loopback addresses are allowed for local receivers and internal alerting systems.
+For environment-only deployments, enable delivery and provide the endpoint
+array as JSON:
+
+```bash
+export REDIS_URL='redis://:PASSWORD@127.0.0.1:6379/0'
+export CUBE_OPS_WEBHOOK_ENABLED=true
+export CUBE_OPS_WEBHOOK_ENDPOINTS='[
+  {
+    "name": "local-receiver",
+    "url": "http://127.0.0.1:9000/webhook",
+    "events": ["sandbox.created", "sandbox.deleted", "sandbox.paused", "sandbox.resumed"],
+    "secret": "change-me"
+  }
+]'
+```
+
+YAML is recommended when timeout and retry overrides are needed.
 
 ## Payload
 
 ```json
 {
-  "event_id": "sandbox.created.sandbox-1.1782945600000000000",
+  "event_id": "80639f37-1b79-42c4-93ff-a33cd93c5eef",
   "event": "sandbox.created",
   "timestamp": "2026-07-01T20:00:00Z",
   "sandbox_id": "sandbox-1",
@@ -50,75 +97,89 @@ Endpoint URL validation only requires `http` or `https` scheme and a non-empty h
   "host_id": "node-1",
   "host_ip": "10.0.0.1",
   "instance_type": "cubebox",
-  "metadata": {}
+  "metadata": {
+    "auto_pause": true,
+    "auto_resume": true,
+    "timeout_seconds": 300
+  }
 }
 ```
 
-Fields:
+`event_id` is a UUID generated once by CubeMaster and remains unchanged across
+delivery retries. The Redis Stream ID is retained only as an internal consumer
+cursor. Receivers should store `event_id` and handle duplicate deliveries
+idempotently.
 
-- `event_id`: Unique event identifier in `<event>.<sandbox_id>.<unix_nano>` format. Use it for receiver-side idempotency.
-- `event`: Event type.
-- `timestamp`: Event time in UTC RFC3339Nano format.
-- `sandbox_id`: Sandbox ID.
-- `template_id`, `host_id`, `host_ip`, `instance_type`: Best-effort context fields.
-- `metadata`: Reserved for future context.
+Context fields are best effort. Create events contain the lifecycle metadata
+snapshot. Delete events always contain `sandbox_id`; pause/resume events also
+contain their actor and source in `metadata`.
 
-## Signature
+## Signature verification
 
-If an endpoint has `secret`, CubeAPI adds:
+When an endpoint has a `secret`, CubeOps adds:
 
 ```text
 X-Cube-Webhook-Timestamp: <unix seconds>
-X-Cube-Webhook-Signature: sha256=<hex hmac>
+X-Cube-Webhook-Signature: sha256=<hex HMAC>
 ```
 
-Signature payload:
+The signed bytes are:
 
 ```text
-<timestamp>.<raw_body>
+<timestamp>.<raw request body>
 ```
 
-Python verification example:
+Python verification:
 
 ```python
 import hashlib
 import hmac
 
-payload = timestamp.encode() + b"." + raw_body
-expected = "sha256=" + hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
-ok = hmac.compare_digest(expected, signature)
+signed = timestamp.encode() + b"." + raw_body
+expected = "sha256=" + hmac.new(
+    secret.encode(), signed, hashlib.sha256
+).hexdigest()
+valid = hmac.compare_digest(expected, signature)
 ```
 
-Receivers should reject stale timestamps to reduce replay risk.
+Receivers should also reject timestamps outside a short tolerance window to
+limit replay.
 
 ## Delivery semantics
 
-Webhook delivery is at-most-once with limited retries. Events are queued in memory and are not persisted. If the queue is full or delivery concurrency is exhausted, CubeAPI drops the event and logs a warning.
+- CubeMaster appends the event without waiting for an HTTP receiver.
+- CubeOps reads through the `cubeops-webhook` Redis consumer group.
+- Non-2xx responses, timeouts and connection errors use bounded exponential
+  backoff.
+- A process crash before acknowledgement leaves the entry pending; another
+  CubeOps replica can reclaim it after `pending_idle`.
+- When the configured retry budget is exhausted, CubeOps records the final
+  error and acknowledges the entry. There is currently no dead-letter queue.
+- Delivery is at-least-once while an event is pending, so duplicates are
+  possible and `event_id` must be used for receiver-side deduplication.
 
-Retries use exponential backoff with a bounded maximum backoff. Delivery work runs with a concurrency limit so failed endpoints do not block sandbox API requests.
+## Local validation and Enterprise WeChat
 
-## Local validation
-
-Start the example receiver:
+Start the standard-library example receiver:
 
 ```bash
-cd examples/webhook-receiver
-python3 receiver.py --port 9000 --secret change-me
+python3 examples/webhook-receiver/receiver.py \
+  --port 9000 \
+  --secret change-me
 ```
 
-Configure CubeAPI to call `http://127.0.0.1:9000/webhook`, restart CubeAPI, then create, pause, resume, and delete a sandbox through CubeAPI. The receiver should print one payload for each subscribed event.
+After CubeOps is configured, create, pause, resume and delete a sandbox through
+CubeAPI or CubeOps. The receiver prints each verified payload.
 
-To verify non-blocking behavior, stop the receiver and repeat sandbox operations. Sandbox API calls should still succeed while CubeAPI logs delivery failures and retries.
-
-## Enterprise WeChat
-
-Enterprise WeChat robot payloads are not compatible with the generic CubeSandbox payload. Use the example receiver as an adapter:
+The same receiver can act as an Enterprise WeChat adapter:
 
 ```bash
-python3 receiver.py \
+python3 examples/webhook-receiver/receiver.py \
   --port 9000 \
   --secret change-me \
-  --wechat-webhook-url "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_KEY"
+  --wechat-webhook-url \
+  "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_KEY"
 ```
 
-The receiver converts the CubeSandbox event into a WeChat text message and forwards it.
+See [the example README](../../examples/webhook-receiver/README.md) for a
+Redis Stream smoke test and real-cluster verification.

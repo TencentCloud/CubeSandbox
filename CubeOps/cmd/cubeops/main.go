@@ -17,6 +17,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/server"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/webhook"
 )
 
 func main() {
@@ -57,6 +58,21 @@ func main() {
 		os.Exit(1)
 	}
 	cfg.JWTSecret = jwtSecret
+
+	var webhookService *webhook.Service
+	if cfg.Webhook.Enabled {
+		webhookService, err = webhook.New(cfg.RedisURL, cfg.Webhook)
+		if err != nil {
+			slog.Error("failed to initialise webhook consumer", "error", err)
+			os.Exit(1)
+		}
+		defer webhookService.Close()
+		go func() {
+			if err := webhookService.Run(ctx); err != nil {
+				slog.Error("webhook consumer stopped", "error", err)
+			}
+		}()
+	}
 
 	srv := server.New(cfg, s)
 

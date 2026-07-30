@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -139,13 +140,14 @@ func TestNoValue(t *testing.T) {
 }
 
 func TestSaveFile(t *testing.T) {
+	cacheFile := filepath.Join(t.TempDir(), "localcache.gob")
 	localCache := NewCache("test",
 		func(ctx context.Context, key string) (val interface{}, found bool, err error) {
 			return "Test", true, nil
 		},
 		&LocalCacheConfig{
 			OpenCacheFile: true,
-			LoadFileName:  "a.txt",
+			LoadFileName:  cacheFile,
 			ExpiredUse:    true,
 			Expired:       5 * time.Second,
 		})
@@ -163,7 +165,7 @@ func TestSaveFile(t *testing.T) {
 		},
 		&LocalCacheConfig{
 			OpenCacheFile: true,
-			LoadFileName:  "a.txt",
+			LoadFileName:  cacheFile,
 			ExpiredUse:    true,
 			Expired:       5 * time.Second,
 		})

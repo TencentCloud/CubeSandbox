@@ -55,6 +55,7 @@ const (
 	FieldSandboxID = "sandbox_id"
 	FieldPayload   = "payload"
 	FieldTimestamp = "ts"
+	FieldEventID   = "event_id"
 )
 
 // SandboxLifecycleMeta mirrors CubeMaster/pkg/lifecycle.SandboxLifecycleMeta.

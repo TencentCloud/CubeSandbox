@@ -1,26 +1,29 @@
 #!/usr/bin/env bash
-# Verifies signed CubeAPI lifecycle webhooks from a CubeSandbox control node.
+# Verifies signed CubeOps lifecycle Webhooks from a CubeSandbox control node.
 # It expects the cluster services to be running before verification starts.
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUN_DIR="${WEBHOOK_REAL_LOG_DIR:-$(mktemp -d /tmp/cubesandbox-webhook-real.XXXXXX)}"
-DROPIN=/etc/systemd/system/cube-sandbox-cube-api.service.d/webhook-e2e.conf
+DROPIN=/etc/systemd/system/cube-sandbox-cubeops.service.d/webhook-e2e.conf
 CUBEMASTER_DROPIN=/etc/systemd/system/cube-sandbox-cubemaster.service.d/template-pull-proxy.conf
-WEBHOOK_ENV_FILE="/run/cube-sandbox-systemd/webhook-e2e-$$.env"
+WEBHOOK_CONFIG_FILE="/run/cube-sandbox-systemd/webhook-e2e-$$.yaml"
+WEBHOOK_GROUP="cubeops-webhook-e2e-$$"
 ONE_CLICK_ENV=/usr/local/services/cubetoolbox/.one-click.env
 CMCLI=/usr/local/services/cubetoolbox/CubeMaster/bin/cubemastercli
+CUBE_OPS_BIN=/usr/local/services/cubetoolbox/CubeOps/bin/cubeops
 CUBEMASTER_ADDRESS="${CUBEMASTER_ADDRESS:-127.0.0.1}"
 CUBEMASTER_PORT="${CUBEMASTER_PORT:-8089}"
 CUBEMASTER_SERVICE="${CUBEMASTER_SERVICE:-cube-sandbox-cubemaster.service}"
 CUBE_API_URL="${CUBE_API_URL:-http://127.0.0.1:3000}"
 CUBE_API_SERVICE="${CUBE_API_SERVICE:-cube-sandbox-cube-api.service}"
+CUBE_OPS_URL="${CUBE_OPS_URL:-http://127.0.0.1:3010}"
+CUBE_OPS_SERVICE="${CUBE_OPS_SERVICE:-cube-sandbox-cubeops.service}"
 RECEIVER_HOST="${RECEIVER_HOST:-127.0.0.1}"
 RECEIVER_PORT="${RECEIVER_PORT:-9000}"
 WEBHOOK_ENDPOINT_URL="${WEBHOOK_ENDPOINT_URL:-http://${RECEIVER_HOST}:${RECEIVER_PORT}/webhook}"
-WEBHOOK_NO_PROXY="${WEBHOOK_NO_PROXY:-127.0.0.1,localhost}"
-INSTALL_CUBE_API="${INSTALL_CUBE_API:-1}"
+INSTALL_CUBE_OPS="${INSTALL_CUBE_OPS:-1}"
 TEMPLATE_IMAGE="${TEMPLATE_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest}"
 # Set this only when the registry is reachable through a host proxy, for example
 # CUBEMASTER_PROXY=http://host.docker.internal:7897 in a configured WSL setup.
@@ -28,9 +31,11 @@ CUBEMASTER_PROXY="${CUBEMASTER_PROXY:-}"
 SECRET=real-cluster-webhook-secret
 DROPIN_INSTALLED=0
 CUBEMASTER_PROXY_DROPIN_INSTALLED=0
+CUBE_OPS_BINARY_REPLACED=0
 RECEIVER_PID=
 SANDBOX_ID=
 START_TIME=
+WEBHOOK_REDIS_URL="${REDIS_URL:-}"
 
 require_command() {
     command -v "$1" >/dev/null 2>&1 || {
@@ -89,34 +94,60 @@ wait_for_healthy_node() {
 }
 
 configure_webhook() {
-    # The launcher sources ONE_CLICK_RUNTIME_ENV_FILE. Create a root-only copy
-    # without existing WEBHOOK__ settings so this test neither depends on nor
-    # changes the deployed subscriber configuration.
-    sudo install -Dm600 /dev/null "${WEBHOOK_ENV_FILE}"
-    sudo awk '!/^WEBHOOK__/' "${ONE_CLICK_ENV}" | sudo tee "${WEBHOOK_ENV_FILE}" >/dev/null
-    sudo tee -a "${WEBHOOK_ENV_FILE}" >/dev/null <<EOF
-WEBHOOK__ENABLED=true
-WEBHOOK__ENDPOINTS__0__NAME=real-cluster-proof
-WEBHOOK__ENDPOINTS__0__URL=${WEBHOOK_ENDPOINT_URL}
-WEBHOOK__ENDPOINTS__0__EVENTS__0=sandbox.created
-WEBHOOK__ENDPOINTS__0__EVENTS__1=sandbox.paused
-WEBHOOK__ENDPOINTS__0__EVENTS__2=sandbox.resumed
-WEBHOOK__ENDPOINTS__0__EVENTS__3=sandbox.deleted
-WEBHOOK__ENDPOINTS__0__SECRET=${SECRET}
-NO_PROXY=${WEBHOOK_NO_PROXY}
-no_proxy=${WEBHOOK_NO_PROXY}
+    if [[ -z "${WEBHOOK_REDIS_URL}" ]]; then
+        # Match the Redis connection CubeOps receives from the one-click
+        # systemd EnvironmentFile instead of assuming the local default password.
+        WEBHOOK_REDIS_URL="$(sudo bash -c '
+            set -a
+            source "$1"
+            if [[ -n "${REDIS_URL:-}" ]]; then
+                printf "%s" "${REDIS_URL}"
+                exit 0
+            fi
+            host="${CUBE_EXTERNAL_REDIS_HOST:-${CUBE_SANDBOX_REDIS_HOST:-127.0.0.1}}"
+            port="${CUBE_EXTERNAL_REDIS_PORT:-${CUBE_SANDBOX_REDIS_PORT:-6379}}"
+            password="${CUBE_EXTERNAL_REDIS_PASSWORD:-${CUBE_SANDBOX_REDIS_PASSWORD:-}}"
+            auth=""
+            if [[ -n "${password}" ]]; then auth=":${password}@"; fi
+            printf "redis://%s%s:%s/0" "${auth}" "${host}" "${port}"
+        ' bash "${ONE_CLICK_ENV}")"
+        [[ -n "${WEBHOOK_REDIS_URL}" ]] || {
+            echo "could not resolve Redis URL from ${ONE_CLICK_ENV}" >&2
+            return 1
+        }
+    fi
+
+    sudo install -Dm600 /dev/null "${WEBHOOK_CONFIG_FILE}"
+    sudo tee "${WEBHOOK_CONFIG_FILE}" >/dev/null <<EOF
+redis_url: "${WEBHOOK_REDIS_URL}"
+webhook:
+  enabled: true
+  consumer_group: "${WEBHOOK_GROUP}"
+  workers: 4
+  default_timeout: "3s"
+  default_max_retries: 3
+  initial_backoff: "200ms"
+  max_backoff: "2s"
+  endpoints:
+    - name: real-cluster-proof
+      url: "${WEBHOOK_ENDPOINT_URL}"
+      events:
+        - sandbox.created
+        - sandbox.paused
+        - sandbox.resumed
+        - sandbox.deleted
+      secret: "${SECRET}"
 EOF
 
     sudo mkdir -p "$(dirname "${DROPIN}")"
     sudo tee "${DROPIN}" >/dev/null <<EOF
 [Service]
-ExecStart=
-ExecStart=/usr/bin/env ONE_CLICK_RUNTIME_ENV_FILE=${WEBHOOK_ENV_FILE} /usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cube-api-start.sh
+Environment=CUBE_OPS_CONFIG=${WEBHOOK_CONFIG_FILE}
 EOF
     DROPIN_INSTALLED=1
     sudo systemctl daemon-reload
-    sudo systemctl restart "${CUBE_API_SERVICE}"
-    wait_for_http "${CUBE_API_URL}/health"
+    sudo systemctl restart "${CUBE_OPS_SERVICE}"
+    wait_for_http "${CUBE_OPS_URL}/health"
 }
 
 cleanup() {
@@ -133,10 +164,19 @@ cleanup() {
     # Remove only the temporary overrides created by this verifier.
     if [[ "${DROPIN_INSTALLED}" -eq 1 ]]; then
         sudo rm -f "${DROPIN}"
-        sudo systemctl daemon-reload
-        sudo systemctl restart "${CUBE_API_SERVICE}"
     fi
-    sudo rm -f "${WEBHOOK_ENV_FILE}"
+    if [[ "${CUBE_OPS_BINARY_REPLACED}" -eq 1 ]]; then
+        sudo install -m755 "${RUN_DIR}/cubeops.previous" "${CUBE_OPS_BIN}"
+    fi
+    if [[ "${DROPIN_INSTALLED}" -eq 1 || "${CUBE_OPS_BINARY_REPLACED}" -eq 1 ]]; then
+        sudo systemctl daemon-reload
+        sudo systemctl restart "${CUBE_OPS_SERVICE}"
+    fi
+    if [[ -n "${WEBHOOK_REDIS_URL}" ]]; then
+        redis-cli -u "${WEBHOOK_REDIS_URL}" XGROUP DESTROY \
+            cube:v1:shared:sandbox:lifecycle:events "${WEBHOOK_GROUP}" >/dev/null 2>&1 || true
+    fi
+    sudo rm -f "${WEBHOOK_CONFIG_FILE}"
     if [[ "${CUBEMASTER_PROXY_DROPIN_INSTALLED}" -eq 1 ]]; then
         sudo rm -f "${CUBEMASTER_DROPIN}"
         sudo systemctl daemon-reload
@@ -144,6 +184,23 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+
+wait_for_event_count() {
+    local expected_count="$1" attempts="${2:-90}"
+
+    for _ in $(seq 1 "${attempts}"); do
+        grep -oE '"event": "sandbox\.[^"]+"' "${RUN_DIR}/receiver.log" \
+            > "${RUN_DIR}/events.txt" || true
+        if [[ "$(wc -l < "${RUN_DIR}/events.txt")" -ge "${expected_count}" ]]; then
+            return 0
+        fi
+        sleep 1
+    done
+
+    echo "timed out waiting for ${expected_count} webhook events" >&2
+    cat "${RUN_DIR}/receiver.log" >&2 || true
+    return 1
+}
 
 extract_json_field() {
     python3 - "$1" "$2" <<'PY'
@@ -173,9 +230,10 @@ with open(sys.argv[1], encoding="utf-8") as source:
 PY
 }
 
-require_command cargo
 require_command curl
+require_command go
 require_command python3
+require_command redis-cli
 require_command sudo
 require_command systemctl
 require_command timeout
@@ -190,18 +248,23 @@ require_command timeout
 
 mkdir -p "${RUN_DIR}"
 
-if [[ "${INSTALL_CUBE_API}" == "1" ]]; then
-    echo '[1/8] Build and install the current CubeAPI binary'
-    cd "${ROOT_DIR}"
-    cargo build --release --manifest-path CubeAPI/Cargo.toml
-    sudo install -Dm755 CubeAPI/target/release/cube-api /usr/local/services/cubetoolbox/CubeAPI/bin/cube-api
+if [[ "${INSTALL_CUBE_OPS}" == "1" ]]; then
+    echo '[1/8] Build and temporarily install the current CubeOps binary'
+    (cd "${ROOT_DIR}/CubeOps" && go build -o "${RUN_DIR}/cubeops" ./cmd/cubeops)
+    sudo install -Dm755 "${CUBE_OPS_BIN}" "${RUN_DIR}/cubeops.previous"
+    CUBE_OPS_BINARY_REPLACED=1
+    sudo systemctl stop "${CUBE_OPS_SERVICE}"
+    sudo install -Dm755 "${RUN_DIR}/cubeops" "${CUBE_OPS_BIN}"
 else
-    echo '[1/8] Use the currently installed CubeAPI binary'
+    echo '[1/8] Use the currently installed CubeOps binary'
 fi
 
 echo '[2/8] Verify the control plane and at least one healthy compute node'
 wait_for_active "${CUBEMASTER_SERVICE}"
 wait_for_active "${CUBE_API_SERVICE}"
+if [[ "${INSTALL_CUBE_OPS}" != "1" ]]; then
+    wait_for_active "${CUBE_OPS_SERVICE}"
+fi
 wait_for_http "${CUBE_API_URL}/health"
 wait_for_healthy_node
 
@@ -255,19 +318,17 @@ printf '%s\n' "${CREATE_RESPONSE}" | tee "${RUN_DIR}/create-response.json"
 SANDBOX_ID="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["sandboxID"])' <<< "${CREATE_RESPONSE}")"
 printf 'sandbox_id=%s\n' "${SANDBOX_ID}" | tee "${RUN_DIR}/sandbox.txt"
 
-sleep 8
+wait_for_event_count 1
 curl --noproxy '*' -fsS -X POST "${CUBE_API_URL}/sandboxes/${SANDBOX_ID}/pause" >/dev/null
+wait_for_event_count 2
 curl --noproxy '*' -fsS -X POST -H 'Content-Type: application/json' -d '{"timeout":300}' "${CUBE_API_URL}/sandboxes/${SANDBOX_ID}/connect" | tee "${RUN_DIR}/connect-response.json"
+wait_for_event_count 3
 curl --noproxy '*' -fsS -X DELETE "${CUBE_API_URL}/sandboxes/${SANDBOX_ID}" >/dev/null
 SANDBOX_ID=
 
 echo '[8/8] Verify signed webhook deliveries and collect evidence'
-for _ in $(seq 1 60); do
-    grep -oE '"event": "sandbox\.[^"]+"' "${RUN_DIR}/receiver.log" > "${RUN_DIR}/events.txt" || true
-    [[ "$(wc -l < "${RUN_DIR}/events.txt")" -ge 4 ]] && break
-    sleep 1
-done
-sudo journalctl -u "${CUBE_API_SERVICE}" -u "${CUBEMASTER_SERVICE}" --since "${START_TIME}" --no-pager > "${RUN_DIR}/cluster.log"
+wait_for_event_count 4
+sudo journalctl -u "${CUBE_OPS_SERVICE}" -u "${CUBEMASTER_SERVICE}" --since "${START_TIME}" --no-pager > "${RUN_DIR}/cluster.log"
 
 python3 - "${RUN_DIR}/events.txt" <<'PY'
 import sys

@@ -71,6 +71,7 @@ func (c *Client) EnsureGroup(ctx context.Context, group string) error {
 // Event is a decoded entry from the events stream.
 type Event struct {
 	StreamID  string
+	EventID   string
 	Op        string // create | delete | update | state
 	SandboxID string
 	// Meta is populated for create/update events (delete carries only the
@@ -181,6 +182,7 @@ func decodeEvent(msg redis.XMessage) *Event {
 		Op:        op,
 		SandboxID: sid,
 	}
+	ev.EventID, _ = msg.Values[lifecycle.FieldEventID].(string)
 	if ts, ok := msg.Values[lifecycle.FieldTimestamp].(string); ok {
 		// CubeMaster writes the millisecond unix timestamp; tolerate both
 		// string and numeric forms.

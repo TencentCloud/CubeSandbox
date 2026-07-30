@@ -15,11 +15,11 @@
 //
 //  3. Built-in defaults.
 //
-// The YAML schema is intentionally flat — one section per top-level
-// component. See config.example.yaml for a fully commented example.
+// See config.example.yaml for a fully commented example.
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -62,9 +62,38 @@ type Config struct {
 	// Redis (optional)
 	RedisURL string `yaml:"redis_url"`
 
+	// Webhook lifecycle event delivery. CubeOps consumes the shared lifecycle
+	// Redis Stream directly; CubeAPI is deliberately not part of this path.
+	Webhook WebhookConfig `yaml:"webhook"`
+
 	// Sandbox domain exposed to SDK clients; matches SDK handler's
 	// CUBE_API_SANDBOX_DOMAIN env so the /config endpoint stays in sync.
 	SandboxDomain string `yaml:"sandbox_domain"`
+}
+
+type WebhookConfig struct {
+	Enabled           bool                    `yaml:"enabled" json:"enabled"`
+	ConsumerGroup     string                  `yaml:"consumer_group" json:"consumer_group"`
+	ConsumerName      string                  `yaml:"consumer_name" json:"consumer_name"`
+	ReadBlock         time.Duration           `yaml:"read_block" json:"read_block"`
+	PendingIdle       time.Duration           `yaml:"pending_idle" json:"pending_idle"`
+	Workers           int                     `yaml:"workers" json:"workers"`
+	DefaultTimeout    time.Duration           `yaml:"default_timeout" json:"default_timeout"`
+	DefaultMaxRetries *int                    `yaml:"default_max_retries" json:"default_max_retries"`
+	InitialBackoff    time.Duration           `yaml:"initial_backoff" json:"initial_backoff"`
+	MaxBackoff        time.Duration           `yaml:"max_backoff" json:"max_backoff"`
+	Endpoints         []WebhookEndpointConfig `yaml:"endpoints" json:"endpoints"`
+}
+
+type WebhookEndpointConfig struct {
+	Name    string        `yaml:"name" json:"name"`
+	URL     string        `yaml:"url" json:"url"`
+	Events  []string      `yaml:"events" json:"events"`
+	Secret  string        `yaml:"secret" json:"secret"`
+	Timeout time.Duration `yaml:"timeout" json:"timeout"`
+	// MaxRetries is a pointer so an omitted value can inherit the default,
+	// while an explicit zero correctly means "do not retry".
+	MaxRetries *int `yaml:"max_retries" json:"max_retries"`
 }
 
 // Load reads configuration from YAML + environment variables (env wins).
@@ -75,7 +104,9 @@ func Load() (*Config, error) {
 	}
 
 	// Environment variable overrides take precedence.
-	overrideFromEnv(cfg)
+	if err := overrideFromEnv(cfg); err != nil {
+		return nil, err
+	}
 
 	// Build DATABASE_URL from individual fields if not set directly.
 	if cfg.DatabaseURL == "" {
@@ -113,6 +144,7 @@ func Load() (*Config, error) {
 	if cfg.SandboxDomain == "" {
 		cfg.SandboxDomain = "cube.app"
 	}
+	applyWebhookDefaults(&cfg.Webhook)
 
 	// JWT_SECRET is optional — if not set, it will be auto-generated and
 	// persisted to the DB on first startup (see store.bootstrapJWTSecret).
@@ -120,8 +152,52 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("database_url (or mysql_host + mysql_user + mysql_password + mysql_db) is required (set in YAML %s or via DATABASE_URL env)",
 			yamlConfigPath())
 	}
+	if cfg.Webhook.Enabled {
+		if cfg.RedisURL == "" {
+			return nil, fmt.Errorf("redis_url is required when webhook.enabled is true")
+		}
+		if len(cfg.Webhook.Endpoints) == 0 {
+			return nil, fmt.Errorf("webhook.endpoints is required when webhook.enabled is true")
+		}
+	}
 
 	return cfg, nil
+}
+
+func applyWebhookDefaults(cfg *WebhookConfig) {
+	if cfg.ConsumerGroup == "" {
+		cfg.ConsumerGroup = "cubeops-webhook"
+	}
+	if cfg.ReadBlock <= 0 {
+		cfg.ReadBlock = 5 * time.Second
+	}
+	if cfg.PendingIdle <= 0 {
+		cfg.PendingIdle = 2 * time.Minute
+	}
+	if cfg.Workers <= 0 {
+		cfg.Workers = 8
+	}
+	if cfg.DefaultTimeout <= 0 {
+		cfg.DefaultTimeout = 3 * time.Second
+	}
+	if cfg.DefaultMaxRetries == nil {
+		defaultMaxRetries := 3
+		cfg.DefaultMaxRetries = &defaultMaxRetries
+	}
+	if cfg.InitialBackoff <= 0 {
+		cfg.InitialBackoff = 200 * time.Millisecond
+	}
+	if cfg.MaxBackoff <= 0 {
+		cfg.MaxBackoff = 2 * time.Second
+	}
+	for i := range cfg.Endpoints {
+		if cfg.Endpoints[i].Timeout <= 0 {
+			cfg.Endpoints[i].Timeout = cfg.DefaultTimeout
+		}
+		if cfg.Endpoints[i].MaxRetries == nil {
+			cfg.Endpoints[i].MaxRetries = cfg.DefaultMaxRetries
+		}
+	}
 }
 
 // DaoConfig converts the CubeOps config to a CubeDB dao.Config.
@@ -258,7 +334,7 @@ func loadFromYAML() (*Config, error) {
 
 // overrideFromEnv fills in any zero-valued fields from environment
 // variables. Env vars are higher priority than the YAML file.
-func overrideFromEnv(cfg *Config) {
+func overrideFromEnv(cfg *Config) error {
 	if v := os.Getenv("CUBE_OPS_BIND"); v != "" {
 		cfg.Bind = v
 	}
@@ -324,4 +400,17 @@ func overrideFromEnv(cfg *Config) {
 			cfg.RefreshTTL = d
 		}
 	}
+	if v := os.Getenv("CUBE_OPS_WEBHOOK_ENABLED"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("parse CUBE_OPS_WEBHOOK_ENABLED: %w", err)
+		}
+		cfg.Webhook.Enabled = enabled
+	}
+	if v := os.Getenv("CUBE_OPS_WEBHOOK_ENDPOINTS"); v != "" {
+		if err := json.Unmarshal([]byte(v), &cfg.Webhook.Endpoints); err != nil {
+			return fmt.Errorf("parse CUBE_OPS_WEBHOOK_ENDPOINTS: %w", err)
+		}
+	}
+	return nil
 }

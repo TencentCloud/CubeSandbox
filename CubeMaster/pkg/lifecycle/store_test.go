@@ -11,6 +11,8 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 // recordedCall captures one Do invocation for later assertion.
@@ -26,6 +28,7 @@ type fakeRedis struct {
 	failHSET bool
 	failHDEL bool
 	failXADD bool
+	hget     interface{}
 }
 
 func (f *fakeRedis) Do(cmd string, args ...interface{}) (interface{}, error) {
@@ -33,6 +36,8 @@ func (f *fakeRedis) Do(cmd string, args ...interface{}) (interface{}, error) {
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, recordedCall{cmd: cmd, args: args})
 	switch cmd {
+	case "HGET":
+		return f.hget, nil
 	case "HSET":
 		if f.failHSET {
 			return nil, errors.New("HSET boom")
@@ -114,6 +119,10 @@ func TestStore_PublishCreate_HappyPath(t *testing.T) {
 	if calls[1].args[7] != FieldSandboxID || calls[1].args[8] != "sbx-42" {
 		t.Fatalf("XADD sandbox_id field wrong: %+v", calls[1].args)
 	}
+	eventID := findXAddStringField(calls[1].args, FieldEventID)
+	if _, err := uuid.Parse(eventID); err != nil {
+		t.Fatalf("XADD event_id = %q, want UUID: %v", eventID, err)
+	}
 	// payload must round-trip through JSON
 	payloadBytes, ok := calls[0].args[2].([]byte)
 	if !ok {
@@ -125,6 +134,36 @@ func TestStore_PublishCreate_HappyPath(t *testing.T) {
 	}
 	if got.SandboxID != "sbx-42" || !got.AutoPause || got.TimeoutSeconds == nil || *got.TimeoutSeconds != 60 {
 		t.Fatalf("payload wrong: %+v", got)
+	}
+}
+
+func findXAddStringField(args []interface{}, field string) string {
+	for i := 5; i+1 < len(args); i += 2 {
+		if args[i] == field {
+			value, _ := args[i+1].(string)
+			return value
+		}
+	}
+	return ""
+}
+
+func findXAddBytesField(args []interface{}, field string) []byte {
+	for i := 5; i+1 < len(args); i += 2 {
+		if args[i] == field {
+			value, _ := args[i+1].([]byte)
+			return value
+		}
+	}
+	return nil
+}
+
+func TestTemplateIDFromAnnotations(t *testing.T) {
+	annotations := map[string]string{
+		"template_id":                         "legacy-template",
+		"cube.master.appsnapshot.template.id": "namespaced-template",
+	}
+	if got := templateIDFromAnnotations(annotations); got != "namespaced-template" {
+		t.Fatalf("template ID = %q", got)
 	}
 }
 
@@ -144,26 +183,35 @@ func TestStore_PublishCreate_HSETFailureStillEmitsXADD(t *testing.T) {
 }
 
 func TestStore_PublishDelete(t *testing.T) {
-	r := &fakeRedis{}
+	meta, err := json.Marshal(SandboxLifecycleMeta{
+		SandboxID:  "sbx-9",
+		TemplateID: "tpl-9",
+	})
+	if err != nil {
+		t.Fatalf("marshal meta: %v", err)
+	}
+	r := &fakeRedis{hget: meta}
 	s := NewStore(r)
 
 	s.PublishDelete(context.Background(), "sbx-9")
 
 	calls := r.snapshot()
-	if len(calls) != 2 {
-		t.Fatalf("want HDEL + XADD, got %d", len(calls))
+	if len(calls) != 3 {
+		t.Fatalf("want HGET + HDEL + XADD, got %d", len(calls))
 	}
-	if calls[0].cmd != "HDEL" || calls[0].args[1] != "sbx-9" {
-		t.Fatalf("HDEL wrong: %+v", calls[0])
+	if calls[0].cmd != "HGET" || calls[1].cmd != "HDEL" || calls[1].args[1] != "sbx-9" {
+		t.Fatalf("metadata removal calls wrong: %+v", calls)
 	}
-	if calls[1].cmd != "XADD" || calls[1].args[6] != OpDelete {
-		t.Fatalf("XADD op should be %q, got %+v", OpDelete, calls[1].args)
+	if calls[2].cmd != "XADD" || calls[2].args[6] != OpDelete {
+		t.Fatalf("XADD op should be %q, got %+v", OpDelete, calls[2].args)
 	}
-	// OpDelete carries no payload field.
-	for _, a := range calls[1].args {
-		if s, ok := a.(string); ok && s == FieldPayload {
-			t.Fatalf("delete event should not include payload field: %+v", calls[1].args)
-		}
+	payload := findXAddBytesField(calls[2].args, FieldPayload)
+	var deletedMeta SandboxLifecycleMeta
+	if err := json.Unmarshal(payload, &deletedMeta); err != nil {
+		t.Fatalf("delete payload: %v", err)
+	}
+	if deletedMeta.TemplateID != "tpl-9" {
+		t.Fatalf("delete template_id = %q", deletedMeta.TemplateID)
 	}
 }
 

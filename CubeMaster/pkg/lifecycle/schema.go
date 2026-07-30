@@ -73,11 +73,16 @@ const (
 	FieldSandboxID = "sandbox_id"
 	FieldPayload   = "payload"
 	FieldTimestamp = "ts"
+	// FieldEventID is a globally unique business identifier generated once by
+	// CubeMaster. Consumers use it for idempotency; the Redis stream ID remains
+	// an internal cursor and ordering primitive.
+	FieldEventID = "event_id"
 )
 
 // SandboxLifecycleMeta is the JSON value stored under MetaKey[sandboxID] and
-// also the payload field of OpCreate stream entries. OpDelete entries omit
-// the payload field — the sandbox ID is enough to drop a registry entry.
+// also the payload field of OpCreate stream entries. OpDelete entries carry
+// the last available snapshot as best-effort Webhook context; lifecycle
+// manager consumers may continue to ignore it.
 type SandboxLifecycleMeta struct {
 	SandboxID    string `json:"sandbox_id"`
 	TemplateID   string `json:"template_id,omitempty"`

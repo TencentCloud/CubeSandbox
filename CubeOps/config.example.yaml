@@ -42,8 +42,32 @@ cubemaster_addr: "http://127.0.0.1:8089"
 # --- CubeAPI (deprecated SDK proxy) ---
 cubeapi_url: "http://127.0.0.1:3000"
 
-# --- Redis (optional, only needed if you add rate-limiting later) ---
+# --- Redis (required when webhook.enabled is true) ---
 redis_url: ""
+
+# --- Asynchronous sandbox lifecycle Webhooks ---
+webhook:
+  enabled: false
+  consumer_group: "cubeops-webhook"
+  consumer_name: ""       # empty = unique process name
+  read_block: "5s"
+  pending_idle: "2m"
+  workers: 8
+  default_timeout: "3s"
+  default_max_retries: 3
+  initial_backoff: "200ms"
+  max_backoff: "2s"
+  endpoints:
+    # - name: local-receiver
+    #   url: "http://127.0.0.1:9000/webhook"
+    #   events:
+    #     - sandbox.created
+    #     - sandbox.deleted
+    #     - sandbox.paused
+    #     - sandbox.resumed
+    #   secret: "change-me"
+    #   timeout: "3s"
+    #   max_retries: 3
 
 # --- Sandbox domain exposed to SDK clients via /config ---
 sandbox_domain: "cube.app"

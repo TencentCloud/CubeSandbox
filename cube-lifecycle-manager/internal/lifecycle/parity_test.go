@@ -31,6 +31,7 @@ func TestSchemaConstants(t *testing.T) {
 		{"FieldTimestamp", FieldTimestamp, "ts"},
 		{"StatePaused", StatePaused, "paused"},
 		{"StateRunning", StateRunning, "running"},
+		{"FieldEventID", FieldEventID, "event_id"},
 		{"ActorCubeMaster", ActorCubeMaster, "cubemaster"},
 		{"ActorCLM", ActorCLM, "clm"},
 	}
