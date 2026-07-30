@@ -138,7 +138,7 @@ def installed_versions(python: Path) -> dict[str, str]:
 def parse_junit(path: Path) -> tuple[int, int, int, list[str]]:
     """Return (passed, failed, skipped, failed_case_ids) from a pytest JUnit XML."""
     root = ElementTree.parse(path).getroot()
-    suites = root.iter("testsuite") if root.tag == "testsuites" else [root]
+    suites = root.findall("testsuite") if root.tag == "testsuites" else [root]
     passed = failed = skipped = 0
     failed_cases: list[str] = []
     for suite in suites:
