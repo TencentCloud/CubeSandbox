@@ -16,7 +16,8 @@ In scope:
 
 Out of scope (stack separately):
   - Guest confinement for an *allowlisted* binary (``cat /etc/passwd`` still
-    runs if ``cat`` is allowed — use MicroVM isolation + least privilege)
+    runs if ``cat`` is allowed — prefer ``cube-tool`` so the guest re-checks
+    the profile; raw allowlisted binaries remain a least-privilege concern)
   - Network egress (use ``allow_internet_access`` / CIDR policies)
   - Interpreters: default set excludes them; ``enable_code_execution=True``
     is an explicit privilege escalation (adds ``CODE_EXECUTION_BINARIES``)
@@ -31,6 +32,9 @@ from typing import Iterable
 
 DEFAULT_ALLOWED_BINARIES: frozenset[str] = frozenset(
     {
+        # Guest wrapper shipped by this example's Dockerfile (preferred path).
+        "cube-tool",
+        # Bare toolbox names (same as /etc/cube-sandbox/tool-profile.txt).
         "echo",
         "uname",
         "pwd",

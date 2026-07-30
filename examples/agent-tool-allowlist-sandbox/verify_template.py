@@ -62,6 +62,27 @@ def main() -> None:
             raise SystemExit(f"unexpected echo: {out!r}")
         print("echo:", out)
 
+        # Image capability: guest cube-tool re-checks the profile.
+        wrapped = "cube-tool echo via-cube-tool"
+        assert_allowlisted(wrapped)
+        wout = sandbox.commands.run(wrapped).stdout.strip()
+        if wout != "via-cube-tool":
+            raise SystemExit(f"unexpected cube-tool echo: {wout!r}")
+        print("cube-tool echo:", wout)
+
+        deny_guest = "cube-tool bash -c id"
+        assert_allowlisted(deny_guest)
+        try:
+            result = sandbox.commands.run(deny_guest)
+            code = int(result.exit_code)
+        except Exception as exc:
+            if not hasattr(exc, "exit_code"):
+                raise
+            code = int(exc.exit_code)
+        if code == 0:
+            raise SystemExit("cube-tool unexpectedly allowed bash")
+        print(f"cube-tool bash denied: exit={code}")
+
     print("TEMPLATE_VERIFY_OK")
 
 

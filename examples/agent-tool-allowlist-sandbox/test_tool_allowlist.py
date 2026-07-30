@@ -13,13 +13,18 @@ refuse, and one explicit non-goal (allowlisted cat is not path confinement).
 
 from __future__ import annotations
 
+from pathlib import Path
 import unittest
 
 from tool_allowlist import (
     AllowlistDenied,
+    DEFAULT_ALLOWED_BINARIES,
     assert_allowlisted,
     is_allowlisted,
 )
+
+ROOT = Path(__file__).resolve().parent
+PROFILE = ROOT / "tool-profile.txt"
 
 
 class ToolAllowlistTests(unittest.TestCase):
@@ -34,6 +39,24 @@ class ToolAllowlistTests(unittest.TestCase):
         cmd = "echo agent-tool-allowlist-ok"
         self.assertTrue(is_allowlisted(cmd))
         self.assertEqual(assert_allowlisted(cmd), cmd)
+
+    def test_cube_tool_wrapper_allowlisted(self) -> None:
+        # Preferred image path: host sees cube-tool; guest re-checks profile.
+        cmd = "cube-tool echo via-cube-tool"
+        self.assertTrue(is_allowlisted(cmd))
+        self.assertEqual(assert_allowlisted(cmd), cmd)
+
+    def test_profile_file_matches_default_toolbox(self) -> None:
+        lines = {
+            line.strip()
+            for line in PROFILE.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        }
+        self.assertTrue(lines)
+        # Profile tools must be host-allowlisted; cube-tool is wrapper-only.
+        self.assertTrue(lines <= DEFAULT_ALLOWED_BINARIES)
+        self.assertIn("cube-tool", DEFAULT_ALLOWED_BINARIES)
+        self.assertNotIn("cube-tool", lines)
 
     def test_unknown_binary_denied(self) -> None:
         for cmd in ("bash -c id", "curl -s http://example.com", "busybox sh"):

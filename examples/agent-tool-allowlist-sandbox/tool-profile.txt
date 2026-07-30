@@ -1,0 +1,8 @@
+echo
+uname
+pwd
+ls
+cat
+head
+wc
+sha256sum

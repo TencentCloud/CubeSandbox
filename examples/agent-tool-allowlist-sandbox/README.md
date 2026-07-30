@@ -2,30 +2,26 @@
 
 [中文文档](README_zh.md)
 
-Host-side argv tool allowlist + a small BYOI toolbox image for
-[#645](https://github.com/TencentCloud/CubeSandbox/issues/645).
+Host argv tool allowlist + a BYOI image that ships a real **guest tool runner**
+(`cube-tool`) for [#645](https://github.com/TencentCloud/CubeSandbox/issues/645).
 
-**What you get:** refuse illegal tool commands on the host *before*
-`Sandbox.create` / `commands.run`, then run allowlisted tools inside a
-MicroVM from this directory's Dockerfile. Stacks with airgap, CIDR
-`allow_out`, pause/resume, and parallel sandboxes.
+**What you get**
+- Host refuses illegal tools before `Sandbox.create` / `commands.run`
+- Image installs `/usr/local/bin/cube-tool` + `/etc/cube-sandbox/tool-profile.txt`
+  + `/workspace` — guest re-checks the profile (not just a text file on disk)
+- Stacks with airgap, CIDR `allow_out`, pause/resume, and parallel sandboxes
 
-**What this is not:** guest confinement, bash-free images, or an LLM agent.
-`tool_agent_loop.py` uses fixed proposals.
+**What this is not:** kernel jail, bash-free base, or an LLM agent.
 
 ## Use cases
 
-- Agent hosts that should never start a sandbox for `bash` / `curl` probes
-- Teaching host-policy vs sandbox-workload (E2B-style) on Cube
-- Minimal BYOI profile (`/etc/cube-sandbox/tool-profile.txt`) aligned with
-  the default allowlist
-- Differentiated stacks: checkpoint, restricted egress, multi-sandbox fan-out
+- Agent hosts that should prefer `cube-tool <name> …` over raw `bash`/`curl`
+- Defense-in-depth: host allowlists `cube-tool`; guest refuses off-profile names
+- Differentiated stacks: checkpoint / egress / multi-sandbox fan-out
 
 ## Prerequisites
 
-- Running Cube Sandbox cluster + `cubemastercli`
-- Docker (to build the image)
-- Python 3.10+
+- Cube Sandbox cluster + `cubemastercli` + Docker + Python 3.10+
 
 ```bash
 pip install -r requirements.txt
@@ -38,7 +34,11 @@ cp .env.example .env
 
 ```bash
 docker build -t agent-tool-allowlist-sandbox:latest .
-# optional: --build-arg INSTALL_CURL=1  (airgap curl probe in egress/loop)
+# optional: --build-arg INSTALL_CURL=1
+
+# local image smoke (no cluster)
+docker run --rm agent-tool-allowlist-sandbox:latest \
+  cube-tool echo build-ok
 
 cubemastercli tpl create-from-image \
   --image <registry-or-local>/agent-tool-allowlist-sandbox:latest \
@@ -48,76 +48,59 @@ cubemastercli tpl create-from-image \
   --probe-path /health
 ```
 
-Put the READY template id into `.env` as `CUBE_TEMPLATE_ID`. Resources: 1G
-writable layer; no GPU.
-
-Local envd probe:
-
-```bash
-docker run --rm -d --name agent-tool-box -p 49983:49983 agent-tool-allowlist-sandbox:latest
-curl -s -o /dev/null -w "envd /health => %{http_code}\n" http://127.0.0.1:49983/health
-docker rm -f agent-tool-box
-```
+Put READY template id into `.env` as `CUBE_TEMPLATE_ID`.
 
 ### 2 — Run demos
 
-| Step | Command | Expect | Needs cluster |
-|------|---------|--------|---------------|
+| Step | Command | Expect | Cluster |
+|------|---------|--------|---------|
 | Limits | `python tool_allowlist_limits.py` | `LIMITS_DEMO_OK` | no |
 | Unit tests | `python -m unittest test_tool_allowlist.py -v` | OK | no |
-| Deny | `python tool_allowlist_deny.py` | `denied_as_expected` | no |
+| Deny | `python tool_allowlist_deny.py` | denied | no |
 | Template smoke | `python verify_template.py` | `TEMPLATE_VERIFY_OK` | yes |
+| Guest runner | `python tool_allowlist_guest_runner.py` | `GUEST_RUNNER_OK` | yes |
 | Allow + airgap | `python tool_allowlist_allow.py` | echo + artifact | yes |
-| Reference loop | `python tool_agent_loop.py` | `AGENT_LOOP_OK` | yes |
+| Loop | `python tool_agent_loop.py` | `AGENT_LOOP_OK` | yes |
 | Checkpoint | `python tool_allowlist_checkpoint.py` | `CHECKPOINT_OK` | yes |
 | Egress stack | `python tool_allowlist_egress.py` | `EGRESS_STACK_OK` | yes |
 | Fan-out | `python tool_allowlist_fanout.py` | `FANOUT_OK` | yes |
 
-`ALLOWLIST_FANOUT_N` defaults to `2` (max `4`).
-
 ## How it works
 
 ```
-propose command
+propose: cube-tool echo hi
     │
     ▼
-tool_allowlist.assert_allowlisted   ← host only
-    │ deny → never Sandbox.create / commands.run
-    ▼ allow
-Sandbox.create(this BYOI, network/lifecycle options…)
+host assert_allowlisted   (argv0 must be allowlisted; prefer cube-tool)
     │
     ▼
-sandbox.commands.run(command)
+Sandbox.create(this BYOI)
+    │
+    ▼
+/usr/local/bin/cube-tool  → checks tool-profile.txt → exec echo
 ```
 
-Guest `tool-profile.txt` documents intended toolbox names; enforcement stays
-on the host.
+Bare allowlisted tools (`echo`, `cat`, …) still pass the host gate for demos;
+prefer `cube-tool` so the guest profile is enforced.
 
 ## Directory
 
 ```
-├── Dockerfile
-├── tool_allowlist.py
-├── tool_allowlist_limits.py / deny.py / allow.py
-├── tool_allowlist_checkpoint.py   # pause/resume + gate
-├── tool_allowlist_egress.py       # argv ⊥ CIDR allow_out
-├── tool_allowlist_fanout.py       # parallel sandboxes
-├── tool_agent_loop.py
-├── test_tool_allowlist.py
+├── Dockerfile                 # installs cube-tool + profile + /workspace
+├── tool-profile.txt           # guest allowlist (copied into the image)
+├── guest/cube-tool            # in-guest runner
+├── workspace/                 # default WORKDIR in the image
+├── tool_allowlist.py          # host argv gate
+├── tool_allowlist_*.py        # demos
 ├── verify_template.py
-├── env_utils.py
-├── requirements.txt
-└── .env.example
+└── …
 ```
 
 ## Limits
 
-- Base image still has a shell; profile ≠ confinement.
-- Allowlisting `cat` still permits `cat /etc/passwd` through this gate.
-- `echo … > file` remains allowlisted (arbitrary guest write residual).
-- Growing the allowlist needs `extra_binaries` **and**
-  `allow_unsafe_allowlist_extension=True`.
-- `enable_code_execution=True` is an explicit interpreter escalation.
-- Default build does not apt-install curl; base may still ship it.
-- `create-from-image` needs an image reference the node can pull.
-- Fan-out creates real VMs — keep `N` small on shared clusters.
+- Base image still has a shell; callers that bypass `cube-tool` are out of scope
+  for the guest wrapper.
+- Allowlisting bare `cat` still permits `cat /etc/passwd` through the host gate.
+- Growing the allowlist needs `extra_binaries` + `allow_unsafe_allowlist_extension=True`.
+- Default build does not apt-install curl.
+- Fan-out creates real VMs — keep `N` small.
