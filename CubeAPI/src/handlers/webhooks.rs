@@ -88,8 +88,19 @@ pub async fn create_webhook(
     State(state): State<AppState>,
     Json(config): Json<WebhookConfig>,
 ) -> AppResult<impl IntoResponse> {
-    if config.url.trim().is_empty() {
+    let url = config.url.trim();
+    if url.is_empty() {
         return Err(AppError::BadRequest("url must not be empty".into()));
+    }
+    // Only http(s) endpoints are deliverable. Rejecting other schemes at
+    // registration gives a clear 400 instead of a delivery that fails silently
+    // through the retry path, and keeps this SSRF-adjacent surface to plain
+    // HTTP callbacks. (Deeper SSRF hardening — blocking internal/metadata
+    // addresses — is out of scope here.)
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(AppError::BadRequest(
+            "url must start with http:// or https://".into(),
+        ));
     }
     if config.events.is_empty() {
         return Err(AppError::BadRequest("events must not be empty".into()));
@@ -236,5 +247,28 @@ mod tests {
             .json(&serde_json::json!({ "url": "http://x/hook", "events": [] }))
             .await;
         assert_eq!(resp.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_webhook_rejects_non_http_url() {
+        let state = AppState::new(
+            ServerConfig::default(),
+            arc(NoopLogger),
+            WebhookRegistry::default(),
+        )
+        .await;
+        let server = TestServer::new(build_router(state)).expect("router should build");
+
+        for bad in ["ftp://host/hook", "not-a-url", "javascript:alert(1)"] {
+            let resp = server
+                .post("/webhooks")
+                .json(&serde_json::json!({ "url": bad, "events": ["sandbox.created"] }))
+                .await;
+            assert_eq!(
+                resp.status_code(),
+                StatusCode::BAD_REQUEST,
+                "non-http url {bad:?} must be rejected"
+            );
+        }
     }
 }

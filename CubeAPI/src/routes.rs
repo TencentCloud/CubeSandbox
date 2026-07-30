@@ -64,6 +64,7 @@ fn build_e2b_router(state: &AppState, auth_configured: bool) -> Router<AppState>
         .merge(build_sandbox_routes(state, auth_configured))
         .merge(build_template_routes(state, auth_configured))
         .merge(build_volume_routes(state, auth_configured))
+        .merge(build_webhook_routes(state, auth_configured))
 }
 
 /// Routes that need the longer 240 s timeout when surfaced under the e2b
@@ -109,7 +110,16 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
             "/sandboxes/:sandboxID/connect",
             post(sandboxes::connect_sandbox),
         )
-        .route("/snapshots", get(snapshots::list_snapshots))
+        .route("/snapshots", get(snapshots::list_snapshots));
+
+    with_auth_and_rate_limit(routes, state, auth_configured)
+}
+
+/// Webhook management API (`/webhooks`). Not sandbox-specific — kept in its own
+/// builder so the router topology reads honestly. Same auth + rate-limit lane
+/// as the sandbox routes.
+fn build_webhook_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
+    let routes = Router::new()
         .route(
             "/webhooks",
             get(webhooks::list_webhooks).post(webhooks::create_webhook),

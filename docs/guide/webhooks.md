@@ -179,6 +179,13 @@ Event loss is surfaced in logs: a full queue logs a throttled `warn`
 (`webhook: queue full, dropping event`) and a delivery that exhausts its
 retries logs an `error` (`webhook delivery giving up after exhausting retries`).
 
+::: warning Log level gates webhook delivery
+Lifecycle events are emitted at `info` level and pass through the same level
+filter as the file logger. If you raise `log_level` to `warn` or `error` (e.g.
+for quieter logs), webhook delivery **stops** along with info-level file
+logging. Keep `log_level` at `info` (or lower) when webhooks are in use.
+:::
+
 ## Signature verification
 
 When `secret` is set, CubeAPI signs the **raw request body** with HMAC-SHA256

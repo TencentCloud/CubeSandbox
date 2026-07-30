@@ -162,6 +162,12 @@ CRUD 视为「单实例、非权威」。全集群一致的运行时管理属于
 event`）,重试耗尽会打一条 `error`（`webhook delivery giving up after exhausting
 retries`）。
 
+::: warning 日志级别会同时门控 webhook 投递
+生命周期事件以 `info` 级别发出,和文件日志走同一个级别过滤器。如果把 `log_level`
+调到 `warn` 或 `error`（比如想让日志更安静),webhook 投递会**随 info 级文件日志
+一起停掉**。使用 webhook 时请把 `log_level` 保持在 `info`(或更低)。
+:::
+
 ## 签名校验
 
 设置 `secret` 后，CubeAPI 会用 HMAC-SHA256 对**原始请求体**签名，并放入

@@ -381,6 +381,15 @@ impl Logger for WebhookLogger {
     async fn log(&self, event: LogEvent) {
         // Cheap early drop: skip events no endpoint subscribes to. This keeps
         // high-frequency events (e.g. `api.request`) off the channel entirely.
+        //
+        // Deliberate TOCTOU trade-off: this check and the dispatcher's later
+        // `matching()` take the read lock separately, so an endpoint registered
+        // (write lock) in the tiny window between them could miss this one
+        // event. That's acceptable under the documented at-most-once, best-
+        // effort semantics — and semantically a just-registered endpoint has no
+        // claim on an event emitted before it existed. Removing this early exit
+        // would close the window at the cost of channelling every unsubscribed
+        // event.
         if !self.registry.any_subscribed(&event.event) {
             return;
         }
