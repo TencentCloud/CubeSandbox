@@ -86,10 +86,18 @@ curl -X DELETE http://localhost:3000/webhooks/8f3a…   # → 204
 
 The response never contains the `secret` value — only `has_secret: true|false`.
 
-::: warning Runtime changes are in-memory
+::: warning Runtime changes are in-memory and per-instance
 Endpoints added/removed via this API are **not persisted**: they are lost on
 restart. The config file provides the durable startup set. (Persisting runtime
 changes would require a datastore and is out of scope here.)
+
+In an **HA deployment (multiple CubeAPI replicas behind a load balancer)** this
+API mutates only the replica that served the request, so replicas diverge — an
+endpoint registered on one replica will not receive events handled by another.
+For HA, treat the **config file as the declarative source of truth** (identical
+on every replica) and consider the runtime CRUD API per-instance and
+non-authoritative. Fleet-consistent runtime management is part of the durable
+control-plane consumer follow-up.
 :::
 
 ## Payload
@@ -120,16 +128,56 @@ The body always contains `event`, `timestamp` (RFC 3339, UTC), and
 - **Non-blocking.** Events are enqueued and delivered from background tasks.
   Sandbox API requests never wait on webhook delivery, so a slow or unreachable
   receiver can never delay or fail a create/pause/resume/delete call.
+- **Bounded queue.** The in-memory queue is capped. Under sustained overload
+  (receivers not keeping up) the newest events are dropped rather than growing
+  memory without limit — a dropped event is logged at `warn` (throttled)
+  instead of risking an OOM that loses everything.
 - **Isolated.** Each (event, endpoint) delivery runs independently — one slow
-  endpoint does not hold up others.
+  endpoint does not hold up others. Concurrent in-flight deliveries are capped
+  so a burst cannot open an unbounded number of connections at once.
 - **Retried.** Failed deliveries (connection errors, timeouts, or non-2xx
   responses) are retried with exponential backoff (1s, 2s, 4s, …) up to
-  `max_retries`. The final failure is logged at `error` level.
-- **Best-effort.** Deliveries are not persisted across restarts; the durable
-  record remains the [structured event log](./sandbox-logs.md).
+  `max_retries`. The final give-up is logged at `error` level.
+- **Drained on shutdown.** On a graceful stop (SIGTERM, e.g. a rolling
+  restart), queued and in-flight deliveries are drained — retry backoff is cut
+  short and deliveries are given a bounded grace period to finish — so a normal
+  deploy does not drop in-flight webhooks.
+- **At-most-once across a hard crash.** Deliveries are held in memory, so a
+  hard kill (SIGKILL / OOM / node failure) can still lose queued and in-flight
+  events. The durable record remains the
+  [structured event log](./sandbox-logs.md); durable at-least-once delivery
+  across a crash is planned as a follow-up (a control-plane event-stream
+  consumer, aligned with the control/data-plane separation on the roadmap).
 
 Your receiver should respond `2xx` quickly and do any heavy work
-asynchronously.
+asynchronously, and **deduplicate on `X-Cube-Delivery`** (stable per event) —
+at-least-once retries mean an event may be delivered more than once.
+
+### Ordering
+
+Deliveries are **not** globally ordered: each (event, endpoint) is delivered by
+an independent task, so a retried `sandbox.created` can arrive *after* the
+`sandbox.deleted` for the same sandbox. Every payload carries a monotonic
+`timestamp`, so a receiver should **reconcile by `timestamp`** — track the
+latest state per `sandbox_id` and ignore an event whose `timestamp` is older
+than one it has already applied (e.g. drop a `created` that arrives after a
+newer `deleted`). Strict in-order delivery is planned as part of the durable
+control-plane consumer (see below).
+
+## Tuning
+
+The delivery subsystem's defaults are production-safe; override per deployment
+via environment variables (no rebuild needed):
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `CUBE_API_WEBHOOK_QUEUE_CAPACITY` | `10000` | In-memory event queue size before overload drops the newest events. |
+| `CUBE_API_WEBHOOK_DRAIN_GRACE_SECS` | `25` | Max time shutdown waits for in-flight deliveries to drain. Keep below your orchestrator's termination grace period. |
+| `CUBE_API_WEBHOOK_MAX_CONCURRENCY` | `256` | Ceiling on concurrent in-flight delivery requests. |
+
+Event loss is surfaced in logs: a full queue logs a throttled `warn`
+(`webhook: queue full, dropping event`) and a delivery that exhausts its
+retries logs an `error` (`webhook delivery giving up after exhausting retries`).
 
 ## Signature verification
 
