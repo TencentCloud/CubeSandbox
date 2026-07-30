@@ -16,6 +16,7 @@ import { ArrowLeft, Pause, Play, Trash2, RefreshCw } from 'lucide-react';
 import { cn, formatBytes, formatRelative } from '@/lib/utils';
 import { formatSandboxActionError } from '@/lib/sandboxActionError';
 import { SandboxActionErrorBanner } from '@/components/SandboxActionErrorBanner';
+import { TerminalEntry } from '@/components/terminal/TerminalEntry';
 
 // ── Log level colors ────────────────────────────────────────────────────────
 const LEVEL_CLASS: Record<string, string> = {
@@ -202,15 +203,17 @@ export default function SandboxDetailPage() {
   return (
     <div className="animate-fade-in space-y-5">
       {/* ── Header ── */}
-      <div className="flex items-center gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
         <Link to="/sandboxes">
           <Button variant="ghost" size="icon">
             <ArrowLeft size={16} />
           </Button>
         </Link>
-        <div className="flex-1">
+        <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <h1 className="font-mono text-xl font-medium tracking-tight">{sandboxID}</h1>
+            <h1 className="min-w-0 break-all font-mono text-xl font-medium tracking-tight">
+              {sandboxID}
+            </h1>
             <Badge tone={tone as any}>{state}</Badge>
           </div>
           <p className="mt-1 text-xs text-muted-foreground">
@@ -218,7 +221,8 @@ export default function SandboxDetailPage() {
           </p>
         </div>
         {data ? (
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
+            <TerminalEntry sandboxId={sandboxID} state={state} display="label" />
             {state === 'paused' ? (
               <Button variant="outline" onClick={() => resume.mutate()} disabled={resume.isPending}>
                 <Play size={14} /> {t('actions.resume')}

@@ -16,6 +16,7 @@ import { formatBytes, formatRelative, short } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 import { formatSandboxActionError } from '@/lib/sandboxActionError';
 import { SandboxActionErrorBanner } from '@/components/SandboxActionErrorBanner';
+import { TerminalEntry } from '@/components/terminal/TerminalEntry';
 
 type StateFilter = 'all' | 'running' | 'paused';
 
@@ -163,8 +164,8 @@ export default function SandboxesPage() {
         </div>
       </Card>
 
-      <Card className="!p-0 overflow-hidden">
-        <div className="grid grid-cols-[120px_minmax(200px,1.2fr)_minmax(160px,1fr)_110px_120px_130px_120px_120px] gap-2 border-b border-border/60 px-4 py-3 text-xs uppercase tracking-wider font-medium text-muted-foreground/85">
+      <Card className="!p-0 overflow-x-auto">
+        <div className="grid min-w-[1050px] grid-cols-[120px_minmax(200px,1.2fr)_minmax(160px,1fr)_110px_120px_130px_120px_120px] gap-2 border-b border-border/60 px-4 py-3 text-xs uppercase tracking-wider font-medium text-muted-foreground/85">
           <div>{t('col.state')}</div>
           <div>{t('col.sandboxId')}</div>
           <div>{t('col.template')}</div>
@@ -215,7 +216,7 @@ function Row({
   const state = sb.state ?? 'running';
   const tone = state === 'paused' ? 'warn' : state === 'running' ? 'ok' : 'mute';
   return (
-    <div className="grid grid-cols-[120px_minmax(200px,1.2fr)_minmax(160px,1fr)_110px_120px_130px_120px_120px] gap-2 border-b border-border/60 px-4 py-3 text-sm transition hover:bg-muted/50">
+    <div className="grid min-w-[1050px] grid-cols-[120px_minmax(200px,1.2fr)_minmax(160px,1fr)_110px_120px_130px_120px_120px] gap-2 border-b border-border/60 px-4 py-3 text-sm transition hover:bg-muted/50">
       <div>
         <Badge tone={tone as any}>{state}</Badge>
       </div>
@@ -236,6 +237,7 @@ function Row({
       <div className="text-xs text-muted-foreground/80 text-num">{sb.clientID || '—'}</div>
       <div className="text-xs text-muted-foreground">{formatRelative(sb.startedAt)}</div>
       <div className="flex justify-end gap-1">
+        <TerminalEntry sandboxId={sb.sandboxID} state={sb.state} />
         {state === 'paused' ? (
           <Button
             size="icon"

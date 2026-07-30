@@ -131,6 +131,7 @@ help:
 	@printf "  web-build     Build WebUI static assets\n"
 	@printf "  web-preview   Preview built WebUI assets\n"
 	@printf "  web-lint      Run WebUI lint checks\n"
+	@printf "  web-test      Run WebUI unit tests\n"
 	@printf "  web-fmt       Format WebUI sources\n"
 	@printf "  fmt            Format code in all component directories\n"
 	@printf "  web-api-sync  Export OpenAPI and regenerate WebUI schema types\n"
@@ -371,6 +372,10 @@ web-preview:
 .PHONY: web-lint
 web-lint:
 	cd "$(WEB_DIR)" && npm run lint
+
+.PHONY: web-test
+web-test:
+	cd "$(WEB_DIR)" && npm run test
 
 .PHONY: web-fmt
 web-fmt:

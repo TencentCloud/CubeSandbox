@@ -25,6 +25,7 @@ i18n
       'overview',
       'sandboxes',
       'sandboxDetail',
+      'terminal',
       'sandboxNew',
       'templates',
       'templateDetail',
