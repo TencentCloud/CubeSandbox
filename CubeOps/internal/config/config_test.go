@@ -6,6 +6,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -128,6 +129,80 @@ func TestLoad_ShortTerminalTokenFails(t *testing.T) {
 
 	if _, err := Load(); err == nil {
 		t.Error("Load with a short terminal token = nil err, want error")
+	}
+}
+
+func TestLoad_TerminalDefaultsAndEnvironmentOverrides(t *testing.T) {
+	t.Setenv("CUBE_OPS_CONFIG", "/nonexistent/path/ops.yaml")
+	t.Setenv("DATABASE_URL", "mysql://root:pass@127.0.0.1:3306/envdb")
+	t.Setenv("CUBE_TERMINAL_ENABLED", "false")
+	t.Setenv("CUBE_TERMINAL_ALLOWED_ORIGINS", "https://ops.example.com, http://127.0.0.1:8080")
+	t.Setenv("CUBE_TERMINAL_GRANT_TTL_SECONDS", "45")
+	t.Setenv("CUBE_TERMINAL_MAX_SESSIONS_PER_USER", "7")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Terminal.Enabled {
+		t.Error("Terminal.Enabled = true, want explicit environment false")
+	}
+	if cfg.Terminal.GrantTTLSeconds != 45 {
+		t.Errorf("GrantTTLSeconds = %d, want 45", cfg.Terminal.GrantTTLSeconds)
+	}
+	if cfg.Terminal.MaxSessionsPerUser != 7 {
+		t.Errorf("MaxSessionsPerUser = %d, want 7", cfg.Terminal.MaxSessionsPerUser)
+	}
+	if cfg.Terminal.MaxFrameBytes != 65536 {
+		t.Errorf("terminal resource default frame:%d, want 65536", cfg.Terminal.MaxFrameBytes)
+	}
+	if len(cfg.Terminal.AllowedOrigins) != 2 || cfg.Terminal.AllowedOrigins[0] != "https://ops.example.com" {
+		t.Errorf("AllowedOrigins = %#v, want two exact origins", cfg.Terminal.AllowedOrigins)
+	}
+}
+
+func TestLoad_RejectsTerminalGrantTTLAboveSecurityMaximum(t *testing.T) {
+	t.Setenv("CUBE_OPS_CONFIG", "/nonexistent/path/ops.yaml")
+	t.Setenv("DATABASE_URL", "mysql://example.invalid/testdb")
+	t.Setenv("CUBE_TERMINAL_GRANT_TTL_SECONDS", "61")
+
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "terminal.grant_ttl_seconds must not exceed 60") {
+		t.Fatalf("Load with terminal grant TTL above 60 seconds error = %v", err)
+	}
+}
+
+func TestLoad_TerminalExplicitYAMLDisableAndOriginValidation(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "ops.yaml")
+	if err := os.WriteFile(yamlPath, []byte(`database_url: mysql://root:pass@127.0.0.1:3306/testdb
+terminal:
+  enabled: false
+  allowed_origins:
+    - https://ops.example.com/path
+`), 0o600); err != nil {
+		t.Fatalf("write yaml: %v", err)
+	}
+	t.Setenv("CUBE_OPS_CONFIG", yamlPath)
+	unsetConfigTestEnv(t, "CUBE_TERMINAL_ENABLED")
+	unsetConfigTestEnv(t, "CUBE_TERMINAL_ALLOWED_ORIGINS")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load with an origin path = nil err, want validation error")
+	}
+
+	if err := os.WriteFile(yamlPath, []byte(`database_url: mysql://root:pass@127.0.0.1:3306/testdb
+terminal:
+  enabled: false
+  allowed_origins:
+    - https://ops.example.com
+`), 0o600); err != nil {
+		t.Fatalf("rewrite yaml: %v", err)
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load valid terminal YAML: %v", err)
+	}
+	if cfg.Terminal.Enabled {
+		t.Error("explicit YAML enabled:false was overwritten by defaults")
 	}
 }
 

@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -16,32 +17,39 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/handler"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/service"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/terminal"
 )
 
 // Server is the CubeOps HTTP server.
 type Server struct {
-	cfg     *config.Config
-	store   *store.Store
-	jm      *auth.JWTManager
-	httpSrv *http.Server
-	cm      *cubemaster.Client
+	cfg             *config.Config
+	store           *store.Store
+	jm              *auth.JWTManager
+	httpSrv         *http.Server
+	cm              *cubemaster.Client
+	terminalService *service.TerminalService
+	terminalGateway *terminal.Gateway
 }
 
 // New creates a new CubeOps server.
 func New(cfg *config.Config, s *store.Store) *Server {
 	jm := auth.NewJWTManager(cfg.JWTSecret, cfg.AccessTTL, cfg.RefreshTTL)
 	cm := cubemaster.New(cfg.CubeMasterAddr)
+	terminalService := service.NewTerminalService(s, cm, cfg.Terminal)
 	return &Server{
-		cfg:   cfg,
-		store: s,
-		jm:    jm,
-		cm:    cm,
+		cfg:             cfg,
+		store:           s,
+		jm:              jm,
+		cm:              cm,
+		terminalService: terminalService,
+		terminalGateway: terminal.NewGateway(cfg.Terminal, cfg.CubeMasterAddr, terminalService),
 	}
 }
 
 // Start begins listening for HTTP requests.
 func (s *Server) Start() error {
 	engine := s.buildRouter()
+	s.terminalGateway.Start()
 
 	s.httpSrv = &http.Server{
 		Addr:              s.cfg.Bind,
@@ -62,11 +70,15 @@ func (s *Server) Start() error {
 
 // Shutdown gracefully stops the server.
 func (s *Server) Shutdown(ctx context.Context) error {
-	if s.httpSrv == nil {
-		return nil
-	}
 	slog.Info("CubeOps shutting down")
-	return s.httpSrv.Shutdown(ctx)
+	var terminalErr, httpErr error
+	if s.terminalGateway != nil {
+		terminalErr = s.terminalGateway.Shutdown(ctx)
+	}
+	if s.httpSrv != nil {
+		httpErr = s.httpSrv.Shutdown(ctx)
+	}
+	return errors.Join(terminalErr, httpErr)
 }
 
 // buildRouter configures all routes on a gin engine.
@@ -92,6 +104,8 @@ func (s *Server) buildRouter() *gin.Engine {
 	storeH := handler.NewStoreHandler(handler.DefaultRegistryClient())
 	configH := handler.NewConfigHandler(s.cfg.Bind, 100, s.cfg.JWTSecret != "", s.cfg.SandboxDomain, "cubebox")
 	agenthubH := handler.NewAgentHubHandler(s.store, s.cm)
+	terminalGrantH := handler.NewTerminalGrantHandler(s.terminalService)
+	terminalWSH := handler.NewTerminalWSHandler(s.terminalGateway)
 	// SDK handler gets the AgentHubService so that E2B template/snapshot
 	// deletions can reverse-sync AgentHub registrations (matching the old
 	// Rust reverse_sync_agenthub_template that lived in CubeAPI).
@@ -100,11 +114,13 @@ func (s *Server) buildRouter() *gin.Engine {
 	// Public (no auth) routes — login + refresh.
 	public := r.Group("/api/v1")
 	authH.RegisterPublic(public)
+	terminalWSH.Register(public)
 
 	// Authenticated routes. The session / logout / change-password endpoints
 	// are mounted here, behind the JWT middleware.
 	authed := r.Group("/api/v1", auth.Middleware(s.jm))
 	authH.RegisterAuthed(authed)
+	terminalGrantH.Register(authed)
 
 	clusterH.Register(authed)
 	configH.Register(authed)

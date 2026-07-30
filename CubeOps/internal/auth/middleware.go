@@ -13,7 +13,10 @@ import (
 
 type contextKey string
 
-const userContextKey contextKey = "user"
+const (
+	userContextKey   contextKey = "user"
+	claimsContextKey contextKey = "access-claims"
+)
 
 // Middleware returns a gin middleware that validates JWT access tokens.
 // Requests without a valid token are rejected with 401.
@@ -37,10 +40,19 @@ func Middleware(jm *JWTManager) gin.HandlerFunc {
 		// Replace the request context so downstream handlers can use
 		// UsernameFromContext(r.Context()) or c.GetString("username").
 		ctx := context.WithValue(c.Request.Context(), userContextKey, claims.Username)
+		ctx = context.WithValue(ctx, claimsContextKey, claims)
 		c.Request = c.Request.WithContext(ctx)
 		c.Set("username", claims.Username)
+		c.Set("accessClaims", claims)
 		c.Next()
 	}
+}
+
+// AccessClaimsFromContext returns the verified access-token claims installed
+// by Middleware. Handlers must not parse the Authorization header again.
+func AccessClaimsFromContext(ctx context.Context) (*AccessClaims, bool) {
+	claims, ok := ctx.Value(claimsContextKey).(*AccessClaims)
+	return claims, ok && claims != nil
 }
 
 // UsernameFromContext extracts the authenticated username from the request context.

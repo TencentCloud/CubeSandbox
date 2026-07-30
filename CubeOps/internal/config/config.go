@@ -69,10 +69,41 @@ type Config struct {
 	Terminal TerminalConfig `yaml:"terminal"`
 }
 
-// TerminalConfig contains deployment-provided transport credentials. The
-// grant and gateway behavior is added separately from this wiring prerequisite.
+// TerminalConfig controls the browser-facing terminal grant service and
+// WebSocket gateway. Durations intentionally keep the units in their field
+// names so YAML and environment configuration cannot accidentally mix them.
 type TerminalConfig struct {
-	InternalToken string `yaml:"internal_token"`
+	Enabled               bool     `yaml:"enabled"`
+	AllowedOrigins        []string `yaml:"allowed_origins"`
+	GrantTTLSeconds       int      `yaml:"grant_ttl_seconds"`
+	HandshakeTimeoutSec   int      `yaml:"handshake_timeout_seconds"`
+	PingIntervalSeconds   int      `yaml:"ping_interval_seconds"`
+	PongTimeoutSeconds    int      `yaml:"pong_timeout_seconds"`
+	WriteDeadlineSeconds  int      `yaml:"write_deadline_seconds"`
+	ReconnectGraceSeconds int      `yaml:"reconnect_grace_seconds"`
+	MaxFrameBytes         int      `yaml:"max_frame_bytes"`
+	MaxSessionsPerUser    int      `yaml:"max_sessions_per_user"`
+	MaxSessionsPerReplica int      `yaml:"max_sessions_per_replica"`
+	DrainTimeoutSeconds   int      `yaml:"drain_timeout_seconds"`
+	InternalToken         string   `yaml:"internal_token"`
+}
+
+const maxTerminalGrantTTLSeconds = 60
+
+func defaultTerminalConfig() TerminalConfig {
+	return TerminalConfig{
+		Enabled:               true,
+		GrantTTLSeconds:       60,
+		HandshakeTimeoutSec:   10,
+		PingIntervalSeconds:   20,
+		PongTimeoutSeconds:    10,
+		WriteDeadlineSeconds:  10,
+		ReconnectGraceSeconds: 30,
+		MaxFrameBytes:         64 << 10,
+		MaxSessionsPerUser:    5,
+		MaxSessionsPerReplica: 200,
+		DrainTimeoutSeconds:   30,
+	}
 }
 
 // Load reads configuration from YAML + environment variables (env wins).
@@ -121,8 +152,8 @@ func Load() (*Config, error) {
 	if cfg.SandboxDomain == "" {
 		cfg.SandboxDomain = "cube.app"
 	}
-	if tokenLength := len(cfg.Terminal.InternalToken); tokenLength > 0 && tokenLength < 16 {
-		return nil, fmt.Errorf("terminal.internal_token must be empty or at least 16 bytes")
+	if err := validateTerminalConfig(cfg.Terminal); err != nil {
+		return nil, err
 	}
 
 	// JWT_SECRET is optional — if not set, it will be auto-generated and
@@ -252,7 +283,9 @@ func yamlConfigPath() string {
 // the returned config is the zero value (env vars / defaults fill in).
 // An existing-but-malformed file is a hard error.
 func loadFromYAML() (*Config, error) {
-	cfg := &Config{}
+	// Seed defaults before unmarshalling so an explicit YAML `enabled: false`
+	// remains distinguishable from an omitted value.
+	cfg := &Config{Terminal: defaultTerminalConfig()}
 	path := yamlConfigPath()
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -328,6 +361,24 @@ func overrideFromEnv(cfg *Config) {
 	if v, ok := os.LookupEnv("CUBE_TERMINAL_INTERNAL_TOKEN"); ok {
 		cfg.Terminal.InternalToken = v
 	}
+	if v, ok := os.LookupEnv("CUBE_TERMINAL_ENABLED"); ok {
+		if enabled, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
+			cfg.Terminal.Enabled = enabled
+		}
+	}
+	if v, ok := os.LookupEnv("CUBE_TERMINAL_ALLOWED_ORIGINS"); ok {
+		cfg.Terminal.AllowedOrigins = splitCommaSeparated(v)
+	}
+	overrideTerminalInt(&cfg.Terminal.GrantTTLSeconds, "CUBE_TERMINAL_GRANT_TTL_SECONDS")
+	overrideTerminalInt(&cfg.Terminal.HandshakeTimeoutSec, "CUBE_TERMINAL_HANDSHAKE_TIMEOUT_SECONDS")
+	overrideTerminalInt(&cfg.Terminal.PingIntervalSeconds, "CUBE_TERMINAL_PING_INTERVAL_SECONDS")
+	overrideTerminalInt(&cfg.Terminal.PongTimeoutSeconds, "CUBE_TERMINAL_PONG_TIMEOUT_SECONDS")
+	overrideTerminalInt(&cfg.Terminal.WriteDeadlineSeconds, "CUBE_TERMINAL_WRITE_DEADLINE_SECONDS")
+	overrideTerminalInt(&cfg.Terminal.ReconnectGraceSeconds, "CUBE_TERMINAL_RECONNECT_GRACE_SECONDS")
+	overrideTerminalInt(&cfg.Terminal.MaxFrameBytes, "CUBE_TERMINAL_MAX_FRAME_BYTES")
+	overrideTerminalInt(&cfg.Terminal.MaxSessionsPerUser, "CUBE_TERMINAL_MAX_SESSIONS_PER_USER")
+	overrideTerminalInt(&cfg.Terminal.MaxSessionsPerReplica, "CUBE_TERMINAL_MAX_SESSIONS_PER_REPLICA")
+	overrideTerminalInt(&cfg.Terminal.DrainTimeoutSeconds, "CUBE_TERMINAL_DRAIN_TIMEOUT_SECONDS")
 	if v := os.Getenv("JWT_ACCESS_TTL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			cfg.AccessTTL = d
@@ -338,4 +389,63 @@ func overrideFromEnv(cfg *Config) {
 			cfg.RefreshTTL = d
 		}
 	}
+}
+
+func overrideTerminalInt(destination *int, key string) {
+	value, ok := os.LookupEnv(key)
+	if !ok {
+		return
+	}
+	if parsed, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+		*destination = parsed
+	}
+}
+
+func splitCommaSeparated(value string) []string {
+	var result []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func validateTerminalConfig(cfg TerminalConfig) error {
+	positive := map[string]int{
+		"grant_ttl_seconds":         cfg.GrantTTLSeconds,
+		"handshake_timeout_seconds": cfg.HandshakeTimeoutSec,
+		"ping_interval_seconds":     cfg.PingIntervalSeconds,
+		"pong_timeout_seconds":      cfg.PongTimeoutSeconds,
+		"write_deadline_seconds":    cfg.WriteDeadlineSeconds,
+		"max_frame_bytes":           cfg.MaxFrameBytes,
+		"max_sessions_per_user":     cfg.MaxSessionsPerUser,
+		"max_sessions_per_replica":  cfg.MaxSessionsPerReplica,
+		"drain_timeout_seconds":     cfg.DrainTimeoutSeconds,
+	}
+	for name, value := range positive {
+		if value <= 0 {
+			return fmt.Errorf("terminal.%s must be positive", name)
+		}
+	}
+	if cfg.GrantTTLSeconds > maxTerminalGrantTTLSeconds {
+		return fmt.Errorf("terminal.grant_ttl_seconds must not exceed %d", maxTerminalGrantTTLSeconds)
+	}
+	if cfg.ReconnectGraceSeconds < 0 {
+		return fmt.Errorf("terminal.reconnect_grace_seconds must not be negative")
+	}
+	if cfg.MaxFrameBytes > 64<<10 {
+		return fmt.Errorf("terminal.max_frame_bytes must not exceed 65536")
+	}
+	if tokenLength := len(cfg.InternalToken); tokenLength > 0 && tokenLength < 16 {
+		return fmt.Errorf("terminal.internal_token must be empty or at least 16 bytes")
+	}
+	for _, origin := range cfg.AllowedOrigins {
+		parsed, err := url.Parse(origin)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" ||
+			parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return fmt.Errorf("terminal.allowed_origins entry %q must be an http(s) origin without path, query, fragment, or credentials", origin)
+		}
+	}
+	return nil
 }
