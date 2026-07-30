@@ -61,9 +61,13 @@ pytest collection
 用例面对的公共接口由 `SandboxAdapter` 定义：
 
 - 查询：`sandbox_id`、`info`；
-- 命令与文件：`run_command`、`write_file`、`read_file`；
+- 命令与文件：`run_command`、`write_file`、`read_file`、`list_files`、
+  `stat_file`、`file_exists`、`remove_file`、`rename_file`、`make_dir`、
+  `write_files`、`watch_dir_events`；
 - 代码：`run_code`；
-- 生命周期：`pause`、`resume_or_connect`、`kill`、`close`；
+- 生命周期：`pause`、`resume_or_connect`、`set_timeout`、`kill`、`close`；
+- 快照：`create_snapshot`、`delete_snapshot`、`rollback`、`clone`、
+  `list_snapshot_ids`；
 - 公网访问：`get_host`、`traffic_access_token`。
 
 返回值使用 `CommandResult`、`CodeResult`、`SandboxInfo` 归一化。用例应对归一化
@@ -156,10 +160,13 @@ CubeProxy admin 地址不可达时，生命周期 probe 会记录告警而非阻
 - `slow`：超出普通 PR 时间预算。
 
 capability 只表达 backend 是否能正确承诺一种行为。目前公共能力有
-`lifecycle`、`commands`、`filesystem`、`run_code`；可选能力包括
-`code_interpreter`、`pause_resume`、`network_allow_deny`、
-`network_public_access`。当前分支的 `platform_lifecycle` 只在
-CubeSandbox capability 集合中启用，并不表示 E2B 后端天然不支持平台生命周期。
+`lifecycle`、`commands`、`filesystem`、`filesystem_extended`、`run_code`；
+可选能力包括 `code_interpreter`、`pause_resume`、`set_timeout`、
+`rollback_clone`、`network_allow_deny`、
+`network_public_access`、`network_mask_request_host`、`platform_lifecycle`、
+`host_mount`、`volume_plugin` 和 `auth_simple_key`。当前 backend 映射中，
+`rollback_clone`、`platform_lifecycle`、`host_mount`、`volume_plugin` 和
+`auth_simple_key` 仅对 CubeSandbox 开启。这并不表示 E2B 后端天然不支持平台生命周期。
 现状是 E2B SDK 传递的 lifecycle 参数与 CubeAPI 接收字段尚未对齐，导致 E2B
 生命周期参数未生效；相关字段兼容修复见
 [PR #988](https://github.com/TencentCloud/CubeSandbox/pull/988)。该 PR 合并并

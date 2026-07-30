@@ -395,8 +395,12 @@ Capability markers:
 - `@pytest.mark.requires_cubeproxy`: platform lifecycle cases that depend on cube-proxy and lifecycle-manager coordination. Skipped unless `SDK_E2E_PLATFORM_LIFECYCLE=true`.
 - `@pytest.mark.volume`: Volume Plugin cases. Skipped unless `SDK_E2E_VOLUME_PLUGIN=true`.
 - `@pytest.mark.auth`: `CUBE_API_KEY` simple-key auth cases. Skipped unless `CUBE_API_KEY` is set for the runner and the backend supports `auth_simple_key` (CubeSandbox only).
-- Common capabilities include `lifecycle`, `commands`, `filesystem`, and `run_code`.
-- Shared optional capabilities include `pause_resume`, `network_allow_deny`, and `network_public_access`.
+- Common capabilities include `lifecycle`, `commands`, `filesystem`,
+  `filesystem_extended`, and `run_code`.
+- Optional capabilities include `code_interpreter`, `pause_resume`, `set_timeout`,
+  `rollback_clone`, `network_allow_deny`, `network_public_access`,
+  `network_mask_request_host`, `platform_lifecycle`, `host_mount`,
+  `volume_plugin`, and `auth_simple_key`.
 - `platform_lifecycle` is available only to CubeSandbox platform-managed lifecycle cases.
 - `host_mount` is a CubeSandbox-only extension; `cases/host-mount/` uses it via
   `@pytest.mark.requires_capability("host_mount")` to skip backends (e.g. e2b) that

@@ -19,10 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[5] / "sdk" / "python"))
 
 import pytest
 import requests
-
 from cubesandbox import Config, Template
 from cubesandbox._exceptions import ApiError, TemplateNotFoundError
-
 from framework.auth import auth_headers
 
 pytestmark = [
@@ -105,6 +103,65 @@ def test_template_create_from_image_and_cleanup(sdk_backend, sdk_e2e_config):
         if created_id:
             try:
                 Template.delete(created_id, config=cfg)
+            except (ApiError, TemplateNotFoundError):
+                pass
+
+
+def test_template_build_preserves_advanced_create_options(
+    sdk_backend,
+    sdk_e2e_config,
+):
+    _require_cubesandbox(sdk_backend)
+    cfg = _cfg(sdk_e2e_config)
+    created_id = None
+    try:
+        job = Template.build(
+            image=DEFAULT_IMAGE,
+            writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE,
+            exposed_ports=[49983, 49999],
+            probe_port=49999,
+            probe_path="/",
+            envs={"SDK_TEMPLATE_E2E": "advanced"},
+            config=cfg,
+        )
+        created_id = job.template_id
+        info = _wait_for_ready(created_id, cfg)
+        assert info.status == "READY", (
+            f"advanced template build failed: id={created_id} status={info.status!r}"
+        )
+        detail = Template.get(created_id, config=cfg)
+        request = detail.create_request or {}
+        annotations = request.get("annotations") or {}
+        assert annotations.get("com.exposed_ports") == "49983:49999", request
+        assert (
+            annotations.get("cube.master.rootfs.writable_layer_size")
+            == DEFAULT_WRITABLE_LAYER_SIZE
+        ), request
+
+        containers = request.get("containers") or []
+        assert len(containers) == 1, request
+        container = containers[0]
+        assert container.get("envs") == [
+            {"key": "SDK_TEMPLATE_E2E", "value": "advanced"}
+        ], request
+        http_get = (
+            (container.get("probe") or {}).get("probe_handler") or {}
+        ).get("http_get") or {}
+        assert http_get.get("port") == 49999, request
+        assert http_get.get("path") == "/", request
+
+        volumes = request.get("volumes") or []
+        assert any(
+            ((volume.get("volume_source") or {}).get("empty_dir") or {}).get(
+                "size_limit"
+            )
+            == DEFAULT_WRITABLE_LAYER_SIZE
+            for volume in volumes
+        ), request
+    finally:
+        if created_id:
+            try:
+                _delete_with_retry(created_id, cfg)
             except (ApiError, TemplateNotFoundError):
                 pass
 

@@ -391,9 +391,11 @@ Capability marker：
 - `@pytest.mark.auth`：`CUBE_API_KEY` 简单密钥鉴权用例，未为 runner 设置
   `CUBE_API_KEY` 或后端不支持 `auth_simple_key`（仅 CubeSandbox）时跳过。
 
-常用 capability 有 `lifecycle`、`commands`、`filesystem`、`run_code`。
-可选共享 capability 包括 `pause_resume`、`network_allow_deny`、
-`network_public_access`。
+公共 capability 有 `lifecycle`、`commands`、`filesystem`、
+`filesystem_extended`、`run_code`。可选 capability 包括 `code_interpreter`、
+`pause_resume`、`set_timeout`、`rollback_clone`、`network_allow_deny`、
+`network_public_access`、`network_mask_request_host`、`platform_lifecycle`、
+`host_mount`、`volume_plugin` 和 `auth_simple_key`。
 当前分支的 `platform_lifecycle` 与 `volume_plugin` 仅在 CubeSandbox
 capability 集合中启用。
 这不是 E2B 的固有能力限制，而是 E2B SDK 传递的 lifecycle 参数与 CubeAPI

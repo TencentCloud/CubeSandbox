@@ -33,6 +33,8 @@ pytest --run-e2e -m "lifecycle and slow"
 | `cases/lifecycle/test_create_options.py` | metadata、env vars、timeout 和创建参数后的 command | `lifecycle` | P1 |
 | `cases/lifecycle/test_pause_resume.py` | SDK pause、connect resume、文件/env/kernel 状态保留 | `pause_resume`，部分需 Code Interpreter | P1 |
 | `cases/lifecycle/test_pause_resume_network.py` | pause/resume 后仍保持出站 deny/allowlist 与限制公网访问 token | `pause_resume` + 网络能力；ingress token 用例需 CubeProxy | P1 + `requires_internet` |
+| `cases/lifecycle/test_rollback_clone.py` | rollback 异常/文件系统/kernel 状态，以及默认/并发 clone 和临时快照清理 | `rollback_clone`（仅 CubeSandbox），部分依赖 Code Interpreter | P1 |
+| `cases/lifecycle/test_negative_and_timeout.py` | create/connect 目标不存在、删除后 pause、在线更新 timeout | `lifecycle`、`pause_resume`、`set_timeout` | P1 |
 | `cases/lifecycle/test_kill.py` | kill 后不可连接、列表移除、重复 kill 终态语义 | `lifecycle` | P1 |
 | `cases/lifecycle/test_auto_lifecycle.py` | auto-pause、手动/自动恢复、重入、auto-kill、主动 pause 与 timeout 的交互 | `platform_lifecycle`、CubeProxy、lifecycle-manager；部分需 Code Interpreter | P1 + `slow`，每日运行 |
 
@@ -43,10 +45,8 @@ pytest --run-e2e -m "lifecycle and slow"
 本组用例纳入双 backend 覆盖。
 
 生命周期覆盖的强项是同时验证控制面 state、文件、kernel 状态和 command 数据面。
-需要注意主动 pause 后的 auto-kill 语义当前作为回归行为记录：实例在 timeout 后
-保持 `paused`。当服务端支持 timeout 回收主动 paused 实例后，应将该测试更新为
-预期 terminal 状态。清理侧的 `safe_kill` 目前需要先恢复 paused 实例；TODO 是
-待服务端支持直接删除 paused 实例后改为直接删除，并确认实例已从列表消失。
+主动 pause 后的 auto-kill 用例验证生命周期 timeout 会销毁 paused 实例，
+并确认实例已从 sandbox 列表中消失。
 
 ### 2.2 Commands
 
@@ -71,7 +71,14 @@ pytest --run-e2e -m "lifecycle and slow"
 - 文件 API 与 shell 双向互操作；
 - 读取不存在文件的错误语义。
 
-当前覆盖以文本文件为主，尚未覆盖目录、权限、二进制、原子覆盖与并发访问。
+`cases/filesystem/test_extended.py` 覆盖 SDK 文件 API 的文件和目录元数据、
+嵌套及空目录 list、exists、remove、rename 和 mkdir。
+
+`cases/filesystem/test_batch_and_watch.py` 覆盖两个 SDK backend 的批量文件写入，
+以及目录 create/write/remove 实时事件。
+
+当前内容覆盖仍以文本文件为主，尚未覆盖非 root 权限行为、二进制往返、
+原子替换和并发文件访问。
 
 ### 2.4 Run code
 
@@ -112,14 +119,20 @@ pytest --run-e2e -m "lifecycle and slow"
 `requires_internet`，运行器没有稳定公网时应使用
 `SDK_E2E_SKIP_INTERNET_TESTS=true` 跳过。
 
-### 2.6 Concurrency
+### 2.6 Templates
+
+`cases/templates/test_alias.py` 覆盖 list/get/build/delete 和 alias 生命周期。
+此外会使用 writable layer 大小、暴露端口、HTTP probe 和环境变量构建模板，
+并从 CubeAPI 返回的模板详情中校验这些高级参数。模板操作仅支持 CubeSandbox。
+
+### 2.7 Concurrency
 
 `cases/concurrency/test_isolation.py` 目前覆盖两个 sandbox 同路径不同内容的文件
 隔离，第二个实例通过 `managed_control_sandbox` 创建和清理。
 
 它证明了基础实例隔离，但不等于并发压力、资源竞争或多 worker 安全性验证。
 
-### 2.7 Volume
+### 2.8 Volume
 
 `cases/volume/` 覆盖 Volume Plugin CRUD、sandbox 绑定/解绑和绑定期间禁止删除。它还验证同一个 Volume 可以在一个沙箱中保持读写，同时在另一个沙箱中以只读方式挂载，包括正常读取，以及 create、write、rename、delete 均被拒绝。这些用例仅适用于 CubeSandbox，只有通过 `SDK_E2E_VOLUME_PLUGIN=true` 明确确认部署已配置 Volume Plugin 后才会执行，否则保持 skip。
 
