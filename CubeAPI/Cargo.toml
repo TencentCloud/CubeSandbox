@@ -30,6 +30,9 @@ tower-http = { version = "0.5", features = [
 tokio = { version = "1", features = ["full"] }
 # select!, join!, channel helpers
 futures = "0.3"
+# TaskTracker (drain in-flight tasks) + CancellationToken (cut retry backoff
+# short on shutdown) for the webhook graceful-drain path.
+tokio-util = { version = "0.7", features = ["rt"] }
 
 # ── Serialization ─────────────────────────────────────────────────────────
 serde = { version = "1", features = ["derive"] }

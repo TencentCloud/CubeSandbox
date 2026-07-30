@@ -40,12 +40,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::mpsc::{self, error::TrySendError, Sender};
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing::{debug, error, warn};
 
 type HmacSha256 = Hmac<Sha256>;
 
 /// Upper bound on the exponential backoff sleep between retries.
 const MAX_BACKOFF_SECS: u64 = 30;
+
+/// Maximum time [`WebhookLogger::flush`] will wait for in-flight deliveries to
+/// drain on shutdown before giving up and letting the process exit. Kept below
+/// a typical orchestrator termination grace period (e.g. Kubernetes' default
+/// 30s) so drain finishes inside the window the platform allows.
+const SHUTDOWN_DRAIN_GRACE: Duration = Duration::from_secs(25);
 
 /// Capacity of the in-memory event queue feeding the dispatcher.
 ///
@@ -175,6 +183,12 @@ pub struct WebhookLogger {
     registry: WebhookRegistry,
     /// Shared delivery counters (queue health, drops).
     metrics: Arc<WebhookMetrics>,
+    /// Tracks the dispatcher and every in-flight delivery task, so
+    /// [`WebhookLogger::flush`] can wait for them to finish on shutdown.
+    tracker: TaskTracker,
+    /// Cancelled on shutdown: tells the dispatcher to drain and stop, and tells
+    /// in-flight deliveries to cut their retry backoff short.
+    shutdown: CancellationToken,
 }
 
 impl WebhookLogger {
@@ -191,12 +205,26 @@ impl WebhookLogger {
             .expect("failed to build webhook HTTP client");
 
         let (tx, rx) = mpsc::channel::<LogEvent>(WEBHOOK_QUEUE_CAPACITY);
-        tokio::spawn(run_dispatcher(rx, client, registry.clone()));
+        let metrics = Arc::new(WebhookMetrics::default());
+        let tracker = TaskTracker::new();
+        let shutdown = CancellationToken::new();
+
+        // The dispatcher itself is tracked, so flush() waiting on the tracker
+        // also waits for the dispatcher to finish draining the queue.
+        tracker.spawn(run_dispatcher(
+            rx,
+            client,
+            registry.clone(),
+            tracker.clone(),
+            shutdown.clone(),
+        ));
 
         Self {
             tx,
             registry,
-            metrics: Arc::new(WebhookMetrics::default()),
+            metrics,
+            tracker,
+            shutdown,
         }
     }
 
@@ -215,43 +243,80 @@ async fn run_dispatcher(
     mut rx: mpsc::Receiver<LogEvent>,
     client: reqwest::Client,
     registry: WebhookRegistry,
+    tracker: TaskTracker,
+    shutdown: CancellationToken,
 ) {
-    while let Some(event) = rx.recv().await {
-        // Build the JSON body once; it is identical for every endpoint.
-        let body = match build_payload(&event) {
-            Ok(b) => Arc::new(b),
-            Err(e) => {
-                error!(event = %event.event, "webhook: failed to serialise payload: {}", e);
-                continue;
+    loop {
+        // Take the next event, but wake up promptly if shutdown is signalled so
+        // we can drain what's already queued and stop, rather than blocking on
+        // recv() forever.
+        let event = tokio::select! {
+            maybe = rx.recv() => match maybe {
+                Some(ev) => ev,
+                None => break, // all senders dropped
+            },
+            _ = shutdown.cancelled() => {
+                // Shutdown: no new events will be emitted (the HTTP server has
+                // already drained its requests before flush() runs), so drain
+                // everything still queued into delivery tasks, then stop.
+                let mut drained = 0u64;
+                while let Ok(ev) = rx.try_recv() {
+                    dispatch_event(ev, &client, &registry, &tracker, &shutdown);
+                    drained += 1;
+                }
+                debug!(drained, "webhook dispatcher draining on shutdown");
+                break;
             }
         };
-
-        // One stable id per *logical event*, shared by every endpoint and
-        // reused across retries so receivers can deduplicate. It is assigned
-        // here — the moment the event is accepted for delivery — rather than
-        // inside the per-attempt retry loop, so any redelivery carries the
-        // same id and identifies the *same event*, not just the same retry
-        // sequence. (For at-least-once across a process restart the id must
-        // travel with a persisted copy of the event; that is the durable-sink
-        // follow-up. Assigning it at emission time is the prerequisite that
-        // makes such a durable sink possible.)
-        let delivery_id = Arc::new(uuid::Uuid::new_v4().to_string());
-
-        // Snapshot the currently-subscribed endpoints (the read lock is
-        // released before we start spawning delivery tasks).
-        for endpoint in registry.matching(&event.event) {
-            // Independent task per (event, endpoint) so a slow endpoint never
-            // blocks the dispatcher or other endpoints.
-            let client = client.clone();
-            let body = body.clone();
-            let event_name = event.event.clone();
-            let delivery_id = delivery_id.clone();
-            tokio::spawn(async move {
-                deliver(&client, &endpoint, &event_name, &delivery_id, &body).await;
-            });
-        }
+        dispatch_event(event, &client, &registry, &tracker, &shutdown);
     }
-    debug!("webhook dispatcher stopped (channel closed)");
+    debug!("webhook dispatcher stopped");
+}
+
+/// Fan a single event out to its subscribed endpoints, spawning one tracked
+/// delivery task per (event, endpoint).
+fn dispatch_event(
+    event: LogEvent,
+    client: &reqwest::Client,
+    registry: &WebhookRegistry,
+    tracker: &TaskTracker,
+    shutdown: &CancellationToken,
+) {
+    // Build the JSON body once; it is identical for every endpoint.
+    let body = match build_payload(&event) {
+        Ok(b) => Arc::new(b),
+        Err(e) => {
+            error!(event = %event.event, "webhook: failed to serialise payload: {}", e);
+            return;
+        }
+    };
+
+    // One stable id per *logical event*, shared by every endpoint and
+    // reused across retries so receivers can deduplicate. It is assigned
+    // here — the moment the event is accepted for delivery — rather than
+    // inside the per-attempt retry loop, so any redelivery carries the
+    // same id and identifies the *same event*, not just the same retry
+    // sequence. (For at-least-once across a process restart the id must
+    // travel with a persisted copy of the event; that is the durable-sink
+    // follow-up. Assigning it at emission time is the prerequisite that
+    // makes such a durable sink possible.)
+    let delivery_id = Arc::new(uuid::Uuid::new_v4().to_string());
+
+    // Snapshot the currently-subscribed endpoints (the read lock is
+    // released before we start spawning delivery tasks).
+    for endpoint in registry.matching(&event.event) {
+        // Independent, tracked task per (event, endpoint): a slow endpoint
+        // never blocks the dispatcher or other endpoints, and flush() can
+        // still wait for it to finish on shutdown.
+        let client = client.clone();
+        let body = body.clone();
+        let event_name = event.event.clone();
+        let delivery_id = delivery_id.clone();
+        let shutdown = shutdown.clone();
+        tracker.spawn(async move {
+            deliver(&client, &endpoint, &event_name, &delivery_id, &shutdown, &body).await;
+        });
+    }
 }
 
 // ─── Logger impl ─────────────────────────────────────────────────────────────
@@ -294,10 +359,32 @@ impl Logger for WebhookLogger {
     }
 
     async fn flush(&self) {
-        // Deliveries are best-effort, fire-and-forget background tasks; there
-        // is no buffer to drain here. Durability is provided by the file
-        // backend. In-flight deliveries continue until they finish or the
-        // process exits.
+        // Graceful drain. Called during shutdown, *after* the HTTP server has
+        // finished its in-flight requests — so no new events will be emitted.
+        //
+        //   1. Signal shutdown: the dispatcher drains everything still queued
+        //      into delivery tasks and stops; in-flight deliveries cut their
+        //      retry backoff short instead of sleeping out the grace window.
+        //   2. Close the tracker and wait for the dispatcher + every delivery
+        //      task to finish, bounded by SHUTDOWN_DRAIN_GRACE so a stuck
+        //      endpoint can't hold the process up indefinitely.
+        //
+        // This is what stops the routine, every-deploy loss of queued and
+        // in-flight webhooks.
+        self.shutdown.cancel();
+        self.tracker.close();
+        if tokio::time::timeout(SHUTDOWN_DRAIN_GRACE, self.tracker.wait())
+            .await
+            .is_err()
+        {
+            warn!(
+                grace_secs = SHUTDOWN_DRAIN_GRACE.as_secs(),
+                "webhook: drain grace expired with deliveries still in flight; \
+                 exiting anyway",
+            );
+        } else {
+            debug!("webhook: all in-flight deliveries drained on shutdown");
+        }
     }
 
     fn name(&self) -> &'static str {
@@ -355,6 +442,7 @@ async fn deliver(
     endpoint: &WebhookConfig,
     event_name: &str,
     delivery_id: &str,
+    shutdown: &CancellationToken,
     body: &[u8],
 ) {
     let signature = endpoint.secret.as_deref().map(|s| sign(s, body));
@@ -408,7 +496,14 @@ async fn deliver(
         // Back off before the next retry (skip after the last attempt).
         if attempt < endpoint.max_retries {
             let secs = 2u64.saturating_pow(attempt).min(MAX_BACKOFF_SECS);
-            tokio::time::sleep(Duration::from_secs(secs)).await;
+            // On shutdown, don't burn the drain grace window sleeping: wake
+            // immediately and proceed straight to the next attempt. (We still
+            // attempt delivery — the goal of draining is to *deliver* in-flight
+            // events, just without the long backoff.)
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(secs)) => {}
+                _ = shutdown.cancelled() => {}
+            }
         }
     }
 
@@ -649,6 +744,56 @@ mod tests {
         assert!(
             start.elapsed() < Duration::from_millis(100),
             "log() must not block on delivery",
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_drains_in_flight_delivery_before_returning() {
+        let (url, mut rx) = spawn_receiver().await;
+        let logger = logger_for(vec![WebhookConfig {
+            url,
+            events: vec!["sandbox.created".to_string()],
+            secret: None,
+            timeout_ms: 2000,
+            max_retries: 0,
+        }]);
+
+        logger.log(created_event("sbx-drain")).await;
+
+        // flush() (graceful shutdown) must wait for the in-flight delivery.
+        logger.flush().await;
+
+        // Because flush() waited, the event is already delivered — it is
+        // available without any further polling. This is the property that
+        // was broken before: shutdown used to abandon in-flight deliveries.
+        let got = rx
+            .try_recv()
+            .expect("event must be delivered *before* flush() returns");
+        assert_eq!(got.body["sandbox_id"], "sbx-drain");
+    }
+
+    #[tokio::test]
+    async fn flush_cuts_retry_backoff_short_on_shutdown() {
+        // Unreachable endpoint with several retries: without shutdown-aware
+        // backoff, draining would sleep 1+2+4+8+16s before giving up.
+        let logger = logger_for(vec![WebhookConfig {
+            url: "http://127.0.0.1:1/webhook".to_string(),
+            events: vec!["sandbox.created".to_string()],
+            secret: None,
+            timeout_ms: 100,
+            max_retries: 5,
+        }]);
+
+        logger.log(created_event("sbx-5")).await;
+        // Let the delivery task fail its first attempt and enter backoff.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let start = tokio::time::Instant::now();
+        logger.flush().await;
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "flush() must cut retry backoff short on shutdown, took {:?}",
+            start.elapsed(),
         );
     }
 }
