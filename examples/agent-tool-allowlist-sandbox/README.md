@@ -7,8 +7,8 @@ Host-side argv tool allowlist + a small BYOI toolbox image for
 
 **What you get:** refuse illegal tool commands on the host *before*
 `Sandbox.create` / `commands.run`, then run allowlisted tools inside a
-MicroVM built from this directory's Dockerfile. Stack with
-`allow_internet_access=False`.
+MicroVM from this directory's Dockerfile. Stacks with airgap, CIDR
+`allow_out`, pause/resume, and parallel sandboxes.
 
 **What this is not:** guest confinement, bash-free images, or an LLM agent.
 `tool_agent_loop.py` uses fixed proposals.
@@ -16,9 +16,10 @@ MicroVM built from this directory's Dockerfile. Stack with
 ## Use cases
 
 - Agent hosts that should never start a sandbox for `bash` / `curl` probes
-- Teaching the host-policy vs sandbox-workload split (E2B-style)
-- A minimal BYOI profile file (`/etc/cube-sandbox/tool-profile.txt`) aligned
-  with the default allowlist
+- Teaching host-policy vs sandbox-workload (E2B-style) on Cube
+- Minimal BYOI profile (`/etc/cube-sandbox/tool-profile.txt`) aligned with
+  the default allowlist
+- Differentiated stacks: checkpoint, restricted egress, multi-sandbox fan-out
 
 ## Prerequisites
 
@@ -33,29 +34,12 @@ cp .env.example .env
 
 ## Quick start
 
-### 1 — Build image
+### 1 — Build & register
 
 ```bash
 docker build -t agent-tool-allowlist-sandbox:latest .
+# optional: --build-arg INSTALL_CURL=1  (airgap curl probe in egress/loop)
 
-# optional guest curl for the airgap turn in tool_agent_loop.py
-# docker build --build-arg INSTALL_CURL=1 -t agent-tool-allowlist-sandbox:latest .
-```
-
-Local envd probe (same idea as `cubesandbox-base-nginx`):
-
-```bash
-docker run --rm -d --name agent-tool-box \
-  -p 49983:49983 agent-tool-allowlist-sandbox:latest
-curl -s -o /dev/null -w "envd /health => %{http_code}\n" http://127.0.0.1:49983/health
-docker rm -f agent-tool-box
-```
-
-### 2 — Register template
-
-Push/tag so the node can pull, then:
-
-```bash
 cubemastercli tpl create-from-image \
   --image <registry-or-local>/agent-tool-allowlist-sandbox:latest \
   --writable-layer-size 1G \
@@ -64,24 +48,32 @@ cubemastercli tpl create-from-image \
   --probe-path /health
 ```
 
-Put the READY template id into `.env` as `CUBE_TEMPLATE_ID`.
-Resources: 1G writable layer is enough; no GPU.
+Put the READY template id into `.env` as `CUBE_TEMPLATE_ID`. Resources: 1G
+writable layer; no GPU.
 
-### 3 — Host-only checks (no cluster)
-
-```bash
-python tool_allowlist_limits.py
-python -m unittest test_tool_allowlist.py -v
-python tool_allowlist_deny.py
-```
-
-### 4 — Cluster demos
+Local envd probe:
 
 ```bash
-python verify_template.py          # TEMPLATE_VERIFY_OK
-python tool_allowlist_allow.py     # allowlisted echo + artifact under airgap
-python tool_agent_loop.py          # AGENT_LOOP_OK (fixed proposals)
+docker run --rm -d --name agent-tool-box -p 49983:49983 agent-tool-allowlist-sandbox:latest
+curl -s -o /dev/null -w "envd /health => %{http_code}\n" http://127.0.0.1:49983/health
+docker rm -f agent-tool-box
 ```
+
+### 2 — Run demos
+
+| Step | Command | Expect | Needs cluster |
+|------|---------|--------|---------------|
+| Limits | `python tool_allowlist_limits.py` | `LIMITS_DEMO_OK` | no |
+| Unit tests | `python -m unittest test_tool_allowlist.py -v` | OK | no |
+| Deny | `python tool_allowlist_deny.py` | `denied_as_expected` | no |
+| Template smoke | `python verify_template.py` | `TEMPLATE_VERIFY_OK` | yes |
+| Allow + airgap | `python tool_allowlist_allow.py` | echo + artifact | yes |
+| Reference loop | `python tool_agent_loop.py` | `AGENT_LOOP_OK` | yes |
+| Checkpoint | `python tool_allowlist_checkpoint.py` | `CHECKPOINT_OK` | yes |
+| Egress stack | `python tool_allowlist_egress.py` | `EGRESS_STACK_OK` | yes |
+| Fan-out | `python tool_allowlist_fanout.py` | `FANOUT_OK` | yes |
+
+`ALLOWLIST_FANOUT_N` defaults to `2` (max `4`).
 
 ## How it works
 
@@ -92,27 +84,27 @@ propose command
 tool_allowlist.assert_allowlisted   ← host only
     │ deny → never Sandbox.create / commands.run
     ▼ allow
-Sandbox.create(template=this BYOI, allow_internet_access=False)
+Sandbox.create(this BYOI, network/lifecycle options…)
     │
     ▼
 sandbox.commands.run(command)
 ```
 
-Guest image ships `/etc/cube-sandbox/tool-profile.txt` listing the default
-toolbox names. The gate itself still lives on the host; the file is intent /
-documentation inside the VM, not enforcement.
+Guest `tool-profile.txt` documents intended toolbox names; enforcement stays
+on the host.
 
 ## Directory
 
 ```
-├── Dockerfile                 # cubesandbox-base + tool-profile
-├── tool_allowlist.py          # host argv gate
-├── tool_allowlist_limits.py   # threat model (host-only)
-├── tool_allowlist_deny.py     # deny before create
-├── tool_allowlist_allow.py    # allow + airgap
-├── tool_agent_loop.py         # reference loop (not an LLM)
-├── test_tool_allowlist.py     # unittest
-├── verify_template.py         # cluster smoke for this image
+├── Dockerfile
+├── tool_allowlist.py
+├── tool_allowlist_limits.py / deny.py / allow.py
+├── tool_allowlist_checkpoint.py   # pause/resume + gate
+├── tool_allowlist_egress.py       # argv ⊥ CIDR allow_out
+├── tool_allowlist_fanout.py       # parallel sandboxes
+├── tool_agent_loop.py
+├── test_tool_allowlist.py
+├── verify_template.py
 ├── env_utils.py
 ├── requirements.txt
 └── .env.example
@@ -121,11 +113,11 @@ documentation inside the VM, not enforcement.
 ## Limits
 
 - Base image still has a shell; profile ≠ confinement.
-- Allowlisting `cat` still permits `cat /etc/passwd` through this gate —
-  rely on MicroVM isolation + least privilege.
+- Allowlisting `cat` still permits `cat /etc/passwd` through this gate.
 - `echo … > file` remains allowlisted (arbitrary guest write residual).
 - Growing the allowlist needs `extra_binaries` **and**
   `allow_unsafe_allowlist_extension=True`.
 - `enable_code_execution=True` is an explicit interpreter escalation.
 - Default build does not apt-install curl; base may still ship it.
 - `create-from-image` needs an image reference the node can pull.
+- Fan-out creates real VMs — keep `N` small on shared clusters.
