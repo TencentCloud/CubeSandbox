@@ -223,7 +223,7 @@ tolerations:
 
 {{/*
 WebUI OpenResty config: static SPA + /opsapi|/cubeapi/v1/SDK → CubeOps, optional /sandbox/ → CubeProxy.
-Rendered into cube-webui-config and checksum'd so edits roll the CloneSet.
+Rendered into cube-webui-config and checksum'd so edits roll the Deployment.
 */}}
 {{- define "cube.webuiNginxConf" -}}
 {{- $opsUpstream := include "cube.opsUpstream" . -}}
@@ -486,6 +486,16 @@ chart-owned StorageClass). This helper only picks which SC name a PVC binds to.
 {{- end -}}
 {{- end -}}
 
+{{- define "cube.volumeCosSecretName" -}}
+{{- if .Values.volumeCos.existingSecret -}}
+{{- .Values.volumeCos.existingSecret -}}
+{{- else if .Values.volumeCos.secretName -}}
+{{- .Values.volumeCos.secretName -}}
+{{- else -}}
+{{- printf "%s-volume-cos" (include "cube.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "cube.masterEndpoint" -}}
 {{- if .Values.externalControlPlane.enabled -}}
 {{- .Values.externalControlPlane.masterEndpoint -}}
@@ -582,29 +592,41 @@ change bind without editing multiple places.
 {{- end -}}
 
 {{/*
-cube-node / installer / bootstrap always use OpenKruise Advanced DaemonSet
-(hard dependency). Do NOT change this to apps/v1 — that would break InPlace
-and the other compute-plane ADS workloads.
+cube-node / installer / bootstrap use native apps/v1 DaemonSet.
 */}}
 {{- define "cube.nodeDaemonSetAPIVersion" -}}
-apps.kruise.io/v1beta1
+apps/v1
 {{- end -}}
 
 {{/*
-cube-node-pvm uses a native apps/v1 DaemonSet so Pod creation does not depend
-on kruise-manager (see docs/PVM-NATIVE-DS-MIGRATION-PLAN.md).
+cube-node-pvm uses a native apps/v1 DaemonSet.
 */}}
 {{- define "cube.nodePvmDaemonSetAPIVersion" -}}
 apps/v1
 {{- end -}}
 
-{{- define "cube.cloneSetAPIVersion" -}}
-apps.kruise.io/v1alpha1
-{{- end -}}
+{{/*
+Render a Deployment strategy block.
 
-{{- define "cube.cloneSetUpdateStrategy" -}}
-updateStrategy:
-  {{- toYaml .Values.controlPlane.cloneSetUpdateStrategy | nindent 2 }}
+Call with the root context to use controlPlane.deploymentStrategy, or with
+(dict "root" $ "strategy" .Values.controlPlane.master.deploymentStrategy) for a
+component override. type Recreate omits rollingUpdate (required for single-
+replica RWO PVC workloads such as cube-master).
+*/}}
+{{- define "cube.deploymentStrategy" -}}
+{{- $strategy := dict -}}
+{{- if hasKey . "Values" -}}
+{{- $strategy = .Values.controlPlane.deploymentStrategy -}}
+{{- else -}}
+{{- $strategy = .strategy | default .root.Values.controlPlane.deploymentStrategy -}}
+{{- end -}}
+strategy:
+  type: {{ required "deploymentStrategy.type is required" $strategy.type }}
+{{- if ne ($strategy.type | toString) "Recreate" }}
+  rollingUpdate:
+    maxUnavailable: {{ $strategy.rollingUpdate.maxUnavailable }}
+    maxSurge: {{ $strategy.rollingUpdate.maxSurge }}
+{{- end }}
 {{- end -}}
 
 {{- define "cube.startupGateEnabled" -}}
@@ -617,15 +639,15 @@ updateStrategy:
 {{- end -}}
 
 {{/*
-Kubernetes API path prefix for the cube-node Advanced DaemonSet (health-test).
+Kubernetes API path prefix for the cube-node DaemonSet (health-test).
 */}}
 {{- define "cube.nodeDaemonSetAPIPath" -}}
-/apis/apps.kruise.io/v1beta1/namespaces
+/apis/apps/v1/namespaces
 {{- end -}}
 
 {{/*
 Big Pod: shared volumeMounts for component install/run containers.
-Toolbox is mounted whole at the fixed path (InPlace-stable).
+Toolbox is mounted whole at the fixed path.
 */}}
 {{- define "cube.nodeToolboxVolumeMounts" -}}
 - name: toolbox
@@ -640,6 +662,12 @@ Toolbox is mounted whole at the fixed path (InPlace-stable).
   mountPropagation: Bidirectional
 - name: data-snapshot-pack
   mountPath: {{ .Values.hostPaths.dataSnapshotPack }}
+- name: data-cube-shared
+  mountPath: {{ .Values.hostPaths.dataCubeShared }}
+  mountPropagation: Bidirectional
+- name: data-shared
+  mountPath: {{ .Values.hostPaths.dataShared }}
+  mountPropagation: Bidirectional
 - name: tmp-cube
   mountPath: {{ .Values.hostPaths.tmpCube }}
   mountPropagation: Bidirectional
@@ -730,6 +758,12 @@ Bootstrap: host mutation mounts for pvm / node-init.
   mountPropagation: Bidirectional
 - name: data-snapshot-pack
   mountPath: {{ .Values.hostPaths.dataSnapshotPack }}
+- name: data-cube-shared
+  mountPath: {{ .Values.hostPaths.dataCubeShared }}
+  mountPropagation: Bidirectional
+- name: data-shared
+  mountPath: {{ .Values.hostPaths.dataShared }}
+  mountPropagation: Bidirectional
 - name: tmp-cube
   mountPath: {{ .Values.hostPaths.tmpCube }}
   mountPropagation: Bidirectional
@@ -767,6 +801,14 @@ Bootstrap: host mutation mounts for pvm / node-init.
 - name: data-snapshot-pack
   hostPath:
     path: {{ .Values.hostPaths.dataSnapshotPack }}
+    type: DirectoryOrCreate
+- name: data-cube-shared
+  hostPath:
+    path: {{ .Values.hostPaths.dataCubeShared }}
+    type: DirectoryOrCreate
+- name: data-shared
+  hostPath:
+    path: {{ .Values.hostPaths.dataShared }}
     type: DirectoryOrCreate
 - name: tmp-cube
   hostPath:

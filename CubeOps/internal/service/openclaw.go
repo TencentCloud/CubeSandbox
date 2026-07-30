@@ -1238,7 +1238,8 @@ print("Applied ~/.openclaw/openclaw.json")
 PY
          python3 /tmp/agenthub-openclaw-apply.py && \
          restart_openclaw_service && \
-         for i in $(seq 1 30); do \
+         sleep 2 && \
+         for i in $(seq 1 60); do \
            if openclaw_ready; then \
              openclaw_status; \
              break; \

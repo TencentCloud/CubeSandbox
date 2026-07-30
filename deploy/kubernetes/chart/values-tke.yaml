@@ -19,9 +19,9 @@
 #      helm fails render until you override it in a local values file (or
 #      set it to "" if you manage CLB SGs outside Helm).
 #
-# Nothing else about the release is TKE-specific — Cube-owned images are
-# already published to ccr.ccs.tencentyun.com, so the chart's default image
-# repositories work as-is.
+# Nothing else about the release is TKE-specific — Cube-owned images default
+# to TCR int (cube-sandbox-int.tencentcloudcr.com/cube-sandbox/...). Users in
+# mainland China should add `-f values-cn.yaml` so pulls use TCR cn.
 
 storageClass:
   create: true

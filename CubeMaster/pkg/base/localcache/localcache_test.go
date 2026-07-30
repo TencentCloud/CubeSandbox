@@ -6,15 +6,19 @@
 package localcache
 
 import (
+	"container/list"
 	"context"
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/patrickmn/go-cache"
 	"github.com/stretchr/testify/assert"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/localcache/util"
 )
 
 func TestLocalCache(t *testing.T) {
@@ -139,13 +143,14 @@ func TestNoValue(t *testing.T) {
 }
 
 func TestSaveFile(t *testing.T) {
+	cacheFile := filepath.Join(t.TempDir(), "cache.gob")
 	localCache := NewCache("test",
 		func(ctx context.Context, key string) (val interface{}, found bool, err error) {
 			return "Test", true, nil
 		},
 		&LocalCacheConfig{
 			OpenCacheFile: true,
-			LoadFileName:  "a.txt",
+			LoadFileName:  cacheFile,
 			ExpiredUse:    true,
 			Expired:       5 * time.Second,
 		})
@@ -163,7 +168,7 @@ func TestSaveFile(t *testing.T) {
 		},
 		&LocalCacheConfig{
 			OpenCacheFile: true,
-			LoadFileName:  "a.txt",
+			LoadFileName:  cacheFile,
 			ExpiredUse:    true,
 			Expired:       5 * time.Second,
 		})
@@ -177,6 +182,55 @@ func TestSaveFile(t *testing.T) {
 	}
 	assert.Equal(t, found, true)
 	assert.Equal(t, v.(string), "Test")
+}
+
+func TestSaveFileDoesNotMutateLiveCache(t *testing.T) {
+	valueList := list.New()
+	cacheValue := &util.CacheValue{Key: "key", Value: "value"}
+	liveCache := cache.New(0, 0)
+	element := valueList.PushBack(cacheValue)
+	liveCache.Set("key", element, cache.NoExpiration)
+	localCache := &LocalCache{cache: liveCache}
+
+	localCache.saveFile(filepath.Join(t.TempDir(), "cache.gob"))
+
+	item, found := liveCache.Get("key")
+	if assert.True(t, found) {
+		assert.Same(t, element, item)
+	}
+	assert.Equal(t, 1, valueList.Len())
+}
+
+func TestSaveFileDoesNotPanicOnInvalidCacheEntries(t *testing.T) {
+	valueList := list.New()
+	liveCache := cache.New(0, 0)
+	liveCache.Set("invalid-element", valueList.PushBack("invalid"), cache.NoExpiration)
+	liveCache.Set("invalid-value", "invalid", cache.NoExpiration)
+	localCache := &LocalCache{name: "test", cache: liveCache}
+
+	assert.NotPanics(t, func() {
+		localCache.saveFile(filepath.Join(t.TempDir(), "cache.gob"))
+	})
+}
+
+func TestLoadFileFailurePreservesLiveCache(t *testing.T) {
+	valueList := list.New()
+	cacheValue := &util.CacheValue{Key: "key", Value: "value"}
+	element := valueList.PushBack(cacheValue)
+	liveCache := cache.New(0, 0)
+	liveCache.Set("key", element, cache.NoExpiration)
+	localCache := &LocalCache{name: "test", valueList: valueList, cache: liveCache}
+
+	assert.NotPanics(t, func() {
+		localCache.loadFile(filepath.Join(t.TempDir(), "missing.gob"))
+	})
+
+	item, found := liveCache.Get("key")
+	if assert.True(t, found) {
+		assert.Same(t, element, item)
+	}
+	assert.Equal(t, 1, valueList.Len())
+	assert.Zero(t, localCache.curCacheSize)
 }
 
 func RandString(len int) string {

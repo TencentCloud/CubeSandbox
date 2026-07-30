@@ -3,16 +3,17 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Callable, Dict
 
 import httpx
 import requests
 
 from ._commands import CommandResult, Commands
-from ._config import Config
+from ._config import Config, _auth_headers
 from ._exceptions import ApiError, AuthenticationError, CubeSandboxError, SandboxNotFoundError, TemplateNotFoundError
 from ._filesystem import Filesystem
-from ._models import Execution, ExecutionError, OutputMessage, Result, SnapshotInfo
+from ._models import Execution, ExecutionError, OutputMessage, Result, SandboxInfo, SnapshotInfo
 from ._policy import (
     Rule,
     _normalize_rules_arg,
@@ -22,19 +23,57 @@ from ._policy import (
 from ._pty import Pty
 from ._stream import _parse_line
 from ._transport import build_client
+from ._volume import VolumeMountsArg, _serialize_volume_mounts
 
 JUPYTER_PORT = 49999
 
 #: Never-timeout sentinel. See docs/guide/lifecycle.md.
 NEVER_TIMEOUT = -1
 
+class _CloneCleanup:
+    """Process-local ownership of one clone operation's temporary snapshot."""
+
+    def __init__(self, snapshot_id: str, remaining: int, config: Config) -> None:
+        self.snapshot_id = snapshot_id
+        self.remaining = remaining
+        self.config = config
+        self._released: set[str] = set()
+        self._cleanup_started = False
+        self._lock = threading.Lock()
+
+    def release(self, sandbox_id: str) -> None:
+        with self._lock:
+            if sandbox_id in self._released:
+                return
+            self._released.add(sandbox_id)
+            self.remaining -= 1
+            should_cleanup = self.remaining == 0
+        if should_cleanup:
+            self.cleanup()
+
+    def cleanup(self) -> None:
+        """Start best-effort deletion once, including failure backstops."""
+        with self._lock:
+            if self._cleanup_started:
+                return
+            self._cleanup_started = True
+        try:
+            Sandbox.delete_snapshot(self.snapshot_id, config=self.config)
+        except Exception:  # noqa: BLE001 — best-effort snapshot cleanup
+            return
+
 
 def _check_response(resp: requests.Response) -> None:
     if resp.ok:
         return
     try:
-        msg = resp.json().get("message") or resp.json().get("detail") or resp.text
-    except Exception:
+        body = resp.json()
+        msg = (
+            (body.get("message") or body.get("detail") or resp.text)
+            if isinstance(body, dict)
+            else resp.text
+        )
+    except (ValueError, requests.JSONDecodeError):
         msg = resp.text or f"HTTP {resp.status_code}"
     code = resp.status_code
     if code in (401, 403):
@@ -88,6 +127,7 @@ class Sandbox:
         self._commands = Commands(self)
         self._files = Filesystem(self)
         self._pty = Pty(self)
+        self._clone_cleanup: _CloneCleanup | None = None
 
 
     @property
@@ -148,10 +188,12 @@ class Sandbox:
         *,
         timeout: int | None = None,
         env_vars: Dict[str, str] | None = None,
+        envs: Dict[str, str] | None = None,
         metadata: Dict[str, str] | None = None,
         allow_internet_access: bool = True,
         network: Dict[str, Any] | None = None,
         lifecycle: Dict[str, Any] | None = None,
+        volume_mounts: VolumeMountsArg | None = None,
         config: Config | None = None,
         **kwargs: Any,
     ) -> "Sandbox":
@@ -162,11 +204,15 @@ class Sandbox:
             timeout: Sandbox idle timeout in seconds (``None`` omits the field).
                 See ``docs/guide/lifecycle.md``.
             env_vars: Environment variables injected into the sandbox.
+            envs: E2B-compatible alias for ``env_vars``. When both aliases are
+                provided, they must contain the same values.
             metadata: Arbitrary key-value metadata (e.g. network-policy, host-mount).
             allow_internet_access: When ``False``, the sandbox is blocked from
                 making outbound traffic to the public internet.
             network: Egress network policy. Accepts keys:
                 - ``allow_out`` / ``deny_out``: lists of CIDRs or hostnames (L3/L4).
+                - ``mask_request_host``: Host authority forwarded to user services;
+                  ``${PORT}`` expands to the requested sandbox port.
                 - ``rules``: list of :class:`~cubesandbox.Rule` dataclasses (or
                   equivalent dicts with snake_case keys) for L7 host/path/SNI
                   matching, audit, and credential injection. For E2B parity,
@@ -189,6 +235,23 @@ class Sandbox:
 
                 Absent ``lifecycle`` keeps today's behaviour (idle sandboxes
                 are killed).
+            volume_mounts: Optional dict mapping mount paths to volumes
+                (e2b-compatible). Key is the sandbox mount path, value is a
+                :class:`~cubesandbox.Volume`,
+                :class:`~cubesandbox.VolumeInfo`, or plain ``volumeID`` string.
+                Wrap any of those in :class:`~cubesandbox.VolumeMount` to set
+                Cube-specific attachment options such as ``read_only``::
+
+                    Sandbox.create(volume_mounts={"/workspace": vol})
+                    Sandbox.create(volume_mounts={"/workspace": "vol-123"})
+                    Sandbox.create(
+                        volume_mounts={"/dataset": VolumeMount(vol, read_only=True)}
+                    )
+
+                Each value must resolve to an existing ``volumeID`` created via
+                :meth:`cubesandbox.Volume.create`. ``read_only`` applies to this
+                sandbox attachment; it does not make the volume an immutable
+                snapshot.
             config: SDK config. Uses default (env-based) config if omitted.
 
         Returns:
@@ -204,12 +267,16 @@ class Sandbox:
         if not tpl:
             raise ValueError("template is required. Set CUBE_TEMPLATE_ID or pass template=")
 
+        if env_vars is not None and envs is not None and env_vars != envs:
+            raise ValueError("env_vars and envs must match when both are provided")
+        sandbox_env_vars = env_vars if env_vars is not None else envs
+
         # Omitted when None; see docs/guide/lifecycle.md.
         payload: dict = {"templateID": tpl}
         if timeout is not None:
             payload["timeout"] = timeout
-        if env_vars:
-            payload["envVars"] = env_vars
+        if sandbox_env_vars:
+            payload["envVars"] = sandbox_env_vars
         if metadata:
             payload["metadata"] = metadata
         if not allow_internet_access:
@@ -227,6 +294,8 @@ class Sandbox:
                 net["denyOut"] = network["deny_out"]
             if "allow_public_traffic" in network:
                 net["allowPublicTraffic"] = network["allow_public_traffic"]
+            if "mask_request_host" in network:
+                net["maskRequestHost"] = network["mask_request_host"]
             if "rules" in network and network["rules"]:
                 # ``rules`` accepts either CubeEgress's list-of-Rule shape or
                 # E2B's per-host transform mapping (``{host: [{transform: {...}}]}``).
@@ -242,11 +311,13 @@ class Sandbox:
         # camelCase keys. Absent => server-side default ("kill" on timeout).
         if lifecycle:
             payload["lifecycle"] = _serialize_lifecycle(lifecycle)
+        if volume_mounts:
+            payload["volumeMounts"] = _serialize_volume_mounts(volume_mounts)
         payload.update(kwargs)
 
         s = requests.Session()
         resp = s.post(f"{cfg.api_url}/sandboxes", json=payload,
-                      headers={"Content-Type": "application/json"})
+                      headers={"Content-Type": "application/json", **_auth_headers(cfg)})
         _check_response(resp)
         return cls(resp.json(), config=cfg)
 
@@ -272,7 +343,7 @@ class Sandbox:
         # Connect omits timeout; see docs/guide/lifecycle.md.
         resp = s.post(f"{cfg.api_url}/sandboxes/{sandbox_id}/connect",
                       json={},
-                      headers={"Content-Type": "application/json"})
+                      headers={"Content-Type": "application/json", **_auth_headers(cfg)})
         _check_response(resp)
         return cls(resp.json(), config=cfg)
 
@@ -290,7 +361,7 @@ class Sandbox:
         """
         cfg = config or Config()
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/sandboxes")
+        resp = s.get(f"{cfg.api_url}/sandboxes", headers=_auth_headers(cfg))
         _check_response(resp)
         return resp.json()
 
@@ -308,7 +379,7 @@ class Sandbox:
         """
         cfg = config or Config()
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/v2/sandboxes")
+        resp = s.get(f"{cfg.api_url}/v2/sandboxes", headers=_auth_headers(cfg))
         _check_response(resp)
         return resp.json()
 
@@ -325,7 +396,7 @@ class Sandbox:
         """
         cfg = config or Config()
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/health")
+        resp = s.get(f"{cfg.api_url}/health", headers=_auth_headers(cfg))
         _check_response(resp)
         return resp.json()
 
@@ -481,13 +552,22 @@ class Sandbox:
         """
         resp = self._session.delete(f"{self._config.api_url}/sandboxes/{self.sandbox_id}")
         _check_response(resp)
+        if self._clone_cleanup is not None:
+            self._clone_cleanup.release(self.sandbox_id)
 
-    def get_info(self) -> dict:
+    def get_info(self) -> SandboxInfo:
         """GET /sandboxes/:sandboxID - Get sandbox detail.
 
         Returns:
-            A dict containing ``sandboxID``, ``state``, ``cpuCount``,
-            ``memoryMB``, ``startedAt``, and other sandbox metadata.
+            A :class:`SandboxInfo` exposing E2B-compatible ``snake_case``
+            attributes (``sandbox_id``, ``template_id``, ``sandbox_domain``,
+            ``started_at`` / ``end_at`` as ``datetime``, ``state`` as
+            ``SandboxState | str | None``, ``cpu_count``, ``memory_mb``,
+            ``envd_version``, ``metadata``, ``name`` ...), plus the
+            CubeSandbox-specific ``disk_size_mb`` attribute. For backward
+            compatibility the object is also a dict containing the raw CubeAPI
+            JSON snapshot (excluding the sensitive ``envdAccessToken``), e.g.
+            ``info["sandboxID"]`` or ``info.get("state")``.
 
         Raises:
             SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
@@ -495,7 +575,7 @@ class Sandbox:
         """
         resp = self._session.get(f"{self._config.api_url}/sandboxes/{self.sandbox_id}")
         _check_response(resp)
-        return resp.json()
+        return SandboxInfo.from_dict(resp.json())
 
 
     def __enter__(self) -> "Sandbox":
@@ -581,7 +661,7 @@ class Sandbox:
         if next_token is not None:
             params["nextToken"] = next_token
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/snapshots", params=params)
+        resp = s.get(f"{cfg.api_url}/snapshots", params=params, headers=_auth_headers(cfg))
         _check_response(resp)
         items = [SnapshotInfo.from_dict(d) for d in (resp.json() or [])]
         nt = resp.headers.get("x-next-token") or None
@@ -605,7 +685,7 @@ class Sandbox:
         """
         cfg = config or Config()
         s = requests.Session()
-        resp = s.delete(f"{cfg.api_url}/templates/{snapshot_id}")
+        resp = s.delete(f"{cfg.api_url}/templates/{snapshot_id}", headers=_auth_headers(cfg))
         _check_response(resp)
 
     # 1.4 — create_from_snapshot is covered by Sandbox.create(template=snapshot_id).
@@ -680,15 +760,17 @@ class Sandbox:
 
         1. :meth:`create_snapshot` — capture the current state.
         2. :func:`Sandbox.create` × n — spin up *n* sandboxes from the snapshot.
-        3. :meth:`delete_snapshot` — clean up the ephemeral snapshot.
+        3. Attach shared cleanup state to the clones. The temporary snapshot
+           is deleted after the last clone is killed through this SDK process.
 
         If any sandbox creation fails, **all sibling sandboxes that did
         succeed are killed** before the exception propagates. This prevents
         leaked sandboxes when a partial failure happens halfway through a
         concurrent fan-out — the alternative (returning a partial list and
         raising) loses one or the other in any caller that doesn't carefully
-        wrap the call in try/except. ``delete_snapshot`` for the ephemeral
-        snapshot is still best-effort and runs unconditionally.
+        wrap the call in try/except. Snapshot cleanup is best-effort and is
+        process-local; server-side timeout or deletion by another process is
+        not observable by this SDK instance.
 
         Args:
             n: Number of clones to create (default: 1).
@@ -722,61 +804,65 @@ class Sandbox:
 
         sandboxes: list[Sandbox] = []
         first_error: BaseException | None = None
-        try:
-            if concurrency <= 1 or n <= 1:
-                # Sequential: short-circuit on first failure to preserve the
-                # historical fail-fast behaviour. Anything created before the
-                # failure stays in ``sandboxes`` and is returned via finally.
-                for _ in range(n):
-                    try:
-                        sandboxes.append(_create_one())
-                    except BaseException as exc:  # noqa: BLE001
-                        first_error = exc
-                        break
-            else:
-                # Local import: keeps the default (sequential) path free of
-                # threading machinery for callers that never opt-in.
-                from concurrent.futures import ThreadPoolExecutor, as_completed
+        if concurrency <= 1 or n <= 1:
+            # Sequential: short-circuit on first failure to preserve the
+            # historical fail-fast behaviour.
+            for _ in range(n):
+                try:
+                    sandboxes.append(_create_one())
+                except BaseException as exc:  # noqa: BLE001
+                    first_error = exc
+                    break
+        else:
+            # Local import: keeps the default (sequential) path free of
+            # threading machinery for callers that never opt-in.
+            from concurrent.futures import ThreadPoolExecutor, as_completed
 
-                workers = min(n, concurrency)
-                with ThreadPoolExecutor(max_workers=workers) as pool:
-                    futures = [pool.submit(_create_one) for _ in range(n)]
-                    # Drain every future — never leak a Sandbox just because
-                    # an earlier sibling raised. We collect successes and the
-                    # first exception, then decide what to do once all futures
-                    # have settled.
-                    for fut in as_completed(futures):
-                        try:
-                            sandboxes.append(fut.result())
-                        except BaseException as exc:  # noqa: BLE001
-                            if first_error is None:
-                                first_error = exc
-                            # Keep draining: another in-flight create may
-                            # still succeed and we must not drop its result.
-        finally:
-            try:
-                Sandbox.delete_snapshot(snap_id, config=cfg)
-            except Exception:  # noqa: BLE001 — best-effort cleanup
-                pass
+            workers = min(n, concurrency)
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(_create_one) for _ in range(n)]
+                # Drain every future — never leak a Sandbox just because
+                # an earlier sibling raised. We collect successes and the
+                # first exception, then decide what to do once all futures
+                # have settled.
+                for fut in as_completed(futures):
+                    try:
+                        sandboxes.append(fut.result())
+                    except BaseException as exc:  # noqa: BLE001
+                        if first_error is None:
+                            first_error = exc
+                        # Keep draining: another in-flight create may
+                        # still succeed and we must not drop its result.
+        cleanup = _CloneCleanup(snap_id, len(sandboxes), cfg)
+        for sb in sandboxes:
+            sb._clone_cleanup = cleanup
 
         if first_error is not None:
             # We hit at least one failure. The caller asked for *n* clones
             # and got fewer — there is no clean way to return both partial
             # successes and an exception, so kill the orphans and propagate.
-            # This is "all-or-nothing" semantics for the failure case;
-            # without it, a partial result is silently lost when we raise.
+            # This is "all-or-nothing" semantics for the failure case.
             for sb in sandboxes:
                 try:
                     sb.kill()
                 except Exception:  # noqa: BLE001 — best-effort cleanup
                     pass
+            # A failed kill cannot release its ownership. Force the idempotent
+            # backstop after every surviving sibling has been attempted.
+            cleanup.cleanup()
             raise first_error
+
+        if not sandboxes:
+            try:
+                Sandbox.delete_snapshot(snap_id, config=cfg)
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
         return sandboxes
 
 
     def _build_session(self) -> requests.Session:
         s = requests.Session()
-        s.headers.update({"Content-Type": "application/json"})
+        s.headers.update({"Content-Type": "application/json", **_auth_headers(self._config)})
         return s
 
     def _build_data_client(self) -> httpx.Client:
@@ -790,6 +876,16 @@ class Sandbox:
         CubeProxy rejects unauthenticated traffic with 403. Attaching the token
         as a default header on the httpx client covers run_code, the Connect
         fallback path, and filesystem read/write in one place.
+
+        Data-plane requests are also routed through CubeAPI's auth middleware,
+        which requires ``X-API-Key`` (or ``Authorization: Bearer``) whenever the
+        backend is started with an auth-callback URL. We therefore attach the
+        API key here as well so run_code / commands / filesystem / pty all
+        authenticate. When no key is configured ``_auth_headers`` returns ``{}``
+        and behavior is unchanged.
         """
+        headers = _auth_headers(self._config)
         token = self.traffic_access_token
-        return {"e2b-traffic-access-token": token} if token else {}
+        if token:
+            headers["e2b-traffic-access-token"] = token
+        return headers

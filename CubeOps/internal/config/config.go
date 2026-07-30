@@ -34,9 +34,12 @@ import (
 // Config holds all CubeOps runtime configuration.
 type Config struct {
 	// Server
-	Bind      string `yaml:"bind"`
-	LogLevel  string `yaml:"log_level"`
-	JWTSecret string `yaml:"jwt_secret"`
+	Bind        string `yaml:"bind"`
+	LogLevel    string `yaml:"log_level"`
+	LogDir      string `yaml:"log_dir"`
+	LogFileNum  int    `yaml:"log_file_num"`
+	LogFileSize int    `yaml:"log_file_size"`
+	JWTSecret   string `yaml:"jwt_secret"`
 
 	// Database — either a single URL or the individual fields below.
 	DatabaseURL   string `yaml:"database_url"`
@@ -91,6 +94,15 @@ func Load() (*Config, error) {
 	}
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "info"
+	}
+	if cfg.LogDir == "" {
+		cfg.LogDir = "/data/log/CubeOps"
+	}
+	if cfg.LogFileNum == 0 {
+		cfg.LogFileNum = 10
+	}
+	if cfg.LogFileSize == 0 {
+		cfg.LogFileSize = 100
 	}
 	if cfg.CubeMasterAddr == "" {
 		cfg.CubeMasterAddr = "http://127.0.0.1:8089"
@@ -252,6 +264,19 @@ func overrideFromEnv(cfg *Config) {
 	}
 	if v := os.Getenv("CUBE_OPS_LOG_LEVEL"); v != "" {
 		cfg.LogLevel = v
+	}
+	if v := os.Getenv("CUBE_OPS_LOG_DIR"); v != "" {
+		cfg.LogDir = v
+	}
+	if v := os.Getenv("CUBE_OPS_LOG_FILE_NUM"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.LogFileNum = n
+		}
+	}
+	if v := os.Getenv("CUBE_OPS_LOG_FILE_SIZE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.LogFileSize = n
+		}
 	}
 	if v := os.Getenv("JWT_SECRET"); v != "" {
 		cfg.JWTSecret = v

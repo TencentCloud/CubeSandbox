@@ -140,7 +140,13 @@ func (s *Sandbox) Kill(ctx context.Context) error {
 	}
 
 	path := "/sandboxes/" + url.PathEscape(s.SandboxID)
-	return s.client.doJSON(ctx, http.MethodDelete, path, nil, nil, http.StatusOK, http.StatusNoContent)
+	if err := s.client.doJSON(ctx, http.MethodDelete, path, nil, nil, http.StatusOK, http.StatusNoContent); err != nil {
+		return err
+	}
+	if s.cloneCleanup != nil {
+		s.cloneCleanup.release(ctx, s.SandboxID)
+	}
+	return nil
 }
 
 // Close releases idle HTTP connections used by this sandbox's client. It does

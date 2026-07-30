@@ -54,6 +54,18 @@ pub trait EpollHelperHandler {
         event: &epoll::Event,
     ) -> Result<(), EpollHelperError>;
 
+    // Called when PAUSE_EVENT is received, before the pause barrier and
+    // park(). Implementations can use this hook to drain inflight work
+    // and bring device state to a quiescent point so that a subsequent
+    // snapshot is consistent. The hook MUST NOT propagate errors via
+    // Err here: returning Err would cause the epoll loop to exit early
+    // and skip paused_sync.wait(), deadlocking the pausing thread.
+    // Implementations should swallow failures internally (e.g. via a
+    // shared atomic flag) and always return Ok.
+    fn before_pause(&mut self, _helper: &mut EpollHelper) -> Result<(), EpollHelperError> {
+        Ok(())
+    }
+
     // This method is only invoked if the EpollHelper was configured to call
     // epoll_wait() with a valid timeout (different from -1), meaning the call
     // won't block forever. When the timeout is reached, and if no even has been
@@ -218,6 +230,11 @@ impl EpollHelper {
                     EPOLL_HELPER_EVENT_PAUSE => {
                         info!("PAUSE_EVENT received, pausing epoll loop");
 
+                        // Per-device pre-pause hook (e.g. drain inflight IO
+                        // for virtio-blk). Contract: hook always returns Ok
+                        // so we never skip the barrier below.
+                        handler.before_pause(self)?;
+
                         // Acknowledge the pause is effective by using the
                         // paused_sync barrier.
                         paused_sync.wait();
@@ -289,6 +306,10 @@ impl EpollHelper {
                     }
                     EPOLL_HELPER_EVENT_PAUSE => {
                         info!("PAUSE_EVENT received, pausing epoll loop");
+
+                        // Per-device pre-pause hook. See the non-fuzzing
+                        // branch for the contract.
+                        handler.before_pause(self)?;
 
                         // Acknowledge the pause is effective by using the
                         // paused_sync barrier.

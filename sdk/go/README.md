@@ -238,6 +238,17 @@ sb, err := client.Create(ctx, cubesandbox.CreateOptions{
 })
 ```
 
+Customize the Host forwarded to user services with a per-sandbox template:
+
+```go
+maskRequestHost := "localhost:${PORT}"
+sb, err := client.Create(ctx, cubesandbox.CreateOptions{
+	Network: cubesandbox.NetworkOptions{
+		MaskRequestHost: &maskRequestHost,
+	},
+})
+```
+
 ## Host Directory Mount
 
 ```go

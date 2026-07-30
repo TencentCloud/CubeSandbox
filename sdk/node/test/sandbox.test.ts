@@ -137,6 +137,26 @@ describe("Sandbox.create", () => {
     sb.close();
   });
 
+  it("omits timeout when not explicitly provided", async () => {
+    setHandler(() => ({ status: 201, json: SANDBOX_DATA }));
+    const cfg = makeConfig();
+    cfg.timeout = 600;
+
+    const sb = await Sandbox.create({ config: cfg });
+    const body = JSON.parse(requests[0].body.toString());
+    expect(body.templateID).toBe("tpl-test");
+    expect("timeout" in body).toBe(false);
+    sb.close();
+  });
+
+  it("sends explicit zero timeout", async () => {
+    setHandler(() => ({ status: 201, json: SANDBOX_DATA }));
+    const sb = await Sandbox.create({ timeout: 0, config: makeConfig() });
+    const body = JSON.parse(requests[0].body.toString());
+    expect(body.timeout).toBe(0);
+    sb.close();
+  });
+
   it("sends envVars and metadata", async () => {
     setHandler(() => ({ status: 201, json: SANDBOX_DATA }));
     const sb = await Sandbox.create({
@@ -165,12 +185,17 @@ describe("Sandbox.create", () => {
   it("maps network allowOut / denyOut", async () => {
     setHandler(() => ({ status: 201, json: SANDBOX_DATA }));
     const sb = await Sandbox.create({
-      network: { allowOut: ["8.8.8.8/32"], denyOut: ["0.0.0.0/0"] },
+      network: {
+        allowOut: ["8.8.8.8/32"],
+        denyOut: ["0.0.0.0/0"],
+        maskRequestHost: "localhost:${PORT}",
+      },
       config: makeConfig(),
     });
     const body = JSON.parse(requests[0].body.toString());
     expect(body.network.allowOut).toEqual(["8.8.8.8/32"]);
     expect(body.network.denyOut).toEqual(["0.0.0.0/0"]);
+    expect(body.network.maskRequestHost).toBe("localhost:${PORT}");
     sb.close();
   });
 
@@ -397,6 +422,38 @@ describe("Sandbox instance operations", () => {
     });
     await sb.kill();
     expect(requests).toHaveLength(1);
+    sb.close();
+  });
+
+  it("connect omits timeout so the server keeps its timeout policy", async () => {
+    setHandler((req) => {
+      expect(req.method).toBe("POST");
+      expect(req.pathname).toBe(`/sandboxes/${SANDBOX_ID}/connect`);
+      expect(JSON.parse(req.body.toString())).toEqual({});
+      return { status: 200, json: SANDBOX_DATA };
+    });
+    const cfg = makeConfig();
+    cfg.timeout = 600;
+
+    const sb = await Sandbox.connect(SANDBOX_ID, { config: cfg });
+    expect(sb.sandboxId).toBe(SANDBOX_ID);
+    sb.close();
+  });
+
+  it("resume omits timeout by default but preserves explicit values", async () => {
+    const sb = await createSandbox();
+    setHandler((req) => {
+      expect(req.method).toBe("POST");
+      expect(req.pathname).toBe(`/sandboxes/${SANDBOX_ID}/resume`);
+      return { status: 204 };
+    });
+
+    await sb.resume();
+    expect(JSON.parse(requests[0].body.toString())).toEqual({});
+
+    requests = [];
+    await sb.resume(0);
+    expect(JSON.parse(requests[0].body.toString())).toEqual({ timeout: 0 });
     sb.close();
   });
 

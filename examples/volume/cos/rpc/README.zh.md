@@ -6,7 +6,7 @@
 | 侧 | Hook | 本示例依赖 |
 |----|------|------------|
 | CubeMaster（Controller） | Create / Destroy | [COS Go SDK](https://cloud.tencent.com/document/product/436/31215) |
-| Cubelet（Node） | Attach / Detach | [cosfs](https://cloud.tencent.com/document/product/436/10976) |
+| Cubelet（Node） | Attach / Detach | [cosfs](https://cloud.tencent.com/document/product/436/6883) |
 
 与 [binary](../binary/) 对比：Controller 用 **Go SDK** 替代 **coscmd**；Node 仍用 **cosfs**。
 
@@ -24,7 +24,7 @@
 | 步骤 | 内容 |
 |------|------|
 | 1 | 完成 [../README.zh.md — 前置条件](../README.zh.md#前置条件) |
-| 2 | **Cubelet 节点**安装 cosfs：[§1](../README.zh.md#1-安装依赖)（脚本或[官方文档](https://cloud.tencent.com/document/product/436/10976)） |
+| 2 | **Cubelet 节点**安装 cosfs：[§1](../README.zh.md#1-安装依赖)（脚本或[官方文档](https://cloud.tencent.com/document/product/436/6883)） |
 | 3 | **Go 1.24+**（[go.mod](go.mod) 声明 `go 1.24.8`），编译本目录 `cube-volume-cos-rpc` |
 | 4 | 配置 CubeMaster + Cubelet `socket_path` 与插件 `SOCKET`（`/run/cube-volume-cos-rpc.sock`） |
 | 5 | SDK：`Volume.create(..., driver="cos-rpc")` 验证 |
@@ -35,16 +35,14 @@
 
 ## 1. cosfs（Cubelet 节点）
 
-Attach/Detach 通过 cosfs 挂载。**仅在 Cubelet 节点**安装，步骤与校验见 [../README.zh.md §1](../README.zh.md#1-安装依赖)。
-
-快速命令：
+Attach/Detach 通过 cosfs 挂载。安装与校验见 [../README.zh.md §1](../README.zh.md#1-安装依赖)。
 
 ```bash
-sudo ../install-deps.sh --cosfs          # 或按官方文档手动安装
+sudo /usr/local/services/cubetoolbox/Cubelet/plugin/install-deps.sh --cosfs
 ls /dev/fuse && which cosfs && cosfs --version
 ```
 
-官方文档：[cosfs 工具](https://cloud.tencent.com/document/product/436/10976)
+官方文档：[cosfs 工具](https://cloud.tencent.com/document/product/436/6883)
 
 ---
 
@@ -67,6 +65,8 @@ replace github.com/tencentcloud/CubeSandbox/Cubelet => ../../../../Cubelet
 ## 3. 构建与启动
 
 需要 **Go 1.24+**（`go.mod` 声明 `go 1.24.8`）。
+
+> Kubernetes / Terraform 部署时，`volume-cos.conf` 由用户自行按集群原生方式完成；下文以裸机路径为例。
 
 ```bash
 PREFIX=/usr/local/services/cubetoolbox/CubeMaster/plugin
@@ -187,8 +187,8 @@ Volume.destroy(vol.volume_id)
 | | [binary](../binary/) | rpc（本示例） |
 |---|---------------------|---------------|
 | 类型 | binary | rpc |
-| Controller | [coscmd](https://cloud.tencent.com/document/product/436/6883) | [COS Go SDK](https://cloud.tencent.com/document/product/436/31215) |
-| Node | [cosfs](https://cloud.tencent.com/document/product/436/10976) | [cosfs](https://cloud.tencent.com/document/product/436/10976) |
+| Controller | [coscmd](https://cloud.tencent.com/document/product/436/10976) | [COS Go SDK](https://cloud.tencent.com/document/product/436/31215) |
+| Node | [cosfs](https://cloud.tencent.com/document/product/436/6883) | [cosfs](https://cloud.tencent.com/document/product/436/6883) |
 | driver | `cos` | `cos-rpc` |
 
 cosfs 排障、mntns 验证见 [binary/README.zh.md](../binary/README.zh.md#验证挂载在-cubelet-mntns-里查看)。
@@ -196,6 +196,6 @@ cosfs 排障、mntns 验证见 [binary/README.zh.md](../binary/README.zh.md#验�
 ## 参考链接
 
 - [cos 共用文档](../README.zh.md)
-- [cosfs](https://cloud.tencent.com/document/product/436/10976) · [COS Go SDK](https://cloud.tencent.com/document/product/436/31215)
+- [cosfs](https://cloud.tencent.com/document/product/436/6883) · [COS Go SDK](https://cloud.tencent.com/document/product/436/31215)
 - 协议：`Cubelet/api/services/volumeplugin/v1/volumeplugin.proto`
 - [Volume 插件框架](../../../../docs/zh/guide/volume-plugin.md)

@@ -17,6 +17,9 @@ TF_DIR="${ONE_CLICK_DIR}/terraform/tencentcloud"
 BUNDLE_SH="${ONE_CLICK_DIR}/build-release-bundle.sh"
 BUILD_IMAGES_SH="${TF_DIR}/build_images.sh"
 TKE_ADDONS_TF="${TF_DIR}/tke-addons.tf"
+CUBE_PROXY_COMPOSE="${ONE_CLICK_DIR}/cubeproxy/docker-compose.yaml.template"
+CUBE_PROXY_UP="${ONE_CLICK_DIR}/scripts/one-click/up-cube-proxy.sh"
+CUBE_DIAG_COLLECTOR="${ONE_CLICK_DIR}/scripts/cube-diag/collect-logs.sh"
 
 failures=0
 fail() {
@@ -32,6 +35,7 @@ require_file() {
 #    exist in the source tree build-release-bundle.sh assembles the package from.
 test_component_build_inputs_exist() {
   require_file "${ONE_CLICK_DIR}/CubeAPI/Dockerfile" "cube-api Dockerfile"
+  require_file "${ONE_CLICK_DIR}/CubeOps/Dockerfile" "cube-ops Dockerfile"
   require_file "${ONE_CLICK_DIR}/CubeMaster/Dockerfile" "cubemaster Dockerfile"
   require_file "${ONE_CLICK_DIR}/webui/Dockerfile.package" "cube-webui Dockerfile"
   # cube-proxy's build-context (and its Dockerfile) come from the CubeProxy source.
@@ -40,6 +44,23 @@ test_component_build_inputs_exist() {
   # webui nginx.conf is the canonical source for both the package and the
   # terraform webui-nginx.conf the addons render.
   require_file "${ONE_CLICK_DIR}/webui/nginx.conf" "webui nginx.conf source"
+  # Shared volume-deps installer: must exist and be wired into the CubeMaster
+  # package context (Dockerfile COPY expects it beside bin/cubemaster).
+  require_file "${ROOT_DIR}/deploy/scripts/docker-install-volume-deps.sh" \
+    "volume deps installer (single source)"
+  if ! grep -q -F 'docker-install-volume-deps.sh' "${BUNDLE_SH}"; then
+    fail "build-release-bundle.sh must copy deploy/scripts/docker-install-volume-deps.sh into CubeMaster/"
+  fi
+  # Do not keep a checked-in duplicate under one-click CubeMaster/.
+  if [[ -f "${ONE_CLICK_DIR}/CubeMaster/docker-install-volume-deps.sh" ]]; then
+    fail "remove duplicate ${ONE_CLICK_DIR}/CubeMaster/docker-install-volume-deps.sh; use deploy/scripts/ only"
+  fi
+  # Bare-metal COS deps script ships next to the volume plugin binaries.
+  require_file "${ROOT_DIR}/examples/volume/cos/install-deps.sh" \
+    "COS volume install-deps.sh (examples source)"
+  if ! grep -q -F 'examples/volume/cos/install-deps.sh' "${BUNDLE_SH}"; then
+    fail "build-release-bundle.sh must copy examples/volume/cos/install-deps.sh into CubeMaster/plugin and Cubelet/plugin"
+  fi
 }
 
 # 2) The component image base names must match between what build_images.sh
@@ -70,8 +91,8 @@ test_image_names_match() {
   # Guard against a regex that silently matches too few/many lines.
   local built_n
   built_n="$(printf '%s\n' "${built}" | grep -c .)"
-  if [[ "${built_n}" -ne 5 ]]; then
-    fail "expected 5 component images in build_images.sh, found ${built_n}: $(echo "${built}" | tr '\n' ' ')"
+  if [[ "${built_n}" -ne 6 ]]; then
+    fail "expected 6 component images in build_images.sh, found ${built_n}: $(echo "${built}" | tr '\n' ' ')"
   fi
   if [[ "${built}" != "${composed}" ]]; then
     fail "image name drift between build_images.sh and tke-addons.tf:
@@ -143,7 +164,20 @@ test_cubeproxy_nginx_template_generation() {
   rm -f "${tmp}"
 }
 
-# 3d) The TKE addon ConfigMap embeds a cube_box_req_template whose default egress
+# 3d) one-click cube-proxy logs must use the same host-visible /data/log
+#     contract as the Kubernetes deployment and the other runtime components.
+test_cubeproxy_host_log_wiring() {
+  grep -q -F -- '- /data/log/cube-proxy:/data/log/cube-proxy' "${CUBE_PROXY_COMPOSE}" \
+    || fail "cube-proxy compose template does not bind-mount the host log directory"
+  grep -q -F 'CUBE_PROXY_LOG_DIR="/data/log/cube-proxy"' "${CUBE_PROXY_UP}" \
+    || fail "up-cube-proxy.sh does not define the host log directory"
+  grep -q -F 'mkdir -p "${CUBE_PROXY_LOG_DIR}"' "${CUBE_PROXY_UP}" \
+    || fail "up-cube-proxy.sh does not create the host log directory"
+  grep -q -F '_collect_data_log_dir "${DATA_LOG_DIR}/cube-proxy"' "${CUBE_DIAG_COLLECTOR}" \
+    || fail "diagnostic collector does not read cube-proxy logs from the host"
+}
+
+# 3e) The TKE addon ConfigMap embeds a cube_box_req_template whose default egress
 #     policy MUST sit under the "cube_network_config" JSON key — the only key
 #     CubeMaster deserializes (CreateCubeSandboxReq.CubeNetworkConfig). The legacy
 #     "cubevs_context" key is silently dropped, so the denyOut policy would never
@@ -162,7 +196,7 @@ test_tke_addons_network_config_key() {
   fi
 }
 
-# 3e) Reinstall first removes packaged component directories, then lays the new
+# 3f) Reinstall first removes packaged component directories, then lays the new
 #     package down. Guard that list against drifting when build-release-bundle.sh
 #     adds a new top-level package component.
 extract_package_root_dirs() {
@@ -237,6 +271,7 @@ test_component_build_inputs_exist
 test_image_names_match
 test_webui_nginx_placeholders
 test_cubeproxy_nginx_template_generation
+test_cubeproxy_host_log_wiring
 test_tke_addons_network_config_key
 test_reinstall_cleanup_tracks_packaged_components
 test_terraform_deployer_files_present

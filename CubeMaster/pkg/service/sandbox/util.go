@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
@@ -30,7 +32,11 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 )
 
-const maxCreateTimeEnvVarsAnnotationBytes = 16 * 1024
+const (
+	maxCreateTimeEnvVarsAnnotationBytes = 16 * 1024
+	maxMaskRequestHostBytes             = 512
+	maskRequestHostPortPlaceholder      = "${PORT}"
+)
 
 func checkAndGetReqResource(req *types.CreateCubeSandboxReq) (*selctx.RequestResource, error) {
 	res := &selctx.RequestResource{
@@ -81,7 +87,71 @@ func checkParam(req *types.CreateCubeSandboxReq) error {
 		return ret.Err(errorcode.ErrorCode_MasterParamsError, "containers param is nil")
 	}
 
+	if req.CubeNetworkConfig != nil && req.CubeNetworkConfig.MaskRequestHost != nil {
+		if err := validateMaskRequestHost(*req.CubeNetworkConfig.MaskRequestHost); err != nil {
+			return ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
+		}
+	}
+
 	return nil
+}
+
+func validateMaskRequestHost(value string) error {
+	invalid := func(reason string) error {
+		return fmt.Errorf("network.maskRequestHost is invalid: %s", reason)
+	}
+
+	if value == "" {
+		return invalid("value must not be empty")
+	}
+	if len(value) > maxMaskRequestHostBytes {
+		return invalid("value is too long")
+	}
+	if strings.TrimSpace(value) != value {
+		return invalid("whitespace and control characters are not allowed")
+	}
+	for _, r := range value {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return invalid("whitespace and control characters are not allowed")
+		}
+	}
+
+	expanded := strings.ReplaceAll(value, maskRequestHostPortPlaceholder, "65535")
+	if strings.Contains(expanded, "${") {
+		return invalid("only the ${PORT} placeholder is supported")
+	}
+	if strings.HasSuffix(expanded, ":") {
+		return invalid("port must not be empty")
+	}
+	if strings.Count(expanded, ":") > 1 && !strings.HasPrefix(expanded, "[") {
+		return invalid("IPv6 hosts must use brackets")
+	}
+	authority, err := url.Parse("//" + expanded)
+	if err != nil || authority.Host == "" || authority.User != nil ||
+		authority.Path != "" || authority.RawQuery != "" || authority.Fragment != "" {
+		return invalid("expected a valid host or host:port authority")
+	}
+	host := authority.Hostname()
+	if host == "" || !isASCII(host) {
+		return invalid("host must be non-empty ASCII")
+	}
+	if port := authority.Port(); port != "" {
+		n, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || n == 0 {
+			return invalid("port must be between 1 and 65535")
+		}
+	}
+
+	return nil
+}
+
+func isASCII(value string) bool {
+	for _, r := range value {
+		if r > unicode.MaxASCII {
+			return false
+		}
+	}
+	return true
 }
 
 func getReqResource(req *types.CreateCubeSandboxReq) (cpu, mem resource.Quantity, err error) {
@@ -648,11 +718,6 @@ func checkAndGetVolumes(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSan
 				return fmt.Errorf("volume name must not be empty")
 			}
 
-			v := &cubebox.Volume{
-				Name:         e.Name,
-				VolumeSource: &cubebox.VolumeSource{},
-			}
-
 			// Identify plugin volumes by name appearing in plugin-volume-mounts
 			// annotation, or by having a nil VolumeSource.
 			if e.VolumeSource == nil || pluginVolumeNames[e.Name] {
@@ -660,14 +725,21 @@ func checkAndGetVolumes(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSan
 				if err != nil {
 					return fmt.Errorf("volume [%s]: %w", e.Name, err)
 				}
-				if err := appendPluginVolumeSourceAnnotation(req, e.Name, record.Driver); err != nil {
+				if err := appendPluginVolumeSourceAnnotation(req, e.Name, record.Driver, record.PrivateData); err != nil {
 					return fmt.Errorf("volume [%s]: annotation: %w", e.Name, err)
 				}
-				v.VolumeSource.EmptyDir = &cubebox.EmptyDirVolumeSource{
-					SizeLimit: "1Gi",
-				}
-				out.Volumes = append(out.Volumes, v)
+				// Compatibility with older Cubelets: do NOT inject
+				// EmptyDir(StorageMediumDefault) as a placeholder. Pre-plugin
+				// Cubelets treat every Default EmptyDir as a rootfs derive
+				// (sb-<id>-rootfs-gen0); a second Default EmptyDir then collides
+				// with cube_rootfs_rw ("cubecow object already exists").
+				out.Volumes = append(out.Volumes, pluginVolumeWireVolume(e.Name))
 				continue
+			}
+
+			v := &cubebox.Volume{
+				Name:         e.Name,
+				VolumeSource: &cubebox.VolumeSource{},
 			}
 
 			if e.VolumeSource.EmptyDir != nil {
@@ -996,16 +1068,31 @@ func checkAndGetContainerHooks(out *cubebox.ContainerConfig, in *types.Container
 	return nil
 }
 
-// appendPluginVolumeSourceAnnotation records name+driver for a plugin volume
-// in the "plugin-volume-sources" annotation so Cubelet can call the right
-// Node Hook binary at attach time.
+// pluginVolumeWireVolume is the Cubelet-facing Volume shape for a plugin volume.
+// VolumeSource is intentionally empty: do not use EmptyDir(StorageMediumDefault)
+// placeholders (see checkAndGetVolumes).
+func pluginVolumeWireVolume(name string) *cubebox.Volume {
+	return &cubebox.Volume{
+		Name:         name,
+		VolumeSource: &cubebox.VolumeSource{},
+	}
+}
+
+// appendPluginVolumeSourceAnnotation records name+driver(+private_data) for a
+// plugin volume in the "plugin-volume-sources" annotation so Cubelet can call
+// the right Node Hook at attach time and forward Create-time private_data.
 //
-// Format: JSON array of {"name": "<volumeID>", "driver": "<driver>"}
-func appendPluginVolumeSourceAnnotation(req *types.CreateCubeSandboxReq, name, driver string) error {
+// Format: JSON array of
+//
+//	{"name":"<volumeID>","driver":"<driver>","private_data":"<opaque>"}
+//
+// private_data is omitted from the JSON object when empty.
+func appendPluginVolumeSourceAnnotation(req *types.CreateCubeSandboxReq, name, driver, privateData string) error {
 	const key = "plugin-volume-sources"
 	type entry struct {
-		Name   string `json:"name"`
-		Driver string `json:"driver"`
+		Name        string `json:"name"`
+		Driver      string `json:"driver"`
+		PrivateData string `json:"private_data,omitempty"`
 	}
 	if req.Annotations == nil {
 		req.Annotations = make(map[string]string)
@@ -1016,7 +1103,7 @@ func appendPluginVolumeSourceAnnotation(req *types.CreateCubeSandboxReq, name, d
 			return err
 		}
 	}
-	entries = append(entries, entry{Name: name, Driver: driver})
+	entries = append(entries, entry{Name: name, Driver: driver, PrivateData: privateData})
 	b, err := json.Marshal(entries)
 	if err != nil {
 		return err

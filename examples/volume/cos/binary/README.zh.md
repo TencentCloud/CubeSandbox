@@ -14,13 +14,13 @@
 | 步骤 | 内容 |
 |------|------|
 | 1 | 完成 [../README.zh.md — 前置条件](../README.zh.md#前置条件) |
-| 2 | **Cubelet 节点**：cosfs — [§1 安装与校验](../README.zh.md#1-安装依赖) |
+| 2 | **Cubelet 节点**：cosfs + jq — [§1 安装与校验](../README.zh.md#1-安装依赖) |
 | 3 | **CubeMaster 节点**：coscmd + jq — [§1](../README.zh.md#1-安装依赖) |
 | 4 | 部署本目录 [cube-volume-cos.sh](cube-volume-cos.sh) 与 `volume-cos.conf` — [§2](../README.zh.md#2-安装插件与-cos-凭证) |
 | 5 | 配置 CubeMaster + Cubelet — [§3–§5](../README.zh.md#3-配置-cubemaster) |
 | 6 | SDK 验证 — [§6–§7](../README.zh.md#6-准备-sdk-环境) |
 
-**本示例依赖**：CubeMaster 侧 [coscmd](https://cloud.tencent.com/document/product/436/6883)；Cubelet 侧 [cosfs](https://cloud.tencent.com/document/product/436/10976)。不使用 COS Go SDK（见 [rpc](../rpc/)）。
+**本示例依赖**：CubeMaster 侧 [coscmd](https://cloud.tencent.com/document/product/436/10976) + **jq**；Cubelet 侧 [cosfs](https://cloud.tencent.com/document/product/436/6883) + **jq**。不使用 COS Go SDK（见 [rpc](../rpc/)）。依赖安装见 [../README.zh.md §1](../README.zh.md#1-安装依赖)。
 
 ---
 
@@ -81,6 +81,8 @@ sudo install -m 0755 /tmp/cube-volume-cos.sh "$PREFIX/Cubelet/plugin/cube-volume
 
 ### 2. 创建配置文件
 
+> Kubernetes / Terraform 部署时，`volume-cos.conf` 由用户自行按集群原生方式完成；下文以 one-click / 裸机路径为例。
+
 与插件脚本同目录（CubeMaster / Cubelet 各一份；分节点部署时在对应节点编辑）：
 
 ```bash
@@ -102,7 +104,7 @@ SECRET_ID=AKIDxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 SECRET_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 BUCKET=mybucket-1250000000
 REGION=ap-guangzhou
-# 挂载路径由 Cubelet 的 --volume-base-dir 决定（默认 /data/volume/cos-<id>），无需在此配置。
+# 挂载路径由 Cubelet 的 --volume-base-dir 决定（默认 /data/cube-shared/volume/cos-<id>），无需在此配置。
 EOF
 sudo chmod 600 "$PREFIX/CubeMaster/plugin/volume-cos.conf"
 # Cubelet 节点同样编辑 $PREFIX/Cubelet/plugin/volume-cos.conf
@@ -117,7 +119,7 @@ sudo chmod 600 "$PREFIX/CubeMaster/plugin/volume-cos.conf"
 | `BUCKET` | COS bucket，格式 `BucketName-APPID` | `mybucket-1250000000` |
 | `REGION` | COS 地域 | `ap-guangzhou` |
 
-挂载路径由 Cubelet 在 attach 时传入 `--volume-base-dir`（配置项 `volume_plugin_base_dir`，默认 `/data/volume`），插件返回的 `host_path` 须在其下，例如 `/data/volume/cos-<id>`。
+挂载路径由 Cubelet 在 attach 时传入 `--volume-base-dir`（配置项 `volume_plugin_base_dir`，默认 `/data/cube-shared/volume`），插件返回的 `host_path` 须在其下，例如 `/data/cube-shared/volume/cos-<id>`。
 
 > **安全建议**：建议使用仅拥有该 bucket 读写权限的子账号密钥，避免使用主账号密钥。
 
@@ -262,7 +264,8 @@ do_create() {
 
     load_config                          # Step 1: read SECRET_ID/KEY, BUCKET, REGION
     cos_create_dir "$volume_id"          # Step 2: upload volumes/<id>/.keep via coscmd
-    jq -cn '{ token: "", error: "" }'    # Step 3: return success (no extra token for COS)
+    jq -cn --arg pd "volumes/${volume_id}/" \
+        '{ token: "", private_data: $pd, error: "" }'  # Step 3: private_data 会转给 Attach
 }
 ```
 
@@ -287,7 +290,7 @@ do_destroy() {
 ```bash
 do_attach() {
     local sandbox_id="$1" volume_id="$2" ref_count="$3"
-    # VOLUME_BASE_DIR comes from --volume-base-dir (default /data/volume)
+    # VOLUME_BASE_DIR comes from --volume-base-dir (default /data/cube-shared/volume)
 
     load_config                          # Step 1: read COS credentials
     ensure_passwd_file                   # Step 2: write /etc/cube/.passwd-cosfs for cosfs
@@ -297,7 +300,7 @@ do_attach() {
 
     cosfs_mount_volume "$volume_id"      # Step 4: mount BUCKET:/volumes/<id> (skip if already up)
 
-    local mnt="$(volume_mountpoint "$volume_id")"   # e.g. /data/volume/cos-my-vol
+    local mnt="$(volume_mountpoint "$volume_id")"   # e.g. /data/cube-shared/volume/cos-my-vol
 
     # Step 5: return host_path; Cubelet bind-mounts it into the sandbox
     jq -cn --arg path "$mnt" --arg vid "$volume_id" \
@@ -357,13 +360,13 @@ ensure_passwd_file() {
   --namespace default \
   --volume-id my-vol \
   --ref-count 0 \
-  --volume-base-dir /data/volume
-# → {"host_path":"/data/volume/cos-my-vol","metadata":{...},"error":""}
+  --volume-base-dir /data/cube-shared/volume
+# → {"host_path":"/data/cube-shared/volume/cos-my-vol","metadata":{...},"error":""}
 
 # 验证挂载（在 Cubelet mntns 里）
 CPID=$(pgrep -f "cubelet --config" | head -1)
-nsenter -t $CPID -m -- mountpoint /data/volume/cos-my-vol
-# → /data/volume/cos-my-vol is a mountpoint
+nsenter -t $CPID -m -- mountpoint /data/cube-shared/volume/cos-my-vol
+# → /data/cube-shared/volume/cos-my-vol is a mountpoint
 ```
 
 ### 手动测试 detach
@@ -375,7 +378,7 @@ nsenter -t $CPID -m -- mountpoint /data/volume/cos-my-vol
   --namespace default \
   --volume-id my-vol \
   --ref-count 0 \
-  --metadata '{"mount_dir":"/data/volume/cos-my-vol"}'
+  --metadata '{"mount_dir":"/data/cube-shared/volume/cos-my-vol"}'
 # → {"error":""}
 ```
 
@@ -427,8 +430,8 @@ ln -sf /opt/coscmd-venv/bin/coscmd /usr/local/bin/coscmd
 ## 参考链接
 
 - 插件源码：[cube-volume-cos.sh](cube-volume-cos.sh)
-- cosfs：[对象存储 cosfs 工具](https://cloud.tencent.com/document/product/436/10976)
-- coscmd：[COSCMD 工具](https://cloud.tencent.com/document/product/436/6883)
+- cosfs：[对象存储 cosfs 工具](https://cloud.tencent.com/document/product/436/6883)
+- coscmd：[COSCMD 工具](https://cloud.tencent.com/document/product/436/10976)
 - COS Go SDK（rpc 示例用）：[Go SDK 快速入门](https://cloud.tencent.com/document/product/436/31215)
 - rpc 类型示例：[../rpc/](../rpc/)
 - Binary plugin 驱动：[Cubelet/plugins/volume/binary/driver.go](../../../../Cubelet/plugins/volume/binary/driver.go)

@@ -42,7 +42,7 @@ export ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX=/abs/path/to/vmlinux-pvm
 
 The installed runtime still uses `cube-kernel-scf/vmlinux` as the active guest kernel path. The package stores the ordinary guest kernel as `vmlinux-bm` and keeps `vmlinux` as a symlink: by default it points to `vmlinux-bm`; if the target machine sets `CUBE_PVM_ENABLE=1` during installation, the installer points it to `vmlinux-pvm`.
 
-The guest image no longer depends on a local zip file. Instead, it is generated locally from `deploy/guest-image/Dockerfile` during the one-click release package build. Common override parameters:
+The guest image no longer depends on a local zip file. By default it is generated locally from `deploy/guest-image/Dockerfile` during the one-click release package build. Common override parameters:
 
 ```bash
 export ONE_CLICK_GUEST_IMAGE_DOCKERFILE=/abs/path/to/cube-sandbox/deploy/guest-image/Dockerfile
@@ -52,6 +52,9 @@ export ONE_CLICK_GUEST_IMAGE_CONTEXT_DIR=/abs/path/to/cube-sandbox/deploy/guest-
 export ONE_CLICK_GUEST_IMAGE_REF=cube-sandbox-guest-image:one-click
 # Optional; defaults to the current repository revision
 export ONE_CLICK_GUEST_IMAGE_VERSION=custom-guest-image-version
+# Optional; reuse a prebuilt cube-guest-image-*.tar.gz (same layout as the
+# Release / docker asset). When set, local docker/mkfs rebuild is skipped.
+export ONE_CLICK_GUEST_IMAGE_TAR=/abs/path/to/cube-guest-image-amd64.tar.gz
 ```
 
 ## Building the Release Package
@@ -528,7 +531,7 @@ export TENCENTCLOUD_TKE_NODE_COUNT=2              # TKE worker nodes (default 2)
 export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=SA9.MEDIUM8
 export TENCENTCLOUD_USE_TCR=false                 # default: public pre-built images
 export TENCENTCLOUD_USE_CFS=false                 # default: no CFS, cubemaster single replica
-export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.5.1
+export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.6.0
 ```
 
 For non-interactive / CI runs, also set these (without a TTY the interactive

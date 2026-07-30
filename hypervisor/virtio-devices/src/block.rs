@@ -34,6 +34,7 @@ use std::path::PathBuf;
 use std::result;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
+use std::time::{Duration, Instant};
 use std::{collections::HashMap, convert::TryInto};
 use thiserror::Error;
 use virtio_bindings::bindings::virtio_blk::*;
@@ -57,6 +58,17 @@ const QUEUE_AVAIL_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 1;
 const COMPLETION_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 2;
 // New 'wake up' event from the rate limiter
 const RATE_LIMITER_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 3;
+
+// Maximum time we wait for inflight IO to drain when the device is
+// paused. Pause is the synchronization point a snapshot relies on, so
+// we err on the side of giving the backend (network or local) enough
+// time to settle. If this expires we mark drain as failed so the
+// snapshot is aborted by the upper layer instead of being captured in
+// an inconsistent state.
+const PAUSE_DRAIN_TIMEOUT: Duration = Duration::from_secs(20);
+// Per-iteration poll budget while draining; bounds CPU when the
+// completion notifier is quiet but we have not yet hit the deadline.
+const PAUSE_DRAIN_POLL_MS: i32 = 100;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -115,6 +127,12 @@ struct BlockEpollHandler {
     read_only: bool,
     rate_limited: std::sync::Once,
     id: String,
+    // Set by `before_pause` when inflight drain or pause-time flush
+    // could not be completed within the deadline. Read by
+    // `Block::pause` after the pause barrier returns to decide whether
+    // the snapshot must be aborted. Shared (not owned) so a multi-queue
+    // device aggregates failures from any queue.
+    drain_failed: Arc<AtomicBool>,
 }
 
 impl BlockEpollHandler {
@@ -368,6 +386,71 @@ impl BlockEpollHandler {
 }
 
 impl EpollHelperHandler for BlockEpollHandler {
+    // Drain inflight IO and (in writeback mode) issue a synchronous
+    // FLUSH before the pause barrier. Any failure is reported via
+    // `drain_failed` rather than `Err`, because returning Err here
+    // would skip `paused_sync.wait()` and deadlock the pausing thread.
+    fn before_pause(&mut self, _helper: &mut EpollHelper) -> result::Result<(), EpollHelperError> {
+        let deadline = Instant::now() + PAUSE_DRAIN_TIMEOUT;
+        let efd = self.disk_image.notifier().as_raw_fd();
+
+        while !self.request_list.is_empty() {
+            if Instant::now() >= deadline {
+                error!(
+                    "virtio-blk {}: pause drain timed out, {} IO still inflight",
+                    self.id,
+                    self.request_list.len()
+                );
+                self.drain_failed.store(true, Ordering::SeqCst);
+                return Ok(());
+            }
+
+            // Wait briefly for the backend completion notifier. We do
+            // not consume the eventfd counter here; `process_queue_complete`
+            // pulls completions directly from the AsyncIo queue, which
+            // is the source of truth.
+            let mut pfd = libc::pollfd {
+                fd: efd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: pfd is initialised; libc::poll only writes revents.
+            let _ = unsafe { libc::poll(&mut pfd, 1, PAUSE_DRAIN_POLL_MS) };
+
+            if let Err(e) = self.process_queue_complete() {
+                error!(
+                    "virtio-blk {}: drain process_queue_complete failed: {:?}",
+                    self.id, e
+                );
+                self.drain_failed.store(true, Ordering::SeqCst);
+                return Ok(());
+            }
+        }
+
+        // Make the freshly-added used entries visible to the guest.
+        // Failures here only affect interrupt delivery (state is
+        // already correct in memory); log and continue.
+        if let Err(e) = self.try_signal_used_queue() {
+            warn!(
+                "virtio-blk {}: pre-pause used-queue signal failed: {:?}",
+                self.id, e
+            );
+        }
+
+        // Write barrier: once data is fully drained, force a synchronous
+        // FLUSH so the backend's completed writes are durable before the
+        // snapshot is taken. Skipped in writethrough because each write
+        // already implies a flush.
+        if self.writeback.load(Ordering::Acquire) {
+            if let Err(e) = self.disk_image.fsync(None) {
+                error!("virtio-blk {}: pause-time flush failed: {:?}", self.id, e);
+                self.drain_failed.store(true, Ordering::SeqCst);
+            }
+        }
+
+        Ok(())
+    }
+
     fn handle_event(
         &mut self,
         _helper: &mut EpollHelper,
@@ -457,6 +540,11 @@ pub struct Block {
     rate_limiter_config: Option<RateLimiterConfig>,
     exit_evt: EventFd,
     read_only: bool,
+    /// Shared with each per-queue `BlockEpollHandler`. Set by an epoll
+    /// thread when its pause-time drain or flush could not complete
+    /// within `PAUSE_DRAIN_TIMEOUT`; checked by `pause()` after the
+    /// pause barrier so the upper layer can abort the snapshot.
+    drain_failed: Arc<AtomicBool>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -582,6 +670,7 @@ impl Block {
             rate_limiter_config,
             exit_evt,
             read_only,
+            drain_failed: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -721,6 +810,7 @@ impl VirtioDevice for Block {
                 read_only: self.read_only,
                 rate_limited: std::sync::Once::new(),
                 id: self.id.clone(),
+                drain_failed: self.drain_failed.clone(),
             };
 
             let paused = self.common.paused.clone();
@@ -786,7 +876,22 @@ impl VirtioDevice for Block {
 
 impl Pausable for Block {
     fn pause(&mut self) -> result::Result<(), MigratableError> {
-        self.common.pause()
+        self.common.pause()?;
+
+        // After common.pause() returns, every per-queue epoll thread has
+        // executed its `before_pause` hook and crossed the barrier. Any
+        // queue that failed to drain inflight IO or to issue the
+        // pause-time flush within `PAUSE_DRAIN_TIMEOUT` will have set
+        // this flag. Aborting pause here propagates upward and prevents
+        // a snapshot from being captured in an inconsistent state.
+        if self.drain_failed.swap(false, Ordering::SeqCst) {
+            return Err(MigratableError::Pause(anyhow!(
+                "Failed to drain inflight IO for block device {} within timeout",
+                self.id
+            )));
+        }
+
+        Ok(())
     }
 
     fn resume(&mut self) -> result::Result<(), MigratableError> {

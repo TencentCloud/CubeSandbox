@@ -18,7 +18,7 @@ sys.path.insert(0, str(SDK_COMPAT_ROOT))
 
 from adapters import create_adapter  # noqa: E402
 from framework.cleanup import safe_kill  # noqa: E402
-from framework.capabilities import CODE_INTERPRETER, CUBESANDBOX_CAPABILITIES, E2B_CAPABILITIES  # noqa: E402
+from framework.capabilities import CODE_INTERPRETER, capabilities_for_backend  # noqa: E402
 from framework.config import SdkE2EConfig  # noqa: E402
 from framework.preflight import run_preflight  # noqa: E402
 from framework.reporting import JsonlReporter  # noqa: E402
@@ -90,6 +90,7 @@ def pytest_configure(config: pytest.Config) -> None:
         "requires_code_interpreter: test requires a stateful Code Interpreter kernel",
         "requires_internet: test requires public internet access from the sandbox",
         "requires_cubeproxy: test requires CubeProxy routing to the sandbox",
+        "auth: CUBE_API_KEY simple-key authentication control-plane tests",
     ):
         config.addinivalue_line("markers", marker)
 
@@ -110,11 +111,21 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     config._sdk_e2e_default_template_needed = any(
         _template_id_for_node(item) is None for item in items
     )
-    if config.getoption("--run-e2e"):
+    volume_skip = None
+    if not _env_true("SDK_E2E_VOLUME_PLUGIN"):
+        from framework.volume import VOLUME_PLUGIN_SKIP_REASON  # noqa: E402
+
+        volume_skip = pytest.mark.skip(reason=VOLUME_PLUGIN_SKIP_REASON)
+    if not config.getoption("--run-e2e"):
+        skip = pytest.mark.skip(reason="live SDK E2E disabled; pass --run-e2e to run")
+        for item in items:
+            item.add_marker(skip)
         return
-    skip = pytest.mark.skip(reason="live SDK E2E disabled; pass --run-e2e to run")
+    if volume_skip is None:
+        return
     for item in items:
-        item.add_marker(skip)
+        if item.get_closest_marker("volume"):
+            item.add_marker(volume_skip)
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -241,11 +252,11 @@ def sdk_sandbox(
 ):
     for marker in request.node.iter_markers("requires_capability"):
         capability = marker.args[0]
-        if capability not in _capabilities_for_backend(sdk_backend):
+        if capability not in capabilities_for_backend(sdk_backend):
             pytest.skip(f"backend {sdk_backend!r} does not support capability {capability!r}")
 
     if request.node.get_closest_marker("requires_code_interpreter"):
-        if CODE_INTERPRETER not in _capabilities_for_backend(sdk_backend):
+        if CODE_INTERPRETER not in capabilities_for_backend(sdk_backend):
             pytest.skip(
                 f"backend {sdk_backend!r} does not support stateful Code Interpreter"
             )
@@ -260,6 +271,11 @@ def sdk_sandbox(
             "platform lifecycle tests require SDK_E2E_PLATFORM_LIFECYCLE=true "
             "(cube-proxy + lifecycle manager coordination)"
         )
+
+    if request.node.get_closest_marker("volume") and not sdk_e2e_config.volume_plugin_enabled:
+        from framework.volume import VOLUME_PLUGIN_SKIP_REASON
+
+        pytest.skip(VOLUME_PLUGIN_SKIP_REASON)
 
     template_id = _template_id_for_node(request.node) or sdk_e2e_config.cube_template_id
     if not template_id:
@@ -326,14 +342,6 @@ def _config_from_pytest(config: pytest.Config) -> SdkE2EConfig:
         cube_api_url=config.getoption("--cube-api-url"),
         cube_template_id=config.getoption("--cube-template-id"),
     )
-
-
-def _capabilities_for_backend(backend: str) -> frozenset[str]:
-    if backend == "cubesandbox":
-        return CUBESANDBOX_CAPABILITIES
-    if backend == "e2b":
-        return E2B_CAPABILITIES
-    return frozenset()
 
 
 def _create_options_for_node(node: pytest.Item) -> dict:
@@ -426,6 +434,8 @@ def _log_effective_environment(cfg: SdkE2EConfig) -> None:
         "CUBE_PROXY_PORT_HTTP": str(cfg.cube_proxy_port_http),
         "CUBE_SANDBOX_DOMAIN": cfg.cube_sandbox_domain,
         "SDK_E2E_PLATFORM_LIFECYCLE": str(cfg.platform_lifecycle_enabled).lower(),
+        "SDK_E2E_VOLUME_PLUGIN": str(cfg.volume_plugin_enabled).lower(),
+        "SDK_E2E_VOLUME_DRIVER": cfg.volume_driver,
     }
     if "e2b" in cfg.backends:
         fields.update(

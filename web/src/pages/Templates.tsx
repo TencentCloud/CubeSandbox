@@ -6,7 +6,12 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, ChevronRight } from 'lucide-react';
-import { templateApi, type TemplateCompatMatrix, type TemplateCompatRow } from '@/api/client';
+import {
+  templateApi,
+  type TemplateCompatMatrix,
+  type TemplateCompatRow,
+  type TemplateSummary,
+} from '@/api/client';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -515,8 +520,12 @@ function DeleteTemplateModal({ templateID, onClose }: DeleteModalProps) {
   const qc = useQueryClient();
   const mutation = useMutation({
     mutationFn: () => templateApi.remove(templateID),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['templates'] });
+    onSuccess: async () => {
+      qc.setQueryData<TemplateSummary[]>(
+        ['templates'],
+        (previous) => previous?.filter((template) => template.templateID !== templateID) ?? [],
+      );
+      await qc.invalidateQueries({ queryKey: ['templates'] });
       onClose();
     },
   });

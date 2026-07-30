@@ -5,7 +5,12 @@ import { useState, useRef, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useParams, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { templateApi, type TemplateNodeCompat, type TemplateCompatRow } from '@/api/client';
+import {
+  templateApi,
+  type TemplateNodeCompat,
+  type TemplateCompatRow,
+  type TemplateSummary,
+} from '@/api/client';
 import { ApiError } from '@/lib/api';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -667,7 +672,16 @@ export default function TemplateDetailPage() {
 
   const deleteMutation = useMutation({
     mutationFn: () => templateApi.remove(templateID!),
-    onSuccess: () => navigate('/templates'),
+    onSuccess: async () => {
+      qc.setQueryData<TemplateSummary[]>(
+        ['templates'],
+        (previous) => previous?.filter((template) => template.templateID !== templateID) ?? [],
+      );
+      await qc.invalidateQueries({ queryKey: ['templates'], exact: true });
+      await qc.invalidateQueries({ queryKey: ['templates', 'compat'], exact: true });
+      qc.removeQueries({ queryKey: ['template', templateID], exact: true });
+      navigate('/templates');
+    },
   });
 
   // ── loading ──
@@ -914,6 +928,7 @@ export default function TemplateDetailPage() {
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-8 gap-y-5">
           <Field label={t('fields.templateID')} value={data.templateID} mono copyable />
+          <Field label={t('fields.alias')} value={data.displayName || null} />
           <Field label={t('fields.instanceType')} value={data.instanceType ?? '—'} />
           {cfg?.exposedPorts && <Field label={t('exposedPorts')} value={cfg.exposedPorts} mono />}
           {cfg?.probePath && (

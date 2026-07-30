@@ -42,6 +42,9 @@ class SdkE2EConfig:
     platform_lifecycle_wait_margin: int
     platform_lifecycle_poll_timeout: int
     cube_proxy_admin_port: int
+    volume_plugin_enabled: bool
+    volume_driver: str
+    volume_refcount_wait: int
 
     @classmethod
     def from_env(
@@ -85,6 +88,9 @@ class SdkE2EConfig:
                 os.environ.get("SDK_E2E_PLATFORM_LIFECYCLE_POLL_TIMEOUT", "45")
             ),
             cube_proxy_admin_port=int(os.environ.get("CUBE_PROXY_ADMIN_PORT", "8082")),
+            volume_plugin_enabled=_bool_env("SDK_E2E_VOLUME_PLUGIN"),
+            volume_driver=os.environ.get("SDK_E2E_VOLUME_DRIVER", "cos").strip() or "cos",
+            volume_refcount_wait=int(os.environ.get("SDK_E2E_VOLUME_REFCOUNT_WAIT", "60")),
         )
 
     def env(self) -> dict[str, str]:

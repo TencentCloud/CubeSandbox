@@ -1,6 +1,6 @@
 {{- if and .Values.controlPlane.enabled .Values.controlPlane.api.enabled }}
-apiVersion: {{ include "cube.cloneSetAPIVersion" . }}
-kind: CloneSet
+apiVersion: apps/v1
+kind: Deployment
 metadata:
   name: {{ include "cube.apiName" . }}
   labels:
@@ -8,7 +8,7 @@ metadata:
     app.kubernetes.io/component: api
 spec:
   replicas: {{ .Values.controlPlane.api.replicas }}
-  {{- include "cube.cloneSetUpdateStrategy" . | nindent 2 }}
+  {{- include "cube.deploymentStrategy" . | nindent 2 }}
   selector:
     matchLabels:
       {{- include "cube.selectorLabels" . | nindent 6 }}

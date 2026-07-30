@@ -102,14 +102,21 @@ func (f *fakeMaster) Resume(ctx context.Context, _, _ string) error {
 }
 
 type fakePush struct {
-	mu      sync.Mutex
-	pushed  []string
-	deleted []string
+	mu       sync.Mutex
+	pushed   []string
+	deleted  []string
+	failSet  int
+	setCalls int
 }
 
 func (f *fakePush) SetState(_ context.Context, _, state string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.setCalls++
+	if f.failSet > 0 {
+		f.failSet--
+		return errors.New("push failed")
+	}
 	f.pushed = append(f.pushed, state)
 	return nil
 }
@@ -119,6 +126,22 @@ func (f *fakePush) DeleteMeta(_ context.Context, sid string) error {
 	defer f.mu.Unlock()
 	f.deleted = append(f.deleted, sid)
 	return nil
+}
+
+// pollUntil polls cond every 10ms until it returns true or timeout elapses,
+// reporting whether it succeeded. Used to wait on the asynchronous proxy push
+// (see doResume's `go r.pushRunningState`) without racing the goroutine.
+func pollUntil(timeout time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if cond() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func newTestResumer(reg *registry.Registry, store *fakeStore, master *fakeMaster, push *fakePush) *Resumer {
@@ -168,15 +191,72 @@ func TestResumer_HappyPath(t *testing.T) {
 }
 
 func TestResumer_RejectsAutoResumeDisabled(t *testing.T) {
+	// AutoResume=false + state=paused: resumer would need to drive
+	// CubeMaster.Resume to bring the sandbox back, but the sandbox opted
+	// out. Must return an error AND release the "resuming" lock it took
+	// during acquireResumeOwnership, otherwise the state key would sit at
+	// "resuming" for its full TTL and make the sweeper skip decisions.
 	reg := registry.New()
 	reg.Upsert(lifecycle.SandboxLifecycleMeta{
 		SandboxID: "sbx", InstanceType: "cubebox", AutoResume: false,
 	})
-	r := newTestResumer(reg, newFakeStore(), &fakeMaster{}, &fakePush{})
+	store := newFakeStore()
+	store.states["sbx"] = "paused"
+	master := &fakeMaster{}
+	push := &fakePush{}
+	r := newTestResumer(reg, store, master, push)
 
 	err := r.Resume(context.Background(), "sbx")
 	if err == nil || err.Error() != "auto_resume not enabled for sandbox" {
 		t.Fatalf("expected auto_resume disabled error, got %v", err)
+	}
+	if got := store.state("sbx"); got != "" {
+		t.Fatalf("resuming lock must be released on AutoResume rejection, got %q", got)
+	}
+	if got := atomic.LoadInt32(&master.calls); got != 0 {
+		t.Fatalf("master.Resume must not be called when AutoResume=false, got %d", got)
+	}
+}
+
+// TestResumer_AutoResumeFalseAllowedWhenAlreadyRunning is the regression
+// this scenario targets: the SDK called Sandbox.connect() to manually resume
+// a paused sandbox that was configured with auto_resume=false. CubeMaster
+// forwarded the resume to Cubelet and the state event synchroniser
+// (statesync.Handle) flipped Redis state to "running". The proxy's local
+// dict is momentarily still "paused", so the next dataplane request lands
+// on /internal/resume. The resumer must NOT reject the request just because
+// auto_resume is false — the sandbox is objectively running and we're only
+// being asked to re-assert state, not to drive the resume RPC ourselves.
+func TestResumer_AutoResumeFalseAllowedWhenAlreadyRunning(t *testing.T) {
+	reg := registry.New()
+	reg.Upsert(lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx", InstanceType: "cubebox", AutoResume: false,
+	})
+	store := newFakeStore()
+	store.states["sbx"] = "running" // state synced from CubeMaster→CLM
+	master := &fakeMaster{}
+	push := &fakePush{}
+	r := newTestResumer(reg, store, master, push)
+
+	if err := r.Resume(context.Background(), "sbx"); err != nil {
+		t.Fatalf("resume must succeed when sandbox already running, got %v", err)
+	}
+	if got := atomic.LoadInt32(&master.calls); got != 0 {
+		t.Fatalf("master.Resume must NOT be called, got %d", got)
+	}
+	// Success bookkeeping still re-asserts running into the proxy dict so
+	// the local cache converges even if the initial push missed the mark.
+	// The push is performed asynchronously (see pushRunningState), so poll
+	// until the background goroutine records it.
+	if !pollUntil(2*time.Second, func() bool {
+		push.mu.Lock()
+		defer push.mu.Unlock()
+		return len(push.pushed) == 1 && push.pushed[0] == "running"
+	}) {
+		push.mu.Lock()
+		got := append([]string(nil), push.pushed...)
+		push.mu.Unlock()
+		t.Fatalf("proxy push should re-assert running, got %+v", got)
 	}
 }
 
@@ -317,5 +397,49 @@ func TestResumer_NoOpWhenStateIsAlreadyRunning(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&master.calls); got != 0 {
 		t.Fatalf("master.Resume must NOT be called when state=running, got %d", got)
+	}
+}
+
+func TestResumer_RunningStatePushRetriesAsynchronously(t *testing.T) {
+	tests := []struct {
+		name       string
+		failSet    int
+		wantCalls  int
+		wantPushes int
+	}{
+		{name: "succeeds immediately", failSet: 0, wantCalls: 1, wantPushes: 1},
+		{name: "succeeds after first retry", failSet: 1, wantCalls: 2, wantPushes: 1},
+		{name: "succeeds after second retry", failSet: 2, wantCalls: 3, wantPushes: 1},
+		{name: "fails after retry limit", failSet: 3, wantCalls: 3, wantPushes: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := registry.New()
+			reg.Upsert(lifecycle.SandboxLifecycleMeta{
+				SandboxID: "sbx-retry", InstanceType: "cubebox", AutoResume: true,
+			})
+			store := newFakeStore()
+			push := &fakePush{failSet: tt.failSet}
+			r := newTestResumer(reg, store, &fakeMaster{}, push)
+
+			if err := r.Resume(context.Background(), "sbx-retry"); err != nil {
+				t.Fatalf("resume failed: %v", err)
+			}
+
+			if !pollUntil(2*time.Second, func() bool {
+				push.mu.Lock()
+				defer push.mu.Unlock()
+				return push.setCalls == tt.wantCalls
+			}) {
+				t.Fatalf("timed out waiting for %d calls", tt.wantCalls)
+			}
+			push.mu.Lock()
+			got := len(push.pushed)
+			push.mu.Unlock()
+			if got != tt.wantPushes {
+				t.Fatalf("got %d successful pushes, want %d", got, tt.wantPushes)
+			}
+		})
 	}
 }

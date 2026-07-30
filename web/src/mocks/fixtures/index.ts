@@ -408,6 +408,7 @@ export function getTemplate(templateID: string): TemplateDetailDto | undefined {
       },
     ],
     createRequest: buildMockCreateRequest(base),
+    aliases: base.aliases ?? [],
     ...network,
   } as TemplateDetailDto;
 }

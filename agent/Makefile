@@ -61,15 +61,39 @@ ifeq ($(MUSL),yes)
     CARGO_TARGET_FLAG := --target $(TRIPLE)
     # +crt-static: statically link libc/crt
     # -lpthread: required by libunwind in musl builds (pthread_rwlock_*)
-    override EXTRA_RUSTFLAGS += -C target-feature=+crt-static -C link-arg=-lpthread
-    # Static libseccomp: container image puts it at /usr/local/lib64/libseccomp/lib,
-    # fall back to pkg-config / common system paths for local builds
-    export LIBSECCOMP_LINK_TYPE := static
-    export LIBSECCOMP_LIB_PATH := $(or \
+    # -lm: keeps libseccomp/libm references (for example pow) resolved by musl libm
+    override EXTRA_RUSTFLAGS += -C target-feature=+crt-static -C relocation-model=static -C link-arg=-static -C link-arg=-lpthread -C link-arg=-lm
+    # Keep cargo on the musl linker even when the host default cc points at glibc.
+    ifeq ($(TRIPLE),x86_64-unknown-linux-musl)
+        export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER ?= musl-gcc
+    endif
+    ifeq ($(TRIPLE),aarch64-unknown-linux-musl)
+        export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER ?= musl-gcc
+    endif
+    # Static libseccomp must be built with musl as well. Do not fall back to
+    # pkg-config or /usr/lib/*-linux-gnu here: those paths often resolve to
+    # glibc archives, producing a binary that fails as PID 1 in the guest.
+    MUSL_LIBSECCOMP_LIB_PATH := $(or \
+        $(LIBSECCOMP_LIB_PATH), \
         $(shell test -f /usr/local/lib64/libseccomp/lib/libseccomp.a && echo /usr/local/lib64/libseccomp/lib), \
-        $(shell pkg-config --variable=libdir libseccomp 2>/dev/null), \
-        $(shell find /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib -name "libseccomp.a" -exec dirname {} \; 2>/dev/null | head -1), \
-        /usr/lib64)
+        $(shell test -f /usr/lib/$(HOST_ARCH)-linux-musl/libseccomp.a && echo /usr/lib/$(HOST_ARCH)-linux-musl), \
+        $(shell test -f /usr/lib/$(TRIPLE)/libseccomp.a && echo /usr/lib/$(TRIPLE)))
+    ifeq ($(SECCOMP),yes)
+        ifeq ($(strip $(MUSL_LIBSECCOMP_LIB_PATH)),)
+            $(error MUSL=yes SECCOMP=yes requires a musl-built static libseccomp.a. Run 'make builder-image && make agent', or set LIBSECCOMP_LIB_PATH=/path/to/musl/libseccomp/lib)
+        endif
+        ifneq ($(findstring linux-gnu,$(MUSL_LIBSECCOMP_LIB_PATH)),)
+            $(error LIBSECCOMP_LIB_PATH=$(MUSL_LIBSECCOMP_LIB_PATH) looks like a glibc libdir. Use the builder image or a musl-built static libseccomp.a)
+        endif
+        ifneq ($(filter /usr/lib /usr/lib64,$(MUSL_LIBSECCOMP_LIB_PATH)),)
+            $(error LIBSECCOMP_LIB_PATH=$(MUSL_LIBSECCOMP_LIB_PATH) is too broad for a musl static build. Point it at a musl-specific libseccomp directory)
+        endif
+        ifeq ($(wildcard $(MUSL_LIBSECCOMP_LIB_PATH)/libseccomp.a),)
+            $(error LIBSECCOMP_LIB_PATH=$(MUSL_LIBSECCOMP_LIB_PATH) does not contain libseccomp.a)
+        endif
+        export LIBSECCOMP_LINK_TYPE := static
+        export LIBSECCOMP_LIB_PATH := $(MUSL_LIBSECCOMP_LIB_PATH)
+    endif
 endif
 
 CWD := $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
@@ -131,7 +155,7 @@ clean:
 	@rm -f $(GENERATED_FILES)
 
 ##TARGET test: run tests
-test:
+test: $(GENERATED_FILES)
 	@cargo test --all $(EXTRA_RUSTFEATURES) -- --nocapture
 
 ##TARGET fmt: format code

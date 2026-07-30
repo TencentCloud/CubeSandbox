@@ -128,7 +128,7 @@ export class TemplateInfo {
     const aliases: string[] = data.aliases ?? [];
     return new TemplateInfo({
       templateId: data.templateID ?? data.template_id ?? "",
-      name: data.name || (aliases.length ? aliases[0] : "") || "",
+      name: aliases.length ? aliases[0] : "",
       instanceType: data.instanceType ?? data.instance_type ?? "",
       version: data.version ?? "",
       status: data.status ?? "",
@@ -154,6 +154,7 @@ export class TemplateInfo {
 /** Options for {@link Template.build}. */
 export interface TemplateBuildOptions {
   image?: string;
+  name?: string;
   dockerfile?: string;
   startCmd?: string;
   instanceType?: string;
@@ -229,6 +230,8 @@ export class Template {
 
     const cfg = resolveConfig(options.config);
     const payload: Record<string, unknown> = { image: options.image.trim() };
+    const name = options.name?.trim();
+    if (name) payload.name = name;
     if (options.instanceType !== undefined) payload.instanceType = options.instanceType;
     if (options.writableLayerSize !== undefined) {
       payload.writableLayerSize = options.writableLayerSize;

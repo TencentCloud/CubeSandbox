@@ -184,23 +184,6 @@ case "$cmd" in
       printf 'pod/%s\n' "$(basename "$f")"
     done
     ;;
-  "get --raw=/apis/apps.kruise.io/v1beta1"|"get --raw=/apis/apps.kruise.io/v1alpha1")
-    ;;
-  get\ deployment\ kruise-controller-manager\ -o\ jsonpath=*)
-    case "$cmd" in
-      *readyReplicas*) printf '%s' "${KRUISE_MANAGER_READY:-1}" ;;
-      *tolerations*) printf '%s\n' "${KRUISE_MANAGER_TOLERATIONS:-|Exists|}" ;;
-      *) printf 'unexpected get deployment: %s\n' "$cmd" >&2; exit 1 ;;
-    esac
-    ;;
-  get\ daemonset\ kruise-daemon\ -o\ jsonpath=*)
-    case "$cmd" in
-      *desiredNumberScheduled*) printf '%s' "${KRUISE_DAEMON_DESIRED:-1}" ;;
-      *numberReady*) printf '%s' "${KRUISE_DAEMON_READY:-1}" ;;
-      *tolerations*) printf '%s\n' "${KRUISE_DAEMON_TOLERATIONS:-|Exists|}" ;;
-      *) printf 'unexpected get daemonset: %s\n' "$cmd" >&2; exit 1 ;;
-    esac
-    ;;
   get\ nodes\ -l\ *\ -o\ name)
     if [ -f "$TEST_STATE/nodes" ]; then
       cat "$TEST_STATE/nodes"
@@ -304,11 +287,6 @@ export IMAGE_PULL_SECRET_NAMES=
 export STATE_DIR=/var/lib/cube-node-bootstrap
 export DESIRED_KERNEL_PATTERN=pvm.host
 export KERNEL_BOOT_ARGS="nopti pti=off"
-export KRUISE_MANAGER_READY=1
-export KRUISE_DAEMON_DESIRED=1
-export KRUISE_DAEMON_READY=1
-export KRUISE_MANAGER_TOLERATIONS='|Exists|'
-export KRUISE_DAEMON_TOLERATIONS='|Exists|'
 export CHECK_POD_PHASE=Succeeded
 
 # Fingerprint-ready untainted node passes (no auto-taint).
@@ -366,31 +344,6 @@ rm -f "$TEST_STATE"/*
 printf 'NoSchedule ' > "$TEST_STATE/effects"
 printf 'maintenance ' > "$TEST_STATE/values"
 IS_UPGRADE=true sh "$PREFLIGHT_SCRIPT"
-
-# Missing Kruise manager ready fails.
-: > "$TEST_LOG"
-rm -f "$TEST_STATE"/*
-if (
-  export KRUISE_MANAGER_READY=0
-  sh "$PREFLIGHT_SCRIPT"
-); then
-  echo "kruise manager not ready unexpectedly passed" >&2
-  exit 1
-fi
-
-# Manager without gate toleration still passes (scheme A: Ready only).
-: > "$TEST_LOG"
-rm -f "$TEST_STATE"/*
-KRUISE_MANAGER_TOLERATIONS='other|Equal|NoSchedule' sh "$PREFLIGHT_SCRIPT"
-
-# Daemon without gate toleration fails.
-if (
-  export KRUISE_DAEMON_TOLERATIONS='other|Equal|NoSchedule'
-  sh "$PREFLIGHT_SCRIPT"
-); then
-  echo "missing daemon toleration unexpectedly passed" >&2
-  exit 1
-fi
 
 # No matching nodes fails.
 if (

@@ -48,29 +48,41 @@ type PluginVolumeBackendInfo struct {
 // The ref-count for (namespace, volumeID) is incremented via Manager.Attach;
 // the pre-attach count is embedded in AttachRequest.RefCount so the plugin
 // can decide whether host-level setup is needed (RefCount == 0 → first attach).
-// isPluginVolume reports whether volumeName is listed in the
-// "plugin-volume-sources" annotation injected by CubeMaster.
-func isPluginVolume(annotations map[string]string, volumeName string) bool {
+// pluginVolumeSourceEntry is one element of the plugin-volume-sources annotation.
+type pluginVolumeSourceEntry struct {
+	Name        string `json:"name"`
+	Driver      string `json:"driver"`
+	PrivateData string `json:"private_data"`
+}
+
+// lookupPluginVolumeSource returns driver and private_data for volumeName from
+// the CubeMaster-injected plugin-volume-sources annotation. ok is false when
+// the annotation is missing, malformed, or does not list volumeName.
+func lookupPluginVolumeSource(annotations map[string]string, volumeName string) (driver, privateData string, ok bool) {
 	if annotations == nil {
-		return false
+		return "", "", false
 	}
 	raw := annotations["plugin-volume-sources"]
 	if raw == "" {
-		return false
+		return "", "", false
 	}
-	type entry struct {
-		Name string `json:"name"`
-	}
-	var entries []entry
+	var entries []pluginVolumeSourceEntry
 	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
-		return false
+		return "", "", false
 	}
 	for _, e := range entries {
 		if e.Name == volumeName {
-			return true
+			return e.Driver, e.PrivateData, true
 		}
 	}
-	return false
+	return "", "", false
+}
+
+// isPluginVolume reports whether volumeName is listed in the
+// "plugin-volume-sources" annotation injected by CubeMaster.
+func isPluginVolume(annotations map[string]string, volumeName string) bool {
+	_, _, ok := lookupPluginVolumeSource(annotations, volumeName)
+	return ok
 }
 
 // volumePluginBaseDir returns the configured parent directory that every
@@ -107,28 +119,11 @@ func (l *local) attachPluginVolume(
 	v *cubebox.Volume,
 	result *StorageInfo,
 ) error {
-	// Resolve driver: first try the plugin-volume-sources annotation (preferred
-	// path set by CubeMaster), then fall back to VolumeSource.plugin_volume.
-	driver := ""
+	// Resolve driver + private_data: first try the plugin-volume-sources
+	// annotation (preferred path set by CubeMaster), then fall back to
+	// VolumeSource.plugin_volume for driver only.
 	volumeName := v.GetName()
-
-	if annotations := opts.ReqInfo.GetAnnotations(); annotations != nil {
-		if raw := annotations["plugin-volume-sources"]; raw != "" {
-			type entry struct {
-				Name   string `json:"name"`
-				Driver string `json:"driver"`
-			}
-			var entries []entry
-			if err := json.Unmarshal([]byte(raw), &entries); err == nil {
-				for _, e := range entries {
-					if e.Name == volumeName {
-						driver = e.Driver
-						break
-					}
-				}
-			}
-		}
-	}
+	driver, privateData, _ := lookupPluginVolumeSource(opts.ReqInfo.GetAnnotations(), volumeName)
 
 	// Fallback: VolumeSource.plugin_volume (proto field 11).
 	if driver == "" {
@@ -170,6 +165,7 @@ func (l *local) attachPluginVolume(
 		VolumeID:      volumeID,
 		Driver:        driver,
 		VolumeBaseDir: volumeBaseDir,
+		PrivateData:   privateData,
 		// RefCount (pre-attach) filled in by Manager.Attach after Acquire.
 	}
 

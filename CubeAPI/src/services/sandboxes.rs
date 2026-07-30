@@ -13,7 +13,7 @@ use crate::{
         CubeEgressRuleAction, CubeEgressRuleInject, CubeEgressRuleMatch, CubeMasterClient,
         CubeMasterError, CubeNetworkConfig, DeleteSandboxRequest, ListSandboxRequest, SandboxInfo,
         SandboxLogsRequest, SandboxRefreshRequest, SandboxStatus, SandboxTimeoutRequest,
-        SandboxUpdateRequest, VolumeMount, VolumeSpec,
+        SandboxUpdateRequest, VolumeSpec,
     },
     error::{AppError, AppResult},
     models::{
@@ -32,6 +32,8 @@ const RET_CODE_TASK_RESUME_FAILED: i32 = 130589;
 const HOSTDIR_MOUNT_KEY: &str = "host-mount";
 const ENV_VAR_NAME_MAX_LEN: usize = 256;
 const ENV_VAR_VALUE_MAX_LEN: usize = 4096;
+const MASK_REQUEST_HOST_MAX_LEN: usize = 512;
+const MASK_REQUEST_HOST_PORT_PLACEHOLDER: &str = "${PORT}";
 
 /// Environment variable names that may compromise sandbox isolation if injected
 /// at the runtime level (loader overrides, language runtime paths).
@@ -144,7 +146,7 @@ impl SandboxService {
             disk_size_mb: Some(d.disk_size_mb),
             metadata: optional_metadata(d.labels),
             state: sandbox_state_from_status(d.status),
-            volume_mounts: None,
+            volume_mounts: map_volume_mounts(&d.volume_mounts),
         })
     }
 
@@ -227,12 +229,15 @@ impl SandboxService {
                 struct MountEntry<'a> {
                     name: &'a str,
                     container_path: &'a str,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    readonly: Option<bool>,
                 }
                 let entries: Vec<MountEntry> = mounts
                     .iter()
                     .map(|m| MountEntry {
                         name: &m.name,
                         container_path: &m.path,
+                        readonly: m.read_only.then_some(true),
                     })
                     .collect();
                 if let Ok(json) = serde_json::to_string(&entries) {
@@ -848,7 +853,30 @@ pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandb
         metadata: optional_metadata(s.labels),
         state: sandbox_state_from_str(&s.status),
         envd_version,
-        volume_mounts: None,
+        volume_mounts: map_volume_mounts(&s.volume_mounts),
+    }
+}
+
+pub(crate) fn map_volume_mounts(
+    mounts: &[crate::cubemaster::CubeVolumeMount],
+) -> Option<Vec<crate::models::SandboxVolumeMount>> {
+    if mounts.is_empty() {
+        return None;
+    }
+    let mapped: Vec<_> = mounts
+        .iter()
+        // Drop entries that have neither a logical name nor a container path.
+        .filter(|mount| !mount.name.is_empty() || !mount.container_path.is_empty())
+        .map(|mount| crate::models::SandboxVolumeMount {
+            name: mount.name.clone(),
+            path: mount.container_path.clone(),
+            read_only: mount.readonly,
+        })
+        .collect();
+    if mapped.is_empty() {
+        None
+    } else {
+        Some(mapped)
     }
 }
 
@@ -929,6 +957,61 @@ fn new_request_id() -> String {
     Uuid::new_v4().to_string()
 }
 
+fn validate_mask_request_host(value: &str) -> AppResult<()> {
+    let invalid = |reason: &str| {
+        AppError::BadRequest(format!("network.maskRequestHost is invalid: {reason}"))
+    };
+
+    if value.is_empty() {
+        return Err(invalid("value must not be empty"));
+    }
+    if value.len() > MASK_REQUEST_HOST_MAX_LEN {
+        return Err(invalid("value is too long"));
+    }
+    if value.trim() != value || value.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(invalid("whitespace and control characters are not allowed"));
+    }
+    if value.contains("://")
+        || value.contains('/')
+        || value.contains('?')
+        || value.contains('#')
+        || value.contains('@')
+    {
+        return Err(invalid("expected a valid host or host:port authority"));
+    }
+
+    let expanded = value.replace(MASK_REQUEST_HOST_PORT_PLACEHOLDER, "65535");
+    if expanded.contains("${") {
+        return Err(invalid("only the ${PORT} placeholder is supported"));
+    }
+
+    let authority = expanded
+        .parse::<axum::http::uri::Authority>()
+        .map_err(|_| invalid("expected a valid host or host:port authority"))?;
+    if authority.host().is_empty() || !authority.host().is_ascii() {
+        return Err(invalid("host must be non-empty ASCII"));
+    }
+    let explicit_port = if expanded.starts_with('[') {
+        expanded
+            .find(']')
+            .and_then(|end| expanded.get(end + 1..))
+            .and_then(|suffix| suffix.strip_prefix(':'))
+    } else {
+        if expanded.matches(':').count() > 1 {
+            return Err(invalid("IPv6 hosts must use brackets"));
+        }
+        expanded.rsplit_once(':').map(|(_, port)| port)
+    };
+    if let Some(port) = explicit_port {
+        match port.parse::<u16>() {
+            Ok(1..=u16::MAX) => {}
+            _ => return Err(invalid("port must be between 1 and 65535")),
+        }
+    }
+
+    Ok(())
+}
+
 pub(crate) fn build_cube_network_config(
     allow_internet_access: Option<bool>,
     network: Option<&SandboxNetworkConfig>,
@@ -949,9 +1032,14 @@ pub(crate) fn build_cube_network_config(
         .unwrap_or_default();
 
     let allow_public_traffic = network.and_then(|n| n.allow_public_traffic);
+    let mask_request_host = network.and_then(|n| n.mask_request_host.clone());
+    if let Some(value) = mask_request_host.as_deref() {
+        validate_mask_request_host(value)?;
+    }
 
     if allow_internet_access.is_none()
         && allow_public_traffic.is_none()
+        && mask_request_host.is_none()
         && allow_out.is_empty()
         && deny_out.is_empty()
         && rules.is_empty()
@@ -962,6 +1050,7 @@ pub(crate) fn build_cube_network_config(
     Ok(Some(CubeNetworkConfig {
         allow_internet_access,
         allow_public_traffic,
+        mask_request_host,
         allow_out,
         deny_out,
         rules,
@@ -1001,17 +1090,18 @@ mod tests {
 
     use super::{
         build_cube_network_config, filter_by_metadata, from_cubemaster_info,
-        map_delete_cubemaster_err, SandboxService, RET_CODE_CONFLICT, RET_CODE_NOT_FOUND,
-        RET_CODE_TASK_RESUME_FAILED, RET_CODE_TASK_STATE_INVALID,
+        map_delete_cubemaster_err, map_volume_mounts, validate_mask_request_host, SandboxService,
+        RET_CODE_CONFLICT, RET_CODE_NOT_FOUND, RET_CODE_TASK_RESUME_FAILED,
+        RET_CODE_TASK_STATE_INVALID,
     };
     use crate::cubemaster::{
-        CreateSandboxRequest, CubeMasterClient, CubeMasterError, ListSandboxResponse, SandboxInfo,
-        SandboxUpdateRequest,
+        CreateSandboxRequest, CubeMasterClient, CubeMasterError, CubeVolumeMount,
+        ListSandboxResponse, SandboxInfo, SandboxUpdateRequest,
     };
     use crate::error::AppError;
     use crate::models::{
         EgressRule, EgressRuleAction, EgressRuleInject, EgressRuleMatch, NewSandbox,
-        SandboxNetworkConfig, SandboxState,
+        SandboxNetworkConfig, SandboxState, SandboxVolumeMount,
     };
     use axum::{
         extract::State,
@@ -1022,6 +1112,36 @@ mod tests {
     };
     use serde_json::Value;
     use tokio::sync::Mutex;
+
+    #[test]
+    fn map_volume_mounts_returns_none_for_empty_input() {
+        assert!(map_volume_mounts(&[]).is_none());
+    }
+
+    #[test]
+    fn map_volume_mounts_skips_all_empty_entries() {
+        assert!(map_volume_mounts(&[CubeVolumeMount {
+            name: String::new(),
+            container_path: String::new(),
+            readonly: false,
+        }])
+        .is_none());
+    }
+
+    #[test]
+    fn map_volume_mounts_exposes_public_mount_fields() {
+        let mapped = map_volume_mounts(&[CubeVolumeMount {
+            name: "hostdir-0".to_string(),
+            container_path: "/mnt/data".to_string(),
+            readonly: true,
+        }])
+        .expect("mounts should map");
+
+        assert_eq!(mapped.len(), 1);
+        assert_eq!(mapped[0].name, "hostdir-0");
+        assert_eq!(mapped[0].path, "/mnt/data");
+        assert!(mapped[0].read_only);
+    }
 
     #[test]
     fn metadata_filter_matches_all_pairs() {
@@ -1056,6 +1176,72 @@ mod tests {
 
         assert_eq!(context.allow_internet_access, Some(false));
         assert_eq!(context.allow_out, vec!["github.com".to_string()]);
+    }
+
+    #[test]
+    fn network_context_forwards_mask_request_host_by_itself() {
+        let context = build_cube_network_config(
+            None,
+            Some(&SandboxNetworkConfig {
+                mask_request_host: Some("localhost:${PORT}".to_string()),
+                ..Default::default()
+            }),
+        )
+        .expect("mask should be valid")
+        .expect("mask-only network config must not be dropped");
+
+        assert_eq!(
+            context.mask_request_host.as_deref(),
+            Some("localhost:${PORT}")
+        );
+        let json = serde_json::to_value(&context).expect("serialize");
+        assert_eq!(json["maskRequestHost"], "localhost:${PORT}");
+    }
+
+    #[test]
+    fn mask_request_host_validation_accepts_documented_authorities() {
+        for value in [
+            "localhost",
+            "localhost:3000",
+            "localhost:${PORT}",
+            "my-app.example.com:${PORT}",
+            "127.0.0.1:3000",
+            "[::1]:${PORT}",
+        ] {
+            validate_mask_request_host(value).unwrap_or_else(|err| {
+                panic!("expected {value:?} to be valid, got {err}");
+            });
+        }
+    }
+
+    #[test]
+    fn mask_request_host_validation_rejects_unsafe_values() {
+        for value in [
+            "",
+            " localhost",
+            "localhost ",
+            "https://example.com",
+            "example.com/path",
+            "example.com?x=1",
+            "example.com#fragment",
+            "user@example.com",
+            "bad\r\nInjected: value",
+            "example.com:",
+            "example.com:0",
+            "example.com:99999",
+            "localhost:${OTHER}",
+            "localhost:${PORT",
+            "[::1",
+            "::1",
+            "[::1]]:3000",
+            "[::1]:",
+            "例子.测试",
+        ] {
+            assert!(
+                validate_mask_request_host(value).is_err(),
+                "expected {value:?} to be rejected"
+            );
+        }
     }
 
     #[test]
@@ -1214,6 +1400,7 @@ mod tests {
             template_id: "tpl-1".to_string(),
             annotations: HashMap::new(),
             labels: HashMap::new(),
+            volume_mounts: vec![],
         });
 
         assert_eq!(listed.cpu_count, 2);
@@ -1609,6 +1796,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_sandbox_forwards_read_only_volume_mount_to_cubemaster() {
+        #[derive(Clone, Default)]
+        struct Capture {
+            create_body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn create_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            *capture.create_body.lock().await = Some(body);
+            Json(serde_json::json!({
+                "requestID": "req-volume",
+                "sandbox_id": "sb-volume",
+                "ret": { "ret_code": 0, "ret_msg": "ok" }
+            }))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener addr");
+        let capture = Capture::default();
+        let app = Router::new()
+            .route("/cube/sandbox", post(create_handler))
+            .with_state(capture.clone());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("server should run");
+        });
+
+        let service = SandboxService::new(
+            CubeMasterClient::new(format!("http://{addr}"), reqwest::Client::new()),
+            "cubebox".to_string(),
+            "cube.app".to_string(),
+        );
+
+        service
+            .create_sandbox(NewSandbox {
+                template_id: "tpl-1".to_string(),
+                timeout: Some(15),
+                lifecycle: None,
+                secure: None,
+                allow_internet_access: None,
+                network: None,
+                metadata: None,
+                distribution_scope: None,
+                env_vars: None,
+                mcp: None,
+                volume_mounts: Some(vec![
+                    SandboxVolumeMount {
+                        name: "dataset".to_string(),
+                        path: "/data".to_string(),
+                        read_only: true,
+                    },
+                    SandboxVolumeMount {
+                        name: "workspace".to_string(),
+                        path: "/workspace".to_string(),
+                        read_only: false,
+                    },
+                ]),
+            })
+            .await
+            .expect("sandbox create should succeed");
+
+        let create_body = capture
+            .create_body
+            .lock()
+            .await
+            .clone()
+            .expect("create body");
+        let raw = create_body["annotations"]["plugin-volume-mounts"]
+            .as_str()
+            .expect("plugin volume mounts annotation");
+        let mounts: Value = serde_json::from_str(raw).expect("annotation JSON");
+        assert_eq!(
+            mounts,
+            serde_json::json!([
+                {"name": "dataset", "container_path": "/data", "readonly": true},
+                {"name": "workspace", "container_path": "/workspace"}
+            ])
+        );
+    }
+
+    #[tokio::test]
     async fn kill_sandbox_maps_cubemaster_not_found_to_app_not_found() {
         async fn delete_handler() -> Json<Value> {
             Json(serde_json::json!({
@@ -1876,10 +2147,12 @@ mod tests {
             SandboxVolumeMount {
                 name: "data".to_string(),
                 path: "/mnt/a".to_string(),
+                read_only: false,
             },
             SandboxVolumeMount {
                 name: "data".to_string(),
                 path: "/mnt/b".to_string(),
+                read_only: false,
             },
         ];
         let err = super::validate_unique_volume_mount_names(&mounts)
@@ -1893,10 +2166,12 @@ mod tests {
             SandboxVolumeMount {
                 name: "data".to_string(),
                 path: "/mnt/a".to_string(),
+                read_only: false,
             },
             SandboxVolumeMount {
                 name: "logs".to_string(),
                 path: "/mnt/b".to_string(),
+                read_only: false,
             },
         ];
         super::validate_unique_volume_mount_names(&ok)
@@ -1917,28 +2192,37 @@ mod tests {
             SandboxVolumeMount {
                 name: "data".to_string(),
                 path: "/mnt/data".to_string(),
+                read_only: true,
             },
             SandboxVolumeMount {
                 name: "logs".to_string(),
                 path: "/mnt/logs".to_string(),
+                read_only: false,
             },
         ];
 
         let (specs, bindings): (Vec<VolumeSpec>, Vec<VolumeMount>) = mounts
             .into_iter()
-            .map(|SandboxVolumeMount { name, path }| {
-                (
-                    VolumeSpec {
-                        name: Some(name.clone()),
-                        volume_source: None,
-                    },
-                    VolumeMount {
-                        name,
-                        container_path: path,
-                        readonly: None,
-                    },
-                )
-            })
+            .map(
+                |SandboxVolumeMount {
+                     name,
+                     path,
+                     read_only,
+                     ..
+                 }| {
+                    (
+                        VolumeSpec {
+                            name: Some(name.clone()),
+                            volume_source: None,
+                        },
+                        VolumeMount {
+                            name,
+                            container_path: path,
+                            readonly: read_only.then_some(true),
+                        },
+                    )
+                },
+            )
             .unzip();
 
         assert_eq!(specs.len(), 2);
@@ -1947,8 +2231,10 @@ mod tests {
 
         assert_eq!(bindings[0].name, "data");
         assert_eq!(bindings[0].container_path, "/mnt/data");
+        assert_eq!(bindings[0].readonly, Some(true));
         assert_eq!(bindings[1].name, "logs");
         assert_eq!(bindings[1].container_path, "/mnt/logs");
+        assert_eq!(bindings[1].readonly, None);
     }
 
     /// When no `volumeMounts` are provided, `volumes` and `containers` in the

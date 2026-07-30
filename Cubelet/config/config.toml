@@ -100,7 +100,7 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     data_path = "/data/cubelet/storage"
 
     # Parent directory for volume plugin host_path mounts (Attach --volume-base-dir).
-    volume_plugin_base_dir = "/data/volume"
+    volume_plugin_base_dir = "/data/cube-shared/volume"
 
     [[plugins."io.cubelet.internal.v1.storage".volume_plugins]]
       name        = "cos"

@@ -22,6 +22,7 @@
 //	  --volume-id       <volumeID>
 //	  --ref-count       <int64>       pre-attach count; 0 = first attach
 //	  --volume-base-dir <path>        required parent dir; host_path MUST be inside it
+//	  --private-data    <string>      optional; omitted when empty (Create-time state)
 //	  stdout: {"host_path":"...","metadata":{...},"error":""}
 //
 //	detach
@@ -86,6 +87,11 @@ func (p *Plugin) Attach(ctx context.Context, req *volume.AttachRequest) (*volume
 		"--volume-id", req.VolumeID,
 		"--ref-count", strconv.FormatInt(req.RefCount, 10),
 		"--volume-base-dir", req.VolumeBaseDir,
+	}
+	// --private-data is optional: omit when empty so older plugins that do not
+	// recognize the flag keep working (pre-private_data volumes, empty Create).
+	if req.PrivateData != "" {
+		args = append(args, "--private-data", req.PrivateData)
 	}
 
 	var resp struct {

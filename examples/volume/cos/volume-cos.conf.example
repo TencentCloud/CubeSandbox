@@ -9,8 +9,8 @@ BUCKET=mybucket-1250000000
 REGION=ap-guangzhou
 
 # FUSE mount base is passed by Cubelet on attach (--volume-base-dir,
-# default /data/volume). host_path must be under it, e.g.
-# /data/volume/cos-<volume_id>.
+# default /data/cube-shared/volume). host_path must be under it, e.g.
+# /data/cube-shared/volume/cos-<volume_id>.
 
 # rpc plugin only (see cos/rpc/volume-cos.conf.example):
 # SOCKET=/run/cube-volume-cos-rpc.sock

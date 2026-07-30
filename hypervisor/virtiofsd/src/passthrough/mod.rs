@@ -22,7 +22,9 @@ use crate::passthrough::device_state::preserialization::{HandleMigrationInfo, In
 use crate::passthrough::inode_store::{
     Inode, InodeData, InodeFile, InodeIds, InodeStore, StrongInodeReference,
 };
-use crate::passthrough::util::{ebadf, is_safe_inode, openat, reopen_fd_through_proc};
+use crate::passthrough::util::{
+    ebadf, is_safe_inode, openat, reopen_fd_through_proc, validate_dentry_name,
+};
 use crate::read_dir::ReadDir;
 use crate::{fuse, oslib};
 use file_handle::{FileHandle, FileOrHandle, OpenableFileHandle};
@@ -1465,6 +1467,7 @@ impl FileSystem for PassthroughFs {
         name: &CStr,
         f_info: Option<(String, StatExt)>,
     ) -> io::Result<Entry> {
+        validate_dentry_name(name)?;
         self.do_lookup(parent, name, f_info)
     }
 
@@ -1504,6 +1507,7 @@ impl FileSystem for PassthroughFs {
         umask: u32,
         extensions: Extensions,
     ) -> io::Result<Entry> {
+        validate_dentry_name(name)?;
         let data = self.inodes.get(parent).ok_or_else(ebadf)?;
         let parent_file = data.get_file()?;
 
@@ -1540,6 +1544,7 @@ impl FileSystem for PassthroughFs {
     }
 
     fn rmdir(&self, _ctx: Context, parent: Inode, name: &CStr) -> io::Result<()> {
+        validate_dentry_name(name)?;
         self.do_unlink(parent, name, libc::AT_REMOVEDIR)
     }
 
@@ -1601,6 +1606,7 @@ impl FileSystem for PassthroughFs {
         umask: u32,
         extensions: Extensions,
     ) -> io::Result<(Entry, Option<Handle>, OpenOptions)> {
+        validate_dentry_name(name)?;
         let data = self.inodes.get(parent).ok_or_else(ebadf)?;
         let parent_file = data.get_file()?;
 
@@ -1668,6 +1674,7 @@ impl FileSystem for PassthroughFs {
     }
 
     fn unlink(&self, _ctx: Context, parent: Inode, name: &CStr) -> io::Result<()> {
+        validate_dentry_name(name)?;
         self.do_unlink(parent, name, 0)
     }
 
@@ -1939,6 +1946,8 @@ impl FileSystem for PassthroughFs {
         newname: &CStr,
         flags: u32,
     ) -> io::Result<()> {
+        validate_dentry_name(oldname)?;
+        validate_dentry_name(newname)?;
         let old_inode = self.inodes.get(olddir).ok_or_else(ebadf)?;
         let new_inode = self.inodes.get(newdir).ok_or_else(ebadf)?;
 
@@ -1986,6 +1995,7 @@ impl FileSystem for PassthroughFs {
         umask: u32,
         extensions: Extensions,
     ) -> io::Result<Entry> {
+        validate_dentry_name(name)?;
         let data = self.inodes.get(parent).ok_or_else(ebadf)?;
         let parent_file = data.get_file()?;
 
@@ -2035,6 +2045,7 @@ impl FileSystem for PassthroughFs {
         newparent: Inode,
         newname: &CStr,
     ) -> io::Result<Entry> {
+        validate_dentry_name(newname)?;
         let data = self.inodes.get(inode).ok_or_else(ebadf)?;
         let new_inode = self.inodes.get(newparent).ok_or_else(ebadf)?;
 
@@ -2069,6 +2080,10 @@ impl FileSystem for PassthroughFs {
         name: &CStr,
         extensions: Extensions,
     ) -> io::Result<Entry> {
+        // The link *name* (the entry being created inside `parent`) must be a
+        // single dentry component -- multi-component paths like `"../foo"`
+        // would let a forged FUSE request escape the parent directory.
+        validate_dentry_name(name)?;
         let data = self.inodes.get(parent).ok_or_else(ebadf)?;
         let parent_file = data.get_file()?;
 

@@ -543,7 +543,10 @@ copy_file "${ROOT_DIR}/configs/single-node/network-agent.yaml" "${PACKAGE_ROOT}/
 copy_dir_contents "${SCRIPT_DIR}/CubeAPI" "${PACKAGE_ROOT}/CubeAPI"
 copy_file "${CORE_BIN_DIR}/cube-api" "${PACKAGE_ROOT}/CubeAPI/bin/cube-api"
 
-# CubeOps binary — admin/ops API (Go), depends on CubeDB via go.mod replace.
+# Lay down the one-click CubeOps package Dockerfile first, then copy the binary
+# on top so terraform/tencentcloud/build_images.sh can build cube-ops from the
+# extracted sandbox-package without the full source tree.
+copy_dir_contents "${SCRIPT_DIR}/CubeOps" "${PACKAGE_ROOT}/CubeOps"
 copy_file "${CORE_BIN_DIR}/cubeops" "${PACKAGE_ROOT}/CubeOps/bin/cubeops"
 
 # Same ordering for CubeMaster so cubemaster/cubemastercli binaries survive the
@@ -552,6 +555,10 @@ copy_dir_contents "${SCRIPT_DIR}/CubeMaster" "${PACKAGE_ROOT}/CubeMaster"
 copy_file "${CORE_BIN_DIR}/cubemaster" "${PACKAGE_ROOT}/CubeMaster/bin/cubemaster"
 copy_file "${CORE_BIN_DIR}/cubemastercli" "${PACKAGE_ROOT}/CubeMaster/bin/cubemastercli"
 copy_file "${ROOT_DIR}/configs/single-node/cubemaster.yaml" "${PACKAGE_ROOT}/CubeMaster/conf.yaml"
+# CubeMaster/Dockerfile COPY's this from the package CubeMaster/ context.
+copy_file "${ROOT_DIR}/deploy/scripts/docker-install-volume-deps.sh" \
+  "${PACKAGE_ROOT}/CubeMaster/docker-install-volume-deps.sh"
+chmod +x "${PACKAGE_ROOT}/CubeMaster/docker-install-volume-deps.sh"
 
 copy_file "${CORE_BIN_DIR}/cubelet" "${PACKAGE_ROOT}/Cubelet/bin/cubelet"
 copy_file "${CORE_BIN_DIR}/cubecli" "${PACKAGE_ROOT}/Cubelet/bin/cubecli"
@@ -568,13 +575,19 @@ copy_dir_contents "${ROOT_DIR}/Cubelet/dynamicconf" "${PACKAGE_ROOT}/Cubelet/dyn
 
 VOLUME_COS_PLUGIN_SRC="${ROOT_DIR}/examples/volume/cos/binary/cube-volume-cos.sh"
 VOLUME_COS_CONF_EXAMPLE="${ROOT_DIR}/examples/volume/cos/volume-cos.conf.example"
+VOLUME_COS_INSTALL_DEPS="${ROOT_DIR}/examples/volume/cos/install-deps.sh"
 ensure_file "${VOLUME_COS_PLUGIN_SRC}"
 ensure_file "${VOLUME_COS_CONF_EXAMPLE}"
+ensure_file "${VOLUME_COS_INSTALL_DEPS}"
 copy_file "${VOLUME_COS_PLUGIN_SRC}" "${PACKAGE_ROOT}/CubeMaster/plugin/cube-volume-cos"
 copy_file "${VOLUME_COS_PLUGIN_SRC}" "${PACKAGE_ROOT}/Cubelet/plugin/cube-volume-cos"
 chmod +x "${PACKAGE_ROOT}/CubeMaster/plugin/cube-volume-cos" "${PACKAGE_ROOT}/Cubelet/plugin/cube-volume-cos"
 copy_file "${VOLUME_COS_CONF_EXAMPLE}" "${PACKAGE_ROOT}/CubeMaster/plugin/volume-cos.conf.example"
 copy_file "${VOLUME_COS_CONF_EXAMPLE}" "${PACKAGE_ROOT}/Cubelet/plugin/volume-cos.conf.example"
+# Host-side COS deps installer (cosfs/coscmd/jq); docs run it from plugin/.
+copy_file "${VOLUME_COS_INSTALL_DEPS}" "${PACKAGE_ROOT}/CubeMaster/plugin/install-deps.sh"
+copy_file "${VOLUME_COS_INSTALL_DEPS}" "${PACKAGE_ROOT}/Cubelet/plugin/install-deps.sh"
+chmod +x "${PACKAGE_ROOT}/CubeMaster/plugin/install-deps.sh" "${PACKAGE_ROOT}/Cubelet/plugin/install-deps.sh"
 
 copy_dir_contents "${CUBE_PROXY_TEMPLATE_DIR}" "${PACKAGE_ROOT}/cubeproxy"
 copy_dir_contents "${CUBE_COREDNS_TEMPLATE_DIR}" "${PACKAGE_ROOT}/coredns"

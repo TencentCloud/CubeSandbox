@@ -1,6 +1,7 @@
 local utils = require "utils"
 local sb = require "sandbox_backend"
 local state = require "sandbox_state"
+local request_host = require "request_host"
 
 -- Parse Host: <container_port>-<sandbox_id>.<domain> e.g. 49983-7c8fbcd45ffe450fb8f7fb223ad45507.cube.app
 -- Returns container_port, ins_id (sandbox / instance id), or nil, nil on failure.
@@ -35,6 +36,7 @@ ngx.var.ins_id = ins_id
 -- Auto-pause gate. See sandbox_state.lua for failure-mode semantics.
 state.gate(ins_id)
 
-local host_ip, host_port = sb.resolve_backend(ins_id, container_port)
+local host_ip, host_port, mask_request_host = sb.resolve_backend(ins_id, container_port)
 ngx.var.backend_ip = host_ip
 ngx.var.backend_port = host_port
+request_host.apply(mask_request_host, container_port)

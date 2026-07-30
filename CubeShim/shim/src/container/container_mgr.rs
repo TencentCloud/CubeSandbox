@@ -2,18 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use containerd_shim::event::Event;
 use containerd_shim::protos::events::task::TaskExit;
 use containerd_shim::protos::protobuf::MessageDyn;
 use protoc::agent::WaitProcessResponse;
 use protoc::{agent, agent_ttrpc};
-use std::sync::Arc;
+use tokio::sync::{mpsc::channel, mpsc::Receiver, mpsc::Sender, Mutex};
 use ttrpc::context;
 
 use crate::log::Log;
 use crate::{errf, infof};
-use tokio::sync::{mpsc::channel, mpsc::Receiver, mpsc::Sender, Mutex};
 
 const EXIT_CODE_255: u32 = 255;
 
@@ -34,6 +35,7 @@ pub enum TaskState {
 pub struct ContainerInfo {
     pub id: String,
     pub bundle: String,
+    pub stdin: String,
     pub stdout: String,
     pub stderr: String,
     pub terminal: bool,

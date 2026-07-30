@@ -4,9 +4,31 @@
 package plugin
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
+
+type stubPlugin struct{ name string }
+
+func (s stubPlugin) Name() string { return s.name }
+func (s stubPlugin) Create(context.Context, string, string) (*VolumeInfo, error) {
+	return &VolumeInfo{}, nil
+}
+func (s stubPlugin) Destroy(context.Context, string) error { return nil }
+
+func TestUnregisterForTest(t *testing.T) {
+	const name = "fake-unregister-test"
+	Register(stubPlugin{name: name})
+	if _, ok := Get(name); !ok {
+		t.Fatalf("expected plugin %q to be registered", name)
+	}
+	UnregisterForTest(name)
+	if _, ok := Get(name); ok {
+		t.Fatalf("expected plugin %q to be unregistered", name)
+	}
+	UnregisterForTest(name) // idempotent
+}
 
 func TestValidateConfigs_uniqueNames(t *testing.T) {
 	err := ValidateConfigs([]Config{

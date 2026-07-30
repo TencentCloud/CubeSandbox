@@ -447,6 +447,7 @@ impl CubeMasterClient {
     // ── Node / Cluster APIs ──────────────────────────────────────────────
 
     /// GET /internal/meta/nodes — list all nodes (capacity + health).
+    #[allow(dead_code)]
     pub async fn list_nodes(&self) -> Result<NodesResponse, CubeMasterError> {
         let url = format!("{}/internal/meta/nodes", self.base_url);
         let resp = self
@@ -459,6 +460,7 @@ impl CubeMasterClient {
     }
 
     /// GET /internal/meta/nodes/{id} — single node detail.
+    #[allow(dead_code)]
     pub async fn get_node(&self, node_id: &str) -> Result<NodeResponse, CubeMasterError> {
         let url = format!("{}/internal/meta/nodes/{}", self.base_url, node_id);
         let resp = self
@@ -471,6 +473,7 @@ impl CubeMasterClient {
     }
 
     /// GET /internal/meta/version-matrix — cluster-wide component version matrix.
+    #[allow(dead_code)]
     pub async fn get_version_matrix(&self) -> Result<VersionMatrixResponse, CubeMasterError> {
         let url = format!("{}/internal/meta/version-matrix", self.base_url);
         let resp = self
@@ -780,6 +783,11 @@ pub struct CubeNetworkConfig {
     #[serde(rename = "allowPublicTraffic", skip_serializing_if = "Option::is_none")]
     pub allow_public_traffic: Option<bool>,
 
+    /// Host authority CubeProxy forwards to user services. This is consumed by
+    /// CubeMaster/CubeProxy only and is intentionally not sent to Cubelet.
+    #[serde(rename = "maskRequestHost", skip_serializing_if = "Option::is_none")]
+    pub mask_request_host: Option<String>,
+
     /// Allowed outbound CIDRs whitelist.
     #[serde(rename = "allowOut", skip_serializing_if = "Vec::is_empty")]
     pub allow_out: Vec<String>,
@@ -882,6 +890,17 @@ pub struct ResourceSpec {
 pub struct EnvVar {
     pub key: String,
     pub value: String,
+}
+
+/// Volume mount entry as returned by CubeMaster sandbox info/list APIs.
+#[derive(Debug, Deserialize, Clone)]
+pub struct CubeVolumeMount {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default, alias = "containerPath")]
+    pub container_path: String,
+    #[serde(default)]
+    pub readonly: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -1093,6 +1112,8 @@ pub struct SandboxInfo {
     pub annotations: HashMap<String, String>,
     #[serde(default)]
     pub labels: HashMap<String, String>,
+    #[serde(default)]
+    pub volume_mounts: Vec<CubeVolumeMount>,
 }
 
 // ─── Get single sandbox ────────────────────────────────────────────────────
@@ -1129,6 +1150,8 @@ pub struct GetSandboxDataItem {
     pub namespace: String,
     #[serde(default, deserialize_with = "deserialize_optional_datetime")]
     pub end_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub volume_mounts: Vec<CubeVolumeMount>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1170,6 +1193,7 @@ pub struct SandboxDetail {
     pub disk_size_mb: i32,
     pub annotations: HashMap<String, String>,
     pub labels: HashMap<String, String>,
+    pub volume_mounts: Vec<CubeVolumeMount>,
 }
 
 fn parse_cpu_millicores(s: &str) -> i32 {
@@ -1348,6 +1372,7 @@ impl GetSandboxResponse {
             disk_size_mb: 0,
             annotations: item.annotations,
             labels: item.labels,
+            volume_mounts: item.volume_mounts,
         })
     }
 }
@@ -2512,6 +2537,7 @@ pub struct ListVolumesRequest {
 }
 
 /// GET /cube/volume — response.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct ListVolumesResponse {
     #[serde(rename = "RequestID", alias = "requestID", default)]
@@ -2531,6 +2557,7 @@ pub struct CreateVolumeRequest {
 }
 
 /// POST /cube/volume — response.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct CreateVolumeResponse {
     #[serde(rename = "RequestID", alias = "requestID", default)]
@@ -2540,6 +2567,7 @@ pub struct CreateVolumeResponse {
 }
 
 /// GET /cube/volume/{volume_id} — response.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct GetVolumeResponse {
     #[serde(rename = "RequestID", alias = "requestID", default)]
@@ -2549,6 +2577,7 @@ pub struct GetVolumeResponse {
 }
 
 /// DELETE /cube/volume/{volume_id} — response.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct DeleteVolumeResponse {
     #[serde(rename = "RequestID", alias = "requestID", default)]

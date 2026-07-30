@@ -14,7 +14,6 @@ spec:
     type: {{ .Values.cubeNodeInstaller.updateStrategy.type | default "RollingUpdate" }}
     {{- if .Values.cubeNodeInstaller.updateStrategy.rollingUpdate }}
     rollingUpdate:
-      rollingUpdateType: {{ .Values.cubeNodeInstaller.updateStrategy.rollingUpdate.rollingUpdateType | default "Standard" }}
       maxUnavailable: {{ .Values.cubeNodeInstaller.updateStrategy.rollingUpdate.maxUnavailable | default 1 }}
       {{- with .Values.cubeNodeInstaller.updateStrategy.rollingUpdate.maxSurge }}
       maxSurge: {{ . }}

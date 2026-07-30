@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Build-context filter for CubeShim/Dockerfile (context = repository root).
+**
+!CubeShim
+!CubeShim/**
+CubeShim/target
+CubeShim/target/**
+!hypervisor
+!hypervisor/**
+hypervisor/target
+hypervisor/target/**
+!deploy
+!deploy/one-click
+!deploy/one-click/config-cube.toml
+!deploy/kubernetes
+!deploy/kubernetes/images
+!deploy/kubernetes/images/scripts
+!deploy/kubernetes/images/scripts/component-entrypoint.sh

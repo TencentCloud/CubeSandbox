@@ -4,9 +4,9 @@ This chart delivers CubeSandbox on Kubernetes/TKE as chart-managed resources.
 
 Current compute-plane shape (per compute node):
 
-- **`cube-node` (Big Pod)**: OpenKruise Advanced DaemonSet (`InPlaceIfPossible`; hard dependency); `wait-node-prep` sidecar + `cubelet` / `network-agent` + optional egress + six frozen `cube-slot-*` pause placeholders; **no initContainers**; Pod network (`hostNetwork=false`).
-- **`cube-node-installer`**: DaemonSet that stages shim / kernel / guest into the host toolbox tree.
-- **`cube-node-bootstrap`**: DaemonSet that runs `wait-pvm-host` + `cube-node-init`, then writes `node-prep-ready`.
+- **`cube-node` (Big Pod)**: native `apps/v1` DaemonSet; `wait-node-prep` **initContainer** (exits when ready) + `cubelet` / `network-agent` + optional egress; Pod network (`hostNetwork=false`). Image/template changes recreate the Pod and interrupt sandboxes on that node.
+- **`cube-node-installer`**: native DaemonSet that stages shim / kernel / guest into the host toolbox tree.
+- **`cube-node-bootstrap`**: native DaemonSet that runs `wait-pvm-host` + `cube-node-init`, then writes `node-prep-ready`.
 - **`cube-node-pvm`**: native `apps/v1` DaemonSet scheduled only via `placement.pvm` (`allow-pvm-bootstrap`); installs PVM host kernel and writes fingerprint `pvm-host-ready`. Non-PVM compute nodes never pull this image.
 
 Control-plane vs compute scheduling uses `placement.controlPlane` and `placement.compute`. PVM host install uses `placement.pvm`. MySQL schema migration is embedded in CubeMaster. Control-plane and runtime components use separate images.
@@ -17,24 +17,23 @@ Control-plane vs compute scheduling uses `placement.controlPlane` and `placement
 deploy/kubernetes/chart/
   Chart.yaml
   values.yaml
-  docs/
-    ARCHITECTURE.md
-    QUICKSTART.md
-    UPGRADE.md
-    FAQ.md
   templates/
 ```
 
 ## Documentation
 
-- [`docs/QUICKSTART.md`](docs/QUICKSTART.md) — install walkthrough from prerequisites to `helm test`.
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — current architecture, startup sequence, DNS / Proxy / Egress, compute-only mode.
-- [`docs/UPGRADE.md`](docs/UPGRADE.md) — compute-plane image upgrades without killing live sandboxes.
-- [`docs/FAQ.md`](docs/FAQ.md) — common install and runtime issues.
+Official docs (source of truth; do not keep a parallel copy under this chart):
+
+- [Kubernetes Deployment](https://cubesandbox.com/guide/kubernetes/) — overview and install order
+- [Helm Install](https://cubesandbox.com/guide/kubernetes/install) — prerequisites through `helm test`
+- [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) — component layering, four compute DaemonSets, DNS / Proxy / Egress, compute-only mode
+- [Upgrade](https://cubesandbox.com/guide/kubernetes/upgrade) — control plane can roll; compute upgrades recreate the Big Pod and interrupt sandboxes
+- [FAQ](https://cubesandbox.com/guide/kubernetes/faq) — common install and runtime issues
+- Chinese: [https://cubesandbox.com/zh/guide/kubernetes/](https://cubesandbox.com/zh/guide/kubernetes/)
 
 ## Architecture
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for component layering, the four compute DaemonSets, DNS/Proxy/Egress flows, and external control plane / compute-only mode.
+See the [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) guide for component layering, the four compute DaemonSets, DNS/Proxy/Egress flows, and external control plane / compute-only mode.
 
 ## Image responsibilities
 
@@ -42,10 +41,9 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for component layering, the f
 |---|---|
 | `cube-pvm-host-bootstrap` | **cube-node-pvm** init. Installs/configures PVM host kernel and may reboot the node. |
 | `cube-node-init` | Bootstrap DaemonSet: `wait-pvm-host` + `cube-node-init`. Loads KVM, prepares host paths, validates `/dev/kvm` and XFS. |
-| `cube-wait-node-prep` | Big Pod high-priority sidecar (poll `node-prep-ready`), bootstrap write-ready, and PVM hold container. |
+| `cube-wait-node-prep` | Big Pod `wait-node-prep` initContainer (poll `node-prep-ready` then exit), bootstrap write-ready, and PVM hold container. |
 | `cube-shim` / `cube-kernel` / `cube-guest` | Installer DaemonSet containers; stage artifacts into `/usr/local/services/cubetoolbox`. |
 | `cubelet` / `network-agent` | Big Pod runtime containers (self-stage then run). |
-| `pause` | Big Pod `cube-slot-1`…`6` placeholders (InPlace-replace later). |
 | `cube-master` | Control-plane master; embedded schema migrations. |
 | `cube-api` | External E2B-compatible HTTP API. |
 | `cube-ops` | Ops/admin backend (JWT) + WebUI SDK proxy to CubeMaster. |
@@ -54,12 +52,11 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for component layering, the f
 | `cube-lifecycle-manager` | Sandbox auto-pause / auto-resume; discovered via Service DNS and Redis. |
 | `cube-egress` / `cube-egress-net` | Transparent outbound proxy + host TPROXY helper (Big Pod sidecars). |
 | `cube-webui` | WebUI static assets and OpenResty. |
-| template builder sidecar | Optional `dockerd`/BuildKit on CubeMaster (`docker:27-dind` by default). |
 
 ## Node selection
 
 The chart separates placement into dedicated control-plane nodes and compute
-nodes. Control-plane CloneSets, StatefulSets, and `cube-proxy` use
+nodes. Control-plane Deployments, StatefulSets, and `cube-proxy` use
 `placement.controlPlane`; `cube-node` / installer / bootstrap use
 `placement.compute`. PVM host install (`cube-node-pvm`) uses `placement.pvm`
 and requires `cube.tencent.com/allow-pvm-bootstrap=true` so non-PVM compute
@@ -138,7 +135,7 @@ kubectl taint node <compute-node>   cube.tencent.com/compute=true:NoSchedule   -
 kubectl label node <pvm-compute-node>   cube.tencent.com/allow-pvm-bootstrap=true   --overwrite
 # The Helm preflight Hook writes pvm-not-ready=true:NoSchedule on
 # fingerprint-unready pvm nodes. For intentional kernel/bootArgs mutate,
-# see docs/UPGRADE.md (value=maintenance).
+# see https://cubesandbox.com/guide/kubernetes/upgrade (value=maintenance).
 ```
 
 The chart does not label nodes or apply role taints; prepare those before install. The PVM startup-gate taint is written by the preflight Hook when the node is not fingerprint-ready.
@@ -175,10 +172,12 @@ To **turn off PVM on one node**: remove the `allow-pvm-bootstrap` label. Bootstr
 ## Build and push images
 
 ```bash
-PUSH=1 REGISTRY=ccr.ccs.tencentyun.com/cubesandbox-chart IMAGE_TAG=v0.5.1 ./deploy/kubernetes/images/build-cube-images.sh
+PUSH=1 REGISTRY=cube-sandbox-int.tencentcloudcr.com/cube-sandbox IMAGE_TAG=v0.6.0 ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
-Cube-owned images default to `imagePullPolicy: Always` because this chart uses the release tag directly and environments are expected to pull the pushed image from the registry during deployment.
+Cube-owned images default to `imagePullPolicy: IfNotPresent`. To pick up a
+registry rebuild that reuses the same tag, change the tag, delete the local
+image on the node, or override `pullPolicy: Always` for that image.
 
 If the target registry requires authentication, create a Kubernetes
 `kubernetes.io/dockerconfigjson` Secret in the release namespace and pass it to
@@ -207,8 +206,8 @@ Set `redis.host` to use an existing Redis service; the chart will not install `c
 
 ## CubeMaster configuration
 
-The `cube-master` image uses `CubeMaster/docker/Dockerfile` directly and does not carry a Kubernetes-specific entrypoint or bundled `conf.yaml`.
-The chart stores the One-click `CubeMaster/conf.yaml` at `deploy/kubernetes/chart/files/cube-master/conf.yaml`, renders MySQL/Redis values into it, creates a release-scoped Secret named `<release>-master-config`, and mounts it to `/usr/local/services/cubemaster/conf.yaml`; `CUBE_MASTER_CONFIG_PATH` points CubeMaster to that mounted file.
+The `cube-master` image is built like CI from `CubeMaster/docker/Dockerfile` (repository-root context) and does not carry a Kubernetes-specific entrypoint or bundled `conf.yaml`.
+The chart stores the One-click `CubeMaster/conf.yaml` at `deploy/kubernetes/chart/files/cube-master/conf.yaml`, renders MySQL/Redis values into it, creates a release-scoped Secret named `<release>-master-config`, and mounts it to `/usr/local/services/cubetoolbox/CubeMaster/conf.yaml` (same path as one-click); `CUBE_MASTER_CONFIG_PATH` points CubeMaster to that mounted file.
 
 CubeMaster artifact storage maps to `/data/CubeMaster/storage`, matching one-click.
 The chart uses PVC-backed persistence by default so state can survive
@@ -280,6 +279,24 @@ disabled, and sets TKE CLB annotations for `pass-to-target` plus a
 override that value in runtime values (comma-separated for multiple SGs),
 or set it to `""` if you manage CLB security groups outside Helm.
 
+### China registry preset (`values-cn.yaml`)
+
+Default Chart values pull Cube images from TCR **int**
+(`cube-sandbox-int.tencentcloudcr.com`). Users in mainland China should layer
+`values-cn.yaml` so component images, plus mirrored MySQL / Redis / kubectl,
+come from TCR **cn** (`cube-sandbox-cn.tencentcloudcr.com`):
+
+```bash
+helm upgrade --install cube ./deploy/kubernetes/chart \
+  -f deploy/kubernetes/chart/values-cn.yaml \
+  -f runtime-values.yaml \
+  -n cube-system --create-namespace
+```
+
+Combine with `values-tke.yaml` when installing on TKE in China. The preset sets
+`global.imageRegistry` to the cn host and overrides mysql / redis / kubectl
+repositories that do not go through `cube.cubeImage`.
+
 ## Database migration
 
 The chart does not deliver a separate DB migration Job or image. CubeMaster owns MySQL schema migration and runs its embedded `CubeMaster/pkg/base/dao/migrate/migrations/mysql` migrations during startup.
@@ -293,9 +310,12 @@ The chart does not deliver a separate DB migration Job or image. CubeMaster owns
 ## cubemastercli operational CLI
 
 `cubemastercli.enabled=true` installs a chart-managed
-`<release>-cubemastercli` CloneSet. The image contains the real
-`CubeMaster/bin/cubemastercli` binary only; it does not provide a wrapper or
-fake `ctl` command.
+`<release>-cubemastercli` Deployment. The image is built like CI from
+`CubeMaster/docker/Dockerfile.cubemastercli` and contains the real
+`cmd/cubemastercli` binary at `/usr/local/bin/cubemastercli`; it does not
+provide a wrapper or fake `ctl` command. Interactive bash sessions may use a
+bashrc helper that injects `--address` / `--port` from env; non-interactive
+`kubectl exec` commands should still pass those flags explicitly.
 
 The chart injects `CUBEMASTERCLI_ADDRESS` and `CUBEMASTERCLI_PORT` from the
 current CubeMaster endpoint. Because upstream `cubemastercli` does not read
@@ -303,10 +323,10 @@ environment variables as flag defaults, commands should pass those values to
 the real binary:
 
 ```bash
-kubectl exec -n cube-system cloneset/cube-cubemastercli -- cubemastercli --help
-kubectl exec -n cube-system cloneset/cube-cubemastercli -- \
+kubectl exec -n cube-system deploy/cube-cubemastercli -- cubemastercli --help
+kubectl exec -n cube-system deploy/cube-cubemastercli -- \
   sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
-kubectl exec -n cube-system cloneset/cube-cubemastercli -- \
+kubectl exec -n cube-system deploy/cube-cubemastercli -- \
   sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" template list'
 ```
 
@@ -316,7 +336,7 @@ carry this operational entry point.
 
 ## Cube Proxy Node
 
-`cube-proxy` is a Cube data-plane component. It is enabled by default to match one-click behavior and is installed, upgraded, and uninstalled with the Cube release as a control-plane CloneSet.
+`cube-proxy` is a Cube data-plane component. It is enabled by default to match one-click behavior and is installed, upgraded, and uninstalled with the Cube release as a control-plane Deployment.
 
 The default TLS mode is `selfSigned`, matching the one-click mkcert-style test experience. Production environments should provide a real TLS certificate for CubeProxy. External clients reach `cubeProxy.domain` / `*.domain` through the chart Ingress (SSL passthrough; TLS still terminates in CubeProxy). The image reuses `CubeProxy/Dockerfile`; the chart does not override nginx with a Kubernetes-only configuration.
 
@@ -464,7 +484,7 @@ kubectl get configmap -n cube-system cube-diagnostics -o jsonpath='{.data.cube-d
 sh /tmp/cube-diag-k8s.sh cube-system cube
 ```
 
-The script collects Pods, Advanced DaemonSets, CloneSets, StatefulSets, Services, Endpoints, Events, Helm values/manifests, Pod descriptions, and recent logs for Cube components into a timestamped directory.
+The script collects Pods, DaemonSets, Deployments, StatefulSets, Services, Endpoints, Events, Helm values/manifests, Pod descriptions, and recent logs for Cube components into a timestamped directory.
 
 ## CubeEgress
 
@@ -506,32 +526,30 @@ helm template cube ./deploy/kubernetes/chart -n cube-system > /tmp/cube-rendered
 
 ```bash
 kubectl get pods -n cube-system -o wide
-kubectl get ads -n cube-system cube-node
+kubectl get daemonset -n cube-system cube-node
 kubectl get daemonset -n cube-system cube-node-pvm
-kubectl get cloneset -n cube-system cube-proxy
+kubectl get deploy -n cube-system cube-proxy
 kubectl get sts -n cube-system cube-mysql cube-redis
 kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node-pvm -c pvm-host-bootstrap --tail=100
 kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node-bootstrap -c wait-pvm-host --tail=100
 kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node-bootstrap -c cube-node-init --tail=100
 kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node -c cubelet --tail=100
 kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node -c wait-node-prep --tail=50
-kubectl logs -n cube-system cloneset/cube-master -c cube-master --tail=100
-kubectl exec -n cube-system cloneset/cube-cubemastercli -- \
+kubectl logs -n cube-system deploy/cube-master -c cube-master --tail=100
+kubectl exec -n cube-system deploy/cube-cubemastercli -- \
   sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
 helm test cube -n cube-system --timeout 20m
 ```
 
 ## Upgrade policy
 
-`cube-node` always uses **OpenKruise Advanced DaemonSet** with
-`rollingUpdateType: InPlaceIfPossible` so bumping Big Pod runtime images
-(`images.cubelet`, `images.networkAgent`, `images.waitNodePrep`, slot images, …)
-or slot service annotations keeps Pod UID/IP/netns. **First introducing
-`cube-slot-1`…`6` recreates Big Pods once** (adding containers is not InPlace).
-Artifact images bump only `cube-node-installer`; node-init images bump
-`cube-node-bootstrap`; PVM host image bumps only `cube-node-pvm`. See
-`docs/UPGRADE.md`. Cluster must have OpenKruise installed (see
-`docs/QUICKSTART.md` §1.4).
+`cube-node` is a native `apps/v1` DaemonSet. Bumping Big Pod runtime images
+(`images.cubelet`, `images.networkAgent`, `images.waitNodePrep`, …)
+or changing the Pod template **recreates** the Big Pod (Pod UID/IP/netns change)
+and **interrupts sandboxes on that node**. Artifact images bump only
+`cube-node-installer`; node-init images bump `cube-node-bootstrap`; PVM host
+image bumps only `cube-node-pvm`. See
+[Upgrade](https://cubesandbox.com/guide/kubernetes/upgrade).
 
 Set `cubeNode.updateStrategy.type: OnDelete` for fully manual
 per-node upgrades.
@@ -547,7 +565,7 @@ Prepare a separate host-kernel rollback runbook for production.
 
 - operator-provided node labels/taints;
 - external MySQL/Redis resources;
-- hostPath data such as `/data/CubeMaster/storage`, `/data/cubelet`, `/data/cube-shim`, `/data/snapshot_pack`, and logs;
+- hostPath data such as `/data/CubeMaster/storage`, `/data/cubelet`, `/data/cube-shim`, `/data/cube-shared`, `/data/shared`, `/data/snapshot_pack`, and logs;
 - host kernel, GRUB, udev, fstab, or XFS changes made by bootstrap containers;
 - external DNS or load balancer records.
 

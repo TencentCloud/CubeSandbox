@@ -69,6 +69,7 @@ func (p *Plugin) Attach(ctx context.Context, req *volume.AttachRequest) (*volume
 		VolumeId:      req.VolumeID,
 		RefCount:      req.RefCount,
 		VolumeBaseDir: req.VolumeBaseDir,
+		PrivateData:   req.PrivateData,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("rpc volume plugin %q attach: %w", p.name, err)

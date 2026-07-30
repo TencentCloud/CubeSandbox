@@ -11,7 +11,11 @@ CODE_INTERPRETER = "code_interpreter"
 PAUSE_RESUME = "pause_resume"
 NETWORK_ALLOW_DENY = "network_allow_deny"
 NETWORK_PUBLIC_ACCESS = "network_public_access"
+NETWORK_MASK_REQUEST_HOST = "network_mask_request_host"
 PLATFORM_LIFECYCLE = "platform_lifecycle"
+HOST_MOUNT = "host_mount"
+VOLUME_PLUGIN = "volume_plugin"
+AUTH_SIMPLE_KEY = "auth_simple_key"
 
 COMMON_CAPABILITIES = frozenset({LIFECYCLE, COMMANDS, FILESYSTEM, RUN_CODE})
 
@@ -22,6 +26,7 @@ E2B_CAPABILITIES = frozenset(
         PAUSE_RESUME,
         NETWORK_ALLOW_DENY,
         NETWORK_PUBLIC_ACCESS,
+        NETWORK_MASK_REQUEST_HOST,
     }
 )
 
@@ -32,6 +37,23 @@ CUBESANDBOX_CAPABILITIES = frozenset(
         PAUSE_RESUME,
         NETWORK_ALLOW_DENY,
         NETWORK_PUBLIC_ACCESS,
+        NETWORK_MASK_REQUEST_HOST,
         PLATFORM_LIFECYCLE,
+        HOST_MOUNT,
+        VOLUME_PLUGIN,
+        AUTH_SIMPLE_KEY,
     }
 )
+
+# Canonical backend -> capability-set map. Single source of truth for the
+# sdk_sandbox fixture gate and helpers that drive create_adapter directly
+# (framework.host_mount / cases/volume). Unknown backends resolve to empty.
+BACKEND_CAPABILITIES = {
+    "cubesandbox": CUBESANDBOX_CAPABILITIES,
+    "e2b": E2B_CAPABILITIES,
+}
+
+
+def capabilities_for_backend(backend: str) -> frozenset[str]:
+    """Return the capability set a backend supports (empty for unknown)."""
+    return BACKEND_CAPABILITIES.get(backend, frozenset())

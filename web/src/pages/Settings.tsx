@@ -4,7 +4,7 @@
 import { useTranslation } from 'react-i18next';
 import { useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useRuntimeConfig } from '@/hooks/useRuntimeConfig';
 import {
   Palette,
@@ -256,6 +256,7 @@ function ClusterSection() {
 function AccountSection() {
   const { t } = useTranslation('auth');
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const username = getSessionUser() || 'admin';
   const [oldPassword, setOldPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -270,6 +271,7 @@ function AccountSection() {
       // ignore network errors on logout
     }
     clearSession();
+    queryClient.clear();
     navigate('/login', { replace: true });
   };
 
@@ -287,10 +289,14 @@ function AccountSection() {
     setSubmitting(true);
     try {
       await authApi.changePassword({ username, oldPassword, newPassword });
-      setMsg({ ok: true, text: t('changePassword.success') });
-      setOldPassword('');
-      setNewPassword('');
-      setConfirm('');
+      // Password changes revoke all existing refresh tokens on the server.
+      // Force a fresh login instead of leaving an unusable session in place.
+      clearSession();
+      queryClient.clear();
+      navigate('/login', {
+        replace: true,
+        state: { from: '/settings?tab=account' },
+      });
     } catch (err) {
       const text =
         err instanceof ApiError && err.status === 401

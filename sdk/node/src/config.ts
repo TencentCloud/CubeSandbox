@@ -65,7 +65,7 @@ function normalizeProxyScheme(scheme: string | undefined, port: number): string 
   return port === 443 ? "https" : "http";
 }
 
-/** Default sandbox TTL in seconds, shared by {@link Config} and ``resume``. */
+/** Default sandbox TTL in seconds retained on {@link Config}. */
 export const DEFAULT_SANDBOX_TIMEOUT_S = 300;
 
 export class Config {

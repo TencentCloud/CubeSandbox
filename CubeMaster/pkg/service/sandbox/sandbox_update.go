@@ -93,5 +93,11 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 	}
 	rsp.Ret.RetCode = int(cubeRsp.GetRet().GetRetCode())
 	rsp.Ret.RetMsg = cubeRsp.GetRet().GetRetMsg()
+	if rsp.Ret.RetCode == int(errorcode.ErrorCode_Success) {
+		// Only on genuine success — IsAlreadyInState / NotFound are handled
+		// upstream by CLM's own reconciliation and would send misleading
+		// state signals through the lifecycle channel.
+		runAfterUpdateSandboxSuccessHook(ctx, req.SandboxID, req.InstanceType, req.Action, req.RequestID)
+	}
 	return
 }

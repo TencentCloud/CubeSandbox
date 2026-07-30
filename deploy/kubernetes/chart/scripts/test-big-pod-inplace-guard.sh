@@ -21,6 +21,7 @@ extract_big_pod() {
   output="$2"
   python3 - "$input" "$output" <<'PY'
 import pathlib
+import re
 import sys
 
 documents = pathlib.Path(sys.argv[1]).read_text().split("\n---\n")
@@ -28,10 +29,10 @@ matches = [
     doc for doc in documents
     if "\nkind: DaemonSet\n" in f"\n{doc}\n"
     and "\n    app.kubernetes.io/component: cube-node\n" in f"\n{doc}\n"
-    and "rollingUpdateType: InPlaceIfPossible" in doc
+    and re.search(r"(?m)^apiVersion:\s*apps/v1\s*$", doc)
 ]
 if len(matches) != 1:
-    raise SystemExit(f"expected one cube-node Advanced DaemonSet, found {len(matches)}")
+    raise SystemExit(f"expected one cube-node DaemonSet, found {len(matches)}")
 pathlib.Path(sys.argv[2]).write_text(matches[0].strip() + "\n")
 PY
 }
@@ -58,12 +59,9 @@ for line in lines:
             continue
     if stripped.startswith("image:"):
         continue
-    # Container resources are explicitly allowed. Only release-managed slot
-    # annotations are allowed; checksum/arbitrary pod annotations stay frozen.
+    # Container resources are allowed to change without failing the guard.
     if stripped == "resources:":
         skip_indent = indent
-        continue
-    if stripped.startswith("cube.tencent.com/slot-"):
         continue
     normalized.append(line)
 pathlib.Path(sys.argv[2]).write_text("\n".join(normalized) + "\n")
@@ -112,4 +110,4 @@ assert_recreate_change_detected network \
   --set-string cubeNode.network.ethName=eth9
 assert_recreate_change_detected egress \
   --set cubeEgress.enabled=false
-echo "Big Pod InPlace guard passed"
+echo "Big Pod template stability guard passed"

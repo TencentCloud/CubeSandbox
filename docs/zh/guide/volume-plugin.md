@@ -17,6 +17,7 @@ CubeSandbox 正在逐步兼容 e2b Volume，为沙箱提供跨生命周期的持
 > | SDK `Volume.create` / `connect` / `list` / `get_info` / `destroy` | ✅ 已支持（SDK ≥ 0.6.0） |
 > | SDK `Sandbox.create(volume_mounts={path: volume})` | ✅ 已支持（e2b dict 映射） |
 > | 同一 Volume 被多个沙箱同时挂载 | ✅ 已支持 |
+> | 按沙箱只读挂载 | ✅ Cube SDK 扩展（`VolumeMount(..., read_only=True)`）；官方 e2b SDK 自身没有只读挂载选项 |
 > | 创建时省略 `driver`（e2b 默认行为） | ✅ 已支持 |
 
 > **e2b API 与 SDK**
@@ -172,6 +173,7 @@ flowchart LR
 | 输入 | `volumeID` | string | 稳定 ID（UUID 或与 `name` 相同） |
 | 输入 | `name` | string | 展示名 |
 | 输出 | `token` | string | 可选鉴权令牌，返回给 SDK |
+| 输出 | `private_data` | string | 插件私有状态（最长 **1024** 字节）。写入 `t_cube_volume`，沙箱创建绑定时转发给 **Attach**。**不**对 API/SDK 暴露。可为空。 |
 | 输出 | `error` | string | 成功为 `""`（仅 binary stdout JSON） |
 
 **binary 示例**
@@ -185,7 +187,7 @@ flowchart LR
 输出（stdout JSON，exit 0）：
 
 ```json
-{"token":"","error":""}
+{"token":"","private_data":"","error":""}
 ```
 
 #### Destroy
@@ -220,13 +222,14 @@ flowchart LR
 | 输入 | `volumeID` | string | 与 `volumeMounts[].name` 相同 |
 | 输入 | `refCount` | int64 | **本 node 挂载前**沙箱数；`0` = 本 node 首次 |
 | 输入 | `volumeBaseDir` | string | 父目录；`hostPath` **必须**在其内 |
+| 输入 | `private_data` | string | Create 返回并落库的同一私有状态；可为空。binary：可选 `--private-data`（为空时不传） |
 | 输出 | `hostPath` | string | Cubelet mntns 内路径，供 virtiofs bind |
 | 输出 | `metadata` | map[string]string | opaque 状态；Detach 原样回传 |
 | 输出 | `error` | string | 成功为 `""`（仅 binary stdout JSON） |
 
 - `refCount == 0`：**本 node 首次挂载** — 执行后端挂载。
 - `refCount > 0`：**本 node 已有沙箱引用该 Volume** — 返回已有 `hostPath`（及 `metadata`），不要再次挂载。
-- **`hostPath`：** 位于 `volumeBaseDir` 下的绝对路径（推荐 `<volumeBaseDir>/<插件名>-<volumeID>`）。否则 Cubelet 拒绝 attach、回滚并导致沙箱创建失败。默认 `volumeBaseDir`：`/data/volume`。
+- **`hostPath`：** 位于 `volumeBaseDir` 下的绝对路径（推荐 `<volumeBaseDir>/<插件名>-<volumeID>`）。否则 Cubelet 拒绝 attach、回滚并导致沙箱创建失败。默认 `volumeBaseDir`：`/data/cube-shared/volume`。
 
 **binary 示例**
 
@@ -236,13 +239,15 @@ flowchart LR
 /path/to/my-plugin --op attach \
   --sandbox-id sb-001 --namespace default \
   --volume-id my-vol --ref-count 0 \
-  --volume-base-dir /data/volume
+  --volume-base-dir /data/cube-shared/volume
+# Create 返回非空 private_data 时可选附加：
+#   --private-data 'volumes/my-vol/'
 ```
 
 输出（stdout JSON，exit 0）：
 
 ```json
-{"host_path":"/data/volume/my-storage-my-vol","metadata":{"mount_dir":"/data/volume/my-storage-my-vol"},"error":""}
+{"host_path":"/data/cube-shared/volume/my-storage-my-vol","metadata":{"mount_dir":"/data/cube-shared/volume/my-storage-my-vol"},"error":""}
 ```
 
 #### Detach
@@ -267,7 +272,7 @@ flowchart LR
 /path/to/my-plugin --op detach \
   --sandbox-id sb-001 --namespace default \
   --volume-id my-vol --ref-count 0 \
-  --metadata '{"mount_dir":"/data/volume/my-storage-my-vol"}'
+  --metadata '{"mount_dir":"/data/cube-shared/volume/my-storage-my-vol"}'
 ```
 
 输出（stdout JSON，exit 0）：
@@ -320,7 +325,7 @@ sequenceDiagram
     U->>API: POST /volumes {name, driver}
     API->>M: POST /cube/volume
     M->>P: Create(volumeID, name)
-    P-->>M: stdout JSON {"token":"...","error":""}
+    P-->>M: stdout JSON {"token":"...","private_data":"...","error":""}
     M->>M: 写入 t_cube_volume
     M-->>U: {volumeID, name, token}
 
@@ -366,6 +371,7 @@ sequenceDiagram
 | 官方 e2b Python SDK | ❌ 否 | 硬编码 e2b.cloud 后端；**勿**用于 CubeSandbox |
 | `cubesandbox` Python SDK | ✅ 是 | `Volume`、`Sandbox.create(volume_mounts={path: volume})`（e2b dict） |
 | 创建时省略 `driver` | ✅ 是 | CubeMaster 取 `volume_plugins` **列表第一项** |
+| 按沙箱只读挂载 | ❌ 否 | 官方 e2b SDK 自身没有只读 Volume 挂载选项；Cube SDK 增加 `VolumeMount(volume, read_only=True)` 扩展 |
 
 完整 COS 插件体验见 [`examples/volume/cos/README.zh.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.zh.md)。
 
@@ -433,9 +439,33 @@ Volume.destroy(vol.volume_id)  # 返回 True；卷不存在时返回 False（幂
 | `Volume.destroy(volume_id)` | e2b 兼容删除；成功返回 `True`，404 返回 `False`（幂等） |
 | `Volume.delete(...)` | `destroy` 的兼容别名（旧代码可用，推荐 `destroy`） |
 | `driver` | 可选；插件名；**e2b 兼容用法下省略**——SDK 不发送该字段，CubeMaster 取 `volume_plugins` **列表第一项** |
-| `volume_mounts` | e2b dict `{挂载路径: Volume \| volume_id \| name}` — key 为沙箱内路径，value 为 `Volume` 实例或 volume ID 字符串 |
+| `volume_mounts` | e2b dict `{挂载路径: Volume \| volume_id \| name}` — key 为沙箱内路径，value 为 `Volume` 实例或 volume ID 字符串；Cube SDK 还可将 value 包装为 `VolumeMount(..., read_only=True)` 以启用只读挂载 |
 
 `driver` 写入 `t_cube_volume`，沙箱创建时经 annotation 传给 Cubelet——CubeMaster 与 Cubelet 两侧 `volume_plugins[].name` 须与之一致。
+
+### 按沙箱选择访问模式
+
+e2b 兼容的 mapping 仍是默认写法，并创建读写挂载。CubeSandbox 在 mapping 的 value 上增加了 `VolumeMount`，因此同一个持久 Volume 可以由不同沙箱分别选择读写或只读：
+
+```python
+from cubesandbox import Sandbox, Volume, VolumeMount
+
+dataset = Volume.create("shared-dataset")
+
+# 该沙箱可以更新 Volume。
+writer = Sandbox.create(
+    volume_mounts={"/dataset": dataset},
+)
+
+# 同一个 Volume 在该沙箱中禁止修改。
+reader = Sandbox.create(
+    volume_mounts={"/dataset": VolumeMount(dataset, read_only=True)},
+)
+```
+
+官方 e2b SDK 的 Volume 挂载接口自身没有只读选项，这不是 CubeSandbox 的兼容性限制。Cube SDK 和 REST 客户端可以显式使用 Cube 扩展 `volumeMounts[].readOnly: true`，原有 e2b 形式的请求不发送 `readOnly`，继续保持读写。
+
+只读是**单次沙箱挂载属性**，不是 Volume 自身的全局属性。reader 不能通过该挂载创建、修改、重命名或删除文件，但仍可能看到其他读写挂载产生的变化，因此它不是不可变快照。当前一个沙箱内仍只能挂载同一个 Volume 一次；同一沙箱重复挂载同一个 Volume 会继续被拒绝。
 
 ### 多沙箱共用同一 Volume
 
@@ -505,7 +535,7 @@ volume_plugins:
 
 **`driver` 名须全链路一致：** `Volume.create(..., driver=...)`（省略则取列表第一项）→ 写入 DB → annotation → Cubelet 按同名路由。CubeMaster 与 Cubelet 的 **`volume_plugins[].name` 必须一致**。
 
-**`volume_plugin_base_dir`：** 所有插件返回的 `host_path` **必须**落在该目录内（未配置时默认 `/data/volume`）。Cubelet 经 `volumeBaseDir`（rpc）/ `--volume-base-dir`（binary）传给插件；`host_path` 越界则 attach 被拒绝并回滚。
+**`volume_plugin_base_dir`：** 所有插件返回的 `host_path` **必须**落在该目录内（未配置时默认 `/data/cube-shared/volume`）。Cubelet 经 `volumeBaseDir`（rpc）/ `--volume-base-dir`（binary）传给插件；`host_path` 越界则 attach 被拒绝并回滚。
 
 **`name` 必须唯一**：同一进程内不能有两条相同 `name` 的 `volume_plugins`。列表顺序决定省略 `driver` 时的默认插件。
 
@@ -590,7 +620,7 @@ nsenter -t "$CPID" -m -- mount | grep -E 'volume|fuse'
 /path/to/my-plugin \
   --op attach --sandbox-id sb-001 --namespace default \
   --volume-id test-vol --ref-count 0 \
-  --volume-base-dir /data/volume
+  --volume-base-dir /data/cube-shared/volume
 ```
 
 COS 插件的手动测试命令见 [`examples/volume/cos/README.zh.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.zh.md)。
@@ -604,6 +634,18 @@ COS 插件的手动测试命令见 [`examples/volume/cos/README.zh.md`](https://
 | `volume not found` | 沙箱 `volumeMounts[].name` 与已有 `volume_id` 不匹配 | 使用 `Volume.create` 返回的 `volume_id`，或在 `volume_mounts` 中直接传 `Volume` 实例 |
 | FUSE 挂载成功但沙箱内看不到 | 挂载在宿主机 mntns 而非 Cubelet mntns | 确保插件由 Cubelet fork，不要手动在宿主机 mount |
 | attach 成功但 detach 泄漏 | `ref_count > 0` 时误卸载了共享 FUSE | 检查 detach 逻辑是否遵守 RefCount 语义 |
+
+## 兼容性说明
+
+Volume 依赖 CubeMaster 与 Cubelet **双侧**均升级到支持 Volume 插件的版本。滚动升级期间：
+
+| CubeMaster | Cubelet | Volume 创建 / 删除 | 沙箱 `volumeMounts` |
+|---|---|---|---|
+| 新 | 新 | 可用 | 可用 |
+| 新 | 旧（如 v0.5.x） | 可用 | 不生效（创建不因此失败，但不会挂载） |
+| 旧（如 v0.5.x） | 新 / 旧 | 不可用 | 不可用；勿传 `volumeMounts`，普通创建不受影响 |
+
+混合版本时勿假设旧节点已挂载成功；需要挂载效果时，请确认调度到的 Cubelet 已升级。
 
 ---
 

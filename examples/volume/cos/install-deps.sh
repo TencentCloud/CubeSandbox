@@ -1,33 +1,45 @@
 #!/usr/bin/env bash
 # Install Tencent Cloud COS dependencies for CubeSandbox volume plugins.
 #
-# Where to run (multi-node clusters):
-#   cosfs  → Cubelet node(s)     attach/detach   binary + rpc
-#   coscmd → CubeMaster node      create/destroy  binary only
-#   jq     → CubeMaster node      binary JSON     binary only
+# Packaged under CubeMaster/plugin/ and Cubelet/plugin/ in release bundles.
+# Source: examples/volume/cos/install-deps.sh
+#
+# Where to run (multi-node):
+#   cosfs  → Cubelet                attach/detach   binary + rpc
+#   coscmd → CubeMaster             create/destroy  binary only
+#   jq     → CubeMaster + Cubelet   binary JSON     binary only
 #
 # Usage:
-#   ./install-deps.sh --all              # cosfs + coscmd + jq (typical binary demo)
-#   ./install-deps.sh --cosfs            # Cubelet / attach side only
-#   ./install-deps.sh --coscmd           # CubeMaster / create side only (binary plugin)
-#   ./install-deps.sh --jq               # required by binary shell plugin
-#   ./install-deps.sh --all --check-only # verify already-installed tools only
+#   sudo .../Cubelet/plugin/install-deps.sh --cosfs --jq
+#   sudo .../CubeMaster/plugin/install-deps.sh --coscmd --jq
+#   sudo .../Cubelet/plugin/install-deps.sh --all           # single-node
+#   ./install-deps.sh --all --check-only
+#
+# ARM/aarch64 is not supported (--cosfs refuses); official cosfs is x86_64/amd64 only.
 #
 # Supported families (auto-detected via /etc/os-release):
 #   RHEL/CentOS/TencentOS/Rocky/Alma 7/8/9  — cosfs RPM + yum/dnf
 #   Ubuntu 14.04–24.04                      — cosfs .deb + apt
 #   Debian                                  — cosfs .deb (ubuntu22.04 build) + apt
 #
-# Official docs (latest packages / manual install):
-#   cosfs:  https://cloud.tencent.com/document/product/436/10976
-#   coscmd: https://cloud.tencent.com/document/product/436/6883
+# EL OpenSSL note:
+#   Official cosfs RPMs link older OpenSSL sonames. On EL8+/TencentOS 4 (OpenSSL 3)
+#   install the matching compat package for the RPM we ship — do NOT blindly
+#   install compat-openssl* on every distro (apt has no such packages).
+#   centos7 RPM → libcrypto.so.10 → compat-openssl10
+#   centos8 RPM → libcrypto.so.1.1 → compat-openssl11
+#   Prefer PLATFORM_ID over VERSION_ID when present:
+#     platform:elN  → treat as EL N (e.g. el9)
+#     platform:tlN  → TencentOS Server N (e.g. tl4); treat as modern EL8+ cosfs
 #
-# RPC plugin Controller uses COS Go SDK (go mod); no coscmd — see cos/rpc/README.md
+# Official docs:
+#   cosfs:  https://cloud.tencent.com/document/product/436/6883
+#   coscmd: https://cloud.tencent.com/document/product/436/10976
 
 set -euo pipefail
 
-COSFS_DOC="https://cloud.tencent.com/document/product/436/10976"
-COSCMD_DOC="https://cloud.tencent.com/document/product/436/6883"
+COSFS_DOC="https://cloud.tencent.com/document/product/436/6883"
+COSCMD_DOC="https://cloud.tencent.com/document/product/436/10976"
 COSFS_RELEASE="v1.0.25"
 COSFS_BASE_URL="https://github.com/tencentyun/cosfs/releases/download/${COSFS_RELEASE}"
 
@@ -35,9 +47,11 @@ INSTALL_COSFS=0
 INSTALL_COSCMD=0
 INSTALL_JQ=0
 CHECK_ONLY=0
+# el7 | el8 — which official cosfs RPM flavor we install (EL family only).
+COSFS_EL_FLAVOR=""
 
 usage() {
-  sed -n '2,20p' "$0"
+  sed -n '2,24p' "$0"
   exit "${1:-0}"
 }
 
@@ -75,11 +89,13 @@ need_root() {
 detect_os() {
   OS_ID="unknown"
   OS_VERSION=""
+  local platform_id=""
   if [[ -f /etc/os-release ]]; then
     # shellcheck disable=SC1091
     . /etc/os-release
     OS_ID="${ID:-unknown}"
     OS_VERSION="${VERSION_ID:-}"
+    platform_id="${PLATFORM_ID:-}"
     case "${ID_LIKE:-}" in
       *rhel*|*fedora*) [[ "$OS_ID" == "unknown" ]] && OS_ID="rhel" ;;
       *debian*) [[ "$OS_ID" == "ubuntu" ]] || OS_ID="${ID:-debian}" ;;
@@ -97,6 +113,16 @@ detect_os() {
     centos|rhel|rocky|almalinux|tencentos|tlinux|opencloudos|anolis)
       OS_FAMILY="el"
       OS_VERSION="${OS_VERSION%%.*}"
+      # Prefer PLATFORM_ID over VERSION_ID:
+      #   platform:el9 → 9; platform:tl4 (TencentOS Server 4) → modern → 8
+      # Plain VERSION_ID=4 would incorrectly select the centos7 cosfs RPM.
+      if [[ "$platform_id" =~ ^platform:el([0-9]+)$ ]]; then
+        OS_VERSION="${BASH_REMATCH[1]}"
+        log "using PLATFORM_ID=${platform_id} → el${OS_VERSION}"
+      elif [[ "$platform_id" =~ ^platform:tl([0-9]+)$ ]]; then
+        OS_VERSION="8"
+        log "using PLATFORM_ID=${platform_id} → el8 cosfs (TencentOS Server)"
+      fi
       [[ -z "$OS_VERSION" ]] && OS_VERSION="8"
       if command -v dnf >/dev/null 2>&1; then
         PKG_MGR="dnf"
@@ -121,6 +147,11 @@ detect_os() {
       elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
         OS_FAMILY="el"
         OS_VERSION="${OS_VERSION:-8}"
+        if [[ "$platform_id" =~ ^platform:el([0-9]+)$ ]]; then
+          OS_VERSION="${BASH_REMATCH[1]}"
+        elif [[ "$platform_id" =~ ^platform:tl([0-9]+)$ ]]; then
+          OS_VERSION="8"
+        fi
         PKG_MGR="$(command -v dnf >/dev/null 2>&1 && echo dnf || echo yum)"
       else
         OS_FAMILY="unknown"
@@ -148,13 +179,64 @@ pkg_install() {
   esac
 }
 
-cosfs_rpm_url() {
+cosfs_el_flavor() {
+  # Returns el7 or el8 — which upstream cosfs RPM to use.
   local major="${OS_VERSION:-8}"
   if [[ "$major" -le 7 ]]; then
+    echo "el7"
+  else
+    echo "el8"
+  fi
+}
+
+cosfs_rpm_url() {
+  # Caller must set COSFS_EL_FLAVOR in the current shell first (not inside $()
+  # subshell, or the assignment would be lost).
+  if [[ -z "${COSFS_EL_FLAVOR}" ]]; then
+    COSFS_EL_FLAVOR="$(cosfs_el_flavor)"
+  fi
+  if [[ "$COSFS_EL_FLAVOR" == "el7" ]]; then
     echo "${COSFS_BASE_URL}/cosfs-1.0.25-centos7.0.x86_64.rpm"
   else
     echo "${COSFS_BASE_URL}/cosfs-1.0.25-centos8.0.x86_64.rpm"
   fi
+}
+
+# Install OpenSSL compat libs required by the chosen cosfs RPM (EL / yum|dnf only).
+# Best-effort: missing package is OK on images that already ship the soname.
+install_cosfs_openssl_compat() {
+  local flavor="${1:-${COSFS_EL_FLAVOR:-$(cosfs_el_flavor)}}"
+  local pkg
+  case "$flavor" in
+    el7) pkg="compat-openssl10" ;; # libcrypto.so.10
+    *)   pkg="compat-openssl11" ;; # libcrypto.so.1.1
+  esac
+  log "ensuring OpenSSL compat for cosfs (${flavor} → ${pkg})"
+  if pkg_install "$pkg" 2>/dev/null; then
+    log "installed ${pkg}"
+  else
+    warn "${pkg} not available via ${PKG_MGR} (may be ok if soname already present)"
+  fi
+}
+
+# If cosfs fails to start due to a missing libcrypto soname, try the matching
+# compat package once more (covers images where the first install was skipped).
+repair_cosfs_openssl_compat() {
+  local err="$1"
+  local pkg=""
+  if [[ "$err" == *libcrypto.so.10* ]]; then
+    pkg="compat-openssl10"
+    COSFS_EL_FLAVOR="el7"
+  elif [[ "$err" == *libcrypto.so.1.1* ]] || [[ "$err" == *libssl.so.1.1* ]]; then
+    pkg="compat-openssl11"
+    COSFS_EL_FLAVOR="el8"
+  else
+    return 1
+  fi
+  [[ "$OS_FAMILY" == "el" ]] || return 1
+  log "cosfs missing shared lib; trying ${pkg}"
+  pkg_install "$pkg" 2>/dev/null || return 1
+  return 0
 }
 
 cosfs_deb_url() {
@@ -185,15 +267,14 @@ cosfs_deb_url() {
 
 install_cosfs_el() {
   local url tmp rpm
+  COSFS_EL_FLAVOR="$(cosfs_el_flavor)"
   url="$(cosfs_rpm_url)"
   tmp="$(mktemp -d)"
   rpm="${tmp}/cosfs.rpm"
-  log "downloading cosfs RPM: ${url}"
+  log "downloading cosfs RPM (${COSFS_EL_FLAVOR}): ${url}"
   curl -fsSL "$url" -o "$rpm"
   pkg_install libxml2 fuse curl
-  if [[ "${OS_VERSION:-8}" -ge 8 ]]; then
-    pkg_install compat-openssl11 2>/dev/null || warn "compat-openssl11 not available (may be ok on this EL image)"
-  fi
+  install_cosfs_openssl_compat "$COSFS_EL_FLAVOR"
   rpm -ivh --nodeps "$rpm" 2>/dev/null || rpm -Uvh --nodeps "$rpm"
   rm -rf "$tmp"
 }
@@ -216,10 +297,19 @@ install_cosfs_deb() {
 }
 
 install_cosfs() {
+  local arch
   log "install cosfs (doc: ${COSFS_DOC})"
   if [[ "$CHECK_ONLY" -eq 1 ]]; then
     return 0
   fi
+  # Official cosfs packages are amd64/x86_64 only; skip on arm temporarily.
+  arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+  case "${arch}" in
+    arm64|aarch64)
+      warn "skip cosfs on ${arch}: no official arm64 package (temporary); see ${COSFS_DOC}"
+      return 0
+      ;;
+  esac
   need_root
   if command -v cosfs >/dev/null 2>&1; then
     log "cosfs already on PATH; skipping install"
@@ -276,11 +366,24 @@ check_cosfs() {
     fail "cosfs not found in PATH"
     return
   fi
-  local ver
-  if ! ver="$(cosfs --version 2>&1 | head -1)"; then
-    fail "cosfs --version failed"
+  local err ver
+  err="$(cosfs --version 2>&1)" && ver="$(printf '%s\n' "$err" | head -1)" || {
+    err="$(cosfs --version 2>&1 || true)"
+    if [[ "$CHECK_ONLY" -eq 0 ]] && repair_cosfs_openssl_compat "$err"; then
+      err="$(cosfs --version 2>&1)" && ver="$(printf '%s\n' "$err" | head -1)" || true
+    fi
+  }
+  if ! cosfs --version >/dev/null 2>&1; then
+    ver="$(printf '%s\n' "${err:-}" | head -1)"
+    fail "cosfs --version failed: ${ver}"
+    if [[ "$err" == *libcrypto.so.10* ]]; then
+      fail "missing libcrypto.so.10 — on EL/TencentOS try: ${PKG_MGR:-yum} install -y compat-openssl10"
+    elif [[ "$err" == *libcrypto.so.1.1* ]] || [[ "$err" == *libssl.so.1.1* ]]; then
+      fail "missing libcrypto.so.1.1 — on EL/TencentOS try: ${PKG_MGR:-yum} install -y compat-openssl11"
+    fi
     return
   fi
+  ver="$(cosfs --version 2>&1 | head -1)"
   log "  cosfs: OK (${ver})"
   if [[ -e /dev/fuse ]]; then
     log "  /dev/fuse: OK"
@@ -322,9 +425,27 @@ check_jq() {
   log "  jq: OK (${ver}, JSON parse ok)"
 }
 
+require_x86_64_for_cosfs() {
+  # Official cosfs releases publish only x86_64/amd64 packages; Node attach
+  # for the COS volume plugin depends on cosfs, so ARM hosts are unsupported.
+  local arch
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64|amd64) return 0 ;;
+    *)
+      echo "ERROR: cosfs (required for COS volume attach) does not support architecture ${arch}; official packages are x86_64/amd64 only. See ${COSFS_DOC}" >&2
+      exit 1
+      ;;
+  esac
+}
+
 # ── main ────────────────────────────────────────────────────────────────────
 
 detect_os
+
+if [[ "$INSTALL_COSFS" -eq 1 ]]; then
+  require_x86_64_for_cosfs
+fi
 
 if [[ "$CHECK_ONLY" -eq 0 ]]; then
   [[ "$INSTALL_COSFS"  -eq 1 ]] && install_cosfs

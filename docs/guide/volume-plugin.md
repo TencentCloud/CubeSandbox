@@ -17,6 +17,7 @@ CubeSandbox is gradually adopting e2b Volume compatibility to provide persistent
 > | SDK `Volume.create` / `connect` / `list` / `get_info` / `destroy` | ✅ Supported (SDK ≥ 0.6.0) |
 > | SDK `Sandbox.create(volume_mounts={path: volume})` | ✅ Supported (e2b dict mapping) |
 > | One volume mounted by multiple sandboxes | ✅ Supported |
+> | Per-sandbox read-only attachment | ✅ Cube SDK extension (`VolumeMount(..., read_only=True)`); the official e2b SDK itself has no read-only mount option |
 > | Omit `driver` on create (e2b default) | ✅ Supported |
 
 > **e2b API vs SDK**
@@ -172,6 +173,7 @@ Config field `type` selects the plugin type; **`name` (driver) must match end-to
 | Input | `volumeID` | string | Stable ID (UUID or same as `name`) |
 | Input | `name` | string | Display name |
 | Output | `token` | string | Optional auth token returned to SDK |
+| Output | `private_data` | string | Opaque plugin state (max **1024** bytes). Persisted in `t_cube_volume` and forwarded to **Attach** on sandbox create. **Not** returned to API/SDK clients. May be empty. |
 | Output | `error` | string | `""` on success (binary stdout JSON only) |
 
 **binary example**
@@ -185,7 +187,7 @@ Input (CLI):
 Output (stdout JSON, exit 0):
 
 ```json
-{"token":"","error":""}
+{"token":"","private_data":"","error":""}
 ```
 
 #### Destroy
@@ -220,13 +222,14 @@ Output (stdout JSON, exit 0):
 | Input | `volumeID` | string | Same as `volumeMounts[].name` |
 | Input | `refCount` | int64 | Sandbox count **on this node before** attach; `0` = first on this node |
 | Input | `volumeBaseDir` | string | Parent dir; `hostPath` **must** be inside it |
+| Input | `private_data` | string | Same opaque blob Create returned (from `t_cube_volume`); may be empty. binary: optional `--private-data` (omitted when empty) |
 | Output | `hostPath` | string | Path in Cubelet mntns for virtiofs bind |
 | Output | `metadata` | map[string]string | Opaque state; echoed back on Detach |
 | Output | `error` | string | `""` on success (binary stdout JSON only) |
 
 - `refCount == 0`: **first attach on this node** — perform backend mount.
 - `refCount > 0`: **another sandbox on this node** already references the volume — return existing `hostPath` (+ `metadata`); do not mount again.
-- **`hostPath`:** absolute path under `volumeBaseDir` (recommended `<volumeBaseDir>/<plugin-name>-<volumeID>`). Otherwise Cubelet rejects attach, rolls back, and fails sandbox create. Default `volumeBaseDir`: `/data/volume`.
+- **`hostPath`:** absolute path under `volumeBaseDir` (recommended `<volumeBaseDir>/<plugin-name>-<volumeID>`). Otherwise Cubelet rejects attach, rolls back, and fails sandbox create. Default `volumeBaseDir`: `/data/cube-shared/volume`.
 
 **binary example**
 
@@ -236,13 +239,15 @@ Input (CLI):
 /path/to/my-plugin --op attach \
   --sandbox-id sb-001 --namespace default \
   --volume-id my-vol --ref-count 0 \
-  --volume-base-dir /data/volume
+  --volume-base-dir /data/cube-shared/volume
+# optional when Create returned non-empty private_data:
+#   --private-data 'volumes/my-vol/'
 ```
 
 Output (stdout JSON, exit 0):
 
 ```json
-{"host_path":"/data/volume/my-storage-my-vol","metadata":{"mount_dir":"/data/volume/my-storage-my-vol"},"error":""}
+{"host_path":"/data/cube-shared/volume/my-storage-my-vol","metadata":{"mount_dir":"/data/cube-shared/volume/my-storage-my-vol"},"error":""}
 ```
 
 #### Detach
@@ -267,7 +272,7 @@ Input (CLI):
 /path/to/my-plugin --op detach \
   --sandbox-id sb-001 --namespace default \
   --volume-id my-vol --ref-count 0 \
-  --metadata '{"mount_dir":"/data/volume/my-storage-my-vol"}'
+  --metadata '{"mount_dir":"/data/cube-shared/volume/my-storage-my-vol"}'
 ```
 
 Output (stdout JSON, exit 0):
@@ -320,7 +325,7 @@ sequenceDiagram
     U->>API: POST /volumes {name, driver}
     API->>M: POST /cube/volume
     M->>P: Create(volumeID, name)
-    P-->>M: stdout JSON {"token":"...","error":""}
+    P-->>M: stdout JSON {"token":"...","private_data":"...","error":""}
     M->>M: write t_cube_volume
     M-->>U: {volumeID, name, token}
 
@@ -368,6 +373,7 @@ Examples below use **Python SDK `cubesandbox` ≥ 0.6.0**. CubeAPI exposes e2b-c
 | Official e2b Python SDK | ❌ No | Hardcoded to e2b.cloud; **do not use** with CubeSandbox |
 | `cubesandbox` Python SDK | ✅ Yes | `Volume`, `Sandbox.create(volume_mounts={path: volume})` (e2b dict) |
 | Omit `driver` on create | ✅ Yes | CubeMaster uses the **first** `volume_plugins` entry |
+| Per-sandbox read-only attachment | ❌ No | The official e2b SDK itself has no read-only Volume mount option; Cube SDK adds `VolumeMount(volume, read_only=True)` |
 
 For a full COS plugin walkthrough, see [`examples/volume/cos/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.md).
 
@@ -435,9 +441,33 @@ Volume.destroy(vol.volume_id)  # returns True; False when already gone (idempote
 | `Volume.destroy(volume_id)` | e2b-compatible delete; `True` on success, `False` on 404 (idempotent) |
 | `Volume.delete(...)` | Backward-compat alias for `destroy` (prefer `destroy`) |
 | `driver` | Optional plugin name; **e2b compatible usage omits it** — SDK sends no field, CubeMaster uses the **first** entry in `volume_plugins` |
-| `volume_mounts` | e2b dict `{mount_path: Volume \| volume_id \| name}` — key is path inside sandbox, value is a `Volume` instance or volume ID string |
+| `volume_mounts` | e2b dict `{mount_path: Volume \| volume_id \| name}` — key is path inside sandbox, value is a `Volume` instance or volume ID string; Cube SDK can additionally wrap the value with `VolumeMount(..., read_only=True)` for a read-only attachment |
 
 `driver` is stored in `t_cube_volume` and forwarded to Cubelet via annotations — `volume_plugins[].name` must match on both CubeMaster and Cubelet.
+
+### Per-sandbox access mode
+
+The e2b-compatible mapping remains the default and creates a read-write attachment. CubeSandbox extends the mapping value with `VolumeMount`, allowing each sandbox to choose its own access mode for the same persistent Volume:
+
+```python
+from cubesandbox import Sandbox, Volume, VolumeMount
+
+dataset = Volume.create("shared-dataset")
+
+# This sandbox may update the Volume.
+writer = Sandbox.create(
+    volume_mounts={"/dataset": dataset},
+)
+
+# The same Volume is protected from mutations in this sandbox.
+reader = Sandbox.create(
+    volume_mounts={"/dataset": VolumeMount(dataset, read_only=True)},
+)
+```
+
+The official e2b SDK's Volume mount API has no read-only option; this is not a CubeSandbox compatibility limitation. Cube SDK and REST clients can opt into the Cube extension `volumeMounts[].readOnly: true`, while existing e2b-shaped requests omit `readOnly` and keep their original read-write behavior.
+
+Read-only is an **attachment property**, not a property of the Volume itself. The reader cannot create, modify, rename, or delete files through its mount, but it can observe changes made through another read-write attachment. It is not an immutable snapshot. A sandbox may currently attach a given Volume only once; mounting the same Volume twice in one sandbox remains rejected.
 
 ### Multiple Sandboxes Sharing One Volume
 
@@ -507,7 +537,7 @@ volume_plugins:
 
 **`driver` name must be consistent end-to-end:** `Volume.create(..., driver=...)` (or first list entry when omitted) → DB → annotations → Cubelet routes by the same `name`. CubeMaster and Cubelet **`volume_plugins[].name` must match**.
 
-**`volume_plugin_base_dir`:** every plugin `host_path` **must** be under this directory (default `/data/volume` when unset). Cubelet passes it to plugins as `volumeBaseDir` (rpc) / `--volume-base-dir` (binary) and rejects attach if `host_path` is outside it.
+**`volume_plugin_base_dir`:** every plugin `host_path` **must** be under this directory (default `/data/cube-shared/volume` when unset). Cubelet passes it to plugins as `volumeBaseDir` (rpc) / `--volume-base-dir` (binary) and rejects attach if `host_path` is outside it.
 
 **`name` must be unique** within each process: no two `volume_plugins` entries with the same `name`. List order sets the default plugin when API/SDK omits `driver`.
 
@@ -592,7 +622,7 @@ Replace `/path/to/my-plugin` and `my-storage` with your plugin binary and config
 /path/to/my-plugin \
   --op attach --sandbox-id sb-001 --namespace default \
   --volume-id test-vol --ref-count 0 \
-  --volume-base-dir /data/volume
+  --volume-base-dir /data/cube-shared/volume
 ```
 
 For COS-specific manual tests, see [`examples/volume/cos/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.md).
@@ -606,6 +636,18 @@ For COS-specific manual tests, see [`examples/volume/cos/README.md`](https://git
 | `volume not found` | `volumeMounts[].name` ≠ existing `volume_id` | Use `volume_id` from `Volume.create` (or pass the `Volume` instance in `volume_mounts`) |
 | FUSE OK but invisible in sandbox | Mount in host mntns, not Cubelet mntns | Let Cubelet fork the plugin |
 | Detach leak after attach | Unmount shared FUSE when `ref_count > 0` | Follow RefCount semantics |
+
+## Compatibility Notes
+
+Volume requires **both** CubeMaster and Cubelet to be on a release that supports the Volume Plugin. During a rolling upgrade:
+
+| CubeMaster | Cubelet | Volume create / delete | Sandbox `volumeMounts` |
+|---|---|---|---|
+| New | New | Supported | Supported |
+| New | Old (e.g. v0.5.x) | Supported | No-op (create must not fail; the volume is not mounted) |
+| Old (e.g. v0.5.x) | New / old | Unsupported | Unsupported; do not send `volumeMounts` — plain create is unaffected |
+
+Do not assume mounts succeed on old nodes; schedule onto an upgraded Cubelet when you need mount behavior.
 
 ---
 

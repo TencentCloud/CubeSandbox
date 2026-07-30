@@ -42,6 +42,11 @@ const (
 	OpCreate = "create"
 	OpDelete = "delete"
 	OpUpdate = "update"
+	// OpState carries a runtime state transition (paused / running) emitted
+	// by CubeMaster after a successful pause / resume RPC. The payload is a
+	// StatePayload. See CubeMaster/pkg/lifecycle/schema.go for the canonical
+	// definition; the CLM consumes these events in statesync.Handle.
+	OpState = "state"
 )
 
 // Stream entry field names.
@@ -71,4 +76,26 @@ type SandboxLifecycleMeta struct {
 // pointer field. Prefer it over inline &v so intent reads clearly.
 func TimeoutSecondsPtr(v int) *int {
 	return &v
+}
+
+// State values carried by StatePayload.State. Only terminal states are
+// broadcast on the stream — transition markers ("pausing", "resuming")
+// stay private to the CLM's state-key coordination logic.
+const (
+	StatePaused  = "paused"
+	StateRunning = "running"
+)
+
+// Actor values distinguishing who initiated the state change.
+const (
+	ActorCubeMaster = "cubemaster"
+	ActorCLM        = "clm"
+)
+
+// StatePayload mirrors CubeMaster/pkg/lifecycle.StatePayload. Whenever you
+// change one side, change the other in the same commit.
+type StatePayload struct {
+	State  string `json:"state"`
+	Actor  string `json:"actor,omitempty"`
+	Source string `json:"source,omitempty"`
 }

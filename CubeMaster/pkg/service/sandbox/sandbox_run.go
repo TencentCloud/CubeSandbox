@@ -41,6 +41,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
+var setSandboxProxyMapFn = localcache.SetSandboxProxyMap
+
 type createSandboxContext struct {
 	selctx           *selctx.SelectorCtx
 	directHost       bool
@@ -573,10 +575,17 @@ func (c *createSandboxContext) setProxyToRedis() error {
 		// pre-feature behavior intact. Only an explicit false unlocks the
 		// per-sandbox token flow.
 		allowPublic := true
-		if origReq := createOriginRequestFromContext(c.ctx); origReq != nil &&
+		origReq := createOriginRequestFromContext(c.ctx)
+		if origReq != nil &&
 			origReq.CubeNetworkConfig != nil &&
 			origReq.CubeNetworkConfig.AllowPublicTraffic != nil {
 			allowPublic = *origReq.CubeNetworkConfig.AllowPublicTraffic
+		}
+		maskRequestHost := ""
+		if origReq != nil &&
+			origReq.CubeNetworkConfig != nil &&
+			origReq.CubeNetworkConfig.MaskRequestHost != nil {
+			maskRequestHost = *origReq.CubeNetworkConfig.MaskRequestHost
 		}
 		var token string
 		if !allowPublic {
@@ -592,13 +601,14 @@ func (c *createSandboxContext) setProxyToRedis() error {
 			CreatedAt:          strconv.FormatInt(time.Now().UnixNano(), 10),
 			AllowPublicTraffic: allowPublic,
 			TrafficAccessToken: token,
+			MaskRequestHost:    maskRequestHost,
 		}
 
 		if config.GetConfig().CubeletConf.EnableExposedPort {
 			proxy.ContainerToHostPorts = c.cubeletRspPorts
 		}
 
-		if err := localcache.SetSandboxProxyMap(c.ctx, proxy); err != nil {
+		if err := setSandboxProxyMapFn(c.ctx, proxy); err != nil {
 			return err
 		}
 		// Surface the token to the master response only after the proxy

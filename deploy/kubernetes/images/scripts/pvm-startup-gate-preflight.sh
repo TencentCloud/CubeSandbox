@@ -55,36 +55,12 @@ while [ -n "$(kubectl -n "$POD_NAMESPACE" get pods \
   sleep 2
 done
 
-kubectl get --raw=/apis/apps.kruise.io/v1beta1 >/dev/null \
-  || fail "OpenKruise Advanced DaemonSet API is unavailable"
-kubectl get --raw=/apis/apps.kruise.io/v1alpha1 >/dev/null \
-  || fail "OpenKruise CloneSet API is unavailable"
-
 tolerates_gate() {
   awk -F'|' -v key="$TAINT_KEY" '
     ($2 == "Exists") && ($1 == "" || $1 == key) && ($3 == "" || $3 == "NoSchedule") {found=1}
     END {exit(found ? 0 : 1)}
   '
 }
-
-manager_ready="$(kubectl -n kruise-system get deployment kruise-controller-manager \
-  -o jsonpath='{.status.readyReplicas}')"
-[ "${manager_ready:-0}" -gt 0 ] \
-  || fail "kruise-controller-manager has no ready replica"
-# Manager Exists toleration is recommended for rebuild resilience (see QUICKSTART),
-# but is not a preflight hard gate: manager typically runs on control-plane nodes
-# that are not gated, and Ready already covers a hung control plane.
-
-daemon_desired="$(kubectl -n kruise-system get daemonset kruise-daemon \
-  -o jsonpath='{.status.desiredNumberScheduled}')"
-daemon_ready="$(kubectl -n kruise-system get daemonset kruise-daemon \
-  -o jsonpath='{.status.numberReady}')"
-[ "${daemon_desired:-0}" -gt 0 ] && [ "$daemon_ready" -eq "$daemon_desired" ] \
-  || fail "kruise-daemon is not fully ready"
-kubectl -n kruise-system get daemonset kruise-daemon \
-  -o jsonpath='{range .spec.template.spec.tolerations[*]}{.key}{"|"}{.operator}{"|"}{.effect}{"\n"}{end}' \
-  | tolerates_gate \
-  || fail "kruise-daemon does not tolerate the startup gate"
 
 nodes="$(kubectl get nodes -l "$NODE_SELECTOR" -o name)"
 [ -n "$nodes" ] || fail "no nodes match placement.pvm (${NODE_SELECTOR})"

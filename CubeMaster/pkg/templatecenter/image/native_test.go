@@ -79,7 +79,7 @@ func TestPrepareNativeSourceExtractsDigestAndConfig(t *testing.T) {
 	// Create a dummy layer
 	var b bytes.Buffer
 	tw := tar.NewWriter(&b)
-	tw.WriteHeader(&tar.Header{Name: "test.txt", Size: 4, Mode: 0644})
+	tw.WriteHeader(withCurrentOwnership(&tar.Header{Name: "test.txt", Size: 4, Mode: 0644}))
 	tw.Write([]byte("test"))
 	tw.Close()
 	layer, _ := tarball.LayerFromOpener(func() (io.ReadCloser, error) {
@@ -211,10 +211,10 @@ func TestStreamRegistryWhiteoutResolution(t *testing.T) {
 	// Base layer: creates /dir/file1 and /dir/file2
 	var b1 bytes.Buffer
 	tw1 := tar.NewWriter(&b1)
-	tw1.WriteHeader(&tar.Header{Name: "dir/", Mode: 0755, Typeflag: tar.TypeDir})
-	tw1.WriteHeader(&tar.Header{Name: "dir/file1", Size: 4, Mode: 0644})
+	tw1.WriteHeader(withCurrentOwnership(&tar.Header{Name: "dir/", Mode: 0755, Typeflag: tar.TypeDir}))
+	tw1.WriteHeader(withCurrentOwnership(&tar.Header{Name: "dir/file1", Size: 4, Mode: 0644}))
 	tw1.Write([]byte("data"))
-	tw1.WriteHeader(&tar.Header{Name: "dir/file2", Size: 4, Mode: 0644})
+	tw1.WriteHeader(withCurrentOwnership(&tar.Header{Name: "dir/file2", Size: 4, Mode: 0644}))
 	tw1.Write([]byte("data"))
 	tw1.Close()
 	l1, _ := tarball.LayerFromOpener(func() (io.ReadCloser, error) {
@@ -224,9 +224,9 @@ func TestStreamRegistryWhiteoutResolution(t *testing.T) {
 	// Second layer: deletes /dir/file1 via whiteout, and makes an opaque dir marker /dir/.wh..wh..opq
 	var b2 bytes.Buffer
 	tw2 := tar.NewWriter(&b2)
-	tw2.WriteHeader(&tar.Header{Name: "dir/.wh.file1", Size: 0, Mode: 0644})
-	tw2.WriteHeader(&tar.Header{Name: "dir/.wh..wh..opq", Size: 0, Mode: 0644})
-	tw2.WriteHeader(&tar.Header{Name: "dir/file3", Size: 4, Mode: 0644}) // New file
+	tw2.WriteHeader(withCurrentOwnership(&tar.Header{Name: "dir/.wh.file1", Size: 0, Mode: 0644}))
+	tw2.WriteHeader(withCurrentOwnership(&tar.Header{Name: "dir/.wh..wh..opq", Size: 0, Mode: 0644}))
+	tw2.WriteHeader(withCurrentOwnership(&tar.Header{Name: "dir/file3", Size: 4, Mode: 0644})) // New file
 	tw2.Write([]byte("data"))
 	tw2.Close()
 	l2, _ := tarball.LayerFromOpener(func() (io.ReadCloser, error) {
@@ -264,8 +264,8 @@ func TestStreamRegistryWhiteoutResolution(t *testing.T) {
 func TestStreamRegistryUsesPreparedNativeImage(t *testing.T) {
 	var b1 bytes.Buffer
 	tw1 := tar.NewWriter(&b1)
-	tw1.WriteHeader(&tar.Header{Name: "dir/", Mode: 0755, Typeflag: tar.TypeDir})
-	tw1.WriteHeader(&tar.Header{Name: "dir/file1", Size: 4, Mode: 0644})
+	tw1.WriteHeader(withCurrentOwnership(&tar.Header{Name: "dir/", Mode: 0755, Typeflag: tar.TypeDir}))
+	tw1.WriteHeader(withCurrentOwnership(&tar.Header{Name: "dir/file1", Size: 4, Mode: 0644}))
 	tw1.Write([]byte("data"))
 	tw1.Close()
 	l1, _ := tarball.LayerFromOpener(func() (io.ReadCloser, error) {
@@ -381,7 +381,7 @@ func TestStreamRegistryConcurrencyAndPipelining(t *testing.T) {
 	makeTar := func(filename string) []byte {
 		var buf bytes.Buffer
 		tw := tar.NewWriter(&buf)
-		_ = tw.WriteHeader(&tar.Header{Name: filename, Size: 4, Mode: 0644})
+		_ = tw.WriteHeader(withCurrentOwnership(&tar.Header{Name: filename, Size: 4, Mode: 0644}))
 		_, _ = tw.Write([]byte("data"))
 		_ = tw.Close()
 		return buf.Bytes()
@@ -482,6 +482,14 @@ func TestStreamRegistryConcurrencyAndPipelining(t *testing.T) {
 			}
 		})
 	})
+}
+
+func withCurrentOwnership(header *tar.Header) *tar.Header {
+	// archive.Apply preserves layer ownership. Unit fixtures that do not test
+	// ownership must therefore use IDs the unprivileged builder can apply.
+	header.Uid = os.Getuid()
+	header.Gid = os.Getgid()
+	return header
 }
 
 // --- Test helpers for gated layers ---

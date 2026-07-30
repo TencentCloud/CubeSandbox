@@ -190,3 +190,44 @@ func TestScanDeadContainerSkipsRollingBack(t *testing.T) {
 	assert.Equal(t, staleFinishedAt, got.FinishedAt, "scanDeadContainer must not touch a rolling-back cubebox")
 	assert.True(t, got.Unknown, "Unknown must be left as-is for the rollback path to fix")
 }
+
+// TestScanDeadContainerSkipsCreatingSandbox reproduces the create/DeadGC race:
+// while a sandbox sits in the CONTAINER_CREATED window (store entry saved before
+// runContainer binds the containerd task), DeadGC must NOT call RecoverContainer,
+// which would find no task and wrongly stamp Unknown=true -- making a follow-up
+// pause fail with "sandbox is not running". A nil containerd client guarantees
+// the test panics/errors if the scan ever reaches RecoverContainer for this cb.
+func TestScanDeadContainerSkipsCreatingSandbox(t *testing.T) {
+	cb := newCubeboxWithStatusForTest("sb-deadgc-creating", cubeboxstore.Status{
+		CreatedAt: time.Now().UnixNano(),
+	})
+
+	// The nil client is the assertion: RecoverContainer -> client.LoadContainer
+	// dereferences the nil *containerd.Client and panics. NotPanics therefore
+	// proves the create-window guard short-circuited before reaching it.
+	assert.NotPanics(t, func() {
+		scanDeadContainer(context.Background(), []*cubeboxstore.CubeBox{cb}, nil, time.Hour)
+	}, "DeadGC must skip a creating sandbox before touching the containerd client")
+
+	assert.False(t, cb.GetStatus().IsTerminated(), "a creating sandbox must not read as terminated")
+	got := cb.GetStatus().Get()
+	assert.False(t, got.Unknown, "a creating sandbox must not be stamped Unknown by DeadGC")
+	assert.Equal(t, int64(0), got.FinishedAt, "a creating sandbox must not be stamped FinishedAt by DeadGC")
+}
+
+// TestScanDeadContainerCreateSkipIsBounded verifies the create skip is bounded:
+// once CreatedAt is older than createStuckThreshold the task was never bound and
+// the entry is genuinely stuck, so DeadGC must NOT short-circuit and instead
+// falls through to probe it. We drive scanDeadContainer with a nil client so
+// reaching RecoverContainer -> client.LoadContainer panics; assert.Panics thus
+// proves the guard let the stuck entry through rather than re-stating the guard
+// predicate literally.
+func TestScanDeadContainerCreateSkipIsBounded(t *testing.T) {
+	stuck := newCubeboxWithStatusForTest("sb-deadgc-stuck-create", cubeboxstore.Status{
+		CreatedAt: time.Now().Add(-2 * createStuckThreshold).UnixNano(),
+	})
+
+	assert.Panics(t, func() {
+		scanDeadContainer(context.Background(), []*cubeboxstore.CubeBox{stuck}, nil, time.Hour)
+	}, "a long-stuck creating sandbox must fall out of the skip window and be probed")
+}

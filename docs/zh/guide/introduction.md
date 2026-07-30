@@ -20,11 +20,13 @@ Cube Sandbox 是一款**专为 AI Agent 打造的基础设施** —— 可托管
 
 * **🛡️ 出口管控**：域名白名单、未授权出口即时阻断、完整审计日志。CubeEgress 提供 L7 域名过滤、凭据注入和访问审计。
 
-* **🖥️ Web 管理控制台**：安装完成后打开 `:12088`，可视化管理沙箱、模板、节点和版本矩阵。
+* **🖥️ Web 管理控制台**：可视化管理沙箱、模板、节点和版本矩阵。
 
 * **📦 模板系统**：一步将 OCI 镜像转化为模板，从模板商店安装预设，多节点自动分发。
 
-* **📦 开箱即用**：无复杂环境依赖，极简部署脚本几分钟内拉起完整环境。
+* **📦 开箱即用**：无复杂环境依赖，极简部署脚本几分钟内拉起完整环境。同时支持裸机部署、K8s集群部署、腾讯云上Terraform部署。
+
+* **💾 Volume 框架**：CubeSandbox提供了兼容E2B标准的Volume框架，在兼容e2b标准的前提下允许用户以插件的形式自定义后端存储方案
 
 ## CubeSandbox 对比
 
@@ -46,6 +48,7 @@ Cube Sandbox 是一款**专为 AI Agent 打造的基础设施** —— 可托管
 * [数字助手（AgentHub）](./digital-assistant.md) — 托管和管理 AI Agent 实例。
 * [本地构建部署](./self-build-deploy.md) — 单机部署参考。
 * [多机集群部署](./multi-node-deploy.md) — 扩展到多机集群。
+* [Kubernetes 部署](./kubernetes/) — 在已有 K8s 集群上用 Helm 安装。
 * [从 OCI 镜像制作模板](./tutorials/template-from-image.md) — 模板制作分步指南。
 * [WebUI 管理控制台](./webui.md) — 安装完成即可可视化管理。
 * [安全代理与凭据保险箱](./security-proxy.md) — CubeEgress 域名过滤与审计。

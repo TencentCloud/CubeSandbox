@@ -139,7 +139,8 @@ func SetRPCFactory(f func(name, socketPath string) (ControllerPlugin, error)) {
 // ─── Wire types ────────────────────────────────────────────────────────────
 
 // VolumeInfo is the canonical result returned by the plugin after a
-// successful create or get-info call.  All fields except Token are required.
+// successful create or get-info call.  All fields except Token and
+// PrivateData are required.
 type VolumeInfo struct {
 	// VolumeID is the stable identifier assigned by the plugin (or generated
 	// by the caller before invoking the plugin).
@@ -151,6 +152,11 @@ type VolumeInfo struct {
 	// Token is the auth credential used by the volume-content service.
 	// May be empty for backends that do not require per-volume tokens.
 	Token string `json:"token"`
+
+	// PrivateData is opaque plugin state persisted in t_cube_volume and
+	// forwarded to the Node Attach hook. Not returned to API/SDK clients.
+	// Max length: models.MaxPrivateDataLen (1024). May be empty.
+	PrivateData string `json:"privateData,omitempty"`
 
 	// PluginName identifies which plugin produced this record.
 	// Populated automatically by the registry before returning to the caller.
@@ -198,6 +204,19 @@ func Register(p ControllerPlugin) {
 func Get(name string) (ControllerPlugin, bool) {
 	p, ok := registry[name]
 	return p, ok
+}
+
+// UnregisterForTest removes a plugin from the global registry.
+// Intended for tests that register ephemeral fake ControllerPlugins.
+func UnregisterForTest(name string) {
+	delete(registry, name)
+	kept := registryOrder[:0]
+	for _, n := range registryOrder {
+		if n != name {
+			kept = append(kept, n)
+		}
+	}
+	registryOrder = kept
 }
 
 // First returns the first registered plugin (in registration order).

@@ -50,6 +50,9 @@ func abortOrSkipDocker(t *testing.T, format string, args ...any) {
 
 func newPostgresTestEnv(t *testing.T) *postgresTestEnv {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping Docker-backed PostgreSQL test in short mode")
+	}
 	if dsn := os.Getenv(postgresDSNEnv); dsn != "" {
 		t.Logf("using external PostgreSQL from %s", postgresDSNEnv)
 		db := openPostgresDB(t, dsn)

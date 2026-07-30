@@ -108,6 +108,10 @@ pytest --run-e2e -m "lifecycle and slow"
 
 它证明了基础实例隔离，但不等于并发压力、资源竞争或多 worker 安全性验证。
 
+### 2.7 Volume
+
+`cases/volume/` 覆盖 Volume Plugin CRUD、sandbox 绑定/解绑和绑定期间禁止删除。它还验证同一个 Volume 可以在一个沙箱中保持读写，同时在另一个沙箱中以只读方式挂载，包括正常读取，以及 create、write、rename、delete 均被拒绝。这些用例仅适用于 CubeSandbox，只有通过 `SDK_E2E_VOLUME_PLUGIN=true` 明确确认部署已配置 Volume Plugin 后才会执行，否则保持 skip。
+
 ## 3. 覆盖边界
 
 当前 suite 主要验证 Python SDK 的同步常用路径和 CubeSandbox/E2B 兼容表面：

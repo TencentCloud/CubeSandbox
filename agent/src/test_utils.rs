@@ -33,6 +33,90 @@ pub mod test_utils {
         };
     }
 
+    // Returns true when the effective capability set holds `cap`. Running as
+    // uid 0 is not sufficient: container/CI environments frequently drop
+    // CAP_SYS_ADMIN or CAP_NET_ADMIN from root, and the affected syscalls
+    // (mount, unshare, netlink link changes, ...) then fail with EPERM.
+    pub fn have_effective_cap(cap: capctl::caps::Cap) -> bool {
+        match capctl::caps::CapState::get_current() {
+            Ok(state) => state.effective.has(cap),
+            Err(_) => false,
+        }
+    }
+
+    // NOTE: rustjail (a separate crate that agent depends on) carries a sibling
+    // `skip_if_no_cap!` in agent/rustjail/src/lib.rs. That crate can't import
+    // this test-util, so the two are intentionally duplicated — keep them
+    // behaviourally in sync.
+    #[macro_export]
+    macro_rules! skip_if_no_cap {
+        ($cap:expr) => {
+            if !$crate::test_utils::test_utils::have_effective_cap($cap) {
+                println!(
+                    "INFO: skipping {} which needs capability {:?}",
+                    module_path!(),
+                    $cap
+                );
+                return;
+            }
+        };
+    }
+
+    // Probe whether the cgroup filesystem is writable, i.e. whether we can
+    // actually create a cgroup. Root inside the builder container sees a
+    // read-only /sys/fs/cgroup, so LinuxContainer::new fails even though the
+    // uid is 0.
+    pub fn cgroupfs_writable() -> bool {
+        if !have_effective_cap(capctl::caps::Cap::SYS_ADMIN) {
+            return false;
+        }
+        let base = if cgroups::hierarchies::is_cgroup2_unified_mode() {
+            "/sys/fs/cgroup".to_string()
+        } else {
+            "/sys/fs/cgroup/pids".to_string()
+        };
+        let probe = format!("{}/cube_agent_test_probe_{}", base, std::process::id());
+        match std::fs::create_dir(&probe) {
+            Ok(_) => {
+                let _ = std::fs::remove_dir(&probe);
+                true
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let _ = std::fs::remove_dir(&probe);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[macro_export]
+    macro_rules! skip_loop_if_no_cap {
+        ($msg:expr, $cap:expr) => {
+            if !$crate::test_utils::test_utils::have_effective_cap($cap) {
+                println!(
+                    "INFO: skipping loop {} in {} which needs capability {:?}",
+                    $msg,
+                    module_path!(),
+                    $cap
+                );
+                continue;
+            }
+        };
+    }
+
+    #[macro_export]
+    macro_rules! skip_if_no_cgroupfs {
+        () => {
+            if !$crate::test_utils::test_utils::cgroupfs_writable() {
+                println!(
+                    "INFO: skipping {} which needs a writable cgroup filesystem",
+                    module_path!()
+                );
+                return;
+            }
+        };
+    }
+
     #[macro_export]
     macro_rules! skip_loop_if_root {
         ($msg:expr) => {

@@ -16,13 +16,13 @@
 | Step | Content |
 |------|---------|
 | 1 | [../README.md — Prerequisites](../README.md#prerequisites) |
-| 2 | **Cubelet node:** cosfs — [§1](../README.md#1-install-dependencies) |
+| 2 | **Cubelet node:** cosfs + jq — [§1](../README.md#1-install-dependencies) |
 | 3 | **CubeMaster node:** coscmd + jq — [§1](../README.md#1-install-dependencies) |
 | 4 | Deploy [cube-volume-cos.sh](cube-volume-cos.sh) + `volume-cos.conf` — [§2](../README.md#2-install-plugin-and-cos-credentials) |
 | 5 | Configure CubeMaster + Cubelet — [§3–§5](../README.md#3-configure-cubemaster) |
 | 6 | SDK verification — [§6–§7](../README.md#6-prepare-sdk-environment) |
 
-**Dependencies:** [coscmd](https://cloud.tencent.com/document/product/436/6883) on CubeMaster; [cosfs](https://cloud.tencent.com/document/product/436/10976) on Cubelet. No COS Go SDK (see [rpc](../rpc/)).
+**Dependencies:** [coscmd](https://cloud.tencent.com/document/product/436/10976) + **jq** on CubeMaster; [cosfs](https://cloud.tencent.com/document/product/436/6883) + **jq** on Cubelet. No COS Go SDK (see [rpc](../rpc/)). Install: [../README.md §1](../README.md#1-install-dependencies).
 
 ---
 
@@ -83,6 +83,8 @@ sudo install -m 0755 /tmp/cube-volume-cos.sh "$PREFIX/Cubelet/plugin/cube-volume
 
 ### 2. Create config file
 
+> For Kubernetes / Terraform deployments, configure `volume-cos.conf` yourself using native cluster mechanisms. The steps below use one-click / bare-metal paths as examples.
+
 Same directory as the plugin binary (one file per node; edit on each host when roles are split):
 
 ```bash
@@ -104,7 +106,7 @@ SECRET_ID=AKIDxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 SECRET_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 BUCKET=mybucket-1250000000
 REGION=ap-guangzhou
-# Mount path comes from Cubelet --volume-base-dir (default /data/volume/cos-<id>).
+# Mount path comes from Cubelet --volume-base-dir (default /data/cube-shared/volume/cos-<id>).
 EOF
 sudo chmod 600 "$PREFIX/CubeMaster/plugin/volume-cos.conf"
 # On Cubelet node, edit $PREFIX/Cubelet/plugin/volume-cos.conf similarly
@@ -117,7 +119,7 @@ sudo chmod 600 "$PREFIX/CubeMaster/plugin/volume-cos.conf"
 | `BUCKET` | COS bucket `BucketName-APPID` | `mybucket-1250000000` |
 | `REGION` | Region | `ap-guangzhou` |
 
-Mount path is passed as `--volume-base-dir` (`volume_plugin_base_dir`, default `/data/volume`). `host_path` must be under it, e.g. `/data/volume/cos-<id>`.
+Mount path is passed as `--volume-base-dir` (`volume_plugin_base_dir`, default `/data/cube-shared/volume`). `host_path` must be under it, e.g. `/data/cube-shared/volume/cos-<id>`.
 
 > **Security:** Prefer a sub-account key with bucket read/write only.
 
@@ -256,7 +258,8 @@ do_create() {
 
     load_config                          # Step 1: read SECRET_ID/KEY, BUCKET, REGION
     cos_create_dir "$volume_id"          # Step 2: upload volumes/<id>/.keep via coscmd
-    jq -cn '{ token: "", error: "" }'    # Step 3: return success (COS has no extra token)
+    jq -cn --arg pd "volumes/${volume_id}/" \
+        '{ token: "", private_data: $pd, error: "" }'  # Step 3: private_data → Attach
 }
 ```
 
@@ -349,10 +352,10 @@ ensure_passwd_file() {
   --namespace default \
   --volume-id my-vol \
   --ref-count 0 \
-  --volume-base-dir /data/volume
+  --volume-base-dir /data/cube-shared/volume
 
 CPID=$(pgrep -f "cubelet --config" | head -1)
-nsenter -t $CPID -m -- mountpoint /data/volume/cos-my-vol
+nsenter -t $CPID -m -- mountpoint /data/cube-shared/volume/cos-my-vol
 ```
 
 ### Manual detach
@@ -364,7 +367,7 @@ nsenter -t $CPID -m -- mountpoint /data/volume/cos-my-vol
   --namespace default \
   --volume-id my-vol \
   --ref-count 0 \
-  --metadata '{"mount_dir":"/data/volume/cos-my-vol"}'
+  --metadata '{"mount_dir":"/data/cube-shared/volume/cos-my-vol"}'
 ```
 
 ### Plugin logs
@@ -408,7 +411,7 @@ Volume still exists. `Volume.destroy("<id>")` first, then recreate.
 ## References
 
 - Source: [cube-volume-cos.sh](cube-volume-cos.sh)
-- [cosfs](https://cloud.tencent.com/document/product/436/10976) · [coscmd](https://cloud.tencent.com/document/product/436/6883)
+- [cosfs](https://cloud.tencent.com/document/product/436/6883) · [coscmd](https://cloud.tencent.com/document/product/436/10976)
 - [COS Go SDK](https://cloud.tencent.com/document/product/436/31215) (rpc example)
 - rpc example: [../rpc/](../rpc/)
 - Binary driver: [Cubelet/plugins/volume/binary/driver.go](../../../../Cubelet/plugins/volume/binary/driver.go)

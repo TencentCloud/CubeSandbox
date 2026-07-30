@@ -23,7 +23,7 @@ func TimeoutPtr(v int) *int {
 }
 
 type Request struct {
-	RequestID string `json:"requestID" p:"requestID"  v:"required"`
+	RequestID string `json:"requestID"`
 }
 
 type Res struct {
@@ -38,8 +38,8 @@ type Ret struct {
 
 type HostChangeEvent struct {
 	*Request
-	HostIDs   []string `p:"hostIDs"  v:"required"`
-	EventType string   `p:"eventType"  v:"required"`
+	HostIDs   []string
+	EventType string
 }
 
 type CreateCubeSandboxReq struct {
@@ -143,6 +143,9 @@ type CubeNetworkConfig struct {
 	AllowOut           []string      `json:"allowOut,omitempty"`
 	DenyOut            []string      `json:"denyOut,omitempty"`
 	Rules              []*EgressRule `json:"rules,omitempty"`
+	// MaskRequestHost is an ingress-only Host authority template consumed by
+	// CubeProxy. It is intentionally not forwarded to Cubelet.
+	MaskRequestHost *string `json:"maskRequestHost,omitempty"`
 }
 
 // EgressRule is an L7 egress rule, evaluated first-match-wins.
@@ -175,6 +178,81 @@ type EgressRuleInject struct {
 	Header string  `json:"header"`
 	Secret string  `json:"secret"`
 	Format *string `json:"format,omitempty"`
+}
+
+// DeepCopy returns an independent copy of the network configuration, including
+// all nested rule pointers. Keep field-copy knowledge here so template, HTTP,
+// and CLI paths cannot drift when the contract grows.
+func (c *CubeNetworkConfig) DeepCopy() *CubeNetworkConfig {
+	if c == nil {
+		return nil
+	}
+	out := &CubeNetworkConfig{
+		AllowInternetAccess: cloneBoolPtr(c.AllowInternetAccess),
+		AllowPublicTraffic:  cloneBoolPtr(c.AllowPublicTraffic),
+		AllowOut:            append([]string(nil), c.AllowOut...),
+		DenyOut:             append([]string(nil), c.DenyOut...),
+		MaskRequestHost:     cloneStringPtr(c.MaskRequestHost),
+	}
+	if len(c.Rules) > 0 {
+		out.Rules = make([]*EgressRule, 0, len(c.Rules))
+		for _, rule := range c.Rules {
+			out.Rules = append(out.Rules, rule.DeepCopy())
+		}
+	}
+	return out
+}
+
+func (r *EgressRule) DeepCopy() *EgressRule {
+	if r == nil {
+		return nil
+	}
+	out := &EgressRule{Name: r.Name}
+	if r.Match != nil {
+		out.Match = &EgressRuleMatch{
+			SNI:    cloneStringPtr(r.Match.SNI),
+			Host:   cloneStringPtr(r.Match.Host),
+			Method: append([]string(nil), r.Match.Method...),
+			Path:   cloneStringPtr(r.Match.Path),
+			Scheme: cloneStringPtr(r.Match.Scheme),
+		}
+	}
+	if r.Action != nil {
+		out.Action = &EgressRuleAction{
+			Allow: r.Action.Allow,
+			Audit: cloneStringPtr(r.Action.Audit),
+		}
+		if len(r.Action.Inject) > 0 {
+			out.Action.Inject = make([]*EgressRuleInject, 0, len(r.Action.Inject))
+			for _, inject := range r.Action.Inject {
+				if inject == nil {
+					continue
+				}
+				out.Action.Inject = append(out.Action.Inject, &EgressRuleInject{
+					Header: inject.Header,
+					Secret: inject.Secret,
+					Format: cloneStringPtr(inject.Format),
+				})
+			}
+		}
+	}
+	return out
+}
+
+func cloneBoolPtr(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func cloneStringPtr(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 type Volume struct {
@@ -289,7 +367,7 @@ type HostAlias struct {
 }
 
 type ImageSpec struct {
-	Image             string            `json:"image,omitempty" v:"required"`
+	Image             string            `json:"image,omitempty"`
 	Name              string            `json:"name,omitempty"`
 	Token             string            `json:"token,omitempty"`
 	Annotations       map[string]string `json:"annotations,omitempty" `
@@ -424,7 +502,7 @@ type DeleteCubeSandboxRes struct {
 }
 
 type DeleteCubeSandboxReq struct {
-	RequestID   string            `json:"requestID,omitempty" p:"requestID"  v:"required"`
+	RequestID   string            `json:"requestID,omitempty"`
 	SandboxID   string            `json:"sandbox_id,omitempty"`
 	HostIP      string            `json:"host_ip,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty" `
@@ -441,7 +519,7 @@ type DeleteCubeSandboxReq struct {
 }
 
 type ListCubeSandboxReq struct {
-	RequestID string `json:"requestID,omitempty" p:"requestID"  v:"required"`
+	RequestID string `json:"requestID,omitempty"`
 	StartIdx  int    `json:"start_idx,omitempty"`
 	Size      int    `json:"size,omitempty"`
 
@@ -461,25 +539,26 @@ type ListCubeSandboxRes struct {
 }
 
 type SandboxBriefData struct {
-	SandboxID   string            `json:"sandbox_id,omitempty"`
-	Status      int32             `json:"status,omitempty"`
-	HostID      string            `json:"host_id,omitempty"`
-	HostIP      string            `json:"host_ip,omitempty"`
-	TemplateID  string            `json:"template_id,omitempty"`
-	CpuCount    int32             `json:"cpu_count,omitempty"`
-	MemoryMB    int32             `json:"memory_mb,omitempty"`
-	Annotations map[string]string `json:"annotations,omitempty"`
-	Labels      map[string]string `json:"labels,omitempty"`
-	NameSpace   string            `json:"namespace,omitempty"`
-	CreateAt    int64             `json:"create_at,omitempty"`
-	PauseAt     int64             `json:"pause_at,omitempty"`
-	EndAt       int64             `json:"end_at,omitempty"`
+	SandboxID    string             `json:"sandbox_id,omitempty"`
+	Status       int32              `json:"status,omitempty"`
+	HostID       string             `json:"host_id,omitempty"`
+	HostIP       string             `json:"host_ip,omitempty"`
+	TemplateID   string             `json:"template_id,omitempty"`
+	CpuCount     int32              `json:"cpu_count,omitempty"`
+	MemoryMB     int32              `json:"memory_mb,omitempty"`
+	Annotations  map[string]string  `json:"annotations,omitempty"`
+	Labels       map[string]string  `json:"labels,omitempty"`
+	NameSpace    string             `json:"namespace,omitempty"`
+	CreateAt     int64              `json:"create_at,omitempty"`
+	PauseAt      int64              `json:"pause_at,omitempty"`
+	EndAt        int64              `json:"end_at,omitempty"`
+	VolumeMounts []*VolumeMountInfo `json:"volume_mounts,omitempty"`
 }
 
 type GetCubeSandboxReq struct {
 	RequestID     string `json:"requestID,omitempty"`
-	SandboxID     string `json:"sandbox_id,omitempty" v:"required-without:host_id#sandbox_id or host_id is required"`
-	HostID        string `json:"host_id,omitempty" v:"required-without:sandbox_id#sandbox_id or host_id is required"`
+	SandboxID     string `json:"sandbox_id,omitempty"`
+	HostID        string `json:"host_id,omitempty"`
 	InstanceType  string `json:"instance_type,omitempty"`
 	ContainerPort int32  `json:"container_port,omitempty"`
 }
@@ -491,20 +570,28 @@ type GetCubeSandboxRes struct {
 }
 
 type SandboxData struct {
-	SandboxID              string            `json:"sandbox_id,omitempty"`
-	Status                 int32             `json:"status,omitempty"`
-	HostID                 string            `json:"host_id,omitempty"`
-	HostIP                 string            `json:"host_ip,omitempty"`
-	SandboxIP              string            `json:"sandbox_ip,omitempty"`
-	TemplateID             string            `json:"template_id,omitempty"`
-	Annotations            map[string]string `json:"annotations,omitempty"`
-	Labels                 map[string]string `json:"labels,omitempty"`
-	Containers             []*ContainerInfo  `json:"containers,omitempty"`
-	NameSpace              string            `json:"namespace,omitempty"`
-	ExposedPortEndpoint    string            `json:"exposed_port_endpoint,omitempty"`
-	ExposedPortMode        string            `json:"exposed_port_mode,omitempty"`
-	RequestedContainerPort int32             `json:"requested_container_port,omitempty"`
-	EndAt                  int64             `json:"end_at,omitempty"`
+	SandboxID              string             `json:"sandbox_id,omitempty"`
+	Status                 int32              `json:"status,omitempty"`
+	HostID                 string             `json:"host_id,omitempty"`
+	HostIP                 string             `json:"host_ip,omitempty"`
+	SandboxIP              string             `json:"sandbox_ip,omitempty"`
+	TemplateID             string             `json:"template_id,omitempty"`
+	Annotations            map[string]string  `json:"annotations,omitempty"`
+	Labels                 map[string]string  `json:"labels,omitempty"`
+	Containers             []*ContainerInfo   `json:"containers,omitempty"`
+	NameSpace              string             `json:"namespace,omitempty"`
+	ExposedPortEndpoint    string             `json:"exposed_port_endpoint,omitempty"`
+	ExposedPortMode        string             `json:"exposed_port_mode,omitempty"`
+	RequestedContainerPort int32              `json:"requested_container_port,omitempty"`
+	EndAt                  int64              `json:"end_at,omitempty"`
+	VolumeMounts           []*VolumeMountInfo `json:"volume_mounts,omitempty"`
+}
+
+// VolumeMountInfo is one container volume mount exposed in sandbox info/list APIs.
+type VolumeMountInfo struct {
+	Name          string `json:"name,omitempty"`
+	ContainerPath string `json:"container_path,omitempty"`
+	Readonly      bool   `json:"readonly,omitempty"`
 }
 
 type ContainerInfo struct {
@@ -520,8 +607,8 @@ type ContainerInfo struct {
 }
 
 type CreateImageReq struct {
-	RequestID         string            `json:"requestID,omitempty" p:"requestID"  v:"required"`
-	Image             string            `json:"image,omitempty" p:"image"  v:"required"`
+	RequestID         string            `json:"requestID,omitempty"`
+	Image             string            `json:"image,omitempty"`
 	Username          string            `json:"username,omitempty"`
 	Token             string            `json:"token,omitempty"`
 	StorageMedia      string            `json:"storage_media,omitempty"`
@@ -546,10 +633,10 @@ type ContainerOverrides struct {
 
 type CreateTemplateFromImageReq struct {
 	*Request
-	SourceImageRef   string `json:"source_image_ref,omitempty" p:"source_image_ref" v:"required"`
+	SourceImageRef   string `json:"source_image_ref,omitempty"`
 	RegistryUsername string `json:"registry_username,omitempty"`
 	RegistryPassword string `json:"registry_password,omitempty"`
-	TemplateID       string `json:"template_id,omitempty" p:"template_id"`
+	TemplateID       string `json:"template_id,omitempty"`
 	// Alias is a human-readable, stable name for the template. When set,
 	// sandboxes can reference the template by this alias instead of the
 	// auto-generated template ID, surviving rebuilds that produce a new ID.
@@ -558,7 +645,7 @@ type CreateTemplateFromImageReq struct {
 	InstanceType       string              `json:"instance_type,omitempty"`
 	NetworkType        string              `json:"network_type,omitempty"`
 	CubeNetworkConfig  *CubeNetworkConfig  `json:"cube_network_config,omitempty"`
-	WritableLayerSize  string              `json:"writable_layer_size,omitempty" p:"writable_layer_size" v:"required"`
+	WritableLayerSize  string              `json:"writable_layer_size,omitempty"`
 	ExposedPorts       []int32             `json:"exposed_ports,omitempty"`
 	DistributionScope  []string            `json:"distribution_scope,omitempty"`
 	ContainerOverrides *ContainerOverrides `json:"container_overrides,omitempty"`
@@ -584,7 +671,7 @@ type CreateTemplateFromImageReq struct {
 
 type RedoTemplateFromImageReq struct {
 	*Request
-	TemplateID        string   `json:"template_id,omitempty" p:"template_id" v:"required"`
+	TemplateID        string   `json:"template_id,omitempty"`
 	DistributionScope []string `json:"distribution_scope,omitempty"`
 	FailedOnly        bool     `json:"failed_only,omitempty"`
 	Wait              bool     `json:"wait,omitempty"`
@@ -645,15 +732,15 @@ type CreateTemplateFromImageRes struct {
 }
 
 type DeleteImageReq struct {
-	RequestID    string `json:"requestID,omitempty" p:"requestID"  v:"required"`
-	Image        string `json:"image,omitempty" p:"image"  v:"required"`
+	RequestID    string `json:"requestID,omitempty"`
+	Image        string `json:"image,omitempty"`
 	StorageMedia string `json:"storage_media,omitempty"`
 	InstanceType string `json:"instance_type,omitempty"`
 }
 
 type GetNodeReq struct {
 	RequestID    string `json:"requestID,omitempty"`
-	HostID       string `json:"host_id,omitempty" v:"required-without:sandbox_id#sandbox_id or host_id is required"`
+	HostID       string `json:"host_id,omitempty"`
 	ScoreOnly    bool   `json:"score_only,omitempty"`
 	InstanceType string `json:"instance_type,omitempty"`
 }
@@ -697,10 +784,10 @@ var FastestJsoniter = jsoniter.Config{
 }.Froze()
 
 type UpdateRequest struct {
-	RequestID    string `json:"requestID" p:"requestID"  v:"required"`
-	SandboxID    string `json:"sandbox_id" p:"sandbox_id"  v:"required"`
-	InstanceType string `json:"instance_type" p:"instance_type"  v:"required"`
-	Action       string `json:"action" p:"action"  v:"required"`
+	RequestID    string `json:"requestID"`
+	SandboxID    string `json:"sandbox_id"`
+	InstanceType string `json:"instance_type"`
+	Action       string `json:"action"`
 }
 
 // SetTimeoutRequest is the wire shape for POST /cube/sandbox/timeout.
@@ -713,10 +800,10 @@ type UpdateRequest struct {
 // rule treats the sandbox as freshly active and re-arms the
 // timeout-then-kill (or pause) ladder.
 type SetTimeoutRequest struct {
-	RequestID    string `json:"requestID" p:"requestID" v:"required"`
-	SandboxID    string `json:"sandboxID" p:"sandboxID" v:"required"`
-	InstanceType string `json:"instanceType" p:"instanceType"`
-	Timeout      int32  `json:"timeout" p:"timeout"`
+	RequestID    string `json:"requestID"`
+	SandboxID    string `json:"sandboxID"`
+	InstanceType string `json:"instanceType"`
+	Timeout      int32  `json:"timeout"`
 }
 
 // SetTimeoutRes is the master-side response for /cube/sandbox/timeout.
@@ -733,10 +820,10 @@ type SetTimeoutRes struct {
 // this implementation: both rebase CreatedAt to "now" and set the new
 // TimeoutSeconds. Mirrors e2b's refresh-then-set-timeout convergence.
 type RefreshSandboxRequest struct {
-	RequestID    string `json:"requestID" p:"requestID" v:"required"`
-	SandboxID    string `json:"sandboxID" p:"sandboxID" v:"required"`
-	InstanceType string `json:"instanceType" p:"instanceType"`
-	Duration     int32  `json:"duration" p:"duration"`
+	RequestID    string `json:"requestID"`
+	SandboxID    string `json:"sandboxID"`
+	InstanceType string `json:"instanceType"`
+	Duration     int32  `json:"duration"`
 }
 
 // RefreshSandboxRes mirrors SetTimeoutRes.
@@ -748,8 +835,8 @@ type RefreshSandboxRes struct {
 }
 
 type ListInventoryReq struct {
-	RequestID    string        `json:"requestID,omitempty" p:"requestID"  v:"required"`
-	Filters      []*FilterItem `json:"filters,omitempty" p:"filters"`
+	RequestID    string        `json:"requestID,omitempty"`
+	Filters      []*FilterItem `json:"filters,omitempty"`
 	InstanceType string        `json:"instance_type,omitempty"`
 }
 

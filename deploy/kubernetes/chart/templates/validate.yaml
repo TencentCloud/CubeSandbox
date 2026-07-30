@@ -54,20 +54,35 @@
 {{- fail "cubeNode.enabled=true with controlPlane.enabled=false requires externalControlPlane.enabled=true" }}
 {{- end }}
 {{- if and .Values.cubeNode.enabled (not .Values.images.waitNodePrep.repository) }}
-{{- fail "cubeNode.enabled=true requires images.waitNodePrep.repository (Big Pod wait-node-prep sidecar)" }}
+{{- fail "cubeNode.enabled=true requires images.waitNodePrep.repository (Big Pod wait-node-prep initContainer)" }}
 {{- end }}
-{{- if and .Values.cubeNode.enabled (not .Values.images.pause.repository) }}
-{{- fail "cubeNode.enabled=true requires images.pause.repository (Big Pod placeholder slots)" }}
+{{- if hasKey (.Values.images | default dict) "pause" }}
+{{- fail "images.pause was removed; Big Pod placeholder slots (cube-slot-*) are gone. Remove images.pause from your values." }}
+{{- end }}
+{{- if hasKey (.Values.cubeNode | default dict) "placeholderSlots" }}
+{{- fail "cubeNode.placeholderSlots was removed; Big Pod no longer reserves cube-slot-1..6. Remove cubeNode.placeholderSlots from your values." }}
 {{- end }}
 {{- if hasKey .Values.security "hostNetwork" }}
 {{- fail "security.hostNetwork was removed; cube-node always runs on the Pod network. Remove security.hostNetwork from your values." }}
 {{- end }}
 {{- if hasKey .Values.cubeNode "useAdvancedDaemonSet" }}
-{{- fail "cubeNode.useAdvancedDaemonSet was removed; cube-node always uses OpenKruise Advanced DaemonSet (hard dependency). Remove cubeNode.useAdvancedDaemonSet from your values and install OpenKruise." }}
+{{- fail "cubeNode.useAdvancedDaemonSet was removed; cube-node uses a native apps/v1 DaemonSet. Remove cubeNode.useAdvancedDaemonSet from your values." }}
+{{- end }}
+{{- $nodeRolling := (((.Values.cubeNode).updateStrategy).rollingUpdate) | default dict -}}
+{{- if hasKey $nodeRolling "rollingUpdateType" }}
+{{- fail "cubeNode.updateStrategy.rollingUpdate.rollingUpdateType was removed; cube-node is a native apps/v1 DaemonSet. Remove rollingUpdateType from your values." }}
+{{- end }}
+{{- $installerRolling := (((.Values.cubeNodeInstaller).updateStrategy).rollingUpdate) | default dict -}}
+{{- if hasKey $installerRolling "rollingUpdateType" }}
+{{- fail "cubeNodeInstaller.updateStrategy.rollingUpdate.rollingUpdateType was removed; cube-node-installer is a native apps/v1 DaemonSet. Remove rollingUpdateType from your values." }}
+{{- end }}
+{{- $bootstrapRolling := (((.Values.cubeNodeBootstrap).updateStrategy).rollingUpdate) | default dict -}}
+{{- if hasKey $bootstrapRolling "rollingUpdateType" }}
+{{- fail "cubeNodeBootstrap.updateStrategy.rollingUpdate.rollingUpdateType was removed; cube-node-bootstrap is a native apps/v1 DaemonSet. Remove rollingUpdateType from your values." }}
 {{- end }}
 {{- $pvmRolling := (((.Values.cubeNodePvm).updateStrategy).rollingUpdate) | default dict -}}
 {{- if hasKey $pvmRolling "rollingUpdateType" }}
-{{- fail "cubeNodePvm.updateStrategy.rollingUpdate.rollingUpdateType was removed; cube-node-pvm is a native apps/v1 DaemonSet (not Advanced DaemonSet). Remove rollingUpdateType from your values." }}
+{{- fail "cubeNodePvm.updateStrategy.rollingUpdate.rollingUpdateType was removed; cube-node-pvm is a native apps/v1 DaemonSet. Remove rollingUpdateType from your values." }}
 {{- end }}
 {{- $controlPlaneNeedsMysql := and .Values.controlPlane.enabled (or .Values.controlPlane.master.enabled .Values.controlPlane.api.enabled) -}}
 {{- if and $controlPlaneNeedsMysql (not (eq (include "cube.mysqlBuiltinEnabled" .) "true")) (not .Values.mysql.host) }}
@@ -159,5 +174,10 @@
 {{- end }}
 {{- if and .Values.cubeEgress.network.enabled (not .Values.cubeEgress.network.ingressInterface) }}
 {{- fail "cubeEgress.network.enabled=true requires cubeEgress.network.ingressInterface" }}
+{{- end }}
+{{- end }}
+{{- if .Values.volumeCos.enabled }}
+{{- if and (not .Values.volumeCos.existingSecret) (or (not .Values.volumeCos.secretId) (not .Values.volumeCos.secretKey) (not .Values.volumeCos.bucket)) }}
+{{- fail "volumeCos.enabled=true requires volumeCos.existingSecret or volumeCos.secretId/secretKey/bucket" }}
 {{- end }}
 {{- end }}

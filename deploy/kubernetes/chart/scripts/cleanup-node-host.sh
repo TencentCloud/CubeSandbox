@@ -13,6 +13,7 @@ set -euo pipefail
 TOOLBOX_ROOT="${TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
 DATA_CUBELET="${DATA_CUBELET:-/data/cubelet}"
 DATA_CUBE_SHIM="${DATA_CUBE_SHIM:-/data/cube-shim}"
+DATA_CUBE_SHARED="${DATA_CUBE_SHARED:-/data/cube-shared}"
 TMP_CUBE="${TMP_CUBE:-/tmp/cube}"
 BOOTSTRAP_STATE="${BOOTSTRAP_STATE:-/var/lib/cube-node-bootstrap}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -35,8 +36,8 @@ run "rm -rf '${TOOLBOX_ROOT}'"
 log "removing bootstrap state ${BOOTSTRAP_STATE}"
 run "rm -rf '${BOOTSTRAP_STATE}'"
 
-log "removing data dirs ${DATA_CUBELET} ${DATA_CUBE_SHIM} ${TMP_CUBE}"
-run "rm -rf '${DATA_CUBELET}' '${DATA_CUBE_SHIM}' '${TMP_CUBE}'"
+log "removing data dirs ${DATA_CUBELET} ${DATA_CUBE_SHIM} ${DATA_CUBE_SHARED} ${TMP_CUBE}"
+run "rm -rf '${DATA_CUBELET}' '${DATA_CUBE_SHIM}' '${DATA_CUBE_SHARED}' '${TMP_CUBE}'"
 run "rm -rf /data/cubelet-xfs.img /data/log/Cubelet /data/log/CubeShim /data/log/CubeVmm /data/snapshot_pack || true"
 
 # Best-effort residual dataplane cleanup (safe if devices/rules absent).

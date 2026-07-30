@@ -270,7 +270,7 @@ func mergeCubeNetworkConfigs(templateCfg *types.CubeNetworkConfig, requestCfg *t
 		return cloneCubeNetworkConfig(templateCfg)
 	}
 
-	out := cloneCubeNetworkConfigBase(templateCfg)
+	out := cloneCubeNetworkConfig(templateCfg)
 	if requestCfg.AllowInternetAccess != nil {
 		allowInternetAccess := *requestCfg.AllowInternetAccess
 		out.AllowInternetAccess = &allowInternetAccess
@@ -283,6 +283,10 @@ func mergeCubeNetworkConfigs(templateCfg *types.CubeNetworkConfig, requestCfg *t
 	if requestCfg.AllowPublicTraffic != nil {
 		allowPublicTraffic := *requestCfg.AllowPublicTraffic
 		out.AllowPublicTraffic = &allowPublicTraffic
+	}
+	if requestCfg.MaskRequestHost != nil {
+		maskRequestHost := *requestCfg.MaskRequestHost
+		out.MaskRequestHost = &maskRequestHost
 	}
 	if len(requestCfg.AllowOut) > 0 {
 		out.AllowOut = appendUniqueCIDRs(out.AllowOut, requestCfg.AllowOut)
@@ -299,31 +303,7 @@ func mergeCubeNetworkConfigs(templateCfg *types.CubeNetworkConfig, requestCfg *t
 }
 
 func cloneCubeNetworkConfig(in *types.CubeNetworkConfig) *types.CubeNetworkConfig {
-	out := cloneCubeNetworkConfigBase(in)
-	if out == nil {
-		return nil
-	}
-	out.Rules = cloneEgressRules(in.Rules)
-	return out
-}
-
-func cloneCubeNetworkConfigBase(in *types.CubeNetworkConfig) *types.CubeNetworkConfig {
-	if in == nil {
-		return nil
-	}
-	out := &types.CubeNetworkConfig{
-		AllowOut: append([]string(nil), in.AllowOut...),
-		DenyOut:  append([]string(nil), in.DenyOut...),
-	}
-	if in.AllowInternetAccess != nil {
-		allowInternetAccess := *in.AllowInternetAccess
-		out.AllowInternetAccess = &allowInternetAccess
-	}
-	if in.AllowPublicTraffic != nil {
-		allowPublicTraffic := *in.AllowPublicTraffic
-		out.AllowPublicTraffic = &allowPublicTraffic
-	}
-	return out
+	return in.DeepCopy()
 }
 
 // mergeEgressRules combines template + request rules. Because egress rules are
@@ -341,14 +321,14 @@ func mergeEgressRules(base []*types.EgressRule, extra []*types.EgressRule) []*ty
 		if r == nil {
 			continue
 		}
-		out = append(out, cloneEgressRule(r))
+		out = append(out, r.DeepCopy())
 	}
 
 	for _, r := range base {
 		if r == nil {
 			continue
 		}
-		out = append(out, cloneEgressRule(r))
+		out = append(out, r.DeepCopy())
 	}
 	return out
 }
@@ -359,42 +339,7 @@ func cloneEgressRules(in []*types.EgressRule) []*types.EgressRule {
 	}
 	out := make([]*types.EgressRule, 0, len(in))
 	for _, r := range in {
-		out = append(out, cloneEgressRule(r))
-	}
-	return out
-}
-
-func cloneEgressRule(in *types.EgressRule) *types.EgressRule {
-	if in == nil {
-		return nil
-	}
-	out := &types.EgressRule{Name: in.Name}
-	if in.Match != nil {
-		match := *in.Match
-		match.Method = append([]string(nil), in.Match.Method...)
-		out.Match = &match
-	}
-	if in.Action != nil {
-		action := &types.EgressRuleAction{Allow: in.Action.Allow}
-		if in.Action.Audit != nil {
-			audit := *in.Action.Audit
-			action.Audit = &audit
-		}
-		if len(in.Action.Inject) > 0 {
-			action.Inject = make([]*types.EgressRuleInject, 0, len(in.Action.Inject))
-			for _, inj := range in.Action.Inject {
-				if inj == nil {
-					continue
-				}
-				cp := *inj
-				if inj.Format != nil {
-					format := *inj.Format
-					cp.Format = &format
-				}
-				action.Inject = append(action.Inject, &cp)
-			}
-		}
-		out.Action = action
+		out = append(out, r.DeepCopy())
 	}
 	return out
 }

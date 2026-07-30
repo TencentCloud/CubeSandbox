@@ -14,6 +14,7 @@ import json
 import struct
 import threading
 import time
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -31,7 +32,15 @@ from cubesandbox._exceptions import (
     TemplateNotFoundError,
 )
 from cubesandbox._filesystem import Filesystem
-from cubesandbox._models import Execution, ExecutionError, Logs, OutputMessage, Result
+from cubesandbox._models import (
+    Execution,
+    ExecutionError,
+    Logs,
+    OutputMessage,
+    Result,
+    SandboxInfo,
+    SandboxState,
+)
 from cubesandbox._stream import _parse_line
 from cubesandbox.sandbox import Sandbox
 
@@ -134,6 +143,24 @@ class TestCreate:
         body = m.call_args.kwargs["json"]
         assert body["envVars"] == {"FOO": "bar"}
 
+    def test_create_accepts_e2b_envs_alias(self):
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(envs={"FOO": "bar"}, config=make_config())
+        body = m.call_args.kwargs["json"]
+        assert body["envVars"] == {"FOO": "bar"}
+
+    def test_create_accepts_matching_environment_aliases(self):
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(
+                env_vars={"FOO": "bar"}, envs={"FOO": "bar"}, config=make_config()
+            )
+        body = m.call_args.kwargs["json"]
+        assert body["envVars"] == {"FOO": "bar"}
+
+    def test_create_rejects_conflicting_environment_aliases(self):
+        with pytest.raises(ValueError, match="env_vars and envs"):
+            Sandbox.create(env_vars={"FOO": "bar"}, envs={"FOO": "baz"}, config=make_config())
+
     def test_create_sends_metadata(self):
         meta = {"network-policy": "deny-all"}
         with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
@@ -176,6 +203,15 @@ class TestCreate:
             Sandbox.create(network={"deny_out": ["0.0.0.0/0"]}, config=make_config())
         body = m.call_args.kwargs["json"]
         assert body["network"]["denyOut"] == ["0.0.0.0/0"]
+
+    def test_create_network_mask_request_host(self):
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(
+                network={"mask_request_host": "localhost:${PORT}"},
+                config=make_config(),
+            )
+        body = m.call_args.kwargs["json"]
+        assert body["network"]["maskRequestHost"] == "localhost:${PORT}"
 
     def test_create_network_empty_not_in_payload(self):
         with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
@@ -665,6 +701,22 @@ class TestListSandboxesV1:
             result = Sandbox.list(config=make_config())
         assert result == data
 
+    def test_list_includes_volume_mounts(self):
+        data = [{
+            **SANDBOX_DATA,
+            "volumeMounts": [{
+                "name": "hostdir-0",
+                "path": "/mnt/data",
+                "readOnly": True,
+            }],
+        }]
+        with patch("requests.Session.get", return_value=mock_response(data)):
+            result = Sandbox.list(config=make_config())
+
+        assert len(result) == 1
+        assert result[0]["volumeMounts"][0]["path"] == "/mnt/data"
+        assert result[0]["volumeMounts"][0]["readOnly"] is True
+
     def test_list_empty(self):
         with patch("requests.Session.get", return_value=mock_response([])):
             result = Sandbox.list(config=make_config())
@@ -691,6 +743,23 @@ class TestListSandboxesV2:
             result = Sandbox.list_v2(config=make_config())
         assert result == data
 
+    def test_list_v2_includes_volume_mounts(self):
+        data = [{
+            **SANDBOX_DATA,
+            "volumeMounts": [{
+                "name": "hostdir-0",
+                "path": "/mnt/ro",
+                "readOnly": True,
+            }],
+        }]
+        with patch("requests.Session.get", return_value=mock_response(data)):
+            result = Sandbox.list_v2(config=make_config())
+
+        mount = result[0]["volumeMounts"][0]
+        assert mount["path"] == "/mnt/ro"
+        assert mount["readOnly"] is True
+        assert "hostPath" not in mount
+
     def test_list_v2_calls_correct_endpoint(self):
         with patch("requests.Session.get", return_value=mock_response([])) as m:
             Sandbox.list_v2(config=make_config())
@@ -716,13 +785,166 @@ class TestHealth:
 
 # ── GET /sandboxes/:id ────────────────────────────────────────────────────────
 
+FULL_INFO_DATA = {
+    "sandboxID": SANDBOX_ID,
+    "templateID": "tpl-test",
+    "alias": "my-sandbox",
+    "clientID": "client-1",
+    "domain": DOMAIN,
+    "startedAt": "2026-05-14T00:00:00Z",
+    "endAt": "2026-05-14T01:00:00Z",
+    "envdVersion": "0.0.1",
+    "cpuCount": 2,
+    "memoryMB": 512,
+    "diskSizeMB": 1024,
+    "metadata": {"team": "core"},
+    "state": "running",
+}
+
+
 class TestGetInfo:
-    def test_get_info_success(self):
+    def test_sandbox_info_supports_e2b_style_construction(self):
+        info = SandboxInfo(sandbox_id="sb-direct", template_id="tpl-direct")
+        assert info.sandbox_id == "sb-direct"
+        assert info.template_id == "tpl-direct"
+        assert info["sandboxID"] == "sb-direct"
+        assert info["templateID"] == "tpl-direct"
+        assert json.loads(json.dumps(info))["sandboxID"] == "sb-direct"
+
+    def test_sandbox_info_does_not_serialize_envd_access_token(self):
+        secret = "envd-secret"
+        raw = {**FULL_INFO_DATA, "envdAccessToken": secret}
+        info = SandboxInfo.from_dict(raw)
+
+        assert info._envd_access_token == secret
+        assert info["envdAccessToken"] == secret
+        assert info.get("envdAccessToken") == secret
+        assert "envdAccessToken" not in info
+        assert "envdAccessToken" not in info.keys()
+        assert secret not in info.values()
+        assert "envdAccessToken" not in info.to_dict()
+        assert "envdAccessToken" not in info.copy()
+        assert secret not in json.dumps(info)
+
+    def test_get_info_returns_sandbox_info(self):
         sb = make_sandbox()
-        info = {**SANDBOX_DATA, "state": "paused"}
+        with patch.object(sb._session, "get", return_value=mock_response(FULL_INFO_DATA)):
+            info = sb.get_info()
+        assert isinstance(info, SandboxInfo)
+
+    def test_get_info_field_mapping(self):
+        sb = make_sandbox()
+        with patch.object(sb._session, "get", return_value=mock_response(FULL_INFO_DATA)):
+            info = sb.get_info()
+        assert info.sandbox_id == SANDBOX_ID
+        assert info.template_id == "tpl-test"
+        assert info.sandbox_domain == DOMAIN
+        assert info.cpu_count == 2
+        assert info.memory_mb == 512
+        assert info.disk_size_mb == 1024
+        assert info.envd_version == "0.0.1"
+        assert info.name == "my-sandbox"
+        assert info.metadata == {"team": "core"}
+
+    def test_get_info_timestamp_parsing(self):
+        sb = make_sandbox()
+        with patch.object(sb._session, "get", return_value=mock_response(FULL_INFO_DATA)):
+            info = sb.get_info()
+        assert isinstance(info.started_at, datetime)
+        assert info.started_at.year == 2026
+        assert info.started_at.tzinfo is not None
+        assert isinstance(info.end_at, datetime)
+        assert info.end_at.hour == 1
+
+    def test_get_info_nanosecond_timestamp_parsing(self):
+        """CubeAPI often emits 9-digit fractional seconds; parse to microseconds."""
+        sb = make_sandbox()
+        info = {
+            **FULL_INFO_DATA,
+            "startedAt": "2026-07-16T03:03:15.877523628Z",
+            "endAt": "2026-07-16T04:03:15.877523628Z",
+        }
         with patch.object(sb._session, "get", return_value=mock_response(info)):
             result = sb.get_info()
+        assert isinstance(result.started_at, datetime)
+        assert result.started_at.microsecond == 877523
+        assert result.started_at.tzinfo is not None
+        assert isinstance(result.end_at, datetime)
+
+    def test_get_info_out_of_range_epoch_timestamp_returns_none(self):
+        sb = make_sandbox()
+        info = {**FULL_INFO_DATA, "startedAt": 10**30}
+        with patch.object(sb._session, "get", return_value=mock_response(info)):
+            result = sb.get_info()
+        assert result.started_at is None
+
+    def test_get_info_state_normalization(self):
+        sb = make_sandbox()
+        info = {**FULL_INFO_DATA, "state": "paused"}
+        with patch.object(sb._session, "get", return_value=mock_response(info)):
+            result = sb.get_info()
+        assert result.state == SandboxState.PAUSED
+        assert result.state == "paused"
+        assert str(result.state) == "paused"
+
+    def test_get_info_unknown_state_falls_back_to_string(self):
+        sb = make_sandbox()
+        info = {**FULL_INFO_DATA, "state": "hibernating"}
+        with patch.object(sb._session, "get", return_value=mock_response(info)):
+            result = sb.get_info()
+        assert result.state == "hibernating"
+
+    def test_get_info_dict_access_backward_compat(self):
+        sb = make_sandbox()
+        info = {**FULL_INFO_DATA, "state": "paused"}
+        with patch.object(sb._session, "get", return_value=mock_response(info)):
+            result = sb.get_info()
+        assert isinstance(result, dict)
+        assert len(result) == len(info)
+        assert list(result) == list(info)
+        assert result["sandboxID"] == SANDBOX_ID
         assert result["state"] == "paused"
+        assert result.get("state") == "paused"
+        assert result.get("missing", "default") == "default"
+        assert "cpuCount" in result
+        assert dict(result.items())["state"] == "paused"
+        assert "paused" in list(result.values())
+        assert json.loads(json.dumps(result)) == info
+        assert result.copy() == info
+        copied = SandboxInfo.from_dict(info)
+        assert copied.pop("state") == "paused"
+        assert "state" not in copied
+
+    def test_get_info_missing_optional_fields(self):
+        sb = make_sandbox()
+        minimal = {"sandboxID": SANDBOX_ID, "templateID": "tpl-test"}
+        with patch.object(sb._session, "get", return_value=mock_response(minimal)):
+            info = sb.get_info()
+        assert info.started_at is None
+        assert info.end_at is None
+        assert info.cpu_count is None
+        assert info.metadata == {}
+        assert info.state is None
+
+    def test_get_info_includes_volume_mounts(self):
+        sb = make_sandbox()
+        info = {
+            **SANDBOX_DATA,
+            "volumeMounts": [{
+                "name": "hostdir-0",
+                "path": "/mnt/data",
+                "readOnly": True,
+            }],
+        }
+        with patch.object(sb._session, "get", return_value=mock_response(info)):
+            result = sb.get_info()
+
+        mounts = result["volumeMounts"]
+        assert len(mounts) == 1
+        assert mounts[0]["name"] == "hostdir-0"
+        assert mounts[0]["path"] == "/mnt/data"
+        assert mounts[0]["readOnly"] is True
+        assert "hostPath" not in mounts[0]
 
     def test_get_info_not_found(self):
         sb = make_sandbox()
@@ -1881,9 +2103,14 @@ class TestClone:
         stack, _snap, create_p, delete_p = self._patch_clone_internals()
         with stack:
             result = sb.clone()
-        assert len(result) == 1
-        assert create_p.call_count == 1
-        delete_p.assert_called_once()
+            assert len(result) == 1
+            assert create_p.call_count == 1
+            delete_p.assert_not_called()
+
+            response = MagicMock(ok=True)
+            with patch.object(result[0]._session, "delete", return_value=response):
+                result[0].kill()
+            delete_p.assert_called_once_with("snap-test", config=sb._config)
 
     def test_clone_n_sequential(self):
         sb = make_sandbox()
@@ -1913,14 +2140,52 @@ class TestClone:
         for call in create_p.call_args_list:
             assert call.kwargs["template"] == "snap-xyz"
 
-    def test_clone_deletes_snapshot_on_success(self):
+    def test_clone_deletes_snapshot_after_last_clone_is_killed(self):
         sb = make_sandbox()
         stack, _snap, _create, delete_p = self._patch_clone_internals(
             snapshot_id="snap-to-clean"
         )
         with stack:
-            sb.clone(n=3)
-        delete_p.assert_called_once_with("snap-to-clean", config=sb._config)
+            clones = sb.clone(n=3)
+            delete_p.assert_not_called()
+            response = MagicMock(ok=True)
+            for clone in clones:
+                with patch.object(clone._session, "delete", return_value=response):
+                    clone.kill()
+            delete_p.assert_called_once_with("snap-to-clean", config=sb._config)
+
+    def test_clone_cleanup_is_idempotent_for_repeated_kill(self):
+        sb = make_sandbox()
+        stack, _snap, _create, delete_p = self._patch_clone_internals()
+        with stack:
+            clone = sb.clone()[0]
+            response = MagicMock(ok=True)
+            with patch.object(clone._session, "delete", return_value=response):
+                clone.kill()
+                clone.kill()
+            delete_p.assert_called_once()
+
+    def test_clone_cleanup_is_thread_safe(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        sb = make_sandbox()
+        stack, _snap, _create, delete_p = self._patch_clone_internals()
+        with stack:
+            clones = sb.clone(n=8)
+            response = MagicMock(ok=True)
+            patches = [
+                patch.object(clone._session, "delete", return_value=response)
+                for clone in clones
+            ]
+            for session_patch in patches:
+                session_patch.start()
+            try:
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    list(pool.map(lambda clone: clone.kill(), clones))
+            finally:
+                for session_patch in patches:
+                    session_patch.stop()
+            delete_p.assert_called_once()
 
     def test_clone_deletes_snapshot_even_on_error(self):
         """If a Sandbox.create call raises, the ephemeral snapshot is still
@@ -1943,8 +2208,12 @@ class TestClone:
         stack, _snap, _create, delete_p = self._patch_clone_internals()
         delete_p.side_effect = ApiError("snapshot delete failed")
         with stack:
-            result = sb.clone(n=2)  # should not raise
-        assert len(result) == 2
+            result = sb.clone(n=2)
+            response = MagicMock(ok=True)
+            for clone in result:
+                with patch.object(clone._session, "delete", return_value=response):
+                    clone.kill()  # should not raise
+            assert len(result) == 2
 
     # ─── concurrent ──────────────────────────────────────────────────────────
 
@@ -2010,8 +2279,9 @@ class TestClone:
             with pytest.raises(ApiError, match="create failed"):
                 sb.clone(n=5, concurrency=3)
 
-        # Snapshot got cleaned up exactly once.
-        delete_p.assert_called_once()
+        # kill() is mocked and therefore cannot release clone ownership. The
+        # error-path backstop must still delete the temporary snapshot.
+        delete_p.assert_called_once_with("snap-partial", config=sb._config)
         # Every sandbox that ``Sandbox.create`` actually returned must have
         # been killed by clone() before it raised. We assert the count
         # matches what _flaky produced — n=5 with the 3rd raising means 4
@@ -2296,6 +2566,27 @@ class TestTemplateAPI:
         assert info.network_type == "tap"
         assert info.allow_internet_access is True
 
+    def test_template_info_from_dict_name_fallback_from_aliases(self):
+        info = TemplateInfo.from_dict({
+            "templateID": "tpl-alias",
+            "aliases": ["my-alias"],
+        })
+        assert info.name == "my-alias"
+
+    def test_build_forwards_name_into_payload(self):
+        body = {"jobID": "job-name", "templateID": "tpl-name", "status": "accepted"}
+        with patch("requests.Session.post", return_value=mock_response(body)) as post:
+            Template.build(image="python:3.11-slim", name="my-alias", config=make_config())
+        sent = post.call_args.kwargs["json"]
+        assert sent["name"] == "my-alias"
+        assert sent["image"] == "python:3.11-slim"
+
+    def test_build_omits_name_when_none(self):
+        body = {"jobID": "j", "templateID": "t", "status": "accepted"}
+        with patch("requests.Session.post", return_value=mock_response(body)) as post:
+            Template.build(image="python:3.11-slim", config=make_config())
+        assert "name" not in post.call_args.kwargs["json"]
+
     def test_template_get_parses_network_fields(self):
         body = {
             "templateID": "tpl-network",
@@ -2319,6 +2610,7 @@ class TestTemplateAPI:
         get.assert_called_once_with(
             "http://localhost:3000/templates/tpl-network",
             params={},
+            headers={}
         )
         assert info.template_id == "tpl-network"
         assert info.network_type == "tap"

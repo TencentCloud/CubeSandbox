@@ -493,8 +493,10 @@ function TemplateListDialog({
     setError(null);
     try {
       await agentHubApi.deleteTemplate(template.templateId);
+      setTemplates((previous) =>
+        previous.filter((item) => item.templateId !== template.templateId),
+      );
       setDeleteTemplate(null);
-      loadTemplates();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

@@ -1,7 +1,7 @@
 {{- if eq (include "cube.opsEnabled" .) "true" }}
 {{- $opsPort := .Values.cubeOps.service.port -}}
-apiVersion: {{ include "cube.cloneSetAPIVersion" . }}
-kind: CloneSet
+apiVersion: apps/v1
+kind: Deployment
 metadata:
   name: {{ include "cube.opsName" . }}
   labels:
@@ -9,7 +9,7 @@ metadata:
     app.kubernetes.io/component: ops
 spec:
   replicas: {{ .Values.cubeOps.replicas }}
-  {{- include "cube.cloneSetUpdateStrategy" . | nindent 2 }}
+  {{- include "cube.deploymentStrategy" . | nindent 2 }}
   selector:
     matchLabels:
       {{- include "cube.selectorLabels" . | nindent 6 }}

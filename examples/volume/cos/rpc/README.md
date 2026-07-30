@@ -6,7 +6,7 @@
 | Side | Hooks | This example uses |
 |------|-------|-------------------|
 | CubeMaster (Controller) | Create / Destroy | [COS Go SDK](https://cloud.tencent.com/document/product/436/31215) |
-| Cubelet (Node) | Attach / Detach | [cosfs](https://cloud.tencent.com/document/product/436/10976) |
+| Cubelet (Node) | Attach / Detach | [cosfs](https://cloud.tencent.com/document/product/436/6883) |
 
 Compared to [binary](../binary/): Controller uses **Go SDK** instead of **coscmd**; Node still uses **cosfs**.
 
@@ -37,14 +37,14 @@ Compared to [binary](../binary/): Controller uses **Go SDK** instead of **coscmd
 
 ## 1. cosfs (Cubelet node)
 
-Attach/Detach use cosfs. **Cubelet node only** — see [../README.md §1](../README.md#1-install-dependencies).
+Attach/Detach use cosfs. Install and verify: [../README.md §1](../README.md#1-install-dependencies).
 
 ```bash
-sudo ../install-deps.sh --cosfs
+sudo /usr/local/services/cubetoolbox/Cubelet/plugin/install-deps.sh --cosfs
 ls /dev/fuse && which cosfs && cosfs --version
 ```
 
-Official doc: [cosfs tool](https://cloud.tencent.com/document/product/436/10976)
+Official doc: [cosfs tool](https://cloud.tencent.com/document/product/436/6883)
 
 ---
 
@@ -67,6 +67,8 @@ replace github.com/tencentcloud/CubeSandbox/Cubelet => ../../../../Cubelet
 ## 3. Build and run
 
 Requires **Go 1.24+** (`go.mod` declares `go 1.24.8`).
+
+> For Kubernetes / Terraform deployments, configure `volume-cos.conf` yourself using native cluster mechanisms. The steps below use bare-metal paths as examples.
 
 ```bash
 PREFIX=/usr/local/services/cubetoolbox/CubeMaster/plugin
@@ -187,8 +189,8 @@ Volume.destroy(vol.volume_id)
 | | [binary](../binary/) | rpc (this example) |
 |---|---------------------|-------------------|
 | Type | binary | rpc |
-| Controller | [coscmd](https://cloud.tencent.com/document/product/436/6883) | [COS Go SDK](https://cloud.tencent.com/document/product/436/31215) |
-| Node | [cosfs](https://cloud.tencent.com/document/product/436/10976) | [cosfs](https://cloud.tencent.com/document/product/436/10976) |
+| Controller | [coscmd](https://cloud.tencent.com/document/product/436/10976) | [COS Go SDK](https://cloud.tencent.com/document/product/436/31215) |
+| Node | [cosfs](https://cloud.tencent.com/document/product/436/6883) | [cosfs](https://cloud.tencent.com/document/product/436/6883) |
 | driver | `cos` | `cos-rpc` |
 
 cosfs / mntns troubleshooting: [binary/README.md](../binary/README.md#create-sandbox-with-mount).
@@ -196,6 +198,6 @@ cosfs / mntns troubleshooting: [binary/README.md](../binary/README.md#create-san
 ## References
 
 - [Shared COS docs](../README.md)
-- [cosfs](https://cloud.tencent.com/document/product/436/10976) · [COS Go SDK](https://cloud.tencent.com/document/product/436/31215)
+- [cosfs](https://cloud.tencent.com/document/product/436/6883) · [COS Go SDK](https://cloud.tencent.com/document/product/436/31215)
 - Proto: `Cubelet/api/services/volumeplugin/v1/volumeplugin.proto`
 - [Volume Plugin framework](../../../../docs/guide/volume-plugin.md)

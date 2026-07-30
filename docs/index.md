@@ -23,8 +23,10 @@ features:
     details: eBPF-based inter-sandbox isolation and egress filtering at kernel level; built-in L7 security proxy enables per-domain/path/method policies with automatic credential injection — secrets never visible to sandbox code.
   - title: "📸 Flexible State Management"
     details: High-frequency snapshot and rollback at hundred-millisecond granularity. Create checkpoints on running sandboxes, roll back to any saved state at any time, or fork from a specific state to explore in parallel.
+  - title: "💾 Volume Framework"
+    details: E2B-compatible Volume framework that lets users plug in custom backend storage solutions. Volumes have an independent lifecycle and can be shared across sandboxes.
   - title: "🚀 Production Deployment"
-    details: Deploy production clusters on Tencent Cloud with one click using Terraform.
+    details: Deploy production clusters on Tencent Cloud with one click using Terraform. Also supports deployment on standard Kubernetes clusters (preview).
   - title: "💪 ARM Architecture Support"
     details: Full native ARM64 support across compilation, build, and deployment workflows.
 ---

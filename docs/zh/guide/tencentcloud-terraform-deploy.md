@@ -1,6 +1,6 @@
 # 腾讯云集群部署（Terraform）
 
-本指南介绍如何使用发布包中自带的 Terraform 部署器，在腾讯云上一键拉起一个**集群版** Cube Sandbox：托管的 TKE 控制面运行 `cube-master` / `cube-api` / `cube-proxy` / `cube-lifecycle-manager` / `cube-webui`，后端使用云数据库 MySQL + Redis，并配备一个或多个 CVM PVM 计算节点。一台跳板机（SSH 端口为 `443`）作为构建主机和私有 VPC 的堡垒机。
+本指南介绍如何使用发布包中自带的 Terraform 部署器，在腾讯云上一键拉起一个**集群版** Cube Sandbox：托管的 TKE 控制面运行 `cube-master` / `cube-api` / `cube-ops` / `cube-proxy` / `cube-lifecycle-manager` / `cube-webui`，后端使用云数据库 MySQL + Redis，并配备一个或多个 CVM PVM 计算节点。一台跳板机（SSH 端口为 `443`）作为构建主机和私有 VPC 的堡垒机。
 
 ::: tip 网络加固
 集群版的网络加固由**腾讯云安全组**完成：部署器按角色创建 **4 个独立安全组**（跳板机 / 计算节点 / TKE Pod / CLB），各自按最小权限放行（如对公网仅放行必要的入口，计算节点与 TKE 节点无任何公网入站），计算节点不分配公网 IP。**默认采用内网模式**（`TENCENTCLOUD_ENABLE_PUBLIC_NETWORK='false'`）：WebUI / cube-api / cube-proxy 三个用户侧服务关联**内网 CLB**，仅 VPC 内部（经跳板机 / VPN）可访问，不对公网暴露；如需公网访问，须显式设置 `TENCENTCLOUD_ENABLE_PUBLIC_NETWORK='true'` 切换为公网 CLB。如需进一步收紧，可在[腾讯云安全组控制台](https://console.cloud.tencent.com/vpc/securitygroup)按需对上述各个安全组（`cubesandbox-sg-jumpserver` / `cubesandbox-sg-compute` / `cubesandbox-sg-tke-pod` / `cubesandbox-sg-clb`）分别调整入站 / 出站规则。**当开启公网模式时**，请额外参阅[公网服务加固建议](#公网服务加固建议)。
@@ -32,8 +32,9 @@
   │  │  CVM 计算节点 ×N │       │    TKE 托管集群          │
   │  │  Cubelet         │       │  cube-master (×1)       │
   │  │  network-agent   │       │  cube-api (×1)          │
-  │  │  CubeEgress      │       │  cube-proxy (×1)        │
-  │  └──────────────────┘       │  cube-lifecycle-manager │
+  │  │  CubeEgress      │       │  cube-ops (×1)          │
+  │  └──────────────────┘       │  cube-proxy (×1)        │
+  │                             │  cube-lifecycle-manager │
   │                             │  cube-webui (×1)        │
   │                             └───┬─────────────┬────────┘
   │                                 │             │         │
@@ -56,7 +57,7 @@
 |------|------|------|
 | 跳板机 | CVM（公网 IP，SSH 443） | 构建镜像（TCR 模式）、作为私有 VPC 的堡垒机 |
 | 负载均衡 | CLB（内网/公网） | 前置 `cube-api` / `cube-proxy` / `cube-webui`，默认内网模式，用户流量入口 |
-| 控制面 | TKE 托管集群 | 运行 `cube-master` / `cube-api` / `cube-proxy` / `cube-lifecycle-manager` / `cube-webui` |
+| 控制面 | TKE 托管集群 | 运行 `cube-master` / `cube-api` / `cube-ops` / `cube-proxy` / `cube-lifecycle-manager` / `cube-webui` |
 | 计算节点 | CVM PVM | 运行 `Cubelet` / `network-agent` / `CubeEgress`，**实际承载沙箱** |
 | 数据库 | 云数据库 MySQL 8.0 + Redis 7.0 | 仅 VPC 内网访问，不开公网 |
 | 共享存储 | CFS（通用标准型 NFS，**可选**） | `USE_CFS=true` 且 cubemaster 多副本时，ReadWriteMany 共享 `/data/CubeMaster/storage` |
@@ -84,7 +85,7 @@
 
 **高级模式：**
 
-- `TENCENTCLOUD_USE_TCR=true`：创建 TCR，在跳板机构建并推送五个组件镜像。
+- `TENCENTCLOUD_USE_TCR=true`：创建 TCR，在跳板机构建并推送六个组件镜像。
 - `TENCENTCLOUD_USE_CFS=true` 且 `TENCENTCLOUD_CUBEMASTER_REPLICAS>1`：创建 CFS，cubemaster 多副本共享存储。
 - `TENCENTCLOUD_CUBE_PROXY_REPLICAS>1`：让 cube-proxy 以多副本方式运行，并复用同一个 CLB 对外服务。
 
@@ -272,7 +273,7 @@ export TENCENTCLOUD_SECRET_KEY="your-secret-key"
 2. 如不存在则在 `terraform/tencentcloud/.ssh/` 下生成 SSH 密钥对。
 3. 在跳板机上用内置 `mkcert` 生成 cube-proxy 的 TLS 证书（`cube.app` / `*.cube.app`），下载到 `terraform/tencentcloud/cubeproxy-certs/` 供 Secret 挂载。
 4. **默认模式**（`USE_TCR=false`）：拉取公网预置镜像，部署 TKE 插件与 CVM 计算节点（默认 2 台）。
-5. **TCR 模式**（`USE_TCR=true`）：创建 TCR，在跳板机构建并推送五个组件镜像，再部署 TKE 与计算节点。
+5. **TCR 模式**（`USE_TCR=true`）：创建 TCR，在跳板机构建并推送六个组件镜像，再部署 TKE 与计算节点。
 
 ## 配置
 
@@ -288,7 +289,7 @@ export TENCENTCLOUD_TKE_NODE_COUNT=2                 # TKE worker 节点数（�
 export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=SA9.MEDIUM8
 export TENCENTCLOUD_USE_TCR=false                    # 默认：公网预置镜像
 export TENCENTCLOUD_USE_CFS=false                    # 默认：无 CFS
-export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.5.1
+export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.6.0
 export TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS=1
 ```
 
@@ -316,6 +317,7 @@ export TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS=1
 | `TENCENTCLOUD_CUBE_DB` / `TENCENTCLOUD_CUBE_USER` / `TENCENTCLOUD_CUBE_PASSWORD` | `cube_mvp` / `cube` / 演示值 | 应用库名 / 账号 / 密码 |
 | `TENCENTCLOUD_CUBEMASTER_REPLICAS` | `1` | cube-master 副本数 |
 | `TENCENTCLOUD_CUBE_API_REPLICAS` | `1` | cube-api 副本数 |
+| `TENCENTCLOUD_CUBE_OPS_REPLICAS` | `1` | cube-ops 副本数。cube-webui 的 `/opsapi/` 与 `/cubeapi/v1/` 会转发到该集群内服务 |
 | `TENCENTCLOUD_CUBE_PROXY_REPLICAS` | `1` | cube-proxy 副本数。支持设置为大于 `1`；每个副本都会注册到 Redis，供 cube-lifecycle-manager 发现 |
 | `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS` | `1` | cube-lifecycle-manager 副本数。除非已验证 CLM 高可用行为，否则建议保持 `1` |
 | `TENCENTCLOUD_CUBE_WEBUI_REPLICAS` | `1` | cube-webui 副本数 |
@@ -354,7 +356,7 @@ export TENCENTCLOUD_BUILD_IMAGES=0        # TCR 模式下复用已推送的镜�
 | 计算节点（PVM） | `SA9.MEDIUM8` | 4C8G + 200GB 数据盘 | 2 台 |
 | TKE Worker | `SA9.LARGE8` | 4C8G | 2 台（`worker_config.count`） |
 | 跳板机 | `SA9.MEDIUM4` | 2C4G | 1 台 |
-| 控制面 Pod | — | cubemaster / cube-api / cube-proxy / cube-lifecycle-manager / cube-webui 各 1 副本 | 运行在 TKE worker 上 |
+| 控制面 Pod | — | cubemaster / cube-api / cube-ops / cube-proxy / cube-lifecycle-manager / cube-webui 各 1 副本 | 运行在 TKE worker 上 |
 
 ::: warning
 默认配置仅适合功能验证和小规模评估。大规模生产环境使用时，**必须调整计算节点和 TKE 节点的规格与数量**，否则会遇到 CPU/内存不足、Pod 调度失败、沙箱创建超时等问题。
@@ -401,7 +403,7 @@ export TF_VAR_compute_data_disk_size=1000
 
 ### 调整 TKE Worker 节点
 
-TKE Worker 运行 cube-master、cube-api、cube-proxy、cube-lifecycle-manager、cube-webui 等控制面 Pod。大规模场景下控制面的请求量和调度压力会增大，需要更多资源。
+TKE Worker 运行 cube-master、cube-api、cube-ops、cube-proxy、cube-lifecycle-manager、cube-webui 等控制面 Pod。大规模场景下控制面的请求量和调度压力会增大，需要更多资源。
 
 | 环境变量 | 说明 |
 |---------|------|

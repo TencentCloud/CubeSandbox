@@ -13,7 +13,7 @@ import (
 
 // DefaultVolumeBaseDir mirrors Cubelet's default parent directory, used when
 // AttachRequest.VolumeBaseDir is empty (older Cubelet).
-const DefaultVolumeBaseDir = "/data/volume"
+const DefaultVolumeBaseDir = "/data/cube-shared/volume"
 
 // Config holds COS credentials and mount settings for the plugin.
 type Config struct {

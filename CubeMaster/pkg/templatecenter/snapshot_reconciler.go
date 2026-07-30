@@ -26,6 +26,8 @@ import (
 	"gorm.io/gorm"
 )
 
+var getSnapshotReconcilerNodes = localcache.GetHealthyNodesByInstanceType
+
 const (
 	snapshotReconcilerInterval  = 5 * time.Minute
 	snapshotOperationTimeout    = 15 * time.Minute
@@ -277,7 +279,7 @@ func reconcileSnapshotReplicaPresence(ctx context.Context) error {
 }
 
 func reconcileSnapshotRuntimeRefs(ctx context.Context) error {
-	nodes := localcache.GetHealthyNodesByInstanceType(-1, cubeboxv1.InstanceType_cubebox.String())
+	nodes := getSnapshotReconcilerNodes(-1, cubeboxv1.InstanceType_cubebox.String())
 	var reconcileErr error
 	for i := range nodes {
 		nodeID := strings.TrimSpace(nodes[i].ID())
@@ -357,7 +359,7 @@ func refreshSnapshotStorageMetrics(ctx context.Context) error {
 		targets = append(targets, refreshTarget{nodeID: nodeID, nodeIP: nodeIP})
 	}
 
-	nodes := localcache.GetHealthyNodesByInstanceType(-1, cubeboxv1.InstanceType_cubebox.String())
+	nodes := getSnapshotReconcilerNodes(-1, cubeboxv1.InstanceType_cubebox.String())
 	for i := range nodes {
 		addTarget(nodes[i].ID(), nodes[i].HostIP())
 	}

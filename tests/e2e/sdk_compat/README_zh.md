@@ -59,6 +59,11 @@ cubemastercli tpl create-from-image \
 
 将生成的 template ID 设置为 `CUBE_TEMPLATE_ID`。
 
+`cases/network/test_mask_request_host.py` 会额外临时创建一个也暴露 `8765`
+端口的模板（在 `CUBE_PROXY_NODE_IP=127.0.0.1` 走跨节点映射路径时需要）。
+可用 `SDK_E2E_MASK_HOST_TEMPLATE_IMAGE` 或 `CUBE_TEMPLATE_E2E_IMAGE` 覆盖镜像。
+整套 suite 的 preflight 仍需要一个已 READY 的 `CUBE_TEMPLATE_ID`。
+
 ## 快速开始
 
 ```bash
@@ -91,6 +96,9 @@ pytest --run-e2e -m "smoke or p0" --sdk-e2e-backends=cubesandbox
 
 # 每日双 SDK 兼容性回归
 SDK_E2E_BACKENDS=e2b,cubesandbox pytest --run-e2e -m "p0 or p1"
+
+# Volume Plugin 回归（需手动部署并配置插件；cubesandbox >= 0.6.0）
+SDK_E2E_VOLUME_PLUGIN=true pytest --run-e2e -m volume --sdk-e2e-backends=cubesandbox
 
 # 更广泛的回归
 SDK_E2E_BACKENDS=e2b,cubesandbox \
@@ -212,7 +220,12 @@ cp env.example .env
 - `SDK_E2E_PLATFORM_LIFECYCLE_IDLE_TIMEOUT`：平台空闲超时，默认 `30` 秒；
 - `SDK_E2E_PLATFORM_LIFECYCLE_WAIT_MARGIN`：额外等待时间，默认 `20` 秒；
 - `SDK_E2E_PLATFORM_LIFECYCLE_POLL_TIMEOUT`：轮询窗口，默认 `45` 秒；
-- `CUBE_PROXY_ADMIN_PORT`：CubeProxy admin 端口，默认 `8082`。
+- `CUBE_PROXY_ADMIN_PORT`：CubeProxy admin 端口，默认 `8082`；
+- `SDK_E2E_VOLUME_PLUGIN`：启用 Volume Plugin 用例（CRUD 与 sandbox
+  `volumeMounts` 绑定/解绑），默认 `false`；
+- `SDK_E2E_VOLUME_DRIVER`：`POST /volumes` 使用的 driver，默认 `cos`；
+- `SDK_E2E_VOLUME_REFCOUNT_WAIT`：等待绑定中删除 `409` / 解绑后 `204`
+  的秒数，默认 `60`。
 
 ### 失败时保留 sandbox
 
@@ -328,7 +341,13 @@ tests/e2e/sdk_compat/
 - `cases/filesystem/`：读写、覆盖、多行内容、文件 API 与 shell 互操作；
 - `cases/run_code/`：表达式结果、stdout、kernel 状态和 Python 错误；
 - `cases/network/`：创建时的 allow/deny 和公网出站策略；
-- `cases/concurrency/`：同时运行多个 sandbox 时的数据隔离。
+- `cases/concurrency/`：同时运行多个 sandbox 时的数据隔离；
+- `cases/host-mount/`：宿主目录挂载扩展——happy path，以及创建时校验、
+  运行期 bind-mount 失败和跨 sandbox 共享等边界用例。
+- `cases/volume/`：Volume Plugin CRUD、sandbox `volumeMounts` 绑定/解绑，以及每个沙箱挂载点的只读约束（需 `SDK_E2E_VOLUME_PLUGIN=true`；仅 CubeSandbox）。插件需手动部署并配置，且要求 `cubesandbox` >= 0.6.0。
+- `cases/auth/`：`CUBE_API_KEY` 简单密钥鉴权，针对 CubeAPI 控制面——
+  `X-API-Key`/`Bearer` 通过、错误/缺失返回 401、`/health` 豁免（仅 CubeSandbox）。
+  仅当服务端以 `CUBE_API_KEY` 启动且 runner 导出相同 key 时才运行，否则跳过。
 
 新增测试应保持后端无关，通过 capability marker 表达后端差异。
 
@@ -351,16 +370,24 @@ Capability marker：
 - `@pytest.mark.sandbox_template_id("tpl-...")`：为单个用例或模块级用例集
   覆盖模板 ID；未设置时使用 `CUBE_TEMPLATE_ID` 或 `--cube-template-id`；
 - `@pytest.mark.requires_cubeproxy`：依赖 CubeProxy/lifecycle-manager
-  协调，未设置 `SDK_E2E_PLATFORM_LIFECYCLE=true` 时跳过。
+  协调，未设置 `SDK_E2E_PLATFORM_LIFECYCLE=true` 时跳过；
+- `@pytest.mark.volume`：Volume Plugin 用例，未设置
+  `SDK_E2E_VOLUME_PLUGIN=true` 时跳过。
+- `@pytest.mark.auth`：`CUBE_API_KEY` 简单密钥鉴权用例，未为 runner 设置
+  `CUBE_API_KEY` 或后端不支持 `auth_simple_key`（仅 CubeSandbox）时跳过。
 
 常用 capability 有 `lifecycle`、`commands`、`filesystem`、`run_code`。
 可选共享 capability 包括 `pause_resume`、`network_allow_deny`、
 `network_public_access`。
-当前分支的 `platform_lifecycle` 仅在 CubeSandbox capability 集合中启用。
+当前分支的 `platform_lifecycle` 与 `volume_plugin` 仅在 CubeSandbox
+capability 集合中启用。
 这不是 E2B 的固有能力限制，而是 E2B SDK 传递的 lifecycle 参数与 CubeAPI
 接收字段尚未对齐，导致 E2B 生命周期参数暂未生效。相关兼容修复见
 [PR #988](https://github.com/TencentCloud/CubeSandbox/pull/988)；修复合并并
 完成版本验证后，应重新启用 E2B 平台生命周期 capability 和双 backend 用例。
+`host_mount` 是 CubeSandbox 独有扩展；`cases/host-mount/` 通过
+`@pytest.mark.requires_capability("host_mount")` 跳过不支持宿主目录挂载的后端（如 e2b）。
+`volume_plugin` 仅用于 CubeSandbox Volume Plugin 用例。
 
 ## 清理
 
@@ -373,4 +400,5 @@ Capability marker：
 export SDK_E2E_KEEP_SANDBOX_ON_FAILURE=true
 ```
 
-通过和跳过的测试仍会清理 sandbox。
+该开关仅保留通过 `sdk_sandbox` fixture 创建、且**失败**的测试的 sandbox；通过和
+跳过的测试始终会被清理，直接创建 sandbox 的边界用例（使用各自的 helper）也始终清理。

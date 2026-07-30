@@ -31,6 +31,8 @@ This guide is for **first-time Volume Plugin users**: follow the steps in order 
 **Single-machine dev:** CubeMaster and Cubelet on one host — install deps once.  
 **Multi-node:** See the table in [§1 Install dependencies](#1-install-dependencies).
 
+> **Architecture:** Official cosfs does not support ARM / aarch64 (x86_64 / amd64 packages only). You may try s3fs as an alternative on your own.
+
 ---
 
 ## 1. Install dependencies
@@ -39,51 +41,47 @@ This guide is for **first-time Volume Plugin users**: follow the steps in order 
 
 | Tool | Install on | Purpose (Hook) | Plugin type |
 |------|------------|----------------|-------------|
-| **[cosfs](https://cloud.tencent.com/document/product/436/10976)** | **Cubelet** | attach / detach (FUSE mount to COS) | binary and rpc |
-| **[coscmd](https://cloud.tencent.com/document/product/436/6883)** | **CubeMaster** | create / destroy (COS directory) | **binary** only |
-| **jq** | **CubeMaster** (with coscmd) | binary plugin stdout JSON | **binary** only |
+| **[cosfs](https://cloud.tencent.com/document/product/436/6883)** | **Cubelet** | attach / detach (FUSE mount to COS) | binary and rpc |
+| **[coscmd](https://cloud.tencent.com/document/product/436/10976)** | **CubeMaster** | create / destroy (COS directory) | **binary** only |
+| **jq** | **CubeMaster** and **Cubelet** | binary plugin stdout JSON (create/destroy and attach/detach) | **binary** only |
 | COS Go SDK | Machine that builds rpc plugin | create / destroy | **rpc** only (via `go build`; see [rpc path](#rpc-path-optional)) |
 
 > **rpc plugin:** Cubelet still needs cosfs; **no** coscmd / jq. Controller logic lives in the `cube-volume-cos-rpc` process using the Go SDK.
 
-### Option A: install script (recommended)
+### Container deployment (Kubernetes / images)
 
-Script: `examples/volume/cos/install-deps.sh`. Supports CentOS / TencentOS / Ubuntu, etc.; runs basic checks after install.
+Container images already include **cosfs, coscmd, and jq** — no need to run the script below.
 
-**Cubelet node** (runs Cubelet, attach):
+### Option A: install script (recommended for bare metal / one-click)
 
-```bash
-cd /path/to/CubeSandbox
-sudo ./examples/volume/cos/install-deps.sh --cosfs
-```
-
-**CubeMaster node** (binary create/destroy):
+**Cubelet node:**
 
 ```bash
-sudo ./examples/volume/cos/install-deps.sh --coscmd --jq
+sudo /usr/local/services/cubetoolbox/Cubelet/plugin/install-deps.sh --cosfs --jq
 ```
 
-**Single machine, full binary stack:**
+**CubeMaster node:**
 
 ```bash
-sudo ./examples/volume/cos/install-deps.sh --all
+sudo /usr/local/services/cubetoolbox/CubeMaster/plugin/install-deps.sh --coscmd --jq
 ```
 
-Check only (no install):
+**Single machine** (CubeMaster and Cubelet on one host):
 
 ```bash
-./examples/volume/cos/install-deps.sh --cosfs --check-only
-./examples/volume/cos/install-deps.sh --coscmd --jq --check-only
+sudo /usr/local/services/cubetoolbox/Cubelet/plugin/install-deps.sh --all
 ```
+
+Check only (no install): add `--check-only`.
 
 ### Option B: manual install — Tencent Cloud official docs
 
-The script may not cover every distro/arch (ARM, custom images). **Follow Tencent docs** and verify with the commands below.
+**Follow Tencent docs** and verify with the commands below.
 
 | Tool | Official doc |
 |------|--------------|
-| cosfs | [COS cosfs tool](https://cloud.tencent.com/document/product/436/10976) |
-| coscmd | [COSCMD tool](https://cloud.tencent.com/document/product/436/6883) |
+| cosfs | [COS cosfs tool](https://cloud.tencent.com/document/product/436/6883) |
+| coscmd | [COSCMD tool](https://cloud.tencent.com/document/product/436/10976) |
 | jq | OS package manager: `yum install jq` / `apt install jq` |
 
 ### Verify install
@@ -105,14 +103,7 @@ Both must succeed; missing `/dev/fuse` breaks attach.
 which coscmd && coscmd --version
 ```
 
-Optional: test bucket access (after configuring keys in `volume-cos.conf`):
-
-```bash
-source /usr/local/services/cubetoolbox/CubeMaster/plugin/volume-cos.conf
-coscmd -b "$BUCKET" -r "$REGION" list /
-```
-
-**CubeMaster — jq** (binary)
+**CubeMaster / Cubelet — jq** (binary; required on both)
 
 ```bash
 which jq && jq --version
@@ -124,6 +115,8 @@ The install script runs similar checks when using `--cosfs` / `--coscmd` / `--jq
 ---
 
 ## 2. Install plugin and COS credentials
+
+> For Kubernetes / Terraform deployments, configure the plugin and `volume-cos.conf` yourself using native cluster mechanisms. The steps below use one-click / bare-metal paths as examples.
 
 One-click install places the binary plugin under **`/usr/local/services/cubetoolbox/CubeMaster/plugin/`** (Controller) and **`/usr/local/services/cubetoolbox/Cubelet/plugin/`** (Node), and seeds `volume-cos.conf` from `volume-cos.conf.example` in each directory. After install, edit credentials on the matching node:
 
@@ -163,7 +156,7 @@ Required fields in `volume-cos.conf`:
 | `BUCKET` | `BucketName-APPID` | `mybucket-1250000000` |
 | `REGION` | Region | `ap-guangzhou` |
 
-Mount base directory is **not** in this file — Cubelet passes it on attach (default `/data/volume`; see [§4](#4-configure-cubelet)).
+Mount base directory is **not** in this file — Cubelet passes it on attach (default `/data/cube-shared/volume`; see [§4](#4-configure-cubelet)).
 
 ---
 
@@ -191,11 +184,11 @@ Save and restart together with Cubelet ([§5](#5-restart-services-and-verify)).
 
 Edit Cubelet config (common path: `/usr/local/services/cubetoolbox/Cubelet/config/config.toml`).
 
-Under `[plugins."io.cubelet.internal.v1.storage"]`, confirm mount parent (optional; default `/data/volume`):
+Under `[plugins."io.cubelet.internal.v1.storage"]`, confirm mount parent (optional; default `/data/cube-shared/volume`):
 
 ```toml
 [plugins."io.cubelet.internal.v1.storage"]
-  volume_plugin_base_dir = "/data/volume"
+  volume_plugin_base_dir = "/data/cube-shared/volume"
 ```
 
 Add the **Node** plugin (Attach / Detach):
@@ -208,7 +201,7 @@ Add the **Node** plugin (Attach / Detach):
 ```
 
 **`name` must match CubeMaster** (both `cos` here).  
-Plugin `host_path` must be under `volume_plugin_base_dir` (example script uses `/data/volume/cos-<volumeID>`).
+Plugin `host_path` must be under `volume_plugin_base_dir` (example script uses `/data/cube-shared/volume/cos-<volumeID>`).
 
 ---
 
@@ -246,8 +239,8 @@ Expected (binary example):
   --namespace default \
   --volume-id test-vol \
   --ref-count 0 \
-  --volume-base-dir /data/volume
-# Success: one JSON line on stdout with "host_path":"/data/volume/cos-test-vol", "error":""
+  --volume-base-dir /data/cube-shared/volume
+# Success: one JSON line on stdout with "host_path":"/data/cube-shared/volume/cos-test-vol", "error":""
 ```
 
 ---
@@ -373,7 +366,7 @@ More: [Framework §8 Troubleshooting](../../docs/guide/volume-plugin.md#8-debugg
 <bucket>/volumes/<volumeID>/   ← one directory per Volume
 ```
 
-Attach mounts cosfs to `/data/volume/cos-<volumeID>/` on the host, then virtiofs into the sandbox.
+Attach mounts cosfs to `/data/cube-shared/volume/cos-<volumeID>/` on the host, then virtiofs into the sandbox.
 
 ### Hook behavior (RefCount)
 

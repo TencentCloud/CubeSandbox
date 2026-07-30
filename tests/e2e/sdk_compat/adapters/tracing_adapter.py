@@ -92,6 +92,18 @@ class TracingSandboxAdapter(SandboxAdapter):
             lambda: self._wrapped.run_code(code, timeout=timeout),
         )
 
+    def get_host(self, port: int) -> str:
+        return self._trace.capture(
+            "get_host",
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+                "port": port,
+            },
+            lambda: self._wrapped.get_host(port),
+            output=lambda host: {"host": host},
+        )
+
     def pause(self, *, timeout: int = 60) -> None:
         return self._trace.capture(
             "pause",

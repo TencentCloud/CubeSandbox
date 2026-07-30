@@ -68,10 +68,11 @@ func (p *Plugin) Create(ctx context.Context, volumeID, name string) (*plugin.Vol
 		return nil, fmt.Errorf("rpc volume plugin %q create: %w", p.name, err)
 	}
 	return &plugin.VolumeInfo{
-		VolumeID:   volumeID,
-		Name:       name,
-		Token:      resp.GetToken(),
-		PluginName: p.name,
+		VolumeID:    volumeID,
+		Name:        name,
+		Token:       resp.GetToken(),
+		PrivateData: resp.GetPrivateData(),
+		PluginName:  p.name,
 	}, nil
 }
 

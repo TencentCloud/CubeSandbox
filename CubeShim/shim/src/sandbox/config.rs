@@ -2,18 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+use std::collections::HashMap;
+
+use cube_hypervisor::config::{BackendFsConfig, RateLimiterConfig};
+use serde::{Deserialize, Serialize};
+
+use super::device::{self, Device, DeviceDisk};
 use crate::common::utils::Utils;
 use crate::common::CResult;
 use crate::common::PRODUCT_CUBEBOX;
 use crate::sandbox::disk::{Disk, ANNO_DISK};
 use crate::sandbox::net::{Net, ANNO_NET};
 use crate::sandbox::pmem::{Pmem, ANNO_PMEM};
-use cube_hypervisor::config::{BackendFsConfig, RateLimiterConfig};
-
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-
-use super::device::{self, Device, DeviceDisk};
 
 pub const ANNO_VM_RES: &str = "cube.vmmres";
 pub const ANNO_VMM_FS: &str = "cube.fs";
@@ -58,6 +58,7 @@ pub struct Config {
     pub notify_snapshot_ret: bool,
     pub app_snapshot_create: bool,
     pub app_snapshot_restore: bool,
+    pub use_passfd_io: bool,
     /// Extra kernel cmdline parameters injected through annotations.
     pub extra_kernel_params: Vec<String>,
 }
@@ -128,6 +129,11 @@ impl Config {
                 None
             }
         };
+
+        let use_passfd_io = anno
+            .get("cube.use_passfd_io")
+            .map(|v| !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true);
 
         let mut cube_vips = String::new();
         if let Some(v) = anno.get(ANNO_CUBE_VIPS) {
@@ -211,6 +217,7 @@ impl Config {
             notify_snapshot_ret,
             app_snapshot_create,
             app_snapshot_restore,
+            use_passfd_io,
             extra_kernel_params,
         };
         Ok(c)

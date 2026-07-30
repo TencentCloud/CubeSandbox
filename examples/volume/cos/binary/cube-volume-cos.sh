@@ -26,7 +26,7 @@
 #   REGION=ap-guangzhou
 #
 # The FUSE mount path is not configured here: Cubelet passes it on attach via
-# --volume-base-dir (default /data/volume) and the plugin mounts at
+# --volume-base-dir (default /data/cube-shared/volume) and the plugin mounts at
 # <volume-base-dir>/cos-<volume_id>.
 #
 # chmod 600 <plugin-dir>/volume-cos.conf
@@ -46,7 +46,7 @@
 # Mount layout (one cosfs process per volume):
 #   <volume-base-dir>/cos-<volume_id>/  →  BUCKET:/volumes/<volume_id>/
 #   where <volume-base-dir> is passed by Cubelet via --volume-base-dir
-#   (default /data/volume). host_path MUST live inside it.
+#   (default /data/cube-shared/volume). host_path MUST live inside it.
 #
 # Locking: per-volume flock on /run/cube-volume-cos/<volume_id>.lock
 # ensures concurrent attach/detach for the same volume is serialised.
@@ -64,9 +64,9 @@ LOCK_DIR="/run/cube-volume-cos"
 PASSWD_FILE="/etc/cube/.passwd-cosfs"
 
 # Parent directory Cubelet requires cosfs mounts to live under.
-# Cubelet passes --volume-base-dir on attach (default /data/volume).
+# Cubelet passes --volume-base-dir on attach (default /data/cube-shared/volume).
 # Each volume gets its own subdir: <volume-base-dir>/cos-<volume_id>.
-VOLUME_BASE_DIR="/data/volume"
+VOLUME_BASE_DIR="/data/cube-shared/volume"
 
 # Read SECRET_ID, SECRET_KEY, BUCKET, REGION from the config file.
 load_config() {
@@ -148,14 +148,30 @@ coscmd_run() {
     coscmd "$@"
 }
 
+# coscmd sometimes exits 0 while printing an XML/JSON error body. Treat those
+# as failure so Create does not report success when COS rejected the upload.
+coscmd_output_indicates_failure() {
+    printf '%s' "$1" | grep -qiE \
+        '<Error>|InvalidAccessKeyId|AccessDenied|AccessDeniedError|Upload file failed|SignatureDoesNotMatch|NoSuchBucket|403 Forbidden'
+}
+
 # Upload a tiny .keep file so the volume folder exists in COS before first mount.
+# Propagates coscmd failures (exit code and soft-fail stdout/stderr) to the caller.
 cos_create_dir() {
     local volume_id="$1"
     log "coscmd: create $(cos_subdir "$volume_id")/.keep"
-    local tmpfile
+    local tmpfile out rc=0
     tmpfile="$(mktemp)"
-    coscmd_run upload "$tmpfile" "$(cos_subdir "$volume_id")/.keep"
+    set +e
+    out="$(coscmd_run upload "$tmpfile" "$(cos_subdir "$volume_id")/.keep" 2>&1)"
+    rc=$?
+    set -e
     rm -f "$tmpfile"
+    if [[ "$rc" -ne 0 ]] || coscmd_output_indicates_failure "$out"; then
+        log "ERROR: coscmd create failed for ${volume_id}: ${out}"
+        return 1
+    fi
+    return 0
 }
 
 # Recursively delete the volume folder from COS (destroy hook).
@@ -200,13 +216,23 @@ cosfs_mount_volume() {
 
     mkdir -p "$mnt"
     log "cosfs: mounting ${BUCKET}:/$(cos_subdir "$volume_id") -> ${mnt}"
-    cosfs "${BUCKET}:/$(cos_subdir "$volume_id")" "$mnt" \
+    local out rc=0
+    set +e
+    out="$(cosfs "${BUCKET}:/$(cos_subdir "$volume_id")" "$mnt" \
         "-ourl=${endpoint}"            \
         "-opasswd_file=${PASSWD_FILE}" \
         "-oallow_other"                \
         "-ononempty"                   \
         "-odbglevel=info"              \
-        "-onoxattr"
+        "-onoxattr" 2>&1)"
+    rc=$?
+    set -e
+    # cosfs may exit 0 even when auth fails; require a real mountpoint.
+    if [[ "$rc" -ne 0 ]] || ! mountpoint -q "$mnt" 2>/dev/null; then
+        log "ERROR: cosfs mount failed for ${volume_id}: ${out}"
+        rmdir "$mnt" 2>/dev/null || true
+        return 1
+    fi
     log "cosfs: mounted ok"
 }
 
@@ -233,10 +259,13 @@ cosfs_unmount_volume() {
 # ---------------------------------------------------------------------------
 
 # create: provision backend storage for a new volume.
-# Steps: load config -> create COS folder -> return empty token JSON.
+# Steps: load config -> create COS folder -> return token/private_data JSON.
 #
 # Input:  --volume-id <id>  --name <name>
-# Output: stdout JSON {"token":"","error":""}
+# Output: stdout JSON {"token":"","private_data":"volumes/<id>/","error":""}
+#
+# private_data is opaque Create→Attach state (max 1024 bytes). This COS demo
+# stores the object-key prefix so Attach can log/reuse it without hardcoding.
 do_create() {
     local volume_id="$1" name="$2"
     log "create volumeID=${volume_id} name=${name}"
@@ -245,8 +274,9 @@ do_create() {
     # Step 1: create volumes/<volume_id>/ in the COS bucket
     cos_create_dir "$volume_id" || { err_json "coscmd create dir failed for ${volume_id}"; exit 1; }
 
-    # Step 2: return success (COS plugin has no extra token to hand back)
-    jq -cn '{ token: "", error: "" }'
+    # Step 2: return success; private_data carries the COS key prefix for Attach
+    jq -cn --arg pd "volumes/${volume_id}/" \
+        '{ token: "", private_data: $pd, error: "" }'
 }
 
 # destroy: remove backend storage when user deletes a volume.
@@ -277,12 +307,13 @@ do_destroy() {
 # Cubelet bind-mounts host_path into the sandbox at the user's chosen path.
 #
 # Input:  --sandbox-id <id>  --namespace <ns>  --volume-id <vid>
-#         --ref-count <n>  --volume-base-dir <dir>
+#         --ref-count <n>  --volume-base-dir <dir>  [--private-data <str>]
 # Output: {"host_path":"<volume-base-dir>/cos-<vid>","metadata":{...},"error":""}
 do_attach() {
     local sandbox_id="$1" volume_id="$2" ref_count="$3"
+    local private_data="${4:-}"
 
-    log "attach sandbox=${sandbox_id} volumeID=${volume_id} refcount_before=${ref_count}"
+    log "attach sandbox=${sandbox_id} volumeID=${volume_id} refcount_before=${ref_count} private_data=${private_data}"
 
     load_config
     ensure_passwd_file
@@ -360,6 +391,7 @@ OP=""
 VOLUME_ID="" NAME=""
 SANDBOX_ID="" NAMESPACE="" REF_COUNT="0"
 METADATA="{}"
+PRIVATE_DATA=""
 
 # CubeMaster/Cubelet pass arguments like --op attach --volume-id xxx ...
 while [[ $# -gt 0 ]]; do
@@ -372,6 +404,7 @@ while [[ $# -gt 0 ]]; do
         --ref-count)    REF_COUNT="$2";    shift 2 ;;
         --volume-base-dir)
             [[ -n "${2:-}" ]] && VOLUME_BASE_DIR="$2"; shift 2 ;;
+        --private-data) PRIVATE_DATA="$2"; shift 2 ;;
         --metadata)     METADATA="$2";     shift 2 ;;
         *) die "unknown argument: $1" ;;
     esac
@@ -384,7 +417,7 @@ case "$OP" in
     create)  do_create  "$VOLUME_ID" "$NAME" ;;
     destroy) do_destroy "$VOLUME_ID" ;;
     # Cubelet (data plane)
-    attach)  do_attach  "$SANDBOX_ID" "$VOLUME_ID" "$REF_COUNT" ;;
+    attach)  do_attach  "$SANDBOX_ID" "$VOLUME_ID" "$REF_COUNT" "$PRIVATE_DATA" ;;
     detach)  do_detach  "$SANDBOX_ID" "$VOLUME_ID" "$REF_COUNT" "$METADATA" ;;
     *)       err_json "unknown op: ${OP}"; exit 1 ;;
 esac

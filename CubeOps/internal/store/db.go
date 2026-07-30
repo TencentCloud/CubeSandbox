@@ -11,6 +11,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
 	"github.com/tencentcloud/CubeSandbox/CubeDB/dao/driver/mysql"
 	"github.com/tencentcloud/CubeSandbox/CubeDB/dao/driver/postgres"
+	"github.com/tencentcloud/CubeSandbox/CubeDB/migrate"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/crypto"
 	"gorm.io/gorm"
 )
@@ -31,9 +32,13 @@ func New(ctx context.Context, cfg dao.Config) (*Store, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
-	slog.Info("running database migrations")
-	if err := dao.Migrate(ctx); err != nil {
-		return nil, fmt.Errorf("schema migration failed: %w", err)
+	if migrate.AutoMigrationEnabled() {
+		slog.Info("running database migrations")
+		if err := dao.Migrate(ctx); err != nil {
+			return nil, fmt.Errorf("schema migration failed: %w", err)
+		}
+	} else {
+		slog.Warn("CUBE_AUTO_MIGRATION=false: skipping schema migration; DDL must be applied out-of-band by a privileged account")
 	}
 
 	s := &Store{db: gormDB}

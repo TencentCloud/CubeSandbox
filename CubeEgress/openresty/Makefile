@@ -7,6 +7,18 @@ IMAGE_TAG         := $(OPENRESTY_VERSION)-tproxy
 # Override with: make build ARCH=amd64  or  make build ARCH=arm64
 ARCH ?= $(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 
+# Set MIRROR=cn to source apt packages from a China-reachable Ubuntu mirror
+# (amd64 -> $(APT_MIRROR_BASE)/ubuntu, arm64 -> $(APT_MIRROR_BASE)/ubuntu-ports).
+# The mirror is only wired into the build when MIRROR=cn; any other value builds
+# against the image default (archive.ubuntu.com on amd64, ports.ubuntu.com on arm64).
+APT_MIRROR_BASE ?= http://mirrors.tencent.com
+BUILD_ARGS ?=
+ifeq ($(MIRROR),cn)
+BUILD_ARGS += --build-arg 'APT_MIRROR_BASE=$(APT_MIRROR_BASE)'
+else ifneq ($(MIRROR),)
+$(warning MIRROR='$(MIRROR)' is not recognized; expected 'cn' or empty -- building against the image default apt sources)
+endif
+
 IMAGES := \
 	cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/openresty-tproxy \
 	cube-sandbox-int.tencentcloudcr.com/cube-sandbox/openresty-tproxy \
@@ -36,6 +48,7 @@ build:
 		--platform linux/$(ARCH)				\
 		--build-arg OPENRESTY_VERSION=$(OPENRESTY_VERSION)	\
 		--build-arg NGINX_VERSION=$(NGINX_VERSION)		\
+		$(BUILD_ARGS)						\
 		-t $(IMAGE_LOCAL):$(IMAGE_TAG)-$(ARCH)			\
 		.
 

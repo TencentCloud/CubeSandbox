@@ -40,14 +40,18 @@ const cleanupTemplateRPCTimeout = 1 * time.Minute
 // the JobPhase* set in template_image.go; they are referenced here without
 // re-declaration to avoid duplicate constants.
 
-func SubmitTemplateCommit(ctx context.Context, sandboxID, nodeID, nodeIP string, req *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.TemplateImageJobInfo, error) {
+func SubmitTemplateCommit(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, templateID string, override *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.TemplateImageJobInfo, error) {
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
 	}
-	if req == nil || req.Request == nil || strings.TrimSpace(req.RequestID) == "" {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
 		return nil, errors.New("requestID is required for commit; retry should generate a new request id")
 	}
-	requestID := strings.TrimSpace(req.RequestID)
+	req, err := prepareTemplateCommitRequest(ctx, requestID, sandboxID, templateID, override)
+	if err != nil {
+		return nil, err
+	}
 	createReq, templateID, err := NormalizeRequest(req)
 	if err != nil {
 		return nil, err
@@ -162,6 +166,31 @@ func SubmitTemplateCommit(ctx context.Context, sandboxID, nodeID, nodeIP string,
 	}), jobID, sandboxID, nodeID, nodeIP, createReq, storedReq)
 
 	return GetTemplateImageJobInfo(ctx, jobID)
+}
+
+func prepareTemplateCommitRequest(ctx context.Context, requestID, sandboxID, templateID string, override *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.CreateCubeSandboxReq, error) {
+	var source *sandboxtypes.CreateCubeSandboxReq
+	var err error
+	if override == nil {
+		source, err = loadSandboxCreateRequestFn(ctx, sandboxID)
+	} else {
+		source, err = cloneCreateRequest(override)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if source == nil {
+		return nil, errors.New("sandbox create request is empty")
+	}
+	if source.Request == nil {
+		source.Request = &sandboxtypes.Request{}
+	}
+	source.RequestID = requestID
+	if source.Annotations == nil {
+		source.Annotations = map[string]string{}
+	}
+	source.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = strings.TrimSpace(templateID)
+	return source, nil
 }
 
 func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP string, createReq, storedReq *sandboxtypes.CreateCubeSandboxReq) {

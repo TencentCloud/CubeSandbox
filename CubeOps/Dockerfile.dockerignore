@@ -9,3 +9,5 @@
 !CubeOps/**
 !CubeDB
 !CubeDB/**
+!cubelog
+!cubelog/**

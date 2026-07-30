@@ -39,6 +39,8 @@ export interface TemplateDetail extends TemplateSummary {
   createRequest?: unknown;
   networkType?: string | null;
   allowInternetAccess?: boolean | null;
+  /** Maps from dto.aliases[0] — CubeMaster returns the template alias as `aliases: string[]`. */
+  displayName?: string | null;
 }
 
 export interface TemplateCompatSummary {
@@ -149,6 +151,10 @@ function mapTemplateDetail(dto: TemplateDetailDto): TemplateDetail {
     networkType: (dto as unknown as { networkType?: string }).networkType ?? null,
     allowInternetAccess:
       (dto as unknown as { allowInternetAccess?: boolean }).allowInternetAccess ?? null,
+    displayName:
+      dto.aliases?.[0]?.trim() ||
+      (dto as unknown as { displayName?: string }).displayName?.trim() ||
+      null,
   };
 }
 
@@ -255,7 +261,11 @@ export const templateApi = {
     api<{ lines?: string[]; status?: string; progress?: number }>(
       `/templates/${id}/builds/${buildID}/logs`,
     ),
-  remove: (id: string) => api<void>(`/templates/${id}`, { method: 'DELETE' }),
+  remove: (id: string) =>
+    api<void>(`/templates/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      params: { sync: true },
+    }),
   compat: () => api<TemplateCompatMatrix>('/templates/compat'),
   adoptCompatBaseline: (id: string) =>
     api<{ updated: number }>(`/templates/compat/${id}/adopt-baseline`, { method: 'POST' }),
