@@ -88,5 +88,3 @@ python tool_agent_loop.py
   `tool-profile.txt`。只有要钉死进自己层时才用 `INSTALL_CURL=1`。
 
 [English](README.md)
-
-[English](README.md)

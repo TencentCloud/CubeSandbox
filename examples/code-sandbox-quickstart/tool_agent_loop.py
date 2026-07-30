@@ -52,11 +52,11 @@ def health_sandbox_count() -> int:
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode())
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+        if "sandboxes" not in data:
+            raise SystemExit(f"health payload missing sandboxes: {data!r}")
+        return int(data["sandboxes"])
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError, TypeError) as exc:
         raise SystemExit(f"health check failed: {exc}") from exc
-    if "sandboxes" not in data:
-        raise SystemExit(f"health payload missing sandboxes: {data!r}")
-    return int(data["sandboxes"])
 
 
 def run_gated(
