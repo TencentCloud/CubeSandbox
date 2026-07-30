@@ -61,8 +61,7 @@ function _M.gate(ins_id)
         ngx.log(ngx.WARN, "LEVEL_WARN||",
             string.format("request %s sandbox %s is %s; returning 410",
                 ngx.var.http_x_cube_request_id or "-", ins_id, state))
-        ngx.var.cube_retcode = "310410"
-        ngx.exit(410)
+        utils:respond_gone()
     end
 
     if state ~= "paused" then
