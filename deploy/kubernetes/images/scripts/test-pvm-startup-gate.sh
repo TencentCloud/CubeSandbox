@@ -72,7 +72,7 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 ensure_startup_gate_taint
 startup_gate_has_taint
-if (clear_startup_gate_taint); then
+if (clear_startup_gate_taint) 2>/dev/null; then
   echo "clear unexpectedly accepted a missing fingerprint" >&2
   exit 1
 fi
@@ -88,7 +88,7 @@ fi
 
 write_pvm_host_ready
 mark_pvm_mutating
-if (clear_startup_gate_taint); then
+if (clear_startup_gate_taint) 2>/dev/null; then
   echo "clear unexpectedly accepted pvm-mutating state" >&2
   exit 1
 fi
@@ -96,7 +96,7 @@ clear_pvm_mutating
 if (
   export FAIL_CLEAR=1
   clear_startup_gate_taint
-); then
+) 2>/dev/null; then
   echo "clear API failure unexpectedly succeeded" >&2
   exit 1
 fi
@@ -113,7 +113,7 @@ if (
   export FAIL_TAINT=1
   ensure_startup_gate_taint
   drain_startup_gate_dependents
-); then
+) 2>/dev/null; then
   echo "ensure failure unexpectedly succeeded" >&2
   exit 1
 fi
@@ -127,7 +127,7 @@ rm -f "$TEST_STATE/evicted-master"
 if (
   export FAIL_EVICT=1
   drain_startup_gate_dependents
-); then
+) 2>/dev/null; then
   echo "PDB/eviction rejection unexpectedly succeeded" >&2
   exit 1
 fi
@@ -333,7 +333,7 @@ printf 'true ' > "$TEST_STATE/values"
 if (
   export IS_UPGRADE=true
   sh "$PREFLIGHT_SCRIPT"
-); then
+) 2>/dev/null; then
   echo "upgrade non-maintenance gate unexpectedly passed" >&2
   exit 1
 fi
@@ -349,7 +349,7 @@ IS_UPGRADE=true sh "$PREFLIGHT_SCRIPT"
 if (
   : > "$TEST_STATE/nodes"
   sh "$PREFLIGHT_SCRIPT"
-); then
+) 2>/dev/null; then
   echo "empty node list unexpectedly passed" >&2
   exit 1
 fi
