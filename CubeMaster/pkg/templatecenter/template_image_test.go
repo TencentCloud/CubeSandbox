@@ -1499,8 +1499,8 @@ func TestRunRedoTemplateImageJobRegeneratesRequestForRedoTemplateID(t *testing.T
 		capturedReq = req
 		return []ReplicaStatus{{NodeID: "node-a", Status: ReplicaStatusReady}}, nil
 	})
-	patches.ApplyFunc(refreshTemplateReplicaSummary, func(ctx context.Context, templateID string) error {
-		return nil
+	patches.ApplyFunc(refreshTemplateReplicaSummary, func(ctx context.Context, templateID, alias string) (string, error) {
+		return "", nil
 	})
 	patches.ApplyFunc(GetTemplateInfo, func(ctx context.Context, templateID string) (*TemplateInfo, error) {
 		return &TemplateInfo{TemplateID: templateID, Status: StatusReady}, nil

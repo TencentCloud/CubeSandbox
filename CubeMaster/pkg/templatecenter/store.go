@@ -447,7 +447,10 @@ func CreateTemplate(ctx context.Context, req *sandboxtypes.CreateCubeSandboxReq)
 	if persistErr != nil {
 		return nil, persistErr
 	}
-	return finalizeTemplateReplicas(ctx, templateID, createReq.InstanceType, constants.GetAppSnapshotVersion(createReq.Annotations), replicas)
+	// The synchronous CreateCubeSandboxReq path carries no template alias (that
+	// is exclusive to CreateTemplateFromImageReq), so no alias is claimed here.
+	info, _, finalizeErr := finalizeTemplateReplicas(ctx, templateID, createReq.InstanceType, constants.GetAppSnapshotVersion(createReq.Annotations), "", replicas)
+	return info, finalizeErr
 }
 
 func healthyTemplateNodes(instanceType string) []*node.Node {
@@ -666,28 +669,43 @@ func ensureRuntimeTemplateRequest(req *sandboxtypes.CreateCubeSandboxReq) {
 	}
 }
 
-func refreshTemplateReplicaSummary(ctx context.Context, templateID string) error {
+// refreshTemplateReplicaSummary recomputes the template's aggregate status from
+// its replicas and publishes it. When the template is not FAILED it claims the
+// requested alias *before* publishing the status, so a client that observes the
+// template as READY (e.g. by polling GetTemplateInfo) is guaranteed the alias
+// already resolves — closing the create/claim publish-ordering race. The
+// returned claimWarning is non-empty when the alias could not be claimed for a
+// non-duplicate reason.
+func refreshTemplateReplicaSummary(ctx context.Context, templateID, alias string) (claimWarning string, err error) {
 	replicas, err := ListReplicas(ctx, templateID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	current := make([]ReplicaStatus, 0, len(replicas))
 	for _, replica := range replicas {
 		current = append(current, replicaModelToStatus(replica))
 	}
 	status, lastError := summarizeStatus(current)
+	// NB: claimAliasForReadyTemplate and UpdateDefinitionStatus each use their own
+	// DB transaction. A crash between the two leaves the alias claimed but the
+	// status at its previous value — strictly safer than the reverse ordering, but
+	// not fully atomic.
+	if status != StatusFailed {
+		claimWarning, _ = claimAliasForReadyTemplate(ctx, templateID, alias)
+	}
 	if err := UpdateDefinitionStatus(ctx, templateID, status, lastError); err != nil {
-		return err
+		return "", err
 	}
 	localcache.InvalidateImageState(templateID)
 	setTemplateLocalityCache(templateID, current)
 	registerReadyTemplateReplicas(templateID, current)
-	return nil
+	return claimWarning, nil
 }
 
 // createDefinitionWithOptions wraps createDefinitionTx in a real DB transaction
 // so the INSERT is atomic. Alias claiming is NOT done here — it happens
-// separately in claimTemplateAlias after the template reaches READY.
+// separately when the template reaches a non-FAILED status, before that status
+// is published (see claimAliasForReadyTemplate).
 func createDefinitionWithOptions(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string, opts definitionCreateOptions) error {
 	return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		return createDefinitionTx(ctx, tx, templateID, storedReq, instanceType, version, opts)
@@ -718,13 +736,38 @@ func ensureTemplateDefinitionWithOptions(ctx context.Context, templateID string,
 	return true, nil
 }
 
-func finalizeTemplateReplicas(ctx context.Context, templateID, instanceType, version string, replicas []ReplicaStatus) (*TemplateInfo, error) {
+// finalizeTemplateReplicas publishes the aggregate template status computed from
+// its replicas. When the template reaches a non-FAILED status it claims the
+// requested alias *before* publishing the status via UpdateDefinitionStatus, so
+// a client that observes the template as READY is guaranteed the alias already
+// resolves — closing the create/claim publish-ordering race.
+//
+// A side effect of that ordering is that the alias becomes resolvable while the
+// status is still the pre-publish value (PENDING/PARTIALLY_READY): alias
+// resolution no longer implies READY. This is intended and strictly safer than
+// the old 404 race; callers must not assume "alias resolves" ⇒ "READY".
+//
+// The returned claim warning (non-empty only when the alias could not be
+// claimed for a non-duplicate reason) and the claimed alias are separate,
+// mutually-exclusive results: on success the alias is reflected in
+// TemplateInfo.DisplayName and the warning is empty; on a non-duplicate claim
+// failure the warning is set and DisplayName stays empty.
+func finalizeTemplateReplicas(ctx context.Context, templateID, instanceType, version, alias string, replicas []ReplicaStatus) (*TemplateInfo, string, error) {
 	setTemplateLocalityCache(templateID, replicas)
 	registerReadyTemplateReplicas(templateID, replicas)
 
 	status, lastError := summarizeStatus(replicas)
+	claimWarning := ""
+	displayName := ""
+	// NB: claimAliasForReadyTemplate and UpdateDefinitionStatus each use their own
+	// DB transaction. A crash between the two leaves the alias claimed but the
+	// status at its previous value — strictly safer than the reverse ordering, but
+	// not fully atomic.
+	if status != StatusFailed {
+		claimWarning, displayName = claimAliasForReadyTemplate(ctx, templateID, alias)
+	}
 	if err := UpdateDefinitionStatus(ctx, templateID, status, lastError); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	info := &TemplateInfo{
 		TemplateID:   templateID,
@@ -732,15 +775,16 @@ func finalizeTemplateReplicas(ctx context.Context, templateID, instanceType, ver
 		Version:      version,
 		Status:       status,
 		LastError:    lastError,
+		DisplayName:  displayName,
 		Replicas:     replicas,
 	}
 	if status == StatusFailed {
 		if lastError == "" {
 			lastError = "template creation failed on all nodes"
 		}
-		return info, fmt.Errorf("template %s creation failed: %s", templateID, lastError)
+		return info, claimWarning, fmt.Errorf("template %s creation failed: %s", templateID, lastError)
 	}
-	return info, nil
+	return info, claimWarning, nil
 }
 
 func UpdateDefinitionStatus(ctx context.Context, templateID, status, lastError string) error {
@@ -906,8 +950,9 @@ func GetDefinition(ctx context.Context, templateID string) (*models.TemplateDefi
 // 20260704120000) so it is inherently scoped to template-kind rows: a snapshot
 // carries its own informational display_name (NULL alias_key) and can never
 // match. The write path that owns template aliases is claimTemplateAlias
-// (called post-READY); without the alias_key filter, a snapshot sharing the
-// alias could shadow the owning template and resolve the alias to a snap-* id.
+// (invoked once the template reaches a non-FAILED status, before that status is
+// published); without the alias_key filter, a snapshot sharing the alias could
+// shadow the owning template and resolve the alias to a snap-* id.
 func GetTemplateByAlias(ctx context.Context, alias string) (*models.TemplateDefinition, error) {
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
@@ -951,8 +996,8 @@ func ResolveTemplateIdentifier(ctx context.Context, identifier string) (string, 
 
 // claimTemplateAlias atomically claims an alias for a template: releases it
 // from any other non-deleting template that currently holds it, then sets
-// display_name on the target template. Call this only after the template is
-// confirmed READY so an alias never points to a broken template.
+// display_name on the target template. Call this only for a non-FAILED template
+// so an alias never points to a broken one (callers gate on status != FAILED).
 func claimTemplateAlias(ctx context.Context, templateID, alias string) error {
 	alias = strings.TrimSpace(alias)
 	if alias == "" {
@@ -989,12 +1034,14 @@ func isDuplicateAliasError(err error) bool {
 	return strings.Contains(s, "23505") || strings.Contains(s, "unique_constraint")
 }
 
-// claimAliasAfterReady is the shared claim-after-READY pattern used by both
-// image_job_runner and redo. It attempts to claim the alias for a template
-// that has just reached READY. Returns a warning string (non-empty if the
-// claim failed for a non-duplicate reason) and the refreshed DisplayName
-// (non-empty if the claim succeeded).
-func claimAliasAfterReady(ctx context.Context, templateID, alias string) (claimWarning, displayName string) {
+// claimAliasForReadyTemplate is the shared alias-claim helper used by both the
+// image-job and redo paths. It is called for a template that has reached a
+// non-FAILED status, and — per the create/claim ordering fix — runs *before*
+// that status is published, so a client that later observes READY is guaranteed
+// the alias already resolves. Returns a warning string (non-empty only if the
+// claim failed for a non-duplicate reason) and the claimed DisplayName
+// (the alias itself on success); the two are mutually exclusive.
+func claimAliasForReadyTemplate(ctx context.Context, templateID, alias string) (claimWarning, displayName string) {
 	alias = strings.TrimSpace(alias)
 	if alias == "" {
 		return "", ""
@@ -1002,16 +1049,14 @@ func claimAliasAfterReady(ctx context.Context, templateID, alias string) (claimW
 	if claimErr := claimTemplateAlias(ctx, templateID, alias); claimErr != nil {
 		if isDuplicateAliasError(claimErr) {
 			log.G(ctx).Infof("alias %q concurrently claimed by another template; template %s is READY without alias", alias, templateID)
-		} else {
-			log.G(ctx).Warnf("claim alias %q for template %s fail: %v", alias, templateID, claimErr)
-			return fmt.Sprintf("template is ready but alias %q could not be claimed: %v", alias, claimErr), ""
+			return "", ""
 		}
-	} else if refreshed, refreshErr := GetTemplateInfo(ctx, templateID); refreshErr == nil && refreshed != nil {
-		return "", refreshed.DisplayName
-	} else {
-		return "", alias
+		log.G(ctx).Warnf("claim alias %q for template %s fail: %v", alias, templateID, claimErr)
+		return fmt.Sprintf("template is ready but alias %q could not be claimed: %v", alias, claimErr), ""
 	}
-	return "", ""
+	// The claim just wrote display_name = alias, so the claimed display name is
+	// the alias itself — no read-back needed.
+	return "", alias
 }
 func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.CreateCubeSandboxReq, error) {
 	cacheStart := time.Now()
