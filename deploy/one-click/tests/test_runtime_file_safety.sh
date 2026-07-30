@@ -238,6 +238,22 @@ test_append_env_exports_by_prefix_forwards_webhook_secrets() {
   ) || fail "prefixed webhook secret exports should round-trip shell-sensitive values"
 }
 
+test_webhook_configuration_is_owned_by_cubeops() {
+	local api_start="${ONE_CLICK_DIR}/scripts/systemd/cube-api-start.sh"
+	local ops_start="${ONE_CLICK_DIR}/scripts/systemd/cubeops-start.sh"
+	local local_up="${ONE_CLICK_DIR}/scripts/one-click/up.sh"
+
+	assert_contains "${api_start}" "CUBE_OPS_URL"
+	assert_not_contains "${api_start}" "CUBE_API_WEBHOOK_CONFIG"
+	assert_not_contains "${api_start}" "compgen -A variable -- CUBE_WEBHOOK_SECRET_"
+	assert_contains "${ops_start}" "CUBE_OPS_WEBHOOK_CONFIG"
+	assert_contains "${ops_start}" "compgen -A variable -- CUBE_WEBHOOK_SECRET_"
+	assert_contains "${local_up}" "CUBE_OPS_URL"
+	assert_not_contains "${local_up}" "CUBE_API_WEBHOOK_CONFIG"
+	assert_file "${ONE_CLICK_DIR}/CubeOps/webhooks.example.toml"
+	[[ ! -e "${ONE_CLICK_DIR}/CubeAPI/webhooks.example.toml" ]] || fail "CubeAPI must not own the webhook example"
+}
+
 # quickcheck runs once right after `systemctl enable --now <target>` returns, so
 # it must tolerate the brief startup race before cubelet/network-agent bind
 # their sockets and serve their health endpoints. Guard the retry semantics so a
@@ -873,6 +889,7 @@ test_one_click_scripts_do_not_require_ripgrep
 test_quickcheck_reports_node_registration_failure_explicitly
 test_append_env_export_shell_escapes_values
 test_append_env_exports_by_prefix_forwards_webhook_secrets
+test_webhook_configuration_is_owned_by_cubeops
 test_quickcheck_probes_are_race_tolerant
 test_quickcheck_wait_until_retries_then_succeeds
 test_quickcheck_wait_until_times_out_with_descriptive_die

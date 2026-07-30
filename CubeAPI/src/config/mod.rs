@@ -77,11 +77,9 @@ pub struct ServerConfig {
     #[serde(default)]
     pub cube_api_key: Option<String>,
 
-    /// Optional Webhook TOML config path.
-    ///
-    /// Env var: `CUBE_API_WEBHOOK_CONFIG`. When unset, Webhook delivery is disabled.
-    #[serde(default = "default_webhook_config_path")]
-    pub webhook_config_path: Option<String>,
+    /// CubeOps base URL. When unset, internal event forwarding is disabled.
+    #[serde(default = "default_ops_url")]
+    pub ops_url: Option<String>,
 }
 
 fn default_bind() -> String {
@@ -116,8 +114,8 @@ fn default_log_prefix() -> String {
     "cube-api".to_string()
 }
 
-fn default_webhook_config_path() -> Option<String> {
-    std::env::var("CUBE_API_WEBHOOK_CONFIG")
+fn default_ops_url() -> Option<String> {
+    std::env::var("CUBE_OPS_URL")
         .ok()
         .filter(|value| !value.trim().is_empty())
 }
@@ -147,7 +145,7 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             cube_api_key: std::env::var("CUBE_API_KEY").ok().filter(|s| !s.is_empty()),
-            webhook_config_path: default_webhook_config_path(),
+            ops_url: default_ops_url(),
         }
     }
 }

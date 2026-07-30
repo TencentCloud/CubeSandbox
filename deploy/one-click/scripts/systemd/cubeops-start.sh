@@ -24,6 +24,14 @@ export CUBE_OPS_LOG_LEVEL="${CUBE_OPS_LOG_LEVEL:-info}"
 # CubeMaster address (same host in All-in-One mode).
 export CUBE_MASTER_ADDR="${CUBE_MASTER_ADDR:-http://127.0.0.1:8089}"
 
+# CubeOps exclusively owns webhook endpoint configuration and signing secrets.
+if [[ -n "${CUBE_OPS_WEBHOOK_CONFIG:-}" ]]; then
+  export CUBE_OPS_WEBHOOK_CONFIG
+fi
+while IFS= read -r webhook_secret_env; do
+  [[ -n "${webhook_secret_env}" ]] && export "${webhook_secret_env}"
+done < <(compgen -A variable -- CUBE_WEBHOOK_SECRET_)
+
 # JWT configuration. JWT_SECRET left unset → CubeOps auto-generates and
 # persists it to t_system_setting on first boot (single-instance default).
 export JWT_ACCESS_TTL="${JWT_ACCESS_TTL:-15m}"

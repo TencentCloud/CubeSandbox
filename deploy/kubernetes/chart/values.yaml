@@ -338,6 +338,14 @@ cubeOps:
   bind: "0.0.0.0:3010"
   # Empty uses cubeProxy.domain for CUBE_API_SANDBOX_DOMAIN.
   sandboxDomain: ""
+  webhook:
+    # Inline TOML configuration. Leave empty to disable external delivery.
+    config: ""
+    # Existing ConfigMap containing a webhooks.toml key. Mutually exclusive
+    # with config.
+    existingConfigMap: ""
+    # Optional Secret whose keys are CUBE_WEBHOOK_SECRET_* environment names.
+    secretName: ""
   service:
     type: ClusterIP
     port: 3010

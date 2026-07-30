@@ -84,18 +84,28 @@ impl LogEvent {
 
     /// Attach a string field (builder-style).
     pub fn field(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.fields
-            .insert(key.into(), serde_json::Value::String(value.into()));
+        let key = key.into();
+        if !is_reserved_field(&key) {
+            self.fields
+                .insert(key, serde_json::Value::String(value.into()));
+        }
         self
     }
 
     /// Attach any serialisable value as a field (builder-style).
     pub fn field_value(mut self, key: impl Into<String>, value: impl Serialize) -> Self {
-        if let Ok(v) = serde_json::to_value(value) {
-            self.fields.insert(key.into(), v);
+        let key = key.into();
+        if !is_reserved_field(&key) {
+            if let Ok(v) = serde_json::to_value(value) {
+                self.fields.insert(key, v);
+            }
         }
         self
     }
+}
+
+fn is_reserved_field(key: &str) -> bool {
+    matches!(key, "timestamp" | "level" | "event")
 }
 
 // ─── Logger trait ──────────────────────────────────────────────────────────
@@ -139,4 +149,28 @@ pub type ArcLogger = Arc<dyn Logger>;
 /// Wrap any `Logger` in an `Arc`.
 pub fn arc<L: Logger>(logger: L) -> ArcLogger {
     Arc::new(logger)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LogEvent, LogLevel};
+
+    #[test]
+    fn log_event_serializes_without_event_id() {
+        let event = LogEvent::new(LogLevel::Info, "sandbox.created");
+
+        let value = serde_json::to_value(event).unwrap();
+        assert!(value.get("event_id").is_none());
+    }
+
+    #[test]
+    fn reserved_fields_cannot_be_overwritten() {
+        let event = LogEvent::new(LogLevel::Info, "sandbox.created")
+            .field("event", "forged-event")
+            .field("sandbox_id", "sbx-1");
+
+        assert_eq!(event.event, "sandbox.created");
+        assert_eq!(event.fields["sandbox_id"], "sbx-1");
+        assert!(!event.fields.contains_key("event"));
+    }
 }

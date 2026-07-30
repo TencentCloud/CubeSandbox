@@ -73,3 +73,6 @@ __pycache__
 !/tests/skills/sdk-e2e-cases/**
 
 web/tsconfig.tsbuildinfo
+
+
+docs/superpowers

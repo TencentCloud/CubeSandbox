@@ -139,12 +139,12 @@ One-click does not create an extra global `configs/` layer on the target machine
 - `Cubelet/dynamicconf/` → `Cubelet/dynamicconf/`
 - `configs/single-node/network-agent.yaml` → `network-agent/network-agent.yaml`
 - `CubeAPI/bin/cube-api` → `/usr/local/services/cubetoolbox/CubeAPI/bin/cube-api`
-- `CubeAPI/webhooks.example.toml` → `/usr/local/services/cubetoolbox/CubeAPI/webhooks.example.toml`
+- `CubeOps/webhooks.example.toml` → `/usr/local/services/cubetoolbox/CubeOps/webhooks.example.toml`
 - `support/` → `/usr/local/services/cubetoolbox/support/`
 - `cubeproxy/` → `/usr/local/services/cubetoolbox/cubeproxy/`
 - `webui/` → `/usr/local/services/cubetoolbox/webui/`
 
-`Cubelet` uses the existing `dynamicconf/conf.yaml` from the repository as-is. At runtime, `network-agent` preferentially reads the network plugin configuration from `Cubelet/config/config.toml` via `--cubelet-config` to stay consistent with `Cubelet`'s network parameters. `cube-api` reads environment variables directly from `.one-click.env` on startup, listening on `0.0.0.0:3000` by default and forwarding to the local `cubemaster`. Optional CubeAPI Webhooks use a static TOML file such as `/usr/local/services/cubetoolbox/CubeAPI/webhooks.toml`, referenced by `CUBE_API_WEBHOOK_CONFIG` in `.one-click.env`; changes take effect after restarting CubeAPI. MySQL/Redis are always deployed to `/usr/local/services/cubetoolbox/support` and run in Docker containers managed by dedicated systemd services on the target machine. `cube proxy` is always deployed to `/usr/local/services/cubetoolbox/cubeproxy`, built locally from the bundled build context, and managed by systemd. WebUI is deployed to `/usr/local/services/cubetoolbox/webui`, listens on `12088` by default, serves the packaged `webui/dist` directory through a standard nginx container, and proxies `/cubeapi` to CubeAPI through Docker `host-gateway` under systemd management.
+`Cubelet` uses the existing `dynamicconf/conf.yaml` from the repository as-is. At runtime, `network-agent` preferentially reads the network plugin configuration from `Cubelet/config/config.toml` via `--cubelet-config` to stay consistent with `Cubelet`'s network parameters. `cube-api` reads environment variables directly from `.one-click.env` on startup, listening on `0.0.0.0:3000` by default and forwarding to the local `cubemaster`. Optional webhooks use a static CubeOps TOML file such as `/usr/local/services/cubetoolbox/CubeOps/webhooks.toml`, referenced by `CUBE_OPS_WEBHOOK_CONFIG` in `.one-click.env`; changes take effect after restarting CubeOps. MySQL/Redis are always deployed to `/usr/local/services/cubetoolbox/support` and run in Docker containers managed by dedicated systemd services on the target machine. `cube proxy` is always deployed to `/usr/local/services/cubetoolbox/cubeproxy`, built locally from the bundled build context, and managed by systemd. WebUI is deployed to `/usr/local/services/cubetoolbox/webui`, listens on `12088` by default, serves the packaged `webui/dist` directory through a standard nginx container, and proxies `/cubeapi` to CubeAPI through Docker `host-gateway` under systemd management.
 
 ## Target Machine Installation
 
@@ -304,7 +304,7 @@ WEB_UI_UPSTREAM=http://host.docker.internal:3010
 CUBE_API_BIND=0.0.0.0:3000
 CUBE_API_HEALTH_ADDR=127.0.0.1:3000
 CUBE_API_SANDBOX_DOMAIN=cube.app
-# CUBE_API_WEBHOOK_CONFIG=/usr/local/services/cubetoolbox/CubeAPI/webhooks.toml
+# CUBE_OPS_WEBHOOK_CONFIG=/usr/local/services/cubetoolbox/CubeOps/webhooks.toml
 # CUBE_WEBHOOK_SECRET_0=change-me
 # When multiple endpoints require different keys, configure additional variables
 # with the CUBE_WEBHOOK_SECRET_ prefix here.

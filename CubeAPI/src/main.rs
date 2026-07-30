@@ -199,8 +199,12 @@ fn main() -> anyhow::Result<()> {
 
 async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()> {
     use logging::{
-        arc, file::FileLogger, filtered::FilteredLogger, http::HttpLogger, http::HttpLoggerConfig,
-        multi::MultiLogger, LogLevel,
+        arc,
+        file::FileLogger,
+        filtered::FilteredLogger,
+        http::{ForwarderConfig, OpsEventForwarder},
+        multi::MultiLogger,
+        LogLevel,
     };
 
     // ── Logger ────────────────────────────────────────────────────────────
@@ -216,14 +220,10 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
     let file_logger = arc(FilteredLogger::new(arc(file_logger), min_level));
     multi_logger = multi_logger.add(file_logger);
 
-    // File logging keeps the existing level gate. Webhooks filter by event name
-    // independently, so diagnostic events such as api.request can be subscribed
-    // to without requiring --debug for the file backend.
-    if let Some(path) = cfg.webhook_config_path.as_deref() {
-        let webhook_config = HttpLoggerConfig::from_file(path)?;
-        let webhook_logger = HttpLogger::new(webhook_config)?;
-        tracing::info!(webhook_config_path = %path, "cube-api webhook logger enabled");
-        multi_logger = multi_logger.add(arc(webhook_logger));
+    if let Some(url) = cfg.ops_url.as_deref() {
+        let forwarder = OpsEventForwarder::new(ForwarderConfig::for_ops_url(url))?;
+        tracing::info!(cubeops_url = %url, "CubeOps event forwarding enabled");
+        multi_logger = multi_logger.add(arc(forwarder));
     }
     let logger: logging::ArcLogger = arc(multi_logger);
 

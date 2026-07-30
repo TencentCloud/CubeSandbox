@@ -161,6 +161,9 @@
 {{- if not .Values.images.ops.repository }}
 {{- fail "cubeOps.enabled=true requires images.ops.repository" }}
 {{- end }}
+{{- if and .Values.cubeOps.webhook.config .Values.cubeOps.webhook.existingConfigMap }}
+{{- fail "cubeOps.webhook.config and cubeOps.webhook.existingConfigMap are mutually exclusive" }}
+{{- end }}
 {{- end }}
 {{- if .Values.cubeEgress.enabled }}
 {{- if not (has .Values.cubeEgress.ca.mode (list "existingSecret" "selfSigned" "inline")) }}

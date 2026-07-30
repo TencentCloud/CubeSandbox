@@ -1,7 +1,8 @@
 # CubeSandbox Webhook Receiver Example
 
-This example starts a small HTTP server that receives CubeAPI Webhook events,
-prints the JSON payload, and optionally verifies `X-Cube-Signature-256`.
+This example runs a small HTTP server that receives webhook batches delivered
+by CubeOps, prints their JSON payload, and optionally verifies
+`X-Cube-Signature-256`.
 
 ## Run
 
@@ -17,15 +18,12 @@ export CUBE_WEBHOOK_SECRET_0='change-me'
 python3 receiver.py
 ```
 
-The server listens on `http://0.0.0.0:8088/webhook` by default. Override it with:
+The server listens on `http://0.0.0.0:8088/webhook` by default. Override it
+with `WEBHOOK_RECEIVER_HOST` and `WEBHOOK_RECEIVER_PORT`.
 
-```bash
-WEBHOOK_RECEIVER_HOST=127.0.0.1 WEBHOOK_RECEIVER_PORT=8089 python3 receiver.py
-```
+## CubeOps Config
 
-## CubeAPI Config
-
-Create `/usr/local/services/cubetoolbox/CubeAPI/webhooks.toml`:
+Create `/usr/local/services/cubetoolbox/CubeOps/webhooks.toml`:
 
 ```toml
 [delivery]
@@ -53,44 +51,29 @@ batch_size = 1
 secret_env = "CUBE_WEBHOOK_SECRET_0"
 ```
 
-The capacity settings bound events waiting in the channel, endpoint batch
-deliveries that have not completed, and HTTP attempts performing network I/O,
-respectively:
-
-```text
-event_queue_capacity -> max_outstanding_deliveries -> max_concurrent_requests
-```
-
-They count different units, so there is no mandatory numeric ordering. It is
-normally useful for `max_outstanding_deliveries` to exceed
-`max_concurrent_requests`, allowing deliveries in retry backoff to retain their
-task slot without consuming all available HTTP request concurrency.
-
-You can reuse the same `url` in another endpoint entry for a disjoint high-volume
-event set, for example `api.request` and `api.response`, and give that entry a
-larger `batch_size`. CubeAPI rejects duplicate subscriptions for the same `url`
-and event.
-
-The `url` must be reachable from the CubeAPI process. Use `127.0.0.1` only when
-the receiver runs on the same host as CubeAPI. In `dev-env`, if this receiver is
-running on the host machine and CubeAPI is running inside the VM, use
+The `url` must be reachable from CubeOps. In `dev-env`, if the receiver runs
+on the host and CubeOps runs inside the VM, use
 `http://10.0.2.2:8088/webhook`.
 
-Add these to `/usr/local/services/cubetoolbox/.one-click.env` and restart CubeAPI:
+Add the following values to
+`/usr/local/services/cubetoolbox/.one-click.env`, then restart CubeOps:
 
 ```bash
-CUBE_API_WEBHOOK_CONFIG=/usr/local/services/cubetoolbox/CubeAPI/webhooks.toml
+CUBE_OPS_WEBHOOK_CONFIG=/usr/local/services/cubetoolbox/CubeOps/webhooks.toml
 CUBE_WEBHOOK_SECRET_0=change-me
+sudo systemctl restart cube-sandbox-cubeops.service
 ```
 
-```bash
-sudo systemctl restart cube-sandbox-cube-api.service
-```
+Create, pause, resume, and delete a sandbox. With `batch_size = 1`, the
+receiver should print one JSON batch for each delivered event.
 
-Create, pause, resume, and delete a sandbox. With `batch_size = 1`, the receiver
-should print one JSON batch per delivered event.
+Delivery is best effort. Deduplicate completed external batches by `batch_id`,
+which remains stable across retries of that batch. Record the completed batch
+atomically before external side effects; batches may arrive zero, one, or
+multiple times and separate batches may arrive out of order.
 
 ## Failure Simulation
 
-Point `url` at an unused port, restart CubeAPI, and trigger an event. The sandbox
-API call should still succeed while CubeAPI logs retry and final delivery errors.
+Point `url` at an unused port, restart CubeOps, and trigger an event. The
+sandbox API call still succeeds while CubeOps logs retry and final delivery
+errors.

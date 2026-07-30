@@ -62,6 +62,9 @@ type Config struct {
 	// Redis (optional)
 	RedisURL string `yaml:"redis_url"`
 
+	// Webhook delivery configuration (optional).
+	WebhookConfigPath string `yaml:"webhook_config_path"`
+
 	// Sandbox domain exposed to SDK clients; matches SDK handler's
 	// CUBE_API_SANDBOX_DOMAIN env so the /config endpoint stays in sync.
 	SandboxDomain string `yaml:"sandbox_domain"`
@@ -310,6 +313,9 @@ func overrideFromEnv(cfg *Config) {
 	}
 	if v := os.Getenv("REDIS_URL"); v != "" {
 		cfg.RedisURL = v
+	}
+	if v := os.Getenv("CUBE_OPS_WEBHOOK_CONFIG"); v != "" {
+		cfg.WebhookConfigPath = v
 	}
 	if v := os.Getenv("CUBE_API_SANDBOX_DOMAIN"); v != "" {
 		cfg.SandboxDomain = v

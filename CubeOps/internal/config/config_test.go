@@ -92,6 +92,20 @@ func TestLoad_NoYAML_UsesEnvAndDefaults(t *testing.T) {
 	}
 }
 
+func TestLoad_ReadsWebhookConfigPathFromEnv(t *testing.T) {
+	t.Setenv("CUBE_OPS_CONFIG", "/nonexistent/path/ops.yaml")
+	t.Setenv("DATABASE_URL", "mysql://root:pass@127.0.0.1:3306/envdb")
+	t.Setenv("CUBE_OPS_WEBHOOK_CONFIG", "/etc/cube/webhooks.toml")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.WebhookConfigPath != "/etc/cube/webhooks.toml" {
+		t.Fatalf("WebhookConfigPath = %q, want /etc/cube/webhooks.toml", cfg.WebhookConfigPath)
+	}
+}
+
 // TestLoad_MissingDB_Fails proves we still require a database URL.
 func TestLoad_MissingDB_Fails(t *testing.T) {
 	t.Setenv("CUBE_OPS_CONFIG", "/nonexistent/path/ops.yaml")

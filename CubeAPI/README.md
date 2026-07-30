@@ -72,7 +72,7 @@ cargo build --release
 | `CUBE_API_SANDBOX_DOMAIN` | `cube.app` | Domain returned in sandbox API responses |
 | `AUTH_CALLBACK_URL` | *(unset)* | External auth callback URL (callback mode) |
 | `CUBE_API_KEY` | *(unset)* | Built-in API key for simple auth (simple-key mode) |
-| `CUBE_API_WEBHOOK_CONFIG` | unset | Optional static Webhook TOML config path |
+| `CUBE_OPS_URL` | *(unset)* | CubeOps base URL; enables best-effort event forwarding when set |
 
 ### Authentication
 

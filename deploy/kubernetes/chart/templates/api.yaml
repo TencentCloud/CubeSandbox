@@ -59,6 +59,10 @@ spec:
               value: {{ .Values.mysql.database | quote }}
             - name: CUBE_API_SANDBOX_DOMAIN
               value: {{ .Values.controlPlane.api.sandboxDomain | quote }}
+            {{- if eq (include "cube.opsEnabled" .) "true" }}
+            - name: CUBE_OPS_URL
+              value: {{ printf "http://%s:%v" (include "cube.opsFQDN" .) .Values.cubeOps.service.port | quote }}
+            {{- end }}
             {{- with .Values.controlPlane.api.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

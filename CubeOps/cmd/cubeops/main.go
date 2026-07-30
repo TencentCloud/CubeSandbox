@@ -17,6 +17,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/server"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/webhook"
 )
 
 func main() {
@@ -38,6 +39,13 @@ func main() {
 		FileSizeMB: cfg.LogFileSize,
 	})
 
+	webhookRuntime, err := loadWebhookRuntime(cfg)
+	if err != nil {
+		slog.Error("failed to load webhook config", "error", err)
+		os.Exit(1)
+	}
+	
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -58,7 +66,7 @@ func main() {
 	}
 	cfg.JWTSecret = jwtSecret
 
-	srv := server.New(cfg, s)
+	srv := server.New(cfg, s, server.WithWebhookRuntime(webhookRuntime))
 
 	// Graceful shutdown
 	go func() {
@@ -80,4 +88,12 @@ func main() {
 	}
 
 	slog.Info("CubeOps stopped")
+}
+
+func loadWebhookRuntime(cfg *config.Config) (*webhook.Runtime, error) {
+	webhookConfig, err := webhook.LoadConfig(cfg.WebhookConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	return webhook.NewRuntime(webhookConfig), nil
 }

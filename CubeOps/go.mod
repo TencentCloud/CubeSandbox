@@ -9,9 +9,11 @@ require (
 	github.com/google/go-containerregistry v0.21.6
 	github.com/google/uuid v1.6.0
 	github.com/ory/dockertest/v3 v3.12.0
+	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/tencentcloud/CubeSandbox/CubeDB v0.1.0
 	github.com/tencentcloud/CubeSandbox/cubelog v0.1.1-0.20260113105508-a996703fa42f
 	golang.org/x/crypto v0.50.0
+	golang.org/x/net v0.53.0
 	gorm.io/gorm v1.25.10
 )
 
@@ -71,7 +73,6 @@ require (
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/opencontainers/runc v1.2.3 // indirect
-	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/pressly/goose/v3 v3.27.1 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/quic-go/quic-go v0.59.0 // indirect
@@ -91,7 +92,6 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/arch v0.22.0 // indirect
-	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.44.0 // indirect
 	golang.org/x/text v0.36.0 // indirect

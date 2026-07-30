@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/handler"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/service"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/webhook"
 )
 
 // Server is the CubeOps HTTP server.
@@ -25,23 +27,41 @@ type Server struct {
 	jm      *auth.JWTManager
 	httpSrv *http.Server
 	cm      *cubemaster.Client
+	webhook *webhook.Runtime
+}
+
+// Option customizes optional server components.
+type Option func(*Server)
+
+// WithWebhookRuntime registers and manages the CubeOps webhook runtime.
+func WithWebhookRuntime(runtime *webhook.Runtime) Option {
+	return func(server *Server) {
+		server.webhook = runtime
+	}
 }
 
 // New creates a new CubeOps server.
-func New(cfg *config.Config, s *store.Store) *Server {
+func New(cfg *config.Config, s *store.Store, options ...Option) *Server {
 	jm := auth.NewJWTManager(cfg.JWTSecret, cfg.AccessTTL, cfg.RefreshTTL)
 	cm := cubemaster.New(cfg.CubeMasterAddr)
-	return &Server{
+	server := &Server{
 		cfg:   cfg,
 		store: s,
 		jm:    jm,
 		cm:    cm,
 	}
+	for _, option := range options {
+		option(server)
+	}
+	return server
 }
 
 // Start begins listening for HTTP requests.
 func (s *Server) Start() error {
 	engine := s.buildRouter()
+	if s.webhook != nil {
+		s.webhook.Start()
+	}
 
 	s.httpSrv = &http.Server{
 		Addr:              s.cfg.Bind,
@@ -62,11 +82,16 @@ func (s *Server) Start() error {
 
 // Shutdown gracefully stops the server.
 func (s *Server) Shutdown(ctx context.Context) error {
-	if s.httpSrv == nil {
-		return nil
+	var httpErr error
+	if s.httpSrv != nil {
+		slog.Info("CubeOps shutting down")
+		httpErr = s.httpSrv.Shutdown(ctx)
 	}
-	slog.Info("CubeOps shutting down")
-	return s.httpSrv.Shutdown(ctx)
+	var webhookErr error
+	if s.webhook != nil {
+		webhookErr = s.webhook.Shutdown(ctx)
+	}
+	return errors.Join(httpErr, webhookErr)
 }
 
 // buildRouter configures all routes on a gin engine.
@@ -84,6 +109,9 @@ func (s *Server) buildRouter() *gin.Engine {
 	r.GET("/health", func(c *gin.Context) {
 		c.String(http.StatusOK, "ok")
 	})
+	if s.webhook != nil {
+		s.webhook.Handler().Register(r)
+	}
 
 	// Wire up service layer + handlers.
 	authSvc := service.NewAuthService(s.store, s.jm)
