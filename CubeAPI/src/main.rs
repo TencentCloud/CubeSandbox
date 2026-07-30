@@ -244,10 +244,14 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
     let webhooks = logging::http::WebhookRegistry::from_configs(cfg.webhooks.clone());
 
     // FilteredLogger gates by level → MultiLogger fans out to file + webhook.
+    let webhook_logger = logging::http::WebhookLogger::with_tuning(
+        webhooks.clone(),
+        logging::http::WebhookTuning::from_env(),
+    );
     let logger: logging::ArcLogger = arc(FilteredLogger::new(
         arc(MultiLogger::new()
             .add(arc(file_logger))
-            .add(arc(logging::http::WebhookLogger::new(webhooks.clone())))),
+            .add(arc(webhook_logger))),
         min_level,
     ));
 

@@ -526,6 +526,7 @@ dependencies = [
  "axum",
  "axum-extra",
  "axum-test",
+ "bytes",
  "chrono",
  "clap",
  "config",

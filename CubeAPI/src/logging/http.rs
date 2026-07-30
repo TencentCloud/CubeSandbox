@@ -15,31 +15,37 @@
 //! stream the rest of the application already emits — no changes to the
 //! sandbox handlers are required.
 //!
-//! `log()` is fully non-blocking: it only forwards subscribed events into an
-//! unbounded channel and returns immediately. A background dispatcher task
-//! reads the channel and, for every endpoint subscribed to that event type,
-//! **spawns an independent delivery task**. This isolation guarantees that a
-//! slow or unreachable endpoint can never stall event emission on the sandbox
-//! API request path, nor delay delivery to other endpoints.
+//! `log()` is fully non-blocking: it only forwards subscribed events into a
+//! **bounded** channel (via `try_send`, dropping the newest event on overload)
+//! and returns immediately. A background dispatcher task reads the channel and,
+//! for every endpoint subscribed to that event type, **spawns an independent,
+//! tracked delivery task**. This isolation guarantees that a slow or
+//! unreachable endpoint can never stall event emission on the sandbox API
+//! request path, nor delay delivery to other endpoints.
 //!
 //! Each delivery:
 //! - builds a JSON payload (`event`, `timestamp`, plus all event fields such
 //!   as `sandbox_id` and `template_id`),
-//! - tags the request with a unique `X-Cube-Delivery` id, stable across
-//!   retries, so receivers can deduplicate,
+//! - tags the request with an `X-Cube-Delivery` id assigned once per logical
+//!   event (stable across endpoints and retries) so receivers can deduplicate,
 //! - optionally signs the body with HMAC-SHA256 (`X-Cube-Signature` header),
-//! - POSTs with a per-endpoint timeout,
+//! - POSTs with a per-endpoint timeout, under a global concurrency cap,
 //! - retries with exponential backoff on failure, logging the final error.
+//!
+//! On shutdown, [`WebhookLogger::flush`] drains queued and in-flight deliveries
+//! within a bounded grace period so a rolling restart does not drop them.
 
 use super::{LogEvent, Logger};
 use crate::config::WebhookConfig;
 use async_trait::async_trait;
+use bytes::Bytes;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::mpsc::{self, error::TrySendError, Sender};
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, error, warn};
@@ -49,35 +55,67 @@ type HmacSha256 = Hmac<Sha256>;
 /// Upper bound on the exponential backoff sleep between retries.
 const MAX_BACKOFF_SECS: u64 = 30;
 
-/// Maximum time [`WebhookLogger::flush`] will wait for in-flight deliveries to
-/// drain on shutdown before giving up and letting the process exit. Kept below
-/// a typical orchestrator termination grace period (e.g. Kubernetes' default
-/// 30s) so drain finishes inside the window the platform allows.
-const SHUTDOWN_DRAIN_GRACE: Duration = Duration::from_secs(25);
+// ─── WebhookTuning ─────────────────────────────────────────────────────────
 
-/// Capacity of the in-memory event queue feeding the dispatcher.
-///
-/// Bounded on purpose: an unbounded queue turns a burst of events (or a
-/// receiver outage that stalls delivery) into unbounded memory growth and,
-/// eventually, an OOM that loses *every* buffered event at once. A bounded
-/// queue caps that blast radius — under sustained overload we drop the newest
-/// events and account for them (see [`WebhookMetrics::dropped`]) instead of
-/// crashing. Sized generously so only pathological bursts ever reach it.
-const WEBHOOK_QUEUE_CAPACITY: usize = 10_000;
+/// Operational knobs for the delivery subsystem. Defaults are production-safe;
+/// each can be overridden by an environment variable so operators can tune per
+/// deployment without a rebuild (see [`WebhookTuning::from_env`]).
+#[derive(Clone, Copy, Debug)]
+pub struct WebhookTuning {
+    /// Capacity of the in-memory event queue feeding the dispatcher.
+    ///
+    /// Bounded on purpose: an unbounded queue turns a burst of events (or a
+    /// receiver outage that stalls delivery) into unbounded memory growth and,
+    /// eventually, an OOM that loses *every* buffered event at once. A bounded
+    /// queue caps that blast radius. `CUBE_API_WEBHOOK_QUEUE_CAPACITY`.
+    pub queue_capacity: usize,
+    /// Max time [`WebhookLogger::flush`] waits for in-flight deliveries to drain
+    /// on shutdown before letting the process exit.
+    ///
+    /// Sized to sit inside a typical orchestrator termination grace period
+    /// (e.g. Kubernetes' default 30s) — but note it starts only *after* the
+    /// HTTP server has drained its own in-flight requests, so a slow request
+    /// lane can eat into the pod's grace first. Best-effort bound, not a
+    /// guarantee. `CUBE_API_WEBHOOK_DRAIN_GRACE_SECS`.
+    pub drain_grace: Duration,
+    /// Ceiling on concurrent in-flight delivery HTTP requests, so a burst that
+    /// clears the queue cannot spawn an unbounded number of simultaneous
+    /// connections. `CUBE_API_WEBHOOK_MAX_CONCURRENCY`.
+    pub max_concurrency: usize,
+}
 
-// ─── WebhookMetrics ──────────────────────────────────────────────────────────
+impl Default for WebhookTuning {
+    fn default() -> Self {
+        Self {
+            queue_capacity: 10_000,
+            drain_grace: Duration::from_secs(25),
+            max_concurrency: 256,
+        }
+    }
+}
 
-/// Delivery counters, shared between the enqueue path and the dispatcher so
-/// event loss and delivery health are *observable* rather than silent.
-///
-/// More counters (delivered / failed / exhausted) are wired in as the delivery
-/// path is hardened; for now the queue path publishes `enqueued` and `dropped`.
-#[derive(Default)]
-pub struct WebhookMetrics {
-    /// Events accepted into the queue for delivery.
-    pub enqueued: AtomicU64,
-    /// Events dropped because the queue was full (backpressure / overload).
-    pub dropped: AtomicU64,
+impl WebhookTuning {
+    /// Load tuning from the environment, falling back to [`Default`] for any
+    /// var that is unset or unparseable.
+    pub fn from_env() -> Self {
+        let d = Self::default();
+        let usize_var = |k: &str, fallback: usize| {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(fallback)
+        };
+        Self {
+            queue_capacity: usize_var("CUBE_API_WEBHOOK_QUEUE_CAPACITY", d.queue_capacity).max(1),
+            drain_grace: std::env::var("CUBE_API_WEBHOOK_DRAIN_GRACE_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(Duration::from_secs)
+                .unwrap_or(d.drain_grace),
+            max_concurrency: usize_var("CUBE_API_WEBHOOK_MAX_CONCURRENCY", d.max_concurrency)
+                .max(1),
+        }
+    }
 }
 
 // ─── WebhookRegistry ─────────────────────────────────────────────────────────
@@ -181,8 +219,11 @@ pub struct WebhookLogger {
     tx: Sender<LogEvent>,
     /// Shared, runtime-mutable endpoint list (also held by the management API).
     registry: WebhookRegistry,
-    /// Shared delivery counters (queue health, drops).
-    metrics: Arc<WebhookMetrics>,
+    /// Running count of events dropped on a full queue — used only to throttle
+    /// the "queue full" warning so overload logs a heartbeat, not a flood.
+    dropped: Arc<AtomicU64>,
+    /// How long [`WebhookLogger::flush`] waits for deliveries to drain.
+    drain_grace: Duration,
     /// Tracks the dispatcher and every in-flight delivery task, so
     /// [`WebhookLogger::flush`] can wait for them to finish on shutdown.
     tracker: TaskTracker,
@@ -197,17 +238,21 @@ impl WebhookLogger {
     /// The dispatcher reads the *current* registry on every event, so webhooks
     /// added or removed at runtime (via the management API) take effect
     /// immediately without a restart.
-    pub fn new(registry: WebhookRegistry) -> Self {
-        // A shared client gives us connection pooling; the request timeout is
-        // applied per-request (each endpoint may configure its own).
+    pub fn with_tuning(registry: WebhookRegistry, tuning: WebhookTuning) -> Self {
+        // A shared client gives connection pooling across deliveries; the
+        // request timeout is applied per-request (each endpoint configures its
+        // own). Keep a warm pool per host for high-frequency endpoints.
         let client = reqwest::Client::builder()
+            .pool_max_idle_per_host(32)
             .build()
             .expect("failed to build webhook HTTP client");
 
-        let (tx, rx) = mpsc::channel::<LogEvent>(WEBHOOK_QUEUE_CAPACITY);
-        let metrics = Arc::new(WebhookMetrics::default());
+        let (tx, rx) = mpsc::channel::<LogEvent>(tuning.queue_capacity);
         let tracker = TaskTracker::new();
         let shutdown = CancellationToken::new();
+        // Caps concurrent in-flight delivery requests so a burst that clears
+        // the queue cannot open an unbounded number of sockets at once.
+        let permits = Arc::new(Semaphore::new(tuning.max_concurrency));
 
         // The dispatcher itself is tracked, so flush() waiting on the tracker
         // also waits for the dispatcher to finish draining the queue.
@@ -215,6 +260,7 @@ impl WebhookLogger {
             rx,
             client,
             registry.clone(),
+            permits,
             tracker.clone(),
             shutdown.clone(),
         ));
@@ -222,16 +268,11 @@ impl WebhookLogger {
         Self {
             tx,
             registry,
-            metrics,
+            dropped: Arc::new(AtomicU64::new(0)),
+            drain_grace: tuning.drain_grace,
             tracker,
             shutdown,
         }
-    }
-
-    /// Shared delivery counters, for exposure by the management API / metrics.
-    #[allow(dead_code)]
-    pub fn metrics(&self) -> Arc<WebhookMetrics> {
-        self.metrics.clone()
     }
 }
 
@@ -243,6 +284,7 @@ async fn run_dispatcher(
     mut rx: mpsc::Receiver<LogEvent>,
     client: reqwest::Client,
     registry: WebhookRegistry,
+    permits: Arc<Semaphore>,
     tracker: TaskTracker,
     shutdown: CancellationToken,
 ) {
@@ -261,14 +303,14 @@ async fn run_dispatcher(
                 // everything still queued into delivery tasks, then stop.
                 let mut drained = 0u64;
                 while let Ok(ev) = rx.try_recv() {
-                    dispatch_event(ev, &client, &registry, &tracker, &shutdown);
+                    dispatch_event(ev, &client, &registry, &permits, &tracker, &shutdown);
                     drained += 1;
                 }
                 debug!(drained, "webhook dispatcher draining on shutdown");
                 break;
             }
         };
-        dispatch_event(event, &client, &registry, &tracker, &shutdown);
+        dispatch_event(event, &client, &registry, &permits, &tracker, &shutdown);
     }
     debug!("webhook dispatcher stopped");
 }
@@ -279,12 +321,15 @@ fn dispatch_event(
     event: LogEvent,
     client: &reqwest::Client,
     registry: &WebhookRegistry,
+    permits: &Arc<Semaphore>,
     tracker: &TaskTracker,
     shutdown: &CancellationToken,
 ) {
-    // Build the JSON body once; it is identical for every endpoint.
+    // Build the JSON body once; it is identical for every endpoint. `Bytes` is
+    // reference-counted, so cloning it per endpoint and per retry attempt is a
+    // cheap refcount bump — no re-serialisation, no per-attempt copy.
     let body = match build_payload(&event) {
-        Ok(b) => Arc::new(b),
+        Ok(b) => Bytes::from(b),
         Err(e) => {
             error!(event = %event.event, "webhook: failed to serialise payload: {}", e);
             return;
@@ -313,8 +358,18 @@ fn dispatch_event(
         let event_name = event.event.clone();
         let delivery_id = delivery_id.clone();
         let shutdown = shutdown.clone();
+        let permits = permits.clone();
         tracker.spawn(async move {
-            deliver(&client, &endpoint, &event_name, &delivery_id, &shutdown, &body).await;
+            deliver(
+                &client,
+                &endpoint,
+                &event_name,
+                &delivery_id,
+                &shutdown,
+                &permits,
+                body,
+            )
+            .await;
         });
     }
 }
@@ -334,20 +389,19 @@ impl Logger for WebhookLogger {
         // webhook delivery). We deliberately do NOT use the async `send`, which
         // would apply backpressure by blocking the caller.
         match self.tx.try_send(event) {
-            Ok(()) => {
-                self.metrics.enqueued.fetch_add(1, Ordering::Relaxed);
-            }
+            Ok(()) => {}
             Err(TrySendError::Full(ev)) => {
                 // Overload: the dispatcher/receivers are not draining fast
-                // enough. Drop the newest event and account for it so the loss
-                // is visible in metrics and (throttled) logs rather than
-                // silently accumulating until OOM.
-                let dropped = self.metrics.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                // enough. We drop the *newest* event (an mpsc sender can only
+                // reject the incoming item, not evict an older queued one) and
+                // log it — throttled by a running counter so sustained overload
+                // logs a heartbeat rather than a flood. This bounds memory
+                // instead of silently accumulating until OOM.
+                let dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
                 if dropped == 1 || dropped % 1000 == 0 {
                     warn!(
                         event = %ev.event,
                         dropped_total = dropped,
-                        capacity = WEBHOOK_QUEUE_CAPACITY,
                         "webhook: queue full, dropping event (receivers not keeping up)",
                     );
                 }
@@ -366,19 +420,19 @@ impl Logger for WebhookLogger {
         //      into delivery tasks and stops; in-flight deliveries cut their
         //      retry backoff short instead of sleeping out the grace window.
         //   2. Close the tracker and wait for the dispatcher + every delivery
-        //      task to finish, bounded by SHUTDOWN_DRAIN_GRACE so a stuck
-        //      endpoint can't hold the process up indefinitely.
+        //      task to finish, bounded by `drain_grace` so a stuck endpoint
+        //      can't hold the process up indefinitely.
         //
         // This is what stops the routine, every-deploy loss of queued and
         // in-flight webhooks.
         self.shutdown.cancel();
         self.tracker.close();
-        if tokio::time::timeout(SHUTDOWN_DRAIN_GRACE, self.tracker.wait())
+        if tokio::time::timeout(self.drain_grace, self.tracker.wait())
             .await
             .is_err()
         {
             warn!(
-                grace_secs = SHUTDOWN_DRAIN_GRACE.as_secs(),
+                grace_secs = self.drain_grace.as_secs(),
                 "webhook: drain grace expired with deliveries still in flight; \
                  exiting anyway",
             );
@@ -443,9 +497,10 @@ async fn deliver(
     event_name: &str,
     delivery_id: &str,
     shutdown: &CancellationToken,
-    body: &[u8],
+    permits: &Semaphore,
+    body: Bytes,
 ) {
-    let signature = endpoint.secret.as_deref().map(|s| sign(s, body));
+    let signature = endpoint.secret.as_deref().map(|s| sign(s, &body));
     let timeout = Duration::from_millis(endpoint.timeout_ms);
 
     // First attempt + `max_retries` retries.
@@ -456,12 +511,20 @@ async fn deliver(
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header("X-Cube-Event", event_name)
             .header("X-Cube-Delivery", delivery_id)
-            .body(body.to_vec());
+            .body(body.clone());
         if let Some(sig) = &signature {
             req = req.header("X-Cube-Signature", sig);
         }
 
-        match req.send().await {
+        // Hold a concurrency permit only around the actual request, so at most
+        // `max_concurrency` deliveries are on the wire at once. It is released
+        // before backoff so a retrying delivery doesn't hog a slot while asleep.
+        let send_result = {
+            let _permit = permits.acquire().await;
+            req.send().await
+        };
+
+        match send_result {
             Ok(resp) if resp.status().is_success() => {
                 debug!(
                     url = %endpoint.url,
@@ -584,7 +647,10 @@ mod tests {
 
     /// Build a logger whose registry is seeded with the given endpoints.
     fn logger_for(configs: Vec<WebhookConfig>) -> WebhookLogger {
-        WebhookLogger::new(WebhookRegistry::from_configs(configs))
+        WebhookLogger::with_tuning(
+            WebhookRegistry::from_configs(configs),
+            WebhookTuning::default(),
+        )
     }
 
     async fn recv_timeout(rx: &mut UnboundedReceiver<Captured>) -> Option<Captured> {
@@ -700,31 +766,6 @@ mod tests {
             recv_timeout(&mut rx).await.is_none(),
             "unsubscribed event should not be delivered",
         );
-    }
-
-    #[tokio::test]
-    async fn subscribed_events_are_counted_and_unsubscribed_ones_are_not() {
-        let (url, _rx) = spawn_receiver().await;
-        let logger = logger_for(vec![WebhookConfig {
-            url,
-            events: vec!["sandbox.created".to_string()],
-            secret: None,
-            timeout_ms: 2000,
-            max_retries: 0,
-        }]);
-        let metrics = logger.metrics();
-
-        // A subscribed event is accepted into the queue…
-        logger.log(created_event("sbx-m")).await;
-        assert_eq!(metrics.enqueued.load(Ordering::Relaxed), 1);
-
-        // …while an unsubscribed event is dropped *before* the queue, so it
-        // costs nothing and is not counted as enqueued or dropped-on-overflow.
-        logger
-            .log(LogEvent::new(LogLevel::Info, "sandbox.deleted").field("sandbox_id", "sbx-m"))
-            .await;
-        assert_eq!(metrics.enqueued.load(Ordering::Relaxed), 1);
-        assert_eq!(metrics.dropped.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
