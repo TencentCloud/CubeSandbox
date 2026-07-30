@@ -61,29 +61,28 @@ jobs:
         # rather than silently skip its checks.
         run: REQUIRE_TOOLS=1 ./validate.sh
 
-      # Lightweight dry run of the release-bundle / image-build layout: catches
-      # Dockerfile/context renames and image-name drift between build_images.sh
-      # and the addon Terraform without docker/terraform/cloud.
-      - name: Package layout dry run
+      # Cloud-free one-click test suite (deploy/one-click/tests/test_*.sh).
+      # Every script is self-contained and needs no docker/cloud; terraform and
+      # shellcheck are installed above and python3 ships with the runner. Loop so
+      # new test_*.sh are picked up automatically instead of drifting out of CI.
+      - name: One-click deployer tests
         shell: bash
-        run: ./deploy/one-click/tests/test_package_layout.sh
-
-      # Cloud-free coverage of create.sh's phase/rerun state machine
-      # (lib-phases.sh): first-run, rerun and partial-failure transitions.
-      - name: Phase-flag / rerun recovery checks
-        shell: bash
-        run: ./deploy/one-click/tests/test_phase_flags.sh
-
-      # Cloud-free coverage of the shared .env parser (lib-state-sync.sh:
-      # _env_value / _load_env_file) that create.sh and destroy.sh restore saved
-      # selections with — guards against a parse regression silently corrupting a
-      # reused value (e.g. an instance type with a trailing "# comment" glued on).
-      - name: .env parsing checks
-        shell: bash
-        run: ./deploy/one-click/tests/test_env_value.sh
-
-      # Guards bump-image.sh: the --check gate, the bump rewrite, the reverse
-      # scan, and the variables.tf line guard against non-image semvers.
-      - name: bump-image tag consistency checks
-        shell: bash
-        run: ./deploy/one-click/tests/test_bump_image.sh
+        run: |
+          shopt -s nullglob
+          status=0
+          tests=(deploy/one-click/tests/test_*.sh)
+          if [ "${#tests[@]}" -eq 0 ]; then
+            echo "::error::no deploy/one-click/tests/test_*.sh found"
+            exit 1
+          fi
+          for t in "${tests[@]}"; do
+            echo "::group::${t}"
+            if bash "${t}"; then
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              echo "::error file=${t}::${t} failed"
+              status=1
+            fi
+          done
+          exit "${status}"
