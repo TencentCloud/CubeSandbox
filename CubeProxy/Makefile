@@ -45,6 +45,7 @@ build:
 .PHONY: test
 test:
 	bash tests/test_start.sh
+	bash tests/test_admin_access_log.sh
 
 # Push the architecture-specific image to all registries.
 # Run `make push` on an amd64 host, then again on an arm64 host, then
