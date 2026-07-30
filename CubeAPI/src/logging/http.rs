@@ -36,15 +36,41 @@ use crate::config::WebhookConfig;
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::sync::mpsc::{self, error::TrySendError, Sender};
 use tracing::{debug, error, warn};
 
 type HmacSha256 = Hmac<Sha256>;
 
 /// Upper bound on the exponential backoff sleep between retries.
 const MAX_BACKOFF_SECS: u64 = 30;
+
+/// Capacity of the in-memory event queue feeding the dispatcher.
+///
+/// Bounded on purpose: an unbounded queue turns a burst of events (or a
+/// receiver outage that stalls delivery) into unbounded memory growth and,
+/// eventually, an OOM that loses *every* buffered event at once. A bounded
+/// queue caps that blast radius — under sustained overload we drop the newest
+/// events and account for them (see [`WebhookMetrics::dropped`]) instead of
+/// crashing. Sized generously so only pathological bursts ever reach it.
+const WEBHOOK_QUEUE_CAPACITY: usize = 10_000;
+
+// ─── WebhookMetrics ──────────────────────────────────────────────────────────
+
+/// Delivery counters, shared between the enqueue path and the dispatcher so
+/// event loss and delivery health are *observable* rather than silent.
+///
+/// More counters (delivered / failed / exhausted) are wired in as the delivery
+/// path is hardened; for now the queue path publishes `enqueued` and `dropped`.
+#[derive(Default)]
+pub struct WebhookMetrics {
+    /// Events accepted into the queue for delivery.
+    pub enqueued: AtomicU64,
+    /// Events dropped because the queue was full (backpressure / overload).
+    pub dropped: AtomicU64,
+}
 
 // ─── WebhookRegistry ─────────────────────────────────────────────────────────
 
@@ -143,9 +169,12 @@ impl WebhookRegistry {
 #[derive(Clone)]
 pub struct WebhookLogger {
     /// Events matching a subscription are forwarded here to the dispatcher.
-    tx: UnboundedSender<LogEvent>,
+    /// Bounded: `try_send` never blocks the caller (see [`WebhookLogger::log`]).
+    tx: Sender<LogEvent>,
     /// Shared, runtime-mutable endpoint list (also held by the management API).
     registry: WebhookRegistry,
+    /// Shared delivery counters (queue health, drops).
+    metrics: Arc<WebhookMetrics>,
 }
 
 impl WebhookLogger {
@@ -161,10 +190,20 @@ impl WebhookLogger {
             .build()
             .expect("failed to build webhook HTTP client");
 
-        let (tx, rx) = mpsc::unbounded_channel::<LogEvent>();
+        let (tx, rx) = mpsc::channel::<LogEvent>(WEBHOOK_QUEUE_CAPACITY);
         tokio::spawn(run_dispatcher(rx, client, registry.clone()));
 
-        Self { tx, registry }
+        Self {
+            tx,
+            registry,
+            metrics: Arc::new(WebhookMetrics::default()),
+        }
+    }
+
+    /// Shared delivery counters, for exposure by the management API / metrics.
+    #[allow(dead_code)]
+    pub fn metrics(&self) -> Arc<WebhookMetrics> {
+        self.metrics.clone()
     }
 }
 
@@ -173,7 +212,7 @@ impl WebhookLogger {
 /// Read events off the channel and fan each one out to its subscribed
 /// endpoints, spawning an independent delivery task per (event, endpoint).
 async fn run_dispatcher(
-    mut rx: mpsc::UnboundedReceiver<LogEvent>,
+    mut rx: mpsc::Receiver<LogEvent>,
     client: reqwest::Client,
     registry: WebhookRegistry,
 ) {
@@ -225,9 +264,32 @@ impl Logger for WebhookLogger {
         if !self.registry.any_subscribed(&event.event) {
             return;
         }
-        // Non-blocking: hand off to the dispatcher and return immediately.
-        if self.tx.send(event).is_err() {
-            error!("webhook: dispatcher task is gone, dropping event");
+        // Non-blocking hand-off: `try_send` never awaits, so a full queue can
+        // never stall the request path (the sandbox API must not wait on
+        // webhook delivery). We deliberately do NOT use the async `send`, which
+        // would apply backpressure by blocking the caller.
+        match self.tx.try_send(event) {
+            Ok(()) => {
+                self.metrics.enqueued.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(TrySendError::Full(ev)) => {
+                // Overload: the dispatcher/receivers are not draining fast
+                // enough. Drop the newest event and account for it so the loss
+                // is visible in metrics and (throttled) logs rather than
+                // silently accumulating until OOM.
+                let dropped = self.metrics.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                if dropped == 1 || dropped % 1000 == 0 {
+                    warn!(
+                        event = %ev.event,
+                        dropped_total = dropped,
+                        capacity = WEBHOOK_QUEUE_CAPACITY,
+                        "webhook: queue full, dropping event (receivers not keeping up)",
+                    );
+                }
+            }
+            Err(TrySendError::Closed(_)) => {
+                error!("webhook: dispatcher task is gone, dropping event");
+            }
         }
     }
 
@@ -364,7 +426,7 @@ mod tests {
     use super::*;
     use crate::logging::{LogEvent, LogLevel};
     use axum::{extract::State, http::HeaderMap, routing::post, Router};
-    use tokio::sync::mpsc::UnboundedReceiver;
+    use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
     /// A request captured by the test receiver.
     #[derive(Debug)]
@@ -543,6 +605,31 @@ mod tests {
             recv_timeout(&mut rx).await.is_none(),
             "unsubscribed event should not be delivered",
         );
+    }
+
+    #[tokio::test]
+    async fn subscribed_events_are_counted_and_unsubscribed_ones_are_not() {
+        let (url, _rx) = spawn_receiver().await;
+        let logger = logger_for(vec![WebhookConfig {
+            url,
+            events: vec!["sandbox.created".to_string()],
+            secret: None,
+            timeout_ms: 2000,
+            max_retries: 0,
+        }]);
+        let metrics = logger.metrics();
+
+        // A subscribed event is accepted into the queue…
+        logger.log(created_event("sbx-m")).await;
+        assert_eq!(metrics.enqueued.load(Ordering::Relaxed), 1);
+
+        // …while an unsubscribed event is dropped *before* the queue, so it
+        // costs nothing and is not counted as enqueued or dropped-on-overflow.
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.deleted").field("sandbox_id", "sbx-m"))
+            .await;
+        assert_eq!(metrics.enqueued.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.dropped.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
