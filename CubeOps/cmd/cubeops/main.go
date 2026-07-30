@@ -66,7 +66,11 @@ func main() {
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
 		slog.Info("received shutdown signal")
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// Hijacked WebSocket connections are not waited on by http.Server.
+		// Give the terminal gateway its configured drain window, plus a small
+		// margin for the ordinary HTTP shutdown that follows.
+		shutdownBudget := time.Duration(cfg.Terminal.DrainTimeoutSeconds+5) * time.Second
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownBudget)
 		defer shutdownCancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			slog.Error("server shutdown error", "error", err)

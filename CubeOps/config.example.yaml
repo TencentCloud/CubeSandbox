@@ -48,8 +48,31 @@ redis_url: ""
 # --- Sandbox domain exposed to SDK clients via /config ---
 sandbox_domain: "cube.app"
 
-# --- Web Terminal internal relay transport ---
-# Empty keeps the gateway disabled. Deployments inject the same secret into
-# CubeOps and CubeMaster through CUBE_TERMINAL_INTERNAL_TOKEN.
+# --- Web Terminal grants, gateway, and internal relay transport ---
+# The browser gateway accepts the request's own Origin by default. Add exact
+# http(s) origins below only when a separate trusted WebUI origin is required;
+# an empty list rejects every cross-origin WebSocket request.
+#
+# Empty internal_token keeps grants and the gateway fail-closed. Deployments
+# inject the same secret into CubeOps and CubeMaster through the protected
+# CUBE_TERMINAL_INTERNAL_TOKEN source.
 terminal:
+  enabled: true
+  allowed_origins: []
+  # May be reduced for stricter deployments, but the security maximum is 60s.
+  grant_ttl_seconds: 60
+  handshake_timeout_seconds: 10
+  ping_interval_seconds: 20
+  pong_timeout_seconds: 10
+  write_deadline_seconds: 10
+  idle_timeout_minutes: 30
+  max_lifetime_hours: 8
+  reconnect_grace_seconds: 30
+  replay_buffer_bytes: 262144
+  max_frame_bytes: 65536
+  stdin_queue_frames: 8
+  stdout_pending_bytes: 262144
+  max_sessions_per_user: 5
+  max_sessions_per_replica: 200
+  drain_timeout_seconds: 30
   internal_token: ""
