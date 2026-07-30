@@ -2,37 +2,25 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-verify_template.py — Smoke-check the agent-tool allowlist BYOI template.
+verify_template.py — Smoke-check this example's BYOI template on a live CubeAPI.
 
-Requires a live CubeAPI + CUBE_TEMPLATE_ID built from this directory's
-Dockerfile. Reuses the host argv gate from code-sandbox-quickstart.
+Expect: host deny for bash, then tool-profile + echo → TEMPLATE_VERIFY_OK.
 """
 
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 
+from e2b_code_interpreter import Sandbox
+
+from env_utils import load_local_dotenv
+from tool_allowlist import AllowlistDenied, assert_allowlisted
+
 ROOT = Path(__file__).resolve().parent
-QUICKSTART = ROOT.parent / "code-sandbox-quickstart"
-
-
-def _load_quickstart_gate():
-    """Import allowlist helpers without leaking sys.path at import time."""
-    qs = str(QUICKSTART)
-    if qs not in sys.path:
-        sys.path.insert(0, qs)
-    from env_utils import load_local_dotenv
-    from tool_allowlist import AllowlistDenied, assert_allowlisted
-
-    return load_local_dotenv, AllowlistDenied, assert_allowlisted
 
 
 def main() -> None:
-    from e2b_code_interpreter import Sandbox
-
-    load_local_dotenv, AllowlistDenied, assert_allowlisted = _load_quickstart_gate()
     load_local_dotenv()
     local_env = ROOT / ".env"
     if local_env.is_file():
@@ -42,7 +30,6 @@ def main() -> None:
 
     template_id = os.environ["CUBE_TEMPLATE_ID"]
 
-    # Host deny still works before create.
     try:
         assert_allowlisted("bash -c id")
     except AllowlistDenied as exc:

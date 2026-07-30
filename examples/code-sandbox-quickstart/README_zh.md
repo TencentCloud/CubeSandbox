@@ -126,11 +126,9 @@ hello cube
 | `network_allowlist.py` | `allow_out` — 白名单 CIDR，拦截其余所有出口 |
 | `network_denylist.py` | `deny_out` — 黑名单 CIDR，其余放行 |
 | `restrict_public_access.py` | `network={"allow_public_traffic": False}` — 公网 URL 必须携带 per-sandbox token 才可访问 |
-| `tool_allowlist_deny.py` | 宿主机 argv 工具白名单 — 非白名单命令在 `Sandbox.create` 前拒绝 |
-| `tool_allowlist_allow.py` | 白名单命令进 MicroVM，并叠加 `allow_internet_access=False`（门控 ⊥ 出口） |
-| `tool_allowlist_limits.py` | 威胁模型：shell 串联 / 路径二进制 / 解释器边界（纯宿主机） |
-| `test_tool_allowlist.py` | 门控宿主机单测（含写明的非目标） |
-| `tool_agent_loop.py` | 迷你 Agent 环：每轮门控、deny 时 health 不变、断网探测、仅 commands 写产物 |
+
+宿主机 argv 工具白名单（BYOI 模板 + 演示）见
+[`../agent-tool-allowlist-sandbox/`](../agent-tool-allowlist-sandbox/)。
 
 ### exec_code.py — 运行 Python 代码
 
@@ -230,34 +228,9 @@ python network_denylist.py
 
 ### 宿主机 argv 工具白名单
 
-与出口 CIDR 策略正交：在宿主机于 `Sandbox.create` **之前**拒绝非法工具。
-默认集合仅含工具级二进制（不含解释器）；并拒绝 shell 串联字符
-（`;|&`$` / 换行），避免 `echo ok; bash -c ...` 绕过「只看首个 argv」的
-朴素模型。
-
-**威胁模型（请先读）：** 这是**宿主机策略**，不是 guest 内 confinement。
-白名单含 `cat` 时，`cat /etc/passwd` 仍可通过本门控——需叠加
-`allow_internet_access=False`、短 `timeout` 与最小白名单。
-`enable_code_execution=True` 是显式提权。默认集合之外的二进制必须同时传
-`extra_binaries=...` 与 `allow_unsafe_allowlist_extension=True`（禁止静默扩白名单）。
-细节见 `tool_allowlist_limits.py`。
-
-```bash
-# 威胁模型 / 非目标（不建沙箱）
-python tool_allowlist_limits.py
-
-# 纯宿主机单测（stdlib unittest，不连集群）
-python -m unittest test_tool_allowlist.py -v
-
-# 拒绝：不创建沙箱
-python tool_allowlist_deny.py
-
-# 放行：MicroVM 内执行，并叠加断网
-python tool_allowlist_allow.py
-
-# 迷你 Agent 环：中途 deny、/health 校验、断网探测、仅 commands 产物
-python tool_agent_loop.py
-```
+已迁至独立示例
+[`../agent-tool-allowlist-sandbox/`](../agent-tool-allowlist-sandbox/)
+（BYOI 模板、宿主机门控、deny/allow/loop 演示与单测）。
 
 ### restrict_public_access.py — 限制公网 URL 访问
 
@@ -312,12 +285,6 @@ code-sandbox-quickstart/
 ├── network_allowlist.py       # 出口 CIDR 白名单
 ├── network_denylist.py        # 出口 CIDR 黑名单
 ├── restrict_public_access.py  # 公网 URL 鉴权 token
-├── tool_allowlist.py          # 宿主机 argv 工具白名单
-├── tool_allowlist_deny.py     # 拒绝路径（不创建沙箱）
-├── tool_allowlist_allow.py    # 放行 + 断网叠加
-├── tool_allowlist_limits.py   # 威胁模型 / 边界演示（纯宿主机）
-├── test_tool_allowlist.py     # 门控宿主机单测
-├── tool_agent_loop.py         # 迷你 Agent：propose → 门控 → MicroVM
 ├── requirements.txt           # Python 依赖
 └── .env.example               # 环境变量模板
 ```

@@ -131,11 +131,9 @@ hello cube
 | `network_allowlist.py` | `allow_out` — whitelist specific CIDRs, block everything else |
 | `network_denylist.py` | `deny_out` — block specific CIDRs, allow the rest |
 | `restrict_public_access.py` | `network={"allow_public_traffic": False}` — require a per-sandbox token on every public-URL request |
-| `tool_allowlist_deny.py` | Host argv tool allowlist — deny before `Sandbox.create` |
-| `tool_allowlist_allow.py` | Allowlisted command in MicroVM + `allow_internet_access=False` (gate ⊥ egress) |
-| `tool_allowlist_limits.py` | Threat model: shell-chain / path / interpreter limits (host-only) |
-| `test_tool_allowlist.py` | Host-only unittest for the gate (incl. documented non-goals) |
-| `tool_agent_loop.py` | Toy agent loop: gate every turn, health flat on deny, airgap + commands-only artifact |
+
+Host argv tool allowlist (BYOI template + demos) lives in
+[`../agent-tool-allowlist-sandbox/`](../agent-tool-allowlist-sandbox/).
 
 ### exec_code.py — Run Python Code
 
@@ -238,35 +236,9 @@ python network_denylist.py
 
 ### Host argv tool allowlist
 
-Orthogonal to egress CIDR policy: refuse illegal tools on the host **before**
-`Sandbox.create`. Default set is tool-level only (no interpreters). Also
-rejects shell-chaining characters (`;|&`$` / newlines) so
-`echo ok; bash -c ...` cannot bypass a first-token-only mental model.
-
-**Threat model (read this):** this gate is **host policy**, not guest
-confinement. Allowlisting `cat` still permits `cat /etc/passwd` inside the
-MicroVM; stack `allow_internet_access=False`, short `timeout`, and least
-privilege on the allowlist. `enable_code_execution=True` is an explicit
-privilege escalation. Adding binaries beyond the default set requires
-`extra_binaries=...` **and** `allow_unsafe_allowlist_extension=True` (no
-silent allowlist growth). Run `tool_allowlist_limits.py` for the cases.
-
-```bash
-# Threat model / non-goals (no sandbox)
-python tool_allowlist_limits.py
-
-# Host-only unit tests (stdlib unittest; no cluster)
-python -m unittest test_tool_allowlist.py -v
-
-# Deny: no sandbox created
-python tool_allowlist_deny.py
-
-# Allow: run in MicroVM under airgap
-python tool_allowlist_allow.py
-
-# Toy agent loop: mid-session deny, /health check, airgap probe, commands-only I/O
-python tool_agent_loop.py
-```
+Moved to the standalone example
+[`../agent-tool-allowlist-sandbox/`](../agent-tool-allowlist-sandbox/)
+(BYOI template, host gate, deny/allow/loop demos, unit tests).
 
 ### restrict_public_access.py — Require a Token on Every Public-URL Request
 
@@ -321,12 +293,6 @@ code-sandbox-quickstart/
 ├── network_allowlist.py       # Outbound CIDR allowlist
 ├── network_denylist.py        # Outbound CIDR denylist
 ├── restrict_public_access.py  # Token-gated public URL access
-├── tool_allowlist.py          # Host argv tool allowlist gate
-├── tool_allowlist_deny.py     # Deny before Sandbox.create
-├── tool_allowlist_allow.py    # Allowlisted cmd + airgap
-├── tool_allowlist_limits.py   # Threat model / bypass limits (host-only)
-├── test_tool_allowlist.py     # Host-only unittest for the gate
-├── tool_agent_loop.py         # Toy agent propose → gate → MicroVM loop
 ├── requirements.txt           # Python dependencies
 └── .env.example               # Environment variable template
 ```
