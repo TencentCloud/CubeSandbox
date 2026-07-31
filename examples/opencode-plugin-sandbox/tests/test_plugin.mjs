@@ -222,6 +222,34 @@ await checkAsync("empty and whitespace-only commands are left alone", async () =
   restore();
 });
 
+// Fail-closed applies to unreadable payloads too. Returning quietly on a
+// malformed call would let it reach the host, contradicting the guarantee that
+// a command which cannot be redirected safely is blocked rather than run.
+await checkAsync("a non-string command is blocked, not passed to the host", async () => {
+  const { hook, restore } = await makeHook();
+  for (const value of [42, null, undefined, {}, ["ls"]]) {
+    const out = { args: { command: value } };
+    await assert.rejects(
+      () => hook({ tool: "bash", sessionID: "s1" }, out),
+      /expected a string command/,
+      `command of type ${typeof value} was not blocked`
+    );
+  }
+  restore();
+});
+
+await checkAsync("a bash call with no args is blocked", async () => {
+  const { hook, restore } = await makeHook();
+  for (const output of [{}, { args: null }, { args: undefined }]) {
+    await assert.rejects(
+      () => hook({ tool: "bash", sessionID: "s1" }, output),
+      /carried no arguments/,
+      "missing args was not blocked"
+    );
+  }
+  restore();
+});
+
 await checkAsync("rewriting is idempotent", async () => {
   const { hook, restore } = await makeHook();
   const out = { args: { command: "ls" } };
@@ -283,12 +311,34 @@ await checkAsync("a genuine rewrite is recognised and not nested", async () => {
 });
 
 // --------------------------------------------------------------- passthrough
-await checkAsync("git and gh stay on the host by default", async () => {
+// Passthrough is empty by default, and that is a security property rather than
+// an oversight: matching is on the leading token, so allowing `git` allows
+// `git -c alias.x='!<any shell>' x`, which runs arbitrary code on the host.
+await checkAsync("nothing passes through by default, including git", async () => {
   const { hook, restore } = await makeHook();
-  for (const cmd of ["git status", "git commit -m x", "gh pr list", "/usr/bin/git log"]) {
+  for (const cmd of [
+    "git status",
+    "gh pr list",
+    "/usr/bin/git log",
+    "git -c alias.pwn='!echo owned' pwn",
+  ]) {
     const out = { args: { command: cmd } };
     await hook({ tool: "bash", sessionID: "s1" }, out);
-    assert.equal(out.args.command, cmd, `${cmd} should not be redirected`);
+    assert.notEqual(out.args.command, cmd, `${cmd} should be redirected by default`);
+    assert.ok(
+      out.args.command.includes("--command"),
+      `${cmd} was not rewritten into a backend call`
+    );
+  }
+  restore();
+});
+
+await checkAsync("host git requires explicit opt-in", async () => {
+  const { hook, restore } = await makeHook({ CUBE_OPENCODE_PASSTHROUGH: "git,gh" });
+  for (const cmd of ["git status", "gh pr list", "/usr/bin/git log"]) {
+    const out = { args: { command: cmd } };
+    await hook({ tool: "bash", sessionID: "s1" }, out);
+    assert.equal(out.args.command, cmd, `${cmd} should pass through once opted in`);
   }
   restore();
 });

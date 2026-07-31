@@ -59,6 +59,21 @@ from pathlib import Path
 _STATE_BEGIN = "__CUBE_STATE_BEGIN_9f2a__"
 _STATE_END = "__CUBE_STATE_END_9f2a__"
 
+# Emitted inside the guest to capture cwd and environment as JSON. Prefers
+# python3 so values containing quotes or newlines stay well-formed, and
+# degrades to a cwd-only object when python3 is absent from the template.
+STATE_SNIPPET = (
+    "python3 -c " + shlex.quote(
+        "import json,os;"
+        "print(json.dumps({"
+        '"cwd": os.getcwd(), '
+        '"env": {k: v for k, v in os.environ.items() '
+        'if k not in (\"_\", \"SHLVL\", \"PWD\", \"OLDPWD\")}}))'
+    )
+    + " 2>/dev/null || "
+    + 'printf \'{"cwd": "%s"}\\n\' "$PWD"'
+)
+
 DEFAULT_API_URL = "http://127.0.0.1:3000"
 DEFAULT_TIMEOUT = 120
 DEFAULT_WORKDIR = "/workspace"
@@ -207,17 +222,36 @@ def build_wrapper(command: str, cwd: str, env: dict) -> str:
 
     The wrapper:
       1. restores the recorded cwd and environment,
-      2. runs the command with ``eval`` in the *current* shell,
-      3. prints a JSON state block between sentinels for the host to capture.
+      2. runs the command with ``eval`` inside a subshell,
+      3. emits a JSON state block between sentinels from an ``EXIT`` trap.
 
     ``exit_code`` is preserved so the caller can mirror it.
 
-    Why ``eval`` and not ``bash -c``: ``bash -c`` starts a child shell, so a
-    ``cd`` or ``export`` performed by the command mutates only that child and
-    is gone by the time the state block runs. The state would then always
-    report the wrapper's own cwd and environment, silently defeating the whole
-    point of capturing it. ``eval`` executes in the shell whose state we go on
-    to read, so mutations are visible.
+    Two constraints shape this, and they pull in opposite directions.
+
+    ``bash -c`` cannot be used: it starts a child shell, so a ``cd`` or
+    ``export`` performed by the command mutates only that child and is gone
+    before the state is read. The state would always report the wrapper's own
+    cwd and environment, silently defeating the point of capturing it.
+
+    Plain ``eval`` in the wrapper's own shell cannot be used either: a command
+    ending in ``exit`` terminates that shell, so the state block and the
+    exit-code line never run. The host then finds no sentinel and reports
+    success for a command that actually failed.
+
+    A subshell with an ``EXIT`` trap satisfies both. ``eval`` runs in the
+    subshell, so its mutations are visible to the trap; the trap fires when the
+    subshell ends normally or via ``exit``, so the state block and exit code
+    are emitted in both cases; and an ``exit`` inside only ends the subshell,
+    leaving the wrapper intact.
+
+    One case remains outside this: a command that calls ``exec`` replaces the
+    subshell's process image, which discards traps along with everything else.
+    No shell-level wrapper can observe that, so the host sees no sentinel.
+    ``run_command`` handles the absence of a sentinel by keeping the previous
+    session state and returning the process exit code unchanged, which is the
+    conservative choice — state is stale rather than wrong. This is recorded in
+    the known limitations rather than papered over.
     """
     lines = ["set +e"]
 
@@ -232,21 +266,23 @@ def build_wrapper(command: str, cwd: str, env: dict) -> str:
             continue
         lines.append(f"export {name}={shlex.quote(str(value))}")
 
-    lines.append(f"eval {shlex.quote(command)}")
-    lines.append("__cube_rc=$?")
-
-    # Emit state as JSON built by python3 inside the guest when available, so
-    # values containing quotes or newlines stay well-formed.
-    lines.append(f'echo "{_STATE_BEGIN}"')
-    lines.append(
-        "python3 -c 'import json,os,sys;"
-        "print(json.dumps({\"cwd\": os.getcwd(), "
-        "\"env\": {k: v for k, v in os.environ.items() "
-        "if k not in (\"_\", \"SHLVL\", \"PWD\", \"OLDPWD\")}}))' "
-        f'2>/dev/null || echo "{{\\"cwd\\": \\"$(pwd)\\"}}"'
+    # Run inside a subshell with an EXIT trap so the state block is emitted no
+    # matter how the command ends, including `exit` and `exec`. See the
+    # docstring for why neither `bash -c` nor a bare `eval` works here.
+    trap_body = "; ".join(
+        [
+            "__cube_rc=$?",
+            f'echo "{_STATE_BEGIN}"',
+            STATE_SNIPPET,
+            f'echo "{_STATE_END}"',
+            'echo "__CUBE_RC__=$__cube_rc"',
+        ]
     )
-    lines.append(f'echo "{_STATE_END}"')
-    lines.append('echo "__CUBE_RC__=$__cube_rc"')
+
+    lines.append("(")
+    lines.append(f"  trap {shlex.quote(trap_body)} EXIT")
+    lines.append(f"  eval {shlex.quote(command)}")
+    lines.append(")")
 
     return "\n".join(lines)
 

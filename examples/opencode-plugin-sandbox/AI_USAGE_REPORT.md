@@ -251,7 +251,77 @@ That understated it — if every known session key is missing, all sessions shar
 one state file and lock, so cwd and environment bleed between them. Still not a
 host escape, but worth stating accurately.
 
-### 5.8 Command-line parsing that missed the real output format
+### 5.9 A second review round, and one fix that was wrong
+
+The automated review ran again after the first round of fixes and found four
+more issues. Two are worth recording in detail because they say something about
+the first round.
+
+**The `eval` fix from §5.7 was incomplete.** Replacing `bash -c` with `eval`
+made `cd` and `export` visible to the state block, which was the reported
+defect. But `eval` runs in the wrapper's own shell, so a command ending in
+`exit` — a plausible thing for an agent to write — terminated that shell before
+the state block and exit-code line ran. The host then found no sentinel and
+reported success for a command that had failed:
+
+```
+eval variant, command `echo before; exit 3`:
+  stdout : before
+  state  : (missing)
+  rc     : 0     <- wrong; the command exited 3
+```
+
+The correct shape is a subshell with an `EXIT` trap: `eval` still runs where its
+mutations are observable, the trap fires however the subshell ends, and an
+`exit` inside only ends the subshell. Verified across four cases:
+
+```
+plain command      rc=0  state captured  cwd=demo  TOKEN=v1
+ends with exit 3   rc=3  state captured  cwd=demo  TOKEN=v2
+failing command    rc=1  state captured
+exec echo ...      no sentinel  <- see below
+```
+
+`exec` remains outside any shell-level wrapper: it replaces the process image
+and discards traps with it. Rather than claim coverage, the backend keeps the
+previous session state when no sentinel arrives (stale rather than wrong) and
+this is now listed as a known limitation.
+
+The lesson is narrower than "test more". The first fix was verified against the
+exact scenario in the report — `cd` then `pwd` — and passed. It was not verified
+against the adjacent shapes of the same operation. A fix to control flow should
+be checked against the ways control flow can end, not only the case reported.
+
+**The default passthrough list was a host-execution escape hatch.** The list
+contained `git`, `gh`, `opencode`, justified as protecting the developer's
+workflow — the sandbox has its own filesystem, so `git commit` there commits the
+wrong repository. That reasoning is sound but it was applied to the wrong threat
+model. Matching is on the leading token, so allowing `git` allows anything git
+can be made to do, and git can be made to run arbitrary shell:
+
+```console
+$ git -c alias.probe='!echo PWNED_VIA_GIT_ALIAS' probe
+PWNED_VIA_GIT_ALIAS
+```
+
+Verified against real git before changing anything. Since the model's commands
+are the untrusted input, a default list containing `git` re-opened the host path
+this integration closes. The default is now empty, opting in is explicit, and
+both the code comment and the docs state that listed commands must be treated as
+fully trusted with host privileges.
+
+Two smaller items from the same round: fail-closed was not applied to unreadable
+payloads (a non-string `command`, or a bash call with no `args`, returned quietly
+and reached the host — now throws), and the Chinese README diagram still said
+"one MicroVM per session" because §5.7's fix landed only in the English file.
+The second is a plain process failure: a bilingual repository needs both files
+changed in the same edit, and checking only the file named in the review is not
+enough.
+
+Tests grew from 21 to 24 with the passthrough default inverted and the new
+fail-closed cases covered.
+
+### 5.10 Command-line parsing that missed the real output format
 
 Not part of the deliverable, but worth recording: a helper script used to drive
 the deployment failed to parse `cubemastercli` output because the AI-generated
@@ -269,7 +339,7 @@ successfully; only the parser was broken.
 - All timings quoted in the docs
 - Plugin loads as an ES module; hook rewrites `bash` and leaves other tools alone
 - Quote escaping survives real `bash` argv parsing
-- 21/21 offline assertions pass
+- 24/24 offline assertions pass
 
 **Not verified**
 
@@ -314,7 +384,7 @@ one was found by reading bytes after a debugging method produced a false result.
 ```bash
 # Offline: no deployment, no network, no npm install
 cd examples/opencode-plugin-sandbox
-node tests/test_plugin.mjs        # expect 21/21, exit 0
+node tests/test_plugin.mjs        # expect 24/24, exit 0
 
 # Against a real deployment
 export CUBE_TEMPLATE_ID=tpl-xxxxxxxx

