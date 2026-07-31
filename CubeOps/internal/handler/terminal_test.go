@@ -24,6 +24,7 @@ import (
 	cubesandbox "github.com/tencentcloud/CubeSandbox/sdk/go"
 
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/auth"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/config"
 )
 
 type fakeTerminalPTY struct {
@@ -125,6 +126,12 @@ func (f *fakeTerminalFactory) pty(index int) *fakeTerminalPTY {
 	return f.ptys[index]
 }
 
+func (f *fakeTerminalFactory) openCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.openCalls
+}
+
 func terminalSandboxResponse(state int, envd bool) json.RawMessage {
 	annotation := `{}`
 	if envd {
@@ -163,6 +170,8 @@ func newTerminalTestHandler(
 		runtime:         defaultTerminalRuntimeConfig(),
 		lifecycleCtx:    lifecycleCtx,
 		lifecycleCancel: lifecycleCancel,
+		usedGrants:      make(map[string]time.Time),
+		activeSessions:  make(map[string]int),
 	}, jm, factory, &calls
 }
 
@@ -480,6 +489,116 @@ func TestTerminalRejectsExpiredGrant(t *testing.T) {
 	}
 }
 
+func TestTerminalRejectsReplayedGrant(t *testing.T) {
+	h, jm, factory, calls := newTerminalTestHandler(t, 1, true)
+	server, accessToken := newTerminalTestServer(t, h, jm)
+	session := createTerminalSession(t, server, accessToken)
+	first, _, err := dialTerminal(t, server, session, server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	if _, _, err := first.ReadMessage(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, resp, err := dialTerminal(t, server, session, server.URL)
+	if second != nil {
+		second.Close()
+		t.Fatal("replayed terminal grant unexpectedly connected")
+	}
+	if err == nil || resp == nil {
+		t.Fatalf("dial error=%v response=%v", err, resp)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusUnauthorized, body)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("CubeMaster calls=%d, want grant and first connection only", calls.Load())
+	}
+	if got := factory.openCallCount(); got != 1 {
+		t.Fatalf("PTY open calls=%d, want one", got)
+	}
+}
+
+func TestTerminalLimitsActiveSessionsPerOperatorAndSandbox(t *testing.T) {
+	h, jm, factory, _ := newTerminalTestHandler(t, 1, true)
+	h.runtime.maxSessions = 1
+	server, accessToken := newTerminalTestServer(t, h, jm)
+	first, _, err := dialTerminal(
+		t,
+		server,
+		createTerminalSession(t, server, accessToken),
+		server.URL,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	if _, _, err := first.ReadMessage(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, resp, err := dialTerminal(
+		t,
+		server,
+		createTerminalSession(t, server, accessToken),
+		server.URL,
+	)
+	if second != nil {
+		second.Close()
+		t.Fatal("terminal session limit was not enforced")
+	}
+	if err == nil || resp == nil {
+		t.Fatalf("dial error=%v response=%v", err, resp)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusTooManyRequests, body)
+	}
+	if got := factory.openCallCount(); got != 1 {
+		t.Fatalf("PTY open calls=%d, want one", got)
+	}
+
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-factory.pty(0).killed:
+	case <-time.After(time.Second):
+		t.Fatal("first PTY was not cleaned up")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		h.lifecycleMu.Lock()
+		active := h.activeSessions["operator\x00sandbox-1"]
+		h.lifecycleMu.Unlock()
+		if active == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("terminal session slot was not released")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	third, _, err := dialTerminal(
+		t,
+		server,
+		createTerminalSession(t, server, accessToken),
+		server.URL,
+	)
+	if err != nil {
+		t.Fatalf("dial after session slot release: %v", err)
+	}
+	defer third.Close()
+	if _, _, err := third.ReadMessage(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTerminalIdleTimeoutCleansPTY(t *testing.T) {
 	h, jm, factory, _ := newTerminalTestHandler(t, 1, true)
 	h.runtime.idleTimeout = 20 * time.Millisecond
@@ -573,6 +692,25 @@ func TestTerminalShutdownRejectsNewGrants(t *testing.T) {
 	}
 	if factory.closeCalls != 1 {
 		t.Fatalf("factory close calls=%d want=1", factory.closeCalls)
+	}
+}
+
+func TestTerminalShutdownWithInvalidProxyConfiguration(t *testing.T) {
+	h := NewTerminalHandler(
+		&fakeCM{},
+		auth.NewJWTManager("terminal-test-secret-32-bytes-long!", time.Minute, time.Hour),
+		&config.Config{SandboxProxyURL: "://invalid"},
+	)
+	if h.factoryErr == nil {
+		t.Fatal("invalid proxy configuration unexpectedly created a terminal factory")
+	}
+	if h.factory != nil {
+		t.Fatalf("factory=%#v, want nil interface", h.factory)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := h.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown with invalid proxy configuration: %v", err)
 	}
 }
 

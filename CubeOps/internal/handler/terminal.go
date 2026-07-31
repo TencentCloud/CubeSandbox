@@ -30,6 +30,7 @@ const (
 	terminalGrantPrefix   = "cube-terminal.grant."
 	terminalWriteTimeout  = 10 * time.Second
 	maxTerminalMessage    = 64 << 10
+	maxTerminalSessions   = 5
 	envdVersionAnnotation = "cube.master.components.envd.version"
 
 	terminalUnavailableClientMessage = "terminal is unavailable for this sandbox; use an envd-enabled template and verify /bin/sh"
@@ -40,6 +41,7 @@ type terminalRuntimeConfig struct {
 	idleTimeout time.Duration
 	maxDuration time.Duration
 	pingPeriod  time.Duration
+	maxSessions int
 }
 
 func defaultTerminalRuntimeConfig() terminalRuntimeConfig {
@@ -48,6 +50,7 @@ func defaultTerminalRuntimeConfig() terminalRuntimeConfig {
 		idleTimeout: 30 * time.Minute,
 		maxDuration: 8 * time.Hour,
 		pingPeriod:  30 * time.Second,
+		maxSessions: maxTerminalSessions,
 	}
 }
 
@@ -134,6 +137,9 @@ func (f *sdkTerminalFactory) Open(
 }
 
 func (f *sdkTerminalFactory) Close() error {
+	if f == nil || f.client == nil {
+		return nil
+	}
 	return f.client.Close()
 }
 
@@ -153,10 +159,16 @@ type TerminalHandler struct {
 	lifecycleMu     sync.Mutex
 	lifecycleWG     sync.WaitGroup
 	closing         bool
+	usedGrants      map[string]time.Time
+	activeSessions  map[string]int
 }
 
 func NewTerminalHandler(cm CubeMasterClient, jm *auth.JWTManager, cfg *config.Config) *TerminalHandler {
-	factory, err := newSDKTerminalFactory(cfg)
+	sdkFactory, err := newSDKTerminalFactory(cfg)
+	var factory terminalFactory
+	if err == nil {
+		factory = sdkFactory
+	}
 	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 	return &TerminalHandler{
 		cm:              cm,
@@ -166,6 +178,8 @@ func NewTerminalHandler(cm CubeMasterClient, jm *auth.JWTManager, cfg *config.Co
 		runtime:         defaultTerminalRuntimeConfig(),
 		lifecycleCtx:    lifecycleCtx,
 		lifecycleCancel: lifecycleCancel,
+		usedGrants:      make(map[string]time.Time),
+		activeSessions:  make(map[string]int),
 	}
 }
 
@@ -278,6 +292,20 @@ func (h *TerminalHandler) Connect(c *gin.Context) {
 		httputil.WriteError(c, http.StatusUnauthorized, "invalid or expired terminal grant")
 		return
 	}
+	if !h.consumeGrant(claims) {
+		logTerminalAudit(
+			slog.LevelWarn,
+			"terminal.failed",
+			claims,
+			"",
+			c.ClientIP(),
+			"grant_replayed",
+			0,
+			errors.New("terminal grant was already used"),
+		)
+		httputil.WriteError(c, http.StatusUnauthorized, "terminal grant was already used")
+		return
+	}
 	containerID, err := h.validateTarget(c.Request.Context(), claims.SandboxID)
 	if err != nil {
 		logTerminalAudit(
@@ -293,21 +321,29 @@ func (h *TerminalHandler) Connect(c *gin.Context) {
 		writeTerminalTargetError(c, err)
 		return
 	}
-	if !h.beginSession() {
+	if err := h.beginSession(claims); err != nil {
+		reason := "session_limit"
+		status := http.StatusTooManyRequests
+		message := "too many active terminal sessions"
+		if errors.Is(err, errTerminalShuttingDown) {
+			reason = "server_shutdown"
+			status = http.StatusServiceUnavailable
+			message = "terminal service is shutting down"
+		}
 		logTerminalAudit(
 			slog.LevelWarn,
 			"terminal.failed",
 			claims,
 			containerID,
 			c.ClientIP(),
-			"server_shutdown",
+			reason,
 			0,
-			errors.New("terminal service is shutting down"),
+			err,
 		)
-		httputil.WriteError(c, http.StatusServiceUnavailable, "terminal service is shutting down")
+		httputil.WriteError(c, status, message)
 		return
 	}
-	defer h.lifecycleWG.Done()
+	defer h.endSession(claims)
 
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  4096,
@@ -331,14 +367,64 @@ func (h *TerminalHandler) Connect(c *gin.Context) {
 	h.relay(conn, claims, containerID, c.ClientIP())
 }
 
-func (h *TerminalHandler) beginSession() bool {
+func (h *TerminalHandler) consumeGrant(claims *auth.TerminalClaims) bool {
+	h.lifecycleMu.Lock()
+	defer h.lifecycleMu.Unlock()
+	now := time.Now()
+	if h.usedGrants == nil {
+		h.usedGrants = make(map[string]time.Time)
+	}
+	for grantID, expiresAt := range h.usedGrants {
+		if !expiresAt.After(now) {
+			delete(h.usedGrants, grantID)
+		}
+	}
+	if _, used := h.usedGrants[claims.ID]; used {
+		return false
+	}
+	expiresAt := now.Add(h.runtime.grantTTL)
+	if claims.ExpiresAt != nil {
+		expiresAt = claims.ExpiresAt.Time
+	}
+	h.usedGrants[claims.ID] = expiresAt
+	return true
+}
+
+// beginSession bounds live PTYs per operator and sandbox. The in-memory grant
+// consumption check prevents ordinary replay on one CubeOps replica; this cap
+// remains the resource-safety boundary when requests span multiple replicas.
+func (h *TerminalHandler) beginSession(claims *auth.TerminalClaims) error {
 	h.lifecycleMu.Lock()
 	defer h.lifecycleMu.Unlock()
 	if h.closing {
-		return false
+		return errTerminalShuttingDown
 	}
+	if h.activeSessions == nil {
+		h.activeSessions = make(map[string]int)
+	}
+	key := terminalSessionKey(claims)
+	if h.runtime.maxSessions > 0 && h.activeSessions[key] >= h.runtime.maxSessions {
+		return errTerminalSessionLimit
+	}
+	h.activeSessions[key]++
 	h.lifecycleWG.Add(1)
-	return true
+	return nil
+}
+
+func (h *TerminalHandler) endSession(claims *auth.TerminalClaims) {
+	h.lifecycleMu.Lock()
+	key := terminalSessionKey(claims)
+	if h.activeSessions[key] <= 1 {
+		delete(h.activeSessions, key)
+	} else {
+		h.activeSessions[key]--
+	}
+	h.lifecycleMu.Unlock()
+	h.lifecycleWG.Done()
+}
+
+func terminalSessionKey(claims *auth.TerminalClaims) string {
+	return claims.Subject + "\x00" + claims.SandboxID
 }
 
 func (h *TerminalHandler) isClosing() bool {
@@ -408,6 +494,8 @@ var (
 	errTerminalNotFound        = errors.New("sandbox not found")
 	errTerminalNotRunning      = errors.New("sandbox must be running before opening a terminal")
 	errTerminalEnvdUnavailable = errors.New("terminal requires an envd-enabled template")
+	errTerminalShuttingDown    = errors.New("terminal service is shutting down")
+	errTerminalSessionLimit    = errors.New("too many active terminal sessions")
 )
 
 func writeTerminalTargetError(c *gin.Context, err error) {
