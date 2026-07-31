@@ -182,6 +182,7 @@ let rafCallbacks = new Map<number, FrameRequestCallback>();
 let nextRaf = 1;
 let grantCounter = 0;
 let fullscreenElement: Element | null = null;
+let grantContainers = defaultGrantContainers();
 
 describe('TerminalEntry and TerminalDialog', () => {
   beforeEach(async () => {
@@ -198,6 +199,7 @@ describe('TerminalEntry and TerminalDialog', () => {
     nextRaf = 1;
     grantCounter = 0;
     fullscreenElement = null;
+    grantContainers = defaultGrantContainers();
     vi.stubGlobal('ResizeObserver', FakeResizeObserver);
     vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
       const id = nextRaf++;
@@ -289,16 +291,14 @@ describe('TerminalEntry and TerminalDialog', () => {
     expect(xtermState.fits.every((fit) => fit.disposed === 1)).toBe(true);
   });
 
-  it('creates independent container tabs, disables unavailable containers, and isolates tab close', async () => {
+  it('opens a container menu from the tab bar, disables unavailable containers, and isolates tab close', async () => {
     render(<TerminalDialog open onOpenChange={vi.fn()} sandboxId="sandbox-a" />);
     await connectInitialDialog();
 
-    const select = screen.getByRole('combobox', {
-      name: 'Select a container for a new terminal session',
-    });
-    const stopped = screen.getByRole('option', { name: 'stopped — not running' });
-    expect(stopped).toBeDisabled();
-    fireEvent.change(select, { target: { value: 'container-worker' } });
+    fireEvent.keyDown(screen.getByRole('button', { name: 'New session' }), { key: 'ArrowDown' });
+    const stopped = screen.getByRole('menuitem', { name: 'stopped not running' });
+    expect(stopped).toHaveAttribute('data-disabled', '');
+    fireEvent.click(screen.getByRole('menuitem', { name: 'worker' }));
     await flushRaf();
     await flushAsync();
     await openPendingSockets();
@@ -314,17 +314,103 @@ describe('TerminalEntry and TerminalDialog', () => {
     expect(screen.getAllByRole('tab')).toHaveLength(1);
   });
 
+  it('starts a new tab directly when the sandbox has one container', async () => {
+    grantContainers = [defaultGrantContainers()[0]];
+    render(<TerminalDialog open onOpenChange={vi.fn()} sandboxId="sandbox-a" />);
+    await connectInitialDialog();
+
+    fireEvent.click(screen.getByRole('button', { name: 'New session' }));
+    await flushRaf();
+    await flushAsync();
+    await openPendingSockets();
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(requestBody(1)).toMatchObject({ kind: 'open', containerId: 'container-primary' });
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(screen.getAllByRole('tab')).toHaveLength(2);
+  });
+
+  it('disables a new session when every discovered container is unavailable', async () => {
+    grantContainers = defaultGrantContainers().map((container) => ({ ...container, status: 0 }));
+    render(<TerminalDialog open onOpenChange={vi.fn()} sandboxId="sandbox-a" />);
+    await connectInitialDialog();
+
+    expect(screen.getByRole('button', { name: 'New session' })).toBeDisabled();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears stale container choices when a later grant reports no containers', async () => {
+    render(<TerminalDialog open onOpenChange={vi.fn()} sandboxId="sandbox-a" />);
+    await connectInitialDialog();
+
+    grantContainers = [];
+    fireEvent.keyDown(screen.getByRole('button', { name: 'New session' }), { key: 'ArrowDown' });
+    fireEvent.click(screen.getByRole('menuitem', { name: 'worker' }));
+    await flushRaf();
+    await flushAsync();
+    await openPendingSockets();
+
+    expect(screen.getByRole('button', { name: 'New session' })).toBeDisabled();
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+
+  it('disables a closed tab retry after the selected target becomes unavailable', async () => {
+    render(<TerminalDialog open onOpenChange={vi.fn()} sandboxId="sandbox-a" />);
+    await connectInitialDialog();
+
+    grantContainers = [];
+    fireEvent.keyDown(screen.getByRole('button', { name: 'New session' }), { key: 'ArrowDown' });
+    fireEvent.click(screen.getByRole('menuitem', { name: 'worker' }));
+    await flushRaf();
+    await flushAsync();
+    await openPendingSockets();
+
+    FakeBrowserSocket.instances[1].serverStatus({ type: 'error', code: 'SESSION_LOST' });
+    await flushAsync();
+    const retry = screen.getByRole('button', { name: 'Start new session' });
+    expect(retry).toBeDisabled();
+    fireEvent.click(retry);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('disables the empty-state action when no target remains available', async () => {
+    render(<TerminalDialog open onOpenChange={vi.fn()} sandboxId="sandbox-a" />);
+    await connectInitialDialog();
+
+    grantContainers = [];
+    fireEvent.keyDown(screen.getByRole('button', { name: 'New session' }), { key: 'ArrowDown' });
+    fireEvent.click(screen.getByRole('menuitem', { name: 'worker' }));
+    await flushRaf();
+    await flushAsync();
+    await openPendingSockets();
+
+    const closeTab = () =>
+      screen
+        .getAllByRole('button')
+        .find(
+          (button) =>
+            button.getAttribute('aria-label')?.startsWith('Close ') &&
+            button.getAttribute('aria-label') !== 'Close terminal',
+        );
+    fireEvent.click(closeTab()!);
+    fireEvent.click(closeTab()!);
+    const emptyStateAction = screen.getByRole('button', { name: 'Start new session' });
+    expect(emptyStateAction).toBeDisabled();
+    fireEvent.click(emptyStateAction);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
   it('persists font size 12..20, drives fullscreen fit, and reports fullscreen rejection', async () => {
     localStorage.setItem('cube.terminal.fontSize', 'invalid');
     expect(readTerminalFontSize()).toBe(14);
     render(<TerminalDialog open onOpenChange={vi.fn()} sandboxId="sandbox-a" />);
     await connectInitialDialog();
 
-    fireEvent.change(screen.getByRole('slider', { name: 'Terminal font size' }), {
-      target: { value: '20' },
-    });
-    expect(localStorage.getItem('cube.terminal.fontSize')).toBe('20');
-    expect(xtermState.terminals.at(-1)?.options.fontSize).toBe(20);
+    fireEvent.click(screen.getByRole('button', { name: 'Increase font size' }));
+    expect(localStorage.getItem('cube.terminal.fontSize')).toBe('15');
+    expect(xtermState.terminals.at(-1)?.options.fontSize).toBe(15);
+    fireEvent.click(screen.getByRole('button', { name: 'Decrease font size' }));
+    expect(localStorage.getItem('cube.terminal.fontSize')).toBe('14');
 
     installFullscreenMocks();
     const fitBefore = xtermState.fits.at(-1)?.fitCount ?? 0;
@@ -381,14 +467,18 @@ async function fakeGrantFetch(_input: RequestInfo | URL, init?: RequestInit): Pr
       wsUrl: '/opsapi/v1/terminal/ws',
       ...metadata,
       expiresAt: '2026-07-30T10:30:00Z',
-      containers: [
-        { containerId: 'container-primary', name: 'primary', type: 'sandbox', status: 1 },
-        { containerId: 'container-worker', name: 'worker', type: 'service', status: 1 },
-        { containerId: 'container-stopped', name: 'stopped', type: 'service', status: 0 },
-      ],
+      containers: grantContainers,
     }),
     { status: 201, headers: { 'Content-Type': 'application/json' } },
   );
+}
+
+function defaultGrantContainers() {
+  return [
+    { containerId: 'container-primary', name: 'primary', type: 'sandbox', status: 1 },
+    { containerId: 'container-worker', name: 'worker', type: 'service', status: 1 },
+    { containerId: 'container-stopped', name: 'stopped', type: 'service', status: 0 },
+  ];
 }
 
 function requestBody(call: number): Record<string, unknown> {
