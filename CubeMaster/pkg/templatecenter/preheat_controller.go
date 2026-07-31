@@ -363,8 +363,8 @@ func batchComputeNodeBudgetUsage(ctx context.Context, db *gorm.DB, nodeIDs []str
 					COALESCE(a.ext4_size_bytes, 0)
 				)
 			), 0) AS total_bytes`).
-		Joins("LEFT JOIN " + constants.TemplateDefinitionTableName + " AS d ON r.template_id = d.template_id").
-		Joins("LEFT JOIN " + constants.RootfsArtifactTableName + " AS a ON d.rootfs_artifact_id = a.artifact_id").
+		Joins("LEFT JOIN "+constants.TemplateDefinitionTableName+" AS d ON r.template_id = d.template_id").
+		Joins("LEFT JOIN "+constants.RootfsArtifactTableName+" AS a ON d.rootfs_artifact_id = a.artifact_id").
 		Where("r.node_id IN ? AND r.status = ?", nodeIDs, ReplicaStatusReady).
 		Group("r.node_id").
 		Find(&results).Error; err != nil {

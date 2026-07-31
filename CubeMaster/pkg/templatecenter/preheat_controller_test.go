@@ -29,9 +29,9 @@ func TestMatchNodeSelector_EmptySelector(t *testing.T) {
 func TestMatchNodeSelector_LabelMatch(t *testing.T) {
 	node := &nodemeta.NodeSnapshot{NodeID: "n1", Labels: map[string]string{"zone": "a", "role": "compute"}}
 	tests := []struct {
-		name    string
+		name     string
 		selector map[string]string
-		want    bool
+		want     bool
 	}{
 		{"single match", map[string]string{"zone": "a"}, true},
 		{"multi match", map[string]string{"zone": "a", "role": "compute"}, true},

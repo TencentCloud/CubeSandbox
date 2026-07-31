@@ -330,7 +330,7 @@ func TestPreHandleTemplatePreheat(t *testing.T) {
 	// Disabled with a malformed pinned block: defaults still normalize, but
 	// validation is skipped so a stale block cannot block startup.
 	disabledBad := &Config{TemplatePreheat: &TemplatePreheatConf{
-		Enabled:        false,
+		Enabled:         false,
 		PerNodeMaxBytes: -1,
 		PinnedTemplates: []PinnedTemplateConf{{TemplateID: "", MinReplicas: 5, MaxReplicas: 1}},
 	}}
@@ -362,7 +362,7 @@ func TestPreHandleTemplatePreheat(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			err := preHandleTemplatePreheat(&Config{TemplatePreheat: &TemplatePreheatConf{
-				Enabled:        tc.enabled,
+				Enabled:         tc.enabled,
 				PinnedTemplates: tc.pinned,
 			}})
 			assert.Error(t, err, "expected validation error for %s", name)

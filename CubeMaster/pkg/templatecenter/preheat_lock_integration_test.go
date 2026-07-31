@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/mysql"
@@ -177,11 +176,11 @@ func TestPreheatAdvisoryLock_ContentionSingleWinner(t *testing.T) {
 			}
 		}()
 	}
-	close(start)            // fire all GET_LOCK(name,0) at once
+	close(start) // fire all GET_LOCK(name,0) at once
 	for attempted.Load() < contenders {
 		time.Sleep(time.Millisecond)
 	}
-	close(release)          // let the winner release
+	close(release) // let the winner release
 	done.Wait()
 
 	assert.Equal(t, int32(1), wins.Load(),

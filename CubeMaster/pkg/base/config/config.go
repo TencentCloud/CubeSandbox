@@ -51,8 +51,8 @@ type Config struct {
 	//     - name: cos-rpc
 	//       type: rpc
 	//       socket_path: /run/cube-volume-cos-rpc.sock
-	VolumePlugins []volumeplugin.Config `yaml:"volume_plugins"`
-	TemplatePreheat  *TemplatePreheatConf  `yaml:"template_preheat"`
+	VolumePlugins   []volumeplugin.Config `yaml:"volume_plugins"`
+	TemplatePreheat *TemplatePreheatConf  `yaml:"template_preheat"`
 }
 
 type CommonConf struct {
