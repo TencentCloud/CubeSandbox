@@ -201,6 +201,36 @@ def _session_lock(session_id: str) -> Iterator[None]:
         os.close(descriptor)
 
 
+def _remove_lock(session_id: str) -> None:
+    """Delete a session lock file once no other process is using it.
+
+    Must be called with the session lock already released. Removal is gated
+    on a non-blocking acquire: if another process holds the lock the file is
+    left in place, because unlinking it would let a later caller create a
+    second inode and defeat mutual exclusion.
+    """
+    path = _lock_path(session_id)
+    flags = os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except (FileNotFoundError, OSError):
+        return
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return  # still in use by a concurrent run; leave it for that owner
+        try:
+            with contextlib.suppress(FileNotFoundError):
+                path.unlink()
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
 def _connect(sandbox_id: str) -> Any:
     """Reconnect to fetch data-plane metadata and verify the sandbox lives."""
     return Sandbox.connect(sandbox_id, config=Config(timeout=SANDBOX_TTL))
@@ -347,15 +377,18 @@ def _state_shell(command: str, state_token: str, mount: Optional[str]) -> str:
         f"eval -- {command_q}\n"
         # Capture the exit status BEFORE any state bookkeeping clobbers $?.
         "__CBX_STATUS__=$?; "
-        # Persist cwd/env for the next call. The guard writes only over a
-        # missing file or a regular non-link file — never through a symlink
+        # Persist cwd/env for the next call. The symlink check leads so the
+        # precedence is explicit: write only when the path is not a symlink
+        # AND is either missing or a regular file — never through a symlink
         # a previous command may have planted.
-        f"if [ ! -e {cwd_file_q} ] || [ -f {cwd_file_q} ] && [ ! -L {cwd_file_q} ]; "
+        f"if [ ! -L {cwd_file_q} ] && "
+        f"{{ [ ! -e {cwd_file_q} ] || [ -f {cwd_file_q} ]; }}; "
         f"then pwd > {cwd_file_q} 2>/dev/null; fi; "
         # `export -p` output is shell-generated, so re-sourcing it cannot
         # smuggle new syntax; still scrub the variables that would
         # re-execute attacker-controlled code on every later command.
-        f"if [ ! -e {env_file_q} ] || [ -f {env_file_q} ] && [ ! -L {env_file_q} ]; "
+        f"if [ ! -L {env_file_q} ] && "
+        f"{{ [ ! -e {env_file_q} ] || [ -f {env_file_q} ]; }}; "
         f"then export -p 2>/dev/null | "
         f"grep -v -E '^(declare -x|export) (BASH_ENV|ENV|LD_PRELOAD|PROMPT_COMMAND)=' "
         f"> {env_file_q}; fi; "
@@ -383,8 +416,12 @@ def run(
         # The SDK raises RuntimeError for execution failures, requests
         # transport errors are OSError subclasses, and local state setup can
         # raise OSError too — report all of them as one-line errors instead
-        # of tracebacks.
-        print(f"[cubesandbox-exec] error: {exc}", file=sys.stderr)
+        # of tracebacks. The type name keeps the broad tuple diagnosable:
+        # without it a bare message cannot be traced back to its origin.
+        print(
+            f"[cubesandbox-exec] error: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
         return 1
 
     if result.stdout:
@@ -405,6 +442,10 @@ def reset(session_id: str) -> None:
                     pass  # best-effort kill; state is cleared regardless
         finally:
             _clear_state(session_id)
+    # Outside the lock: the file cannot be unlinked while we hold it open as
+    # our own mutex, and reset() is the only point where a session is known
+    # to be finished, so this is where accumulated lock files get reaped.
+    _remove_lock(session_id)
     print(f"[cubesandbox-exec] sandbox for session {session_id!r} destroyed")
 
 

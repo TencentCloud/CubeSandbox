@@ -206,7 +206,10 @@ def test_run_reports_execution_failure_without_traceback(executor, monkeypatch, 
 
     assert executor.run("printf ok", "session", 3.5, None) == 1
     captured = capsys.readouterr()
-    assert "[cubesandbox-exec] error: process failed: killed" in captured.err
+    assert (
+        "[cubesandbox-exec] error: RuntimeError: process failed: killed"
+        in captured.err
+    )
     assert "Traceback" not in captured.err
 
 
@@ -223,7 +226,7 @@ def test_run_kills_orphan_when_state_save_fails(executor, monkeypatch, capsys):
 
     assert executor.run("printf ok", "session", 3.5, None) == 1
     created.kill.assert_called_once_with()
-    assert "state dir is read-only" in capsys.readouterr().err
+    assert "OSError: state dir is read-only" in capsys.readouterr().err
 
 
 def test_parallel_runs_for_one_session_are_serialized(executor, monkeypatch):
@@ -407,6 +410,53 @@ def test_reset_clears_state_when_kill_fails(executor):
     executor.reset("session")
 
     assert executor._load_state("session") == {}
+
+
+def test_reset_removes_lock_file(executor):
+    """Lock files must not accumulate in the state dir for every session
+    that was ever used."""
+    executor._save_state("session", {"sandbox_id": "sb-reset"})
+    with executor._session_lock("session"):
+        pass
+    lock_path = executor._lock_path("session")
+    assert lock_path.exists()
+
+    executor.reset("session")
+
+    assert not lock_path.exists()
+    assert not list(executor.STATE_DIR.glob("*.lock"))
+
+
+def test_reset_keeps_lock_held_by_another_process(executor):
+    """Removing a lock another run is waiting on would let a later caller
+    create a second inode and break mutual exclusion, so a held lock file
+    must survive reset()."""
+    executor._save_state("session", {"sandbox_id": "sb-reset"})
+    lock_path = executor._lock_path("session")
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import fcntl,sys,time\n"
+            "fd=open(sys.argv[1],'a+')\n"
+            "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+            "sys.stdout.write('locked')\n"
+            "sys.stdout.flush()\n"
+            "time.sleep(30)\n",
+            str(executor._lock_path("session")),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout.read(6) == "locked"
+        # reset() itself would block on the session lock, so exercise the
+        # reaper directly — that is the part gated on the non-blocking probe.
+        executor._remove_lock("session")
+        assert lock_path.exists()
+    finally:
+        holder.kill()
+        holder.wait(timeout=10)
 
 
 def test_config_loader_whitelists_and_preserves_exported_values(
