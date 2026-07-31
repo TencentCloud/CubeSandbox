@@ -50,6 +50,7 @@
     "title": "Terminal · {{sandboxID}}",
     "description": "Interactive terminal for the selected sandbox",
     "mainContainerOnly": "Main container only",
+    "resizeHint": "Drag the lower-right corner to resize the terminal window.",
     "empty": "No terminal tabs are open.",
     "unavailableLoading": "Terminal availability is being checked.",
     "unavailableState": "Terminal is unavailable while the sandbox is {{state}}.",

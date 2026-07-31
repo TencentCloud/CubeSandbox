@@ -151,10 +151,28 @@ systemctl restart cube-sandbox-oneclick.service
 
 # 构建并部署 WebUI 到 guest
 make -C .. web-sync-dev-env
+
+# 构建/同步 Web Terminal 相关组件并运行完整 Firefox 生命周期冒烟测试
+./test_web_terminal_lifecycle.sh
 ```
 
 旧二进制仍然会在 guest 里保留成 `*.bak`，但脚本输出不再主动教你怎么
 verify / rollback；需要的话你自己在虚机里处理。
+
+`test_web_terminal_lifecycle.sh` 会依次运行 CubeOps 和 Go SDK 测试、
+WebUI lint/test/build，同步 CubeOps 与 WebUI，检查开发虚机服务，
+再用真实的无头 Firefox 执行：
+
+```text
+创建 -> 终端命令 -> 两个隔离标签 -> 关闭终端
+     -> 暂停 -> 恢复 -> 再暂停 -> 销毁
+```
+
+默认选择第一个可用的 `READY` 模板；如果有多个模板，或第一个模板
+没有 envd，请设置 `E2E_TEMPLATE_ID`。设置 `BUILD_AND_SYNC=0` 可直接
+测试虚机里当前部署的版本。任何断言失败时脚本都会返回非零；失败截图
+保存在 `output/playwright/`，并通过“恢复后销毁”做尽力清理，通常不会
+遗留测试沙箱。
 
 前置：第 4 步已完成；推荐先跑过 `./cube-autostart.sh`。
 
@@ -207,6 +225,7 @@ dev-env/
 ├── login.sh                # 第 3 步
 ├── cube-autostart.sh       # enable / disable / status systemd autostart unit
 ├── sync_to_vm.sh           # 只负责把宿主机产物拷进虚机，不 build/不 restart
+├── test_web_terminal_lifecycle.sh # 构建/同步并运行 Firefox 终端生命周期冒烟测试
 ├── copy_logs.sh            # 拉 /data/log
 └── internal/               # 由 prepare_image.sh 传进虚机执行
     ├── grow_rootfs.sh         # 扩根文件系统到 qcow2 虚拟大小
@@ -271,6 +290,19 @@ dev-env/
 - `bin [NAME ...]`：把预构建好的二进制推到 guest 对应安装路径；不写 `NAME` 时同步全部已知组件。
 - `files [--remote-dir DIR] PATH [PATH ...]`：把任意文件或目录推到 guest。
 - `-h`、`--help`：查看内置帮助。
+
+#### `test_web_terminal_lifecycle.sh`
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `BUILD_AND_SYNC` | `1` | 浏览器流程前构建、测试并部署 CubeOps/WebUI。 |
+| `E2E_TEMPLATE_ID` | 第一个可用 READY 模板 | 显式选择启用 envd 的模板。 |
+| `E2E_USERNAME` / `E2E_PASSWORD` | `admin` / `admin` | WebUI 登录凭据。 |
+| `WEB_UI_URL` | `http://127.0.0.1:12088` | Firefox 打开的 WebUI 地址。 |
+| `HEADED` | `0` | 设为 `1` 显示 Firefox 窗口。 |
+| `KEEP_ARTIFACTS` | `0` | 保留成功截图到 `output/playwright/`。 |
+| `KEEP_ARTIFACTS_ON_FAILURE` | `1` | 保留失败截图用于排查。 |
+| `VM_COMMAND_TIMEOUT_SECS` | `120` | 限制 SSH/同步操作，避免开发虚机无响应时无限等待。 |
 
 #### `copy_logs.sh`
 

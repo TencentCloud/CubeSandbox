@@ -152,11 +152,19 @@ export function TerminalDialog({
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-black/60" />
         <Dialog.Content
-          className="fixed inset-4 z-50 flex min-h-0 flex-col overflow-hidden rounded-lg border border-zinc-700 bg-zinc-950 shadow-2xl md:inset-8"
+          data-resizable="true"
+          className="fixed left-4 top-4 z-50 flex h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] resize flex-col overflow-hidden rounded-lg border border-zinc-700 bg-zinc-950 shadow-2xl md:left-8 md:top-8 md:h-[calc(100vh-4rem)] md:w-[calc(100vw-4rem)]"
+          style={{
+            minWidth: 'min(28rem, calc(100vw - 2rem))',
+            minHeight: 'min(22rem, calc(100vh - 2rem))',
+            maxWidth: 'calc(100vw - 2rem)',
+            maxHeight: 'calc(100vh - 2rem)',
+          }}
           onOpenAutoFocus={(event) => event.preventDefault()}
         >
           <Dialog.Title className="sr-only">{t('terminal.title', { sandboxID })}</Dialog.Title>
           <Dialog.Description className="sr-only">{t('terminal.description')}</Dialog.Description>
+          <span className="sr-only">{t('terminal.resizeHint')}</span>
 
           <div className="flex min-h-11 items-center gap-2 border-b border-zinc-800 px-3 text-zinc-200">
             <TerminalSquare size={16} />
@@ -248,6 +256,10 @@ export function TerminalDialog({
               />
             ))}
           </div>
+          <span
+            aria-hidden="true"
+            className="pointer-events-none absolute bottom-1 right-1 z-10 h-3 w-3 border-b-2 border-r-2 border-zinc-500"
+          />
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>

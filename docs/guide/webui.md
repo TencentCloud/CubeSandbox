@@ -98,6 +98,9 @@ xterm instance, WebSocket, envd PTY, and shell process; closing one tab does not
 affect the others. ANSI colors, cursor control, resize events, and 5,000 lines
 of scrollback are preserved.
 
+- Drag the terminal window's lower-right corner to resize it. xterm fits the
+  available space automatically and synchronizes the new PTY dimensions with
+  the sandbox.
 - **Copy** copies the current terminal selection. **Paste** sends clipboard
   text to the active shell. `Ctrl/Cmd+Shift+C` and `Ctrl/Cmd+Shift+V` provide
   the same operations.

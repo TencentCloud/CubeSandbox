@@ -50,6 +50,7 @@
     "title": "终端 · {{sandboxID}}",
     "description": "所选沙箱的交互式终端",
     "mainContainerOnly": "当前仅支持主容器",
+    "resizeHint": "拖动右下角可调整终端窗口大小。",
     "empty": "当前没有打开的终端标签。",
     "unavailableLoading": "正在检查终端可用性。",
     "unavailableState": "沙箱处于 {{state}} 状态时无法使用终端。",

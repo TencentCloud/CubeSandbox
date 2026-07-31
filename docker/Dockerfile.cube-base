@@ -64,6 +64,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
+        iproute2 \
+        iputils-ping \
+        procps \
         sudo \
         tini \
     && rm -rf /var/lib/apt/lists/*

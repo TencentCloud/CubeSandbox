@@ -162,10 +162,29 @@ Useful examples:
 
 # Build and deploy the WebUI into the guest
 make -C .. web-sync-dev-env
+
+# Build/sync Web Terminal components and run the complete Firefox lifecycle smoke test
+./test_web_terminal_lifecycle.sh
 ```
 
 The previous binary is still kept on the VM as `*.bak`, but the script no
 longer surfaces rollback or verification steps in its output.
+
+`test_web_terminal_lifecycle.sh` runs CubeOps and Go SDK tests, WebUI
+lint/test/build, syncs CubeOps and WebUI, verifies the dev VM services, and
+uses a real headless Firefox browser for:
+
+```text
+create -> terminal command -> two isolated tabs -> close terminal
+       -> pause -> resume -> pause -> delete
+```
+
+It selects the first usable `READY` template by default. Set
+`E2E_TEMPLATE_ID` when more than one template exists or the first one does not
+include envd. Use `BUILD_AND_SYNC=0` to test the currently deployed build.
+The script exits non-zero when any assertion fails. It keeps a failure
+screenshot under `output/playwright/` and performs best-effort
+resume-then-delete cleanup so a failed test does not normally leak a sandbox.
 
 Prerequisite: Step 4 finished and (recommended) `./cube-autostart.sh`
 has been run.
@@ -219,6 +238,7 @@ dev-env/
 ├── login.sh                # Step 3
 ├── cube-autostart.sh       # enable / disable / status the systemd autostart unit
 ├── sync_to_vm.sh           # Copy host artifacts into the guest (no build/restart)
+├── test_web_terminal_lifecycle.sh # Build/sync and run the Firefox terminal lifecycle smoke test
 ├── copy_logs.sh            # Pull /data/log from the guest
 └── internal/               # Run inside the guest by prepare_image.sh
     ├── grow_rootfs.sh         # grow rootfs to qcow2 virtual size
@@ -283,6 +303,19 @@ Subcommands:
 - `bin [NAME ...]`: copy pre-built binaries into their install paths in the guest. If `NAME` is omitted, sync all known components.
 - `files [--remote-dir DIR] PATH [PATH ...]`: copy arbitrary files or directories into the guest.
 - `-h`, `--help`: show the built-in help text.
+
+#### `test_web_terminal_lifecycle.sh`
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BUILD_AND_SYNC` | `1` | Build/test and deploy CubeOps/WebUI before the browser flow. |
+| `E2E_TEMPLATE_ID` | first usable READY template | Select an envd-enabled template explicitly. |
+| `E2E_USERNAME` / `E2E_PASSWORD` | `admin` / `admin` | WebUI login credentials. |
+| `WEB_UI_URL` | `http://127.0.0.1:12088` | WebUI endpoint opened by Firefox. |
+| `HEADED` | `0` | Set `1` to show the Firefox window. |
+| `KEEP_ARTIFACTS` | `0` | Keep the passing screenshot under `output/playwright/`. |
+| `KEEP_ARTIFACTS_ON_FAILURE` | `1` | Keep the failure screenshot for diagnosis. |
+| `VM_COMMAND_TIMEOUT_SECS` | `120` | Bound SSH/sync operations against an unresponsive dev VM. |
 
 #### `copy_logs.sh`
 

@@ -27,6 +27,7 @@ const terminalMocks = vi.hoisted(() => {
       'terminal.title': `Terminal ${options?.sandboxID ?? ''}`,
       'terminal.description': 'Interactive shell',
       'terminal.mainContainerOnly': 'Main container only',
+      'terminal.resizeHint': 'Drag the lower-right corner to resize.',
       'terminal.empty': 'No terminal tabs are open.',
       'terminal.status.connecting': 'Connecting',
       'terminal.status.connected': 'Connected',
@@ -234,6 +235,21 @@ afterEach(() => {
 });
 
 describe('TerminalDialog', () => {
+  it('allows the terminal window to resize within the viewport', () => {
+    renderTerminal();
+
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveAttribute('data-resizable', 'true');
+    expect(dialog).toHaveClass('resize');
+    expect(dialog).toHaveStyle({
+      minWidth: 'min(28rem, calc(100vw - 2rem))',
+      minHeight: 'min(22rem, calc(100vh - 2rem))',
+      maxWidth: 'calc(100vw - 2rem)',
+      maxHeight: 'calc(100vh - 2rem)',
+    });
+    expect(screen.getByText('Drag the lower-right corner to resize.')).toHaveClass('sr-only');
+  });
+
   it('opens the first shell and bridges resize, input, and output', async () => {
     renderTerminal();
 
