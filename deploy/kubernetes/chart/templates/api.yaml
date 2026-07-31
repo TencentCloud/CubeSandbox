@@ -44,19 +44,28 @@ spec:
               value: {{ printf "http://%s" (include "cube.masterEndpoint" .) | quote }}
             - name: CUBE_API_BIND
               value: {{ .Values.controlPlane.api.bind | quote }}
+            {{- if eq (include "cube.dbDriver" .) "postgres" }}
+            # Same as CubeOps: driver comes from DATABASE_URL scheme.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: database-url
+            {{- else }}
             - name: CUBE_SANDBOX_MYSQL_HOST
-              value: {{ include "cube.mysqlHost" . | quote }}
+              value: {{ include "cube.dbHost" . | quote }}
             - name: CUBE_SANDBOX_MYSQL_PORT
-              value: {{ .Values.mysql.port | quote }}
+              value: {{ include "cube.dbPort" . | quote }}
             - name: CUBE_SANDBOX_MYSQL_USER
-              value: {{ .Values.mysql.user | quote }}
+              value: {{ include "cube.dbUser" . | quote }}
             - name: CUBE_SANDBOX_MYSQL_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "cube.secretName" . }}
                   key: mysql-password
             - name: CUBE_SANDBOX_MYSQL_DB
-              value: {{ .Values.mysql.database | quote }}
+              value: {{ include "cube.dbName" . | quote }}
+            {{- end }}
             - name: CUBE_API_SANDBOX_DOMAIN
               value: {{ .Values.controlPlane.api.sandboxDomain | quote }}
             {{- with .Values.controlPlane.api.env }}

@@ -30,6 +30,14 @@ func (s *Sandbox) GetHost(port int) string {
 	return fmt.Sprintf("%d-%s.%s", port, s.SandboxID, domain)
 }
 
+func (s *Sandbox) addTrafficTokenHeaders(req *http.Request) {
+	if s.TrafficAccessToken == "" {
+		return
+	}
+	req.Header.Set("e2b-traffic-access-token", s.TrafficAccessToken)
+	req.Header.Set("cube-traffic-access-token", s.TrafficAccessToken)
+}
+
 func (s *Sandbox) GetInfo(ctx context.Context) (*SandboxInfo, error) {
 	if err := s.ensureClient(); err != nil {
 		return nil, err
@@ -140,7 +148,13 @@ func (s *Sandbox) Kill(ctx context.Context) error {
 	}
 
 	path := "/sandboxes/" + url.PathEscape(s.SandboxID)
-	return s.client.doJSON(ctx, http.MethodDelete, path, nil, nil, http.StatusOK, http.StatusNoContent)
+	if err := s.client.doJSON(ctx, http.MethodDelete, path, nil, nil, http.StatusOK, http.StatusNoContent); err != nil {
+		return err
+	}
+	if s.cloneCleanup != nil {
+		s.cloneCleanup.release(ctx, s.SandboxID)
+	}
+	return nil
 }
 
 // Close releases idle HTTP connections used by this sandbox's client. It does
@@ -188,6 +202,7 @@ func (s *Sandbox) RunCode(ctx context.Context, code string, opts RunCodeOptions)
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	s.addTrafficTokenHeaders(req)
 
 	resp, err := s.client.dataHTTP.Do(req)
 	if err != nil {

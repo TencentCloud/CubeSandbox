@@ -124,6 +124,17 @@ func printSandboxInfoBlock(w *tabwriter.Writer, sb *types.SandboxData) {
 	fmt.Fprintf(w, "NAMESPACE\t%s\n", displayValue(sb.NameSpace))
 	fmt.Fprintf(w, "ANNOTATIONS\t%s\n", displayValue(utils.InterfaceToString(sb.Annotations)))
 	fmt.Fprintf(w, "LABELS\t%s\n", displayValue(utils.InterfaceToString(sb.Labels)))
+	if len(sb.VolumeMounts) > 0 {
+		fmt.Fprintln(w, "VOLUME_MOUNTS")
+		fmt.Fprintln(w, "NAME\tCONTAINER_PATH\tREAD_ONLY")
+		for _, mount := range sb.VolumeMounts {
+			fmt.Fprintf(w, "%s\t%s\t%t\n",
+				displayValue(mount.Name),
+				displayValue(mount.ContainerPath),
+				mount.Readonly,
+			)
+		}
+	}
 	if sb.ExposedPortEndpoint != "" {
 		fmt.Fprintf(w, "EXPOSED_PORT_MODE\t%s\n", displayValue(sb.ExposedPortMode))
 		fmt.Fprintf(w, "EXPOSED_ENDPOINT\t%s\n", displayValue(sb.ExposedPortEndpoint))

@@ -109,6 +109,11 @@ impl AgentServiceClient {
         ::ttrpc::async_client_request!(self, ctx, req, "grpc.AgentService", "TtyWinResize", cres);
     }
 
+    pub async fn reconnect_container_io(&self, ctx: ttrpc::context::Context, req: &super::agent::ReconnectContainerIORequest) -> ::ttrpc::Result<super::empty::Empty> {
+        let mut cres = super::empty::Empty::new();
+        ::ttrpc::async_client_request!(self, ctx, req, "grpc.AgentService", "ReconnectContainerIO", cres);
+    }
+
     pub async fn update_interface(&self, ctx: ttrpc::context::Context, req: &super::agent::UpdateInterfaceRequest) -> ::ttrpc::Result<super::types::Interface> {
         let mut cres = super::types::Interface::new();
         ::ttrpc::async_client_request!(self, ctx, req, "grpc.AgentService", "UpdateInterface", cres);
@@ -372,6 +377,17 @@ struct TtyWinResizeMethod {
 impl ::ttrpc::r#async::MethodHandler for TtyWinResizeMethod {
     async fn handler(&self, ctx: ::ttrpc::r#async::TtrpcContext, req: ::ttrpc::Request) -> ::ttrpc::Result<(u32, Vec<u8>)> {
         ::ttrpc::async_request_handler!(self, ctx, req, agent, TtyWinResizeRequest, tty_win_resize);
+    }
+}
+
+struct ReconnectContainerIoMethod {
+    service: Arc<std::boxed::Box<dyn AgentService + Send + Sync>>,
+}
+
+#[async_trait]
+impl ::ttrpc::r#async::MethodHandler for ReconnectContainerIoMethod {
+    async fn handler(&self, ctx: ::ttrpc::r#async::TtrpcContext, req: ::ttrpc::Request) -> ::ttrpc::Result<(u32, Vec<u8>)> {
+        ::ttrpc::async_request_handler!(self, ctx, req, agent, ReconnectContainerIORequest, reconnect_container_io);
     }
 }
 
@@ -642,6 +658,9 @@ pub trait AgentService: Sync {
     async fn tty_win_resize(&self, _ctx: &::ttrpc::r#async::TtrpcContext, _req: super::agent::TtyWinResizeRequest) -> ::ttrpc::Result<super::empty::Empty> {
         Err(::ttrpc::Error::RpcStatus(::ttrpc::get_status(::ttrpc::Code::NOT_FOUND, "/grpc.AgentService/TtyWinResize is not supported".to_string())))
     }
+    async fn reconnect_container_io(&self, _ctx: &::ttrpc::r#async::TtrpcContext, _req: super::agent::ReconnectContainerIORequest) -> ::ttrpc::Result<super::empty::Empty> {
+        Err(::ttrpc::Error::RpcStatus(::ttrpc::get_status(::ttrpc::Code::NOT_FOUND, "/grpc.AgentService/ReconnectContainerIO is not supported".to_string())))
+    }
     async fn update_interface(&self, _ctx: &::ttrpc::r#async::TtrpcContext, _req: super::agent::UpdateInterfaceRequest) -> ::ttrpc::Result<super::types::Interface> {
         Err(::ttrpc::Error::RpcStatus(::ttrpc::get_status(::ttrpc::Code::NOT_FOUND, "/grpc.AgentService/UpdateInterface is not supported".to_string())))
     }
@@ -751,6 +770,9 @@ pub fn create_agent_service(service: Arc<std::boxed::Box<dyn AgentService + Send
 
     methods.insert("/grpc.AgentService/TtyWinResize".to_string(),
                     std::boxed::Box::new(TtyWinResizeMethod{service: service.clone()}) as std::boxed::Box<dyn ::ttrpc::r#async::MethodHandler + Send + Sync>);
+
+    methods.insert("/grpc.AgentService/ReconnectContainerIO".to_string(),
+                    std::boxed::Box::new(ReconnectContainerIoMethod{service: service.clone()}) as std::boxed::Box<dyn ::ttrpc::r#async::MethodHandler + Send + Sync>);
 
     methods.insert("/grpc.AgentService/UpdateInterface".to_string(),
                     std::boxed::Box::new(UpdateInterfaceMethod{service: service.clone()}) as std::boxed::Box<dyn ::ttrpc::r#async::MethodHandler + Send + Sync>);

@@ -699,6 +699,8 @@ message Container {
   int64 finished_at = 7;
   map<string, string> labels = 8;
   int64 paused_at = 9;
+  // Mounts declared on the container spec (including host-dir mounts).
+  repeated VolumeMounts volume_mounts = 10;
 }
 
 // ContainerState represents the lifecycle state of a container.

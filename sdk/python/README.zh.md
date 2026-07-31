@@ -230,7 +230,7 @@ with Sandbox.create(metadata={"host-mount": mounts}) as sb:
 也可在多个沙箱之间共享。
 
 ```python
-from cubesandbox import Sandbox, Volume
+from cubesandbox import Sandbox, Volume, VolumeMount
 
 # 创建卷 —— name 可选（省略时服务端生成 UUID）。
 # 省略 driver 即 e2b 兼容：不发送 driver，后端使用第一个已配置的插件。
@@ -247,6 +247,11 @@ with Sandbox.create(
     print(sb.files.read("/workspace/note.txt"))
 
 # 值可以是 Volume、VolumeInfo 或 volume_id 字符串。
+# 包装某个值可将本次沙箱挂载设为只读；原有写法继续保持读写且兼容 e2b。
+with Sandbox.create(
+    volume_mounts={"/dataset": VolumeMount(vol, read_only=True)},
+) as sb:
+    print(sb.files.read("/dataset/note.txt"))
 
 # 列出 / 查询信息 / 连接 / 销毁
 for v in Volume.list():                 # list[VolumeInfo]（token 恒为 ""）
@@ -255,6 +260,8 @@ Volume.get_info(vol.volume_id)          # -> VolumeInfo（含 token）
 vol = Volume.connect(vol.volume_id)     # -> 返回 Volume 实例
 Volume.destroy(vol.volume_id)           # -> bool；先杀掉所有挂载它的沙箱（不会自动 detach）
 ```
+
+访问模式按沙箱挂载设置。同一个 Volume 可以在一个沙箱中读写，在另一个沙箱中只读；原有 e2b 形式无需修改。
 
 卷的 `name` 必须匹配 `^[a-zA-Z0-9_-]+$` 且不超过 128 字符；非法名称
 会在任何网络请求之前抛出 `ValueError`。完整 API、参数和错误码请参阅
@@ -343,10 +350,7 @@ with Sandbox.create(config=cfg) as sb:
 | `Volume.get_info(volume_id, *, config)` | `GET /volumes/:id` — 查询单个卷信息（含 token）→ `VolumeInfo` |
 | `Volume.destroy(volume_id, *, config)` | `DELETE /volumes/:id` — 删除卷 → `bool` |
 
-通过 `Sandbox.create(volume_mounts={path: vol})` 将卷挂载进沙箱。
-`Volume.create` / `connect` 返回 `Volume` 实例，`list` / `get_info` 返回
-`VolumeInfo`；二者都暴露 `.volume_id`、`.name`、`.token`。完整参考：
-[`docs/volume.zh.md`](docs/volume.zh.md)。
+通过 `Sandbox.create(volume_mounts={path: vol})` 将卷挂载进沙箱。使用 `VolumeMount(vol, read_only=True)` 可将单次挂载设为只读；这不会把卷变成不可变快照。`Volume.create` / `connect` 返回 `Volume` 实例，`list` / `get_info` 返回 `VolumeInfo`；二者都暴露 `.volume_id`、`.name`、`.token`。完整参考：[`docs/volume.zh.md`](docs/volume.zh.md)。
 
 ### `Execution` 对象
 

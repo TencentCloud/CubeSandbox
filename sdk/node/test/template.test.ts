@@ -86,6 +86,7 @@ describe("Template.list", () => {
     expect(templates).toHaveLength(1);
     expect(templates[0].templateId).toBe("tpl-a");
     expect(templates[0].status).toBe("READY");
+    expect(templates[0].name).toBe("alpha");
   });
 });
 
@@ -107,6 +108,28 @@ describe("Template.get", () => {
     expect(info.templateId).toBe("tpl-network");
     expect(info.networkType).toBe("tap");
     expect(info.allowInternetAccess).toBe(false);
+  });
+
+  it("parses aliases and falls back to aliases[0] for name", async () => {
+    handler = () => ({
+      status: 200,
+      json: {
+        templateID: "tpl-alias",
+        status: "READY",
+        aliases: ["my-alias"],
+      },
+    });
+    const info = await Template.get("tpl-alias", { config: makeConfig() });
+    expect(info.name).toBe("my-alias");
+  });
+
+  it("exposes empty aliases array when server omits it", async () => {
+    handler = () => ({
+      status: 200,
+      json: { templateID: "tpl-noalias", status: "READY" },
+    });
+    const info = await Template.get("tpl-noalias", { config: makeConfig() });
+    expect(info.name).toBe("");
   });
 });
 
@@ -137,6 +160,25 @@ describe("Template.build", () => {
     expect(build.jobId).toBe("job-001");
     expect(build.templateId).toBe("tpl-python");
     expect(build.status).toBe("running");
+  });
+
+  it("forwards name into the request body when provided", async () => {
+    handler = (req) => {
+      const body = JSON.parse(req.body.toString());
+      expect(body.name).toBe("my-alias");
+      expect(body.image).toBe("python:3.11-slim");
+      return { status: 200, json: { jobID: "job-name", templateID: "tpl-name" } };
+    };
+    await Template.build({ image: "python:3.11-slim", name: "my-alias", config: makeConfig() });
+  });
+
+  it("omits name when undefined", async () => {
+    handler = (req) => {
+      const body = JSON.parse(req.body.toString());
+      expect(body.name).toBeUndefined();
+      return { status: 200, json: { jobID: "j", templateID: "t" } };
+    };
+    await Template.build({ image: "python:3.11-slim", config: makeConfig() });
   });
 });
 

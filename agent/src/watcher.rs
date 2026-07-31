@@ -528,7 +528,8 @@ impl BindWatcher {
 mod tests {
     use super::*;
     use crate::mount::is_mounted;
-    use crate::skip_if_not_root;
+    use crate::{skip_if_no_cap, skip_if_not_root};
+    use capctl::caps::Cap;
     use nix::unistd::{Gid, Uid};
     use std::fs;
     use std::thread;
@@ -632,6 +633,9 @@ mod tests {
     #[tokio::test]
     async fn test_watch_entries() {
         skip_if_not_root!();
+        // When a storage becomes unwatchable the watcher falls back to a bind
+        // mount, which needs CAP_SYS_ADMIN.
+        skip_if_no_cap!(Cap::SYS_ADMIN);
 
         // If there's an error with an entry, let's make sure it is removed, and that the
         // mount-destination behaves like a standard bind-mount.
@@ -1271,6 +1275,8 @@ mod tests {
     #[serial]
     async fn create_tmpfs() {
         skip_if_not_root!();
+        // Mounting the watchable tmpfs needs CAP_SYS_ADMIN.
+        skip_if_no_cap!(Cap::SYS_ADMIN);
 
         let logger = slog::Logger::root(slog::Discard, o!());
         let mut watcher = BindWatcher::default();
@@ -1288,6 +1294,8 @@ mod tests {
     #[serial]
     async fn spawn_thread() {
         skip_if_not_root!();
+        // Mounting the watchable tmpfs needs CAP_SYS_ADMIN.
+        skip_if_no_cap!(Cap::SYS_ADMIN);
 
         let source_dir = tempfile::tempdir().unwrap();
         fs::write(source_dir.path().join("1.txt"), "one").unwrap();
@@ -1318,6 +1326,8 @@ mod tests {
     #[serial]
     async fn verify_container_cleanup_watching() {
         skip_if_not_root!();
+        // Mounting the watchable tmpfs needs CAP_SYS_ADMIN.
+        skip_if_no_cap!(Cap::SYS_ADMIN);
 
         let source_dir = tempfile::tempdir().unwrap();
         fs::write(source_dir.path().join("1.txt"), "one").unwrap();

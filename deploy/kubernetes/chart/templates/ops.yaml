@@ -39,19 +39,29 @@ spec:
               value: {{ .Values.cubeOps.bind | quote }}
             - name: CUBE_MASTER_ADDR
               value: {{ printf "http://%s" (include "cube.masterEndpoint" .) | quote }}
+            {{- if eq (include "cube.dbDriver" .) "postgres" }}
+            # CubeOps selects the driver from DATABASE_URL scheme; MYSQL_* only yields mysql://.
+            # Password stays in Secret (urlquery-encoded) rather than a plaintext env value.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: database-url
+            {{- else }}
             - name: CUBE_SANDBOX_MYSQL_HOST
-              value: {{ include "cube.mysqlHost" . | quote }}
+              value: {{ include "cube.dbHost" . | quote }}
             - name: CUBE_SANDBOX_MYSQL_PORT
-              value: {{ .Values.mysql.port | quote }}
+              value: {{ include "cube.dbPort" . | quote }}
             - name: CUBE_SANDBOX_MYSQL_USER
-              value: {{ .Values.mysql.user | quote }}
+              value: {{ include "cube.dbUser" . | quote }}
             - name: CUBE_SANDBOX_MYSQL_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "cube.secretName" . }}
                   key: mysql-password
             - name: CUBE_SANDBOX_MYSQL_DB
-              value: {{ .Values.mysql.database | quote }}
+              value: {{ include "cube.dbName" . | quote }}
+            {{- end }}
             - name: CUBE_API_SANDBOX_DOMAIN
               value: {{ default .Values.cubeProxy.domain .Values.cubeOps.sandboxDomain | quote }}
             - name: CUBE_TERMINAL_ENABLED

@@ -32,7 +32,7 @@ func TestNewf(t *testing.T) {
 	assert.Equal(t, "test message 1", s.Message())
 
 	str := "test no format"
-	s = Newf(c, str)
+	s = Newf(c, "%s", str)
 	assert.NotNil(t, s)
 	assert.Equal(t, c, s.Code())
 	assert.Equal(t, str, s.Message())

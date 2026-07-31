@@ -35,6 +35,53 @@ type CloneOptions struct {
 	Concurrency int
 }
 
+type cloneCleanup struct {
+	mu             sync.Mutex
+	client         *Client
+	snapshotID     string
+	remaining      int
+	released       map[string]struct{}
+	cleanupStarted bool
+}
+
+func (c *cloneCleanup) release(ctx context.Context, sandboxID string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	if _, ok := c.released[sandboxID]; ok {
+		c.mu.Unlock()
+		return
+	}
+	c.released[sandboxID] = struct{}{}
+	c.remaining--
+	shouldCleanup := c.startCleanupLocked(c.remaining == 0)
+	c.mu.Unlock()
+	if shouldCleanup {
+		_ = c.client.DeleteSnapshot(context.WithoutCancel(ctx), c.snapshotID)
+	}
+}
+
+func (c *cloneCleanup) cleanup(ctx context.Context) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	shouldCleanup := c.startCleanupLocked(true)
+	c.mu.Unlock()
+	if shouldCleanup {
+		_ = c.client.DeleteSnapshot(context.WithoutCancel(ctx), c.snapshotID)
+	}
+}
+
+func (c *cloneCleanup) startCleanupLocked(ready bool) bool {
+	if !ready || c.cleanupStarted {
+		return false
+	}
+	c.cleanupStarted = true
+	return true
+}
+
 // CreateSnapshot captures the current sandbox state (POST
 // /sandboxes/:id/snapshots). The snapshot outlives the sandbox. An empty name
 // lets the server pick one; a known name attaches a new build to it.
@@ -121,10 +168,10 @@ func (s *Sandbox) Rollback(ctx context.Context, snapshotID string) (map[string]a
 	return result, nil
 }
 
-// Clone snapshots this sandbox and spins up opts.N fresh sandboxes from it,
-// then deletes the ephemeral snapshot (best-effort). On any create failure all
-// successful siblings are killed and the first error is returned, so a partial
-// fan-out never leaks sandboxes.
+// Clone snapshots this sandbox and spins up opts.N fresh sandboxes from it.
+// The temporary snapshot is deleted after the last clone is killed through
+// this SDK process. On any create failure all successful siblings are killed
+// and the first error is returned, so a partial fan-out never leaks sandboxes.
 func (s *Sandbox) Clone(ctx context.Context, opts CloneOptions) ([]*Sandbox, error) {
 	if err := s.ensureClient(); err != nil {
 		return nil, err
@@ -142,10 +189,6 @@ func (s *Sandbox) Clone(ctx context.Context, opts CloneOptions) ([]*Sandbox, err
 	if err != nil {
 		return nil, err
 	}
-	// Cleanup must run even if ctx is cancelled, matching the Python SDK's
-	// unconditional best-effort delete.
-	defer func() { _ = s.client.DeleteSnapshot(context.WithoutCancel(ctx), snapshot.SnapshotID) }()
-
 	createOne := func() (*Sandbox, error) {
 		return s.client.Create(ctx, CreateOptions{TemplateID: snapshot.SnapshotID})
 	}
@@ -177,11 +220,24 @@ func (s *Sandbox) Clone(ctx context.Context, opts CloneOptions) ([]*Sandbox, err
 		}()
 	}
 	wg.Wait()
+	cleanup := &cloneCleanup{
+		client:     s.client,
+		snapshotID: snapshot.SnapshotID,
+		remaining:  len(clones),
+		released:   make(map[string]struct{}, len(clones)),
+	}
+	for _, clone := range clones {
+		clone.cloneCleanup = cleanup
+	}
 
 	if firstErr != nil {
 		for _, clone := range clones {
 			_ = clone.Kill(context.WithoutCancel(ctx))
 		}
+		// A failed Kill does not release its clone ownership. Force the
+		// best-effort snapshot cleanup after all surviving siblings have been
+		// handled so a transient teardown failure cannot leak the snapshot.
+		cleanup.cleanup(context.WithoutCancel(ctx))
 		return nil, firstErr
 	}
 	return clones, nil

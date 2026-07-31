@@ -24,6 +24,7 @@ rate_limiter = { path = "../rate_limiter" }
 seccompiler = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1.0.87"
+sendfd = "0.4.3"
 serde_with = { version = "3.4.0", default-features = false, features = ["macros"] }
 serial_buffer = { path = "../serial_buffer" }
 thiserror = "1.0.37"

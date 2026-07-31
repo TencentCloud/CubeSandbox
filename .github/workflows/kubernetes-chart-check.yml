@@ -6,11 +6,13 @@ on:
     paths:
       - 'deploy/kubernetes/chart/**'
       - 'deploy/kubernetes/images/scripts/**'
+      - 'scripts/bump-image.sh'
       - '.github/workflows/kubernetes-chart-check.yml'
   pull_request:
     paths:
       - 'deploy/kubernetes/chart/**'
       - 'deploy/kubernetes/images/scripts/**'
+      - 'scripts/bump-image.sh'
       - '.github/workflows/kubernetes-chart-check.yml'
   workflow_dispatch:
 
@@ -35,6 +37,8 @@ jobs:
             --set-string redis.password=test >/dev/null
       - name: Guard Web Terminal configuration and Secret wiring
         run: sh deploy/kubernetes/chart/scripts/test-terminal-secret-wiring.sh
+      - name: Guard chart version sync with image tags
+        run: sh deploy/kubernetes/chart/scripts/test-chart-version-sync.sh
       - name: Enforce Big Pod template stability
         run: sh deploy/kubernetes/chart/scripts/test-big-pod-inplace-guard.sh
       - name: Guard PVM native DaemonSet GVK
@@ -43,6 +47,8 @@ jobs:
         run: sh deploy/kubernetes/chart/scripts/test-master-recreate-strategy-guard.sh
       - name: Guard cluster-scoped resource names
         run: sh deploy/kubernetes/chart/scripts/test-cluster-resource-names.sh
+      - name: Guard database.driver postgres path
+        run: sh deploy/kubernetes/chart/scripts/test-database-postgres-guard.sh
       - name: Check startup-gate shell syntax
         run: |
           sh -n deploy/kubernetes/images/scripts/node-prep-lib.sh

@@ -24,6 +24,8 @@ import (
 )
 
 func TestCreateSnapshotSuccessResponse(t *testing.T) {
+	registerKnownSandboxTestID(t)
+
 	origCreateSnapshotFn := createSnapshotFn
 	origGetSnapshotInfoFn := getSnapshotInfoFn
 	origResolveSnapshotHostFn := resolveSnapshotHostFn
@@ -58,14 +60,14 @@ func TestCreateSnapshotSuccessResponse(t *testing.T) {
 		return &templatecenter.SnapshotInfo{
 			SnapshotID:      snapshotID,
 			Status:          "READY",
-			OriginSandboxID: "sb-1",
+			OriginSandboxID: knownSandboxTestID,
 			StorageBackend:  "cubecow",
 		}, nil
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/cube/snapshot", strings.NewReader(`{
 		"requestID":"req-1",
-		"sandbox_id":"sb-1",
+		"sandbox_id":"`+knownSandboxTestID+`",
 		"display_name":"snap-name"
 	}`))
 	rt := &CubeLog.RequestTrace{}
@@ -78,7 +80,7 @@ func TestCreateSnapshotSuccessResponse(t *testing.T) {
 	assert.Equal(t, int(errorcode.ErrorCode_Success), got.Ret.RetCode)
 	if assert.NotNil(t, got.Snapshot) {
 		assert.Equal(t, "snap-1", got.Snapshot.SnapshotID)
-		assert.Equal(t, "sb-1", got.Snapshot.OriginSandboxID)
+		assert.Equal(t, knownSandboxTestID, got.Snapshot.OriginSandboxID)
 	}
 	if assert.NotNil(t, got.Operation) {
 		assert.Equal(t, "op-1", got.Operation.OperationID)
@@ -98,6 +100,8 @@ func TestSnapshotErrorCodeMapsMySQLLockErrorsToDBError(t *testing.T) {
 }
 
 func TestCreateSnapshotAcceptsSnakeCaseRequestID(t *testing.T) {
+	registerKnownSandboxTestID(t)
+
 	origCreateSnapshotFn := createSnapshotFn
 	origGetSnapshotInfoFn := getSnapshotInfoFn
 	origResolveSnapshotHostFn := resolveSnapshotHostFn
@@ -119,7 +123,7 @@ func TestCreateSnapshotAcceptsSnakeCaseRequestID(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/cube/snapshot", strings.NewReader(`{
 		"request_id":"req-snake",
-		"sandbox_id":"sb-1"
+		"sandbox_id":"`+knownSandboxTestID+`"
 	}`))
 	rt := &CubeLog.RequestTrace{}
 	resp := createSnapshot(req, rt)
@@ -131,6 +135,8 @@ func TestCreateSnapshotAcceptsSnakeCaseRequestID(t *testing.T) {
 }
 
 func TestCreateSnapshotDetachesExecutionFromCanceledRequest(t *testing.T) {
+	registerKnownSandboxTestID(t)
+
 	origCreateSnapshotFn := createSnapshotFn
 	origGetSnapshotInfoFn := getSnapshotInfoFn
 	origResolveSnapshotHostFn := resolveSnapshotHostFn
@@ -172,7 +178,7 @@ func TestCreateSnapshotDetachesExecutionFromCanceledRequest(t *testing.T) {
 
 	baseReq := httptest.NewRequest(http.MethodPost, "/cube/snapshot", strings.NewReader(`{
 		"request_id":"req-detached",
-		"sandbox_id":"sb-1"
+		"sandbox_id":"`+knownSandboxTestID+`"
 	}`))
 	canceledCtx, cancel := context.WithCancel(baseReq.Context())
 	cancel()
@@ -249,13 +255,15 @@ func TestGetSnapshotListSupportsFiltersAndPagination(t *testing.T) {
 }
 
 func TestHandleSandboxRollbackActionUsesPathSandboxID(t *testing.T) {
+	registerKnownSandboxTestID(t)
+
 	origRollbackSnapshotFn := rollbackSnapshotFn
 	t.Cleanup(func() {
 		rollbackSnapshotFn = origRollbackSnapshotFn
 	})
 	rollbackSnapshotFn = func(ctx context.Context, requestID, sandboxID, snapshotID, instanceType string) (*types.TemplateImageJobInfo, error) {
 		assert.Equal(t, "req-rb", requestID)
-		assert.Equal(t, "sb-path", sandboxID)
+		assert.Equal(t, knownSandboxTestID, sandboxID)
 		assert.Equal(t, "snap-1", snapshotID)
 		return &types.TemplateImageJobInfo{
 			JobID:      "op-rb",
@@ -266,7 +274,7 @@ func TestHandleSandboxRollbackActionUsesPathSandboxID(t *testing.T) {
 		}, nil
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/cube/sandbox/sb-path/rollback", strings.NewReader(`{
+	req := httptest.NewRequest(http.MethodPost, "/cube/sandbox/"+knownSandboxTestID+"/rollback", strings.NewReader(`{
 		"request_id":"req-rb",
 		"snapshot_id":"snap-1"
 	}`))
@@ -275,7 +283,7 @@ func TestHandleSandboxRollbackActionUsesPathSandboxID(t *testing.T) {
 	w := httptest.NewRecorder()
 	gc, _ := gin.CreateTestContext(w)
 	gc.Request = req.WithContext(ctx)
-	gc.Params = gin.Params{{Key: "sandbox_id", Value: "sb-path"}}
+	gc.Params = gin.Params{{Key: "sandbox_id", Value: knownSandboxTestID}}
 	handleSandboxRollbackAction(gc)
 
 	var got operationResponse

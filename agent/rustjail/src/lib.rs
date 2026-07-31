@@ -529,6 +529,31 @@ mod tests {
         };
     }
 
+    // Skip a test unless the given capability is present in the effective set.
+    // Being uid 0 is not sufficient: container/CI environments frequently drop
+    // capabilities such as CAP_MKNOD or CAP_SYS_ADMIN from root, and the
+    // corresponding syscalls then fail with EPERM.
+    //
+    // NOTE: the agent crate has a sibling `skip_if_no_cap!` in
+    // agent/src/test_utils.rs. rustjail can't depend on agent's test-utils, so
+    // the two are intentionally duplicated — keep them behaviourally in sync.
+    #[macro_export]
+    macro_rules! skip_if_no_cap {
+        ($cap:expr) => {
+            match caps::has_cap(None, caps::CapSet::Effective, $cap) {
+                Ok(true) => {}
+                _ => {
+                    println!(
+                        "INFO: skipping {} which needs capability {:?}",
+                        module_path!(),
+                        $cap
+                    );
+                    return;
+                }
+            }
+        };
+    }
+
     // Parameters:
     //
     // 1: expected Result

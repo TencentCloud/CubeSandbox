@@ -210,6 +210,9 @@ describe("Sandbox.clone", () => {
         createdIds.push(id);
         return { status: 201, json: { ...SANDBOX_DATA, sandboxID: id } };
       }
+      if (req.method === "DELETE" && req.pathname.startsWith("/sandboxes/")) {
+        return { status: 204 };
+      }
       if (req.method === "DELETE" && req.pathname === "/templates/snap-clone") {
         snapshotDeleted = true;
         return { status: 204 };
@@ -219,6 +222,12 @@ describe("Sandbox.clone", () => {
 
     const clones = await sb.clone(2);
     expect(clones.map((c) => c.sandboxId)).toEqual(["sb-clone-0", "sb-clone-1"]);
+    expect(snapshotDeleted).toBe(false);
+    await clones[0].kill();
+    expect(snapshotDeleted).toBe(false);
+    await clones[1].kill();
+    expect(snapshotDeleted).toBe(true);
+    await clones[1].kill();
     expect(snapshotDeleted).toBe(true);
     clones.forEach((c) => c.close());
     sb.close();
@@ -273,7 +282,7 @@ describe("Sandbox.clone", () => {
       }
       if (req.method === "DELETE" && req.pathname.startsWith("/sandboxes/")) {
         killed.push(req.pathname);
-        return { status: 204 };
+        return { status: 500, json: { message: "transient kill failure" } };
       }
       if (req.method === "DELETE" && req.pathname === "/templates/snap-clone") {
         snapshotDeleted = true;

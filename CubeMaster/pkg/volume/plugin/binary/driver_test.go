@@ -11,8 +11,6 @@ import (
 )
 
 func TestCreateParsesPrivateData(t *testing.T) {
-	t.Parallel()
-
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake-plugin.sh")
 	content := "#!/bin/sh\n" +
@@ -38,8 +36,6 @@ func TestCreateParsesPrivateData(t *testing.T) {
 }
 
 func TestCreateAllowsEmptyPrivateData(t *testing.T) {
-	t.Parallel()
-
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake-plugin.sh")
 	content := "#!/bin/sh\nprintf '%s\\n' '{\"token\":\"\",\"private_data\":\"\",\"error\":\"\"}'\n"

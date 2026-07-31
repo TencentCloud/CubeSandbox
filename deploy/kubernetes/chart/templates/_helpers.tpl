@@ -563,12 +563,97 @@ chart-owned StorageClass). This helper only picks which SC name a PVC binds to.
 {{- end -}}
 {{- end -}}
 
+{{/*
+database.driver selects which connection section the control plane reads:
+  mysql    -> mysql.*    (built-in StatefulSet when mysql.host is empty)
+  postgres -> postgres.* (external only; the chart never deploys PostgreSQL)
+Each engine keeps its own host/port/database/user/password, so no key is
+shared between engines and no value is inferred across sections.
+*/}}
+{{- define "cube.dbDriver" -}}
+{{- $driver := ((.Values.database).driver) | default "mysql" -}}
+{{- if not (has $driver (list "mysql" "postgres")) -}}
+{{- fail (printf "database.driver must be mysql or postgres (got %q)" $driver) -}}
+{{- end -}}
+{{- $driver -}}
+{{- end -}}
+
+{{- define "cube.dbHostRaw" -}}
+{{- if eq (include "cube.dbDriver" .) "postgres" -}}
+{{- ((.Values.postgres).host) | default "" -}}
+{{- else -}}
+{{- ((.Values.mysql).host) | default "" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "cube.dbHost" -}}
+{{- $host := include "cube.dbHostRaw" . -}}
+{{- if $host -}}{{ $host }}{{- else -}}{{ include "cube.mysqlName" . }}.{{ .Release.Namespace }}.svc.{{ include "cube.clusterDomain" . }}{{- end -}}
+{{- end -}}
+
+{{/* Deprecated alias of cube.dbHost (kept so older includes keep working). */}}
 {{- define "cube.mysqlHost" -}}
-{{- if .Values.mysql.host -}}{{ .Values.mysql.host }}{{- else -}}{{ include "cube.mysqlName" . }}.{{ .Release.Namespace }}.svc.{{ include "cube.clusterDomain" . }}{{- end -}}
+{{- include "cube.dbHost" . -}}
+{{- end -}}
+
+{{- define "cube.dbPort" -}}
+{{- if eq (include "cube.dbDriver" .) "postgres" -}}
+{{- ((.Values.postgres).port) | default 5432 -}}
+{{- else -}}
+{{- ((.Values.mysql).port) | default 3306 -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "cube.dbUser" -}}
+{{- if eq (include "cube.dbDriver" .) "postgres" -}}
+{{- ((.Values.postgres).user) | default "cube" -}}
+{{- else -}}
+{{- ((.Values.mysql).user) | default "cube" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "cube.dbName" -}}
+{{- if eq (include "cube.dbDriver" .) "postgres" -}}
+{{- ((.Values.postgres).database) | default "cube_mvp" -}}
+{{- else -}}
+{{- ((.Values.mysql).database) | default "cube_mvp" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "cube.dbPassword" -}}
+{{- if eq (include "cube.dbDriver" .) "postgres" -}}
+{{- ((.Values.postgres).password) | default "" -}}
+{{- else -}}
+{{- ((.Values.mysql).password) | default "" -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Root password only exists for the chart-managed MySQL StatefulSet. */}}
+{{- define "cube.dbRootPassword" -}}
+{{- ((.Values.mysql).rootPassword) | default "" -}}
+{{- end -}}
+
+{{/*
+CubeOps / CubeAPI DATABASE_URL. postgres must use a URL scheme;
+CUBE_SANDBOX_MYSQL_* alone is always assembled as mysql://.
+*/}}
+{{- define "cube.databaseURL" -}}
+{{- $driver := include "cube.dbDriver" . -}}
+{{- $user := include "cube.dbUser" . | urlquery -}}
+{{- $pass := include "cube.dbPassword" . | urlquery -}}
+{{- $host := include "cube.dbHost" . -}}
+{{- $port := include "cube.dbPort" . -}}
+{{- $name := include "cube.dbName" . | urlquery -}}
+{{- if eq $driver "postgres" -}}
+{{- printf "postgresql://%s:%s@%s:%v/%s" $user $pass $host $port $name -}}
+{{- else -}}
+{{- printf "mysql://%s:%s@%s:%v/%s" $user $pass $host $port $name -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "cube.mysqlBuiltinEnabled" -}}
-{{- if and .Values.controlPlane.enabled .Values.mysql.enabled (not .Values.mysql.host) -}}true{{- else -}}false{{- end -}}
+{{- /* Built-in StatefulSet is MySQL only; postgres is always external. */ -}}
+{{- if and .Values.controlPlane.enabled .Values.mysql.enabled (eq (((.Values.mysql).host) | default "") "") (ne (include "cube.dbDriver" .) "postgres") -}}true{{- else -}}false{{- end -}}
 {{- end -}}
 
 {{- define "cube.redisHost" -}}

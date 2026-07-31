@@ -143,9 +143,22 @@ class VolumeInfo:
         )
 
 
-# ``Sandbox.create(volume_mounts=...)`` argument — e2b-compatible mapping:
-# ``{mount_path: Volume | VolumeInfo | volume_id_str}``.
-VolumeMountsArg = "Dict[str, Union[Volume, VolumeInfo, str]]"
+@dataclass(frozen=True)
+class VolumeMount:
+    """CubeSandbox mount options for one Volume attachment.
+
+    Plain ``Volume``, ``VolumeInfo`` and volume-ID string values remain the
+    e2b-compatible shorthand. Wrap a value only when Cube-specific attachment
+    options such as ``read_only`` are needed.
+    """
+
+    volume: "Volume | VolumeInfo | str"
+    read_only: bool = False
+
+
+# ``Sandbox.create(volume_mounts=...)`` argument — e2b-compatible mapping with
+# an optional CubeSandbox value wrapper for attachment-specific options.
+VolumeMountsArg = Dict[str, Union["Volume", VolumeInfo, str, VolumeMount]]
 
 
 def _resolve_volume_id(vol: "Volume | VolumeInfo | str") -> str:
@@ -185,12 +198,25 @@ def _validate_mount_path(path: str) -> str:
     return path
 
 
-def _serialize_volume_mounts(mounts: VolumeMountsArg) -> list[dict[str, str]]:
+def _serialize_volume_mounts(mounts: VolumeMountsArg) -> list[dict[str, object]]:
     """Serialize the e2b-style ``{path: volume}`` mapping into the wire format."""
-    return [
-        {"name": _resolve_volume_id(vol), "path": _validate_mount_path(str(path))}
-        for path, vol in mounts.items()
-    ]
+    serialized: list[dict[str, object]] = []
+    for path, value in mounts.items():
+        if isinstance(value, VolumeMount):
+            volume = value.volume
+            read_only = value.read_only
+        else:
+            volume = value
+            read_only = False
+
+        item: dict[str, object] = {
+            "name": _resolve_volume_id(volume),
+            "path": _validate_mount_path(str(path)),
+        }
+        if read_only:
+            item["readOnly"] = True
+        serialized.append(item)
+    return serialized
 
 
 class Volume:
@@ -223,6 +249,13 @@ class Volume:
         Volume.get_info(vol.volume_id)    # VolumeInfo
         vol = Volume.connect("my-data")   # Volume instance (== e2b)
         Volume.destroy(vol.volume_id)     # bool
+
+        # CubeSandbox extension: make only this attachment read-only.
+        from cubesandbox import VolumeMount
+        with Sandbox.create(
+            volume_mounts={"/dataset": VolumeMount(vol, read_only=True)},
+        ) as sb:
+            print(sb.files.read("/dataset/note.txt"))
     """
 
     def __init__(
@@ -471,5 +504,3 @@ class Volume:
             return False
         _check_response(resp)
         return True
-
-

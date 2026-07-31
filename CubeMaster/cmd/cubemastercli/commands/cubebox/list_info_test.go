@@ -138,6 +138,32 @@ func TestParseListFiltersSkipsInvalidEntries(t *testing.T) {
 	}
 }
 
+func TestPrintSandboxInfoBlockIncludesVolumeMounts(t *testing.T) {
+	var buf bytes.Buffer
+	w := tabwriter.NewWriter(&buf, 4, 8, 4, ' ', 0)
+	printSandboxInfoBlock(w, &types.SandboxData{
+		SandboxID: "sb-1",
+		VolumeMounts: []*types.VolumeMountInfo{{
+			Name:          "hostdir-0",
+			ContainerPath: "/mnt/data",
+			Readonly:      true,
+		}},
+	})
+	if err := w.Flush(); err != nil {
+		t.Fatalf("flush writer error=%v", err)
+	}
+
+	output := buf.String()
+	for _, want := range []string{"VOLUME_MOUNTS", "hostdir-0", "/mnt/data", "true"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output=%q, missing %q", output, want)
+		}
+	}
+	if strings.Contains(output, "HOST_PATH") || strings.Contains(output, "/tmp/data") {
+		t.Fatalf("output=%q unexpectedly includes hostPath", output)
+	}
+}
+
 func TestPrintSandboxInfoBlockIncludesMetadata(t *testing.T) {
 	var buf bytes.Buffer
 	w := tabwriter.NewWriter(&buf, 4, 8, 4, ' ', 0)

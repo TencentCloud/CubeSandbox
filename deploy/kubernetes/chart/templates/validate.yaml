@@ -84,12 +84,20 @@
 {{- if hasKey $pvmRolling "rollingUpdateType" }}
 {{- fail "cubeNodePvm.updateStrategy.rollingUpdate.rollingUpdateType was removed; cube-node-pvm is a native apps/v1 DaemonSet. Remove rollingUpdateType from your values." }}
 {{- end }}
+{{- /* Trigger database.driver validation (invalid values fail inside the helper). */ -}}
+{{- $_ := include "cube.dbDriver" . -}}
 {{- $controlPlaneNeedsMysql := and .Values.controlPlane.enabled (or .Values.controlPlane.master.enabled .Values.controlPlane.api.enabled) -}}
-{{- if and $controlPlaneNeedsMysql (not (eq (include "cube.mysqlBuiltinEnabled" .) "true")) (not .Values.mysql.host) }}
+{{- if and (eq (include "cube.dbDriver" .) "postgres") (eq (include "cube.dbHostRaw" .) "") }}
+{{- fail "database.driver=postgres requires postgres.host (the chart-managed MySQL StatefulSet cannot serve PostgreSQL)" }}
+{{- end }}
+{{- if and $controlPlaneNeedsMysql (not (eq (include "cube.mysqlBuiltinEnabled" .) "true")) (eq (include "cube.dbHostRaw" .) "") }}
 {{- fail "control plane requires mysql.host when mysql.enabled=false" }}
 {{- end }}
-{{- if and (eq (include "cube.mysqlBuiltinEnabled" .) "true") (or (hasPrefix "CHANGE_ME" (default "" .Values.mysql.password)) (hasPrefix "CHANGE_ME" (default "" .Values.mysql.rootPassword))) }}
-{{- fail "mysql.password / mysql.rootPassword still equal the CHANGE_ME_* default sentinel. Override them before deploying (or set mysql.host to use external MySQL)." }}
+{{- if and (eq (include "cube.mysqlBuiltinEnabled" .) "true") (or (hasPrefix "CHANGE_ME" (include "cube.dbPassword" .)) (hasPrefix "CHANGE_ME" (include "cube.dbRootPassword" .))) }}
+{{- fail "mysql.password / mysql.rootPassword still equal the CHANGE_ME_* default sentinel. Override them before deploying (or set mysql.host to use an external MySQL)." }}
+{{- end }}
+{{- if and (ne (include "cube.dbHostRaw" .) "") (hasPrefix "CHANGE_ME" (include "cube.dbPassword" .)) }}
+{{- fail (printf "%s.password still equals the CHANGE_ME_* default sentinel. Override it when connecting to an external database." (include "cube.dbDriver" .)) }}
 {{- end }}
 {{- $controlPlaneNeedsRedis := and .Values.controlPlane.enabled .Values.controlPlane.master.enabled -}}
 {{- if and $controlPlaneNeedsRedis (not (eq (include "cube.redisBuiltinEnabled" .) "true")) (not .Values.redis.host) }}

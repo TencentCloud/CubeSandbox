@@ -203,7 +203,7 @@ QEMU_ARGS=(
   -device virtio-rng-pci
   -drive if=none,id=drive0,format=qcow2,file="${IMAGE_PATH}"
   -device virtio-blk-pci,drive=drive0
-  -nic user,model=virtio-net-pci,hostfwd=tcp::"${SSH_PORT}"-:22,hostfwd=tcp::"${CUBE_API_PORT}"-:3000,hostfwd=tcp::"${CUBE_PROXY_HTTP_PORT}"-:80,hostfwd=tcp::"${CUBE_PROXY_HTTPS_PORT}"-:443,hostfwd=tcp::"${WEB_UI_PORT}"-:12088
+  -nic "user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22,hostfwd=tcp:127.0.0.1:${CUBE_API_PORT}-:3000,hostfwd=tcp:127.0.0.1:${CUBE_PROXY_HTTP_PORT}-:80,hostfwd=tcp:127.0.0.1:${CUBE_PROXY_HTTPS_PORT}-:443,hostfwd=tcp:127.0.0.1:${WEB_UI_PORT}-:12088"
 )
 
 if [[ "${VM_BACKGROUND}" == "1" ]]; then

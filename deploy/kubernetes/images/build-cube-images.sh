@@ -1133,8 +1133,9 @@ parse_args "$@"
 need docker
 need tar
 need curl
-need go
 need sha256sum
+# Go is not required on the host: component binaries are compiled inside
+# Dockerfile builder stages. LOCAL_BIN=1 only overlays prebuilt binaries.
 
 DOWNLOAD_DIR="${BUILD_ROOT}/downloads"
 EXTRACT_DIR="${BUILD_ROOT}/extract"

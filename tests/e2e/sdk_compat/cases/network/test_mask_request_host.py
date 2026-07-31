@@ -1,9 +1,24 @@
 # Copyright (c) 2026 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
+"""E2E coverage for network.maskRequestHost.
+
+Covers two rewrite shapes used by the quickstart example:
+  - with ${PORT}: ``localhost:${PORT}`` → ``localhost:<container_port>``
+  - without ${PORT}: fixed hostname such as ``www.example.com``
+
+Also checks the no-mask baseline and create-time rejection of invalid values.
+
+These cases need a container port that is neither envd (49983, mask-exempt)
+nor Jupyter (49999, already occupied). The shared CUBE_TEMPLATE_ID often only
+exposes 49983/49999, so this module provisions a dedicated template with
+SERVICE_PORT exposed, then runs sandbox traffic through CubeProxy.
+"""
+
 from __future__ import annotations
 
 import json
+import os
 import time
 
 import httpx
@@ -13,10 +28,24 @@ from adapters import create_adapter
 from framework.assertions import assert_command_ok
 from framework.capabilities import NETWORK_MASK_REQUEST_HOST
 from framework.cleanup import safe_kill
+from framework.config import SdkE2EConfig
 
 SERVICE_PORT = 8765
-MASK_REQUEST_HOST = "localhost:${PORT}"
-EXPECTED_UPSTREAM_HOST = f"localhost:{SERVICE_PORT}"
+# With ${PORT}: expands to the requested sandbox container port.
+MASK_REQUEST_HOST_WITH_PORT = "localhost:${PORT}"
+EXPECTED_UPSTREAM_HOST_WITH_PORT = f"localhost:{SERVICE_PORT}"
+# Without ${PORT}: fixed authority, matching Host-based virtual hosting
+# (same shape as examples/code-sandbox-quickstart/mask-request-host.py).
+MASK_REQUEST_HOST_HOSTNAME = "www.example.com"
+
+# Keep envd + Jupyter exposed so the image probe and normal SDK data-plane
+# paths remain usable on sandboxes created from this template.
+TEMPLATE_EXPOSED_PORTS = [49999, 49983, SERVICE_PORT]
+DEFAULT_TEMPLATE_IMAGE = (
+    "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest"
+)
+DEFAULT_WRITABLE_LAYER_SIZE = "1G"
+TEMPLATE_READY_TIMEOUT = 300
 
 HOST_ECHO_SERVER = f"""\
 import json
@@ -47,6 +76,112 @@ pytestmark = [
     pytest.mark.p1,
     pytest.mark.requires_capability(NETWORK_MASK_REQUEST_HOST),
 ]
+
+
+def _template_image() -> str:
+    return (
+        os.environ.get("SDK_E2E_MASK_HOST_TEMPLATE_IMAGE")
+        or os.environ.get("CUBE_TEMPLATE_E2E_IMAGE")
+        or DEFAULT_TEMPLATE_IMAGE
+    )
+
+
+def _wait_for_template_ready(template_id: str, config, timeout: int = TEMPLATE_READY_TIMEOUT):
+    from cubesandbox import Template
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            info = Template.get(template_id, config=config)
+            if info.status in ("READY", "FAILED"):
+                return info
+        except Exception:
+            pass
+        time.sleep(2)
+    pytest.fail(f"template {template_id} did not reach READY within {timeout}s")
+
+
+def _delete_template(template_id: str, config) -> None:
+    from cubesandbox import Template
+    from cubesandbox._exceptions import ApiError, TemplateNotFoundError
+
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        try:
+            Template.delete(template_id, config=config)
+            return
+        except TemplateNotFoundError:
+            return
+        except ApiError as exc:
+            if "attempt is already in progress" in str(exc):
+                time.sleep(5)
+                continue
+            raise
+
+
+@pytest.fixture(scope="module")
+def mask_request_host_template_id(pytestconfig: pytest.Config):
+    """Build a template that exposes SERVICE_PORT for CubeProxy port mapping."""
+    from cubesandbox import Config, Template
+
+    base = SdkE2EConfig.from_env(
+        backends=pytestconfig.getoption("--sdk-e2e-backends"),
+        cube_api_url=pytestconfig.getoption("--cube-api-url"),
+        cube_template_id=pytestconfig.getoption("--cube-template-id"),
+    )
+    if "cubesandbox" not in base.backends:
+        yield None
+        return
+
+    sdk_config = Config(api_url=base.cube_api_url)
+    created_id: str | None = None
+    try:
+        job = Template.build(
+            image=_template_image(),
+            writable_layer_size=os.environ.get(
+                "CUBE_TEMPLATE_E2E_WRITABLE_LAYER_SIZE",
+                DEFAULT_WRITABLE_LAYER_SIZE,
+            ),
+            exposed_ports=TEMPLATE_EXPOSED_PORTS,
+            probe_port=49999,
+            config=sdk_config,
+        )
+        assert job.template_id.startswith("tpl-"), job.template_id
+        created_id = job.template_id
+        info = _wait_for_template_ready(created_id, sdk_config)
+        assert info.status == "READY", (
+            f"template {created_id} finished with status={info.status!r}"
+        )
+        yield created_id
+    finally:
+        if created_id is not None:
+            try:
+                _delete_template(created_id, sdk_config)
+            except Exception:
+                pass
+
+
+@pytest.fixture(autouse=True)
+def _apply_mask_request_host_template(
+    request: pytest.FixtureRequest,
+    sdk_backend: str,
+    mask_request_host_template_id: str | None,
+):
+    """Route sdk_sandbox creates onto the module template via marker.
+
+    Do not override session-scoped ``sdk_e2e_config`` (preflight depends on it).
+    ``sandbox_template_id`` is the framework's supported per-test template override.
+    """
+    if sdk_backend != "cubesandbox":
+        return
+    if not mask_request_host_template_id:
+        pytest.skip(
+            "maskRequestHost proxy cases require provisioning a CubeSandbox "
+            "template that exposes SERVICE_PORT"
+        )
+    request.node.add_marker(
+        pytest.mark.sandbox_template_id(mask_request_host_template_id)
+    )
 
 
 def _start_host_echo_server(sdk_sandbox, sdk_e2e_config) -> None:
@@ -106,16 +241,39 @@ def _public_get_json(
 
 
 @pytest.mark.sandbox_create_options(
-    network={"mask_request_host": MASK_REQUEST_HOST},
+    network={"mask_request_host": MASK_REQUEST_HOST_WITH_PORT},
 )
-def test_mask_request_host_rewrites_upstream_host(sdk_sandbox, sdk_e2e_config):
+def test_mask_request_host_with_port_placeholder(sdk_sandbox, sdk_e2e_config):
+    """maskRequestHost with ${PORT} expands to localhost:<container_port>."""
     _start_host_echo_server(sdk_sandbox, sdk_e2e_config)
 
     public_host = sdk_sandbox.get_host(SERVICE_PORT)
     data = _public_get_json(public_host, sdk_e2e_config)
 
-    assert data.get("host") == EXPECTED_UPSTREAM_HOST, (
-        f"upstream Host should be rewritten to {EXPECTED_UPSTREAM_HOST!r}; "
+    assert data.get("host") == EXPECTED_UPSTREAM_HOST_WITH_PORT, (
+        f"upstream Host should be rewritten to {EXPECTED_UPSTREAM_HOST_WITH_PORT!r}; "
+        f"got={data!r} public_host={public_host!r}"
+    )
+    assert data.get("x_forwarded_host") == public_host, (
+        f"X-Forwarded-Host should preserve the public Host {public_host!r}; "
+        f"got={data!r}"
+    )
+
+
+@pytest.mark.sandbox_create_options(
+    network={"mask_request_host": MASK_REQUEST_HOST_HOSTNAME},
+)
+def test_mask_request_host_without_port_uses_fixed_hostname(
+    sdk_sandbox, sdk_e2e_config
+):
+    """maskRequestHost without ${PORT} forwards a fixed hostname (vhost-style)."""
+    _start_host_echo_server(sdk_sandbox, sdk_e2e_config)
+
+    public_host = sdk_sandbox.get_host(SERVICE_PORT)
+    data = _public_get_json(public_host, sdk_e2e_config)
+
+    assert data.get("host") == MASK_REQUEST_HOST_HOSTNAME, (
+        f"upstream Host should be rewritten to {MASK_REQUEST_HOST_HOSTNAME!r}; "
         f"got={data!r} public_host={public_host!r}"
     )
     assert data.get("x_forwarded_host") == public_host, (
@@ -144,7 +302,7 @@ def test_invalid_mask_request_host_is_rejected_at_create(
     sdk_e2e_config,
 ):
     if not sdk_e2e_config.cube_template_id:
-        pytest.skip("CUBE_TEMPLATE_ID or --cube-template-id is required for SDK E2E")
+        pytest.skip("a CubeSandbox template is required for SDK E2E create")
 
     adapter = None
     try:

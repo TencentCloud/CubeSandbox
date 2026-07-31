@@ -5,6 +5,23 @@
 pub mod container_mgr;
 pub mod exec;
 pub mod rootfs;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use agent::CustomFile;
+use chrono::{DateTime, Utc};
+use container_mgr::{ContainerInfo, ContainerState, TaskState};
+use containerd_shim::protos::protobuf::MessageDyn;
+use containerd_shim::{Error, Result};
+use exec::{Exec, Tty};
+use oci_spec::runtime::{LinuxResources, Mount, Process, Spec};
+use protoc::{agent, agent_ttrpc, oci};
+use serde_json;
+use tokio::sync::mpsc::Sender;
+use tokio::sync::Mutex;
+use ttrpc::context::{self, Context};
+
 use crate::common::types::PropagationContainerMount;
 use crate::common::utils::{AsyncUtils, CPath, Utils};
 use crate::common::{
@@ -15,24 +32,6 @@ use crate::container::rootfs::ANNO_CONTAINER_CUSTOM_FILE;
 use crate::log::{stat_defer, stat_defer::StatDefer, Log};
 use crate::sandbox::config::{Config, ANNO_APP_SNAPSHOT_CREATE};
 use crate::{infof, warnf};
-use agent::CustomFile;
-use chrono::{DateTime, Utc};
-use container_mgr::{ContainerInfo, ContainerState, TaskState};
-use containerd_shim::protos::protobuf::MessageDyn;
-use containerd_shim::{Error, Result};
-use exec::{Exec, Tty};
-use oci_spec::runtime::{LinuxResources, Mount, Process, Spec};
-
-use protoc::{agent, agent_ttrpc, oci};
-use tokio::sync::mpsc::Sender;
-
-use serde_json;
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
-
-use tokio::sync::Mutex;
-use ttrpc::context::{self, Context};
 
 pub const GUEST_DEV_SHM: &str = "/run/cube-containers/sandbox/shm";
 pub const ANNO_APP_SNAPSHOT_CONTAINER_ID: &str = "cube.appsnapshot.container.id";
@@ -124,7 +123,10 @@ impl Container {
         true
     }
 
-    pub async fn set_client(&mut self, client: Arc<Mutex<agent_ttrpc::AgentServiceClient>>) {
+    pub async fn set_client(
+        &mut self,
+        client: Arc<Mutex<agent_ttrpc::AgentServiceClient>>,
+    ) -> CResult<()> {
         self.client = Some(client.clone());
         self.state = Some(ContainerState::new(self.log.clone()));
         let cli = self.client.as_ref().unwrap().lock().await;
@@ -142,11 +144,17 @@ impl Container {
         // Drop the client lock before attempting the async vsock connection.
         drop(cli);
 
-        // Restart log forwarding after resume.  Errors are non-fatal: the
-        // container keeps running; we just lose log streaming for this session.
-        if let Err(e) = self.start_log_forward().await {
-            warnf!(self.log, "restart log forward failed after resume: {}", e);
+        if self.passfd_io_enabled() {
+            self.reconnect_passfd_io().await?;
+        } else {
+            // Restart legacy log forwarding after resume. Errors are non-fatal:
+            // the container keeps running; we just lose log streaming for this session.
+            if let Err(e) = self.start_log_forward().await {
+                warnf!(self.log, "restart log forward failed after resume: {}", e);
+            }
         }
+
+        Ok(())
     }
 
     /// Stop init log forwarding (stdout/stderr).  Wakes the select! loops in
@@ -426,14 +434,47 @@ impl Container {
         self.id == self.real_id
     }
 
+    /// Template creation writes stdout/stderr to regular files under
+    /// /data/log/template. Regular files cannot be registered with epoll, so
+    /// keep that path on the legacy RPC log forwarder even when passfd is the
+    /// sandbox default.
+    fn passfd_io_enabled(&self) -> bool {
+        self.sb_conf.use_passfd_io && !self.sb_conf.app_snapshot_create
+    }
+
     pub async fn create_container(&mut self) -> CResult<()> {
         let mut stat = self.new_stat(stat_defer::CALLEE_ACT_CREATE_CONTAINER.to_string());
+
+        let (stdin_port, stdout_port, stderr_port) = if self.passfd_io_enabled() {
+            let (i, o, e) = crate::common::utils::AsyncUtils::setup_passfd_streams(
+                &self.sandbox_id,
+                &self.info.stdin,
+                &self.info.stdout,
+                &self.info.stderr,
+            )
+            .await?;
+            infof!(
+                self.log,
+                "passfd streams ready for create, id:{}, stdin_port:{}, stdout_port:{}, stderr_port:{}",
+                self.real_id,
+                i,
+                o,
+                e
+            );
+            (i, o, e)
+        } else {
+            (0, 0, 0)
+        };
+
         let req = agent::CreateContainerRequest {
             container_id: self.id.clone(),
             exec_id: self.id.clone(),
             storages: self.get_storages()?.into(),
             OCI: Some(self.get_pb_spec()?).into(),
             custom_files: self.get_custom_files()?.into(),
+            stdin_port,
+            stdout_port,
+            stderr_port,
             ..Default::default()
         };
 
@@ -449,15 +490,49 @@ impl Container {
         Ok(())
     }
 
+    async fn reconnect_passfd_io(&mut self) -> CResult<()> {
+        let (stdin_port, stdout_port, stderr_port) = AsyncUtils::setup_passfd_streams(
+            &self.sandbox_id,
+            &self.info.stdin,
+            &self.info.stdout,
+            &self.info.stderr,
+        )
+        .await?;
+
+        if stdin_port == 0 && stdout_port == 0 && stderr_port == 0 {
+            return Ok(());
+        }
+
+        infof!(
+            self.log,
+            "passfd streams ready for reconnect, id:{}, stdin_port:{}, stdout_port:{}, stderr_port:{}",
+            self.real_id,
+            stdin_port,
+            stdout_port,
+            stderr_port
+        );
+
+        let req = agent::ReconnectContainerIORequest {
+            container_id: self.id.clone(),
+            stdin_port,
+            stdout_port,
+            stderr_port,
+            ..Default::default()
+        };
+
+        let client = self.client.as_ref().unwrap().lock().await;
+        client
+            .reconnect_container_io(self.ctx.clone(), &req)
+            .await
+            .map_err(|e| format!("reconnect container io failed:{}", e))?;
+
+        Ok(())
+    }
+
     pub async fn start_container(&mut self) -> CResult<()> {
-        // Start log forwarding BEFORE waking the container process.
-        // This ensures the stdout/stderr pipes in the agent are drained
-        // from the very first byte and can never fill up and stall the
-        // container before the shim has a chance to open the connection.
-        // During template creation (app_snapshot_create) logs go to
-        // /data/log/template/<id>-stdout|stderr; on restore they go to
-        // <bundle>/stdout|stderr.
-        self.start_log_forward().await?;
+        if !self.passfd_io_enabled() {
+            self.start_log_forward().await?;
+        }
 
         let client = self.client.as_ref().unwrap().lock().await;
         if self.is_cold_start() {
@@ -592,23 +667,46 @@ impl Container {
         };
         let client = self.client.as_ref().unwrap().lock().await;
 
-        if let Err(e) = client
-            .signal_process(self.ctx.clone(), &req)
-            .await
-            .map_err(|e| {
-                format!(
-                    "signal process failed:{}, execid:{}, sig:{}",
-                    e,
-                    exec_id.to_owned(),
-                    sig
-                )
-            })
-        {
+        if let Err(err) = client.signal_process(self.ctx.clone(), &req).await {
+            let err_msg = err.to_string();
+            if sig == libc::SIGPIPE as u32 && err_msg.contains("Invalid exec id") {
+                warnf!(
+                    self.log,
+                    "ignore SIGPIPE for exited exec:{}, container:{}",
+                    exec_id,
+                    &self.real_id
+                );
+                return Ok(());
+            }
+
+            let e = format!(
+                "signal process failed:{}, execid:{}, sig:{}",
+                err_msg,
+                exec_id.to_owned(),
+                sig
+            );
             //forcibly change the result of the kill request to success,
             //so that the cubelet can successfully complete the destruction work.
             if sig != (libc::SIGKILL as u32) && sig != (libc::SIGTERM as u32) {
                 return Err(e);
             }
+        }
+
+        Ok(())
+    }
+
+    pub async fn close_io(&self, exec_id: &String) -> Result<()> {
+        let req = agent::CloseStdinRequest {
+            container_id: self.id.clone(),
+            exec_id: exec_id.clone(),
+            ..Default::default()
+        };
+        let client = self.client.as_ref().unwrap().lock().await;
+
+        if let Err(err) = client.close_stdin(self.ctx.clone(), &req).await {
+            let err_msg = err.to_string();
+            warnf!(self.log, "close_io failed:{}, execid:{}", err_msg, exec_id);
+            return Err(Error::Other(format!("close_io failed: {}", err_msg)));
         }
 
         Ok(())
@@ -828,10 +926,36 @@ impl Container {
         proc.set_env(exec.proc.env().clone().unwrap_or(Vec::new()).into());
         proc.set_cwd(exec.proc.cwd().clone().to_str().unwrap_or("").to_string());
 
+        let (stdin_port, stdout_port, stderr_port) = if self.passfd_io_enabled() {
+            let (i, o, e) = crate::common::utils::AsyncUtils::setup_passfd_streams(
+                &self.sandbox_id,
+                &exec.tty.stdin,
+                &exec.tty.stdout,
+                &exec.tty.stderr,
+            )
+            .await
+            .map_err(Error::Other)?;
+            infof!(
+                self.log,
+                "passfd streams ready for exec, id:{}, execid:{}, stdin_port:{}, stdout_port:{}, stderr_port:{}",
+                self.real_id,
+                exec_id,
+                i,
+                o,
+                e
+            );
+            (i, o, e)
+        } else {
+            (0, 0, 0)
+        };
+
         let mut req = agent::ExecProcessRequest {
             container_id: self.id.clone(),
             exec_id: exec_id.clone(),
             process: Some(proc).into(),
+            stdin_port,
+            stdout_port,
+            stderr_port,
             ..Default::default()
         };
 
@@ -861,12 +985,14 @@ impl Container {
             .wait_process(client_wait, cid, real_id, exec_id, tx_containerd)
             .await;
 
-        let conn = AsyncUtils::connect_agent(&self.sandbox_id)
-            .await
-            .map_err(|e| Error::Other(e.to_string()))?;
-        let std_client = agent_ttrpc::AgentServiceClient::new(conn);
-        exec.forward_std(exec.state.clone().unwrap(), std_client, self.log.clone())
-            .await;
+        if !self.passfd_io_enabled() {
+            let conn = AsyncUtils::connect_agent(&self.sandbox_id)
+                .await
+                .map_err(|e| Error::Other(e.to_string()))?;
+            let std_client = agent_ttrpc::AgentServiceClient::new(conn);
+            exec.forward_std(exec.state.clone().unwrap(), std_client, self.log.clone())
+                .await;
+        }
 
         Ok(())
     }

@@ -276,8 +276,18 @@ restore_selinux_contexts() {
     return 0
   fi
 
+  # cubeletmnt/mnt is a bind mount of /proc/<pid>/ns/mnt created by cubelet
+  # (Cubelet/cmd/cubelet/main.go, newCubeMnt). procfs does not support xattrs,
+  # so restorecon fails with "Operation not permitted" on upgrades where
+  # cubelet is already running.  The path is hardcoded in the Go constant
+  # CubeMntNsDirPath as ${INSTALL_PREFIX}/cubeletmnt.
+  local -a exclude_args=()
+  if mountpoint -q "${INSTALL_PREFIX}/cubeletmnt" 2>/dev/null; then
+    exclude_args+=(-e "${INSTALL_PREFIX}/cubeletmnt")
+  fi
+
   log "restoring SELinux contexts under ${INSTALL_PREFIX}"
-  restorecon -R "${INSTALL_PREFIX}"
+  restorecon -R "${exclude_args[@]}" "${INSTALL_PREFIX}"
 }
 
 one_click_runtime_file_paths() {
@@ -723,6 +733,32 @@ check_cgroup_cpu_preflight() {
   Full repro and fix: https://github.com/TencentCloud/CubeSandbox/issues/366"
 }
 
+check_bpf_fs_preflight() {
+  # Let the regular OS preflight report unsupported non-Linux hosts.
+  [[ "$(uname)" == "Linux" ]] || return 0
+
+  local bpf_dir="/sys/fs/bpf"
+
+  if ! grep -qw bpf /proc/filesystems; then
+    die "Your kernel does not support the 'bpf' filesystem (eBPF is missing or not enabled).
+  network-agent requires eBPF to function properly.
+  Please upgrade your kernel or enable CONFIG_BPF_SYSCALL."
+  fi
+
+  local bpf_fs_type=""
+  if [[ -d "${bpf_dir}" ]]; then
+    bpf_fs_type="$(df -T "${bpf_dir}" 2>/dev/null | awk 'NR==2 {print $2}' || true)"
+  fi
+
+  if [[ "${bpf_fs_type}" == "bpf" ]]; then
+    return 0
+  fi
+
+  die "/sys/fs/bpf is not mounted as a bpf filesystem (type: ${bpf_fs_type:-unknown}).
+  network-agent requires bpffs for its pinned eBPF maps.
+  Troubleshooting: https://github.com/TencentCloud/CubeSandbox/blob/master/docs/guide/troubleshooting/deployment.md#bpffs-is-not-mounted"
+}
+
 check_install_preflight() {
   # install.sh itself.
   require_cmd tar
@@ -948,6 +984,7 @@ check_hardware_preflight
 check_pvm_consistency_preflight
 check_cubelet_fs_preflight
 check_cgroup_cpu_preflight
+check_bpf_fs_preflight
 check_glibc_preflight
 check_compute_control_plane_preflight
 

@@ -3,11 +3,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use nix::unistd;
 use std::mem;
 use std::os::unix::io::RawFd;
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
+use nix::poll::{poll, PollFd, PollFlags};
+use nix::unistd;
 
 pub const SYNC_SUCCESS: i32 = 1;
 pub const SYNC_FAILED: i32 = 2;
@@ -129,6 +131,37 @@ pub fn read_sync(fd: RawFd) -> Result<Vec<u8>> {
             Err(anyhow!(error_str))
         }
         _ => Err(anyhow!("error in receive sync message")),
+    }
+}
+
+pub fn read_sync_with_timeout(fd: RawFd, timeout: Duration) -> Result<Vec<u8>> {
+    let start = std::time::Instant::now();
+
+    loop {
+        let elapsed = start.elapsed();
+        let Some(remaining) = timeout.checked_sub(elapsed) else {
+            return Err(anyhow!(
+                "process: {} timed out waiting for sync message after {}ms",
+                std::process::id(),
+                timeout.as_millis()
+            ));
+        };
+
+        let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+        let mut poll_fds = [PollFd::new(fd, PollFlags::POLLIN)];
+
+        match poll(&mut poll_fds, timeout_ms) {
+            Ok(0) => {
+                return Err(anyhow!(
+                    "process: {} timed out waiting for sync message after {}ms",
+                    std::process::id(),
+                    timeout.as_millis()
+                ))
+            }
+            Ok(_) => return read_sync(fd),
+            Err(nix::Error::EINTR) => continue,
+            Err(e) => return Err(e.into()),
+        }
     }
 }
 

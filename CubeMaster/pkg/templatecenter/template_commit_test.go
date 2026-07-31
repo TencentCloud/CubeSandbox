@@ -7,6 +7,7 @@ package templatecenter
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -156,23 +157,71 @@ func TestSubmitTemplateCommitRejectsEmptyRequestID(t *testing.T) {
 	store.db = &gorm.DB{}
 	defer func() { store.db = origDB }()
 
-	tests := []struct {
-		name string
-		req  *types.CreateCubeSandboxReq
-	}{
-		{"nil request", nil},
-		{"missing Request envelope", &types.CreateCubeSandboxReq{}},
-		{
-			name: "empty request id",
-			req: &types.CreateCubeSandboxReq{
-				Request: &types.Request{RequestID: "   "},
-			},
-		},
+	_, err := SubmitTemplateCommit(context.Background(), "   ", "sb-1", "node-a", "10.0.0.1", "tpl-out", nil)
+	if err == nil || !strings.Contains(err.Error(), "requestID is required") {
+		t.Fatalf("expected requestID guard error, got %v", err)
 	}
-	for _, tc := range tests {
-		_, err := SubmitTemplateCommit(context.Background(), "sb-1", "node-a", "10.0.0.1", tc.req)
-		if err == nil || !strings.Contains(err.Error(), "requestID is required") {
-			t.Fatalf("%s: expected requestID guard error, got %v", tc.name, err)
+}
+
+func TestPrepareTemplateCommitRequestLoadsSandboxSpec(t *testing.T) {
+	origLoad := loadSandboxCreateRequestFn
+	defer func() { loadSandboxCreateRequestFn = origLoad }()
+
+	loadSandboxCreateRequestFn = func(ctx context.Context, sandboxID string) (*types.CreateCubeSandboxReq, error) {
+		if sandboxID != "sb-1" {
+			t.Fatalf("sandboxID=%q", sandboxID)
 		}
+		return &types.CreateCubeSandboxReq{
+			Request: &types.Request{RequestID: "old-request"},
+			Annotations: map[string]string{
+				constants.CubeAnnotationAppSnapshotTemplateID: "tpl-old",
+			},
+			InstanceType: "cubebox",
+		}, nil
+	}
+
+	got, err := prepareTemplateCommitRequest(context.Background(), "req-new", "sb-1", "tpl-new", nil)
+	if err != nil {
+		t.Fatalf("prepareTemplateCommitRequest: %v", err)
+	}
+	if got.RequestID != "req-new" {
+		t.Fatalf("requestID=%q", got.RequestID)
+	}
+	if got.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] != "tpl-new" {
+		t.Fatalf("template annotation=%q", got.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
+	}
+}
+
+func TestPrepareTemplateCommitRequestUsesExplicitOverride(t *testing.T) {
+	origLoad := loadSandboxCreateRequestFn
+	defer func() { loadSandboxCreateRequestFn = origLoad }()
+	loadSandboxCreateRequestFn = func(context.Context, string) (*types.CreateCubeSandboxReq, error) {
+		t.Fatal("sandbox request resolver should not be called for an explicit override")
+		return nil, nil
+	}
+
+	override := &types.CreateCubeSandboxReq{InstanceType: "custom"}
+	got, err := prepareTemplateCommitRequest(context.Background(), "req-1", "sb-1", "tpl-new", override)
+	if err != nil {
+		t.Fatalf("prepareTemplateCommitRequest: %v", err)
+	}
+	if got.InstanceType != "custom" || got.RequestID != "req-1" {
+		t.Fatalf("unexpected request: %#v", got)
+	}
+	if got == override {
+		t.Fatal("explicit override should be cloned before normalization")
+	}
+}
+
+func TestPrepareTemplateCommitRequestPropagatesResolverError(t *testing.T) {
+	origLoad := loadSandboxCreateRequestFn
+	defer func() { loadSandboxCreateRequestFn = origLoad }()
+	loadSandboxCreateRequestFn = func(context.Context, string) (*types.CreateCubeSandboxReq, error) {
+		return nil, fmt.Errorf("base template lookup failed: %w", ErrTemplateNotFound)
+	}
+
+	_, err := prepareTemplateCommitRequest(context.Background(), "req-1", "sb-legacy", "tpl-new", nil)
+	if !errors.Is(err, ErrTemplateNotFound) {
+		t.Fatalf("expected ErrTemplateNotFound, got %v", err)
 	}
 }

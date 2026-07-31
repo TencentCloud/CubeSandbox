@@ -10,7 +10,6 @@
 
 extern crate test_infra;
 
-use net_util::MacAddr;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -26,6 +25,8 @@ use std::sync::mpsc;
 use std::sync::mpsc::Receiver;
 use std::sync::Mutex;
 use std::thread;
+
+use net_util::MacAddr;
 use test_infra::*;
 use vmm::config::RestoreConfig;
 use vmm::vm_config::{DiskConfig, FsConfig, NetConfig, PmemConfig, VsockConfig};
@@ -1654,6 +1655,71 @@ fn _test_virtio_vsock(hotplug: bool) {
         // guest.reboot_linux(0, None);
         // Validate vsock still works after a reboot.
         // guest.check_vsock(socket.as_str());
+
+        if hotplug {
+            assert!(remote_command(&api_socket, "remove-device", Some("test0")));
+        }
+    });
+
+    kill_child(&mut child);
+    let output = child.wait_with_output().unwrap();
+
+    handle_child_output(r, &output);
+}
+
+fn _test_virtio_vsock_passthrough_fd(hotplug: bool) {
+    let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+    let guest = Guest::new(Box::new(focal));
+
+    #[cfg(target_arch = "x86_64")]
+    let kernel_path = direct_kernel_boot_path();
+    #[cfg(target_arch = "aarch64")]
+    let kernel_path = if hotplug {
+        edk2_path()
+    } else {
+        direct_kernel_boot_path()
+    };
+
+    let socket = temp_vsock_path(&guest.tmp_dir);
+    let api_socket = temp_api_path(&guest.tmp_dir);
+
+    let mut cmd = GuestCommand::new(&guest);
+    cmd.args(["--api-socket", &api_socket]);
+    cmd.args(["--cpus", "boot=1"]);
+    cmd.args(["--memory", "size=512M"]);
+    cmd.args(["--kernel", kernel_path.to_str().unwrap()]);
+    cmd.args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE]);
+    cmd.default_disks();
+    cmd.default_net();
+
+    if !hotplug {
+        cmd.args(["--vsock", format!("cid=3,socket={}", socket).as_str()]);
+    }
+
+    let mut child = cmd.capture_output().spawn().unwrap();
+
+    let r = std::panic::catch_unwind(|| {
+        guest.wait_vm_boot(None).unwrap();
+
+        if hotplug {
+            let (cmd_success, cmd_output) = remote_command_w_output(
+                &api_socket,
+                "add-vsock",
+                Some(format!("cid=3,socket={},id=test0", socket).as_str()),
+            );
+            assert!(cmd_success);
+            assert!(String::from_utf8_lossy(&cmd_output)
+                .contains("{\"id\":\"test0\",\"bdf\":\"0000:00:06.0\"}"));
+            thread::sleep(std::time::Duration::new(10, 0));
+        }
+
+        // Validate vsock passthrough fd works as expected.
+        guest.start_vsock_passthrough_fd_listener();
+        guest.check_vsock_passthrough_fd_bidirectional(
+            socket.as_str(),
+            "HelloWorld!\n",
+            "HelloWorld!",
+        );
 
         if hotplug {
             assert!(remote_command(&api_socket, "remove-device", Some("test0")));
@@ -4606,6 +4672,16 @@ mod common_parallel {
     }
 
     #[test]
+    fn test_virtio_vsock_passthrough_fd() {
+        _test_virtio_vsock_passthrough_fd(false);
+    }
+
+    #[test]
+    fn test_virtio_vsock_passthrough_fd_hotplug() {
+        _test_virtio_vsock_passthrough_fd(true);
+    }
+
+    #[test]
     // Start cloud-hypervisor with no VM parameters, only the API server running.
     // From the API: Create a VM, boot it and check that it looks as expected.
     fn test_api_create_boot() {
@@ -7477,6 +7553,125 @@ mod common_sequential {
         );
     }
 
+    #[test]
+    fn test_restored_vsock_reuses_guest_listener_for_new_passthrough_fd() {
+        let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+        let guest = Guest::new(Box::new(focal));
+        let kernel_path = direct_kernel_boot_path();
+
+        let api_socket_source = format!("{}.1", temp_api_path(&guest.tmp_dir));
+        let socket = temp_vsock_path(&guest.tmp_dir);
+        let event_path = temp_event_monitor_path(&guest.tmp_dir);
+
+        let mut child = GuestCommand::new(&guest)
+            .args(["--api-socket", &api_socket_source])
+            .args(["--event-monitor", format!("path={}", event_path).as_str()])
+            .args(["--cpus", "boot=1"])
+            .args(["--memory", "size=512M"])
+            .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .args(["--vsock", format!("cid=3,socket={}", socket).as_str()])
+            .default_disks()
+            .default_net()
+            .capture_output()
+            .spawn()
+            .unwrap();
+
+        let snapshot_dir = temp_snapshot_dir_path(&guest.tmp_dir);
+        let r = std::panic::catch_unwind(|| {
+            guest.wait_vm_boot(None).unwrap();
+
+            // Start socat before taking the snapshot. The restored VM must
+            // continue using this guest listener rather than starting a new
+            // one after restore.
+            guest.start_vsock_passthrough_fd_listener();
+
+            // Establish passfd and verify the source VM data path before
+            // taking the snapshot.
+            guest.check_vsock_passthrough_fd_bidirectional(
+                socket.as_str(),
+                "BeforeSnapshot\n",
+                "BeforeSnapshot",
+            );
+            let listener_identity = guest.vsock_passthrough_fd_listener_identity();
+
+            // Pause and snapshot using the shared event-checked helper.
+            snapshot_and_check_events(
+                api_socket_source.as_str(),
+                snapshot_dir.as_str(),
+                event_path.as_str(),
+            );
+            listener_identity
+        });
+
+        kill_child(&mut child);
+        let output = child.wait_with_output().unwrap();
+        let listener_identity = r.as_ref().ok().cloned();
+        handle_child_output(r.map(|_| ()), &output);
+        let listener_identity = listener_identity.unwrap();
+
+        // The restored VMM must recreate its host Unix listener; the guest
+        // socat listener remains part of the VM state captured above.
+        let _ = std::fs::remove_file(&socket);
+        let api_socket_restored = format!("{}.2", temp_api_path(&guest.tmp_dir));
+        let event_path_restored = format!("{}.2", temp_event_monitor_path(&guest.tmp_dir));
+        let mut restored_child = GuestCommand::new(&guest)
+            .args(["--api-socket", &api_socket_restored])
+            .args([
+                "--event-monitor",
+                format!("path={}", event_path_restored).as_str(),
+            ])
+            .args([
+                "--restore",
+                format!("source_url=file://{}", snapshot_dir).as_str(),
+            ])
+            .capture_output()
+            .spawn()
+            .unwrap();
+
+        thread::sleep(std::time::Duration::new(10, 0));
+
+        let r = std::panic::catch_unwind(|| {
+            let restored_events = [
+                &MetaEvent {
+                    event: "restored".to_string(),
+                    device_id: None,
+                },
+                &MetaEvent {
+                    event: "resuming".to_string(),
+                    device_id: None,
+                },
+                &MetaEvent {
+                    event: "resumed".to_string(),
+                    device_id: None,
+                },
+            ];
+            assert!(check_latest_events_exact(
+                &restored_events,
+                &event_path_restored
+            ));
+
+            assert_eq!(
+                guest.vsock_passthrough_fd_listener_identity(),
+                listener_identity,
+                "restore replaced the socat listener FD captured in the snapshot"
+            );
+
+            // Prove the unchanged listener FD still accepts a new
+            // passfd-backed connection through the restored VMM, and that
+            // its log continues from the pre-snapshot write.
+            guest.check_vsock_passthrough_fd_bidirectional(
+                socket.as_str(),
+                "AfterRestore\n",
+                "BeforeSnapshot\nAfterRestore",
+            );
+        });
+
+        kill_child(&mut restored_child);
+        let output = restored_child.wait_with_output().unwrap();
+        handle_child_output(r, &output);
+    }
+
     /// Snapshot a VM that has a native virtiofs share, delete one of the
     /// backing files referenced by that snapshot, then restore the VM.
     ///
@@ -7682,8 +7877,9 @@ mod common_sequential {
 }
 
 mod compatibility {
-    use crate::_test_snapshot_restore_from_different_binary;
     use test_infra::clh_command;
+
+    use crate::_test_snapshot_restore_from_different_binary;
 
     #[test]
     fn test_snapshot_from_release_restore_on_head() {
@@ -8229,8 +8425,9 @@ mod vmm_instance {
 }
 
 mod windows {
-    use crate::*;
     use once_cell::sync::Lazy;
+
+    use crate::*;
 
     static NEXT_DISK_ID: Lazy<Mutex<u8>> = Lazy::new(|| Mutex::new(1));
 

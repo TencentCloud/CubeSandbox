@@ -122,8 +122,6 @@ spec:
           echo "${container_names}" | grep -qxF 'cube-egress-net'
           {{- end }}
 {{ if eq (include "cube.cubemastercliEnabled" .) "true" }}
-{{- $images := default dict .Values.images -}}
-{{- $cubemastercliImage := default (dict "repository" "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cubemastercli" "tag" "v0.5.1" "pullPolicy" "Always") (get $images "cubemastercli") -}}
 ---
 apiVersion: v1
 kind: Pod
@@ -143,8 +141,8 @@ spec:
   {{- end }}
   containers:
     - name: cubemastercli
-      image: {{ include "cube.cubeImage" (dict "image" $cubemastercliImage "context" $) | quote }}
-      imagePullPolicy: {{ dig "pullPolicy" "Always" $cubemastercliImage }}
+      image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubemastercli "context" $) | quote }}
+      imagePullPolicy: {{ .Values.images.cubemastercli.pullPolicy }}
       env:
         {{- include "cube.timezoneEnv" . | nindent 8 }}
         - name: CUBE_RELEASE
@@ -196,7 +194,7 @@ spec:
         - -ec
         - |
           echo '[health-test] check MySQL'
-          mysqladmin ping -h {{ include "cube.mysqlHost" . | quote }} -P {{ .Values.mysql.port }} -u{{ .Values.mysql.user | quote }} --silent
+          mysqladmin ping -h {{ include "cube.dbHost" . | quote }} -P {{ include "cube.dbPort" . }} -u{{ include "cube.dbUser" . | quote }} --silent
 {{- end }}
 {{ if eq (include "cube.redisBuiltinEnabled" .) "true" }}
 ---

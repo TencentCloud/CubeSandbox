@@ -190,6 +190,8 @@ spec:
               value: {{ .Values.cubeProxy.ports.http.containerPort | quote }}
             - name: CUBE_PROXY_HTTPS_LISTEN_PORT
               value: {{ .Values.cubeProxy.ports.https.containerPort | quote }}
+            - name: CUBE_PROXY_GRPC_LISTEN_PORT
+              value: {{ .Values.cubeProxy.ports.grpc.containerPort | quote }}
             - name: CUBE_PROXY_ADMIN_LISTEN
               value: {{ .Values.cubeProxy.adminListen | quote }}
             - name: CUBE_PROXY_ADMIN_PORT
@@ -240,6 +242,9 @@ spec:
               protocol: TCP
             - name: https
               containerPort: {{ .Values.cubeProxy.ports.https.containerPort }}
+              protocol: TCP
+            - name: grpc
+              containerPort: {{ .Values.cubeProxy.ports.grpc.containerPort }}
               protocol: TCP
             - name: admin
               containerPort: {{ .Values.cubeProxy.adminPort }}

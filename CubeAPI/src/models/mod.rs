@@ -156,6 +156,14 @@ impl Default for SandboxOnTimeout {
 pub struct SandboxVolumeMount {
     pub name: String,
     pub path: String,
+    /// CubeSandbox extension: mount this volume read-only for this sandbox
+    /// attachment. Defaults to false when omitted.
+    #[serde(rename = "readOnly", default, skip_serializing_if = "is_false")]
+    pub read_only: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 // ─── Sandbox — create request ──────────────────────────────────────────────
@@ -604,6 +612,36 @@ mod tests {
                 .and_then(|envs| envs.get("CUBE_TEST_ENV"))
                 .map(String::as_str),
             Some("value")
+        );
+    }
+
+    #[test]
+    fn new_sandbox_volume_mount_read_only_is_optional() {
+        let req: NewSandbox = serde_json::from_value(serde_json::json!({
+            "templateID": "tpl-1",
+            "volumeMounts": [
+                {"name": "dataset", "path": "/data", "readOnly": true},
+                {"name": "workspace", "path": "/workspace"},
+                {"name": "cache", "path": "/cache", "readOnly": false}
+            ]
+        }))
+        .expect("volume mounts should deserialize");
+
+        let mounts = req.volume_mounts.expect("volume mounts");
+        assert!(mounts[0].read_only);
+        assert!(!mounts[1].read_only);
+        assert!(!mounts[2].read_only);
+        assert_eq!(
+            serde_json::to_value(&mounts[0]).expect("serialize read-only mount"),
+            serde_json::json!({"name": "dataset", "path": "/data", "readOnly": true})
+        );
+        assert_eq!(
+            serde_json::to_value(&mounts[1]).expect("serialize read-write mount"),
+            serde_json::json!({"name": "workspace", "path": "/workspace"})
+        );
+        assert_eq!(
+            serde_json::to_value(&mounts[2]).expect("serialize explicit read-write mount"),
+            serde_json::json!({"name": "cache", "path": "/cache"})
         );
     }
 

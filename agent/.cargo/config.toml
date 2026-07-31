@@ -4,9 +4,11 @@
 ##
 
 [target.x86_64-unknown-linux-musl]
-## Use the system cc as linker (rust's self-contained musl sysroot handles libc/crt).
-## Extra -lpthread is required because libunwind references pthread_rwlock_*.
-rustflags = [ "-C", "link-arg=-lpthread" ]
+## Use musl-gcc so native static archives do not pull in glibc libc/crt.
+linker = "musl-gcc"
+## Force a self-contained PID 1 binary. Without relocation-model=static,
+## musl startup code can still take the PIE relocation path before main.
+rustflags = [ "-C", "relocation-model=static", "-C", "link-arg=-static", "-C", "link-arg=-lpthread", "-C", "link-arg=-lm" ]
 
 [target.aarch64-unknown-linux-musl]
 ## Only setting linker with `musl-gcc`, the

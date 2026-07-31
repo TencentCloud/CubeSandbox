@@ -22,7 +22,7 @@ COPY rotate_nginx_log.sh /usr/local/openresty/nginx/sbin/rotate_nginx_log.sh
 COPY root /etc/crontabs/root
 COPY start.sh /usr/local/openresty/nginx/sbin/start.sh
 
-EXPOSE 8080 8081
+EXPOSE 8080 8081 9090
 
 STOPSIGNAL SIGQUIT
 

@@ -443,6 +443,7 @@ Capability contains the container capabilities to add or drop
 | finished_at | [int64](#int64) |  | exit time of the container in nanoseconds. |
 | labels | [Container.LabelsEntry](#cubelet-services-cubebox-v1-Container-LabelsEntry) | repeated |  |
 | paused_at | [int64](#int64) |  |  |
+| volume_mounts | [VolumeMounts](#cubelet-services-cubebox-v1-VolumeMounts) | repeated | Mounts declared on the container spec (including host-dir mounts). |
 
 
 

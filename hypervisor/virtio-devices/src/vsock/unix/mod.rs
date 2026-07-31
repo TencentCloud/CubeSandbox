@@ -11,8 +11,10 @@
 mod muxer;
 mod muxer_killq;
 mod muxer_rxq;
+mod stream;
 
 pub use muxer::VsockMuxer as VsockUnixBackend;
+pub use stream::{PassFdStream, VsockBackendStream};
 pub use Error as VsockUnixError;
 
 mod defs {
@@ -55,4 +57,5 @@ pub enum Error {
 }
 
 type Result<T> = std::result::Result<T, Error>;
-type MuxerConnection = super::csm::VsockConnection<std::os::unix::net::UnixStream>;
+
+type MuxerConnection = super::csm::VsockConnection<VsockBackendStream>;

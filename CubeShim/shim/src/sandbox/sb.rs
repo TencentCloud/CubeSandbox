@@ -2,7 +2,33 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+use std::collections::{HashMap, HashSet};
+use std::fs as stdfs;
+use std::net::IpAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
+
+use chrono::{DateTime, Utc};
+use containerd_shim::event::Event;
+use containerd_shim::protos::events::task::TaskOOM;
+use containerd_shim::protos::protobuf::MessageDyn;
+use containerd_shim::{Error, Result};
+use cube_hypervisor::config::RestoreConfig;
+use cube_hypervisor::vm_config::{DeviceConfig, FsConfig, IvshmemConfig};
+use cube_hypervisor::{SnapshotType, VmRemoveDeviceData};
+use oci_spec::runtime::{LinuxResources, Process, Spec};
+use protoc::{agent, agent_ttrpc, health, health_ttrpc};
+use tokio::sync::mpsc::{channel, Sender};
+use tokio::sync::Mutex;
+use tokio::time::{sleep, Duration};
+use ttrpc::context::{self, Context};
+use ttrpc::r#async::Client;
+
 use super::config::{Fs, ANNO_VMM_FS, VIRTIO_FS_ID, VIRTIO_FS_TAG};
+use super::device;
+use super::disk::Disk;
+use super::pmem::Pmem;
 use crate::common::types::PropagationMount;
 use crate::common::utils::{self, AsyncUtils, CPath, Utils};
 use crate::common::{
@@ -17,33 +43,7 @@ use crate::hypervisor::snapshot::{enable_snapshot, SnapshotInfo};
 use crate::log::{stat_defer, Log};
 use crate::sandbox::config;
 use crate::{debugf, errf, infof, warnf};
-use chrono::{DateTime, Utc};
-use containerd_shim::event::Event;
-use containerd_shim::protos::events::task::TaskOOM;
-use containerd_shim::protos::protobuf::MessageDyn;
-use containerd_shim::{Error, Result};
-use cube_hypervisor::config::RestoreConfig;
-use cube_hypervisor::vm_config::{DeviceConfig, FsConfig, IvshmemConfig};
-use cube_hypervisor::{SnapshotType, VmRemoveDeviceData};
-use oci_spec::runtime::{LinuxResources, Process, Spec};
-use protoc::{agent, agent_ttrpc, health, health_ttrpc};
-use std::collections::{HashMap, HashSet};
-use std::fs as stdfs;
-use std::net::IpAddr;
-use std::time::Instant;
-use ttrpc::context::{self, Context};
-use ttrpc::r#async::Client;
 
-use std::path::PathBuf;
-use std::sync::Arc;
-
-use tokio::sync::mpsc::{channel, Sender};
-use tokio::sync::Mutex;
-use tokio::time::{sleep, Duration};
-
-use super::device;
-use super::disk::Disk;
-use super::pmem::Pmem;
 //use tokio_uring::fs::UnixStream;
 
 const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
@@ -1022,6 +1022,16 @@ impl SandBox {
         container.unwrap().signal_container(exec_id, sig).await
     }
 
+    pub async fn close_io(&self, id: &String, exec_id: &String) -> Result<()> {
+        let mut containers = self.containers.lock().await;
+        let container = containers.get_mut(id);
+        if container.is_none() {
+            return Err(Error::NotFoundError(format!("not found container:{}", id)));
+        }
+
+        container.unwrap().close_io(exec_id).await
+    }
+
     pub async fn delete_container(&mut self, id: &String) -> Result<(u32, DateTime<Utc>)> {
         let mut container = {
             let mut containers = self.containers.lock().await;
@@ -1402,7 +1412,7 @@ impl SandBox {
 
         let mut containers = self.containers.lock().await;
         for (_, c) in containers.iter_mut() {
-            c.set_client(client.clone()).await;
+            c.set_client(client.clone()).await?;
         }
 
         let (sender, handle) = self.watch_oom().await?;
@@ -1452,15 +1462,15 @@ fn normalize_dns_for_agent(entry: &str) -> CResult<String> {
 
 #[cfg(test)]
 mod tests {
-    use protobuf::MessageDyn;
     use std::collections::HashSet;
-    use tokio::sync::mpsc::channel;
 
-    use crate::common::PRODUCT_CUBEBOX;
+    use protobuf::MessageDyn;
+    use tokio::sync::mpsc::channel;
 
     use super::normalize_dns_for_agent;
     use super::Log;
     use super::SandBox;
+    use crate::common::PRODUCT_CUBEBOX;
 
     #[tokio::test]
     async fn test_sandbox_prepare_resource() {

@@ -9,10 +9,10 @@ PUSH=1 REGISTRY=cube-sandbox-int.tencentcloudcr.com/cube-sandbox IMAGE_TAG=v0.6.
 ```
 
 Before a real release, run `scripts/bump-image.sh vX.Y.Z` so hard-coded tags
-(including chart `deploy/kubernetes/chart/values.yaml` component image tags)
-match the release. `release-docker-images` runs `bump-image.sh --check` by
-default; for a manual/dev image-only build, set workflow input
-`skip_version_check=true`.
+(including chart `deploy/kubernetes/chart/values.yaml` component image tags and
+`Chart.yaml` version / appVersion) match the release. `release-docker-images`
+runs `bump-image.sh --check` by default; for a manual/dev image-only build, set
+workflow input `skip_version_check=true`.
 
 Use `NO_CACHE=1` when every Docker image layer must be rebuilt instead of
 using Docker's build cache:

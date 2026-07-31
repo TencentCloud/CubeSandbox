@@ -93,7 +93,8 @@ fn do_setup_guest_dns(logger: Logger, dns_list: Vec<String>, src: &str, dst: &st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skip_if_not_root;
+    use crate::{skip_if_no_cap, skip_if_not_root};
+    use capctl::caps::Cap;
     use nix::mount;
     use std::fs::File;
     use std::io::Write;
@@ -102,6 +103,8 @@ mod tests {
     #[test]
     fn test_setup_guest_dns() {
         skip_if_not_root!();
+        // do_setup_guest_dns bind-mounts the resolv.conf, needing CAP_SYS_ADMIN.
+        skip_if_no_cap!(Cap::SYS_ADMIN);
 
         let drain = slog::Discard;
         let logger = slog::Logger::root(drain, o!());
@@ -155,6 +158,8 @@ mod tests {
     #[test]
     fn test_setup_guest_dns_creates_missing_destination_file() {
         skip_if_not_root!();
+        // do_setup_guest_dns bind-mounts the resolv.conf, needing CAP_SYS_ADMIN.
+        skip_if_no_cap!(Cap::SYS_ADMIN);
 
         let drain = slog::Discard;
         let logger = slog::Logger::root(drain, o!());
