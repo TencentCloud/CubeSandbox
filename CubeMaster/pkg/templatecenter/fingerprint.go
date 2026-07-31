@@ -11,6 +11,7 @@ import (
 	"errors"
 
 	"github.com/google/uuid"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
 
@@ -92,6 +93,25 @@ func marshalTemplateCommitJobRequest(req *types.CreateCubeSandboxReq) (string, e
 	return string(payload), nil
 }
 
+func marshalSnapshotFingerprintRequest(req *types.CreateCubeSandboxReq) (string, error) {
+	if req == nil {
+		return "", errors.New("request is nil")
+	}
+	cloned, err := cloneCreateRequest(req)
+	if err != nil {
+		return "", err
+	}
+	cloned.Request = nil
+	// Exclude the server-generated snapshot ID from the fingerprint input so
+	// identical snapshot-create retries produce the same fingerprint (#1105)
+	delete(cloned.Annotations, constants.CubeAnnotationAppSnapshotTemplateID)
+	payload, err := json.Marshal(cloned)
+	if err != nil {
+		return "", err
+	}
+	return string(payload), nil
+}
+
 func buildCommitTemplateSpecFingerprintFromSnapshot(requestSnapshot string) string {
 	sum := sha256.Sum256([]byte(requestSnapshot))
 	return hex.EncodeToString(sum[:])
@@ -104,6 +124,6 @@ func buildCommitTemplateSpecFingerprintFromSnapshot(requestSnapshot string) stri
 // avoids touching every snapshot call site while still routing fingerprint
 // generation through a single canonical encoder.
 func buildCommitTemplateSpecFingerprint(req *types.CreateCubeSandboxReq) string {
-	payload, _ := marshalTemplateCommitJobRequest(req)
+	payload, _ := marshalSnapshotFingerprintRequest(req)
 	return buildCommitTemplateSpecFingerprintFromSnapshot(payload)
 }

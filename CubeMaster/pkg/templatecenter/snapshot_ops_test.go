@@ -694,3 +694,43 @@ func TestExecuteSnapshotDeleteJobReturnsReadyWithoutJobLookup(t *testing.T) {
 		t.Fatalf("GetTemplateImageJobInfo called %d time(s), want 0", getJobInfoCallCount)
 	}
 }
+
+func TestSnapshotCreateRequestIDIdempotency(t *testing.T) {
+	build := func() *sandboxtypes.CreateCubeSandboxReq {
+		_, storedReq, err := buildSnapshotRequests(&sandboxtypes.CreateCubeSandboxReq{
+			Request:      &sandboxtypes.Request{RequestID: "req-1"},
+			InstanceType: "cubebox",
+		}, "")
+		if err != nil {
+			t.Fatalf("buildSnapshotRequests: %v", err)
+		}
+		return storedReq
+	}
+
+	t.Run("rebuild is deterministic", func(t *testing.T) {
+		if buildCommitTemplateSpecFingerprint(build()) != buildCommitTemplateSpecFingerprint(build()) {
+			t.Fatal("two identical rebuilds produced different fingerprints")
+		}
+	})
+
+	t.Run("identical retry matches stored job", func(t *testing.T) {
+		// Store side, exactly as SubmitSandboxSnapshot does it: stamp the
+		// generated snapshot id, then fingerprint.
+		submitted := build()
+		submitted.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = "snap-generated"
+		raw, err := marshalSnapshotCreateRequest(snapshotCreateJobRequest{
+			RequestID:       "req-1",
+			SandboxID:       "sb-1",
+			SnapshotID:      "snap-generated",
+			NodeID:          "node-1",
+			NodeIP:          "10.0.0.1",
+			SpecFingerprint: buildCommitTemplateSpecFingerprint(submitted),
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if !snapshotCreateRequestMatches(raw, "req-1", "sb-1", "node-1", "10.0.0.1", "", build()) {
+			t.Fatal("byte-identical retry did not match the stored job")
+		}
+	})
+}
