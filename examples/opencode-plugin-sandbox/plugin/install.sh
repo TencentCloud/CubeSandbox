@@ -103,6 +103,12 @@ uninstall)
   else
     info "not installed at ${TARGET}"
   fi
+  # The copy fallback also places a backend next to the plugin directory.
+  # Remove it only if it is a copy of ours, never a user's own file.
+  BACKEND_TARGET="$(cd "$TARGET_DIR/.." 2>/dev/null && pwd)/exec_backend.py"
+  if [[ -f "$BACKEND_TARGET" ]] && grep -q "cubesandbox-exec" "$BACKEND_TARGET" 2>/dev/null; then
+    rm -f "$BACKEND_TARGET" && ok "removed copied backend ${BACKEND_TARGET}"
+  fi
   # Clean up the directory only when this example created it and left it empty.
   if [[ -d "$TARGET_DIR" ]] && [[ -z "$(ls -A "$TARGET_DIR" 2>/dev/null)" ]]; then
     rmdir "$TARGET_DIR" 2>/dev/null && ok "removed empty ${TARGET_DIR}"
@@ -142,8 +148,27 @@ install)
   if ln -s "$PLUGIN_SRC" "$TARGET" 2>/dev/null; then
     ok "symlinked (edits to the example take effect immediately)"
   else
+    # Copy fallback. The plugin resolves the backend relative to its own
+    # location (<plugin-dir>/../exec_backend.py), so copying only the plugin
+    # would install something that fails closed on every bash call, and the
+    # documented "reinstall" remedy would reproduce the same broken state.
+    # Copy the backend to the matching relative location as well.
     cp "$PLUGIN_SRC" "$TARGET" || { bad "copy failed"; exit 1; }
-    ok "copied (symlink unavailable on this filesystem)"
+
+    BACKEND_TARGET="$(cd "$TARGET_DIR/.." && pwd)/exec_backend.py"
+    if cp "$BACKEND" "$BACKEND_TARGET" 2>/dev/null; then
+      ok "copied plugin and backend (symlink unavailable on this filesystem)"
+      info "backend copied to ${BACKEND_TARGET}"
+      echo "         Re-run this installer after editing the example, since"
+      echo "         copies do not track the source."
+    else
+      bad "copied the plugin but could not copy the backend to ${BACKEND_TARGET}"
+      echo
+      echo "  The plugin fails closed, so it would block every bash call."
+      echo "  Removing the plugin again rather than leaving a broken install."
+      rm -f "$TARGET"
+      exit 1
+    fi
   fi
 
   echo

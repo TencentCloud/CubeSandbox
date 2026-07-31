@@ -271,7 +271,7 @@ cd examples/opencode-plugin-sandbox
 node tests/test_plugin.mjs
 ```
 
-19 项断言，覆盖命令改写、放行名单、幂等性、session id 处理与引号注入抵抗。
+21 项断言，覆盖命令改写、放行名单、幂等性、session id 处理与引号注入抵抗。
 **仅依赖 Node 标准库** —— 不需要 npm install、不需要联网、不需要 CubeSandbox 部署。
 
 注入相关断言会按 POSIX shell 的语义解析改写后的命令，

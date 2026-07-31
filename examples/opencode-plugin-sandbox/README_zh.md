@@ -51,7 +51,7 @@ git 凭据和编辑器状态的访问 —— 最后你是在一份副本上开�
 | 透明 | 模型侧无需改动提示词、工具或配置 |
 | 失败即阻断 | 无法安全重定向时**阻断**命令，而不是回落到宿主执行 |
 | 防注入 | 原始命令作为单个 argv 元素传递，shell 元字符无法逃逸 |
-| 保持状态 | 每 session 一个 MicroVM，`cd` 与 `export` 跨命令保留 |
+| 保持状态 | 同一 session 内，`cd` 与 `export` 跨命令保留 |
 | 并发安全 | 同一 session 内的调用用锁文件串行化 |
 | 逃生通道 | `git` / `gh` 默认留在宿主，名单可配置 |
 
@@ -188,7 +188,7 @@ python3 exec_backend.py --session <session-id> --reset
 node tests/test_plugin.mjs
 ```
 
-19 项断言，覆盖命令改写、放行名单、幂等性、session id 处理与引号注入抵抗。
+21 项断言，覆盖命令改写、放行名单、幂等性、session id 处理与引号注入抵抗。
 **仅依赖 Node 标准库** —— 不需要 npm install、不需要联网、不需要 CubeSandbox 部署。
 
 注入相关的断言会按 POSIX shell 的语义解析改写后的命令，
@@ -276,7 +276,7 @@ generateResolvConf = false
 | `/data/cubelet` | XFS，`reflink=1` |
 | 沙箱创建耗时 | 约 1.0 秒 |
 | 完整 run_code 周期 | 约 2.4 秒 |
-| 插件测试 | 19/19 通过 |
+| 插件测试 | 21/21 通过 |
 
 ## 文件说明
 
@@ -285,7 +285,7 @@ generateResolvConf = false
 | `plugin/cubesandbox-bash.js` | `tool.execute.before` 钩子实现 |
 | `plugin/install.sh` | 幂等的安装 / 卸载 / 状态查看 |
 | `exec_backend.py` | 在 MicroVM 中执行单条命令，并维护 session 状态 |
-| `tests/test_plugin.mjs` | 19 项离线断言 |
+| `tests/test_plugin.mjs` | 21 项离线断言 |
 | `.env.example` | 全部配置项及说明 |
 
 ## 参考

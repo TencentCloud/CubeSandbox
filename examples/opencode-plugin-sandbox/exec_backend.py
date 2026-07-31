@@ -184,11 +184,17 @@ class SessionLock:
                 time.sleep(0.1)
 
     def __exit__(self, *_exc):
-        if self.fd is not None:
-            try:
-                os.close(self.fd)
-            except OSError:
-                pass
+        # Only release a lock we actually acquired. When __enter__ gave up after
+        # the timeout, self.fd is None and the lock is still held by a live
+        # peer; unlinking it there would let a third call acquire concurrently
+        # and defeat the serialisation this class exists to provide.
+        # Crashed holders are already covered by the stale-lock reclaim above.
+        if self.fd is None:
+            return False
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
         self.path.unlink(missing_ok=True)
         return False
 
@@ -201,10 +207,17 @@ def build_wrapper(command: str, cwd: str, env: dict) -> str:
 
     The wrapper:
       1. restores the recorded cwd and environment,
-      2. runs the command through ``bash -c`` (as a single quoted argument),
+      2. runs the command with ``eval`` in the *current* shell,
       3. prints a JSON state block between sentinels for the host to capture.
 
     ``exit_code`` is preserved so the caller can mirror it.
+
+    Why ``eval`` and not ``bash -c``: ``bash -c`` starts a child shell, so a
+    ``cd`` or ``export`` performed by the command mutates only that child and
+    is gone by the time the state block runs. The state would then always
+    report the wrapper's own cwd and environment, silently defeating the whole
+    point of capturing it. ``eval`` executes in the shell whose state we go on
+    to read, so mutations are visible.
     """
     lines = ["set +e"]
 
@@ -219,7 +232,7 @@ def build_wrapper(command: str, cwd: str, env: dict) -> str:
             continue
         lines.append(f"export {name}={shlex.quote(str(value))}")
 
-    lines.append(f"bash -c {shlex.quote(command)}")
+    lines.append(f"eval {shlex.quote(command)}")
     lines.append("__cube_rc=$?")
 
     # Emit state as JSON built by python3 inside the guest when available, so

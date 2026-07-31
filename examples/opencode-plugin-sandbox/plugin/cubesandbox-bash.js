@@ -111,8 +111,13 @@ function isPassthrough(command) {
  *
  * OpenCode has used several spellings across versions and the hook payload is
  * not part of a stable public contract, so probe the known variants and fall
- * back to a constant. A wrong-but-stable key only costs sandbox reuse
- * granularity; it never causes a host escape.
+ * back to a constant.
+ *
+ * The fallback is a correctness trade-off worth stating plainly: if every known
+ * key is missing, all sessions collapse onto the shared `"default"` state file
+ * and lock, so cwd and exported environment bleed between concurrent sessions.
+ * It never causes a host escape — commands still run inside a MicroVM — but it
+ * is stronger than merely losing reuse granularity.
  */
 function resolveSessionId(input) {
   const candidates = [
@@ -130,6 +135,92 @@ function resolveSessionId(input) {
 /** Single-quote a value for safe embedding in a POSIX shell command. */
 function shellQuote(value) {
   return "'" + String(value).replace(/'/g, "'\\''") + "'";
+}
+
+/**
+ * Decide whether a command is already one of our own rewrites.
+ *
+ * Multiple plugins may observe the same call, and a second rewrite would nest
+ * the backend invocation inside itself, so a guard is needed. The guard must be
+ * *structural*, not a substring test.
+ *
+ * A substring test such as `command.includes("exec_backend.py")` is a host
+ * escape: `ls exec_backend.py`, `echo x # exec_backend.py`, and
+ * `touch /tmp/pwned; echo exec_backend.py` all contain the marker while being
+ * ordinary user commands, so they would skip redirection and run on the host
+ * unlogged — exactly what this plugin exists to prevent.
+ *
+ * Instead, require the exact shape this plugin emits:
+ *
+ *   '<interpreter>' '<backend>' --session '<id>' --command '<original>'
+ *
+ * The backend path must be our resolved absolute path, and the flags must be in
+ * the positions we place them.
+ */
+function isOwnRewrite(command) {
+  const text = String(command).trimStart();
+  if (!text.startsWith("'")) return false;
+
+  const tokens = splitSingleQuoted(text);
+  if (tokens === null || tokens.length !== 6) return false;
+
+  return (
+    tokens[1] === BACKEND &&
+    tokens[2] === "--session" &&
+    tokens[4] === "--command"
+  );
+}
+
+/**
+ * Tokenise a command that only ever uses POSIX single quoting.
+ *
+ * Returns null when the input uses any construct we do not emit, which makes
+ * the caller treat it as a user command rather than one of our rewrites — the
+ * safe direction to fail in.
+ */
+function splitSingleQuoted(input) {
+  const tokens = [];
+  let i = 0;
+
+  while (i < input.length) {
+    while (input[i] === " ") i += 1;
+    if (i >= input.length) break;
+
+    if (input[i] === "'") {
+      let value = "";
+      i += 1;
+      for (;;) {
+        if (i >= input.length) return null; // unterminated quote
+        if (input[i] === "'") {
+          // Either the end of the token, or the POSIX '\'' escape sequence.
+          if (input.slice(i, i + 4) === "'\\''") {
+            value += "'";
+            i += 4;
+            continue;
+          }
+          i += 1;
+          break;
+        }
+        value += input[i];
+        i += 1;
+      }
+      if (i < input.length && input[i] !== " ") return null; // adjacent junk
+      tokens.push(value);
+      continue;
+    }
+
+    // A bare token. We only emit bare `--session` / `--command`, so anything
+    // containing shell metacharacters means this is not our rewrite.
+    let value = "";
+    while (i < input.length && input[i] !== " ") {
+      value += input[i];
+      i += 1;
+    }
+    if (/[^A-Za-z0-9_-]/.test(value)) return null;
+    tokens.push(value);
+  }
+
+  return tokens;
 }
 
 export const CubeSandboxBashPlugin = async ({ client, directory }) => {
@@ -167,7 +258,8 @@ export const CubeSandboxBashPlugin = async ({ client, directory }) => {
 
       // Idempotence guard. Multiple plugins may observe the same call, and a
       // second rewrite would nest the backend invocation inside itself.
-      if (original.includes("exec_backend.py")) return;
+      // Structural, not a substring test — see isOwnRewrite.
+      if (isOwnRewrite(original)) return;
 
       if (isPassthrough(original)) {
         await log("info", "passthrough (host)", { command: original });

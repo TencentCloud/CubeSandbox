@@ -180,7 +180,78 @@ The docs now say so, and "a MicroVM per call, not per session" is listed first
 under Known limitations. Claiming VM reuse would have been the kind of statement
 a reviewer catches immediately by reading the code.
 
-### 5.6 Command-line parsing that missed the real output format
+### 5.7 Four defects surfaced by the repository's automated review
+
+The repository runs an AI review on every PR. It found four real defects that
+neither the offline suite nor manual reading had caught, and one documentation
+contradiction. All were confirmed against the actual code before being fixed —
+the review was treated as a lead to verify, not as a verdict to accept.
+
+**State preservation did not work at all (highest impact).** The wrapper ran the
+user command through `bash -c`, which starts a *child* shell. A `cd` or `export`
+performed by the command mutated only that child and was gone by the time the
+state block ran, so the captured state always reported the wrapper's own cwd and
+environment. "Stateful" was a headline property of this integration, and the
+documented examples (`cd /workspace/demo` then `pwd`) could not have reproduced.
+
+Confirmed with two minimal scripts before changing anything:
+
+```
+bash -c variant:   command printed /tmp/statetest/demo
+                   wrapper shell still at /tmp/statetest      <- state lost
+eval variant:      command printed /tmp/statetest/demo
+                   wrapper shell now at /tmp/statetest/demo   <- state kept
+```
+
+Fixed by running the command with `eval` in the current shell. Re-verified
+end to end: after `cd /workspace/demo && export TOKEN=abc123`, the state block
+reports both the new cwd and `TOKEN=abc123`.
+
+Root cause of the miss is worth naming: the offline suite only exercises the
+JavaScript hook, and `build_wrapper` was never executed. The gap was already
+listed as "end-to-end usage not verified" in this report, and this is precisely
+the defect that gap was hiding.
+
+**The idempotence guard was a silent host escape (security).** The guard was
+`command.includes("exec_backend.py")`, placed *before* the passthrough and
+fail-closed checks. So `ls exec_backend.py`, `echo x # exec_backend.py`, and
+`touch /tmp/pwned; echo exec_backend.py` all skipped redirection and ran on the
+host with no isolation and no log entry — the exact failure this plugin exists
+to prevent, arrived at through the guard meant to make it safe.
+
+Replaced with a structural check: parse the command with POSIX single-quote
+semantics and require the exact six-token shape this plugin emits, with the
+backend path matching our resolved absolute path. Five escape cases were added
+to the test suite.
+
+**The session lock could release a lock it did not own.** `__exit__` unlinked
+the lock file unconditionally. When `__enter__` gave up after its 90 s timeout,
+`self.fd` is `None` and the lock is still held by a live peer; unlinking it let a
+third call acquire concurrently and defeated the serialisation. Now `__exit__`
+returns early unless the lock was actually acquired. Crashed holders remain
+covered by the existing stale-lock reclaim.
+
+**The installer's copy fallback installed a broken plugin.** When symlinking is
+unavailable the installer copied only the plugin, but the plugin resolves the
+backend at `<plugin-dir>/../exec_backend.py`, which was never installed in that
+mode. Every `bash` call would then fail closed, and the documented "reinstall"
+remedy reproduced the same state. The fallback now copies the backend to the
+matching location and aborts (removing the plugin again) if it cannot. Uninstall
+removes the copy, guarded by a content check so a user's own file is never
+deleted.
+
+**Documentation contradiction.** The README summary table and diagram claimed
+"one MicroVM per session" while the code creates one per call and the known
+limitations section said so correctly. The summary and diagram now match the
+code.
+
+One further wording fix came out of the same review: the comment on
+`resolveSessionId` claimed the fallback "only costs sandbox reuse granularity".
+That understated it — if every known session key is missing, all sessions share
+one state file and lock, so cwd and environment bleed between them. Still not a
+host escape, but worth stating accurately.
+
+### 5.8 Command-line parsing that missed the real output format
 
 Not part of the deliverable, but worth recording: a helper script used to drive
 the deployment failed to parse `cubemastercli` output because the AI-generated
@@ -198,7 +269,7 @@ successfully; only the parser was broken.
 - All timings quoted in the docs
 - Plugin loads as an ES module; hook rewrites `bash` and leaves other tools alone
 - Quote escaping survives real `bash` argv parsing
-- 19/19 offline assertions pass
+- 21/21 offline assertions pass
 
 **Not verified**
 
@@ -243,7 +314,7 @@ one was found by reading bytes after a debugging method produced a false result.
 ```bash
 # Offline: no deployment, no network, no npm install
 cd examples/opencode-plugin-sandbox
-node tests/test_plugin.mjs        # expect 19/19, exit 0
+node tests/test_plugin.mjs        # expect 21/21, exit 0
 
 # Against a real deployment
 export CUBE_TEMPLATE_ID=tpl-xxxxxxxx

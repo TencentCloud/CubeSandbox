@@ -29,7 +29,7 @@ OpenCode (host)
   ├── read / write / edit ──────────────────► host project files
   │
   └── bash ──► tool.execute.before ──► exec_backend.py ──► CubeAPI ──► MicroVM
-               (cubesandbox-bash.js)                       (:3000)     └─ one per session
+               (cubesandbox-bash.js)                       (:3000)     └─ one per call
 ```
 
 The model keeps issuing ordinary `bash` calls. It does not know, and does not
@@ -55,7 +55,7 @@ dangerous part.
 | Transparent | No prompt, tool, or config change on the model side |
 | Fail closed | If the command cannot be redirected safely, it is **blocked**, not run on the host |
 | Injection safe | The original command travels as one argv element; shell metacharacters cannot escape |
-| Stateful | One MicroVM per session; `cd` and `export` persist across commands |
+| Stateful | `cd` and `export` persist across commands within a session |
 | Concurrency safe | Calls within a session are serialised with a lock file |
 | Escape hatch | `git` / `gh` stay on the host by default, and the list is configurable |
 
@@ -195,7 +195,7 @@ Matching is on the leading token only. `git status` passes through;
 node tests/test_plugin.mjs
 ```
 
-19 assertions covering rewriting, passthrough, idempotence, session-id
+21 assertions covering rewriting, passthrough, idempotence, session-id
 handling, and quote-injection resistance. Node standard library only — no npm
 install, no network, no CubeSandbox deployment required.
 
@@ -293,7 +293,7 @@ Everything above was exercised on:
 | `/data/cubelet` | XFS with `reflink=1` |
 | Sandbox creation | ~1.0 s |
 | Full run_code cycle | ~2.4 s |
-| Plugin tests | 19/19 passing |
+| Plugin tests | 21/21 passing |
 
 ## Files
 
@@ -302,7 +302,7 @@ Everything above was exercised on:
 | `plugin/cubesandbox-bash.js` | The `tool.execute.before` hook |
 | `plugin/install.sh` | Idempotent install / uninstall / status |
 | `exec_backend.py` | Runs one command in a MicroVM; keeps session state |
-| `tests/test_plugin.mjs` | 19 offline assertions |
+| `tests/test_plugin.mjs` | 21 offline assertions |
 | `.env.example` | Every setting, documented |
 
 ## References

@@ -232,6 +232,56 @@ await checkAsync("rewriting is idempotent", async () => {
   assert.equal(out.args.command, once, "second pass wrapped the command again");
 });
 
+// The idempotence guard must be structural, not a substring test. A substring
+// test on the backend filename would let ordinary user commands that merely
+// mention it escape to the host unlogged, which is the exact failure this
+// plugin exists to prevent.
+await checkAsync("commands that merely mention the backend are still redirected", async () => {
+  const { hook, restore } = await makeHook();
+  const escapes = [
+    "ls exec_backend.py",
+    "cat exec_backend.py",
+    "echo x # exec_backend.py",
+    "touch /tmp/should-not-happen; echo exec_backend.py",
+    "grep -n session exec_backend.py",
+  ];
+  for (const cmd of escapes) {
+    const out = { args: { command: cmd } };
+    await hook({ tool: "bash", sessionID: "s1" }, out);
+    assert.notEqual(
+      out.args.command,
+      cmd,
+      `command escaped to the host unredirected: ${cmd}`
+    );
+    assert.ok(
+      out.args.command.includes("--command"),
+      `command was not rewritten into a backend call: ${cmd}`
+    );
+  }
+  restore();
+});
+
+await checkAsync("a genuine rewrite is recognised and not nested", async () => {
+  const { hook, restore } = await makeHook();
+
+  // Produce a real rewrite, then feed it back in.
+  const out = { args: { command: "echo hello" } };
+  await hook({ tool: "bash", sessionID: "s1" }, out);
+  const rewritten = out.args.command;
+
+  const again = { args: { command: rewritten } };
+  await hook({ tool: "bash", sessionID: "s1" }, again);
+  restore();
+
+  assert.equal(again.args.command, rewritten, "a real rewrite was wrapped twice");
+  // One --command flag, not two: no nesting happened.
+  assert.equal(
+    (again.args.command.match(/--command/g) || []).length,
+    1,
+    "the backend invocation was nested inside itself"
+  );
+});
+
 // --------------------------------------------------------------- passthrough
 await checkAsync("git and gh stay on the host by default", async () => {
   const { hook, restore } = await makeHook();
