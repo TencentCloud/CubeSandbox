@@ -318,10 +318,53 @@ The second is a plain process failure: a bilingual repository needs both files
 changed in the same edit, and checking only the file named in the review is not
 enough.
 
-Tests grew from 21 to 24 with the passthrough default inverted and the new
+Tests grew from 21 to 25 with the passthrough default inverted and the new
 fail-closed cases covered.
 
-### 5.10 Command-line parsing that missed the real output format
+### 5.10 A third round: the same fix missed in more places
+
+The review ran a third time and moved to "approve with minor changes". Its main
+finding was uncomfortable: the passthrough default had been inverted in the code
+and documented correctly in the integration guide, but **five other places still
+described the old default**, including two spots in each README and
+`.env.example`. Each README therefore contradicted itself — its config table
+said the default was empty while its prose said `git` runs on the host.
+
+That is the same failure mode as §5.9's Chinese-diagram miss, one round later
+and wider. The lesson taken from §5.9 was "change both language files". The
+actual lesson is more general: **after inverting a default, grep the whole
+example for the old value rather than editing the places the review named.**
+Applied here, that turns up `.env.example`, which no review round had mentioned
+and which is the file a user copies before reading anything else.
+
+Four smaller items in the same round:
+
+- The backend module docstring still said each session maps to one MicroVM. Same
+  stale claim as §5.7, surviving in the file a reviewer opens first. Reworded,
+  and the practical consequence spelled out: environment and cwd carry over as
+  replayed strings, but filesystem changes do not, so a directory created by one
+  call is gone by the next.
+- `exec` lost the exit code. §5.9 claimed the exit code was returned unchanged
+  when no sentinel arrived; in fact `split_output` returned 0, so `exec false`
+  was reported as success. The guest now appends `__CUBE_RC__=<returncode>` when
+  the wrapper produced none, and `split_output` reads the exit code from the body
+  as well as from after the state block. This was a documentation claim that the
+  code did not support — worse than an undocumented gap, because it invited trust.
+- The concurrency claim overstated the lock. `SessionLock` proceeds *unlocked*
+  after its timeout, and the default command timeout is longer than the lock
+  timeout, so concurrent same-session calls can routinely overlap. The code
+  comment was honest about this; the property table said "serialised". Both
+  READMEs now say best-effort and state what happens on timeout.
+- The idempotence guard could be spoofed. It pinned the backend path and the
+  flags but not the interpreter or the session id. Since `read` is deliberately
+  unsandboxed, a model can read the plugin and reproduce the six-token shape.
+  Now every fixed position is pinned, including the session id derived from the
+  same call, so a replayed rewrite from another session is redirected rather
+  than trusted. Covered by a new assertion.
+
+Tests: 25.
+
+### 5.11 Command-line parsing that missed the real output format
 
 Not part of the deliverable, but worth recording: a helper script used to drive
 the deployment failed to parse `cubemastercli` output because the AI-generated
@@ -339,7 +382,7 @@ successfully; only the parser was broken.
 - All timings quoted in the docs
 - Plugin loads as an ES module; hook rewrites `bash` and leaves other tools alone
 - Quote escaping survives real `bash` argv parsing
-- 24/24 offline assertions pass
+- 25/25 offline assertions pass
 
 **Not verified**
 
@@ -384,7 +427,7 @@ one was found by reading bytes after a debugging method produced a false result.
 ```bash
 # Offline: no deployment, no network, no npm install
 cd examples/opencode-plugin-sandbox
-node tests/test_plugin.mjs        # expect 24/24, exit 0
+node tests/test_plugin.mjs        # expect 25/25, exit 0
 
 # Against a real deployment
 export CUBE_TEMPLATE_ID=tpl-xxxxxxxx

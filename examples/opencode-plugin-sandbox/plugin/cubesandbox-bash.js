@@ -170,10 +170,15 @@ function shellQuote(value) {
  *
  *   '<interpreter>' '<backend>' --session '<id>' --command '<original>'
  *
- * The backend path must be our resolved absolute path, and the flags must be in
- * the positions we place them.
+ * Every fixed position is pinned: the interpreter, the backend path, both flags,
+ * and the session id derived from this same call. Pinning the session id matters
+ * because `read` is deliberately not sandboxed, so a model can read this file
+ * and reproduce the shape from it. Without the session check it could emit a
+ * well-formed rewrite for an arbitrary command and have the guard wave it
+ * through to the host; with it, the model would additionally have to guess the
+ * session id OpenCode assigned to the very call it is making.
  */
-function isOwnRewrite(command) {
+function isOwnRewrite(command, sessionId) {
   const text = String(command).trimStart();
   if (!text.startsWith("'")) return false;
 
@@ -181,8 +186,10 @@ function isOwnRewrite(command) {
   if (tokens === null || tokens.length !== 6) return false;
 
   return (
+    tokens[0] === pythonInterpreter() &&
     tokens[1] === BACKEND &&
     tokens[2] === "--session" &&
+    tokens[3] === sessionId &&
     tokens[4] === "--command"
   );
 }
@@ -298,10 +305,12 @@ export const CubeSandboxBashPlugin = async ({ client, directory }) => {
         );
       }
 
+      const sessionId = resolveSessionId(input);
+
       // Idempotence guard. Multiple plugins may observe the same call, and a
       // second rewrite would nest the backend invocation inside itself.
-      // Structural, not a substring test — see isOwnRewrite.
-      if (isOwnRewrite(original)) return;
+      // Structural and session-pinned, not a substring test — see isOwnRewrite.
+      if (isOwnRewrite(original, sessionId)) return;
 
       if (isPassthrough(original)) {
         await log("info", "passthrough (host)", { command: original });
@@ -321,8 +330,6 @@ export const CubeSandboxBashPlugin = async ({ client, directory }) => {
             "Reinstall the plugin or unset it to restore host execution."
         );
       }
-
-      const sessionId = resolveSessionId(input);
 
       // The original command travels as one argv element. The only shell that
       // ever sees it is the one inside the MicroVM.

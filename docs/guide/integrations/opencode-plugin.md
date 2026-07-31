@@ -312,7 +312,7 @@ cd examples/opencode-plugin-sandbox
 node tests/test_plugin.mjs
 ```
 
-24 assertions covering rewriting, passthrough, idempotence, session-id handling,
+25 assertions covering rewriting, passthrough, idempotence, session-id handling,
 and quote-injection resistance. Node standard library only — no npm install, no
 network, no CubeSandbox deployment required.
 

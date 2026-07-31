@@ -19,15 +19,23 @@ Invoked as::
 
 Session affinity
 ----------------
-A shell is only useful if consecutive commands share state. Each OpenCode
-session is therefore mapped to one MicroVM, recorded in a state file under
-``CUBE_OPENCODE_STATE_DIR`` (default ``~/.cache/cubesandbox-opencode``).
+A shell is only useful if consecutive commands share state. Each call runs in a
+fresh MicroVM, created and closed within the call; what persists across calls is
+the recorded cwd and environment, kept in a state file under
+``CUBE_OPENCODE_STATE_DIR`` (default ``~/.cache/cubesandbox-opencode``) and
+replayed into the next MicroVM.
+
+The distinction matters: environment variables and the working directory carry
+over because they are replayed as strings, but filesystem changes do not. A
+directory created by one call does not exist in the next, and the wrapper falls
+back to the default workdir when the recorded cwd is absent.
 
 Two pieces of state are carried across calls:
 
 ``cwd``
     Emitted by the wrapper after the command finishes and stored host-side, so
-    ``cd /tmp`` followed by ``pwd`` behaves as expected.
+    ``cd /tmp`` followed by ``pwd`` behaves as expected, provided the directory
+    exists in the template rootfs.
 
 ``env``
     Variables exported by the command, captured the same way, so
@@ -36,8 +44,16 @@ Two pieces of state are carried across calls:
 Concurrency
 -----------
 OpenCode may issue several ``bash`` calls concurrently. Calls within one session
-are serialised with a lock file so they cannot interleave on the same MicroVM
-and corrupt the recorded cwd/env. Different sessions run in parallel.
+take a lock file so they do not interleave while updating the recorded cwd/env.
+Different sessions run in parallel.
+
+This is best-effort rather than a guarantee. After waiting ``LOCK_TIMEOUT``
+seconds the call proceeds *unlocked* instead of failing, on the grounds that
+losing a state update is preferable to refusing the user's command. With a
+command timeout above the lock timeout, two concurrent same-session calls can
+therefore overlap, and the last writer wins on the state file. A lock is also
+reclaimed once its file is older than ``LOCK_STALE_AFTER`` seconds, so a holder
+running longer than that can be displaced.
 
 Requirements
 ------------
@@ -247,11 +263,16 @@ def build_wrapper(command: str, cwd: str, env: dict) -> str:
 
     One case remains outside this: a command that calls ``exec`` replaces the
     subshell's process image, which discards traps along with everything else.
-    No shell-level wrapper can observe that, so the host sees no sentinel.
-    ``run_command`` handles the absence of a sentinel by keeping the previous
-    session state and returning the process exit code unchanged, which is the
-    conservative choice — state is stale rather than wrong. This is recorded in
-    the known limitations rather than papered over.
+    No shell-level wrapper can observe that, so no state block is emitted. Two
+    consequences, handled separately:
+
+    * The exit code is still recovered. The guest appends
+      ``__CUBE_RC__=<returncode>`` when the wrapper produced none, so
+      ``exec false`` is reported as a failure rather than a success.
+    * The cwd and environment updates are lost. The previous session state is
+      kept, so state is stale rather than wrong.
+
+    The second point is a real limitation and is documented as one.
     """
     lines = ["set +e"]
 
@@ -288,7 +309,16 @@ def build_wrapper(command: str, cwd: str, env: dict) -> str:
 
 
 def split_output(text: str) -> tuple[str, dict, int]:
-    """Separate command output from the trailing state block and exit code."""
+    """Separate command output from the trailing state block and exit code.
+
+    Two shapes arrive here. Normally the wrapper's EXIT trap emits a state block
+    followed by ``__CUBE_RC__=<n>``. When the command called ``exec`` the trap is
+    gone, so there is no state block and the guest appends the process exit code
+    on its own line instead. Both are handled: the exit code is searched for in
+    whichever part follows the state block, or in the body when there is none,
+    and the line is stripped from the output either way so it never reaches the
+    model as command output.
+    """
     state: dict = {}
     rc = 0
 
@@ -302,15 +332,33 @@ def split_output(text: str) -> tuple[str, dict, int]:
         except ValueError:
             state = {}
     else:
+        # No trap output, e.g. the command called `exec`. The exit code, if the
+        # guest appended one, is in the body rather than after a state block.
         head, tail = text, ""
 
-    for line in tail.splitlines():
-        line = line.strip()
-        if line.startswith("__CUBE_RC__="):
-            try:
-                rc = int(line.split("=", 1)[1])
-            except ValueError:
-                rc = 0
+    def take_rc(block: str) -> tuple[str, int | None]:
+        """Strip __CUBE_RC__ lines from a block and return the last value."""
+        kept, found = [], None
+        for line in block.splitlines():
+            if line.strip().startswith("__CUBE_RC__="):
+                try:
+                    found = int(line.strip().split("=", 1)[1])
+                except ValueError:
+                    pass
+                continue
+            kept.append(line)
+        joined = "\n".join(kept)
+        if block.endswith("\n") and joined:
+            joined += "\n"
+        return joined, found
+
+    tail_body, tail_rc = take_rc(tail)
+    head, head_rc = take_rc(head)
+
+    if tail_rc is not None:
+        rc = tail_rc
+    elif head_rc is not None:
+        rc = head_rc
 
     return head, state, rc
 
@@ -341,12 +389,19 @@ def run_in_sandbox(command: str, session: str, timeout: int) -> int:
 
         try:
             with Sandbox.create(template=template) as sandbox:
+                # The wrapper normally emits __CUBE_RC__ itself from its EXIT
+                # trap. A command that calls `exec` replaces the process image
+                # and takes the trap with it, so nothing is emitted; the guest
+                # then appends the real process exit code as a fallback. Without
+                # this, `exec false` would be reported to OpenCode as success.
                 result = sandbox.run_code(
                     "import subprocess, sys\n"
                     "p = subprocess.run(['bash', '-lc', " + repr(wrapper) + "],\n"
                     "                   capture_output=True, text=True)\n"
                     "sys.stdout.write(p.stdout)\n"
-                    "sys.stderr.write(p.stderr)\n",
+                    "sys.stderr.write(p.stderr)\n"
+                    "if '__CUBE_RC__=' not in p.stdout:\n"
+                    "    sys.stdout.write('\\n__CUBE_RC__=%d\\n' % p.returncode)\n",
                     timeout=timeout,
                 )
         except Exception as exc:  # noqa: BLE001 - surface any SDK failure verbatim

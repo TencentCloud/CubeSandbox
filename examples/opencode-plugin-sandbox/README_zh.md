@@ -52,8 +52,8 @@ git 凭据和编辑器状态的访问 —— 最后你是在一份副本上开�
 | 失败即阻断 | 无法安全重定向时**阻断**命令，而不是回落到宿主执行 |
 | 防注入 | 原始命令作为单个 argv 元素传递，shell 元字符无法逃逸 |
 | 保持状态 | 同一 session 内，`cd` 与 `export` 跨命令保留 |
-| 并发安全 | 同一 session 内的调用用锁文件串行化 |
-| 逃生通道 | `git` / `gh` 默认留在宿主，名单可配置 |
+| 并发安全（尽力而为） | 同一 session 内的调用会取锁文件；等待 90 秒后仍未取到则不加锁继续执行，而非失败 |
+| 逃生通道 | 可通过放行名单把特定命令留在宿主，默认为空 |
 
 ## 前置条件
 
@@ -150,6 +150,12 @@ cd examples/opencode-plugin-sandbox
 abc123
 ```
 
+跨调用保留的是**记录下来的** cwd 与环境变量，它们以字符串形式重放进下一个
+MicroVM。文件系统的改动不会保留：每次调用都是全新的 VM，所以某次调用创建的
+目录到下一次就不存在了，此时包装脚本会回退到 `/workspace`。上面的示例假设
+`/workspace/demo` 已存在于模板 rootfs 中；如果先 `mkdir /tmp/x`，
+下一次调用再 `cd /tmp/x`，实际会落回 `/workspace`。
+
 状态存放在 `~/.cache/cubesandbox-opencode/<session>.json`，
 权限为 `0600`（因为可能包含命令导出的敏感值）。清除方式：
 
@@ -203,7 +209,8 @@ export CUBE_OPENCODE_PASSTHROUGH=git,gh
 node tests/test_plugin.mjs
 ```
 
-24 项断言，覆盖命令改写、放行名单、幂等性、session id 处理与引号注入抵抗。
+25 项断言，覆盖命令改写、放行名单、幂等性、session id 处理与引号注入抵抗。
+需要 Node 22 或更新版本 —— 插件是放在 `.js` 文件里的 ESM，依赖 Node 自动识别模块语法。
 **仅依赖 Node 标准库** —— 不需要 npm install、不需要联网、不需要 CubeSandbox 部署。
 
 注入相关的断言会按 POSIX shell 的语义解析改写后的命令，
@@ -222,7 +229,8 @@ node tests/test_plugin.mjs
 
 - `read` / `write` / `edit` 仍然操作宿主文件。这是有意为之 ——
   Agent 必须能编辑你的项目 —— 但也意味着恶意的 `write` 不在防护范围内。
-- 放行名单中的命令（默认 `git`）按设计就在宿主执行。
+- 放行名单中的命令按设计就在宿主执行。名单默认为空，
+  任何加入其中的命令都必须被当作完全可信。
 - 这里没有配置网络策略。请用
   [网络策略](https://cubesandbox.com/zh/guide/network-policy.html)限制沙箱出网。
 - 仅涉及示例与文档，不改动 CubeSandbox 运行时或 API 行为。
@@ -296,7 +304,7 @@ generateResolvConf = false
 | `/data/cubelet` | XFS，`reflink=1` |
 | 沙箱创建耗时 | 约 1.0 秒 |
 | 完整 run_code 周期 | 约 2.4 秒 |
-| 插件测试 | 24/24 通过 |
+| 插件测试 | 25/25 通过 |
 
 ## 文件说明
 
@@ -305,7 +313,7 @@ generateResolvConf = false
 | `plugin/cubesandbox-bash.js` | `tool.execute.before` 钩子实现 |
 | `plugin/install.sh` | 幂等的安装 / 卸载 / 状态查看 |
 | `exec_backend.py` | 在 MicroVM 中执行单条命令，并维护 session 状态 |
-| `tests/test_plugin.mjs` | 24 项离线断言 |
+| `tests/test_plugin.mjs` | 25 项离线断言 |
 | `.env.example` | 全部配置项及说明 |
 
 ## 参考

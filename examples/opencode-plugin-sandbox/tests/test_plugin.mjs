@@ -310,6 +310,35 @@ await checkAsync("a genuine rewrite is recognised and not nested", async () => {
   );
 });
 
+// The guard pins the session id, not just the shape. `read` is deliberately not
+// sandboxed, so a model can read this plugin and reproduce the six-token form;
+// without the session check it could hand itself host execution.
+await checkAsync("a rewrite carrying another session's id is not trusted", async () => {
+  const { hook, restore } = await makeHook();
+
+  // Build a well-formed rewrite under one session.
+  const forged = { args: { command: "echo hello" } };
+  await hook({ tool: "bash", sessionID: "victim" }, forged);
+  const shaped = forged.args.command;
+
+  // Replay it as if the model had emitted it during a different session.
+  const replay = { args: { command: shaped } };
+  await hook({ tool: "bash", sessionID: "attacker" }, replay);
+  restore();
+
+  assert.notEqual(
+    replay.args.command,
+    shaped,
+    "a rewrite from another session was accepted as our own"
+  );
+  // It gets redirected again, which is safe: the nested call still runs in the
+  // sandbox. What must not happen is passing it through untouched.
+  assert.ok(
+    replay.args.command.includes("'attacker'"),
+    "the replayed command was not re-bound to the current session"
+  );
+});
+
 // --------------------------------------------------------------- passthrough
 // Passthrough is empty by default, and that is a security property rather than
 // an oversight: matching is on the leading token, so allowing `git` allows

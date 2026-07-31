@@ -56,8 +56,8 @@ dangerous part.
 | Fail closed | If the command cannot be redirected safely, it is **blocked**, not run on the host |
 | Injection safe | The original command travels as one argv element; shell metacharacters cannot escape |
 | Stateful | `cd` and `export` persist across commands within a session |
-| Concurrency safe | Calls within a session are serialised with a lock file |
-| Escape hatch | `git` / `gh` stay on the host by default, and the list is configurable |
+| Concurrency safe (best effort) | Calls within a session take a lock file; after a 90 s wait the call proceeds unlocked rather than failing |
+| Escape hatch | An opt-in allowlist can keep specific commands on the host; empty by default |
 
 ## Prerequisites
 
@@ -157,6 +157,13 @@ restores them before the next one:
 abc123
 ```
 
+What carries over is the *recorded* cwd and environment, replayed into the next
+MicroVM as strings. Filesystem changes do not: each call gets a fresh VM, so a
+directory created by one call is gone by the next, and the wrapper falls back to
+`/workspace` when the recorded cwd no longer exists. The example above assumes
+`/workspace/demo` exists in the template rootfs; `mkdir /tmp/x` in one call
+followed by `cd /tmp/x` in the next would land back in `/workspace`.
+
 State lives in `~/.cache/cubesandbox-opencode/<session>.json`, mode `0600`
 because it can contain values exported by commands. Clear it with:
 
@@ -212,8 +219,10 @@ anything.
 node tests/test_plugin.mjs
 ```
 
-24 assertions covering rewriting, passthrough, idempotence, session-id
-handling, and quote-injection resistance. Node standard library only — no npm
+25 assertions covering rewriting, passthrough, idempotence, session-id
+handling, and quote-injection resistance. Requires Node 22 or newer, since the
+plugin is ESM in a `.js` file and relies on Node detecting module syntax.
+Node standard library only — no npm
 install, no network, no CubeSandbox deployment required.
 
 The injection tests parse the rewritten command the way a POSIX shell would and
@@ -234,7 +243,8 @@ payload across elements and fail the assertion.
 - `read` / `write` / `edit` still touch host files. That is intentional — the
   agent has to be able to edit your project — but it means a malicious `write`
   is not covered.
-- Passthrough commands (`git` by default) run on the host by design.
+- Passthrough commands run on the host by design. The list is empty by
+  default; anything added to it must be treated as fully trusted.
 - Network policy is not configured here. Use
   [Network Policy](https://cubesandbox.com/guide/network-policy.html) to
   restrict sandbox egress.
@@ -316,7 +326,7 @@ Everything above was exercised on:
 | `/data/cubelet` | XFS with `reflink=1` |
 | Sandbox creation | ~1.0 s |
 | Full run_code cycle | ~2.4 s |
-| Plugin tests | 24/24 passing |
+| Plugin tests | 25/25 passing |
 
 ## Files
 
@@ -325,7 +335,7 @@ Everything above was exercised on:
 | `plugin/cubesandbox-bash.js` | The `tool.execute.before` hook |
 | `plugin/install.sh` | Idempotent install / uninstall / status |
 | `exec_backend.py` | Runs one command in a MicroVM; keeps session state |
-| `tests/test_plugin.mjs` | 24 offline assertions |
+| `tests/test_plugin.mjs` | 25 offline assertions |
 | `.env.example` | Every setting, documented |
 
 ## References
