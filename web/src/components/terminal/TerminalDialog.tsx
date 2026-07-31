@@ -3,11 +3,21 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal as XTerm } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
-import { Maximize2, Minimize2, Minus, Plus, RotateCcw, TerminalSquare, X } from 'lucide-react';
+import {
+  AArrowDown,
+  AArrowUp,
+  Maximize2,
+  Minimize2,
+  Plus,
+  RotateCcw,
+  TerminalSquare,
+  X,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { cn, short } from '@/lib/utils';
@@ -50,17 +60,27 @@ export function TerminalDialog({ open, onOpenChange, sandboxId }: TerminalDialog
   const sequenceRef = useRef(0);
   const initialTabRef = useRef<TerminalTab | null>(null);
 
-  const startTab = useCallback((containerId?: string) => {
-    const sequence = ++sequenceRef.current;
-    const tab: TerminalTab = {
-      id: `terminal-${sequence}`,
-      sequence,
-      ...(containerId ? { requestedContainerId: containerId } : {}),
-      snapshot: null,
-    };
-    setTabs((current) => [...current, tab]);
-    setActiveTabId(tab.id);
-  }, []);
+  const startTab = useCallback(
+    (containerId?: string) => {
+      const container = containerId
+        ? containers.find((item) => item.containerId === containerId)
+        : containers.length === 1
+          ? containers[0]
+          : undefined;
+      if (!container || container.status !== 1) return;
+
+      const sequence = ++sequenceRef.current;
+      const tab: TerminalTab = {
+        id: `terminal-${sequence}`,
+        sequence,
+        requestedContainerId: container.containerId,
+        snapshot: null,
+      };
+      setTabs((current) => [...current, tab]);
+      setActiveTabId(tab.id);
+    },
+    [containers],
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -88,7 +108,7 @@ export function TerminalDialog({ open, onOpenChange, sandboxId }: TerminalDialog
 
   const updateTabSnapshot = useCallback((tabId: string, snapshot: TerminalSessionSnapshot) => {
     setTabs((current) => current.map((tab) => (tab.id === tabId ? { ...tab, snapshot } : tab)));
-    if (snapshot.metadata?.containers.length) {
+    if (snapshot.metadata) {
       setContainers(snapshot.metadata.containers);
     }
   }, []);
@@ -145,6 +165,7 @@ export function TerminalDialog({ open, onOpenChange, sandboxId }: TerminalDialog
   }, [t]);
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? null;
+  const canStartNewSession = containers.some((container) => container.status === 1);
 
   return (
     <Dialog.Root open={open} onOpenChange={handleOpenChange}>
@@ -182,101 +203,67 @@ export function TerminalDialog({ open, onOpenChange, sandboxId }: TerminalDialog
             </TooltipIconButton>
           </header>
 
-          <div className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border/60 bg-muted/20 px-3 py-1.5 sm:px-4">
-            <label className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-              <span className="hidden sm:inline">{t('newSession')}</span>
-              <select
-                aria-label={t('selectContainer')}
-                value=""
-                disabled={containers.length === 0}
-                onChange={(event) => {
-                  const containerId = event.target.value;
-                  if (containerId) startTab(containerId);
-                }}
-                className="h-8 w-36 rounded-md border border-border bg-background px-2 text-xs text-foreground outline-none focus:ring-2 focus:ring-ring disabled:opacity-50 sm:w-52"
-              >
-                <option value="">
-                  {containers.length === 0 ? t('discoveringContainers') : t('chooseContainer')}
-                </option>
-                {containers.map((container) => (
-                  <option
-                    key={container.containerId}
-                    value={container.containerId}
-                    disabled={container.status !== 1}
+          <div className="flex h-10 shrink-0 items-stretch border-b border-border/60 bg-muted/30 px-2 pt-1">
+            <div className="flex min-w-0 flex-1 items-stretch overflow-x-auto" role="tablist">
+              {tabs.map((tab) => {
+                const label = tabLabel(tab, containers, t('tab', { number: tab.sequence }));
+                const selected = tab.id === activeTabId;
+                return (
+                  <div
+                    key={tab.id}
+                    className={cn(
+                      'mr-1 flex min-w-0 max-w-56 items-center rounded-t-md border border-b-0',
+                      selected
+                        ? 'border-border bg-background text-foreground'
+                        : 'border-transparent text-muted-foreground hover:bg-background/50',
+                    )}
                   >
-                    {containerLabel(container)}
-                    {container.status === 1 ? '' : ` — ${t('containerUnavailable')}`}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <div className="ml-auto flex items-center gap-1" aria-label={t('fontSize')}>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={selected}
+                      aria-controls={`${tab.id}-panel`}
+                      className="min-w-0 flex-1 truncate px-3 py-2 text-left text-xs"
+                      title={label}
+                      onClick={() => setActiveTabId(tab.id)}
+                    >
+                      {label}
+                    </button>
+                    <TooltipIconButton
+                      label={t('closeTab', { name: label })}
+                      compact
+                      onClick={() => closeTab(tab.id)}
+                    >
+                      <X size={12} />
+                    </TooltipIconButton>
+                  </div>
+                );
+              })}
+              <NewTerminalTabButton
+                containers={containers}
+                canStartNewSession={canStartNewSession}
+                onStartTab={startTab}
+              />
+            </div>
+            <div
+              className="ml-2 flex shrink-0 items-center gap-0.5 border-l border-border/60 pl-2"
+              aria-label={t('fontSize')}
+            >
               <TooltipIconButton
                 label={t('decreaseFont')}
                 disabled={fontSize <= MIN_FONT_SIZE}
                 onClick={() => changeFontSize(fontSize - 1)}
               >
-                <Minus size={14} />
+                <AArrowDown size={15} />
               </TooltipIconButton>
-              <input
-                type="range"
-                min={MIN_FONT_SIZE}
-                max={MAX_FONT_SIZE}
-                step={1}
-                value={fontSize}
-                aria-label={t('fontSize')}
-                onChange={(event) => changeFontSize(Number(event.target.value))}
-                className="h-1.5 w-20 cursor-pointer accent-primary sm:w-28"
-              />
-              <output className="w-7 text-center font-mono text-xs text-muted-foreground">
-                {fontSize}
-              </output>
               <TooltipIconButton
                 label={t('increaseFont')}
                 disabled={fontSize >= MAX_FONT_SIZE}
                 onClick={() => changeFontSize(fontSize + 1)}
               >
-                <Plus size={14} />
+                <AArrowUp size={15} />
               </TooltipIconButton>
             </div>
-          </div>
-
-          <div className="flex h-10 shrink-0 items-stretch overflow-x-auto border-b border-border/60 bg-muted/30 px-2 pt-1">
-            {tabs.map((tab) => {
-              const label = tabLabel(tab, containers, t('tab', { number: tab.sequence }));
-              const selected = tab.id === activeTabId;
-              return (
-                <div
-                  key={tab.id}
-                  className={cn(
-                    'mr-1 flex min-w-0 max-w-56 items-center rounded-t-md border border-b-0',
-                    selected
-                      ? 'border-border bg-background text-foreground'
-                      : 'border-transparent text-muted-foreground hover:bg-background/50',
-                  )}
-                >
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={selected}
-                    aria-controls={`${tab.id}-panel`}
-                    className="min-w-0 flex-1 truncate px-3 py-2 text-left text-xs"
-                    title={label}
-                    onClick={() => setActiveTabId(tab.id)}
-                  >
-                    {label}
-                  </button>
-                  <TooltipIconButton
-                    label={t('closeTab', { name: label })}
-                    compact
-                    onClick={() => closeTab(tab.id)}
-                  >
-                    <X size={12} />
-                  </TooltipIconButton>
-                </div>
-              );
-            })}
           </div>
 
           <main className="relative min-h-0 flex-1 bg-[#0b0d0f]">
@@ -284,7 +271,12 @@ export function TerminalDialog({ open, onOpenChange, sandboxId }: TerminalDialog
               <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-sm text-neutral-400">
                 <TerminalSquare size={24} />
                 <p>{t('noSessions')}</p>
-                <Button size="sm" variant="outline" onClick={() => startTab()}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={containers.length !== 1 || !canStartNewSession}
+                  onClick={() => startTab()}
+                >
                   <RotateCcw size={14} /> {t('startNewSession')}
                 </Button>
               </div>
@@ -300,6 +292,10 @@ export function TerminalDialog({ open, onOpenChange, sandboxId }: TerminalDialog
                 fitEpoch={fitEpoch}
                 onSnapshot={updateTabSnapshot}
                 onStartNewSession={(containerId) => startTab(containerId)}
+                canRestartTarget={isRunningContainer(
+                  containers,
+                  tab.snapshot?.metadata?.containerId ?? tab.requestedContainerId,
+                )}
               />
             ))}
           </main>
@@ -323,6 +319,74 @@ export function TerminalDialog({ open, onOpenChange, sandboxId }: TerminalDialog
   );
 }
 
+function NewTerminalTabButton({
+  containers,
+  canStartNewSession,
+  onStartTab,
+}: {
+  containers: TerminalContainer[];
+  canStartNewSession: boolean;
+  onStartTab(containerId?: string): void;
+}) {
+  const { t } = useTranslation('terminal');
+
+  if (containers.length <= 1) {
+    const container = containers[0];
+    return (
+      <TooltipIconButton
+        label={t('newSession')}
+        compact
+        disabled={!container || !canStartNewSession}
+        onClick={() => onStartTab(container.containerId)}
+      >
+        <Plus size={15} />
+      </TooltipIconButton>
+    );
+  }
+
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button
+          type="button"
+          aria-label={t('newSession')}
+          title={t('newSession')}
+          disabled={!canStartNewSession}
+          className="mr-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40"
+        >
+          <Plus size={15} />
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content
+          align="start"
+          sideOffset={6}
+          aria-label={t('selectContainer')}
+          className="z-[70] min-w-52 rounded-md border border-border/60 bg-popover p-1 text-popover-foreground shadow-md data-[state=open]:animate-fade-in"
+        >
+          <DropdownMenu.Label className="px-2.5 py-1.5 text-xs font-medium text-muted-foreground">
+            {t('chooseContainer')}
+          </DropdownMenu.Label>
+          <DropdownMenu.Separator className="my-1 h-px bg-border/70" />
+          {containers.map((container) => (
+            <DropdownMenu.Item
+              key={container.containerId}
+              disabled={container.status !== 1}
+              onSelect={() => onStartTab(container.containerId)}
+              className="flex cursor-pointer select-none items-center gap-2 rounded-sm px-2.5 py-2 text-xs outline-none transition-colors hover:bg-muted focus:bg-muted data-[disabled]:pointer-events-none data-[disabled]:opacity-50"
+            >
+              <span className="min-w-0 flex-1 truncate">{containerLabel(container)}</span>
+              {container.status !== 1 ? (
+                <span className="shrink-0 text-muted-foreground">{t('containerUnavailable')}</span>
+              ) : null}
+            </DropdownMenu.Item>
+          ))}
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  );
+}
+
 interface TerminalPaneProps {
   id: string;
   active: boolean;
@@ -330,6 +394,7 @@ interface TerminalPaneProps {
   requestedContainerId?: string;
   fontSize: number;
   fitEpoch: number;
+  canRestartTarget: boolean;
   onSnapshot(tabId: string, snapshot: TerminalSessionSnapshot): void;
   onStartNewSession(containerId?: string): void;
 }
@@ -341,6 +406,7 @@ function TerminalPane({
   requestedContainerId,
   fontSize,
   fitEpoch,
+  canRestartTarget,
   onSnapshot,
   onStartNewSession,
 }: TerminalPaneProps) {
@@ -504,6 +570,7 @@ function TerminalPane({
           <Button
             size="sm"
             variant="outline"
+            disabled={!canRestartTarget}
             className="h-8 border-white/15 bg-transparent text-neutral-200 hover:bg-white/10"
             onClick={() => onStartNewSession(metadata?.containerId ?? requestedContainerId)}
           >
@@ -586,6 +653,13 @@ function writeTerminalFontSize(value: number): void {
 
 function containerLabel(container: TerminalContainer): string {
   return container.name?.trim() || container.type?.trim() || short(container.containerId);
+}
+
+function isRunningContainer(containers: TerminalContainer[], containerId?: string): boolean {
+  return Boolean(
+    containerId &&
+    containers.some((container) => container.containerId === containerId && container.status === 1),
+  );
 }
 
 function tabLabel(tab: TerminalTab, containers: TerminalContainer[], fallback: string): string {
