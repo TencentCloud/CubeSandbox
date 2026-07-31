@@ -137,9 +137,11 @@ func TestRefreshSnapshotStorageMetricsRetriesCachedUnknown(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 
-	patches.ApplyFunc(localcache.GetHealthyNodesByInstanceType, func(n int, product string) node.NodeList {
+	originalGetNodes := getSnapshotReconcilerNodes
+	getSnapshotReconcilerNodes = func(n int, product string) node.NodeList {
 		return nil
-	})
+	}
+	t.Cleanup(func() { getSnapshotReconcilerNodes = originalGetNodes })
 	patches.ApplyFunc(cubelet.GetCubeletAddr, func(hostIP string) string { return hostIP })
 
 	type call struct {

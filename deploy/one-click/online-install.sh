@@ -39,6 +39,30 @@ detect_glibc_version() {
 # ---------------------------------------------------------------------------
 # Pre-download preflight checks (lightweight, self-contained)
 # ---------------------------------------------------------------------------
+check_bpf_fs_preflight() {
+  # Let the regular OS preflight report unsupported non-Linux hosts.
+  [[ "$(uname)" == "Linux" ]] || return 0
+
+  local bpf_dir="/sys/fs/bpf"
+  if ! grep -qw bpf /proc/filesystems; then
+    echo "[online-install] ERROR: Your kernel does not support the 'bpf' filesystem (eBPF is missing or not enabled)." >&2
+    echo "[online-install] network-agent requires eBPF to function properly." >&2
+    echo "[online-install] Please upgrade your kernel or enable CONFIG_BPF_SYSCALL." >&2
+    exit 3
+  fi
+
+  local bpf_fs_type=""
+  if [[ -d "${bpf_dir}" ]]; then
+    bpf_fs_type="$(df -T "${bpf_dir}" 2>/dev/null | awk 'NR==2 {print $2}' || true)"
+  fi
+  if [[ "${bpf_fs_type}" != "bpf" ]]; then
+    echo "[online-install] ERROR: /sys/fs/bpf is not mounted as a bpf filesystem (type: ${bpf_fs_type:-unknown})." >&2
+    echo "[online-install] network-agent requires bpffs for its pinned eBPF maps." >&2
+    echo "[online-install] Troubleshooting: https://github.com/TencentCloud/CubeSandbox/blob/master/docs/guide/troubleshooting/deployment.md#bpffs-is-not-mounted" >&2
+    exit 3
+  fi
+}
+
 check_early_preflight() {
   if [[ "${SKIP_PRECHECK:-0}" == "1" ]]; then
     echo "[online-install] Skipping pre-download preflight checks." >&2
@@ -290,7 +314,12 @@ EOF
   echo "[online-install] Pre-download preflight checks passed." >&2
 }
 
-# Run early preflight checks before fetching release info or downloading large bundle
+# Run the mandatory bpffs check before fetching release info or downloading the
+# large bundle. Unlike the optional early checks, this is never skipped.
+check_bpf_fs_preflight
+
+# Run optional early preflight checks before fetching release info or downloading
+# the large bundle.
 check_early_preflight
 
 # ---------------------------------------------------------------------------

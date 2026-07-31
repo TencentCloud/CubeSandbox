@@ -701,6 +701,22 @@ class TestListSandboxesV1:
             result = Sandbox.list(config=make_config())
         assert result == data
 
+    def test_list_includes_volume_mounts(self):
+        data = [{
+            **SANDBOX_DATA,
+            "volumeMounts": [{
+                "name": "hostdir-0",
+                "path": "/mnt/data",
+                "readOnly": True,
+            }],
+        }]
+        with patch("requests.Session.get", return_value=mock_response(data)):
+            result = Sandbox.list(config=make_config())
+
+        assert len(result) == 1
+        assert result[0]["volumeMounts"][0]["path"] == "/mnt/data"
+        assert result[0]["volumeMounts"][0]["readOnly"] is True
+
     def test_list_empty(self):
         with patch("requests.Session.get", return_value=mock_response([])):
             result = Sandbox.list(config=make_config())
@@ -726,6 +742,23 @@ class TestListSandboxesV2:
         with patch("requests.Session.get", return_value=mock_response(data)):
             result = Sandbox.list_v2(config=make_config())
         assert result == data
+
+    def test_list_v2_includes_volume_mounts(self):
+        data = [{
+            **SANDBOX_DATA,
+            "volumeMounts": [{
+                "name": "hostdir-0",
+                "path": "/mnt/ro",
+                "readOnly": True,
+            }],
+        }]
+        with patch("requests.Session.get", return_value=mock_response(data)):
+            result = Sandbox.list_v2(config=make_config())
+
+        mount = result[0]["volumeMounts"][0]
+        assert mount["path"] == "/mnt/ro"
+        assert mount["readOnly"] is True
+        assert "hostPath" not in mount
 
     def test_list_v2_calls_correct_endpoint(self):
         with patch("requests.Session.get", return_value=mock_response([])) as m:
@@ -892,6 +925,26 @@ class TestGetInfo:
         assert info.cpu_count is None
         assert info.metadata == {}
         assert info.state is None
+
+    def test_get_info_includes_volume_mounts(self):
+        sb = make_sandbox()
+        info = {
+            **SANDBOX_DATA,
+            "volumeMounts": [{
+                "name": "hostdir-0",
+                "path": "/mnt/data",
+                "readOnly": True,
+            }],
+        }
+        with patch.object(sb._session, "get", return_value=mock_response(info)):
+            result = sb.get_info()
+
+        mounts = result["volumeMounts"]
+        assert len(mounts) == 1
+        assert mounts[0]["name"] == "hostdir-0"
+        assert mounts[0]["path"] == "/mnt/data"
+        assert mounts[0]["readOnly"] is True
+        assert "hostPath" not in mounts[0]
 
     def test_get_info_not_found(self):
         sb = make_sandbox()
@@ -2512,6 +2565,27 @@ class TestTemplateAPI:
         assert info.name == ""
         assert info.network_type == "tap"
         assert info.allow_internet_access is True
+
+    def test_template_info_from_dict_name_fallback_from_aliases(self):
+        info = TemplateInfo.from_dict({
+            "templateID": "tpl-alias",
+            "aliases": ["my-alias"],
+        })
+        assert info.name == "my-alias"
+
+    def test_build_forwards_name_into_payload(self):
+        body = {"jobID": "job-name", "templateID": "tpl-name", "status": "accepted"}
+        with patch("requests.Session.post", return_value=mock_response(body)) as post:
+            Template.build(image="python:3.11-slim", name="my-alias", config=make_config())
+        sent = post.call_args.kwargs["json"]
+        assert sent["name"] == "my-alias"
+        assert sent["image"] == "python:3.11-slim"
+
+    def test_build_omits_name_when_none(self):
+        body = {"jobID": "j", "templateID": "t", "status": "accepted"}
+        with patch("requests.Session.post", return_value=mock_response(body)) as post:
+            Template.build(image="python:3.11-slim", config=make_config())
+        assert "name" not in post.call_args.kwargs["json"]
 
     def test_template_get_parses_network_fields(self):
         body = {

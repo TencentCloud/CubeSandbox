@@ -1331,6 +1331,19 @@ mod tests {
         let path = Path::new("fifo");
 
         let ret = mknod_dev(&dev, path);
+        // Creating a device node can be denied even for uid 0: CAP_MKNOD may be
+        // dropped, and inside a user namespace mknod(S_IFCHR) is refused
+        // regardless of the capability. Both surface as EPERM, so skip rather
+        // than fail when the environment forbids the operation.
+        if let Err(ref e) = ret {
+            if e.downcast_ref::<nix::Error>() == Some(&nix::Error::EPERM) {
+                println!(
+                    "INFO: skipping {} which needs device-node creation (got EPERM)",
+                    module_path!()
+                );
+                return;
+            }
+        }
         assert!(ret.is_ok(), "Should pass. Got: {:?}", ret);
 
         let ret = stat::stat(path);

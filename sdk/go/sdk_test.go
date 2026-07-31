@@ -937,6 +937,56 @@ func TestSandboxInfoEndAtPresent(t *testing.T) {
 	}
 }
 
+func TestGetInfoDecodesVolumeMounts(t *testing.T) {
+	const sandboxID = "sb-mount-1"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/sandboxes/"+sandboxID {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		fmt.Fprint(w, `{"sandboxID":"sb-mount-1","templateID":"tpl-test","clientID":"client-1","startedAt":"2026-05-14T00:00:00Z","endAt":"2026-05-14T01:00:00Z","envdVersion":"0.0.1","domain":"cube.app","cpuCount":2,"memoryMB":512,"state":"running","volumeMounts":[{"name":"hostdir-0","path":"/mnt/data","readOnly":true}]}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, TemplateID: "tpl-test"})
+	sb := &Sandbox{client: client, SandboxID: sandboxID}
+	info, err := sb.GetInfo(context.Background())
+	if err != nil {
+		t.Fatalf("GetInfo: %v", err)
+	}
+	if len(info.VolumeMounts) != 1 {
+		t.Fatalf("VolumeMounts=%#v want len 1", info.VolumeMounts)
+	}
+	mount := info.VolumeMounts[0]
+	if mount.Name != "hostdir-0" || mount.Path != "/mnt/data" {
+		t.Fatalf("mount=%#v", mount)
+	}
+	if !mount.ReadOnly {
+		t.Fatalf("ReadOnly=%v want true", mount.ReadOnly)
+	}
+}
+
+func TestListDecodesVolumeMounts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/sandboxes" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		fmt.Fprint(w, `[{"sandboxID":"sb-mount-1","templateID":"tpl-test","clientID":"client-1","startedAt":"2026-05-14T00:00:00Z","endAt":"2026-05-14T01:00:00Z","envdVersion":"0.0.1","domain":"cube.app","cpuCount":2,"memoryMB":512,"state":"running","volumeMounts":[{"name":"hostdir-0","path":"/mnt/data","readOnly":true}]}]`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, TemplateID: "tpl-test"})
+	list, err := client.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 || len(list[0].VolumeMounts) != 1 {
+		t.Fatalf("List=%#v", list)
+	}
+	if list[0].VolumeMounts[0].Path != "/mnt/data" {
+		t.Fatalf("mount=%#v", list[0].VolumeMounts[0])
+	}
+}
+
 func serverHostPort(t *testing.T, rawURL string) (string, int) {
 	t.Helper()
 	parsed, err := url.Parse(rawURL)
@@ -1463,6 +1513,97 @@ func TestGetTemplateParsesNetworkFields(t *testing.T) {
 	}
 	if info.AllowInternetAccess == nil || *info.AllowInternetAccess {
 		t.Fatalf("AllowInternetAccess=%#v, want false", info.AllowInternetAccess)
+	}
+}
+
+func TestBuildTemplateForwardsName(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/templates" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprint(w, `{"jobID":"job-name","templateID":"tpl-name","status":"accepted"}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	if _, err := client.BuildTemplate(context.Background(), BuildTemplateOptions{
+		Image: "python:3.11-slim",
+		Name:  "my-alias",
+	}); err != nil {
+		t.Fatalf("BuildTemplate returned error: %v", err)
+	}
+	assertString(t, got, "name", "my-alias")
+	assertString(t, got, "image", "python:3.11-slim")
+}
+
+func TestBuildTemplateOmitsNameWhenBlank(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprint(w, `{"jobID":"j","templateID":"t","status":"accepted"}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	if _, err := client.BuildTemplate(context.Background(), BuildTemplateOptions{
+		Image: "python:3.11-slim",
+		Name:  "   ",
+	}); err != nil {
+		t.Fatalf("BuildTemplate returned error: %v", err)
+	}
+	if _, ok := got["name"]; ok {
+		t.Fatalf("name should be omitted when blank: %#v", got)
+	}
+}
+
+func TestGetTemplateDerivesNameFromAliases(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/templates/tpl-alias" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{
+			"templateID":"tpl-alias",
+			"aliases":["my-alias"],
+			"status":"READY"
+		}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	info, err := client.GetTemplate(context.Background(), "tpl-alias")
+	if err != nil {
+		t.Fatalf("GetTemplate returned error: %v", err)
+	}
+	if info.Name != "my-alias" {
+		t.Fatalf("Name=%q, want my-alias", info.Name)
+	}
+}
+
+func TestGetTemplateFallsBackToFirstAliasForName(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"templateID":"tpl-fb","aliases":["fallback-alias"],"status":"READY"}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	info, err := client.GetTemplate(context.Background(), "tpl-fb")
+	if err != nil {
+		t.Fatalf("GetTemplate returned error: %v", err)
+	}
+	if info.Name != "fallback-alias" {
+		t.Fatalf("Name=%q, want fallback-alias (from aliases[0])", info.Name)
 	}
 }
 

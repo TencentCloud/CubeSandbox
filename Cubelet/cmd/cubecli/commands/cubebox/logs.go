@@ -14,8 +14,12 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
 	"github.com/urfave/cli/v2"
+
+	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/sandboxid"
 )
 
 const (
@@ -127,16 +131,28 @@ var LogsCommand = &cli.Command{
 			return readLog(id, stream, all, tailN, headN)
 		}
 
+		// Resolve short sandbox ID prefix to full 32-char ID before re-exec
+		// so the child process can locate the log directory directly.
+		originalID := id
+		if !sandboxid.IsFullID(id) {
+			resolved, err := resolveLogsSandboxID(cliCtx, id)
+			if err != nil {
+				return err
+			}
+			id = resolved
+		}
+
 		// Re-exec with CUBEMNT=1 so the C constructor enters the cubelet mount
 		// namespace before Go runtime starts (single-threaded at that point).
-		// Pass os.Args[1:] directly so flag parsing is handled by the CLI
-		// framework in the child, avoiding fragile manual flag reconstruction.
+		// Substitute the resolved full ID for the user-supplied value so the
+		// child process uses the canonical ID directly.
 		self, err := os.Executable()
 		if err != nil {
 			return fmt.Errorf("cannot determine executable path: %w", err)
 		}
 
-		cmd := exec.Command(self, os.Args[1:]...)
+		childArgs := replacePositionalArg(os.Args[1:], originalID, id)
+		cmd := exec.Command(self, childArgs...)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -261,6 +277,42 @@ func printTail(r io.Reader, logPath string, n int) error {
 		fmt.Println(buf[(start+i)%n])
 	}
 	return nil
+}
+
+// resolveLogsSandboxID resolves a short sandbox ID prefix to the full 32-char
+// ID by listing all sandboxes via the Cubelet gRPC API.
+func resolveLogsSandboxID(cliCtx *cli.Context, id string) (string, error) {
+	conn, ctx, cancel, err := commands.NewGrpcConn(cliCtx)
+	if err != nil {
+		return "", fmt.Errorf("resolve sandbox id: %w", err)
+	}
+	defer conn.Close()
+	defer cancel()
+
+	client := cubebox.NewCubeboxMgrClient(conn)
+	resp, err := client.List(ctx, &cubebox.ListCubeSandboxRequest{})
+	if err != nil {
+		return "", fmt.Errorf("resolve sandbox id: list sandboxes: %w", err)
+	}
+	return resolveSandboxIDFromList(resp.Items, id)
+}
+
+// replacePositionalArg returns a copy of args with the last occurrence of old
+// replaced by new.  Searching from the end is preferred because positional
+// arguments typically follow flags.
+func replacePositionalArg(args []string, old, new string) []string {
+	if old == new {
+		return args
+	}
+	out := make([]string, len(args))
+	copy(out, args)
+	for i := len(out) - 1; i >= 0; i-- {
+		if out[i] == old {
+			out[i] = new
+			break
+		}
+	}
+	return out
 }
 
 // readTemplateLog reads log files from /data/log/template/<templateID>_0/.

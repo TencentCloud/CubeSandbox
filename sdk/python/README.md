@@ -241,7 +241,7 @@ them into a sandbox via `Sandbox.create(volume_mounts={...})` (e2b mapping). Dat
 across sandbox restarts and can be shared between sandboxes.
 
 ```python
-from cubesandbox import Sandbox, Volume
+from cubesandbox import Sandbox, Volume, VolumeMount
 
 # Create a volume — name is optional (server generates a UUID when omitted).
 # Omitting driver is e2b-compatible: NO driver is sent, so the backend uses its
@@ -258,6 +258,11 @@ with Sandbox.create(
     print(sb.files.read("/workspace/note.txt"))
 
 # The value can be a Volume, a VolumeInfo, or a bare volume_id string.
+# Wrap a value to make only this sandbox attachment read-only. Plain values remain read-write and e2b-compatible.
+with Sandbox.create(
+    volume_mounts={"/dataset": VolumeMount(vol, read_only=True)},
+) as sb:
+    print(sb.files.read("/dataset/note.txt"))
 
 # List / get_info / connect / destroy
 for v in Volume.list():                 # list[VolumeInfo] (token always "")
@@ -266,6 +271,8 @@ Volume.get_info(vol.volume_id)          # -> VolumeInfo (with token)
 vol = Volume.connect(vol.volume_id)     # -> live Volume instance
 Volume.destroy(vol.volume_id)           # -> bool; kill any mounting sandbox first (no auto-detach)
 ```
+
+The access mode is selected per sandbox attachment. The same Volume can be read-write in one sandbox and read-only in another; existing e2b-shaped calls remain unchanged.
 
 Volume `name` must match `^[a-zA-Z0-9_-]+$` and be at most 128 characters;
 invalid names raise `ValueError` before any network call. See
@@ -356,10 +363,7 @@ with Sandbox.create(config=cfg) as sb:
 | `Volume.get_info(volume_id, *, config)` | `GET /volumes/:id` — get one volume's info (with token) → `VolumeInfo` |
 | `Volume.destroy(volume_id, *, config)` | `DELETE /volumes/:id` — delete a volume → `bool` |
 
-Mount a volume into a sandbox with `Sandbox.create(volume_mounts={path: vol})`.
-`Volume.create` / `connect` return a live `Volume` instance; `list` / `get_info`
-return `VolumeInfo`. Both expose `.volume_id`, `.name`, `.token`. Full reference:
-[`docs/volume.md`](docs/volume.md).
+Mount a volume into a sandbox with `Sandbox.create(volume_mounts={path: vol})`. Use `VolumeMount(vol, read_only=True)` for a read-only attachment; this does not turn the volume into an immutable snapshot. `Volume.create` / `connect` return a live `Volume` instance; `list` / `get_info` return `VolumeInfo`. Both expose `.volume_id`, `.name`, `.token`. Full reference: [`docs/volume.md`](docs/volume.md).
 
 ### `Execution` object
 

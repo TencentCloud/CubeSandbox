@@ -36,6 +36,17 @@ mysql:
   password: "replace-me-mysql-password"
   rootPassword: "replace-me-mysql-root-password"
   # host: "mysql.example.com"   # optional: skip built-in StatefulSet
+#
+# External PostgreSQL instead of MySQL (skips built-in MySQL; CubeMaster gets
+# driver: postgres). Switch the driver and fill in the postgres section:
+# database:
+#   driver: postgres
+# postgres:
+#   host: "10.0.0.10"
+#   port: 5432
+#   user: postgres
+#   password: "replace-me-pg-password"
+#   database: cube_mvp
 redis:
   host: ""
   password: "replace-me-redis-password"

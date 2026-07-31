@@ -237,14 +237,21 @@ class Sandbox:
                 are killed).
             volume_mounts: Optional dict mapping mount paths to volumes
                 (e2b-compatible). Key is the sandbox mount path, value is a
-                :class:`~cubesandbox.Volume` instance (or a plain ``volumeID``
-                string)::
+                :class:`~cubesandbox.Volume`,
+                :class:`~cubesandbox.VolumeInfo`, or plain ``volumeID`` string.
+                Wrap any of those in :class:`~cubesandbox.VolumeMount` to set
+                Cube-specific attachment options such as ``read_only``::
 
                     Sandbox.create(volume_mounts={"/workspace": vol})
                     Sandbox.create(volume_mounts={"/workspace": "vol-123"})
+                    Sandbox.create(
+                        volume_mounts={"/dataset": VolumeMount(vol, read_only=True)}
+                    )
 
                 Each value must resolve to an existing ``volumeID`` created via
-                :meth:`cubesandbox.Volume.create`.
+                :meth:`cubesandbox.Volume.create`. ``read_only`` applies to this
+                sandbox attachment; it does not make the volume an immutable
+                snapshot.
             config: SDK config. Uses default (env-based) config if omitted.
 
         Returns:

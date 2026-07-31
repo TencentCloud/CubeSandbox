@@ -8,7 +8,7 @@
 沙箱之间共享。
 
 ```python
-from cubesandbox import Sandbox, Volume
+from cubesandbox import Sandbox, Volume, VolumeMount
 ```
 
 `Volume` 的方法均为**类方法**——无需手动实例化即可调用。对齐 e2b：`create` 与
@@ -82,7 +82,7 @@ from cubesandbox import Sandbox, Volume
 | `.name` | `str` | 显示名称。 |
 | `.token` | `str` | 插件签发的 token。`create` / `get_info` 时填充；**`list` 时恒为空串**。 |
 
-### 挂载
+### 挂载与按沙箱访问模式
 
 传入一个 mount 路径到卷的映射（e2b 兼容）：
 
@@ -91,7 +91,22 @@ Sandbox.create(volume_mounts={"/workspace": vol})
 Sandbox.create(volume_mounts={"/workspace": "vol-xxx"})
 ```
 
-每个值必须能解析为已存在的 `volume_id`。
+每个值可以是 `Volume`、`VolumeInfo` 或 `volume_id` 字符串，且必须能解析为已存在的卷。原有 e2b 风格写法继续保持读写挂载。
+
+若只想把某次沙箱挂载设为只读，用 `VolumeMount` 包装对应值：
+
+```python
+from cubesandbox import Sandbox, VolumeMount
+
+Sandbox.create(
+    volume_mounts={
+        "/dataset": VolumeMount(vol, read_only=True),
+        "/workspace": workspace_vol,
+    }
+)
+```
+
+`read_only` 仅表示该挂载点以只读方式挂载。只会禁止当前沙箱经由该挂载点写入或修改文件，不会生成不可变快照。同一个 Volume 可以同时在不同沙箱中以不同权限挂载，例如在沙箱 A 中读写，在沙箱 B 中只读。
 
 ---
 
@@ -201,3 +216,4 @@ except ApiError as e:
 - **`list` 不返回 token。** token 仅在 `create` 和 `get_info` 时暴露；需要 token 时请调用
   `Volume.get_info(volume_id)`。
 - **`name` 可选。** 省略时服务端分配一个 UUID，该 UUID 同时用作 `volume_id` 和 `name`。
+- **只读是单次挂载属性。** 在创建沙箱时使用 `VolumeMount(volume, read_only=True)`；创建 `Volume` 本身的接口不变。

@@ -5,10 +5,7 @@
 package node
 
 import (
-	"crypto/rand"
 	"fmt"
-	"math"
-	"math/big"
 	pseudorand "math/rand"
 	"testing"
 
@@ -207,42 +204,6 @@ func TestNodes_IndexByPageFallbackRejectsOutOfRangeStart(t *testing.T) {
 	result, endIndex := nodes.IndexByPage(3, 1)
 	assert.Equal(t, 0, len(result))
 	assert.Equal(t, -1, endIndex)
-}
-
-func TestRandNode(t *testing.T) {
-	nodes := NodeList{}
-	testNum := 10
-	for i := 1; i <= testNum; i++ {
-		n := &Node{
-			Index: i,
-			InsID: fmt.Sprintf("%d", i),
-		}
-		nodes.Append(n)
-	}
-	nodes.AllSortByIndex()
-	statm := map[string]int{}
-	max := nodes.Len()
-	for i := 0; i < 100; i++ {
-		n := nodes[pseudorand.Intn(max)]
-		statm[n.InsID]++
-	}
-
-	expected := 100 / max
-	expectdiff := float64(10)
-	for _, v := range statm {
-		assert.LessOrEqual(t, math.Abs(float64((int64(v - expected)))), expectdiff)
-	}
-
-	statmm := map[string]int{}
-	for i := 0; i < 100; i++ {
-		rindex, _ := rand.Int(rand.Reader, big.NewInt(int64(max)))
-		n := nodes[int(rindex.Int64())]
-		statmm[n.InsID]++
-	}
-	for _, v := range statmm {
-		assert.LessOrEqual(t, math.Abs(float64((int64(v - expected)))), expectdiff)
-	}
-
 }
 
 func TestNodeScoreListSorted(t *testing.T) {

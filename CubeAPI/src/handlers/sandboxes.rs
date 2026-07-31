@@ -23,6 +23,15 @@ use crate::{
 
 // ─── GET /sandboxes ───────────────────────────────────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/sandboxes",
+    params(ListSandboxesQuery),
+    responses(
+        (status = 200, description = "Sandbox list", body = [crate::models::ListedSandbox]),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
 pub async fn list_sandboxes(
     State(state): State<AppState>,
     Query(params): Query<ListSandboxesQuery>,
@@ -156,6 +165,16 @@ pub async fn get_sandbox(
 
 // ─── POST /sandboxes ──────────────────────────────────────────────────────────
 
+#[utoipa::path(
+    post,
+    path = "/sandboxes",
+    request_body = NewSandbox,
+    responses(
+        (status = 201, description = "Sandbox created", body = Sandbox),
+        (status = 400, description = "Invalid request", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
 pub async fn create_sandbox(
     State(state): State<AppState>,
     Json(body): Json<NewSandbox>,
@@ -318,6 +337,19 @@ pub async fn resume_sandbox(
 
 // ─── POST /sandboxes/:sandboxID/connect ───────────────────────────────────────
 
+#[utoipa::path(
+    post,
+    path = "/sandboxes/{sandboxID}/connect",
+    params(
+        ("sandboxID" = String, Path, description = "Sandbox identifier")
+    ),
+    request_body = ConnectSandbox,
+    responses(
+        (status = 200, description = "Sandbox connection info", body = Sandbox),
+        (status = 404, description = "Sandbox not found", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
 pub async fn connect_sandbox(
     State(state): State<AppState>,
     Path(sandbox_id): Path<String>,
@@ -343,6 +375,19 @@ pub async fn connect_sandbox(
 
 // ─── GET /sandboxes/:sandboxID/logs ───────────────────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/sandboxes/{sandboxID}/logs",
+    params(
+        ("sandboxID" = String, Path, description = "Sandbox identifier"),
+        SandboxLogsQuery
+    ),
+    responses(
+        (status = 200, description = "Sandbox logs (legacy shape)", body = crate::models::SandboxLogs),
+        (status = 404, description = "Sandbox not found", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
 pub async fn get_sandbox_logs(
     State(state): State<AppState>,
     Path(sandbox_id): Path<String>,
@@ -424,6 +469,20 @@ pub async fn get_sandbox_logs_v2(
 
 // ─── POST /sandboxes/:sandboxID/timeout ───────────────────────────────────────
 
+#[utoipa::path(
+    post,
+    path = "/sandboxes/{sandboxID}/timeout",
+    params(
+        ("sandboxID" = String, Path, description = "Sandbox identifier")
+    ),
+    request_body = SetTimeoutRequest,
+    responses(
+        (status = 204, description = "Timeout updated"),
+        (status = 400, description = "Invalid timeout value", body = ApiError),
+        (status = 404, description = "Sandbox not found", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
 pub async fn set_sandbox_timeout(
     State(state): State<AppState>,
     Path(sandbox_id): Path<String>,
@@ -462,6 +521,20 @@ pub async fn set_sandbox_timeout(
 
 // ─── POST /sandboxes/:sandboxID/refreshes ─────────────────────────────────────
 
+#[utoipa::path(
+    post,
+    path = "/sandboxes/{sandboxID}/refreshes",
+    params(
+        ("sandboxID" = String, Path, description = "Sandbox identifier")
+    ),
+    request_body = RefreshRequest,
+    responses(
+        (status = 204, description = "Sandbox refreshed"),
+        (status = 400, description = "Invalid duration value", body = ApiError),
+        (status = 404, description = "Sandbox not found", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
 pub async fn refresh_sandbox(
     State(state): State<AppState>,
     Path(sandbox_id): Path<String>,

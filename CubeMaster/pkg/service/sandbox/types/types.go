@@ -539,19 +539,20 @@ type ListCubeSandboxRes struct {
 }
 
 type SandboxBriefData struct {
-	SandboxID   string            `json:"sandbox_id,omitempty"`
-	Status      int32             `json:"status,omitempty"`
-	HostID      string            `json:"host_id,omitempty"`
-	HostIP      string            `json:"host_ip,omitempty"`
-	TemplateID  string            `json:"template_id,omitempty"`
-	CpuCount    int32             `json:"cpu_count,omitempty"`
-	MemoryMB    int32             `json:"memory_mb,omitempty"`
-	Annotations map[string]string `json:"annotations,omitempty"`
-	Labels      map[string]string `json:"labels,omitempty"`
-	NameSpace   string            `json:"namespace,omitempty"`
-	CreateAt    int64             `json:"create_at,omitempty"`
-	PauseAt     int64             `json:"pause_at,omitempty"`
-	EndAt       int64             `json:"end_at,omitempty"`
+	SandboxID    string             `json:"sandbox_id,omitempty"`
+	Status       int32              `json:"status,omitempty"`
+	HostID       string             `json:"host_id,omitempty"`
+	HostIP       string             `json:"host_ip,omitempty"`
+	TemplateID   string             `json:"template_id,omitempty"`
+	CpuCount     int32              `json:"cpu_count,omitempty"`
+	MemoryMB     int32              `json:"memory_mb,omitempty"`
+	Annotations  map[string]string  `json:"annotations,omitempty"`
+	Labels       map[string]string  `json:"labels,omitempty"`
+	NameSpace    string             `json:"namespace,omitempty"`
+	CreateAt     int64              `json:"create_at,omitempty"`
+	PauseAt      int64              `json:"pause_at,omitempty"`
+	EndAt        int64              `json:"end_at,omitempty"`
+	VolumeMounts []*VolumeMountInfo `json:"volume_mounts,omitempty"`
 }
 
 type GetCubeSandboxReq struct {
@@ -569,20 +570,28 @@ type GetCubeSandboxRes struct {
 }
 
 type SandboxData struct {
-	SandboxID              string            `json:"sandbox_id,omitempty"`
-	Status                 int32             `json:"status,omitempty"`
-	HostID                 string            `json:"host_id,omitempty"`
-	HostIP                 string            `json:"host_ip,omitempty"`
-	SandboxIP              string            `json:"sandbox_ip,omitempty"`
-	TemplateID             string            `json:"template_id,omitempty"`
-	Annotations            map[string]string `json:"annotations,omitempty"`
-	Labels                 map[string]string `json:"labels,omitempty"`
-	Containers             []*ContainerInfo  `json:"containers,omitempty"`
-	NameSpace              string            `json:"namespace,omitempty"`
-	ExposedPortEndpoint    string            `json:"exposed_port_endpoint,omitempty"`
-	ExposedPortMode        string            `json:"exposed_port_mode,omitempty"`
-	RequestedContainerPort int32             `json:"requested_container_port,omitempty"`
-	EndAt                  int64             `json:"end_at,omitempty"`
+	SandboxID              string             `json:"sandbox_id,omitempty"`
+	Status                 int32              `json:"status,omitempty"`
+	HostID                 string             `json:"host_id,omitempty"`
+	HostIP                 string             `json:"host_ip,omitempty"`
+	SandboxIP              string             `json:"sandbox_ip,omitempty"`
+	TemplateID             string             `json:"template_id,omitempty"`
+	Annotations            map[string]string  `json:"annotations,omitempty"`
+	Labels                 map[string]string  `json:"labels,omitempty"`
+	Containers             []*ContainerInfo   `json:"containers,omitempty"`
+	NameSpace              string             `json:"namespace,omitempty"`
+	ExposedPortEndpoint    string             `json:"exposed_port_endpoint,omitempty"`
+	ExposedPortMode        string             `json:"exposed_port_mode,omitempty"`
+	RequestedContainerPort int32              `json:"requested_container_port,omitempty"`
+	EndAt                  int64              `json:"end_at,omitempty"`
+	VolumeMounts           []*VolumeMountInfo `json:"volume_mounts,omitempty"`
+}
+
+// VolumeMountInfo is one container volume mount exposed in sandbox info/list APIs.
+type VolumeMountInfo struct {
+	Name          string `json:"name,omitempty"`
+	ContainerPath string `json:"container_path,omitempty"`
+	Readonly      bool   `json:"readonly,omitempty"`
 }
 
 type ContainerInfo struct {

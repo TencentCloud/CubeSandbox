@@ -7,10 +7,24 @@ package cube
 import (
 	"fmt"
 	"os"
-	"path/filepath"
+	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 )
+
+const knownSandboxTestID = "0123456789abcdef0123456789abcdef"
+
+func registerKnownSandboxTestID(t *testing.T) {
+	t.Helper()
+	localcache.SetSandboxCache(knownSandboxTestID, &localcache.SandboxCache{
+		SandboxID: knownSandboxTestID,
+		HostIP:    "10.0.0.1",
+	})
+	t.Cleanup(func() {
+		localcache.DeleteSandboxCache(knownSandboxTestID)
+	})
+}
 
 // minimalTestConfig is a bare-minimum configuration that passes validate().
 // It is written to disk on demand so that tests which require a non-nil
@@ -31,23 +45,20 @@ scheduler:
 `
 
 func init() {
-	mydir, err := os.Getwd()
-	if err != nil {
-		panic(err)
-	}
-	fmt.Printf("mydir=%s\n", mydir)
 	if os.Getenv("CUBE_MASTER_CONFIG_PATH") == "" {
-		cfgPath := filepath.Clean(filepath.Join(mydir, "../../../../test/conf.yaml"))
-		os.Setenv("CUBE_MASTER_CONFIG_PATH", cfgPath)
-		// Create a minimal config file on the fly so that config.Init()
-		// succeeds regardless of whether a fixture file was checked in.
-		if _, statErr := os.Stat(cfgPath); os.IsNotExist(statErr) {
-			if err := os.MkdirAll(filepath.Dir(cfgPath), 0755); err != nil {
-				panic(fmt.Sprintf("cannot create test config dir: %v", err))
-			}
-			if err := os.WriteFile(cfgPath, []byte(minimalTestConfig), 0644); err != nil {
-				panic(fmt.Sprintf("cannot write test config: %v", err))
-			}
+		file, err := os.CreateTemp("", "cubemaster-test-conf-*.yaml")
+		if err != nil {
+			panic(fmt.Sprintf("cannot create test config: %v", err))
+		}
+		if _, err := file.WriteString(minimalTestConfig); err != nil {
+			_ = file.Close()
+			panic(fmt.Sprintf("cannot write test config: %v", err))
+		}
+		if err := file.Close(); err != nil {
+			panic(fmt.Sprintf("cannot close test config: %v", err))
+		}
+		if err := os.Setenv("CUBE_MASTER_CONFIG_PATH", file.Name()); err != nil {
+			panic(fmt.Sprintf("cannot set test config path: %v", err))
 		}
 	}
 	config.Init()

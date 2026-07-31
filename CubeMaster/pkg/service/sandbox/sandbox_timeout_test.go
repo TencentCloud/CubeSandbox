@@ -48,6 +48,53 @@ func TestSetTimeoutValidationRejectsNegative(t *testing.T) {
 	}
 }
 
+func TestRefreshValidationRejectsNonPositiveDuration(t *testing.T) {
+	for _, duration := range []int32{0, -1} {
+		rsp := Refresh(context.Background(), &types.RefreshSandboxRequest{
+			RequestID: "req-invalid-duration",
+			SandboxID: "sandbox-does-not-need-resolution",
+			Duration:  duration,
+		})
+
+		if rsp.Ret.RetCode != int(errorcode.ErrorCode_MasterParamsError) {
+			t.Fatalf("duration=%d should be rejected as params error, got ret=%+v", duration, rsp.Ret)
+		}
+	}
+}
+
+func TestTimeoutValidationPrecedesSandboxIDResolution(t *testing.T) {
+	const unresolvedSandboxID = " "
+	ctx := context.Background()
+	// A whitespace-only ID passes the initial non-empty check, but normalization
+	// deterministically rejects it before consulting cache or cluster state.
+
+	t.Run("set timeout", func(t *testing.T) {
+		rsp := SetTimeout(ctx, &types.SetTimeoutRequest{
+			RequestID: "req-invalid-timeout-and-sandbox-id",
+			SandboxID: unresolvedSandboxID,
+			Timeout:   -2,
+		})
+
+		if rsp.Ret.RetCode != int(errorcode.ErrorCode_MasterParamsError) ||
+			rsp.Ret.RetMsg != "timeout must be >= -1 (use -1 for never timeout)" {
+			t.Fatalf("timeout validation should take precedence, got ret=%+v", rsp.Ret)
+		}
+	})
+
+	t.Run("refresh", func(t *testing.T) {
+		rsp := Refresh(ctx, &types.RefreshSandboxRequest{
+			RequestID: "req-invalid-duration-and-sandbox-id",
+			SandboxID: unresolvedSandboxID,
+			Duration:  0,
+		})
+
+		if rsp.Ret.RetCode != int(errorcode.ErrorCode_MasterParamsError) ||
+			rsp.Ret.RetMsg != "duration must be positive (seconds)" {
+			t.Fatalf("duration validation should take precedence, got ret=%+v", rsp.Ret)
+		}
+	})
+}
+
 func TestSetTimeoutValidationAllowsNeverTimeout(t *testing.T) {
 	const sandboxID = "sb-timeout-never-validation"
 	localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{

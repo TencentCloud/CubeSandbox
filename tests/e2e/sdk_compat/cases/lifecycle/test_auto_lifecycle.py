@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from framework.assertions import assert_code_ok, assert_command_ok
@@ -63,6 +65,24 @@ def _assert_manual_pause_survives_lifecycle_timeout(
 
     assert fetch_state(adapter) == "paused"
     assert sandbox_listed(adapter.sandbox_id, backend, config) is True
+
+
+def _assert_sandbox_unlisted(sandbox_id, backend, config) -> None:
+    observed = sandbox_listed(sandbox_id, backend, config)
+    if observed is None:
+        pytest.skip(f"backend {backend!r} does not expose a reliable sandbox list API")
+
+    deadline = time.monotonic() + config.platform_lifecycle_poll_timeout
+    while time.monotonic() < deadline:
+        observed = sandbox_listed(sandbox_id, backend, config)
+        if observed is False:
+            return
+        time.sleep(1)
+
+    raise AssertionError(
+        f"sandbox {sandbox_id} was not absent from the list within "
+        f"{config.platform_lifecycle_poll_timeout}s (last observed={observed!r})"
+    )
 
 
 @pytest.mark.requires_capability(RUN_CODE)
@@ -224,19 +244,40 @@ def test_manual_pause_before_auto_pause_timeout_remains_paused(
 
 @pytest.mark.requires_capability(PAUSE_RESUME)
 @pytest.mark.requires_capability(PLATFORM_LIFECYCLE)
+# sdk_sandbox injects timeout=platform_lifecycle_idle_timeout for requires_cubeproxy tests.
 @pytest.mark.sandbox_create_options(lifecycle={"on_timeout": "kill"})
-def test_manual_pause_before_auto_kill_timeout_remains_paused(
+def test_manual_pause_before_auto_kill_timeout_is_deleted(
     sdk_sandbox,
     sdk_backend,
     sdk_e2e_config,
 ):
-    # TODO: Once auto-kill supports deleting explicitly paused sandboxes,
-    # change this regression to expect a terminal state and an absent listing.
-    _assert_manual_pause_survives_lifecycle_timeout(
+    sandbox_id = sdk_sandbox.sandbox_id
+
+    result = sdk_sandbox.run_command(
+        "printf manual-pause-before-auto-kill",
+        timeout=sdk_e2e_config.command_timeout,
+    )
+    assert_command_ok(result)
+
+    sdk_sandbox.pause(timeout=sdk_e2e_config.default_timeout)
+    assert wait_until_paused(sdk_sandbox, timeout=sdk_e2e_config.default_timeout) == "paused"
+
+    idle_past_timeout(
+        sdk_e2e_config.platform_lifecycle_idle_timeout,
+        margin=sdk_e2e_config.platform_lifecycle_wait_margin,
+    )
+
+    destroyed, details = wait_for_platform_destroy(
         sdk_sandbox,
+        sandbox_id,
         sdk_backend,
         sdk_e2e_config,
     )
+    assert destroyed, (
+        "manual pause before auto-kill timeout must destroy the sandbox; "
+        f"{PLATFORM_LIFECYCLE_SKIP_REASON}; last_observed={details!r}"
+    )
+    _assert_sandbox_unlisted(sandbox_id, sdk_backend, sdk_e2e_config)
 
 
 @pytest.mark.sandbox_create_options(lifecycle={"on_timeout": "kill"})

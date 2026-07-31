@@ -319,18 +319,37 @@ func (localCache *LocalCache) errStrategy() {
 }
 
 func (localCache *LocalCache) saveFile(file string) {
+	snapshot := cache.New(0, 0)
 	for key, item := range localCache.cache.Items() {
-		element := item.Object.(*list.Element)
-		itm := element.Value.(*util.CacheValue)
-		localCache.cache.Set(key, itm, -1)
+		var itm *util.CacheValue
+		switch value := item.Object.(type) {
+		case *list.Element:
+			var ok bool
+			itm, ok = value.Value.(*util.CacheValue)
+			if !ok {
+				CubeLog.Errorf("Cache(%s) cannot persist key %s: list element contains %T", localCache.name, key, value.Value)
+				continue
+			}
+		case *util.CacheValue:
+			itm = value
+		default:
+			CubeLog.Errorf("Cache(%s) cannot persist key %s: unsupported value type %T", localCache.name, key, item.Object)
+			continue
+		}
+		snapshot.Set(key, itm, -1)
 	}
 
-	_ = localCache.cache.SaveFile(file)
+	if err := snapshot.SaveFile(file); err != nil {
+		CubeLog.Errorf("Cache(%s) failed to save cache file %s: %v", localCache.name, file, err)
+	}
 }
 
 func (localCache *LocalCache) loadFile(file string) {
 	gob.Register(&util.CacheValue{})
-	_ = localCache.cache.LoadFile(file)
+	if err := localCache.cache.LoadFile(file); err != nil {
+		CubeLog.Errorf("Cache(%s) failed to load cache file %s: %v", localCache.name, file, err)
+		return
+	}
 	for key, item := range localCache.cache.Items() {
 		cacheValue := item.Object.(*util.CacheValue)
 		atomic.AddInt64(&localCache.curCacheSize, cacheValue.Size())

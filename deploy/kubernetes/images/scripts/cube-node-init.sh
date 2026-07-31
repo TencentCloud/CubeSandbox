@@ -22,6 +22,7 @@ CUBE_MASTER_ENDPOINT="${CUBE_MASTER_ENDPOINT:-cube-master.cube-system.svc.cluste
 CHECK_MEMORY="${CHECK_MEMORY:-true}"
 MIN_MEMORY_KB="${MIN_MEMORY_KB:-7500000}"
 CHECK_CGROUP_CPU="${CHECK_CGROUP_CPU:-true}"
+CHECK_BPF_FS="${CHECK_BPF_FS:-true}"
 CHECK_GLIBC="${CHECK_GLIBC:-true}"
 CHECK_CIDR="${CHECK_CIDR:-true}"
 CHECK_CUBECOW_DEPS="${CHECK_CUBECOW_DEPS:-true}"
@@ -121,6 +122,19 @@ check_cgroup_cpu() {
     return 0
   fi
   fail "failed to enable cgroup v2 cpu controller on /sys/fs/cgroup/cgroup.subtree_control"
+}
+
+check_bpf_fs() {
+  [ "$CHECK_BPF_FS" = "true" ] || return 0
+
+  grep -qw bpf /proc/filesystems \
+    || fail "host kernel does not support the bpf filesystem"
+
+  bpf_fs_type="$(host_mount_sh "df -T /sys/fs/bpf 2>/dev/null | awk 'NR == 2 { print \$2; exit }'" || true)"
+  [ "$bpf_fs_type" = "bpf" ] \
+    || fail "host /sys/fs/bpf is not mounted as a bpf filesystem (type: ${bpf_fs_type:-unknown})"
+
+  log "host bpffs check passed"
 }
 
 ip_to_int() {
@@ -307,6 +321,7 @@ check_pvm_consistency() {
 check_memory
 check_glibc
 check_cgroup_cpu
+check_bpf_fs
 check_cidr_conflict
 check_cubecow_deps
 

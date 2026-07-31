@@ -41,6 +41,8 @@ jobs:
         run: sh deploy/kubernetes/chart/scripts/test-master-recreate-strategy-guard.sh
       - name: Guard cluster-scoped resource names
         run: sh deploy/kubernetes/chart/scripts/test-cluster-resource-names.sh
+      - name: Guard database.driver postgres path
+        run: sh deploy/kubernetes/chart/scripts/test-database-postgres-guard.sh
       - name: Check startup-gate shell syntax
         run: |
           sh -n deploy/kubernetes/images/scripts/node-prep-lib.sh

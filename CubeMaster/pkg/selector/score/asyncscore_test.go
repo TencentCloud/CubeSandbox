@@ -12,6 +12,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 )
 
@@ -22,9 +23,37 @@ func init() {
 	}
 	fmt.Printf("mydir=%s\n", mydir)
 	if os.Getenv("CUBE_MASTER_CONFIG_PATH") == "" {
-		os.Setenv("CUBE_MASTER_CONFIG_PATH", filepath.Clean(filepath.Join(mydir, "../../../test/conf.yaml")))
+		os.Setenv("CUBE_MASTER_CONFIG_PATH", filepath.Clean(filepath.Join(mydir, "../../../conf.yaml")))
 	}
 	config.Init()
+	if cfg := config.GetConfig(); cfg.Scheduler.Score == nil {
+		cfg.Scheduler.Score = &config.SchedulerScoreConf{
+			ResourceWeights: map[string]float64{
+				constants.WeightFactorMvmNum:            1,
+				constants.WeightFactorQuotaCpu:          1,
+				constants.WeightFactorQuotaMem:          1,
+				constants.WeightFactorCpuUtil:           1,
+				constants.WeightFactorMemUsage:          1,
+				constants.WeightFactorCpuLoadUsage:      1,
+				constants.WeightFactorRealTimeCreateNum: 1,
+				constants.WeightFactorLocalCreateNum:    1,
+			},
+			ScorePluginConf: config.ScorePluginConf{
+				MultiFactorWeightedAverage: &config.MultiFactorWeightedAverage{
+					EnableWeightFactors: []string{
+						constants.WeightFactorMvmNum,
+						constants.WeightFactorQuotaCpu,
+						constants.WeightFactorQuotaMem,
+						constants.WeightFactorCpuUtil,
+						constants.WeightFactorMemUsage,
+						constants.WeightFactorCpuLoadUsage,
+						constants.WeightFactorRealTimeCreateNum,
+						constants.WeightFactorLocalCreateNum,
+					},
+				},
+			},
+		}
+	}
 }
 
 func TestGetMultiFactorWeightedAverageScore(t *testing.T) {
