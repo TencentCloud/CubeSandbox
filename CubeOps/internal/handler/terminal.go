@@ -39,10 +39,13 @@ import (
 )
 
 const (
-	terminalSubprotocol     = "cube-terminal"
-	terminalMaxFrame        = 64 * 1024
-	terminalIdleTimeout     = 30 * time.Minute
-	terminalWriteTimeout    = 10 * time.Second
+	terminalSubprotocol  = "cube-terminal"
+	terminalMaxFrame     = 64 * 1024
+	terminalIdleTimeout  = 30 * time.Minute
+	terminalWriteTimeout = 10 * time.Second
+	// terminalPingInterval must stay well below terminalIdleTimeout so several
+	// pings are attempted before a healthy-but-quiet session could time out.
+	terminalPingInterval    = 30 * time.Second
 	terminalMaxCols         = 512
 	terminalMaxRows         = 256
 	terminalMaxPerSandbox   = 4
@@ -137,7 +140,11 @@ func (th *TerminalHandler) Handle(c *gin.Context) {
 		writeJSON(map[string]any{"type": "error", "message": msg})
 	}
 
-	// First frame must open the session and (if it names one) agree with the URL.
+	// First frame must open the session and name the same sandbox as the URL.
+	// The check is unconditional: an omitted sandboxId used to skip it, which
+	// left the frame's agreement with the path optional and made the contract
+	// ambiguous to audit. Only the URL parameter is ever passed to OpenPTY, so
+	// the frame is a cross-check rather than a source of truth.
 	_, raw, err := conn.ReadMessage()
 	if err != nil {
 		return
@@ -147,7 +154,7 @@ func (th *TerminalHandler) Handle(c *gin.Context) {
 		writeError("first terminal frame must open the session")
 		return
 	}
-	if open.SandboxID != "" && open.SandboxID != sandboxID {
+	if !terminalOpenMatchesPath(open, sandboxID) {
 		writeError("terminal sandbox does not match request path")
 		return
 	}
@@ -171,6 +178,35 @@ func (th *TerminalHandler) Handle(c *gin.Context) {
 		killCancel()
 		pty.Close()
 		slog.Info("audit", "event", "terminal.session.close", "operator", operator, "sandboxId", sandboxID)
+	}()
+
+	// Keepalive pings. SetPongHandler above extends the read deadline, but
+	// nothing was driving it: a silently dropped TCP connection (laptop lid,
+	// NAT timeout) would hold one of the terminalMaxPerSandbox slots until the
+	// 30-minute idle timeout expired. Pinging makes the write fail promptly,
+	// which tears the session down and frees the slot.
+	pingDone := make(chan struct{})
+	defer close(pingDone)
+	go func() {
+		ticker := time.NewTicker(terminalPingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-pingDone:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				writeMu.Lock()
+				_ = conn.SetWriteDeadline(time.Now().Add(terminalWriteTimeout))
+				perr := conn.WriteMessage(websocket.PingMessage, nil)
+				writeMu.Unlock()
+				if perr != nil {
+					cancel()
+					return
+				}
+			}
+		}
 	}()
 
 	// Output pump: raw PTY bytes → browser as binary frames; on stream end,
@@ -234,6 +270,15 @@ func (th *TerminalHandler) Handle(c *gin.Context) {
 
 	cancel()
 	<-pty.Done()
+}
+
+// terminalOpenMatchesPath reports whether an open frame agrees with the sandbox
+// named in the request path. The frame must state the id explicitly: treating an
+// omitted value as consent made the cross-check optional, so a client could skip
+// it entirely. Only the path parameter is ever passed to OpenPTY, so this is
+// defence in depth rather than the sole authorization boundary.
+func terminalOpenMatchesPath(open terminalClientFrame, sandboxID string) bool {
+	return sandboxID != "" && open.SandboxID == sandboxID
 }
 
 // clampDim caps a browser-supplied dimension at max. A non-positive value is

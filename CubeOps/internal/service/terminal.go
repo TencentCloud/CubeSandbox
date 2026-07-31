@@ -40,8 +40,24 @@ const (
 	maxConnectEnvelopeSize = 4 * 1024 * 1024
 
 	// defaultTermEnvTERM etc. seed a usable interactive environment.
-	terminalShell = "/bin/bash"
+	//
+	// terminalShell is /bin/sh rather than /bin/bash because minimal images
+	// (Alpine, busybox-based) ship no bash at all and the session would fail to
+	// start outright. terminalShellArgs upgrades to bash when the image has it,
+	// so bash-based templates keep line editing and completion.
+	terminalShell = "/bin/sh"
 )
+
+// terminalShellArgs execs an interactive login bash when the image provides one
+// and otherwise stays on sh. The fallback uses an absolute /bin/sh so a broken
+// or empty PATH cannot leave the session with no shell at all. exec replaces the
+// wrapper in both branches, so no extra process lingers and the PTY is owned by
+// the real shell.
+var terminalShellArgs = []string{
+	"-c",
+	`b=$(command -v bash 2>/dev/null); ` +
+		`if [ -n "$b" ]; then exec "$b" -i -l; else exec /bin/sh -i -l; fi`,
+}
 
 // terminalStreamHTTPClient has no overall timeout: the Start stream is
 // long-lived and its lifecycle is bounded by the request context instead.
@@ -145,7 +161,7 @@ func OpenPTY(ctx context.Context, sandboxID, domain string, size PtySize, cwd st
 	payload := ptyStartRequest{
 		Process: ptyProcessConfig{
 			Cmd:  terminalShell,
-			Args: []string{"-i", "-l"},
+			Args: terminalShellArgs,
 			Envs: envs,
 			Cwd:  cwd,
 		},

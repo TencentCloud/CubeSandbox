@@ -26,6 +26,44 @@ func TestSubprotocolToken(t *testing.T) {
 	}
 }
 
+func TestTerminalOpenMatchesPath(t *testing.T) {
+	cases := []struct {
+		name  string
+		frame terminalClientFrame
+		path  string
+		want  bool
+	}{
+		{"matching id", terminalClientFrame{SandboxID: "sb-1"}, "sb-1", true},
+		{"mismatched id", terminalClientFrame{SandboxID: "sb-2"}, "sb-1", false},
+		// An omitted sandboxId previously skipped the check entirely; the frame
+		// must now name the sandbox for the session to open.
+		{"omitted id", terminalClientFrame{}, "sb-1", false},
+		{"empty path", terminalClientFrame{SandboxID: "sb-1"}, "", false},
+		{"both empty", terminalClientFrame{}, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := terminalOpenMatchesPath(tc.frame, tc.path); got != tc.want {
+				t.Fatalf("terminalOpenMatchesPath(%+v, %q) = %v, want %v",
+					tc.frame, tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTerminalPingIntervalIsBelowIdleTimeout(t *testing.T) {
+	// A ping interval at or above the idle timeout would never detect a dead
+	// peer before the session expired on its own, defeating the purpose.
+	if terminalPingInterval >= terminalIdleTimeout {
+		t.Fatalf("terminalPingInterval (%v) must be below terminalIdleTimeout (%v)",
+			terminalPingInterval, terminalIdleTimeout)
+	}
+	if terminalPingInterval <= terminalWriteTimeout {
+		t.Fatalf("terminalPingInterval (%v) should exceed terminalWriteTimeout (%v) "+
+			"so a slow write cannot overlap the next ping", terminalPingInterval, terminalWriteTimeout)
+	}
+}
+
 func TestClampDim(t *testing.T) {
 	cases := []struct{ in, max, want int }{
 		{0, 512, 0},
