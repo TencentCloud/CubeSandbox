@@ -1,0 +1,380 @@
+# S3 兼容 Volume 插件 —— 完整指引
+
+使用任意 S3 兼容对象存储作为 CubeSandbox Volume 的持久化存储：创建 Volume → 在沙箱中挂载 → 读写 → 卸载 → 删除。
+
+插件完全基于通用工具构建 —— 挂载使用 **s3fs**，控制面使用 **AWS CLI**。插件本身不绑定任何厂商：存储后端只是配置文件中的 `ENDPOINT` 地址。已验证的 Endpoint 包括 AWS S3、[Tigris](https://www.tigrisdata.com/)、MinIO 与 Cloudflare R2。
+
+> **版本要求：** Cube 平台 **≥ 0.6.0**，Python SDK **`cubesandbox` ≥ 0.6.0**。
+> 协议与 Hook 细节：[Volume 插件开发框架](../../../docs/zh/guide/volume-plugin.md)。
+
+English: [README.md](README.md)
+
+---
+
+## 为什么需要这个插件
+
+| | COS 插件 | S3 插件 |
+|---|---|---|
+| 后端 | 腾讯云 COS | 任意 S3 兼容 Endpoint |
+| 挂载驱动 | cosfs（仅 `amd64`） | s3fs（`amd64` **和** `arm64`） |
+| 安装方式 | 手动下载 `.rpm`/`.deb` | `apt install s3fs` / `yum install s3fs-fuse` |
+| 控制面 | coscmd | AWS CLI v2 |
+
+本插件填补两个空缺。其一，在腾讯云之外自建 CubeSandbox 时，COS 示例需要腾讯云账号 —— 本插件可对接你已有的任意 S3 兼容存储。其二，**ARM64 集群目前无法通过 cosfs 获得可用的 Volume 后端**：[`deploy/scripts/docker-install-volume-deps.sh`](../../../deploy/scripts/docker-install-volume-deps.sh) 在 `arm64` 上会跳过 cosfs（上游未提供 ARM 包），而 Debian/Ubuntu 与 EPEL 均为 `arm64` 打包了 s3fs。
+
+---
+
+## 选择 Endpoint
+
+无论选择哪家存储，下文所有步骤完全相同 —— 只有 `volume-s3.conf` 不同：
+
+| 存储提供方 | `ENDPOINT` | `REGION` |
+|-----------|-----------|----------|
+| AWS S3 | `https://s3.<region>.amazonaws.com` | 存储桶所在地域 |
+| Tigris | `https://t3.storage.dev` | `auto` |
+| Cloudflare R2 | `https://<account-id>.r2.cloudflarestorage.com` | `auto` |
+| MinIO | `http://<minio-host>:9000` | 任意值 |
+
+需要包含开通账号、创建存储桶与密钥的厂商级端到端指引，见 [Tigris 集成指南](../../../docs/zh/guide/integrations/tigris.md)。
+
+---
+
+## 前置条件
+
+| 项目 | 说明 |
+|------|------|
+| 运行中的 Cube 集群 | 至少包含 **CubeMaster**、**Cubelet**、**CubeAPI**（端口通常为 `3000`） |
+| 沙箱模板 | 一个 `templateID`（见 [§7](#7-使用-sdk-验证)） |
+| S3 兼容存储 | 一个存储桶，以及对该桶具备读写权限的访问密钥对 |
+| 本地权限 | 在 CubeMaster / Cubelet 主机上具备 `sudo`，用于安装软件、修改配置、重启服务 |
+
+**单机开发：** CubeMaster 与 Cubelet 在同一台主机，只需安装一次依赖。
+**多节点：** 见 [§1](#1-安装依赖) 中的表格。
+
+---
+
+## 1. 安装依赖
+
+### 装在哪台机器
+
+| 工具 | 安装节点 | 用途（Hook） |
+|------|----------|--------------|
+| **[s3fs](https://github.com/s3fs-fuse/s3fs-fuse)** | **Cubelet** | attach / detach（FUSE 挂载） |
+| **AWS CLI v2** | **CubeMaster** | create / destroy（Volume 前缀） |
+| **jq** | **CubeMaster** 与 **Cubelet** | binary 插件的 stdout JSON |
+
+### 方式 A：安装脚本
+
+**Cubelet 节点：**
+
+```bash
+sudo ./install-deps.sh --s3fs --jq
+```
+
+**CubeMaster 节点：**
+
+```bash
+sudo ./install-deps.sh --aws --jq
+```
+
+**单机（两个角色同机）：**
+
+```bash
+sudo ./install-deps.sh --all
+```
+
+只检查不安装：追加 `--check-only`。
+
+### 方式 B：手动安装
+
+```bash
+# Cubelet —— Debian/Ubuntu
+sudo apt-get install -y s3fs jq
+# Cubelet —— RHEL/CentOS（需要 EPEL）
+sudo yum install -y epel-release && sudo yum install -y s3fs-fuse jq
+
+# CubeMaster —— AWS CLI v2（ARM64 主机请改用 aarch64 包）
+curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+unzip -q awscliv2.zip && sudo ./aws/install
+```
+
+### 验证安装
+
+**Cubelet —— s3fs**
+
+```bash
+ls /dev/fuse && echo "FUSE ok"
+s3fs --version | head -1
+```
+
+两条都必须成功；缺少 `/dev/fuse` 会导致 attach 失败。
+
+**CubeMaster —— 用 AWS CLI 访问存储桶**
+
+```bash
+AWS_ACCESS_KEY_ID=xxx AWS_SECRET_ACCESS_KEY=xxx AWS_REGION=<region> \
+  aws s3 ls s3://my-cube-volumes/ --endpoint-url <your-endpoint>
+```
+
+返回空列表（退出码 0）即为成功。出现 `InvalidAccessKeyId` 或 `AccessDenied` 说明密钥对缺少该桶的读写权限。
+
+---
+
+## 2. 安装插件与凭证
+
+把插件复制到两个 `plugin/` 目录：
+
+```bash
+PREFIX=/usr/local/services/cubetoolbox
+sudo install -m 0755 binary/cube-volume-s3.sh \
+  "$PREFIX/CubeMaster/plugin/cube-volume-s3"
+sudo install -m 0755 binary/cube-volume-s3.sh \
+  "$PREFIX/Cubelet/plugin/cube-volume-s3"
+sudo install -m 0600 volume-s3.conf.example \
+  "$PREFIX/CubeMaster/plugin/volume-s3.conf"
+sudo install -m 0600 volume-s3.conf.example \
+  "$PREFIX/Cubelet/plugin/volume-s3.conf"
+```
+
+然后在每个节点上编辑 `volume-s3.conf`：
+
+| 字段 | 说明 | 是否必填 |
+|------|------|----------|
+| `ACCESS_KEY_ID` | 访问密钥 ID | 是 |
+| `SECRET_ACCESS_KEY` | 密钥 | 是 |
+| `BUCKET` | 存放所有 Volume 的存储桶 | 是 |
+| `ENDPOINT` | S3 兼容 Endpoint 地址（见[选择 Endpoint](#选择-endpoint)） | 是 |
+| `REGION` | SigV4 签名地域，默认 `us-east-1` | 否 |
+
+该配置文件必须为 root 所有、权限 `600` —— 其中以明文保存密钥，且会被插件 `source` 执行：
+
+```bash
+sudo chown root:root "$PREFIX/CubeMaster/plugin/volume-s3.conf" "$PREFIX/Cubelet/plugin/volume-s3.conf"
+sudo chmod 600 "$PREFIX/CubeMaster/plugin/volume-s3.conf" "$PREFIX/Cubelet/plugin/volume-s3.conf"
+```
+
+挂载根目录**不在**此文件中配置 —— Cubelet 在 attach 时传入（默认 `/data/cube-shared/volume`，见 [§4](#4-配置-cubelet)）。
+
+---
+
+## 3. 配置 CubeMaster
+
+编辑 CubeMaster 配置（常见路径：`/usr/local/services/cubetoolbox/CubeMaster/conf.yaml`），添加 **Controller** 插件（Create / Destroy）：
+
+```yaml
+volume_plugins:
+  - name: s3
+    type: binary
+    binary_path: /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-s3
+```
+
+`name: s3` 即 API/SDK 中的 **`driver`**。当 `Volume.create("x")` 未指定 driver 时，使用列表中的**第一项**。
+
+---
+
+## 4. 配置 Cubelet
+
+编辑 Cubelet 配置（常见路径：`/usr/local/services/cubetoolbox/Cubelet/config/config.toml`）。
+
+确认挂载父目录（可选，下方为默认值）：
+
+```toml
+[plugins."io.cubelet.internal.v1.storage"]
+  volume_plugin_base_dir = "/data/cube-shared/volume"
+```
+
+添加 **Node** 插件（Attach / Detach）：
+
+```toml
+[[plugins."io.cubelet.internal.v1.storage".volume_plugins]]
+  name        = "s3"
+  type        = "binary"
+  binary_path = "/usr/local/services/cubetoolbox/Cubelet/plugin/cube-volume-s3"
+```
+
+**`name` 必须与 CubeMaster 一致**（此处均为 `s3`）。插件返回的 `host_path` 形如 `<volume_plugin_base_dir>/s3-<volumeID>`，满足框架对 `host_path` 必须位于 `volumeBaseDir` 之内的要求。
+
+---
+
+## 5. 重启服务并验证
+
+```bash
+sudo systemctl restart cube-sandbox-cubemaster
+sudo systemctl restart cube-sandbox-cubelet
+sudo systemctl restart cube-sandbox-cube-api
+
+sleep 5
+systemctl is-active cube-sandbox-cubemaster cube-sandbox-cubelet cube-sandbox-cube-api
+```
+
+**确认插件已加载：**
+
+```bash
+grep -aF '[volume] registered' /data/log/CubeMaster/cubemaster-req.log | tail -5
+grep -aF '[plugin_volume] initialized' /data/log/Cubelet/Cubelet-req.log | tail -5
+```
+
+预期输出：
+
+```text
+[volume] registered binary plugin "s3" at /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-s3
+[plugin_volume] initialized binary plugin "s3" at /usr/local/services/cubetoolbox/Cubelet/plugin/cube-volume-s3
+```
+
+**手动 attach 测试**（在 Cubelet 节点执行）：
+
+```bash
+/usr/local/services/cubetoolbox/Cubelet/plugin/cube-volume-s3 \
+  --op attach \
+  --sandbox-id test-sandbox \
+  --namespace default \
+  --volume-id test-vol \
+  --ref-count 0 \
+  --volume-base-dir /data/cube-shared/volume
+```
+
+成功时 stdout 输出一行 JSON，包含 `"host_path":"/data/cube-shared/volume/s3-test-vol"` 与 `"error":""`。
+
+手动测试后清理：
+
+```bash
+/usr/local/services/cubetoolbox/Cubelet/plugin/cube-volume-s3 \
+  --op detach --sandbox-id test-sandbox --namespace default \
+  --volume-id test-vol --ref-count 0 \
+  --metadata '{"mount_dir":"/data/cube-shared/volume/s3-test-vol"}'
+```
+
+---
+
+## 6. 准备 SDK 环境
+
+在能访问 CubeAPI 的**开发机**上：
+
+```bash
+pip install 'cubesandbox>=0.6.0'
+
+export CUBE_API_URL=http://<cubeapi-host>:3000
+export CUBE_TEMPLATE_ID=<your-template-id>
+
+# 远程访问已挂载 Volume 时必需（数据面经由 CubeProxy）
+export CUBE_PROXY_NODE_IP=<cubeproxy-or-cubelet-node-ip>
+
+# 集群开启鉴权时：
+# export CUBE_API_KEY=<your-key>
+```
+
+---
+
+## 7. 使用 SDK 验证
+
+```python
+from cubesandbox import Sandbox, Volume
+
+# ① 创建 Volume（存储桶中生成 volumes/<id>/.keep）
+vol = Volume.create("my-data", driver="s3")
+print("volume_id:", vol.volume_id)
+
+# ② 创建带挂载的沙箱
+with Sandbox.create(volume_mounts={"/workspace": vol}) as sb:
+    sb.files.write("/workspace/hello.txt", "from S3 volume")
+    print(sb.files.read("/workspace/hello.txt"))
+
+# ③ 退出 with → 沙箱销毁，Volume 卸载（存储桶中数据保留）
+
+# ④ 删除 Volume（存储桶前缀被移除，不可恢复）
+Volume.destroy(vol.volume_id)
+print("done")
+```
+
+**确认对象已写入存储桶：**
+
+```bash
+source /usr/local/services/cubetoolbox/CubeMaster/plugin/volume-s3.conf
+AWS_ACCESS_KEY_ID="$ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$SECRET_ACCESS_KEY" AWS_REGION="${REGION:-us-east-1}" \
+  aws s3 ls "s3://$BUCKET/volumes/" --recursive --endpoint-url "$ENDPOINT"
+```
+
+**在 Cubelet 挂载命名空间中确认 s3fs 挂载**（沙箱运行期间）：
+
+```bash
+CPID=$(pgrep -f "cubelet --config" | head -1)
+nsenter -t "$CPID" -m -- cat /proc/mounts | grep s3fs
+```
+
+### 自动化验证
+
+COS 示例中的 [`verify_volume.py`](../cos/verify_volume.py) 与 driver 无关，可直接指向本 driver：
+
+```bash
+cd ../cos
+export CUBE_API_URL=http://127.0.0.1:3000
+export CUBE_TEMPLATE_ID=tpl-xxxx
+export CUBE_PROXY_NODE_IP=127.0.0.1
+export CUBE_VOLUME_DRIVERS=s3
+
+python3 verify_volume.py
+```
+
+---
+
+## 8. 故障排查
+
+| 现象 | 排查方向 |
+|------|----------|
+| `unknown driver: s3` | CubeMaster `volume_plugins` 未配置，或未重启 |
+| `no plugin registered for driver "s3"` | Cubelet 缺少同名插件，或未重启 |
+| attach 失败，提示 `s3fs mount failed` | 检查 `ls /dev/fuse`、`volume-s3.conf` 中的凭证与 `ENDPOINT`；执行 [§5](#5-重启服务并验证) 的手动 attach 查看 s3fs 报错 |
+| `InvalidAccessKeyId` / `SignatureDoesNotMatch` | 密钥对错误、缺少桶权限，或 `REGION` 与 Endpoint 期望的 SigV4 地域不匹配 |
+| 存储桶名包含点号 | s3fs 默认使用 virtual-hosted 风格寻址，带点号的桶名会导致 TLS 校验失败。请改用不含点号的桶名，或追加 `-ouse_path_request_style`（MinIO 通常也需要该选项） |
+| SDK 写入失败 | 未设置 `CUBE_PROXY_NODE_IP`；CubeAPI 或模板未就绪 |
+| `Volume.create` 未指定 driver 时没有走 s3 | `volume_plugins` 的**第一项**才是默认 driver |
+
+更多内容：[框架 §8 调试与排障](../../../docs/zh/guide/volume-plugin.md)。
+
+---
+
+## 后端存储布局
+
+```
+<bucket>/volumes/<volumeID>/   ← 每个 Volume 一个前缀
+```
+
+attach 时用 s3fs 把 `BUCKET:/volumes/<volumeID>` 挂载到宿主机的 `/data/cube-shared/volume/s3-<volumeID>/`，Cubelet 再通过 virtiofs 暴露给 microVM。
+
+### Hook 行为（RefCount）
+
+| Hook | 角色 | refCount | 行为 |
+|------|------|----------|------|
+| Create | Controller | — | `aws s3api put-object` 写入 `volumes/<id>/.keep` |
+| Destroy | Controller | — | `aws s3 rm --recursive` 删除该前缀 |
+| Attach | Node | `0` | 执行 `s3fs` 挂载并返回 `host_path` |
+| Attach | Node | `> 0` | 返回已有 `host_path`，不重复挂载 |
+| Detach | Node | `> 0` | 空操作 |
+| Detach | Node | `0` | 执行 `fusermount -u`；**保留**存储桶中的数据 |
+
+### 设计说明
+
+- **单桶、每 Volume 一个前缀。** 与 COS 示例保持一致。多桶场景通常部署多个插件实例并使用不同 `driver` 名，或扩展 `Create` 使其接受桶名。框架只要求 Hook 协议与 `driver` 命名一致。
+- **凭证不会进入沙箱。** 凭证保存在 CubeMaster/Cubelet 上 root 所有、权限 `600` 的配置文件中，microVM 只看到一个文件系统。
+- **`private_data` 把对象前缀从 Create 传递到 Attach**（上限 1024 字节，不会返回给 SDK 客户端）。
+- **并发控制。** 按 Volume 粒度的 `flock` 串行化同一节点上同一 Volume 的 attach/detach，避免两个沙箱同时启动导致重复挂载。
+- **Destroy 不可恢复**，会删除整个 `volumes/<id>/` 前缀。API 的引用计数保护（有沙箱持有 Volume 时 `DELETE /volumes` 返回 409）是防止删除已挂载 Volume 的机制 —— 真正的风险点是节点崩溃后引用计数失真：集群级计数可能归零而某节点仍持有挂载。
+
+---
+
+## 目录结构
+
+```
+examples/volume/s3/
+├── install-deps.sh          # 依赖安装与检查（s3fs / aws / jq）
+├── volume-s3.conf.example
+└── binary/
+    └── cube-volume-s3.sh    # 插件本体（四个 Hook）
+```
+
+| 文档 | 内容 |
+|------|------|
+| [Volume 插件开发框架](../../../docs/zh/guide/volume-plugin.md) | 协议、RefCount、Hook 语义 |
+| [Tigris 集成指南](../../../docs/zh/guide/integrations/tigris.md) | 基于本插件的厂商级端到端指引 |
+| [COS 示例](../cos/README.zh.md) | 本插件所参照的参考实现 |
+| [s3fs-fuse](https://github.com/s3fs-fuse/s3fs-fuse) | 挂载驱动选项与行为 |
