@@ -148,8 +148,42 @@ configure_sandbox_dns() {
       ' /etc/resolv.conf
     )"
     log "sandbox DNS follow-node nameservers: ${CUBE_SANDBOX_DNS_SERVERS:-<empty>}"
+    if [[ -z "${CUBE_SANDBOX_DNS_SEARCHES:-}" ]]; then
+      CUBE_SANDBOX_DNS_SEARCHES="$(
+        awk '
+          /^[[:space:]]*#/ { next }
+          /^search[[:space:]]+/ {
+            for (i = 2; i <= NF; i++) {
+              if ($i ~ /^[#;]/) break
+              if (seen[$i]++) continue
+              if (n++) printf ","
+              printf "%s", $i
+            }
+          }
+        ' /etc/resolv.conf
+      )"
+      log "sandbox DNS follow-node searches: ${CUBE_SANDBOX_DNS_SEARCHES:-<empty>}"
+    fi
+    if [[ -z "${CUBE_SANDBOX_DNS_OPTIONS:-}" ]]; then
+      CUBE_SANDBOX_DNS_OPTIONS="$(
+        awk '
+          /^[[:space:]]*#/ { next }
+          /^options[[:space:]]+/ {
+            for (i = 2; i <= NF; i++) {
+              if ($i ~ /^[#;]/) break
+              if (seen[$i]++) continue
+              if (n++) printf ","
+              printf "%s", $i
+            }
+          }
+        ' /etc/resolv.conf
+      )"
+      log "sandbox DNS follow-node options: ${CUBE_SANDBOX_DNS_OPTIONS:-<empty>}"
+    fi
   fi
   patch_common_yaml_list default_dns_servers "${CUBE_SANDBOX_DNS_SERVERS:-}"
+  patch_common_yaml_list default_dns_searches "${CUBE_SANDBOX_DNS_SEARCHES:-}"
+  patch_common_yaml_list default_dns_options "${CUBE_SANDBOX_DNS_OPTIONS:-}"
 }
 
 [[ -x "${CUBELET_BIN}" ]] || fail "missing executable: ${CUBELET_BIN}"

@@ -59,6 +59,30 @@ type CubeboxNetfile struct {
 	ContainerNetfiles map[string]ContainerNetfile
 }
 
+// EffectiveDNSConfig is the guest resolv.conf content after merging request
+// dns_config with Cubelet defaults. If the request sets any servers, the whole
+// config comes from the request (no default search/options mixed in); otherwise
+// empty request searches/options fall back to Cubelet defaults.
+type EffectiveDNSConfig struct {
+	Servers  []string
+	Searches []string
+	Options  []string
+}
+
+// AnnotationLines returns entries for the cube.sandbox.dns annotation.
+// Servers stay as bare IPs (shim prefixes nameserver); search/options are full lines.
+func (c EffectiveDNSConfig) AnnotationLines() []string {
+	lines := make([]string, 0, len(c.Servers)+2)
+	if len(c.Searches) > 0 {
+		lines = append(lines, "search "+strings.Join(c.Searches, " "))
+	}
+	lines = append(lines, c.Servers...)
+	if len(c.Options) > 0 {
+		lines = append(lines, "options "+strings.Join(c.Options, " "))
+	}
+	return lines
+}
+
 func (c *CubeboxNetfile) WriteToHost() error {
 	for key := range c.ContainerNetfiles {
 		cnf := c.ContainerNetfiles[key]
@@ -80,9 +104,9 @@ func (c *CubeboxNetfile) WriteToHost() error {
 }
 
 func (cn *CubeboxNetfile) CreateNetfiles(req *cubebox.RunCubeSandboxRequest) error {
-	dnsServers, err := ResolveEffectiveDNSServers(req)
+	dnsCfg, err := ResolveEffectiveDNSConfig(req)
 	if err != nil {
-		return fmt.Errorf("failed to resolve effective dns servers: %w", err)
+		return fmt.Errorf("failed to resolve effective dns config: %w", err)
 	}
 	var netfiles = make(map[string]ContainerNetfile)
 	for _, c := range req.GetContainers() {
@@ -90,7 +114,7 @@ func (cn *CubeboxNetfile) CreateNetfiles(req *cubebox.RunCubeSandboxRequest) err
 		if err != nil {
 			return fmt.Errorf("failed to gen hosts file for container %s", c.Name)
 		}
-		dns, err := genResolvContent(dnsServers)
+		dns, err := genResolvContent(dnsCfg)
 		if err != nil {
 			return fmt.Errorf("failed to gen resolv.conf for container %s", c.Name)
 		}
@@ -187,21 +211,61 @@ func (cn *CubeboxNetfile) OciContainerNetfileSpec(ctx context.Context, container
 	return nil
 }
 
+// ResolveEffectiveDNSConfig merges request dns_config with Cubelet defaults.
+//
+// If the request sets any dns_config.servers, the whole DNS config is taken from
+// the request (servers plus any request searches/options). Defaults for
+// searches/options are not mixed in — explicit nameservers mean the caller owns
+// DNS end-to-end.
+//
+// If the request does not set servers, Cubelet defaults apply: empty request
+// searches/options fall back to default_dns_searches / default_dns_options
+// (e.g. followNodeDns).
+func ResolveEffectiveDNSConfig(req *cubebox.RunCubeSandboxRequest) (EffectiveDNSConfig, error) {
+	requestServers, err := requestDNSServers(req)
+	if err != nil {
+		return EffectiveDNSConfig{}, err
+	}
+	searches, err := requestDNSSearches(req)
+	if err != nil {
+		return EffectiveDNSConfig{}, err
+	}
+	options, err := requestDNSOptions(req)
+	if err != nil {
+		return EffectiveDNSConfig{}, err
+	}
+
+	servers := requestServers
+	if len(servers) == 0 {
+		servers = defaultDNSServers()
+		if len(servers) == 0 {
+			servers = []string{defaultDNSIP}
+		}
+		if len(searches) == 0 {
+			searches = defaultDNSSearches()
+		}
+		if len(options) == 0 {
+			options = defaultDNSOptions()
+		}
+	}
+
+	sort.Slice(servers, func(i, j int) bool {
+		return servers[i] < servers[j]
+	})
+
+	return EffectiveDNSConfig{
+		Servers:  append([]string(nil), servers...),
+		Searches: append([]string(nil), searches...),
+		Options:  append([]string(nil), options...),
+	}, nil
+}
+
 func ResolveEffectiveDNSServers(req *cubebox.RunCubeSandboxRequest) ([]string, error) {
-	dns, err := requestDNSServers(req)
+	cfg, err := ResolveEffectiveDNSConfig(req)
 	if err != nil {
 		return nil, err
 	}
-	if len(dns) == 0 {
-		dns = defaultDNSServers()
-	}
-	if len(dns) == 0 {
-		dns = []string{defaultDNSIP}
-	}
-	sort.Slice(dns, func(i, j int) bool {
-		return dns[i] < dns[j]
-	})
-	return append([]string(nil), dns...), nil
+	return append([]string(nil), cfg.Servers...), nil
 }
 
 func genHostsFileWithHostName(hostname string, hosts []*cubebox.HostAlias) ([]byte, error) {
@@ -233,23 +297,42 @@ func genHostsFileWithHostName(hostname string, hosts []*cubebox.HostAlias) ([]by
 	return b.Bytes(), nil
 }
 
-func genResolvContent(dns []string) ([]byte, error) {
-	var err error
-	if len(dns) == 0 {
-		dns, err = ResolveEffectiveDNSServers(nil)
+func genResolvContent(cfg EffectiveDNSConfig) ([]byte, error) {
+	if len(cfg.Servers) == 0 {
+		resolved, err := ResolveEffectiveDNSConfig(nil)
 		if err != nil {
 			return nil, err
 		}
+		// Fill missing fields from Cubelet defaults; keep any caller-provided
+		// searches/options (e.g. when only servers were empty).
+		cfg.Servers = resolved.Servers
+		if len(cfg.Searches) == 0 {
+			cfg.Searches = resolved.Searches
+		}
+		if len(cfg.Options) == 0 {
+			cfg.Options = resolved.Options
+		}
 	}
-	sort.Slice(dns, func(i, j int) bool {
-		return dns[i] < dns[j]
+	servers := append([]string(nil), cfg.Servers...)
+	sort.Slice(servers, func(i, j int) bool {
+		return servers[i] < servers[j]
 	})
 	var b bytes.Buffer
-	for _, entry := range dns {
+	if len(cfg.Searches) > 0 {
+		if _, err := b.Write([]byte("search " + strings.Join(cfg.Searches, " ") + "\n")); err != nil {
+			return nil, err
+		}
+	}
+	for _, entry := range servers {
 		if net.ParseIP(entry) == nil {
 			return nil, fmt.Errorf("invalid dns %s", entry)
 		}
 		if _, err := b.Write([]byte("nameserver " + entry + "\n")); err != nil {
+			return nil, err
+		}
+	}
+	if len(cfg.Options) > 0 {
+		if _, err := b.Write([]byte("options " + strings.Join(cfg.Options, " ") + "\n")); err != nil {
 			return nil, err
 		}
 	}
@@ -282,12 +365,82 @@ func requestDNSServers(req *cubebox.RunCubeSandboxRequest) ([]string, error) {
 	return dnsServers, nil
 }
 
+func requestDNSSearches(req *cubebox.RunCubeSandboxRequest) ([]string, error) {
+	return requestDNSStringList(req, "search", func(cfg *cubebox.DNSConfig) []string {
+		if cfg == nil {
+			return nil
+		}
+		return cfg.GetSearches()
+	})
+}
+
+func requestDNSOptions(req *cubebox.RunCubeSandboxRequest) ([]string, error) {
+	return requestDNSStringList(req, "option", func(cfg *cubebox.DNSConfig) []string {
+		if cfg == nil {
+			return nil
+		}
+		return cfg.GetOptions()
+	})
+}
+
+// validDNSListToken rejects whitespace/control chars and resolv.conf comment
+// markers so a single request entry cannot inject extra nameserver lines.
+func validDNSListToken(item string) bool {
+	for _, r := range item {
+		if r <= ' ' || r == 0x7f || r == '#' || r == ';' {
+			return false
+		}
+	}
+	return true
+}
+
+func requestDNSStringList(req *cubebox.RunCubeSandboxRequest, kind string, get func(*cubebox.DNSConfig) []string) ([]string, error) {
+	if req == nil {
+		return nil, nil
+	}
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	for _, ctr := range req.GetContainers() {
+		for _, item := range get(ctr.GetDnsConfig()) {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+			if !validDNSListToken(item) {
+				return nil, fmt.Errorf("invalid dns %s %q", kind, item)
+			}
+			if _, ok := seen[item]; ok {
+				continue
+			}
+			seen[item] = struct{}{}
+			out = append(out, item)
+		}
+	}
+	return out, nil
+}
+
 func defaultDNSServers() []string {
 	cfg := config.GetConfig()
 	if cfg == nil || cfg.Common == nil || len(cfg.Common.DefaultDNSServers) == 0 {
 		return nil
 	}
 	return append([]string(nil), cfg.Common.DefaultDNSServers...)
+}
+
+func defaultDNSSearches() []string {
+	cfg := config.GetConfig()
+	if cfg == nil || cfg.Common == nil || len(cfg.Common.DefaultDNSSearches) == 0 {
+		return nil
+	}
+	return append([]string(nil), cfg.Common.DefaultDNSSearches...)
+}
+
+func defaultDNSOptions() []string {
+	cfg := config.GetConfig()
+	if cfg == nil || cfg.Common == nil || len(cfg.Common.DefaultDNSOptions) == 0 {
+		return nil
+	}
+	return append([]string(nil), cfg.Common.DefaultDNSOptions...)
 }
 
 func Clean(ctx context.Context, containerID string) error {

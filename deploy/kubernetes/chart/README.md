@@ -487,7 +487,8 @@ cubeProxy:
 cubeNode:
   dns:
     sandbox:
-      followNodeDns: true          # guests use node/cluster DNS
+      followNodeDns: true          # guests use node/cluster DNS (nameservers+search+options)
+                                   # explicit nameservers[] overrides and disables follow-node
 ```
 
 ## WebUI and CubeOps

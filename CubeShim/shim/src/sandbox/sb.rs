@@ -1470,6 +1470,22 @@ fn normalize_dns_for_agent(entry: &str) -> CResult<String> {
         return Ok(format!("nameserver {}", ip));
     }
 
+    // Pass through resolv.conf search/options lines from followNodeDns.
+    if let Some(rest) = trimmed.strip_prefix("search ") {
+        let domains: Vec<&str> = rest.split_whitespace().collect();
+        if domains.is_empty() {
+            return Err(format!("invalid dns search entry {}", entry));
+        }
+        return Ok(format!("search {}", domains.join(" ")));
+    }
+    if let Some(rest) = trimmed.strip_prefix("options ") {
+        let opts: Vec<&str> = rest.split_whitespace().collect();
+        if opts.is_empty() {
+            return Err(format!("invalid dns options entry {}", entry));
+        }
+        return Ok(format!("options {}", opts.join(" ")));
+    }
+
     let ip = trimmed
         .parse::<IpAddr>()
         .map_err(|_| format!("invalid dns ip {}", entry))?;
@@ -1603,5 +1619,16 @@ mod tests {
             sandbox.guest_container_id("real-task").await.unwrap(),
             "guest-container"
         );
+    }
+
+    #[test]
+    fn test_normalize_dns_for_agent_accepts_search_and_options() {
+        let got =
+            normalize_dns_for_agent(" search  default.svc.cluster.local   svc.cluster.local ")
+                .unwrap();
+        assert_eq!(got, "search default.svc.cluster.local svc.cluster.local");
+
+        let got = normalize_dns_for_agent(" options  ndots:5  timeout:2 ").unwrap();
+        assert_eq!(got, "options ndots:5 timeout:2");
     }
 }

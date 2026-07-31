@@ -543,9 +543,10 @@ cubeNode:
   dns:
     clusterDomain: cluster.local
     sandbox:
-      # Guests inherit the cube-node Pod nameservers (cluster DNS) so they can
-      # resolve in-cluster Services and *.cubeProxy.domain.
-      # Set nameservers to an explicit list to override.
+      # Guests inherit the cube-node Pod DNS (nameservers + search + options,
+      # e.g. ndots:5) so they can resolve in-cluster Services and *.cubeProxy.domain.
+      # Set nameservers to an explicit list to override: that turns follow-node
+      # off for the whole guest DNS config (search/options are not copied either).
       followNodeDns: true
       nameservers: []
 

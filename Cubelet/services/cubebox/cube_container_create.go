@@ -451,14 +451,14 @@ func (l *local) genSandboxOptions(ctx context.Context, realReq *cubebox.RunCubeS
 		return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "generate storage medium annotation failed: %v", err)
 	}
 	additionalSandboxOpt = append(additionalSandboxOpt, sOpts...)
-	dnsServers, err := sandboxDNSServersFromContainers(realReq)
+	dnsLines, err := sandboxDNSLinesFromContainers(realReq)
 	if err != nil {
 		return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "generate sandbox dns annotation failed: %v", err)
 	}
-	if len(dnsServers) > 0 {
-		data, err := jsoniter.Marshal(dnsServers)
+	if len(dnsLines) > 0 {
+		data, err := jsoniter.Marshal(dnsLines)
 		if err != nil {
-			return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "marshal dns servers failed: %v", err)
+			return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "marshal dns lines failed: %v", err)
 		}
 		additionalSandboxOpt = append(additionalSandboxOpt, oci.WithAnnotations(map[string]string{
 			constants.AnnotationsSandboxDNS: string(data),
@@ -471,8 +471,12 @@ func (l *local) genSandboxOptions(ctx context.Context, realReq *cubebox.RunCubeS
 	return additionalSandboxOpt, nil
 }
 
-func sandboxDNSServersFromContainers(realReq *cubebox.RunCubeSandboxRequest) ([]string, error) {
-	return localnetfile.ResolveEffectiveDNSServers(realReq)
+func sandboxDNSLinesFromContainers(realReq *cubebox.RunCubeSandboxRequest) ([]string, error) {
+	cfg, err := localnetfile.ResolveEffectiveDNSConfig(realReq)
+	if err != nil {
+		return nil, err
+	}
+	return cfg.AnnotationLines(), nil
 }
 
 func (l *local) genImageReferenceForCubebox(ctx context.Context, flowOpts *workflow.CreateContext, sandBox *cubeboxstore.CubeBox) error {
