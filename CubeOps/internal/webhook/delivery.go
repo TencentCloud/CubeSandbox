@@ -55,8 +55,14 @@ type dispatcher struct {
 //
 // 返回初始化完成的 dispatcher；若任一 endpoint 配置非法则返回错误。
 func newDispatcher(cfg config.WebhookConfig) (*dispatcher, error) {
+	if cfg.DefaultMaxRetries != nil && *cfg.DefaultMaxRetries < 0 {
+		return nil, fmt.Errorf("webhook default_max_retries must be non-negative")
+	}
 	endpoints := make([]endpoint, 0, len(cfg.Endpoints))
 	for index, item := range cfg.Endpoints {
+		if item.MaxRetries != nil && *item.MaxRetries < 0 {
+			return nil, fmt.Errorf("webhook endpoint %d max_retries must be non-negative", index)
+		}
 		parsed, err := url.Parse(strings.TrimSpace(item.URL))
 		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
 			return nil, fmt.Errorf("webhook endpoint %d has invalid url %q", index, item.URL)

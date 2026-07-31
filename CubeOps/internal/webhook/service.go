@@ -140,6 +140,12 @@ func (s *Service) ensureGroup(ctx context.Context) error {
 
 func (s *Service) worker(ctx context.Context, jobs <-chan LifecycleEvent) {
 	for event := range jobs {
+		if ctx.Err() != nil {
+			slog.Info("webhook event retained after consumer cancellation",
+				"stream_id", event.StreamID,
+				"event_id", event.EventID)
+			continue
+		}
 		if event.Op == "" || event.SandboxID == "" {
 			slog.Warn("discarding malformed lifecycle event",
 				"stream_id", event.StreamID)
@@ -149,6 +155,12 @@ func (s *Service) worker(ctx context.Context, jobs <-chan LifecycleEvent) {
 				"stream_id", event.StreamID,
 				"sandbox_id", event.SandboxID,
 				"error", err)
+		}
+		if ctx.Err() != nil {
+			slog.Info("webhook event retained after delivery cancellation",
+				"stream_id", event.StreamID,
+				"event_id", event.EventID)
+			continue
 		}
 		// Delivery failures are acknowledged after the configured retry budget
 		// is exhausted. Process crashes before this point leave the entry in

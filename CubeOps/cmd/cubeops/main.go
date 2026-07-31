@@ -60,6 +60,7 @@ func main() {
 	cfg.JWTSecret = jwtSecret
 
 	var webhookService *webhook.Service
+	var webhookDone chan error
 	if cfg.Webhook.Enabled {
 		webhookService, err = webhook.New(cfg.RedisURL, cfg.Webhook)
 		if err != nil {
@@ -67,10 +68,9 @@ func main() {
 			os.Exit(1)
 		}
 		defer webhookService.Close()
+		webhookDone = make(chan error, 1)
 		go func() {
-			if err := webhookService.Run(ctx); err != nil {
-				slog.Error("webhook consumer stopped", "error", err)
-			}
+			webhookDone <- webhookService.Run(ctx)
 		}()
 	}
 
@@ -93,6 +93,12 @@ func main() {
 	if err := srv.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("server error", "error", err)
 		os.Exit(1)
+	}
+	cancel()
+	if webhookDone != nil {
+		if err := <-webhookDone; err != nil {
+			slog.Error("webhook consumer stopped", "error", err)
+		}
 	}
 
 	slog.Info("CubeOps stopped")

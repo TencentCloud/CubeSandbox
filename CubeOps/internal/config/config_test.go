@@ -164,6 +164,54 @@ webhook:
 	}
 }
 
+func TestLoad_WebhookRejectsNegativeRetries(t *testing.T) {
+	tests := []struct {
+		name        string
+		yamlContent string
+	}{
+		{
+			name: "default",
+			yamlContent: `database_url: "mysql://root:pass@127.0.0.1:3306/testdb"
+redis_url: "redis://127.0.0.1:6379/0"
+webhook:
+  enabled: true
+  default_max_retries: -1
+  endpoints:
+    - name: receiver
+      url: "http://127.0.0.1:9000/webhook"
+      events: ["sandbox.created"]
+`,
+		},
+		{
+			name: "endpoint",
+			yamlContent: `database_url: "mysql://root:pass@127.0.0.1:3306/testdb"
+redis_url: "redis://127.0.0.1:6379/0"
+webhook:
+  enabled: true
+  endpoints:
+    - name: receiver
+      url: "http://127.0.0.1:9000/webhook"
+      events: ["sandbox.created"]
+      max_retries: -1
+`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			yamlPath := filepath.Join(dir, "ops.yaml")
+			if err := os.WriteFile(yamlPath, []byte(test.yamlContent), 0o644); err != nil {
+				t.Fatalf("write yaml: %v", err)
+			}
+			t.Setenv("CUBE_OPS_CONFIG", yamlPath)
+
+			if _, err := Load(); err == nil {
+				t.Fatal("Load accepted negative webhook retries")
+			}
+		})
+	}
+}
+
 func TestLoad_WebhookEndpointsFromEnvironment(t *testing.T) {
 	t.Setenv("CUBE_OPS_CONFIG", "/nonexistent/path/ops.yaml")
 	t.Setenv("DATABASE_URL", "mysql://root:pass@127.0.0.1:3306/testdb")

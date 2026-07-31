@@ -159,6 +159,14 @@ func Load() (*Config, error) {
 		if len(cfg.Webhook.Endpoints) == 0 {
 			return nil, fmt.Errorf("webhook.endpoints is required when webhook.enabled is true")
 		}
+		if cfg.Webhook.DefaultMaxRetries != nil && *cfg.Webhook.DefaultMaxRetries < 0 {
+			return nil, fmt.Errorf("webhook.default_max_retries must be non-negative")
+		}
+		for index, endpoint := range cfg.Webhook.Endpoints {
+			if endpoint.MaxRetries != nil && *endpoint.MaxRetries < 0 {
+				return nil, fmt.Errorf("webhook endpoint %d max_retries must be non-negative", index)
+			}
+		}
 	}
 
 	return cfg, nil

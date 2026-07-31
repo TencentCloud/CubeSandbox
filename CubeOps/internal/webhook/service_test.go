@@ -45,6 +45,16 @@ func (d failingDispatcher) Deliver(_ context.Context, event LifecycleEvent) erro
 	return errors.New("retry budget exhausted")
 }
 
+type cancellationDispatcher struct {
+	started chan struct{}
+}
+
+func (d cancellationDispatcher) Deliver(ctx context.Context, _ LifecycleEvent) error {
+	close(d.started)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
 func TestServiceAcknowledgesAfterDeliveryBudgetIsExhausted(t *testing.T) {
 	source := &fakeSource{
 		event: LifecycleEvent{
@@ -98,5 +108,47 @@ func TestWorkerIndexPreservesPerSandboxOrdering(t *testing.T) {
 	deleted := workerIndex(LifecycleEvent{SandboxID: "sandbox-1", StreamID: "9-0"}, 8)
 	if create != deleted {
 		t.Fatalf("same sandbox routed to workers %d and %d", create, deleted)
+	}
+}
+
+func TestServiceDoesNotAcknowledgeDeliveryCanceledDuringShutdown(t *testing.T) {
+	source := &fakeSource{
+		event: LifecycleEvent{
+			StreamID: "1-0", EventID: "event-1", Op: "delete", SandboxID: "sandbox-1",
+		},
+		acked: make(chan string, 1),
+	}
+	started := make(chan struct{})
+	service := &Service{
+		source:      source,
+		dispatcher:  cancellationDispatcher{started: started},
+		group:       "cubeops-webhook",
+		consumer:    "consumer-1",
+		readBlock:   time.Millisecond,
+		pendingIdle: time.Hour,
+		workers:     1,
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- service.Run(ctx) }()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("event delivery did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("service did not stop")
+	}
+	select {
+	case streamID := <-source.acked:
+		t.Fatalf("canceled event %q was acknowledged", streamID)
+	default:
 	}
 }

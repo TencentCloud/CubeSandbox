@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -141,5 +142,40 @@ func TestDispatcherDoesNotRetryWhenMaxRetriesIsZero(t *testing.T) {
 	}
 	if requests != 1 {
 		t.Fatalf("requests = %d, want 1 when max_retries is zero", requests)
+	}
+}
+
+func TestDispatcherRejectsNegativeMaxRetries(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  config.WebhookConfig
+	}{
+		{
+			name: "default",
+			cfg: config.WebhookConfig{
+				DefaultMaxRetries: retries(-1),
+			},
+		},
+		{
+			name: "endpoint",
+			cfg: config.WebhookConfig{
+				Endpoints: []config.WebhookEndpointConfig{{
+					URL:        "https://example.com/webhook",
+					Events:     []string{EventSandboxCreated},
+					MaxRetries: retries(-1),
+				}},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := newDispatcher(test.cfg)
+			if err == nil {
+				t.Fatal("newDispatcher accepted negative max_retries")
+			}
+			if !strings.Contains(err.Error(), "max_retries") {
+				t.Fatalf("newDispatcher error = %q, want max_retries validation error", err)
+			}
+		})
 	}
 }
