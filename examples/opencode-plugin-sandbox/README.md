@@ -101,7 +101,10 @@ export CUBE_OPENCODE_PYTHON=~/.venvs/cube/bin/python
 export CUBE_TEMPLATE_ID=tpl-xxxxxxxx           # from the step above
 export E2B_API_URL=http://127.0.0.1:3000
 export E2B_API_KEY=e2b_000000
-export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem
+# mkcert writes its CA under the home directory of the user that ran the
+# one-click install. If that was root and you run OpenCode as a normal user,
+# copy the file somewhere readable and point at the copy instead.
+export SSL_CERT_FILE="$HOME/.local/share/mkcert/rootCA.pem"
 
 cd examples/opencode-plugin-sandbox
 ./plugin/install.sh            # project scope: ./.opencode/plugin/
@@ -178,7 +181,7 @@ python3 exec_backend.py --session <session-id> --reset
 | `CUBE_TEMPLATE_ID` | — | **Required.** Template to create sandboxes from |
 | `E2B_API_URL` | `http://127.0.0.1:3000` | CubeSandbox E2B-compatible endpoint |
 | `E2B_API_KEY` | `e2b_000000` | Any non-empty string for local deployments |
-| `SSL_CERT_FILE` | — | mkcert CA, needed because the SDK uses HTTPS |
+| `SSL_CERT_FILE` | — | mkcert CA, needed because the SDK uses HTTPS. Must be readable by the user running OpenCode |
 | `CUBE_OPENCODE_PYTHON` | `python3` | Interpreter running the backend; set for venvs |
 | `CUBE_OPENCODE_PASSTHROUGH` | empty | Commands that stay on the host; nothing by default |
 | `CUBE_OPENCODE_TIMEOUT` | `120` | Per-command timeout in seconds |
@@ -240,6 +243,10 @@ payload across elements and fail the assertion.
 
 **What this does not do**
 
+- **Only the tool named exactly `bash` is intercepted.** The hook matches on
+  `input.tool === "bash"`. Any other shell-capable tool the agent can reach,
+  now or in a future OpenCode version, runs on the host and is not logged
+  here. Re-check this after upgrading OpenCode.
 - `read` / `write` / `edit` still touch host files. That is intentional — the
   agent has to be able to edit your project — but it means a malicious `write`
   is not covered.
@@ -300,6 +307,15 @@ completely — plugins load at startup only.
    alive between calls would need a resident helper process or CubeSandbox
    pause/resume; both are larger changes than this example warrants.
 2. **`read` / `write` / `edit` are not sandboxed.** See "Security boundaries".
+3. **Files the agent edits are not visible to `bash`.** This is the largest
+   practical limitation. `write` and `edit` operate on the host project;
+   `bash` runs in a fresh MicroVM whose rootfs does not contain that project.
+   So the usual edit-then-run loop does not work: `write foo.py` followed by
+   `python foo.py` fails, because `foo.py` does not exist in the sandbox.
+   Commands that only need a working shell (package queries, one-off scripts,
+   network calls, text processing on data created in the same command) are
+   unaffected. Mounting the project into the sandbox would fix this and would
+   also give up most of the isolation, so it is deliberately not done here.
 3. **Hook payload shape is not a stable contract.** The session id key has been
    spelled differently across OpenCode versions, so several variants are probed
    with a fallback. If every known key is missing, all sessions collapse onto

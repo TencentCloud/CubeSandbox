@@ -75,10 +75,18 @@ status)
   echo "  source : ${PLUGIN_SRC}"
   echo "  backend: ${BACKEND}"
   echo
-  for d in \
-    "$(pwd)/.opencode/plugin" \
-    "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugin"
-  do
+  # An explicit --dir is the only location that matters when it is given; the
+  # project and global paths would be misleading noise. Without it, report both
+  # standard locations, since either could hold an installation.
+  if [[ -n "$EXPLICIT_DIR" ]]; then
+    STATUS_DIRS=("$TARGET_DIR")
+  else
+    STATUS_DIRS=(
+      "$(pwd)/.opencode/plugin"
+      "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugin"
+    )
+  fi
+  for d in "${STATUS_DIRS[@]}"; do
     p="${d}/${PLUGIN_NAME}"
     if [[ -L "$p" ]]; then
       ok "symlink  ${p} -> $(readlink "$p")"
@@ -86,6 +94,16 @@ status)
       ok "copy     ${p}"
     else
       info "absent   ${p}"
+    fi
+    # In copy mode the backend is installed next to the plugin directory, and a
+    # plugin without it fails every call closed, so report it too.
+    b="$(cd "$d/.." 2>/dev/null && pwd)/exec_backend.py"
+    if [[ -f "$p" && ! -L "$p" ]]; then
+      if [[ -f "$b" ]]; then
+        ok "backend  ${b}"
+      else
+        bad "backend  ${b} MISSING — every bash call will fail closed"
+      fi
     fi
   done
   echo

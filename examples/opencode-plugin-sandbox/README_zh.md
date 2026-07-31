@@ -96,7 +96,10 @@ export CUBE_OPENCODE_PYTHON=~/.venvs/cube/bin/python
 export CUBE_TEMPLATE_ID=tpl-xxxxxxxx           # 上一步得到的
 export E2B_API_URL=http://127.0.0.1:3000
 export E2B_API_KEY=e2b_000000
-export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem
+# mkcert 把 CA 写在执行一键安装的那个用户的 home 下。
+# 如果安装时用的是 root，而你以普通用户运行 OpenCode，
+# 需要先把该文件复制到可读位置，再指向副本。
+export SSL_CERT_FILE="$HOME/.local/share/mkcert/rootCA.pem"
 
 cd examples/opencode-plugin-sandbox
 ./plugin/install.sh            # 项目级：./.opencode/plugin/
@@ -170,7 +173,7 @@ python3 exec_backend.py --session <session-id> --reset
 | `CUBE_TEMPLATE_ID` | — | **必填。** 创建沙箱所用的模板 |
 | `E2B_API_URL` | `http://127.0.0.1:3000` | CubeSandbox 的 E2B 兼容接口地址 |
 | `E2B_API_KEY` | `e2b_000000` | 本地部署下任意非空字符串即可 |
-| `SSL_CERT_FILE` | — | mkcert CA，因为 SDK 走 HTTPS |
+| `SSL_CERT_FILE` | — | mkcert CA，因为 SDK 走 HTTPS。必须对运行 OpenCode 的用户可读 |
 | `CUBE_OPENCODE_PYTHON` | `python3` | 运行后端的解释器，用 venv 时需设置 |
 | `CUBE_OPENCODE_PASSTHROUGH` | 空 | 保留在宿主执行的命令，默认不放行任何命令 |
 | `CUBE_OPENCODE_TIMEOUT` | `120` | 单条命令超时秒数 |
@@ -227,6 +230,10 @@ node tests/test_plugin.mjs
 
 **本方案没有做到什么**
 
+- **只有名字恰好是 `bash` 的工具会被拦截。** 钩子匹配的是
+  `input.tool === "bash"`。Agent 能触及的其他具备 shell 能力的工具 ——
+  当前的或未来 OpenCode 版本新增的 —— 都会在宿主执行，且不会被这里记录。
+  升级 OpenCode 后请重新确认这一点。
 - `read` / `write` / `edit` 仍然操作宿主文件。这是有意为之 ——
   Agent 必须能编辑你的项目 —— 但也意味着恶意的 `write` 不在防护范围内。
 - 放行名单中的命令按设计就在宿主执行。名单默认为空，
@@ -280,6 +287,14 @@ generateResolvConf = false
    跨调用保留，但 VM 本身会被重建。让沙箱在调用间保持存活需要一个常驻辅助进程，
    或使用 CubeSandbox 的 pause/resume；两者都超出了本示例应有的复杂度。
 2. **`read` / `write` / `edit` 未被沙箱化。** 见「安全边界」。
+3. **Agent 编辑的文件对 `bash` 不可见。** 这是最主要的实际限制。
+   `write` / `edit` 操作的是宿主上的项目，而 `bash` 运行在一个全新的
+   MicroVM 里，其根文件系统不包含那个项目。所以常见的「改完就跑」循环
+   在这里不成立：`write foo.py` 之后执行 `python foo.py` 会失败，
+   因为沙箱里没有 `foo.py`。只需要一个可用 shell 的命令不受影响
+   （查询软件包、一次性脚本、网络调用、对同一条命令内产生的数据做文本处理）。
+   把项目挂载进沙箱可以解决这个问题，但同时会放弃大部分隔离性，
+   因此这里有意不这么做。
 3. **钩子入参结构不是稳定契约。** session id 的键名在不同 OpenCode 版本间
    拼写有差异，因此代码会探测多种变体并提供兜底。若所有已知键名都取不到，
    全部 session 会坍缩到同一个状态文件与锁上，cwd 与导出的环境变量会在并发

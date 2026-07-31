@@ -12,6 +12,8 @@ lang: zh-CN
 
 # OpenCode 集成指南（插件钩子方案）
 
+[English](../../../guide/integrations/opencode-plugin.md)
+
 让 OpenCode 继续跑在宿主机上，但它下发的每一条 `bash` 命令都在隔离的
 CubeSandbox MicroVM 中执行。重定向发生在插件钩子里，模型侧不需要改动
 提示词、工具或工作流。
@@ -104,7 +106,10 @@ export CUBE_OPENCODE_PYTHON=~/.venvs/cube/bin/python
 export CUBE_TEMPLATE_ID=tpl-xxxxxxxx
 export E2B_API_URL=http://127.0.0.1:3000
 export E2B_API_KEY=e2b_000000
-export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem
+# mkcert 把 CA 写在执行一键安装的那个用户的 home 下。
+# 如果安装时用的是 root，而你以普通用户运行 OpenCode，
+# 需要先把该文件复制到可读位置，再指向副本。
+export SSL_CERT_FILE="$HOME/.local/share/mkcert/rootCA.pem"
 ```
 
 请在启动 OpenCode **之前**导出；之后再导出的变量，编辑器的子进程看不到。
@@ -156,7 +161,14 @@ cd examples/opencode-plugin-sandbox
 ### 钩子实现
 
 整个重定向就是一个钩子。`output.args.command` 是可变的，
-赋值即改变实际执行的内容：
+赋值即改变实际执行的内容。
+
+下面的片段为了突出这一个思路做了删减，**不是**实际发布的插件：
+它省略了「入参缺失或 command 非字符串」的 fail-closed 处理、放行名单检查
+与幂等守卫，backend 的解析方式也不同。照抄会得到一个会嵌套改写、
+并对已配置放行的命令抛错的插件。请改为安装
+[`plugin/cubesandbox-bash.js`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/opencode-plugin-sandbox/plugin/cubesandbox-bash.js)，
+那是唯一的规范实现：
 
 ```js
 export const CubeSandboxBashPlugin = async ({ client }) => ({
@@ -235,8 +247,19 @@ OpenCode 可能同时下发多条 `bash` 调用。同一 session 内的调用通
 但 VM 每次都重建（参考环境下约 1 秒）。让它在调用间保持存活需要常驻辅助进程
 或 CubeSandbox 的 pause/resume。
 
+**只有名字恰好是 `bash` 的工具会被拦截。** 钩子匹配的是 `input.tool === "bash"`。
+Agent 能触及的其他具备 shell 能力的工具 —— 当前的或未来 OpenCode 版本新增的 ——
+都会在宿主执行，且不会被这里记录。升级 OpenCode 后请重新确认这一点。
+
 **`read` / `write` / `edit` 未被沙箱化。** 这是有意为之 —— Agent 必须能编辑项目 ——
 但恶意的 `write` 不在本集成的防护范围内。
+
+**Agent 编辑的文件对 `bash` 不可见。** 这是最主要的实际限制。
+`write` / `edit` 操作的是宿主上的项目，而 `bash` 运行在一个全新的 MicroVM 里，
+其根文件系统并不包含那个项目。所以常见的「改完就跑」循环在这里不成立：
+`write foo.py` 之后执行 `python foo.py` 会失败，因为沙箱里没有 `foo.py`。
+只需要一个可用 shell 的命令不受影响。把项目挂载进沙箱可以解决这个问题，
+但同时会放弃大部分隔离性，因此这里有意不这么做。
 
 **放行清单默认为空，它是逃生舱而非小例外。** 匹配只看首个 token，
 所以放行 `git` 等于放行所有以 `git` 开头的命令 —— 而 git 可以被用来执行任意 shell：
@@ -292,6 +315,7 @@ node tests/test_plugin.mjs
 ```
 
 25 项断言，覆盖命令改写、放行名单、幂等性、session id 处理与引号注入抵抗。
+需要 Node 22 或更新版本 —— 插件是放在 `.js` 文件里的 ESM，依赖 Node 自动识别模块语法。
 **仅依赖 Node 标准库** —— 不需要 npm install、不需要联网、不需要 CubeSandbox 部署。
 
 注入相关断言会按 POSIX shell 的语义解析改写后的命令，

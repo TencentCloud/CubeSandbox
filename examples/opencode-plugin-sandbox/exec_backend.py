@@ -365,18 +365,33 @@ def split_output(text: str) -> tuple[str, dict, int | None]:
         head, tail = text, ""
 
     def take_rc(block: str) -> tuple[str, int | None]:
-        """Strip __CUBE_RC__ lines from a block and return the last value."""
-        kept, found = [], None
-        for line in block.splitlines():
-            if line.strip().startswith("__CUBE_RC__="):
-                try:
-                    found = int(line.strip().split("=", 1)[1])
-                except ValueError:
-                    pass
-                continue
-            kept.append(line)
-        joined = "\n".join(kept)
-        if block.endswith("\n") and joined:
+        """Take the exit code from the *last* line only, if it is a marker.
+
+        Only the final line is considered, and only one line is ever removed.
+        An earlier version scanned every line and stripped all of them, which
+        had two consequences. A command printing ``__CUBE_RC__=0`` as ordinary
+        output had that line silently deleted from what the model saw, and in
+        the ``exec`` path the printed value was taken as the real exit code, so
+        ``exec bash -c 'echo __CUBE_RC__=0; exit 3'`` was reported as success.
+        Since both emitters append the marker as the final line, anchoring to
+        the end removes the forgery surface without losing the real value.
+        """
+        lines = block.splitlines()
+        if not lines:
+            return block, None
+
+        candidate = lines[-1].strip()
+        if not candidate.startswith("__CUBE_RC__="):
+            return block, None
+
+        try:
+            found = int(candidate.split("=", 1)[1])
+        except ValueError:
+            # Not a real marker after all; leave it in the output as data.
+            return block, None
+
+        joined = "\n".join(lines[:-1])
+        if joined:
             joined += "\n"
         return joined, found
 
@@ -415,17 +430,25 @@ def run_in_sandbox(command: str, session: str, timeout: int) -> int:
         try:
             with Sandbox.create(template=template) as sandbox:
                 # The wrapper normally emits __CUBE_RC__ itself from its EXIT
-                # trap. A command that calls `exec` replaces the process image
-                # and takes the trap with it, so nothing is emitted; the guest
-                # then appends the real process exit code as a fallback. Without
-                # this, `exec false` would be reported to OpenCode as success.
+                # trap, as the final line. A command that calls `exec` replaces
+                # the process image and takes the trap with it, so nothing is
+                # emitted; the guest then appends the real process exit code as
+                # a fallback. Without this, `exec false` would be reported to
+                # OpenCode as success.
+                #
+                # The check is anchored to the last line rather than searching
+                # the whole stream, so a command printing the marker as data
+                # cannot suppress the fallback and pass its own exit code off
+                # as the real one.
                 result = sandbox.run_code(
                     "import subprocess, sys\n"
                     "p = subprocess.run(['bash', '-lc', " + repr(wrapper) + "],\n"
                     "                   capture_output=True, text=True)\n"
                     "sys.stdout.write(p.stdout)\n"
                     "sys.stderr.write(p.stderr)\n"
-                    "if '__CUBE_RC__=' not in p.stdout:\n"
+                    "_lines = p.stdout.splitlines()\n"
+                    "_last = _lines[-1].strip() if _lines else ''\n"
+                    "if not _last.startswith('__CUBE_RC__='):\n"
                     "    sys.stdout.write('\\n__CUBE_RC__=%d\\n' % p.returncode)\n",
                     timeout=timeout,
                 )

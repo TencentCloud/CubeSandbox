@@ -418,7 +418,67 @@ the running instance.
 
 Tests: 25.
 
-### 5.12 Command-line parsing that missed the real output format
+### 5.12 A fifth round: the exit-code marker was forgeable
+
+The fifth review round reported that `take_rc` treated *any* stdout line
+beginning with `__CUBE_RC__=` as the exit-code marker, stripped every such line
+from the output the model sees, and — in the `exec` path — used the printed value
+as the real exit code. The guest-side fallback was suppressed at the same time,
+because it only appended the real return code when `'__CUBE_RC__=' not in
+p.stdout`. So `exec bash -c 'echo __CUBE_RC__=0; exit 3'` was reported as
+success.
+
+Reproduced against `split_output` before changing anything: input
+`'some output\n__CUBE_RC__=0\n'` returned `rc=0` with the marker line deleted
+from the body.
+
+Two things are wrong here and they compound. Deleting a line a command legitimately
+printed is data loss the user cannot see. Trusting that line as the exit code is
+the same silent-success failure this integration exists to remove — the third time
+it has reappeared in a different guise, after the `bash -c` state loss in round two
+and the `rc = 0` default in round four.
+
+Both emitters append the marker as the *final* line, so anchoring to the end
+removes the forgery surface without losing the real value. `take_rc` now inspects
+only the last line and removes at most one line, and the guest-side fallback check
+is anchored the same way so a forged line cannot suppress it. Verified across five
+shapes, including the compound case — a forged marker mid-stream plus the real
+fallback at the end now yields `rc=3` with the forged line preserved as output.
+
+Four smaller findings from the same round:
+
+The interception is a name-based allowlist for exactly `bash`, which the READMEs'
+headline claim did not qualify. Any other shell-capable tool the agent can reach,
+now or in a future OpenCode version, runs on the host unlogged. Stated explicitly
+in the security boundaries of both READMEs and both guides.
+
+The split-brain filesystem was understated. The docs said filesystem changes do
+not carry over, but never that files the agent edits via `write`/`edit` are never
+visible to `bash` — so `write foo.py` followed by `python foo.py` fails. This is
+the largest practical limitation of the whole approach and it was left for the
+reader to infer. Now stated plainly, along with why mounting the project would
+defeat the point.
+
+The integration guides' abridged hook snippet diverged from the shipped plugin in
+security-relevant ways: no fail-closed handling for unreadable args, no
+passthrough check, no idempotence guard. A reader copying it would get a plugin
+that nests rewrites and throws on configured passthrough commands. The snippet is
+now labelled as abridged, with what it omits enumerated and a link to the
+canonical file. Abridging for readability is fine; abridging away the safety
+checks without saying so is not.
+
+Also: the `SSL_CERT_FILE` examples hardcoded `/root/.local/share/mkcert/...`,
+which a non-root OpenCode user cannot read — now `$HOME` with a note that the
+install user and the OpenCode user must match; the guides' test sections did not
+mention the Node 22 requirement the READMEs document; the guides were missing the
+cross-language link `pi-agent.md` includes; and `install.sh --status` ignored
+`--dir`, reporting the project and global locations instead of the one asked
+about. `--status` now honours `--dir` and also reports whether the backend is
+present next to a copy-mode install, since a plugin without it fails every call.
+
+Tests: 25.
+
+### 5.13 Command-line parsing that missed the real output format
 
 Not part of the deliverable, but worth recording: a helper script used to drive
 the deployment failed to parse `cubemastercli` output because the AI-generated

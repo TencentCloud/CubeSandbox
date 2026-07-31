@@ -12,6 +12,8 @@ lang: en-US
 
 # OpenCode Integration Guide (Plugin Hook)
 
+[中文文档](../../zh/guide/integrations/opencode-plugin.md)
+
 Run OpenCode on your host, but execute every `bash` command it issues inside an
 isolated CubeSandbox MicroVM. The redirection happens in a plugin hook, so the
 model needs no prompt, tool, or workflow change.
@@ -109,7 +111,10 @@ export CUBE_OPENCODE_PYTHON=~/.venvs/cube/bin/python
 export CUBE_TEMPLATE_ID=tpl-xxxxxxxx
 export E2B_API_URL=http://127.0.0.1:3000
 export E2B_API_KEY=e2b_000000
-export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem
+# mkcert writes its CA under the home directory of the user that ran the
+# one-click install. If that was root and you run OpenCode as a normal user,
+# copy the file somewhere readable and point at the copy instead.
+export SSL_CERT_FILE="$HOME/.local/share/mkcert/rootCA.pem"
 ```
 
 Export these **before** starting OpenCode; variables exported afterwards are not
@@ -163,7 +168,15 @@ It exists for the model; `ls /tmp/only-in-sandbox` on the host reports
 ### The hook
 
 The whole redirection is one hook. `output.args.command` is mutable, so
-assigning to it changes what actually runs:
+assigning to it changes what actually runs.
+
+The snippet below is abridged to show that one idea. It is **not** the
+shipped plugin: it omits the fail-closed handling for a call with no `args`
+or a non-string command, the passthrough check, and the idempotence guard,
+and it resolves the backend differently. Copying it verbatim gives a plugin
+that nests rewrites and throws on configured passthrough commands. Install
+[`plugin/cubesandbox-bash.js`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/opencode-plugin-sandbox/plugin/cubesandbox-bash.js)
+instead, which is the canonical implementation:
 
 ```js
 export const CubeSandboxBashPlugin = async ({ client }) => ({
@@ -247,9 +260,23 @@ a crashed call cannot wedge the session. Different sessions run in parallel.
 VM is recreated each time (~1 s on the reference environment). Keeping one alive
 between calls needs a resident helper or CubeSandbox pause/resume.
 
+**Only the tool named exactly `bash` is intercepted.** The hook matches on
+`input.tool === "bash"`. Any other shell-capable tool the agent can reach, now
+or in a future OpenCode version, runs on the host and is not logged here.
+Re-check this after upgrading OpenCode.
+
 **`read` / `write` / `edit` are not sandboxed.** Intentional — the agent must be
 able to edit the project — but a malicious `write` is not covered by this
 integration.
+
+**Files the agent edits are not visible to `bash`.** This is the largest
+practical limitation. `write` and `edit` operate on the host project, while
+`bash` runs in a fresh MicroVM whose rootfs does not contain it. The usual
+edit-then-run loop therefore does not work: `write foo.py` followed by
+`python foo.py` fails because `foo.py` does not exist in the sandbox. Commands
+that only need a working shell are unaffected. Mounting the project into the
+sandbox would fix this and would also give up most of the isolation, so it is
+deliberately not done here.
 
 **Passthrough is empty by default, and it is an escape hatch rather than a
 narrow exception.** Matching is on the leading token only, so allowing `git`
@@ -313,8 +340,9 @@ node tests/test_plugin.mjs
 ```
 
 25 assertions covering rewriting, passthrough, idempotence, session-id handling,
-and quote-injection resistance. Node standard library only — no npm install, no
-network, no CubeSandbox deployment required.
+and quote-injection resistance. Requires Node 22 or newer, since the plugin is
+ESM in a `.js` file and relies on Node detecting module syntax. Node standard
+library only — no npm install, no network, no CubeSandbox deployment required.
 
 The injection assertions parse the rewritten command the way a POSIX shell
 would and check the original text lands in exactly one argv element. That is a
