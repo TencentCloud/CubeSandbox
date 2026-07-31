@@ -18,6 +18,11 @@ type Sandbox struct {
 	EnvdAccessToken    string `json:"envdAccessToken,omitempty"`
 	TrafficAccessToken string `json:"trafficAccessToken,omitempty"`
 	Domain             string `json:"domain,omitempty"`
+	// EnvdPort overrides the default envd data-plane port for this sandbox
+	// handle. It is intentionally not serialized: CubeAPI's public sandbox
+	// response remains backward compatible, while trusted control-plane
+	// callers can address envd instances in additional containers.
+	EnvdPort int `json:"-"`
 }
 
 // SandboxInfo is returned by list and get-info endpoints.

@@ -24,6 +24,10 @@ export CUBE_OPS_LOG_LEVEL="${CUBE_OPS_LOG_LEVEL:-info}"
 # CubeMaster address (same host in All-in-One mode).
 export CUBE_MASTER_ADDR="${CUBE_MASTER_ADDR:-http://127.0.0.1:8089}"
 
+# Web Terminal data plane. CubeProxy publishes its HTTP listener on the host;
+# keep custom one-click proxy ports aligned automatically.
+export CUBE_SANDBOX_PROXY_URL="${CUBE_SANDBOX_PROXY_URL:-http://127.0.0.1:${CUBE_PROXY_HTTP_PORT:-80}}"
+
 # JWT configuration. JWT_SECRET left unset → CubeOps auto-generates and
 # persists it to t_system_setting on first boot (single-instance default).
 export JWT_ACCESS_TTL="${JWT_ACCESS_TTL:-15m}"

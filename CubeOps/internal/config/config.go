@@ -65,6 +65,14 @@ type Config struct {
 	// Sandbox domain exposed to SDK clients; matches SDK handler's
 	// CUBE_API_SANDBOX_DOMAIN env so the /config endpoint stays in sync.
 	SandboxDomain string `yaml:"sandbox_domain"`
+
+	// Web Terminal data-plane and session settings.
+	SandboxProxyURL           string        `yaml:"sandbox_proxy_url"`
+	TerminalTicketTTL         time.Duration `yaml:"terminal_ticket_ttl"`
+	TerminalIdleTimeout       time.Duration `yaml:"terminal_idle_timeout"`
+	TerminalReconnectGrace    time.Duration `yaml:"terminal_reconnect_grace"`
+	TerminalMaxSessions       int           `yaml:"terminal_max_sessions"`
+	TerminalMaxSessionsPerBox int           `yaml:"terminal_max_sessions_per_sandbox"`
 }
 
 // Load reads configuration from YAML + environment variables (env wins).
@@ -112,6 +120,24 @@ func Load() (*Config, error) {
 	}
 	if cfg.SandboxDomain == "" {
 		cfg.SandboxDomain = "cube.app"
+	}
+	if cfg.SandboxProxyURL == "" {
+		cfg.SandboxProxyURL = "http://127.0.0.1"
+	}
+	if cfg.TerminalTicketTTL <= 0 {
+		cfg.TerminalTicketTTL = 30 * time.Second
+	}
+	if cfg.TerminalIdleTimeout <= 0 {
+		cfg.TerminalIdleTimeout = 15 * time.Minute
+	}
+	if cfg.TerminalReconnectGrace <= 0 {
+		cfg.TerminalReconnectGrace = 30 * time.Second
+	}
+	if cfg.TerminalMaxSessions <= 0 {
+		cfg.TerminalMaxSessions = 128
+	}
+	if cfg.TerminalMaxSessionsPerBox <= 0 {
+		cfg.TerminalMaxSessionsPerBox = 8
 	}
 
 	// JWT_SECRET is optional — if not set, it will be auto-generated and
@@ -313,6 +339,36 @@ func overrideFromEnv(cfg *Config) {
 	}
 	if v := os.Getenv("CUBE_API_SANDBOX_DOMAIN"); v != "" {
 		cfg.SandboxDomain = v
+	}
+	if v := os.Getenv("CUBE_SANDBOX_PROXY_URL"); v != "" {
+		cfg.SandboxProxyURL = v
+	} else if v := os.Getenv("AGENTHUB_SANDBOX_PROXY_URL"); v != "" {
+		cfg.SandboxProxyURL = v
+	}
+	if v := os.Getenv("CUBE_OPS_TERMINAL_TICKET_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.TerminalTicketTTL = d
+		}
+	}
+	if v := os.Getenv("CUBE_OPS_TERMINAL_IDLE_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.TerminalIdleTimeout = d
+		}
+	}
+	if v := os.Getenv("CUBE_OPS_TERMINAL_RECONNECT_GRACE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.TerminalReconnectGrace = d
+		}
+	}
+	if v := os.Getenv("CUBE_OPS_TERMINAL_MAX_SESSIONS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.TerminalMaxSessions = n
+		}
+	}
+	if v := os.Getenv("CUBE_OPS_TERMINAL_MAX_SESSIONS_PER_SANDBOX"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.TerminalMaxSessionsPerBox = n
+		}
 	}
 	if v := os.Getenv("JWT_ACCESS_TTL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {

@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/envdport"
 )
 
 func TestCheckReqVolumes(t *testing.T) {
@@ -310,5 +311,22 @@ func TestCheckParamExposedPorts(t *testing.T) {
 		})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "at most 4")
+	})
+
+	// Create validates the caller's request first and only then lets
+	// envdport.PrepareRequest publish the per-container envd endpoints the Web
+	// Terminal routes through. Those internal ports must not push a request
+	// that declared four ports of its own over the quota.
+	t.Run("internal envd ports do not consume the caller quota", func(t *testing.T) {
+		req := &cubebox.RunCubeSandboxRequest{
+			Containers: []*cubebox.ContainerConfig{
+				{Name: "main", Resources: &cubebox.Resource{Cpu: "2000m", Mem: "2048Mi"}},
+				{Name: "sidecar", Resources: &cubebox.Resource{Cpu: "1000m", Mem: "1024Mi"}},
+			},
+			ExposedPorts: []int64{80, 443, 8080, 9000},
+		}
+		assert.NoError(t, checkParam(ctx, req))
+		assert.NoError(t, envdport.PrepareRequest(req))
+		assert.Equal(t, []int64{80, 443, 8080, 9000, 49983, 49984}, req.ExposedPorts)
 	})
 }

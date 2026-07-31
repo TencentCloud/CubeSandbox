@@ -85,7 +85,86 @@ The Dashboard uses **JWT-based authentication** (since v0.6.0, replacing the old
 - Login is rate-limited: 5 failed attempts per minute per IP.
 :::
 
-## 4. Keyboard shortcuts
+## 4. Open a Web Terminal
+
+The Web Terminal gives an authenticated Dashboard user an interactive shell in
+a **running** sandbox container. It uses the same envd PTY data plane as the
+CubeSandbox SDK; it does not grant host access or bypass the sandbox's network
+and egress policy.
+
+### Before you start
+
+- Sign in to the Dashboard. Terminal ticket creation is protected by the same
+  CubeOps JWT authentication as other sandbox operations.
+- Start a sandbox and wait until its state is **Running**. The terminal button
+  is disabled for paused, pausing, stopped, or missing sandboxes.
+- The selected container image must include envd. New multi-container
+  sandboxes expose an independent envd endpoint for each container.
+- Use HTTPS for production deployments. The browser automatically changes the
+  terminal channel from `ws://` to encrypted `wss://`.
+
+### Start a shell
+
+1. Open **Sandboxes**.
+2. Select **Open terminal** in a running sandbox's action column, or open the
+   sandbox detail page and select **Open terminal** there.
+3. If the sandbox contains more than one terminal-capable container, select
+   the target from the **Container** menu.
+4. Wait for the green **Connected** status, then run:
+
+   ```sh
+   ls
+   top
+   ping -c 3 127.0.0.1
+   ```
+
+   Press `q` to exit `top`. ANSI color, cursor control, scrollback, resize, and
+   normal browser copy/paste shortcuts are supported.
+5. Select **Disconnect** to actively terminate the shell. Closing the panel
+   also terminates an active session.
+
+The toolbar can enter fullscreen and change the terminal font size. Each panel
+opens an independent PTY, so multiple users, browser tabs, sandboxes, and
+containers can be used concurrently within the configured session limits.
+
+### Disconnects, timeout, and audit
+
+CubeOps sends WebSocket keepalives. If the network drops unexpectedly, the
+panel shows **Connection lost** and offers **Reconnect**; the PTY is retained
+for 30 seconds by default. An inactive session is closed after 15 minutes by
+default. Operators can tune these values with:
+
+```sh
+CUBE_OPS_TERMINAL_IDLE_TIMEOUT=15m
+CUBE_OPS_TERMINAL_RECONNECT_GRACE=30s
+CUBE_OPS_TERMINAL_MAX_SESSIONS=128
+CUBE_OPS_TERMINAL_MAX_SESSIONS_PER_SANDBOX=8
+```
+
+For a non-default topology, also set `CUBE_SANDBOX_PROXY_URL` to the internal
+HTTP endpoint of CubeProxy (for example, `http://cube-proxy:80`). CubeOps keeps
+the virtual sandbox host name while dialing that endpoint.
+
+CubeOps writes structured `terminal audit` entries when a ticket is issued and
+when a session opens or closes. The log includes operator, timestamp, sandbox,
+container, session, and close reason.
+
+### Security and known limits
+
+- A WebSocket URL carries only a random, single-use ticket that expires after
+  30 seconds—not the user's JWT. Same-origin checks apply to browser upgrades.
+- Commands run with the container's existing envd identity and remain inside
+  its isolation, filesystem, Linux capabilities, and egress policy.
+- Sandboxes created before per-container envd metadata was introduced can use
+  the primary container on port `49983`; an older sidecar without endpoint
+  metadata is shown as unavailable.
+- The session starts `/bin/sh -i` for compatibility with minimal images.
+  Commands absent from the image (for example `ping`) must be installed in the
+  image using its normal package policy.
+- Reconnection is available only during the configured grace window and only
+  to the same authenticated operator, sandbox, and container.
+
+## 5. Keyboard shortcuts
 
 The Dashboard is keyboard-friendly. The big three:
 
@@ -96,7 +175,7 @@ The Dashboard is keyboard-friendly. The big three:
 | `R` | Refetch every visible data panel |
 | `Esc` | Close any open modal or the Command Palette |
 
-## 5. Personalize it
+## 6. Personalize it
 
 Open **Settings** in the left rail:
 
@@ -106,7 +185,7 @@ Open **Settings** in the left rail:
 
 The Command Palette's ⌘K input box and the topbar have quick toggles for the same.
 
-## 6. FAQ
+## 7. FAQ
 
 **Why a separate Dashboard, not just curl?**
 Most operations (create-from-image, version matrix, node triage) are easier to discover and visualize in a UI. For automation, the Dashboard is just a thin client — every page is a call to `/cubeapi/v1/*`, which is the same E2B-compatible REST API you can hit with `curl` or the E2B SDK.
@@ -123,7 +202,7 @@ Yes — set `WEB_UI_ENABLE=0` (or unset) in `.env`. The cluster keeps running; y
 **Is the Dashboard open source? Can I run my own build?**
 Yes — it lives in `web/` of the repo, built with Vite + React + TypeScript + Tailwind. See [Self-Build Deployment](./self-build-deploy.md) and the [`web/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/web/README.md) for details.
 
-## 7. Next steps
+## 8. Next steps
 
 - [Quick Start](./quickstart.md) — if you haven't installed yet, get to a running Dashboard in minutes
 - [Service Management](./service-management.md) — how to start/stop/restart the `cube-sandbox-webui.service` container

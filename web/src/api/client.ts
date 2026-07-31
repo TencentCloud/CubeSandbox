@@ -19,7 +19,18 @@ export type ComponentVersionDto = components['schemas']['ComponentVersionView'];
 
 export interface RunningSandbox extends ListedSandboxDto {}
 
-export interface SandboxDetail extends SandboxDetailDto {}
+export interface SandboxContainer {
+  name?: string;
+  containerID: string;
+  state: string;
+  image?: string;
+  type?: string;
+  envdPort?: number;
+}
+
+export interface SandboxDetail extends SandboxDetailDto {
+  containers?: SandboxContainer[];
+}
 
 export interface TemplateSummary {
   templateID: string;
@@ -117,7 +128,7 @@ function mapSandbox(dto: ListedSandboxDto): RunningSandbox {
 }
 
 function mapSandboxDetail(dto: SandboxDetailDto): SandboxDetail {
-  return dto;
+  return dto as SandboxDetail;
 }
 
 function mapTemplateSummary(dto: TemplateSummaryDto): TemplateSummary {
@@ -224,6 +235,27 @@ export const sandboxApi = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+};
+
+export interface TerminalTicketResponse {
+  ticket: string;
+  expiresAt: string;
+  containerID: string;
+  wsPath: string;
+}
+
+export const terminalApi = {
+  ticket: (
+    sandboxID: string,
+    body: { containerID?: string; sessionID?: string; rows: number; cols: number },
+  ) =>
+    ops<TerminalTicketResponse>(
+      `/sdk/sandboxes/${encodeURIComponent(sandboxID)}/terminal/tickets`,
+      {
+        method: 'POST',
+        body: JSON.stringify(body),
+      },
+    ),
 };
 
 export const templateApi = {

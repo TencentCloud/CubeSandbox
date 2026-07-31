@@ -25,6 +25,10 @@ const (
 const (
 	LabelCriSandboxID     = "io.kubernetes.cri.sandbox-id"
 	LabelCriContainerType = "io.cri-containerd.kind"
+	// LabelEnvdPort identifies the per-container envd endpoint exposed through
+	// CubeProxy. The Web Terminal uses it to route a PTY to the selected
+	// container without crossing the sandbox's network boundary.
+	LabelEnvdPort = "cube.envd-port"
 
 	LabelSandboxFirstContainerID = "cube.sandbox.first.container.id"
 )

@@ -16,6 +16,7 @@ import { ArrowLeft, Pause, Play, Trash2, RefreshCw } from 'lucide-react';
 import { cn, formatBytes, formatRelative } from '@/lib/utils';
 import { formatSandboxActionError } from '@/lib/sandboxActionError';
 import { SandboxActionErrorBanner } from '@/components/SandboxActionErrorBanner';
+import { TerminalLauncher } from '@/components/terminal/TerminalLauncher';
 
 // ── Log level colors ────────────────────────────────────────────────────────
 const LEVEL_CLASS: Record<string, string> = {
@@ -219,6 +220,7 @@ export default function SandboxDetailPage() {
         </div>
         {data ? (
           <div className="flex gap-2">
+            <TerminalLauncher sandboxID={sandboxID} state={state} containers={data.containers} />
             {state === 'paused' ? (
               <Button variant="outline" onClick={() => resume.mutate()} disabled={resume.isPending}>
                 <Play size={14} /> {t('actions.resume')}

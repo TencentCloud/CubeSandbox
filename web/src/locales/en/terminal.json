@@ -1,0 +1,37 @@
+{
+  "open": "Open terminal",
+  "unavailable": "Terminal is available only while the sandbox is running.",
+  "containerUnavailable": "No running container exposes a terminal endpoint.",
+  "title": "Web Terminal",
+  "container": "Container",
+  "primaryContainer": "Primary container",
+  "status": {
+    "idle": "Not connected",
+    "connecting": "Connecting…",
+    "connected": "Connected",
+    "reconnected": "Reconnected",
+    "disconnected": "Connection lost",
+    "closed": "Session closed",
+    "error": "Connection failed"
+  },
+  "actions": {
+    "disconnect": "Disconnect",
+    "reconnect": "Reconnect",
+    "newSession": "New session",
+    "fullscreen": "Fullscreen",
+    "exitFullscreen": "Exit fullscreen",
+    "increaseFont": "Increase font size",
+    "decreaseFont": "Decrease font size",
+    "close": "Close"
+  },
+  "messages": {
+    "connecting": "Connecting to {{container}}…",
+    "ready": "Connected to {{container}}.",
+    "reconnected": "Terminal session restored.",
+    "disconnected": "The connection was interrupted. Your shell is retained briefly; select Reconnect to restore it.",
+    "idleTimeout": "The terminal was closed after being idle.",
+    "sessionClosed": "The terminal session has ended.",
+    "switchContainer": "Switching containers starts a new terminal session.",
+    "secureTransport": "The terminal uses the current HTTPS/WSS session and keeps the sandbox's existing permission and network boundaries."
+  }
+}

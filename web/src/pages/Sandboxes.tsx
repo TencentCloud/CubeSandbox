@@ -16,6 +16,7 @@ import { formatBytes, formatRelative, short } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 import { formatSandboxActionError } from '@/lib/sandboxActionError';
 import { SandboxActionErrorBanner } from '@/components/SandboxActionErrorBanner';
+import { TerminalLauncher } from '@/components/terminal/TerminalLauncher';
 
 type StateFilter = 'all' | 'running' | 'paused';
 
@@ -236,6 +237,13 @@ function Row({
       <div className="text-xs text-muted-foreground/80 text-num">{sb.clientID || '—'}</div>
       <div className="text-xs text-muted-foreground">{formatRelative(sb.startedAt)}</div>
       <div className="flex justify-end gap-1">
+        <TerminalLauncher
+          sandboxID={sb.sandboxID}
+          state={state}
+          size="icon"
+          variant="ghost"
+          iconOnly
+        />
         {state === 'paused' ? (
           <Button
             size="icon"

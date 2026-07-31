@@ -209,9 +209,13 @@ func multipartFileBody(path string, data []byte) (io.Reader, string, error) {
 }
 
 func (s *Sandbox) newEnvdRequest(ctx context.Context, method, path string, query url.Values, body io.Reader) (*http.Request, error) {
+	envdPort := s.EnvdPort
+	if envdPort <= 0 || envdPort > 65535 {
+		envdPort = EnvdPort
+	}
 	target := url.URL{
 		Scheme:   s.client.config.ProxyScheme,
-		Host:     s.GetHost(EnvdPort),
+		Host:     s.GetHost(envdPort),
 		Path:     path,
 		RawQuery: query.Encode(),
 	}

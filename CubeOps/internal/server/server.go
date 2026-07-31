@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -20,23 +21,38 @@ import (
 
 // Server is the CubeOps HTTP server.
 type Server struct {
-	cfg     *config.Config
-	store   *store.Store
-	jm      *auth.JWTManager
-	httpSrv *http.Server
-	cm      *cubemaster.Client
+	cfg      *config.Config
+	store    *store.Store
+	jm       *auth.JWTManager
+	httpSrv  *http.Server
+	cm       *cubemaster.Client
+	terminal *service.TerminalService
 }
 
-// New creates a new CubeOps server.
-func New(cfg *config.Config, s *store.Store) *Server {
+// New creates a new CubeOps server. It fails when the Web Terminal data-plane
+// address (sandbox_proxy_url / CUBE_SANDBOX_PROXY_URL) is not a usable
+// http(s) URL, so a misconfiguration surfaces as a startup error.
+func New(cfg *config.Config, s *store.Store) (*Server, error) {
 	jm := auth.NewJWTManager(cfg.JWTSecret, cfg.AccessTTL, cfg.RefreshTTL)
 	cm := cubemaster.New(cfg.CubeMasterAddr)
-	return &Server{
-		cfg:   cfg,
-		store: s,
-		jm:    jm,
-		cm:    cm,
+	terminal, err := service.NewTerminalService(
+		cfg.SandboxProxyURL,
+		cfg.SandboxDomain,
+		cfg.TerminalTicketTTL,
+		cfg.TerminalReconnectGrace,
+		cfg.TerminalMaxSessions,
+		cfg.TerminalMaxSessionsPerBox,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("configure Web Terminal: %w", err)
 	}
+	return &Server{
+		cfg:      cfg,
+		store:    s,
+		jm:       jm,
+		cm:       cm,
+		terminal: terminal,
+	}, nil
 }
 
 // Start begins listening for HTTP requests.
@@ -63,10 +79,19 @@ func (s *Server) Start() error {
 // Shutdown gracefully stops the server.
 func (s *Server) Shutdown(ctx context.Context) error {
 	if s.httpSrv == nil {
+		if s.terminal != nil {
+			return s.terminal.Close()
+		}
 		return nil
 	}
 	slog.Info("CubeOps shutting down")
-	return s.httpSrv.Shutdown(ctx)
+	err := s.httpSrv.Shutdown(ctx)
+	if s.terminal != nil {
+		if terminalErr := s.terminal.Close(); err == nil {
+			err = terminalErr
+		}
+	}
+	return err
 }
 
 // buildRouter configures all routes on a gin engine.
@@ -96,10 +121,12 @@ func (s *Server) buildRouter() *gin.Engine {
 	// deletions can reverse-sync AgentHub registrations (matching the old
 	// Rust reverse_sync_agenthub_template that lived in CubeAPI).
 	sdkH := handler.NewSDKHandler(s.cm).WithAgentHubService(agenthubH.AgentHubService())
+	terminalH := handler.NewTerminalHandler(s.cm, s.terminal, s.cfg.TerminalIdleTimeout)
 
 	// Public (no auth) routes — login + refresh.
 	public := r.Group("/api/v1")
 	authH.RegisterPublic(public)
+	terminalH.RegisterPublic(public.Group("/sdk"))
 
 	// Authenticated routes. The session / logout / change-password endpoints
 	// are mounted here, behind the JWT middleware.
@@ -115,6 +142,7 @@ func (s *Server) buildRouter() *gin.Engine {
 	// the WebUI and the E2B-compatible clients hit different prefixes.
 	sdkGroup := authed.Group("/sdk")
 	sdkH.Register(sdkGroup)
+	terminalH.RegisterAuthed(sdkGroup)
 	sdkV2Group := authed.Group("/sdk/v2")
 	sdkV2Group.GET("/sandboxes", sdkH.ListSandboxes)
 	sdkV2Group.GET("/sandboxes/:id/logs", sdkH.GetSandboxLogs)

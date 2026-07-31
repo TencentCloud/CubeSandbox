@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import react from '@vitejs/plugin-react';
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vitest/config';
 
 const pkg = JSON.parse(readFileSync(path.resolve(__dirname, './package.json'), 'utf-8'));
 
@@ -36,6 +36,11 @@ export default defineConfig({
     __APP_VERSION__: JSON.stringify(resolveAppVersion()),
   },
   plugins: [react()],
+  test: {
+    environment: 'jsdom',
+    setupFiles: ['./src/test/setup.ts'],
+    restoreMocks: true,
+  },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
@@ -48,6 +53,13 @@ export default defineConfig({
       '/opsapi': {
         target: 'http://127.0.0.1:3010',
         rewrite: (path) => path.replace(/^\/opsapi/, '/api'),
+      },
+      // Web Terminal and SDK routes served by CubeOps. This entry must precede
+      // the legacy /cubeapi fallback so WebSocket upgrades reach CubeOps.
+      '/cubeapi/v1': {
+        target: 'http://127.0.0.1:3010',
+        ws: true,
+        rewrite: (path) => path.replace(/^\/cubeapi\/v1/, '/api/v1/sdk'),
       },
       // CubeAPI (SDK/E2B endpoints) — proxy specific API paths to avoid
       // conflicting with vite's own static file serving.

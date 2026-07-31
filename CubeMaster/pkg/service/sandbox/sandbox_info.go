@@ -6,6 +6,7 @@ package sandbox
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -171,6 +172,7 @@ func doget(ctx context.Context, calleep string, cubeletReq *cubebox.ListCubeSand
 				Mem:         container.GetResources().GetMem(),
 				Type:        container.GetType(),
 				PauseAt:     container.GetPausedAt(),
+				EnvdPort:    envdPortFromLabels(container.GetLabels(), container.GetId() == sandbox.GetId()),
 			}
 			one.Containers = append(one.Containers, containerInfo)
 		}
@@ -182,6 +184,20 @@ func doget(ctx context.Context, calleep string, cubeletReq *cubebox.ListCubeSand
 		rsp.Data = append(rsp.Data, one)
 	}
 	return nil
+}
+
+func envdPortFromLabels(labels map[string]string, primary bool) int32 {
+	if raw := labels[constants.LabelEnvdPort]; raw != "" {
+		if port, err := strconv.Atoi(raw); err == nil && port > 0 && port <= 65535 {
+			return int32(port)
+		}
+	}
+	// Sandboxes created before per-container endpoint metadata always expose
+	// the primary envd process on the historical default port.
+	if primary {
+		return 49983
+	}
+	return 0
 }
 
 func decorateSandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq, rsp *types.GetCubeSandboxRes) error {

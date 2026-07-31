@@ -47,6 +47,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/cgroup"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/command"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/env"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/envdport"
 	localnetfile "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/netfile"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/pmem"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/rlimit"
@@ -838,6 +839,9 @@ func (l *local) containerSpec(ctx context.Context, sandBox *cubeboxstore.CubeBox
 	containerLabels[constants.ContainerType] = containerType
 	containerLabels[constants.LabelCriContainerType] = containerType
 	containerLabels[constants.LabelCriSandboxID] = sandBox.ID
+	if port, ok := envdport.Get(containerReq); ok {
+		containerLabels[constants.LabelEnvdPort] = strconv.Itoa(port)
+	}
 	ci.AddLabels(containerLabels)
 	cOpts = append(cOpts, containerd.WithContainerLabels(containerLabels))
 

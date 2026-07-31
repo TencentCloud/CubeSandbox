@@ -58,7 +58,11 @@ func main() {
 	}
 	cfg.JWTSecret = jwtSecret
 
-	srv := server.New(cfg, s)
+	srv, err := server.New(cfg, s)
+	if err != nil {
+		slog.Error("failed to initialise server", "error", err)
+		os.Exit(1)
+	}
 
 	// Graceful shutdown
 	go func() {

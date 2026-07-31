@@ -54,6 +54,9 @@ func checkParam(ctx context.Context, realReq *cubebox.RunCubeSandboxRequest) err
 			return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid exposed port %d", p)
 		}
 	}
+	// The four-port quota covers caller-declared ports only. Create runs this
+	// check before envdport.PrepareRequest appends the internal per-container
+	// envd endpoints, so those never consume the caller's quota.
 	if len(realReq.GetExposedPorts()) > 4 {
 		return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat,
 			"exposed ports should be at most 4")

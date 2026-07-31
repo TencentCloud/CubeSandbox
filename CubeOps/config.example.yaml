@@ -47,3 +47,13 @@ redis_url: ""
 
 # --- Sandbox domain exposed to SDK clients via /config ---
 sandbox_domain: "cube.app"
+
+# --- Web Terminal ---
+# CubeOps reaches envd through CubeProxy while preserving the virtual Host
+# (<envd-port>-<sandbox-id>.<sandbox-domain>).
+sandbox_proxy_url: "http://127.0.0.1"
+terminal_ticket_ttl: "30s"
+terminal_idle_timeout: "15m"
+terminal_reconnect_grace: "30s"
+terminal_max_sessions: 128
+terminal_max_sessions_per_sandbox: 8

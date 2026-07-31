@@ -122,6 +122,51 @@ func TestPtyCreateStreamsAndWaits(t *testing.T) {
 	}
 }
 
+func TestAttachSandboxUsesSelectedEnvdPortAndShell(t *testing.T) {
+	var gotHost string
+	var gotProcess struct {
+		Process struct {
+			Cmd  string   `json:"cmd"`
+			Args []string `json:"args"`
+		} `json:"process"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost = r.Host
+		body, _ := io.ReadAll(r.Body)
+		decodeEnvelopeJSON(t, body, &gotProcess)
+		w.Header().Set("Content-Type", connectContentType)
+		w.Write(connectEnvelope(0, `{"event":{"start":{"pid":7}}}`))
+		w.Write(connectEnvelope(0, `{"event":{"end":{"exitCode":0,"exited":true}}}`))
+		w.Write(connectEnvelope(connectEndStreamFlag, `{}`))
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{
+		ProxyNodeIP:    host,
+		ProxyPortHTTP:  port,
+		SandboxDomain:  "cube.test",
+		RequestTimeout: 5 * time.Second,
+	})
+	sandbox := client.AttachSandbox("sandbox-selected", 55000)
+	handle, err := sandbox.Pty().Create(context.Background(), PtySize{Rows: 24, Cols: 80}, PtyCreateOptions{
+		Shell: "/bin/sh",
+		Args:  []string{"-i"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := handle.Wait(nil); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if gotHost != "55000-sandbox-selected.cube.test" {
+		t.Fatalf("Host = %q", gotHost)
+	}
+	if gotProcess.Process.Cmd != "/bin/sh" || len(gotProcess.Process.Args) != 1 || gotProcess.Process.Args[0] != "-i" {
+		t.Fatalf("process = %#v", gotProcess.Process)
+	}
+}
+
 func TestPtyCreateUserEnvsCwd(t *testing.T) {
 	var gotAuth string
 	var gotBody []byte

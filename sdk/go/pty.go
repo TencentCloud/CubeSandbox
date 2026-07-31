@@ -47,6 +47,13 @@ type PtyCreateOptions struct {
 	// Timeout is the server-side deadline for the stream (Connect-Timeout-Ms).
 	// Zero uses defaultPtyTimeout.
 	Timeout time.Duration
+	// Shell is the interactive shell executable. Empty preserves the existing
+	// /bin/bash default. Callers targeting minimal images can select /bin/sh.
+	Shell string
+	// Args overrides the default interactive shell arguments. When Shell is
+	// set and Args is nil, "-i" is used; with an empty Shell the historical
+	// bash arguments "-i -l" are retained.
+	Args []string
 }
 
 // PtyConnectOptions configures Pty.Connect.
@@ -95,10 +102,21 @@ func (p *Pty) Create(ctx context.Context, size PtySize, opts PtyCreateOptions) (
 		timeout = defaultPtyTimeout
 	}
 
+	shell := opts.Shell
+	args := opts.Args
+	if shell == "" {
+		shell = "/bin/bash"
+		if args == nil {
+			args = []string{"-i", "-l"}
+		}
+	} else if args == nil {
+		args = []string{"-i"}
+	}
+
 	payload := ptyStartRequest{
 		Process: ptyProcessConfig{
-			Cmd:  "/bin/bash",
-			Args: []string{"-i", "-l"},
+			Cmd:  shell,
+			Args: args,
 			Envs: envs,
 			Cwd:  opts.Cwd,
 		},

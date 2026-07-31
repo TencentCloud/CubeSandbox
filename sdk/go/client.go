@@ -89,6 +89,21 @@ func (c *Client) Connect(ctx context.Context, sandboxID string) (*Sandbox, error
 	return &sandbox, nil
 }
 
+// AttachSandbox creates a local data-plane handle for an already validated
+// sandbox without issuing a control-plane request. Control-plane services use
+// it after checking sandbox ownership and lifecycle state themselves.
+//
+// envdPort selects the envd endpoint for a specific container. Values outside
+// the TCP port range fall back to the standard EnvdPort.
+func (c *Client) AttachSandbox(sandboxID string, envdPort int) *Sandbox {
+	sandbox := &Sandbox{
+		SandboxID: sandboxID,
+		EnvdPort:  envdPort,
+	}
+	c.attachSandbox(sandbox)
+	return sandbox
+}
+
 func (c *Client) List(ctx context.Context) ([]SandboxInfo, error) {
 	var sandboxes []SandboxInfo
 	if err := c.doJSON(ctx, http.MethodGet, "/sandboxes", nil, &sandboxes, http.StatusOK); err != nil {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestLoad_FromYAML proves that config.Load() reads values from the YAML
@@ -20,6 +21,12 @@ func TestLoad_FromYAML(t *testing.T) {
 log_level: "debug"
 cubemaster_addr: "http://1.2.3.4:8089"
 sandbox_domain: "test.example.com"
+sandbox_proxy_url: "https://proxy.example.com:8443"
+terminal_ticket_ttl: "45s"
+terminal_idle_timeout: "20m"
+terminal_reconnect_grace: "1m"
+terminal_max_sessions: 64
+terminal_max_sessions_per_sandbox: 6
 database_url: "mysql://root:pass@127.0.0.1:3306/testdb"
 jwt_secret: "yaml-secret"
 access_ttl: "30m"
@@ -48,6 +55,14 @@ refresh_ttl: "336h"
 	}
 	if cfg.JWTSecret != "yaml-secret" {
 		t.Errorf("JWTSecret = %q, want yaml-secret", cfg.JWTSecret)
+	}
+	if cfg.SandboxProxyURL != "https://proxy.example.com:8443" ||
+		cfg.TerminalTicketTTL != 45*time.Second ||
+		cfg.TerminalIdleTimeout != 20*time.Minute ||
+		cfg.TerminalReconnectGrace != time.Minute ||
+		cfg.TerminalMaxSessions != 64 ||
+		cfg.TerminalMaxSessionsPerBox != 6 {
+		t.Errorf("terminal config was not loaded from YAML: %#v", cfg)
 	}
 }
 

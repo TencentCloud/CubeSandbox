@@ -1,0 +1,37 @@
+{
+  "open": "打开终端",
+  "unavailable": "仅运行中的沙箱可以打开终端。",
+  "containerUnavailable": "没有运行中的容器提供终端端点。",
+  "title": "网页终端",
+  "container": "容器",
+  "primaryContainer": "主容器",
+  "status": {
+    "idle": "未连接",
+    "connecting": "连接中…",
+    "connected": "已连接",
+    "reconnected": "已重新连接",
+    "disconnected": "连接已中断",
+    "closed": "会话已关闭",
+    "error": "连接失败"
+  },
+  "actions": {
+    "disconnect": "断开",
+    "reconnect": "重新连接",
+    "newSession": "新建会话",
+    "fullscreen": "全屏",
+    "exitFullscreen": "退出全屏",
+    "increaseFont": "增大字号",
+    "decreaseFont": "减小字号",
+    "close": "关闭"
+  },
+  "messages": {
+    "connecting": "正在连接 {{container}}…",
+    "ready": "已连接到 {{container}}。",
+    "reconnected": "终端会话已恢复。",
+    "disconnected": "连接异常中断。Shell 会短暂保留，请点击“重新连接”恢复会话。",
+    "idleTimeout": "终端因长时间无活动已关闭。",
+    "sessionClosed": "终端会话已结束。",
+    "switchContainer": "切换容器会启动一个新的终端会话。",
+    "secureTransport": "终端沿用当前 HTTPS/WSS 会话，并保持沙箱原有的权限与网络边界。"
+  }
+}

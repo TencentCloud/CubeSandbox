@@ -68,6 +68,7 @@ type CMSandboxDetailItem struct {
 
 // CMSandboxContainer describes one container inside a CubeMaster sandbox detail.
 type CMSandboxContainer struct {
+	Name        string `json:"name"`
 	ContainerID string `json:"container_id"`
 	Status      int    `json:"status"`
 	Image       string `json:"image"`
@@ -76,6 +77,7 @@ type CMSandboxContainer struct {
 	Mem         string `json:"mem"`       // e.g. "2048Mi"
 	Type        string `json:"type"`
 	PauseAt     int64  `json:"pause_at"`
+	EnvdPort    int    `json:"envd_port"`
 }
 
 // ── camelCase key conversion ────────────────────────────────────────────────
@@ -359,6 +361,18 @@ func TransformSandboxDetail(raw json.RawMessage) interface{} {
 		"hostID":      item.HostID,
 		"domain":      SandboxDomain(),
 	}
+	containers := make([]map[string]interface{}, 0, len(item.Containers))
+	for _, container := range item.Containers {
+		containers = append(containers, map[string]interface{}{
+			"name":        container.Name,
+			"containerID": container.ContainerID,
+			"state":       SandboxStateFromInt(container.Status),
+			"image":       container.Image,
+			"type":        container.Type,
+			"envdPort":    container.EnvdPort,
+		})
+	}
+	result["containers"] = containers
 	if item.Labels != nil {
 		result["metadata"] = item.Labels
 	}

@@ -94,7 +94,7 @@ func TestSDK_GetSandbox_Success(t *testing.T) {
 				"data": [{
 					"sandbox_id": "sb-42", "host_id": "node-a", "status": 1,
 					"template_id": "tpl-1", "namespace": "default",
-					"containers": [{"container_id": "c-1", "cpu": "2000m", "mem": "2048Mi", "create_at": 1700000000000000000, "type": "sandbox"}],
+					"containers": [{"name": "main", "container_id": "c-1", "cpu": "2000m", "mem": "2048Mi", "create_at": 1700000000000000000, "type": "sandbox", "status": 1, "envd_port": 49983}],
 					"annotations": {}, "labels": {}
 				}]
 			}`), nil
@@ -119,6 +119,15 @@ func TestSDK_GetSandbox_Success(t *testing.T) {
 	}
 	if detail["state"] != "running" {
 		t.Errorf("state = %v, want running (status 1 → running)", detail["state"])
+	}
+	containers, ok := detail["containers"].([]interface{})
+	if !ok || len(containers) != 1 {
+		t.Fatalf("containers = %#v", detail["containers"])
+	}
+	container, ok := containers[0].(map[string]interface{})
+	if !ok || container["name"] != "main" || container["containerID"] != "c-1" ||
+		container["state"] != "running" || container["envdPort"] != float64(49983) {
+		t.Errorf("container detail = %#v", containers[0])
 	}
 }
 

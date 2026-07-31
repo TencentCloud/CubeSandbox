@@ -5,6 +5,11 @@
 // Package constants contains all of the application wide constant values used throughout Cube Master.
 package constants
 
+// LabelEnvdPort is written by Cubelet on each container and exposed by
+// CubeMaster so control-plane clients can route data-plane calls to a selected
+// container.
+const LabelEnvdPort = "cube.envd-port"
+
 const (
 	SelectorPreFilterID     = "PreFilter"
 	SelectorBackoffFilterID = "Backoff"

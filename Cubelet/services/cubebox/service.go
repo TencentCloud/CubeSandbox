@@ -29,6 +29,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/envdport"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/resourcesource"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
@@ -230,6 +231,14 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		rerr, _ := ret.FromError(err)
 		rsp.Ret.RetMsg = rerr.Message()
 		rsp.Ret.RetCode = rerr.Code()
+		return rsp, nil
+	}
+	// Runs after checkParam so the internal envd endpoints it exposes are not
+	// counted against the caller's four-port quota, and before the create
+	// workflow so network allocation publishes a host-port mapping for each.
+	if err := envdport.PrepareRequest(req); err != nil {
+		rsp.Ret.RetMsg = err.Error()
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		return rsp, nil
 	}
 	SetRunCubeSandboxRequestDefaultValue(req)
