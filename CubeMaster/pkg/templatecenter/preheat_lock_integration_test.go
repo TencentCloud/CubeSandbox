@@ -10,7 +10,11 @@ import (
 	"context"
 	"database/sql"
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
+
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -126,4 +130,66 @@ func TestPreheatAdvisoryLock_TwoStatementPatternLeaks(t *testing.T) {
 	var final sql.NullInt64
 	require.NoError(t, connA.QueryRowContext(ctx, "SELECT RELEASE_LOCK(?)", name).Scan(&final))
 	assert.True(t, final.Valid && final.Int64 == 1, "owning connection must release")
+}
+
+// TestPreheatAdvisoryLock_ContentionSingleWinner simulates N CubeMaster
+// replicas all firing a reconcile pass at the same instant (the multi-master
+// contention case). Exactly one must win the GET_LOCK(name, 0); the rest must
+// get locked=false and skip (the loser path in runPreheatReconcilePass). After
+// the winner releases, a fresh connection must be able to acquire (no leak).
+func TestPreheatAdvisoryLock_ContentionSingleWinner(t *testing.T) {
+	db := openLiveMySQL(t)
+	ctx := context.Background()
+	name := preheatLockName + "_contention"
+	t.Cleanup(func() { _ = db.WithContext(ctx).Exec("SELECT RELEASE_LOCK(?)", name).Error })
+
+	const contenders = 6
+	var wins atomic.Int32
+	var attempted atomic.Int32
+	start := make(chan struct{})
+	release := make(chan struct{})
+	var done sync.WaitGroup
+	done.Add(contenders)
+
+	for range contenders {
+		go func() {
+			defer done.Done()
+			err := db.WithContext(ctx).Connection(func(sess *gorm.DB) error {
+				<-start // release all contenders simultaneously
+				locked, err := trySessionLock(sess, name)
+				attempted.Add(1)
+				if err != nil {
+					t.Errorf("acquire: %v", err)
+					return err
+				}
+				if locked {
+					wins.Add(1)
+					// hold the lock until the main goroutine has counted every
+					// contender's attempt, so a late loser can't sneak in after
+					// an early winner releases.
+					<-release
+					_, _ = releaseSessionLock(pinnedSessionWithContext(sess, ctx), name)
+				}
+				return nil
+			})
+			if err != nil {
+				t.Errorf("connection: %v", err)
+			}
+		}()
+	}
+	close(start)            // fire all GET_LOCK(name,0) at once
+	for attempted.Load() < contenders {
+		time.Sleep(time.Millisecond)
+	}
+	close(release)          // let the winner release
+	done.Wait()
+
+	assert.Equal(t, int32(1), wins.Load(),
+		"exactly one master must win the advisory lock under simultaneous contention")
+
+	// After release, a fresh connection must acquire (no leak).
+	var got sql.NullInt64
+	require.NoError(t, db.WithContext(ctx).Raw("SELECT GET_LOCK(?, 0)", name).Scan(&got).Error)
+	assert.True(t, got.Valid && got.Int64 == 1, "lock leaked after the winner released")
+	_ = db.WithContext(ctx).Exec("SELECT RELEASE_LOCK(?)", name).Error
 }
