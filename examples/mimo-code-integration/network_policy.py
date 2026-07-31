@@ -165,16 +165,25 @@ def verify_ca_bundle(sandbox: Sandbox, envs: dict[str, str]) -> None:
 
 
 def show_secret_boundary(sandbox: Sandbox, envs: dict[str, str]) -> None:
+    """Inspect the VM environment itself, not the driver's per-command envs.
+
+    Agent turns still pass ``PLACEHOLDER_KEY`` via command ``envs`` so MiMo can
+    send a stand-in header for CubeEgress to replace. This check deliberately
+    omits that overlay so a real key baked into the image or sandbox env_vars
+    cannot hide behind the placeholder.
+    """
     key = shlex.quote(MIMO_API_KEY_ENV)
     home = shlex.quote(envs["MIMOCODE_HOME"])
+    placeholder = shlex.quote(PLACEHOLDER_KEY)
     result = run_command(
         sandbox,
         shell_join(
-            f"test \"$(printenv {key})\" = {shlex.quote(PLACEHOLDER_KEY)}",
+            f"value=$(printenv {key} || echo '<unset>')",
+            f"printf 'In-VM {MIMO_API_KEY_ENV}: %s\\n' \"$value\"",
+            # Accept only unset or the documented placeholder at VM scope.
+            f"case \"$value\" in '<unset>'|{placeholder}) ;; *) exit 2 ;; esac",
             f"test ! -f {home}/data/auth.json",
-            f"printf 'In-VM {MIMO_API_KEY_ENV}: %s\\n' \"$(printenv {key})\"",
         ),
-        envs=envs,
         timeout=30,
     )
     ensure_success(result, "verify the CubeEgress secret boundary")

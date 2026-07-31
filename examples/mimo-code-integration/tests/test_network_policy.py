@@ -132,6 +132,31 @@ class NetworkPolicyTests(unittest.TestCase):
             "verify CubeEgress CA bundle at '/etc/cube/ca/cube-root-ca.crt'",
         )
 
+    @patch.object(network_policy, "run_command")
+    def test_secret_boundary_reads_vm_env_without_command_overlay(
+        self, run_command
+    ) -> None:
+        from types import SimpleNamespace
+
+        run_command.return_value = SimpleNamespace(
+            exit_code=0,
+            stdout="In-VM MIMO_API_KEY: <unset>\n",
+            stderr="",
+        )
+
+        network_policy.show_secret_boundary(
+            object(),
+            {"MIMOCODE_HOME": "/root/.mimocode"},
+        )
+
+        command = run_command.call_args.args[1]
+        kwargs = run_command.call_args.kwargs
+        self.assertNotIn("envs", kwargs)
+        self.assertNotIn("env", kwargs)
+        self.assertIn("printenv MIMO_API_KEY || echo '<unset>'", command)
+        self.assertIn("cube-egress-managed-placeholder", command)
+        self.assertIn("test ! -f /root/.mimocode/data/auth.json", command)
+
 
 if __name__ == "__main__":
     unittest.main()
