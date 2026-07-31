@@ -33,10 +33,13 @@
  *    the backend, never interpolated into a shell string. Shell metacharacters
  *    and newlines cannot break out onto the host.
  *
- * 3. Session affinity. One MicroVM per OpenCode session, keyed by the session
- *    id taken from the hook input. Consecutive commands therefore observe each
- *    other's working directory and exported environment, which is what a user
- *    expects from a shell.
+ * 3. Session-scoped state, not a session-scoped VM. The backend creates a fresh
+ *    MicroVM per call and replays the recorded working directory and exported
+ *    environment into it, keyed by the session id taken from the hook input.
+ *    Consecutive commands therefore observe each other's `cd` and `export`,
+ *    which is what a user expects from a shell, but filesystem changes do not
+ *    survive: a file written by one call is gone by the next. See the known
+ *    limitations in the README.
  *
  * Hook contract (https://opencode.ai/docs/plugins/)
  * -------------------------------------------------

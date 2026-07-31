@@ -11,6 +11,7 @@
  */
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -462,11 +463,19 @@ await checkAsync("CUBE_OPENCODE_PYTHON overrides the interpreter", async () => {
 
 check("backend script exists next to the plugin", () => {
   // The plugin fails closed when this file is missing, so its presence is part
-  // of the contract the example ships.
+  // of the contract the example ships. The earlier version of this test only
+  // compared basenames, which a constant-derived path satisfies unconditionally
+  // -- it would have passed on a repository with the backend deleted. Check the
+  // filesystem instead, which is what the plugin itself does at call time.
   assert.ok(
-    path.basename(BACKEND) === "exec_backend.py",
-    "unexpected backend filename"
+    fs.existsSync(BACKEND),
+    `backend missing at ${BACKEND}; the example cannot run as shipped`
   );
+  assert.ok(
+    fs.statSync(BACKEND).isFile(),
+    `${BACKEND} exists but is not a regular file`
+  );
+  assert.equal(path.basename(BACKEND), "exec_backend.py", "unexpected backend filename");
 });
 
 // --------------------------------------------------------------- summary

@@ -114,6 +114,27 @@ def state_dir() -> Path:
     return base
 
 
+def positive_int(value) -> int:
+    """Parse a positive integer, raising an argparse-friendly error otherwise.
+
+    ``CUBE_OPENCODE_TIMEOUT`` is read from the environment, so a typo like
+    ``CUBE_OPENCODE_TIMEOUT=30s`` would otherwise surface as a bare
+    ``ValueError`` traceback out of module import. Zero and negatives are
+    rejected too, since they would make every command time out immediately.
+    """
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            f"expected a positive integer number of seconds, got {value!r}"
+        ) from None
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(
+            f"timeout must be greater than zero, got {parsed}"
+        )
+    return parsed
+
+
 def safe_session_key(session: str) -> str:
     """Reduce a session id to a filesystem-safe token.
 
@@ -308,7 +329,7 @@ def build_wrapper(command: str, cwd: str, env: dict) -> str:
     return "\n".join(lines)
 
 
-def split_output(text: str) -> tuple[str, dict, int]:
+def split_output(text: str) -> tuple[str, dict, int | None]:
     """Separate command output from the trailing state block and exit code.
 
     Two shapes arrive here. Normally the wrapper's EXIT trap emits a state block
@@ -318,9 +339,16 @@ def split_output(text: str) -> tuple[str, dict, int]:
     whichever part follows the state block, or in the body when there is none,
     and the line is stripped from the output either way so it never reaches the
     model as command output.
+
+    The exit code is returned as ``None`` when no marker was found at all, rather
+    than defaulting to ``0``. Both emitters normally produce one, so its absence
+    means the guest side did not complete — truncated output, a crashed guest
+    interpreter, or a transport problem. Reporting ``0`` there would tell
+    OpenCode a command succeeded when nothing is known about it, which is the
+    same silent-success failure this integration exists to remove. The caller
+    turns ``None`` into an explicit error.
     """
     state: dict = {}
-    rc = 0
 
     if _STATE_BEGIN in text:
         head, _, rest = text.partition(_STATE_BEGIN)
@@ -355,10 +383,7 @@ def split_output(text: str) -> tuple[str, dict, int]:
     tail_body, tail_rc = take_rc(tail)
     head, head_rc = take_rc(head)
 
-    if tail_rc is not None:
-        rc = tail_rc
-    elif head_rc is not None:
-        rc = head_rc
+    rc = tail_rc if tail_rc is not None else head_rc
 
     return head, state, rc
 
@@ -429,6 +454,18 @@ def run_in_sandbox(command: str, session: str, timeout: int) -> int:
                 merged["env"] = new_state["env"]
             save_state(key, merged)
 
+        if rc is None:
+            # Neither the EXIT trap nor the guest fallback produced an exit-code
+            # marker, so the guest side did not run to completion. Any output
+            # above is partial. Reporting success here would be the silent
+            # failure this integration exists to remove, so surface it instead.
+            fail(
+                "the sandbox produced no exit-code marker, so the command's "
+                "result is unknown. Any output above may be incomplete. "
+                "The command was NOT re-run on the host."
+            )
+            return 97
+
         return rc
 
 
@@ -441,11 +478,14 @@ def main(argv: list[str] | None = None) -> int:
         description="Run a shell command inside a CubeSandbox MicroVM.",
     )
     parser.add_argument("--session", default="default", help="OpenCode session id")
-    parser.add_argument("--command", required=True, help="shell command to run in the sandbox")
+    # Not required=True: --reset is a standalone mode that takes no command, and
+    # the documented `--session <id> --reset` invocation has to work. The two
+    # modes are validated against each other below instead.
+    parser.add_argument("--command", help="shell command to run in the sandbox")
     parser.add_argument(
         "--timeout",
-        type=int,
-        default=int(os.environ.get("CUBE_OPENCODE_TIMEOUT", DEFAULT_TIMEOUT)),
+        type=positive_int,
+        default=os.environ.get("CUBE_OPENCODE_TIMEOUT", DEFAULT_TIMEOUT),
         help="per-command timeout in seconds",
     )
     parser.add_argument(
@@ -462,7 +502,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[cubesandbox-exec] session state cleared: {key}")
         return 0
 
-    return run_in_sandbox(args.command, args.session, args.timeout)
+    if args.command is None:
+        parser.error("--command is required unless --reset is given")
+
+    # The default may still be the raw environment value when --timeout was not
+    # passed, because argparse only applies `type` to command-line strings.
+    timeout = positive_int(args.timeout) if isinstance(args.timeout, str) else args.timeout
+
+    return run_in_sandbox(args.command, args.session, timeout)
 
 
 if __name__ == "__main__":

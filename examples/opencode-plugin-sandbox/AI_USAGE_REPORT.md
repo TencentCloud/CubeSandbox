@@ -364,7 +364,61 @@ Four smaller items in the same round:
 
 Tests: 25.
 
-### 5.11 Command-line parsing that missed the real output format
+### 5.11 A fourth round: a documented mode that could not run
+
+The fourth review round reported that `--reset`, documented in both READMEs as
+
+```bash
+python3 exec_backend.py --session <session-id> --reset
+```
+
+exits with `error: the following arguments are required: --command`. The
+`--reset` branch existed and was correct; `--command` was declared
+`required=True`, so argparse rejected the invocation before that branch could be
+reached. Reproduced exactly as documented before changing anything.
+
+This is a different class of miss from the previous three rounds. Those were
+stale prose describing code that had moved on. This one is code that never
+worked in any version, in a mode both language variants document. Nothing in the
+offline suite touches `main()` — it tests the JavaScript hook — and no manual
+run had used `--reset`, because during development state was cleared by deleting
+the file directly. A code path that only a user would take was therefore never
+taken.
+
+The correction: `--command` is no longer `required`, the two modes are validated
+against each other after parsing, and `--command` without `--reset` still errors
+with a clear message.
+
+Three smaller findings from the same round:
+
+The plugin's own header still claimed one MicroVM per session. Round three fixed
+this in the backend docstring and both READMEs; the plugin header was missed. It
+now also states the consequence, that filesystem changes do not carry over.
+
+A missing exit-code marker was reported as success. `split_output` defaulted `rc`
+to `0`, so if neither the EXIT trap nor the guest fallback emitted a marker —
+truncated output, a crashed guest interpreter, a transport problem — OpenCode was
+told the command succeeded while nothing was known about it. That is precisely
+the silent-success failure this integration exists to remove, reintroduced by a
+default value. `split_output` now returns `None` and the caller fails explicitly.
+
+The test named "backend script exists next to the plugin" did not check
+existence. It asserted `path.basename(BACKEND) === "exec_backend.py"`, which a
+constant-derived path satisfies unconditionally: the test would have passed on a
+checkout with the backend deleted. It now calls `fs.existsSync` and `statSync`,
+which is what the plugin does at call time. A test that cannot fail is worse than
+no test, because it occupies the space where a real check would be noticed as
+missing.
+
+Also made the `--timeout` default reject non-integers with an argparse error
+instead of a `ValueError` traceback, and corrected `.env.example`, which said to
+copy the file to `.env` and source it — nothing in the example reads `.env`
+files, and exporting the variables after OpenCode has started has no effect on
+the running instance.
+
+Tests: 25.
+
+### 5.12 Command-line parsing that missed the real output format
 
 Not part of the deliverable, but worth recording: a helper script used to drive
 the deployment failed to parse `cubemastercli` output because the AI-generated
