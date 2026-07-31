@@ -28,6 +28,11 @@ fi
 if [[ -n "${CUBE_API_KEY:-}" ]]; then
   export CUBE_API_KEY
 fi
+for webhook_var in CUBE_API_WEBHOOK_ENDPOINTS CUBE_API_WEBHOOK_QUEUE_CAPACITY CUBE_API_WEBHOOK_MAX_CONCURRENCY; do
+  if [[ -n "${!webhook_var:-}" ]]; then
+    export "${webhook_var}"
+  fi
+done
 if [[ -n "${DATABASE_URL:-}" ]]; then
   export DATABASE_URL
 else

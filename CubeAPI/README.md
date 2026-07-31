@@ -72,6 +72,12 @@ cargo build --release
 | `CUBE_API_SANDBOX_DOMAIN` | `cube.app` | Domain returned in sandbox API responses |
 | `AUTH_CALLBACK_URL` | *(unset)* | External auth callback URL (callback mode) |
 | `CUBE_API_KEY` | *(unset)* | Built-in API key for simple auth (simple-key mode) |
+| `CUBE_API_WEBHOOK_ENDPOINTS` | `[]` | JSON array of lifecycle webhook endpoints |
+| `CUBE_API_WEBHOOK_QUEUE_CAPACITY` | `1024` | Maximum pending webhook deliveries |
+| `CUBE_API_WEBHOOK_MAX_CONCURRENCY` | `16` | Maximum concurrent webhook requests |
+
+See the [Webhook Events guide](../docs/guide/webhooks.md) for endpoint configuration,
+payloads, signing, and retry behavior.
 
 ### Authentication
 
@@ -161,4 +167,3 @@ python pause.py
 python create_with_mount.py
 python browser.py
 python test.py
-

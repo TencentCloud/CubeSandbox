@@ -55,6 +55,12 @@ fi
 if [[ -n "${AUTH_CALLBACK_URL:-}" ]]; then
   CUBE_API_OPTIONAL_EXPORTS+="export AUTH_CALLBACK_URL=\"${AUTH_CALLBACK_URL}\"; "
 fi
+for webhook_var in CUBE_API_WEBHOOK_ENDPOINTS CUBE_API_WEBHOOK_QUEUE_CAPACITY CUBE_API_WEBHOOK_MAX_CONCURRENCY; do
+  if [[ -n "${!webhook_var:-}" ]]; then
+    printf -v webhook_value '%q' "${!webhook_var}"
+    CUBE_API_OPTIONAL_EXPORTS+="export ${webhook_var}=${webhook_value}; "
+  fi
+done
 if [[ -n "${DATABASE_URL:-}" ]]; then
   CUBE_API_OPTIONAL_EXPORTS+="export DATABASE_URL=\"${DATABASE_URL}\"; "
 else
