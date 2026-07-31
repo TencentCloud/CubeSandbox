@@ -99,7 +99,13 @@ func newDispatcher(cfg config.WebhookConfig) (*dispatcher, error) {
 		})
 	}
 	return &dispatcher{
-		client:         &http.Client{},
+		// The configured endpoint is the delivery trust boundary. Do not
+		// automatically follow redirects: a redirect can either turn a POST
+		// into a successful GET, or forward the signed payload to an
+		// unconfigured receiver.
+		client: &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		}},
 		endpoints:      endpoints,
 		initialBackoff: cfg.InitialBackoff,
 		maxBackoff:     cfg.MaxBackoff,

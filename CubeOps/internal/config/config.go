@@ -415,9 +415,15 @@ func overrideFromEnv(cfg *Config) error {
 		}
 		cfg.Webhook.Enabled = enabled
 	}
-	if v := os.Getenv("CUBE_OPS_WEBHOOK_ENDPOINTS"); v != "" {
-		if err := json.Unmarshal([]byte(v), &cfg.Webhook.Endpoints); err != nil {
-			return fmt.Errorf("parse CUBE_OPS_WEBHOOK_ENDPOINTS: %w", err)
+	// Endpoint JSON is meaningful only when the final, environment-overridden
+	// webhook state is enabled. A disabled webhook must not prevent startup
+	// because of a stale or malformed endpoint setting.
+	if cfg.Webhook.Enabled {
+		v := os.Getenv("CUBE_OPS_WEBHOOK_ENDPOINTS")
+		if v != "" {
+			if err := json.Unmarshal([]byte(v), &cfg.Webhook.Endpoints); err != nil {
+				return fmt.Errorf("parse CUBE_OPS_WEBHOOK_ENDPOINTS: %w", err)
+			}
 		}
 	}
 	return nil

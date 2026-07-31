@@ -6,15 +6,23 @@ package webhook
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 )
 
 type fakeSource struct {
-	once  sync.Once
-	event LifecycleEvent
-	acked chan string
+	once        sync.Once
+	event       LifecycleEvent
+	acked       chan string
+	claimPages  []claimPage
+	claimStarts []string
+}
+
+type claimPage struct {
+	events    []LifecycleEvent
+	nextStart string
 }
 
 func (f *fakeSource) EnsureGroup(context.Context, string) error { return nil }
@@ -27,8 +35,20 @@ func (f *fakeSource) Read(ctx context.Context, _, _ string, _ time.Duration, _ i
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
-func (f *fakeSource) Claim(context.Context, string, string, time.Duration, int64) ([]LifecycleEvent, error) {
-	return nil, nil
+func (f *fakeSource) Claim(
+	_ context.Context,
+	_, _ string,
+	_ time.Duration,
+	start string,
+	_ int64,
+) ([]LifecycleEvent, string, error) {
+	f.claimStarts = append(f.claimStarts, start)
+	if len(f.claimPages) == 0 {
+		return nil, "0-0", nil
+	}
+	page := f.claimPages[0]
+	f.claimPages = f.claimPages[1:]
+	return page.events, page.nextStart, nil
 }
 func (f *fakeSource) Ack(_ context.Context, _, streamID string) error {
 	f.acked <- streamID
@@ -108,6 +128,34 @@ func TestWorkerIndexPreservesPerSandboxOrdering(t *testing.T) {
 	deleted := workerIndex(LifecycleEvent{SandboxID: "sandbox-1", StreamID: "9-0"}, 8)
 	if create != deleted {
 		t.Fatalf("same sandbox routed to workers %d and %d", create, deleted)
+	}
+}
+
+func TestServiceReclaimsAllPendingPagesFromOldestToNewest(t *testing.T) {
+	source := &fakeSource{claimPages: []claimPage{
+		{events: []LifecycleEvent{{StreamID: "1-0", SandboxID: "sandbox-1"}}, nextStart: "2-0"},
+		{events: []LifecycleEvent{{StreamID: "2-0", SandboxID: "sandbox-1"}}, nextStart: "3-0"},
+		{events: []LifecycleEvent{{StreamID: "3-0", SandboxID: "sandbox-1"}}, nextStart: "0-0"},
+	}}
+	service := &Service{
+		source:      source,
+		group:       "cubeops-webhook",
+		consumer:    "consumer-1",
+		pendingIdle: time.Minute,
+	}
+	jobs := []chan LifecycleEvent{make(chan LifecycleEvent, 3)}
+
+	if !service.reclaimPending(t.Context(), jobs) {
+		t.Fatal("reclaimPending stopped unexpectedly")
+	}
+
+	if got, want := source.claimStarts, []string{"0-0", "2-0", "3-0"}; !slices.Equal(got, want) {
+		t.Fatalf("claim starts = %v, want %v", got, want)
+	}
+	for _, want := range []string{"1-0", "2-0", "3-0"} {
+		if got := (<-jobs[0]).StreamID; got != want {
+			t.Fatalf("reclaimed stream ID = %q, want %q", got, want)
+		}
 	}
 }
 

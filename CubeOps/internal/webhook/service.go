@@ -103,10 +103,7 @@ func (s *Service) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-claimTicker.C:
-			events, err := s.source.Claim(ctx, s.group, s.consumer, s.pendingIdle, 100)
-			if err != nil {
-				slog.Warn("webhook pending reclaim failed", "error", err)
-			} else if !enqueue(ctx, jobs, events) {
+			if !s.reclaimPending(ctx, jobs) {
 				return nil
 			}
 		default:
@@ -122,6 +119,31 @@ func (s *Service) Run(ctx context.Context) error {
 				return nil
 			}
 		}
+	}
+}
+
+// reclaimPending scans the whole pending-entry list from oldest to newest.
+// XAUTOCLAIM returns a cursor for the next page; restarting each request at
+// 0-0 would continually reclaim the oldest page and starve later entries.
+func (s *Service) reclaimPending(ctx context.Context, jobs []chan LifecycleEvent) bool {
+	start := "0-0"
+	for {
+		events, nextStart, err := s.source.Claim(ctx, s.group, s.consumer, s.pendingIdle, start, 100)
+		if err != nil {
+			slog.Warn("webhook pending reclaim failed", "error", err)
+			return true
+		}
+		if !enqueue(ctx, jobs, events) {
+			return false
+		}
+		if nextStart == "0-0" {
+			return true
+		}
+		if nextStart == start {
+			slog.Warn("webhook pending reclaim cursor did not advance", "start", start)
+			return true
+		}
+		start = nextStart
 	}
 }
 

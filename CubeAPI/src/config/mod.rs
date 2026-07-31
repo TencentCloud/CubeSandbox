@@ -138,3 +138,42 @@ impl Default for ServerConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ServerConfig;
+    use std::sync::{Mutex, OnceLock};
+
+    fn environment_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn from_env_rejects_invalid_config_when_api_key_is_configured() {
+        let _guard = environment_lock()
+            .lock()
+            .expect("environment lock poisoned");
+        let old_api_key = std::env::var_os("CUBE_API_KEY");
+        let old_worker_threads = std::env::var_os("WORKER_THREADS");
+        std::env::set_var("CUBE_API_KEY", "test-api-key");
+        std::env::set_var("WORKER_THREADS", "not-an-integer");
+
+        let result = ServerConfig::from_env();
+
+        match old_api_key {
+            Some(value) => std::env::set_var("CUBE_API_KEY", value),
+            None => std::env::remove_var("CUBE_API_KEY"),
+        }
+        match old_worker_threads {
+            Some(value) => std::env::set_var("WORKER_THREADS", value),
+            None => std::env::remove_var("WORKER_THREADS"),
+        }
+
+        let error = result.expect_err("invalid configuration must prevent startup");
+        assert!(
+            error.to_string().contains("worker_threads"),
+            "unexpected configuration error: {error:#}"
+        );
+    }
+}

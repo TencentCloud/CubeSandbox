@@ -145,6 +145,44 @@ func TestDispatcherDoesNotRetryWhenMaxRetriesIsZero(t *testing.T) {
 	}
 }
 
+func TestDispatcherRejectsRedirectWithoutContactingRedirectTarget(t *testing.T) {
+	redirectTargetRequests := 0
+	redirectTarget := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		redirectTargetRequests++
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer redirectTarget.Close()
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, redirectTarget.URL, http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+
+	dispatcher, err := newDispatcher(config.WebhookConfig{
+		InitialBackoff: time.Millisecond,
+		MaxBackoff:     time.Millisecond,
+		Endpoints: []config.WebhookEndpointConfig{{
+			URL:        redirector.URL,
+			Events:     []string{EventSandboxCreated},
+			Timeout:    time.Second,
+			MaxRetries: retries(0),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("newDispatcher: %v", err)
+	}
+
+	err = dispatcher.Deliver(t.Context(), LifecycleEvent{
+		EventID: "event-1", Op: "create", SandboxID: "sandbox-1", Timestamp: 1,
+	})
+	if err == nil {
+		t.Fatal("Deliver accepted redirect response")
+	}
+	if redirectTargetRequests != 0 {
+		t.Fatalf("redirect target received %d requests, want 0", redirectTargetRequests)
+	}
+}
+
 func TestDispatcherRejectsNegativeMaxRetries(t *testing.T) {
 	tests := []struct {
 		name string

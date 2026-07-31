@@ -18,7 +18,7 @@ import (
 type eventSource interface {
 	EnsureGroup(context.Context, string) error
 	Read(context.Context, string, string, time.Duration, int64) ([]LifecycleEvent, error)
-	Claim(context.Context, string, string, time.Duration, int64) ([]LifecycleEvent, error)
+	Claim(context.Context, string, string, time.Duration, string, int64) ([]LifecycleEvent, string, error)
 	Ack(context.Context, string, string) error
 	Close() error
 }
@@ -69,28 +69,29 @@ func (s *redisSource) Claim(
 	ctx context.Context,
 	group, consumer string,
 	minIdle time.Duration,
+	start string,
 	count int64,
-) ([]LifecycleEvent, error) {
-	messages, _, err := s.client.XAutoClaim(ctx, &redis.XAutoClaimArgs{
+) ([]LifecycleEvent, string, error) {
+	messages, nextStart, err := s.client.XAutoClaim(ctx, &redis.XAutoClaimArgs{
 		Stream:   EventStreamKey,
 		Group:    group,
 		Consumer: consumer,
 		MinIdle:  minIdle,
-		Start:    "0-0",
+		Start:    start,
 		Count:    count,
 	}).Result()
 	if errors.Is(err, redis.Nil) {
-		return nil, nil
+		return nil, "0-0", nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("claim pending lifecycle events: %w", err)
+		return nil, "", fmt.Errorf("claim pending lifecycle events: %w", err)
 	}
 	events := make([]LifecycleEvent, 0, len(messages))
 	for _, message := range messages {
 		event, _ := decodeMessage(message)
 		events = append(events, event)
 	}
-	return events, nil
+	return events, nextStart, nil
 }
 
 func (s *redisSource) Ack(ctx context.Context, group, streamID string) error {
