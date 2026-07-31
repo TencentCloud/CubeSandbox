@@ -66,6 +66,73 @@ One-click deployments expose the variables in `deploy/one-click/env.example`. He
 
 Cubelet also enforces built-in limits of 100 sessions per node, 10 per sandbox, and 5 per container. The browser cannot raise these limits.
 
+## 30-Minute Deployment-To-Terminal Reproduction
+
+This checklist is for a disposable Linux one-click deployment. Use a task-owned
+release bundle and a task-owned deployment host. Do not reuse an operator's
+production `.env`, credentials, or sandbox IDs.
+
+### 0-5 minutes: prepare the bundle
+
+```bash
+tar -xzf cube-sandbox-one-click-<version>.tar.gz
+cd cube-sandbox-one-click-<version>
+cp env.example .env
+chmod 600 .env
+```
+
+Set only the deployment values required by the target host, such as the node
+address and WebUI port. Keep database passwords and administrator credentials
+out of shell history and out of the command line. Use the operator-provided
+administrator credential through the deployment's normal secure input path.
+
+### 5-20 minutes: install and verify the services
+
+```bash
+sudo ./install.sh
+systemctl is-active cube-sandbox-cubeops.service
+systemctl is-active cube-sandbox-cubemaster.service
+systemctl is-active cube-sandbox-cubelet.service
+systemctl is-active cube-sandbox-webui.service
+curl -fsS http://127.0.0.1:12088/health
+```
+
+The expected result is four `active` responses and HTTP 200 from `/health`.
+Open the configured WebUI endpoint from a non-localhost browser. Do not use a
+Vite development server for this check.
+
+### 20-25 minutes: sign in and open a terminal
+
+1. Sign in with an administrator account whose current role is `admin`.
+2. Open **Sandboxes** and select a sandbox that is already running.
+3. Select **Open terminal** from the list or detail view.
+4. Wait for **Connected** and confirm that the terminal surface is non-empty.
+
+The expected result is a real xterm surface with a shell prompt. A paused or
+stopped target must remain disabled.
+
+### 25-30 minutes: run `top` and clean up
+
+In the terminal, run:
+
+```text
+printf 'WEB_TERMINAL_HOST=%s\n' "$(hostname)"
+top
+```
+
+Press `Ctrl+C` to return to the shell, then close the terminal normally. The
+expected result is a live `top` screen, a return to the same shell, and no
+automatic reconnect after the normal close.
+
+For a disposable one-click host, finish with:
+
+```bash
+sudo ./down.sh
+```
+
+For a shared host, delete only the exact task-owned sandbox through the normal
+Dashboard/API workflow and leave the host services running.
+
 ### Shared Internal Token
 
 CubeOps and CubeMaster must receive the same `CUBE_TERMINAL_INTERNAL_TOKEN`.

@@ -66,6 +66,68 @@ Web 终端可以从 CubeSandbox 控制台为运行中的沙箱容器打开交互
 
 Cubelet 还会执行内置限额：每节点 100 个会话、每沙箱 10 个会话、每容器 5 个会话。浏览器无法提高这些限额。
 
+## 30 分钟：从一键部署到终端
+
+以下步骤用于一次性的 Linux one-click 测试部署。请使用本次任务专用的
+发布包和部署主机，不要复用生产 `.env`、凭据或沙箱 ID。
+
+### 0-5 分钟：准备发布包
+
+```bash
+tar -xzf cube-sandbox-one-click-<version>.tar.gz
+cd cube-sandbox-one-click-<version>
+cp env.example .env
+chmod 600 .env
+```
+
+只设置目标主机需要的部署参数，例如节点地址和 WebUI 端口。数据库密码和
+管理员凭据不要写入 shell history，也不要放在命令行参数中；请通过部署流程
+提供的安全输入方式使用运维方提供的管理员凭据。
+
+### 5-20 分钟：安装并检查服务
+
+```bash
+sudo ./install.sh
+systemctl is-active cube-sandbox-cubeops.service
+systemctl is-active cube-sandbox-cubemaster.service
+systemctl is-active cube-sandbox-cubelet.service
+systemctl is-active cube-sandbox-webui.service
+curl -fsS http://127.0.0.1:12088/health
+```
+
+预期结果是四个服务都返回 `active`，并且 `/health` 返回 HTTP 200。用非
+localhost 浏览器打开配置好的 WebUI 入口；不要用 Vite 开发服务器完成此检查。
+
+### 20-25 分钟：登录并打开终端
+
+1. 使用当前角色为 `admin` 的管理员账号登录。
+2. 打开 **Sandboxes（沙箱）**，选择一个已经运行的沙箱。
+3. 从列表或详情页点击 **打开终端**。
+4. 等待状态变为 **已连接**，并确认终端表面有真实输出。
+
+预期结果是真实 xterm 表面和 Shell 提示符。暂停或停止的目标必须保持禁用。
+
+### 25-30 分钟：执行 `top` 并清理
+
+在终端中执行：
+
+```text
+printf 'WEB_TERMINAL_HOST=%s\n' "$(hostname)"
+top
+```
+
+按 `Ctrl+C` 返回 Shell，然后正常关闭终端。预期结果是能看到实时 `top`，
+回到同一个 Shell，并且正常关闭后不会自动重连。
+
+对于一次性的 one-click 主机，最后执行：
+
+```bash
+sudo ./down.sh
+```
+
+对于共享主机，只能通过正常 Dashboard/API 流程删除本次任务专用的精确沙箱，
+不要停止或删除主机上的共享服务。
+
 ### Shared Internal Token
 
 CubeOps 和 CubeMaster 必须收到同一个 `CUBE_TERMINAL_INTERNAL_TOKEN`。
