@@ -12,7 +12,8 @@
 #
 # Environment variables:
 #   ENVD_PORT       Port envd listens on (default: 49983).
-#   ENVD_EXTRA_ARGS Extra flags appended to the envd invocation (optional).
+#   ENVD_EXTRA_ARGS Extra flags appended to the envd invocation (default: empty).
+#                   -isnotfc is appended automatically if not already present.
 #   ENVD_LOG_FILE   Where to redirect envd stdout/stderr (default:
 #                   /var/log/envd.log). Set to "-" to inherit the container
 #                   stdio.
@@ -23,6 +24,10 @@ ENVD_BIN="${ENVD_BIN:-/usr/bin/envd}"
 ENVD_PORT="${ENVD_PORT:-49983}"
 ENVD_LOG_FILE="${ENVD_LOG_FILE:-/var/log/envd.log}"
 ENVD_EXTRA_ARGS="${ENVD_EXTRA_ARGS:-}"
+case " ${ENVD_EXTRA_ARGS} " in
+    *" -isnotfc "*) ;;
+    *) ENVD_EXTRA_ARGS="${ENVD_EXTRA_ARGS} -isnotfc" ;;
+esac
 
 if [ ! -x "${ENVD_BIN}" ]; then
     echo "cube-entrypoint: envd binary not found or not executable at ${ENVD_BIN}" >&2
