@@ -76,11 +76,15 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def build_rules(secret: str) -> list[Rule]:
+def build_rules(
+    secret: str,
+    *,
+    rule_name: str = "allow_mimo_platform",
+) -> list[Rule]:
     host = mimo_api_host()
     return [
         Rule(
-            name="allow_mimo_platform",
+            name=rule_name,
             match=Match(scheme="https", sni=host, host=host),
             action=Action(
                 allow=True,
@@ -91,16 +95,10 @@ def build_rules(secret: str) -> list[Rule]:
     ]
 
 
-def create_sandbox(
-    template_id: str,
-    secret: str,
-    timeout: int,
-    *,
-    api_url: str,
-    api_key: str,
-) -> Sandbox:
+def build_config(template_id: str, *, api_url: str, api_key: str) -> Config:
+    """Build an authenticated native SDK config with legacy compatibility."""
     try:
-        config = Config(
+        return Config(
             api_url=api_url,
             api_key=api_key,
             template_id=template_id,
@@ -113,12 +111,41 @@ def create_sandbox(
             "CubeAPI authentication must be disabled or the SDK must be upgraded.",
             file=sys.stderr,
         )
-        config = Config(api_url=api_url, template_id=template_id)
+        return Config(api_url=api_url, template_id=template_id)
+
+
+def create_sandbox(
+    template_id: str,
+    secret: str,
+    timeout: int,
+    *,
+    api_url: str,
+    api_key: str,
+    rule_name: str = "allow_mimo_platform",
+) -> Sandbox:
+    config = build_config(template_id, api_url=api_url, api_key=api_key)
     return Sandbox.create(
         template=template_id,
         allow_internet_access=False,
-        network={"rules": build_rules(secret)},
+        network={"rules": build_rules(secret, rule_name=rule_name)},
         timeout=timeout,
+        config=config,
+    )
+
+
+def create_isolated_sandbox(
+    template_id: str,
+    timeout: int,
+    *,
+    api_url: str,
+    api_key: str,
+) -> Sandbox:
+    """Create a default-deny sandbox without persisting credential rules."""
+    config = build_config(template_id, api_url=api_url, api_key=api_key)
+    return Sandbox.create(
+        template=template_id,
+        timeout=timeout,
+        allow_internet_access=False,
         config=config,
     )
 

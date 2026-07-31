@@ -156,10 +156,13 @@ def mimo_command(
     *,
     workspace: str | None = None,
     session_id: str | None = None,
+    fork: bool = False,
     agent: str | None = None,
     dangerous: bool = True,
 ) -> str:
     """Build a headless MiMo Code invocation with machine-readable output."""
+    if fork and not session_id:
+        raise ValueError("fork=True requires session_id")
     args = [
         "mimo",
         "run",
@@ -172,6 +175,8 @@ def mimo_command(
     ]
     if session_id:
         args.extend(["--session", session_id])
+    if fork:
+        args.append("--fork")
     if agent:
         args.extend(["--agent", agent])
     if dangerous:

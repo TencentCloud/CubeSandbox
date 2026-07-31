@@ -1,214 +1,106 @@
 ---
-title: MiMo Code Integration Guide
+title: MiMo Code Dual-Fork Rollout Reference Pattern
 author: Young-Allen
-date: 2026-07-22
+date: 2026-07-29
 tags:
   - integration
   - mimo-code
   - coding-agent
-  - agent
+  - snapshot
 lang: en-US
 ---
 
-# MiMo Code Integration Guide
+# MiMo Code Dual-Fork Rollout Reference Pattern
 
 [中文文档](../../zh/guide/integrations/mimo-code.md)
 
-Run [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code) inside a
-CubeSandbox MicroVM. This guide covers a reproducible template, headless agent
-execution, MiMo Platform authentication, restricted egress, and conversation
-continuation across a CubeSandbox snapshot.
+This integration uses [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code)
+session forking and CubeSandbox full-VM snapshots to run multiple implementation
+candidates from one shared planning context.
+
+The dual-fork lifecycle is a reusable reference pattern. The bundled
+`normalize-slug` fixture is only a deterministic demonstration: task prompts,
+test command, editable paths, and candidate strategies are supplied by an
+external `task.json`.
+
+The workflow does not merely run a coding agent inside a MicroVM. It creates a
+speculative coding transaction:
+
+1. MiMo analyzes a task in a short-lived credentialed planner.
+2. The parent profile is copied into a credential-free source MicroVM.
+3. CubeSandbox snapshots that complete source MicroVM.
+4. Multiple candidate MicroVMs start from the same snapshot.
+5. Each candidate forks the parent with `mimo run --session ... --fork`.
+6. Deterministic tests and patch policy select a winner.
+7. Only the winning patch is promoted to the source.
+8. A failed final validation rolls the source back to its snapshot.
+
+This directly implements the **execute Agent-generated code in sandboxes and
+collect the results** use case: candidate MicroVMs execute fixed acceptance tests, and
+the host retrieves bounded test output plus validated patch metadata before
+promoting one result.
 
 The runnable implementation is in
 [`examples/mimo-code-integration`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/mimo-code-integration).
 
-## Integration Target and Version
+## Why pair the two fork models?
 
-| Component | Tested version |
+MiMo and CubeSandbox fork different state:
+
+| Layer | Forked state |
+| --- | --- |
+| MiMo `--fork` | Conversation history, planning context, memory, and agent metadata |
+| CubeSandbox snapshot | Guest memory, root filesystem, workspace, tools, and MiMo profile |
+
+Using only a MiMo session fork does not isolate native processes or filesystem
+writes. Using only a VM clone does not establish a separate conversation
+branch. Pairing both gives every candidate the same initial knowledge and
+runtime while keeping subsequent work independent.
+
+The CubeSandbox lifecycle follows the same invariants as
+[`07_clone_concurrent.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/snapshot-rollback-clone/07_clone_concurrent.py)
+and
+[`08_fork_three_axis.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/snapshot-rollback-clone/08_fork_three_axis.py):
+multiple sandboxes inherit one snapshot, later writes stay isolated, and the
+source remains usable. This integration adds the missing Agent layer by pairing
+each candidate VM with a distinct MiMo conversation fork, then selecting and
+promoting one tested patch.
+
+```mermaid
+flowchart LR
+    Driver[HostDriver] --> Planner[CredentialedPlannerVM]
+    Planner -->|"MiMo plan"| Parent[ParentSession]
+    Parent -->|"copy profile only"| Source[CredentialFreeSourceVM]
+    Source -->|"create_snapshot"| Snapshot[BaselineSnapshot]
+    Snapshot --> CandidateA[CandidateA]
+    Snapshot --> CandidateB[CandidateB]
+    Parent -->|"--session + --fork"| ChildA[ChildSessionA]
+    Parent -->|"--session + --fork"| ChildB[ChildSessionB]
+    ChildA --> CandidateA
+    ChildB --> CandidateB
+    CandidateA --> Evaluator[TestAndPatchPolicy]
+    CandidateB --> Evaluator
+    Evaluator -->|"winner patch"| Source
+    Source -->|"validation failure"| Rollback[RollbackBaseline]
+```
+
+## Tested components
+
+| Component | Version or requirement |
 | --- | --- |
 | MiMo Code | `@mimo-ai/cli@0.1.7` |
 | MiMo model | `mimo/mimo-v2.5-pro` |
-| Node.js | 24 (npm installation runtime) |
 | CubeSandbox base image | `ghcr.io/tencentcloud/cubesandbox-base:2026.16` |
-| E2B SDK | `e2b>=2.4.1` |
-| CubeSandbox SDK | `cubesandbox>=0.3.0` |
-| CubeSandbox platform | `>= 0.3.0` for pause/resume; `>= 0.4.0` for CubeEgress |
+| Python SDK | `cubesandbox>=0.6.0` |
+| CubeSandbox platform | Snapshot/rollback and CubeEgress support |
 
-MiMo Code is derived from OpenCode but adds persistent memory, context
-checkpoints, subagent orchestration, and Compose workflows. This integration
-uses MiMo's own CLI, unified profile, NDJSON event stream, session IDs, and
-Compose mode rather than reproducing a generic OpenCode executor or plugin.
+The image build verifies that the pinned CLI exposes `mimo run --fork`.
 
-## Prerequisites
+## Security model
 
-- A running CubeSandbox deployment and a reachable CubeAPI.
-- `cubemastercli`, Docker, and a node-reachable image registry.
-- Python 3.10+ for the host runners.
-- A MiMo Platform API key from <https://platform.xiaomimimo.com>.
-
-For executable setup details and the current runner prerequisites, see the
-self-contained [example README](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/mimo-code-integration/README.md).
-
-## Why Run MiMo Code in CubeSandbox
-
-MiMo can edit files, execute shell commands, install dependencies, and spawn
-subagents. A MicroVM limits those capabilities to a disposable environment:
-
-| Concern | CubeSandbox mechanism |
-| --- | --- |
-| Agent command isolation | Dedicated KVM MicroVM and guest kernel |
-| Reproducible tools | Version-pinned template |
-| Long task continuity | `pause()` snapshots VM memory and rootfs |
-| MiMo state continuity | `$MIMOCODE_HOME` and `/workspace` survive reconnect |
-| Key isolation | CubeEgress injects the real `api-key` outside the VM |
-| Network control | Exact-host allow rule with default-deny egress |
-
-## Integration Steps
-
-### 1. Build the template
-
-```bash
-export MIMO_IMAGE="<your-registry>/mimo-code-cube:0.1.7"
-./examples/mimo-code-integration/build-template.sh
-cubemastercli tpl watch --job-id <job_id>
-```
-
-The Dockerfile pins the CLI and verifies the platform binary during the build:
-
-```dockerfile
-ARG CUBE_BASE_IMAGE=ghcr.io/tencentcloud/cubesandbox-base:2026.16
-FROM ${CUBE_BASE_IMAGE}
-
-ARG MIMO_VERSION=0.1.7
-RUN npm install -g --no-audit --no-fund \
-      "@mimo-ai/cli@${MIMO_VERSION}" \
-      --registry https://registry.npmjs.org \
-    && mimo --version
-
-ENV MIMOCODE_HOME=/root/.mimocode
-WORKDIR /workspace
-EXPOSE 49983
-```
-
-The full Dockerfile also installs development tools and disables unrelated
-MiMo network features.
-
-### 2. Configure the host
-
-```bash
-cd examples/mimo-code-integration
-install -m 600 .env.example .env
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-```
-
-Set `E2B_API_URL`, `E2B_API_KEY`, `CUBE_TEMPLATE_ID`, and `MIMO_API_KEY`.
-Use HTTPS when a remote CubeAPI requires a real API key; plain HTTP is suitable
-only for a trusted local deployment.
-The initial integration deliberately targets MiMo Platform only:
-
-- base URL: `https://api.xiaomimimo.com/v1`;
-- model: `mimo/mimo-v2.5-pro`;
-- authentication header: `api-key`.
-
-Keeping this contract explicit avoids sending credentials to a host inferred
-from an untrusted URL. Other OpenAI-compatible providers can be added later as
-an explicit mode with their own host and authentication scheme.
-
-### 3. Run a headless task
-
-```bash
-python run_mimo_code.py
-```
-
-The host invokes:
-
-```bash
-mimo run --format json --dir /workspace \
-  --model mimo/mimo-v2.5-pro \
-  --agent build \
-  --dangerously-skip-permissions "<prompt>"
-```
-
-`--format json` produces newline-delimited events such as `tool_use`, `text`,
-`error`, and `step_finish`. Every event carries a `sessionID`; the example
-buffers arbitrary SDK stdout chunks before parsing complete JSON lines.
-
-The direct runner forwards the key only in the command environment. Treat this
-as a development flow: a tool with open egress can still exfiltrate a key that
-exists in its process environment.
-
-### 4. Keep all MiMo state under one profile
-
-The template uses the absolute path:
-
-```text
-/root/.mimocode/
-├── config/
-├── data/    # session database, auth (if used), memory, checkpoints
-├── state/
-└── cache/
-```
-
-`MIMOCODE_HOME` is a MiMo-specific integration advantage: the profile can be
-inspected, retained, or destroyed as one unit. Never pre-populate this
-directory with developer sessions or credentials in a shared template.
-
-### 5. Pause and continue the exact conversation
-
-```bash
-python resume_mimo_code.py
-```
-
-The runner captures the first turn's session ID, pauses the VM, reconnects, and
-continues explicitly:
-
-```python
-first_result, events = run_turn(
-    sandbox,
-    workspace=workspace,
-    prompt=first_prompt,
-    envs=mimo_env,
-    timeout=900,
-)
-session_id = session_id_from_events(events)
-
-sandbox_id = sandbox.sandbox_id
-sandbox.pause()  # pause() preserves sandbox_id and returns None
-sandbox = Sandbox.connect(sandbox_id=sandbox_id)
-
-second_result, events = run_turn(
-    sandbox,
-    workspace=workspace,
-    prompt=second_prompt,
-    envs=mimo_env,
-    timeout=900,
-    session_id=session_id,
-)
-```
-
-CubeSandbox and E2B both preserve the sandbox ID and return `None` from
-`pause()`. The runner also does not use a `Sandbox.create()` context manager,
-whose `__exit__` would kill the paused sandbox.
-
-The test token is deliberately absent from `/workspace`; successful recall
-therefore proves MiMo conversation continuity. The runner also verifies the
-workspace, profile data, and `mimo session list --format json`.
-
-MiMo checkpoints and CubeSandbox snapshots are complementary:
-
-- MiMo checkpoints reconstruct long model context and persistent memory.
-- CubeSandbox snapshots preserve the complete VM, including process memory,
-  rootfs, workspace, database, and MiMo profile.
-
-### 6. Apply default-deny egress and credential injection
-
-```bash
-python network_policy.py
-```
-
-The native CubeSandbox SDK attaches one exact MiMo Platform rule:
+The short-lived planner and every candidate sandbox use default-deny internet
+access. One exact CubeEgress rule allows `api.xiaomimimo.com` and injects the
+real `api-key` outside the VM:
 
 ```python
 Rule(
@@ -232,77 +124,206 @@ Rule(
 )
 ```
 
-The sandbox is created with `allow_internet_access=False`. It sees only a
-placeholder `MIMO_API_KEY`; the real value exists in the host-side CubeEgress
-rule. MiMo's runtime must trust the interception CA, so the example sets
-`NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt` and verifies that the
-path is readable inside the sandbox before making the API request.
+The driver replaces the illustrative rule name with a random per-rollout name,
+which lets evidence collection correlate audit records without copying traffic
+from other sandboxes.
 
-Sharing, telemetry, auto-update, model-manifest fetches, LSP downloads, and
-external skills/plugins are disabled. These settings reduce auxiliary requests;
-the CubeEgress rule remains the enforcement boundary for the allowlist.
+MiMo sees only a placeholder environment value. The source is separately
+created default-deny without any credential rule. After the parent turn, only
+the placeholder-bearing MiMo profile is transferred to the source, so its
+snapshot request cannot persist the CubeEgress injection secret. The real key
+is absent from:
 
-### 7. Use MiMo Compose when the task benefits from subagents
+- `$MIMOCODE_HOME`;
+- `/workspace`;
+- candidate patches and evidence;
+- the credential-free baseline source snapshot.
+
+MiMo sharing, telemetry, updates, external skills, model-manifest fetches, and
+LSP downloads are disabled so the exact-host rule remains narrow.
+
+## Run the integration
+
+Build and import the pinned template:
 
 ```bash
-python run_mimo_code.py --agent compose --prompt \
-  "Inspect the project, implement the change, test it, and write result.md containing CUBE_MIMO_RUN_OK."
+export MIMO_IMAGE="<your-registry>/mimo-code-cube:0.1.7"
+./examples/mimo-code-integration/build-template.sh
+cubemastercli tpl watch --job-id <job_id>
 ```
 
-Compose is a MiMo primary agent and works in headless mode. Delegation is
-model-driven, so production workflows should validate final artifacts and
-tests rather than require a fixed subagent trace.
+Configure the host runner:
 
-## Use Cases and Best Practices
+```bash
+cd examples/mimo-code-integration
+install -m 600 .env.example .env
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+```
 
-- **Isolated autonomous development:** give MiMo a disposable repository copy,
-  not host filesystem access.
-- **Execute and collect:** keep outputs under `/workspace`, then retrieve them
-  through `sandbox.files` or a controlled command.
-- **Long task checkpointing:** pause after a completed MiMo turn, record both
-  sandbox ID and MiMo session ID, then reconnect and resume explicitly.
-- **Parallel variants:** fork MiMo sessions or clone CubeSandbox snapshots only
-  when each branch has a clear ownership and cleanup policy.
-- **Preinstall dependencies:** package required toolchains into the template so
-  a narrow egress policy does not need npm, PyPI, or arbitrary download hosts.
-- **Treat profile data as sensitive:** memory and session databases can contain
-  prompts, code, paths, and command output.
+Set `E2B_API_URL`, `E2B_API_KEY`, `CUBE_TEMPLATE_ID`, and `MIMO_API_KEY`.
+Use HTTPS when a real CubeAPI key crosses an untrusted network.
 
-## Caveats
+Run two candidates in parallel:
 
-- `--dangerously-skip-permissions` removes interactive approvals. Use it only
-  inside a disposable sandbox and retain explicit deny rules when needed.
-- The E2B command channel does not expose the MiMo TUI. Use `mimo run`.
-- OAuth writes access and refresh tokens to `auth.json`; snapshots would retain
-  them. The example therefore uses API-key injection instead.
-- Pausing drops outbound connections. A resumed MiMo command opens a new model
-  connection while retaining session state.
-- `MIMOCODE_HOME` must be absolute.
-- Compose delegation and automatic memory consolidation are model-dependent;
-  do not use their exact trace as a deterministic health check.
+```bash
+python speculative_mimo_code.py \
+  --task fixtures/normalize-slug/task.json \
+  --candidates 2 \
+  --concurrency 2 \
+  --evidence-file output/speculative-success.json
+```
+
+A successful promotion prints `CUBE_MIMO_PROMOTION_OK`.
+
+Exercise the transaction rollback path:
+
+```bash
+python speculative_mimo_code.py \
+  --force-promotion-failure \
+  --evidence-file output/speculative-rollback.json
+```
+
+This mode forces only the final source validation to fail. The source must
+return to a clean baseline and print `CUBE_MIMO_ROLLBACK_OK`.
+
+## Task profile and reuse boundary
+
+The reference implementation separates task inputs from the transaction
+lifecycle:
+
+```text
+fixtures/normalize-slug/
+├── task.json
+└── project/
+    ├── .gitignore
+    ├── README.md
+    ├── app.py
+    └── tests/test_app.py
+```
+
+`task.json` supplies `name`, `summary`, planning and implementation
+instructions, a fixed test command and timeout, existing editable paths, named
+candidate strategies, and `expect_baseline_failure`. The loader bounds file
+count and size and rejects symlinks, unsafe paths, duplicates, and editable
+paths absent from the fixture.
+
+New applications reuse the same conversation fork, snapshot fan-out,
+credential boundary, promotion, rollback, cleanup, and evidence contract. The
+current evaluator is binary and ranks passing patches by changed lines. A later
+`research-experiment` integration can add a metric-aware evaluator without
+duplicating the surrounding infrastructure.
+
+## Conversation-continuity proof
+
+Before the snapshot, a plan-only turn in the planner receives a random token
+while file edits and permission auto-approval are disabled. The driver verifies
+both a clean Git status and absence of the token under `/workspace`, then
+transfers the parent profile to the credential-free source.
+
+Each candidate receives no token value in its new prompt. Its forked child
+session must recover the token from the parent conversation and prove it in an
+out-of-workspace report or a `CONTINUITY=...` NDJSON event. A missing proof gets
+one same-session retry. This distinguishes full MiMo session inheritance from
+ordinary filesystem cloning.
+
+## Candidate policy and winner selection
+
+The model does not decide which candidate wins. A candidate is eligible only
+when:
+
+- every eligible child's session ID differs from the parent and other eligible
+  children;
+- the continuity report or NDJSON marker is correct;
+- fixed acceptance tests pass and are rerun unchanged on the source;
+- every changed path is declared by the task profile;
+- the patch is non-empty, textual, and below the size limit.
+
+Eligible results are sorted by changed-line count and candidate name. The patch
+is then checked with `git apply --check`, applied to the unchanged source, and
+tested again.
+
+## Failure semantics
+
+- Candidate creation is all-or-nothing; partial siblings are killed.
+- A failed candidate is recorded and does not prevent another valid candidate
+  from winning.
+- No valid candidate means no source mutation.
+- Failed promotion validation calls `rollback(snapshot_id)` and verifies a
+  clean source Git worktree.
+- Planner, candidate, and source sandboxes plus the persistent snapshot are
+  explicitly cleaned up on every path.
+- Cleanup errors identify the leaked resource and fail an otherwise successful
+  run.
+
+## Supporting checks
+
+The example retains two small supporting entry points:
+
+```bash
+# Verify the pinned template and MiMo NDJSON event contract.
+python run_mimo_code.py
+
+# Verify exact-host egress, CA trust, and placeholder-only VM credentials.
+python network_policy.py
+```
+
+## Verification and evidence
+
+Offline checks run without a model key or live cluster:
+
+```bash
+python -m unittest discover -s tests -v
+python -m py_compile *.py tests/*.py \
+  fixtures/normalize-slug/project/*.py \
+  fixtures/normalize-slug/project/tests/*.py
+bash -n build-template.sh collect_e2e_evidence.sh
+```
+
+On a live cluster:
+
+```bash
+./collect_e2e_evidence.sh
+```
+
+The collector runs promotion and forced-rollback scenarios. Evidence includes
+source/candidate sandbox IDs, snapshot ID, parent/child session IDs, candidate
+scores, CubeEgress boundary checks, final outcome, and final zero-resource
+checks for IDs created by the run. It never records the real MiMo key.
+
+## Operational guidance
+
+- Limit candidate count to the cluster capacity; the example caps it at eight.
+- Preinstall required toolchains so candidate tasks do not need broad package
+  registry access.
+- Treat MiMo profiles and snapshots as sensitive because they contain prompts,
+  code, and command output.
+- Snapshot deletion is independent from sandbox deletion. Always clean up both.
+- `--dangerously-skip-permissions` is used only in disposable candidate
+  MicroVMs. The parent planning turn does not use it.
+- Use the fixed tests and patch policy as the trust boundary, not model claims.
 
 ## Troubleshooting
 
 | Symptom | Cause | Resolution |
 | --- | --- | --- |
-| `mimo: command not found` | Old template | Rebuild and register the pinned image |
-| Platform binary cannot execute | Wrong image architecture | Build for the Cube node architecture |
-| Authentication failed | Invalid key or Bearer header used | MiMo Platform requires the `api-key` header |
-| `403 Forbidden - CubeEgress` or curl status `000` | Request host does not match | Use the exact MiMo endpoint and inspect egress audit logs; some deployments block unmatched traffic at the network data plane |
-| TLS verification failed | Runtime does not trust CubeEgress CA | Set `MIMO_NODE_EXTRA_CA_CERTS` in `.env`; the runner maps it to `NODE_EXTRA_CA_CERTS` inside the sandbox and verifies that the path is readable |
-| Unexpected models.dev/update errors | Auxiliary network feature enabled | Keep the supplied disable switches |
-| Template remains `PULLING` | Registry unavailable | Use a node-reachable registry and pull credentials |
-| Probe timeout | Missing Cube entrypoint/envd | Inherit the CubeSandbox base image |
-| No session ID | CLI/output changed | Keep MiMo Code pinned and use `--format json` |
-| Session missing after resume | Different profile or workspace | Reuse the same absolute paths and sandbox ID |
-| Task timeout | Model/tool run exceeded the budget | Increase both exec and sandbox timeouts |
+| `mimo run` lacks `--fork` | Stale template | Rebuild the pinned image |
+| MiMo Platform returns `401` / `403` | Missing, expired, or incorrectly injected API key | Check `MIMO_API_KEY`, the `api-key` injection rule, and the redacted CubeEgress audit |
+| Template import cannot pull the image | Image was not pushed, registry credentials are unavailable to Cube nodes, or the architecture is wrong | Push an `linux/amd64` image to a registry every Cube node can pull from and configure registry credentials |
+| Sandbox or MiMo command times out | Cluster capacity is exhausted or the task exceeds its limit | Reduce candidates, then raise `MIMO_SANDBOX_TIMEOUT` or `MIMO_AGENT_EXEC_TIMEOUT` as appropriate |
+| Child ID equals parent ID | Fork was not honored | Inspect raw MiMo events and CLI version |
+| Continuity proof fails | Parent state was not inherited | Check snapshot timing and `--session` |
+| Candidate rejected for paths | Tests or files outside the task policy changed | Tighten the prompt or intentionally extend `allowed_paths` |
+| No eligible candidate | All candidates failed tests/policy | Inspect candidate evidence |
+| Promotion validation fails | Winner does not reproduce on source | Rollback is automatic |
+| TLS verification fails | CubeEgress CA is unavailable | Configure `MIMO_NODE_EXTRA_CA_CERTS` |
+| Requests return `403` or `000` | Exact-host policy rejected them | Use the MiMo Platform endpoint |
+| Snapshot remains | Snapshot cleanup failed | Delete its template ID manually |
 
 ## References
 
-- Runnable example: [`examples/mimo-code-integration`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/mimo-code-integration)
-- [MiMo Code repository](https://github.com/XiaomiMiMo/MiMo-Code)
-- [MiMo Code models](https://mimo.xiaomi.com/mimocode/models-provider)
 - [MiMo Code sessions](https://mimo.xiaomi.com/mimocode/sessions)
-- [Bring Your Own Image](../tutorials/bring-your-own-image.md)
-- [Snapshot / Clone / Rollback](../snapshot-rollback-clone.md)
+- [Snapshot, Rollback & Clone](../snapshot-rollback-clone.md)
 - [CubeEgress Security Proxy](../security-proxy.md)
+- [Runnable example](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/mimo-code-integration)

@@ -1,207 +1,99 @@
 ---
-title: MiMo Code 集成指南
+title: MiMo Code 双分叉 Rollout 参考模式
 author: Young-Allen
-date: 2026-07-22
+date: 2026-07-29
 tags:
   - integration
   - mimo-code
   - coding-agent
-  - agent
+  - snapshot
 lang: zh-CN
 ---
 
-# MiMo Code 集成指南
+# MiMo Code 双分叉 Rollout 参考模式
 
 [English](../../../guide/integrations/mimo-code.md)
 
-在 CubeSandbox MicroVM 中运行
-[MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code)。本指南覆盖可复现模板、
-无头 Agent 执行、MiMo Platform 鉴权、受限网络出口，以及跨 CubeSandbox 快照
-续接同一个对话。
+本集成把 [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code) 的会话分叉与
+CubeSandbox 完整 VM 快照结合，让多个实现候选从同一个规划上下文出发。
+
+其中双分叉生命周期是可复用的参考模式；随附的 `normalize-slug` fixture 只是
+确定性演示。任务提示、测试命令、可编辑路径和候选策略均由外部 `task.json`
+提供。
+
+它不只是把 Coding Agent 放进 MicroVM，而是建立一套推测式编码事务：
+
+1. MiMo 在短生命周期且带凭证的规划沙箱中分析任务。
+2. 父会话 profile 被复制到不带凭证的源 MicroVM。
+3. CubeSandbox 为这个完整源 MicroVM 创建快照。
+4. 多个候选 MicroVM 从同一个快照启动。
+5. 每个候选通过 `mimo run --session ... --fork` 分叉父会话。
+6. 确定性测试和补丁策略选择获胜者。
+7. 只有获胜补丁会提升到源沙箱。
+8. 最终验证失败时，源沙箱回滚到基线快照。
+
+这直接实现了**用沙箱执行 Agent 生成的代码并回收结果**用例：候选 MicroVM
+执行固定验收测试，Host 回收有长度限制的测试输出和已验证补丁元数据，再提升
+一个结果。
 
 可运行实现位于
 [`examples/mimo-code-integration`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/mimo-code-integration)。
 
-## 集成目标与版本
+## 为什么要配对两种分叉？
 
-| 组件 | 已测试版本 |
+MiMo 与 CubeSandbox 分叉的是不同状态：
+
+| 层级 | 分叉内容 |
+| --- | --- |
+| MiMo `--fork` | 对话历史、规划上下文、记忆和 Agent 元数据 |
+| CubeSandbox snapshot | Guest 内存、根文件系统、工作区、工具链和 MiMo profile |
+
+只分叉 MiMo 会话不能隔离原生进程和文件写入；只克隆 VM 又不能形成独立对话
+分支。两者组合后，每个候选拥有相同的初始知识与运行环境，后续工作则完全隔离。
+
+CubeSandbox 生命周期遵循
+[`07_clone_concurrent.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/snapshot-rollback-clone/07_clone_concurrent.py)
+与
+[`08_fork_three_axis.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/snapshot-rollback-clone/08_fork_three_axis.py)
+相同的约束：多个沙箱继承同一快照、后续写入保持隔离、源沙箱仍可继续使用。
+本集成补上 Agent 层，为每个候选 VM 配对独立 MiMo 对话分叉，再选择并提升一个
+通过测试的补丁。
+
+```mermaid
+flowchart LR
+    Driver[HostDriver] --> Planner[CredentialedPlannerVM]
+    Planner -->|"MiMo plan"| Parent[ParentSession]
+    Parent -->|"copy profile only"| Source[CredentialFreeSourceVM]
+    Source -->|"create_snapshot"| Snapshot[BaselineSnapshot]
+    Snapshot --> CandidateA[CandidateA]
+    Snapshot --> CandidateB[CandidateB]
+    Parent -->|"--session + --fork"| ChildA[ChildSessionA]
+    Parent -->|"--session + --fork"| ChildB[ChildSessionB]
+    ChildA --> CandidateA
+    ChildB --> CandidateB
+    CandidateA --> Evaluator[TestAndPatchPolicy]
+    CandidateB --> Evaluator
+    Evaluator -->|"winner patch"| Source
+    Source -->|"validation failure"| Rollback[RollbackBaseline]
+```
+
+## 已测试组件
+
+| 组件 | 版本或要求 |
 | --- | --- |
 | MiMo Code | `@mimo-ai/cli@0.1.7` |
 | MiMo 模型 | `mimo/mimo-v2.5-pro` |
-| Node.js | 24（npm 安装运行时） |
-| CubeSandbox base image | `ghcr.io/tencentcloud/cubesandbox-base:2026.16` |
-| E2B SDK | `e2b>=2.4.1` |
-| CubeSandbox SDK | `cubesandbox>=0.3.0` |
-| CubeSandbox 平台 | `>= 0.3.0` 支持 pause/resume；`>= 0.4.0` 支持 CubeEgress |
+| CubeSandbox 基础镜像 | `ghcr.io/tencentcloud/cubesandbox-base:2026.16` |
+| Python SDK | `cubesandbox>=0.6.0` |
+| CubeSandbox 平台 | 支持 snapshot/rollback 与 CubeEgress |
 
-MiMo Code 基于 OpenCode 演进，并加入持久记忆、上下文 Checkpoint、子 Agent 编排和
-Compose 工作流。本集成使用 MiMo 自身的 CLI、统一 profile、NDJSON 事件、
-sessionID 和 Compose 模式，而不是再次实现通用 OpenCode executor 或插件。
+镜像构建会验证固定 CLI 是否提供 `mimo run --fork`。
 
-## 前置条件
+## 安全模型
 
-- CubeSandbox 已运行，且 CubeAPI 可访问；
-- 构建机上有 `cubemastercli`、Docker 和节点可拉取的镜像仓库；
-- Host runner 使用 Python 3.10+；
-- 从 <https://platform.xiaomimimo.com> 获取 MiMo Platform API Key。
-
-可执行的配置步骤和当前 runner 前置条件请参阅
-[示例 README](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/mimo-code-integration/README_zh.md)；该 README
-保持自包含并作为运行细节的维护来源。
-
-## 为什么在 CubeSandbox 中运行 MiMo Code
-
-MiMo 可以修改文件、执行 Shell、安装依赖和启动子 Agent。MicroVM 把这些能力限制在
-可丢弃环境中：
-
-| 风险或需求 | CubeSandbox 机制 |
-| --- | --- |
-| Agent 命令隔离 | 独立 KVM MicroVM 和 Guest Kernel |
-| 工具环境复现 | 固定版本模板 |
-| 长任务连续性 | `pause()` 保存 VM 内存和根文件系统 |
-| MiMo 状态连续性 | `$MIMOCODE_HOME` 与 `/workspace` 在恢复后保留 |
-| 密钥隔离 | CubeEgress 在 VM 外注入真实 `api-key` |
-| 网络管控 | 精确 Host 规则和默认拒绝出口 |
-
-## 集成步骤
-
-### 1. 构建模板
-
-```bash
-export MIMO_IMAGE="<your-registry>/mimo-code-cube:0.1.7"
-./examples/mimo-code-integration/build-template.sh
-cubemastercli tpl watch --job-id <job_id>
-```
-
-Dockerfile 固定 CLI 版本，并在构建时验证平台二进制：
-
-```dockerfile
-ARG CUBE_BASE_IMAGE=ghcr.io/tencentcloud/cubesandbox-base:2026.16
-FROM ${CUBE_BASE_IMAGE}
-
-ARG MIMO_VERSION=0.1.7
-RUN npm install -g --no-audit --no-fund \
-      "@mimo-ai/cli@${MIMO_VERSION}" \
-      --registry https://registry.npmjs.org \
-    && mimo --version
-
-ENV MIMOCODE_HOME=/root/.mimocode
-WORKDIR /workspace
-EXPOSE 49983
-```
-
-完整 Dockerfile 还会安装开发工具，并关闭与本示例无关的 MiMo 网络功能。
-
-### 2. 配置 Host
-
-```bash
-cd examples/mimo-code-integration
-install -m 600 .env.example .env
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-```
-
-设置 `E2B_API_URL`、`E2B_API_KEY`、`CUBE_TEMPLATE_ID` 和 `MIMO_API_KEY`。
-远程 CubeAPI 使用真实 API Key 时应启用 HTTPS；明文 HTTP 只适合受信任的本地部署。
-首版集成只面向 MiMo Platform：
-
-- Base URL：`https://api.xiaomimimo.com/v1`；
-- 模型：`mimo/mimo-v2.5-pro`；
-- 鉴权请求头：`api-key`。
-
-明确固定该契约，可以避免把凭证发送给根据不可信 URL 猜出的 Host。其他
-OpenAI-compatible Provider 可在后续作为显式模式加入，并单独指定 Host 和鉴权方式。
-
-### 3. 执行无头任务
-
-```bash
-python run_mimo_code.py
-```
-
-Host 会执行：
-
-```bash
-mimo run --format json --dir /workspace \
-  --model mimo/mimo-v2.5-pro \
-  --agent build \
-  --dangerously-skip-permissions "<prompt>"
-```
-
-`--format json` 会输出 `tool_use`、`text`、`error`、`step_finish` 等 NDJSON
-事件，每个事件都带有 `sessionID`。示例会先缓冲 SDK 的任意 stdout 分块，再解析
-完整 JSON 行。
-
-直接 runner 只在命令环境中传递 Key。这适合作为开发流程，但拥有开放出口的工具仍
-可能泄露进程环境中的密钥。
-
-### 4. 将 MiMo 状态集中到一个 profile
-
-模板使用绝对路径：
-
-```text
-/root/.mimocode/
-├── config/
-├── data/    # 会话数据库、鉴权（如使用）、记忆、Checkpoint
-├── state/
-└── cache/
-```
-
-`MIMOCODE_HOME` 是 MiMo 集成的关键特性：整个 profile 可以作为一个单元检查、保留
-或删除。共享模板绝不能预置开发者会话或凭证。
-
-### 5. 暂停并续接同一个对话
-
-```bash
-python resume_mimo_code.py
-```
-
-Runner 会提取第一轮的 sessionID、暂停 VM、重新连接并显式续接：
-
-```python
-first_result, events = run_turn(
-    sandbox,
-    workspace=workspace,
-    prompt=first_prompt,
-    envs=mimo_env,
-    timeout=900,
-)
-session_id = session_id_from_events(events)
-
-sandbox_id = sandbox.sandbox_id
-sandbox.pause()  # pause() 保留 sandbox_id，并返回 None
-sandbox = Sandbox.connect(sandbox_id=sandbox_id)
-
-second_result, events = run_turn(
-    sandbox,
-    workspace=workspace,
-    prompt=second_prompt,
-    envs=mimo_env,
-    timeout=900,
-    session_id=session_id,
-)
-```
-
-CubeSandbox 和 E2B 的 `pause()` 都会保留 sandbox ID 并返回 `None`。Runner 也不会
-使用 `Sandbox.create()` 上下文管理器，因为其 `__exit__` 会 kill 已暂停沙箱。
-
-测试 token 不会写入 `/workspace`，所以成功回忆能证明 MiMo 对话连续性，而不只是
-文件仍然存在。Runner 还会验证 workspace、profile data 和
-`mimo session list --format json`。
-
-MiMo Checkpoint 和 CubeSandbox 快照互相补充：
-
-- MiMo Checkpoint 用于重建长模型上下文和持久记忆；
-- CubeSandbox 快照保存完整 VM，包括进程内存、根文件系统、workspace、数据库和
-  MiMo profile。
-
-### 6. 使用默认拒绝出口和凭证注入
-
-```bash
-python network_policy.py
-```
-
-原生 CubeSandbox SDK 会添加一个精确的 MiMo Platform 规则：
+短生命周期规划沙箱与所有候选沙箱都使用默认拒绝互联网访问。唯一的
+CubeEgress 精确规则允许 `api.xiaomimimo.com`，并在 VM 外注入真实
+`api-key`：
 
 ```python
 Rule(
@@ -225,71 +117,185 @@ Rule(
 )
 ```
 
-沙箱使用 `allow_internet_access=False` 创建。VM 中只有占位
-`MIMO_API_KEY`，真实值只存在于 Host 侧 CubeEgress 规则。MiMo 运行时必须信任
-拦截 CA，因此示例设置
-`NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt`，并在发起 API 请求前验证
-该路径在沙箱内可读。
+驱动会把示例规则名替换为每轮随机名称，使证据收集器无需复制其他沙箱流量
+即可关联本轮审计记录。
 
-示例关闭分享、遥测、自动更新、模型清单下载、LSP 下载和外部 Skills/插件，以减少
-辅助请求；CubeEgress 规则才是白名单的实际强制边界。
+MiMo 在 VM 内只能看到占位环境变量。源沙箱则使用默认拒绝网络且完全不带凭证
+规则。父轮次结束后，只有含占位符的 MiMo profile 会传入源沙箱，因此快照
+创建请求不会持久化 CubeEgress 注入密钥。真实密钥不会出现在：
 
-### 7. 在适合的任务中使用 MiMo Compose
+- `$MIMOCODE_HOME`；
+- `/workspace`；
+- 候选补丁与证据；
+- 不带凭证的源基线快照。
+
+示例同时禁用 MiMo 分享、遥测、更新、外部 skill、模型清单与 LSP 下载，使
+精确域名规则保持最小范围。
+
+## 运行集成
+
+构建并导入固定版本模板：
 
 ```bash
-python run_mimo_code.py --agent compose --prompt \
-  "Inspect the project, implement the change, test it, and write result.md containing CUBE_MIMO_RUN_OK."
+export MIMO_IMAGE="<your-registry>/mimo-code-cube:0.1.7"
+./examples/mimo-code-integration/build-template.sh
+cubemastercli tpl watch --job-id <job_id>
 ```
 
-Compose 是 MiMo 的主 Agent，可用于无头模式。具体委派行为由模型决定，所以生产流程
-应验证最终产物和测试，而不是要求固定的子 Agent trace。
+配置 Host 驱动：
 
-## 使用场景与最佳实践
+```bash
+cd examples/mimo-code-integration
+install -m 600 .env.example .env
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+```
 
-- **隔离式自主开发：** 向 MiMo 提供一次性仓库副本，不挂载 Host 文件系统。
-- **执行并回收结果：** 将输出统一写入 `/workspace`，再通过 `sandbox.files` 或受控
-  命令读取。
-- **长任务断点续跑：** 在一轮 MiMo 完成后 pause，同时保存 sandbox ID 和 MiMo
-  session ID，恢复时显式指定。
-- **并行方案：** 只有在每个分支都有明确所有者和清理策略时，才 fork MiMo session
-  或 clone CubeSandbox 快照。
-- **预装依赖：** 把工具链放入模板，避免窄出口策略额外开放 npm、PyPI 或下载域名。
-- **把 profile 当作敏感数据：** 记忆和会话数据库可能含有提示词、代码、路径和
-  命令输出。
+设置 `E2B_API_URL`、`E2B_API_KEY`、`CUBE_TEMPLATE_ID` 和 `MIMO_API_KEY`。
+真实 CubeAPI key 穿越不可信网络时必须使用 HTTPS。
 
-## 限制与注意事项
+并行运行两个候选：
 
-- `--dangerously-skip-permissions` 会移除交互确认，只能在一次性沙箱中使用；必要时
-  仍应保留显式 deny 规则。
-- E2B 命令通道不提供 MiMo TUI，应使用 `mimo run`。
-- OAuth 会把 access/refresh token 写入 `auth.json`，快照也会保存它们。本示例
-  因此采用 API Key 出口注入。
-- Pause 会断开现有网络连接；恢复后的 MiMo 命令会重建模型连接，但保留会话状态。
-- `MIMOCODE_HOME` 必须是绝对路径。
-- Compose 委派和自动记忆整理由模型决定，不适合作为确定性健康检查。
+```bash
+python speculative_mimo_code.py \
+  --task fixtures/normalize-slug/task.json \
+  --candidates 2 \
+  --concurrency 2 \
+  --evidence-file output/speculative-success.json
+```
 
-## 常见问题
+成功提升时输出 `CUBE_MIMO_PROMOTION_OK`。
 
-| 现象 | 原因 | 处理方式 |
+验证事务回滚路径：
+
+```bash
+python speculative_mimo_code.py \
+  --force-promotion-failure \
+  --evidence-file output/speculative-rollback.json
+```
+
+该模式只会强制最终源验证失败。源工作区必须恢复为干净基线，并输出
+`CUBE_MIMO_ROLLBACK_OK`。
+
+## 任务 profile 与复用边界
+
+参考实现将任务输入与事务生命周期分离：
+
+```text
+fixtures/normalize-slug/
+├── task.json
+└── project/
+    ├── .gitignore
+    ├── README.md
+    ├── app.py
+    └── tests/test_app.py
+```
+
+`task.json` 提供 `name`、`summary`、规划和实现说明、固定测试命令及超时、
+已存在的可编辑路径、具名候选策略和 `expect_baseline_failure`。加载器限制
+文件数量与大小，并拒绝符号链接、不安全路径、重复项和基线中不存在的可编辑
+路径。
+
+新应用会复用相同的会话分叉、快照扇出、凭证边界、提升、回滚、清理和证据
+契约。当前评估器为二元测试，并按改动行数排序通过补丁。后续
+`research-experiment` 集成可以新增指标评估器，无需重复外围基础设施。
+
+## 对话连续性证明
+
+创建快照前，规划沙箱中的只规划父轮次会收到随机令牌，同时禁止文件编辑和
+权限自动批准。驱动验证 Git 状态为空、确认 `/workspace` 下没有令牌，再把父
+会话 profile 传入不带凭证的源沙箱。
+
+候选的新提示不会包含令牌值。分叉后的子会话必须从父对话恢复令牌，并通过
+工作区之外的报告或 `CONTINUITY=...` NDJSON 事件证明；缺少证明时会在同一
+子会话重试一次。这能区分完整 MiMo 会话继承与普通文件系统克隆。
+
+## 候选策略与获胜者选择
+
+模型无权决定谁获胜。候选只有满足以下条件才有资格：
+
+- 每个合格子会话 ID 与父会话及其他合格子会话不同；
+- 连续性报告或 NDJSON 标记正确；
+- 固定验收测试通过，并在源沙箱原样重跑；
+- 所有改动路径都由任务 profile 声明；
+- 补丁非空、为文本且低于大小限制。
+
+合格结果按改动行数和候选名排序。补丁随后通过 `git apply --check`，应用到
+未修改的源沙箱，并再次执行相同测试。
+
+## 失败语义
+
+- 候选创建为全有或全无，部分成功的兄弟沙箱会被杀死。
+- 单个候选失败会被记录，但不会阻止其他有效候选获胜。
+- 没有有效候选时，源沙箱不会被修改。
+- 提升验证失败会调用 `rollback(snapshot_id)` 并验证源 Git 工作区干净。
+- 每条路径都会显式清理规划、候选与源沙箱以及持久快照。
+- 清理错误会报告泄漏资源 ID，并使原本成功的流程失败。
+
+## 辅助检查
+
+示例保留两个小型辅助入口：
+
+```bash
+# 验证固定模板与 MiMo NDJSON 事件契约。
+python run_mimo_code.py
+
+# 验证精确出口、CA 信任与 VM 内只有占位凭证。
+python network_policy.py
+```
+
+## 验证与证据
+
+离线检查不需要模型 key 或真实集群：
+
+```bash
+python -m unittest discover -s tests -v
+python -m py_compile *.py tests/*.py \
+  fixtures/normalize-slug/project/*.py \
+  fixtures/normalize-slug/project/tests/*.py
+bash -n build-template.sh collect_e2e_evidence.sh
+```
+
+真实集群上运行：
+
+```bash
+./collect_e2e_evidence.sh
+```
+
+收集器会运行补丁提升与强制回滚两个场景。证据包括源/候选沙箱 ID、快照 ID、
+父/子会话 ID、候选评分、CubeEgress 边界检查、最终结果，以及本轮资源 ID
+全部清理的检查，但绝不记录真实 MiMo key。
+
+## 运维建议
+
+- 候选数量应服从集群容量；示例最多允许八个。
+- 预装任务需要的工具链，避免为候选开放包仓库。
+- MiMo profile 和快照包含提示、代码与命令输出，应按敏感数据处理。
+- snapshot 删除与 sandbox 删除相互独立，必须同时清理。
+- `--dangerously-skip-permissions` 仅用于可丢弃候选 MicroVM，父规划轮不会使用。
+- 信任边界应是固定测试和补丁策略，而不是模型的文字声明。
+
+## 排错
+
+| 现象 | 原因 | 处理 |
 | --- | --- | --- |
-| `mimo: command not found` | 模板过旧 | 重新构建并注册固定版本镜像 |
-| 平台二进制无法执行 | 镜像架构错误 | 按 Cube 节点架构构建 |
-| 鉴权失败 | Key 无效或使用 Bearer 请求头 | MiMo Platform 要求 `api-key` |
-| `403 Forbidden - CubeEgress` 或 curl 状态 `000` | 请求 Host 未命中 | 使用精确 MiMo 端点并查看出口审计；部分部署会在网络数据面直接阻断未匹配流量 |
-| TLS 校验失败 | 运行时不信任 CubeEgress CA | 在 `.env` 中设置 `MIMO_NODE_EXTRA_CA_CERTS`；Runner 会将其映射为沙箱内的 `NODE_EXTRA_CA_CERTS`，并验证该路径可读 |
-| 出现 models.dev/更新错误 | 辅助网络功能被开启 | 保留示例提供的 disable 开关 |
-| 模板停在 `PULLING` | 镜像仓库不可达 | 使用节点可访问的仓库和拉取凭证 |
-| Probe 超时 | 缺少 Cube entrypoint/envd | 继承 CubeSandbox base image |
-| 没有 session ID | CLI 或输出发生变化 | 固定 MiMo 版本并使用 `--format json` |
-| 恢复后找不到会话 | Profile 或 workspace 改变 | 复用相同绝对路径和 sandbox ID |
-| 任务超时 | 模型或工具执行超预算 | 同时增大 exec 和 sandbox timeout |
+| `mimo run` 缺少 `--fork` | 模板过旧 | 重新构建固定镜像 |
+| MiMo Platform 返回 `401` / `403` | API key 缺失、过期或未正确注入 | 检查 `MIMO_API_KEY`、`api-key` 注入规则和脱敏 CubeEgress 审计 |
+| 模板导入无法拉取镜像 | 镜像未推送、Cube 节点无仓库凭证或架构错误 | 推送 `linux/amd64` 镜像到所有 Cube 节点可访问的仓库，并配置仓库凭证 |
+| 沙箱或 MiMo 命令超时 | 集群容量不足或任务超过限制 | 减少候选数，再按需增大 `MIMO_SANDBOX_TIMEOUT` 或 `MIMO_AGENT_EXEC_TIMEOUT` |
+| 子 ID 与父 ID 相同 | 分叉未生效 | 检查原始 MiMo 事件和 CLI 版本 |
+| 连续性证明失败 | 未继承父状态 | 检查快照时机与 `--session` |
+| 路径策略拒绝候选 | 修改了测试或任务策略之外的文件 | 收紧提示，或有意扩展 `allowed_paths` |
+| 没有有效候选 | 所有候选测试或策略失败 | 查看候选证据 |
+| 提升验证失败 | 结果无法在源复现 | 流程会自动回滚 |
+| TLS 验证失败 | 缺少 CubeEgress CA | 配置 `MIMO_NODE_EXTRA_CA_CERTS` |
+| 请求返回 `403` 或 `000` | 精确域名规则拒绝 | 使用 MiMo Platform endpoint |
+| 仍有快照残留 | 快照清理失败 | 手动删除对应 template ID |
 
-## 参考
+## 参考资料
 
-- 可运行示例：[`examples/mimo-code-integration`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/mimo-code-integration)
-- [MiMo Code 仓库](https://github.com/XiaomiMiMo/MiMo-Code)
-- [MiMo Code 模型](https://mimo.xiaomi.com/mimocode/models-provider)
 - [MiMo Code 会话](https://mimo.xiaomi.com/mimocode/sessions)
-- [自定义镜像](../tutorials/bring-your-own-image.md)
-- [快照 / 克隆 / 回滚](../snapshot-rollback-clone.md)
+- [Snapshot、Rollback 与 Clone](../snapshot-rollback-clone.md)
 - [CubeEgress 安全代理](../security-proxy.md)
+- [可运行示例](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/mimo-code-integration)

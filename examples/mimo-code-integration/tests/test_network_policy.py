@@ -43,6 +43,13 @@ class NetworkPolicyTests(unittest.TestCase):
             },
         )
 
+    def test_rule_name_can_correlate_one_rollout_audit(self) -> None:
+        rules = network_policy.build_rules(
+            "real-secret",
+            rule_name="mimo_rollout_123",
+        )
+        self.assertEqual(rules[0].name, "mimo_rollout_123")
+
     @patch.object(network_policy.Sandbox, "create")
     def test_create_is_default_deny_and_uses_explicit_config(self, create) -> None:
         expected = object()
@@ -91,6 +98,19 @@ class NetworkPolicyTests(unittest.TestCase):
             create.call_args.kwargs["config"].api_url, "https://cube.example.com"
         )
         self.assertEqual(create.call_args.kwargs["config"].template_id, "tpl_123")
+
+    @patch.object(network_policy.Sandbox, "create")
+    def test_isolated_source_persists_no_credential_rules(self, create) -> None:
+        network_policy.create_isolated_sandbox(
+            "tpl_123",
+            900,
+            api_url="https://cube.example.com",
+            api_key="cube-key",
+        )
+        kwargs = create.call_args.kwargs
+        self.assertFalse(kwargs["allow_internet_access"])
+        self.assertNotIn("network", kwargs)
+        self.assertNotIn("env_vars", kwargs)
 
     @patch.object(network_policy, "run_command")
     def test_verify_ca_bundle_checks_path_inside_sandbox(self, run_command) -> None:

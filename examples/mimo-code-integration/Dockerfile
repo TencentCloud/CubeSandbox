@@ -34,6 +34,7 @@ RUN npm install -g --no-audit --no-fund \
         "@mimo-ai/cli@${MIMO_VERSION}" \
         --registry https://registry.npmjs.org \
     && mimo --version \
+    && mimo run --help 2>&1 | grep -F -- "--fork" \
     && npm cache clean --force \
     && rm -rf /root/.npm
 

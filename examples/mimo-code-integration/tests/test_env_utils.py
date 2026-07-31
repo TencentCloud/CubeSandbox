@@ -89,6 +89,23 @@ class EnvUtilsTests(unittest.TestCase):
             args = shlex.split(env_utils.mimo_command("inspect", dangerous=False))
         self.assertNotIn("--dangerously-skip-permissions", args)
 
+    def test_command_can_fork_an_existing_session(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            args = shlex.split(
+                env_utils.mimo_command(
+                    "try another approach",
+                    session_id="ses_parent",
+                    fork=True,
+                )
+            )
+        self.assertIn("--session", args)
+        self.assertIn("ses_parent", args)
+        self.assertIn("--fork", args)
+
+    def test_fork_requires_a_parent_session(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires session_id"):
+            env_utils.mimo_command("try another approach", fork=True)
+
     def test_workspace_must_be_absolute(self) -> None:
         with patch.dict(os.environ, {"MIMO_WORKSPACE": "relative"}, clear=True):
             with self.assertRaisesRegex(SystemExit, "must be an absolute path"):
