@@ -15,12 +15,24 @@ use vm_memory::bitmap::Bitmap;
 use vm_memory::{Bytes, GuestMemory};
 use vm_virtio::{AccessPlatform, Translatable};
 
+/// Whether an EIO-drop log line should be emitted after the cumulative dropped
+/// count moved from `before` to `after`. Log the first drop, then once per
+/// 1000-frame boundary crossed, so a persistently down tap cannot flood the
+/// log at line rate. The `tx_dropped_frames` counter is the source of truth
+/// for monitoring; this log is best-effort.
+fn should_log_dropped(before: u64, after: u64) -> bool {
+    (before == 0 && after > 0) || before / 1000 != after / 1000
+}
+
 #[derive(Clone)]
 pub struct TxVirtio {
     pub counter_bytes: Wrapping<u64>,
     pub counter_frames: Wrapping<u64>,
     pub limit_bytes: Wrapping<u64>,
     pub limit_frames: Wrapping<u64>,
+    /// Frames the tap refused with EIO and we dropped instead of killing the
+    /// VM (see the EIO branch in `process_desc_chain`).
+    pub dropped_frames: Wrapping<u64>,
 }
 
 impl Default for TxVirtio {
@@ -36,6 +48,7 @@ impl TxVirtio {
             counter_frames: Wrapping(0),
             limit_bytes: Wrapping(0),
             limit_frames: Wrapping(0),
+            dropped_frames: Wrapping(0),
         }
     }
 
@@ -111,14 +124,22 @@ impl TxVirtio {
                         retry_write = true;
                         break;
                     }
-                    error!("net: tx: failed writing to tap: {}", e);
-                    return Err(NetQueuePairError::WriteTap(e));
+
+                    if e.raw_os_error() != Some(libc::EIO) {
+                        error!("net: tx: failed writing to tap: {}", e);
+                        return Err(NetQueuePairError::WriteTap(e));
+                    }
+
+                    // EIO: the tap refused the frame (device down / carrier
+                    // not up). Drop it like real hardware would and keep the
+                    // queue alive; see the commit message for the rationale.
+                    self.dropped_frames += Wrapping(1);
+                    0
+                } else {
+                    self.counter_bytes += Wrapping(result as u64 - vnet_hdr_len() as u64);
+                    self.counter_frames += Wrapping(1);
+                    result as u32
                 }
-
-                self.counter_bytes += Wrapping(result as u64 - vnet_hdr_len() as u64);
-                self.counter_frames += Wrapping(1);
-
-                result as u32
             } else {
                 0
             };
@@ -322,6 +343,7 @@ impl RxVirtio {
 pub struct NetCounters {
     pub tx_bytes: Arc<AtomicU64>,
     pub tx_frames: Arc<AtomicU64>,
+    pub tx_dropped_frames: Arc<AtomicU64>,
     pub rx_bytes: Arc<AtomicU64>,
     pub rx_frames: Arc<AtomicU64>,
     pub rx_limit_bytes: Arc<AtomicU64>,
@@ -432,10 +454,24 @@ impl NetQueuePair {
         self.counters
             .tx_limit_frames
             .fetch_add(self.tx.limit_frames.0, Ordering::AcqRel);
+        if self.tx.dropped_frames.0 != 0 {
+            let before = self
+                .counters
+                .tx_dropped_frames
+                .fetch_add(self.tx.dropped_frames.0, Ordering::AcqRel);
+            let after = before + self.tx.dropped_frames.0;
+            if should_log_dropped(before, after) {
+                debug!(
+                    "net: tx: tap refused frame(s) with EIO; dropping instead of failing the VM (total dropped: {})",
+                    after
+                );
+            }
+        }
         self.tx.counter_bytes = Wrapping(0);
         self.tx.counter_frames = Wrapping(0);
         self.tx.limit_bytes = Wrapping(0);
         self.tx.limit_frames = Wrapping(0);
+        self.tx.dropped_frames = Wrapping(0);
 
         queue
             .needs_notification(mem)
@@ -494,5 +530,37 @@ impl NetQueuePair {
         queue
             .needs_notification(mem)
             .map_err(NetQueuePairError::QueueNeedsNotification)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_log_dropped;
+
+    #[test]
+    fn logs_first_drop() {
+        assert!(should_log_dropped(0, 1));
+        assert!(should_log_dropped(0, 5));
+    }
+
+    #[test]
+    fn suppresses_within_the_same_thousand_bucket() {
+        assert!(!should_log_dropped(1, 2));
+        assert!(!should_log_dropped(500, 999));
+        assert!(!should_log_dropped(1000, 1500));
+    }
+
+    #[test]
+    fn logs_on_each_thousand_boundary_crossed() {
+        assert!(should_log_dropped(999, 1000));
+        assert!(should_log_dropped(1999, 2001));
+        // A single batch spanning several boundaries still logs once.
+        assert!(should_log_dropped(1500, 4200));
+    }
+
+    #[test]
+    fn no_log_when_nothing_was_dropped() {
+        assert!(!should_log_dropped(0, 0));
+        assert!(!should_log_dropped(42, 42));
     }
 }
