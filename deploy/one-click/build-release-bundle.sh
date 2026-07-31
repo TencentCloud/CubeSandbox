@@ -177,14 +177,18 @@ generate_release_manifest() {
     guest_image_version="$(head -n1 "${guest_image_ver_file}" | tr -d '[:space:]')"
   fi
 
+  # Prefer independent cube-agent/version; fall back to legacy cube-image/agent-version.
   local guest_agent_version="${cube_version}"
-  local guest_agent_ver_file="${RUNTIME_LAYOUT_DIR}/cube-image/agent-version"
+  local guest_agent_ver_file="${RUNTIME_LAYOUT_DIR}/cube-agent/version"
   if [[ -f "${guest_agent_ver_file}" ]]; then
     guest_agent_version="$(head -n1 "${guest_agent_ver_file}" | tr -d '[:space:]')"
+  elif [[ -f "${RUNTIME_LAYOUT_DIR}/cube-image/agent-version" ]]; then
+    guest_agent_version="$(head -n1 "${RUNTIME_LAYOUT_DIR}/cube-image/agent-version" | tr -d '[:space:]')"
   fi
 
   # Guest-image path
   local guest_image_path="${RUNTIME_LAYOUT_DIR}/cube-image/cube-guest-image-cpu.img"
+  local agent_ext4_path="${RUNTIME_LAYOUT_DIR}/cube-agent/cube-agent.ext4"
 
   # Kernel paths
   local kernel_vmlinux="${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-bm"
@@ -200,17 +204,20 @@ generate_release_manifest() {
     log "WARNING: PVM_KERNEL_TAG is not set; release manifest will record kernel.pvm_version=unknown"
   fi
 
-  # Agent binary: prefer CI override, then search known build output paths.
-  local agent_bin="${ONE_CLICK_CUBE_AGENT_BIN:-}"
-  if [[ -z "${agent_bin}" ]]; then
-    for candidate in \
-      "${ROOT_DIR}/agent/target/x86_64-unknown-linux-musl/release/cube-agent" \
-      "${ROOT_DIR}/agent/target/release/cube-agent"; do
-      if [[ -f "${candidate}" ]]; then
-        agent_bin="${candidate}"
-        break
-      fi
-    done
+  # Agent digest: prefer cube-agent.ext4; fall back to ELF binary for older layouts.
+  local agent_artifact="${agent_ext4_path}"
+  if [[ ! -f "${agent_artifact}" ]]; then
+    agent_artifact="${ONE_CLICK_CUBE_AGENT_BIN:-}"
+    if [[ -z "${agent_artifact}" ]]; then
+      for candidate in \
+        "${ROOT_DIR}/agent/target/x86_64-unknown-linux-musl/release/cube-agent" \
+        "${ROOT_DIR}/agent/target/release/cube-agent"; do
+        if [[ -f "${candidate}" ]]; then
+          agent_artifact="${candidate}"
+          break
+        fi
+      done
+    fi
   fi
 
   # Shim + runtime binaries: already copied to RUNTIME_LAYOUT_DIR by build-vm-assets.sh.
@@ -220,7 +227,7 @@ generate_release_manifest() {
   python3 - "${output}" "${release_version}" "${cube_version}" "${cube_commit}" "${cube_build_time}" \
       "${guest_image_version}" "${guest_agent_version}" "${kernel_version}" "${kernel_pvm_version}" \
       "${CORE_BIN_DIR}" \
-      "${agent_bin}" "${shim_bin}" "${runtime_bin}" \
+      "${agent_artifact}" "${shim_bin}" "${runtime_bin}" \
       "${guest_image_path}" "${kernel_vmlinux}" "${kernel_pvm_vmlinux}" <<'PY'
 import json, os, sys, hashlib
 
@@ -616,6 +623,9 @@ copy_file "${MKCERT_BIN_ASSET}" "${PACKAGE_ROOT}/support/bin/mkcert"
 copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-shim" "${PACKAGE_ROOT}/cube-shim"
 copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf" "${PACKAGE_ROOT}/cube-kernel-scf"
 copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-image" "${PACKAGE_ROOT}/cube-image"
+if [[ -d "${RUNTIME_LAYOUT_DIR}/cube-agent" ]]; then
+  copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-agent" "${PACKAGE_ROOT}/cube-agent"
+fi
 
 # Ship the entire scripts/one-click directory: the systemd unit scripts
 # delegate container lifecycle to the compose-based up-/down- helpers

@@ -19,6 +19,7 @@ COPY scripts/component-entrypoint.sh /usr/local/bin/component-entrypoint.sh
 ARG CUBE_VERSION=unknown
 RUN set -eu; \
     img_ver="$(tr -d '[:space:]' < ${IMAGE_ROOT}/cube-image/version 2>/dev/null || true)"; \
+    # Prefer legacy agent-version if present; independent cube-agent is staged separately.
     agent_ver="$(tr -d '[:space:]' < ${IMAGE_ROOT}/cube-image/agent-version 2>/dev/null || true)"; \
     : "${img_ver:=${CUBE_VERSION}}"; \
     { \

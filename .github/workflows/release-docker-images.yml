@@ -18,7 +18,7 @@ on:
         type: string
         default: ''
       components:
-        description: 'Comma-separated components to build, or "all" (cube-egress, cube-egress-net, cube-master, cubemastercli, cubelet, network-agent, cube-shim, cube-kernel, cube-guest, cube-pvm-host-bootstrap, cube-node-init, cube-wait-node-prep, cube-api, cube-ops, cube-proxy, webui, cube-lifecycle-manager)'
+        description: 'Comma-separated components to build, or "all" (cube-egress, cube-egress-net, cube-master, cubemastercli, cubelet, network-agent, cube-shim, cube-kernel, cube-guest, cube-agent, cube-pvm-host-bootstrap, cube-node-init, cube-wait-node-prep, cube-api, cube-ops, cube-proxy, webui, cube-lifecycle-manager)'
         required: false
         type: string
         default: all
@@ -145,6 +145,7 @@ jobs:
               "cube-shim",
               "cube-kernel",
               "cube-guest",
+              "cube-agent",
               "cube-pvm-host-bootstrap",
               "cube-node-init",
               "cube-wait-node-prep",
@@ -227,6 +228,13 @@ jobs:
                   "context": "cube-guest-ctx",
                   "dockerfile": "deploy/kubernetes/images/cube-guest/Dockerfile",
                   "cache_scope": "cube-guest",
+              },
+              {
+                  "component": "cube-agent",
+                  "image": "cube-agent",
+                  "context": "cube-agent-ctx",
+                  "dockerfile": "deploy/kubernetes/images/cube-agent/Dockerfile",
+                  "cache_scope": "cube-agent",
               },
               {
                   "component": "cube-pvm-host-bootstrap",
@@ -468,7 +476,7 @@ jobs:
           # Extract cube-image/ from the arch-specific one-click bundle on a tag.
           # Layout: cube-sandbox-one-click-<tag>-<arch>.tar.gz
           #   → …/assets/package/sandbox-package.tar.gz
-          #   → sandbox-package/cube-image/{cube-guest-image-cpu.img,version,agent-version}
+          #   → sandbox-package/cube-image/{cube-guest-image-cpu.img,version}
           try_oneclick_bundle() {
             local tag="$1"
             local bundle="cube-sandbox-one-click-${tag}-${ARCH}.tar.gz"
@@ -546,12 +554,129 @@ jobs:
 
           test -f cube-guest-ctx/package/cube-image/cube-guest-image-cpu.img
           test -f cube-guest-ctx/package/cube-image/version
-          test -f cube-guest-ctx/package/cube-image/agent-version
+          # agent-version is legacy (agent baked into guest). Independent agent is
+          # published as cube-agent-${ARCH}.tar.gz / cube-agent image.
+          test ! -f cube-guest-ctx/package/cube-image/agent-version || \
+            echo "warning: legacy agent-version present in guest assets (ignored)"
           install -m 0755 \
             deploy/kubernetes/images/scripts/component-entrypoint.sh \
             cube-guest-ctx/scripts/component-entrypoint.sh
           echo "asset_tag=${GUEST_RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
           echo "guest_source=${GUEST_SOURCE}" >> "${GITHUB_OUTPUT}"
+
+      - name: Stage cube-agent artifacts from Release
+        id: stage_agent
+        if: matrix.component == 'cube-agent'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          ARCH: ${{ matrix.arch }}
+          ALLOW_GUEST_RELEASE_FALLBACK: ${{ inputs.allow_guest_release_fallback }}
+        run: |
+          set -euo pipefail
+          mkdir -p cube-agent-ctx/package/cube-agent cube-agent-ctx/scripts
+          rm -rf /tmp/cube-agent-dl /tmp/cube-agent-oneclick
+          mkdir -p /tmp/cube-agent-dl
+
+          latest_release_tag() {
+            gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name
+          }
+
+          try_agent_asset() {
+            local tag="$1"
+            rm -rf /tmp/cube-agent-dl
+            mkdir -p /tmp/cube-agent-dl
+            if ! gh release download "${tag}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --dir /tmp/cube-agent-dl \
+              --pattern "cube-agent-${ARCH}.tar.gz"; then
+              return 1
+            fi
+            [[ -f "/tmp/cube-agent-dl/cube-agent-${ARCH}.tar.gz" ]] || return 1
+            rm -rf cube-agent-ctx/package/cube-agent
+            mkdir -p cube-agent-ctx/package/cube-agent
+            tar -xzf "/tmp/cube-agent-dl/cube-agent-${ARCH}.tar.gz" \
+              -C cube-agent-ctx/package/cube-agent
+            return 0
+          }
+
+          # Fallback: extract cube-agent/ from one-click sandbox-package.
+          try_oneclick_bundle() {
+            local tag="$1"
+            local bundle="cube-sandbox-one-click-${tag}-${ARCH}.tar.gz"
+            rm -rf /tmp/cube-agent-oneclick
+            mkdir -p /tmp/cube-agent-oneclick/bundle /tmp/cube-agent-oneclick/package
+            if ! gh release download "${tag}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --dir /tmp/cube-agent-oneclick \
+              --pattern "${bundle}"; then
+              return 1
+            fi
+            [[ -f "/tmp/cube-agent-oneclick/${bundle}" ]] || return 1
+            tar -xzf "/tmp/cube-agent-oneclick/${bundle}" -C /tmp/cube-agent-oneclick/bundle
+            local inner
+            inner="$(find /tmp/cube-agent-oneclick/bundle -type f \
+              -path '*/assets/package/sandbox-package.tar.gz' | head -n1)"
+            [[ -n "${inner}" && -f "${inner}" ]] \
+              || { echo "one-click bundle ${bundle} has no assets/package/sandbox-package.tar.gz" >&2; return 1; }
+            tar -xzf "${inner}" -C /tmp/cube-agent-oneclick/package
+            local agent_dir="/tmp/cube-agent-oneclick/package/sandbox-package/cube-agent"
+            [[ -d "${agent_dir}" ]] \
+              || { echo "sandbox-package missing cube-agent/ in ${bundle}" >&2; return 1; }
+            rm -rf cube-agent-ctx/package/cube-agent
+            mkdir -p cube-agent-ctx/package/cube-agent
+            cp -a "${agent_dir}/." cube-agent-ctx/package/cube-agent/
+            return 0
+          }
+
+          AGENT_SOURCE=""
+          AGENT_RELEASE_TAG=""
+
+          if gh release view "${IMAGE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            if try_agent_asset "${IMAGE_TAG}"; then
+              AGENT_RELEASE_TAG="${IMAGE_TAG}"
+              AGENT_SOURCE="release-asset:${IMAGE_TAG}"
+              echo "using agent assets from Release tag ${IMAGE_TAG}"
+            elif [[ "${ALLOW_GUEST_RELEASE_FALLBACK}" != "true" ]]; then
+              echo "missing Release asset cube-agent-${ARCH}.tar.gz on ${IMAGE_TAG} and fallback is disabled" >&2
+              exit 1
+            else
+              echo "Release ${IMAGE_TAG} has no cube-agent-${ARCH}.tar.gz; trying fallbacks"
+            fi
+          elif [[ "${ALLOW_GUEST_RELEASE_FALLBACK}" != "true" ]]; then
+            echo "Release ${IMAGE_TAG} not found and agent fallback is disabled" >&2
+            exit 1
+          else
+            echo "Release ${IMAGE_TAG} not found; trying fallbacks for agent assets"
+          fi
+
+          if [[ -z "${AGENT_SOURCE}" && "${ALLOW_GUEST_RELEASE_FALLBACK}" == "true" ]]; then
+            LATEST_TAG="$(latest_release_tag)"
+            [[ -n "${LATEST_TAG}" && "${LATEST_TAG}" != "null" ]] \
+              || { echo "no latest GitHub Release available for agent fallback" >&2; exit 1; }
+            if try_agent_asset "${LATEST_TAG}"; then
+              AGENT_RELEASE_TAG="${LATEST_TAG}"
+              AGENT_SOURCE="release-asset:${LATEST_TAG}"
+              echo "using agent assets from latest Release ${LATEST_TAG}"
+            elif try_oneclick_bundle "${LATEST_TAG}"; then
+              AGENT_RELEASE_TAG="${LATEST_TAG}"
+              AGENT_SOURCE="one-click-bundle:${LATEST_TAG}"
+              echo "latest Release ${LATEST_TAG} has no cube-agent-${ARCH}.tar.gz; extracted cube-agent from one-click bundle"
+            else
+              echo "failed to obtain cube-agent artifacts: no cube-agent-${ARCH}.tar.gz on ${IMAGE_TAG}/latest and one-click fallback failed on ${LATEST_TAG}" >&2
+              exit 1
+            fi
+          fi
+
+          [[ -n "${AGENT_SOURCE}" ]] || { echo "internal error: agent source unset" >&2; exit 1; }
+
+          test -f cube-agent-ctx/package/cube-agent/cube-agent.ext4
+          test -f cube-agent-ctx/package/cube-agent/version
+          install -m 0755 \
+            deploy/kubernetes/images/scripts/component-entrypoint.sh \
+            cube-agent-ctx/scripts/component-entrypoint.sh
+          echo "asset_tag=${AGENT_RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "agent_source=${AGENT_SOURCE}" >> "${GITHUB_OUTPUT}"
 
       - name: Stage cube-egress-net context
         if: matrix.component == 'cube-egress-net'

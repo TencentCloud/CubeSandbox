@@ -425,6 +425,7 @@ func TestCollectAgentVersionFileWithoutManifest(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(imgDir, "version"), []byte("guest-v1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Legacy fallback: cube-image/agent-version
 	if err := os.WriteFile(filepath.Join(imgDir, "agent-version"), []byte("agent-v1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -434,7 +435,33 @@ func TestCollectAgentVersionFileWithoutManifest(t *testing.T) {
 
 	agent, ok := versionOf(t, got, ComponentCubeAgent)
 	if !ok || agent.Version != "agent-v1" || agent.Source != SourceFile {
-		t.Fatalf("cube-agent from agent-version file, got %+v ok=%v", agent, ok)
+		t.Fatalf("cube-agent from legacy agent-version file, got %+v ok=%v", agent, ok)
+	}
+}
+
+func TestCollectAgentVersionPrefersIndependentDir(t *testing.T) {
+	dir := t.TempDir()
+	imgDir := filepath.Join(dir, "cube-image")
+	agentDir := filepath.Join(dir, "cube-agent")
+	if err := os.MkdirAll(imgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(imgDir, "agent-version"), []byte("legacy-agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "version"), []byte("agent-v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewCollector(dir)
+	got := c.Collect()
+
+	agent, ok := versionOf(t, got, ComponentCubeAgent)
+	if !ok || agent.Version != "agent-v2" || agent.Source != SourceFile {
+		t.Fatalf("cube-agent must prefer cube-agent/version, got %+v ok=%v", agent, ok)
 	}
 }
 
@@ -552,7 +579,11 @@ func TestCollectStagingMarkerMarksIncomplete(t *testing.T) {
 func TestCollectMalformedJSONDoesNotFallBackToMarker(t *testing.T) {
 	dir := t.TempDir()
 	img := filepath.Join(dir, "cube-image")
+	agentDir := filepath.Join(dir, "cube-agent")
 	if err := os.MkdirAll(img, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(img, "version.json"), []byte("{bad"), 0o644); err != nil {
@@ -561,19 +592,22 @@ func TestCollectMalformedJSONDoesNotFallBackToMarker(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(img, "version"), []byte("legacy-guest\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(img, "agent-version"), []byte("legacy-agent\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(agentDir, "version.json"), []byte("{bad"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "version"), []byte("agent-v1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	c := NewCollector(dir)
 	report := c.CollectReport()
 	if !report.Incomplete {
-		t.Fatal("expected incomplete on malformed cube-image/version.json")
+		t.Fatal("expected incomplete on malformed version.json")
 	}
 	if _, ok := versionOf(t, report.Versions, ComponentGuestImage); ok {
 		t.Fatal("malformed version.json must not fall back to guest-image marker")
 	}
 	if _, ok := versionOf(t, report.Versions, ComponentCubeAgent); ok {
-		t.Fatal("malformed version.json must not fall back to agent-version marker")
+		t.Fatal("malformed cube-agent/version.json must not fall back to version marker")
 	}
 }
 

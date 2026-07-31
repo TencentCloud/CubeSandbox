@@ -13,7 +13,7 @@ use crate::sandbox::disk::Disk;
 use crate::sandbox::net::Interface;
 use crate::sandbox::net::Net;
 
-use crate::sandbox::pmem::Pmem;
+use crate::sandbox::pmem::{Pmem, HYP_AGENT_ID, HYP_OS_IMAGE_ID};
 
 use cube_hypervisor;
 use cube_hypervisor::config::BackendFsConfig;
@@ -289,11 +289,9 @@ impl Snapshot {
             rate_limiter_config: None,
         };
 
-        if let Some(p) = self.pmem.get(0) {
-            if p.id == "pmem-agent" {
-                self.pmem.remove(0);
-            }
-        }
+        // Annotation pmems must not re-add OS/agent builtins already in VmConfig.
+        self.pmem
+            .retain(|p| p.id != HYP_AGENT_ID && p.id != HYP_OS_IMAGE_ID);
 
         vm_config
             .add_disks(&self.disk)
@@ -394,6 +392,9 @@ impl Snapshot {
     fn store_metadata(&self) -> CResult<()> {
         let mut snap_info = SnapshotInfo::new(self.res.cpu, self.res.memory);
         snap_info.image_version = Utils::get_image_version()?;
+        snap_info.agent_version = Some(Utils::get_agent_version(
+            crate::hypervisor::config::DEFAULT_AGENT_PATH,
+        )?);
         snap_info.kernel_version = Utils::get_kernel_version(self.kernel.as_str())?;
         snap_info.app_snapshot_container_id = self.container_id.clone();
         for d in &self.disk {

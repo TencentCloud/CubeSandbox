@@ -299,7 +299,9 @@ check_cubelet() {
     "${TOOLBOX_ROOT}/Cubelet/dynamicconf/conf.yaml" \
     "${TOOLBOX_ROOT}/cube-shim/conf/config-cube.toml" \
     "${TOOLBOX_ROOT}/cube-kernel-scf/vmlinux" \
-    "${TOOLBOX_ROOT}/cube-image/cube-guest-image-cpu.img"; do
+    "${TOOLBOX_ROOT}/cube-image/cube-guest-image-cpu.img" \
+    "${TOOLBOX_ROOT}/cube-agent/cube-agent.ext4" \
+    "${TOOLBOX_ROOT}/cube-agent/version"; do
     local label; label="$(basename "${f}")"
     if [[ -f "${f}" ]]; then
       pass "asset_${label}" "${f}"

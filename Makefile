@@ -13,6 +13,10 @@ UID := $(shell id -u)
 GID := $(shell id -g)
 OUTPUT_DIR ?= $(ROOT_DIR)/_output/bin
 RELEASE_DIR ?= $(ROOT_DIR)/_output/release
+# Host path for cube-agent.ext4 (+ version). Must be under the workspace so the
+# builder container can write it via the /workspace mount.
+AGENT_EXT4_OUTPUT_DIR ?= $(ROOT_DIR)/_output/cube-agent
+AGENT_EXT4_CONTAINER_DIR := /workspace/$(patsubst $(ROOT_DIR)/%,%,$(abspath $(AGENT_EXT4_OUTPUT_DIR)))
 MANUAL_DEPLOY_SCRIPT ?= $(ROOT_DIR)/deploy/one-click/deploy-manual.sh
 WEB_DIR ?= $(ROOT_DIR)/web
 CUBECOW_DIR ?= $(ROOT_DIR)/cubecow
@@ -44,11 +48,13 @@ RUST_PROJECT_DIRS := \
 	$(ROOT_DIR)/CubeAPI \
 	$(ROOT_DIR)/CubeShim \
 	$(ROOT_DIR)/agent \
+	$(ROOT_DIR)/guest-init \
 	$(ROOT_DIR)/cubecow \
 	$(ROOT_DIR)/hypervisor
 
 BINARIES := \
 	agent \
+	cube-init \
 	cubeapi \
 	cubelet \
 	cubemaster \
@@ -110,6 +116,11 @@ help:
 	@printf "  network-agent Build network-agent in Docker\n"
 	@printf "  cube-proxy-sidecar Build cube-proxy-sidecar (developer-only; not in 'all')\n"
 	@printf "  agent         Build cube-agent in Docker\n"
+	@printf "  cube-init     Build cube-init (guest PID1) in Docker (alias: guest-init)\n"
+	@printf "  guest-init    Alias for cube-init (source dir guest-init/)\n"
+	@printf "  agent-ext4    Build independent cube-agent.ext4 (+ version) in Docker (alias: cube-agent-ext4)\n"
+	@printf "  cube-agent-ext4 Alias for agent-ext4\n"
+	@printf "  pmem-assets   Build cube-init + cube-agent.ext4 (agent-independent pmem essentials)\n"
 	@printf "  cubeapi       Build CubeAPI (cube-api) in Docker\n"
 	@printf "  cube-api      Alias of cubeapi\n"
 	@printf "  cubeops       Build CubeOps in Docker\n"
@@ -132,13 +143,14 @@ help:
 	@printf "  web-preview   Preview built WebUI assets\n"
 	@printf "  web-lint      Run WebUI lint checks\n"
 	@printf "  web-fmt       Format WebUI sources\n"
-	@printf "  fmt            Format code in all component directories\n"
+	@printf "  fmt           Format all component directories\n"
 	@printf "  web-api-sync  Export OpenAPI and regenerate WebUI schema types\n"
 	@printf "  web-sync-dev-env Build and deploy WebUI into dev-env VM\n"
 	@printf "\nNotes:\n"
 	@printf "  - builder-shell forwards ~/.git-credentials when present\n"
 	@printf "  - builder-run reuses the same mounted workspace and persisted HOME\n"
 	@printf "  - binary outputs are written to %s\n" "$(OUTPUT_DIR)"
+	@printf "  - cube-agent.ext4 outputs are written to %s\n" "$(AGENT_EXT4_OUTPUT_DIR)"
 	@printf "  - release outputs are written to %s\n" "$(RELEASE_DIR)"
 	@printf "  - Run 'make builder-image' first if image %s is missing\n" "$(BUILDER_IMAGE)"
 
@@ -272,6 +284,32 @@ agent: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
 	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/agent && make -j1 &&  make BINDIR=/workspace/_output/bin install'
 
+.PHONY: cube-init guest-init
+cube-init guest-init: builder-image
+	@mkdir -p "$(OUTPUT_DIR)"
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/guest-init && make -j1 && make BINDIR=/workspace/_output/bin install'
+
+# Independent cube-agent.ext4 plane file for virtio-pmem1 (agent-independent pmem).
+# Builds the musl-static cube-agent inside the builder, then packages
+# cube-agent.ext4 + version via deploy/one-click/build-agent-ext4.sh.
+# Override output with: make agent-ext4 AGENT_EXT4_OUTPUT_DIR=$$PWD/_output/cube-agent
+# (path must stay under the repo so the builder /workspace mount can write it)
+# Reuse a prebuilt binary already under the workspace:
+#   ONE_CLICK_CUBE_AGENT_BIN=/workspace/_output/bin/cube-agent make agent-ext4
+.PHONY: agent-ext4 cube-agent-ext4
+agent-ext4 cube-agent-ext4: builder-image
+	@case "$(abspath $(AGENT_EXT4_OUTPUT_DIR))" in \
+		"$(ROOT_DIR)"|"$(ROOT_DIR)"/*) ;; \
+		*) echo "ERROR: AGENT_EXT4_OUTPUT_DIR must be under $(ROOT_DIR) (got $(AGENT_EXT4_OUTPUT_DIR))"; exit 1 ;; \
+	esac
+	@mkdir -p "$(AGENT_EXT4_OUTPUT_DIR)"
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p $(AGENT_EXT4_CONTAINER_DIR) && OUTPUT_DIR=$(AGENT_EXT4_CONTAINER_DIR) $(if $(strip $(ONE_CLICK_CUBE_AGENT_BIN)),ONE_CLICK_CUBE_AGENT_BIN=$(ONE_CLICK_CUBE_AGENT_BIN) )bash /workspace/deploy/one-click/build-agent-ext4.sh'
+
+# Essentials for agent-independent pmem: guest PID1 binary + agent plane file.
+# Does not build the full guest OS image or shim/kernel (use one-click for that).
+.PHONY: pmem-assets
+pmem-assets: cube-init agent-ext4
+
 .PHONY: cubeapi
 cubeapi: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
@@ -386,8 +424,11 @@ web-sync-dev-env:
 # Components without formattable code (e.g. CubeProxy) are skipped.
 .PHONY: fmt
 fmt:
+ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@printf '  %-8s %s\n' "FMT" "agent"
 	@$(MAKE) -C agent fmt
+	@printf '  %-8s %s\n' "FMT" "guest-init"
+	@$(MAKE) -C guest-init fmt
 	@printf '  %-8s %s\n' "FMT" "cubecow"
 	@$(MAKE) -C cubecow fmt
 	@printf '  %-8s %s\n' "FMT" "CubeAPI"
@@ -420,3 +461,7 @@ fmt:
 	else \
 		printf '  %-8s %s\n' "SKIP" "web (npm not available)"; \
 	fi
+else
+	@$(MAKE) builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make fmt'
+endif

@@ -5,7 +5,9 @@
 ## 目录说明
 
 - `build-release-bundle-builder.sh`：推荐入口；先在 builder 镜像中编译 one-click 需要的组件，再在宿主机继续执行发布包打包。
-- `build-vm-assets.sh`：构建 `containerd-shim-cube-rs`、`cube-runtime`、`cube-agent`，把 `cube-agent` 注入 guest image 作为 `/sbin/init`，并收集 guest kernel。
+- `build-vm-assets.sh`：构建 `containerd-shim-cube-rs`、`cube-runtime`、含 `cube-init` 的 guest image，以及独立的 `cube-agent.ext4`；并收集 guest kernel。
+- `build-guest-image.sh`：构建仅含轻量 `cube-init`（作为 `/sbin/init`）的 guest OS 镜像。
+- `build-agent-ext4.sh`：构建独立 `cube-agent/cube-agent.ext4`（+ `version`），供 virtio-pmem1 注入。
 - `build-release-bundle.sh`：底层打包入口；消费源码树或 `ONE_CLICK_*_BIN` 预编译产物，组装 `sandbox-package` 并生成最终发布包。
 - `config-cube.toml`：one-click 默认 runtime 配置模板。
 - `support/`：MySQL/Redis 的 `docker compose` 模板，安装后落到 `/usr/local/services/cubetoolbox/support/`；`support/bin/mkcert` 为内置的 mkcert 二进制。
@@ -19,6 +21,20 @@
 - `lib/common.sh`：公共 shell 函数。
 - `scripts/one-click/`：systemd 托管部署安装后使用的校验与维护辅助脚本。
 - `terraform/tencentcloud/`：在腾讯云上部署**集群版** CubeSandbox 的 Terraform 部署器（TKE 控制面 + CVM 计算节点）。`create.sh` 为入口，`destroy.sh` 负责整体销毁。这些文件同时位于发布包顶层和 `sandbox-package` 内（见“腾讯云集群部署”）。
+
+## 根目录 Makefile Target（Agent 独立 pmem）
+
+在仓库根目录通过统一 builder 镜像构建（如缺少镜像先执行 `make builder-image`）：
+
+```bash
+make cube-init          # guest PID1 → _output/bin/cube-init（别名 guest-init）
+make agent-ext4         # 独立平面文件 → _output/cube-agent/{cube-agent.ext4,version}
+                        # （别名 cube-agent-ext4）
+make pmem-assets        # 一次产出 cube-init + agent-ext4
+make help               # 查看全部根 target
+```
+
+完整 runtime 布局（shim + guest image + agent.ext4 + kernel）请使用 `./build-vm-assets.sh` 或下方的发布包入口。
 
 ## 支持的操作系统
 
@@ -111,7 +127,8 @@ deploy/one-click/dist/cube-sandbox-one-click-<version>.tar.gz
 - `sandbox-package.tar.gz`
 - `CubeAPI/bin/cube-api`
 - `containerd-shim-cube-rs`、`cube-runtime`
-- 本地构建得到的 `cube-image/cube-guest-image-cpu.img`
+- 本地构建得到的 `cube-image/cube-guest-image-cpu.img`（含 `cube-init` 作为 `/sbin/init`）
+- 独立的 `cube-agent/cube-agent.ext4`（+ `cube-agent/version`）
 - `cubeproxy/` 目录（运行时拉取预构建镜像；`build-context` 仅供私有 TCR 重建）
 - `support/` 目录及其 compose 模板
 - `webui/` 目录、compose 模板、nginx 配置和已构建的 `web/dist` 静态资源

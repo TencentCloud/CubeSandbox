@@ -104,6 +104,7 @@ ALL_IMAGES=(
   cube-shim
   cube-kernel
   cube-guest
+  cube-agent
   cube-node-init
   cube-wait-node-prep
   cube-pvm-host-bootstrap
@@ -989,7 +990,11 @@ build_cube_guest_image() {
   [[ -f "${stage_dir}/cube-guest-image-cpu.img" ]] \
     || fail "guest artifacts missing cube-guest-image-cpu.img"
   [[ -f "${stage_dir}/version" ]] || fail "guest artifacts missing version"
-  [[ -f "${stage_dir}/agent-version" ]] || fail "guest artifacts missing agent-version"
+  # agent-version is legacy (agent baked into guest image). New layout uses
+  # independent cube-agent/version next to cube-agent.ext4; tolerate absence.
+  if [[ ! -f "${stage_dir}/agent-version" ]]; then
+    log "guest artifacts have no agent-version (expected with independent cube-agent.ext4)"
+  fi
 
   ctx="$(prepare_context cube-guest)"
   mkdir -p "${ctx}/package/cube-image"
@@ -998,6 +1003,49 @@ build_cube_guest_image() {
   build_image cube-guest "${ctx}" \
     --build-arg "CUBE_VERSION=${IMAGE_TAG}"
   record_built cube-guest
+}
+
+# Assemble cube-agent from pre-built cube-agent.ext4 artifacts.
+build_cube_agent_image() {
+  local arch="${ONE_CLICK_ARCH:-amd64}"
+  local agent_dir="${CUBE_AGENT_IMAGE_DIR:-}"
+  local agent_tar="${CUBE_AGENT_IMAGE_TAR:-}"
+  local dl_dir="${BUILD_ROOT}/downloads/agent-artifacts"
+  local ctx stage_dir
+  local agent_tag agent_base agent_url
+
+  stage_dir="${BUILD_ROOT}/agent-image-stage"
+  rm -rf "${stage_dir}"
+  mkdir -p "${stage_dir}"
+
+  if [[ -n "${agent_dir}" ]]; then
+    [[ -d "${agent_dir}" ]] || fail "CUBE_AGENT_IMAGE_DIR not found: ${agent_dir}"
+    cp -a "${agent_dir}/." "${stage_dir}/"
+  elif [[ -n "${agent_tar}" ]]; then
+    [[ -f "${agent_tar}" ]] || fail "CUBE_AGENT_IMAGE_TAR not found: ${agent_tar}"
+    tar -xzf "${agent_tar}" -C "${stage_dir}"
+  else
+    agent_tag="$(resolve_guest_release_tag "${arch}")"
+    agent_base="$(release_download_base_for_tag "${agent_tag}")"
+    mkdir -p "${dl_dir}"
+    agent_url="${agent_base}/cube-agent-${arch}.tar.gz"
+    agent_tar="${dl_dir}/${agent_tag}-cube-agent-${arch}.tar.gz"
+    log "downloading cube-agent artifacts from ${agent_url} (Release ${agent_tag})"
+    download_file "${agent_url}" "${agent_tar}" tar.gz
+    tar -xzf "${agent_tar}" -C "${stage_dir}"
+  fi
+
+  [[ -f "${stage_dir}/cube-agent.ext4" ]] \
+    || fail "agent artifacts missing cube-agent.ext4"
+  [[ -f "${stage_dir}/version" ]] || fail "agent artifacts missing version"
+
+  ctx="$(prepare_context cube-agent)"
+  mkdir -p "${ctx}/package/cube-agent"
+  copy_scripts "${ctx}" component-entrypoint.sh
+  cp -a "${stage_dir}/." "${ctx}/package/cube-agent/"
+  build_image cube-agent "${ctx}" \
+    --build-arg "CUBE_VERSION=${IMAGE_TAG}"
+  record_built cube-agent
 }
 
 run_selected_builds() {
@@ -1071,6 +1119,9 @@ run_selected_builds() {
   fi
   if should_build cube-guest; then
     build_cube_guest_image
+  fi
+  if should_build cube-agent; then
+    build_cube_agent_image
   fi
 
   if should_build cube-node-init; then

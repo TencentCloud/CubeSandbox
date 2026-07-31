@@ -264,6 +264,7 @@ sudo ./down.sh
 | `ONE_CLICK_CUBE_API_BUILD_MODE` | `local` | cube-api 构建模式 |
 | `ONE_CLICK_NETWORK_AGENT_BUILD_MODE` | `local` | network-agent 构建模式 |
 | `ONE_CLICK_CUBE_AGENT_BUILD_MODE` | `local` | cube-agent 构建模式 |
+| `ONE_CLICK_CUBE_INIT_BUILD_MODE` | `local` | cube-init 构建模式 |
 | `ONE_CLICK_CUBE_SHIM_BUILD_MODE` | `local` | CubeShim 构建模式 |
 | `ONE_CLICK_CUBE_KERNEL_VMLINUX` | `assets/kernel-artifacts/vmlinux` | vmlinux 内核文件路径 |
 
@@ -277,7 +278,8 @@ sudo ./down.sh
 | `ONE_CLICK_CUBECLI_BIN` | 预编译 cubecli 路径 |
 | `ONE_CLICK_CUBE_API_BIN` | 预编译 cube-api 路径 |
 | `ONE_CLICK_NETWORK_AGENT_BIN` | 预编译 network-agent 路径 |
-| `ONE_CLICK_CUBE_AGENT_BIN` | 预编译 cube-agent 路径 |
+| `ONE_CLICK_CUBE_AGENT_BIN` | 预编译 cube-agent 路径（打入 cube-agent.ext4） |
+| `ONE_CLICK_CUBE_INIT_BIN` | 预编译 cube-init 路径（注入 guest `/sbin/init`） |
 | `ONE_CLICK_CUBESHIM_BIN` | 预编译 containerd-shim-cube-rs 路径 |
 | `ONE_CLICK_CUBE_RUNTIME_BIN` | 预编译 cube-runtime 路径 |
 

@@ -375,6 +375,7 @@ quickcheck_main() {
     check_file "${TOOLBOX_ROOT}/cube-shim/conf/config-cube.toml"
     check_file "${TOOLBOX_ROOT}/cube-kernel-scf/vmlinux"
     check_file "${TOOLBOX_ROOT}/cube-image/cube-guest-image-cpu.img"
+    check_file "${TOOLBOX_ROOT}/cube-agent/cube-agent.ext4"
   else
     echo "[quickcheck] 4/6 check cube-api /health"
     check_http "http://${CUBE_API_HEALTH_ADDR}/health"

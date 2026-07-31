@@ -29,6 +29,11 @@ pub struct SnapshotInfo {
     pub kernel_version: String,
     pub image_version: String,
     pub ch_version: String,
+    /// Agent plane-file identity (`cube-agent/version` next to cube-agent.ext4).
+    /// Optional for serde backward compat with old templates; restore only fails
+    /// when both sides are `Some` and unequal (missing/`None` is allowed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_version: Option<String>,
     pub vm_res: VmRes,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_vol_url: Option<String>,
@@ -103,6 +108,16 @@ impl SnapshotInfo {
         Ok(())
     }
 
+    pub fn set_image_version_for_path(&mut self, os_image_path: &str) -> CResult<()> {
+        self.image_version = Utils::get_image_version_for_path(os_image_path)?;
+        Ok(())
+    }
+
+    pub fn set_agent_version(&mut self, agent_path: &str) -> CResult<()> {
+        self.agent_version = Some(Utils::get_agent_version(agent_path)?);
+        Ok(())
+    }
+
     pub fn set_disks(&mut self, disks: &[SbDisk]) {
         for d in disks.iter() {
             let disk = Disk {
@@ -173,9 +188,89 @@ impl SnapshotInfo {
             ));
         }
 
+        // Fail only when both sides have agent_version and they differ.
+        // Missing agent_version skips the check so old templates can still restore.
+        if let (Some(v1), Some(v2)) = (&self.agent_version, &o.agent_version) {
+            if v1 != v2 {
+                return Err(format!(
+                    "agent version not eq:{} {} (refuse silent agent swap on restore)",
+                    v1, v2
+                ));
+            }
+        }
+
         self.vm_res.eq(&o.vm_res)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_info() -> SnapshotInfo {
+        let mut info = SnapshotInfo::new(2, 1024);
+        info.kernel_version = "k1".to_string();
+        info.image_version = "img1".to_string();
+        info
+    }
+
+    #[test]
+    fn eq_agent_version_both_some_unequal_fails() {
+        let mut a = base_info();
+        let mut b = base_info();
+        a.agent_version = Some("v1".to_string());
+        b.agent_version = Some("v2".to_string());
+        let err = a.eq(&b).unwrap_err();
+        assert!(err.contains("agent version not eq"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn eq_agent_version_both_some_equal_passes() {
+        let mut a = base_info();
+        let mut b = base_info();
+        a.agent_version = Some("v1".to_string());
+        b.agent_version = Some("v1".to_string());
+        a.eq(&b).expect("equal agent_version should pass");
+    }
+
+    #[test]
+    fn eq_agent_version_self_none_passes() {
+        let mut a = base_info();
+        let mut b = base_info();
+        a.agent_version = None;
+        b.agent_version = Some("v1".to_string());
+        a.eq(&b).expect("None on self should skip agent check");
+    }
+
+    #[test]
+    fn eq_agent_version_other_none_passes() {
+        let mut a = base_info();
+        let mut b = base_info();
+        a.agent_version = Some("v1".to_string());
+        b.agent_version = None;
+        a.eq(&b).expect("None on other should skip agent check");
+    }
+
+    #[test]
+    fn eq_agent_version_both_none_passes() {
+        let mut a = base_info();
+        let mut b = base_info();
+        a.agent_version = None;
+        b.agent_version = None;
+        a.eq(&b).expect("both None should skip agent check");
+    }
+
+    #[test]
+    fn eq_image_version_mismatch_still_fails() {
+        let mut a = base_info();
+        let mut b = base_info();
+        a.agent_version = None;
+        b.agent_version = None;
+        b.image_version = "img2".to_string();
+        let err = a.eq(&b).unwrap_err();
+        assert!(err.contains("image version not eq"), "unexpected: {err}");
     }
 }
 

@@ -1,6 +1,8 @@
 # cube-agent
 
-The in-VM guest agent for Cube Sandbox. It runs as PID 1 (init) inside each MicroVM and manages the full container lifecycle within the sandbox.
+The in-VM guest agent for Cube Sandbox. It runs as PID 1 inside each MicroVM
+(after `cube-init` execs it with `wrapper_mode=on`) and manages the full
+container lifecycle within the sandbox.
 
 ## Upstream
 
@@ -19,27 +21,40 @@ The original Kata Containers copyright notices and license headers are preserved
 Host
 ┌────────────────────────────────┐
 │  containerd-shim-cube-rs       │
+│  pmem0 = guest OS (cube-init)  │
+│  pmem1 = cube-agent.ext4       │
 │       │  ttrpc over vsock      │
 └───────┼────────────────────────┘
         │  (vsock channel)
    MicroVM boundary
         │
 ┌───────▼────────────────────────┐
-│  cube-agent  (PID 1 / init)    │
+│  cube-init (/sbin/init)        │
+│    mounts /dev/pmem1 →         │
+│      /run/support (ext4,ro,dax)│
+│    exec /run/support/cube-agent│
 │       │                        │
+│  cube-agent (PID 1, wrapper)   │
 │  ┌────▼──────────────────────┐ │
 │  │  container workload       │ │
 │  └───────────────────────────┘ │
 └────────────────────────────────┘
 ```
 
-cube-agent is packaged into the guest image at build time (as `/sbin/init`). When the MicroVM boots, the agent starts immediately and:
+cube-agent is packaged as an independent **`cube-agent.ext4`** plane file
+(containing only `/cube-agent`). CubeShim injects it as virtio-pmem1. Guest
+Image contains lightweight `cube-init` as `/sbin/init`, which mounts pmem1 and
+execs the agent with `wrapper_mode=on` so the agent skips duplicate
+`general_mount`.
 
-1. **Initialises the guest environment** — mounts filesystems, sets up namespaces, configures networking via vsock/netlink.
-2. **Listens for ttrpc commands** — exposes the Cube agent API over a vsock channel; the shim (`containerd-shim-cube-rs`) connects to this channel to drive the agent.
-3. **Manages container lifecycle** — handles `CreateContainer / StartContainer / ExecProcess / SignalProcess / RemoveContainer` requests, delegating to `rustjail` for OCI-compliant container execution.
-4. **Forwards I/O** — proxies container stdio streams back to the shim over vsock.
-5. **Exposes metrics** — exports Prometheus-compatible metrics for guest CPU, memory, and container health.
+When the MicroVM boots, the agent:
+
+1. **Skips init mounts when `wrapper_mode=on`** — `cube-init` already prepared `/proc`, `/sys`, `/run`, etc.
+2. **Notifies shim via SysCtrl** — writes `VsockServerReady` (x86 PIO `0x680` / aarch64 MMIO `0x0903_0000`). This is **not** the template `SysStart` handshake; open-source `cube-init` does not perform snapshot-mode SysCtrl handshake.
+3. **Listens for ttrpc commands** — exposes the Cube agent API over a vsock channel; the shim (`containerd-shim-cube-rs`) connects to this channel to drive the agent.
+4. **Manages container lifecycle** — handles `CreateContainer / StartContainer / ExecProcess / SignalProcess / RemoveContainer` requests, delegating to `rustjail` for OCI-compliant container execution.
+5. **Forwards I/O** — proxies container stdio streams back to the shim over vsock.
+6. **Exposes metrics** — exports Prometheus-compatible metrics for guest CPU, memory, and container health.
 
 ## Repository Layout
 
@@ -64,9 +79,12 @@ agent/
 └── build.sh         # Release build script (musl static binary)
 ```
 
+See also `../guest-init/` for the lightweight Guest PID 1 (`cube-init`).
+
 ## Build
 
-cube-agent is built as a **statically linked musl binary** so it can run as `/sbin/init` without any host library dependencies.
+cube-agent is built as a **statically linked musl binary**, then packaged into
+`cube-agent.ext4` by `deploy/one-click/build-agent-ext4.sh`.
 
 ### Prerequisites
 
@@ -90,6 +108,26 @@ The output binary is placed at `target/<arch>-unknown-linux-musl/release/cube-ag
 
 ```bash
 make all-docker
+# or from repo root:
+make agent
+```
+
+### Package cube-agent.ext4 via root Makefile (recommended)
+
+```bash
+# From repo root — builds musl-static cube-agent inside the builder image,
+# then packages _output/cube-agent/{cube-agent.ext4,version}:
+make agent-ext4
+# aliases:
+make cube-agent-ext4
+# with guest PID1 as well:
+make pmem-assets
+```
+
+Or call the script directly after a prebuilt binary is available:
+
+```bash
+OUTPUT_DIR=/tmp/cube-agent ./deploy/one-click/build-agent-ext4.sh
 ```
 
 ## API

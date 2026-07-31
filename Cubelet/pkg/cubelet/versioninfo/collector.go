@@ -52,10 +52,13 @@ const (
 	manifestFileName     = "release-manifest.json"
 	componentVersionJSON = "version.json"
 	guestImageVerPath    = "cube-image/version"
-	guestAgentVerPath    = "cube-image/agent-version"
-	kernelVmlinuxPath    = "cube-kernel-scf/vmlinux"
-	cubeEgressVerPath    = "cube-egress/version"
-	maxVersionJSONBytes  = 64 << 10
+	// Preferred agent version marker (independent cube-agent component).
+	agentVerPath = "cube-agent/version"
+	// Legacy bake-into-guest-image marker; read as fallback during transition.
+	legacyGuestAgentVerPath = "cube-image/agent-version"
+	kernelVmlinuxPath       = "cube-kernel-scf/vmlinux"
+	cubeEgressVerPath       = "cube-egress/version"
+	maxVersionJSONBytes     = 64 << 10
 )
 
 // oneClickInstallLayout maps manifest component keys to the concrete one-click
@@ -77,7 +80,8 @@ var pathAllowlist = map[string]map[string]struct{}{
 	"Cubelet":       {"cubelet": {}, "cubecli": {}},
 	"network-agent": {"network-agent": {}},
 	"cube-shim":     {"containerd-shim-cube-rs": {}, "cube-runtime": {}},
-	"cube-image":    {"guest-image": {}, "cube-agent": {}},
+	"cube-image":    {"guest-image": {}},
+	"cube-agent":    {"cube-agent": {}},
 	"cube-egress":   {"cube-egress": {}},
 }
 
@@ -243,7 +247,7 @@ func (c *Collector) CollectReport() CollectReport {
 	add(ComponentVersion{Component: ComponentGuestImage, Version: c.guestImageVersionLocked(), Source: SourceFile})
 	add(ComponentVersion{
 		Component: ComponentCubeAgent,
-		Version:   c.readSingleLine(filepath.Join(c.baseDir, guestAgentVerPath)),
+		Version:   c.agentVersionLocked(),
 		Source:    SourceFile,
 	})
 	add(ComponentVersion{
@@ -300,6 +304,7 @@ func (c *Collector) detectStageGapsLocked(report *CollectReport) {
 		{"network-agent", ".staged-network-agent", ".staging-network-agent"},
 		{"cube-shim", ".staged-cube-shim", ".staging-cube-shim"},
 		{"cube-image", ".staged-cube-guest", ".staging-cube-guest"},
+		{"cube-agent", ".staged-cube-agent", ".staging-cube-agent"},
 		{"cube-kernel-scf", ".staged-cube-kernel", ".staging-cube-kernel"},
 	}
 	for _, ch := range checks {
@@ -542,6 +547,14 @@ func (c *Collector) guestImageVersionLocked() string {
 	}
 	c.guestImageVer = firstLine(data)
 	return c.guestImageVer
+}
+
+// agentVersionLocked prefers cube-agent/version, then legacy cube-image/agent-version.
+func (c *Collector) agentVersionLocked() string {
+	if v := c.readSingleLine(filepath.Join(c.baseDir, agentVerPath)); v != "" {
+		return v
+	}
+	return c.readSingleLine(filepath.Join(c.baseDir, legacyGuestAgentVerPath))
 }
 
 func (c *Collector) readSingleLine(path string) string {

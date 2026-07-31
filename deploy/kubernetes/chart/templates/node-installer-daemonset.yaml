@@ -96,6 +96,23 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+        - name: cube-agent-install
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubeAgent "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.cubeAgent.pullPolicy }}
+          securityContext:
+            privileged: {{ .Values.security.privileged }}
+          env:
+            {{- include "cube.installerComponentEnv" . | nindent 12 }}
+            - name: CUBE_COMPONENT
+              value: cube-agent
+            - name: CUBE_ROLE
+              value: install
+          volumeMounts:
+            {{- include "cube.installerVolumeMounts" . | nindent 12 }}
+          {{- with .Values.cubeNodeInstaller.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
       volumes:
         - name: toolbox
           hostPath:

@@ -264,6 +264,7 @@ All configuration is managed through the `.env` file. Below is the full paramete
 | `ONE_CLICK_CUBE_API_BUILD_MODE` | `local` | Build mode for cube-api |
 | `ONE_CLICK_NETWORK_AGENT_BUILD_MODE` | `local` | Build mode for network-agent |
 | `ONE_CLICK_CUBE_AGENT_BUILD_MODE` | `local` | Build mode for cube-agent |
+| `ONE_CLICK_CUBE_INIT_BUILD_MODE` | `local` | Build mode for cube-init |
 | `ONE_CLICK_CUBE_SHIM_BUILD_MODE` | `local` | Build mode for CubeShim |
 | `ONE_CLICK_CUBE_KERNEL_VMLINUX` | `assets/kernel-artifacts/vmlinux` | Path to the vmlinux kernel file |
 
@@ -277,7 +278,8 @@ You can also point to prebuilt binaries to skip compilation:
 | `ONE_CLICK_CUBECLI_BIN` | Path to prebuilt cubecli binary |
 | `ONE_CLICK_CUBE_API_BIN` | Path to prebuilt cube-api binary |
 | `ONE_CLICK_NETWORK_AGENT_BIN` | Path to prebuilt network-agent binary |
-| `ONE_CLICK_CUBE_AGENT_BIN` | Path to prebuilt cube-agent binary |
+| `ONE_CLICK_CUBE_AGENT_BIN` | Path to prebuilt cube-agent binary (packaged into cube-agent.ext4) |
+| `ONE_CLICK_CUBE_INIT_BIN` | Path to prebuilt cube-init binary (injected as guest `/sbin/init`) |
 | `ONE_CLICK_CUBESHIM_BIN` | Path to prebuilt containerd-shim-cube-rs binary |
 | `ONE_CLICK_CUBE_RUNTIME_BIN` | Path to prebuilt cube-runtime binary |
 

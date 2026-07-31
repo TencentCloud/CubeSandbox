@@ -8,9 +8,13 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 pub const ANNO_PMEM: &str = "cube.pmem";
 
+/// Builtin virtio-pmem ids (must match VmConfig::builtin_pmems).
+pub const HYP_OS_IMAGE_ID: &str = "pmem-cube-os-image";
+pub const HYP_AGENT_ID: &str = "pmem-cube-agent";
+
 const GUEST_MOUNT_DIR_PREFIX: &str = "/run/cube-containers/sandbox/pmem-cube/pmem";
 
-pub static DEVICE_INDEX_OFFSET: AtomicU32 = AtomicU32::new(1);
+pub static DEVICE_INDEX_OFFSET: AtomicU32 = AtomicU32::new(2);
 
 #[derive(Eq, PartialEq, Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Pmem {
@@ -27,7 +31,7 @@ pub struct Pmem {
 }
 
 impl Pmem {
-    // pmem0 is the guest root image
+    // relative_index 0 → /dev/pmem{DEVICE_INDEX_OFFSET} (business pmem; OS/agent are builtin)
     pub fn guest_device_name(relative_index: u32) -> String {
         let offset = DEVICE_INDEX_OFFSET.load(Ordering::Relaxed);
         format!("pmem{}", relative_index + offset)
@@ -56,5 +60,22 @@ impl Pmem {
 
     pub fn driver() -> String {
         "nvdimm".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_index_offset_starts_at_two() {
+        assert_eq!(DEVICE_INDEX_OFFSET.load(Ordering::Relaxed), 2);
+        assert_eq!(Pmem::guest_device_name(0), "pmem2");
+        assert_eq!(Pmem::guest_device_path(0), "/dev/pmem2");
+        assert_eq!(
+            Pmem::guest_mount_point(0),
+            "/run/cube-containers/sandbox/pmem-cube/pmem2"
+        );
+        assert_eq!(Pmem::guest_device_path(1), "/dev/pmem3");
     }
 }

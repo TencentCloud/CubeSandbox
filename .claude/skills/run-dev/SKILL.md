@@ -51,6 +51,17 @@ This builds: cubemaster, cubelet, cubevsmapdump, network-agent, agent, cubeapi, 
 | `make cubevsmapdump` | eBPF map dump tool | Go | ~20s |
 | `make cube-proxy-sidecar` | Proxy sidecar (dev only) | Go | ~20s |
 | `make cubecow-smoke` | CubeCoW smoke test | Go + Rust | ~60s |
+| `make cube-init` / `make guest-init` | Guest PID1 (`cube-init`) | Rust (musl) | ~30s |
+| `make agent-ext4` / `make cube-agent-ext4` | Independent `cube-agent.ext4` (+ version) | Rust + e2fsprogs | ~2min |
+| `make pmem-assets` | `cube-init` + `agent-ext4` | — | ~2min |
+
+Agent-independent pmem outputs:
+
+```bash
+make cube-init     # → _output/bin/cube-init
+make agent-ext4    # → _output/cube-agent/cube-agent.ext4 (+ version)
+make pmem-assets   # both of the above
+```
 
 ### Verify a build
 

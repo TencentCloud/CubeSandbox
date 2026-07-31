@@ -24,6 +24,10 @@ pub const ANNO_SNAPSHOT_NOTIFY: &str = "cube.snapshot.healthcheck";
 pub const ANNO_VM_KERNEL: &str = "cube.vm.kernel.path";
 /// Annotation key used to append extra kernel cmdline parameters.
 pub const ANNO_VM_KERNEL_CMDLINE_APPEND: &str = "cube.vm.kernel.cmdline.append";
+/// Override path to cube-agent.ext4 (virtio-pmem1).
+pub const ANNO_VM_AGENT: &str = "cube.vm.agent.path";
+/// Override path to guest OS image (virtio-pmem0).
+pub const ANNO_VM_OS_IMAGE: &str = "cube.vm.os-image.path";
 pub const ANNO_SNAPSHOT_BASE: &str = "cube.vm.snapshot.base.path";
 pub const ANNO_SNAPSHOT_MEMORY_VOL_URL: &str = "cube.vm.snapshot.memory_vol_url";
 pub const ANNO_APP_SNAPSHOT_CREATE: &str = "cube.appsnapshot.create";
@@ -32,11 +36,11 @@ pub const ANNO_APP_SNAPSHOT_RESTORE: &str = "cube.appsnapshot.restore";
 pub const SHARE_CACHE_ALWAYS: u8 = 1;
 pub const SHARE_CACHE_NEVER: u8 = 2;
 
-pub use crate::hypervisor::config::{VIRTIO_FS_ID, VIRTIO_FS_TAG};
+pub use crate::hypervisor::config::{DEFAULT_AGENT_PATH, IMAGE_PATH, VIRTIO_FS_ID, VIRTIO_FS_TAG};
 
 const KERNEL_SCF: &str = "/usr/local/services/cubetoolbox/cube-kernel-scf/vmlinux";
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Config {
     pub net: Net,
     pub disk: Vec<Disk>,
@@ -45,6 +49,8 @@ pub struct Config {
     pub pmem_path_map: HashMap<String, u32>,
     pub vm_res: VmResource,
     pub kernel: String,
+    pub agent_path: String,
+    pub os_image_path: String,
     pub snapshot_base: String,
     pub snapshot_memory_vol_url: Option<String>,
     pub fs: Option<Fs>,
@@ -61,6 +67,37 @@ pub struct Config {
     pub use_passfd_io: bool,
     /// Extra kernel cmdline parameters injected through annotations.
     pub extra_kernel_params: Vec<String>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            net: Net::default(),
+            disk: Vec::new(),
+            disk_path_map: HashMap::new(),
+            pmem: Vec::new(),
+            pmem_path_map: HashMap::new(),
+            vm_res: VmResource::default(),
+            kernel: KERNEL_SCF.to_string(),
+            agent_path: DEFAULT_AGENT_PATH.to_string(),
+            os_image_path: IMAGE_PATH.to_string(),
+            snapshot_base: String::new(),
+            snapshot_memory_vol_url: None,
+            fs: None,
+            virtiofs: Vec::new(),
+            vips: String::new(),
+            product: String::new(),
+            snapshot: false,
+            vfio_nets: Vec::new(),
+            vfio_disks: Vec::new(),
+            vfio_disk_path_map: HashMap::new(),
+            notify_snapshot_ret: false,
+            app_snapshot_create: false,
+            app_snapshot_restore: false,
+            use_passfd_io: true,
+            extra_kernel_params: Vec::new(),
+        }
+    }
 }
 
 impl Config {
@@ -107,9 +144,17 @@ impl Config {
 
         let prod = PRODUCT_CUBEBOX.to_string();
         let mut kernel = KERNEL_SCF.to_string();
+        let mut agent_path = DEFAULT_AGENT_PATH.to_string();
+        let mut os_image_path = IMAGE_PATH.to_string();
 
         if let Some(kernel_path) = anno.get(ANNO_VM_KERNEL) {
             kernel = kernel_path.clone();
+        }
+        if let Some(path) = anno.get(ANNO_VM_AGENT) {
+            agent_path = path.clone();
+        }
+        if let Some(path) = anno.get(ANNO_VM_OS_IMAGE) {
+            os_image_path = path.clone();
         }
 
         let snapshot_base = Utils::get_snapshot_base_dir(
@@ -204,6 +249,8 @@ impl Config {
             pmem_path_map,
             vm_res,
             kernel,
+            agent_path,
+            os_image_path,
             snapshot_base,
             snapshot_memory_vol_url,
             fs,
@@ -260,9 +307,13 @@ mod tests {
     use crate::sandbox::config::Config;
     use crate::sandbox::config::ANNO_SNAPSHOT_BASE;
     use crate::sandbox::config::ANNO_SNAPSHOT_MEMORY_VOL_URL;
+    use crate::sandbox::config::ANNO_VM_AGENT;
     use crate::sandbox::config::ANNO_VM_KERNEL;
     use crate::sandbox::config::ANNO_VM_KERNEL_CMDLINE_APPEND;
+    use crate::sandbox::config::ANNO_VM_OS_IMAGE;
     use crate::sandbox::config::ANNO_VM_RES;
+    use crate::sandbox::config::DEFAULT_AGENT_PATH;
+    use crate::sandbox::config::IMAGE_PATH;
     use crate::sandbox::config::KERNEL_SCF;
 
     #[test]
@@ -287,6 +338,8 @@ mod tests {
         // product,kernel,snapshot base dir (always CUBEBOX)
         assert_eq!(config.product, PRODUCT_CUBEBOX);
         assert_eq!(config.kernel, KERNEL_SCF);
+        assert_eq!(config.agent_path, DEFAULT_AGENT_PATH);
+        assert_eq!(config.os_image_path, IMAGE_PATH);
         assert_eq!(
             config.snapshot_base,
             Utils::get_snapshot_base_dir(None, PRODUCT_CUBEBOX)
@@ -321,6 +374,22 @@ mod tests {
         assert!(ret.is_ok());
         let config = ret.unwrap();
         assert_eq!(config.kernel, "/1/2/3".to_string());
+
+        // default agent/image paths
+        assert_eq!(config.agent_path, DEFAULT_AGENT_PATH);
+        assert_eq!(config.os_image_path, IMAGE_PATH);
+
+        annotations.insert(ANNO_VM_AGENT.to_string(), "/agent/path".to_string());
+        let ret = Config::new(&Some(annotations.clone()));
+        assert!(ret.is_ok());
+        let config = ret.unwrap();
+        assert_eq!(config.agent_path, "/agent/path".to_string());
+
+        annotations.insert(ANNO_VM_OS_IMAGE.to_string(), "/os/image".to_string());
+        let ret = Config::new(&Some(annotations.clone()));
+        assert!(ret.is_ok());
+        let config = ret.unwrap();
+        assert_eq!(config.os_image_path, "/os/image".to_string());
 
         let extra_cmdlines = r#"["foo=bar","  second=2  ",""]"#;
         annotations.insert(

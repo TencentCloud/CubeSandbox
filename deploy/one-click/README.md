@@ -5,7 +5,9 @@ This directory is used to build and deliver the single-machine one-click release
 ## Directory Overview
 
 - `build-release-bundle-builder.sh`: Recommended entry point. Compiles the components needed by one-click inside a builder image, then continues the release package assembly on the host machine.
-- `build-vm-assets.sh`: Builds `containerd-shim-cube-rs`, `cube-runtime`, and `cube-agent`; injects `cube-agent` into the guest image as `/sbin/init`; and collects the guest kernel.
+- `build-vm-assets.sh`: Builds `containerd-shim-cube-rs`, `cube-runtime`, guest image (with `cube-init` as `/sbin/init`), and independent `cube-agent.ext4`; collects the guest kernel.
+- `build-guest-image.sh`: Builds guest OS image with lightweight `cube-init` only (no baked-in agent).
+- `build-agent-ext4.sh`: Builds independent `cube-agent/cube-agent.ext4` (+ `version`) for virtio-pmem1.
 - `build-release-bundle.sh`: Low-level packaging entry point. Consumes either the source tree or `ONE_CLICK_*_BIN` pre-built artifacts, assembles `sandbox-package`, and produces the final release package.
 - `config-cube.toml`: Default one-click runtime configuration template.
 - `support/`: `docker compose` templates for MySQL/Redis, installed to `/usr/local/services/cubetoolbox/support/` on the target machine; `support/bin/mkcert` is the bundled mkcert binary.
@@ -19,6 +21,20 @@ This directory is used to build and deliver the single-machine one-click release
 - `lib/common.sh`: Common shell utility functions.
 - `scripts/one-click/`: Validation and maintenance helpers used by the systemd-managed deployment after installation.
 - `terraform/tencentcloud/`: Terraform deployer for a **clustered** CubeSandbox on Tencent Cloud (TKE control plane + CVM compute nodes). `create.sh` is the entry point; `destroy.sh` tears everything down. These files are shipped both at the release-bundle top level and inside `sandbox-package` (see "Tencent Cloud Cluster Deployment").
+
+## Root Makefile Targets (agent-independent pmem)
+
+From the repository root, these targets build via the unified builder image (`make builder-image` first if needed):
+
+```bash
+make cube-init          # guest PID1 binary → _output/bin/cube-init (alias: guest-init)
+make agent-ext4         # independent plane file → _output/cube-agent/{cube-agent.ext4,version}
+                        # (alias: cube-agent-ext4)
+make pmem-assets        # cube-init + agent-ext4
+make help               # list all root targets
+```
+
+For the full runtime layout (shim + guest image + agent.ext4 + kernel), use `./build-vm-assets.sh` or the release-bundle entry points below.
 
 ## Supported Operating Systems
 
@@ -112,7 +128,8 @@ The release package contains:
 - `release-manifest.json`
 - `CubeAPI/bin/cube-api`
 - `containerd-shim-cube-rs`, `cube-runtime`
-- Locally built `cube-image/cube-guest-image-cpu.img`
+- Locally built `cube-image/cube-guest-image-cpu.img` (with `cube-init` as `/sbin/init`)
+- Independent `cube-agent/cube-agent.ext4` (+ `cube-agent/version`)
 - `cubeproxy/` directory and its build context
 - `support/` directory and its compose templates
 - `webui/` directory, its compose template, nginx configuration, and built `web/dist` assets

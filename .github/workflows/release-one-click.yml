@@ -482,7 +482,7 @@ jobs:
       - name: Pull builder image
         run: docker pull "${BUILDER_IMAGE}"
 
-      - name: Build cube-agent in builder
+      - name: Build cube-init and cube-agent in builder
         env:
           CUBE_VERSION: ${{ github.ref_name }}
           CUBE_COMMIT: ${{ github.sha }}
@@ -492,38 +492,48 @@ jobs:
           export CUBE_VERSION CUBE_COMMIT CUBE_BUILD_TIME
           make builder-run \
             BUILDER_IMAGE="${BUILDER_IMAGE}" \
-            BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/agent && make -j1 && make BINDIR=/workspace/_output/bin install'
+            BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/guest-init && make -j1 && make BINDIR=/workspace/_output/bin install && cd /workspace/agent && make -j1 && make BINDIR=/workspace/_output/bin install'
+          test -x _output/bin/cube-init
           test -x _output/bin/cube-agent
 
-      - name: Build guest image artifacts
+      - name: Build guest image and cube-agent.ext4 artifacts
         env:
           CUBE_VERSION: ${{ github.ref_name }}
           CUBE_COMMIT: ${{ github.sha }}
+          ONE_CLICK_CUBE_INIT_BIN: ${{ github.workspace }}/_output/bin/cube-init
           ONE_CLICK_CUBE_AGENT_BIN: ${{ github.workspace }}/_output/bin/cube-agent
           OUTPUT_DIR: ${{ github.workspace }}/guest-release-assets/cube-image
+          AGENT_OUTPUT_DIR: ${{ github.workspace }}/guest-release-assets/cube-agent
         run: |
           set -euo pipefail
           CUBE_BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           export CUBE_VERSION CUBE_COMMIT CUBE_BUILD_TIME
-          mkdir -p "${OUTPUT_DIR}"
+          mkdir -p "${OUTPUT_DIR}" "${AGENT_OUTPUT_DIR}"
           ./deploy/one-click/build-guest-image.sh
           test -f "${OUTPUT_DIR}/cube-guest-image-cpu.img"
           test -f "${OUTPUT_DIR}/version"
-          test -f "${OUTPUT_DIR}/agent-version"
+          test ! -f "${OUTPUT_DIR}/agent-version"
+          OUTPUT_DIR="${AGENT_OUTPUT_DIR}" ./deploy/one-click/build-agent-ext4.sh
+          test -f "${AGENT_OUTPUT_DIR}/cube-agent.ext4"
+          test -f "${AGENT_OUTPUT_DIR}/version"
 
-      - name: Pack guest Release asset
+      - name: Pack guest and agent Release assets
         run: |
           set -euo pipefail
           tar -C guest-release-assets/cube-image -czf \
             "guest-release-assets/cube-guest-image-${BUNDLE_ARCH}.tar.gz" .
-          ls -lh "guest-release-assets/cube-guest-image-${BUNDLE_ARCH}.tar.gz"
+          tar -C guest-release-assets/cube-agent -czf \
+            "guest-release-assets/cube-agent-${BUNDLE_ARCH}.tar.gz" .
+          ls -lh "guest-release-assets/cube-guest-image-${BUNDLE_ARCH}.tar.gz" \
+            "guest-release-assets/cube-agent-${BUNDLE_ARCH}.tar.gz"
 
-      - name: Upload guest asset to Release
+      - name: Upload guest and agent assets to Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "${GITHUB_REF_NAME}" \
             "guest-release-assets/cube-guest-image-${BUNDLE_ARCH}.tar.gz" \
+            "guest-release-assets/cube-agent-${BUNDLE_ARCH}.tar.gz" \
             --repo "${GITHUB_REPOSITORY}" \
             --clobber
 

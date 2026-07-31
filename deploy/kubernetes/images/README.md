@@ -74,16 +74,25 @@ IMAGE_TAG=v0.6.0 ./deploy/kubernetes/images/build-cube-images.sh cube-kernel
 `cube-guest` does not use the one-click package. It stages guest rootfs from:
 
 1. `CUBE_GUEST_IMAGE_DIR` (directory containing `cube-guest-image-cpu.img`,
-   `version`, `agent-version`), or
+   `version`), or
 2. `CUBE_GUEST_IMAGE_TAR` (`.tar.gz` of those files), or
 3. Release asset `cube-guest-image-${arch}.tar.gz` (same `IMAGE_TAG` when
    present, otherwise latest GitHub Release).
+
+`cube-agent` stages the independent Agent plane file from:
+
+1. `CUBE_AGENT_IMAGE_DIR` (`cube-agent.ext4` + `version`), or
+2. `CUBE_AGENT_IMAGE_TAR`, or
+3. Release asset `cube-agent-${arch}.tar.gz`.
 
 ```bash
 CUBE_GUEST_IMAGE_DIR=/path/to/cube-image IMAGE_TAG=dev \
   ./deploy/kubernetes/images/build-cube-images.sh cube-guest
 
-IMAGE_TAG=v0.6.0 ./deploy/kubernetes/images/build-cube-images.sh cube-guest
+CUBE_AGENT_IMAGE_DIR=/path/to/cube-agent IMAGE_TAG=dev \
+  ./deploy/kubernetes/images/build-cube-images.sh cube-agent
+
+IMAGE_TAG=v0.6.0 ./deploy/kubernetes/images/build-cube-images.sh cube-guest cube-agent
 ```
 
 ## Pinning source to a release tag
@@ -189,9 +198,12 @@ entrypoint behavior.
   `release-docker-images.yml` (multi-arch; arm64 is BM-only when no PVM asset).
 - `cube-guest` is built from pre-built Release (or local) guest rootfs
   artifacts: context stages `package/cube-image/` (`cube-guest-image-cpu.img`,
-  `version`, `agent-version`); file =
+  `version`); file =
   `deploy/kubernetes/images/cube-guest/Dockerfile`. Same as CI
   `release-docker-images.yml` (downloads `cube-guest-image-${arch}.tar.gz`).
+- `cube-agent` stages `package/cube-agent/` (`cube-agent.ext4`, `version`) via
+  `deploy/kubernetes/images/cube-agent/Dockerfile` (Release asset
+  `cube-agent-${arch}.tar.gz`).
 - `cube-api` is built exactly like CI (`.github/workflows/release-docker-images.yml`):
   context = `CubeAPI`, file = `CubeAPI/Dockerfile`, with
   `CUBE_VERSION` / `CUBE_COMMIT` / `CUBE_BUILD_TIME`. No duplicate Dockerfile is

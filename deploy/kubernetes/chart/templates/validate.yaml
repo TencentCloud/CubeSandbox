@@ -56,6 +56,9 @@
 {{- if and .Values.cubeNode.enabled (not .Values.images.waitNodePrep.repository) }}
 {{- fail "cubeNode.enabled=true requires images.waitNodePrep.repository (Big Pod wait-node-prep initContainer)" }}
 {{- end }}
+{{- if and .Values.cubeNode.enabled (not .Values.images.cubeAgent.repository) }}
+{{- fail "cubeNode.enabled=true requires images.cubeAgent.repository (installer stages cube-agent.ext4)" }}
+{{- end }}
 {{- if hasKey (.Values.images | default dict) "pause" }}
 {{- fail "images.pause was removed; Big Pod placeholder slots (cube-slot-*) are gone. Remove images.pause from your values." }}
 {{- end }}

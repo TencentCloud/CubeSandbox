@@ -1067,6 +1067,7 @@ rm -rf \
   "${INSTALL_PREFIX}/cube-shim" \
   "${INSTALL_PREFIX}/cube-kernel-scf" \
   "${INSTALL_PREFIX}/cube-image" \
+  "${INSTALL_PREFIX}/cube-agent" \
   "${INSTALL_PREFIX}/cube-egress" \
   "${INSTALL_PREFIX}/cube-lifecycle-manager" \
   "${INSTALL_PREFIX}/scripts" \
@@ -1080,6 +1081,9 @@ if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
   copy_dir_contents "${PKG_ROOT}/cube-shim" "${INSTALL_PREFIX}/cube-shim"
   copy_dir_contents "${PKG_ROOT}/cube-kernel-scf" "${INSTALL_PREFIX}/cube-kernel-scf"
   copy_dir_contents "${PKG_ROOT}/cube-image" "${INSTALL_PREFIX}/cube-image"
+  if [[ -d "${PKG_ROOT}/cube-agent" ]]; then
+    copy_dir_contents "${PKG_ROOT}/cube-agent" "${INSTALL_PREFIX}/cube-agent"
+  fi
   copy_dir_contents "${PKG_ROOT}/cube-egress" "${INSTALL_PREFIX}/cube-egress"
   copy_dir_contents "${PKG_ROOT}/systemd" "${INSTALL_PREFIX}/systemd"
   copy_dir_contents "${PKG_ROOT}/scripts" "${INSTALL_PREFIX}/scripts"

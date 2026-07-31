@@ -113,6 +113,7 @@ mkdir -p \
   "${RUNTIME_LAYOUT_DIR}/cube-shim/bin" \
   "${RUNTIME_LAYOUT_DIR}/cube-shim/conf" \
   "${RUNTIME_LAYOUT_DIR}/cube-image" \
+  "${RUNTIME_LAYOUT_DIR}/cube-agent" \
   "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf"
 
 log "copying runtime binaries"
@@ -124,6 +125,11 @@ prepare_runtime_config "${RUNTIME_LAYOUT_DIR}/cube-shim/conf/config-cube.toml"
 log "building guest image artifacts via build-guest-image.sh"
 OUTPUT_DIR="${RUNTIME_LAYOUT_DIR}/cube-image" \
   "${SCRIPT_DIR}/build-guest-image.sh"
+
+log "building cube-agent.ext4 via build-agent-ext4.sh"
+OUTPUT_DIR="${RUNTIME_LAYOUT_DIR}/cube-agent" \
+  "${SCRIPT_DIR}/build-agent-ext4.sh"
+
 log "copying ordinary guest kernel vmlinux"
 copy_file "${CUBE_KERNEL_VMLINUX}" "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-bm"
 ensure_file "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-bm"

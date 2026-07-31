@@ -18,7 +18,7 @@ global:
   # individually. Applies to the pvmHostBootstrap / nodeInit / node / master
   # / api / ops / cubemastercli / proxy / lifecycleManager / cubeEgress /
   # cubeEgressNet / webui / cubelet / networkAgent / cubeShim / cubeKernel /
-  # cubeGuest / waitNodePrep / kubectl (alpine-k8s mirror) entries but not to
+  # cubeGuest / cubeAgent / waitNodePrep / kubectl (alpine-k8s mirror) entries but not to
   # third-party images such as mysql / redis.
   imageRegistry: ""
 
@@ -64,6 +64,11 @@ images:
 
   cubeGuest:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-guest
+    tag: v0.6.0
+    pullPolicy: IfNotPresent
+
+  cubeAgent:
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-agent
     tag: v0.6.0
     pullPolicy: IfNotPresent
 

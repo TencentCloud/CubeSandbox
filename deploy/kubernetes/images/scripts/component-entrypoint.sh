@@ -4,7 +4,7 @@
 #
 # Big Pod / Installer per-component entrypoint (REV3.1).
 # Env:
-#   CUBE_COMPONENT  cubelet|network-agent|cube-shim|cube-kernel|cube-guest
+#   CUBE_COMPONENT  cubelet|network-agent|cube-shim|cube-kernel|cube-guest|cube-agent
 #   CUBE_ROLE       install|run
 #     install — artifact-only components on cube-node-installer Pod: stage + pause
 #     run     — cubelet / network-agent on Big Pod: self-stage then start the process
@@ -43,6 +43,7 @@ component_relpath() {
     cube-shim) echo "cube-shim" ;;
     cube-kernel) echo "cube-kernel-scf" ;;
     cube-guest) echo "cube-image" ;;
+    cube-agent) echo "cube-agent" ;;
     *) fail "unknown CUBE_COMPONENT=$1" ;;
   esac
 }
@@ -54,6 +55,7 @@ component_sentinel() {
     cube-shim) echo "${TOOLBOX_ROOT}/.staged-cube-shim" ;;
     cube-kernel) echo "${TOOLBOX_ROOT}/.staged-cube-kernel" ;;
     cube-guest) echo "${TOOLBOX_ROOT}/.staged-cube-guest" ;;
+    cube-agent) echo "${TOOLBOX_ROOT}/.staged-cube-agent" ;;
     *) fail "unknown CUBE_COMPONENT=$1" ;;
   esac
 }
@@ -190,6 +192,11 @@ stage_component() {
       ;;
     cube-guest)
       [[ -d "${dst}" ]] || fail "missing guest image dir ${dst}"
+      [[ -f "${dst}/cube-guest-image-cpu.img" ]] || fail "missing ${dst}/cube-guest-image-cpu.img"
+      ;;
+    cube-agent)
+      [[ -f "${dst}/cube-agent.ext4" ]] || fail "missing ${dst}/cube-agent.ext4"
+      [[ -f "${dst}/version" ]] || fail "missing ${dst}/version"
       ;;
   esac
 
@@ -227,22 +234,24 @@ ensure_component_version_json() {
   [[ -f "${json}" ]] && return 0
   case "${component}" in
     cube-guest)
-      local img_ver agent_ver
+      local img_ver
       img_ver="$(tr -d '[:space:]' < "${dst}/version" 2>/dev/null || true)"
-      agent_ver="$(tr -d '[:space:]' < "${dst}/agent-version" 2>/dev/null || true)"
-      [[ -n "${img_ver}" || -n "${agent_ver}" ]] || return 0
+      [[ -n "${img_ver}" ]] || return 0
       {
         printf '{\n  "schema_version": 1,\n  "components": {\n'
-        local first=1
-        if [[ -n "${img_ver}" ]]; then
-          printf '    "guest-image": {"version": "%s"}' "$(json_escape "${img_ver}")"
-          first=0
-        fi
-        if [[ -n "${agent_ver}" ]]; then
-          [[ "${first}" -eq 1 ]] || printf ',\n'
-          printf '    "cube-agent": {"version": "%s"}' "$(json_escape "${agent_ver}")"
-        fi
-        printf '\n  }\n}\n'
+        printf '    "guest-image": {"version": "%s"}\n' "$(json_escape "${img_ver}")"
+        printf '  }\n}\n'
+      } | write_atomic "${json}"
+      log "synthesized ${json}"
+      ;;
+    cube-agent)
+      local agent_ver
+      agent_ver="$(tr -d '[:space:]' < "${dst}/version" 2>/dev/null || true)"
+      [[ -n "${agent_ver}" ]] || return 0
+      {
+        printf '{\n  "schema_version": 1,\n  "components": {\n'
+        printf '    "cube-agent": {"version": "%s"}\n' "$(json_escape "${agent_ver}")"
+        printf '  }\n}\n'
       } | write_atomic "${json}"
       log "synthesized ${json}"
       ;;
@@ -461,6 +470,7 @@ run_cubelet() {
   wait_sentinel "$(component_sentinel cube-shim)" "cube-shim"
   wait_sentinel "$(component_sentinel cube-kernel)" "cube-kernel"
   wait_sentinel "$(component_sentinel cube-guest)" "cube-guest"
+  wait_sentinel "$(component_sentinel cube-agent)" "cube-agent"
   wait_sentinel "$(component_sentinel network-agent)" "network-agent"
 
   [[ -x "${bin}" ]] || fail "missing ${bin}"

@@ -63,6 +63,7 @@ rm -f \
   "${PREBUILT_DIR}/network-agent" \
   "${PREBUILT_DIR}/cubevsmapdump" \
   "${PREBUILT_DIR}/cube-agent" \
+  "${PREBUILT_DIR}/cube-init" \
   "${PREBUILT_DIR}/containerd-shim-cube-rs" \
   "${PREBUILT_DIR}/cube-runtime"
 
@@ -97,6 +98,10 @@ echo "[one-click] building cube-agent in builder" >&2
 (cd /workspace/agent && make -j1)
 make -C /workspace/agent BINDIR=${PREBUILT_DIR} install
 
+echo "[one-click] building cube-init in builder" >&2
+(cd /workspace/guest-init && make -j1)
+make -C /workspace/guest-init BINDIR=${PREBUILT_DIR} install
+
 echo "[one-click] building shim workspace in builder" >&2
 # CUBE_VERSION/COMMIT/BUILD_TIME picked up by shim/build.rs and cube-runtime/build.rs
 (cd /workspace/CubeShim && cargo build --release --locked)
@@ -126,6 +131,7 @@ for artifact in \
   network-agent \
   cubevsmapdump \
   cube-agent \
+  cube-init \
   containerd-shim-cube-rs \
   cube-runtime
 do
@@ -142,6 +148,7 @@ ONE_CLICK_CUBE_OPS_BIN="${PREBUILT_DIR}/cubeops" \
 ONE_CLICK_NETWORK_AGENT_BIN="${PREBUILT_DIR}/network-agent" \
 ONE_CLICK_CUBEVSMAPDUMP_BIN="${PREBUILT_DIR}/cubevsmapdump" \
 ONE_CLICK_CUBE_AGENT_BIN="${PREBUILT_DIR}/cube-agent" \
+ONE_CLICK_CUBE_INIT_BIN="${PREBUILT_DIR}/cube-init" \
 ONE_CLICK_CUBESHIM_BIN="${PREBUILT_DIR}/containerd-shim-cube-rs" \
 ONE_CLICK_CUBE_RUNTIME_BIN="${PREBUILT_DIR}/cube-runtime" \
   "${SCRIPT_DIR}/build-release-bundle.sh" "$@"

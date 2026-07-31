@@ -714,7 +714,7 @@ impl SandBox {
     }
 
     pub async fn prepare_resource(&mut self) -> CResult<VmConfig> {
-        let mut vc = VmConfig::default();
+        let mut vc = VmConfig::new(&self.conf.os_image_path, &self.conf.agent_path);
         vc.set_kernel(self.conf.kernel.clone())
             .set_vcpus(self.conf.vm_res.cpu)
             .set_memory(self.conf.vm_res.memory, false)
@@ -901,7 +901,8 @@ impl SandBox {
         )?;
 
         let mut ss_req = SnapshotInfo::new(self.conf.vm_res.cpu, self.conf.vm_res.snap_memory);
-        ss_req.set_image_version()?;
+        ss_req.set_image_version_for_path(self.conf.os_image_path.as_str())?;
+        ss_req.set_agent_version(self.conf.agent_path.as_str())?;
         ss_req.set_kernel_version(self.conf.kernel.as_str())?;
         ss_req.set_disks(&self.conf.disk);
 
@@ -928,7 +929,9 @@ impl SandBox {
         fss.extend(Utils::restore_virtiofs_configs(&self.conf.virtiofs));
         let nets = Utils::restore_nets_config(&self.conf.net.interfaces)?;
         let disks = Utils::restore_disks_config(&self.conf.disk);
-        let pmems = Utils::restore_pmems_config(&self.conf.pmem);
+        // Always rebuild builtin pmem0/pmem1 then append business pmems (order is guest device order).
+        let mut pmems = VmConfig::builtin_pmems(&self.conf.os_image_path, &self.conf.agent_path);
+        pmems.extend(Utils::restore_pmems_config(&self.conf.pmem));
         let vsock = Utils::gen_vsock_config(&self.id);
 
         let ch = self.ch.as_mut().unwrap().lock().await;

@@ -148,10 +148,15 @@ printf 'ok: network-agent does not synthesize from CUBE_VERSION\n'
 
 mkdir -p "${TMP}/guest"
 printf 'g1\n' >"${TMP}/guest/version"
-printf 'a1\n' >"${TMP}/guest/agent-version"
 ensure_component_version_json cube-guest "${TMP}/guest"
 grep -q 'guest-image' "${TMP}/guest/version.json"
-grep -q 'cube-agent' "${TMP}/guest/version.json"
-printf 'ok: cube-guest still synthesizes from markers\n'
+! grep -q 'cube-agent' "${TMP}/guest/version.json"
+printf 'ok: cube-guest synthesizes guest-image only\n'
+
+mkdir -p "${TMP}/agent"
+printf 'a1\n' >"${TMP}/agent/version"
+ensure_component_version_json cube-agent "${TMP}/agent"
+grep -q 'cube-agent' "${TMP}/agent/version.json"
+printf 'ok: cube-agent synthesizes from version marker\n'
 
 printf 'ALL PASS\n'

@@ -42,7 +42,7 @@ See the [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) gu
 | `cube-pvm-host-bootstrap` | **cube-node-pvm** init. Installs/configures PVM host kernel and may reboot the node. |
 | `cube-node-init` | Bootstrap DaemonSet: `wait-pvm-host` + `cube-node-init`. Loads KVM, prepares host paths, validates `/dev/kvm` and XFS. |
 | `cube-wait-node-prep` | Big Pod `wait-node-prep` initContainer (poll `node-prep-ready` then exit), bootstrap write-ready, and PVM hold container. |
-| `cube-shim` / `cube-kernel` / `cube-guest` | Installer DaemonSet containers; stage artifacts into `/usr/local/services/cubetoolbox`. |
+| `cube-shim` / `cube-kernel` / `cube-guest` / `cube-agent` | Installer DaemonSet containers; stage artifacts into `/usr/local/services/cubetoolbox` (`cube-image/`, `cube-agent/cube-agent.ext4`, …). |
 | `cubelet` / `network-agent` | Big Pod runtime containers (self-stage then run). |
 | `cube-master` | Control-plane master; embedded schema migrations. |
 | `cube-api` | External E2B-compatible HTTP API. |
