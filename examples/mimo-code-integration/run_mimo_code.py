@@ -9,16 +9,16 @@ import os
 import shlex
 import sys
 
-from e2b import Sandbox
-
 from _mimo_common import (
     ensure_success,
+    kill_sandbox,
     run_command,
     run_mimo_command,
     sandbox_identifier,
     session_id_from_events,
 )
 from env_utils import (
+    MIMO_API_KEY_ENV,
     build_mimo_env,
     int_env,
     load_local_dotenv,
@@ -27,6 +27,13 @@ from env_utils import (
     positive_int,
     required,
     shell_join,
+)
+from network_policy import (
+    DEFAULT_NODE_CA_BUNDLE,
+    PLACEHOLDER_KEY,
+    create_sandbox,
+    show_secret_boundary,
+    verify_ca_bundle,
 )
 
 DEFAULT_PROMPT = (
@@ -38,7 +45,10 @@ DEFAULT_PROMPT = (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run a one-shot MiMo Code task inside CubeSandbox."
+        description=(
+            "Run a one-shot MiMo Code smoke task inside CubeSandbox with "
+            "CubeEgress placeholder credentials."
+        )
     )
     parser.add_argument("--template", default=os.environ.get("CUBE_TEMPLATE_ID"))
     parser.add_argument("--workspace", default=mimo_workspace())
@@ -74,7 +84,7 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def seed_project(sandbox: Sandbox, workspace: str) -> None:
+def seed_project(sandbox, workspace: str) -> None:
     directory = shlex.quote(workspace)
     command = f"""mkdir -p {directory}
 cat > {directory}/README.md <<'EOF'
@@ -95,7 +105,7 @@ EOF
     ensure_success(result, "seed the workspace")
 
 
-def verify_result(sandbox: Sandbox, workspace: str) -> None:
+def verify_result(sandbox, workspace: str) -> None:
     directory = shlex.quote(workspace)
     result_file = shlex.quote(f"{workspace}/result.md")
     command = shell_join(
@@ -117,13 +127,30 @@ def main() -> int:
         os.environ["MIMO_STREAM_RAW"] = "1"
 
     template_id = args.template or required("CUBE_TEMPLATE_ID")
-    required("E2B_API_URL")
-    required("E2B_API_KEY")
-    envs = build_mimo_env(include_secret=True)
+    api_url = required("E2B_API_URL")
+    api_key = required("E2B_API_KEY")
+    secret = required(MIMO_API_KEY_ENV)
 
-    print(f"Creating sandbox from template: {template_id}")
-    with Sandbox.create(template=template_id, timeout=args.sandbox_timeout) as sandbox:
-        print(f"Sandbox ready: {sandbox_identifier(sandbox)}")
+    envs = build_mimo_env(include_secret=False)
+    envs[MIMO_API_KEY_ENV] = PLACEHOLDER_KEY
+    envs["NODE_EXTRA_CA_CERTS"] = os.environ.get(
+        "MIMO_NODE_EXTRA_CA_CERTS", DEFAULT_NODE_CA_BUNDLE
+    )
+
+    print(f"Creating CubeEgress sandbox from template: {template_id}")
+    sandbox = create_sandbox(
+        template_id,
+        secret,
+        args.sandbox_timeout,
+        api_url=api_url,
+        api_key=api_key,
+    )
+    sandbox_id = sandbox_identifier(sandbox)
+    try:
+        print(f"Sandbox ready: {sandbox_id}")
+        verify_ca_bundle(sandbox, envs)
+        show_secret_boundary(sandbox, envs)
+
         version = run_command(sandbox, "mimo --version", timeout=60)
         ensure_success(version, "check the MiMo Code version")
         print(f"MiMo Code version: {getattr(version, 'stdout', '').strip()}")
@@ -150,8 +177,14 @@ def main() -> int:
         print(f"\nMiMo session ID: {session_id}")
         if not args.skip_result_check:
             verify_result(sandbox, args.workspace)
-
-    return 0
+        show_secret_boundary(sandbox, envs)
+        return 0
+    finally:
+        kill_sandbox(
+            sandbox,
+            sandbox_id,
+            run_failed=sys.exc_info()[0] is not None,
+        )
 
 
 if __name__ == "__main__":

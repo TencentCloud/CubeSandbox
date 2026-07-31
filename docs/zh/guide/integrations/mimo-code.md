@@ -238,7 +238,8 @@ fixtures/normalize-slug/
 示例保留两个小型辅助入口：
 
 ```bash
-# 验证固定模板与 MiMo NDJSON 事件契约。
+# 验证固定模板与 MiMo NDJSON 事件契约；同样通过 CubeEgress 注入真实密钥，
+# VM 内只保留占位符。
 python run_mimo_code.py
 
 # 验证精确出口、CA 信任与 VM 内只有占位凭证。

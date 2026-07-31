@@ -236,7 +236,8 @@ my-task/
 
 ## 辅助预检
 
-运行最小模板与 MiMo NDJSON 冒烟测试：
+运行最小模板与 MiMo NDJSON 冒烟测试（同样走 CubeEgress 占位符密钥，不会把真实
+密钥放进 VM）：
 
 ```bash
 python run_mimo_code.py

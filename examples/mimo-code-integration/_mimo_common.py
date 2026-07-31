@@ -8,9 +8,17 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import sys
 from collections.abc import Callable
 from typing import Any
+
+# CubeSandbox Commands.run buffers process output and does not invoke on_stdout
+# callbacks. Capture MiMo NDJSON to a sandbox file and parse only a bounded
+# prefix so long agent runs cannot grow unbounded host-side event lists.
+DEFAULT_EVENTS_PATH = "/tmp/cube-mimo-events.ndjson"
+DEFAULT_MAX_EVENT_BYTES = 2 * 1024 * 1024
+DEFAULT_MAX_EVENTS = 5_000
 
 
 def is_unexpected_keyword_error(error: TypeError, keyword: str) -> bool:
@@ -28,7 +36,11 @@ def stream_writer(stream) -> Callable[[object], None]:
     return write
 
 
-def parse_jsonl(text: str) -> list[dict[str, Any]]:
+def parse_jsonl(
+    text: str,
+    *,
+    max_events: int = DEFAULT_MAX_EVENTS,
+) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     for line in text.splitlines():
         if not line.strip():
@@ -39,6 +51,8 @@ def parse_jsonl(text: str) -> list[dict[str, Any]]:
             continue
         if isinstance(event, dict):
             events.append(event)
+            if len(events) >= max_events:
+                break
     return events
 
 
@@ -79,25 +93,49 @@ def render_event(event: dict[str, Any]) -> None:
 class JsonlCollector:
     """Collect arbitrary stdout chunks into complete MiMo NDJSON events."""
 
-    def __init__(self, *, raw: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        raw: bool = False,
+        max_events: int = DEFAULT_MAX_EVENTS,
+        max_bytes: int = DEFAULT_MAX_EVENT_BYTES,
+    ) -> None:
         self.raw = raw
+        self.max_events = max_events
+        self.max_bytes = max_bytes
         self.events: list[dict[str, Any]] = []
+        self.truncated = False
         self._buffer = ""
+        self._bytes = 0
 
     def __call__(self, chunk: object) -> None:
+        if self.truncated:
+            return
         text = getattr(chunk, "line", chunk)
-        self._buffer += text if isinstance(text, str) else str(text)
+        piece = text if isinstance(text, str) else str(text)
+        remaining = self.max_bytes - self._bytes
+        if remaining <= 0:
+            self.truncated = True
+            return
+        if len(piece) > remaining:
+            piece = piece[:remaining]
+            self.truncated = True
+        self._buffer += piece
+        self._bytes += len(piece)
         while "\n" in self._buffer:
             line, self._buffer = self._buffer.split("\n", 1)
             self._consume(line)
+            if self.truncated:
+                self._buffer = ""
+                return
 
     def flush(self) -> None:
-        if self._buffer:
+        if self._buffer and not self.truncated:
             self._consume(self._buffer)
-            self._buffer = ""
+        self._buffer = ""
 
     def _consume(self, line: str) -> None:
-        if not line.strip():
+        if self.truncated or not line.strip():
             return
         if self.raw:
             print(line)
@@ -112,6 +150,8 @@ class JsonlCollector:
         self.events.append(event)
         if not self.raw:
             render_event(event)
+        if len(self.events) >= self.max_events:
+            self.truncated = True
 
 
 def run_command(
@@ -147,25 +187,42 @@ def run_mimo_command(
     cwd: str,
     envs: dict[str, str],
     timeout: int,
+    events_path: str = DEFAULT_EVENTS_PATH,
+    max_event_bytes: int = DEFAULT_MAX_EVENT_BYTES,
+    max_events: int = DEFAULT_MAX_EVENTS,
 ) -> tuple[Any, list[dict[str, Any]]]:
+    """Run MiMo and return (CommandResult, bounded NDJSON events).
+
+    stdout is redirected to a sandbox file so CubeSandbox's non-streaming
+    ``Commands.run`` does not need callbacks. Only the first
+    ``max_event_bytes`` of that file are read back and parsed into at most
+    ``max_events`` events.
+    """
     raw = os.environ.get("MIMO_STREAM_RAW", "").strip().lower() in {
         "1",
         "true",
         "yes",
     }
-    collector = JsonlCollector(raw=raw)
+    quoted = shlex.quote(events_path)
+    wrapped = f"rm -f {quoted} && {{ {command}; }} > {quoted}"
     result = run_command(
         sandbox,
-        command,
+        wrapped,
         cwd=cwd,
         envs=envs,
         timeout=timeout,
-        on_stdout=collector,
     )
+    read = run_command(
+        sandbox,
+        f"head -c {int(max_event_bytes)} {quoted} 2>/dev/null || true",
+        timeout=60,
+    )
+    payload = str(getattr(read, "stdout", "") or "")
+    collector = JsonlCollector(raw=raw, max_events=max_events, max_bytes=max_event_bytes)
+    if payload:
+        collector(payload if payload.endswith("\n") else payload + "\n")
     collector.flush()
-    events = collector.events or parse_jsonl(
-        str(getattr(result, "stdout", "") or "")
-    )
+    events = collector.events or parse_jsonl(payload, max_events=max_events)
     return result, events
 
 
@@ -190,6 +247,21 @@ def session_id_from_events(events: list[dict[str, Any]]) -> str:
     if len(ids) != 1:
         raise SystemExit(f"MiMo Code returned multiple session IDs: {sorted(ids)}")
     return ids.pop()
+
+
+def events_contain_text(events: list[dict[str, Any]], text: str) -> bool:
+    """Return whether any string field in the bounded event list contains text."""
+
+    def contains(value: Any) -> bool:
+        if isinstance(value, str):
+            return text in value
+        if isinstance(value, dict):
+            return any(contains(item) for item in value.values())
+        if isinstance(value, list):
+            return any(contains(item) for item in value)
+        return False
+
+    return any(contains(event) for event in events)
 
 
 def session_list_contains(text: str, session_id: str) -> bool:

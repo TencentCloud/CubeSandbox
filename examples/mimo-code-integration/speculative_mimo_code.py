@@ -28,6 +28,7 @@ from cubesandbox import Sandbox
 
 from _mimo_common import (
     ensure_success,
+    events_contain_text,
     run_command,
     run_mimo_command,
     sandbox_identifier,
@@ -528,10 +529,6 @@ def candidate_prompt(
         workspace=workspace,
         report_path=REPORT_PATH,
     )
-
-
-def events_contain_text(events: list[dict[str, Any]], text: str) -> bool:
-    return text in json.dumps(events, ensure_ascii=False)
 
 
 def evaluate_candidate(

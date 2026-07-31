@@ -74,11 +74,16 @@ class RolloutTask:
             if "__pycache__" in relative_path.parts or path.suffix == ".pyc":
                 continue
             relative = _safe_relative_path(relative_path.as_posix())
-            content = path.read_text(encoding="utf-8")
-            total_bytes += len(content.encode("utf-8"))
-            files.append((relative, content))
-            if len(files) > MAX_FIXTURE_FILES or total_bytes > MAX_FIXTURE_BYTES:
+            total_bytes += path.stat().st_size
+            if len(files) + 1 > MAX_FIXTURE_FILES or total_bytes > MAX_FIXTURE_BYTES:
                 raise ValueError("task fixture exceeds the file or byte limit")
+            try:
+                content = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError as exc:
+                raise ValueError(
+                    f"fixture file must be UTF-8 text: {relative}"
+                ) from exc
+            files.append((relative, content))
         if not files:
             raise ValueError("task fixture project is empty")
         fixture_paths = {relative for relative, _content in files}

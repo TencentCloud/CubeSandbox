@@ -262,7 +262,8 @@ tested again.
 The example retains two small supporting entry points:
 
 ```bash
-# Verify the pinned template and MiMo NDJSON event contract.
+# Verify the pinned template and MiMo NDJSON event contract with CubeEgress
+# placeholder credentials (the real key stays in the host-side inject rule).
 python run_mimo_code.py
 
 # Verify exact-host egress, CA trust, and placeholder-only VM credentials.

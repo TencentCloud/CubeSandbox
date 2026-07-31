@@ -130,6 +130,19 @@ class RolloutTaskTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "exceeds"):
                         load_rollout_task(config)
 
+    def test_non_utf8_fixture_files_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "project"
+            project.mkdir()
+            (project / "app.py").write_text("pass\n", encoding="utf-8")
+            (project / "binary.dat").write_bytes(b"\xff\xfe binary")
+            payload = json.loads(DEFAULT_TASK.read_text(encoding="utf-8"))
+            config = root / "task.json"
+            config.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "UTF-8"):
+                load_rollout_task(config)
+
     def test_unsafe_or_duplicate_paths_are_rejected(self) -> None:
         for allowed_paths in (
             ["../app.py"],

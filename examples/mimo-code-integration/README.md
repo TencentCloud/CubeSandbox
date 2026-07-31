@@ -259,7 +259,8 @@ credential, rollback, cleanup, and evidence infrastructure.
 
 ## Supporting preflights
 
-Run the minimal template and MiMo NDJSON smoke test:
+Run the minimal template and MiMo NDJSON smoke test (also uses CubeEgress
+placeholder credentials, not a raw VM API key):
 
 ```bash
 python run_mimo_code.py
