@@ -6,13 +6,15 @@ package templatecenter
 
 import (
 	"context"
-	"database/sql"
 	"errors"
+	"fmt"
+	"runtime/debug"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -20,7 +22,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
-	"github.com/prometheus/client_golang/prometheus"
+	"gorm.io/gorm"
 )
 
 // ---------------------------------------------------------------------------
@@ -28,9 +30,10 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	preheatReconcileInterval = 5 * time.Minute
-	preheatDebounceDelay     = 2 * time.Second
-	preheatLockName          = "cubemaster_templatecenter_preheat_v1"
+	preheatReconcileInterval  = 5 * time.Minute
+	preheatDebounceDelay      = 2 * time.Second
+	preheatLockReleaseTimeout = 5 * time.Second
+	preheatLockName           = "cubemaster_templatecenter_preheat_v1"
 )
 
 // ---------------------------------------------------------------------------
@@ -86,7 +89,7 @@ func startPreheatController(ctx context.Context) {
 
 func runPreheatController(ctx context.Context) {
 	// Immediate first pass (mirrors snapshot_reconciler + artifact_gc).
-	runPreheatReconcilePass(detachTemplateImageJobContext(ctx, "preheat", nil))
+	runPreheatReconcilePassSafely(detachTemplateImageJobContext(ctx, "preheat", nil))
 
 	ticker := time.NewTicker(preheatReconcileInterval)
 	defer ticker.Stop()
@@ -107,11 +110,23 @@ func runPreheatController(ctx context.Context) {
 			debounceCh = debounceTimer.C
 		case <-debounceCh:
 			debounceCh = nil
-			runPreheatReconcilePass(detachTemplateImageJobContext(ctx, "preheat", nil))
+			runPreheatReconcilePassSafely(detachTemplateImageJobContext(ctx, "preheat", nil))
 		case <-ticker.C:
-			runPreheatReconcilePass(detachTemplateImageJobContext(ctx, "preheat", nil))
+			runPreheatReconcilePassSafely(detachTemplateImageJobContext(ctx, "preheat", nil))
 		}
 	}
+}
+
+// runPreheatReconcilePassSafely runs one reconcile pass, recovering from any
+// panic so a single bad pass never kills the controller goroutine permanently.
+// A background controller must outlive a transient fault in one pass.
+func runPreheatReconcilePassSafely(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.G(ctx).Errorf("preheat: reconcile pass recovered from panic: %v\n%s", r, debug.Stack())
+		}
+	}()
+	runPreheatReconcilePass(ctx)
 }
 
 // ---------------------------------------------------------------------------
@@ -147,23 +162,58 @@ func runPreheatReconcilePass(ctx context.Context) {
 
 	logger := log.G(ctx).WithFields(map[string]any{"component": "preheat"})
 
-	// Acquire component-scoped MySQL GET_LOCK (mirrors artifact_gc).
-	var lockRes sql.NullInt64
-	if err := store.db.WithContext(ctx).
-		Raw("SELECT GET_LOCK(?, 0)", preheatLockName).Scan(&lockRes).Error; err != nil {
-		logger.Warnf("preheat: acquire lock failed: %v", err)
-		return
-	}
-	if !lockRes.Valid || lockRes.Int64 != 1 {
-		return // another master is reconciling
-	}
-	defer func() {
-		if err := store.db.WithContext(ctx).Exec("SELECT RELEASE_LOCK(?)", preheatLockName).Error; err != nil {
-			logger.Warnf("preheat: release lock failed: %v", err)
+	// Pin ONE physical DB connection for the whole pass so the advisory lock
+	// (session-scoped) is acquired and released on the same session. Using two
+	// pooled statements would run RELEASE_LOCK on a non-owning connection: it
+	// returns NULL (not a SQL error), the lock leaks, and every subsequent pass
+	// on every master sees the lock held and skips — disabling preheat
+	// cluster-wide. This mirrors artifact_gc's Connection(func(sess){...}) +
+	// trySessionLock/releaseSessionLock/discardPinnedSession pattern (which also
+	// supports PostgreSQL pg_try_advisory_lock, unlike raw GET_LOCK).
+	err := store.db.WithContext(ctx).Connection(func(sess *gorm.DB) (retErr error) {
+		locked, err := trySessionLock(sess, preheatLockName)
+		if err != nil {
+			return errors.Join(fmt.Errorf("preheat: acquire lock: %w", err), discardPinnedSession(sess))
 		}
-	}()
+		if !locked {
+			return nil // another master is reconciling
+		}
+		defer func() {
+			releaseCtx, releaseCancel := context.WithTimeout(
+				context.WithoutCancel(ctx), preheatLockReleaseTimeout)
+			defer releaseCancel()
 
-	// 1. List healthy nodes (in-memory).
+			releaseSess := pinnedSessionWithContext(sess, releaseCtx)
+			released, releaseErr := releaseSessionLock(releaseSess, preheatLockName)
+			if releaseErr != nil {
+				// Lock state unknown: discard the session so it (and any held
+				// advisory lock) cannot silently re-enter the pool.
+				retErr = errors.Join(retErr, fmt.Errorf("preheat: release lock: %w", releaseErr), discardPinnedSession(sess))
+				return
+			}
+			if !released {
+				retErr = errors.Join(retErr, errors.New("preheat: release lock: current session did not hold lock"))
+			}
+		}()
+
+		runPreheatReconcileLocked(ctx, sess, preheatCfg)
+		return nil
+	})
+	if err != nil {
+		logger.Warnf("preheat: pass aborted: %v", err)
+	}
+}
+
+// runPreheatReconcileLocked performs the reconcile work while holding the
+// advisory lock. All reads use the pinned session (sess) for consistency with
+// the single-connection model and to avoid checking out further connections.
+// Template distribution via SubmitRedoTemplateFromImage intentionally uses the
+// caller's ctx (the mature async distribution path) — it enqueues jobs and
+// returns; it does not block the lock.
+func runPreheatReconcileLocked(ctx context.Context, sess *gorm.DB, cfg *config.TemplatePreheatConf) {
+	logger := log.G(ctx).WithFields(map[string]any{"component": "preheat"})
+
+	// 1. List healthy, non-cordoned nodes (in-memory).
 	nodes, err := nodemeta.ListNodes(ctx)
 	if err != nil {
 		logger.Warnf("preheat: list nodes failed: %v", err)
@@ -172,7 +222,7 @@ func runPreheatReconcilePass(ctx context.Context) {
 	healthyNodes := filterHealthyNodes(nodes)
 
 	// 2. Sort pinned templates by priority (desc), tie-break on template_id.
-	pinned := sortPinnedTemplates(preheatCfg.PinnedTemplates)
+	pinned := sortPinnedTemplates(cfg.PinnedTemplates)
 	if len(pinned) == 0 {
 		return
 	}
@@ -182,18 +232,19 @@ func runPreheatReconcilePass(ctx context.Context) {
 	for _, p := range pinned {
 		templateIDs = append(templateIDs, p.TemplateID)
 	}
-	defs := batchGetDefinitions(ctx, templateIDs)
-	activeJobs := batchGetActiveJobs(ctx, templateIDs)
-	replicas := batchListReplicas(ctx, templateIDs)
+	defs := batchGetDefinitions(ctx, sess, templateIDs)
+	activeJobs := batchGetActiveJobs(ctx, sess, templateIDs)
+	replicas := batchListReplicas(ctx, sess, templateIDs)
+	sizes := batchGetTemplateSizes(ctx, sess, defs)
 
 	// 4. Batch query: per-node budget usage for candidate nodes.
 	candidateNodeIDs := collectCandidateNodeIDs(pinned, healthyNodes, defs)
-	nodeCounts, nodeBytes := batchComputeNodeBudgetUsage(ctx, candidateNodeIDs)
+	nodeCounts, nodeBytes := batchComputeNodeBudgetUsage(ctx, sess, candidateNodeIDs)
 
 	// 5. Evaluate each pinned template using in-memory data.
 	for _, p := range pinned {
-		evaluatePinnedTemplate(ctx, preheatCfg, p, healthyNodes,
-			nodeCounts, nodeBytes, defs, activeJobs, replicas)
+		evaluatePinnedTemplate(ctx, cfg, p, healthyNodes,
+			nodeCounts, nodeBytes, defs, activeJobs, replicas, sizes)
 	}
 
 	logger.Infof("preheat: pass complete, %d pinned templates evaluated", len(pinned))
@@ -203,10 +254,12 @@ func runPreheatReconcilePass(ctx context.Context) {
 // Batch queries
 // ---------------------------------------------------------------------------
 
-func batchGetDefinitions(ctx context.Context, templateIDs []string) map[string]*models.TemplateDefinition {
+func batchGetDefinitions(ctx context.Context, db *gorm.DB, templateIDs []string) map[string]*models.TemplateDefinition {
 	var defs []models.TemplateDefinition
-	store.db.WithContext(ctx).Table(constants.TemplateDefinitionTableName).
-		Where("template_id IN ?", templateIDs).Find(&defs)
+	if err := db.WithContext(ctx).Table(constants.TemplateDefinitionTableName).
+		Where("template_id IN ?", templateIDs).Find(&defs).Error; err != nil {
+		log.G(ctx).Warnf("preheat: batch get definitions failed: %v", err)
+	}
 	out := make(map[string]*models.TemplateDefinition, len(defs))
 	for i := range defs {
 		out[defs[i].TemplateID] = &defs[i]
@@ -214,11 +267,13 @@ func batchGetDefinitions(ctx context.Context, templateIDs []string) map[string]*
 	return out
 }
 
-func batchGetActiveJobs(ctx context.Context, templateIDs []string) map[string]bool {
+func batchGetActiveJobs(ctx context.Context, db *gorm.DB, templateIDs []string) map[string]bool {
 	var jobs []models.TemplateImageJob
-	store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+	if err := db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
 		Where("template_id IN ? AND status IN ?", templateIDs,
-			[]string{JobStatusPending, JobStatusRunning}).Find(&jobs)
+			[]string{JobStatusPending, JobStatusRunning}).Find(&jobs).Error; err != nil {
+		log.G(ctx).Warnf("preheat: batch get active jobs failed: %v", err)
+	}
 	out := make(map[string]bool, len(jobs))
 	for _, j := range jobs {
 		out[j.TemplateID] = true
@@ -226,13 +281,58 @@ func batchGetActiveJobs(ctx context.Context, templateIDs []string) map[string]bo
 	return out
 }
 
-func batchListReplicas(ctx context.Context, templateIDs []string) map[string][]models.TemplateReplica {
+func batchListReplicas(ctx context.Context, db *gorm.DB, templateIDs []string) map[string][]models.TemplateReplica {
 	var replicas []models.TemplateReplica
-	store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
-		Where("template_id IN ?", templateIDs).Find(&replicas)
+	if err := db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
+		Where("template_id IN ?", templateIDs).Find(&replicas).Error; err != nil {
+		log.G(ctx).Warnf("preheat: batch list replicas failed: %v", err)
+	}
 	out := make(map[string][]models.TemplateReplica)
 	for _, r := range replicas {
 		out[r.TemplateID] = append(out[r.TemplateID], r)
+	}
+	return out
+}
+
+// batchGetTemplateSizes resolves the effective rootfs byte size for every
+// template definition in a single query. The snapshot size wins; otherwise the
+// artifact ext4 size is used (the same precedence the per-template lookup had,
+// now batched to honor the "no N+1 per pass" contract). This is the size used
+// for per-node byte budget accounting, so it must match the accounting in
+// batchComputeNodeBudgetUsage (NULLIF(rootfs_size_bytes_at_snapshot,0) → ext4).
+func batchGetTemplateSizes(ctx context.Context, db *gorm.DB, defs map[string]*models.TemplateDefinition) map[string]int64 {
+	out := make(map[string]int64, len(defs))
+	artifactIDs := make([]string, 0, len(defs))
+	for _, d := range defs {
+		if d == nil {
+			continue
+		}
+		if d.RootfsSizeBytesAtSnapshot > 0 {
+			out[d.TemplateID] = int64(d.RootfsSizeBytesAtSnapshot)
+		} else if d.RootfsArtifactID != "" {
+			artifactIDs = append(artifactIDs, d.RootfsArtifactID)
+		}
+	}
+	if len(artifactIDs) == 0 {
+		return out
+	}
+	var arts []models.RootfsArtifact
+	if err := db.WithContext(ctx).Table(constants.RootfsArtifactTableName).
+		Where("artifact_id IN ?", artifactIDs).Find(&arts).Error; err != nil {
+		log.G(ctx).Warnf("preheat: batch get artifact sizes failed: %v", err)
+		return out
+	}
+	artByID := make(map[string]int64, len(arts))
+	for _, a := range arts {
+		artByID[a.ArtifactID] = a.Ext4SizeBytes
+	}
+	for tid, d := range defs {
+		if d == nil || d.RootfsSizeBytesAtSnapshot > 0 {
+			continue // already resolved from snapshot size
+		}
+		if sz, ok := artByID[d.RootfsArtifactID]; ok {
+			out[tid] = sz
+		}
 	}
 	return out
 }
@@ -241,7 +341,7 @@ func batchListReplicas(ctx context.Context, templateIDs []string) map[string][]m
 // bytes. The 3-table JOIN ensures rootfs_size_bytes_at_snapshot=0 (image-based
 // templates) falls back to rootfs_artifact.ext4_size_bytes, so the byte budget
 // is enforced correctly for all template kinds.
-func batchComputeNodeBudgetUsage(ctx context.Context, nodeIDs []string) (map[string]int, map[string]int64) {
+func batchComputeNodeBudgetUsage(ctx context.Context, db *gorm.DB, nodeIDs []string) (map[string]int, map[string]int64) {
 	counts := make(map[string]int)
 	bytes := make(map[string]int64)
 	if len(nodeIDs) == 0 {
@@ -254,7 +354,7 @@ func batchComputeNodeBudgetUsage(ctx context.Context, nodeIDs []string) (map[str
 		TotalBytes int64  `gorm:"column:total_bytes"`
 	}
 	var results []nodeUsage
-	store.db.WithContext(ctx).
+	if err := db.WithContext(ctx).
 		Table(constants.TemplateReplicaTableName+" AS r").
 		Select(`r.node_id,
 			COUNT(*) AS cnt,
@@ -267,7 +367,9 @@ func batchComputeNodeBudgetUsage(ctx context.Context, nodeIDs []string) (map[str
 		Joins("LEFT JOIN " + constants.RootfsArtifactTableName + " AS a ON d.rootfs_artifact_id = a.artifact_id").
 		Where("r.node_id IN ? AND r.status = ?", nodeIDs, ReplicaStatusReady).
 		Group("r.node_id").
-		Find(&results)
+		Find(&results).Error; err != nil {
+		log.G(ctx).Warnf("preheat: batch compute node budget usage failed: %v", err)
+	}
 
 	for _, r := range results {
 		counts[r.NodeID] = int(r.Count)
@@ -290,6 +392,7 @@ func evaluatePinnedTemplate(
 	defs map[string]*models.TemplateDefinition,
 	activeJobs map[string]bool,
 	replicas map[string][]models.TemplateReplica,
+	sizes map[string]int64,
 ) {
 	logger := log.G(ctx).WithFields(map[string]any{
 		"component":   "preheat",
@@ -303,8 +406,8 @@ func evaluatePinnedTemplate(
 		return
 	}
 
-	// b. Get template size for candidate budget check.
-	templateSize := getTemplateSizeFromDef(ctx, def)
+	// b. Get template size for candidate budget check (from batch).
+	templateSize := sizes[pinned.TemplateID]
 
 	// c. Get replicas (from batch).
 	templateReplicas := replicas[pinned.TemplateID]
@@ -356,6 +459,12 @@ func evaluatePinnedTemplate(
 	admitCount := deficit
 	if maxAdmitable < admitCount {
 		admitCount = maxAdmitable
+	}
+	// Clamp to the available node count: admitCount is derived from operator
+	// config and could exceed the matching set (or be a typo'd huge value).
+	// make(..., 0, admitCount) would pre-allocate a multi-GB array otherwise.
+	if admitCount > len(matchingNodes) {
+		admitCount = len(matchingNodes)
 	}
 	if admitCount <= 0 {
 		logDecision(ctx, pinned.TemplateID, "skipped", "no_deficit")
@@ -478,33 +587,17 @@ func selectCandidates(
 }
 
 // ---------------------------------------------------------------------------
-// Template size lookup
-// ---------------------------------------------------------------------------
-
-func getTemplateSizeFromDef(ctx context.Context, def *models.TemplateDefinition) int64 {
-	if def.RootfsSizeBytesAtSnapshot > 0 {
-		return int64(def.RootfsSizeBytesAtSnapshot)
-	}
-	if def.RootfsArtifactID == "" {
-		return 0
-	}
-	var artifact models.RootfsArtifact
-	err := store.db.WithContext(ctx).Table(constants.RootfsArtifactTableName).
-		Where("artifact_id = ?", def.RootfsArtifactID).First(&artifact).Error
-	if err != nil {
-		return 0
-	}
-	return artifact.Ext4SizeBytes
-}
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
+// filterHealthyNodes returns nodes that are healthy AND schedulable. A cordoned
+// node (SchedulingDisabled, e.g. under drain/quarantine) is excluded so preheat
+// never pushes templates onto a node the operator is draining — consistent with
+// the normal sandbox scheduler, which gates placement on SchedulingDisabled.
 func filterHealthyNodes(nodes []*nodemeta.NodeSnapshot) []*nodemeta.NodeSnapshot {
 	var out []*nodemeta.NodeSnapshot
 	for _, n := range nodes {
-		if n != nil && n.Healthy {
+		if n != nil && n.Healthy && !n.SchedulingDisabled {
 			out = append(out, n)
 		}
 	}

@@ -182,6 +182,22 @@ func TestSelectCandidates_AdmitCountCap(t *testing.T) {
 	}
 }
 
+// TestSelectCandidates_AdmitCountAboveNodeCount verifies that an admitCount
+// larger than the matching set never over-allocates (the loop is bounded by
+// len(matchingNodes)). evaluatePinnedTemplate clamps admitCount to the node
+// count before calling this, defending the make(...,0,admitCount) preallocation
+// against a huge operator-supplied min_replicas.
+func TestSelectCandidates_AdmitCountAboveNodeCount(t *testing.T) {
+	nodes := []*nodemeta.NodeSnapshot{{NodeID: "n1"}, {NodeID: "n2"}}
+	counts := map[string]int{}
+	bytes := map[string]int64{}
+	cfg := &config.TemplatePreheatConf{PerNodeMaxTemplates: 20, PerNodeMaxBytes: 1000}
+	out := selectCandidates(nodes, map[string]struct{}{}, 1<<20, counts, bytes, cfg, 10)
+	if len(out) != 2 {
+		t.Fatalf("admitCount huge but only 2 nodes exist: expected 2, got %d", len(out))
+	}
+}
+
 func TestSelectCandidates_OptimisticIncrement(t *testing.T) {
 	// Two templates evaluated in the same pass.
 	// After first template picks n1, the second should see n1's count incremented.
@@ -293,6 +309,26 @@ func TestFilterHealthyNodes(t *testing.T) {
 	out := filterHealthyNodes(nodes)
 	if len(out) != 2 {
 		t.Fatalf("expected 2 healthy nodes, got %d", len(out))
+	}
+}
+
+// TestFilterHealthyNodes_ExcludesCordoned verifies that a node cordoned for
+// drain/quarantine (SchedulingDisabled) is excluded from preheat candidates
+// even when Healthy — consistent with the normal sandbox scheduler.
+func TestFilterHealthyNodes_ExcludesCordoned(t *testing.T) {
+	nodes := []*nodemeta.NodeSnapshot{
+		{NodeID: "ok", Healthy: true, SchedulingDisabled: false},
+		{NodeID: "draining", Healthy: true, SchedulingDisabled: true},
+		{NodeID: "also-ok", Healthy: true, SchedulingDisabled: false},
+	}
+	out := filterHealthyNodes(nodes)
+	if len(out) != 2 {
+		t.Fatalf("expected 2 candidates (cordoned node excluded), got %d", len(out))
+	}
+	for _, n := range out {
+		if n.SchedulingDisabled {
+			t.Fatalf("cordoned node %s must not be a preheat candidate", n.NodeID)
+		}
 	}
 }
 

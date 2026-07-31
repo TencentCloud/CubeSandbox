@@ -819,8 +819,8 @@ func preHandle(config *Config) (*Config, error) {
 	if preHandleAuthConf(config) != nil {
 		return nil, errors.New("preHandleAuthConf failed")
 	}
-	if preHandleTemplatePreheat(config) != nil {
-		return nil, errors.New("preHandleTemplatePreheat failed")
+	if err := preHandleTemplatePreheat(config); err != nil {
+		return nil, err
 	}
 	return config, nil
 }
@@ -926,14 +926,39 @@ func preHandleTemplatePreheat(config *Config) error {
 		return nil // disabled by default — nil block means feature off
 	}
 	p := config.TemplatePreheat
-	if p.PerNodeMaxTemplates == 0 {
+	// Defaults and normalization. <= 0 (including a negative typo) falls back
+	// to the default: a negative budget would otherwise silently disable the
+	// per-node guard in selectCandidates, which checks `> 0`.
+	if p.PerNodeMaxTemplates <= 0 {
 		p.PerNodeMaxTemplates = 20
 	}
-	if p.PerNodeMaxBytes == 0 {
+	if p.PerNodeMaxBytes <= 0 {
 		p.PerNodeMaxBytes = 200 * 1024 * 1024 * 1024 // 200 GiB
 	}
-	if p.PerTemplateMinRedoInterval == 0 {
+	if p.PerTemplateMinRedoInterval <= 0 {
 		p.PerTemplateMinRedoInterval = 10 * time.Minute
+	}
+	// Enforce pinned-template validity only when the feature is on, so a stale
+	// or malformed block cannot block startup while preheat is disabled.
+	if !p.Enabled {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(p.PinnedTemplates))
+	for _, pt := range p.PinnedTemplates {
+		if pt.TemplateID == "" {
+			return errors.New("template_preheat: pinned template has empty template_id")
+		}
+		if pt.MinReplicas < 0 {
+			return fmt.Errorf("template_preheat: min_replicas must be >= 0 for template %s", pt.TemplateID)
+		}
+		if pt.MaxReplicas < pt.MinReplicas {
+			return fmt.Errorf("template_preheat: max_replicas (%d) < min_replicas (%d) for template %s",
+				pt.MaxReplicas, pt.MinReplicas, pt.TemplateID)
+		}
+		if _, dup := seen[pt.TemplateID]; dup {
+			return fmt.Errorf("template_preheat: duplicate pinned template %s", pt.TemplateID)
+		}
+		seen[pt.TemplateID] = struct{}{}
 	}
 	return nil
 }
