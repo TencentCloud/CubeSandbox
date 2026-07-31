@@ -804,6 +804,23 @@ test_postcheck_skips_when_external_host_set() {
     || fail "redis-postcheck must exit 0 when CUBE_EXTERNAL_REDIS_HOST is set"
 }
 
+test_webui_postcheck_skips_when_disabled() {
+  local stub_dir="${TMP_DIR}/webui-disabled/bin"
+
+  mkdir -p "${stub_dir}"
+  cat > "${stub_dir}/ss" <<'SH'
+#!/usr/bin/env bash
+echo "ss must not be called when WebUI is disabled" >&2
+exit 1
+SH
+  chmod +x "${stub_dir}/ss"
+
+  PATH="${stub_dir}:${PATH}" \
+    WEB_UI_ENABLE=0 \
+    bash "${ONE_CLICK_DIR}/scripts/systemd/webui-postcheck.sh" \
+    || fail "webui-postcheck must exit 0 when WEB_UI_ENABLE is disabled"
+}
+
 test_mask_external_dep_services_remove_then_mask() {
   local path="${ONE_CLICK_DIR}/install.sh"
 
@@ -863,6 +880,7 @@ test_cube_proxy_postcheck_ignores_https_port
 test_cube_proxy_postcheck_ignores_deprecated_host_port
 test_cube_proxy_postcheck_prefers_http_over_deprecated_host_port
 test_postcheck_skips_when_external_host_set
+test_webui_postcheck_skips_when_disabled
 test_mask_external_dep_services_remove_then_mask
 
 echo "runtime file safety tests OK"
