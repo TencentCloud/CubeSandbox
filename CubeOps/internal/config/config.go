@@ -65,6 +65,14 @@ type Config struct {
 	// Sandbox domain exposed to SDK clients; matches SDK handler's
 	// CUBE_API_SANDBOX_DOMAIN env so the /config endpoint stays in sync.
 	SandboxDomain string `yaml:"sandbox_domain"`
+
+	Terminal TerminalConfig `yaml:"terminal"`
+}
+
+// TerminalConfig contains deployment-provided transport credentials. The
+// grant and gateway behavior is added separately from this wiring prerequisite.
+type TerminalConfig struct {
+	InternalToken string `yaml:"internal_token"`
 }
 
 // Load reads configuration from YAML + environment variables (env wins).
@@ -112,6 +120,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.SandboxDomain == "" {
 		cfg.SandboxDomain = "cube.app"
+	}
+	if tokenLength := len(cfg.Terminal.InternalToken); tokenLength > 0 && tokenLength < 16 {
+		return nil, fmt.Errorf("terminal.internal_token must be empty or at least 16 bytes")
 	}
 
 	// JWT_SECRET is optional — if not set, it will be auto-generated and
@@ -313,6 +324,9 @@ func overrideFromEnv(cfg *Config) {
 	}
 	if v := os.Getenv("CUBE_API_SANDBOX_DOMAIN"); v != "" {
 		cfg.SandboxDomain = v
+	}
+	if v, ok := os.LookupEnv("CUBE_TERMINAL_INTERNAL_TOKEN"); ok {
+		cfg.Terminal.InternalToken = v
 	}
 	if v := os.Getenv("JWT_ACCESS_TTL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {

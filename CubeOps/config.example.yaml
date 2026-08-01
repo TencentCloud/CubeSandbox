@@ -47,3 +47,9 @@ redis_url: ""
 
 # --- Sandbox domain exposed to SDK clients via /config ---
 sandbox_domain: "cube.app"
+
+# --- Web Terminal internal relay transport ---
+# Empty keeps the gateway disabled. Deployments inject the same secret into
+# CubeOps and CubeMaster through CUBE_TERMINAL_INTERNAL_TOKEN.
+terminal:
+  internal_token: ""

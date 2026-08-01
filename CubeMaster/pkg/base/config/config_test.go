@@ -62,7 +62,8 @@ func TestPreHandleTerminalConfDefaults(t *testing.T) {
 	}
 }
 
-func TestPreHandleTerminalConfPreservesExplicitValues(t *testing.T) {
+func TestPreHandleTerminalConfEmptyEnvDisablesYAMLToken(t *testing.T) {
+	t.Setenv(terminalInternalTokenEnv, "")
 	c := &Config{TerminalConf: &TerminalConf{
 		InternalToken:      "internal-secret",
 		MaxFrameBytes:      32 << 10,
@@ -71,10 +72,39 @@ func TestPreHandleTerminalConfPreservesExplicitValues(t *testing.T) {
 	}}
 
 	assert.NoError(t, preHandleTerminalConf(c))
-	assert.Equal(t, "internal-secret", c.TerminalConf.InternalToken)
+	assert.Empty(t, c.TerminalConf.InternalToken)
 	assert.Equal(t, 32<<10, c.TerminalConf.MaxFrameBytes)
 	assert.Equal(t, 7, c.TerminalConf.WriteDeadlineInSec)
 	assert.Equal(t, 9, c.TerminalConf.CloseTimeoutInSec)
+}
+
+func TestPreHandleTerminalConfEnvOverridesYAML(t *testing.T) {
+	t.Setenv(terminalInternalTokenEnv, "environment-secret")
+	c := &Config{TerminalConf: &TerminalConf{InternalToken: "yaml-secret"}}
+
+	assert.NoError(t, preHandleTerminalConf(c))
+	assert.Equal(t, "environment-secret", c.TerminalConf.InternalToken)
+}
+
+func TestPreHandleTerminalConfPreservesYAMLWhenEnvUnset(t *testing.T) {
+	unsetTestEnv(t, terminalInternalTokenEnv)
+	c := &Config{TerminalConf: &TerminalConf{InternalToken: "yaml-secret-value"}}
+
+	assert.NoError(t, preHandleTerminalConf(c))
+	assert.Equal(t, "yaml-secret-value", c.TerminalConf.InternalToken)
+}
+
+func unsetTestEnv(t *testing.T, key string) {
+	t.Helper()
+	old, existed := os.LookupEnv(key)
+	assert.NoError(t, os.Unsetenv(key))
+	t.Cleanup(func() {
+		if existed {
+			assert.NoError(t, os.Setenv(key, old))
+			return
+		}
+		assert.NoError(t, os.Unsetenv(key))
+	})
 }
 
 func TestValidateTerminalConf(t *testing.T) {
@@ -84,7 +114,9 @@ func TestValidateTerminalConf(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "missing disables relay", conf: nil},
-		{name: "valid", conf: &TerminalConf{MaxFrameBytes: 64 << 10, WriteDeadlineInSec: 10, CloseTimeoutInSec: 15}},
+		{name: "valid", conf: &TerminalConf{InternalToken: "0123456789abcdef", MaxFrameBytes: 64 << 10, WriteDeadlineInSec: 10, CloseTimeoutInSec: 15}},
+		{name: "empty token disables relay", conf: &TerminalConf{MaxFrameBytes: 64 << 10, WriteDeadlineInSec: 10, CloseTimeoutInSec: 15}},
+		{name: "short internal token", conf: &TerminalConf{InternalToken: "too-short", MaxFrameBytes: 64 << 10, WriteDeadlineInSec: 10, CloseTimeoutInSec: 15}, wantErr: true},
 		{name: "zero frame limit", conf: &TerminalConf{WriteDeadlineInSec: 10, CloseTimeoutInSec: 15}, wantErr: true},
 		{name: "frame limit too large", conf: &TerminalConf{MaxFrameBytes: (64 << 10) + 1, WriteDeadlineInSec: 10, CloseTimeoutInSec: 15}, wantErr: true},
 		{name: "non-positive write deadline", conf: &TerminalConf{MaxFrameBytes: 64 << 10, CloseTimeoutInSec: 15}, wantErr: true},
