@@ -169,6 +169,10 @@ func (s *service) receiveTerminalFrames(
 			log.G(stream.Context()).Error("terminal receive panic")
 		}
 	}()
+	protocolError := func() {
+		attachment.NotifyError(terminalcore.CodeProtocolError)
+		_ = attachment.Close(terminalcore.CloseProtocolError)
+	}
 	for {
 		frame, err := stream.Recv()
 		if err != nil {
@@ -177,13 +181,11 @@ func (s *service) receiveTerminalFrames(
 		}
 		switch payload := frame.GetFrame().(type) {
 		case *cubebox.TerminalClientFrame_Open:
-			attachment.NotifyError(terminalcore.CodeProtocolError)
-			_ = attachment.Close(terminalcore.CloseProtocolError)
+			protocolError()
 			return
 		case *cubebox.TerminalClientFrame_Stdin:
 			if len(payload.Stdin) > s.terminal.MaxFrameBytes() {
-				attachment.NotifyError(terminalcore.CodeProtocolError)
-				_ = attachment.Close(terminalcore.CloseProtocolError)
+				protocolError()
 				return
 			}
 			if err := attachment.SendStdin(payload.Stdin); err != nil {
@@ -196,8 +198,7 @@ func (s *service) receiveTerminalFrames(
 			}
 		case *cubebox.TerminalClientFrame_Resize:
 			if payload.Resize == nil {
-				attachment.NotifyError(terminalcore.CodeProtocolError)
-				_ = attachment.Close(terminalcore.CloseProtocolError)
+				protocolError()
 				return
 			}
 			if err := attachment.Resize(payload.Resize.GetCols(), payload.Resize.GetRows()); err != nil {
@@ -209,8 +210,7 @@ func (s *service) receiveTerminalFrames(
 			_ = attachment.Close(terminalcore.CloseUserClosed)
 			return
 		default:
-			attachment.NotifyError(terminalcore.CodeProtocolError)
-			_ = attachment.Close(terminalcore.CloseProtocolError)
+			protocolError()
 			return
 		}
 	}
@@ -220,12 +220,9 @@ func sendTerminalError(
 	stream grpc.BidiStreamingServer[cubebox.TerminalClientFrame, cubebox.TerminalServerFrame],
 	code string,
 ) error {
-	if err := stream.Send(&cubebox.TerminalServerFrame{
+	return stream.Send(&cubebox.TerminalServerFrame{
 		Frame: &cubebox.TerminalServerFrame_Error{Error: &cubebox.TerminalError{Code: code}},
-	}); err != nil {
-		return err
-	}
-	return nil
+	})
 }
 
 func terminalServerFrame(event terminalcore.Event) *cubebox.TerminalServerFrame {

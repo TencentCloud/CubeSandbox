@@ -23,6 +23,8 @@ on:
       - 'sdk/go/Makefile'
       - 'examples/cube-bench/Makefile'
       - 'web/**'
+      - 'terminal-protocol-v1.json'
+      - 'Cubelet/scripts/terminal-protocol-gen/**'
       - '.github/workflows/fmt-check.yml'
   workflow_dispatch:
 
@@ -47,6 +49,15 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: Set up Go for Web Terminal protocol generation
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: Cubelet/scripts/terminal-protocol-gen/go.mod
+
+      - name: Check Web Terminal protocol generation
+        shell: bash
+        run: make terminal-protocol-check
 
       - name: Detect builder changes
         id: builder_changes

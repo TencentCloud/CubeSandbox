@@ -1,0 +1,63 @@
+{
+  "subprotocol": "cube-terminal.v1",
+  "grantPrefix": "cube-grant.",
+  "channels": [
+    { "name": "Stdin", "tsName": "stdin", "value": 0 },
+    { "name": "Stdout", "tsName": "stdout", "value": 1 },
+    { "name": "Stderr", "tsName": "stderr", "value": 2 },
+    { "name": "Status", "tsName": "status", "value": 3 },
+    { "name": "Resize", "tsName": "resize", "value": 4 }
+  ],
+  "limits": {
+    "maxPayloadBytes": 65536,
+    "maxStatusBytes": 4096,
+    "minDimension": 1,
+    "maxDimension": 1000
+  },
+  "errorCodes": [
+    { "name": "TargetNotFound", "value": "TARGET_NOT_FOUND" },
+    { "name": "TargetNotRunning", "value": "TARGET_NOT_RUNNING" },
+    { "name": "LimitExceeded", "value": "LIMIT_EXCEEDED" },
+    { "name": "ProtocolError", "value": "PROTOCOL_ERROR" },
+    { "name": "ShellNotFound", "value": "SHELL_NOT_FOUND" },
+    { "name": "SlowProducer", "value": "SLOW_PRODUCER" },
+    { "name": "SlowConsumer", "value": "SLOW_CONSUMER" },
+    { "name": "SessionLost", "value": "SESSION_LOST" },
+    { "name": "Internal", "value": "INTERNAL" },
+    { "name": "ServerDraining", "value": "SERVER_DRAINING" },
+    { "name": "SandboxTransition", "value": "SANDBOX_TRANSITION" }
+  ],
+  "closeReasons": [
+    { "name": "UserClosed", "value": "USER_CLOSED" },
+    { "name": "IdleTimeout", "value": "IDLE_TIMEOUT" },
+    { "name": "MaxLifetime", "value": "MAX_LIFETIME" },
+    { "name": "SandboxTransition", "value": "SANDBOX_TRANSITION" },
+    { "name": "RuntimeExited", "value": "RUNTIME_EXITED" },
+    { "name": "SessionLost", "value": "SESSION_LOST" },
+    { "name": "ProtocolError", "value": "PROTOCOL_ERROR" },
+    { "name": "ServerDraining", "value": "SERVER_DRAINING" },
+    { "name": "SlowProducer", "value": "SLOW_PRODUCER" },
+    { "name": "SlowConsumer", "value": "SLOW_CONSUMER" },
+    { "name": "Internal", "value": "INTERNAL" }
+  ],
+  "reasonCodes": [
+    "UNAUTHORIZED",
+    "FORBIDDEN",
+    "TARGET_NOT_FOUND",
+    "TARGET_NOT_RUNNING",
+    "GRANT_INVALID",
+    "LIMIT_EXCEEDED",
+    "PROTOCOL_ERROR",
+    "SHELL_NOT_FOUND",
+    "SLOW_PRODUCER",
+    "SLOW_CONSUMER",
+    "IDLE_TIMEOUT",
+    "MAX_LIFETIME",
+    "SANDBOX_TRANSITION",
+    "RUNTIME_EXITED",
+    "SESSION_LOST",
+    "INTERNAL",
+    "SERVER_DRAINING",
+    "USER_CLOSED"
+  ]
+}

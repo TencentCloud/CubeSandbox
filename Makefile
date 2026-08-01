@@ -136,6 +136,8 @@ help:
 	@printf "  web-fmt       Format WebUI sources\n"
 	@printf "  fmt            Format code in all component directories\n"
 	@printf "  web-api-sync  Export OpenAPI and regenerate WebUI schema types\n"
+	@printf "  terminal-protocol-sync Regenerate Web Terminal protocol constants\n"
+	@printf "  terminal-protocol-check Verify generated Web Terminal protocol constants\n"
 	@printf "  web-sync-dev-env Build and deploy WebUI into dev-env VM\n"
 	@printf "\nNotes:\n"
 	@printf "  - builder-shell forwards ~/.git-credentials when present\n"
@@ -377,6 +379,14 @@ web-fmt:
 .PHONY: web-api-sync
 web-api-sync:
 	cd "$(WEB_DIR)" && npm run api:sync
+
+.PHONY: terminal-protocol-sync
+terminal-protocol-sync:
+	cd Cubelet/scripts/terminal-protocol-gen && go run .
+
+.PHONY: terminal-protocol-check
+terminal-protocol-check:
+	cd Cubelet/scripts/terminal-protocol-gen && go run . -check
 
 .PHONY: web-sync-dev-env
 web-sync-dev-env:

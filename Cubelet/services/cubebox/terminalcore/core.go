@@ -283,7 +283,10 @@ func (c *Core) RecoverOrphans(ctx context.Context) error {
 	defer c.recoverMu.Unlock()
 
 	records, listErr := c.journal.List()
-	errs := []error{listErr}
+	var errs []error
+	if listErr != nil {
+		errs = append(errs, listErr)
+	}
 	for _, record := range records {
 		c.mu.Lock()
 		_, active := c.sessions[record.SessionID]

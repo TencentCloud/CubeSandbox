@@ -12,34 +12,6 @@ import (
 	"time"
 )
 
-const (
-	CodeTargetNotFound    = "TARGET_NOT_FOUND"
-	CodeTargetNotRunning  = "TARGET_NOT_RUNNING"
-	CodeLimitExceeded     = "LIMIT_EXCEEDED"
-	CodeProtocolError     = "PROTOCOL_ERROR"
-	CodeShellNotFound     = "SHELL_NOT_FOUND"
-	CodeSlowProducer      = "SLOW_PRODUCER"
-	CodeSlowConsumer      = "SLOW_CONSUMER"
-	CodeSessionLost       = "SESSION_LOST"
-	CodeInternal          = "INTERNAL"
-	CodeServerDraining    = "SERVER_DRAINING"
-	CodeSandboxTransition = "SANDBOX_TRANSITION"
-)
-
-const (
-	CloseUserClosed        = "USER_CLOSED"
-	CloseIdleTimeout       = "IDLE_TIMEOUT"
-	CloseMaxLifetime       = "MAX_LIFETIME"
-	CloseSandboxTransition = "SANDBOX_TRANSITION"
-	CloseRuntimeExited     = "RUNTIME_EXITED"
-	CloseSessionLost       = "SESSION_LOST"
-	CloseProtocolError     = "PROTOCOL_ERROR"
-	CloseServerDraining    = "SERVER_DRAINING"
-	CloseSlowProducer      = "SLOW_PRODUCER"
-	CloseSlowConsumer      = "SLOW_CONSUMER"
-	CloseInternal          = "INTERNAL"
-)
-
 // State is the lifecycle state of one terminal session.
 type State string
 
@@ -268,13 +240,8 @@ func CodeOf(err error) string {
 }
 
 func sanitizeCloseReason(reason string) string {
-	switch reason {
-	case CloseUserClosed, CloseIdleTimeout, CloseMaxLifetime,
-		CloseSandboxTransition, CloseRuntimeExited, CloseSessionLost,
-		CloseProtocolError, CloseServerDraining, CloseSlowProducer, CloseSlowConsumer,
-		CloseInternal:
+	if _, ok := terminalCloseReasons[reason]; ok {
 		return reason
-	default:
-		return CloseUserClosed
 	}
+	return CloseUserClosed
 }
