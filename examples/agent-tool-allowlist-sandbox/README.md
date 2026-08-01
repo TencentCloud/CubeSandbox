@@ -2,8 +2,17 @@
 
 [中文文档](README_zh.md)
 
-Host argv tool allowlist + a BYOI image that ships a real **guest tool runner**
-(`cube-tool`) for [#645](https://github.com/TencentCloud/CubeSandbox/issues/645).
+[#645](https://github.com/TencentCloud/CubeSandbox/issues/645) **scenario template**:
+agent-host **tool argv policy** + a BYOI image with a real guest runner
+(`/usr/local/bin/cube-tool`). Same shelf as `network-policy` (egress) — a
+platform control-plane pattern users copy — not another language runtime.
+
+**Why a dedicated example (answer to [#1062](https://github.com/TencentCloud/CubeSandbox/pull/1062) close notes)**
+- Not a thin script on `sandbox-code`: this tree builds its **own** OCI image,
+  installs `cube-tool`, embeds `tool-profile.txt`, and verifies with
+  `verify_template.py` on a live cluster.
+- Not a second code-interpreter tutorial: the product is **host+guest tool
+  policy**, stacked with airgap / CIDR / pause / fan-out.
 
 **What you get**
 - Host refuses illegal tools before `Sandbox.create` / `commands.run`
@@ -11,13 +20,22 @@ Host argv tool allowlist + a BYOI image that ships a real **guest tool runner**
   + `/workspace` — guest re-checks the profile (not just a text file on disk)
 - Stacks with airgap, CIDR `allow_out`, pause/resume, and parallel sandboxes
 
-**What this is not:** kernel jail, bash-free base, or an LLM agent.
+**What this is not:** kernel jail, bash-free base, language runtime, or an LLM agent.
 
 ## Use cases
 
 - Agent hosts that should prefer `cube-tool <name> …` over raw `bash`/`curl`
 - Defense-in-depth: host allowlists `cube-tool`; guest refuses off-profile names
 - Differentiated stacks: checkpoint / egress / multi-sandbox fan-out
+
+## Resources
+
+| Item | Suggestion |
+|------|------------|
+| Writable layer | `--writable-layer-size 1G` (demos write under `/workspace`) |
+| Ports | expose/probe `49983` (envd from `cubesandbox-base`) |
+| Fan-out | keep `N≤2` on shared nodes |
+| CPU/mem | default template quotas are enough for echo/artifact demos |
 
 ## Prerequisites
 

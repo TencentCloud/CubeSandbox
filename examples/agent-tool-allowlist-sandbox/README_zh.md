@@ -2,8 +2,16 @@
 
 [English](README.md)
 
-宿主机 argv 工具白名单 + **带真实 guest 能力**的 BYOI 镜像（`cube-tool`），对应
-[#645](https://github.com/TencentCloud/CubeSandbox/issues/645)。
+[#645](https://github.com/TencentCloud/CubeSandbox/issues/645) **场景模板**：Agent
+宿主侧 **工具 argv 策略** + 带真实 guest runner（`/usr/local/bin/cube-tool`）的
+BYOI 镜像。与 `network-policy`（出口策略）同层——给用户可复制的平台控制面样例，
+而不是又一个语言运行时。
+
+**为何单独成例（回应 [#1062](https://github.com/TencentCloud/CubeSandbox/pull/1062) 关闭意见）**
+- 不是在 `sandbox-code` 上叠薄脚本：本目录自建 OCI 镜像、安装 `cube-tool`、嵌入
+  `tool-profile.txt`，并用 `verify_template.py` 在真集群冒烟。
+- 不是第二份代码解释器教程：交付物是 **宿主+guest 工具策略**，并可叠加断网 /
+  CIDR / pause / 扇出。
 
 **你会得到**
 - 宿主机在 `Sandbox.create` / `commands.run` 前拒绝非法工具
@@ -11,7 +19,16 @@
   会再校验工具名（不是只放一个文本文件）
 - 可叠加断网、CIDR `allow_out`、pause/resume、多沙箱扇出
 
-**这不是：** 内核级 jail、无 bash 基础镜像，或 LLM Agent。
+**这不是：** 内核级 jail、无 bash 基础镜像、语言运行时，或 LLM Agent。
+
+## 资源建议
+
+| 项 | 建议 |
+|----|------|
+| 可写层 | `--writable-layer-size 1G` |
+| 端口 | expose/probe `49983`（`cubesandbox-base` 的 envd） |
+| 扇出 | 共享节点上保持 `N≤2` |
+| CPU/内存 | 默认模板配额即可跑 echo/artifact 演示 |
 
 ## 快速开始
 
