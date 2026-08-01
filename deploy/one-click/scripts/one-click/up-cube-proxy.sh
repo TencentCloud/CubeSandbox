@@ -68,12 +68,16 @@ CUBE_PROXY_HTTP_PORT="${CUBE_PROXY_HTTP_PORT:-80}"
 CUBE_PROXY_GRPC_PORT="${CUBE_PROXY_GRPC_PORT:-9090}"
 CUBE_PROXY_SSL_CERT="${CUBE_PROXY_SSL_CERT:-cube.app+3.pem}"
 CUBE_PROXY_SSL_KEY="${CUBE_PROXY_SSL_KEY:-cube.app+3-key.pem}"
-# Address the /admin/* server (port 8082) binds to. Defaults to the node's
+# Address the /admin/* server binds to. Defaults to the node's
 # cluster-reachable IP so cube-lifecycle-manager (running on the control
 # node) can push meta / state updates here. Token auth via
 # $cube_admin_token below prevents outside abuse; operators may further
 # tighten this with iptables / security groups.
 CUBE_PROXY_ADMIN_LISTEN="${CUBE_PROXY_ADMIN_LISTEN:-${CUBE_SANDBOX_NODE_IP}}"
+# Port the /admin/* server binds to. cube-proxy uses host networking, so this
+# has to be free on the node; override it when something else already holds
+# 8082. Kept at 8082 by default for backward compatibility.
+CUBE_PROXY_ADMIN_PORT="${CUBE_PROXY_ADMIN_PORT:-8082}"
 
 # Address of cube-lifecycle-manager reachable from this cube-proxy replica.
 # Consumed by the Lua $cube_sidecar_addr variable used by the
@@ -93,8 +97,8 @@ CUBE_ADMIN_TOKEN="${CUBE_ADMIN_TOKEN:-}"
 # ── CubeProxy service registration for cube-lifecycle-manager discovery ──
 # Enabled by default now that CLM owns lifecycle coordination.
 CUBE_PROXY_REGISTRY_ENABLE="${CUBE_PROXY_REGISTRY_ENABLE:-1}"
-CUBE_PROXY_ID="${CUBE_PROXY_ID:-${CUBE_SANDBOX_NODE_IP}:8082}"
-CUBE_PROXY_ADMIN_URL="${CUBE_PROXY_ADMIN_URL:-http://${CUBE_SANDBOX_NODE_IP}:8082}"
+CUBE_PROXY_ID="${CUBE_PROXY_ID:-${CUBE_SANDBOX_NODE_IP}:${CUBE_PROXY_ADMIN_PORT}}"
+CUBE_PROXY_ADMIN_URL="${CUBE_PROXY_ADMIN_URL:-http://${CUBE_SANDBOX_NODE_IP}:${CUBE_PROXY_ADMIN_PORT}}"
 CUBE_PROXY_RESUME_URL="${CUBE_PROXY_RESUME_URL:-${CUBE_PROXY_ADMIN_URL}}"
 CUBE_PROXY_NODE_IP="${CUBE_PROXY_NODE_IP:-${CUBE_SANDBOX_NODE_IP}}"
 CUBE_PROXY_VERSION="${CUBE_PROXY_VERSION:-}"
@@ -176,6 +180,7 @@ render_template_atomic \
   -e "s/__CUBE_PROXY_HTTP_PORT__/$(escape_sed "${CUBE_PROXY_HTTP_PORT}")/g" \
   -e "s/__CUBE_PROXY_GRPC_PORT__/$(escape_sed "${CUBE_PROXY_GRPC_PORT}")/g" \
   -e "s/__CUBE_PROXY_ADMIN_LISTEN__/$(escape_sed "${CUBE_PROXY_ADMIN_LISTEN}")/g" \
+  -e "s/__CUBE_PROXY_ADMIN_PORT__/$(escape_sed "${CUBE_PROXY_ADMIN_PORT}")/g" \
   -e "s/__CUBE_PROXY_SSL_CERT__/$(escape_sed "${CUBE_PROXY_SSL_CERT}")/g" \
   -e "s/__CUBE_PROXY_SSL_KEY__/$(escape_sed "${CUBE_PROXY_SSL_KEY}")/g"
 
@@ -210,7 +215,7 @@ docker_rm_if_exists "${CUBE_PROXY_CONTAINER_NAME}"
 # cube-proxy uses network_mode: host, so HTTP/HTTPS ports must be free on the
 # host before we attempt to start the container; otherwise the failure mode is
 # a cryptic "address already in use" from nginx inside the container.
-for port in "${CUBE_PROXY_HTTP_PORT}" "${CUBE_PROXY_HTTPS_PORT}" "${CUBE_PROXY_GRPC_PORT}"; do
+for port in "${CUBE_PROXY_HTTP_PORT}" "${CUBE_PROXY_HTTPS_PORT}" "${CUBE_PROXY_GRPC_PORT}" "${CUBE_PROXY_ADMIN_PORT}"; do
   if command_output_contains_fixed_string "LISTEN" ss -lnt "( sport = :${port} )"; then
     die "port ${port} is already in use; cube-proxy uses host networking and requires it to be free"
   fi

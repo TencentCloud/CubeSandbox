@@ -153,15 +153,73 @@ test_cubeproxy_nginx_template_generation() {
     -e 's|^\(\s*listen \)8080\( ssl reuseport;\)|\1__CUBE_PROXY_HTTPS_PORT__\2|' \
     -e 's|^\(\s*set \$host_proxy_port \)8081;|\1__CUBE_PROXY_HTTP_PORT__;|' \
     -e 's|^\(\s*set \$host_proxy_port \)8080;|\1__CUBE_PROXY_HTTPS_PORT__;|' \
-    -e 's|^\(\s*listen \)127\.0\.0\.1:8082;|\1__CUBE_PROXY_ADMIN_LISTEN__:8082;|' \
+    -e 's|^\(\s*listen \)127\.0\.0\.1:8082;|\1__CUBE_PROXY_ADMIN_LISTEN__:__CUBE_PROXY_ADMIN_PORT__;|' \
     -e 's|/usr/local/openresty/nginx/certs/cube\.app+3\.pem|/usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_CERT__|' \
     -e 's|/usr/local/openresty/nginx/certs/cube\.app+3-key\.pem|/usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_KEY__|' \
     "${src}" >"${tmp}"
 
-  for token in __CUBE_PROXY_HTTP_PORT__ __CUBE_PROXY_HTTPS_PORT__ __CUBE_PROXY_ADMIN_LISTEN__ __CUBE_PROXY_SSL_CERT__ __CUBE_PROXY_SSL_KEY__; do
+  for token in __CUBE_PROXY_HTTP_PORT__ __CUBE_PROXY_HTTPS_PORT__ __CUBE_PROXY_ADMIN_LISTEN__ __CUBE_PROXY_ADMIN_PORT__ __CUBE_PROXY_SSL_CERT__ __CUBE_PROXY_SSL_KEY__; do
     grep -q -F "${token}" "${tmp}" || fail "cube-proxy nginx template generation is missing ${token}; CubeProxy/nginx.conf may have changed"
   done
+
+  # Round-trip the second half too: bundle-time templating is only useful if
+  # install-time substitution (up-cube-proxy.sh) renders a real listen
+  # directive from it. Use a non-default admin port so a regression that
+  # reintroduces a hardcoded 8082 fails here.
+  local rendered
+  rendered="$(sed \
+    -e 's/__CUBE_PROXY_ADMIN_LISTEN__/10.0.0.7/g' \
+    -e 's/__CUBE_PROXY_ADMIN_PORT__/9082/g' \
+    "${tmp}")"
+  grep -q -F 'listen 10.0.0.7:9082;' <<<"${rendered}" \
+    || fail "rendering the nginx template with CUBE_PROXY_ADMIN_PORT=9082 did not produce 'listen 10.0.0.7:9082;'"
+  # Match the listen directive specifically — nginx.conf also mentions the
+  # default admin address in a comment, which is not a binding.
+  if grep -q -E '^[[:space:]]*listen[[:space:]]+127\.0\.0\.1:8082;' <<<"${rendered}"; then
+    fail "rendered nginx.conf still binds the admin listener to a hardcoded 127.0.0.1:8082"
+  fi
+
   rm -f "${tmp}"
+}
+
+# 3c-bis) CubeProxy runs with host networking, so its admin listener must be
+#     movable off 8082 the same way the HTTP/HTTPS/gRPC ports already are.
+#     A hardcoded 8082 makes the whole control target fail to start with a
+#     bare "bind() ... (98: Address in use)" whenever anything else on the
+#     node holds that port. The generated nginx template, the discovery URLs
+#     CLM reads, the pre-start port check and the systemd postcheck must all
+#     agree on one configurable value.
+test_cubeproxy_admin_port_configurable() {
+  local postcheck="${ONE_CLICK_DIR}/scripts/systemd/cube-proxy-postcheck.sh"
+
+  grep -q -E 'CUBE_PROXY_ADMIN_PORT="\$\{CUBE_PROXY_ADMIN_PORT:-8082\}"' "${CUBE_PROXY_UP}" \
+    || fail "up-cube-proxy.sh does not define CUBE_PROXY_ADMIN_PORT with a backward-compatible 8082 default"
+
+  grep -q -F '__CUBE_PROXY_ADMIN_PORT__' "${CUBE_PROXY_UP}" \
+    || fail "up-cube-proxy.sh does not substitute the __CUBE_PROXY_ADMIN_PORT__ nginx placeholder"
+
+  # The discovery endpoints CLM resolves must follow the configured port,
+  # otherwise a moved admin listener registers an unreachable admin_url.
+  grep -q -F 'CUBE_PROXY_ID="${CUBE_PROXY_ID:-${CUBE_SANDBOX_NODE_IP}:${CUBE_PROXY_ADMIN_PORT}}"' "${CUBE_PROXY_UP}" \
+    || fail "CUBE_PROXY_ID still hardcodes the admin port"
+  grep -q -F 'CUBE_PROXY_ADMIN_URL="${CUBE_PROXY_ADMIN_URL:-http://${CUBE_SANDBOX_NODE_IP}:${CUBE_PROXY_ADMIN_PORT}}"' "${CUBE_PROXY_UP}" \
+    || fail "CUBE_PROXY_ADMIN_URL still hardcodes the admin port"
+
+  # Pre-start conflict detection: the admin port must be checked alongside
+  # the public ports so a conflict dies with a clear message here instead of
+  # inside the container.
+  grep -q -F '"${CUBE_PROXY_HTTP_PORT}" "${CUBE_PROXY_HTTPS_PORT}" "${CUBE_PROXY_GRPC_PORT}" "${CUBE_PROXY_ADMIN_PORT}"' "${CUBE_PROXY_UP}" \
+    || fail "up-cube-proxy.sh does not preflight the admin port for conflicts"
+
+  [[ -f "${postcheck}" ]] || { fail "cube-proxy postcheck missing: ${postcheck}"; return; }
+  grep -q -F 'CUBE_PROXY_ADMIN_PORT' "${postcheck}" \
+    || fail "cube-proxy-postcheck.sh does not verify the admin listener came up"
+
+  grep -q -F 'CUBE_PROXY_ADMIN_PORT' "${ONE_CLICK_DIR}/env.example" \
+    || fail "env.example does not document CUBE_PROXY_ADMIN_PORT"
+
+  grep -q -F '__CUBE_PROXY_ADMIN_PORT__' "${BUNDLE_SH}" \
+    || fail "build-release-bundle.sh does not emit the __CUBE_PROXY_ADMIN_PORT__ placeholder"
 }
 
 # 3d) one-click cube-proxy logs must use the same host-visible /data/log
@@ -271,6 +329,7 @@ test_component_build_inputs_exist
 test_image_names_match
 test_webui_nginx_placeholders
 test_cubeproxy_nginx_template_generation
+test_cubeproxy_admin_port_configurable
 test_cubeproxy_host_log_wiring
 test_tke_addons_network_config_key
 test_reinstall_cleanup_tracks_packaged_components
