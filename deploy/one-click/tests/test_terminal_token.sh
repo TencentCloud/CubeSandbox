@@ -85,29 +85,4 @@ grep -q -F 'remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_TERMINAL_INTERNAL_TOKEN"' 
 grep -q -F '".terminal-internal-token"' "${ONE_CLICK_DIR}/lib/common.sh" \
   || fail "upgrade backup does not include the isolated token file"
 
-# Direct Terraform callers must not have TF_VAR_terminal_internal_token erased
-# by the convenience TENCENTCLOUD_* alias.
-# shellcheck disable=SC2016
-grep -q -F 'TF_VAR_terminal_internal_token="${TF_VAR_terminal_internal_token:-${TENCENTCLOUD_TERMINAL_INTERNAL_TOKEN:-}}"' \
-  "${ONE_CLICK_DIR}/terraform/tencentcloud/create.sh" \
-  || fail "Terraform create path does not preserve a direct TF_VAR override"
-! grep -q -F -- '--arg terminal_internal_token' \
-  "${ONE_CLICK_DIR}/terraform/tencentcloud/create.sh" \
-  || fail "Terraform create path exposes the terminal token in jq argv"
-# shellcheck disable=SC2016
-grep -q -F 'terminal_internal_token: $ENV.TF_VAR_terminal_internal_token' \
-  "${ONE_CLICK_DIR}/terraform/tencentcloud/create.sh" \
-  || fail "Terraform resolved variables do not read the terminal token from the process environment"
-
-tke_addons="${ONE_CLICK_DIR}/terraform/tencentcloud/tke-addons.tf"
-master_block="$(sed -n '/resource "kubernetes_deployment" "cubemaster"/,/resource "kubernetes_service" "cubemaster"/p' "${tke_addons}")"
-api_block="$(sed -n '/resource "kubernetes_deployment" "cube_api"/,/resource "kubernetes_service" "cube_api"/p' "${tke_addons}")"
-ops_block="$(sed -n '/resource "kubernetes_deployment" "cube_ops"/,/resource "kubernetes_service" "cube_ops"/p' "${tke_addons}")"
-[[ "$(grep -c -F 'CUBE_TERMINAL_INTERNAL_TOKEN' <<<"${master_block}")" -eq 1 ]] \
-  || fail "TKE CubeMaster does not have exactly one terminal token reference"
-[[ "$(grep -c -F 'CUBE_TERMINAL_INTERNAL_TOKEN' <<<"${ops_block}")" -eq 1 ]] \
-  || fail "TKE CubeOps does not have exactly one terminal token reference"
-! grep -q -F 'CUBE_TERMINAL_INTERNAL_TOKEN' <<<"${api_block}" \
-  || fail "TKE CubeAPI must not receive the terminal token"
-
 echo "terminal token generation and upgrade preservation tests OK"

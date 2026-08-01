@@ -357,32 +357,6 @@ cubeOps:
       failureThreshold: 6
   resources: {}
 
-# Web Terminal gateway defaults and the shared CubeOps -> CubeMaster relay
-# credential. Additional trusted origins must be exact http(s) origins without
-# paths. Same-origin Dashboard requests do not need an allowedOrigins entry.
-terminal:
-  enabled: true
-  allowedOrigins: []
-  grantTTLSeconds: 60
-  handshakeTimeoutSeconds: 10
-  pingIntervalSeconds: 20
-  pongTimeoutSeconds: 10
-  writeDeadlineSeconds: 10
-  idleTimeoutMinutes: 30
-  maxLifetimeHours: 8
-  reconnectGraceSeconds: 30
-  replayBufferBytes: 262144
-  maxFrameBytes: 65536
-  stdinQueueFrames: 8
-  stdoutPendingBytes: 262144
-  maxSessionsPerUser: 5
-  maxSessionsPerReplica: 200
-  drainTimeoutSeconds: 30
-  # By default the chart creates a Secret and reuses it across upgrades. Set
-  # existingSecret to reference an operator-managed Secret instead.
-  existingSecret: ""
-  secretKey: internal-token
-
 lifecycleManager:
   # Standalone sandbox auto-pause / auto-resume coordinator. Replaces the
   # obsolete in-process cube-proxy-sidecar. Enabled by default when CubeProxy

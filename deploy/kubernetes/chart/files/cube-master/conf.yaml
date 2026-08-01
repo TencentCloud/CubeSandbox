@@ -31,14 +31,6 @@ cubelet_conf:
 auth:
   enable: false
 
-terminal:
-  # CUBE_TERMINAL_INTERNAL_TOKEN overrides this empty value in both Helm and
-  # one-click deployments. Empty keeps the internal relay disabled.
-  internal_token: ""
-  max_frame_bytes: 65536
-  write_deadline_seconds: 10
-  close_timeout_seconds: 15
-
 req_template_conf:
   whitelist_req_tag:
     WorkingDir: true

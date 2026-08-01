@@ -42,27 +42,9 @@ Web 终端可以从 CubeSandbox 控制台为运行中的沙箱容器打开交互
 
 ## 配置参考
 
-一键部署在 `deploy/one-click/env.example` 中提供以下变量。Helm 部署在 `deploy/kubernetes/chart/values.yaml` 的 `terminal` 下提供等价配置。
+Web Terminal 运行时默认值由 `CubeOps/internal/config/config.go` 统一维护，部署层不再重复这些数值。部署环境没有显式覆盖时，CubeOps 使用程序内置默认值；管理员确有需要时，可以在 `.one-click.env` 中加入受支持的 `CUBE_TERMINAL_*` 环境变量，单独覆盖相应设置。
 
-| 环境变量 | Helm value | 默认值 | 含义 |
-| --- | --- | --- | --- |
-| `CUBE_TERMINAL_ENABLED` | `terminal.enabled` | `true` | shared internal token 存在时启用终端 grant 和 WebSocket 网关。 |
-| `CUBE_TERMINAL_ALLOWED_ORIGINS` | `terminal.allowedOrigins` | 空 | 额外受信任的精确 `http://` 或 `https://` Origin。同源控制台无需加入列表。 |
-| `CUBE_TERMINAL_GRANT_TTL_SECONDS` | `terminal.grantTTLSeconds` | `60` | 未消费的一次性 grant 有效期；超过 60 的值会被拒绝。 |
-| `CUBE_TERMINAL_HANDSHAKE_TIMEOUT_SECONDS` | `terminal.handshakeTimeoutSeconds` | `10` | 建立终端 relay 的最长时间。 |
-| `CUBE_TERMINAL_PING_INTERVAL_SECONDS` | `terminal.pingIntervalSeconds` | `20` | WebSocket ping 间隔。 |
-| `CUBE_TERMINAL_PONG_TIMEOUT_SECONDS` | `terminal.pongTimeoutSeconds` | `10` | ping 后等待传输存活响应的时间。 |
-| `CUBE_TERMINAL_WRITE_DEADLINE_SECONDS` | `terminal.writeDeadlineSeconds` | `10` | 慢终端消费者的单次写入 deadline。 |
-| `CUBE_TERMINAL_IDLE_TIMEOUT_MINUTES` | `terminal.idleTimeoutMinutes` | `30` | 用户空闲超时。只有 stdin 会重置；输出、resize、ping 和 pong 都不会重置。 |
-| `CUBE_TERMINAL_MAX_LIFETIME_HOURS` | `terminal.maxLifetimeHours` | `8` | Shell 的绝对最长生命周期，包括持续活跃的 Shell。 |
-| `CUBE_TERMINAL_RECONNECT_GRACE_SECONDS` | `terminal.reconnectGraceSeconds` | `30` | detached 恢复窗口；设为 `0` 可关闭恢复。 |
-| `CUBE_TERMINAL_REPLAY_BUFFER_BYTES` | `terminal.replayBufferBytes` | `262144` | 为恢复保留在内存中的最大输出（256 KiB）。 |
-| `CUBE_TERMINAL_MAX_FRAME_BYTES` | `terminal.maxFrameBytes` | `65536` | WebSocket 入站帧上限（64 KiB）。 |
-| `CUBE_TERMINAL_STDIN_QUEUE_FRAMES` | `terminal.stdinQueueFrames` | `8` | 有界 stdin 队列深度。 |
-| `CUBE_TERMINAL_STDOUT_PENDING_BYTES` | `terminal.stdoutPendingBytes` | `262144` | 触发慢消费者处理前允许等待的 stdout 上限（256 KiB）。 |
-| `CUBE_TERMINAL_MAX_SESSIONS_PER_USER` | `terminal.maxSessionsPerUser` | `5` | 单个用户允许的活跃会话数。 |
-| `CUBE_TERMINAL_MAX_SESSIONS_PER_REPLICA` | `terminal.maxSessionsPerReplica` | `200` | 单个 CubeOps 副本允许的活跃连接数。 |
-| `CUBE_TERMINAL_DRAIN_TIMEOUT_SECONDS` | `terminal.drainTimeoutSeconds` | `30` | CubeOps 优雅停止窗口。 |
+例如，`CUBE_TERMINAL_ALLOWED_ORIGINS` 可以填写用逗号分隔的额外受信任精确 `http://` 或 `https://` Origin。同源控制台不需要配置。其他参数应保持缺省，除非运维人员有明确的覆盖理由。
 
 Cubelet 还会执行内置限额：每节点 100 个会话、每沙箱 10 个会话、每容器 5 个会话。浏览器无法提高这些限额。
 
@@ -71,8 +53,7 @@ Cubelet 还会执行内置限额：每节点 100 个会话、每沙箱 10 个会
 CubeOps 和 CubeMaster 必须收到同一个 `CUBE_TERMINAL_INTERNAL_TOKEN`。
 
 - 一键部署在 `CUBE_TERMINAL_INTERNAL_TOKEN` 为空时生成 token，将其移动到 `/usr/local/services/cubetoolbox/.terminal-internal-token`，要求 root 所有且权限为 `0400` 或 `0600`，并从共享 runtime env 中删除。
-- Helm 默认创建并在升级时复用 Secret。使用外部控制面等场景，应通过 `terminal.existingSecret` 和 `terminal.secretKey` 引用运维方管理的 Secret。
-- Terraform 接受 `TENCENTCLOUD_TERMINAL_INTERNAL_TOKEN`，留空则自动生成。生成的 `.env`、resolved variables 和 Terraform state 必须使用权限控制、加密存储和受限 backend 访问保护。
+- 本次变更不提供 Helm/Kubernetes 或 Terraform/TKE 的 terminal token wiring。将来增加这些部署模式时，应通过其既有 secret 管理流程向 CubeOps 和 CubeMaster 提供同一个 token。
 
 不得把该 token 放进命令参数、URL、日志、截图或提交到仓库的 values 文件。
 
@@ -98,11 +79,7 @@ CubeOps 和 CubeMaster 必须收到同一个 `CUBE_TERMINAL_INTERNAL_TOKEN`。
 
 ### WebSocket 没有返回 101
 
-三份 nginx 源都必须包含精确终端 location、Upgrade/Connection 头、`Host $http_host`、关闭 buffering，以及 7200 秒 read timeout：
-
-1. 一键部署：`deploy/one-click/webui/nginx.conf`。线上生成文件为 `/usr/local/services/cubetoolbox/webui/nginx.generated.conf`。
-2. Helm：`deploy/kubernetes/chart/templates/_helpers.tpl`，渲染到 WebUI ConfigMap。
-3. Terraform：`deploy/one-click/terraform/tencentcloud/tke-addons.tf`；`create.sh` 通常先把一键部署 canonical 模板复制为 `webui-nginx.conf`，再渲染 `cube-webui-nginx-conf` ConfigMap。
+一键部署 nginx 源 `deploy/one-click/webui/nginx.conf` 必须包含精确终端 location、Upgrade/Connection 头、`Host $http_host`、关闭 buffering，以及 7200 秒 read timeout。线上生成文件为 `/usr/local/services/cubetoolbox/webui/nginx.generated.conf`。
 
 普通 `/opsapi/` REST location 应继续使用 300 秒 timeout，并保留现有 `/sandbox/` WebSocket 路由。health 或 REST 请求成功，并不能证明终端 upgrade 头和长连接 timeout 已生效。
 

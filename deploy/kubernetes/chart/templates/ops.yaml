@@ -64,45 +64,6 @@ spec:
             {{- end }}
             - name: CUBE_API_SANDBOX_DOMAIN
               value: {{ default .Values.cubeProxy.domain .Values.cubeOps.sandboxDomain | quote }}
-            - name: CUBE_TERMINAL_ENABLED
-              value: {{ .Values.terminal.enabled | quote }}
-            - name: CUBE_TERMINAL_ALLOWED_ORIGINS
-              value: {{ join "," .Values.terminal.allowedOrigins | quote }}
-            - name: CUBE_TERMINAL_GRANT_TTL_SECONDS
-              value: {{ .Values.terminal.grantTTLSeconds | quote }}
-            - name: CUBE_TERMINAL_HANDSHAKE_TIMEOUT_SECONDS
-              value: {{ .Values.terminal.handshakeTimeoutSeconds | quote }}
-            - name: CUBE_TERMINAL_PING_INTERVAL_SECONDS
-              value: {{ .Values.terminal.pingIntervalSeconds | quote }}
-            - name: CUBE_TERMINAL_PONG_TIMEOUT_SECONDS
-              value: {{ .Values.terminal.pongTimeoutSeconds | quote }}
-            - name: CUBE_TERMINAL_WRITE_DEADLINE_SECONDS
-              value: {{ .Values.terminal.writeDeadlineSeconds | quote }}
-            - name: CUBE_TERMINAL_IDLE_TIMEOUT_MINUTES
-              value: {{ .Values.terminal.idleTimeoutMinutes | quote }}
-            - name: CUBE_TERMINAL_MAX_LIFETIME_HOURS
-              value: {{ .Values.terminal.maxLifetimeHours | quote }}
-            - name: CUBE_TERMINAL_RECONNECT_GRACE_SECONDS
-              value: {{ .Values.terminal.reconnectGraceSeconds | quote }}
-            - name: CUBE_TERMINAL_REPLAY_BUFFER_BYTES
-              value: {{ .Values.terminal.replayBufferBytes | quote }}
-            - name: CUBE_TERMINAL_MAX_FRAME_BYTES
-              value: {{ .Values.terminal.maxFrameBytes | quote }}
-            - name: CUBE_TERMINAL_STDIN_QUEUE_FRAMES
-              value: {{ .Values.terminal.stdinQueueFrames | quote }}
-            - name: CUBE_TERMINAL_STDOUT_PENDING_BYTES
-              value: {{ .Values.terminal.stdoutPendingBytes | quote }}
-            - name: CUBE_TERMINAL_MAX_SESSIONS_PER_USER
-              value: {{ .Values.terminal.maxSessionsPerUser | quote }}
-            - name: CUBE_TERMINAL_MAX_SESSIONS_PER_REPLICA
-              value: {{ .Values.terminal.maxSessionsPerReplica | quote }}
-            - name: CUBE_TERMINAL_DRAIN_TIMEOUT_SECONDS
-              value: {{ .Values.terminal.drainTimeoutSeconds | quote }}
-            - name: CUBE_TERMINAL_INTERNAL_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "cube.terminalSecretName" . }}
-                  key: {{ .Values.terminal.secretKey }}
             # Shared CubeDB with CubeMaster; skip fingerprint so chart upgrades
             # do not fail when Master already applied the same migrations.
             - name: CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK

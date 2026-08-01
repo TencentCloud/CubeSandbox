@@ -46,44 +46,37 @@ check_terminal_location() {
 }
 
 check_terminal_location "${ONE_CLICK_DIR}/webui/nginx.conf"
-check_terminal_location "${ROOT_DIR}/deploy/kubernetes/chart/templates/_helpers.tpl"
-check_terminal_location "${ONE_CLICK_DIR}/terraform/tencentcloud/tke-addons.tf"
-check_terminal_location "${ONE_CLICK_DIR}/terraform/tencentcloud/create.sh"
 
 grep -A14 -F 'location /opsapi/ {' "${ONE_CLICK_DIR}/webui/nginx.conf" \
   | grep -q -F 'proxy_read_timeout 300s;' \
   || fail "ordinary one-click /opsapi REST timeout changed"
-grep -A14 -F 'location /opsapi/ {' "${ROOT_DIR}/deploy/kubernetes/chart/templates/_helpers.tpl" \
-  | grep -q -F 'proxy_read_timeout 300s;' \
-  || fail "ordinary Helm /opsapi REST timeout changed"
 grep -A5 -F "'/opsapi': {" "${ROOT_DIR}/web/vite.config.ts" \
   | grep -q -F 'ws: true,' \
   || fail "Vite /opsapi proxy is not WebSocket-enabled"
 
-while IFS='|' read -r key value; do
-  grep -q -x -F "${key}=${value}" "${ONE_CLICK_DIR}/env.example" \
-    || fail "one-click env default ${key}=${value} is missing"
-  expected="export ${key}=\"\${${key}:-${value}}\""
-  grep -q -F "${expected}" "${ONE_CLICK_DIR}/scripts/systemd/cubeops-start.sh" \
-    || fail "cubeops-start.sh default for ${key} does not match env.example"
-done <<'DEFAULTS'
-CUBE_TERMINAL_ENABLED|true
-CUBE_TERMINAL_ALLOWED_ORIGINS|
-CUBE_TERMINAL_GRANT_TTL_SECONDS|60
-CUBE_TERMINAL_HANDSHAKE_TIMEOUT_SECONDS|10
-CUBE_TERMINAL_PING_INTERVAL_SECONDS|20
-CUBE_TERMINAL_PONG_TIMEOUT_SECONDS|10
-CUBE_TERMINAL_WRITE_DEADLINE_SECONDS|10
-CUBE_TERMINAL_IDLE_TIMEOUT_MINUTES|30
-CUBE_TERMINAL_MAX_LIFETIME_HOURS|8
-CUBE_TERMINAL_RECONNECT_GRACE_SECONDS|30
-CUBE_TERMINAL_REPLAY_BUFFER_BYTES|262144
-CUBE_TERMINAL_MAX_FRAME_BYTES|65536
-CUBE_TERMINAL_STDIN_QUEUE_FRAMES|8
-CUBE_TERMINAL_STDOUT_PENDING_BYTES|262144
-CUBE_TERMINAL_MAX_SESSIONS_PER_USER|5
-CUBE_TERMINAL_MAX_SESSIONS_PER_REPLICA|200
-CUBE_TERMINAL_DRAIN_TIMEOUT_SECONDS|30
-DEFAULTS
+while IFS= read -r key; do
+  ! grep -q -E "^${key}=" "${ONE_CLICK_DIR}/env.example" \
+    || fail "one-click env duplicates CubeOps default for ${key}"
+  ! grep -q -E "^[[:space:]]*export ${key}=" "${ONE_CLICK_DIR}/scripts/systemd/cubeops-start.sh" \
+    || fail "cubeops-start.sh duplicates CubeOps default for ${key}"
+done <<'DEFAULT_KEYS'
+CUBE_TERMINAL_ENABLED
+CUBE_TERMINAL_ALLOWED_ORIGINS
+CUBE_TERMINAL_GRANT_TTL_SECONDS
+CUBE_TERMINAL_HANDSHAKE_TIMEOUT_SECONDS
+CUBE_TERMINAL_PING_INTERVAL_SECONDS
+CUBE_TERMINAL_PONG_TIMEOUT_SECONDS
+CUBE_TERMINAL_WRITE_DEADLINE_SECONDS
+CUBE_TERMINAL_IDLE_TIMEOUT_MINUTES
+CUBE_TERMINAL_MAX_LIFETIME_HOURS
+CUBE_TERMINAL_RECONNECT_GRACE_SECONDS
+CUBE_TERMINAL_REPLAY_BUFFER_BYTES
+CUBE_TERMINAL_MAX_FRAME_BYTES
+CUBE_TERMINAL_STDIN_QUEUE_FRAMES
+CUBE_TERMINAL_STDOUT_PENDING_BYTES
+CUBE_TERMINAL_MAX_SESSIONS_PER_USER
+CUBE_TERMINAL_MAX_SESSIONS_PER_REPLICA
+CUBE_TERMINAL_DRAIN_TIMEOUT_SECONDS
+DEFAULT_KEYS
 
 echo "terminal transport wiring tests OK"

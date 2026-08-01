@@ -42,27 +42,9 @@ Normal close, shell exit, sandbox pause/stop, idle timeout, maximum lifetime, an
 
 ## Configuration Reference
 
-One-click deployments expose the variables in `deploy/one-click/env.example`. Helm deployments expose equivalent values under `terminal` in `deploy/kubernetes/chart/values.yaml`.
+CubeOps owns the Web Terminal runtime defaults in `CubeOps/internal/config/config.go`. The deployment layer intentionally does not repeat those values. When no deployment override is present, CubeOps uses its built-in defaults; an administrator can add a supported `CUBE_TERMINAL_*` variable to `.one-click.env` to override a specific setting.
 
-| Environment variable | Helm value | Default | Meaning |
-| --- | --- | --- | --- |
-| `CUBE_TERMINAL_ENABLED` | `terminal.enabled` | `true` | Enables terminal grants and the WebSocket gateway when the shared internal token is present. |
-| `CUBE_TERMINAL_ALLOWED_ORIGINS` | `terminal.allowedOrigins` | empty | Additional exact trusted `http://` or `https://` origins. Same-origin Dashboard requests are accepted without an entry. |
-| `CUBE_TERMINAL_GRANT_TTL_SECONDS` | `terminal.grantTTLSeconds` | `60` | Lifetime of an unconsumed one-time grant; values above 60 are rejected. |
-| `CUBE_TERMINAL_HANDSHAKE_TIMEOUT_SECONDS` | `terminal.handshakeTimeoutSeconds` | `10` | Maximum time allowed to establish the terminal relay. |
-| `CUBE_TERMINAL_PING_INTERVAL_SECONDS` | `terminal.pingIntervalSeconds` | `20` | WebSocket ping interval. |
-| `CUBE_TERMINAL_PONG_TIMEOUT_SECONDS` | `terminal.pongTimeoutSeconds` | `10` | Time to wait for transport liveness after a ping. |
-| `CUBE_TERMINAL_WRITE_DEADLINE_SECONDS` | `terminal.writeDeadlineSeconds` | `10` | Per-write deadline for a slow terminal consumer. |
-| `CUBE_TERMINAL_IDLE_TIMEOUT_MINUTES` | `terminal.idleTimeoutMinutes` | `30` | User idle timeout. Only stdin resets it; output, resize, ping, and pong do not. |
-| `CUBE_TERMINAL_MAX_LIFETIME_HOURS` | `terminal.maxLifetimeHours` | `8` | Absolute lifetime of a shell, including active shells. |
-| `CUBE_TERMINAL_RECONNECT_GRACE_SECONDS` | `terminal.reconnectGraceSeconds` | `30` | Detached resume window. Set to `0` to disable resume. |
-| `CUBE_TERMINAL_REPLAY_BUFFER_BYTES` | `terminal.replayBufferBytes` | `262144` | Maximum detached output retained in memory for replay (256 KiB). |
-| `CUBE_TERMINAL_MAX_FRAME_BYTES` | `terminal.maxFrameBytes` | `65536` | Maximum inbound WebSocket frame size (64 KiB). |
-| `CUBE_TERMINAL_STDIN_QUEUE_FRAMES` | `terminal.stdinQueueFrames` | `8` | Bounded stdin queue depth. |
-| `CUBE_TERMINAL_STDOUT_PENDING_BYTES` | `terminal.stdoutPendingBytes` | `262144` | Maximum pending stdout before slow-consumer handling (256 KiB). |
-| `CUBE_TERMINAL_MAX_SESSIONS_PER_USER` | `terminal.maxSessionsPerUser` | `5` | Active sessions allowed for one user. |
-| `CUBE_TERMINAL_MAX_SESSIONS_PER_REPLICA` | `terminal.maxSessionsPerReplica` | `200` | Active connections allowed for one CubeOps replica. |
-| `CUBE_TERMINAL_DRAIN_TIMEOUT_SECONDS` | `terminal.drainTimeoutSeconds` | `30` | Graceful CubeOps shutdown window. |
+For example, `CUBE_TERMINAL_ALLOWED_ORIGINS` accepts a comma-separated list of additional exact trusted `http://` or `https://` origins. The same-origin Dashboard does not require an entry. Keep all other settings absent unless an operator has an explicit reason to override the application default.
 
 Cubelet also enforces built-in limits of 100 sessions per node, 10 per sandbox, and 5 per container. The browser cannot raise these limits.
 
@@ -71,8 +53,7 @@ Cubelet also enforces built-in limits of 100 sessions per node, 10 per sandbox, 
 CubeOps and CubeMaster must receive the same `CUBE_TERMINAL_INTERNAL_TOKEN`.
 
 - One-click generates the token when `CUBE_TERMINAL_INTERNAL_TOKEN` is empty, moves it to `/usr/local/services/cubetoolbox/.terminal-internal-token`, requires root ownership with mode `0400` or `0600`, and removes it from the shared runtime environment file.
-- Helm creates and reuses a Secret by default. Set `terminal.existingSecret` and `terminal.secretKey` to use an operator-managed Secret, especially with an external control plane.
-- Terraform accepts `TENCENTCLOUD_TERMINAL_INTERNAL_TOKEN` or generates a value. Protect the generated `.env`, resolved variables, and Terraform state with mode restrictions, encrypted storage, and limited backend access.
+- This change does not add Helm/Kubernetes or Terraform/TKE terminal-token wiring. Those deployment modes must supply the same token to CubeOps and CubeMaster through their existing secret-management process if support is added later.
 
 Never place the token in a command argument, URL, log, screenshot, or committed values file.
 
@@ -98,11 +79,7 @@ Confirm that both the sandbox and target container are running. A paused target 
 
 ### The WebSocket does not return 101
 
-All three nginx sources must contain the exact terminal location, Upgrade/Connection headers, `Host $http_host`, disabled buffering, and a 7200-second read timeout:
-
-1. One-click: `deploy/one-click/webui/nginx.conf`. The live generated file is `/usr/local/services/cubetoolbox/webui/nginx.generated.conf`.
-2. Helm: `deploy/kubernetes/chart/templates/_helpers.tpl`, rendered into the WebUI ConfigMap.
-3. Terraform: `deploy/one-click/terraform/tencentcloud/tke-addons.tf`; `create.sh` normally copies the canonical one-click template to `webui-nginx.conf` before rendering the `cube-webui-nginx-conf` ConfigMap.
+The one-click nginx source at `deploy/one-click/webui/nginx.conf` must contain the exact terminal location, Upgrade/Connection headers, `Host $http_host`, disabled buffering, and a 7200-second read timeout. The live generated file is `/usr/local/services/cubetoolbox/webui/nginx.generated.conf`.
 
 Keep the ordinary `/opsapi/` REST location at its 300-second timeout and preserve the existing `/sandbox/` WebSocket route. A successful health or REST request does not prove that the terminal upgrade headers and long timeout are active.
 
