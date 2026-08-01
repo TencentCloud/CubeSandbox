@@ -169,6 +169,7 @@ export default withMermaid(defineConfig({
               text: 'Operations',
               items: [
                 { text: 'WebUI Dashboard', link: '/guide/webui' },
+                { text: 'Web Terminal', link: '/guide/web-terminal' },
                 { text: 'Service Management & Logs', link: '/guide/service-management' },
                 { text: 'Node Isolation', link: '/guide/node-isolation' },
                 { text: 'Sandbox Logs', link: '/guide/sandbox-logs' },
@@ -318,6 +319,7 @@ export default withMermaid(defineConfig({
               text: '安全与运维',
               items: [
                 { text: 'WebUI 控制台', link: '/zh/guide/webui' },
+                { text: 'Web 终端', link: '/zh/guide/web-terminal' },
                 { text: '服务管理与日志', link: '/zh/guide/service-management' },
                 { text: '隔离节点', link: '/zh/guide/node-isolation' },
                 { text: '沙箱日志', link: '/zh/guide/sandbox-logs' },
