@@ -5,13 +5,25 @@
 
 local _M = {}
 
+local ROUTE_CACHE_SUFFIXES = {
+    "meta_cached",
+    "HostIP",
+    "SandboxIP",
+    "CreatedAt",
+    "AllowPublicTraffic",
+    "TrafficAccessToken",
+    "MaskRequestHost",
+}
+
 local function cache_dict()
     return ngx.shared.local_cache
 end
 
--- delete_sandbox removes every local_cache entry belonging to sandbox_id.
--- Returns the number of keys deleted. Safe when the dict is missing.
-function _M.delete_sandbox(sandbox_id)
+-- Invalidate the cache-hit sentinel first, then remove the fixed route metadata
+-- mirrored from Redis. Dynamic per-port entries are intentionally left to their
+-- existing TTL so invalidation stays bounded and never scans the shared dict.
+-- Returns the number of fixed keys that existed. Safe when the dict is missing.
+function _M.invalidate_sandbox(sandbox_id)
     if type(sandbox_id) ~= "string" or sandbox_id == "" then
         return 0
     end
@@ -20,23 +32,14 @@ function _M.delete_sandbox(sandbox_id)
         return 0
     end
 
-    local prefix = sandbox_id .. ":"
     local deleted = 0
-    -- get_keys(0) returns at most 1024 keys; loop until a pass finds none
-    -- matching this sandbox so large dicts still converge.
-    for _ = 1, 32 do
-        local keys = cache:get_keys(0)
-        local n = 0
-        for _, k in ipairs(keys) do
-            if type(k) == "string" and k:sub(1, #prefix) == prefix then
-                cache:delete(k)
-                deleted = deleted + 1
-                n = n + 1
-            end
+    local prefix = sandbox_id .. ":"
+    for _, suffix in ipairs(ROUTE_CACHE_SUFFIXES) do
+        local key = prefix .. suffix
+        if cache:get(key) ~= nil then
+            deleted = deleted + 1
         end
-        if n == 0 then
-            break
-        end
+        cache:delete(key)
     end
     return deleted
 end

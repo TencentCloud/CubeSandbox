@@ -111,11 +111,6 @@ local function load_sandbox_proxy_metadata(ins_id)
             last_err = err
         elseif value and #value > 0 then
             return value, nil
-        else
-            -- This Redis command succeeded but the key is empty/missing. Clear
-            -- any previous key's transport error so the final result is a
-            -- truthful "not found" instead of a stale connectivity error.
-            last_err = nil
         end
     end
 
@@ -123,8 +118,7 @@ local function load_sandbox_proxy_metadata(ins_id)
         return nil, string.format("request %s using keys for %s get redis err: %s",
             ngx.var.http_x_cube_request_id, ins_id, last_err)
     end
-    return nil, string.format("request %s using keys for %s get redis nil",
-        ngx.var.http_x_cube_request_id, ins_id)
+    return nil, nil
 end
 
 --[[
@@ -177,6 +171,12 @@ function _M.resolve_backend(ins_id, container_port)
     if err then
         ngx.log(ngx.ERR, "LEVEL_ERROR||", err)
         utils:respond_unavailable()
+    end
+    if not metadata then
+        ngx.log(ngx.WARN, "LEVEL_WARN||",
+            string.format("request %s using instance %s has no Redis route",
+                ngx.var.http_x_cube_request_id, ins_id))
+        utils:respond_not_found()
     end
 
     cache:set(ins_id .. ":meta_cached", "1", timeout)
