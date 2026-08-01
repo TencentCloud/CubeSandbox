@@ -51,6 +51,7 @@ var terminalCloseReasons = map[string]struct{}{
 	"SESSION_LOST":       {},
 	"PROTOCOL_ERROR":     {},
 	"SERVER_DRAINING":    {},
+	"SLOW_PRODUCER":      {},
 	"SLOW_CONSUMER":      {},
 	"INTERNAL":           {},
 }

@@ -615,7 +615,11 @@ func (s *relaySession) pumpBrowserToMaster(ctx context.Context) pumpResult {
 		if err := s.writeMaster(messageType, message); err != nil {
 			writeCloseControl(s.browser, websocket.CloseTryAgainLater, "terminal upstream is slow")
 			_ = s.master.UnderlyingConn().Close()
-			return pumpResult{err: err, closeReason: "SLOW_PRODUCER"}
+			// A transport-level write failure to the upstream is not an
+			// authoritative SLOW_PRODUCER verdict (that code belongs to
+			// cubelet's stdin-queue-full condition). Detach so the session stays
+			// resumable instead of being permanently closed by the outcome logic.
+			return pumpResult{err: err, detached: true}
 		}
 		s.bytesIn.Add(info.StdinBytes)
 		select {
@@ -659,11 +663,10 @@ func (s *relaySession) pumpMasterToBrowser(ctx context.Context) pumpResult {
 			return pumpResult{err: errors.New("terminal opened session id mismatch"), closeReason: "INTERNAL"}
 		}
 		s.observeServerFrame(info)
-		if info.StdoutBytes > int64(s.cfg.StdoutPendingBytes) {
-			writeCloseControl(s.browser, websocket.CloseTryAgainLater, "terminal consumer is slow")
-			_ = s.master.UnderlyingConn().Close()
-			return pumpResult{closeReason: "SLOW_CONSUMER"}
-		}
+		// No pre-check on StdoutBytes here: a single master frame is bounded by
+		// the read limit (MaxFrameBytes+1), so an `info.StdoutBytes > pending`
+		// pre-check could never fire. A slow consumer is caught by the write
+		// deadline below.
 		if err := s.writeBrowser(messageType, message); err != nil {
 			writeCloseControl(s.browser, websocket.CloseTryAgainLater, "terminal consumer is slow")
 			_ = s.master.UnderlyingConn().Close()

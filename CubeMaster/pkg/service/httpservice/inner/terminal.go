@@ -51,6 +51,14 @@ const (
 	terminalEventOpened       = "terminal_opened"
 )
 
+// terminalTargetResolveTimeout bounds the sandbox resolution fallback. In the
+// normal flow the target is already cached (CubeOps resolved it moments
+// earlier to issue the grant); only a stale cache reaches the sandbox
+// resolver, whose cluster-scan fallback must never block the WebSocket
+// handshake for the full request lifetime. It is a variable so tests can
+// shrink the window.
+var terminalTargetResolveTimeout = 10 * time.Second
+
 var (
 	errTerminalTargetNotFound  = errors.New("terminal target not found")
 	errTerminalTargetUnhealthy = errors.New("terminal target is unavailable")
@@ -96,7 +104,11 @@ type terminalRelayWarning struct {
 var (
 	terminalRelaySettingsProvider = currentTerminalRelaySettings
 	terminalTargetResolver        = resolveTerminalTarget
-	terminalRelayOpener           = func(ctx context.Context, endpoint string) (terminalRelayClient, error) {
+	// terminalSandboxIDResolver is the stale-cache fallback inside
+	// resolveTerminalTarget; it is a variable so tests can exercise the
+	// bounded resolution timeout without a real cluster scan.
+	terminalSandboxIDResolver = sandboxservice.ResolveSandboxID
+	terminalRelayOpener       = func(ctx context.Context, endpoint string) (terminalRelayClient, error) {
 		return cubelet.Terminal(ctx, endpoint)
 	}
 	terminalRelayOpenedLogger = func(ctx context.Context, event terminalRelayOpenedEvent) {
@@ -307,7 +319,9 @@ func resolveTerminalTarget(ctx context.Context, requestedSandboxID string) (stri
 	if hostIP, ok := terminalTargetHost(ctx, requestedSandboxID); ok {
 		return terminalEndpointForHost(requestedSandboxID, hostIP)
 	}
-	canonicalSandboxID, err := sandboxservice.ResolveSandboxID(ctx, requestedSandboxID)
+	resolveCtx, resolveCancel := context.WithTimeout(ctx, terminalTargetResolveTimeout)
+	canonicalSandboxID, err := terminalSandboxIDResolver(resolveCtx, requestedSandboxID)
+	resolveCancel()
 	if err != nil {
 		return "", "", fmt.Errorf("%w: %v", errTerminalTargetNotFound, err)
 	}

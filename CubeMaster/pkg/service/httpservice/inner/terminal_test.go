@@ -9,11 +9,16 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -21,9 +26,24 @@ import (
 	"google.golang.org/grpc/status"
 
 	cubebox "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/terminalprotocol"
 )
+
+func init() {
+	// The terminalTargetHost cache lookup touches wrapredis, which panics on a
+	// nil config; initialize the global config from the checked-in conf.yaml
+	// (same pattern as pkg/localcache tests) so Redis lookups fail closed.
+	if os.Getenv("CUBE_MASTER_CONFIG_PATH") == "" {
+		_, file, _, _ := runtime.Caller(0)
+		cubeMasterDir := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(file)))))
+		os.Setenv("CUBE_MASTER_CONFIG_PATH", filepath.Join(cubeMasterDir, "conf.yaml"))
+	}
+	if _, err := config.Init(); err != nil {
+		panic(err)
+	}
+}
 
 const (
 	testTerminalToken     = "terminal-internal-secret"
@@ -718,4 +738,97 @@ func TestServeTerminalRelayAbnormalDisconnectCancelsAndJoinsPumps(t *testing.T) 
 		t.Fatalf("abnormal disconnect must detach without terminal close frame: %v", frame)
 	default:
 	}
+}
+
+// installTerminalSandboxRedis points the local cache at an in-memory Redis so
+// the proxy-map lookup in terminalTargetHost misses cleanly (the cache is
+// stale) instead of panicking on a nil Redis configuration.
+func installTerminalSandboxRedis(t *testing.T) {
+	t.Helper()
+	server := miniredis.RunT(t)
+	oldRedisConf := config.GetConfig().RedisConf
+	config.GetConfig().RedisConf = &config.RedisConf{
+		Nodes:       server.Addr(),
+		MaxActive:   4,
+		MaxIdle:     1,
+		MaxRetry:    1,
+		DbNo:        0,
+		IdleTimeout: 30,
+	}
+	t.Cleanup(func() {
+		config.GetConfig().RedisConf = oldRedisConf
+	})
+}
+
+// TestResolveTerminalTargetBoundsStaleCacheResolution proves the stale-cache
+// fallback cannot hang the relay: when the sandbox resolver blocks (a slow
+// cluster scan), resolveTerminalTarget must return within
+// terminalTargetResolveTimeout instead of waiting for the request lifetime.
+func TestResolveTerminalTargetBoundsStaleCacheResolution(t *testing.T) {
+	installTerminalSandboxRedis(t)
+	oldSandboxResolver := terminalSandboxIDResolver
+	oldTimeout := terminalTargetResolveTimeout
+	terminalTargetResolveTimeout = 200 * time.Millisecond
+	t.Cleanup(func() {
+		terminalSandboxIDResolver = oldSandboxResolver
+		terminalTargetResolveTimeout = oldTimeout
+	})
+	// A stale cache misses terminalTargetHost, so the fallback runs. Block
+	// until the bounded context is cancelled, then surface the cancellation
+	// as the underlying resolution error.
+	terminalSandboxIDResolver = func(ctx context.Context, _ string) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+
+	start := time.Now()
+	_, _, err := resolveTerminalTarget(context.Background(), uuid.NewString())
+	elapsed := time.Since(start)
+
+	require.ErrorIs(t, err, errTerminalTargetNotFound)
+	require.GreaterOrEqual(t, elapsed, terminalTargetResolveTimeout,
+		"resolution must wait for the bounded timeout before failing")
+	require.Less(t, elapsed, 2*terminalTargetResolveTimeout,
+		"resolution must not exceed the bounded timeout")
+}
+
+// TestServeTerminalRelayResolveTimeoutReturns404 proves the whole relay path
+// is bounded: a stale cache that falls into a slow cluster scan fails the
+// handshake with 404 (target not found) inside the resolve timeout instead of
+// hanging the request, and never reaches the terminal opener.
+func TestServeTerminalRelayResolveTimeoutReturns404(t *testing.T) {
+	installTerminalSandboxRedis(t)
+	oldSandboxResolver := terminalSandboxIDResolver
+	oldTimeout := terminalTargetResolveTimeout
+	terminalTargetResolveTimeout = 200 * time.Millisecond
+	t.Cleanup(func() {
+		terminalSandboxIDResolver = oldSandboxResolver
+		terminalTargetResolveTimeout = oldTimeout
+	})
+	terminalSandboxIDResolver = func(ctx context.Context, _ string) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+
+	installTerminalRelayHooks(t, testTerminalRelaySettings(), terminalTargetResolver,
+		func(context.Context, string) (terminalRelayClient, error) {
+			t.Fatal("terminal opener must not be reached when resolution times out")
+			return nil, errors.New("unexpected opener call")
+		})
+
+	headers := validTerminalHeaders()
+	headers.Set(HeaderTerminalSandbox, uuid.NewString())
+	req := httptest.NewRequest(http.MethodGet, "http://cubemaster/internal/terminal/relay", nil)
+	req.Header = headers
+	response := httptest.NewRecorder()
+
+	start := time.Now()
+	serveTerminalRelay(response, req)
+	elapsed := time.Since(start)
+
+	require.Equal(t, http.StatusNotFound, response.Code)
+	require.GreaterOrEqual(t, elapsed, terminalTargetResolveTimeout,
+		"relay must wait for the bounded resolution timeout before failing")
+	require.Less(t, elapsed, 2*terminalTargetResolveTimeout,
+		"relay must not hang beyond the bounded resolution timeout")
 }
