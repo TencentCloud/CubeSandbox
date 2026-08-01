@@ -100,7 +100,7 @@ locals {
                       location / { return 404; }
                     }
                     server {
-                      listen __CUBE_PROXY_ADMIN_LISTEN__:8082;
+                      listen __CUBE_PROXY_ADMIN_LISTEN__:__CUBE_PROXY_ADMIN_PORT__;
                       server_name _;
                       location / { return 404; }
                     }
@@ -122,8 +122,8 @@ locals {
       "__CUBE_PROXY_SSL_KEY__",
       "cube.app+3-key.pem"
     ),
-    "__CUBE_PROXY_ADMIN_LISTEN__:8082",
-    "0.0.0.0:8082"
+    "__CUBE_PROXY_ADMIN_LISTEN__:__CUBE_PROXY_ADMIN_PORT__",
+    "0.0.0.0:${var.cube_proxy_admin_port}"
   )
 
   # Precondition for creating the TKE addons
@@ -1020,7 +1020,7 @@ resource "kubernetes_deployment" "cube_proxy" {
           }
           port {
             name           = "admin"
-            container_port = 8082
+            container_port = var.cube_proxy_admin_port
             protocol       = "TCP"
           }
           env {
@@ -1066,11 +1066,11 @@ resource "kubernetes_deployment" "cube_proxy" {
           }
           env {
             name  = "CUBE_PROXY_ADMIN_URL"
-            value = "http://$(POD_IP):8082"
+            value = "http://$(POD_IP):${var.cube_proxy_admin_port}"
           }
           env {
             name  = "CUBE_PROXY_RESUME_URL"
-            value = "http://$(POD_IP):8082"
+            value = "http://$(POD_IP):${var.cube_proxy_admin_port}"
           }
           env {
             name  = "CUBE_PROXY_NODE_IP"

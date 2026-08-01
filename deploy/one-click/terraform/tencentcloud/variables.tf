@@ -377,6 +377,17 @@ variable "cube_proxy_replicas" {
   }
 }
 
+variable "cube_proxy_admin_port" {
+  description = "Port cube-proxy's /admin/* server listens on. cube-proxy uses host networking, so this must be free on the node; override it when something else already holds 8082."
+  type        = number
+  default     = 8082
+
+  validation {
+    condition     = var.cube_proxy_admin_port >= 1 && var.cube_proxy_admin_port <= 65535 && floor(var.cube_proxy_admin_port) == var.cube_proxy_admin_port
+    error_message = "cube_proxy_admin_port must be an integer between 1 and 65535."
+  }
+}
+
 variable "cube_lifecycle_manager_replicas" {
   description = "cube-lifecycle-manager Deployment replica count. Keep 1 unless CLM HA behavior has been validated for the target deployment."
   type        = number
