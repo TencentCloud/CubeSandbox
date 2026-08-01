@@ -48,6 +48,7 @@ const (
 	terminalCodeInternal      = "INTERNAL"
 	terminalMetadataRequestID = "x-cube-request-id"
 	terminalMetadataSessionID = "x-cube-terminal-session-id"
+	terminalEventOpened       = "terminal_opened"
 )
 
 var (
@@ -77,11 +78,44 @@ type terminalPumpResult struct {
 	localCloseReason string
 }
 
+type terminalRelayOpenedEvent struct {
+	RequestID   string
+	SessionID   string
+	SandboxID   string
+	ContainerID string
+	Resume      bool
+}
+
+type terminalRelayWarning struct {
+	RequestID string
+	SessionID string
+	SandboxID string
+	ErrorKind string
+}
+
 var (
 	terminalRelaySettingsProvider = currentTerminalRelaySettings
 	terminalTargetResolver        = resolveTerminalTarget
 	terminalRelayOpener           = func(ctx context.Context, endpoint string) (terminalRelayClient, error) {
 		return cubelet.Terminal(ctx, endpoint)
+	}
+	terminalRelayOpenedLogger = func(ctx context.Context, event terminalRelayOpenedEvent) {
+		log.G(ctx).WithFields(map[string]interface{}{
+			"event":        terminalEventOpened,
+			"request_id":   event.RequestID,
+			"session_id":   event.SessionID,
+			"sandbox_id":   event.SandboxID,
+			"container_id": event.ContainerID,
+			"resume":       event.Resume,
+		}).Info("terminal opened")
+	}
+	terminalRelayWarningLogger = func(ctx context.Context, warning terminalRelayWarning) {
+		log.G(ctx).WithFields(map[string]interface{}{
+			"request_id": warning.RequestID,
+			"session_id": warning.SessionID,
+			"sandbox_id": warning.SandboxID,
+			"error_kind": warning.ErrorKind,
+		}).Warn("terminal relay ended")
 	}
 )
 
@@ -100,7 +134,7 @@ var terminalRelayUpgrader = websocket.Upgrader{
 func terminalRelayGinHandler(c *gin.Context) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			log.G(c.Request.Context()).Errorf("terminal relay panic: %v", recovered)
+			log.G(c.Request.Context()).Error("terminal relay panic")
 		}
 	}()
 	serveTerminalRelay(c.Writer, c.Request)
@@ -151,7 +185,12 @@ func serveTerminalRelay(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() {
 		if closeErr := stream.Close(); closeErr != nil && !isExpectedTerminalRelayError(closeErr) {
-			log.G(r.Context()).Warnf("close terminal cubelet stream: %v", closeErr)
+			terminalRelayWarningLogger(r.Context(), terminalRelayWarning{
+				RequestID: open.GetRequestId(),
+				SessionID: open.GetSessionId(),
+				SandboxID: open.GetSandboxId(),
+				ErrorKind: terminalRelayErrorKind(closeErr),
+			})
 		}
 	}()
 
@@ -169,12 +208,20 @@ func serveTerminalRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := relayTerminal(relayCtx, relayCancel, connection, stream, settings); err != nil {
-		log.G(r.Context()).WithFields(map[string]interface{}{
-			"request_id": open.GetRequestId(),
-			"session_id": open.GetSessionId(),
-			"sandbox_id": open.GetSandboxId(),
-		}).Warnf("terminal relay ended with error: %v", err)
+	openedEvent := terminalRelayOpenedEvent{
+		RequestID:   open.GetRequestId(),
+		SessionID:   open.GetSessionId(),
+		SandboxID:   open.GetSandboxId(),
+		ContainerID: open.GetContainerId(),
+		Resume:      open.GetResume() != nil,
+	}
+	if err := relayTerminal(relayCtx, relayCancel, connection, stream, settings, openedEvent); err != nil {
+		terminalRelayWarningLogger(r.Context(), terminalRelayWarning{
+			RequestID: open.GetRequestId(),
+			SessionID: open.GetSessionId(),
+			SandboxID: open.GetSandboxId(),
+			ErrorKind: terminalRelayErrorKind(err),
+		})
 	}
 }
 
@@ -298,6 +345,7 @@ func relayTerminal(
 	connection *websocket.Conn,
 	stream terminalRelayClient,
 	settings terminalRelaySettings,
+	openedEvent terminalRelayOpenedEvent,
 ) error {
 	results := make(chan terminalPumpResult, 2)
 	var discardWrites atomic.Bool
@@ -305,7 +353,7 @@ func relayTerminal(
 		results <- pumpTerminalClient(connection, stream, settings, &discardWrites)
 	}()
 	go func() {
-		results <- pumpTerminalServer(ctx, connection, stream, settings, &discardWrites)
+		results <- pumpTerminalServer(ctx, connection, stream, settings, &discardWrites, openedEvent)
 	}()
 
 	first := <-results
@@ -440,7 +488,9 @@ func pumpTerminalServer(
 	stream terminalRelayClient,
 	settings terminalRelaySettings,
 	discardWrites *atomic.Bool,
+	openedEvent terminalRelayOpenedEvent,
 ) terminalPumpResult {
+	openedLogged := false
 	for {
 		frame, err := stream.Recv()
 		if err != nil {
@@ -460,6 +510,10 @@ func pumpTerminalServer(
 			if err := connection.WriteMessage(websocket.BinaryMessage, message); err != nil {
 				return terminalPumpResult{}
 			}
+			if frame.GetOpened() != nil && !openedLogged {
+				terminalRelayOpenedLogger(ctx, openedEvent)
+				openedLogged = true
+			}
 		}
 		if terminalprotocol.IsCloseFrame(frame) {
 			return terminalPumpResult{
@@ -473,6 +527,21 @@ func pumpTerminalServer(
 			return terminalPumpResult{}
 		default:
 		}
+	}
+}
+
+func terminalRelayErrorKind(err error) string {
+	switch status.Code(err) {
+	case codes.Canceled:
+		return "DOWNSTREAM_CANCELED"
+	case codes.DeadlineExceeded:
+		return "DOWNSTREAM_TIMEOUT"
+	case codes.InvalidArgument:
+		return "DOWNSTREAM_PROTOCOL"
+	case codes.Unavailable:
+		return "DOWNSTREAM_UNAVAILABLE"
+	default:
+		return "DOWNSTREAM_ERROR"
 	}
 }
 

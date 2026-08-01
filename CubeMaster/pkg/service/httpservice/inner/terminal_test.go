@@ -16,7 +16,9 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	cubebox "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -29,6 +31,7 @@ const (
 )
 
 var terminalRelayHooksMu sync.Mutex
+var terminalRelayLogHooksMu sync.Mutex
 
 type fakeTerminalRecv struct {
 	frame *cubebox.TerminalServerFrame
@@ -143,6 +146,24 @@ func installTerminalRelayHooks(
 	terminalRelaySettingsProvider = func() terminalRelaySettings { return settings }
 	terminalTargetResolver = resolver
 	terminalRelayOpener = opener
+}
+
+func installTerminalRelayLogHooks(
+	t *testing.T,
+	opened func(context.Context, terminalRelayOpenedEvent),
+	warning func(context.Context, terminalRelayWarning),
+) {
+	t.Helper()
+	terminalRelayLogHooksMu.Lock()
+	oldOpenedLogger := terminalRelayOpenedLogger
+	oldWarningLogger := terminalRelayWarningLogger
+	t.Cleanup(func() {
+		terminalRelayOpenedLogger = oldOpenedLogger
+		terminalRelayWarningLogger = oldWarningLogger
+		terminalRelayLogHooksMu.Unlock()
+	})
+	terminalRelayOpenedLogger = opened
+	terminalRelayWarningLogger = warning
 }
 
 func TestServeTerminalRelayRejectsInvalidRequestsBeforeUpgrade(t *testing.T) {
@@ -439,6 +460,107 @@ func TestServeTerminalRelayForwardsTypedFrames(t *testing.T) {
 	require.Equal(t, websocket.CloseNormalClosure, closeCode)
 	waitTerminalSignal(t, handlerDone, "relay handler")
 	waitTerminalSignal(t, stream.closeDone, "stream close")
+}
+
+func TestServeTerminalRelayLogsOpenedOnceAfterCubeletAcknowledgement(t *testing.T) {
+	stream := newFakeTerminalRelayStream()
+	openedEvents := make(chan terminalRelayOpenedEvent, 2)
+	installTerminalRelayLogHooks(t,
+		func(_ context.Context, event terminalRelayOpenedEvent) { openedEvents <- event },
+		func(context.Context, terminalRelayWarning) {},
+	)
+	installTerminalRelayHooks(t, testTerminalRelaySettings(),
+		func(context.Context, string) (string, string, error) {
+			return "sandbox-canonical", "10.0.0.7:9999", nil
+		},
+		func(ctx context.Context, _ string) (terminalRelayClient, error) {
+			stream.ctx = ctx
+			return stream, nil
+		},
+	)
+	server, handlerDone := startTerminalRelayTestServer(t)
+	connection := dialTerminalRelay(t, server, validTerminalHeaders())
+	require.NotNil(t, waitTerminalClientFrame(t, stream).GetOpen())
+
+	openedFrame := &cubebox.TerminalServerFrame{Frame: &cubebox.TerminalServerFrame_Opened{Opened: &cubebox.TerminalOpened{
+		SessionId: testTerminalSessionID,
+	}}}
+	pushTerminalServerFrame(t, stream, openedFrame)
+	_ = readTerminalBinary(t, connection)
+	event := <-openedEvents
+	require.Equal(t, "request-a", event.RequestID)
+	require.Equal(t, testTerminalSessionID, event.SessionID)
+	require.Equal(t, "sandbox-canonical", event.SandboxID)
+	require.Equal(t, "container-a", event.ContainerID)
+	require.True(t, event.Resume)
+
+	pushTerminalServerFrame(t, stream, openedFrame)
+	_ = readTerminalBinary(t, connection)
+	select {
+	case duplicate := <-openedEvents:
+		t.Fatalf("duplicate TerminalOpened logged a second success event: %+v", duplicate)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	pushTerminalServerFrame(t, stream, &cubebox.TerminalServerFrame{
+		Frame: &cubebox.TerminalServerFrame_Close{Close: &cubebox.TerminalClose{Reason: terminalCloseUser}},
+	})
+	_, closeCode := readTerminalUntilClose(t, connection)
+	require.Equal(t, websocket.CloseNormalClosure, closeCode)
+	waitTerminalSignal(t, handlerDone, "relay handler")
+}
+
+func TestServeTerminalRelayDoesNotLogOpenedWhenCubeletRejectsOpen(t *testing.T) {
+	stream := newFakeTerminalRelayStream()
+	openedEvents := make(chan terminalRelayOpenedEvent, 1)
+	installTerminalRelayLogHooks(t,
+		func(_ context.Context, event terminalRelayOpenedEvent) { openedEvents <- event },
+		func(context.Context, terminalRelayWarning) {},
+	)
+	installTerminalRelayHooks(t, testTerminalRelaySettings(),
+		func(context.Context, string) (string, string, error) {
+			return "sandbox-canonical", "10.0.0.7:9999", nil
+		},
+		func(ctx context.Context, _ string) (terminalRelayClient, error) {
+			stream.ctx = ctx
+			return stream, nil
+		},
+	)
+	server, handlerDone := startTerminalRelayTestServer(t)
+	connection := dialTerminalRelay(t, server, validTerminalHeaders())
+	require.NotNil(t, waitTerminalClientFrame(t, stream).GetOpen())
+
+	pushTerminalServerFrame(t, stream, &cubebox.TerminalServerFrame{
+		Frame: &cubebox.TerminalServerFrame_Error{Error: &cubebox.TerminalError{Code: terminalCodeInternal}},
+	})
+	message := readTerminalBinary(t, connection)
+	require.JSONEq(t, "{\"type\":\"error\",\"code\":\"INTERNAL\"}", string(message[1:]))
+	pushTerminalServerFrame(t, stream, &cubebox.TerminalServerFrame{
+		Frame: &cubebox.TerminalServerFrame_Close{Close: &cubebox.TerminalClose{Reason: terminalCloseUser}},
+	})
+	_, closeCode := readTerminalUntilClose(t, connection)
+	require.Equal(t, websocket.CloseNormalClosure, closeCode)
+	waitTerminalSignal(t, handlerDone, "relay handler")
+	select {
+	case unexpected := <-openedEvents:
+		t.Fatalf("terminal rejection logged a success event: %+v", unexpected)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestTerminalRelayErrorKindDoesNotPreservePeerText(t *testing.T) {
+	peerErr := status.Error(codes.Internal, "Bearer peer-secret terminal payload")
+	warning := terminalRelayWarning{
+		RequestID: "request-a",
+		SessionID: testTerminalSessionID,
+		SandboxID: "sandbox-canonical",
+		ErrorKind: terminalRelayErrorKind(peerErr),
+	}
+	require.Equal(t, "DOWNSTREAM_ERROR", warning.ErrorKind)
+	require.NotContains(t, warning.ErrorKind, "peer-secret")
+	require.NotContains(t, warning.ErrorKind, "payload")
+	require.Equal(t, "request-a", warning.RequestID)
+	require.Equal(t, testTerminalSessionID, warning.SessionID)
 }
 
 func TestServeTerminalRelayNormalClientCloseWaitsForCubeletClose(t *testing.T) {
