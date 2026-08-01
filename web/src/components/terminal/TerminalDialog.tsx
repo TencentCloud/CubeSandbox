@@ -153,8 +153,8 @@ export function TerminalDialog({ open, onOpenChange, sandboxId }: TerminalDialog
         <Dialog.Content
           ref={contentRef}
           className={cn(
-            'fixed left-1/2 top-1/2 z-50 flex -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden',
-            'h-[min(760px,calc(100dvh-0.5rem))] w-[min(1180px,calc(100vw-0.5rem))]',
+            'fixed left-[50dvw] top-[50dvh] z-50 flex -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden',
+            'h-[min(760px,calc(100dvh-0.5rem))] w-[min(1180px,calc(100dvw-0.5rem))]',
             'rounded-lg border border-border/70 bg-card shadow-2xl',
             'focus:outline-none data-[state=open]:animate-fade-in',
             'fullscreen:inset-0 fullscreen:h-screen fullscreen:w-screen fullscreen:translate-x-0 fullscreen:translate-y-0 fullscreen:rounded-none fullscreen:border-0',

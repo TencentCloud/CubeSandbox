@@ -253,6 +253,15 @@ describe('TerminalEntry and TerminalDialog', () => {
     expect(screen.getByText('session-1')).toBeInTheDocument();
   });
 
+  it('anchors the dialog to the dynamic viewport on narrow mobile layouts', () => {
+    render(<TerminalDialog open onOpenChange={vi.fn()} sandboxId="sandbox-a" />);
+    const dialog = screen.getByRole('dialog');
+
+    expect(dialog.className).toContain('left-[50dvw]');
+    expect(dialog.className).toContain('top-[50dvh]');
+    expect(dialog.className).toContain('w-[min(1180px,calc(100dvw-0.5rem))]');
+  });
+
   it('is StrictMode-safe and does not create duplicate grants or input handlers', async () => {
     const view = render(
       <StrictMode>
