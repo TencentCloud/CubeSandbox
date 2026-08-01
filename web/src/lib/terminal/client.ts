@@ -481,6 +481,11 @@ export class TerminalSessionClient {
       this.finish('USER_CLOSED', this.exitCode);
       return;
     }
+    const serverReason = serverCloseCodeReason(event.code);
+    if (serverReason) {
+      this.finish(serverReason);
+      return;
+    }
     if (!this.metadata?.sessionId) {
       this.finish('INTERNAL');
       return;
@@ -662,6 +667,22 @@ function stableErrorCode(error: unknown): TerminalReasonCode | null {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
+}
+
+function serverCloseCodeReason(code: number): TerminalReasonCode | null {
+  switch (code) {
+    case 1008:
+    case 1009:
+      return 'PROTOCOL_ERROR';
+    case 1011:
+      return 'INTERNAL';
+    case 1012:
+      return 'SERVER_DRAINING';
+    case 1013:
+      return 'SLOW_CONSUMER';
+    default:
+      return null;
+  }
 }
 
 function incomingSize(data: unknown): number {

@@ -88,6 +88,22 @@ describe('TerminalSessionClient', () => {
     expect(lastSnapshot(harness).state).toMatchObject({ kind: 'closed', reason: 'USER_CLOSED' });
   });
 
+  it.each([
+    [1008, 'PROTOCOL_ERROR'],
+    [1009, 'PROTOCOL_ERROR'],
+    [1011, 'INTERNAL'],
+    [1012, 'SERVER_DRAINING'],
+    [1013, 'SLOW_CONSUMER'],
+  ] as const)('treats server close code %i as authoritative %s', async (code, reason) => {
+    const harness = createHarness();
+    await openConnected(harness);
+    harness.sockets[0].serverClose(code);
+    await vi.runAllTimersAsync();
+
+    expect(harness.requests).toHaveLength(1);
+    expect(lastSnapshot(harness).state).toMatchObject({ kind: 'closed', reason });
+  });
+
   it('retries abnormal transport loss at 1s, 2s, and 4s with a real resume request', async () => {
     const harness = createHarness();
     await openConnected(harness);
