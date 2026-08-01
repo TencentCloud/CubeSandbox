@@ -7,6 +7,7 @@ package cubebox
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"sync"
 	"testing"
@@ -34,6 +35,12 @@ func TestTerminalRejectsNonOpenLeadingFrame(t *testing.T) {
 func TestTerminalOpenedIsFirstAndClientFramesDrivePTY(t *testing.T) {
 	config := terminalHandlerConfig()
 	service := newTerminalTestService(t, config)
+	openedEvents := make([]terminalOpenedLogEvent, 0, 1)
+	oldOpenedLogger := terminalOpenedLogger
+	terminalOpenedLogger = func(_ context.Context, event terminalOpenedLogEvent) {
+		openedEvents = append(openedEvents, event)
+	}
+	t.Cleanup(func() { terminalOpenedLogger = oldOpenedLogger })
 	sessionID := uuid.NewString()
 	stream := newFakeTerminalStream(
 		terminalOpenFrame(sessionID),
@@ -56,6 +63,12 @@ func TestTerminalOpenedIsFirstAndClientFramesDrivePTY(t *testing.T) {
 	require.Equal(t, uint32(100), cols)
 	require.Equal(t, uint32(40), rows)
 	require.Equal(t, []string{"close-stdin", "kill", "delete"}, process.operations())
+	require.Len(t, openedEvents, 1, "stdin, resize, and close frames must not add success logs")
+	require.Equal(t, sessionID, openedEvents[0].SessionID)
+	require.False(t, openedEvents[0].Resume)
+	require.Equal(t, "sandbox-a", openedEvents[0].SandboxID)
+	require.Equal(t, "sandbox-a", openedEvents[0].ContainerID)
+	require.Equal(t, "cubelet-term-"+sessionID[:12], openedEvents[0].ExecID)
 }
 
 func TestTerminalOversizedStdinClosesWithProtocolError(t *testing.T) {
@@ -70,6 +83,58 @@ func TestTerminalOversizedStdinClosesWithProtocolError(t *testing.T) {
 	sent := stream.sentFrames()
 	require.Equal(t, terminalcore.CodeProtocolError, sent[1].GetError().GetCode())
 	require.Equal(t, terminalcore.CloseProtocolError, sent[len(sent)-1].GetClose().GetReason())
+}
+
+func TestTerminalLogsInitialAndResumeWithTrustedTargetAndStableExecID(t *testing.T) {
+	service := newTerminalTestService(t, terminalHandlerConfig())
+	openedEvents := make([]terminalOpenedLogEvent, 0, 2)
+	oldOpenedLogger := terminalOpenedLogger
+	terminalOpenedLogger = func(_ context.Context, event terminalOpenedLogEvent) {
+		openedEvents = append(openedEvents, event)
+	}
+	t.Cleanup(func() { terminalOpenedLogger = oldOpenedLogger })
+
+	sessionID := uuid.NewString()
+	initial := newFakeTerminalStream(terminalOpenFrame(sessionID))
+	require.NoError(t, service.Terminal(initial))
+	resume := terminalOpenFrame(sessionID)
+	resume.GetOpen().Resume = &cubeboxapi.TerminalResume{SessionId: sessionID, LastOffset: 0}
+	require.NoError(t, service.Terminal(newFakeTerminalStream(resume)))
+
+	require.Len(t, openedEvents, 2)
+	require.False(t, openedEvents[0].Resume)
+	require.True(t, openedEvents[1].Resume)
+	require.Equal(t, openedEvents[0].ExecID, openedEvents[1].ExecID)
+	for _, event := range openedEvents {
+		require.Equal(t, sessionID, event.SessionID)
+		require.Equal(t, "sandbox-a", event.SandboxID)
+		require.Equal(t, "sandbox-a", event.ContainerID)
+	}
+}
+
+func TestTerminalOpenFailureDoesNotLogSuccessOrPeerText(t *testing.T) {
+	service := newTerminalTestService(t, terminalHandlerConfig())
+	service.testAdapter.resolveErr = errors.New("Bearer peer-secret terminal payload")
+	openedEvents := make([]terminalOpenedLogEvent, 0)
+	rejectedEvents := make([]terminalOpenRejectedLogEvent, 0, 1)
+	oldOpenedLogger := terminalOpenedLogger
+	oldRejectedLogger := terminalOpenRejectedLogger
+	terminalOpenedLogger = func(_ context.Context, event terminalOpenedLogEvent) {
+		openedEvents = append(openedEvents, event)
+	}
+	terminalOpenRejectedLogger = func(_ context.Context, event terminalOpenRejectedLogEvent) {
+		rejectedEvents = append(rejectedEvents, event)
+	}
+	t.Cleanup(func() {
+		terminalOpenedLogger = oldOpenedLogger
+		terminalOpenRejectedLogger = oldRejectedLogger
+	})
+
+	require.NoError(t, service.Terminal(newFakeTerminalStream(terminalOpenFrame(uuid.NewString()))))
+	require.Empty(t, openedEvents)
+	require.Len(t, rejectedEvents, 1)
+	require.Equal(t, terminalcore.CodeInternal, rejectedEvents[0].ErrorKind)
+	require.NotContains(t, rejectedEvents[0].ErrorKind, "peer-secret")
 }
 
 func terminalOpenFrame(sessionID string) *cubeboxapi.TerminalClientFrame {
@@ -167,11 +232,15 @@ type terminalHandlerTarget struct{ metadata terminalcore.TargetMetadata }
 func (t *terminalHandlerTarget) Metadata() terminalcore.TargetMetadata { return t.metadata }
 
 type terminalHandlerAdapter struct {
-	mu        sync.Mutex
-	processes []*terminalHandlerProcess
+	mu         sync.Mutex
+	processes  []*terminalHandlerProcess
+	resolveErr error
 }
 
 func (a *terminalHandlerAdapter) Resolve(_ context.Context, sandboxID, containerID string) (terminalcore.Target, error) {
+	if a.resolveErr != nil {
+		return nil, a.resolveErr
+	}
 	if containerID == "" {
 		containerID = sandboxID
 	}

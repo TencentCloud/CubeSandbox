@@ -23,6 +23,7 @@ type session struct {
 	id       string
 	request  OpenRequest
 	target   Target
+	execID   string
 	openedAt time.Time
 
 	ctx    context.Context
@@ -70,6 +71,7 @@ func newSession(core *Core, request OpenRequest, target Target) *session {
 		id:           request.SessionID,
 		request:      request,
 		target:       target,
+		execID:       execIDForSession(request.SessionID),
 		openedAt:     now,
 		ctx:          ctx,
 		cancel:       cancel,
@@ -125,7 +127,11 @@ func (s *session) activate(process PTYProcess) (*Attachment, Opened, error) {
 	}
 	s.state = StateActive
 	s.generation = 1
-	attachment := newAttachment(s, s.generation, Opened{SessionID: s.id}, s.core.config)
+	attachment := newAttachment(s, s.generation, Opened{
+		SessionID: s.id,
+		ExecID:    s.execID,
+		Target:    s.target.Metadata(),
+	}, s.core.config)
 	s.attachment = attachment
 	s.mu.Unlock()
 
@@ -150,7 +156,13 @@ func (s *session) resume(request OpenRequest) (*Attachment, Opened, error) {
 
 	replay, replayFrom, truncated := s.ring.ReadFrom(request.Resume.LastOffset)
 	nextGeneration := s.generation + 1
-	opened := Opened{SessionID: s.id, ReplayFrom: replayFrom, ReplayTruncated: truncated}
+	opened := Opened{
+		SessionID:       s.id,
+		ReplayFrom:      replayFrom,
+		ReplayTruncated: truncated,
+		ExecID:          s.execID,
+		Target:          metadata,
+	}
 	attachment := newAttachment(s, nextGeneration, opened, s.core.config)
 	for len(replay) > 0 {
 		n := s.core.config.StdoutChunkBytes

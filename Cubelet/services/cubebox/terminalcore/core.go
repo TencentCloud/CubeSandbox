@@ -131,7 +131,7 @@ func (c *Core) Open(ctx context.Context, request OpenRequest) (*Attachment, Open
 
 	record := JournalRecord{
 		SessionID: request.SessionID,
-		ExecID:    execIDForSession(request.SessionID),
+		ExecID:    s.execID,
 		Target:    metadata,
 		OpenedAt:  s.openedAt,
 	}

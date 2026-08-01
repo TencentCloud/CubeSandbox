@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"runtime/debug"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -19,6 +18,46 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/cubebox/terminalcore"
 )
 
+const terminalEventOpened = "terminal_opened"
+
+type terminalOpenedLogEvent struct {
+	RequestID   string
+	SessionID   string
+	SandboxID   string
+	ContainerID string
+	Resume      bool
+	ExecID      string
+}
+
+type terminalOpenRejectedLogEvent struct {
+	RequestID string
+	SessionID string
+	SandboxID string
+	ErrorKind string
+}
+
+var (
+	terminalOpenedLogger = func(ctx context.Context, event terminalOpenedLogEvent) {
+		log.G(ctx).WithFields(map[string]interface{}{
+			"event":        terminalEventOpened,
+			"request_id":   event.RequestID,
+			"session_id":   event.SessionID,
+			"sandbox_id":   event.SandboxID,
+			"container_id": event.ContainerID,
+			"resume":       event.Resume,
+			"exec_id":      event.ExecID,
+		}).Warn("terminal opened")
+	}
+	terminalOpenRejectedLogger = func(ctx context.Context, event terminalOpenRejectedLogEvent) {
+		log.G(ctx).WithFields(map[string]interface{}{
+			"request_id": event.RequestID,
+			"session_id": event.SessionID,
+			"sandbox_id": event.SandboxID,
+			"error_kind": event.ErrorKind,
+		}).Warn("terminal open rejected")
+	}
+)
+
 func (s *service) Terminal(stream grpc.BidiStreamingServer[cubebox.TerminalClientFrame, cubebox.TerminalServerFrame]) (returnErr error) {
 	var attachment *terminalcore.Attachment
 	defer func() {
@@ -26,7 +65,7 @@ func (s *service) Terminal(stream grpc.BidiStreamingServer[cubebox.TerminalClien
 			if attachment != nil {
 				attachment.Detach()
 			}
-			log.G(stream.Context()).Errorf("terminal handler panic: %v, stack:%s", panicValue, string(debug.Stack()))
+			log.G(stream.Context()).Error("terminal handler panic")
 			returnErr = status.Error(codes.Internal, "terminal internal error")
 		}
 	}()
@@ -63,11 +102,12 @@ func (s *service) Terminal(stream grpc.BidiStreamingServer[cubebox.TerminalClien
 
 	attachment, opened, err := s.terminal.Open(stream.Context(), request)
 	if err != nil {
-		log.G(stream.Context()).WithFields(map[string]interface{}{
-			"request_id": request.RequestID,
-			"session_id": request.SessionID,
-			"sandbox_id": request.SandboxID,
-		}).Warnf("terminal open rejected: %v", err)
+		terminalOpenRejectedLogger(stream.Context(), terminalOpenRejectedLogEvent{
+			RequestID: request.RequestID,
+			SessionID: request.SessionID,
+			SandboxID: request.SandboxID,
+			ErrorKind: terminalcore.CodeOf(err),
+		})
 		return sendTerminalError(stream, terminalcore.CodeOf(err))
 	}
 	if err := stream.Send(&cubebox.TerminalServerFrame{
@@ -80,6 +120,14 @@ func (s *service) Terminal(stream grpc.BidiStreamingServer[cubebox.TerminalClien
 		attachment.Detach()
 		return nil
 	}
+	terminalOpenedLogger(stream.Context(), terminalOpenedLogEvent{
+		RequestID:   request.RequestID,
+		SessionID:   opened.SessionID,
+		SandboxID:   opened.Target.SandboxID,
+		ContainerID: opened.Target.ContainerID,
+		Resume:      request.Resume != nil,
+		ExecID:      opened.ExecID,
+	})
 
 	go s.receiveTerminalFrames(stream, attachment)
 	for {

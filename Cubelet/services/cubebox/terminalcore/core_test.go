@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 )
 
 func TestSessionPTYLifecycleAndBoundedIO(t *testing.T) {
@@ -25,6 +26,9 @@ func TestSessionPTYLifecycleAndBoundedIO(t *testing.T) {
 	require.Equal(t, attachment.Opened(), opened)
 	require.Equal(t, opened.SessionID, adapter.lastSpec().SessionID)
 	require.Equal(t, execIDForSession(opened.SessionID), adapter.lastSpec().ExecID)
+	require.Equal(t, adapter.lastSpec().ExecID, opened.ExecID)
+	require.Equal(t, "sandbox-a", opened.Target.SandboxID)
+	require.Equal(t, "sandbox-a-primary", opened.Target.ContainerID)
 
 	require.NoError(t, attachment.SendStdin([]byte("whoami\n")))
 	process := adapter.lastProcess()
@@ -77,6 +81,7 @@ func TestCleanupEscalatesAndIsIdempotent(t *testing.T) {
 }
 
 func TestDetachedResumeReplayAndGenerationFence(t *testing.T) {
+	ignoreGoroutines := goleak.IgnoreCurrent()
 	adapter := newFakeAdapter()
 	config := testConfig()
 	config.ReplayBufferBytes = 16
@@ -105,6 +110,9 @@ func TestDetachedResumeReplayAndGenerationFence(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, opened.ReplayTruncated)
 	require.Equal(t, uint64(4), opened.ReplayFrom)
+	require.Equal(t, execIDForSession(request.SessionID), opened.ExecID)
+	require.Equal(t, "sandbox-a", opened.Target.SandboxID)
+	require.Equal(t, "sandbox-a-primary", opened.Target.ContainerID)
 	var replay bytes.Buffer
 	for replay.Len() < 16 {
 		event := nextEvent(t, resumed)
@@ -147,6 +155,7 @@ func TestDetachedResumeReplayAndGenerationFence(t *testing.T) {
 			}
 		}
 	}
+	goleak.VerifyNone(t, ignoreGoroutines)
 }
 
 func TestDetachedReplayOverflowClosesSession(t *testing.T) {

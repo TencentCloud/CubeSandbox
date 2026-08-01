@@ -203,6 +203,8 @@ type Opened struct {
 	SessionID       string
 	ReplayFrom      uint64
 	ReplayTruncated bool
+	ExecID          string
+	Target          TargetMetadata
 }
 
 type EventKind uint8
