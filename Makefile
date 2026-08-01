@@ -16,7 +16,9 @@ RELEASE_DIR ?= $(ROOT_DIR)/_output/release
 MANUAL_DEPLOY_SCRIPT ?= $(ROOT_DIR)/deploy/one-click/deploy-manual.sh
 WEB_DIR ?= $(ROOT_DIR)/web
 CUBECOW_DIR ?= $(ROOT_DIR)/cubecow
-CUBECOW_TARGET_DIR ?= $(CUBECOW_DIR)/target
+# Keep Cargo output out of the source tree. This also avoids inheriting stale
+# ownership from a prior builder invocation under cubecow/target.
+CUBECOW_TARGET_DIR ?= $(ROOT_DIR)/_output/cubecow-target
 # builder-run bind-mounts ROOT_DIR at /workspace. Map only a target directory
 # rooted in that checkout before exporting it to the nested builder command.
 CUBECOW_TARGET_DIR_IN_BUILDER := $(if $(filter $(ROOT_DIR),$(CUBECOW_TARGET_DIR)),/workspace,$(patsubst $(ROOT_DIR)/%,/workspace/%,$(CUBECOW_TARGET_DIR)))
