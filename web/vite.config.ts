@@ -53,6 +53,7 @@ export default defineConfig({
       // CubeOps (ops/admin endpoints) — rewrite /opsapi → /api
       '/opsapi': {
         target: 'http://127.0.0.1:3010',
+        ws: true,
         rewrite: (path) => path.replace(/^\/opsapi/, '/api'),
       },
       // CubeAPI (SDK/E2B endpoints) — proxy specific API paths to avoid
