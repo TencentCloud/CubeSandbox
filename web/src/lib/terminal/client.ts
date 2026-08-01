@@ -321,24 +321,21 @@ export class TerminalSessionClient {
     this.grantAbort?.abort();
     const controller = new AbortController();
     this.grantAbort = controller;
-    const request: TerminalGrantRequest =
-      kind === 'open'
-        ? {
-            kind,
-            sandboxId: this.sandboxId,
-            ...(this.requestedContainerId ? { containerId: this.requestedContainerId } : {}),
-            cols: this.cols,
-            rows: this.rows,
-          }
+    const request: TerminalGrantRequest = {
+      kind,
+      sandboxId: kind === 'open' ? this.sandboxId : (this.metadata?.sandboxId ?? this.sandboxId),
+      cols: this.cols,
+      rows: this.rows,
+      ...(kind === 'open'
+        ? this.requestedContainerId
+          ? { containerId: this.requestedContainerId }
+          : {}
         : {
-            kind,
-            sandboxId: this.metadata?.sandboxId ?? this.sandboxId,
             containerId: this.metadata?.containerId,
             sessionId: this.metadata?.sessionId,
-            cols: this.cols,
-            rows: this.rows,
             lastOffset: this.lastOffset,
-          };
+          }),
+    };
     let connection: TerminalConnection;
     try {
       connection = await this.requester(request, controller.signal);
