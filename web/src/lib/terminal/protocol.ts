@@ -1,68 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Tencent. All rights reserved.
 
-export const TERMINAL_SUBPROTOCOL = 'cube-terminal.v1';
-export const TERMINAL_GRANT_PREFIX = 'cube-grant.';
+import {
+  MAX_TERMINAL_DIMENSION,
+  MAX_TERMINAL_PAYLOAD_BYTES,
+  MAX_TERMINAL_STATUS_BYTES,
+  MIN_TERMINAL_DIMENSION,
+  TERMINAL_CHANNEL,
+  TERMINAL_CLOSE_REASONS,
+  TERMINAL_ERROR_CODES,
+  TERMINAL_GRANT_PREFIX,
+  TERMINAL_REASON_CODES,
+  TERMINAL_SUBPROTOCOL,
+} from './protocol.generated';
 
-export const TERMINAL_CHANNEL = {
-  stdin: 0x00,
-  stdout: 0x01,
-  stderr: 0x02,
-  status: 0x03,
-  resize: 0x04,
-} as const;
-
-export const MAX_TERMINAL_PAYLOAD_BYTES = 64 * 1024;
-export const MAX_TERMINAL_STATUS_BYTES = 4 * 1024;
-
-export const TERMINAL_ERROR_CODES = [
-  'TARGET_NOT_FOUND',
-  'TARGET_NOT_RUNNING',
-  'LIMIT_EXCEEDED',
-  'PROTOCOL_ERROR',
-  'SHELL_NOT_FOUND',
-  'SLOW_PRODUCER',
-  'SLOW_CONSUMER',
-  'SESSION_LOST',
-  'INTERNAL',
-  'SERVER_DRAINING',
-  'SANDBOX_TRANSITION',
-] as const;
-
-export const TERMINAL_CLOSE_REASONS = [
-  'USER_CLOSED',
-  'IDLE_TIMEOUT',
-  'MAX_LIFETIME',
-  'SANDBOX_TRANSITION',
-  'RUNTIME_EXITED',
-  'SESSION_LOST',
-  'PROTOCOL_ERROR',
-  'SERVER_DRAINING',
-  'SLOW_PRODUCER',
-  'SLOW_CONSUMER',
-  'INTERNAL',
-] as const;
-
-export const TERMINAL_REASON_CODES = [
-  'UNAUTHORIZED',
-  'FORBIDDEN',
-  'TARGET_NOT_FOUND',
-  'TARGET_NOT_RUNNING',
-  'GRANT_INVALID',
-  'LIMIT_EXCEEDED',
-  'PROTOCOL_ERROR',
-  'SHELL_NOT_FOUND',
-  'SLOW_PRODUCER',
-  'SLOW_CONSUMER',
-  'IDLE_TIMEOUT',
-  'MAX_LIFETIME',
-  'SANDBOX_TRANSITION',
-  'RUNTIME_EXITED',
-  'SESSION_LOST',
-  'INTERNAL',
-  'SERVER_DRAINING',
-  'USER_CLOSED',
-] as const;
+export {
+  MAX_TERMINAL_PAYLOAD_BYTES,
+  MAX_TERMINAL_STATUS_BYTES,
+  TERMINAL_CHANNEL,
+  TERMINAL_CLOSE_REASONS,
+  TERMINAL_ERROR_CODES,
+  TERMINAL_GRANT_PREFIX,
+  TERMINAL_REASON_CODES,
+  TERMINAL_SUBPROTOCOL,
+} from './protocol.generated';
 
 export type TerminalErrorCode = (typeof TERMINAL_ERROR_CODES)[number];
 export type TerminalCloseReason = (typeof TERMINAL_CLOSE_REASONS)[number];
@@ -100,10 +61,10 @@ export function assertTerminalDimensions(cols: number, rows: number): void {
   if (
     !Number.isInteger(cols) ||
     !Number.isInteger(rows) ||
-    cols < 1 ||
-    rows < 1 ||
-    cols > 1000 ||
-    rows > 1000
+    cols < MIN_TERMINAL_DIMENSION ||
+    rows < MIN_TERMINAL_DIMENSION ||
+    cols > MAX_TERMINAL_DIMENSION ||
+    rows > MAX_TERMINAL_DIMENSION
   ) {
     throw new TerminalProtocolError(1008, 'Terminal dimensions are out of range');
   }
@@ -136,15 +97,8 @@ export function encodeStdinFrames(data: string | Uint8Array): Uint8Array[] {
 }
 
 export function decodeClientFrame(data: unknown): TerminalClientFrame {
-  const frame = toBytes(data);
-  if (frame.byteLength === 0) {
-    throw new TerminalProtocolError(1008, 'Terminal frame is empty');
-  }
-  const payload = frame.subarray(1);
-  if (payload.byteLength > MAX_TERMINAL_PAYLOAD_BYTES) {
-    throw new TerminalProtocolError(1009, 'Terminal frame exceeds the payload limit');
-  }
-  switch (frame[0]) {
+  const { channel, payload } = readFrame(data);
+  switch (channel) {
     case TERMINAL_CHANNEL.stdin:
       return { type: 'stdin', payload };
     case TERMINAL_CHANNEL.resize: {
@@ -164,6 +118,18 @@ export function decodeClientFrame(data: unknown): TerminalClientFrame {
 }
 
 export function decodeServerFrame(data: unknown): TerminalServerFrame {
+  const { channel, payload } = readFrame(data);
+  switch (channel) {
+    case TERMINAL_CHANNEL.stdout:
+      return { type: 'stdout', payload };
+    case TERMINAL_CHANNEL.status:
+      return decodeStatus(payload);
+    default:
+      throw new TerminalProtocolError(1008, 'Terminal server channel is invalid');
+  }
+}
+
+function readFrame(data: unknown): { channel: number; payload: Uint8Array } {
   const frame = toBytes(data);
   if (frame.byteLength === 0) {
     throw new TerminalProtocolError(1008, 'Terminal frame is empty');
@@ -172,14 +138,7 @@ export function decodeServerFrame(data: unknown): TerminalServerFrame {
   if (payload.byteLength > MAX_TERMINAL_PAYLOAD_BYTES) {
     throw new TerminalProtocolError(1009, 'Terminal frame exceeds the payload limit');
   }
-  switch (frame[0]) {
-    case TERMINAL_CHANNEL.stdout:
-      return { type: 'stdout', payload };
-    case TERMINAL_CHANNEL.status:
-      return decodeStatus(payload);
-    default:
-      throw new TerminalProtocolError(1008, 'Terminal server channel is invalid');
-  }
+  return { channel: frame[0], payload };
 }
 
 export function isTerminalReasonCode(value: unknown): value is TerminalReasonCode {
