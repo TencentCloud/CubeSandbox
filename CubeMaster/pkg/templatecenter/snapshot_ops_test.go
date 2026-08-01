@@ -86,6 +86,68 @@ func TestSubmitSandboxSnapshotReusesExistingRequest(t *testing.T) {
 	}
 }
 
+func TestSubmitSandboxSnapshotRetryMatchesExistingSnapshotID(t *testing.T) {
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	defer func() { store.db = oldDB }()
+
+	_, storedReq, err := buildSnapshotRequests(&sandboxtypes.CreateCubeSandboxReq{
+		Request:      &sandboxtypes.Request{RequestID: "req-existing"},
+		InstanceType: "cubebox",
+		Annotations:  map[string]string{},
+	}, "snap-existing")
+	if err != nil {
+		t.Fatalf("buildSnapshotRequests returned error: %v", err)
+	}
+	requestJSON, err := marshalSnapshotCreateRequest(snapshotCreateJobRequest{
+		RequestID:       "req-existing",
+		SandboxID:       "sb-1",
+		SnapshotID:      "snap-existing",
+		NodeID:          "node-1",
+		NodeIP:          "10.0.0.1",
+		DisplayName:     "snap",
+		SpecFingerprint: buildCommitTemplateSpecFingerprint(storedReq),
+	})
+	if err != nil {
+		t.Fatalf("marshalSnapshotCreateRequest returned error: %v", err)
+	}
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	origLoad := loadSandboxCreateRequestFn
+	defer func() { loadSandboxCreateRequestFn = origLoad }()
+	loadSandboxCreateRequestFn = func(ctx context.Context, sandboxID string) (*sandboxtypes.CreateCubeSandboxReq, error) {
+		return &sandboxtypes.CreateCubeSandboxReq{
+			InstanceType: "cubebox",
+			Annotations:  map[string]string{},
+		}, nil
+	}
+	patches.ApplyFunc(getTemplateImageJobByRequestID, func(ctx context.Context, requestID string) (*models.TemplateImageJob, error) {
+		return &models.TemplateImageJob{
+			TemplateID:  "snap-existing",
+			JobID:       "job-existing",
+			Operation:   JobOperationSnapshotCreate,
+			RequestJSON: requestJSON,
+		}, nil
+	})
+	patches.ApplyFunc(GetTemplateImageJobInfo, func(ctx context.Context, jobID string) (*sandboxtypes.TemplateImageJobInfo, error) {
+		return &sandboxtypes.TemplateImageJobInfo{
+			JobID:      jobID,
+			TemplateID: "snap-existing",
+			Status:     JobStatusReady,
+		}, nil
+	})
+
+	info, err := SubmitSandboxSnapshot(context.Background(), "req-existing", "sb-1", "node-1", "10.0.0.1", "snap")
+	if err != nil {
+		t.Fatalf("SubmitSandboxSnapshot returned error: %v", err)
+	}
+	if info == nil || info.JobID != "job-existing" {
+		t.Fatalf("unexpected job info: %#v", info)
+	}
+}
+
 func TestSubmitSandboxSnapshotResumesPendingExistingRequest(t *testing.T) {
 	oldDB := store.db
 	store.db = &gorm.DB{}
