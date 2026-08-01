@@ -16,6 +16,10 @@ RELEASE_DIR ?= $(ROOT_DIR)/_output/release
 MANUAL_DEPLOY_SCRIPT ?= $(ROOT_DIR)/deploy/one-click/deploy-manual.sh
 WEB_DIR ?= $(ROOT_DIR)/web
 CUBECOW_DIR ?= $(ROOT_DIR)/cubecow
+CUBECOW_TARGET_DIR ?= $(CUBECOW_DIR)/target
+# builder-run bind-mounts ROOT_DIR at /workspace. Map only a target directory
+# rooted in that checkout before exporting it to the nested builder command.
+CUBECOW_TARGET_DIR_IN_BUILDER := $(if $(filter $(ROOT_DIR),$(CUBECOW_TARGET_DIR)),/workspace,$(patsubst $(ROOT_DIR)/%,/workspace/%,$(CUBECOW_TARGET_DIR)))
 CUBELET_COW_THIRD_PARTY_DIR ?= $(ROOT_DIR)/Cubelet/third_party/cubecow
 COW_STATICLIB ?= $(CUBELET_COW_THIRD_PARTY_DIR)/lib/libcubecow.a
 COW_HEADER ?= $(CUBELET_COW_THIRD_PARTY_DIR)/include/cubecow.h
@@ -188,6 +192,7 @@ endif
 		-e CARGO_HOME=$(BUILDER_CONTAINER_HOME)/.cargo \
 		-e RUSTUP_HOME=/usr/local/rustup \
 		-e GOPATH=$(BUILDER_CONTAINER_HOME)/go \
+		-e CUBECOW_TARGET_DIR="$(CUBECOW_TARGET_DIR_IN_BUILDER)" \
 		-e BUILDER_CMD="$(BUILDER_CMD)" \
 		-e CUBE_VERSION \
 		-e CUBE_COMMIT \
@@ -204,8 +209,8 @@ endif
 cubecow-sdk:
 ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@mkdir -p "$(CUBELET_COW_THIRD_PARTY_DIR)/lib" "$(CUBELET_COW_THIRD_PARTY_DIR)/include"
-	cd "$(CUBECOW_DIR)" && cargo build --release -p cubecow
-	install -m 0644 "$(CUBECOW_DIR)/target/release/libcubecow.a" "$(COW_STATICLIB)"
+	cd "$(CUBECOW_DIR)" && cargo build --release -p cubecow --target-dir "$(CUBECOW_TARGET_DIR)"
+	install -m 0644 "$(CUBECOW_TARGET_DIR)/release/libcubecow.a" "$(COW_STATICLIB)"
 	install -m 0644 "$(CUBECOW_DIR)/include/cubecow.h" "$(COW_HEADER)"
 else
 	$(MAKE) builder-image
