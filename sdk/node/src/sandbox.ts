@@ -4,7 +4,7 @@
 import { fetch, type Dispatcher } from "undici";
 
 import { Commands } from "./commands.js";
-import { Config, resolveConfig, type ConfigOptions } from "./config.js";
+import { Config, NEVER_TIMEOUT, resolveConfig, type ConfigOptions } from "./config.js";
 import {
   ApiError,
   AuthenticationError,
@@ -580,6 +580,28 @@ export class Sandbox {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    await checkControlResponse(resp);
+  }
+
+  /** POST /sandboxes/:id/timeout — set sandbox idle timeout. */
+  async setTimeout(timeout: number): Promise<void> {
+    if (!Number.isFinite(timeout)) {
+      throw new Error(`timeout must be a finite number of seconds, got ${timeout}`);
+    }
+    if (timeout < 0 && timeout !== NEVER_TIMEOUT) {
+      throw new Error(`timeout must be >= 0 or NEVER_TIMEOUT (-1), got ${timeout}`);
+    }
+
+    const seconds = Math.ceil(timeout);
+    const resp = await controlFetch(
+      this.config,
+      `${this.config.apiUrl}/sandboxes/${this.sandboxId}/timeout`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ timeout: seconds }),
+      },
+    );
     await checkControlResponse(resp);
   }
 

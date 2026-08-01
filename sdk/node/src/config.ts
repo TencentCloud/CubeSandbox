@@ -68,6 +68,9 @@ function normalizeProxyScheme(scheme: string | undefined, port: number): string 
 /** Default sandbox TTL in seconds retained on {@link Config}. */
 export const DEFAULT_SANDBOX_TIMEOUT_S = 300;
 
+/** Sentinel value that disables sandbox idle timeout. */
+export const NEVER_TIMEOUT = -1;
+
 export class Config {
   apiUrl: string;
   apiKey: string | null;
