@@ -84,15 +84,19 @@ print(
     "(MicroVM) + path policy must cover that, not this argv gate"
 )
 
-# Residual (intentional): redirects are not shell-chaining meta for this demo.
-# Security note: allowlisted `echo` + `>` is an *arbitrary guest file write*
-# vector (e.g. under /tmp or worse). This host gate does not stop that —
-# MicroVM isolation + least privilege on the allowlist must.
+# Residual (intentional): simple redirects are not treated as shell-chaining
+# meta for this demo. Security note: allowlisted `echo` + `>` is an *arbitrary
+# guest file write* vector. MicroVM isolation + least privilege must cover it.
 if not is_allowlisted("echo artifact-ok > /tmp/x"):
     raise SystemExit("expected redirect form to remain allowlisted")
 print(
     "[out_of_scope] echo … > file remains allowlisted — arbitrary guest "
     "writes are a guest-isolation concern, not covered by argv gating"
 )
+
+# Bash-only constructs that keep argv0 allowlisted while doing more work —
+# refused by the host gate (see bot review on process substitution /dev/tcp).
+expect_denied("process_substitution", "cat <(echo hi)")
+expect_denied("dev_tcp", "echo x > /dev/tcp/127.0.0.1/80")
 
 print("LIMITS_DEMO_OK")

@@ -144,6 +144,15 @@ class ToolAllowlistTests(unittest.TestCase):
         self.assertTrue(is_allowlisted(cmd))
         self.assertEqual(assert_allowlisted(cmd), cmd)
 
+    def test_bash_constructs_denied(self) -> None:
+        # argv0 stays allowlisted, but guest bash would run more than argv0.
+        self.assertFalse(is_allowlisted("cat <(echo hi)"))
+        self.assertFalse(is_allowlisted("echo x > /dev/tcp/127.0.0.1/80"))
+        self.assertFalse(is_allowlisted("echo x > /dev/udp/127.0.0.1/53"))
+        with self.assertRaises(AllowlistDenied) as ctx:
+            assert_allowlisted("cat <(curl -s https://example.com)")
+        self.assertIn("bash-only constructs", str(ctx.exception))
+
     def test_unbalanced_quotes_denied(self) -> None:
         self.assertFalse(is_allowlisted("echo 'unterminated"))
         with self.assertRaises(AllowlistDenied) as ctx:

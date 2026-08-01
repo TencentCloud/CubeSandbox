@@ -13,9 +13,11 @@ Flow:
 
 Hardening vs a naive demo:
   - Denied turns never call Sandbox.create / commands.run
-  - /health sandboxes count must stay flat until the first allow
+  - /health ``sandboxes`` field is sampled as a smoke check (CubeAPI currently
+    returns 0 unconditionally — this does not prove gate correctness alone)
   - A deny *after* create proves the gate still runs mid-session
   - Airgap probe: curl temporarily allowlisted only to show egress still drops
+    (base image usually ships curl; skip branch is defensive)
   - Workspace artifact via allowlisted commands only (no sandbox.files.*)
   - Fail-closed assertions on counts and key observations
 
@@ -135,7 +137,9 @@ try:
         raise SystemExit(
             f"sandbox count changed during denies: {baseline} → {after_deny}"
         )
-    print("check: sandboxes unchanged through early denies")
+    # CubeAPI historically returns sandboxes=0 always; keep the equality check
+    # as a forward-compatible smoke signal, not a gate proof.
+    print("check: sandboxes field unchanged through early denies (smoke)")
 
     for name, command in EARLY_ALLOW:
         print(f"\n--- turn: {name} ---")
@@ -180,8 +184,8 @@ try:
         else:
             raise SystemExit(f"expected mid-session deny for {name}")
 
-    # Airgap proof when curl exists in the guest image.
-    # Lean toolbox builds omit curl (INSTALL_CURL=0); skip rather than force it.
+    # Airgap proof when curl is present (cubesandbox-base normally ships it).
+    # Skip branch remains for custom bases that omit curl.
     print("\n--- turn: airgap_probe ---")
     probe = "curl -s --max-time 3 https://example.com -o /dev/null"
     print(f"propose: {probe!r}")

@@ -32,7 +32,7 @@ platform control-plane pattern users copy — not another language runtime.
 
 | Item | Suggestion |
 |------|------------|
-| Writable layer | `--writable-layer-size 1G` (demos write under `/workspace`) |
+| Writable layer | `--writable-layer-size 1G` (demos write under `/tmp`; `/workspace` is chowned to uid 1000) |
 | Ports | expose/probe `49983` (envd from `cubesandbox-base`) |
 | Fan-out | keep `N≤2` on shared nodes |
 | CPU/mem | default template quotas are enough for echo/artifact demos |
@@ -123,9 +123,13 @@ prefer `cube-tool` so the guest profile is enforced.
 - Base image still has a shell; callers that bypass `cube-tool` are out of scope
   for the guest wrapper.
 - Allowlisting bare `cat` still permits `cat /etc/passwd` through the host gate.
-- Documented residuals (host gate is not a shell): `echo … > file` (guest write),
-  `cat < /etc/passwd` (input redirect), and glob chars `*` / `?` (guest shell
-  may expand them before the binary runs) — not treated as chaining metas here.
+- Documented residuals (host gate is not a full shell parser): simple redirects
+  (`echo … > file`, `cat < /etc/passwd`) and glob chars `*` / `?` (guest shell
+  may expand them before the binary runs).
+- Host gate **does** refuse bash process substitution (`<(…)`, `>(…)`) and
+  `/dev/tcp` / `/dev/udp` (argv0 would otherwise stay allowlisted while the
+  guest shell runs other programs or opens sockets).
 - Growing the allowlist needs `extra_binaries` + `allow_unsafe_allowlist_extension=True`.
-- Default build does not apt-install curl.
+- `cubesandbox-base` already includes `curl`; `INSTALL_CURL=1` is only for custom
+  bases that omit it. Demo “curl missing” branches are defensive fallbacks.
 - Fan-out creates real VMs — keep `N` small.

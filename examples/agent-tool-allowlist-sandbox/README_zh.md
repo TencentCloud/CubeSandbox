@@ -25,7 +25,7 @@ BYOI 镜像。与 `network-policy`（出口策略）同层——给用户可复�
 
 | 项 | 建议 |
 |----|------|
-| 可写层 | `--writable-layer-size 1G` |
+| 可写层 | `--writable-layer-size 1G`（演示脚本写 `/tmp`；镜像内 `/workspace` 已 chown 给 uid 1000） |
 | 端口 | expose/probe `49983`（`cubesandbox-base` 的 envd） |
 | 扇出 | 共享节点上保持 `N≤2` |
 | CPU/内存 | 默认模板配额即可跑 echo/artifact 演示 |
@@ -69,7 +69,10 @@ entrypoint）；本 Dockerfile 只 `EXPOSE` 该端口，不另起健康检查服
 
 - 基础镜像仍有 shell；绕过 `cube-tool` 直接调 bash/路径二进制，不在 guest wrapper 范围内。
 - 宿主白名单含裸 `cat` 时，`cat /etc/passwd` 仍过宿主门控。
-- 文档化残差（本门控不是 shell）：`echo … > file`（guest 写）、`cat < /etc/passwd`
-  （输入重定向）、以及 `*` / `?` 通配（可能由 guest shell 先展开）——此处不按串联元字符拦截。
+- 文档化残差（本门控不是完整 shell 解析器）：简单重定向（`echo … > file`、`cat < /etc/passwd`）
+  以及 `*` / `?` 通配（可能由 guest shell 先展开）。
+- 宿主门控**会拒绝** bash 进程替换（`<(…)` / `>(…)`）以及 `/dev/tcp` / `/dev/udp`
+  （否则 argv0 仍在白名单内，guest shell 却能拉起其他程序或开套接字）。
 - 扩白名单需 `extra_binaries` + `allow_unsafe_allowlist_extension=True`。
+- `cubesandbox-base` 已含 `curl`；`INSTALL_CURL=1` 仅用于自定义缺 curl 的 base。
 - Fan-out 会创建真实 VM，共享集群请保持小 `N`。

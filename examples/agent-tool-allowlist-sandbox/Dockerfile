@@ -9,13 +9,13 @@
 #
 #   docker build -t agent-tool-allowlist-sandbox:latest .
 #
-# Base image already ships coreutils (echo/cat/…). Skip apt unless INSTALL_CURL=1.
+# cubesandbox-base already ships coreutils and curl. INSTALL_CURL=1 is only a
+# defensive reinstall if a custom CUBE_BASE_IMAGE omits curl.
 
 ARG CUBE_BASE_IMAGE=ghcr.io/tencentcloud/cubesandbox-base:2026.16
 FROM ${CUBE_BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
-# Optional: docker build --build-arg INSTALL_CURL=1 …  (only for egress demos)
 ARG INSTALL_CURL=0
 
 RUN mkdir -p /etc/cube-sandbox /workspace /usr/local/bin \
@@ -29,8 +29,11 @@ COPY tool-profile.txt /etc/cube-sandbox/tool-profile.txt
 COPY guest/cube-tool /usr/local/bin/cube-tool
 COPY workspace/ /workspace/
 
+# Base image default user is ``user`` (uid 1000). Make /workspace writable for
+# demos that choose WORKDIR paths (most demos still write under /tmp).
 RUN sed -i 's/\r$//' /usr/local/bin/cube-tool /etc/cube-sandbox/tool-profile.txt \
     && chmod 0755 /usr/local/bin/cube-tool \
+    && chown -R 1000:1000 /workspace \
     && /usr/local/bin/cube-tool echo "cube-tool-ok" \
     && if /usr/local/bin/cube-tool bash -c id; then echo "cube-tool must deny bash" >&2; exit 1; fi \
     && test -f /workspace/README.txt

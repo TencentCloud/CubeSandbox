@@ -13,11 +13,14 @@ In scope:
   - Refuse path-style first tokens (``/bin/echo``, ``..\\\\echo``)
   - Refuse shell-operator / expansion characters (``;|&`$`` / newlines),
     including variable expansion via ``$``
+  - Refuse bash process substitution and ``/dev/tcp`` / ``/dev/udp`` forms that
+    keep argv0 allowlisted while the guest shell does more work
 
 Out of scope (stack separately):
   - Guest confinement for an *allowlisted* binary (``cat /etc/passwd`` still
     runs if ``cat`` is allowed — prefer ``cube-tool`` so the guest re-checks
     the profile; raw allowlisted binaries remain a least-privilege concern)
+  - Simple redirects / globs (``echo … > file``, ``*`` / ``?``) — documented residuals
   - Network egress (use ``allow_internet_access`` / CIDR policies)
   - Interpreters: default set excludes them; ``enable_code_execution=True``
     is an explicit privilege escalation (adds ``CODE_EXECUTION_BINARIES``)
@@ -52,8 +55,8 @@ CODE_EXECUTION_BINARIES: frozenset[str] = frozenset({"python3"})
 
 # Shell chaining / expansion markers. Rejected up front so a naive
 # first-token check cannot be bypassed via ``echo ok; bash -c ...``.
-# Parentheses / redirects are not listed: tools like ``python3 -c 'print(1)'``
-# need ``()``, and residual redirect risk belongs with guest least-privilege.
+# Bare ``()`` / ``<>`` are not listed: ``python3 -c 'print(1)'`` needs
+# parentheses, and simple redirects remain a documented residual.
 _SHELL_META_CHARS: frozenset[str] = frozenset(
     {
         ";",
@@ -66,6 +69,15 @@ _SHELL_META_CHARS: frozenset[str] = frozenset(
     }
 )
 
+# Bash-only constructs that keep argv0 allowlisted while running other
+# programs or opening sockets (envd runs commands via the guest shell).
+_BASH_CONSTRUCT_MARKERS: tuple[str, ...] = (
+    "<(",  # process substitution
+    ">(",
+    "/dev/tcp/",
+    "/dev/udp/",
+)
+
 
 class AllowlistDenied(PermissionError):
     """Raised when a command is not on the host-side tool allowlist."""
@@ -75,6 +87,10 @@ def _has_shell_meta(command: str) -> bool:
     # Conservative: scan the raw string before shlex, so quoted metas
     # (e.g. ``echo 'safe; string'``) are also refused.
     return any(ch in command for ch in _SHELL_META_CHARS)
+
+
+def _has_bash_construct(command: str) -> bool:
+    return any(marker in command for marker in _BASH_CONSTRUCT_MARKERS)
 
 
 def _split_argv(command: str) -> list[str] | None:
@@ -118,6 +134,8 @@ def is_allowlisted(
         return False
     if _has_shell_meta(command):
         return False
+    if _has_bash_construct(command):
+        return False
     parts = _split_argv(command)
     if not parts:
         return False
@@ -156,6 +174,11 @@ def assert_allowlisted(
             raise AllowlistDenied(
                 "command contains shell metacharacters "
                 f"(host gate refuses shell chaining): {command!r}"
+            )
+        if _has_bash_construct(command):
+            raise AllowlistDenied(
+                "command contains bash-only constructs "
+                f"(process substitution or /dev/tcp|/dev/udp): {command!r}"
             )
         parts = _split_argv(command)
         if parts is None:
