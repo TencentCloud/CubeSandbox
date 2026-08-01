@@ -1,0 +1,32 @@
+{
+  "title": "终端",
+  "subtitle": "沙箱 {{sandboxID}} 的交互式 Shell",
+  "open": "终端",
+  "openTooltip": "在此沙箱中打开终端",
+  "disabledTooltip": "沙箱需处于运行中状态才能打开终端",
+  "status": {
+    "connecting": "连接中…",
+    "connected": "已连接",
+    "reconnecting": "重连中…",
+    "disconnected": "已断开",
+    "exited": "Shell 已退出（退出码 {{code}}）",
+    "error": "连接失败"
+  },
+  "actions": {
+    "reconnect": "重新连接",
+    "close": "关闭",
+    "clear": "清屏",
+    "fullscreen": "切换全屏"
+  },
+  "errors": {
+    "ticket": "获取终端票据失败：{{message}}",
+    "notRunning": "沙箱未在运行，无法打开终端。",
+    "socket": "终端连接已断开。",
+    "unsupported": "当前浏览器不支持 WebSocket。"
+  },
+  "hints": {
+    "reconnectAvailable": "连接已断开，Shell 仍在运行——点击重连即可继续。",
+    "sessionGone": "Shell 已不可用，请关闭对话框后重新打开终端。",
+    "idleTimeout": "终端因空闲过久已被关闭。"
+  }
+}

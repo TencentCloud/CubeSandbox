@@ -10,7 +10,7 @@ export type ApiInit = RequestInit & {
 };
 
 const SDK_BASE = ''; // CubeAPI root path (E2B compatible)
-const OPS_BASE = '/opsapi/v1'; // CubeOps via nginx proxy
+export const OPS_BASE = '/opsapi/v1'; // CubeOps via nginx proxy
 
 function buildQuery(params?: ApiInit['params']): string {
   if (!params) return '';

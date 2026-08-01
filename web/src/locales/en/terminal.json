@@ -1,0 +1,32 @@
+{
+  "title": "Terminal",
+  "subtitle": "Interactive shell in sandbox {{sandboxID}}",
+  "open": "Terminal",
+  "openTooltip": "Open a terminal in this sandbox",
+  "disabledTooltip": "The sandbox must be running to open a terminal",
+  "status": {
+    "connecting": "Connecting…",
+    "connected": "Connected",
+    "reconnecting": "Reconnecting…",
+    "disconnected": "Disconnected",
+    "exited": "Shell exited (code {{code}})",
+    "error": "Connection failed"
+  },
+  "actions": {
+    "reconnect": "Reconnect",
+    "close": "Close",
+    "clear": "Clear",
+    "fullscreen": "Toggle fullscreen"
+  },
+  "errors": {
+    "ticket": "Could not obtain a terminal ticket: {{message}}",
+    "notRunning": "The sandbox is not running, so no terminal can be opened.",
+    "socket": "The terminal connection was lost.",
+    "unsupported": "This browser does not support WebSocket."
+  },
+  "hints": {
+    "reconnectAvailable": "The connection dropped. Your shell is still running — reconnect to resume it.",
+    "sessionGone": "The shell is no longer available. Close this dialog and open a new terminal.",
+    "idleTimeout": "The terminal was closed after being idle for too long."
+  }
+}

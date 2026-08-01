@@ -224,7 +224,22 @@ export const sandboxApi = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  /**
+   * Requests a one-time, short-lived ticket for the web terminal WebSocket.
+   * Browsers cannot attach an Authorization header to a WebSocket handshake,
+   * so the ticket (not the login JWT) is what travels in the query string.
+   */
+  createTerminalTicket: (id: string) =>
+    ops<TerminalTicketDto>(`/sdk/sandboxes/${encodeURIComponent(id)}/terminal`, {
+      method: 'POST',
+    }),
 };
+
+export interface TerminalTicketDto {
+  ticket: string;
+  /** WebSocket path relative to the ops API base, e.g. "/terminal/ws". */
+  wsPath: string;
+}
 
 export const templateApi = {
   list: () =>

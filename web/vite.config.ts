@@ -44,9 +44,11 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      // CubeOps (ops/admin endpoints) — rewrite /opsapi → /api
+      // CubeOps (ops/admin endpoints) — rewrite /opsapi → /api.
+      // ws is on for the web terminal's /opsapi/v1/terminal/ws upgrade.
       '/opsapi': {
         target: 'http://127.0.0.1:3010',
+        ws: true,
         rewrite: (path) => path.replace(/^\/opsapi/, '/api'),
       },
       // CubeAPI (SDK/E2B endpoints) — proxy specific API paths to avoid
