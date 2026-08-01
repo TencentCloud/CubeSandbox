@@ -438,7 +438,6 @@ func (s *TerminalService) resolveTerminalTarget(ctx context.Context, sandboxID, 
 
 	containers := make([]TerminalContainer, 0, len(sandbox.Containers))
 	selected := -1
-	primary := -1
 	for i, container := range sandbox.Containers {
 		containers = append(containers, TerminalContainer{
 			ContainerID: container.ContainerID,
@@ -446,20 +445,17 @@ func (s *TerminalService) resolveTerminalTarget(ctx context.Context, sandboxID, 
 			Type:        container.Type,
 			Status:      container.Status,
 		})
-		if container.ContainerID == requestedContainerID && requestedContainerID != "" {
+		if requestedContainerID != "" && container.ContainerID == requestedContainerID {
+			selected = i
+		} else if requestedContainerID == "" && selected == -1 &&
+			(container.Type == "sandbox" || container.ContainerID == sandbox.SandboxID) {
 			selected = i
 		}
-		if primary == -1 && (container.Type == "sandbox" || container.ContainerID == sandbox.SandboxID) {
-			primary = i
-		}
 	}
-	if requestedContainerID == "" {
-		selected = primary
-		if selected == -1 && len(sandbox.Containers) > 0 {
-			selected = 0
-		}
+	if requestedContainerID == "" && selected == -1 && len(sandbox.Containers) > 0 {
+		selected = 0
 	}
-	if selected < 0 || selected >= len(sandbox.Containers) {
+	if selected < 0 {
 		return nil, newTerminalError(http.StatusNotFound, "TARGET_NOT_FOUND", nil)
 	}
 	container := sandbox.Containers[selected]

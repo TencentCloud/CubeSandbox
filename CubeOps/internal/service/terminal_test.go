@@ -184,6 +184,48 @@ func TestIssueTerminalGrantRejectsNonRunningAndMissingContainer(t *testing.T) {
 	}
 }
 
+func TestIssueTerminalGrantSelectsRequestedAndFallbackContainers(t *testing.T) {
+	tests := []struct {
+		name        string
+		response    json.RawMessage
+		containerID string
+		want        string
+	}{
+		{
+			name:        "requested sidecar",
+			response:    runningTerminalTargetJSON(),
+			containerID: "container-b",
+			want:        "container-b",
+		},
+		{
+			name: "fallback first",
+			response: json.RawMessage(`{
+				"ret":{"ret_code":0},
+				"data":[{"sandbox_id":"sandbox-a","status":1,"containers":[
+					{"name":"worker","container_id":"container-a","status":1,"type":"worker"},
+					{"name":"sidecar","container_id":"container-b","status":1,"type":"sidecar"}
+				]}]
+			}`),
+			want: "container-a",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			svc := NewTerminalService(&fakeTerminalStore{}, &fakeTerminalCM{response: test.response}, testTerminalConfig())
+			svc.mint = func() (string, error) { return "AAECAwQFBgcICQoLDA0ODw", nil }
+			response, terminalErr := svc.IssueTerminalGrant(context.Background(), TerminalPrincipal{UserID: "admin", Role: "admin"}, TerminalGrantRequest{
+				SandboxID: "sandbox-a", ContainerID: test.containerID, Cols: 80, Rows: 24,
+			})
+			if terminalErr != nil {
+				t.Fatalf("IssueTerminalGrant: %v", terminalErr)
+			}
+			if response.ContainerID != test.want {
+				t.Fatalf("ContainerID = %q, want %q", response.ContainerID, test.want)
+			}
+		})
+	}
+}
+
 func TestIssueTerminalResumeGrantUsesOriginalUserAndTarget(t *testing.T) {
 	fixedNow := time.Date(2026, 7, 29, 22, 0, 0, 0, time.UTC)
 	fakeStore := &fakeTerminalStore{session: &store.TerminalSession{

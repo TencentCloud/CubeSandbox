@@ -560,22 +560,19 @@ func terminalRelayErrorKind(err error) string {
 }
 
 func writeTerminalError(connection *websocket.Conn, settings terminalRelaySettings, code string) error {
-	message, err := terminalprotocol.EncodeServerFrame(&cubebox.TerminalServerFrame{
+	return writeTerminalStatusFrame(connection, settings, &cubebox.TerminalServerFrame{
 		Frame: &cubebox.TerminalServerFrame_Error{Error: &cubebox.TerminalError{Code: code}},
-	}, settings.MaxFrameBytes)
-	if err != nil {
-		return err
-	}
-	if err := connection.SetWriteDeadline(time.Now().Add(settings.WriteDeadline)); err != nil {
-		return err
-	}
-	return connection.WriteMessage(websocket.BinaryMessage, message)
+	})
 }
 
 func writeTerminalCloseStatus(connection *websocket.Conn, settings terminalRelaySettings, reason string) error {
-	message, err := terminalprotocol.EncodeServerFrame(&cubebox.TerminalServerFrame{
+	return writeTerminalStatusFrame(connection, settings, &cubebox.TerminalServerFrame{
 		Frame: &cubebox.TerminalServerFrame_Close{Close: &cubebox.TerminalClose{Reason: reason}},
-	}, settings.MaxFrameBytes)
+	})
+}
+
+func writeTerminalStatusFrame(connection *websocket.Conn, settings terminalRelaySettings, frame *cubebox.TerminalServerFrame) error {
+	message, err := terminalprotocol.EncodeServerFrame(frame, settings.MaxFrameBytes)
 	if err != nil {
 		return err
 	}

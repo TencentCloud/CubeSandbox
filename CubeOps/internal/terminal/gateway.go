@@ -324,14 +324,12 @@ func (g *Gateway) finalizeFailedAttachment(ctx context.Context, grant *service.C
 }
 
 func (g *Gateway) finalizeOutcome(ctx context.Context, grant *service.ConsumedTerminalGrant, outcome relayOutcome) {
-	finalCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
 	if outcome.Detached {
-		if err := g.service.TouchTerminalSession(finalCtx, grant.SessionID, outcome.BytesIn, outcome.BytesOut); err != nil {
-			slog.Warn("terminal detached audit heartbeat failed", "session_id", grant.SessionID, "error", err)
-		}
+		g.touchDetached(ctx, grant.SessionID, outcome.BytesIn, outcome.BytesOut)
 		return
 	}
+	finalCtx, cancel := terminalAuditContext(ctx)
+	defer cancel()
 	reason := outcome.CloseReason
 	if reason == "" {
 		reason = "INTERNAL"
@@ -342,11 +340,15 @@ func (g *Gateway) finalizeOutcome(ctx context.Context, grant *service.ConsumedTe
 }
 
 func (g *Gateway) touchDetached(ctx context.Context, sessionID string, bytesIn, bytesOut int64) {
-	touchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	touchCtx, cancel := terminalAuditContext(ctx)
 	defer cancel()
 	if err := g.service.TouchTerminalSession(touchCtx, sessionID, bytesIn, bytesOut); err != nil {
 		slog.Warn("terminal detached audit heartbeat failed", "session_id", sessionID, "error", err)
 	}
+}
+
+func terminalAuditContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 }
 
 func (g *Gateway) originAllowed(r *http.Request) bool {
