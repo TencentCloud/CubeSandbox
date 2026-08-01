@@ -36,11 +36,17 @@ func Middleware(jm *JWTManager) gin.HandlerFunc {
 		}
 		// Replace the request context so downstream handlers can use
 		// UsernameFromContext(r.Context()) or c.GetString("username").
-		ctx := context.WithValue(c.Request.Context(), userContextKey, claims.Username)
-		c.Request = c.Request.WithContext(ctx)
+		c.Request = c.Request.WithContext(ContextWithUsername(c.Request.Context(), claims.Username))
 		c.Set("username", claims.Username)
 		c.Next()
 	}
+}
+
+// ContextWithUsername returns ctx carrying username as the authenticated user.
+// Middleware uses it on every authenticated request; tests use it to stand in
+// for the middleware without minting a JWT.
+func ContextWithUsername(ctx context.Context, username string) context.Context {
+	return context.WithValue(ctx, userContextKey, username)
 }
 
 // UsernameFromContext extracts the authenticated username from the request context.

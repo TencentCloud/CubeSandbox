@@ -65,6 +65,9 @@ type Config struct {
 	// Sandbox domain exposed to SDK clients; matches SDK handler's
 	// CUBE_API_SANDBOX_DOMAIN env so the /config endpoint stays in sync.
 	SandboxDomain string `yaml:"sandbox_domain"`
+
+	// Web terminal: kill a PTY after this much time without user input.
+	TerminalIdleTimeout time.Duration `yaml:"terminal_idle_timeout"`
 }
 
 // Load reads configuration from YAML + environment variables (env wins).
@@ -112,6 +115,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.SandboxDomain == "" {
 		cfg.SandboxDomain = "cube.app"
+	}
+	if cfg.TerminalIdleTimeout == 0 {
+		cfg.TerminalIdleTimeout = 30 * time.Minute
 	}
 
 	// JWT_SECRET is optional — if not set, it will be auto-generated and
@@ -313,6 +319,11 @@ func overrideFromEnv(cfg *Config) {
 	}
 	if v := os.Getenv("CUBE_API_SANDBOX_DOMAIN"); v != "" {
 		cfg.SandboxDomain = v
+	}
+	if v := os.Getenv("CUBE_OPS_TERMINAL_IDLE_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.TerminalIdleTimeout = d
+		}
 	}
 	if v := os.Getenv("JWT_ACCESS_TTL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {

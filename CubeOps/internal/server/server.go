@@ -16,6 +16,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/handler"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/service"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/terminal"
 )
 
 // Server is the CubeOps HTTP server.
@@ -96,10 +97,13 @@ func (s *Server) buildRouter() *gin.Engine {
 	// deletions can reverse-sync AgentHub registrations (matching the old
 	// Rust reverse_sync_agenthub_template that lived in CubeAPI).
 	sdkH := handler.NewSDKHandler(s.cm).WithAgentHubService(agenthubH.AgentHubService())
+	terminalH := terminal.NewHandler(s.cm, s.cfg.JWTSecret, s.cfg.SandboxDomain, s.cfg.TerminalIdleTimeout)
 
-	// Public (no auth) routes — login + refresh.
+	// Public (no auth) routes — login + refresh, plus the terminal WebSocket
+	// (authenticated by a one-time ticket issued on the authed group below).
 	public := r.Group("/api/v1")
 	authH.RegisterPublic(public)
+	terminalH.RegisterPublic(public)
 
 	// Authenticated routes. The session / logout / change-password endpoints
 	// are mounted here, behind the JWT middleware.
@@ -115,6 +119,7 @@ func (s *Server) buildRouter() *gin.Engine {
 	// the WebUI and the E2B-compatible clients hit different prefixes.
 	sdkGroup := authed.Group("/sdk")
 	sdkH.Register(sdkGroup)
+	terminalH.RegisterAuthed(sdkGroup)
 	sdkV2Group := authed.Group("/sdk/v2")
 	sdkV2Group.GET("/sandboxes", sdkH.ListSandboxes)
 	sdkV2Group.GET("/sandboxes/:id/logs", sdkH.GetSandboxLogs)
