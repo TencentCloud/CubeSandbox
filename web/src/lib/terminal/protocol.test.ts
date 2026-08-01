@@ -42,6 +42,7 @@ describe('cube-terminal.v1 protocol mirror', () => {
       'SESSION_LOST',
       'PROTOCOL_ERROR',
       'SERVER_DRAINING',
+      'SLOW_PRODUCER',
       'SLOW_CONSUMER',
       'INTERNAL',
     ]);

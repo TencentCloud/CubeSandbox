@@ -222,6 +222,41 @@ describe('TerminalSessionClient', () => {
     ]);
   });
 
+  it('never partially sends a multi-frame stdin payload over the outbound budget', async () => {
+    const harness = createHarness();
+    await openConnected(harness);
+    // The 3-frame payload (131078 bytes total) fits the budget on its own, but
+    // not on top of this bufferedAmount: 131067 + 131078 > 262144. Every single
+    // frame would individually fit, so only the whole-payload budget check can
+    // reject it — the point being nothing is sent at all.
+    harness.sockets[0].bufferedAmount = 131067;
+    expect(harness.client.sendInput('a'.repeat(MAX_TERMINAL_PAYLOAD_BYTES * 2 + 3))).toBe(false);
+    expect(harness.sockets[0].sent).toHaveLength(0);
+  });
+
+  it('retries a transient generic HTTP error on resume instead of permanently closing', async () => {
+    const harness = createHarness((request, index) => {
+      if (index > 0) {
+        throw new ApiError(502, 'Bad Gateway', {});
+      }
+      return connectionFor(new FakeWebSocket(), request);
+    });
+    await openConnected(harness);
+    harness.sockets[0].serverClose(1006);
+    await vi.advanceTimersByTimeAsync(1000);
+    await flush();
+    // The first resume grant POST failed with a generic 502 (no terminal code):
+    // the client must schedule the next retry, not close the session.
+    expect(harness.requests.length).toBeGreaterThan(1);
+    expect(lastSnapshot(harness).state.kind).toBe('detached');
+    await vi.runAllTimersAsync();
+    expect(harness.requests).toHaveLength(4);
+    expect(lastSnapshot(harness).state).toMatchObject({
+      kind: 'closed',
+      reason: 'SESSION_LOST',
+    });
+  });
+
   it('handles bounded Blob messages and disposes grant, socket, listeners, and timers', async () => {
     const captured: { signal?: AbortSignal } = {};
     const pendingRequester = vi.fn(

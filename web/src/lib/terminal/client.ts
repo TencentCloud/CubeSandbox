@@ -257,10 +257,15 @@ export class TerminalSessionClient {
       return false;
     }
     const frames = encodeStdinFrames(data);
+    // Budget the whole payload up front: a multi-frame input (e.g. a large
+    // paste split across 64 KiB frames) must be all-or-nothing. Sending the
+    // first frames and then hitting the budget would deliver a truncated
+    // command to the PTY with no way for the caller to recover.
+    const totalBytes = frames.reduce((sum, frame) => sum + frame.byteLength, 0);
+    if (socket.bufferedAmount + totalBytes > MAX_OUTBOUND_BUFFERED_BYTES) {
+      return false;
+    }
     for (const frame of frames) {
-      if (socket.bufferedAmount + frame.byteLength > MAX_OUTBOUND_BUFFERED_BYTES) {
-        return false;
-      }
       try {
         socket.send(frame);
       } catch {
@@ -649,7 +654,11 @@ function stableErrorCode(error: unknown): TerminalReasonCode | null {
       if (isTerminalReasonCode(code)) return code;
     }
     if (isTerminalReasonCode(error.message)) return error.message;
-    return 'INTERNAL';
+    // A generic ApiError (e.g. a transient 5xx or an nginx 502 without a
+    // terminal code) is not an authoritative terminal verdict. Returning null
+    // lets the resume path retry instead of permanently killing a session that
+    // may still be alive on the cubelet.
+    return null;
   }
   return null;
 }
