@@ -89,6 +89,19 @@ func TestEncodeServerFrame(t *testing.T) {
 	require.JSONEq(t, `{"type":"close","reason":"USER_CLOSED"}`, string(closed[1:]))
 }
 
+func TestEncodeServerFrameRejectsUnknownStatusValues(t *testing.T) {
+	for name, frame := range map[string]*cubebox.TerminalServerFrame{
+		"error": {Frame: &cubebox.TerminalServerFrame_Error{Error: &cubebox.TerminalError{Code: "FUTURE_ERROR"}}},
+		"close": {Frame: &cubebox.TerminalServerFrame_Close{Close: &cubebox.TerminalClose{Reason: "FUTURE_CLOSE"}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := EncodeServerFrame(frame, 64<<10); err == nil {
+				t.Fatal("EncodeServerFrame accepted an unknown status value")
+			}
+		})
+	}
+}
+
 func TestEncodeServerFrameRejectsOversizedStdout(t *testing.T) {
 	_, err := EncodeServerFrame(&cubebox.TerminalServerFrame{
 		Frame: &cubebox.TerminalServerFrame_Stdout{Stdout: &cubebox.TerminalStdout{Data: []byte("too large")}},

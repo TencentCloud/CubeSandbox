@@ -17,18 +17,6 @@ import (
 	cubebox "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 )
 
-const (
-	Subprotocol = "cube-terminal.v1"
-
-	ChannelStdin  byte = 0x00
-	ChannelStdout byte = 0x01
-	ChannelStderr byte = 0x02 // Reserved: TTY stderr is merged into stdout.
-	ChannelStatus byte = 0x03
-	ChannelResize byte = 0x04
-
-	maxStatusBytes = 4 << 10
-)
-
 type resizePayload struct {
 	Cols uint32 `json:"cols"`
 	Rows uint32 `json:"rows"`
@@ -76,7 +64,7 @@ func DecodeClientFrame(message []byte, maxFrameBytes int) (*cubebox.TerminalClie
 		if err := decodeStrictJSON(payload, &resize); err != nil {
 			return nil, fmt.Errorf("decode terminal resize: %w", err)
 		}
-		if resize.Cols == 0 || resize.Rows == 0 || resize.Cols > 1000 || resize.Rows > 1000 {
+		if resize.Cols < minTerminalDimension || resize.Rows < minTerminalDimension || resize.Cols > maxTerminalDimension || resize.Rows > maxTerminalDimension {
 			return nil, errors.New("terminal dimensions are out of range")
 		}
 		return &cubebox.TerminalClientFrame{
@@ -129,13 +117,19 @@ func EncodeServerFrame(frame *cubebox.TerminalServerFrame, maxFrameBytes int) ([
 		exitCode := payload.Exit.GetExitCode()
 		return encodeStatus(statusPayload{Type: "exit", ExitCode: &exitCode})
 	case *cubebox.TerminalServerFrame_Error:
-		if payload.Error == nil || payload.Error.GetCode() == "" {
+		if payload.Error == nil {
 			return nil, errors.New("terminal error frame is invalid")
+		}
+		if _, ok := terminalErrorCodes[payload.Error.GetCode()]; !ok {
+			return nil, errors.New("terminal error frame code is unknown")
 		}
 		return encodeStatus(statusPayload{Type: "error", Code: payload.Error.GetCode()})
 	case *cubebox.TerminalServerFrame_Close:
-		if payload.Close == nil || payload.Close.GetReason() == "" {
+		if payload.Close == nil {
 			return nil, errors.New("terminal close frame is invalid")
+		}
+		if _, ok := terminalCloseReasons[payload.Close.GetReason()]; !ok {
+			return nil, errors.New("terminal close frame reason is unknown")
 		}
 		return encodeStatus(statusPayload{Type: "close", Reason: payload.Close.GetReason()})
 	default:

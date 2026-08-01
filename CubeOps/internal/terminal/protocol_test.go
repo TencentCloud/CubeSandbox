@@ -130,6 +130,15 @@ func TestEncodeGatewayStatusUsesTerminalChannel(t *testing.T) {
 	}
 }
 
+func TestEncodeGatewayStatusRejectsUnknownValues(t *testing.T) {
+	if _, err := EncodeErrorStatus("FUTURE_ERROR"); err == nil {
+		t.Fatal("EncodeErrorStatus accepted an unknown code")
+	}
+	if _, err := EncodeCloseStatus("FUTURE_CLOSE"); err == nil {
+		t.Fatal("EncodeCloseStatus accepted an unknown reason")
+	}
+}
+
 func resizeMessage(payload string) []byte {
 	return append([]byte{ChannelResize}, []byte(payload)...)
 }

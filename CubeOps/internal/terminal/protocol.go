@@ -15,47 +15,6 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const (
-	Subprotocol = "cube-terminal.v1"
-	GrantPrefix = "cube-grant."
-
-	ChannelStdin  byte = 0x00
-	ChannelStdout byte = 0x01
-	ChannelStderr byte = 0x02
-	ChannelStatus byte = 0x03
-	ChannelResize byte = 0x04
-
-	maxStatusBytes = 4 << 10
-)
-
-var terminalErrorCodes = map[string]struct{}{
-	"TARGET_NOT_FOUND":   {},
-	"TARGET_NOT_RUNNING": {},
-	"LIMIT_EXCEEDED":     {},
-	"PROTOCOL_ERROR":     {},
-	"SHELL_NOT_FOUND":    {},
-	"SLOW_PRODUCER":      {},
-	"SLOW_CONSUMER":      {},
-	"SESSION_LOST":       {},
-	"INTERNAL":           {},
-	"SERVER_DRAINING":    {},
-	"SANDBOX_TRANSITION": {},
-}
-
-var terminalCloseReasons = map[string]struct{}{
-	"USER_CLOSED":        {},
-	"IDLE_TIMEOUT":       {},
-	"MAX_LIFETIME":       {},
-	"SANDBOX_TRANSITION": {},
-	"RUNTIME_EXITED":     {},
-	"SESSION_LOST":       {},
-	"PROTOCOL_ERROR":     {},
-	"SERVER_DRAINING":    {},
-	"SLOW_PRODUCER":      {},
-	"SLOW_CONSUMER":      {},
-	"INTERNAL":           {},
-}
-
 type ProtocolError struct {
 	CloseCode int
 	Message   string
@@ -118,7 +77,7 @@ func ValidateClientMessage(messageType int, message []byte, maxFrameBytes int) (
 		if err := decodeStrictJSON(payload, &resize); err != nil {
 			return ClientFrameInfo{}, &ProtocolError{CloseCode: websocket.ClosePolicyViolation, Message: "terminal resize payload is invalid"}
 		}
-		if resize.Cols == 0 || resize.Rows == 0 || resize.Cols > 1000 || resize.Rows > 1000 {
+		if resize.Cols < minTerminalDimension || resize.Rows < minTerminalDimension || resize.Cols > maxTerminalDimension || resize.Rows > maxTerminalDimension {
 			return ClientFrameInfo{}, &ProtocolError{CloseCode: websocket.ClosePolicyViolation, Message: "terminal dimensions are out of range"}
 		}
 		return ClientFrameInfo{}, nil
@@ -194,15 +153,15 @@ func validateStatus(status statusPayload) (ServerFrameInfo, error) {
 }
 
 func EncodeErrorStatus(code string) ([]byte, error) {
-	if code == "" {
-		return nil, errors.New("terminal error code is empty")
+	if _, ok := terminalErrorCodes[code]; !ok {
+		return nil, errors.New("terminal error code is unknown")
 	}
 	return encodeStatus(statusPayload{Type: "error", Code: code})
 }
 
 func EncodeCloseStatus(reason string) ([]byte, error) {
-	if reason == "" {
-		return nil, errors.New("terminal close reason is empty")
+	if _, ok := terminalCloseReasons[reason]; !ok {
+		return nil, errors.New("terminal close reason is unknown")
 	}
 	return encodeStatus(statusPayload{Type: "close", Reason: reason})
 }
