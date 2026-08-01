@@ -294,6 +294,9 @@ Other common parameters:
 CUBE_PROXY_HTTPS_PORT=443
 CUBE_PROXY_HTTP_PORT=80
 CUBE_PROXY_GRPC_PORT=9090
+# cube-proxy's /admin/* listener. cube-proxy uses host networking, so this
+# port must be free on the node; change it when something else holds 8082.
+CUBE_PROXY_ADMIN_PORT=8082
 # Deprecated: CUBE_PROXY_HOST_PORT is ignored; configure CUBE_PROXY_HTTP_PORT instead.
 CUBE_PROXY_CERT_DIR=/usr/local/services/cubetoolbox/cubeproxy/certs
 CUBE_PROXY_DNS_ANSWER_IP="${CUBE_SANDBOX_NODE_IP}"

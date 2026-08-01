@@ -281,6 +281,9 @@ CUBE_PROXY_DNS_ENABLE=1
 CUBE_PROXY_HTTPS_PORT=443
 CUBE_PROXY_HTTP_PORT=80
 CUBE_PROXY_GRPC_PORT=9090
+# cube-proxy 的 /admin/* 监听端口。cube-proxy 使用 host 网络，该端口必须在
+# 节点上空闲；当 8082 已被其它进程占用时，请修改此项。
+CUBE_PROXY_ADMIN_PORT=8082
 # 已废弃：CUBE_PROXY_HOST_PORT 会被忽略；如需调整启动后检查端口，请配置 CUBE_PROXY_HTTP_PORT。
 CUBE_PROXY_CERT_DIR=/usr/local/services/cubetoolbox/cubeproxy/certs
 CUBE_PROXY_DNS_ANSWER_IP="${CUBE_SANDBOX_NODE_IP}"
