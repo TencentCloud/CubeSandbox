@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec bash "$0" "$@"
+fi
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -88,6 +91,13 @@ grep -q -F '".terminal-internal-token"' "${ONE_CLICK_DIR}/lib/common.sh" \
 grep -q -F 'TF_VAR_terminal_internal_token="${TF_VAR_terminal_internal_token:-${TENCENTCLOUD_TERMINAL_INTERNAL_TOKEN:-}}"' \
   "${ONE_CLICK_DIR}/terraform/tencentcloud/create.sh" \
   || fail "Terraform create path does not preserve a direct TF_VAR override"
+! grep -q -F -- '--arg terminal_internal_token' \
+  "${ONE_CLICK_DIR}/terraform/tencentcloud/create.sh" \
+  || fail "Terraform create path exposes the terminal token in jq argv"
+# shellcheck disable=SC2016
+grep -q -F 'terminal_internal_token: $ENV.TF_VAR_terminal_internal_token' \
+  "${ONE_CLICK_DIR}/terraform/tencentcloud/create.sh" \
+  || fail "Terraform resolved variables do not read the terminal token from the process environment"
 
 tke_addons="${ONE_CLICK_DIR}/terraform/tencentcloud/tke-addons.tf"
 master_block="$(sed -n '/resource "kubernetes_deployment" "cubemaster"/,/resource "kubernetes_service" "cubemaster"/p' "${tke_addons}")"

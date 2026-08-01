@@ -26,6 +26,11 @@ render "$TMP_DIR/external.yaml" \
   --set controlPlane.master.enabled=false \
   --set-string terminal.existingSecret=external-terminal \
   --set-string terminal.secretKey=relay-token
+render "$TMP_DIR/overrides.yaml" \
+  --set terminal.enabled=false \
+  --set-string 'terminal.allowedOrigins[0]=https://ops.example.test' \
+  --set terminal.reconnectGraceSeconds=0 \
+  --set terminal.maxSessionsPerUser=3
 
 if helm template terminal-wiring "$CHART_DIR" \
   --set-string mysql.password=test \
@@ -38,7 +43,7 @@ if helm template terminal-wiring "$CHART_DIR" \
   exit 1
 fi
 
-python3 - "$TMP_DIR/generated.yaml" "$TMP_DIR/existing.yaml" "$TMP_DIR/external.yaml" <<'PY'
+python3 - "$TMP_DIR/generated.yaml" "$TMP_DIR/existing.yaml" "$TMP_DIR/external.yaml" "$TMP_DIR/overrides.yaml" <<'PY'
 import pathlib
 import re
 import sys
@@ -74,10 +79,40 @@ def assert_ref(doc, secret_name, key):
         raise SystemExit(f"missing terminal Secret reference {secret_name}/{key}")
 
 
+def assert_env(doc, expected):
+    for name, value in expected.items():
+        pattern = rf'(?ms)^\s*- name: {re.escape(name)}\s*\n\s+value: "([^"]*)"\s*$'
+        match = re.search(pattern, doc)
+        if not match:
+            raise SystemExit(f"missing terminal environment value {name}")
+        if match.group(1) != value:
+            raise SystemExit(f"terminal environment value {name}={match.group(1)!r}, expected {value!r}")
+
+
 generated = documents(sys.argv[1])
 generated_name = terminal_secret(generated)
 assert_ref(deployment(generated, "master"), generated_name, "internal-token")
-assert_ref(deployment(generated, "ops"), generated_name, "internal-token")
+generated_ops = deployment(generated, "ops")
+assert_ref(generated_ops, generated_name, "internal-token")
+assert_env(generated_ops, {
+    "CUBE_TERMINAL_ENABLED": "true",
+    "CUBE_TERMINAL_ALLOWED_ORIGINS": "",
+    "CUBE_TERMINAL_GRANT_TTL_SECONDS": "60",
+    "CUBE_TERMINAL_HANDSHAKE_TIMEOUT_SECONDS": "10",
+    "CUBE_TERMINAL_PING_INTERVAL_SECONDS": "20",
+    "CUBE_TERMINAL_PONG_TIMEOUT_SECONDS": "10",
+    "CUBE_TERMINAL_WRITE_DEADLINE_SECONDS": "10",
+    "CUBE_TERMINAL_IDLE_TIMEOUT_MINUTES": "30",
+    "CUBE_TERMINAL_MAX_LIFETIME_HOURS": "8",
+    "CUBE_TERMINAL_RECONNECT_GRACE_SECONDS": "30",
+    "CUBE_TERMINAL_REPLAY_BUFFER_BYTES": "262144",
+    "CUBE_TERMINAL_MAX_FRAME_BYTES": "65536",
+    "CUBE_TERMINAL_STDIN_QUEUE_FRAMES": "8",
+    "CUBE_TERMINAL_STDOUT_PENDING_BYTES": "262144",
+    "CUBE_TERMINAL_MAX_SESSIONS_PER_USER": "5",
+    "CUBE_TERMINAL_MAX_SESSIONS_PER_REPLICA": "200",
+    "CUBE_TERMINAL_DRAIN_TIMEOUT_SECONDS": "30",
+})
 
 existing = documents(sys.argv[2])
 if any(re.search(r"(?m)^  relay-token:", doc) for doc in existing if "\nkind: Secret\n" in f"\n{doc}\n"):
@@ -90,9 +125,17 @@ if any(re.search(r"(?m)^  relay-token:", doc) for doc in external if "\nkind: Se
     raise SystemExit("external control-plane mode rendered the operator-managed terminal Secret")
 assert_ref(deployment(external, "ops"), "external-terminal", "relay-token")
 
-for doc in generated + existing + external:
+overrides = documents(sys.argv[4])
+assert_env(deployment(overrides, "ops"), {
+    "CUBE_TERMINAL_ENABLED": "false",
+    "CUBE_TERMINAL_ALLOWED_ORIGINS": "https://ops.example.test",
+    "CUBE_TERMINAL_RECONNECT_GRACE_SECONDS": "0",
+    "CUBE_TERMINAL_MAX_SESSIONS_PER_USER": "3",
+})
+
+for doc in generated + existing + external + overrides:
     if "\nkind: ConfigMap\n" in f"\n{doc}\n" and "CUBE_TERMINAL_INTERNAL_TOKEN" in doc:
         raise SystemExit("terminal token reference leaked into a ConfigMap")
 
-print("terminal generated/existing Secret wiring OK")
+print("terminal configuration and generated/existing Secret wiring OK")
 PY

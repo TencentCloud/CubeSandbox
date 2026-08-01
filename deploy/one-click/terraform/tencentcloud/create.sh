@@ -4485,7 +4485,6 @@ write_resolved_tfvars_file() {
 		--arg cube_lifecycle_manager_heartbeat_ttl "${TF_VAR_cube_lifecycle_manager_heartbeat_ttl:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_HEARTBEAT_TTL:-15s}}" \
 		--arg cube_lifecycle_manager_discovery_refresh "${TF_VAR_cube_lifecycle_manager_discovery_refresh:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DISCOVERY_REFRESH:-3s}}" \
 		--arg cube_admin_token "${TF_VAR_cube_admin_token:-${TENCENTCLOUD_CUBE_ADMIN_TOKEN:-}}" \
-		--arg terminal_internal_token "${TF_VAR_terminal_internal_token:-${TENCENTCLOUD_TERMINAL_INTERNAL_TOKEN:-}}" \
 		--argjson cube_proxy_heartbeat_interval_ms "$(_number_or_default "${TF_VAR_cube_proxy_heartbeat_interval_ms:-${TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS:-5000}}" 5000)" \
 		'{
 			vpc_name: $vpc_name,
@@ -4537,7 +4536,7 @@ write_resolved_tfvars_file() {
 			cube_lifecycle_manager_heartbeat_ttl: $cube_lifecycle_manager_heartbeat_ttl,
 			cube_lifecycle_manager_discovery_refresh: $cube_lifecycle_manager_discovery_refresh,
 			cube_admin_token: $cube_admin_token,
-			terminal_internal_token: $terminal_internal_token,
+			terminal_internal_token: $ENV.TF_VAR_terminal_internal_token,
 			cube_proxy_heartbeat_interval_ms: $cube_proxy_heartbeat_interval_ms,
 		}
 		| with_entries(select(.value != "" and .value != null))' >"$tmp"
