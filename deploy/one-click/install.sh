@@ -54,6 +54,12 @@ if [[ -f "${ENV_FILE}" ]]; then
   esac
 fi
 
+# Keep an explicit operator value separate from the shared runtime env. The
+# installer later writes it to a root-only file read only by CubeMaster and
+# CubeOps, so unrelated services never inherit the credential.
+TERMINAL_INTERNAL_TOKEN_OVERRIDE="${CUBE_TERMINAL_INTERNAL_TOKEN:-}"
+UPGRADE_TERMINAL_INTERNAL_TOKEN=""
+
 DEPLOY_ROLE="$(one_click_deploy_role)"
 
 # ---- External MySQL / Redis support ----
@@ -113,6 +119,16 @@ UPGRADE_BACKUP_DIR=""
 if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
   RUNTIME_ENV_OLD="${INSTALL_PREFIX}/.one-click.env"
   ensure_file "${RUNTIME_ENV_OLD}"
+
+  if [[ -L "${INSTALL_PREFIX}/.terminal-internal-token" ]]; then
+    die "refusing symlink terminal token file: ${INSTALL_PREFIX}/.terminal-internal-token"
+  elif [[ -f "${INSTALL_PREFIX}/.terminal-internal-token" ]]; then
+    UPGRADE_TERMINAL_INTERNAL_TOKEN="$(<"${INSTALL_PREFIX}/.terminal-internal-token")"
+  else
+    # Migration from prerelease wiring that stored the generated plain-scalar
+    # token in the shared runtime env.
+    UPGRADE_TERMINAL_INTERNAL_TOKEN="$(read_env_key "${RUNTIME_ENV_OLD}" CUBE_TERMINAL_INTERNAL_TOKEN)"
+  fi
 
   preflight_upgrade \
     "${INSTALL_PREFIX}" \
@@ -1071,7 +1087,8 @@ rm -rf \
   "${INSTALL_PREFIX}/cube-lifecycle-manager" \
   "${INSTALL_PREFIX}/scripts" \
   "${INSTALL_PREFIX}/sql" \
-  "${INSTALL_PREFIX}/.one-click.env"
+  "${INSTALL_PREFIX}/.one-click.env" \
+  "${INSTALL_PREFIX}/.terminal-internal-token"
 
 mkdir -p "${INSTALL_PREFIX}"
 if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
@@ -1132,6 +1149,23 @@ fi
 # mktemp+mv, which replaces the inode; it sets 0600 on its temp file so this
 # mode is preserved across every later upsert rather than reverting to 0644.
 chmod 600 "${RUNTIME_ENV_FILE}"
+
+# Persist the credential outside .one-click.env because every CubeSandbox unit
+# reads that shared file. Only the CubeMaster and CubeOps start scripts read this
+# dedicated root-only file. Preserve an explicit override or upgrade-carried
+# value; generate it once for a fresh control-plane install.
+if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
+  CUBE_TERMINAL_INTERNAL_TOKEN="${TERMINAL_INTERNAL_TOKEN_OVERRIDE:-${UPGRADE_TERMINAL_INTERNAL_TOKEN}}"
+  if [[ -z "${CUBE_TERMINAL_INTERNAL_TOKEN}" ]]; then
+    CUBE_TERMINAL_INTERNAL_TOKEN="$(generate_terminal_internal_token)"
+  fi
+  validate_terminal_internal_token "${CUBE_TERMINAL_INTERNAL_TOKEN}"
+  write_terminal_internal_token_file \
+    "${INSTALL_PREFIX}/.terminal-internal-token" \
+    "${CUBE_TERMINAL_INTERNAL_TOKEN}"
+fi
+remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_TERMINAL_INTERNAL_TOKEN"
+unset CUBE_TERMINAL_INTERNAL_TOKEN TERMINAL_INTERNAL_TOKEN_OVERRIDE UPGRADE_TERMINAL_INTERNAL_TOKEN
 
 # Install version files so the installed system can report its version.
 if [[ -f "${SCRIPT_DIR}/VERSION.txt" ]]; then

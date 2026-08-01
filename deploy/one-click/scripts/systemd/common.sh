@@ -39,6 +39,30 @@ ensure_file() {
   [[ -f "${path}" ]] || die "required file not found: ${path}"
 }
 
+load_terminal_internal_token() {
+  local token_file="${TOOLBOX_ROOT}/.terminal-internal-token"
+  local token mode owner byte_count
+  local LC_ALL=C
+
+  if [[ ! -f "${token_file}" ]]; then
+    export CUBE_TERMINAL_INTERNAL_TOKEN=""
+    return 0
+  fi
+  [[ ! -L "${token_file}" ]] || die "terminal token file must not be a symlink: ${token_file}"
+  mode="$(stat -c '%a' -- "${token_file}")"
+  owner="$(stat -c '%u' -- "${token_file}")"
+  [[ "${owner}" == "0" && "${mode}" =~ ^[46]00$ ]] \
+    || die "terminal token file must be root-owned with mode 0400 or 0600: ${token_file}"
+  if grep -q '[[:cntrl:]]' "${token_file}"; then
+    die "terminal token file must contain one token without control characters"
+  fi
+  token="$(<"${token_file}")"
+  byte_count="$(wc -c <"${token_file}")"
+  [[ "${byte_count}" -eq "${#token}" && "${#token}" -ge 16 ]] \
+    || die "terminal token file must contain at least 16 bytes without a trailing newline"
+  export CUBE_TERMINAL_INTERNAL_TOKEN="${token}"
+}
+
 ensure_dir() {
   local path="$1"
   [[ -d "${path}" ]] || die "required directory not found: ${path}"

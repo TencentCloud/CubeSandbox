@@ -20,6 +20,9 @@ ensure_executable "${CUBEMASTER_BIN}"
 ensure_file "${CUBEMASTER_CFG}"
 
 export CUBE_MASTER_CONFIG_PATH="${CUBEMASTER_CFG}"
+# Shared with CubeOps through a dedicated root-only file. A missing file leaves
+# the internal relay disabled.
+load_terminal_internal_token
 if mkdir -p "${CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR}" >/dev/null 2>&1; then
   export CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR="${CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR}"
 else

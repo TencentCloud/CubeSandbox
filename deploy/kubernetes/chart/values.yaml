@@ -357,6 +357,13 @@ cubeOps:
       failureThreshold: 6
   resources: {}
 
+# Shared service-to-service credential for CubeOps -> CubeMaster terminal relay.
+# By default the chart creates a Secret and reuses it across upgrades. Set
+# existingSecret to reference an operator-managed Secret instead.
+terminal:
+  existingSecret: ""
+  secretKey: internal-token
+
 lifecycleManager:
   # Standalone sandbox auto-pause / auto-resume coordinator. Replaces the
   # obsolete in-process cube-proxy-sidecar. Enabled by default when CubeProxy

@@ -79,11 +79,11 @@ if command -v terraform >/dev/null 2>&1; then
 	if [ "${init_ok}" = "1" ]; then
 		# tke-addons.tf reads webui-nginx.conf via file(); that file is generated
 		# at build/run time and is gitignored, so drop in a throwaway placeholder
-		# (with the two upstream tokens the config expects) just for validate.
+		# (with every upstream token the config expects) just for validate.
 		placeholder=0
 		if [ ! -f webui-nginx.conf ]; then
 			placeholder=1
-			printf 'server { location /cubeapi/ { proxy_pass __WEB_UI_UPSTREAM__; } location /sandbox/ { proxy_pass __SANDBOX_PROXY_UPSTREAM__; } }\n' \
+			printf 'server { location /cubeapi/ { proxy_pass __WEB_UI_UPSTREAM__; } location /sandbox/ { proxy_pass __SANDBOX_PROXY_UPSTREAM__; } location /opsapi/ { proxy_pass __CUBE_OPS_UPSTREAM__/api/; } }\n' \
 				>webui-nginx.conf
 		fi
 		echo "==> terraform validate"

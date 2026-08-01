@@ -444,6 +444,18 @@ variable "cube_admin_token" {
   }
 }
 
+variable "terminal_internal_token" {
+  description = "Optional shared token used only by CubeOps and CubeMaster for the internal terminal relay. If empty, Terraform auto-generates one."
+  type        = string
+  default     = ""
+  sensitive   = true
+
+  validation {
+    condition     = var.terminal_internal_token == "" || length(var.terminal_internal_token) >= 16
+    error_message = "terminal_internal_token must be empty for auto-generation or at least 16 characters when explicitly set."
+  }
+}
+
 variable "cube_proxy_heartbeat_interval_ms" {
   description = "Heartbeat interval in milliseconds for cube-proxy Redis registration."
   type        = number

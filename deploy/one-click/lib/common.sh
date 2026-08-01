@@ -579,6 +579,42 @@ render_env_assignment_value() {
   printf '"%s"' "${value}"
 }
 
+generate_terminal_internal_token() {
+  local token
+  token="$(LC_ALL=C od -An -N32 -tx1 /dev/urandom | tr -d '[:space:]')"
+  [[ "${#token}" -eq 64 && "${token}" =~ ^[0-9a-f]{64}$ ]] \
+    || die "failed to generate Web Terminal internal token"
+  printf '%s' "${token}"
+}
+
+validate_terminal_internal_token() {
+  local token="${1-}"
+  local LC_ALL=C
+  [[ -n "${token}" ]] || die "Web Terminal internal token must not be empty"
+  [[ ! "${token}" =~ [[:cntrl:]] ]] \
+    || die "Web Terminal internal token must not contain control characters"
+  [[ "${#token}" -ge 16 ]] \
+    || die "Web Terminal internal token must be at least 16 bytes"
+}
+
+write_terminal_internal_token_file() {
+  local token_file="$1"
+  local token="$2"
+  local old_umask tmp_file
+  validate_terminal_internal_token "${token}"
+
+  old_umask="$(umask)"
+  umask 077
+  tmp_file="$(mktemp "${token_file}.XXXXXX")"
+  umask "${old_umask}"
+  if ! printf '%s' "${token}" >"${tmp_file}"; then
+    rm -f "${tmp_file}"
+    die "failed to write Web Terminal internal token file"
+  fi
+  chmod 600 "${tmp_file}"
+  mv -f "${tmp_file}" "${token_file}"
+}
+
 upsert_env_kv() {
   local env_file="$1"
   local key="$2"
@@ -621,6 +657,25 @@ upsert_env_kv() {
     printf '%s=%s\n' "${key}" "${rendered_value}" >> "${tmp_file}"
   fi
 
+  mv -f "${tmp_file}" "${env_file}"
+}
+
+remove_env_kv() {
+  local env_file="$1"
+  local key="$2"
+  local old_umask tmp_file
+  [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "invalid env key name: ${key}"
+  [[ -f "${env_file}" ]] || return 0
+
+  old_umask="$(umask)"
+  umask 077
+  tmp_file="$(mktemp "${env_file}.XXXXXX")"
+  umask "${old_umask}"
+  chmod 600 "${tmp_file}"
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    [[ "${line}" == "${key}="* ]] && continue
+    printf '%s\n' "${line}" >>"${tmp_file}"
+  done <"${env_file}"
   mv -f "${tmp_file}" "${env_file}"
 }
 
@@ -1318,6 +1373,7 @@ backup_before_upgrade() {
 
   for rel in \
     ".one-click.env" \
+    ".terminal-internal-token" \
     "env.example" \
     "VERSION.txt" \
     "release-manifest.json" \
@@ -1338,7 +1394,7 @@ backup_before_upgrade() {
       cp -a "${install_prefix}/${rel}" "${backup_dir}/${rel}"
       # Secret-bearing config files: restrict to owner-only in the backup.
       case "${rel}" in
-        ".one-click.env"|"env.example"|*conf.yaml|*config.toml|*.yaml|*.conf)
+        ".one-click.env"|".terminal-internal-token"|"env.example"|*conf.yaml|*config.toml|*.yaml|*.conf)
           chmod 600 "${backup_dir}/${rel}" 2>/dev/null || true
           ;;
       esac

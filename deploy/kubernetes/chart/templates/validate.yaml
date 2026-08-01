@@ -162,6 +162,15 @@
 {{- if and .Values.webui.enabled .Values.controlPlane.enabled (ne (include "cube.opsEnabled" .) "true") }}
 {{- fail "webui.enabled=true requires cubeOps.enabled=true (WebUI proxies /opsapi and SDK paths to CubeOps)" }}
 {{- end }}
+{{- if not .Values.terminal.secretKey }}
+{{- fail "terminal.secretKey must name the shared token key" }}
+{{- end }}
+{{- if not (regexMatch "^[A-Za-z0-9._-]+$" .Values.terminal.secretKey) }}
+{{- fail "terminal.secretKey must be a valid Kubernetes Secret data key" }}
+{{- end }}
+{{- if and .Values.externalControlPlane.enabled (eq (include "cube.opsEnabled" .) "true") (not .Values.terminal.existingSecret) }}
+{{- fail "externalControlPlane with CubeOps requires terminal.existingSecret so CubeOps and the external CubeMaster share the same token" }}
+{{- end }}
 {{- if eq (include "cube.opsEnabled" .) "true" }}
 {{- if not (include "cube.masterEndpoint" .) }}
 {{- fail "cubeOps.enabled=true requires a CubeMaster endpoint (controlPlane.master or externalControlPlane.masterEndpoint)" }}

@@ -589,11 +589,43 @@ prepare_webui_nginx_conf() {
 worker_processes auto;
 events { worker_connections 1024; }
 http {
+  map $http_upgrade $connection_upgrade {
+    default upgrade;
+    '' '';
+  }
   server {
     listen 80;
     root /usr/share/nginx/html;
     index index.html;
     location ^~ /sandbox/ { proxy_pass __SANDBOX_PROXY_UPSTREAM__; }
+    location = /opsapi/v1/terminal/ws {
+      proxy_http_version 1.1;
+      proxy_set_header Host $http_host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection $connection_upgrade;
+      proxy_set_header Accept-Encoding "";
+      proxy_read_timeout 7200s;
+      proxy_send_timeout 7200s;
+      proxy_buffering off;
+      proxy_request_buffering off;
+      gzip off;
+      proxy_pass __CUBE_OPS_UPSTREAM__/api/v1/terminal/ws;
+    }
+    location /opsapi/ {
+      proxy_http_version 1.1;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection $connection_upgrade;
+      proxy_read_timeout 300s;
+      proxy_send_timeout 300s;
+      proxy_pass __CUBE_OPS_UPSTREAM__/api/;
+    }
     location /cubeapi/ { proxy_pass __WEB_UI_UPSTREAM__/cubeapi/; }
     location / { try_files $uri $uri/ /index.html; }
   }
@@ -912,6 +944,7 @@ setup_env() {
 	export TF_VAR_cube_lifecycle_manager_heartbeat_ttl="${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_HEARTBEAT_TTL:-15s}"
 	export TF_VAR_cube_lifecycle_manager_discovery_refresh="${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DISCOVERY_REFRESH:-3s}"
 	export TF_VAR_cube_admin_token="${TENCENTCLOUD_CUBE_ADMIN_TOKEN:-}"
+	export TF_VAR_terminal_internal_token="${TF_VAR_terminal_internal_token:-${TENCENTCLOUD_TERMINAL_INTERNAL_TOKEN:-}}"
 	export TF_VAR_cube_proxy_heartbeat_interval_ms="${TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS:-5000}"
 	# Network exposure mode. Default (false) fronts cube-api/cube-proxy/cube-webui
 	# with VPC-internal CLBs; set to 'true' for public CLBs reachable from the
@@ -4237,6 +4270,7 @@ TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DEFAULT_IDLE_TIMEOUT='${TF_VAR_cube_lifecycl
 TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_HEARTBEAT_TTL='${TF_VAR_cube_lifecycle_manager_heartbeat_ttl:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_HEARTBEAT_TTL:-15s}}'
 TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DISCOVERY_REFRESH='${TF_VAR_cube_lifecycle_manager_discovery_refresh:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DISCOVERY_REFRESH:-3s}}'
 TENCENTCLOUD_CUBE_ADMIN_TOKEN='${TF_VAR_cube_admin_token:-${TENCENTCLOUD_CUBE_ADMIN_TOKEN:-}}'
+TENCENTCLOUD_TERMINAL_INTERNAL_TOKEN='${TF_VAR_terminal_internal_token:-${TENCENTCLOUD_TERMINAL_INTERNAL_TOKEN:-}}'
 TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS='${TF_VAR_cube_proxy_heartbeat_interval_ms:-${TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS:-5000}}'
 TENCENTCLOUD_ENABLE_PUBLIC_NETWORK='${TF_VAR_enable_public_network:-${TENCENTCLOUD_ENABLE_PUBLIC_NETWORK:-false}}'
 TENCENTCLOUD_LOCAL_BUNDLE='${LOCAL_BUNDLE:-${TENCENTCLOUD_LOCAL_BUNDLE:-}}'
@@ -4451,6 +4485,7 @@ write_resolved_tfvars_file() {
 		--arg cube_lifecycle_manager_heartbeat_ttl "${TF_VAR_cube_lifecycle_manager_heartbeat_ttl:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_HEARTBEAT_TTL:-15s}}" \
 		--arg cube_lifecycle_manager_discovery_refresh "${TF_VAR_cube_lifecycle_manager_discovery_refresh:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DISCOVERY_REFRESH:-3s}}" \
 		--arg cube_admin_token "${TF_VAR_cube_admin_token:-${TENCENTCLOUD_CUBE_ADMIN_TOKEN:-}}" \
+		--arg terminal_internal_token "${TF_VAR_terminal_internal_token:-${TENCENTCLOUD_TERMINAL_INTERNAL_TOKEN:-}}" \
 		--argjson cube_proxy_heartbeat_interval_ms "$(_number_or_default "${TF_VAR_cube_proxy_heartbeat_interval_ms:-${TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS:-5000}}" 5000)" \
 		'{
 			vpc_name: $vpc_name,
@@ -4502,6 +4537,7 @@ write_resolved_tfvars_file() {
 			cube_lifecycle_manager_heartbeat_ttl: $cube_lifecycle_manager_heartbeat_ttl,
 			cube_lifecycle_manager_discovery_refresh: $cube_lifecycle_manager_discovery_refresh,
 			cube_admin_token: $cube_admin_token,
+			terminal_internal_token: $terminal_internal_token,
 			cube_proxy_heartbeat_interval_ms: $cube_proxy_heartbeat_interval_ms,
 		}
 		| with_entries(select(.value != "" and .value != null))' >"$tmp"

@@ -12,13 +12,14 @@ locals {
   image_namespace = var.use_tcr ? (
     var.image_namespace != "" ? var.image_namespace : tencentcloud_tcr_namespace.cluster[0].name
   ) : var.image_namespace
-  cube_master_image = var.cubemaster_image != "" ? var.cubemaster_image : "${local.image_registry}/${local.image_namespace}/cube-master:${var.image_tag}"
-  cube_api_image    = var.cubeapi_image != "" ? var.cubeapi_image : "${local.image_registry}/${local.image_namespace}/cube-api:${var.image_tag}"
-  cube_ops_image    = var.cubeops_image != "" ? var.cubeops_image : "${local.image_registry}/${local.image_namespace}/cube-ops:${var.image_tag}"
-  cube_proxy_image  = var.cubeproxy_image != "" ? var.cubeproxy_image : "${local.image_registry}/${local.image_namespace}/cube-proxy:${var.image_tag}"
-  cube_webui_image  = var.webui_image != "" ? var.webui_image : "${local.image_registry}/${local.image_namespace}/cube-webui:${var.image_tag}"
-  cube_lcm_image    = var.cube_lifecycle_manager_image != "" ? var.cube_lifecycle_manager_image : "${local.image_registry}/${local.image_namespace}/cube-lifecycle-manager:${var.image_tag}"
-  cube_admin_token  = var.cube_admin_token != "" ? var.cube_admin_token : random_password.cube_admin_token[0].result
+  cube_master_image       = var.cubemaster_image != "" ? var.cubemaster_image : "${local.image_registry}/${local.image_namespace}/cube-master:${var.image_tag}"
+  cube_api_image          = var.cubeapi_image != "" ? var.cubeapi_image : "${local.image_registry}/${local.image_namespace}/cube-api:${var.image_tag}"
+  cube_ops_image          = var.cubeops_image != "" ? var.cubeops_image : "${local.image_registry}/${local.image_namespace}/cube-ops:${var.image_tag}"
+  cube_proxy_image        = var.cubeproxy_image != "" ? var.cubeproxy_image : "${local.image_registry}/${local.image_namespace}/cube-proxy:${var.image_tag}"
+  cube_webui_image        = var.webui_image != "" ? var.webui_image : "${local.image_registry}/${local.image_namespace}/cube-webui:${var.image_tag}"
+  cube_lcm_image          = var.cube_lifecycle_manager_image != "" ? var.cube_lifecycle_manager_image : "${local.image_registry}/${local.image_namespace}/cube-lifecycle-manager:${var.image_tag}"
+  cube_admin_token        = var.cube_admin_token != "" ? var.cube_admin_token : random_password.cube_admin_token[0].result
+  terminal_internal_token = var.terminal_internal_token != "" ? var.terminal_internal_token : random_password.terminal_internal_token[0].result
 
   # cube_db / cube_user are wired through Terraform (var.cube_db / var.cube_user)
   # so the MySQL account/database created in main.tf, the cube-master conf Secret
@@ -55,12 +56,43 @@ locals {
       worker_processes auto;
       events { worker_connections 1024; }
       http {
+        map $http_upgrade $connection_upgrade {
+          default upgrade;
+          '' '';
+        }
         server {
           listen 80;
           root /usr/share/nginx/html;
           index index.html;
           location ^~ /sandbox/ { proxy_pass __SANDBOX_PROXY_UPSTREAM__; }
-          location /opsapi/ { proxy_pass __CUBE_OPS_UPSTREAM__/api/; }
+          location = /opsapi/v1/terminal/ws {
+            proxy_http_version 1.1;
+            proxy_set_header Host $http_host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+            proxy_set_header Accept-Encoding "";
+            proxy_read_timeout 7200s;
+            proxy_send_timeout 7200s;
+            proxy_buffering off;
+            proxy_request_buffering off;
+            gzip off;
+            proxy_pass __CUBE_OPS_UPSTREAM__/api/v1/terminal/ws;
+          }
+          location /opsapi/ {
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+            proxy_read_timeout 300s;
+            proxy_send_timeout 300s;
+            proxy_pass __CUBE_OPS_UPSTREAM__/api/;
+          }
           location /cubeapi/v1/ {
             rewrite ^/cubeapi/v1/(.*)$ /api/v1/sdk/$1 break;
             proxy_pass __CUBE_OPS_UPSTREAM__;
@@ -133,6 +165,12 @@ locals {
 resource "random_password" "cube_admin_token" {
   count   = var.cube_admin_token == "" ? 1 : 0
   length  = 32
+  special = false
+}
+
+resource "random_password" "terminal_internal_token" {
+  count   = var.terminal_internal_token == "" ? 1 : 0
+  length  = 64
   special = false
 }
 
@@ -291,6 +329,12 @@ resource "kubernetes_secret" "cubemaster_conf" {
       auth = {
         enable = false
       }
+      terminal = {
+        internal_token         = ""
+        max_frame_bytes        = 65536
+        write_deadline_seconds = 10
+        close_timeout_seconds  = 15
+      }
       req_template_conf = {
         whitelist_req_tag = {
           WorkingDir  = true
@@ -383,6 +427,18 @@ resource "kubernetes_secret" "cubemaster_conf" {
   depends_on = [tencentcloud_mysql_instance.mysql, tencentcloud_redis_instance.redis]
 }
 
+resource "kubernetes_secret" "terminal_internal" {
+  count = local.deploy_addons ? 1 : 0
+  type  = "Opaque"
+  metadata {
+    name      = "cube-terminal-internal"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+  }
+  data = {
+    "internal-token" = local.terminal_internal_token
+  }
+}
+
 # cube-master Deployment
 resource "kubernetes_deployment" "cubemaster" {
   count      = local.deploy_addons ? 1 : 0
@@ -409,6 +465,15 @@ resource "kubernetes_deployment" "cubemaster" {
           env {
             name  = "CUBE_MASTER_CONFIG_PATH"
             value = "/usr/local/services/cubetoolbox/CubeMaster/conf.yaml"
+          }
+          env {
+            name = "CUBE_TERMINAL_INTERNAL_TOKEN"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.terminal_internal[0].metadata[0].name
+                key  = "internal-token"
+              }
+            }
           }
           port {
             name           = "http"
@@ -671,6 +736,15 @@ resource "kubernetes_deployment" "cube_ops" {
           env {
             name  = "CUBE_MASTER_ADDR"
             value = local.cubemaster_url
+          }
+          env {
+            name = "CUBE_TERMINAL_INTERNAL_TOKEN"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.terminal_internal[0].metadata[0].name
+                key  = "internal-token"
+              }
+            }
           }
           env {
             name  = "CUBE_SANDBOX_MYSQL_HOST"
