@@ -712,21 +712,10 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 		rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
 		return rsp, nil
 	}
-	terminalDrained := true
-	defer func() {
-		if !terminalDrained {
-			return
-		}
-		if ret.IsSuccessCode(rsp.Ret.RetCode) {
-			// The sandbox no longer exists after a successful destroy; drop the
-			// admission fence so the core does not accumulate one entry per
-			// destroyed sandbox. A deleted sandbox cannot be opened, so this is
-			// safe even though AllowSandbox is unconditional.
-			s.allowTerminalSandbox(req.SandboxID)
-			return
-		}
-		s.allowTerminalSandboxIfRunning(context.WithoutCancel(ctx), req.SandboxID)
-	}()
+	// Sandbox IDs are never reused. Clear the admission fence on every exit
+	// after a successful drain so failed destroy attempts remain retryable and
+	// successful destroys do not leak one map entry per sandbox.
+	defer s.allowTerminalSandbox(req.SandboxID)
 
 	if getErr == nil {
 		// Do not mark the sandbox as deleted until the paused preflight has

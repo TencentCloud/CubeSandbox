@@ -32,24 +32,25 @@ type TerminalServicesConfig struct {
 }
 
 func defaultTerminalServicesConfig() TerminalServicesConfig {
+	defaults := terminalcore.DefaultConfig()
 	return TerminalServicesConfig{
-		ReconnectGraceSeconds:    30,
-		ReplayBufferBytes:        256 << 10,
-		MaxFrameBytes:            64 << 10,
-		StdinQueueFrames:         8,
-		StdoutChunkBytes:         32 << 10,
-		StdoutPendingBytes:       256 << 10,
-		MaxSessions:              100,
-		MaxSessionsPerSandbox:    10,
-		MaxSessionsPerContainer:  5,
-		ResizeCoalesceMillis:     100,
-		OpenTimeoutSeconds:       10,
-		IdleTimeoutMinutes:       30,
-		MaxLifetimeHours:         8,
-		CleanupGraceSeconds:      2,
-		CleanupTimeoutSeconds:    10,
+		ReconnectGraceSeconds:    int(defaults.ReconnectGrace / time.Second),
+		ReplayBufferBytes:        defaults.ReplayBufferBytes,
+		MaxFrameBytes:            defaults.MaxFrameBytes,
+		StdinQueueFrames:         defaults.StdinQueueFrames,
+		StdoutChunkBytes:         defaults.StdoutChunkBytes,
+		StdoutPendingBytes:       defaults.StdoutPendingBytes,
+		MaxSessions:              defaults.MaxSessions,
+		MaxSessionsPerSandbox:    defaults.MaxSessionsSandbox,
+		MaxSessionsPerContainer:  defaults.MaxSessionsContainer,
+		ResizeCoalesceMillis:     int(defaults.ResizeCoalesce / time.Millisecond),
+		OpenTimeoutSeconds:       int(defaults.OpenTimeout / time.Second),
+		IdleTimeoutMinutes:       int(defaults.IdleTimeout / time.Minute),
+		MaxLifetimeHours:         int(defaults.MaxLifetime / time.Hour),
+		CleanupGraceSeconds:      int(defaults.CleanupGrace / time.Second),
+		CleanupTimeoutSeconds:    int(defaults.CleanupTimeout / time.Second),
 		DrainTimeoutSeconds:      15,
-		ReconcileIntervalSeconds: 300,
+		ReconcileIntervalSeconds: int(defaults.ReconcileInterval / time.Second),
 	}
 }
 

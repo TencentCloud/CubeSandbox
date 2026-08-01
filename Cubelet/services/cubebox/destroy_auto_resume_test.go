@@ -12,6 +12,7 @@ import (
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/cio"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -22,6 +23,7 @@ import (
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/services/cubebox/terminalcore"
 )
 
 // fakeDestroyContainer overrides Task and inherits the unused containerd
@@ -256,6 +258,9 @@ func TestDestroyKeepsAutoResumedSandboxMarkedWhenWorkflowDestroyFails(t *testing
 	sb.FirstContainer().Container = &fakeDestroyContainer{task: task}
 	s, manager, flow := newDestroyAutoResumeServiceForTest(sb)
 	flow.destroyErr = errors.New("workflow destroy failed")
+	terminalService := newTerminalTestService(t, terminalHandlerConfig())
+	s.terminal = terminalService.terminal
+	s.terminalDrainTimeout = time.Second
 
 	rsp := destroySandboxForTest(t, s, sb.ID)
 
@@ -268,6 +273,17 @@ func TestDestroyKeepsAutoResumedSandboxMarkedWhenWorkflowDestroyFails(t *testing
 	assert.Equal(t, int64(0), sb.GetStatus().Get().PausedAt)
 	assert.NotZero(t, sb.GetStatus().Get().StartedAt)
 	assert.Equal(t, []string{sb.ID, sb.ID}, manager.syncIDs)
+
+	attachment, _, err := s.terminal.Open(context.Background(), terminalcore.OpenRequest{
+		RequestID:   uuid.NewString(),
+		SandboxID:   sb.ID,
+		ContainerID: sb.ID,
+		SessionID:   uuid.NewString(),
+		Cols:        80,
+		Rows:        24,
+	})
+	require.NoError(t, err, "a failed destroy must clear the terminal admission fence")
+	require.NoError(t, attachment.Close(terminalcore.CloseUserClosed))
 }
 
 func TestDestroyRunningSandboxDoesNotResume(t *testing.T) {
