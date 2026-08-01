@@ -17,8 +17,9 @@ use crate::{
     },
     error::{AppError, AppResult},
     models::{
-        EgressRule, LogLevel as ModelLogLevel, NewSandbox, Sandbox, SandboxDetail, SandboxLog,
-        SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxState,
+        EgressRule, LogLevel as ModelLogLevel, NewSandbox, Sandbox, SandboxAutoResume,
+        SandboxDetail, SandboxLifecycleConfig, SandboxLog, SandboxLogEntry, SandboxLogs,
+        SandboxLogsV2Response, SandboxNetworkConfig, SandboxOnTimeout, SandboxState,
         SandboxVolumeMount,
     },
 };
@@ -155,6 +156,8 @@ impl SandboxService {
             template_id,
             timeout,
             lifecycle,
+            auto_pause: flat_auto_pause,
+            auto_resume: flat_auto_resume,
             allow_internet_access,
             network,
             metadata,
@@ -190,19 +193,11 @@ impl SandboxService {
         let cube_network_config =
             build_cube_network_config(allow_internet_access, network.as_ref())?;
 
-        // Derive the two CubeMaster-side bools from the e2b-shaped lifecycle
-        // object. Absent lifecycle keeps today's behaviour: idle sandboxes
-        // are killed (auto_pause = false), and auto_resume defaults off.
-        let (auto_pause, auto_resume) = lifecycle
-            .as_ref()
-            .map(|lc| {
-                use crate::models::SandboxOnTimeout;
-                (
-                    matches!(lc.on_timeout, SandboxOnTimeout::Pause),
-                    lc.auto_resume,
-                )
-            })
-            .unwrap_or((false, false));
+        let (auto_pause, auto_resume) = resolve_lifecycle_flags(
+            lifecycle.as_ref(),
+            flat_auto_pause,
+            flat_auto_resume.as_ref(),
+        );
 
         // Convert e2b-style volumeMounts into the CubeMaster wire format.
         // Volumes (pod-level declarations) are passed in the volumes field;
@@ -1012,6 +1007,34 @@ fn validate_mask_request_host(value: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Derive CubeMaster's `(auto_pause, auto_resume)` bools from whichever
+/// lifecycle representation the caller sent.
+///
+/// Two shapes reach this endpoint. `lifecycle` is CubeSandbox's native nested
+/// object. The e2b SDK never sends it — `Sandbox.create(lifecycle=...)` is
+/// flattened client-side into top-level `autoPause` / `autoResume` before the
+/// request goes out. Both are accepted; the nested object wins when present,
+/// since an explicit `lifecycle` can only come from a direct API caller who
+/// meant it. Neither present keeps today's behaviour: idle sandboxes are
+/// killed.
+pub(crate) fn resolve_lifecycle_flags(
+    lifecycle: Option<&SandboxLifecycleConfig>,
+    auto_pause: Option<bool>,
+    auto_resume: Option<&SandboxAutoResume>,
+) -> (bool, bool) {
+    if let Some(lc) = lifecycle {
+        return (
+            matches!(lc.on_timeout, SandboxOnTimeout::Pause),
+            lc.auto_resume,
+        );
+    }
+
+    (
+        auto_pause.unwrap_or(false),
+        auto_resume.is_some_and(SandboxAutoResume::enabled),
+    )
+}
+
 pub(crate) fn build_cube_network_config(
     allow_internet_access: Option<bool>,
     network: Option<&SandboxNetworkConfig>,
@@ -1090,9 +1113,9 @@ mod tests {
 
     use super::{
         build_cube_network_config, filter_by_metadata, from_cubemaster_info,
-        map_delete_cubemaster_err, map_volume_mounts, validate_mask_request_host, SandboxService,
-        RET_CODE_CONFLICT, RET_CODE_NOT_FOUND, RET_CODE_TASK_RESUME_FAILED,
-        RET_CODE_TASK_STATE_INVALID,
+        map_delete_cubemaster_err, map_volume_mounts, resolve_lifecycle_flags,
+        validate_mask_request_host, SandboxService, RET_CODE_CONFLICT, RET_CODE_NOT_FOUND,
+        RET_CODE_TASK_RESUME_FAILED, RET_CODE_TASK_STATE_INVALID,
     };
     use crate::cubemaster::{
         CreateSandboxRequest, CubeMasterClient, CubeMasterError, CubeVolumeMount,
@@ -1101,7 +1124,8 @@ mod tests {
     use crate::error::AppError;
     use crate::models::{
         EgressRule, EgressRuleAction, EgressRuleInject, EgressRuleMatch, NewSandbox,
-        SandboxNetworkConfig, SandboxState, SandboxVolumeMount,
+        SandboxAutoResume, SandboxLifecycleConfig, SandboxNetworkConfig, SandboxOnTimeout,
+        SandboxState, SandboxVolumeMount,
     };
     use axum::{
         extract::State,
@@ -1486,6 +1510,86 @@ mod tests {
         );
     }
 
+    /// The e2b Python SDK does not put `lifecycle` on the wire. It flattens
+    /// the user-facing object into top-level `autoPause` / `autoResume` before
+    /// calling `POST /sandboxes`. Unknown fields are dropped silently by serde,
+    /// so a missing binding here means auto-pause is ignored and the sandbox is
+    /// killed at timeout instead of paused.
+    #[test]
+    fn new_sandbox_deserializes_e2b_flat_lifecycle_fields() {
+        let body = serde_json::json!({
+            "templateID": "tpl-1",
+            "timeout": 30,
+            "autoPause": true,
+            "autoResume": { "enabled": true }
+        });
+
+        let new_sandbox: NewSandbox =
+            serde_json::from_value(body).expect("e2b create body should deserialize");
+
+        assert_eq!(new_sandbox.auto_pause, Some(true));
+        assert_eq!(
+            new_sandbox
+                .auto_resume
+                .as_ref()
+                .map(SandboxAutoResume::enabled),
+            Some(true)
+        );
+    }
+
+    /// `autoResume` is an object in the current SDK, but older releases and
+    /// hand-rolled clients send a bare bool. Accept both rather than 400-ing on
+    /// a shape difference that carries the same meaning.
+    #[test]
+    fn new_sandbox_accepts_bare_bool_auto_resume() {
+        let body = serde_json::json!({
+            "templateID": "tpl-1",
+            "autoResume": true
+        });
+
+        let new_sandbox: NewSandbox =
+            serde_json::from_value(body).expect("bare-bool autoResume should deserialize");
+
+        assert_eq!(
+            new_sandbox
+                .auto_resume
+                .as_ref()
+                .map(SandboxAutoResume::enabled),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn flat_lifecycle_fields_enable_pause_and_resume() {
+        let auto_resume = SandboxAutoResume::Config { enabled: true };
+        let flags = resolve_lifecycle_flags(None, Some(true), Some(&auto_resume));
+
+        assert_eq!(flags, (true, true));
+    }
+
+    /// `lifecycle` is CubeSandbox's native, richer form. When a caller sends it
+    /// explicitly it wins over the flattened compatibility fields. The e2b SDK
+    /// never sends both, so this only disambiguates direct API callers.
+    #[test]
+    fn nested_lifecycle_wins_over_flat_lifecycle_fields() {
+        let lifecycle = SandboxLifecycleConfig {
+            on_timeout: SandboxOnTimeout::Kill,
+            auto_resume: false,
+        };
+        let auto_resume = SandboxAutoResume::Enabled(true);
+
+        let flags = resolve_lifecycle_flags(Some(&lifecycle), Some(true), Some(&auto_resume));
+
+        assert_eq!(flags, (false, false));
+    }
+
+    #[test]
+    fn absent_lifecycle_fields_keep_kill_behaviour() {
+        let flags = resolve_lifecycle_flags(None, None, None);
+
+        assert_eq!(flags, (false, false));
+    }
+
     fn empty_create_request() -> CreateSandboxRequest {
         CreateSandboxRequest {
             request_id: "req-1".to_string(),
@@ -1695,6 +1799,8 @@ mod tests {
                 template_id: "tpl-1".to_string(),
                 timeout: Some(15),
                 lifecycle: None,
+                auto_pause: None,
+                auto_resume: None,
                 secure: None,
                 allow_internet_access: None,
                 network: None,
@@ -1770,6 +1876,8 @@ mod tests {
                 template_id: "tpl-1".to_string(),
                 timeout: Some(15),
                 lifecycle: None,
+                auto_pause: None,
+                auto_resume: None,
                 secure: None,
                 allow_internet_access: None,
                 network: None,
@@ -1837,6 +1945,8 @@ mod tests {
                 template_id: "tpl-1".to_string(),
                 timeout: Some(15),
                 lifecycle: None,
+                auto_pause: None,
+                auto_resume: None,
                 secure: None,
                 allow_internet_access: None,
                 network: None,

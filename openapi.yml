@@ -1493,6 +1493,20 @@ components:
           - boolean
           - 'null'
           description: SDK sends this as snake_case (known quirk).
+        autoPause:
+          type:
+          - boolean
+          - 'null'
+          description: |-
+            e2b SDK compatibility: the SDK flattens its user-facing `lifecycle`
+            object into top-level `autoPause` / `autoResume` before it hits the
+            wire, so `lifecycle` never arrives from an SDK caller. Ignored when
+            `lifecycle` is present.
+        autoResume:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxAutoResume'
+            description: See `auto_pause`. Only meaningful alongside `autoPause = true`.
         distributionScope:
           type:
           - array
@@ -1645,6 +1659,20 @@ components:
           type:
           - string
           - 'null'
+    SandboxAutoResume:
+      oneOf:
+      - type: boolean
+      - type: object
+        required:
+        - enabled
+        properties:
+          enabled:
+            type: boolean
+      description: |-
+        Wire shape of the top-level `autoResume` field the e2b SDK sends. Current
+        SDK releases send `{"enabled": true}`; older ones and hand-rolled clients
+        send a bare `true`. Both mean the same thing, so accept either rather than
+        rejecting on shape.
     SandboxDetail:
       type: object
       description: Detailed sandbox info returned by GET /sandboxes/{sandboxID}.
