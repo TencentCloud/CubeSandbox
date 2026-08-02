@@ -307,15 +307,20 @@ func (p *containerdPTYProcess) Delete(ctx context.Context) error {
 	if p.deleted {
 		return nil
 	}
+	defer func() {
+		// Release the containerd Wait registration and the local pipes even when
+		// Delete fails: the session cleanup kills and reaps the process before
+		// Delete runs, so these resources must not leak on the error path.
+		p.waitCancel()
+		if p.closeResources != nil {
+			p.closeResources()
+		}
+	}()
 	_, err := p.process.Delete(p.namespacedContext(ctx))
 	if err != nil && !isNotFound(err) {
 		return err
 	}
 	p.deleted = true
-	p.waitCancel()
-	if p.closeResources != nil {
-		p.closeResources()
-	}
 	return nil
 }
 

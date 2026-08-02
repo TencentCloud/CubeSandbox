@@ -645,6 +645,9 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 			if err := s.engine.CleanUp(ctx, cleanOpts); err != nil {
 				log.G(ctx).Fatalf("CleanUp:%s", err)
 			}
+			// The sandbox is gone; drop the admission fence the drain installed
+			// so the core does not accumulate one entry per destroyed sandbox.
+			s.allowTerminalSandbox(req.SandboxID)
 			return rsp, nil
 		}
 	}
@@ -711,9 +714,18 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 	}
 	terminalDrained := true
 	defer func() {
-		if terminalDrained && !ret.IsSuccessCode(rsp.Ret.RetCode) {
-			s.allowTerminalSandboxIfRunning(context.WithoutCancel(ctx), req.SandboxID)
+		if !terminalDrained {
+			return
 		}
+		if ret.IsSuccessCode(rsp.Ret.RetCode) {
+			// The sandbox no longer exists after a successful destroy; drop the
+			// admission fence so the core does not accumulate one entry per
+			// destroyed sandbox. A deleted sandbox cannot be opened, so this is
+			// safe even though AllowSandbox is unconditional.
+			s.allowTerminalSandbox(req.SandboxID)
+			return
+		}
+		s.allowTerminalSandboxIfRunning(context.WithoutCancel(ctx), req.SandboxID)
 	}()
 
 	if getErr == nil {

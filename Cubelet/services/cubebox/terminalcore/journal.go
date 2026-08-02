@@ -102,7 +102,16 @@ func (j *FileJournal) List() ([]JournalRecord, error) {
 	records := make([]JournalRecord, 0, len(entries))
 	var errs []error
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		if entry.IsDir() {
+			continue
+		}
+		if strings.HasSuffix(entry.Name(), ".tmp") {
+			// A crash between CreateTemp and the atomic rename left an
+			// incomplete file. It is never a valid record, so sweep it.
+			_ = os.Remove(filepath.Join(j.dir, entry.Name()))
+			continue
+		}
+		if !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
 		path := filepath.Join(j.dir, entry.Name())
