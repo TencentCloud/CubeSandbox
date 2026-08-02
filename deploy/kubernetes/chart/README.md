@@ -196,10 +196,30 @@ helm upgrade --install cube ./deploy/kubernetes/chart   -n cube-system   --creat
 
 > Do not store SSH passwords or node login credentials in this chart. Host mutation is performed through Kubernetes privileged Pods, not through SSH.
 
-## Use third-party MySQL or Redis
+## Use third-party MySQL, PostgreSQL, or Redis
 
-The chart installs `cube-mysql` StatefulSet only when `mysql.enabled=true` and `mysql.host` is empty.
-Set `mysql.host` to use an existing MySQL service; the chart will not install `cube-mysql`.
+`database.driver` picks the control-plane database engine, and each engine keeps its own connection section. The section that does not match the driver is ignored, and no value is inferred across sections.
+
+| Goal | Values |
+| --- | --- |
+| Built-in MySQL (default) | `database.driver: mysql`, `mysql.enabled: true`, `mysql.host: ""` |
+| External MySQL | `database.driver: mysql`, `mysql.host: <addr>` (plus `mysql.port` / `user` / `password` / `database`) |
+| External PostgreSQL | `database.driver: postgres`, `postgres.host: <addr>` (plus `postgres.port` / `user` / `password` / `database`) |
+
+The chart installs the `cube-mysql` StatefulSet only when the driver is `mysql`, `mysql.enabled=true`, and `mysql.host` is empty. `mysql.rootPassword` is used only by that StatefulSet.
+
+PostgreSQL is external-only: the chart never deploys it, so `postgres.host` is required. It then skips the built-in MySQL StatefulSet, writes `driver: postgres` into the CubeMaster config, and sets CubeOps/CubeAPI `DATABASE_URL` to a `postgresql://` URL sourced from the release Secret.
+
+```yaml
+database:
+  driver: postgres
+postgres:
+  host: "10.0.0.10"
+  port: 5432
+  user: postgres
+  password: "replace-me"
+  database: cube_mvp
+```
 
 The chart installs `cube-redis` StatefulSet only when `redis.enabled=true` and `redis.host` is empty.
 Set `redis.host` to use an existing Redis service; the chart will not install `cube-redis`.
@@ -305,7 +325,7 @@ The chart does not deliver a separate DB migration Job or image. CubeMaster owns
 - The chart does not package or maintain SQL files under `files/`; do not add migration SQL copies to the chart.
 - CubeMaster records applied versions in `goose_db_version` and serializes concurrent migration attempts through the migration lock implemented by CubeMaster.
 - There is no chart-managed SQL data seed, and the one-click single-node seed file `sql/002_seed_single_node.sql` is intentionally not rendered by the chart. Node registration must come from real Cube Node Pods selected by `placement.compute.nodeSelector`.
-- When using third-party MySQL, set `mysql.host` and ensure the configured MySQL user can create/alter tables in `mysql.database`.
+- When using a third-party database, set `mysql.host` or `postgres.host` (matching `database.driver`) and ensure the configured user can create/alter tables in that database.
 
 ## cubemastercli operational CLI
 

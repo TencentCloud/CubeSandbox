@@ -132,7 +132,8 @@ pub fn init_seccomp(scmp: &LinuxSeccomp) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skip_if_not_root;
+    use crate::{skip_if_no_cap, skip_if_not_root};
+    use caps::Capability;
     use libc::{dup3, process_vm_readv, EPERM, O_CLOEXEC};
     use std::io::Error;
     use std::ptr::null;
@@ -236,6 +237,8 @@ mod tests {
     #[test]
     fn test_init_seccomp() {
         skip_if_not_root!();
+        // Loading a seccomp filter (with no-new-privs unset) requires CAP_SYS_ADMIN.
+        skip_if_no_cap!(Capability::CAP_SYS_ADMIN);
 
         let mut scmp: oci::LinuxSeccomp = serde_json::from_str(TEST_DATA).unwrap();
         let mut arch: Vec<oci::Arch>;

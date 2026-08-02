@@ -1263,6 +1263,36 @@ func TestCleanupCreateResultRemovesHostDirSandboxPath(t *testing.T) {
 	require.NoDirExists(t, filepath.Join(hostDirBasePath, "hostdir-sb"))
 }
 
+func TestDestroyRemovesHostDirSandboxPath(t *testing.T) {
+	cfg := makeTestConfig(t)
+	cfg.StorageBackend = "cubecow"
+	s := &local{config: cfg, cowManager: &fakeCowVolumeManager{}}
+	require.NoError(t, s.init(&plugin.InitContext{Context: context.Background()}))
+
+	oldHostDirBasePath := hostDirBasePath
+	hostDirBasePath = t.TempDir()
+	t.Cleanup(func() { hostDirBasePath = oldHostDirBasePath })
+
+	sandboxID := "destroy-hostdir-sb"
+	bindPath := filepath.Join(hostDirBasePath, sandboxID, "rw", "hostdir-0")
+	require.NoError(t, os.MkdirAll(bindPath, 0755))
+
+	err := s.destroy(context.Background(), &StorageInfo{
+		SandboxID: sandboxID,
+		HostDirBackendInfos: map[string]*HostDirBackendInfo{
+			"volume/hostdir-0": {
+				VolumeName: "volume",
+				ShareDir:   filepath.Dir(bindPath),
+				BindPath:   bindPath,
+			},
+		},
+	}, &workflow.DestroyContext{
+		BaseWorkflowInfo: workflow.BaseWorkflowInfo{SandboxID: sandboxID},
+	})
+	require.NoError(t, err)
+	require.NoDirExists(t, filepath.Join(hostDirBasePath, sandboxID))
+}
+
 func TestCleanupHostDirVolumesResolvesSymlinkedBasePath(t *testing.T) {
 	// Simulate a deployment where an ancestor of hostDirBasePath is a symlink
 	// (e.g. /data -> /mnt/ssd/data). The kernel records fully resolved

@@ -184,15 +184,8 @@ func (s *session) resume(request OpenRequest) (*Attachment, Opened, error) {
 	s.resizeCols = request.Cols
 	s.resizeRows = request.Rows
 	s.resizeGeneration = s.generation
-	// A resume re-activates the session: reset the idle clock so the detached
-	// time spent offline does not count against the reconnected client.
-	s.lastActivity.Store(time.Now().UnixNano())
 	select {
 	case s.resizeNotify <- struct{}{}:
-	default:
-	}
-	select {
-	case s.activity <- struct{}{}:
 	default:
 	}
 	return attachment, opened, nil
@@ -232,18 +225,11 @@ func (s *session) handleOutput(data []byte) {
 	)
 	s.mu.Lock()
 	offset := s.ring.Write(data)
-	// Output counts as activity too: a session streaming output (tail -f,
-	// watch, a long build) with no keystrokes is alive and must not be
-	// reaped as idle.
-	s.lastActivity.Store(time.Now().UnixNano())
 	switch s.state {
 	case StateActive:
 		if s.attachment != nil && !s.attachment.enqueue(Event{Kind: EventStdout, Data: data, Offset: offset}) {
 			detached = s.attachment
 			s.attachment = nil
-			s.state = StateDetachedGrace
-			s.detachedAt = s.ring.End()
-			s.graceEpoch++
 		}
 	case StateClosing, StateExited:
 		if s.attachment != nil && !s.attachment.enqueue(Event{Kind: EventStdout, Data: data, Offset: offset}) {
@@ -253,19 +239,14 @@ func (s *session) handleOutput(data []byte) {
 	case StateDetachedGrace:
 		closeForOverflow = s.ring.Start() > s.detachedAt
 	}
-	epoch := s.graceEpoch
 	s.mu.Unlock()
 
-	select {
-	case s.activity <- struct{}{}:
-	default:
-	}
-
 	if detached != nil {
-		detached.finish(Event{Kind: EventError, Code: CodeSlowConsumer})
-		if s.currentState() == StateDetachedGrace {
-			s.startGraceTimer(epoch)
-		}
+		detached.finish(
+			Event{Kind: EventError, Code: CodeSlowConsumer},
+			Event{Kind: EventClose, Reason: CloseSlowConsumer},
+		)
+		s.requestClose(CloseSlowConsumer, nil)
 	}
 	if closeForOverflow {
 		s.requestClose(CloseSessionLost, nil)

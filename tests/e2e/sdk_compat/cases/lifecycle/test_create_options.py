@@ -6,7 +6,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
-
 from framework.assertions import assert_command_ok, assert_stdout_contains
 from framework.capabilities import LIFECYCLE
 from framework.lifecycle import metadata_from_info
@@ -27,7 +26,9 @@ def test_create_metadata_visible_in_info(sdk_sandbox):
     assert metadata.get("test_backend")
 
 
-@pytest.mark.sandbox_create_options(metadata={"sdk_compat_custom": "lifecycle-metadata"})
+@pytest.mark.sandbox_create_options(
+    metadata={"sdk_compat_custom": "lifecycle-metadata"}
+)
 def test_create_custom_metadata_visible_in_info(sdk_sandbox):
     metadata = metadata_from_info(sdk_sandbox.info().raw)
 
@@ -43,6 +44,16 @@ def test_create_env_vars_visible_to_command(sdk_sandbox, sdk_e2e_config):
     )
     assert_command_ok(result)
     assert result.stdout == "lifecycle-env"
+
+
+@pytest.mark.sandbox_create_options(envs={"SDK_COMPAT_E2E_VAR": "lifecycle-env-alias"})
+def test_create_envs_alias_visible_to_command(sdk_sandbox, sdk_e2e_config):
+    result = sdk_sandbox.run_command(
+        'printf "%s" "$SDK_COMPAT_E2E_VAR"',
+        timeout=sdk_e2e_config.command_timeout,
+    )
+    assert_command_ok(result)
+    assert result.stdout == "lifecycle-env-alias"
 
 
 @pytest.mark.sandbox_create_options(timeout=120)
@@ -66,7 +77,9 @@ def test_create_timeout_visible_in_info(sdk_sandbox):
         try:
             deadline = datetime.fromisoformat(str(end_at).replace("Z", "+00:00"))
         except ValueError as exc:
-            raise AssertionError(f"invalid endAt returned by sandbox info: {end_at!r}") from exc
+            raise AssertionError(
+                f"invalid endAt returned by sandbox info: {end_at!r}"
+            ) from exc
 
         if deadline.tzinfo is None:
             deadline = deadline.replace(tzinfo=timezone.utc)

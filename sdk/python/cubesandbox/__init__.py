@@ -3,12 +3,12 @@
 
 from .sandbox import Sandbox, NEVER_TIMEOUT
 from ._config import Config
-from ._models import Execution, Result, Logs, ExecutionError, OutputMessage, SnapshotInfo
+from ._models import Execution, Result, Logs, ExecutionError, OutputMessage, SnapshotInfo, SandboxInfo, SandboxState
 from ._exceptions import CubeSandboxError, SandboxNotFoundError, ApiError, TemplateNotFoundError, VolumeNotFoundError, FilesystemNotFoundError, PartialWriteError
 from ._commands import CommandResult
 from ._pty import Pty, PtyHandle, PtyOutput, PtySize
 from ._template import Template, TemplateInfo, TemplateBuild
-from ._volume import Volume, VolumeInfo
+from ._volume import Volume, VolumeInfo, VolumeMount
 from ._policy import Rule, Match, Action, Inject
 
 __all__ = [
@@ -21,6 +21,8 @@ __all__ = [
     "ExecutionError",
     "OutputMessage",
     "SnapshotInfo",
+    "SandboxInfo",
+    "SandboxState",
     "CubeSandboxError",
     "SandboxNotFoundError",
     "TemplateNotFoundError",
@@ -38,6 +40,7 @@ __all__ = [
     "TemplateBuild",
     "Volume",
     "VolumeInfo",
+    "VolumeMount",
     "Rule",
     "Match",
     "Action",

@@ -516,6 +516,9 @@ func assertArtifactGCLockCanBeReacquired(t *testing.T, sqlDB *sql.DB) {
 
 func newArtifactGCMySQL(t *testing.T) (*gorm.DB, *sql.DB) {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping Docker-backed MySQL test in short mode")
+	}
 	pool, err := dockertest.NewPool("")
 	if err != nil {
 		abortOrSkipArtifactGCDocker(t, "dockertest not available (%v)", err)

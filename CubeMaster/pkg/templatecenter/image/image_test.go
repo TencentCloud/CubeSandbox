@@ -60,7 +60,13 @@ func disableEngineClient(t *testing.T) {
 	})
 }
 
+func disableNativeRootfsExport(t *testing.T) {
+	t.Helper()
+	t.Setenv("CUBEMASTER_NATIVE_ROOTFS_EXPORT_ENABLED", "false")
+}
+
 func TestPrepareSourceImageSkipsPullWhenImageExistsLocally(t *testing.T) {
+	disableNativeRootfsExport(t)
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 	disableEngineClient(t)
@@ -98,6 +104,7 @@ func TestPrepareSourceImageSkipsPullWhenImageExistsLocally(t *testing.T) {
 }
 
 func TestPrepareSourceImagePullsAfterLocalInspectMiss(t *testing.T) {
+	disableNativeRootfsExport(t)
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 	disableEngineClient(t)
@@ -143,6 +150,7 @@ func TestPrepareSourceImagePullsAfterLocalInspectMiss(t *testing.T) {
 }
 
 func TestPrepareSourceImageReturnsPullErrorAfterInspectMiss(t *testing.T) {
+	disableNativeRootfsExport(t)
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 	disableEngineClient(t)
@@ -178,6 +186,7 @@ func TestPrepareSourceImageReturnsPullErrorAfterInspectMiss(t *testing.T) {
 }
 
 func TestPrepareSourceImageUsesSkopeoWhenDockerlessToolsAvailable(t *testing.T) {
+	disableNativeRootfsExport(t)
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 	withExecutableLookPath(t, func(file string) (string, error) {
@@ -425,6 +434,7 @@ func TestCreateSkopeoAuthFileNoCredentials(t *testing.T) {
 }
 
 func TestPrepareDockerlessSourceImageCleansAuthFileOnInspectFailure(t *testing.T) {
+	disableNativeRootfsExport(t)
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 	withExecutableLookPath(t, func(file string) (string, error) {
@@ -823,11 +833,13 @@ func TestEnsureArtifactBuildPreflightAllowsDockerlessWithoutDockerOrTar(t *testi
 }
 
 func TestEnsureArtifactBuildPreflightRequiresTarForDockerFallback(t *testing.T) {
+	disableNativeRootfsExport(t)
 	binDir := t.TempDir()
 	t.Setenv("PATH", binDir)
-	for _, cmd := range []string{"docker", "mkfs.ext4", "truncate", "cp", "skopeo"} {
+	for _, cmd := range []string{"docker", "truncate", "cp", "skopeo"} {
 		installFakeCommand(t, binDir, cmd, "exit 0")
 	}
+	installFakeCommand(t, binDir, "mkfs.ext4", "echo 'mkfs.ext4 help supports -d'")
 
 	err := EnsureArtifactBuildPreflight(context.Background())
 	if err == nil || !strings.Contains(err.Error(), `required command "tar"`) {
@@ -1112,6 +1124,7 @@ func TestBuildExt4Phase1FailureCleansStoreDir(t *testing.T) {
 }
 
 func TestPrepareLocalSourceUsesDockerlessWhenAvailable(t *testing.T) {
+	disableNativeRootfsExport(t)
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 	withExecutableLookPath(t, func(file string) (string, error) {
@@ -1148,6 +1161,7 @@ func TestPrepareLocalSourceUsesDockerlessWhenAvailable(t *testing.T) {
 }
 
 func TestPrepareLocalSourceRequiresLocalDockerImage(t *testing.T) {
+	disableNativeRootfsExport(t)
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 	withExecutableLookPath(t, func(file string) (string, error) {

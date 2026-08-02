@@ -4,6 +4,7 @@ version = "0.1.0"
 authors = ["The Kata Containers community <kata-dev@lists.katacontainers.io>"]
 edition = "2021"
 
+
 [dependencies]
 moniclock = "0.1.0"
 oci = { path = "libs/oci" }
@@ -30,7 +31,7 @@ futures = "0.3.17"
 
 # Async runtime
 tokio = { version = "1.45.1", features = ["full"] }
-tokio-vsock = "0.5.0"
+tokio-vsock = "0.7.2"
 
 netlink-sys = { version = "0.7.0", features = ["tokio_socket"] }
 rtnetlink = "0.14.0"
@@ -77,7 +78,9 @@ x86_64 = { version = "0.14.2", default-features = false, features = [
 ] }
 
 [dev-dependencies]
-tempfile = "3.1.0"
+# 3.20.0 is the release that renamed `TempDir::into_path` to `keep()`, which the
+# mount tests use — declare that minimum so the API is guaranteed present.
+tempfile = "3.20.0"
 
 [workspace]
 members = ["rustjail", "cube"]

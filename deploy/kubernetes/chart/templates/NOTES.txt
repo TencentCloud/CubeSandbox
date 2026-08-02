@@ -62,7 +62,7 @@ Cube Node DaemonSet:
 
 Cube Proxy Deployment:
   {{ include "cube.proxyName" . }}
-  Service ({{ .Values.cubeProxy.service.type | default "ClusterIP" }}): {{ include "cube.proxyServiceFQDN" . }}:{{ .Values.cubeProxy.ports.http.containerPort }}/{{ .Values.cubeProxy.ports.https.containerPort }}
+  Service ({{ .Values.cubeProxy.service.type | default "ClusterIP" }}): {{ include "cube.proxyServiceFQDN" . }}:{{ .Values.cubeProxy.ports.http.containerPort }}/{{ .Values.cubeProxy.ports.https.containerPort }}/{{ .Values.cubeProxy.ports.grpc.containerPort }} (http/https/grpc)
 {{- if .Values.cubeProxy.ingress.enabled }}
   Ingress: {{ include "cube.proxyName" . }} (TLS passthrough → CubeProxy; point external DNS at the Ingress)
 {{- end }}

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import warnings
 
 import pytest
 
@@ -99,6 +100,49 @@ def host_mount_metadata(options: list[dict]) -> dict[str, str]:
 def under_prefix(*parts: str) -> str:
     """Join path components under the allowed prefix."""
     return "/".join([ALLOWED_PREFIX, *(p.strip("/") for p in parts)])
+
+
+def is_missing_hostpath_source_error(exc: BaseException | str) -> bool:
+    """Whether ``exc`` looks like Cubelet failing because hostPath is absent.
+
+    Cubelet wraps mount(8) failures as ``bind mount <src> -> <dst>: ...``
+    (see ``hostdir.go``). A missing source typically surfaces ``No such file
+    or directory`` / ``ENOENT`` in that chain. Used by cases that assume a
+    single-node host after ``provision_host_dirs``: on multi-node local-disk
+    clusters the create may land where the source was never prepared.
+    """
+    text = str(exc).lower()
+    if "bind mount" not in text:
+        return False
+    return (
+        "no such file" in text
+        or "does not exist" in text
+        or "enoent" in text
+    )
+
+
+def warn_pass_missing_hostpath_source(
+    exc: BaseException | str,
+    *,
+    host_paths: list[str],
+    role: str,
+) -> bool:
+    """If ``exc`` is a missing hostPath source, emit a warning and return True.
+
+    Callers treat ``True`` as an early pass (cluster / unprepared node). Other
+    errors should be re-raised by the caller.
+    """
+    if not is_missing_hostpath_source_error(exc):
+        return False
+    warnings.warn(
+        f"host-mount {role}: hostPath source missing on the scheduled node "
+        f"({host_paths!r}); treating as pass (provision may have landed on "
+        f"another node). Use shared storage at the same path on every Cubelet "
+        f"to exercise the assertion. original error: {exc}",
+        UserWarning,
+        stacklevel=2,
+    )
+    return True
 
 
 def provision_host_dirs(backend: str, config, subpaths: list[str]) -> None:

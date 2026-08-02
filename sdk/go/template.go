@@ -5,6 +5,7 @@ package cubesandbox
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -23,6 +24,7 @@ type TemplateBuildJob struct {
 
 type TemplateInfo struct {
 	TemplateID          string `json:"templateID"`
+	Name                string `json:"name,omitempty"`
 	InstanceType        string `json:"instanceType,omitempty"`
 	Version             string `json:"version,omitempty"`
 	Status              string `json:"status,omitempty"`
@@ -32,6 +34,27 @@ type TemplateInfo struct {
 	JobID               string `json:"jobID,omitempty"`
 	NetworkType         string `json:"networkType,omitempty"`
 	AllowInternetAccess *bool  `json:"allowInternetAccess,omitempty"`
+}
+
+// UnmarshalJSON populates Name from aliases[0] when the server omits the
+// top-level name field (CubeSandbox returns only the aliases array). The
+// aliases array is parsed into a local helper and not exposed as a field.
+func (t *TemplateInfo) UnmarshalJSON(data []byte) error {
+	type alias TemplateInfo
+	var tmp struct {
+		alias
+		Aliases []string `json:"aliases"`
+	}
+	if err := json.Unmarshal(data, &tmp); err != nil {
+		return err
+	}
+	// CubeSandbox returns only the aliases array (no top-level name); derive
+	// Name from aliases[0] for E2B API compatibility.
+	if len(tmp.Aliases) > 0 {
+		tmp.Name = tmp.Aliases[0]
+	}
+	*t = TemplateInfo(tmp.alias)
+	return nil
 }
 
 type TemplateBuildStatus struct {
@@ -44,6 +67,7 @@ type TemplateBuildStatus struct {
 
 type BuildTemplateOptions struct {
 	Image               string
+	Name                string
 	InstanceType        string
 	WritableLayerSize   string
 	ExposedPorts        []uint16
@@ -142,6 +166,9 @@ func buildTemplatePayload(opts BuildTemplateOptions) (map[string]any, error) {
 
 	payload := map[string]any{
 		"image": image,
+	}
+	if name := strings.TrimSpace(opts.Name); name != "" {
+		payload["name"] = name
 	}
 	if instanceType := strings.TrimSpace(opts.InstanceType); instanceType != "" {
 		payload["instanceType"] = instanceType

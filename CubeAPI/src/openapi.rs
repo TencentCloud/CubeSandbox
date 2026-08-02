@@ -12,11 +12,14 @@ use utoipa::{
 use crate::{
     handlers,
     models::{
-        ApiError, CreateTemplateRequest, RebuildTemplateRequest, ResumedSandbox, Sandbox,
-        SandboxDetail, SandboxLogEntry, SandboxLogsV2Response, SandboxState, SandboxVolumeMount,
-        TemplateAliasLookupResponse, TemplateBuildJob, TemplateBuildStatus,
+        ApiError, ConnectSandbox, CreateSnapshotRequest, CreateTemplateRequest, NewSandbox,
+        NewVolume, RebuildTemplateRequest, RefreshRequest, ResumedSandbox, RollbackRequest,
+        RollbackResponse, Sandbox, SandboxDetail, SandboxLogEntry, SandboxLogs,
+        SandboxLogsV2Response, SandboxState, SandboxVolumeMount, SetTimeoutRequest, SnapshotInfo,
+        SnapshotListItem, TemplateAliasLookupResponse, TemplateBuildJob, TemplateBuildStatus,
         TemplateCompatAdoptResponseView, TemplateCompatMatrixView, TemplateCompatRowView,
-        TemplateCompatSummaryView, TemplateDetail, TemplateNodeCompatView, TemplateSummary,
+        TemplateCompatSummaryView, TemplateDetail, TemplateNodeCompatView, TemplateSummary, Volume,
+        VolumeAndToken,
     },
 };
 
@@ -62,12 +65,25 @@ impl Modify for SecurityAddon {
         handlers::templates::get_template_build_logs,
         handlers::templates::template_compat,
         handlers::templates::adopt_template_compat_baseline,
+        handlers::sandboxes::list_sandboxes,
+        handlers::sandboxes::create_sandbox,
         handlers::sandboxes::list_sandboxes_v2,
         handlers::sandboxes::get_sandbox,
         handlers::sandboxes::kill_sandbox,
         handlers::sandboxes::pause_sandbox,
         handlers::sandboxes::resume_sandbox,
-        handlers::sandboxes::get_sandbox_logs_v2
+        handlers::sandboxes::connect_sandbox,
+        handlers::sandboxes::get_sandbox_logs,
+        handlers::sandboxes::get_sandbox_logs_v2,
+        handlers::sandboxes::set_sandbox_timeout,
+        handlers::sandboxes::refresh_sandbox,
+        handlers::snapshots::create_snapshot,
+        handlers::snapshots::list_snapshots,
+        handlers::snapshots::rollback_sandbox,
+        handlers::volumes::list_volumes,
+        handlers::volumes::create_volume,
+        handlers::volumes::get_volume,
+        handlers::volumes::delete_volume
     ),
     components(schemas(
         ApiError,
@@ -89,15 +105,30 @@ impl Modify for SecurityAddon {
         crate::models::ListedSandbox,
         SandboxDetail,
         Sandbox,
+        NewSandbox,
+        ConnectSandbox,
         ResumedSandbox,
+        SetTimeoutRequest,
+        RefreshRequest,
         SandboxLogEntry,
-        SandboxLogsV2Response
+        SandboxLogs,
+        SandboxLogsV2Response,
+        CreateSnapshotRequest,
+        SnapshotInfo,
+        SnapshotListItem,
+        RollbackRequest,
+        RollbackResponse,
+        NewVolume,
+        Volume,
+        VolumeAndToken
     )),
     modifiers(&SecurityAddon),
     tags(
         (name = "health", description = "Health and liveness"),
         (name = "templates", description = "Template catalog"),
-        (name = "sandboxes", description = "Sandbox lifecycle and logs")
+        (name = "sandboxes", description = "Sandbox lifecycle and logs"),
+        (name = "snapshots", description = "Sandbox snapshots"),
+        (name = "volumes", description = "Persistent volumes")
     )
 )]
 struct ApiDoc;

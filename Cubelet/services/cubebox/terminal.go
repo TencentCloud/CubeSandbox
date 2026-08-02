@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -19,6 +20,8 @@ import (
 )
 
 const terminalEventOpened = "terminal_opened"
+
+var terminalSendTimeout = 10 * time.Second
 
 type terminalOpenedLogEvent struct {
 	RequestID   string
@@ -110,7 +113,7 @@ func (s *service) Terminal(stream grpc.BidiStreamingServer[cubebox.TerminalClien
 		})
 		return sendTerminalError(stream, terminalcore.CodeOf(err))
 	}
-	if err := stream.Send(&cubebox.TerminalServerFrame{
+	if err := sendTerminalFrame(stream, &cubebox.TerminalServerFrame{
 		Frame: &cubebox.TerminalServerFrame_Opened{Opened: &cubebox.TerminalOpened{
 			SessionId:       opened.SessionID,
 			ReplayFrom:      opened.ReplayFrom,
@@ -143,7 +146,7 @@ func (s *service) Terminal(stream grpc.BidiStreamingServer[cubebox.TerminalClien
 		if frame == nil {
 			continue
 		}
-		if err := stream.Send(frame); err != nil {
+		if err := sendTerminalFrame(stream, frame); err != nil {
 			attachment.Detach()
 			return nil
 		}
@@ -192,7 +195,7 @@ func (s *service) receiveTerminalFrames(
 				code := terminalcore.CodeOf(err)
 				attachment.NotifyError(code)
 				if code == terminalcore.CodeSlowProducer {
-					_ = attachment.Close(terminalcore.CloseSlowProducer)
+					continue
 				}
 				return
 			}
@@ -207,7 +210,11 @@ func (s *service) receiveTerminalFrames(
 				return
 			}
 		case *cubebox.TerminalClientFrame_Close:
-			_ = attachment.Close(terminalcore.CloseUserClosed)
+			if payload.Close == nil {
+				protocolError()
+				return
+			}
+			_ = attachment.Close(payload.Close.GetReason())
 			return
 		default:
 			protocolError()
@@ -220,9 +227,30 @@ func sendTerminalError(
 	stream grpc.BidiStreamingServer[cubebox.TerminalClientFrame, cubebox.TerminalServerFrame],
 	code string,
 ) error {
-	return stream.Send(&cubebox.TerminalServerFrame{
+	return sendTerminalFrame(stream, &cubebox.TerminalServerFrame{
 		Frame: &cubebox.TerminalServerFrame_Error{Error: &cubebox.TerminalError{Code: code}},
 	})
+}
+
+func sendTerminalFrame(
+	stream grpc.BidiStreamingServer[cubebox.TerminalClientFrame, cubebox.TerminalServerFrame],
+	frame *cubebox.TerminalServerFrame,
+) error {
+	result := make(chan error, 1)
+	// gRPC cancels the stream context when the handler returns. A timed-out
+	// Send therefore remains the only writer and is released by transport
+	// cancellation as Terminal returns; the handler never starts a later Send.
+	go func() { result <- stream.Send(frame) }()
+	timer := time.NewTimer(terminalSendTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-result:
+		return err
+	case <-stream.Context().Done():
+		return stream.Context().Err()
+	case <-timer.C:
+		return context.DeadlineExceeded
+	}
 }
 
 func terminalServerFrame(event terminalcore.Event) *cubebox.TerminalServerFrame {

@@ -163,7 +163,7 @@ Environment variables:
 | Variable           | Default             | Purpose                                              |
 | ------------------ | ------------------- | ---------------------------------------------------- |
 | `ENVD_PORT`        | `49983`             | Port `envd` listens on.                              |
-| `ENVD_EXTRA_ARGS`  | *(empty)*           | Extra flags passed after `-port`.                    |
+| `ENVD_EXTRA_ARGS`  | *(empty)*           | Extra flags passed after `-port`. `-isnotfc` is appended automatically if not already present, to skip Firecracker MMDS lookup. |
 | `ENVD_LOG_FILE`    | `/var/log/envd.log` | File that captures envd stdout/stderr. Use `-` to inherit the container stdio. |
 | `ENVD_BIN`         | `/usr/bin/envd`     | Override if you install envd elsewhere.              |
 
@@ -178,7 +178,12 @@ control to your main process:
 # your-entrypoint.sh
 
 # Start envd in the background.
-/usr/bin/envd -port 49983 >/var/log/envd.log 2>&1 &
+# -isnotfc is REQUIRED: it tells envd to skip the Firecracker MMDS lookup
+# at 169.254.169.254. CubeSandbox does not use Firecracker, so the MMDS
+# service does not exist. Without this flag envd will attempt to access
+# the non-existent MMDS, which may cause various problems such as network
+# timeouts, /init delays, or env_vars injection failures.
+/usr/bin/envd -port 49983 -isnotfc >/var/log/envd.log 2>&1 &
 
 # ... your usual startup sequence ...
 exec "$@"
@@ -221,6 +226,7 @@ docker exec "$cid" cat /var/log/envd.log
 | Template creation fails the readiness probe   | envd did not start / started on the wrong port                        | Ensure `ENTRYPOINT` invokes `cube-entrypoint.sh` **or** your own script runs `envd -port 49983 &` before `exec`. |
 | `curl :49983/health` returns `000`            | Nothing is listening; entrypoint replaced                             | Check <code v-pre>docker inspect --format '{{json .Config.Entrypoint}}'</code>; keep `cube-entrypoint.sh` as the wrapper. |
 | envd exits immediately                        | Version mismatch between binary and kernel/init expectations          | Verify with `docker exec ... /usr/bin/envd -version`; re-copy from the pinned base tag. |
+| envd `/init` slow or `create_time env_vars` fail | `-isnotfc` flag missing; envd attempts invalid MMDS access at `169.254.169.254` | Use `cube-entrypoint.sh` (appends `-isnotfc` automatically), or add `-isnotfc` to the command line when starting envd manually. |
 | Port 49983 conflicts with your own service    | Your app also listens on 49983                                        | Move your app to a different port and expose both with `--expose-port`.             |
 | `sudo: command not found` in your CMD         | You started `FROM` a `-slim` / `-alpine` image without sudo           | Either `apt-get install -y sudo`, or drop `sudo` from your entrypoint — `cube-entrypoint.sh` doesn't require it. |
 | Template creation times out in `PULLING`      | Registry unreachable from Cube nodes                                  | Push to a registry the cluster can reach, or supply `--registry-username` / `--registry-password`. |

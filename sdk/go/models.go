@@ -7,7 +7,8 @@ import "time"
 
 // Sandbox is a connected CubeSandbox instance returned by create/connect.
 type Sandbox struct {
-	client *Client `json:"-"`
+	client       *Client       `json:"-"`
+	cloneCleanup *cloneCleanup `json:"-"`
 
 	TemplateID         string `json:"templateID"`
 	SandboxID          string `json:"sandboxID"`
@@ -40,6 +41,8 @@ type SandboxInfo struct {
 type VolumeMount struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
+	// ReadOnly is false when the API omits the field (CubeAPI skips serializing false).
+	ReadOnly bool `json:"readOnly,omitempty"`
 }
 
 type NetworkOptions struct {

@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -219,25 +221,82 @@ func TestSnapshotLifecycle(t *testing.T) {
 	}
 }
 
+func TestCloneDeletesSnapshotAfterLastCloneIsKilled(t *testing.T) {
+	var created atomic.Int32
+	var snapshotDeletes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/snapshots"):
+			fmt.Fprint(w, `{"snapshotID":"snap-clone"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes":
+			id := created.Add(1)
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, sandboxJSON(fmt.Sprintf("clone-%d", id), "snap-clone"))
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/sandboxes/"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete && r.URL.Path == "/templates/snap-clone":
+			snapshotDeletes.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	source := &Sandbox{client: client, SandboxID: testSandboxID}
+	clones, err := source.Clone(context.Background(), CloneOptions{N: 2})
+	if err != nil {
+		t.Fatalf("Clone: %v", err)
+	}
+	if snapshotDeletes.Load() != 0 {
+		t.Fatalf("snapshot deleted before clones were killed")
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, len(clones))
+	for _, clone := range clones {
+		wg.Add(1)
+		go func(clone *Sandbox) {
+			defer wg.Done()
+			errs <- clone.Kill(context.Background())
+		}(clone)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("kill clone: %v", err)
+		}
+	}
+	if err := clones[1].Kill(context.Background()); err != nil {
+		t.Fatalf("repeat kill last clone: %v", err)
+	}
+	if got := snapshotDeletes.Load(); got != 1 {
+		t.Fatalf("snapshotDeletes=%d, want 1", got)
+	}
+}
+
 func TestCloneKillsSiblingsOnFailure(t *testing.T) {
-	var created, killed int
+	var created, killed, snapshotDeletes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/snapshots"):
 			fmt.Fprint(w, `{"snapshotID":"snap-1"}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes":
-			created++
-			if created == 2 { // fail the second clone
+			id := created.Add(1)
+			if id == 2 { // fail the second clone
 				http.Error(w, `{"message":"boom"}`, http.StatusInternalServerError)
 				return
 			}
 			w.WriteHeader(http.StatusCreated)
-			fmt.Fprint(w, sandboxJSON(fmt.Sprintf("clone-%d", created), "snap-1"))
+			fmt.Fprint(w, sandboxJSON(fmt.Sprintf("clone-%d", id), "snap-1"))
 		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/sandboxes/"):
-			killed++
-			w.WriteHeader(http.StatusNoContent)
+			killed.Add(1)
+			http.Error(w, `{"message":"transient kill failure"}`, http.StatusInternalServerError)
 		case r.Method == http.MethodDelete && r.URL.Path == "/templates/snap-1":
+			snapshotDeletes.Add(1)
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
@@ -250,8 +309,11 @@ func TestCloneKillsSiblingsOnFailure(t *testing.T) {
 	if _, err := sb.Clone(context.Background(), CloneOptions{N: 2}); err == nil {
 		t.Fatal("Clone with a failing create returned nil error")
 	}
-	if killed != 1 {
-		t.Fatalf("killed=%d, want 1 surviving sibling cleaned up", killed)
+	if got := killed.Load(); got != 1 {
+		t.Fatalf("killed=%d, want 1 surviving sibling cleanup attempted", got)
+	}
+	if got := snapshotDeletes.Load(); got != 1 {
+		t.Fatalf("snapshotDeletes=%d, want 1 after sibling kill failure", got)
 	}
 }
 

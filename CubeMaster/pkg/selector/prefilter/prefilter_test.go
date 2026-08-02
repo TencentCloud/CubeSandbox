@@ -7,10 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agiledragon/gomonkey/v2"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
@@ -38,11 +36,11 @@ func TestPreFilterExcludesUnhealthyNode(t *testing.T) {
 		MetaDataUpdateAt: now, MetricUpdate: now, MetricLocalUpdateAt: now,
 	}
 
-	patches := gomonkey.NewPatches()
-	defer patches.Reset()
-	patches.ApplyFunc(localcache.GetSchedulableNodesByInstanceType, func(n int, product string) node.NodeList {
+	original := getSchedulableNodesByInstanceType
+	getSchedulableNodesByInstanceType = func(n int, product string) node.NodeList {
 		return node.NodeList{fresh, stale}
-	})
+	}
+	t.Cleanup(func() { getSchedulableNodesByInstanceType = original })
 
 	got, err := NewPreFilter().Select(&selctx.SelectorCtx{Ctx: context.Background(), InstanceType: "valid"})
 	if err != nil {
@@ -67,11 +65,11 @@ func TestPreFilterExcludesMetricTimeoutNode(t *testing.T) {
 		MetricLocalUpdateAt: now.Add(-(timeout + time.Second)),
 	}
 
-	patches := gomonkey.NewPatches()
-	defer patches.Reset()
-	patches.ApplyFunc(localcache.GetSchedulableNodesByInstanceType, func(n int, product string) node.NodeList {
+	original := getSchedulableNodesByInstanceType
+	getSchedulableNodesByInstanceType = func(n int, product string) node.NodeList {
 		return node.NodeList{fresh, staleMetric}
-	})
+	}
+	t.Cleanup(func() { getSchedulableNodesByInstanceType = original })
 
 	got, err := NewPreFilter().Select(&selctx.SelectorCtx{Ctx: context.Background(), InstanceType: "valid"})
 	if err != nil {

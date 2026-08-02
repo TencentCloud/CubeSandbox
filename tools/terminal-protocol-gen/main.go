@@ -57,7 +57,7 @@ func main() {
 	flag.Parse()
 
 	root := repositoryRoot()
-	data, err := os.ReadFile(filepath.Join(root, "terminal-protocol-v1.json"))
+	data, err := os.ReadFile(filepath.Join(root, "protocol/terminal-v1.json"))
 	checkErr(err)
 	var spec manifest
 	checkErr(json.Unmarshal(data, &spec))
@@ -166,7 +166,7 @@ func repositoryRoot() string {
 	if !ok {
 		checkErr(fmt.Errorf("locate terminal protocol generator source"))
 	}
-	return filepath.Clean(filepath.Join(filepath.Dir(source), "../../.."))
+	return filepath.Clean(filepath.Join(filepath.Dir(source), "../.."))
 }
 
 func goOutput(root, source, path, packageName string, spec manifest, cubelet bool) output {

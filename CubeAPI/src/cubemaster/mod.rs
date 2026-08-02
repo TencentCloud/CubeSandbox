@@ -892,6 +892,17 @@ pub struct EnvVar {
     pub value: String,
 }
 
+/// Volume mount entry as returned by CubeMaster sandbox info/list APIs.
+#[derive(Debug, Deserialize, Clone)]
+pub struct CubeVolumeMount {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default, alias = "containerPath")]
+    pub container_path: String,
+    #[serde(default)]
+    pub readonly: bool,
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct VolumeMount {
     pub name: String,
@@ -1101,6 +1112,8 @@ pub struct SandboxInfo {
     pub annotations: HashMap<String, String>,
     #[serde(default)]
     pub labels: HashMap<String, String>,
+    #[serde(default)]
+    pub volume_mounts: Vec<CubeVolumeMount>,
 }
 
 // ─── Get single sandbox ────────────────────────────────────────────────────
@@ -1137,6 +1150,8 @@ pub struct GetSandboxDataItem {
     pub namespace: String,
     #[serde(default, deserialize_with = "deserialize_optional_datetime")]
     pub end_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub volume_mounts: Vec<CubeVolumeMount>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1178,6 +1193,7 @@ pub struct SandboxDetail {
     pub disk_size_mb: i32,
     pub annotations: HashMap<String, String>,
     pub labels: HashMap<String, String>,
+    pub volume_mounts: Vec<CubeVolumeMount>,
 }
 
 fn parse_cpu_millicores(s: &str) -> i32 {
@@ -1356,6 +1372,7 @@ impl GetSandboxResponse {
             disk_size_mb: 0,
             annotations: item.annotations,
             labels: item.labels,
+            volume_mounts: item.volume_mounts,
         })
     }
 }

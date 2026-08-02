@@ -7,7 +7,7 @@ Create a volume, mount it into a sandbox via
 survives sandbox restarts and can be shared across sandboxes.
 
 ```python
-from cubesandbox import Sandbox, Volume
+from cubesandbox import Sandbox, Volume, VolumeMount
 ```
 
 All `Volume` methods are **class methods** — no instance needed. Mirroring
@@ -72,7 +72,7 @@ Modeled on e2b, where `Volume.create(name)` takes no driver:
 | `.name` | `str` | Display name. |
 | `.token` | `str` | Plugin-issued token. Populated on `create` / `get_info`; **empty on `list`**. |
 
-### Mounting
+### Mounting and per-sandbox access modes
 
 Pass a dict mapping mount paths to volumes (e2b-compatible):
 
@@ -81,7 +81,22 @@ Sandbox.create(volume_mounts={"/workspace": vol})
 Sandbox.create(volume_mounts={"/workspace": "vol-xxx"})
 ```
 
-Each value must resolve to an existing `volume_id`.
+Each value can be a `Volume`, `VolumeInfo`, or bare `volume_id` string and must resolve to an existing volume. Existing e2b-style values remain read-write.
+
+To make one sandbox attachment read-only, wrap its value in `VolumeMount`:
+
+```python
+from cubesandbox import Sandbox, VolumeMount
+
+Sandbox.create(
+    volume_mounts={
+        "/dataset": VolumeMount(vol, read_only=True),
+        "/workspace": workspace_vol,
+    }
+)
+```
+
+`read_only` only mounts that attachment as read-only. It prevents the current sandbox from writing or modifying files through that mount, but does not create an immutable snapshot. The same Volume can be attached with different access modes in different sandboxes, for example read-write in sandbox A and read-only in sandbox B.
 
 ---
 
@@ -195,3 +210,4 @@ except ApiError as e:
   `get_info`; call `Volume.get_info(volume_id)` when you need the token.
 - **`name` is optional.** Omit it and the server assigns a UUID that serves as
   both `volume_id` and `name`.
+- **Read-only is per attachment.** Use `VolumeMount(volume, read_only=True)` at sandbox creation time. Creating the `Volume` itself remains unchanged.

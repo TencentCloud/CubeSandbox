@@ -262,28 +262,68 @@ func TestResizeDoesNotExtendIdleButStdinDoes(t *testing.T) {
 	require.Equal(t, CloseIdleTimeout, waitForKind(t, second, EventClose).Reason)
 }
 
-func TestStdoutKeepsSessionAlivePastIdleTimeout(t *testing.T) {
+func TestStdoutDoesNotExtendIdleTimeout(t *testing.T) {
 	adapter := newFakeAdapter()
 	config := testConfig()
-	config.IdleTimeout = 100 * time.Millisecond
+	config.IdleTimeout = 120 * time.Millisecond
 	core := newTestCore(t, adapter, config)
 	attachment, _, err := core.Open(context.Background(), openRequest("sandbox-a"))
 	require.NoError(t, err)
 	process := adapter.lastProcess()
 
-	// Continuous output with no keystrokes must keep the session alive well
-	// past IdleTimeout: output is activity, not silence (e.g. tail -f or a
-	// long-running build that streams to the terminal).
-	for i := 0; i < 6; i++ {
-		time.Sleep(45 * time.Millisecond)
+	for i := 0; i < 3; i++ {
+		time.Sleep(30 * time.Millisecond)
 		_, err := process.stdoutW.Write([]byte("tick\n"))
 		require.NoError(t, err)
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-		event, nextErr := attachment.Next(ctx)
-		cancel()
-		require.NoError(t, nextErr, "session must stay active under continuous output")
-		require.Equal(t, EventStdout, event.Kind)
+		require.Equal(t, EventStdout, waitForKind(t, attachment, EventStdout).Kind)
 	}
+	require.Equal(t, CloseIdleTimeout, waitForKind(t, attachment, EventClose).Reason)
+}
+
+func TestResumePreservesOriginalIdleDeadline(t *testing.T) {
+	adapter := newFakeAdapter()
+	config := testConfig()
+	config.IdleTimeout = 140 * time.Millisecond
+	config.ReconnectGrace = time.Second
+	core := newTestCore(t, adapter, config)
+	request := openRequest("sandbox-a")
+	attachment, _, err := core.Open(context.Background(), request)
+	require.NoError(t, err)
+	time.Sleep(70 * time.Millisecond)
+	attachment.Detach()
+	time.Sleep(40 * time.Millisecond)
+	request.Resume = &ResumeRequest{SessionID: request.SessionID, LastOffset: 0}
+	resumed, _, err := core.Open(context.Background(), request)
+	require.NoError(t, err)
+	started := time.Now()
+	require.Equal(t, CloseIdleTimeout, waitForKind(t, resumed, EventClose).Reason)
+	require.Less(t, time.Since(started), 100*time.Millisecond)
+}
+
+func TestSlowConsumerClosesInsteadOfEnteringDetachedGrace(t *testing.T) {
+	adapter := newFakeAdapter()
+	config := testConfig()
+	config.StdoutChunkBytes = 4
+	config.StdoutPendingBytes = 8
+	config.ReplayBufferBytes = 8
+	config.ReconnectGrace = time.Second
+	core := newTestCore(t, adapter, config)
+	request := openRequest("sandbox-a")
+	attachment, _, err := core.Open(context.Background(), request)
+	require.NoError(t, err)
+	process := adapter.lastProcess()
+
+	_, err = process.stdoutW.Write([]byte("abcdefghijkl"))
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		_, exists := core.SessionState(request.SessionID)
+		return !exists
+	}, time.Second, time.Millisecond)
+	require.Equal(t, CodeSlowConsumer, waitForKind(t, attachment, EventError).Code)
+	require.Equal(t, CloseSlowConsumer, waitForKind(t, attachment, EventClose).Reason)
+	request.Resume = &ResumeRequest{SessionID: request.SessionID, LastOffset: 0}
+	_, _, err = core.Open(context.Background(), request)
+	require.Equal(t, CodeSessionLost, CodeOf(err))
 }
 
 func TestParentCancellationDrainsSessionsAndRejectsNewOpens(t *testing.T) {

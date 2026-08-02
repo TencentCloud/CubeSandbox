@@ -23,8 +23,8 @@ on:
       - 'sdk/go/Makefile'
       - 'examples/cube-bench/Makefile'
       - 'web/**'
-      - 'terminal-protocol-v1.json'
-      - 'Cubelet/scripts/terminal-protocol-gen/**'
+      - 'protocol/terminal-v1.json'
+      - 'tools/terminal-protocol-gen/**'
       - '.github/workflows/fmt-check.yml'
   workflow_dispatch:
 
@@ -53,7 +53,7 @@ jobs:
       - name: Set up Go for Web Terminal protocol generation
         uses: actions/setup-go@v5
         with:
-          go-version-file: Cubelet/scripts/terminal-protocol-gen/go.mod
+          go-version-file: 'CubeMaster/go.mod'
 
       - name: Check Web Terminal protocol generation
         shell: bash

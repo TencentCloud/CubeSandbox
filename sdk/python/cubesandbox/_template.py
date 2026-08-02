@@ -92,7 +92,7 @@ class TemplateInfo:
         aliases = data.get("aliases") or []
         return cls(
             template_id=data.get("templateID") or data.get("template_id", ""),
-            name=data.get("name") or (aliases[0] if aliases else "") or "",
+            name=aliases[0] if aliases else "",
             instance_type=data.get("instanceType") or data.get("instance_type", ""),
             version=data.get("version") or "",
             status=data.get("status") or "",
@@ -296,7 +296,8 @@ class Template:
 
         cfg = config or Config()
         payload: dict = {"image": image.strip()}
-        if name is not None:
+        name = name.strip() if name else ""
+        if name:
             payload["name"] = name
         if instance_type is not None:
             payload["instanceType"] = instance_type

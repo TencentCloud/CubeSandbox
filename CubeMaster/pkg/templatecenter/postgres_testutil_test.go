@@ -55,6 +55,9 @@ func skipOrFailPGDocker(t *testing.T, format string, args ...any) {
 
 func newPGDockerEnv(t *testing.T) *pgDockerEnv {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping Docker-backed PostgreSQL test in short mode")
+	}
 	if dsn := os.Getenv(pgTestDSNEnv); dsn != "" {
 		t.Logf("using external PostgreSQL from %s", pgTestDSNEnv)
 		return &pgDockerEnv{dsn: dsn, teardown: func() {}}

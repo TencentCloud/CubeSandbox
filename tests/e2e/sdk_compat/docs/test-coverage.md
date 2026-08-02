@@ -115,6 +115,10 @@ created and cleaned up through `managed_control_sandbox`.
 This proves basic instance isolation, but it is not a concurrency stress test,
 resource contention test or multi-worker safety validation.
 
+### 2.7 Volume
+
+`cases/volume/` covers Volume Plugin CRUD, sandbox bind/unbind and delete-while-bound behavior. It also verifies that one Volume can remain writable in one sandbox while a concurrent attachment is read-only in another sandbox, including read access and rejected create, write, rename and delete operations. These cases are CubeSandbox-only and remain skipped unless `SDK_E2E_VOLUME_PLUGIN=true` explicitly confirms that the deployment has a configured Volume Plugin.
+
 ## 3. Coverage Boundaries
 
 The current suite mainly validates synchronous Python SDK paths and the

@@ -407,7 +407,16 @@ diagnostics:
   # can collect release state without maintaining a second script copy.
   enabled: true
 
+# Control-plane database (CubeMaster / CubeOps / CubeAPI) engine selector.
+# The driver decides which section below is read; the other one is ignored.
+#   mysql    -> mysql.*    (chart-managed StatefulSet when mysql.host is empty,
+#                           or an external MySQL when mysql.host is set)
+#   postgres -> postgres.* (external only, postgres.host is required)
+database:
+  driver: mysql
+
 mysql:
+  # Read when database.driver=mysql.
   enabled: true
   image:
     repository: mysql
@@ -424,8 +433,9 @@ mysql:
   # production, provide `mysql.password` and `mysql.rootPassword` via -f
   # secret-values.yaml or --set, or use `mysql.host` to point at an externally
   # managed MySQL. templates/validate.yaml refuses to render when passwords
-  # equal the default sentinel below.
+  # equal the default sentinels below.
   password: CHANGE_ME_MYSQL_PASSWORD
+  # rootPassword is only used by the chart-managed StatefulSet.
   rootPassword: CHANGE_ME_MYSQL_ROOT_PASSWORD
   persistence:
     enabled: true
@@ -440,6 +450,17 @@ mysql:
     accessModes:
       - ReadWriteOnce
   resources: {}
+
+# External PostgreSQL, read only when database.driver=postgres.
+# The chart never deploys PostgreSQL, so host must point at an existing server.
+postgres:
+  host: ""
+  port: 5432
+  database: cube_mvp
+  user: cube
+  # SECURITY: same rule as mysql.password; templates/validate.yaml refuses to
+  # render while this equals the CHANGE_ME_* sentinel.
+  password: CHANGE_ME_POSTGRES_PASSWORD
 
 redis:
   enabled: true
@@ -661,6 +682,9 @@ cubeProxy:
       containerPort: 80
     https:
       containerPort: 443
+    # Plaintext gRPC (HTTP/2) ingress; mirrors CubeProxy listen 9090.
+    grpc:
+      containerPort: 9090
   redis:
     # Empty host uses redis.host or chart-managed cube-redis.
     host: ""
@@ -883,6 +907,7 @@ bootstrap:
     checkMemory: true
     minMemoryKB: "7500000"
     checkCgroupCPU: true
+    checkBPFFS: true
     checkGlibc: true
     checkCIDR: true
     checkCubecowDeps: true

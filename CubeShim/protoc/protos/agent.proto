@@ -44,6 +44,7 @@ service AgentService {
 	rpc ReadStderr(ReadStreamRequest) returns (ReadStreamResponse);
 	rpc CloseStdin(CloseStdinRequest) returns (google.protobuf.Empty);
 	rpc TtyWinResize(TtyWinResizeRequest) returns (google.protobuf.Empty);
+	rpc ReconnectContainerIO(ReconnectContainerIORequest) returns (google.protobuf.Empty);
 
 	// networking
 	rpc UpdateInterface(UpdateInterfaceRequest) returns (types.Interface);
@@ -88,6 +89,11 @@ message CreateContainerRequest {
 	// out altogether and not just the pid ns path.
 	bool sandbox_pidns = 7;
 	repeated CustomFile custom_files = 8;
+	// A zero port keeps the legacy gRPC stream for that direction. A non-zero
+	// port selects direct passfd I/O over the corresponding vsock connection.
+	uint32 stdin_port = 9;
+	uint32 stdout_port = 10;
+	uint32 stderr_port = 11;
 }
 
 message StartContainerRequest {
@@ -111,6 +117,20 @@ message ExecProcessRequest {
 	StringUser string_user = 3;
 	Process process = 4;
 	string runtime_unix_addr = 5;
+	// A zero port keeps the legacy gRPC stream for that direction. A non-zero
+	// port selects direct passfd I/O over the corresponding vsock connection.
+	uint32 stdin_port = 6;
+	uint32 stdout_port = 7;
+	uint32 stderr_port = 8;
+}
+
+// Reconnects direct passfd I/O after VM resume or rollback restore.
+message ReconnectContainerIORequest {
+	string container_id = 1;
+	// Zero means that direction is absent; non-zero is its direct vsock port.
+	uint32 stdin_port = 2;
+	uint32 stdout_port = 3;
+	uint32 stderr_port = 4;
 }
 
 message SignalProcessRequest {

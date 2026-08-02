@@ -30,7 +30,7 @@ use crate::{
         (status = 401, description = "Authentication error",              body = ApiError),
         (status = 500, description = "Server error",                      body = ApiError),
     ),
-    security(("ApiKeyAuth" = []))
+    security(("apiKeyAuth" = []))
 )]
 pub async fn list_volumes(State(state): State<AppState>) -> AppResult<impl IntoResponse> {
     tracing::debug!("list_volumes");
@@ -53,7 +53,7 @@ pub async fn list_volumes(State(state): State<AppState>) -> AppResult<impl IntoR
         (status = 401, description = "Authentication error",               body = ApiError),
         (status = 500, description = "Server error",                       body = ApiError),
     ),
-    security(("ApiKeyAuth" = []))
+    security(("apiKeyAuth" = []))
 )]
 pub async fn create_volume(
     State(state): State<AppState>,
@@ -94,7 +94,7 @@ pub async fn create_volume(
         (status = 404, description = "Not found",                       body = ApiError),
         (status = 500, description = "Server error",                    body = ApiError),
     ),
-    security(("ApiKeyAuth" = []))
+    security(("apiKeyAuth" = []))
 )]
 pub async fn get_volume(
     State(state): State<AppState>,
@@ -122,7 +122,7 @@ pub async fn get_volume(
         (status = 404, description = "Not found",            body = ApiError),
         (status = 500, description = "Server error",         body = ApiError),
     ),
-    security(("ApiKeyAuth" = []))
+    security(("apiKeyAuth" = []))
 )]
 pub async fn delete_volume(
     State(state): State<AppState>,

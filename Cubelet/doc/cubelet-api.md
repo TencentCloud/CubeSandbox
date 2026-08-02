@@ -91,6 +91,16 @@
     - [StorageVolumeInfo](#cubelet-services-cubebox-v1-StorageVolumeInfo)
     - [SysCall](#cubelet-services-cubebox-v1-SysCall)
     - [TCPSocketAction](#cubelet-services-cubebox-v1-TCPSocketAction)
+    - [TerminalClientFrame](#cubelet-services-cubebox-v1-TerminalClientFrame)
+    - [TerminalClose](#cubelet-services-cubebox-v1-TerminalClose)
+    - [TerminalError](#cubelet-services-cubebox-v1-TerminalError)
+    - [TerminalExit](#cubelet-services-cubebox-v1-TerminalExit)
+    - [TerminalOpen](#cubelet-services-cubebox-v1-TerminalOpen)
+    - [TerminalOpened](#cubelet-services-cubebox-v1-TerminalOpened)
+    - [TerminalResize](#cubelet-services-cubebox-v1-TerminalResize)
+    - [TerminalResume](#cubelet-services-cubebox-v1-TerminalResume)
+    - [TerminalServerFrame](#cubelet-services-cubebox-v1-TerminalServerFrame)
+    - [TerminalStdout](#cubelet-services-cubebox-v1-TerminalStdout)
     - [UpdateCubeSandboxRequest](#cubelet-services-cubebox-v1-UpdateCubeSandboxRequest)
     - [UpdateCubeSandboxRequest.AnnotationsEntry](#cubelet-services-cubebox-v1-UpdateCubeSandboxRequest-AnnotationsEntry)
     - [UpdateCubeSandboxResponse](#cubelet-services-cubebox-v1-UpdateCubeSandboxResponse)
@@ -433,6 +443,7 @@ Capability contains the container capabilities to add or drop
 | finished_at | [int64](#int64) |  | exit time of the container in nanoseconds. |
 | labels | [Container.LabelsEntry](#cubelet-services-cubebox-v1-Container-LabelsEntry) | repeated |  |
 | paused_at | [int64](#int64) |  |  |
+| volume_mounts | [VolumeMounts](#cubelet-services-cubebox-v1-VolumeMounts) | repeated | Mounts declared on the container spec (including host-dir mounts). |
 
 
 
@@ -1795,6 +1806,178 @@ TCPSocketAction describes an action based on opening a socket.
 
 
 
+<a name="cubelet-services-cubebox-v1-TerminalClientFrame"></a>
+
+### TerminalClientFrame
+TerminalClientFrame is one message from the terminal caller to cubelet.
+The first frame of a stream MUST carry `open`; any other leading frame is a
+protocol violation and the stream is rejected.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| open | [TerminalOpen](#cubelet-services-cubebox-v1-TerminalOpen) |  | open starts the session. Only valid as the first frame. |
+| stdin | [bytes](#bytes) |  | stdin carries raw bytes typed by the user. Frames larger than the negotiated limit (64 KiB) are rejected. |
+| resize | [TerminalResize](#cubelet-services-cubebox-v1-TerminalResize) |  | resize reports a new terminal window size. |
+| close | [TerminalClose](#cubelet-services-cubebox-v1-TerminalClose) |  | close asks cubelet to terminate the session with the given reason. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-TerminalClose"></a>
+
+### TerminalClose
+TerminalClose terminates a session. Sent by either side.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| reason | [string](#string) |  | Stable close reason, e.g. &#34;USER_CLOSED&#34; / &#34;IDLE_TIMEOUT&#34; / &#34;SANDBOX_TRANSITION&#34;. Never carries internal addresses or paths. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-TerminalError"></a>
+
+### TerminalError
+TerminalError reports a failure with a stable, client-safe code.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| code | [string](#string) |  | Stable error code, e.g. &#34;TARGET_NOT_RUNNING&#34; / &#34;SHELL_NOT_FOUND&#34; / &#34;LIMIT_EXCEEDED&#34;. Never carries internal addresses, paths or credentials. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-TerminalExit"></a>
+
+### TerminalExit
+TerminalExit reports the exit status of the shell process.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| exit_code | [int32](#int32) |  | Process exit code. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-TerminalOpen"></a>
+
+### TerminalOpen
+TerminalOpen carries everything cubelet needs to resolve the target and
+start a PTY. Cubelet re-resolves the target itself and never trusts a raw
+runtime process id supplied by the caller.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| request_id | [string](#string) |  | requestID reqID, for cross-service log correlation. |
+| sandbox_id | [string](#string) |  | ID of the sandbox that hosts the target container. |
+| container_id | [string](#string) |  | ID of the container to attach to. Empty selects the sandbox&#39;s first (primary) container. |
+| cols | [uint32](#uint32) |  | Initial terminal width in columns. |
+| rows | [uint32](#uint32) |  | Initial terminal height in rows. |
+| session_id | [string](#string) |  | Session identifier minted by the caller, used as the audit key and as the basis of the containerd exec id. |
+| resume | [TerminalResume](#cubelet-services-cubebox-v1-TerminalResume) |  | resume, when set, re-attaches to a session that is still within its detached grace window instead of starting a new PTY. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-TerminalOpened"></a>
+
+### TerminalOpened
+TerminalOpened acknowledges a started session.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| session_id | [string](#string) |  | ID of the established session, echoed for correlation. |
+| replay_from | [uint64](#uint64) |  | Absolute stdout offset the following stdout frames start from. Non-zero only when resuming. |
+| replay_truncated | [bool](#bool) |  | True when the resume cursor fell behind the replay buffer and some output was dropped. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-TerminalResize"></a>
+
+### TerminalResize
+TerminalResize reports the terminal window size.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| cols | [uint32](#uint32) |  | Terminal width in columns. |
+| rows | [uint32](#uint32) |  | Terminal height in rows. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-TerminalResume"></a>
+
+### TerminalResume
+TerminalResume re-attaches to an existing session after a transport failure.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| session_id | [string](#string) |  | ID of the session to re-attach to. |
+| last_offset | [uint64](#uint64) |  | Absolute stdout offset the client has already consumed. Cubelet replays from max(last_offset, buffer_start). |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-TerminalServerFrame"></a>
+
+### TerminalServerFrame
+TerminalServerFrame is one message from cubelet to the terminal caller.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| opened | [TerminalOpened](#cubelet-services-cubebox-v1-TerminalOpened) |  | opened acknowledges that the PTY is running. Always the first frame. |
+| stdout | [TerminalStdout](#cubelet-services-cubebox-v1-TerminalStdout) |  | stdout carries terminal output. Under a TTY stderr is merged into it. |
+| exit | [TerminalExit](#cubelet-services-cubebox-v1-TerminalExit) |  | exit reports the shell&#39;s exit status. |
+| error | [TerminalError](#cubelet-services-cubebox-v1-TerminalError) |  | error reports a stable failure code before or during the session. |
+| close | [TerminalClose](#cubelet-services-cubebox-v1-TerminalClose) |  | close reports that cubelet terminated the session. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-TerminalStdout"></a>
+
+### TerminalStdout
+TerminalStdout carries a chunk of terminal output.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| data | [bytes](#bytes) |  | Raw output bytes. |
+| offset | [uint64](#uint64) |  | Absolute offset of the first byte of `data` within the session&#39;s output stream, used as the resume cursor. |
+
+
+
+
+
+
 <a name="cubelet-services-cubebox-v1-UpdateCubeSandboxRequest"></a>
 
 ### UpdateCubeSandboxRequest
@@ -2004,6 +2187,9 @@ Service for handling cubesandbox
 | List | [ListCubeSandboxRequest](#cubelet-services-cubebox-v1-ListCubeSandboxRequest) | [ListCubeSandboxResponse](#cubelet-services-cubebox-v1-ListCubeSandboxResponse) |  |
 | Update | [UpdateCubeSandboxRequest](#cubelet-services-cubebox-v1-UpdateCubeSandboxRequest) | [UpdateCubeSandboxResponse](#cubelet-services-cubebox-v1-UpdateCubeSandboxResponse) |  |
 | Exec | [ExecCubeSandboxRequest](#cubelet-services-cubebox-v1-ExecCubeSandboxRequest) | [ExecCubeSandboxResponse](#cubelet-services-cubebox-v1-ExecCubeSandboxResponse) |  |
+| Terminal | [TerminalClientFrame](#cubelet-services-cubebox-v1-TerminalClientFrame) stream | [TerminalServerFrame](#cubelet-services-cubebox-v1-TerminalServerFrame) stream | Terminal opens a bidirectional interactive TTY session against a container inside a running cubebox.
+
+Exec above is unary and fire-and-forget: it starts the process with dummy IO and returns as soon as the process is started, so it cannot carry continuous stdin, incremental stdout, window resizes, TTY signal semantics or the asynchronous exit status. Terminal keeps a stream open for the whole session instead, which makes cubelet the single owner of the PTY lifecycle (create, resize, kill, wait, delete) and lets it reclaim the exec process when the caller goes away. Process spec derivation and the containerd Task.Exec execution path are shared with Exec; only the transport differs. |
 | AppSnapshot | [AppSnapshotRequest](#cubelet-services-cubebox-v1-AppSnapshotRequest) | [AppSnapshotResponse](#cubelet-services-cubebox-v1-AppSnapshotResponse) | AppSnapshot creates a cubebox, makes an app snapshot, and destroys the cubebox. Required annotations: - cube.master.appsnapshot.create: &#34;true&#34; - cube.master.appsnapshot.template.id: &#34;&lt;template_id&gt;&#34; |
 | CommitSandbox | [CommitSandboxRequest](#cubelet-services-cubebox-v1-CommitSandboxRequest) | [CommitSandboxResponse](#cubelet-services-cubebox-v1-CommitSandboxResponse) | CommitSandbox snapshots an existing running sandbox into a template snapshot. |
 | RollbackSandbox | [RollbackSandboxRequest](#cubelet-services-cubebox-v1-RollbackSandboxRequest) | [RollbackSandboxResponse](#cubelet-services-cubebox-v1-RollbackSandboxResponse) | RollbackSandbox restores a running sandbox to a committed snapshot. |

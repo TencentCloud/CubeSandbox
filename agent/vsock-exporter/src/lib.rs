@@ -14,16 +14,18 @@
 
 #![allow(unknown_lints)]
 
+use std::io::ErrorKind;
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use byteorder::{ByteOrder, NetworkEndian};
 use opentelemetry::sdk::export::trace::{ExportResult, SpanData, SpanExporter};
 use opentelemetry::sdk::export::ExportError;
 use slog::{error, info, o, Logger};
-use std::io::ErrorKind;
-use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
+use tokio_vsock::VsockAddr;
 use tokio_vsock::VsockStream;
 
 const ANY_CID: &str = "any";
@@ -194,7 +196,7 @@ impl Builder {
 }
 
 async fn connect_vsock(cid: u32, port: u32) -> Result<VsockStream, Error> {
-    match VsockStream::connect(cid, port).await {
+    match VsockStream::connect(VsockAddr::new(cid, port)).await {
         Ok(conn) => Ok(conn),
         Err(e) => Err(Error::ConnectionError(e.to_string())),
     }

@@ -1,4 +1,3 @@
----
 # Copyright (c) 2026 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -6,56 +5,14 @@
 openapi: 3.1.0
 info:
   title: CubeAPI
-  description: OpenAPI contract for the CubeSandbox dashboard surface.
+  description: E2B-compatible sandbox API server.
   license:
     name: ''
   version: 0.1.0
 servers:
 - url: /cubeapi/v1
-  description: CubeAPI dashboard surface
+  description: CubeAPI SDK/dashboard surface (source of truth generated via `cube-api --export-openapi`)
 paths:
-  /cluster/overview:
-    get:
-      tags:
-      - handlers::cluster
-      operationId: cluster_overview
-      responses:
-        '200':
-          description: Cluster capacity overview
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ClusterOverview'
-        '404':
-          description: Cluster endpoint unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
-        '500':
-          description: Unexpected backend error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
-  /cluster/versions:
-    get:
-      tags:
-      - handlers::cluster
-      operationId: cluster_versions
-      responses:
-        '200':
-          description: Cluster component version matrix
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/VersionMatrixView'
-        '500':
-          description: Unexpected backend error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
   /health:
     get:
       tags:
@@ -69,53 +26,51 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
-  /nodes:
+  /sandboxes:
     get:
       tags:
-      - handlers::cluster
-      operationId: list_nodes
+      - handlers::sandboxes
+      operationId: list_sandboxes
+      parameters:
+      - name: metadata
+        in: query
+        required: false
+        schema:
+          type: string
       responses:
         '200':
-          description: Node list
+          description: Sandbox list
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/NodeView'
-        '404':
-          description: Node inventory unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
+                  $ref: '#/components/schemas/ListedSandbox'
         '500':
           description: Unexpected backend error
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
-  /nodes/{nodeID}:
-    get:
+    post:
       tags:
-      - handlers::cluster
-      operationId: get_node
-      parameters:
-      - name: nodeID
-        in: path
-        description: Node identifier
+      - handlers::sandboxes
+      operationId: create_sandbox
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewSandbox'
         required: true
-        schema:
-          type: string
       responses:
-        '200':
-          description: Node detail
+        '201':
+          description: Sandbox created
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/NodeView'
-        '404':
-          description: Node not found
+                $ref: '#/components/schemas/Sandbox'
+        '400':
+          description: Invalid request
           content:
             application/json:
               schema:
@@ -192,7 +147,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
         '503':
-          description: Sandbox is pausing or another lifecycle operation is in progress (Retry-After 2); the Cubelet RPC has too little remaining time or its internal resume could not be completed (Retry-After 5)
+          description: Sandbox is pausing, another lifecycle operation is in progress, the Cubelet RPC has too little remaining time, or its internal resume could not be completed
           headers:
             Retry-After:
               schema:
@@ -200,6 +155,86 @@ paths:
                 format: int64
                 minimum: 0
               description: Seconds a client should wait before retrying DELETE
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /sandboxes/{sandboxID}/connect:
+    post:
+      tags:
+      - handlers::sandboxes
+      operationId: connect_sandbox
+      parameters:
+      - name: sandboxID
+        in: path
+        description: Sandbox identifier
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectSandbox'
+        required: true
+      responses:
+        '200':
+          description: Sandbox connection info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sandbox'
+        '404':
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /sandboxes/{sandboxID}/logs:
+    get:
+      tags:
+      - handlers::sandboxes
+      operationId: get_sandbox_logs
+      parameters:
+      - name: sandboxID
+        in: path
+        description: Sandbox identifier
+        required: true
+        schema:
+          type: string
+      - name: start
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int64
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+      responses:
+        '200':
+          description: Sandbox logs (legacy shape)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SandboxLogs'
+        '404':
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
           content:
             application/json:
               schema:
@@ -227,6 +262,45 @@ paths:
                 $ref: '#/components/schemas/ApiError'
         '409':
           description: Sandbox cannot be paused
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /sandboxes/{sandboxID}/refreshes:
+    post:
+      tags:
+      - handlers::sandboxes
+      operationId: refresh_sandbox
+      parameters:
+      - name: sandboxID
+        in: path
+        description: Sandbox identifier
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+        required: true
+      responses:
+        '204':
+          description: Sandbox refreshed
+        '400':
+          description: Invalid duration value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Sandbox not found
           content:
             application/json:
               schema:
@@ -274,6 +348,159 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /sandboxes/{sandboxID}/rollback:
+    post:
+      tags:
+      - handlers::snapshots
+      operationId: rollback_sandbox
+      parameters:
+      - name: sandboxID
+        in: path
+        description: Sandbox identifier
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RollbackRequest'
+        required: true
+      responses:
+        '200':
+          description: Sandbox rolled back to snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RollbackResponse'
+        '404':
+          description: Sandbox or snapshot not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /sandboxes/{sandboxID}/snapshots:
+    post:
+      tags:
+      - handlers::snapshots
+      operationId: create_snapshot
+      parameters:
+      - name: sandboxID
+        in: path
+        description: Sandbox identifier
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSnapshotRequest'
+        required: true
+      responses:
+        '201':
+          description: Snapshot created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SnapshotInfo'
+        '404':
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /sandboxes/{sandboxID}/timeout:
+    post:
+      tags:
+      - handlers::sandboxes
+      operationId: set_sandbox_timeout
+      parameters:
+      - name: sandboxID
+        in: path
+        description: Sandbox identifier
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetTimeoutRequest'
+        required: true
+      responses:
+        '204':
+          description: Timeout updated
+        '400':
+          description: Invalid timeout value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /snapshots:
+    get:
+      tags:
+      - handlers::snapshots
+      operationId: list_snapshots
+      parameters:
+      - name: sandboxID
+        in: query
+        description: Filter by originating sandbox ID.
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        description: Max items per page (default 100, max 100).
+        required: false
+        schema:
+          type: integer
+          format: int32
+      - name: nextToken
+        in: query
+        description: Pagination cursor from previous response header x-next-token.
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: List of snapshots
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SnapshotListItem'
         '500':
           description: Unexpected backend error
           content:
@@ -750,6 +977,152 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+  /volumes:
+    get:
+      tags:
+      - handlers::volumes
+      summary: List all volumes.
+      description: Returns `200 OK` with `[Volume]` on success.
+      operationId: list_volumes
+      responses:
+        '200':
+          description: Successfully listed all volumes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Volume'
+        '401':
+          description: Authentication error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+      security:
+      - apiKeyAuth: []
+    post:
+      tags:
+      - handlers::volumes
+      summary: Create a new volume.
+      description: Returns `201 Created` with `VolumeAndToken` on success.
+      operationId: create_volume
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewVolume'
+        required: true
+      responses:
+        '201':
+          description: Successfully created a new volume
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VolumeAndToken'
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Authentication error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+      security:
+      - apiKeyAuth: []
+  /volumes/{volumeID}:
+    get:
+      tags:
+      - handlers::volumes
+      summary: Get info for a single volume (includes auth token).
+      description: Returns `200 OK` with `VolumeAndToken` on success.
+      operationId: get_volume
+      parameters:
+      - name: volumeID
+        in: path
+        description: Identifier of the volume
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Successfully retrieved a volume
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VolumeAndToken'
+        '401':
+          description: Authentication error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+      security:
+      - apiKeyAuth: []
+    delete:
+      tags:
+      - handlers::volumes
+      summary: Delete a volume.
+      description: Returns `204 No Content` on success.
+      operationId: delete_volume
+      parameters:
+      - name: volumeID
+        in: path
+        description: Identifier of the volume
+        required: true
+        schema:
+          type: string
+      responses:
+        '204':
+          description: Successfully deleted a volume
+        '401':
+          description: Authentication error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+      security:
+      - apiKeyAuth: []
 components:
   schemas:
     ApiError:
@@ -763,106 +1136,24 @@ components:
           format: int32
         message:
           type: string
-    ClusterOverview:
+    ConnectSandbox:
       type: object
-      required:
-      - nodeCount
-      - healthyNodes
-      - totalCpuMilli
-      - allocatableCpuMilli
-      - totalMemoryMB
-      - allocatableMemoryMB
-      - maxMvmSlots
+      description: Request body for POST /sandboxes/{id}/connect.
       properties:
-        allocatableCpuMilli:
-          type: integer
-          format: int64
-          description: Currently-allocatable CPU in millicpu.
-        allocatableMemoryMB:
-          type: integer
-          format: int64
-          description: Currently-allocatable memory in MiB.
-        healthyNodes:
-          type: integer
-          minimum: 0
-        maxMvmSlots:
-          type: integer
-          format: int64
-          description: Sum of every node's maximum MVM slots.
-        nodeCount:
-          type: integer
-          minimum: 0
-        totalCpuMilli:
-          type: integer
-          format: int64
-          description: Total CPU across the cluster, expressed in millicpu.
-        totalMemoryMB:
-          type: integer
-          format: int64
-          description: Total memory in MiB.
-    ComponentMatrixRowView:
+        timeout:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: Idle timeout in seconds; None when the client did not send one.
+    CreateSnapshotRequest:
       type: object
-      description: Per-component aggregation across all nodes.
-      required:
-      - component
-      - consistent
-      - versions
+      description: Request body for POST /sandboxes/{id}/snapshots.
       properties:
-        component:
-          type: string
-        consistent:
-          type: boolean
-        declaredVersion:
-          type: string
-        declaredVersions:
-          type: array
-          items:
-            type: string
-        versions:
-          type: array
-          items:
-            $ref: '#/components/schemas/ComponentVersionGroupView'
-    ComponentVersionGroupView:
-      type: object
-      description: A group of nodes that report the same version of a component.
-      required:
-      - version
-      - nodes
-      properties:
-        nodes:
-          type: array
-          items:
-            type: string
-        version:
-          type: string
-    ComponentVersionView:
-      type: object
-      description: One component's version on a node.
-      required:
-      - component
-      properties:
-        buildTime:
-          type: string
-        commit:
-          type: string
-        component:
-          type: string
-        source:
-          type: string
-        version:
-          type: string
-    ControlPlaneVersionView:
-      type: object
-      description: Control-plane reference version (the cluster's target version).
-      required:
-      - version
-      properties:
-        buildTime:
-          type: string
-        commit:
-          type: string
-        version:
-          type: string
+        name:
+          type:
+          - string
+          - 'null'
     CreateTemplateRequest:
       type: object
       description: Body for POST /templates (create from image).
@@ -921,6 +1212,11 @@ components:
           items:
             type: string
           description: Container DNS nameservers.
+        enableIvshmem:
+          type:
+          - boolean
+          - 'null'
+          description: Enable ivshmem when building the template snapshot.
         env:
           type:
           - array
@@ -1009,6 +1305,93 @@ components:
           - string
           - 'null'
           description: Writable layer size for the rootfs, e.g. "1G".
+    EgressRule:
+      type: object
+      description: 'L7 egress rule: match conditions + action (allow/deny, audit, credential injection).'
+      required:
+      - name
+      - match
+      - action
+      properties:
+        action:
+          $ref: '#/components/schemas/EgressRuleAction'
+        match:
+          $ref: '#/components/schemas/EgressRuleMatch'
+        name:
+          type: string
+          description: Human-readable label used for audit logging.
+    EgressRuleAction:
+      type: object
+      description: |-
+        Rule action.
+
+        - `allow=true`: pass the request through; optional credential injection.
+        - `allow=false`: reject (HTTP 403); `inject` is ignored if set.
+        - `audit` defaults to `"metadata"` server-side when omitted.
+      required:
+      - allow
+      properties:
+        allow:
+          type: boolean
+        audit:
+          type:
+          - string
+          - 'null'
+          description: One of `"full"`, `"metadata"`, `"none"`.
+        inject:
+          type:
+          - array
+          - 'null'
+          items:
+            $ref: '#/components/schemas/EgressRuleInject'
+    EgressRuleInject:
+      type: object
+      description: |-
+        Credential injection. Only honored when `Action.allow=true` and the
+        request is HTTPS with matching SNI/Host (downstream enforces).
+      required:
+      - header
+      - secret
+      properties:
+        format:
+          type:
+          - string
+          - 'null'
+          description: Template containing `${SECRET}`; defaults to `"${SECRET}"` when omitted.
+        header:
+          type: string
+        secret:
+          type: string
+    EgressRuleMatch:
+      type: object
+      description: |-
+        Rule match conditions. All fields optional; empty match matches any request.
+
+        Multi-field semantics: AND across fields, OR within `method`.
+        Comparisons on sni/host/scheme are case-insensitive.
+      properties:
+        host:
+          type:
+          - string
+          - 'null'
+        method:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+        path:
+          type:
+          - string
+          - 'null'
+        scheme:
+          type:
+          - string
+          - 'null'
+        sni:
+          type:
+          - string
+          - 'null'
     HashMap:
       type: object
       additionalProperties:
@@ -1034,7 +1417,6 @@ components:
       - sandboxID
       - clientID
       - startedAt
-      - endAt
       - cpuCount
       - memoryMB
       - state
@@ -1055,8 +1437,13 @@ components:
           - 'null'
           format: int32
         endAt:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
+          description: |-
+            Projected next-timeout instant. Omitted for never-timeout sandboxes
+            (no deadline) rather than being misreported as equal to startedAt.
         envdVersion:
           type: string
         memoryMB:
@@ -1088,139 +1475,104 @@ components:
       - info
       - warn
       - error
-    NodeComponentEntryView:
+    NewSandbox:
       type: object
-      description: A single component version on a single node, with release declaration membership.
+      description: |-
+        Request body for POST /sandboxes
+        Field names match exactly what the E2B SDK sends.
+        Rule: ID abbreviations → uppercase (templateID, sandboxID, envVars);
+              allow_internet_access is a known SDK snake_case quirk;
+              lifecycle is a nested object — see SandboxLifecycleConfig.
+        `envVars` is the canonical field name; `envs` is accepted as a compatibility
+        alias for E2B SDK callers.
       required:
-      - component
-      - version
-      - declared
+      - templateID
       properties:
-        component:
-          type: string
-        declared:
-          type: boolean
-        version:
-          type: string
-    NodeConditionView:
-      type: object
-      required:
-      - type
-      - status
-      properties:
-        lastHeartbeatTime:
+        allow_internet_access:
           type:
-          - string
+          - boolean
           - 'null'
-          format: date-time
-        message:
-          type: string
-        reason:
-          type: string
-        status:
-          type: string
-        type:
-          type: string
-    NodeResourcesView:
-      type: object
-      required:
-      - cpuMilli
-      - memoryMB
-      properties:
-        cpuMilli:
-          type: integer
-          format: int64
-          description: CPU capacity or availability expressed in millicpu.
-        memoryMB:
-          type: integer
-          format: int64
-    NodeVersionRowView:
-      type: object
-      description: Per-node view of the version matrix.
-      required:
-      - nodeID
-      - healthy
-      - components
-      properties:
-        components:
-          type: array
-          items:
-            $ref: '#/components/schemas/NodeComponentEntryView'
-        healthy:
-          type: boolean
-        nodeID:
-          type: string
-    NodeView:
-      type: object
-      required:
-      - nodeID
-      - hostIP
-      - healthy
-      - capacity
-      - allocatable
-      - cpuSaturation
-      - memorySaturation
-      - maxMvmSlots
-      - quotaCpu
-      - quotaMemMB
-      - createConcurrentNum
-      properties:
-        allocatable:
-          $ref: '#/components/schemas/NodeResourcesView'
-        capacity:
-          $ref: '#/components/schemas/NodeResourcesView'
-        conditions:
-          type: array
-          items:
-            $ref: '#/components/schemas/NodeConditionView'
-        cpuSaturation:
-          type: number
-          format: float
-          description: Percentage (0-100) of CPU currently in use.
-        createConcurrentNum:
-          type: integer
-          format: int64
-          description: Max concurrent sandbox-create operations on this node.
-        healthy:
-          type: boolean
-        heartbeatTime:
+          description: SDK sends this as snake_case (known quirk).
+        distributionScope:
           type:
-          - string
+          - array
           - 'null'
-          format: date-time
-        hostIP:
-          type: string
-        instanceType:
-          type: string
-        localTemplates:
-          type: array
           items:
             type: string
-        maxMvmSlots:
-          type: integer
-          format: int64
-        memorySaturation:
-          type: number
-          format: float
-          description: Percentage (0-100) of memory currently in use.
-        nodeID:
+        envVars:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/HashMap'
+        lifecycle:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxLifecycleConfig'
+            description: |-
+              Sandbox lifecycle configuration. Maps to e2b's `lifecycle` object so
+              callers that already speak e2b can pass through unchanged. Absent
+              (None) means today's behaviour: idle sandboxes are killed.
+        mcp: {}
+        metadata:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/HashMap'
+        network:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxNetworkConfig'
+        secure:
+          type:
+          - boolean
+          - 'null'
+        templateID:
           type: string
-        quotaCpu:
-          type: integer
-          format: int64
-          description: CPU quota in millicores assigned to this node.
-        quotaMemMB:
-          type: integer
-          format: int64
-          description: Memory quota in MiB assigned to this node.
-        versions:
-          type: array
+        timeout:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: Optional idle TTL in seconds. See docs/guide/lifecycle.md.
+        volumeMounts:
+          type:
+          - array
+          - 'null'
           items:
-            $ref: '#/components/schemas/ComponentVersionView'
+            $ref: '#/components/schemas/SandboxVolumeMount'
+    NewVolume:
+      type: object
+      description: |-
+        Request body for POST /volumes.
+
+        `name` must match `^[a-zA-Z0-9_-]+$` and be at most [`MAX_VOLUME_NAME_LEN`] characters
+        (validated in the handler).
+        `driver` selects the Controller Hook Plugin in CubeMaster; omit to use the
+        default plugin configured in CubeMaster.
+      properties:
+        driver:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Plugin/driver to use, e.g. "nfs", "cos", "host-mount".
+            Omit to use CubeMaster's default plugin.
+        name:
+          type: string
+          description: |-
+            Human-readable name for the volume. Optional;
+            if omitted a UUIDv4 is generated and used as both name and volume_id.
     RebuildTemplateRequest:
       type: object
       description: Body for POST /templates/:id (rebuild).
       additionalProperties: {}
+    RefreshRequest:
+      type: object
+      description: Request body for POST /sandboxes/{id}/refreshes
+      properties:
+        duration:
+          type:
+          - integer
+          - 'null'
+          format: int32
     ResumedSandbox:
       type: object
       description: Request body for POST /sandboxes/{id}/resume (deprecated).
@@ -1228,8 +1580,36 @@ components:
         autoPause:
           type: boolean
         timeout:
-          type: integer
+          type:
+          - integer
+          - 'null'
           format: int32
+          description: Idle timeout in seconds; None when the client did not send one.
+    RollbackRequest:
+      type: object
+      description: Request body for POST /sandboxes/{id}/rollback.
+      required:
+      - snapshotID
+      properties:
+        snapshotID:
+          type: string
+    RollbackResponse:
+      type: object
+      description: Response for POST /sandboxes/{id}/rollback after synchronous completion.
+      required:
+      - sandboxID
+      - snapshotID
+      - operationID
+      - status
+      properties:
+        operationID:
+          type: string
+        sandboxID:
+          type: string
+        snapshotID:
+          type: string
+        status:
+          type: string
     Sandbox:
       type: object
       description: |-
@@ -1273,7 +1653,6 @@ components:
       - sandboxID
       - clientID
       - startedAt
-      - endAt
       - envdVersion
       - cpuCount
       - memoryMB
@@ -1298,8 +1677,13 @@ components:
           - string
           - 'null'
         endAt:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
+          description: |-
+            Projected next-timeout instant. Omitted for never-timeout sandboxes
+            (no deadline) rather than being misreported as equal to startedAt.
         envdAccessToken:
           type:
           - string
@@ -1328,6 +1712,38 @@ components:
           - 'null'
           items:
             $ref: '#/components/schemas/SandboxVolumeMount'
+    SandboxLifecycleConfig:
+      type: object
+      description: |-
+        Sandbox lifecycle configuration. Mirrors the e2b SDK's `lifecycle` object —
+        see https://e2b.dev/docs/sandbox/auto-resume for the canonical reference.
+
+        `on_timeout` decides what happens when the sandbox idle timer fires; the
+        historical default is "kill" (delete the sandbox) which matches today's
+        behaviour. `auto_resume` only takes effect when `on_timeout = "pause"` —
+        it tells the proxy/sidecar to wake a paused sandbox up automatically when
+        activity arrives, instead of returning an error.
+      properties:
+        autoResume:
+          type: boolean
+          description: |-
+            Auto-resume on activity. Defaults to false. Only meaningful when
+            `on_timeout` is set to "pause".
+        onTimeout:
+          $ref: '#/components/schemas/SandboxOnTimeout'
+          description: '"kill" (default) | "pause".'
+    SandboxLog:
+      type: object
+      description: Single raw log line — matches E2B SandboxLog schema (timestamp + line).
+      required:
+      - timestamp
+      - line
+      properties:
+        line:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
     SandboxLogEntry:
       type: object
       description: Structured log entry (v2 logs).
@@ -1350,6 +1766,21 @@ components:
         timestamp:
           type: string
           format: date-time
+    SandboxLogs:
+      type: object
+      description: Legacy log response — matches E2B SandboxLogs schema.
+      required:
+      - logs
+      - logEntries
+      properties:
+        logEntries:
+          type: array
+          items:
+            $ref: '#/components/schemas/SandboxLogEntry'
+        logs:
+          type: array
+          items:
+            $ref: '#/components/schemas/SandboxLog'
     SandboxLogsV2Response:
       type: object
       description: v2 log response.
@@ -1360,6 +1791,45 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/SandboxLogEntry'
+    SandboxNetworkConfig:
+      type: object
+      description: Network configuration for sandbox egress/ingress control.
+      properties:
+        allowOut:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+        allowPublicTraffic:
+          type:
+          - boolean
+          - 'null'
+        denyOut:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+        maskRequestHost:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Host authority forwarded to user services by CubeProxy. `${PORT}` is
+            expanded to the requested sandbox port; envd traffic is exempt.
+        rules:
+          type:
+          - array
+          - 'null'
+          items:
+            $ref: '#/components/schemas/EgressRule'
+          description: L7 egress rules, evaluated first-match-wins in list order.
+    SandboxOnTimeout:
+      type: string
+      enum:
+      - kill
+      - pause
     SandboxState:
       type: string
       description: State of the sandbox (running | paused)
@@ -1378,6 +1848,63 @@ components:
           type: string
         path:
           type: string
+        readOnly:
+          type: boolean
+          description: |-
+            CubeSandbox extension: mount this volume read-only for this sandbox
+            attachment. Defaults to false when omitted.
+    SetTimeoutRequest:
+      type: object
+      description: Request body for POST /sandboxes/{id}/timeout
+      required:
+      - timeout
+      properties:
+        timeout:
+          type: integer
+          format: int32
+    SnapshotInfo:
+      type: object
+      description: Response for POST /sandboxes/{id}/snapshots.
+      required:
+      - snapshotID
+      - names
+      properties:
+        names:
+          type: array
+          items:
+            type: string
+        snapshotID:
+          type: string
+    SnapshotListItem:
+      type: object
+      description: One entry in the GET /snapshots list.
+      required:
+      - snapshotID
+      - names
+      - status
+      properties:
+        createdAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        names:
+          type: array
+          items:
+            type: string
+        originSandboxID:
+          type:
+          - string
+          - 'null'
+        snapshotID:
+          type: string
+        status:
+          type: string
+        updatedAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
     TemplateAliasLookupResponse:
       type: object
       required:
@@ -1638,24 +2165,34 @@ components:
           type:
           - string
           - 'null'
-    VersionMatrixView:
+    Volume:
       type: object
-      description: Full node x component version matrix.
+      description: Volume descriptor returned in list responses (no token).
       required:
-      - controlPlane
-      - components
-      - nodes
+      - volumeID
+      - name
       properties:
-        components:
-          type: array
-          items:
-            $ref: '#/components/schemas/ComponentMatrixRowView'
-        controlPlane:
-          $ref: '#/components/schemas/ControlPlaneVersionView'
-        nodes:
-          type: array
-          items:
-            $ref: '#/components/schemas/NodeVersionRowView'
+        name:
+          type: string
+        volumeID:
+          type: string
+    VolumeAndToken:
+      type: object
+      description: |-
+        Volume descriptor with auth token — returned on create / get-single.
+        E2B SDK requires `token` to always be present (non-optional); use empty
+        string when the plugin does not return a token.
+      required:
+      - volumeID
+      - name
+      properties:
+        name:
+          type: string
+        token:
+          type: string
+          description: Auth token returned by the volume plugin. Empty string when not applicable.
+        volumeID:
+          type: string
   securitySchemes:
     apiKeyAuth:
       type: apiKey
@@ -1668,9 +2205,11 @@ components:
 tags:
 - name: health
   description: Health and liveness
-- name: cluster
-  description: Cluster and node inventory
 - name: templates
   description: Template catalog
 - name: sandboxes
   description: Sandbox lifecycle and logs
+- name: snapshots
+  description: Sandbox snapshots
+- name: volumes
+  description: Persistent volumes

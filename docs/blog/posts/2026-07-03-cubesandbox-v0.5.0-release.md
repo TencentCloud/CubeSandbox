@@ -4,7 +4,7 @@ date: 2026-07-03
 author: Cube Sandbox Team
 description: "If v0.3.0 solved 'fast' (millisecond snapshot / clone / rollback), and v0.4.0 solved 'governance' (L7 egress control + observability + cluster consistency), then v0.5.0 aims to solve 'stable, efficient, broad'. With 116 commits from 26 contributors, v0.5.0 brings four core features: AutoPause/AutoResume sandbox lifecycle automation, ARM64 full-stack native support, Tencent Cloud Terraform one-click cluster deployment, and network security enhancements."
 featured: true
-weight: 1
+weight: 2
 ---
 
 # Cube v0.5.0: Auto-Pause, ARM Support, One-Click Cluster Deploy — Taking Sandboxes to Production

@@ -85,7 +85,19 @@ func TestTerminalOversizedStdinClosesWithProtocolError(t *testing.T) {
 	require.Equal(t, terminalcore.CloseProtocolError, sent[len(sent)-1].GetClose().GetReason())
 }
 
-func TestTerminalStdinBackpressureClosesWithSlowProducer(t *testing.T) {
+func TestTerminalRejectsNilClosePayload(t *testing.T) {
+	service := newTerminalTestService(t, terminalHandlerConfig())
+	stream := newFakeTerminalStream(
+		terminalOpenFrame(uuid.NewString()),
+		&cubeboxapi.TerminalClientFrame{Frame: &cubeboxapi.TerminalClientFrame_Close{}},
+	)
+	require.NoError(t, service.Terminal(stream))
+	sent := stream.sentFrames()
+	require.Equal(t, terminalcore.CodeProtocolError, sent[1].GetError().GetCode())
+	require.Equal(t, terminalcore.CloseProtocolError, sent[len(sent)-1].GetClose().GetReason())
+}
+
+func TestTerminalStdinBackpressureRejectsFramesWithoutClosingSession(t *testing.T) {
 	config := terminalHandlerConfig()
 	config.StdinQueueFrames = 1
 	service := newTerminalTestService(t, config)
@@ -100,7 +112,25 @@ func TestTerminalStdinBackpressureClosesWithSlowProducer(t *testing.T) {
 
 	sent := stream.sentFrames()
 	require.Equal(t, terminalcore.CodeSlowProducer, sent[1].GetError().GetCode())
-	require.Equal(t, terminalcore.CloseSlowProducer, sent[len(sent)-1].GetClose().GetReason())
+	require.Nil(t, sent[len(sent)-1].GetClose())
+}
+
+func TestTerminalSendTimeoutDetachesBlockedClient(t *testing.T) {
+	service := newTerminalTestService(t, terminalHandlerConfig())
+	ctx, cancel := context.WithCancel(context.Background())
+	stream := newFakeTerminalStream(terminalOpenFrame(uuid.NewString()))
+	stream.ctx = ctx
+	stream.blockSend = true
+	oldTimeout := terminalSendTimeout
+	terminalSendTimeout = 20 * time.Millisecond
+	t.Cleanup(func() {
+		terminalSendTimeout = oldTimeout
+		cancel()
+	})
+
+	started := time.Now()
+	require.NoError(t, service.Terminal(stream))
+	require.Less(t, time.Since(started), time.Second)
 }
 
 func TestTerminalLogsInitialAndResumeWithTrustedTargetAndStableExecID(t *testing.T) {
@@ -205,6 +235,7 @@ type fakeTerminalStream struct {
 	received  []*cubeboxapi.TerminalClientFrame
 	sent      []*cubeboxapi.TerminalServerFrame
 	recvDelay time.Duration
+	blockSend bool
 }
 
 func newFakeTerminalStream(frames ...*cubeboxapi.TerminalClientFrame) *fakeTerminalStream {
@@ -226,6 +257,10 @@ func (s *fakeTerminalStream) Recv() (*cubeboxapi.TerminalClientFrame, error) {
 }
 
 func (s *fakeTerminalStream) Send(frame *cubeboxapi.TerminalServerFrame) error {
+	if s.blockSend {
+		<-s.ctx.Done()
+		return s.ctx.Err()
+	}
 	s.mu.Lock()
 	s.sent = append(s.sent, frame)
 	s.mu.Unlock()

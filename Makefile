@@ -16,12 +16,6 @@ RELEASE_DIR ?= $(ROOT_DIR)/_output/release
 MANUAL_DEPLOY_SCRIPT ?= $(ROOT_DIR)/deploy/one-click/deploy-manual.sh
 WEB_DIR ?= $(ROOT_DIR)/web
 CUBECOW_DIR ?= $(ROOT_DIR)/cubecow
-# Keep Cargo output out of the source tree. This also avoids inheriting stale
-# ownership from a prior builder invocation under cubecow/target.
-CUBECOW_TARGET_DIR ?= $(ROOT_DIR)/_output/cubecow-target
-# builder-run bind-mounts ROOT_DIR at /workspace. Map only a target directory
-# rooted in that checkout before exporting it to the nested builder command.
-CUBECOW_TARGET_DIR_IN_BUILDER := $(if $(filter $(ROOT_DIR),$(CUBECOW_TARGET_DIR)),/workspace,$(patsubst $(ROOT_DIR)/%,/workspace/%,$(CUBECOW_TARGET_DIR)))
 CUBELET_COW_THIRD_PARTY_DIR ?= $(ROOT_DIR)/Cubelet/third_party/cubecow
 COW_STATICLIB ?= $(CUBELET_COW_THIRD_PARTY_DIR)/lib/libcubecow.a
 COW_HEADER ?= $(CUBELET_COW_THIRD_PARTY_DIR)/include/cubecow.h
@@ -79,19 +73,23 @@ ifneq ($(wildcard $(HOME)/.git-credentials),)
 DOCKER_GIT_CRED += -v $(TMP_GIT_CREDENTIALS):$(BUILDER_CONTAINER_HOME)/.git-credentials
 endif
 
-# Builder image build-args. Set MIRROR=cn to fetch the llvm.sh installer script
-# and the clang-14 apt packages from a China-reachable mirror (override the mirror
-# host with LLVM_MIRROR_BASE=...); unset uses upstream apt.llvm.org. The LLVM GPG
-# signing key is always fetched from apt.llvm.org -- llvm.sh hardcodes that URL and
-# the mirror does not serve the key -- but that is a small request that usually
-# succeeds even when bulk package downloads from apt.llvm.org are slow. This
+# Builder image build-args. Set MIRROR=cn to source packages from China-reachable
+# mirrors: the ubuntu apt archive (amd64 -> $(APT_MIRROR_BASE)/ubuntu, arm64 ->
+# $(APT_MIRROR_BASE)/ubuntu-ports) plus the llvm.sh installer script and clang-14
+# apt packages (override the LLVM mirror host with LLVM_MIRROR_BASE=...). Unset
+# builds against upstream archive.ubuntu.com/ports.ubuntu.com and apt.llvm.org. The
+# LLVM GPG signing key is always fetched from apt.llvm.org -- llvm.sh hardcodes that
+# URL and the mirror does not serve the key -- but that is a small request that
+# usually succeeds even when bulk package downloads from apt.llvm.org are slow. This
 # build-time MIRROR is unrelated to the runtime MIRROR=cn used by deploy/one-click.
+APT_MIRROR_BASE ?= http://mirrors.tencent.com
 LLVM_MIRROR_BASE ?= https://mirrors.zju.edu.cn/llvm-apt
 BUILDER_BUILD_ARGS ?=
 ifeq ($(MIRROR),cn)
-BUILDER_BUILD_ARGS += --build-arg LLVM_MIRROR_BASE=$(LLVM_MIRROR_BASE)
+BUILDER_BUILD_ARGS += --build-arg 'APT_MIRROR_BASE=$(APT_MIRROR_BASE)'
+BUILDER_BUILD_ARGS += --build-arg 'LLVM_MIRROR_BASE=$(LLVM_MIRROR_BASE)'
 else ifneq ($(MIRROR),)
-$(warning MIRROR='$(MIRROR)' is not recognized by builder-image; expected 'cn' or empty -- building against upstream apt.llvm.org)
+$(warning MIRROR='$(MIRROR)' is not recognized by builder-image; expected 'cn' or empty -- building against upstream ubuntu and apt.llvm.org sources)
 endif
 
 .PHONY: all
@@ -147,11 +145,14 @@ help:
 	@printf "  - Run 'make builder-image' first if image %s is missing\n" "$(BUILDER_IMAGE)"
 
 .PHONY: builder-image
+# BUILDER_FORCE_REBUILD rebuilds even when the image is present, and adds
+# --no-cache so a stale image is refreshed from scratch rather than reproduced
+# from the Docker layer cache. A plain first build (image missing) stays cached.
 builder-image:
 	@if [ -z "$(BUILDER_FORCE_REBUILD)" ] && docker image inspect $(BUILDER_IMAGE) >/dev/null 2>&1; then \
 		printf 'Builder image %s already present, skipping build (set BUILDER_FORCE_REBUILD=1 to rebuild)\n' "$(BUILDER_IMAGE)"; \
 	else \
-		docker build $(BUILDER_BUILD_ARGS) -t $(BUILDER_IMAGE) -f $(BUILDER_DOCKERFILE) ./docker; \
+		docker build $(if $(filter-out 0,$(BUILDER_FORCE_REBUILD)),--no-cache) $(BUILDER_BUILD_ARGS) -t $(BUILDER_IMAGE) -f $(BUILDER_DOCKERFILE) ./docker; \
 	fi
 
 .PHONY: prepare-builder-home
@@ -196,7 +197,6 @@ endif
 		-e CARGO_HOME=$(BUILDER_CONTAINER_HOME)/.cargo \
 		-e RUSTUP_HOME=/usr/local/rustup \
 		-e GOPATH=$(BUILDER_CONTAINER_HOME)/go \
-		-e CUBECOW_TARGET_DIR="$(CUBECOW_TARGET_DIR_IN_BUILDER)" \
 		-e BUILDER_CMD="$(BUILDER_CMD)" \
 		-e CUBE_VERSION \
 		-e CUBE_COMMIT \
@@ -213,8 +213,8 @@ endif
 cubecow-sdk:
 ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@mkdir -p "$(CUBELET_COW_THIRD_PARTY_DIR)/lib" "$(CUBELET_COW_THIRD_PARTY_DIR)/include"
-	cd "$(CUBECOW_DIR)" && cargo build --release -p cubecow --target-dir "$(CUBECOW_TARGET_DIR)"
-	install -m 0644 "$(CUBECOW_TARGET_DIR)/release/libcubecow.a" "$(COW_STATICLIB)"
+	cd "$(CUBECOW_DIR)" && cargo build --release -p cubecow
+	install -m 0644 "$(CUBECOW_DIR)/target/release/libcubecow.a" "$(COW_STATICLIB)"
 	install -m 0644 "$(CUBECOW_DIR)/include/cubecow.h" "$(COW_HEADER)"
 else
 	$(MAKE) builder-image
@@ -382,11 +382,11 @@ web-api-sync:
 
 .PHONY: terminal-protocol-sync
 terminal-protocol-sync:
-	cd Cubelet/scripts/terminal-protocol-gen && go run .
+	go run ./tools/terminal-protocol-gen/main.go
 
 .PHONY: terminal-protocol-check
 terminal-protocol-check:
-	cd Cubelet/scripts/terminal-protocol-gen && go run . -check
+	go run ./tools/terminal-protocol-gen/main.go -check
 
 .PHONY: web-sync-dev-env
 web-sync-dev-env:

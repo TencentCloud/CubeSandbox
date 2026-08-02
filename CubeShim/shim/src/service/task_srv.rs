@@ -2,17 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use crate::common::utils::Utils;
+use std::sync::Arc;
+use std::time::Instant;
 
-use crate::container::{container_mgr::ContainerInfo, exec::Tty};
-use crate::log::{stat_defer, Log, LogLevel};
-use crate::sandbox::sb;
-use crate::service::update_ext;
-use crate::{debugf, errf, infof, warnf};
 use async_trait::async_trait;
-
 use containerd_shim::event::Event;
-
 use containerd_shim::{
     asynchronous::{publisher::RemotePublisher, ExitSignal},
     protos::events::task::{
@@ -25,10 +19,15 @@ use containerd_shim::{
     Context, Error, TtrpcResult,
 };
 use protobuf::Enum;
-use std::sync::Arc;
-use std::time::Instant;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
+
+use crate::common::utils::Utils;
+use crate::container::{container_mgr::ContainerInfo, exec::Tty};
+use crate::log::{stat_defer, Log, LogLevel};
+use crate::sandbox::sb;
+use crate::service::update_ext;
+use crate::{debugf, errf, infof, warnf};
 const MODULE: &str = "Shim";
 const INTERNAL_PROBE_EXEC_ID_PREFIX: &str = "cubesandbox-internal-probe-";
 
@@ -142,6 +141,7 @@ impl Task for TaskService {
         let info = ContainerInfo {
             id: req.id.clone(),
             bundle: req.bundle.clone(),
+            stdin: req.stdin.clone(),
             stdout: req.stdout.clone(),
             stderr: req.stderr.clone(),
             terminal: req.terminal,
@@ -189,6 +189,7 @@ impl Task for TaskService {
         _ctx: &TtrpcContext,
         req: api::StartRequest,
     ) -> TtrpcResult<api::StartResponse> {
+        let start_at = Instant::now();
         infof!(
             self.log,
             "start request, id:{}, execid:{}",
@@ -228,7 +229,13 @@ impl Task for TaskService {
             let topic = event.topic();
             self.tx_event(topic, Box::new(event)).await;
         }
-        infof!(self.log, "start req finish");
+        infof!(
+            self.log,
+            "start req finish, id:{}, execid:{}, cost_ms:{}",
+            req.id(),
+            req.exec_id(),
+            start_at.elapsed().as_millis()
+        );
         Ok(api::StartResponse {
             pid: sb.pid(),
             ..Default::default()
@@ -240,6 +247,7 @@ impl Task for TaskService {
         _ctx: &TtrpcContext,
         req: api::WaitRequest,
     ) -> TtrpcResult<api::WaitResponse> {
+        let start_at = Instant::now();
         infof!(
             self.log,
             "wait req start, id:{}, execid:{}",
@@ -268,7 +276,14 @@ impl Task for TaskService {
                 seconds: tm.timestamp(),
                 ..Default::default()
             };
-        infof!(self.log, "wait req finish");
+        infof!(
+            self.log,
+            "wait req finish, id:{}, execid:{}, exit_status:{}, cost_ms:{}",
+            req.id(),
+            req.exec_id(),
+            code,
+            start_at.elapsed().as_millis()
+        );
         Ok(api::WaitResponse {
             exit_status: code,
             exited_at: Some(e_tm).into(),
@@ -281,6 +296,7 @@ impl Task for TaskService {
         _ctx: &TtrpcContext,
         req: api::DeleteRequest,
     ) -> TtrpcResult<api::DeleteResponse> {
+        let start_at = Instant::now();
         infof!(
             self.log,
             "delete req start, id:{}, execid:{}",
@@ -341,7 +357,14 @@ impl Task for TaskService {
             }
         };
         stat.set_ok();
-        infof!(self.log, "delete req finish");
+        infof!(
+            self.log,
+            "delete req finish, id:{}, execid:{}, exit_status:{}, cost_ms:{}",
+            req.id(),
+            req.exec_id(),
+            exit_code,
+            start_at.elapsed().as_millis()
+        );
 
         Ok(api::DeleteResponse {
             pid: sb.pid(),
@@ -504,6 +527,7 @@ impl Task for TaskService {
         _ctx: &TtrpcContext,
         req: api::ExecProcessRequest,
     ) -> TtrpcResult<api::Empty> {
+        let start_at = Instant::now();
         infof!(
             self.log,
             "exec req start, id:{}, execid:{}",
@@ -551,7 +575,58 @@ impl Task for TaskService {
         };
         let topic = event.topic();
         self.tx_event(topic, Box::new(event)).await;
-        infof!(self.log, "exec req finish");
+        infof!(
+            self.log,
+            "exec req finish, id:{}, execid:{}, cost_ms:{}",
+            req.id(),
+            req.exec_id(),
+            start_at.elapsed().as_millis()
+        );
+        Ok(api::Empty::default())
+    }
+
+    async fn close_io(
+        &self,
+        _ctx: &TtrpcContext,
+        req: api::CloseIORequest,
+    ) -> TtrpcResult<api::Empty> {
+        let start_at = Instant::now();
+        infof!(
+            self.log,
+            "close_io req start, id:{}, execid:{}",
+            req.id(),
+            req.exec_id()
+        );
+
+        if !req.stdin {
+            infof!(
+                self.log,
+                "close_io req finish, id:{}, execid:{}, stdin:false, cost_ms:{}",
+                req.id(),
+                req.exec_id(),
+                start_at.elapsed().as_millis()
+            );
+            return Ok(api::Empty::default());
+        }
+
+        let sb = self.sandbox.lock().await;
+        if sb.paused().await {
+            errf!(self.log, "sandbox not in normal state");
+            return Err(Others(format!("sandbox not in normal state")));
+        }
+
+        sb.close_io(&req.id, &req.exec_id).await.map_err(|e| {
+            errf!(self.log, "close_io failed:{}", e);
+            e
+        })?;
+
+        infof!(
+            self.log,
+            "close_io req finish, id:{}, execid:{}, stdin:true, cost_ms:{}",
+            req.id(),
+            req.exec_id(),
+            start_at.elapsed().as_millis()
+        );
         Ok(api::Empty::default())
     }
 
