@@ -184,8 +184,15 @@ func (s *session) resume(request OpenRequest) (*Attachment, Opened, error) {
 	s.resizeCols = request.Cols
 	s.resizeRows = request.Rows
 	s.resizeGeneration = s.generation
+	// A resume re-activates the session: reset the idle clock so the detached
+	// time spent offline does not count against the reconnected client.
+	s.lastActivity.Store(time.Now().UnixNano())
 	select {
 	case s.resizeNotify <- struct{}{}:
+	default:
+	}
+	select {
+	case s.activity <- struct{}{}:
 	default:
 	}
 	return attachment, opened, nil
@@ -208,7 +215,9 @@ func (s *session) pumpStdout() {
 			s.handleOutput(append([]byte(nil), buf[:n]...))
 		}
 		if err != nil {
-			if !errors.Is(err, io.EOF) && s.currentState() != StateClosed {
+			// ErrClosedPipe is the expected result of cleanup closing the read
+			// side after process.Delete; it is not an internal fault.
+			if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) && s.currentState() != StateClosed {
 				s.core.report(WrapError(CodeInternal, err))
 			}
 			return
@@ -223,6 +232,10 @@ func (s *session) handleOutput(data []byte) {
 	)
 	s.mu.Lock()
 	offset := s.ring.Write(data)
+	// Output counts as activity too: a session streaming output (tail -f,
+	// watch, a long build) with no keystrokes is alive and must not be
+	// reaped as idle.
+	s.lastActivity.Store(time.Now().UnixNano())
 	switch s.state {
 	case StateActive:
 		if s.attachment != nil && !s.attachment.enqueue(Event{Kind: EventStdout, Data: data, Offset: offset}) {
@@ -242,6 +255,11 @@ func (s *session) handleOutput(data []byte) {
 	}
 	epoch := s.graceEpoch
 	s.mu.Unlock()
+
+	select {
+	case s.activity <- struct{}{}:
+	default:
+	}
 
 	if detached != nil {
 		detached.finish(Event{Kind: EventError, Code: CodeSlowConsumer})
@@ -516,11 +534,21 @@ func (s *session) startGraceTimer(epoch uint64) {
 		return
 	}
 	time.AfterFunc(s.core.config.ReconnectGrace, func() {
+		// The epoch check and the state transition must be atomic: a resume
+		// that lands between them (in a plain check-then-requestClose) would
+		// leave a freshly re-activated session immediately torn down.
 		s.mu.Lock()
 		expired := s.state == StateDetachedGrace && s.graceEpoch == epoch
+		if expired {
+			if s.closeReason == "" {
+				s.closeReason = CloseSessionLost
+			}
+			s.state = StateClosing
+		}
 		s.mu.Unlock()
 		if expired {
-			s.requestClose(CloseSessionLost, nil)
+			s.cancel()
+			s.cleanupOnce.Do(func() { go s.cleanup() })
 		}
 	})
 }
@@ -697,11 +725,10 @@ func (a *Attachment) enqueue(event Event) bool {
 		if a.pendingBytes+len(event.Data) > a.maxBytes || a.pendingFrames >= a.maxFrames {
 			return false
 		}
-	} else {
-		if a.pendingControl >= 2 {
-			return true
-		}
 	}
+	// Control events (error notifications) share the channel's control-frame
+	// headroom and are never silently accepted-but-dropped: if the channel is
+	// genuinely full, enqueue reports false and the caller handles it.
 	select {
 	case a.events <- event:
 		if event.Kind == EventStdout {

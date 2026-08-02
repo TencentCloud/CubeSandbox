@@ -262,6 +262,30 @@ func TestResizeDoesNotExtendIdleButStdinDoes(t *testing.T) {
 	require.Equal(t, CloseIdleTimeout, waitForKind(t, second, EventClose).Reason)
 }
 
+func TestStdoutKeepsSessionAlivePastIdleTimeout(t *testing.T) {
+	adapter := newFakeAdapter()
+	config := testConfig()
+	config.IdleTimeout = 100 * time.Millisecond
+	core := newTestCore(t, adapter, config)
+	attachment, _, err := core.Open(context.Background(), openRequest("sandbox-a"))
+	require.NoError(t, err)
+	process := adapter.lastProcess()
+
+	// Continuous output with no keystrokes must keep the session alive well
+	// past IdleTimeout: output is activity, not silence (e.g. tail -f or a
+	// long-running build that streams to the terminal).
+	for i := 0; i < 6; i++ {
+		time.Sleep(45 * time.Millisecond)
+		_, err := process.stdoutW.Write([]byte("tick\n"))
+		require.NoError(t, err)
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		event, nextErr := attachment.Next(ctx)
+		cancel()
+		require.NoError(t, nextErr, "session must stay active under continuous output")
+		require.Equal(t, EventStdout, event.Kind)
+	}
+}
+
 func TestParentCancellationDrainsSessionsAndRejectsNewOpens(t *testing.T) {
 	parent, cancelParent := context.WithCancel(context.Background())
 	adapter := newFakeAdapter()

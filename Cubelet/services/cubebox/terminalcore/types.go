@@ -35,6 +35,7 @@ const (
 	CloseSessionLost       = "SESSION_LOST"
 	CloseProtocolError     = "PROTOCOL_ERROR"
 	CloseServerDraining    = "SERVER_DRAINING"
+	CloseSlowProducer      = "SLOW_PRODUCER"
 	CloseSlowConsumer      = "SLOW_CONSUMER"
 	CloseInternal          = "INTERNAL"
 )
@@ -270,7 +271,7 @@ func sanitizeCloseReason(reason string) string {
 	switch reason {
 	case CloseUserClosed, CloseIdleTimeout, CloseMaxLifetime,
 		CloseSandboxTransition, CloseRuntimeExited, CloseSessionLost,
-		CloseProtocolError, CloseServerDraining, CloseSlowConsumer,
+		CloseProtocolError, CloseServerDraining, CloseSlowProducer, CloseSlowConsumer,
 		CloseInternal:
 		return reason
 	default:

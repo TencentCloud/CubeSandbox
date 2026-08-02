@@ -157,6 +157,18 @@ func (s *service) receiveTerminalFrames(
 	stream grpc.BidiStreamingServer[cubebox.TerminalClientFrame, cubebox.TerminalServerFrame],
 	attachment *terminalcore.Attachment,
 ) {
+	// This runs on a separate goroutine from the handler's recover, so a panic
+	// here would otherwise unwind into the gRPC transport and crash the whole
+	// cubelet. Mirror the handler's containment: detach so the session stays
+	// resumable, then return.
+	defer func() {
+		if panicValue := recover(); panicValue != nil {
+			if attachment != nil {
+				attachment.Detach()
+			}
+			log.G(stream.Context()).Error("terminal receive panic")
+		}
+	}()
 	for {
 		frame, err := stream.Recv()
 		if err != nil {
@@ -177,9 +189,10 @@ func (s *service) receiveTerminalFrames(
 			if err := attachment.SendStdin(payload.Stdin); err != nil {
 				code := terminalcore.CodeOf(err)
 				attachment.NotifyError(code)
-				if code != terminalcore.CodeSlowProducer {
-					return
+				if code == terminalcore.CodeSlowProducer {
+					_ = attachment.Close(terminalcore.CloseSlowProducer)
 				}
+				return
 			}
 		case *cubebox.TerminalClientFrame_Resize:
 			if payload.Resize == nil {

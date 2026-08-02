@@ -85,6 +85,24 @@ func TestTerminalOversizedStdinClosesWithProtocolError(t *testing.T) {
 	require.Equal(t, terminalcore.CloseProtocolError, sent[len(sent)-1].GetClose().GetReason())
 }
 
+func TestTerminalStdinBackpressureClosesWithSlowProducer(t *testing.T) {
+	config := terminalHandlerConfig()
+	config.StdinQueueFrames = 1
+	service := newTerminalTestService(t, config)
+	service.testAdapter.blockStdin = true
+	stream := newFakeTerminalStream(
+		terminalOpenFrame(uuid.NewString()),
+		&cubeboxapi.TerminalClientFrame{Frame: &cubeboxapi.TerminalClientFrame_Stdin{Stdin: []byte("one")}},
+		&cubeboxapi.TerminalClientFrame{Frame: &cubeboxapi.TerminalClientFrame_Stdin{Stdin: []byte("two")}},
+		&cubeboxapi.TerminalClientFrame{Frame: &cubeboxapi.TerminalClientFrame_Stdin{Stdin: []byte("three")}},
+	)
+	require.NoError(t, service.Terminal(stream))
+
+	sent := stream.sentFrames()
+	require.Equal(t, terminalcore.CodeSlowProducer, sent[1].GetError().GetCode())
+	require.Equal(t, terminalcore.CloseSlowProducer, sent[len(sent)-1].GetClose().GetReason())
+}
+
 func TestTerminalLogsInitialAndResumeWithTrustedTargetAndStableExecID(t *testing.T) {
 	service := newTerminalTestService(t, terminalHandlerConfig())
 	openedEvents := make([]terminalOpenedLogEvent, 0, 2)
@@ -235,6 +253,7 @@ type terminalHandlerAdapter struct {
 	mu         sync.Mutex
 	processes  []*terminalHandlerProcess
 	resolveErr error
+	blockStdin bool
 }
 
 func (a *terminalHandlerAdapter) Resolve(_ context.Context, sandboxID, containerID string) (terminalcore.Target, error) {
@@ -254,6 +273,9 @@ func (a *terminalHandlerAdapter) Resolve(_ context.Context, sandboxID, container
 
 func (a *terminalHandlerAdapter) StartPTY(context.Context, terminalcore.Target, terminalcore.PTYSpec) (terminalcore.PTYProcess, error) {
 	process := newTerminalHandlerProcess()
+	if a.blockStdin {
+		process.stdinBlock = make(chan struct{})
+	}
 	a.mu.Lock()
 	a.processes = append(a.processes, process)
 	a.mu.Unlock()
@@ -271,15 +293,17 @@ func (a *terminalHandlerAdapter) lastProcess() *terminalHandlerProcess {
 }
 
 type terminalHandlerProcess struct {
-	mu       sync.Mutex
-	stdin    bytes.Buffer
-	stdoutR  *io.PipeReader
-	stdoutW  *io.PipeWriter
-	exitCh   chan terminalcore.ExitStatus
-	exitOnce sync.Once
-	cols     uint32
-	rows     uint32
-	ops      []string
+	mu         sync.Mutex
+	stdin      bytes.Buffer
+	stdoutR    *io.PipeReader
+	stdoutW    *io.PipeWriter
+	exitCh     chan terminalcore.ExitStatus
+	exitOnce   sync.Once
+	cols       uint32
+	rows       uint32
+	ops        []string
+	stdinBlock chan struct{}
+	stdinOnce  sync.Once
 }
 
 func newTerminalHandlerProcess() *terminalHandlerProcess {
@@ -301,6 +325,11 @@ func (p *terminalHandlerProcess) Resize(_ context.Context, cols, rows uint32) er
 }
 
 func (p *terminalHandlerProcess) CloseStdin(context.Context) error {
+	p.stdinOnce.Do(func() {
+		if p.stdinBlock != nil {
+			close(p.stdinBlock)
+		}
+	})
 	p.record("close-stdin")
 	return nil
 }
@@ -349,6 +378,9 @@ func (p *terminalHandlerProcess) record(operation string) {
 type terminalHandlerStdin struct{ process *terminalHandlerProcess }
 
 func (w terminalHandlerStdin) Write(data []byte) (int, error) {
+	if w.process.stdinBlock != nil {
+		<-w.process.stdinBlock
+	}
 	w.process.mu.Lock()
 	defer w.process.mu.Unlock()
 	return w.process.stdin.Write(data)
