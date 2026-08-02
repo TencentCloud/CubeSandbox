@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"path/filepath"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -37,6 +38,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/services/cubebox/terminalcore"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
@@ -55,6 +57,8 @@ type ServicesConfig struct {
 
 	DeadContainerTTLStr string `toml:"dead_container_ttl"`
 	deadContainerTTL    time.Duration
+
+	Terminal TerminalServicesConfig `toml:"terminal"`
 }
 
 var (
@@ -65,7 +69,7 @@ var (
 )
 
 func defaultServiceConfig() *ServicesConfig {
-	return &ServicesConfig{}
+	return &ServicesConfig{Terminal: defaultTerminalServicesConfig()}
 }
 
 func init() {
@@ -86,6 +90,10 @@ func init() {
 			}()
 
 			config := ic.Config.(*ServicesConfig)
+			terminalConfig, terminalDrainTimeout, err := config.Terminal.coreConfig()
+			if err != nil {
+				return nil, fmt.Errorf("invalid terminal config: %w", err)
+			}
 			t, err := time.ParseDuration(config.CreateDeadlineStr)
 			if err != nil || t == 0 {
 				config.createDeadline = defaultCreateDeadline
@@ -133,6 +141,24 @@ func init() {
 			if !ok {
 				return nil, fmt.Errorf("not a workflow engine")
 			}
+			terminalAdapter, err := newTerminalRuntimeAdapter(cb)
+			if err != nil {
+				return nil, fmt.Errorf("init terminal runtime adapter: %w", err)
+			}
+			terminalJournal, err := terminalcore.NewFileJournal(filepath.Join(cb.config.StatePath, "terminal-journal"))
+			if err != nil {
+				return nil, err
+			}
+			terminal, err := terminalcore.New(ic.Context, terminalConfig, terminalAdapter, terminalJournal,
+				terminalcore.WithErrorReporter(func(reportErr error) {
+					log.G(ic.Context).Errorf("terminal core: %v", reportErr)
+				}))
+			if err != nil {
+				return nil, fmt.Errorf("init terminal core: %w", err)
+			}
+			if recoverErr := terminal.Start(); recoverErr != nil {
+				log.G(ic.Context).Warnf("terminal orphan recovery incomplete: %v", recoverErr)
+			}
 			s := &service{
 				engine:                e,
 				cubeboxMgr:            cb,
@@ -145,6 +171,8 @@ func init() {
 				otherRuntime: &ociRuntime{
 					cubeboxMgr: cb,
 				},
+				terminal:             terminal,
+				terminalDrainTimeout: terminalDrainTimeout,
 			}
 
 			// Publish the cubebox manager as the authoritative source of
@@ -186,6 +214,9 @@ type service struct {
 	sandboxLifecycleLocks *utils.ResourceLocks
 
 	otherRuntime *ociRuntime
+
+	terminal             *terminalcore.Core
+	terminalDrainTimeout time.Duration
 }
 
 func (s *service) RegisterTCP(server *grpc.Server) error {
@@ -321,6 +352,9 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	err, _ := ret.FromError(createErr)
 	rsp.Ret.RetMsg = err.Message()
 	rsp.Ret.RetCode = err.Code()
+	if ret.IsSuccessCode(rsp.Ret.RetCode) {
+		s.allowTerminalSandbox(createInfo.SandboxID)
+	}
 	if strings.Contains(rsp.Ret.RetMsg, "no space left") ||
 		strings.Contains(rsp.Ret.RetMsg, "No space left") {
 		rsp.Ret.RetCode = errorcode.ErrorCode_NoSpaceLeftOnDevice
@@ -598,6 +632,11 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 				sb.DeleteRequestID = req.RequestID
 				s.cubeboxMgr.cubeboxManger.SyncByID(ctx, req.SandboxID)
 			}
+			if err := s.drainTerminalSandbox(ctx, req.SandboxID, terminalcore.CloseSandboxTransition); err != nil {
+				rsp.Ret.RetMsg = fmt.Sprintf("failed to drain terminal sessions: %v", err)
+				rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
+				return rsp, nil
+			}
 			cleanOpts := &workflow.CleanContext{
 				BaseWorkflowInfo: workflow.BaseWorkflowInfo{
 					SandboxID: req.SandboxID,
@@ -665,6 +704,17 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 			}
 		}
 	}
+	if err := s.drainTerminalSandbox(ctx, req.SandboxID, terminalcore.CloseSandboxTransition); err != nil {
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to drain terminal sessions: %v", err)
+		rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
+		return rsp, nil
+	}
+	terminalDrained := true
+	defer func() {
+		if terminalDrained && !ret.IsSuccessCode(rsp.Ret.RetCode) {
+			s.allowTerminalSandboxIfRunning(context.WithoutCancel(ctx), req.SandboxID)
+		}
+	}()
 
 	if getErr == nil {
 		// Do not mark the sandbox as deleted until the paused preflight has
