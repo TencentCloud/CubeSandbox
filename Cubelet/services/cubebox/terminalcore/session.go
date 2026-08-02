@@ -653,7 +653,7 @@ func (a *Attachment) SendStdin(data []byte) error {
 }
 
 func (a *Attachment) Resize(cols, rows uint32) error {
-	if cols == 0 || rows == 0 || cols > 1000 || rows > 1000 {
+	if cols < minTerminalDimension || rows < minTerminalDimension || cols > maxTerminalDimension || rows > maxTerminalDimension {
 		return Errorf(CodeProtocolError, "terminal dimensions are out of range")
 	}
 	a.session.mu.Lock()

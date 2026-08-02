@@ -187,6 +187,12 @@ func goOutput(root, source, path, packageName string, spec manifest, cubelet boo
 		fmt.Fprintf(&b, "\tmaxTerminalDimension = %d\n", spec.Limits.MaxDimension)
 		fmt.Fprintln(&b, ")")
 	}
+	if cubelet {
+		fmt.Fprintln(&b, "const (")
+		fmt.Fprintf(&b, "\tminTerminalDimension = %d\n", spec.Limits.MinDimension)
+		fmt.Fprintf(&b, "\tmaxTerminalDimension = %d\n", spec.Limits.MaxDimension)
+		fmt.Fprintln(&b, ")")
+	}
 	writeGoCodes(&b, spec, cubelet)
 	formatted, err := format.Source(b.Bytes())
 	checkErr(err)

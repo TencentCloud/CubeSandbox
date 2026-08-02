@@ -348,7 +348,7 @@ func validateOpenRequest(request OpenRequest) error {
 	if _, err := uuid.Parse(request.SessionID); err != nil {
 		return Errorf(CodeProtocolError, "invalid session id")
 	}
-	if request.Cols == 0 || request.Rows == 0 || request.Cols > 1000 || request.Rows > 1000 {
+	if request.Cols < minTerminalDimension || request.Rows < minTerminalDimension || request.Cols > maxTerminalDimension || request.Rows > maxTerminalDimension {
 		return Errorf(CodeProtocolError, "terminal dimensions are out of range")
 	}
 	if len(request.RequestID) > 256 || len(request.SandboxID) > 256 || len(request.ContainerID) > 256 {

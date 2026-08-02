@@ -3,6 +3,10 @@
 package terminalcore
 
 const (
+	minTerminalDimension = 1
+	maxTerminalDimension = 1000
+)
+const (
 	CodeTargetNotFound    = "TARGET_NOT_FOUND"
 	CodeTargetNotRunning  = "TARGET_NOT_RUNNING"
 	CodeLimitExceeded     = "LIMIT_EXCEEDED"

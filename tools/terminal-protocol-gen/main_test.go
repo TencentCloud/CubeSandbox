@@ -46,6 +46,19 @@ func TestQuoteTSEscapesStringSyntax(t *testing.T) {
 	}
 }
 
+func TestGoOutputIncludesDimensionLimitsForCubelet(t *testing.T) {
+	spec := testManifest()
+	generated := string(goOutput("/repo", "source.go", "generated.go", "terminalcore", spec, true).data)
+	for _, expected := range []string{
+		"minTerminalDimension = 1",
+		"maxTerminalDimension = 2",
+	} {
+		if !strings.Contains(generated, expected) {
+			t.Fatalf("Cubelet output %q does not contain %q", generated, expected)
+		}
+	}
+}
+
 func testManifest() manifest {
 	return manifest{
 		Subprotocol: "cube-terminal.v1",
