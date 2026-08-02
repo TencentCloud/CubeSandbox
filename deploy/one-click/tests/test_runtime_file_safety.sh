@@ -168,7 +168,7 @@ test_unit_dependency_order() {
   assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-cube-proxy.service" "After=docker.service network-online.target cube-sandbox-redis.service cube-sandbox-dns.service"
   assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-cubemaster.service" "After=network-online.target cube-sandbox-mysql.service cube-sandbox-redis.service"
   assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-cube-api.service" "After=network-online.target cube-sandbox-cubemaster.service"
-  assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-webui.service" "After=docker.service network-online.target cube-sandbox-cube-api.service"
+  assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-webui.service" "After=docker.service network-online.target cube-sandbox-cubemaster.service cube-sandbox-cubeops.service"
 }
 
 test_detect_glibc_version_consumes_full_ldd_output() {
@@ -854,6 +854,22 @@ SH
   assert_contains "${ss_log}" "sport = :9090"
 }
 
+test_one_click_proxy_and_egress_ports_do_not_collide() {
+  local proxy_port egress_port
+  proxy_port="$(sed -n 's/^CUBE_PROXY_GRPC_PORT=//p' "${ONE_CLICK_DIR}/env.example" | tail -n1)"
+  egress_port="$(sed -n 's/.*CUBE_EGRESS_ADMIN_PORT:-\([0-9][0-9]*\).*/\1/p' \
+    "${ONE_CLICK_DIR}/scripts/systemd/cube-egress-postcheck.sh" | head -n1)"
+
+  [[ "${proxy_port}" == "19091" ]] || fail "unexpected one-click CubeProxy gRPC default: ${proxy_port}"
+  [[ "${egress_port}" == "9090" ]] || fail "unexpected CubeEgress admin default: ${egress_port}"
+  [[ "${proxy_port}" != "${egress_port}" ]] || fail "CubeProxy and CubeEgress must not share a host port"
+}
+
+test_cube_egress_stop_removes_container() {
+  assert_contains "${ONE_CLICK_DIR}/scripts/systemd/cube-egress-stop.sh" \
+    'docker_rm_if_exists "${CUBE_EGRESS_CONTAINER}" 15'
+}
+
 test_postcheck_skips_when_external_host_set() {
   # When an external endpoint is configured the local container is never
   # started, so the postcheck must short-circuit with exit 0 instead of
@@ -927,6 +943,8 @@ test_cube_proxy_postcheck_ignores_deprecated_host_port
 test_cube_proxy_postcheck_prefers_http_over_deprecated_host_port
 test_cube_proxy_postcheck_follows_grpc_port
 test_cube_proxy_postcheck_fails_when_grpc_port_not_ready
+test_one_click_proxy_and_egress_ports_do_not_collide
+test_cube_egress_stop_removes_container
 test_postcheck_skips_when_external_host_set
 test_mask_external_dep_services_remove_then_mask
 

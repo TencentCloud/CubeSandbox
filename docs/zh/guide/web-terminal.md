@@ -8,7 +8,7 @@ Web 终端可以从 CubeSandbox 控制台为运行中的沙箱容器打开交互
 
 ## 使用条件
 
-- 使用当前角色为 `admin` 的账号登录控制台。
+- 使用具备终端访问权限的账号登录控制台。
 - 沙箱和所选容器必须处于运行状态。
 - 访问已部署的控制台入口。Vite 开发服务器可用于前端开发，但不能替代生产 Web 终端入口。
 - 生产环境应在控制台或受信任的反向代理处终止 HTTPS，使终端使用 WSS。
@@ -48,6 +48,77 @@ Web Terminal 运行时默认值由 `CubeOps/internal/config/config.go` 统一维
 
 Cubelet 还会执行内置限额：每节点 100 个会话、每沙箱 10 个会话、每容器 5 个会话。浏览器无法提高这些限额。
 
+## 部署并验证 Web 终端
+
+下面的流程使用 one-click 发布包启动 CubeSandbox，并验证从浏览器到容器的
+完整终端链路。请使用具备 KVM、systemd 和 Docker 的 Linux 主机，并为该主机
+单独准备部署配置和凭据；不要把生产环境的 `.env` 复制到新的安装环境。
+
+### 准备发布包
+
+```bash
+tar -xzf cube-sandbox-one-click-<version>.tar.gz
+cd cube-sandbox-one-click-<version>
+cp env.example .env
+chmod 600 .env
+```
+
+只设置目标主机必需的部署参数，例如节点地址和 WebUI 端口。
+密码和管理员凭据不得进入 shell history 或命令行参数。
+
+### 安装并检查服务
+
+```bash
+sudo ./install.sh
+systemctl is-active cube-sandbox-cubeops.service
+systemctl is-active cube-sandbox-cubemaster.service
+systemctl is-active cube-sandbox-cubelet.service
+systemctl is-active cube-sandbox-webui.service
+curl -fsS http://127.0.0.1:12088/health
+```
+
+预期结果是四个服务都返回 `active`，且 `/health` 返回 HTTP 200。
+使用浏览器打开已部署的 WebUI，不得使用 Vite 开发服务器代替。
+
+### 创建沙箱并打开终端
+
+1. 使用具备终端访问权限的账号登录控制台。如当前部署仍使用文档记载的
+   初始凭据，应立即通过正常的修改密码流程更换。
+2. 如当前部署中没有 `READY` 模板和运行中沙箱，按
+   [快速开始：制作模板](./quickstart.md#第三步制作模板)操作，
+   然后在控制台中从该模板创建一个沙箱。
+3. 打开 **Sandboxes（沙箱）**，找到运行中的沙箱，在列表或详情页点击
+   **打开终端**。
+4. 等待状态变为 **已连接**，并确认终端表面存在真实输出。
+
+暂停或停止的目标会保持禁用。如模板准备或沙箱创建失败，应先解决对应的
+生命周期问题，再继续验证终端，而不是改用另一个沙箱。
+
+### 验证终端交互
+
+在终端中执行：
+
+```text
+printf 'WEB_TERMINAL_HOST=%s\n' "$(hostname)"
+ls --color=auto
+stty size
+top
+```
+
+按 `Ctrl+C` 停止 `top`，确认仍可继续使用同一个 Shell。执行
+`ping -c 3 127.0.0.1`，检查普通命令的输入和输出。调整终端窗口大小后再次
+执行 `stty size`，返回的行列数应随之变化。完成后正常关闭终端。
+
+不再需要沙箱时，可以通过控制台将其删除。如需停止并移除 one-click 安装，
+执行：
+
+```bash
+sudo ./down.sh
+```
+
+排查问题或共享截图时，不得包含凭据、grant、Cookie、完整认证头、internal
+token、终端 payload 或数据库密码。
+
 ### Shared Internal Token
 
 CubeOps 和 CubeMaster 必须收到同一个 `CUBE_TERMINAL_INTERNAL_TOKEN`。
@@ -72,9 +143,10 @@ CubeOps 和 CubeMaster 必须收到同一个 `CUBE_TERMINAL_INTERNAL_TOKEN`。
 
 确认沙箱和目标容器都处于运行状态。暂停目标会在 UI 中禁用，并被后端以 `TARGET_NOT_RUNNING` 拒绝。
 
-### Grant 请求返回 401 或 403
+### 终端请求返回 401 或 403
 
-- `401`：重新登录，并确认账号当前角色为 `admin`。
+- `401`：重新登录；当前登录会话可能不存在或已经过期。
+- Grant 请求返回 `403`：确认该账号具备目标沙箱的终端访问权限。
 - WebSocket upgrade 返回 `403`：确认浏览器 Origin 与控制台的 scheme、host、port 完全一致，或者已加入额外 allowed-origin 列表。
 
 ### WebSocket 没有返回 101

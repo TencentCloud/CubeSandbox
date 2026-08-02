@@ -280,7 +280,9 @@ CUBE_PROXY_DNS_ENABLE=1
 ```bash
 CUBE_PROXY_HTTPS_PORT=443
 CUBE_PROXY_HTTP_PORT=80
-CUBE_PROXY_GRPC_PORT=9090
+# CubeProxy 的通用默认端口是 9090。one-click 同机部署时，
+# CubeEgress 已占用回环地址 9090，因此该部署配置使用 19091。
+CUBE_PROXY_GRPC_PORT=19091
 # 已废弃：CUBE_PROXY_HOST_PORT 会被忽略；如需调整启动后检查端口，请配置 CUBE_PROXY_HTTP_PORT。
 CUBE_PROXY_CERT_DIR=/usr/local/services/cubetoolbox/cubeproxy/certs
 CUBE_PROXY_DNS_ANSWER_IP="${CUBE_SANDBOX_NODE_IP}"

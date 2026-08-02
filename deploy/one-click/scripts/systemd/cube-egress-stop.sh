@@ -12,9 +12,7 @@ require_root
 require_cmd docker
 
 CUBE_EGRESS_CONTAINER="${CUBE_SANDBOX_CUBE_EGRESS_CONTAINER:-cube-egress}"
-if container_exists "${CUBE_EGRESS_CONTAINER}"; then
-  # CubeEgress's Dockerfile sets STOPSIGNAL SIGQUIT (graceful nginx
-  # shutdown); docker stop honours that. Generous timeout because
-  # nginx will let in-flight upstream connections finish.
-  docker stop -t 15 "${CUBE_EGRESS_CONTAINER}" >/dev/null 2>&1 || true
-fi
+# CubeEgress's Dockerfile sets STOPSIGNAL SIGQUIT. The shared helper performs
+# that graceful stop first, then removes the stopped container so down.sh leaves
+# a clean host for the next one-click deployment.
+docker_rm_if_exists "${CUBE_EGRESS_CONTAINER}" 15

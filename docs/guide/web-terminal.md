@@ -8,7 +8,7 @@ Web Terminal opens an interactive shell in a running sandbox container from the 
 
 ## Requirements
 
-- Sign in to the Dashboard with an account whose current role is `admin`.
+- Sign in to the Dashboard with an account authorized to open terminals.
 - The sandbox and selected container must be running.
 - Open the deployed Dashboard endpoint. The Vite development server is useful for frontend work, but it is not a production Web Terminal endpoint.
 - For production access, terminate HTTPS at the Dashboard or an approved reverse proxy so the terminal uses WSS.
@@ -42,11 +42,90 @@ Normal close, shell exit, sandbox pause/stop, idle timeout, maximum lifetime, an
 
 ## Configuration Reference
 
-CubeOps owns the Web Terminal runtime defaults in `CubeOps/internal/config/config.go`. The deployment layer intentionally does not repeat those values. When no deployment override is present, CubeOps uses its built-in defaults; an administrator can add a supported `CUBE_TERMINAL_*` variable to `.one-click.env` to override a specific setting.
+CubeOps owns the Web Terminal runtime defaults in `CubeOps/internal/config/config.go`. The deployment layer intentionally does not repeat those values. When no deployment override is present, CubeOps uses its built-in defaults; an operator can add a supported `CUBE_TERMINAL_*` variable to `.one-click.env` to override a specific setting.
 
 For example, `CUBE_TERMINAL_ALLOWED_ORIGINS` accepts a comma-separated list of additional exact trusted `http://` or `https://` origins. The same-origin Dashboard does not require an entry. Keep all other settings absent unless an operator has an explicit reason to override the application default.
 
 Cubelet also enforces built-in limits of 100 sessions per node, 10 per sandbox, and 5 per container. The browser cannot raise these limits.
+
+## Deploy And Verify Web Terminal
+
+The following workflow uses the one-click release bundle to bring up
+CubeSandbox and verify the complete browser-to-container terminal path. Use a
+Linux host with KVM, systemd, and Docker. Keep deployment configuration and
+credentials specific to that host; do not copy a production `.env` into a new
+installation.
+
+### Prepare the release bundle
+
+```bash
+tar -xzf cube-sandbox-one-click-<version>.tar.gz
+cd cube-sandbox-one-click-<version>
+cp env.example .env
+chmod 600 .env
+```
+
+Set only the deployment values required by the target host, such as its node
+address and WebUI port. Keep passwords and deployment credentials out of
+shell history and command arguments.
+
+### Install and verify the services
+
+```bash
+sudo ./install.sh
+systemctl is-active cube-sandbox-cubeops.service
+systemctl is-active cube-sandbox-cubemaster.service
+systemctl is-active cube-sandbox-cubelet.service
+systemctl is-active cube-sandbox-webui.service
+curl -fsS http://127.0.0.1:12088/health
+```
+
+The expected result is four `active` responses and HTTP 200 from `/health`.
+Open the deployed WebUI endpoint in a browser; do not use the Vite development
+server.
+
+### Create a sandbox and open its terminal
+
+1. Sign in to the Dashboard with an account authorized to open terminals. If
+   the deployment still uses documented bootstrap credentials, immediately
+   use the normal password-change flow.
+2. If the deployment has no `READY` template and running sandbox, follow
+   [Quick Start: Create a Template](./quickstart.md#step-3-create-a-template),
+   then create a sandbox from that template in the Dashboard.
+3. Open **Sandboxes**, find the running sandbox, and select **Open terminal**
+   from the list or detail view.
+4. Wait for **Connected** and confirm that the terminal surface is non-empty.
+
+A paused or stopped target remains disabled. If template preparation or
+sandbox creation fails, resolve that lifecycle problem before testing the
+terminal rather than using a different sandbox.
+
+### Verify terminal interaction
+
+In the terminal, run:
+
+```text
+printf 'WEB_TERMINAL_HOST=%s\n' "$(hostname)"
+ls --color=auto
+stty size
+top
+```
+
+Press `Ctrl+C` to stop `top` and confirm that the same shell remains usable.
+Run `ping -c 3 127.0.0.1` to verify ordinary command input and output. Resize
+the terminal window and run `stty size` again; the reported dimensions should
+change. Close the terminal normally when finished.
+
+Delete the sandbox through the Dashboard when it is no longer needed. To stop
+and remove a one-click installation, run:
+
+```bash
+sudo ./down.sh
+```
+
+Do not include credentials, grants, cookies, authorization headers, internal
+tokens, terminal payloads, or database passwords in troubleshooting output or
+shared screenshots.
 
 ### Shared Internal Token
 
@@ -72,9 +151,10 @@ Never place the token in a command argument, URL, log, screenshot, or committed 
 
 Confirm that both the sandbox and target container are running. A paused target is intentionally disabled in the UI and rejected by the backend with `TARGET_NOT_RUNNING`.
 
-### The grant request returns 401 or 403
+### A terminal request returns 401 or 403
 
-- `401`: sign in again and confirm the account has the current `admin` role.
+- `401`: sign in again; the current login session may be missing or expired.
+- `403` from the grant request: confirm that the account is authorized to open a terminal for the target sandbox.
 - `403` during WebSocket upgrade: verify the browser Origin matches the Dashboard scheme, host, and port, or is present in the additional allowed-origin list.
 
 ### The WebSocket does not return 101
