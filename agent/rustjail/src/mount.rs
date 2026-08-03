@@ -297,11 +297,14 @@ pub fn init_rootfs(
     let olddir = unistd::getcwd()?;
     unistd::chdir(rootfs).map_err(|e| anyhow!("chdir {:} failed:{:}", rootfs, e))?;
 
+    // /dev/fd and /dev/{stdin,stdout,stderr} point into /proc/self/fd. devtmpfs
+    // never provides them, so they are needed even when /dev is bind mounted
+    // from the guest; only the device nodes can be skipped in that case.
+    default_symlinks().map_err(|e| anyhow!("default_symlinks failed:{:}", e))?;
+
     // in case the /dev directory was binded mount from guest,
-    // then there's no need to create devices nodes and symlinks
-    // in /dev.
+    // then there's no need to create devices nodes in /dev.
     if !bind_mount_dev {
-        default_symlinks().map_err(|e| anyhow!("default_symlinks failed:{:}", e))?;
         create_devices(&linux.devices, bind_device)
             .map_err(|e| anyhow!("create_devices failed:{:}", e))?;
         ensure_ptmx()?;
@@ -893,12 +896,21 @@ static SYMLINKS: &[(&str, &str)] = &[
 
 fn default_symlinks() -> Result<()> {
     if Path::new("/proc/kcore").exists() {
-        unix::fs::symlink("/proc/kcore", "dev/kcore")?;
+        ensure_symlink("/proc/kcore", "dev/kcore")?;
     }
     for &(src, dst) in SYMLINKS {
-        unix::fs::symlink(src, dst)?;
+        ensure_symlink(src, dst)?;
     }
     Ok(())
+}
+
+// A bind mounted guest /dev is shared, so the links may already have been
+// created by an earlier container in the same sandbox.
+fn ensure_symlink(src: &str, dst: &str) -> Result<()> {
+    match unix::fs::symlink(src, dst) {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        other => other.map_err(|e| e.into()),
+    }
 }
 
 fn dev_rel_path(path: &str) -> Option<&Path> {
@@ -1348,6 +1360,28 @@ mod tests {
 
         let ret = stat::stat(path);
         assert!(ret.is_ok(), "Should pass. Got: {:?}", ret);
+    }
+
+    #[test]
+    #[serial(chdir)]
+    fn test_default_symlinks() {
+        let tempdir = tempdir().unwrap();
+
+        let olddir = unistd::getcwd().unwrap();
+        defer!(let _ = unistd::chdir(&olddir););
+        let _ = unistd::chdir(tempdir.path());
+        create_dir("dev").unwrap();
+
+        let ret = default_symlinks();
+        assert!(ret.is_ok(), "Should pass. Got: {:?}", ret);
+        for &(src, dst) in SYMLINKS {
+            assert_eq!(std::fs::read_link(dst).unwrap(), Path::new(src));
+        }
+
+        // A bind mounted guest /dev is shared between containers, so the links
+        // can already be there.
+        let ret = default_symlinks();
+        assert!(ret.is_ok(), "Should be idempotent. Got: {:?}", ret);
     }
 
     #[test]
