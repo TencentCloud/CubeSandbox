@@ -48,7 +48,7 @@ httpx.ConnectError: [Errno -2] Name or service not known   <- 数据面失败
 - Cube Sandbox 版本：v0.6.0（`cubemastercli` `8721dd15`，构建于 2026-07-24）
 - 部署模式：one-click 单机（control 与 compute 同机）
 - 宿主机 OS / 内核：WSL2 上的 Ubuntu 24.04.4 LTS，`6.18.33.2-microsoft-standard-WSL2`，glibc 2.39
-- 相关组件：`online-install.sh` preflight、CoreDNS（`cube-sandbox-coredns`）、CubeProxy、`scripts/systemd/dns-host-route-up.sh`
+- 相关组件：`online-install.sh` preflight、CoreDNS（`cube-sandbox-coredns`）、CubeProxy、`deploy/one-click/scripts/systemd/dns-host-route-up.sh`
 
 WSL 上其他前置条件当时都已满足，不属于本文范围：`/dev/kvm` 存在（较新版本的 WSL
 默认开启嵌套虚拟化）、`/data/cubelet` 是带 `reflink=1` 的 loopback XFS
@@ -88,13 +88,18 @@ if ! command -v resolvectl >/dev/null 2>&1; then
 
 E2B 兼容 SDK 访问沙箱使用的是形如 `<port>-<sandboxId>.cube.app` 的独立域名。
 由于 sandboxId 每次都变，客户端必须支持 `*.cube.app` 的通配解析；
-一键安装自带的 CoreDNS 负责提供这个能力，`scripts/systemd/dns-host-route-up.sh`
-会把 `/etc/resolv.conf` 指向它（`systemd-resolved` 路径下是 `169.254.254.53`，
-`dnsmasq` 回退路径下是 `127.0.0.54`）。完整的寻址方案见
-[HTTPS 与域名](../https-and-domain.md)。
+一键安装自带的 CoreDNS 负责提供这个能力，`deploy/one-click/scripts/systemd/dns-host-route-up.sh`
+会把 `cube.app` 查询路由到它。两条 DNS 后端路径下，面向客户端的 nameserver 都是
+`169.254.254.53`（dummy link 地址）：`systemd-resolved` 路径下脚本通过 `resolvectl`
+把这个地址挂到 `cube-dns0` 链路上；`dnsmasq` 回退路径下脚本把同一个地址写进
+`/etc/resolv.conf`。`127.0.0.54` 只是 CoreDNS 的内部 loopback 绑定，
+`dnsmasq` 会把 `cube.app` 查询转发给它，但它**不会出现在 `/etc/resolv.conf` 里**。
+完整的寻址方案见 [HTTPS 与域名](../https-and-domain.md)。
 
-而 WSL 默认在每次启动时重新生成 `/etc/resolv.conf`，这会静默地丢掉安装器写入的
-nameserver，于是：
+而 WSL 默认在每次启动时重新生成 `/etc/resolv.conf`。在 `dnsmasq` 回退路径下，
+这会静默地丢掉安装器写入的 nameserver；在 `systemd-resolved` 路径下，
+路由挂在 `cube-dns0` dummy link 上，WSL 重启时链路被拆除，同样会丢。
+无论哪种情况，客户端都会失去通配解析，于是：
 
 - 控制面照常工作，因为它走 `127.0.0.1:3000`，不需要域名解析。
 - 数据面失败，因为 `*.cube.app` 已经解析不出来了。
@@ -144,9 +149,12 @@ EOF
 - 第二行要保留一个上游解析器。如果只写 CoreDNS 地址，
   `*.cube.app` 能解析，但普通上网会断。
 
-请使用与你的 DNS 后端匹配的地址。修完问题 1 之后你会走 `systemd-resolved` 路径，
-因此用 `169.254.254.53`；如果走的是 `dnsmasq` 回退路径，则是 `127.0.0.54`。
-具体绑定到哪个地址，可以从运行中的 Corefile 确认。
+要写入的 nameserver 是 `169.254.254.53`，与走哪条 DNS 后端无关：它是
+`systemd-resolved` 与 `dnsmasq` 两条路径都暴露给客户端的 dummy link 地址。
+（`127.0.0.54` 只是 CoreDNS 的内部 loopback 绑定，`dnsmasq` 会把 `cube.app`
+查询转发给它；它不是面向客户端的解析器，**不要写进 `/etc/resolv.conf`** ——
+loopback 地址在 Docker 容器内不可达，而这正是引入 dummy link 地址要解决的问题。）
+当前生效的地址可以从运行中的 Corefile 确认。
 
 继续之前先把两个方向都验证一遍：
 
@@ -179,11 +187,14 @@ cat /etc/resolv.conf
 
 ## 关于 WSL 重启的提醒
 
-有两项状态不会在 `wsl --shutdown` 后保留，且都会在下次运行时产生容易误判的报错：
+有几项状态不会在 `wsl --shutdown` 后保留，且都会在下次运行时产生容易误判的报错：
 
 - `/data/cubelet` 上的 loopback XFS 不会自动挂回，启动服务前需要先挂上
   （见 [#311](https://github.com/TencentCloud/CubeSandbox/issues/311)）。
 - 除非按上文设置了 `generateResolvConf = false`，`/etc/resolv.conf` 会被重新生成。
+- `systemd-resolved` 路径下的 `cube-dns0` dummy link 及其 `~cube.app` 路由
+  也会随 WSL 重启消失，直到服务单元重启；`dnsmasq` 回退路径下，
+  link 和 `server=/cube.app/...` 转发规则同理。
 
 ## 参考资料
 

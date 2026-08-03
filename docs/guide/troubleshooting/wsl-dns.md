@@ -53,7 +53,7 @@ triggered by restarting WSL rather than by anything you changed.
 - Cube Sandbox version: v0.6.0 (`cubemastercli` `8721dd15`, built 2026-07-24)
 - Deployment mode: one-click, single node (control + compute on the same host)
 - Host OS / kernel: Ubuntu 24.04.4 LTS on WSL2, `6.18.33.2-microsoft-standard-WSL2`, glibc 2.39
-- Related components: `online-install.sh` preflight, CoreDNS (`cube-sandbox-coredns`), CubeProxy, `scripts/systemd/dns-host-route-up.sh`
+- Related components: `online-install.sh` preflight, CoreDNS (`cube-sandbox-coredns`), CubeProxy, `deploy/one-click/scripts/systemd/dns-host-route-up.sh`
 
 Other WSL preconditions were already satisfied and are not the subject of this
 page: `/dev/kvm` exists (recent WSL enables nested virtualization by default),
@@ -97,13 +97,20 @@ stuck on WSL anyway:
 The E2B-compatible SDK reaches a sandbox through a per-sandbox hostname of the
 form `<port>-<sandboxId>.cube.app`. Because the sandbox ID changes every time,
 the client needs wildcard resolution for `*.cube.app`; the bundled CoreDNS
-provides it, and `scripts/systemd/dns-host-route-up.sh` points
-`/etc/resolv.conf` at it (`169.254.254.53` on the `systemd-resolved` path,
-`127.0.0.54` on the `dnsmasq` fallback path). See
+provides it, and `deploy/one-click/scripts/systemd/dns-host-route-up.sh` routes
+`cube.app` queries to it. On both DNS backends the client-facing nameserver is
+`169.254.254.53` (the dummy-link address): on the `systemd-resolved` path the
+script attaches that address to the `cube-dns0` link via `resolvectl`, and on
+the `dnsmasq` fallback path it writes the same address into `/etc/resolv.conf`.
+`127.0.0.54` is only CoreDNS's internal loopback bind, which `dnsmasq` forwards
+`cube.app` queries to; it never appears in `/etc/resolv.conf`. See
 [HTTPS and domain](../https-and-domain.md) for the full addressing scheme.
 
-WSL, by default, regenerates `/etc/resolv.conf` on every start. That silently
-discards the nameserver the installer wrote, so:
+WSL, by default, regenerates `/etc/resolv.conf` on every start. On the
+`dnsmasq` fallback path that silently discards the nameserver the installer
+wrote; on the `systemd-resolved` path the routing lives on the `cube-dns0`
+dummy link and is dropped too, because WSL tears the link down. Either way the
+client loses the wildcard resolution, so:
 
 - The control plane keeps working, because it is reached over `127.0.0.1:3000`
   and needs no name resolution.
@@ -156,10 +163,14 @@ Two details matter here:
 - Keep an upstream resolver as the second entry. With only the CoreDNS address,
   `*.cube.app` resolves but general internet resolution breaks.
 
-Use the address that matches your DNS backend. After the fix for Problem 1 you
-are on the `systemd-resolved` path, so `169.254.254.53` is the one to use; on
-the `dnsmasq` fallback path it is `127.0.0.54`. You can confirm which one
-CoreDNS is bound to from the running Corefile.
+The nameserver to write is `169.254.254.53` regardless of which DNS backend
+you are on: it is the dummy-link address that both the `systemd-resolved` and
+the `dnsmasq` paths expose to clients. (`127.0.0.54` is only CoreDNS's internal
+loopback bind, which `dnsmasq` forwards `cube.app` queries to; it is not a
+client-facing resolver and must not be written to `/etc/resolv.conf` — a
+loopback address there would be unreachable from inside Docker containers,
+which is exactly the problem the dummy-link address was introduced to solve.)
+You can confirm the live address from the running Corefile.
 
 Verify both directions before moving on:
 
@@ -195,14 +206,18 @@ See [HTTPS and domain](../https-and-domain.md) for both.
 
 ## Notes for WSL Restarts
 
-Two pieces of state do not survive `wsl --shutdown`, and both produce confusing
-errors on the next run:
+Several pieces of state do not survive `wsl --shutdown`, and all produce
+confusing errors on the next run:
 
 - The loopback XFS mount at `/data/cubelet` is not remounted automatically. Add
   it back before starting the services (see
   [#311](https://github.com/TencentCloud/CubeSandbox/issues/311)).
 - `/etc/resolv.conf` is regenerated unless `generateResolvConf = false` is set
   as described above.
+- On the `systemd-resolved` path, the `cube-dns0` dummy link and its
+  `~cube.app` routing are also gone until the service unit restarts; on the
+  `dnsmasq` fallback path the same applies to the link and the
+  `server=/cube.app/...` forwarder rule.
 
 ## References
 
