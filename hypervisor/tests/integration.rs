@@ -2527,24 +2527,28 @@ mod common_parallel {
 
     #[test]
     #[cfg(target_arch = "x86_64")]
+    #[ignore = "PVM host does not support hypervisor-fw/OVMF firmware boot chain"]
     fn test_bionic_hypervisor_fw() {
         test_simple_launch(fw_path(FwType::RustHypervisorFirmware), BIONIC_IMAGE_NAME)
     }
 
     #[test]
     #[cfg(target_arch = "x86_64")]
+    #[ignore = "PVM host does not support hypervisor-fw/OVMF firmware boot chain"]
     fn test_focal_hypervisor_fw() {
         test_simple_launch(fw_path(FwType::RustHypervisorFirmware), FOCAL_IMAGE_NAME)
     }
 
     #[test]
     #[cfg(target_arch = "x86_64")]
+    #[ignore = "PVM host does not support hypervisor-fw/OVMF firmware boot chain"]
     fn test_bionic_ovmf() {
         test_simple_launch(fw_path(FwType::Ovmf), BIONIC_IMAGE_NAME)
     }
 
     #[test]
     #[cfg(target_arch = "x86_64")]
+    #[ignore = "PVM host does not support hypervisor-fw/OVMF firmware boot chain"]
     fn test_focal_ovmf() {
         test_simple_launch(fw_path(FwType::Ovmf), FOCAL_IMAGE_NAME)
     }
@@ -3361,6 +3365,7 @@ mod common_parallel {
     }
 
     #[test]
+    #[ignore = "PVM: vhdx toolchain/firmware compatibility (aligned with intranet cube skip)"]
     fn test_virtio_block_vhdx() {
         let mut workload_path = dirs::home_dir().unwrap();
         workload_path.push("workloads");
@@ -3475,6 +3480,7 @@ mod common_parallel {
     }
 
     #[test]
+    #[ignore = "PVM host does not support firmware boot"]
     fn test_virtio_block_direct_and_firmware() {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
@@ -6620,6 +6626,7 @@ mod common_parallel {
     }
 
     #[test]
+    #[ignore = "PVM guest kernel has no virtio-watchdog driver (CONFIG_VIRTIO_WDT not enabled)"]
     fn test_watchdog() {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
@@ -6914,6 +6921,7 @@ mod common_parallel {
 
     #[test]
     #[cfg(not(feature = "mshv"))]
+    #[ignore = "PVM guest kernel has CONFIG_OPENVSWITCH disabled (aligned with intranet cube skip)"]
     fn test_ovs_dpdk() {
         let focal1 = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest1 = Guest::new(Box::new(focal1));
@@ -7086,6 +7094,7 @@ mod common_parallel {
     }
 
     #[test]
+    #[ignore = "PVM kernel does not support vfio-user (no VFIO support in PVM host/guest kernel)"]
     fn test_vfio_user() {
         let jammy_image = JAMMY_IMAGE_NAME.to_string();
         let jammy = UbuntuDiskConfig::new(jammy_image);
@@ -10935,11 +10944,13 @@ mod live_migration {
         }
 
         #[test]
+        #[ignore = "PVM guest kernel has no virtio-watchdog driver (CONFIG_VIRTIO_WDT not enabled)"]
         fn test_live_migration_watchdog() {
             _test_live_migration_watchdog(false, false)
         }
 
         #[test]
+        #[ignore = "PVM guest kernel has no virtio-watchdog driver (CONFIG_VIRTIO_WDT not enabled)"]
         fn test_live_migration_watchdog_local() {
             _test_live_migration_watchdog(false, true)
         }
@@ -10977,11 +10988,13 @@ mod live_migration {
         }
 
         #[test]
+        #[ignore = "PVM guest kernel has no virtio-watchdog driver (CONFIG_VIRTIO_WDT not enabled)"]
         fn test_live_upgrade_watchdog() {
             _test_live_migration_watchdog(true, false)
         }
 
         #[test]
+        #[ignore = "PVM guest kernel has no virtio-watchdog driver (CONFIG_VIRTIO_WDT not enabled)"]
         fn test_live_upgrade_watchdog_local() {
             _test_live_migration_watchdog(true, true)
         }
@@ -11006,6 +11019,7 @@ mod live_migration {
         #[test]
         #[cfg(target_arch = "x86_64")]
         #[cfg(not(feature = "mshv"))]
+        #[ignore = "PVM guest kernel has CONFIG_OPENVSWITCH disabled (aligned with intranet cube skip)"]
         fn test_live_migration_ovs_dpdk() {
             _test_live_migration_ovs_dpdk(false, false);
         }
@@ -11013,6 +11027,7 @@ mod live_migration {
         #[test]
         #[cfg(target_arch = "x86_64")]
         #[cfg(not(feature = "mshv"))]
+        #[ignore = "PVM guest kernel has CONFIG_OPENVSWITCH disabled (aligned with intranet cube skip)"]
         fn test_live_migration_ovs_dpdk_local() {
             _test_live_migration_ovs_dpdk(false, true);
         }
@@ -11020,6 +11035,7 @@ mod live_migration {
         #[test]
         #[cfg(target_arch = "x86_64")]
         #[cfg(not(feature = "mshv"))]
+        #[ignore = "PVM guest kernel has CONFIG_OPENVSWITCH disabled (aligned with intranet cube skip)"]
         fn test_live_upgrade_ovs_dpdk() {
             _test_live_migration_ovs_dpdk(true, false);
         }
@@ -11027,6 +11043,7 @@ mod live_migration {
         #[test]
         #[cfg(target_arch = "x86_64")]
         #[cfg(not(feature = "mshv"))]
+        #[ignore = "PVM guest kernel has CONFIG_OPENVSWITCH disabled (aligned with intranet cube skip)"]
         fn test_live_upgrade_ovs_dpdk_local() {
             _test_live_migration_ovs_dpdk(true, true);
         }
