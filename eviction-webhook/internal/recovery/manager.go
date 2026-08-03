@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/eviction-webhook/internal/cubemaster"
+	"github.com/tencentcloud/CubeSandbox/eviction-webhook/internal/metrics"
 	"github.com/tencentcloud/CubeSandbox/eviction-webhook/pkg/types"
 )
 
@@ -282,8 +283,10 @@ func (m *Manager) applyEviction(nodeName, eventID, instanceType string) {
 	if !alreadyIsolated {
 		if err := m.client().IsolateNode(ctx, cubeMasterNodeID); err != nil {
 			log.Printf("[recovery] IsolateNode failed node=%s cubeMasterNodeID=%s err=%v", nodeName, cubeMasterNodeID, err)
+			metrics.CubeMasterAPIErrorsTotal.WithLabelValues("IsolateNode", "error").Inc()
 			// Continue — still try to pause sandboxes.
 		} else {
+			metrics.IsolatedNodesTotal.Inc()
 			m.mu.Lock()
 			m.isolated[nodeName] = cubeMasterNodeID
 			m.mu.Unlock()
@@ -399,6 +402,7 @@ func (m *Manager) applyRelief(nodeName, isolatedNodeID string, sandboxes []Pause
 
 	// Resume each paused sandbox.
 	resumed := make(map[string]bool, len(sandboxes))
+	start := time.Now()
 	for _, ps := range sandboxes {
 		instanceType := ps.InstanceType
 		if instanceType == "" {
@@ -407,10 +411,13 @@ func (m *Manager) applyRelief(nodeName, isolatedNodeID string, sandboxes []Pause
 		requestID := fmt.Sprintf("eviction-resume-%s", ps.EventID)
 		if err := m.client().ResumeSandbox(ctx, ps.SandboxID, instanceType, requestID); err != nil {
 			log.Printf("[recovery] ResumeSandbox failed sandboxID=%s err=%v", ps.SandboxID, err)
-			// Continue — try to resume others and uncordon regardless.
+			metrics.CubeMasterAPIErrorsTotal.WithLabelValues("ResumeSandbox", "error").Inc()
 			continue
 		}
 		resumed[ps.SandboxID] = true
+	}
+	if len(resumed) > 0 {
+		metrics.RecoveryDurationSeconds.WithLabelValues(nodeName, "success").Observe(time.Since(start).Seconds())
 	}
 
 	// Uncordon the node so new sandboxes can be scheduled again.
@@ -418,6 +425,7 @@ func (m *Manager) applyRelief(nodeName, isolatedNodeID string, sandboxes []Pause
 	if wasIsolated {
 		if err := m.client().UnisolateNode(ctx, isolatedNodeID); err != nil {
 			log.Printf("[recovery] UnisolateNode failed node=%s cubeMasterNodeID=%s err=%v", nodeName, isolatedNodeID, err)
+			metrics.CubeMasterAPIErrorsTotal.WithLabelValues("UnisolateNode", "error").Inc()
 		} else {
 			unisolated = true
 		}

@@ -1,18 +1,16 @@
 // Copyright (c) 2026 Tencent Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package admission implements the ValidatingWebhook handler for Pod eviction
-// requests. Every matching request is denied (allowed: false) so that kubelet
-// cannot destroy the sandbox MicroVM. The eviction event is persisted locally,
-// optionally reported to CubeMaster, and handed to the RecoveryManager which
-// immediately cordons the node and freezes the sandbox MicroVM via CubeMaster APIs.
+// Package admission implements the ValidatingWebhook handler for Pod eviction requests.
+// Every matching kubelet eviction is denied (allowed: false) to protect the sandbox MicroVM.
+// The eviction event is persisted locally, reported to CubeMaster, and handed to
+// RecoveryManager which cordons the node and freezes the MicroVM via CubeMaster APIs.
 package admission
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -21,7 +19,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"go.uber.org/zap"
 
+	"github.com/tencentcloud/CubeSandbox/eviction-webhook/internal/metrics"
 	"github.com/tencentcloud/CubeSandbox/eviction-webhook/internal/store"
 	"github.com/tencentcloud/CubeSandbox/eviction-webhook/pkg/types"
 )
@@ -52,29 +52,50 @@ type Handler struct {
 	store           *store.Store
 	reporter        EventReporter
 	pressureChecker PressureChecker
-	// recoveryMgr may be nil when running without full CubeMaster integration (tests).
-	recoveryMgr RecoveryManager
+	recoveryMgr     RecoveryManager
+	logger          *zap.Logger
 }
 
-// New constructs a Handler. recoveryMgr may be nil.
+// New constructs a Handler with a no-op logger.
 func New(podGetter PodGetter, s *store.Store, r EventReporter) *Handler {
-	return &Handler{podGetter: podGetter, store: s, reporter: r}
+	return &Handler{
+		podGetter: podGetter,
+		store:     s,
+		reporter:  r,
+		logger:    zap.NewNop(),
+	}
 }
 
 // NewWithRecovery constructs a Handler wired to a RecoveryManager.
 func NewWithRecovery(podGetter PodGetter, s *store.Store, r EventReporter, mgr RecoveryManager) *Handler {
-	return &Handler{podGetter: podGetter, store: s, reporter: r, recoveryMgr: mgr}
+	return &Handler{
+		podGetter:   podGetter,
+		store:       s,
+		reporter:    r,
+		recoveryMgr: mgr,
+		logger:      zap.NewNop(),
+	}
 }
 
-// SetPressureChecker wires a live Node MemoryPressure lookup into the admission
-// path. When configured, kubelet evictions are denied only while the node is
-// actually under MemoryPressure; DiskPressure/PIDPressure evictions pass through.
+// NewWithLogger constructs a Handler with a structured logger.
+func NewWithLogger(podGetter PodGetter, s *store.Store, r EventReporter, mgr RecoveryManager, logger *zap.Logger) *Handler {
+	return &Handler{
+		podGetter:   podGetter,
+		store:       s,
+		reporter:    r,
+		recoveryMgr: mgr,
+		logger:      logger,
+	}
+}
+
+// SetPressureChecker wires a live Node MemoryPressure lookup into the admission path.
 func (h *Handler) SetPressureChecker(checker PressureChecker) {
 	h.pressureChecker = checker
 }
 
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	var review admissionv1.AdmissionReview
 	if err := json.NewDecoder(r.Body).Decode(&review); err != nil {
 		http.Error(w, fmt.Sprintf("decode: %v", err), http.StatusBadRequest)
@@ -84,9 +105,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	response := h.handle(review.Request)
 	review.Response = response
 
+	allowed := "false"
+	if response.Allowed {
+		allowed = "true"
+	}
+	metrics.WebhookRequestsTotal.WithLabelValues("eviction", allowed).Inc()
+	metrics.WebhookLatencySeconds.WithLabelValues(allowed).Observe(time.Since(start).Seconds())
+
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(review); err != nil {
-		log.Printf("[eviction-admission] encode response: %v", err)
+		h.logger.Error("encode response failed", zap.Error(err))
 	}
 }
 
@@ -102,6 +130,13 @@ func (h *Handler) handle(req *admissionv1.AdmissionRequest) *admissionv1.Admissi
 	instanceType := h.instanceType(namespace, podName)
 	interceptedAt := time.Now().UTC().Format(time.RFC3339)
 
+	logger := h.logger.With(
+		zap.String("TraceID", string(req.UID)),
+		zap.String("PodName", podName),
+		zap.String("Namespace", namespace),
+		zap.String("NodeName", nodeName),
+	)
+
 	event := &types.EvictionEvent{
 		EventID:       string(req.UID),
 		PodName:       podName,
@@ -114,7 +149,7 @@ func (h *Handler) handle(req *admissionv1.AdmissionRequest) *admissionv1.Admissi
 	// 1. Persist locally (audit trail).
 	if h.store != nil {
 		if err := h.store.Save(event); err != nil {
-			log.Printf("[eviction-admission] store.Save eventID=%s: %v", event.EventID, err)
+			logger.Error("audit store save failed", zap.Error(err))
 		}
 	}
 
@@ -123,61 +158,69 @@ func (h *Handler) handle(req *admissionv1.AdmissionRequest) *admissionv1.Admissi
 		h.reporter.Report(event)
 	}
 
-	// 3. Only kubelet-shaped evictions are treated as pressure recovery signals.
-	// Admin-initiated evictions such as drain/evict are allowed so maintenance
-	// workflows do not hang behind a recovery path that will never run.
+	// 3. Allow admin-initiated evictions (drain/evict) so maintenance workflows are not blocked.
 	if !isNodeUser(req.UserInfo.Username) {
+		logger.Info("non-kubelet eviction allowed",
+			zap.String("Username", req.UserInfo.Username),
+		)
 		return allowResponse(string(req.UID), "non-kubelet eviction allowed by eviction-webhook")
 	}
+
+	// 4. Optional: only intercept when node is under actual MemoryPressure.
 	if h.pressureChecker != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		underPressure, err := h.pressureChecker(ctx, nodeName)
 		cancel()
 		if err != nil {
-			log.Printf("[eviction-admission] MemoryPressure check failed node=%s err=%v; allowing eviction", nodeName, err)
+			logger.Warn("MemoryPressure check failed, allowing eviction", zap.Error(err))
 			return allowResponse(string(req.UID), "MemoryPressure check failed; eviction allowed by eviction-webhook")
 		}
 		if !underPressure {
+			logger.Info("no MemoryPressure, eviction allowed")
 			return allowResponse(string(req.UID), "non-MemoryPressure eviction allowed by eviction-webhook")
 		}
 	}
 
+	// 5. Intercept: trigger recovery.
+	metrics.EvictionInterceptedTotal.WithLabelValues(nodeName, instanceType, "kubelet").Inc()
 	if h.recoveryMgr != nil {
 		h.recoveryMgr.OnEviction(event)
+		metrics.IsolatedNodesTotal.Inc()
 	}
 
+	logger.Info("eviction intercepted, recovery initiated",
+		zap.String("InstanceType", instanceType),
+	)
 	return denyResponse(string(req.UID), "eviction intercepted by eviction-webhook; recovery initiated")
 }
 
-// instanceType looks up the cube.master.instance.type label from the Pod cache.
-// Returns empty string when the Pod is not in cache — the eviction is still denied.
 func (h *Handler) instanceType(namespace, podName string) string {
 	pod, ok := h.podGetter.Get(namespace, podName)
 	if !ok {
-		log.Printf("[eviction-admission] pod %s/%s not in cache, instanceType will be empty", namespace, podName)
+		h.logger.Warn("pod not in cache, instanceType empty",
+			zap.String("Namespace", namespace),
+			zap.String("PodName", podName),
+		)
 		return ""
 	}
 	return pod.Labels[instanceTypeLabelKey]
 }
 
-// nodeName resolves the K8s node name for the evicted pod. Resolution order:
-//  1. pod.Spec.NodeName from the pod cache (most reliable)
-//  2. Extract from kubelet service-account username "system:node:<name>"
-//  3. Fall back to the raw username (best-effort; logged as warning)
 func (h *Handler) nodeName(namespace, podName, username string) string {
 	if pod, ok := h.podGetter.Get(namespace, podName); ok && pod.Spec.NodeName != "" {
 		return pod.Spec.NodeName
 	}
 	resolved := nodeFromUserInfo(username)
 	if resolved == username && !strings.HasPrefix(username, "system:node:") {
-		log.Printf("[eviction-admission] pod %s/%s not in cache, username %q is not a system:node identity — node resolution may be incorrect",
-			namespace, podName, username)
+		h.logger.Warn("pod not in cache and username is not system:node identity",
+			zap.String("Namespace", namespace),
+			zap.String("PodName", podName),
+			zap.String("Username", username),
+		)
 	}
 	return resolved
 }
 
-// nodeFromUserInfo extracts the node name from the kubelet service-account
-// username format "system:node:<nodeName>".
 func nodeFromUserInfo(username string) string {
 	const prefix = "system:node:"
 	if strings.HasPrefix(username, prefix) {
@@ -194,9 +237,7 @@ func denyResponse(uid, message string) *admissionv1.AdmissionResponse {
 	return &admissionv1.AdmissionResponse{
 		UID:     k8stypes.UID(uid),
 		Allowed: false,
-		Result: &metav1.Status{
-			Message: message,
-		},
+		Result:  &metav1.Status{Message: message},
 	}
 }
 
@@ -204,8 +245,6 @@ func allowResponse(uid, message string) *admissionv1.AdmissionResponse {
 	return &admissionv1.AdmissionResponse{
 		UID:     k8stypes.UID(uid),
 		Allowed: true,
-		Result: &metav1.Status{
-			Message: message,
-		},
+		Result:  &metav1.Status{Message: message},
 	}
 }

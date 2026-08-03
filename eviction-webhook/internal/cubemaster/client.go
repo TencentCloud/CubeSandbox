@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/eviction-webhook/internal/auth"
+	"github.com/tencentcloud/CubeSandbox/eviction-webhook/internal/metrics"
 )
 
 const (
@@ -290,6 +291,7 @@ func checkRetCode(body []byte, allowAlreadyInState bool) error {
 // do executes an HTTP request against CubeMaster, optionally attaching auth headers.
 // Returns the raw response body on HTTP 200; returns an error for other status codes.
 func (c *Client) do(ctx context.Context, method, path string, body []byte) ([]byte, error) {
+	start := time.Now()
 	var bodyReader io.Reader
 	if len(body) > 0 {
 		bodyReader = bytes.NewReader(body)
@@ -310,7 +312,10 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte) ([]by
 	}
 
 	resp, err := c.http.Do(req)
+	elapsed := time.Since(start).Seconds()
 	if err != nil {
+		metrics.CubeMasterAPILatencySeconds.WithLabelValues(method, "error").Observe(elapsed)
+		metrics.CubeMasterAPIErrorsTotal.WithLabelValues(method, "http_error").Inc()
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -320,8 +325,12 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte) ([]by
 		return nil, fmt.Errorf("read response body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
+		metrics.CubeMasterAPILatencySeconds.WithLabelValues(method, fmt.Sprintf("%d", resp.StatusCode)).Observe(elapsed)
+		metrics.CubeMasterAPIErrorsTotal.WithLabelValues(method, fmt.Sprintf("%d", resp.StatusCode)).Inc()
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
+
+	metrics.CubeMasterAPILatencySeconds.WithLabelValues(method, "200").Observe(elapsed)
 	return respBody, nil
 }
 

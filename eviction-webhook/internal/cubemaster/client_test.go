@@ -9,8 +9,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestIsolateNode(t *testing.T) {
@@ -24,15 +26,9 @@ func TestIsolateNode(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL, "", "", false)
-	if err := c.IsolateNode(context.Background(), "worker-01"); err != nil {
-		t.Fatalf("IsolateNode: %v", err)
-	}
-	if gotMethod != http.MethodPut {
-		t.Errorf("method: want PUT, got %s", gotMethod)
-	}
-	if gotPath != "/internal/meta/nodes/worker-01/isolation" {
-		t.Errorf("path: want /internal/meta/nodes/worker-01/isolation, got %s", gotPath)
-	}
+	require.NoError(t, c.IsolateNode(context.Background(), "worker-01"))
+	assert.Equal(t, http.MethodPut, gotMethod)
+	assert.Equal(t, "/internal/meta/nodes/worker-01/isolation", gotPath)
 }
 
 func TestUnisolateNode(t *testing.T) {
@@ -46,15 +42,9 @@ func TestUnisolateNode(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL, "", "", false)
-	if err := c.UnisolateNode(context.Background(), "worker-01"); err != nil {
-		t.Fatalf("UnisolateNode: %v", err)
-	}
-	if gotMethod != http.MethodDelete {
-		t.Errorf("method: want DELETE, got %s", gotMethod)
-	}
-	if gotPath != "/internal/meta/nodes/worker-01/isolation" {
-		t.Errorf("path: %s", gotPath)
-	}
+	require.NoError(t, c.UnisolateNode(context.Background(), "worker-01"))
+	assert.Equal(t, http.MethodDelete, gotMethod)
+	assert.Equal(t, "/internal/meta/nodes/worker-01/isolation", gotPath)
 }
 
 func TestPauseSandbox(t *testing.T) {
@@ -67,26 +57,14 @@ func TestPauseSandbox(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL, "", "", false)
-	if err := c.PauseSandbox(context.Background(), "sandbox-abc", "cubebox", "req-1"); err != nil {
-		t.Fatalf("PauseSandbox: %v", err)
-	}
+	require.NoError(t, c.PauseSandbox(context.Background(), "sandbox-abc", "cubebox", "req-1"))
 
 	var req sandboxUpdateReq
-	if err := json.Unmarshal(body, &req); err != nil {
-		t.Fatalf("unmarshal body: %v", err)
-	}
-	if req.Action != "pause" {
-		t.Errorf("action: want pause, got %s", req.Action)
-	}
-	if req.SandboxID != "sandbox-abc" {
-		t.Errorf("sandbox_id: want sandbox-abc, got %s", req.SandboxID)
-	}
-	if req.InstanceType != "cubebox" {
-		t.Errorf("instance_type: want cubebox, got %s", req.InstanceType)
-	}
-	if req.RequestID != "req-1" {
-		t.Errorf("requestID: want req-1, got %s", req.RequestID)
-	}
+	require.NoError(t, json.Unmarshal(body, &req))
+	assert.Equal(t, "pause", req.Action)
+	assert.Equal(t, "sandbox-abc", req.SandboxID)
+	assert.Equal(t, "cubebox", req.InstanceType)
+	assert.Equal(t, "req-1", req.RequestID)
 }
 
 func TestResumeSandbox(t *testing.T) {
@@ -99,15 +77,11 @@ func TestResumeSandbox(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL, "", "", false)
-	if err := c.ResumeSandbox(context.Background(), "sandbox-abc", "cubebox", "req-2"); err != nil {
-		t.Fatalf("ResumeSandbox: %v", err)
-	}
+	require.NoError(t, c.ResumeSandbox(context.Background(), "sandbox-abc", "cubebox", "req-2"))
 
 	var req sandboxUpdateReq
 	json.Unmarshal(body, &req)
-	if req.Action != "resume" {
-		t.Errorf("action: want resume, got %s", req.Action)
-	}
+	assert.Equal(t, "resume", req.Action)
 }
 
 func TestClientErrorOnNon200(t *testing.T) {
@@ -119,12 +93,8 @@ func TestClientErrorOnNon200(t *testing.T) {
 
 	c := New(srv.URL, "", "", false)
 	err := c.IsolateNode(context.Background(), "node-x")
-	if err == nil {
-		t.Fatal("expected error on 500")
-	}
-	if !strings.Contains(err.Error(), "500") {
-		t.Errorf("error should mention 500: %v", err)
-	}
+	require.Error(t, err, "expected error on 500")
+	assert.Contains(t, err.Error(), "500")
 }
 
 func TestClientSendsAuthHeaders(t *testing.T) {
@@ -141,9 +111,7 @@ func TestClientSendsAuthHeaders(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL, "test-user", "test-secret", true)
-	if err := c.IsolateNode(context.Background(), "node-auth"); err != nil {
-		t.Fatalf("IsolateNode with auth: %v", err)
-	}
+	require.NoError(t, c.IsolateNode(context.Background(), "node-auth"))
 }
 
 func TestClientCubeMasterRetCodeError(t *testing.T) {
@@ -155,12 +123,8 @@ func TestClientCubeMasterRetCodeError(t *testing.T) {
 
 	c := New(srv.URL, "", "", false)
 	err := c.PauseSandbox(context.Background(), "no-such-sandbox", "cubebox", "req-x")
-	if err == nil {
-		t.Fatal("expected error when ret_code != 200")
-	}
-	if !strings.Contains(err.Error(), "100501") {
-		t.Errorf("error should contain ret_code: %v", err)
-	}
+	require.Error(t, err, "expected error when ret_code != 200")
+	assert.Contains(t, err.Error(), "100501")
 }
 
 func TestIsolateNodeRetCodeError(t *testing.T) {
@@ -172,12 +136,8 @@ func TestIsolateNodeRetCodeError(t *testing.T) {
 
 	c := New(srv.URL, "", "", false)
 	err := c.IsolateNode(context.Background(), "missing-node")
-	if err == nil {
-		t.Fatal("expected error when isolation ret_code != 200")
-	}
-	if !strings.Contains(err.Error(), "100501") {
-		t.Errorf("error should contain ret_code: %v", err)
-	}
+	require.Error(t, err, "expected error when isolation ret_code != 200")
+	assert.Contains(t, err.Error(), "100501")
 }
 
 func TestIsolateNodeRejectsMalformedResponse(t *testing.T) {
@@ -200,12 +160,8 @@ func TestIsolateNodeRejectsMalformedResponse(t *testing.T) {
 
 			c := New(srv.URL, "", "", false)
 			err := c.IsolateNode(context.Background(), "node-bad-response")
-			if err == nil {
-				t.Fatal("expected malformed response to fail")
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("expected error to contain %q, got %v", tc.want, err)
-			}
+			require.Error(t, err, "expected malformed response to fail")
+			require.Contains(t, err.Error(), tc.want)
 		})
 	}
 }
@@ -218,12 +174,8 @@ func TestSandboxUpdateAlreadyInStateIsSuccess(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL, "", "", false)
-	if err := c.PauseSandbox(context.Background(), "sandbox-already", "cubebox", "req-already"); err != nil {
-		t.Fatalf("PauseSandbox should treat ret_code 130490 as success: %v", err)
-	}
-	if err := c.ResumeSandbox(context.Background(), "sandbox-already", "cubebox", "req-already"); err != nil {
-		t.Fatalf("ResumeSandbox should treat ret_code 130490 as success: %v", err)
-	}
+	require.NoError(t, c.PauseSandbox(context.Background(), "sandbox-already", "cubebox", "req-already"), "PauseSandbox should treat ret_code 130490 as success")
+	require.NoError(t, c.ResumeSandbox(context.Background(), "sandbox-already", "cubebox", "req-already"), "ResumeSandbox should treat ret_code 130490 as success")
 }
 
 func TestListSandboxesByNode(t *testing.T) {
@@ -245,33 +197,19 @@ func TestListSandboxesByNode(t *testing.T) {
 
 	c := New(srv.URL, "", "", false)
 	sandboxes, err := c.ListSandboxesByNode(context.Background(), "worker-01")
-	if err != nil {
-		t.Fatalf("ListSandboxesByNode: %v", err)
-	}
+	require.NoError(t, err)
 
-	if gotPath != "/cube/sandbox/list" {
-		t.Errorf("path: want /cube/sandbox/list, got %s", gotPath)
-	}
+	assert.Equal(t, "/cube/sandbox/list", gotPath)
 
 	// Verify request body contains host_id.
 	var req listSandboxesReq
-	if err := json.Unmarshal(body, &req); err != nil {
-		t.Fatalf("unmarshal request body: %v", err)
-	}
-	if req.HostID != "worker-01" {
-		t.Errorf("host_id: want worker-01, got %s", req.HostID)
-	}
+	require.NoError(t, json.Unmarshal(body, &req))
+	assert.Equal(t, "worker-01", req.HostID)
 
 	// Verify response parsing.
-	if len(sandboxes) != 2 {
-		t.Fatalf("expected 2 sandboxes, got %d", len(sandboxes))
-	}
-	if sandboxes[0].SandboxID != "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6" {
-		t.Errorf("sandbox[0] id: %s", sandboxes[0].SandboxID)
-	}
-	if sandboxes[1].SandboxID != "f1e2d3c4b5a6f7e8d9c0b1a2f3e4d5c6" {
-		t.Errorf("sandbox[1] id: %s", sandboxes[1].SandboxID)
-	}
+	require.Len(t, sandboxes, 2)
+	assert.Equal(t, "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6", sandboxes[0].SandboxID)
+	assert.Equal(t, "f1e2d3c4b5a6f7e8d9c0b1a2f3e4d5c6", sandboxes[1].SandboxID)
 }
 
 func TestListSandboxesByNodeError(t *testing.T) {
@@ -283,12 +221,8 @@ func TestListSandboxesByNodeError(t *testing.T) {
 
 	c := New(srv.URL, "", "", false)
 	_, err := c.ListSandboxesByNode(context.Background(), "nonexistent-node")
-	if err == nil {
-		t.Fatal("expected error when ret_code != 0")
-	}
-	if !strings.Contains(err.Error(), "100501") {
-		t.Errorf("error should contain ret_code: %v", err)
-	}
+	require.Error(t, err, "expected error when ret_code != 0")
+	assert.Contains(t, err.Error(), "100501")
 }
 
 func TestListSandboxesByNodeMissingRetError(t *testing.T) {
@@ -300,12 +234,8 @@ func TestListSandboxesByNodeMissingRetError(t *testing.T) {
 
 	c := New(srv.URL, "", "", false)
 	_, err := c.ListSandboxesByNode(context.Background(), "node-missing-ret")
-	if err == nil {
-		t.Fatal("expected error when ret envelope is missing")
-	}
-	if !strings.Contains(err.Error(), "missing CubeMaster ret envelope") {
-		t.Fatalf("expected missing ret error, got %v", err)
-	}
+	require.Error(t, err, "expected error when ret envelope is missing")
+	require.Contains(t, err.Error(), "missing CubeMaster ret envelope")
 }
 
 func TestResolveHostIDParsesSingleNodeEnvelope(t *testing.T) {
@@ -325,15 +255,9 @@ func TestResolveHostIDParsesSingleNodeEnvelope(t *testing.T) {
 
 	c := New(srv.URL, "", "", false)
 	hostID, err := c.ResolveHostID(context.Background(), "192.0.2.222")
-	if err != nil {
-		t.Fatalf("ResolveHostID: %v", err)
-	}
-	if gotPath != "/internal/meta/nodes/192.0.2.222" {
-		t.Errorf("path: want /internal/meta/nodes/192.0.2.222, got %s", gotPath)
-	}
-	if hostID != "192.0.2.222" {
-		t.Errorf("hostID: want 192.0.2.222, got %s", hostID)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "/internal/meta/nodes/192.0.2.222", gotPath)
+	assert.Equal(t, "192.0.2.222", hostID)
 }
 
 func TestResolveHostIDFallsBackToNodeList(t *testing.T) {
@@ -357,13 +281,7 @@ func TestResolveHostIDFallsBackToNodeList(t *testing.T) {
 
 	c := New(srv.URL, "", "", false)
 	hostID, err := c.ResolveHostID(context.Background(), "worker-ip")
-	if err != nil {
-		t.Fatalf("ResolveHostID: %v", err)
-	}
-	if hostID != "node-b" {
-		t.Errorf("hostID: want node-b, got %s", hostID)
-	}
-	if len(paths) != 2 || paths[0] != "/internal/meta/nodes/worker-ip" || paths[1] != "/internal/meta/nodes" {
-		t.Errorf("paths: %v", paths)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "node-b", hostID)
+	assert.Equal(t, []string{"/internal/meta/nodes/worker-ip", "/internal/meta/nodes"}, paths)
 }

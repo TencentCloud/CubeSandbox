@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	admissionv1 "k8s.io/api/admission/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -24,27 +26,25 @@ import (
 	"github.com/tencentcloud/CubeSandbox/eviction-webhook/pkg/types"
 )
 
-// mockPodGetter implements PodGetter for tests.
+// ── Test doubles ────────────────────────────────────────────────────────────
+
 type mockPodGetter struct {
 	pods map[string]*corev1.Pod
 }
 
 func (m *mockPodGetter) Get(namespace, name string) (*corev1.Pod, bool) {
-	key := namespace + "/" + name
-	pod, ok := m.pods[key]
+	pod, ok := m.pods[namespace+"/"+name]
 	return pod, ok
 }
 
 func newMockPodGetter(pods ...*corev1.Pod) *mockPodGetter {
 	m := &mockPodGetter{pods: make(map[string]*corev1.Pod)}
 	for _, p := range pods {
-		key := p.Namespace + "/" + p.Name
-		m.pods[key] = p
+		m.pods[p.Namespace+"/"+p.Name] = p
 	}
 	return m
 }
 
-// stubReporter is a reporter that captures calls synchronously.
 type stubReporter struct {
 	events []*types.EvictionEvent
 }
@@ -64,177 +64,110 @@ func (s *stubRecoveryManager) OnEviction(event *types.EvictionEvent) {
 	s.events = append(s.events, event)
 }
 
-func TestHandleNilRequest(t *testing.T) {
-	h := &Handler{}
-	resp := h.handle(nil)
+// ── Helper ───────────────────────────────────────────────────────────────────
 
-	if resp.Allowed {
-		t.Error("expected Allowed=false for nil request")
+func newSandboxPod(name, namespace, instanceType string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels:    map[string]string{instanceTypeLabelKey: instanceType},
+		},
 	}
-	if resp.UID != "" {
-		t.Errorf("expected empty UID, got %q", resp.UID)
+}
+
+func kubeletRequest(uid, podName, namespace, nodeName string) *admissionv1.AdmissionRequest {
+	return &admissionv1.AdmissionRequest{
+		UID:       k8stypes.UID(uid),
+		Name:      podName,
+		Namespace: namespace,
+		UserInfo:  authenticationv1.UserInfo{Username: "system:node:" + nodeName},
 	}
-	if resp.Result == nil {
-		t.Fatal("expected Result not nil")
-	}
-	if resp.Result.Message == "" {
-		t.Error("expected non-empty message")
-	}
+}
+
+// ── Unit tests ───────────────────────────────────────────────────────────────
+
+func TestHandleNilRequest(t *testing.T) {
+	resp := New(newMockPodGetter(), nil, nil).handle(nil)
+
+	assert.False(t, resp.Allowed)
+	assert.Empty(t, resp.UID)
+	require.NotNil(t, resp.Result)
+	assert.NotEmpty(t, resp.Result.Message)
 }
 
 func TestHandleEvictionEvent(t *testing.T) {
 	auditPath := filepath.Join(t.TempDir(), "audit.ndjson")
 	auditStore, err := store.New(auditPath)
-	if err != nil {
-		t.Fatalf("store.New: %v", err)
-	}
+	require.NoError(t, err)
 	defer auditStore.Close()
 
 	stub := &stubReporter{}
-	h := &Handler{
-		podGetter: newMockPodGetter(&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "sandbox-abc",
-				Namespace: "cube-system",
-				Labels: map[string]string{
-					instanceTypeLabelKey: "cubebox",
-				},
-			},
-		}),
-		store:    auditStore,
-		reporter: stub,
-	}
+	h := New(
+		newMockPodGetter(newSandboxPod("sandbox-abc", "cube-system", "cubebox")),
+		auditStore,
+		stub,
+	)
 
-	req := &admissionv1.AdmissionRequest{
-		UID:       k8stypes.UID("uid-12345-test"),
-		Name:      "sandbox-abc",
-		Namespace: "cube-system",
-		UserInfo: authenticationv1.UserInfo{
-			Username: "system:node:worker-01",
-		},
-	}
+	resp := h.handle(kubeletRequest("uid-12345-test", "sandbox-abc", "cube-system", "worker-01"))
 
-	resp := h.handle(req)
+	assert.False(t, resp.Allowed)
+	assert.Equal(t, k8stypes.UID("uid-12345-test"), resp.UID)
+	require.NotNil(t, resp.Result)
+	assert.NotEmpty(t, resp.Result.Message)
 
-	if resp.Allowed {
-		t.Error("expected Allowed=false")
-	}
-	if resp.UID != "uid-12345-test" {
-		t.Errorf("expected UID=uid-12345-test, got %q", resp.UID)
-	}
-	if resp.Result == nil || resp.Result.Message == "" {
-		t.Error("expected Result.Message to be set")
-	}
+	require.Len(t, stub.events, 1)
+	ev := stub.events[0]
+	assert.Equal(t, "uid-12345-test", ev.EventID)
+	assert.Equal(t, "sandbox-abc", ev.PodName)
+	assert.Equal(t, "cube-system", ev.Namespace)
+	assert.Equal(t, "worker-01", ev.NodeName)
+	assert.Equal(t, "cubebox", ev.InstanceType)
 
-	// Verify the event was sent to reporter
-	if len(stub.events) != 1 {
-		t.Fatalf("expected 1 reporter event, got %d", len(stub.events))
-	}
-	event := stub.events[0]
-	if event.EventID != "uid-12345-test" {
-		t.Errorf("EventID: want uid-12345-test, got %s", event.EventID)
-	}
-	if event.PodName != "sandbox-abc" {
-		t.Errorf("PodName: want sandbox-abc, got %s", event.PodName)
-	}
-	if event.Namespace != "cube-system" {
-		t.Errorf("Namespace: want cube-system, got %s", event.Namespace)
-	}
-	if event.NodeName != "worker-01" {
-		t.Errorf("NodeName: want worker-01, got %s", event.NodeName)
-	}
-	if event.InstanceType != "cubebox" {
-		t.Errorf("InstanceType: want cubebox, got %s", event.InstanceType)
-	}
-
-	// Verify the event was persisted
+	// Verify persisted to audit log
 	auditStore.Close()
 	data, err := os.ReadFile(auditPath)
-	if err != nil {
-		t.Fatalf("read audit log: %v", err)
-	}
+	require.NoError(t, err)
 	var recovered types.EvictionEvent
-	// NDJSON: first line minus trailing newline
-	json.Unmarshal(data[:len(data)-1], &recovered)
-	if recovered.EventID != "uid-12345-test" {
-		t.Errorf("audit EventID: want uid-12345-test, got %s", recovered.EventID)
-	}
+	require.NoError(t, json.Unmarshal(data[:len(data)-1], &recovered))
+	assert.Equal(t, "uid-12345-test", recovered.EventID)
 }
 
 func TestHandlePodNotInCache(t *testing.T) {
-	auditPath := filepath.Join(t.TempDir(), "audit.ndjson")
-	auditStore, _ := store.New(auditPath)
+	auditStore, _ := store.New(filepath.Join(t.TempDir(), "audit.ndjson"))
 	defer auditStore.Close()
 
 	stub := &stubReporter{}
-	h := &Handler{
-		// No pods in cache
-		podGetter: newMockPodGetter(),
-		store:     auditStore,
-		reporter:  stub,
-	}
+	h := New(newMockPodGetter(), auditStore, stub)
 
-	req := &admissionv1.AdmissionRequest{
-		UID:       k8stypes.UID("uid-missing"),
-		Name:      "sandbox-gone",
-		Namespace: "cube-system",
-		UserInfo: authenticationv1.UserInfo{
-			Username: "system:node:worker-02",
-		},
-	}
+	resp := h.handle(kubeletRequest("uid-missing", "sandbox-gone", "cube-system", "worker-02"))
 
-	resp := h.handle(req)
-
-	// Should still deny eviction even if Pod not in cache
-	if resp.Allowed {
-		t.Error("expected Allowed=false even when Pod not in cache")
-	}
-
-	if len(stub.events) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(stub.events))
-	}
-	if stub.events[0].InstanceType != "" {
-		t.Errorf("expected empty InstanceType for missing pod, got %q", stub.events[0].InstanceType)
-	}
+	assert.False(t, resp.Allowed, "should deny even when Pod not in cache")
+	require.Len(t, stub.events, 1)
+	assert.Empty(t, stub.events[0].InstanceType, "InstanceType should be empty for missing pod")
 }
 
 func TestHandleTriggersRecoveryOnlyForNodeUser(t *testing.T) {
-	auditPath := filepath.Join(t.TempDir(), "audit.ndjson")
-	auditStore, _ := store.New(auditPath)
+	auditStore, _ := store.New(filepath.Join(t.TempDir(), "audit.ndjson"))
 	defer auditStore.Close()
 
 	recoveryMgr := &stubRecoveryManager{}
 	h := NewWithRecovery(newMockPodGetter(), auditStore, nil, recoveryMgr)
 
-	resp := h.handle(&admissionv1.AdmissionRequest{
-		UID:       k8stypes.UID("uid-node-user"),
-		Name:      "sandbox-node-user",
-		Namespace: "cube-system",
-		UserInfo: authenticationv1.UserInfo{
-			Username: "system:node:worker-01",
-		},
-	})
-	if resp.Allowed {
-		t.Fatal("expected node-user eviction to be denied")
-	}
-	if len(recoveryMgr.events) != 1 {
-		t.Fatalf("expected node-user eviction to trigger recovery, got %d", len(recoveryMgr.events))
-	}
+	// kubelet eviction → denied, recovery triggered
+	resp := h.handle(kubeletRequest("uid-node", "sandbox-node", "cube-system", "worker-01"))
+	assert.False(t, resp.Allowed)
+	assert.Len(t, recoveryMgr.events, 1)
 
+	// admin eviction → allowed, recovery NOT triggered
 	resp = h.handle(&admissionv1.AdmissionRequest{
-		UID:       k8stypes.UID("uid-admin-user"),
-		Name:      "sandbox-admin-user",
+		UID:       "uid-admin",
+		Name:      "sandbox-admin",
 		Namespace: "cube-system",
-		UserInfo: authenticationv1.UserInfo{
-			Username: "admin@example.com",
-		},
+		UserInfo:  authenticationv1.UserInfo{Username: "admin@example.com"},
 	})
-	if !resp.Allowed {
-		t.Fatal("expected admin eviction to be allowed")
-	}
-	if len(recoveryMgr.events) != 1 {
-		t.Fatalf("expected admin eviction not to trigger recovery, got %d events", len(recoveryMgr.events))
-	}
+	assert.True(t, resp.Allowed)
+	assert.Len(t, recoveryMgr.events, 1, "admin eviction must not trigger recovery")
 }
 
 func TestHandleKubeletEvictionRequiresMemoryPressure(t *testing.T) {
@@ -245,9 +178,9 @@ func TestHandleKubeletEvictionRequiresMemoryPressure(t *testing.T) {
 		wantAllowed   bool
 		wantRecovery  int
 	}{
-		{name: "memory_pressure", underPressure: true, wantAllowed: false, wantRecovery: 1},
-		{name: "not_memory_pressure", underPressure: false, wantAllowed: true, wantRecovery: 0},
-		{name: "pressure_check_error", checkErr: fmt.Errorf("node lookup failed"), wantAllowed: true, wantRecovery: 0},
+		{"memory_pressure", true, nil, false, 1},
+		{"not_memory_pressure", false, nil, true, 0},
+		{"pressure_check_error", false, fmt.Errorf("node lookup failed"), true, 0},
 	}
 
 	for _, tc := range tests {
@@ -255,26 +188,12 @@ func TestHandleKubeletEvictionRequiresMemoryPressure(t *testing.T) {
 			recoveryMgr := &stubRecoveryManager{}
 			h := NewWithRecovery(newMockPodGetter(), nil, nil, recoveryMgr)
 			h.SetPressureChecker(func(context.Context, string) (bool, error) {
-				if tc.checkErr != nil {
-					return false, tc.checkErr
-				}
-				return tc.underPressure, nil
+				return tc.underPressure, tc.checkErr
 			})
 
-			resp := h.handle(&admissionv1.AdmissionRequest{
-				UID:       k8stypes.UID("uid-" + tc.name),
-				Name:      "sandbox-" + tc.name,
-				Namespace: "cube-system",
-				UserInfo: authenticationv1.UserInfo{
-					Username: "system:node:worker-01",
-				},
-			})
-			if resp.Allowed != tc.wantAllowed {
-				t.Fatalf("Allowed: want %v, got %v", tc.wantAllowed, resp.Allowed)
-			}
-			if len(recoveryMgr.events) != tc.wantRecovery {
-				t.Fatalf("recovery events: want %d, got %d", tc.wantRecovery, len(recoveryMgr.events))
-			}
+			resp := h.handle(kubeletRequest("uid-"+tc.name, "sandbox-"+tc.name, "cube-system", "worker-01"))
+			assert.Equal(t, tc.wantAllowed, resp.Allowed)
+			assert.Len(t, recoveryMgr.events, tc.wantRecovery)
 		})
 	}
 }
@@ -286,158 +205,77 @@ func TestNodeFromUserInfo(t *testing.T) {
 	}{
 		{"system:node:worker-01", "worker-01"},
 		{"system:node:node-42.cluster.local", "node-42.cluster.local"},
-		{"system:kube-scheduler", "system:kube-scheduler"}, // non-node service account
+		{"system:kube-scheduler", "system:kube-scheduler"},
 		{"", ""},
 	}
 
 	for _, tc := range tests {
-		result := nodeFromUserInfo(tc.username)
-		if result != tc.expected {
-			t.Errorf("nodeFromUserInfo(%q): want %q, got %q", tc.username, tc.expected, result)
-		}
+		assert.Equal(t, tc.expected, nodeFromUserInfo(tc.username), "input: %q", tc.username)
 	}
 }
 
 func TestServeHTTP(t *testing.T) {
-	auditPath := filepath.Join(t.TempDir(), "audit.ndjson")
-	auditStore, _ := store.New(auditPath)
+	auditStore, _ := store.New(filepath.Join(t.TempDir(), "audit.ndjson"))
 	defer auditStore.Close()
 
 	stub := &stubReporter{}
 	handler := New(
-		newMockPodGetter(&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "sandbox-e2e",
-				Namespace: "cube-system",
-				Labels: map[string]string{
-					instanceTypeLabelKey: "cubebox",
-				},
-			},
-		}),
-		auditStore,
-		stub,
+		newMockPodGetter(newSandboxPod("sandbox-e2e", "cube-system", "cubebox")),
+		auditStore, stub,
 	)
 
-	review := admissionv1.AdmissionReview{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "admission.k8s.io/v1",
-			Kind:       "AdmissionReview",
-		},
+	body, _ := json.Marshal(admissionv1.AdmissionReview{
+		TypeMeta: metav1.TypeMeta{APIVersion: "admission.k8s.io/v1", Kind: "AdmissionReview"},
 		Request: &admissionv1.AdmissionRequest{
-			UID:       k8stypes.UID("uid-http-test"),
+			UID:       "uid-http-test",
 			Name:      "sandbox-e2e",
 			Namespace: "cube-system",
-			UserInfo: authenticationv1.UserInfo{
-				Username: "system:node:worker-99",
-			},
+			UserInfo:  authenticationv1.UserInfo{Username: "system:node:worker-99"},
 		},
-	}
-
-	body, _ := json.Marshal(review)
+	})
 	req := httptest.NewRequest(http.MethodPost, "/webhook/eviction", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
-
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: body=%s", rec.Code, rec.Body.String())
-	}
+	require.Equal(t, http.StatusOK, rec.Code)
 
 	var result admissionv1.AdmissionReview
-	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
-		t.Fatalf("unmarshal response: %v", err)
-	}
-	if result.Response == nil {
-		t.Fatal("expected Response in AdmissionReview")
-	}
-	if result.Response.Allowed {
-		t.Error("expected Allowed=false")
-	}
-	if result.Response.UID != "uid-http-test" {
-		t.Errorf("expected UID=uid-http-test, got %q", result.Response.UID)
-	}
-
-	// Verify reporter was called
-	if len(stub.events) != 1 {
-		t.Errorf("expected 1 reporter event, got %d", len(stub.events))
-	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &result))
+	require.NotNil(t, result.Response)
+	assert.False(t, result.Response.Allowed)
+	assert.Equal(t, k8stypes.UID("uid-http-test"), result.Response.UID)
+	assert.Len(t, stub.events, 1)
 }
 
 func TestServeHTTPBadBody(t *testing.T) {
 	handler := New(newMockPodGetter(), nil, &stubReporter{})
-
 	req := httptest.NewRequest(http.MethodPost, "/webhook/eviction", bytes.NewReader([]byte("not-json")))
-	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
-
 	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for bad body, got %d", rec.Code)
-	}
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestHandleEvictionReturnsInterceptedAt(t *testing.T) {
-	auditPath := filepath.Join(t.TempDir(), "audit.ndjson")
-	auditStore, _ := store.New(auditPath)
+	auditStore, _ := store.New(filepath.Join(t.TempDir(), "audit.ndjson"))
 	defer auditStore.Close()
 
 	stub := &stubReporter{}
-	h := &Handler{
-		podGetter: newMockPodGetter(),
-		store:     auditStore,
-		reporter:  stub,
-	}
+	h := New(newMockPodGetter(), auditStore, stub)
+	h.handle(kubeletRequest("uid-time", "sandbox-time", "cube-system", "worker-01"))
 
-	req := &admissionv1.AdmissionRequest{
-		UID:       k8stypes.UID("uid-time"),
-		Name:      "sandbox-time",
-		Namespace: "cube-system",
-		UserInfo: authenticationv1.UserInfo{
-			Username: "system:node:worker-01",
-		},
-	}
-
-	resp := h.handle(req)
-	if resp.Allowed {
-		t.Error("expected Allowed=false")
-	}
-
-	if len(stub.events) != 1 {
-		t.Fatalf("expected 1 event")
-	}
-	if stub.events[0].InterceptedAt == "" {
-		t.Error("InterceptedAt should not be empty")
-	}
-	// Verify it's a valid RFC3339 timestamp
-	if stub.events[0].InterceptedAt != "" {
-		// Basic format check: should contain T and end with Z
-		ts := stub.events[0].InterceptedAt
-		if len(ts) < 20 {
-			t.Errorf("InterceptedAt too short: %q", ts)
-		}
-	}
+	require.Len(t, stub.events, 1)
+	assert.NotEmpty(t, stub.events[0].InterceptedAt)
+	assert.GreaterOrEqual(t, len(stub.events[0].InterceptedAt), 20, "should be valid RFC3339")
 }
 
-// Ensure PodGetter interface is satisfied by *podinformer.Cache (compile-time check).
 func TestPodGetterInterfaceSatisfaction(t *testing.T) {
-	// This type assertion verifies *podinformer.Cache implements PodGetter.
-	// The actual check is compile-time in the production code path;
-	// this test documents the expectation.
 	var _ PodGetter = newMockPodGetter()
-	// Will not compile if mockPodGetter.Get signature changes.
 }
 
 func TestDenyResponse(t *testing.T) {
 	resp := denyResponse("uid-abc", "test denial message")
-	if resp.Allowed {
-		t.Error("denyResponse must set Allowed=false")
-	}
-	if resp.UID != "uid-abc" {
-		t.Errorf("UID: want uid-abc, got %q", resp.UID)
-	}
-	if resp.Result.Message != "test denial message" {
-		t.Errorf("Message: want 'test denial message', got %q", resp.Result.Message)
-	}
+	assert.False(t, resp.Allowed)
+	assert.Equal(t, k8stypes.UID("uid-abc"), resp.UID)
+	assert.Equal(t, "test denial message", resp.Result.Message)
 }

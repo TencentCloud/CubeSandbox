@@ -13,18 +13,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/eviction-webhook/pkg/types"
 )
 
 func TestReporterSuccess(t *testing.T) {
 	var received atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Errorf("expected POST, got %s", r.Method)
-		}
-		if r.URL.Path != reportPath {
-			t.Errorf("expected path %s, got %s", reportPath, r.URL.Path)
-		}
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, reportPath, r.URL.Path)
 		received.Add(1)
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -43,9 +41,7 @@ func TestReporterSuccess(t *testing.T) {
 	done := r.Report(event)
 	<-done
 
-	if received.Load() != 1 {
-		t.Errorf("expected 1 request, got %d", received.Load())
-	}
+	assert.Equal(t, int32(1), received.Load())
 }
 
 func TestReporterRetryThenSuccess(t *testing.T) {
@@ -73,9 +69,7 @@ func TestReporterRetryThenSuccess(t *testing.T) {
 	done := r.Report(event)
 	<-done
 
-	if attempts.Load() != 3 {
-		t.Errorf("expected 3 attempts, got %d", attempts.Load())
-	}
+	assert.Equal(t, int32(3), attempts.Load())
 }
 
 func TestReporterExhaustsRetries(t *testing.T) {
@@ -99,9 +93,7 @@ func TestReporterExhaustsRetries(t *testing.T) {
 	done := r.Report(event)
 	<-done
 
-	if attempts.Load() != 2 {
-		t.Errorf("expected 2 attempts, got %d", attempts.Load())
-	}
+	assert.Equal(t, int32(2), attempts.Load())
 }
 
 func TestReporterAuthHeadersSent(t *testing.T) {
@@ -111,9 +103,7 @@ func TestReporterAuthHeadersSent(t *testing.T) {
 			"cube_version", "cube_user_id", "cube_timestamp",
 			"cube_nonce", "cube_sgn_method", "cube_signature",
 		} {
-			if r.Header.Get(h) == "" {
-				t.Errorf("auth header %s is empty", h)
-			}
+			assert.NotEmpty(t, r.Header.Get(h), "auth header %s should not be empty", h)
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -136,9 +126,7 @@ func TestReporterAuthHeadersSent(t *testing.T) {
 func TestReporterAuthDisabled(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// When auth is disabled, no auth signature header should be present
-		if sig := r.Header.Get("cube_signature"); sig != "" {
-			t.Errorf("unexpected cube_signature when auth disabled: %s", sig)
-		}
+		assert.Empty(t, r.Header.Get("cube_signature"), "unexpected cube_signature when auth disabled")
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -163,25 +151,12 @@ func TestReporterRequestBodyMatchesEvent(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var received types.EvictionEvent
-		if err := json.Unmarshal(body, &received); err != nil {
-			t.Errorf("unmarshal body: %v", err)
-			return
-		}
-		if received.EventID != sent.EventID {
-			t.Errorf("EventID: want %s, got %s", sent.EventID, received.EventID)
-		}
-		if received.PodName != sent.PodName {
-			t.Errorf("PodName: want %s, got %s", sent.PodName, received.PodName)
-		}
-		if received.Namespace != sent.Namespace {
-			t.Errorf("Namespace: want %s, got %s", sent.Namespace, received.Namespace)
-		}
-		if received.NodeName != sent.NodeName {
-			t.Errorf("NodeName: want %s, got %s", sent.NodeName, received.NodeName)
-		}
-		if received.InstanceType != sent.InstanceType {
-			t.Errorf("InstanceType: want %s, got %s", sent.InstanceType, received.InstanceType)
-		}
+		require.NoError(t, json.Unmarshal(body, &received), "unmarshal body")
+		assert.Equal(t, sent.EventID, received.EventID)
+		assert.Equal(t, sent.PodName, received.PodName)
+		assert.Equal(t, sent.Namespace, received.Namespace)
+		assert.Equal(t, sent.NodeName, received.NodeName)
+		assert.Equal(t, sent.InstanceType, received.InstanceType)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -205,9 +180,7 @@ func TestReporterAsyncReturn(t *testing.T) {
 	done := r.Report(event)
 	elapsed := time.Since(start)
 
-	if elapsed > 50*time.Millisecond {
-		t.Errorf("Report should return immediately, took %v", elapsed)
-	}
+	assert.LessOrEqual(t, elapsed, 50*time.Millisecond, "Report should return immediately, took %v", elapsed)
 	// Wait for completion so the test doesn't leak goroutines
 	<-done
 }
@@ -241,7 +214,5 @@ func TestReporterConcurrentReports(t *testing.T) {
 		<-ch
 	}
 
-	if int(received.Load()) != goroutines {
-		t.Errorf("expected %d requests, got %d", goroutines, received.Load())
-	}
+	assert.Equal(t, goroutines, int(received.Load()))
 }

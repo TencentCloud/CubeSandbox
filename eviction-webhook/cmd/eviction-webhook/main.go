@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.uber.org/zap"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -25,6 +27,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/eviction-webhook/internal/recovery"
 	"github.com/tencentcloud/CubeSandbox/eviction-webhook/internal/reporter"
 	"github.com/tencentcloud/CubeSandbox/eviction-webhook/internal/store"
+	"github.com/tencentcloud/CubeSandbox/eviction-webhook/internal/telemetry"
 )
 
 func main() {
@@ -39,64 +42,71 @@ func run() error {
 		return err
 	}
 
+	// ── Structured logger ─────────────────────────────────────────────────
+	logger, err := telemetry.InitLogger(cfg.Debug)
+	if err != nil {
+		return fmt.Errorf("init logger: %w", err)
+	}
+	defer logger.Sync() //nolint:errcheck
+
+	logger.Info("eviction-webhook starting",
+		zap.String("ListenAddr", cfg.ListenAddr),
+		zap.String("MetricsAddr", cfg.MetricsAddr),
+		zap.String("CubeMasterURL", cfg.CubeMasterURL),
+	)
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	// ── Metrics server (non-TLS, separate port) ───────────────────────────
+	go startMetricsServer(ctx, cfg.MetricsAddr, logger)
+
 	// ── Kubernetes in-cluster client ──────────────────────────────────────
-	log.Printf("loading in-cluster config...")
+	logger.Info("loading in-cluster config")
 	restCfg, err := rest.InClusterConfig()
 	if err != nil {
 		return fmt.Errorf("in-cluster config: %w", err)
 	}
-	log.Printf("in-cluster config loaded: host=%s", restCfg.Host)
 	k8sClient, err := kubernetes.NewForConfig(restCfg)
 	if err != nil {
 		return fmt.Errorf("k8s client: %w", err)
 	}
-	log.Printf("k8s client created")
+	logger.Info("k8s client created", zap.String("Host", restCfg.Host))
 
-	// ── Pod informer — provides label lookups on the hot webhook path ─────
-	// Start async to avoid blocking startup. The informer syncs in the background.
-	// If sync fails, the handler falls back to UserInfo username for node name.
-	log.Printf("starting pod informer (namespace=%q)...", cfg.PodNamespace)
+	// ── Pod informer ──────────────────────────────────────────────────────
 	podCache, err := podinformer.NewAsync(ctx, k8sClient, cfg.PodNamespace)
 	if err != nil {
 		return fmt.Errorf("pod informer async start: %w", err)
 	}
-	log.Printf("pod informer started (async sync)")
+	logger.Info("pod informer started", zap.String("Namespace", cfg.PodNamespace))
 
-	// ── Local NDJSON audit store ──────────────────────────────────────────
+	// ── Audit store ───────────────────────────────────────────────────────
 	auditStore, err := store.New(cfg.AuditLogPath)
 	if err != nil {
 		return fmt.Errorf("audit store: %w", err)
 	}
 	defer auditStore.Close()
-	log.Printf("audit store opened: %s", cfg.AuditLogPath)
+	logger.Info("audit store opened", zap.String("Path", cfg.AuditLogPath))
 
 	// ── CubeMaster clients ────────────────────────────────────────────────
 	var rep admission.EventReporter
 	if cfg.EventReportEnabled {
-		// Optional event notification. The recovery path below uses existing
-		// CubeMaster APIs and does not require CubeMaster to expose /event/eviction.
 		rep = reporter.New(cfg.CubeMasterURL, cfg.AuthUserID, cfg.AuthSecretKey, cfg.AuthEnabled)
-		log.Printf("event reporter enabled: target=%s/event/eviction", cfg.CubeMasterURL)
+		logger.Info("event reporter enabled", zap.String("Target", cfg.CubeMasterURL))
 	} else {
-		log.Printf("event reporter disabled")
+		logger.Info("event reporter disabled")
 	}
 
-	// cmClient: directly calls CubeMaster isolation + pause/resume APIs
 	cmClient := cubemaster.New(cfg.CubeMasterURL, cfg.AuthUserID, cfg.AuthSecretKey, cfg.AuthEnabled)
 
-	// ── Recovery manager ─────────────────────────────────────────────────
-	// Tracks which nodes are cordoned and which sandboxes are paused, and
-	// drives CubeMaster to cordon/uncordon + pause/resume.
-	// State is persisted to disk so the webhook can recover after restart.
+	// ── Recovery manager ──────────────────────────────────────────────────
 	statePath := envOrDefault("RECOVERY_STATE_PATH", "/var/lib/eviction-webhook/recovery-state.json")
 	recoveryMgr, err := recovery.NewWithPersister(cmClient, statePath)
 	if err != nil {
-		log.Printf("recovery manager: %v (continuing without persisted state)", err)
+		logger.Warn("recovery persisted state unavailable, starting clean", zap.Error(err))
 		recoveryMgr = recovery.New(cmClient)
 	}
+
 	nodePressure := func(ctx context.Context, nodeName string) (bool, bool, error) {
 		node, err := k8sClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
 		if err != nil {
@@ -109,31 +119,27 @@ func run() error {
 		return underResourcePressure, err
 	})
 
-	// ── Node watcher — triggers recovery on MemoryPressure transitions ───
-	// onPressureDetected handles the case where kubelet's internal eviction
-	// bypasses the API server (and thus the webhook never sees an Eviction).
-	log.Printf("starting node watcher...")
+	// ── Node watcher ──────────────────────────────────────────────────────
+	logger.Info("starting node watcher")
 	if err := nodewatch.StartAsyncWithPressureDetected(ctx, k8sClient, recoveryMgr.OnPressureRelief, recoveryMgr.OnPressureDetected); err != nil {
-		log.Printf("node watcher: %v (continuing anyway)", err)
+		logger.Warn("node watcher failed to start", zap.Error(err))
 	}
-	log.Printf("node watcher started (async)")
 	recoveryMgr.ReconcileRestored(ctx)
 
 	// ── Admission handler ─────────────────────────────────────────────────
-	handler := admission.NewWithRecovery(podCache, auditStore, rep, recoveryMgr)
+	handler := admission.NewWithLogger(podCache, auditStore, rep, recoveryMgr, logger)
 	handler.SetPressureChecker(func(ctx context.Context, nodeName string) (bool, error) {
 		underMemoryPressure, _, err := nodePressure(ctx, nodeName)
 		return underMemoryPressure, err
 	})
 
-	// ── HTTP mux ──────────────────────────────────────────────────────────
+	// ── Webhook TLS server ────────────────────────────────────────────────
 	mux := http.NewServeMux()
 	mux.Handle("/webhook/eviction", handler)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	// ── TLS server ────────────────────────────────────────────────────────
 	tlsCert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
 	if err != nil {
 		return fmt.Errorf("load TLS cert: %w", err)
@@ -152,7 +158,7 @@ func run() error {
 
 	serverErr := make(chan error, 1)
 	go func() {
-		log.Printf("listening on %s (TLS)", cfg.ListenAddr)
+		logger.Info("webhook server listening (TLS)", zap.String("Addr", cfg.ListenAddr))
 		if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 			serverErr <- fmt.Errorf("serve: %w", err)
 		}
@@ -164,17 +170,45 @@ func run() error {
 		return err
 	}
 
-	log.Println("shutting down")
+	logger.Info("shutting down")
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutCancel()
 	if err := srv.Shutdown(shutCtx); err != nil {
-		log.Printf("shutdown: %v", err)
+		logger.Warn("shutdown error", zap.Error(err))
 	}
 	return nil
 }
 
+func startMetricsServer(ctx context.Context, addr string, logger *zap.Logger) {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok")) //nolint:errcheck
+	})
+
+	srv := &http.Server{
+		Addr:         addr,
+		Handler:      mux,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 5 * time.Second,
+	}
+
+	logger.Info("metrics server starting", zap.String("Addr", addr))
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("metrics server error", zap.Error(err))
+		}
+	}()
+	<-ctx.Done()
+	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	srv.Shutdown(shutCtx) //nolint:errcheck
+}
+
 type config struct {
 	ListenAddr         string
+	MetricsAddr        string
 	TLSCertFile        string
 	TLSKeyFile         string
 	PodNamespace       string
@@ -184,6 +218,7 @@ type config struct {
 	AuthEnabled        bool
 	AuthUserID         string
 	AuthSecretKey      string
+	Debug              bool
 }
 
 func loadConfig() (config, error) {
@@ -193,6 +228,7 @@ func loadConfig() (config, error) {
 	}
 	return config{
 		ListenAddr:         envOrDefault("LISTEN_ADDR", ":8443"),
+		MetricsAddr:        envOrDefault("METRICS_ADDR", ":8888"),
 		TLSCertFile:        envOrDefault("TLS_CERT_FILE", "/etc/eviction-webhook/tls/tls.crt"),
 		TLSKeyFile:         envOrDefault("TLS_KEY_FILE", "/etc/eviction-webhook/tls/tls.key"),
 		PodNamespace:       os.Getenv("POD_NAMESPACE"),
@@ -202,6 +238,7 @@ func loadConfig() (config, error) {
 		AuthEnabled:        os.Getenv("CUBE_AUTH_ENABLE") == "true",
 		AuthUserID:         os.Getenv("CUBE_AUTH_USER_ID"),
 		AuthSecretKey:      os.Getenv("CUBE_AUTH_SECRET_KEY"),
+		Debug:              os.Getenv("DEBUG") == "true",
 	}, nil
 }
 
