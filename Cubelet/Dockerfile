@@ -83,7 +83,7 @@ ARG CUBE_VERSION=unknown
 ENV IMAGE_ROOT=/opt/cube-image
 ENV TOOLBOX_ROOT=/usr/local/services/cubetoolbox
 ENV CUBE_COMPONENT=cubelet
-ENV PATH="/usr/local/services/cubetoolbox/cube-shim/bin:${PATH}"
+ENV PATH="/usr/local/services/cubetoolbox/Cubelet/bin:/usr/local/services/cubetoolbox/cube-shim/bin:${PATH}"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

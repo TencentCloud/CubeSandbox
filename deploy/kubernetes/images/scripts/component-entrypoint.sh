@@ -170,6 +170,7 @@ stage_component() {
     cubelet)
       chmod +x "${dst}/bin/cubelet" "${dst}/bin/cubecli" 2>/dev/null || true
       [[ -x "${dst}/bin/cubelet" ]] || fail "missing cubelet after stage"
+      [[ -x "${dst}/bin/cubecli" ]] || fail "missing cubecli after stage"
       ;;
     network-agent)
       chmod +x "${dst}/bin/network-agent" "${dst}/bin/cubevsmapdump" 2>/dev/null || true

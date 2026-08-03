@@ -495,7 +495,9 @@ redis:
 
 cubeNode:
   enabled: true
-  podAnnotations: {}
+  podAnnotations:
+    # kubectl exec/logs without -c should enter the node-local Cubelet runtime.
+    kubectl.kubernetes.io/default-container: cubelet
   # Native apps/v1 DaemonSet. Image/tag/resource changes recreate the Pod
   # (PodIP / netns change; existing sandboxes on that node are interrupted).
   updateStrategy:

@@ -157,6 +157,14 @@ can set it to `false`.
 - `cubeNode.network.autoDetectEthName=true` auto-detects the primary host NIC and patches Cubelet `eth_name`;
 - `cubeNode.network.cidr` patches Cubelet cubevs/sandbox CIDR (default `172.16.0.0/18`, chosen to avoid common cluster Service CIDR `192.168.0.0/16` while keeping a /18 pool). A Helm `pre-install`/`pre-upgrade` Hook fails fast when this range overlaps the cluster Service CIDR or existing ClusterIPs; set `cubeNode.network.cidrSkipConflictCheck=true` only if you accept that risk.
 
+The `cube-node` Pod defaults `kubectl exec` to its `cubelet` container, where `cubecli` uses the node-local Cubelet and containerd sockets. In a multi-node cluster, select the Pod scheduled on the compute node you want to inspect:
+
+```bash
+kubectl get pods -n cube-system \
+  -l app.kubernetes.io/component=cube-node -o wide
+kubectl exec -n cube-system <cube-node-pod> -- cubecli ls
+```
+
 ### Guest kernel (bm vs PVM)
 
 What actually decides the guest kernel on a node:

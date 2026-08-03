@@ -251,6 +251,23 @@ kubectl -n cube-system logs -l app.kubernetes.io/component=cube-node -c cubelet 
 
 常见原因是连不上 CubeMaster（网络 / DNS）。
 
+### 如何在 Kubernetes 部署中运行 `cubecli`？
+
+`cubecli` 访问的是单个计算节点本地的 Cubelet 和 containerd socket。因此，需要先找到目标计算节点对应的 `cube-node` Pod，再通过 `kubectl exec` 在该 `cube-node` Pod 中运行 `cubecli` 命令：
+
+```bash
+# 查看各个 cube-node Pod 所在的节点，并根据 NODE 列找到目标节点对应的 Pod
+kubectl get pods -n cube-system \
+  -l app.kubernetes.io/component=cube-node -o wide
+
+# 在目标节点对应的 cube-node Pod 中运行 cubecli
+kubectl exec -n cube-system <cube-node-pod> -- cubecli ls
+```
+
+默认情况下，`kubectl exec` 会进入该 `cube-node` Pod 的 `cubelet` container，这是 Kubernetes 部署中运行 `cubecli` 的支持入口。
+
+对于 `cubecli container taps` 这类网络设备诊断命令，建议在目标 `cube-node` Pod 内执行。Chart 默认使用 `hostNetwork: false`，TAP 设备创建在 `cube-node` Pod 的 network namespace 中；宿主机 login shell 通常使用不同的 network namespace，无法提供同一视角。只有在用户自定义 `cube-node` 使用 `hostNetwork: true` 时，`cube-node` Pod 才会与宿主机共享 network namespace，此时才可以从两侧排查同一批 TAP 设备。
+
 ### 沙箱启动很慢（>10s），节点却很空
 
 - 排查节点CPU 负载是否较高。
@@ -382,6 +399,8 @@ kubectl -n cube-system logs <cube-node-pod> -c cube-egress-net --tail=100
 **升 Big Pod 运行时镜像 / 改 Pod template：会。** `cube-node` 是原生 DaemonSet，变更会 recreate Pod（UID / IP / netns 变化），该节点存量沙箱会中断。只升 Installer / Bootstrap / PVM 且不动 Big Pod template 时，Big Pod 可保持不变。步骤与红线见 [升级](./upgrade.md)。
 
 会 recreate Big Pod 的典型操作：bump `images.cubelet` 等运行时镜像、增删容器、改 volumeMount / securityContext / 容器名 / env。
+
+本次变更会把 `cube-node` Pod 中不带 `-c` 的 `kubectl exec` 和 `kubectl logs` 默认目标从 `network-agent` 改为 `cubelet`；如果运维流程需要其他 container，可通过 `cubeNode.podAnnotations` 显式设置默认值。
 
 ### `helm rollback` 会回滚 host kernel 吗？
 

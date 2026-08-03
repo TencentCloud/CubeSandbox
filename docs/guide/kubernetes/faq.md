@@ -251,6 +251,23 @@ kubectl -n cube-system logs -l app.kubernetes.io/component=cube-node -c cubelet 
 
 A common cause is inability to reach CubeMaster (network / DNS).
 
+### How do I run `cubecli` in a Kubernetes deployment?
+
+`cubecli` accesses the local Cubelet and containerd sockets of a single compute node. First find the `cube-node` Pod corresponding to the target node, then use `kubectl exec` to run commands inside that Pod:
+
+```bash
+# List the node assigned to each cube-node Pod and find the Pod for the target node
+kubectl get pods -n cube-system \
+  -l app.kubernetes.io/component=cube-node -o wide
+
+# Run cubecli in the cube-node Pod for the target node
+kubectl exec -n cube-system <cube-node-pod> -- cubecli ls
+```
+
+By default, `kubectl exec` enters the `cubelet` container in that `cube-node` Pod, which is the supported place to run `cubecli` in a Kubernetes deployment.
+
+For network-device diagnostics such as `cubecli container taps`, run the command inside the target `cube-node` Pod. The chart defaults to `hostNetwork: false`, so TAP devices are created in the `cube-node` Pod's network namespace. A host login shell normally uses a different network namespace and cannot provide the same diagnostic view. Only when a user customizes `cube-node` with `hostNetwork: true` does the Pod share the host network namespace, allowing the same TAP devices to be inspected from either side.
+
 ### Sandbox start is slow (>10s) while the node is mostly idle
 
 - Check whether the node's CPU load is high.
@@ -382,6 +399,8 @@ kubectl -n cube-system logs <cube-node-pod> -c cube-egress-net --tail=100
 **Bumping Big Pod runtime images / changing the Pod template: yes.** `cube-node` is a native DaemonSet; changes recreate the Pod (UID / IP / netns change) and interrupt existing sandboxes on that node. Bumping only Installer / Bootstrap / PVM while leaving the Big Pod template untouched can leave the Big Pod unchanged. Steps and red lines: [Upgrade](./upgrade.md).
 
 Typical Big Pod recreate triggers: bump `images.cubelet` and other runtime images, add/remove containers, change volumeMount / securityContext / container name / env.
+
+This release changes the default no-`-c` `kubectl exec` and `kubectl logs` target for `cube-node` Pods from `network-agent` to `cubelet`; use `cubeNode.podAnnotations` to set an explicit default if your operational workflow needs another container.
 
 ### Does `helm rollback` roll back the host kernel?
 

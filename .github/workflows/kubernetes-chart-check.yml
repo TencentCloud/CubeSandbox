@@ -4,12 +4,14 @@ on:
   push:
     branches: [master]
     paths:
+      - 'Cubelet/Dockerfile'
       - 'deploy/kubernetes/chart/**'
       - 'deploy/kubernetes/images/scripts/**'
       - 'scripts/bump-image.sh'
       - '.github/workflows/kubernetes-chart-check.yml'
   pull_request:
     paths:
+      - 'Cubelet/Dockerfile'
       - 'deploy/kubernetes/chart/**'
       - 'deploy/kubernetes/images/scripts/**'
       - 'scripts/bump-image.sh'

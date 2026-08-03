@@ -104,6 +104,8 @@ Useful commands:
   kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node-bootstrap -c cube-node-init --tail=100
   kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node -c wait-node-prep --tail=100
   kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node -c cubelet --tail=100
+  kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node -o wide
+  kubectl exec -n {{ .Release.Namespace }} <cube-node-pod> -- cubecli ls
 {{- if eq (include "cube.cubemastercliEnabled" .) "true" }}
   kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.cubemastercliName" . }} -- cubemastercli --help
   kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.cubemastercliName" . }} -- sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
