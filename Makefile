@@ -136,6 +136,7 @@ help:
 	@printf "  fmt            Format code in all component directories\n"
 	@printf "  web-api-sync  Export OpenAPI and regenerate WebUI schema types\n"
 	@printf "  terminal-protocol-sync Regenerate Web Terminal protocol constants\n"
+	@printf "  terminal-protocol-test Run Web Terminal protocol generator unit tests\n"
 	@printf "  terminal-protocol-check Verify generated Web Terminal protocol constants\n"
 	@printf "  web-sync-dev-env Build and deploy WebUI into dev-env VM\n"
 	@printf "\nNotes:\n"
@@ -387,11 +388,15 @@ web-api-sync:
 
 .PHONY: terminal-protocol-sync
 terminal-protocol-sync:
-	go run ./tools/terminal-protocol-gen/main.go
+	cd tools/terminal-protocol-gen && go run .
+
+.PHONY: terminal-protocol-test
+terminal-protocol-test:
+	cd tools/terminal-protocol-gen && go test ./...
 
 .PHONY: terminal-protocol-check
 terminal-protocol-check:
-	go run ./tools/terminal-protocol-gen/main.go -check
+	cd tools/terminal-protocol-gen && go run . -check
 
 .PHONY: web-sync-dev-env
 web-sync-dev-env:
