@@ -287,6 +287,102 @@ func TestGatewayRelaysTypedFramesAndWritesAudit(t *testing.T) {
 	}
 }
 
+func TestGatewayPreservesMasterErrorWhenRelayEndsWithoutCloseFrame(t *testing.T) {
+	cfg := gatewayTestConfig()
+	terminalService := &fakeGatewayService{grant: gatewayTestGrant("open")}
+	masterServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connection, err := testMasterUpgrader().Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		if err := connection.WriteMessage(websocket.BinaryMessage,
+			statusMessage(`{"type":"error","code":"TARGET_NOT_RUNNING"}`)); err != nil {
+			_ = connection.Close()
+			return
+		}
+		// CubeMaster can terminate after forwarding Cubelet's typed error
+		// without writing a WebSocket close-control frame.
+		_ = connection.UnderlyingConn().Close()
+	}))
+	defer masterServer.Close()
+
+	gateway := NewGateway(cfg, masterServer.URL, terminalService)
+	browserServer := httptest.NewServer(gateway)
+	defer browserServer.Close()
+	browser := dialBrowser(t, browserServer.URL, testRawGrant, browserServer.URL)
+	defer browser.Close()
+
+	messageType, message, err := browser.ReadMessage()
+	if err != nil {
+		t.Fatalf("read Cubelet error: %v", err)
+	}
+	info, err := ValidateServerMessage(messageType, message, cfg.MaxFrameBytes)
+	if err != nil || info.Type != "error" || info.ErrorCode != "TARGET_NOT_RUNNING" {
+		t.Fatalf("Cubelet error = %+v err=%v", info, err)
+	}
+	_, _, err = browser.ReadMessage()
+	var closeErr *websocket.CloseError
+	if !errors.As(err, &closeErr) || closeErr.Code != websocket.CloseInternalServerErr {
+		t.Fatalf("relay close = %T %v, want close 1011", err, err)
+	}
+
+	waitForGatewayAudit(t, terminalService, func(_ []terminalAuditCall, closes []terminalAuditCall) bool {
+		return len(closes) == 1
+	})
+	_, _, _, touches, closes := terminalService.auditSnapshot()
+	if len(touches) != 0 || len(closes) != 1 || closes[0].reason != "TARGET_NOT_RUNNING" {
+		t.Fatalf("error termination audit touches=%+v closes=%+v", touches, closes)
+	}
+}
+
+func TestGatewayDoesNotAppendInternalAfterMasterCloseStatus(t *testing.T) {
+	cfg := gatewayTestConfig()
+	terminalService := &fakeGatewayService{grant: gatewayTestGrant("open")}
+	masterServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connection, err := testMasterUpgrader().Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		if err := connection.WriteMessage(websocket.BinaryMessage,
+			statusMessage(`{"type":"close","reason":"PROTOCOL_ERROR"}`)); err != nil {
+			_ = connection.Close()
+			return
+		}
+		// The master close-control may be lost at this relay boundary. The
+		// already-forwarded typed status must remain the sole browser outcome.
+		_ = connection.UnderlyingConn().Close()
+	}))
+	defer masterServer.Close()
+
+	gateway := NewGateway(cfg, masterServer.URL, terminalService)
+	browserServer := httptest.NewServer(gateway)
+	defer browserServer.Close()
+	browser := dialBrowser(t, browserServer.URL, testRawGrant, browserServer.URL)
+	defer browser.Close()
+
+	messageType, message, err := browser.ReadMessage()
+	if err != nil {
+		t.Fatalf("read protocol close: %v", err)
+	}
+	info, err := ValidateServerMessage(messageType, message, cfg.MaxFrameBytes)
+	if err != nil || info.Type != "close" || info.CloseReason != "PROTOCOL_ERROR" {
+		t.Fatalf("protocol close = %+v err=%v", info, err)
+	}
+	_, _, err = browser.ReadMessage()
+	var closeErr *websocket.CloseError
+	if !errors.As(err, &closeErr) || closeErr.Code != websocket.ClosePolicyViolation {
+		t.Fatalf("relay close = %T %v, want close 1008", err, err)
+	}
+
+	waitForGatewayAudit(t, terminalService, func(_ []terminalAuditCall, closes []terminalAuditCall) bool {
+		return len(closes) == 1
+	})
+	_, _, _, touches, closes := terminalService.auditSnapshot()
+	if len(touches) != 0 || len(closes) != 1 || closes[0].reason != "PROTOCOL_ERROR" {
+		t.Fatalf("protocol termination audit touches=%+v closes=%+v", touches, closes)
+	}
+}
+
 func TestGatewayResumeDialCarriesOnlyTargetBinding(t *testing.T) {
 	cfg := gatewayTestConfig()
 	grant := gatewayTestGrant("resume")
@@ -383,6 +479,62 @@ func TestGatewayNormalAndAbnormalBrowserCloseSemantics(t *testing.T) {
 			t.Fatalf("abnormal close audit touches=%+v closes=%+v", touches, closes)
 		}
 	})
+}
+
+func TestPumpMasterToBrowserWriteFailurePreservesDetachedSession(t *testing.T) {
+	browserPeerCh := make(chan *websocket.Conn, 1)
+	browserServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connection, err := testMasterUpgrader().Upgrade(w, r, nil)
+		if err == nil {
+			browserPeerCh <- connection
+		}
+	}))
+	defer browserServer.Close()
+	browserClient, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(browserServer.URL, "http"), nil)
+	if response != nil && response.Body != nil {
+		defer response.Body.Close()
+	}
+	if err != nil {
+		t.Fatalf("dial browser peer: %v", err)
+	}
+	defer browserClient.Close()
+	browserPeer := <-browserPeerCh
+	defer browserPeer.Close()
+
+	masterPeerCh := make(chan *websocket.Conn, 1)
+	masterServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connection, err := testMasterUpgrader().Upgrade(w, r, nil)
+		if err == nil {
+			masterPeerCh <- connection
+		}
+	}))
+	defer masterServer.Close()
+	masterClient, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(masterServer.URL, "http"), nil)
+	if response != nil && response.Body != nil {
+		defer response.Body.Close()
+	}
+	if err != nil {
+		t.Fatalf("dial master peer: %v", err)
+	}
+	defer masterClient.Close()
+	masterPeer := <-masterPeerCh
+	defer masterPeer.Close()
+
+	session := newRelaySession(gatewayTestConfig(), &fakeGatewayService{}, gatewayTestGrant("open"), browserPeer, masterPeer)
+	resultCh := make(chan pumpResult, 1)
+	go func() {
+		resultCh <- session.pumpMasterToBrowser(context.Background())
+	}()
+	if err := browserPeer.UnderlyingConn().Close(); err != nil {
+		t.Fatalf("close browser relay connection: %v", err)
+	}
+	if err := masterClient.WriteMessage(websocket.BinaryMessage, append([]byte{ChannelStdout}, []byte("output")...)); err != nil {
+		t.Fatalf("write master frame: %v", err)
+	}
+	result := <-resultCh
+	if !result.detached || result.closeReason != "" {
+		t.Fatalf("slow consumer result = %+v, want detached without terminal close reason", result)
+	}
 }
 
 func TestGatewayRejectsOpenedSessionMismatch(t *testing.T) {
