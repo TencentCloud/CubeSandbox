@@ -262,9 +262,9 @@ spec:
         - -ec
         - |
           echo '[health-test] check CubeProxy via ClusterIP Service'
-          curl --connect-timeout 5 --max-time 15 -fsS -o /dev/null \
+          curl --connect-timeout 5 --max-time 15 -sS -o /dev/null \
             "http://{{ include "cube.proxyServiceFQDN" . }}:{{ .Values.cubeProxy.ports.http.containerPort }}/" \
-            || curl --connect-timeout 5 --max-time 15 -k -fsS -o /dev/null \
+            || curl --connect-timeout 5 --max-time 15 -k -sS -o /dev/null \
             "https://{{ include "cube.proxyServiceFQDN" . }}:{{ .Values.cubeProxy.ports.https.containerPort }}/" \
             || { echo "cube-proxy Service unreachable"; exit 1; }
 {{- end }}
