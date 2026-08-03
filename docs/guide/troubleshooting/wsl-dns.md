@@ -142,6 +142,8 @@ Both steps are required — doing only one of them does not survive a restart.
 
 ```bash
 # 1. tell WSL to leave resolv.conf alone
+#    if /etc/wsl.conf already has a [network] section, add the key to that
+#    section instead of appending a second one
 sudo tee -a /etc/wsl.conf >/dev/null <<'EOF'
 
 [network]
@@ -149,6 +151,8 @@ generateResolvConf = false
 EOF
 
 # 2. resolv.conf is usually a symlink into /run, so remove it before writing
+#    223.5.5.5 is only an example upstream; use any resolver reachable on
+#    your network
 sudo rm -f /etc/resolv.conf
 sudo tee /etc/resolv.conf >/dev/null <<'EOF'
 nameserver 169.254.254.53
@@ -156,12 +160,18 @@ nameserver 223.5.5.5
 EOF
 ```
 
-Two details matter here:
+Three details matter here:
 
 - `/etc/resolv.conf` is typically a **symlink** into `/run/...`. Writing
   through the symlink does not persist, so it has to be removed first.
+- If `/etc/wsl.conf` already contains a `[network]` section, put
+  `generateResolvConf = false` inside it rather than appending a second
+  section.
 - Keep an upstream resolver as the second entry. With only the CoreDNS address,
-  `*.cube.app` resolves but general internet resolution breaks.
+  `*.cube.app` resolves but general internet resolution breaks. The installer's
+  own `write_host_resolv_conf` preserves the host's existing upstream
+  automatically; here the file is written by hand, so choose an upstream that
+  works on your network.
 
 The nameserver to write is `169.254.254.53` regardless of which DNS backend
 you are on: it is the dummy-link address that both the `systemd-resolved` and
@@ -172,10 +182,14 @@ loopback address there would be unreachable from inside Docker containers,
 which is exactly the problem the dummy-link address was introduced to solve.)
 You can confirm the live address from the running Corefile.
 
-Verify both directions before moving on:
+Verify both directions before moving on (`dig` comes from `dnsutils` /
+`bind9-dnsutils`, which Ubuntu does not install by default — the `getent`
+checks work without it):
 
 ```bash
 # wildcard sandbox domain must resolve
+getent hosts foo.cube.app
+# or, to query CoreDNS directly: sudo apt-get install -y dnsutils
 dig +short +tcp +timeout=3 foo.cube.app @169.254.254.53
 
 # ordinary resolution must still work

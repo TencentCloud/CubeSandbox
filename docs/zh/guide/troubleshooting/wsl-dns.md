@@ -128,6 +128,8 @@ command -v resolvectl   # 应当输出一个路径
 
 ```bash
 # 1. 让 WSL 不再自动生成 resolv.conf
+#    如果 /etc/wsl.conf 里已经有 [network] 段，请把这个键加进那一段，
+#    不要再追加第二个 [network]
 sudo tee -a /etc/wsl.conf >/dev/null <<'EOF'
 
 [network]
@@ -135,6 +137,7 @@ generateResolvConf = false
 EOF
 
 # 2. resolv.conf 通常是指向 /run 的符号链接，写入前需要先删掉
+#    223.5.5.5 只是示例上游，请换成你的网络里能通的解析器
 sudo rm -f /etc/resolv.conf
 sudo tee /etc/resolv.conf >/dev/null <<'EOF'
 nameserver 169.254.254.53
@@ -142,12 +145,16 @@ nameserver 223.5.5.5
 EOF
 ```
 
-这里有两个细节值得注意：
+这里有三个细节值得注意：
 
 - `/etc/resolv.conf` 一般是指向 `/run/...` 的**符号链接**，
   透过符号链接写入不会保留，因此必须先删除。
+- 如果 `/etc/wsl.conf` 里已经存在 `[network]` 段，请把
+  `generateResolvConf = false` 写进该段，而不是再追加一个 `[network]`。
 - 第二行要保留一个上游解析器。如果只写 CoreDNS 地址，
-  `*.cube.app` 能解析，但普通上网会断。
+  `*.cube.app` 能解析，但普通上网会断。安装器自己的
+  `write_host_resolv_conf` 会自动沿用宿主机原有的上游；这里是手写文件，
+  所以要自己挑一个在当前网络里可用的上游。
 
 要写入的 nameserver 是 `169.254.254.53`，与走哪条 DNS 后端无关：它是
 `systemd-resolved` 与 `dnsmasq` 两条路径都暴露给客户端的 dummy link 地址。
@@ -156,10 +163,13 @@ EOF
 loopback 地址在 Docker 容器内不可达，而这正是引入 dummy link 地址要解决的问题。）
 当前生效的地址可以从运行中的 Corefile 确认。
 
-继续之前先把两个方向都验证一遍：
+继续之前先把两个方向都验证一遍（`dig` 来自 `dnsutils` / `bind9-dnsutils` 包，
+Ubuntu 默认不装 —— 下面的 `getent` 检查不依赖它）：
 
 ```bash
 # 通配沙箱域名必须能解析
+getent hosts foo.cube.app
+# 若想直接问 CoreDNS：sudo apt-get install -y dnsutils
 dig +short +tcp +timeout=3 foo.cube.app @169.254.254.53
 
 # 普通解析也必须正常
