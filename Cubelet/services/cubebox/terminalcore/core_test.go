@@ -579,6 +579,48 @@ func TestAttachmentFinishDoesNotBlockWhenEventChannelIsSaturated(t *testing.T) {
 	require.Equal(t, EventClose, events[len(events)-1].Kind)
 }
 
+func TestClosingOutputOverflowPreservesFinalStatus(t *testing.T) {
+	adapter := newFakeAdapter()
+	core := newTestCore(t, adapter, testConfig())
+	request := openRequest("sandbox-a")
+	attachment, _, err := core.Open(context.Background(), request)
+	require.NoError(t, err)
+
+	// Saturate the transport queue, then simulate stdout arriving after close
+	// has started but before cleanup has delivered the final status.
+	for i := 0; i < cap(attachment.events); i++ {
+		require.True(t, attachment.enqueue(Event{Kind: EventError, Code: "queued"}))
+	}
+	core.mu.Lock()
+	s := core.sessions[request.SessionID]
+	core.mu.Unlock()
+	require.NotNil(t, s)
+	s.mu.Lock()
+	s.state = StateClosing
+	s.closeReason = CloseUserClosed
+	s.mu.Unlock()
+	s.handleOutput([]byte("trailing output"))
+	s.requestClose(CloseUserClosed, nil)
+
+	var events []Event
+	for {
+		event, nextErr := nextEventWithTimeout(attachment, time.Second)
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		require.NoError(t, nextErr)
+		events = append(events, event)
+	}
+	for _, event := range events {
+		require.NotEqual(t, CodeSlowConsumer, event.Code)
+		require.NotEqual(t, EventStdout, event.Kind)
+	}
+	require.GreaterOrEqual(t, len(events), 2)
+	require.Equal(t, EventExit, events[len(events)-2].Kind)
+	require.Equal(t, EventClose, events[len(events)-1].Kind)
+	require.Equal(t, CloseUserClosed, events[len(events)-1].Reason)
+}
+
 func TestResumeReplayFailureDoesNotCommitGeneration(t *testing.T) {
 	config := testConfig()
 	core := &Core{config: config, ctx: context.Background()}

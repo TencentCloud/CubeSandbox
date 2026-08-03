@@ -239,9 +239,11 @@ func (s *session) handleOutput(data []byte) {
 			s.attachment = nil
 		}
 	case StateClosing, StateExited:
-		if s.attachment != nil && !s.attachment.enqueue(Event{Kind: EventStdout, Data: data, Offset: offset}) {
-			detached = s.attachment
-			s.attachment = nil
+		if s.attachment != nil {
+			// Once close has started, cleanup owns the authoritative exit and
+			// close events. Drop excess trailing stdout instead of finishing the
+			// attachment early with SLOW_CONSUMER and hiding that final status.
+			_ = s.attachment.enqueue(Event{Kind: EventStdout, Data: data, Offset: offset})
 		}
 	case StateDetachedGrace:
 		closeForOverflow = s.ring.Start() > s.detachedAt

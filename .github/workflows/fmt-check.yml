@@ -53,7 +53,11 @@ jobs:
       - name: Set up Go for Web Terminal protocol generation
         uses: actions/setup-go@v5
         with:
-          go-version-file: 'CubeMaster/go.mod'
+          go-version-file: tools/terminal-protocol-gen/go.mod
+
+      - name: Test Web Terminal protocol generator
+        shell: bash
+        run: make terminal-protocol-test
 
       - name: Check Web Terminal protocol generation
         shell: bash
