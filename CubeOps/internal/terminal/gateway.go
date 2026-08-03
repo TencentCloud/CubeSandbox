@@ -31,7 +31,10 @@ const (
 	headerTerminalCols      = "X-Cube-Terminal-Cols"
 	headerTerminalRows      = "X-Cube-Terminal-Rows"
 	headerTerminalResume    = "X-Cube-Terminal-Resume-Offset"
-	headerRequestID         = "X-Cube-Request-ID"
+	// CubeMaster reads the relay request ID through its existing X-RequestID
+	// convention. Keep this value aligned across the two independently built
+	// Go modules so terminal correlation survives the WebSocket hop.
+	headerRequestID = "X-RequestID"
 
 	terminalHeartbeatInterval = 30 * time.Second
 	terminalCloseTimeout      = 15 * time.Second
