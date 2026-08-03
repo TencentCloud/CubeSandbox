@@ -168,6 +168,8 @@ type observedMasterHeaders struct {
 	userAuthSet  bool
 }
 
+const cubeMasterRequestIDHeader = "X-RequestID"
+
 func TestGatewayRelaysTypedFramesAndWritesAudit(t *testing.T) {
 	cfg := gatewayTestConfig()
 	grant := gatewayTestGrant("open")
@@ -675,7 +677,9 @@ func observeMasterHeaders(r *http.Request, expectedToken string) observedMasterH
 		cols:         r.Header.Get(headerTerminalCols),
 		rows:         r.Header.Get(headerTerminalRows),
 		resume:       r.Header.Get(headerTerminalResume),
-		requestIDSet: r.Header.Get(headerRequestID) != "",
+		// Keep the assertion independent from the gateway implementation
+		// constant so this test catches a cross-module header drift.
+		requestIDSet: r.Header.Get(cubeMasterRequestIDHeader) != "",
 		userAuthSet:  r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "",
 	}
 }

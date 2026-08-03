@@ -27,7 +27,6 @@ import (
 
 	cubebox "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/terminalprotocol"
 )
 
@@ -141,7 +140,9 @@ func validTerminalHeaders() http.Header {
 	headers.Set(HeaderTerminalCols, "100")
 	headers.Set(HeaderTerminalRows, "40")
 	headers.Set(HeaderTerminalResume, "12")
-	headers.Set(constants.RequestID, "request-a")
+	// Keep the input independent from CubeMaster's implementation constant so
+	// this test catches request-ID header drift with the CubeOps gateway.
+	headers.Set("X-RequestID", "request-a")
 	headers.Set("Sec-WebSocket-Protocol", terminalprotocol.Subprotocol)
 	return headers
 }
