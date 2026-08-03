@@ -173,8 +173,7 @@ func (s *service) receiveTerminalFrames(
 		}
 	}()
 	protocolError := func() {
-		attachment.NotifyError(terminalcore.CodeProtocolError)
-		_ = attachment.Close(terminalcore.CloseProtocolError)
+		attachment.ProtocolError()
 	}
 	for {
 		frame, err := stream.Recv()
