@@ -140,6 +140,26 @@ class CubeSandboxAdapter(SandboxAdapter):
                 return str(raw[key])
         return None
 
+    # ── filesystem metadata ops ────────────────────────────────────────────
+
+    def make_dir(self, path: str, *, user: str = "root") -> None:
+        self._sandbox.files.make_dir(path, user=user)
+
+    def list_dir(self, path: str, *, user: str = "root") -> list[str]:
+        entries = self._sandbox.files.list(path, user=user)
+        return [entry["name"] for entry in entries]
+
+    def file_exists(self, path: str, *, user: str = "root") -> bool:
+        return self._sandbox.files.exists(path, user=user)
+
+    def remove_file(self, path: str, *, user: str = "root") -> None:
+        self._sandbox.files.remove(path, user=user)
+
+    def rename_file(self, old_path: str, new_path: str, *, user: str = "root") -> None:
+        self._sandbox.files.rename(old_path, new_path, user=user)
+
+    # ── lifecycle ──────────────────────────────────────────────────────────
+
     def kill(self) -> None:
         self._sandbox.kill()
 

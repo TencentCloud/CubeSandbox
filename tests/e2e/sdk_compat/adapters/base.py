@@ -69,6 +69,25 @@ class SandboxAdapter(ABC):
     def traffic_access_token(self) -> str | None:
         raise UnsupportedCapability(self.backend, "network_public_access")
 
+    # ── filesystem metadata ops ────────────────────────────────────────────────
+
+    def make_dir(self, path: str, *, user: str = "root") -> None:
+        raise NotImplementedError
+
+    def list_dir(self, path: str, *, user: str = "root") -> list[str]:
+        raise NotImplementedError
+
+    def file_exists(self, path: str, *, user: str = "root") -> bool:
+        raise NotImplementedError
+
+    def remove_file(self, path: str, *, user: str = "root") -> None:
+        raise NotImplementedError
+
+    def rename_file(self, old_path: str, new_path: str, *, user: str = "root") -> None:
+        raise NotImplementedError
+
+    # ── lifecycle ──────────────────────────────────────────────────────────────
+
     @abstractmethod
     def kill(self) -> None:
         raise NotImplementedError
