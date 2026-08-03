@@ -115,28 +115,35 @@ func (s *session) abortOpen(openErr error) {
 func (s *session) activate(process PTYProcess) (*Attachment, Opened, error) {
 	s.mu.Lock()
 	s.process = process
+	var closeReason string
+	closing := false
+	var attachment *Attachment
 	if s.state == StateClosing || s.state == StateExited || s.state == StateClosed {
-		reason := s.closeReason
-		s.mu.Unlock()
-		s.signalOpenDone()
+		closeReason = s.closeReason
+		closing = true
+	} else {
+		s.state = StateActive
+		s.generation = 1
+		attachment = newAttachment(s, s.generation, Opened{
+			SessionID: s.id,
+			ExecID:    s.execID,
+			Target:    s.target.Metadata(),
+		}, s.core.config)
+		s.attachment = attachment
+	}
+	s.mu.Unlock()
+
+	// Cleanup waits for these workers after openDone is signaled. Start them
+	// even when close raced StartPTY so every completion channel is released.
+	s.startPumps()
+	s.signalOpenDone()
+	if closing {
 		<-s.done
-		if reason == CloseSandboxTransition {
+		if closeReason == CloseSandboxTransition {
 			return nil, Opened{}, Errorf(CodeSandboxTransition, "sandbox transitioned while terminal was opening")
 		}
 		return nil, Opened{}, Errorf(CodeSessionLost, "terminal closed while opening")
 	}
-	s.state = StateActive
-	s.generation = 1
-	attachment := newAttachment(s, s.generation, Opened{
-		SessionID: s.id,
-		ExecID:    s.execID,
-		Target:    s.target.Metadata(),
-	}, s.core.config)
-	s.attachment = attachment
-	s.mu.Unlock()
-
-	s.startPumps()
-	s.signalOpenDone()
 	return attachment, attachment.opened, nil
 }
 

@@ -17,10 +17,11 @@ func (s *service) drainTerminalSandbox(ctx context.Context, sandboxID, reason st
 	drainCtx, cancel := context.WithTimeout(ctx, s.terminalDrainTimeout)
 	defer cancel()
 	if err := s.terminal.DrainSandbox(drainCtx, sandboxID, reason); err != nil {
-		// The caller aborts the transition when the drain fails, so the sandbox
-		// is still running and its admission fence must not survive — otherwise
-		// it is permanently blocked from new terminal sessions until a later
-		// successful resume. AllowSandbox is a no-op for a deleted sandbox.
+		// Drain is intentionally destructive: sessions are closed before the
+		// caller knows whether pause/destroy will complete. If the transition
+		// fails, the sandbox remains running but those terminal sessions cannot
+		// be restored; clear only the admission fence so a later attempt can
+		// open fresh sessions. AllowSandbox is a no-op for a deleted sandbox.
 		s.terminal.AllowSandbox(sandboxID)
 		return err
 	}
