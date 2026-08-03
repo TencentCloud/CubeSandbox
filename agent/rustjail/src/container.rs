@@ -1676,6 +1676,20 @@ fn valid_env(e: &str) -> Option<(&str, &str)> {
     Some((key, value))
 }
 
+fn exec_process_error(code: i32, stdout: &[u8], stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    let stdout = String::from_utf8_lossy(stdout);
+    let detail = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    if detail.is_empty() {
+        return format!("exec process exit code:{}", code);
+    }
+    format!("exec process exit code:{}: {}", code, detail)
+}
+
 pub async fn start_exec_process(
     pid: pid_t,
     exec_mnts: Option<&String>,
@@ -1694,17 +1708,13 @@ pub async fn start_exec_process(
     }
     let _lock = WAIT_PID_LOCKER.lock().await;
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("spawn child process failed:{}", e))?;
-
-    let status = child
-        .wait()
-        .map_err(|e| format!("wait child failed:{}", e))?;
-    match status.code() {
+    let output = cmd
+        .output()
+        .map_err(|e| format!("run child process failed:{}", e))?;
+    match output.status.code() {
         Some(code) => {
             if code != 0 {
-                return Err(format!("exec process exit code:{}", code));
+                return Err(exec_process_error(code, &output.stdout, &output.stderr));
             }
         }
         None => {
@@ -1723,6 +1733,23 @@ mod tests {
 
     use nix::unistd::Uid;
     use tempfile::tempdir;
+
+    #[test]
+    fn exec_process_error_includes_stdout_detail() {
+        assert_eq!(
+            exec_process_error(1, b"open /proc/42/ns/mnt failed: ENOENT\n", b""),
+            "exec process exit code:1: open /proc/42/ns/mnt failed: ENOENT"
+        );
+    }
+
+    #[test]
+    fn exec_process_error_prefers_stderr_and_handles_empty_output() {
+        assert_eq!(
+            exec_process_error(2, b"stdout detail", b"stderr detail\n"),
+            "exec process exit code:2: stderr detail"
+        );
+        assert_eq!(exec_process_error(3, b"", b""), "exec process exit code:3");
+    }
     use tokio::process::Command;
 
     use super::*;
