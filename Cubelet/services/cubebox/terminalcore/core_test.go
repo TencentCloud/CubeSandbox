@@ -80,6 +80,54 @@ func TestCleanupEscalatesAndIsIdempotent(t *testing.T) {
 	}, time.Second, time.Millisecond)
 }
 
+func TestOpenCloseRaceStartsCleanupPumps(t *testing.T) {
+	adapter := &blockingStartAdapter{
+		fakeAdapter: newFakeAdapter(),
+		entered:     make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+	config := testConfig()
+	config.CleanupGrace = 5 * time.Millisecond
+	config.CleanupTimeout = 200 * time.Millisecond
+	core := newTestCore(t, adapter, config)
+	// Make cleanup unblock the fake StartPTY before newTestCore closes the core
+	// if the test exits early.
+	t.Cleanup(adapter.unblock)
+
+	request := openRequest("sandbox-a")
+	openErr := make(chan error, 1)
+	go func() {
+		_, _, err := core.Open(context.Background(), request)
+		openErr <- err
+	}()
+	<-adapter.entered
+
+	drainErr := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		drainErr <- core.DrainSandbox(ctx, request.SandboxID, CloseSandboxTransition)
+	}()
+	require.Eventually(t, func() bool {
+		state, ok := core.SessionState(request.SessionID)
+		return ok && state == StateClosing
+	}, time.Second, time.Millisecond)
+
+	adapter.unblock()
+	select {
+	case err := <-openErr:
+		require.Equal(t, CodeSandboxTransition, CodeOf(err))
+	case <-time.After(time.Second):
+		t.Fatal("open did not return after the opening session was drained")
+	}
+	select {
+	case err := <-drainErr:
+		require.NoError(t, err)
+	case <-time.After(config.CleanupTimeout / 2):
+		t.Fatal("drain waited for cleanup workers that were not started")
+	}
+}
+
 func TestDetachedResumeReplayAndGenerationFence(t *testing.T) {
 	ignoreGoroutines := goleak.IgnoreCurrent()
 	adapter := newFakeAdapter()
@@ -203,6 +251,25 @@ func TestLimitsAndDrainFence(t *testing.T) {
 			break
 		}
 	}
+}
+
+func TestResumeHonorsDrainFence(t *testing.T) {
+	adapter := newFakeAdapter()
+	core := newTestCore(t, adapter, testConfig())
+	request := openRequest("sandbox-a")
+	attachment, _, err := core.Open(context.Background(), request)
+	require.NoError(t, err)
+	attachment.Detach()
+
+	core.mu.Lock()
+	core.draining[request.SandboxID] = struct{}{}
+	core.mu.Unlock()
+	resume := request
+	resume.Resume = &ResumeRequest{SessionID: request.SessionID, LastOffset: 0}
+	_, _, err = core.Open(context.Background(), resume)
+	require.Equal(t, CodeSandboxTransition, CodeOf(err))
+
+	core.AllowSandbox(request.SandboxID)
 }
 
 func TestDrainDeliversOutputProducedDuringCleanupGrace(t *testing.T) {
@@ -511,7 +578,7 @@ func TestResumeReplayFailureDoesNotCommitGeneration(t *testing.T) {
 	require.Nil(t, s.attachment)
 }
 
-func newTestCore(t *testing.T, adapter *fakeAdapter, config Config) *Core {
+func newTestCore(t *testing.T, adapter RuntimeAdapter, config Config) *Core {
 	t.Helper()
 	core, err := New(context.Background(), config, adapter, newMemoryJournal())
 	require.NoError(t, err)
@@ -583,6 +650,27 @@ type fakeAdapter struct {
 	specs         []PTYSpec
 	cleaned       []string
 	cleanupErrors map[string]error
+}
+
+type blockingStartAdapter struct {
+	*fakeAdapter
+	entered     chan struct{}
+	release     chan struct{}
+	releaseOnce sync.Once
+}
+
+func (a *blockingStartAdapter) StartPTY(_ context.Context, target Target, spec PTYSpec) (PTYProcess, error) {
+	select {
+	case <-a.entered:
+	default:
+		close(a.entered)
+	}
+	<-a.release
+	return a.fakeAdapter.StartPTY(context.Background(), target, spec)
+}
+
+func (a *blockingStartAdapter) unblock() {
+	a.releaseOnce.Do(func() { close(a.release) })
 }
 
 type blockingRecoveryAdapter struct {

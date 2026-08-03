@@ -166,15 +166,21 @@ func (c *Core) resume(request OpenRequest) (*Attachment, Opened, error) {
 		return nil, Opened{}, Errorf(CodeProtocolError, "resume session id does not match open session id")
 	}
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.closed || c.ctx.Err() != nil {
-		c.mu.Unlock()
 		return nil, Opened{}, Errorf(CodeServerDraining, "terminal core is draining")
 	}
 	s := c.sessions[request.SessionID]
-	c.mu.Unlock()
 	if s == nil {
 		return nil, Opened{}, Errorf(CodeSessionLost, "terminal session is not available")
 	}
+	if _, blocked := c.draining[s.target.Metadata().SandboxID]; blocked {
+		return nil, Opened{}, Errorf(CodeSandboxTransition, "sandbox is transitioning")
+	}
+	// Keep the admission fence check and the state transition under c.mu. This
+	// serializes resume with DrainSandbox: a resume either wins before the
+	// fence is installed or is rejected after it, never reactivating a session
+	// after drain has started.
 	return s.resume(request)
 }
 
