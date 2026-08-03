@@ -153,6 +153,11 @@ func (c *Core) Open(ctx context.Context, request OpenRequest) (*Attachment, Open
 		s.abortOpen(err)
 		return nil, Opened{}, err
 	}
+	if process == nil {
+		err = Errorf(CodeInternal, "runtime adapter returned nil terminal process")
+		s.abortOpen(err)
+		return nil, Opened{}, err
+	}
 
 	attachment, opened, err := s.activate(process)
 	if err != nil {

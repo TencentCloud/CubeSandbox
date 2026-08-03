@@ -688,6 +688,14 @@ func (a *Attachment) NotifyError(code string) {
 	}
 }
 
+// ProtocolError closes the session before trying to enqueue its error event.
+// A saturated attachment must not be detached into reconnect grace for a
+// protocol violation.
+func (a *Attachment) ProtocolError() {
+	_ = a.Close(CloseProtocolError)
+	a.NotifyError(CodeProtocolError)
+}
+
 func (a *Attachment) Close(reason string) error {
 	a.session.mu.Lock()
 	valid := a.session.generation == a.generation && a.session.attachment == a && a.session.state == StateActive

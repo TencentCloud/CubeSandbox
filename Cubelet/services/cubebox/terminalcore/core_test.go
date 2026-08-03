@@ -128,6 +128,19 @@ func TestOpenCloseRaceStartsCleanupPumps(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsNilPTYProcess(t *testing.T) {
+	adapter := &nilProcessAdapter{fakeAdapter: newFakeAdapter()}
+	core := newTestCore(t, adapter, testConfig())
+
+	request := openRequest("sandbox-a")
+	_, _, err := core.Open(context.Background(), request)
+	require.Equal(t, CodeInternal, CodeOf(err))
+	require.Eventually(t, func() bool {
+		_, exists := core.SessionState(request.SessionID)
+		return !exists
+	}, time.Second, time.Millisecond)
+}
+
 func TestDetachedResumeReplayAndGenerationFence(t *testing.T) {
 	ignoreGoroutines := goleak.IgnoreCurrent()
 	adapter := newFakeAdapter()
@@ -270,6 +283,26 @@ func TestResumeHonorsDrainFence(t *testing.T) {
 	require.Equal(t, CodeSandboxTransition, CodeOf(err))
 
 	core.AllowSandbox(request.SandboxID)
+}
+
+func TestProtocolErrorClosesSaturatedAttachment(t *testing.T) {
+	adapter := newFakeAdapter()
+	core := newTestCore(t, adapter, testConfig())
+	request := openRequest("sandbox-a")
+	attachment, _, err := core.Open(context.Background(), request)
+	require.NoError(t, err)
+
+	for i := 0; i < cap(attachment.events); i++ {
+		attachment.events <- Event{Kind: EventError, Code: "queued"}
+	}
+	attachment.ProtocolError()
+	if state, exists := core.SessionState(request.SessionID); exists {
+		require.NotEqual(t, StateDetachedGrace, state)
+	}
+	require.Eventually(t, func() bool {
+		_, exists := core.SessionState(request.SessionID)
+		return !exists
+	}, time.Second, time.Millisecond)
 }
 
 func TestDrainDeliversOutputProducedDuringCleanupGrace(t *testing.T) {
@@ -657,6 +690,12 @@ type blockingStartAdapter struct {
 	entered     chan struct{}
 	release     chan struct{}
 	releaseOnce sync.Once
+}
+
+type nilProcessAdapter struct{ *fakeAdapter }
+
+func (a *nilProcessAdapter) StartPTY(context.Context, Target, PTYSpec) (PTYProcess, error) {
+	return nil, nil
 }
 
 func (a *blockingStartAdapter) StartPTY(_ context.Context, target Target, spec PTYSpec) (PTYProcess, error) {
