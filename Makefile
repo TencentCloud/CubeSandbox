@@ -425,8 +425,11 @@ web-sync-dev-env:
 
 # Run make fmt in each component directory that has a fmt target.
 # Components without formattable code (e.g. CubeProxy) are skipped.
+# Outside the builder, route through builder-run so agent/Makefile's
+# MUSL+SECCOMP parse-time libseccomp.a check does not fail on the host.
 .PHONY: fmt
 fmt:
+ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@printf '  %-8s %s\n' "FMT" "agent"
 	@$(MAKE) -C agent fmt
 	@printf '  %-8s %s\n' "FMT" "cubecow"
@@ -461,3 +464,7 @@ fmt:
 	else \
 		printf '  %-8s %s\n' "SKIP" "web (npm not available)"; \
 	fi
+else
+	@$(MAKE) builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make fmt'
+endif

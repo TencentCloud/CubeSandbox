@@ -135,7 +135,7 @@ jobs:
           set -euo pipefail
           make builder-run \
             BUILDER_IMAGE="${{ steps.builder_image.outputs.image }}" \
-            BUILDER_CMD='make fmt'
+            BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make fmt'
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
