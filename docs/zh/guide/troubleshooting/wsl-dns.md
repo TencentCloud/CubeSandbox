@@ -25,7 +25,7 @@ lang: zh-CN
 `online-install.sh` 会立刻退出：
 
 ```text
-[online-install] ERROR: DNS setup requires resolvectl or NetworkManager.
+[online-install] ERROR: DNS setup requires resolvectl or NetworkManager. resolvectl is provided by the systemd-resolved package: apt install systemd-resolved (or dnf install systemd-resolved).
 ```
 
 退出码是 `3`。此时还没有下载任何东西，也没有修改系统。
@@ -68,7 +68,7 @@ if ! command -v resolvectl >/dev/null 2>&1; then
   if command -v systemctl >/dev/null 2>&1; then
     nm_load_state="$(systemctl show -p LoadState --value NetworkManager 2>/dev/null || true)"
     if [[ "${nm_load_state}" != "loaded" ]]; then
-      echo "[online-install] ERROR: DNS setup requires resolvectl or NetworkManager." >&2
+      echo "[online-install] ERROR: DNS setup requires resolvectl or NetworkManager. resolvectl is provided by the systemd-resolved package: apt install systemd-resolved (or dnf install systemd-resolved)." >&2
       exit 3
     fi
   ...
@@ -81,8 +81,8 @@ if ! command -v resolvectl >/dev/null 2>&1; then
 - WSL 上的 Ubuntu 默认安装**两者都没有**。`systemd-resolved` 没装，
   NetworkManager 也不存在，因此第一个分支就失败了。
 - 报错提示的是**命令名** `resolvectl`，而这个命令是由 **`systemd-resolved` 包**
-  提供的。包名没有出现在报错里，而 `apt install resolvectl` 并不存在，
-  所以下一步该做什么并不明显。
+  提供的—— `apt install resolvectl` 并不存在。现在报错里已经写明了包名，
+  所以这一点只会影响该改动之前的版本。
 
 ### 问题 2：WSL 每次启动都会重写 `/etc/resolv.conf`
 

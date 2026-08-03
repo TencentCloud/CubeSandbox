@@ -292,11 +292,11 @@ EOF
         local nm_load_state
         nm_load_state="$(systemctl show -p LoadState --value NetworkManager 2>/dev/null || true)"
         if [[ "${nm_load_state}" != "loaded" ]]; then
-          echo "[online-install] ERROR: DNS setup requires resolvectl or NetworkManager." >&2
+          echo "[online-install] ERROR: DNS setup requires resolvectl or NetworkManager. resolvectl is provided by the systemd-resolved package: apt install systemd-resolved (or dnf install systemd-resolved)." >&2
           exit 3
         fi
       else
-        echo "[online-install] ERROR: DNS setup requires resolvectl or systemd/NetworkManager." >&2
+        echo "[online-install] ERROR: DNS setup requires resolvectl or systemd/NetworkManager. resolvectl is provided by the systemd-resolved package: apt install systemd-resolved (or dnf install systemd-resolved)." >&2
         exit 3
       fi
 

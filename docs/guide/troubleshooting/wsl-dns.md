@@ -28,7 +28,7 @@ are in [Environment](#environment).
 `online-install.sh` stops immediately with:
 
 ```text
-[online-install] ERROR: DNS setup requires resolvectl or NetworkManager.
+[online-install] ERROR: DNS setup requires resolvectl or NetworkManager. resolvectl is provided by the systemd-resolved package: apt install systemd-resolved (or dnf install systemd-resolved).
 ```
 
 The exit code is `3`. Nothing has been downloaded or changed on the system yet.
@@ -74,7 +74,7 @@ if ! command -v resolvectl >/dev/null 2>&1; then
   if command -v systemctl >/dev/null 2>&1; then
     nm_load_state="$(systemctl show -p LoadState --value NetworkManager 2>/dev/null || true)"
     if [[ "${nm_load_state}" != "loaded" ]]; then
-      echo "[online-install] ERROR: DNS setup requires resolvectl or NetworkManager." >&2
+      echo "[online-install] ERROR: DNS setup requires resolvectl or NetworkManager. resolvectl is provided by the systemd-resolved package: apt install systemd-resolved (or dnf install systemd-resolved)." >&2
       exit 3
     fi
   ...
@@ -87,10 +87,10 @@ stuck on WSL anyway:
 
 - A default Ubuntu-on-WSL install has **neither**. `systemd-resolved` is not
   installed, and NetworkManager is not present, so the first branch fails.
-- The message names the *command* `resolvectl`, but the command is shipped by
-  the **`systemd-resolved` package**. The package name does not appear in the
-  error, and `apt install resolvectl` does not exist, so the next step is not
-  obvious.
+- The message names the *command* `resolvectl`, which is shipped by the
+  **`systemd-resolved` package** — `apt install resolvectl` does not exist. The
+  error now names the package, so this is only a problem on releases that
+  predate that change.
 
 ### Problem 2: WSL rewrites `/etc/resolv.conf` on every start
 
