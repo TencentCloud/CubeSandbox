@@ -457,6 +457,7 @@ type relaySession struct {
 
 	stateMu     sync.Mutex
 	closeReason string
+	errorCode   string
 	exitCode    *int32
 }
 
@@ -646,8 +647,20 @@ func (s *relaySession) pumpMasterToBrowser(ctx context.Context) pumpResult {
 			}
 			var closeErr *websocket.CloseError
 			if errors.As(err, &closeErr) && closeErr.Code == websocket.CloseNormalClosure {
+				if code, auditReason, closeText, ok := s.authoritativeServerClose(); ok {
+					writeCloseControl(s.browser, code, closeText)
+					return pumpResult{err: err, closeReason: auditReason}
+				}
 				writeCloseControl(s.browser, websocket.CloseNormalClosure, "terminal closed")
 				return pumpResult{}
+			}
+			if code, auditReason, closeText, ok := s.authoritativeServerClose(); ok {
+				// CubeMaster may have already forwarded a typed terminal error or
+				// close status before the transport ended without a close frame. Do
+				// not append a contradictory INTERNAL status; preserve the single
+				// authoritative terminal outcome and close the browser accordingly.
+				writeCloseControl(s.browser, code, closeText)
+				return pumpResult{err: err, closeReason: auditReason}
 			}
 			_ = s.writeBrowserStatus("error", "INTERNAL")
 			writeCloseControl(s.browser, websocket.CloseInternalServerErr, "terminal relay failed")
@@ -675,7 +688,9 @@ func (s *relaySession) pumpMasterToBrowser(ctx context.Context) pumpResult {
 		if err := s.writeBrowser(messageType, message); err != nil {
 			writeCloseControl(s.browser, websocket.CloseTryAgainLater, "terminal consumer is slow")
 			_ = s.master.UnderlyingConn().Close()
-			return pumpResult{err: err, closeReason: "SLOW_CONSUMER"}
+			// Closing the upstream transport makes Cubelet detach the PTY. Keep
+			// the audit row resumable so a later grant can reattach to it.
+			return pumpResult{err: err, detached: true}
 		}
 		s.bytesOut.Add(info.StdoutBytes)
 		select {
@@ -723,8 +738,47 @@ func (s *relaySession) observeServerFrame(info ServerFrameInfo) {
 		value := *info.ExitCode
 		s.exitCode = &value
 	}
+	if info.ErrorCode != "" {
+		s.errorCode = info.ErrorCode
+	}
 	if info.CloseReason != "" {
 		s.closeReason = info.CloseReason
+	}
+}
+
+func (s *relaySession) authoritativeServerClose() (code int, auditReason, closeText string, ok bool) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if s.closeReason != "" {
+		return terminalCloseControlCode(s.closeReason), s.closeReason, "terminal closed", true
+	}
+	if s.errorCode != "" {
+		return terminalErrorCloseCode(s.errorCode), s.errorCode, "terminal error", true
+	}
+	return 0, "", "", false
+}
+
+func terminalCloseControlCode(reason string) int {
+	switch reason {
+	case "PROTOCOL_ERROR":
+		return websocket.ClosePolicyViolation
+	case "SLOW_CONSUMER":
+		return websocket.CloseTryAgainLater
+	case "SERVER_DRAINING":
+		return websocket.CloseServiceRestart
+	default:
+		return websocket.CloseNormalClosure
+	}
+}
+
+func terminalErrorCloseCode(code string) int {
+	switch code {
+	case "PROTOCOL_ERROR":
+		return websocket.ClosePolicyViolation
+	case "SLOW_CONSUMER", "SERVER_DRAINING":
+		return terminalCloseControlCode(code)
+	default:
+		return websocket.CloseInternalServerErr
 	}
 }
 
