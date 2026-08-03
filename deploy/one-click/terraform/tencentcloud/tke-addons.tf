@@ -14,6 +14,7 @@ locals {
   ) : var.image_namespace
   cube_master_image = var.cubemaster_image != "" ? var.cubemaster_image : "${local.image_registry}/${local.image_namespace}/cube-master:${var.image_tag}"
   cube_api_image    = var.cubeapi_image != "" ? var.cubeapi_image : "${local.image_registry}/${local.image_namespace}/cube-api:${var.image_tag}"
+  cube_ops_image    = var.cubeops_image != "" ? var.cubeops_image : "${local.image_registry}/${local.image_namespace}/cube-ops:${var.image_tag}"
   cube_proxy_image  = var.cubeproxy_image != "" ? var.cubeproxy_image : "${local.image_registry}/${local.image_namespace}/cube-proxy:${var.image_tag}"
   cube_webui_image  = var.webui_image != "" ? var.webui_image : "${local.image_registry}/${local.image_namespace}/cube-webui:${var.image_tag}"
   cube_lcm_image    = var.cube_lifecycle_manager_image != "" ? var.cube_lifecycle_manager_image : "${local.image_registry}/${local.image_namespace}/cube-lifecycle-manager:${var.image_tag}"
@@ -59,7 +60,12 @@ locals {
           root /usr/share/nginx/html;
           index index.html;
           location ^~ /sandbox/ { proxy_pass __SANDBOX_PROXY_UPSTREAM__; }
-          location /cubeapi/ { proxy_pass __WEB_UI_UPSTREAM__/cubeapi/; }
+          location /opsapi/ { proxy_pass __CUBE_OPS_UPSTREAM__/api/; }
+          location /cubeapi/v1/ {
+            rewrite ^/cubeapi/v1/(.*)$ /api/v1/sdk/$1 break;
+            proxy_pass __CUBE_OPS_UPSTREAM__;
+          }
+          location = /health { proxy_pass __WEB_UI_UPSTREAM__; }
           location / { try_files $uri $uri/ /index.html; }
         }
       }
@@ -70,41 +76,45 @@ locals {
       replace(
         replace(
           replace(
-            fileexists("${path.module}/cubeproxy-nginx.conf") ? file("${path.module}/cubeproxy-nginx.conf") : (
-              fileexists("${path.module}/../../cubeproxy/nginx.conf.template") ? file("${path.module}/../../cubeproxy/nginx.conf.template") : <<-EOF
-                user root;
-                worker_processes auto;
-                error_log /data/log/cube-proxy/error.log notice;
-                daemon off;
-                events { worker_connections 100000; }
-                http {
-                  include mime.types;
-                  default_type application/octet-stream;
-                  server {
-                    listen __CUBE_PROXY_HTTP_PORT__;
-                    server_name _;
-                    location / { return 404; }
+            replace(
+              fileexists("${path.module}/cubeproxy-nginx.conf") ? file("${path.module}/cubeproxy-nginx.conf") : (
+                fileexists("${path.module}/../../cubeproxy/nginx.conf.template") ? file("${path.module}/../../cubeproxy/nginx.conf.template") : <<-EOF
+                  user root;
+                  worker_processes auto;
+                  error_log /data/log/cube-proxy/error.log notice;
+                  daemon off;
+                  events { worker_connections 100000; }
+                  http {
+                    include mime.types;
+                    default_type application/octet-stream;
+                    server {
+                      listen __CUBE_PROXY_HTTP_PORT__;
+                      server_name _;
+                      location / { return 404; }
+                    }
+                    server {
+                      listen __CUBE_PROXY_HTTPS_PORT__ ssl;
+                      server_name _;
+                      ssl_certificate /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_CERT__;
+                      ssl_certificate_key /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_KEY__;
+                      location / { return 404; }
+                    }
+                    server {
+                      listen __CUBE_PROXY_ADMIN_LISTEN__:8082;
+                      server_name _;
+                      location / { return 404; }
+                    }
                   }
-                  server {
-                    listen __CUBE_PROXY_HTTPS_PORT__ ssl;
-                    server_name _;
-                    ssl_certificate /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_CERT__;
-                    ssl_certificate_key /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_KEY__;
-                    location / { return 404; }
-                  }
-                  server {
-                    listen __CUBE_PROXY_ADMIN_LISTEN__:8082;
-                    server_name _;
-                    location / { return 404; }
-                  }
-                }
-              EOF
+                EOF
+              ),
+              "__CUBE_PROXY_HTTP_PORT__",
+              "8081"
             ),
-            "__CUBE_PROXY_HTTP_PORT__",
-            "8081"
+            "__CUBE_PROXY_HTTPS_PORT__",
+            "8080"
           ),
-          "__CUBE_PROXY_HTTPS_PORT__",
-          "8080"
+          "__CUBE_PROXY_GRPC_PORT__",
+          "9090"
         ),
         "__CUBE_PROXY_SSL_CERT__",
         "cube.app+3.pem"
@@ -147,6 +157,8 @@ resource "local_file" "tke_kubeconfig" {
   depends_on = [
     kubernetes_deployment.cube_webui,
     kubernetes_service.cube_webui,
+    kubernetes_deployment.cube_ops,
+    kubernetes_service.cube_ops,
     kubernetes_deployment.cube_lifecycle_manager,
     kubernetes_service.cube_lifecycle_manager,
     kubernetes_deployment.cube_proxy,
@@ -627,6 +639,116 @@ resource "kubernetes_service" "cube_api" {
 }
 
 # ---------------------------------------------------------------
+# cube-ops: Deployment -> ClusterIP Service
+# ---------------------------------------------------------------
+
+resource "kubernetes_deployment" "cube_ops" {
+  count = local.deploy_addons ? 1 : 0
+  metadata {
+    name      = "cube-ops"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+    labels    = { app = "cube-ops" }
+  }
+
+  spec {
+    replicas = var.cube_ops_replicas
+    selector {
+      match_labels = { app = "cube-ops" }
+    }
+    template {
+      metadata {
+        labels = { app = "cube-ops" }
+      }
+      spec {
+        container {
+          name  = "cube-ops"
+          image = local.cube_ops_image
+
+          env {
+            name  = "CUBE_OPS_BIND"
+            value = "0.0.0.0:3010"
+          }
+          env {
+            name  = "CUBE_MASTER_ADDR"
+            value = local.cubemaster_url
+          }
+          env {
+            name  = "CUBE_SANDBOX_MYSQL_HOST"
+            value = tencentcloud_mysql_instance.mysql.intranet_ip
+          }
+          env {
+            name  = "CUBE_SANDBOX_MYSQL_PORT"
+            value = "3306"
+          }
+          env {
+            name  = "CUBE_SANDBOX_MYSQL_USER"
+            value = local.cube_user
+          }
+          env {
+            name  = "CUBE_SANDBOX_MYSQL_PASSWORD"
+            value = local.cube_password
+          }
+          env {
+            name  = "CUBE_SANDBOX_MYSQL_DB"
+            value = local.cube_db
+          }
+          env {
+            name  = "CUBE_API_SANDBOX_DOMAIN"
+            value = "cube.app"
+          }
+          env {
+            name  = "CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK"
+            value = "true"
+          }
+
+          port {
+            name           = "http"
+            container_port = 3010
+            protocol       = "TCP"
+          }
+
+          readiness_probe {
+            http_get {
+              path = "/health"
+              port = 3010
+            }
+            initial_delay_seconds = 5
+            period_seconds        = 5
+          }
+        }
+      }
+    }
+  }
+
+  depends_on = [
+    kubernetes_service.cubemaster,
+    tencentcloud_mysql_privilege.cube,
+  ]
+}
+
+resource "kubernetes_service" "cube_ops" {
+  count = local.deploy_addons ? 1 : 0
+
+  metadata {
+    name      = "cube-ops"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+    labels    = { app = "cube-ops" }
+  }
+
+  spec {
+    type     = "ClusterIP"
+    selector = { app = "cube-ops" }
+
+    port {
+      name        = "http"
+      port        = 3010
+      target_port = 3010
+      protocol    = "TCP"
+    }
+  }
+}
+
+# ---------------------------------------------------------------
 # cube-lifecycle-manager: Secret → Deployment → ClusterIP Service
 # ---------------------------------------------------------------
 
@@ -882,6 +1004,11 @@ resource "kubernetes_deployment" "cube_proxy" {
             protocol       = "TCP"
           }
           port {
+            name           = "grpc"
+            container_port = 9090
+            protocol       = "TCP"
+          }
+          port {
             name           = "http80"
             container_port = 80
             protocol       = "TCP"
@@ -1076,7 +1203,7 @@ resource "kubernetes_deployment" "cube_proxy" {
   }
 }
 
-# cube-proxy CLB Service (public network 80/443)
+# cube-proxy CLB Service (public network 80/443/9090)
 resource "kubernetes_service" "cube_proxy" {
   count = local.deploy_addons ? 1 : 0
   metadata {
@@ -1085,7 +1212,7 @@ resource "kubernetes_service" "cube_proxy" {
     # Public mode: a public CLB billed by traffic (internet-charge-type).
     # Internal mode (default): pin to a VPC-internal subnet for a private VIP.
     annotations = merge({
-      "service.cloud.tencent.com/specify-protocol"        = "{\"80\":{\"protocol\":[\"TCP\"]},\"443\":{\"protocol\":[\"TCP\"]}}"
+      "service.cloud.tencent.com/specify-protocol"        = "{\"80\":{\"protocol\":[\"TCP\"]},\"443\":{\"protocol\":[\"TCP\"]},\"9090\":{\"protocol\":[\"TCP\"]}}"
       "service.cloud.tencent.com/modification-protection" = "false"
       "service.cloud.tencent.com/pass-to-target"          = "true"
       "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.clb.id
@@ -1098,6 +1225,10 @@ resource "kubernetes_service" "cube_proxy" {
   lifecycle {
     # TKE controller-manager injects runtime annotations (e.g. bindedip,
     # loadbalanceId) that would otherwise cause perpetual drift on every plan.
+    # NOTE: because annotations are ignored after create, upgrading an existing
+    # cluster will add Service port 9090 via spec.ports but will NOT refresh
+    # specify-protocol. Operators must manually patch the annotation to include
+    # 9090, or recreate this Service, for CLB to expose plaintext gRPC.
     ignore_changes = [
       metadata[0].annotations,
     ]
@@ -1124,6 +1255,12 @@ resource "kubernetes_service" "cube_proxy" {
       target_port = 8080
       protocol    = "TCP"
     }
+    port {
+      name        = "tcp-grpc-9090"
+      port        = 9090
+      target_port = 9090
+      protocol    = "TCP"
+    }
   }
 }
 
@@ -1139,24 +1276,29 @@ resource "kubernetes_config_map" "cube_webui_nginx_conf" {
     labels    = { app = "cube-webui" }
   }
   data = {
-    # webui/nginx.conf has two upstream placeholders that must both be replaced,
+    # webui/nginx.conf has upstream placeholders that must all be replaced,
     # otherwise nginx rejects the leftover literal with "invalid URL prefix".
     # webui runs inside the cluster, so it reaches the backends over the internal
     # (VPC) network via their Service ClusterIPs instead of the public CLB IPs:
-    #   __WEB_UI_UPSTREAM__        → cube-api   (the /cubeapi/ backend, port 3000)
+    #   __WEB_UI_UPSTREAM__        → cube-ops   (the /health backend, port 3010)
     #   __SANDBOX_PROXY_UPSTREAM__ → cube-proxy (the /sandbox/ backend, port 80)
+    #   __CUBE_OPS_UPSTREAM__      → cube-ops   (the /opsapi/ + SDK backend, port 3010)
     "nginx.conf" = replace(
       replace(
-        local.webui_nginx_conf,
-        "__WEB_UI_UPSTREAM__",
-        "http://${kubernetes_service.cube_api[0].spec[0].cluster_ip}:3000"
+        replace(
+          local.webui_nginx_conf,
+          "__WEB_UI_UPSTREAM__",
+          "http://${kubernetes_service.cube_ops[0].spec[0].cluster_ip}:3010"
+        ),
+        "__SANDBOX_PROXY_UPSTREAM__",
+        "http://${kubernetes_service.cube_proxy[0].spec[0].cluster_ip}"
       ),
-      "__SANDBOX_PROXY_UPSTREAM__",
-      "http://${kubernetes_service.cube_proxy[0].spec[0].cluster_ip}"
+      "__CUBE_OPS_UPSTREAM__",
+      "http://${kubernetes_service.cube_ops[0].spec[0].cluster_ip}:3010"
     )
   }
 
-  depends_on = [kubernetes_service.cube_api, kubernetes_service.cube_proxy]
+  depends_on = [kubernetes_service.cube_ops, kubernetes_service.cube_proxy]
 }
 
 resource "kubernetes_deployment" "cube_webui" {

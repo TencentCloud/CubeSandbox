@@ -391,7 +391,7 @@ jobs:
               || { echo "no GitHub Release found for ${IMAGE_TAG} and no latest release available" >&2; exit 1; }
             echo "Release ${IMAGE_TAG} not found; falling back to latest Release ${KERNEL_RELEASE_TAG} for kernel assets"
           else
-            echo "Release ${IMAGE_TAG} not found and kernel release fallback is disabled (expected after publish_kernel_release_assets)" >&2
+            echo "Release ${IMAGE_TAG} not found and kernel release fallback is disabled (expected after publish_kernel_amd64/arm64)" >&2
             exit 1
           fi
 

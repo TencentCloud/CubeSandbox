@@ -1214,7 +1214,11 @@ fn parse_options(option_list: Vec<String>) -> HashMap<String, String> {
 mod tests {
     use super::*;
     use crate::test_utils::test_utils::TestUserType;
-    use crate::{skip_if_not_root, skip_loop_by_user, skip_loop_if_not_root, skip_loop_if_root};
+    use crate::{
+        skip_if_no_cap, skip_if_not_root, skip_loop_by_user, skip_loop_if_no_cap,
+        skip_loop_if_not_root, skip_loop_if_root,
+    };
+    use capctl::caps::Cap;
     use protocols::agent::FSGroup;
     use std::fs::File;
     use std::fs::OpenOptions;
@@ -1308,6 +1312,12 @@ mod tests {
             let msg = format!("test[{}]: {:?}", i, d);
 
             skip_loop_by_user!(msg, d.test_user);
+            // A successful (non-error) mount needs CAP_SYS_ADMIN, which root
+            // may lack inside a container. Error-path cases don't reach the
+            // syscall, so keep running those.
+            if d.error_contains.is_empty() {
+                skip_loop_if_no_cap!(msg, Cap::SYS_ADMIN);
+            }
 
             let src: PathBuf;
             let dest: PathBuf;
@@ -1377,6 +1387,7 @@ mod tests {
     #[test]
     fn test_remove_mounts() {
         skip_if_not_root!();
+        skip_if_no_cap!(Cap::SYS_ADMIN);
 
         #[derive(Debug)]
         struct TestData<'a> {
@@ -1763,7 +1774,7 @@ mod tests {
     fn test_ensure_destination_file_exists() {
         let dir = tempdir().expect("failed to create tmpdir");
 
-        let mut testfile = dir.into_path();
+        let mut testfile = dir.keep();
         testfile.push("testfile");
 
         let result = ensure_destination_file_exists(&testfile);
@@ -1842,6 +1853,11 @@ mod tests {
             let msg = format!("test[{}]: {:?}", i, d);
 
             skip_loop_by_user!(msg, d.test_user);
+            // A successful mount needs CAP_SYS_ADMIN; error-path cases fail
+            // before the mount syscall, so keep exercising those.
+            if d.error_contains.is_empty() {
+                skip_loop_if_no_cap!(msg, Cap::SYS_ADMIN);
+            }
 
             let drain = slog::Discard;
             let logger = slog::Logger::root(drain, o!());
@@ -1951,6 +1967,11 @@ mod tests {
         for (i, d) in tests.iter().enumerate() {
             let msg = format!("test[{}]: {:?}", i, d);
             skip_loop_by_user!(msg, d.test_user);
+            // A successful mount_to_rootfs needs CAP_SYS_ADMIN; error-path
+            // cases fail before the mount syscall, so keep exercising those.
+            if d.error_contains.is_empty() {
+                skip_loop_if_no_cap!(msg, Cap::SYS_ADMIN);
+            }
 
             let drain = slog::Discard;
             let logger = slog::Logger::root(drain, o!());

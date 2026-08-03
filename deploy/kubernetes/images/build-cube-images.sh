@@ -183,9 +183,9 @@ Examples:
   SOURCE_REF="" IMAGE_TAG=dev $0 cube-shim
   CUBE_KERNEL_VMLINUX=/path/vmlinux CUBE_KERNEL_PVM_VMLINUX=/path/vmlinux-pvm \\
     IMAGE_TAG=dev $0 cube-kernel
-  IMAGE_TAG=v0.5.1 $0 cube-kernel
+  IMAGE_TAG=v0.6.0 $0 cube-kernel
   CUBE_GUEST_IMAGE_DIR=/path/to/cube-image IMAGE_TAG=dev $0 cube-guest
-  IMAGE_TAG=v0.5.1 $0 cube-guest
+  IMAGE_TAG=v0.6.0 $0 cube-guest
   SOURCE_REF="" IMAGE_TAG=dev $0 cube-api
   SOURCE_REF="" IMAGE_TAG=dev $0 cube-ops
 
@@ -1133,8 +1133,9 @@ parse_args "$@"
 need docker
 need tar
 need curl
-need go
 need sha256sum
+# Go is not required on the host: component binaries are compiled inside
+# Dockerfile builder stages. LOCAL_BIN=1 only overlays prebuilt binaries.
 
 DOWNLOAD_DIR="${BUILD_ROOT}/downloads"
 EXTRACT_DIR="${BUILD_ROOT}/extract"

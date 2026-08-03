@@ -124,6 +124,32 @@ not rewritten.
 
 ---
 
+## gRPC Ingress (Plaintext HTTP/2)
+
+CubeProxy also exposes a dedicated listener for sandbox gRPC services. The default port is `9090` and can be changed via `CUBE_PROXY_GRPC_PORT` in one-click deployments.
+
+Clients dial the CubeProxy IP over plaintext HTTP/2 and identify the target sandbox with the gRPC `:authority` pseudo-header, using the same `<container-port>-<sandbox-id>` format as host-based HTTP routing:
+
+```
+<container-port>-<sandbox-id>
+```
+
+For example, to reach sandbox `abc123` on container port `49983` through CubeProxy at `10.0.0.5`:
+
+```
+dial: 10.0.0.5:9090
+:authority: 49983-abc123
+```
+
+This mode is intended for gRPC clients that cannot rely on wildcard DNS or TLS on CubeProxy. It reuses the same Redis-backed routing metadata as host-based HTTP routing.
+
+When a sandbox is created with `network.allow_public_traffic = false`, the same
+`e2b-traffic-access-token` / `cube-traffic-access-token` checks apply on this
+listener too. Pass the token as gRPC metadata (or the equivalent request header)
+on every call; see [Restrict Public Access](./restrict-public-access.md).
+
+---
+
 ## HTTPS Certificate Configuration
 
 CubeProxy serves both **HTTPS (port 443) and HTTP (port 80)** out of the box. The E2B SDK uses HTTPS by default. The one-click install pre-installs a `cube.app` test certificate so you can try HTTPS immediately.

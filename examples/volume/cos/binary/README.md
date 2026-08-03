@@ -16,13 +16,13 @@
 | Step | Content |
 |------|---------|
 | 1 | [../README.md — Prerequisites](../README.md#prerequisites) |
-| 2 | **Cubelet node:** cosfs — [§1](../README.md#1-install-dependencies) |
+| 2 | **Cubelet node:** cosfs + jq — [§1](../README.md#1-install-dependencies) |
 | 3 | **CubeMaster node:** coscmd + jq — [§1](../README.md#1-install-dependencies) |
 | 4 | Deploy [cube-volume-cos.sh](cube-volume-cos.sh) + `volume-cos.conf` — [§2](../README.md#2-install-plugin-and-cos-credentials) |
 | 5 | Configure CubeMaster + Cubelet — [§3–§5](../README.md#3-configure-cubemaster) |
 | 6 | SDK verification — [§6–§7](../README.md#6-prepare-sdk-environment) |
 
-**Dependencies:** [coscmd](https://cloud.tencent.com/document/product/436/6883) on CubeMaster; [cosfs](https://cloud.tencent.com/document/product/436/10976) on Cubelet. No COS Go SDK (see [rpc](../rpc/)). Install: [../README.md §1](../README.md#1-install-dependencies).
+**Dependencies:** [coscmd](https://cloud.tencent.com/document/product/436/10976) + **jq** on CubeMaster; [cosfs](https://cloud.tencent.com/document/product/436/6883) + **jq** on Cubelet. No COS Go SDK (see [rpc](../rpc/)). Install: [../README.md §1](../README.md#1-install-dependencies).
 
 ---
 
@@ -82,6 +82,8 @@ sudo install -m 0755 /tmp/cube-volume-cos.sh "$PREFIX/Cubelet/plugin/cube-volume
 ```
 
 ### 2. Create config file
+
+> For Kubernetes / Terraform deployments, configure `volume-cos.conf` yourself using native cluster mechanisms. The steps below use one-click / bare-metal paths as examples.
 
 Same directory as the plugin binary (one file per node; edit on each host when roles are split):
 
@@ -409,7 +411,7 @@ Volume still exists. `Volume.destroy("<id>")` first, then recreate.
 ## References
 
 - Source: [cube-volume-cos.sh](cube-volume-cos.sh)
-- [cosfs](https://cloud.tencent.com/document/product/436/10976) · [coscmd](https://cloud.tencent.com/document/product/436/6883)
+- [cosfs](https://cloud.tencent.com/document/product/436/6883) · [coscmd](https://cloud.tencent.com/document/product/436/10976)
 - [COS Go SDK](https://cloud.tencent.com/document/product/436/31215) (rpc example)
 - rpc example: [../rpc/](../rpc/)
 - Binary driver: [Cubelet/plugins/volume/binary/driver.go](../../../../Cubelet/plugins/volume/binary/driver.go)

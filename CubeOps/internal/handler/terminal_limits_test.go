@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func TestTerminalTicketLimiterBoundsUsersAndPrunesWindows(t *testing.T) {
+func TestTerminalTicketLimiterBoundsUsersAndPrunesCurrentUserWindow(t *testing.T) {
 	limiter := newTerminalTicketLimiter(2, time.Minute)
 	now := time.Unix(1_000, 0)
 
@@ -25,8 +25,17 @@ func TestTerminalTicketLimiterBoundsUsersAndPrunesWindows(t *testing.T) {
 	if !limiter.allowAt("sam", now.Add(2*time.Minute)) {
 		t.Fatal("ticket request should be allowed after the window expires")
 	}
-	if _, ok := limiter.attempts["other"]; ok {
-		t.Fatal("expired user entries should be pruned")
+	if got := len(limiter.attempts["sam"]); got != 1 {
+		t.Fatalf("current user retained %d attempts after window pruning, want 1", got)
+	}
+	if got := len(limiter.attempts["other"]); got != 1 {
+		t.Fatalf("unrelated user attempts changed on sam's hot path: got %d, want 1", got)
+	}
+	if !limiter.allowAt("other", now.Add(2*time.Minute)) {
+		t.Fatal("other user should be allowed after its window expires")
+	}
+	if got := len(limiter.attempts["other"]); got != 1 {
+		t.Fatalf("other user retained %d attempts after its own window pruning, want 1", got)
 	}
 }
 

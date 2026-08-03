@@ -165,17 +165,12 @@ func hasCapability(cap uintptr) bool {
 	return false
 }
 
-// getFileBlockSize returns the actual on-disk size of a file (as reported by
-// stat(2) st_blocks * 512), which for sparse files is smaller than the apparent
-// length.
-func getFileBlockSize(path string) int64 {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return 0
+// alignUp rounds size up to the nearest multiple of alignment (alignment must be
+// positive). Rounding up never cuts into live data — the extra tail is unused
+// space. Used to satisfy the virtio-pmem 2 MiB backing-file size requirement.
+func alignUp(size, alignment int64) int64 {
+	if alignment <= 0 {
+		return size
 	}
-	stat, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok || stat == nil {
-		return fi.Size() // fallback to apparent size
-	}
-	return stat.Blocks * 512
+	return ((size + alignment - 1) / alignment) * alignment
 }

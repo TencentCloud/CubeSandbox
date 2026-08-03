@@ -475,6 +475,8 @@ export interface components {
         SandboxVolumeMount: {
             name: string;
             path: string;
+            /** CubeSandbox extension: mount this volume read-only for this sandbox attachment. Defaults to false when omitted. */
+            readOnly?: boolean;
         };
         TemplateAliasLookupResponse: {
             public: boolean;

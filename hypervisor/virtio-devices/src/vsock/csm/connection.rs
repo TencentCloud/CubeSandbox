@@ -581,15 +581,9 @@ where
         self.state
     }
 
-    /// Send some raw, untracked, data straight to the underlying connected stream.
-    /// Returns: number of bytes written, or the error describing the write failure.
-    ///
-    /// Warning: this will bypass the connection state machine and write directly to the
-    /// underlying stream. No account of this write is kept, which includes bypassing
-    /// vsock flow control.
-    ///
-    pub fn send_bytes_raw(&mut self, buf: &[u8]) -> Result<usize> {
-        self.stream.write(buf).map_err(Error::StreamWrite)
+    /// Get a mutable reference to the underlying stream.
+    pub fn stream_mut(&mut self) -> &mut S {
+        &mut self.stream
     }
 
     /// Send some raw data (a byte-slice) to the host stream.
@@ -680,12 +674,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use libc::EFD_NONBLOCK;
-    use virtio_queue::QueueOwnedT;
-
     use std::io::{Error as IoError, ErrorKind, Read, Result as IoResult, Write};
     use std::os::unix::io::RawFd;
     use std::time::{Duration, Instant};
+
+    use libc::EFD_NONBLOCK;
+    use virtio_queue::QueueOwnedT;
     use vmm_sys_util::eventfd::EventFd;
 
     use super::super::super::defs::uapi;

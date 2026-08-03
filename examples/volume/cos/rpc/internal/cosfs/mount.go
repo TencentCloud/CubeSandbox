@@ -83,8 +83,17 @@ func (m *Manager) Mount(baseDir, volumeID string) (string, error) {
 		"-odbglevel=info",
 		"-onoxattr",
 	)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := cmd.CombinedOutput()
+	if err != nil {
 		return "", fmt.Errorf("cosfs mount %s: %w: %s", mnt, err, string(out))
+	}
+	// cosfs may exit 0 even when auth fails; require a real mountpoint.
+	mounted, merr := isMountPoint(mnt)
+	if merr != nil {
+		return "", merr
+	}
+	if !mounted {
+		return "", fmt.Errorf("cosfs mount %s: process exited 0 but path is not a mountpoint: %s", mnt, string(out))
 	}
 	return mnt, nil
 }

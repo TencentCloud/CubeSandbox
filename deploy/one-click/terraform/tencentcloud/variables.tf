@@ -272,7 +272,7 @@ variable "use_cfs" {
 variable "image_tag" {
   description = "Shared image tag for the Cube components when per-component image overrides are empty"
   type        = string
-  default     = "v0.5.1"
+  default     = "v0.6.0"
 }
 
 variable "image_registry" {
@@ -290,31 +290,37 @@ variable "image_namespace" {
 variable "cubemaster_image" {
   description = "Full cubemaster image override."
   type        = string
-  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-master:v0.5.1"
+  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-master:v0.6.0"
 }
 
 variable "cubeapi_image" {
   description = "Full cube-api image override."
   type        = string
-  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-api:v0.5.1"
+  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-api:v0.6.0"
+}
+
+variable "cubeops_image" {
+  description = "Full cube-ops image override."
+  type        = string
+  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-ops:v0.6.0"
 }
 
 variable "cubeproxy_image" {
   description = "Full cube-proxy image override."
   type        = string
-  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-proxy:v0.5.1"
+  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-proxy:v0.6.0"
 }
 
 variable "webui_image" {
   description = "Full cube-webui image override."
   type        = string
-  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-webui:v0.5.1"
+  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-webui:v0.6.0"
 }
 
 variable "cube_lifecycle_manager_image" {
   description = "Full cube-lifecycle-manager image override."
   type        = string
-  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager:v0.5.1"
+  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager:v0.6.0"
 }
 # Per-component replica counts. All four default to 1 in env.example / variables.tf
 # and are independently tunable via -var / TF_VAR_* / the TENCENTCLOUD_*_REPLICAS
@@ -346,6 +352,17 @@ variable "cube_api_replicas" {
   validation {
     condition     = var.cube_api_replicas >= 1 && floor(var.cube_api_replicas) == var.cube_api_replicas
     error_message = "cube_api_replicas must be an integer >= 1."
+  }
+}
+
+variable "cube_ops_replicas" {
+  description = "cube-ops Deployment replica count"
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.cube_ops_replicas >= 1 && floor(var.cube_ops_replicas) == var.cube_ops_replicas
+    error_message = "cube_ops_replicas must be an integer >= 1."
   }
 }
 

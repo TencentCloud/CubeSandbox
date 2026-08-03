@@ -4,8 +4,10 @@
 #
 # Single source of truth for the release image tag hard-coded across the
 # one-click deployment surface (terraform defaults, systemd launcher, env
-# examples, CubeEgress Makefile, install docs) and the Helm chart defaults
-# (deploy/kubernetes/chart/values.yaml component image tags).
+# examples, CubeEgress Makefile, install docs), the Helm chart defaults
+# (deploy/kubernetes/chart/values.yaml component image tags and Chart.yaml
+# version / appVersion), and the kubernetes image-build docs / usage examples
+# (IMAGE_TAG= / CUBE_VERSION=).
 #
 # Run it before tagging a release to bump every hard-coded cube-* component
 # image tag to the target version; the release workflow runs it with --check to
@@ -61,12 +63,16 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 cd "${repo_root}"
 
+# Helm Chart.yaml version / appVersion omit the leading "v" (SemVer), while
+# every image tag keeps it. Strip once so bump and --check stay in sync.
+CHART_VERSION="${VERSION#v}"
+
 # transform_file <path> -- print the file with its release image tags rewritten
 # to ${VERSION}, WITHOUT modifying it. Each entry is anchored so it only touches
 # the intended tag and never a go.sum pin, a test fixture, or a changelog entry.
 transform_file() {
 	local f="$1"
-	VER="${VERSION}" perl -pe "$(edit_expr "$f")" "$f"
+	VER="${VERSION}" CHART_VER="${CHART_VERSION}" perl -pe "$(edit_expr "$f")" "$f"
 }
 
 # edit_expr <path> -- the per-file perl expression used by transform_file.
@@ -118,6 +124,23 @@ edit_expr() {
 		# use quoted non-v tags (e.g. "1.28.15", "8.0") and are left alone.
 		echo "s{(^\\s+tag:\\s+)${PERL_SEMVER}}{\$1\$ENV{VER}}"
 		;;
+	deploy/kubernetes/chart/Chart.yaml)
+		# Chart package metadata tracks the release without the leading "v".
+		# Accept quoted or unquoted forms on read. Write version unquoted and
+		# appVersion quoted so Helm treats appVersion as a string, not a float.
+		echo "s{(^version:\\s*)\"?\\d+\\.\\d+\\.\\d+(?:[-.][0-9A-Za-z.]+)?\"?}{\$1\$ENV{CHART_VER}}; s{(^appVersion:\\s*)\"?\\d+\\.\\d+\\.\\d+(?:[-.][0-9A-Za-z.]+)?\"?}{\$1\"\$ENV{CHART_VER}\"}"
+		;;
+	deploy/kubernetes/images/build-cube-images.sh | \
+		deploy/kubernetes/images/README.md | \
+		deploy/kubernetes/chart/README.md | \
+		deploy/one-click/build-guest-image.sh | \
+		docs/guide/kubernetes/faq.md | \
+		docs/zh/guide/kubernetes/faq.md)
+		# Docs / usage examples that hard-code IMAGE_TAG=vX or CUBE_VERSION=vX.
+		# Leave non-semver placeholders alone (e.g. IMAGE_TAG=dev) and do not
+		# touch unrelated tags on the same line (e.g. cube-node:v0.4.0-...).
+		echo "s{((?:IMAGE_TAG|CUBE_VERSION)=)${PERL_SEMVER}}{\$1\$ENV{VER}}g"
+		;;
 	*)
 		echo "error: no edit rule for $1" >&2
 		exit 3
@@ -142,6 +165,13 @@ FILES=(
 	docs/guide/tencentcloud-terraform-deploy.md
 	docs/zh/guide/tencentcloud-terraform-deploy.md
 	deploy/kubernetes/chart/values.yaml
+	deploy/kubernetes/chart/Chart.yaml
+	deploy/kubernetes/images/build-cube-images.sh
+	deploy/kubernetes/images/README.md
+	deploy/kubernetes/chart/README.md
+	deploy/one-click/build-guest-image.sh
+	docs/guide/kubernetes/faq.md
+	docs/zh/guide/kubernetes/faq.md
 )
 
 do_bump() {

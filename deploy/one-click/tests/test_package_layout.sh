@@ -35,6 +35,7 @@ require_file() {
 #    exist in the source tree build-release-bundle.sh assembles the package from.
 test_component_build_inputs_exist() {
   require_file "${ONE_CLICK_DIR}/CubeAPI/Dockerfile" "cube-api Dockerfile"
+  require_file "${ONE_CLICK_DIR}/CubeOps/Dockerfile" "cube-ops Dockerfile"
   require_file "${ONE_CLICK_DIR}/CubeMaster/Dockerfile" "cubemaster Dockerfile"
   require_file "${ONE_CLICK_DIR}/webui/Dockerfile.package" "cube-webui Dockerfile"
   # cube-proxy's build-context (and its Dockerfile) come from the CubeProxy source.
@@ -90,8 +91,8 @@ test_image_names_match() {
   # Guard against a regex that silently matches too few/many lines.
   local built_n
   built_n="$(printf '%s\n' "${built}" | grep -c .)"
-  if [[ "${built_n}" -ne 5 ]]; then
-    fail "expected 5 component images in build_images.sh, found ${built_n}: $(echo "${built}" | tr '\n' ' ')"
+  if [[ "${built_n}" -ne 6 ]]; then
+    fail "expected 6 component images in build_images.sh, found ${built_n}: $(echo "${built}" | tr '\n' ' ')"
   fi
   if [[ "${built}" != "${composed}" ]]; then
     fail "image name drift between build_images.sh and tke-addons.tf:

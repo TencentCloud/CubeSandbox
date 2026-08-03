@@ -405,6 +405,9 @@ generate_cube_proxy_nginx_template() {
 # the backend instead of redirecting to HTTPS, because some upstream clients
 # require plain HTTP. If you need a 301 redirect, override the HTTP server
 # block in your own deployment.
+#
+# The gRPC server block (port __CUBE_PROXY_GRPC_PORT__) is a plaintext HTTP/2
+# listener for sandbox gRPC ingress.
 EOF
 )
 
@@ -414,6 +417,7 @@ EOF
       -e 's|^worker_processes [0-9]\+;|worker_processes auto;|' \
       -e 's|^\(\s*listen \)8081\( reuseport;\)|\1__CUBE_PROXY_HTTP_PORT__\2|' \
       -e 's|^\(\s*listen \)8080\( ssl reuseport;\)|\1__CUBE_PROXY_HTTPS_PORT__\2|' \
+      -e 's|^\(\s*listen \)9090\( http2 reuseport;\)|\1__CUBE_PROXY_GRPC_PORT__\2|' \
       -e 's|^\(\s*set \$host_proxy_port \)8081;|\1__CUBE_PROXY_HTTP_PORT__;|' \
       -e 's|^\(\s*set \$host_proxy_port \)8080;|\1__CUBE_PROXY_HTTPS_PORT__;|' \
       -e 's|^\(\s*listen \)127\.0\.0\.1:8082;|\1__CUBE_PROXY_ADMIN_LISTEN__:8082;|' \
@@ -422,7 +426,7 @@ EOF
       "${src}"
   } > "${dst}"
 
-  for token in __CUBE_PROXY_HTTP_PORT__ __CUBE_PROXY_HTTPS_PORT__ __CUBE_PROXY_ADMIN_LISTEN__ __CUBE_PROXY_SSL_CERT__ __CUBE_PROXY_SSL_KEY__; do
+  for token in __CUBE_PROXY_HTTP_PORT__ __CUBE_PROXY_HTTPS_PORT__ __CUBE_PROXY_GRPC_PORT__ __CUBE_PROXY_ADMIN_LISTEN__ __CUBE_PROXY_SSL_CERT__ __CUBE_PROXY_SSL_KEY__; do
     if ! grep -q -F "${token}" "${dst}"; then
       die "generated nginx.conf.template is missing placeholder ${token}; upstream CubeProxy/nginx.conf may have changed"
     fi
@@ -543,7 +547,10 @@ copy_file "${ROOT_DIR}/configs/single-node/network-agent.yaml" "${PACKAGE_ROOT}/
 copy_dir_contents "${SCRIPT_DIR}/CubeAPI" "${PACKAGE_ROOT}/CubeAPI"
 copy_file "${CORE_BIN_DIR}/cube-api" "${PACKAGE_ROOT}/CubeAPI/bin/cube-api"
 
-# CubeOps binary — admin/ops API (Go), depends on CubeDB via go.mod replace.
+# Lay down the one-click CubeOps package Dockerfile first, then copy the binary
+# on top so terraform/tencentcloud/build_images.sh can build cube-ops from the
+# extracted sandbox-package without the full source tree.
+copy_dir_contents "${SCRIPT_DIR}/CubeOps" "${PACKAGE_ROOT}/CubeOps"
 copy_file "${CORE_BIN_DIR}/cubeops" "${PACKAGE_ROOT}/CubeOps/bin/cubeops"
 
 # Same ordering for CubeMaster so cubemaster/cubemastercli binaries survive the

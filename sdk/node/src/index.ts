@@ -14,7 +14,7 @@ export {
   type LifecycleOptions,
 } from "./sandbox.js";
 
-export { Config, resolveConfig, type ConfigOptions } from "./config.js";
+export { Config, resolveConfig, NEVER_TIMEOUT, type ConfigOptions } from "./config.js";
 
 export {
   Execution,

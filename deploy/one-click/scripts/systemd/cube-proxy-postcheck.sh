@@ -4,6 +4,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 postcheck_port="${CUBE_PROXY_HTTP_PORT:-80}"
+postcheck_grpc_port="${CUBE_PROXY_GRPC_PORT:-9090}"
 postcheck_retries="${CUBE_PROXY_POSTCHECK_RETRIES:-30}"
 postcheck_delay="${CUBE_PROXY_POSTCHECK_DELAY:-2}"
 deprecated_host_port="${CUBE_PROXY_HOST_PORT:-}"
@@ -14,3 +15,5 @@ fi
 
 log "checking cube-proxy HTTP tcp port ${postcheck_port}"
 wait_for_tcp_port "${postcheck_port}" "${postcheck_retries}" "${postcheck_delay}" || die "cube-proxy HTTP tcp port not ready: ${postcheck_port}"
+log "checking cube-proxy gRPC tcp port ${postcheck_grpc_port}"
+wait_for_tcp_port "${postcheck_grpc_port}" "${postcheck_retries}" "${postcheck_delay}" || die "cube-proxy gRPC tcp port not ready: ${postcheck_grpc_port}"

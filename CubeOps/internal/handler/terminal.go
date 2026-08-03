@@ -83,7 +83,6 @@ type TerminalGateway struct {
 	ticketSecret   []byte
 	sandboxDomain  string
 	upgrader       websocket.Upgrader
-	envdHTTP       *http.Client
 	proxyBase      string
 	ticketLimiter  *terminalTicketLimiter
 	sessionLimiter *terminalSessionLimiter
@@ -241,7 +240,7 @@ func (h *TerminalGateway) OpenWebSocket(c *gin.Context) {
 
 	ctx, cancel := context.WithCancel(c.Request.Context())
 	defer cancel()
-	pty := service.NewEnvdPTYClient(h.envdHTTP, h.proxyBase, claims.SandboxID, h.sandboxDomain)
+	pty := service.NewEnvdPTYClient(nil, h.proxyBase, claims.SandboxID, h.sandboxDomain)
 	stream, err := pty.Start(ctx, service.EnvdPTYStartOptions{
 		Rows: claims.Rows,
 		Cols: claims.Cols,

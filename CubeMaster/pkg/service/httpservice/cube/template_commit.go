@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
@@ -53,11 +52,11 @@ func handleSandboxCommitAction(c *gin.Context) {
 		})
 		return
 	}
-	if strings.TrimSpace(req.SandboxID) == "" || req.CreateRequest == nil {
+	if strings.TrimSpace(req.SandboxID) == "" {
 		common.WriteAPI(c, &commitTemplateResponse{
 			Res: &types.Res{Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
-				RetMsg:  "sandbox_id and create_request are required",
+				RetMsg:  "sandbox_id is required",
 			}},
 		})
 		return
@@ -82,17 +81,6 @@ func handleSandboxCommitAction(c *gin.Context) {
 		})
 		return
 	}
-	if req.CreateRequest.Request == nil {
-		req.CreateRequest.Request = &types.Request{RequestID: req.RequestID}
-	}
-	if req.CreateRequest.RequestID == "" {
-		req.CreateRequest.RequestID = req.RequestID
-	}
-	if req.CreateRequest.Annotations == nil {
-		req.CreateRequest.Annotations = map[string]string{}
-	}
-	req.CreateRequest.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = req.TemplateID
-
 	hostIP := ""
 	if cache := localcache.GetSandboxCache(req.SandboxID); cache != nil {
 		hostIP = cache.HostIP
@@ -140,14 +128,15 @@ func handleSandboxCommitAction(c *gin.Context) {
 		"SandboxID":   req.SandboxID,
 		"SandboxHost": hostIP,
 	}))
-	job, err := templatecenter.SubmitTemplateCommit(ctx, req.SandboxID, hostID, hostIP, req.CreateRequest)
+	job, err := templatecenter.SubmitTemplateCommit(ctx, req.RequestID, req.SandboxID, hostID, hostIP, req.TemplateID, req.CreateRequest)
 	if err != nil {
 		code := commitTemplateErrorCode(err)
+		log.G(ctx).Errorf("submit template commit failed: %v", err)
 		rt.RetCode = int64(code)
 		common.WriteAPI(c, &commitTemplateResponse{
 			Res: &types.Res{
 				RequestID: req.RequestID,
-				Ret:       &types.Ret{RetCode: code, RetMsg: err.Error()},
+				Ret:       &types.Ret{RetCode: code, RetMsg: commitTemplateErrorMessage(err)},
 			},
 			TemplateID: req.TemplateID,
 		})
@@ -171,10 +160,29 @@ func commitTemplateErrorCode(err error) int {
 		errors.Is(err, templatecenter.ErrDuplicateTemplate),
 		errors.Is(err, templatecenter.ErrTemplateAttemptInProgress):
 		return int(errorcode.ErrorCode_MasterParamsError)
+	case errors.Is(err, templatecenter.ErrTemplateNotFound):
+		return int(errorcode.ErrorCode_NotFound)
 	case errors.Is(err, templatecenter.ErrTemplateStoreNotInitialized):
 		return int(errorcode.ErrorCode_DBError)
 	default:
 		return int(errorcode.ErrorCode_MasterInternalError)
+	}
+}
+
+func commitTemplateErrorMessage(err error) string {
+	switch {
+	case errors.Is(err, templatecenter.ErrTemplateIDRequired):
+		return templatecenter.ErrTemplateIDRequired.Error()
+	case errors.Is(err, templatecenter.ErrDuplicateTemplate):
+		return templatecenter.ErrDuplicateTemplate.Error()
+	case errors.Is(err, templatecenter.ErrTemplateAttemptInProgress):
+		return templatecenter.ErrTemplateAttemptInProgress.Error()
+	case errors.Is(err, templatecenter.ErrTemplateNotFound):
+		return templatecenter.ErrTemplateNotFound.Error()
+	case errors.Is(err, templatecenter.ErrTemplateStoreNotInitialized):
+		return "template service is unavailable"
+	default:
+		return "failed to submit template commit"
 	}
 }
 

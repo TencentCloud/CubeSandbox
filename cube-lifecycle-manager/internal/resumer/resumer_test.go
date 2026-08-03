@@ -128,6 +128,22 @@ func (f *fakePush) DeleteMeta(_ context.Context, sid string) error {
 	return nil
 }
 
+// pollUntil polls cond every 10ms until it returns true or timeout elapses,
+// reporting whether it succeeded. Used to wait on the asynchronous proxy push
+// (see doResume's `go r.pushRunningState`) without racing the goroutine.
+func pollUntil(timeout time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if cond() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func newTestResumer(reg *registry.Registry, store *fakeStore, master *fakeMaster, push *fakePush) *Resumer {
 	return New(Options{
 		Registry:     reg,
@@ -230,11 +246,17 @@ func TestResumer_AutoResumeFalseAllowedWhenAlreadyRunning(t *testing.T) {
 	}
 	// Success bookkeeping still re-asserts running into the proxy dict so
 	// the local cache converges even if the initial push missed the mark.
-	push.mu.Lock()
-	pushed := append([]string(nil), push.pushed...)
-	push.mu.Unlock()
-	if len(pushed) != 1 || pushed[0] != "running" {
-		t.Fatalf("proxy push should re-assert running, got %+v", pushed)
+	// The push is performed asynchronously (see pushRunningState), so poll
+	// until the background goroutine records it.
+	if !pollUntil(2*time.Second, func() bool {
+		push.mu.Lock()
+		defer push.mu.Unlock()
+		return len(push.pushed) == 1 && push.pushed[0] == "running"
+	}) {
+		push.mu.Lock()
+		got := append([]string(nil), push.pushed...)
+		push.mu.Unlock()
+		t.Fatalf("proxy push should re-assert running, got %+v", got)
 	}
 }
 
@@ -405,21 +427,19 @@ func TestResumer_RunningStatePushRetriesAsynchronously(t *testing.T) {
 				t.Fatalf("resume failed: %v", err)
 			}
 
-			deadline := time.Now().Add(2 * time.Second)
-			for time.Now().Before(deadline) {
+			if !pollUntil(2*time.Second, func() bool {
 				push.mu.Lock()
-				calls := push.setCalls
-				got := len(push.pushed)
-				push.mu.Unlock()
-				if calls == tt.wantCalls {
-					if got != tt.wantPushes {
-						t.Fatalf("got %d successful pushes, want %d", got, tt.wantPushes)
-					}
-					return
-				}
-				time.Sleep(10 * time.Millisecond)
+				defer push.mu.Unlock()
+				return push.setCalls == tt.wantCalls
+			}) {
+				t.Fatalf("timed out waiting for %d calls", tt.wantCalls)
 			}
-			t.Fatalf("timed out waiting for %d calls", tt.wantCalls)
+			push.mu.Lock()
+			got := len(push.pushed)
+			push.mu.Unlock()
+			if got != tt.wantPushes {
+				t.Fatalf("got %d successful pushes, want %d", got, tt.wantPushes)
+			}
 		})
 	}
 }

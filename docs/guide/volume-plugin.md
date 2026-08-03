@@ -17,6 +17,7 @@ CubeSandbox is gradually adopting e2b Volume compatibility to provide persistent
 > | SDK `Volume.create` / `connect` / `list` / `get_info` / `destroy` | ✅ Supported (SDK ≥ 0.6.0) |
 > | SDK `Sandbox.create(volume_mounts={path: volume})` | ✅ Supported (e2b dict mapping) |
 > | One volume mounted by multiple sandboxes | ✅ Supported |
+> | Per-sandbox read-only attachment | ✅ Cube SDK extension (`VolumeMount(..., read_only=True)`); the official e2b SDK itself has no read-only mount option |
 > | Omit `driver` on create (e2b default) | ✅ Supported |
 
 > **e2b API vs SDK**
@@ -372,6 +373,7 @@ Examples below use **Python SDK `cubesandbox` ≥ 0.6.0**. CubeAPI exposes e2b-c
 | Official e2b Python SDK | ❌ No | Hardcoded to e2b.cloud; **do not use** with CubeSandbox |
 | `cubesandbox` Python SDK | ✅ Yes | `Volume`, `Sandbox.create(volume_mounts={path: volume})` (e2b dict) |
 | Omit `driver` on create | ✅ Yes | CubeMaster uses the **first** `volume_plugins` entry |
+| Per-sandbox read-only attachment | ❌ No | The official e2b SDK itself has no read-only Volume mount option; Cube SDK adds `VolumeMount(volume, read_only=True)` |
 
 For a full COS plugin walkthrough, see [`examples/volume/cos/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.md).
 
@@ -439,9 +441,33 @@ Volume.destroy(vol.volume_id)  # returns True; False when already gone (idempote
 | `Volume.destroy(volume_id)` | e2b-compatible delete; `True` on success, `False` on 404 (idempotent) |
 | `Volume.delete(...)` | Backward-compat alias for `destroy` (prefer `destroy`) |
 | `driver` | Optional plugin name; **e2b compatible usage omits it** — SDK sends no field, CubeMaster uses the **first** entry in `volume_plugins` |
-| `volume_mounts` | e2b dict `{mount_path: Volume \| volume_id \| name}` — key is path inside sandbox, value is a `Volume` instance or volume ID string |
+| `volume_mounts` | e2b dict `{mount_path: Volume \| volume_id \| name}` — key is path inside sandbox, value is a `Volume` instance or volume ID string; Cube SDK can additionally wrap the value with `VolumeMount(..., read_only=True)` for a read-only attachment |
 
 `driver` is stored in `t_cube_volume` and forwarded to Cubelet via annotations — `volume_plugins[].name` must match on both CubeMaster and Cubelet.
+
+### Per-sandbox access mode
+
+The e2b-compatible mapping remains the default and creates a read-write attachment. CubeSandbox extends the mapping value with `VolumeMount`, allowing each sandbox to choose its own access mode for the same persistent Volume:
+
+```python
+from cubesandbox import Sandbox, Volume, VolumeMount
+
+dataset = Volume.create("shared-dataset")
+
+# This sandbox may update the Volume.
+writer = Sandbox.create(
+    volume_mounts={"/dataset": dataset},
+)
+
+# The same Volume is protected from mutations in this sandbox.
+reader = Sandbox.create(
+    volume_mounts={"/dataset": VolumeMount(dataset, read_only=True)},
+)
+```
+
+The official e2b SDK's Volume mount API has no read-only option; this is not a CubeSandbox compatibility limitation. Cube SDK and REST clients can opt into the Cube extension `volumeMounts[].readOnly: true`, while existing e2b-shaped requests omit `readOnly` and keep their original read-write behavior.
+
+Read-only is an **attachment property**, not a property of the Volume itself. The reader cannot create, modify, rename, or delete files through its mount, but it can observe changes made through another read-write attachment. It is not an immutable snapshot. A sandbox may currently attach a given Volume only once; mounting the same Volume twice in one sandbox remains rejected.
 
 ### Multiple Sandboxes Sharing One Volume
 
@@ -610,6 +636,18 @@ For COS-specific manual tests, see [`examples/volume/cos/README.md`](https://git
 | `volume not found` | `volumeMounts[].name` ≠ existing `volume_id` | Use `volume_id` from `Volume.create` (or pass the `Volume` instance in `volume_mounts`) |
 | FUSE OK but invisible in sandbox | Mount in host mntns, not Cubelet mntns | Let Cubelet fork the plugin |
 | Detach leak after attach | Unmount shared FUSE when `ref_count > 0` | Follow RefCount semantics |
+
+## Compatibility Notes
+
+Volume requires **both** CubeMaster and Cubelet to be on a release that supports the Volume Plugin. During a rolling upgrade:
+
+| CubeMaster | Cubelet | Volume create / delete | Sandbox `volumeMounts` |
+|---|---|---|---|
+| New | New | Supported | Supported |
+| New | Old (e.g. v0.5.x) | Supported | No-op (create must not fail; the volume is not mounted) |
+| Old (e.g. v0.5.x) | New / old | Unsupported | Unsupported; do not send `volumeMounts` — plain create is unaffected |
+
+Do not assume mounts succeed on old nodes; schedule onto an upgraded Cubelet when you need mount behavior.
 
 ---
 

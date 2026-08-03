@@ -59,6 +59,11 @@ cubemastercli tpl create-from-image \
 
 将生成的 template ID 设置为 `CUBE_TEMPLATE_ID`。
 
+`cases/network/test_mask_request_host.py` 会额外临时创建一个也暴露 `8765`
+端口的模板（在 `CUBE_PROXY_NODE_IP=127.0.0.1` 走跨节点映射路径时需要）。
+可用 `SDK_E2E_MASK_HOST_TEMPLATE_IMAGE` 或 `CUBE_TEMPLATE_E2E_IMAGE` 覆盖镜像。
+整套 suite 的 preflight 仍需要一个已 READY 的 `CUBE_TEMPLATE_ID`。
+
 ## 快速开始
 
 ```bash
@@ -339,9 +344,10 @@ tests/e2e/sdk_compat/
 - `cases/concurrency/`：同时运行多个 sandbox 时的数据隔离；
 - `cases/host-mount/`：宿主目录挂载扩展——happy path，以及创建时校验、
   运行期 bind-mount 失败和跨 sandbox 共享等边界用例。
-- `cases/volume/`：Volume Plugin CRUD 与 sandbox `volumeMounts` 绑定/解绑
-  （需 `SDK_E2E_VOLUME_PLUGIN=true`；仅 CubeSandbox）。插件需手动部署并配置，
-  且要求 `cubesandbox` >= 0.6.0。
+- `cases/volume/`：Volume Plugin CRUD、sandbox `volumeMounts` 绑定/解绑，以及每个沙箱挂载点的只读约束（需 `SDK_E2E_VOLUME_PLUGIN=true`；仅 CubeSandbox）。插件需手动部署并配置，且要求 `cubesandbox` >= 0.6.0。
+- `cases/auth/`：`CUBE_API_KEY` 简单密钥鉴权，针对 CubeAPI 控制面——
+  `X-API-Key`/`Bearer` 通过、错误/缺失返回 401、`/health` 豁免（仅 CubeSandbox）。
+  仅当服务端以 `CUBE_API_KEY` 启动且 runner 导出相同 key 时才运行，否则跳过。
 
 新增测试应保持后端无关，通过 capability marker 表达后端差异。
 
@@ -367,6 +373,8 @@ Capability marker：
   协调，未设置 `SDK_E2E_PLATFORM_LIFECYCLE=true` 时跳过；
 - `@pytest.mark.volume`：Volume Plugin 用例，未设置
   `SDK_E2E_VOLUME_PLUGIN=true` 时跳过。
+- `@pytest.mark.auth`：`CUBE_API_KEY` 简单密钥鉴权用例，未为 runner 设置
+  `CUBE_API_KEY` 或后端不支持 `auth_simple_key`（仅 CubeSandbox）时跳过。
 
 常用 capability 有 `lifecycle`、`commands`、`filesystem`、`run_code`。
 可选共享 capability 包括 `pause_resume`、`network_allow_deny`、

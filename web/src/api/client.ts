@@ -32,6 +32,26 @@ export interface SandboxDetail extends SandboxDetailDto {
   containers?: SandboxContainer[] | null;
 }
 
+function isOptionalString(value: unknown): value is string | null | undefined {
+  return value === undefined || value === null || typeof value === 'string';
+}
+
+function isSandboxContainer(value: unknown): value is SandboxContainer {
+  if (typeof value !== 'object' || value === null) return false;
+
+  const container = value as Record<string, unknown>;
+  return (
+    typeof container.containerID === 'string' &&
+    (container.state === 'running' ||
+      container.state === 'paused' ||
+      container.state === 'pausing') &&
+    isOptionalString(container.name) &&
+    isOptionalString(container.image) &&
+    isOptionalString(container.kind) &&
+    isOptionalString(container.startedAt)
+  );
+}
+
 export interface TerminalTicketRequest {
   containerID?: string;
   rows?: number;
@@ -141,7 +161,12 @@ function mapSandbox(dto: ListedSandboxDto): RunningSandbox {
 }
 
 function mapSandboxDetail(dto: SandboxDetailDto): SandboxDetail {
-  return dto as SandboxDetail;
+  const containers: unknown = 'containers' in dto ? dto.containers : undefined;
+  return {
+    ...dto,
+    containers:
+      Array.isArray(containers) && containers.every(isSandboxContainer) ? containers : null,
+  };
 }
 
 function mapTemplateSummary(dto: TemplateSummaryDto): TemplateSummary {

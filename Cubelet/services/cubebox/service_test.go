@@ -16,9 +16,40 @@ import (
 	"github.com/stretchr/testify/require"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
+	imagesv1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 )
+
+func TestToGRPCContainerIncludesVolumeMounts(t *testing.T) {
+	container := &cubeboxstore.Container{
+		Metadata: cubeboxstore.Metadata{
+			ID:     "ctr-1",
+			Labels: map[string]string{},
+			Config: &cubeboxv1.ContainerConfig{
+				Image: &imagesv1.ImageSpec{Image: "img"},
+				Resources: &cubeboxv1.Resource{
+					Cpu: "100m",
+					Mem: "128Mi",
+				},
+				VolumeMounts: []*cubeboxv1.VolumeMounts{{
+					Name:          "hostdir-0",
+					ContainerPath: "/mnt/data",
+					HostPath:      "/tmp/data",
+					Readonly:      true,
+				}},
+			},
+		},
+		Status: cubeboxstore.StoreStatus(cubeboxstore.Status{StartedAt: time.Now().UnixNano()}),
+	}
+
+	got := toGRPCContainer(container)
+	require.Len(t, got.GetVolumeMounts(), 1)
+	assert.Equal(t, "hostdir-0", got.GetVolumeMounts()[0].GetName())
+	assert.Equal(t, "/mnt/data", got.GetVolumeMounts()[0].GetContainerPath())
+	assert.Equal(t, "/tmp/data", got.GetVolumeMounts()[0].GetHostPath())
+	assert.True(t, got.GetVolumeMounts()[0].GetReadonly())
+}
 
 func TestDeadline(t *testing.T) {
 	expected := time.Duration(10) * time.Second

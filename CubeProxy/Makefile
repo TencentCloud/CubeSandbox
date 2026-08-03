@@ -1,4 +1,4 @@
-IMAGE_TAG           ?= v0.5.1
+IMAGE_TAG           ?= v0.6.0
 IMAGE_LOCAL         := cube-proxy
 CUBE_VERSION        ?= $(IMAGE_TAG)
 CUBE_COMMIT         ?= $(shell git rev-parse HEAD | cut -c1-8)
@@ -45,6 +45,7 @@ build:
 .PHONY: test
 test:
 	bash tests/test_start.sh
+	bash tests/test_admin_access_log.sh
 
 # Push the architecture-specific image to all registries.
 # Run `make push` on an amd64 host, then again on an arm64 host, then

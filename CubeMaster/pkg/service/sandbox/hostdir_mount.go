@@ -97,6 +97,7 @@ func injectHostDirMounts(ctx context.Context, req *types.CreateCubeSandboxReq) e
 		vm = append(vm, &cubeboxv1.VolumeMounts{
 			Name:          name,
 			ContainerPath: o.MountPath,
+			HostPath:      o.HostPath,
 			Readonly:      o.ReadOnly,
 		})
 		log.G(ctx).Infof("[hostdir] injected VolumeMount %q containerPath=%s readOnly=%v", name, o.MountPath, o.ReadOnly)

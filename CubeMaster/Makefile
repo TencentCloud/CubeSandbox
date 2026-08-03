@@ -99,8 +99,7 @@ test:
 	$(Q)go clean -testcache
 	$(Q)mkdir -p coverage
 	@( for pkg in ${COVERAGE_PACKAGES}; do \
-		if [ -f "$(ROOT_DIR)/test/conf.yaml" ]; then export CUBE_MASTER_CONFIG_PATH="$(ROOT_DIR)/test/conf.yaml"; fi; \
-		CI=true && go test -v -timeout=20m ${TEST_FLAGS} \
+		CI=true go test -short -v -timeout=20m ${TEST_FLAGS} \
 			-coverprofile=coverage/unit-test-`echo $$pkg | tr "/" "_"`.cov \
 			$$pkg || exit 1 ;\
 	done )
@@ -141,4 +140,3 @@ push-image-dev:
 
 push-image-release:
 	$(call push-images,release)
-

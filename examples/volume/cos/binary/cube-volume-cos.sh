@@ -148,14 +148,30 @@ coscmd_run() {
     coscmd "$@"
 }
 
+# coscmd sometimes exits 0 while printing an XML/JSON error body. Treat those
+# as failure so Create does not report success when COS rejected the upload.
+coscmd_output_indicates_failure() {
+    printf '%s' "$1" | grep -qiE \
+        '<Error>|InvalidAccessKeyId|AccessDenied|AccessDeniedError|Upload file failed|SignatureDoesNotMatch|NoSuchBucket|403 Forbidden'
+}
+
 # Upload a tiny .keep file so the volume folder exists in COS before first mount.
+# Propagates coscmd failures (exit code and soft-fail stdout/stderr) to the caller.
 cos_create_dir() {
     local volume_id="$1"
     log "coscmd: create $(cos_subdir "$volume_id")/.keep"
-    local tmpfile
+    local tmpfile out rc=0
     tmpfile="$(mktemp)"
-    coscmd_run upload "$tmpfile" "$(cos_subdir "$volume_id")/.keep"
+    set +e
+    out="$(coscmd_run upload "$tmpfile" "$(cos_subdir "$volume_id")/.keep" 2>&1)"
+    rc=$?
+    set -e
     rm -f "$tmpfile"
+    if [[ "$rc" -ne 0 ]] || coscmd_output_indicates_failure "$out"; then
+        log "ERROR: coscmd create failed for ${volume_id}: ${out}"
+        return 1
+    fi
+    return 0
 }
 
 # Recursively delete the volume folder from COS (destroy hook).
@@ -200,13 +216,23 @@ cosfs_mount_volume() {
 
     mkdir -p "$mnt"
     log "cosfs: mounting ${BUCKET}:/$(cos_subdir "$volume_id") -> ${mnt}"
-    cosfs "${BUCKET}:/$(cos_subdir "$volume_id")" "$mnt" \
+    local out rc=0
+    set +e
+    out="$(cosfs "${BUCKET}:/$(cos_subdir "$volume_id")" "$mnt" \
         "-ourl=${endpoint}"            \
         "-opasswd_file=${PASSWD_FILE}" \
         "-oallow_other"                \
         "-ononempty"                   \
         "-odbglevel=info"              \
-        "-onoxattr"
+        "-onoxattr" 2>&1)"
+    rc=$?
+    set -e
+    # cosfs may exit 0 even when auth fails; require a real mountpoint.
+    if [[ "$rc" -ne 0 ]] || ! mountpoint -q "$mnt" 2>/dev/null; then
+        log "ERROR: cosfs mount failed for ${volume_id}: ${out}"
+        rmdir "$mnt" 2>/dev/null || true
+        return 1
+    fi
     log "cosfs: mounted ok"
 }
 

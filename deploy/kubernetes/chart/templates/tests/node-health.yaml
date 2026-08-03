@@ -61,20 +61,27 @@ spec:
             *) api_base="http://${api_endpoint}" ;;
           esac
           curl --connect-timeout 5 --max-time 15 -fsS "${api_base%/}/health"
-
-          {{- if .Values.cubeNode.enabled }}
-          echo '[health-test] check node registration'
-          nodes_json="$(curl --connect-timeout 5 --max-time 15 -fsS "${api_base%/}/cubeapi/v1/nodes")"
-          printf '%s\n' "${nodes_json}"
-          healthy_nodes="$(printf '%s\n' "${nodes_json}" | grep -o '"healthy"[[:space:]]*:[[:space:]]*true' | wc -l | tr -d ' ')"
-          node_ids="$(printf '%s\n' "${nodes_json}" | grep -o '"nodeID"[[:space:]]*:' | wc -l | tr -d ' ')"
-          test "${healthy_nodes}" -ge 1
-          test "${node_ids}" -ge 1
-          {{- else }}
-          echo '[health-test] skip node registration: cubeNode.enabled=false'
-          {{- end }}
           {{- else }}
           echo '[health-test] skip CubeAPI: no internal API and externalControlPlane.apiEndpoint is empty'
+          {{- end }}
+
+          {{- if and .Values.cubeNode.enabled (or $internalMaster .Values.externalControlPlane.enabled) }}
+          echo '[health-test] check node registration via CubeMaster'
+          master_endpoint={{ include "cube.masterEndpoint" . | quote }}
+          case "${master_endpoint}" in
+            http://*|https://*) master_base="${master_endpoint}" ;;
+            *) master_base="http://${master_endpoint}" ;;
+          esac
+          nodes_json="$(curl --connect-timeout 5 --max-time 15 -fsS "${master_base%/}/internal/meta/nodes")"
+          printf '%s\n' "${nodes_json}"
+          healthy_nodes="$(printf '%s\n' "${nodes_json}" | grep -o '"healthy"[[:space:]]*:[[:space:]]*true' | wc -l | tr -d ' ')"
+          node_ids="$(printf '%s\n' "${nodes_json}" | grep -o '"node_id"[[:space:]]*:' | wc -l | tr -d ' ')"
+          test "${healthy_nodes}" -ge 1
+          test "${node_ids}" -ge 1
+          {{- else if .Values.cubeNode.enabled }}
+          echo '[health-test] skip node registration: no internal or external CubeMaster'
+          {{- else }}
+          echo '[health-test] skip node registration: cubeNode.enabled=false'
           {{- end }}
 
           {{- if and .Values.webui.enabled $internalOps }}
@@ -115,8 +122,6 @@ spec:
           echo "${container_names}" | grep -qxF 'cube-egress-net'
           {{- end }}
 {{ if eq (include "cube.cubemastercliEnabled" .) "true" }}
-{{- $images := default dict .Values.images -}}
-{{- $cubemastercliImage := default (dict "repository" "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cubemastercli" "tag" "v0.5.1" "pullPolicy" "Always") (get $images "cubemastercli") -}}
 ---
 apiVersion: v1
 kind: Pod
@@ -136,8 +141,8 @@ spec:
   {{- end }}
   containers:
     - name: cubemastercli
-      image: {{ include "cube.cubeImage" (dict "image" $cubemastercliImage "context" $) | quote }}
-      imagePullPolicy: {{ dig "pullPolicy" "Always" $cubemastercliImage }}
+      image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubemastercli "context" $) | quote }}
+      imagePullPolicy: {{ .Values.images.cubemastercli.pullPolicy }}
       env:
         {{- include "cube.timezoneEnv" . | nindent 8 }}
         - name: CUBE_RELEASE
@@ -189,7 +194,7 @@ spec:
         - -ec
         - |
           echo '[health-test] check MySQL'
-          mysqladmin ping -h {{ include "cube.mysqlHost" . | quote }} -P {{ .Values.mysql.port }} -u{{ .Values.mysql.user | quote }} --silent
+          mysqladmin ping -h {{ include "cube.dbHost" . | quote }} -P {{ include "cube.dbPort" . }} -u{{ include "cube.dbUser" . | quote }} --silent
 {{- end }}
 {{ if eq (include "cube.redisBuiltinEnabled" .) "true" }}
 ---

@@ -84,6 +84,10 @@ keeps all existing callers working unchanged.
 | Default — publicly reachable | omit `network`, or `allow_public_traffic=True` | `None` | accepts every request |
 | Lock down | `network={"allow_public_traffic": False}` | opaque token | rejects requests without a valid token header (403) |
 
+The same enforcement applies to every CubeProxy ingress listener (HTTP, HTTPS, and
+the plaintext gRPC port `9090` by default). gRPC callers should send the token as
+metadata using `e2b-traffic-access-token` or `cube-traffic-access-token`.
+
 ## Header semantics
 
 Both `e2b-traffic-access-token` and `cube-traffic-access-token` accept

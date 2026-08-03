@@ -3,17 +3,44 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+use std::ffi::CString;
+use std::fmt;
+use std::fs;
+use std::fs::create_dir_all;
+use std::fs::{File, OpenOptions};
+use std::io;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::FileExt;
+#[cfg(target_arch = "aarch64")]
+use std::os::unix::io::AsRawFd;
+use std::os::unix::prelude::PermissionsExt;
+use std::path::Path;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use cgroups::freezer::FreezerState;
+use cube::rootfs;
 use cube::rootfs::ANNO_PROPAGATION_CONTAINER_UMNTS;
 use cube::rootfs::ANNO_PROPAGATION_EXEC_MNTS;
 use cube::utils::ANNO_APP_SNAPSHOT_CONTAINER_ID;
 use cube::utils::ANNO_CONTAINER_LOG_FORWARDING;
+use libc::{self, c_char, c_ushort, pid_t, winsize, TIOCSWINSZ};
+use nix::errno::Errno;
+use nix::mount::MsFlags;
+use nix::sys::{stat, statfs};
+use nix::unistd::{self, Pid};
+use nix::unistd::{Gid, Uid};
 use oci::{LinuxNamespace, Mount, Root, Spec};
+use opentelemetry::global;
 use protobuf::MessageDyn;
 use protobuf::MessageField;
-
 use protocols::agent::{
     self, AddSwapRequest, AgentDetails, CopyFileRequest, GetIPTablesRequest, GetIPTablesResponse,
     GuestDetailsResponse, Interfaces, Metrics, OOMEvent, ReadStreamResponse, Routes,
@@ -26,32 +53,24 @@ use protocols::health::health_check_response::ServingStatus;
 use protocols::health::{HealthCheckResponse, VersionCheckResponse};
 use protocols::types::Interface;
 use rustjail::cgroups::notifier;
+use rustjail::cgroups::Manager;
 use rustjail::container::{
     start_exec_process, BaseContainer, Container, LinuxContainer, EXEC_FIFO_FILENAME,
 };
 use rustjail::process::Process;
+use rustjail::process::ProcessOperations;
 use rustjail::specconv::CreateOpts;
 use rustjail::{pipestream::PipeStream, process::StreamType};
-use std::ffi::CString;
-use std::fmt;
-use std::fs::create_dir_all;
-use std::io;
-use std::path::Path;
-use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf};
 use tokio::sync::Mutex;
+use tracing::instrument;
+use tracing::span;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use ttrpc::{
     self,
     error::get_rpc_status,
     r#async::{Server as TtrpcServer, TtrpcContext},
 };
-
-use nix::errno::Errno;
-use nix::mount::MsFlags;
-use nix::sys::{stat, statfs};
-use nix::unistd::{self, Pid};
-use rustjail::cgroups::Manager;
-use rustjail::process::ProcessOperations;
 
 use crate::device::{
     add_devices, get_virtio_blk_pci_device_name, update_device_cgroup, update_env_pci,
@@ -67,34 +86,10 @@ use crate::pci;
 use crate::random;
 use crate::sandbox::Sandbox;
 use crate::time::start_time_sync_task;
-use crate::version::{AGENT_VERSION, API_VERSION};
-use crate::AGENT_CONFIG;
-use cube::rootfs;
-
 use crate::trace_rpc_call;
 use crate::tracer::extract_carrier_from_ttrpc;
-use opentelemetry::global;
-use tracing::span;
-use tracing_opentelemetry::OpenTelemetrySpanExt;
-
-use tracing::instrument;
-
-use libc::{self, c_char, c_ushort, pid_t, winsize, TIOCSWINSZ};
-use std::fs;
-use std::os::unix::prelude::PermissionsExt;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
-
-use base64::engine::general_purpose::STANDARD;
-use base64::Engine;
-use nix::unistd::{Gid, Uid};
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::FileExt;
-#[cfg(target_arch = "aarch64")]
-use std::os::unix::io::AsRawFd;
-use std::path::PathBuf;
-use std::str::FromStr;
+use crate::version::{AGENT_VERSION, API_VERSION};
+use crate::AGENT_CONFIG;
 const CONTAINER_BASE: &str = "/run/cube-containers";
 const RUNTIME_SHARE: &str = "/run/share_runtime/";
 
@@ -177,10 +172,30 @@ impl AgentService {
         let anno = oci.annotations.clone();
         if let Some(id) = anno.get(ANNO_APP_SNAPSHOT_CONTAINER_ID) {
             info!(sl!(), "create container by restore");
+
+            let mut proc_io = None;
+            if crate::passfd_io::has_passfd_ports(req.stdin_port, req.stdout_port, req.stderr_port)
+            {
+                proc_io = Some(
+                    crate::passfd_io::create_process_io(
+                        req.stdin_port,
+                        req.stdout_port,
+                        req.stderr_port,
+                    )
+                    .await?,
+                );
+            }
+
             let pid = {
                 let sandbox = self.sandbox.clone();
                 let mut s: tokio::sync::MutexGuard<'_, Sandbox> = sandbox.lock().await;
                 let process = s.find_container_process(id, &"")?;
+
+                if let Some(io) = proc_io {
+                    info!(sl!(), "reconnecting passfd for restored container {}", id);
+                    process.reconnect_passfd(io).await?;
+                }
+
                 process.pid
             };
 
@@ -261,6 +276,7 @@ impl AgentService {
             info!(sl!(), "no process configurations!");
             return Err(anyhow!(nix::Error::EINVAL));
         };
+        p.container_id = cid.clone();
         let duration_init_container = start.elapsed().as_millis();
         start = Instant::now();
         p.log_forwarding = oci
@@ -268,6 +284,16 @@ impl AgentService {
             .get(ANNO_CONTAINER_LOG_FORWARDING)
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        if crate::passfd_io::has_passfd_ports(req.stdin_port, req.stdout_port, req.stderr_port) {
+            p.proc_io = Some(
+                crate::passfd_io::create_process_io(
+                    req.stdin_port,
+                    req.stdout_port,
+                    req.stderr_port,
+                )
+                .await?,
+            );
+        }
         p.open_io(&sl!(), None).map_err(|e| anyhow!(e))?;
         ctr.start(p).await?;
         s.update_shared_pidns(&ctr)?;
@@ -410,6 +436,17 @@ impl AgentService {
         let pipe_size = AGENT_CONFIG.read().await.container_pipe_size;
         let ocip = rustjail::process_grpc_to_oci(&process);
         let mut p = Process::new(&sl!(), &ocip, exec_id.as_str(), false, pipe_size)?;
+        p.container_id = cid.clone();
+        if crate::passfd_io::has_passfd_ports(req.stdin_port, req.stdout_port, req.stderr_port) {
+            p.proc_io = Some(
+                crate::passfd_io::create_process_io(
+                    req.stdin_port,
+                    req.stdout_port,
+                    req.stderr_port,
+                )
+                .await?,
+            );
+        }
         let ctr = sandbox
             .get_container(&cid)
             .ok_or_else(|| anyhow!("Invalid container id"))?;
@@ -422,7 +459,34 @@ impl AgentService {
         }
 
         ctr.run(p).await?;
-        info!(sl!(), "finish exec run");
+
+        Ok(())
+    }
+
+    async fn do_reconnect_container_io(
+        &self,
+        req: protocols::agent::ReconnectContainerIORequest,
+    ) -> Result<()> {
+        let cid = req.container_id.clone();
+
+        if !crate::passfd_io::has_passfd_ports(req.stdin_port, req.stdout_port, req.stderr_port) {
+            return Ok(());
+        }
+
+        let proc_io =
+            crate::passfd_io::create_process_io(req.stdin_port, req.stdout_port, req.stderr_port)
+                .await?;
+
+        let s = self.sandbox.clone();
+        let mut sandbox = s.lock().await;
+        let process = sandbox.find_container_process(&cid, "")?;
+
+        if process.exited {
+            return Err(anyhow!("cannot reconnect IO for exited container {}", cid));
+        }
+
+        info!(sl!(), "reconnecting passfd for container {}", cid);
+        process.reconnect_passfd(proc_io).await?;
 
         Ok(())
     }
@@ -433,12 +497,7 @@ impl AgentService {
         let eid = req.exec_id.clone();
         let s = self.sandbox.clone();
 
-        info!(
-            sl!(),
-            "signal process";
-            "container-id" => cid.clone(),
-            "exec-id" => eid.clone(),
-        );
+        info!(sl!(), "signal process cid: {} eid: {}", cid, eid);
 
         let mut sig: libc::c_int = req.signal as libc::c_int;
         {
@@ -466,9 +525,7 @@ impl AgentService {
             // eid is empty, signal all the remaining processes in the container cgroup
             info!(
                 sl!(),
-                "signal all the remaining processes";
-                "container-id" => cid.clone(),
-                "exec-id" => eid.clone(),
+                "signal all the remaining processes cid: {} eid: {}", cid, eid
             );
 
             if let Err(err) = self.freeze_cgroup(&cid, FreezerState::Frozen).await {
@@ -541,6 +598,7 @@ impl AgentService {
         &self,
         req: protocols::agent::WaitProcessRequest,
     ) -> Result<protocols::agent::WaitProcessResponse> {
+        let total_start = Instant::now();
         let cid = req.container_id.clone();
         let eid = req.exec_id;
         let s = self.sandbox.clone();
@@ -549,59 +607,101 @@ impl AgentService {
 
         let (exit_send, mut exit_recv) = tokio::sync::mpsc::channel(100);
 
-        info!(
-            sl!(),
-            "wait process";
-            "container-id" => cid.clone(),
-            "exec-id" => eid.clone()
-        );
+        info!(sl!(), "wait process cid: {} eid: {}", cid, eid);
 
+        let find_start = Instant::now();
         let exit_rx = {
             let mut sandbox = s.lock().await;
             let p = sandbox.find_container_process(cid.as_str(), eid.as_str())?;
 
-            p.exit_watchers.push(exit_send);
+            p.exit_watchers.push(exit_send.clone());
+            if p.exited {
+                let _ = exit_send.try_send(p.exit_code);
+            }
             pid = p.pid;
 
             p.exit_rx.clone()
         };
+        let find_ms = find_start.elapsed().as_millis();
 
+        let wait_exit_start = Instant::now();
         if let Some(mut exit_rx) = exit_rx {
-            info!(sl!(), "cid {} eid {} waiting for exit signal", &cid, &eid);
             while exit_rx.changed().await.is_ok() {}
-            info!(sl!(), "cid {} eid {} received exit signal", &cid, &eid);
+            info!(sl!(), "process exited cid: {} eid: {}", &cid, &eid);
         }
+        let wait_exit_ms = wait_exit_start.elapsed().as_millis();
 
+        let relock_start = Instant::now();
         let mut sandbox = s.lock().await;
         let ctr = sandbox
             .get_container(&cid)
             .ok_or_else(|| anyhow!("Invalid container id"))?;
+        let relock_ms = relock_start.elapsed().as_millis();
 
-        let p = match ctr.processes.get_mut(&pid) {
-            Some(p) => p,
+        let (status, cleanup_ms, notify_ms) = match ctr.processes.get_mut(&pid) {
+            Some(p) => {
+                let cleanup_start = Instant::now();
+                // need to close all fd
+                // ignore errors for some fd might be closed by stream
+                p.cleanup_process_stream();
+                let cleanup_ms = cleanup_start.elapsed().as_millis();
+
+                let status = p.exit_code;
+                resp.status = status;
+                let notify_start = Instant::now();
+                // broadcast exit code to all parallel watchers
+                for s in p.exit_watchers.iter_mut() {
+                    // Just ignore errors in case any watcher quits unexpectedly
+                    let _ = s.send(p.exit_code).await;
+                }
+                let notify_ms = notify_start.elapsed().as_millis();
+
+                (status, cleanup_ms, notify_ms)
+            }
             None => {
                 // Lost race, pick up exit code from channel
+                let recv_start = Instant::now();
                 resp.status = exit_recv
                     .recv()
                     .await
                     .ok_or_else(|| anyhow!("Failed to receive exit code"))?;
+                info!(
+                    sl!(),
+                    "wait process summary cid: {} eid: {} pid: {} status: {} missing_process: true find_ms: {} wait_exit_ms: {} relock_ms: {} exit_recv_ms: {} total_ms: {}",
+                    cid,
+                    eid,
+                    pid,
+                    resp.status,
+                    find_ms,
+                    wait_exit_ms,
+                    relock_ms,
+                    recv_start.elapsed().as_millis(),
+                    total_start.elapsed().as_millis()
+                );
 
                 return Ok(resp);
             }
         };
 
-        // need to close all fd
-        // ignore errors for some fd might be closed by stream
-        p.cleanup_process_stream();
-
-        resp.status = p.exit_code;
-        // broadcast exit code to all parallel watchers
-        for s in p.exit_watchers.iter_mut() {
-            // Just ignore errors in case any watcher quits unexpectedly
-            let _ = s.send(p.exit_code).await;
-        }
-
+        let remove_start = Instant::now();
         ctr.processes.remove(&pid);
+        let remove_ms = remove_start.elapsed().as_millis();
+
+        info!(
+            sl!(),
+            "wait process summary cid: {} eid: {} pid: {} status: {} missing_process: false find_ms: {} wait_exit_ms: {} relock_ms: {} cleanup_ms: {} notify_ms: {} remove_ms: {} total_ms: {}",
+            cid,
+            eid,
+            pid,
+            status,
+            find_ms,
+            wait_exit_ms,
+            relock_ms,
+            cleanup_ms,
+            notify_ms,
+            remove_ms,
+            total_start.elapsed().as_millis()
+        );
 
         Ok(resp)
     }
@@ -926,7 +1026,7 @@ impl protocols::agent_ttrpc::AgentService for AgentService {
                 )
             })?;
 
-        p.close_stdin();
+        p.close_stdin().await;
 
         Ok(Empty::new())
     }
@@ -971,6 +1071,19 @@ impl protocols::agent_ttrpc::AgentService for AgentService {
         }
 
         Ok(Empty::new())
+    }
+
+    async fn reconnect_container_io(
+        &self,
+        ctx: &TtrpcContext,
+        req: protocols::agent::ReconnectContainerIORequest,
+    ) -> ttrpc::Result<Empty> {
+        trace_rpc_call!(ctx, "reconnect_container_io", req);
+        is_allowed!(req);
+        match self.do_reconnect_container_io(req).await {
+            Err(e) => Err(ttrpc_error!(ttrpc::Code::INTERNAL, e)),
+            Ok(_) => Ok(Empty::new()),
+        }
     }
 
     async fn update_interface(
@@ -1831,6 +1944,10 @@ pub fn start(s: Arc<Mutex<Sandbox>>, server_address: &str) -> Result<TtrpcServer
         moniclock::Clock::new().elapsed().as_millis()
     );
 
+    Ok(server)
+}
+
+pub fn notify_vsock_server_ready() -> Result<()> {
     #[cfg(target_arch = "x86_64")]
     {
         let port: u16 = 0x680;
@@ -1885,7 +2002,7 @@ pub fn start(s: Arc<Mutex<Sandbox>>, server_address: &str) -> Result<TtrpcServer
         }
     }
 
-    Ok(server)
+    Ok(())
 }
 
 // This function updates the container namespaces configuration based on the
@@ -2294,16 +2411,18 @@ pub fn mount_custom_file(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{
-        assert_result, namespace::Namespace, protocols::agent_ttrpc::AgentService as _,
-        skip_if_not_root,
-    };
     use nix::mount;
     use nix::sched::{unshare, CloneFlags};
     use oci::{Hook, Hooks, Linux, LinuxNamespace};
     use tempfile::{tempdir, TempDir};
     use ttrpc::{r#async::TtrpcContext, MessageHeader};
+
+    use super::*;
+    use crate::{
+        assert_result, namespace::Namespace, protocols::agent_ttrpc::AgentService as _,
+        skip_if_no_cap, skip_if_not_root,
+    };
+    use capctl::caps::Cap;
 
     fn mk_ttrpc_context() -> TtrpcContext {
         TtrpcContext {
@@ -2423,6 +2542,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_do_write_stream() {
+        // Only the create_container cases build a cgroup (which needs a
+        // writable cgroup filesystem); the invalid-container-id and
+        // cannot-get-writer cases exercise pure pipe I/O and stay covered
+        // even when /sys/fs/cgroup is read-only.
+        let have_cgroupfs = crate::test_utils::test_utils::cgroupfs_writable();
+
         #[derive(Debug)]
         struct TestData<'a> {
             create_container: bool,
@@ -2495,6 +2620,14 @@ mod tests {
 
         for (i, d) in tests.iter().enumerate() {
             let msg = format!("test[{}]: {:?}", i, d);
+
+            if d.create_container && !have_cgroupfs {
+                println!(
+                    "INFO: skipping {} which needs a writable cgroup filesystem",
+                    msg
+                );
+                continue;
+            }
 
             let logger = slog::Logger::root(slog::Discard, o!());
             let mut sandbox = Sandbox::new(&logger).unwrap();
@@ -2934,6 +3067,8 @@ OtherField:other
     #[tokio::test]
     async fn test_volume_capacity_stats() {
         skip_if_not_root!();
+        // The test mounts a tmpfs, needing CAP_SYS_ADMIN.
+        skip_if_no_cap!(Cap::SYS_ADMIN);
 
         // Verify error if path does not exist
         assert!(get_volume_capacity_stats("/does-not-exist").is_err());
@@ -2964,6 +3099,8 @@ OtherField:other
     #[tokio::test]
     async fn test_get_volume_inode_stats() {
         skip_if_not_root!();
+        // The test mounts a tmpfs, needing CAP_SYS_ADMIN.
+        skip_if_no_cap!(Cap::SYS_ADMIN);
 
         // Verify error if path does not exist
         assert!(get_volume_inode_stats("/does-not-exist").is_err());
@@ -2996,6 +3133,8 @@ OtherField:other
     #[tokio::test]
     async fn test_ip_tables() {
         skip_if_not_root!();
+        // The test unshares a network namespace, needing CAP_SYS_ADMIN.
+        skip_if_no_cap!(Cap::SYS_ADMIN);
 
         let logger = slog::Logger::root(slog::Discard, o!());
         let sandbox = Sandbox::new(&logger).unwrap();

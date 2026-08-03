@@ -31,7 +31,7 @@ This guide is for **first-time Volume Plugin users**: follow the steps in order 
 **Single-machine dev:** CubeMaster and Cubelet on one host — install deps once.  
 **Multi-node:** See the table in [§1 Install dependencies](#1-install-dependencies).
 
-> **Architecture:** ARM / aarch64 is not supported (official cosfs packages are x86_64 / amd64 only).
+> **Architecture:** Official cosfs does not support ARM / aarch64 (x86_64 / amd64 packages only). You may try s3fs as an alternative on your own.
 
 ---
 
@@ -41,9 +41,9 @@ This guide is for **first-time Volume Plugin users**: follow the steps in order 
 
 | Tool | Install on | Purpose (Hook) | Plugin type |
 |------|------------|----------------|-------------|
-| **[cosfs](https://cloud.tencent.com/document/product/436/10976)** | **Cubelet** | attach / detach (FUSE mount to COS) | binary and rpc |
-| **[coscmd](https://cloud.tencent.com/document/product/436/6883)** | **CubeMaster** | create / destroy (COS directory) | **binary** only |
-| **jq** | **CubeMaster** (with coscmd) | binary plugin stdout JSON | **binary** only |
+| **[cosfs](https://cloud.tencent.com/document/product/436/6883)** | **Cubelet** | attach / detach (FUSE mount to COS) | binary and rpc |
+| **[coscmd](https://cloud.tencent.com/document/product/436/10976)** | **CubeMaster** | create / destroy (COS directory) | **binary** only |
+| **jq** | **CubeMaster** and **Cubelet** | binary plugin stdout JSON (create/destroy and attach/detach) | **binary** only |
 | COS Go SDK | Machine that builds rpc plugin | create / destroy | **rpc** only (via `go build`; see [rpc path](#rpc-path-optional)) |
 
 > **rpc plugin:** Cubelet still needs cosfs; **no** coscmd / jq. Controller logic lives in the `cube-volume-cos-rpc` process using the Go SDK.
@@ -57,7 +57,7 @@ Container images already include **cosfs, coscmd, and jq** — no need to run th
 **Cubelet node:**
 
 ```bash
-sudo /usr/local/services/cubetoolbox/Cubelet/plugin/install-deps.sh --cosfs
+sudo /usr/local/services/cubetoolbox/Cubelet/plugin/install-deps.sh --cosfs --jq
 ```
 
 **CubeMaster node:**
@@ -80,8 +80,8 @@ Check only (no install): add `--check-only`.
 
 | Tool | Official doc |
 |------|--------------|
-| cosfs | [COS cosfs tool](https://cloud.tencent.com/document/product/436/10976) |
-| coscmd | [COSCMD tool](https://cloud.tencent.com/document/product/436/6883) |
+| cosfs | [COS cosfs tool](https://cloud.tencent.com/document/product/436/6883) |
+| coscmd | [COSCMD tool](https://cloud.tencent.com/document/product/436/10976) |
 | jq | OS package manager: `yum install jq` / `apt install jq` |
 
 ### Verify install
@@ -103,7 +103,7 @@ Both must succeed; missing `/dev/fuse` breaks attach.
 which coscmd && coscmd --version
 ```
 
-**CubeMaster — jq** (binary)
+**CubeMaster / Cubelet — jq** (binary; required on both)
 
 ```bash
 which jq && jq --version
@@ -115,6 +115,8 @@ The install script runs similar checks when using `--cosfs` / `--coscmd` / `--jq
 ---
 
 ## 2. Install plugin and COS credentials
+
+> For Kubernetes / Terraform deployments, configure the plugin and `volume-cos.conf` yourself using native cluster mechanisms. The steps below use one-click / bare-metal paths as examples.
 
 One-click install places the binary plugin under **`/usr/local/services/cubetoolbox/CubeMaster/plugin/`** (Controller) and **`/usr/local/services/cubetoolbox/Cubelet/plugin/`** (Node), and seeds `volume-cos.conf` from `volume-cos.conf.example` in each directory. After install, edit credentials on the matching node:
 

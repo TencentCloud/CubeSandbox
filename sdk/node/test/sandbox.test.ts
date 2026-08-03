@@ -13,7 +13,7 @@ import {
   SandboxNotFoundError,
   TemplateNotFoundError,
 } from "../src/exceptions.js";
-import { Sandbox } from "../src/index.js";
+import { NEVER_TIMEOUT, Sandbox } from "../src/index.js";
 import { stubCubeEnv } from "./_env.js";
 
 stubCubeEnv();
@@ -134,6 +134,26 @@ describe("Sandbox.create", () => {
     const body = JSON.parse(requests[0].body.toString());
     expect(body.templateID).toBe("tpl-foo");
     expect(body.timeout).toBe(600);
+    sb.close();
+  });
+
+  it("omits timeout when not explicitly provided", async () => {
+    setHandler(() => ({ status: 201, json: SANDBOX_DATA }));
+    const cfg = makeConfig();
+    cfg.timeout = 600;
+
+    const sb = await Sandbox.create({ config: cfg });
+    const body = JSON.parse(requests[0].body.toString());
+    expect(body.templateID).toBe("tpl-test");
+    expect("timeout" in body).toBe(false);
+    sb.close();
+  });
+
+  it("sends explicit zero timeout", async () => {
+    setHandler(() => ({ status: 201, json: SANDBOX_DATA }));
+    const sb = await Sandbox.create({ timeout: 0, config: makeConfig() });
+    const body = JSON.parse(requests[0].body.toString());
+    expect(body.timeout).toBe(0);
     sb.close();
   });
 
@@ -403,6 +423,106 @@ describe("Sandbox instance operations", () => {
     await sb.kill();
     expect(requests).toHaveLength(1);
     sb.close();
+  });
+
+  it("connect omits timeout so the server keeps its timeout policy", async () => {
+    setHandler((req) => {
+      expect(req.method).toBe("POST");
+      expect(req.pathname).toBe(`/sandboxes/${SANDBOX_ID}/connect`);
+      expect(JSON.parse(req.body.toString())).toEqual({});
+      return { status: 200, json: SANDBOX_DATA };
+    });
+    const cfg = makeConfig();
+    cfg.timeout = 600;
+
+    const sb = await Sandbox.connect(SANDBOX_ID, { config: cfg });
+    expect(sb.sandboxId).toBe(SANDBOX_ID);
+    sb.close();
+  });
+
+  it("resume omits timeout by default but preserves explicit values", async () => {
+    const sb = await createSandbox();
+    setHandler((req) => {
+      expect(req.method).toBe("POST");
+      expect(req.pathname).toBe(`/sandboxes/${SANDBOX_ID}/resume`);
+      return { status: 204 };
+    });
+
+    await sb.resume();
+    expect(JSON.parse(requests[0].body.toString())).toEqual({});
+
+    requests = [];
+    await sb.resume(0);
+    expect(JSON.parse(requests[0].body.toString())).toEqual({ timeout: 0 });
+    sb.close();
+  });
+
+  describe("Sandbox.setTimeout", () => {
+    it("sends the requested idle timeout", async () => {
+      const sb = await createSandbox();
+      setHandler((req) => {
+        expect(req.method).toBe("POST");
+        expect(req.pathname).toBe(`/sandboxes/${SANDBOX_ID}/timeout`);
+        expect(JSON.parse(req.body.toString())).toEqual({ timeout: 3600 });
+        return { status: 204 };
+      });
+
+      await sb.setTimeout(3600);
+      expect(requests).toHaveLength(1);
+      sb.close();
+    });
+
+    it("preserves an immediate timeout", async () => {
+      const sb = await createSandbox();
+      setHandler((req) => {
+        expect(JSON.parse(req.body.toString())).toEqual({ timeout: 0 });
+        return { status: 204 };
+      });
+
+      await sb.setTimeout(0);
+      sb.close();
+    });
+
+    it("rounds a fractional timeout up to whole seconds", async () => {
+      const sb = await createSandbox();
+      setHandler((req) => {
+        expect(JSON.parse(req.body.toString())).toEqual({ timeout: 1 });
+        return { status: 204 };
+      });
+
+      await sb.setTimeout(0.5);
+      sb.close();
+    });
+
+    it("sends NEVER_TIMEOUT unchanged", async () => {
+      const sb = await createSandbox();
+      setHandler((req) => {
+        expect(JSON.parse(req.body.toString())).toEqual({ timeout: -1 });
+        return { status: 204 };
+      });
+
+      await sb.setTimeout(NEVER_TIMEOUT);
+      sb.close();
+    });
+
+    it.each([-2, NaN, Infinity])(
+      "rejects invalid timeout %p before sending a request",
+      async (timeout) => {
+        const sb = await createSandbox();
+
+        await expect(sb.setTimeout(timeout)).rejects.toThrow();
+        expect(requests).toHaveLength(0);
+        sb.close();
+      },
+    );
+
+    it("maps a missing sandbox to SandboxNotFoundError", async () => {
+      const sb = await createSandbox();
+      setHandler(() => ({ status: 404, json: { message: "sandbox not found" } }));
+
+      await expect(sb.setTimeout(3600)).rejects.toBeInstanceOf(SandboxNotFoundError);
+      sb.close();
+    });
   });
 
   it("pauses and polls getInfo until the sandbox is paused", async () => {

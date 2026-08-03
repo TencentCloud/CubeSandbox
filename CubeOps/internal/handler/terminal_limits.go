@@ -43,24 +43,19 @@ func (l *terminalTicketLimiter) allowAt(user string, now time.Time) bool {
 	defer l.mu.Unlock()
 
 	cutoff := now.Add(-l.window)
-	for key, attempts := range l.attempts {
-		kept := attempts[:0]
-		for _, attempt := range attempts {
-			if attempt.After(cutoff) {
-				kept = append(kept, attempt)
-			}
+	attempts := l.attempts[user]
+	kept := attempts[:0]
+	for _, attempt := range attempts {
+		if attempt.After(cutoff) {
+			kept = append(kept, attempt)
 		}
-		if len(kept) == 0 {
-			delete(l.attempts, key)
-			continue
-		}
-		l.attempts[key] = kept
 	}
 
-	if len(l.attempts[user]) >= l.limit {
+	if len(kept) >= l.limit {
+		l.attempts[user] = kept
 		return false
 	}
-	l.attempts[user] = append(l.attempts[user], now)
+	l.attempts[user] = append(kept, now)
 	return true
 }
 

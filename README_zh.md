@@ -55,6 +55,22 @@ Cube Sandbox 是一款基于 RustVMM 与 KVM 构建的高性能、开箱即用�
 <table>
   <tr>
     <td align="right" valign="top" width="100">
+      <a href="./docs/zh/changelog/v0.6.0.md">
+        <img src="https://img.shields.io/badge/v0.6.0-2026.07.24-fd7e14?style=flat-square" alt="v0.6.0" />
+      </a>
+    </td>
+    <td valign="top">
+      <strong>v0.6：K8s 部署、Volume 框架、模板别名支持</strong><br/>
+      <b>K8s 部署</b> — 支持在K8s中部署Cube的控制面组件及计算节点<br/>
+      <b>Volume框架</b> — 在兼容e2b标准的前提下允许用户以插件的形式自定义后端存储方案<br/>
+      <b>模板别名</b> — 支持在创建模板时，为模板设置别名，并通过指定别名来创建沙箱。<br/>
+      <a href="./docs/zh/changelog/v0.6.0.md">更新日志 →</a> ·
+      <a href="./docs/zh/guide/kubernetes/index.md">K8s 部署 →</a> ·
+      <a href="./docs/zh/guide/volume-plugin.md">Volume 插件 →</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="right" valign="top" width="100">
       <a href="./docs/zh/changelog/v0.5.0.md">
         <img src="https://img.shields.io/badge/v0.5.0-2026.07.03-dc3545?style=flat-square" alt="v0.5.0" />
       </a>
@@ -111,53 +127,54 @@ Cube Sandbox 是一款基于 RustVMM 与 KVM 构建的高性能、开箱即用�
 <table align="center">
   <tr align="center" valign="top">
     <td width="33%">
-      <strong>⚡ 毫秒启动 · 高密度· 自动暂停恢复</strong><br/><br/>
-      平均 &lt;60ms 冷启动，单实例额外开销 &lt;5MB，单机轻松跑起数千 Agent。支持沙箱的自动暂停及恢复，实现成本优化<br/><br/>
+      <strong>⚡ 极速启动</strong><br/><br/>
+      资源池化预置 + 快照克隆，跳过所有冷启动开销。平均 &lt;60ms 冷启动，创建沙箱比一次眨眼都快。<br/><br/>
       <a href="./docs/zh/guide/quickstart.md">快速开始 →</a>
     </td>
     <td width="33%">
       <strong>🔒 硬件级隔离</strong><br/><br/>
-      每个沙箱独立 Guest OS 内核，告别 Docker 共享内核，放心跑大模型生成的未知代码<br/><br/>
+      每个沙箱配备独立操作系统内核，运行在专属 MicroVM 中。<br/><br/>
       <a href="./docs/zh/architecture/overview.md">架构概览 →</a>
     </td>
     <td width="33%">
-      <strong>🔌 E2B 无缝迁移</strong><br/><br/>
-      原生兼容 E2B SDK，替换一个 URL 环境变量即可接入，零业务代码改动<br/><br/>
+      <strong>🔌 E2B 生态兼容</strong><br/><br/>
+      兼容 E2B SDK 接口，替换一个环境变量即可从 E2B 云无缝切换，零业务代码改动。<br/><br/>
       <a href="./docs/zh/guide/tutorials/examples.md">示例项目 →</a>
     </td>
   </tr>
   <tr align="center" valign="top">
     <td width="33%">
-      <strong>🖥️ Web 控制台</strong><br/><br/>
-      浏览器管集群：沙箱、模板、节点、版本矩阵，装完即开 <code>:12088</code><br/><br/>
-      <a href="./docs/zh/guide/webui.md">WebUI 指南 →</a>
+      <strong>📦 高密度部署</strong><br/><br/>
+      单沙箱额外开销 &lt;5MB，通过内核共享与写时复制（CoW），单机可运行数千个实例。支持沙箱的自动暂停及恢复，进一步提升部署密度，实现成本优化。<br/><br/>
+      <a href="./docs/zh/guide/quickstart.md">快速开始 →</a>
     </td>
     <td width="33%">
-      <strong>🔐 凭证托管</strong><br/><br/>
-      Agent 照常调 LLM 与外部 API，Key 不进沙箱、不进模型上下文、不落日志<br/><br/>
+      <strong>🛡️ 网络安全</strong><br/><br/>
+      基于 eBPF 的内核态沙箱间网络隔离与出站过滤；内置 L7 安全代理支持按域名/路径/方法的精细策略及自动凭证注入，密钥对沙箱内代码不可见。<br/><br/>
       <a href="./docs/zh/guide/security-proxy.md">安全代理指南 →</a>
     </td>
     <td width="33%">
-      <strong>🛡️ 出站管控</strong><br/><br/>
-      域名白名单放行、越权出站当场拦截，全量访问留审计日志方便合规<br/><br/>
-      <a href="./docs/zh/guide/security-proxy.md">安全代理指南 →</a>
+      <strong>📸 灵活的状态管理</strong><br/><br/>
+      百毫秒级的高频快照与回滚。支持对运行中沙箱创建检查点，随时回滚到任意快照状态，或从指定状态快速创建分叉探索环境。<br/><br/>
+      <a href="./docs/zh/changelog/v0.3.0.md">v0.3 更新日志 →</a>
     </td>
   </tr>
   <tr align="center" valign="top">
     <td width="33%">
-      <strong>📸 快照 · 克隆 · 回档</strong><br/><br/>
-      百毫秒级检查点，运行中随时快照，回滚到任意状态或分叉探索<br/><br/>
-      <a href="./docs/zh/changelog/v0.3.0.md">v0.3 更新日志 →</a>
+      <strong>💾 Volume 框架</strong><br/><br/>
+      兼容 E2B 标准的 Volume 框架，允许用户以插件形式自定义后端存储方案。Volume 拥有独立生命周期，可跨沙箱共享。<br/><br/>
+      <a href="./docs/zh/guide/volume-plugin.md">Volume 插件 →</a>
     </td>
     <td width="33%">
-      <strong>📦 模板体系</strong><br/><br/>
-      OCI 镜像一键转模板，模板商店装官方预置环境，跨节点自动分发<br/><br/>
-      <a href="./docs/zh/guide/templates.md">模板指南 →</a>
+      <strong>🚀 生产部署</strong><br/><br/>
+      支持在腾讯云上使用 Terraform 一键部署生产集群。同时支持在标准 K8s 集群中部署（preview）。<br/><br/>
+      <a href="./docs/zh/guide/tencentcloud-terraform-deploy.md">Terraform 部署 →</a> ·
+      <a href="./docs/zh/guide/kubernetes/">K8s 部署 →</a>
     </td>
     <td width="33%">
-      <strong>🤖 AgentHub 数字助手</strong><br/><br/>
-      基于 OpenClaw 一键创建 AI 助手，支持快照、回档与助手模板发布<br/><br/>
-      <a href="./docs/zh/guide/digital-assistant.md">数字助手 →</a>
+      <strong>💪 ARM 架构支持</strong><br/><br/>
+      ARM64 全栈原生支持，覆盖编译、构建、部署全流程。<br/><br/>
+      <a href="./docs/zh/guide/bare-metal-deploy.md">裸机部署 →</a>
     </td>
   </tr>
 </table>
@@ -396,8 +413,7 @@ http://<控制节点 IP>:12088
 
 | 特性 | 说明 |
 |---|---|
-| **Kubernetes 原生部署** | 使用 CRD、Operator 和原生调度在 K8s 集群内完整部署运营 CubeSandbox，无需额外编排组件 |
-| **Volume 支持** | 兼容 E2B Volume 协议的持久化与共享存储能力 |
+| **Kubernetes 原生部署** | 从 Helm 部署进一步走向以 CRD、Operator 为核心的原生管理，并补齐平滑升级能力。
 | **跨机暂停与恢复** | 在一台宿主机上暂停沙箱，在另一台上完整恢复内存和文件系统状态 |
 | **E2B API 对齐补齐** | 补齐与 E2B 规范的剩余差距，实现完整的兼容替代 |
 | **控制面与数据面分离** | 解耦控制面与数据面，控制面升级或故障不影响已在运行的沙箱，保证全路径高可用 |

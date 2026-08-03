@@ -4,19 +4,21 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use crate::sandbox::Sandbox;
+use std::sync::Arc;
+
 use anyhow::{anyhow, Result};
 use capctl::prctl::set_subreaper;
 use nix::sys::wait::WaitPidFlag;
 use nix::sys::wait::{self, WaitStatus};
 use nix::unistd;
 use slog::{error, info, o, Logger};
-use std::sync::Arc;
 use tokio::select;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch::Receiver;
 use tokio::sync::Mutex;
 use unistd::Pid;
+
+use crate::sandbox::Sandbox;
 
 async fn handle_sigchild(logger: Logger, sandbox: Arc<Mutex<Sandbox>>) -> Result<()> {
     loop {
@@ -69,10 +71,63 @@ async fn handle_sigchild(logger: Logger, sandbox: Arc<Mutex<Sandbox>>) -> Result
                 }
             };
 
+            // To avoid deadlocking the entire agent by holding the sandbox lock while
+            // waiting for passfd output to drain, extract the tasks and the io struct,
+            // drop the lock, then reacquire the lock to finish up.
             p.exit_code = ret;
+            p.exited = true;
+            for watcher in p.exit_watchers.iter_mut() {
+                let _ = watcher.try_send(ret);
+            }
+            let passfd_stdin_task = p.passfd_stdin_task.take();
+            let passfd_tasks: Vec<_> = p.passfd_tasks.drain(..).collect();
+            let mut proc_io = p.proc_io.take();
+            let container_id = p.container_id.clone();
+            let exec_id = p.exec_id.clone();
+
+            drop(sandbox); // RELEASE LOCK BEFORE AWAIT!
+
+            if let Some(io) = &mut proc_io {
+                if tokio::time::timeout(std::time::Duration::from_secs(2), io.wg_output.wait())
+                    .await
+                    .is_err()
+                {
+                    warn!(
+                        logger,
+                        "passfd output drain timed out; output may be truncated";
+                        "container_id" => container_id,
+                        "exec_id" => exec_id,
+                        "output_truncated" => true,
+                    );
+                }
+            }
+            if let Some(task) = passfd_stdin_task {
+                task.abort();
+                let _ = task.await;
+            }
+            for task in passfd_tasks {
+                task.abort();
+                let _ = task.await;
+            }
+
+            // proc_io was taken only to wait for its output workers without holding
+            // the sandbox lock. Drop any streams left after the drain instead of
+            // restoring an empty or partially consumed IO state.
+            drop(proc_io);
+
+            // REACQUIRE LOCK
+            let mut sandbox = sandbox_ref.lock().await;
+            let process = sandbox.find_process(raw_pid);
+            if process.is_none() {
+                continue;
+            }
+            let p = process.unwrap();
+
+            p.exit_code = ret;
+            p.exited = true;
             let _ = p.exit_tx.take();
 
-            info!(logger, "notify term to close");
+            debug!(logger, "notify term to close");
             // close the socket file to notify readStdio to close terminal specifically
             // in case this process's terminal has been inherited by its children.
             p.notify_term_close();
@@ -118,10 +173,11 @@ pub async fn setup_signal_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tokio::pin;
     use tokio::sync::watch::channel;
     use tokio::time::Duration;
+
+    use super::*;
 
     #[tokio::test]
     async fn test_setup_signal_handler() {

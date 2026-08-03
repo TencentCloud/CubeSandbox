@@ -26,6 +26,13 @@ FILES=(
 	docs/guide/tencentcloud-terraform-deploy.md
 	docs/zh/guide/tencentcloud-terraform-deploy.md
 	deploy/kubernetes/chart/values.yaml
+	deploy/kubernetes/chart/Chart.yaml
+	deploy/kubernetes/images/build-cube-images.sh
+	deploy/kubernetes/images/README.md
+	deploy/kubernetes/chart/README.md
+	deploy/one-click/build-guest-image.sh
+	docs/guide/kubernetes/faq.md
+	docs/zh/guide/kubernetes/faq.md
 )
 
 failures=0
@@ -43,6 +50,12 @@ CURRENT="$(grep -oE 'cube-egress:v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?' \
 	exit 1
 }
 
+# Synthetic bump target — never a real release tag — so rewrite assertions stay
+# meaningful regardless of what CURRENT is. Avoid colliding with CURRENT.
+TARGET=v999.99.9
+[[ "${CURRENT}" != "${TARGET}" ]] || TARGET=v888.88.8
+CHART_VER="${TARGET#v}"
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
 install -D "${REPO_ROOT}/scripts/bump-image.sh" "${WORK}/scripts/bump-image.sh"
@@ -56,32 +69,68 @@ bump() { (cd "${WORK}" && ./scripts/bump-image.sh "$1" >/dev/null 2>&1); }
 
 # 1. clean tree passes at its current version, fails for any other version.
 check "${CURRENT}" || fail "--check ${CURRENT} should pass on the seeded tree"
-if check v9.9.9; then fail "--check v9.9.9 should fail when files are at ${CURRENT}"; fi
+if check "${TARGET}"; then fail "--check ${TARGET} should fail when files are at ${CURRENT}"; fi
 
 # 2. bump rewrites every format; afterwards the new version passes and the old fails.
-bump v0.6.0 || fail "bump v0.6.0 failed"
-check v0.6.0 || fail "--check v0.6.0 should pass after bumping"
-if check "${CURRENT}"; then fail "--check ${CURRENT} should fail after bumping to v0.6.0"; fi
+bump "${TARGET}" || fail "bump ${TARGET} failed"
+check "${TARGET}" || fail "--check ${TARGET} should pass after bumping"
+if check "${CURRENT}"; then fail "--check ${CURRENT} should fail after bumping to ${TARGET}"; fi
 
 # 2b. chart values.yaml component tags move; third-party tags stay put.
 component_tags="$(grep -E '^\s+tag:\s+v[0-9]' "${WORK}/deploy/kubernetes/chart/values.yaml" || true)"
 [[ -n "${component_tags}" ]] || fail "values.yaml should still have component tag: v… lines after bump"
 while IFS= read -r line; do
 	[[ -z "${line}" ]] && continue
-	echo "${line}" | grep -qE "tag:\s+v0\.6\.0$" || fail "values.yaml component tag not bumped: ${line}"
+	got="$(awk '{print $2}' <<<"${line}")"
+	[[ "${got}" == "${TARGET}" ]] || fail "values.yaml component tag not bumped: ${line}"
 done <<<"${component_tags}"
 grep -qE 'tag:\s+"1\.28\.15"' "${WORK}/deploy/kubernetes/chart/values.yaml" \
 	|| fail "values.yaml kubectl third-party tag must remain \"1.28.15\""
 
+# 2c. Chart.yaml version / appVersion track the release without the leading "v".
+grep -qx "version: ${CHART_VER}" "${WORK}/deploy/kubernetes/chart/Chart.yaml" \
+	|| fail "Chart.yaml version must become ${CHART_VER} after bump"
+grep -qx "appVersion: \"${CHART_VER}\"" "${WORK}/deploy/kubernetes/chart/Chart.yaml" \
+	|| fail "Chart.yaml appVersion must become \"${CHART_VER}\" after bump"
+
+# 2d. unquoted appVersion is accepted and normalized to the quoted form on write.
+OLD_CHART_VER="${CURRENT#v}"
+sed -i -E \
+	-e "s/^version:.*/version: ${OLD_CHART_VER}/" \
+	-e "s/^appVersion:.*/appVersion: ${OLD_CHART_VER}/" \
+	"${WORK}/deploy/kubernetes/chart/Chart.yaml"
+bump "${TARGET}" || fail "bump ${TARGET} failed with unquoted appVersion"
+grep -qx "version: ${CHART_VER}" "${WORK}/deploy/kubernetes/chart/Chart.yaml" \
+	|| fail "Chart.yaml version must become ${CHART_VER} after bump from unquoted appVersion"
+grep -qx "appVersion: \"${CHART_VER}\"" "${WORK}/deploy/kubernetes/chart/Chart.yaml" \
+	|| fail "Chart.yaml appVersion must become \"${CHART_VER}\" after bump from unquoted form"
+check "${TARGET}" || fail "--check ${TARGET} should pass after normalizing unquoted appVersion"
+
+# 2e. quoted version is accepted and normalized to the unquoted form on write.
+sed -i -E \
+	-e "s/^version:.*/version: \"${OLD_CHART_VER}\"/" \
+	-e "s/^appVersion:.*/appVersion: \"${OLD_CHART_VER}\"/" \
+	"${WORK}/deploy/kubernetes/chart/Chart.yaml"
+# Stale quoted version with already-correct appVersion must not slip past --check.
+sed -i -E "s/^appVersion:.*/appVersion: \"${CHART_VER}\"/" \
+	"${WORK}/deploy/kubernetes/chart/Chart.yaml"
+if check "${TARGET}"; then fail "--check ${TARGET} should fail when version is stale quoted"; fi
+bump "${TARGET}" || fail "bump ${TARGET} failed with quoted version"
+grep -qx "version: ${CHART_VER}" "${WORK}/deploy/kubernetes/chart/Chart.yaml" \
+	|| fail "Chart.yaml version must become ${CHART_VER} (unquoted) after bump from quoted form"
+grep -qx "appVersion: \"${CHART_VER}\"" "${WORK}/deploy/kubernetes/chart/Chart.yaml" \
+	|| fail "Chart.yaml appVersion must stay \"${CHART_VER}\" after bump from quoted version"
+check "${TARGET}" || fail "--check ${TARGET} should pass after normalizing quoted version"
+
 # 3. reverse scan catches a stray tag in a NEW file that is not in the bump list.
 (cd "${WORK}" && printf 'IMAGE_TAG ?= v1.2.3\n' >stray.mk && git add -N stray.mk)
-if check v0.6.0; then fail "reverse scan should catch a stray tag in a new file"; fi
+if check "${TARGET}"; then fail "reverse scan should catch a stray tag in a new file"; fi
 (cd "${WORK}" && rm -f stray.mk && git reset -q -- stray.mk 2>/dev/null || true)
 
 # 4. a non-image v-semver is left untouched by bump (variables.tf line guard).
 (cd "${WORK}" && printf '\nrequired_version = "~> v1.2.0"\n' \
 	>>deploy/one-click/terraform/tencentcloud/variables.tf)
-bump v0.7.0 || fail "bump v0.7.0 failed"
+bump "${TARGET}" || fail "bump ${TARGET} failed"
 if ! grep -q 'required_version = "~> v1.2.0"' \
 	"${WORK}/deploy/one-click/terraform/tencentcloud/variables.tf"; then
 	fail "bump must not rewrite a non-image semver in variables.tf"

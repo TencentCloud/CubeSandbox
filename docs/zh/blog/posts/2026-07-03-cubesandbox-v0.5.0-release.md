@@ -4,7 +4,7 @@ date: 2026-07-03
 author: Cube Sandbox 团队
 description: "如果说 Cube Sandbox v0.3.0 解决的是\"快\"（毫秒级的快照 / 克隆 / 回滚），v0.4.0 解决的是\"治理\"（L7 出站管控 + 可观测性 + 集群一致性），那么 v0.5.0 想解决的是——\"稳、省、广\"。v0.5.0 由 26 位贡献者合入 116 个 commits，带来四大核心特性：AutoPause/AutoResume 沙箱生命周期自动化、ARM64 全栈原生支持、腾讯云 Terraform 一键集群部署、网络安全性增强。"
 featured: true
-weight: 1
+weight: 2
 ---
 
 # Cube v0.5.0发布：自动暂停 · ARM 支持· 一键集群部署，把沙箱送进生产

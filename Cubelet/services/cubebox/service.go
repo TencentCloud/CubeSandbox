@@ -62,6 +62,18 @@ var (
 	defaultDestroyDeadline  = 60 * time.Second
 	defaultDeadContainerTTL = 1 * time.Hour
 	cleanerHeartBeat        = 10 * time.Second
+
+	// createStuckThreshold bounds how long a sandbox may legitimately remain in
+	// the CONTAINER_CREATED transient before DeadGC is allowed to probe it. The
+	// create path saves the cubebox into the store (state CONTAINER_CREATED)
+	// BEFORE runContainer binds the containerd task and sets StartedAt; within
+	// that window RecoverContainer would find no task and wrongly stamp
+	// Unknown=true. A real create completes (or fails and cleans up) well within
+	// defaultCreateDeadline, so once CreatedAt is older than this the entry is
+	// genuinely stuck and safe to reap. It MUST stay comfortably larger than
+	// defaultCreateDeadline. Mirrors pausingStuckThreshold (update.go), which
+	// bounds the PAUSING transient the same "2x the deadline" way.
+	createStuckThreshold = 2 * defaultCreateDeadline
 )
 
 func defaultServiceConfig() *ServicesConfig {
@@ -809,6 +821,10 @@ func toGRPCContainer(c *cubeboxstore.Container) *cubebox.Container {
 		cc.PausedAt = c.Status.Status.PausedAt
 	}
 
+	if mounts := c.Config.GetVolumeMounts(); len(mounts) > 0 {
+		cc.VolumeMounts = append(cc.VolumeMounts, mounts...)
+	}
+
 	if cc.Labels == nil {
 		cc.Labels = make(map[string]string)
 	}
@@ -1002,6 +1018,23 @@ func scanDeadContainer(ctx context.Context, dc []*cubeboxstore.CubeBox, client *
 				continue
 			}
 			switch st.State() {
+			case cubebox.ContainerState_CONTAINER_CREATED:
+				// Sandbox create is in flight: createCubeboxContainer saves the
+				// cubebox into the store (state CONTAINER_CREATED, CreatedAt only)
+				// BEFORE runContainer binds the containerd container/task and sets
+				// StartedAt. In this window RecoverContainer -> loadStatus finds no
+				// task yet and stamps Unknown=true / FinishedAt=now, which State()
+				// ranks above StartedAt (see pkg/store/cubebox/status.go) -- so the
+				// sandbox reads as terminated forever even after the task starts
+				// RUNNING, breaking a follow-up pause with "sandbox is not running".
+				// Create owns this phase (and its own failover/cleanup on failure),
+				// so DeadGC skips it while create could still be running, exactly
+				// like the PAUSING/RollingBack races. Past createStuckThreshold the
+				// entry is genuinely stuck (task never bound) and safe to reap.
+				if st.CreatedAt == 0 ||
+					time.Since(time.Unix(0, st.CreatedAt)) < createStuckThreshold {
+					continue
+				}
 			case cubebox.ContainerState_CONTAINER_PAUSED:
 				// User-driven pause: a legitimate, possibly long-lived state.
 				// Nothing for DeadGC to do.

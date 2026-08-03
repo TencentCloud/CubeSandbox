@@ -18,6 +18,11 @@ can prove:
 - real read-write host sharing: two sandboxes bind-mounting the same host dir
   observe each other's writes (proving it is a genuine host mount, not a
   per-sandbox overlay);
+- nested RO parent + RW child: child remains writable even when the child
+  descriptor is listed before the parent (regression for Cubelet mount-order
+  determinism; source PR #946 / issue #944). Provisions host dirs via a
+  throwaway sandbox; a missing hostPath source on multi-node local-disk
+  clusters is treated as pass-with-warning;
 - the symlink TOCTOU escape: CubeMaster validates the path lexically while
   Cubelet resolves symlinks before mounting, so a symlink planted under the
   allowed prefix can redirect the mount to an arbitrary host path.
@@ -39,6 +44,7 @@ from framework.host_mount import (
     provision_host_dirs,
     skip_if_host_mount_unavailable,
     under_prefix,
+    warn_pass_missing_hostpath_source,
 )
 from framework.lifecycle import managed_control_sandbox
 
@@ -346,6 +352,176 @@ def test_rw_mount_shares_data_across_sandboxes(sdk_backend, sdk_e2e_config):
                 f"rm -rf {mount}/note.txt",
                 timeout=sdk_e2e_config.command_timeout,
             )
+
+
+# --- Nested host mounts (RO parent + RW child) --------------------------------
+#
+# Regression for https://github.com/TencentCloud/CubeSandbox/pull/946
+# (issue #944): when a read-only parent mountPath contains a writable nested
+# child, Cubelet must apply the parent before the child so the child is not
+# hidden by a later RO parent remount. Descriptor input order must not matter.
+#
+# Topology: default **single-node**. The nested host dirs are provisioned via a
+# throwaway sandbox (``provision_host_dirs``) before the seed/agent creates. On
+# a single-node cluster this materializes the source on the one Cubelet; on a
+# multi-node local-disk cluster the provision may land on a different node than a
+# later create, so a missing source there is still treated as a warned pass.
+
+# Fixed layout under the allowed prefix. Provisioned per test via
+# ``provision_host_dirs`` (mkdir -p also creates the parent ``nested-e2e``):
+#   <prefix>/nested-e2e/members/agent-a
+_NESTED_TEAM_REL = "nested-e2e"
+_NESTED_MEMBER_REL = "nested-e2e/members/agent-a"
+
+
+def test_nested_ro_parent_rw_child_writable_when_child_listed_first(
+    sdk_backend, sdk_e2e_config
+):
+    """RO parent + RW nested child stays writable with child-first descriptors.
+
+    Layout mirrors the collaboration model in docs/guide/persistent-storage.md
+    and issue #944:
+
+        <prefix>/nested-e2e/                     -> /workspace                  (RO)
+        <prefix>/nested-e2e/members/agent-a/     -> /workspace/members/agent-a  (RW)
+
+    Descriptors intentionally list the child before the parent. Before #946,
+    restore/apply order was nondeterministic and a late RO parent could hide the
+    RW child (``Read-only file system`` on writes). Assert the child accepts
+    writes and the parent path rejects them.
+
+    Single-node default
+    -------------------
+    This case assumes a single Cubelet node. It provisions the nested layout via
+    ``provision_host_dirs`` (a throwaway sandbox that ``mkdir -p``s the source),
+    so no manual host prep is required. ``mkdir -p .../members/agent-a`` also
+    creates the ``nested-e2e`` parent, giving both mount sources.
+
+    Multi-node / missing source
+    ---------------------------
+    On a cluster with node-local disks, ``provision_host_dirs`` may create the
+    source on one node while a later create is scheduled on another. When the
+    scheduled node lacks the source, create fails with Cubelet's
+    ``bind mount ...: No such file or directory``. That is treated as a **pass
+    with a warning** — topology and shared-storage setup are outside this
+    regression's scope. Use shared storage at the same path on every node (see
+    persistent-storage.md) if the nested assertion must run in multi-node CI.
+    """
+    token = uuid.uuid4().hex[:12]
+    team_host = under_prefix(_NESTED_TEAM_REL)
+    member_host = under_prefix(_NESTED_MEMBER_REL)
+    parent_mount = "/workspace"
+    child_mount = "/workspace/members/agent-a"
+    payload = f"nested-write-{token}"
+    seed_marker = f"shared-input-{token}.txt"
+    child_note = f"note-{token}.txt"
+
+    # Provision the nested layout on the host. ``mkdir -p .../members/agent-a``
+    # also creates the ``nested-e2e`` parent, so both mount sources exist.
+    provision_host_dirs(sdk_backend, sdk_e2e_config, [_NESTED_MEMBER_REL])
+
+    seed_mount = "/mnt/seed"
+    seed_metadata = host_mount_metadata(
+        [mount_option(team_host, seed_mount, read_only=False)]
+    )
+    try:
+        with managed_control_sandbox(
+            sdk_backend,
+            sdk_e2e_config,
+            metadata={"test_role": "host_mount_nested_seed", **seed_metadata},
+        ) as seeder:
+            seed = seeder.run_command(
+                f"echo shared-from-host > {seed_mount}/{seed_marker} && sync",
+                timeout=sdk_e2e_config.command_timeout,
+            )
+            assert_command_ok(seed)
+
+            # Child listed first — the order that previously exposed the bug.
+            nested_metadata = host_mount_metadata(
+                [
+                    mount_option(member_host, child_mount, read_only=False),
+                    mount_option(team_host, parent_mount, read_only=True),
+                ]
+            )
+            try:
+                try:
+                    with managed_control_sandbox(
+                        sdk_backend,
+                        sdk_e2e_config,
+                        metadata={
+                            "test_role": "host_mount_nested_agent",
+                            **nested_metadata,
+                        },
+                    ) as agent:
+                        read_shared = agent.run_command(
+                            f"cat {parent_mount}/{seed_marker}",
+                            timeout=sdk_e2e_config.command_timeout,
+                        )
+                        assert_command_ok(read_shared)
+                        assert "shared-from-host" in read_shared.stdout, (
+                            "expected RO parent content visible at "
+                            f"{parent_mount}/{seed_marker}; "
+                            f"stdout={read_shared.stdout!r} "
+                            f"stderr={read_shared.stderr!r}"
+                        )
+
+                        write_child = agent.run_command(
+                            f"echo {payload} > {child_mount}/{child_note} && "
+                            f"cat {child_mount}/{child_note}",
+                            timeout=sdk_e2e_config.command_timeout,
+                        )
+                        assert_command_ok(write_child)
+                        assert payload in write_child.stdout, (
+                            "expected RW nested child to accept writes at "
+                            f"{child_mount}; "
+                            f"stdout={write_child.stdout!r} "
+                            f"stderr={write_child.stderr!r}"
+                        )
+
+                        write_parent = agent.run_command(
+                            f"echo should-fail > {parent_mount}/parent-write-{token}.txt",
+                            timeout=sdk_e2e_config.command_timeout,
+                        )
+                        assert write_parent.exit_code != 0, (
+                            "expected RO parent mount to reject writes at "
+                            f"{parent_mount}/parent-write-{token}.txt, "
+                            "but the write succeeded"
+                        )
+                        combined = (
+                            f"{write_parent.stdout}\n{write_parent.stderr}".lower()
+                        )
+                        assert (
+                            "read-only" in combined
+                            or "readonly" in combined
+                            or "read only" in combined
+                        ), (
+                            "expected a read-only filesystem error when writing "
+                            f"the RO parent; stdout={write_parent.stdout!r} "
+                            f"stderr={write_parent.stderr!r}"
+                        )
+                except Exception as exc:  # noqa: BLE001 - missing source => pass
+                    if warn_pass_missing_hostpath_source(
+                        exc,
+                        host_paths=[team_host, member_host],
+                        role="host_mount_nested_agent",
+                    ):
+                        return
+                    raise
+            finally:
+                seeder.run_command(
+                    f"rm -f {seed_mount}/{seed_marker} "
+                    f"{seed_mount}/members/agent-a/{child_note} "
+                    f"{seed_mount}/parent-write-{token}.txt",
+                    timeout=sdk_e2e_config.command_timeout,
+                )
+    except Exception as exc:  # noqa: BLE001 - missing source => pass
+        if warn_pass_missing_hostpath_source(
+            exc,
+            host_paths=[team_host, member_host],
+            role="host_mount_nested_seed",
+        ):
+            return
+        raise
 
 
 # --- Symlink TOCTOU escape ---------------------------------------------------
