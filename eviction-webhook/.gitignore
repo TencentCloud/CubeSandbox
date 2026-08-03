@@ -4,3 +4,4 @@
 # IDE
 .idea/
 .vscode/
+coverage.out

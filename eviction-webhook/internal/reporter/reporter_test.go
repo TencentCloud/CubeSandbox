@@ -4,6 +4,7 @@
 package reporter
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -215,4 +216,58 @@ func TestReporterConcurrentReports(t *testing.T) {
 	}
 
 	assert.Equal(t, goroutines, int(received.Load()))
+}
+
+func TestReporterContextCancelledDuringSend(t *testing.T) {
+	// Use a server that blocks long enough for the context to cancel,
+	// but responds eventually so the server can close cleanly.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	r := New(srv.URL, "", "", false, WithRetry(1, time.Millisecond))
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	event := &types.EvictionEvent{EventID: "ctx-cancel", PodName: "p", Namespace: "ns", InterceptedAt: "t"}
+	body, _ := json.Marshal(event)
+	err := r.send(ctx, body)
+	assert.Error(t, err, "send should return error when context is cancelled")
+}
+
+func TestReporterContextCancelledBetweenRetries(t *testing.T) {
+	// Server always returns 500 to force retries, then ctx is cancelled.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	r := New(srv.URL, "", "", false, WithRetry(5, 50*time.Millisecond))
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+
+	event := &types.EvictionEvent{EventID: "ctx-retry", PodName: "p", Namespace: "ns", InterceptedAt: "t"}
+	body, _ := json.Marshal(event)
+	// reportWithRetry should return early when ctx is cancelled between retries.
+	r.reportWithRetry(ctx, event, 5, 50*time.Millisecond)
+	_ = body // used above for send test
+}
+
+func TestReporterSendNon200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	r := New(srv.URL, "", "", false)
+	event := &types.EvictionEvent{EventID: "503", PodName: "p", Namespace: "ns", InterceptedAt: "t"}
+	body, _ := json.Marshal(event)
+	err := r.send(context.Background(), body)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "503")
 }

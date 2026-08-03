@@ -96,3 +96,43 @@ func TestHeadersAuthEnabled(t *testing.T) {
 	require.NoError(t, err, "expected no error from Headers with valid inputs")
 	require.NotNil(t, h, "expected non-nil http.Header")
 }
+
+// TestHmacSignSha256 directly exercises the sha256 branch of hmacSign.
+func TestHmacSignSha256(t *testing.T) {
+	key := []byte("test-key")
+	data := []byte("test-data")
+	sig, err := hmacSign("sha256", key, data)
+	require.NoError(t, err)
+	assert.NotEmpty(t, sig, "expected non-empty signature from sha256 branch")
+}
+
+// TestHmacSignSha1 directly exercises the sha1 (else) branch of hmacSign.
+func TestHmacSignSha1(t *testing.T) {
+	key := []byte("test-key")
+	data := []byte("test-data")
+	sig, err := hmacSign("sha1", key, data)
+	require.NoError(t, err)
+	assert.NotEmpty(t, sig, "expected non-empty signature from sha1 branch")
+}
+
+// TestHmacSignUnknownMethodFallsBackToSha1 verifies that an unrecognised method
+// falls back to sha1 without returning an error.
+func TestHmacSignUnknownMethodFallsBackToSha1(t *testing.T) {
+	key := []byte("test-key")
+	data := []byte("test-data")
+	sig, err := hmacSign("md5", key, data)
+	require.NoError(t, err, "expected no error for unknown method (should fall back to sha1)")
+	assert.NotEmpty(t, sig, "expected non-empty signature for fallback sha1 path")
+}
+
+// TestGenerateNonceIsNumeric verifies that generateNonce returns a string that
+// can be parsed as a positive uint64.
+func TestGenerateNonceIsNumeric(t *testing.T) {
+	nonce, err := generateNonce()
+	require.NoError(t, err)
+	require.NotEmpty(t, nonce)
+
+	v, err := strconv.ParseUint(nonce, 10, 64)
+	require.NoError(t, err, "nonce %q must be a valid uint64 string", nonce)
+	assert.Greater(t, v, uint64(0), "nonce must be > 0")
+}

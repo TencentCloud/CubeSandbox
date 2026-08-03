@@ -930,3 +930,295 @@ func TestReconcileRestoredPausedOnlyNodeUnderPressure(t *testing.T) {
 	// cubeMasterNodeID is "" so IsolateNode must NOT be called.
 	assert.Empty(t, mock.isolated, "expected no IsolateNode when no cubeMasterNodeID stored")
 }
+
+// TestPersistWithActivePersisterWritesToDisk verifies the real disk-write path
+// of persist(): after an eviction is processed the on-disk state file contains
+// the paused node entry.
+func TestPersistWithActivePersisterWritesToDisk(t *testing.T) {
+	dir := t.TempDir()
+	statePath := dir + "/recovery-state.json"
+
+	mock := &mockCubeMaster{
+		listResult: []cubemaster.SandboxBrief{
+			{SandboxID: "aabbccddeeff00112233445566778899"},
+		},
+	}
+
+	mgr, err := NewWithPersister(nil, statePath)
+	require.NoError(t, err)
+	// Wire in our mock so no real CubeMaster client is needed.
+	mgr.cmIface = mock
+
+	mgr.OnEviction(&types.EvictionEvent{
+		EventID:      "uid-persist-disk",
+		PodName:      "sandbox-pod-persist",
+		NodeName:     "node-persist",
+		InstanceType: "cubebox",
+	})
+
+	// Wait until the async eviction goroutine finishes pausing the sandbox.
+	eventually(t, func() bool {
+		mock.mu.Lock()
+		defer mock.mu.Unlock()
+		return len(mock.paused) == 1
+	})
+
+	// Allow persist() to complete after recordPaused returns.
+	time.Sleep(50 * time.Millisecond)
+
+	// Load the state file and verify the paused node is present.
+	p := newPersister(statePath)
+	loaded, err := p.load()
+	require.NoError(t, err)
+	assert.NotEmpty(t, loaded.Isolated, "expected at least one isolated node in persisted state")
+	require.Contains(t, loaded.Paused, "node-persist", "expected node-persist in persisted paused map")
+	require.Len(t, loaded.Paused["node-persist"], 1, "expected one paused sandbox persisted")
+	assert.Equal(t, "aabbccddeeff00112233445566778899", loaded.Paused["node-persist"][0].SandboxID)
+}
+
+// TestScheduleAPIEvictionReliefWithNoPressureChecker verifies that directly
+// calling scheduleAPIEvictionRelief when no pressureChecker is configured does
+// not panic. The spawned goroutine will sleep for apiEvictionReliefDelay and
+// then return early because checker == nil.
+func TestScheduleAPIEvictionReliefWithNoPressureChecker(t *testing.T) {
+	mock := &mockCubeMaster{}
+	mgr := newTestManager(mock)
+	// No pressureChecker set — must not panic.
+	require.NotPanics(t, func() {
+		mgr.scheduleAPIEvictionRelief("node-x")
+	})
+}
+
+// TestScheduleAPIEvictionReliefAlreadyRelieved exercises the pressure-checker
+// path of the relief flow. We cannot wait 5 minutes for the real goroutine
+// spawned by scheduleAPIEvictionRelief, so we call OnPressureRelief directly
+// (which uses the same checker) to verify that a checker returning (false, nil)
+// causes resumed+unisolated to be called.
+func TestScheduleAPIEvictionReliefAlreadyRelieved(t *testing.T) {
+	id := "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+	var checkerCalled atomic.Int32
+
+	mock := &mockCubeMaster{
+		listResult: []cubemaster.SandboxBrief{{SandboxID: id}},
+	}
+	mgr := newTestManager(mock)
+
+	// Pre-populate isolation and paused state so OnPressureRelief has work to do.
+	mgr.mu.Lock()
+	mgr.isolated["node-x"] = "host-x"
+	mgr.paused["node-x"] = []PausedSandbox{{
+		SandboxID:    id,
+		InstanceType: "cubebox",
+		EventID:      "uid-relief",
+	}}
+	mgr.mu.Unlock()
+
+	mgr.SetPressureChecker(func(_ context.Context, _ string) (bool, error) {
+		checkerCalled.Add(1)
+		return false, nil // pressure already gone
+	})
+
+	// Kick off the background goroutine (it will sleep 5 min then call OnPressureRelief).
+	mgr.scheduleAPIEvictionRelief("node-x")
+
+	// Invoke OnPressureRelief directly to exercise the identical code path
+	// without waiting for the 5-minute timer.
+	mgr.OnPressureRelief("node-x")
+
+	eventually(t, func() bool {
+		mock.mu.Lock()
+		defer mock.mu.Unlock()
+		return len(mock.resumed) == 1 && len(mock.unisolated) == 1
+	})
+
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	require.Len(t, mock.resumed, 1)
+	assert.Equal(t, id, mock.resumed[0], "expected sandbox to be resumed on pressure relief")
+	require.Len(t, mock.unisolated, 1)
+	assert.Equal(t, "host-x", mock.unisolated[0], "expected node to be unisolated on pressure relief")
+	assert.GreaterOrEqual(t, checkerCalled.Load(), int32(1), "pressureChecker should have been called at least once")
+}
+
+// TestClientReturnsCubeMasterWhenNoIface verifies the client() fallback path:
+// when cmIface is nil, client() returns the real *cubemaster.Client field (m.cm).
+// We can only observe this indirectly — the returned value must equal m.cm.
+func TestClientReturnsCubeMasterWhenNoIface(t *testing.T) {
+	mgr := New(nil) // cmIface is nil, cm is nil
+	mgr.cmIface = nil
+	// client() should return m.cm (nil in this case) without panicking.
+	got := mgr.client()
+	// m.cm is nil, so got should also be nil (the concrete *cubemaster.Client).
+	assert.Nil(t, got, "client() should return m.cm when cmIface is nil")
+}
+
+// TestPersisterSaveWriteFileFailure exercises the WriteFile error path in
+// persister.save by using a path inside a directory that is itself a file
+// (so MkdirAll will fail).
+func TestPersisterSaveWriteFileFailure(t *testing.T) {
+	dir := t.TempDir()
+	// Create a regular file where we want a directory — MkdirAll will fail.
+	blocker := dir + "/blocker"
+	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o644))
+	p := newPersister(blocker + "/subdir/state.json")
+	err := p.save(persistState{
+		Paused:   make(map[string][]PausedSandbox),
+		Isolated: make(map[string]string),
+	})
+	assert.Error(t, err, "expected save to fail when directory cannot be created")
+}
+
+// TestPersisterLoadInvalidJSON exercises the JSON unmarshal error path in
+// persister.load by writing syntactically invalid JSON to the state file.
+func TestPersisterLoadInvalidJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/bad.json"
+	require.NoError(t, os.WriteFile(path, []byte("{not valid json}"), 0o644))
+	p := newPersister(path)
+	_, err := p.load()
+	assert.Error(t, err, "expected load to fail on invalid JSON")
+}
+
+// TestNewWithPersisterLoadError exercises the error-return path of
+// NewWithPersister when the state file contains corrupt JSON.
+func TestNewWithPersisterLoadError(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/corrupt.json"
+	require.NoError(t, os.WriteFile(path, []byte("{corrupt"), 0o644))
+	_, err := NewWithPersister(nil, path)
+	assert.Error(t, err, "expected NewWithPersister to return an error on corrupt state file")
+}
+
+// TestPersistSaveErrorLogsAndContinues verifies that when the persister's save
+// call fails (bad path), persist() logs and does NOT panic. We achieve this by
+// writing a file where the persister expects a directory.
+func TestPersistSaveErrorLogsAndContinues(t *testing.T) {
+	dir := t.TempDir()
+	// Place a regular file where the state file's parent dir would be.
+	blocker := dir + "/notadir"
+	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o644))
+
+	mock := &mockCubeMaster{}
+	mgr := newTestManager(mock)
+	// Give it a persister pointing inside the blocker "directory".
+	mgr.persister = newPersister(blocker + "/sub/state.json")
+	mgr.isolated["node-persist-err"] = "host-err"
+
+	// persist() must not panic even though save will fail.
+	require.NotPanics(t, func() {
+		mgr.persist()
+	})
+}
+
+// TestApplyEvictionIsolateNodeFailureContinues verifies that when IsolateNode
+// fails, applyEviction still proceeds to list and pause sandboxes (best-effort).
+func TestApplyEvictionIsolateNodeFailureContinues(t *testing.T) {
+	id := "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+
+	type isolateFailMock struct {
+		mockCubeMaster
+	}
+	failMock := &struct {
+		mockCubeMaster
+	}{
+		mockCubeMaster: mockCubeMaster{
+			listResult: []cubemaster.SandboxBrief{{SandboxID: id}},
+		},
+	}
+	// Override IsolateNode to return an error.
+	mgr := &Manager{
+		cmIface:          &isolateErrMock{inner: &failMock.mockCubeMaster},
+		paused:           make(map[string][]PausedSandbox),
+		isolated:         make(map[string]string),
+		evictionInFlight: make(map[string]bool),
+	}
+
+	mgr.OnEviction(&types.EvictionEvent{
+		EventID:      "uid-isolate-fail",
+		PodName:      "sandbox-pod-iso-fail",
+		NodeName:     "worker-iso-fail",
+		InstanceType: "cubebox",
+	})
+
+	// Even though IsolateNode fails, PauseSandbox should still be called.
+	eventually(t, func() bool {
+		failMock.mockCubeMaster.mu.Lock()
+		defer failMock.mockCubeMaster.mu.Unlock()
+		return len(failMock.mockCubeMaster.paused) == 1
+	})
+
+	failMock.mockCubeMaster.mu.Lock()
+	defer failMock.mockCubeMaster.mu.Unlock()
+	assert.Equal(t, id, failMock.mockCubeMaster.paused[0])
+}
+
+// isolateErrMock delegates all calls to the inner mockCubeMaster but always
+// returns an error from IsolateNode.
+type isolateErrMock struct {
+	inner *mockCubeMaster
+}
+
+func (m *isolateErrMock) IsolateNode(_ context.Context, _ string) error {
+	return fmt.Errorf("forced IsolateNode failure")
+}
+
+func (m *isolateErrMock) UnisolateNode(ctx context.Context, nodeID string) error {
+	return m.inner.UnisolateNode(ctx, nodeID)
+}
+
+func (m *isolateErrMock) PauseSandbox(ctx context.Context, sandboxID, it, req string) error {
+	return m.inner.PauseSandbox(ctx, sandboxID, it, req)
+}
+
+func (m *isolateErrMock) ResumeSandbox(ctx context.Context, sandboxID, it, req string) error {
+	return m.inner.ResumeSandbox(ctx, sandboxID, it, req)
+}
+
+func (m *isolateErrMock) ListSandboxesByNode(ctx context.Context, hostID string) ([]cubemaster.SandboxBrief, error) {
+	return m.inner.ListSandboxesByNode(ctx, hostID)
+}
+
+func (m *isolateErrMock) ResolveHostID(ctx context.Context, identifier string) (string, error) {
+	return m.inner.ResolveHostID(ctx, identifier)
+}
+
+// TestRecordPausedDeduplicate verifies that recordPaused returns false (and
+// does not append) when the sandbox is already present in the paused list.
+func TestRecordPausedDeduplicate(t *testing.T) {
+	mock := &mockCubeMaster{}
+	mgr := newTestManager(mock)
+	ps := PausedSandbox{SandboxID: "aabb", InstanceType: "cubebox", EventID: "e1"}
+	mgr.paused["node-dup"] = []PausedSandbox{ps}
+
+	// Second recordPaused for same sandbox ID must return false.
+	ok := mgr.recordPaused("node-dup", ps)
+	assert.False(t, ok, "recordPaused should return false for duplicate sandbox")
+	assert.Len(t, mgr.paused["node-dup"], 1, "duplicate should not be appended")
+}
+
+// TestApplyReliefEmptyInstanceType covers the `instanceType == ""` fallback
+// branch inside applyRelief: a PausedSandbox with empty InstanceType should
+// default to "cubebox" for the ResumeSandbox call.
+func TestApplyReliefEmptyInstanceType(t *testing.T) {
+	id := "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+	mock := &mockCubeMaster{}
+	mgr := newTestManager(mock)
+	mgr.paused["node-empty-type"] = []PausedSandbox{{
+		SandboxID:    id,
+		InstanceType: "", // intentionally empty — should default to "cubebox"
+		EventID:      "uid-empty-type",
+	}}
+	mgr.isolated["node-empty-type"] = "host-empty-type"
+
+	mgr.OnPressureRelief("node-empty-type")
+
+	eventually(t, func() bool {
+		mock.mu.Lock()
+		defer mock.mu.Unlock()
+		return len(mock.resumed) == 1
+	})
+
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	assert.Equal(t, id, mock.resumed[0])
+}

@@ -285,3 +285,162 @@ func TestResolveHostIDFallsBackToNodeList(t *testing.T) {
 	assert.Equal(t, "node-b", hostID)
 	assert.Equal(t, []string{"/internal/meta/nodes/worker-ip", "/internal/meta/nodes"}, paths)
 }
+
+// TestUnisolateNodeHTTPError verifies that UnisolateNode propagates an error
+// when the server returns a non-200 HTTP status code.
+func TestUnisolateNodeHTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("internal server error"))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "", "", false)
+	err := c.UnisolateNode(context.Background(), "worker-01")
+	require.Error(t, err, "expected error when server returns 500")
+	assert.Contains(t, err.Error(), "500", "error must mention HTTP status code")
+}
+
+// TestUnisolateNodeRetCodeError verifies that UnisolateNode returns an error
+// when the HTTP status is 200 but the response ret_code indicates failure.
+func TestUnisolateNodeRetCodeError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"ret":{"ret_code":100404,"ret_msg":"node not found"}}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "", "", false)
+	err := c.UnisolateNode(context.Background(), "missing-node")
+	require.Error(t, err, "expected error when ret_code != 200")
+	assert.Contains(t, err.Error(), "100404")
+}
+
+// TestParseMetaNodeEnvelopedFormat verifies parseMetaNode handles the standard
+// CubeMaster envelope format {"ret":{...},"data":{...}}.
+func TestParseMetaNodeEnvelopedFormat(t *testing.T) {
+	body := []byte(`{"ret":{"ret_code":200},"data":{"node_id":"n1","host_ip":"1.2.3.4"}}`)
+	node, ok := parseMetaNode(body)
+	require.True(t, ok, "expected parseMetaNode to succeed for enveloped format")
+	assert.Equal(t, "n1", node.NodeID)
+	assert.Equal(t, "1.2.3.4", node.HostIP)
+}
+
+// TestParseMetaNodeBareFormat verifies parseMetaNode handles the bare format
+// {"node_id":"...","host_ip":"..."} with no ret envelope.
+func TestParseMetaNodeBareFormat(t *testing.T) {
+	body := []byte(`{"node_id":"n2","host_ip":"5.6.7.8"}`)
+	node, ok := parseMetaNode(body)
+	require.True(t, ok, "expected parseMetaNode to succeed for bare format")
+	assert.Equal(t, "n2", node.NodeID)
+	assert.Equal(t, "5.6.7.8", node.HostIP)
+}
+
+// TestParseMetaNodeInvalid verifies parseMetaNode returns (empty, false) when
+// the body carries neither a valid node_id in data nor as a bare field.
+func TestParseMetaNodeInvalid(t *testing.T) {
+	body := []byte(`{"garbage": true}`)
+	_, ok := parseMetaNode(body)
+	assert.False(t, ok, "expected parseMetaNode to fail for invalid body")
+}
+
+// TestDoContextCancelled verifies that do (and IsolateNode) returns an error
+// when the context is already cancelled before the request is made.
+func TestDoContextCancelled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"ret":{"ret_code":200}}`))
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately before the call
+
+	c := New(srv.URL, "", "", false)
+	err := c.IsolateNode(ctx, "node-x")
+	require.Error(t, err, "expected error when context is already cancelled")
+}
+
+// TestParseMetaNodeEnvelopedNon200Ret verifies that parseMetaNode returns false
+// when the envelope is present but ret_code != 200.
+func TestParseMetaNodeEnvelopedNon200Ret(t *testing.T) {
+	body := []byte(`{"ret":{"ret_code":404,"ret_msg":"not found"},"data":{"node_id":"n1","host_ip":"1.2.3.4"}}`)
+	_, ok := parseMetaNode(body)
+	assert.False(t, ok, "expected parseMetaNode to return false when ret_code != 200")
+}
+
+// TestResolveHostIDNodeNotFound verifies that ResolveHostID returns an error
+// when neither the direct lookup nor the list contains a matching node.
+func TestResolveHostIDNodeNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if r.URL.Path != "/internal/meta/nodes" {
+			// Direct lookup returns empty data so fast path fails.
+			w.Write([]byte(`{"ret":{"ret_code":200},"data":{}}`))
+			return
+		}
+		// List returns nodes but none match the identifier.
+		w.Write([]byte(`{"ret":{"ret_code":200},"data":[{"node_id":"node-a","host_ip":"10.0.0.1"}]}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "", "", false)
+	_, err := c.ResolveHostID(context.Background(), "unknown-identifier")
+	require.Error(t, err, "expected error when node not found")
+	assert.Contains(t, err.Error(), "node not found in CubeMaster")
+}
+
+// TestResolveHostIDListFails verifies that ResolveHostID returns an error when
+// both the direct node lookup and the fallback list request fail.
+func TestResolveHostIDListFails(t *testing.T) {
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		// First call (direct lookup): return HTTP 500 so do() returns error.
+		// Second call (list): also return HTTP 500.
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("error"))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "", "", false)
+	_, err := c.ResolveHostID(context.Background(), "bad-node")
+	require.Error(t, err, "expected error when both direct and list requests fail")
+	assert.Contains(t, err.Error(), "list nodes")
+}
+
+// TestListSandboxesByNodeHTTPError verifies that ListSandboxesByNode propagates
+// the error from do() when the server returns a non-200 HTTP status.
+func TestListSandboxesByNodeHTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte("service unavailable"))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "", "", false)
+	_, err := c.ListSandboxesByNode(context.Background(), "worker-01")
+	require.Error(t, err, "expected error when server returns non-200")
+	assert.Contains(t, err.Error(), "ListSandboxesByNode")
+}
+
+// TestResolveHostIDListUnmarshalError verifies that ResolveHostID returns an
+// error when the fallback node list returns non-JSON.
+func TestResolveHostIDListUnmarshalError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if r.URL.Path != "/internal/meta/nodes" {
+			// Direct lookup: empty data so fast path fails.
+			w.Write([]byte(`{"ret":{"ret_code":200},"data":{}}`))
+			return
+		}
+		// List returns invalid JSON.
+		w.Write([]byte(`not-valid-json`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "", "", false)
+	_, err := c.ResolveHostID(context.Background(), "some-node")
+	require.Error(t, err, "expected error when node list returns invalid JSON")
+	assert.Contains(t, err.Error(), "unmarshal")
+}

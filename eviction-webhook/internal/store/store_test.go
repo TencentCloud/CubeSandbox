@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/eviction-webhook/pkg/types"
 )
 
@@ -171,6 +172,28 @@ func TestStoreClosedFileReturnsError(t *testing.T) {
 	if err == nil {
 		t.Error("expected error on Save after Close")
 	}
+}
+
+// TestStoreNewInvalidPath verifies that New returns an error when the path
+// cannot be opened (e.g. empty string causes OpenFile to fail).
+func TestStoreNewInvalidPath(t *testing.T) {
+	_, err := New("")
+	require.Error(t, err, "expected error when creating store with empty path")
+}
+
+// TestStoreNewMkdirAllFails verifies that New returns an error when the parent
+// directory cannot be created because a regular file already exists at that path.
+func TestStoreNewMkdirAllFails(t *testing.T) {
+	// Create a regular file at the path that New will try to use as a directory.
+	blockingFile := filepath.Join(t.TempDir(), "blocking-file")
+	f, err := os.Create(blockingFile)
+	require.NoError(t, err)
+	f.Close()
+
+	// Attempt to create a store whose parent dir would be inside the blocking file.
+	storePath := filepath.Join(blockingFile, "subdir", "events.ndjson")
+	_, err = New(storePath)
+	require.Error(t, err, "expected error when MkdirAll cannot create directory inside a file")
 }
 
 func splitLines(s string) []string {
