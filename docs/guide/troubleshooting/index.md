@@ -58,4 +58,5 @@ lang: en-US
 | [Template Creation Times Out When the Sandbox CIDR Overlaps the LAN](./local-network-cidr-conflict.md) | luzhixing12345 | 2026-05-20 | deployment, networking, one-click |
 | [Host Mounts Fail with Permission Denied](./host-mount-permissions.md) | barry166 | 2026-06-14 | runtime, host-mount, permissions |
 | [How to Find CubeSandbox Component Logs (cubecli logs and the Guest Kernel Log)](./component-log-locations.md) | ls-ggg | 2026-07-15 | logging, cubelet, cubeshim, operations |
+| [WSL2: Two DNS Problems That Block One-Click Install and the Sandbox Data Plane](./wsl-dns.md) | Tantanovo | 2026-08-03 | deployment, networking, dns, wsl |
 | _Add your article here_ | - | - | - |
