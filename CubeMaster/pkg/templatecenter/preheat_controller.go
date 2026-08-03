@@ -106,6 +106,16 @@ func runPreheatController(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-preheatTriggerCh:
+			// Stop+drain before Reset (Go's documented guidance for Timer.Reset).
+			// Without it, a stale value from an already-fired timer stays in the
+			// channel and the next select would fire immediately, defeating the
+			// debounce under a burst of triggers.
+			if !debounceTimer.Stop() {
+				select {
+				case <-debounceTimer.C:
+				default:
+				}
+			}
 			debounceTimer.Reset(preheatDebounceDelay)
 			debounceCh = debounceTimer.C
 		case <-debounceCh:

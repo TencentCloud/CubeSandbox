@@ -943,6 +943,9 @@ func preHandleTemplatePreheat(config *Config) error {
 	if !p.Enabled {
 		return nil
 	}
+	if strings.TrimSpace(p.DownloadBaseURL) == "" {
+		return errors.New("template_preheat: download_base_url is required when enabled")
+	}
 	seen := make(map[string]struct{}, len(p.PinnedTemplates))
 	for _, pt := range p.PinnedTemplates {
 		if pt.TemplateID == "" {

@@ -339,22 +339,24 @@ func TestPreHandleTemplatePreheat(t *testing.T) {
 
 	// Enabled, valid: defaults applied, no error.
 	valid := &Config{TemplatePreheat: &TemplatePreheatConf{
-		Enabled: true,
+		Enabled:         true,
+		DownloadBaseURL: "http://master:8089",
 		PinnedTemplates: []PinnedTemplateConf{
 			{TemplateID: "tpl-a", Priority: 10, MinReplicas: 2, MaxReplicas: 3},
 		},
 	}}
 	assert.NoError(t, preHandleTemplatePreheat(valid))
 	assert.Equal(t, 20, valid.TemplatePreheat.PerNodeMaxTemplates)
-
 	cases := map[string]struct {
 		enabled bool
+		url     string
 		pinned  []PinnedTemplateConf
 	}{
-		"empty template_id": {true, []PinnedTemplateConf{{TemplateID: ""}}},
-		"min negative":      {true, []PinnedTemplateConf{{TemplateID: "tpl-a", MinReplicas: -1}}},
-		"max < min":         {true, []PinnedTemplateConf{{TemplateID: "tpl-a", MinReplicas: 3, MaxReplicas: 2}}},
-		"duplicate": {true, []PinnedTemplateConf{
+		"empty template_id":         {true, "http://x", []PinnedTemplateConf{{TemplateID: ""}}},
+		"min negative":              {true, "http://x", []PinnedTemplateConf{{TemplateID: "tpl-a", MinReplicas: -1}}},
+		"max < min":                 {true, "http://x", []PinnedTemplateConf{{TemplateID: "tpl-a", MinReplicas: 3, MaxReplicas: 2}}},
+		"missing download_base_url": {true, "", []PinnedTemplateConf{{TemplateID: "tpl-a", MaxReplicas: 2}}},
+		"duplicate": {true, "http://x", []PinnedTemplateConf{
 			{TemplateID: "tpl-a", MaxReplicas: 2},
 			{TemplateID: "tpl-a", MaxReplicas: 2},
 		}},
@@ -363,6 +365,7 @@ func TestPreHandleTemplatePreheat(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			err := preHandleTemplatePreheat(&Config{TemplatePreheat: &TemplatePreheatConf{
 				Enabled:         tc.enabled,
+				DownloadBaseURL: tc.url,
 				PinnedTemplates: tc.pinned,
 			}})
 			assert.Error(t, err, "expected validation error for %s", name)
