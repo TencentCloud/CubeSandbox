@@ -354,7 +354,7 @@ patch_cubemaster_external_deps() {
     # Match only on the YAML key prefix ('addr:'/'user:'/'pwd:'/'db_name:') and
     # accept any current value, so these patterns keep working even if the
     # conf.yaml template is regenerated with different defaults. These keys only
-    # appear in the MySQL sections (ossdb_config/instance_db_config), so without
+    # appear in the MySQL section (instance_db_config), so without
     # a trailing 'g' flag each line is patched exactly once and Redis fields
     # (nodes:/password:) are never touched.
     sed -i \

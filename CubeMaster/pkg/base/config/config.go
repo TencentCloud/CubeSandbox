@@ -34,7 +34,6 @@ type Config struct {
 	AuthConf         *AuthConf             `yaml:"auth"`
 	Log              *log.Conf             `yaml:"log"`
 	CubeletConf      *CubeletConf          `yaml:"cubelet_conf"`
-	OssDBConfig      *DBConfig             `yaml:"ossdb_config"`
 	InstanceDBConfig *DBConfig             `yaml:"instance_db_config"`
 	RedisConf        *RedisConf            `yaml:"redis"`
 	ExtraConf        *ExtraConf            `yaml:"extra_conf"`
@@ -649,10 +648,6 @@ type HookWhitelist struct {
 }
 
 func GetDbConfig() *DBConfig {
-	return cfg.OssDBConfig
-}
-
-func GetInstanceConfig() *DBConfig {
 	return cfg.InstanceDBConfig
 }
 

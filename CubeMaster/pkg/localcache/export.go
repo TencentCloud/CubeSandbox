@@ -56,7 +56,7 @@ func Init(ctx context.Context) error {
 	l.imageCache = cache.New(0, 0)
 	l.templateNodeCache = cache.New(0, 0)
 	l.db = db.Init(config.GetDbConfig())
-	l.dbAddr = config.GetConfig().OssDBConfig.Addr
+	l.dbAddr = config.GetDbConfig().Addr
 	l.totalSelfNodes = config.GetConfig().Common.DefaultHeadlessServiceNodesNum
 	l.sortedNodesByClusters = make(map[string]node.NodeList)
 	l.sortedNodesByClusters[constants.DefaultInstanceTypeName] = node.NodeList{}

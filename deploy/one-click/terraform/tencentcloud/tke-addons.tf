@@ -311,18 +311,6 @@ resource "kubernetes_secret" "cubemaster_conf" {
         # checks THIS template uses cube_network_config (and not cubevs_context).
         cube_box_req_template = "{\"volumes\":[{\"name\":\"tmp\",\"volume_source\":{\"empty_dir\":{\"medium\":0}}}],\"containers\":[{\"name\":\"cubebox-default\",\"envs\":[{\"key\":\"TZ\",\"value\":\"Asia/Shanghai\"},{\"key\":\"TERM\",\"value\":\"xterm\"}],\"volume_mounts\":[{\"name\":\"tmp\",\"container_path\":\"/\"}],\"security_context\":{\"privileged\":true,\"readonly_rootfs\":false,\"no_new_privs\":false}}],\"network_type\":\"tap\",\"cube_network_config\":{\"allowInternetAccess\":true,\"denyOut\":[\"10.0.0.0/8\",\"100.64.0.0/10\",\"172.16.0.0/12\",\"192.168.0.0/16\"]}}"
       }
-      ossdb_config = {
-        addr                       = "${tencentcloud_mysql_instance.mysql.intranet_ip}:3306"
-        user                       = local.cube_user
-        pwd                        = local.cube_password
-        db_name                    = local.cube_db
-        conn_timeout               = 5
-        read_timeout               = 5
-        write_timeout              = 5
-        max_idle_conns             = 5
-        max_open_conns             = 20
-        max_conn_life_time_seconds = 300
-      }
       instance_db_config = {
         addr                       = "${tencentcloud_mysql_instance.mysql.intranet_ip}:3306"
         user                       = local.cube_user

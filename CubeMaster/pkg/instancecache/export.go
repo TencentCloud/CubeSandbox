@@ -55,8 +55,8 @@ func Init(ctx context.Context) error {
 	_ = ctx
 	// Schema is owned by pkg/base/dao/migrate and applied at startup
 	// before this package's Init runs.
-	l.db = db.Init(config.GetInstanceConfig())
-	l.dbAddr = config.GetInstanceConfig().Addr
+	l.db = db.Init(config.GetDbConfig())
+	l.dbAddr = config.GetDbConfig().Addr
 	return nil
 }
 

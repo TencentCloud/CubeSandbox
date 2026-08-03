@@ -251,7 +251,7 @@ func ListTemplates(ctx context.Context) ([]TemplateInfo, error) {
 
 func Init(ctx context.Context) error {
 	_ = ctx
-	if config.GetInstanceConfig() == nil {
+	if config.GetDbConfig() == nil {
 		return ErrTemplateStoreNotInitialized
 	}
 	var initErr error
@@ -259,8 +259,8 @@ func Init(ctx context.Context) error {
 		// Schema is owned by pkg/base/dao/migrate and applied in main.go
 		// before any business package Init runs; here we only attach to
 		// the existing *gorm.DB.
-		store.db = db.Init(config.GetInstanceConfig())
-		store.dbAddr = config.GetInstanceConfig().Addr
+		store.db = db.Init(config.GetDbConfig())
+		store.dbAddr = config.GetDbConfig().Addr
 		if initErr = sandboxspec.Init(store.db); initErr != nil {
 			return
 		}
