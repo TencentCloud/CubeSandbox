@@ -161,7 +161,11 @@ EOF
 （`127.0.0.54` 只是 CoreDNS 的内部 loopback 绑定，`dnsmasq` 会把 `cube.app`
 查询转发给它；它不是面向客户端的解析器，**不要写进 `/etc/resolv.conf`** ——
 loopback 地址在 Docker 容器内不可达，而这正是引入 dummy link 地址要解决的问题。）
-当前生效的地址可以从运行中的 Corefile 确认。
+当前部署上生效的地址可以这样确认：
+
+```bash
+grep -n 'bind' /usr/local/services/cubetoolbox/coredns/Corefile
+```
 
 继续之前先把两个方向都验证一遍（`dig` 来自 `dnsutils` / `bind9-dnsutils` 包，
 Ubuntu 默认不装 —— 下面的 `getent` 检查不依赖它）：
@@ -205,6 +209,29 @@ cat /etc/resolv.conf
 - `systemd-resolved` 路径下的 `cube-dns0` dummy link 及其 `~cube.app` 路由
   也会随 WSL 重启消失，直到服务单元重启；`dnsmasq` 回退路径下，
   link 和 `server=/cube.app/...` 转发规则同理。
+
+`cube-sandbox-dns.service` 是 `Type=oneshot` 单元，dummy link 与宿主路由由它创建，
+所以重启这个单元才能把它们重建出来。`wsl --shutdown` 之后一套可用的恢复流程是：
+
+```bash
+# 1. 先挂回 XFS（cubelet 需要）
+sudo mount -o loop /path/to/cubelet.img /data/cubelet
+
+# 2. 把服务拉起来
+sudo systemctl start cube-sandbox-control.target
+
+# 3. 如果 *.cube.app 仍然解析不了，重建 DNS 路由
+sudo systemctl restart cube-sandbox-coredns.service
+sudo systemctl restart cube-sandbox-dns.service
+
+# 4. 确认
+ip addr show cube-dns0
+getent hosts foo.cube.app
+```
+
+注意先重启 `cube-sandbox-coredns.service` 再重启 `cube-sandbox-dns.service`：
+后者对前者声明了 `Requires=` / `BindsTo=`，会等 CoreDNS 真正开始监听之后
+才切换宿主机的解析。
 
 ## 参考资料
 

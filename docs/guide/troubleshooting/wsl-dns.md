@@ -180,7 +180,11 @@ loopback bind, which `dnsmasq` forwards `cube.app` queries to; it is not a
 client-facing resolver and must not be written to `/etc/resolv.conf` — a
 loopback address there would be unreachable from inside Docker containers,
 which is exactly the problem the dummy-link address was introduced to solve.)
-You can confirm the live address from the running Corefile.
+To confirm the live address on your deployment:
+
+```bash
+grep -n 'bind' /usr/local/services/cubetoolbox/coredns/Corefile
+```
 
 Verify both directions before moving on (`dig` comes from `dnsutils` /
 `bind9-dnsutils`, which Ubuntu does not install by default — the `getent`
@@ -232,6 +236,30 @@ confusing errors on the next run:
   `~cube.app` routing are also gone until the service unit restarts; on the
   `dnsmasq` fallback path the same applies to the link and the
   `server=/cube.app/...` forwarder rule.
+
+`cube-sandbox-dns.service` is a `Type=oneshot` unit that owns the dummy link
+and the host routing, so restarting it is what rebuilds them. A working
+recovery sequence after `wsl --shutdown` is:
+
+```bash
+# 1. remount the XFS volume first (cubelet needs it)
+sudo mount -o loop /path/to/cubelet.img /data/cubelet
+
+# 2. bring the services back
+sudo systemctl start cube-sandbox-control.target
+
+# 3. if *.cube.app still does not resolve, rebuild the DNS routing
+sudo systemctl restart cube-sandbox-coredns.service
+sudo systemctl restart cube-sandbox-dns.service
+
+# 4. confirm
+ip addr show cube-dns0
+getent hosts foo.cube.app
+```
+
+Restart `cube-sandbox-coredns.service` before `cube-sandbox-dns.service`: the
+latter declares `Requires=` / `BindsTo=` on the former and waits for CoreDNS to
+be listening before it switches host resolution over.
 
 ## References
 
