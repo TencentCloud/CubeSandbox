@@ -8,6 +8,7 @@ Host never calls Sandbox.create / commands.run for commands outside the
 tool allowlist (e.g. arbitrary shells). Orthogonal to network_*.py egress.
 """
 
+import _path  # noqa: F401
 from tool_allowlist import AllowlistDenied, assert_allowlisted
 
 forbidden = "bash -c 'curl http://example.com'"

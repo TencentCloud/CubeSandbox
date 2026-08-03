@@ -46,6 +46,12 @@ class ToolAllowlistTests(unittest.TestCase):
         self.assertTrue(is_allowlisted(cmd))
         self.assertEqual(assert_allowlisted(cmd), cmd)
 
+    def test_toolbox_hello_workload_allowlisted(self) -> None:
+        cmd = "cube-tool toolbox-hello"
+        self.assertTrue(is_allowlisted(cmd))
+        self.assertEqual(assert_allowlisted(cmd), cmd)
+        self.assertIn("toolbox-hello", DEFAULT_ALLOWED_BINARIES)
+
     def test_profile_file_matches_default_toolbox(self) -> None:
         lines = {
             line.strip()

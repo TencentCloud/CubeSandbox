@@ -46,6 +46,8 @@ DEFAULT_ALLOWED_BINARIES: frozenset[str] = frozenset(
         "head",
         "wc",
         "sha256sum",
+        # Perceptible image workload (also installed under /usr/local/bin).
+        "toolbox-hello",
     }
 )
 

@@ -13,6 +13,8 @@ This is not a replacement for examples/network-policy; it shows the stack.
 
 from __future__ import annotations
 
+import _path  # noqa: F401  # example root on sys.path
+
 import os
 
 from e2b_code_interpreter import Sandbox

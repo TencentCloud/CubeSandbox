@@ -14,6 +14,8 @@ Recommended production shape for this example:
 
 from __future__ import annotations
 
+import _path  # noqa: F401  # example root on sys.path
+
 import os
 
 from e2b_code_interpreter import Sandbox

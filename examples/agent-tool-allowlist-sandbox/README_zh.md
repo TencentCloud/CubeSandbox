@@ -2,77 +2,100 @@
 
 [English](README.md)
 
-[#645](https://github.com/TencentCloud/CubeSandbox/issues/645) **场景模板**：Agent
-宿主侧 **工具 argv 策略** + 带真实 guest runner（`/usr/local/bin/cube-tool`）的
-BYOI 镜像。与 `network-policy`（出口策略）同层——给用户可复制的平台控制面样例，
-而不是又一个语言运行时。
+[#645](https://github.com/TencentCloud/CubeSandbox/issues/645) 的 **BYOI 受限工具箱模板**：
+镜像内提供 `/usr/local/bin/cube-tool` 与可感知负载 `toolbox-hello`。
 
-**为何单独成例（回应 [#1062](https://github.com/TencentCloud/CubeSandbox/pull/1062) 关闭意见）**
-- 不是在 `sandbox-code` 上叠薄脚本：本目录自建 OCI 镜像、安装 `cube-tool`、嵌入
-  `tool-profile.txt`，并用 `verify_template.py` 在真集群冒烟。
-- 不是第二份代码解释器教程：交付物是 **宿主+guest 工具策略**，并可叠加断网 /
-  CIDR / pause / 扇出。
+宿主脚本在 `Sandbox.create` 前拒绝非白名单 argv；推荐 `cube-tool <name>`，由
+guest 再对照 `/etc/cube-sandbox/tool-profile.txt`。
 
-**你会得到**
-- 宿主机在 `Sandbox.create` / `commands.run` 前拒绝非法工具
-- 镜像安装 `/usr/local/bin/cube-tool`、`tool-profile.txt`、`/workspace`——guest
-  会再校验工具名（不是只放一个文本文件）
-- 可叠加断网、CIDR `allow_out`、pause/resume、多沙箱扇出
+**这不是：** 内核 jail、无 bash 基础镜像、语言运行时或 LLM Agent。
 
-**这不是：** 内核级 jail、无 bash 基础镜像、语言运行时，或 LLM Agent。
+## 前置
+
+- Cube 集群 + `cubemastercli`
+- Docker，以及节点可拉取的镜像仓库
+- Python 3.10+
+
+```bash
+cd examples/agent-tool-allowlist-sandbox
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+## 1. 构建模板镜像
+
+```bash
+docker build --platform linux/amd64 \
+  -t <your-registry>/agent-tool-allowlist-sandbox:latest \
+  .
+
+docker push <your-registry>/agent-tool-allowlist-sandbox:latest
+```
+
+无集群本地冒烟：
+
+```bash
+docker run --rm <your-registry>/agent-tool-allowlist-sandbox:latest \
+  cube-tool toolbox-hello
+# 期望 WORKLOAD_OK
+```
+
+## 2. 注册为 Cube 模板
+
+```bash
+cubemastercli tpl create-from-image \
+  --image <your-registry>/agent-tool-allowlist-sandbox:latest \
+  --writable-layer-size 1G \
+  --expose-port 49983 \
+  --probe 49983 \
+  --probe-path /health
+
+cubemastercli tpl watch --job-id <job_id>
+```
+
+`--probe` 指向基础镜像 **envd**。将 READY 的 template id 写入 `.env` 的
+`CUBE_TEMPLATE_ID`，并配置 `E2B_API_URL`。
+
+## 3. 配置宿主驱动
+
+```bash
+# .env
+E2B_API_URL=http://<node>:3000
+CUBE_TEMPLATE_ID=tpl-...
+```
+
+## 4. 运行（主路径）
+
+```bash
+python run.py
+```
+
+期望：宿主拒绝 `bash` → MicroVM → `cube-tool toolbox-hello` 输出 `WORKLOAD_OK`
+→ 读到 `/workspace/out/hello.txt` → guest 拒绝 `cube-tool bash` → **`RUN_OK`**。
+
+`verify_template.py` 是同一路径的薄别名。
 
 ## 资源建议
 
 | 项 | 建议 |
 |----|------|
-| 可写层 | `--writable-layer-size 1G`（演示脚本写 `/tmp`；镜像内 `/workspace` 已 chown 给 uid 1000） |
-| 端口 | expose/probe `49983`（`cubesandbox-base` 的 envd） |
-| 扇出 | 共享节点上保持 `N≤2` |
-| CPU/内存 | 默认模板配额即可跑 echo/artifact 演示 |
+| 可写层 | `--writable-layer-size 1G` |
+| 端口 | expose/probe `49983`（envd） |
+| CPU/内存 | 默认配额即可跑 hello 负载 |
+| 扇出（extras） | 共享节点保持 `N≤2` |
 
-## 快速开始
+## 进阶（可选）
+
+见 [`extras/README.md`](extras/README.md)。例如：
 
 ```bash
-pip install -r requirements.txt
-cp .env.example .env
-
-docker build -t agent-tool-allowlist-sandbox:latest .
-docker run --rm agent-tool-allowlist-sandbox:latest cube-tool echo build-ok
-
-cubemastercli tpl create-from-image \
-  --image <仓库或本地>/agent-tool-allowlist-sandbox:latest \
-  --writable-layer-size 1G \
-  --expose-port 49983 \
-  --probe 49983 \
-  --probe-path /health
+python extras/tool_allowlist_limits.py
+python extras/tool_allowlist_checkpoint.py
 ```
-
-`--probe 49983 --probe-path /health` 指向基础镜像自带的 **envd**（继承
-entrypoint）；本 Dockerfile 只 `EXPOSE` 该端口，不另起健康检查服务。
-
-把 READY 模板 id 写入 `.env` 的 `CUBE_TEMPLATE_ID`。
-
-| 步骤 | 命令 | 期望 |
-|------|------|------|
-| 边界/单测/拒绝 | `tool_allowlist_limits.py` / unittest / `deny` | OK |
-| 模板冒烟 | `verify_template.py` | `TEMPLATE_VERIFY_OK` |
-| Guest runner | `tool_allowlist_guest_runner.py` | `GUEST_RUNNER_OK` |
-| allow / loop / checkpoint / egress / fanout | 见英文 README 表 | 对应 `*_OK` |
-
-## 原理
-
-推荐路径：宿主白名单放行 `cube-tool` → 镜像内 `cube-tool` 对照
-`/etc/cube-sandbox/tool-profile.txt` 再 `exec`。裸 `echo`/`cat` 仍可过宿主门控
-（演示用）；生产更应只放行 `cube-tool`。
 
 ## 限制
 
-- 基础镜像仍有 shell；绕过 `cube-tool` 直接调 bash/路径二进制，不在 guest wrapper 范围内。
+- 基础镜像仍有 shell；绕过 `cube-tool` 不在 guest wrapper 范围内。
 - 宿主白名单含裸 `cat` 时，`cat /etc/passwd` 仍过宿主门控。
-- 文档化残差（本门控不是完整 shell 解析器）：简单重定向（`echo … > file`、`cat < /etc/passwd`）
-  以及 `*` / `?` 通配（可能由 guest shell 先展开）。
-- 宿主门控**会拒绝** bash 进程替换（`<(…)` / `>(…)`）以及 `/dev/tcp` / `/dev/udp`
-  （否则 argv0 仍在白名单内，guest shell 却能拉起其他程序或开套接字）。
+- 简单重定向/通配为残差；进程替换与 `/dev/tcp`|/`/dev/udp` 会被宿主拒绝。
 - 扩白名单需 `extra_binaries` + `allow_unsafe_allowlist_extension=True`。
-- `cubesandbox-base` 已含 `curl`；`INSTALL_CURL=1` 仅用于自定义缺 curl 的 base。
-- Fan-out 会创建真实 VM，共享集群请保持小 `N`。

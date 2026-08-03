@@ -17,6 +17,7 @@ Cases:
   6) Reminder: allowlisting cat/ls is not guest least-privilege
 """
 
+import _path  # noqa: F401
 from tool_allowlist import AllowlistDenied, assert_allowlisted, is_allowlisted
 
 

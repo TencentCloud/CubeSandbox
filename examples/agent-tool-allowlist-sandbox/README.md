@@ -2,120 +2,115 @@
 
 [中文文档](README_zh.md)
 
-[#645](https://github.com/TencentCloud/CubeSandbox/issues/645) **scenario template**:
-agent-host **tool argv policy** + a BYOI image with a real guest runner
-(`/usr/local/bin/cube-tool`). Same shelf as `network-policy` (egress) — a
-platform control-plane pattern users copy — not another language runtime.
+Bring-your-own-image **restricted toolbox** template for
+[#645](https://github.com/TencentCloud/CubeSandbox/issues/645): a MicroVM that
+ships `/usr/local/bin/cube-tool` plus a real guest workload (`toolbox-hello`).
 
-**Why a dedicated example (answer to [#1062](https://github.com/TencentCloud/CubeSandbox/pull/1062) close notes)**
-- Not a thin script on `sandbox-code`: this tree builds its **own** OCI image,
-  installs `cube-tool`, embeds `tool-profile.txt`, and verifies with
-  `verify_template.py` on a live cluster.
-- Not a second code-interpreter tutorial: the product is **host+guest tool
-  policy**, stacked with airgap / CIDR / pause / fan-out.
-
-**What you get**
-- Host refuses illegal tools before `Sandbox.create` / `commands.run`
-- Image installs `/usr/local/bin/cube-tool` + `/etc/cube-sandbox/tool-profile.txt`
-  + `/workspace` — guest re-checks the profile (not just a text file on disk)
-- Stacks with airgap, CIDR `allow_out`, pause/resume, and parallel sandboxes
+Host scripts refuse non-allowlisted argv before `Sandbox.create`. Prefer
+`cube-tool <name>` so the guest re-checks `/etc/cube-sandbox/tool-profile.txt`.
 
 **What this is not:** kernel jail, bash-free base, language runtime, or an LLM agent.
 
-## Use cases
+## Prerequisites
 
-- Agent hosts that should prefer `cube-tool <name> …` over raw `bash`/`curl`
-- Defense-in-depth: host allowlists `cube-tool`; guest refuses off-profile names
-- Differentiated stacks: checkpoint / egress / multi-sandbox fan-out
+- Cube Sandbox cluster + `cubemastercli` on `$PATH`
+- Docker (build host) and a registry the Cube nodes can pull
+- Python 3.10+ for the host driver
+
+```bash
+cd examples/agent-tool-allowlist-sandbox
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+## 1. Build the template image
+
+```bash
+docker build --platform linux/amd64 \
+  -t <your-registry>/agent-tool-allowlist-sandbox:latest \
+  .
+
+docker push <your-registry>/agent-tool-allowlist-sandbox:latest
+```
+
+Local image smoke (no cluster):
+
+```bash
+docker run --rm <your-registry>/agent-tool-allowlist-sandbox:latest \
+  cube-tool toolbox-hello
+# expect WORKLOAD_OK
+```
+
+## 2. Register as a Cube template
+
+```bash
+cubemastercli tpl create-from-image \
+  --image <your-registry>/agent-tool-allowlist-sandbox:latest \
+  --writable-layer-size 1G \
+  --expose-port 49983 \
+  --probe 49983 \
+  --probe-path /health
+
+cubemastercli tpl watch --job-id <job_id>
+```
+
+`--probe 49983 --probe-path /health` targets **envd** from `cubesandbox-base`
+(inherited entrypoint). This Dockerfile only `EXPOSE`s that port.
+
+Put the READY template id into `.env` as `CUBE_TEMPLATE_ID` (also set
+`E2B_API_URL`).
+
+## 3. Configure the host driver
+
+```bash
+# .env
+E2B_API_URL=http://<node>:3000
+CUBE_TEMPLATE_ID=tpl-...
+```
+
+## 4. Run (happy path)
+
+```bash
+python run.py
+```
+
+Expect: host deny for `bash` → MicroVM → `cube-tool toolbox-hello` prints
+`WORKLOAD_OK` → artifact `/workspace/out/hello.txt` → guest deny for
+`cube-tool bash` → **`RUN_OK`**.
+
+`verify_template.py` is a thin alias of the same path.
 
 ## Resources
 
 | Item | Suggestion |
 |------|------------|
-| Writable layer | `--writable-layer-size 1G` (demos write under `/tmp`; `/workspace` is chowned to uid 1000) |
-| Ports | expose/probe `49983` (envd from `cubesandbox-base`) |
-| Fan-out | keep `N≤2` on shared nodes |
-| CPU/mem | default template quotas are enough for echo/artifact demos |
-
-## Prerequisites
-
-- Cube Sandbox cluster + `cubemastercli` + Docker + Python 3.10+
-
-```bash
-pip install -r requirements.txt
-cp .env.example .env
-```
-
-## Quick start
-
-### 1 — Build & register
-
-```bash
-docker build -t agent-tool-allowlist-sandbox:latest .
-# optional: --build-arg INSTALL_CURL=1
-
-# local image smoke (no cluster)
-docker run --rm agent-tool-allowlist-sandbox:latest \
-  cube-tool echo build-ok
-
-cubemastercli tpl create-from-image \
-  --image <registry-or-local>/agent-tool-allowlist-sandbox:latest \
-  --writable-layer-size 1G \
-  --expose-port 49983 \
-  --probe 49983 \
-  --probe-path /health
-```
-
-`--probe 49983 --probe-path /health` targets **envd** from `cubesandbox-base`
-(inherited entrypoint); this Dockerfile only `EXPOSE`s that port and does not
-add its own health server.
-
-Put READY template id into `.env` as `CUBE_TEMPLATE_ID`.
-
-### 2 — Run demos
-
-| Step | Command | Expect | Cluster |
-|------|---------|--------|---------|
-| Limits | `python tool_allowlist_limits.py` | `LIMITS_DEMO_OK` | no |
-| Unit tests | `python -m unittest test_tool_allowlist.py -v` | OK | no |
-| Deny | `python tool_allowlist_deny.py` | denied | no |
-| Template smoke | `python verify_template.py` | `TEMPLATE_VERIFY_OK` | yes |
-| Guest runner | `python tool_allowlist_guest_runner.py` | `GUEST_RUNNER_OK` | yes |
-| Allow + airgap | `python tool_allowlist_allow.py` | echo + artifact | yes |
-| Loop | `python tool_agent_loop.py` | `AGENT_LOOP_OK` | yes |
-| Checkpoint | `python tool_allowlist_checkpoint.py` | `CHECKPOINT_OK` | yes |
-| Egress stack | `python tool_allowlist_egress.py` | `EGRESS_STACK_OK` | yes |
-| Fan-out | `python tool_allowlist_fanout.py` | `FANOUT_OK` | yes |
-
-## How it works
-
-```
-propose: cube-tool echo hi
-    │
-    ▼
-host assert_allowlisted   (argv0 must be allowlisted; prefer cube-tool)
-    │
-    ▼
-Sandbox.create(this BYOI)
-    │
-    ▼
-/usr/local/bin/cube-tool  → checks tool-profile.txt → exec echo
-```
-
-Bare allowlisted tools (`echo`, `cat`, …) still pass the host gate for demos;
-prefer `cube-tool` so the guest profile is enforced.
+| Writable layer | `--writable-layer-size 1G` |
+| Ports | expose/probe `49983` (envd) |
+| CPU/mem | default template quotas enough for the hello workload |
+| Fan-out (extras) | keep `N≤2` on shared nodes |
 
 ## Directory
 
 ```
-├── Dockerfile                 # installs cube-tool + profile + /workspace
-├── tool-profile.txt           # guest allowlist (copied into the image)
-├── guest/cube-tool            # in-guest runner
-├── workspace/                 # default WORKDIR in the image
-├── tool_allowlist.py          # host argv gate
-├── tool_allowlist_*.py        # demos
-├── verify_template.py
-└── …
+├── Dockerfile              # installs cube-tool + toolbox-hello + profile
+├── guest/cube-tool         # in-guest profile runner
+├── guest/toolbox-hello     # perceptible workload binary
+├── tool-profile.txt        # guest allowlist
+├── workspace/              # default WORKDIR (+ out/)
+├── run.py                  # happy path
+├── tool_allowlist.py       # host argv gate
+├── test_tool_allowlist.py  # host-only unit tests
+└── extras/                 # optional stacks (checkpoint / egress / fan-out / …)
+```
+
+## Advanced (optional)
+
+See [`extras/README.md`](extras/README.md). Examples:
+
+```bash
+python extras/tool_allowlist_limits.py    # LIMITS_DEMO_OK (host-only)
+python extras/tool_allowlist_deny.py
+python extras/tool_allowlist_checkpoint.py
 ```
 
 ## Limits
@@ -123,13 +118,7 @@ prefer `cube-tool` so the guest profile is enforced.
 - Base image still has a shell; callers that bypass `cube-tool` are out of scope
   for the guest wrapper.
 - Allowlisting bare `cat` still permits `cat /etc/passwd` through the host gate.
-- Documented residuals (host gate is not a full shell parser): simple redirects
-  (`echo … > file`, `cat < /etc/passwd`) and glob chars `*` / `?` (guest shell
-  may expand them before the binary runs).
-- Host gate **does** refuse bash process substitution (`<(…)`, `>(…)`) and
-  `/dev/tcp` / `/dev/udp` (argv0 would otherwise stay allowlisted while the
-  guest shell runs other programs or opens sockets).
+- Simple redirects / globs remain residuals; bash process substitution and
+  `/dev/tcp` / `/dev/udp` are refused by the host gate.
 - Growing the allowlist needs `extra_binaries` + `allow_unsafe_allowlist_extension=True`.
-- `cubesandbox-base` already includes `curl`; `INSTALL_CURL=1` is only for custom
-  bases that omit it. Demo “curl missing” branches are defensive fallbacks.
-- Fan-out creates real VMs — keep `N` small.
+- `cubesandbox-base` already includes `curl`.

@@ -10,6 +10,8 @@ each running only allowlisted tools. Not multi-agent orchestration.
 
 from __future__ import annotations
 
+import _path  # noqa: F401  # example root on sys.path
+
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 

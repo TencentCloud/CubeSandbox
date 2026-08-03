@@ -28,6 +28,8 @@ check. SDK surfaces such as sandbox.files.* / sandbox.run_code() are a
 
 from __future__ import annotations
 
+import _path  # noqa: F401  # example root on sys.path
+
 import json
 import os
 import urllib.error

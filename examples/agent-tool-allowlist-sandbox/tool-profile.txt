@@ -6,3 +6,4 @@ cat
 head
 wc
 sha256sum
+toolbox-hello
