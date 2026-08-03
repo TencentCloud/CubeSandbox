@@ -254,11 +254,19 @@ class E2BAdapter(SandboxAdapter):
         if commands is None:
             raise RuntimeError("E2B sandbox object does not expose commands")
         command_exit_exception = _import_e2b_command_exit_exception()
+        # Pass cwd="/" only for non-root users whose /nonexistent home (e.g.
+        # nobody on the e2b template) would trip envd's "cwd does not exist"
+        # check. Root keeps envd's default (the user's home), matching the
+        # cubesandbox SDK's behavior in _commands.py.
+        supports_user = _accepts_keyword(commands.run, "user")
+        supports_cwd = _accepts_keyword(commands.run, "cwd")
         try:
-            if _accepts_keyword(commands.run, "user"):
-                result = commands.run(command, timeout=timeout, user=user)
-            else:
-                result = commands.run(command, timeout=timeout)
+            kwargs: dict[str, Any] = {"timeout": timeout}
+            if supports_user:
+                kwargs["user"] = user
+            if supports_cwd and user != "root":
+                kwargs["cwd"] = "/"
+            result = commands.run(command, **kwargs)
         except Exception as exc:  # E2B raises on non-zero command exits.
             if command_exit_exception is None or not isinstance(exc, command_exit_exception):
                 raise
@@ -307,26 +315,42 @@ class E2BAdapter(SandboxAdapter):
             raise RuntimeError(f"E2B files object does not expose any of {names!r}")
         return method(*args)
 
-    def list_files(self, path: str) -> list[dict[str, Any]]:
+    # NOTE: the e2b envd filesystem RPCs do not honor a per-request user (see
+    # docs/dev/pending-envd-fixes.md), so the ``user`` kwarg is accepted for
+    # interface parity with the cubesandbox adapter but intentionally not
+    # forwarded to the e2b SDK.
+    def list_files(self, path: str, *, user: str = "root") -> list[dict[str, Any]]:
         return [_normalize_info_value(item) for item in self._files_call(("list",), path)]
 
-    def stat_file(self, path: str) -> dict[str, Any]:
+    def stat_file(self, path: str, *, user: str = "root") -> dict[str, Any]:
         return dict(_normalize_info_value(self._files_call(("stat", "get_info"), path)))
 
-    def file_exists(self, path: str) -> bool:
+    def file_exists(self, path: str, *, user: str = "root") -> bool:
         return bool(self._files_call(("exists",), path))
 
-    def remove_file(self, path: str) -> None:
+    def remove_file(self, path: str, *, user: str = "root") -> None:
         self._files_call(("remove", "delete"), path)
 
-    def rename_file(self, old_path: str, new_path: str) -> dict[str, Any]:
+    def rename_file(self, old_path: str, new_path: str, *, user: str = "root") -> dict[str, Any]:
         value = self._files_call(("rename", "move"), old_path, new_path)
         return dict(_normalize_info_value(value) or {})
 
-    def make_dir(self, path: str) -> None:
+    def make_dir(self, path: str, *, user: str = "root") -> None:
         self._files_call(("make_dir", "mkdir"), path)
 
-    def write_files(self, files: list[tuple[str, str | bytes]]) -> int:
+    def list_dir(self, path: str, *, user: str = "root") -> list[str]:
+        entries = self._files_call(("list",), path)
+        result: list[str] = []
+        for e in entries or []:
+            if isinstance(e, str):
+                result.append(e)
+            elif hasattr(e, "name"):
+                result.append(str(e.name))
+            elif isinstance(e, dict):
+                result.append(str(e.get("name", e)))
+        return result
+
+    def write_files(self, files: list[tuple[str, str | bytes]], *, user: str = "root") -> int:
         entries = [{"path": path, "data": data} for path, data in files]
         return len(self._files_call(("write_files",), entries))
 

@@ -6,7 +6,7 @@
 Mirrors the E2B SDK's ``sandbox.pty`` API but speaks envd's Connect-JSON RPC
 directly over httpx — no dependency on the ``e2b`` / ``e2b_connect`` Python
 packages. The on-the-wire encoding is the same one used by
-:func:`cubesandbox._commands._run_with_connect_fallback`: each Connect frame
+:func:`cubesandbox._commands.Commands._run`: each Connect frame
 is a 5-byte envelope (1 flags byte + big-endian uint32 length) followed by a
 JSON body, and protobuf ``bytes`` fields are base64 strings on the JSON side.
 """

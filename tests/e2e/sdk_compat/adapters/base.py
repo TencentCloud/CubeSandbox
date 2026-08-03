@@ -47,25 +47,28 @@ class SandboxAdapter(ABC):
     def read_file(self, path: str, *, user: str = "root") -> str:
         raise NotImplementedError
 
-    def list_files(self, path: str) -> list[dict[str, Any]]:
+    def list_files(self, path: str, *, user: str = "root") -> list[dict[str, Any]]:
         raise UnsupportedCapability(self.backend, "filesystem_extended")
 
-    def stat_file(self, path: str) -> dict[str, Any]:
+    def stat_file(self, path: str, *, user: str = "root") -> dict[str, Any]:
         raise UnsupportedCapability(self.backend, "filesystem_extended")
 
-    def file_exists(self, path: str) -> bool:
+    def file_exists(self, path: str, *, user: str = "root") -> bool:
         raise UnsupportedCapability(self.backend, "filesystem_extended")
 
-    def remove_file(self, path: str) -> None:
+    def remove_file(self, path: str, *, user: str = "root") -> None:
         raise UnsupportedCapability(self.backend, "filesystem_extended")
 
-    def rename_file(self, old_path: str, new_path: str) -> dict[str, Any]:
+    def rename_file(self, old_path: str, new_path: str, *, user: str = "root") -> dict[str, Any]:
         raise UnsupportedCapability(self.backend, "filesystem_extended")
 
-    def make_dir(self, path: str) -> None:
+    def make_dir(self, path: str, *, user: str = "root") -> None:
         raise UnsupportedCapability(self.backend, "filesystem_extended")
 
-    def write_files(self, files: list[tuple[str, str | bytes]]) -> int:
+    def list_dir(self, path: str, *, user: str = "root") -> list[str]:
+        raise UnsupportedCapability(self.backend, "filesystem_extended")
+
+    def write_files(self, files: list[tuple[str, str | bytes]], *, user: str = "root") -> int:
         raise UnsupportedCapability(self.backend, "filesystem_extended")
 
     def watch_dir_events(
@@ -119,6 +122,8 @@ class SandboxAdapter(ABC):
         included, so the signature matches E2B's ``update_network``.
         """
         raise UnsupportedCapability(self.backend, "network_dynamic_update")
+
+    # ── lifecycle ──────────────────────────────────────────────────────────────
 
     @abstractmethod
     def kill(self) -> None:

@@ -81,35 +81,35 @@ class TracingSandboxAdapter(SandboxAdapter):
             output=_content_summary,
         )
 
-    def list_files(self, path: str) -> list[dict[str, Any]]:
+    def list_files(self, path: str, *, user: str = "root") -> list[dict[str, Any]]:
         return self._trace.capture(
             "list_files",
-            {"backend": self.backend, "sandbox_id": self.sandbox_id, "path": path},
-            lambda: self._wrapped.list_files(path),
+            {"backend": self.backend, "sandbox_id": self.sandbox_id, "path": path, "user": user},
+            lambda: self._wrapped.list_files(path, user=user),
         )
 
-    def stat_file(self, path: str) -> dict[str, Any]:
+    def stat_file(self, path: str, *, user: str = "root") -> dict[str, Any]:
         return self._trace.capture(
             "stat_file",
-            {"backend": self.backend, "sandbox_id": self.sandbox_id, "path": path},
-            lambda: self._wrapped.stat_file(path),
+            {"backend": self.backend, "sandbox_id": self.sandbox_id, "path": path, "user": user},
+            lambda: self._wrapped.stat_file(path, user=user),
         )
 
-    def file_exists(self, path: str) -> bool:
+    def file_exists(self, path: str, *, user: str = "root") -> bool:
         return self._trace.capture(
             "file_exists",
-            {"backend": self.backend, "sandbox_id": self.sandbox_id, "path": path},
-            lambda: self._wrapped.file_exists(path),
+            {"backend": self.backend, "sandbox_id": self.sandbox_id, "path": path, "user": user},
+            lambda: self._wrapped.file_exists(path, user=user),
         )
 
-    def remove_file(self, path: str) -> None:
+    def remove_file(self, path: str, *, user: str = "root") -> None:
         return self._trace.capture(
             "remove_file",
-            {"backend": self.backend, "sandbox_id": self.sandbox_id, "path": path},
-            lambda: self._wrapped.remove_file(path),
+            {"backend": self.backend, "sandbox_id": self.sandbox_id, "path": path, "user": user},
+            lambda: self._wrapped.remove_file(path, user=user),
         )
 
-    def rename_file(self, old_path: str, new_path: str) -> dict[str, Any]:
+    def rename_file(self, old_path: str, new_path: str, *, user: str = "root") -> dict[str, Any]:
         return self._trace.capture(
             "rename_file",
             {
@@ -117,29 +117,38 @@ class TracingSandboxAdapter(SandboxAdapter):
                 "sandbox_id": self.sandbox_id,
                 "old_path": old_path,
                 "new_path": new_path,
+                "user": user,
             },
-            lambda: self._wrapped.rename_file(old_path, new_path),
+            lambda: self._wrapped.rename_file(old_path, new_path, user=user),
         )
 
-    def make_dir(self, path: str) -> None:
+    def make_dir(self, path: str, *, user: str = "root") -> None:
         return self._trace.capture(
             "make_dir",
-            {"backend": self.backend, "sandbox_id": self.sandbox_id, "path": path},
-            lambda: self._wrapped.make_dir(path),
+            {"backend": self.backend, "sandbox_id": self.sandbox_id, "path": path, "user": user},
+            lambda: self._wrapped.make_dir(path, user=user),
         )
 
-    def write_files(self, files: list[tuple[str, str | bytes]]) -> int:
+    def list_dir(self, path: str, *, user: str = "root") -> list[str]:
+        return self._trace.capture(
+            "list_dir",
+            {"backend": self.backend, "sandbox_id": self.sandbox_id, "path": path, "user": user},
+            lambda: self._wrapped.list_dir(path, user=user),
+        )
+
+    def write_files(self, files: list[tuple[str, str | bytes]], *, user: str = "root") -> int:
         return self._trace.capture(
             "write_files",
             {
                 "backend": self.backend,
                 "sandbox_id": self.sandbox_id,
+                "user": user,
                 "files": [
                     {"path": path, **_content_summary(content)}
                     for path, content in files
                 ],
             },
-            lambda: self._wrapped.write_files(files),
+            lambda: self._wrapped.write_files(files, user=user),
             output=lambda written: {"written": written},
         )
 
