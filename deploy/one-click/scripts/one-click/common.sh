@@ -33,6 +33,10 @@ die() {
 # shellcheck source=../common/validation.sh
 source "${ONE_CLICK_RUNTIME_SCRIPT_DIR}/../common/validation.sh"
 
+# Fold any legacy CUBE_EXTERNAL_* values onto the unified CUBE_SANDBOX_* names
+# right after the env file is loaded, so every helper below sees one variable set.
+apply_deprecated_external_aliases
+
 require_cmd() {
   local cmd="$1"
   command -v "${cmd}" >/dev/null 2>&1 || die "required command not found: ${cmd}"

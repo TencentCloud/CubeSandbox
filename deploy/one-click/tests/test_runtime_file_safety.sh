@@ -238,6 +238,11 @@ _quickcheck_source() {
   source "${ONE_CLICK_DIR}/scripts/one-click/quickcheck.sh"
 }
 
+_systemd_common_source() {
+  # shellcheck source=../scripts/systemd/common.sh
+  source "${ONE_CLICK_DIR}/scripts/systemd/common.sh"
+}
+
 test_quickcheck_wait_until_retries_then_succeeds() {
   local counter_file="${TMP_DIR}/wait-until-attempts"
   printf '0\n' > "${counter_file}"
@@ -858,18 +863,67 @@ test_postcheck_skips_when_external_host_set() {
   # When an external endpoint is configured the local container is never
   # started, so the postcheck must short-circuit with exit 0 instead of
   # blocking on wait_for_container_health (which would otherwise need docker
-  # and ~80s before failing into Restart=on-failure).
+  # and ~80s before failing into Restart=on-failure). The unified
+  # CUBE_SANDBOX_*_HOST set is the primary path.
+  CUBE_SANDBOX_MYSQL_HOST=db.example.com \
+    bash "${ONE_CLICK_DIR}/scripts/systemd/mysql-postcheck.sh" \
+    || fail "mysql-postcheck must exit 0 when CUBE_SANDBOX_MYSQL_HOST is external"
+  CUBE_SANDBOX_REDIS_HOST=cache.example.com \
+    bash "${ONE_CLICK_DIR}/scripts/systemd/redis-postcheck.sh" \
+    || fail "redis-postcheck must exit 0 when CUBE_SANDBOX_REDIS_HOST is external"
+
+  # Legacy CUBE_EXTERNAL_*_HOST must keep working via the deprecation alias map.
   CUBE_EXTERNAL_MYSQL_HOST=db.example.com \
     bash "${ONE_CLICK_DIR}/scripts/systemd/mysql-postcheck.sh" \
-    || fail "mysql-postcheck must exit 0 when CUBE_EXTERNAL_MYSQL_HOST is set"
+    || fail "mysql-postcheck must exit 0 when legacy CUBE_EXTERNAL_MYSQL_HOST is set"
   CUBE_EXTERNAL_REDIS_HOST=cache.example.com \
     bash "${ONE_CLICK_DIR}/scripts/systemd/redis-postcheck.sh" \
-    || fail "redis-postcheck must exit 0 when CUBE_EXTERNAL_REDIS_HOST is set"
-  # Sentinel-only external Redis has no fixed HOST; MASTER_NAME alone must
-  # also skip the local container health wait.
+    || fail "redis-postcheck must exit 0 when legacy CUBE_EXTERNAL_REDIS_HOST is set"
+
+  # Sentinel-only external Redis has no fixed HOST; a master name alone must
+  # also skip the local container health wait. Test both the unified name and
+  # the legacy alias (migrated by apply_deprecated_external_aliases).
+  CUBE_SANDBOX_REDIS_MASTER_NAME=mymaster \
+    bash "${ONE_CLICK_DIR}/scripts/systemd/redis-postcheck.sh" \
+    || fail "redis-postcheck must exit 0 when CUBE_SANDBOX_REDIS_MASTER_NAME is set"
   CUBE_EXTERNAL_REDIS_MASTER_NAME=mymaster \
     bash "${ONE_CLICK_DIR}/scripts/systemd/redis-postcheck.sh" \
-    || fail "redis-postcheck must exit 0 when CUBE_EXTERNAL_REDIS_MASTER_NAME is set"
+    || fail "redis-postcheck must exit 0 when legacy CUBE_EXTERNAL_REDIS_MASTER_NAME is set"
+
+  # A loopback HOST must NOT be treated as external (this is the semantic
+  # inversion risk): the postcheck should proceed to the container health check
+  # and therefore fail here. The health-wait bounds are forced to a single
+  # zero-delay probe so the assertion fails fast even on a host that has docker
+  # installed (otherwise wait_for_container_health would block ~80s).
+  if CUBE_SANDBOX_MYSQL_HOST=127.0.0.1 \
+      CUBE_SANDBOX_MYSQL_CONTAINER=cube-sandbox-test-missing \
+      CUBE_SANDBOX_DEP_HEALTH_RETRIES=1 CUBE_SANDBOX_DEP_HEALTH_DELAY=0 \
+      bash "${ONE_CLICK_DIR}/scripts/systemd/mysql-postcheck.sh" >/dev/null 2>&1; then
+    fail "mysql-postcheck must NOT skip when host is loopback (local mode)"
+  fi
+
+  # A loopback HOST with MANAGED=0 means the operator runs their own service on
+  # the local host; cube must NOT manage a container, so the postcheck must skip.
+  CUBE_SANDBOX_MYSQL_HOST=127.0.0.1 CUBE_SANDBOX_MYSQL_MANAGED=0 \
+    bash "${ONE_CLICK_DIR}/scripts/systemd/mysql-postcheck.sh" \
+    || fail "mysql-postcheck must exit 0 for loopback host with MANAGED=0"
+  CUBE_SANDBOX_REDIS_HOST=127.0.0.1 CUBE_SANDBOX_REDIS_MANAGED=0 \
+    bash "${ONE_CLICK_DIR}/scripts/systemd/redis-postcheck.sh" \
+    || fail "redis-postcheck must exit 0 for loopback host with MANAGED=0"
+
+  # MANAGED=1 with a non-loopback host is contradictory and must hard-fail
+  # (cube cannot start a bundled container that serves a remote address).
+  if CUBE_SANDBOX_MYSQL_HOST=db.example.com CUBE_SANDBOX_MYSQL_MANAGED=1 \
+      bash "${ONE_CLICK_DIR}/scripts/systemd/mysql-postcheck.sh" >/dev/null 2>&1; then
+    fail "mysql-postcheck must die when MANAGED=1 conflicts with a non-loopback host"
+  fi
+
+  # An invalid MANAGED value must be rejected rather than silently treated as a
+  # boolean default.
+  if CUBE_SANDBOX_MYSQL_MANAGED=bogus \
+      bash "${ONE_CLICK_DIR}/scripts/systemd/mysql-postcheck.sh" >/dev/null 2>&1; then
+    fail "mysql-postcheck must die on an invalid CUBE_SANDBOX_MYSQL_MANAGED value"
+  fi
 }
 
 test_external_redis_sentinel_wiring() {
@@ -888,10 +942,17 @@ test_external_redis_sentinel_wiring() {
   local lcm_compose="${ONE_CLICK_DIR}/cube-lifecycle-manager/docker-compose.yaml.template"
   local postcheck="${ONE_CLICK_DIR}/scripts/systemd/redis-postcheck.sh"
 
-  assert_contains "${env_example}" "CUBE_EXTERNAL_REDIS_MASTER_NAME"
-  assert_contains "${env_example}" "CUBE_EXTERNAL_REDIS_SENTINEL_NODES"
-  assert_contains "${postcheck}" "CUBE_EXTERNAL_REDIS_MASTER_NAME"
-  assert_contains "${up_support}" "CUBE_EXTERNAL_REDIS_MASTER_NAME"
+  # Unified CUBE_SANDBOX_* names are the primary configuration path.
+  assert_contains "${env_example}" "CUBE_SANDBOX_REDIS_MASTER_NAME"
+  assert_contains "${env_example}" "CUBE_SANDBOX_REDIS_SENTINEL_NODES"
+  # Legacy CUBE_EXTERNAL_REDIS_* Sentinel names must still be recognized via the
+  # deprecation alias map in scripts/common/validation.sh.
+  assert_contains "${ONE_CLICK_DIR}/scripts/common/validation.sh" "CUBE_EXTERNAL_REDIS_MASTER_NAME"
+  assert_contains "${ONE_CLICK_DIR}/scripts/common/validation.sh" "CUBE_EXTERNAL_REDIS_SENTINEL_NODES"
+  # redis-postcheck / up-support decide external via redis_is_external, which
+  # forces external in Sentinel mode (CUBE_SANDBOX_REDIS_MASTER_NAME set).
+  assert_contains "${postcheck}" "redis_is_external"
+  assert_contains "${up_support}" "CUBE_SANDBOX_REDIS_MASTER_NAME"
   assert_contains "${up_deps}" "CUBE_PROXY_REDIS_MASTER_NAME"
   assert_contains "${up_deps}" "CUBE_LCM_REDIS_MASTER_NAME"
   assert_contains "${up_deps}" "CUBE_PROXY_REDIS_SENTINEL_NODES"
@@ -899,26 +960,24 @@ test_external_redis_sentinel_wiring() {
   assert_contains "${up_proxy}" "CUBE_PROXY_REDIS_MASTER_NAME"
   assert_contains "${up_proxy}" "__CUBE_PROXY_REDIS_MASTER_NAME__"
   assert_contains "${up_proxy}" "__CUBE_PROXY_REGISTRY_REDIS_SENTINEL_NODES__"
-  assert_contains "${quickcheck}" "EXTERNAL_REDIS_MASTER_NAME"
-  assert_contains "${install_sh}" "CUBE_EXTERNAL_REDIS_MASTER_NAME"
-  assert_contains "${install_sh}" "CUBE_EXTERNAL_REDIS_SENTINEL_NODES"
+  assert_contains "${quickcheck}" "CUBE_SANDBOX_REDIS_MASTER_NAME"
+  assert_contains "${install_sh}" "CUBE_SANDBOX_REDIS_MASTER_NAME"
+  assert_contains "${install_sh}" "CUBE_SANDBOX_REDIS_SENTINEL_NODES"
   assert_contains "${install_sh}" "SENTINEL get-master-addr-by-name"
   assert_contains "${install_sh}" "master_name:"
   assert_contains "${install_sh}" "sentinel_nodes:"
   # Leaving Sentinel mode must scrub conf.yaml keys (env side uses remove_env_kv).
   assert_contains "${install_sh}" "removing stale Redis Sentinel keys from conf.yaml"
   assert_contains "${install_sh}" "/^  master_name:/d; /^  sentinel_nodes:/d; /^  sentinel_password:/d"
-  # Back to bundled Redis must also drop external Redis markers from .one-click.env.
-  assert_contains "${install_sh}" "Back to bundled local Redis: drop every external Redis marker"
   # SENTINEL lookup must reuse credentials without putting the password in argv.
   assert_contains "${install_sh}" 'REDISCLI_AUTH="${sentinel_pd}"'
   # Leaving Sentinel for bundled Redis must restore password as well as nodes.
   assert_contains "${install_sh}" "restoring bundled Redis nodes/password in conf.yaml"
   # Sentinel → external standalone must scrub leftover master_name/sentinel_* keys.
   assert_contains "${install_sh}" "Sentinel → standalone: drop leftover master_name/sentinel_*"
-  # Empty CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD must not AUTH with the master password.
-  if grep -E 'sentinel_pd="\$\{CUBE_EXTERNAL_REDIS_PASSWORD\}"' "${install_sh}" >/dev/null; then
-    fail "install.sh must not fall back Sentinel AUTH to CUBE_EXTERNAL_REDIS_PASSWORD"
+  # Empty CUBE_SANDBOX_REDIS_SENTINEL_PASSWORD must not AUTH with the master password.
+  if grep -E 'sentinel_pd="\$\{CUBE_SANDBOX_REDIS_PASSWORD\}"' "${install_sh}" >/dev/null; then
+    fail "install.sh must not fall back Sentinel AUTH to CUBE_SANDBOX_REDIS_PASSWORD"
   fi
   assert_contains "${env_example}" "Leave SENTINEL_PASSWORD empty"
   assert_contains "${global_conf}" "redis_master_name"
@@ -927,6 +986,87 @@ test_external_redis_sentinel_wiring() {
   assert_contains "${proxy_compose}" "CUBE_PROXY_REGISTRY_REDIS_SENTINEL_NODES"
   assert_contains "${lcm_compose}" "CUBE_LCM_REDIS_MASTER_NAME"
   assert_contains "${lcm_compose}" "CUBE_LCM_REDIS_SENTINEL_NODES"
+  # Sentinel keys must be persisted into the runtime env by persist_unified_dep_config.
+  assert_contains "${ONE_CLICK_DIR}/lib/common.sh" "CUBE_PROXY_REDIS_MASTER_NAME"
+  assert_contains "${ONE_CLICK_DIR}/lib/common.sh" "CUBE_SANDBOX_REDIS_SENTINEL_NODES"
+}
+
+test_wait_for_container_health_applies_retry_delay_knobs() {
+  # CUBE_SANDBOX_DEP_HEALTH_RETRIES/DELAY reach wait_for_container_health as its
+  # positional retries/delay args (see mysql-postcheck.sh / redis-postcheck.sh).
+  # Drive the function directly with a stubbed docker so we verify the bounds are
+  # actually consumed rather than only exercising them incidentally.
+  local docker_calls="${TMP_DIR}/health-docker-calls"
+  local calls
+
+  # retries=N with a never-healthy container -> N inspect calls, then failure.
+  printf '0\n' > "${docker_calls}"
+  if (
+    _systemd_common_source
+    sleep() { :; }
+    docker() {
+      local n
+      n="$(<"${docker_calls}")"
+      n=$(( n + 1 ))
+      printf '%s\n' "${n}" > "${docker_calls}"
+      printf 'starting\n'
+    }
+    wait_for_container_health "c" 3 0
+  ); then
+    fail "wait_for_container_health should fail when never healthy"
+  fi
+  calls="$(<"${docker_calls}")"
+  (( calls == 3 )) || fail "expected 3 inspect calls for retries=3, got ${calls}"
+
+  # A "healthy" status mid-loop returns success and stops early.
+  printf '0\n' > "${docker_calls}"
+  (
+    _systemd_common_source
+    sleep() { :; }
+    docker() {
+      local n
+      n="$(<"${docker_calls}")"
+      n=$(( n + 1 ))
+      printf '%s\n' "${n}" > "${docker_calls}"
+      if (( n >= 2 )); then printf 'healthy\n'; else printf 'starting\n'; fi
+    }
+    wait_for_container_health "c" 10 0
+  ) || fail "wait_for_container_health should succeed once status is healthy"
+  calls="$(<"${docker_calls}")"
+  (( calls == 2 )) || fail "expected to stop after 2 inspect calls, got ${calls}"
+
+  # retries<=0 (zero or negative) means the loop never runs: no docker call, and
+  # the function fails immediately instead of hanging or dividing by delay.
+  local val
+  for val in 0 -1; do
+    printf '0\n' > "${docker_calls}"
+    if (
+      _systemd_common_source
+      sleep() { fail "sleep must not run when retries<=0"; }
+      docker() {
+        local n
+        n="$(<"${docker_calls}")"
+        printf '%s\n' "$(( n + 1 ))" > "${docker_calls}"
+        printf 'starting\n'
+      }
+      wait_for_container_health "c" "${val}" 0
+    ); then
+      fail "wait_for_container_health should fail for retries=${val}"
+    fi
+    calls="$(<"${docker_calls}")"
+    (( calls == 0 )) || fail "expected 0 inspect calls for retries=${val}, got ${calls}"
+  done
+
+  # A non-numeric retries value is a caller/config error: under set -u the
+  # arithmetic loop guard aborts rather than silently looping forever.
+  if (
+    _systemd_common_source
+    sleep() { :; }
+    docker() { printf 'starting\n'; }
+    wait_for_container_health "c" abc 0
+  ) 2>/dev/null; then
+    fail "wait_for_container_health must reject a non-numeric retries value"
+  fi
 }
 
 test_webui_postcheck_skips_when_disabled() {
@@ -1009,6 +1149,7 @@ test_cube_proxy_postcheck_fails_when_grpc_port_not_ready
 test_postcheck_skips_when_external_host_set
 test_webui_postcheck_skips_when_disabled
 test_external_redis_sentinel_wiring
+test_wait_for_container_health_applies_retry_delay_knobs
 test_mask_external_dep_services_remove_then_mask
 
 echo "runtime file safety tests OK"

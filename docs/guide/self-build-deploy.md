@@ -299,10 +299,16 @@ You can also point to prebuilt binaries to skip compilation:
 
 ### Database and Cache
 
+MySQL/Redis use a single variable set: `*_HOST` selects the mode (loopback = bundled local container, remote = external server) and `*_MANAGED` decouples container ownership from where clients connect. See [Using an external MySQL / Redis](https://github.com/tencentcloud/CubeSandbox/blob/master/deploy/one-click/README.md#using-an-external-mysql--redis) for the full external-mode reference.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CUBE_SANDBOX_MYSQL_CONTAINER` | `cube-sandbox-mysql` | MySQL container name |
-| `CUBE_SANDBOX_REDIS_CONTAINER` | `cube-sandbox-redis` | Redis container name |
+| `CUBE_SANDBOX_MYSQL_HOST` | `127.0.0.1` | MySQL host. A loopback address (`127.0.0.0/8`, `localhost`, `::1`) uses the bundled container; any other address is treated as an external server. |
+| `CUBE_SANDBOX_REDIS_HOST` | `127.0.0.1` | Redis host. Same loopback-vs-external rule as MySQL. |
+| `CUBE_SANDBOX_MYSQL_MANAGED` | `auto` | Whether cube starts/owns the bundled MySQL container. `auto` = managed when the host is loopback; `1`/`true`/`yes`/`on` = force bundled (host must be loopback); `0`/`false`/`no`/`off` = connect to an existing service at `*_HOST:*_PORT`. |
+| `CUBE_SANDBOX_REDIS_MANAGED` | `auto` | Same semantics as `CUBE_SANDBOX_MYSQL_MANAGED`, for Redis. |
+| `CUBE_SANDBOX_MYSQL_CONTAINER` | `cube-sandbox-mysql` | MySQL container name (bundled mode only) |
+| `CUBE_SANDBOX_REDIS_CONTAINER` | `cube-sandbox-redis` | Redis container name (bundled mode only) |
 | `CUBE_SANDBOX_MYSQL_PORT` | `3306` | MySQL port |
 | `CUBE_SANDBOX_REDIS_PORT` | `6379` | Redis port |
 | `CUBE_SANDBOX_MYSQL_ROOT_PASSWORD` | `cube_root` | MySQL root password |
@@ -310,6 +316,7 @@ You can also point to prebuilt binaries to skip compilation:
 | `CUBE_SANDBOX_MYSQL_USER` | `cube` | MySQL user |
 | `CUBE_SANDBOX_MYSQL_PASSWORD` | `cube_pass` | MySQL user password |
 | `CUBE_SANDBOX_REDIS_PASSWORD` | `ceuhvu123` | Redis password |
+| `DATABASE_URL` | assembled from `CUBE_SANDBOX_MYSQL_*` | CubeAPI database DSN. Normally left unset — `install.sh` assembles it. An explicit value is honored **only when MySQL is external**; in bundled mode it is ignored and always reassembled from `CUBE_SANDBOX_MYSQL_*`. |
 
 ### CubeProxy and DNS
 

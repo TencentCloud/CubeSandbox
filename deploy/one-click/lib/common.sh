@@ -588,7 +588,7 @@ upsert_env_kv() {
   # the start, closing the race window between creation and the chmod below.
   # The atomic `mv` later replaces the target's inode with this temp file, so a
   # permissive umask (e.g. 0022 -> 0644, or 0000 -> 0666) would otherwise leak
-  # every persisted secret (DATABASE_URL, CUBE_EXTERNAL_*_PASSWORD, ...) to other
+  # every persisted secret (DATABASE_URL, CUBE_SANDBOX_*_PASSWORD, ...) to other
   # local users -- briefly here and permanently in env_file. Mirrors the pattern
   # in install.sh's check_external_deps_preflight and up-with-deps.sh.
   local old_umask
@@ -598,10 +598,11 @@ upsert_env_kv() {
   # atomic rename across filesystem boundaries (e.g., /tmp on tmpfs
   # and /usr/local on ext4/xfs).
   tmp_file="$(mktemp "${env_file}.XXXXXX")"
-  umask "${old_umask}"
   # Defense-in-depth: enforce 0600 explicitly in case the temp file pre-existed
-  # with looser permissions or mktemp honored a non-default mode.
+  # with looser permissions or mktemp honored a non-default mode. Do this before
+  # restoring the umask so any file creation added later still inherits 077.
   chmod 600 "${tmp_file}"
+  umask "${old_umask}"
   local replaced=false
   rendered_value="$(render_env_assignment_value "${key}" "${value}")"
 
@@ -623,30 +624,64 @@ upsert_env_kv() {
   mv -f "${tmp_file}" "${env_file}"
 }
 
-# remove_env_kv deletes KEY=... lines from env_file. Used when switching Redis
-# modes (Sentinel <-> standalone) so stale sentinel/host keys cannot keep the
-# previous mode alive via ":-" fallbacks in downstream scripts.
+# remove_env_kv: delete every active `KEY=...` line for one or more KEYs from
+# env_file in a SINGLE atomic rewrite. Used to strip deprecated/migrated keys
+# (e.g. the legacy CUBE_EXTERNAL_* set) so a stale external address/password
+# cannot linger in the runtime env after migration. Passing all keys at once
+# avoids N separate read-rewrite-mv cycles over the same file, which is costly
+# on burstable/low-IOPS storage. Preserves the file mode via the same
+# umask-tightened atomic rewrite as upsert_env_kv. A no-op when the file is
+# absent, no keys are given, or none of the keys are present.
+#
+#   remove_env_kv ENV_FILE KEY [KEY...]
+#
+# Matching normalizes each line before comparing: a trailing CR (from a
+# CRLF-formatted file) is stripped and leading whitespace is ignored, so an
+# indented or CRLF-carrying legacy line is deleted rather than silently kept.
+# Surviving lines are written back CR-stripped so the file ends up with
+# consistent LF line endings.
 remove_env_kv() {
   local env_file="$1"
-  local key="$2"
-  local tmp_file
-  local old_umask
+  shift
+  local -a keys=("$@")
+  local tmp_file old_umask key
+
+  [[ ${#keys[@]} -gt 0 ]] || return 0
   [[ -f "${env_file}" ]] || return 0
+  # Fast-path guard: only rewrite when at least one key is literally present
+  # (grep -F, so a regex-special key still matches its own literal prefix). -F
+  # drops the '^' anchor, so a mid-line substring can trigger a rewrite that
+  # deletes nothing -- harmless (the loop is the authoritative deleter).
+  local present=false
+  for key in "${keys[@]}"; do
+    if grep -qF -- "${key}=" "${env_file}" 2>/dev/null; then
+      present=true
+      break
+    fi
+  done
+  [[ "${present}" == "true" ]] || return 0
 
   old_umask="$(umask)"
   umask 077
   tmp_file="$(mktemp "${env_file}.XXXXXX")"
-  umask "${old_umask}"
+  # Enforce 0600 before restoring the umask so any file creation added later
+  # still inherits 077 (mirrors upsert_env_kv).
   chmod 600 "${tmp_file}"
+  umask "${old_umask}"
 
+  local line trimmed matched
   while IFS= read -r line || [[ -n "${line}" ]]; do
-    if [[ "${line}" == "${key}="* ]]; then
-      continue
-    fi
-    if ! printf '%s\n' "${line}" >> "${tmp_file}"; then
-      rm -f "${tmp_file}"
-      die "failed to rewrite ${env_file} while removing ${key}"
-    fi
+    line="${line%$'\r'}"                       # normalize CRLF -> LF
+    trimmed="${line#"${line%%[![:space:]]*}"}" # drop leading whitespace
+    matched=false
+    for key in "${keys[@]}"; do
+      if [[ "${trimmed}" == "${key}="* ]]; then
+        matched=true
+        break
+      fi
+    done
+    [[ "${matched}" == "true" ]] && continue
+    printf '%s\n' "${line}" >> "${tmp_file}"
   done < "${env_file}"
 
   mv -f "${tmp_file}" "${env_file}"
@@ -920,6 +955,317 @@ read_env_key() {
   sed -n "/^${key}=/{s/^${key}=//;p;q;}" "${file}" 2>/dev/null || true
 }
 
+# _parse_env_rhs: interpret the raw right-hand side of an env-file `KEY=RHS` line
+# the way `set -a; source` would, returning the resulting value. read_env_key
+# returns the raw on-disk RHS (everything after the first `=`), which for shell
+# purposes is one of:
+#   - double-quoted: "..."  (optionally followed by an inline `# comment`)
+#   - single-quoted: '...'  (optionally followed by an inline `# comment`)
+#   - bare:          mysql://...  (ends at the first unquoted whitespace; any
+#                    trailing `  # comment` is a shell comment, not part of the value)
+# Re-persisting the value through upsert_env_kv (which escapes and quotes values
+# carrying shell metacharacters, as a custom DSN's ? and & force) requires the
+# CLEAN value: a hand-written quoted DSN would otherwise be double-quoted into
+# literal quote characters, and a value with a trailing inline comment would carry
+# the comment text into the DSN. Both corrupt the DSN AND disagree with what a
+# later `source .one-click.env` would parse. Mirror the shell's own parsing so the
+# installer and the runtime shell always agree on the value.
+#
+# Escaped quotes inside a quoted value are not handled (a DSN never contains a
+# literal quote); this matches the deployment target and keeps the parser simple.
+_parse_env_rhs() {
+  local v="$1"
+  case "${v}" in
+    '"'*)
+      v="${v#\"}"       # drop the opening quote
+      v="${v%%\"*}"     # keep up to the closing quote, dropping any trailing comment
+      ;;
+    "'"*)
+      v="${v#\'}"
+      v="${v%%\'*}"
+      ;;
+    *)
+      v="${v%%[[:space:]]*}"  # bare value ends at the first whitespace (inline comment)
+      ;;
+  esac
+  printf '%s' "${v}"
+}
+
+# _dsn_host: extract the host component from a mysql://user:pass@host:port/db
+# DSN. Prints empty for a non-mysql scheme (a fully custom DSN we deliberately do
+# not second-guess). IPv6-in-brackets is not parsed (deployments target IPv4).
+_dsn_host() {
+  local dsn="$1"
+  [[ "${dsn}" == mysql://* ]] || { printf ''; return 0; }
+  local rest="${dsn#mysql://}"
+  rest="${rest%%/*}" # strip /path?query -> user:pass@host:port
+  rest="${rest##*@}" # strip userinfo    -> host:port
+  rest="${rest%%:*}" # strip :port       -> host
+  printf '%s' "${rest}"
+}
+
+# _dsn_is_stale_bundled_default: whether a DSN carries the pre-unification shipped
+# bundled default credentials -- scheme mysql, loopback host, user `cube`,
+# password `cube_pass`, database `cube_mvp`, and NO query/fragment. env.example
+# shipped exactly `mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp` as an ACTIVE
+# line for years, so a DSN matching this signature is almost certainly that stale
+# leftover rather than a deliberate custom endpoint (a real custom DSN would carry
+# non-default credentials, a query string, or a non-loopback host). Returns 0
+# (true) on a match, 1 otherwise. The port is intentionally NOT part of the
+# signature: the discard path rebuilds from CUBE_SANDBOX_MYSQL_* (which carries
+# the resolved port), so a stale line with a customised port is still caught.
+_dsn_is_stale_bundled_default() {
+  local dsn="$1"
+  [[ "${dsn}" == mysql://* ]] || return 1
+  [[ "${dsn}" == *[\?#]* ]] && return 1  # a query/fragment marks a deliberate custom DSN
+  local host userinfo user pass rest db
+  host="$(_dsn_host "${dsn}")"
+  _host_is_loopback "${host}" || return 1
+  rest="${dsn#mysql://}"
+  rest="${rest%%/*}"        # user:pass@host:port
+  [[ "${rest}" == *@* ]] || return 1
+  userinfo="${rest%@*}"     # user:pass
+  user="${userinfo%%:*}"
+  pass="${userinfo#*:}"
+  db="${dsn##*/}"           # path after the final '/'
+  [[ "${user}" == "cube" && "${pass}" == "cube_pass" && "${db}" == "cube_mvp" ]]
+}
+
+# persist_unified_dep_config: freeze the resolved MySQL/Redis config into the
+# runtime env file so every systemd unit / helper uses the same endpoint.
+#
+#   persist_unified_dep_config RUNTIME_ENV_FILE OPERATOR_ENV_FILE
+#
+# The CUBE_SANDBOX_{MYSQL,REDIS}_* variables must already be resolved in the
+# environment (defaults filled, legacy aliases mapped). OPERATOR_ENV_FILE is the
+# operator's .env, consulted only for an explicit DATABASE_URL override in
+# EXTERNAL mysql mode (see the DATABASE_URL block below); pass "" when absent.
+#
+# The resolved MANAGED decision is frozen as a concrete 0/1: a loopback external
+# service (HOST=127.0.0.1 + MANAGED=0) would otherwise persist only HOST and
+# later scripts (postcheck/quickcheck) would recompute MANAGED=auto -> managed
+# and health-check a container that was never started.
+persist_unified_dep_config() {
+  local runtime_env_file="$1"
+  local operator_env_file="$2"
+
+  if mysql_is_external; then
+    upsert_env_kv "${runtime_env_file}" "CUBE_SANDBOX_MYSQL_HOST" "${CUBE_SANDBOX_MYSQL_HOST}"
+    upsert_env_kv "${runtime_env_file}" "CUBE_SANDBOX_MYSQL_PORT" "${CUBE_SANDBOX_MYSQL_PORT}"
+    upsert_env_kv "${runtime_env_file}" "CUBE_SANDBOX_MYSQL_USER" "${CUBE_SANDBOX_MYSQL_USER}"
+    upsert_env_kv "${runtime_env_file}" "CUBE_SANDBOX_MYSQL_PASSWORD" "${CUBE_SANDBOX_MYSQL_PASSWORD}"
+    upsert_env_kv "${runtime_env_file}" "CUBE_SANDBOX_MYSQL_DB" "${CUBE_SANDBOX_MYSQL_DB}"
+    upsert_env_kv "${runtime_env_file}" "CUBE_SANDBOX_MYSQL_MANAGED" "0"
+  else
+    # Managed (bundled) mode persists only MANAGED=1 and the assembled
+    # DATABASE_URL below -- NOT the individual CUBE_SANDBOX_MYSQL_HOST/_PORT/
+    # _USER/_PASSWORD/_DB keys (deliberate, inherits pre-unification behaviour;
+    # the bundled container owns those credentials). Consumers sourcing
+    # .one-click.env must therefore treat every CUBE_SANDBOX_MYSQL_* key as
+    # possibly-unset in managed mode and apply their own defaults, exactly as
+    # the degraded fallbacks in up.sh / cube-api-start.sh do.
+    upsert_env_kv "${runtime_env_file}" "CUBE_SANDBOX_MYSQL_MANAGED" "1"
+  fi
+
+  # DATABASE_URL points CubeAPI at the database.
+  #
+  # Managed (bundled) mode ALWAYS reassembles DATABASE_URL from the unified
+  # CUBE_SANDBOX_MYSQL_* vars and ignores any explicit operator DATABASE_URL.
+  # This is deliberate and matches the pre-unification behaviour: the bundled
+  # container is created with the CUBE_SANDBOX_MYSQL_* credentials, so an explicit
+  # DATABASE_URL (which for years shipped as an *active* default line in
+  # env.example, `mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp`) must NOT be
+  # allowed to win -- an operator who customised CUBE_SANDBOX_MYSQL_PASSWORD but
+  # left that stale default line would otherwise point CubeAPI at the wrong
+  # password while the container/CubeMaster use the custom one.
+  #
+  # External mode honours an explicit operator DATABASE_URL so a fully custom DSN
+  # (extra params, a non-mysql scheme, ...) can be supplied; otherwise it is
+  # assembled from the unified vars. Read the operator's .env directly so a
+  # previously auto-generated value (carried in the upgrade merge / runtime env)
+  # is still refreshed from current settings.
+  local explicit_database_url=""
+  if mysql_is_external && [[ -n "${operator_env_file}" && -f "${operator_env_file}" ]]; then
+    explicit_database_url="$(read_env_key "${operator_env_file}" DATABASE_URL)"
+    # read_env_key returns the raw on-disk RHS. Interpret it exactly as a later
+    # `source .one-click.env` would: strip a surrounding quote layer (natural for
+    # a DSN full of ? and &) AND drop any trailing inline `# comment`. Otherwise
+    # the re-upsert below escapes and re-wraps the quotes (literal quote chars in
+    # the DSN) or carries the comment text into the DSN -- either way the
+    # installer and the runtime shell would disagree on the value.
+    explicit_database_url="$(_parse_env_rhs "${explicit_database_url}")"
+    # Discard a STALE bundled-default DATABASE_URL. Pre-unification env.example
+    # shipped `DATABASE_URL=mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp` as an
+    # ACTIVE line and the old installer always recomputed the value (never let the
+    # .env line win), so an existing external deployment very likely still carries
+    # that loopback line in its .env. Honouring it here would re-persist the stale
+    # loopback DSN and point CubeAPI at a dead 127.0.0.1 port after upgrade. When
+    # the resolved MySQL endpoint is a real (non-loopback) external host but the
+    # explicit DSN's host is loopback, it is that stale default, not a deliberate
+    # override -- treat it as non-explicit and reassemble from CUBE_SANDBOX_MYSQL_*
+    # (mirrors the managed-mode guard, which ignores the same stale line).
+    if [[ -n "${explicit_database_url}" ]] \
+      && ! _host_is_loopback "${CUBE_SANDBOX_MYSQL_HOST}"; then
+      local _explicit_dsn_host
+      _explicit_dsn_host="$(_dsn_host "${explicit_database_url}")"
+      if [[ -n "${_explicit_dsn_host}" ]] && _host_is_loopback "${_explicit_dsn_host}"; then
+        log "WARNING: ignoring the loopback DATABASE_URL in your .env (${explicit_database_url%%\?*}) -- MySQL is external at ${CUBE_SANDBOX_MYSQL_HOST}, so this looks like the stale pre-unification bundled default. DATABASE_URL will be rebuilt from CUBE_SANDBOX_MYSQL_*. Set an explicit non-loopback DATABASE_URL in your .env to override."
+        explicit_database_url=""
+      fi
+    elif [[ -n "${explicit_database_url}" ]] \
+      && _dsn_is_stale_bundled_default "${explicit_database_url}"; then
+      # LOOPBACK-EXTERNAL mode ("run your own MySQL on the local host":
+      # HOST=127.0.0.1 + MANAGED=0). The host-only guard above cannot fire here
+      # (the resolved host IS loopback), so an operator who configured a custom
+      # CUBE_SANDBOX_MYSQL_PASSWORD but left the stale bundled-default
+      # `mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp` line in their .env would
+      # otherwise have CubeAPI pointed at the wrong (default) credentials. A DSN
+      # matching the exact pre-unification default signature is that stale
+      # leftover, not a deliberate override -- discard it and reassemble from
+      # CUBE_SANDBOX_MYSQL_* (if the operator genuinely kept the defaults the
+      # rebuilt DSN is identical). A DSN with any non-default credential, a query
+      # string, or a non-loopback host is preserved as a real override.
+      log "WARNING: ignoring the DATABASE_URL in your .env (${explicit_database_url}) -- it carries the pre-unification bundled default credentials (cube/cube_pass/cube_mvp), so it looks like a stale leftover. DATABASE_URL will be rebuilt from CUBE_SANDBOX_MYSQL_*. Set an explicit DATABASE_URL with non-default credentials in your .env to override."
+      explicit_database_url=""
+    fi
+  fi
+  # If the operator did not supply an explicit DSN, a *custom* DATABASE_URL that a
+  # prior install persisted into the runtime env (extra query params like
+  # ?parseTime=true, or a non-mysql scheme) would otherwise be silently rebuilt
+  # from the plain CUBE_SANDBOX_MYSQL_* components on the next upgrade, dropping
+  # those params. Preserve it by leaving the existing runtime line UNTOUCHED
+  # (and warn). We deliberately do NOT read-and-re-upsert it: upsert_env_kv quotes
+  # values carrying shell metacharacters (a custom DSN's ? and & force quoting),
+  # so re-persisting the raw on-disk value would double-quote it. The runtime env
+  # file is the merged config that already holds the correctly-quoted line, so a
+  # no-op preserves it verbatim. A plain auto-generated DSN
+  # (mysql://user:pass@host:port/db, no query/fragment -- stored unquoted) is NOT
+  # preserved: it is rebuilt below so a credential change in CUBE_SANDBOX_MYSQL_*
+  # still propagates.
+  local preserve_runtime_dsn=0
+  if mysql_is_external && [[ -z "${explicit_database_url}" ]]; then
+    local runtime_database_url
+    runtime_database_url="$(read_env_key "${runtime_env_file}" DATABASE_URL)"
+    # read_env_key returns the raw RHS: a custom DSN is stored quoted, so it
+    # starts with a double quote (fails the mysql:// prefix test); a plain DSN is
+    # stored unquoted (starts with mysql://, no ? or #). Either signal marks it
+    # custom.
+    if [[ -n "${runtime_database_url}" ]] \
+      && { [[ "${runtime_database_url}" == *[\?#]* ]] || [[ "${runtime_database_url}" != mysql://* ]]; }; then
+      # Do NOT preserve a custom DSN whose host is loopback while the resolved
+      # MySQL endpoint is now a real (non-loopback) external host: that is the
+      # stale-loopback footgun the explicit-.env guard above also blocks (e.g. an
+      # operator moved a loopback-external deployment onto a remote server, but a
+      # prior install had persisted a query-bearing loopback DSN into the runtime
+      # env). Keeping it verbatim would leave CubeAPI pointing at a dead 127.0.0.1.
+      # Parse the host from the on-disk value first (strip one surrounding quote
+      # layer as read_env_key returns it raw).
+      local _runtime_dsn_val _runtime_dsn_host
+      _runtime_dsn_val="$(_parse_env_rhs "${runtime_database_url}")"
+      _runtime_dsn_host="$(_dsn_host "${_runtime_dsn_val}")"
+      if ! _host_is_loopback "${CUBE_SANDBOX_MYSQL_HOST}" \
+        && [[ -n "${_runtime_dsn_host}" ]] && _host_is_loopback "${_runtime_dsn_host}"; then
+        log "WARNING: discarding the loopback DATABASE_URL persisted in the runtime env (host ${_runtime_dsn_host}) -- MySQL is now external at ${CUBE_SANDBOX_MYSQL_HOST}, so the stale loopback endpoint would point CubeAPI at a dead port. DATABASE_URL will be rebuilt from CUBE_SANDBOX_MYSQL_*. Set an explicit non-loopback DATABASE_URL in your .env to keep custom query parameters."
+      else
+        preserve_runtime_dsn=1
+        log "WARNING: preserving the existing custom DATABASE_URL from the runtime env (host ${_runtime_dsn_host:-unknown}; it carries query parameters or a non-mysql scheme); it will NOT be rebuilt from CUBE_SANDBOX_MYSQL_*. Set DATABASE_URL explicitly in your .env if you need to change it on upgrade."
+      fi
+    fi
+  fi
+  if [[ "${preserve_runtime_dsn}" == "1" ]]; then
+    : # leave the existing DATABASE_URL line in the runtime env untouched
+  elif [[ -n "${explicit_database_url}" ]]; then
+    upsert_env_kv "${runtime_env_file}" "DATABASE_URL" "${explicit_database_url}"
+  else
+    # Percent-encode every component so URL metacharacters (@ : / # %) cannot
+    # corrupt the connection string. In managed mode the bundled container always
+    # publishes on 127.0.0.1 (the compose template hardcodes the loopback bind)
+    # and conf.yaml is left at its 127.0.0.1 default (patch_cubemaster_external_deps
+    # only runs for external deps), so the DATABASE_URL host must be 127.0.0.1 too
+    # -- pinning it keeps CubeAPI and CubeMaster consistent even when *_HOST is a
+    # non-127.0.0.1 loopback literal (e.g. 127.0.0.2). Only an external dep uses
+    # the configured host verbatim.
+    local database_url_host_src="127.0.0.1"
+    mysql_is_external && database_url_host_src="${CUBE_SANDBOX_MYSQL_HOST}"
+    local database_url_user database_url_pass database_url_host
+    local database_url_port database_url_db
+    database_url_user="$(urlencode "${CUBE_SANDBOX_MYSQL_USER}")"
+    database_url_pass="$(urlencode "${CUBE_SANDBOX_MYSQL_PASSWORD}")"
+    database_url_host="$(urlencode "${database_url_host_src}")"
+    database_url_port="$(urlencode "${CUBE_SANDBOX_MYSQL_PORT}")"
+    database_url_db="$(urlencode "${CUBE_SANDBOX_MYSQL_DB}")"
+    upsert_env_kv "${runtime_env_file}" "DATABASE_URL" "mysql://${database_url_user}:${database_url_pass}@${database_url_host}:${database_url_port}/${database_url_db}"
+  fi
+
+  # Persist the unified Redis config. cube-proxy reads CUBE_PROXY_REDIS_* from the
+  # env file when rendering global.conf (CubeMaster reads the patched conf.yaml).
+  # As with MySQL, freeze the resolved MANAGED decision so later runtime scripts
+  # do not recompute auto differently for a loopback external service.
+  if redis_is_external; then
+    if [[ -n "${CUBE_SANDBOX_REDIS_MASTER_NAME:-}" ]]; then
+      # Sentinel mode: there is no fixed master host, so persist the master name +
+      # sentinel node list (and optional sentinel requirepass) instead of a single
+      # HOST/PORT. cube-proxy / cube-lifecycle-manager read the CUBE_PROXY_REDIS_*
+      # mirror from the runtime env. CUBE_SANDBOX_REDIS_PASSWORD is still the
+      # master's requirepass, so it is persisted as the connection password.
+      upsert_env_kv "${runtime_env_file}" "CUBE_SANDBOX_REDIS_MASTER_NAME" "${CUBE_SANDBOX_REDIS_MASTER_NAME}"
+      upsert_env_kv "${runtime_env_file}" "CUBE_SANDBOX_REDIS_SENTINEL_NODES" "${CUBE_SANDBOX_REDIS_SENTINEL_NODES:-}"
+      upsert_env_kv "${runtime_env_file}" "CUBE_SANDBOX_REDIS_SENTINEL_PASSWORD" "${CUBE_SANDBOX_REDIS_SENTINEL_PASSWORD:-}"
+      upsert_env_kv "${runtime_env_file}" "CUBE_SANDBOX_REDIS_PASSWORD" "${CUBE_SANDBOX_REDIS_PASSWORD}"
+      upsert_env_kv "${runtime_env_file}" "CUBE_PROXY_REDIS_MASTER_NAME" "${CUBE_SANDBOX_REDIS_MASTER_NAME}"
+      upsert_env_kv "${runtime_env_file}" "CUBE_PROXY_REDIS_SENTINEL_NODES" "${CUBE_SANDBOX_REDIS_SENTINEL_NODES:-}"
+      upsert_env_kv "${runtime_env_file}" "CUBE_PROXY_REDIS_SENTINEL_PASSWORD" "${CUBE_SANDBOX_REDIS_SENTINEL_PASSWORD:-}"
+      upsert_env_kv "${runtime_env_file}" "CUBE_PROXY_REDIS_PASSWORD" "${CUBE_SANDBOX_REDIS_PASSWORD}"
+      upsert_env_kv "${runtime_env_file}" "CUBE_SANDBOX_REDIS_MANAGED" "0"
+      # Drop stale standalone keys so a prior standalone install cannot keep the
+      # old single-host endpoint alive via ":-" fallbacks in downstream scripts.
+      remove_env_kv "${runtime_env_file}" "CUBE_PROXY_REDIS_IP" "CUBE_PROXY_REDIS_PORT"
+    else
+      upsert_env_kv "${runtime_env_file}" "CUBE_SANDBOX_REDIS_HOST" "${CUBE_SANDBOX_REDIS_HOST}"
+      upsert_env_kv "${runtime_env_file}" "CUBE_SANDBOX_REDIS_PORT" "${CUBE_SANDBOX_REDIS_PORT}"
+      upsert_env_kv "${runtime_env_file}" "CUBE_SANDBOX_REDIS_PASSWORD" "${CUBE_SANDBOX_REDIS_PASSWORD}"
+      upsert_env_kv "${runtime_env_file}" "CUBE_PROXY_REDIS_IP" "${CUBE_SANDBOX_REDIS_HOST}"
+      upsert_env_kv "${runtime_env_file}" "CUBE_PROXY_REDIS_PORT" "${CUBE_SANDBOX_REDIS_PORT}"
+      upsert_env_kv "${runtime_env_file}" "CUBE_PROXY_REDIS_PASSWORD" "${CUBE_SANDBOX_REDIS_PASSWORD}"
+      upsert_env_kv "${runtime_env_file}" "CUBE_SANDBOX_REDIS_MANAGED" "0"
+      # Drop stale Sentinel keys so a prior Sentinel install cannot keep the old
+      # master-name/node-list endpoint alive via ":-" fallbacks downstream.
+      remove_env_kv "${runtime_env_file}" \
+        "CUBE_SANDBOX_REDIS_MASTER_NAME" "CUBE_SANDBOX_REDIS_SENTINEL_NODES" \
+        "CUBE_SANDBOX_REDIS_SENTINEL_PASSWORD" "CUBE_PROXY_REDIS_MASTER_NAME" \
+        "CUBE_PROXY_REDIS_SENTINEL_NODES" "CUBE_PROXY_REDIS_SENTINEL_PASSWORD"
+    fi
+  else
+    # As with MySQL above: managed mode persists only MANAGED=1, not the
+    # individual CUBE_SANDBOX_REDIS_HOST/_PORT/_PASSWORD (or CUBE_PROXY_REDIS_*)
+    # keys. Consumers sourcing .one-click.env must treat them as possibly-unset
+    # in managed mode and apply their own defaults.
+    upsert_env_kv "${runtime_env_file}" "CUBE_SANDBOX_REDIS_MANAGED" "1"
+    # Drop any stale Sentinel keys a prior external/Sentinel install persisted so
+    # they cannot leak into the bundled-container config via ":-" fallbacks.
+    remove_env_kv "${runtime_env_file}" \
+      "CUBE_SANDBOX_REDIS_MASTER_NAME" "CUBE_SANDBOX_REDIS_SENTINEL_NODES" \
+      "CUBE_SANDBOX_REDIS_SENTINEL_PASSWORD" "CUBE_PROXY_REDIS_MASTER_NAME" \
+      "CUBE_PROXY_REDIS_SENTINEL_NODES" "CUBE_PROXY_REDIS_SENTINEL_PASSWORD"
+  fi
+
+  # Strip any lingering pre-unification CUBE_EXTERNAL_* keys from the runtime
+  # env. On upgrade the merge already drops them, but a fresh install seeded from
+  # an operator .env that still carries CUBE_EXTERNAL_* would otherwise persist a
+  # stale (now-migrated) external address/password on disk. Their values have
+  # already been folded into the CUBE_SANDBOX_* vars written above.
+  # Legacy key list is shared with apply_deprecated_external_aliases via the
+  # canonical ONE_CLICK_LEGACY_EXTERNAL_ALIAS_PAIRS array (validation.sh); take
+  # the "old" half of each old:new pair so the two paths never diverge. Collect
+  # them all and strip in one atomic rewrite instead of one rewrite per key.
+  local alias_pair
+  local -a legacy_keys=()
+  for alias_pair in "${ONE_CLICK_LEGACY_EXTERNAL_ALIAS_PAIRS[@]}"; do
+    legacy_keys+=("${alias_pair%%:*}")
+  done
+  remove_env_kv "${runtime_env_file}" "${legacy_keys[@]}"
+}
+
 # read_version_field: read `field=value` from a VERSION.txt-style file.
 read_version_field() {
   local file="$1"
@@ -1024,6 +1370,21 @@ DEPRECATED_KEYS = {
     # the old local-build knobs must not linger as kept-extra after upgrade.
     "CUBE_PROXY_IMAGE_TAG",
     "CUBE_PROXY_BASE_IMAGE",
+    # Pre-unification external-endpoint variables. Their values are migrated
+    # authoritatively onto the unified CUBE_SANDBOX_* set below, then the legacy
+    # keys are dropped so a stale external address/password cannot linger in the
+    # runtime env (and get re-applied on a later pass).
+    "CUBE_EXTERNAL_MYSQL_HOST",
+    "CUBE_EXTERNAL_MYSQL_PORT",
+    "CUBE_EXTERNAL_MYSQL_USER",
+    "CUBE_EXTERNAL_MYSQL_PASSWORD",
+    "CUBE_EXTERNAL_MYSQL_DB",
+    "CUBE_EXTERNAL_REDIS_HOST",
+    "CUBE_EXTERNAL_REDIS_PORT",
+    "CUBE_EXTERNAL_REDIS_PASSWORD",
+    "CUBE_EXTERNAL_REDIS_MASTER_NAME",
+    "CUBE_EXTERNAL_REDIS_SENTINEL_NODES",
+    "CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD",
 }
 
 LEGACY_CUBE_PROXY_CERT_DIR_DEFAULTS = {
@@ -1052,6 +1413,123 @@ new_overrides = parse(new_dotenv) if new_dotenv else {}
 has_baseline = bool(old_baseline_vals)
 
 added = []
+migrated_external = []
+
+# Authoritatively migrate the pre-unification CUBE_EXTERNAL_* endpoint config
+# onto the unified CUBE_SANDBOX_* set BEFORE the template loop below consumes
+# old_values. On older installs the real external MySQL/Redis address and
+# password lived on CUBE_EXTERNAL_*, while CUBE_SANDBOX_* only ever held the
+# bundled loopback defaults (127.0.0.1 / cube_pass / ceuhvu123) carried over
+# verbatim. If we did not migrate here, the template loop would keep those
+# bundled defaults and persist_unified_dep_config would then rewrite
+# DATABASE_URL / CUBE_PROXY_REDIS_* to point at 127.0.0.1 with the default
+# password -- silently clobbering the operator's real external connection. The
+# legacy value therefore WINS unconditionally (overwrites CUBE_SANDBOX_*); the
+# legacy keys themselves are in DEPRECATED_KEYS and get dropped from the output.
+#
+# KEEP IN SYNC with ONE_CLICK_LEGACY_EXTERNAL_ALIAS_PAIRS in
+# scripts/common/validation.sh -- that shell array is the canonical definition of
+# the old->new pairs (consumed by the live-env migration and the runtime-env strip
+# loop). If a legacy key is added/removed there, mirror it here.
+EXTERNAL_ALIAS_MAP = (
+    ("CUBE_EXTERNAL_MYSQL_HOST", "CUBE_SANDBOX_MYSQL_HOST"),
+    ("CUBE_EXTERNAL_MYSQL_PORT", "CUBE_SANDBOX_MYSQL_PORT"),
+    ("CUBE_EXTERNAL_MYSQL_USER", "CUBE_SANDBOX_MYSQL_USER"),
+    ("CUBE_EXTERNAL_MYSQL_PASSWORD", "CUBE_SANDBOX_MYSQL_PASSWORD"),
+    ("CUBE_EXTERNAL_MYSQL_DB", "CUBE_SANDBOX_MYSQL_DB"),
+    ("CUBE_EXTERNAL_REDIS_HOST", "CUBE_SANDBOX_REDIS_HOST"),
+    ("CUBE_EXTERNAL_REDIS_PORT", "CUBE_SANDBOX_REDIS_PORT"),
+    ("CUBE_EXTERNAL_REDIS_PASSWORD", "CUBE_SANDBOX_REDIS_PASSWORD"),
+    ("CUBE_EXTERNAL_REDIS_MASTER_NAME", "CUBE_SANDBOX_REDIS_MASTER_NAME"),
+    ("CUBE_EXTERNAL_REDIS_SENTINEL_NODES", "CUBE_SANDBOX_REDIS_SENTINEL_NODES"),
+    ("CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD", "CUBE_SANDBOX_REDIS_SENTINEL_PASSWORD"),
+)
+for legacy_key, new_key in EXTERNAL_ALIAS_MAP:
+    legacy_val = old_values.get(legacy_key)
+    if legacy_val is None or legacy_val == "":
+        continue
+    if old_values.get(new_key) != legacy_val:
+        migrated_external.append((legacy_key, legacy_val, "%s=%s" % (new_key, legacy_val)))
+    old_values[new_key] = legacy_val
+
+# Preserve legacy semantics: under the old scheme any non-empty legacy *_HOST
+# meant "external", even a loopback address. Freeze *_MANAGED=0 so the migrated
+# config keeps connecting to the external service instead of flipping to the
+# bundled container -- but only when the operator did not pin *_MANAGED
+# explicitly in the old runtime.
+if old_values.get("CUBE_EXTERNAL_MYSQL_HOST") and not old_values.get("CUBE_SANDBOX_MYSQL_MANAGED"):
+    old_values["CUBE_SANDBOX_MYSQL_MANAGED"] = "0"
+if old_values.get("CUBE_EXTERNAL_REDIS_HOST") and not old_values.get("CUBE_SANDBOX_REDIS_MANAGED"):
+    old_values["CUBE_SANDBOX_REDIS_MANAGED"] = "0"
+# Sentinel mode has no fixed host and is inherently external, so a migrated legacy
+# master name likewise freezes *_MANAGED=0 (unless the operator pinned it).
+if old_values.get("CUBE_EXTERNAL_REDIS_MASTER_NAME") and not old_values.get("CUBE_SANDBOX_REDIS_MANAGED"):
+    old_values["CUBE_SANDBOX_REDIS_MANAGED"] = "0"
+
+
+# Honour an operator's explicit *_MANAGED override from their .env. env.example
+# ships these keys COMMENTED (# CUBE_SANDBOX_MYSQL_MANAGED=auto), so they are not
+# active template keys and never flow through the template loop below -- the
+# override would otherwise be silently dropped and the old runtime's frozen
+# decision (e.g. external MANAGED=0 + a remote HOST) would win. That is exactly
+# the documented "external -> bundled: set *_MANAGED=1" upgrade path, which was a
+# dead end: the override was lost, and even when honoured the preserved remote
+# HOST made MANAGED=1 (managed bundled container) incompatible with a non-loopback
+# host, so install died on the first mysql_is_managed/redis_is_managed check.
+#
+# Fix: take the operator's *_MANAGED verbatim, and when it force-selects the
+# bundled container (1/true/yes/on) reset a stale non-loopback HOST to the bundled
+# loopback default so the frozen managed decision is self-consistent. The reverse
+# flip (bundled -> external) already works: a remote HOST differs from the default
+# and is preserved as an explicit override, and MANAGED=0 is honoured here.
+FORCE_MANAGED_VALUES = {"1", "true", "yes", "on"}
+
+
+def _merge_host_is_loopback(host):
+    # Mirror _host_is_loopback in scripts/common/validation.sh: the whole IPv4
+    # 127.0.0.0/8 range plus localhost/::1 is loopback (the bundled container
+    # binds loopback). Kept intentionally simple -- an exact-form IPv6 gap is an
+    # accepted limitation there too.
+    if host in ("", "localhost", "::1", "0:0:0:0:0:0:0:1"):
+        return True
+    m = re.match(r"^127\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$", host)
+    return bool(m) and all(int(o) <= 255 for o in m.groups())
+
+
+for managed_key, host_key in (
+    ("CUBE_SANDBOX_MYSQL_MANAGED", "CUBE_SANDBOX_MYSQL_HOST"),
+    ("CUBE_SANDBOX_REDIS_MANAGED", "CUBE_SANDBOX_REDIS_HOST"),
+):
+    op_managed = new_overrides.get(managed_key)
+    if op_managed is None:
+        continue
+    old_values[managed_key] = op_managed
+    if op_managed.strip().lower() in FORCE_MANAGED_VALUES:
+        # Resolve the HOST the template loop below would otherwise choose so the
+        # reset is not silently defeated: that loop gives an operator .env
+        # override (one that DIFFERS from the new default) precedence over the
+        # old runtime value, so a stale non-loopback CUBE_SANDBOX_*_HOST sitting
+        # in the operator's .env would win over a reset applied only to
+        # old_values. Mirror that precedence here.
+        if (host_key in new_overrides
+                and new_overrides[host_key] != new_defaults.get(host_key)):
+            cur_host = new_overrides[host_key]
+        else:
+            cur_host = old_values.get(host_key, new_defaults.get(host_key, ""))
+        if not _merge_host_is_loopback(cur_host):
+            reset_host = new_defaults.get(host_key, "127.0.0.1")
+            old_values[host_key] = reset_host
+            # Also neutralize an explicit non-loopback .env override so the
+            # template loop does not re-apply it: setting it equal to the new
+            # default makes the loop treat it as "not an override" and fall back
+            # to the reset old_values entry.
+            if host_key in new_overrides:
+                new_overrides[host_key] = reset_host
+            sys.stderr.write(
+                "[one-click] %s=%s forces the bundled container; resetting %s "
+                "from the stale external '%s' to the bundled default '%s'.\n"
+                % (managed_key, op_managed, host_key, cur_host, reset_host))
+
 updated_default = []
 preserved = []
 explicit = []
@@ -1153,6 +1631,11 @@ for k, v in preserved:
 report.append("[migrated-legacy] legacy defaults rewritten to new fixed defaults: %d" % len(migrated_legacy))
 for k, ov, nv in migrated_legacy:
     report.append("  ^ %s: %s -> %s" % (k, redact(k, ov), redact(k, nv)))
+report.append("[migrated-external] legacy CUBE_EXTERNAL_* authoritatively migrated to unified vars: %d" % len(migrated_external))
+for k, ov, nv in migrated_external:
+    # nv is "NEW_KEY=value"; redact against the *new* key name so secrets stay hidden.
+    nv_key = nv.split("=", 1)[0]
+    report.append("  @ %s: %s -> %s" % (k, redact(k, ov), redact(nv_key, nv)))
 report.append("[explicit] taken from new .env overrides: %d" % len(explicit))
 for k in explicit:
     report.append("  ! %s" % k)
@@ -1167,8 +1650,8 @@ with open(diff_file, "w", encoding="utf-8") as fh:
     fh.write("\n".join(report) + "\n")
 
 sys.stderr.write(
-    "[one-click] env merge: +%d new, ~%d default-updated, =%d preserved, ^%d migrated-legacy, >%d kept-extra, -%d dropped%s\n" % (
-        len(added), len(updated_default), len(preserved), len(migrated_legacy), len(extra), len(dropped),
+    "[one-click] env merge: +%d new, ~%d default-updated, =%d preserved, ^%d migrated-legacy, @%d migrated-external, >%d kept-extra, -%d dropped%s\n" % (
+        len(added), len(updated_default), len(preserved), len(migrated_legacy), len(migrated_external), len(extra), len(dropped),
         "" if has_baseline else " (two-way fallback: no baseline)"))
 PY
 }

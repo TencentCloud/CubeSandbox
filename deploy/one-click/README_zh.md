@@ -194,11 +194,18 @@ http://<target-host>:12088
 
 ### 数字助手环境变量
 
-数字助手（AgentHub）需要 CubeAPI 连接 MySQL 保存助手实例、存档、模板和操作流水。one-click 默认会根据 `CUBE_SANDBOX_MYSQL_HOST`、`CUBE_SANDBOX_MYSQL_PORT`、`CUBE_SANDBOX_MYSQL_USER`、`CUBE_SANDBOX_MYSQL_PASSWORD`、`CUBE_SANDBOX_MYSQL_DB` 拼出 `DATABASE_URL`，指向随 one-click 启动的 MySQL：
+数字助手（AgentHub）需要 CubeAPI 连接 MySQL 保存助手实例、存档、模板和操作流水。`install.sh` 会根据 `CUBE_SANDBOX_MYSQL_HOST`、`CUBE_SANDBOX_MYSQL_PORT`、`CUBE_SANDBOX_MYSQL_USER`、`CUBE_SANDBOX_MYSQL_PASSWORD`、`CUBE_SANDBOX_MYSQL_DB` 自动拼出 `DATABASE_URL`，通常无需手动设置。显式的 `DATABASE_URL` **仅在 MySQL 为外部时**生效（参见上文 `CUBE_SANDBOX_MYSQL_HOST` / `_MANAGED` 说明）；在默认的内置模式下会被**忽略**并始终从 `CUBE_SANDBOX_MYSQL_*` 重新拼接，因为内置容器就是用这套凭据创建的。
+
+在外部模式下执行 `--mode=upgrade` 时，`.env` 中显式的 `DATABASE_URL` 优先——但有一个例外，取决于 MySQL 现在解析到哪里：
+
+- **MySQL 解析到远端 host**（`CUBE_SANDBOX_MYSQL_HOST` 不在本机）：若 `DATABASE_URL` 自身的 host 是回环地址（`127.0.0.0/8`／`localhost`／`::1`），则无论其凭据或查询串如何都会**一律忽略**并从 `CUBE_SANDBOX_MYSQL_*` 重新拼接——回环 DSN 根本连不上远端服务器，只可能是过期残留。若要在此保留自定义 DSN，请把它指向同一个远端 host。
+- **MySQL 解析到本机**（回环 host + `*_MANAGED=0`）：只有与**统一化之前的内置默认值**（`mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp`——回环 host、默认的 `cube`/`cube_pass`/`cube_mvp` 凭据、不含查询串）完全匹配的 DSN 才会被忽略并重新拼接，从而避免仅自定义了 `CUBE_SANDBOX_MYSQL_PASSWORD` 的部署被悄悄指向错误的凭据。若想让该 DSN 被视为有意的覆盖，请给它一个非默认凭据（或带查询串／非 `mysql://` 协议）。
+
+若 `.env` 未设置 `DATABASE_URL`，但上次安装已把一个**自定义** DSN（带查询参数如 `?parseTime=true&charset=utf8mb4`，或非 `mysql://` 协议）写入 `.one-click.env`，则升级时会**保留**该自定义值（并打印告警），而不会从 `CUBE_SANDBOX_MYSQL_*` 重新拼接（那样会丢掉额外参数）。同样适用上述远端 host 规则：若持久化的 DSN 其 host 为回环地址，但 MySQL 现在解析到远端 host，则会被**丢弃并重新拼接**（请在 `.env` 中用远端 host 重新提供该 DSN 以保留查询参数）。普通的自动生成 DSN（`mysql://user:pass@host:port/db`，不含查询串/片段）仍会从 `CUBE_SANDBOX_MYSQL_*` 重新拼接，以便凭据变更生效。若需在升级时修改自定义 DSN，请在 `.env` 中显式设置。
 
 ```bash
-# 可选；未设置时由 one-click 自动拼接。
-DATABASE_URL=mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
+# 可选；内置模式下会被忽略，仅在外部 MySQL 时生效。
+# DATABASE_URL=mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
 ```
 
 创建或重新配置 OpenClaw 数字助手前，请在 WebUI 的 **AgentHub 设置** 中填写 LLM API Key（以及 provider、Base URL、模型）。
@@ -259,24 +266,63 @@ MySQL/Redis 依赖默认会部署到：
 
 ### 使用外部 MySQL / Redis
 
-如果希望使用已有的 MySQL/Redis 服务器，而不是内置的本地容器，可在执行
-`install.sh` 之前在 `.env` 中设置以下变量（参见 `env.example`）：
+MySQL/Redis 使用同一套变量描述，靠 `*_HOST` 的值区分模式：默认是 `127.0.0.1`
+（内置本地容器）。如果希望使用已有的 MySQL/Redis 服务器，只需把 `*_HOST` 指向
+其地址，在执行 `install.sh` 之前写入 `.env`（参见 `env.example`）：
 
 ```bash
 # 外部 MySQL（凭据字段可按需覆盖）
-CUBE_EXTERNAL_MYSQL_HOST=10.0.0.20
-CUBE_EXTERNAL_MYSQL_PORT=3306
-CUBE_EXTERNAL_MYSQL_USER=cube
-CUBE_EXTERNAL_MYSQL_PASSWORD=cube_pass
-CUBE_EXTERNAL_MYSQL_DB=cube_mvp
+CUBE_SANDBOX_MYSQL_HOST=10.0.0.20
+CUBE_SANDBOX_MYSQL_PORT=3306
+CUBE_SANDBOX_MYSQL_USER=cube
+CUBE_SANDBOX_MYSQL_PASSWORD=cube_pass
+CUBE_SANDBOX_MYSQL_DB=cube_mvp
 
 # 外部 Redis
-CUBE_EXTERNAL_REDIS_HOST=10.0.0.21
-CUBE_EXTERNAL_REDIS_PORT=6379
-CUBE_EXTERNAL_REDIS_PASSWORD=ceuhvu123
+CUBE_SANDBOX_REDIS_HOST=10.0.0.21
+CUBE_SANDBOX_REDIS_PORT=6379
+CUBE_SANDBOX_REDIS_PASSWORD=ceuhvu123
 ```
 
-当设置了 `CUBE_EXTERNAL_MYSQL_HOST`（和/或 `CUBE_EXTERNAL_REDIS_HOST`）时，`install.sh` 会：
+> 旧的 `CUBE_EXTERNAL_MYSQL_*` / `CUBE_EXTERNAL_REDIS_*` 变量已弃用，并将被移除。
+> 从旧版本**首次**安装/升级时，任意非空的旧变量会被**权威地迁移**到对应的
+> `CUBE_SANDBOX_*` 变量（覆盖其原有取值），任意非空的旧 `*_HOST` 会强制置
+> `*_MANAGED=0`，随后旧变量会从运行时 `.one-click.env` 中清除（并打印弃用警告）。
+> 首次迁移之后，运行时 env 不再含有任何 `CUBE_EXTERNAL_*`，因此后续升级时若你自己的
+> `.env` 中仍残留未删除的 `CUBE_EXTERNAL_*`，这些残留值会被**忽略**（并打印告警），
+> 而不会再被重新应用——它们无法再把已迁移的部署悄悄回滚到旧地址。无论如何请勿同时保留
+> 两套变量：新配置请直接设置 `CUBE_SANDBOX_*_HOST` / `*_MANAGED`，并从 `.env` 中删除
+> `CUBE_EXTERNAL_*` 行。
+
+#### 连接本机上你自己的 MySQL / Redis
+
+`*_HOST` 的判定默认把回环地址视为「使用内置容器」。如果你在本机上跑了**自己的**
+MySQL/Redis（监听 `127.0.0.1`），请设置 `*_MANAGED=0`，让 cube 连接你的服务，而不是
+在同一个回环端口上去启动自己的容器（否则会端口冲突）：
+
+```bash
+CUBE_SANDBOX_MYSQL_HOST=127.0.0.1
+CUBE_SANDBOX_MYSQL_PORT=3306
+CUBE_SANDBOX_MYSQL_MANAGED=0
+```
+
+`*_MANAGED` 默认为 `auto`（回环地址时由 cube 管理，否则视为外部）。`*_MANAGED=1` 强制
+使用内置容器，且要求 host 为回环地址。为方便起见，除 `auto` 外还接受布尔别名（不区分
+大小写）：`1`/`true`/`yes`/`on` 表示内置管理，`0`/`false`/`no`/`off` 表示外部。内置模式下容器始终发布在 `127.0.0.1`，因此把
+`*_HOST` 设为非 `127.0.0.1` 的回环地址（如 `127.0.0.2`）只影响模式判定，客户端
+（CubeAPI/CubeMaster）仍通过 `127.0.0.1` 连接。
+
+> **升级（`--mode=upgrade`）时切换模式：** `install.sh` 会把解析出的「内置/外部」
+> 决策固化写入 `.one-click.env`，升级合并会保留该值。如需在升级时把某依赖在内置与
+> 外部之间切换，必须在 `.env` 中显式设置 `*_MANAGED`（内置 → 外部：设 `*_MANAGED=0`；
+> 外部 → 内置：设 `*_MANAGED=1`）。仅改 `*_HOST` 会被拒绝并报错（内置 → 外部）或被
+> 静默地继续当作外部（外部 → 内置），因为上一次安装固化的决策优先。设置 `*_MANAGED=1`
+> 时，合并还会把残留的外部 `*_HOST` 重置回内置回环默认值，使强制内置的决策保持自洽。
+> `*_MANAGED=auto` 本身不会把外部翻转为内置：`auto` 由 host 决定，而升级会保留外部
+> `*_HOST`，因此依赖仍为外部——需要强制内置容器时请使用 `*_MANAGED=1`。
+
+当某个依赖被判定为外部时——要么 `*_HOST` 指向非本机地址（即不在 `127.0.0.0/8`、
+`localhost`、`::1` 范围内），要么回环 host 配了 `*_MANAGED=0`——`install.sh` 会：
 
 - 用外部 MySQL/Redis 地址改写 `CubeMaster/conf.yaml`；
 - 将 `DATABASE_URL`（CubeAPI）和 `CUBE_PROXY_REDIS_*`（cube proxy）写入 `.one-click.env`，让各服务都连接外部地址；

@@ -299,10 +299,16 @@ sudo ./down.sh
 
 ### 数据库与缓存
 
+MySQL/Redis 使用同一套变量：`*_HOST` 决定模式（回环地址 = 内置本地容器，远端地址 = 外部服务器），`*_MANAGED` 将「谁拥有容器」与「客户端连到哪里」解耦。外部模式的完整说明见 [使用外部 MySQL / Redis](https://github.com/tencentcloud/CubeSandbox/blob/master/deploy/one-click/README_zh.md#使用外部-mysql--redis)。
+
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `CUBE_SANDBOX_MYSQL_CONTAINER` | `cube-sandbox-mysql` | MySQL 容器名 |
-| `CUBE_SANDBOX_REDIS_CONTAINER` | `cube-sandbox-redis` | Redis 容器名 |
+| `CUBE_SANDBOX_MYSQL_HOST` | `127.0.0.1` | MySQL 主机。回环地址（`127.0.0.0/8`、`localhost`、`::1`）使用内置容器；其他地址视为外部服务器。 |
+| `CUBE_SANDBOX_REDIS_HOST` | `127.0.0.1` | Redis 主机。回环/外部判定规则同 MySQL。 |
+| `CUBE_SANDBOX_MYSQL_MANAGED` | `auto` | 是否由 cube 启动/管理内置 MySQL 容器。`auto` = host 为回环时管理；`1`/`true`/`yes`/`on` = 强制内置（host 必须为回环）；`0`/`false`/`no`/`off` = 连接 `*_HOST:*_PORT` 上已有的服务。 |
+| `CUBE_SANDBOX_REDIS_MANAGED` | `auto` | 语义同 `CUBE_SANDBOX_MYSQL_MANAGED`，用于 Redis。 |
+| `CUBE_SANDBOX_MYSQL_CONTAINER` | `cube-sandbox-mysql` | MySQL 容器名（仅内置模式） |
+| `CUBE_SANDBOX_REDIS_CONTAINER` | `cube-sandbox-redis` | Redis 容器名（仅内置模式） |
 | `CUBE_SANDBOX_MYSQL_PORT` | `3306` | MySQL 端口 |
 | `CUBE_SANDBOX_REDIS_PORT` | `6379` | Redis 端口 |
 | `CUBE_SANDBOX_MYSQL_ROOT_PASSWORD` | `cube_root` | MySQL root 密码 |
@@ -310,6 +316,7 @@ sudo ./down.sh
 | `CUBE_SANDBOX_MYSQL_USER` | `cube` | MySQL 用户名 |
 | `CUBE_SANDBOX_MYSQL_PASSWORD` | `cube_pass` | MySQL 用户密码 |
 | `CUBE_SANDBOX_REDIS_PASSWORD` | `ceuhvu123` | Redis 密码 |
+| `DATABASE_URL` | 由 `CUBE_SANDBOX_MYSQL_*` 拼接 | CubeAPI 数据库 DSN。通常无需设置，由 `install.sh` 自动拼接。显式值**仅在 MySQL 为外部时**生效；内置模式下会被忽略并始终从 `CUBE_SANDBOX_MYSQL_*` 重新拼接。 |
 
 ### CubeProxy 与 DNS
 

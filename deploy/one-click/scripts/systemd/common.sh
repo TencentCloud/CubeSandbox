@@ -474,3 +474,7 @@ systemd_target_for_role() {
 }
 
 load_runtime_env
+
+# Fold any legacy CUBE_EXTERNAL_* values onto the unified CUBE_SANDBOX_* names
+# once the runtime env is loaded, so every systemd helper sees one variable set.
+apply_deprecated_external_aliases

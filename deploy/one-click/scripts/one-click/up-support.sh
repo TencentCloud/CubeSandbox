@@ -75,10 +75,7 @@ esac
 # container. Filter it out of the requested service set; for the legacy
 # "all services" path (empty SUPPORT_SERVICES) restrict the run to the local
 # services only so we don't accidentally launch a conflicting container.
-CUBE_EXTERNAL_MYSQL_HOST="${CUBE_EXTERNAL_MYSQL_HOST:-}"
-CUBE_EXTERNAL_REDIS_HOST="${CUBE_EXTERNAL_REDIS_HOST:-}"
-CUBE_EXTERNAL_REDIS_MASTER_NAME="${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}"
-if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" || -n "${CUBE_EXTERNAL_REDIS_HOST}" || -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
+if mysql_is_external || redis_is_external; then
   requested_services="${SUPPORT_SERVICES:-mysql redis}"
   filtered_services=""
   # Split on whitespace into an array so SUPPORT_SERVICES (user-controllable) is
@@ -87,17 +84,17 @@ if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" || -n "${CUBE_EXTERNAL_REDIS_HOST}" || -n
   for svc in "${requested_services_arr[@]}"; do
     case "${svc}" in
       mysql)
-        if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
-          log "using external MySQL (${CUBE_EXTERNAL_MYSQL_HOST}), skipping local mysql container"
+        if mysql_is_external; then
+          log "using external MySQL (${CUBE_SANDBOX_MYSQL_HOST}), skipping local mysql container"
           continue
         fi
         ;;
       redis)
-        if [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" || -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
-          if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
-            log "using external Redis Sentinel (${CUBE_EXTERNAL_REDIS_MASTER_NAME}), skipping local redis container"
+        if redis_is_external; then
+          if [[ -n "${CUBE_SANDBOX_REDIS_MASTER_NAME:-}" ]]; then
+            log "using external Redis Sentinel (${CUBE_SANDBOX_REDIS_MASTER_NAME}), skipping local redis container"
           else
-            log "using external Redis (${CUBE_EXTERNAL_REDIS_HOST}), skipping local redis container"
+            log "using external Redis (${CUBE_SANDBOX_REDIS_HOST}), skipping local redis container"
           fi
           continue
         fi

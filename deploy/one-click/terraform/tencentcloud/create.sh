@@ -3904,8 +3904,8 @@ fi"
 echo '[local-bundle] Creating .env...'
 cd \"\${BUNDLE_DIR}\"
 cat <<EOF > .env
-CUBE_EXTERNAL_MYSQL_HOST=${mysql_ip}
-CUBE_EXTERNAL_REDIS_HOST=${redis_ip}
+CUBE_SANDBOX_MYSQL_HOST=${mysql_ip}
+CUBE_SANDBOX_REDIS_HOST=${redis_ip}
 CUBE_PVM_ENABLE=1
 ONE_CLICK_CONTROL_PLANE_IP=\"${control_plane_ip}\"
 MIRROR=${egress_mirror}

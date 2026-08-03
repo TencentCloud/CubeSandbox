@@ -58,11 +58,27 @@ fi
 if [[ -n "${DATABASE_URL:-}" ]]; then
   CUBE_API_OPTIONAL_EXPORTS+="export DATABASE_URL=\"${DATABASE_URL}\"; "
 else
+  # Degraded fallback for an ad-hoc invocation whose env carries no DATABASE_URL.
+  # persist_unified_dep_config (lib/common.sh) is the authoritative assembler and
+  # always writes an encoded, managed-mode-127.0.0.1-pinned DATABASE_URL into
+  # .one-click.env, so on a normal install/upgrade the branch above wins. This
+  # path lacks urlencode (not sourced here); the assembled string is later run
+  # via `bash -c` as root by start_with_pidfile, so a credential carrying URL or
+  # shell metacharacters would corrupt the DSN or inject a command (CWE-78).
+  # Rather than emit a broken/injectable URL, refuse and point at the
+  # authoritative path -- callers must pre-set DATABASE_URL for such credentials.
   mysql_host="${CUBE_SANDBOX_MYSQL_HOST:-127.0.0.1}"
   mysql_port="${CUBE_SANDBOX_MYSQL_PORT:-3306}"
   mysql_user="${CUBE_SANDBOX_MYSQL_USER:-cube}"
   mysql_password="${CUBE_SANDBOX_MYSQL_PASSWORD:-cube_pass}"
   mysql_db="${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}"
+  for _dsn_part in "${mysql_user}" "${mysql_password}" "${mysql_host}" "${mysql_port}" "${mysql_db}"; do
+    # dsn_component_has_metachar (scripts/common/validation.sh) is the single
+    # source of the metacharacter guard, shared with cube-api-start.sh.
+    if dsn_component_has_metachar "${_dsn_part}"; then
+      die "cannot assemble DATABASE_URL: a MySQL credential component contains a URL/shell metacharacter; set DATABASE_URL explicitly (the installer's persist_unified_dep_config percent-encodes it) instead of relying on this degraded fallback"
+    fi
+  done
   CUBE_API_OPTIONAL_EXPORTS+="export DATABASE_URL=\"mysql://${mysql_user}:${mysql_password}@${mysql_host}:${mysql_port}/${mysql_db}\"; "
 fi
 if [[ -n "${CUBE_SANDBOX_NODE_IP:-}" ]]; then

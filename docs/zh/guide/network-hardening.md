@@ -20,8 +20,8 @@ Cube Sandbox 的控制面与管理类服务为了便于本地快速体验，部�
 | Cubelet HTTP | `0.0.0.0` | 9998 | `Cubelet/config/config.toml` 的 `[http] address` | 调试 / metrics |
 | cube-proxy | `0.0.0.0` | 80 / 443 / 9090 | `CUBE_PROXY_HTTP_PORT` / `CUBE_PROXY_HTTPS_PORT` / `CUBE_PROXY_GRPC_PORT` | 设计上即面向公网 |
 | WebUI | `0.0.0.0` | 12088 | `.env` 中的 `WEB_UI_HOST_PORT`（仅端口） | 控制台 |
-| MySQL | `127.0.0.1` | 3306 | compose 模板中硬编码 | 已仅绑回环 |
-| Redis | `127.0.0.1` | 6379 | compose 模板中硬编码 | 已仅绑回环 |
+| MySQL | `127.0.0.1` | 3306 | compose 模板中硬编码（内置模式） | 已仅绑回环（内置模式） |
+| Redis | `127.0.0.1` | 6379 | compose 模板中硬编码（内置模式） | 已仅绑回环（内置模式） |
 
 MySQL 与 Redis 已由内置 compose 模板绑定到回环地址，网络上不可达。需要重点关注
 的是表中默认为 `0.0.0.0` 的其余服务。
@@ -113,7 +113,7 @@ CUBE_PROXY_HTTPS_PORT=443
 ### MySQL / Redis
 
 内置容器已通过 compose 模板绑定到 `127.0.0.1`，无需额外配置。若使用外部
-MySQL/Redis（`CUBE_EXTERNAL_MYSQL_HOST`），请在网络层做好访问控制。
+MySQL/Redis（`CUBE_SANDBOX_MYSQL_HOST` 指向远端地址），请在网络层做好访问控制。
 
 ## 加固方案
 

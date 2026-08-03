@@ -56,30 +56,30 @@ fi
 
 DEPLOY_ROLE="$(one_click_deploy_role)"
 
-# ---- External MySQL / Redis support ----
-# Set CUBE_EXTERNAL_MYSQL_HOST / CUBE_EXTERNAL_REDIS_HOST to use external
-# services instead of the bundled local Docker containers. Defaults are filled
-# after the optional upgrade env merge so they are based on the final runtime
-# configuration.
-init_external_dep_defaults() {
-  CUBE_EXTERNAL_MYSQL_HOST="${CUBE_EXTERNAL_MYSQL_HOST:-}"
-  CUBE_EXTERNAL_MYSQL_PORT="${CUBE_EXTERNAL_MYSQL_PORT:-3306}"
-  CUBE_EXTERNAL_MYSQL_USER="${CUBE_EXTERNAL_MYSQL_USER:-cube}"
-  CUBE_EXTERNAL_MYSQL_PASSWORD="${CUBE_EXTERNAL_MYSQL_PASSWORD:-cube_pass}"
-  # Default the external DB name from CUBE_SANDBOX_MYSQL_DB so it resolves to the
-  # same value up-with-deps.sh derives independently. Otherwise a custom
-  # CUBE_SANDBOX_MYSQL_DB (without an explicit CUBE_EXTERNAL_MYSQL_DB) would make
-  # the persisted .one-click.env and the seed step disagree on the database name.
-  CUBE_EXTERNAL_MYSQL_DB="${CUBE_EXTERNAL_MYSQL_DB:-${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}}"
+# ---- MySQL / Redis configuration ----
+# A single CUBE_SANDBOX_{MYSQL,REDIS}_* variable set describes the database and
+# cache. Point CUBE_SANDBOX_MYSQL_HOST / CUBE_SANDBOX_REDIS_HOST at a remote
+# address to use an external server instead of the bundled local containers;
+# leaving them at the loopback default keeps the bundled services. Defaults are
+# filled after the optional upgrade env merge so they reflect the final runtime
+# configuration. (Legacy CUBE_EXTERNAL_* names are mapped onto these by
+# apply_deprecated_external_aliases before this runs.)
+init_unified_dep_defaults() {
+  CUBE_SANDBOX_MYSQL_HOST="${CUBE_SANDBOX_MYSQL_HOST:-127.0.0.1}"
+  CUBE_SANDBOX_MYSQL_PORT="${CUBE_SANDBOX_MYSQL_PORT:-3306}"
+  CUBE_SANDBOX_MYSQL_USER="${CUBE_SANDBOX_MYSQL_USER:-cube}"
+  CUBE_SANDBOX_MYSQL_PASSWORD="${CUBE_SANDBOX_MYSQL_PASSWORD:-cube_pass}"
+  CUBE_SANDBOX_MYSQL_DB="${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}"
 
-  # Mirrors the MySQL behaviour above (patch conf.yaml, persist env, mask local
-  # redis unit).
-  CUBE_EXTERNAL_REDIS_HOST="${CUBE_EXTERNAL_REDIS_HOST:-}"
-  CUBE_EXTERNAL_REDIS_PORT="${CUBE_EXTERNAL_REDIS_PORT:-6379}"
-  CUBE_EXTERNAL_REDIS_PASSWORD="${CUBE_EXTERNAL_REDIS_PASSWORD:-ceuhvu123}"
-  CUBE_EXTERNAL_REDIS_MASTER_NAME="${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}"
-  CUBE_EXTERNAL_REDIS_SENTINEL_NODES="${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}"
-  CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD="${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD:-}"
+  CUBE_SANDBOX_REDIS_HOST="${CUBE_SANDBOX_REDIS_HOST:-127.0.0.1}"
+  CUBE_SANDBOX_REDIS_PORT="${CUBE_SANDBOX_REDIS_PORT:-6379}"
+  CUBE_SANDBOX_REDIS_PASSWORD="${CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123}"
+  # Redis Sentinel fields. A non-empty MASTER_NAME selects Sentinel mode, which
+  # implies external (redis_is_managed returns false); *_HOST/_PORT are then
+  # unused. These stay empty in the default bundled/standalone modes.
+  CUBE_SANDBOX_REDIS_MASTER_NAME="${CUBE_SANDBOX_REDIS_MASTER_NAME:-}"
+  CUBE_SANDBOX_REDIS_SENTINEL_NODES="${CUBE_SANDBOX_REDIS_SENTINEL_NODES:-}"
+  CUBE_SANDBOX_REDIS_SENTINEL_PASSWORD="${CUBE_SANDBOX_REDIS_SENTINEL_PASSWORD:-}"
 }
 
 # Guard against shipping the example/default credentials to a real external
@@ -87,24 +87,24 @@ init_external_dep_defaults() {
 # are trivially guessable, so warn loudly when an external endpoint is wired up
 # without overriding them.
 warn_default_external_credentials() {
-  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" && "${CUBE_EXTERNAL_MYSQL_PASSWORD}" == "cube_pass" ]]; then
-    log "WARNING: external MySQL (${CUBE_EXTERNAL_MYSQL_HOST}) configured with the default password 'cube_pass'."
-    log "WARNING: set CUBE_EXTERNAL_MYSQL_PASSWORD to a strong value in your .env before exposing this deployment."
+  if mysql_is_external && [[ "${CUBE_SANDBOX_MYSQL_PASSWORD}" == "cube_pass" ]]; then
+    log "WARNING: external MySQL (${CUBE_SANDBOX_MYSQL_HOST}) configured with the default password 'cube_pass'."
+    log "WARNING: set CUBE_SANDBOX_MYSQL_PASSWORD to a strong value in your .env before exposing this deployment."
   fi
-  if [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" && "${CUBE_EXTERNAL_REDIS_PASSWORD}" == "ceuhvu123" ]]; then
-    log "WARNING: external Redis (${CUBE_EXTERNAL_REDIS_HOST}) configured with the default password 'ceuhvu123'."
-    log "WARNING: set CUBE_EXTERNAL_REDIS_PASSWORD to a strong value in your .env before exposing this deployment."
+  if redis_is_external && [[ "${CUBE_SANDBOX_REDIS_PASSWORD}" == "ceuhvu123" ]]; then
+    log "WARNING: external Redis (${CUBE_SANDBOX_REDIS_HOST}) configured with the default password 'ceuhvu123'."
+    log "WARNING: set CUBE_SANDBOX_REDIS_PASSWORD to a strong value in your .env before exposing this deployment."
   fi
-  if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" && "${CUBE_EXTERNAL_REDIS_PASSWORD}" == "ceuhvu123" ]]; then
-    log "WARNING: external Redis Sentinel (${CUBE_EXTERNAL_REDIS_MASTER_NAME}) configured with the default password 'ceuhvu123'."
-    log "WARNING: set CUBE_EXTERNAL_REDIS_PASSWORD to a strong value in your .env before exposing this deployment."
+  if [[ -n "${CUBE_SANDBOX_REDIS_MASTER_NAME}" && "${CUBE_SANDBOX_REDIS_PASSWORD}" == "ceuhvu123" ]]; then
+    log "WARNING: external Redis Sentinel (${CUBE_SANDBOX_REDIS_MASTER_NAME}) configured with the default password 'ceuhvu123'."
+    log "WARNING: set CUBE_SANDBOX_REDIS_PASSWORD to a strong value in your .env before exposing this deployment."
   fi
   # Same password for Sentinel and master is a valid shared-secret setup.
   # Only remind when Sentinel has no requirepass and the env can be left empty.
-  if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" && -n "${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD}" \
-      && "${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD}" == "${CUBE_EXTERNAL_REDIS_PASSWORD}" ]]; then
-    log "INFO: CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD equals master password (valid if intentional)."
-    log "INFO: if Sentinel has no requirepass, leave CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD empty."
+  if [[ -n "${CUBE_SANDBOX_REDIS_MASTER_NAME}" && -n "${CUBE_SANDBOX_REDIS_SENTINEL_PASSWORD}" \
+      && "${CUBE_SANDBOX_REDIS_SENTINEL_PASSWORD}" == "${CUBE_SANDBOX_REDIS_PASSWORD}" ]]; then
+    log "INFO: CUBE_SANDBOX_REDIS_SENTINEL_PASSWORD equals master password (valid if intentional)."
+    log "INFO: if Sentinel has no requirepass, leave CUBE_SANDBOX_REDIS_SENTINEL_PASSWORD empty."
   fi
 }
 
@@ -162,9 +162,25 @@ if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
   load_env_file "${MERGED_ENV}"
   apply_cli_overrides
   DEPLOY_ROLE="$(one_click_deploy_role)"
+
+  # If the OLD runtime env carries no CUBE_EXTERNAL_* key, a prior install already
+  # migrated onto the unified vars and merge_env_three_way just rebuilt the
+  # endpoint from that runtime env. Signal apply_deprecated_external_aliases to
+  # DISCARD (not apply) any leftover CUBE_EXTERNAL_* still lingering in the
+  # operator .env, so they cannot clobber the freshly merged unified endpoint.
+  if runtime_external_migration_complete "${RUNTIME_ENV_OLD}"; then
+    # Consumed by apply_deprecated_external_aliases (sourced from validation.sh).
+    # shellcheck disable=SC2034
+    ONE_CLICK_EXTERNAL_MIGRATION_COMPLETE=1
+  fi
 fi
 
-init_external_dep_defaults
+# Fold legacy CUBE_EXTERNAL_* onto the unified CUBE_SANDBOX_* names BEFORE
+# init_unified_dep_defaults fills the new vars with loopback defaults, otherwise
+# a still-set legacy host would be masked by the 127.0.0.1 default.
+apply_deprecated_external_aliases
+
+init_unified_dep_defaults
 
 CUBE_PVM_ENABLE="${CUBE_PVM_ENABLE:-0}"
 case "${CUBE_PVM_ENABLE}" in
@@ -350,11 +366,13 @@ patch_cubemaster_external_deps() {
   local cfg="${PKG_ROOT}/CubeMaster/conf.yaml"
 
   # Leaving Sentinel mode must scrub master_name / sentinel_* even when the
-  # operator returns to bundled Redis (no CUBE_EXTERNAL_* set). Otherwise
-  # resolveRedisAddr keeps preferring MasterName over Nodes.
+  # operator returns to bundled Redis. Otherwise resolveRedisAddr keeps
+  # preferring MasterName over Nodes. redis_is_external is false only for the
+  # managed bundled container (Sentinel mode forces external), so its negation is
+  # the "back to bundled" signal.
   local scrub_stale_sentinel=0
   local restore_bundled_redis=0
-  if [[ -z "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" && -z "${CUBE_EXTERNAL_REDIS_HOST}" && -f "${cfg}" ]]; then
+  if ! redis_is_external && [[ -f "${cfg}" ]]; then
     if grep -qE '^[[:space:]]*master_name:' "${cfg}"; then
       scrub_stale_sentinel=1
       restore_bundled_redis=1
@@ -369,9 +387,8 @@ patch_cubemaster_external_deps() {
   fi
 
   # Validate once up front; both branches patch the same file.
-  if [[ -z "${CUBE_EXTERNAL_MYSQL_HOST}" && -z "${CUBE_EXTERNAL_REDIS_HOST}" \
-      && -z "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" \
-      && "${scrub_stale_sentinel}" -eq 0 && "${restore_bundled_redis}" -eq 0 ]]; then
+  if ! mysql_is_external && ! redis_is_external \
+      && [[ "${scrub_stale_sentinel}" -eq 0 && "${restore_bundled_redis}" -eq 0 ]]; then
     return 0
   fi
   ensure_file "${cfg}"
@@ -381,16 +398,16 @@ patch_cubemaster_external_deps() {
     sed -i '/^  master_name:/d; /^  sentinel_nodes:/d; /^  sentinel_password:/d' "${cfg}"
   fi
 
-  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
-    log "patching conf.yaml for external MySQL: ${CUBE_EXTERNAL_MYSQL_HOST}:${CUBE_EXTERNAL_MYSQL_PORT}/${CUBE_EXTERNAL_MYSQL_DB}"
+  if mysql_is_external; then
+    log "patching conf.yaml for external MySQL: ${CUBE_SANDBOX_MYSQL_HOST}:${CUBE_SANDBOX_MYSQL_PORT}/${CUBE_SANDBOX_MYSQL_DB}"
     # SECURITY: escape user-supplied values for the sed '|' delimiter so that a
     # '|', '\', '&' or '"' in a host/user/password does not corrupt conf.yaml
     # or break the double-quoted sed replacement strings below.
     local mysql_addr_esc mysql_user_esc mysql_pwd_esc mysql_db_esc
-    mysql_addr_esc="$(escape_sed "${CUBE_EXTERNAL_MYSQL_HOST}:${CUBE_EXTERNAL_MYSQL_PORT}")"
-    mysql_user_esc="$(escape_sed "${CUBE_EXTERNAL_MYSQL_USER}")"
-    mysql_pwd_esc="$(escape_sed "${CUBE_EXTERNAL_MYSQL_PASSWORD}")"
-    mysql_db_esc="$(escape_sed "${CUBE_EXTERNAL_MYSQL_DB}")"
+    mysql_addr_esc="$(escape_sed "${CUBE_SANDBOX_MYSQL_HOST}:${CUBE_SANDBOX_MYSQL_PORT}")"
+    mysql_user_esc="$(escape_sed "${CUBE_SANDBOX_MYSQL_USER}")"
+    mysql_pwd_esc="$(escape_sed "${CUBE_SANDBOX_MYSQL_PASSWORD}")"
+    mysql_db_esc="$(escape_sed "${CUBE_SANDBOX_MYSQL_DB}")"
     # Match only on the YAML key prefix ('addr:'/'user:'/'pwd:'/'db_name:') and
     # accept any current value, so these patterns keep working even if the
     # conf.yaml template is regenerated with different defaults. These keys only
@@ -405,15 +422,15 @@ patch_cubemaster_external_deps() {
       "${cfg}"
   fi
 
-  if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
-    [[ -n "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES}" ]] \
-      || die "CUBE_EXTERNAL_REDIS_SENTINEL_NODES is required when CUBE_EXTERNAL_REDIS_MASTER_NAME is set"
-    log "patching conf.yaml for external Redis Sentinel: master=${CUBE_EXTERNAL_REDIS_MASTER_NAME} sentinels=${CUBE_EXTERNAL_REDIS_SENTINEL_NODES}"
+  if [[ -n "${CUBE_SANDBOX_REDIS_MASTER_NAME}" ]]; then
+    [[ -n "${CUBE_SANDBOX_REDIS_SENTINEL_NODES}" ]] \
+      || die "CUBE_SANDBOX_REDIS_SENTINEL_NODES is required when CUBE_SANDBOX_REDIS_MASTER_NAME is set"
+    log "patching conf.yaml for external Redis Sentinel: master=${CUBE_SANDBOX_REDIS_MASTER_NAME} sentinels=${CUBE_SANDBOX_REDIS_SENTINEL_NODES}"
     local redis_master_esc redis_sentinel_esc redis_pwd_esc redis_sentinel_pwd_esc
-    redis_master_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_MASTER_NAME}")"
-    redis_sentinel_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES}")"
-    redis_pwd_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_PASSWORD}")"
-    redis_sentinel_pwd_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD}")"
+    redis_master_esc="$(escape_sed "${CUBE_SANDBOX_REDIS_MASTER_NAME}")"
+    redis_sentinel_esc="$(escape_sed "${CUBE_SANDBOX_REDIS_SENTINEL_NODES}")"
+    redis_pwd_esc="$(escape_sed "${CUBE_SANDBOX_REDIS_PASSWORD}")"
+    redis_sentinel_pwd_esc="$(escape_sed "${CUBE_SANDBOX_REDIS_SENTINEL_PASSWORD}")"
     # Always use s||| substitutions (not sed a\) so escape_sed's \| / \& /
     # \\ escapes are interpreted by the replacement engine. sed a-text would
     # leave those backslashes literal and produce invalid YAML on first insert
@@ -434,14 +451,14 @@ patch_cubemaster_external_deps() {
   sentinel_password: \"${redis_sentinel_pwd_esc}\"|" \
         "${cfg}"
     fi
-  elif [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" ]]; then
-    log "patching conf.yaml for external Redis: ${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT}"
+  elif redis_is_external; then
+    log "patching conf.yaml for external Redis: ${CUBE_SANDBOX_REDIS_HOST}:${CUBE_SANDBOX_REDIS_PORT}"
     # Sentinel → standalone: drop leftover master_name/sentinel_* so
     # resolveRedisAddr does not keep preferring MasterName over Nodes.
     sed -i '/^  master_name:/d; /^  sentinel_nodes:/d; /^  sentinel_password:/d' "${cfg}"
     local redis_nodes_esc redis_pwd_esc
-    redis_nodes_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT}")"
-    redis_pwd_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_PASSWORD}")"
+    redis_nodes_esc="$(escape_sed "${CUBE_SANDBOX_REDIS_HOST}:${CUBE_SANDBOX_REDIS_PORT}")"
+    redis_pwd_esc="$(escape_sed "${CUBE_SANDBOX_REDIS_PASSWORD}")"
     # Match only on the YAML key prefix so these patterns survive template
     # default changes. 'nodes:'/'password:' only appear in the redis* sections,
     # so every Redis endpoint is repointed while MySQL fields stay untouched.
@@ -473,9 +490,9 @@ patch_cubemaster_external_deps() {
 check_external_deps_preflight() {
   local connect_timeout="${ONE_CLICK_EXTERNAL_DEP_TIMEOUT:-5}"
 
-  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
+  if mysql_is_external; then
     if command -v mysqladmin >/dev/null 2>&1; then
-      log "checking connectivity to external MySQL ${CUBE_EXTERNAL_MYSQL_HOST}:${CUBE_EXTERNAL_MYSQL_PORT}"
+      log "checking connectivity to external MySQL ${CUBE_SANDBOX_MYSQL_HOST}:${CUBE_SANDBOX_MYSQL_PORT}"
       local mysql_cnf
       # SECURITY: tighten umask before mktemp so the credential file is created
       # 0600 from the start -- this closes the brief race window between mktemp's
@@ -492,17 +509,17 @@ check_external_deps_preflight() {
       chmod 600 "${mysql_cnf}"
       cat > "${mysql_cnf}" <<EOF
 [client]
-password="${CUBE_EXTERNAL_MYSQL_PASSWORD}"
+password="${CUBE_SANDBOX_MYSQL_PASSWORD}"
 EOF
       if ! mysqladmin --defaults-extra-file="${mysql_cnf}" \
-          -h "${CUBE_EXTERNAL_MYSQL_HOST}" \
-          -P "${CUBE_EXTERNAL_MYSQL_PORT}" \
-          -u "${CUBE_EXTERNAL_MYSQL_USER}" \
+          -h "${CUBE_SANDBOX_MYSQL_HOST}" \
+          -P "${CUBE_SANDBOX_MYSQL_PORT}" \
+          -u "${CUBE_SANDBOX_MYSQL_USER}" \
           --connect-timeout="${connect_timeout}" ping >/dev/null 2>&1; then
         rm -f "${mysql_cnf}"
         trap - EXIT
-        die "cannot reach external MySQL at ${CUBE_EXTERNAL_MYSQL_HOST}:${CUBE_EXTERNAL_MYSQL_PORT} as user '${CUBE_EXTERNAL_MYSQL_USER}'.
-  Verify CUBE_EXTERNAL_MYSQL_HOST / _PORT / _USER / _PASSWORD and that the server is reachable from this host."
+        die "cannot reach external MySQL at ${CUBE_SANDBOX_MYSQL_HOST}:${CUBE_SANDBOX_MYSQL_PORT} as user '${CUBE_SANDBOX_MYSQL_USER}'.
+  Verify CUBE_SANDBOX_MYSQL_HOST / _PORT / _USER / _PASSWORD and that the server is reachable from this host."
       fi
       rm -f "${mysql_cnf}"
       trap - EXIT
@@ -512,11 +529,11 @@ EOF
     fi
   fi
 
-  if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
-    [[ -n "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES}" ]] \
-      || die "CUBE_EXTERNAL_REDIS_SENTINEL_NODES is required when CUBE_EXTERNAL_REDIS_MASTER_NAME is set"
+  if [[ -n "${CUBE_SANDBOX_REDIS_MASTER_NAME}" ]]; then
+    [[ -n "${CUBE_SANDBOX_REDIS_SENTINEL_NODES}" ]] \
+      || die "CUBE_SANDBOX_REDIS_SENTINEL_NODES is required when CUBE_SANDBOX_REDIS_MASTER_NAME is set"
     if command -v redis-cli >/dev/null 2>&1; then
-      log "checking connectivity to external Redis Sentinel master=${CUBE_EXTERNAL_REDIS_MASTER_NAME} sentinels=${CUBE_EXTERNAL_REDIS_SENTINEL_NODES}"
+      log "checking connectivity to external Redis Sentinel master=${CUBE_SANDBOX_REDIS_MASTER_NAME} sentinels=${CUBE_SANDBOX_REDIS_SENTINEL_NODES}"
       local redis_help_output
       local redis_timeout_args=()
       local use_timeout_wrapper=0
@@ -533,11 +550,11 @@ EOF
 
       # Do not fall back to the Redis master password: many deployments only
       # set requirepass on the master, while Sentinel has no AUTH.
-      local sentinel_pd="${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD}"
+      local sentinel_pd="${CUBE_SANDBOX_REDIS_SENTINEL_PASSWORD}"
 
       local master_host="" master_port=""
       local sentinel_addr sentinel_host sentinel_port
-      IFS=',' read -ra _sentinel_list <<< "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES}"
+      IFS=',' read -ra _sentinel_list <<< "${CUBE_SANDBOX_REDIS_SENTINEL_NODES}"
       for sentinel_addr in "${_sentinel_list[@]}"; do
         sentinel_addr="${sentinel_addr//[[:space:]]/}"
         [[ -n "${sentinel_addr}" ]] || continue
@@ -584,13 +601,13 @@ EOF
             "${connect_timeout}" \
             "${sentinel_base_cmd[@]}" \
             --no-auth-warning \
-            SENTINEL get-master-addr-by-name "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" 2>/dev/null || true)"
+            SENTINEL get-master-addr-by-name "${CUBE_SANDBOX_REDIS_MASTER_NAME}" 2>/dev/null || true)"
         else
           lookup_reply="$(run_redis_preflight_cmd \
             "${use_timeout_wrapper}" \
             "${connect_timeout}" \
             "${sentinel_base_cmd[@]}" \
-            SENTINEL get-master-addr-by-name "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" 2>/dev/null || true)"
+            SENTINEL get-master-addr-by-name "${CUBE_SANDBOX_REDIS_MASTER_NAME}" 2>/dev/null || true)"
         fi
         master_host="$(printf '%s\n' "${lookup_reply}" | sed -n '1p')"
         master_port="$(printf '%s\n' "${lookup_reply}" | sed -n '2p')"
@@ -599,8 +616,8 @@ EOF
         fi
       done
       if [[ -z "${master_host}" || -z "${master_port}" ]]; then
-        die "cannot resolve Redis master ${CUBE_EXTERNAL_REDIS_MASTER_NAME} via Sentinel nodes ${CUBE_EXTERNAL_REDIS_SENTINEL_NODES}.
-  Verify CUBE_EXTERNAL_REDIS_MASTER_NAME / _SENTINEL_NODES / _SENTINEL_PASSWORD and that at least one sentinel is reachable."
+        die "cannot resolve Redis master ${CUBE_SANDBOX_REDIS_MASTER_NAME} via Sentinel nodes ${CUBE_SANDBOX_REDIS_SENTINEL_NODES}.
+  Verify CUBE_SANDBOX_REDIS_MASTER_NAME / _SENTINEL_NODES / _SENTINEL_PASSWORD and that at least one sentinel is reachable."
       fi
 
       local master_base_cmd=(
@@ -609,9 +626,9 @@ EOF
         -p "${master_port}"
         "${redis_timeout_args[@]}"
       )
-      if [[ -n "${CUBE_EXTERNAL_REDIS_PASSWORD}" ]]; then
+      if [[ -n "${CUBE_SANDBOX_REDIS_PASSWORD}" ]]; then
         local redis_reply
-        redis_reply="$(printf '%s' "${CUBE_EXTERNAL_REDIS_PASSWORD}" | run_redis_preflight_cmd \
+        redis_reply="$(printf '%s' "${CUBE_SANDBOX_REDIS_PASSWORD}" | run_redis_preflight_cmd \
           "${use_timeout_wrapper}" \
           "${connect_timeout}" \
           "${master_base_cmd[@]}" \
@@ -619,7 +636,7 @@ EOF
           -x AUTH 2>&1 || true)"
         if [[ "${redis_reply}" != "OK" ]]; then
           die "external Redis master ${master_host}:${master_port} (via Sentinel) rejected the configured password (AUTH replied: ${redis_reply:-<no response>}).
-  Verify CUBE_EXTERNAL_REDIS_PASSWORD and that the master is reachable from this host."
+  Verify CUBE_SANDBOX_REDIS_PASSWORD and that the master is reachable from this host."
         fi
       else
         local redis_pong
@@ -633,9 +650,9 @@ EOF
     else
       log "redis-cli not found; skipping external Redis Sentinel connectivity preflight"
     fi
-  elif [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" ]]; then
+  elif redis_is_external; then
     if command -v redis-cli >/dev/null 2>&1; then
-      log "checking connectivity to external Redis ${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT}"
+      log "checking connectivity to external Redis ${CUBE_SANDBOX_REDIS_HOST}:${CUBE_SANDBOX_REDIS_PORT}"
       local redis_help_output
       local redis_reply
       local redis_base_cmd=()
@@ -669,11 +686,11 @@ EOF
       fi
       redis_base_cmd=(
         redis-cli
-        -h "${CUBE_EXTERNAL_REDIS_HOST}"
-        -p "${CUBE_EXTERNAL_REDIS_PORT}"
+        -h "${CUBE_SANDBOX_REDIS_HOST}"
+        -p "${CUBE_SANDBOX_REDIS_PORT}"
         "${redis_timeout_args[@]}"
       )
-      if [[ -n "${CUBE_EXTERNAL_REDIS_PASSWORD}" ]]; then
+      if [[ -n "${CUBE_SANDBOX_REDIS_PASSWORD}" ]]; then
         # SECURITY: PING is NOT an authenticated command. A reachable server that
         # has no 'requirepass' set answers PONG even when a (wrong/extraneous)
         # password is configured, so a misconfigured credential would slip
@@ -687,22 +704,22 @@ EOF
         # When the local redis-cli supports them, timeout flags bound the TCP
         # handshake and Redis protocol I/O so a middlebox that accepts the
         # socket but stalls the response cannot hang this preflight indefinitely.
-        redis_reply="$(printf '%s' "${CUBE_EXTERNAL_REDIS_PASSWORD}" | run_redis_preflight_cmd \
+        redis_reply="$(printf '%s' "${CUBE_SANDBOX_REDIS_PASSWORD}" | run_redis_preflight_cmd \
           "${use_timeout_wrapper}" \
           "${connect_timeout}" \
           "${redis_base_cmd[@]}" \
           --no-auth-warning \
           -x AUTH 2>&1 || true)"
         if [[ "${redis_reply}" != "OK" ]]; then
-          die "external Redis at ${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT} is unreachable or rejected the configured password (AUTH replied: ${redis_reply:-<no response>}).
-  Verify CUBE_EXTERNAL_REDIS_HOST / _PORT / _PASSWORD and that the server is reachable from this host."
+          die "external Redis at ${CUBE_SANDBOX_REDIS_HOST}:${CUBE_SANDBOX_REDIS_PORT} is unreachable or rejected the configured password (AUTH replied: ${redis_reply:-<no response>}).
+  Verify CUBE_SANDBOX_REDIS_HOST / _PORT / _PASSWORD and that the server is reachable from this host."
         fi
       else
         local redis_pong
         redis_pong="$(run_redis_preflight_cmd "${use_timeout_wrapper}" "${connect_timeout}" "${redis_base_cmd[@]}" ping 2>/dev/null || true)"
         if [[ "${redis_pong}" != "PONG" ]]; then
-          die "cannot reach external Redis at ${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT} (PING did not return PONG).
-  Verify CUBE_EXTERNAL_REDIS_HOST / _PORT and that the server is reachable from this host."
+          die "cannot reach external Redis at ${CUBE_SANDBOX_REDIS_HOST}:${CUBE_SANDBOX_REDIS_PORT} (PING did not return PONG).
+  Verify CUBE_SANDBOX_REDIS_HOST / _PORT and that the server is reachable from this host."
         fi
       fi
       log "external Redis connectivity OK"
@@ -1150,19 +1167,19 @@ mask_local_dep_service() {
 }
 
 mask_external_dep_services() {
-  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
-    log "masking local MySQL service (external MySQL at ${CUBE_EXTERNAL_MYSQL_HOST} in use)"
+  if mysql_is_external; then
+    log "masking local MySQL service (external MySQL at ${CUBE_SANDBOX_MYSQL_HOST} in use)"
     mask_local_dep_service cube-sandbox-mysql.service
   else
     # Re-enable in case a previous install masked it and the user switched back.
     systemctl unmask cube-sandbox-mysql.service >/dev/null 2>&1 || true
   fi
 
-  if [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" || -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
-    if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
-      log "masking local Redis service (external Redis Sentinel master=${CUBE_EXTERNAL_REDIS_MASTER_NAME} in use)"
+  if redis_is_external; then
+    if [[ -n "${CUBE_SANDBOX_REDIS_MASTER_NAME}" ]]; then
+      log "masking local Redis service (external Redis Sentinel master=${CUBE_SANDBOX_REDIS_MASTER_NAME} in use)"
     else
-      log "masking local Redis service (external Redis at ${CUBE_EXTERNAL_REDIS_HOST} in use)"
+      log "masking local Redis service (external Redis at ${CUBE_SANDBOX_REDIS_HOST} in use)"
     fi
     mask_local_dep_service cube-sandbox-redis.service
   else
@@ -1340,7 +1357,7 @@ elif [[ -f "${ENV_FILE}" ]]; then
 else
   : > "${RUNTIME_ENV_FILE}"
 fi
-# SECURITY: this file holds DATABASE_URL and CUBE_EXTERNAL_*_PASSWORD secrets.
+# SECURITY: this file holds DATABASE_URL and CUBE_SANDBOX_*_PASSWORD secrets.
 # Restrict it to root before any secrets are written so they are never readable
 # by other local users. Note that upsert_env_kv rewrites the file via an atomic
 # mktemp+mv, which replaces the inode; it sets 0600 on its temp file so this
@@ -1407,84 +1424,11 @@ if [[ -n "${CUBE_SANDBOX_CUBE_ROUTER_CIDR:-}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_CUBE_ROUTER_CIDR" "${CUBE_SANDBOX_CUBE_ROUTER_CIDR}"
 fi
 
-# Persist external MySQL config so every systemd unit / helper picks it up
-# instead of the local container. The CUBE_EXTERNAL_* markers let quickcheck
-# and the up/down helpers skip the local service entirely; DATABASE_URL points
-# CubeAPI at the external server (CubeMaster reads the patched conf.yaml).
-if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_HOST" "${CUBE_EXTERNAL_MYSQL_HOST}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_PORT" "${CUBE_EXTERNAL_MYSQL_PORT}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_USER" "${CUBE_EXTERNAL_MYSQL_USER}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_PASSWORD" "${CUBE_EXTERNAL_MYSQL_PASSWORD}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_DB" "${CUBE_EXTERNAL_MYSQL_DB}"
-  # Percent-encode every URI component so values containing URL metacharacters
-  # (@, :, /, #, %, ...) cannot corrupt the connection string. This covers the
-  # userinfo (user/password) as well as the host, port, and database name (e.g.
-  # a '/' in the db name would otherwise be parsed as a path separator).
-  database_url_user="$(urlencode "${CUBE_EXTERNAL_MYSQL_USER}")"
-  database_url_pass="$(urlencode "${CUBE_EXTERNAL_MYSQL_PASSWORD}")"
-  database_url_host="$(urlencode "${CUBE_EXTERNAL_MYSQL_HOST}")"
-  database_url_port="$(urlencode "${CUBE_EXTERNAL_MYSQL_PORT}")"
-  database_url_db="$(urlencode "${CUBE_EXTERNAL_MYSQL_DB}")"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "DATABASE_URL" "mysql://${database_url_user}:${database_url_pass}@${database_url_host}:${database_url_port}/${database_url_db}"
-else
-  # Local MySQL (bundled container): persist DATABASE_URL so CubeAPI and other
-  # components can reach the database without relying on per-script defaults.
-  local_mysql_host="127.0.0.1"
-  local_mysql_port="${CUBE_SANDBOX_MYSQL_PORT:-3306}"
-  local_mysql_user="${CUBE_SANDBOX_MYSQL_USER:-cube}"
-  local_mysql_password="${CUBE_SANDBOX_MYSQL_PASSWORD:-cube_pass}"
-  local_mysql_db="${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "DATABASE_URL" "mysql://$(urlencode "${local_mysql_user}"):$(urlencode "${local_mysql_password}")@$(urlencode "${local_mysql_host}"):$(urlencode "${local_mysql_port}")/$(urlencode "${local_mysql_db}")"
-fi
-
-# Persist external Redis config. cube-proxy reads CUBE_PROXY_REDIS_* from the
-# env file when rendering global.conf (CubeMaster reads the patched conf.yaml).
-# When switching modes, remove the opposite-mode keys so stale sentinel/host
-# values cannot keep the previous mode alive via ":-" fallbacks.
-if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_MASTER_NAME" "${CUBE_EXTERNAL_REDIS_MASTER_NAME}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_SENTINEL_NODES" "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_PASSWORD" "${CUBE_EXTERNAL_REDIS_PASSWORD}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD" "${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_MASTER_NAME" "${CUBE_EXTERNAL_REDIS_MASTER_NAME}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_SENTINEL_NODES" "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_PASSWORD" "${CUBE_EXTERNAL_REDIS_PASSWORD}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_SENTINEL_PASSWORD" "${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD}"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_HOST"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_PORT"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_IP"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_PORT"
-elif [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" ]]; then
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_HOST" "${CUBE_EXTERNAL_REDIS_HOST}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_PORT" "${CUBE_EXTERNAL_REDIS_PORT}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_PASSWORD" "${CUBE_EXTERNAL_REDIS_PASSWORD}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_IP" "${CUBE_EXTERNAL_REDIS_HOST}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_PORT" "${CUBE_EXTERNAL_REDIS_PORT}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_PASSWORD" "${CUBE_EXTERNAL_REDIS_PASSWORD}"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_MASTER_NAME"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_SENTINEL_NODES"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_MASTER_NAME"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_SENTINEL_NODES"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_SENTINEL_PASSWORD"
-else
-  # Back to bundled local Redis: drop every external Redis marker so
-  # up-support / proxy / LCM do not keep skipping the local container or
-  # wiring Sentinel from a previous install.
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_MASTER_NAME"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_SENTINEL_NODES"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_HOST"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_PORT"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_PASSWORD"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_MASTER_NAME"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_SENTINEL_NODES"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_SENTINEL_PASSWORD"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_IP"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_PORT"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_PASSWORD"
-fi
+# Persist the unified MySQL/Redis config (MANAGED freeze + DATABASE_URL, plus the
+# Redis Sentinel wiring when in Sentinel mode) into the runtime env. Extracted to
+# lib/common.sh so the freeze/precedence invariants are unit-testable (see
+# tests/test_env_merge.sh).
+persist_unified_dep_config "${RUNTIME_ENV_FILE}" "${ENV_FILE}"
 
 chmod +x "${INSTALL_PREFIX}/network-agent/bin/"*
 chmod +x "${INSTALL_PREFIX}/Cubelet/bin/"*

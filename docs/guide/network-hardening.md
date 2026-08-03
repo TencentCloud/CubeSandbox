@@ -23,8 +23,8 @@ entire page and apply at least one of the hardening strategies below.
 | Cubelet HTTP | `0.0.0.0` | 9998 | `[http] address` in `Cubelet/config/config.toml` | Debug / metrics |
 | cube-proxy | `0.0.0.0` | 80 / 443 / 9090 | `CUBE_PROXY_HTTP_PORT` / `CUBE_PROXY_HTTPS_PORT` / `CUBE_PROXY_GRPC_PORT` | Intentionally public-facing |
 | WebUI | `0.0.0.0` | 12088 | `WEB_UI_HOST_PORT` in `.env` (port only) | Dashboard |
-| MySQL | `127.0.0.1` | 3306 | Hardcoded in compose template | Already loopback-only |
-| Redis | `127.0.0.1` | 6379 | Hardcoded in compose template | Already loopback-only |
+| MySQL | `127.0.0.1` | 3306 | Hardcoded in compose template (bundled mode) | Already loopback-only (bundled mode) |
+| Redis | `127.0.0.1` | 6379 | Hardcoded in compose template (bundled mode) | Already loopback-only (bundled mode) |
 
 MySQL and Redis are already bound to loopback by the bundled compose template
 and are not reachable from the network. The remaining services listed with a
@@ -120,7 +120,8 @@ If you need to restrict source IPs, use firewall rules.
 
 The bundled containers already bind to `127.0.0.1` via the compose template — no
 extra configuration needed. If you use external MySQL/Redis
-(`CUBE_EXTERNAL_MYSQL_HOST`), enforce access control at the network level.
+(`CUBE_SANDBOX_MYSQL_HOST` pointing at a remote address), enforce access control
+at the network level.
 
 ## Hardening strategies
 
