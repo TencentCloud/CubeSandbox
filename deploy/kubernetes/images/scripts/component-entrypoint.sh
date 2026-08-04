@@ -279,18 +279,22 @@ patch_cubelet_mtu() {
   local cfg="$1"
   [[ -n "${CUBE_SANDBOX_NETWORK_MTU:-}" && "${CUBE_SANDBOX_NETWORK_MTU}" != "0" ]] || return 0
   # Reject anything that is not an integer so operators cannot inject
-  # replacement content via numeric-looking env variables.
+  # replacement content via numeric-looking env variables. Underscores are
+  # valid inside TOML integer literals (`mvm_mtu = 1_500`); rejecting them
+  # here keeps the sed/post-check patterns simple and unambiguous.
   [[ "${CUBE_SANDBOX_NETWORK_MTU}" =~ ^[0-9]+$ ]] || fail "CUBE_SANDBOX_NETWORK_MTU must be a non-negative integer"
+  # Normalize leading zeros first (they make bash parse the value as octal
+  # in -ge/-le and would write invalid TOML), then check length. Doing the
+  # length check after normalization means a zero-padded in-range value like
+  # `001450` (6 chars, numeric value 1450) is accepted as 1450 instead of
+  # being rejected as "too long".
+  local mtu_decimal=$((10#$CUBE_SANDBOX_NETWORK_MTU))
   # A valid MTU is at most 5 digits (max 65535). Check length before the
-  # arithmetic so an absurdly long string fails with a self-explanatory
+  # range check so an absurdly long string fails with a self-explanatory
   # message instead of wrapping in bash's int64 arithmetic (e.g. 25+ digits
   # becomes a huge negative number) and hitting a misleading range error.
-  [[ "${#CUBE_SANDBOX_NETWORK_MTU}" -le 5 ]] \
+  [[ "${#mtu_decimal}" -le 5 ]] \
     || fail "CUBE_SANDBOX_NETWORK_MTU is too long (max 5 digits, range 1280..65535)"
-  # Leading zeros make bash parse the value as octal (-ge/-le), and sed would
-  # write invalid TOML (leading zeros forbidden in integers). Normalize to
-  # decimal before the range check.
-  local mtu_decimal=$((10#$CUBE_SANDBOX_NETWORK_MTU))
   # The guest virtio-net device enforces MIN_MTU=1280
   # (hypervisor/virtio-devices/src/net.rs:51), and the guest MTU is derived
   # from the tap's actual MTU — so anything below 1280 would propagate into
@@ -308,7 +312,11 @@ patch_cubelet_mtu() {
     log "WARN: mvm_mtu key not found in ${cfg}; CUBE_SANDBOX_NETWORK_MTU not applied"
     return 0
   fi
-  sed -i "s/^\([[:space:]]*\)mvm_mtu[[:space:]]*=[[:space:]]*[0-9][0-9]*/\1mvm_mtu = ${mtu_decimal}/" "${cfg}"
+  # Match [0-9_] so a TOML integer with underscores (`mvm_mtu = 1_500`,
+  # valid TOML) is rewritten wholesale to `mvm_mtu = <decimal>` instead of
+  # mangling the leading digits into `1450_500` (still valid TOML, but a
+  # wrong MTU that would fail LinkSetMTU at sandbox-create time).
+  sed -i "s/^\([[:space:]]*\)mvm_mtu[[:space:]]*=[[:space:]]*[0-9_][0-9_]*/\1mvm_mtu = ${mtu_decimal}/" "${cfg}"
   # Anchor the post-check to the end of the value (whitespace / comment /
   # EOL) so a line whose value merely starts with the target (e.g.
   # `mvm_mtu = 14500` for 1450) cannot log a false success. A non-digit
