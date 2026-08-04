@@ -32,15 +32,31 @@ assert_file_absent() {
   printf 'ok: %s\n' "${msg}"
 }
 
-# expect_fail <value> <msg>: value must be rejected with a non-zero exit.
+# expect_fail <value> <msg>: value must be rejected with a non-zero exit AND
+# a validation error on stderr. Asserting stderr distinguishes a genuine
+# validation rejection from an unexpected failure (e.g. a broken sed) — the
+# former exits via fail(), the latter would produce a different message and
+# fail the assertion. The config must also be left untouched, since every
+# rejection path runs before any sed.
 expect_fail() {
   local value="$1" msg="$2"
   local cfg="${TMP}/fail-$$.toml"
   printf 'mvm_mtu = 1500\n' >"${cfg}"
   # Subshell: patch_cubelet_mtu calls fail() which `exit 1`s — inside a
   # subshell that only kills the subshell, letting the `if` catch it.
-  if (CUBE_SANDBOX_NETWORK_MTU="${value}" patch_cubelet_mtu "${cfg}") >/dev/null 2>&1; then
+  local out rc
+  out="$(CUBE_SANDBOX_NETWORK_MTU="${value}" patch_cubelet_mtu "${cfg}" 2>&1)" && rc=0 || rc=$?
+  if [[ "${rc}" -eq 0 ]]; then
     printf 'FAIL: %s (value %q was accepted)\n' "${msg}" "${value}" >&2
+    exit 1
+  fi
+  if [[ "${out}" != *"CUBE_SANDBOX_NETWORK_MTU"* ]]; then
+    printf 'FAIL: %s (rejected but not by validation: %q)\n' "${msg}" "${out}" >&2
+    exit 1
+  fi
+  if [[ "$(cat "${cfg}")" != "mvm_mtu = 1500" ]]; then
+    printf 'FAIL: %s (rejected value %q modified config: %q)\n' \
+      "${msg}" "${value}" "$(cat "${cfg}")" >&2
     exit 1
   fi
   printf 'ok: %s\n' "${msg}"
@@ -51,6 +67,10 @@ cfg="${TMP}/noop.toml"
 printf 'mvm_mtu = 1500\nother = 1\n' >"${cfg}"
 CUBE_SANDBOX_NETWORK_MTU=0 patch_cubelet_mtu "${cfg}"
 assert_file_contains "${cfg}" '^mvm_mtu = 1500' "0 keeps packaged default (no-op)"
+CUBE_SANDBOX_NETWORK_MTU=00 patch_cubelet_mtu "${cfg}"
+assert_file_contains "${cfg}" '^mvm_mtu = 1500' "00 keeps packaged default (no-op)"
+CUBE_SANDBOX_NETWORK_MTU=000000 patch_cubelet_mtu "${cfg}"
+assert_file_contains "${cfg}" '^mvm_mtu = 1500' "000000 keeps packaged default (no-op)"
 unset CUBE_SANDBOX_NETWORK_MTU || true
 patch_cubelet_mtu "${cfg}"
 assert_file_contains "${cfg}" '^mvm_mtu = 1500' "unset keeps packaged default (no-op)"
@@ -120,5 +140,27 @@ printf 'mvm_mtu = 1_500\n' >"${cfg}"
 CUBE_SANDBOX_NETWORK_MTU=1450 patch_cubelet_mtu "${cfg}"
 assert_file_contains "${cfg}" '^mvm_mtu = 1450$' "underscore literal rewritten wholesale"
 assert_file_absent "${cfg}" '1450_500' "no mangle into 1450_500"
+
+# --- 13. drift guard: both entrypoints carry an intentional copy of
+# patch_cubelet_mtu (the images are self-contained and cannot share code).
+# Assert the function bodies are byte-identical so a future fix applied to
+# one script cannot silently miss the other.
+extract_mtu_fn() {
+  awk '
+    in_fn {
+      if ($0 ~ /^}/) exit
+      if ($0 ~ /^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{/ && $0 !~ /^patch_cubelet_mtu\(\) \{/) exit
+      print
+    }
+    /^patch_cubelet_mtu\(\) \{/ { in_fn = 1 }
+  ' "$1"
+}
+if ! diff -u \
+    <(extract_mtu_fn "${SCRIPT_DIR}/component-entrypoint.sh") \
+    <(extract_mtu_fn "${SCRIPT_DIR}/cube-node-entrypoint.sh") >/dev/null; then
+  printf 'FAIL: patch_cubelet_mtu drifted between entrypoints\n  run: diff <(extract of component-entrypoint.sh) <(extract of cube-node-entrypoint.sh)\n' >&2
+  exit 1
+fi
+printf 'ok: patch_cubelet_mtu identical in both entrypoints\n'
 
 printf 'ALL PASS\n'

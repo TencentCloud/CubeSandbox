@@ -288,11 +288,15 @@ patch_cubelet_mtu() {
   # BEFORE any arithmetic: bash's int64 arithmetic wraps absurdly long
   # strings (e.g. `18446744073709552896` wraps to 1280), so a length gate
   # applied after normalization would let a wrapped in-range value through.
-  local mtu_norm="${CUBE_SANDBOX_NETWORK_MTU#"${CUBE_SANDBOX_NETWORK_MTU%%[!0]*}"}"
+  local mtu_norm mtu_decimal
+  mtu_norm="$(printf '%s' "${CUBE_SANDBOX_NETWORK_MTU}" | sed 's/^0*//')"
   [[ -n "${mtu_norm}" ]] || mtu_norm=0
+  # All-zero strings (`00`, `000000`, ...) normalize to 0, which keeps the
+  # packaged default — same no-op semantics as the `"0"` sentinel above.
+  [[ "${mtu_norm}" != "0" ]] || return 0
   [[ "${#mtu_norm}" -le 5 ]] \
     || fail "CUBE_SANDBOX_NETWORK_MTU is too long (max 5 digits, range 1280..65535)"
-  local mtu_decimal=$((10#${mtu_norm}))
+  mtu_decimal=$((10#${mtu_norm}))
   # The guest virtio-net device enforces MIN_MTU=1280
   # (hypervisor/virtio-devices/src/net.rs:51), and the guest MTU is derived
   # from the tap's actual MTU — so anything below 1280 would propagate into

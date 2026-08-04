@@ -527,12 +527,14 @@ cubeNode:
     # preflight Hook. Use only when you accept blackhole / routing risk.
     cidrSkipConflictCheck: false
     # Sandbox tap MTU (mvm_mtu) patched into Cubelet config.toml. 0 keeps the
-    # packaged Cubelet default. On cluster networks whose Pod MTU is smaller
-    # than 1500 (e.g. Calico defaults to 1450 for VXLAN, 1480 for IPIP), the
-    # guest advertises MSS from a 1500-byte MTU while the uplink silently drops
-    # frames larger than the Pod MTU — an MTU blackhole that truncates HTTPS
-    # handshakes and large downloads. Set this to the Pod network MTU so the
-    # guest's advertised MSS fits inside the Pod MTU.
+    # packaged Cubelet default; `null` behaves the same (the template
+    # normalizes it to 0). Non-integer strings are passed through untouched so
+    # the entrypoint rejects them with a clear error. On cluster networks whose
+    # Pod MTU is smaller than 1500 (e.g. Calico defaults to 1450 for VXLAN,
+    # 1480 for IPIP), the guest advertises MSS from a 1500-byte MTU while the
+    # uplink silently drops frames larger than the Pod MTU — an MTU blackhole
+    # that truncates HTTPS handshakes and large downloads. Set this to the Pod
+    # network MTU so the guest's advertised MSS fits inside the Pod MTU.
     # Valid range is 1280..65535. Values outside this range fail fast at
     # container startup (hard exit, so a misconfiguration surfaces in the
     # pod status rather than silently producing a broken sandbox). The guest
