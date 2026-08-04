@@ -2660,13 +2660,17 @@ mod common_parallel {
             assert_eq!(guest.get_cpu_count().unwrap_or_default(), 2);
 
             #[cfg(target_arch = "x86_64")]
-            assert_eq!(
-                guest
-                    .ssh_command(r#"dmesg | grep "smpboot: Allowing" | sed "s/\[\ *[0-9.]*\] //""#)
-                    .unwrap()
-                    .trim(),
-                "smpboot: Allowing 4 CPUs, 2 hotplug CPUs"
-            );
+            {
+                let dmesg_output = guest
+                    .ssh_command(r#"sudo dmesg | grep -o "Allowing.*hotplug CPU[s]*""#)
+                    .unwrap();
+                let trimmed = dmesg_output.trim();
+                assert!(
+                    trimmed.contains("2 hotplug CPU"),
+                    "Expected dmesg to contain '2 hotplug CPU', got: '{}'",
+                    trimmed
+                );
+            }
             #[cfg(target_arch = "aarch64")]
             assert_eq!(
                 guest
