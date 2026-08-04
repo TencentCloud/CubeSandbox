@@ -428,19 +428,29 @@ run_network_agent() {
     # write invalid TOML (leading zeros forbidden in integers). Normalize to
     # decimal before the range check.
     mtu_decimal=$((10#$CUBE_SANDBOX_NETWORK_MTU))
-    # Linux enforces a minimum interface MTU of 68; the tap must also fit the
-    # virtio MTU field (u16). The guest inherits the tap's actual MTU.
-    [[ "${mtu_decimal}" -ge 68 && "${mtu_decimal}" -le 65535 ]] \
-      || fail "CUBE_SANDBOX_NETWORK_MTU must be within 68..65535"
-    grep -qE '^[[:space:]]*mvm_mtu' "${cfg}" \
-      || fail "mvm_mtu key not found in ${cfg}; cannot apply CUBE_SANDBOX_NETWORK_MTU"
-    # Anchor to line start so a preceding `# mvm_mtu = ...` comment (or any
-    # mid-line occurrence) is never the thing rewritten; the pre/post checks
-    # use the same anchor and preserve leading whitespace.
-    sed -i "s/^\([[:space:]]*\)mvm_mtu = [0-9]\+/\1mvm_mtu = ${mtu_decimal}/" "${cfg}"
-    grep -qE "^[[:space:]]*mvm_mtu = ${mtu_decimal}" "${cfg}" \
-      || fail "failed to patch mvm_mtu in ${cfg}"
-    log "patched Cubelet mvm_mtu = ${mtu_decimal}"
+    # The guest virtio-net device enforces MIN_MTU=1280
+    # (hypervisor/virtio-devices/src/net.rs:51), and the guest MTU is derived
+    # from the tap's actual MTU — so anything below 1280 would propagate into
+    # the guest below the VIRTIO spec minimum. The VMM's InvalidMtu validation
+    # never catches this because the shim leaves NetConfig.mtu unset. Keep the
+    # cap at u16 max for the virtio MTU field.
+    [[ "${mtu_decimal}" -ge 1280 && "${mtu_decimal}" -le 65535 ]] \
+      || fail "CUBE_SANDBOX_NETWORK_MTU must be within 1280..65535"
+    # Fail-open (warn + skip), matching the neighboring cidr / eth_name patches,
+    # so a future config.toml schema drift does not crash-loop the node.
+    if ! grep -qE '^[[:space:]]*mvm_mtu' "${cfg}"; then
+      log "WARN: mvm_mtu key not found in ${cfg}; CUBE_SANDBOX_NETWORK_MTU not applied"
+    else
+      # Anchor to line start so a preceding `# mvm_mtu = ...` comment (or any
+      # mid-line occurrence) is never the thing rewritten; the pre/post checks
+      # use the same anchor and preserve leading whitespace.
+      sed -i "s/^\([[:space:]]*\)mvm_mtu = [0-9]\+/\1mvm_mtu = ${mtu_decimal}/" "${cfg}"
+      if grep -qE "^[[:space:]]*mvm_mtu = ${mtu_decimal}" "${cfg}"; then
+        log "patched Cubelet mvm_mtu = ${mtu_decimal}"
+      else
+        log "WARN: failed to patch mvm_mtu in ${cfg}; CUBE_SANDBOX_NETWORK_MTU not applied"
+      fi
+    fi
   fi
 
   log "starting network-agent"
@@ -517,19 +527,29 @@ run_cubelet() {
     # write invalid TOML (leading zeros forbidden in integers). Normalize to
     # decimal before the range check.
     mtu_decimal=$((10#$CUBE_SANDBOX_NETWORK_MTU))
-    # Linux enforces a minimum interface MTU of 68; the tap must also fit the
-    # virtio MTU field (u16). The guest inherits the tap's actual MTU.
-    [[ "${mtu_decimal}" -ge 68 && "${mtu_decimal}" -le 65535 ]] \
-      || fail "CUBE_SANDBOX_NETWORK_MTU must be within 68..65535"
-    grep -qE '^[[:space:]]*mvm_mtu' "${cfg}" \
-      || fail "mvm_mtu key not found in ${cfg}; cannot apply CUBE_SANDBOX_NETWORK_MTU"
-    # Anchor to line start so a preceding `# mvm_mtu = ...` comment (or any
-    # mid-line occurrence) is never the thing rewritten; the pre/post checks
-    # use the same anchor and preserve leading whitespace.
-    sed -i "s/^\([[:space:]]*\)mvm_mtu = [0-9]\+/\1mvm_mtu = ${mtu_decimal}/" "${cfg}"
-    grep -qE "^[[:space:]]*mvm_mtu = ${mtu_decimal}" "${cfg}" \
-      || fail "failed to patch mvm_mtu in ${cfg}"
-    log "patched Cubelet mvm_mtu = ${mtu_decimal}"
+    # The guest virtio-net device enforces MIN_MTU=1280
+    # (hypervisor/virtio-devices/src/net.rs:51), and the guest MTU is derived
+    # from the tap's actual MTU — so anything below 1280 would propagate into
+    # the guest below the VIRTIO spec minimum. The VMM's InvalidMtu validation
+    # never catches this because the shim leaves NetConfig.mtu unset. Keep the
+    # cap at u16 max for the virtio MTU field.
+    [[ "${mtu_decimal}" -ge 1280 && "${mtu_decimal}" -le 65535 ]] \
+      || fail "CUBE_SANDBOX_NETWORK_MTU must be within 1280..65535"
+    # Fail-open (warn + skip), matching the neighboring cidr / eth_name patches,
+    # so a future config.toml schema drift does not crash-loop the node.
+    if ! grep -qE '^[[:space:]]*mvm_mtu' "${cfg}"; then
+      log "WARN: mvm_mtu key not found in ${cfg}; CUBE_SANDBOX_NETWORK_MTU not applied"
+    else
+      # Anchor to line start so a preceding `# mvm_mtu = ...` comment (or any
+      # mid-line occurrence) is never the thing rewritten; the pre/post checks
+      # use the same anchor and preserve leading whitespace.
+      sed -i "s/^\([[:space:]]*\)mvm_mtu = [0-9]\+/\1mvm_mtu = ${mtu_decimal}/" "${cfg}"
+      if grep -qE "^[[:space:]]*mvm_mtu = ${mtu_decimal}" "${cfg}"; then
+        log "patched Cubelet mvm_mtu = ${mtu_decimal}"
+      else
+        log "WARN: failed to patch mvm_mtu in ${cfg}; CUBE_SANDBOX_NETWORK_MTU not applied"
+      fi
+    fi
   fi
   if [[ -n "${CUBE_TAP_INIT_NUM:-}" ]]; then
     [[ "${CUBE_TAP_INIT_NUM}" =~ ^[0-9]+$ ]] || fail "CUBE_TAP_INIT_NUM must be a non-negative integer"
