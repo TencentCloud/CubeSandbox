@@ -1008,19 +1008,9 @@ func claimTemplateAlias(ctx context.Context, templateID, alias string) error {
 			Update("display_name", "").Error; err != nil {
 			return fmt.Errorf("release stale alias %q fail: %w", alias, err)
 		}
-		res := tx.Table(constants.TemplateDefinitionTableName).
+		return tx.Table(constants.TemplateDefinitionTableName).
 			Where("template_id = ?", templateID).
-			Update("display_name", alias)
-		if res.Error != nil {
-			return res.Error
-		}
-		if res.RowsAffected == 0 {
-			// Target row vanished between GetDefinition and this UPDATE
-			// (concurrent hard-delete); surface as not-found instead of a
-			// silent no-op that would leave the alias pointing at nothing.
-			return ErrTemplateNotFound
-		}
-		return nil
+			Update("display_name", alias).Error
 	})
 }
 
@@ -1083,8 +1073,8 @@ func claimAliasForReadyTemplate(ctx context.Context, templateID, alias string) (
 // alias_key is always NULL per the STORED generated column). DELETING templates
 // return ErrTemplateNotFound, matching GetTemplateByAlias' behavior (store.go:921).
 //
-// Unlike claimAliasAfterReady, this does NOT require the template to be READY —
-// it is an explicit operator action; see design §3.5.
+// Unlike claimAliasForReadyTemplate, this does NOT require the template to be
+// READY — it is an explicit operator action; see design §3.5.
 func SetTemplateAlias(ctx context.Context, templateID, alias string) error {
 	if strings.TrimSpace(templateID) == "" {
 		return ErrTemplateIDRequired
@@ -1117,8 +1107,9 @@ func SetTemplateAlias(ctx context.Context, templateID, alias string) error {
 		return updateDefinitionFields(ctx, templateID, map[string]any{"display_name": ""})
 	}
 	// Claim path — claimTemplateAlias does the release+claim in one
-	// transaction and checks RowsAffected (returns ErrTemplateNotFound if
-	// the target was concurrently hard-deleted).
+	// transaction. A target hard-deleted between GetDefinition and the UPDATE
+	// is caught by the handler's follow-up getTemplateInfoFn (→ 404), and a
+	// deleted row can't hold the alias, so none is left dangling.
 	return claimTemplateAlias(ctx, templateID, alias)
 }
 

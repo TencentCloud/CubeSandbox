@@ -99,8 +99,8 @@ type setAliasRequest struct {
 // Error mapping (design §3.3):
 //   - validateTemplateAlias failure → 400 MasterParamsError
 //   - ErrTemplateNotFound (missing OR DELETING) → 404 NotFound
-//   - ErrAliasNotApplicableToSnapshot → 404 NotFound (a snapshot has no
-//     alias slot, so "alias for this id" is not found)
+//   - ErrAliasNotApplicableToSnapshot → 400 MasterParamsError (a snapshot
+//     exists but has no alias slot — distinct from a genuine 404)
 //   - isDuplicateAliasError → 130409 Conflict (so CubeAPI maps to HTTP 409)
 //   - other → 500 MasterInternalError
 //
