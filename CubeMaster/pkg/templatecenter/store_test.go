@@ -775,6 +775,13 @@ func TestSetTemplateAlias_ValidatesAlias(t *testing.T) {
 	err = SetTemplateAlias(context.Background(), "tpl-1", "-leading")
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, ErrInvalidAlias)
+
+	// Bare prefix (no suffix) must also be rejected — matches CubeAPI's
+	// is_valid_alias (hasValidTemplateIDPrefix alone would allow "tpl-").
+	for _, bare := range []string{"tpl-", "snap-"} {
+		err := SetTemplateAlias(context.Background(), "tpl-1", bare)
+		assert.ErrorIs(t, err, ErrInvalidAlias, "bare prefix %q must be rejected", bare)
+	}
 }
 
 // TestSetTemplateAlias_RejectsEmptyID verifies that an empty or

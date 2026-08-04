@@ -1001,17 +1001,30 @@ func claimTemplateAlias(ctx context.Context, templateID, alias string) error {
 	if !isReady() {
 		return ErrTemplateStoreNotInitialized
 	}
-	return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Table(constants.TemplateDefinitionTableName).
-			Where("alias_key = ? AND template_id <> ?",
-				alias, templateID).
-			Update("display_name", "").Error; err != nil {
-			return fmt.Errorf("release stale alias %q fail: %w", alias, err)
+	// Two concurrent SetTemplateAlias calls swapping aliases between the same
+	// pair of templates can InnoDB-deadlock (the release locks one row, the
+	// claim locks the other, in opposite orders → errno 1213). The deadlocked
+	// transaction rolls back, so retry once — it almost always succeeds.
+	claim := func() error {
+		return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if err := tx.Table(constants.TemplateDefinitionTableName).
+				Where("alias_key = ? AND template_id <> ?",
+					alias, templateID).
+				Update("display_name", "").Error; err != nil {
+				return fmt.Errorf("release stale alias %q fail: %w", alias, err)
+			}
+			return tx.Table(constants.TemplateDefinitionTableName).
+				Where("template_id = ?", templateID).
+				Update("display_name", alias).Error
+		})
+	}
+	if err := claim(); err != nil {
+		if isDeadlockError(err) {
+			return claim()
 		}
-		return tx.Table(constants.TemplateDefinitionTableName).
-			Where("template_id = ?", templateID).
-			Update("display_name", alias).Error
-	})
+		return err
+	}
+	return nil
 }
 
 // isDuplicateAliasError returns true for MySQL (1062) and PostgreSQL (23505)
@@ -1027,6 +1040,13 @@ func isDuplicateAliasError(err error) bool {
 	// driver may not be imported in all build configurations.
 	s := err.Error()
 	return strings.Contains(s, "23505") || strings.Contains(s, "unique_constraint")
+}
+
+// isDeadlockError reports InnoDB deadlock (1213) and lock-wait-timeout (1205) —
+// the transient errors worth one retry in the alias release+claim transaction.
+func isDeadlockError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	return errors.As(err, &mysqlErr) && (mysqlErr.Number == 1205 || mysqlErr.Number == 1213)
 }
 
 // IsDuplicateAliasError is the exported wrapper around isDuplicateAliasError
@@ -1094,11 +1114,12 @@ func SetTemplateAlias(ctx context.Context, templateID, alias string) error {
 		return ErrTemplateNotFound
 	}
 	if def.Status != StatusReady {
-		// Explicit operator action: aliases may target non-READY templates
-		// by design (see comment above / design §3.5), but warn so the
-		// operator knows the alias will point at a non-ready template and
-		// is not auto-reverted.
-		log.G(ctx).Warnf("SetTemplateAlias: template %s status is %q (not READY); alias %q will point at a non-ready template", templateID, def.Status, alias)
+		// Explicit operator action: aliases may target non-READY templates by
+		// design (see design §3.5). Caveat: for a still-building template the
+		// create-time claimAliasForReadyTemplate re-claims the build's original
+		// alias once it reaches a non-FAILED status, which can silently
+		// overwrite this operator-set alias.
+		log.G(ctx).Warnf("SetTemplateAlias: template %s status is %q (not READY); alias %q points at a non-ready template (may be overwritten on build completion)", templateID, def.Status, alias)
 	}
 	if alias == "" {
 		// Clear path. updateDefinitionFields (snapshot_ops.go:1031) writes
