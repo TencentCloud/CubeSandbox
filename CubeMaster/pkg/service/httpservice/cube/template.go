@@ -103,6 +103,34 @@ type setAliasRequest struct {
 //     alias slot, so "alias for this id" is not found)
 //   - isDuplicateAliasError → 130409 Conflict (so CubeAPI maps to HTTP 409)
 //   - other → 500 MasterInternalError
+//
+// templateResponseFromInfo builds the success templateResponse shared by
+// getTemplate and setTemplateAlias so both endpoints always return the
+// identical shape (avoids the two hand-written 15-field copies drifting).
+// createReq is included only when non-nil (GET ?include_request=true).
+func templateResponseFromInfo(info *templatecenter.TemplateInfo, createReq *types.CreateCubeSandboxReq) *templateResponse {
+	return &templateResponse{
+		Res: &types.Res{Ret: &types.Ret{
+			RetCode: int(errorcode.ErrorCode_Success),
+			RetMsg:  "success",
+		}},
+		TemplateID:                 info.TemplateID,
+		InstanceType:               info.InstanceType,
+		Version:                    info.Version,
+		Status:                     info.Status,
+		LastError:                  info.LastError,
+		DisplayName:                info.DisplayName,
+		CreatedAt:                  info.CreatedAt,
+		ImageInfo:                  info.ImageInfo,
+		JobID:                      info.JobID,
+		Replicas:                   info.Replicas,
+		CreateRequest:              createReq,
+		CubeEgressCABaked:          info.CubeEgressCABaked,
+		CubeEgressCAFingerprint:    info.CubeEgressCAFingerprint,
+		CubeEgressCATargetsWritten: info.CubeEgressCATargetsWritten,
+	}
+}
+
 func setTemplateAlias(r *http.Request, rt *CubeLog.RequestTrace, rawTemplateID string) interface{} {
 	if strings.TrimSpace(rawTemplateID) == "" {
 		return &templateResponse{
@@ -147,9 +175,13 @@ func setTemplateAlias(r *http.Request, rt *CubeLog.RequestTrace, rawTemplateID s
 	if err := setTemplateAliasFn(ctx, resolvedTemplateID, bodyReq.Alias); err != nil {
 		code := int(errorcode.ErrorCode_MasterInternalError)
 		switch {
-		case errors.Is(err, templatecenter.ErrTemplateNotFound),
-			errors.Is(err, templatecenter.ErrAliasNotApplicableToSnapshot):
+		case errors.Is(err, templatecenter.ErrTemplateNotFound):
 			code = int(errorcode.ErrorCode_NotFound)
+		// A snapshot exists but aliases don't apply to it — map to 400 so
+		// clients can distinguish "operation not supported on this resource"
+		// from a genuine 404 "template not found".
+		case errors.Is(err, templatecenter.ErrAliasNotApplicableToSnapshot):
+			code = int(errorcode.ErrorCode_MasterParamsError)
 		case errors.Is(err, templatecenter.ErrInvalidAlias):
 			code = int(errorcode.ErrorCode_MasterParamsError)
 		case templatecenter.IsDuplicateAliasError(err):
@@ -185,27 +217,7 @@ func setTemplateAlias(r *http.Request, rt *CubeLog.RequestTrace, rawTemplateID s
 		}
 	}
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
-	return &templateResponse{
-		Res: &types.Res{
-			Ret: &types.Ret{
-				RetCode: int(errorcode.ErrorCode_Success),
-				RetMsg:  "success",
-			},
-		},
-		TemplateID:                 info.TemplateID,
-		InstanceType:               info.InstanceType,
-		Version:                    info.Version,
-		Status:                     info.Status,
-		LastError:                  info.LastError,
-		DisplayName:                info.DisplayName,
-		CreatedAt:                  info.CreatedAt,
-		ImageInfo:                  info.ImageInfo,
-		JobID:                      info.JobID,
-		Replicas:                   info.Replicas,
-		CubeEgressCABaked:          info.CubeEgressCABaked,
-		CubeEgressCAFingerprint:    info.CubeEgressCAFingerprint,
-		CubeEgressCATargetsWritten: info.CubeEgressCATargetsWritten,
-	}
+	return templateResponseFromInfo(info, nil)
 }
 
 func deleteTemplate(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
@@ -407,28 +419,7 @@ func getTemplate(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 		}
 	}
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
-	return &templateResponse{
-		Res: &types.Res{
-			Ret: &types.Ret{
-				RetCode: int(errorcode.ErrorCode_Success),
-				RetMsg:  "success",
-			},
-		},
-		TemplateID:                 info.TemplateID,
-		InstanceType:               info.InstanceType,
-		Version:                    info.Version,
-		Status:                     info.Status,
-		LastError:                  info.LastError,
-		DisplayName:                info.DisplayName,
-		CreatedAt:                  info.CreatedAt,
-		ImageInfo:                  info.ImageInfo,
-		JobID:                      info.JobID,
-		Replicas:                   info.Replicas,
-		CreateRequest:              createReq,
-		CubeEgressCABaked:          info.CubeEgressCABaked,
-		CubeEgressCAFingerprint:    info.CubeEgressCAFingerprint,
-		CubeEgressCATargetsWritten: info.CubeEgressCATargetsWritten,
-	}
+	return templateResponseFromInfo(info, createReq)
 }
 
 func listTemplates(r *http.Request, rt *CubeLog.RequestTrace) interface{} {

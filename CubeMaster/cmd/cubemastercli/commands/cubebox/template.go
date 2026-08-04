@@ -672,7 +672,7 @@ var TemplateSetAliasCommand = cli.Command{
 		},
 		cli.BoolFlag{
 			Name:  "clear",
-			Usage: "clear the template's alias (equivalent to --alias \"\")",
+			Usage: "clear the template's alias; takes precedence over --alias (equivalent to --alias \"\")",
 		},
 		cli.BoolFlag{
 			Name:  "json",

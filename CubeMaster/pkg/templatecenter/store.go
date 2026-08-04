@@ -1008,9 +1008,19 @@ func claimTemplateAlias(ctx context.Context, templateID, alias string) error {
 			Update("display_name", "").Error; err != nil {
 			return fmt.Errorf("release stale alias %q fail: %w", alias, err)
 		}
-		return tx.Table(constants.TemplateDefinitionTableName).
+		res := tx.Table(constants.TemplateDefinitionTableName).
 			Where("template_id = ?", templateID).
-			Update("display_name", alias).Error
+			Update("display_name", alias)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			// Target row vanished between GetDefinition and this UPDATE
+			// (concurrent hard-delete); surface as not-found instead of a
+			// silent no-op that would leave the alias pointing at nothing.
+			return ErrTemplateNotFound
+		}
+		return nil
 	})
 }
 
@@ -1093,14 +1103,22 @@ func SetTemplateAlias(ctx context.Context, templateID, alias string) error {
 	if def.Status == StatusDeleting {
 		return ErrTemplateNotFound
 	}
+	if def.Status != StatusReady {
+		// Explicit operator action: aliases may target non-READY templates
+		// by design (see comment above / design §3.5), but warn so the
+		// operator knows the alias will point at a non-ready template and
+		// is not auto-reverted.
+		log.G(ctx).Warnf("SetTemplateAlias: template %s status is %q (not READY); alias %q will point at a non-ready template", templateID, def.Status, alias)
+	}
 	if alias == "" {
 		// Clear path. updateDefinitionFields (snapshot_ops.go:1031) writes
 		// "updated_at" into the caller's map, so pass a fresh map to avoid
 		// polluting any caller-held state.
 		return updateDefinitionFields(ctx, templateID, map[string]any{"display_name": ""})
 	}
-	// Claim path — claimTemplateAlias already has its own isReady() guard
-	// and release+claim transaction.
+	// Claim path — claimTemplateAlias does the release+claim in one
+	// transaction and checks RowsAffected (returns ErrTemplateNotFound if
+	// the target was concurrently hard-deleted).
 	return claimTemplateAlias(ctx, templateID, alias)
 }
 

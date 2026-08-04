@@ -76,8 +76,8 @@ impl TemplateService {
         alias: Option<&str>,
     ) -> AppResult<TemplateDetail> {
         // Normalize: trim, and treat empty / whitespace-only as None (clear).
-        // The handler already does this, but direct service callers (and
-        // tests) rely on the same invariant.
+        // Single normalization point: the HTTP handler forwards the raw
+        // body.alias here; direct service callers and tests rely on this too.
         let alias = alias.and_then(|s| {
             let trimmed = s.trim();
             if trimmed.is_empty() {
@@ -88,7 +88,8 @@ impl TemplateService {
         });
 
         // Client-side validation mirrors CubeMaster's `validateTemplateAlias`
-        // so a bad alias surfaces as 400 without a round-trip.
+        // (the single source of truth) so a bad alias surfaces as 400 without
+        // a round-trip — keep the two in sync if the rule changes.
         if let Some(value) = alias {
             if !is_valid_alias(value) {
                 return Err(AppError::BadRequest(

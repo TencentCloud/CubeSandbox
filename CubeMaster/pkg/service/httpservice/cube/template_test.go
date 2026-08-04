@@ -438,8 +438,7 @@ func TestSetTemplateAliasHandler_500_OnUnknownDBError(t *testing.T) {
 }
 
 // TestSetTemplateAliasHandler_404_OnMissingTemplate verifies that
-// ErrTemplateNotFound from SetTemplateAlias maps to NotFound (404). The
-// handler also maps ErrAliasNotApplicableToSnapshot to 404 — same code path.
+// ErrTemplateNotFound from SetTemplateAlias maps to NotFound (404).
 func TestSetTemplateAliasHandler_404_OnMissingTemplate(t *testing.T) {
 	origResolveFn := resolveTemplateIdentifierFn
 	origSetFn := setTemplateAliasFn
@@ -467,10 +466,10 @@ func TestSetTemplateAliasHandler_404_OnMissingTemplate(t *testing.T) {
 	assert.Equal(t, int64(errorcode.ErrorCode_NotFound), rt.RetCode)
 }
 
-// TestSetTemplateAliasHandler_404_OnSnapshot verifies that
-// ErrAliasNotApplicableToSnapshot maps to 404 (a snapshot has no alias slot,
-// so "alias for this id" is not found).
-func TestSetTemplateAliasHandler_404_OnSnapshot(t *testing.T) {
+// TestSetTemplateAliasHandler_400_OnSnapshot verifies that
+// ErrAliasNotApplicableToSnapshot maps to 400 (a snapshot exists but has no
+// alias slot — distinct from a genuine 404 "template not found").
+func TestSetTemplateAliasHandler_400_OnSnapshot(t *testing.T) {
 	origResolveFn := resolveTemplateIdentifierFn
 	origSetFn := setTemplateAliasFn
 	t.Cleanup(func() {
@@ -493,8 +492,8 @@ func TestSetTemplateAliasHandler_404_OnSnapshot(t *testing.T) {
 	if !ok {
 		t.Fatalf("unexpected response type %T", resp)
 	}
-	assert.Equal(t, int(errorcode.ErrorCode_NotFound), got.Ret.RetCode)
-	assert.Equal(t, int64(errorcode.ErrorCode_NotFound), rt.RetCode)
+	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Ret.RetCode)
+	assert.Equal(t, int64(errorcode.ErrorCode_MasterParamsError), rt.RetCode)
 }
 
 // TestSetTemplateAliasHandler_409_OnDuplicateAlias verifies that a

@@ -231,20 +231,12 @@ pub async fn set_template_alias(
     Path(template_id): Path<String>,
     Json(body): Json<SetTemplateAliasRequest>,
 ) -> AppResult<impl IntoResponse> {
-    // Normalize HTTP input here; TemplateService::set_template_alias repeats the
-    // trim/empty->None pass as a guard for direct (non-HTTP) callers and unit tests.
-    let alias = body.alias.and_then(|s| {
-        let trimmed = s.trim().to_string();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed)
-        }
-    });
+    // Forward the raw body; normalization (trim, empty->None) lives in the
+    // service layer so it is the single boundary for all callers.
     let detail = state
         .services
         .templates
-        .set_template_alias(&template_id, alias.as_deref())
+        .set_template_alias(&template_id, body.alias.as_deref())
         .await?;
     Ok((StatusCode::OK, Json(detail)))
 }
