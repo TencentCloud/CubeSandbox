@@ -431,8 +431,11 @@ run_network_agent() {
       || fail "CUBE_SANDBOX_NETWORK_MTU must be within 1280..65535"
     grep -qE '^[[:space:]]*mvm_mtu' "${cfg}" \
       || fail "mvm_mtu key not found in ${cfg}; cannot apply CUBE_SANDBOX_NETWORK_MTU"
-    sed -i "s/mvm_mtu = [0-9]\+/mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}/" "${cfg}"
-    grep -q "mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}" "${cfg}" \
+    # Anchor to line start so a preceding `# mvm_mtu = ...` comment (or any
+    # mid-line occurrence) is never the thing rewritten; the pre/post checks
+    # use the same anchor and preserve leading whitespace.
+    sed -i "s/^\([[:space:]]*\)mvm_mtu = [0-9]\+/\1mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}/" "${cfg}"
+    grep -qE "^[[:space:]]*mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}" "${cfg}" \
       || fail "failed to patch mvm_mtu in ${cfg}"
     log "patched Cubelet mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}"
   fi
@@ -514,8 +517,11 @@ run_cubelet() {
       || fail "CUBE_SANDBOX_NETWORK_MTU must be within 1280..65535"
     grep -qE '^[[:space:]]*mvm_mtu' "${cfg}" \
       || fail "mvm_mtu key not found in ${cfg}; cannot apply CUBE_SANDBOX_NETWORK_MTU"
-    sed -i "s/mvm_mtu = [0-9]\+/mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}/" "${cfg}"
-    grep -q "mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}" "${cfg}" \
+    # Anchor to line start so a preceding `# mvm_mtu = ...` comment (or any
+    # mid-line occurrence) is never the thing rewritten; the pre/post checks
+    # use the same anchor and preserve leading whitespace.
+    sed -i "s/^\([[:space:]]*\)mvm_mtu = [0-9]\+/\1mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}/" "${cfg}"
+    grep -qE "^[[:space:]]*mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}" "${cfg}" \
       || fail "failed to patch mvm_mtu in ${cfg}"
     log "patched Cubelet mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}"
   fi

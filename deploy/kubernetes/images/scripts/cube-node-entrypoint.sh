@@ -203,8 +203,11 @@ if [[ -n "${CUBE_SANDBOX_NETWORK_MTU:-}" && "${CUBE_SANDBOX_NETWORK_MTU}" != "0"
     || fail "CUBE_SANDBOX_NETWORK_MTU must be within 1280..65535"
   grep -qE '^[[:space:]]*mvm_mtu' "${CUBELET_CONFIG}" \
     || fail "mvm_mtu key not found in ${CUBELET_CONFIG}; cannot apply CUBE_SANDBOX_NETWORK_MTU"
-  sed -i "s/mvm_mtu = [0-9]\+/mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}/" "${CUBELET_CONFIG}"
-  grep -q "mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}" "${CUBELET_CONFIG}" \
+  # Anchor to line start so a preceding `# mvm_mtu = ...` comment (or any
+  # mid-line occurrence) is never the thing rewritten; the pre/post checks
+  # use the same anchor and preserve leading whitespace.
+  sed -i "s/^\([[:space:]]*\)mvm_mtu = [0-9]\+/\1mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}/" "${CUBELET_CONFIG}"
+  grep -qE "^[[:space:]]*mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}" "${CUBELET_CONFIG}" \
     || fail "failed to patch mvm_mtu in ${CUBELET_CONFIG}"
   log "patched Cubelet mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}"
 fi
