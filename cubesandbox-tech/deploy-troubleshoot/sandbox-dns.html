@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>02 · 沙箱里 DNS 全挂了——一次"安全默认值"引发的公网断连</title>
+<style>
+  :root {
+    --bg:#0b1020; --border:rgba(255,255,255,0.09); --border-strong:rgba(255,255,255,0.16);
+    --text:#e6eaf2; --text-dim:#9aa7bd; --text-faint:#6b7a93;
+    --blue:#4f8cff; --cyan:#2dd4bf; --purple:#a78bfa; --amber:#fbbf24; --red:#f87171; --green:#34d399;
+    --mono:"SFMono-Regular","JetBrains Mono","Fira Code",Consolas,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+    --radius:14px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{font-family:var(--sans);background:var(--bg);color:var(--text);line-height:2.05;font-size:16px}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono);font-size:.85em;background:rgba(79,140,255,.12);color:#b9d2ff;padding:2px 7px;border-radius:6px;white-space:nowrap}
+
+  header{position:sticky;top:0;z-index:100;backdrop-filter:blur(14px);background:rgba(11,16,32,.85);border-bottom:1px solid var(--border)}
+  .nav-inner{max-width:1120px;margin:0 auto;padding:0 24px;height:56px;display:flex;align-items:center;gap:22px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px;white-space:nowrap}
+  .brand-mark{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--blue),var(--purple));display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:800}
+  .back-home{margin-left:auto;font-size:13px;color:var(--text-faint);border:1px solid var(--border);padding:5px 14px;border-radius:20px;white-space:nowrap}
+  .back-home:hover{color:var(--text);border-color:var(--border-strong);text-decoration:none}
+
+  main{max-width:740px;margin:0 auto;padding:44px 24px 96px}
+  .hero{border-bottom:1px solid var(--border);padding:12px 0 36px;margin-bottom:48px}
+  .hero .crumb{font-family:var(--mono);font-size:12px;color:var(--text-faint);letter-spacing:1px}
+  .hero h1{font-size:31px;font-weight:900;margin:14px 0 10px;line-height:1.4;background:linear-gradient(90deg,#fff,var(--amber));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  .hero .lead{font-size:16.5px;color:var(--text-dim);max-width:640px;line-height:2.1}
+
+  h2{font-size:20px;font-weight:800;margin:60px 0 4px;color:#f0f4ff;line-height:1.5}
+  h3{font-size:16px;font-weight:700;margin:28px 0 4px;color:#dbe4f5}
+  p{margin:16px 0}
+  .dim{color:var(--text-dim)}
+  .hl{color:var(--cyan);font-weight:600}
+  .hlb{color:var(--amber);font-weight:600}
+  .hlr{color:var(--red);font-weight:600}
+  .hlg{color:var(--green);font-weight:600}
+
+  .think{border-left:3px solid var(--purple);background:rgba(167,139,250,.06);padding:16px 22px;border-radius:0 10px 10px 0;margin:24px 0;color:var(--text-dim)}
+  .think .q{font-weight:700;color:var(--purple);margin-bottom:4px}
+
+  .codeblock{background:#0a0f1e;border:1px solid var(--border);border-radius:12px;padding:16px 20px;font-family:var(--mono);font-size:13px;color:#c8d3e8;overflow-x:auto;white-space:pre;line-height:1.9;margin:20px 0}
+  .codeblock .cm{color:var(--text-faint)}
+
+  .tbl-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:12px;margin:20px 0}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  thead th{background:rgba(79,140,255,.1);color:#bcd6ff;text-align:left;padding:9px 14px;font-weight:700;border-bottom:1px solid var(--border-strong)}
+  tbody td{padding:9px 14px;border-bottom:1px solid var(--border);color:var(--text-dim);vertical-align:top}
+  tbody tr:last-child td{border-bottom:none}
+
+  .punchline{border:1px solid rgba(52,211,153,.4);background:rgba(52,211,153,.06);border-radius:var(--radius);padding:20px 24px;margin:30px 0;font-size:16px;line-height:2}
+  .punchline small{display:block;font-family:var(--mono);font-size:11px;color:var(--green);letter-spacing:1px;margin-bottom:8px}
+
+  footer{border-top:1px solid var(--border);padding:28px 24px 46px;text-align:center;color:var(--text-faint);font-size:13px}
+  @media(max-width:720px){.hero h1{font-size:25px}}
+  .flow{width:100%;height:auto;display:block;margin:24px 0 2px}
+  .flow .fn{fill:#eaf0fb;font-size:14px;font-weight:700;font-family:var(--sans)}
+  .flow .fd{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow .fm{fill:#6b7a93;font-size:10.5px;font-family:var(--mono)}
+  .flow .fl{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow-cap{font-family:var(--mono);font-size:11px;color:var(--text-faint);letter-spacing:.6px;text-align:center;margin:6px 0 28px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="nav-inner">
+    <div class="brand"><div class="brand-mark">C</div> CubeSandbox · 部署排障</div>
+    <a class="back-home" href="index.html">← 排障索引</a>
+  </div>
+</header>
+
+<main>
+
+  <div class="hero">
+    <div class="crumb">CUBESANDBOX · 部署排障 02 / 05</div>
+    <h1>沙箱里 DNS 全挂了——一次"安全默认值"引发的公网断连</h1>
+    <p class="lead">上一篇修通了命令执行，下一个测试是公网访问。`curl http://www.baidu.com` 通了，可 `getent hosts www.baidu.com` 直接失败——沙箱连域名都解析不了，又何谈访问。看起来再普通不过的 DNS 问题，背后是一个"安全默认值"和一张你完全看不见的 eBPF 拒绝表。</p>
+  </div>
+
+  <h2>一、背景速览：沙箱不是 Pod，它的网走另一条路</h2>
+
+  <p>如果你熟悉 Kubernetes，会习惯性认为"容器里 DNS 配 CoreDNS 天经地义"。但 CubeSandbox 的沙箱<span class="hl">不是 K8s Pod</span>——它是一台 PVM 虚拟机，它的网络不经过 CNI，而是走一条由 <span class="hl">CubeNet（CubeVS）eBPF 数据面</span>控制的独立通路。</p>
+  <p>这条通路大致是这样：</p>
+  <div class="codeblock">沙箱内应用
+  └─ 虚拟网卡 eth0（virtio-net）
+     └─ 宿主 tap 设备（如 cube-dev / z172.16.x.y）
+        └─ eBPF 数据面（CubeVS）
+           ├─ 出向：SNAT + 网络策略检查（允许/拒绝/限流）
+           └─ 入向：反向 NAT + 端口映射</div>
+  <p>所有沙箱的出向流量都必须经过 eBPF 里的<span class="hl">策略引擎</span>。策略引擎里有"允许出网段"的名单，也有一张"永远拒绝"的名单。下一节我们看的就是后者。</p>
+
+  <h2>二、问题：域名解析失败，但"看起来一切正常"</h2>
+
+  <p>沙箱里执行：</p>
+  <div class="codeblock">$ cat /etc/resolv.conf
+nameserver 10.50.0.10        <span class="cm"># 集群 CoreDNS 的 ClusterIP</span>
+$ getent hosts www.baidu.com
+<span class="cm"># 无输出，exit code 非 0 —— 解析失败</span></div>
+  <p>把 <code>10.50.0.10</code> 换到宿主机（或宿主 Pod）里的 DNS，同一个域名秒回。也就是说：<span class="hlb">不是 DNS 服务器挂了，是沙箱到 DNS 服务器这条路不通。</span></p>
+  <p>这引出一个先要回答的问题：<span class="hl">沙箱的 resolv.conf 是谁写的？为什么是 10.50.0.10？</span></p>
+
+  <h2>三、机制之一：沙箱的 resolv.conf 是谁写的</h2>
+
+  <p>Cubelet（节点代理）在创建沙箱时，由 <code>netfile.go</code> 的 <code>CreateNetfiles</code> 生成容器的网络文件（resolv.conf / hosts 等）。DNS 服务器的选择走 <code>ResolveEffectiveDNSServers</code>，生效顺序是：</p>
+  <div class="codeblock">① 请求里显式的 dns_config.servers   <span class="cm"># 最优先</span>
+② 配置里的 default_dns_servers        <span class="cm"># 兜底</span></div>
+  <p>K8s 部署默认把沙箱 DNS 设为"跟随节点"（<code>followNodeDns: true</code>），于是 resolv.conf 里就写进了节点所在集群的 CoreDNS ClusterIP <code>10.50.0.10</code>。这一步在 K8s 里很正常——<span class="hlb">问题出在"沙箱不是 Pod"：它到 CoreDNS 的路，被自己的策略引擎堵死了。</span></p>
+
+  <h2>四、机制之二：数据面的"默认拒绝私网"</h2>
+
+  <p>回到 eBPF 策略引擎。出向策略里有一张<span class="hl">硬编码、永远拒绝</span>的私网段表，写在 <code>CubeNet/cubevs/netpolicy.go</code>：</p>
+  <div class="codeblock">var alwaysDeniedSandboxCIDRs = []string{
+    "10.0.0.0/8",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+}</div>
+  <p>这是一条<span class="hl">安全默认值</span>：沙箱默认不许访问任何私网地址，防止一台被入侵的沙箱横向扫描集群内部机器。但它有个致命副作用——<span class="hlb">集群 CoreDNS 的 ClusterIP 10.50.0.10 恰好落在 <code>10.0.0.0/8</code> 里。</span>沙箱发往 <code>10.50.0.10:53</code> 的 DNS 查询 UDP 包，在数据面被静默丢弃，DNS 请求石沉大海。</p>
+
+  <div class="think">
+    <div class="q">这个安全默认值能被绕过吗？</div>
+    不该绕，也不需要绕。正确做法是别让沙箱依赖集群内部 DNS——给沙箱配公网 DNS（8.8.8.8 / 223.5.5.5），公网地址不在拒绝表里，查询正常放行。
+  </div>
+
+  <svg class="flow" viewBox="0 0 720 252" role="img" aria-label="沙箱DNS查询路径与修复">
+    <defs>
+      <marker id="d2Arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#4f8cff"/></marker>
+      <marker id="d2ArrR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#f87171"/></marker>
+      <marker id="d2ArrG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#34d399"/></marker>
+    </defs>
+    <rect x="0" y="0" width="720" height="252" rx="14" fill="rgba(255,255,255,.03)" stroke="rgba(255,255,255,.09)"/>
+    <text x="24" y="28" class="fm">沙箱 DNS 查询 · 上：指向 CoreDNS 被拒；下：指向公网 DNS 放行</text>
+
+    <rect x="26" y="48" width="140" height="56" rx="10" fill="rgba(79,140,255,.08)" stroke="rgba(79,140,255,.45)"/>
+    <text x="96" y="72" text-anchor="middle" class="fn">沙箱内 getent</text>
+    <text x="96" y="90" text-anchor="middle" class="fd">nameserver 10.50.0.10</text>
+
+    <rect x="206" y="48" width="150" height="56" rx="10" fill="rgba(248,113,113,.08)" stroke="rgba(248,113,113,.5)"/>
+    <text x="281" y="72" text-anchor="middle" class="fn" style="fill:#f87171">eBPF 策略</text>
+    <text x="281" y="90" text-anchor="middle" class="fd">10.0.0.0/8 → 拒绝</text>
+
+    <rect x="396" y="48" width="150" height="56" rx="10" fill="rgba(248,113,113,.07)" stroke="rgba(248,113,113,.45)"/>
+    <text x="471" y="72" text-anchor="middle" class="fn" style="fill:#f87171">CoreDNS 10.50.0.10</text>
+    <text x="471" y="90" text-anchor="middle" class="fd">查询到不了</text>
+
+    <line x1="166" y1="76" x2="206" y2="76" stroke="#4f8cff" stroke-width="1.5" marker-end="url(#d2Arr)"/>
+    <line x1="356" y1="76" x2="396" y2="76" stroke="#f87171" stroke-width="1.5" marker-end="url(#d2ArrR)"/>
+    <text x="376" y="124" text-anchor="middle" class="fl">UDP:53 被丢</text>
+
+    <rect x="26" y="180" width="140" height="56" rx="10" fill="rgba(52,211,153,.07)" stroke="rgba(52,211,153,.45)"/>
+    <text x="96" y="204" text-anchor="middle" class="fn" style="fill:#34d399">沙箱内 getent</text>
+    <text x="96" y="222" text-anchor="middle" class="fd">nameserver 8.8.8.8</text>
+    <rect x="206" y="180" width="150" height="56" rx="10" fill="rgba(52,211,153,.07)" stroke="rgba(52,211,153,.45)"/>
+    <text x="281" y="204" text-anchor="middle" class="fn" style="fill:#34d399">eBPF 策略</text>
+    <text x="281" y="222" text-anchor="middle" class="fd">公网 → 放行</text>
+    <rect x="396" y="180" width="150" height="56" rx="10" fill="rgba(52,211,153,.08)" stroke="rgba(52,211,153,.5)"/>
+    <text x="471" y="204" text-anchor="middle" class="fn" style="fill:#34d399">8.8.8.8</text>
+    <text x="471" y="222" text-anchor="middle" class="fd">可达</text>
+    <line x1="96" y1="104" x2="96" y2="180" stroke="#34d399" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#d2ArrG)"/>
+    <line x1="166" y1="208" x2="206" y2="208" stroke="#4f8cff" stroke-width="1.5" marker-end="url(#d2Arr)"/>
+    <line x1="356" y1="208" x2="396" y2="208" stroke="#34d399" stroke-width="1.5" marker-end="url(#d2ArrG)"/>
+    <text x="128" y="150" class="fl">修复：DNS 指向公网</text>
+  </svg>
+  <div class="flow-cap">同一张 eBPF 策略：私网目标被 alwaysDeniedSandboxCIDRs 拒掉，公网目标放行。修复的核心是"让沙箱的 DNS 指向公网"。</div>
+
+  <h2>五、机制之三：为什么改了配置却不生效</h2>
+
+  <p>第一反应自然是去改部署参数，在 <code>runtime-values.yaml</code> 里把沙箱 DNS 指到公网：</p>
+  <div class="codeblock">cubeNode:
+  dns:
+    sandbox:
+      followNodeDns: false
+      nameservers:
+        - 8.8.8.8
+        - 223.5.5.5</div>
+  <p>这个配置确实生效了：Cubelet 的 <code>dynamicconf/conf.yaml</code> 里 <code>default_dns_servers</code> 被更新。但沙箱里的 resolv.conf 依旧是 10.50.0.10。原因藏在一个开关里——<code>disable_host_netfile: true</code>。</p>
+  <p>在 <code>netfile_plugin.go</code> 里，<code>Create</code> 流程是：先 <code>cnfs.CreateNetfiles(...)</code> 生成 DNS 内容，再根据 <code>!DisableHostNetfile</code> 决定要不要 <code>WriteToHost</code>（把 resolv.conf 写进宿主侧、再挂进沙箱）。K8s 部署默认关闭了 host netfile 写入，于是 <span class="hlb">沙箱 guest 里的 resolv.conf 是模板 rootfs 里烘焙的静态文件</span>，不随 Cubelet 配置动态更新。<span class="hl">改了 cubelet 配置，对已经建好的模板无效。</span></p>
+
+  <h2>六、修复：DNS 烘焙进模板</h2>
+
+  <p>正解是把公网 DNS 直接写进模板 rootfs。模板创建命令支持 <code>--dns</code> 参数（可重复），它会把 DNS 写入容器 rootfs 的 resolv.conf：</p>
+  <div class="codeblock">cubemastercli template create-from-image --image &lt;image&gt; \
+  --expose-port 49983 --writable-layer-size 20Gi \
+  --dns 8.8.8.8 --dns 223.5.5.5</div>
+  <p>重建模板后，新沙箱的 <code>/etc/resolv.conf</code> 指向公网 DNS，域名解析立即恢复。</p>
+
+  <h2>七、权衡：安全默认值与"内网可达"的取舍</h2>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>方案</th><th>优点</th><th>代价</th></tr></thead>
+      <tbody>
+        <tr><td>沙箱 DNS = 集群 CoreDNS</td><td>内网域名开箱即用</td><td>被 alwaysDeniedSandboxCIDRs 拒绝，外网解析全挂</td></tr>
+        <tr><td>沙箱 DNS = 公网 DNS（本次选择）</td><td>外网解析正常，符合"沙箱访问公网"场景</td><td>集群内私网域名需另行配置放行，否则被拒</td></tr>
+        <tr><td>运行时注入（Cubelet 动态写 netfile）</td><td>配置热生效、模板解耦</td><td>依赖 <code>disable_host_netfile: false</code>，K8s 部署默认关闭</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>这次排障最大的收获是一个心智校正：<span class="hl">K8s Pod 的"标准答案"（DNS 指向 CoreDNS）在 CubeSandbox 沙箱里不成立</span>——沙箱出向流量走的是 CubeNet eBPF 数据面，它默认拒绝私网段，而 CoreDNS 恰好在那张表里。安全默认值没错，错的是默认组合不适用于"沙箱访问公网"的场景。</p>
+
+  <div class="punchline">
+    <small>一句话带走</small>
+    沙箱 DNS 不能照抄 K8s Pod 的"指 CoreDNS"——CubeNet 数据面的 alwaysDeniedSandboxCIDRs 默认拒绝 10/8 等私网段，CoreDNS 正在其中；而且模板 rootfs 里的 resolv.conf 是静态的，要把公网 DNS 用 <code>--dns</code> 烘焙进模板才生效。
+  </div>
+
+  <h2>传送门：真想读代码，就这几个文件</h2>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>想看什么</th><th>去这里</th></tr></thead>
+      <tbody>
+        <tr><td>默认拒绝的私网段</td><td><code>CubeNet/cubevs/netpolicy.go</code>（<code>alwaysDeniedSandboxCIDRs</code>）</td></tr>
+        <tr><td>DNS 生效顺序（请求 &gt; 默认配置）</td><td><code>Cubelet/pkg/container/netfile/netfile.go</code></td></tr>
+        <tr><td>host netfile 开关分支</td><td><code>Cubelet/plugins/cube/internals/netfile/netfile_plugin.go</code></td></tr>
+        <tr><td>K8s 沙箱 DNS 默认值</td><td><code>deploy/kubernetes/chart/values.yaml</code>（<code>cubeNode.dns.sandbox</code>）</td></tr>
+        <tr><td>模板 --dns 参数</td><td><code>CubeMaster/cmd/cubemastercli/commands/cubebox/template.go</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</main>
+
+<footer>部署排障 02/05 · 下一篇：HTTP 通、HTTPS 超时、大文件截断——一次 MTU 黑洞的完整修复</footer>
+</body>
+</html>

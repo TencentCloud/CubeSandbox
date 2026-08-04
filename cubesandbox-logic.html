@@ -1,0 +1,1449 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CubeSandbox 逻辑梳理 | 架构与代码路径全景</title>
+<style>
+  :root {
+    --bg: #0b1020;
+    --bg-soft: #0f1730;
+    --panel: rgba(255, 255, 255, 0.04);
+    --panel-hover: rgba(255, 255, 255, 0.07);
+    --border: rgba(255, 255, 255, 0.09);
+    --border-strong: rgba(255, 255, 255, 0.16);
+    --text: #e6eaf2;
+    --text-dim: #9aa7bd;
+    --text-faint: #6b7a93;
+    --blue: #4f8cff;
+    --cyan: #2dd4bf;
+    --purple: #a78bfa;
+    --amber: #fbbf24;
+    --red: #f87171;
+    --green: #34d399;
+    --pink: #f472b6;
+    --mono: "SFMono-Regular", "JetBrains Mono", "Fira Code", Consolas, "Liberation Mono", Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+    --radius: 14px;
+    --shadow: 0 10px 40px rgba(0, 0, 0, 0.35);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: var(--sans);
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    font-size: 15px;
+  }
+  a { color: var(--blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code {
+    font-family: var(--mono);
+    font-size: 0.88em;
+    background: rgba(79, 140, 255, 0.12);
+    color: #b9d2ff;
+    padding: 2px 7px;
+    border-radius: 6px;
+    white-space: nowrap;
+  }
+  pre {
+    font-family: var(--mono);
+    font-size: 13px;
+    background: #0a0f1e;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    color: #c8d3e8;
+    line-height: 1.6;
+  }
+  pre code { background: none; padding: 0; color: inherit; white-space: pre; }
+
+  /* ===== 导航栏 ===== */
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    backdrop-filter: blur(14px);
+    background: rgba(11, 16, 32, 0.82);
+    border-bottom: 1px solid var(--border);
+  }
+  .nav-inner {
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: 0 24px;
+    height: 58px;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 700;
+    font-size: 17px;
+    letter-spacing: 0.2px;
+    white-space: nowrap;
+  }
+  .brand-mark {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, var(--blue), var(--purple));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-size: 15px;
+    font-weight: 800;
+  }
+  .nav-links {
+    display: flex;
+    gap: 4px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .nav-links::-webkit-scrollbar { display: none; }
+  .nav-links a {
+    color: var(--text-dim);
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 13.5px;
+    white-space: nowrap;
+    transition: all 0.15s;
+  }
+  .nav-links a:hover { color: var(--text); background: var(--panel-hover); text-decoration: none; }
+  .nav-links a.active { color: #fff; background: rgba(79, 140, 255, 0.18); }
+
+  /* ===== 主体 ===== */
+  main { max-width: 1080px; margin: 0 auto; padding: 40px 24px 100px; }
+  section { margin-bottom: 64px; }
+  .section-title {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 26px;
+    font-weight: 800;
+    margin-bottom: 8px;
+    letter-spacing: 0.3px;
+  }
+  .section-title .num {
+    font-family: var(--mono);
+    font-size: 15px;
+    color: var(--blue);
+    background: rgba(79, 140, 255, 0.14);
+    border: 1px solid rgba(79, 140, 255, 0.3);
+    border-radius: 8px;
+    padding: 3px 9px;
+  }
+  .section-sub {
+    color: var(--text-dim);
+    margin-bottom: 28px;
+    max-width: 760px;
+  }
+  h3 {
+    font-size: 19px;
+    font-weight: 700;
+    margin: 34px 0 14px;
+    padding-left: 12px;
+    border-left: 3px solid var(--blue);
+  }
+
+  /* ===== Hero ===== */
+  .hero {
+    text-align: center;
+    padding: 70px 24px 40px;
+    background:
+      radial-gradient(900px 380px at 20% -10%, rgba(79, 140, 255, 0.18), transparent 60%),
+      radial-gradient(900px 380px at 85% -10%, rgba(167, 139, 250, 0.16), transparent 60%);
+  }
+  .hero h1 {
+    font-size: 44px;
+    font-weight: 900;
+    letter-spacing: 1px;
+    background: linear-gradient(90deg, #fff, var(--blue) 45%, var(--purple));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .hero p.tagline { color: var(--text-dim); font-size: 17px; margin-top: 14px; max-width: 680px; margin-left: auto; margin-right: auto; }
+  .hero .meta { color: var(--text-faint); font-size: 12.5px; margin-top: 18px; font-family: var(--mono); }
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px;
+    max-width: 980px;
+    margin: 40px auto 0;
+  }
+  .stat {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px 16px;
+    backdrop-filter: blur(8px);
+  }
+  .stat .v { font-size: 30px; font-weight: 900; color: var(--blue); font-family: var(--mono); }
+  .stat .k { color: var(--text-dim); font-size: 13px; margin-top: 4px; }
+
+  /* ===== 卡片网格 ===== */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px 20px 22px;
+    transition: border-color 0.2s, background 0.2s, transform 0.2s;
+  }
+  .card:hover { border-color: var(--border-strong); background: var(--panel-hover); transform: translateY(-2px); }
+  .card h4 { font-size: 15.5px; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  .card p { color: var(--text-dim); font-size: 13.5px; }
+
+  /* ===== 组件卡片（可折叠） ===== */
+  .component {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 14px;
+    overflow: hidden;
+    background: var(--panel);
+  }
+  .component summary {
+    cursor: pointer;
+    padding: 18px 22px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    list-style: none;
+    user-select: none;
+    transition: background 0.15s;
+  }
+  .component summary::-webkit-details-marker { display: none; }
+  .component summary:hover { background: var(--panel-hover); }
+  .component summary .c-logo {
+    width: 40px; height: 40px;
+    border-radius: 10px;
+    flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: 15px; color: #fff;
+    font-family: var(--mono);
+  }
+  .component summary .c-name { font-weight: 700; font-size: 16px; }
+  .component summary .c-lang {
+    font-size: 11px;
+    color: var(--text-faint);
+    background: rgba(255,255,255,0.07);
+    border: 1px solid var(--border);
+    padding: 2px 8px;
+    border-radius: 20px;
+    font-family: var(--mono);
+    white-space: nowrap;
+  }
+  .component summary .c-brief { color: var(--text-dim); font-size: 13px; margin-left: auto; text-align: right; }
+  .component summary .chevron {
+    color: var(--text-faint);
+    transition: transform 0.2s;
+    font-size: 12px;
+  }
+  .component[open] summary .chevron { transform: rotate(90deg); }
+  .component-body { padding: 4px 24px 22px; border-top: 1px solid var(--border); }
+  .component-body .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; margin-top: 16px; }
+  .component-body ul { padding-left: 20px; color: var(--text-dim); font-size: 13.5px; }
+  .component-body ul li { margin: 5px 0; }
+  .file-list { font-size: 12.5px; }
+  .file-list .f { font-family: var(--mono); color: #b9d2ff; word-break: break-all; }
+
+  /* ===== 架构拓扑 ===== */
+  .topo { background: var(--bg-soft); border: 1px solid var(--border); border-radius: var(--radius); padding: 28px; }
+  .topo-layer { margin-bottom: 20px; }
+  .topo-label {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    margin-bottom: 12px;
+  }
+  .topo-row { display: flex; flex-wrap: wrap; gap: 12px; }
+  .node {
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    padding: 10px 16px;
+    font-size: 13.5px;
+    font-weight: 600;
+    background: rgba(255,255,255,0.05);
+    text-align: center;
+    min-width: 120px;
+  }
+  .node small { display: block; font-weight: 400; color: var(--text-faint); font-size: 11px; font-family: var(--mono); margin-top: 2px; }
+  .node.accent-blue { border-color: rgba(79,140,255,0.5); background: rgba(79,140,255,0.12); }
+  .node.accent-purple { border-color: rgba(167,139,250,0.5); background: rgba(167,139,250,0.12); }
+  .node.accent-cyan { border-color: rgba(45,212,191,0.5); background: rgba(45,212,191,0.1); }
+  .node.accent-amber { border-color: rgba(251,191,36,0.5); background: rgba(251,191,36,0.1); }
+  .node.accent-pink { border-color: rgba(244,114,182,0.5); background: rgba(244,114,182,0.1); }
+  .topo-conn {
+    text-align: center;
+    color: var(--text-faint);
+    font-family: var(--mono);
+    font-size: 12px;
+    margin: 8px 0;
+    letter-spacing: 1px;
+  }
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 18px; color: var(--text-dim); font-size: 12.5px; }
+  .legend span { display: flex; align-items: center; gap: 6px; }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; }
+
+  /* ===== 流程 / 时序 ===== */
+  .flow-step {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 0;
+    position: relative;
+    padding-bottom: 26px;
+  }
+  .flow-step::before {
+    content: "";
+    position: absolute;
+    left: 17px;
+    top: 38px;
+    bottom: 0;
+    width: 2px;
+    background: linear-gradient(var(--blue), transparent);
+  }
+  .flow-step:last-child::before { display: none; }
+  .flow-step .bubble {
+    width: 36px; height: 36px;
+    border-radius: 50%;
+    background: rgba(79, 140, 255, 0.16);
+    border: 1.5px solid var(--blue);
+    color: var(--blue);
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 800;
+    font-family: var(--mono);
+    font-size: 14px;
+    flex-shrink: 0;
+    position: relative;
+    z-index: 1;
+    background: #101a33;
+  }
+  .flow-step .content { flex: 1; padding-top: 4px; }
+  .flow-step .content .who { font-family: var(--mono); font-size: 12px; color: var(--text-faint); letter-spacing: 0.5px; }
+  .flow-step .content .what { font-weight: 700; font-size: 15px; margin: 2px 0 4px; }
+  .flow-step .content .detail { color: var(--text-dim); font-size: 13.5px; }
+
+  .seq-wrap { overflow-x: auto; }
+  .seq {
+    min-width: 820px;
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 26px 20px 10px;
+  }
+  .seq-head { display: flex; justify-content: space-between; padding: 0 10px; }
+  .seq-head span { font-family: var(--mono); font-size: 12px; color: var(--text-dim); text-align: center; flex: 1; font-weight: 700; }
+  .seq-body { position: relative; margin-top: 6px; }
+  .seq-lane {
+    display: flex;
+    gap: 0;
+    height: 26px;
+    border-top: 1px dashed rgba(255,255,255,0.12);
+  }
+  .seq-lane div { flex: 1; position: relative; }
+  .msg {
+    position: absolute;
+    top: -13px;
+    white-space: nowrap;
+    font-size: 12px;
+    font-family: var(--mono);
+    border: 1px solid rgba(79,140,255,0.4);
+    background: #0e1830;
+    color: #b9d2ff;
+    padding: 3px 10px;
+    border-radius: 20px;
+    z-index: 2;
+  }
+  .seq-lane .from { left: 0; }
+
+  /* ===== 表格 ===== */
+  .tbl-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; min-width: 640px; }
+  thead th {
+    background: rgba(79,140,255,0.1);
+    color: #bcd6ff;
+    text-align: left;
+    padding: 11px 14px;
+    font-weight: 700;
+    border-bottom: 1px solid var(--border-strong);
+    white-space: nowrap;
+  }
+  tbody td { padding: 10px 14px; border-bottom: 1px solid var(--border); color: var(--text-dim); vertical-align: top; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: rgba(255,255,255,0.03); }
+  td code, th code { font-size: 0.92em; }
+  .tag {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border-strong);
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .tag.go { color: #7ee7ff; border-color: rgba(126,231,255,0.4); background: rgba(126,231,255,0.08); }
+  .tag.rust { color: #ffab7e; border-color: rgba(255,171,126,0.4); background: rgba(255,171,126,0.08); }
+  .tag.lua { color: #a5f3a1; border-color: rgba(165,243,161,0.4); background: rgba(165,243,161,0.08); }
+  .tag.c { color: #ffd27e; border-color: rgba(255,210,126,0.4); background: rgba(255,210,126,0.08); }
+  .tag.ts { color: #c9b7ff; border-color: rgba(201,183,255,0.4); background: rgba(201,183,255,0.08); }
+
+  /* ===== 状态机 ===== */
+  .state-machine { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; justify-content: center; padding: 20px 0; }
+  .state {
+    border-radius: 12px;
+    padding: 14px 22px;
+    text-align: center;
+    border: 2px solid;
+    font-weight: 700;
+    min-width: 120px;
+  }
+  .state small { display: block; font-weight: 400; font-size: 11.5px; color: var(--text-faint); margin-top: 4px; }
+  .state.running { border-color: var(--green); color: var(--green); background: rgba(52,211,153,0.08); }
+  .state.pausing { border-color: var(--amber); color: var(--amber); background: rgba(251,191,36,0.08); }
+  .state.paused { border-color: var(--blue); color: var(--blue); background: rgba(79,140,255,0.08); }
+  .state.resuming { border-color: var(--cyan); color: var(--cyan); background: rgba(45,212,191,0.08); }
+  .state.terminated { border-color: var(--red); color: var(--red); background: rgba(248,113,113,0.08); }
+  .trans { color: var(--text-faint); font-size: 12px; text-align: center; max-width: 140px; line-height: 1.5; }
+  .trans b { color: var(--text-dim); }
+
+  /* ===== 提示块 ===== */
+  .note {
+    border-left: 3px solid var(--blue);
+    background: rgba(79,140,255,0.07);
+    padding: 12px 18px;
+    border-radius: 0 10px 10px 0;
+    font-size: 13.5px;
+    color: var(--text-dim);
+    margin: 16px 0;
+  }
+  .note strong { color: var(--text); }
+  .note.warn { border-color: var(--amber); background: rgba(251,191,36,0.07); }
+
+  /* ===== 目录 ===== */
+  .toc {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 10px;
+    margin-bottom: 20px;
+  }
+  .toc a {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 16px;
+    color: var(--text-dim);
+    font-size: 13.5px;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    transition: all 0.15s;
+  }
+  .toc a:hover { border-color: var(--border-strong); color: var(--text); background: var(--panel-hover); text-decoration: none; }
+  .toc a .n { font-family: var(--mono); color: var(--blue); font-weight: 700; }
+
+  footer { border-top: 1px solid var(--border); padding: 30px 24px 50px; text-align: center; color: var(--text-faint); font-size: 12.5px; }
+  .back-top {
+    position: fixed;
+    right: 26px;
+    bottom: 26px;
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+    background: rgba(79,140,255,0.85);
+    color: #fff;
+    border: none;
+    cursor: pointer;
+    font-size: 18px;
+    box-shadow: var(--shadow);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.25s;
+  }
+  .back-top.show { opacity: 1; pointer-events: auto; }
+
+  @media (max-width: 720px) {
+    .hero h1 { font-size: 32px; }
+    .nav-links { display: none; }
+    .component summary .c-brief { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="nav-inner">
+    <div class="brand"><div class="brand-mark">C</div> CubeSandbox 逻辑梳理</div>
+    <nav class="nav-links" id="nav">
+      <a href="#overview">概览</a>
+      <a href="#principles">设计原则</a>
+      <a href="#architecture">架构</a>
+      <a href="#components">核心组件</a>
+      <a href="#request-flow">请求链路</a>
+      <a href="#lifecycle">沙箱生命周期</a>
+      <a href="#storage">存储</a>
+      <a href="#network">网络</a>
+      <a href="#interfaces">接口</a>
+      <a href="#source-map">源码索引</a>
+    </nav>
+  </div>
+</header>
+
+<div class="hero">
+  <h1>CubeSandbox 逻辑梳理</h1>
+  <p class="tagline">一个基于 RustVMM + KVM 构建的 AI Agent 沙箱服务：毫秒级启动、硬件级隔离、E2B 兼容，以一份 HTML 全景梳理其架构设计、组件职责与核心代码路径。</p>
+  <div class="stats">
+    <div class="stat"><div class="v">&lt;60ms</div><div class="k">沙箱冷启动</div></div>
+    <div class="stat"><div class="v">&lt;5MB</div><div class="k">单沙箱额外内存开销</div></div>
+    <div class="stat"><div class="v">KVM</div><div class="k">独立内核 · 硬件级隔离</div></div>
+    <div class="stat"><div class="v">E2B</div><div class="k">SDK 兼容 · Drop-in 替换</div></div>
+  </div>
+  <div class="meta">基于仓库源码与 docs/ 文档梳理 · 2026-08-03</div>
+</div>
+
+<main>
+
+<!-- ================= 目录 ================= -->
+<section>
+  <div class="toc">
+    <a href="#overview"><span class="n">01</span> 项目概览与关键数据</a>
+    <a href="#principles"><span class="n">02</span> 设计原则</a>
+    <a href="#architecture"><span class="n">03</span> 整体架构（控制面 / 数据面）</a>
+    <a href="#components"><span class="n">04</span> 核心组件逐一拆解</a>
+    <a href="#request-flow"><span class="n">05</span> 一次 Sandbox.create() 的完整请求链路</a>
+    <a href="#lifecycle"><span class="n">06</span> 沙箱状态机与自动暂停 / 恢复</a>
+    <a href="#storage"><span class="n">07</span> 存储逻辑：CubeCoW 快照引擎</a>
+    <a href="#network"><span class="n">08</span> 网络逻辑：CubeVS / CubeEgress / CubeProxy</a>
+    <a href="#interfaces"><span class="n">09</span> 组件间接口与协议</a>
+    <a href="#source-map"><span class="n">10</span> 关键源码文件索引</a>
+  </div>
+</section>
+
+<!-- ================= 1 概览 ================= -->
+<section id="overview">
+  <div class="section-title"><span class="num">01</span> 项目概览</div>
+  <p class="section-sub">CubeSandbox 是一个多语言（Go + Rust + Web）Monorepo 沙箱服务。所有组件构建在 Docker builder 容器中完成（<code>make</code> 目标驱动），产物输出到 <code>_output/bin/</code>。</p>
+
+  <div class="grid">
+    <div class="card"><h4><span class="dot" style="background:var(--green)"></span>定位</h4><p>面向 AI Agent 场景专门构建的基础设施。不只支持"LLM 调用工具 → 沙箱执行 → 返回结果"的经典闭环，也支持在沙箱内托管长时运行的 Agent 与有状态服务（常驻开发环境、Web 服务、数据库等）。</p></div>
+    <div class="card"><h4><span class="dot" style="background:var(--blue)"></span>隔离模型</h4><p>每个沙箱是一个在 KVM MicroVM 中运行独立 Linux 内核的沙箱，不存在共享内核的逃逸面；出站流量全部经 CubeEgress L7 代理，域名必须显式放行（零信任出网）。</p></div>
+    <div class="card"><h4><span class="dot" style="background:var(--purple)"></span>性能手段</h4><p>预快照模板 + RustVMM 恢复路径实现毫秒级冷启动；内核共享与 CoW 快照（FICLONE，O(1)）让单机可运行数千实例，单沙箱额外开销 &lt;5MB。</p></div>
+    <div class="card"><h4><span class="dot" style="background:var(--amber)"></span>生态兼容</h4><p>对外暴露 E2B 兼容的 REST API 与 SDK；替换一个环境变量（API URL）即可从 E2B 云无缝切换，无需改动业务代码。</p></div>
+  </div>
+
+  <h3>组件语言矩阵</h3>
+  <div class="grid">
+    <div class="card"><h4><span class="tag go">Go</span> 控制面与节点编排</h4><p>CubeMaster（调度器）、Cubelet（节点代理）、CubeOps、cube-lifecycle-manager、network-agent、CubeNet/cubevs（eBPF 控制面）、CubeDB。</p></div>
+    <div class="card"><h4><span class="tag rust">Rust</span> 数据面核心</h4><p>CubeAPI（Axum 网关）、CubeShim（Shim v2）、hypervisor（RustVMM）、cubecow（快照引擎）、agent（沙箱内 guest agent）。</p></div>
+    <div class="card"><h4><span class="tag lua">OpenResty + Lua</span> 数据面代理</h4><p>CubeProxy（反向代理/路由）、CubeEgress（L7 出向安全代理）。</p></div>
+    <div class="card"><h4><span class="tag c">C (eBPF)</span> 内核态网络</h4><p>CubeNet 的三个 BPF 程序（CO-RE）：from_cube / from_world / from_envoy。</p></div>
+  </div>
+</section>
+
+<!-- ================= 2 设计原则 ================= -->
+<section id="principles">
+  <div class="section-title"><span class="num">02</span> 设计原则</div>
+  <p class="section-sub">这六条原则决定了整个系统的结构形态，理解它们就能理解后面所有组件的职责划分。</p>
+  <div class="grid">
+    <div class="card"><h4>Agent 优先</h4><p>生命周期语义、SDK 形态、自动暂停/恢复、极速克隆/回滚等特性为 Agent 工作负载定制，而非通用 VM 平台。</p></div>
+    <div class="card"><h4>硬件隔离</h4><p>每沙箱独立 KVM MicroVM + 独立内核；叠加 eBPF 网络隔离，隔离级别高于容器、等同物理机。</p></div>
+    <div class="card"><h4>毫秒级启动</h4><p>预快照模板 + RustVMM 恢复路径（而非冷启动引导），冷启动 &lt;60ms、50 并发下 P95 90ms。</p></div>
+    <div class="card"><h4>零信任出网</h4><p>所有出站流量经 CubeEgress L7 MITM 代理，域名白名单放行；私网/链路本地地址段被 CubeVS 默认拒绝。</p></div>
+    <div class="card"><h4>无状态控制面</h4><p>CubeAPI / CubeMaster 不保存本地状态，Redis 是元数据与生命周期事件的唯一可信源，可水平扩容。</p></div>
+    <div class="card"><h4>高效存储</h4><p>CubeCoW 借助内核 FICLONE ioctl 在 XFS reflink 上实现 O(1) 快照与克隆，零数据拷贝。</p></div>
+  </div>
+</section>
+
+<!-- ================= 3 架构 ================= -->
+<section id="architecture">
+  <div class="section-title"><span class="num">03</span> 整体架构</div>
+  <p class="section-sub">系统按"控制面 / 数据面"分层：控制面无状态、依赖 Redis 协调，可横向扩展；数据面节点本地化，负责 VM 生命周期、存储、网络与安全策略执行。</p>
+
+  <div class="topo">
+    <div class="topo-label">客户端入口</div>
+    <div class="topo-row">
+      <div class="node">客户端 / SDK<br><small>E2B 兼容 REST</small></div>
+      <div class="node">WebUI 控制台<br><small>React + Vite · :12088</small></div>
+    </div>
+
+    <div class="topo-conn">▼ HTTP（/sandboxes … 兼容 E2B）&nbsp;&nbsp;&nbsp;▼ HTTP（/opsapi/v1）</div>
+
+    <div class="topo-label">控制面 · 无状态</div>
+    <div class="topo-row">
+      <div class="node accent-blue">CubeAPI<br><small>Rust · E2B REST 网关</small></div>
+      <div class="node accent-blue">CubeMaster<br><small>Go · 调度编排</small></div>
+      <div class="node accent-amber">cube-lifecycle-manager<br><small>Go · 自动暂停/恢复</small></div>
+      <div class="node accent-blue">CubeOps<br><small>Go · 运维 API</small></div>
+      <div class="node accent-pink">Redis<br><small>元数据 / 事件流 / 路由表</small></div>
+    </div>
+
+    <div class="topo-conn">▼ gRPC（CubeboxMgr / Images）&nbsp;&nbsp;◀── Redis Stream 生命周期事件 ──▶</div>
+
+    <div class="topo-label">数据面 · 每计算节点</div>
+    <div class="topo-row">
+      <div class="node accent-blue">Cubelet<br><small>Go · 节点调度 + containerd 插件</small></div>
+      <div class="node accent-cyan">network-agent<br><small>Go · TAP / IPAM / 策略下发</small></div>
+      <div class="node accent-blue">CubeProxy<br><small>OpenResty · 反代路由</small></div>
+      <div class="node accent-blue">CubeEgress<br><small>OpenResty · L7 出向代理</small></div>
+    </div>
+
+    <div class="topo-conn">▼ containerd Shim v2（ttRPC）</div>
+
+    <div class="topo-row">
+      <div class="node accent-purple">CubeShim<br><small>Rust · Shim v2 实现</small></div>
+      <div class="node accent-amber">CubeCoW<br><small>Rust · FICLONE 快照</small></div>
+      <div class="node accent-cyan">CubeVS<br><small>eBPF · 内核态虚拟交换机</small></div>
+    </div>
+
+    <div class="topo-conn">▼ 进程内 mpsc（ApiRequest）&nbsp;&nbsp;&nbsp;▼ cgo / C ABI</div>
+
+    <div class="topo-row">
+      <div class="node accent-purple">CubeHypervisor<br><small>RustVMM + KVM</small></div>
+      <div class="node accent-purple">guest agent<br><small>Rust · 沙箱内 init + ttRPC</small></div>
+    </div>
+
+    <div class="topo-conn">▼ vsock ttRPC</div>
+
+    <div class="topo-row">
+      <div class="node">MicroVM（沙箱）<br><small>独立内核 · TAP 直连 · virtio</small></div>
+    </div>
+
+    <div class="legend">
+      <span><span class="swatch" style="background:var(--blue)"></span>控制面 / 编排</span>
+      <span><span class="swatch" style="background:var(--purple)"></span>虚拟化层</span>
+      <span><span class="swatch" style="background:var(--cyan)"></span>网络数据面</span>
+      <span><span class="swatch" style="background:var(--amber)"></span>存储 / 生命周期</span>
+      <span><span class="swatch" style="background:var(--pink)"></span>共享状态</span>
+    </div>
+  </div>
+
+  <div class="note"><strong>注意一个易混淆点：</strong>README 架构图把 CubeAPI → CubeMaster 标为 gRPC，但当前实现中 CubeAPI 通过 <strong>HTTP/JSON</strong>（reqwest）调用 CubeMaster 的 <code>/cube/*</code> 路由；CubeMaster → Cubelet 才是 gRPC（服务端在 Cubelet，proto 定义在 CubeMaster <code>api/</code> 下共享）。</div>
+
+  <h3>控制面 vs 数据面</h3>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>层</th><th>组件</th><th>职责</th></tr></thead>
+      <tbody>
+        <tr><td><b>控制面</b></td><td>CubeAPI、CubeMaster、WebUI、CubeOps、Redis</td><td>API 网关、调度、状态协调、运维控制台</td></tr>
+        <tr><td><b>数据面</b></td><td>Cubelet、CubeShim、CubeHypervisor、CubeCoW、CubeVS、CubeEgress、CubeProxy、network-agent、guest agent</td><td>VM 生命周期、存储、网络、安全策略执行、请求路由</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ================= 4 核心组件 ================= -->
+<section id="components">
+  <div class="section-title"><span class="num">04</span> 核心组件逐一拆解</div>
+  <p class="section-sub">每个组件给出职责、技术栈、关键代码路径与核心逻辑。点击卡片展开细节。</p>
+
+  <h3>4.1 控制面</h3>
+
+  <details class="component" open>
+    <summary>
+      <div class="c-logo" style="background:linear-gradient(135deg,#f97316,#f43f5e)">API</div>
+      <div>
+        <div class="c-name">CubeAPI</div>
+        <div style="display:flex;gap:6px;margin-top:4px"><span class="tag rust">Rust</span><span class="tag">Axum</span></div>
+      </div>
+      <div class="c-brief">E2B 兼容的 REST API 网关</div>
+      <div class="chevron">▶</div>
+    </summary>
+    <div class="component-body">
+      <p>把 E2B SDK 调用转换为对 CubeMaster 的 HTTP 调用（<code>/cube/*</code>），处理鉴权回调与 E2B 生态兼容逻辑。框架为 Axum + tokio，路由层带 <code>TimeoutLayer</code>（普通 30s、snapshot 等长路由 240s）、CORS、压缩、请求 ID。</p>
+      <div class="row">
+        <div>
+          <b>关键文件</b>
+          <div class="file-list">
+            <div class="f">CubeAPI/src/main.rs</div>
+            <div class="f">src/routes.rs</div>
+            <div class="f">src/cubemaster/mod.rs</div>
+            <div class="f">src/services/{sandboxes,templates,snapshots,volumes}.rs</div>
+            <div class="f">src/middleware/{auth,rate_limit}.rs</div>
+          </div>
+        </div>
+        <div>
+          <b>核心职责</b>
+          <ul>
+            <li>E2B 兼容端点：<code>POST /sandboxes</code>、<code>GET|DELETE /sandboxes/:id</code>、<code>/logs</code>、<code>/timeout</code>、<code>/refreshes</code>、<code>/pause|/resume</code>、<code>/connect</code>、<code>/snapshots</code>、<code>/rollback</code>、<code>/templates*</code>、<code>/volumes*</code>。</li>
+            <li>环境变量黑名单校验（<code>FORBIDDEN_ENV_NAMES</code>，防 LD_PRELOAD / PYTHONPATH 注入）、出站域名校验。</li>
+            <li>错误映射：CubeMaster 130404 → 404、130409 → 409、130490（暂停中）→ 503 + Retry-After。</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </details>
+
+  <details class="component">
+    <summary>
+      <div class="c-logo" style="background:linear-gradient(135deg,#2563eb,#7c3aed)">M</div>
+      <div>
+        <div class="c-name">CubeMaster</div>
+        <div style="display:flex;gap:6px;margin-top:4px"><span class="tag go">Go</span><span class="tag">gin</span></div>
+      </div>
+      <div class="c-brief">集群级调度器与编排中枢</div>
+      <div class="chevron">▶</div>
+    </summary>
+    <div class="component-body">
+      <p>接收沙箱创建/销毁/暂停/恢复请求，依据资源可用性选择目标节点，通过 gRPC 将工作分发给 Cubelet，并把生命周期事件发布到 Redis Stream。持有节点/沙箱的本地缓存（localcache / instancecache）以支撑调度决策。</p>
+      <div class="row">
+        <div>
+          <b>关键文件</b>
+          <div class="file-list">
+            <div class="f">CubeMaster/cmd/cubemaster/app/main.go</div>
+            <div class="f">pkg/scheduler/{schedule,local,init}.go</div>
+            <div class="f">pkg/selector/{filter,score,postscore,backofffilter}/</div>
+            <div class="f">pkg/service/sandbox/sandbox_{run,remove,update,timeout,exec,migrate}.go</div>
+            <div class="f">pkg/service/httpservice/cube/cube.go</div>
+            <div class="f">pkg/cubelet/actions.go + grpcconn/</div>
+            <div class="f">pkg/lifecycle/{store,schema}.go</div>
+            <div class="f">pkg/task/export.go</div>
+          </div>
+        </div>
+        <div>
+          <b>调度流水线（pkg/scheduler）</b>
+          <ol style="padding-left:20px;color:var(--text-dim);font-size:13.5px">
+            <li><code>runPreFilter</code> 预选过滤</li>
+            <li><code>runFilter</code> 并行执行：cpufilter / memfilter / diskfilter / realtimecreatelimit / template_locality（模板快照所在节点优先）</li>
+            <li><code>runScoreFilter</code> 加权打分：affinityscore / imagescore / multifactorscore / realtimescore / asyncscore</li>
+            <li><code>LeastRandomSelect</code> 从高分节点随机挑选；失败时 <code>BackoffSelect</code> 兜底</li>
+            <li><code>local.go</code>：按 instance_type 维护缓冲队列 + 每 5s 动态调整节点创建/销毁并发上限</li>
+          </ol>
+        </div>
+      </div>
+      <div class="note"><strong>它本身不是 gRPC 服务端。</strong>gRPC 服务（CubeboxMgr / Images）由 Cubelet 实现；CubeMaster 通过 <code>pkg/cubelet/actions.go</code> 以客户端身份调用。调用方法：<code>Create</code> / <code>Destroy</code> / <code>List</code> / <code>Update</code> / <code>Exec</code> / <code>AppSnapshot</code> / <code>CommitSandbox</code> / <code>RollbackSandbox</code> 等。</div>
+    </div>
+  </details>
+
+  <details class="component">
+    <summary>
+      <div class="c-logo" style="background:linear-gradient(135deg,#14b8a6,#0ea5e9)">LM</div>
+      <div>
+        <div class="c-name">cube-lifecycle-manager（CLM）</div>
+        <div style="display:flex;gap:6px;margin-top:4px"><span class="tag go">Go</span></div>
+      </div>
+      <div class="c-brief">自动暂停 / 恢复的协调者</div>
+      <div class="chevron">▶</div>
+    </summary>
+    <div class="component-body">
+      <p>消费 CubeMaster 发布的 Redis Stream 生命周期事件，维护内存沙箱注册表；扫描空闲沙箱执行自动暂停/超时销毁，并把状态同步推送到所有 CubeProxy 副本；接收 CubeProxy 的恢复请求合并为单次 CubeMaster RPC。</p>
+      <div class="row">
+        <div>
+          <b>关键文件</b>
+          <div class="file-list">
+            <div class="f">cube-lifecycle-manager/cmd/cube-lifecycle-manager/main.go</div>
+            <div class="f">internal/redisstream/</div>
+            <div class="f">internal/registry/</div>
+            <div class="f">internal/sweeper/sweeper.go</div>
+            <div class="f">internal/resumer/resumer.go</div>
+            <div class="f">internal/statesync/</div>
+            <div class="f">internal/proxypush/ + discovery/</div>
+          </div>
+        </div>
+        <div>
+          <b>核心循环</b>
+          <ul>
+            <li><b>启动引导</b>：<code>HGETALL lifecycle:meta</code> 全量加载 → <code>XGROUP/XREADGROUP</code> 消费事件流增量。</li>
+            <li><b>自动暂停（sweeper）</b>：<code>idle = now − max(LastActiveMs, CreatedAt)</code> 超过 <code>timeout_seconds</code> 且 <code>auto_pause</code> → SETNX 状态锁 → 调 CubeMaster Pause → 广播 "paused"；否则超时 kill。</li>
+            <li><b>自动恢复（resumer）</b>：CubeProxy 遇 paused 沙箱 → <code>POST /internal/resume</code> → 并发合并 → CubeMaster Resume → 轮询等待 running → 回推 "running"。</li>
+            <li><b>状态同步</b>：消费 <code>OpState</code> 事件对账 Redis state 与 CubeProxy 状态。</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </details>
+
+  <details class="component">
+    <summary>
+      <div class="c-logo" style="background:linear-gradient(135deg,#eab308,#f97316)">DB</div>
+      <div>
+        <div class="c-name">CubeDB + Redis + WebUI</div>
+        <div style="display:flex;gap:6px;margin-top:4px"><span class="tag go">Go</span><span class="tag ts">React/TS</span></div>
+      </div>
+      <div class="c-brief">持久化 / 共享状态 / 控制台</div>
+      <div class="chevron">▶</div>
+    </summary>
+    <div class="component-body">
+      <div class="row">
+        <div>
+          <b>CubeDB（Go 共享库）</b>
+          <div class="file-list">
+            <div class="f">CubeDB/dao/ + driver/{mysql,postgres}</div>
+            <div class="f">CubeDB/migrate/（goose + SHA-256 指纹防篡改）</div>
+          </div>
+          <ul>
+            <li>被 CubeMaster 与 CubeOps 共享的 GORM 访问 + 迁移库；MySQL <code>GET_LOCK</code> 做集群级串行化。</li>
+            <li>迁移覆盖：AgentHub、节点组件版本、模板副本兼容、snapshot、volume、refresh_token、JWT secret 等。</li>
+          </ul>
+        </div>
+        <div>
+          <b>Redis 的角色（控制面唯一可信源）</b>
+          <ul>
+            <li>沙箱元数据 / 生命周期事件流（<code>cube:v1:shared:sandbox:lifecycle:*</code>）</li>
+            <li>CubeProxy 路由表（<code>cube:v1:shared:sandbox:proxy:*</code>）与节点指标</li>
+            <li>自动暂停/恢复所需的分布式锁（SETNX）</li>
+          </ul>
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <div>
+          <b>WebUI（web/，React 18 + Vite + TS + React Query + Zustand）</b>
+          <div class="file-list">
+            <div class="f">web/src/main.tsx</div>
+            <div class="f">src/lib/api.ts（api() → CubeAPI 根路径；ops() → /opsapi/v1）</div>
+            <div class="f">src/api/client.ts + generated/schema.ts（openapi-typescript）</div>
+            <div class="f">src/pages/（Overview / Sandboxes / Templates / Nodes / Versions / Network / AgentHub …）</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </details>
+
+  <h3>4.2 数据面</h3>
+
+  <details class="component">
+    <summary>
+      <div class="c-logo" style="background:linear-gradient(135deg,#10b981,#059669)">L</div>
+      <div>
+        <div class="c-name">Cubelet</div>
+        <div style="display:flex;gap:6px;margin-top:4px"><span class="tag go">Go</span><span class="tag">containerd 插件</span></div>
+      </div>
+      <div class="c-brief">节点本地调度 · 沙箱生命周期管家</div>
+      <div class="chevron">▶</div>
+    </summary>
+    <div class="component-body">
+      <p>管理单节点所有沙箱的完整生命周期（创建 → 运行 → 暂停 → 恢复 → 快照 → 销毁），以 containerd 插件形式注册（<code>io.cubelet.internal.v1.cubebox</code>），复用 containerd 的镜像/快照器/元数据。与 CubeCoW（cgo）完成 rootfs 与内存卷操作，与 network-agent 协作完成 TAP/网络策略。</p>
+      <div class="row">
+        <div>
+          <b>关键文件</b>
+          <div class="file-list">
+            <div class="f">Cubelet/services/cubebox/service.go（gRPC 服务端）</div>
+            <div class="f">services/cubebox/local.go（workflow.Flow 实现）</div>
+            <div class="f">services/cubebox/{update,exec,destroy}.go</div>
+            <div class="f">plugins/workflow/engine.go（流水线引擎）</div>
+            <div class="f">config/config.toml（workflow flows 定义）</div>
+            <div class="f">pkg/cubecow/cubecow.go（cgo 绑定）</div>
+            <div class="f">pkg/store/cubebox/cubebox.go（boltdb 状态机）</div>
+          </div>
+        </div>
+        <div>
+          <b>Workflow 流水线（config.toml 定义、Step 内 Action 并行）</b>
+          <pre>init:    cleanup → cubebox → images/storage/cgroup/network/volume/netfile/store
+create:  [createid, appsnapshot]
+         → [images, volume, storage, network, netfile, cube-sandbox-store]
+         → [cgroup] → [cubebox]
+destroy: [cubebox] → [images, storage, cgroup, network, volume, netfile, store] → [cleanup]</pre>
+          <b>暂停 / 恢复</b>：通过 containerd Task API <code>task.Pause / task.Resume</code>，实际 VM 暂停/恢复由 CubeShim 完成，失败时做 <code>reconcileStatusAfterPauseError</code>。
+        </div>
+      </div>
+    </div>
+  </details>
+
+  <details class="component">
+    <summary>
+      <div class="c-logo" style="background:linear-gradient(135deg,#8b5cf6,#6366f1)">S</div>
+      <div>
+        <div class="c-name">CubeShim</div>
+        <div style="display:flex;gap:6px;margin-top:4px"><span class="tag rust">Rust</span><span class="tag">Shim v2</span></div>
+      </div>
+      <div class="c-brief">containerd Shim v2 与 VM 之间的桥梁</div>
+      <div class="chevron">▶</div>
+    </summary>
+    <div class="component-body">
+      <p>实现 containerd Shim v2 接口（<code>TaskService</code>），负责沙箱资源准备（rootfs、内存文件、内核）、VM 启动/恢复、vsock 通信与自动暂停的原地快照。二进制名 <code>io.containerd.cube.rs</code>。</p>
+      <div class="row">
+        <div>
+          <b>关键文件</b>
+          <div class="file-list">
+            <div class="f">CubeShim/shim/src/service/task_srv.rs</div>
+            <div class="f">shim/src/service/srv.rs</div>
+            <div class="f">shim/src/sandbox/sb.rs</div>
+            <div class="f">shim/src/hypervisor/cube_hypervisor.rs</div>
+            <div class="f">shim/src/snapshot/cmd.rs</div>
+          </div>
+        </div>
+        <div>
+          <b>核心逻辑</b>
+          <ul>
+            <li><b>create</b>：加载 bundle spec → 未初始化则 <code>sb.create_sandbox()</code>（启动 VM、连接 agent）→ <code>sb.create_container()</code> → 发 <code>TaskCreate</code> 事件。</li>
+            <li><b>pause/resume</b>：仅支持 pod 级（校验 <code>pod_scope</code>）→ <code>sb.pause_vm()</code>（内存快照写盘到 <code>PAUSE_VM_SNAPSHOT_BASE</code>）→ <code>resume_vm()</code>。</li>
+            <li><b>状态机</b>：<code>SandBoxState::{Normal, Paused, Exited}</code>。</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </details>
+
+  <details class="component">
+    <summary>
+      <div class="c-logo" style="background:linear-gradient(135deg,#a855f7,#d946ef)">HV</div>
+      <div>
+        <div class="c-name">CubeHypervisor</div>
+        <div style="display:flex;gap:6px;margin-top:4px"><span class="tag rust">Rust</span><span class="tag">RustVMM + KVM</span></div>
+      </div>
+      <div class="c-brief">轻量级 VMM · MicroVM 生命周期</div>
+      <div class="chevron">▶</div>
+    </summary>
+    <div class="component-body">
+      <p>基于 Cloud Hypervisor 衍生改造，管理 MicroVM 生命周期：vCPU 配置、内存区域、virtio 设备（block / net / vsock / fs）、启动、暂停、快照与恢复。seccomp 加固、系统调用面最小化。CubeShim 以<strong>进程内库</strong>方式使用（<code>VmmInstance::new</code> + mpsc <code>ApiRequest</code>）。</p>
+      <div class="row">
+        <div>
+          <b>关键文件</b>
+          <div class="file-list">
+            <div class="f">hypervisor/src/lib.rs（VmmInstance 门面）</div>
+            <div class="f">hypervisor/vmm/src/api/mod.rs（ApiRequest 枚举）</div>
+            <div class="f">vmm/src/vm.rs（Migratable trait 实现）</div>
+            <div class="f">hypervisor/src/kvm/（KVM 后端 + TDX 支持）</div>
+            <div class="f">hypervisor/virtiofsd/ + devices/</div>
+          </div>
+        </div>
+        <div>
+          <b>ApiRequest 核心操作</b>
+          <div class="file-list">
+            <div class="f">VmCreate / VmBoot / VmDelete</div>
+            <div class="f">VmPauseToSnapshot(SnapshotConfig)</div>
+            <div class="f">VmResumeFromSnapshot(RestoreConfig)</div>
+            <div class="f">VmSnapshot / VmRestore / VmAddDevice / VmSetFs</div>
+            <div class="f">VmResize / VmShutdown / VmmShutdown / VmPowerButton</div>
+          </div>
+          <p style="color:var(--text-dim);font-size:13px">Vm 实现 <code>Migratable</code> trait：暂停 = 冻结 vCPU + 设备；快照 = 序列化状态（含软脏页 soft_dirty 支持，见 vm-migration/）。</p>
+        </div>
+      </div>
+    </div>
+  </details>
+
+  <details class="component">
+    <summary>
+      <div class="c-logo" style="background:linear-gradient(135deg,#0ea5e9,#06b6d4)">A</div>
+      <div>
+        <div class="c-name">guest agent（沙箱内）</div>
+        <div style="display:flex;gap:6px;margin-top:4px"><span class="tag rust">Rust</span><span class="tag">vsock ttRPC</span></div>
+      </div>
+      <div class="c-brief">沙箱内 init · 容器运行时</div>
+      <div class="chevron">▶</div>
+    </summary>
+    <div class="component-body">
+      <p>沙箱内首个进程（init），通过 vsock 暴露 ttRPC 服务，接收宿主侧（CubeShim）的沙箱/容器管理指令，内置基于 kata-rustjail 的容器运行时，可运行 OCI 容器（Agent 进程）。</p>
+      <div class="row">
+        <div>
+          <b>关键文件</b>
+          <div class="file-list">
+            <div class="f">agent/src/main.rs</div>
+            <div class="f">agent/src/rpc.rs（AgentService + HealthService）</div>
+            <div class="f">agent/src/sandbox.rs</div>
+            <div class="f">agent/rustjail/（OCI 运行时）</div>
+            <div class="f">agent/libs/protocols/protos/agent.proto</div>
+          </div>
+        </div>
+        <div>
+          <b>ttRPC 接口（agent.proto）</b>
+          <ul>
+            <li>沙箱级：<code>CreateSandbox / DestroySandbox</code></li>
+            <li>容器级：<code>CreateContainer / StartContainer / ExecProcess / SignalProcess / WaitProcess / PauseContainer / ResumeContainer</code></li>
+            <li>流式 IO：<code>WriteStdin / ReadStdout / ReadStderr</code></li>
+            <li>网络：<code>UpdateInterface / UpdateRoutes / AddARPNeighbors</code></li>
+            <li>其他：<code>GetOOMEvent（OOM 监控）</code>、<code>OnlineCPUMem</code>、<code>ResizeVolume</code>、<code>CopyFile</code> 等</li>
+          </ul>
+          <div class="note">就绪通知：x86 用 I/O port <code>0x680</code>，aarch64 用 MMIO <code>0x0903_0000</code> 通知宿主侧 agent 已就绪。</div>
+        </div>
+      </div>
+    </div>
+  </details>
+
+  <details class="component">
+    <summary>
+      <div class="c-logo" style="background:linear-gradient(135deg,#f59e0b,#ef4444)">CoW</div>
+      <div>
+        <div class="c-name">CubeCoW</div>
+        <div style="display:flex;gap:6px;margin-top:4px"><span class="tag rust">Rust</span><span class="tag">XFS reflink</span></div>
+      </div>
+      <div class="c-brief">O(1) 快照 / 克隆存储引擎</div>
+      <div class="chevron">▶</div>
+    </summary>
+    <div class="component-body">
+      <p>精简配置卷管理库，通过内核 <code>FICLONE</code> ioctl 在 XFS (reflink) 上实现 O(1) 快照与克隆。对外暴露 C ABI，由 Cubelet 经 cgo 调用。</p>
+      <div class="row">
+        <div>
+          <b>关键文件</b>
+          <div class="file-list">
+            <div class="f">cubecow/src/ffi.rs（C ABI）</div>
+            <div class="f">cubecow/src/engine/reflink.rs（ReflinkEngine）</div>
+            <div class="f">cubecow/include/cubecow.h</div>
+          </div>
+        </div>
+        <div>
+          <b>核心能力</b>
+          <ul>
+            <li>快照仅为元数据操作（共享 extent，零字节拷贝），扁平模型——删除任一快照不影响其他快照。</li>
+            <li>增量脏页追踪：快照仅持久化自上次快照以来的匿名（脏）内存页，未变更页继续 reflink 共享。</li>
+            <li>API：<code>create_volume / delete_volume / resize_volume / create_snapshot / activate_volume / list_snapshots / get_metrics</code>。</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </details>
+
+  <details class="component">
+    <summary>
+      <div class="c-logo" style="background:linear-gradient(135deg,#22c55e,#0d9488)">VS</div>
+      <div>
+        <div class="c-name">CubeVS（CubeNet）</div>
+        <div style="display:flex;gap:6px;margin-top:4px"><span class="tag c">eBPF</span><span class="tag go">Go</span></div>
+      </div>
+      <div class="c-brief">内核态虚拟交换机 · 沙箱网络隔离</div>
+      <div class="chevron">▶</div>
+    </summary>
+    <div class="component-body">
+      <p>三个挂在内核数据路径关键位置的 BPF 程序取代整条传统网络栈（无 iptables、无 Linux Bridge、无 OVS）：</p>
+      <div class="row">
+        <div>
+          <b>关键文件</b>
+          <div class="file-list">
+            <div class="f">CubeNet/src/mvmtap.bpf.c（from_cube）</div>
+            <div class="f">CubeNet/src/nodenic.bpf.c（from_world）</div>
+            <div class="f">CubeNet/src/localgw.bpf.c（from_envoy）</div>
+            <div class="f">CubeNet/cubevs/{cubevs,netpolicy,tap,snat,port,reaper}.go</div>
+          </div>
+        </div>
+        <div>
+          <b>三个程序</b>
+          <ul>
+            <li><code>from_cube</code>（TAP TC ingress）：策略检查、DNS 拦截、SNAT、会话创建、ARP 代理。</li>
+            <li><code>from_world</code>（宿主机网卡 TC ingress）：反向 NAT、端口映射、DNS 响应学习。</li>
+            <li><code>from_envoy</code>（cube-dev TC egress）：DNAT 到沙箱、透明代理回包、就绪探测。</li>
+          </ul>
+          <b>Go 控制面（cubevs/）</b>：Init 注入宿主常量并固定 Map；AddTAPDevice / AttachFilter / SetSNATIPs / AddPortMapping；后台回收器清理过期会话与 DNS 学习条目。
+        </div>
+      </div>
+      <div class="note"><strong>网络策略评估顺序</strong>：目标为沙箱网关（169.254.68.5）→ 放行；<code>allow_out_v2</code> 命中 → 放行；<code>deny_out</code> 命中 → 丢弃；否则默认放行。<strong>始终拒绝</strong>私网/链路本地段（10/8、127/8、169.254/16、172.16/12、192.168/16）。详情见第 08 节。</div>
+    </div>
+  </details>
+
+  <details class="component">
+    <summary>
+      <div class="c-logo" style="background:linear-gradient(135deg,#84cc16,#0ea5e9)">NA</div>
+      <div>
+        <div class="c-name">network-agent</div>
+        <div style="display:flex;gap:6px;margin-top:4px"><span class="tag go">Go</span><span class="tag">SCM_RIGHTS</span></div>
+      </div>
+      <div class="c-brief">节点网络编排 · TAP 直通</div>
+      <div class="chevron">▶</div>
+    </summary>
+    <div class="component-body">
+      <p>提供 gRPC <code>NetworkAgent</code> 服务，向 Cubelet 提供网络能力：TAP 设备生命周期（经 fdserver 用 unix socket + SCM_RIGHTS 把 TAP fd 直传给 hypervisor）、IPAM、主机路由/邻居配置（cube-router）、eBPF 策略下发与 CubeEgress 规则同步。</p>
+      <div class="row">
+        <div>
+          <b>关键文件</b>
+          <div class="file-list">
+            <div class="f">network-agent/api/v1/network_agent.proto</div>
+            <div class="f">internal/service/local_service.go</div>
+            <div class="f">internal/service/tap_lifecycle.go</div>
+            <div class="f">internal/fdserver/</div>
+            <div class="f">internal/cubeegress/cubeegress_push.go</div>
+          </div>
+        </div>
+        <div>
+          <b>gRPC 接口</b>
+          <ul>
+            <li><code>EnsureNetwork</code>（幂等：interfaces / routes / arp / port_mappings / CubeNetworkConfig）</li>
+            <li><code>ReleaseNetwork / ReconcileNetwork / GetNetwork / ListNetworks / Health</code></li>
+          </ul>
+          <b>CubeNetworkConfig</b>：<code>allow_internet_access</code>、<code>allow_out</code>/<code>deny_out</code> CIDR、<code>rules[]</code>（L7 egress：EgressRule{name, match{sni,host,method,path,scheme}, action{allow,audit,inject{header,secret,format}}}）。
+        </div>
+      </div>
+    </div>
+  </details>
+
+  <details class="component">
+    <summary>
+      <div class="c-logo" style="background:linear-gradient(135deg,#ec4899,#f43f5e)">P</div>
+      <div>
+        <div class="c-name">CubeProxy</div>
+        <div style="display:flex;gap:6px;margin-top:4px"><span class="tag lua">OpenResty + Lua</span></div>
+      </div>
+      <div class="c-brief">反向代理 · 请求路由到沙箱</div>
+      <div class="chevron">▶</div>
+    </summary>
+    <div class="component-body">
+      <p>反向代理与请求路由组件，兼容 E2B 协议，把请求路由到对应沙箱。通过 Redis 注册表实时发现（由 CLM 推送 meta/state），支持多副本、零静态配置。</p>
+      <div class="row">
+        <div>
+          <b>关键文件</b>
+          <div class="file-list">
+            <div class="f">CubeProxy/nginx.conf（8081 http / 8080 https + 8082 admin）</div>
+            <div class="f">lua/rewrite_phase.lua（Host 模式）</div>
+            <div class="f">lua/path_rewrite_phase.lua（Path 模式）</div>
+            <div class="f">lua/sandbox_backend.lua（后端解析）</div>
+            <div class="f">lua/sandbox_state.lua（自动恢复门禁）</div>
+          </div>
+        </div>
+        <div>
+          <b>两种路由模式</b>
+          <ul>
+            <li><b>Host 模式</b>：从 Host 头解析 <code>&lt;port&gt;-&lt;sandbox_id&gt;.&lt;domain&gt;</code> → resolve_backend 查后端 IP/端口 → 渲染 maskRequestHost（envd 49983 豁免）→ balancer 选上游。</li>
+            <li><b>Path 模式</b>：<code>/sandbox/&lt;id&gt;/&lt;port&gt;/&lt;rest&gt;</code>，保留前缀（proxy_redirect / proxy_cookie_path / X-Forwarded-Prefix）。</li>
+            <li><b>自动恢复门禁</b>（sandbox_state.lua）：rewrite 阶段查状态字典——<code>paused</code> → 捕获子请求触发 CLM 恢复并阻塞等待；<code>pausing</code> → 503 Retry-After；<code>killing/killed</code> → 410。</li>
+            <li>envd 流式端点白名单（Process/Start|Connect、Filesystem/WatchDir）关闭缓冲。</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </details>
+
+  <details class="component">
+    <summary>
+      <div class="c-logo" style="background:linear-gradient(135deg,#f97316,#dc2626)">EG</div>
+      <div>
+        <div class="c-name">CubeEgress</div>
+        <div style="display:flex;gap:6px;margin-top:4px"><span class="tag lua">OpenResty + Lua</span><span class="tag">TPROXY</span></div>
+      </div>
+      <div class="c-brief">透明 L7 出向安全代理</div>
+      <div class="chevron">▶</div>
+    </summary>
+    <div class="component-body">
+      <p>部署在每台主机上的透明 L7 出网代理，通过 TPROXY 拦截每一个出站 HTTP/HTTPS 请求：域名过滤、凭据注入、访问审计。沙箱信任 CubeEgress 签发的根 CA（预置于模板），实现透明 TLS 检查。</p>
+      <div class="row">
+        <div>
+          <b>关键文件</b>
+          <div class="file-list">
+            <div class="f">CubeEgress/nginx.conf（transparent listen）</div>
+            <div class="f">lua/access_phase.lua（决策 + 注入主逻辑）</div>
+            <div class="f">lua/policy.lua（shared_dict 策略存储）</div>
+            <div class="f">lua/admin.lua（/admin/v1/ 管理 API）</div>
+            <div class="f">lua/cert_signer.lua（动态叶子证书）</div>
+          </div>
+        </div>
+        <div>
+          <b>核心机制</b>
+          <ul>
+            <li><b>TPROXY</b>：nginx 补丁为 <code>listen</code> 增加 <code>transparent</code> 关键字（IP_TRANSPARENT），accept 后用 getsockname() 取真实目的地址。</li>
+            <li><b>决策</b>（access_phase.lua <code>_M.decide</code>）：按 sandbox_ip 查策略，规则首匹配生效（sni/host/method/path/scheme）；bootstrap 未就绪默认拒绝（fail-closed）。</li>
+            <li><b>凭据注入</b>：<code>inject{header, secret, format}</code> 写入请求头（先 clear_header 防伪造），审计只记 secret_ref 指纹。</li>
+            <li><b>动态证书</b>：ssl_certificate_by_lua_block 用根 CA 按 SNI+目的 IP 签发叶子证书；上游 proxy_ssl_verify on。</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </details>
+
+</section>
+
+<!-- ================= 5 请求链路 ================= -->
+<section id="request-flow">
+  <div class="section-title"><span class="num">05</span> 一次 Sandbox.create() 的完整请求链路</div>
+  <p class="section-sub">从 SDK 调用到沙箱就绪，请求依次穿过控制面与数据面的每一层。同步路径只到"调度完成"，沙箱实际就绪通过生命周期事件异步确认。</p>
+
+  <div class="flow-step">
+    <div class="bubble">1</div>
+    <div class="content">
+      <div class="who">Client / SDK</div>
+      <div class="what">POST /sandboxes（兼容 E2B）</div>
+      <div class="detail">携带 template、timeout、lifecycle（on_timeout / auto_resume）、env_vars、network 等参数。</div>
+    </div>
+  </div>
+  <div class="flow-step">
+    <div class="bubble">2</div>
+    <div class="content">
+      <div class="who">CubeAPI（Rust/Axum）</div>
+      <div class="what">鉴权 + 参数校验 → HTTP 转发 CubeMaster</div>
+      <div class="detail">中间件做鉴权回调与限流；<code>services/sandboxes.rs</code> 校验环境变量黑名单、出站域名；错误映射 130404→404 / 130409→409 / 130490→503。</div>
+    </div>
+  </div>
+  <div class="flow-step">
+    <div class="bubble">3</div>
+    <div class="content">
+      <div class="who">CubeMaster（Go）</div>
+      <div class="what">调度器选择目标节点</div>
+      <div class="detail"><code>pkg/service/sandbox/sandbox_run.go</code> 触发 <code>scheduler.Select</code>：预选 → 并行 filter（cpu/mem/disk/实时创建上限/模板本地性）→ 加权打分 → 随机挑选；失败走 BackoffSelect。本地缓存（localcache/instancecache）提供节点与模板分布数据。</div>
+    </div>
+  </div>
+  <div class="flow-step">
+    <div class="bubble">4</div>
+    <div class="content">
+      <div class="who">CubeMaster → Cubelet（gRPC）</div>
+      <div class="what">RunCubeSandbox</div>
+      <div class="detail"><code>pkg/cubelet/actions.go</code> 经连接池（grpcconn）发起 <code>CubeboxMgr.Create</code>，请求携带 volumes、containers、exposed_ports、runtime_handler、instance_type、network_type、cube_network_config（L7 出站规则）。</div>
+    </div>
+  </div>
+  <div class="flow-step">
+    <div class="bubble">5</div>
+    <div class="content">
+      <div class="who">Cubelet（Go）</div>
+      <div class="what">Workflow：prepare rootfs → 交给 containerd</div>
+      <div class="detail"><code>services/cubebox/local.go</code> 驱动 workflow：createid 分配 → CubeCoW 从模板卷克隆 rootfs（FICLONE）与内存快照 → storage/cgroup/network 准备 → <code>containerd.NewContainer</code> + <code>WithRuntime(io.containerd.cube.rs)</code> 创建容器 → Task 启动驱动 shim。</div>
+    </div>
+  </div>
+  <div class="flow-step">
+    <div class="bubble">6</div>
+    <div class="content">
+      <div class="who">CubeShim（Rust，Shim v2）</div>
+      <div class="what">Create + Start → 启动 VM</div>
+      <div class="detail"><code>task_srv.rs</code> 收到 containerd Task 请求 → <code>sb.create_sandbox()</code>：<code>launch_vmm</code>（hypervisor 库启动 VMM 线程）→ <code>create_vm</code> + <code>restore_vm</code>（从模板内存快照恢复）→ 连接 guest agent → agent.create_sandbox → watch_oom / monitor_vm。vsock 就绪后回 Task 已启动。</div>
+    </div>
+  </div>
+  <div class="flow-step">
+    <div class="bubble">7</div>
+    <div class="content">
+      <div class="who">Cubelet → network-agent → CubeVS / CubeEgress</div>
+      <div class="what">AddTAPDevice + AttachFilter + 策略下发</div>
+      <div class="detail">network-agent 创建/直通 TAP fd（SCM_RIGHTS），CubeVS 注册 TAP 并挂 from_cube TC 过滤器；把 allow/deny/DNS 域名推入 eBPF Map；L7 egress 规则推送到 CubeEgress admin API。</div>
+    </div>
+  </div>
+  <div class="flow-step">
+    <div class="bubble">8</div>
+    <div class="content">
+      <div class="who">CubeMaster → Redis → CLM → CubeProxy</div>
+      <div class="what">发布生命周期事件，注册路由，返回结果</div>
+      <div class="detail">CubeMaster <code>pkg/lifecycle/store.go</code> 写 meta（HSET）+ <code>XADD events</code>；CLM 消费后把 sandbox 路由/状态推送给所有 CubeProxy；最终 201 返回 sandbox_id 与元数据给客户端。CubeProxy 路由表就绪后，客户端即可通过 <code>&lt;port&gt;-&lt;sandbox_id&gt;.&lt;domain&gt;</code> 或 <code>/sandbox/&lt;id&gt;/&lt;port&gt;</code> 访问沙箱内服务。</div>
+    </div>
+  </div>
+
+  <div class="note warn"><strong>执行链路（数据面）</strong>：沙箱内代码执行时，agent（vsock ttRPC）接收宿主侧 ExecProcess/流式 IO 指令，运行 OCI 容器；沙箱进程的 IO 经 virtio + agent 流式转发回 CubeProxy/客户端。</div>
+</section>
+
+<!-- ================= 6 生命周期 ================= -->
+<section id="lifecycle">
+  <div class="section-title"><span class="num">06</span> 沙箱状态机与自动暂停 / 恢复</div>
+  <p class="section-sub">沙箱是系统的核心运行单元。五个状态 + 两个驱动参数（timeout 与 on_timeout）构成完整的生命周期管理。CLM 是自动化的中枢。</p>
+
+  <div class="state-machine">
+    <div class="state running">running<small>运行中 · 占用 CPU/内存</small></div>
+    <div class="trans"><b>timeout & on_timeout=pause</b><br>（空闲超时）</div>
+    <div class="state pausing">pausing<small>瞬时 · 保存 VM 快照中</small></div>
+    <div class="trans"><b>快照完成</b></div>
+    <div class="state paused">paused<small>内存落盘 · 零 CPU/内存占用</small></div>
+  </div>
+  <div class="state-machine" style="margin-top:0">
+    <div class="state running">running</div>
+    <div class="trans"><b>timeout & on_timeout=kill</b><br>或显式 kill()</div>
+    <div class="state terminated">terminated<small>不可恢复</small></div>
+    <div class="trans"></div>
+    <div class="state paused">paused</div>
+    <div class="trans"><b>kill() / DELETE</b><br>（内部先恢复再销毁）</div>
+    <div class="state terminated">terminated</div>
+  </div>
+
+  <h3>自动暂停 / 恢复的完整时序</h3>
+  <div class="flow-step">
+    <div class="bubble">1</div>
+    <div class="content">
+      <div class="who">CubeMaster</div>
+      <div class="what">创建沙箱时登记生命周期 meta</div>
+      <div class="detail">写 <code>HSET cube:v1:shared:sandbox:lifecycle:meta</code>（timeout_seconds / auto_pause / auto_resume）+ <code>XADD events</code>。CLM 启动时 HGETALL 全量引导 registry，之后 XREADGROUP 增量消费。</div>
+    </div>
+  </div>
+  <div class="flow-step">
+    <div class="bubble">2</div>
+    <div class="content">
+      <div class="who">CLM · sweeper</div>
+      <div class="what">扫描空闲沙箱，触发自动暂停 / 超时销毁</div>
+      <div class="detail"><code>idle = now − max(LastActiveMs, CreatedAt)</code>；<code>auto_pause=true</code> → tryPause（SETNX 状态锁防并发 → 通知 CubeProxy → CubeMaster Pause RPC → 写 paused 并广播）；否则超时 kill（KillReasonTimeout）。BootstrapWarmup 防止重启误暂停。</div>
+    </div>
+  </div>
+  <div class="flow-step">
+    <div class="bubble">3</div>
+    <div class="content">
+      <div class="who">CubeMaster → Cubelet → CubeShim</div>
+      <div class="what">执行暂停（内存快照落盘）</div>
+      <div class="detail">Cubelet <code>task.Pause</code> → shim <code>sb.pause_vm()</code>：把 VM 内存写快照到 <code>PAUSE_VM_SNAPSHOT_BASE/{id}</code>，随后 <code>VmPauseToSnapshot</code>。paused 状态物理上释放 CPU/内存。</div>
+    </div>
+  </div>
+  <div class="flow-step">
+    <div class="bubble">4</div>
+    <div class="content">
+      <div class="who">CubeProxy（数据面）</div>
+      <div class="what">请求到达 paused 沙箱 → 触发恢复</div>
+      <div class="detail">rewrite 阶段查状态字典发现 paused → 捕获子请求 <code>/_sidecar_resume</code> → CLM resumer：并发合并为单次 <code>callCubeMasterResume</code> → <code>waitForRunning</code>（轮询状态）→ 回推 running 给 CubeProxy → 阻塞中的请求继续转发，客户端无感知。</div>
+    </div>
+  </div>
+  <div class="flow-step">
+    <div class="bubble">5</div>
+    <div class="content">
+      <div class="who">CubeShim</div>
+      <div class="what">从快照恢复 VM</div>
+      <div class="detail"><code>sb.resume_vm()</code> → <code>VmResumeFromSnapshot</code>；恢复成功后获得全新 timeout 计时窗口（"恢复 → 使用 → 再次空闲 → 再次暂停"循环无缝持续）。</div>
+    </div>
+  </div>
+
+  <div class="note"><strong>删除 paused 沙箱</strong>：DELETE 会先在内部恢复运行时状态（最多 5 秒预算）再走正常销毁，不触发 resumed 生命周期事件；失败返回 409（资源准入）/ 503（操作未完成，带 Retry-After）。</div>
+  <div class="note"><strong>暂停资源释放（quota.paused_resource_release_ratio）</strong>：默认 0 = 暂停沙箱保留完整调度配额（恢复必有保障）；=1 全部释放（最大化密度、恢复尽力而为）；0~1 之间折中。节点级配置在 <code>Cubelet/config/config.toml</code>。恢复时触发本地实时准入检查，不满足返回 409 带配额诊断。</div>
+</section>
+
+<!-- ================= 7 存储 ================= -->
+<section id="storage">
+  <div class="section-title"><span class="num">07</span> 存储逻辑：CubeCoW 快照引擎</div>
+  <p class="section-sub">所有 rootfs 与内存卷操作（创建、克隆、快照、删除）由 Cubelet 通过 CubeCoW 完成。核心是内核 FICLONE 提供的 O(1) reflink 语义。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>阶段</th><th>做什么</th><th>技术</th></tr></thead>
+      <tbody>
+        <tr><td><b>模板创建</b></td><td>OCI 镜像 → Buildkit → rootfs + 冷启动一次 → 内存快照 → 注册为模板（只读基础）</td><td>Buildkit + CubeCoW</td></tr>
+        <tr><td><b>沙箱启动</b></td><td>Cubelet 克隆模板的 rootfs 与内存卷（O(1) 零拷贝），CubeShim 从内存快照恢复 VM</td><td><code>FICLONE</code> + <code>restore_vm</code></td></tr>
+        <tr><td><b>增量快照</b></td><td>仅写入匿名（脏）内存页，未变更页 reflink 共享上一快照</td><td>脏页追踪 + reflink</td></tr>
+        <tr><td><b>回滚 / 克隆</b></td><td>回滚 = 丢弃当前状态挂载历史快照；克隆 = 从任意快照 fork 出独立环境（分叉探索）</td><td><code>RollbackSandbox</code> / <code>CommitSandbox</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <pre>模板（只读基础）
+  └── FICLONE ──→ 沙箱 rootfs 卷 (CoW)
+                      ├── FICLONE ──→ 快照 A
+                      ├── FICLONE ──→ 快照 B（只存脏页）
+                      └── FICLONE ──→ 克隆 1、克隆 2、…（可从任意快照 fork）</pre>
+
+  <div class="grid">
+    <div class="card"><h4>扁平快照模型</h4><p>快照之间无依赖链，删除任一快照不影响其他快照，crash-safe 且可独立挂载。</p></div>
+    <div class="card"><h4>应用层快照（AppSnapshot）</h4><p>Cubelet 提供 <code>AppSnapshot</code> RPC：创建沙箱 → 运行到目标状态 → 截图（内存+文件系统）→ 销毁，产物即新的模板/快照。</p></div>
+    <div class="card"><h4>Volume 框架</h4><p>兼容 E2B 标准；允许以插件形式自定义后端存储（CubeMaster <code>pkg/volume/plugin/{binary,rpc}</code> + refcount），Volume 独立生命周期、可跨沙箱共享。</p></div>
+    <div class="card"><h4>运行中快照</h4><p><code>CommitSandbox</code> 对运行中沙箱打快照，<code>RollbackSandbox</code> 回滚到任意已提交快照（CubeShim rollback_vm：VmDelete + VmResumeFromSnapshot，避免写盘）。</p></div>
+  </div>
+</section>
+
+<!-- ================= 8 网络 ================= -->
+<section id="network">
+  <div class="section-title"><span class="num">08</span> 网络逻辑</div>
+  <p class="section-sub">三层网络栈：CubeVS（内核态转发与策略）、CubeEgress（L7 出向安全）、CubeProxy（L7 入向路由）。整个数据面无 iptables / 无网桥 / 无 OVS。</p>
+
+  <h3>8.1 出站流量路径（沙箱 → 外部）</h3>
+  <div class="flow-step">
+    <div class="bubble">1</div>
+    <div class="content"><div class="who">沙箱进程</div><div class="what">发送报文，源 IP = 169.254.68.6（固定内部地址）</div><div class="detail">默认网关 169.254.68.5 由 from_cube 现场构造 ARP 应答（ARP 代理）。</div></div>
+  </div>
+  <div class="flow-step">
+    <div class="bubble">2</div>
+    <div class="content"><div class="who">from_cube（TAP TC ingress）</div><div class="what">策略 → 网关 → SNAT → 会话</div>
+      <div class="detail">目标为网关 → 重定向 cube-dev 交宿主机协议栈；被策略标记需 L7 检查的流量 → 重定向 cube-dev 走 CubeEgress；否则：策略评估 → DNS 拦截（域名规则学习）→ 创建/更新会话（egress_sessions + ingress_sessions）→ SNAT（jhash(sandbox_ip) % 4 确定性选 IP，端口从 30000 起水位线分配，自旋锁防碰撞）→ 重定向到宿主机网卡。</div>
+    </div>
+  </div>
+  <div class="flow-step">
+    <div class="bubble">3</div>
+    <div class="content"><div class="who">CubeEgress（L7，可选路径）</div><div class="what">透明代理：域名过滤 + 凭据注入 + 审计</div>
+      <div class="detail">TPROXY 监听 192.168.0.1:8080/8443（transparent），决策规则首匹配（sni/host/method/path/scheme），未就绪 fail-closed；通过 ssl_certificate_by_lua 按 SNI 动态签发叶子证书完成 TLS 检查；响应经 cube-dev（from_envoy 保留真实远端源 IP）回到沙箱。</div>
+    </div>
+  </div>
+
+  <h3>8.2 入站流量路径（外部 → 沙箱）</h3>
+  <div class="flow-step">
+    <div class="bubble">1</div>
+    <div class="content"><div class="who">from_world（宿主机网卡 TC ingress）</div><div class="what">会话反向 NAT / 端口映射</div>
+      <div class="detail">查 ingress_sessions 命中 → 重建沙箱侧五元组反向 DNAT → 重定向 TAP；未命中则查 remote_port_mapping[host_port] → DNAT 到沙箱监听端口。</div>
+    </div>
+  </div>
+  <div class="flow-step">
+    <div class="bubble">2</div>
+    <div class="content"><div class="who">CubeProxy（L7 路由）</div><div class="what">把对 <code>&lt;port&gt;-&lt;sandbox_id&gt;</code> 的访问路由到沙箱后端</div>
+      <div class="detail">Host 模式解析 Host 头，Path 模式解析 <code>/sandbox/&lt;id&gt;/&lt;port&gt;/</code>；结合状态门禁支持自动恢复、503 Retry-After、410 Gone。</div>
+    </div>
+  </div>
+
+  <h3>8.3 会话跟踪与 DNS 学习</h3>
+  <div class="grid">
+    <div class="card"><h4>双 Map 会话跟踪</h4><p>egress_sessions（沙箱侧五元组 → 完整 NAT 状态）与 ingress_sessions（外部侧五元组 → 反向重建）。TCP 11 状态机按协议状态调整超时（ESTABLISHED 3h，SYN_SENT 1min…）；Go 回收器每 5s 清理，占用超 80% 告警。</p></div>
+    <div class="card"><h4>DNS 学习式域名策略</h4><p>from_cube 拦截查询（dns_allow LPM 精确/通配匹配 + dns_query_track 记录）；from_world 在响应时提取 A 记录写入 allow_out_v2（TTL 过期）。仅当沙箱配置域名规则才开启（dns_policy_flags 总闸门），否则零开销。</p></div>
+    <div class="card"><h4>端口分段规划</h4><p>10000–19999 宿主机临时端口；20000–29999 CubeProxy 访问沙箱端口；30000–65535 SNAT 源端口。避免子系统间冲突。</p></div>
+    <div class="card"><h4>策略优先级</h4><p>网关 > allow_out_v2 > deny_out > 默认放行；始终拒绝私网/链路本地段。LPM-trie 线速执行，每沙箱 Hash-of-Maps 隔离，更新不干扰他人。</p></div>
+  </div>
+</section>
+
+<!-- ================= 9 接口 ================= -->
+<section id="interfaces">
+  <div class="section-title"><span class="num">09</span> 组件间接口与协议</div>
+  <p class="section-sub">系统是多协议栈的：HTTP / gRPC / containerd ttRPC / vsock ttRPC / 进程内 mpsc / cgo / eBPF Map / Redis。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>接口</th><th>协议</th><th>定义位置</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td>Client → CubeAPI</td><td>HTTP/JSON（E2B 兼容 REST）</td><td><code>openapi.yml</code> + <code>CubeAPI/src/routes.rs</code></td><td>/sandboxes、/templates、/volumes、/snapshots…</td></tr>
+        <tr><td>CubeAPI → CubeMaster</td><td>HTTP/JSON</td><td><code>CubeAPI/src/cubemaster/mod.rs</code></td><td>/cube/sandbox*、/cube/snapshot*、/cube/template*、/cube/volume*</td></tr>
+        <tr><td>CubeMaster → Cubelet</td><td>gRPC</td><td><code>CubeMaster/api/services/cubebox/v1/cubebox.proto</code></td><td>CubeboxMgr.Create/Destroy/List/Update/Exec/AppSnapshot/CommitSandbox/RollbackSandbox…</td></tr>
+        <tr><td>CubeMaster → Cubelet</td><td>gRPC</td><td><code>CubeMaster/api/services/images/v1/images.proto</code></td><td>Images.CreateImage/ListImages/DestroyImage/VolumeUtils</td></tr>
+        <tr><td>Cubelet → CubeShim</td><td>containerd Shim v2（ttRPC）</td><td>containerd API + <code>CubeShim/shim/src/service/task_srv.rs</code></td><td>Create/Start/Pause/Resume/Exec…（运行时 io.containerd.cube.rs）</td></tr>
+        <tr><td>CubeShim → CubeHypervisor</td><td>进程内 mpsc</td><td><code>hypervisor/vmm/src/api/mod.rs</code></td><td>ApiRequest / ApiResponse 通道</td></tr>
+        <tr><td>CubeShim → guest agent</td><td>ttRPC over vsock</td><td><code>agent/libs/protocols/protos/agent.proto</code></td><td>CreateSandbox/ExecProcess/流式 IO/GetOOMEvent…</td></tr>
+        <tr><td>Cubelet → CubeCoW</td><td>cgo / C ABI</td><td><code>cubecow/include/cubecow.h</code> + <code>Cubelet/pkg/cubecow/cubecow.go</code></td><td>cubecow_init / create_snapshot / activate_volume…</td></tr>
+        <tr><td>Cubelet → network-agent</td><td>gRPC + SCM_RIGHTS</td><td><code>network-agent/api/v1/network_agent.proto</code> + fdserver</td><td>EnsureNetwork/ReleaseNetwork + TAP fd 直通</td></tr>
+        <tr><td>network-agent → CubeVS</td><td>eBPF Map（bpffs）</td><td><code>CubeNet/cubevs/</code></td><td>写 allow/deny/DNS 策略、会话管理</td></tr>
+        <tr><td>network-agent → CubeEgress</td><td>HTTP admin</td><td><code>CubeEgress/lua/admin.lua</code></td><td>/admin/v1/policy Put/Delete（L7 egress 规则）</td></tr>
+        <tr><td>CubeMaster → Redis</td><td>RESP</td><td><code>CubeMaster/pkg/base/rediskey</code></td><td>meta/events/proxy/state/分布式锁</td></tr>
+        <tr><td>CubeMaster → CLM</td><td>Redis Stream</td><td><code>CubeMaster/pkg/lifecycle/schema.go</code></td><td>XADD events（op: create/delete/update/state）</td></tr>
+        <tr><td>CLM → CubeProxy</td><td>HTTP admin（loopback）</td><td><code>CubeProxy/lua/admin_phase.lua</code></td><td>/admin/meta/upsert、/admin/state、/admin/last_active</td></tr>
+        <tr><td>CubeProxy → CLM</td><td>HTTP（数据面子请求）</td><td><code>cube-lifecycle-manager/internal/httpapi</code></td><td>POST /internal/resume（触发自动恢复）</td></tr>
+        <tr><td>CLM → CubeMaster</td><td>HTTP</td><td><code>cube-lifecycle-manager/internal/cubemasterclient</code></td><td>Pause / Resume</td></tr>
+        <tr><td>WebUI → CubeAPI / CubeOps</td><td>HTTP</td><td><code>web/src/lib/api.ts</code></td><td>根路径 E2B API + /opsapi/v1</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ================= 10 源码索引 ================= -->
+<section id="source-map">
+  <div class="section-title"><span class="num">10</span> 关键源码文件索引</div>
+  <p class="section-sub">想深入某个子系统时，从这里开始读代码。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>关注点</th><th>入口文件</th></tr></thead>
+      <tbody>
+        <tr><td>沙箱创建控制流</td><td><code>CubeMaster/pkg/service/sandbox/sandbox_run.go</code> → <code>Cubelet/services/cubebox/local.go</code> → <code>CubeShim/shim/src/sandbox/sb.rs</code> → <code>hypervisor/vmm/src/vm.rs</code></td></tr>
+        <tr><td>调度器</td><td><code>CubeMaster/pkg/scheduler/schedule.go</code>、<code>pkg/scheduler/local.go</code>、<code>pkg/selector/filter/</code>、<code>pkg/selector/score/</code></td></tr>
+        <tr><td>暂停 / 恢复 / 回滚</td><td><code>Cubelet/services/cubebox/update.go</code>、<code>CubeShim/shim/src/sandbox/sb.rs</code>（pause_vm/resume_vm/rollback_vm）、<code>hypervisor/vmm/src/vm.rs</code>（Migratable）</td></tr>
+        <tr><td>生命周期事件</td><td><code>CubeMaster/pkg/lifecycle/{store,schema,init}.go</code>；消费端 <code>cube-lifecycle-manager/internal/{redisstream,sweeper,resumer,proxypush}</code></td></tr>
+        <tr><td>快照与克隆</td><td><code>cubecow/src/engine/reflink.rs</code>、<code>cubecow/src/ffi.rs</code>、<code>Cubelet/plugins/storage/</code>、<code>Cubelet/services/cubebox/appsnapshot.go</code></td></tr>
+        <tr><td>eBPF 数据面</td><td><code>CubeNet/src/mvmtap.bpf.c</code>、<code>CubeNet/src/nodenic.bpf.c</code>、<code>CubeNet/src/localgw.bpf.c</code>；控制面 <code>CubeNet/cubevs/</code></td></tr>
+        <tr><td>出向安全（L7）</td><td><code>CubeEgress/lua/access_phase.lua</code>、<code>CubeEgress/lua/policy.lua</code>、<code>CubeEgress/lua/cert_signer.lua</code></td></tr>
+        <tr><td>入向路由（L7）</td><td><code>CubeProxy/lua/rewrite_phase.lua</code>、<code>CubeProxy/lua/path_rewrite_phase.lua</code>、<code>CubeProxy/lua/sandbox_state.lua</code></td></tr>
+        <tr><td>沙箱内运行时</td><td><code>agent/src/rpc.rs</code>、<code>agent/src/sandbox.rs</code>、<code>agent/rustjail/src/container.rs</code></td></tr>
+        <tr><td>E2B API 网关</td><td><code>CubeAPI/src/routes.rs</code>、<code>CubeAPI/src/services/sandboxes.rs</code>、<code>CubeAPI/src/cubemaster/mod.rs</code></td></tr>
+        <tr><td>节点网络编排</td><td><code>network-agent/internal/service/tap_lifecycle.go</code>、<code>internal/service/ipam.go</code>、<code>internal/cubeegress/cubeegress_push.go</code></td></tr>
+        <tr><td>构建与开发</td><td><code>Makefile</code>（make all / make cubelet / make web-dev…）；配置 <code>CubeMaster/conf.yaml</code>、<code>Cubelet/config/config.toml</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note"><strong>运行环境要求</strong>：沙箱运行需要 <code>/dev/kvm</code>（嵌套虚拟化）；构建在 Docker builder 容器内完成（Go 1.24 / Rust 1.89 / protoc）。Redis 是控制面运行的最低外部依赖。</div>
+</section>
+
+</main>
+
+<footer>
+  CubeSandbox 逻辑梳理 · 基于仓库源码与 docs/ 文档整理，仅作开发参考。<br>
+  组件行为以源码为准：<code>/workspace/github/CubeSandbox</code>
+</footer>
+
+<button class="back-top" id="backTop" title="返回顶部">↑</button>
+
+<script>
+  // 导航高亮 + 滚动监听
+  const nav = document.getElementById('nav');
+  const links = Array.from(nav.querySelectorAll('a'));
+  const sections = links.map(l => document.querySelector(l.getAttribute('href')));
+  const backTop = document.getElementById('backTop');
+
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        links.forEach(l => l.classList.toggle('active', l.getAttribute('href') === '#' + e.target.id));
+      }
+    });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+  sections.forEach(s => s && observer.observe(s));
+
+  window.addEventListener('scroll', () => {
+    backTop.classList.toggle('show', window.scrollY > 500);
+  });
+  backTop.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
+</script>
+
+</body>
+</html>

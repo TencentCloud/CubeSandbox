@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CubeCoW 存储引擎 · 磁盘怎么做到"一秒复制一百份"</title>
+<style>
+  :root {
+    --bg:#0b1020; --border:rgba(255,255,255,0.09); --border-strong:rgba(255,255,255,0.16);
+    --text:#e6eaf2; --text-dim:#9aa7bd; --text-faint:#6b7a93;
+    --blue:#4f8cff; --cyan:#2dd4bf; --purple:#a78bfa; --amber:#fbbf24; --red:#f87171; --green:#34d399;
+    --mono:"SFMono-Regular","JetBrains Mono","Fira Code",Consolas,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+    --radius:14px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{font-family:var(--sans);background:var(--bg);color:var(--text);line-height:2.05;font-size:16px}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono);font-size:.85em;background:rgba(79,140,255,.12);color:#b9d2ff;padding:2px 7px;border-radius:6px;white-space:nowrap}
+
+  header{position:sticky;top:0;z-index:100;backdrop-filter:blur(14px);background:rgba(11,16,32,.85);border-bottom:1px solid var(--border)}
+  .nav-inner{max-width:1120px;margin:0 auto;padding:0 24px;height:56px;display:flex;align-items:center;gap:22px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px;white-space:nowrap}
+  .brand-mark{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--amber),var(--red));display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:800}
+  .back-home{margin-left:auto;font-size:13px;color:var(--text-faint);border:1px solid var(--border);padding:5px 14px;border-radius:20px;white-space:nowrap}
+  .back-home:hover{color:var(--text);border-color:var(--border-strong);text-decoration:none}
+
+  main{max-width:740px;margin:0 auto;padding:44px 24px 96px}
+  .hero{border-bottom:1px solid var(--border);padding:12px 0 36px;margin-bottom:48px}
+  .hero .crumb{font-family:var(--mono);font-size:12px;color:var(--text-faint);letter-spacing:1px}
+  .hero h1{font-size:31px;font-weight:900;margin:14px 0 10px;line-height:1.4;background:linear-gradient(90deg,#fff,var(--amber));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  .hero .lead{font-size:16.5px;color:var(--text-dim);max-width:640px;line-height:2.1}
+
+  h2{font-size:20px;font-weight:800;margin:60px 0 4px;color:#f0f4ff;line-height:1.5}
+  h3{font-size:16px;font-weight:700;margin:28px 0 4px;color:#dbe4f5}
+  p{margin:16px 0}
+  .dim{color:var(--text-dim)}
+  .hl{color:var(--cyan);font-weight:600}
+  .hlb{color:var(--amber);font-weight:600}
+  .hlr{color:var(--red);font-weight:600}
+  .hlg{color:var(--green);font-weight:600}
+
+  .think{border-left:3px solid var(--purple);background:rgba(167,139,250,.06);padding:16px 22px;border-radius:0 10px 10px 0;margin:24px 0;color:var(--text-dim)}
+  .think .q{font-weight:700;color:var(--purple);margin-bottom:4px}
+
+  .codeblock{background:#0a0f1e;border:1px solid var(--border);border-radius:12px;padding:16px 20px;font-family:var(--mono);font-size:13px;color:#c8d3e8;overflow-x:auto;white-space:pre;line-height:1.9;margin:20px 0}
+  .codeblock .cm{color:var(--text-faint)}
+
+  .tbl-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:12px;margin:20px 0}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  thead th{background:rgba(79,140,255,.1);color:#bcd6ff;text-align:left;padding:9px 14px;font-weight:700;border-bottom:1px solid var(--border-strong)}
+  tbody td{padding:9px 14px;border-bottom:1px solid var(--border);color:var(--text-dim);vertical-align:top}
+  tbody tr:last-child td{border-bottom:none}
+
+  .punchline{border:1px solid rgba(52,211,153,.4);background:rgba(52,211,153,.06);border-radius:var(--radius);padding:20px 24px;margin:30px 0;font-size:16px;line-height:2}
+  .punchline small{display:block;font-family:var(--mono);font-size:11px;color:var(--green);letter-spacing:1px;margin-bottom:8px}
+
+  footer{border-top:1px solid var(--border);padding:28px 24px 46px;text-align:center;color:var(--text-faint);font-size:13px}
+  @media(max-width:720px){.hero h1{font-size:25px}}
+  .flow{width:100%;height:auto;display:block;margin:24px 0 2px}
+  .flow .fn{fill:#eaf0fb;font-size:14px;font-weight:700;font-family:var(--sans)}
+  .flow .fd{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow .fm{fill:#6b7a93;font-size:10.5px;font-family:var(--mono)}
+  .flow .fl{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow-cap{font-family:var(--mono);font-size:11px;color:var(--text-faint);letter-spacing:.6px;text-align:center;margin:6px 0 28px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="nav-inner">
+    <div class="brand"><div class="brand-mark">C</div> CubeSandbox · 技术深入</div>
+    <a class="back-home" href="index.html">← 技术索引</a>
+  </div>
+</header>
+
+<main>
+
+  <div class="hero">
+    <div class="crumb">CUBESANDBOX · 核心技术 04 / 09</div>
+    <h1>磁盘怎么做到"一秒复制一百份"</h1>
+    <p class="lead">这篇讲 CubeCoW，CubeSandbox 的存储引擎。调度器把沙箱派到了机器上，但这台机器凭什么能"秒开"一百个同模板沙箱而不爆磁盘？答案是一个叫写时复制的古老概念，加上一个"把复杂度删到几乎为零"的设计态度。我们从头走一遍。</p>
+  </div>
+
+  <h2>一、问题：一百台电脑，不能有一百份系统盘</h2>
+
+  <p>先回到那个反复出现的场景：开发者不断敲下 <code>sandbox.create()</code>，每次都要"开一台带 Python 3.11 环境的电脑"。如果每个沙箱都完整复制一份系统盘——几个 GB——开一百个就是一百份磁盘：空间爆炸，而且复制本身耗时。而 CubeSandbox 的核心卖点是"从模板秒开"，秒开的物理前提就是：<span class="hl">创建沙箱不能真的复制数据。</span></p>
+  <p>但这一百个沙箱的系统盘内容，99.9% 是一样的——都是同一份模板。只有每个人自己的代码、下载的东西是独有的。问题于是变成：<span class="hlb">如何让一百个沙箱"共享"同一份模板的磁盘内容，各自写入时互不干扰？</span></p>
+
+  <h2>二、核心思想：写时复制，用内核现成的能力</h2>
+
+  <p>这个概念你其实早就用过——Copy-on-Write（写时复制，COW）。一间教室，老师发一本公共教材当模板，所有学生共用；谁要在书上划重点（写入），就先复印那一页，在复印件上划——其他同学仍然用原书。划重点的人越多，才会出现越多的独立拷贝。</p>
+  <p>CubeCoW 没有发明任何复杂的新东西，而是<span class="hl">直接调用 Linux 内核已有的能力</span>：一个叫 <code>FICLONE</code> 的 ioctl（ioctl 号 <code>0x40049409</code>）。它的语义是：</p>
+  <div class="codeblock">FICLONE(dst, src) = 在磁盘上登记"dst 的内容就是 src 的内容"
+                   —— 不拷贝任何字节，只加一个"引用"
+只有某一方要改动某个数据块时，内核才真正复制那一小块，
+让双方各自拥有。这就是 COW。</div>
+  <p>用这套语义，<span class="hl">"创建沙箱 = 对模板文件做一次 FICLONE"</span>，耗时与模板大小完全无关，永远是一个瞬间操作（O(1)）。这也正是 Cubelet Workflow 那篇里 storage 插件在做的：<code>storage_backend=cubecow</code> 时，卷的创建就是一次引用式克隆。</p>
+  <p>这里有一个技术选型值得停下来：为什么不直接用 dm-thin（设备映射薄卷）？dm-thin 同样提供 O(1) 快照，但要维护一个 pool 台账、一套内核 ioctl 编排，以及不小的崩溃恢复面。而 CubeCoW 的工作负载模式是"<span class="hlb">大量短命的、大镜像文件的克隆</span>"——对这种模式，xfs 的 reflink（挂在 <code>-m reflink=1</code> 布局上）在文件层就提供同样的 O(1) 语义，且每次操作就是一个文件系统事务，崩溃语义简单得多。选择 reflink，本质是选择"更小的出故障面"。</p>
+
+  <svg class="flow" viewBox="0 0 720 196" role="img" aria-label="FICLONE 克隆关系">
+    <defs>
+      <marker id="cwArr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#fbbf24"/></marker>
+    </defs>
+    <rect x="0" y="0" width="720" height="196" rx="14" fill="rgba(255,255,255,.03)" stroke="rgba(255,255,255,.09)"/>
+    <text x="24" y="28" class="fm">一个模板 → N 个沙箱 · 创建沙箱 = 一次 FICLONE，与模板大小无关</text>
+
+    <rect x="270" y="40" width="180" height="56" rx="10" fill="rgba(251,191,36,.1)" stroke="rgba(251,191,36,.6)"/>
+    <text x="360" y="64" text-anchor="middle" class="fn">模板 vol-A 主文件</text>
+    <text x="360" y="82" text-anchor="middle" class="fd">几个 GB · 唯一一份真实字节</text>
+
+    <line x1="360" y1="96" x2="120" y2="128" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#cwArr2)"/>
+    <line x1="360" y1="96" x2="360" y2="128" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#cwArr2)"/>
+    <line x1="360" y1="96" x2="600" y2="128" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#cwArr2)"/>
+    <text x="378" y="117" class="fl">FICLONE 登记引用 · O(1)</text>
+
+    <rect x="30" y="128" width="180" height="54" rx="10" fill="rgba(251,191,36,.06)" stroke="rgba(251,191,36,.4)"/>
+    <text x="120" y="152" text-anchor="middle" class="fn">沙箱卷 1</text>
+    <text x="120" y="170" text-anchor="middle" class="fd">共享模板块 + 私有写块</text>
+    <rect x="270" y="128" width="180" height="54" rx="10" fill="rgba(251,191,36,.06)" stroke="rgba(251,191,36,.4)"/>
+    <text x="360" y="152" text-anchor="middle" class="fn">沙箱卷 2</text>
+    <text x="360" y="170" text-anchor="middle" class="fd">共享模板块 + 私有写块</text>
+    <rect x="510" y="128" width="180" height="54" rx="10" fill="rgba(251,191,36,.06)" stroke="rgba(251,191,36,.4)"/>
+    <text x="600" y="152" text-anchor="middle" class="fn">沙箱卷 3</text>
+    <text x="600" y="170" text-anchor="middle" class="fd">共享模板块 + 私有写块</text>
+  </svg>
+
+  <h2>三、三个设计取舍：把复杂度一个个删掉</h2>
+
+  <p>真正的亮点不在"用了 FICLONE"，而在围绕它做出的三个取舍。它们让这个引擎简单到几乎不可能出 bug：</p>
+
+  <h3>取舍一：快照"扁平化"——没有快照树</h3>
+  <p>很多存储系统允许"快照的快照"，形成一棵树，树越深管理越复杂。CubeCoW 选择：<span class="hl">无论从哪一层做快照，结果都落在最初那个卷的目录下。</span>目录布局是：</p>
+  <div class="codeblock">&lt;root_dir&gt;/volumes/
+    ├── &lt;vol-A&gt;/
+    │   ├── &lt;vol-A&gt;          ← 卷主文件（FICLONE 源）
+    │   ├── &lt;snap-1&gt;         ← FICLONE(&lt;vol-A&gt;)
+    │   └── &lt;snap-2&gt;         ← FICLONE(&lt;snap-1&gt;)，但扁平化落在 vol-A/ 下
+    ├── &lt;vol-B&gt;/&lt;vol-B&gt;
+    └── ...</div>
+  <p>注意 <code>snap-2</code>：它是从 <code>snap-1</code> 克隆的，但物理上仍然躺在 <code>vol-A/</code> 目录里。每个快照都记录自己的"最终源卷"，所有快照是兄弟，删除任何一个都不影响其他。<span class="hlb">代价</span>：失去快照树的分层语义；<span class="hlb">回报</span>：永远不用算"我的祖先是谁"，删除永远安全。</p>
+
+  <h3>取舍二：父卷可以先删</h3>
+  <p>一般理解是"子快照依赖父卷，父卷不能先删"。CubeCoW 的快照是独立的文件，不依赖祖先，允许"父卷先删、快照后删"。这正好服务一个真实流程：构建模板时先建临时卷，完成后删临时卷——快照安然无恙。对运维来说少了一个"先删谁后删谁"的纪律约束，就少了一类操作失误。</p>
+
+  <h3>取舍三：崩溃恢复靠"扫描目录"，而不是日志</h3>
+  <p>传统存储系统要写事务日志（WAL）才能保证崩溃后一致。CubeCoW 的选择更简单：<span class="hl">目录结构本身就是状态。</span>启动时扫一遍磁盘，就能重建全部元数据——卷列表来自 <code>readdir(volumes/)</code>，快照列表来自 <code>readdir(volumes/&lt;vol&gt;/)</code> 减掉主文件，大小来自 <code>stat</code>，创建时间来自 <code>mtime</code>。扫描器还负责清理上次崩溃留下的孤儿：空目录、FICLONE 没落地的零字节快照文件。<span class="hlb">代价</span>：要求每步操作严格先落盘再返回；<span class="hlb">回报</span>：没有日志、没有 WAL，代码少一大截。</p>
+
+  <h2>四、为什么这套设计"敢"这么简单</h2>
+
+  <p>这三个取舍成立的前提，是 CubeCoW 刻意押注在一个假设上：<span class="hl">底层文件系统（xfs）已经把它最难的部分做好了。</span>引用计数、空间回收、掉电一致性——全是内核的事。CubeCoW 只做三件事：起名字（校验名称合法性）、建目录、调 FICLONE。它甚至启动时还会探测一次底层文件系统是否真的支持 FICLONE，不支持直接拒绝启动，而不是运行到一半才炸。</p>
+  <p>也正因为"卷 = 一个普通文件"，它才能用最薄的接口暴露能力：对外是一个 <code>Engine</code> trait（create/delete/resize/list volume、snapshot 操作、激活/停用），再通过 C FFI 层（<code>ffi.rs</code> + <code>cubecow.h</code>）暴露给 Go 侧。CubeSandbox 的节点管理程序（Go 写的 Cubelet）通过 cgo 调用它——两边语言不同，但接口薄得一眼看穿。</p>
+  <div class="think">
+    <div class="q">一个反直觉的结论：越基础的基础设施，越该把"简单可靠"放在"功能强大"前面。</div>
+    <div class="a">存储引擎是沙箱数据安全的最后防线。每删掉一个复杂机制（快照树、事务日志、pool 台账），就少一类能出故障的状态。CubeCoW 的"设计审美"，是把能不做的事全都不做。</div>
+  </div>
+
+  <h2>五、收束</h2>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>问题</th><th>选择</th><th>付出的代价</th></tr></thead>
+      <tbody>
+        <tr><td>克隆模板太贵</td><td>FICLONE 引用式克隆，O(1)</td><td>依赖底层文件系统支持 reflink</td></tr>
+        <tr><td>快照树难管理</td><td>扁平化，全部落在源卷目录</td><td>失去分层语义</td></tr>
+        <tr><td>父卷先删会悬空</td><td>快照独立，父卷可先删</td><td>无（少一条操作纪律）</td></tr>
+        <tr><td>崩溃后不一致</td><td>目录即状态，扫描自愈</td><td>每步必须严格先落盘</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="punchline">
+    <small>一句话带走</small>
+    CubeCoW = 用内核自带的 FICLONE 把"克隆模板"变成 O(1) 的瞬间操作；再配合三个删繁就简的取舍（无快照树、父卷可先删、扫描自愈），换来一个简单到几乎不会出错的存储层——而"秒开一百个沙箱"的物理基础，就在这里。
+  </div>
+
+  <h2>传送门：真想读代码，就这几个文件</h2>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>想看什么</th><th>去这里</th></tr></thead>
+      <tbody>
+        <tr><td>引擎接口抽象</td><td><code>cubecow/src/engine/mod.rs</code>（Engine trait）</td></tr>
+        <tr><td>reflink 实现（FICLONE / 扫描自愈）</td><td><code>cubecow/src/engine/reflink.rs</code></td></tr>
+        <tr><td>C 接口（暴露给 Go）</td><td><code>cubecow/src/ffi.rs</code> + <code>cubecow/include/cubecow.h</code></td></tr>
+        <tr><td>Go 侧封装</td><td><code>Cubelet/pkg/cubecow/</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</main>
+
+<footer>CubeCoW 存储引擎 · CubeSandbox 技术深入 04/09 · 下一篇：CubeShim + CubeHypervisor——containerd 到 KVM 的最后一公里</footer>
+</body>
+</html>

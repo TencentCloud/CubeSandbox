@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CubeEgress 安全代理 · 出站流量最后的安检员</title>
+<style>
+  :root {
+    --bg:#0b1020; --border:rgba(255,255,255,0.09); --border-strong:rgba(255,255,255,0.16);
+    --text:#e6eaf2; --text-dim:#9aa7bd; --text-faint:#6b7a93;
+    --blue:#4f8cff; --cyan:#2dd4bf; --purple:#a78bfa; --amber:#fbbf24; --red:#f87171; --green:#34d399;
+    --mono:"SFMono-Regular","JetBrains Mono","Fira Code",Consolas,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+    --radius:14px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{font-family:var(--sans);background:var(--bg);color:var(--text);line-height:2.05;font-size:16px}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono);font-size:.85em;background:rgba(79,140,255,.12);color:#b9d2ff;padding:2px 7px;border-radius:6px;white-space:nowrap}
+
+  header{position:sticky;top:0;z-index:100;backdrop-filter:blur(14px);background:rgba(11,16,32,.85);border-bottom:1px solid var(--border)}
+  .nav-inner{max-width:1120px;margin:0 auto;padding:0 24px;height:56px;display:flex;align-items:center;gap:22px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px;white-space:nowrap}
+  .brand-mark{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--green),var(--cyan));display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:800}
+  .back-home{margin-left:auto;font-size:13px;color:var(--text-faint);border:1px solid var(--border);padding:5px 14px;border-radius:20px;white-space:nowrap}
+  .back-home:hover{color:var(--text);border-color:var(--border-strong);text-decoration:none}
+
+  main{max-width:740px;margin:0 auto;padding:44px 24px 96px}
+  .hero{border-bottom:1px solid var(--border);padding:12px 0 36px;margin-bottom:48px}
+  .hero .crumb{font-family:var(--mono);font-size:12px;color:var(--text-faint);letter-spacing:1px}
+  .hero h1{font-size:31px;font-weight:900;margin:14px 0 10px;line-height:1.4;background:linear-gradient(90deg,#fff,var(--green));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  .hero .lead{font-size:16.5px;color:var(--text-dim);max-width:640px;line-height:2.1}
+
+  h2{font-size:20px;font-weight:800;margin:60px 0 4px;color:#f0f4ff;line-height:1.5}
+  h3{font-size:16px;font-weight:700;margin:28px 0 4px;color:#dbe4f5}
+  p{margin:16px 0}
+  .dim{color:var(--text-dim)}
+  .hl{color:var(--cyan);font-weight:600}
+  .hlb{color:var(--amber);font-weight:600}
+  .hlr{color:var(--red);font-weight:600}
+  .hlg{color:var(--green);font-weight:600}
+
+  .think{border-left:3px solid var(--purple);background:rgba(167,139,250,.06);padding:16px 22px;border-radius:0 10px 10px 0;margin:24px 0;color:var(--text-dim)}
+  .think .q{font-weight:700;color:var(--purple);margin-bottom:4px}
+
+  .codeblock{background:#0a0f1e;border:1px solid var(--border);border-radius:12px;padding:16px 20px;font-family:var(--mono);font-size:13px;color:#c8d3e8;overflow-x:auto;white-space:pre;line-height:1.9;margin:20px 0}
+  .codeblock .cm{color:var(--text-faint)}
+
+  .gate{display:flex;flex-wrap:wrap;gap:6px;margin:18px 0}
+  .gate span{font-family:var(--mono);font-size:12px;padding:5px 10px;border-radius:8px;border:1px solid var(--border-strong);background:rgba(255,255,255,.03);color:var(--text-dim)}
+  .gate span.ok{border-color:rgba(52,211,153,.5);color:var(--green)}
+
+  .tbl-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:12px;margin:20px 0}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  thead th{background:rgba(79,140,255,.1);color:#bcd6ff;text-align:left;padding:9px 14px;font-weight:700;border-bottom:1px solid var(--border-strong)}
+  tbody td{padding:9px 14px;border-bottom:1px solid var(--border);color:var(--text-dim);vertical-align:top}
+  tbody tr:last-child td{border-bottom:none}
+
+  .punchline{border:1px solid rgba(52,211,153,.4);background:rgba(52,211,153,.06);border-radius:var(--radius);padding:20px 24px;margin:30px 0;font-size:16px;line-height:2}
+  .punchline small{display:block;font-family:var(--mono);font-size:11px;color:var(--green);letter-spacing:1px;margin-bottom:8px}
+
+  footer{border-top:1px solid var(--border);padding:28px 24px 46px;text-align:center;color:var(--text-faint);font-size:13px}
+  @media(max-width:720px){.hero h1{font-size:25px}}
+  .flow{width:100%;height:auto;display:block;margin:24px 0 2px}
+  .flow .fn{fill:#eaf0fb;font-size:14px;font-weight:700;font-family:var(--sans)}
+  .flow .fd{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow .fm{fill:#6b7a93;font-size:10.5px;font-family:var(--mono)}
+  .flow .fl{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow-cap{font-family:var(--mono);font-size:11px;color:var(--text-faint);letter-spacing:.6px;text-align:center;margin:6px 0 28px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="nav-inner">
+    <div class="brand"><div class="brand-mark">C</div> CubeSandbox · 技术深入</div>
+    <a class="back-home" href="index.html">← 技术索引</a>
+  </div>
+</header>
+
+<main>
+
+  <div class="hero">
+    <div class="crumb">CUBESANDBOX · 核心技术 08 / 09</div>
+    <h1>出站流量最后的安检员</h1>
+    <p class="lead">这篇讲 CubeEgress。上一篇的 CubeVS 在 L4 管"哪些 IP 能去"，但安全往往要管到 L7——允许访问哪个域名、哪个方法、哪条路径；还要解决一个更棘手的问题：数据库密码、API Key 怎么安全地给到沙箱。CubeEgress 把这两件事都做在了沙箱之外的透明代理里。</p>
+  </div>
+
+  <h2>一、问题：L4 管不了域名，密钥也不能进沙箱</h2>
+
+  <p>CubeVS 用 eBPF 把访问控制做到了 IP 级，但它有一个边界：它看到的只是"目的 IP:端口"。管理员想表达的是"允许访问 github.com 的 API，禁止上传大文件"——这种应用语义，L4 无从判断。域名、方法、路径、TLS 里的 SNI，都是 L7 层的信息。</p>
+  <p>而另一个更麻烦的问题关于密钥。沙箱里跑着用户的代码，它要连数据库、要调云 API，就需要密码、Key。但如果把密钥直接放进沙箱镜像或环境变量——<span class="hlr">密钥就暴露给了不可信的用户代码</span>，用户把系统盘一克隆，密钥就跟着扩散了。正确做法是：<span class="hl">密钥只存在于控制面，请求发出时由代理自动注入，沙箱代码永远拿不到明文。</span></p>
+  <p>两个诉求合到一起，答案指向同一个组件：一个<span class="hl">透明的 L7 出向代理</span>，站在沙箱和互联网之间，看得见域名和方法，也握得住密钥。这就是 CubeEgress——基于 OpenResty + Lua 实现。</p>
+
+  <h2>二、机制：TPROXY——沙箱无感的透明截获</h2>
+
+  <p>关键前提是"透明"：沙箱里的程序发 HTTP/HTTPS 请求时，根本不知道流量会被拦截，代码一行都不用改。实现靠 Linux 的 TPROXY：CubeVS 判断某条流量"需要 L7 检查"（L7_REQUIRED），TPROXY 规则按目的 IP/端口把它转给 CubeEgress。CubeEgress 的 nginx 配置里是三个 server：</p>
+  <div class="codeblock">CubeEgress（OpenResty）
+├─ 8080（HTTP transparent）：listen IP:8080 transparent
+│      proxy_pass http://$server_addr:$server_port   ← 回源到 TPROXY 记录的原始目的
+├─ 8443（HTTPS transparent）：listen IP:8443 ssl transparent
+│      ssl_certificate_by_lua 按 SNI+目的IP 动态签发叶子证书
+│      proxy_ssl_verify on（校验上游证书，verify_depth 4）
+└─ 9090（Admin，loopback only）：策略 PUT/PATCH/DELETE / dump</div>
+  <p>注意一个必须解决的问题：标准 nginx 的 <code>$server_addr</code> 在 transparent listen 下拿到的是本机地址，而不是原始目的地址。CubeEgress 自带一个 OpenResty 补丁（<code>openresty/0001-nginx-support-TPROXY...</code>），让 <code>$server_addr</code> 携带 TPROXY 记录的真实目的地址，从而用变量式 proxy_pass 精确回源。HTTPS 侧则用 <code>ssl.raw_server_addr()</code> 还原目的 IP。这层"补丁"是整个透明代理能不能工作的关键——没有它，代理就不知道把请求转发给谁。</p>
+
+  <h2>三、机制：决策引擎——每个请求一次完整判断</h2>
+
+  <p>请求到达后，access 阶段执行一次完整决策，核心是 <code>_M.decide()</code>：</p>
+  <div class="codeblock">decide():
+① build_ctx()：sandbox_ip=remote_addr、sni=ssl_server_name、host（去端口）、
+               method、path=uri、dst_ip=server_addr、scheme
+② Bootstrap 门禁：策略存储的 bootstrap_status 仅 "ready"/"skipped" 放行
+     pending/unknown → fail-closed 返回 403（每 worker 每状态只 WARN 一次）
+③ sandbox_ip 为空 → deny("no_remote_addr")
+④ policy.get(sandbox_ip)：
+     └─ 出错 → deny("policy_lookup_error")
+     └─ 无策略 → deny("no_policy_for_sandbox")
+⑤ 顺序遍历 p.rules，rule_matches(r.match, ctx) 首条命中即决（first-match-wins）：
+     decision.rule_id = r.id；audit_level = r.action.audit or "metadata"
+     allow==true  → allow(decision)
+     allow==false → deny("rule_deny")
+⑥ 无规则命中 → deny("no_rule_match")（默认拒绝）</div>
+  <svg class="flow" viewBox="0 0 720 252" role="img" aria-label="CubeEgress 决策流程">
+    <defs>
+      <marker id="egArr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#34d399"/></marker>
+      <marker id="egArrR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#f87171"/></marker>
+    </defs>
+    <rect x="0" y="0" width="720" height="252" rx="14" fill="rgba(255,255,255,.03)" stroke="rgba(255,255,255,.09)"/>
+    <text x="24" y="28" class="fm">decide() · 每个请求一次完整判断 · fail-closed 默认拒绝</text>
+
+    <rect x="20" y="36" width="300" height="48" rx="10" fill="rgba(52,211,153,.08)" stroke="rgba(52,211,153,.45)"/>
+    <text x="170" y="57" text-anchor="middle" class="fn">① build_ctx</text>
+    <text x="170" y="75" text-anchor="middle" class="fd">IP / SNI / Host / Method / Path</text>
+    <line x1="170" y1="84" x2="170" y2="98" stroke="#34d399" stroke-width="1.5" marker-end="url(#egArr)"/>
+
+    <rect x="20" y="98" width="300" height="48" rx="10" fill="rgba(52,211,153,.08)" stroke="rgba(52,211,153,.45)"/>
+    <text x="170" y="119" text-anchor="middle" class="fn">② 门禁 + 策略查询</text>
+    <text x="170" y="137" text-anchor="middle" class="fd">Bootstrap ready · policy.get 命中</text>
+    <line x1="320" y1="122" x2="368" y2="176" stroke="#34d399" stroke-width="1.5" marker-end="url(#egArr)"/>
+    <text x="352" y="138" class="fl">有策略</text>
+
+    <polygon points="368,176 440,146 512,176 440,206" fill="rgba(251,191,36,.1)" stroke="rgba(251,191,36,.6)" stroke-width="1.5"/>
+    <text x="440" y="174" text-anchor="middle" class="fn">命中规则？</text>
+    <text x="440" y="192" text-anchor="middle" class="fd">first-match-wins</text>
+
+    <line x1="512" y1="176" x2="560" y2="176" stroke="#34d399" stroke-width="1.5" marker-end="url(#egArr)"/>
+    <text x="534" y="168" class="fl">是</text>
+    <rect x="560" y="130" width="140" height="92" rx="10" fill="rgba(52,211,153,.1)" stroke="rgba(52,211,153,.6)"/>
+    <text x="630" y="158" text-anchor="middle" class="fn">allow</text>
+    <text x="630" y="178" text-anchor="middle" class="fd">放行</text>
+    <text x="630" y="196" text-anchor="middle" class="fd">凭证注入</text>
+    <text x="630" y="214" text-anchor="middle" class="fm">先清后注入</text>
+
+    <line x1="440" y1="206" x2="440" y2="210" stroke="#f87171" stroke-width="1.5" marker-end="url(#egArrR)"/>
+    <text x="528" y="200" class="fl">否</text>
+    <rect x="340" y="210" width="200" height="36" rx="9" fill="rgba(248,113,113,.08)" stroke="rgba(248,113,113,.5)"/>
+    <text x="440" y="232" text-anchor="middle" class="fn" style="fill:#f87171">deny · 403</text>
+    <text x="440" y="247" text-anchor="middle" class="fm">策略缺/错 · 无命中 · rule_deny</text>
+  </svg>
+  <p>两个设计取向值得记下。<span class="hlb">一是 fail-closed（默认拒绝）</span>：没有规则命中的请求直接 403——安全语义是白名单而不是黑名单；策略查询出错也拒绝，宁可服务不可用，也不放行未受控流量。<span class="hlb">二是 first-match-wins</span>：规则按顺序遍历，第一条命中的规则决定放行与否，规则之间不需要考虑"更具体优先"的排列——把"规则优先级"这个隐患直接消除。</p>
+  <p>规则匹配的字段全部可选、缺省即匹配：<code>sni</code>/<code>host</code> 用 domain_match（仅支持前导 <code>*.</code> 通配，不匹配 apex 域）、<code>method</code> 数组 any-of、<code>path</code> 尾部 <code>*</code> 前缀通配、<code>scheme</code> 等值。返回 true 当全部约束通过。</p>
+
+  <h2>四、机制：八道门禁——从握手到授权</h2>
+
+  <div class="gate">
+    <span class="ok">G1 scheme 合法</span><span>G2 TLS 握手成功</span><span>G3 SNI 匹配规则</span><span>G4 Host==SNI</span><span>G5 目的 IP 可信</span><span>G6 上游证书校验</span><span>G7 method/path 匹配</span><span>G8 策略授权</span>
+  </div>
+  <p>其中最有含金量的是 <span class="hl">G4：Host 必须等于 SNI</span>。为什么？这是防 SNI 与 Host 分离攻击：攻击者可以把"放行的域名"放在 TLS 的 SNI 里骗过代理决策，然后在 HTTP Host 头里写真正想去的域名。G4 强制两者一致，把这条绕过路径堵死。</p>
+  <p>G5/G6 是一组纵深防御：目的 IP 可信 + 上游证书由 nginx 全局 <code>proxy_ssl_verify on</code> 校验——代理自己也要防"被中间人"。整个门禁链条还有一个统一原则：<span class="hl">任何门禁失败都丢弃凭证注入</span>（请求按 allow 决定是否放行）——绝不让密钥进入一个没被完整验证过的上下文。</p>
+
+  <h2>五、机制：凭证注入——密钥永不出控制面</h2>
+
+  <p>这是 CubeEgress 的核心安全价值。策略里这样写：</p>
+  <div class="codeblock">policy: rules[].action.inject = [{ header="Authorization", secret="sk-xxx", format="${SECRET}" }]
+
+allow(decision) 里：
+① 无条件 clear_header(inj.header)      ← 先清掉沙箱自带的伪造头（防竞态）
+② inject_gates(ctx)                    ← 再走一遍门禁，失败则 dropped 并审计
+③ apply_injects：
+     pcall(ngx.req.set_header, header, rendered)   ← 渲染后注入
+     成功 → 记录 {header, secret_ref}（绝不记录值本身）
+④ 有 skipped 或 security_event → audit.write_security_event</div>
+  <p>有几个值得展开的细节。<span class="hlg">一是"先清后注入"</span>：先无条件删掉沙箱可能自带的同名请求头，再注入真实的——防止沙箱伪造一个错误的 Authorization 头抢占位置（竞态）。<span class="hlg">二是模板渲染的防御</span>：默认 format 是 <code>${SECRET}</code>，先转义 <code>%</code> 为 <code>%%</code> 再替换；如果替换 0 次则 WARN——防止策略把占位符写错（比如写成 <code>Bearer $SECRET</code>）而注入出错误值。</p>
+  <p><span class="hlg">三是密钥指纹</span>：policy.lua 在写入策略时，为每个 inject 项预计算 <code>secret_ref_synthetic</code>（sha256 前 4 字节 → "fp-xxxx"）。审计日志和管理接口只出现指纹，绝不出现明文。这样即使日志泄露，攻击者拿到的也只是"某密钥的短指纹"，而数据面判断"这次注入用的是哪把密钥"完全够用。</p>
+
+  <h2>六、机制：动态证书——透明 MITM 的底座</h2>
+
+  <p>要检查 HTTPS 流量，代理必须能解密——也就是对沙箱扮演"目标服务器"，对目标服务器扮演"合法客户端"。沙箱侧需要"看起来像真的"证书，由 CubeEgress 自带的 CA 动态签发：</p>
+  <div class="codeblock">serve(sni, dst_ip)：
+① 缓存键 = sni 或 ("ip:"..dst_ip)
+② 命中 → unpack 直接用
+③ 未命中 → resty.lock 慢路径，锁内 double-check
+     → sign_leaf(sni, dst_ip) → cache:set(…, CACHE_TTL_SEC=6天)
+     → ssl.clear_certs() + set_der_cert() + set_der_priv_key()
+
+sign_leaf：
+  ECDSA P-256，v3 证书，序列号 = now*1e6 + random
+  not_before = now−60s（时钟偏移容忍），not_after = now + 7 天
+  SAN 优先级：非 IP 的 SNI → DNS；IP 形式 SNI → IP；否则 dst_ip → IP</div>
+  <p>并发防重复签名的设计是"锁内 double-check"：缓存 miss 后先抢 resty.lock（cert_locks，5s 超时），进锁后再查一次缓存，仍然没有才签——避免同一域名被并发签出多张。证书缓存 64m、锁 8m 两个 shared dict。CA 由部署侧生成并挂载（/etc/cube/ca/），沙箱镜像和用户环境需要信任该 CA 才不会有 TLS 告警——这是所有透明 MITM 方案共同的前提成本。</p>
+
+  <h2>七、机制：策略存储与审计</h2>
+
+  <p>策略存在 shared dict：key 是沙箱源 IP，value 是策略表。有个工程细节：openresty 的 <code>get_keys()</code> 有 1024 条上限，所以用一个手工维护的 <code>__index__</code> 数组跟踪所有 IP，配一把哨兵锁保护。策略校验严格：policy_id 非空、rules 非空、rule.id 唯一、action.allow 为 boolean、inject 每项 header+secret 非空且 secret ≤ 64KiB、audit ∈ {full, metadata, none}。Admin API 只监听 127.0.0.1:9090，响应前先 redact_policy（secret → ***REDACTED***）。</p>
+  <p>下发链路：network-agent 在 EnsureNetwork 时把 CubeNetworkConfig 的 EgressRule 转成 PolicyInput 推给 CubeEgress（瞬时错误失败则打 pending 标记等重试）；CubeEgress 启动时也向 network-agent 拉取一次全量做 bootstrap。审计走 nginx 的 JSON 日志，落 <code>/data/log/cube-egress/access.jsonl</code>，记录 sandbox_ip、dst_ip、host、latency 等，门禁失败与注入丢弃事件单独写 security_event。</p>
+
+  <h2>八、收束</h2>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>问题</th><th>设计</th><th>关键权衡</th></tr></thead>
+      <tbody>
+        <tr><td>L4 管不了域名/方法/路径</td><td>TPROXY 透明截获 + L7 决策</td><td>沙箱代码零改动</td></tr>
+        <tr><td>密钥不能进沙箱</td><td>凭证注入 + 指纹审计</td><td>密钥永不出控制面</td></tr>
+        <tr><td>策略必须白名单语义</td><td>fail-closed 默认拒绝 + first-match-wins</td><td>宁可拒，不可放</td></tr>
+        <tr><td>SNI 与 Host 分离攻击</td><td>G4 强制一致</td><td>堵死一条绕过路径</td></tr>
+        <tr><td>HTTPS 需要解密</td><td>自带 CA 动态签发 + 锁内 double-check</td><td>各端需信任该 CA</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="punchline">
+    <small>一句话带走</small>
+    CubeEgress = TPROXY 透明截获 + 默认拒绝的决策引擎 + 动态签发的 MITM + 凭证注入 + 指纹化审计——把"出站访问控制"从 IP 级提升到应用级，同时让密钥永远不落地沙箱。
+  </div>
+
+  <h2>传送门：真想读代码，就这几个文件</h2>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>想看什么</th><th>去这里</th></tr></thead>
+      <tbody>
+        <tr><td>nginx 配置（三 server）</td><td><code>CubeEgress/nginx.conf</code>（8080 HTTP L107 / 8443 HTTPS L139 / 9090 admin L208）</td></tr>
+        <tr><td>决策引擎</td><td><code>CubeEgress/lua/access_phase.lua</code>（_M.decide L401 / inject_gates L184 / apply_injects L223）</td></tr>
+        <tr><td>策略存储</td><td><code>CubeEgress/lua/policy.lua</code>（fingerprint L147 / bulk_load L345）</td></tr>
+        <tr><td>证书签发</td><td><code>CubeEgress/lua/cert_signer.lua</code>（sign_leaf L97 / serve L161）</td></tr>
+        <tr><td>Admin API</td><td><code>CubeEgress/lua/admin.lua</code>（路由表 L186）</td></tr>
+        <tr><td>审计 / 脱敏</td><td><code>CubeEgress/lua/audit.lua</code>、<code>redactor.lua</code></td></tr>
+        <tr><td>TPROXY 补丁</td><td><code>CubeEgress/openresty/0001-nginx-support-TPROXY*.patch</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</main>
+
+<footer>CubeEgress 安全代理 · CubeSandbox 技术深入 08/09 · 下一篇：CubeProxy——请求怎么找到沙箱，又怎么叫醒它</footer>
+</body>
+</html>

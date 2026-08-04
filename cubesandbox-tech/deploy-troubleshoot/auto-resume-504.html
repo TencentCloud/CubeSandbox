@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>04 · 沙箱自己睡了，却没人能把它叫醒——auto_resume 504 之谜</title>
+<style>
+  :root {
+    --bg:#0b1020; --border:rgba(255,255,255,0.09); --border-strong:rgba(255,255,255,0.16);
+    --text:#e6eaf2; --text-dim:#9aa7bd; --text-faint:#6b7a93;
+    --blue:#4f8cff; --cyan:#2dd4bf; --purple:#a78bfa; --amber:#fbbf24; --red:#f87171; --green:#34d399;
+    --mono:"SFMono-Regular","JetBrains Mono","Fira Code",Consolas,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+    --radius:14px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{font-family:var(--sans);background:var(--bg);color:var(--text);line-height:2.05;font-size:16px}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono);font-size:.85em;background:rgba(79,140,255,.12);color:#b9d2ff;padding:2px 7px;border-radius:6px;white-space:nowrap}
+
+  header{position:sticky;top:0;z-index:100;backdrop-filter:blur(14px);background:rgba(11,16,32,.85);border-bottom:1px solid var(--border)}
+  .nav-inner{max-width:1120px;margin:0 auto;padding:0 24px;height:56px;display:flex;align-items:center;gap:22px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px;white-space:nowrap}
+  .brand-mark{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--blue),var(--purple));display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:800}
+  .back-home{margin-left:auto;font-size:13px;color:var(--text-faint);border:1px solid var(--border);padding:5px 14px;border-radius:20px;white-space:nowrap}
+  .back-home:hover{color:var(--text);border-color:var(--border-strong);text-decoration:none}
+
+  main{max-width:740px;margin:0 auto;padding:44px 24px 96px}
+  .hero{border-bottom:1px solid var(--border);padding:12px 0 36px;margin-bottom:48px}
+  .hero .crumb{font-family:var(--mono);font-size:12px;color:var(--text-faint);letter-spacing:1px}
+  .hero h1{font-size:31px;font-weight:900;margin:14px 0 10px;line-height:1.4;background:linear-gradient(90deg,#fff,var(--purple));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  .hero .lead{font-size:16.5px;color:var(--text-dim);max-width:640px;line-height:2.1}
+
+  h2{font-size:20px;font-weight:800;margin:60px 0 4px;color:#f0f4ff;line-height:1.5}
+  h3{font-size:16px;font-weight:700;margin:28px 0 4px;color:#dbe4f5}
+  p{margin:16px 0}
+  .dim{color:var(--text-dim)}
+  .hl{color:var(--cyan);font-weight:600}
+  .hlb{color:var(--amber);font-weight:600}
+  .hlr{color:var(--red);font-weight:600}
+  .hlg{color:var(--green);font-weight:600}
+
+  .think{border-left:3px solid var(--purple);background:rgba(167,139,250,.06);padding:16px 22px;border-radius:0 10px 10px 0;margin:24px 0;color:var(--text-dim)}
+  .think .q{font-weight:700;color:var(--purple);margin-bottom:4px}
+
+  .codeblock{background:#0a0f1e;border:1px solid var(--border);border-radius:12px;padding:16px 20px;font-family:var(--mono);font-size:13px;color:#c8d3e8;overflow-x:auto;white-space:pre;line-height:1.9;margin:20px 0}
+  .codeblock .cm{color:var(--text-faint)}
+
+  .tbl-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:12px;margin:20px 0}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  thead th{background:rgba(79,140,255,.1);color:#bcd6ff;text-align:left;padding:9px 14px;font-weight:700;border-bottom:1px solid var(--border-strong)}
+  tbody td{padding:9px 14px;border-bottom:1px solid var(--border);color:var(--text-dim);vertical-align:top}
+  tbody tr:last-child td{border-bottom:none}
+
+  .punchline{border:1px solid rgba(52,211,153,.4);background:rgba(52,211,153,.06);border-radius:var(--radius);padding:20px 24px;margin:30px 0;font-size:16px;line-height:2}
+  .punchline small{display:block;font-family:var(--mono);font-size:11px;color:var(--green);letter-spacing:1px;margin-bottom:8px}
+
+  footer{border-top:1px solid var(--border);padding:28px 24px 46px;text-align:center;color:var(--text-faint);font-size:13px}
+  @media(max-width:720px){.hero h1{font-size:25px}}
+  .flow{width:100%;height:auto;display:block;margin:24px 0 2px}
+  .flow .fn{fill:#eaf0fb;font-size:14px;font-weight:700;font-family:var(--sans)}
+  .flow .fd{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow .fm{fill:#6b7a93;font-size:10.5px;font-family:var(--mono)}
+  .flow .fl{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow-cap{font-family:var(--mono);font-size:11px;color:var(--text-faint);letter-spacing:.6px;text-align:center;margin:6px 0 28px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="nav-inner">
+    <div class="brand"><div class="brand-mark">C</div> CubeSandbox · 部署排障</div>
+    <a class="back-home" href="index.html">← 排障索引</a>
+  </div>
+</header>
+
+<main>
+
+  <div class="hero">
+    <div class="crumb">CUBESANDBOX · 部署排障 04 / 05</div>
+    <h1>沙箱自己睡了，却没人能把它叫醒——auto_resume 504 之谜</h1>
+    <p class="lead">验证脚本的最后一项：创建一个 `lifecycle={"on_timeout":"pause","auto_resume":True}` 的沙箱，等 35 秒让它自动睡觉，再发命令把它叫醒。暂停一切正常，状态也显示 `paused`——可叫醒的命令全是 504，恢复后状态还是 `paused`。自动暂停活了，自动恢复却整条链路是死的。</p>
+  </div>
+
+  <h2>一、背景速览：沙箱的"睡眠"机制</h2>
+
+  <p>CubeSandbox 有一个省钱的杀手锏：沙箱闲置时自动"睡觉"。这需要先讲清楚几个概念。</p>
+
+  <p><span class="hlg">① 暂停不是关机。</span>沙箱有状态：<code>running</code>（运行中）、<code>paused</code>（已暂停）、<code>killed</code>（已销毁）。<span class="hl">暂停（pause）是把虚拟机的内存写盘成快照、释放 CPU/内存</span>，但磁盘镜像保留——需要时从快照恢复，几秒内回到暂停前的状态，用户无感。这和前置篇里"模板秒开"是同一个机制。</p>
+  <p><span class="hlg">② 谁决定它睡觉？</span>用户可以在创建沙箱时声明生命周期策略：<code>lifecycle={"on_timeout":"pause","auto_resume":True}</code>，含义是"空闲超时自动暂停；收到请求自动恢复"。真正执行这个策略的是 <span class="hl">CLM（cube-lifecycle-manager）</span>——一个独立部署的控制面组件，它扫描闲置沙箱、执行暂停、响应恢复请求。</p>
+  <p><span class="hlg">③ 用户请求来了，怎么把睡着的沙箱叫醒？</span>这是本篇文章的核心：用户请求先到达 <span class="hl">CubeProxy</span>（数据面）。CubeProxy 内部维护一个状态字典 <code>cube_sandbox_state</code>，记录每个沙箱当前是 running 还是 paused。请求到达时，门禁（gate）查字典：如果是 paused，就内部回调 CLM 的 <code>/internal/resume</code> 把沙箱唤醒，再继续转发。问题是——<span class="hlb">CubeProxy 的字典是谁填的？它怎么知道沙箱被暂停了？</span></p>
+
+  <h2>二、机制：自动恢复的四段接力</h2>
+
+  <p>答案是一套四段式的"接力"，每一段都依赖上一段：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>接力段</th><th>实现</th><th>作用</th></tr></thead>
+      <tbody>
+        <tr><td>① 代理注册</td><td>CubeProxy <code>proxy_registry.lua</code> 心跳写 Redis</td><td>让 CLM 知道"有哪些 CubeProxy 活着、admin 端口在哪"</td></tr>
+        <tr><td>② 服务发现</td><td>CLM <code>discovery.RedisDiscovery</code> 扫描心跳</td><td>构建可推送的 proxy 端点列表（fleet）</td></tr>
+        <tr><td>③ 状态推送</td><td>CLM <code>proxypush.Client.broadcast</code> → POST <code>/admin/state</code></td><td>把 paused/running 写进每个 CubeProxy 的共享字典 <code>cube_sandbox_state</code></td></tr>
+        <tr><td>④ 请求门禁</td><td>CubeProxy <code>sandbox_state.lua</code> gate</td><td>请求到达时查字典：paused → 内部回调 CLM <code>/internal/resume</code> 叫醒沙箱</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>把这条链路想成"对讲机调度"：CubeProxy 每隔几秒通过对讲机喊一声"我在，我的 admin 端口是 X"（①）；CLM 听着对讲机记下所有在场的代理（②）；CLM 有状态变化时就拨号通知每个在场的代理"沙箱 A 暂停了"（③）；代理在请求到来时查自己的记录本决定要不要唤醒沙箱（④）。<span class="hlb">只要 ① 的心跳断了，②③④ 全部失效。</span></p>
+
+  <svg class="flow" viewBox="0 0 720 252" role="img" aria-label="自动恢复四段链路">
+    <defs>
+      <marker id="a4Arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#4f8cff"/></marker>
+      <marker id="a4ArrR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#f87171"/></marker>
+      <marker id="a4ArrG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#34d399"/></marker>
+    </defs>
+    <rect x="0" y="0" width="720" height="252" rx="14" fill="rgba(255,255,255,.03)" stroke="rgba(255,255,255,.09)"/>
+    <text x="24" y="28" class="fm">自动恢复四段接力 · 断点在第 ① 段：心跳写进了黑洞，②③④ 全部饿死</text>
+
+    <rect x="22" y="48" width="132" height="58" rx="10" fill="rgba(79,140,255,.08)" stroke="rgba(79,140,255,.45)"/>
+    <text x="88" y="72" text-anchor="middle" class="fn">① proxy_registry</text>
+    <text x="88" y="90" text-anchor="middle" class="fd">心跳 → Redis</text>
+
+    <rect x="188" y="48" width="132" height="58" rx="10" fill="rgba(79,140,255,.08)" stroke="rgba(79,140,255,.45)"/>
+    <text x="254" y="72" text-anchor="middle" class="fn">② discovery</text>
+    <text x="254" y="90" text-anchor="middle" class="fd">扫描心跳 → fleet</text>
+
+    <rect x="354" y="48" width="150" height="58" rx="10" fill="rgba(79,140,255,.08)" stroke="rgba(79,140,255,.45)"/>
+    <text x="429" y="72" text-anchor="middle" class="fn">③ proxypush</text>
+    <text x="429" y="90" text-anchor="middle" class="fd">/admin/state 广播</text>
+
+    <rect x="538" y="48" width="158" height="58" rx="10" fill="rgba(79,140,255,.08)" stroke="rgba(79,140,255,.45)"/>
+    <text x="617" y="72" text-anchor="middle" class="fn">④ gate 门禁</text>
+    <text x="617" y="90" text-anchor="middle" class="fd">paused → 回调唤醒</text>
+
+    <line x1="154" y1="77" x2="188" y2="77" stroke="#4f8cff" stroke-width="1.5" marker-end="url(#a4Arr)"/>
+    <line x1="320" y1="77" x2="354" y2="77" stroke="#4f8cff" stroke-width="1.5" marker-end="url(#a4Arr)"/>
+    <line x1="504" y1="77" x2="538" y2="77" stroke="#4f8cff" stroke-width="1.5" marker-end="url(#a4Arr)"/>
+
+    <rect x="22" y="182" width="132" height="52" rx="10" fill="rgba(248,113,113,.07)" stroke="rgba(248,113,113,.45)"/>
+    <text x="88" y="202" text-anchor="middle" class="fn" style="fill:#f87171">写向死地址</text>
+    <text x="88" y="218" text-anchor="middle" class="fd">10.60.235.237:6379</text>
+    <line x1="88" y1="106" x2="88" y2="182" stroke="#f87171" stroke-width="1.5" marker-end="url(#a4ArrR)" stroke-dasharray="4 3"/>
+    <text x="96" y="152" class="fl">根因：IP 已过期</text>
+  </svg>
+  <div class="flow-cap">②③④ 的正常运转完全依赖 ① 的心跳成功写进 Redis；心跳断了，后面全部静默失效。</div>
+
+  <h2>三、问题：一半活着，一半死着</h2>
+
+  <div class="codeblock"># 验证脚本步骤 10
+等待 35 秒触发 auto_pause...
+[PASS] 超时后状态为 paused（当前=paused）
+发送请求触发 auto_resume...
+(attempt 1 failed: 504 Gateway Time-out)   <span class="cm"># openresty 返回</span>
+(attempt 2 failed: 504 Gateway Time-out)
+(attempt 3 failed: 504 Gateway Time-out)
+[FAIL] 自动恢复后命令执行成功</div>
+  <p>最有意思的细节：手动单独复现（新建一个同样的 auto_pause 沙箱）一切正常——暂停、恢复、命令，全都对。<span class="hl">功能本身没坏，是这个特定环境下的某条链路悄悄断了。</span></p>
+
+  <h2>四、排查：从 504 一路追到 Redis 心跳</h2>
+
+  <p>504 来自 openresty 的"upstream 超时"。逐层取证，用排除法收窄——每一步都在缩小嫌疑范围：</p>
+
+  <p><span class="hlg">第一刀：CubeProxy error.log 查 gate。</span>gate 一旦判定沙箱是 paused，就会打日志并回调 CLM。结果：该沙箱在 error.log 里 <b>0 条记录</b>。说明 gate 根本没走 resume 分支——<span class="hl">字典里没有这个沙箱的 paused 状态</span>。嫌疑：状态字典是空的。</p>
+
+  <p><span class="hlg">第二刀：CLM 日志查 resume 请求。</span>CLM 收到 <code>/internal/resume</code> 必打 <code>resume request received</code>。结果：没有。<span class="hl">CLM 根本没收到叫醒请求。</span>连起来就是：gate 放行了请求 → 请求打到已暂停的沙箱后端 → 无响应 30 秒 → 504。两刀下去，问题锁定在"gate 为什么放行"。</p>
+
+  <p><span class="hlg">第三刀：为什么会放行？</span>gate 查的是 worker 内共享字典 <code>cube_sandbox_state</code>，这个字典由 CLM 经 <code>/admin/state</code> 写入。字典空 → 没有 <code>paused</code> → gate 放行。那 CLM 推了没有？——推了，但推给了"空列表"。</p>
+
+  <p><span class="hlg">第四刀（根因）：Redis 里的注册表。</span>CLM 的 <code>broadcast</code> 每次推送前都从 fleet 取端点列表；fleet 来自 Redis 服务发现；而 Redis 里的注册表由 CubeProxy 心跳维护。查 Redis：</p>
+  <div class="codeblock">$ redis-cli KEYS "cube:v1:shared:cube_proxy:*"
+(empty array)   <span class="cm"># 一个键都没有！</span></div>
+  <p>CubeProxy 的心跳从来没写进过这个 Redis。<span class="hlb">fleet 为空 → broadcast 遍历空列表 → 静默跳过（只有 Debug 日志）→ 字典永不填充 → gate 永远放行 → 504。</span>至此，根因浮出水面：<span class="hl">心跳为什么写不进去？</span></p>
+
+  <h2>五、根因：一条"渲染时固化的 IP"</h2>
+
+  <p>CubeProxy 心跳要连的 Redis 地址，来自 Helm chart 在 <code>proxy.yaml</code> 里渲染出的环境变量。原逻辑：内置 Redis 是 headless Service + StatefulSet，chart 在渲染时用 <code>lookup</code> 读 Endpoints，把当时 Redis Pod 的 IP 写死进环境变量：</p>
+  <div class="codeblock"># 修复前：lookup 固化 Endpoints IP
+{{- $redisEps := lookup "v1" "Endpoints" ... }}
+{{- $redisRegistryHost = (index $subset.addresses 0).ip }}
+# → 渲染结果：CUBE_PROXY_REGISTRY_REDIS_HOST=10.60.235.237</div>
+  <p>而 <code>proxy_registry.lua</code> 跑在 <code>ngx.timer</code> 里，cosocket 没有 nginx resolver，只能用 IP 直连。这个 IP 是 Helm 渲染那一刻的 Redis Pod IP——之后 Redis Pod 重建，IP 变成 <code>10.60.235.240</code>，但 cube-proxy 的环境变量是静态的，心跳就永远写向那个已死掉的 <code>10.60.235.237:6379</code>。</p>
+
+  <div class="think">
+    <div class="q">为什么这么难发现？</div>
+    三个"静默"叠在一起：心跳失败只有 proxy 的 ERR 日志（在容器内文件里，不随 stdout 出）；fleet 为空时 broadcast 只打 Debug 不告警；gate 字典缺失时按"未加入生命周期"处理、放行请求。每一环都优雅地失败了，最后只有一个没有状态码意义的 504 浮出水面。
+  </div>
+
+  <h2>六、修复：让地址"活"起来</h2>
+
+  <p>修法是把"固化 IP"换成"可解析的主机名"——headless Service 的 StatefulSet Pod DNS 名 <code>cube-redis-0.cube-redis.cube-system.svc.cluster.local</code> 永远指向当前存活的 Pod，由入口脚本在启动时解析成 IP：</p>
+
+  <div class="codeblock"># chart 修复：headless 分支改用 Pod DNS 名
+{{- $redisRegistryHost = printf "%s-0.%s.%s.svc.%s" ... }}</div>
+  <div class="codeblock"># cube-proxy-entrypoint.sh：启动时 getent 解析成当前 IP
+if [ -n "${CUBE_PROXY_REGISTRY_REDIS_HOST:-}" ]; then
+  case "${CUBE_PROXY_REGISTRY_REDIS_HOST}" in
+    *[!0-9.]* )    <span class="cm"># 非纯 IP 才解析</span>
+      resolved="$(getent ahostsv4 "${CUBE_PROXY_REGISTRY_REDIS_HOST}" | awk 'NR==1 {print $1}')"
+      [ -n "${resolved}" ] && export CUBE_PROXY_REGISTRY_REDIS_HOST="${resolved}"
+      ;;
+  esac
+fi</div>
+  <p>这里"为什么不直接用 nginx resolver 在 Lua 里解析？"因为 <code>proxy_registry.lua</code> 跑在 <code>ngx.timer</code> 定时器里，Lua cosocket 没有 nginx resolver 可用，只能连一个具体的 IP。所以退而求其次：<span class="hl">入口脚本（bash，有完整 DNS 能力）在启动时把主机名解析成当前 IP</span>，再把解析结果交给 Lua。各用各的时机，各补各的短板。</p>
+  <p>现网立即修复，一条命令滚动更新：</p>
+  <div class="codeblock">kubectl set env deploy/cube-proxy -n cube-system \
+  CUBE_PROXY_REGISTRY_REDIS_HOST=cube-redis-0.cube-redis.cube-system.svc.cluster.local</div>
+
+  <h2>七、验证：链路重新点亮</h2>
+
+  <p>更新后，四个关键证据先后出现：</p>
+  <div class="codeblock"># ① Redis 有了注册表和心跳
+cube:v1:shared:cube_proxy:heartbeat
+cube:v1:shared:cube_proxy:registry
+# ② CLM 发现新代理并完成对账
+discovery: proxy joined  proxy_id=cube-proxy-6994fd99bb-7ws2z
+replay begin  entries=3
+replay done   pushed:3, failed:0
+# ③ 验证脚本
+结果: 34/34 通过, 0 失败    <span class="cm"># auto_resume 恢复如初</span></div>
+
+  <h2>八、权衡：为什么"渲染时固化"会失效</h2>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>维度</th><th>固化 IP</th><th>可解析主机名（本次修复）</th></tr></thead>
+      <tbody>
+        <tr><td>渲染期正确性</td><td>✓ 当时一定可达</td><td>✓ DNS 解析当前值</td></tr>
+        <tr><td>运行期持久性</td><td>✗ Pod 重建即失效</td><td>✓ 永远指向存活 Pod</td></tr>
+        <tr><td>对运行环境的假设</td><td>无（纯 IP）</td><td>需有 DNS + 启动期解析（entrypoint 已实现）</td></tr>
+        <tr><td>失败可见性</td><td>静默（仅 Debug）</td><td>解析失败会立即暴露在启动日志</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>教训也清楚：<span class="hl">用 <code>lookup</code> 把集群内地址固化进 env，等于把"运行时才会变的东西"在"渲染时"定格。</span>headless Service + StatefulSet 的 Pod DNS 名是天然稳定的标识，而 <code>getent</code> 在入口脚本解析，正好补齐了 Lua cosocket 无 resolver 的短板——各用各的时机，各补各的缺口。</p>
+
+  <div class="punchline">
+    <small>一句话带走</small>
+    auto_resume 504 的根因是 CubeProxy 心跳写向了 Helm 渲染时固化的过期 Redis Pod IP，导致 CLM 服务发现 fleet 为空、状态字典永不填充、gate 永远放行；改成 StatefulSet Pod DNS 名 + 入口脚本启动期解析后，四段接力重新点亮。
+  </div>
+
+  <h2>传送门：真想读代码，就这几个文件</h2>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>想看什么</th><th>去这里</th></tr></thead>
+      <tbody>
+        <tr><td>心跳注册（ngx.timer + cosocket）</td><td><code>CubeProxy/lua/proxy_registry.lua</code></td></tr>
+        <tr><td>请求门禁（paused → 回调唤醒）</td><td><code>CubeProxy/lua/sandbox_state.lua</code></td></tr>
+        <tr><td>Redis 发现与端点格式</td><td><code>cube-lifecycle-manager/internal/discovery/discovery.go</code></td></tr>
+        <tr><td>状态推送广播（空 fleet 静默）</td><td><code>cube-lifecycle-manager/internal/proxypush/client.go</code></td></tr>
+        <tr><td>admin 状态写入端点</td><td><code>CubeProxy/lua/admin_phase.lua</code></td></tr>
+        <tr><td>chart 修复与启动解析</td><td><code>deploy/kubernetes/chart/templates/proxy.yaml</code> + <code>chart/files/cube-proxy/cube-proxy-entrypoint.sh</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</main>
+
+<footer>部署排障 04/05 · 本系列完 · 全部排障过程见部署记录文档</footer>
+</body>
+</html>

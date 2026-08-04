@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CubeProxy 请求路由 · 请求怎么找到沙箱，又怎么叫醒它</title>
+<style>
+  :root {
+    --bg:#0b1020; --border:rgba(255,255,255,0.09); --border-strong:rgba(255,255,255,0.16);
+    --text:#e6eaf2; --text-dim:#9aa7bd; --text-faint:#6b7a93;
+    --blue:#4f8cff; --cyan:#2dd4bf; --purple:#a78bfa; --amber:#fbbf24; --red:#f87171; --green:#34d399;
+    --mono:"SFMono-Regular","JetBrains Mono","Fira Code",Consolas,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+    --radius:14px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{font-family:var(--sans);background:var(--bg);color:var(--text);line-height:2.05;font-size:16px}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono);font-size:.85em;background:rgba(79,140,255,.12);color:#b9d2ff;padding:2px 7px;border-radius:6px;white-space:nowrap}
+
+  header{position:sticky;top:0;z-index:100;backdrop-filter:blur(14px);background:rgba(11,16,32,.85);border-bottom:1px solid var(--border)}
+  .nav-inner{max-width:1120px;margin:0 auto;padding:0 24px;height:56px;display:flex;align-items:center;gap:22px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px;white-space:nowrap}
+  .brand-mark{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--blue),var(--green));display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:800}
+  .back-home{margin-left:auto;font-size:13px;color:var(--text-faint);border:1px solid var(--border);padding:5px 14px;border-radius:20px;white-space:nowrap}
+  .back-home:hover{color:var(--text);border-color:var(--border-strong);text-decoration:none}
+
+  main{max-width:740px;margin:0 auto;padding:44px 24px 96px}
+  .hero{border-bottom:1px solid var(--border);padding:12px 0 36px;margin-bottom:48px}
+  .hero .crumb{font-family:var(--mono);font-size:12px;color:var(--text-faint);letter-spacing:1px}
+  .hero h1{font-size:31px;font-weight:900;margin:14px 0 10px;line-height:1.4;background:linear-gradient(90deg,#fff,var(--green));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  .hero .lead{font-size:16.5px;color:var(--text-dim);max-width:640px;line-height:2.1}
+
+  h2{font-size:20px;font-weight:800;margin:60px 0 4px;color:#f0f4ff;line-height:1.5}
+  h3{font-size:16px;font-weight:700;margin:28px 0 4px;color:#dbe4f5}
+  p{margin:16px 0}
+  .dim{color:var(--text-dim)}
+  .hl{color:var(--cyan);font-weight:600}
+  .hlb{color:var(--amber);font-weight:600}
+  .hlr{color:var(--red);font-weight:600}
+  .hlg{color:var(--green);font-weight:600}
+
+  .think{border-left:3px solid var(--purple);background:rgba(167,139,250,.06);padding:16px 22px;border-radius:0 10px 10px 0;margin:24px 0;color:var(--text-dim)}
+  .think .q{font-weight:700;color:var(--purple);margin-bottom:4px}
+
+  .codeblock{background:#0a0f1e;border:1px solid var(--border);border-radius:12px;padding:16px 20px;font-family:var(--mono);font-size:13px;color:#c8d3e8;overflow-x:auto;white-space:pre;line-height:1.9;margin:20px 0}
+  .codeblock .cm{color:var(--text-faint)}
+
+  .pipeline{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:24px 0}
+  .pipeline .ps{border:1px solid var(--border);border-radius:12px;padding:14px;background:rgba(255,255,255,.03)}
+  .pipeline .ps .no{font-family:var(--mono);font-size:11px;color:var(--blue);margin-bottom:6px}
+  .pipeline .ps .t{font-weight:700;font-size:14.5px;margin-bottom:4px}
+  .pipeline .ps .d{font-size:12.5px;color:var(--text-dim);line-height:1.8}
+  @media(max-width:720px){.pipeline{grid-template-columns:1fr 1fr}}
+
+  .tbl-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:12px;margin:20px 0}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  thead th{background:rgba(79,140,255,.1);color:#bcd6ff;text-align:left;padding:9px 14px;font-weight:700;border-bottom:1px solid var(--border-strong)}
+  tbody td{padding:9px 14px;border-bottom:1px solid var(--border);color:var(--text-dim);vertical-align:top}
+  tbody tr:last-child td{border-bottom:none}
+
+  .punchline{border:1px solid rgba(52,211,153,.4);background:rgba(52,211,153,.06);border-radius:var(--radius);padding:20px 24px;margin:30px 0;font-size:16px;line-height:2}
+  .punchline small{display:block;font-family:var(--mono);font-size:11px;color:var(--green);letter-spacing:1px;margin-bottom:8px}
+
+  footer{border-top:1px solid var(--border);padding:28px 24px 46px;text-align:center;color:var(--text-faint);font-size:13px}
+  @media(max-width:720px){.hero h1{font-size:25px}}
+  .flow{width:100%;height:auto;display:block;margin:24px 0 2px}
+  .flow .fn{fill:#eaf0fb;font-size:14px;font-weight:700;font-family:var(--sans)}
+  .flow .fd{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow .fm{fill:#6b7a93;font-size:10.5px;font-family:var(--mono)}
+  .flow .fl{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow-cap{font-family:var(--mono);font-size:11px;color:var(--text-faint);letter-spacing:.6px;text-align:center;margin:6px 0 28px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="nav-inner">
+    <div class="brand"><div class="brand-mark">C</div> CubeSandbox · 技术深入</div>
+    <a class="back-home" href="index.html">← 技术索引</a>
+  </div>
+</header>
+
+<main>
+
+  <div class="hero">
+    <div class="crumb">CUBESANDBOX · 核心技术 09 / 09</div>
+    <h1>请求怎么找到沙箱，又怎么叫醒它</h1>
+    <p class="lead">这是九篇的收官。CubeProxy 是系统的入向大门：外部请求带着一个沙箱 ID 进来，它要路由到那台机器上的那个端口。而它还有一个更妙的职责——如果目标沙箱正在"睡觉"（被 CLM 暂停了），它不是返回错误，而是把沙箱叫醒再继续转发。我们看这条链路怎么设计。</p>
+  </div>
+
+  <h2>一、问题：入向路由的两道难题</h2>
+
+  <p>外部请求要到达沙箱，得先回答两个问题。第一，<span class="hlb">路由</span>：请求里带着沙箱 ID 和端口，怎么翻译成"哪台宿主机的哪个端口"？宿主机、沙箱的 IP 是动态分配的，路由表必须实时、可查。第二，<span class="hlb">状态</span>：沙箱可能被自动暂停了（CLM 的功劳），此时请求打到它身上会发生什么？返回"沙箱不存在"当然简单，但用户会觉得"我的沙箱怎么丢了"——体验上应该是"等一小会儿，它醒了"。</p>
+  <p>CubeProxy 的设计里，两个难题的解法是耦合的：它解析后端时顺便拿到沙箱的<span class="hl">生命周期状态</span>，然后路由前先过一道"状态门禁"——该叫醒就叫醒。我们顺着一个请求的路径走。</p>
+
+  <h2>二、入口：双模式解析</h2>
+
+  <p>CubeProxy 同时支持两种 URL 约定，方便不同场景的客户端。E2B SDK 走经典的 Host 模式：</p>
+  <div class="codeblock">Host 模式（rewrite_phase.lua）：
+Host: 80-a1b2c3d4e5f6.domain.com
+      │   └──────────┬───────────┘
+      │              └── 正则 ^(%d+)%-([^%.]+) 提取
+      │                    port="80", sandbox_id="a1b2c3d4e5f6"
+      ▼
+resolve_backend(sandbox_id, port) → route 到沙箱 IP:port，重写 Host 头</div>
+  <p>通用场景走 Path 模式：</p>
+  <div class="codeblock">Path 模式（path_rewrite_phase.lua）：
+URI: /sandbox/a1b2c3d4e5f6/80/rest/of/path
+     ├─ sandbox_id = "a1b2c3d4e5f6"
+     ├─ port       = "80"
+     └─ rest       = "/rest/of/path" → 重写为实际容器路径
+同时设置 proxy_redirect / proxy_cookie_path：让容器里的重定向/Cookie 也带
+/sandbox/&lt;id&gt;/&lt;port&gt; 前缀；X-Forwarded-Prefix：/sandbox/&lt;id&gt;/&lt;port&gt;</div>
+  <p>为什么维护两套？Host 模式对 SDK 用户最透明（URL 结构不用改），但依赖 DNS 泛解析；Path 模式适合"一个域名服务多个沙箱"或没法配置泛解析的环境。两种模式最终都汇入同一个 <code>resolve_backend</code>——解析逻辑只有一份，避免了双份维护。</p>
+
+  <svg class="flow" viewBox="0 0 720 272" role="img" aria-label="CubeProxy 请求完整旅程">
+    <defs>
+      <marker id="prArr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#4f8cff"/></marker>
+      <marker id="prArrG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#34d399"/></marker>
+      <marker id="prArrA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#fbbf24"/></marker>
+      <marker id="prArrR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#f87171"/></marker>
+    </defs>
+    <rect x="0" y="0" width="720" height="272" rx="14" fill="rgba(255,255,255,.03)" stroke="rgba(255,255,255,.09)"/>
+    <text x="24" y="28" class="fm">一个外部请求的完整旅程 · 双模式 → 两级缓存 → 状态门禁</text>
+
+    <rect x="20" y="38" width="170" height="44" rx="10" fill="rgba(255,255,255,.04)" stroke="rgba(255,255,255,.25)"/>
+    <text x="105" y="58" text-anchor="middle" class="fn">Host 模式</text>
+    <text x="105" y="75" text-anchor="middle" class="fm">port-id.domain</text>
+    <rect x="210" y="38" width="170" height="44" rx="10" fill="rgba(255,255,255,.04)" stroke="rgba(255,255,255,.25)"/>
+    <text x="295" y="58" text-anchor="middle" class="fn">Path 模式</text>
+    <text x="295" y="75" text-anchor="middle" class="fm">/sandbox/&lt;id&gt;/&lt;port&gt;</text>
+
+    <path d="M 105 82 L 105 96 L 270 96 L 270 102" fill="none" stroke="#4f8cff" stroke-width="1.5"/>
+    <path d="M 295 82 L 295 96 L 292 96 L 292 102" fill="none" stroke="#4f8cff" stroke-width="1.5"/>
+    <line x1="270" y1="102" x2="292" y2="102" stroke="#4f8cff" stroke-width="1.5"/>
+    <line x1="292" y1="102" x2="292" y2="112" stroke="#4f8cff" stroke-width="1.5" marker-end="url(#prArr)"/>
+
+    <rect x="120" y="112" width="260" height="48" rx="10" fill="rgba(79,140,255,.08)" stroke="rgba(79,140,255,.45)"/>
+    <text x="250" y="133" text-anchor="middle" class="fn">resolve_backend · 两级缓存</text>
+    <text x="250" y="151" text-anchor="middle" class="fd">shared dict → Redis · IP+port+state</text>
+    <line x1="380" y1="136" x2="370" y2="160" stroke="#4f8cff" stroke-width="1.5" marker-end="url(#prArr)"/>
+
+    <polygon points="360,164 440,132 520,164 440,196" fill="rgba(79,140,255,.1)" stroke="rgba(79,140,255,.6)" stroke-width="1.5"/>
+    <text x="440" y="162" text-anchor="middle" class="fn">状态门禁 gate</text>
+    <text x="440" y="180" text-anchor="middle" class="fd">按 state:&lt;id&gt; 分支</text>
+
+    <line x1="520" y1="164" x2="560" y2="164" stroke="#34d399" stroke-width="1.5" marker-end="url(#prArrG)"/>
+    <text x="540" y="110" class="fl">running</text>
+    <rect x="560" y="118" width="140" height="92" rx="10" fill="rgba(52,211,153,.08)" stroke="rgba(52,211,153,.5)"/>
+    <text x="630" y="144" text-anchor="middle" class="fn">放行</text>
+    <text x="630" y="164" text-anchor="middle" class="fd">balancer 动态选路</text>
+    <text x="630" y="184" text-anchor="middle" class="fm">set_current_peer</text>
+
+    <line x1="400" y1="180" x2="230" y2="192" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#prArrA)"/>
+    <text x="300" y="174" class="fl">paused</text>
+    <rect x="20" y="192" width="250" height="50" rx="9" fill="rgba(251,191,36,.07)" stroke="rgba(251,191,36,.5)"/>
+    <text x="145" y="211" text-anchor="middle" class="fn" style="fill:#fbbf24">paused → 自动唤醒</text>
+    <text x="145" y="228" text-anchor="middle" class="fd">子请求 _sidecar_resume → CLM 阻塞等恢复</text>
+
+    <line x1="440" y1="196" x2="345" y2="220" stroke="#64748b" stroke-width="1.5" marker-end="url(#prArr)"/>
+    <line x1="440" y1="196" x2="495" y2="220" stroke="#f87171" stroke-width="1.5" marker-end="url(#prArrR)"/>
+    <line x1="440" y1="196" x2="645" y2="220" stroke="#64748b" stroke-width="1.5" marker-end="url(#prArr)"/>
+    <rect x="280" y="220" width="130" height="44" rx="9" fill="rgba(100,116,139,.08)" stroke="rgba(100,116,139,.5)"/>
+    <text x="345" y="238" text-anchor="middle" class="fn">pausing → 503</text>
+    <text x="345" y="255" text-anchor="middle" class="fm">Retry-After</text>
+    <rect x="430" y="220" width="150" height="44" rx="9" fill="rgba(248,113,113,.08)" stroke="rgba(248,113,113,.5)"/>
+    <text x="505" y="238" text-anchor="middle" class="fn" style="fill:#f87171">killing / killed</text>
+    <text x="505" y="255" text-anchor="middle" class="fm">410 Gone</text>
+    <rect x="590" y="220" width="120" height="44" rx="9" fill="rgba(100,116,139,.08)" stroke="rgba(100,116,139,.5)"/>
+    <text x="650" y="238" text-anchor="middle" class="fn">未知 → 404</text>
+    <text x="650" y="255" text-anchor="middle" class="fm">沙箱不存在</text>
+  </svg>
+
+  <h2>三、机制：后端解析——两级缓存</h2>
+
+  <p>解析后端是"先本地、后远端"的两级：</p>
+  <div class="codeblock">resolve_backend(sandbox_id, port)：
+① 查共享字典 sandbox_backend_cache（key = sandbox_id:port）
+     ├─ 命中且未过期 → 返回 backend{ip, host_port, meta}
+     └─ 未命中/过期 → 查 Redis
+② Redis：按 sandbox_id 取 meta（HSET 结构，含 host_id/host_ip/端口映射）
+     → 组装 backend → 写回本地缓存
+③ 仍然失败 → 判定沙箱不存在 → 返回 nil（触发 404 / 门禁逻辑）</div>
+  <p>这个两级设计的动机是延迟：共享字典在进程内，查询是微秒级；Redis 在远端，每次查询都有网络往返。把热点数据缓存在本地，是典型的"以内存换延迟"。而解析结果里顺带携带的<span class="hl">生命周期状态和 last_active 水位</span>，正是下一步门禁逻辑的输入——所以解析不能只返回"地址"，必须返回"地址 + 状态"。跨多个 CubeProxy 副本时，last_active 取各副本上报的最大值（由 CLM 轮询汇总）。</p>
+
+  <h2>四、机制：状态门禁——自动恢复的最后一公里</h2>
+
+  <p>请求解析到后端后，不是直接转发，而是先过状态门禁（<code>sandbox_state.gate</code>）。这是整个"自动暂停/自动恢复"闭环里最精妙的一环：</p>
+  <div class="codeblock">sandbox_state.gate(backend)：
+根据 backend 的状态字典（state:&lt;id&gt;）分支：
+├─ running  → 放行
+├─ paused   → 触发自动恢复：
+│     ngx.location.capture("/_sidecar_resume", {args={sandbox_id=…}})
+│       → 内部子请求调用 CLM: POST /internal/resume（阻塞等待恢复完成）
+│       → 恢复成功 → 重试路由；失败 → 503
+├─ pausing  → 503 + Retry-After（马上就好）
+├─ killing / killed → 410 Gone（沙箱即将/已被销毁）
+└─ 未知    → 404</div>
+  <p>关键设计是"<span class="hlb">阻塞式恢复</span>"：请求到达一个 paused 沙箱时，数据面不返回错误，而是阻塞几百毫秒到一两秒，等 VM 从快照恢复，然后重试路由。对用户来说，这是"首次请求稍微慢了一点"，而不是"一次失败"。配合 CLM resumer 的并发合并（那篇里讲过），同一沙箱的并发请求只触发一次恢复，其余等待同一个结果。</p>
+  <p>这就是为什么整个系统敢做自动暂停：<span class="hl">暂停省的是机器的资源，用户无感是因为 CubeProxy 在门口替你等着叫醒。</span>省资源与好体验之间的鸿沟，由这个门禁补上。</p>
+
+  <h2>五、机制：动态选路——没有静态 upstream</h2>
+
+  <p>转发本身也做了一个不常见的取舍：CubeProxy 不配置静态 upstream 块，而是在 balancer 阶段动态指定每个请求的目标：</p>
+  <div class="codeblock">balancer_phase.lua（balancer_by_lua_block）：
+  从当前请求上下文取 resolve_backend 的结果
+    → balancer.set_current_peer(backend.ip, backend.host_port)
+  没有静态上游服务器，peer 完全由 Lua 每请求决定
+    → 沙箱 IP 由元数据驱动，宿主机迁移/重建后自动生效，无需 reload</div>
+  <p>为什么值得这样？如果写死 upstream 列表，沙箱 IP 一变（宿主机重建、沙箱迁移）就得 reload nginx。动态选路让 peer 完全由 Redis 里的元数据驱动——元数据变了，下一跳自然就对了，配置零维护。配合 <code>maskRequestHost</code>（request_host.lua 按 ${PORT} 模板渲染重建上游 Host 头），保证沙箱内应用看到的 Host 与其被调用端口一致——多端口服务场景下这是必需的，否则容器里拿到的主机名对不上。</p>
+
+  <h2>六、机制：注册与心跳——让自己被发现</h2>
+
+  <p>CLM 需要知道"有哪些 CubeProxy 副本"来轮询 last_active 与推送状态——靠 Redis 注册表自我宣告：</p>
+  <div class="codeblock">init_worker_phase.lua（每 worker 启动）：
+  HSET cube:v1:shared:cube_proxy:registry &lt;proxy_id&gt; {admin_url, resume_url, node_ip, started_at, version}
+  ZADD cube:v1:shared:cube_proxy:heartbeat &lt;unix_ms&gt; &lt;proxy_id&gt;
+  （心跳 TTL 15s，按 3s 周期刷新；过期成员由 CLM 的 discovery 清理）
+
+同时：
+  从 Redis 拉取沙箱 meta 建立本地缓存基线
+  admin_phase 提供：
+    POST /admin/meta/upsert    ← CLM 推送沙箱元数据
+    POST /admin/meta/delete    ← CLM 通知沙箱销毁
+    POST /admin/state          ← CLM 推送状态变化
+    GET  /admin/last_active?since=… ← CLM 轮询活跃水位（X-Cube-Admin-Token 鉴权）</div>
+  <p>三管齐下保证"任何时刻每个副本都有全量路由信息"：<span class="hl">新副本靠 bootstrap 拉全量，存量副本靠 admin 事件推送增量，故障副本靠心跳过期被剔除。</span>一个分布式系统里最经典的三个数据同步模式，在这里各司其职、互相兜底。心跳用 ZADD + TTL 15s + 3s 周期：副本活着就持续刷新自己的分数（时间戳），死了就自然过期，CLM 扫到就清理。</p>
+
+  <h2>七、收束</h2>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>问题</th><th>设计</th><th>关键权衡</th></tr></thead>
+      <tbody>
+        <tr><td>两种客户端 URL 约定</td><td>Host 模式 + Path 模式，汇入同一解析</td><td>兼容 E2B SDK 与通用场景</td></tr>
+        <tr><td>路由表要实时</td><td>shared dict + Redis 两级缓存</td><td>内存换延迟</td></tr>
+        <tr><td>请求打到已暂停沙箱</td><td>状态门禁阻塞式唤醒</td><td>用户无感，代价是首请求延迟</td></tr>
+        <tr><td>沙箱 IP 会变</td><td>balancer 动态选路，无静态 upstream</td><td>零 reload，元数据驱动</td></tr>
+        <tr><td>多副本信息同步</td><td>bootstrap 拉全量 + 事件推增量 + 心跳剔除</td><td>三种模式各司其职</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="punchline">
+    <small>一句话带走</small>
+    CubeProxy 是双模式请求路由 + 两级后端解析 + 状态门禁驱动的自动唤醒 + balancer 动态选路 + Redis 注册表自我宣告的无状态数据面——它是 E2B 兼容的入口，也是"自动暂停"在用户请求侧的无感保障。
+  </div>
+
+  <h2>传送门：真想读代码，就这几个文件</h2>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>想看什么</th><th>去这里</th></tr></thead>
+      <tbody>
+        <tr><td>nginx 主配置</td><td><code>CubeProxy/nginx.conf</code></td></tr>
+        <tr><td>Host 模式解析</td><td><code>CubeProxy/lua/rewrite_phase.lua</code></td></tr>
+        <tr><td>Path 模式解析</td><td><code>CubeProxy/lua/path_rewrite_phase.lua</code></td></tr>
+        <tr><td>后端解析（双级）</td><td><code>CubeProxy/lua/sandbox_backend.lua</code></td></tr>
+        <tr><td>状态门禁</td><td><code>CubeProxy/lua/sandbox_state.lua</code>（gate 分支）</td></tr>
+        <tr><td>动态选路</td><td><code>CubeProxy/lua/balancer_phase.lua</code></td></tr>
+        <tr><td>Admin API</td><td><code>CubeProxy/lua/admin_phase.lua</code></td></tr>
+        <tr><td>启动拉取与心跳</td><td><code>CubeProxy/lua/init_worker_phase.lua</code>、<code>proxy_registry.lua</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</main>
+
+<footer>CubeProxy 请求路由 · CubeSandbox 技术深入 09/09 · 到这里，一条 sandbox.create() 的完整旅程就走完了</footer>
+</body>
+</html>

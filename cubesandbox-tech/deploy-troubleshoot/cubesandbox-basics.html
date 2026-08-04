@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 0 篇 · 先看懂一张地图：CubeSandbox 全景速览</title>
+<style>
+  :root {
+    --bg:#0b1020; --border:rgba(255,255,255,0.09); --border-strong:rgba(255,255,255,0.16);
+    --text:#e6eaf2; --text-dim:#9aa7bd; --text-faint:#6b7a93;
+    --blue:#4f8cff; --cyan:#2dd4bf; --purple:#a78bfa; --amber:#fbbf24; --red:#f87171; --green:#34d399;
+    --mono:"SFMono-Regular","JetBrains Mono","Fira Code",Consolas,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+    --radius:14px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{font-family:var(--sans);background:var(--bg);color:var(--text);line-height:2.05;font-size:16px}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono);font-size:.85em;background:rgba(79,140,255,.12);color:#b9d2ff;padding:2px 7px;border-radius:6px;white-space:nowrap}
+
+  header{position:sticky;top:0;z-index:100;backdrop-filter:blur(14px);background:rgba(11,16,32,.85);border-bottom:1px solid var(--border)}
+  .nav-inner{max-width:1120px;margin:0 auto;padding:0 24px;height:56px;display:flex;align-items:center;gap:22px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px;white-space:nowrap}
+  .brand-mark{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--blue),var(--purple));display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:800}
+  .back-home{margin-left:auto;font-size:13px;color:var(--text-faint);border:1px solid var(--border);padding:5px 14px;border-radius:20px;white-space:nowrap}
+  .back-home:hover{color:var(--text);border-color:var(--border-strong);text-decoration:none}
+
+  main{max-width:740px;margin:0 auto;padding:44px 24px 96px}
+  .hero{border-bottom:1px solid var(--border);padding:12px 0 36px;margin-bottom:48px}
+  .hero .crumb{font-family:var(--mono);font-size:12px;color:var(--text-faint);letter-spacing:1px}
+  .hero h1{font-size:31px;font-weight:900;margin:14px 0 10px;line-height:1.4;background:linear-gradient(90deg,#fff,var(--blue));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  .hero .lead{font-size:16.5px;color:var(--text-dim);max-width:640px;line-height:2.1}
+
+  h2{font-size:20px;font-weight:800;margin:60px 0 4px;color:#f0f4ff;line-height:1.5}
+  h3{font-size:16px;font-weight:700;margin:28px 0 4px;color:#dbe4f5}
+  p{margin:16px 0}
+  .dim{color:var(--text-dim)}
+  .hl{color:var(--cyan);font-weight:600}
+  .hlb{color:var(--amber);font-weight:600}
+  .hlr{color:var(--red);font-weight:600}
+  .hlg{color:var(--green);font-weight:600}
+
+  .think{border-left:3px solid var(--purple);background:rgba(167,139,250,.06);padding:16px 22px;border-radius:0 10px 10px 0;margin:24px 0;color:var(--text-dim)}
+  .think .q{font-weight:700;color:var(--purple);margin-bottom:4px}
+
+  .codeblock{background:#0a0f1e;border:1px solid var(--border);border-radius:12px;padding:16px 20px;font-family:var(--mono);font-size:13px;color:#c8d3e8;overflow-x:auto;white-space:pre;line-height:1.9;margin:20px 0}
+  .codeblock .cm{color:var(--text-faint)}
+
+  .tbl-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:12px;margin:20px 0}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  thead th{background:rgba(79,140,255,.1);color:#bcd6ff;text-align:left;padding:9px 14px;font-weight:700;border-bottom:1px solid var(--border-strong)}
+  tbody td{padding:9px 14px;border-bottom:1px solid var(--border);color:var(--text-dim);vertical-align:top}
+  tbody tr:last-child td{border-bottom:none}
+
+  .punchline{border:1px solid rgba(52,211,153,.4);background:rgba(52,211,153,.06);border-radius:var(--radius);padding:20px 24px;margin:30px 0;font-size:16px;line-height:2}
+  .punchline small{display:block;font-family:var(--mono);font-size:11px;color:var(--green);letter-spacing:1px;margin-bottom:8px}
+
+  footer{border-top:1px solid var(--border);padding:28px 24px 46px;text-align:center;color:var(--text-faint);font-size:13px}
+  @media(max-width:720px){.hero h1{font-size:25px}}
+  .flow{width:100%;height:auto;display:block;margin:24px 0 2px}
+  .flow .fn{fill:#eaf0fb;font-size:14px;font-weight:700;font-family:var(--sans)}
+  .flow .fd{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow .fm{fill:#6b7a93;font-size:10.5px;font-family:var(--mono)}
+  .flow .fl{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow-cap{font-family:var(--mono);font-size:11px;color:var(--text-faint);letter-spacing:.6px;text-align:center;margin:6px 0 28px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="nav-inner">
+    <div class="brand"><div class="brand-mark">C</div> CubeSandbox · 部署排障</div>
+    <a class="back-home" href="index.html">← 排障索引</a>
+  </div>
+</header>
+
+<main>
+
+  <div class="hero">
+    <div class="crumb">CUBESANDBOX · 部署排障 00 / 05 · 前置篇</div>
+    <h1>先看懂一张地图：CubeSandbox 全景速览</h1>
+    <p class="lead">这一篇不是排障，是为后面四篇排障铺路。如果你第一次接触 CubeSandbox，请先花十分钟读完这篇——它回答三个问题：一个"沙箱"到底是什么、SDK 一行代码背后发生了什么、那么多组件各管什么。有了这张地图，后面每篇排障你都能立刻定位"问题出在地图的哪个角落"。</p>
+  </div>
+
+  <h2>一、一个"沙箱"，到底是什么</h2>
+
+  <p>在 CubeSandbox 里，沙箱（Sandbox）并不是 Docker 容器，而是一台<span class="hl">真正的轻量虚拟机（MicroVM）</span>。它有自己的 Linux 内核、自己的文件系统（rootfs）、自己的 IP。你调用 SDK 创建沙箱，实际上是在一台宿主机上<span class="hlb">启动了一台新的虚拟机</span>。</p>
+  <p>这台虚拟机用 PVM（Pagetable-based Virtual Machine，页表虚拟化）运行——不需要 KVM 那样的硬件辅助虚拟化，纯软件分页，所以对宿主机没有"必须开 KVM"的要求。但这也意味着：你创建沙箱的每一秒，都有真实的 CPU、内存、磁盘被一台完整的操作系统占着。</p>
+  <p>虚拟机里常驻一个叫 <code>envd</code> 的进程，监听固定的 <code>49983</code> 端口。它相当于沙箱的"操作系统代理"：你的命令执行、文件读写、进程管理等，最终都是 envd 在虚拟机里替你完成的。</p>
+
+  <div class="think">
+    <div class="q">那"秒开"是怎么做到的？</div>
+    靠模板快照。见下一节——这是理解整个系统最重要的概念。
+  </div>
+
+  <h2>二、模板：秒开沙箱的秘诀</h2>
+
+  <p>从零启动一台 Linux 虚拟机需要几十秒（加载内核、初始化系统）。CubeSandbox 的沙箱能"秒开"，秘密在 <span class="hl">模板（Template）</span>。</p>
+  <p>模板创建过程（<code>cubemastercli template create-from-image</code>）大致是：</p>
+  <div class="codeblock">① 拉取一个 OCI 镜像（Docker 镜像）
+② 把镜像转换为一个 ext4 磁盘镜像（rootfs）
+③ 用这个 rootfs 启动一台"build 沙箱"，执行镜像里预设的初始化脚本
+④ 把这台沙箱的磁盘 + 内存 打成一份快照（AppSnapshot），保存为模板</div>
+  <p>之后每次创建沙箱，都不是从零启动，而是<span class="hlb">从模板快照恢复</span>——把快照里的磁盘和内存"克隆"出来，一台"已经初始化好、正在运行"的虚拟机立刻出现在眼前。这就是秒开的原理。</p>
+  <p>代价是：模板是"死"的。rootfs 里的配置文件（比如 <code>/etc/resolv.conf</code>）在快照里就定型了，运行时很难再改。这个"静态"特性，会在排障链二（DNS）里坑你一次。</p>
+  <p>另一个关键点：模板创建时通过 <code>--expose-port</code> 声明"这个沙箱对外暴露哪些端口"。端口没声明，外界就永远连不进来——这是排障链一的伏笔。</p>
+
+  <h2>三、SDK 一行代码，背后有两条完全不同的路</h2>
+
+  <p>用 Python SDK 写一个最小示例：</p>
+  <div class="codeblock">sb = Sandbox.create(template=tpl)          <span class="cm"># ① 创建沙箱</span>
+sb.commands.run("echo hello")               <span class="cm"># ② 执行命令</span>
+sb.get_info()                               <span class="cm"># ③ 查询状态</span></div>
+  <p>这三行代码，走的是<span class="hl">两条互不相干的路</span>：</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>操作</th><th>打给谁</th><th>做什么</th></tr></thead>
+      <tbody>
+        <tr><td>①③ 创建 / 查状态</td><td><b>CubeMaster 控制面</b>（CubeAPI，HTTP <code>:3000</code>）</td><td>调度、分配资源、记录元数据</td></tr>
+        <tr><td>② 执行命令</td><td><b>CubeProxy 数据面</b>（HTTP <code>:80</code>）</td><td>路由到沙箱内 envd，实时往返</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>这个区分极其重要：<span class="hlb">创建沙箱的"开关"和沙箱内命令的"水管"是两套系统。</span>一个出问题不影响另一个。排障链一就是两条路之间"端口没对上"。</p>
+
+  <h2>四、组件全景：谁在管什么</h2>
+
+  <p>把整个系统摊开，分成"控制面"和"节点数据面"两层。控制面是大脑，决定"创建哪个沙箱、什么时候暂停"；节点数据面是手脚，真的去启动虚拟机、转发流量。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>层次</th><th>组件</th><th>一句话职责</th></tr></thead>
+      <tbody>
+        <tr><td rowspan="4" style="vertical-align:middle"><b>控制面</b></td><td><code>CubeMaster / CubeAPI</code></td><td>SDK 的入口；调度沙箱落到哪台节点、管理模板、处理 pause/resume</td></tr>
+        <tr><td><code>cube-lifecycle-manager</code>（CLM）</td><td>自动暂停/恢复的协调中枢：扫描闲置沙箱、状态对账</td></tr>
+        <tr><td><code>CubeProxy</code></td><td>反向代理，把 SDK 的"命令请求"路由到具体沙箱；维护沙箱状态门禁</td></tr>
+        <tr><td><code>Redis / MySQL</code></td><td>Redis：元数据、事件流、服务注册表；MySQL：持久化业务数据</td></tr>
+        <tr><td rowspan="4" style="vertical-align:middle"><b>节点数据面</b></td><td><code>cubelet</code></td><td>每台节点上的代理，管理本节点沙箱生命周期（类似 K8s 的 kubelet）</td></tr>
+        <tr><td><code>CubeShim</code> + VMM</td><td>containerd shim 与轻量虚拟机监控器，真正把虚拟机拉起来 / 暂停</td></tr>
+        <tr><td><code>CubeNet</code>（CubeVS）</td><td>eBPF 网络数据面：沙箱出向 SNAT、网络策略、DNS 学习</td></tr>
+        <tr><td><code>network-agent</code></td><td>管理虚拟网卡（tap 设备）、给沙箱分配 IP、配置 MTU</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <svg class="flow" viewBox="0 0 720 352" role="img" aria-label="CubeSandbox 系统全景">
+    <defs>
+      <marker id="b0Arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#4f8cff"/></marker>
+      <marker id="b0ArrC" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2dd4bf"/></marker>
+      <marker id="b0ArrG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#34d399"/></marker>
+    </defs>
+    <rect x="0" y="0" width="720" height="352" rx="14" fill="rgba(255,255,255,.03)" stroke="rgba(255,255,255,.09)"/>
+    <text x="24" y="26" class="fm">CubeSandbox 全景 · 控制面决定"做什么"，节点数据面负责"真干"</text>
+
+    <text x="40" y="60" class="fl">用户 / SDK</text>
+    <rect x="30" y="66" width="150" height="46" rx="9" fill="rgba(79,140,255,.1)" stroke="rgba(79,140,255,.6)"/>
+    <text x="105" y="84" text-anchor="middle" class="fn">SDK (Python)</text>
+    <text x="105" y="100" text-anchor="middle" class="fd">create / commands.run</text>
+
+    <rect x="300" y="52" width="150" height="46" rx="9" fill="rgba(45,212,191,.08)" stroke="rgba(45,212,191,.45)"/>
+    <text x="375" y="70" text-anchor="middle" class="fn">CubeMaster</text>
+    <text x="375" y="86" text-anchor="middle" class="fd">创建/调度/模板</text>
+    <rect x="300" y="108" width="150" height="46" rx="9" fill="rgba(45,212,191,.08)" stroke="rgba(45,212,191,.45)"/>
+    <text x="375" y="126" text-anchor="middle" class="fn">CLM</text>
+    <text x="375" y="142" text-anchor="middle" class="fd">自动暂停/恢复</text>
+    <rect x="300" y="164" width="150" height="46" rx="9" fill="rgba(45,212,191,.08)" stroke="rgba(45,212,191,.45)"/>
+    <text x="375" y="182" text-anchor="middle" class="fn">CubeProxy</text>
+    <text x="375" y="198" text-anchor="middle" class="fd">命令路由/状态门禁</text>
+    <rect x="300" y="220" width="150" height="46" rx="9" fill="rgba(45,212,191,.07)" stroke="rgba(45,212,191,.4)"/>
+    <text x="375" y="238" text-anchor="middle" class="fn">Redis / MySQL</text>
+    <text x="375" y="254" text-anchor="middle" class="fd">元数据/事件/注册表</text>
+    <text x="375" y="292" text-anchor="middle" class="fd" style="fill:#6b7a93">—— 控制面 ——</text>
+
+    <rect x="520" y="52" width="176" height="46" rx="9" fill="rgba(167,139,250,.08)" stroke="rgba(167,139,250,.45)"/>
+    <text x="608" y="70" text-anchor="middle" class="fn">cubelet</text>
+    <text x="608" y="86" text-anchor="middle" class="fd">节点沙箱生命周期</text>
+    <rect x="520" y="108" width="176" height="46" rx="9" fill="rgba(167,139,250,.08)" stroke="rgba(167,139,250,.45)"/>
+    <text x="608" y="126" text-anchor="middle" class="fn">CubeShim + VMM</text>
+    <text x="608" y="142" text-anchor="middle" class="fd">拉起/暂停虚拟机</text>
+    <rect x="520" y="164" width="176" height="46" rx="9" fill="rgba(167,139,250,.08)" stroke="rgba(167,139,250,.45)"/>
+    <text x="608" y="182" text-anchor="middle" class="fn">CubeNet (eBPF)</text>
+    <text x="608" y="198" text-anchor="middle" class="fd">SNAT/策略/DNS 学习</text>
+    <rect x="520" y="220" width="176" height="46" rx="9" fill="rgba(167,139,250,.07)" stroke="rgba(167,139,250,.4)"/>
+    <text x="608" y="238" text-anchor="middle" class="fn">network-agent</text>
+    <text x="608" y="254" text-anchor="middle" class="fd">tap 设备/IP/MTU</text>
+    <text x="608" y="292" text-anchor="middle" class="fd" style="fill:#6b7a93">—— 节点数据面 ——</text>
+
+    <rect x="520" y="300" width="176" height="32" rx="8" fill="rgba(52,211,153,.08)" stroke="rgba(52,211,153,.5)"/>
+    <text x="608" y="320" text-anchor="middle" class="fn" style="fill:#34d399">沙箱 (PVM 虚拟机)</text>
+
+    <line x1="180" y1="88" x2="300" y2="75" stroke="#4f8cff" stroke-width="1.5" marker-end="url(#b0Arr)"/>
+    <line x1="180" y1="88" x2="300" y2="187" stroke="#2dd4bf" stroke-width="1.5" marker-end="url(#b0ArrC)"/>
+    <text x="238" y="106" text-anchor="middle" class="fl" style="font-size:10.5px">创建/状态</text>
+    <text x="236" y="150" text-anchor="middle" class="fl" style="font-size:10.5px">命令</text>
+    <line x1="450" y1="75" x2="520" y2="75" stroke="#2dd4bf" stroke-width="1.5" marker-end="url(#b0ArrC)"/>
+    <text x="485" y="66" text-anchor="middle" class="fl" style="font-size:10px">下发</text>
+    <line x1="450" y1="187" x2="520" y2="187" stroke="#2dd4bf" stroke-width="1.5" marker-end="url(#b0ArrC)"/>
+    <text x="485" y="179" text-anchor="middle" class="fl" style="font-size:10px">路由</text>
+    <line x1="608" y1="266" x2="608" y2="300" stroke="#34d399" stroke-width="1.5" marker-end="url(#b0ArrG)"/>
+  </svg>
+  <div class="flow-cap">本篇之后的所有排障，都能在这张图上定位：链一在 CubeProxy 路由，链二在 CubeNet 策略，链三在 CubeShim/VMM 网络配置，链四在 CubeProxy↔CLM↔Redis 的注册链路。</div>
+
+  <h2>五、一次命令执行，完整旅程</h2>
+
+  <p>把第 ② 行 <code>commands.run()</code> 展开，它实际走了这样一段路：</p>
+  <div class="codeblock">SDK
+ └─ HTTP 请求，Host 头 = &lt;sandbox_id&gt;-49983.cube.app   <span class="cm"># 虚拟域名，端口固定 49983</span>
+    └─ 到达 CubeProxy
+       └─ Lua 解析 Host：沙箱 ID = xxx，目标端口 = 49983
+          └─ 查 Redis 代理映射 …sandbox:proxy:&lt;id&gt;：49983 → 宿主端口
+             └─ 转发到节点上的宿主端口
+                └─ 经网络数据面进入沙箱的虚拟网卡
+                   └─ 沙箱内 envd（:49983）接收，执行命令，返回结果</div>
+  <p>注意 <span class="hlb">Redis 代理映射</span>这一步：沙箱在哪个节点、以哪个宿主端口暴露 <code>49983</code>，都记录在 Redis 的一个 hash 里。这一步查不到，命令就永远到达不了沙箱——排障链一正是栽在这里。</p>
+
+  <h2>六、生命周期：沙箱会"睡觉"</h2>
+
+  <p>沙箱有状态：<code>running</code>（运行中）、<code>paused</code>（暂停）、<code>killed</code>（已销毁）。<span class="hl">暂停（pause）不是关停</span>，而是把虚拟机内存写盘成快照、释放 CPU/内存，需要时再恢复（resume）——这天然复用了模板的秒开机制。</p>
+  <p>谁触发暂停？用户手动调 <code>sb.pause()</code>，或者设置 <code>lifecycle={"on_timeout":"pause","auto_resume":True}</code> 后由 CLM 自动判定"空闲超时"而暂停。谁触发恢复？用户请求到达时，CubeProxy 的"门禁"发现沙箱是 paused，会内部通知 CLM 把它唤醒。这套"睡/醒"的协作链条，就是排障链四的主战场。</p>
+
+  <h2>七、本系列排障的地图坐标</h2>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>排障</th><th>现象一句话</th><th>根因在地图的哪</th></tr></thead>
+      <tbody>
+        <tr><td><a href="envd-port.html">01 · envd 端口</a></td><td>建沙箱成功，命令 ConnectException</td><td>CubeProxy → Redis 代理映射：模板没暴露 49983</td></tr>
+        <tr><td><a href="sandbox-dns.html">02 · 沙箱 DNS</a></td><td>公网域名解析失败</td><td>CubeNet eBPF 策略默认拒绝私网段（含 CoreDNS）</td></tr>
+        <tr><td><a href="mtu-blackhole.html">03 · MTU 黑洞</a></td><td>HTTP 通、HTTPS 超时、大文件截断</td><td>CubeShim/VMM 没把 MTU 传进虚拟机</td></tr>
+        <tr><td><a href="auto-resume-504.html">04 · auto_resume 504</a></td><td>自动暂停正常，自动恢复 504</td><td>CubeProxy 心跳写向过期 Redis IP → CLM 发现不到代理</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="punchline">
+    <small>一句话带走</small>
+    记住三件事就够：沙箱是一台由模板快照秒开的 PVM 虚拟机；创建走 CubeMaster、命令走 CubeProxy 两条独立链路；运行中沙箱还会被 CLM 自动暂停和恢复。后面每篇排障都在这三句话的延长线上。
+  </div>
+
+  <h2>传送门：真想读代码，就这几个入口</h2>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>想看什么</th><th>去这里</th></tr></thead>
+      <tbody>
+        <tr><td>SDK 客户端</td><td><code>cubesandbox/</code>（Python 包，<code>sandbox.py</code> / <code>_commands.py</code>）</td></tr>
+        <tr><td>控制面入口</td><td><code>CubeMaster/</code>、<code>cube-lifecycle-manager/</code></td></tr>
+        <tr><td>数据面路由与门禁</td><td><code>CubeProxy/lua/</code></td></tr>
+        <tr><td>节点沙箱生命周期</td><td><code>Cubelet/</code>、<code>CubeShim/</code>、<code>hypervisor/</code></td></tr>
+        <tr><td>网络数据面</td><td><code>CubeNet/</code>、<code>network-agent/</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</main>
+
+<footer>部署排障 00/05 · 前置篇 · 下一篇：沙箱建好了，命令却一条都跑不了</footer>
+</body>
+</html>

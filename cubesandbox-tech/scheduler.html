@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CubeMaster 调度器 · 一台沙箱该落在哪台机器上</title>
+<style>
+  :root {
+    --bg:#0b1020; --border:rgba(255,255,255,0.09); --border-strong:rgba(255,255,255,0.16);
+    --text:#e6eaf2; --text-dim:#9aa7bd; --text-faint:#6b7a93;
+    --blue:#4f8cff; --cyan:#2dd4bf; --purple:#a78bfa; --amber:#fbbf24; --red:#f87171; --green:#34d399;
+    --mono:"SFMono-Regular","JetBrains Mono","Fira Code",Consolas,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+    --radius:14px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{font-family:var(--sans);background:var(--bg);color:var(--text);line-height:2.05;font-size:16px}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono);font-size:.85em;background:rgba(79,140,255,.12);color:#b9d2ff;padding:2px 7px;border-radius:6px;white-space:nowrap}
+
+  header{position:sticky;top:0;z-index:100;backdrop-filter:blur(14px);background:rgba(11,16,32,.85);border-bottom:1px solid var(--border)}
+  .nav-inner{max-width:1120px;margin:0 auto;padding:0 24px;height:56px;display:flex;align-items:center;gap:22px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px;white-space:nowrap}
+  .brand-mark{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--blue),var(--purple));display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:800}
+  .back-home{margin-left:auto;font-size:13px;color:var(--text-faint);border:1px solid var(--border);padding:5px 14px;border-radius:20px;white-space:nowrap}
+  .back-home:hover{color:var(--text);border-color:var(--border-strong);text-decoration:none}
+
+  main{max-width:740px;margin:0 auto;padding:44px 24px 96px}
+  .hero{border-bottom:1px solid var(--border);padding:12px 0 36px;margin-bottom:48px}
+  .hero .crumb{font-family:var(--mono);font-size:12px;color:var(--text-faint);letter-spacing:1px}
+  .hero h1{font-size:31px;font-weight:900;margin:14px 0 10px;line-height:1.4;background:linear-gradient(90deg,#fff,var(--blue));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  .hero .lead{font-size:16.5px;color:var(--text-dim);max-width:640px;line-height:2.1}
+
+  h2{font-size:20px;font-weight:800;margin:60px 0 4px;color:#f0f4ff;line-height:1.5}
+  p{margin:16px 0}
+  .dim{color:var(--text-dim)}
+  .hl{color:var(--cyan);font-weight:600}
+  .hlb{color:var(--amber);font-weight:600}
+  .hlr{color:var(--red);font-weight:600}
+  .hlg{color:var(--green);font-weight:600}
+
+  .think{border-left:3px solid var(--purple);background:rgba(167,139,250,.06);padding:16px 22px;border-radius:0 10px 10px 0;margin:24px 0;color:var(--text-dim)}
+  .think .q{font-weight:700;color:var(--purple);margin-bottom:4px}
+
+  .codeblock{background:#0a0f1e;border:1px solid var(--border);border-radius:12px;padding:16px 20px;font-family:var(--mono);font-size:13px;color:#c8d3e8;overflow-x:auto;white-space:pre;line-height:1.9;margin:20px 0}
+  .codeblock .cm{color:var(--text-faint)}
+
+  .pipeline{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:24px 0}
+  .pipeline .ps{border:1px solid var(--border);border-radius:12px;padding:14px;background:rgba(255,255,255,.03)}
+  .pipeline .ps .no{font-family:var(--mono);font-size:11px;color:var(--blue);margin-bottom:6px}
+  .pipeline .ps .t{font-weight:700;font-size:14.5px;margin-bottom:4px}
+  .pipeline .ps .d{font-size:12.5px;color:var(--text-dim);line-height:1.8}
+  @media(max-width:720px){.pipeline{grid-template-columns:1fr 1fr}}
+
+  .tbl-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:12px;margin:20px 0}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  thead th{background:rgba(79,140,255,.1);color:#bcd6ff;text-align:left;padding:9px 14px;font-weight:700;border-bottom:1px solid var(--border-strong)}
+  tbody td{padding:9px 14px;border-bottom:1px solid var(--border);color:var(--text-dim);vertical-align:top}
+  tbody tr:last-child td{border-bottom:none}
+
+  .punchline{border:1px solid rgba(52,211,153,.4);background:rgba(52,211,153,.06);border-radius:var(--radius);padding:20px 24px;margin:30px 0;font-size:16px;line-height:2}
+  .punchline small{display:block;font-family:var(--mono);font-size:11px;color:var(--green);letter-spacing:1px;margin-bottom:8px}
+
+  footer{border-top:1px solid var(--border);padding:28px 24px 46px;text-align:center;color:var(--text-faint);font-size:13px}
+  @media(max-width:720px){.hero h1{font-size:25px}}
+  .flow{width:100%;height:auto;display:block;margin:24px 0 2px}
+  .flow .fn{fill:#eaf0fb;font-size:14px;font-weight:700;font-family:var(--sans)}
+  .flow .fd{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow .fm{fill:#6b7a93;font-size:10.5px;font-family:var(--mono)}
+  .flow .fl{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow-cap{font-family:var(--mono);font-size:11px;color:var(--text-faint);letter-spacing:.6px;text-align:center;margin:6px 0 28px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="nav-inner">
+    <div class="brand"><div class="brand-mark">C</div> CubeSandbox · 技术深入</div>
+    <a class="back-home" href="index.html">← 技术索引</a>
+  </div>
+</header>
+
+<main>
+
+  <div class="hero">
+    <div class="crumb">CUBESANDBOX · 核心技术 01 / 09</div>
+    <h1>一台沙箱，该落在哪台机器上？</h1>
+    <p class="lead">这篇讲 CubeMaster 的调度器。我们从问题出发，一层一层看它如何被逼出现在的样子：先解决"选得动"，再解决"选得对"，然后解决"扛得住"。每层的机制、以及机制背后的权衡，都会讲到代码层面。读完你应该能闭着眼画出完整的选位流水线。</p>
+  </div>
+
+  <h2>一、问题：选一台机器，难在哪</h2>
+
+  <p>你敲下 <code>sandbox.create()</code>，说"我要一台 4 核 8G 的沙箱"。后台有一百台物理机，每台上百个沙箱。系统的任务是：<span class="hl">从这一百台里挑出一台，来承载你的沙箱。</span></p>
+  <p>这个选择，要在三个维度上同时成立，缺一个就会出事：</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>维度</th><th>具体问题</th><th>违反的后果</th></tr></thead>
+      <tbody>
+        <tr><td><b>资源（选得动）</b></td><td>机器剩下的 CPU/内存/磁盘，装得下这个请求</td><td>创建失败，用户重试，体验崩坏</td></tr>
+        <tr><td><b>均衡（选得对）</b></td><td>负载不能一边倒，也不能在几台机器间震荡</td><td>有的机器挤爆，有的空转，资源浪费</td></tr>
+        <tr><td><b>时效（选得快）</b></td><td>整个决策必须压缩在几十毫秒内完成</td><td>创建响应变慢，秒开变慢开</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>调度器入口是 <code>Select()</code>（<code>CubeMaster/pkg/scheduler/schedule.go</code>）。它不真正创建沙箱——创建发生在节点上的 Cubelet 进程里——它只负责"选位"。但选位的每一步，都和上面三个维度较劲。我们把调度器当作一条四段流水线来看，后面的内容都是围绕它展开的：</p>
+  <svg class="flow" viewBox="0 0 720 176" role="img" aria-label="调度器 Select 主流程与兜底路径">
+    <defs>
+      <marker id="sArr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#4f8cff"/></marker>
+      <marker id="sArrA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#fbbf24"/></marker>
+    </defs>
+    <rect x="0" y="0" width="720" height="176" rx="14" fill="rgba(255,255,255,.03)" stroke="rgba(255,255,255,.09)"/>
+    <text x="24" y="30" class="fm">SELECT() 主流程 · 一条 sandbox.create() 的选位之旅</text>
+
+    <rect x="14" y="48" width="156" height="72" rx="10" fill="rgba(79,140,255,.08)" stroke="rgba(79,140,255,.45)"/>
+    <text x="92" y="76" text-anchor="middle" class="fn">① 预选 PreFilter</text>
+    <text x="92" y="96" text-anchor="middle" class="fd">健康 / 存活 / 未超载</text>
+    <text x="92" y="110" text-anchor="middle" class="fm">prefilter.go</text>
+    <line x1="170" y1="84" x2="188" y2="84" stroke="#4f8cff" stroke-width="1.5" marker-end="url(#sArr)"/>
+
+    <rect x="188" y="48" width="156" height="72" rx="10" fill="rgba(79,140,255,.08)" stroke="rgba(79,140,255,.45)"/>
+    <text x="266" y="76" text-anchor="middle" class="fn">② 五关淘汰 Filter</text>
+    <text x="266" y="96" text-anchor="middle" class="fd">cpu/mem/disk/创建数/模板</text>
+    <text x="266" y="110" text-anchor="middle" class="fm">parallelRunFilters · 全票</text>
+    <line x1="344" y1="84" x2="362" y2="84" stroke="#4f8cff" stroke-width="1.5" marker-end="url(#sArr)"/>
+
+    <rect x="362" y="48" width="156" height="72" rx="10" fill="rgba(79,140,255,.08)" stroke="rgba(79,140,255,.45)"/>
+    <text x="440" y="76" text-anchor="middle" class="fn">③ 四路打分 Score</text>
+    <text x="440" y="96" text-anchor="middle" class="fd">亲和/镜像/实时/综合分</text>
+    <text x="440" y="110" text-anchor="middle" class="fm">runScoreFilter · 加权归一</text>
+    <line x1="518" y1="84" x2="536" y2="84" stroke="#4f8cff" stroke-width="1.5" marker-end="url(#sArr)"/>
+
+    <rect x="536" y="48" width="156" height="72" rx="10" fill="rgba(79,140,255,.1)" stroke="rgba(79,140,255,.6)"/>
+    <text x="614" y="76" text-anchor="middle" class="fn">④ 加权抽签</text>
+    <text x="614" y="96" text-anchor="middle" class="fd">Top N · 随机选一台</text>
+    <text x="614" y="110" text-anchor="middle" class="fm">LeastRandomSelect</text>
+
+    <line x1="266" y1="120" x2="266" y2="142" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#sArrA)"/>
+    <text x="278" y="137" class="fl">候选清空？</text>
+    <rect x="150" y="142" width="216" height="30" rx="8" fill="rgba(251,191,36,.07)" stroke="rgba(251,191,36,.5)"/>
+    <text x="258" y="161" text-anchor="middle" class="fn" style="fill:#fbbf24">BackoffSelect 兜底</text>
+    <line x1="366" y1="157" x2="380" y2="157" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#sArrA)"/>
+    <rect x="380" y="142" width="160" height="30" rx="8" fill="rgba(248,113,113,.07)" stroke="rgba(248,113,113,.5)"/>
+    <text x="460" y="161" text-anchor="middle" class="fn" style="fill:#f87171">返回 SelectNodesNoRes</text>
+  </svg>
+  <div class="flow-cap">带模板 ID 的请求：淘汰失败 → 直接报错返回，不走兜底（shouldSkipBackoffForTemplate）</div>
+
+  <h2>二、第一层设计：淘汰——"装不下"的直接回答</h2>
+
+  <p>最天真的做法是随机挑一台，但这会把请求砸到快满的机器上，创建失败。第一层进化由此而来：<span class="hl">先把装不下的机器淘汰掉，剩下的才叫候选。</span>淘汰在代码里叫 Filter，每一关是一个独立的函数，实现同一个接口 <code>Select(selCtx) (node.NodeList, error)</code>。五关判据如下：</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>关卡</th><th>判据（淘汰条件）</th><th>出处</th></tr></thead>
+      <tbody>
+        <tr><td><b>cpuFilter</b></td><td>有效空闲 CPU ≤ 请求，或节点 CPU 利用率 ≥ 80%</td><td>filter/cpufilter.go</td></tr>
+        <tr><td><b>memFilter</b></td><td>有效空闲内存 ≤ 请求；或实时负载内存不够「请求 + 预留」</td><td>filter/memfilter.go</td></tr>
+        <tr><td><b>diskFilter</b></td><td>存储盘 / 系统盘 / 数据盘任一分区使用率 ≥ 80%</td><td>filter/diskfilter.go</td></tr>
+        <tr><td><b>realtimecreatelimit</b></td><td>正在创建数 ≥ 节点上报的创建并发上限（默认 50）</td><td>filter/realtimecreatelimit.go</td></tr>
+        <tr><td><b>template_locality</b></td><td>模板快照不在本机（第五节详述）</td><td>filter/template_locality.go</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>“有效空闲”背后的两个算法决定</h3>
+
+  <p>CPU 和内存两关的核心是同一个公式：</p>
+  <div class="codeblock">有效空闲 = 上报配额 × 超售比(overcommit ratio) − 已分配量
+（源码：EffectiveQuotaCpu / EffectiveQuotaMem − EffectiveAllocated，config.go）</div>
+  <p>这里有两个算法决定，值得停下来理解。</p>
+  <p>第一是<span class="hlb">超售</span>。沙箱实际用不满上报的配额——4 核的沙箱，多数时间 CPU 只用到几十个百分点。如果按上报值严格相加，一台 64 核的机器放 16 个 4 核沙箱就"满了"，剩下 80% 容量空转。超售比就是对"配额"和"实际占用"之间差距的承认：<code>有效配额 = 上报配额 × 超售比</code>。代价是风险——万一所有沙箱同时打满，物理机真的会超载，所以这个比值不能拍脑袋定，是整个集群运营中最敏感的调参点之一。</p>
+  <p>第二是<span class="hlb">"已分配量"从哪来</span>。它等于这台机器上所有沙箱承诺出去的配额之和，记录在 Redis 里，由各节点上报。这里有一个例外开关：如果 Redis 的分配记录不可信（比如节点闪断漏报），可以配置 <code>ignore_redis_allocation</code>，让调度器把已分配当作 0 来算——宁可冒险多放一点，也不让脏数据卡死整个集群。</p>
+  <p>内存关比 CPU 关多一道检查：<span class="hl">实时负载防线</span>。配额是承诺，实际占用是另一回事——节点上报的实时内存 <code>MemMBTotal − MemUsage</code>，必须能盖住「你的请求 + 预留」。预留默认 10GB，给机器留呼吸空间；小机器则按配额比例的 10% 兜底。这道防线防止的是：配额账面上有富余，但实际内存已经吃紧。</p>
+  <p>另外，五关是<span class="hl">并行执行</span>的，实现是 Go 的 <code>errgroup</code> + 计数器（<code>parallelRunFilters()</code>，schedule.go）：每个节点被某一关放行一次就记一票，最后只保留票数等于关卡总数的节点。一票否决，全票才留。</p>
+
+  <h2>三、第二层设计：打分——"装了之后会怎样"的效用评估</h2>
+
+  <p>淘汰只回答"能不能装"，但它制造了一个新问题：<span class="hlb">大家会往同一两台"最好"的机器上挤。</span>如果这些机器装得下，所有人都选它们，直到被淘汰关拦下才流向下一台——集群负载永远一边倒。</p>
+  <p>第二层进化由此而来：<span class="hl">给通过淘汰的机器打分。</span>分代表"这台机器接下你这单之后的综合处境"，越高越好。打分在 <code>runScoreFilter()</code> 完成，四路插件各有权重、各有关闭开关，不想要的路可以直接禁用。四路分是：</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>插件</th><th>计算什么</th><th>作用</th></tr></thead>
+      <tbody>
+        <tr><td><b>affinityscore</b></td><td>用户偏好的机器（k8s 亲和语义换算分）</td><td>尊重用户显式意愿</td></tr>
+        <tr><td><b>imagescore</b></td><td>镜像/模板在本机缓存的命中情况</td><td>让秒开成为可能</td></tr>
+        <tr><td><b>realtimeweighted</b></td><td>实时负载因子 + 剩余资源越多分越高</td><td>负载均衡的数学化</td></tr>
+        <tr><td><b>multifactorscore</b></td><td>后台预计算的综合分，直接读取</td><td>把耗时算在选位之前</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>三个机制层面的细节，把它们讲透：</p>
+  <p><span class="hlg">① 打分本质是"效用函数"。</span>realtimeweighted 的负载均衡项写成公式就是：</p>
+  <div class="codeblock">剩余资源分 = getReciprocal(有效配额 − 已分配 − 你的请求, 有效配额)
+              —— 机器在承接你这单后剩得越多，这一项分越高</div>
+  <p>它让"空机器"天然得高分，流量就会被"没用完的地方"吸引过去，集群负载趋于均匀。注意这里减去了"你的请求"——打分评估的是承接后的处境，而不是当前处境。</p>
+  <p><span class="hlg">② imagescore 的映射曲线是有讲究的。</span>模板快照的大小从 23MB 线性映射到 80GB×容器数：快照越小、克隆越省事，分越高。低于 23MB 一律按 23MB 算（不给零分），超过上限封顶为满分。这条曲线把"模板本地性"这个产品特性，量化成了调度依据。</p>
+  <p><span class="hlg">③ 综合分是预计算的，这是"几十毫秒选位"的关键。</span>multifactorscore 背后有个后台协程 <code>loopAsyncScore()</code>：每 50ms 醒一次、按配置间隔节流，把全集群所有健康节点的综合分提前算好存进缓存。真正选位时直接读 <code>n.Score</code>，不再现场遍历一百台机器。用提前算好的代价，换选位瞬间的极致延迟——这是调度系统里非常典型的时间换空间。</p>
+  <p>最后，各路的原始分乘上自己的权重求和，再除以总权重归一化（跳过关掉的路），每台机器得到一个 0–1 之间的分，按降序排好。</p>
+
+  <h2>四、第三层设计：抽签——以及"永远选最好"为什么是错的</h2>
+
+  <p>分数排好名次，最后一步是选。这里有一个反直觉的设定：<span class="hlr">默认情况下，调度器不是选分数最高的一台，而是从高分集合里随机挑。</span></p>
+  <p>选择逻辑是 <code>LeastRandomSelect()</code>（selctx/selectcontext.go）：</p>
+  <div class="codeblock">① 取按分数排序后的前 N 名（PrioritySelectNum，默认 -1 = 全部保留）
+② 把每台机器的分放大为权重：int(Score × 1e6)
+③ 用权重构造选择器，随机抽出一个
+   选择器算法由 least_select_name 配置：
+   random  → 均匀随机（默认，忽略权重）
+   sw/rrw  → 平滑加权随机（分数越高，中选概率越大）</div>
+  <p>默认用均匀随机，是有意为之。回忆一个场景：如果"永远选最高分"，会发生什么？所有流量扑向第一名，把它打满；打满后它分数暴跌，流量再涌向新的第一名……集群在几台机器间来回震荡，永远安分不下来。而均匀随机保证流量天然散开——代价是偶尔选到次优，换来长期的均衡。</p>
+  <p>这也是集群调度领域的通识：<span class="hlb">不追求单次最优，追求整体稳定。</span>分数排序的真正用途，是给可选的加权算法提供权重依据；而默认行为刻意保守。</p>
+
+  <h2>五、兜底路径，和模板那道"不兜底"的铁律</h2>
+
+  <p>淘汰层有个兜底设计：万一五关把候选清空了，普通请求不会直接失败。调度器会走 <code>BackoffSelect()</code>：用一套更宽松的条件（跳过部分淘汰，按健康度从集群里捞一批），再 <code>rand.Intn</code> 随机挑一台顶上。宁可放宽标准，不让请求白跑一趟。</p>
+  <p>但这个兜底，在模板面前失效了。回到模板本地性：CubeSandbox 的招牌是"从模板秒开"——模板是一份打包好的 rootfs + 内存快照，新沙箱克隆一份、恢复快照，几十毫秒起。这一切的前提是：<span class="hl">模板快照就在你选中的那台机器上。</span>模板在 A 机、沙箱被派到 B 机？B 得先跨网络搬模板，你的 60ms 变成 6s。</p>
+  <p>所以模板本地性被做成一道淘汰关 <code>template_locality</code>，它按三层校验：</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>校验</th><th>逻辑</th></tr></thead>
+      <tbody>
+        <tr><td>① 显式限定</td><td>请求可指定 <code>TemplateNodeScope</code>（模板只能落在哪些节点），不在范围的淘汰</td></tr>
+        <tr><td>② 镜像缓存</td><td><code>GetImageStateByNode(templateID, nodeID)</code> 查不到这份模板快照 → 淘汰</td></tr>
+        <tr><td>③ 快照可写</td><td>请求带 <code>EnforceSnapshotStorage</code> 时，要求快照存储存在且可写</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>而它的特殊之处在于兜底豁免：<code>schedule.go</code> 里 <code>shouldSkipBackoffForTemplate()</code> 规定——<span class="hlr">只要请求带模板 ID 且注册了这道关，淘汰失败就直接返回 <code>SelectNodesNoRes</code>，绝不进入 BackoffSelect。</span>逻辑是：模板都不在那台机器上，兜底挑中了也是一场注定慢 6 秒的启动。与其制造一个"能开但慢得离谱"的沙箱，不如明确告诉上层"没有合适的地方"，让上层决定报错或重试。</p>
+
+  <h2>六、最后的防线：洪峰限流，源头就把水龙头拧小</h2>
+
+  <p>前面都是"选谁"的问题。还有一个更粗鲁的：活动日一千人同时创建，请求洪水一样涌进来。如果全部立刻分派，每台机器要同时启动几百个虚拟机——启动虚拟机本身极吃 CPU 和磁盘 IO，瞬间所有创建通道堵死，已运行的沙箱跟着卡顿。这是"自己把自己挤兑死"。</p>
+  <p>解法分两层，都在 <code>pkg/scheduler/local.go</code> 和 <code>pkg/base/bufferqueue/</code>：</p>
+  <p><span class="hlg">第一层：排队桶。</span>按机器配置（instance_type）分桶，每桶一个队列，请求先入队，工人按并发上限一个一个处理。队列的数据结构是两个部件的组合：一个按入队时间戳排序的小顶堆（<code>TimeSortedQueue</code>，priority 取 <code>time.Now().UnixNano()</code>，天然先进先出），一个信号量（<code>semaphore.Weighted</code>）卡住并发。工人拿不到名额就睡 1ms 重试。为什么分桶？4 核和 32 核机器能承受的并发不同，混在一队，小机器会被大请求堵死。</p>
+  <p><span class="hlg">第二层：水位自动升降。</span>并发上限不是写死的。<code>monitorLimit()</code> 每 5 秒重算一次：</p>
+  <div class="codeblock">每节点创建上限 = max( 集群总创建并发 ÷ 健康节点数, 100 )
+全局创建并发   = ceil( 健康节点数 × 每节点上限 ÷ Master 副本数 )
+销毁并发同理，按每节点 50 计算</div>
+  <p>算出的水位和当前不同，就用 <code>SetLimit()</code> 动态改信号量。集群扩容了水位自动抬高，节点挂了自动收紧，全程无人值守。如果水位写死，活动日扩容了机器够用却仍按旧上限拒客，那才叫事故。</p>
+
+  <h2>七、收束：这条设计之路的全貌</h2>
+
+  <p>回头看，每一层设计都是被一个问题逼出来的，环环相扣：</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>问题</th><th>逼出的设计</th><th>关键权衡</th></tr></thead>
+      <tbody>
+        <tr><td>随机挑会挑到快满的机器</td><td>五关并行淘汰，全票通过</td><td>超售换容量，预留防过载</td></tr>
+        <tr><td>淘汰后大家挤向"最好"的机器</td><td>四路效用分，加权归一化</td><td>预计算换选位延迟</td></tr>
+        <tr><td>"永远选最高分"导致热震荡</td><td>默认均匀随机，加权可选</td><td>稳定优先于最优</td></tr>
+        <tr><td>模板不在本机，秒开变慢开</td><td>模板本地性淘汰 + 失败不兜底</td><td>宁可拒绝，不制造慢启动</td></tr>
+        <tr><td>创建洪峰挤兑后端</td><td>分桶排队 + 水位自动升降</td><td>快速失败优于死等</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="punchline">
+    <small>一句话带走</small>
+    调度器是一条四段流水线：预选 → 五关淘汰 → 四路打分 → 抽签。它的每个部件都对应一个真实问题，而贯穿始终的设计哲学只有一句——不追求单次最优，追求整体稳定。
+  </div>
+
+  <h2>传送门：真想读代码，就这几个文件</h2>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>想看什么</th><th>去这里</th></tr></thead>
+      <tbody>
+        <tr><td>调度主流程（Select + 兜底）</td><td><code>CubeMaster/pkg/scheduler/schedule.go</code></td></tr>
+        <tr><td>五道淘汰关</td><td><code>CubeMaster/pkg/selector/filter/</code></td></tr>
+        <tr><td>四路打分 + 后台预计算</td><td><code>CubeMaster/pkg/selector/score/</code></td></tr>
+        <tr><td>抽签与 Top N 选择</td><td><code>CubeMaster/pkg/scheduler/selctx/selectcontext.go</code></td></tr>
+        <tr><td>排队桶 + 动态限流</td><td><code>CubeMaster/pkg/base/bufferqueue/</code> · <code>pkg/scheduler/local.go</code></td></tr>
+        <tr><td>超售比、预留、各默认值</td><td><code>CubeMaster/pkg/base/config/config.go</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</main>
+
+<footer>CubeMaster 调度器 · CubeSandbox 技术深入 01/09 · 下一篇：生命周期管理——机器如何自己学会"休眠"</footer>
+</body>
+</html>

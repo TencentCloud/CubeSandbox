@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CubeShim + CubeHypervisor · containerd 到 KVM 的最后一公里</title>
+<style>
+  :root {
+    --bg:#0b1020; --border:rgba(255,255,255,0.09); --border-strong:rgba(255,255,255,0.16);
+    --text:#e6eaf2; --text-dim:#9aa7bd; --text-faint:#6b7a93;
+    --blue:#4f8cff; --cyan:#2dd4bf; --purple:#a78bfa; --amber:#fbbf24; --red:#f87171; --green:#34d399;
+    --mono:"SFMono-Regular","JetBrains Mono","Fira Code",Consolas,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+    --radius:14px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{font-family:var(--sans);background:var(--bg);color:var(--text);line-height:2.05;font-size:16px}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono);font-size:.85em;background:rgba(79,140,255,.12);color:#b9d2ff;padding:2px 7px;border-radius:6px;white-space:nowrap}
+
+  header{position:sticky;top:0;z-index:100;backdrop-filter:blur(14px);background:rgba(11,16,32,.85);border-bottom:1px solid var(--border)}
+  .nav-inner{max-width:1120px;margin:0 auto;padding:0 24px;height:56px;display:flex;align-items:center;gap:22px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px;white-space:nowrap}
+  .brand-mark{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--cyan),var(--blue));display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:800}
+  .back-home{margin-left:auto;font-size:13px;color:var(--text-faint);border:1px solid var(--border);padding:5px 14px;border-radius:20px;white-space:nowrap}
+  .back-home:hover{color:var(--text);border-color:var(--border-strong);text-decoration:none}
+
+  main{max-width:740px;margin:0 auto;padding:44px 24px 96px}
+  .hero{border-bottom:1px solid var(--border);padding:12px 0 36px;margin-bottom:48px}
+  .hero .crumb{font-family:var(--mono);font-size:12px;color:var(--text-faint);letter-spacing:1px}
+  .hero h1{font-size:31px;font-weight:900;margin:14px 0 10px;line-height:1.4;background:linear-gradient(90deg,#fff,var(--cyan));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  .hero .lead{font-size:16.5px;color:var(--text-dim);max-width:640px;line-height:2.1}
+
+  h2{font-size:20px;font-weight:800;margin:60px 0 4px;color:#f0f4ff;line-height:1.5}
+  h3{font-size:16px;font-weight:700;margin:28px 0 4px;color:#dbe4f5}
+  p{margin:16px 0}
+  .dim{color:var(--text-dim)}
+  .hl{color:var(--cyan);font-weight:600}
+  .hlb{color:var(--amber);font-weight:600}
+  .hlr{color:var(--red);font-weight:600}
+  .hlg{color:var(--green);font-weight:600}
+
+  .think{border-left:3px solid var(--purple);background:rgba(167,139,250,.06);padding:16px 22px;border-radius:0 10px 10px 0;margin:24px 0;color:var(--text-dim)}
+  .think .q{font-weight:700;color:var(--purple);margin-bottom:4px}
+
+  .codeblock{background:#0a0f1e;border:1px solid var(--border);border-radius:12px;padding:16px 20px;font-family:var(--mono);font-size:13px;color:#c8d3e8;overflow-x:auto;white-space:pre;line-height:1.9;margin:20px 0}
+  .codeblock .cm{color:var(--text-faint)}
+
+  .tbl-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:12px;margin:20px 0}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  thead th{background:rgba(79,140,255,.1);color:#bcd6ff;text-align:left;padding:9px 14px;font-weight:700;border-bottom:1px solid var(--border-strong)}
+  tbody td{padding:9px 14px;border-bottom:1px solid var(--border);color:var(--text-dim);vertical-align:top}
+  tbody tr:last-child td{border-bottom:none}
+
+  .punchline{border:1px solid rgba(52,211,153,.4);background:rgba(52,211,153,.06);border-radius:var(--radius);padding:20px 24px;margin:30px 0;font-size:16px;line-height:2}
+  .punchline small{display:block;font-family:var(--mono);font-size:11px;color:var(--green);letter-spacing:1px;margin-bottom:8px}
+
+  footer{border-top:1px solid var(--border);padding:28px 24px 46px;text-align:center;color:var(--text-faint);font-size:13px}
+  @media(max-width:720px){.hero h1{font-size:25px}}
+  .flow{width:100%;height:auto;display:block;margin:24px 0 2px}
+  .flow .fn{fill:#eaf0fb;font-size:14px;font-weight:700;font-family:var(--sans)}
+  .flow .fd{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow .fm{fill:#6b7a93;font-size:10.5px;font-family:var(--mono)}
+  .flow .fl{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow-cap{font-family:var(--mono);font-size:11px;color:var(--text-faint);letter-spacing:.6px;text-align:center;margin:6px 0 28px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="nav-inner">
+    <div class="brand"><div class="brand-mark">C</div> CubeSandbox · 技术深入</div>
+    <a class="back-home" href="index.html">← 技术索引</a>
+  </div>
+</header>
+
+<main>
+
+  <div class="hero">
+    <div class="crumb">CUBESANDBOX · 核心技术 05 / 09</div>
+    <h1>containerd 到 KVM 的最后一公里</h1>
+    <p class="lead">这篇讲 CubeShim 与 CubeHypervisor。前一篇我们看到 Cubelet 把"启动 VM"包装成了 containerd 眼里的一个 Task——本篇要看明白：containerd 的请求到了之后，一台真正的 KVM 虚拟机是怎么被创建、暂停、落盘、再恢复的。这是整个虚拟化链路的执行末端。</p>
+  </div>
+
+  <h2>一、问题：两种语言之间的翻译层</h2>
+
+  <p>上面是 containerd，它只会说"容器"的语言：create、start、pause、resume、exec。下面是 Linux KVM，它只会说"虚拟机"的语言：KVM_CREATE_VM、KVM_RUN、内存映射。两者之间隔着巨大的语义鸿沟——containerd 说"暂停这个容器"，KVM 端要做的是"暂停 vCPU、把 VM 内存写盘、删除 VM 实例"。</p>
+  <p>CubeShim 就是这座桥。它是标准的 containerd Shim v2 进程，<span class="hl">每个沙箱一个</span>，同时持有两副面孔：对 containerd 它是个 Task 服务实现；对 KVM 它是个沙箱管理器。而"翻译"的过程还牵出一个并发模型问题——怎么让控制逻辑和 VMM 执行逻辑在同一个进程里安全地协作？看分层：</p>
+  <div class="codeblock">containerd（Cubelet 进程内）
+   │  ttrpc（shim socket）
+   ▼
+CubeShim  ──── Shim v2 进程，每个沙箱一个
+   │  SandBox：沙箱生命周期 + vsock 连接 guest agent
+   ▼
+CubeHypervisor  ── 封装 cube-hypervisor crate
+   │  send_request(ApiRequest)，通过 mpsc 通道
+   ▼
+VMM 线程（独立线程内运行事件循环）
+cube-hypervisor (VmmInstance)
+   │  vmm::Vm + hypervisor::KvmHypervisor
+   ▼
+/dev/kvm（KVM_CREATE_VM / KVM_RUN ...）</div>
+  <p>关键的设计决定是：<span class="hlb">VMM 在 shim 进程的独立线程里跑事件循环</span>，控制面与执行面通过 <code>ApiRequest</code>/<code>ApiResponse</code> 两条 mpsc 通道 + eventfd 通信，而不是直接函数调用。为什么？如果直接在控制线程里同步操作 KVM，一次慢操作（比如写盘）就会卡住整个 shim 的请求处理。异步化之后，控制线程发一条请求就继续处理别的，VMM 线程忙完了再把响应投回来。</p>
+  <p>这里还有一个更深的取舍：shim 崩溃 = VM 崩溃，生命周期强绑定。听起来像是缺陷——但反过来想，这正是"避免孤儿 VM"的保证：<span class="hl">没有 shim 就没有 VM，任何崩溃都会带着 VM 一起消失，系统里不可能出现一台没人管理的游离虚拟机。</span></p>
+
+  <h2>二、机制：沙箱创建——六步启动序列</h2>
+
+  <p>TaskService 收到 containerd 的 create 后，首次初始化沙箱并走完整启动流程：</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>步骤</th><th>做什么</th></tr></thead>
+      <tbody>
+        <tr><td><b>1. start_vm</b></td><td>launch_vmm 启动 VMM 线程 → 若非"禁用快照"且非 app-snapshot-create，尝试 restore_vm（从模板快照恢复）；恢复失败仅 app-snapshot-restore 报错，否则回退 boot_vm → 等待 VsockServerReady 事件（10s 超时）</td></tr>
+        <tr><td><b>2. connect_agent</b></td><td>通过 vsock 建立到 guest 内 cube-agent 的 ttrpc 连接</td></tr>
+        <tr><td><b>3. reset_guest（恢复场景）</b></td><td>set_guest_date_time（时钟对齐）+ reseed_random_dev（重播种随机设备，防重复快照复用同一随机流）</td></tr>
+        <tr><td><b>4. 构造 CreateSandboxRequest</b></td><td>hostname（id 前 8 字符）、网络 interfaces/routes/ARP、cube_vip；按模式设 start_mode：SNAPSHOT 或 RESTORE；25s 超时</td></tr>
+        <tr><td><b>5. client.create_sandbox()</b></td><td>通知 guest agent 初始化共享命名空间、挂载存储</td></tr>
+        <tr><td><b>6. 启动监控</b></td><td>watch_oom（订阅 guest OOM 事件，转发为 TaskOOM）+ monitor_vm（轮询 try_wait_notify + 周期 agent health；收到 VmShutdown 或 agent 失联 → 置 Exited 并通知所有容器）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>注意第 1 步的<span class="hl">回退逻辑</span>：如果是从模板恢复（restore_vm），恢复失败后不是直接放弃，而是回退到"从头启动"（boot_vm）——模板坏了，那就当普通机器冷启动，功能可用性优先。只有"app-snapshot-restore"这种必须从快照恢复的场景才允许失败。这是典型的降级策略：快照是优化，不是硬依赖。</p>
+
+  <h2>三、机制：ApiRequest——控制面与 VMM 的通信协议</h2>
+
+  <p>CubeHypervisor 的每个方法都对应一个 ApiRequest 枚举变体，VMM 线程收到后分发到 Vm 实现。这个枚举完整到可以当作"VMM 能力清单"看：</p>
+  <div class="codeblock">// hypervisor/vmm/src/api/mod.rs —— 完整枚举（节选）
+VmCreate(VmConfig) | VmBoot | VmDelete | VmInfo | VmmPing,
+VmPause | VmPauseToSnapshot(SnapshotConfig) | VmResumeFromSnapshot(RestoreConfig) | VmResume,
+VmWaitStart | VmCounters | VmShutdown | VmReboot | VmmShutdown,
+VmResize | VmResizeZone,
+VmAddDevice | VmAddUserDevice | VmRemoveDevice,
+VmAddDisk | VmAddFs | VmSetFs | VmAddPmem | VmAddNet | VmAddVdpa | VmAddVsock,
+VmSnapshot(SnapshotConfig) | VmRestore(RestoreConfig),
+VmCoredump | VmReceiveMigration | VmSendMigration | VmPowerButton</div>
+  <p>方法到请求的映射，把"暂停"这件事拆成了语义完全不同的两种：</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>CubeHypervisor 方法</th><th>ApiRequest</th><th>语义</th></tr></thead>
+      <tbody>
+        <tr><td>snapshot_vm</td><td>VmSnapshot</td><td>应用快照：内存落盘，VM 继续运行</td></tr>
+        <tr><td>pause_vm_cube</td><td>VmPauseToSnapshot</td><td>暂停 → 写快照 → 删除 VM（"暂停"语义）</td></tr>
+        <tr><td>resume_vm_cube</td><td>VmResumeFromSnapshot</td><td>从快照恢复 VM</td></tr>
+        <tr><td>delete_vm</td><td>VmDelete</td><td>关 VM，VMM 进程存活（之后还能恢复）</td></tr>
+        <tr><td>add_dev / remove_dev</td><td>VmAddDevice / VmRemoveDevice</td><td>设备热插拔，从响应解析 PciDeviceInfo.bdf</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>快照配置类型是 <code>SnapshotConfig{destination_url, snapshot_type, memory_vol_url}</code>，快照类型三种——full（完整内存）、incremental（pagemap+kpageflags 只存 CoW 匿名页）、soft-dirty（/proc/self/clear_refs + pagemap bit55）。快照版本号 <code>SNAPSHOT_VERSION = "1.0.3"</code>，落盘产物是 <code>config.json</code>（序列化的 VmConfig）+ <code>state.json</code>（快照状态）。这个版本号是恢复时校验的依据——版本不匹配的旧快照，宁可不恢复也不赌。</p>
+
+  <h2>四、机制：暂停 → 快照 → 恢复的完整链路</h2>
+
+  <p>CLM 自动暂停的请求，最终在这里落地。Cubelet 的 task.Pause 一路传下来：</p>
+  <div class="codeblock">TaskService::pause（要求 pod_scope 元数据，仅支持 Pod 级）
+  └─ SandBox::pause_vm
+       ├─ 状态校验（必须 Normal；有 exec 则拒绝——exec 会话还没结束）
+       ├─ disconnect_agent：停 monitor/oom，置空 client/conn
+       ├─ snapshot_path = /data/cubelet/root/pausevm/&lt;id&gt;（先 remove_dir_all 再 create）
+       ├─ ch.pause_vm_cube("file://...") → VmPauseToSnapshot
+       │     VMM 侧 = vm_pause() + vm_snapshot() + vm_delete()
+       │              （先暂停 vCPU → 保存时钟 → 内存落盘 → 删除 VM，进程存活）
+       └─ wait_notify 消费 VmShutdown 事件
+
+resume 反向：
+  TaskService::resume（要求 pod_scope + sandbox.paused）
+  └─ SandBox::resume_vm → resume_vm_with_config
+       ├─ ch.resume_vm_cube("file://...") → VmResumeFromSnapshot → vm_restore
+       │     读 config.json/state.json → 校验版本/磁盘/pmem 对齐 → 重建 VM
+       ├─ connect_agent + reset_guest
+       ├─ 每个容器 set_client（重启 wait_process 与日志转发）
+       └─ 重启 watch_oom + monitor_vm → 置 Normal</div>
+  <p>两个细节值得展开。<span class="hlg">一是暂停为什么是"写盘 + 删 VM"</span>：暂停不是把 VM 留在内存里等恢复——那资源一点没省。真正的暂停是把内存快照落到 <code>/data/cubelet/root/pausevm/&lt;id&gt;</code>，然后删掉 VM 实例，这样 VM 占的内存、vCPU 全部归还宿主机。恢复时再从快照把 VM 重建出来。这是"暂停 = 快照化"的完整语义。</p>
+  <p><span class="hlg">二是 vsock 等 I/O 的恢复</span>：恢复后 agent 连接要重建，每个容器要重新 set_client 重启 wait_process 与日志转发——因为整个 guest 是全新的进程树，宿主侧所有依赖旧连接的东西都得重来一遍。恢复的"重启一切"性质，是这类暂停方案绕不开的成本。</p>
+
+  <svg class="flow" viewBox="0 0 720 244" role="img" aria-label="暂停、恢复、回滚三岔路">
+    <defs>
+      <marker id="vArr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2dd4bf"/></marker>
+      <marker id="vArrR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#f87171"/></marker>
+    </defs>
+    <rect x="0" y="0" width="720" height="244" rx="14" fill="rgba(255,255,255,.03)" stroke="rgba(255,255,255,.09)"/>
+    <text x="24" y="28" class="fm">pause / resume / rollback · 同一台 VM 的三条去路</text>
+
+    <rect x="250" y="36" width="220" height="44" rx="10" fill="rgba(45,212,191,.1)" stroke="rgba(45,212,191,.6)"/>
+    <text x="360" y="56" text-anchor="middle" class="fn">SandBox 生命周期操作</text>
+    <text x="360" y="72" text-anchor="middle" class="fd">状态机守卫（Normal / paused）</text>
+
+    <line x1="330" y1="80" x2="130" y2="96" stroke="#2dd4bf" stroke-width="1.5" marker-end="url(#vArr)"/>
+    <line x1="360" y1="80" x2="360" y2="96" stroke="#2dd4bf" stroke-width="1.5" marker-end="url(#vArr)"/>
+    <line x1="390" y1="80" x2="590" y2="96" stroke="#f87171" stroke-width="1.5" marker-end="url(#vArrR)"/>
+
+    <rect x="25" y="96" width="210" height="48" rx="10" fill="rgba(45,212,191,.08)" stroke="rgba(45,212,191,.45)"/>
+    <text x="130" y="117" text-anchor="middle" class="fn">task.Pause → pause_vm_cube</text>
+    <text x="130" y="135" text-anchor="middle" class="fd">仅 Pod 级 · 有 exec 则拒</text>
+    <rect x="255" y="96" width="210" height="48" rx="10" fill="rgba(45,212,191,.08)" stroke="rgba(45,212,191,.45)"/>
+    <text x="360" y="117" text-anchor="middle" class="fn">task.Resume → resume_vm_cube</text>
+    <text x="360" y="135" text-anchor="middle" class="fd">需 sandbox.paused</text>
+    <rect x="485" y="96" width="210" height="48" rx="10" fill="rgba(248,113,113,.08)" stroke="rgba(248,113,113,.5)"/>
+    <text x="590" y="117" text-anchor="middle" class="fn">RollbackSandbox → rollback_vm</text>
+    <text x="590" y="135" text-anchor="middle" class="fd">经 task.Update(annotations)</text>
+
+    <line x1="130" y1="144" x2="130" y2="152" stroke="#2dd4bf" stroke-width="1.5" marker-end="url(#vArr)"/>
+    <line x1="360" y1="144" x2="360" y2="152" stroke="#2dd4bf" stroke-width="1.5" marker-end="url(#vArr)"/>
+    <line x1="590" y1="144" x2="590" y2="152" stroke="#f87171" stroke-width="1.5" marker-end="url(#vArrR)"/>
+
+    <rect x="25" y="152" width="210" height="58" rx="10" fill="rgba(45,212,191,.06)" stroke="rgba(45,212,191,.4)"/>
+    <text x="130" y="173" text-anchor="middle" class="fn" style="fill:#2dd4bf">VmPauseToSnapshot</text>
+    <text x="130" y="191" text-anchor="middle" class="fd">暂停 vCPU → 保存时钟</text>
+    <text x="130" y="206" text-anchor="middle" class="fd">内存落盘 → 删除 VM</text>
+    <rect x="255" y="152" width="210" height="58" rx="10" fill="rgba(45,212,191,.06)" stroke="rgba(45,212,191,.4)"/>
+    <text x="360" y="173" text-anchor="middle" class="fn" style="fill:#2dd4bf">VmResumeFromSnapshot</text>
+    <text x="360" y="191" text-anchor="middle" class="fd">读 config/state.json 重建</text>
+    <text x="360" y="206" text-anchor="middle" class="fd">版本 / 磁盘 / pmem 对齐</text>
+    <rect x="485" y="152" width="210" height="58" rx="10" fill="rgba(248,113,113,.06)" stroke="rgba(248,113,113,.4)"/>
+    <text x="590" y="173" text-anchor="middle" class="fn" style="fill:#f87171">delete + 目标快照恢复</text>
+    <text x="590" y="191" text-anchor="middle" class="fd">delete 不写盘 · 排空陈旧</text>
+    <text x="590" y="206" text-anchor="middle" class="fd">VmShutdown 再恢复</text>
+
+    <text x="130" y="228" text-anchor="middle" class="fl">→ 内存 / vCPU 归还宿主机</text>
+    <text x="360" y="228" text-anchor="middle" class="fl">→ 重建 agent 连接，容器全重连</text>
+    <text x="590" y="228" text-anchor="middle" class="fl">→ 丢弃当前状态，回到历史</text>
+  </svg>
+
+  <h2>五、机制：回滚——"丢弃当前、回到历史"</h2>
+
+  <p>回滚与恢复看起来像，语义完全不同：恢复是"同一台机器从暂停中醒来"，回滚是<span class="hl">"丢弃当前状态、回到某个历史快照"</span>——它由 Cubelet 的 RollbackSandbox 通过 <code>task.Update(annotations)</code> 触发，对应 VMM 端：</p>
+  <div class="codeblock">rollback_vm：
+① delete_vm()          // 直接丢弃当前 VM——不写盘，省掉把内存落盘的 I/O
+② 排空 hypervisor 事件队列里的陈旧 VmShutdown
+                       // 防止新 monitor 把旧事件误判成"刚崩溃"
+③ resume_vm_with_config(Some(target_config))  // 从目标快照恢复</div>
+  <p>这里最妙的细节是第②步：delete_vm 会触发一个 VmShutdown 事件，如果不管它，重新恢复后新启动的 monitor 会读到这个陈旧事件，误以为 VM 崩了。所以回滚必须先排空事件队列，再做恢复。一个看似不起眼的步骤，防止了一个隐蔽的竞态。</p>
+
+  <h2>六、机制：KVM 后端与脏页日志</h2>
+
+  <p>hypervisor crate 通过 trait 抽象 KVM 后端。启动时打开 /dev/kvm、校验 KVM_API_VERSION，还通过 cpuid 0x40000002 检测 KVM-PV 变体。创建 VM 时做一系列 x86 准备：预取 MSR 列表、设置 identity map / TSS 地址、开启 split irq。vCPU 的 <code>run()</code> 就是 KVM_RUN 事件循环，把 IoIn/IoOut、Mmio、Shutdown/Hlt 等退出事件分发给 vm_ops。</p>
+  <p>最值得讲的是<span class="hlb">脏页日志</span>——它是增量快照和 live 迁移的基石。原理：</p>
+  <div class="codeblock">create_user_memory_region：遇到 KVM_MEM_LOG_DIRTY_PAGES flag 时，
+   先把该区域登记到 dirty_log_slots，但以 flags=0 建 region（先不记账）
+start_dirty_log：用 set_user_memory_region 重设 flags，真正开启脏页记录
+get_dirty_log：调 KVM_GET_DIRTY_LOG，拿"每页一位"的 bitmap</div>
+  <p>为什么延迟开启？因为脏页日志有性能开销——每写一个页都要在内核里置位。不开启时 zero overhead，需要做快照的那一刻才打开，快照完了再关。soft-dirty 增量快照与迁移（Send/ReceiveMigration）都依赖这份 bitmap：有了它，就知道从上次快照到现在哪些内存页变了，只序列化这些页，而不是整块内存。</p>
+
+  <h2>七、收束</h2>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>问题</th><th>设计</th><th>关键权衡</th></tr></thead>
+      <tbody>
+        <tr><td>containerd 与 KVM 语义不通</td><td>Shim v2 进程做翻译层</td><td>每沙箱一个 shim，隔离故障面</td></tr>
+        <tr><td>控制面与执行面并发</td><td>mpsc + eventfd 异步通信，VMM 独立线程</td><td>慢操作不阻塞控制线程</td></tr>
+        <tr><td>shim 崩溃后孤儿 VM</td><td>生命周期强绑定</td><td>shim 死 = VM 死，无游离 VM</td></tr>
+        <tr><td>暂停要真省资源</td><td>写盘 + 删 VM，恢复重建</td><td>恢复要重建一切连接</td></tr>
+        <tr><td>增量快照要知道改了哪些页</td><td>脏页日志，按需开启</td><td>开日志有开销，快照时才开</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="punchline">
+    <small>一句话带走</small>
+    CubeShim 是"containerd 眼里的一个 Task"与"KVM 眼里的一台 VM"之间的胶水：控制面在 shim 进程，执行面在独立 VMM 线程；暂停 = pause→snapshot→delete（内存落盘到 pausevm），恢复 = 读 config.json/state.json 重建 VM，回滚 = delete + restore 不写盘。
+  </div>
+
+  <h2>传送门：真想读代码，就这几个文件</h2>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>想看什么</th><th>去这里</th></tr></thead>
+      <tbody>
+        <tr><td>沙箱生命周期</td><td><code>CubeShim/shim/src/sandbox/sb.rs</code>（PAUSE_VM_SNAPSHOT_BASE=/data/cubelet/root/pausevm）</td></tr>
+        <tr><td>沙箱配置解析</td><td><code>CubeShim/shim/src/sandbox/config.rs</code>（ANNO_VM_RES / ANNO_SNAPSHOT_BASE 等注解常量）</td></tr>
+        <tr><td>Hypervisor 封装</td><td><code>CubeShim/shim/src/hypervisor/cube_hypervisor.rs</code></td></tr>
+        <tr><td>Task API</td><td><code>CubeShim/shim/src/service/task_srv.rs</code></td></tr>
+        <tr><td>VmmInstance 线程</td><td><code>hypervisor/src/lib.rs</code></td></tr>
+        <tr><td>ApiRequest 枚举与处理</td><td><code>hypervisor/vmm/src/api/mod.rs</code>、<code>hypervisor/vmm/src/lib.rs</code></td></tr>
+        <tr><td>Vm 状态机与快照</td><td><code>hypervisor/vmm/src/vm.rs</code>（Pausable / Snapshottable）</td></tr>
+        <tr><td>KVM 后端</td><td><code>hypervisor/hypervisor/src/kvm/mod.rs</code></td></tr>
+        <tr><td>快照/迁移配置类型</td><td><code>hypervisor/vm-migration/src/lib.rs</code>（SnapshotType）</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</main>
+
+<footer>CubeShim + CubeHypervisor · CubeSandbox 技术深入 05/09 · 下一篇：guest agent——VM 里的"内应"</footer>
+</body>
+</html>

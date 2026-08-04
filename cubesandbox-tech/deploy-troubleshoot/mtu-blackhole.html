@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>03 · HTTP 通、HTTPS 超时、大文件截断——一次 MTU 黑洞的完整修复</title>
+<style>
+  :root {
+    --bg:#0b1020; --border:rgba(255,255,255,0.09); --border-strong:rgba(255,255,255,0.16);
+    --text:#e6eaf2; --text-dim:#9aa7bd; --text-faint:#6b7a93;
+    --blue:#4f8cff; --cyan:#2dd4bf; --purple:#a78bfa; --amber:#fbbf24; --red:#f87171; --green:#34d399;
+    --mono:"SFMono-Regular","JetBrains Mono","Fira Code",Consolas,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+    --radius:14px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{font-family:var(--sans);background:var(--bg);color:var(--text);line-height:2.05;font-size:16px}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono);font-size:.85em;background:rgba(79,140,255,.12);color:#b9d2ff;padding:2px 7px;border-radius:6px;white-space:nowrap}
+
+  header{position:sticky;top:0;z-index:100;backdrop-filter:blur(14px);background:rgba(11,16,32,.85);border-bottom:1px solid var(--border)}
+  .nav-inner{max-width:1120px;margin:0 auto;padding:0 24px;height:56px;display:flex;align-items:center;gap:22px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px;white-space:nowrap}
+  .brand-mark{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--blue),var(--purple));display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:800}
+  .back-home{margin-left:auto;font-size:13px;color:var(--text-faint);border:1px solid var(--border);padding:5px 14px;border-radius:20px;white-space:nowrap}
+  .back-home:hover{color:var(--text);border-color:var(--border-strong);text-decoration:none}
+
+  main{max-width:740px;margin:0 auto;padding:44px 24px 96px}
+  .hero{border-bottom:1px solid var(--border);padding:12px 0 36px;margin-bottom:48px}
+  .hero .crumb{font-family:var(--mono);font-size:12px;color:var(--text-faint);letter-spacing:1px}
+  .hero h1{font-size:31px;font-weight:900;margin:14px 0 10px;line-height:1.4;background:linear-gradient(90deg,#fff,var(--red));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  .hero .lead{font-size:16.5px;color:var(--text-dim);max-width:640px;line-height:2.1}
+
+  h2{font-size:20px;font-weight:800;margin:60px 0 4px;color:#f0f4ff;line-height:1.5}
+  h3{font-size:16px;font-weight:700;margin:28px 0 4px;color:#dbe4f5}
+  p{margin:16px 0}
+  .dim{color:var(--text-dim)}
+  .hl{color:var(--cyan);font-weight:600}
+  .hlb{color:var(--amber);font-weight:600}
+  .hlr{color:var(--red);font-weight:600}
+  .hlg{color:var(--green);font-weight:600}
+
+  .think{border-left:3px solid var(--purple);background:rgba(167,139,250,.06);padding:16px 22px;border-radius:0 10px 10px 0;margin:24px 0;color:var(--text-dim)}
+  .think .q{font-weight:700;color:var(--purple);margin-bottom:4px}
+
+  .codeblock{background:#0a0f1e;border:1px solid var(--border);border-radius:12px;padding:16px 20px;font-family:var(--mono);font-size:13px;color:#c8d3e8;overflow-x:auto;white-space:pre;line-height:1.9;margin:20px 0}
+  .codeblock .cm{color:var(--text-faint)}
+
+  .tbl-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:12px;margin:20px 0}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  thead th{background:rgba(79,140,255,.1);color:#bcd6ff;text-align:left;padding:9px 14px;font-weight:700;border-bottom:1px solid var(--border-strong)}
+  tbody td{padding:9px 14px;border-bottom:1px solid var(--border);color:var(--text-dim);vertical-align:top}
+  tbody tr:last-child td{border-bottom:none}
+
+  .punchline{border:1px solid rgba(52,211,153,.4);background:rgba(52,211,153,.06);border-radius:var(--radius);padding:20px 24px;margin:30px 0;font-size:16px;line-height:2}
+  .punchline small{display:block;font-family:var(--mono);font-size:11px;color:var(--green);letter-spacing:1px;margin-bottom:8px}
+
+  footer{border-top:1px solid var(--border);padding:28px 24px 46px;text-align:center;color:var(--text-faint);font-size:13px}
+  @media(max-width:720px){.hero h1{font-size:25px}}
+  .flow{width:100%;height:auto;display:block;margin:24px 0 2px}
+  .flow .fn{fill:#eaf0fb;font-size:14px;font-weight:700;font-family:var(--sans)}
+  .flow .fd{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow .fm{fill:#6b7a93;font-size:10.5px;font-family:var(--mono)}
+  .flow .fl{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow-cap{font-family:var(--mono);font-size:11px;color:var(--text-faint);letter-spacing:.6px;text-align:center;margin:6px 0 28px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="nav-inner">
+    <div class="brand"><div class="brand-mark">C</div> CubeSandbox · 部署排障</div>
+    <a class="back-home" href="index.html">← 排障索引</a>
+  </div>
+</header>
+
+<main>
+
+  <div class="hero">
+    <div class="crumb">CUBESANDBOX · 部署排障 03 / 05</div>
+    <h1>HTTP 通、HTTPS 超时、大文件截断——一次 MTU 黑洞的完整修复</h1>
+    <p class="lead">DNS 修好后，沙箱能解析域名了。可诡异的事情来了：`curl http://www.baidu.com` 返回 200，`curl https://www.baidu.com` 却超时；1MB 的下载文件只收到 228KB 就断。同一台机器、同一个网络，为什么对数据大小这么"挑剔"？这题一解就是一天，最后改到了 Rust 写的虚拟化层源码里。</p>
+  </div>
+
+  <h2>一、背景速览：MTU / MSS / virtio 网卡，三块拼图</h2>
+
+  <p>在讲排障前，先建立三个概念——没有它们，后面的现象完全不可理解。</p>
+
+  <p><span class="hlg">拼图一：MTU 与 MSS。</span>MTU（Maximum Transmission Unit）是链路层能承载的最大帧。TCP 发送数据时要按 <span class="hl">MSS（最大分段大小）</span>切段，经典公式 <code>MSS = MTU − 40</code>（20 字节 IPv4 头 + 20 字节 TCP 头）。发送端通告的 MSS 来自自己网卡的 MTU。比如 MTU 1500 的网卡通告 MSS 1460。</p>
+  <p><span class="hlg">拼图二：黑洞的机制。</span>如果数据链路某一段的 MTU 比发送端通告的小，那么"太大的包"有两种命运：<span class="hlb">要么沿途设备发回 ICMP "Packet Too Big" 让发送端降速重发（健康），要么被静默丢弃（黑洞）</span>。丢弃没有任何反馈，发送端还以为包在路上，于是表现为超时/截断——这就是"黑洞"名字的由来。</p>
+  <p><span class="hlg">拼图三：沙箱的网卡是 virtio-net。</span>沙箱是一台 PVM 虚拟机，它的 <code>eth0</code> 是虚拟网卡（virtio-net），由 hypervisor（VMM）创建。virtio-net 有一个特性位 <code>VIRTIO_NET_F_MTU</code>：宿主机可以通过它告诉 guest 内核"你该用多大的 MTU"。<span class="hl">也就是说，guest 的 MTU 不是 guest 自己定的，而是宿主机传进去的。</span>这正是这次排障的突破口。</p>
+
+  <h2>二、问题：按数据大小"挑食"的网络</h2>
+
+  <p>三个观察，互相印证：</p>
+  <div class="codeblock">$ curl -s -o /dev/null -w '%{http_code}' http://www.baidu.com
+200                    <span class="cm"># HTTP 正常</span>
+$ curl -k -s -o /dev/null -m 15 https://www.baidu.com
+000                    <span class="cm"># HTTPS 握手超时</span>
+$ python3 -c 'import socket; socket.create_connection(("www.baidu.com", 443))'
+<span class="cm"># 成功 —— TCP 层是通的！</span></div>
+  <p>TCP 能连上（SYN/SYN-ACK 都是小包），说明不是路由不通；HTTP 能通（GET 响应体通常只有几 KB，被切分成若干 ≤1460 字节的段）；唯独 HTTPS 挂——TLS 握手里，ServerHello 之后紧跟的<strong>证书链</strong>是一大坨数据，动辄几 KB。为什么大段数据过不去？</p>
+  <p>再补一刀：下载 1MB 文件，只收到约 228KB 就断了。一个精确的"截断点"，强烈暗示<span class="hl">超过某一大小的数据被稳定地丢弃</span>。</p>
+
+  <h2>三、根因：1500 与 1450 之间的"静默黑洞"</h2>
+
+  <p>把这条链路上每一段的 MTU 都量一遍，答案就出来了：</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>节点</th><th>MTU</th><th>可承载 TCP 载荷上限</th></tr></thead>
+      <tbody>
+        <tr><td>沙箱 guest <code>eth0</code>（virtio-net）</td><td><b>1500</b>（打包默认 <code>mvm_mtu=1500</code>）</td><td>1460（通告 MSS）</td></tr>
+        <tr><td>宿主机 tap（<code>cube-dev</code> / <code>z172.16.x.y</code>）</td><td>1500</td><td>1460</td></tr>
+        <tr><td>cube-node Pod <code>eth0</code>（Calico VXLAN）</td><td><b>1450</b></td><td>1410</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Calico 的 VXLAN 模式要在数据帧外包一层 50 字节的 VXLAN/UDP/IP 头，所以 Pod 网络的 MTU 是 1450。于是黑洞出现：</p>
+  <p><span class="hlb">guest 按 MTU 1500 通告 MSS=1460，但数据面最多承载 1410 字节载荷。回程任何长度在 1411~1460 之间的 TCP 段，超过 Pod MTU，被 Calico 数据面静默丢弃——没有任何 ICMP 通知。</span></p>
+  <p>为什么会"半通半不通"？因为 TCP 丢包后会重传，重传的段还是 1460 大小——永远超限，永远重传，永远丢。HTTP 响应小、段少，恰好没撞上阈值；TLS 证书和大文件下载，段段 1460，撞个正着。</p>
+
+  <svg class="flow" viewBox="0 0 720 236" role="img" aria-label="MTU黑洞成因链路">
+    <defs>
+      <marker id="m3Arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#4f8cff"/></marker>
+      <marker id="m3ArrR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#f87171"/></marker>
+    </defs>
+    <rect x="0" y="0" width="720" height="236" rx="14" fill="rgba(255,255,255,.03)" stroke="rgba(255,255,255,.09)"/>
+    <text x="24" y="28" class="fm">MTU 黑洞 · 1500 与 1450 之间的 50 字节差，吞掉一切 1411~1460 的 TCP 段</text>
+
+    <rect x="24" y="48" width="160" height="60" rx="10" fill="rgba(79,140,255,.08)" stroke="rgba(79,140,255,.45)"/>
+    <text x="104" y="72" text-anchor="middle" class="fn">沙箱 guest eth0</text>
+    <text x="104" y="90" text-anchor="middle" class="fd">MTU 1500 · 通告 MSS 1460</text>
+
+    <rect x="220" y="48" width="140" height="60" rx="10" fill="rgba(79,140,255,.08)" stroke="rgba(79,140,255,.45)"/>
+    <text x="290" y="72" text-anchor="middle" class="fn">tap 设备</text>
+    <text x="290" y="90" text-anchor="middle" class="fd">MTU 1500</text>
+
+    <rect x="396" y="48" width="150" height="60" rx="10" fill="rgba(248,113,113,.08)" stroke="rgba(248,113,113,.5)"/>
+    <text x="471" y="72" text-anchor="middle" class="fn" style="fill:#f87171">Pod eth0 (Calico)</text>
+    <text x="471" y="90" text-anchor="middle" class="fd">MTU 1450 · 载荷上限 1410</text>
+
+    <rect x="582" y="48" width="112" height="60" rx="10" fill="rgba(248,113,113,.07)" stroke="rgba(248,113,113,.45)"/>
+    <text x="638" y="72" text-anchor="middle" class="fn" style="fill:#f87171">1411~1460</text>
+    <text x="638" y="90" text-anchor="middle" class="fd">段被静默丢弃</text>
+
+    <line x1="184" y1="78" x2="220" y2="78" stroke="#4f8cff" stroke-width="1.5" marker-end="url(#m3Arr)"/>
+    <line x1="360" y1="78" x2="396" y2="78" stroke="#4f8cff" stroke-width="1.5" marker-end="url(#m3Arr)"/>
+    <line x1="546" y1="78" x2="582" y2="78" stroke="#f87171" stroke-width="1.5" marker-end="url(#m3ArrR)"/>
+    <text x="566" y="124" text-anchor="middle" class="fl">超出 1450 → 吞</text>
+
+    <rect x="220" y="170" width="150" height="54" rx="10" fill="rgba(52,211,153,.07)" stroke="rgba(52,211,153,.45)"/>
+    <text x="295" y="192" text-anchor="middle" class="fn" style="fill:#34d399">修复：guest MTU 1450</text>
+    <text x="295" y="209" text-anchor="middle" class="fd">MSS 1410 ≤ 1410 上限</text>
+    <rect x="412" y="170" width="150" height="54" rx="10" fill="rgba(52,211,153,.08)" stroke="rgba(52,211,153,.5)"/>
+    <text x="487" y="192" text-anchor="middle" class="fn" style="fill:#34d399">数据面正常转发</text>
+    <text x="487" y="209" text-anchor="middle" class="fd">不再有段被吞</text>
+    <line x1="370" y1="120" x2="370" y2="170" stroke="#34d399" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#m3Arr)"/>
+    <line x1="412" y1="197" x2="482" y2="197" stroke="#34d399" stroke-width="1.5" marker-end="url(#m3Arr)"/>
+  </svg>
+  <div class="flow-cap">上排是问题链路：guest 通告 MSS 1460，超过 Pod 数据面 1410 的上限；下排是修复：guest MTU 对齐 1450，MSS 1410 恰好不越界。</div>
+
+  <h2>四、第一层修复：让 guest 的 MTU 对齐 Pod 网络</h2>
+
+  <p>修法很直白——把沙箱的 MTU 从 1500 改成 1450。难的是"改哪里"。首先要让宿主侧的 tap 设备用 1450，这由 Helm 配置链控制：</p>
+  <div class="codeblock"># values.yaml 新增参数（默认 0 = 用打包默认值）
+cubeNode:
+  network:
+    mtu: 1450</div>
+  <p>这个值经 <code>_helpers.tpl</code> 的 <code>cube.nodeComponentCommonEnv</code> 变成环境变量 <code>CUBE_SANDBOX_NETWORK_MTU</code>，再由 <code>cube-node-entrypoint.sh</code>（以及单组件部署的 <code>component-entrypoint.sh</code>）在启动时用 <code>sed</code> 把 Cubelet <code>config.toml</code> 里的 <code>mvm_mtu</code> 打补丁——并做了整型校验防止注入：</p>
+  <div class="codeblock">if [[ -n "${CUBE_SANDBOX_NETWORK_MTU:-}" && "${CUBE_SANDBOX_NETWORK_MTU}" != "0" ]]; then
+  [[ "${CUBE_SANDBOX_NETWORK_MTU}" =~ ^[0-9]+$ ]] || fail "CUBE_SANDBOX_NETWORK_MTU must be a non-negative integer"
+  sed -i "s/mvm_mtu = [0-9]\+/mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}/" "${CUBELET_CONFIG}"
+fi</div>
+  <p>改完发现：宿主机侧全部对了——<code>cube-dev</code>、<code>z172.16.x.y</code> 的 MTU 都是 1450，network-agent 传给 Cubelet 的 <code>Interface.MTU=1450</code> 也没错。<span class="hlb">但 guest 里的 eth0 依然是 1500。</span>信息在"进入虚拟机"这一步断了——而这正是背景速览里拼图三说的：guest MTU 由宿主机通过 virtio-net 传进去，现在没人传。</p>
+
+  <h2>五、第二层修复：CubeShim 透传 MTU 到虚拟机</h2>
+
+  <p>链路是：Cubelet 把接口信息（含 MTU）发给 CubeShim，CubeShim 构造 <code>NetConfig</code> 交给 VMM（hypervisor），VMM 再通过 virtio-net 的 <code>VIRTIO_NET_F_MTU</code> 通知 guest。查源码发现，CubeShim 的 <code>add_nets</code> 构造 <code>NetConfig</code> 时根本没拷贝 MTU 字段：</p>
+  <div class="codeblock">// CubeShim/shim/src/hypervisor/config.rs — 修复前
+let mut nc: NetConfig = NetConfig {
+    id: Some(...), tap: n.name.clone(), ..Default::default()
+};
+// nc.mtu 从未被赋值 → None</div>
+  <p>修复是在两处把 MTU 显式传下去，并利用 VIRTIO_NET_F_MTU 让 guest 内核应用通告值：</p>
+  <div class="codeblock">// 修复后：add_nets（新创建路径）
+if n.mtu &gt; 0 {
+    nc.mtu = Some(n.mtu as u16);   <span class="cm">// VIRTIO_NET_F_MTU 让 guest 应用该 MTU</span>
+}
+// 修复后：restore_nets_config（快照恢复路径，CubeShim/shim/src/common/utils.rs）
+if n.mtu &gt; 0 {
+    net_config.mtu = Some(n.mtu as u16);
+}</div>
+  <p>还有第三处：<code>hypervisor/vmm/src/config.rs</code> 的 <code>update_nets</code>。它负责在 VM 状态更新（快照恢复）时把新的网络配置合并进 VM 的 <code>NetConfig</code>，但原来只复制了 <code>tap</code> 和 <code>rate_limiter_config</code>，把 MTU 丢了。这次一并补上：</p>
+  <div class="codeblock">// update_nets 修复：新增 mtu_map，恢复时按网卡 id 回填 MTU
+let mut mtu_map: HashMap&lt;String, Option&lt;u16&gt;&gt; = HashMap::default();
+// ...遍历 net_cfgs 收集 mtu ...
+for net in nets.iter_mut() {
+    if let Some(mtu) = mtu_map.get(&amp;id.clone()) { net.mtu = *mtu; }
+}</div>
+  <p>这里"快照恢复路径"为什么要单独修？因为沙箱大多从模板快照恢复，恢复时走的是 <code>update_nets</code> 合并配置——如果它丢 MTU，恢复出来的 guest 还是 1500。三条路径（新建 + 快照恢复 + 恢复合并）都得补，缺一条都会让 guest MTU 回到 1500。</p>
+
+  <h2>六、第三层：在 64_host 编译并替换 shim 二进制</h2>
+
+  <p>改动在源码，生效得重新编译。64_host 上先装齐工具链：</p>
+  <div class="codeblock">apt-get install -y build-essential libseccomp-dev libcap-ng-dev
+<span class="cm"># 首次编译曾报：error: linking with 'cc' failed: cannot find -lseccomp / -lcap-ng</span></div>
+  <div class="codeblock">cd /opt/cube-build/CubeShim
+cargo build --release
+<span class="cm"># 产出 target/release/{containerd-shim-cube-rs, cube-runtime}</span></div>
+  <p>然后替换节点上的二进制并重启 cubelet 使其加载新 shim：</p>
+  <div class="codeblock">cp -f /opt/cube-build/CubeShim/target/release/{containerd-shim-cube-rs,cube-runtime} \
+      /usr/local/services/cubetoolbox/cube-shim/bin/
+kubectl -n cube-system rollout restart ds/cube-node</div>
+
+  <h2>七、第四层（关键）：为什么模板必须重建</h2>
+
+  <p>代码改了、shim 换了，可新沙箱的 eth0 还是 1500。原因在模板创建机制：模板创建流程会先起一个"build 沙箱"跑构建，然后把它的磁盘 + 内存做成快照（AppSnapshot）。如果 build 沙箱是<strong>从旧模板的快照恢复</strong>的，那么 guest 启动走的是"快照恢复"路径——而这条路径的 MTU 透传正是我们刚在 <code>update_nets</code> 里修的那一环，旧二进制没有这个修复。</p>
+  <p>于是修复后的正确做法是：<span class="hl">重新建一个模板（不带 <code>--node</code> 让 CubeMaster 自动选健康节点），保证 build 沙箱冷启动，让新 shim 的 MTU 透传完整走一遍</span>。重建后验证：</p>
+  <div class="codeblock">$ ip link show eth0        <span class="cm"># mtu 1450 ✓</span>
+$ curl -k https://www.baidu.com   <span class="cm"># 200，TLS 握手正常 ✓</span>
+$ curl -O http://.../1MB.zip       <span class="cm"># 完整下载 ✓</span></div>
+
+  <h2>八、权衡：为什么"黑洞"如此难查</h2>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>常见排查手段</th><th>为何失效</th></tr></thead>
+      <tbody>
+        <tr><td>ping / TCP connect</td><td>小包都能过，黑洞只吞 1411~1460 的大段</td></tr>
+        <tr><td>看各段 MTU</td><td>每一段看起来都"正常"（1500/1450 都是合法值），差异藏在跨段处</td></tr>
+        <tr><td>路由跟踪</td><td>黑洞不产生 ICMP，无从报告</td></tr>
+        <tr><td>tcpdump 抓包</td><td>能看到 SACK 重传、部分段到达——需要很强的前后对照才能定位</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>而修复本身也是三层：配置层（helm mtu 参数）解决"告诉宿主机用多少"，CubeShim/VMM 层解决"把 MTU 传进 guest"，模板层解决"让 build 沙箱冷启动走新代码"。<span class="hl">任何一层缺失，guest 的 MTU 都还是 1500。</span></p>
+
+  <div class="punchline">
+    <small>一句话带走</small>
+    MTU 黑洞的根因是 guest 通告 MSS 1460 而数据面只承载 1410；修复要贯穿三层——Helm 配置 mvm_mtu、CubeShim 的 add_nets / restore_nets_config / update_nets 透传 MTU（VIRTIO_NET_F_MTU）、重建模板让 build 沙箱冷启动走新代码。
+  </div>
+
+  <h2>传送门：真想读代码，就这几个文件</h2>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>想看什么</th><th>去这里</th></tr></thead>
+      <tbody>
+        <tr><td>新建路径透传 MTU</td><td><code>CubeShim/shim/src/hypervisor/config.rs</code>（<code>add_nets</code>）</td></tr>
+        <tr><td>快照恢复路径透传 MTU</td><td><code>CubeShim/shim/src/common/utils.rs</code>（<code>restore_nets_config</code>）</td></tr>
+        <tr><td>VM 网络更新合并 MTU</td><td><code>hypervisor/vmm/src/config.rs</code>（<code>update_nets</code>）</td></tr>
+        <tr><td>helm 新增 MTU 参数</td><td><code>deploy/kubernetes/chart/values.yaml</code> + <code>templates/_helpers.tpl</code></td></tr>
+        <tr><td>启动时 patch mvm_mtu</td><td><code>deploy/kubernetes/images/scripts/cube-node-entrypoint.sh</code> / <code>component-entrypoint.sh</code></td></tr>
+        <tr><td>tap MTU 来源</td><td><code>network-agent/internal/service/tap_lifecycle.go</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</main>
+
+<footer>部署排障 03/05 · 下一篇：沙箱自己睡了，却没人能把它叫醒——auto_resume 504 之谜</footer>
+</body>
+</html>

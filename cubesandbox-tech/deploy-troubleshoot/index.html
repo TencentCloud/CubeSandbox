@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CubeSandbox 部署排障实录</title>
+<style>
+  :root {
+    --bg: #0b1020;
+    --panel: rgba(255,255,255,0.04);
+    --panel-hover: rgba(255,255,255,0.07);
+    --border: rgba(255,255,255,0.09);
+    --border-strong: rgba(255,255,255,0.16);
+    --text: #e6eaf2;
+    --text-dim: #9aa7bd;
+    --text-faint: #6b7a93;
+    --blue: #4f8cff;
+    --cyan: #2dd4bf;
+    --purple: #a78bfa;
+    --amber: #fbbf24;
+    --red: #f87171;
+    --green: #34d399;
+    --mono: "SFMono-Regular","JetBrains Mono","Fira Code",Consolas,Menlo,monospace;
+    --sans: -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: var(--sans); background: var(--bg); color: var(--text); line-height: 1.7; font-size: 15px; }
+  a { color: var(--blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { font-family: var(--mono); font-size: 0.88em; background: rgba(79,140,255,0.12); color: #b9d2ff; padding: 2px 7px; border-radius: 6px; white-space: nowrap; }
+
+  .hero {
+    text-align: center;
+    padding: 76px 24px 50px;
+    background:
+      radial-gradient(1000px 420px at 15% -10%, rgba(248,113,113,0.18), transparent 60%),
+      radial-gradient(1000px 420px at 85% -10%, rgba(79,140,255,0.2), transparent 60%),
+      radial-gradient(700px 300px at 50% 110%, rgba(251,191,36,0.1), transparent 60%);
+    border-bottom: 1px solid var(--border);
+  }
+  .hero .badge {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--amber);
+    border: 1px solid rgba(251,191,36,0.4);
+    background: rgba(251,191,36,0.08);
+    padding: 4px 14px;
+    border-radius: 20px;
+    margin-bottom: 20px;
+    letter-spacing: 1px;
+  }
+  .hero h1 {
+    font-size: 40px;
+    font-weight: 900;
+    background: linear-gradient(90deg,#fff,var(--blue) 45%,var(--purple));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .hero p { color: var(--text-dim); font-size: 16.5px; margin-top: 14px; max-width: 720px; margin-left: auto; margin-right: auto; }
+  .hero .back {
+    display: inline-block;
+    margin-top: 22px;
+    font-size: 13px;
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    padding: 6px 16px;
+    border-radius: 20px;
+    transition: all 0.15s;
+  }
+  .hero .back:hover { color: var(--text); border-color: var(--border-strong); text-decoration: none; }
+
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 56px 24px 90px; }
+  .section-title { font-size: 20px; font-weight: 800; margin: 48px 0 20px; padding-left: 12px; border-left: 3px solid var(--amber); }
+  .section-title:first-child { margin-top: 0; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 22px 22px 24px;
+    display: flex;
+    flex-direction: column;
+    transition: transform 0.2s, border-color 0.2s, background 0.2s;
+  }
+  .card:hover { transform: translateY(-3px); border-color: var(--border-strong); background: var(--panel-hover); }
+  .card .num {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--amber);
+    background: rgba(251,191,36,0.12);
+    border: 1px solid rgba(251,191,36,0.3);
+    border-radius: 6px;
+    padding: 2px 8px;
+    align-self: flex-start;
+    margin-bottom: 12px;
+  }
+  .card h3 { font-size: 18px; margin-bottom: 6px; }
+  .card .tags { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+  .card p.desc { color: var(--text-dim); font-size: 13.5px; flex: 1; }
+  .card .features { color: var(--text-faint); font-size: 12.5px; margin-top: 14px; font-family: var(--mono); line-height: 2; }
+  .card .go {
+    margin-top: 16px;
+    font-size: 13.5px;
+    font-weight: 700;
+    color: var(--blue);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .card:hover .go { color: #8fb6ff; }
+  .tag {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border-strong);
+    color: var(--text-dim);
+  }
+  .tag.go { color: #7ee7ff; border-color: rgba(126,231,255,0.4); background: rgba(126,231,255,0.08); }
+  .tag.rust { color: #ffab7e; border-color: rgba(255,171,126,0.4); background: rgba(255,171,126,0.08); }
+  .tag.lua { color: #a5f3a1; border-color: rgba(165,243,161,0.4); background: rgba(165,243,161,0.08); }
+  .tag.yaml { color: #ffd27e; border-color: rgba(255,210,126,0.4); background: rgba(255,210,126,0.08); }
+  .tag.k8s { color: #b9a3ff; border-color: rgba(185,163,255,0.4); background: rgba(185,163,255,0.08); }
+
+  .note {
+    border-left: 3px solid var(--amber);
+    background: rgba(251,191,36,0.07);
+    padding: 12px 18px;
+    border-radius: 0 10px 10px 0;
+    font-size: 13px;
+    color: var(--text-dim);
+    max-width: 720px;
+    margin: 26px auto 0;
+  }
+  .note strong { color: var(--text); }
+
+  .back-top {
+    position: fixed; right: 26px; bottom: 26px;
+    width: 44px; height: 44px; border-radius: 12px;
+    background: rgba(79,140,255,0.85); color: #fff; border: none;
+    cursor: pointer; font-size: 18px;
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0; pointer-events: none; transition: opacity 0.25s;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.35);
+  }
+  .back-top.show { opacity: 1; pointer-events: auto; }
+  footer { border-top: 1px solid var(--border); padding: 34px 24px 50px; text-align: center; color: var(--text-faint); font-size: 12.5px; }
+  @media (max-width: 720px) { .hero h1 { font-size: 30px; } }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <div class="badge">CUBE SANDBOX · DEPLOY TROUBLESHOOTING</div>
+  <h1>CubeSandbox 部署排障实录</h1>
+  <p>2026-08-03 在 64_host 上部署 CubeSandbox 0.6 后，沙箱"建得起来、命令跑不动"——从命令执行、公网 DNS、到 HTTPS 握手超时、自动恢复 504，四篇排障实录，每篇从现象入手，循链路抽丝剥茧，一路修到源码层。</p>
+  <a class="back" href="../index.html">← 返回核心技术索引</a>
+</div>
+
+<div class="wrap">
+
+  <div class="section-title">前置 · 系统全景</div>
+  <div class="grid">
+    <div class="card">
+      <span class="num">00</span>
+      <h3>先看懂一张地图：CubeSandbox 全景速览</h3>
+      <div class="tags"><span class="tag">前置必读</span><span class="tag">概念</span></div>
+      <p class="desc">第一次接触 CubeSandbox？先读这篇。回答三个问题：一个"沙箱"到底是什么、SDK 一行代码背后发生了什么、那么多组件各管什么。</p>
+      <div class="features">PVM 虚拟机 · 模板快照 · envd:49983<br>CubeMaster / CubeProxy / CLM / CubeNet</div>
+      <a class="go" href="cubesandbox-basics.html">深入阅读 →</a>
+    </div>
+  </div>
+
+  <div class="section-title">沙箱访问排障 · 由浅入深</div>
+  <div class="grid">
+    <div class="card">
+      <span class="num">01</span>
+      <h3>沙箱建好了，命令却一条都跑不了</h3>
+      <div class="tags"><span class="tag go">Go</span><span class="tag">envd · E2B</span></div>
+      <p class="desc">Sandbox.create() 成功、commands.run 却抛 ConnectException——命令执行链路里"端口暴露"这一步是怎么断的。</p>
+      <div class="features">ENVD_PORT=49983 · --expose-port<br>_envd_rpc_base_url_and_headers · sandbox_backend</div>
+      <a class="go" href="envd-port.html">深入阅读 →</a>
+    </div>
+    <div class="card">
+      <span class="num">02</span>
+      <h3>沙箱里 DNS 全挂了——一次"安全默认值"引发的公网断连</h3>
+      <div class="tags"><span class="tag go">Go</span><span class="tag c">C/eBPF</span></div>
+      <p class="desc">resolv.conf 指向集群 CoreDNS，但沙箱连 DNS 查询都发不出去。一条"默认拒绝私网"的安全策略，如何变成沙箱的断网根源。</p>
+      <div class="features">alwaysDeniedSandboxCIDRs · ResolveEffectiveDNSServers<br>disable_host_netfile · template --dns</div>
+      <a class="go" href="sandbox-dns.html">深入阅读 →</a>
+    </div>
+    <div class="card">
+      <span class="num">03</span>
+      <h3>HTTP 通、HTTPS 超时、大文件截断——一次 MTU 黑洞的完整修复</h3>
+      <div class="tags"><span class="tag rust">Rust</span><span class="tag k8s">Calico</span></div>
+      <p class="desc">同样的链路，TCP 能连、HTTP 能通，HTTPS 却握手超时、1MB 下载只收到 228KB。1500 与 1450 之间藏着一个静默丢包的黑洞，而修复要动到 Rust VMM 的源码。</p>
+      <div class="features">mvm_mtu · VIRTIO_NET_F_MTU · add_nets<br>restore_nets_config · update_nets · MSS</div>
+      <a class="go" href="mtu-blackhole.html">深入阅读 →</a>
+    </div>
+    <div class="card">
+      <span class="num">04</span>
+      <h3>沙箱自己睡了，却没人能把它叫醒——auto_resume 504 之谜</h3>
+      <div class="tags"><span class="tag lua">OpenResty</span><span class="tag go">Go</span></div>
+      <p class="desc">自动暂停一切正常，自动恢复却永远 504。一条"渲染时固化的 IP"，让 CubeProxy 的心跳写进黑洞、CLM 找不到任何代理——四层链路逐层排查。</p>
+      <div class="features">proxy_registry.lua · lookup() · Redis discovery<br>StateLockTTL · /_sidecar_resume · cube_sandbox_state</div>
+      <a class="go" href="auto-resume-504.html">深入阅读 →</a>
+    </div>
+  </div>
+
+  <div class="note"><strong>阅读建议：</strong>第一次接触 CubeSandbox 的读者，请务必先读 <a href="cubesandbox-basics.html">第 0 篇《先看懂一张地图》</a>，它建立了全系统的心智模型——之后再按 01 → 04 顺序阅读，每篇排障你都能立刻定位"问题出在地图的哪个角落"。所有源码路径以仓库根目录为基准，涉及部署环境的 IP / ID 均为本次环境的历史值。</div>
+</div>
+
+<footer>
+  CubeSandbox 部署排障实录 · 源码路径基准：/workspace/github/CubeSandbox<br>
+  完整排障记录见 docs/zh/guide/kubernetes/deployment-record-2026-08-03-64host.md
+</footer>
+
+<button class="back-top" id="backTop">↑</button>
+<script>
+  const b = document.getElementById('backTop');
+  window.addEventListener('scroll', () => b.classList.toggle('show', window.scrollY > 500));
+  b.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
+</script>
+</body>
+</html>

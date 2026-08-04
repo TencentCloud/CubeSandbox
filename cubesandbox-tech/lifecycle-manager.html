@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>生命周期管理 · 一台闲置的沙箱，怎么自己学会"睡觉"</title>
+<style>
+  :root {
+    --bg:#0b1020; --border:rgba(255,255,255,0.09); --border-strong:rgba(255,255,255,0.16);
+    --text:#e6eaf2; --text-dim:#9aa7bd; --text-faint:#6b7a93;
+    --blue:#4f8cff; --cyan:#2dd4bf; --purple:#a78bfa; --amber:#fbbf24; --red:#f87171; --green:#34d399;
+    --mono:"SFMono-Regular","JetBrains Mono","Fira Code",Consolas,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+    --radius:14px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{font-family:var(--sans);background:var(--bg);color:var(--text);line-height:2.05;font-size:16px}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono);font-size:.85em;background:rgba(79,140,255,.12);color:#b9d2ff;padding:2px 7px;border-radius:6px;white-space:nowrap}
+
+  header{position:sticky;top:0;z-index:100;backdrop-filter:blur(14px);background:rgba(11,16,32,.85);border-bottom:1px solid var(--border)}
+  .nav-inner{max-width:1120px;margin:0 auto;padding:0 24px;height:56px;display:flex;align-items:center;gap:22px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px;white-space:nowrap}
+  .brand-mark{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--blue),var(--purple));display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:800}
+  .back-home{margin-left:auto;font-size:13px;color:var(--text-faint);border:1px solid var(--border);padding:5px 14px;border-radius:20px;white-space:nowrap}
+  .back-home:hover{color:var(--text);border-color:var(--border-strong);text-decoration:none}
+
+  main{max-width:740px;margin:0 auto;padding:44px 24px 96px}
+  .hero{border-bottom:1px solid var(--border);padding:12px 0 36px;margin-bottom:48px}
+  .hero .crumb{font-family:var(--mono);font-size:12px;color:var(--text-faint);letter-spacing:1px}
+  .hero h1{font-size:31px;font-weight:900;margin:14px 0 10px;line-height:1.4;background:linear-gradient(90deg,#fff,var(--cyan));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  .hero .lead{font-size:16.5px;color:var(--text-dim);max-width:640px;line-height:2.1}
+
+  h2{font-size:20px;font-weight:800;margin:60px 0 4px;color:#f0f4ff;line-height:1.5}
+  h3{font-size:16px;font-weight:700;margin:28px 0 4px;color:#dbe4f5}
+  p{margin:16px 0}
+  .dim{color:var(--text-dim)}
+  .hl{color:var(--cyan);font-weight:600}
+  .hlb{color:var(--amber);font-weight:600}
+  .hlr{color:var(--red);font-weight:600}
+  .hlg{color:var(--green);font-weight:600}
+
+  .think{border-left:3px solid var(--purple);background:rgba(167,139,250,.06);padding:16px 22px;border-radius:0 10px 10px 0;margin:24px 0;color:var(--text-dim)}
+  .think .q{font-weight:700;color:var(--purple);margin-bottom:4px}
+
+  .codeblock{background:#0a0f1e;border:1px solid var(--border);border-radius:12px;padding:16px 20px;font-family:var(--mono);font-size:13px;color:#c8d3e8;overflow-x:auto;white-space:pre;line-height:1.9;margin:20px 0}
+  .codeblock .cm{color:var(--text-faint)}
+
+  .pipeline{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:24px 0}
+  .pipeline .ps{border:1px solid var(--border);border-radius:12px;padding:14px;background:rgba(255,255,255,.03)}
+  .pipeline .ps .no{font-family:var(--mono);font-size:11px;color:var(--blue);margin-bottom:6px}
+  .pipeline .ps .t{font-weight:700;font-size:14.5px;margin-bottom:4px}
+  .pipeline .ps .d{font-size:12.5px;color:var(--text-dim);line-height:1.8}
+  @media(max-width:720px){.pipeline{grid-template-columns:1fr 1fr}}
+
+  .tbl-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:12px;margin:20px 0}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  thead th{background:rgba(79,140,255,.1);color:#bcd6ff;text-align:left;padding:9px 14px;font-weight:700;border-bottom:1px solid var(--border-strong)}
+  tbody td{padding:9px 14px;border-bottom:1px solid var(--border);color:var(--text-dim);vertical-align:top}
+  tbody tr:last-child td{border-bottom:none}
+
+  .punchline{border:1px solid rgba(52,211,153,.4);background:rgba(52,211,153,.06);border-radius:var(--radius);padding:20px 24px;margin:30px 0;font-size:16px;line-height:2}
+  .punchline small{display:block;font-family:var(--mono);font-size:11px;color:var(--green);letter-spacing:1px;margin-bottom:8px}
+
+  footer{border-top:1px solid var(--border);padding:28px 24px 46px;text-align:center;color:var(--text-faint);font-size:13px}
+  @media(max-width:720px){.hero h1{font-size:25px}}
+  .flow{width:100%;height:auto;display:block;margin:24px 0 2px}
+  .flow .fn{fill:#eaf0fb;font-size:14px;font-weight:700;font-family:var(--sans)}
+  .flow .fd{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow .fm{fill:#6b7a93;font-size:10.5px;font-family:var(--mono)}
+  .flow .fl{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow-cap{font-family:var(--mono);font-size:11px;color:var(--text-faint);letter-spacing:.6px;text-align:center;margin:6px 0 28px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="nav-inner">
+    <div class="brand"><div class="brand-mark">C</div> CubeSandbox · 技术深入</div>
+    <a class="back-home" href="index.html">← 技术索引</a>
+  </div>
+</header>
+
+<main>
+
+  <div class="hero">
+    <div class="crumb">CUBESANDBOX · 核心技术 02 / 09</div>
+    <h1>一台闲置的沙箱，怎么自己学会"睡觉"</h1>
+    <p class="lead">这篇讲 cube-lifecycle-manager（CLM）。我们从成本问题出发：沙箱不用的时候也在烧钱，但用户随时可能回来。CLM 的答案是把闲置沙箱"暂停"成快照、需要时再"唤醒"——而"判断何时该睡、何时该醒、醒来谁来做"，是一个分布式系统里最考验并发设计的问题之一。</p>
+  </div>
+
+  <h2>一、问题：闲置的沙箱，是纯成本</h2>
+
+  <p>沙箱的计费对象是"存在时间"，不管用户用不用。而现实里，开发者开一个沙箱，真正的使用往往只有几分钟，剩下的几个小时它都闲着——一台 VM 占着内存、占着 CPU 配额，什么也不干。</p>
+  <p>前一篇调度器里我们见过"模板秒开"：沙箱本质是"模板快照 + 内存快照"，既然创建时能从快照恢复，那暂停时把内存写回快照、恢复时再拉起来，就是一条自然的路径。于是设计目标明确了：</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>需求</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td><b>自动暂停</b></td><td>沙箱空闲超过阈值，自动把 VM 内存落盘、释放资源，只剩一份快照</td></tr>
+        <tr><td><b>自动恢复</b></td><td>用户请求到达暂停的沙箱时，从快照毫秒级唤醒，体验上"只是首请求稍慢"</td></tr>
+        <tr><td><b>收敛一致</b></td><td>手动 pause/resume（SDK 调用）与自动逻辑并存，最终状态必须一致</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>问题被翻译成一个工程任务：<span class="hl">谁来判断空闲、谁执行暂停、谁响应唤醒、如何防止多副本重复操作。</span>这就是 CLM 存在的理由。</p>
+
+  <svg class="flow" viewBox="0 0 720 228" role="img" aria-label="沙箱生命周期状态机">
+    <defs>
+      <marker id="lmArr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2dd4bf"/></marker>
+      <marker id="lmArr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#f87171"/></marker>
+    </defs>
+    <rect x="0" y="0" width="720" height="228" rx="14" fill="rgba(255,255,255,.03)" stroke="rgba(255,255,255,.09)"/>
+    <text x="24" y="30" class="fm">沙箱生命周期状态机 · 状态即锁（SETNX 抢到才有资格操作）</text>
+
+    <rect x="30" y="44" width="180" height="54" rx="10" fill="rgba(45,212,191,.08)" stroke="rgba(45,212,191,.45)"/>
+    <text x="120" y="70" text-anchor="middle" class="fn">running</text>
+    <text x="120" y="88" text-anchor="middle" class="fd">VM 运行中，接流量</text>
+
+    <rect x="270" y="44" width="180" height="54" rx="10" fill="rgba(45,212,191,.08)" stroke="rgba(45,212,191,.45)"/>
+    <text x="360" y="70" text-anchor="middle" class="fn">pausing</text>
+    <text x="360" y="88" text-anchor="middle" class="fd">SETNX 持锁，内存写盘</text>
+
+    <rect x="510" y="44" width="180" height="54" rx="10" fill="rgba(45,212,191,.1)" stroke="rgba(45,212,191,.6)"/>
+    <text x="600" y="70" text-anchor="middle" class="fn">paused</text>
+    <text x="600" y="88" text-anchor="middle" class="fd">快照态，零资源占用</text>
+
+    <line x1="210" y1="71" x2="270" y2="71" stroke="#2dd4bf" stroke-width="1.5" marker-end="url(#lmArr)"/>
+    <text x="240" y="62" text-anchor="middle" class="fl">空闲超时 → tryPause</text>
+    <line x1="450" y1="71" x2="510" y2="71" stroke="#2dd4bf" stroke-width="1.5" marker-end="url(#lmArr)"/>
+    <text x="480" y="62" text-anchor="middle" class="fl">快照写盘完成</text>
+
+    <path d="M 600 98 L 600 136 L 120 136 L 120 98" fill="none" stroke="#2dd4bf" stroke-width="1.5" marker-end="url(#lmArr)"/>
+    <text x="360" y="124" text-anchor="middle" class="fl">请求到达 / 手动 resume → tryResume（单飞合并唤醒）</text>
+
+    <rect x="270" y="168" width="170" height="44" rx="9" fill="rgba(248,113,113,.07)" stroke="rgba(248,113,113,.5)"/>
+    <text x="355" y="186" text-anchor="middle" class="fn" style="fill:#f87171">killing</text>
+    <text x="355" y="203" text-anchor="middle" class="fd">注销资源中</text>
+    <rect x="470" y="168" width="170" height="44" rx="9" fill="rgba(248,113,113,.07)" stroke="rgba(248,113,113,.5)"/>
+    <text x="555" y="186" text-anchor="middle" class="fn" style="fill:#f87171">killed</text>
+    <text x="555" y="203" text-anchor="middle" class="fd">终态，从注册表移除</text>
+    <line x1="210" y1="98" x2="318" y2="168" stroke="#f87171" stroke-width="1.5" marker-end="url(#lmArr2)"/>
+    <text x="238" y="144" class="fl">销毁 / 超时</text>
+    <line x1="440" y1="188" x2="470" y2="188" stroke="#f87171" stroke-width="1.5" marker-end="url(#lmArr2)"/>
+  </svg>
+
+  <h2>二、为什么需要一个独立组件</h2>
+
+  <p>一个自然的想法是：把扫描闲置的逻辑塞进 CubeMaster 里不就行了？但这样有两个问题。第一，CubeMaster 的主链路是请求驱动的调度，它必须保持"无状态、专注于转发"——扫描、定时、状态维护是另一种节奏，混在一起会让主链路的故障面变大。第二，"自动化策略"（多久算闲置、是否自动暂停）需要独立升级、独立扩缩容，绑在主服务里就没法单独动了。</p>
+  <p>所以 CLM 被做成一个独立的 sidecar 部署在控制面，它自己不执行暂停/恢复，而是"协调"：从 Redis 事件流里看发生了什么，向 CubeMaster 发 RPC 让它暂停/恢复，把状态推给 CubeProxy 让数据面知道"这个沙箱现在能不能接请求"。启动时，<code>main.go</code> 装配了五个内部循环，各管一摊：</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>循环</th><th>职责</th></tr></thead>
+      <tbody>
+        <tr><td><code>consumeStream</code></td><td>XREADGROUP 消费生命周期事件（block 5s、count 100、出错退避 1s）</td></tr>
+        <tr><td><code>pollLastActive</code></td><td>周期轮询所有 CubeProxy 的 <code>/admin/last_active</code>，合并活跃时间戳</td></tr>
+        <tr><td><code>sweep.Run</code></td><td>空闲超时扫描，默认每 5s 一次</td></tr>
+        <tr><td><code>apiSrv.Run</code></td><td>HTTP 面：<code>/internal/resume</code>、<code>/healthz</code>、<code>/readyz</code></td></tr>
+        <tr><td><code>discSvc.Run</code></td><td>CubeProxy 副本发现（Redis 心跳注册表）</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>三、机制之一：Redis 事件流，唯一的"事实源"</h2>
+
+  <p>CLM 判断"世界上有哪些沙箱、处于什么状态"，依据不是自己去问，而是订阅一条事件流。CubeMaster 在每次创建/销毁/更新成功后，把元数据和事件写进 Redis；CLM 消费后，在内存里建起自己的注册表（registry）。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Redis Key</th><th>结构</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td><code>…sandbox:lifecycle:meta</code></td><td>Hash</td><td>field=sandbox_id，value=生命周期元数据 JSON，供启动时全量引导</td></tr>
+        <tr><td><code>…sandbox:lifecycle:events</code></td><td>Stream</td><td>XADD 事件（MAXLEN ~100000），字段 op / sandbox_id / payload / ts</td></tr>
+        <tr><td><code>…sandbox:lifecycle:state:&lt;id&gt;</code></td><td>String</td><td>当前状态（paused/running/pausing…），兼作 SETNX 状态锁（第四节）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>事件有四种 op：<code>create / delete / update / state</code>。其中 <code>state</code> 事件带 <code>StatePayload{state, actor, source}</code>——state 只允许 paused/running，actor 区分是谁改的（cubemaster 还是 clm），这为后面的"状态对账"埋下伏笔。</p>
+  <p>消费侧有几个工程细节。启动引导（bootstrap）时用 <code>HGetAll</code> 全量加载 meta，并且<span class="hl">强制以 hash 的 field 作为 sandbox_id</span>——防御脏数据，不能信 value 里可能写错的 id。消费者组用 <code>XGroupCreateMkStream</code> 创建，多副本 CLM 共享同一个消费组，事件不会重复处理；遇到 <code>BUSYGROUP</code> 错误就忽略（说明别的副本建过了）。遇到解析不了的事件，先 <code>Ack</code> 再丢弃——不处理，但也不能让它卡住整条流。</p>
+
+  <h2>四、机制之二：扫描决策——"它到底闲没闲"</h2>
+
+  <p>注册表建好了，每 5 秒 <code>sweep.Run</code> 扫一遍，找出"空闲超时"的沙箱。问题来了：<span class="hlb">怎么判定一个沙箱闲了多久？</span></p>
+  <p>活跃时间的定义是：跨所有 CubeProxy 副本取 <code>LastActiveMs</code> 的最大值，再和元数据里的创建时间取 max。为什么跨副本取 max？因为用户可能从任何一台 CubeProxy 进入，单看一台会低估活跃度。公式如下：</p>
+  <div class="codeblock">baseline = max( 各 CubeProxy 上报的 LastActiveMs, Meta.CreatedAt )
+           （若两者皆 0，回落 FirstSeenAt —— CLM 本地首次见到它的时间）
+timeout  = Meta.TimeoutSeconds
+           （nil → 集群默认；&lt; 0 → 永不暂停）
+idleFor  = nowMs − baseline
+idleFor &lt; timeout → 跳过（还没到点）</div>
+  <p>这个"空闲判定"里有三个陷阱，代码里各有对策：</p>
+  <p><span class="hlg">陷阱一：CLM 重启会误杀。</span>重启后从 HGETALL 引导进来的老沙箱，LastActiveMs 还是 0——如果立即扫描，会误判"从未活跃、立刻超时"。对策是 BootstrapWarmup：启动后 30 秒内，跳过那些"首次见到时间 ≤ 启动时间"的条目，等 pollLastActive 把真实活跃时间回填。</p>
+  <p><span class="hlg">陷阱二：状态锁可能过期。</span>扫描前先 <code>GetState</code>，若已经是 paused/pausing/killing/killed，直接跳过——避免对一个正在处理中的沙箱做无谓 RPC。</p>
+  <p><span class="hlg">陷阱三：多副本同时扫到同一个沙箱。</span>这是分布式系统最经典的竞态，解法是"状态即锁"：</p>
+  <div class="codeblock">tryPause(sid)：
+① AcquireState(sid, "pausing", TTL=60s)   // SETNX：抢到锁才继续，抢不到 = 别人在处理，直接返回
+② ProxyPush.SetState(sid, "pausing")        // 先通知 CubeProxy 门禁（失败仅告警）
+③ CubeMaster.Pause(sid)                     // POST /cube/sandbox/update {action:"pause"}
+   ├─ 404(沙箱不存在)  → 驱逐本地条目：清状态 + 删 meta + 删注册表，视为成功
+   ├─ 已处于目标态     → 落入"成功记账"（补写 paused）
+   └─ 其它错误        → 回滚：清状态锁 + 写回 running + 返回错误
+④ 成功记账：SetState(sid, "paused") + ProxyPush.SetState(sid, "paused")</div>
+  <p>销毁（tryKill）结构相同：抢 killing 锁 → 通知代理 → DELETE 沙箱（kill_reason=timeout）→ 成功后清理。这套 <span class="hl">"状态即锁"的设计把"状态表示"和"并发控制"合二为一</span>——state key 既是 CubeProxy 查询的门禁依据，也是 CLM 操作的互斥锁，TTL 兜底防止执行者崩溃后锁被永久占用。一个 key，两用，代价是必须在语义上小心设计。</p>
+
+  <h2>五、机制之三：自动恢复——十个并发请求，只唤醒一次</h2>
+
+  <p>暂停是 CLM 主动发起的，恢复则是请求驱动的：CubeProxy 数据面遇到一个 paused 沙箱的请求，回调 <code>POST /internal/resume</code>。这带来一个高并发问题：<span class="hlb">同一沙箱同时来了 10 个请求，恢复只能做一次，另外 9 个得等同一个结果。</span></p>
+  <p>解法是"单飞合并"（singleflight 模式）：CLM 内部维护一个 <code>calls[sid]</code> 表，第一个请求创建 in-flight call，后续请求发现已有 in-flight，直接 select 等它的 done 通道，共享第一个执行者的结果。恢复执行本身还要再过一道状态锁：</p>
+  <div class="codeblock">Resume(sid)：
+  锁内查 calls[sid]
+   ├─ 已有 in-flight → 等 done / ctx.Done() → 返回首个执行者的结果
+   └─ 无 → 新建 call，执行 doResume：
+        acquireResumeOwnership：SETNX "resuming" 锁
+         ├─ cur == "running"     → 幂等成功（already running）
+         ├─ cur == "pausing/resuming" → waitForRunning 等对端结果
+         └─ cur == "paused" / 不存在 → 抢锁成功，own 路径
+        AutoResume 门：!Meta.AutoResume → 放弃（必须显式 connect()）
+        callCubeMasterResume：POST /cube/sandbox/update {action:"resume"}
+          └─ 404 → 驱逐注册表；已处于目标态 → 视为成功
+        成功记账：
+          SetState("running")
+          go pushRunningState(sid)      // 独立 3s 超时 + 指数退避（100ms→200ms，3 次）
+          Registry.MergeLastActive(sid, now)   // 刷新活跃时间，防 sweeper 立刻再暂停</div>
+  <p>有两个细节值得注意。<span class="hlg">一是 waitForRunning 的轮询</span>：以 200ms 间隔轮询状态直到 running，如果状态锁在轮询中途过期（TTL 60s），返回错误而不是假装成功——宁可失败重来，不给用户一个虚假的成功。</p>
+  <p><span class="hlg">二是 MergeLastActive。</span>每次自动恢复成功后，把活跃时间刷新到当前——沙箱获得一个全新的计时窗口。于是"恢复 → 使用 → 再次空闲 → 再次暂停"的循环可以无限持续。这是 Agent 场景成本优化的核心：<span class="hl">闲置就睡，来请求就醒，睡和醒之间用户无感。</span></p>
+
+  <h2>六、机制之四：状态对账——手动与自动，收敛到同一事实</h2>
+
+  <p>除了 CLM 的自动暂停/恢复，用户也可能通过 SDK 直接调用 pause()/resume()（走 CubeMaster）。这两条路径并存，必须保证最终一致。CubeMaster 的操作成功后同样会发 <code>state</code> 事件，CLM 消费后走对账：</p>
+  <div class="codeblock">Handle(ev)：
+① 校验：op=state、state ∈ {paused, running}、注册表里有该沙箱
+② 若当前状态是 "pausing"/"resuming" → 跳过（CLM 自己的 in-flight 流程会写终态，避免竞争）
+③ 幂等：当前状态 == 新状态 → 直接返回
+④ 对账：SetState(newState) + ProxyPush.SetState(newState)
+   newState == "running" → 额外 MergeLastActive（防止刚恢复又被扫暂停）</div>
+  <p>这套设计的价值在于：<span class="hl">事件驱动 + 幂等对账，让"谁发起的操作"在最终状态上收敛一致，不依赖事件到达的时序。</span>即使事件乱序，最终也会幂等收敛到真实状态——这就是"最终一致性"在一个具体系统里的落地。</p>
+
+  <h2>七、收束：设计全景</h2>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>问题</th><th>机制</th><th>核心权衡</th></tr></thead>
+      <tbody>
+        <tr><td>谁来判断沙箱闲了多久</td><td>事件流 + 跨副本 max 活跃时间</td><td>事实源唯一，判定可审计</td></tr>
+        <tr><td>多副本同时扫描到同一沙箱</td><td>"状态即锁"（SETNX + TTL）</td><td>状态表示与并发控制合一</td></tr>
+        <tr><td>并发请求同时唤醒一个沙箱</td><td>singleflight 合并 + 状态锁</td><td>一次恢复，N 个等待者共享结果</td></tr>
+        <tr><td>重启误杀闲置沙箱</td><td>BootstrapWarmup 30s 宽限</td><td>正确性优先于即时性</td></tr>
+        <tr><td>手动与自动操作并存</td><td>事件驱动 + 幂等对账</td><td>不依赖时序，最终收敛</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="punchline">
+    <small>一句话带走</small>
+    CLM 是一个事件驱动的"寿命管家"：Redis 流是事实源，sweeper 用 SETNX 状态锁做幂等的暂停决策，resumer 用单飞合并做请求驱动的唤醒，statesync 让手动与自动收敛一致——闲置就睡，来请求就醒，全程用户无感。
+  </div>
+
+  <h2>传送门：真想读代码，就这几个文件</h2>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>想看什么</th><th>去这里</th></tr></thead>
+      <tbody>
+        <tr><td>装配与五个循环</td><td><code>cube-lifecycle-manager/cmd/cube-lifecycle-manager/main.go</code></td></tr>
+        <tr><td>Redis 键与事件 schema</td><td><code>cube-lifecycle-manager/internal/lifecycle/schema.go</code></td></tr>
+        <tr><td>流消费（XREADGROUP）</td><td><code>cube-lifecycle-manager/internal/redisstream/stream.go</code></td></tr>
+        <tr><td>注册表 Entry 语义</td><td><code>cube-lifecycle-manager/internal/registry/registry.go</code></td></tr>
+        <tr><td>自动暂停 / 超时销毁</td><td><code>cube-lifecycle-manager/internal/sweeper/sweeper.go</code></td></tr>
+        <tr><td>自动恢复（并发合并）</td><td><code>cube-lifecycle-manager/internal/resumer/resumer.go</code></td></tr>
+        <tr><td>状态对账</td><td><code>cube-lifecycle-manager/internal/statesync/handler.go</code></td></tr>
+        <tr><td>发布端（CubeMaster 侧）</td><td><code>CubeMaster/pkg/lifecycle/{store,schema,init}.go</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</main>
+
+<footer>生命周期管理 CLM · CubeSandbox 技术深入 02/09 · 下一篇：Cubelet Workflow——沙箱是怎么被"流水线"制造出来的</footer>
+</body>
+</html>

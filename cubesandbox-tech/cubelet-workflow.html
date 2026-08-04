@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cubelet Workflow 引擎 · 一个沙箱，是被"流水线"制造出来的</title>
+<style>
+  :root {
+    --bg:#0b1020; --border:rgba(255,255,255,0.09); --border-strong:rgba(255,255,255,0.16);
+    --text:#e6eaf2; --text-dim:#9aa7bd; --text-faint:#6b7a93;
+    --blue:#4f8cff; --cyan:#2dd4bf; --purple:#a78bfa; --amber:#fbbf24; --red:#f87171; --green:#34d399;
+    --mono:"SFMono-Regular","JetBrains Mono","Fira Code",Consolas,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+    --radius:14px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{font-family:var(--sans);background:var(--bg);color:var(--text);line-height:2.05;font-size:16px}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono);font-size:.85em;background:rgba(79,140,255,.12);color:#b9d2ff;padding:2px 7px;border-radius:6px;white-space:nowrap}
+
+  header{position:sticky;top:0;z-index:100;backdrop-filter:blur(14px);background:rgba(11,16,32,.85);border-bottom:1px solid var(--border)}
+  .nav-inner{max-width:1120px;margin:0 auto;padding:0 24px;height:56px;display:flex;align-items:center;gap:22px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px;white-space:nowrap}
+  .brand-mark{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--blue),var(--purple));display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:800}
+  .back-home{margin-left:auto;font-size:13px;color:var(--text-faint);border:1px solid var(--border);padding:5px 14px;border-radius:20px;white-space:nowrap}
+  .back-home:hover{color:var(--text);border-color:var(--border-strong);text-decoration:none}
+
+  main{max-width:740px;margin:0 auto;padding:44px 24px 96px}
+  .hero{border-bottom:1px solid var(--border);padding:12px 0 36px;margin-bottom:48px}
+  .hero .crumb{font-family:var(--mono);font-size:12px;color:var(--text-faint);letter-spacing:1px}
+  .hero h1{font-size:31px;font-weight:900;margin:14px 0 10px;line-height:1.4;background:linear-gradient(90deg,#fff,var(--green));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  .hero .lead{font-size:16.5px;color:var(--text-dim);max-width:640px;line-height:2.1}
+
+  h2{font-size:20px;font-weight:800;margin:60px 0 4px;color:#f0f4ff;line-height:1.5}
+  h3{font-size:16px;font-weight:700;margin:28px 0 4px;color:#dbe4f5}
+  p{margin:16px 0}
+  .dim{color:var(--text-dim)}
+  .hl{color:var(--cyan);font-weight:600}
+  .hlb{color:var(--amber);font-weight:600}
+  .hlr{color:var(--red);font-weight:600}
+  .hlg{color:var(--green);font-weight:600}
+
+  .think{border-left:3px solid var(--purple);background:rgba(167,139,250,.06);padding:16px 22px;border-radius:0 10px 10px 0;margin:24px 0;color:var(--text-dim)}
+  .think .q{font-weight:700;color:var(--purple);margin-bottom:4px}
+
+  .codeblock{background:#0a0f1e;border:1px solid var(--border);border-radius:12px;padding:16px 20px;font-family:var(--mono);font-size:13px;color:#c8d3e8;overflow-x:auto;white-space:pre;line-height:1.9;margin:20px 0}
+  .codeblock .cm{color:var(--text-faint)}
+
+  .pipeline{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:24px 0}
+  .pipeline .ps{border:1px solid var(--border);border-radius:12px;padding:14px;background:rgba(255,255,255,.03)}
+  .pipeline .ps .no{font-family:var(--mono);font-size:11px;color:var(--blue);margin-bottom:6px}
+  .pipeline .ps .t{font-weight:700;font-size:14.5px;margin-bottom:4px}
+  .pipeline .ps .d{font-size:12.5px;color:var(--text-dim);line-height:1.8}
+  @media(max-width:720px){.pipeline{grid-template-columns:1fr 1fr}}
+
+  .tbl-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:12px;margin:20px 0}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  thead th{background:rgba(79,140,255,.1);color:#bcd6ff;text-align:left;padding:9px 14px;font-weight:700;border-bottom:1px solid var(--border-strong)}
+  tbody td{padding:9px 14px;border-bottom:1px solid var(--border);color:var(--text-dim);vertical-align:top}
+  tbody tr:last-child td{border-bottom:none}
+
+  .punchline{border:1px solid rgba(52,211,153,.4);background:rgba(52,211,153,.06);border-radius:var(--radius);padding:20px 24px;margin:30px 0;font-size:16px;line-height:2}
+  .punchline small{display:block;font-family:var(--mono);font-size:11px;color:var(--green);letter-spacing:1px;margin-bottom:8px}
+
+  footer{border-top:1px solid var(--border);padding:28px 24px 46px;text-align:center;color:var(--text-faint);font-size:13px}
+  @media(max-width:720px){.hero h1{font-size:25px}}
+  .flow{width:100%;height:auto;display:block;margin:24px 0 2px}
+  .flow .fn{fill:#eaf0fb;font-size:14px;font-weight:700;font-family:var(--sans)}
+  .flow .fd{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow .fm{fill:#6b7a93;font-size:10.5px;font-family:var(--mono)}
+  .flow .fl{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow-cap{font-family:var(--mono);font-size:11px;color:var(--text-faint);letter-spacing:.6px;text-align:center;margin:6px 0 28px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="nav-inner">
+    <div class="brand"><div class="brand-mark">C</div> CubeSandbox · 技术深入</div>
+    <a class="back-home" href="index.html">← 技术索引</a>
+  </div>
+</header>
+
+<main>
+
+  <div class="hero">
+    <div class="crumb">CUBESANDBOX · 核心技术 03 / 09</div>
+    <h1>一个沙箱，是被"流水线"制造出来的</h1>
+    <p class="lead">这篇讲 Cubelet 的 Workflow 引擎。创建沙箱不是一行代码，而是拉镜像、准备卷、建网络、算 cgroup、启动 VM……一长串步骤。我们把视线放到节点侧：Cubelet 是怎么把这串步骤组织成一条可扩展、可控并发、失败自愈的流水线的。</p>
+  </div>
+
+  <h2>一、问题：一个"创建沙箱"的函数，会膨胀成什么</h2>
+
+  <p>假设你是 Cubelet 的开发者，要写"创建沙箱"。你很快会发现，这不是一个函数，而是一串依赖关系明确的步骤：得先有 sandbox ID，才能建卷；卷建好，才能配网络；网络配好，才能起 cgroup；这些都好了，才能启动 VM。而每一步内部，又有多个互不依赖的子任务可以并行——比如"拉镜像"和"建网络"互不相干，让它们串行执行纯粹是浪费时间。</p>
+  <p>如果把这一切写进一个巨型函数，会怎样？函数会长到几千行，步骤顺序写死在代码里，想调整顺序要改代码，想加一种新资源类型（比如新的存储后端）要改主流程。创建时间 = 所有步骤之和，因为谁都不敢并行。</p>
+  <div class="think">
+    <div class="q">于是设计者决定：把流水线本身做成数据，让配置驱动执行。</div>
+    <div class="a">这就是 Workflow 引擎的起点——"配置即流水线"。</div>
+  </div>
+  <p>解法分成两层：一层是<span class="hl">声明式定义</span>——流水线长什么样，写在 <code>Cubelet/config/config.toml</code> 里；一层是<span class="hl">插件式执行</span>——每个步骤是一个独立的 Action 插件，实现同一个接口。调整流水线 = 改配置；加能力 = 注册新插件。引擎本身永远不需要为具体资源类型改代码。</p>
+
+  <h2>二、骨架：Flow / Step / Action 三层结构</h2>
+
+  <p>流水线有三个层次：一个 <code>Flow</code> 是一条完整的流水线（create 或 destroy）；Flow 由若干 <code>Step</code> 组成（外层数组，串行）；Step 由若干 <code>Action</code> 组成（内层数组，并行）。真实配置长这样：</p>
+  <div class="codeblock">[plugins."io.cubelet.workflow.v1.workflow".flows.create]
+  concurrent = 100
+  actions = [
+    ["createid", "appsnapshot"],               # Step1：生成 ID + 快照场景准备模板（并行）
+    ["images","volume","storage","network",
+     "netfile","cube-sandbox-store"],          # Step2：六大资源并行准备
+    ["cgroup"],                                # Step3：cgroup 资源计算与限额
+    ["cubebox"]                                # Step4：核心——创建容器并驱动 shim
+  ]
+
+[flows.destroy]
+  actions = [
+    ["cubebox"],                               # Step1：先销毁 VM/容器
+    ["images","storage","cgroup","network",
+     "volume","netfile","cube-sandbox-store"], # Step2：并行回收资源
+    ["cleanup"]                                # Step3：GC 清理
+  ]</div>
+  <p>注意到 destroy 的顺序刻意反过来了：创建时最后启动的东西，销毁时最先干掉——VM 必须先死，才能安全回收它的资源。这种顺序关系，正是"依赖"在配置里的显式表达。</p>
+
+  <svg class="flow" viewBox="0 0 720 178" role="img" aria-label="create 流水线的 Step 与 Action">
+    <defs>
+      <marker id="cwArr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#34d399"/></marker>
+    </defs>
+    <rect x="0" y="0" width="720" height="178" rx="14" fill="rgba(255,255,255,.03)" stroke="rgba(255,255,255,.09)"/>
+    <text x="24" y="28" class="fm">FLOWS.CREATE · 外层 Step 串行（有依赖），内层 Action 并行（无依赖）</text>
+
+    <text x="89" y="46" text-anchor="middle" class="fm">STEP 1</text>
+    <rect x="14" y="54" width="150" height="84" rx="10" fill="rgba(52,211,153,.08)" stroke="rgba(52,211,153,.45)"/>
+    <text x="89" y="82" text-anchor="middle" class="fn">createid + appsnapshot</text>
+    <text x="89" y="102" text-anchor="middle" class="fd">生成沙箱 ID</text>
+    <text x="89" y="118" text-anchor="middle" class="fd">模板快照就绪</text>
+    <line x1="164" y1="96" x2="192" y2="96" stroke="#34d399" stroke-width="1.5" marker-end="url(#cwArr)"/>
+
+    <text x="299" y="46" text-anchor="middle" class="fm">STEP 2 · 六大资源并行</text>
+    <rect x="204" y="54" width="190" height="84" rx="10" fill="rgba(52,211,153,.08)" stroke="rgba(52,211,153,.45)"/>
+    <text x="299" y="80" text-anchor="middle" class="fn" style="font-size:12.5px">images · volume · storage</text>
+    <text x="299" y="96" text-anchor="middle" class="fn" style="font-size:12.5px">network · netfile · store</text>
+    <text x="299" y="118" text-anchor="middle" class="fd">拉镜像 / 建卷 / 配网络</text>
+    <line x1="394" y1="96" x2="422" y2="96" stroke="#34d399" stroke-width="1.5" marker-end="url(#cwArr)"/>
+
+    <text x="489" y="46" text-anchor="middle" class="fm">STEP 3</text>
+    <rect x="434" y="54" width="110" height="84" rx="10" fill="rgba(52,211,153,.08)" stroke="rgba(52,211,153,.45)"/>
+    <text x="489" y="82" text-anchor="middle" class="fn">cgroup</text>
+    <text x="489" y="102" text-anchor="middle" class="fd">资源限额计算</text>
+    <text x="489" y="118" text-anchor="middle" class="fd">CPU / 内存配额</text>
+    <line x1="544" y1="96" x2="572" y2="96" stroke="#34d399" stroke-width="1.5" marker-end="url(#cwArr)"/>
+
+    <text x="645" y="46" text-anchor="middle" class="fm">STEP 4</text>
+    <rect x="584" y="54" width="122" height="84" rx="10" fill="rgba(52,211,153,.1)" stroke="rgba(52,211,153,.6)"/>
+    <text x="645" y="82" text-anchor="middle" class="fn">cubebox</text>
+    <text x="645" y="102" text-anchor="middle" class="fd">创建容器</text>
+    <text x="645" y="118" text-anchor="middle" class="fd">驱动 shim 起 VM</text>
+
+    <text x="24" y="162" class="fl">concurrent = 100 → 整条 Flow 的并发上限；任一个 Action 失败 → 依赖它的后续 Step 不执行，Flow 失败可重试</text>
+  </svg>
+  <p>每个 Action 是什么，一张表说清楚：</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Action</th><th>职责</th></tr></thead>
+      <tbody>
+        <tr><td><b>cubebox</b></td><td>核心：创建容器、驱动 shim、设置宿主机 cgroup 限额（services/cubebox/local.go）</td></tr>
+        <tr><td><b>createid</b></td><td>生成 sandbox ID（快照场景固定 templateID_0）</td></tr>
+        <tr><td><b>appsnapshot</b></td><td>快照恢复场景：确保 runtemplate 就绪</td></tr>
+        <tr><td><b>images</b></td><td>OCI 镜像拉取/确保（runtime_type io.containerd.cube.v2）</td></tr>
+        <tr><td><b>storage</b></td><td>CubeCoW 卷/快照准备（storage_backend=cubecow）</td></tr>
+        <tr><td><b>cgroup</b></td><td>计算资源配额（含 VM 内存开销 42MiB 等），注入 CreateContext.CgroupInfo</td></tr>
+        <tr><td><b>network</b></td><td>调用 network-agent 建网（TAP/IPAM/策略）</td></tr>
+        <tr><td><b>volume / netfile</b></td><td>外部卷插件挂载 / 沙箱网络文件（/run/vc/sbs）</td></tr>
+        <tr><td><b>cube-sandbox-store</b></td><td>containerd SandboxStore 本地存储</td></tr>
+        <tr><td><b>cleanup</b></td><td>GC 兜底清理（也是引擎的 cleanupFlow）</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>三、机制：引擎的执行规则</h2>
+
+  <p>引擎在 <code>plugins/workflow/engine.go</code>，核心抽象是 <code>Flow</code> 接口——所有 Action 和引擎本身都实现它：</p>
+  <div class="codeblock">type Flow interface {
+    ID() string
+    Init(context.Context, *InitInfo) error
+    Create(context.Context, *CreateContext) error
+    Destroy(context.Context, *DestroyContext) error
+    CleanUp(context.Context, *CleanContext) error
+}
+
+type Workflow struct {
+    Name          string
+    MaxConcurrent int64
+    Limiter       *semaphore.Limiter   // 整条流水线的并发闸门
+    Steps         []*Step
+}
+type Step struct { Name string; Actions []Flow }   // Step 内 Actions 并行</div>
+  <p>执行规则有四条，每条对应一个真实问题：</p>
+  <p><span class="hlg">① 并发闸门。</span>进入流水线前 <code>Limiter.TryAcquire()</code>，拿不到信号量直接返回 <code>ErrorCode_ConcurrentFailed</code>。为什么？创建沙箱本身吃 CPU 和磁盘 IO，如果一台节点同时被塞进上千个创建请求，大家都会因为争抢资源而集体变慢。宁可快速失败让上层重试，也不挤兑节点——这是调度器那篇讲过的"排队限流"思想在节点侧的落地。</p>
+  <p><span class="hlg">② Step 串行、Action 并行。</span>逐个 Step 调用 <code>parallelRunSteps()</code>，内部用 <code>errgroup.WithContext</code> 并发执行 Step 内所有 Action——任一失败，通过 context cancel 取消其余兄弟 Action。于是创建耗时 = 串行 Step 之和，而不是 Action 之和。</p>
+  <p><span class="hlg">③ 失败自愈。</span>Create 失败且 <code>Failover=true</code> → 异步构造 DestroyContext 走销毁流水线做现场清理（防止资源泄漏——镜像拉了、卷建了、网络开了，最后 VM 没起来，不能留着这些孤儿资源）。Destroy 失败 → 调用 <code>cleanupFlow</code> 兜底 GC。还有一种特殊错误 <code>PreConditionFailed</code> 直接短路返回、不触发 failover——比如快照场景沙箱已经存在，这是预期内的，不该走销毁。</p>
+  <p><span class="hlg">④ 插件间不直接依赖，通过上下文传数据。</span>比如 cgroup 插件把算好的 <code>*cgroupp.Info</code>（CgroupID、ResourceQuantity、UsePoolV2）塞进 <code>CreateContext.CgroupInfo</code>，cubebox 插件在 Step4 消费它来设置宿主机 cgroup 限额。上下文还提供关键判定方法：<code>IsCreateSnapshot()</code>、<code>IsRestoreSnapshot()</code>、<code>GetSnapshotTemplateID()</code>——快照场景走哪条分支，由上下文说了算。</p>
+
+  <h2>四、机制：containerd 集成——VM 也是"一个 Task"</h2>
+
+  <p>到这里你可能会问：cubebox 插件里的"创建容器"，和普通容器有什么区别？答案是：<span class="hl">在 containerd 眼里，一台 VM 就是一个 runtime 很特殊的 Task。</span>这是整个设计最聪明的地方——Cubelet 以 containerd 插件身份注册（<code>io.cubelet.internal.v1.cubebox</code>），用进程内客户端（<code>containerd.New(…, WithInMemoryServices(ic))</code>）复用 containerd 的镜像、快照器与元数据，但容器的运行时指定为 <code>io.containerd.cube.rs</code>：</p>
+  <div class="codeblock">// cube_container_create.go —— createContainers 关键步骤
+opts := []containerd.NewContainerOpts{
+    containerd.WithImageName(image),
+    containerd.WithSandbox(sandboxID),                  // 挂到沙箱（非 Pod 容器）
+    containerd.WithRuntime("io.containerd.cube.rs", nil), // 指定 cube shim 运行时
+}
+c, _ := client.NewContainer(ctx, id, cOpts...)
+task, _ := c.NewTask(ctx, ioCreater, taskOpts...)       // 创建 Task → containerd 拉起 CubeShim
+task.Start(ctx)</div>
+  <p>当 containerd 看到容器要创建 Task 时，发现 runtime type 是 <code>io.containerd.cube.rs</code>，就去启动 CubeShim 二进制（Shim v2）——后续的所有 Task 请求（Start/Pause/Resume/Exec）都走 shim。一个沙箱里，<span class="hl">第一个容器（容器 0）承载 VM 本身</span>，后续容器都是 VM 内部的 OCI 容器，由 guest agent 管理。cubebox 插件会记住 shim 暴露的 vsock 端点（<code>cubebox.Endpoint = {Address, Version}</code>），后面的一切 guest 通信都靠它。</p>
+  <p>runtime 路径本身也支持三级解析（<code>withRuntimePathOpt</code>）：OciRuntime.Path → runtemplate → annotation，优先级从高到低——这允许为不同场景注入不同的运行时模板。另外还有一个失败兜底细节：envd init 失败时走 <code>cleanupAfterEnvdInitFailure</code> 直接同步销毁，并把 Failover 置 false，防止二次销毁。</p>
+
+  <h2>五、机制：暂停/恢复——三层之间的状态收敛</h2>
+
+  <p>前面 CLM 那篇讲的自动暂停，落到节点侧就是这里：Cubelet 通过 containerd Task API 触发暂停/恢复，真正的 VM 级暂停（内存落盘）由 CubeShim 完成。难点在于——<span class="hlb">一次暂停跨越 containerd、shim、VMM 三层，任何一层半途失败，状态机都可能卡死在 pausing。</span></p>
+  <p>暂停（UpdateWithPause）的处理：</p>
+  <div class="codeblock">① 预检：IsPaused → "already paused"；IsTerminated → "not running"
+② 全部容器置 PausingAt=now，doPreStop 停止任务内进程
+③ task.Pause(ctx, 30s 超时)
+   ├─ 失败 → reconcileStatusAfterPauseError：
+   │      用全新 context.Background()+5s（不用已过期的 ctx）调 task.Status，
+   │      按 shim 真实状态收敛本地状态：
+   │        containerd.Paused → 写 PausedAt；Running/Created → 清 PausingAt；中间态不动
+   └─ 成功 → 全部容器 PausedAt=now、PausingAt=0</div>
+  <p>恢复（UpdateWithResume）在非 PAUSED 状态时：RUNNING → 幂等成功；其余 → 失败。真正执行时先做<span class="hl">资源准入检查</span>（<code>admitResume</code>，受 paused_resource_release_ratio 配额约束）——暂停期间资源可能被别的沙箱占了，恢复前得确认够不够；然后 <code>task.Resume</code>。成功后收敛状态，并<span class="hlr">作废旧的运行时快照绑定</span>：因为从 pausevm 目录恢复是"不透明恢复"，旧快照引用必须失效，否则下一次快照会基于错误的基底。</p>
+  <p>配套的兜底是 DeadGC：PausingAt 卡住超过 <code>2 × taskPauseTimeout</code>（60s），判定为卡死，走回收流程自愈。三层系统，一层一层查真实状态，是这类跨层状态机唯一的可靠收敛方式。</p>
+
+  <h2>六、机制：状态机——用时间戳推断状态</h2>
+
+  <p>每个沙箱对象持久化在 boltdb 里，它的状态不是显式枚举，而是由时间戳字段推断：</p>
+  <div class="codeblock">func (s Status) State() ContainerState {
+    if s.Unknown       { return UNKNOWN }      // 优先级从高到低
+    if s.FinishedAt!=0 { return EXITED }       // 已结束
+    if s.PausingAt!=0  { return PAUSING }      // 暂停中（瞬时态）
+    if s.PausedAt!=0   { return PAUSED }       // 已暂停
+    if s.StartedAt!=0  { return RUNNING }      // 运行中
+    if s.CreatedAt!=0  { return CREATED }      // 已创建
+    return UNKNOWN
+}</div>
+  <p>为什么用时间戳推断而不是枚举？因为状态机有中间态，而中间态天然是"时间"的产物——PausingAt 一写，就进入 pausing；成功后再写 PausedAt。字段天然保存了"什么时候进入的"，DeadGC 要判断"卡了多久"，直接读时间戳即可，不用另存一份记录。这是把"状态"和"状态发生的时间"合并存储。</p>
+
+  <h2>七、机制：快照 / 提交 / 回滚——秒级模板的根基</h2>
+
+  <p>这三个能力支撑着"模板秒开"和"任意历史回滚"，都围绕 CubeCoW 卷操作 + shim 的 snapshot 命令。</p>
+  <p><span class="hlg">AppSnapshot（创建模板）</span>是离线的一次性流程：建临时沙箱 → 从 OCI spec annotations 提取 CPU/内存/磁盘参数 → 算快照路径（<code>&lt;snapshotDir&gt;/cubebox/&lt;templateID&gt;/{cpu}C{mem}M</code>）→ 创建内存卷 → 执行 cube-runtime 的 <code>--app-snapshot --snapshot-type full</code>（采集 VM 完整内存 + 文件系统）→ 写 memory.dev、rootfs → 销毁临时沙箱 → rename 到最终路径 → 登记模板元数据。</p>
+  <p><span class="hlg">CommitSandbox</span> 是对运行中沙箱打快照：rootfs 走 <code>CommitTemplateRootfs</code>；内存走 <code>prepareCommitMemoryArtifact</code>——如果存在可解析的快照基底，就 reflink 克隆基底做 <b>soft-dirty 增量</b>（只写变化的页），否则新建空卷做 full。提交后把这次 commit 标记为新的基底。</p>
+  <p><span class="hlg">RollbackSandbox</span> 要求新代际 > 当前 rootfs 代际。构造 rollbackRestoreConfig，通过 <code>task.Update(WithAnnotations)</code> 通知 shim 执行 <code>delete_vm + resume_vm_with_config</code>——<span class="hl">丢弃当前 VM、从目标快照恢复，全程不写盘</span>。期间置 RollingBack=true 防止 DeadGC 误判。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>快照类型</th><th>原理</th><th>用途</th></tr></thead>
+      <tbody>
+        <tr><td><b>full</b></td><td>完整内存</td><td>模板创建（一次性）</td></tr>
+        <tr><td><b>incremental</b></td><td>pagemap+kpageflags 只存 CoW 匿名页</td><td>节省空间的完整替代</td></tr>
+        <tr><td><b>soft-dirty</b></td><td>/proc/self/clear_refs + pagemap bit55</td><td>运行时提交（默认，最小化写放大）</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>八、收束</h2>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>问题</th><th>设计</th><th>关键权衡</th></tr></thead>
+      <tbody>
+        <tr><td>创建流程冗长、顺序僵化</td><td>config.toml 声明流水线，插件注册</td><td>改流水线 = 改配置，不动代码</td></tr>
+        <tr><td>串行太慢</td><td>Step 串行、Action 并行（errgroup）</td><td>耗时 = 串行 Step 之和</td></tr>
+        <tr><td>创建风暴挤兑节点</td><td>信号量并发闸门</td><td>快速失败优于死等</td></tr>
+        <tr><td>失败后资源泄漏</td><td>failover 走销毁流水线 / cleanup GC</td><td>防孤儿资源</td></tr>
+        <tr><td>跨 containerd/shim/VMM 状态漂移</td><td>独立超时上下文 + shim 真实状态收敛 + DeadGC</td><td>以真实状态为准，不猜</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="punchline">
+    <small>一句话带走</small>
+    Cubelet 把"创建/销毁沙箱"从巨型函数重构为 config.toml 驱动的插件流水线，以 containerd 插件身份复用其生态——VM 在 containerd 眼里只是一个 runtime 为 io.containerd.cube.rs 的 Task。这也是它和 Kubernetes/containerd 生态无缝集成的根本原因。
+  </div>
+
+  <h2>传送门：真想读代码，就这几个文件</h2>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>想看什么</th><th>去这里</th></tr></thead>
+      <tbody>
+        <tr><td>Flow 定义（config.toml）</td><td><code>Cubelet/config/config.toml</code></td></tr>
+        <tr><td>引擎实现</td><td><code>Cubelet/plugins/workflow/engine.go</code>、<code>plugins/workflow/plugin/plugin.go</code></td></tr>
+        <tr><td>cubebox 插件（local）</td><td><code>Cubelet/services/cubebox/local.go</code>、<code>cube_container_create.go</code></td></tr>
+        <tr><td>暂停/恢复与状态对账</td><td><code>Cubelet/services/cubebox/update.go</code></td></tr>
+        <tr><td>沙箱状态对象</td><td><code>Cubelet/pkg/store/cubebox/cubebox.go</code>、<code>status.go</code></td></tr>
+        <tr><td>快照/提交/回滚</td><td><code>Cubelet/services/cubebox/appsnapshot.go</code>、<code>template_ops.go</code>、<code>rollback.go</code></td></tr>
+        <tr><td>cgroup 资源插件</td><td><code>Cubelet/plugins/cube/internals/cgroup/</code></td></tr>
+        <tr><td>CubeCoW cgo 绑定</td><td><code>Cubelet/pkg/cubecow/cubecow.go</code>、<code>engine.go</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</main>
+
+<footer>Cubelet Workflow 引擎 · CubeSandbox 技术深入 03/09 · 下一篇：CubeCoW——磁盘怎么做到"一秒复制一百份"</footer>
+</body>
+</html>

@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>guest agent 沙箱内运行时 · VM 里的"内应"</title>
+<style>
+  :root {
+    --bg:#0b1020; --border:rgba(255,255,255,0.09); --border-strong:rgba(255,255,255,0.16);
+    --text:#e6eaf2; --text-dim:#9aa7bd; --text-faint:#6b7a93;
+    --blue:#4f8cff; --cyan:#2dd4bf; --purple:#a78bfa; --amber:#fbbf24; --red:#f87171; --green:#34d399;
+    --mono:"SFMono-Regular","JetBrains Mono","Fira Code",Consolas,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+    --radius:14px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{font-family:var(--sans);background:var(--bg);color:var(--text);line-height:2.05;font-size:16px}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono);font-size:.85em;background:rgba(79,140,255,.12);color:#b9d2ff;padding:2px 7px;border-radius:6px;white-space:nowrap}
+
+  header{position:sticky;top:0;z-index:100;backdrop-filter:blur(14px);background:rgba(11,16,32,.85);border-bottom:1px solid var(--border)}
+  .nav-inner{max-width:1120px;margin:0 auto;padding:0 24px;height:56px;display:flex;align-items:center;gap:22px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px;white-space:nowrap}
+  .brand-mark{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--purple),var(--blue));display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:800}
+  .back-home{margin-left:auto;font-size:13px;color:var(--text-faint);border:1px solid var(--border);padding:5px 14px;border-radius:20px;white-space:nowrap}
+  .back-home:hover{color:var(--text);border-color:var(--border-strong);text-decoration:none}
+
+  main{max-width:740px;margin:0 auto;padding:44px 24px 96px}
+  .hero{border-bottom:1px solid var(--border);padding:12px 0 36px;margin-bottom:48px}
+  .hero .crumb{font-family:var(--mono);font-size:12px;color:var(--text-faint);letter-spacing:1px}
+  .hero h1{font-size:31px;font-weight:900;margin:14px 0 10px;line-height:1.4;background:linear-gradient(90deg,#fff,var(--purple));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  .hero .lead{font-size:16.5px;color:var(--text-dim);max-width:640px;line-height:2.1}
+
+  h2{font-size:20px;font-weight:800;margin:60px 0 4px;color:#f0f4ff;line-height:1.5}
+  h3{font-size:16px;font-weight:700;margin:28px 0 4px;color:#dbe4f5}
+  p{margin:16px 0}
+  .dim{color:var(--text-dim)}
+  .hl{color:var(--cyan);font-weight:600}
+  .hlb{color:var(--amber);font-weight:600}
+  .hlr{color:var(--red);font-weight:600}
+  .hlg{color:var(--green);font-weight:600}
+
+  .think{border-left:3px solid var(--purple);background:rgba(167,139,250,.06);padding:16px 22px;border-radius:0 10px 10px 0;margin:24px 0;color:var(--text-dim)}
+  .think .q{font-weight:700;color:var(--purple);margin-bottom:4px}
+
+  .codeblock{background:#0a0f1e;border:1px solid var(--border);border-radius:12px;padding:16px 20px;font-family:var(--mono);font-size:13px;color:#c8d3e8;overflow-x:auto;white-space:pre;line-height:1.9;margin:20px 0}
+  .codeblock .cm{color:var(--text-faint)}
+
+  .tbl-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:12px;margin:20px 0}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  thead th{background:rgba(79,140,255,.1);color:#bcd6ff;text-align:left;padding:9px 14px;font-weight:700;border-bottom:1px solid var(--border-strong)}
+  tbody td{padding:9px 14px;border-bottom:1px solid var(--border);color:var(--text-dim);vertical-align:top}
+  tbody tr:last-child td{border-bottom:none}
+
+  .punchline{border:1px solid rgba(52,211,153,.4);background:rgba(52,211,153,.06);border-radius:var(--radius);padding:20px 24px;margin:30px 0;font-size:16px;line-height:2}
+  .punchline small{display:block;font-family:var(--mono);font-size:11px;color:var(--green);letter-spacing:1px;margin-bottom:8px}
+
+  footer{border-top:1px solid var(--border);padding:28px 24px 46px;text-align:center;color:var(--text-faint);font-size:13px}
+  @media(max-width:720px){.hero h1{font-size:25px}}
+  .flow{width:100%;height:auto;display:block;margin:24px 0 2px}
+  .flow .fn{fill:#eaf0fb;font-size:14px;font-weight:700;font-family:var(--sans)}
+  .flow .fd{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow .fm{fill:#6b7a93;font-size:10.5px;font-family:var(--mono)}
+  .flow .fl{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow-cap{font-family:var(--mono);font-size:11px;color:var(--text-faint);letter-spacing:.6px;text-align:center;margin:6px 0 28px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="nav-inner">
+    <div class="brand"><div class="brand-mark">C</div> CubeSandbox · 技术深入</div>
+    <a class="back-home" href="index.html">← 技术索引</a>
+  </div>
+</header>
+
+<main>
+
+  <div class="hero">
+    <div class="crumb">CUBESANDBOX · 核心技术 06 / 09</div>
+    <h1>VM 里的"内应"</h1>
+    <p class="lead">上一篇我们站在宿主侧看了虚拟化链路。这篇翻到墙的另一边：沙箱是一台真虚拟机，但用户要的是"容器体验"——VM 里得有人负责把宿主传来的命令翻译成真实的进程操作。这个人就是 guest agent：一个烧录进沙箱镜像、以 PID 1 身份运行的 Rust 程序。</p>
+  </div>
+
+  <h2>一、问题：VM 隔离了，但里面还得跑容器</h2>
+
+  <p>把沙箱做成 VM 有巨大的隔离收益——宿主的 CPU 漏洞、内核 bug 都无法波及 guest。但它带来一个尴尬：用户在沙箱里跑的不是虚拟机，而是容器。他们调用 <code>sandbox.files.write()</code>、<code>sandbox.commands.run()</code>，期望拿到的是"在一个 Linux 环境里操作进程"的体验。</p>
+  <p>于是需要一个"翻译层"：宿主侧传来"创建容器"，guest 里得有人真的 fork 进程、建命名空间、挂文件系统；宿主侧要读容器的 stdout，guest 里得有人把管道里的字节传出去。这个角色不能由宿主直接做——它活在 VM 里，是唯一能把"容器命令"翻译成"guest 内进程操作"的通道。<span class="hl">这就是 guest agent。</span></p>
+  <p>它与宿主的通信通道是 vsock（虚拟机专用的套接字，不经网络栈），协议是 ttRPC（一种 thrift 风格的轻量 RPC）。宿主侧的 CubeShim 就是通过它指挥整个 VM 内部的。</p>
+
+  <svg class="flow" viewBox="0 0 720 210" role="img" aria-label="宿主与 guest 的通信链路">
+    <defs>
+      <marker id="gaArr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#a78bfa"/></marker>
+    </defs>
+    <rect x="0" y="0" width="720" height="210" rx="14" fill="rgba(255,255,255,.03)" stroke="rgba(255,255,255,.09)"/>
+    <text x="24" y="28" class="fm">宿主 ↔ guest · 唯一的命令通道，把"容器操作"翻译成"进程操作"</text>
+
+    <text x="139" y="46" text-anchor="middle" class="fm">宿主 HOST</text>
+    <rect x="14" y="54" width="250" height="116" rx="12" fill="rgba(167,139,250,.06)" stroke="rgba(167,139,250,.4)"/>
+    <text x="139" y="92" text-anchor="middle" class="fn">CubeShim 进程</text>
+    <text x="139" y="112" text-anchor="middle" class="fd">Task 服务 · VMM 线程</text>
+    <text x="139" y="130" text-anchor="middle" class="fd">每个沙箱一个</text>
+    <text x="139" y="152" text-anchor="middle" class="fm">exec / stdio / pause / resume</text>
+
+    <line x1="264" y1="112" x2="456" y2="112" stroke="#a78bfa" stroke-width="1.5" marker-start="url(#gaArr)" marker-end="url(#gaArr)"/>
+    <text x="360" y="96" text-anchor="middle" class="fm">vsock · ttRPC</text>
+    <text x="360" y="134" text-anchor="middle" class="fl">0x680 端口握手 · cid=-1</text>
+
+    <text x="581" y="46" text-anchor="middle" class="fm">沙箱 VM（guest 内）</text>
+    <rect x="456" y="54" width="250" height="116" rx="12" fill="rgba(167,139,250,.06)" stroke="rgba(167,139,250,.4)"/>
+    <rect x="470" y="66" width="222" height="50" rx="9" fill="rgba(167,139,250,.1)" stroke="rgba(167,139,250,.55)"/>
+    <text x="581" y="88" text-anchor="middle" class="fn">cube-agent（PID 1）</text>
+    <text x="581" y="106" text-anchor="middle" class="fd">AgentService · HealthService</text>
+    <line x1="581" y1="116" x2="581" y2="126" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#gaArr)"/>
+    <rect x="470" y="126" width="222" height="40" rx="9" fill="rgba(167,139,250,.06)" stroke="rgba(167,139,250,.4)"/>
+    <text x="581" y="143" text-anchor="middle" class="fn">rustjail 容器</text>
+    <text x="581" y="159" text-anchor="middle" class="fd">fork + 命名空间 + OCI bundle</text>
+  </svg>
+
+  <h2>二、机制：启动——它是 VM 的 PID 1</h2>
+
+  <p>agent 被烧录进沙箱镜像，以 PID 1 启动。作为 init 进程，它先做系统级初始化，再把自己变成"服务进程"：</p>
+  <div class="codeblock">main() → real_main():
+① 日志管道（logger 任务）
+② init_mode = (getpid()==1)：
+     general_mount（基础挂载）、enable_rc_local、init_agent_as_init（挂 cgroup、设 hostname）
+③ start_sandbox(logger, config, init_mode):
+     ├─ Sandbox::new(logger)               // 建立共享 UTS/IPC 命名空间等
+     ├─ rpc::start(sandbox, vsock://-1:1024) // 注册并启动 ttRPC 服务
+     └─ 信号/uevent handler → 等待 shutdown
+④ shutdown 后 reboot VM</div>
+  <p>两种模式的分工很干净：PID 1 模式负责系统级初始化（挂载、cgroup、hostname）；非 init 模式（比如作为普通进程调试运行时）只启动 RPC 服务。监听地址 <code>vsock://-1:1024</code> 里的 cid=-1 表示"接受任意来源"，宿主的 CubeShim 随时可以连进来。</p>
+
+  <h2>三、机制：ttRPC 服务面——它的"能力清单"</h2>
+
+  <p>agent 对外暴露两个服务：AgentService（一切容器操作）和 HealthService。RPC 定义在 <code>libs/protocols/protos/agent.proto</code>。按能力分组看：</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>能力分组</th><th>RPC</th></tr></thead>
+      <tbody>
+        <tr><td>沙箱生命周期</td><td>CreateSandbox / DestroySandbox</td></tr>
+        <tr><td>容器生命周期</td><td>CreateContainer / StartContainer / RemoveContainer</td></tr>
+        <tr><td>进程执行</td><td>ExecProcess / SignalProcess / WaitProcess</td></tr>
+        <tr><td>标准 IO</td><td>WriteStdin / ReadStdout / ReadStderr / CloseStdin / TtyWinResize</td></tr>
+        <tr><td>网络</td><td>UpdateInterface / UpdateRoutes / ListInterfaces / ListRoutes / AddARPNeighbors / Get-SetIPTables</td></tr>
+        <tr><td>运维</td><td>GetOOMEvent / OnlineCPUMem / MemHotplugByProbe / SetGuestDateTime / ReseedRandomDev / CopyFile / AddSwap / GetVolumeStats / ResizeVolume</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>注意一个细节：<span class="hl">这套 RPC 把"宿主发起"和"guest 执行"完全对齐</span>——宿主说"写 stdin"，agent 就真的往容器的 stdin 管道写字节；宿主说"调整窗口尺寸"，agent 就 ioctl 终端。所有容器的 I/O 都是宿主代理转发，agent 是另一端。这也是为什么上一篇文章里暂停时要先 disconnect_agent：连接一断，I/O 转发就停了，进程还在，只是没人替它说话。</p>
+  <p>create_container 的内部处理链也值得一瞥：先 add_devices 把宿主给的设备逐个挂进 guest（virtio-blk / mmio-blk / nvdimm / scsi / vfio，带冲突检测），再把宿主 PCI 地址映射注入容器环境变量；然后 add_storages 按 Storage.driver 分派到 blk/virtiofs/ephemeral/overlayfs 各 handler；接着 update_container_namespaces、setup_bundle 准备 OCI bundle；最后 <code>LinuxContainer::new → Process::new → start</code>。</p>
+
+  <h2>四、机制：就绪通知——一个"笨但可靠"的硬件握手</h2>
+
+  <p>有个绕不开的问题：宿主怎么知道"agent 已经能接请求了"？轮询 vsock 可不可行？可行，但慢、且有竞态——你得反复尝试连接，还可能误判"还没就绪"和"已崩溃"。CubeSandbox 的选择是<span class="hlb">硬件级握手</span>：agent 就绪后，写一个 I/O 端口，VMM 截获这个写动作，通知宿主。</p>
+  <div class="codeblock">// x86_64：写 I/O port 0x680，数据 0x8
+let port: u16 = 0x680;
+let data: u8 = 0x8;
+libc::ioperm(port as u64, 5, 1);            // 打开端口访问权限
+x86_64::instructions::port::Port::new(port).write(data);
+
+// aarch64：mmap /dev/mem 0x0903_0000 写 1<<3（SYS_VSOCK_SERVER）
+const SYS_CTRL_MMIO_ADDR: libc::off_t = 0x0903_0000;
+const SYS_VSOCK_SERVER: u8 = 1 << 3;</div>
+  <p>I/O port 0x680 由 VMM 的 vsock/虚拟设备模块截获——agent 一写，宿主立刻知道"vsock server 就绪了"，随后建立 ttRPC 连接。相比轮询，硬件通知<b>更快、无竞态、不依赖网络栈</b>。这是那种"用一点点硬件知识换掉一大块状态机逻辑"的设计，很符合这个项目一贯的审美。</p>
+
+  <h2>五、机制：沙箱模型——用共享命名空间实现 Pod 语义</h2>
+
+  <p>一个沙箱里可以有多个容器（K8s Pod 语义：它们共享网络、共享进程树、共享 hostname）。agent 的 <code>Sandbox</code> 结构体负责建立这套共享基础：</p>
+  <div class="codeblock">pub struct Sandbox {
+    shared_utsns: Namespace,          // 共享 UTS（hostname）
+    shared_ipcns: Namespace,          // 共享 IPC
+    sandbox_pidns: Option<Namespace>, // 可选的共享 PID 命名空间
+    containers: HashMap<String, LinuxContainer>,
+    network: Network,
+    event_tx: Option<BroadcastSender<String>>,  // OOM 等事件广播
+    sender: oneshot::Sender<i32>,                // 触发 VM 关机的通道
+    pcimap: ...,                                 // 宿主 PCI → guest PCI 映射表
+}</div>
+  <p><code>setup_shared_namespaces</code>：若沙箱未指定独立 PID 命名空间，就把首个容器的 PID ns 作为共享 PID 命名空间——所有容器"看到同一个进程树"。IPC/UTS 命名空间始终共享。这就是 Pod 语义：容器们是"同一个屋子里的室友"，而不是各自独立的房间。</p>
+  <p>OOM 处理走事件广播：cgroup manager 收到 OOM 事件后，通过 <code>event_tx</code>（BroadcastSender）广播给所有 <code>GetOOMEvent</code> 订阅者——宿主 CubeShim 的 watch_oom 正是这样拿到 OOM 并转成 TaskOOM 事件上抛的。</p>
+  <p>网络也由 agent 直接管：guest 内没有 NetworkManager，agent 通过 netlink 直接配置接口与路由，写临时 resolv.conf 后 bind-mount 到 /etc/resolv.conf。这样沙箱内看到的网络与宿主 TAP 的 IP/路由严格一致，不依赖 systemd-networkd。</p>
+
+  <h2>六、机制：rustjail——VM 内的 OCI 容器运行时</h2>
+
+  <p>容器进程本身由 rustjail 管理——一个 Rust 版的 runc（OCI runtime）。它的启动模型是经典的 fork-exec：</p>
+  <div class="codeblock">LinuxContainer::new(spec)  → 解析 OCI spec
+  → init_child()：子进程入口
+      ├─ 读父进程环境变量（配置传递）
+      ├─ join / create 命名空间
+      └─ execvp 容器 init 进程（OCI 标准启动）
+  → start(&mut self, p): FIFO 建立、I/O 与日志 pipe、join ns、execvp、更新进程表</div>
+  <p>进程模型：每容器一个 init 进程 + 若干 exec 进程，WaitProcess 轮询退出状态。I/O 经宿主转发（ttRPC 的 WriteStdin/ReadStdout），支持 TTY（TtyWinResize 同步窗口尺寸）。这里值得点一句的是：<span class="hl">这个"内应"要同时充当 init（系统守护）和容器运行时（进程管理），两者在一个进程里协调</span>——它既是"管家"又是"宿主的手"，责任很重，所以协议设计上力求薄而完整。</p>
+
+  <h2>七、机制：设备热插拔——宿主加盘，guest 自动感知</h2>
+
+  <p>沙箱创建后可以动态加磁盘/设备。链路是：宿主 <code>VmAddDevice</code> → VMM 为设备分配 PCI BDF 并注入 guest → agent 的 <code>add_device</code> 里各 handler <code>wait_for_pci_device</code>（轮询 sysfs 直到设备出现）→ <code>get_device_name_by_pci</code> 换算 host/guest PCI 地址 → 找到设备节点 → 挂载到容器指定路径。</p>
+  <p>为什么设备热插拔重要？应用快照/模板通常只有最小系统盘，用户运行时才按需挂数据盘。<span class="hl">能在不停机的情况下给运行中的沙箱加盘，是"模板 + 运行时扩展"模型的关键能力。</span>另外有个安全细节：<code>update_device_cgroup</code> 会把 VM 根分区设备加入 cgroup deny——防止容器访问 VM rootfs，这是防逃逸的一部分。</p>
+
+  <h2>八、收束</h2>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>问题</th><th>设计</th><th>关键权衡</th></tr></thead>
+      <tbody>
+        <tr><td>VM 隔离后谁在内部执行命令</td><td>agent 以 PID 1 常驻，vsock ttRPC 通信</td><td>薄而完整的协议面</td></tr>
+        <tr><td>宿主怎么知道 agent 就绪</td><td>I/O port 0x680 硬件握手</td><td>无轮询、无竞态、不依赖网络栈</td></tr>
+        <tr><td>多容器共享进程树</td><td>共享 UTS/IPC/PID 命名空间</td><td>Pod 语义，容器是室友</td></tr>
+        <tr><td>容器进程由谁管理</td><td>rustjail（Rust 版 runc）</td><td>与 OCI 生态兼容</td></tr>
+        <tr><td>运行中加盘</td><td>PCI 热插拔 + sysfs 轮询发现</td><td>模板最小化 + 运行时扩展</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="punchline">
+    <small>一句话带走</small>
+    guest agent 是 VM 内的"内应运行时"：通过 vsock ttRPC 承接宿主控制面（沙箱/容器/设备/网络/进程/IO），以 rustjail 实现 OCI 容器，用共享命名空间实现 Pod 语义，硬件 I/O 端口做就绪握手——它是"容器体验 + VM 隔离"之间唯一的翻译层。
+  </div>
+
+  <h2>传送门：真想读代码，就这几个文件</h2>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>想看什么</th><th>去这里</th></tr></thead>
+      <tbody>
+        <tr><td>启动入口</td><td><code>agent/src/main.rs</code></td></tr>
+        <tr><td>ttRPC 服务与就绪通知</td><td><code>agent/src/rpc.rs</code>（0x680 ioport L1834+）</td></tr>
+        <tr><td>沙箱结构</td><td><code>agent/src/sandbox.rs</code></td></tr>
+        <tr><td>OCI 容器运行时</td><td><code>agent/rustjail/src/container.rs</code></td></tr>
+        <tr><td>RPC 协议定义</td><td><code>agent/libs/protocols/protos/agent.proto</code></td></tr>
+        <tr><td>网络 / 挂载 / 控制台</td><td><code>agent/src/{network,mount,console}.rs</code></td></tr>
+        <tr><td>设备与 PCI</td><td><code>agent/src/{device,pci}.rs</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</main>
+
+<footer>guest agent 沙箱内运行时 · CubeSandbox 技术深入 06/09 · 下一篇：CubeVS——几百个沙箱怎么共享一张网卡</footer>
+</body>
+</html>

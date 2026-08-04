@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CubeVS eBPF 网络虚拟化 · 几百个沙箱怎么共享一张网卡</title>
+<style>
+  :root {
+    --bg:#0b1020; --border:rgba(255,255,255,0.09); --border-strong:rgba(255,255,255,0.16);
+    --text:#e6eaf2; --text-dim:#9aa7bd; --text-faint:#6b7a93;
+    --blue:#4f8cff; --cyan:#2dd4bf; --purple:#a78bfa; --amber:#fbbf24; --red:#f87171; --green:#34d399;
+    --mono:"SFMono-Regular","JetBrains Mono","Fira Code",Consolas,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+    --radius:14px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{font-family:var(--sans);background:var(--bg);color:var(--text);line-height:2.05;font-size:16px}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono);font-size:.85em;background:rgba(79,140,255,.12);color:#b9d2ff;padding:2px 7px;border-radius:6px;white-space:nowrap}
+
+  header{position:sticky;top:0;z-index:100;backdrop-filter:blur(14px);background:rgba(11,16,32,.85);border-bottom:1px solid var(--border)}
+  .nav-inner{max-width:1120px;margin:0 auto;padding:0 24px;height:56px;display:flex;align-items:center;gap:22px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px;white-space:nowrap}
+  .brand-mark{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--red),var(--amber));display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:800}
+  .back-home{margin-left:auto;font-size:13px;color:var(--text-faint);border:1px solid var(--border);padding:5px 14px;border-radius:20px;white-space:nowrap}
+  .back-home:hover{color:var(--text);border-color:var(--border-strong);text-decoration:none}
+
+  main{max-width:740px;margin:0 auto;padding:44px 24px 96px}
+  .hero{border-bottom:1px solid var(--border);padding:12px 0 36px;margin-bottom:48px}
+  .hero .crumb{font-family:var(--mono);font-size:12px;color:var(--text-faint);letter-spacing:1px}
+  .hero h1{font-size:31px;font-weight:900;margin:14px 0 10px;line-height:1.4;background:linear-gradient(90deg,#fff,var(--red));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  .hero .lead{font-size:16.5px;color:var(--text-dim);max-width:640px;line-height:2.1}
+
+  h2{font-size:20px;font-weight:800;margin:60px 0 4px;color:#f0f4ff;line-height:1.5}
+  h3{font-size:16px;font-weight:700;margin:28px 0 4px;color:#dbe4f5}
+  p{margin:16px 0}
+  .dim{color:var(--text-dim)}
+  .hl{color:var(--cyan);font-weight:600}
+  .hlb{color:var(--amber);font-weight:600}
+  .hlr{color:var(--red);font-weight:600}
+  .hlg{color:var(--green);font-weight:600}
+
+  .think{border-left:3px solid var(--purple);background:rgba(167,139,250,.06);padding:16px 22px;border-radius:0 10px 10px 0;margin:24px 0;color:var(--text-dim)}
+  .think .q{font-weight:700;color:var(--purple);margin-bottom:4px}
+
+  .codeblock{background:#0a0f1e;border:1px solid var(--border);border-radius:12px;padding:16px 20px;font-family:var(--mono);font-size:13px;color:#c8d3e8;overflow-x:auto;white-space:pre;line-height:1.9;margin:20px 0}
+  .codeblock .cm{color:var(--text-faint)}
+
+  .pipeline{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:24px 0}
+  .pipeline .ps{border:1px solid var(--border);border-radius:12px;padding:14px;background:rgba(255,255,255,.03)}
+  .pipeline .ps .no{font-family:var(--mono);font-size:11px;color:var(--green);margin-bottom:6px}
+  .pipeline .ps .t{font-weight:700;font-size:14.5px;margin-bottom:4px}
+  .pipeline .ps .d{font-size:12.5px;color:var(--text-dim);line-height:1.8}
+  @media(max-width:720px){.pipeline{grid-template-columns:1fr}}
+
+  .tbl-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:12px;margin:20px 0}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  thead th{background:rgba(79,140,255,.1);color:#bcd6ff;text-align:left;padding:9px 14px;font-weight:700;border-bottom:1px solid var(--border-strong)}
+  tbody td{padding:9px 14px;border-bottom:1px solid var(--border);color:var(--text-dim);vertical-align:top}
+  tbody tr:last-child td{border-bottom:none}
+
+  .punchline{border:1px solid rgba(52,211,153,.4);background:rgba(52,211,153,.06);border-radius:var(--radius);padding:20px 24px;margin:30px 0;font-size:16px;line-height:2}
+  .punchline small{display:block;font-family:var(--mono);font-size:11px;color:var(--green);letter-spacing:1px;margin-bottom:8px}
+
+  footer{border-top:1px solid var(--border);padding:28px 24px 46px;text-align:center;color:var(--text-faint);font-size:13px}
+  @media(max-width:720px){.hero h1{font-size:25px}}
+  .flow{width:100%;height:auto;display:block;margin:24px 0 2px}
+  .flow .fn{fill:#eaf0fb;font-size:14px;font-weight:700;font-family:var(--sans)}
+  .flow .fd{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow .fm{fill:#6b7a93;font-size:10.5px;font-family:var(--mono)}
+  .flow .fl{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow-cap{font-family:var(--mono);font-size:11px;color:var(--text-faint);letter-spacing:.6px;text-align:center;margin:6px 0 28px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="nav-inner">
+    <div class="brand"><div class="brand-mark">C</div> CubeSandbox · 技术深入</div>
+    <a class="back-home" href="index.html">← 技术索引</a>
+  </div>
+</header>
+
+<main>
+
+  <div class="hero">
+    <div class="crumb">CUBESANDBOX · 核心技术 07 / 09</div>
+    <h1>几百个沙箱怎么共享一张网卡</h1>
+    <p class="lead">一篇讲 CubeVS，CubeSandbox 的网络数据面。几百个沙箱挤在一台物理机上，要同时上网、要互相隔离、要按策略控制访问——传统做法是堆 iptables 规则，规则一多就慢。CubeVS 换了一个思路：把"规则比对"换成"查表放行"，直接跑在内核的 eBPF 里。我们从头拆。</p>
+  </div>
+
+  <h2>一、问题：规则越来越多，网就越来越慢</h2>
+
+  <p>先想清楚物理现实：一台物理机上一块网卡，几百个沙箱各有一个"假的"私有 IP。每个沙箱要上网，出去必须伪装成物理机 IP（NAT）；外面要访问沙箱里的服务，又得把流量翻译回那个假 IP。同时沙箱之间必须隔离，还得按策略控制"谁能访问什么"。</p>
+  <p>传统方案是给每个沙箱配一套 iptables 规则（NAT + filter）。几百个沙箱就是几千条规则——每个包进出都要逐条比对，规则越多越慢；而且配置一下就是几秒，规则之间还会互相打架，运维噩梦。问题的本质是：<span class="hlb">"规则比对"的复杂度是 O(规则数)，它不该随沙箱数量线性增长。</span></p>
+  <div class="think">
+    <div class="q">换个思路：如果我们不改"规则"，而是改"表"呢？</div>
+    <div class="a">把策略做成一张哈希表，每个包查一次表——查表时间是 O(1)，与规则数量无关。这就是 eBPF 的查表放行。</div>
+  </div>
+
+  <h2>二、核心思想：把"逐条比对规则"换成"一次哈希查表"</h2>
+
+  <p>理解 CubeVS 只需要理解一件事：<span class="hl">它把网络策略做成了"查表放行"，而不是"逐条比对规则"。</span></p>
+  <p>实现上，策略存在 eBPF 的 map（内核里的哈希表）里；一段 eBPF 程序挂在内核网络通道的必经之路上，每个包进来先查这张表——查到了就放行 + 改地址，查不到就拦下。规则再多，也只是表里的多几行记录，查表时间恒定为一次哈希查找。而且这一切发生在内核数据路径上，<span class="hl">没有用户态介入，没有 netfilter 钩子</span>，单个包的处理是微秒级。</p>
+  <p>"外面访问沙箱"怎么处理？也是查表——查的是另一张反方向的<span class="hlb">会话登记表</span>：出向流量经过时登记一笔"谁从哪个端口出去了"，回包时按登记反向翻译回假 IP。没有登记的回包，不翻译，直接放主机栈。这套"来去都认账"的机制让沙箱间流量天然隔离：<span class="hl">没有出向会话，就永远等不到对应的入向包。</span>隔离不是靠"挡住"，而是靠"不认"。</p>
+
+  <h2>三、三条数据路径，各管一段</h2>
+
+  <svg class="flow" viewBox="0 0 720 248" role="img" aria-label="三条数据路径">
+    <defs>
+      <marker id="nvArrG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#34d399"/></marker>
+      <marker id="nvArrC" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#22d3ee"/></marker>
+      <marker id="nvArrA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#fbbf24"/></marker>
+    </defs>
+    <rect x="0" y="0" width="720" height="248" rx="14" fill="rgba(255,255,255,.03)" stroke="rgba(255,255,255,.09)"/>
+    <text x="24" y="28" class="fm">一台物理机上的三张表 · 查表放行，而非逐条比对</text>
+
+    <rect x="14" y="44" width="160" height="44" rx="10" fill="rgba(255,255,255,.04)" stroke="rgba(255,255,255,.25)"/>
+    <text x="94" y="64" text-anchor="middle" class="fn">沙箱 A</text>
+    <text x="94" y="80" text-anchor="middle" class="fm">假 IP 10.x</text>
+    <rect x="14" y="108" width="160" height="44" rx="10" fill="rgba(255,255,255,.04)" stroke="rgba(255,255,255,.25)"/>
+    <text x="94" y="128" text-anchor="middle" class="fn">沙箱 B</text>
+    <text x="94" y="144" text-anchor="middle" class="fm">假 IP 10.x</text>
+    <rect x="14" y="172" width="160" height="44" rx="10" fill="rgba(255,255,255,.04)" stroke="rgba(255,255,255,.25)"/>
+    <text x="94" y="192" text-anchor="middle" class="fn">沙箱 C</text>
+    <text x="94" y="208" text-anchor="middle" class="fm">假 IP 10.x</text>
+
+    <rect x="250" y="32" width="200" height="196" rx="12" fill="rgba(79,140,255,.05)" stroke="rgba(79,140,255,.4)"/>
+    <text x="350" y="44" text-anchor="middle" class="fm">eBPF 门禁 · 查表</text>
+    <rect x="262" y="52" width="176" height="44" rx="9" fill="rgba(52,211,153,.08)" stroke="rgba(52,211,153,.45)"/>
+    <text x="350" y="71" text-anchor="middle" class="fn">允许名单 allow</text>
+    <text x="350" y="87" text-anchor="middle" class="fm">SNAT · mvmtap from_cube</text>
+    <rect x="262" y="108" width="176" height="44" rx="9" fill="rgba(34,211,238,.08)" stroke="rgba(34,211,238,.45)"/>
+    <text x="350" y="127" text-anchor="middle" class="fn">会话登记 sessions</text>
+    <text x="350" y="143" text-anchor="middle" class="fm">回译 · nodenic from_world</text>
+    <rect x="262" y="164" width="176" height="44" rx="9" fill="rgba(251,191,36,.08)" stroke="rgba(251,191,36,.45)"/>
+    <text x="350" y="183" text-anchor="middle" class="fn">端口映射 ports</text>
+    <text x="350" y="199" text-anchor="middle" class="fm">DNAT · localgw from_envoy</text>
+
+    <rect x="520" y="44" width="186" height="96" rx="10" fill="rgba(255,255,255,.04)" stroke="rgba(255,255,255,.25)"/>
+    <text x="613" y="84" text-anchor="middle" class="fn">外网 / 物理网卡</text>
+    <text x="613" y="104" text-anchor="middle" class="fm">NIC · 进出都过它</text>
+    <rect x="520" y="164" width="186" height="52" rx="10" fill="rgba(255,255,255,.04)" stroke="rgba(255,255,255,.25)"/>
+    <text x="613" y="184" text-anchor="middle" class="fn">开发环境</text>
+    <text x="613" y="202" text-anchor="middle" class="fm">用户访问入口</text>
+
+    <line x1="174" y1="66" x2="250" y2="66" stroke="#34d399" stroke-width="1.5" marker-end="url(#nvArrG)"/>
+    <line x1="450" y1="66" x2="520" y2="66" stroke="#34d399" stroke-width="1.5" marker-end="url(#nvArrG)"/>
+    <line x1="520" y1="108" x2="450" y2="130" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#nvArrC)"/>
+    <line x1="250" y1="130" x2="174" y2="130" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#nvArrC)"/>
+    <line x1="520" y1="190" x2="450" y2="194" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#nvArrA)"/>
+    <line x1="250" y1="194" x2="174" y2="194" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#nvArrA)"/>
+
+    <text x="24" y="236" class="fl">PATH① 出门 SNAT</text>
+    <text x="220" y="236" class="fl">PATH② 回家 会话回译</text>
+    <text x="450" y="236" class="fl">PATH③ 访客 DNAT</text>
+  </svg>
+
+  <p>三条路径都只干一件事：<b>查表 + 改地址 + 投递</b>。没有一条路径去"逐条比对规则"。有趣的是它们的挂载点也不同：出门和回家分别挂在 TAP 虚拟网卡和物理网卡两个方向，访客路径挂在本地网关——三个 eBPF 程序，三个挂载点，职责互不重叠，各管一段数据流。</p>
+
+  <h2>四、最精巧的设计：DNS 学习</h2>
+
+  <p>有一个问题让纯 IP 白名单几乎没法用：管理员允许沙箱访问 <code>*.example.com</code>，但沙箱实际连接的是这个域名的 IP——而 IP 会变，管理员没法预先填 IP。传统方案只能把域名流量全部交给上层代理（L7），每个请求过一遍，慢。</p>
+  <p>CubeVS 让门禁系统"自己学"：</p>
+  <div class="codeblock">① 沙箱发出 DNS 查询（请求 www.example.com 的 IP）
+     如果查询的域名在允许名单里 → 在"登记簿"上记一笔
+② DNS 响应回来 → 门禁只认登记簿里对应的响应
+     把响应的 IP 自动写进允许名单（带有效期，跟 DNS TTL 走）
+③ 之后沙箱直连这个 IP → 不再走代理，直接放行</div>
+  <p>这里最关键的是安全性：<span class="hl">"只认登记过的响应"。</span>沙箱不能伪造一个 DNS 响应，把自己想要的 IP 灌进名单——能进名单的，只有它已经获准查询的域名的真实应答。于是"放行域名"这个语义，被精确落实成了"放行该域名的真实 IP"，而 IP 的变动由 DNS 响应自动跟随。一个本来需要 L7 代理才能做的事，在 L4 查表里就完成了，代价仅是拦截一下 DNS 流量。</p>
+
+  <h2>五、谁来打扫：会话与名单的回收</h2>
+
+  <p>所有表都在内核内存里，有容量上限，必须有清理机制。CubeVS 的做法是后台定期"大扫除"（<code>reaper.go</code>）：按协议超时判断逐条删除过期记录——TCP 会话超时、UDP 30 秒没回包、180 秒没再发包、DNS 学来的 IP 过了 TTL。任何查表系统都必须回答"表满了怎么办、表脏了怎么办"，这里用"周期性回收"这个最直白的答案。</p>
+  <p>另外还有一层"运维管家"：network-agent 进程负责每个沙箱虚拟网卡（TAP）的创建和销毁、端口分配、策略下发。沙箱创建时它插网卡，销毁时拔网卡，策略随沙箱生、随沙箱灭——<span class="hl">没有"僵尸规则"残留</span>。eBPF 程序处理"快"，但"规则从哪来、随什么清理"这件事，必须有这么个配套的进程管理，否则表里的记录会漏一辈子。</p>
+
+  <h2>六、收束</h2>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>问题</th><th>设计</th><th>关键权衡</th></tr></thead>
+      <tbody>
+        <tr><td>规则随沙箱数线性膨胀</td><td>eBPF map 查表，O(1)</td><td>快，但要配套回收机制</td></tr>
+        <tr><td>沙箱间隔离</td><td>出向登记、入向认账</td><td>隔离靠"不认"而非"挡"</td></tr>
+        <tr><td>域名白名单遇到动态 IP</td><td>DNS 学习：只认登记过的响应</td><td>L4 完成本该 L7 的事</td></tr>
+        <tr><td>表会满、会脏</td><td>reaper 定期回收</td><td>简单直白</td></tr>
+        <tr><td>规则随沙箱生灭</td><td>network-agent 管理 TAP 与策略</td><td>无僵尸规则</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="punchline">
+    <small>一句话带走</small>
+    CubeVS 用 eBPF 把 NAT 和访问控制做成"查表放行"：出门查白名单、回家按会话登记翻译、访客按端口映射投递，外加"DNS 学 IP"和"后台大扫除"两个小机制——几百个沙箱的虚拟网络，就在这张表上转起来了。
+  </div>
+
+  <h2>传送门：真想读代码，就这几个文件</h2>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>想看什么</th><th>去这里</th></tr></thead>
+      <tbody>
+        <tr><td>出门路径（SNAT + 策略 + 拒绝回包）</td><td><code>CubeNet/src/mvmtap.bpf.c</code></td></tr>
+        <tr><td>回家路径（反向 NAT + DNS 学习）</td><td><code>CubeNet/src/nodenic.bpf.c</code>、<code>dns_response.h</code></td></tr>
+        <tr><td>访客路径（端口映射 DNAT）</td><td><code>CubeNet/src/localgw.bpf.c</code></td></tr>
+        <tr><td>允许名单 / 会话表结构</td><td><code>CubeNet/src/session.h</code>、<code>cubevs.h</code></td></tr>
+        <tr><td>策略下发（Go）</td><td><code>CubeNet/cubevs/netpolicy.go</code></td></tr>
+        <tr><td>后台回收</td><td><code>CubeNet/cubevs/reaper.go</code></td></tr>
+        <tr><td>网卡/端口生命周期管家</td><td><code>network-agent/internal/service/local_service.go</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</main>
+
+<footer>CubeVS eBPF 网络虚拟化 · CubeSandbox 技术深入 07/09 · 下一篇：CubeEgress——出站流量最后的安检员</footer>
+</body>
+</html>

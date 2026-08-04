@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>01 · 沙箱建好了，命令却一条都跑不了</title>
+<style>
+  :root {
+    --bg:#0b1020; --border:rgba(255,255,255,0.09); --border-strong:rgba(255,255,255,0.16);
+    --text:#e6eaf2; --text-dim:#9aa7bd; --text-faint:#6b7a93;
+    --blue:#4f8cff; --cyan:#2dd4bf; --purple:#a78bfa; --amber:#fbbf24; --red:#f87171; --green:#34d399;
+    --mono:"SFMono-Regular","JetBrains Mono","Fira Code",Consolas,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+    --radius:14px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{font-family:var(--sans);background:var(--bg);color:var(--text);line-height:2.05;font-size:16px}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono);font-size:.85em;background:rgba(79,140,255,.12);color:#b9d2ff;padding:2px 7px;border-radius:6px;white-space:nowrap}
+
+  header{position:sticky;top:0;z-index:100;backdrop-filter:blur(14px);background:rgba(11,16,32,.85);border-bottom:1px solid var(--border)}
+  .nav-inner{max-width:1120px;margin:0 auto;padding:0 24px;height:56px;display:flex;align-items:center;gap:22px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px;white-space:nowrap}
+  .brand-mark{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--blue),var(--purple));display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:800}
+  .back-home{margin-left:auto;font-size:13px;color:var(--text-faint);border:1px solid var(--border);padding:5px 14px;border-radius:20px;white-space:nowrap}
+  .back-home:hover{color:var(--text);border-color:var(--border-strong);text-decoration:none}
+
+  main{max-width:740px;margin:0 auto;padding:44px 24px 96px}
+  .hero{border-bottom:1px solid var(--border);padding:12px 0 36px;margin-bottom:48px}
+  .hero .crumb{font-family:var(--mono);font-size:12px;color:var(--text-faint);letter-spacing:1px}
+  .hero h1{font-size:31px;font-weight:900;margin:14px 0 10px;line-height:1.4;background:linear-gradient(90deg,#fff,var(--cyan));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  .hero .lead{font-size:16.5px;color:var(--text-dim);max-width:640px;line-height:2.1}
+
+  h2{font-size:20px;font-weight:800;margin:60px 0 4px;color:#f0f4ff;line-height:1.5}
+  h3{font-size:16px;font-weight:700;margin:28px 0 4px;color:#dbe4f5}
+  p{margin:16px 0}
+  .dim{color:var(--text-dim)}
+  .hl{color:var(--cyan);font-weight:600}
+  .hlb{color:var(--amber);font-weight:600}
+  .hlr{color:var(--red);font-weight:600}
+  .hlg{color:var(--green);font-weight:600}
+
+  .think{border-left:3px solid var(--purple);background:rgba(167,139,250,.06);padding:16px 22px;border-radius:0 10px 10px 0;margin:24px 0;color:var(--text-dim)}
+  .think .q{font-weight:700;color:var(--purple);margin-bottom:4px}
+
+  .codeblock{background:#0a0f1e;border:1px solid var(--border);border-radius:12px;padding:16px 20px;font-family:var(--mono);font-size:13px;color:#c8d3e8;overflow-x:auto;white-space:pre;line-height:1.9;margin:20px 0}
+  .codeblock .cm{color:var(--text-faint)}
+
+  .tbl-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:12px;margin:20px 0}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  thead th{background:rgba(79,140,255,.1);color:#bcd6ff;text-align:left;padding:9px 14px;font-weight:700;border-bottom:1px solid var(--border-strong)}
+  tbody td{padding:9px 14px;border-bottom:1px solid var(--border);color:var(--text-dim);vertical-align:top}
+  tbody tr:last-child td{border-bottom:none}
+
+  .punchline{border:1px solid rgba(52,211,153,.4);background:rgba(52,211,153,.06);border-radius:var(--radius);padding:20px 24px;margin:30px 0;font-size:16px;line-height:2}
+  .punchline small{display:block;font-family:var(--mono);font-size:11px;color:var(--green);letter-spacing:1px;margin-bottom:8px}
+
+  footer{border-top:1px solid var(--border);padding:28px 24px 46px;text-align:center;color:var(--text-faint);font-size:13px}
+  @media(max-width:720px){.hero h1{font-size:25px}}
+  .flow{width:100%;height:auto;display:block;margin:24px 0 2px}
+  .flow .fn{fill:#eaf0fb;font-size:14px;font-weight:700;font-family:var(--sans)}
+  .flow .fd{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow .fm{fill:#6b7a93;font-size:10.5px;font-family:var(--mono)}
+  .flow .fl{fill:#9aa7bd;font-size:11.5px;font-family:var(--sans)}
+  .flow-cap{font-family:var(--mono);font-size:11px;color:var(--text-faint);letter-spacing:.6px;text-align:center;margin:6px 0 28px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="nav-inner">
+    <div class="brand"><div class="brand-mark">C</div> CubeSandbox · 部署排障</div>
+    <a class="back-home" href="index.html">← 排障索引</a>
+  </div>
+</header>
+
+<main>
+
+  <div class="hero">
+    <div class="crumb">CUBESANDBOX · 部署排障 01 / 05</div>
+    <h1>沙箱建好了，命令却一条都跑不了</h1>
+    <p class="lead">部署完 CubeSandbox，第一件事自然是拿 SDK 试试手。`Sandbox.create()` 秒回、沙箱 ID 都拿到了——可紧接着的 `commands.run('echo hi')`，直接抛出一个干巴巴的 `ConnectException`。创建成功但命令全挂，问题出在"创建"和"命令"这两条完全不同的路上。</p>
+  </div>
+
+  <h2>一、背景速览：先分清"创建"和"命令"是两条路</h2>
+
+  <p>如果你还没读前置篇，这里先补一块最重要的地图：CubeSandbox 的 SDK 调用被刻意拆成了<span class="hl">两条互不相干的网络路径</span>。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>操作</th><th>走哪条路</th><th>依赖什么</th></tr></thead>
+      <tbody>
+        <tr><td><code>Sandbox.create()</code> / <code>get_info()</code></td><td>CubeMaster 控制面（CubeAPI，HTTP <code>:3000</code>）</td><td>模板存在、有节点能调度</td></tr>
+        <tr><td><code>commands.run()</code> / <code>files.*</code></td><td>CubeProxy 数据面（HTTP <code>:80</code>）</td><td>沙箱内 envd 端口（49983）被"暴露"</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>为什么拆开？因为这是两种完全不同的流量：创建是低频控制操作，命令是高频实时数据流。拆开后，控制面故障不影响已运行沙箱的命令通道，反之亦然。<span class="hlb">代价是：排障时必须先搞清楚当前错误是哪条路报的。</span></p>
+
+  <h2>二、机制之一：命令通道 = "虚拟域名 + 动态后端"</h2>
+
+  <p>命令请求长什么样？SDK 在 <code>cubesandbox/_commands.py</code> 里，用 <code>e2b_connect</code> 库发一个 gRPC-streaming 请求，目标是沙箱内 <code>envd</code> 进程监听的固定端口 <code>49983</code>。关键在请求的 <span class="hl">Host 头</span>：</p>
+  <div class="codeblock">ENVD_PORT = 49983   <span class="cm"># 沙箱内 envd 的固定端口，写死在 SDK 里</span>
+
+def _envd_rpc_base_url_and_headers(sandbox):
+    ...
+    headers["Host"] = sandbox.get_host(ENVD_PORT)
+    <span class="cm"># → Host: &lt;sandbox_id&gt;-49983.cube.app</span>
+    return f"http://{proxy_node_ip}:{proxy_port}", headers</div>
+  <p>这个 Host 是<span class="hl">虚拟域名</span>：格式固定为 <code>&lt;sandbox_id&gt;-&lt;端口&gt;.cube.app</code>。请求到达 CubeProxy 后，OpenResty 的 Lua 从 Host 里解出 <code>sandbox_id</code> 和 <code>49983</code>，然后查 Redis 里的一份<span class="hl">代理映射</span>（HSET 结构，key 类似 <code>…sandbox:proxy:&lt;id&gt;</code>），拿到这个沙箱"在哪个节点、以哪个宿主端口承载 49983"：</p>
+  <div class="codeblock"># Redis 里的代理映射（HSET）
+HostIP       = 192.168.4.64     <span class="cm"># 沙箱所在节点</span>
+SandboxIP    = 172.16.x.y      <span class="cm"># 沙箱自己的 IP</span>
+"49983"      = 33021           <span class="cm"># 节点上暴露 49983 的宿主端口</span></div>
+  <p>然后 CubeProxy 把请求转发到 <code>HostIP:宿主端口</code>，再经网络数据面进入沙箱，最终 envd 收到并执行。</p>
+
+  <div class="think">
+    <div class="q">那 Redis 映射里"有哪些端口"是谁决定的？</div>
+    是<span class="hlb">模板</span>。模板创建时用 <code>--expose-port</code> 声明了"这个沙箱对外暴露哪些容器端口"。沙箱是模板的克隆体，模板没暴露的端口，代理映射里就永远没有。
+  </div>
+
+  <h2>三、问题：建沙箱成功，命令却 ConnectException</h2>
+
+  <p>用脚本复现：</p>
+  <div class="codeblock">sb = Sandbox.create(template=tpl, timeout=120)   <span class="cm"># 返回 sandbox_id，正常</span>
+ec, out, err = sb.commands.run("echo hello")       <span class="cm"># 抛 ConnectException</span>
+<span class="cm"># e2b_connect.client.ConnectException: (&lt;Code.unknown: 'unknown'&gt;, '')</span></div>
+  <p><code>ConnectException</code> 没有 HTTP 状态码——不是 404、不是 500，是<span class="hl">连接层</span>的失败："TCP 握手根本没成功"。创建走 CubeMaster 成功了，说明控制面没问题；命令走 CubeProxy，问题必然出在命令这条链路的某个环节。</p>
+
+  <svg class="flow" viewBox="0 0 720 244" role="img" aria-label="命令链路断点定位">
+    <defs>
+      <marker id="p1Arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#4f8cff"/></marker>
+      <marker id="p1ArrR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#f87171"/></marker>
+      <marker id="p1ArrG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#34d399"/></marker>
+    </defs>
+    <rect x="0" y="0" width="720" height="244" rx="14" fill="rgba(255,255,255,.03)" stroke="rgba(255,255,255,.09)"/>
+    <text x="24" y="28" class="fm">命令链路 · 断点在第 ③ 环：Redis 映射里没有 49983</text>
+
+    <rect x="26" y="46" width="150" height="56" rx="10" fill="rgba(79,140,255,.08)" stroke="rgba(79,140,255,.45)"/>
+    <text x="101" y="70" text-anchor="middle" class="fn">SDK</text>
+    <text x="101" y="88" text-anchor="middle" class="fd">Host: &lt;sid&gt;-49983.cube.app</text>
+
+    <rect x="216" y="46" width="140" height="56" rx="10" fill="rgba(79,140,255,.08)" stroke="rgba(79,140,255,.45)"/>
+    <text x="286" y="70" text-anchor="middle" class="fn">CubeProxy</text>
+    <text x="286" y="88" text-anchor="middle" class="fd">解出 sid + 端口 49983</text>
+
+    <rect x="396" y="46" width="150" height="56" rx="10" fill="rgba(167,139,250,.08)" stroke="rgba(167,139,250,.45)"/>
+    <text x="471" y="70" text-anchor="middle" class="fn">Redis 代理映射</text>
+    <text x="471" y="88" text-anchor="middle" class="fd">只存了 "8000" → …</text>
+
+    <rect x="586" y="46" width="108" height="56" rx="10" fill="rgba(248,113,113,.08)" stroke="rgba(248,113,113,.5)"/>
+    <text x="640" y="70" text-anchor="middle" class="fn" style="fill:#f87171">无 49983</text>
+    <text x="640" y="88" text-anchor="middle" class="fd">后端解析失败</text>
+
+    <line x1="176" y1="74" x2="216" y2="74" stroke="#4f8cff" stroke-width="1.5" marker-end="url(#p1Arr)"/>
+    <line x1="356" y1="74" x2="396" y2="74" stroke="#4f8cff" stroke-width="1.5" marker-end="url(#p1Arr)"/>
+    <line x1="546" y1="74" x2="586" y2="74" stroke="#f87171" stroke-width="1.5" marker-end="url(#p1ArrR)"/>
+    <text x="566" y="122" text-anchor="middle" class="fl">metadata_map["49983"] = nil</text>
+
+    <rect x="216" y="168" width="160" height="56" rx="10" fill="rgba(52,211,153,.07)" stroke="rgba(52,211,153,.45)"/>
+    <text x="296" y="192" text-anchor="middle" class="fn" style="fill:#34d399">模板重建</text>
+    <text x="296" y="210" text-anchor="middle" class="fd">--expose-port 49983</text>
+    <line x1="330" y1="102" x2="320" y2="168" stroke="#34d399" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#p1ArrG)"/>
+    <text x="342" y="144" class="fl">修复：模板暴露 49983</text>
+  </svg>
+  <div class="flow-cap">SDK 请求 → CubeProxy → Redis 查映射 → 映射里没有 49983 → 后端解析失败 → ConnectException。修复点在"模板"这一源头。</div>
+
+  <h2>四、根因：模板暴露的端口，不是 49983</h2>
+
+  <p>第一次建模板时，命令是：</p>
+  <div class="codeblock">cubemastercli template create-from-image --image &lt;image&gt; --expose-port 8000</div>
+  <p>容器端口 <code>8000</code> 被写进模板元数据。于是沙箱创建后，Redis 代理映射里只有 <code>HostIP / SandboxIP / "8000"</code>——<span class="hlb">没有 <code>49983</code></span>。当 SDK 的请求带着 <code>Host: &lt;sid&gt;-49983.cube.app</code> 到达 CubeProxy 时，Lua 侧 <code>sandbox_backend.lua</code> 的 <code>resolve_backend(ins_id, "49983")</code> 查表，<code>metadata_map["49983"]</code> 是 nil——没有宿主端口，转发无门，连接直接失败。</p>
+  <p>为什么之前用 8000？因为模板镜像本身是个 Web 服务镜像，端口是 8000。但对 CubeSandbox 来说，<span class="hl">命令执行要求模板必须暴露 envd 端口 49983</span>——这是 SDK 与沙箱之间的"内部契约"，和镜像本身的业务端口无关。建模板时只想着业务端口，漏了内部端口，是最容易踩的坑。</p>
+
+  <h2>五、修复：重建模板，暴露 49983</h2>
+
+  <p>重建模板：</p>
+  <div class="codeblock">cubemastercli template create-from-image --image &lt;image&gt; \
+  --expose-port 49983 --writable-layer-size 20Gi</div>
+  <p>两个参数都值得说明。<code>--expose-port 49983</code> 是本次的关键；而 <code>--writable-layer-size 20Gi</code> 是 CLI 校验里的一个"必填项"——缺了它命令直接报 <code>writable-layer-size is required</code>，属于不算友好的细节。重建后重新创建沙箱，命令执行立即恢复。</p>
+
+  <h2>六、权衡：为什么是"端口即契约"</h2>
+
+  <p>这套"模板声明暴露端口 + Host 虚拟域名路由"的设计，本质是<span class="hl">把暴露面显式化</span>：沙箱默认对网络封闭，只有模板声明的端口才写入 Redis 映射、才可能被代理路由到。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>好处</th><th>代价</th></tr></thead>
+      <tbody>
+        <tr><td>安全：一个模板只开一个端口，其余全屏蔽</td><td>排障直觉陷阱：错端口报"连接失败"，无状态码可查</td></tr>
+        <tr><td>每个端口都是显式声明的"契约"</td><td>创建与命令两套链路，配置来源（模板元数据）不同，端口不匹配时错误只浮现在命令层</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>记住这张对照表——排障链二（DNS）还会用到"模板元数据决定运行行为"这个心智。</p>
+
+  <div class="punchline">
+    <small>一句话带走</small>
+    命令执行走的是"Host 虚拟域名 → CubeProxy → Redis 端口映射"的独立链路；模板创建时漏了 <code>--expose-port 49983</code>，映射表里没有 envd 端口，命令请求自然无处可去。
+  </div>
+
+  <h2>传送门：真想读代码，就这几个文件</h2>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>想看什么</th><th>去这里</th></tr></thead>
+      <tbody>
+        <tr><td>SDK 命令执行入口与 49983 常量</td><td><code>cubesandbox/_commands.py</code></td></tr>
+        <tr><td>SDK 构造 Host 虚拟域名</td><td><code>cubesandbox/sandbox.py</code>（<code>get_host</code>）</td></tr>
+        <tr><td>代理端口路由</td><td><code>CubeProxy/lua/sandbox_backend.lua</code></td></tr>
+        <tr><td>Redis 代理映射 key 结构</td><td><code>CubeProxy/lua/redis_keys.lua</code></td></tr>
+        <tr><td>模板 create-from-image 命令</td><td><code>CubeMaster/cmd/cubemastercli/commands/cubebox/template.go</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</main>
+
+<footer>部署排障 01/05 · 下一篇：沙箱里 DNS 全挂了——一次"安全默认值"引发的公网断连</footer>
+</body>
+</html>

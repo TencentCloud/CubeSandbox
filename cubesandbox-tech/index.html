@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CubeSandbox 核心技术深入解读</title>
+<style>
+  :root {
+    --bg: #0b1020;
+    --panel: rgba(255,255,255,0.04);
+    --panel-hover: rgba(255,255,255,0.07);
+    --border: rgba(255,255,255,0.09);
+    --border-strong: rgba(255,255,255,0.16);
+    --text: #e6eaf2;
+    --text-dim: #9aa7bd;
+    --text-faint: #6b7a93;
+    --blue: #4f8cff;
+    --cyan: #2dd4bf;
+    --purple: #a78bfa;
+    --amber: #fbbf24;
+    --red: #f87171;
+    --green: #34d399;
+    --mono: "SFMono-Regular","JetBrains Mono","Fira Code",Consolas,Menlo,monospace;
+    --sans: -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: var(--sans); background: var(--bg); color: var(--text); line-height: 1.7; font-size: 15px; }
+  a { color: var(--blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { font-family: var(--mono); font-size: 0.88em; background: rgba(79,140,255,0.12); color: #b9d2ff; padding: 2px 7px; border-radius: 6px; white-space: nowrap; }
+
+  .hero {
+    text-align: center;
+    padding: 76px 24px 50px;
+    background:
+      radial-gradient(1000px 420px at 15% -10%, rgba(79,140,255,0.2), transparent 60%),
+      radial-gradient(1000px 420px at 85% -10%, rgba(167,139,250,0.18), transparent 60%),
+      radial-gradient(700px 300px at 50% 110%, rgba(45,212,191,0.1), transparent 60%);
+    border-bottom: 1px solid var(--border);
+  }
+  .hero .badge {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--cyan);
+    border: 1px solid rgba(45,212,191,0.4);
+    background: rgba(45,212,191,0.08);
+    padding: 4px 14px;
+    border-radius: 20px;
+    margin-bottom: 20px;
+    letter-spacing: 1px;
+  }
+  .hero h1 {
+    font-size: 42px;
+    font-weight: 900;
+    background: linear-gradient(90deg,#fff,var(--blue) 40%,var(--purple));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .hero p { color: var(--text-dim); font-size: 16.5px; margin-top: 14px; max-width: 700px; margin-left: auto; margin-right: auto; }
+  .hero .back {
+    display: inline-block;
+    margin-top: 22px;
+    font-size: 13px;
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    padding: 6px 16px;
+    border-radius: 20px;
+    transition: all 0.15s;
+  }
+  .hero .back:hover { color: var(--text); border-color: var(--border-strong); text-decoration: none; }
+
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 56px 24px 90px; }
+  .section-title { font-size: 20px; font-weight: 800; margin: 48px 0 20px; padding-left: 12px; border-left: 3px solid var(--blue); }
+  .section-title:first-child { margin-top: 0; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 22px 22px 24px;
+    display: flex;
+    flex-direction: column;
+    transition: transform 0.2s, border-color 0.2s, background 0.2s;
+  }
+  .card:hover { transform: translateY(-3px); border-color: var(--border-strong); background: var(--panel-hover); }
+  .card .num {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--blue);
+    background: rgba(79,140,255,0.14);
+    border: 1px solid rgba(79,140,255,0.3);
+    border-radius: 6px;
+    padding: 2px 8px;
+    align-self: flex-start;
+    margin-bottom: 12px;
+  }
+  .card h3 { font-size: 18px; margin-bottom: 6px; }
+  .card .tags { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+  .card p.desc { color: var(--text-dim); font-size: 13.5px; flex: 1; }
+  .card .features { color: var(--text-faint); font-size: 12.5px; margin-top: 14px; font-family: var(--mono); line-height: 2; }
+  .card .go {
+    margin-top: 16px;
+    font-size: 13.5px;
+    font-weight: 700;
+    color: var(--blue);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .card:hover .go { color: #8fb6ff; }
+  .tag {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border-strong);
+    color: var(--text-dim);
+  }
+  .tag.go { color: #7ee7ff; border-color: rgba(126,231,255,0.4); background: rgba(126,231,255,0.08); }
+  .tag.rust { color: #ffab7e; border-color: rgba(255,171,126,0.4); background: rgba(255,171,126,0.08); }
+  .tag.lua { color: #a5f3a1; border-color: rgba(165,243,161,0.4); background: rgba(165,243,161,0.08); }
+  .tag.c { color: #ffd27e; border-color: rgba(255,210,126,0.4); background: rgba(255,210,126,0.08); }
+
+  .note {
+    border-left: 3px solid var(--amber);
+    background: rgba(251,191,36,0.07);
+    padding: 12px 18px;
+    border-radius: 0 10px 10px 0;
+    font-size: 13px;
+    color: var(--text-dim);
+    max-width: 720px;
+    margin: 26px auto 0;
+  }
+  .note strong { color: var(--text); }
+
+  .back-top {
+    position: fixed; right: 26px; bottom: 26px;
+    width: 44px; height: 44px; border-radius: 12px;
+    background: rgba(79,140,255,0.85); color: #fff; border: none;
+    cursor: pointer; font-size: 18px;
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0; pointer-events: none; transition: opacity 0.25s;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.35);
+  }
+  .back-top.show { opacity: 1; pointer-events: auto; }
+  footer { border-top: 1px solid var(--border); padding: 34px 24px 50px; text-align: center; color: var(--text-faint); font-size: 12.5px; }
+  @media (max-width: 720px) { .hero h1 { font-size: 30px; } }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <div class="badge">CUBE SANDBOX · DEEP DIVE</div>
+  <h1>CubeSandbox 核心技术深入解读</h1>
+  <p>把"一个沙箱服务"拆解成 9 项核心技术，每篇独立成册。从真实问题讲起，循着设计演进慢慢展开——机制是什么、为什么这么设计、代价是什么，一路讲到源码层。</p>
+  <a class="back" href="../cubesandbox-logic.html">← 返回总览文档（cubesandbox-logic.html）</a>
+</div>
+
+<div class="wrap">
+
+  <div class="section-title">控制面 · 调度与编排</div>
+  <div class="grid">
+    <div class="card">
+      <span class="num">01</span>
+      <h3>CubeMaster 调度器</h3>
+      <div class="tags"><span class="tag go">Go</span><span class="tag">gin + errgroup</span></div>
+      <p class="desc">集群级调度器如何用"预选 → 并行 Filter → 加权打分 → 随机挑选"的流水线选出一个节点来承载新沙箱；以及按实例类型分桶的缓冲队列如何动态限流。</p>
+      <div class="features">scheduler.Select · runFilter · runScoreFilter<br>bufferTaskMap · monitorLimit · LeastRandomSelect</div>
+      <a class="go" href="scheduler.html">深入阅读 →</a>
+    </div>
+    <div class="card">
+      <span class="num">02</span>
+      <h3>生命周期管理（cube-lifecycle-manager）</h3>
+      <div class="tags"><span class="tag go">Go</span><span class="tag">Redis Stream</span></div>
+      <p class="desc">自动暂停/自动恢复的协调中枢：消费 Redis 事件流、扫描空闲沙箱、SETNX 状态锁保证单次执行、并发恢复请求合并为单次 RPC。</p>
+      <div class="features">sweeper.tryPause · resumer.Resume<br>XREADGROUP · proxypush · statesync</div>
+      <a class="go" href="lifecycle-manager.html">深入阅读 →</a>
+    </div>
+    <div class="card">
+      <span class="num">03</span>
+      <h3>Cubelet Workflow 引擎</h3>
+      <div class="tags"><span class="tag go">Go</span><span class="tag">containerd 插件</span></div>
+      <p class="desc">节点本地沙箱生命周期的流水线引擎：config.toml 声明式定义 Step/Action，errgroup 并行执行；与 containerd API、cgroup、CubeCoW 深度集成。</p>
+      <div class="features">workflow.Engine · parallelRunSteps<br>NewContainer · task.Pause/Resume · CubeBox 状态机</div>
+      <a class="go" href="cubelet-workflow.html">深入阅读 →</a>
+    </div>
+  </div>
+
+  <div class="section-title">存储 · 虚拟化 · 沙箱内</div>
+  <div class="grid">
+    <div class="card">
+      <span class="num">04</span>
+      <h3>CubeCoW 存储引擎</h3>
+      <div class="tags"><span class="tag rust">Rust</span><span class="tag">XFS reflink</span></div>
+      <p class="desc">用内核 FICLONE ioctl 实现 O(1) 快照/克隆的卷管理库：卷目录布局、崩溃恢复索引重建、C ABI 设计与 Cubelet cgo 绑定。</p>
+      <div class="features">ReflinkEngine · ficlone() · scan_and_rebuild_index<br>cubecow_init · Box&lt;dyn Engine&gt;</div>
+      <a class="go" href="cubecow.html">深入阅读 →</a>
+    </div>
+    <div class="card">
+      <span class="num">05</span>
+      <h3>CubeShim + CubeHypervisor</h3>
+      <div class="tags"><span class="tag rust">Rust</span><span class="tag">RustVMM + KVM</span></div>
+      <p class="desc">containerd Shim v2 与 KVM VMM 之间的完整链路：沙箱创建/启动、暂停写内存快照、恢复、回滚，以及 VMM 的 ApiRequest 通信模型与脏页日志。</p>
+      <div class="features">SandBox::create_sandbox · pause_vm_cube<br>VmPauseToSnapshot · KvmDirtyLogSlot</div>
+      <a class="go" href="virtualization.html">深入阅读 →</a>
+    </div>
+    <div class="card">
+      <span class="num">06</span>
+      <h3>guest agent 沙箱内运行时</h3>
+      <div class="tags"><span class="tag rust">Rust</span><span class="tag">vsock ttRPC</span></div>
+      <p class="desc">沙箱内 init 进程：vsock ttRPC 服务、I/O port 0x680 就绪通知、共享命名空间、基于 rustjail 的 OCI 容器运行时、OOM 事件上报。</p>
+      <div class="features">rpc::start · ioport 0x680 · create_container<br>rustjail LinuxContainer · run_oom_event_monitor</div>
+      <a class="go" href="guest-agent.html">深入阅读 →</a>
+    </div>
+  </div>
+
+  <div class="section-title">网络与安全</div>
+  <div class="grid">
+    <div class="card">
+      <span class="num">07</span>
+      <h3>CubeVS eBPF 网络虚拟化</h3>
+      <div class="tags"><span class="tag c">C/eBPF</span><span class="tag go">Go</span></div>
+      <p class="desc">三个挂在内核数据路径上的 BPF 程序：沙箱出向 SNAT/策略/DNS 学习、入向反向 NAT/端口映射、网关 DNAT；以及 Go 控制面的 map 管理与会话回收。</p>
+      <div class="features">from_cube · from_world · from_envoy<br>egress_sessions · pick_snat_ip_port · session_reaper</div>
+      <a class="go" href="cubevs-network.html">深入阅读 →</a>
+    </div>
+    <div class="card">
+      <span class="num">08</span>
+      <h3>CubeEgress 安全代理</h3>
+      <div class="tags"><span class="tag lua">OpenResty + Lua</span><span class="tag">TPROXY</span></div>
+      <p class="desc">透明 L7 出向 MITM：TPROXY 拦截 → 八道门禁 → 域名过滤决策 → 凭证注入（密钥不进沙箱）→ 动态签发叶子证书 → 审计与脱敏。</p>
+      <div class="features">_M.decide · inject_gates · cert_signer<br>fail-closed · redactor · audit jsonl</div>
+      <a class="go" href="cubeegress.html">深入阅读 →</a>
+    </div>
+    <div class="card">
+      <span class="num">09</span>
+      <h3>CubeProxy 请求路由</h3>
+      <div class="tags"><span class="tag lua">OpenResty + Lua</span><span class="tag">动态 upstream</span></div>
+      <p class="desc">兼容 E2B 的反向代理：Host / Path 双路由模式、local_cache + Redis 双级后端解析、基于状态字典的自动恢复门禁与动态选路。</p>
+      <div class="features">rewrite_phase · sandbox_backend · sandbox_state.gate<br>maskRequestHost · /_sidecar_resume</div>
+      <a class="go" href="cubeproxy.html">深入阅读 →</a>
+    </div>
+  </div>
+
+  <div class="note"><strong>阅读建议：</strong>每篇文档相互独立，可直接打开对应链接。建议先读总览《cubesandbox-logic.html》建立全局观，再按"控制面 → 存储/虚拟化 → 网络与安全"的顺序逐篇深入。所有源码路径以仓库根目录为基准。</div>
+  <div class="note"><strong>延伸系列：</strong>K8s 部署后的实战排障（envd 端口、沙箱 DNS、MTU 黑洞、auto_resume 504），见 <a href="deploy-troubleshoot/index.html">《CubeSandbox 部署排障实录》</a>。</div>
+</div>
+
+<footer>
+  CubeSandbox 核心技术深入解读 · 源码路径基准：/workspace/github/CubeSandbox<br>
+  组件行为以源码为准，文档仅作开发参考
+</footer>
+
+<button class="back-top" id="backTop">↑</button>
+<script>
+  const b = document.getElementById('backTop');
+  window.addEventListener('scroll', () => b.classList.toggle('show', window.scrollY > 500));
+  b.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
+</script>
+</body>
+</html>
