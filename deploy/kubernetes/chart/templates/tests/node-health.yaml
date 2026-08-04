@@ -20,6 +20,7 @@ spec:
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+  {{- include "cube.controlPlanePlacement" . | nindent 2 }}
   serviceAccountName: {{ include "cube.fullname" . }}-test
   containers:
     - name: curl
@@ -33,6 +34,11 @@ spec:
           ca_path=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
           ns={{ .Release.Namespace | quote }}
           kube_api="https://kubernetes.default.svc"
+          # CoreDNS forwards AAAA for names it does not answer and the upstream
+          # DNS times out, so plain curl (IPv6 probe) fails to resolve even when
+          # A records exist. Force IPv4 for all lookups and retry the occasional
+          # transient lookup timeout in this test.
+          curl() { command curl -4 --retry 3 --retry-all-errors --retry-delay 1 "$@"; }
           kget() {
             curl --connect-timeout 5 --max-time 20 --cacert "${ca_path}" \
               -H "Authorization: Bearer $(cat "${token_path}")" \
@@ -139,6 +145,7 @@ spec:
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+  {{- include "cube.controlPlanePlacement" . | nindent 2 }}
   containers:
     - name: cubemastercli
       image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubemastercli "context" $) | quote }}
@@ -178,6 +185,7 @@ spec:
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+  {{- include "cube.controlPlanePlacement" . | nindent 2 }}
   containers:
     - name: mysql
       image: {{ include "cube.image" .Values.mysql.image | quote }}
@@ -214,6 +222,7 @@ spec:
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+  {{- include "cube.controlPlanePlacement" . | nindent 2 }}
   containers:
     - name: redis
       image: {{ include "cube.image" .Values.redis.image | quote }}
@@ -257,16 +266,24 @@ spec:
       imagePullPolicy: {{ .Values.helmTest.image.pullPolicy }}
       env:
         {{- include "cube.timezoneEnv" . | nindent 8 }}
+        - name: CUBE_PROXY_ADMIN_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "cube.secretName" . }}
+              key: cube-admin-token
       command:
         - sh
         - -ec
         - |
-          echo '[health-test] check CubeProxy via ClusterIP Service'
-          curl --connect-timeout 5 --max-time 15 -fsS -o /dev/null \
-            "http://{{ include "cube.proxyServiceFQDN" . }}:{{ .Values.cubeProxy.ports.http.containerPort }}/" \
-            || curl --connect-timeout 5 --max-time 15 -k -fsS -o /dev/null \
-            "https://{{ include "cube.proxyServiceFQDN" . }}:{{ .Values.cubeProxy.ports.https.containerPort }}/" \
-            || { echo "cube-proxy Service unreachable"; exit 1; }
+          echo '[health-test] check CubeProxy admin healthz'
+          # The dataplane returns 400 for the bare "/" path (it only serves
+          # sandbox traffic), so probe the admin health endpoint instead.
+          # Retry to absorb transient CoreDNS lookup timeouts.
+          status="$(curl -4 --retry 3 --retry-all-errors --retry-delay 1 --connect-timeout 5 --max-time 15 -sS \
+            -H "X-Cube-Admin-Token: ${CUBE_PROXY_ADMIN_TOKEN}" \
+            -o /dev/null -w "%{http_code}" \
+            "http://{{ include "cube.proxyServiceFQDN" . }}:{{ .Values.cubeProxy.adminPort }}/admin/healthz")"
+          test "$status" = "200" || { echo "cube-proxy admin healthz status=$status"; exit 1; }
 {{- end }}
 {{ if eq (include "cube.configureClusterDNS" .) "true" }}
 ---
@@ -290,16 +307,28 @@ spec:
   {{- include "cube.controlPlanePlacement" . | nindent 2 }}
   containers:
     - name: dns
-      image: {{ include "cube.image" .Values.helmTest.dnsImage | quote }}
-      imagePullPolicy: {{ .Values.helmTest.dnsImage.pullPolicy }}
+      image: {{ include "cube.image" .Values.helmTest.image | quote }}
+      imagePullPolicy: {{ .Values.helmTest.image.pullPolicy }}
       command:
         - sh
         - -ec
         - |
           echo '[health-test] check cluster DNS for sandbox domain'
           target={{ include "cube.proxyServiceFQDN" . | quote }}
-          # busybox nslookup prints the DNS server Address first; take the last A record.
-          a_record() { nslookup "$1" | sed -n 's/^Address: \([0-9][0-9.]*\)$/\1/p' | tail -n 1; }
+          # curl image (alpine/musl) getent: reliable against CoreDNS rewrite zones
+          # (busybox nslookup times out on non-cluster.svc names in this setup).
+          # CoreDNS forwards non-cluster.svc names upstream and can hit transient
+          # timeouts, so retry the lookup before treating it as a failure.
+          a_record() {
+            for _ in 1 2 3 4 5; do
+              if ip="$(getent hosts "$1" 2>/dev/null | awk '{print $1}' | tail -n 1)" && [ -n "$ip" ]; then
+                printf '%s\n' "$ip"
+                return 0
+              fi
+              sleep 1
+            done
+            return 1
+          }
           domain_ip="$(a_record {{ $domain | quote }})"
           target_ip="$(a_record "$target")"
           test -n "$domain_ip"
@@ -339,6 +368,7 @@ spec:
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+  {{- include "cube.controlPlanePlacement" . | nindent 2 }}
   serviceAccountName: {{ include "cube.fullname" . }}-test
   containers:
     - name: node-image-assets
