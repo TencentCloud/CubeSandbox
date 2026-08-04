@@ -930,7 +930,7 @@ Bootstrap: host mutation mounts for pvm / node-init.
 - name: CUBE_SANDBOX_NETWORK_CIDR
   value: {{ .Values.cubeNode.network.cidr | quote }}
 - name: CUBE_SANDBOX_NETWORK_MTU
-  value: {{ int .Values.cubeNode.network.mtu | quote }}
+  value: {{ .Values.cubeNode.network.mtu | quote }}
 - name: CUBE_SANDBOX_DNS_SERVERS
   {{- if .Values.cubeNode.dns.sandbox.nameservers }}
   value: {{ join "," .Values.cubeNode.dns.sandbox.nameservers | quote }}

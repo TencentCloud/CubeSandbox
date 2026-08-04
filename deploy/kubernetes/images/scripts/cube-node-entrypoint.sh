@@ -66,6 +66,56 @@ detect_primary_interface() {
     }'
 }
 
+# patch_cubelet_mtu <config>
+# Patch mvm_mtu in a Cubelet config.toml from CUBE_SANDBOX_NETWORK_MTU.
+# component-entrypoint.sh keeps a sibling copy (run_network_agent and
+# run_cubelet share one there) because the two scripts are self-contained.
+patch_cubelet_mtu() {
+  local cfg="$1"
+  [[ -n "${CUBE_SANDBOX_NETWORK_MTU:-}" && "${CUBE_SANDBOX_NETWORK_MTU}" != "0" ]] || return 0
+  # Reject anything that is not an integer so operators cannot inject
+  # replacement content via numeric-looking env variables.
+  [[ "${CUBE_SANDBOX_NETWORK_MTU}" =~ ^[0-9]+$ ]] || fail "CUBE_SANDBOX_NETWORK_MTU must be a non-negative integer"
+  # A valid MTU is at most 5 digits (max 65535). Check length before the
+  # arithmetic so an absurdly long string fails with a self-explanatory
+  # message instead of wrapping in bash's int64 arithmetic (e.g. 25+ digits
+  # becomes a huge negative number) and hitting a misleading range error.
+  [[ "${#CUBE_SANDBOX_NETWORK_MTU}" -le 5 ]] \
+    || fail "CUBE_SANDBOX_NETWORK_MTU is too long (max 5 digits, range 1280..65535)"
+  # Leading zeros make bash parse the value as octal (-ge/-le), and sed would
+  # write invalid TOML (leading zeros forbidden in integers). Normalize to
+  # decimal before the range check.
+  local mtu_decimal=$((10#$CUBE_SANDBOX_NETWORK_MTU))
+  # The guest virtio-net device enforces MIN_MTU=1280
+  # (hypervisor/virtio-devices/src/net.rs:51), and the guest MTU is derived
+  # from the tap's actual MTU — so anything below 1280 would propagate into
+  # the guest below the VIRTIO spec minimum. The VMM's InvalidMtu validation
+  # never catches this because the shim leaves NetConfig.mtu unset. Keep the
+  # cap at u16 max for the virtio MTU field.
+  [[ "${mtu_decimal}" -ge 1280 && "${mtu_decimal}" -le 65535 ]] \
+    || fail "CUBE_SANDBOX_NETWORK_MTU must be within 1280..65535"
+  # A missing/renamed mvm_mtu key is non-fatal (warn + skip) so a future
+  # config.toml schema drift cannot crash-loop the node container. The
+  # pre-check shares the same anchor as the sed and post-check, including
+  # the optional spaces around '=', so an e.g. `mvm_mtu=1500` line (valid
+  # TOML without spaces) is found and rewritten rather than silently no-op'd.
+  if ! grep -qE '^[[:space:]]*mvm_mtu[[:space:]]*=' "${cfg}"; then
+    log "WARN: mvm_mtu key not found in ${cfg}; CUBE_SANDBOX_NETWORK_MTU not applied"
+    return 0
+  fi
+  sed -i "s/^\([[:space:]]*\)mvm_mtu[[:space:]]*=[[:space:]]*[0-9][0-9]*/\1mvm_mtu = ${mtu_decimal}/" "${cfg}"
+  # Anchor the post-check to the end of the value (whitespace / comment /
+  # EOL) so a line whose value merely starts with the target (e.g.
+  # `mvm_mtu = 14500` for 1450) cannot log a false success. A non-digit
+  # boundary alone would not suffice (`mvm_mtu = 1450abc` would still
+  # match).
+  if grep -qE "^[[:space:]]*mvm_mtu[[:space:]]*=[[:space:]]*${mtu_decimal}([[:space:]]|#|\$)" "${cfg}"; then
+    log "patched Cubelet mvm_mtu = ${mtu_decimal}"
+  else
+    log "WARN: failed to patch mvm_mtu in ${cfg}; CUBE_SANDBOX_NETWORK_MTU not applied"
+  fi
+}
+
 validate_runtime_commands() {
   for cmd in mkfs.ext4 mount umount losetup cube-runtime containerd-shim-cube-rs cubecli cubevsmapdump; do
     require_cmd "${cmd}"
@@ -192,49 +242,7 @@ if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
   CIDR_ESC="$(sed_escape_replacement "${CUBE_SANDBOX_NETWORK_CIDR}")"
   sed -i "s|cidr = \"[^\"]*\"|cidr = \"${CIDR_ESC}\"|" "${CUBELET_CONFIG}"
 fi
-if [[ -n "${CUBE_SANDBOX_NETWORK_MTU:-}" && "${CUBE_SANDBOX_NETWORK_MTU}" != "0" ]]; then
-  # Reject anything that is not an integer so operators cannot inject
-  # replacement content via numeric-looking env variables.
-  [[ "${CUBE_SANDBOX_NETWORK_MTU}" =~ ^[0-9]+$ ]] || fail "CUBE_SANDBOX_NETWORK_MTU must be a non-negative integer"
-  # A valid MTU is at most 5 digits (max 65535). Check length before the
-  # arithmetic so an absurdly long string fails with a self-explanatory
-  # message instead of wrapping in bash's int64 arithmetic (e.g. 25+ digits
-  # becomes a huge negative number) and hitting a misleading range error.
-  [[ "${#CUBE_SANDBOX_NETWORK_MTU}" -le 5 ]] \
-    || fail "CUBE_SANDBOX_NETWORK_MTU is too long (max 5 digits, range 1280..65535)"
-  # Leading zeros make bash parse the value as octal (-ge/-le), and sed would
-  # write invalid TOML (leading zeros forbidden in integers). Normalize to
-  # decimal before the range check.
-  mtu_decimal=$((10#$CUBE_SANDBOX_NETWORK_MTU))
-  # The guest virtio-net device enforces MIN_MTU=1280
-  # (hypervisor/virtio-devices/src/net.rs:51), and the guest MTU is derived
-  # from the tap's actual MTU — so anything below 1280 would propagate into
-  # the guest below the VIRTIO spec minimum. The VMM's InvalidMtu validation
-  # never catches this because the shim leaves NetConfig.mtu unset. Keep the
-  # cap at u16 max for the virtio MTU field.
-  [[ "${mtu_decimal}" -ge 1280 && "${mtu_decimal}" -le 65535 ]] \
-    || fail "CUBE_SANDBOX_NETWORK_MTU must be within 1280..65535"
-  # A missing/renamed mvm_mtu key is non-fatal (warn + skip) so a future
-  # config.toml schema drift cannot crash-loop the node container. The
-  # pre-check shares the same anchor as the sed and post-check, including
-  # the optional spaces around '=', so an e.g. `mvm_mtu=1500` line (valid
-  # TOML without spaces) is found and rewritten rather than silently no-op'd.
-  if ! grep -qE '^[[:space:]]*mvm_mtu[[:space:]]*=' "${CUBELET_CONFIG}"; then
-    log "WARN: mvm_mtu key not found in ${CUBELET_CONFIG}; CUBE_SANDBOX_NETWORK_MTU not applied"
-  else
-    sed -i "s/^\([[:space:]]*\)mvm_mtu[[:space:]]*=[[:space:]]*[0-9][0-9]*/\1mvm_mtu = ${mtu_decimal}/" "${CUBELET_CONFIG}"
-    # Anchor the post-check to the end of the value (whitespace / comment /
-    # EOL) so a line whose value merely starts with the target (e.g.
-    # `mvm_mtu = 14500` for 1450) cannot log a false success. A non-digit
-    # boundary alone would not suffice (`mvm_mtu = 1450abc` would still
-    # match).
-    if grep -qE "^[[:space:]]*mvm_mtu[[:space:]]*=[[:space:]]*${mtu_decimal}([[:space:]]|#|\$)" "${CUBELET_CONFIG}"; then
-      log "patched Cubelet mvm_mtu = ${mtu_decimal}"
-    else
-      log "WARN: failed to patch mvm_mtu in ${CUBELET_CONFIG}; CUBE_SANDBOX_NETWORK_MTU not applied"
-    fi
-  fi
-fi
+patch_cubelet_mtu "${CUBELET_CONFIG}"
 if [[ -n "${CUBE_TAP_INIT_NUM:-}" ]]; then
   # Reject anything that is not an integer so operators cannot inject
   # replacement content via numeric-looking env variables.
