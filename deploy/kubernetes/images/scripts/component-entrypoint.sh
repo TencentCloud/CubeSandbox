@@ -424,7 +424,16 @@ run_network_agent() {
   fi
   if [[ -n "${CUBE_SANDBOX_NETWORK_MTU:-}" && "${CUBE_SANDBOX_NETWORK_MTU}" != "0" ]]; then
     [[ "${CUBE_SANDBOX_NETWORK_MTU}" =~ ^[0-9]+$ ]] || fail "CUBE_SANDBOX_NETWORK_MTU must be a non-negative integer"
+    # VMM enforces MIN_MTU=1280 (hypervisor/virtio-devices/src/net.rs); a value
+    # below that passes here but fails at VM boot with InvalidMtu. Also cap at
+    # u16 max so the value fits the NetConfig.mtu field.
+    [[ "${CUBE_SANDBOX_NETWORK_MTU}" -ge 1280 && "${CUBE_SANDBOX_NETWORK_MTU}" -le 65535 ]] \
+      || fail "CUBE_SANDBOX_NETWORK_MTU must be within 1280..65535"
+    grep -qE '^[[:space:]]*mvm_mtu' "${cfg}" \
+      || fail "mvm_mtu key not found in ${cfg}; cannot apply CUBE_SANDBOX_NETWORK_MTU"
     sed -i "s/mvm_mtu = [0-9]\+/mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}/" "${cfg}"
+    grep -q "mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}" "${cfg}" \
+      || fail "failed to patch mvm_mtu in ${cfg}"
     log "patched Cubelet mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}"
   fi
 
@@ -498,7 +507,16 @@ run_cubelet() {
   fi
   if [[ -n "${CUBE_SANDBOX_NETWORK_MTU:-}" && "${CUBE_SANDBOX_NETWORK_MTU}" != "0" ]]; then
     [[ "${CUBE_SANDBOX_NETWORK_MTU}" =~ ^[0-9]+$ ]] || fail "CUBE_SANDBOX_NETWORK_MTU must be a non-negative integer"
+    # VMM enforces MIN_MTU=1280 (hypervisor/virtio-devices/src/net.rs); a value
+    # below that passes here but fails at VM boot with InvalidMtu. Also cap at
+    # u16 max so the value fits the NetConfig.mtu field.
+    [[ "${CUBE_SANDBOX_NETWORK_MTU}" -ge 1280 && "${CUBE_SANDBOX_NETWORK_MTU}" -le 65535 ]] \
+      || fail "CUBE_SANDBOX_NETWORK_MTU must be within 1280..65535"
+    grep -qE '^[[:space:]]*mvm_mtu' "${cfg}" \
+      || fail "mvm_mtu key not found in ${cfg}; cannot apply CUBE_SANDBOX_NETWORK_MTU"
     sed -i "s/mvm_mtu = [0-9]\+/mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}/" "${cfg}"
+    grep -q "mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}" "${cfg}" \
+      || fail "failed to patch mvm_mtu in ${cfg}"
     log "patched Cubelet mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}"
   fi
   if [[ -n "${CUBE_TAP_INIT_NUM:-}" ]]; then

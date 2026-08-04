@@ -196,7 +196,16 @@ if [[ -n "${CUBE_SANDBOX_NETWORK_MTU:-}" && "${CUBE_SANDBOX_NETWORK_MTU}" != "0"
   # Reject anything that is not an integer so operators cannot inject
   # replacement content via numeric-looking env variables.
   [[ "${CUBE_SANDBOX_NETWORK_MTU}" =~ ^[0-9]+$ ]] || fail "CUBE_SANDBOX_NETWORK_MTU must be a non-negative integer"
+  # VMM enforces MIN_MTU=1280 (hypervisor/virtio-devices/src/net.rs); a value
+  # below that passes here but fails at VM boot with InvalidMtu. Also cap at
+  # u16 max so the value fits the NetConfig.mtu field.
+  [[ "${CUBE_SANDBOX_NETWORK_MTU}" -ge 1280 && "${CUBE_SANDBOX_NETWORK_MTU}" -le 65535 ]] \
+    || fail "CUBE_SANDBOX_NETWORK_MTU must be within 1280..65535"
+  grep -qE '^[[:space:]]*mvm_mtu' "${CUBELET_CONFIG}" \
+    || fail "mvm_mtu key not found in ${CUBELET_CONFIG}; cannot apply CUBE_SANDBOX_NETWORK_MTU"
   sed -i "s/mvm_mtu = [0-9]\+/mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}/" "${CUBELET_CONFIG}"
+  grep -q "mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}" "${CUBELET_CONFIG}" \
+    || fail "failed to patch mvm_mtu in ${CUBELET_CONFIG}"
   log "patched Cubelet mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}"
 fi
 if [[ -n "${CUBE_TAP_INIT_NUM:-}" ]]; then

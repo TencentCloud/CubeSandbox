@@ -370,8 +370,12 @@ impl Utils {
                 ..Default::default()
             };
             // Restore/snapshot 路径同样需要透传 MTU（见 add_nets 注释）。
+            // u16::try_from rejects values that would silently truncate the MTU.
             if n.mtu > 0 {
-                net_config.mtu = Some(n.mtu as u16);
+                net_config.mtu = Some(
+                    u16::try_from(n.mtu)
+                        .map_err(|_| format!("invalid mtu {} for net {}", n.mtu, n.name))?,
+                );
             }
 
             if let Some(qos) = &n.qos {
