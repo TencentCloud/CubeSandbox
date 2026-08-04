@@ -451,7 +451,12 @@ run_network_agent() {
       log "WARN: mvm_mtu key not found in ${cfg}; CUBE_SANDBOX_NETWORK_MTU not applied"
     else
       sed -i "s/^\([[:space:]]*\)mvm_mtu[[:space:]]*=[[:space:]]*[0-9][0-9]*/\1mvm_mtu = ${mtu_decimal}/" "${cfg}"
-      if grep -qE "^[[:space:]]*mvm_mtu[[:space:]]*=[[:space:]]*${mtu_decimal}" "${cfg}"; then
+      # Anchor the post-check to the end of the value (whitespace / comment /
+      # EOL) so a line whose value merely starts with the target (e.g.
+      # `mvm_mtu = 14500` for 1450) cannot log a false success. A non-digit
+      # boundary alone would not suffice (`mvm_mtu = 1450abc` would still
+      # match).
+      if grep -qE "^[[:space:]]*mvm_mtu[[:space:]]*=[[:space:]]*${mtu_decimal}([[:space:]]|#|\$)" "${cfg}"; then
         log "patched Cubelet mvm_mtu = ${mtu_decimal}"
       else
         log "WARN: failed to patch mvm_mtu in ${cfg}; CUBE_SANDBOX_NETWORK_MTU not applied"
@@ -556,7 +561,12 @@ run_cubelet() {
       log "WARN: mvm_mtu key not found in ${cfg}; CUBE_SANDBOX_NETWORK_MTU not applied"
     else
       sed -i "s/^\([[:space:]]*\)mvm_mtu[[:space:]]*=[[:space:]]*[0-9][0-9]*/\1mvm_mtu = ${mtu_decimal}/" "${cfg}"
-      if grep -qE "^[[:space:]]*mvm_mtu[[:space:]]*=[[:space:]]*${mtu_decimal}" "${cfg}"; then
+      # Anchor the post-check to the end of the value (whitespace / comment /
+      # EOL) so a line whose value merely starts with the target (e.g.
+      # `mvm_mtu = 14500` for 1450) cannot log a false success. A non-digit
+      # boundary alone would not suffice (`mvm_mtu = 1450abc` would still
+      # match).
+      if grep -qE "^[[:space:]]*mvm_mtu[[:space:]]*=[[:space:]]*${mtu_decimal}([[:space:]]|#|\$)" "${cfg}"; then
         log "patched Cubelet mvm_mtu = ${mtu_decimal}"
       else
         log "WARN: failed to patch mvm_mtu in ${cfg}; CUBE_SANDBOX_NETWORK_MTU not applied"
