@@ -20,7 +20,7 @@ spec:
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
-  {{- include "cube.controlPlanePlacement" . | nindent 2 }}
+  {{- include "cube.computePlacement" . | nindent 2 }}
   serviceAccountName: {{ include "cube.fullname" . }}-test
   containers:
     - name: curl
@@ -39,6 +39,8 @@ spec:
           # A records exist. Force IPv4 on every lookup; do NOT add a global
           # --retry here because that would make the fail-fast health checks
           # below retry real 5xx/timing-out endpoints for ~48s before failing.
+          # Note: this test pod is IPv4-only by design (CubeSandbox sandbox
+          # networking is IPv4; the chart does not support single-stack IPv6).
           curl() { command curl -4 "$@"; }
           kget() {
             curl --connect-timeout 5 --max-time 20 --cacert "${ca_path}" \
@@ -375,7 +377,7 @@ spec:
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
-  {{- include "cube.controlPlanePlacement" . | nindent 2 }}
+  {{- include "cube.computePlacement" . | nindent 2 }}
   serviceAccountName: {{ include "cube.fullname" . }}-test
   containers:
     - name: node-image-assets
