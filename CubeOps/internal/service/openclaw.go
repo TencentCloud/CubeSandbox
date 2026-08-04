@@ -177,15 +177,14 @@ func decodeB64Lossy(s string) string {
 
 // ── OpenClaw gateway token resolution ───────────────────────────────────────
 
-// ReadOpenclawGatewayTokenFromHost reads the gateway auth token directly from
-// the host-side OpenClaw state directory (shared_files persistence mode).
-// This avoids a round-trip through envd and is more reliable because the host
-// file is not subject to in-process rewrites by OpenClaw during startup.
-func ReadOpenclawGatewayTokenFromHost(statePath string) string {
+// readOpenclawGatewayTokenFromHostFile reads the gateway token from a named
+// file in the host-side OpenClaw state dir (shared_files). Note the host file
+// is the same mounted sandbox file, so it is subject to OpenClaw rewrites.
+func readOpenclawGatewayTokenFromHostFile(statePath, filename string) string {
 	if statePath == "" {
 		return ""
 	}
-	data, err := os.ReadFile(filepath.Join(statePath, "openclaw.json"))
+	data, err := os.ReadFile(filepath.Join(statePath, filename))
 	if err != nil {
 		return ""
 	}
@@ -202,19 +201,97 @@ func ReadOpenclawGatewayTokenFromHost(statePath string) string {
 	return strings.TrimSpace(v.Gateway.Auth.Token)
 }
 
-// ResolveGatewayToken reads the gateway token with the same priority as the
-// old Rust code (CubeAPI/src/handlers/agenthub.rs):
-//  1. host-side file (shared_files mode only)
-//  2. sandbox-side file via envd (single read)
+// ReadOpenclawGatewayTokenFromHost reads the gateway token from the host-side
+// openclaw.json (shared_files), avoiding an envd round-trip.
+func ReadOpenclawGatewayTokenFromHost(statePath string) string {
+	return readOpenclawGatewayTokenFromHostFile(statePath, "openclaw.json")
+}
+
+// readOpenclawGatewayTokenSandboxFile reads the gateway token from a named file
+// in the sandbox via envd. Returns "" if the read fails or the token is absent.
+func readOpenclawGatewayTokenSandboxFile(httpClient *http.Client, sandboxID, domain, filename string) string {
+	if httpClient == nil {
+		return ""
+	}
+	script := fmt.Sprintf(`python3 - <<'PY'
+import json
+try:
+    token = json.load(open('/root/.openclaw/%s')).get('gateway', {}).get('auth', {}).get('token')
+    if token:
+        print(token)
+except Exception:
+    pass
+PY`, filename)
+	req := map[string]interface{}{
+		"process": map[string]interface{}{
+			"cmd":  "/bin/bash",
+			"args": []string{"-l", "-c", script},
+			"envs": map[string]string{},
+			"cwd":  "/root",
+		},
+		"stdin": false,
+	}
+	output, err := RunEnvdCommand(httpClient, sandboxID, domain, req)
+	if err != nil || output.ExitCode != 0 {
+		return ""
+	}
+	return strings.TrimSpace(output.Stdout)
+}
+
+// resolveOpenclawLastGoodToken polls openclaw.json.last-good (the token the
+// live gateway actually enforces, unlike openclaw.json) until it is stable.
+// Reads from the host side for shared_files, otherwise via envd. Returns "" on
+// timeout.
+func resolveOpenclawLastGoodToken(httpClient *http.Client, sandboxID, domain, hostStatePath string, timeout time.Duration) string {
+	readFn := func() string {
+		if hostStatePath != "" {
+			return readOpenclawGatewayTokenFromHostFile(hostStatePath, "openclaw.json.last-good")
+		}
+		return readOpenclawGatewayTokenSandboxFile(httpClient, sandboxID, domain, "openclaw.json.last-good")
+	}
+	interval := time.Second
+	const stableRounds = 3
+	deadline := time.Now().Add(timeout)
+	prev := ""
+	consecutive := 0
+	for time.Now().Before(deadline) {
+		cur := readFn()
+		if cur != "" && cur == prev {
+			consecutive++
+			if consecutive >= stableRounds {
+				return cur
+			}
+		} else {
+			consecutive = 1
+			prev = cur
+		}
+		time.Sleep(interval)
+	}
+	return ""
+}
+
+// ResolveGatewayToken resolves the OpenClaw gateway token to persist.
+//
+// The live gateway enforces the value OpenClaw writes to openclaw.json.last-
+// good, not necessarily the value in openclaw.json (which OpenClaw may rewrite
+// during startup with a token it does not enforce). So we poll .last-good for a
+// stable token first; if none appears within the timeout we fall back to:
+//  1. host-side openclaw.json (shared_files)
+//  2. sandbox-side openclaw.json via envd
 //  3. fallback (the token CubeOps generated and passed to the apply script)
 //
-// A 5-second sleep is performed first to let OpenClaw finish its in-process
-// config reload after the apply script writes openclaw.json. Without this
-// delay, the host/sandbox file may still contain a transient token that
-// OpenClaw generates during startup, which differs from the token the apply
-// script wrote. This matches the Rust `tokio::time::sleep(Duration::from_secs(5))`.
+// A 5s sleep first lets OpenClaw finish its config reload, mirroring the Rust
+// `sleep(Duration::from_secs(5))`.
 func ResolveGatewayToken(httpClient *http.Client, sandboxID, domain, hostStatePath, fallbackToken string) string {
 	time.Sleep(5 * time.Second)
+
+	if stable := resolveOpenclawLastGoodToken(httpClient, sandboxID, domain, hostStatePath, 20*time.Second); stable != "" {
+		slog.Info("ResolveGatewayToken: using last-good token",
+			"sandboxID", sandboxID, "hostStatePath", hostStatePath)
+		return stable
+	}
+	slog.Warn("ResolveGatewayToken: last-good not stable; falling back to file/fallback",
+		"sandboxID", sandboxID, "hostStatePath", hostStatePath)
 
 	if hostToken := ReadOpenclawGatewayTokenFromHost(hostStatePath); hostToken != "" {
 		slog.Info("ResolveGatewayToken: using host-side token",
@@ -235,29 +312,7 @@ func ResolveGatewayToken(httpClient *http.Client, sandboxID, domain, hostStatePa
 // /root/.openclaw/openclaw.json inside the sandbox via envd.
 // Matches old Rust read_openclaw_gateway_token.
 func readOpenclawGatewayToken(httpClient *http.Client, sandboxID, domain string) string {
-	req := map[string]interface{}{
-		"process": map[string]interface{}{
-			"cmd": "/bin/bash",
-			"args": []string{"-l", "-c", `python3 - <<'PY'
-import json
-try:
-    token = json.load(open('/root/.openclaw/openclaw.json')).get('gateway', {}).get('auth', {}).get('token')
-    if token:
-        print(token)
-except Exception:
-    pass
-PY`},
-			"envs": map[string]string{},
-			"cwd":  "/root",
-		},
-		"stdin": false,
-	}
-
-	output, err := RunEnvdCommand(httpClient, sandboxID, domain, req)
-	if err != nil || output.ExitCode != 0 {
-		return ""
-	}
-	return strings.TrimSpace(output.Stdout)
+	return readOpenclawGatewayTokenSandboxFile(httpClient, sandboxID, domain, "openclaw.json")
 }
 
 // ── OpenClaw restart / upgrade scripts ──────────────────────────────────────

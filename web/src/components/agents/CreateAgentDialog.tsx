@@ -2,9 +2,10 @@
 // Copyright (C) 2026 Tencent. All rights reserved.
 
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import * as Dialog from '@radix-ui/react-dialog';
-import { X, Check, Wrench, TriangleAlert } from 'lucide-react';
+import { X, Check, Wrench, TriangleAlert, Store } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
@@ -38,6 +39,7 @@ export function CreateAgentDialog({
   onError,
 }: Props) {
   const { t } = useTranslation('agentHub');
+  const navigate = useNavigate();
 
   const addAgent = useAgentStore((s) => s.addAgent);
   const removeAgent = useAgentStore((s) => s.removeAgent);
@@ -78,6 +80,13 @@ export function CreateAgentDialog({
   }, [initialTemplateId, open]);
 
   const selectedTemplate = templates.find((template) => template.templateId === selectedTemplateId);
+  // The selected template may no longer be in the list (e.g. it was uninstalled
+  // from the template market while the dialog stayed open).
+  const selectedTemplateMissing = selectedTemplateId !== '' && !selectedTemplate;
+  const hasTemplate = templates.length > 0;
+  // A template must be chosen before submitting; a missing/uninstalled selection
+  // also counts as "not ready to submit".
+  const templateReady = Boolean(selectedTemplate) && !selectedTemplateMissing;
   const inheritedPersistenceMode = selectedTemplate?.persistenceMode;
   const effectivePersistenceMode = inheritedPersistenceMode ?? persistenceMode;
 
@@ -100,6 +109,10 @@ export function CreateAgentDialog({
     }
     if (!apiKeyConfigured) {
       setError(t('dialog.errors.apiKeyRequired'));
+      return;
+    }
+    if (!templateReady) {
+      setError(t('dialog.errors.templateRequired'));
       return;
     }
     const payload = {
@@ -230,51 +243,73 @@ export function CreateAgentDialog({
 
             {/* * 助手模板 */}
             <Section label={t('dialog.sections.template')} hint={t('dialog.templateHint')}>
-              <select
-                value={selectedTemplateId}
-                disabled={submitting || templatesLoading}
-                onChange={(e) => setSelectedTemplateId(e.target.value)}
-                className="h-10 w-full rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground outline-none transition-colors focus:border-primary/60 focus:ring-2 focus:ring-primary/15 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <option value="">
-                  {templatesLoading
-                    ? t('dialog.templateLoading')
-                    : t('dialog.templateOptions.default')}
-                </option>
-                {templates.map((template) => (
-                  <option key={template.templateId} value={template.templateId}>
-                    {template.name} · {template.model} · {template.version}
-                  </option>
-                ))}
-              </select>
-              {selectedTemplate && (
-                <div className="mt-2 rounded-lg border border-border/60 bg-muted/20 p-3 text-xs">
-                  <div className="font-medium text-foreground">
-                    {t('dialog.templateSelected', { templateId: selectedTemplate.templateId })}
-                  </div>
-                  <div className="mt-2 grid gap-1.5 text-muted-foreground sm:grid-cols-2">
-                    <span>
-                      {t('dialog.templateFields.model')}: {selectedTemplate.model}
-                    </span>
-                    <span>
-                      {t('dialog.templateFields.version')}: {selectedTemplate.version}
-                    </span>
-                    {inheritedPersistenceMode && (
-                      <span>
-                        {t('dialog.templateFields.persistence')}:{' '}
-                        {t(
-                          `dialog.persistenceOptions.${inheritedPersistenceMode === 'shared_files' ? 'sharedFiles' : 'fullSnapshot'}.title`,
-                        )}
-                      </span>
-                    )}
-                    <span>
-                      {t('dialog.templateFields.sourceAgent')}: {selectedTemplate.sourceAgentId}
-                    </span>
-                    <span>
-                      {t('dialog.templateFields.createdAt')}: {selectedTemplate.createdAt || '-'}
-                    </span>
-                  </div>
+              {templatesLoading ? (
+                <div className="flex h-10 items-center rounded-lg border border-border/60 bg-background px-3 text-sm text-muted-foreground">
+                  {t('dialog.templateLoading')}
                 </div>
+              ) : !hasTemplate ? (
+                <div className="flex flex-col items-start gap-3 rounded-lg border border-dashed border-border/70 bg-muted/20 px-4 py-3">
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    {t('dialog.templateEmpty')}
+                  </p>
+                  <Button size="sm" variant="outline" onClick={() => navigate('/store')}>
+                    <Store size={14} className="mr-1.5" />
+                    {t('dialog.templateEmptyAction')}
+                  </Button>
+                </div>
+              ) : (
+                <>
+                  <select
+                    value={selectedTemplateId}
+                    disabled={submitting || templatesLoading}
+                    onChange={(e) => setSelectedTemplateId(e.target.value)}
+                    className="h-10 w-full rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground outline-none transition-colors focus:border-primary/60 focus:ring-2 focus:ring-primary/15 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <option value="" disabled hidden>
+                      {t('dialog.templateSelectPlaceholder')}
+                    </option>
+                    {templates.map((template) => (
+                      <option key={template.templateId} value={template.templateId}>
+                        {template.name} · {template.model} · {template.version}
+                      </option>
+                    ))}
+                  </select>
+                  {selectedTemplateMissing && (
+                    <div className="mt-2 flex items-start gap-2 rounded-lg border border-amber-200/70 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100">
+                      <TriangleAlert size={14} className="mt-0.5 shrink-0" />
+                      <span>{t('dialog.templateUnavailable')}</span>
+                    </div>
+                  )}
+                  {selectedTemplate && (
+                    <div className="mt-2 rounded-lg border border-border/60 bg-muted/20 p-3 text-xs">
+                      <div className="font-medium text-foreground">
+                        {t('dialog.templateSelected', { templateId: selectedTemplate.templateId })}
+                      </div>
+                      <div className="mt-2 grid gap-1.5 text-muted-foreground sm:grid-cols-2">
+                        <span>
+                          {t('dialog.templateFields.model')}: {selectedTemplate.model}
+                        </span>
+                        <span>
+                          {t('dialog.templateFields.version')}: {selectedTemplate.version}
+                        </span>
+                        {inheritedPersistenceMode && (
+                          <span>
+                            {t('dialog.templateFields.persistence')}:{' '}
+                            {t(
+                              `dialog.persistenceOptions.${inheritedPersistenceMode === 'shared_files' ? 'sharedFiles' : 'fullSnapshot'}.title`,
+                            )}
+                          </span>
+                        )}
+                        <span>
+                          {t('dialog.templateFields.sourceAgent')}: {selectedTemplate.sourceAgentId}
+                        </span>
+                        <span>
+                          {t('dialog.templateFields.createdAt')}: {selectedTemplate.createdAt || '-'}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
             </Section>
 
@@ -359,7 +394,7 @@ export function CreateAgentDialog({
             <Button
               size="sm"
               onClick={handleSubmit}
-              disabled={!name.trim() || submitting || !apiKeyConfigured}
+              disabled={!name.trim() || submitting || !apiKeyConfigured || !templateReady}
               className="min-w-[88px]"
             >
               {submitting ? t('dialog.actions.submitting') : t('dialog.actions.submit')}
