@@ -132,10 +132,24 @@ func assertPGHeadSchema(t *testing.T, db *sql.DB) {
 				"snapshot_path", "rootfs_vol", "memory_vol",
 			},
 			columns: []string{"guest_image_version", "compat_status"},
+			indexes: []string{"idx_template_replica_deleted_at"},
 		},
 		{
 			table:   "t_cube_sandbox_spec",
 			columns: []string{"sandbox_id", "request_json", "backfilled"},
+			indexes: []string{"idx_sandbox_spec_deleted_at"},
+		},
+		{
+			table:   "t_cube_instance_info",
+			indexes: []string{"idx_instance_info_deleted_at"},
+		},
+		{
+			table:   "t_cube_instance_userdata",
+			indexes: []string{"idx_instance_userdata_deleted_at"},
+		},
+		{
+			table:   "t_agenthub_snapshot",
+			indexes: []string{"idx_agenthub_snapshot_deleted_at"},
 		},
 		{
 			table:   "t_cube_snapshot_runtime_ref",

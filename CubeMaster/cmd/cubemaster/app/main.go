@@ -22,6 +22,7 @@ import (
 	_ "github.com/tencentcloud/CubeSandbox/CubeDB/dao/driver/mysql"    // register mysql driver
 	_ "github.com/tencentcloud/CubeSandbox/CubeDB/dao/driver/postgres" // register postgres driver
 	"github.com/tencentcloud/CubeSandbox/CubeDB/migrate"
+	"github.com/tencentcloud/CubeSandbox/CubeDB/tombstone"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"
@@ -146,6 +147,39 @@ func coreInit(ctx context.Context, cfg *config.Config) error {
 	if err := initDatabaseSchema(ctx, cfg); err != nil {
 		return fmt.Errorf("dao migrate: %w", err)
 	}
+
+	// Launch the scheduled tombstone purger (issue #973): hard-purges
+	// soft-deleted rows older than the configured retention. Registered
+	// here (not in templatecenter.Init) because it is a DB-level concern;
+	// it runs only after the schema is migrated and dao.Default() is
+	// usable, and stops when ctx is cancelled. DISABLED by default: the purge is
+	// irreversible, so operators must opt in via soft_delete_purge.enable: true
+	// (review: upgrading must not silently hard-delete retained tombstones).
+	sp := cfg.SoftDeletePurge
+	spEnabled := false
+	if sp != nil && sp.Enable != nil {
+		spEnabled = *sp.Enable
+	}
+	var spRetention, spInterval time.Duration
+	if sp != nil {
+		spRetention = sp.Retention
+		spInterval = sp.Interval
+	}
+	tombstone.Start(ctx, dao.Default(), tombstone.Config{
+		Enabled:   spEnabled,
+		DryRun:    sp != nil && sp.DryRun,
+		Retention: spRetention,
+		Interval:  spInterval,
+		TablesFn: func() []string {
+			// Resolve per pass from the LIVE config so the purge table list tracks
+			// disable_hard_delete across a hot-reload (the app reads it live on every
+			// delete); a boot-time snapshot would otherwise diverge and purge rows the
+			// operator just chose to retain.
+			c := config.GetConfig()
+			return cubeMasterPurgeTables(c != nil && c.Common != nil && c.Common.DisableHardDelete)
+		},
+		LockName: "cubemaster_tombstone_purge_v1",
+	})
 
 	if err := nodemeta.Init(ctx); err != nil {
 		stdlog.Fatalf("nodemeta init fail:%v", err)

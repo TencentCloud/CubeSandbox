@@ -17,6 +17,15 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/crypto"
 )
 
+// AgentHub table names owned by this store. The tombstone purger (cmd/cubeops)
+// references these so its purge list cannot drift from the store/migration names
+// — mirroring how CubeMaster uses pkg/base/constants for its tables.
+const (
+	AgenthubInstanceTable = "t_agenthub_instance"
+	AgenthubSnapshotTable = "t_agenthub_snapshot"
+	AgenthubTemplateTable = "t_agenthub_template"
+)
+
 // AgentInstance matches the old Rust AgentInstanceResponse exactly.
 type AgentInstance struct {
 	ID                string            `json:"id"`
