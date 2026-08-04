@@ -36,9 +36,10 @@ spec:
           kube_api="https://kubernetes.default.svc"
           # CoreDNS forwards AAAA for names it does not answer and the upstream
           # DNS times out, so plain curl (IPv6 probe) fails to resolve even when
-          # A records exist. Force IPv4 for all lookups and retry the occasional
-          # transient lookup timeout in this test.
-          curl() { command curl -4 --retry 3 --retry-all-errors --retry-delay 1 "$@"; }
+          # A records exist. Force IPv4 on every lookup; do NOT add a global
+          # --retry here because that would make the fail-fast health checks
+          # below retry real 5xx/timing-out endpoints for ~48s before failing.
+          curl() { command curl -4 "$@"; }
           kget() {
             curl --connect-timeout 5 --max-time 20 --cacert "${ca_path}" \
               -H "Authorization: Bearer $(cat "${token_path}")" \
@@ -278,11 +279,14 @@ spec:
           echo '[health-test] check CubeProxy admin healthz'
           # The dataplane returns 400 for the bare "/" path (it only serves
           # sandbox traffic), so probe the admin health endpoint instead.
-          # Retry to absorb transient CoreDNS lookup timeouts.
+          # Retry to absorb transient CoreDNS lookup timeouts. Under `set -e`
+          # a connection failure (curl non-zero exit) would abort before the
+          # status assertion, so capture it explicitly and print a clear error.
           status="$(curl -4 --retry 3 --retry-all-errors --retry-delay 1 --connect-timeout 5 --max-time 15 -sS \
             -H "X-Cube-Admin-Token: ${CUBE_PROXY_ADMIN_TOKEN}" \
             -o /dev/null -w "%{http_code}" \
-            "http://{{ include "cube.proxyServiceFQDN" . }}:{{ .Values.cubeProxy.adminPort }}/admin/healthz")"
+            "http://{{ include "cube.proxyServiceFQDN" . }}:{{ .Values.cubeProxy.adminPort }}/admin/healthz")" \
+            || { echo "cube-proxy admin healthz unreachable"; exit 1; }
           test "$status" = "200" || { echo "cube-proxy admin healthz status=$status"; exit 1; }
 {{- end }}
 {{ if eq (include "cube.configureClusterDNS" .) "true" }}
@@ -317,11 +321,14 @@ spec:
           target={{ include "cube.proxyServiceFQDN" . | quote }}
           # curl image (alpine/musl) getent: reliable against CoreDNS rewrite zones
           # (busybox nslookup times out on non-cluster.svc names in this setup).
+          # Use ahostsv4 so only A records are returned — getent hosts can emit
+          # both A and AAAA in a dual-stack cluster and the equality assertions
+          # below must compare the same address family.
           # CoreDNS forwards non-cluster.svc names upstream and can hit transient
           # timeouts, so retry the lookup before treating it as a failure.
           a_record() {
             for _ in 1 2 3 4 5; do
-              if ip="$(getent hosts "$1" 2>/dev/null | awk '{print $1}' | tail -n 1)" && [ -n "$ip" ]; then
+              if ip="$(getent ahostsv4 "$1" 2>/dev/null | awk 'NR==1 {print $1}')" && [ -n "$ip" ]; then
                 printf '%s\n' "$ip"
                 return 0
               fi
