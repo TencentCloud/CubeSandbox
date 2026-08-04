@@ -533,9 +533,10 @@ cubeNode:
     # frames larger than the Pod MTU — an MTU blackhole that truncates HTTPS
     # handshakes and large downloads. Set this to the Pod network MTU so the
     # guest's advertised MSS fits inside the Pod MTU.
-    # Valid range is 1280..65535 (VMM enforces MIN_MTU=1280); 0 keeps the
-    # packaged Cubelet default (1500). The entrypoint rejects values outside
-    # this range at startup.
+    # Valid range is 68..65535 (Linux enforces a minimum interface MTU of 68);
+    # the entrypoint rejects values outside this range at startup. Note the
+    # guest virtio MTU is derived from the tap's actual MTU, which
+    # network-agent sets from mvm_mtu, so no separate guest MTU setting exists.
     mtu: 0
 
   dns:

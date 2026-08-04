@@ -196,20 +196,23 @@ if [[ -n "${CUBE_SANDBOX_NETWORK_MTU:-}" && "${CUBE_SANDBOX_NETWORK_MTU}" != "0"
   # Reject anything that is not an integer so operators cannot inject
   # replacement content via numeric-looking env variables.
   [[ "${CUBE_SANDBOX_NETWORK_MTU}" =~ ^[0-9]+$ ]] || fail "CUBE_SANDBOX_NETWORK_MTU must be a non-negative integer"
-  # VMM enforces MIN_MTU=1280 (hypervisor/virtio-devices/src/net.rs); a value
-  # below that passes here but fails at VM boot with InvalidMtu. Also cap at
-  # u16 max so the value fits the NetConfig.mtu field.
-  [[ "${CUBE_SANDBOX_NETWORK_MTU}" -ge 1280 && "${CUBE_SANDBOX_NETWORK_MTU}" -le 65535 ]] \
-    || fail "CUBE_SANDBOX_NETWORK_MTU must be within 1280..65535"
+  # Leading zeros make bash parse the value as octal (-ge/-le), and sed would
+  # write invalid TOML (leading zeros forbidden in integers). Normalize to
+  # decimal before the range check.
+  mtu_decimal=$((10#$CUBE_SANDBOX_NETWORK_MTU))
+  # Linux enforces a minimum interface MTU of 68; the tap must also fit the
+  # virtio MTU field (u16). The guest inherits the tap's actual MTU.
+  [[ "${mtu_decimal}" -ge 68 && "${mtu_decimal}" -le 65535 ]] \
+    || fail "CUBE_SANDBOX_NETWORK_MTU must be within 68..65535"
   grep -qE '^[[:space:]]*mvm_mtu' "${CUBELET_CONFIG}" \
     || fail "mvm_mtu key not found in ${CUBELET_CONFIG}; cannot apply CUBE_SANDBOX_NETWORK_MTU"
   # Anchor to line start so a preceding `# mvm_mtu = ...` comment (or any
   # mid-line occurrence) is never the thing rewritten; the pre/post checks
   # use the same anchor and preserve leading whitespace.
-  sed -i "s/^\([[:space:]]*\)mvm_mtu = [0-9]\+/\1mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}/" "${CUBELET_CONFIG}"
-  grep -qE "^[[:space:]]*mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}" "${CUBELET_CONFIG}" \
+  sed -i "s/^\([[:space:]]*\)mvm_mtu = [0-9]\+/\1mvm_mtu = ${mtu_decimal}/" "${CUBELET_CONFIG}"
+  grep -qE "^[[:space:]]*mvm_mtu = ${mtu_decimal}" "${CUBELET_CONFIG}" \
     || fail "failed to patch mvm_mtu in ${CUBELET_CONFIG}"
-  log "patched Cubelet mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}"
+  log "patched Cubelet mvm_mtu = ${mtu_decimal}"
 fi
 if [[ -n "${CUBE_TAP_INIT_NUM:-}" ]]; then
   # Reject anything that is not an integer so operators cannot inject
