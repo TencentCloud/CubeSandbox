@@ -367,6 +367,7 @@ CUBE_SANDBOX_REDIS_PASSWORD=topsecret123
 DATABASE_URL=mysql://u:p@host:3306/realdb
 CUSTOM_THIRD_PARTY_API_KEY=sk-custom-secret
 MY_SERVICE_AUTH_TOKEN=tok-openclaw-secret
+CUBE_API_WEBHOOKS='[{"url":"https://example.com/hook","secret":"webhook-secret"}]'
 EOF
 
   merge_env_three_way "${new}" "${old}" "" "" "${out}" "${diff}" 2>/dev/null
@@ -376,10 +377,12 @@ EOF
   assert_contains "${diff}" "DATABASE_URL=***REDACTED***"
   assert_contains "${diff}" "CUSTOM_THIRD_PARTY_API_KEY=***REDACTED***"
   assert_contains "${diff}" "MY_SERVICE_AUTH_TOKEN=***REDACTED***"
+  assert_contains "${diff}" "CUBE_API_WEBHOOKS=***REDACTED***"
   assert_not_contains "${diff}" "topsecret123"
   assert_not_contains "${diff}" "realdb"
   assert_not_contains "${diff}" "sk-custom-secret"
   assert_not_contains "${diff}" "tok-openclaw-secret"
+  assert_not_contains "${diff}" "webhook-secret"
 
   # ...but the merged runtime env MUST keep the real values intact.
   assert_value "${out}" CUBE_SANDBOX_REDIS_PASSWORD topsecret123

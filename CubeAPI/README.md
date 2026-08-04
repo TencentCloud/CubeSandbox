@@ -72,6 +72,7 @@ cargo build --release
 | `CUBE_API_SANDBOX_DOMAIN` | `cube.app` | Domain returned in sandbox API responses |
 | `AUTH_CALLBACK_URL` | *(unset)* | External auth callback URL (callback mode) |
 | `CUBE_API_KEY` | *(unset)* | Built-in API key for simple auth (simple-key mode) |
+| `CUBE_API_WEBHOOKS` | *(unset)* | JSON array of lifecycle webhook endpoints; see the [Webhook guide](../docs/guide/webhooks.md) |
 
 ### Authentication
 
@@ -161,4 +162,3 @@ python pause.py
 python create_with_mount.py
 python browser.py
 python test.py
-

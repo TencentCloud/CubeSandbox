@@ -131,7 +131,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // ── Config ─────────────────────────────────────────────────────────────
-    let mut cfg = config::ServerConfig::from_env().unwrap_or_default();
+    let mut cfg = config::ServerConfig::from_env()?;
 
     // CLI flags override env vars / config file (highest priority)
     if cli.debug {
@@ -198,7 +198,10 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()> {
-    use logging::{arc, file::FileLogger, filtered::FilteredLogger, multi::MultiLogger, LogLevel};
+    use logging::{
+        arc, file::FileLogger, filtered::FilteredLogger, multi::MultiLogger,
+        webhook::WebhookLogger, LogLevel,
+    };
 
     // ── Logger ────────────────────────────────────────────────────────────
     let min_level = if debug {
@@ -209,20 +212,20 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
 
     let file_logger = FileLogger::new(cfg.log_dir.clone(), cfg.log_prefix.clone()).await?;
 
-    // FilteredLogger gates by level → MultiLogger fans out to file (+ future backends)
-    let logger: logging::ArcLogger = arc(FilteredLogger::new(
-        arc(
-            MultiLogger::new().add(arc(file_logger)), // Uncomment to add more backends:
-                                                      // .add(arc(logging::http::HttpLogger::new(Default::default())))
-                                                      // .add(arc(logging::otlp::OtlpLogger::new()))
-        ),
-        min_level,
-    ));
+    let webhook_endpoint_count = cfg.webhooks.endpoints.len();
+    let mut backends = MultiLogger::new().add(arc(file_logger));
+    if webhook_endpoint_count > 0 {
+        backends = backends.add(arc(WebhookLogger::new(cfg.webhooks.clone())?));
+    }
+
+    // FilteredLogger gates by level, then MultiLogger fans out to each backend.
+    let logger: logging::ArcLogger = arc(FilteredLogger::new(arc(backends), min_level));
 
     tracing::info!(
         log_dir = %cfg.log_dir,
         log_prefix = %cfg.log_prefix,
         min_level = %min_level,
+        webhook_endpoints = webhook_endpoint_count,
         "structured event logger started"
     );
 

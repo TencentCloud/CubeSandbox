@@ -329,7 +329,11 @@ pub async fn resume_sandbox(
     tracing::info!(sandbox_id = %sandbox_id, "resume_sandbox: success");
     state
         .logger
-        .log(LogEvent::new(LogLevel::Info, "sandbox.resumed").field("sandbox_id", &sandbox_id))
+        .log(
+            LogEvent::new(LogLevel::Info, "sandbox.resumed")
+                .field("sandbox_id", &sandbox_id)
+                .field("template_id", &sandbox.template_id),
+        )
         .await;
 
     Ok((StatusCode::CREATED, Json(sandbox)))
@@ -365,12 +369,22 @@ pub async fn connect_sandbox(
         )
         .await;
     tracing::info!("connect request");
-    let sandbox = state
+    let outcome = state
         .services
         .sandboxes
         .connect_sandbox(&sandbox_id, body.timeout)
         .await?;
-    Ok((StatusCode::OK, Json(sandbox)))
+    if outcome.resumed {
+        state
+            .logger
+            .log(
+                LogEvent::new(LogLevel::Info, "sandbox.resumed")
+                    .field("sandbox_id", &sandbox_id)
+                    .field("template_id", &outcome.sandbox.template_id),
+            )
+            .await;
+    }
+    Ok((StatusCode::OK, Json(outcome.sandbox)))
 }
 
 // ─── GET /sandboxes/:sandboxID/logs ───────────────────────────────────────────

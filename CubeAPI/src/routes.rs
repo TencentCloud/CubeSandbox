@@ -223,18 +223,122 @@ fn apply_http_layers(router: Router<AppState>, timeout: Duration) -> Router<AppS
 mod tests {
     use super::build_router;
     use crate::{
-        config::ServerConfig,
-        logging::{arc, noop::NoopLogger},
+        config::{ServerConfig, WebhookConfig, WebhookEndpointConfig},
+        logging::{arc, noop::NoopLogger, webhook::WebhookLogger, LogEvent, Logger},
         state::AppState,
     };
+    use async_trait::async_trait;
     use axum::{
-        extract::Json,
+        extract::{Json, State},
         http::{header::RETRY_AFTER, StatusCode},
-        routing::delete,
+        routing::{delete, get, post},
         Router,
     };
     use axum_test::TestServer;
     use serde_json::Value;
+    use std::{
+        sync::{
+            atomic::{AtomicI32, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
+    use tokio::sync::{Mutex, Notify};
+
+    #[derive(Clone, Default)]
+    struct CaptureLogger {
+        events: Arc<Mutex<Vec<LogEvent>>>,
+    }
+
+    #[async_trait]
+    impl Logger for CaptureLogger {
+        async fn log(&self, event: LogEvent) {
+            self.events.lock().await.push(event);
+        }
+
+        fn name(&self) -> &'static str {
+            "capture"
+        }
+    }
+
+    #[derive(Clone)]
+    struct MockCubeMaster {
+        status: Arc<AtomicI32>,
+    }
+
+    async fn create_handler() -> Json<Value> {
+        Json(serde_json::json!({
+            "requestID": "req-create",
+            "sandbox_id": "sb-events",
+            "ret": { "ret_code": 0, "ret_msg": "ok" }
+        }))
+    }
+
+    async fn delete_handler() -> Json<Value> {
+        Json(serde_json::json!({
+            "requestID": "req-delete",
+            "sandbox_id": "sb-events",
+            "ret": { "ret_code": 0, "ret_msg": "ok" }
+        }))
+    }
+
+    async fn update_handler(
+        State(state): State<MockCubeMaster>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        let status = if body["action"] == "pause" { 5 } else { 1 };
+        state.status.store(status, Ordering::SeqCst);
+        Json(serde_json::json!({
+            "ret": { "ret_code": 0, "ret_msg": "ok" }
+        }))
+    }
+
+    async fn info_handler(State(state): State<MockCubeMaster>) -> Json<Value> {
+        Json(serde_json::json!({
+            "requestID": "req-info",
+            "ret": { "ret_code": 0, "ret_msg": "ok" },
+            "data": [{
+                "sandbox_id": "sb-events",
+                "host_id": "host-1",
+                "status": state.status.load(Ordering::SeqCst),
+                "template_id": "tpl-events",
+                "containers": []
+            }]
+        }))
+    }
+
+    async fn mock_cubemaster() -> (String, tokio::task::JoinHandle<()>) {
+        let state = MockCubeMaster {
+            status: Arc::new(AtomicI32::new(1)),
+        };
+        let app = Router::new()
+            .route("/cube/sandbox", post(create_handler).delete(delete_handler))
+            .route("/cube/sandbox/update", post(update_handler))
+            .route("/cube/sandbox/info", get(info_handler))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock CubeMaster should bind");
+        let address = listener.local_addr().expect("listener address");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("mock CubeMaster should run");
+        });
+        (format!("http://{address}"), task)
+    }
+
+    async fn sandbox_test_server(
+        cubemaster_url: String,
+        logger: crate::logging::ArcLogger,
+    ) -> TestServer {
+        let config = ServerConfig {
+            cubemaster_url,
+            ..ServerConfig::default()
+        };
+        let state = AppState::new(config, logger).await;
+        TestServer::new(build_router(state)).expect("router should build")
+    }
 
     async fn test_server() -> TestServer {
         let mut config = ServerConfig::default();
@@ -242,6 +346,140 @@ mod tests {
 
         let state = AppState::new(config, arc(NoopLogger)).await;
         TestServer::new(build_router(state)).expect("router should build")
+    }
+
+    #[tokio::test]
+    async fn sandbox_lifecycle_routes_emit_all_four_webhook_event_types() {
+        let (cubemaster_url, cubemaster_task) = mock_cubemaster().await;
+        let capture = CaptureLogger::default();
+        let server = sandbox_test_server(cubemaster_url, arc(capture.clone())).await;
+
+        server
+            .post("/sandboxes")
+            .json(&serde_json::json!({"templateID": "tpl-events", "timeout": 60}))
+            .await
+            .assert_status(StatusCode::CREATED);
+        server
+            .post("/sandboxes/sb-events/pause")
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+        server
+            .post("/sandboxes/sb-events/resume")
+            .json(&serde_json::json!({"timeout": 60}))
+            .await
+            .assert_status(StatusCode::CREATED);
+        server
+            .post("/sandboxes/sb-events/pause")
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+        server
+            .post("/sandboxes/sb-events/connect")
+            .json(&serde_json::json!({"timeout": 60}))
+            .await
+            .assert_status(StatusCode::OK);
+        server
+            .delete("/sandboxes/sb-events")
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+
+        let events = capture.events.lock().await;
+        let lifecycle: Vec<_> = events
+            .iter()
+            .filter(|event| event.event.starts_with("sandbox."))
+            .collect();
+        assert_eq!(
+            lifecycle
+                .iter()
+                .map(|event| event.event.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "sandbox.created",
+                "sandbox.paused",
+                "sandbox.resumed",
+                "sandbox.paused",
+                "sandbox.resumed",
+                "sandbox.deleted"
+            ]
+        );
+        assert!(lifecycle.iter().all(|event| {
+            event.fields.get("sandbox_id") == Some(&Value::String("sb-events".to_string()))
+        }));
+        assert_eq!(
+            lifecycle[0].fields.get("template_id"),
+            Some(&Value::String("tpl-events".to_string()))
+        );
+        assert_eq!(
+            lifecycle[2].fields.get("template_id"),
+            Some(&Value::String("tpl-events".to_string()))
+        );
+        assert_eq!(
+            lifecycle[4].fields.get("template_id"),
+            Some(&Value::String("tpl-events".to_string()))
+        );
+        cubemaster_task.abort();
+    }
+
+    #[tokio::test]
+    async fn slow_webhook_does_not_delay_sandbox_creation() {
+        #[derive(Clone)]
+        struct SlowReceiver {
+            entered: Arc<Notify>,
+            release: Arc<Notify>,
+        }
+
+        async fn slow_receiver(State(state): State<SlowReceiver>) -> StatusCode {
+            state.entered.notify_one();
+            state.release.notified().await;
+            StatusCode::NO_CONTENT
+        }
+
+        let receiver_state = SlowReceiver {
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        };
+        let receiver = Router::new()
+            .route("/webhook", post(slow_receiver))
+            .with_state(receiver_state.clone());
+        let receiver_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock receiver should bind");
+        let receiver_address = receiver_listener.local_addr().expect("listener address");
+        let receiver_task = tokio::spawn(async move {
+            axum::serve(receiver_listener, receiver)
+                .await
+                .expect("mock receiver should run");
+        });
+        let webhook = WebhookLogger::new(WebhookConfig {
+            endpoints: vec![WebhookEndpointConfig {
+                name: Some("slow".to_string()),
+                url: format!("http://{receiver_address}/webhook"),
+                events: vec!["sandbox.created".to_string()],
+                secret: None,
+            }],
+            timeout_ms: 5_000,
+            max_attempts: 1,
+            ..WebhookConfig::default()
+        })
+        .expect("webhook logger should build");
+        let (cubemaster_url, cubemaster_task) = mock_cubemaster().await;
+        let server = sandbox_test_server(cubemaster_url, arc(webhook.clone())).await;
+
+        let request = server
+            .post("/sandboxes")
+            .json(&serde_json::json!({"templateID": "tpl-events", "timeout": 60}));
+        let response = tokio::time::timeout(Duration::from_secs(2), async move { request.await })
+            .await
+            .expect("sandbox creation must return while the webhook is blocked");
+        response.assert_status(StatusCode::CREATED);
+
+        tokio::time::timeout(Duration::from_secs(2), receiver_state.entered.notified())
+            .await
+            .expect("webhook delivery should reach the receiver");
+        receiver_state.release.notify_waiters();
+
+        webhook.flush().await;
+        cubemaster_task.abort();
+        receiver_task.abort();
     }
 
     #[tokio::test]

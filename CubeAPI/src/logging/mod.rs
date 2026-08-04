@@ -19,6 +19,7 @@
 //! | `noop`         | Discard all events            | ✅ Ready |
 //! | `multi`        | Fan-out to N backends         | ✅ Ready |
 //! | `filtered`     | Min-level gate wrapper        | ✅ Ready |
+//! | `webhook`      | Async HTTP webhook delivery   | ✅ Ready |
 //! | `otlp`         | OpenTelemetry OTLP exporter   | 🔲 Stub  |
 //! | `http`         | Generic HTTP webhook          | 🔲 Stub  |
 
@@ -28,6 +29,7 @@ pub mod http;
 pub mod multi;
 pub mod noop;
 pub mod otlp;
+pub mod webhook;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

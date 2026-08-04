@@ -2,7 +2,67 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+use anyhow::Context;
 use serde::Deserialize;
+use std::{fmt, str::FromStr};
+
+#[derive(Clone, Deserialize)]
+pub struct WebhookEndpointConfig {
+    /// Stable diagnostic label. The URL is deliberately not logged because it
+    /// may contain credentials in its query string.
+    #[serde(default)]
+    pub name: Option<String>,
+    pub url: String,
+    /// Empty means all supported sandbox lifecycle events.
+    #[serde(default)]
+    pub events: Vec<String>,
+    /// Optional HMAC-SHA256 signing secret.
+    #[serde(default)]
+    pub secret: Option<String>,
+}
+
+impl fmt::Debug for WebhookEndpointConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WebhookEndpointConfig")
+            .field("name", &self.name)
+            .field("url", &"<redacted>")
+            .field("events", &self.events)
+            .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WebhookConfig {
+    #[serde(default)]
+    pub endpoints: Vec<WebhookEndpointConfig>,
+    #[serde(default = "default_webhook_queue_capacity")]
+    pub queue_capacity: usize,
+    #[serde(default = "default_webhook_max_in_flight")]
+    pub max_in_flight: usize,
+    #[serde(default = "default_webhook_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_webhook_max_attempts")]
+    pub max_attempts: u32,
+    #[serde(default = "default_webhook_retry_base_ms")]
+    pub retry_base_ms: u64,
+    #[serde(default = "default_webhook_retry_max_ms")]
+    pub retry_max_ms: u64,
+}
+
+impl Default for WebhookConfig {
+    fn default() -> Self {
+        Self {
+            endpoints: Vec::new(),
+            queue_capacity: default_webhook_queue_capacity(),
+            max_in_flight: default_webhook_max_in_flight(),
+            timeout_ms: default_webhook_timeout_ms(),
+            max_attempts: default_webhook_max_attempts(),
+            retry_base_ms: default_webhook_retry_base_ms(),
+            retry_max_ms: default_webhook_retry_max_ms(),
+        }
+    }
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ServerConfig {
@@ -76,6 +136,10 @@ pub struct ServerConfig {
     /// Env var: CUBE_API_KEY
     #[serde(default)]
     pub cube_api_key: Option<String>,
+
+    /// Asynchronous sandbox lifecycle webhook delivery.
+    #[serde(default)]
+    pub webhooks: WebhookConfig,
 }
 
 fn default_bind() -> String {
@@ -110,15 +174,91 @@ fn default_log_prefix() -> String {
     "cube-api".to_string()
 }
 
+fn default_webhook_queue_capacity() -> usize {
+    1024
+}
+
+fn default_webhook_max_in_flight() -> usize {
+    16
+}
+
+fn default_webhook_timeout_ms() -> u64 {
+    5_000
+}
+
+fn default_webhook_max_attempts() -> u32 {
+    3
+}
+
+fn default_webhook_retry_base_ms() -> u64 {
+    500
+}
+
+fn default_webhook_retry_max_ms() -> u64 {
+    30_000
+}
+
 impl ServerConfig {
     pub fn from_env() -> anyhow::Result<Self> {
         let _ = dotenvy::dotenv();
-        let cfg = config::Config::builder()
+        // Preserve the existing fallback for generic configuration. Explicit
+        // webhook overrides below still fail fast with actionable errors.
+        let mut cfg: Self = config::Config::builder()
             .add_source(config::Environment::default().separator("__"))
-            .build()?
-            .try_deserialize()?;
+            .build()
+            .and_then(|config| config.try_deserialize())
+            .unwrap_or_default();
+
+        if let Ok(raw) = std::env::var("CUBE_API_WEBHOOKS") {
+            if !raw.trim().is_empty() {
+                cfg.webhooks.endpoints = parse_webhook_endpoints(&raw)?;
+            }
+        }
+        apply_env_override(
+            "CUBE_API_WEBHOOK_QUEUE_CAPACITY",
+            &mut cfg.webhooks.queue_capacity,
+        )?;
+        apply_env_override(
+            "CUBE_API_WEBHOOK_MAX_IN_FLIGHT",
+            &mut cfg.webhooks.max_in_flight,
+        )?;
+        apply_env_override("CUBE_API_WEBHOOK_TIMEOUT_MS", &mut cfg.webhooks.timeout_ms)?;
+        apply_env_override(
+            "CUBE_API_WEBHOOK_MAX_ATTEMPTS",
+            &mut cfg.webhooks.max_attempts,
+        )?;
+        apply_env_override(
+            "CUBE_API_WEBHOOK_RETRY_BASE_MS",
+            &mut cfg.webhooks.retry_base_ms,
+        )?;
+        apply_env_override(
+            "CUBE_API_WEBHOOK_RETRY_MAX_MS",
+            &mut cfg.webhooks.retry_max_ms,
+        )?;
+
         Ok(cfg)
     }
+}
+
+fn parse_webhook_endpoints(raw: &str) -> anyhow::Result<Vec<WebhookEndpointConfig>> {
+    serde_json::from_str(raw).context("CUBE_API_WEBHOOKS must be a JSON array of webhook endpoints")
+}
+
+fn apply_env_override<T>(name: &str, target: &mut T) -> anyhow::Result<()>
+where
+    T: FromStr,
+    T::Err: fmt::Display,
+{
+    let Ok(raw) = std::env::var(name) else {
+        return Ok(());
+    };
+    if raw.trim().is_empty() {
+        return Ok(());
+    }
+    *target = raw
+        .parse()
+        .map_err(|err| anyhow::anyhow!("{name} must be a valid number: {err}"))?;
+    Ok(())
 }
 
 impl Default for ServerConfig {
@@ -135,6 +275,51 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             cube_api_key: std::env::var("CUBE_API_KEY").ok().filter(|s| !s.is_empty()),
+            webhooks: WebhookConfig::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_webhook_endpoints, WebhookEndpointConfig};
+
+    #[test]
+    fn parses_multiple_webhook_endpoints_from_json() {
+        let endpoints = parse_webhook_endpoints(
+            r#"[
+                {"url":"https://one.example/hook","events":["sandbox.created"]},
+                {"name":"two","url":"http://two.example/hook","secret":"secret"}
+            ]"#,
+        )
+        .unwrap();
+
+        assert_eq!(endpoints.len(), 2);
+        assert_eq!(endpoints[0].events, ["sandbox.created"]);
+        assert_eq!(endpoints[1].name.as_deref(), Some("two"));
+        assert_eq!(endpoints[1].secret.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn rejects_non_array_webhook_configuration() {
+        assert!(parse_webhook_endpoints(r#"{"url":"https://example.com"}"#)
+            .unwrap_err()
+            .to_string()
+            .contains("must be a JSON array"));
+    }
+
+    #[test]
+    fn webhook_endpoint_debug_redacts_url_and_secret() {
+        let endpoint = WebhookEndpointConfig {
+            name: Some("alerts".to_string()),
+            url: "https://example.com/hook?token=sensitive".to_string(),
+            events: vec!["sandbox.created".to_string()],
+            secret: Some("signing-secret".to_string()),
+        };
+
+        let debug = format!("{endpoint:?}");
+        assert!(!debug.contains("sensitive"));
+        assert!(!debug.contains("signing-secret"));
+        assert!(debug.contains("<redacted>"));
     }
 }
