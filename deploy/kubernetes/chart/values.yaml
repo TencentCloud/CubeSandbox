@@ -526,6 +526,14 @@ cubeNode:
     # Skip host-network conflict checks (cube-node-init) and the Service CIDR
     # preflight Hook. Use only when you accept blackhole / routing risk.
     cidrSkipConflictCheck: false
+    # Sandbox tap MTU (mvm_mtu) patched into Cubelet config.toml. 0 keeps the
+    # packaged Cubelet default. On cluster networks whose Pod MTU is smaller
+    # than 1500 (e.g. Calico defaults to 1450 for VXLAN, 1480 for IPIP), the
+    # guest advertises MSS from a 1500-byte MTU while the uplink silently drops
+    # frames larger than the Pod MTU — an MTU blackhole that truncates HTTPS
+    # handshakes and large downloads. Set this to the Pod network MTU so the
+    # guest's advertised MSS fits inside the Pod MTU.
+    mtu: 0
 
   dns:
     clusterDomain: cluster.local

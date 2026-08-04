@@ -422,6 +422,11 @@ run_network_agent() {
     cidr_esc="$(sed_escape_replacement "${CUBE_SANDBOX_NETWORK_CIDR}")"
     sed -i "s|cidr = \"[^\"]*\"|cidr = \"${cidr_esc}\"|" "${cfg}"
   fi
+  if [[ -n "${CUBE_SANDBOX_NETWORK_MTU:-}" && "${CUBE_SANDBOX_NETWORK_MTU}" != "0" ]]; then
+    [[ "${CUBE_SANDBOX_NETWORK_MTU}" =~ ^[0-9]+$ ]] || fail "CUBE_SANDBOX_NETWORK_MTU must be a non-negative integer"
+    sed -i "s/mvm_mtu = [0-9]\+/mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}/" "${cfg}"
+    log "patched Cubelet mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}"
+  fi
 
   log "starting network-agent"
   "${bin}" --cubelet-config "${cfg}" --state-dir "${state_dir}" &
@@ -490,6 +495,11 @@ run_cubelet() {
     local cidr_esc
     cidr_esc="$(sed_escape_replacement "${CUBE_SANDBOX_NETWORK_CIDR}")"
     sed -i "s|cidr = \"[^\"]*\"|cidr = \"${cidr_esc}\"|" "${cfg}"
+  fi
+  if [[ -n "${CUBE_SANDBOX_NETWORK_MTU:-}" && "${CUBE_SANDBOX_NETWORK_MTU}" != "0" ]]; then
+    [[ "${CUBE_SANDBOX_NETWORK_MTU}" =~ ^[0-9]+$ ]] || fail "CUBE_SANDBOX_NETWORK_MTU must be a non-negative integer"
+    sed -i "s/mvm_mtu = [0-9]\+/mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}/" "${cfg}"
+    log "patched Cubelet mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}"
   fi
   if [[ -n "${CUBE_TAP_INIT_NUM:-}" ]]; then
     [[ "${CUBE_TAP_INIT_NUM}" =~ ^[0-9]+$ ]] || fail "CUBE_TAP_INIT_NUM must be a non-negative integer"

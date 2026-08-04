@@ -192,6 +192,13 @@ if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
   CIDR_ESC="$(sed_escape_replacement "${CUBE_SANDBOX_NETWORK_CIDR}")"
   sed -i "s|cidr = \"[^\"]*\"|cidr = \"${CIDR_ESC}\"|" "${CUBELET_CONFIG}"
 fi
+if [[ -n "${CUBE_SANDBOX_NETWORK_MTU:-}" && "${CUBE_SANDBOX_NETWORK_MTU}" != "0" ]]; then
+  # Reject anything that is not an integer so operators cannot inject
+  # replacement content via numeric-looking env variables.
+  [[ "${CUBE_SANDBOX_NETWORK_MTU}" =~ ^[0-9]+$ ]] || fail "CUBE_SANDBOX_NETWORK_MTU must be a non-negative integer"
+  sed -i "s/mvm_mtu = [0-9]\+/mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}/" "${CUBELET_CONFIG}"
+  log "patched Cubelet mvm_mtu = ${CUBE_SANDBOX_NETWORK_MTU}"
+fi
 if [[ -n "${CUBE_TAP_INIT_NUM:-}" ]]; then
   # Reject anything that is not an integer so operators cannot inject
   # replacement content via numeric-looking env variables.

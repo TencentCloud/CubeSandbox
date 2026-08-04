@@ -2305,6 +2305,7 @@ impl VmConfig {
         if let Some(nets) = &mut self.net {
             let mut devices: HashMap<String, String> = HashMap::default();
             let mut rate_limiter: HashMap<String, RateLimiterConfig> = HashMap::default();
+            let mut mtu_map: HashMap<String, Option<u16>> = HashMap::default();
             for net_cfg in net_cfgs.iter() {
                 if net_cfg.id.is_none() {
                     continue;
@@ -2321,6 +2322,9 @@ impl VmConfig {
                         net_cfg.rate_limiter_config.as_ref().unwrap().clone(),
                     );
                 }
+                if net_cfg.mtu.is_some() {
+                    mtu_map.insert(net_cfg.id.as_ref().unwrap().clone(), net_cfg.mtu);
+                }
             }
 
             for net in nets.iter_mut() {
@@ -2330,6 +2334,9 @@ impl VmConfig {
                     }
                     if let Some(rate_limit) = rate_limiter.get(&id.clone()) {
                         net.rate_limiter_config = Some(*rate_limit);
+                    }
+                    if let Some(mtu) = mtu_map.get(&id.clone()) {
+                        net.mtu = *mtu;
                     }
                 }
             }

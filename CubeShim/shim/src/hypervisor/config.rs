@@ -263,6 +263,12 @@ impl VmConfig {
             //todo:handle err
             nc.mac =
                 MacAddr::from_str(&n.mac).map_err(|_| format!("New mac addr failed:{}", &n.mac))?;
+            // VIRTIO_NET_F_MTU 让 guest 内核应用通告的 MTU。若忽略该字段，
+            // guest 内 eth0 会保持默认 1500，与 Pod 网络 MTU(如 Calico 1450)不一致，
+            // 造成 MTU 黑洞：回程超过 Pod MTU 的 TCP 段被静默丢弃（HTTPS 握手超时）。
+            if n.mtu > 0 {
+                nc.mtu = Some(n.mtu as u16);
+            }
             if let Some(q) = &n.qos {
                 let rate_limit = RateLimiterConfig {
                     bandwidth: Some(TokenBucketConfig {
