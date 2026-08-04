@@ -79,7 +79,10 @@ export function SandboxTerminalDialog({
       terminal.writeln('\r\n\x1b[31mYou must be signed in to open a terminal.\x1b[0m');
       return () => terminal.dispose();
     }
-    const socket = new WebSocket(terminalSocketUrl(sandboxId), [TERMINAL_SUBPROTOCOL, sessionToken]);
+    const socket = new WebSocket(terminalSocketUrl(sandboxId), [
+      TERMINAL_SUBPROTOCOL,
+      sessionToken,
+    ]);
     socket.binaryType = 'arraybuffer';
     socketRef.current = socket;
 
@@ -89,17 +92,27 @@ export function SandboxTerminalDialog({
     const send = (frame: TerminalFrame) => {
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify(frame));
-      } else if (socket.readyState === WebSocket.CONNECTING && pendingFrames.length < maxPendingFrames) {
+      } else if (
+        socket.readyState === WebSocket.CONNECTING &&
+        pendingFrames.length < maxPendingFrames
+      ) {
         pendingFrames.push(frame);
       } else if (!dropNotified) {
         dropNotified = true;
-        terminal.writeln('\r\n\x1b[33mSome terminal input was ignored while the terminal was unavailable.\x1b[0m');
+        terminal.writeln(
+          '\r\n\x1b[33mSome terminal input was ignored while the terminal was unavailable.\x1b[0m',
+        );
       }
     };
 
     socket.onopen = () => {
       setStatus('connected');
-      const openFrame: TerminalFrame = { type: 'open', sandboxId, cols: terminal.cols, rows: terminal.rows };
+      const openFrame: TerminalFrame = {
+        type: 'open',
+        sandboxId,
+        cols: terminal.cols,
+        rows: terminal.rows,
+      };
       socket.send(JSON.stringify(openFrame));
       pendingFrames.splice(0).forEach(send);
     };
@@ -113,8 +126,10 @@ export function SandboxTerminalDialog({
       const receive = (data: string) => {
         try {
           const frame = JSON.parse(data) as { type?: string; message?: string };
-          if (frame.type === 'error') terminal.writeln(`\r\n\x1b[31m${frame.message ?? 'Terminal error'}\x1b[0m`);
-          else if (frame.type === 'exit') terminal.writeln('\r\n\x1b[90mTerminal process exited.\x1b[0m');
+          if (frame.type === 'error')
+            terminal.writeln(`\r\n\x1b[31m${frame.message ?? 'Terminal error'}\x1b[0m`);
+          else if (frame.type === 'exit')
+            terminal.writeln('\r\n\x1b[90mTerminal process exited.\x1b[0m');
         } catch {
           terminal.write(data);
         }
@@ -162,19 +177,49 @@ export function SandboxTerminalDialog({
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-background/70 backdrop-blur-sm data-[state=open]:animate-fade-in" />
-        <Dialog.Content className={`fixed z-50 flex flex-col overflow-hidden border border-border/60 bg-card shadow-2xl ${fullScreen ? 'inset-3 rounded-xl' : 'left-1/2 top-1/2 h-[min(720px,calc(100vh-3rem))] w-[min(980px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-2xl'}`}>
+        <Dialog.Content
+          className={`fixed z-50 flex flex-col overflow-hidden border border-border/60 bg-card shadow-2xl ${fullScreen ? 'inset-3 rounded-xl' : 'left-1/2 top-1/2 h-[min(720px,calc(100vh-3rem))] w-[min(980px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-2xl'}`}
+        >
           <div className="flex items-center gap-3 border-b border-border/60 px-4 py-3">
-            <div className="grid h-8 w-8 place-items-center rounded-lg bg-primary/10 text-primary"><TerminalSquare size={16} /></div>
+            <div className="grid h-8 w-8 place-items-center rounded-lg bg-primary/10 text-primary">
+              <TerminalSquare size={16} />
+            </div>
             <div className="min-w-0 flex-1">
               <Dialog.Title className="text-sm font-semibold">Sandbox terminal</Dialog.Title>
-              <Dialog.Description className="truncate font-mono text-xs text-muted-foreground">{sandboxId}</Dialog.Description>
+              <Dialog.Description className="truncate font-mono text-xs text-muted-foreground">
+                {sandboxId}
+              </Dialog.Description>
             </div>
-            <span className={`h-2 w-2 rounded-full ${status === 'connected' ? 'bg-cube-ok' : status === 'connecting' ? 'bg-cube-warn animate-pulse' : 'bg-muted-foreground'}`} aria-label={status} />
-            {status === 'disconnected' && <Button size="sm" variant="ghost" onClick={() => setConnectionNonce((value) => value + 1)}><RefreshCw size={14} /> Reconnect</Button>}
-            <Button size="icon" variant="ghost" title="Toggle fullscreen" onClick={() => setFullScreen((value) => !value)}><Maximize2 size={15} /></Button>
-            <Dialog.Close asChild><Button size="icon" variant="ghost" title="Close terminal"><X size={16} /></Button></Dialog.Close>
+            <span
+              className={`h-2 w-2 rounded-full ${status === 'connected' ? 'bg-cube-ok' : status === 'connecting' ? 'bg-cube-warn animate-pulse' : 'bg-muted-foreground'}`}
+              aria-label={status}
+            />
+            {status === 'disconnected' && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setConnectionNonce((value) => value + 1)}
+              >
+                <RefreshCw size={14} /> Reconnect
+              </Button>
+            )}
+            <Button
+              size="icon"
+              variant="ghost"
+              title="Toggle fullscreen"
+              onClick={() => setFullScreen((value) => !value)}
+            >
+              <Maximize2 size={15} />
+            </Button>
+            <Dialog.Close asChild>
+              <Button size="icon" variant="ghost" title="Close terminal">
+                <X size={16} />
+              </Button>
+            </Dialog.Close>
           </div>
-          <div className="min-h-0 flex-1 bg-[#111318] p-3"><div ref={hostRef} className="h-full w-full" /></div>
+          <div className="min-h-0 flex-1 bg-[#111318] p-3">
+            <div ref={hostRef} className="h-full w-full" />
+          </div>
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
