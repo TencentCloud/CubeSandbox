@@ -436,16 +436,16 @@ run_network_agent() {
     # cap at u16 max for the virtio MTU field.
     [[ "${mtu_decimal}" -ge 1280 && "${mtu_decimal}" -le 65535 ]] \
       || fail "CUBE_SANDBOX_NETWORK_MTU must be within 1280..65535"
-    # Fail-open (warn + skip), matching the neighboring cidr / eth_name patches,
-    # so a future config.toml schema drift does not crash-loop the node.
-    if ! grep -qE '^[[:space:]]*mvm_mtu' "${cfg}"; then
+    # A missing/renamed mvm_mtu key is non-fatal (warn + skip) so a future
+    # config.toml schema drift cannot crash-loop the node container. The
+    # pre-check shares the same anchor as the sed and post-check, including
+    # the optional spaces around '=', so an e.g. `mvm_mtu=1500` line (valid
+    # TOML without spaces) is found and rewritten rather than silently no-op'd.
+    if ! grep -qE '^[[:space:]]*mvm_mtu[[:space:]]*=' "${cfg}"; then
       log "WARN: mvm_mtu key not found in ${cfg}; CUBE_SANDBOX_NETWORK_MTU not applied"
     else
-      # Anchor to line start so a preceding `# mvm_mtu = ...` comment (or any
-      # mid-line occurrence) is never the thing rewritten; the pre/post checks
-      # use the same anchor and preserve leading whitespace.
-      sed -i "s/^\([[:space:]]*\)mvm_mtu = [0-9]\+/\1mvm_mtu = ${mtu_decimal}/" "${cfg}"
-      if grep -qE "^[[:space:]]*mvm_mtu = ${mtu_decimal}" "${cfg}"; then
+      sed -i "s/^\([[:space:]]*\)mvm_mtu[[:space:]]*=[[:space:]]*[0-9][0-9]*/\1mvm_mtu = ${mtu_decimal}/" "${cfg}"
+      if grep -qE "^[[:space:]]*mvm_mtu[[:space:]]*=[[:space:]]*${mtu_decimal}" "${cfg}"; then
         log "patched Cubelet mvm_mtu = ${mtu_decimal}"
       else
         log "WARN: failed to patch mvm_mtu in ${cfg}; CUBE_SANDBOX_NETWORK_MTU not applied"
@@ -535,16 +535,16 @@ run_cubelet() {
     # cap at u16 max for the virtio MTU field.
     [[ "${mtu_decimal}" -ge 1280 && "${mtu_decimal}" -le 65535 ]] \
       || fail "CUBE_SANDBOX_NETWORK_MTU must be within 1280..65535"
-    # Fail-open (warn + skip), matching the neighboring cidr / eth_name patches,
-    # so a future config.toml schema drift does not crash-loop the node.
-    if ! grep -qE '^[[:space:]]*mvm_mtu' "${cfg}"; then
+    # A missing/renamed mvm_mtu key is non-fatal (warn + skip) so a future
+    # config.toml schema drift cannot crash-loop the node container. The
+    # pre-check shares the same anchor as the sed and post-check, including
+    # the optional spaces around '=', so an e.g. `mvm_mtu=1500` line (valid
+    # TOML without spaces) is found and rewritten rather than silently no-op'd.
+    if ! grep -qE '^[[:space:]]*mvm_mtu[[:space:]]*=' "${cfg}"; then
       log "WARN: mvm_mtu key not found in ${cfg}; CUBE_SANDBOX_NETWORK_MTU not applied"
     else
-      # Anchor to line start so a preceding `# mvm_mtu = ...` comment (or any
-      # mid-line occurrence) is never the thing rewritten; the pre/post checks
-      # use the same anchor and preserve leading whitespace.
-      sed -i "s/^\([[:space:]]*\)mvm_mtu = [0-9]\+/\1mvm_mtu = ${mtu_decimal}/" "${cfg}"
-      if grep -qE "^[[:space:]]*mvm_mtu = ${mtu_decimal}" "${cfg}"; then
+      sed -i "s/^\([[:space:]]*\)mvm_mtu[[:space:]]*=[[:space:]]*[0-9][0-9]*/\1mvm_mtu = ${mtu_decimal}/" "${cfg}"
+      if grep -qE "^[[:space:]]*mvm_mtu[[:space:]]*=[[:space:]]*${mtu_decimal}" "${cfg}"; then
         log "patched Cubelet mvm_mtu = ${mtu_decimal}"
       else
         log "WARN: failed to patch mvm_mtu in ${cfg}; CUBE_SANDBOX_NETWORK_MTU not applied"
