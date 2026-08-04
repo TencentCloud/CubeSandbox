@@ -375,7 +375,7 @@ fn setup_ovs_dpdk_guests(
     setup_ovs_dpdk();
 
     let clh_path = if !release_binary {
-        clh_command("cloud-hypervisor")
+        clh_command("cube-hypervisor")
     } else {
         cloud_hypervisor_release_path()
     };
@@ -10072,7 +10072,7 @@ mod live_migration {
 
         // Start the source VM
         let src_vm_path = if !upgrade_test {
-            clh_command("cloud-hypervisor")
+            clh_command("cube-hypervisor")
         } else {
             cloud_hypervisor_release_path()
         };
@@ -10236,7 +10236,7 @@ mod live_migration {
 
         // Start the source VM
         let src_vm_path = if !upgrade_test {
-            clh_command("cloud-hypervisor")
+            clh_command("cube-hypervisor")
         } else {
             cloud_hypervisor_release_path()
         };
@@ -10437,7 +10437,7 @@ mod live_migration {
 
         // Start the source VM
         let src_vm_path = if !upgrade_test {
-            clh_command("cloud-hypervisor")
+            clh_command("cube-hypervisor")
         } else {
             cloud_hypervisor_release_path()
         };
@@ -10662,7 +10662,7 @@ mod live_migration {
 
         // Start the source VM
         let src_vm_path = if !upgrade_test {
-            clh_command("cloud-hypervisor")
+            clh_command("cube-hypervisor")
         } else {
             cloud_hypervisor_release_path()
         };
