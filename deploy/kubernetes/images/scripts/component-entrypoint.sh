@@ -283,18 +283,16 @@ patch_cubelet_mtu() {
   # valid inside TOML integer literals (`mvm_mtu = 1_500`); rejecting them
   # here keeps the sed/post-check patterns simple and unambiguous.
   [[ "${CUBE_SANDBOX_NETWORK_MTU}" =~ ^[0-9]+$ ]] || fail "CUBE_SANDBOX_NETWORK_MTU must be a non-negative integer"
-  # Normalize leading zeros first (they make bash parse the value as octal
-  # in -ge/-le and would write invalid TOML), then check length. Doing the
-  # length check after normalization means a zero-padded in-range value like
-  # `001450` (6 chars, numeric value 1450) is accepted as 1450 instead of
-  # being rejected as "too long".
-  local mtu_decimal=$((10#$CUBE_SANDBOX_NETWORK_MTU))
-  # A valid MTU is at most 5 digits (max 65535). Check length before the
-  # range check so an absurdly long string fails with a self-explanatory
-  # message instead of wrapping in bash's int64 arithmetic (e.g. 25+ digits
-  # becomes a huge negative number) and hitting a misleading range error.
-  [[ "${#mtu_decimal}" -le 5 ]] \
+  # Strip leading zeros (string-only; they make -ge/-le parse the value as
+  # octal and would write invalid TOML). Length-check the stripped form
+  # BEFORE any arithmetic: bash's int64 arithmetic wraps absurdly long
+  # strings (e.g. `18446744073709552896` wraps to 1280), so a length gate
+  # applied after normalization would let a wrapped in-range value through.
+  local mtu_norm="${CUBE_SANDBOX_NETWORK_MTU#"${CUBE_SANDBOX_NETWORK_MTU%%[!0]*}"}"
+  [[ -n "${mtu_norm}" ]] || mtu_norm=0
+  [[ "${#mtu_norm}" -le 5 ]] \
     || fail "CUBE_SANDBOX_NETWORK_MTU is too long (max 5 digits, range 1280..65535)"
+  local mtu_decimal=$((10#${mtu_norm}))
   # The guest virtio-net device enforces MIN_MTU=1280
   # (hypervisor/virtio-devices/src/net.rs:51), and the guest MTU is derived
   # from the tap's actual MTU — so anything below 1280 would propagate into

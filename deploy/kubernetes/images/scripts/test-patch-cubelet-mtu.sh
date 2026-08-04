@@ -76,8 +76,10 @@ printf 'mvm_mtu = 1500\n' >"${cfg}"
 CUBE_SANDBOX_NETWORK_MTU=001450 patch_cubelet_mtu "${cfg}"
 assert_file_contains "${cfg}" '^mvm_mtu = 1450$' "zero-padded 001450 normalized to 1450"
 
-# --- 6. absurdly long digit string rejected ---
+# --- 6. absurdly long digit strings rejected ---
 expect_fail "123456789012345678901234567890" "25+ digit string rejected (int64 wrap guard)"
+expect_fail "18446744073709552896" "20-digit string that wraps to 1280 in int64 rejected"
+expect_fail "18446744073709553066" "20-digit string that wraps to 1450 in int64 rejected"
 
 # --- 7. missing mvm_mtu key: warn + skip, not a hard fail ---
 cfg="${TMP}/missing.toml"
