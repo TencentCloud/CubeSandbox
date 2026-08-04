@@ -34,11 +34,11 @@ spec:
           ca_path=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
           ns={{ .Release.Namespace | quote }}
           kube_api="https://kubernetes.default.svc"
-          # CoreDNS forwards AAAA for names it does not answer and the upstream
-          # DNS times out, so plain curl (IPv6 probe) fails to resolve even when
-          # A records exist. Force IPv4 on every lookup; do NOT add a global
-          # --retry here because that would make the fail-fast health checks
-          # below retry real 5xx/timing-out endpoints for ~48s before failing.
+          # IPv6 (AAAA) probes of the probed names stall in practice, so plain
+          # curl fails to resolve even when A records exist. Force IPv4 on
+          # every lookup; do NOT add a global --retry here because that would
+          # make the fail-fast health checks below retry real 5xx/timing-out
+          # endpoints for ~48s before failing.
           # Note: this test pod is IPv4-only by design (CubeSandbox sandbox
           # networking is IPv4; the chart does not support single-stack IPv6).
           curl() { command curl -4 "$@"; }
@@ -281,9 +281,11 @@ spec:
           echo '[health-test] check CubeProxy admin healthz'
           # The dataplane returns 400 for the bare "/" path (it only serves
           # sandbox traffic), so probe the admin health endpoint instead.
-          # Retry to absorb transient CoreDNS lookup timeouts. Under `set -e`
-          # a connection failure (curl non-zero exit) would abort before the
-          # status assertion, so capture it explicitly and print a clear error.
+          # Retry absorbs transient CoreDNS lookup timeouts; each attempt is
+          # capped at --max-time 15, so the worst case (real outage) is ~4×15s
+          # + retry backoff before this pod fails. Under `set -e` a connection
+          # failure (curl non-zero exit) would abort before the status
+          # assertion, so capture it explicitly and print a clear error.
           status="$(curl -4 --retry 3 --retry-all-errors --retry-delay 1 --connect-timeout 5 --max-time 15 -sS \
             -H "X-Cube-Admin-Token: ${CUBE_PROXY_ADMIN_TOKEN}" \
             -o /dev/null -w "%{http_code}" \
@@ -321,13 +323,16 @@ spec:
         - |
           echo '[health-test] check cluster DNS for sandbox domain'
           target={{ include "cube.proxyServiceFQDN" . | quote }}
-          # curl image (alpine/musl) getent: reliable against CoreDNS rewrite zones
-          # (busybox nslookup times out on non-cluster.svc names in this setup).
-          # Use ahostsv4 so only A records are returned — getent hosts can emit
-          # both A and AAAA in a dual-stack cluster and the equality assertions
-          # below must compare the same address family.
-          # CoreDNS forwards non-cluster.svc names upstream and can hit transient
-          # timeouts, so retry the lookup before treating it as a failure.
+          # curl image (alpine/musl) getent: reliable against CoreDNS rewrite
+          # zones (busybox nslookup times out on non-cluster.svc names in this
+          # setup). Use ahostsv4 so only A records are returned — getent hosts
+          # can emit both A and AAAA in a dual-stack cluster and the equality
+          # assertions below must compare the same address family. IPv6 (AAAA)
+          # probes of these names stall in practice, so the DNS test is
+          # IPv4-only by design.
+          # Lookups of the sandbox domain hit the chart's CoreDNS rewrite zone
+          # (cluster-dns.yaml) and can be transiently slow; retry before
+          # treating a failure as fatal.
           a_record() {
             for _ in 1 2 3 4 5; do
               if ip="$(getent ahostsv4 "$1" 2>/dev/null | awk 'NR==1 {print $1}')" && [ -n "$ip" ]; then
@@ -338,12 +343,14 @@ spec:
             done
             return 1
           }
-          domain_ip="$(a_record {{ $domain | quote }})"
-          target_ip="$(a_record "$target")"
-          test -n "$domain_ip"
-          test -n "$target_ip"
-          test "$domain_ip" = "$target_ip"
-          test -n "$(a_record {{ printf "wildcard-check.%s" $domain | quote }})"
+          # a_record exits non-zero on the last retry; under `set -e` the
+          # command substitution would abort the pod with no diagnostics, so
+          # capture explicitly and print which name failed.
+          domain_ip="$(a_record {{ $domain | quote }})" || { echo "could not resolve {{ $domain }} (A)"; exit 1; }
+          target_ip="$(a_record "$target")" || { echo "could not resolve $target (A)"; exit 1; }
+          test "$domain_ip" = "$target_ip" || { echo "DNS mismatch: {{ $domain }} -> $domain_ip, $target -> $target_ip"; exit 1; }
+          wildcard_ip="$(a_record {{ printf "wildcard-check.%s" $domain | quote }})" || { echo "could not resolve wildcard-check.{{ $domain }} (A)"; exit 1; }
+          test "$domain_ip" = "$wildcard_ip" || { echo "DNS mismatch: wildcard-check.{{ $domain }} -> $wildcard_ip, {{ $domain }} -> $domain_ip"; exit 1; }
 {{- end }}
 {{ if .Values.cubeNode.enabled }}
 ---
@@ -431,6 +438,16 @@ spec:
     - name: node-runtime
       image: {{ include "cube.image" .Values.helmTest.image | quote }}
       imagePullPolicy: {{ .Values.helmTest.image.pullPolicy }}
+      # Runs as root on purpose: it stat()s hostPath sockets that cube-node
+      # creates with root-only permissions (e.g. /data/cubelet/cubelet.sock),
+      # which a non-root image user cannot traverse. Root is safe here only
+      # because every hostPath mount is read-only and capabilities are
+      # dropped — the script itself only performs existence checks.
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
       command:
         - sh
         - -ec
@@ -446,8 +463,10 @@ spec:
           readOnly: true
         - name: data-cubelet
           mountPath: {{ .Values.hostPaths.dataCubelet }}
+          readOnly: true
         - name: tmp-cube
           mountPath: {{ .Values.hostPaths.tmpCube }}
+          readOnly: true
   volumes:
     - name: dev
       hostPath:
