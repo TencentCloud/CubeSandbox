@@ -6820,6 +6820,21 @@ mod common_parallel {
             fs::read_to_string(format!("/sys/class/net/{}/ifindex", guest_macvtap_name)).unwrap();
         let tap_device = format!("/dev/tap{}", tap_index.trim());
 
+        // In a container netns (non init_net), devtmpfs does not auto-create
+        // /dev/tap<ifindex> for macvtap devices. On bare metal (init_net) the
+        // node is auto-created by devtmpfs, so this workaround is a no-op there.
+        if !std::path::Path::new(&tap_device).exists() {
+            let dev = fs::read_to_string(format!("/sys/class/macvtap/tap{}/dev", tap_index.trim()))
+                .expect("failed to read macvtap dev from sysfs");
+            let dev = dev.trim();
+            let (major, minor) = dev.split_once(':').expect("invalid macvtap dev format");
+            assert!(exec_host_command_status(&format!(
+                "sudo mknod {} c {} {}",
+                tap_device, major, minor
+            ))
+            .success());
+        }
+
         assert!(
             exec_host_command_status(&format!("sudo chown $UID.$UID {}", tap_device)).success()
         );
