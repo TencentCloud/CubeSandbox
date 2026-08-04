@@ -313,8 +313,8 @@ spec:
   {{- include "cube.controlPlanePlacement" . | nindent 2 }}
   containers:
     - name: dns
-      image: {{ include "cube.image" .Values.helmTest.image | quote }}
-      imagePullPolicy: {{ .Values.helmTest.image.pullPolicy }}
+      image: {{ include "cube.image" .Values.helmTest.dnsImage | quote }}
+      imagePullPolicy: {{ .Values.helmTest.dnsImage.pullPolicy }}
       command:
         - sh
         - -ec
@@ -429,8 +429,8 @@ spec:
   {{- include "cube.computePlacement" . | nindent 2 }}
   containers:
     - name: node-runtime
-      image: {{ include "cube.image" .Values.helmTest.dnsImage | quote }}
-      imagePullPolicy: {{ .Values.helmTest.dnsImage.pullPolicy }}
+      image: {{ include "cube.image" .Values.helmTest.image | quote }}
+      imagePullPolicy: {{ .Values.helmTest.image.pullPolicy }}
       command:
         - sh
         - -ec

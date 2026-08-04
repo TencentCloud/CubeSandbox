@@ -989,17 +989,17 @@ rbac:
 
 helmTest:
   enabled: true
-  # Main test image (curlimages/curl, Alpine/musl). Used by all test pods;
-  # the dns-test depends on its `getent` binary (ahostsv4 database), so do
-  # not override this with a non-Alpine image.
+  # Shared test image (curlimages/curl, Alpine/musl). Used by health-test,
+  # proxy-control-test, node-image-test and node-runtime-test.
   image:
     repository: curlimages/curl
     tag: "8.10.1"
     pullPolicy: IfNotPresent
-  # Only used by node-runtime-test (busybox host-runtime asset checks).
-  # The dns-test intentionally uses helmTest.image instead: busybox lacks a
-  # reliable getent for the CoreDNS rewrite zones this chart configures.
+  # DNS test image. The dns-test resolves names through `getent ahostsv4`,
+  # so the image must ship musl's getent (curlimages/curl's Alpine base does).
+  # Keep it a separate value so operators can pin a different image for the
+  # DNS test without touching the shared test image.
   dnsImage:
-    repository: busybox
-    tag: "1.36"
+    repository: curlimages/curl
+    tag: "8.10.1"
     pullPolicy: IfNotPresent

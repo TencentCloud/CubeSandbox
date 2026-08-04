@@ -561,6 +561,14 @@ kubectl exec -n cube-system deploy/cube-cubemastercli -- \
 helm test cube -n cube-system --timeout 20m
 ```
 
+`helm test` pods are **IPv4-only by design**: CubeSandbox sandbox networking
+is IPv4, and the chart does not support single-stack IPv6 clusters. The
+health-test and dns-test force IPv4 lookups (`curl -4` / `getent ahostsv4`)
+because CoreDNS forwards AAAA queries for the sandbox domain (`cubeProxy.domain`,
+a non-`cluster.svc` name) to upstream, where they can stall. The dns-test image
+(`helmTest.dnsImage`) must ship musl `getent` — the default `curlimages/curl`
+image does; the shared `helmTest.image` is not used there.
+
 ## Upgrade policy
 
 `cube-node` is a native `apps/v1` DaemonSet. Bumping Big Pod runtime images
