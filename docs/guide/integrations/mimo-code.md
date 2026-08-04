@@ -18,10 +18,13 @@ This integration uses [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code)
 session forking and CubeSandbox full-VM snapshots to run multiple implementation
 candidates from one shared planning context.
 
-The dual-fork lifecycle is a reusable reference pattern. The bundled
-`normalize-slug` fixture is only a deterministic demonstration: task prompts,
-test command, editable paths, and candidate strategies are supplied by an
-external `task.json`.
+The dual-fork lifecycle is a reusable reference pattern. “Dual-fork” means
+pairing two fork mechanisms (MiMo session fork + CubeSandbox VM snapshot), not
+a fixed width of two candidates. The demo defaults to `--candidates 2`; raise
+it (up to 8) so each extra child session is paired with its own snapshot-backed
+MicroVM. The bundled `normalize-slug` fixture is only a deterministic
+demonstration: task prompts, test command, editable paths, and candidate
+strategies are supplied by an external `task.json`.
 
 The workflow does not merely run a coding agent inside a MicroVM. It creates a
 speculative coding transaction:
@@ -72,17 +75,20 @@ flowchart LR
     Planner -->|"MiMo plan"| Parent[ParentSession]
     Parent -->|"copy profile only"| Source[CredentialFreeSourceVM]
     Source -->|"create_snapshot"| Snapshot[BaselineSnapshot]
-    Snapshot --> CandidateA[CandidateA]
-    Snapshot --> CandidateB[CandidateB]
-    Parent -->|"--session + --fork"| ChildA[ChildSessionA]
-    Parent -->|"--session + --fork"| ChildB[ChildSessionB]
-    ChildA --> CandidateA
-    ChildB --> CandidateB
-    CandidateA --> Evaluator[TestAndPatchPolicy]
-    CandidateB --> Evaluator
+    Snapshot --> Candidate1[Candidate1]
+    Snapshot --> CandidateN[CandidateN]
+    Parent -->|"--session + --fork"| Child1[ChildSession1]
+    Parent -->|"--session + --fork"| ChildN[ChildSessionN]
+    Child1 --> Candidate1
+    ChildN --> CandidateN
+    Candidate1 --> Evaluator[TestAndPatchPolicy]
+    CandidateN --> Evaluator
     Evaluator -->|"winner patch"| Source
     Source -->|"validation failure"| Rollback[RollbackBaseline]
 ```
+
+Scale candidates with `--candidates` / `--concurrency` and rotate strategies from
+`task.json`; each extra child gets its own snapshot-backed MicroVM.
 
 ## Tested components
 
@@ -210,10 +216,10 @@ count and size and rejects symlinks, unsafe paths, duplicates, and editable
 paths absent from the fixture.
 
 New applications reuse the same conversation fork, snapshot fan-out,
-credential boundary, promotion, rollback, cleanup, and evidence contract. The
-current evaluator is binary and ranks passing patches by changed lines. A later
-`research-experiment` integration can add a metric-aware evaluator without
-duplicating the surrounding infrastructure.
+credential boundary, promotion, rollback, and cleanup. Grow N MiMo child
+sessions together with N snapshot-backed MicroVMs via `--candidates` and
+`task.json` strategies. The current evaluator is binary and ranks passing
+patches by changed lines.
 
 ## Conversation-continuity proof
 
@@ -257,41 +263,28 @@ tested again.
 - Cleanup errors identify the leaked resource and fail an otherwise successful
   run.
 
-## Supporting checks
-
-The example retains two small supporting entry points:
+## Supporting check
 
 ```bash
-# Verify the pinned template and MiMo NDJSON event contract with CubeEgress
-# placeholder credentials (the real key stays in the host-side inject rule).
-python run_mimo_code.py
-
 # Verify exact-host egress, CA trust, and placeholder-only VM credentials.
 python network_policy.py
 ```
 
-## Verification and evidence
+## Verification
 
-Offline checks run without a model key or live cluster:
+Syntax check without a model key or live cluster:
 
 ```bash
-python -m unittest discover -s tests -v
-python -m py_compile *.py tests/*.py \
+python -m py_compile *.py \
   fixtures/normalize-slug/project/*.py \
   fixtures/normalize-slug/project/tests/*.py
-bash -n build-template.sh collect_e2e_evidence.sh
+bash -n build-template.sh
 ```
 
-On a live cluster:
-
-```bash
-./collect_e2e_evidence.sh
-```
-
-The collector runs promotion and forced-rollback scenarios. Evidence includes
-source/candidate sandbox IDs, snapshot ID, parent/child session IDs, candidate
-scores, CubeEgress boundary checks, final outcome, and final zero-resource
-checks for IDs created by the run. It never records the real MiMo key.
+On a live cluster, run `speculative_mimo_code.py` for promotion and
+`--force-promotion-failure` for rollback, then confirm the printed sandbox and
+snapshot IDs are cleaned up. Optional `--evidence-file` output is bounded
+metadata only (no real MiMo key, no patch body).
 
 ## Operational guidance
 

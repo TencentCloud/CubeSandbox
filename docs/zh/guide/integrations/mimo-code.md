@@ -17,9 +17,11 @@ lang: zh-CN
 本集成把 [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code) 的会话分叉与
 CubeSandbox 完整 VM 快照结合，让多个实现候选从同一个规划上下文出发。
 
-其中双分叉生命周期是可复用的参考模式；随附的 `normalize-slug` fixture 只是
-确定性演示。任务提示、测试命令、可编辑路径和候选策略均由外部 `task.json`
-提供。
+其中双分叉生命周期是可复用的参考模式。「双分叉」指配对两种分叉机制（MiMo
+会话 fork + CubeSandbox VM 快照），不是候选数固定为 2。演示默认
+`--candidates 2`；可提高到最多 8，每多一个子会话就配对一个快照派生的
+MicroVM。随附的 `normalize-slug` fixture 只是确定性演示。任务提示、测试命令、
+可编辑路径和候选策略均由外部 `task.json` 提供。
 
 它不只是把 Coding Agent 放进 MicroVM，而是建立一套推测式编码事务：
 
@@ -65,17 +67,20 @@ flowchart LR
     Planner -->|"MiMo plan"| Parent[ParentSession]
     Parent -->|"copy profile only"| Source[CredentialFreeSourceVM]
     Source -->|"create_snapshot"| Snapshot[BaselineSnapshot]
-    Snapshot --> CandidateA[CandidateA]
-    Snapshot --> CandidateB[CandidateB]
-    Parent -->|"--session + --fork"| ChildA[ChildSessionA]
-    Parent -->|"--session + --fork"| ChildB[ChildSessionB]
-    ChildA --> CandidateA
-    ChildB --> CandidateB
-    CandidateA --> Evaluator[TestAndPatchPolicy]
-    CandidateB --> Evaluator
+    Snapshot --> Candidate1[Candidate1]
+    Snapshot --> CandidateN[CandidateN]
+    Parent -->|"--session + --fork"| Child1[ChildSession1]
+    Parent -->|"--session + --fork"| ChildN[ChildSessionN]
+    Child1 --> Candidate1
+    ChildN --> CandidateN
+    Candidate1 --> Evaluator[TestAndPatchPolicy]
+    CandidateN --> Evaluator
     Evaluator -->|"winner patch"| Source
     Source -->|"validation failure"| Rollback[RollbackBaseline]
 ```
+
+用 `--candidates` / `--concurrency` 扩展候选数，并由 `task.json` 中的策略轮转
+分配；每多一个子会话，就多一个快照派生的 MicroVM。
 
 ## 已测试组件
 
@@ -197,9 +202,9 @@ fixtures/normalize-slug/
 文件数量与大小，并拒绝符号链接、不安全路径、重复项和基线中不存在的可编辑
 路径。
 
-新应用会复用相同的会话分叉、快照扇出、凭证边界、提升、回滚、清理和证据
-契约。当前评估器为二元测试，并按改动行数排序通过补丁。后续
-`research-experiment` 集成可以新增指标评估器，无需重复外围基础设施。
+新应用会复用相同的会话分叉、快照扇出、凭证边界、提升、回滚和清理。通过
+`--candidates` 与 `task.json` 策略，让 N 个 MiMo 子会话与 N 个快照派生
+MicroVM 一起扩展。当前评估器为二元测试，并按改动行数排序通过补丁。
 
 ## 对话连续性证明
 
@@ -235,38 +240,25 @@ fixtures/normalize-slug/
 
 ## 辅助检查
 
-示例保留两个小型辅助入口：
-
 ```bash
-# 验证固定模板与 MiMo NDJSON 事件契约；同样通过 CubeEgress 注入真实密钥，
-# VM 内只保留占位符。
-python run_mimo_code.py
-
 # 验证精确出口、CA 信任与 VM 内只有占位凭证。
 python network_policy.py
 ```
 
-## 验证与证据
+## 验证
 
-离线检查不需要模型 key 或真实集群：
+不依赖模型 key 或真实集群的语法检查：
 
 ```bash
-python -m unittest discover -s tests -v
-python -m py_compile *.py tests/*.py \
+python -m py_compile *.py \
   fixtures/normalize-slug/project/*.py \
   fixtures/normalize-slug/project/tests/*.py
-bash -n build-template.sh collect_e2e_evidence.sh
+bash -n build-template.sh
 ```
 
-真实集群上运行：
-
-```bash
-./collect_e2e_evidence.sh
-```
-
-收集器会运行补丁提升与强制回滚两个场景。证据包括源/候选沙箱 ID、快照 ID、
-父/子会话 ID、候选评分、CubeEgress 边界检查、最终结果，以及本轮资源 ID
-全部清理的检查，但绝不记录真实 MiMo key。
+在真实集群上运行 `speculative_mimo_code.py` 验证补丁提升，并用
+`--force-promotion-failure` 验证回滚，然后确认打印出的沙箱 / 快照 ID 已被
+清理。可选 `--evidence-file` 只保存有界元数据（不含真实 MiMo key 与补丁正文）。
 
 ## 运维建议
 

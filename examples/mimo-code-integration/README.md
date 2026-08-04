@@ -7,6 +7,10 @@ This example combines two independent fork mechanisms:
 - MiMo Code forks one parent planning session with `--session ... --fork`.
 - CubeSandbox forks one complete MicroVM baseline with snapshot-backed sandboxes.
 
+“Dual-fork” names those **two mechanisms**, not a fixed candidate count. The
+demo defaults to `--candidates 2`; raise it (up to 8) so each extra MiMo child
+session is paired with its own snapshot-backed MicroVM.
+
 Each MiMo child implements the same task in an isolated candidate MicroVM. A
 deterministic evaluator rejects unsafe or failing patches, selects the smallest
 passing change, and promotes only that patch to the source MicroVM. If final
@@ -28,25 +32,27 @@ collects bounded test output and patch metadata before promoting one result.
 ## Architecture
 
 ```text
-host driver
-  |
-  +-- credentialed planner MicroVM
-  |     `-- MiMo plan-only turn (parent session)
-  |                  |
-  |                  `-- copy $MIMOCODE_HOME (not the key)
-  |
-  +-- source MicroVM
-  |     +-- seed fixed acceptance tests
-  |     +-- import parent session into a credential-free runtime
-  |     +-- create baseline snapshot
-  |     `-- apply winner or rollback
-  |
-  +-- candidate MicroVM A <- baseline snapshot
-  |     `-- MiMo child session A <- parent --fork
-  |
-  `-- candidate MicroVM B <- baseline snapshot
-        `-- MiMo child session B <- parent --fork
+MiMo parent session                 CubeSandbox source VM
+       |                                     |
+       |                          (seed tests + import profile)
+       |                                     |
+       |                            baseline snapshot
+       |                                     |
+       +-- child session 1  <------>  candidate VM 1
+       +-- child session 2  <------>  candidate VM 2
+       +-- child session N  <------>  candidate VM N
+                                             |
+                                  test / validate / rank
+                                             |
+                                      winning patch
+                                             |
+                                      source VM
+                                   promote or rollback
 ```
+
+“Dual-fork” is the pairing on each row: one MiMo `--fork` child with one
+snapshot-backed MicroVM. Scale width with `--candidates` (default 2, max 8)
+and matching `--concurrency`; strategies from `task.json` rotate across them.
 
 The parent is given a random continuity token that is never written to
 `/workspace`. Every child must recall it from conversation state. This proves
@@ -95,8 +101,8 @@ The planner and every candidate MicroVM are created with:
 - sharing, telemetry, auto-update, model-manifest downloads, LSP downloads,
   and external skills disabled.
 
-Each rollout uses a random CubeEgress rule name, allowing the evidence collector
-to select only that run's audit records on a shared host.
+Each rollout uses a random CubeEgress rule name so audit records from a shared
+host can be scoped to that run.
 
 The source is created default-deny without a credential rule. Only the
 placeholder-bearing MiMo profile is copied into it before snapshotting, so the
@@ -118,13 +124,10 @@ mimo-code-integration/
 ├── rollout_task.py            # bounded task.json and fixture loader
 ├── fixtures/
 │   └── normalize-slug/        # demonstration task.json + project/
-├── run_mimo_code.py          # minimal template and NDJSON smoke test
-├── network_policy.py         # focused CubeEgress preflight
+├── network_policy.py         # CubeEgress credential-boundary preflight
 ├── env_utils.py
 ├── _mimo_common.py
-├── collect_e2e_evidence.sh
 ├── requirements.txt
-├── tests/
 ├── README.md
 └── README_zh.md
 ```
@@ -173,7 +176,6 @@ Important settings:
 | `MIMO_WORKSPACE` | Candidate Git workspace; defaults to `/workspace` |
 | `MIMO_SANDBOX_TIMEOUT` | Sandbox timeout; defaults to 1800 seconds |
 | `MIMO_AGENT_EXEC_TIMEOUT` | MiMo turn timeout; defaults to 900 seconds |
-| `MIMO_EGRESS_AUDIT_PATH` | Optional host audit JSONL path for evidence collection |
 
 Use HTTPS for a remote authentication-enabled CubeAPI. Plain HTTP is only
 appropriate on a trusted local network.
@@ -203,12 +205,11 @@ A successful run prints:
 CUBE_MIMO_PROMOTION_OK
 ```
 
-The evidence JSON contains bounded execution metadata: sandbox and snapshot
-IDs, parent/child MiMo session IDs, candidate test output, changed paths and
-line counts, errors, winner, and final outcome. The schema deliberately omits
-the patch body, but bounded test output is untrusted and may echo source text,
-so review evidence before sharing it. The collector separately verifies that
-the real MiMo key is absent.
+Optional `--evidence-file` JSON contains bounded execution metadata: sandbox
+and snapshot IDs, parent/child MiMo session IDs, candidate test output, changed
+paths and line counts, errors, winner, and final outcome. The schema
+deliberately omits the patch body, but bounded test output is untrusted and may
+echo source text, so review evidence before sharing it.
 
 ### Exercise the rollback path
 
@@ -248,54 +249,36 @@ my-task/
 
 The loader rejects absolute/traversal paths, duplicate paths or strategies,
 symlinks, oversized fixtures, and editable files absent from the baseline.
-The rollout lifecycle, credential boundary, snapshot handling, selection,
-promotion, rollback, cleanup, and evidence format remain unchanged.
+The dual-fork lifecycle stays fixed while you change only the task profile and
+`--candidates` count.
 
-This is the task extension seam for later applications. The current evaluator
-is intentionally binary—fixed tests pass or fail, then passing patches are
-ranked by changed lines. A later MiMo Code `research-experiment` integration can
-add a metric-aware evaluator while reusing the dual-fork transaction,
-credential, rollback, cleanup, and evidence infrastructure.
+This is the extension seam: grow N MiMo child sessions and N snapshot-backed
+MicroVMs together, then validate, promote or roll back, and reclaim. The
+current evaluator is intentionally binary—fixed tests pass or fail, then
+passing patches are ranked by changed lines.
 
-## Supporting preflights
+## Supporting preflight
 
-Run the minimal template and MiMo NDJSON smoke test (also uses CubeEgress
-placeholder credentials, not a raw VM API key):
-
-```bash
-python run_mimo_code.py
-```
-
-Run the focused default-deny and credential-boundary preflight:
+Run the focused default-deny and credential-boundary check:
 
 ```bash
 python network_policy.py
 ```
 
-These are supporting checks. The speculative workflow is the integration's
-main use case.
-
 ## Verification
 
-Offline checks require no model key or CubeSandbox cluster:
+Syntax check without a model key or live cluster:
 
 ```bash
-python -m unittest discover -s tests -v
-python -m py_compile *.py tests/*.py \
+python -m py_compile *.py \
   fixtures/normalize-slug/project/*.py \
   fixtures/normalize-slug/project/tests/*.py
-bash -n build-template.sh collect_e2e_evidence.sh
+bash -n build-template.sh
 ```
 
-For a live cluster, the evidence collector runs both promotion and rollback
-scenarios and checks that none of the run-owned sandbox or snapshot IDs remain:
-
-```bash
-./collect_e2e_evidence.sh
-```
-
-Generated evidence is written below `output/`, which is ignored by Git. Review
-all evidence before sharing it.
+On a live cluster, run promotion and the forced-rollback path above, then
+confirm the printed sandbox and snapshot IDs are cleaned up. Optional evidence
+files land under `output/` (Git-ignored); review before sharing.
 
 ## Deterministic selection
 
