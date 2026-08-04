@@ -166,6 +166,13 @@ func (c *Client) createPayload(opts CreateOptions) (map[string]any, error) {
 		payload["network"] = network
 	}
 
+	if len(opts.VolumeMounts) > 0 {
+		if err := validateVolumeMounts(opts.VolumeMounts); err != nil {
+			return nil, err
+		}
+		payload["volumeMounts"] = opts.VolumeMounts
+	}
+
 	for key, value := range opts.Extra {
 		payload[key] = value
 	}

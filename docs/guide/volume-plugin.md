@@ -4,7 +4,7 @@ CubeSandbox is gradually adopting e2b Volume compatibility to provide persistent
 
 > **Version requirement**
 >
-> Volume features require **Cube platform ≥ 0.6.0** (CubeMaster, CubeAPI, and Cubelet must all be upgraded), plus **Python SDK `cubesandbox` ≥ 0.6.0** (`Volume` and `Sandbox.create(volume_mounts=...)`). Environments below these versions have no Volume API — do not call `/volumes` with an older SDK.
+> Volume features require **Cube platform ≥ 0.6.0** (CubeMaster, CubeAPI, and Cubelet must all be upgraded), plus **Python SDK `cubesandbox` ≥ 0.6.0** (`Volume` and `Sandbox.create(volume_mounts=...)`). The **Go SDK** (`sdk/go`) provides equivalent support as of repository master (`Client.CreateVolume` etc. and `CreateOptions.VolumeMounts`). Environments below these versions have no Volume API — do not call `/volumes` with an older SDK.
 
 > **Current status** (API / SDK)
 >
@@ -14,10 +14,12 @@ CubeSandbox is gradually adopting e2b Volume compatibility to provide persistent
 > | REST `POST /volumes` — create volume | ✅ Supported |
 > | REST `GET /volumes/{volumeID}` — get volume + token | ✅ Supported |
 > | REST `DELETE /volumes/{volumeID}` — delete volume | ✅ Supported (409 when still mounted) |
-> | SDK `Volume.create` / `connect` / `list` / `get_info` / `destroy` | ✅ Supported (SDK ≥ 0.6.0) |
-> | SDK `Sandbox.create(volume_mounts={path: volume})` | ✅ Supported (e2b dict mapping) |
+> | Python SDK `Volume.create` / `connect` / `list` / `get_info` / `destroy` | ✅ Supported (SDK ≥ 0.6.0) |
+> | Python SDK `Sandbox.create(volume_mounts={path: volume})` | ✅ Supported (e2b dict mapping) |
+> | Go SDK `Client.CreateVolume / ListVolumes / GetVolume / DeleteVolume` | ✅ Supported |
+> | Go SDK `CreateOptions.VolumeMounts` (incl. `ReadOnly`) | ✅ Supported |
 > | One volume mounted by multiple sandboxes | ✅ Supported |
-> | Per-sandbox read-only attachment | ✅ Cube SDK extension (`VolumeMount(..., read_only=True)`); the official e2b SDK itself has no read-only mount option |
+> | Per-sandbox read-only attachment | ✅ Cube SDK extension (Python `VolumeMount(..., read_only=True)`, Go `VolumeMount{ReadOnly: true}`); the official e2b SDK itself has no read-only mount option |
 > | Omit `driver` on create (e2b default) | ✅ Supported |
 
 > **e2b API vs SDK**
@@ -46,6 +48,12 @@ Register the same `driver` name on both sides (`volume_plugins`), point `binary_
 
 ```bash
 pip install 'cubesandbox>=0.6.0'
+```
+
+For Go, use the `sdk/go` module:
+
+```bash
+go get github.com/tencentcloud/CubeSandbox/sdk/go
 ```
 
 Use **`cubesandbox`**, not the official e2b Python SDK. Set `CUBE_API_URL`, `CUBE_TEMPLATE_ID`, and (for remote I/O) `CUBE_PROXY_NODE_IP`. See [Environment Setup](#environment-setup).
@@ -363,7 +371,7 @@ CubeAPI forwards `volume_mounts` for plugin volumes via the `plugin-volume-mount
 
 ## SDK Usage
 
-Examples below use **Python SDK `cubesandbox` ≥ 0.6.0**. CubeAPI exposes e2b-compatible `/volumes` REST endpoints; applications should prefer the SDK over raw HTTP.
+Examples below use **Python SDK `cubesandbox` ≥ 0.6.0**; for Go see [Go SDK Usage](#go-sdk-usage). CubeAPI exposes e2b-compatible `/volumes` REST endpoints; applications should prefer the SDK over raw HTTP.
 
 ### e2b compatibility note
 
@@ -372,6 +380,7 @@ Examples below use **Python SDK `cubesandbox` ≥ 0.6.0**. CubeAPI exposes e2b-c
 | CubeAPI `/volumes` REST | ✅ Yes | `POST/GET/DELETE /volumes`, `GET /volumes/{volumeID}` |
 | Official e2b Python SDK | ❌ No | Hardcoded to e2b.cloud; **do not use** with CubeSandbox |
 | `cubesandbox` Python SDK | ✅ Yes | `Volume`, `Sandbox.create(volume_mounts={path: volume})` (e2b dict) |
+| `cubesandbox` Go SDK (`sdk/go`) | ✅ Yes | `Client.CreateVolume / ListVolumes / GetVolume / DeleteVolume`; mounts use the explicit `CreateOptions.VolumeMounts` structs (not the e2b dict) |
 | Omit `driver` on create | ✅ Yes | CubeMaster uses the **first** `volume_plugins` entry |
 | Per-sandbox read-only attachment | ❌ No | The official e2b SDK itself has no read-only Volume mount option; Cube SDK adds `VolumeMount(volume, read_only=True)` |
 
@@ -444,6 +453,53 @@ Volume.destroy(vol.volume_id)  # returns True; False when already gone (idempote
 | `volume_mounts` | e2b dict `{mount_path: Volume \| volume_id \| name}` — key is path inside sandbox, value is a `Volume` instance or volume ID string; Cube SDK can additionally wrap the value with `VolumeMount(..., read_only=True)` for a read-only attachment |
 
 `driver` is stored in `t_cube_volume` and forwarded to Cubelet via annotations — `volume_plugins[].name` must match on both CubeMaster and Cubelet.
+
+### Go SDK Usage
+
+The Go SDK (`sdk/go`) covers the same full lifecycle and uses the same environment variables as Python:
+
+```go
+import (
+	"context"
+	"errors"
+
+	cubesandbox "github.com/tencentcloud/CubeSandbox/sdk/go"
+)
+
+client := cubesandbox.NewClient(cubesandbox.NewConfigFromEnv())
+ctx := context.Background()
+
+// ① Create a volume (control plane) — omitting Driver selects the first volume_plugins entry
+volume, err := client.CreateVolume(ctx, cubesandbox.CreateVolumeOptions{Name: "my-data"})
+
+// List / get one
+volumes, err := client.ListVolumes(ctx)              // no tokens
+volume, err = client.GetVolume(ctx, volume.VolumeID) // includes token
+
+// ② Create a sandbox with the volume mounted (data plane: Attach); ReadOnly is the Cube read-only extension
+sb, err := client.Create(ctx, cubesandbox.CreateOptions{
+	TemplateID: "base",
+	VolumeMounts: []cubesandbox.VolumeMount{
+		{Name: volume.VolumeID, Path: "/workspace"},
+		// {Name: volume.VolumeID, Path: "/dataset", ReadOnly: true}
+	},
+})
+
+// ③ Destroy the sandbox (data plane: Detach)
+err = sb.Kill(ctx)
+
+// ④ Delete the volume (control plane: Destroy)
+if err := client.DeleteVolume(ctx, volume.VolumeID); err != nil {
+	switch {
+	case errors.Is(err, cubesandbox.ErrVolumeInUse):
+		// still mounted (HTTP 409) — destroy the sandboxes using it first
+	case errors.Is(err, cubesandbox.ErrVolumeNotFound):
+		// already gone — idempotent cleanup can ignore this
+	}
+}
+```
+
+Differences from the Python SDK: mounts are the explicit `[]VolumeMount{Name, Path, ReadOnly}` structs (not the e2b dict mapping), and delete outcomes are distinguished with the `ErrVolumeInUse` / `ErrVolumeNotFound` sentinel errors via `errors.Is`. Name rules, the omitted-driver behavior, and token-less list results match Python. See [`sdk/go/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/sdk/go/README.md) for more examples.
 
 ### Per-sandbox access mode
 

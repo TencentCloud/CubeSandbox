@@ -4,7 +4,7 @@ CubeSandbox 正在逐步兼容 e2b Volume，为沙箱提供跨生命周期的持
 
 > **版本要求**
 >
-> Volume 能力需要 **Cube 平台 ≥ 0.6.0**（CubeMaster、CubeAPI、Cubelet 均需升级），以及 **Python SDK `cubesandbox` ≥ 0.6.0**（提供 `Volume` 与 `Sandbox.create(volume_mounts=...)`）。低于上述版本的环境无 Volume API，请勿混用旧版 SDK 调用 `/volumes`。
+> Volume 能力需要 **Cube 平台 ≥ 0.6.0**（CubeMaster、CubeAPI、Cubelet 均需升级），以及 **Python SDK `cubesandbox` ≥ 0.6.0**（提供 `Volume` 与 `Sandbox.create(volume_mounts=...)`）。**Go SDK**（`sdk/go`）自仓库 master 起提供等价能力（`Client.CreateVolume` 等与 `CreateOptions.VolumeMounts`）。低于上述版本的环境无 Volume API，请勿混用旧版 SDK 调用 `/volumes`。
 
 > **当前进展**（API / SDK）
 >
@@ -14,10 +14,12 @@ CubeSandbox 正在逐步兼容 e2b Volume，为沙箱提供跨生命周期的持
 > | REST `POST /volumes` — 创建 Volume | ✅ 已支持 |
 > | REST `GET /volumes/{volumeID}` — 查询 Volume + token | ✅ 已支持 |
 > | REST `DELETE /volumes/{volumeID}` — 删除 Volume | ✅ 已支持（仍被挂载时返回 409） |
-> | SDK `Volume.create` / `connect` / `list` / `get_info` / `destroy` | ✅ 已支持（SDK ≥ 0.6.0） |
-> | SDK `Sandbox.create(volume_mounts={path: volume})` | ✅ 已支持（e2b dict 映射） |
+> | Python SDK `Volume.create` / `connect` / `list` / `get_info` / `destroy` | ✅ 已支持（SDK ≥ 0.6.0） |
+> | Python SDK `Sandbox.create(volume_mounts={path: volume})` | ✅ 已支持（e2b dict 映射） |
+> | Go SDK `Client.CreateVolume / ListVolumes / GetVolume / DeleteVolume` | ✅ 已支持 |
+> | Go SDK `CreateOptions.VolumeMounts`（含 `ReadOnly`） | ✅ 已支持 |
 > | 同一 Volume 被多个沙箱同时挂载 | ✅ 已支持 |
-> | 按沙箱只读挂载 | ✅ Cube SDK 扩展（`VolumeMount(..., read_only=True)`）；官方 e2b SDK 自身没有只读挂载选项 |
+> | 按沙箱只读挂载 | ✅ Cube SDK 扩展（Python `VolumeMount(..., read_only=True)`，Go `VolumeMount{ReadOnly: true}`）；官方 e2b SDK 自身没有只读挂载选项 |
 > | 创建时省略 `driver`（e2b 默认行为） | ✅ 已支持 |
 
 > **e2b API 与 SDK**
@@ -46,6 +48,12 @@ CubeSandbox 正在逐步兼容 e2b Volume，为沙箱提供跨生命周期的持
 
 ```bash
 pip install 'cubesandbox>=0.6.0'
+```
+
+Go 侧使用 `sdk/go` 模块：
+
+```bash
+go get github.com/tencentcloud/CubeSandbox/sdk/go
 ```
 
 须使用 **`cubesandbox`**，不可用官方 e2b Python SDK。配置 `CUBE_API_URL`、`CUBE_TEMPLATE_ID`，远程读写时还需 `CUBE_PROXY_NODE_IP`。见 [环境准备](#环境准备)。
@@ -361,7 +369,7 @@ sequenceDiagram
 
 ## SDK 用法
 
-以下示例基于 **Python SDK `cubesandbox` ≥ 0.6.0**。CubeAPI 提供 e2b 兼容的 `/volumes` REST 接口；应用侧推荐优先使用 SDK。
+以下示例基于 **Python SDK `cubesandbox` ≥ 0.6.0**，Go 示例见 [Go SDK 用法](#go-sdk-用法)。CubeAPI 提供 e2b 兼容的 `/volumes` REST 接口；应用侧推荐优先使用 SDK。
 
 ### e2b 兼容性说明
 
@@ -370,6 +378,7 @@ sequenceDiagram
 | CubeAPI `/volumes` REST | ✅ 是 | `POST/GET/DELETE /volumes`、`GET /volumes/{volumeID}` |
 | 官方 e2b Python SDK | ❌ 否 | 硬编码 e2b.cloud 后端；**勿**用于 CubeSandbox |
 | `cubesandbox` Python SDK | ✅ 是 | `Volume`、`Sandbox.create(volume_mounts={path: volume})`（e2b dict） |
+| `cubesandbox` Go SDK（`sdk/go`） | ✅ 是 | `Client.CreateVolume / ListVolumes / GetVolume / DeleteVolume`；挂载用显式结构体 `CreateOptions.VolumeMounts`（非 e2b dict） |
 | 创建时省略 `driver` | ✅ 是 | CubeMaster 取 `volume_plugins` **列表第一项** |
 | 按沙箱只读挂载 | ❌ 否 | 官方 e2b SDK 自身没有只读 Volume 挂载选项；Cube SDK 增加 `VolumeMount(volume, read_only=True)` 扩展 |
 
@@ -442,6 +451,53 @@ Volume.destroy(vol.volume_id)  # 返回 True；卷不存在时返回 False（幂
 | `volume_mounts` | e2b dict `{挂载路径: Volume \| volume_id \| name}` — key 为沙箱内路径，value 为 `Volume` 实例或 volume ID 字符串；Cube SDK 还可将 value 包装为 `VolumeMount(..., read_only=True)` 以启用只读挂载 |
 
 `driver` 写入 `t_cube_volume`，沙箱创建时经 annotation 传给 Cubelet——CubeMaster 与 Cubelet 两侧 `volume_plugins[].name` 须与之一致。
+
+### Go SDK 用法
+
+Go SDK（`sdk/go`）提供与上文等价的完整生命周期，使用与 Python 相同的环境变量：
+
+```go
+import (
+	"context"
+	"errors"
+
+	cubesandbox "github.com/tencentcloud/CubeSandbox/sdk/go"
+)
+
+client := cubesandbox.NewClient(cubesandbox.NewConfigFromEnv())
+ctx := context.Background()
+
+// ① 创建 Volume（管理面）——Driver 省略时取 volume_plugins 第一项
+volume, err := client.CreateVolume(ctx, cubesandbox.CreateVolumeOptions{Name: "my-data"})
+
+// 列出 / 单查
+volumes, err := client.ListVolumes(ctx)              // 不含 token
+volume, err = client.GetVolume(ctx, volume.VolumeID) // 含 token
+
+// ② 创建沙箱并挂载（数据面：Attach）；ReadOnly 为 Cube 只读扩展
+sb, err := client.Create(ctx, cubesandbox.CreateOptions{
+	TemplateID: "base",
+	VolumeMounts: []cubesandbox.VolumeMount{
+		{Name: volume.VolumeID, Path: "/workspace"},
+		// {Name: volume.VolumeID, Path: "/dataset", ReadOnly: true}
+	},
+})
+
+// ③ 销毁沙箱（数据面：Detach，解绑）
+err = sb.Kill(ctx)
+
+// ④ 删除 Volume（管理面：Destroy）
+if err := client.DeleteVolume(ctx, volume.VolumeID); err != nil {
+	switch {
+	case errors.Is(err, cubesandbox.ErrVolumeInUse):
+		// 仍被挂载（HTTP 409）——先销毁使用该卷的沙箱
+	case errors.Is(err, cubesandbox.ErrVolumeNotFound):
+		// 已不存在——幂等清理可忽略
+	}
+}
+```
+
+与 Python SDK 的差异：挂载参数是显式的 `[]VolumeMount{Name, Path, ReadOnly}` 结构体（非 e2b dict 映射）；删除结果通过 `ErrVolumeInUse` / `ErrVolumeNotFound` 哨兵错误用 `errors.Is` 区分。name 规则、driver 省略行为、list 不返回 token 等语义与 Python 一致。更多示例见 [`sdk/go/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/sdk/go/README.md)。
 
 ### 按沙箱选择访问模式
 
