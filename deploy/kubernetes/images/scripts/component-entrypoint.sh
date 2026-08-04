@@ -424,6 +424,12 @@ run_network_agent() {
   fi
   if [[ -n "${CUBE_SANDBOX_NETWORK_MTU:-}" && "${CUBE_SANDBOX_NETWORK_MTU}" != "0" ]]; then
     [[ "${CUBE_SANDBOX_NETWORK_MTU}" =~ ^[0-9]+$ ]] || fail "CUBE_SANDBOX_NETWORK_MTU must be a non-negative integer"
+    # A valid MTU is at most 5 digits (max 65535). Check length before the
+    # arithmetic so an absurdly long string fails with a self-explanatory
+    # message instead of wrapping in bash's int64 arithmetic (e.g. 25+ digits
+    # becomes a huge negative number) and hitting a misleading range error.
+    [[ "${#CUBE_SANDBOX_NETWORK_MTU}" -le 5 ]] \
+      || fail "CUBE_SANDBOX_NETWORK_MTU is too long (max 5 digits, range 1280..65535)"
     # Leading zeros make bash parse the value as octal (-ge/-le), and sed would
     # write invalid TOML (leading zeros forbidden in integers). Normalize to
     # decimal before the range check.
@@ -523,6 +529,12 @@ run_cubelet() {
   fi
   if [[ -n "${CUBE_SANDBOX_NETWORK_MTU:-}" && "${CUBE_SANDBOX_NETWORK_MTU}" != "0" ]]; then
     [[ "${CUBE_SANDBOX_NETWORK_MTU}" =~ ^[0-9]+$ ]] || fail "CUBE_SANDBOX_NETWORK_MTU must be a non-negative integer"
+    # A valid MTU is at most 5 digits (max 65535). Check length before the
+    # arithmetic so an absurdly long string fails with a self-explanatory
+    # message instead of wrapping in bash's int64 arithmetic (e.g. 25+ digits
+    # becomes a huge negative number) and hitting a misleading range error.
+    [[ "${#CUBE_SANDBOX_NETWORK_MTU}" -le 5 ]] \
+      || fail "CUBE_SANDBOX_NETWORK_MTU is too long (max 5 digits, range 1280..65535)"
     # Leading zeros make bash parse the value as octal (-ge/-le), and sed would
     # write invalid TOML (leading zeros forbidden in integers). Normalize to
     # decimal before the range check.
