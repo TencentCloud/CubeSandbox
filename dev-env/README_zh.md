@@ -80,8 +80,8 @@ QEMU 串口控制台挂在这个终端里。不要用 `Ctrl+a` 然后 `x` 直接
 curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | bash
 ```
 
-跑完后应该能看到四个核心进程都活着（`network-agent`、`cubemaster`、
-`cube-api`、`cubelet`）。
+跑完后应该能看到核心进程都活着（`cubemaster`、`cube-api`、`cubelet`）。
+原来的网络运行时已经内置到 `cubelet` 中。
 
 ### 第 5 步 &nbsp; 验证 &nbsp; *(在虚机里)*
 
@@ -102,7 +102,7 @@ curl -sf http://127.0.0.1:3000/health && echo OK
 
 会先交互确认，然后在 guest 内 enable `cube-sandbox-oneclick.service`。
 之后每次开机都会自动跑 `up-with-deps.sh`，把 MySQL/Redis、cube-proxy、
-coredns、network-agent、cubemaster、cube-api、cubelet 一并拉起。
+coredns、cubemaster、cube-api、cubelet 一并拉起。网络运行时随 `cubelet` 一起启动。
 
 其他子命令：
 

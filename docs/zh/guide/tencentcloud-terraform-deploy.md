@@ -31,7 +31,7 @@
   │  ┌─────────┴────────┐       ┌───────────────┴─────┐    │
   │  │  CVM 计算节点 ×N │       │    TKE 托管集群          │
   │  │  Cubelet         │       │  cube-master (×1)       │
-  │  │  network-agent   │       │  cube-api (×1)          │
+  │  │  network runtime │       │  cube-api (×1)          │
   │  │  CubeEgress      │       │  cube-ops (×1)          │
   │  └──────────────────┘       │  cube-proxy (×1)        │
   │                             │  cube-lifecycle-manager │
@@ -58,7 +58,7 @@
 | 跳板机 | CVM（公网 IP，SSH 443） | 构建镜像（TCR 模式）、作为私有 VPC 的堡垒机 |
 | 负载均衡 | CLB（内网/公网） | 前置 `cube-api` / `cube-proxy` / `cube-webui`，默认内网模式，用户流量入口 |
 | 控制面 | TKE 托管集群 | 运行 `cube-master` / `cube-api` / `cube-ops` / `cube-proxy` / `cube-lifecycle-manager` / `cube-webui` |
-| 计算节点 | CVM PVM | 运行 `Cubelet` / `network-agent` / `CubeEgress`，**实际承载沙箱** |
+| 计算节点 | CVM PVM | 运行带内嵌 network runtime 的 `Cubelet` 与 `CubeEgress`，**实际承载沙箱** |
 | 数据库 | 云数据库 MySQL 8.0 + Redis 7.0 | 仅 VPC 内网访问，不开公网 |
 | 共享存储 | CFS（通用标准型 NFS，**可选**） | `USE_CFS=true` 且 cubemaster 多副本时，ReadWriteMany 共享 `/data/CubeMaster/storage` |
 | 镜像仓库 | TCR（基础版，**可选**） | `USE_TCR=true` 时创建；跳板机构建并推送组件镜像 |

@@ -245,7 +245,7 @@ Per-VM amortized overhead = (current used - baseline used) ÷ VM count
 
 **Scaling up the TAP pre-allocation pool:**
 
-The TAP pool target is specified by `tap_init_num` in the cubelet configuration (default **500**). However, this parameter is actually consumed by **network-agent** (which reads the same cubelet config via `--cubelet-config` at startup) to pre-create TAP devices. After modifying it, you need to restart **network-agent** (not cubelet) for the change to take effect. The target density must not exceed this value — for example, to benchmark 1000 sandboxes, first set `tap_init_num` to 1000 (or higher).
+The TAP pool target is specified by `tap_init_num` in the cubelet configuration (default **500**). This parameter is now consumed by the **embedded network runtime inside cubelet** to pre-create TAP devices. After modifying it, restart **cubelet** for the change to take effect. The target density must not exceed this value — for example, to benchmark 1000 sandboxes, first set `tap_init_num` to 1000 (or higher).
 
 ```bash
 # 1. Edit cubelet config, increase tap_init_num under [plugins."io.cubelet.internal.v1.network"]
@@ -253,8 +253,8 @@ vi /usr/local/services/cubetoolbox/Cubelet/config/config.toml
 #   [plugins."io.cubelet.internal.v1.network"]
 #     tap_init_num = 1000        # default 500; set to 1000+ for benchmarking 1000 sandboxes
 
-# 2. Restart network-agent to pre-create TAP devices with the new target
-systemctl restart cube-sandbox-network-agent.service
+# 2. Restart cubelet so the embedded network runtime pre-creates TAP devices with the new target
+systemctl restart cube-sandbox-cubelet.service
 ```
 
 **Estimated single-host capacity (BMI5, 375 GiB memory):**

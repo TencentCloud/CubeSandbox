@@ -3,7 +3,7 @@ module github.com/tencentcloud/CubeSandbox/Cubelet
 go 1.24.8
 
 require (
-	github.com/cilium/ebpf v0.17.3 // indirect
+	github.com/cilium/ebpf v0.17.3
 	github.com/containerd/console v1.0.5
 	github.com/containerd/continuity v0.4.5
 	github.com/containerd/fifo v1.1.0
@@ -74,6 +74,7 @@ require (
 	github.com/docker/go-events v0.0.0-20190806004212-e31b211e4f1c // indirect
 	github.com/emicklei/go-restful/v3 v3.13.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
+	github.com/florianl/go-tc v0.4.1 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.8 // indirect
 	github.com/gin-contrib/sse v1.1.0 // indirect
@@ -97,11 +98,13 @@ require (
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.0 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/intel/goresctrl v0.10.0 // indirect
+	github.com/josharian/native v1.1.0 // indirect
 	github.com/klauspost/compress v1.18.1 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/mdlayher/netlink v1.7.2 // indirect
 	github.com/mdlayher/socket v0.5.1 // indirect
 	github.com/miekg/pkcs11 v1.1.1 // indirect
 	github.com/minio/blake2b-simd v0.0.0-20160723061019-3f5f724cb5b1 // indirect
@@ -189,6 +192,7 @@ require (
 	github.com/opencontainers/selinux v1.13.1
 	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/prometheus/client_golang v1.23.2
+	github.com/tencentcloud/CubeSandbox/CubeNet/cubevs v0.0.0
 	github.com/urfave/cli/v2 v2.27.7
 	go.uber.org/mock v0.6.0
 	golang.org/x/term v0.37.0
@@ -209,3 +213,5 @@ replace (
 	// use 0.25.16 instande of latest that 0.25.16 have v1alpha2 and v1 runtime API
 	k8s.io/cri-api => k8s.io/cri-api v0.25.16
 )
+
+replace github.com/tencentcloud/CubeSandbox/CubeNet/cubevs => ../CubeNet/cubevs

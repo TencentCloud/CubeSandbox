@@ -61,7 +61,7 @@ chmod +x install.sh
 
 ::: details What gets installed
 - E2B-compatible REST API listening on port `3000`
-- CubeMaster, Cubelet, network-agent, CubeShim running as host processes
+- CubeMaster, Cubelet with embedded network runtime, and CubeShim running as host processes
 - MySQL and Redis managed via Docker Compose
 - CubeProxy providing TLS (mkcert) and CoreDNS domain routing (`cube.app`)
 :::

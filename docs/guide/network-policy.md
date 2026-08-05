@@ -1,6 +1,6 @@
 # Egress Network Policy
 
-Cube Sandbox egress control is not a single switch. It is a chain formed by **API validation, template merging, network-agent programming, the CubeVS eBPF data plane, and the CubeEgress L7 proxy**. Once you understand this chain, it becomes much easier to predict whether a packet will be forwarded directly, rejected, ignored by DNS learning, or redirected into the HTTP/HTTPS proxy.
+Cube Sandbox egress control is not a single switch. It is a chain formed by **API validation, template merging, Cubelet embedded network runtime programming, the CubeVS eBPF data plane, and the CubeEgress L7 proxy**. Once you understand this chain, it becomes much easier to predict whether a packet will be forwarded directly, rejected, ignored by DNS learning, or redirected into the HTTP/HTTPS proxy.
 
 This page explains:
 
@@ -34,8 +34,8 @@ Each component has a distinct responsibility:
 | Component | Responsibility |
 | --- | --- |
 | CubeAPI | Receives SDK/API requests, maps the network configuration, and forwards a CubeMaster request. |
-| CubeMaster | Merges template network configuration with the current create request and schedules the sandbox through Cubelet/network-agent. |
-| network-agent | Converts `CubeNetworkConfig` into CubeVS `MVMOptions`, extracts network reachability targets from L7 `rules`, and registers or updates the TAP eBPF maps. |
+| CubeMaster | Merges template network configuration with the current create request and schedules the sandbox through Cubelet embedded network runtime. |
+| Cubelet embedded network runtime | Converts `CubeNetworkConfig` into CubeVS `MVMOptions`, extracts network reachability targets from L7 `rules`, and registers or updates the TAP eBPF maps. |
 | CubeVS | Runs in the host eBPF data plane. It enforces per-sandbox L3/L4 allow/deny policy, DNS A-record learning for configured domains, session/NAT, TCP RST rejection, and L7 proxy routing decisions. |
 | CubeEgress | Transparent HTTP/HTTPS proxy. It only receives TCP/80 and TCP/443 traffic that CubeVS marked as requiring L7 checks, then evaluates the complete `rules` list. |
 
@@ -68,7 +68,7 @@ When `allow_internet_access=false`, the backend installs `0.0.0.0/0` as deny-all
 
 ## Entry limits
 
-Before changing a sandbox's eBPF maps, CubeVS counts the final unique map keys produced from `allow_out`, `deny_out`, and the network targets extracted from `rules`. Limit errors propagate back through network-agent, Cubelet, CubeMaster, and CubeAPI to the sandbox create caller.
+Before changing a sandbox's eBPF maps, CubeVS counts the final unique map keys produced from `allow_out`, `deny_out`, and the network targets extracted from `rules`. Limit errors propagate back through Cubelet, CubeMaster, and CubeAPI to the sandbox create caller.
 
 | Final map counter | Limit |
 | --- | --- |
@@ -163,9 +163,9 @@ flowchart TD
     A[SDK/API request] --> B[CubeAPI map request]
     B --> C[CubeMaster request]
     C --> D[Merge template CubeNetworkConfig]
-    D --> E[Cubelet / network-agent EnsureNetwork]
+    D --> E[Cubelet NetworkRuntime EnsureNetwork]
     E --> F[Translate CubeNetworkConfig]
-    F --> G[network-agent cubeVSTapRegistration]
+    F --> G[Cubelet runtime cubeVSTapRegistration]
     G --> H[Extract L7 allow targets from rules]
     H --> I[CubeVS AddTAPDevice / UpsertTAPDevice]
     I --> J[Validate final unique map keys]
@@ -196,11 +196,11 @@ If the template also carries a `CubeNetworkConfig`, CubeMaster merges template c
 - `denyOut`: request entries are appended to template entries and deduplicated by string.
 - `rules`: request rules are placed before template rules. If both contain the same `name`, CubeEgress matches the request rule first because the rule list uses first-match-wins semantics. The template rule with the same name is not overwritten or removed; it remains later in the merged list.
 
-The merged `CubeNetworkConfig` is sent to Cubelet/network-agent. CubeVS validates the final unique eBPF map keys after network-agent extracts L7 reachability targets.
+The merged `CubeNetworkConfig` is sent to Cubelet embedded network runtime. CubeVS validates the final unique eBPF map keys after the embedded network runtime extracts L7 reachability targets.
 
-### 3. network-agent extracts CubeVS targets
+### 3. Cubelet embedded network runtime extracts CubeVS targets
 
-network-agent receives `CubeNetworkConfig` and constructs CubeVS `MVMOptions`:
+Cubelet embedded network runtime receives `CubeNetworkConfig` and constructs CubeVS `MVMOptions`:
 
 - `AllowInternetAccess`: defaults to `true` when omitted.
 - `AllowOut`: copied from merged `allowOut`.
@@ -242,7 +242,7 @@ The difference from plain `allow_out` is that these targets carry the `L7_REQUIR
 
 ### 4. CubeVS map programming
 
-network-agent finally programs different sources into different maps:
+Cubelet embedded network runtime finally programs different sources into different maps:
 
 | Source | Map | `L7_REQUIRED`? | Purpose |
 | --- | --- | --- | --- |
@@ -402,7 +402,7 @@ If an IP is already a static `allow_out` entry, DNS learning does not turn it in
 
 ### DNS reaping
 
-The network-agent / CubeVS user-space side periodically scans:
+The Cubelet embedded network runtime / CubeVS user-space side periodically scans:
 
 - `allow_out_v2`: removes expired DNS-learned temporary entries.
 - `dns_query_track`: removes pending queries that did not receive a response within `10` seconds.
@@ -706,7 +706,7 @@ Useful fields:
 ### Check services
 
 ```bash
-sudo systemctl status cube-sandbox-network-agent.service
+sudo systemctl status cube-sandbox-cubelet.service
 sudo systemctl status cube-sandbox-cube-egress.service
 sudo systemctl restart cube-sandbox-compute.target
 ```

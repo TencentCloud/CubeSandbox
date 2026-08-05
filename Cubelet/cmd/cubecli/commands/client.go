@@ -36,7 +36,6 @@ import (
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/platforms"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
-	srvconfig "github.com/tencentcloud/CubeSandbox/Cubelet/services/server/config"
 	"github.com/urfave/cli/v2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
@@ -44,8 +43,7 @@ import (
 )
 
 const (
-	DefaultCubeletConfigPath        = "/usr/local/services/cubetoolbox/Cubelet/config/config.toml"
-	DefaultNetworkAgentGRPCEndpoint = "grpc+unix:///tmp/cube/network-agent-grpc.sock"
+	DefaultCubeletConfigPath = "/usr/local/services/cubetoolbox/Cubelet/config/config.toml"
 )
 
 var (
@@ -58,10 +56,6 @@ var (
 		},
 	}
 )
-
-type networkPluginCLIConfig struct {
-	NetworkAgentEndpoint string `toml:"network_agent_endpoint"`
-}
 
 func AppContext(context *cli.Context) (gocontext.Context, gocontext.CancelFunc) {
 	var (
@@ -192,49 +186,4 @@ func NewDefaultContainerdClient(context *cli.Context) (*containerd.Client, gocon
 	}
 	cntCtx := namespaces.WithNamespace(gocontext.Background(), context.String("namespace"))
 	return cntdClient, cntCtx, nil
-}
-
-func NetworkAgentFlags() []cli.Flag {
-	return []cli.Flag{
-		&cli.StringFlag{
-			Name:    "config",
-			Aliases: []string{"c"},
-			Usage:   "path to cubelet configuration file",
-			Value:   DefaultCubeletConfigPath,
-		},
-		&cli.StringFlag{
-			Name:  "network-agent-endpoint",
-			Usage: "override network-agent gRPC endpoint",
-		},
-	}
-}
-
-func ResolveNetworkAgentEndpoint(clictx *cli.Context) (string, error) {
-	if endpoint := strings.TrimSpace(clictx.String("network-agent-endpoint")); endpoint != "" {
-		return endpoint, nil
-	}
-
-	configPath := strings.TrimSpace(clictx.String("config"))
-	if configPath != "" {
-		_, statErr := os.Stat(configPath)
-		switch {
-		case statErr == nil:
-			config := &srvconfig.Config{}
-			if err := srvconfig.LoadConfig(gocontext.Background(), configPath, config); err != nil {
-				return "", err
-			}
-			networkConfig := &networkPluginCLIConfig{}
-			pluginID := fmt.Sprintf("%s.%s", constants.InternalPlugin, constants.NetworkID.ID())
-			if _, err := config.Decode(gocontext.Background(), pluginID, networkConfig); err != nil {
-				return "", err
-			}
-			if endpoint := strings.TrimSpace(networkConfig.NetworkAgentEndpoint); endpoint != "" {
-				return endpoint, nil
-			}
-		case clictx.IsSet("config"):
-			return "", statErr
-		}
-	}
-
-	return DefaultNetworkAgentGRPCEndpoint, nil
 }

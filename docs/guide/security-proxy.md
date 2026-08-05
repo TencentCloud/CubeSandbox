@@ -241,7 +241,7 @@ The data plane is split into one file per phase under
 | File | Phase | What it does |
 | --- | --- | --- |
 | `cert_signer.lua` | `ssl_certificate_by_lua` | Mints leaf certs for the SNI seen on the wire |
-| `bootstrap.lua` | `init_worker_by_lua` (worker 0 only) | Pulls initial policies from network-agent |
+| `bootstrap.lua` | `init_worker_by_lua` (worker 0 only) | Pulls initial policies from Cubelet embedded network runtime |
 | `access_phase.lua` | `access_by_lua` | Runs match → action → inject for every request |
 | `policy.lua` | (module) | In-memory policy store, fed by `admin.lua` and `bootstrap.lua` |
 | `admin.lua` | `content_by_lua` on `:9090` | CRUD admin API for policies |

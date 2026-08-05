@@ -54,11 +54,9 @@ go_version_ldflags() {
 
 CUBEMASTER_VERSION_PKG="github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version"
 CUBELET_VERSION_PKG="github.com/tencentcloud/CubeSandbox/Cubelet/pkg/version"
-NETAGENT_VERSION_PKG="github.com/tencentcloud/CubeSandbox/network-agent/pkg/version"
 
 CUBEMASTER_LDFLAGS="$(go_version_ldflags "${CUBEMASTER_VERSION_PKG}")"
 CUBELET_LDFLAGS="$(go_version_ldflags "${CUBELET_VERSION_PKG}")"
-NETAGENT_LDFLAGS="$(go_version_ldflags "${NETAGENT_VERSION_PKG}")"
 
 PREBUILT_DIR="/workspace/deploy/one-click/.work/prebuilt"
 mkdir -p "${PREBUILT_DIR}"
@@ -69,7 +67,6 @@ rm -f \
   "${PREBUILT_DIR}/cubecli" \
   "${PREBUILT_DIR}/cube-api" \
   "${PREBUILT_DIR}/cubeops" \
-  "${PREBUILT_DIR}/network-agent" \
   "${PREBUILT_DIR}/cubevsmapdump" \
   "${PREBUILT_DIR}/cube-agent" \
   "${PREBUILT_DIR}/cube-init" \
@@ -79,8 +76,8 @@ rm -f \
 # Component builds are split into independent tracks that run concurrently.
 # Cross-step dependencies that must be serialized:
 #   * cubecow static lib -> cubelet cgo link (inside track_cubelet)
-#   * cubevs BPF `go generate` -> network-agent + cubevsmapdump (inside
-#     track_netstack)
+#   * cubevs BPF `go generate` -> cubelet (embedded network runtime) +
+#     cubevsmapdump; hoisted to the serial pre-launch step with Cubelet proto
 #   * Cubelet proto generation -> BOTH track_cubelet AND track_cubemaster.
 #     CubeMaster/go.mod has `replace .../Cubelet => ../Cubelet` and imports
 #     Cubelet/api/services/volumeplugin/v1, so `go build ./cmd/cubemaster`
@@ -347,11 +344,8 @@ track_cubeops() {
 }
 
 track_netstack() {
-  # Generate the cubevs BPF bindings exactly once, then build both consumers.
-  # Running `go generate` twice concurrently would race on the same generated
-  # sources, so network-agent and cubevsmapdump share this single gen step.
-  ( cd /workspace/CubeNet/cubevs && make gen )
-  ( cd /workspace/network-agent && go build -ldflags "${NETAGENT_LDFLAGS}" -o "${PREBUILT_DIR}/network-agent" ./cmd/network-agent )
+  # cubevs BPF bindings are generated in the serial pre-launch step because
+  # track_cubelet also links CubeNet/cubevs after the network runtime embed.
   ( cd /workspace/CubeNet/cubevs && go build -o "${PREBUILT_DIR}/cubevsmapdump" ./cmd/cubevsmapdump )
 }
 
@@ -377,12 +371,14 @@ track_shim() {
   install -m 0755 /workspace/CubeShim/target/release/cube-runtime "${PREBUILT_DIR}/cube-runtime"
 }
 
-# Serial pre-launch step: generate Cubelet's protobuf sources exactly once
-# before any track starts. Both track_cubelet and track_cubemaster compile these
-# generated *.pb.go, so regenerating them inside a track would race the other
-# track's compiler on a cold cache (see dependency notes above).
+# Serial pre-launch steps: generate Cubelet protobuf sources and cubevs BPF
+# bindings exactly once before any track starts. Both track_cubelet and
+# track_cubemaster compile the generated *.pb.go; track_cubelet and
+# track_netstack both need the cubevs bpf2go outputs (see dependency notes).
 echo "[one-click] generating Cubelet proto sources (serial, pre-tracks)" >&2
 ( cd /workspace/Cubelet && make proto ) >&2
+echo "[one-click] generating CubeNet/cubevs bpf2go outputs (serial, pre-tracks)" >&2
+( cd /workspace/CubeNet/cubevs && make gen ) >&2
 
 echo "[one-click] building one-click components in parallel tracks" >&2
 # Queue order matters under a low concurrency cap: front-load the slowest,
@@ -419,7 +415,6 @@ for artifact in \
   cubecli \
   cube-api \
   cubeops \
-  network-agent \
   cubevsmapdump \
   cube-agent \
   cube-init \
@@ -436,7 +431,6 @@ ONE_CLICK_CUBELET_BIN="${PREBUILT_DIR}/cubelet" \
 ONE_CLICK_CUBECLI_BIN="${PREBUILT_DIR}/cubecli" \
 ONE_CLICK_CUBE_API_BIN="${PREBUILT_DIR}/cube-api" \
 ONE_CLICK_CUBE_OPS_BIN="${PREBUILT_DIR}/cubeops" \
-ONE_CLICK_NETWORK_AGENT_BIN="${PREBUILT_DIR}/network-agent" \
 ONE_CLICK_CUBEVSMAPDUMP_BIN="${PREBUILT_DIR}/cubevsmapdump" \
 ONE_CLICK_CUBE_AGENT_BIN="${PREBUILT_DIR}/cube-agent" \
 ONE_CLICK_CUBE_INIT_BIN="${PREBUILT_DIR}/cube-init" \

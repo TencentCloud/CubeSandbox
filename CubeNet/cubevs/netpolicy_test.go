@@ -50,7 +50,7 @@ func TestSplitAllowOutTargetsRejectsInvalidTargets(t *testing.T) {
 	}
 }
 
-func TestValidateNetPolicyEntryCountsUsesFinalMapTargets(t *testing.T) {
+func TestBuildNetPolicyPlanValidatesFinalMapTargets(t *testing.T) {
 	allowOutCIDRs := repeatedCIDRs(maxNetPolicyEntries)
 	l7AllowOutCIDRs := []string{"198.51.100.1"}
 	dnsAllowDomains := repeatedDomains(maxDNSAllowDomains)
@@ -59,48 +59,46 @@ func TestValidateNetPolicyEntryCountsUsesFinalMapTargets(t *testing.T) {
 
 	tests := []struct {
 		name string
-		err  error
+		opts MVMOptions
 		want string
 	}{
 		{
 			name: "allow out v2 counts allow and l7 cidrs",
-			err:  validateNetPolicyEntryCounts(allowOutCIDRs, l7AllowOutCIDRs, nil, nil, nil),
+			opts: MVMOptions{AllowOut: &allowOutCIDRs, L7AllowOut: &l7AllowOutCIDRs},
 			want: "network.allow_out_v2 exceeds maximum entries: got 8193, max 8192",
 		},
 		{
 			name: "dns allow counts allow and l7 domains",
-			err:  validateNetPolicyEntryCounts(nil, nil, dnsAllowDomains, l7DNSAllowDomains, nil),
+			opts: MVMOptions{AllowOut: &dnsAllowDomains, L7AllowOut: &l7DNSAllowDomains},
 			want: "network.dns_allow exceeds maximum entries: got 1025, max 1024",
 		},
 		{
-			name: "deny out counts effective deny cidrs",
-			err:  validateNetPolicyEntryCounts(nil, nil, nil, nil, denyOut),
+			name: "deny out counts effective deny cidrs on replace",
+			opts: MVMOptions{DenyOut: &denyOut},
 			want: "network.deny_out exceeds maximum entries: got 8193, max 8192",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.err == nil {
-				t.Fatalf("validateNetPolicyEntryCounts returned nil error")
+			_, err := buildNetPolicyPlan(tt.opts)
+			if err == nil {
+				t.Fatalf("buildNetPolicyPlan returned nil error")
 			}
-			if got := tt.err.Error(); got != tt.want {
+			if got := err.Error(); got != tt.want {
 				t.Fatalf("error=%q, want %q", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestValidateNetPolicyEntryCountsDeduplicatesByMapKey(t *testing.T) {
-	err := validateNetPolicyEntryCounts(
-		[]string{"198.51.100.1", "198.51.100.1/32"},
-		[]string{"198.51.100.1"},
-		[]string{"API.Example.COM."},
-		[]string{"api.example.com"},
-		[]string{"203.0.113.1", "203.0.113.1/32"},
-	)
-	if err != nil {
-		t.Fatalf("validateNetPolicyEntryCounts returned error: %v", err)
+func TestBuildNetPolicyPlanDeduplicatesValidationTargetsByMapKey(t *testing.T) {
+	allowOut := []string{"198.51.100.1", "198.51.100.1/32", "API.Example.COM."}
+	l7AllowOut := []string{"198.51.100.1", "api.example.com"}
+	denyOut := []string{"203.0.113.1", "203.0.113.1/32"}
+
+	if _, err := buildNetPolicyPlan(MVMOptions{AllowOut: &allowOut, L7AllowOut: &l7AllowOut, DenyOut: &denyOut}); err != nil {
+		t.Fatalf("buildNetPolicyPlan returned error: %v", err)
 	}
 }
 

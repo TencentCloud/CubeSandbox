@@ -68,7 +68,6 @@ var oneClickInstallLayout = map[string][][]string{
 	"cubemastercli":           {{"CubeMaster", "bin", "cubemastercli"}},
 	"cube-api":                {{"CubeAPI", "bin", "cube-api"}},
 	"cubecli":                 {{"Cubelet", "bin", "cubecli"}},
-	"network-agent":           {{"network-agent", "bin", "network-agent"}},
 	"containerd-shim-cube-rs": {{"cube-shim", "bin", "containerd-shim-cube-rs"}},
 	"cube-runtime":            {{"cube-shim", "bin", "cube-runtime"}},
 	"cube-egress":             {{"cube-egress", "version"}},
@@ -77,12 +76,11 @@ var oneClickInstallLayout = map[string][][]string{
 // pathAllowlist restricts which component keys may be accepted from each
 // directory's version.json.
 var pathAllowlist = map[string]map[string]struct{}{
-	"Cubelet":       {"cubelet": {}, "cubecli": {}},
-	"network-agent": {"network-agent": {}},
-	"cube-shim":     {"containerd-shim-cube-rs": {}, "cube-runtime": {}},
-	"cube-image":    {"guest-image": {}},
-	"cube-agent":    {"cube-agent": {}},
-	"cube-egress":   {"cube-egress": {}},
+	"Cubelet":     {"cubelet": {}, "cubecli": {}},
+	"cube-shim":   {"containerd-shim-cube-rs": {}, "cube-runtime": {}},
+	"cube-image":  {"guest-image": {}},
+	"cube-agent":  {"cube-agent": {}},
+	"cube-egress": {"cube-egress": {}},
 }
 
 // ComponentVersion is a pure-data version record.
@@ -301,7 +299,6 @@ func (c *Collector) detectStageGapsLocked(report *CollectReport) {
 	}
 	checks := []staged{
 		{"Cubelet", ".staged-cubelet", ".staging-cubelet"},
-		{"network-agent", ".staged-network-agent", ".staging-network-agent"},
 		{"cube-shim", ".staged-cube-shim", ".staging-cube-shim"},
 		{"cube-image", ".staged-cube-guest", ".staging-cube-guest"},
 		{"cube-agent", ".staged-cube-agent", ".staging-cube-agent"},

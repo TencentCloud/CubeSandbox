@@ -46,7 +46,7 @@ check_bpf_fs_preflight() {
   local bpf_dir="/sys/fs/bpf"
   if ! grep -qw bpf /proc/filesystems; then
     echo "[online-install] ERROR: Your kernel does not support the 'bpf' filesystem (eBPF is missing or not enabled)." >&2
-    echo "[online-install] network-agent requires eBPF to function properly." >&2
+    echo "[online-install] Cubelet's embedded network runtime requires eBPF to function properly." >&2
     echo "[online-install] Please upgrade your kernel or enable CONFIG_BPF_SYSCALL." >&2
     exit 3
   fi
@@ -57,7 +57,7 @@ check_bpf_fs_preflight() {
   fi
   if [[ "${bpf_fs_type}" != "bpf" ]]; then
     echo "[online-install] ERROR: /sys/fs/bpf is not mounted as a bpf filesystem (type: ${bpf_fs_type:-unknown})." >&2
-    echo "[online-install] network-agent requires bpffs for its pinned eBPF maps." >&2
+    echo "[online-install] Cubelet's embedded network runtime requires bpffs for its pinned eBPF maps." >&2
     echo "[online-install] Troubleshooting: https://github.com/TencentCloud/CubeSandbox/blob/master/docs/guide/troubleshooting/deployment.md#bpffs-is-not-mounted" >&2
     exit 3
   fi

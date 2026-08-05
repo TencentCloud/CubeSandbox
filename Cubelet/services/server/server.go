@@ -41,7 +41,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/resourcemetrics"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"google.golang.org/grpc"
 
 	containerdserver "github.com/containerd/containerd/v2/cmd/containerd/server"
@@ -108,23 +108,32 @@ func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
 		RegisterOperation(*http.ServeMux) error
 	}
 
+	// httpService is for lightweight Cubelet HTTP endpoints exposed by plugins,
+	// such as network runtime diagnostics. It is separate from operationService so
+	// these handlers are served on Cubelet's normal HTTP listener.
+	type httpService interface {
+		RegisterHTTP(map[string]http.Handler) error
+	}
+
 	type tcpService interface {
 		RegisterTCP(*grpc.Server) error
 	}
 
 	var (
 		operationServices   []operationService
+		httpServices        []httpService
 		tcpServices         []tcpService
 		engine              *workflow.Engine
 		imgExpirationSetter images.ExpirationTimeSetter
 	)
 
 	s := &Server{
-		Server:      baseServer,
-		tcpServer:   grpc.NewServer(),
-		tapProvider: new(tapProvider),
-		config:      config,
-		stopCh:      make(chan struct{}),
+		Server:       baseServer,
+		tcpServer:    grpc.NewServer(),
+		tapProvider:  new(tapProvider),
+		httpHandlers: make(map[string]http.Handler),
+		config:       config,
+		stopCh:       make(chan struct{}),
 	}
 
 	dynamConf.AppendConfigWatcher(s)
@@ -173,6 +182,9 @@ func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
 		if service, ok := instance.(operationService); ok {
 			operationServices = append(operationServices, service)
 		}
+		if service, ok := instance.(httpService); ok {
+			httpServices = append(httpServices, service)
+		}
 		if service, ok := instance.(tcpService); ok {
 			tcpServices = append(tcpServices, service)
 		}
@@ -186,6 +198,11 @@ func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
 	operationMux := s.operationServer.srv.Handler.(*http.ServeMux)
 	for _, service := range operationServices {
 		if err := service.RegisterOperation(operationMux); err != nil {
+			return nil, err
+		}
+	}
+	for _, service := range httpServices {
+		if err := service.RegisterHTTP(s.httpHandlers); err != nil {
 			return nil, err
 		}
 	}
@@ -209,6 +226,7 @@ type Server struct {
 	tapProvider          *tapProvider
 	metricServer         http.Handler
 	resourceMetricServer http.Handler
+	httpHandlers         map[string]http.Handler
 	config               *srvconfig.Config
 	stopCh               chan struct{}
 }
@@ -250,6 +268,8 @@ func (s *Server) ServeTCP(l net.Listener) error {
 	return trapClosedConnErr(s.tcpServer.Serve(l))
 }
 
+// appendHttpHandlers merges HTTP handler maps while rejecting duplicate paths.
+// Failing fast here prevents two plugins from silently shadowing the same Cubelet endpoint.
 func appendHttpHandlers(dst map[string]http.Handler, src map[string]http.Handler) (map[string]http.Handler, error) {
 	for path, handler := range src {
 		if dst[path] != nil {
@@ -283,6 +303,13 @@ func (s *Server) ServeHttp(l net.Listener) error {
 	}
 
 	log.G(context.Background()).Infof("ServeHttp: Serve snhost.")
+
+	// Plugin HTTP handlers are appended after built-in endpoints so path conflicts
+	// are detected against the complete Cubelet HTTP surface.
+	handlers, err = appendHttpHandlers(handlers, s.httpHandlers)
+	if err != nil {
+		return fmt.Errorf("failed to append plugin http handlers: %s", err.Error())
+	}
 
 	for path, handler := range handlers {
 

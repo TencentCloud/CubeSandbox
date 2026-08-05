@@ -15,6 +15,11 @@ type MVMOptions struct {
 	DenyOut             *[]string // CIDR or IP
 }
 
+type tapMetadataMapOps interface {
+	Lookup(key, valueOut interface{}) error
+	Delete(key interface{}) error
+}
+
 // ListTAPDevices lists all TAP devices that managed by CubeVS.
 func ListTAPDevices() ([]TAPDevice, error) {
 	m, err := loadPinnedMap(MapNameIfindexToMVMMetadata)
@@ -44,20 +49,20 @@ func ListTAPDevices() ([]TAPDevice, error) {
 
 // AddTAPDevice adds a new device to CubeVS.
 func AddTAPDevice(ifindex uint32, ip net.IP, id string, version uint32, opts MVMOptions) error {
-	if err := UpsertTAPDeviceMeta(ifindex, ip, id, version); err != nil {
+	if err := UpsertTAPDeviceMetadata(ifindex, ip, id, version); err != nil {
 		return err
 	}
 	if err := applyNetPolicy(ifindex, opts); err != nil {
-		_ = DelTAPDevice(ifindex, ip)
+		_ = DeleteTAPDevice(ifindex, ip)
 		return err
 	}
 	return nil
 }
 
-// UpsertTAPDeviceMeta registers or refreshes TAP metadata without touching
+// UpsertTAPDeviceMetadata registers or refreshes TAP metadata without touching
 // per-sandbox policy maps. Recovery paths use this to repair metadata while
 // preserving allow_out_v2, deny_out and dns_allow contents.
-func UpsertTAPDeviceMeta(ifindex uint32, ip net.IP, id string, version uint32) error {
+func UpsertTAPDeviceMetadata(ifindex uint32, ip net.IP, id string, version uint32) error {
 	if len(id) > maxIDLength {
 		return ErrTooLong
 	}
@@ -114,47 +119,63 @@ func UpsertTAPDeviceMeta(ifindex uint32, ip net.IP, id string, version uint32) e
 
 // UpsertTAPDevice registers a TAP device and replaces its desired policy state.
 func UpsertTAPDevice(ifindex uint32, ip net.IP, id string, version uint32, opts MVMOptions) error {
-	if err := UpsertTAPDeviceMeta(ifindex, ip, id, version); err != nil {
+	if err := UpsertTAPDeviceMetadata(ifindex, ip, id, version); err != nil {
 		return err
 	}
 	return replaceNetPolicy(ifindex, opts)
 }
 
-// DelTAPDevice removes a TAP device from CubeVS.
-func DelTAPDevice(ifindex uint32, ip net.IP) error {
-	// Clean up policy inner map entries first.
-	err := cleanupNetPolicy(ifindex)
-	if err != nil {
+// DeleteTAPDevice removes all CubeVS state for a TAP device. It is a compatibility
+// wrapper for callers that still want the old all-in-one behavior; new runtime
+// cleanup paths should compose CleanupTAPDevicePolicy and DeleteTAPDeviceMetadata
+// explicitly so policy cleanup and metadata cleanup remain separate steps.
+func DeleteTAPDevice(ifindex uint32, ip net.IP) error {
+	if err := CleanupTAPDevicePolicy(ifindex); err != nil {
 		return err
 	}
-	if err := cleanupDNSAllow(ifindex); err != nil {
-		return err
-	}
+	return DeleteTAPDeviceMetadata(ifindex, ip)
+}
 
+// DeleteTAPDeviceMetadata removes TAP identity metadata from CubeVS without touching
+// policy maps. Missing keys are treated as already-clean so cleanup paths remain
+// idempotent.
+func DeleteTAPDeviceMetadata(ifindex uint32, ip net.IP) error {
 	mvmIP := ipToUint32(ip)
 
 	// ifindex <-> MVM metadata
-	m, err := loadPinnedMap(MapNameIfindexToMVMMetadata)
+	ifindexMap, err := loadPinnedMap(MapNameIfindexToMVMMetadata)
 	if err != nil {
 		return err
 	}
-	defer m.Close()
-
-	err = m.Delete(&ifindex)
-	if err != nil {
-		return fmt.Errorf("map.Delete failed: %w, name: %s", err, MapNameIfindexToMVMMetadata)
-	}
+	defer ifindexMap.Close()
 
 	// MVM IP <-> ifindex
-	m, err = loadPinnedMap(MapNameMVMIPToIfindex)
+	ipMap, err := loadPinnedMap(MapNameMVMIPToIfindex)
 	if err != nil {
 		return err
 	}
-	defer m.Close()
+	defer ipMap.Close()
 
-	err = m.Delete(&mvmIP)
-	if err != nil {
-		return fmt.Errorf("map.Delete failed: %w, name: %s", err, MapNameMVMIPToIfindex)
+	return deleteTAPDeviceMetadataEntries(ifindexMap, ipMap, ifindex, mvmIP)
+}
+
+func deleteTAPDeviceMetadataEntries(ifindexMap, ipMap tapMetadataMapOps, ifindex, mvmIP uint32) error {
+	var mappedIfindex uint32
+	ipMappingFound := true
+	if err := ipMap.Lookup(&mvmIP, &mappedIfindex); err != nil {
+		if !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return fmt.Errorf("map.Lookup failed before delete: %w, name: %s", err, MapNameMVMIPToIfindex)
+		}
+		ipMappingFound = false
+	}
+
+	if err := ifindexMap.Delete(&ifindex); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("map.Delete failed: %w, name: %s", err, MapNameIfindexToMVMMetadata)
+	}
+	if ipMappingFound && mappedIfindex == ifindex {
+		if err := ipMap.Delete(&mvmIP); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return fmt.Errorf("map.Delete failed: %w, name: %s", err, MapNameMVMIPToIfindex)
+		}
 	}
 
 	return nil

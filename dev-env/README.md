@@ -87,8 +87,8 @@ Inside the guest shell from Step 3:
 curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | bash
 ```
 
-When this finishes you should see the four core processes alive
-(`network-agent`, `cubemaster`, `cube-api`, `cubelet`).
+When this finishes you should see the core processes alive
+(`cubemaster`, `cube-api`, `cubelet`). The former network runtime is now embedded in `cubelet`.
 
 ### Step 5 &nbsp; Verify &nbsp; *(inside the VM)*
 
@@ -110,8 +110,8 @@ on every boot, run **on the host** after Step 5:
 
 This asks for confirmation, then enables `cube-sandbox-oneclick.service`
 inside the guest. From now on every boot will run `up-with-deps.sh`,
-which brings MySQL/Redis, cube-proxy, coredns, network-agent,
-cubemaster, cube-api and cubelet up together.
+which brings MySQL/Redis, cube-proxy, coredns,
+cubemaster, cube-api and cubelet up together. The network runtime starts inside `cubelet`.
 
 Other subcommands:
 

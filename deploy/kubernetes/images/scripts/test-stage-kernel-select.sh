@@ -140,11 +140,11 @@ rm -f "${marker}"
 printf 'ok: success path can clear staging marker\n'
 
 # --- ensure_component_version_json: no weak env synthesis ---
-dst="${TMP}/na"
+dst="${TMP}/cubelet"
 mkdir -p "${dst}"
-CUBE_VERSION=should-not-write ensure_component_version_json network-agent "${dst}"
+CUBE_VERSION=should-not-write ensure_component_version_json cubelet "${dst}"
 [[ ! -f "${dst}/version.json" ]] || { echo "FAIL: weak env wrote version.json"; exit 1; }
-printf 'ok: network-agent does not synthesize from CUBE_VERSION\n'
+printf 'ok: cubelet does not synthesize from CUBE_VERSION\n'
 
 mkdir -p "${TMP}/guest"
 printf 'g1\n' >"${TMP}/guest/version"

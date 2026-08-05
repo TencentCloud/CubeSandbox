@@ -2,13 +2,10 @@
 set -euo pipefail
 
 TOOLBOX_ROOT="${TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
-NETWORK_AGENT_BIN="${TOOLBOX_ROOT}/network-agent/bin/network-agent"
 CUBELET_BIN="${TOOLBOX_ROOT}/Cubelet/bin/cubelet"
 CUBELET_CONFIG="${TOOLBOX_ROOT}/Cubelet/config/config.toml"
 CUBELET_DYNAMICCONF="${CUBELET_DYNAMICCONF:-${TOOLBOX_ROOT}/Cubelet/dynamicconf/conf.yaml}"
 CUBE_KERNEL_DIR="${TOOLBOX_ROOT}/cube-kernel-scf"
-NETWORK_AGENT_STATE_DIR="${NETWORK_AGENT_STATE_DIR:-/data/cubelet/network-agent/state}"
-NETWORK_AGENT_HEALTH_URL="${NETWORK_AGENT_HEALTH_URL:-http://127.0.0.1:19090/readyz}"
 if [[ -z "${CUBE_MASTER_ENDPOINT:-}" ]]; then
   # Do not fall back to a hardcoded namespace like cube-system: when this env
   # var is missing it means the DaemonSet template did not inject the endpoint
@@ -155,7 +152,6 @@ configure_sandbox_dns() {
   patch_common_yaml_list default_dns_servers "${CUBE_SANDBOX_DNS_SERVERS:-}"
 }
 
-[[ -x "${NETWORK_AGENT_BIN}" ]] || fail "missing executable: ${NETWORK_AGENT_BIN}"
 [[ -x "${CUBELET_BIN}" ]] || fail "missing executable: ${CUBELET_BIN}"
 [[ -f "${CUBELET_CONFIG}" ]] || fail "missing config: ${CUBELET_CONFIG}"
 [[ -f "${CUBELET_DYNAMICCONF}" ]] || fail "missing dynamic config: ${CUBELET_DYNAMICCONF}"
@@ -208,7 +204,6 @@ if [[ -n "${CUBE_WORKFLOW_CONCURRENT:-}" ]]; then
 fi
 
 mkdir -p \
-  "${NETWORK_AGENT_STATE_DIR}" \
   "${TOOLBOX_ROOT}/cube-vs/network" \
   "${TOOLBOX_ROOT}/cube-snapshot" \
   /tmp/cube \
@@ -229,14 +224,10 @@ if ! findmnt --mountpoint /data/cubelet/state >/dev/null 2>&1; then
   log "bound /data/cubelet/state to hostPath (skip state tmpfs)"
 fi
 
-rm -f \
-  /tmp/cube/network-agent.sock \
-  /tmp/cube/network-agent-grpc.sock \
-  /tmp/cube/network-agent-tap.sock \
-  || true
 
-# stop_stale_processes intentionally matches ONLY cubelet / network-agent.
-# Never broaden these patterns to containerd-shim-cube-rs, cube-runtime, or
+
+# stop_stale_processes intentionally matches ONLY cubelet.
+# Never broaden this pattern to containerd-shim-cube-rs, cube-runtime, or
 # VMM processes: those must survive Pod rebuilds so existing sandboxes keep
 # running across image upgrades (one-click KillMode=process equivalent).
 # Also never call InitHost / cubecli unsafe init from this entrypoint — that
@@ -260,36 +251,18 @@ stop_stale_processes() {
   pgrep -f "${pattern}" | xargs -r kill -9 2>/dev/null || true
 }
 
-stop_stale_processes network-agent "${NETWORK_AGENT_BIN}"
 stop_stale_processes cubelet "${CUBELET_BIN}"
 
 cleanup() {
   # TERM/INT/HUP/EXIT: stop only the control processes we started. Do not
   # pkill shim/runtime — Pod deletion must leave microVMs alive for recover.
-  if [[ -n "${NETWORK_AGENT_PID:-}" ]]; then
-    kill "${NETWORK_AGENT_PID}" 2>/dev/null || true
-  fi
   if [[ -n "${CUBELET_PID:-}" ]]; then
     kill "${CUBELET_PID}" 2>/dev/null || true
   fi
 }
 trap cleanup TERM INT HUP EXIT
 
-log "starting network-agent"
-"${NETWORK_AGENT_BIN}" --cubelet-config "${CUBELET_CONFIG}" --state-dir "${NETWORK_AGENT_STATE_DIR}" &
-NETWORK_AGENT_PID=$!
 
-for i in $(seq 1 120); do
-  if curl -fsS "${NETWORK_AGENT_HEALTH_URL}" >/dev/null 2>&1; then
-    log "network-agent ready"
-    break
-  fi
-  if ! kill -0 "${NETWORK_AGENT_PID}" >/dev/null 2>&1; then
-    fail "network-agent exited before ready"
-  fi
-  [[ "${i}" -lt 120 ]] || fail "network-agent did not become ready"
-  sleep 1
-done
 
 log "starting cubelet for node ${CUBE_SANDBOX_NODE_IP}"
 "${CUBELET_BIN}" --config "${CUBELET_CONFIG}" --dynamic-conf-path "${CUBELET_DYNAMICCONF}" &
@@ -310,9 +283,6 @@ for i in $(seq 1 60); do
 done
 
 while true; do
-  if ! kill -0 "${NETWORK_AGENT_PID}" >/dev/null 2>&1; then
-    fail "network-agent exited"
-  fi
   if ! kill -0 "${CUBELET_PID}" >/dev/null 2>&1; then
     fail "cubelet exited"
   fi

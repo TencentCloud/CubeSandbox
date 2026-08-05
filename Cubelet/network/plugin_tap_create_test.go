@@ -6,34 +6,49 @@ package network
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/tomlext"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/network/proto"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/networkagentclient"
+	networkruntime "github.com/tencentcloud/CubeSandbox/Cubelet/network/runtime"
+	networktypes "github.com/tencentcloud/CubeSandbox/Cubelet/network/types"
+	networkstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/network"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 )
 
-type fakeNetworkAgentClient struct {
+type fakeNetworkRuntime struct {
 	ensureCalled       bool
-	lastEnsureRequest  *networkagentclient.EnsureNetworkRequest
+	ensureErr          error
+	lastEnsureRequest  *networkruntime.EnsureNetworkRequest
 	releaseCalled      bool
-	lastReleaseRequest *networkagentclient.ReleaseNetworkRequest
+	lastReleaseRequest *networkruntime.ReleaseNetworkRequest
+	listTaps           []networkruntime.TapState
+	dumpPolicies       map[string]map[string]any
 	healthErrs         []error
 	healthCalls        int
+	tapFiles           []*os.File
+	getTapFileCalls    int
+	lastTapSandboxID   string
+	lastTapName        string
 }
 
-func (c *fakeNetworkAgentClient) EnsureNetwork(_ context.Context, req *networkagentclient.EnsureNetworkRequest) (*networkagentclient.EnsureNetworkResponse, error) {
+func (c *fakeNetworkRuntime) EnsureNetwork(_ context.Context, req *networkruntime.EnsureNetworkRequest) (*networkruntime.EnsureNetworkResponse, error) {
 	c.ensureCalled = true
 	c.lastEnsureRequest = req
-	return &networkagentclient.EnsureNetworkResponse{
+	if c.ensureErr != nil {
+		return nil, c.ensureErr
+	}
+	return &networkruntime.EnsureNetworkResponse{
 		SandboxID:     "sandbox-1",
 		NetworkHandle: "sandbox-1",
-		Interfaces: []networkagentclient.Interface{
+		Interfaces: []networkruntime.Interface{
 			{
 				Name:    "z192.168.0.40",
 				MAC:     "20:90:6f:fc:fc:fc",
@@ -42,13 +57,13 @@ func (c *fakeNetworkAgentClient) EnsureNetwork(_ context.Context, req *networkag
 				Gateway: "169.254.68.5",
 			},
 		},
-		Routes: []networkagentclient.Route{
+		Routes: []networkruntime.Route{
 			{
 				Gateway: "169.254.68.5",
 				Device:  eth0,
 			},
 		},
-		ARPNeighbors: []networkagentclient.ARPNeighbor{
+		ARPNeighbors: []networkruntime.ARPNeighbor{
 			{
 				IP:     "169.254.68.5",
 				MAC:    "20:90:6f:cf:cf:cf",
@@ -63,21 +78,21 @@ func (c *fakeNetworkAgentClient) EnsureNetwork(_ context.Context, req *networkag
 	}, nil
 }
 
-func (c *fakeNetworkAgentClient) ReleaseNetwork(_ context.Context, req *networkagentclient.ReleaseNetworkRequest) error {
+func (c *fakeNetworkRuntime) ReleaseNetwork(_ context.Context, req *networkruntime.ReleaseNetworkRequest) (*networkruntime.ReleaseNetworkResponse, error) {
 	c.releaseCalled = true
 	c.lastReleaseRequest = req
-	return nil
+	return &networkruntime.ReleaseNetworkResponse{Released: true, PersistMetadata: req.PersistMetadata}, nil
 }
 
-func (c *fakeNetworkAgentClient) ReconcileNetwork(context.Context, *networkagentclient.ReconcileNetworkRequest) (*networkagentclient.ReconcileNetworkResponse, error) {
-	return nil, nil
+func (c *fakeNetworkRuntime) ListTaps(_ context.Context, _ *networkruntime.ListTapsRequest) (*networkruntime.ListTapsResponse, error) {
+	stateCounts := map[string]int{}
+	for _, tap := range c.listTaps {
+		stateCounts[tap.State]++
+	}
+	return &networkruntime.ListTapsResponse{Taps: append([]networkruntime.TapState(nil), c.listTaps...), StateCounts: stateCounts}, nil
 }
 
-func (c *fakeNetworkAgentClient) GetNetwork(context.Context, *networkagentclient.GetNetworkRequest) (*networkagentclient.GetNetworkResponse, error) {
-	return nil, nil
-}
-
-func (c *fakeNetworkAgentClient) Health(context.Context, *networkagentclient.HealthRequest) error {
+func (c *fakeNetworkRuntime) Health(context.Context) error {
 	if c.healthCalls < len(c.healthErrs) {
 		err := c.healthErrs[c.healthCalls]
 		c.healthCalls++
@@ -87,23 +102,37 @@ func (c *fakeNetworkAgentClient) Health(context.Context, *networkagentclient.Hea
 	return nil
 }
 
-func (c *fakeNetworkAgentClient) ListNetworks(_ context.Context, _ *networkagentclient.ListNetworksRequest) (*networkagentclient.ListNetworksResponse, error) {
-	return &networkagentclient.ListNetworksResponse{}, nil
+func (c *fakeNetworkRuntime) GetTapFile(sandboxID, tapName string) (*os.File, error) {
+	c.getTapFileCalls++
+	c.lastTapSandboxID = sandboxID
+	c.lastTapName = tapName
+	if len(c.tapFiles) > 0 {
+		file := c.tapFiles[0]
+		c.tapFiles = c.tapFiles[1:]
+		return file, nil
+	}
+	return nil, errors.New("tap fd unavailable")
 }
 
-func TestTapCreateInNetworkAgentModeCallsEnsureNetwork(t *testing.T) {
-	fakeClient := &fakeNetworkAgentClient{}
+func (c *fakeNetworkRuntime) DumpEgressPolicies(context.Context) (map[string]map[string]any, error) {
+	if c.dumpPolicies != nil {
+		return c.dumpPolicies, nil
+	}
+	return map[string]map[string]any{}, nil
+}
+
+func TestTapCreateWithNetworkRuntimeCallsEnsureNetwork(t *testing.T) {
+	fakeClient := &fakeNetworkRuntime{}
 	l := &local{
 		Config: &Config{
-			EnableNetworkAgent: true,
-			MVMMacAddr:         "20:90:6f:fc:fc:fc",
-			MvmMtu:             1500,
-			MvmGwDestIP:        "169.254.68.5",
-			MVMInnerIP:         "169.254.68.6",
-			MvmMask:            30,
+			MVMMacAddr:  "20:90:6f:fc:fc:fc",
+			MvmMtu:      1500,
+			MvmGwDestIP: "169.254.68.5",
+			MVMInnerIP:  "169.254.68.6",
+			MvmMask:     30,
 		},
-		cubeDev:            &proto.CubeDev{Index: 16},
-		networkAgentClient: fakeClient,
+
+		networkRuntime: fakeClient,
 	}
 
 	req := &cubebox.RunCubeSandboxRequest{
@@ -119,40 +148,145 @@ func TestTapCreateInNetworkAgentModeCallsEnsureNetwork(t *testing.T) {
 
 	err := l.Create(context.Background(), opts)
 
-	if err == nil {
-		t.Fatal("Create error=nil, want downstream register failure after EnsureNetwork")
-	}
-	if !strings.Contains(err.Error(), "register network-agent tap for pool failed") {
-		t.Fatalf("Create error=%v, want register network-agent tap failure", err)
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
 	}
 	if !fakeClient.ensureCalled {
-		t.Fatal("network-agent EnsureNetwork was not called")
+		t.Fatal("network runtime EnsureNetwork was not called")
 	}
-	if !fakeClient.releaseCalled {
-		t.Fatal("network-agent ReleaseNetwork was not called after downstream register failure")
+	if fakeClient.getTapFileCalls != 0 {
+		t.Fatalf("Create called GetTapFile %d times, want lazy shim fd handoff", fakeClient.getTapFileCalls)
 	}
-	if fakeClient.lastReleaseRequest == nil || fakeClient.lastReleaseRequest.NetworkHandle != "sandbox-1" {
-		t.Fatalf("ReleaseNetwork request invalid: %+v", fakeClient.lastReleaseRequest)
+	if fakeClient.releaseCalled {
+		t.Fatal("network runtime ReleaseNetwork was called despite successful Create")
 	}
-	if fakeClient.lastReleaseRequest.IdempotencyKey != "req-1" {
-		t.Fatalf("ReleaseNetwork idempotency key=%q, want req-1", fakeClient.lastReleaseRequest.IdempotencyKey)
+	shimInfo, ok := opts.NetworkInfo.(*networktypes.ShimNetReq)
+	if !ok || shimInfo == nil || len(shimInfo.Interfaces) != 1 || shimInfo.Interfaces[0].Name != "z192.168.0.40" {
+		t.Fatalf("NetworkInfo not populated from runtime response: %+v", opts.NetworkInfo)
 	}
 }
 
-func TestTapCreateInNetworkAgentModeAddsDNSAllowOutCIDRsForDomainAllow(t *testing.T) {
-	fakeClient := &fakeNetworkAgentClient{}
+func TestTapCreateReleasesRuntimeAfterCommittedEnsureError(t *testing.T) {
+	fakeClient := &fakeNetworkRuntime{ensureErr: errors.Join(
+		networkruntime.ErrEnsureNetworkCommitted,
+		errors.New("success commit outcome unknown"),
+	)}
+	l := &local{
+		Config: &Config{
+			MVMMacAddr:  "20:90:6f:fc:fc:fc",
+			MvmMtu:      1500,
+			MvmGwDestIP: "169.254.68.5",
+			MVMInnerIP:  "169.254.68.6",
+			MvmMask:     30,
+		},
+		networkRuntime: fakeClient,
+	}
+	opts := &workflow.CreateContext{
+		BaseWorkflowInfo: workflow.BaseWorkflowInfo{SandboxID: "sandbox-ensure-error"},
+		ReqInfo: &cubebox.RunCubeSandboxRequest{
+			RequestID:    "ensure-error-request",
+			InstanceType: cubebox.InstanceType_cubebox.String(),
+		},
+	}
+
+	if err := l.Create(context.Background(), opts); err == nil {
+		t.Fatal("Create succeeded despite runtime EnsureNetwork error")
+	}
+	if !fakeClient.releaseCalled {
+		t.Fatal("Create did not issue idempotent ReleaseNetwork after EnsureNetwork error")
+	}
+	if fakeClient.lastReleaseRequest == nil ||
+		fakeClient.lastReleaseRequest.SandboxID != "sandbox-ensure-error" ||
+		fakeClient.lastReleaseRequest.NetworkHandle != "sandbox-ensure-error" ||
+		fakeClient.lastReleaseRequest.IdempotencyKey != "ensure-error-request" {
+		t.Fatalf("ReleaseNetwork request after EnsureNetwork error = %+v", fakeClient.lastReleaseRequest)
+	}
+}
+
+func TestTapCreateDoesNotReleaseRuntimeAfterPreCommitEnsureError(t *testing.T) {
+	fakeClient := &fakeNetworkRuntime{ensureErr: errors.New("invalid create request")}
+	l := &local{
+		Config: &Config{
+			MVMMacAddr:  "20:90:6f:fc:fc:fc",
+			MvmMtu:      1500,
+			MvmGwDestIP: "169.254.68.5",
+			MVMInnerIP:  "169.254.68.6",
+			MvmMask:     30,
+		},
+		networkRuntime: fakeClient,
+	}
+	opts := &workflow.CreateContext{
+		BaseWorkflowInfo: workflow.BaseWorkflowInfo{SandboxID: "sandbox-precommit-error"},
+		ReqInfo: &cubebox.RunCubeSandboxRequest{
+			RequestID:    "precommit-error-request",
+			InstanceType: cubebox.InstanceType_cubebox.String(),
+		},
+	}
+
+	if err := l.Create(context.Background(), opts); err == nil {
+		t.Fatal("Create succeeded despite runtime EnsureNetwork error")
+	}
+	if fakeClient.releaseCalled {
+		t.Fatal("pre-commit EnsureNetwork error triggered a cross-request ReleaseNetwork")
+	}
+}
+
+func TestGetTapFileForShimGetsFreshRuntimeFDForEveryRequest(t *testing.T) {
+	oldDNM := dnm
+	defer func() {
+		dnm = oldDNM
+	}()
+	firstFile, err := os.CreateTemp(t.TempDir(), "tap-fd-first-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer firstFile.Close()
+	secondFile, err := os.CreateTemp(t.TempDir(), "tap-fd-second-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondFile.Close()
+	fakeClient := &fakeNetworkRuntime{
+		tapFiles: []*os.File{firstFile, secondFile},
+	}
+	dnm = &delegateNetworkManager{tapPlugin: &local{networkRuntime: fakeClient}}
+
+	file, err := GetTapFileForShim("sandbox-lazy", "tap-lazy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file != firstFile {
+		t.Fatalf("file=%#v, want %#v", file, firstFile)
+	}
+	if fakeClient.getTapFileCalls != 1 || fakeClient.lastTapSandboxID != "sandbox-lazy" || fakeClient.lastTapName != "tap-lazy" {
+		t.Fatalf("GetTapFile calls=%d sandbox=%q tap=%q", fakeClient.getTapFileCalls, fakeClient.lastTapSandboxID, fakeClient.lastTapName)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close first caller-owned fd: %v", err)
+	}
+
+	again, err := GetTapFileForShim("sandbox-lazy", "tap-lazy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != secondFile || fakeClient.getTapFileCalls != 2 {
+		t.Fatalf("second request did not get a fresh runtime fd: again=%#v calls=%d", again, fakeClient.getTapFileCalls)
+	}
+}
+
+func TestTapCreateWithNetworkRuntimeAddsDNSAllowOutCIDRsForDomainAllow(t *testing.T) {
+	fakeClient := &fakeNetworkRuntime{}
 	block := false
 	l := &local{
 		Config: &Config{
-			EnableNetworkAgent: true,
-			MVMMacAddr:         "20:90:6f:fc:fc:fc",
-			MvmMtu:             1500,
-			MvmGwDestIP:        "169.254.68.5",
-			MVMInnerIP:         "169.254.68.6",
-			MvmMask:            30,
+			MVMMacAddr:  "20:90:6f:fc:fc:fc",
+			MvmMtu:      1500,
+			MvmGwDestIP: "169.254.68.5",
+			MVMInnerIP:  "169.254.68.6",
+			MvmMask:     30,
 		},
-		cubeDev:            &proto.CubeDev{Index: 16},
-		networkAgentClient: fakeClient,
+
+		networkRuntime: fakeClient,
 	}
 
 	req := &cubebox.RunCubeSandboxRequest{
@@ -177,8 +311,11 @@ func TestTapCreateInNetworkAgentModeAddsDNSAllowOutCIDRsForDomainAllow(t *testin
 	}
 
 	err := l.Create(context.Background(), opts)
-	if err == nil {
-		t.Fatal("Create error=nil, want downstream register failure after EnsureNetwork")
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if fakeClient.getTapFileCalls != 0 {
+		t.Fatalf("Create called GetTapFile %d times, want lazy shim fd handoff", fakeClient.getTapFileCalls)
 	}
 	if fakeClient.lastEnsureRequest == nil || fakeClient.lastEnsureRequest.CubeNetworkConfig == nil {
 		t.Fatal("EnsureNetwork request missing CubeNetworkConfig")
@@ -189,27 +326,272 @@ func TestTapCreateInNetworkAgentModeAddsDNSAllowOutCIDRsForDomainAllow(t *testin
 	}
 }
 
-func TestWaitForNetworkAgentReadyRetriesUntilSuccess(t *testing.T) {
-	fakeClient := &fakeNetworkAgentClient{
-		healthErrs: []error{
-			errors.New("connection refused"),
-			errors.New("transport is closing"),
-		},
+func TestWaitForNetworkRuntimeReadyReturnsHealthError(t *testing.T) {
+	fakeClient := &fakeNetworkRuntime{
+		healthErrs: []error{errors.New("runtime not ready")},
 	}
 	l := &local{
-		Config: &Config{
-			NetworkAgentEndpoint:      "grpc+unix:///tmp/cube/network-agent-grpc.sock",
-			NetworkAgentInitTimeout:   tomlext.FromStdTime(200 * time.Millisecond),
-			NetworkAgentRetryInterval: tomlext.FromStdTime(10 * time.Millisecond),
-		},
-		networkAgentClient: fakeClient,
+		Config:         &Config{},
+		networkRuntime: fakeClient,
 	}
 
-	if err := l.waitForNetworkAgentReady(context.Background()); err != nil {
-		t.Fatalf("waitForNetworkAgentReady error=%v", err)
+	if err := l.waitForNetworkRuntimeReady(context.Background()); err == nil {
+		t.Fatal("waitForNetworkRuntimeReady error=nil, want health error")
 	}
-	if fakeClient.healthCalls < 3 {
-		t.Fatalf("healthCalls=%d, want at least 3", fakeClient.healthCalls)
+	if fakeClient.healthCalls != 1 {
+		t.Fatalf("healthCalls=%d, want 1", fakeClient.healthCalls)
+	}
+}
+
+func TestDelegateNetworkManagerRegistersHTTPHandlers(t *testing.T) {
+	manager := &delegateNetworkManager{tapPlugin: &local{networkRuntime: &fakeNetworkRuntime{}}}
+	var service interface {
+		RegisterHTTP(map[string]http.Handler) error
+	} = manager
+
+	handlers := map[string]http.Handler{}
+	if err := service.RegisterHTTP(handlers); err != nil {
+		t.Fatalf("RegisterHTTP returned error: %v", err)
+	}
+	if handlers[egressPolicyDumpPath] == nil || handlers[networkTapsPath] == nil {
+		t.Fatalf("handlers not registered through delegateNetworkManager: %+v", handlers)
+	}
+}
+
+func TestRegisterHTTPExposesNetworkRuntimeTaps(t *testing.T) {
+	fakeClient := &fakeNetworkRuntime{
+		listTaps: []networkruntime.TapState{
+			{
+				SandboxID:      "sandbox-http",
+				TapName:        "z192.168.0.80",
+				TapIfIndex:     80,
+				SandboxIP:      "192.168.0.80",
+				State:          string(networkruntime.TapPoolCleaning),
+				OwnerSandboxID: "sandbox-http",
+				RetryCount:     2,
+				LastError:      "cubeegress verify failed",
+				PortMappings: []networkruntime.PortMapping{
+					{Protocol: "tcp", HostIP: "127.0.0.1", HostPort: 20080, ContainerPort: 8080},
+				},
+			},
+		},
+	}
+	l := &local{networkRuntime: fakeClient}
+	handlers := map[string]http.Handler{}
+	if err := l.RegisterHTTP(handlers); err != nil {
+		t.Fatalf("RegisterHTTP returned error: %v", err)
+	}
+	handler := handlers["/v1/network/taps"]
+	if handler == nil {
+		t.Fatal("/v1/network/taps handler not registered")
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/v1/network/taps", nil)
+	request.RemoteAddr = "127.0.0.1:12345"
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var resp networkruntime.ListTapsResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Taps) != 1 || resp.Taps[0].SandboxID != "sandbox-http" || resp.Taps[0].PortMappings[0].HostPort != 20080 {
+		t.Fatalf("unexpected taps response: %+v", resp)
+	}
+	if resp.Taps[0].State != string(networkruntime.TapPoolCleaning) || resp.Taps[0].RetryCount != 2 || resp.Taps[0].LastError == "" {
+		t.Fatalf("taps diagnostic fields missing: %+v", resp.Taps[0])
+	}
+	if resp.StateCounts[string(networkruntime.TapPoolCleaning)] != 1 {
+		t.Fatalf("stateCounts=%v, want one Cleaning tap", resp.StateCounts)
+	}
+}
+
+func TestNetworkTapsRejectsNonLoopbackClients(t *testing.T) {
+	l := &local{networkRuntime: &fakeNetworkRuntime{
+		listTaps: []networkruntime.TapState{
+			{SandboxID: "sandbox-secret", TapName: "z192.168.0.81", SandboxIP: "192.168.0.81"},
+		},
+	}}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/v1/network/taps", nil)
+	request.RemoteAddr = "192.0.2.10:12345"
+
+	l.handleListNetworkTaps(recorder, request)
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status=%d body=%s, want forbidden", recorder.Code, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "sandbox-secret") {
+		t.Fatalf("tap diagnostics leaked to non-loopback client: %s", recorder.Body.String())
+	}
+}
+
+func TestRegisterHTTPExposesEgressPoliciesDumpWithBootstrapShape(t *testing.T) {
+	fakeClient := &fakeNetworkRuntime{
+		dumpPolicies: map[string]map[string]any{
+			"192.168.0.10": {
+				"policy_id": "policy-1",
+				"rules": []any{
+					map[string]any{"type": "domain", "value": "example.com"},
+				},
+			},
+		},
+	}
+	l := &local{networkRuntime: fakeClient}
+	handlers := map[string]http.Handler{}
+	if err := l.RegisterHTTP(handlers); err != nil {
+		t.Fatalf("RegisterHTTP returned error: %v", err)
+	}
+	handler := handlers["/v1/policies/dump"]
+	if handler == nil {
+		t.Fatal("/v1/policies/dump handler not registered")
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/v1/policies/dump", nil)
+	request.RemoteAddr = "127.0.0.1:12345"
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var resp struct {
+		Policies map[string]map[string]any `json:"policies"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	policy := resp.Policies["192.168.0.10"]
+	if policy == nil {
+		t.Fatalf("policies wrapper missing sandbox policy: %+v", resp)
+	}
+	if policy["policy_id"] != "policy-1" {
+		t.Fatalf("policy_id=%v, want policy-1", policy["policy_id"])
+	}
+}
+
+func TestEgressPoliciesDumpRejectsNonLoopbackClients(t *testing.T) {
+	l := &local{networkRuntime: &fakeNetworkRuntime{
+		dumpPolicies: map[string]map[string]any{
+			"192.168.0.10": {"secret": "must-not-leak"},
+		},
+	}}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/v1/policies/dump", nil)
+	request.RemoteAddr = "192.0.2.10:12345"
+
+	l.handleDumpEgressPolicies(recorder, request)
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status=%d body=%s, want forbidden", recorder.Code, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "must-not-leak") {
+		t.Fatalf("policy secret leaked to non-loopback client: %s", recorder.Body.String())
+	}
+}
+
+func TestDelegateDestroyCallsTapRuntimeWhenAllocationMissing(t *testing.T) {
+	fakeClient := &fakeNetworkRuntime{}
+	manager := &delegateNetworkManager{
+		tapPlugin: &local{
+			Config:          &Config{},
+			allocationStore: networkstore.NewStore(nil),
+			networkRuntime:  fakeClient,
+		},
+		allocationStore: networkstore.NewStore(nil),
+	}
+
+	err := manager.Destroy(context.Background(), &workflow.DestroyContext{
+		BaseWorkflowInfo: workflow.BaseWorkflowInfo{SandboxID: "sandbox-missing-allocation"},
+		DestroyInfo: &cubebox.DestroyCubeSandboxRequest{
+			SandboxID: "sandbox-missing-allocation",
+			RequestID: "destroy-missing-allocation",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Destroy returned error: %v", err)
+	}
+	if !fakeClient.releaseCalled {
+		t.Fatal("network runtime ReleaseNetwork was not called when allocation metadata was missing")
+	}
+	if fakeClient.lastReleaseRequest == nil || fakeClient.lastReleaseRequest.SandboxID != "sandbox-missing-allocation" {
+		t.Fatalf("ReleaseNetwork request invalid: %+v", fakeClient.lastReleaseRequest)
+	}
+	if fakeClient.lastReleaseRequest.IdempotencyKey != "destroy-missing-allocation" {
+		t.Fatalf("ReleaseNetwork idempotency key=%q, want destroy-missing-allocation", fakeClient.lastReleaseRequest.IdempotencyKey)
+	}
+}
+
+func TestTapDestroyCallsNetworkRuntimeEvenWhenLocalFDCacheMissing(t *testing.T) {
+	fakeClient := &fakeNetworkRuntime{}
+	allocationStore := networkstore.NewStore(nil)
+	allocationStore.Add(networkstore.NetworkAllocation{
+		SandboxID:          "sandbox-destroy",
+		NetworkType:        cubebox.NetworkType_tap.String(),
+		PersistentMetadata: (&networktypes.ShimNetReq{}).GetPersistMetadata(),
+	})
+	l := &local{
+		Config:          &Config{},
+		allocationStore: allocationStore,
+		networkRuntime:  fakeClient,
+	}
+
+	err := l.Destroy(context.Background(), &workflow.DestroyContext{
+		BaseWorkflowInfo: workflow.BaseWorkflowInfo{SandboxID: "sandbox-destroy"},
+		DestroyInfo: &cubebox.DestroyCubeSandboxRequest{
+			SandboxID: "sandbox-destroy",
+			RequestID: "destroy-req",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Destroy returned error: %v", err)
+	}
+	if !fakeClient.releaseCalled {
+		t.Fatal("network runtime ReleaseNetwork was not called")
+	}
+	if fakeClient.lastReleaseRequest == nil || fakeClient.lastReleaseRequest.SandboxID != "sandbox-destroy" {
+		t.Fatalf("ReleaseNetwork request invalid: %+v", fakeClient.lastReleaseRequest)
+	}
+	if fakeClient.lastReleaseRequest.IdempotencyKey != "destroy-req" {
+		t.Fatalf("ReleaseNetwork idempotency key=%q, want destroy-req", fakeClient.lastReleaseRequest.IdempotencyKey)
+	}
+}
+
+func TestNetworkRuntimeConfigFromPluginConfigMapsEmbeddedRuntimeSettings(t *testing.T) {
+	cfg := networkRuntimeConfigFromPluginConfig(&Config{
+		EthName:               "eth-test",
+		ObjectDir:             "/tmp/cubevs",
+		CIDR:                  "10.1.0.0/24",
+		MVMInnerIP:            "169.254.68.10",
+		MVMMacAddr:            "20:90:6f:fc:fc:aa",
+		MvmGwDestIP:           "169.254.68.9",
+		MvmGwMacAddr:          "20:90:6f:cf:cf:aa",
+		MvmMask:               30,
+		MvmMtu:                1400,
+		TapInitNum:            3,
+		CubeEgressAdminURL:    "http://127.0.0.1:19090",
+		CubeEgressPushTimeout: tomlext.FromStdTime(3 * time.Second),
+		CubeRouterEnable:      true,
+		CubeRouterCIDR:        "10.254.0.0/24",
+		CubeRouterMacAddr:     "22:90:6f:cf:cf:aa",
+	})
+
+	if cfg.CubeEgressAdminURL != "http://127.0.0.1:19090" {
+		t.Fatalf("CubeEgressAdminURL=%q", cfg.CubeEgressAdminURL)
+	}
+	if cfg.CubeEgressPushTimeout != 3*time.Second {
+		t.Fatalf("CubeEgressPushTimeout=%v", cfg.CubeEgressPushTimeout)
+	}
+	if !cfg.CubeRouterEnable || cfg.CubeRouterCIDR != "10.254.0.0/24" || cfg.CubeRouterMacAddr != "22:90:6f:cf:cf:aa" {
+		t.Fatalf("CubeRouter config not mapped: enable=%v cidr=%q mac=%q", cfg.CubeRouterEnable, cfg.CubeRouterCIDR, cfg.CubeRouterMacAddr)
+	}
+}
+
+func TestNetworkRuntimeConfigFromPluginConfigAllowsCubeEgressDisable(t *testing.T) {
+	cfg := networkRuntimeConfigFromPluginConfig(&Config{CubeEgressAdminURL: ""})
+	if cfg.CubeEgressAdminURL != "" {
+		t.Fatalf("CubeEgressAdminURL=%q, want disabled", cfg.CubeEgressAdminURL)
 	}
 }
 
@@ -221,7 +603,7 @@ func TestShouldAppendDNSAllowOut(t *testing.T) {
 
 	tests := []struct {
 		name string
-		cfg  *networkagentclient.CubeNetworkConfig
+		cfg  *networkruntime.CubeNetworkConfig
 		want bool
 	}{
 		{
@@ -230,7 +612,7 @@ func TestShouldAppendDNSAllowOut(t *testing.T) {
 		},
 		{
 			name: "allow_out domain with disabled internet access",
-			cfg: &networkagentclient.CubeNetworkConfig{
+			cfg: &networkruntime.CubeNetworkConfig{
 				AllowInternetAccess: &block,
 				AllowOut:            []string{"172.67.0.0/16", "api.example.com"},
 			},
@@ -238,7 +620,7 @@ func TestShouldAppendDNSAllowOut(t *testing.T) {
 		},
 		{
 			name: "allow_out domain with open internet access",
-			cfg: &networkagentclient.CubeNetworkConfig{
+			cfg: &networkruntime.CubeNetworkConfig{
 				AllowInternetAccess: &allow,
 				AllowOut:            []string{"api.example.com"},
 			},
@@ -246,43 +628,43 @@ func TestShouldAppendDNSAllowOut(t *testing.T) {
 		},
 		{
 			name: "allow_out domain with default internet access",
-			cfg: &networkagentclient.CubeNetworkConfig{
+			cfg: &networkruntime.CubeNetworkConfig{
 				AllowOut: []string{"api.example.com"},
 			},
 			want: true,
 		},
 		{
 			name: "l7 host domain with disabled internet access",
-			cfg: &networkagentclient.CubeNetworkConfig{
+			cfg: &networkruntime.CubeNetworkConfig{
 				AllowInternetAccess: &block,
-				Rules: []*networkagentclient.EgressRule{
-					{Match: &networkagentclient.EgressRuleMatch{Host: &host}},
+				Rules: []*networkruntime.EgressRule{
+					{Match: &networkruntime.EgressRuleMatch{Host: &host}},
 				},
 			},
 			want: true,
 		},
 		{
 			name: "l7 sni wildcard domain with disabled internet access",
-			cfg: &networkagentclient.CubeNetworkConfig{
+			cfg: &networkruntime.CubeNetworkConfig{
 				AllowInternetAccess: &block,
-				Rules: []*networkagentclient.EgressRule{
-					{Match: &networkagentclient.EgressRuleMatch{SNI: &sni}},
+				Rules: []*networkruntime.EgressRule{
+					{Match: &networkruntime.EgressRuleMatch{SNI: &sni}},
 				},
 			},
 			want: true,
 		},
 		{
 			name: "l7 host domain with default internet access",
-			cfg: &networkagentclient.CubeNetworkConfig{
-				Rules: []*networkagentclient.EgressRule{
-					{Match: &networkagentclient.EgressRuleMatch{Host: &host}},
+			cfg: &networkruntime.CubeNetworkConfig{
+				Rules: []*networkruntime.EgressRule{
+					{Match: &networkruntime.EgressRuleMatch{Host: &host}},
 				},
 			},
 			want: true,
 		},
 		{
 			name: "disabled internet access without domain target",
-			cfg: &networkagentclient.CubeNetworkConfig{
+			cfg: &networkruntime.CubeNetworkConfig{
 				AllowInternetAccess: &block,
 				AllowOut:            []string{"172.67.0.0/16"},
 			},
@@ -290,14 +672,14 @@ func TestShouldAppendDNSAllowOut(t *testing.T) {
 		},
 		{
 			name: "default internet access without domain target",
-			cfg: &networkagentclient.CubeNetworkConfig{
+			cfg: &networkruntime.CubeNetworkConfig{
 				AllowOut: []string{"172.67.0.0/16"},
 			},
 			want: false,
 		},
 		{
 			name: "open internet without domain target",
-			cfg: &networkagentclient.CubeNetworkConfig{
+			cfg: &networkruntime.CubeNetworkConfig{
 				AllowInternetAccess: &allow,
 			},
 			want: false,
@@ -315,7 +697,7 @@ func TestShouldAppendDNSAllowOut(t *testing.T) {
 
 func TestMergeDNSAllowOutCIDRsForAllowOutDomain(t *testing.T) {
 	block := false
-	cfg := &networkagentclient.CubeNetworkConfig{
+	cfg := &networkruntime.CubeNetworkConfig{
 		AllowInternetAccess: &block,
 		AllowOut:            []string{"172.67.0.0/16", "api.example.com"},
 	}
@@ -335,7 +717,7 @@ func TestMergeDNSAllowOutCIDRsForAllowOutDomain(t *testing.T) {
 
 func TestMergeDNSAllowOutCIDRsSkipsWithoutDomainAllow(t *testing.T) {
 	block := false
-	cfg := &networkagentclient.CubeNetworkConfig{
+	cfg := &networkruntime.CubeNetworkConfig{
 		AllowInternetAccess: &block,
 		DenyOut:             []string{"0.0.0.0/0"},
 	}
@@ -355,11 +737,11 @@ func TestMergeDNSAllowOutCIDRsSkipsWithoutDomainAllow(t *testing.T) {
 func TestMergeDNSAllowOutCIDRsForL7DomainRule(t *testing.T) {
 	block := false
 	host := "api.example.com:443"
-	cfg := &networkagentclient.CubeNetworkConfig{
+	cfg := &networkruntime.CubeNetworkConfig{
 		AllowInternetAccess: &block,
 		AllowOut:            []string{"172.67.0.0/16"},
-		Rules: []*networkagentclient.EgressRule{
-			{Match: &networkagentclient.EgressRuleMatch{Host: &host}},
+		Rules: []*networkruntime.EgressRule{
+			{Match: &networkruntime.EgressRuleMatch{Host: &host}},
 		},
 	}
 
@@ -380,11 +762,11 @@ func TestMergeDNSAllowOutCIDRsForL7WildcardRules(t *testing.T) {
 	block := false
 	host := "*.moonshot.cn"
 	sni := "*.example.com"
-	cfg := &networkagentclient.CubeNetworkConfig{
+	cfg := &networkruntime.CubeNetworkConfig{
 		AllowInternetAccess: &block,
-		Rules: []*networkagentclient.EgressRule{
-			{Match: &networkagentclient.EgressRuleMatch{Host: &host}},
-			{Match: &networkagentclient.EgressRuleMatch{SNI: &sni}},
+		Rules: []*networkruntime.EgressRule{
+			{Match: &networkruntime.EgressRuleMatch{Host: &host}},
+			{Match: &networkruntime.EgressRuleMatch{SNI: &sni}},
 		},
 	}
 
@@ -403,7 +785,7 @@ func TestMergeDNSAllowOutCIDRsForL7WildcardRules(t *testing.T) {
 
 func TestMergeDNSAllowOutCIDRsSkipsOpenInternetContext(t *testing.T) {
 	allow := true
-	cfg := &networkagentclient.CubeNetworkConfig{AllowInternetAccess: &allow}
+	cfg := &networkruntime.CubeNetworkConfig{AllowInternetAccess: &allow}
 
 	got, dnsCIDRs := mergeDNSAllowOutCIDRs(context.Background(), cfg, []string{"1.1.1.1"})
 	if got != cfg {

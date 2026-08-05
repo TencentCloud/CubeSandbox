@@ -169,7 +169,7 @@ Stopping Cube Sandbox does NOT remove the `cube-dev` dummy interface or the pers
   Changing the sandbox CIDR on a host that already has a cube network is
   disruptive: the old cube-dev and the persistent z* TAP devices are left
   stale. A reboot alone is NOT enough -- the systemd target is enabled and
-  network-agent rebuilds the old network from config.toml on boot.
+  Cubelet embedded network runtime rebuilds the old network from config.toml on boot.
 
   To change the CIDR, fully reset the cube network first:
     sudo systemctl stop 'cube-sandbox-*.target'
@@ -184,4 +184,4 @@ Stopping Cube Sandbox does NOT remove the `cube-dev` dummy interface or the pers
     CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK=1
 ```
 
-A reboot alone is NOT enough — the systemd target is enabled, so on boot `network-agent` rebuilds `cube-dev` and the TAP devices from `config.toml`. Perform the deterministic reset shown in the error, then re-run the installer with the new `CUBE_SANDBOX_NETWORK_CIDR`. If the new CIDR does not overlap the residual `cube-dev`, the pre-flight allows it and `network-agent` reconciles `cube-dev` to the new network.
+A reboot alone is NOT enough — the systemd target is enabled, so on boot the Cubelet embedded network runtime rebuilds `cube-dev` and the TAP devices from `config.toml`. Perform the deterministic reset shown in the error, then re-run the installer with the new `CUBE_SANDBOX_NETWORK_CIDR`. If the new CIDR does not overlap the residual `cube-dev`, the pre-flight allows it and the Cubelet embedded network runtime reconciles `cube-dev` to the new network.

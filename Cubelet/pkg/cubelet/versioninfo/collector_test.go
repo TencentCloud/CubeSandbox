@@ -31,7 +31,6 @@ func writeManifest(t *testing.T, dir string) {
     "cube-api": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
     "cubelet": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
     "cubecli": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
-    "network-agent": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
     "containerd-shim-cube-rs": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
     "cube-runtime": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
     "cube-egress": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
@@ -121,7 +120,6 @@ func TestCollectRecognizesOneClickInstallLayout(t *testing.T) {
 	mkComponentFile(t, dir, "CubeMaster", "bin", "cubemastercli")
 	mkComponentFile(t, dir, "CubeAPI", "bin", "cube-api")
 	mkComponentFile(t, dir, "Cubelet", "bin", "cubecli")
-	mkComponentFile(t, dir, "network-agent", "bin", "network-agent")
 	mkComponentFile(t, dir, "cube-shim", "bin", "containerd-shim-cube-rs")
 	mkComponentFile(t, dir, "cube-shim", "bin", "cube-runtime")
 	mkComponentFile(t, dir, "cube-egress", "version")
@@ -134,7 +132,6 @@ func TestCollectRecognizesOneClickInstallLayout(t *testing.T) {
 		"cubemastercli",
 		"cube-api",
 		"cubecli",
-		"network-agent",
 		"containerd-shim-cube-rs",
 		"cube-runtime",
 	} {
@@ -467,25 +464,25 @@ func TestCollectAgentVersionPrefersIndependentDir(t *testing.T) {
 
 func TestCollectVersionJSONWithoutManifest(t *testing.T) {
 	dir := t.TempDir()
-	na := filepath.Join(dir, "network-agent")
-	if err := os.MkdirAll(na, 0o755); err != nil {
+	shim := filepath.Join(dir, "cube-shim")
+	if err := os.MkdirAll(shim, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	body := `{
   "schema_version": 1,
   "components": {
-    "network-agent": {"version": "na-1.0", "commit": "abc"}
+    "cube-runtime": {"version": "runtime-1.0", "commit": "abc"}
   }
 }`
-	if err := os.WriteFile(filepath.Join(na, "version.json"), []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(shim, "version.json"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	c := NewCollector(dir)
 	got := c.Collect()
-	v, ok := versionOf(t, got, "network-agent")
-	if !ok || v.Version != "na-1.0" || v.Source != SourceComponentJSON {
-		t.Fatalf("network-agent from version.json, got %+v ok=%v", v, ok)
+	v, ok := versionOf(t, got, "cube-runtime")
+	if !ok || v.Version != "runtime-1.0" || v.Source != SourceComponentJSON {
+		t.Fatalf("cube-runtime from version.json, got %+v ok=%v", v, ok)
 	}
 }
 
@@ -513,11 +510,11 @@ func TestCollectKernelFromVersionJSONAndActiveSymlink(t *testing.T) {
 
 func TestCollectReportMarksMalformedJSONIncomplete(t *testing.T) {
 	dir := t.TempDir()
-	na := filepath.Join(dir, "network-agent")
-	if err := os.MkdirAll(na, 0o755); err != nil {
+	shim := filepath.Join(dir, "cube-shim")
+	if err := os.MkdirAll(shim, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(na, "version.json"), []byte("{not-json"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(shim, "version.json"), []byte("{not-json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	c := NewCollector(dir)
@@ -553,10 +550,10 @@ func TestCollectEgressVersionJSON(t *testing.T) {
 
 func TestCollectStageGapMarksIncomplete(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, ".staged-network-agent"), []byte("staged\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ".staged-cube-shim"), []byte("staged\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Sentinel present but network-agent/ directory missing → mid-stage gap.
+	// Sentinel present but cube-shim/ directory missing → mid-stage gap.
 	c := NewCollector(dir)
 	report := c.CollectReport()
 	if !report.Incomplete {

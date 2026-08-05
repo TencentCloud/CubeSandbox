@@ -51,35 +51,6 @@ spec:
           {{- end }}
       containers:
         # Artifact install (shim/kernel/guest) lives in cube-node-installer.
-        - name: network-agent
-          image: {{ include "cube.cubeImage" (dict "image" .Values.images.networkAgent "context" $) | quote }}
-          imagePullPolicy: {{ .Values.images.networkAgent.pullPolicy }}
-          securityContext:
-            {{- include "cube.nodeDataplaneSecurityContext" . | nindent 12 }}
-          env:
-            {{- include "cube.nodeComponentCommonEnv" . | nindent 12 }}
-            - name: CUBE_COMPONENT
-              value: network-agent
-            - name: CUBE_ROLE
-              value: run
-          ports:
-            - name: network-agent
-              containerPort: 19090
-          lifecycle:
-            preStop:
-              exec:
-                command:
-                  - /bin/bash
-                  - -ec
-                  - |
-                    # Kill only this container's pidfile. Never pkill -f —
-                    # must not match containerd-shim-cube-rs / cube-runtime / VMM.
-                    pidfile=/run/cube-node/network-agent.pid
-                    if [[ -f "${pidfile}" ]]; then
-                      kill -TERM "$(cat "${pidfile}")" 2>/dev/null || true
-                    fi
-          volumeMounts:
-            {{- include "cube.nodeDataplaneVolumeMounts" . | nindent 12 }}
         - name: cubelet
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubelet "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.cubelet.pullPolicy }}
@@ -185,9 +156,6 @@ spec:
               value: {{ .Values.cubeEgress.bootstrapURL | quote }}
             - name: CUBE_EGRESS_DEBUG_DUMP
               value: {{ ternary "1" "0" .Values.cubeEgress.debugDump | quote }}
-            # Optional: entrypoint may wait on this sentinel before bootstrap.
-            - name: CUBE_WAIT_NETWORK_AGENT_SENTINEL
-              value: /usr/local/services/cubetoolbox/.staged-network-agent
           ports:
             - name: egress-admin
               containerPort: 9090
@@ -252,9 +220,6 @@ spec:
               value: {{ .Values.cubeEgress.network.initialWaitSeconds | quote }}
             - name: CUBE_EGRESS_NET_REAPPLY_INTERVAL_SECONDS
               value: {{ .Values.cubeEgress.network.reapplyIntervalSeconds | quote }}
-            # Optional: entrypoint may wait on this sentinel before applying rules.
-            - name: CUBE_WAIT_NETWORK_AGENT_SENTINEL
-              value: /usr/local/services/cubetoolbox/.staged-network-agent
           {{- if .Values.cubeEgress.network.probes.readiness.enabled }}
           readinessProbe:
             exec:

@@ -1,6 +1,6 @@
 # 出网网络策略
 
-Cube Sandbox 的出网控制不是单一开关，而是由 **API 校验、模板合并、network-agent 下发、CubeVS eBPF 数据面、CubeEgress L7 代理** 共同完成的一条链路。理解这条链路后，配置 `allow_out`、`deny_out` 和 `rules` 时会更容易判断：某个包会被直接转发、被拒绝、被 DNS 学习忽略，还是进入 HTTP/HTTPS 代理。
+Cube Sandbox 的出网控制不是单一开关，而是由 **API 校验、模板合并、Cubelet 内置 network runtime 下发、CubeVS eBPF 数据面、CubeEgress L7 代理** 共同完成的一条链路。理解这条链路后，配置 `allow_out`、`deny_out` 和 `rules` 时会更容易判断：某个包会被直接转发、被拒绝、被 DNS 学习忽略，还是进入 HTTP/HTTPS 代理。
 
 本文重点说明：
 
@@ -34,8 +34,8 @@ flowchart LR
 | 组件 | 主要职责 |
 | --- | --- |
 | CubeAPI | 接收 SDK/API 请求，映射网络配置，并转成 CubeMaster 请求。 |
-| CubeMaster | 将模板里的网络配置和本次创建请求里的网络配置合并，然后调度到 Cubelet/network-agent。 |
-| network-agent | 把 `CubeNetworkConfig` 转成 CubeVS 可理解的 `MVMOptions`；从 L7 `rules` 中抽取网络可达目标；注册或更新 TAP 的 eBPF map。 |
+| CubeMaster | 将模板里的网络配置和本次创建请求里的网络配置合并，然后调度到 Cubelet 内置 network runtime。 |
+| Cubelet 内置 network runtime | 把 `CubeNetworkConfig` 转成 CubeVS 可理解的 `MVMOptions`；从 L7 `rules` 中抽取网络可达目标；注册或更新 TAP 的 eBPF map。 |
 | CubeVS | 运行在宿主机 eBPF 数据面。负责 per-sandbox L3/L4 allow/deny、配置域名的 DNS A 记录学习、session/NAT、TCP RST 拒绝，以及是否把流量送到 L7 代理。 |
 | CubeEgress | 透明 HTTP/HTTPS 代理。只处理被 CubeVS 标记为需要 L7 检查的 TCP/80、TCP/443 流量，执行完整 `rules`。 |
 
@@ -68,7 +68,7 @@ CubeVS 的基础 IP 策略优先级是：
 
 ## 数量上限
 
-在修改沙箱 eBPF map 之前，CubeVS 会统计由 `allow_out`、`deny_out` 和从 `rules` 抽取出的网络目标生成的最终唯一 map key。超限错误会经 network-agent、Cubelet、CubeMaster 和 CubeAPI 逐层返回给创建沙箱的调用方。
+在修改沙箱 eBPF map 之前，CubeVS 会统计由 `allow_out`、`deny_out` 和从 `rules` 抽取出的网络目标生成的最终唯一 map key。超限错误会经 Cubelet、CubeMaster 和 CubeAPI 逐层返回给创建沙箱的调用方。
 
 | 最终 map 计数 | 上限 |
 | --- | --- |
@@ -163,9 +163,9 @@ flowchart TD
     A[SDK/API request] --> B[CubeAPI map request]
     B --> C[CubeMaster request]
     C --> D[Merge template CubeNetworkConfig]
-    D --> E[Cubelet / network-agent EnsureNetwork]
+    D --> E[Cubelet NetworkRuntime EnsureNetwork]
     E --> F[Translate CubeNetworkConfig]
-    F --> G[network-agent cubeVSTapRegistration]
+    F --> G[Cubelet runtime cubeVSTapRegistration]
     G --> H[Extract L7 allow targets from rules]
     H --> I[CubeVS AddTAPDevice / UpsertTAPDevice]
     I --> J[Validate final unique map keys]
@@ -196,11 +196,11 @@ CubeAPI 会把请求映射成 CubeMaster 的 `CubeNetworkConfig`，并转发 `al
 - `denyOut`：把请求列表追加到模板列表后，并按字符串去重。
 - `rules`：请求规则会排在模板规则之前。若两者包含相同的 `name`，由于规则列表采用 first-match-wins 机制，CubeEgress 会优先匹配请求规则；同名的模板规则不会被覆盖或删除，而是保留在合并后列表的后续位置。
 
-合并后的 `CubeNetworkConfig` 会发给 Cubelet/network-agent。network-agent 抽取 L7 网络可达目标后，由 CubeVS 校验最终唯一 eBPF map key。
+合并后的 `CubeNetworkConfig` 会发给 Cubelet 内置 network runtime。内置 network runtime 抽取 L7 网络可达目标后，由 CubeVS 校验最终唯一 eBPF map key。
 
-### 3. network-agent 提取 CubeVS 目标
+### 3. Cubelet 内置 network runtime 提取 CubeVS 目标
 
-network-agent 收到 `CubeNetworkConfig` 后，会构造 CubeVS 的 `MVMOptions`：
+Cubelet 内置 network runtime 收到 `CubeNetworkConfig` 后，会构造 CubeVS 的 `MVMOptions`：
 
 - `AllowInternetAccess`：未设置时默认 `true`。
 - `AllowOut`：直接来自用户/模板合并后的 `allowOut`。
@@ -242,7 +242,7 @@ gateway.example.com
 
 ### 4. CubeVS map 写入
 
-network-agent 最终把不同来源写入不同 map：
+Cubelet 内置 network runtime 最终把不同来源写入不同 map：
 
 | 来源 | 写入位置 | 是否带 `L7_REQUIRED` | 作用 |
 | --- | --- | --- | --- |
@@ -402,7 +402,7 @@ DNS 响应从外部回来时，先进入宿主机网卡上的 `from_world`：
 
 ### DNS 回收
 
-network-agent / CubeVS 用户态侧有 reaper 定期扫描：
+Cubelet 内置 network runtime / CubeVS 用户态侧有 reaper 定期扫描：
 
 - `allow_out_v2`：删除已经过期的 DNS-learned 临时条目。
 - `dns_query_track`：删除超过 `10` 秒仍未收到响应的 pending query。
@@ -706,7 +706,7 @@ sudo cubevsmapdump --ifindex tapxxx --map dns_allow,allow_out_v2,deny_out
 ### 查看服务状态
 
 ```bash
-sudo systemctl status cube-sandbox-network-agent.service
+sudo systemctl status cube-sandbox-cubelet.service
 sudo systemctl status cube-sandbox-cube-egress.service
 sudo systemctl restart cube-sandbox-compute.target
 ```

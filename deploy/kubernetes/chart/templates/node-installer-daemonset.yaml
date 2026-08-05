@@ -79,6 +79,7 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+
         - name: cube-guest-install
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubeGuest "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.cubeGuest.pullPolicy }}

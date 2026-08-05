@@ -7,7 +7,7 @@
 部署完成后，你将获得一个完整可用的 Cube Sandbox 实例：
 
 - E2B 兼容 REST API 监听在 `3000` 端口
-- CubeMaster、Cubelet、network-agent、CubeShim 作为宿主机进程运行
+- CubeMaster、Cubelet、CubeShim 作为宿主机进程运行；network runtime 已内置在 Cubelet 中
 - MySQL 和 Redis 通过 Docker Compose 管理
 - CubeProxy 提供 TLS（mkcert）和 CoreDNS 域名路由（`cube.app`）
 
@@ -76,7 +76,7 @@ cd cube-sandbox
 该脚本会：
 
 1. 构建或复用 `cube-sandbox-builder` Docker 镜像
-2. 在 builder 容器内编译所有组件（CubeMaster、Cubelet、cube-api、network-agent、cube-agent、CubeShim、cube-runtime）
+2. 在 builder 容器内编译所有组件（CubeMaster、Cubelet、cube-api、cube-agent、CubeShim、cube-runtime）
 3. 在宿主机上构建 Guest VM 镜像
 4. 将所有产物打包为发布包
 
@@ -92,7 +92,7 @@ deploy/one-click/dist/cube-sandbox-one-click-<version>.tar.gz
 
 发布包包含：
 
-- 所有编译后的二进制文件（cubemaster、cubelet、cube-api、network-agent、containerd-shim-cube-rs、cube-runtime）
+- 所有编译后的二进制文件（cubemaster、cubelet、cube-api、containerd-shim-cube-rs、cube-runtime）
 - Guest VM 镜像（`cube-guest-image-cpu.img`）
 - 内核包（`cube-kernel-scf.zip`）
 - CubeProxy 和 CoreDNS 的 Docker Compose 模板
@@ -143,7 +143,7 @@ sudo ./install.sh
 6. 通过 Docker Compose 启动 MySQL 和 Redis
 7. 构建并启动 CubeProxy 容器
 8. 启动 CoreDNS 容器，配置宿主机 DNS 路由（`cube.app`）
-9. 启动宿主机进程：network-agent、cubemaster、cube-api、cubelet
+9. 启动宿主机进程：cubemaster、cube-api、cubelet
 10. 执行健康检查（如 `ONE_CLICK_RUN_QUICKCHECK=1`）
 
 安装完成后，安装器会把 `cubemastercli` 和 `cubecli` 软链接到 `/usr/local/bin`。
@@ -231,7 +231,7 @@ with Sandbox.create(template=template_id) as sandbox:
 sudo ./down.sh
 ```
 
-该命令会停止所有宿主机进程（cubelet、cubemaster、cube-api、network-agent）、Docker 容器（CubeProxy、CoreDNS、MySQL、Redis），并回滚 `cube.app` 的 DNS 路由配置。
+该命令会停止所有宿主机进程（cubelet、cubemaster、cube-api）、Docker 容器（CubeProxy、CoreDNS、MySQL、Redis），并回滚 `cube.app` 的 DNS 路由配置。
 
 ### 重新安装
 
@@ -262,7 +262,6 @@ sudo ./down.sh
 | `ONE_CLICK_CUBEMASTER_BUILD_MODE` | `local` | CubeMaster 构建模式（`local` = 从源码编译） |
 | `ONE_CLICK_CUBELET_BUILD_MODE` | `local` | Cubelet 构建模式 |
 | `ONE_CLICK_CUBE_API_BUILD_MODE` | `local` | cube-api 构建模式 |
-| `ONE_CLICK_NETWORK_AGENT_BUILD_MODE` | `local` | network-agent 构建模式 |
 | `ONE_CLICK_CUBE_AGENT_BUILD_MODE` | `local` | cube-agent 构建模式 |
 | `ONE_CLICK_CUBE_INIT_BUILD_MODE` | `local` | cube-init 构建模式 |
 | `ONE_CLICK_CUBE_SHIM_BUILD_MODE` | `local` | CubeShim 构建模式 |
@@ -277,9 +276,9 @@ sudo ./down.sh
 | `ONE_CLICK_CUBELET_BIN` | 预编译 cubelet 路径 |
 | `ONE_CLICK_CUBECLI_BIN` | 预编译 cubecli 路径 |
 | `ONE_CLICK_CUBE_API_BIN` | 预编译 cube-api 路径 |
-| `ONE_CLICK_NETWORK_AGENT_BIN` | 预编译 network-agent 路径 |
 | `ONE_CLICK_CUBE_AGENT_BIN` | 预编译 cube-agent 路径（打入 cube-agent.ext4） |
 | `ONE_CLICK_CUBE_INIT_BIN` | 预编译 cube-init 路径（注入 guest `/sbin/init`） |
+
 | `ONE_CLICK_CUBESHIM_BIN` | 预编译 containerd-shim-cube-rs 路径 |
 | `ONE_CLICK_CUBE_RUNTIME_BIN` | 预编译 cube-runtime 路径 |
 
@@ -338,7 +337,6 @@ sudo ./down.sh
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `CUBEMASTER_ADDR` | `127.0.0.1:8089` | CubeMaster 监听地址 |
-| `NETWORK_AGENT_HEALTH_ADDR` | `127.0.0.1:19090` | network-agent 健康检查端点 |
 | `CUBE_API_BIND` | `0.0.0.0:3000` | cube-api 监听地址 |
 | `CUBE_API_HEALTH_ADDR` | `127.0.0.1:3000` | cube-api 健康检查地址 |
 | `CUBE_API_SANDBOX_DOMAIN` | `cube.app` | 沙箱域名，用于 CubeProxy 路由 |
@@ -366,9 +364,6 @@ sudo ./down.sh
 │   ├── bin/cubecli                   # 命令行工具
 │   ├── config/                       # Cubelet 配置
 │   └── dynamicconf/                  # 动态配置
-├── network-agent/
-│   ├── bin/network-agent             # 网络编排服务
-│   └── network-agent.yaml            # 配置文件
 ├── cube-shim/bin/
 │   ├── containerd-shim-cube-rs       # containerd shim
 │   └── cube-runtime                  # 运行时

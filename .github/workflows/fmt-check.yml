@@ -19,7 +19,6 @@ on:
       - 'cubecow/Makefile'
       - 'cubelog/Makefile'
       - 'hypervisor/Makefile'
-      - 'network-agent/Makefile'
       - 'sdk/go/Makefile'
       - 'examples/cube-bench/Makefile'
       - 'web/**'

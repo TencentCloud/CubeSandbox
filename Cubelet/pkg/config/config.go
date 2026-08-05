@@ -21,12 +21,6 @@ import (
 
 var cfg *Config
 
-var networkAgentOverride struct {
-	enable   bool
-	endpoint string
-	set      bool
-}
-
 type MetaServerConfig struct {
 	MetaServerEndpoint  string `yaml:"meta_server_endpoint,omitempty"`
 	NodeStatusMaxImages int32  `yaml:"node_status_max_images,omitempty"`
@@ -83,8 +77,6 @@ type HostConfigGC struct {
 type CommonConf struct {
 	CommonTimeout         time.Duration `yaml:"common_timeout"`
 	LogLevel              string        `yaml:"log_level"`
-	EnableNetworkAgent    bool          `yaml:"enable_network_agent"`
-	NetworkAgentEndpoint  string        `yaml:"network_agent_endpoint"`
 	DescribeAsyncInterval time.Duration `yaml:"describe_asynchronous"`
 	EnablePFMode          bool          `yaml:"enable_pf_mode"`
 	DescribeBDFInterval   time.Duration `yaml:"describe_bdf"`
@@ -148,12 +140,6 @@ func Init(configPath string, useDefault bool) (*Config, error) {
 	return newCfg, nil
 }
 
-func SetNetworkAgentOverride(enable bool, endpoint string) {
-	networkAgentOverride.enable = enable
-	networkAgentOverride.endpoint = endpoint
-	networkAgentOverride.set = true
-}
-
 func validate(cfg *Config) error {
 	if cfg == nil {
 		return fmt.Errorf("config is nil")
@@ -198,16 +184,6 @@ func preHandle(config *Config) (*Config, error) {
 		config.Common = &CommonConf{}
 	}
 
-	if networkAgentOverride.set {
-		config.Common.EnableNetworkAgent = networkAgentOverride.enable
-		if networkAgentOverride.endpoint != "" {
-			config.Common.NetworkAgentEndpoint = networkAgentOverride.endpoint
-		}
-	}
-
-	if config.Common.NetworkAgentEndpoint == "" {
-		config.Common.NetworkAgentEndpoint = "grpc+unix:///run/cube/network-agent-grpc.sock"
-	}
 	if config.HostConf == nil {
 		config.HostConf = &HostConf{}
 	}

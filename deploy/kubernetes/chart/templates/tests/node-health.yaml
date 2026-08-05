@@ -400,7 +400,6 @@ spec:
           test -e /dev/kvm
           test -d {{ .Values.hostPaths.dataCubelet | quote }}
           test -S {{ printf "%s/cubelet.sock" .Values.hostPaths.dataCubelet | quote }}
-          test -S {{ printf "%s/network-agent-grpc.sock" .Values.hostPaths.tmpCube | quote }}
       volumeMounts:
         - name: dev
           mountPath: /dev

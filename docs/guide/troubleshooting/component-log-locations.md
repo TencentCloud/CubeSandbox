@@ -14,7 +14,7 @@ lang: en-US
 
 ## Symptom
 
-CubeSandbox is made up of several components (CubeAPI, CubeMaster, Cubelet, CubeShim, the Hypervisor/VMM, network-agent, cube-proxy). When troubleshooting, it's often unclear which log file a given error actually lands in, where the guest kernel boot log can be found, and how to raise Cubelet's log verbosity — its default log level (`warn`) doesn't print enough detail to reproduce most issues.
+CubeSandbox is made up of several components (CubeAPI, CubeMaster, Cubelet, CubeShim, the Hypervisor/VMM, Cubelet embedded network runtime, cube-proxy). When troubleshooting, it's often unclear which log file a given error actually lands in, where the guest kernel boot log can be found, and how to raise Cubelet's log verbosity — its default log level (`warn`) doesn't print enough detail to reproduce most issues.
 
 This article lists the **exact paths** for every component's logs in a one-click (systemd-managed) deployment, explains how to use `cubecli logs` to read sandbox/template logs, shows where the guest kernel boot log lives, and covers how to turn on Cubelet debug logging.
 
@@ -23,7 +23,7 @@ This article lists the **exact paths** for every component's logs in a one-click
 - Cube Sandbox version: v0.4.0 or newer (one-click deployment, systemd-managed)
 - Deployment mode: all-in-one or multi-node cluster, applies to both
 - Host OS / kernel: any Linux host running Cubelet
-- Related components: CubeAPI, CubeMaster, Cubelet, CubeShim, Hypervisor (VMM), network-agent, cube-proxy
+- Related components: CubeAPI, CubeMaster, Cubelet, CubeShim, Hypervisor (VMM), Cubelet embedded network runtime, cube-proxy
 
 ## Root Cause
 
@@ -52,7 +52,6 @@ Cubelet defaults to a fairly quiet `warn` log level, so normal operation won't p
 | CubeShim | Business request log (includes guest kernel output) | `/data/log/CubeShim/cube-shim-req.log` | `tail -F` |
 | CubeShim | Stats log | `/data/log/CubeShim/cube-shim-stat.log` | `tail -F` |
 | Hypervisor (VMM) | VMM creation log | `/data/log/CubeVmm/vmm.log` | `tail -F` |
-| network-agent | Business request log | `/data/log/network-agent/network-agent-req.log` | `tail -F` |
 | cube-proxy | Access/error logs | `/data/log/cube-proxy/{access,error}.log` | `tail -F` (see below) |
 | Sandbox container | init process stdout/stderr | `/data/cubelet/state/io.containerd.runtime.v2.task/default/<sandbox-id>/{stdout,stderr}` (inside Cubelet's mount namespace) | `cubecli logs <sandbox-id>` (see below) |
 | Template build | Build container stdout/stderr | `/data/log/template/<template-id>_0/{stdout,stderr}` (host filesystem) | `cubecli logs --tpl <template-id>` |

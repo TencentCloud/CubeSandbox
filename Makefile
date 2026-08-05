@@ -60,7 +60,6 @@ BINARIES := \
 	cubemaster \
 	cubeops \
 	cubevsmapdump \
-	network-agent \
 	shim \
 	#
 
@@ -113,7 +112,6 @@ help:
 	@printf "  cubecow-sdk   Build cubecow static library for Cubelet\n"
 	@printf "  cubecow-smoke Build cubecow smoke test CLI in Docker\n"
 	@printf "  cubecow-test-native Build SDK artifacts and run native tests in Docker\n"
-	@printf "  network-agent Build network-agent in Docker\n"
 	@printf "  cube-proxy-sidecar Build cube-proxy-sidecar (developer-only; not in 'all')\n"
 	@printf "  agent         Build cube-agent in Docker\n"
 	@printf "  cube-init     Build cube-init (guest PID1) in Docker (alias: guest-init)\n"
@@ -132,7 +130,6 @@ help:
 	@printf "  cube-api-test Run CubeAPI unit tests in Docker\n"
 	@printf "  cubeops-test  Run CubeOps unit tests in Docker\n"
 	@printf "  shim-test     Run CubeShim unit tests in Docker\n"
-	@printf "  network-agent-test Run network-agent unit tests in Docker\n"
 	@printf "  cubelog-test  Run cubelog unit tests on the host\n"
 	@printf "  cubedb-test   Run CubeDB unit tests on the host\n"
 	@printf "  cube-lifecycle-manager-test Run cube-lifecycle-manager unit tests in Docker\n"
@@ -140,7 +137,7 @@ help:
 	@printf "  agent-test    Run cube-agent unit tests in Docker\n"
 	@printf "  hypervisor-test Run hypervisor --lib --bins unit tests in Docker\n"
 	@printf "  guest-kernel  Build guest kernel vmlinux/Image (KERNEL_SRC=...; native or cross x86_64<->aarch64)\n"
-	@printf "  all           Build cubemaster, cubelet, network-agent and cubevsmapdump in Docker\n"
+	@printf "  all           Build all default binaries in Docker\n"
 	@printf "  manual-release Build binaries and package manual update tarball\n"
 	@printf "  clean-rust-target-dirs Remove target/ in every top-level Rust project\n"
 	@printf "  web-install   Install WebUI npm dependencies\n"
@@ -269,17 +266,14 @@ cubemaster: builder-image
 .PHONY: cubelet
 cubelet: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && make proto && make build && cp build/cubelet build/cubecli /workspace/_output/bin/'
+	# Cubelet embeds the network runtime and links CubeNet/cubevs; bpf2go outputs
+	# are gitignored, so generate them before compiling cubelet.
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && go mod download && make proto && make build && cp build/cubelet build/cubecli /workspace/_output/bin/'
 
 .PHONY: cubevsmapdump
 cubevsmapdump: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
 	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeNet/cubevs && make gen && go build -o /workspace/_output/bin/cubevsmapdump ./cmd/cubevsmapdump'
-
-.PHONY: network-agent
-network-agent: builder-image
-	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeNet && make -C cubevs gen && cd /workspace/network-agent && make proto && make build && cp bin/network-agent /workspace/_output/bin/network-agent'
 
 .PHONY: cube-proxy-sidecar
 cube-proxy-sidecar: builder-image
@@ -340,11 +334,7 @@ cubemaster-test: builder-image
 
 .PHONY: cubelet-test
 cubelet-test: builder-image
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && make test'
-
-.PHONY: network-agent-test
-network-agent-test: builder-image
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace/network-agent && go mod download && make test'
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && go mod download && make test'
 
 .PHONY: cube-proxy-test
 cube-proxy-test:
@@ -422,7 +412,7 @@ manual-release: all
 	@mkdir -p "$(RELEASE_DIR)"
 	@PKG_TS="$$(date +%Y%m%d-%H%M%S)"; \
 	PKG_NAME="cube-manual-update-$${PKG_TS}.tar.gz"; \
-	tar -C "$(OUTPUT_DIR)" -czf "$(RELEASE_DIR)/$${PKG_NAME}" cubemaster cubemastercli cubelet cubecli network-agent cubevsmapdump; \
+	tar -C "$(OUTPUT_DIR)" -czf "$(RELEASE_DIR)/$${PKG_NAME}" cubemaster cubemastercli cubelet cubecli cubevsmapdump; \
 	sha256sum "$(RELEASE_DIR)/$${PKG_NAME}" > "$(RELEASE_DIR)/$${PKG_NAME}.sha256"; \
 	install -m 0755 "$(MANUAL_DEPLOY_SCRIPT)" "$(RELEASE_DIR)/deploy-manual.sh"; \
 	printf 'Manual release ready:\n  %s\n  %s\n  %s\n' \
@@ -495,8 +485,6 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@$(MAKE) -C cube-lifecycle-manager fmt
 	@printf '  %-8s %s\n' "FMT" "hypervisor"
 	@$(MAKE) -C hypervisor fmt
-	@printf '  %-8s %s\n' "FMT" "network-agent"
-	@$(MAKE) -C network-agent fmt
 	@printf '  %-8s %s\n' "FMT" "sdk/go"
 	@$(MAKE) -C sdk/go fmt
 	@printf '  %-8s %s\n' "FMT" "examples/cube-bench"

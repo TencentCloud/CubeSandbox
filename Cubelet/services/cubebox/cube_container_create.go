@@ -70,7 +70,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/images"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
 const (
@@ -1556,9 +1556,6 @@ func (l *local) storeNumaQueues(ctx context.Context, cubebox *cubeboxstore.CubeB
 		if ok {
 			cubebox.Queues += tmpInfo.GetNICQueues()
 		}
-	}
-	if opts.NetworkInfo != nil {
-		cubebox.Queues += opts.NetworkInfo.GetNICQueues()
 	}
 	if cubebox.Labels == nil {
 		cubebox.Labels = make(map[string]string)

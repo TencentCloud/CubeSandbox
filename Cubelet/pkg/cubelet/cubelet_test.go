@@ -6,9 +6,6 @@ package cubelet
 
 import (
 	"context"
-	"errors"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -21,7 +18,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	cubeletnodemeta "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/masterclient"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/networkagentclient"
 )
 
 type MockCubeMetaController struct {
@@ -60,54 +56,6 @@ func (m *MockRunTemplateManager) ListLocalTemplates(ctx context.Context) (map[st
 
 func (m *MockRunTemplateManager) EnsureLocalTemplate(ctx context.Context, templateID string) (*templatetypes.LocalRunTemplate, error) {
 	return m.EnsureCubeRunTemplate(ctx, templateID)
-}
-
-type mockNetworkAgentClient struct {
-	healthErr   error
-	healthCalls int
-}
-
-func (m *mockNetworkAgentClient) EnsureNetwork(context.Context, *networkagentclient.EnsureNetworkRequest) (*networkagentclient.EnsureNetworkResponse, error) {
-	return nil, nil
-}
-
-func (m *mockNetworkAgentClient) ReleaseNetwork(context.Context, *networkagentclient.ReleaseNetworkRequest) error {
-	return nil
-}
-
-func (m *mockNetworkAgentClient) ReconcileNetwork(context.Context, *networkagentclient.ReconcileNetworkRequest) (*networkagentclient.ReconcileNetworkResponse, error) {
-	return nil, nil
-}
-
-func (m *mockNetworkAgentClient) GetNetwork(context.Context, *networkagentclient.GetNetworkRequest) (*networkagentclient.GetNetworkResponse, error) {
-	return nil, nil
-}
-
-func (m *mockNetworkAgentClient) ListNetworks(context.Context, *networkagentclient.ListNetworksRequest) (*networkagentclient.ListNetworksResponse, error) {
-	return nil, nil
-}
-
-func (m *mockNetworkAgentClient) Health(context.Context, *networkagentclient.HealthRequest) error {
-	m.healthCalls++
-	return m.healthErr
-}
-
-func initTestCubeletConfig(t *testing.T, enableNetworkAgent bool) {
-	t.Helper()
-
-	config.SetNetworkAgentOverride(enableNetworkAgent, "grpc+unix:///tmp/test-network-agent.sock")
-	configPath := filepath.Join(t.TempDir(), "cubelet-config.yaml")
-	if _, err := config.Init(configPath, true); err != nil {
-		t.Fatalf("config.Init() failed: %v", err)
-	}
-
-	t.Cleanup(func() {
-		config.SetNetworkAgentOverride(false, "")
-		cleanupPath := filepath.Join(t.TempDir(), "cubelet-config-cleanup.yaml")
-		if _, err := config.Init(cleanupPath, true); err != nil {
-			t.Fatalf("cleanup config.Init() failed: %v", err)
-		}
-	})
 }
 
 func TestNewCubelet(t *testing.T) {
@@ -151,7 +99,6 @@ func TestNewCubelet(t *testing.T) {
 				controllerMap,
 				nil,
 				mockRunTemplateManager,
-				nil,
 			)
 
 			if (err != nil) != tt.shouldFail {
@@ -213,7 +160,6 @@ func TestCubeletRun(t *testing.T) {
 		controllerMap,
 		nil,
 		mockRunTemplateManager,
-		nil,
 	)
 	if err != nil {
 		t.Fatalf("Failed to create Cubelet: %v", err)
@@ -263,7 +209,6 @@ func TestCubeletNodeStatusInitialization(t *testing.T) {
 		controllerMap,
 		nil,
 		mockRunTemplateManager,
-		nil,
 	)
 	if err != nil {
 		t.Fatalf("Failed to create Cubelet: %v", err)
@@ -316,7 +261,6 @@ func TestCubeletIntegrationWithMockControllers(t *testing.T) {
 		controllerMap,
 		nil,
 		mockRunTemplateManager,
-		nil,
 	)
 	if err != nil {
 		t.Fatalf("Failed to create Cubelet: %v", err)
@@ -453,7 +397,6 @@ func TestCubeletNodeInformation(t *testing.T) {
 		controllerMap,
 		nil,
 		mockRunTemplateManager,
-		nil,
 	)
 	if err != nil {
 		t.Fatalf("Failed to create Cubelet: %v", err)
@@ -517,7 +460,6 @@ func TestCubeletStandaloneMode(t *testing.T) {
 		controllerMap,
 		nil,
 		mockRunTemplateManager,
-		nil,
 	)
 	if err != nil {
 		t.Fatalf("Failed to create Cubelet: %v", err)
@@ -539,66 +481,9 @@ func TestCubeletStandaloneMode(t *testing.T) {
 }
 
 func TestNetworkErrorsFunc(t *testing.T) {
-	tests := []struct {
-		name            string
-		enableAgent     bool
-		client          networkagentclient.Client
-		wantErrContains string
-		wantHealthCalls int
-	}{
-		{
-			name:            "skip health check when network agent disabled",
-			enableAgent:     false,
-			client:          &mockNetworkAgentClient{healthErr: errors.New("should not be called")},
-			wantHealthCalls: 0,
-		},
-		{
-			name:            "return nil when health check passes",
-			enableAgent:     true,
-			client:          &mockNetworkAgentClient{},
-			wantHealthCalls: 1,
-		},
-		{
-			name:            "return health error when agent is unhealthy",
-			enableAgent:     true,
-			client:          &mockNetworkAgentClient{healthErr: errors.New("network agent unhealthy")},
-			wantErrContains: "network agent unhealthy",
-			wantHealthCalls: 1,
-		},
-		{
-			name:            "return error when client is missing",
-			enableAgent:     true,
-			client:          nil,
-			wantErrContains: "network-agent client is not configured",
-			wantHealthCalls: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			initTestCubeletConfig(t, tt.enableAgent)
-
-			cubelet := &Cubelet{networkAgentClient: tt.client}
-			err := cubelet.networkErrorsFunc()
-			if tt.wantErrContains == "" {
-				if err != nil {
-					t.Fatalf("networkErrorsFunc() unexpected error: %v", err)
-				}
-			} else {
-				if err == nil {
-					t.Fatal("networkErrorsFunc() expected error, got nil")
-				}
-				if !strings.Contains(err.Error(), tt.wantErrContains) {
-					t.Fatalf("networkErrorsFunc() error = %q, want substring %q", err.Error(), tt.wantErrContains)
-				}
-			}
-
-			if mockClient, ok := tt.client.(*mockNetworkAgentClient); ok {
-				if mockClient.healthCalls != tt.wantHealthCalls {
-					t.Fatalf("Health() call count = %d, want %d", mockClient.healthCalls, tt.wantHealthCalls)
-				}
-			}
-		})
+	cubelet := &Cubelet{}
+	if err := cubelet.networkErrorsFunc(); err != nil {
+		t.Fatalf("networkErrorsFunc() unexpected error: %v", err)
 	}
 }
 
@@ -615,7 +500,6 @@ func BenchmarkNewCubelet(b *testing.B) {
 			controllerMap,
 			nil,
 			mockRunTemplateManager,
-			nil,
 		)
 		if err != nil {
 			b.Fatalf("Failed to create Cubelet: %v", err)

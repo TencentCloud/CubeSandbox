@@ -11,7 +11,6 @@ on:
       - 'CubeMaster/**'
       - 'CubeShim/**'
       - 'CubeNet/**'
-      - 'network-agent/**'
       - 'cubelog/**'
       - 'cube-lifecycle-manager/**'
       - 'Cubelet/**'
@@ -30,7 +29,6 @@ on:
       - 'CubeMaster/**'
       - 'CubeShim/**'
       - 'CubeNet/**'
-      - 'network-agent/**'
       - 'cubelog/**'
       - 'cube-lifecycle-manager/**'
       - 'Cubelet/**'
@@ -54,7 +52,6 @@ on:
           - cubeproxy
           - cubemaster
           - cubeshim
-          - network-agent
           - cubecow
           - cubelog
           - cubedb
@@ -111,7 +108,6 @@ jobs:
             add_component "CubeProxy"
             add_component "CubeMaster"
             add_component "CubeShim"
-            add_component "network-agent"
             add_component "cubecow"
             add_component "cubelog"
             add_component "cubedb"
@@ -130,7 +126,6 @@ jobs:
               cubeproxy) add_component "CubeProxy" ;;
               cubemaster) add_component "CubeMaster" ;;
               cubeshim) add_component "CubeShim" ;;
-              network-agent) add_component "network-agent" ;;
               cubecow) add_component "cubecow" ;;
               cubelog) add_component "cubelog" ;;
               cubedb) add_component "cubedb" ;;
@@ -187,8 +182,10 @@ jobs:
                 CubeShim/*)
                   add_component "CubeShim"
                   ;;
-                network-agent/*|CubeNet/*)
-                  add_component "network-agent"
+                CubeNet/*)
+                  # Embedded network runtime lives under Cubelet; CubeNet eBPF
+                  # helper changes still need the cubelet test set.
+                  add_component "cubelet"
                   ;;
                 cubelog/*)
                   add_component "cubelog"
@@ -229,7 +226,6 @@ jobs:
                     elif . == "CubeProxy" then "CubeProxy"
                     elif . == "CubeMaster" then "CubeMaster"
                     elif . == "CubeShim" then "CubeShim"
-                    elif . == "network-agent" then "Network Agent"
                     elif . == "cubecow" then "CubeCow"
                     elif . == "cubelog" then "CubeLog"
                     elif . == "cubedb" then "CubeDB"
@@ -246,7 +242,6 @@ jobs:
                     elif . == "CubeProxy" then "cube-proxy-test"
                     elif . == "CubeMaster" then "cubemaster-test"
                     elif . == "CubeShim" then "shim-test"
-                    elif . == "network-agent" then "network-agent-test"
                     elif . == "cubecow" then "cubecow-test-native"
                     elif . == "cubelog" then "cubelog-test"
                     elif . == "cubedb" then "cubedb-test"

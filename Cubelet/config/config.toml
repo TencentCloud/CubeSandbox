@@ -79,8 +79,11 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     mvm_gw_mac_addr = "20:90:6f:cf:cf:cf"
     mvm_gw_dest_ip = "169.254.68.5"
     mvm_mtu = 1500
+    cube_egress_admin_url = "http://127.0.0.1:9090"
+    cube_egress_push_timeout = "2s"
     cube_router_enable = false
     cube_router_cidr = ""
+    cube_router_mac_addr = "22:90:6f:cf:cf:cf"
     # metric
     check_interval_in_sec = "5s"
     report_stat_interval_in_sec = "60s"
@@ -90,14 +93,6 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     stream_name_prefix = "gw_route:update:"
     stream_key = "gw_key"
     stream_block_time = "30s"
-    # network-agent
-    enable_network_agent = true
-    network_agent_endpoint = "grpc+unix:///tmp/cube/network-agent-grpc.sock"
-    network_agent_tap_socket = "/tmp/cube/network-agent-tap.sock"
-    network_agent_init_timeout = "120s"
-    network_agent_retry_interval = "1s"
-    network_agent_tap_fd_timeout = "2s"
-
   [plugins."io.cubelet.internal.v1.storage"]
     # Default storage backend: cubecow (reflink-only copy-on-write).
     storage_backend = "cubecow"

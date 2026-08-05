@@ -5,11 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./common.sh
 source "${SCRIPT_DIR}/common.sh"
 
-NETWORK_AGENT_BIN="${TOOLBOX_ROOT}/network-agent/bin/network-agent"
-NETWORK_AGENT_CFG="${TOOLBOX_ROOT}/network-agent/network-agent.yaml"
-NETWORK_AGENT_STATE_DIR="/data/cubelet/network-agent/state"
-NETWORK_AGENT_HEALTH_ADDR="${NETWORK_AGENT_HEALTH_ADDR:-127.0.0.1:19090}"
-NETWORK_AGENT_READY_TIMEOUT="${NETWORK_AGENT_READY_TIMEOUT:-120}"
 CUBE_API_BIN="${TOOLBOX_ROOT}/CubeAPI/bin/cube-api"
 CUBE_API_LOG_DIR="${CUBE_API_LOG_DIR:-/data/log/CubeAPI}"
 CUBE_API_HEALTH_ADDR="${CUBE_API_HEALTH_ADDR:-127.0.0.1:3000}"
@@ -27,17 +22,15 @@ CUBELET_OPTIONAL_EXPORTS=""
 require_cmd bash
 require_cmd curl
 
-test -x "${NETWORK_AGENT_BIN}" || die "network-agent binary missing: ${NETWORK_AGENT_BIN}"
 test -x "${CUBE_API_BIN}" || die "cube-api binary missing: ${CUBE_API_BIN}"
 test -x "${CUBEMASTER_BIN}" || die "cubemaster binary missing: ${CUBEMASTER_BIN}"
 test -x "${CUBELET_BIN}" || die "cubelet binary missing: ${CUBELET_BIN}"
-test -f "${NETWORK_AGENT_CFG}" || die "network-agent config missing: ${NETWORK_AGENT_CFG}"
 test -f "${CUBEMASTER_CFG}" || die "cubemaster config missing: ${CUBEMASTER_CFG}"
 test -f "${CUBELET_CONFIG}" || die "cubelet config missing: ${CUBELET_CONFIG}"
 test -f "${CUBELET_DYNAMICCONF}" || die "cubelet dynamic config missing: ${CUBELET_DYNAMICCONF}"
 validate_cubelet_cow_startup_deps "${CUBELET_CONFIG}"
 
-mkdir -p "${NETWORK_AGENT_STATE_DIR}" "${CUBE_API_LOG_DIR}" /tmp/cube
+mkdir -p "${CUBE_API_LOG_DIR}" /tmp/cube
 
 CUBEMASTER_ARTIFACT_STORE_EXPORT=""
 if [[ -n "${CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR_CONFIGURED}" ]]; then
@@ -71,11 +64,7 @@ fi
 
 "${SCRIPT_DIR}/down-local.sh" >/dev/null 2>&1 || true
 
-start_with_pidfile \
-  "network-agent" \
-  "mkdir -p /tmp/cube \"${NETWORK_AGENT_STATE_DIR}\" && \"${NETWORK_AGENT_BIN}\" --cubelet-config \"${CUBELET_CONFIG}\" --state-dir \"${NETWORK_AGENT_STATE_DIR}\""
 
-wait_for_http "http://${NETWORK_AGENT_HEALTH_ADDR}/readyz" "${NETWORK_AGENT_READY_TIMEOUT}" 1 || die "network-agent did not become ready, check logs under ${LOG_DIR}"
 
 start_with_pidfile \
   "cubemaster" \

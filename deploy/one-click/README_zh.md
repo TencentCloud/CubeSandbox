@@ -90,7 +90,7 @@ cp env.example .env
 
 这个入口会先：
 
-- 通过根目录 builder 镜像在容器内编译 `cubemaster`、`cubemastercli`、`cubelet`、`cubecli`、`cube-api`、`network-agent`、`cube-agent`、`containerd-shim-cube-rs`、`cube-runtime`
+- 通过根目录 builder 镜像在容器内编译 `cubemaster`、`cubemastercli`、`cubelet`、`cubecli`、`cube-api`、`cube-agent`、`containerd-shim-cube-rs`、`cube-runtime`；network runtime 已内置到 `cubelet`，不再构建独立网络运行时二进制
 - 在 builder 内对 `CubeMaster`、`Cubelet` 执行 `go mod download`，首次构建会在线拉取 Go modules，后续复用 builder HOME 下的模块缓存
 - 将预编译产物落到 `deploy/one-click/.work/prebuilt/`
 - 回到宿主机调用 `build-release-bundle.sh`，构建 WebUI 静态资源，继续 guest image 和最终打包
@@ -143,13 +143,12 @@ one-click 不会在目标机额外创建一层全局 `configs/`，而是直接�
   - `cubelet_conf.default_timeout_insec`: cluster default sandbox idle TTL when the client omits `timeout`; unset or `<= 0` means **no cluster-wide idle timeout** (shipped default `-1`). See [lifecycle — 设计与运维要点](../../docs/zh/guide/lifecycle.md#集群默认空闲超时default_timeout_insec)。
 - `Cubelet/config/` -> `Cubelet/config/`
 - `Cubelet/dynamicconf/` -> `Cubelet/dynamicconf/`
-- `configs/single-node/network-agent.yaml` -> `network-agent/network-agent.yaml`
 - `CubeAPI/bin/cube-api` -> `/usr/local/services/cubetoolbox/CubeAPI/bin/cube-api`
 - `support/` -> `/usr/local/services/cubetoolbox/support/`
 - `cubeproxy/` -> `/usr/local/services/cubetoolbox/cubeproxy/`
 - `webui/` -> `/usr/local/services/cubetoolbox/webui/`
 
-其中 `Cubelet` 直接使用仓库内现成的 `dynamicconf/conf.yaml`；`network-agent` 实际启动时优先通过 `--cubelet-config` 读取 `Cubelet/config/config.toml` 中的网络插件配置，以保证和 `Cubelet` 的网络参数保持一致；`cube-api` 则直接读取 `.one-click.env` 中的环境变量启动，默认监听 `0.0.0.0:3000` 并转发到本机 `cubemaster`。MySQL/Redis 固定部署到 `/usr/local/services/cubetoolbox/support`，以 Docker 容器运行并由专用 systemd service 管理；`cube proxy` 固定部署到 `/usr/local/services/cubetoolbox/cubeproxy`，从发布包内 build context 本地构建镜像，并由 systemd 管理。WebUI 固定部署到 `/usr/local/services/cubetoolbox/webui`，默认监听 `12088`，通过标准 nginx 容器托管发布包里的 `webui/dist`，并通过 Docker `host-gateway` 把 `/cubeapi` 反代到宿主机 CubeAPI；其生命周期同样由 systemd 托管。
+其中 `Cubelet` 直接使用仓库内现成的 `dynamicconf/conf.yaml`，其内置 network runtime 直接读取 `Cubelet/config/config.toml` 中的网络插件配置；`cube-api` 则直接读取 `.one-click.env` 中的环境变量启动，默认监听 `0.0.0.0:3000` 并转发到本机 `cubemaster`。MySQL/Redis 固定部署到 `/usr/local/services/cubetoolbox/support`，以 Docker 容器运行并由专用 systemd service 管理；`cube proxy` 固定部署到 `/usr/local/services/cubetoolbox/cubeproxy`，从发布包内 build context 本地构建镜像，并由 systemd 管理。WebUI 固定部署到 `/usr/local/services/cubetoolbox/webui`，默认监听 `12088`，通过标准 nginx 容器托管发布包里的 `webui/dist`，并通过 Docker `host-gateway` 把 `/cubeapi` 反代到宿主机 CubeAPI；其生命周期同样由 systemd 托管。
 
 ## 目标机安装
 
@@ -234,8 +233,8 @@ sudo ./install-compute.sh
 
 计算节点模式会：
 
-- 安装 `Cubelet`、`network-agent`、`cube-shim`、`cube-image`、`cube-kernel-scf`、`cube-egress` 和运行所需脚本，并安装 `docker`
-- 启动 `network-agent`、`cubelet`，并通过 `cube-sandbox-compute.target` 拉起 `cube-egress`（透明出网 MITM 代理，以 docker 容器运行，用于强制执行沙箱出网策略）
+- 安装内置 network runtime 的 `Cubelet`、`cube-shim`、`cube-image`、`cube-kernel-scf`、`cube-egress` 和运行所需脚本，并安装 `docker`
+- 启动 `cubelet`，并通过 `cube-sandbox-compute.target` 拉起 `cube-egress`（透明出网 MITM 代理，以 docker 容器运行，用于强制执行沙箱出网策略）
 - `cube-egress` 启动前会通过主节点的 `/cube/ca/<file>` 接口拉取与模板一致的 MITM 根 CA（含私钥），保证模板信任 compute 节点上 `cube-egress` 签发的叶子证书
 - 将 `Cubelet` 的 `meta_server_endpoint` 指向 `ONE_CLICK_CONTROL_PLANE_IP:8089`
 - 通过主节点的 `/internal/meta` 接口自动注册节点
@@ -318,10 +317,10 @@ CUBE_API_SANDBOX_DOMAIN=cube.app
 - 安装 `/etc/systemd/system/cube-sandbox-*.service|target|timer`，并把宿主机进程与容器统一交给 systemd 管理
 - MySQL、Redis、cube proxy、WebUI、CoreDNS 仍使用 Docker 运行，但生命周期改由各自的 systemd service 直接管理，而不是运行期依赖 `docker compose up -d`
 - 若目标机有 `resolvectl`，则创建专用 dummy link（默认 `cube-dns0`）并分配本地地址，`CoreDNS` 默认绑定到该链路地址 `169.254.254.53`，再把 `cube.app` 域名通过该链路路由到本地 DNS；若目标机没有 `resolvectl`，则回退到 `NetworkManager + dnsmasq`：同样会创建该 dummy link，并让 `dnsmasq` 在 `169.254.254.53` 上额外监听，安装器同时把 `/etc/resolv.conf` 从 NetworkManager 手里接管（`rc-manager=unmanaged`）并改写为指向该非 loopback IP。这样宿主与 `systemd-resolved` 路径保持对称，避免 Docker 在 `/etc/resolv.conf` 只剩 loopback nameserver 时默默回退到内置公网 DNS（`8.8.8.8`）——一旦回退，宿主上所有依赖域名解析的容器（典型如 `docker build` 跑 `apk update`）都会因为公网 DNS 在内网不可达而失败。若目标机上 NetworkManager 会初始化其 `dnsmasq` 插件但从不真正拉起子进程（例如通过 `ifcfg` + `assume` 管理的 bond 网卡），可设置 `CUBE_PROXY_DNSMASQ_MODE=standalone`，让 DNS 脚本直接拉起并管理 `dnsmasq`，而不再依赖 NetworkManager 插件；面向客户端的解析器布局（dummy link、监听地址、入口 IP）在其它方面完全一致。
-- 启动宿主机进程 `network-agent`、`cubemaster`、`cube-api`、`cubelet`，并在 `quickcheck.sh` 中校验 systemd 状态与业务健康检查
+- 启动宿主机进程 `cubemaster`、`cube-api`、`cubelet`，并在 `quickcheck.sh` 中校验 systemd 状态与业务健康检查
 - 在 `/usr/local/services/cubetoolbox/webui/` 下运行标准 WebUI nginx 容器。该容器只读挂载 `webui/dist` 静态资源，发布 `WEB_UI_HOST_PORT`（默认 `12088`），把 `host.docker.internal` 映射到 Docker `host-gateway`，并通过 nginx 反代校验 `/health`（由 CubeOps 提供）
 
-停止 one-click 时会同时停止 `/usr/local/services/cubetoolbox/support` 下的 MySQL/Redis、WebUI、`cube proxy` / `CoreDNS`、宿主机进程 `network-agent` / `cubemaster` / `cube-api` / `cubelet`，并回滚 `cube.app` 的宿主机 DNS 路由配置。
+停止 one-click 时会同时停止 `/usr/local/services/cubetoolbox/support` 下的 MySQL/Redis、WebUI、`cube proxy` / `CoreDNS`、宿主机进程 `cubemaster` / `cube-api` / `cubelet`，并回滚 `cube.app` 的宿主机 DNS 路由配置。
 
 部署完成后，如需让 E2B 官方 SDK 指向 one-click 节点，可以在客户端侧设置：
 
@@ -429,7 +428,7 @@ sudo yum install -y e2fsprogs util-linux
 - 推荐入口只把组件编译放进 builder；guest image 与最终打包仍在宿主机执行。
 - 若直接执行底层入口 `build-release-bundle.sh`，构建机还需要根据 build mode 自行准备 `go` / `cargo` / `make` 等本地工具链。
 - 若直接执行底层入口或首次使用推荐入口，构建机还需要能联网下载 Go modules；受限网络环境建议预先配置可用的 `GOPROXY`。
-- 若启用 VM 路径，目标机仍需满足 `network-agent`、tap、路由等运行权限要求。
+- 若启用 VM 路径，目标机仍需满足 `Cubelet` 内置 network runtime、tap、路由等运行权限要求。
 
 ## 已知限制
 

@@ -1,6 +1,6 @@
 # Multi-Node Cluster Deployment
 
-This guide explains how to expand a single-node Cube Sandbox deployment into a multi-node cluster by adding **compute nodes**. Compute nodes run only the sandbox runtime components (`Cubelet`, `network-agent`, `CubeShim`) and register themselves to the control plane on the first machine.
+This guide explains how to expand a single-node Cube Sandbox deployment into a multi-node cluster by adding **compute nodes**. Compute nodes run only the sandbox runtime components (`Cubelet` with the embedded network runtime, `CubeShim`) and register themselves to the control plane on the first machine.
 
 ::: warning Production Use
 If you plan to use Cube Sandbox in a production environment, please refer to the [Network Hardening](./network-hardening.md) guide to secure your deployment before exposing services to untrusted networks.
@@ -17,7 +17,7 @@ You must have a working control node deployed via the [Self-Build Deployment Gui
 │           Control Node                  │
 │  CubeMaster, cube-api, CubeProxy,       │
 │  CoreDNS, MySQL, Redis,                 │
-│  Cubelet, network-agent                 │
+│  Cubelet (network runtime)              │
 └──────────────────┬──────────────────────┘
                    │  /internal/meta API
        ┌───────────┼───────────┐
@@ -25,12 +25,12 @@ You must have a working control node deployed via the [Self-Build Deployment Gui
 ┌────────────┐┌────────────┐┌────────────┐
 │ Compute #1 ││ Compute #2 ││ Compute #N │
 │ Cubelet    ││ Cubelet    ││ Cubelet    │
-│ net-agent  ││ net-agent  ││ net-agent  │
+│ net runtime││ net runtime││ net runtime│
 └────────────┘└────────────┘└────────────┘
 ```
 
 - The **control node** runs the full stack: orchestration (CubeMaster), API gateway (cube-api), proxy (CubeProxy + CoreDNS), databases (MySQL + Redis), and also acts as a compute node itself.
-- Each **compute node** runs only `Cubelet` and `network-agent`. It registers to the control-plane `CubeMaster` and receives sandbox scheduling requests.
+- Each **compute node** runs only `Cubelet` with its embedded network runtime. It registers to the control-plane `CubeMaster` and receives sandbox scheduling requests.
 
 ## Prerequisites
 
@@ -88,8 +88,8 @@ sudo ./install-compute.sh
 
 The compute-node install script will:
 
-1. Install only `Cubelet`, `network-agent`, `cube-shim`, `cube-image`, `cube-kernel-scf`, and the runtime scripts
-2. Start only the host processes `network-agent` and `cubelet`
+1. Install only `Cubelet` with the embedded network runtime, `cube-shim`, `cube-image`, `cube-kernel-scf`, and the runtime scripts
+2. Start only the host process `cubelet`
 3. Automatically point `Cubelet`'s `meta_server_endpoint` to the control-plane `CubeMaster`
 4. Register the node and report status through the control plane `/internal/meta` API
 
@@ -103,7 +103,7 @@ sudo ./smoke.sh
 
 In compute-node mode, `quickcheck.sh` verifies:
 
-- Local `network-agent` health
+- Local `Cubelet` and embedded network runtime health
 - Reachability of the control-plane `CubeMaster`
 - That the current node appears under `/internal/meta/nodes/{node_id}` on the control plane
 
@@ -157,7 +157,7 @@ After updating `cubemaster.yaml`, restart CubeMaster with your normal deployment
 sudo ./down.sh
 ```
 
-In compute-node mode, this only stops `cubelet` and `network-agent`. It does not affect the control plane or other compute nodes.
+In compute-node mode, this only stops `cubelet`. It does not affect the control plane or other compute nodes.
 
 ### Reinstall
 

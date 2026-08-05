@@ -11,9 +11,7 @@ import (
 	jsoniter "github.com/json-iterator/go"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/network/proto"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow/provider"
 )
 
 const DBBucketNetwork = "network/v1"
@@ -46,15 +44,11 @@ func RecoverFromDB(db *utils.CubeStore) (*Store, error) {
 		if err := jsoniter.Unmarshal(netBytes, &net); err != nil {
 			return nil, err
 		}
-		var metadata provider.NetworkProvider
 		switch net.NetworkType {
 		case cubebox.NetworkType_tap.String():
-			metadata = &proto.ShimNetReq{}
 		default:
 			return nil, fmt.Errorf("unknown instance type %s", net.NetworkType)
 		}
-		metadata.FromPersistMetadata(net.PersistentMetadata)
-		net.Metadata = metadata
 		s.idToAlloc[id] = net
 	}
 

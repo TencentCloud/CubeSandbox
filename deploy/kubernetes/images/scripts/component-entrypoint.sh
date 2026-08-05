@@ -4,10 +4,10 @@
 #
 # Big Pod / Installer per-component entrypoint (REV3.1).
 # Env:
-#   CUBE_COMPONENT  cubelet|network-agent|cube-shim|cube-kernel|cube-guest|cube-agent
+#   CUBE_COMPONENT  cubelet|cube-shim|cube-kernel|cube-guest|cube-agent
 #   CUBE_ROLE       install|run
 #     install — artifact-only components on cube-node-installer Pod: stage + pause
-#     run     — cubelet / network-agent on Big Pod: self-stage then start the process
+#     run     — cubelet on Big Pod: self-stage then start the process
 #   IMAGE_ROOT      default /opt/cube-image
 #   TOOLBOX_ROOT    default /usr/local/services/cubetoolbox
 set -euo pipefail
@@ -39,7 +39,6 @@ apply_effective_pvm_from_state() {
 component_relpath() {
   case "$1" in
     cubelet) echo "Cubelet" ;;
-    network-agent) echo "network-agent" ;;
     cube-shim) echo "cube-shim" ;;
     cube-kernel) echo "cube-kernel-scf" ;;
     cube-guest) echo "cube-image" ;;
@@ -51,7 +50,6 @@ component_relpath() {
 component_sentinel() {
   case "$1" in
     cubelet) echo "${TOOLBOX_ROOT}/.staged-cubelet" ;;
-    network-agent) echo "${TOOLBOX_ROOT}/.staged-network-agent" ;;
     cube-shim) echo "${TOOLBOX_ROOT}/.staged-cube-shim" ;;
     cube-kernel) echo "${TOOLBOX_ROOT}/.staged-cube-kernel" ;;
     cube-guest) echo "${TOOLBOX_ROOT}/.staged-cube-guest" ;;
@@ -171,10 +169,6 @@ stage_component() {
       chmod +x "${dst}/bin/cubelet" "${dst}/bin/cubecli" 2>/dev/null || true
       [[ -x "${dst}/bin/cubelet" ]] || fail "missing cubelet after stage"
       ;;
-    network-agent)
-      chmod +x "${dst}/bin/network-agent" "${dst}/bin/cubevsmapdump" 2>/dev/null || true
-      [[ -x "${dst}/bin/network-agent" ]] || fail "missing network-agent after stage"
-      ;;
     cube-shim)
       chmod +x "${dst}/bin/cube-runtime" "${dst}/bin/containerd-shim-cube-rs" 2>/dev/null || true
       [[ -x "${dst}/bin/containerd-shim-cube-rs" ]] || fail "missing shim after stage"
@@ -256,6 +250,26 @@ ensure_component_version_json() {
       log "synthesized ${json}"
       ;;
   esac
+}
+
+stage_cubevs_tools() {
+  local src="${IMAGE_ROOT}/cube-vs/network/bin/cubevsmapdump"
+  local dst_dir="${TOOLBOX_ROOT}/cube-vs/network/bin"
+  local dst="${dst_dir}/cubevsmapdump"
+  local tmp="${dst}.tmp.$$"
+  [[ -f "${src}" ]] || fail "image bypass missing: ${src}"
+  mkdir -p "${dst_dir}"
+  cp "${src}" "${tmp}"
+  chmod +x "${tmp}"
+  mv -f "${tmp}" "${dst}"
+  [[ -x "${dst}" ]] || fail "missing cubevsmapdump after cube-vs install"
+  if [[ -f "${IMAGE_ROOT}/cube-vs/version.json" ]]; then
+    cp "${IMAGE_ROOT}/cube-vs/version.json" "${TOOLBOX_ROOT}/cube-vs/version.json.tmp.$$"
+    mv -f "${TOOLBOX_ROOT}/cube-vs/version.json.tmp.$$" "${TOOLBOX_ROOT}/cube-vs/version.json"
+  fi
+  mkdir -p /usr/local/bin
+  ln -sf "${dst}" /usr/local/bin/cubevsmapdump
+  log "installed cubevsmapdump -> ${dst}"
 }
 
 run_install() {
@@ -398,80 +412,24 @@ kill_pidfile() {
   rm -f "${file}"
 }
 
-run_network_agent() {
-  local bin="${TOOLBOX_ROOT}/network-agent/bin/network-agent"
-  local cfg="${TOOLBOX_ROOT}/Cubelet/config/config.toml"
-  local state_dir="${NETWORK_AGENT_STATE_DIR:-/data/cubelet/network-agent/state}"
-  local health="${NETWORK_AGENT_HEALTH_URL:-http://127.0.0.1:19090/readyz}"
-  local pid
 
-  # Self-stage (no separate network-agent-install container).
-  stage_component "$(component_relpath network-agent)"
-  # Config lives under Cubelet tree — wait until cubelet run has staged it.
-  wait_sentinel "$(component_sentinel cubelet)" "cubelet-config"
-  [[ -x "${bin}" ]] || fail "missing ${bin}"
-  [[ -f "${cfg}" ]] || fail "missing ${cfg}"
-
-  mkdir -p "${state_dir}" "${TOOLBOX_ROOT}/cube-vs/network" /tmp/cube /data/log
-  rm -f /tmp/cube/network-agent.sock /tmp/cube/network-agent-grpc.sock /tmp/cube/network-agent-tap.sock || true
-
-  kill_pidfile network-agent
-
-  if [[ -z "${CUBE_SANDBOX_ETH_NAME:-}" && "${CUBE_SANDBOX_AUTO_DETECT_ETH:-true}" == "true" ]]; then
-    CUBE_SANDBOX_ETH_NAME="$(detect_primary_interface || true)"
-    [[ -n "${CUBE_SANDBOX_ETH_NAME}" ]] && log "auto detected primary interface: ${CUBE_SANDBOX_ETH_NAME}"
-  fi
-  if [[ -n "${CUBE_SANDBOX_ETH_NAME:-}" ]]; then
-    local eth_esc
-    eth_esc="$(sed_escape_replacement "${CUBE_SANDBOX_ETH_NAME}")"
-    sed -i "s/eth_name = \"[^\"]*\"/eth_name = \"${eth_esc}\"/" "${cfg}"
-  fi
-  if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
-    local cidr_esc
-    cidr_esc="$(sed_escape_replacement "${CUBE_SANDBOX_NETWORK_CIDR}")"
-    sed -i "s|cidr = \"[^\"]*\"|cidr = \"${cidr_esc}\"|" "${cfg}"
-  fi
-
-  log "starting network-agent"
-  "${bin}" --cubelet-config "${cfg}" --state-dir "${state_dir}" &
-  pid=$!
-  write_pidfile network-agent "${pid}"
-
-  cleanup() { kill_pidfile network-agent; }
-  trap cleanup TERM INT HUP EXIT
-
-  local i
-  for i in $(seq 1 120); do
-    if curl -fsS "${health}" >/dev/null 2>&1; then
-      log "network-agent ready"
-      break
-    fi
-    if ! kill -0 "${pid}" >/dev/null 2>&1; then
-      fail "network-agent exited before ready"
-    fi
-    [[ "${i}" -lt 120 ]] || fail "network-agent did not become ready"
-    sleep 1
-  done
-
-  while kill -0 "${pid}" >/dev/null 2>&1; do
-    sleep 10
-  done
-  fail "network-agent exited"
-}
 
 run_cubelet() {
   local bin="${TOOLBOX_ROOT}/Cubelet/bin/cubelet"
   local cfg="${TOOLBOX_ROOT}/Cubelet/config/config.toml"
   local dyn="${CUBELET_DYNAMICCONF:-${TOOLBOX_ROOT}/Cubelet/dynamicconf/conf.yaml}"
-  local pid launch
+  local i pid launch
 
-  # Self-stage (no separate cubelet-install container).
+  # Self-stage (no separate cubelet-install container). CubeVS tools are bundled
+  # with the cubelet image so cube-node-installer does not need an extra
+  # CubeVS installer container.
   stage_component "$(component_relpath cubelet)"
+  stage_cubevs_tools
   wait_sentinel "$(component_sentinel cube-shim)" "cube-shim"
   wait_sentinel "$(component_sentinel cube-kernel)" "cube-kernel"
   wait_sentinel "$(component_sentinel cube-guest)" "cube-guest"
   wait_sentinel "$(component_sentinel cube-agent)" "cube-agent"
-  wait_sentinel "$(component_sentinel network-agent)" "network-agent"
+
 
   [[ -x "${bin}" ]] || fail "missing ${bin}"
   [[ -f "${cfg}" ]] || fail "missing ${cfg}"
@@ -524,21 +482,14 @@ run_cubelet() {
     /data/cubelet/state \
     "${TOOLBOX_ROOT}/cube-snapshot" \
     "${TOOLBOX_ROOT}/cube-vs/network"
+  [[ -x "${TOOLBOX_ROOT}/cube-vs/network/bin/cubevsmapdump" ]] || fail "missing cubevsmapdump after cube-vs stage"
+  mkdir -p /usr/local/bin
+  ln -sf "${TOOLBOX_ROOT}/cube-vs/network/bin/cubevsmapdump" /usr/local/bin/cubevsmapdump
 
   if ! findmnt --mountpoint /data/cubelet/state >/dev/null 2>&1; then
     mount --bind /data/cubelet/state /data/cubelet/state
     log "bound /data/cubelet/state to hostPath (skip state tmpfs)"
   fi
-
-  # Wait for network-agent health before cubelet init (NA creates cube-dev).
-  local i
-  for i in $(seq 1 120); do
-    if curl -fsS "${NETWORK_AGENT_HEALTH_URL:-http://127.0.0.1:19090/readyz}" >/dev/null 2>&1; then
-      break
-    fi
-    [[ "${i}" -lt 120 ]] || fail "network-agent not healthy before cubelet start"
-    sleep 1
-  done
 
   kill_pidfile cubelet
 
@@ -575,7 +526,6 @@ main() {
     install) run_install ;;
     run)
       case "${CUBE_COMPONENT}" in
-        network-agent) run_network_agent ;;
         cubelet) run_cubelet ;;
         *) fail "CUBE_ROLE=run not supported for ${CUBE_COMPONENT}" ;;
       esac

@@ -20,7 +20,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/versioninfo"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/masterclient"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/networkagentclient"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	corev1 "k8s.io/api/core/v1"
@@ -110,8 +109,7 @@ type Cubelet struct {
 
 	rtManager runtemplate.RunTemplateManager
 
-	networkAgentClient networkagentclient.Client
-	lastNodeSnapshot   *cubeletnodemeta.Node
+	lastNodeSnapshot *cubeletnodemeta.Node
 
 	versionCollector *versioninfo.Collector
 
@@ -124,7 +122,6 @@ func NewCubelet(
 	controllerMap map[string]controller.CubeMetaController,
 	criImage *cubeimages.CubeImageService,
 	rtManager runtemplate.RunTemplateManager,
-	networkAgentClient networkagentclient.Client,
 ) (*Cubelet, error) {
 	var (
 		ctx        = context.Background()
@@ -156,10 +153,9 @@ func NewCubelet(
 		nodeStatusUpdateFrequency: tomlext.ToStdTime(mconfig.NodeStatusUpdateFrequency),
 		nodeStatusReportFrequency: tomlext.ToStdTime(mconfig.NodeStatusUpdateFrequency),
 
-		criImage:           criImage,
-		rtManager:          rtManager,
-		controllerMap:      controllerMap,
-		networkAgentClient: networkAgentClient,
+		criImage:      criImage,
+		rtManager:     rtManager,
+		controllerMap: controllerMap,
 
 		NodeLabels: nodeLabels,
 

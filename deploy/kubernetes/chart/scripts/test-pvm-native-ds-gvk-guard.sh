@@ -55,7 +55,7 @@ for component in (
 node = find_ds("cube-node")
 if "initContainers:" not in node or "name: wait-node-prep" not in node:
     raise SystemExit("cube-node must have wait-node-prep as initContainer")
-# wait must not appear as a long-running container alongside network-agent
+# wait must not appear as a long-running container alongside cubelet runtime
 containers_idx = node.find("\n      containers:")
 init_idx = node.find("\n      initContainers:")
 if containers_idx < 0 or init_idx < 0 or containers_idx < init_idx:

@@ -17,7 +17,7 @@ global:
   # to mirror all images into a private registry without editing each entry
   # individually. Applies to the pvmHostBootstrap / nodeInit / node / master
   # / api / ops / cubemastercli / proxy / lifecycleManager / cubeEgress /
-  # cubeEgressNet / webui / cubelet / networkAgent / cubeShim / cubeKernel /
+  # cubeEgressNet / webui / cubelet / cubeShim / cubeKernel /
   # cubeGuest / cubeAgent / waitNodePrep / kubectl (alpine-k8s mirror) entries but not to
   # third-party images such as mysql / redis.
   imageRegistry: ""
@@ -44,11 +44,6 @@ images:
   # Big Pod per-component runtime images.
   cubelet:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cubelet
-    tag: v0.6.0
-    pullPolicy: IfNotPresent
-
-  networkAgent:
-    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/network-agent
     tag: v0.6.0
     pullPolicy: IfNotPresent
 
@@ -513,8 +508,8 @@ cubeNode:
     type: RollingUpdate
     rollingUpdate:
       maxUnavailable: 1
-  # Give cubelet/network-agent time to exit cleanly on Pod delete. preStop only
-  # signals those processes via pidfile; containerd-shim-cube-rs / microVMs are left alone.
+  # Give cubelet time to exit cleanly on Pod delete. preStop only signals the
+  # cubelet pidfile; containerd-shim-cube-rs / microVMs are left alone.
   terminationGracePeriodSeconds: 30
 
   # Stable NodeID = Kubernetes node name (CUBE_SANDBOX_NODE_ID).
@@ -571,15 +566,13 @@ cubeNode:
     readiness:
       enabled: true
       tcpSocketPort: 9999
-      # Recovery gate: cubelet listening AND network-agent ready.
+      # Recovery gate: cubelet listening and serving its local socket.
       exec:
         - /bin/bash
         - -ec
         - |
           ss -lntp 2>/dev/null | grep -q ':9999' || exit 1
-          curl -fsS http://127.0.0.1:19090/readyz >/dev/null
           test -S /data/cubelet/cubelet.sock
-          test -S /tmp/cube/network-agent-grpc.sock
       initialDelaySeconds: 10
       periodSeconds: 10
       failureThreshold: 6
@@ -793,7 +786,7 @@ cubeEgress:
   # Cube Node Big Pod gets a cube-egress sidecar and a cube-egress-net helper
   # sidecar that owns host TPROXY iptables/ip-rule state.
   enabled: true
-  bootstrapURL: http://127.0.0.1:19090/v1/policies/dump
+  bootstrapURL: http://127.0.0.1:9998/v1/policies/dump
   debugDump: false
   ca:
     # Supported modes:

@@ -18,7 +18,7 @@ For install steps, see [Helm Install](./install.md). For compute image upgrades,
 | Admin entry | WebUI | Deployment + Service + ConfigMap | Static console; reverse-proxies `/opsapi/` and `/cubeapi/v1/` to CubeOps (depends on `cubeOps.enabled`) |
 | Ops entry | cubemastercli | Deployment | CLI for `kubectl exec`; injects this Release’s CubeMaster endpoint |
 | Dependent storage | MySQL / Redis | Built-in StatefulSet or third-party | Business data / Proxy and lifecycle state |
-| Compute · runtime | `cube-node` (Big Pod) | Native `apps/v1` DaemonSet | `wait-node-prep` init + cubelet / network-agent + optional egress |
+| Compute · runtime | `cube-node` (Big Pod) | Native `apps/v1` DaemonSet | `wait-node-prep` init + cubelet with embedded network runtime + optional egress |
 | Compute · artifacts | `cube-node-installer` | Native `apps/v1` DaemonSet | Installs shim / kernel / guest into the host toolbox |
 | Compute · node bootstrap | `cube-node-bootstrap` | Native `apps/v1` DaemonSet | `wait-pvm-host`, `cube-node-init`, writes `node-prep-ready` |
 | Compute · PVM host | `cube-node-pvm` | Native `apps/v1` DaemonSet (`placement.pvm` only) | PVM host kernel install (may reboot); manages L0 taints and writes fingerprints |
@@ -60,7 +60,7 @@ flowchart TB
     end
     subgraph NODE["cube-node Big Pod"]
       WAIT["init: wait-node-prep (exits when ready)"]
-      RUN["cubelet + network-agent"]
+      RUN["cubelet + embedded network runtime"]
       EG["cube-egress + cube-egress-net"]
     end
   end
@@ -130,8 +130,7 @@ All four compute lines (Big Pod / installer / bootstrap / PVM) are native `apps/
 | Container | Image | Responsibility |
 | --- | --- | --- |
 | `wait-node-prep` (init) | `images.waitNodePrep` | Read-only hostPath `node-prep-ready` self-describing fingerprint; exits when matched so run containers can start |
-| `network-agent` | `images.networkAgent` | Starts after self-stage |
-| `cubelet` | `images.cubelet` | Starts after self-stage |
+| `cubelet` | `images.cubelet` | Starts after self-stage; includes embedded network runtime and CubeVS tools |
 | `cube-egress` / `cube-egress-net` | matching images | Optional; transparent egress / TPROXY |
 
 **Container names / volumeMount / securityContext / imagePullPolicy changes also recreate**.
@@ -294,7 +293,8 @@ sequenceDiagram
 
 Probe conventions:
 
-- cubelet: startup waits on 9999; readiness defaults to exec (9999 + network-agent `/readyz` + sock); liveness checks 9999.
+- cubelet: startup waits on 9999; readiness defaults to exec (9999 + Cubelet local socket); liveness checks 9999.
+- After network-agent was embedded into Cubelet, node readiness / `NotReady` no longer probes a standalone network daemon. Runtime network degradation (for example TAP pool exhaustion or sustained CubeEgress push failures) is surfaced on create/release paths and local diagnostics instead of flipping the node to NotReady. Monitor create failure rates, TAP pool state (`cubecli container taps` / loopback `GET /v1/network/taps`), and CubeEgress health rather than relying on node Ready alone.
 - `cube-egress`: `127.0.0.1:9090/admin/v1/health`.
 - `cube-egress-net`: `cube-dev`, ip rule, table 100, mangle `TRANSPROXY`.
 
@@ -416,7 +416,7 @@ Does not install built-in Master / API / MySQL / Redis / WebUI; by default does 
 | `<release>-mysql-test` / `redis-test` | Built-in dependency connectivity |
 | `<release>-dns-test` | `cube.app` / wildcard → Proxy Service |
 | `<release>-node-image-test` | Runtime tools and assets inside the image |
-| `<release>-node-runtime-test` | `/dev/kvm`, cubelet / network-agent sockets |
+| `<release>-node-runtime-test` | `/dev/kvm`, cubelet socket, embedded network runtime |
 
 ```bash
 helm test <release> -n <namespace> --timeout 20m --logs

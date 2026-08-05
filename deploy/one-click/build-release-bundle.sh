@@ -77,7 +77,6 @@ CUBEMASTER_BUILD_MODE="${ONE_CLICK_CUBEMASTER_BUILD_MODE:-local}"
 CUBELET_BUILD_MODE="${ONE_CLICK_CUBELET_BUILD_MODE:-local}"
 API_BUILD_MODE="${ONE_CLICK_CUBE_API_BUILD_MODE:-local}"
 CUBE_OPS_BUILD_MODE="${ONE_CLICK_CUBE_OPS_BUILD_MODE:-local}"
-NETWORK_AGENT_BUILD_MODE="${ONE_CLICK_NETWORK_AGENT_BUILD_MODE:-local}"
 CUBEVSMAPDUMP_BUILD_MODE="${ONE_CLICK_CUBEVSMAPDUMP_BUILD_MODE:-local}"
 
 CUBEMASTER_BIN_OVERRIDE="${ONE_CLICK_CUBEMASTER_BIN:-}"
@@ -86,7 +85,6 @@ CUBELET_BIN_OVERRIDE="${ONE_CLICK_CUBELET_BIN:-}"
 CUBECLI_BIN_OVERRIDE="${ONE_CLICK_CUBECLI_BIN:-}"
 API_BIN_OVERRIDE="${ONE_CLICK_CUBE_API_BIN:-}"
 CUBE_OPS_BIN_OVERRIDE="${ONE_CLICK_CUBE_OPS_BIN:-}"
-NETWORK_AGENT_BIN_OVERRIDE="${ONE_CLICK_NETWORK_AGENT_BIN:-}"
 CUBEVSMAPDUMP_BIN_OVERRIDE="${ONE_CLICK_CUBEVSMAPDUMP_BIN:-}"
 
 go_version_ldflags() {
@@ -301,7 +299,7 @@ def optional_sha256(path):
 components = {}
 
 # ── Go binaries from CORE_BIN_DIR ──
-for name in ["cubemaster", "cubemastercli", "cubelet", "cubecli", "network-agent"]:
+for name in ["cubemaster", "cubemastercli", "cubelet", "cubecli"]:
     path = os.path.join(core_bin_dir, name)
     components[name] = {
         "version": cube_version,
@@ -639,7 +637,6 @@ mkdir -p "${CORE_BIN_DIR}"
 
 CUBEMASTER_VERSION_PKG="github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version"
 CUBELET_VERSION_PKG="github.com/tencentcloud/CubeSandbox/Cubelet/pkg/version"
-NETAGENT_VERSION_PKG="github.com/tencentcloud/CubeSandbox/network-agent/pkg/version"
 
 build_or_copy_go_binary \
   "cubemaster" "${CUBEMASTER_BIN_OVERRIDE}" \
@@ -665,18 +662,13 @@ build_or_copy_go_binary \
   "cubeops" "${CUBE_OPS_BIN_OVERRIDE}" \
   "${ROOT_DIR}/CubeOps" "${CUBE_OPS_BUILD_MODE}" \
   "${CORE_BIN_DIR}/cubeops" ./cmd/cubeops
-build_or_copy_go_binary \
-  "network-agent" "${NETWORK_AGENT_BIN_OVERRIDE}" \
-  "${ROOT_DIR}/network-agent" "${NETWORK_AGENT_BUILD_MODE}" \
-  "${CORE_BIN_DIR}/network-agent" ./cmd/network-agent "${NETAGENT_VERSION_PKG}"
+
 build_or_copy_go_binary \
   "cubevsmapdump" "${CUBEVSMAPDUMP_BIN_OVERRIDE}" \
   "${ROOT_DIR}/CubeNet/cubevs" "${CUBEVSMAPDUMP_BUILD_MODE}" \
   "${CORE_BIN_DIR}/cubevsmapdump" ./cmd/cubevsmapdump
 
 mkdir -p \
-  "${PACKAGE_ROOT}/network-agent/bin" \
-  "${PACKAGE_ROOT}/network-agent/state" \
   "${PACKAGE_ROOT}/CubeAPI/bin" \
   "${PACKAGE_ROOT}/CubeOps/bin" \
   "${PACKAGE_ROOT}/CubeMaster/bin" \
@@ -693,7 +685,7 @@ mkdir -p \
   "${PACKAGE_ROOT}/support" \
   "${PACKAGE_ROOT}/support/bin" \
   "${PACKAGE_ROOT}/systemd" \
-  "${PACKAGE_ROOT}/cube-vs/network" \
+  "${PACKAGE_ROOT}/cube-vs/network/bin" \
   "${PACKAGE_ROOT}/cube-snapshot" \
   "${PACKAGE_ROOT}/scripts/one-click" \
   "${PACKAGE_ROOT}/scripts/systemd" \
@@ -701,9 +693,7 @@ mkdir -p \
   "${PACKAGE_ROOT}/cube-egress" \
   "${PACKAGE_ROOT}/terraform/tencentcloud"
 
-copy_file "${CORE_BIN_DIR}/network-agent" "${PACKAGE_ROOT}/network-agent/bin/network-agent"
-copy_file "${CORE_BIN_DIR}/cubevsmapdump" "${PACKAGE_ROOT}/network-agent/bin/cubevsmapdump"
-copy_file "${ROOT_DIR}/configs/single-node/network-agent.yaml" "${PACKAGE_ROOT}/network-agent/network-agent.yaml"
+copy_file "${CORE_BIN_DIR}/cubevsmapdump" "${PACKAGE_ROOT}/cube-vs/network/bin/cubevsmapdump"
 
 # Lay down the one-click CubeAPI assets (Dockerfile, etc.) first, then copy the
 # binary on top: copy_dir_contents rm -rf's the destination, so copying the

@@ -931,7 +931,7 @@ check_bpf_fs_preflight() {
 
   if ! grep -qw bpf /proc/filesystems; then
     die "Your kernel does not support the 'bpf' filesystem (eBPF is missing or not enabled).
-  network-agent requires eBPF to function properly.
+  Cubelet's embedded network runtime requires eBPF to function properly.
   Please upgrade your kernel or enable CONFIG_BPF_SYSCALL."
   fi
 
@@ -945,7 +945,7 @@ check_bpf_fs_preflight() {
   fi
 
   die "/sys/fs/bpf is not mounted as a bpf filesystem (type: ${bpf_fs_type:-unknown}).
-  network-agent requires bpffs for its pinned eBPF maps.
+  Cubelet's embedded network runtime requires bpffs for its pinned eBPF maps.
   Troubleshooting: https://github.com/TencentCloud/CubeSandbox/blob/master/docs/guide/troubleshooting/deployment.md#bpffs-is-not-mounted"
 }
 
@@ -1099,9 +1099,20 @@ stop_existing_legacy_deployment() {
   fi
 }
 
+remove_obsolete_network_agent_unit() {
+  local unit="cube-sandbox-network-agent.service"
+  systemctl disable --now "${unit}" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/${unit}"
+  rm -f "/etc/systemd/system/cube-sandbox-control.target.wants/${unit}"
+  rm -f "/etc/systemd/system/cube-sandbox-compute.target.wants/${unit}"
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl reset-failed "${unit}" >/dev/null 2>&1 || true
+}
+
 install_systemd_units() {
   local install_units_script="${INSTALL_PREFIX}/scripts/systemd/install-units.sh"
   ensure_file "${install_units_script}"
+  remove_obsolete_network_agent_unit
   "${install_units_script}"
 }
 
@@ -1286,8 +1297,8 @@ rm -rf \
 
 mkdir -p "${INSTALL_PREFIX}"
 if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
-  copy_dir_contents "${PKG_ROOT}/network-agent" "${INSTALL_PREFIX}/network-agent"
   copy_dir_contents "${PKG_ROOT}/Cubelet" "${INSTALL_PREFIX}/Cubelet"
+  copy_dir_contents "${PKG_ROOT}/cube-vs" "${INSTALL_PREFIX}/cube-vs"
   copy_dir_contents "${PKG_ROOT}/cube-shim" "${INSTALL_PREFIX}/cube-shim"
   copy_dir_contents "${PKG_ROOT}/cube-kernel-scf" "${INSTALL_PREFIX}/cube-kernel-scf"
   copy_dir_contents "${PKG_ROOT}/cube-image" "${INSTALL_PREFIX}/cube-image"
@@ -1486,8 +1497,8 @@ else
   remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_PASSWORD"
 fi
 
-chmod +x "${INSTALL_PREFIX}/network-agent/bin/"*
 chmod +x "${INSTALL_PREFIX}/Cubelet/bin/"*
+chmod +x "${INSTALL_PREFIX}/cube-vs/network/bin/"* 2>/dev/null || true
 chmod +x "${INSTALL_PREFIX}/cube-shim/bin/containerd-shim-cube-rs" "${INSTALL_PREFIX}/cube-shim/bin/cube-runtime"
 chmod +x "${INSTALL_PREFIX}/scripts/one-click/"*.sh
 chmod +x "${INSTALL_PREFIX}/scripts/systemd/"*.sh
@@ -1508,7 +1519,7 @@ fi
 ln -sf "${INSTALL_PREFIX}/cube-shim/bin/containerd-shim-cube-rs" /usr/local/bin/containerd-shim-cube-rs
 ln -sf "${INSTALL_PREFIX}/cube-shim/bin/cube-runtime" /usr/local/bin/cube-runtime
 ln -sf "${INSTALL_PREFIX}/Cubelet/bin/cubecli" /usr/local/bin/cubecli
-ln -sf "${INSTALL_PREFIX}/network-agent/bin/cubevsmapdump" /usr/local/bin/cubevsmapdump
+ln -sf "${INSTALL_PREFIX}/cube-vs/network/bin/cubevsmapdump" /usr/local/bin/cubevsmapdump
 if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
   ln -sf "${INSTALL_PREFIX}/CubeMaster/bin/cubemastercli" /usr/local/bin/cubemastercli
 else

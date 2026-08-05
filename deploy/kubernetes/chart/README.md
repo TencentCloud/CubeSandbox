@@ -4,7 +4,7 @@ This chart delivers CubeSandbox on Kubernetes/TKE as chart-managed resources.
 
 Current compute-plane shape (per compute node):
 
-- **`cube-node` (Big Pod)**: native `apps/v1` DaemonSet; `wait-node-prep` **initContainer** (exits when ready) + `cubelet` / `network-agent` + optional egress; Pod network (`hostNetwork=false`). Image/template changes recreate the Pod and interrupt sandboxes on that node.
+- **`cube-node` (Big Pod)**: native `apps/v1` DaemonSet; `wait-node-prep` **initContainer** (exits when ready) + `cubelet` with embedded network runtime + optional egress; Pod network (`hostNetwork=false`). Image/template changes recreate the Pod and interrupt sandboxes on that node.
 - **`cube-node-installer`**: native DaemonSet that stages shim / kernel / guest into the host toolbox tree.
 - **`cube-node-bootstrap`**: native DaemonSet that runs `wait-pvm-host` + `cube-node-init`, then writes `node-prep-ready`.
 - **`cube-node-pvm`**: native `apps/v1` DaemonSet scheduled only via `placement.pvm` (`allow-pvm-bootstrap`); installs PVM host kernel and writes fingerprint `pvm-host-ready`. Non-PVM compute nodes never pull this image.
@@ -43,7 +43,7 @@ See the [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) gu
 | `cube-node-init` | Bootstrap DaemonSet: `wait-pvm-host` + `cube-node-init`. Loads KVM, prepares host paths, validates `/dev/kvm` and XFS. |
 | `cube-wait-node-prep` | Big Pod `wait-node-prep` initContainer (poll `node-prep-ready` then exit), bootstrap write-ready, and PVM hold container. |
 | `cube-shim` / `cube-kernel` / `cube-guest` / `cube-agent` | Installer DaemonSet containers; stage artifacts into `/usr/local/services/cubetoolbox` (`cube-image/`, `cube-agent/cube-agent.ext4`, …). |
-| `cubelet` / `network-agent` | Big Pod runtime containers (self-stage then run). |
+| `cubelet` | Big Pod runtime container (self-stage then run; includes embedded network runtime and CubeVS tools). |
 | `cube-master` | Control-plane master; embedded schema migrations. |
 | `cube-api` | External E2B-compatible HTTP API. |
 | `cube-ops` | Ops/admin backend (JWT) + WebUI SDK proxy to CubeMaster. |
@@ -564,12 +564,11 @@ helm test cube -n cube-system --timeout 20m
 ## Upgrade policy
 
 `cube-node` is a native `apps/v1` DaemonSet. Bumping Big Pod runtime images
-(`images.cubelet`, `images.networkAgent`, `images.waitNodePrep`, …)
-or changing the Pod template **recreates** the Big Pod (Pod UID/IP/netns change)
-and **interrupts sandboxes on that node**. Artifact images bump only
-`cube-node-installer`; node-init images bump `cube-node-bootstrap`; PVM host
-image bumps only `cube-node-pvm`. See
-[Upgrade](https://cubesandbox.com/guide/kubernetes/upgrade).
+(`images.cubelet`, `images.waitNodePrep`, …) or changing the Pod template
+**recreates** the Big Pod (Pod UID/IP/netns change) and **interrupts sandboxes
+on that node**. Artifact images bump only `cube-node-installer`; node-init
+images bump `cube-node-bootstrap`; PVM host image bumps only `cube-node-pvm`.
+See [Upgrade](https://cubesandbox.com/guide/kubernetes/upgrade).
 
 Set `cubeNode.updateStrategy.type: OnDelete` for fully manual
 per-node upgrades.

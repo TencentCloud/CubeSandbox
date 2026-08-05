@@ -214,7 +214,7 @@ inject 的 `secret` 值在写入任何日志路径前都会被剥除。审计日
 | 文件 | Phase | 作用 |
 | --- | --- | --- |
 | `cert_signer.lua` | `ssl_certificate_by_lua` | 按 SNI 现场签发 leaf 证书 |
-| `bootstrap.lua` | `init_worker_by_lua`（仅 worker 0）| 启动时从 network-agent 拉初始策略 |
+| `bootstrap.lua` | `init_worker_by_lua`（仅 worker 0）| 启动时从 Cubelet 内置 network runtime 拉初始策略 |
 | `access_phase.lua` | `access_by_lua` | 每个请求做 match → action → inject 决策 |
 | `policy.lua` | （模块）| 内存中的策略表，由 `admin.lua` 和 `bootstrap.lua` 写入 |
 | `admin.lua` | `:9090` 上的 `content_by_lua` | 策略 CRUD admin API |

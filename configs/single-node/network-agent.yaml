@@ -1,4 +1,0 @@
-network_agent:
-  listen: "unix:///tmp/cube/network-agent.sock"
-  health_listen: "127.0.0.1:19090"
-  grpc_listen: "unix:///tmp/cube/network-agent-grpc.sock"

@@ -203,15 +203,12 @@ chown "${WORKER_UID}:${WORKER_GID}" "${AUDIT_DIR}"
 chmod 0755 "${AUDIT_DIR}"
 log "audit dir ${AUDIT_DIR} ready (owner ${WORKER_UID}:${WORKER_GID})"
 
-# Wait for network-agent's policy bootstrap endpoint before letting
-# cube-egress start. The unit declares
-# After=cube-sandbox-network-agent.service, but systemd ordering only
-# waits for the network-agent unit to finish activating — not for its
-# HTTP listener to bind. cube-egress's lua/init_worker_phase fires
-# CUBE_EGRESS_BOOTSTRAP_URL on worker-0 startup; if :19090 isn't ready
-# yet, bootstrap_status sticks at "pending" until the next retry tick.
+# Wait for Cubelet's embedded network runtime policy bootstrap endpoint before
+# letting cube-egress start. cube-egress's lua/init_worker_phase fires
+# CUBE_EGRESS_BOOTSTRAP_URL on worker-0 startup; if the Cubelet HTTP listener is
+# not ready yet, bootstrap_status sticks at "pending" until the next retry tick.
 # Block here to make the dependency hard.
-NETWORK_AGENT_BOOTSTRAP_URL="${CUBE_EGRESS_BOOTSTRAP_URL:-http://127.0.0.1:19090/v1/policies/dump}"
-log "waiting for network-agent bootstrap endpoint ${NETWORK_AGENT_BOOTSTRAP_URL}"
-wait_for_http "${NETWORK_AGENT_BOOTSTRAP_URL}" 60 1 \
-  || die "network-agent bootstrap endpoint ${NETWORK_AGENT_BOOTSTRAP_URL} not ready in 60s"
+CUBELET_BOOTSTRAP_URL="${CUBE_EGRESS_BOOTSTRAP_URL:-http://127.0.0.1:9998/v1/policies/dump}"
+log "waiting for Cubelet network runtime bootstrap endpoint ${CUBELET_BOOTSTRAP_URL}"
+wait_for_http "${CUBELET_BOOTSTRAP_URL}" 60 1 \
+  || die "Cubelet network runtime bootstrap endpoint ${CUBELET_BOOTSTRAP_URL} not ready in 60s"

@@ -1860,14 +1860,15 @@ _check_cidr_conflict() {
     elif (( cidr_net_start <= cd_net_end && cidr_net_end >= cd_net_start )); then
       # Different network that overlaps the requested CIDR -> disruptive change
       # on a host that already has a cube network. A reboot alone is NOT enough
-      # because the systemd target is enabled and network-agent rebuilds the old
-      # network from config.toml; a deterministic reset is required.
+      # because the systemd target is enabled and cubelet's embedded network
+      # runtime rebuilds the old network from config.toml; a deterministic reset
+      # is required.
       die "${cidr_label} '${cidr}' overlaps an existing cube-dev network (${cd_network}/${cd_mask}).
 
   Changing the sandbox CIDR on a host that already has a cube network is
   disruptive: the old cube-dev and the persistent z* TAP devices are left
   stale. A reboot alone is NOT enough -- the systemd target is enabled and
-  network-agent rebuilds the old network from config.toml on boot.
+  cubelet's embedded network runtime rebuilds the old network from config.toml on boot.
 
   To change the CIDR, fully reset the cube network first:
     sudo systemctl stop 'cube-sandbox-*.target'

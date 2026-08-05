@@ -212,7 +212,7 @@ test_quickcheck_reports_node_registration_failure_explicitly() {
 }
 
 # quickcheck runs once right after `systemctl enable --now <target>` returns, so
-# it must tolerate the brief startup race before cubelet/network-agent bind
+# it must tolerate the brief startup race before cubelet binds
 # their sockets and serve their health endpoints. Guard the retry semantics so a
 # future refactor cannot reintroduce one-shot probes (which produced spurious
 # "compute installation failed ... exit 1" failures on healthy nodes).
@@ -751,7 +751,7 @@ test_quickcheck_check_http_retries_then_succeeds() {
       printf '%s\n' "${n}" > "${curl_counter}"
       (( n >= 3 ))
     }
-    check_http "http://127.0.0.1:19090/healthz"
+    check_http "http://127.0.0.1:9998/v1/policies/dump"
   ) || fail "check_http should retry then succeed once the endpoint responds"
   local calls
   calls="$(<"${curl_counter}")"

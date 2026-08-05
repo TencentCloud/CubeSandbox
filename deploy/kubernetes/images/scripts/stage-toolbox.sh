@@ -77,15 +77,12 @@ done < <(find "${IMAGE_TOOLBOX_ROOT}" -mindepth 1 -maxdepth 1 -print0)
 chmod +x \
   "${HOST_TOOLBOX_ROOT}/Cubelet/bin/cubelet" \
   "${HOST_TOOLBOX_ROOT}/Cubelet/bin/cubecli" \
-  "${HOST_TOOLBOX_ROOT}/network-agent/bin/network-agent" \
-  "${HOST_TOOLBOX_ROOT}/network-agent/bin/cubevsmapdump" \
   "${HOST_TOOLBOX_ROOT}/cube-shim/bin/cube-runtime" \
   "${HOST_TOOLBOX_ROOT}/cube-shim/bin/containerd-shim-cube-rs" \
   2>/dev/null || true
 
 for required in \
   Cubelet/bin/cubelet \
-  network-agent/bin/network-agent \
   cube-shim/bin/containerd-shim-cube-rs \
   cube-shim/bin/cube-runtime
 do

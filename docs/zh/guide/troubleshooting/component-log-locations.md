@@ -14,7 +14,7 @@ lang: zh-CN
 
 ## 问题现象
 
-CubeSandbox 由多个组件组成（CubeAPI、CubeMaster、Cubelet、CubeShim、Hypervisor/VMM、network-agent、cube-proxy），排障时经常搞不清楚"这条报错该去哪个日志文件里找"，也不知道 guest kernel 的启动日志在哪里查看，以及 Cubelet 默认日志级别较低（`warn`），复现问题时看不到足够细节。
+CubeSandbox 由多个组件组成（CubeAPI、CubeMaster、Cubelet、CubeShim、Hypervisor/VMM、Cubelet 内置 network runtime、cube-proxy），排障时经常搞不清楚"这条报错该去哪个日志文件里找"，也不知道 guest kernel 的启动日志在哪里查看，以及 Cubelet 默认日志级别较低（`warn`），复现问题时看不到足够细节。
 
 本文汇总一键部署（systemd 托管）场景下，各组件日志的**确切路径**，并说明如何用 `cubecli logs` 查看沙箱/模板日志，如何在 guest kernel 日志里定位启动信息，以及如何给 Cubelet 开启 debug 级别日志。
 
@@ -23,7 +23,7 @@ CubeSandbox 由多个组件组成（CubeAPI、CubeMaster、Cubelet、CubeShim、
 - Cube Sandbox 版本：v0.4.0 及以上（一键部署，systemd 托管）
 - 部署模式：all-in-one / 多机集群，均适用
 - 宿主机 OS / 内核：运行 Cubelet 的 Linux 宿主机
-- 相关组件：CubeAPI、CubeMaster、Cubelet、CubeShim、Hypervisor(VMM)、network-agent、cube-proxy
+- 相关组件：CubeAPI、CubeMaster、Cubelet、CubeShim、Hypervisor(VMM)、Cubelet 内置 network runtime、cube-proxy
 
 ## 根因分析
 
@@ -52,7 +52,6 @@ Cubelet 默认日志级别较低（`warn`），常规运行时不会打印详细
 | CubeShim | 业务请求日志（含 guest kernel 输出） | `/data/log/CubeShim/cube-shim-req.log` | `tail -F` |
 | CubeShim | 统计日志 | `/data/log/CubeShim/cube-shim-stat.log` | `tail -F` |
 | Hypervisor (VMM) | VMM 创建过程日志 | `/data/log/CubeVmm/vmm.log` | `tail -F` |
-| network-agent | 业务请求日志 | `/data/log/network-agent/network-agent-req.log` | `tail -F` |
 | cube-proxy | 访问/错误日志 | `/data/log/cube-proxy/{access,error}.log` | `tail -F`（见下文） |
 | 沙箱容器 | init 进程 stdout/stderr | `/data/cubelet/state/io.containerd.runtime.v2.task/default/<sandbox-id>/{stdout,stderr}`（Cubelet 挂载命名空间内） | `cubecli logs <sandbox-id>`（见下文） |
 | 模板构建 | 构建容器 stdout/stderr | `/data/log/template/<template-id>_0/{stdout,stderr}`（宿主机文件系统） | `cubecli logs --tpl <template-id>` |

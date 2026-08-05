@@ -797,7 +797,7 @@ Toolbox is mounted whole at the fixed path.
 {{- end -}}
 
 {{/*
-Privileged securityContext shared by cubelet / network-agent / placeholder slots.
+Privileged securityContext shared by cubelet / placeholder slots.
 Must stay identical across frozen Big Pod containers (securityContext is not InPlace).
 */}}
 {{- define "cube.nodeDataplaneSecurityContext" -}}

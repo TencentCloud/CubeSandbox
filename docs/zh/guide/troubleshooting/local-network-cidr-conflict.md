@@ -169,7 +169,7 @@ sudo systemctl start 'cube-sandbox-*.target'
   Changing the sandbox CIDR on a host that already has a cube network is
   disruptive: the old cube-dev and the persistent z* TAP devices are left
   stale. A reboot alone is NOT enough -- the systemd target is enabled and
-  network-agent rebuilds the old network from config.toml on boot.
+  Cubelet 内置 network runtime 会在启动时按 config.toml 重建旧网络。
 
   To change the CIDR, fully reset the cube network first:
     sudo systemctl stop 'cube-sandbox-*.target'
@@ -184,4 +184,4 @@ sudo systemctl start 'cube-sandbox-*.target'
     CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK=1
 ```
 
-仅 reboot 并不够 —— systemd target 是 enabled 的，开机后 `network-agent` 会按 `config.toml` 重建 `cube-dev` 和 TAP 设备。按报错中给出的步骤做确定性清理，再用新的 `CUBE_SANDBOX_NETWORK_CIDR` 重新安装。若新网段不与残留 `cube-dev` 重叠，预检放行，`network-agent` 会把 `cube-dev` 协调到新网段。
+仅 reboot 并不够 —— systemd target 是 enabled 的，开机后 Cubelet 内置 network runtime 会按 `config.toml` 重建 `cube-dev` 和 TAP 设备。按报错中给出的步骤做确定性清理，再用新的 `CUBE_SANDBOX_NETWORK_CIDR` 重新安装。若新网段不与残留 `cube-dev` 重叠，预检放行，Cubelet 内置 network runtime 会把 `cube-dev` 协调到新网段。

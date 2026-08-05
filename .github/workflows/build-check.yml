@@ -11,7 +11,6 @@ on:
       - 'Cubelet/**'
       - 'CubeShim/**'
       - 'agent/**'
-      - 'network-agent/**'
       - 'docker/Dockerfile.builder'
       - '.github/workflows/build-builder-image.yml'
       - '.github/workflows/build-check.yml'
@@ -25,7 +24,6 @@ on:
       - 'Cubelet/**'
       - 'CubeShim/**'
       - 'agent/**'
-      - 'network-agent/**'
       - 'docker/Dockerfile.builder'
       - '.github/workflows/build-builder-image.yml'
       - '.github/workflows/build-check.yml'
@@ -57,7 +55,7 @@ jobs:
         # make target + expected binaries. Architecture coverage catches
         # arch-specific regressions (e.g. cfg(target_arch) code in the shim /
         # hypervisor) that an amd64-only build would miss.
-        component: [CubeAPI, CubeOps, CubeMaster, Cubelet, agent, CubeShim, network-agent]
+        component: [CubeAPI, CubeOps, CubeMaster, Cubelet, agent, CubeShim]
         arch: [amd64, arm64]
         include:
           - arch: amd64
@@ -91,10 +89,6 @@ jobs:
             expected_bins: |
               _output/bin/containerd-shim-cube-rs
               _output/bin/cube-runtime
-          - component: network-agent
-            make_target: network-agent
-            expected_bins: |
-              _output/bin/network-agent
 
     steps:
       - name: Checkout
@@ -246,14 +240,6 @@ jobs:
         with:
           context: .
           file: Cubelet/Dockerfile
-          push: false
-          load: false
-
-      - name: Build network-agent image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: network-agent/Dockerfile
           push: false
           load: false
 

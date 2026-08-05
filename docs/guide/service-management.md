@@ -66,8 +66,7 @@ The target lists its child services via `Wants=`; each service declares membersh
 | `cube-sandbox-redis.service` | Docker container | `6379` | control | docker |
 | `cube-sandbox-cubemaster.service` | Host process | `8089` | control | mysql, redis |
 | `cube-sandbox-cube-api.service` | Host process | `3000` (E2B-compatible API) | control | cubemaster |
-| `cube-sandbox-network-agent.service` | Host process | `19090` (health) | control / compute | network |
-| `cube-sandbox-cubelet.service` | Host process | `9999` (gRPC) | control / compute | network-agent + `/data/cubelet` (XFS) |
+| `cube-sandbox-cubelet.service` | Host process | `9999` (gRPC), HTTP diagnostics | control / compute | embedded network runtime + `/data/cubelet` (XFS) |
 | `cube-sandbox-coredns.service` | Docker container | `127.0.0.54:53` or `169.254.254.53:53` | control | docker |
 | `cube-sandbox-cube-proxy.service` | Docker container | `443` (TLS) / `80` / `9090` (gRPC) | control | docker, redis |
 | `cube-sandbox-dns.service` | oneshot (no daemon) | — | control | coredns (`BindsTo`) |
@@ -83,7 +82,7 @@ docker.service
    └─ coredns.service ─ dns.service (oneshot, BindsTo coredns)
 
 network-online.target
-   └─ network-agent.service ─ cubelet.service
+   └─ cubelet.service (embedded network runtime)
 ```
 
 Dependencies only express **startup ordering** via `After=` / `Wants=`. If an upstream service crashes at runtime, downstreams are **not** automatically restarted — cubelet won't be cycled just because cube-api died, and vice versa.
@@ -95,7 +94,7 @@ Dependencies only express **startup ordering** via `After=` / `Wants=`. If an up
 The two most common config entry points:
 
 - Top-level env: `/usr/local/services/cubetoolbox/.one-click.env`
-- Per-component: `Cubelet/config/config.toml`, `Cubelet/dynamicconf/conf.yaml`, `CubeMaster/conf.yaml`, `network-agent/network-agent.yaml`, `cubeproxy/global.conf`, `coredns/Corefile`
+- Per-component: `Cubelet/config/config.toml`, `Cubelet/dynamicconf/conf.yaml`, `CubeMaster/conf.yaml`, `cubeproxy/global.conf`, `coredns/Corefile`
 
 Restart the **service that consumes that config**:
 
@@ -227,14 +226,13 @@ CubeSandbox has multiple log sources, including component-specific in-container 
 
 ### `/data/log/` runtime logs (primary)
 
-> ⚠️ Cubelet / CubeMaster / CubeAPI / network-agent / CubeShim / VMM all write **business request + stat + audit + VMM lifecycle** logs to `/data/log/`. They do **not** show up in `journalctl` — read the files directly.
+> ⚠️ Cubelet / CubeMaster / CubeAPI / CubeShim / VMM all write **business request + stat + audit + VMM lifecycle** logs to `/data/log/`. They do **not** show up in `journalctl` — read the files directly.
 
 | Module | Directory | Main files |
 |---|---|---|
 | Cubelet | `/data/log/Cubelet/` | `Cubelet-req.log` (requests)<br>`Cubelet-stat.log` (metrics/stats) |
 | CubeMaster | `/data/log/CubeMaster/` | `cubemaster-req.log` |
 | CubeAPI | `/data/log/CubeAPI/` | `cube-api-YYYY-MM-DD.log` (daily-rotated) |
-| network-agent | `/data/log/network-agent/` | `network-agent-req.log` |
 | CubeShim | `/data/log/CubeShim/` | `cube-shim-req.log`, `cube-shim-stat.log` |
 | Hypervisor (VMM) | `/data/log/CubeVmm/` | `vmm.log` (one entry per sandbox creation) |
 | cube-proxy | `/data/log/cube-proxy/` | `error.log`, `access.log` (see below) |
@@ -297,7 +295,7 @@ sudo /usr/local/services/cubetoolbox/scripts/cube-diag/collect-logs.sh
 
 It collects everything into `cube-diag-<timestamp>/`:
 
-- Tails of `/data/log/CubeMaster|Cubelet|CubeAPI|CubeShim|CubeVmm|network-agent/`
+- Tails of `/data/log/CubeMaster|Cubelet|CubeAPI|CubeShim|CubeVmm/`
 - `/data/log/cube-proxy/` access/error logs
 - `dmesg` / process list / ports / mounts / cgroup / cpuinfo
 - Major config files (with secrets redacted)
@@ -426,7 +424,6 @@ sudo ss -lntp 'sport = :3000'
 | `cube-api` | ✅ | — |
 | `webui` | ✅ | — |
 | `cube-proxy` / `coredns` / `dns` | ✅ | — |
-| `network-agent` | ✅ | ✅ |
 | `cubelet` | ✅ | ✅ |
 
 ### See also
