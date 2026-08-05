@@ -26,8 +26,16 @@ concurrency:
 
 jobs:
   migration-check:
-    name: Migration naming & immutability
-    runs-on: ubuntu-latest
+    name: Migration naming & immutability (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -136,8 +144,16 @@ jobs:
           echo "All migration changes are additive (new files only)."
 
   schema-alignment:
-    name: Cross-dialect schema alignment (docker)
-    runs-on: ubuntu-latest
+    name: Cross-dialect schema alignment (docker) (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v6

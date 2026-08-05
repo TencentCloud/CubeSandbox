@@ -40,8 +40,20 @@ env:
 
 jobs:
   fmt:
-    name: Code Format Check
-    runs-on: ubuntu-latest
+    name: Code Format Check (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Run the format check on both arches. Formatter output is
+        # arch-independent, so the arm64 leg primarily exercises the arm64
+        # builder image end-to-end (that `make fmt` runs there), keeping arch
+        # coverage uniform with build-check / unit-test.
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v6

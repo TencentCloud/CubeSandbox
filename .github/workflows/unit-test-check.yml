@@ -259,6 +259,18 @@ jobs:
                   ),
                   requires_builder: (. != "CubeProxy" and . != "cubelog" and . != "cubedb")
                 })
+              | map(
+                  . as $c
+                  | ["amd64", "arm64"]
+                  | map(
+                      $c + {
+                        arch: .,
+                        runner: (if . == "amd64" then "ubuntu-latest" else "ubuntu-24.04-arm" end),
+                        display_name: ($c.display_name + " (" + . + ")")
+                      }
+                    )
+                )
+              | add
             '
           )"
 
@@ -270,7 +282,7 @@ jobs:
     name: Test ${{ matrix.display_name }}
     needs: detect-changes
     if: needs.detect-changes.outputs.has_work == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:

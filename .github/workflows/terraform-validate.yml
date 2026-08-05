@@ -34,8 +34,16 @@ concurrency:
 
 jobs:
   validate:
-    name: fmt + validate + shellcheck
-    runs-on: ubuntu-latest
+    name: fmt + validate + shellcheck (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v6
