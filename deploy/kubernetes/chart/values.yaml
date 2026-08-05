@@ -270,6 +270,9 @@ controlPlane:
     service:
       type: ClusterIP
       port: 3000
+      # Optional host port when type is NodePort or LoadBalancer.
+      # Leave empty for Kubernetes auto-allocation. Must not be set for ClusterIP.
+      nodePort: ""
     internalLoadBalancer:
       enabled: false
       annotations: {}
@@ -664,6 +667,17 @@ cubeProxy:
   service:
     type: ClusterIP
     annotations: {}
+    # Optional host ports when type is NodePort or LoadBalancer (range
+    # 30000-32767). Leave empty for auto-allocation. Must not be set for
+    # ClusterIP. Typical bare-metal / no-Ingress profile:
+    #   type: NodePort
+    #   nodePorts: { http: 30080, https: 30443, grpc: 30090 }
+    # and set ingress.enabled=false.
+    nodePorts:
+      http: ""
+      https: ""
+      grpc: ""
+      admin: ""
   ingress:
     # Requires a cluster Ingress Controller. Set false to manage the entrypoint
     # yourself (still keep the ClusterIP Service as the backend).

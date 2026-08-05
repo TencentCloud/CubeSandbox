@@ -20,16 +20,28 @@ spec:
       port: {{ .Values.cubeProxy.ports.http.containerPort }}
       targetPort: http
       protocol: TCP
+      {{- with (((.Values.cubeProxy).service).nodePorts).http }}
+      nodePort: {{ . }}
+      {{- end }}
     - name: https
       port: {{ .Values.cubeProxy.ports.https.containerPort }}
       targetPort: https
       protocol: TCP
+      {{- with (((.Values.cubeProxy).service).nodePorts).https }}
+      nodePort: {{ . }}
+      {{- end }}
     - name: grpc
       port: {{ .Values.cubeProxy.ports.grpc.containerPort }}
       targetPort: grpc
       protocol: TCP
+      {{- with (((.Values.cubeProxy).service).nodePorts).grpc }}
+      nodePort: {{ . }}
+      {{- end }}
     - name: admin
       port: {{ .Values.cubeProxy.adminPort }}
       targetPort: admin
       protocol: TCP
+      {{- with (((.Values.cubeProxy).service).nodePorts).admin }}
+      nodePort: {{ . }}
+      {{- end }}
 {{- end }}

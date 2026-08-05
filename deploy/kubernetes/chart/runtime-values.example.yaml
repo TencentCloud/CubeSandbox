@@ -28,7 +28,22 @@ cubeProxy:
   #   annotations:
   #     service.cloud.tencent.com/security-groups: "sg-xxxxxxxx"
   # No Ingress controller? Set cubeProxy.ingress.enabled: false and expose
-  # the ClusterIP Service yourself.
+  # the Service yourself, e.g. NodePort with fixed host ports:
+  # service:
+  #   type: NodePort
+  #   nodePorts:
+  #     http: 30080
+  #     https: 30443
+  #     grpc: 30090
+  # ingress:
+  #   enabled: false
+
+# Optional: expose CubeAPI on a fixed NodePort (with service.type=NodePort):
+# controlPlane:
+#   api:
+#     service:
+#       type: NodePort
+#       nodePort: 30030
 
 # REQUIRED: validate.yaml refuses CHANGE_ME_* sentinels from values.yaml.
 mysql:

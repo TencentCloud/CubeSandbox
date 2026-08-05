@@ -106,6 +106,18 @@
 {{- if and (eq (include "cube.redisBuiltinEnabled" .) "true") (hasPrefix "CHANGE_ME" (default "" .Values.redis.password)) }}
 {{- fail "redis.password still equals the CHANGE_ME_* default sentinel. Override it before deploying (or set redis.host to use external Redis)." }}
 {{- end }}
+{{- /* Fixed Service nodePorts are only valid for NodePort / LoadBalancer. */ -}}
+{{- $apiSvcType := .Values.controlPlane.api.service.type | default "ClusterIP" -}}
+{{- $apiNodePort := .Values.controlPlane.api.service.nodePort | default "" | toString -}}
+{{- if and (ne $apiNodePort "") (not (has $apiSvcType (list "NodePort" "LoadBalancer"))) }}
+{{- fail (printf "controlPlane.api.service.nodePort requires service.type NodePort or LoadBalancer (got %s)" $apiSvcType) }}
+{{- end }}
+{{- if ne $apiNodePort "" }}
+{{- $apiNP := $apiNodePort | int -}}
+{{- if or (lt $apiNP 30000) (gt $apiNP 32767) }}
+{{- fail (printf "controlPlane.api.service.nodePort must be in 30000-32767 (got %v)" $apiNodePort) }}
+{{- end }}
+{{- end }}
 {{- if eq (include "cube.proxyEnabled" .) "true" }}
 {{- if not $controlPlaneSelector }}
 {{- fail "cubeProxy.enabled=true requires placement.controlPlane.nodeSelector because CubeProxy runs on control nodes" }}
@@ -129,11 +141,29 @@
 {{- if and (eq (.Values.cubeProxy.service.type | default "ClusterIP") "LoadBalancer") (hasPrefix "CHANGE_ME" $clbSecurityGroups) }}
 {{- fail "cubeProxy.service.annotations[\"service.cloud.tencent.com/security-groups\"] still equals the CHANGE_ME_* sentinel from values-tke.yaml. Override it with your VPC security group id(s) (comma-separated), or set it to \"\" if you manage CLB security groups outside Helm." }}
 {{- end }}
+{{- $proxySvcType := .Values.cubeProxy.service.type | default "ClusterIP" -}}
+{{- $proxyNodePorts := ((.Values.cubeProxy).service).nodePorts | default dict -}}
+{{- $proxyNodePortKeys := list "http" "https" "grpc" "admin" -}}
+{{- range $name, $raw := $proxyNodePorts }}
+{{- if not (has $name $proxyNodePortKeys) }}
+{{- fail (printf "cubeProxy.service.nodePorts.%s is not supported; allowed keys: http, https, grpc, admin" $name) }}
+{{- end }}
+{{- $npStr := $raw | default "" | toString -}}
+{{- if ne $npStr "" }}
+{{- if not (has $proxySvcType (list "NodePort" "LoadBalancer")) }}
+{{- fail (printf "cubeProxy.service.nodePorts.%s requires service.type NodePort or LoadBalancer (got %s)" $name $proxySvcType) }}
+{{- end }}
+{{- $np := $npStr | int -}}
+{{- if or (lt $np 30000) (gt $np 32767) }}
+{{- fail (printf "cubeProxy.service.nodePorts.%s must be in 30000-32767 (got %v)" $name $raw) }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- if hasKey .Values.cubeProxy "sidecar" }}
 {{- fail "cubeProxy.sidecar was removed; lifecycle coordination is handled by lifecycleManager (cube-lifecycle-manager). Remove cubeProxy.sidecar from your values." }}
 {{- end }}
 {{- if hasKey .Values.cubeProxy "hostNetwork" }}
-{{- fail "cubeProxy.hostNetwork was removed; CubeProxy always runs on the Pod network behind a ClusterIP Service + Ingress. Remove cubeProxy.hostNetwork from your values." }}
+{{- fail "cubeProxy.hostNetwork was removed; CubeProxy always runs on the Pod network behind its Service (ClusterIP / NodePort / LoadBalancer; Ingress optional). Remove cubeProxy.hostNetwork from your values." }}
 {{- end }}
 {{- if and .Values.lifecycleManager.adminToken (lt (len .Values.lifecycleManager.adminToken) 16) }}
 {{- fail "lifecycleManager.adminToken must be empty for auto-generation or at least 16 characters when explicitly set" }}
