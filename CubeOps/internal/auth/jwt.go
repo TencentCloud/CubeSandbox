@@ -6,6 +6,7 @@ package auth
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -19,11 +20,13 @@ import (
 // VerifyAccessToken and accepted, turning it into a long-lived access
 // token.
 const (
-	tokenTypeAccess  = "access"
-	tokenTypeRefresh = "refresh"
+	tokenTypeAccess   = "access"
+	tokenTypeRefresh  = "refresh"
+	tokenTypeTerminal = "terminal"
 
-	audAccess  = "cubeops:access"  // audience for access tokens
-	audRefresh = "cubeops:refresh" // audience for refresh tokens
+	audAccess   = "cubeops:access"   // audience for access tokens
+	audRefresh  = "cubeops:refresh"  // audience for refresh tokens
+	audTerminal = "cubeops:terminal" // audience for short-lived Web Terminal tickets
 )
 
 // AccessClaims is the JWT claims for short-lived access tokens.
@@ -41,6 +44,17 @@ type RefreshClaims struct {
 	Username string `json:"username"`
 	TokenID  string `json:"tid"`
 	Typ      string `json:"typ"` // token type, always "refresh"
+}
+
+// TerminalClaims is carried by the short-lived ticket used to upgrade a
+// browser connection to a Web Terminal WebSocket. A separate audience and
+// token type prevent access or refresh tokens from being accepted as terminal
+// tickets. SandboxID binds the ticket to exactly one sandbox.
+type TerminalClaims struct {
+	jwt.RegisteredClaims
+	Username  string `json:"username"`
+	SandboxID string `json:"sandbox_id"`
+	Typ       string `json:"typ"`
 }
 
 // JWTManager handles JWT signing and verification.
@@ -107,6 +121,35 @@ func (m *JWTManager) GenerateRefreshToken(username string) (string, string, erro
 	return signed, tokenID, nil
 }
 
+// GenerateTerminalTicket creates a short-lived ticket for a single sandbox.
+// The ticket is transported in Sec-WebSocket-Protocol rather than a URL query
+// parameter so it is not copied into access logs, browser history, or referrer
+// headers.
+func (m *JWTManager) GenerateTerminalTicket(username, sandboxID string, ttl time.Duration) (string, error) {
+	if strings.TrimSpace(username) == "" || strings.TrimSpace(sandboxID) == "" {
+		return "", errors.New("terminal ticket requires username and sandbox ID")
+	}
+	if ttl <= 0 {
+		return "", errors.New("terminal ticket TTL must be positive")
+	}
+	now := time.Now()
+	claims := TerminalClaims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now.Add(-5 * time.Second)),
+			Subject:   username,
+			Audience:  jwt.ClaimStrings{audTerminal},
+			ID:        uuid.New().String(),
+		},
+		Username:  username,
+		SandboxID: sandboxID,
+		Typ:       tokenTypeTerminal,
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(m.secret)
+}
+
 // VerifyAccessToken parses and validates an access token. It rejects refresh
 // tokens by checking the "typ" claim and the audience, so a long-lived
 // refresh token cannot be used as an access token.
@@ -153,4 +196,29 @@ func (m *JWTManager) VerifyRefreshToken(tokenStr string) (*service.RefreshClaims
 		return nil, errors.New("not a refresh token")
 	}
 	return &service.RefreshClaims{Username: claims.Username, TokenID: claims.TokenID}, nil
+}
+
+// VerifyTerminalTicket parses and validates a Web Terminal ticket. Access and
+// refresh JWTs are rejected by both the dedicated audience and typ claim.
+func (m *JWTManager) VerifyTerminalTicket(tokenStr string) (*TerminalClaims, error) {
+	token, err := jwt.ParseWithClaims(tokenStr, &TerminalClaims{}, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+		}
+		return m.secret, nil
+	}, jwt.WithValidMethods([]string{"HS256"}), jwt.WithAudience(audTerminal))
+	if err != nil {
+		return nil, err
+	}
+	claims, ok := token.Claims.(*TerminalClaims)
+	if !ok || !token.Valid {
+		return nil, errors.New("invalid terminal ticket")
+	}
+	if claims.Typ != tokenTypeTerminal {
+		return nil, errors.New("not a terminal ticket")
+	}
+	if strings.TrimSpace(claims.Username) == "" || strings.TrimSpace(claims.SandboxID) == "" {
+		return nil, errors.New("terminal ticket is missing required claims")
+	}
+	return claims, nil
 }

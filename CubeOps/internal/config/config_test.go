@@ -20,6 +20,7 @@ func TestLoad_FromYAML(t *testing.T) {
 log_level: "debug"
 cubemaster_addr: "http://1.2.3.4:8089"
 sandbox_domain: "test.example.com"
+sandbox_proxy_url: "http://proxy.internal:8080"
 database_url: "mysql://root:pass@127.0.0.1:3306/testdb"
 jwt_secret: "yaml-secret"
 access_ttl: "30m"
@@ -46,6 +47,9 @@ refresh_ttl: "336h"
 	if cfg.SandboxDomain != "test.example.com" {
 		t.Errorf("SandboxDomain = %q, want test.example.com", cfg.SandboxDomain)
 	}
+	if cfg.SandboxProxyURL != "http://proxy.internal:8080" {
+		t.Errorf("SandboxProxyURL = %q, want http://proxy.internal:8080", cfg.SandboxProxyURL)
+	}
 	if cfg.JWTSecret != "yaml-secret" {
 		t.Errorf("JWTSecret = %q, want yaml-secret", cfg.JWTSecret)
 	}
@@ -64,6 +68,7 @@ database_url: "mysql://root:pass@127.0.0.1:3306/yamldb"
 	}
 	t.Setenv("CUBE_OPS_CONFIG", yamlPath)
 	t.Setenv("CUBE_OPS_BIND", "127.0.0.1:7777")
+	t.Setenv("CUBE_SANDBOX_PROXY_URL", "http://proxy.env:8080")
 
 	cfg, err := Load()
 	if err != nil {
@@ -71,6 +76,9 @@ database_url: "mysql://root:pass@127.0.0.1:3306/yamldb"
 	}
 	if cfg.Bind != "127.0.0.1:7777" {
 		t.Errorf("Bind = %q, want 127.0.0.1:7777 (env should override YAML)", cfg.Bind)
+	}
+	if cfg.SandboxProxyURL != "http://proxy.env:8080" {
+		t.Errorf("SandboxProxyURL = %q, want env override", cfg.SandboxProxyURL)
 	}
 }
 
@@ -89,6 +97,9 @@ func TestLoad_NoYAML_UsesEnvAndDefaults(t *testing.T) {
 	}
 	if cfg.Bind != "127.0.0.1:3010" {
 		t.Errorf("Bind = %q, want default 127.0.0.1:3010", cfg.Bind)
+	}
+	if cfg.SandboxProxyURL != "http://127.0.0.1" {
+		t.Errorf("SandboxProxyURL = %q, want default http://127.0.0.1", cfg.SandboxProxyURL)
 	}
 }
 

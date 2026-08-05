@@ -226,6 +226,19 @@ export const sandboxApi = {
     }),
 };
 
+export interface TerminalTicketDto {
+  ticket: string;
+  expiresIn: number;
+  protocol: string;
+}
+
+export const terminalApi = {
+  createTicket: (id: string) =>
+    ops<TerminalTicketDto>(`/sdk/sandboxes/${encodeURIComponent(id)}/terminal/ticket`, {
+      method: 'POST',
+    }),
+};
+
 export const templateApi = {
   list: () =>
     api<TemplateSummaryDto[]>('/templates').then((items) => items.map(mapTemplateSummary)),

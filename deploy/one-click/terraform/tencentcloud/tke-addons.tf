@@ -685,6 +685,10 @@ resource "kubernetes_deployment" "cube_ops" {
             value = "cube.app"
           }
           env {
+            name  = "CUBE_SANDBOX_PROXY_URL"
+            value = "http://cube-proxy:80"
+          }
+          env {
             name  = "CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK"
             value = "true"
           }

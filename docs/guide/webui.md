@@ -71,7 +71,37 @@ If any number is red, click into **Nodes** to see which host is unhappy.
 
 To stop a sandbox, go to **Sandboxes**, find the row, and click the pause / kill button on the right.
 
-### 3.3 Log in (JWT authentication)
+### 3.3 Open a Web Terminal
+
+Running sandboxes have a terminal icon in the **Sandboxes** table and a **Terminal** button on the sandbox detail page. Click either one to open an interactive login shell without installing an SSH server or exposing another port.
+
+- The session starts `/bin/bash -i -l` as root in `/root` with a resizable PTY.
+- Input and output are streamed as binary WebSocket frames, so UTF-8 text and full-screen terminal applications work normally.
+- Closing the dialog terminates the shell. Use **Reconnect** to start a fresh shell; sessions are not reattached.
+- The terminal entry is hidden while a sandbox is paused. Resume it first.
+
+::: details Authentication and safety boundaries
+The browser uses its access JWT only to request a 30-second terminal ticket. That ticket is bound to one user and one sandbox, can be used once, and travels in `Sec-WebSocket-Protocol` instead of the URL. CubeOps also enforces same-origin WebSocket requests, a 256 KiB client-frame limit, at most four sessions per user and sandbox, a 15-second opening timeout, and a 30-minute inactivity timeout.
+:::
+
+For custom deployments, CubeOps must be able to reach CubeProxy over HTTP:
+
+```bash
+CUBE_API_SANDBOX_DOMAIN=cube.app
+CUBE_SANDBOX_PROXY_URL=http://127.0.0.1
+```
+
+The Dashboard reverse proxy must forward `Upgrade` and `Connection` headers on `/opsapi/`. The provided one-click nginx and Kubernetes chart already include this configuration.
+
+If the dialog fails to connect:
+
+| Symptom | Check |
+| --- | --- |
+| `409 sandbox must be running` | Resume the sandbox and retry. |
+| `502` or “failed to open sandbox terminal” | Verify `CUBE_SANDBOX_PROXY_URL`, CubeProxy health, wildcard sandbox DNS, and envd port `49983`. |
+| Ticket succeeds but WebSocket immediately closes | Confirm `/opsapi/` forwards WebSocket upgrade headers and has a read timeout longer than the session. |
+
+### 3.4 Log in (JWT authentication)
 
 The Dashboard uses **JWT-based authentication** (since v0.6.0, replacing the old `X-API-Key` scheme). On first visit you'll be redirected to the login page.
 
@@ -112,7 +142,7 @@ The Command Palette's ⌘K input box and the topbar have quick toggles for the s
 Most operations (create-from-image, version matrix, node triage) are easier to discover and visualize in a UI. For automation, the Dashboard is just a thin client — every page is a call to `/cubeapi/v1/*`, which is the same E2B-compatible REST API you can hit with `curl` or the E2B SDK.
 
 **Does the Dashboard store my data?**
-It stores only one thing in your browser: the API key under `localStorage.cube.apiKey`. All other state (templates, sandboxes, logs) lives on the cluster.
+It stores the JWT access and refresh tokens in browser `localStorage`. Terminal tickets are short-lived and kept only in memory. All cluster state (templates, sandboxes, logs) remains on the cluster.
 
 **Can I change the port?**
 Yes — set `WEB_UI_HOST_PORT` in `.env` before running `install.sh`. The change applies on next start of `cube-sandbox-webui.service`.

@@ -64,6 +64,8 @@ spec:
             {{- end }}
             - name: CUBE_API_SANDBOX_DOMAIN
               value: {{ default .Values.cubeProxy.domain .Values.cubeOps.sandboxDomain | quote }}
+            - name: CUBE_SANDBOX_PROXY_URL
+              value: {{ default (printf "http://%s:%v" (include "cube.proxyServiceFQDN" .) .Values.cubeProxy.ports.http.containerPort) .Values.cubeOps.sandboxProxyURL | quote }}
             # Shared CubeDB with CubeMaster; skip fingerprint so chart upgrades
             # do not fail when Master already applied the same migrations.
             - name: CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK

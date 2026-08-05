@@ -25,7 +25,26 @@
   "actions": {
     "resume": "Resume",
     "pause": "Pause",
-    "kill": "Kill"
+    "kill": "Kill",
+    "terminal": "Open terminal"
+  },
+  "terminal": {
+    "title": "Terminal — {{sandboxID}}",
+    "connectingTo": "Connecting to {{sandboxID}}…",
+    "connected": "Connected (PID {{pid}})",
+    "exited": "Terminal exited with code {{code}}.",
+    "disconnected": "Connection closed.",
+    "connectionFailed": "Failed to connect to the terminal.",
+    "invalidResponse": "The server returned an invalid terminal message.",
+    "retry": "Reconnect",
+    "close": "Close terminal",
+    "status": {
+      "connecting": "Connecting…",
+      "connected": "Connected",
+      "exited": "Process exited",
+      "error": "Connection error",
+      "disconnected": "Disconnected"
+    }
   },
   "errors": {
     "unknown": "Unknown error",

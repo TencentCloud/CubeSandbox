@@ -24,6 +24,10 @@ export CUBE_OPS_LOG_LEVEL="${CUBE_OPS_LOG_LEVEL:-info}"
 # CubeMaster address (same host in All-in-One mode).
 export CUBE_MASTER_ADDR="${CUBE_MASTER_ADDR:-http://127.0.0.1:8089}"
 
+# Web Terminal data plane. CubeOps sends envd Connect traffic through
+# CubeProxy, selecting the sandbox with CubeProxy's Host routing convention.
+export CUBE_SANDBOX_PROXY_URL="${CUBE_SANDBOX_PROXY_URL:-http://127.0.0.1}"
+
 # JWT configuration. JWT_SECRET left unset → CubeOps auto-generates and
 # persists it to t_system_setting on first boot (single-instance default).
 export JWT_ACCESS_TTL="${JWT_ACCESS_TTL:-15m}"

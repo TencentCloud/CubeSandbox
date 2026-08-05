@@ -43,7 +43,8 @@
   "actions": {
     "resume": "Resume",
     "pause": "Pause",
-    "kill": "Kill"
+    "kill": "Kill",
+    "terminal": "Terminal"
   },
   "errors": {
     "unknown": "Unknown error",

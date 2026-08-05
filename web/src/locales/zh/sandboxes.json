@@ -25,7 +25,26 @@
   "actions": {
     "resume": "恢复",
     "pause": "暂停",
-    "kill": "终止"
+    "kill": "终止",
+    "terminal": "打开终端"
+  },
+  "terminal": {
+    "title": "终端 — {{sandboxID}}",
+    "connectingTo": "正在连接 {{sandboxID}}…",
+    "connected": "已连接（PID {{pid}}）",
+    "exited": "终端已退出，退出码 {{code}}。",
+    "disconnected": "连接已关闭。",
+    "connectionFailed": "无法连接到终端。",
+    "invalidResponse": "服务端返回了无效的终端消息。",
+    "retry": "重新连接",
+    "close": "关闭终端",
+    "status": {
+      "connecting": "正在连接…",
+      "connected": "已连接",
+      "exited": "进程已退出",
+      "error": "连接错误",
+      "disconnected": "连接已断开"
+    }
   },
   "errors": {
     "unknown": "未知错误",

@@ -119,3 +119,51 @@ func TestS1_DifferentSecretsRejected(t *testing.T) {
 		t.Fatal("VerifyAccessToken accepted a token signed by a different secret (S1)")
 	}
 }
+
+func TestTerminalTicketRoundTripAndTypeIsolation(t *testing.T) {
+	jm := newTestJWTManager()
+	ticket, err := jm.GenerateTerminalTicket("admin", "sandbox-123", time.Minute)
+	if err != nil {
+		t.Fatalf("GenerateTerminalTicket: %v", err)
+	}
+	claims, err := jm.VerifyTerminalTicket(ticket)
+	if err != nil {
+		t.Fatalf("VerifyTerminalTicket: %v", err)
+	}
+	if claims.Username != "admin" || claims.SandboxID != "sandbox-123" || claims.Typ != "terminal" {
+		t.Fatalf("unexpected terminal claims: %#v", claims)
+	}
+
+	access, err := jm.GenerateAccessToken("admin")
+	if err != nil {
+		t.Fatalf("GenerateAccessToken: %v", err)
+	}
+	if _, err := jm.VerifyTerminalTicket(access); err == nil {
+		t.Fatal("VerifyTerminalTicket accepted an access token")
+	}
+	if _, err := jm.VerifyAccessToken(ticket); err == nil {
+		t.Fatal("VerifyAccessToken accepted a terminal ticket")
+	}
+}
+
+func TestTerminalTicketRejectsInvalidArgumentsAndExpiredTicket(t *testing.T) {
+	jm := newTestJWTManager()
+	if _, err := jm.GenerateTerminalTicket("", "sandbox-123", time.Minute); err == nil {
+		t.Fatal("GenerateTerminalTicket accepted an empty username")
+	}
+	if _, err := jm.GenerateTerminalTicket("admin", "", time.Minute); err == nil {
+		t.Fatal("GenerateTerminalTicket accepted an empty sandbox ID")
+	}
+	if _, err := jm.GenerateTerminalTicket("admin", "sandbox-123", 0); err == nil {
+		t.Fatal("GenerateTerminalTicket accepted a non-positive TTL")
+	}
+
+	ticket, err := jm.GenerateTerminalTicket("admin", "sandbox-123", time.Nanosecond)
+	if err != nil {
+		t.Fatalf("GenerateTerminalTicket: %v", err)
+	}
+	time.Sleep(time.Millisecond)
+	if _, err := jm.VerifyTerminalTicket(ticket); err == nil {
+		t.Fatal("VerifyTerminalTicket accepted an expired ticket")
+	}
+}

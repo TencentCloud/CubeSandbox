@@ -67,16 +67,48 @@ Dashboard 是一个静态前端，由 **控制节点** 上的 nginx 容器托管
 
 要停掉一个沙箱，去 **Sandboxes** 列表，找到对应行，点最右边的暂停 / 销毁按钮。
 
-### 3.3 配置 API Key（仅在开启鉴权时需要）
+### 3.3 打开 Web 终端
 
-如果你的部署开启了鉴权，Dashboard 必须在请求里带上 API Key，否则所有请求都会失败。
+运行中的沙箱会在 **Sandboxes** 表格中显示终端图标，详情页也会显示 **终端** 按钮。点击后即可打开交互式登录 Shell，不需要在沙箱内安装 SSH 服务，也不需要额外暴露端口。
 
-1. 点左侧栏的 **API Keys**。
-2. 把 Key（形如 `sk-cube-…`）粘进输入框。
-3. 点 **Save**。Key 会保存在浏览器的 `localStorage.cube.apiKey`，Dashboard 之后每次请求都会自动带上 `X-API-Key` 请求头。
+- 会话以 root 用户在 `/root` 目录启动 `/bin/bash -i -l`，并支持动态调整 PTY 大小。
+- 输入和输出使用 WebSocket 二进制帧传输，UTF-8 文本和全屏终端程序都能正常工作。
+- 关闭弹窗会终止 Shell；点击 **重新连接** 会创建一个新 Shell，不会重新挂接旧会话。
+- 沙箱暂停时不会显示终端入口，请先恢复沙箱。
 
-::: details 这个 Key 从哪来？
-开启鉴权的人会生成它。完整流程见 [鉴权](./authentication.md)。
+::: details 鉴权与安全边界
+浏览器只使用访问 JWT 请求一个 30 秒有效的终端票据。票据绑定单个用户和单个沙箱、只能使用一次，并通过 `Sec-WebSocket-Protocol` 传递，不会出现在 URL 中。CubeOps 还会校验 WebSocket 同源请求，将客户端帧限制为 256 KiB，限制每个用户和沙箱最多 4 个会话，打开阶段最多等待 15 秒，并在空闲 30 分钟后自动关闭会话。
+:::
+
+自定义部署时，CubeOps 必须能够通过 HTTP 访问 CubeProxy：
+
+```bash
+CUBE_API_SANDBOX_DOMAIN=cube.app
+CUBE_SANDBOX_PROXY_URL=http://127.0.0.1
+```
+
+Dashboard 的反向代理必须在 `/opsapi/` 上转发 `Upgrade` 和 `Connection` 请求头。一键部署 nginx 和 Kubernetes Helm Chart 已包含这项配置。
+
+连接失败时可以按下面的顺序排查：
+
+| 现象 | 检查项 |
+| --- | --- |
+| 返回 `409 sandbox must be running` | 恢复沙箱后重试。 |
+| 返回 `502` 或“无法打开沙箱终端” | 检查 `CUBE_SANDBOX_PROXY_URL`、CubeProxy 健康状态、沙箱泛域名解析，以及 envd 的 `49983` 端口。 |
+| 票据创建成功，但 WebSocket 立即断开 | 确认 `/opsapi/` 转发了 WebSocket 升级请求头，且读取超时大于会话时长。 |
+
+### 3.4 登录（JWT 鉴权）
+
+Dashboard 从 v0.6.0 起使用 JWT 鉴权。首次访问时会自动跳转到登录页。
+
+1. 输入账号和密码。一键部署的默认账号是 `admin` / `admin`，生产环境必须立即在设置页修改密码。
+2. 登录成功后会获得短期访问令牌和 7 天有效的刷新令牌，后续请求使用 `Authorization: Bearer <jwt>`。
+3. `/opsapi/*` 管理接口由 Dashboard 同源代理转发；不要将 CubeOps 的 `3010` 端口直接暴露到公网。
+
+::: details 令牌生命周期
+- **访问令牌**：默认 15 分钟，类型为 `access`，audience 为 `cubeops:access`。
+- **刷新令牌**：默认 7 天，类型为 `refresh`，audience 为 `cubeops:refresh`，不能当作访问令牌使用。
+- 登录接口会按 IP 限制失败尝试次数。
 :::
 
 ## 4. 键盘快捷键
@@ -106,7 +138,7 @@ Dashboard 对键盘很友好。最常用的三个：
 绝大多数操作（从镜像创建模板、看版本矩阵、排查节点）在 UI 里更容易发现和理解。Dashboard 本质上只是 CubeAPI 的一个轻量客户端——每个页面背后都是一次 `/cubeapi/v1/*` 请求，这跟 E2B SDK、`curl` 调的是同一个 E2B 兼容 REST API。
 
 **Dashboard 会保存我的数据吗？**
-只会在浏览器里保存一样东西：`localStorage.cube.apiKey` 里的 API Key。其他所有状态（模板、沙箱、日志）都在集群上。
+浏览器的 `localStorage` 中只保存 JWT 访问令牌和刷新令牌；终端票据寿命很短，只保存在内存中。模板、沙箱和日志等集群状态仍保存在服务端。
 
 **能改端口吗？**
 可以——在 `.env` 里设 `WEB_UI_HOST_PORT`，然后重跑 `install.sh`。改动会在下次启动 `cube-sandbox-webui.service` 时生效。
@@ -121,6 +153,6 @@ Dashboard 对键盘很友好。最常用的三个：
 
 - [快速开始](./quickstart.md) — 如果你还没安装，几分钟到能跑的 Dashboard
 - [服务管理与日志](./service-management.md) — 如何启停 / 重启 `cube-sandbox-webui.service` 容器
-- [鉴权](./authentication.md) — 还没开启 API Key？这里有完整步骤
+- [鉴权](./authentication.md) — 了解 JWT 登录、令牌生命周期与密码管理
 - [HTTPS 证书与域名解析](./https-and-domain.md) — 给 Dashboard 加 TLS
 - [架构概览](../architecture/overview.md) — 了解 Dashboard 背后的 CubeAPI / CubeMaster / Cubelet 怎么协作

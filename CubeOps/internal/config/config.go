@@ -64,7 +64,8 @@ type Config struct {
 
 	// Sandbox domain exposed to SDK clients; matches SDK handler's
 	// CUBE_API_SANDBOX_DOMAIN env so the /config endpoint stays in sync.
-	SandboxDomain string `yaml:"sandbox_domain"`
+	SandboxDomain   string `yaml:"sandbox_domain"`
+	SandboxProxyURL string `yaml:"sandbox_proxy_url"`
 }
 
 // Load reads configuration from YAML + environment variables (env wins).
@@ -112,6 +113,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.SandboxDomain == "" {
 		cfg.SandboxDomain = "cube.app"
+	}
+	if cfg.SandboxProxyURL == "" {
+		cfg.SandboxProxyURL = "http://127.0.0.1"
 	}
 
 	// JWT_SECRET is optional — if not set, it will be auto-generated and
@@ -313,6 +317,12 @@ func overrideFromEnv(cfg *Config) {
 	}
 	if v := os.Getenv("CUBE_API_SANDBOX_DOMAIN"); v != "" {
 		cfg.SandboxDomain = v
+	}
+	if v := os.Getenv("CUBE_SANDBOX_PROXY_URL"); v != "" {
+		cfg.SandboxProxyURL = v
+	} else if v := os.Getenv("AGENTHUB_SANDBOX_PROXY_URL"); v != "" {
+		// Keep AgentHub-only deployments working without a second proxy URL.
+		cfg.SandboxProxyURL = v
 	}
 	if v := os.Getenv("JWT_ACCESS_TTL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {

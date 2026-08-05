@@ -47,3 +47,7 @@ redis_url: ""
 
 # --- Sandbox domain exposed to SDK clients via /config ---
 sandbox_domain: "cube.app"
+
+# CubeProxy base URL used by CubeOps for Web Terminal envd traffic.
+# The sandbox is selected with CubeProxy's Host routing convention.
+sandbox_proxy_url: "http://127.0.0.1"

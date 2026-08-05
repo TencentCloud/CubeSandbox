@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Tencent. All rights reserved.
 
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useParams, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -12,10 +12,12 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 
 import { Skeleton } from '@/components/ui/skeleton';
-import { ArrowLeft, Pause, Play, Trash2, RefreshCw } from 'lucide-react';
+import { ArrowLeft, Pause, Play, Trash2, RefreshCw, SquareTerminal } from 'lucide-react';
 import { cn, formatBytes, formatRelative } from '@/lib/utils';
 import { formatSandboxActionError } from '@/lib/sandboxActionError';
 import { SandboxActionErrorBanner } from '@/components/SandboxActionErrorBanner';
+
+const TerminalDialog = lazy(() => import('@/components/TerminalDialog'));
 
 // ── Log level colors ────────────────────────────────────────────────────────
 const LEVEL_CLASS: Record<string, string> = {
@@ -77,6 +79,7 @@ export default function SandboxDetailPage() {
   }, [logs.data]);
 
   const [actionError, setActionError] = useState<string | null>(null);
+  const [terminalOpen, setTerminalOpen] = useState(false);
   const onLifecycleError = (err: unknown) => {
     setActionError(formatSandboxActionError(err, t));
   };
@@ -219,6 +222,11 @@ export default function SandboxDetailPage() {
         </div>
         {data ? (
           <div className="flex gap-2">
+            {state === 'running' ? (
+              <Button variant="outline" onClick={() => setTerminalOpen(true)}>
+                <SquareTerminal size={14} /> {t('actions.terminal')}
+              </Button>
+            ) : null}
             {state === 'paused' ? (
               <Button variant="outline" onClick={() => resume.mutate()} disabled={resume.isPending}>
                 <Play size={14} /> {t('actions.resume')}
@@ -236,6 +244,11 @@ export default function SandboxDetailPage() {
       </div>
 
       <SandboxActionErrorBanner message={actionError} onDismiss={() => setActionError(null)} />
+      {terminalOpen ? (
+        <Suspense fallback={null}>
+          <TerminalDialog sandboxID={sandboxID} open onOpenChange={setTerminalOpen} />
+        </Suspense>
+      ) : null}
       {detail.isError && data ? (
         <div className="rounded-md border border-cube-warn/30 bg-cube-warn/10 px-3 py-2 text-sm text-cube-warn">
           {t('refreshFailed')}
