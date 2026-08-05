@@ -4643,6 +4643,7 @@ mod common_parallel {
     }
 
     #[test]
+    #[ignore = "PVM guest: TSC deadline timer is disabled; with acpi=off, no clockevent works (HPET/ACPI PM-Timer unavailable, 8259 PIC not emulated), kernel boot is expected to hang"]
     fn test_direct_kernel_boot_noacpi() {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
