@@ -82,6 +82,10 @@ Running sandboxes have a terminal icon in the **Sandboxes** table and a **Termin
 
 ::: details Authentication and safety boundaries
 The browser uses its access JWT only to request a 30-second terminal ticket. That ticket is bound to one user and one sandbox, can be used once, and travels in `Sec-WebSocket-Protocol` instead of the URL. CubeOps also enforces same-origin WebSocket requests, a 256 KiB client-frame limit, at most four sessions per user and sandbox, a 15-second opening timeout, and a 30-minute inactivity timeout.
+
+CubeOps currently uses a single-administrator authorization model: every authenticated access token has administrator privileges, and sandbox records do not carry an owner or ACL that CubeOps can enforce. The terminal therefore does **not** provide tenant isolation. Do not expose CubeOps to mutually untrusted users; add sandbox ownership/ACL checks before using it in a multi-tenant control plane.
+
+Ticket replay tracking and session counters are maintained in each CubeOps process. The supplied deployments run one CubeOps replica. A horizontally scaled deployment must add a shared replay/session store before relying on the one-use ticket and four-session limits as cluster-wide controls.
 :::
 
 For custom deployments, CubeOps must be able to reach CubeProxy over HTTP:

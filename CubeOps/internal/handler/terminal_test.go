@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -153,6 +154,123 @@ func TestTerminalOpenTimeoutCancelsBackend(t *testing.T) {
 	case <-backend.cancelled:
 	case <-time.After(time.Second):
 		t.Fatal("backend context was not cancelled after opening timeout")
+	}
+}
+
+func TestTerminalPongsDoNotResetIdleTimeout(t *testing.T) {
+	cm := &fakeCM{getSandbox: func(context.Context, string, string) (json.RawMessage, error) {
+		return json.RawMessage(`{"ret":{"ret_code":0},"data":[{"sandbox_id":"sb-idle","status":1}]}`), nil
+	}}
+	backend := newFakeTerminalBackend()
+	jm := auth.NewJWTManager("terminal-test-secret", time.Minute, time.Hour)
+	h := NewTerminalHandler(cm, jm, backend)
+	h.idleTimeout = 75 * time.Millisecond
+	h.idleCheck = 10 * time.Millisecond
+	h.pingInterval = 10 * time.Millisecond
+	h.pongTimeout = 250 * time.Millisecond
+	router := gin.New()
+	h.RegisterAuthed(router.Group("/api/v1/sdk", auth.Middleware(jm)))
+	h.RegisterPublic(router.Group("/api/v1/sdk"))
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+
+	ticket := requestTerminalTicket(t, srv.URL, jm, "sb-idle")
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/v1/sdk/sandboxes/sb-idle/terminal/ws"
+	dialer := websocket.Dialer{Subprotocols: []string{terminalProtocol, terminalTicketPrefix + ticket}}
+	conn, resp, err := dialer.Dial(wsURL, http.Header{"Origin": []string{srv.URL}})
+	if err != nil {
+		t.Fatalf("Dial: %v, status=%v", err, responseStatus(resp))
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+
+	var ready terminalServerMessage
+	if err := conn.ReadJSON(&ready); err != nil || ready.Type != "ready" {
+		t.Fatalf("ready = %#v, err=%v", ready, err)
+	}
+	if messageType, _, err := conn.ReadMessage(); err != nil || messageType != websocket.BinaryMessage {
+		t.Fatalf("read initial output: type=%d err=%v", messageType, err)
+	}
+	// ReadMessage processes server pings and Gorilla automatically answers
+	// with pongs. Those liveness frames must not count as user activity.
+	var timeout terminalServerMessage
+	if err := conn.ReadJSON(&timeout); err != nil {
+		var closeErr *websocket.CloseError
+		if !errors.As(err, &closeErr) || !strings.Contains(closeErr.Text, "inactivity") {
+			t.Fatalf("read idle timeout: %v", err)
+		}
+	} else if timeout.Type != "error" || !strings.Contains(timeout.Message, "inactivity") {
+		t.Fatalf("idle timeout message = %#v", timeout)
+	} else {
+		// Process the following close frame so the server can complete the
+		// bounded WebSocket close handshake before cleaning up the PTY.
+		_, _, err := conn.ReadMessage()
+		var closeErr *websocket.CloseError
+		if !errors.As(err, &closeErr) || !strings.Contains(closeErr.Text, "inactivity") {
+			t.Fatalf("idle close frame: %v", err)
+		}
+	}
+	select {
+	case <-backend.session.killed:
+	case <-time.After(time.Second):
+		t.Fatal("idle terminal session was not killed")
+	}
+}
+
+func TestTerminalReadDeadlineReapsUnresponsivePeer(t *testing.T) {
+	cm := &fakeCM{getSandbox: func(context.Context, string, string) (json.RawMessage, error) {
+		return json.RawMessage(`{"ret":{"ret_code":0},"data":[{"sandbox_id":"sb-unresponsive","status":1}]}`), nil
+	}}
+	backend := newFakeTerminalBackend()
+	jm := auth.NewJWTManager("terminal-test-secret", time.Minute, time.Hour)
+	h := NewTerminalHandler(cm, jm, backend)
+	h.pingInterval = time.Hour
+	h.pongTimeout = 40 * time.Millisecond
+	router := gin.New()
+	h.RegisterAuthed(router.Group("/api/v1/sdk", auth.Middleware(jm)))
+	h.RegisterPublic(router.Group("/api/v1/sdk"))
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+
+	ticket := requestTerminalTicket(t, srv.URL, jm, "sb-unresponsive")
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/v1/sdk/sandboxes/sb-unresponsive/terminal/ws"
+	dialer := websocket.Dialer{Subprotocols: []string{terminalProtocol, terminalTicketPrefix + ticket}}
+	conn, resp, err := dialer.Dial(wsURL, http.Header{"Origin": []string{srv.URL}})
+	if err != nil {
+		t.Fatalf("Dial: %v, status=%v", err, responseStatus(resp))
+	}
+	defer conn.Close()
+	// Do not read from or write to the socket. The server-side read deadline
+	// must release the PTY and limiter slot without relying on OS TCP timeout.
+	select {
+	case <-backend.session.killed:
+	case <-time.After(time.Second):
+		t.Fatal("unresponsive terminal peer was not reaped by the read deadline")
+	}
+}
+
+func TestTerminalTicketReportsMalformedSandboxDetailAsBadGateway(t *testing.T) {
+	cm := &fakeCM{getSandbox: func(context.Context, string, string) (json.RawMessage, error) {
+		return json.RawMessage(`{"ret":{"ret_code":0},"data":{"sandbox_id":"sb-malformed","status":1}}`), nil
+	}}
+	jm := auth.NewJWTManager("terminal-test-secret", time.Minute, time.Hour)
+	h := NewTerminalHandler(cm, jm, newFakeTerminalBackend())
+	router := gin.New()
+	h.RegisterAuthed(router.Group("/api/v1/sdk", auth.Middleware(jm)))
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+
+	access, _ := jm.GenerateAccessToken("admin")
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/sdk/sandboxes/sb-malformed/terminal/ticket", nil)
+	req.Header.Set("Authorization", "Bearer "+access)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
 	}
 }
 

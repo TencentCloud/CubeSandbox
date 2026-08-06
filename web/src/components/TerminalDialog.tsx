@@ -108,8 +108,6 @@ export function TerminalDialog({ sandboxID, open, onOpenChange }: TerminalDialog
         }
       }
     });
-    const resizeDisposable = terminal.onResize(sendResize);
-
     const connect = async () => {
       try {
         const ticket = await terminalApi.createTicket(sandboxID);
@@ -189,7 +187,6 @@ export function TerminalDialog({ sandboxID, open, onOpenChange }: TerminalDialog
       cancelAnimationFrame(animationFrame);
       observer.disconnect();
       dataDisposable.dispose();
-      resizeDisposable.dispose();
       if (socket?.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: 'close' }));
         socket.close(1000, 'terminal dialog closed');
