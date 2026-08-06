@@ -370,7 +370,7 @@ It depends on `cube-dev` created by the main containers:
 kubectl -n cube-system logs <cube-node-pod> -c cube-egress-net --tail=100
 ```
 
-- Log shows `interface cube-dev not present` → **network-agent / cubelet** have not created `cube-dev` yet; usually self-heals; if longer than ~5 minutes, check those two containers’ logs
+- Log shows `interface cube-dev not present` → **cubelet** has not created `cube-dev` yet; usually self-heals; if longer than ~5 minutes, check cubelet logs
 - Repeated `rule reapply failed` → iptables too old (needs nft) or conflict with CNI rules
 
 ---

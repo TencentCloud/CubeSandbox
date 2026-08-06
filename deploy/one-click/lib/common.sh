@@ -1903,7 +1903,7 @@ _check_cidr_conflict() {
     CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK=1"
     fi
     # else: cube-dev exists but does not overlap the requested CIDR -> allow;
-    # network-agent will reconcile cube-dev to the new network.
+    # Cubelet's embedded network runtime will reconcile cube-dev to the new network.
   fi
 }
 

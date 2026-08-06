@@ -22,7 +22,7 @@ CubeSandbox 的网络（cubevs）钩子挂在 Pod 的网卡上，沙箱的 tap �
 
 | 你想升级的东西 | 动哪条工作负载 | values 里改谁 | 是否会 recreate Big Pod |
 | --- | --- | --- | --- |
-| cubelet / network-agent / wait-node-prep / 槽位镜像或 resources | **Big Pod**（`cube-node`） | `images.cubelet` 等 | **是**（会中断沙箱） |
+| cubelet / wait-node-prep / 槽位镜像或 resources | **Big Pod**（`cube-node`） | `images.cubelet` 等 | **是**（会中断沙箱） |
 | shim / kernel / guest 产物 | **Installer** | `images.cubeShim` 等 | 否（Big Pod template 不变） |
 | node-init / 节点预检逻辑 | **Bootstrap** | `images.nodeInit` | 否（Big Pod template 不变） |
 | PVM 宿主机换核脚本 | **cube-node-pvm** | `images.pvmHostBootstrap` | 否（但节点可能 reboot） |
@@ -45,8 +45,6 @@ images:
   cubelet:
     tag: v0.5.2
   # 需要一起升再写上，例如：
-  # networkAgent:
-  #   tag: v0.5.2
   # cubeShim:
   #   tag: v0.5.2
 ```
@@ -151,8 +149,7 @@ helm upgrade --install cube ./deploy/kubernetes/chart \
 
 | values 键 | 工作负载 | 容器 |
 | --- | --- | --- |
-| `images.cubelet` | Big Pod | `cubelet` |
-| `images.networkAgent` | Big Pod | `network-agent` |
+| `images.cubelet` | Big Pod | `cubelet`（含内嵌网络运行时） |
 | `images.waitNodePrep` | Big Pod / Bootstrap | Big Pod 的 `wait-node-prep` init；Bootstrap 的 write-ready 也用它 |
 | `images.cubeShim` | Installer | `cube-shim-install` |
 | `images.cubeKernel` | Installer | `cube-kernel-install` |

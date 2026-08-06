@@ -370,7 +370,7 @@ kubectl -n cube-system get secret cube-egress-ca \
 kubectl -n cube-system logs <cube-node-pod> -c cube-egress-net --tail=100
 ```
 
-- 日志出现 `interface cube-dev not present` → **network-agent / cubelet** 尚未创建 `cube-dev`，通常会自愈；超过约 5 分钟查这两类容器日志
+- 日志出现 `interface cube-dev not present` → **cubelet** 尚未创建 `cube-dev`，通常会自愈；超过约 5 分钟查 cubelet 日志
 - 规则反复 `rule reapply failed` → iptables 过旧（需 nft）或与 CNI 规则冲突
 
 ---

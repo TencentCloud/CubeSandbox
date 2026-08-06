@@ -10,7 +10,7 @@
 # Network: network configuration, tap devices, connectivity
 /CubeNet/ @chenhengqi @zhouxianping
 /CubeEgress/ @chenhengqi @zhouxianping
-/network-agent/ @chenhengqi @zhouxianping
+/Cubelet/network/ @chenhengqi @zhouxianping
 
 # Cubelet / CubeMaster: overall system/orchestration flow
 /Cubelet/ @fslongjin @ls-ggg @chenhengqi

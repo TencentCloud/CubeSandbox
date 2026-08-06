@@ -51,7 +51,7 @@ make builder-image MIRROR=cn
 # 进入构建容器的交互式 Shell
 make builder-shell
 
-# 构建所有 Go 组件（CubeMaster、Cubelet、network-agent）
+# 构建所有 Go 组件（CubeMaster、Cubelet、…）
 make all
 
 # 构建单个组件
@@ -75,7 +75,6 @@ make shim
 | `agent/` | Rust | 运行在每个沙箱内部的 Guest Daemon |
 | `hypervisor/` | Rust | 基于 KVM 的 MicroVM 管理器（Cloud Hypervisor 分支） |
 | `mvs/` / `CubeNet/` | Go | CubeVS 基于 eBPF 的网络隔离 |
-| `network-agent/` | Go | 网络管理服务 |
 | `deploy/` | Shell | 部署脚本与 Guest 镜像工具 |
 | `examples/` | Python | SDK 示例与端到端使用场景 |
 | `docs/` | Markdown | VitePress 文档站（中英双语） |
