@@ -20,6 +20,7 @@ spec:
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+  {{- include "cube.computePlacement" . | nindent 2 }}
   serviceAccountName: {{ include "cube.fullname" . }}-test
   containers:
     - name: curl
@@ -33,6 +34,14 @@ spec:
           ca_path=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
           ns={{ .Release.Namespace | quote }}
           kube_api="https://kubernetes.default.svc"
+          # IPv6 (AAAA) probes of the probed names stall in practice, so plain
+          # curl fails to resolve even when A records exist. Force IPv4 on
+          # every lookup; do NOT add a global --retry here because that would
+          # make the fail-fast health checks below retry real 5xx/timing-out
+          # endpoints for ~48s before failing.
+          # Note: this test pod is IPv4-only by design (CubeSandbox sandbox
+          # networking is IPv4; the chart does not support single-stack IPv6).
+          curl() { command curl -4 "$@"; }
           kget() {
             curl --connect-timeout 5 --max-time 20 --cacert "${ca_path}" \
               -H "Authorization: Bearer $(cat "${token_path}")" \
@@ -139,6 +148,7 @@ spec:
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+  {{- include "cube.controlPlanePlacement" . | nindent 2 }}
   containers:
     - name: cubemastercli
       image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubemastercli "context" $) | quote }}
@@ -178,6 +188,7 @@ spec:
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+  {{- include "cube.controlPlanePlacement" . | nindent 2 }}
   containers:
     - name: mysql
       image: {{ include "cube.image" .Values.mysql.image | quote }}
@@ -214,6 +225,7 @@ spec:
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+  {{- include "cube.controlPlanePlacement" . | nindent 2 }}
   containers:
     - name: redis
       image: {{ include "cube.image" .Values.redis.image | quote }}
@@ -257,16 +269,29 @@ spec:
       imagePullPolicy: {{ .Values.helmTest.image.pullPolicy }}
       env:
         {{- include "cube.timezoneEnv" . | nindent 8 }}
+        - name: CUBE_PROXY_ADMIN_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "cube.secretName" . }}
+              key: cube-admin-token
       command:
         - sh
         - -ec
         - |
-          echo '[health-test] check CubeProxy via ClusterIP Service'
-          curl --connect-timeout 5 --max-time 15 -fsS -o /dev/null \
-            "http://{{ include "cube.proxyServiceFQDN" . }}:{{ .Values.cubeProxy.ports.http.containerPort }}/" \
-            || curl --connect-timeout 5 --max-time 15 -k -fsS -o /dev/null \
-            "https://{{ include "cube.proxyServiceFQDN" . }}:{{ .Values.cubeProxy.ports.https.containerPort }}/" \
-            || { echo "cube-proxy Service unreachable"; exit 1; }
+          echo '[health-test] check CubeProxy admin healthz'
+          # The dataplane returns 400 for the bare "/" path (it only serves
+          # sandbox traffic), so probe the admin health endpoint instead.
+          # Retry absorbs transient CoreDNS lookup timeouts; each attempt is
+          # capped at --max-time 15, so the worst case (real outage) is ~4×15s
+          # + retry backoff before this pod fails. Under `set -e` a connection
+          # failure (curl non-zero exit) would abort before the status
+          # assertion, so capture it explicitly and print a clear error.
+          status="$(curl -4 --retry 3 --retry-all-errors --retry-delay 1 --connect-timeout 5 --max-time 15 -sS \
+            -H "X-Cube-Admin-Token: ${CUBE_PROXY_ADMIN_TOKEN}" \
+            -o /dev/null -w "%{http_code}" \
+            "http://{{ include "cube.proxyServiceFQDN" . }}:{{ .Values.cubeProxy.adminPort }}/admin/healthz")" \
+            || { echo "cube-proxy admin healthz unreachable"; exit 1; }
+          test "$status" = "200" || { echo "cube-proxy admin healthz status=$status"; exit 1; }
 {{- end }}
 {{ if eq (include "cube.configureClusterDNS" .) "true" }}
 ---
@@ -298,14 +323,34 @@ spec:
         - |
           echo '[health-test] check cluster DNS for sandbox domain'
           target={{ include "cube.proxyServiceFQDN" . | quote }}
-          # busybox nslookup prints the DNS server Address first; take the last A record.
-          a_record() { nslookup "$1" | sed -n 's/^Address: \([0-9][0-9.]*\)$/\1/p' | tail -n 1; }
-          domain_ip="$(a_record {{ $domain | quote }})"
-          target_ip="$(a_record "$target")"
-          test -n "$domain_ip"
-          test -n "$target_ip"
-          test "$domain_ip" = "$target_ip"
-          test -n "$(a_record {{ printf "wildcard-check.%s" $domain | quote }})"
+          # curl image (alpine/musl) getent: reliable against CoreDNS rewrite
+          # zones (busybox nslookup times out on non-cluster.svc names in this
+          # setup). Use ahostsv4 so only A records are returned — getent hosts
+          # can emit both A and AAAA in a dual-stack cluster and the equality
+          # assertions below must compare the same address family. IPv6 (AAAA)
+          # probes of these names stall in practice, so the DNS test is
+          # IPv4-only by design.
+          # Lookups of the sandbox domain hit the chart's CoreDNS rewrite zone
+          # (cluster-dns.yaml) and can be transiently slow; retry before
+          # treating a failure as fatal.
+          a_record() {
+            for _ in 1 2 3 4 5; do
+              if ip="$(getent ahostsv4 "$1" 2>/dev/null | awk 'NR==1 {print $1}')" && [ -n "$ip" ]; then
+                printf '%s\n' "$ip"
+                return 0
+              fi
+              sleep 1
+            done
+            return 1
+          }
+          # a_record exits non-zero on the last retry; under `set -e` the
+          # command substitution would abort the pod with no diagnostics, so
+          # capture explicitly and print which name failed.
+          domain_ip="$(a_record {{ $domain | quote }})" || { echo "could not resolve {{ $domain }} (A)"; exit 1; }
+          target_ip="$(a_record "$target")" || { echo "could not resolve $target (A)"; exit 1; }
+          test "$domain_ip" = "$target_ip" || { echo "DNS mismatch: {{ $domain }} -> $domain_ip, $target -> $target_ip"; exit 1; }
+          wildcard_ip="$(a_record {{ printf "wildcard-check.%s" $domain | quote }})" || { echo "could not resolve wildcard-check.{{ $domain }} (A)"; exit 1; }
+          test "$domain_ip" = "$wildcard_ip" || { echo "DNS mismatch: wildcard-check.{{ $domain }} -> $wildcard_ip, {{ $domain }} -> $domain_ip"; exit 1; }
 {{- end }}
 {{ if .Values.cubeNode.enabled }}
 ---
@@ -339,6 +384,7 @@ spec:
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+  {{- include "cube.computePlacement" . | nindent 2 }}
   serviceAccountName: {{ include "cube.fullname" . }}-test
   containers:
     - name: node-image-assets
@@ -390,8 +436,18 @@ spec:
   {{- include "cube.computePlacement" . | nindent 2 }}
   containers:
     - name: node-runtime
-      image: {{ include "cube.image" .Values.helmTest.dnsImage | quote }}
-      imagePullPolicy: {{ .Values.helmTest.dnsImage.pullPolicy }}
+      image: {{ include "cube.image" .Values.helmTest.image | quote }}
+      imagePullPolicy: {{ .Values.helmTest.image.pullPolicy }}
+      # Runs as root on purpose: it stat()s hostPath sockets that cube-node
+      # creates with root-only permissions (e.g. /data/cubelet/cubelet.sock),
+      # which a non-root image user cannot traverse. Root is safe here only
+      # because every hostPath mount is read-only and capabilities are
+      # dropped — the script itself only performs existence checks.
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
       command:
         - sh
         - -ec
@@ -407,8 +463,10 @@ spec:
           readOnly: true
         - name: data-cubelet
           mountPath: {{ .Values.hostPaths.dataCubelet }}
+          readOnly: true
         - name: tmp-cube
           mountPath: {{ .Values.hostPaths.tmpCube }}
+          readOnly: true
   volumes:
     - name: dev
       hostPath:

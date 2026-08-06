@@ -989,11 +989,17 @@ rbac:
 
 helmTest:
   enabled: true
+  # Shared test image (curlimages/curl, Alpine/musl). Used by health-test,
+  # proxy-control-test, node-image-test and node-runtime-test.
   image:
     repository: curlimages/curl
     tag: "8.10.1"
     pullPolicy: IfNotPresent
+  # DNS test image. The dns-test resolves names through `getent ahostsv4`,
+  # so the image must ship musl's getent (curlimages/curl's Alpine base does).
+  # Keep it a separate value so operators can pin a different image for the
+  # DNS test without touching the shared test image.
   dnsImage:
-    repository: busybox
-    tag: "1.36"
+    repository: curlimages/curl
+    tag: "8.10.1"
     pullPolicy: IfNotPresent
