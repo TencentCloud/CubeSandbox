@@ -69,7 +69,7 @@ The target lists its child services via `Wants=`; each service declares membersh
 | `cube-sandbox-network-agent.service` | Host process | `19090` (health) | control / compute | network |
 | `cube-sandbox-cubelet.service` | Host process | `9999` (gRPC) | control / compute | network-agent + `/data/cubelet` (XFS) |
 | `cube-sandbox-coredns.service` | Docker container | `127.0.0.54:53` or `169.254.254.53:53` | control | docker |
-| `cube-sandbox-cube-proxy.service` | Docker container | `443` (TLS) / `80` / `9090` (gRPC) | control | docker, redis |
+| `cube-sandbox-cube-proxy.service` | Docker container | `443` (TLS) / `80` / `9091` (gRPC) | control | docker, redis |
 | `cube-sandbox-dns.service` | oneshot (no daemon) | — | control | coredns (`BindsTo`) |
 | `cube-sandbox-webui.service` | Docker container | `12088` | control | docker, cube-api |
 

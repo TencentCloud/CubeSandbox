@@ -79,7 +79,7 @@ assert resp.status_code == 200
 | 默认 —— 公网可达 | 不传 `network`，或 `allow_public_traffic=True` | `None` | 接受所有请求 |
 | 锁定访问 | `network={"allow_public_traffic": False}` | 不透明 token | 拒绝未携带正确 token 的请求（403） |
 
-CubeProxy 的所有入站监听（HTTP、HTTPS 以及默认明文 gRPC 端口 `9090`）均执行相同校验。
+CubeProxy 的所有入站监听（HTTP、HTTPS 以及默认明文 gRPC 端口 `9091`）均执行相同校验。
 gRPC 客户端应通过 metadata 发送 `e2b-traffic-access-token` 或 `cube-traffic-access-token`。
 
 ## Header 语义

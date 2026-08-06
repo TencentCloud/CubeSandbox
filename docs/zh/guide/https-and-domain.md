@@ -123,7 +123,7 @@ Host 写入 `X-Forwarded-Host`。该配置同时适用于 Host 模式、Path 模
 
 ## gRPC 接入（明文 HTTP/2）
 
-CubeProxy 还提供独立的沙箱 gRPC 接入监听端口。一键部署默认使用 `9090`，可通过 `.env` 中的 `CUBE_PROXY_GRPC_PORT` 调整。
+CubeProxy 还提供独立的沙箱 gRPC 接入监听端口。一键部署默认使用 `9091`，可通过 `.env` 中的 `CUBE_PROXY_GRPC_PORT` 调整。
 
 客户端以明文 HTTP/2 连接 CubeProxy IP，并通过 gRPC `:authority` 指定目标沙箱，格式与 Host 模式一致：
 
@@ -134,7 +134,7 @@ CubeProxy 还提供独立的沙箱 gRPC 接入监听端口。一键部署默认�
 例如，经部署在 `10.0.0.5` 的 CubeProxy 访问沙箱 `abc123` 的 `49983` 端口：
 
 ```
-dial: 10.0.0.5:9090
+dial: 10.0.0.5:9091
 :authority: 49983-abc123
 ```
 

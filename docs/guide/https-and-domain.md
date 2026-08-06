@@ -126,7 +126,7 @@ not rewritten.
 
 ## gRPC Ingress (Plaintext HTTP/2)
 
-CubeProxy also exposes a dedicated listener for sandbox gRPC services. The default port is `9090` and can be changed via `CUBE_PROXY_GRPC_PORT` in one-click deployments.
+CubeProxy also exposes a dedicated listener for sandbox gRPC services. The default port is `9091` and can be changed via `CUBE_PROXY_GRPC_PORT` in one-click deployments.
 
 Clients dial the CubeProxy IP over plaintext HTTP/2 and identify the target sandbox with the gRPC `:authority` pseudo-header, using the same `<container-port>-<sandbox-id>` format as host-based HTTP routing:
 
@@ -137,7 +137,7 @@ Clients dial the CubeProxy IP over plaintext HTTP/2 and identify the target sand
 For example, to reach sandbox `abc123` on container port `49983` through CubeProxy at `10.0.0.5`:
 
 ```
-dial: 10.0.0.5:9090
+dial: 10.0.0.5:9091
 :authority: 49983-abc123
 ```
 

@@ -4,7 +4,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 postcheck_port="${CUBE_PROXY_HTTP_PORT:-80}"
-postcheck_grpc_port="${CUBE_PROXY_GRPC_PORT:-9090}"
+postcheck_grpc_port="${CUBE_PROXY_GRPC_PORT:-9091}"
 postcheck_retries="${CUBE_PROXY_POSTCHECK_RETRIES:-30}"
 postcheck_delay="${CUBE_PROXY_POSTCHECK_DELAY:-2}"
 deprecated_host_port="${CUBE_PROXY_HOST_PORT:-}"

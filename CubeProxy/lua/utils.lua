@@ -60,7 +60,7 @@ function _M.is_null(self, str)
     return str == nil or str == ""
 end
 
--- True only on the dedicated plaintext gRPC server (:9090 sets
+-- True only on the dedicated plaintext gRPC server (:9091 by default sets
 -- $cube_ingress_protocol = "grpc"). Do not key off Content-Type: a client
 -- sending application/grpc to :80/:443 must stay on the HTTP error path —
 -- those servers lack @grpc_lua_error / $cube_grpc_*.

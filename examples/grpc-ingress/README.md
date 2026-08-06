@@ -2,17 +2,17 @@
 
 [中文文档](README_zh.md)
 
-Minimal example for CubeProxy **plaintext gRPC ingress** on port `9090`.
+Minimal example for CubeProxy **plaintext gRPC ingress** on port `9091`.
 
 The CubeSandbox Python SDK (`commands`, `files`, etc.) talks to envd over
 **HTTP/Connect** on CubeProxy HTTP/HTTPS (`80`/`443`, or `CUBE_PROXY_NODE_IP` +
 `CUBE_PROXY_PORT_HTTP` with a `Host` header). **No SDK changes are required** for
 those APIs.
 
-Use port `9090` when you have a **native gRPC client** (`grpcio`, `grpc-go`, …)
+Use port `9091` when you have a **native gRPC client** (`grpcio`, `grpc-go`, …)
 that cannot rely on wildcard DNS (`*.cube.app`) or TLS on CubeProxy.
 
-> **Security:** Port `9090` speaks **plaintext** gRPC (`grpc.insecure_channel`).
+> **Security:** Port `9091` speaks **plaintext** gRPC (`grpc.insecure_channel`).
 > Do not expose it to untrusted networks unless you terminate TLS elsewhere
 > (for example a load balancer). Prefer CubeProxy HTTP/HTTPS for Connect-style
 > traffic when TLS is required.
@@ -24,10 +24,10 @@ that cannot rely on wildcard DNS (`*.cube.app`) or TLS on CubeProxy.
         │
         ├─ Sandbox.create()  ──► CubeAPI (control plane)
         │
-        └─ grpc.insecure_channel(proxy:9090, authority=<port>-<sandbox_id>)
+        └─ grpc.insecure_channel(proxy:9091, authority=<port>-<sandbox_id>)
                                     │
                                     ▼
-                               CubeProxy :9090
+                               CubeProxy :9091
                                     │
                                     ▼
                                envd in sandbox (:49983)
@@ -53,7 +53,7 @@ python grpc_plaintext.py
 | `CUBE_API_URL` | yes | — | Cube API base URL |
 | `CUBE_TEMPLATE_ID` | yes | — | Sandbox template ID |
 | `CUBE_PROXY_NODE_IP` | yes | — | CubeProxy IP (no DNS needed) |
-| `CUBE_PROXY_GRPC_PORT` | no | `9090` | Plaintext gRPC listen port |
+| `CUBE_PROXY_GRPC_PORT` | no | `9091` | Plaintext gRPC listen port |
 | `ENVD_PORT` | no | `49983` | Sandbox service port in `:authority` |
 
 ## Restricted sandboxes

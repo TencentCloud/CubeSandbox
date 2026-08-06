@@ -611,7 +611,7 @@ EOF
 prepare_cubeproxy_nginx_conf() {
 	local dst="${SCRIPT_DIR}/cubeproxy-nginx.conf"
 	if [ -f "${dst}" ]; then
-		# Stale pre-gRPC templates would leave Service:9090 open with no nginx
+		# Stale pre-gRPC templates would leave Service:9091 open with no nginx
 		# listener. Force regeneration when the gRPC placeholder is missing.
 		if grep -q -F '__CUBE_PROXY_GRPC_PORT__' "${dst}"; then
 			return 0
@@ -645,7 +645,7 @@ EOF
 				-e 's|^worker_processes [0-9]\+;|worker_processes auto;|' \
 				-e 's|^\(\s*listen \)8081\( reuseport;\)|\1__CUBE_PROXY_HTTP_PORT__\2|' \
 				-e 's|^\(\s*listen \)8080\( ssl reuseport;\)|\1__CUBE_PROXY_HTTPS_PORT__\2|' \
-				-e 's|^\(\s*listen \)9090\( http2 reuseport;\)|\1__CUBE_PROXY_GRPC_PORT__\2|' \
+				-e 's|^\(\s*listen \)9091\( http2 reuseport;\)|\1__CUBE_PROXY_GRPC_PORT__\2|' \
 				-e 's|^\(\s*set \$host_proxy_port \)8081;|\1__CUBE_PROXY_HTTP_PORT__;|' \
 				-e 's|^\(\s*set \$host_proxy_port \)8080;|\1__CUBE_PROXY_HTTPS_PORT__;|' \
 				-e 's|^\(\s*listen \)127\.0\.0\.1:8082;|\1__CUBE_PROXY_ADMIN_LISTEN__:8082;|' \
@@ -4741,7 +4741,7 @@ print_cluster_operator_help() {
 	echo ""
 	echo -e "${CYAN}▶ 2. CLB (load balancer) IPs and ports${NC}"
 	echo -e "    ${GREEN}cube-webui${NC}  (public, HTTP)   : ${webui_ip:-N/A}  → port 80"
-	echo -e "    ${GREEN}cube-proxy${NC}  (public, TCP)    : ${proxy_ip:-N/A}  → ports 80, 443, 9090"
+	echo -e "    ${GREEN}cube-proxy${NC}  (public, TCP)    : ${proxy_ip:-N/A}  → ports 80, 443, 9091"
 	echo -e "    ${GREEN}cube-api${NC}    (public, TCP)    : ${api_ip:-N/A}  → port 3000"
 	echo -e "    ${GREEN}cube-master${NC} (VPC-internal)   : ${master_ip:-N/A}  → port 8089 (reachable from the jumpserver/VPC only)"
 
@@ -5057,7 +5057,7 @@ phase7_health_check() {
 	echo -e "  ${CYAN}Summary:${NC}"
 	echo -e "    cube-master : ${cm_ip:-N/A}:8089   (VPC-internal)"
 	echo -e "    cube-api    : ${api_ip:-N/A}:3000  (public)"
-	echo -e "    cube-proxy  : ${proxy_ip:-N/A}:80/443/9090 (public)"
+	echo -e "    cube-proxy  : ${proxy_ip:-N/A}:80/443/9091 (public)"
 	echo -e "    cube-webui  : ${webui_ip:-N/A}:80   (public)"
 	return 0
 }

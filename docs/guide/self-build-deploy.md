@@ -316,7 +316,7 @@ You can also point to prebuilt binaries to skip compilation:
 | `CUBE_PROXY_ENABLE` | `1` | Enable CubeProxy (must be `1` for one-click) |
 | `CUBE_PROXY_HTTPS_PORT` | `443` | CubeProxy HTTPS listen port |
 | `CUBE_PROXY_HTTP_PORT` | `80` | CubeProxy HTTP listen port; the systemd post-start TCP listener check follows this port |
-| `CUBE_PROXY_GRPC_PORT` | `9090` | CubeProxy plaintext gRPC (HTTP/2) listen port |
+| `CUBE_PROXY_GRPC_PORT` | `9091` | CubeProxy plaintext gRPC (HTTP/2) listen port |
 | `CUBE_PROXY_DNS_ENABLE` | `1` | Enable CoreDNS (must be `1` for one-click) |
 | `CUBE_PROXY_DNS_ANSWER_IP` | `${CUBE_SANDBOX_NODE_IP}` | IP returned by CoreDNS for `cube.app` |
 | `CUBE_PROXY_COREDNS_BIND_ADDR` | `127.0.0.54` | CoreDNS bind address |

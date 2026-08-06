@@ -28,7 +28,7 @@ set -eu
 
 mkdir -p /usr/local/openresty/nginx/conf/global /data /data/log/cube-proxy /cache
 
-CUBE_PROXY_GRPC_LISTEN_PORT="${CUBE_PROXY_GRPC_LISTEN_PORT:-9090}"
+CUBE_PROXY_GRPC_LISTEN_PORT="${CUBE_PROXY_GRPC_LISTEN_PORT:-9091}"
 
 case "${CUBE_PROXY_HTTP_LISTEN_PORT}:${CUBE_PROXY_HTTPS_LISTEN_PORT}:${CUBE_PROXY_GRPC_LISTEN_PORT}" in
   *[!0-9:]*|:*|*:|::*|*::*)
@@ -55,7 +55,7 @@ esac
 sed -i \
   -e "s/listen 8081 reuseport;/listen ${CUBE_PROXY_HTTP_LISTEN_PORT} reuseport;/g" \
   -e "s/listen 8080 ssl reuseport;/listen ${CUBE_PROXY_HTTPS_LISTEN_PORT} ssl reuseport;/g" \
-  -e "s/listen 9090 http2 reuseport;/listen ${CUBE_PROXY_GRPC_LISTEN_PORT} http2 reuseport;/g" \
+  -e "s/listen 9091 http2 reuseport;/listen ${CUBE_PROXY_GRPC_LISTEN_PORT} http2 reuseport;/g" \
   -e "s/set \\\$host_proxy_port 8081;/set \\\$host_proxy_port ${CUBE_PROXY_HTTP_LISTEN_PORT};/g" \
   -e "s/set \\\$host_proxy_port 8080;/set \\\$host_proxy_port ${CUBE_PROXY_HTTPS_LISTEN_PORT};/g" \
   -e "s/listen 127\\.0\\.0\\.1:8082;/listen ${admin_listen}:${admin_port};/g" \

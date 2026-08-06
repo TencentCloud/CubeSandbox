@@ -114,7 +114,7 @@ locals {
             "8080"
           ),
           "__CUBE_PROXY_GRPC_PORT__",
-          "9090"
+          "9091"
         ),
         "__CUBE_PROXY_SSL_CERT__",
         "cube.app+3.pem"
@@ -993,7 +993,7 @@ resource "kubernetes_deployment" "cube_proxy" {
           }
           port {
             name           = "grpc"
-            container_port = 9090
+            container_port = 9091
             protocol       = "TCP"
           }
           port {
@@ -1191,7 +1191,7 @@ resource "kubernetes_deployment" "cube_proxy" {
   }
 }
 
-# cube-proxy CLB Service (public network 80/443/9090)
+# cube-proxy CLB Service (public network 80/443/9091)
 resource "kubernetes_service" "cube_proxy" {
   count = local.deploy_addons ? 1 : 0
   metadata {
@@ -1200,7 +1200,7 @@ resource "kubernetes_service" "cube_proxy" {
     # Public mode: a public CLB billed by traffic (internet-charge-type).
     # Internal mode (default): pin to a VPC-internal subnet for a private VIP.
     annotations = merge({
-      "service.cloud.tencent.com/specify-protocol"        = "{\"80\":{\"protocol\":[\"TCP\"]},\"443\":{\"protocol\":[\"TCP\"]},\"9090\":{\"protocol\":[\"TCP\"]}}"
+      "service.cloud.tencent.com/specify-protocol"        = "{\"80\":{\"protocol\":[\"TCP\"]},\"443\":{\"protocol\":[\"TCP\"]},\"9091\":{\"protocol\":[\"TCP\"]}}"
       "service.cloud.tencent.com/modification-protection" = "false"
       "service.cloud.tencent.com/pass-to-target"          = "true"
       "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.clb.id
@@ -1214,9 +1214,9 @@ resource "kubernetes_service" "cube_proxy" {
     # TKE controller-manager injects runtime annotations (e.g. bindedip,
     # loadbalanceId) that would otherwise cause perpetual drift on every plan.
     # NOTE: because annotations are ignored after create, upgrading an existing
-    # cluster will add Service port 9090 via spec.ports but will NOT refresh
+    # cluster will add Service port 9091 via spec.ports but will NOT refresh
     # specify-protocol. Operators must manually patch the annotation to include
-    # 9090, or recreate this Service, for CLB to expose plaintext gRPC.
+    # 9091, or recreate this Service, for CLB to expose plaintext gRPC.
     ignore_changes = [
       metadata[0].annotations,
     ]
@@ -1244,9 +1244,9 @@ resource "kubernetes_service" "cube_proxy" {
       protocol    = "TCP"
     }
     port {
-      name        = "tcp-grpc-9090"
-      port        = 9090
-      target_port = 9090
+      name        = "tcp-grpc-9091"
+      port        = 9091
+      target_port = 9091
       protocol    = "TCP"
     }
   }

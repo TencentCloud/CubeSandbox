@@ -63,8 +63,8 @@ run_cube_proxy_postcheck_case() {
   local env_content="$1"
   local listen_port="$2"
   local expected_port="$3"
-  local grpc_listen_port="${4:-9090}"
-  local grpc_expected_port="${5:-9090}"
+  local grpc_listen_port="${4:-9091}"
+  local grpc_expected_port="${5:-9091}"
   local case_dir="${TMP_DIR}/cube-proxy-postcheck-${expected_port}-${grpc_expected_port}"
   local env_file="${case_dir}/.one-click.env"
   local stub_dir="${case_dir}/bin"
@@ -806,13 +806,13 @@ CUBE_PROXY_POSTCHECK_DELAY=0" \
 test_cube_proxy_postcheck_follows_grpc_port() {
   run_cube_proxy_postcheck_case \
     "CUBE_PROXY_HTTP_PORT=8081
-CUBE_PROXY_GRPC_PORT=50051
+CUBE_PROXY_GRPC_PORT=9092
 CUBE_PROXY_POSTCHECK_RETRIES=1
 CUBE_PROXY_POSTCHECK_DELAY=0" \
     8081 \
     8081 \
-    50051 \
-    50051
+    9092 \
+    9092
 }
 
 test_cube_proxy_postcheck_fails_when_grpc_port_not_ready() {
@@ -824,7 +824,7 @@ test_cube_proxy_postcheck_fails_when_grpc_port_not_ready() {
   mkdir -p "${stub_dir}"
   printf '%s\n' \
     "CUBE_PROXY_HTTP_PORT=80
-CUBE_PROXY_GRPC_PORT=9090
+CUBE_PROXY_GRPC_PORT=9091
 CUBE_PROXY_POSTCHECK_RETRIES=1
 CUBE_PROXY_POSTCHECK_DELAY=0" > "${env_file}"
   cat > "${stub_dir}/ss" <<'SH'
@@ -851,7 +851,7 @@ SH
   fi
 
   assert_contains "${ss_log}" "sport = :80"
-  assert_contains "${ss_log}" "sport = :9090"
+  assert_contains "${ss_log}" "sport = :9091"
 }
 
 test_postcheck_skips_when_external_host_set() {

@@ -69,7 +69,7 @@ Target 通过 `Wants=` 列出自己要拉起的 service；service 通过 `PartOf
 | `cube-sandbox-network-agent.service` | 宿主机进程 | `19090`（health） | control / compute | network |
 | `cube-sandbox-cubelet.service` | 宿主机进程 | `9999`（gRPC） | control / compute | network-agent + `/data/cubelet`（XFS） |
 | `cube-sandbox-coredns.service` | Docker 容器 | `127.0.0.54:53` 或 `169.254.254.53:53` | control | docker |
-| `cube-sandbox-cube-proxy.service` | Docker 容器 | `443`（TLS）/ `80` / `9090`（gRPC） | control | docker, redis |
+| `cube-sandbox-cube-proxy.service` | Docker 容器 | `443`（TLS）/ `80` / `9091`（gRPC） | control | docker, redis |
 | `cube-sandbox-dns.service` | oneshot（无常驻进程） | — | control | coredns（`BindsTo`）|
 | `cube-sandbox-webui.service` | Docker 容器 | `12088` | control | docker, cube-api |
 

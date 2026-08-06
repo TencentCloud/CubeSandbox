@@ -2,11 +2,11 @@
 # Copyright (c) 2026 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Dial a sandbox service through CubeProxy plaintext gRPC ingress (port 9090).
+# Dial a sandbox service through CubeProxy plaintext gRPC ingress (port 9091).
 #
 # The Python SDK's commands/files APIs use HTTP/Connect on CubeProxy HTTP/HTTPS.
 # This script shows the native gRPC client path:
-#   dial  <CUBE_PROXY_NODE_IP>:9090
+#   dial  <CUBE_PROXY_NODE_IP>:9091
 #   set   :authority to <container_port>-<sandbox_id>
 #
 # Run:
@@ -25,7 +25,7 @@ from env_utils import load_local_dotenv
 load_local_dotenv()
 
 PROXY_IP = os.environ.get("CUBE_PROXY_NODE_IP")
-GRPC_PORT = int(os.environ.get("CUBE_PROXY_GRPC_PORT", "9090"))
+GRPC_PORT = int(os.environ.get("CUBE_PROXY_GRPC_PORT", "9091"))
 ENVD_PORT = int(os.environ.get("ENVD_PORT", "49983"))
 TEMPLATE_ID = os.environ.get("CUBE_TEMPLATE_ID")
 
