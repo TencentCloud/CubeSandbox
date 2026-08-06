@@ -23,7 +23,7 @@ const ANNO_UPDATE_EXT_ACTION: &str = "cube.shimapi.update.action";
 ///   `source_url`  — URL of the snapshot to restore from (e.g. `file:///data/snapshots/foo`)
 ///
 /// Optional fields (replace backend devices after restore):
-///   `disks`, `net`, `fs`, `vsock`, `pmem`, `prefault`, `dirty_log`
+///   `disks`, `net`, `fs`, `vsock`, `pmem`, `prefault`, `dirty_log`, `memory_vol_url`
 const ANNO_ROLLBACK_RESTORE_CONFIG: &str = "cube.shimapi.update.rollback.restore_config";
 
 // ── restore config aligned with hypervisor RestoreConfig ─────────────────────
@@ -92,9 +92,11 @@ impl From<RollbackRestoreConfig> for RestoreConfig {
 /// Roll back the running VM to a previously-taken snapshot.
 ///
 /// Steps:
-/// 1. Pause the current VM and snapshot its state to a temporary path on disk.
-/// 2. Resume the VM from the snapshot specified in `restore_config.source_url`,
-///    optionally replacing backend devices via the other fields.
+/// 1. Mark the sandbox paused (a logical state transition, not a VMM-level pause) and
+///    disconnect the guest agent, then delete the current VM with `VmDelete`.
+/// 2. Restore the target snapshot specified in `restore_config.source_url`, optionally
+///    replacing backend devices via the other fields. Restore failure is terminal; the
+///    previous VM cannot be restored because no temporary checkpoint is taken.
 async fn do_rollback_snapshot(
     sb: &mut SandBox,
     annos: &HashMap<String, String>,
