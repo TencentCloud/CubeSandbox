@@ -80,6 +80,28 @@ configure_listen_ip() {
     log "nginx transparent listen IP: ${listen_ip}"
 }
 
+configure_admin_port() {
+    # Loopback admin API for Cubelet policy push. Default 9091 avoids
+    # colliding with CubeProxy plaintext gRPC on :9090 (all-in-one).
+    local admin_port="${CUBE_EGRESS_ADMIN_PORT:-9091}"
+
+    case "${admin_port}" in
+        *[!0-9]*|"")
+            fatal "invalid CUBE_EGRESS_ADMIN_PORT: ${admin_port}"
+            ;;
+    esac
+    (( 10#${admin_port} >= 1 && 10#${admin_port} <= 65535 )) \
+        || fatal "CUBE_EGRESS_ADMIN_PORT out of range: ${admin_port}"
+
+    [[ -f "${NGINX_CONF}" ]] || fatal "nginx config missing: ${NGINX_CONF}"
+    sed -i -E \
+        -e "s/listen 127\\.0\\.0\\.1:[0-9]+;/listen 127.0.0.1:${admin_port};/" \
+        "${NGINX_CONF}"
+    grep -Fq "listen 127.0.0.1:${admin_port};" "${NGINX_CONF}" \
+        || fatal "failed to render admin listen port in ${NGINX_CONF}"
+    log "nginx admin listen: 127.0.0.1:${admin_port}"
+}
+
 # -------- 0. Must run as root --------
 # Several downstream steps require uid 0:
 #   - chown the bind-mounted audit dir (CAP_CHOWN)
@@ -172,8 +194,9 @@ if (( (owner_bits & 3) != 3 )); then
     fatal "audit dir mode ${audit_mode} lacks owner rwx bits: ${AUDIT_DIR}"
 fi
 
-# -------- 5. Render listener IP and validate nginx config --------
+# -------- 5. Render listener IP / admin port and validate nginx config --------
 configure_listen_ip
+configure_admin_port
 log "Running nginx -t"
 "${NGINX_BIN}" -t
 

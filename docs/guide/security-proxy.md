@@ -244,7 +244,7 @@ The data plane is split into one file per phase under
 | `bootstrap.lua` | `init_worker_by_lua` (worker 0 only) | Pulls initial policies from Cubelet embedded network runtime |
 | `access_phase.lua` | `access_by_lua` | Runs match → action → inject for every request |
 | `policy.lua` | (module) | In-memory policy store, fed by `admin.lua` and `bootstrap.lua` |
-| `admin.lua` | `content_by_lua` on `:9090` | CRUD admin API for policies |
+| `admin.lua` | `content_by_lua` on `:9091` (default; `CUBE_EGRESS_ADMIN_PORT`) | CRUD admin API for policies |
 | `audit.lua` | `log_by_lua` | Writes the JSONL audit line per request |
 | `redactor.lua` | (helper) | Scrubs secrets from anything user-visible |
 

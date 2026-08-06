@@ -156,9 +156,11 @@ spec:
               value: {{ .Values.cubeEgress.bootstrapURL | quote }}
             - name: CUBE_EGRESS_DEBUG_DUMP
               value: {{ ternary "1" "0" .Values.cubeEgress.debugDump | quote }}
+            - name: CUBE_EGRESS_ADMIN_PORT
+              value: {{ .Values.cubeEgress.adminPort | quote }}
           ports:
             - name: egress-admin
-              containerPort: 9090
+              containerPort: {{ .Values.cubeEgress.adminPort }}
             - name: egress-http
               containerPort: 8080
             - name: egress-https

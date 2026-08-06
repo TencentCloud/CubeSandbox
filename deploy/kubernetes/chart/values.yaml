@@ -786,6 +786,10 @@ cubeEgress:
   # Cube Node Big Pod gets a cube-egress sidecar and a cube-egress-net helper
   # sidecar that owns host TPROXY iptables/ip-rule state.
   enabled: true
+  # Loopback admin API port (policy push from Cubelet). Default 9091 avoids
+  # colliding with CubeProxy plaintext gRPC on 9090. Keep cubeNode / Cubelet
+  # cube_egress_admin_url in sync (chart sets CUBE_EGRESS_ADMIN_PORT on both).
+  adminPort: 9091
   bootstrapURL: http://127.0.0.1:9998/v1/policies/dump
   debugDump: false
   ca:
@@ -832,14 +836,15 @@ cubeEgress:
     readiness:
       enabled: true
       path: /admin/v1/health
-      port: 9090
+      # Defaults to cubeEgress.adminPort when unset in the template.
+      port: 9091
       initialDelaySeconds: 5
       periodSeconds: 10
       failureThreshold: 12
     liveness:
       enabled: true
       path: /admin/v1/health
-      port: 9090
+      port: 9091
       initialDelaySeconds: 30
       periodSeconds: 20
       failureThreshold: 6

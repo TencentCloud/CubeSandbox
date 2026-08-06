@@ -295,7 +295,7 @@ Probe conventions:
 
 - cubelet: startup waits on 9999; readiness defaults to exec (9999 + Cubelet local socket); liveness checks 9999.
 - After network-agent was embedded into Cubelet, node readiness / `NotReady` no longer probes a standalone network daemon. Runtime network degradation (for example TAP pool exhaustion or sustained CubeEgress push failures) is surfaced on create/release paths and local diagnostics instead of flipping the node to NotReady. Monitor create failure rates, TAP pool state (`cubecli container taps` / loopback `GET /v1/network/taps`), and CubeEgress health rather than relying on node Ready alone.
-- `cube-egress`: `127.0.0.1:9090/admin/v1/health`.
+- `cube-egress`: `127.0.0.1:9091/admin/v1/health` (default; `cubeEgress.adminPort`).
 - `cube-egress-net`: `cube-dev`, ip rule, table 100, mangle `TRANSPROXY`.
 
 ### 4.4 Registration and acceptance checkpoints

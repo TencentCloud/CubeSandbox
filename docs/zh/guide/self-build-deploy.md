@@ -327,6 +327,7 @@ sudo ./down.sh
 | `CUBE_PROXY_HTTPS_PORT` | `443` | CubeProxy HTTPS 监听端口 |
 | `CUBE_PROXY_HTTP_PORT` | `80` | CubeProxy HTTP 监听端口；systemd 启动后 TCP listener 检查跟随该端口 |
 | `CUBE_PROXY_GRPC_PORT` | `9090` | CubeProxy 明文 gRPC（HTTP/2）监听端口 |
+| `CUBE_EGRESS_ADMIN_PORT` | `9091` | CubeEgress 本机 admin API 端口（策略推送）；install.sh 会同步改写 Cubelet `cube_egress_admin_url` |
 | `CUBE_PROXY_DNS_ENABLE` | `1` | 启用 CoreDNS（一键部署必须为 `1`） |
 | `CUBE_PROXY_DNS_ANSWER_IP` | `${CUBE_SANDBOX_NODE_IP}` | CoreDNS 对 `cube.app` 返回的 IP |
 | `CUBE_PROXY_COREDNS_BIND_ADDR` | `127.0.0.54` | CoreDNS 绑定地址 |

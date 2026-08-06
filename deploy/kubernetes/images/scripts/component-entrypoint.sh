@@ -459,6 +459,13 @@ run_cubelet() {
     cidr_esc="$(sed_escape_replacement "${CUBE_SANDBOX_NETWORK_CIDR}")"
     sed -i "s|cidr = \"[^\"]*\"|cidr = \"${cidr_esc}\"|" "${cfg}"
   fi
+  if [[ -n "${CUBE_EGRESS_ADMIN_PORT:-}" ]]; then
+    [[ "${CUBE_EGRESS_ADMIN_PORT}" =~ ^[0-9]+$ ]] || fail "CUBE_EGRESS_ADMIN_PORT must be a positive integer"
+    local egress_admin_url="http://127.0.0.1:${CUBE_EGRESS_ADMIN_PORT}"
+    local egress_admin_url_esc
+    egress_admin_url_esc="$(sed_escape_replacement "${egress_admin_url}")"
+    sed -i "s|cube_egress_admin_url = \"[^\"]*\"|cube_egress_admin_url = \"${egress_admin_url_esc}\"|" "${cfg}"
+  fi
   if [[ -n "${CUBE_TAP_INIT_NUM:-}" ]]; then
     [[ "${CUBE_TAP_INIT_NUM}" =~ ^[0-9]+$ ]] || fail "CUBE_TAP_INIT_NUM must be a non-negative integer"
     sed -i "s/tap_init_num = [0-9]\+/tap_init_num = ${CUBE_TAP_INIT_NUM}/" "${cfg}"

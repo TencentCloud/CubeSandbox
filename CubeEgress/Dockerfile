@@ -34,7 +34,7 @@ COPY lua/ /usr/local/openresty/nginx/lua/
 COPY nginx.conf /usr/local/openresty/nginx/conf/nginx.conf
 COPY start.sh /usr/local/openresty/nginx/sbin/start.sh
 
-EXPOSE 8080 8443 9090
+EXPOSE 8080 8443 9091
 
 STOPSIGNAL SIGQUIT
 

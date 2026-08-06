@@ -19,6 +19,7 @@ Cube Sandbox 的控制面与管理类服务为了便于本地快速体验，部�
 | Cubelet gRPC | `0.0.0.0` | 9999 | `Cubelet/config/config.toml` 的 `tcp_address` | 节点管理 RPC，**无 TLS** |
 | Cubelet HTTP | `0.0.0.0` | 9998 | `Cubelet/config/config.toml` 的 `[http] address` | 调试 / metrics |
 | cube-proxy | `0.0.0.0` | 80 / 443 / 9090 | `CUBE_PROXY_HTTP_PORT` / `CUBE_PROXY_HTTPS_PORT` / `CUBE_PROXY_GRPC_PORT` | 设计上即面向公网 |
+| cube-egress admin | `127.0.0.1` | 9091 | `.env` 中的 `CUBE_EGRESS_ADMIN_PORT`（需与 Cubelet `cube_egress_admin_url` 保持一致） | 仅本机策略 API |
 | WebUI | `0.0.0.0` | 12088 | `.env` 中的 `WEB_UI_HOST_PORT`（仅端口） | 控制台 |
 | MySQL | `127.0.0.1` | 3306 | compose 模板中硬编码 | 已仅绑回环 |
 | Redis | `127.0.0.1` | 6379 | compose 模板中硬编码 | 已仅绑回环 |

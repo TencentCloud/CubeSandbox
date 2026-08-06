@@ -716,6 +716,7 @@ patch_cubelet_config_template() {
   local network_cidr="${3:-}"
   local cube_router_enable="${4:-}"
   local cube_router_cidr="${5:-}"
+  local cube_egress_admin_port="${6:-}"
 
   ensure_file "${cubelet_config}"
   if [[ -L "${cubelet_config}" ]]; then
@@ -772,6 +773,24 @@ patch_cubelet_config_template() {
       log "patched cube-router CIDR: ${cube_router_cidr}"
     else
       log "WARNING: Cubelet config missing cube_router_cidr key; skipped cube-router CIDR patch (${cubelet_config})"
+    fi
+  fi
+
+  if [[ -n "${cube_egress_admin_port}" ]]; then
+    case "${cube_egress_admin_port}" in
+      *[!0-9]*|"")
+        die "invalid CUBE_EGRESS_ADMIN_PORT: ${cube_egress_admin_port}"
+        ;;
+    esac
+    local cube_egress_admin_url="http://127.0.0.1:${cube_egress_admin_port}"
+    if grep -Eq '^[[:space:]]*cube_egress_admin_url = "' "${cubelet_config}"; then
+      sed -i -E "s|^([[:space:]]*)cube_egress_admin_url = \"[^\"]*\"|\1cube_egress_admin_url = \"${cube_egress_admin_url}\"|" "${cubelet_config}"
+      if ! grep -Eq "^[[:space:]]*cube_egress_admin_url = \"${cube_egress_admin_url}\"\$" "${cubelet_config}"; then
+        log "WARNING: failed to patch cube_egress_admin_url in Cubelet config (${cubelet_config})"
+      fi
+      log "patched cube-egress admin URL: ${cube_egress_admin_url}"
+    else
+      log "WARNING: Cubelet config missing cube_egress_admin_url key; skipped admin URL patch (${cubelet_config})"
     fi
   fi
 }

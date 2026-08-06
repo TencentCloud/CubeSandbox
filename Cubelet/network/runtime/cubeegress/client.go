@@ -58,7 +58,7 @@ func IsNotFound(err error) bool {
 // PUT /policies/<ip> (full replace), DELETE /policies/<ip>, and
 // GET /policies/<ip> for delete verification.
 //
-// Loopback only: by convention adminURL is http://127.0.0.1:9090, so
+// Loopback only: by convention adminURL is http://127.0.0.1:9091, so
 // this connects over a localhost TCP socket. No keepalive pool is
 // shared across sandboxes — egress-policy mutations are infrequent
 // (one per sandbox lifetime) and the cost of a fresh connection is

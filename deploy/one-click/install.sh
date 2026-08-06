@@ -1246,12 +1246,20 @@ tar -xzf "${PACKAGE_TAR}" -C "${WORK_DIR}"
 PKG_ROOT="${WORK_DIR}/sandbox-package"
 ensure_dir "${PKG_ROOT}"
 validate_cubelet_cow_startup_deps "${PKG_ROOT}/Cubelet/config/config.toml"
+CUBE_EGRESS_ADMIN_PORT="${CUBE_EGRESS_ADMIN_PORT:-9091}"
+case "${CUBE_EGRESS_ADMIN_PORT}" in
+  *[!0-9]*|"")
+    die "invalid CUBE_EGRESS_ADMIN_PORT: ${CUBE_EGRESS_ADMIN_PORT}"
+    ;;
+esac
+
 patch_cubelet_config_template \
   "${PKG_ROOT}/Cubelet/config/config.toml" \
   "${CUBE_SANDBOX_ETH_NAME:-}" \
   "${CUBE_SANDBOX_NETWORK_CIDR:-}" \
   "${CUBE_SANDBOX_CUBE_ROUTER_ENABLE}" \
-  "${CUBE_SANDBOX_CUBE_ROUTER_CIDR}"
+  "${CUBE_SANDBOX_CUBE_ROUTER_CIDR}" \
+  "${CUBE_EGRESS_ADMIN_PORT}"
 
 installed_role="${DEPLOY_ROLE}"
 detected_installed_role="$(detect_installed_role)"
@@ -1417,6 +1425,7 @@ fi
 if [[ -n "${CUBE_SANDBOX_CUBE_ROUTER_CIDR:-}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_CUBE_ROUTER_CIDR" "${CUBE_SANDBOX_CUBE_ROUTER_CIDR}"
 fi
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EGRESS_ADMIN_PORT" "${CUBE_EGRESS_ADMIN_PORT}"
 
 # Persist external MySQL config so every systemd unit / helper picks it up
 # instead of the local container. The CUBE_EXTERNAL_* markers let quickcheck

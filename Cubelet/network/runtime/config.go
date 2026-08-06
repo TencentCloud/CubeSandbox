@@ -38,13 +38,14 @@ type Config struct {
 	HostPortBindIP string
 
 	// CubeEgressAdminURL points at the colocated CubeEgress admin
-	// listener (loopback, e.g. http://127.0.0.1:9090). Defaults to
+	// listener (loopback, e.g. http://127.0.0.1:9091). Defaults to
 	// the canonical loopback address that CubeEgress's nginx.conf
-	// hard-codes; override (or set to "") only for setups where
-	// CubeEgress lives elsewhere or isn't deployed at all. When
-	// empty, the embedded network runtime skips the per-sandbox push and
-	// the /v1/policies/dump endpoint still works (it just returns
-	// an empty map until sandboxes with rules are created).
+	// uses (CUBE_EGRESS_ADMIN_PORT, default 9091); override (or set
+	// to "") only for setups where CubeEgress lives elsewhere or
+	// isn't deployed at all. When empty, the embedded network runtime
+	// skips the per-sandbox push and the /v1/policies/dump endpoint
+	// still works (it just returns an empty map until sandboxes with
+	// rules are created).
 	CubeEgressAdminURL string
 
 	// CubeEgressPushTimeout bounds a single PUT/DELETE call to the
@@ -77,7 +78,7 @@ func DefaultConfig() Config {
 		TapInitNum:            0,
 		StateDir:              defaultStateDir,
 		HostPortBindIP:        "127.0.0.1",
-		CubeEgressAdminURL:    "http://127.0.0.1:9090",
+		CubeEgressAdminURL:    "http://127.0.0.1:9091",
 		CubeEgressPushTimeout: 2 * time.Second,
 
 		// Route-aware egress options.

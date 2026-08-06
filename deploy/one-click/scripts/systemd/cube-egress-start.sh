@@ -48,6 +48,14 @@ AUDIT_DIR="${CUBE_EGRESS_AUDIT_DIR:-/data/log/cube-egress}"
 # from inside the container without any port forwarding.
 BOOTSTRAP_URL="${CUBE_EGRESS_BOOTSTRAP_URL:-http://127.0.0.1:9998/v1/policies/dump}"
 SANDBOX_NETWORK_CIDR="${CUBE_SANDBOX_NETWORK_CIDR:-192.168.0.0/18}"
+# Loopback admin API (policy push from Cubelet). Must stay in sync with
+# Cubelet config.toml cube_egress_admin_url (patched at install time).
+ADMIN_PORT="${CUBE_EGRESS_ADMIN_PORT:-9091}"
+case "${ADMIN_PORT}" in
+  *[!0-9]*|"")
+    die "invalid CUBE_EGRESS_ADMIN_PORT: ${ADMIN_PORT}"
+    ;;
+esac
 
 ensure_dir "${CA_DIR}"
 ensure_dir "${AUDIT_DIR}"
@@ -98,6 +106,7 @@ docker create \
   --cap-add=DAC_READ_SEARCH \
   -e "CUBE_EGRESS_BOOTSTRAP_URL=${BOOTSTRAP_URL}" \
   -e "CUBE_SANDBOX_NETWORK_CIDR=${SANDBOX_NETWORK_CIDR}" \
+  -e "CUBE_EGRESS_ADMIN_PORT=${ADMIN_PORT}" \
   "${CUBE_EGRESS_IMAGE}" >/dev/null
 
 # `docker start -a` keeps the foreground attached to the container

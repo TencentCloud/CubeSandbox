@@ -295,7 +295,7 @@ sequenceDiagram
 
 - cubelet：startup 等 9999；readiness 默认 exec（9999 + Cubelet 本地 socket）；liveness 查 9999。
 - network-agent 合入 Cubelet 后，节点就绪 / `NotReady` 不再探测独立网络进程。运行期网络退化（例如 TAP 池耗尽、CubeEgress 持续推送失败）会体现在 create/release 失败与本地诊断上，而不会把节点打成 NotReady。请改看创建失败率、TAP 池状态（`cubecli container taps` / loopback `GET /v1/network/taps`）以及 CubeEgress 健康，而不是只依赖节点 Ready。
-- `cube-egress`：`127.0.0.1:9090/admin/v1/health`。
+- `cube-egress`：`127.0.0.1:9091/admin/v1/health`（默认；`cubeEgress.adminPort`）。
 - `cube-egress-net`：`cube-dev`、ip rule、table 100、mangle `TRANSPROXY`。
 
 ### 4.4 注册与验收关注点

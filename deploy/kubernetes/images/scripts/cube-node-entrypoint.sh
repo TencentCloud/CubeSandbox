@@ -188,6 +188,12 @@ if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
   CIDR_ESC="$(sed_escape_replacement "${CUBE_SANDBOX_NETWORK_CIDR}")"
   sed -i "s|cidr = \"[^\"]*\"|cidr = \"${CIDR_ESC}\"|" "${CUBELET_CONFIG}"
 fi
+if [[ -n "${CUBE_EGRESS_ADMIN_PORT:-}" ]]; then
+  [[ "${CUBE_EGRESS_ADMIN_PORT}" =~ ^[0-9]+$ ]] || fail "CUBE_EGRESS_ADMIN_PORT must be a positive integer"
+  EGRESS_ADMIN_URL="http://127.0.0.1:${CUBE_EGRESS_ADMIN_PORT}"
+  EGRESS_ADMIN_URL_ESC="$(sed_escape_replacement "${EGRESS_ADMIN_URL}")"
+  sed -i "s|cube_egress_admin_url = \"[^\"]*\"|cube_egress_admin_url = \"${EGRESS_ADMIN_URL_ESC}\"|" "${CUBELET_CONFIG}"
+fi
 if [[ -n "${CUBE_TAP_INIT_NUM:-}" ]]; then
   # Reject anything that is not an integer so operators cannot inject
   # replacement content via numeric-looking env variables.
