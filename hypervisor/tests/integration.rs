@@ -8458,11 +8458,11 @@ mod vmm_instance {
         // Then boot it
         assert!(vmm.send_request(ApiRequest::VmBoot));
 
-        guest.ssh_command("sudo reboot").unwrap();
+        guest.ssh_command("sudo poweroff").unwrap();
 
         let mut recv_evt_flag = false;
         for _ in 0..3 {
-            let data = receiver.recv().unwrap();
+            let data = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
             if data == NotifyEvent::VmShutdown {
                 recv_evt_flag = true;
                 break;
