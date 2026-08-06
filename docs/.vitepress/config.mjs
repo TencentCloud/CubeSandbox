@@ -218,7 +218,7 @@ export default withMermaid(defineConfig({
               text: 'System Design',
               items: [
                 { text: 'Architecture Overview', link: '/architecture/overview' },
-                { text: 'Networking (CubeVS)', link: '/architecture/network' }
+                { text: 'CubeVS Network Model', link: '/architecture/network' }
               ]
             }
           ],

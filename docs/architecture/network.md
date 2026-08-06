@@ -1,4 +1,4 @@
-# Network (CubeVS)
+# CubeVS Network Model
 
 Cube-Sandbox isolates each sandbox with its own virtual network, giving every instance private connectivity to the outside world while enforcing per-sandbox security policies entirely in kernel space. The subsystem that makes this possible is **CubeVS** -- a purpose-built network virtualization layer composed of three eBPF programs, a set of shared BPF maps, and a Go control-plane library.
 
