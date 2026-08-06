@@ -31,7 +31,8 @@ use crate::vm_config::{
 };
 use anyhow::anyhow;
 use event_notifier::{event_notify, NotifyEvent};
-use libc::{EFD_NONBLOCK, SIGINT, SIGTERM};
+use libc::{EFD_NONBLOCK, SIGINT, SIGTERM, TFD_NONBLOCK};
+use logging::LOG_CTRL_REOPEN;
 use memory_manager::MemoryManagerSnapshotData;
 use pci::PciBdf;
 use seccompiler::{apply_filter, SeccompAction};
@@ -51,7 +52,7 @@ use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, RecvError, SendError, Sender};
 use std::sync::{Arc, Barrier, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::{result, thread};
 use thiserror::Error;
 use tracer::trace_scoped;
@@ -118,6 +119,14 @@ pub enum Error {
     /// Cannot read from EventFd.
     #[error("Error reading from EventFd: {0}")]
     EventFdRead(#[source] io::Error),
+
+    /// Cannot create the periodic log-reopen timer.
+    #[error("Error creating log-reopen timer: {0}")]
+    LogReopenTimerCreate(#[source] io::Error),
+
+    /// Cannot consume the periodic log-reopen timer event.
+    #[error("Error reading log-reopen timer: {0}")]
+    LogReopenTimerRead(#[source] io::Error),
 
     /// Cannot create epoll context.
     #[error("Error creating epoll context: {0}")]
@@ -197,6 +206,7 @@ pub enum EpollDispatch {
     Api = 2,
     ActivateVirtioDevices = 3,
     Debug = 4,
+    LogReopen = 5,
     Unknown,
 }
 
@@ -209,8 +219,63 @@ impl From<u64> for EpollDispatch {
             2 => Api,
             3 => ActivateVirtioDevices,
             4 => Debug,
+            5 => LogReopen,
             _ => Unknown,
         }
+    }
+}
+
+const LOG_REOPEN_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+fn create_log_reopen_timer(interval: Duration) -> io::Result<File> {
+    // This is called from the VMM control thread after its VMM-specific
+    // seccomp filter has been installed. The vCPU and API thread filters do
+    // not allow timerfd syscalls.
+    let timer_fd =
+        unsafe { libc::timerfd_create(libc::CLOCK_MONOTONIC, libc::TFD_CLOEXEC | TFD_NONBLOCK) };
+    if timer_fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // SAFETY: timer_fd is a valid, newly-created file descriptor owned by us.
+    let timer = unsafe { File::from_raw_fd(timer_fd) };
+    let interval = libc::itimerspec {
+        it_interval: libc::timespec {
+            tv_sec: interval.as_secs() as _,
+            tv_nsec: interval.subsec_nanos() as _,
+        },
+        it_value: libc::timespec {
+            tv_sec: interval.as_secs() as _,
+            tv_nsec: interval.subsec_nanos() as _,
+        },
+    };
+
+    let result =
+        unsafe { libc::timerfd_settime(timer.as_raw_fd(), 0, &interval, std::ptr::null_mut()) };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(timer)
+}
+
+fn read_log_reopen_timer<R: Read>(reader: &mut R) -> io::Result<bool> {
+    let mut expirations = [0_u8; std::mem::size_of::<u64>()];
+    match reader.read(&mut expirations) {
+        Ok(size) if size == expirations.len() => Ok(true),
+        Ok(size) => Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!("short log-reopen timer read: {size} bytes"),
+        )),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -383,6 +448,7 @@ struct VmMigrationConfig {
 
 pub struct Vmm {
     epoll: EpollContext,
+    log_reopen_timer: File,
     exit_evt: EventFd,
     reset_evt: EventFd,
     api_evt: EventFd,
@@ -492,8 +558,14 @@ impl Vmm {
         vcpu_started: Arc<AtomicBool>,
     ) -> Result<Self> {
         let mut epoll = EpollContext::new().map_err(Error::Epoll)?;
+        let log_reopen_timer =
+            create_log_reopen_timer(LOG_REOPEN_INTERVAL).map_err(Error::LogReopenTimerCreate)?;
         let reset_evt = EventFd::new(EFD_NONBLOCK).map_err(Error::EventFdCreate)?;
         let activate_evt = EventFd::new(EFD_NONBLOCK).map_err(Error::EventFdCreate)?;
+
+        epoll
+            .add_event(&log_reopen_timer, EpollDispatch::LogReopen)
+            .map_err(Error::Epoll)?;
 
         epoll
             .add_event(&exit_evt, EpollDispatch::Exit)
@@ -518,6 +590,7 @@ impl Vmm {
 
         Ok(Vmm {
             epoll,
+            log_reopen_timer,
             exit_evt,
             reset_evt,
             api_evt,
@@ -1884,6 +1957,17 @@ impl Vmm {
                                 .map_err(Error::ActivateVirtioDevices)?;
                         }
                     }
+                    EpollDispatch::LogReopen => {
+                        if read_log_reopen_timer(&mut self.log_reopen_timer)
+                            .map_err(Error::LogReopenTimerRead)?
+                        {
+                            // The default VMM verbosity is Warn. Keep the
+                            // control record visible to the logger facade at
+                            // that level; the file decorator consumes it
+                            // without writing a warning line.
+                            warn!(target: LOG_CTRL_REOPEN, "periodic log reopen");
+                        }
+                    }
                     EpollDispatch::Api => {
                         // Consume the events.
                         for _ in 0..self.api_evt.read().map_err(Error::EventFdRead)? {
@@ -2208,6 +2292,46 @@ mod unit_tests {
         ConsoleConfig, ConsoleOutputMode, CpusConfig, HotplugMethod, MemoryConfig, PayloadConfig,
         RngConfig, VmConfig,
     };
+
+    #[test]
+    fn log_reopen_timer_expires() {
+        let mut timer = create_log_reopen_timer(Duration::from_millis(1)).unwrap();
+        for _ in 0..100 {
+            if read_log_reopen_timer(&mut timer).unwrap() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        panic!("log-reopen timer did not expire");
+    }
+
+    #[test]
+    fn log_reopen_timer_handles_would_block() {
+        let mut timer = create_log_reopen_timer(Duration::from_secs(3600)).unwrap();
+
+        assert!(!read_log_reopen_timer(&mut timer).unwrap());
+    }
+
+    #[test]
+    fn log_reopen_timer_handles_interrupted_read() {
+        struct InterruptOnceReader {
+            interrupted: bool,
+        }
+
+        impl Read for InterruptOnceReader {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if !self.interrupted {
+                    self.interrupted = true;
+                    return Err(io::Error::from(io::ErrorKind::Interrupted));
+                }
+                Ok(buf.len())
+            }
+        }
+
+        let mut reader = InterruptOnceReader { interrupted: false };
+        assert!(!read_log_reopen_timer(&mut reader).unwrap());
+        assert!(read_log_reopen_timer(&mut reader).unwrap());
+    }
 
     fn create_dummy_vmm() -> Vmm {
         Vmm::new(

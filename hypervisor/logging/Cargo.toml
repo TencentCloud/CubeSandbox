@@ -5,7 +5,6 @@ authors = ["The Cloud Hypervisor Authors"]
 edition = "2018"
 
 [dependencies]
-chrono = "0.4.24"
 lazy_static = "1.2"
 serde = { workspace = true, features = ["derive"] }
 slog = "2.7.0"

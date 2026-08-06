@@ -1,4 +1,3 @@
-use chrono::{Datelike, Timelike, Utc};
 use slog::*;
 use slog_term::{Decorator, RecordDecorator};
 use std::cell::RefCell;
@@ -9,7 +8,22 @@ use std::{io, result};
 #[macro_use]
 extern crate lazy_static;
 
+/// Slog tag used to request an explicit log-file reopen.
 pub const LOG_CTRL_REOPEN: &str = "LogReopen";
+
+fn open_log_file(name: &str) -> io::Result<std::fs::File> {
+    std::fs::File::options()
+        .create(true)
+        .append(true)
+        .open(std::path::Path::new(name))
+}
+
+fn open_replacement_log_file(name: &str) -> io::Result<std::fs::File> {
+    std::fs::File::options()
+        .create(true)
+        .append(true)
+        .open(std::path::Path::new(name))
+}
 
 lazy_static! {
     pub static ref START_TM: Mutex<std::time::Instant> = Mutex::new(std::time::Instant::now());
@@ -19,7 +33,6 @@ lazy_static! {
 
 pub struct RawPlainDecorator {
     name: String,
-    current: u64,
     output: std::fs::File,
 }
 
@@ -30,32 +43,29 @@ pub struct PlainDecorator {
 impl PlainDecorator {
     /// Create `PlainDecorator` instance
     pub fn new(name: String) -> Self {
-        let now = Utc::now();
-        let current = now.year() as u64 * 1_000_000
-            + now.month() as u64 * 10_000
-            + now.day() as u64 * 100
-            + now.hour() as u64;
         let filename = name.clone();
+        let output = open_log_file(&filename).unwrap();
         PlainDecorator {
-            deco: RefCell::new(RawPlainDecorator {
-                name: name,
-                current: current,
-                output: std::fs::File::options()
-                    .create(true)
-                    .append(true)
-                    .open(std::path::Path::new(&filename.to_string()))
-                    .unwrap(),
-            }),
+            deco: RefCell::new(RawPlainDecorator { name, output }),
         }
     }
 }
 
 impl Decorator for PlainDecorator {
-    fn with_record<F>(&self, _record: &Record, _logger_values: &OwnedKVList, f: F) -> io::Result<()>
+    fn with_record<F>(&self, record: &Record, _logger_values: &OwnedKVList, f: F) -> io::Result<()>
     where
         F: FnOnce(&mut dyn RecordDecorator) -> io::Result<()>,
     {
         let mut deco = self.deco.borrow_mut();
+        if record.tag() == LOG_CTRL_REOPEN {
+            if let Err(error) = deco.reopen() {
+                eprintln!(
+                    "cube-vmm: failed to reopen log file {:?}: {}",
+                    deco.name, error
+                );
+            }
+            return Ok(());
+        }
         let mut deco = PlainRecordDecorator { deco: &mut *deco };
         f(&mut deco)
     }
@@ -66,24 +76,17 @@ pub struct PlainRecordDecorator<'a> {
     deco: &'a mut RawPlainDecorator,
 }
 
+impl RawPlainDecorator {
+    fn reopen(&mut self) -> io::Result<()> {
+        self.output.flush()?;
+        let output = open_replacement_log_file(&self.name)?;
+        self.output = output;
+        Ok(())
+    }
+}
+
 impl<'a> io::Write for PlainRecordDecorator<'a> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        {
-            let now = Utc::now();
-            let current = now.year() as u64 * 1_000_000
-                + now.month() as u64 * 10_000
-                + now.day() as u64 * 100
-                + now.hour() as u64;
-            if self.deco.current != current {
-                self.deco.current = current;
-                let filename = self.deco.name.clone();
-                self.deco.output = std::fs::File::options()
-                    .create(true)
-                    .append(true)
-                    .open(std::path::Path::new(&filename.to_string()))
-                    .unwrap();
-            }
-        }
         self.deco.output.write(buf)
     }
 
@@ -174,4 +177,103 @@ pub fn create_logger(name: String) -> slog::Logger {
     let logger = slog::Logger::root(drain, o!());
 
     logger
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn test_log_path() -> std::path::PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let test_id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "cube-vmm-log-reopen-{}-{}-{}",
+            std::process::id(),
+            suffix,
+            test_id
+        ))
+    }
+
+    struct TestLogFiles {
+        active: std::path::PathBuf,
+        rotated: std::path::PathBuf,
+    }
+
+    impl TestLogFiles {
+        fn new() -> Self {
+            let active = test_log_path();
+            let rotated = active.with_extension("log.1");
+            Self { active, rotated }
+        }
+    }
+
+    impl Drop for TestLogFiles {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.active);
+            let _ = fs::remove_file(&self.rotated);
+        }
+    }
+
+    #[test]
+    fn control_record_reopens_after_rename_based_rotation() {
+        let files = TestLogFiles::new();
+        let drain = RawFormat::new(PlainDecorator::new(
+            files.active.to_string_lossy().into_owned(),
+        ))
+        .build();
+        let values = OwnedKVList::from(o!());
+
+        drain
+            .log(
+                &slog::record!(Level::Info, "", &format_args!("before"), b!()),
+                &values,
+            )
+            .unwrap();
+
+        fs::rename(&files.active, &files.rotated).unwrap();
+        fs::File::create(&files.active).unwrap();
+
+        drain
+            .log(
+                &slog::record!(Level::Info, LOG_CTRL_REOPEN, &format_args!(""), b!()),
+                &values,
+            )
+            .unwrap();
+        drain
+            .log(
+                &slog::record!(Level::Info, "", &format_args!("after"), b!()),
+                &values,
+            )
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(&files.rotated).unwrap(), "before");
+        assert_eq!(fs::read_to_string(&files.active).unwrap(), "after");
+    }
+
+    #[test]
+    fn failed_reopen_keeps_current_descriptor_usable() {
+        let files = TestLogFiles::new();
+        let output = open_log_file(files.active.to_str().expect("utf-8 log path")).unwrap();
+        let mut raw = RawPlainDecorator {
+            name: std::env::temp_dir().to_string_lossy().into_owned(),
+            output,
+        };
+
+        raw.output.write_all(b"before\n").unwrap();
+        assert!(raw.reopen().is_err());
+        raw.output.write_all(b"after\n").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&files.active).unwrap(),
+            "before\nafter\n"
+        );
+    }
 }
