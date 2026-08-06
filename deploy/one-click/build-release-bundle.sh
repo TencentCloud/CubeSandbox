@@ -13,6 +13,30 @@ if [[ -f "${ENV_FILE}" ]]; then
   load_env_file "${ENV_FILE}"
 fi
 
+# tar_czf: create a gzip-compressed tarball, using pigz (parallel gzip) when it
+# is installed and falling back to tar's built-in single-threaded gzip
+# otherwise. The output is a standard .tar.gz in both cases, so consumers /
+# `tar xzf` are unaffected -- pigz only speeds up compression of the large guest
+# image + kernel payloads on multi-core hosts. ONE_CLICK_DISABLE_PIGZ=1 forces
+# the portable single-tool gzip path for environments that want a consistent,
+# single-threaded compressor rather than pigz's parallel block framing. (Note:
+# neither path is strictly bit-for-bit reproducible -- gzip still records an
+# mtime/OS byte in its header.)
+tar_czf() {
+  local out="$1"
+  local base_dir="$2"
+  local member="$3"
+  if [[ "${ONE_CLICK_DISABLE_PIGZ:-}" != "1" ]] && command -v pigz >/dev/null 2>&1; then
+    # Run the pipeline in a subshell with pipefail set there, so a tar failure
+    # in the pipe is caught even if a caller ever clears the global setting --
+    # and the option change stays scoped to the subshell instead of leaking back
+    # into the caller. This produces the shipped tarball.
+    ( set -o pipefail; tar -C "${base_dir}" -cf - "${member}" | pigz > "${out}" )
+  else
+    tar -C "${base_dir}" -czf "${out}" "${member}"
+  fi
+}
+
 WORK_ROOT="${ONE_CLICK_WORK_ROOT:-${SCRIPT_DIR}/.work}"
 RUNTIME_LAYOUT_DIR="${ONE_CLICK_RUNTIME_LAYOUT_DIR:-${WORK_ROOT}/runtime-layout}"
 CORE_BIN_DIR="${WORK_ROOT}/core-bin"
@@ -37,7 +61,12 @@ CUBE_VERSION_FROM_ENV="${CUBE_VERSION:-}"
 LATEST_RELEASE_TAG="$(git -C "${ROOT_DIR}" describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
 : "${CUBE_VERSION:=${LATEST_RELEASE_TAG:-0.0.0-dev}}"
 : "${CUBE_COMMIT:=$(git -C "${ROOT_DIR}" rev-parse HEAD 2>/dev/null || echo 'unknown')}"
-: "${CUBE_BUILD_TIME:=$(date -u +'%Y-%m-%dT%H:%M:%SZ')}"
+# Anchor to the HEAD commit date (UTC) so repeated builds on the same commit
+# embed a byte-identical value and reuse incremental caches; keep the manifest
+# built_at in step with the binaries' BuildTime when this script is invoked
+# directly. The builder wrapper exports the same value and pre-empts this. Falls
+# back to wall-clock outside a git tree; still overridable via the environment.
+: "${CUBE_BUILD_TIME:=$(TZ=UTC0 git -C "${ROOT_DIR}" show -s --format=%cd --date=format-local:'%Y-%m-%dT%H:%M:%SZ' HEAD 2>/dev/null || date -u +'%Y-%m-%dT%H:%M:%SZ')}"
 export CUBE_VERSION CUBE_COMMIT CUBE_BUILD_TIME
 
 DIST_VERSION="${ONE_CLICK_DIST_VERSION:-${CUBE_VERSION_FROM_ENV:-${LATEST_RELEASE_TAG:-$(latest_git_revision "${ROOT_DIR}")}}}"
@@ -440,6 +469,122 @@ EOF
   done
 }
 
+# WebUI (npm) build state. The npm build only reads WEB_SOURCE_DIR and writes
+# WEB_SOURCE_DIR/dist; it shares no inputs or outputs with the guest-image /
+# runtime-layout build, so it can run concurrently with build-vm-assets.sh and
+# then be collected later. WEB_BUILD_ASYNC_PID is the backgrounded builder (0 =
+# none started; the synchronous path in build_web_dist runs instead).
+WEB_BUILD_ASYNC_PID=0
+# Set to 1 once a successful async build has been collected and its dist is on
+# disk, so build_web_dist copies the result instead of re-`wait`ing a
+# already-reaped pid (which would return 127 and be misread as a failure) or
+# rebuilding synchronously.
+WEB_BUILD_ASYNC_DONE=0
+WEB_BUILD_ASYNC_LOG="${WORK_ROOT}/web-build.log"
+
+# Replay the captured async web-build log to stderr. Called on both success and
+# failure so that tsc/vite diagnostics that exit 0 (warnings) stay visible --
+# mirroring the builder-track policy where every track's log is always replayed
+# on completion, not only on failure.
+_replay_web_build_log() {
+  echo "[one-click] ----- begin web build log -----" >&2
+  cat "${WEB_BUILD_ASYNC_LOG}" >&2 || true
+  echo "[one-click] ----- end web build log -----" >&2
+}
+
+# Wait for the in-flight async build, replay its log, and die on failure. Clears
+# WEB_BUILD_ASYNC_PID (so the EXIT trap and any later call become no-ops) and
+# marks the dist ready on success. Caller must have confirmed WEB_BUILD_ASYNC_PID
+# is nonzero.
+_collect_web_build_async() {
+  local web_pid="${WEB_BUILD_ASYNC_PID}"
+  WEB_BUILD_ASYNC_PID=0
+  if ! wait "${web_pid}"; then
+    _replay_web_build_log
+    die "web dashboard build failed"
+  fi
+  _replay_web_build_log
+  WEB_BUILD_ASYNC_DONE=1
+}
+
+# Non-blocking check: if the async web build has ALREADY exited, collect it now.
+# On failure this aborts immediately -- so a fast failure (bad lockfile, TS
+# error) surfaces before the remaining serial work (component binary builds +
+# packaging) runs, instead of being masked until build_web_dist near the very
+# end. If the build is still running, return at once and let it keep overlapping.
+# No-op when no async build is in flight or it was already collected.
+poll_web_build_async() {
+  [[ "${WEB_BUILD_ASYNC_PID}" -ne 0 ]] || return 0
+  kill -0 "${WEB_BUILD_ASYNC_PID}" 2>/dev/null && return 0
+  log "async web dashboard build finished early; collecting"
+  _collect_web_build_async
+}
+
+# Reap a still-running async web build on any exit (including an early failure
+# elsewhere), so the backgrounded npm process is never orphaned onto a
+# persistent host. No-op once build_web_dist has already collected it. npm forks
+# descendant workers (vite/esbuild), so signal the whole process group (the
+# build is launched under `set -m` with PGID == PID) -- otherwise the workers
+# survive as orphans. Fall back to signaling the single PID if the group-kill
+# fails.
+cleanup_web_build_async() {
+  [[ "${WEB_BUILD_ASYNC_PID}" -ne 0 ]] || return 0
+  if kill -0 "${WEB_BUILD_ASYNC_PID}" 2>/dev/null; then
+    kill -- -"${WEB_BUILD_ASYNC_PID}" 2>/dev/null \
+      || kill "${WEB_BUILD_ASYNC_PID}" 2>/dev/null || true
+    wait "${WEB_BUILD_ASYNC_PID}" 2>/dev/null || true
+  fi
+}
+# EXIT alone is not enough: bash does NOT run EXIT traps when the shell is
+# terminated by an uncaught signal (Ctrl-C -> SIGINT, or SIGTERM from a CI
+# timeout). Because the npm build runs in its own process group, a signal
+# delivered only to this script would not reach it and it would leak as an
+# orphan onto a persistent host. Trap
+# INT/TERM to reap it, then restore the default disposition and re-raise so the
+# script still exits with the correct 128+signum status (the EXIT trap that then
+# fires is a harmless no-op once the child is already reaped).
+trap cleanup_web_build_async EXIT
+trap 'cleanup_web_build_async; trap - INT; kill -INT $$' INT
+trap 'cleanup_web_build_async; trap - TERM; kill -TERM $$' TERM
+
+# start_web_build_async: kick off `npm ci && npm run build` in the background so
+# it overlaps the guest-image build. Deliberately conservative -- it only starts
+# the async build in the plain success case (npm present, source tree present,
+# no prebuilt-dist override, not explicitly disabled). In every other case it is
+# a no-op and build_web_dist falls through to its original synchronous path, so
+# validation errors (missing npm / missing WEB_SOURCE_DIR) surface with the
+# exact same message and behavior as before. Set ONE_CLICK_SEQUENTIAL_WEB_BUILD=1
+# to force the fully sequential build.
+start_web_build_async() {
+  [[ "${ONE_CLICK_SEQUENTIAL_WEB_BUILD:-}" != "1" ]] || return 0
+  [[ -z "${WEB_DIST_OVERRIDE}" ]] || return 0
+  command -v npm >/dev/null 2>&1 || return 0
+  [[ -d "${WEB_SOURCE_DIR}" ]] || return 0
+
+  mkdir -p "$(dirname "${WEB_BUILD_ASYNC_LOG}")"
+  log "building web dashboard (async, overlapping runtime layout build)"
+  # Run in a fresh process group so cleanup_web_build_async can signal the whole
+  # group and reap npm's descendant workers (vite/esbuild).
+  #
+  # `set -m` (not setsid) is the primary path. It places the background job in
+  # its own process group with PGID == PID, so WEB_BUILD_ASYNC_PID is both the
+  # thing we `wait` on AND a valid `kill -- -PID` group target. Crucially, the
+  # backgrounded shell is a *real child* of this script, so `wait` blocks on the
+  # actual npm build and $? reflects its true exit status.
+  #
+  # setsid is deliberately NOT used here: when the caller is already a
+  # process-group leader (script launched via `setsid`, as a background job from
+  # an interactive shell, or by a job scheduler that puts each job in its own
+  # group), setsid must fork -- its parent exits 0 immediately, so $! captures a
+  # short-lived pid. `wait` would then return 0 at once (letting build_web_dist
+  # copy a half-built dist) and cleanup could not reach the detached npm build.
+  # `set -m` never forks and does not have this failure mode.
+  set -m
+  ( cd "${WEB_SOURCE_DIR}" && npm ci && npm run build ) >"${WEB_BUILD_ASYNC_LOG}" 2>&1 &
+  set +m
+  WEB_BUILD_ASYNC_PID=$!
+}
+
 build_web_dist() {
   local output_dir="$1"
   rm -rf "${output_dir}"
@@ -449,6 +594,14 @@ build_web_dist() {
     log "using prebuilt web dist: ${WEB_DIST_OVERRIDE}"
     ensure_dir "${WEB_DIST_OVERRIDE}"
     copy_dir_contents "${WEB_DIST_OVERRIDE}" "${output_dir}"
+  elif [[ "${WEB_BUILD_ASYNC_DONE}" -eq 1 ]]; then
+    # Already collected by an earlier poll_web_build_async (finished-early path).
+    log "using async web dashboard build collected earlier"
+    copy_dir_contents "${WEB_SOURCE_DIR}/dist" "${output_dir}"
+  elif [[ "${WEB_BUILD_ASYNC_PID}" -ne 0 ]]; then
+    log "collecting async web dashboard build"
+    _collect_web_build_async
+    copy_dir_contents "${WEB_SOURCE_DIR}/dist" "${output_dir}"
   else
     log "building web dashboard"
     require_cmd npm
@@ -468,8 +621,20 @@ ensure_dir "${CUBE_WEBUI_TEMPLATE_DIR}"
 ensure_dir "${CUBE_SYSTEMD_TEMPLATE_DIR}"
 ensure_dir "${CUBE_PROXY_SOURCE_DIR}"
 
+# Start the WebUI build in the background so it overlaps the guest-image build
+# below (they are fully independent). Collected later in build_web_dist.
+start_web_build_async
+
 log "building runtime layout"
 "${SCRIPT_DIR}/build-vm-assets.sh"
+
+# The guest-image build above is the long pole the async web build overlaps. By
+# the time it returns, a fast web-build failure (bad lockfile, TS error) has
+# usually already happened -- surface it now rather than masking it behind the
+# remaining component-binary builds and packaging that still precede
+# build_web_dist. Non-blocking: if the web build is still running it keeps
+# overlapping and is collected later.
+poll_web_build_async
 
 log "packaging fixed kernel artifact zip"
 package_kernel_artifact_zip \
@@ -702,7 +867,7 @@ find "${PACKAGE_ROOT}/scripts/cube-egress" -type f -name "*.sh" -exec chmod +x {
 find "${PACKAGE_ROOT}/terraform" -type f -name "*.sh" -exec chmod +x {} \;
 
 mkdir -p "$(dirname "${PACKAGE_TAR}")"
-tar -C "${WORK_ROOT}" -czf "${PACKAGE_TAR}" "sandbox-package"
+tar_czf "${PACKAGE_TAR}" "${WORK_ROOT}" "sandbox-package"
 
 mkdir -p "${DIST_ROOT}/assets/package" "${DIST_ROOT}/assets/kernel-artifacts" "${DIST_ROOT}/lib" "${DIST_ROOT}/scripts/common"
 copy_file "${SCRIPT_DIR}/README.md" "${DIST_ROOT}/README.md"
@@ -777,5 +942,5 @@ EOF
 # exported by build-vm-assets.sh.
 generate_release_manifest "${DIST_ROOT}" "${DIST_VERSION}"
 
-tar -C "${SCRIPT_DIR}/dist" -czf "${DIST_TAR}" "cube-sandbox-one-click-${DIST_VERSION}"
+tar_czf "${DIST_TAR}" "${SCRIPT_DIR}/dist" "cube-sandbox-one-click-${DIST_VERSION}"
 log "release bundle ready: ${DIST_TAR}"

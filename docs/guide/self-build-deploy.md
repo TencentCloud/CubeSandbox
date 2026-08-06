@@ -283,6 +283,15 @@ You can also point to prebuilt binaries to skip compilation:
 | `ONE_CLICK_CUBESHIM_BIN` | Path to prebuilt containerd-shim-cube-rs binary |
 | `ONE_CLICK_CUBE_RUNTIME_BIN` | Path to prebuilt cube-runtime binary |
 
+Build-performance knobs (all optional):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ONE_CLICK_BUILD_JOBS` | auto | Max concurrent component build tracks. Auto = min of CPU count and available-memory/3GiB (available memory respects the cgroup limit when building in a container). Set `1` for a fully serial build, or a large value to uncap. |
+| `ONE_CLICK_DISABLE_PIGZ` | empty | Set to `1` to force portable single-threaded `gzip` for tarballs instead of `pigz` (parallel gzip), e.g. when a consistent single-tool compressor is preferred over pigz's parallel block framing. |
+| `ONE_CLICK_SEQUENTIAL_WEB_BUILD` | empty | Set to `1` to build the WebUI synchronously instead of overlapping it with the guest-image build. |
+| `CUBE_BUILD_TIME` | HEAD commit date (UTC) | Build timestamp embedded in binaries and recorded as `built_at` in `release-manifest.json` / `VERSION.txt`. Defaults to the HEAD commit date so repeated builds on the same commit are byte-identical and reuse incremental caches; override with a literal timestamp (e.g. `2026-01-01T00:00:00Z`) for a wall-clock value. |
+
 ### Target Machine Options
 
 | Variable | Default | Description |

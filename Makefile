@@ -217,6 +217,7 @@ endif
 		-e CUBE_VERSION \
 		-e CUBE_COMMIT \
 		-e CUBE_BUILD_TIME \
+		-e ONE_CLICK_BUILD_JOBS \
 		-v "$(ROOT_DIR)":/workspace \
 		-v "$(BUILDER_HOME)":$(BUILDER_CONTAINER_HOME) \
 		$(BUILDER_RUN_EXTRA_MOUNTS) \

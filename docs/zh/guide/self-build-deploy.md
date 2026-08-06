@@ -283,6 +283,15 @@ sudo ./down.sh
 | `ONE_CLICK_CUBESHIM_BIN` | 预编译 containerd-shim-cube-rs 路径 |
 | `ONE_CLICK_CUBE_RUNTIME_BIN` | 预编译 cube-runtime 路径 |
 
+构建性能选项（均为可选）：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `ONE_CLICK_BUILD_JOBS` | auto | 组件构建并发轨道数上限。auto = CPU 核数与 可用内存/3GiB 取较小值（在容器中构建时，可用内存会考虑 cgroup 限制）。设为 `1` 表示完全串行构建，设为较大值可取消上限。 |
+| `ONE_CLICK_DISABLE_PIGZ` | 空 | 设为 `1` 时，打包使用可移植的单线程 `gzip` 而非 `pigz`（并行 gzip），适用于希望使用一致的单一压缩工具、而非 pigz 并行分块格式的场景。 |
+| `ONE_CLICK_SEQUENTIAL_WEB_BUILD` | 空 | 设为 `1` 时，串行构建 WebUI，而不与 Guest 镜像构建并行重叠。 |
+| `CUBE_BUILD_TIME` | HEAD 提交日期（UTC） | 嵌入二进制并记录到 `release-manifest.json` / `VERSION.txt` 的 `built_at` 的构建时间戳。默认取 HEAD 提交日期，使同一提交上的重复构建字节一致并复用增量缓存；可覆盖为字面时间戳（如 `2026-01-01T00:00:00Z`）以使用真实构建时钟。 |
+
 ### 目标机选项
 
 | 变量 | 默认值 | 说明 |
