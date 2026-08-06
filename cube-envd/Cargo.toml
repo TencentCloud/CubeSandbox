@@ -1,0 +1,30 @@
+[package]
+name = "cube-envd"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "CubeSandbox-maintained in-guest data-plane daemon, E2B envd protocol compatible"
+repository = "https://github.com/TencentCloud/CubeSandbox"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7" }
+multer = "3"
+tower-http = { version = "0.5", features = ["catch-panic"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+bytes = "1"
+futures = "0.3"
+tokio-stream = "0.1"
+libc = "0.2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
