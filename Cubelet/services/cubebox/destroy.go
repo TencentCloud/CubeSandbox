@@ -485,10 +485,12 @@ func containerExecWithOutput(ctx context.Context, ci *cubeboxstore.Container, cm
 		return nil, err
 	}
 
-	var stdout, stderr bytes.Buffer
+	var stdout bytes.Buffer
 
 	cioOpts := []cio.Opt{
-		cio.WithStreams(nil, &stdout, &stderr),
+		// A terminal merges stderr into stdout. Do not request a separate stderr
+		// FIFO because containerd does not create one for terminal IO.
+		cio.WithStreams(nil, &stdout, nil),
 		cio.WithTerminal, cio.WithFIFODir("/data/cubelet/fifo"),
 	}
 	ioCreator := cio.NewCreator(cioOpts...)
@@ -516,15 +518,15 @@ func containerExecWithOutput(ctx context.Context, ci *cubeboxstore.Container, cm
 		return nil, err
 	}
 	status := <-statusC
+	process.IO().Wait()
+
 	code, _, err := status.Result()
 	if err != nil {
 		return nil, err
 	}
 	if code != 0 {
-		return nil, fmt.Errorf("exec failed with exit code %d,stderr:%s", code, stderr.String())
+		return nil, fmt.Errorf("exec failed with exit code %d,output:%s", code, stdout.String())
 	}
-
-	process.IO().Wait()
 
 	return stdout.Bytes(), nil
 }

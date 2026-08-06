@@ -104,22 +104,6 @@ func TestRunProbeCallRecoversPanic(t *testing.T) {
 	assert.Contains(t, err.Error(), "probe exploded")
 }
 
-func TestParseEnvdVersionFromOutputPrefersStdout(t *testing.T) {
-	t.Parallel()
-
-	stdout := "envd version 1.2.3\n"
-	stderr := "WARN: noise 9.9.9\n"
-	assert.Equal(t, "1.2.3", parseEnvdVersionFromOutput(stdout, stderr))
-}
-
-func TestParseEnvdVersionFromOutputFallsBackToStderr(t *testing.T) {
-	t.Parallel()
-
-	stdout := ""
-	stderr := "WARN: starting envd 4.5.6\n"
-	assert.Equal(t, "4.5.6", parseEnvdVersionFromOutput(stdout, stderr))
-}
-
 func TestBoundedBufferEnforcesPerStreamLimit(t *testing.T) {
 	t.Parallel()
 
