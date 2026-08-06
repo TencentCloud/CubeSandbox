@@ -4,23 +4,27 @@
 # that sandboxes built FROM this image expose :49983/health out of the box
 # and can be turned into Cube templates without any extra wiring.
 #
-# envd is compiled from e2b-dev/infra@${ENVD_REF} in a builder stage,
-# producing a static linux/amd64 binary that is copied into the final
-# ubuntu:22.04 runtime stage alongside a generic entrypoint.
+# The in-guest data plane is cube-envd (this repo, cube-envd/), installed as
+# /usr/bin/envd. The upstream Go envd (e2b-dev/infra@${ENVD_REF}) is still
+# compiled and shipped as /usr/bin/envd-go so a deployment can roll back at
+# runtime with ENVD_BIN=/usr/bin/envd-go — no image rebuild needed.
+# ENVD_IMPL=go flips the build-time default back to the Go implementation.
 #
-# Build example:
+# Build example (repo root as context — cube-envd/ must be inside it):
 #   docker build \
 #     -f docker/Dockerfile.cube-base \
 #     -t ghcr.io/tencentcloud/cubesandbox-base:2026.16 \
-#     docker/
+#     .
 
 ARG ENVD_REF=2026.16
+ARG ENVD_IMPL=cube
 ARG GO_VERSION=1.25.4
+ARG RUST_VERSION=1.89
 ARG UBUNTU_VERSION=22.04
 ARG TARGETARCH
 
-# -------- Stage 1: compile envd from e2b-dev/infra --------
-FROM golang:${GO_VERSION}-bookworm AS envd-builder
+# -------- Stage 1a: compile upstream Go envd (rollback binary) --------
+FROM golang:${GO_VERSION}-bookworm AS envd-go-builder
 
 ARG ENVD_REF
 ARG ENVD_UPSTREAM_REPO=https://github.com/e2b-dev/infra.git
@@ -49,10 +53,45 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     && /out/envd -version \
     && /out/envd -commit
 
+# -------- Stage 1b: compile cube-envd from this repo --------
+FROM rust:${RUST_VERSION}-bookworm AS envd-cube-builder
+
+ARG TARGETARCH
+# Short commit sha of the repo, passed in by CI / make (git metadata is not
+# part of the build context).
+ARG CUBE_ENVD_COMMIT=unknown
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends musl-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src/cube-envd
+COPY cube-envd/ ./
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    case "${TARGETARCH:-amd64}" in \
+        amd64) rust_target=x86_64-unknown-linux-musl ;; \
+        arm64) rust_target=aarch64-unknown-linux-musl ;; \
+        *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && rustup target add "${rust_target}" \
+    && echo "Building cube-envd (commit=${CUBE_ENVD_COMMIT}) for ${rust_target}" \
+    && CUBE_ENVD_COMMIT="${CUBE_ENVD_COMMIT}" cargo build --release --locked --target "${rust_target}" \
+    && mkdir -p /out \
+    && install -m 0755 "target/${rust_target}/release/cube-envd" /out/envd \
+    && /out/envd -version \
+    && /out/envd -commit
+
+# -------- Stage 1c: select the default implementation --------
+# `envd-${ENVD_IMPL}-builder` resolves to envd-cube-builder (default) or
+# envd-go-builder, so /usr/bin/envd below is whichever was selected.
+FROM envd-${ENVD_IMPL}-builder AS envd-default
+
 # -------- Stage 2: runtime image --------
 FROM ubuntu:${UBUNTU_VERSION}
 
 ARG ENVD_REF
+ARG ENVD_IMPL
 ARG DEBIAN_FRONTEND=noninteractive
 
 ENV ENVD_REF=${ENVD_REF} \
@@ -76,20 +115,26 @@ RUN useradd --create-home --uid 1000 --shell /bin/bash user \
     && echo 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/user \
     && chmod 0440 /etc/sudoers.d/user
 
-COPY --from=envd-builder /out/envd /usr/bin/envd
-COPY cube-entrypoint.sh /usr/local/bin/cube-entrypoint.sh
+# Default data plane at /usr/bin/envd (Cubelet's version probe execs the
+# literal `envd`); Go envd kept alongside for the ENVD_BIN runtime rollback.
+COPY --from=envd-default /out/envd /usr/bin/envd
+COPY --from=envd-go-builder /out/envd /usr/bin/envd-go
+COPY docker/cube-entrypoint.sh /usr/local/bin/cube-entrypoint.sh
 
-RUN chmod +x /usr/bin/envd /usr/local/bin/cube-entrypoint.sh \
+RUN chmod +x /usr/bin/envd /usr/bin/envd-go /usr/local/bin/cube-entrypoint.sh \
     && mkdir -p /var/log \
     && printf '%s\n' "${ENVD_REF}" > /etc/cubesandbox-envd-ref \
+    && printf '%s\n' "${ENVD_IMPL}" > /etc/cubesandbox-envd-impl \
     && /usr/bin/envd -version \
-    && /usr/bin/envd -commit
+    && /usr/bin/envd -commit \
+    && /usr/bin/envd-go -version
 
 LABEL org.opencontainers.image.source="https://github.com/TencentCloud/CubeSandbox" \
       org.opencontainers.image.title="cubesandbox-base" \
-      org.opencontainers.image.description="CubeSandbox base image with envd compiled from e2b-dev/infra@${ENVD_REF}" \
+      org.opencontainers.image.description="CubeSandbox base image with envd (impl: ${ENVD_IMPL}); Go envd from e2b-dev/infra@${ENVD_REF} included as /usr/bin/envd-go for rollback" \
       org.opencontainers.image.licenses="Apache-2.0" \
-      io.cubesandbox.envd.ref="${ENVD_REF}"
+      io.cubesandbox.envd.ref="${ENVD_REF}" \
+      io.cubesandbox.envd.impl="${ENVD_IMPL}"
 
 EXPOSE 49983
 

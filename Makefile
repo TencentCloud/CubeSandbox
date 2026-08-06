@@ -286,6 +286,19 @@ cubeapi: builder-image
 .PHONY: cube-api
 cube-api: cubeapi
 
+.PHONY: cube-envd
+# Short-sha computed at make level: BUILDER_CMD goes through two make
+# expansions (this recipe, then builder-run), which would eat a shell
+# $(command) substitution.
+CUBE_COMMIT_SHORT ?= $(shell git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)
+cube-envd: builder-image
+	@mkdir -p "$(OUTPUT_DIR)"
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/cube-envd && CUBE_ENVD_COMMIT=$(CUBE_COMMIT_SHORT) CC_$(TARGET_ARCH)_unknown_linux_musl=musl-gcc cargo build --release --locked --target $(TARGET_ARCH)-unknown-linux-musl && install -m 0755 /workspace/cube-envd/target/$(TARGET_ARCH)-unknown-linux-musl/release/cube-envd /workspace/_output/bin/cube-envd'
+
+.PHONY: cube-envd-test
+cube-envd-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/cube-envd && cargo test --locked && cargo clippy --release --all-targets --locked -- -D warnings'
+
 .PHONY: cubeops
 cubeops: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
@@ -436,6 +449,8 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@$(MAKE) -C cubecow fmt
 	@printf '  %-8s %s\n' "FMT" "CubeAPI"
 	@$(MAKE) -C CubeAPI fmt
+	@printf '  %-8s %s\n' "FMT" "cube-envd"
+	@$(MAKE) -C cube-envd fmt
 	@printf '  %-8s %s\n' "FMT" "Cubelet"
 	@$(MAKE) -C Cubelet fmt
 	@printf '  %-8s %s\n' "FMT" "cubelog"

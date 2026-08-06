@@ -65,6 +65,12 @@ __pycache__
 !/tests/e2e/sdk_compat/
 !/tests/e2e/sdk_compat/**
 /tests/e2e/sdk_compat/.pytest_cache/
+!/tests/e2e/envd_conformance/
+!/tests/e2e/envd_conformance/**
+/tests/e2e/envd_conformance/fixtures*/
+/tests/e2e/envd_conformance/perf-results.json
+/tests/e2e/envd_conformance/results/
+/tests/e2e/envd_conformance/__pycache__/
 !/tests/e2e/resource_metrics/
 !/tests/e2e/resource_metrics/**
 
@@ -82,3 +88,6 @@ __pycache__
 !/tests/perf/cubebench.sh
 
 web/tsconfig.tsbuildinfo
+
+# Local toolchains/venvs kept inside the repo to avoid polluting the host.
+/.tools/

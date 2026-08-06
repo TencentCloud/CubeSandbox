@@ -16,6 +16,7 @@ on:
       - 'cube-lifecycle-manager/**'
       - 'Cubelet/**'
       - 'agent/**'
+      - 'cube-envd/**'
       - 'hypervisor/**'
       - 'docker/Dockerfile.builder'
       - '.github/workflows/build-builder-image.yml'
@@ -35,6 +36,7 @@ on:
       - 'cube-lifecycle-manager/**'
       - 'Cubelet/**'
       - 'agent/**'
+      - 'cube-envd/**'
       - 'hypervisor/**'
       - 'docker/Dockerfile.builder'
       - '.github/workflows/build-builder-image.yml'
@@ -61,6 +63,7 @@ on:
           - cube-lifecycle-manager
           - cubelet
           - agent
+          - cube-envd
           - hypervisor
 
 concurrency:
@@ -118,6 +121,7 @@ jobs:
             add_component "cube-lifecycle-manager"
             add_component "cubelet"
             add_component "agent"
+            add_component "cube-envd"
             add_component "hypervisor"
           }
 
@@ -137,6 +141,7 @@ jobs:
               cube-lifecycle-manager) add_component "cube-lifecycle-manager" ;;
               cubelet) add_component "cubelet" ;;
               agent) add_component "agent" ;;
+              cube-envd) add_component "cube-envd" ;;
               hypervisor) add_component "hypervisor" ;;
               *)
                 echo "::error::unsupported component input: ${selected_component}"
@@ -205,6 +210,9 @@ jobs:
                 agent/*)
                   add_component "agent"
                   ;;
+                cube-envd/*)
+                  add_component "cube-envd"
+                  ;;
                 hypervisor/*)
                   add_component "hypervisor"
                   ;;
@@ -236,6 +244,7 @@ jobs:
                     elif . == "cube-lifecycle-manager" then "Cube Lifecycle Manager"
                     elif . == "cubelet" then "Cubelet"
                     elif . == "agent" then "Agent"
+                    elif . == "cube-envd" then "cube-envd"
                     elif . == "hypervisor" then "Hypervisor"
                     else error("unsupported component: " + .)
                     end
@@ -253,6 +262,7 @@ jobs:
                     elif . == "cube-lifecycle-manager" then "cube-lifecycle-manager-test"
                     elif . == "cubelet" then "cubelet-pkg-test"
                     elif . == "agent" then "agent-test"
+                    elif . == "cube-envd" then "cube-envd-test"
                     elif . == "hypervisor" then "hypervisor-test"
                     else error("unsupported component: " + .)
                     end

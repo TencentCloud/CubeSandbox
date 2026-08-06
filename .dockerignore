@@ -2,3 +2,7 @@
 !.dockerignore
 !docker/
 !docker/Dockerfile.builder
+# cube-envd sources are a build input of docker/Dockerfile.cube-base
+# (repo-root context); its build artifacts stay excluded.
+!cube-envd/
+cube-envd/target/
