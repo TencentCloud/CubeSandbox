@@ -172,28 +172,38 @@ func (c *Config) DaoConfig() dao.Config {
 
 	// Parse DatabaseURL and select driver from the scheme.
 	// Supported schemes: mysql://, postgres:// (or postgresql://).
-	driver, user, pass, host, port, dbname := parseDatabaseURL(c.DatabaseURL)
+	driver, user, pass, host, port, dbname, extra := parseDatabaseURL(c.DatabaseURL)
 	return dao.Config{
 		Driver:       driver,
 		User:         user,
 		Pwd:          pass,
 		Addr:         fmt.Sprintf("%s:%d", host, port),
 		DBName:       dbname,
+		Extra:        extra,
 		MaxIdleConns: 10,
 		MaxOpenConns: 100,
 	}
 }
 
-// parseDatabaseURL extracts (driver, user, password, host, port, dbname) from
-// a database URL. The driver is inferred from the scheme:
+// parseDatabaseURL extracts (driver, user, password, host, port, dbname, extra)
+// from a database URL. The driver is inferred from the scheme:
 //   - mysql://    → "mysql"
 //   - postgres:// or postgresql:// → "postgres"
+//
+// The URL query string is forwarded verbatim into extra so engine-specific
+// knobs travel with the connection. This is what carries sslmode (and the
+// postgres statement_timeout / idle_in_transaction_session_timeout options)
+// from the installer-written DATABASE_URL into dao.Config.Extra, which the
+// postgres driver's buildDSN reads. Without this, a TLS-enforcing server that
+// CubeMaster can reach (it reads extra.sslmode from conf.yaml) would reject
+// CubeOps, which would silently connect with sslmode=disable. extra is nil
+// when the URL has no query string; the mysql driver ignores Extra entirely.
 //
 // If parsing fails for any component, the caller's individual fields are NOT
 // consulted — the error surfaces as an empty component that the DB driver
 // will reject with a clear "access denied" or "unknown database" message,
 // which is better than silently connecting to the wrong database.
-func parseDatabaseURL(rawURL string) (driver, user, pass, host string, port int, dbname string) {
+func parseDatabaseURL(rawURL string) (driver, user, pass, host string, port int, dbname string, extra map[string]string) {
 	port = 3306 // default (MySQL)
 
 	u, err := url.Parse(rawURL)
@@ -230,6 +240,20 @@ func parseDatabaseURL(rawURL string) (driver, user, pass, host string, port int,
 
 	// Database name is the path without leading "/".
 	dbname = strings.TrimPrefix(u.Path, "/")
+
+	// Forward query params (sslmode, statement_timeout, ...) into extra so the
+	// driver's buildDSN can honour them. First value wins on repeated keys.
+	if q := u.Query(); len(q) > 0 {
+		extra = make(map[string]string, len(q))
+		for k, vs := range q {
+			if len(vs) > 0 && vs[0] != "" {
+				extra[k] = vs[0]
+			}
+		}
+		if len(extra) == 0 {
+			extra = nil
+		}
+	}
 
 	return
 }

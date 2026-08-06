@@ -115,6 +115,60 @@ func TestDaoConfig_DefaultPort(t *testing.T) {
 	}
 }
 
+// TestDaoConfig_PostgresSSLModeForwarded proves the sslmode (and other query
+// params) from a postgres:// DATABASE_URL reach dao.Config.Extra, which the
+// postgres driver reads to build the DSN. Without forwarding, CubeOps would
+// silently connect with sslmode=disable and fail against a TLS-enforcing
+// server — the exact gap raised in PR review (CubeMaster reads extra.sslmode
+// from conf.yaml and succeeds, so only CubeOps breaks).
+func TestDaoConfig_PostgresSSLModeForwarded(t *testing.T) {
+	cfg := &Config{
+		DatabaseURL: "postgres://alice:s3cret@10.0.0.5:5432/mydb?sslmode=require",
+	}
+
+	dc := cfg.DaoConfig()
+
+	if dc.Driver != "postgres" {
+		t.Errorf("Driver = %q, want postgres", dc.Driver)
+	}
+	if got := dc.Extra["sslmode"]; got != "require" {
+		t.Errorf("Extra[sslmode] = %q, want require (forwarded from URL query)", got)
+	}
+}
+
+// TestDaoConfig_PostgresMultipleQueryParamsForwarded proves that all query
+// params (not just sslmode) are forwarded, so the postgres driver's
+// statement_timeout / idle_in_transaction_session_timeout overrides also work.
+func TestDaoConfig_PostgresMultipleQueryParamsForwarded(t *testing.T) {
+	cfg := &Config{
+		DatabaseURL: "postgres://alice:s3cret@10.0.0.5:5432/mydb?sslmode=verify-full&statement_timeout=3000",
+	}
+
+	dc := cfg.DaoConfig()
+
+	if got := dc.Extra["sslmode"]; got != "verify-full" {
+		t.Errorf("Extra[sslmode] = %q, want verify-full", got)
+	}
+	if got := dc.Extra["statement_timeout"]; got != "3000" {
+		t.Errorf("Extra[statement_timeout] = %q, want 3000", got)
+	}
+}
+
+// TestDaoConfig_NoQueryParamsYieldsNilExtra proves that a URL without a query
+// string produces a nil Extra (not an empty non-nil map), so mysql and query-
+// less postgres configs behave exactly as before this change.
+func TestDaoConfig_NoQueryParamsYieldsNilExtra(t *testing.T) {
+	cfg := &Config{
+		DatabaseURL: "mysql://alice:s3cret@10.0.0.5:3307/mydb",
+	}
+
+	dc := cfg.DaoConfig()
+
+	if dc.Extra != nil {
+		t.Errorf("Extra = %v, want nil (no query string in URL)", dc.Extra)
+	}
+}
+
 // TestDaoConfig_FullLoadToDaoConfig proves the end-to-end data flow that R06
 // is about: Load() accepts a YAML with only database_url, and DaoConfig()
 // correctly translates it — no field is lost between config loading and the
