@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -49,6 +50,29 @@ func TestInit(t *testing.T) {
 	gotCpu, err := resource.ParseQuantity(cubeboxConf.CpuLowerWaterMark)
 	assert.NoError(t, err)
 	assert.True(t, expectCpu.Equal(gotCpu))
+}
+
+func TestNestedLogSettingsUseSnakeCaseOnRoundTrip(t *testing.T) {
+	var cfg Config
+	err := yaml.Unmarshal([]byte("log:\n  file_size: 100\n  file_num: 10\n  enable_log_metric: true\n"), &cfg)
+	assert.NoError(t, err)
+	if !assert.NotNil(t, cfg.Log) {
+		return
+	}
+
+	assert.Equal(t, 100, cfg.Log.FileSize)
+	assert.Equal(t, 10, cfg.Log.FileNum)
+	assert.True(t, cfg.Log.EnableLogMetric)
+
+	encoded, err := yaml.Marshal(&cfg)
+	assert.NoError(t, err)
+	text := string(encoded)
+	assert.Contains(t, text, "file_size: 100")
+	assert.Contains(t, text, "file_num: 10")
+	assert.Contains(t, text, "enable_log_metric: true")
+	assert.NotContains(t, text, "fileSize:")
+	assert.NotContains(t, text, "fileNum:")
+	assert.NotContains(t, text, "enableLogMetric:")
 }
 
 func TestGetEffectiveNodeMaxMemReservedInMBFallsBackForSmallNodes(t *testing.T) {
