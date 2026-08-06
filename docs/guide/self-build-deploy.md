@@ -370,10 +370,10 @@ CUBE_EXTERNAL_DB_NAME=cube_mvp
 CUBE_EXTERNAL_DB_SSLMODE=require
 ```
 
-The resulting `conf.yaml` (`ossdb_config` and `instance_db_config` are identical):
+The resulting `instance_db_config` in `conf.yaml`:
 
 ```yaml
-ossdb_config:
+instance_db_config:
   driver: "postgres"
   addr: "10.0.0.20:5432"
   user: "cube"
