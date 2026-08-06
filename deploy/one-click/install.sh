@@ -132,19 +132,42 @@ init_external_dep_defaults() {
 }
 
 # CubeMaster talks to exactly one metadata engine. Validate that the operator
-# has not set conflicting external-database variables. The legacy
-# CUBE_EXTERNAL_MYSQL_HOST is mapped to CUBE_EXTERNAL_DB_* by
-# init_external_dep_defaults, so by the time this runs the canonical variable
-# is CUBE_EXTERNAL_DB_HOST. The check below catches the case where an operator
-# explicitly sets both CUBE_EXTERNAL_MYSQL_HOST and CUBE_EXTERNAL_DB_HOST with
-# a non-mysql driver — an ambiguous configuration that should fail fast.
+# has not set conflicting external-database variables, and that the driver is
+# one this installer knows how to configure. Runs after
+# init_external_dep_defaults, which has already mapped the legacy
+# CUBE_EXTERNAL_MYSQL_* aliases onto the canonical CUBE_EXTERNAL_DB_* form and
+# defaulted the driver to "mysql".
 validate_external_db_exclusive() {
-  # Detect legacy MYSQL_HOST used alongside new DB_HOST for a different engine.
-  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST:-}" && -n "${CUBE_EXTERNAL_DB_HOST:-}" \
-        && "${CUBE_EXTERNAL_DB_DRIVER:-}" != "mysql" \
-        && "${CUBE_EXTERNAL_DB_HOST}" != "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
-    die "CUBE_EXTERNAL_MYSQL_HOST (${CUBE_EXTERNAL_MYSQL_HOST}) and CUBE_EXTERNAL_DB_HOST (${CUBE_EXTERNAL_DB_HOST}, driver=${CUBE_EXTERNAL_DB_DRIVER}) are both set with different targets.
-  Configure only one external database engine (unset CUBE_EXTERNAL_MYSQL_HOST to use CUBE_EXTERNAL_DB_* directly)."
+  # Restrict the driver to engines this installer can actually configure. An
+  # unknown value (e.g. "postgresql" instead of "postgres") would otherwise be
+  # only log-warned in the connectivity preflight and then written verbatim
+  # into conf.yaml / DATABASE_URL, surfacing as a confusing connection failure
+  # at CubeMaster/CubeOps startup. Fail fast here instead. After this guard the
+  # driver is guaranteed to be a safe literal (mysql|postgres), so the later
+  # `*)` branches in the preflight and DATABASE_URL builders are unreachable
+  # defensive fallbacks.
+  if [[ -n "${CUBE_EXTERNAL_DB_HOST:-}" ]]; then
+    case "${CUBE_EXTERNAL_DB_DRIVER:-mysql}" in
+      mysql | postgres) ;;
+      *)
+        die "unsupported CUBE_EXTERNAL_DB_DRIVER '${CUBE_EXTERNAL_DB_DRIVER}'.
+  Supported engines: mysql, postgres."
+        ;;
+    esac
+  fi
+
+  # Reject the legacy MySQL alias combined with a non-mysql driver. The legacy
+  # CUBE_EXTERNAL_MYSQL_HOST var is, by definition, a MySQL endpoint (and it
+  # supplies MySQL-flavoured defaults, notably port 3306). Pairing it with
+  # CUBE_EXTERNAL_DB_DRIVER=postgres would point the postgres driver at a MySQL
+  # host:port and only fail later with an opaque connection error. Note we test
+  # the driver against the *legacy* var directly, not DB_HOST != MYSQL_HOST:
+  # init_external_dep_defaults has already copied MYSQL_HOST into DB_HOST, so
+  # that comparison is always false and can never fire.
+  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST:-}" \
+        && "${CUBE_EXTERNAL_DB_DRIVER:-mysql}" != "mysql" ]]; then
+    die "CUBE_EXTERNAL_MYSQL_HOST (${CUBE_EXTERNAL_MYSQL_HOST}) is a MySQL endpoint but CUBE_EXTERNAL_DB_DRIVER=${CUBE_EXTERNAL_DB_DRIVER}.
+  Use CUBE_EXTERNAL_DB_HOST (and the other CUBE_EXTERNAL_DB_* vars) for a ${CUBE_EXTERNAL_DB_DRIVER} server, and unset the legacy CUBE_EXTERNAL_MYSQL_* vars."
   fi
 }
 
@@ -537,12 +560,16 @@ patch_cubemaster_external_deps() {
   if [[ -n "${CUBE_EXTERNAL_DB_HOST}" ]]; then
     local db_driver="${CUBE_EXTERNAL_DB_DRIVER:-mysql}"
     log "patching conf.yaml for external database: driver=${db_driver} ${CUBE_EXTERNAL_DB_HOST}:${CUBE_EXTERNAL_DB_PORT}/${CUBE_EXTERNAL_DB_NAME}"
-    local db_addr_esc db_user_esc db_pwd_esc db_name_esc db_sslmode_esc
+    local db_addr_esc db_user_esc db_pwd_esc db_name_esc db_sslmode_esc db_driver_esc
     db_addr_esc="$(escape_sed "${CUBE_EXTERNAL_DB_HOST}:${CUBE_EXTERNAL_DB_PORT}")"
     db_user_esc="$(escape_sed "${CUBE_EXTERNAL_DB_USER}")"
     db_pwd_esc="$(escape_sed "${CUBE_EXTERNAL_DB_PASSWORD}")"
     db_name_esc="$(escape_sed "${CUBE_EXTERNAL_DB_NAME}")"
     db_sslmode_esc="$(escape_sed "${CUBE_EXTERNAL_DB_SSLMODE}")"
+    # driver is validated against a mysql|postgres whitelist in
+    # validate_external_db_driver, but escape it too so it is handled exactly
+    # like every other substituted value (no raw interpolation into sed).
+    db_driver_esc="$(escape_sed "${db_driver}")"
 
     # A conf.yaml from an older package (or hand-edited) may predate the
     # driver:/extra.sslmode keys. Ensure they exist before substituting so a
@@ -597,7 +624,7 @@ patch_cubemaster_external_deps() {
       -e "s|user: \".*\"|user: \"${db_user_esc}\"|" \
       -e "s|pwd: \".*\"|pwd: \"${db_pwd_esc}\"|" \
       -e "s|db_name: \".*\"|db_name: \"${db_name_esc}\"|" \
-      -e "s|^  driver: \".*\"|  driver: \"${db_driver}\"|" \
+      -e "s|^  driver: \".*\"|  driver: \"${db_driver_esc}\"|" \
       -e "s|^    sslmode: \".*\"|    sslmode: \"${db_sslmode_esc}\"|" \
       "${cfg}"
   fi
@@ -736,7 +763,9 @@ EOF
         fi
         ;;
       *)
-        log "WARNING: unknown database driver '${db_driver}'; skipping connectivity preflight"
+        # Unreachable: validate_external_db_exclusive already die()d on any
+        # driver outside mysql|postgres. Kept as a fail-fast backstop.
+        die "unsupported database driver '${db_driver}' (expected mysql|postgres)"
         ;;
     esac
   fi
@@ -1965,9 +1994,15 @@ if [[ -n "${CUBE_EXTERNAL_DB_HOST}" ]]; then
       upsert_env_kv "${RUNTIME_ENV_FILE}" "DATABASE_URL" \
         "postgres://${database_url_user}:${database_url_pass}@${database_url_host}:${database_url_port}/${database_url_db}?sslmode=$(urlencode "${CUBE_EXTERNAL_DB_SSLMODE}")"
       ;;
-    *)
+    mysql)
       upsert_env_kv "${RUNTIME_ENV_FILE}" "DATABASE_URL" \
         "mysql://${database_url_user}:${database_url_pass}@${database_url_host}:${database_url_port}/${database_url_db}"
+      ;;
+    *)
+      # Unreachable: validate_external_db_exclusive restricts the driver to
+      # mysql|postgres. Kept so a future driver added without updating this
+      # dispatch fails loudly instead of silently emitting a mysql:// URL.
+      die "unsupported database driver '${local_db_driver}' (expected mysql|postgres)"
       ;;
   esac
 else
