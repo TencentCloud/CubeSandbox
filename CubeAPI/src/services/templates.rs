@@ -87,18 +87,6 @@ impl TemplateService {
             }
         });
 
-        // Client-side validation mirrors CubeMaster's `validateTemplateAlias`
-        // (the single source of truth) so a bad alias surfaces as 400 without
-        // a round-trip — keep the two in sync if the rule changes.
-        if let Some(value) = alias {
-            if !is_valid_alias(value) {
-                return Err(AppError::BadRequest(
-                    "alias must match ^[a-z0-9][a-z0-9-]{0,63}$ and not start with tpl-/snap-"
-                        .to_string(),
-                ));
-            }
-        }
-
         let resp = self
             .cubemaster
             .set_template_alias(template_id, alias)
@@ -1150,41 +1138,5 @@ mod tests {
         // None maps to an empty string so CubeMaster's clear path is
         // exercised (display_name = '' → alias_key = NULL).
         assert_eq!(body["alias"], "");
-    }
-
-    #[tokio::test]
-    async fn set_template_alias_rejects_invalid_alias_client_side() {
-        // The mock server is never reached for these cases — client-side
-        // validation returns BadRequest before any HTTP call. We bind to a
-        // closed port (127.0.0.1:9) so that if a regression forwards, the
-        // connection fails fast rather than hanging.
-        let service = TemplateService::new(
-            CubeMasterClient::new("http://127.0.0.1:9", reqwest::Client::new()),
-            "cubebox".to_string(),
-        );
-
-        // Uppercase fails the ^[a-z0-9][a-z0-9-]{0,63}$ regex.
-        let err = service
-            .set_template_alias("tpl-1", Some("UPPER"))
-            .await
-            .expect_err("uppercase alias must be rejected");
-        assert!(matches!(err, AppError::BadRequest(_)));
-
-        // `tpl-` prefix is rejected to avoid collisions with canonical ids.
-        let err = service
-            .set_template_alias("tpl-1", Some("tpl-abc"))
-            .await
-            .expect_err("tpl- prefix alias must be rejected");
-        assert!(matches!(err, AppError::BadRequest(_)));
-
-        // Leading dash fails the first-char regex.
-        let err = service
-            .set_template_alias("tpl-1", Some("-leading-dash"))
-            .await
-            .expect_err("leading dash alias must be rejected");
-        assert!(matches!(err, AppError::BadRequest(_)));
-
-        // Whitespace-only is normalized to None (clear) and is NOT rejected
-        // — it's covered by set_template_alias_clear_passes_empty_string.
     }
 }

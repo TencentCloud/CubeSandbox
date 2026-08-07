@@ -806,7 +806,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/TemplateDetail'
         '400':
-          description: Invalid alias
+          description: Invalid alias, or alias requested on a snapshot (not applicable)
           content:
             application/json:
               schema:
@@ -818,7 +818,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
         '409':
-          description: Concurrent alias claim conflict; retry may succeed
+          description: Template is not READY, or concurrent alias claim conflict; retry may succeed
           content:
             application/json:
               schema:

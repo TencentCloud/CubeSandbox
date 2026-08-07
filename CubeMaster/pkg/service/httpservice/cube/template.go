@@ -102,6 +102,7 @@ type setAliasRequest struct {
 //   - ErrAliasNotApplicableToSnapshot → 400 MasterParamsError (a snapshot
 //     exists but has no alias slot — distinct from a genuine 404)
 //   - isDuplicateAliasError → 130409 Conflict (so CubeAPI maps to HTTP 409)
+//   - ErrTemplateNotReady → 130409 Conflict (retry after the template is READY)
 //   - other → 500 MasterInternalError
 //
 // templateResponseFromInfo builds the success templateResponse shared by
@@ -184,6 +185,8 @@ func setTemplateAlias(r *http.Request, rt *CubeLog.RequestTrace, rawTemplateID s
 			code = int(errorcode.ErrorCode_MasterParamsError)
 		case errors.Is(err, templatecenter.ErrInvalidAlias):
 			code = int(errorcode.ErrorCode_MasterParamsError)
+		case errors.Is(err, templatecenter.ErrTemplateNotReady):
+			code = int(errorcode.ErrorCode_Conflict)
 		case templatecenter.IsDuplicateAliasError(err):
 			code = int(errorcode.ErrorCode_Conflict)
 		case errors.Is(err, templatecenter.ErrTemplateStoreNotInitialized):

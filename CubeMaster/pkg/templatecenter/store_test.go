@@ -753,6 +753,25 @@ func TestSetTemplateAlias_RejectsDeletingTemplate(t *testing.T) {
 	assert.ErrorIs(t, err, ErrTemplateNotFound)
 }
 
+// TestSetTemplateAlias_RejectsNotReady verifies that a template not in READY
+// status is rejected with ErrTemplateNotReady, so an alias never points at a
+// building/failed template (and the create-time claim can't overwrite an
+// operator change). DELETING is covered separately (→ ErrTemplateNotFound).
+func TestSetTemplateAlias_RejectsNotReady(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(GetDefinition, func(ctx context.Context, templateID string) (*models.TemplateDefinition, error) {
+		return &models.TemplateDefinition{
+			TemplateID: templateID,
+			Kind:       TemplateKindTemplate,
+			Status:     StatusPending,
+		}, nil
+	})
+
+	err := SetTemplateAlias(context.Background(), "tpl-building-1", "my-alias")
+	assert.ErrorIs(t, err, ErrTemplateNotReady)
+}
+
 // TestSetTemplateAlias_ValidatesAlias verifies that invalid alias strings
 // are rejected before any DB access, and that the rejection wraps
 // ErrInvalidAlias so the HTTP handler can map it to 400 (vs. raw DB errors

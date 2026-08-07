@@ -695,6 +695,9 @@ var TemplateSetAliasCommand = cli.Command{
 		// --alias value (which may itself be "" to clear, per the shared
 		// contract).
 		alias := c.String("alias")
+		if !c.Bool("clear") && !c.IsSet("alias") {
+			return errors.New("must specify --alias <alias> or --clear")
+		}
 		if c.Bool("clear") {
 			alias = ""
 		}

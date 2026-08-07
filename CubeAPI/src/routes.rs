@@ -417,22 +417,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn put_template_alias_rejects_invalid_alias_with_400() {
-        let server = test_server().await;
-
-        // CubeMaster is unreachable (pointing at 127.0.0.1:9), but the
-        // client-side regex check must reject the request before any forward.
-        let resp = server
-            .put("/templates/tpl-1/alias")
-            .json(&serde_json::json!({ "alias": "UPPER" }))
-            .await;
-
-        assert_eq!(resp.status_code(), StatusCode::BAD_REQUEST);
-        let error: crate::models::ApiError = resp.json();
-        assert_eq!(error.code, 400);
-    }
-
-    #[tokio::test]
     async fn removes_cluster_routes_from_root_surface() {
         let server = test_server().await;
         server

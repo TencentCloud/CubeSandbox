@@ -81,6 +81,7 @@ var (
 	ErrTemplateAttemptInProgress    = errors.New("template attempt is already in progress")
 	ErrAliasNotApplicableToSnapshot = errors.New("alias is not applicable to snapshot")
 	ErrInvalidAlias                 = errors.New("alias is invalid")
+	ErrTemplateNotReady             = errors.New("template is not ready")
 )
 
 type localStore struct {
@@ -1013,9 +1014,26 @@ func claimTemplateAlias(ctx context.Context, templateID, alias string) error {
 				Update("display_name", "").Error; err != nil {
 				return fmt.Errorf("release stale alias %q fail: %w", alias, err)
 			}
-			return tx.Table(constants.TemplateDefinitionTableName).
+			if err := tx.Table(constants.TemplateDefinitionTableName).
 				Where("template_id = ?", templateID).
-				Update("display_name", alias).Error
+				Update("display_name", alias).Error; err != nil {
+				return fmt.Errorf("claim alias %q for template %s fail: %w", alias, templateID, err)
+			}
+			// Confirm the target still exists and now holds the alias. If it was
+			// hard-deleted between GetDefinition and this transaction the claim
+			// UPDATE matched 0 rows; returning here rolls back the release above so
+			// the original holder keeps its alias. A SELECT (not RowsAffected)
+			// avoids MySQL's rows-changed conflation with idempotent re-claims.
+			var claimed int64
+			if err := tx.Table(constants.TemplateDefinitionTableName).
+				Where("template_id = ? AND alias_key = ?", templateID, alias).
+				Count(&claimed).Error; err != nil {
+				return fmt.Errorf("confirm alias claim for template %s fail: %w", templateID, err)
+			}
+			if claimed == 0 {
+				return ErrTemplateNotFound
+			}
+			return nil
 		})
 	}
 	if err := claim(); err != nil {
@@ -1042,11 +1060,18 @@ func isDuplicateAliasError(err error) bool {
 	return strings.Contains(s, "23505") || strings.Contains(s, "unique_constraint")
 }
 
-// isDeadlockError reports InnoDB deadlock (1213) and lock-wait-timeout (1205) —
-// the transient errors worth one retry in the alias release+claim transaction.
+// isDeadlockError reports transient lock errors worth one retry in the alias
+// release+claim transaction: InnoDB deadlock (1213) / lock-wait-timeout (1205),
+// and the PostgreSQL equivalents 40P01 (deadlock_detected) / 55P03
+// (lock_not_available). PG codes are string-matched like isDuplicateAliasError
+// because pgx may not be imported in all build configurations.
 func isDeadlockError(err error) bool {
 	var mysqlErr *mysql.MySQLError
-	return errors.As(err, &mysqlErr) && (mysqlErr.Number == 1205 || mysqlErr.Number == 1213)
+	if errors.As(err, &mysqlErr) && (mysqlErr.Number == 1205 || mysqlErr.Number == 1213) {
+		return true
+	}
+	s := err.Error()
+	return strings.Contains(s, "40P01") || strings.Contains(s, "55P03")
 }
 
 // IsDuplicateAliasError is the exported wrapper around isDuplicateAliasError
@@ -1088,13 +1113,14 @@ func claimAliasForReadyTemplate(ctx context.Context, templateID, alias string) (
 //	                    holder inside the same transaction, then UPDATE on the
 //	                    target template).
 //
-// The target must be a non-deleting template. Snapshots are rejected because
-// their display_name is an informational label, not a unique alias (their
-// alias_key is always NULL per the STORED generated column). DELETING templates
-// return ErrTemplateNotFound, matching GetTemplateByAlias' behavior (store.go:921).
-//
-// Unlike claimAliasForReadyTemplate, this does NOT require the template to be
-// READY — it is an explicit operator action; see design §3.5.
+// The target must be a READY template: non-READY is rejected with
+// ErrTemplateNotReady, so an alias never points at a building/failed template
+// and the create-time claim (claimAliasForReadyTemplate) can't silently
+// overwrite an operator change once the build finishes. Snapshots are rejected
+// (ErrAliasNotApplicableToSnapshot) because their display_name is an
+// informational label, not a unique alias (alias_key is always NULL per the
+// STORED generated column). DELETING templates return ErrTemplateNotFound,
+// matching GetTemplateByAlias' behavior (store.go:921).
 func SetTemplateAlias(ctx context.Context, templateID, alias string) error {
 	if strings.TrimSpace(templateID) == "" {
 		return ErrTemplateIDRequired
@@ -1114,12 +1140,7 @@ func SetTemplateAlias(ctx context.Context, templateID, alias string) error {
 		return ErrTemplateNotFound
 	}
 	if def.Status != StatusReady {
-		// Explicit operator action: aliases may target non-READY templates by
-		// design (see design §3.5). Caveat: for a still-building template the
-		// create-time claimAliasForReadyTemplate re-claims the build's original
-		// alias once it reaches a non-FAILED status, which can silently
-		// overwrite this operator-set alias.
-		log.G(ctx).Warnf("SetTemplateAlias: template %s status is %q (not READY); alias %q points at a non-ready template (may be overwritten on build completion)", templateID, def.Status, alias)
+		return ErrTemplateNotReady
 	}
 	if alias == "" {
 		// Clear path. updateDefinitionFields (snapshot_ops.go:1031) writes
@@ -1127,10 +1148,10 @@ func SetTemplateAlias(ctx context.Context, templateID, alias string) error {
 		// polluting any caller-held state.
 		return updateDefinitionFields(ctx, templateID, map[string]any{"display_name": ""})
 	}
-	// Claim path — claimTemplateAlias does the release+claim in one
-	// transaction. A target hard-deleted between GetDefinition and the UPDATE
-	// is caught by the handler's follow-up getTemplateInfoFn (→ 404), and a
-	// deleted row can't hold the alias, so none is left dangling.
+	// Claim path — claimTemplateAlias does release+claim+confirm in one
+	// transaction: if the target is hard-deleted between GetDefinition and the
+	// claim, the confirmation query fails the transaction (rolling back the
+	// release) → ErrTemplateNotFound → handler maps to 404.
 	return claimTemplateAlias(ctx, templateID, alias)
 }
 
