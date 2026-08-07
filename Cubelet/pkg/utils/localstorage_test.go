@@ -270,7 +270,10 @@ func TestSetBs_SingleDb(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		value := []byte(strconv.FormatInt(int64(i), 10))
 		key := strconv.FormatInt(rand.Int63(), 10)
-		err = db.SetBs(key, value, b1, b2s[rand.Int()%len(b2s)])
+		// Iterate deterministically over b2s so every sub-bucket is created,
+		// otherwise the len(allBs) assertion below is flaky (a random draw may
+		// never select one of the sub-buckets across only 10 iterations).
+		err = db.SetBs(key, value, b1, b2s[i%len(b2s)])
 		if err != nil {
 			assert.Nil(t, err)
 			t.FailNow()
@@ -281,7 +284,7 @@ func TestSetBs_SingleDb(t *testing.T) {
 		assert.Nil(t, err)
 		t.FailNow()
 	}
-	assert.Equal(t, 3, len(allBs))
+	assert.Equal(t, len(b2s), len(allBs))
 	for b, _ := range allBs {
 		all, err := db.ReadAllBs(b1, []byte(b))
 		if err != nil {
