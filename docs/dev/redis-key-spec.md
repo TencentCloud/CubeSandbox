@@ -64,6 +64,7 @@ The following are the standard keys currently registered in the system (`v1`). N
 | Sandbox lifecycle registry | `cube:v1:shared:sandbox:lifecycle:meta` | Hash | shared | CubeMaster | cube-lifecycle-manager | none (lifecycle via `HDEL`) |
 | Sandbox lifecycle events | `cube:v1:shared:sandbox:lifecycle:events` | Stream | shared | CubeMaster | cube-lifecycle-manager | MAXLEN ~ 100000 |
 | Sandbox lifecycle state | `cube:v1:shared:sandbox:lifecycle:state:{sandboxID}` | String | shared | cube-lifecycle-manager | cube-lifecycle-manager | SET TTL (default 60s) |
+| Cubemaster control events | `cube:v1:shared:master:control:events` | Stream | shared | CubeMaster | CubeMaster (all replicas) | MAXLEN ~ 10000 |
 | CubeProxy replica registry | `cube:v1:shared:cube_proxy:registry` | Hash | shared | CubeProxy | cube-lifecycle-manager | none (evicted on heartbeat expiry via `HDEL`) |
 | CubeProxy replica heartbeat | `cube:v1:shared:cube_proxy:heartbeat` | Sorted Set | shared | CubeProxy | cube-lifecycle-manager | none (`ZREMRANGEBYSCORE` on expiry, default 15s) |
 
@@ -121,6 +122,19 @@ See the `redis` tags on `InstanceInfoMap` in [`CubeMaster/pkg/base/types/redis.g
 | `paused` | Sandbox is paused |
 | `resuming` | Resume transition in progress |
 
+**`master:control:events`** (CubeMaster control-plane fan-out)
+
+Stream fields:
+
+| field | Meaning |
+| --- | --- |
+| `op` | `node.isolate` \| `node.unisolate` (extensible) |
+| `node_id` | Target compute node ID |
+| `payload` | JSON `IsolationPayload` (`scheduling_disabled`, `updated_at_unix_ms`, `origin`) |
+| `ts` | Event unix milliseconds |
+
+MySQL remains the source of truth for node labels / cordon. The stream accelerates in-memory convergence across Cubemaster replicas; each replica independently `XREAD`s (broadcast). See [`CubeMaster/pkg/controlevents`](https://github.com/tencentcloud/CubeSandbox/blob/master/CubeMaster/pkg/controlevents).
+
 ## 6. TTL policy
 
 | Key type | Policy | Notes |
@@ -132,6 +146,7 @@ See the `redis` tags on `InstanceInfoMap` in [`CubeMaster/pkg/base/types/redis.g
 | `sandbox:lifecycle:meta` | No TTL | Written on sandbox create, `HDEL` on destroy |
 | `sandbox:lifecycle:events` | MAXLEN ~ | Stream trimmed on each `XADD` (default ~100000) |
 | `sandbox:lifecycle:state` | SET TTL | `EX` on each write (cube-lifecycle-manager default 60s); released on rollback or sandbox delete |
+| `master:control:events` | MAXLEN ~ | Stream trimmed on each `XADD` (default ~10000); Cubemaster replicas independently `XREAD` for broadcast |
 | `cube_proxy:registry` | No TTL (heartbeat-derived) | Written by each CubeProxy replica on startup; entries are `HDEL`'d by cube-lifecycle-manager once the corresponding heartbeat expires |
 | `cube_proxy:heartbeat` | Sorted Set expiry | Score = last heartbeat unix ms; entries older than `heartbeat_ttl` (default 15s) are removed via `ZREMRANGEBYSCORE` |
 | Cache keys (future) | TTL required | Must be declared on write and registered in this document |

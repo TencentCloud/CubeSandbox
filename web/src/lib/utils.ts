@@ -31,6 +31,30 @@ export function short(id: string, head = 6, tail = 4): string {
   return `${id.slice(0, head)}…${id.slice(-tail)}`;
 }
 
+export function formatCondition(type: string, status: string): string {
+  if (type === 'Ready') {
+    return status === 'True' ? 'Ready' : 'Not Ready';
+  }
+  if (type.endsWith('Pressure')) {
+    const base = type.replace('Pressure', '');
+    return status === 'True' ? `${base} Pressure` : `${base} OK`;
+  }
+  if (type === 'NetworkUnavailable') {
+    return status === 'True' ? 'Network Unavailable' : 'Network OK';
+  }
+  return `${type}: ${status}`;
+}
+
+export function getConditionTone(type: string, status: string): 'ok' | 'warn' | 'err' {
+  if (type === 'Ready') {
+    return status === 'True' ? 'ok' : 'err';
+  }
+  if (type.endsWith('Pressure') || type === 'NetworkUnavailable') {
+    return status === 'False' ? 'ok' : 'warn';
+  }
+  return status === 'True' ? 'ok' : 'warn';
+}
+
 /**
  * Copy text to clipboard with execCommand fallback for HTTP (non-HTTPS) environments.
  * On success, dispatches a 'cube:toast' custom event so ToastProvider can show a notification.

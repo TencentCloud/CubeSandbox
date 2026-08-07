@@ -77,6 +77,13 @@ func SandboxLifecycleState(sandboxID string) string {
 	return join(Prefix, Version, ScopeShared, "sandbox", "lifecycle", "state", sandboxID)
 }
 
+// MasterControlEvents is the append-only control-plane event stream that
+// CubeMaster replicas use to fan out mutations that must converge in every
+// replica's in-memory view (e.g. node isolation / cordon).
+func MasterControlEvents() string {
+	return join(Prefix, Version, ScopeShared, "master", "control", "events")
+}
+
 // ---- legacy key builders (read fallback / delete cleanup only) ----
 
 // LegacyNodeMetric is the bare node ID used before namespacing.

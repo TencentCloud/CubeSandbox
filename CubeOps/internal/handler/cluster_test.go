@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/cubemaster"
 )
 
 func newClusterRouter(t *testing.T, cm CubeMasterClient) *gin.Engine {
@@ -88,7 +89,8 @@ func TestCluster_ListNodes_Success(t *testing.T) {
 		getNodes: func(_ context.Context) (json.RawMessage, error) {
 			return raw(`{"data": [
 				{"node_id": "n-1", "host_ip": "10.0.0.1", "instance_type": "cubebox",
-				 "healthy": true, "capacity": {"milli_cpu": 4000, "memory_mb": 8192},
+				 "healthy": true, "scheduling_disabled": true,
+				 "capacity": {"milli_cpu": 4000, "memory_mb": 8192},
 				 "allocatable": {"milli_cpu": 4000, "memory_mb": 8192},
 				 "max_mvm_num": 10, "quota_cpu": 4000, "quota_mem_mb": 8192,
 				 "create_concurrent_num": 5, "conditions": [], "local_templates": [], "versions": []}
@@ -117,10 +119,80 @@ func TestCluster_ListNodes_Success(t *testing.T) {
 	if nodes[0]["healthy"] != true {
 		t.Errorf("healthy = %v, want true", nodes[0]["healthy"])
 	}
+	if nodes[0]["schedulingDisabled"] != true {
+		t.Errorf("schedulingDisabled = %v, want true", nodes[0]["schedulingDisabled"])
+	}
+	if _, ok := nodes[0]["labels"]; ok {
+		t.Errorf("labels must not be exposed on nodeView: %v", nodes[0]["labels"])
+	}
 	// snake_case → camelCase for nested fields.
 	cap, _ := nodes[0]["capacity"].(map[string]interface{})
 	if cap["cpuMilli"] != float64(4000) {
 		t.Errorf("capacity.cpuMilli = %v, want 4000", cap["cpuMilli"])
+	}
+}
+
+func TestCluster_IsolateNode_Success(t *testing.T) {
+	cm := &fakeCM{
+		isolateNode: func(_ context.Context, id string) (json.RawMessage, error) {
+			return raw(`{"data":{"node_id":"` + id + `","host_ip":"10.0.0.1",
+			  "healthy":true,"scheduling_disabled":true,
+			  "capacity":{"milli_cpu":4000,"memory_mb":8192},
+			  "allocatable":{"milli_cpu":4000,"memory_mb":8192},
+			  "conditions":[],"local_templates":[],"versions":[]}}`), nil
+		},
+		listSandboxes: func(_ context.Context) (json.RawMessage, error) {
+			return raw(`{"data":[]}`), nil
+		},
+	}
+	w := httptestRecorder(t, newClusterRouter(t, cm), "PUT", "/api/v1/nodes/n-1/isolation")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var node map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &node); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if node["schedulingDisabled"] != true {
+		t.Errorf("schedulingDisabled = %v, want true", node["schedulingDisabled"])
+	}
+}
+
+func TestCluster_UnisolateNode_Success(t *testing.T) {
+	cm := &fakeCM{
+		unisolateNode: func(_ context.Context, id string) (json.RawMessage, error) {
+			return raw(`{"data":{"node_id":"` + id + `","host_ip":"10.0.0.1",
+			  "healthy":true,"scheduling_disabled":false,
+			  "capacity":{"milli_cpu":4000,"memory_mb":8192},
+			  "allocatable":{"milli_cpu":4000,"memory_mb":8192},
+			  "conditions":[],"local_templates":[],"versions":[]}}`), nil
+		},
+		listSandboxes: func(_ context.Context) (json.RawMessage, error) {
+			return raw(`{"data":[]}`), nil
+		},
+	}
+	w := httptestRecorder(t, newClusterRouter(t, cm), "DELETE", "/api/v1/nodes/n-1/isolation")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var node map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &node); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if node["schedulingDisabled"] != false {
+		t.Errorf("schedulingDisabled = %v, want false", node["schedulingDisabled"])
+	}
+}
+
+func TestCluster_IsolateNode_NotFound(t *testing.T) {
+	cm := &fakeCM{
+		isolateNode: func(_ context.Context, _ string) (json.RawMessage, error) {
+			return nil, &cubemaster.CMError{RetCode: 130404, RetMsg: "node not found"}
+		},
+	}
+	w := httptestRecorder(t, newClusterRouter(t, cm), "PUT", "/api/v1/nodes/ghost/isolation")
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404; body=%s", w.Code, w.Body.String())
 	}
 }
 

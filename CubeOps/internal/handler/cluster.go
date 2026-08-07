@@ -27,6 +27,8 @@ func (h *ClusterHandler) Register(r *gin.RouterGroup) {
 	r.GET("/cluster/versions", h.Versions)
 	r.GET("/nodes", h.ListNodes)
 	r.GET("/nodes/:nodeID", h.GetNode)
+	r.PUT("/nodes/:nodeID/isolation", h.IsolateNode)
+	r.DELETE("/nodes/:nodeID/isolation", h.UnisolateNode)
 }
 
 // --- Response types matching the frontend's expected format ---
@@ -57,6 +59,7 @@ type nodeView struct {
 	HostIP              string                 `json:"hostIP"`
 	InstanceType        string                 `json:"instanceType"`
 	Healthy             bool                   `json:"healthy"`
+	SchedulingDisabled  bool                   `json:"schedulingDisabled"`
 	Capacity            nodeResourcesView      `json:"capacity"`
 	Allocatable         nodeResourcesView      `json:"allocatable"`
 	CpuSaturation       float32                `json:"cpuSaturation"`
@@ -113,6 +116,7 @@ type cmNodeSnapshot struct {
 	HostIP              string               `json:"host_ip"`
 	InstanceType        string               `json:"instance_type"`
 	Healthy             bool                 `json:"healthy"`
+	SchedulingDisabled  bool                 `json:"scheduling_disabled"`
 	Capacity            cmNodeResources      `json:"capacity"`
 	Allocatable         cmNodeResources      `json:"allocatable"`
 	MaxMvmNum           int                  `json:"max_mvm_num"`
@@ -253,6 +257,48 @@ func (h *ClusterHandler) GetNode(c *gin.Context) {
 	httputil.WriteJSON(c, http.StatusOK, toNodeView(*resp.Data, used))
 }
 
+// IsolateNode handles PUT /nodes/{nodeID}/isolation.
+func (h *ClusterHandler) IsolateNode(c *gin.Context) {
+	h.writeIsolation(c, true)
+}
+
+// UnisolateNode handles DELETE /nodes/{nodeID}/isolation.
+func (h *ClusterHandler) UnisolateNode(c *gin.Context) {
+	h.writeIsolation(c, false)
+}
+
+func (h *ClusterHandler) writeIsolation(c *gin.Context, isolate bool) {
+	nodeID := c.Param("nodeID")
+	if nodeID == "" {
+		httputil.WriteError(c, http.StatusBadRequest, "nodeID is required")
+		return
+	}
+	var (
+		data json.RawMessage
+		err  error
+	)
+	if isolate {
+		data, err = h.cm.IsolateNode(c.Request.Context(), nodeID)
+	} else {
+		data, err = h.cm.UnisolateNode(c.Request.Context(), nodeID)
+	}
+	if err != nil {
+		writeCMError(c, err)
+		return
+	}
+	var resp cmNodeResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		httputil.WriteError(c, http.StatusInternalServerError, "failed to parse node response")
+		return
+	}
+	if resp.Data == nil {
+		httputil.WriteError(c, http.StatusNotFound, fmt.Sprintf("node %s not found", nodeID))
+		return
+	}
+	used := h.fetchUsedResources(c.Request.Context())
+	httputil.WriteJSON(c, http.StatusOK, toNodeView(*resp.Data, used))
+}
+
 // Versions handles GET /cluster/versions.
 //
 // Empty/missing CubeMaster data returns an empty shell for the UI. Otherwise
@@ -342,6 +388,7 @@ func toNodeView(s cmNodeSnapshot, usedMap map[string]struct {
 		HostIP:              s.HostIP,
 		InstanceType:        s.InstanceType,
 		Healthy:             s.Healthy,
+		SchedulingDisabled:  s.SchedulingDisabled,
 		Capacity:            nodeResourcesView{CpuMilli: capCPU, MemoryMB: capMem},
 		Allocatable:         nodeResourcesView{CpuMilli: allocCPU, MemoryMB: allocMem},
 		CpuSaturation:       saturationPct(capCPU, allocCPU),

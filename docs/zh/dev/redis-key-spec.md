@@ -64,6 +64,7 @@ cube:{ver}:{scope}:{resource}[:{sub}...]:{id}
 | 沙箱 lifecycle 注册表 | `cube:v1:shared:sandbox:lifecycle:meta` | Hash | shared | CubeMaster | cube-lifecycle-manager | 无（生命周期由 `HDEL` 管理） |
 | 沙箱 lifecycle 事件流 | `cube:v1:shared:sandbox:lifecycle:events` | Stream | shared | CubeMaster | cube-lifecycle-manager | MAXLEN ~ 100000 |
 | 沙箱 lifecycle 状态 | `cube:v1:shared:sandbox:lifecycle:state:{sandboxID}` | String | shared | cube-lifecycle-manager | cube-lifecycle-manager | SET TTL（默认 60s） |
+| Cubemaster 控制面事件 | `cube:v1:shared:master:control:events` | Stream | shared | CubeMaster | CubeMaster（全部副本） | MAXLEN ~ 10000 |
 | CubeProxy 副本注册表 | `cube:v1:shared:cube_proxy:registry` | Hash | shared | CubeProxy | cube-lifecycle-manager | 无（心跳超时后由 `HDEL` 清理） |
 | CubeProxy 副本心跳 | `cube:v1:shared:cube_proxy:heartbeat` | Sorted Set | shared | CubeProxy | cube-lifecycle-manager | 无（`ZREMRANGEBYSCORE` 清理，默认 15s 过期） |
 
@@ -121,6 +122,19 @@ cube:{ver}:{scope}:{resource}[:{sub}...]:{id}
 | `paused` | 沙箱已暂停 |
 | `resuming` | 恢复过渡中 |
 
+**`master:control:events`**（CubeMaster 控制面广播）
+
+Stream 字段：
+
+| field | 含义 |
+| --- | --- |
+| `op` | `node.isolate` \| `node.unisolate`（可扩展） |
+| `node_id` | 目标计算节点 ID |
+| `payload` | JSON `IsolationPayload`（`scheduling_disabled`、`updated_at_unix_ms`、`origin`） |
+| `ts` | 事件 unix 毫秒时间戳 |
+
+节点 labels / cordon 的权威源仍是 MySQL。Stream 用于加速各 Cubemaster 副本内存视图收敛；每个副本独立 `XREAD`（广播）。见 [`CubeMaster/pkg/controlevents`](https://github.com/tencentcloud/CubeSandbox/blob/master/CubeMaster/pkg/controlevents)。
+
 ## 6. TTL 策略
 
 | Key 类型 | 策略 | 说明 |
@@ -132,6 +146,7 @@ cube:{ver}:{scope}:{resource}[:{sub}...]:{id}
 | `sandbox:lifecycle:meta` | 无 TTL | 沙箱创建时写入，销毁时 `HDEL` |
 | `sandbox:lifecycle:events` | MAXLEN ~ | 每次 `XADD` 时裁剪（默认 ~100000） |
 | `sandbox:lifecycle:state` | SET TTL | 每次写入带 `EX`（cube-lifecycle-manager 默认 60s）；回滚或沙箱删除时释放 |
+| `master:control:events` | MAXLEN ~ | 每次 `XADD` 时裁剪（默认 ~10000）；Cubemaster 各副本独立 `XREAD` 做广播 |
 | `cube_proxy:registry` | 无 TTL（依赖心跳） | 每个 CubeProxy 副本启动时写入；对应心跳过期后由 cube-lifecycle-manager 通过 `HDEL` 清理 |
 | `cube_proxy:heartbeat` | Sorted Set 过期 | Score 为最近一次心跳的 unix ms，超过 `heartbeat_ttl`（默认 15s）的条目由 `ZREMRANGEBYSCORE` 清理 |
 | 缓存类（未来新增） | 必须设 TTL | 写入时显式声明，并在文档中登记 |

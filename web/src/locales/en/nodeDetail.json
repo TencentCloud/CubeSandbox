@@ -23,5 +23,19 @@
   },
   "empty": {
     "sandboxes": "No sandboxes running on this node."
+  },
+  "isolation": {
+    "badge": "Isolated",
+    "isolate": "Isolate",
+    "unisolate": "Unisolate",
+    "isolating": "Isolating…",
+    "unisolating": "Unisolating…",
+    "confirmTitle": "Isolate this node?",
+    "confirmDesc": "New sandboxes will no longer be scheduled to this node. Existing sandboxes are not affected.",
+    "confirm": "Isolate",
+    "cancel": "Cancel",
+    "failed": "Isolation request failed.",
+    "isolatedToast": "Node isolated",
+    "unisolatedToast": "Node unisolated"
   }
 }

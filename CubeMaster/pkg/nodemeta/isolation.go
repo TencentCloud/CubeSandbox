@@ -14,6 +14,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/controlevents"
 	"gorm.io/gorm"
 )
 
@@ -92,7 +93,49 @@ func SetNodeSchedulingDisabled(ctx context.Context, nodeID string, disabled bool
 	out := cloneSnapshotWithCurrentHealth(snap, time.Now())
 	log.G(ctx).Infof("node isolation write node_id=%s disabled=%v changed=%v scheduling_disabled=%v",
 		nodeID, disabled, changed, out.SchedulingDisabled)
+
+	// Fan out to all Cubemaster replicas via Redis Stream (best-effort).
+	controlevents.PublishNodeIsolationDefault(ctx, nodeID, disabled)
 	return out, nil
+}
+
+// ApplySchedulingDisabledLocal updates the in-memory cordon view and localcache
+// without touching MySQL. Used by controlevents consumers on every replica so
+// isolation converges immediately; DB remains the source of truth via reload.
+func ApplySchedulingDisabledLocal(ctx context.Context, nodeID string, disabled bool) error {
+	if nodeID == "" {
+		return fmt.Errorf("node_id is required")
+	}
+	if !Ready() {
+		return fmt.Errorf("nodemeta not ready")
+	}
+
+	unlock := global.lockNodeLabels(nodeID)
+	defer unlock()
+
+	global.mu.Lock()
+	snap, ok := global.nodes[nodeID]
+	if !ok {
+		global.mu.Unlock()
+		log.G(ctx).Debugf("controlevents apply skipped: unknown node_id=%s", nodeID)
+		return nil
+	}
+	labels := cloneStringMap(snap.Labels)
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	if disabled {
+		labels[constants.LabelSchedulingDisabled] = constants.LabelSchedulingDisabledValue
+	} else {
+		delete(labels, constants.LabelSchedulingDisabled)
+	}
+	snap.Labels = labels
+	snap.labelsJSONCorrupt = false
+	global.mu.Unlock()
+
+	syncLocalcache(snap)
+	log.G(ctx).Infof("node isolation applied from event node_id=%s disabled=%v", nodeID, disabled)
+	return nil
 }
 
 // stripAndPreserveSchedulingLabel merges cubelet labels while keeping the

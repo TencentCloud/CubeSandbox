@@ -8,7 +8,7 @@ lang: zh-CN
 节点隔离（isolate）用于在维护、升级或排障时，**临时阻止 CubeMaster 向指定计算节点调度新沙箱**。它类似 Kubernetes 的 `cordon`：节点仍可保持健康、已有沙箱继续运行，只是不再接收新负载。
 
 ::: tip 当前入口
-WebUI / CubeOps / 对外 OpenAPI **暂不提供**隔离操作。请通过 **CubeMaster HTTP 接口**，或控制节点上的 **`cubemastercli`** 完成隔离与取消隔离。
+可通过 **WebUI 节点详情页**、**CubeOps** `PUT/DELETE /api/v1/nodes/{nodeID}/isolation`、**CubeMaster HTTP 接口**，或控制节点上的 **`cubemastercli`** 完成隔离与取消隔离。
 :::
 
 ## 读完本页你会知道
@@ -34,6 +34,8 @@ cube.cloud.tencentcloud.com/scheduling-disabled=true
 ```
 
 该 label **不能**通过普通 labels API 或 Cubelet 注册伪造 / 清除，只能走本文的隔离 / 取消隔离接口。
+
+实现上，写入会落到 MySQL（权威源）。处理请求的 Cubemaster 副本会立刻更新本机调度缓存，再通过 Redis Stream 控制面事件（`cube:v1:shared:master:control:events`）广播，使**所有 Cubemaster 副本**近实时收敛。周期性 DB reload 仍作为兜底。
 
 ::: warning 隔离 ≠ 清空节点
 隔离**不会**驱逐存量沙箱。若你要做会中断沙箱网络或进程的操作（例如 K8s 计算面升级会 recreate Big Pod），需要在隔离之后**自行销毁**该节点上的沙箱，再进行维护。详见 [K8s 升级指南](./kubernetes/upgrade.md)。
@@ -75,7 +77,23 @@ curl -s http://127.0.0.1:8089/internal/meta/nodes/<node_id> | jq '{
 
 ## 隔离节点
 
-### 方式一：HTTP 接口（推荐脚本 / 自动化）
+### 方式一：WebUI（推荐运维操作）
+
+打开 **节点** → 进入目标节点详情 → 点击 **隔离**，在确认框中确认。生效后页头会显示 **已隔离** 标记；用 **取消隔离** 恢复调度。
+
+### 方式二：CubeOps API
+
+```bash
+# 隔离（需要 CubeOps JWT）
+curl -X PUT "http://127.0.0.1:3010/api/v1/nodes/<node_id>/isolation" \
+  -H "Authorization: Bearer <access_token>"
+
+# 取消隔离
+curl -X DELETE "http://127.0.0.1:3010/api/v1/nodes/<node_id>/isolation" \
+  -H "Authorization: Bearer <access_token>"
+```
+
+### 方式三：CubeMaster HTTP 接口（适合控制节点脚本）
 
 ```bash
 curl -X PUT "http://127.0.0.1:8089/internal/meta/nodes/<node_id>/isolation"
@@ -103,7 +121,7 @@ curl -X PUT "http://127.0.0.1:8089/internal/meta/nodes/<node_id>/isolation"
 
 接口**幂等**：对已隔离节点重复 `PUT` 是安全的。无需请求体。
 
-### 方式二：cubemastercli
+### 方式四：cubemastercli
 
 ```bash
 # 隔离单个节点
@@ -124,7 +142,7 @@ node node-1 isolated: scheduling_disabled=true
 
 ## 确认隔离生效
 
-再次查询节点，确认 `scheduling_disabled` 为 `true`：
+在 WebUI 节点详情页确认出现 **已隔离** 标记。或查询 CubeMaster / CLI：
 
 ```bash
 curl -s http://127.0.0.1:8089/internal/meta/nodes/<node_id> | jq '.scheduling_disabled'
@@ -135,7 +153,7 @@ cubemastercli --address 127.0.0.1 --port 8089 node list
 ```
 
 ::: tip 建议等待窗口
-隔离后建议再等待 **≥ 60 秒**，让进行中的调度 / 创建窗口结束，再对该节点做破坏性维护（重启、升级、下线等）。
+隔离后建议再等待 **≥ 60 秒**，让**已经选中该节点、尚在飞行中的**调度 / 创建 RPC 结束，再做破坏性维护（重启、升级、下线等）。这段等待针对的是创建流水线窗口，**不是**多副本缓存延迟。其它 Cubemaster 副本通过 Redis Stream 广播近实时生效（DB reload 为兜底）。
 :::
 
 ## 取消隔离
@@ -143,7 +161,13 @@ cubemastercli --address 127.0.0.1 --port 8089 node list
 维护完成后，取消隔离，节点即可重新接收新沙箱：
 
 ```bash
-# HTTP
+# WebUI：节点详情 → 取消隔离
+
+# CubeOps
+curl -X DELETE "http://127.0.0.1:3010/api/v1/nodes/<node_id>/isolation" \
+  -H "Authorization: Bearer <access_token>"
+
+# CubeMaster HTTP
 curl -X DELETE "http://127.0.0.1:8089/internal/meta/nodes/<node_id>/isolation"
 
 # CLI
@@ -176,6 +200,7 @@ cubemastercli --address 127.0.0.1 --port 8089 node unisolate <node_id>
 ## 范围与限制
 
 - **不是 drain**：不会自动迁移或销毁已有沙箱。
+- **Cubemaster 多副本**：isolate/unisolate 可打到任一副本；MySQL 为权威源，Redis Stream 广播 cordon 变更，使各副本调度视图快速收敛。
 - **单节点 / 全部隔离**：若集群中没有其它可调度节点，新沙箱创建会失败（调度选不到节点）。
 - **与健康检查正交**：隔离节点仍可保持 Healthy，仍会出现在健康节点列表中，只是不进入可调度集合。
 - **与 Kubernetes `kubectl cordon` 无关**：本能力只影响 CubeMaster 调度，不会自动对 K8s Node 执行 cordon。

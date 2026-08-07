@@ -161,6 +161,8 @@ RBAC is reserved for future use — currently any valid JWT grants full access.
 - `GET /api/v1/cluster/versions` — Component version matrix
 - `GET /api/v1/nodes` — Node list
 - `GET /api/v1/nodes/{nodeID}` — Node detail
+- `PUT /api/v1/nodes/{nodeID}/isolation` — Isolate (cordon) node
+- `DELETE /api/v1/nodes/{nodeID}/isolation` — Unisolate (uncordon) node
 
 ### AgentHub
 - `GET /api/v1/agenthub/instances` — List agent instances

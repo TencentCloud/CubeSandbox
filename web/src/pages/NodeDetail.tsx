@@ -1,14 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Tencent. All rights reserved.
 
-import { useQuery } from '@tanstack/react-query';
+import { useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { clusterApi, sandboxApi, templateApi } from '@/api/client';
+import {
+  formatIsolationError,
+  IsolateConfirmDialog,
+} from '@/components/nodes/IsolateConfirmDialog';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
-import { ArrowLeft, Package, Box, Activity } from 'lucide-react';
-import { cn, formatRelative } from '@/lib/utils';
+import { showToast } from '@/components/ui/ToastProvider';
+import { ArrowLeft, Package, Box, Activity, ShieldOff, ShieldCheck } from 'lucide-react';
+import { cn, formatRelative, formatCondition, getConditionTone } from '@/lib/utils';
 
 // ── Resource bar ──────────────────────────────────────────────────────────────
 
@@ -110,7 +117,8 @@ function ConditionRow({
   message?: string;
   time?: string | null;
 }) {
-  const ok = status === 'True';
+  const tone = getConditionTone(type, status);
+  const text = formatCondition(type, status);
   return (
     <div className="flex items-start justify-between gap-4 py-2.5 border-b border-white/5 last:border-0">
       <div className="min-w-0 flex-1">
@@ -118,20 +126,10 @@ function ConditionRow({
           <span
             className={cn(
               'inline-block h-1.5 w-1.5 rounded-full shrink-0',
-              ok ? 'bg-cube-ok' : 'bg-cube-warn',
+              tone === 'ok' ? 'bg-cube-ok' : tone === 'err' ? 'bg-cube-err' : 'bg-cube-warn',
             )}
           />
-          <span className="text-base font-medium">{type}</span>
-          <span
-            className={cn(
-              'text-xs font-medium px-1.5 py-0.5 rounded border',
-              ok
-                ? 'text-cube-ok border-cube-ok/30 bg-cube-ok/5'
-                : 'text-cube-warn border-cube-warn/30 bg-cube-warn/5',
-            )}
-          >
-            {status}
-          </span>
+          <span className="text-base font-medium">{text}</span>
         </div>
         {reason && <p className="mt-0.5 text-sm text-muted-foreground pl-3.5">{reason}</p>}
         {message && (
@@ -152,6 +150,9 @@ function ConditionRow({
 export default function NodeDetailPage() {
   const { nodeID } = useParams<{ nodeID: string }>();
   const { t } = useTranslation('nodeDetail');
+  const qc = useQueryClient();
+  const [confirmIsolate, setConfirmIsolate] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const { data, isLoading, isError } = useQuery({
     queryKey: ['node', nodeID],
@@ -174,12 +175,44 @@ export default function NodeDetailPage() {
     enabled: !!data,
   });
 
+  const invalidateNode = async () => {
+    await Promise.all([
+      qc.invalidateQueries({ queryKey: ['node', nodeID] }),
+      qc.invalidateQueries({ queryKey: ['nodes'] }),
+    ]);
+  };
+
+  const isolate = useMutation({
+    mutationFn: () => clusterApi.isolate(nodeID!),
+    onMutate: () => setActionError(null),
+    onSuccess: async () => {
+      setConfirmIsolate(false);
+      showToast(t('isolation.isolatedToast'));
+      await invalidateNode();
+    },
+    onError: (err) => {
+      setActionError(formatIsolationError(err, t('isolation.failed')));
+    },
+  });
+
+  const unisolate = useMutation({
+    mutationFn: () => clusterApi.unisolate(nodeID!),
+    onMutate: () => setActionError(null),
+    onSuccess: async () => {
+      showToast(t('isolation.unisolatedToast'));
+      await invalidateNode();
+    },
+    onError: (err) => {
+      setActionError(formatIsolationError(err, t('isolation.failed')));
+    },
+  });
+
   // local templates with READY or RUNNING status only
   const localTemplateIDs = new Set(data?.localTemplates ?? []);
   const visibleLocalTemplates = (allTemplates ?? []).filter(
-    (t) =>
-      localTemplateIDs.has(t.templateID) &&
-      ['READY', 'RUNNING'].includes((t.status ?? '').toUpperCase()),
+    (tpl) =>
+      localTemplateIDs.has(tpl.templateID) &&
+      ['READY', 'RUNNING'].includes((tpl.status ?? '').toUpperCase()),
   );
 
   const nodeSandboxes = (allSandboxes ?? []).filter((sb) => sb.clientID === data?.address);
@@ -212,6 +245,7 @@ export default function NodeDetailPage() {
   const memUsed = data.resources.totalMemoryMB - data.resources.allocatableMemoryMB;
 
   const isReady = data.status.toLowerCase() === 'ready';
+  const isolationPending = isolate.isPending || unisolate.isPending;
 
   return (
     <div className="animate-fade-in space-y-8">
@@ -242,6 +276,9 @@ export default function NodeDetailPage() {
             <h1 className="text-2xl font-semibold tracking-tight">
               {data.hostname ?? data.nodeID}
             </h1>
+            {data.schedulingDisabled && (
+              <Badge tone="warn">{t('isolation.badge')}</Badge>
+            )}
           </div>
           <div className="flex items-center gap-3 pl-4.5">
             <span className="font-mono text-sm text-muted-foreground/70">{data.nodeID}</span>
@@ -259,13 +296,52 @@ export default function NodeDetailPage() {
             )}
           </div>
         </div>
-        <div className="flex items-center gap-2 shrink-0 pt-1">
-          <Activity size={13} className="text-muted-foreground/50" />
-          <span className="text-sm text-muted-foreground">
-            {formatRelative(data.heartbeatTime)}
-          </span>
+        <div className="flex items-center gap-3 shrink-0 pt-1">
+          {data.schedulingDisabled ? (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={isolationPending}
+              onClick={() => unisolate.mutate()}
+            >
+              <ShieldCheck size={14} />
+              {unisolate.isPending ? t('isolation.unisolating') : t('isolation.unisolate')}
+            </Button>
+          ) : (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={isolationPending}
+              onClick={() => setConfirmIsolate(true)}
+            >
+              <ShieldOff size={14} />
+              {t('isolation.isolate')}
+            </Button>
+          )}
+          <div className="flex items-center gap-2">
+            <Activity size={13} className="text-muted-foreground/50" />
+            <span className="text-sm text-muted-foreground">
+              {formatRelative(data.heartbeatTime)}
+            </span>
+          </div>
         </div>
       </div>
+
+      {actionError && (
+        <div className="rounded-md border border-cube-err/30 bg-cube-err/10 px-3 py-2 text-sm text-cube-err">
+          {actionError}
+        </div>
+      )}
+
+      <IsolateConfirmDialog
+        open={confirmIsolate}
+        onClose={() => setConfirmIsolate(false)}
+        onConfirm={() => isolate.mutate()}
+        pending={isolate.isPending}
+        error={
+          isolate.isError ? formatIsolationError(isolate.error, t('isolation.failed')) : null
+        }
+      />
 
       {/* resource KPIs */}
       <Section title={t('section.resources')}>

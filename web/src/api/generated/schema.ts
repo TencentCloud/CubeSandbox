@@ -407,6 +407,10 @@ export interface components {
              * @description Memory quota in MiB assigned to this node.
              */
             quotaMemMB: number;
+            /**
+             * @description Whether CubeMaster will skip this node when scheduling new sandboxes.
+             */
+            schedulingDisabled?: boolean;
             versions?: components["schemas"]["ComponentVersionView"][];
         };
         /** @description Request body for POST /sandboxes/{id}/resume (deprecated). */

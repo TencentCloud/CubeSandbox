@@ -106,6 +106,7 @@ export interface ClusterNodeView {
   memorySaturationPct: number;
   heartbeatTime?: string | null;
   healthy: boolean;
+  schedulingDisabled: boolean;
   localTemplates: string[];
   versions: ComponentVersionDto[];
 }
@@ -159,6 +160,9 @@ function mapTemplateDetail(dto: TemplateDetailDto): TemplateDetail {
 }
 
 function mapNode(dto: ApiNodeView): ClusterNodeView {
+  const extended = dto as ApiNodeView & {
+    schedulingDisabled?: boolean;
+  };
   return {
     nodeID: dto.nodeID,
     hostname: undefined,
@@ -187,6 +191,7 @@ function mapNode(dto: ApiNodeView): ClusterNodeView {
     memorySaturationPct: Math.round(dto.memorySaturation),
     heartbeatTime: dto.heartbeatTime,
     healthy: dto.healthy,
+    schedulingDisabled: extended.schedulingDisabled ?? false,
     localTemplates: dto.localTemplates ?? [],
     versions: dto.versions ?? [],
   };
@@ -279,6 +284,12 @@ export const clusterApi = {
   overview: () => ops<ClusterOverviewDto>('/cluster/overview'),
   nodes: () => ops<ApiNodeView[]>('/nodes').then((items) => items.map(mapNode)),
   node: (id: string) => ops<ApiNodeView>(`/nodes/${id}`).then(mapNode),
+  isolate: (id: string) =>
+    ops<ApiNodeView>(`/nodes/${encodeURIComponent(id)}/isolation`, { method: 'PUT' }).then(mapNode),
+  unisolate: (id: string) =>
+    ops<ApiNodeView>(`/nodes/${encodeURIComponent(id)}/isolation`, {
+      method: 'DELETE',
+    }).then(mapNode),
   config: () =>
     ops<{
       apiEndpoint: string;

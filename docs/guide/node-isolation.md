@@ -8,7 +8,7 @@ lang: en-US
 Node isolation (isolate) temporarily **stops CubeMaster from scheduling new sandboxes onto a compute node** during maintenance, upgrades, or troubleshooting. It behaves like Kubernetes `cordon`: the node can stay healthy and existing sandboxes keep running — it simply stops receiving new work.
 
 ::: tip Current entry points
-WebUI / CubeOps / the public OpenAPI surface do **not** expose isolation yet. Use the **CubeMaster HTTP API**, or **`cubemastercli`** on the control node, to isolate and unisolate nodes.
+Use the **WebUI Nodes detail page**, **CubeOps** `PUT/DELETE /api/v1/nodes/{nodeID}/isolation`, the **CubeMaster HTTP API**, or **`cubemastercli`** on the control node to isolate and unisolate nodes.
 :::
 
 ## What you'll learn
@@ -34,6 +34,8 @@ cube.cloud.tencentcloud.com/scheduling-disabled=true
 ```
 
 That label **cannot** be forged or cleared via the generic labels API or Cubelet registration — only the isolate / unisolate APIs on this page can change it.
+
+Under the hood, the write lands in MySQL (source of truth). The handling Cubemaster replica updates its local scheduling cache immediately, then publishes a Redis Stream control event (`cube:v1:shared:master:control:events`) so **every Cubemaster replica** converges nearly in real time. Periodic DB reload remains a safety net if a replica briefly misses the stream.
 
 ::: warning Isolation is not drain
 Isolation does **not** evict existing sandboxes. If your next step will interrupt sandbox networking or processes (for example, a Kubernetes compute-plane upgrade that recreates the Big Pod), **destroy sandboxes on that node yourself** after isolating, then proceed. See the [Kubernetes upgrade guide](./kubernetes/upgrade.md).
@@ -75,7 +77,23 @@ curl -s http://127.0.0.1:8089/internal/meta/nodes/<node_id> | jq '{
 
 ## Isolate a node
 
-### Option 1: HTTP API (best for scripts / automation)
+### Option 1: WebUI (recommended for operators)
+
+Open **Nodes** → select the node → click **Isolate**. Confirm in the dialog. The page shows an **Isolated** badge when cordon is active; use **Unisolate** to clear it.
+
+### Option 2: CubeOps API
+
+```bash
+# Isolate (requires CubeOps JWT)
+curl -X PUT "http://127.0.0.1:3010/api/v1/nodes/<node_id>/isolation" \
+  -H "Authorization: Bearer <access_token>"
+
+# Unisolate
+curl -X DELETE "http://127.0.0.1:3010/api/v1/nodes/<node_id>/isolation" \
+  -H "Authorization: Bearer <access_token>"
+```
+
+### Option 3: CubeMaster HTTP API (best for scripts on the control node)
 
 ```bash
 curl -X PUT "http://127.0.0.1:8089/internal/meta/nodes/<node_id>/isolation"
@@ -103,7 +121,7 @@ A successful response looks like:
 
 The call is **idempotent**: repeating `PUT` on an already-isolated node is safe. No request body is required.
 
-### Option 2: cubemastercli
+### Option 4: cubemastercli
 
 ```bash
 # Isolate one node
@@ -124,7 +142,7 @@ node node-1 isolated: scheduling_disabled=true
 
 ## Verify isolation
 
-Query the node again and confirm `scheduling_disabled` is `true`:
+In the WebUI, open the node detail page and confirm the **Isolated** badge is shown. Or query CubeMaster / CLI:
 
 ```bash
 curl -s http://127.0.0.1:8089/internal/meta/nodes/<node_id> | jq '.scheduling_disabled'
@@ -135,7 +153,7 @@ cubemastercli --address 127.0.0.1 --port 8089 node list
 ```
 
 ::: tip Wait window
-After isolating, wait **≥ 60 seconds** so in-flight schedule / create windows can finish before you perform disruptive maintenance (reboot, upgrade, take-down, and so on).
+After isolating, wait **≥ 60 seconds** so **in-flight** schedule / create RPCs that already selected the node can finish before you perform disruptive maintenance (reboot, upgrade, take-down, and so on). This wait is about the create pipeline window — **not** multi-replica cache lag. Other Cubemaster replicas pick up isolation via Redis Stream fan-out (with DB reload as fallback).
 :::
 
 ## Unisolate a node
@@ -143,7 +161,13 @@ After isolating, wait **≥ 60 seconds** so in-flight schedule / create windows 
 When maintenance is done, remove the cordon so the node can receive new sandboxes again:
 
 ```bash
-# HTTP
+# WebUI: Nodes → node detail → Unisolate
+
+# CubeOps
+curl -X DELETE "http://127.0.0.1:3010/api/v1/nodes/<node_id>/isolation" \
+  -H "Authorization: Bearer <access_token>"
+
+# CubeMaster HTTP
 curl -X DELETE "http://127.0.0.1:8089/internal/meta/nodes/<node_id>/isolation"
 
 # CLI
@@ -176,6 +200,7 @@ Full steps: [Kubernetes upgrade guide](./kubernetes/upgrade.md).
 ## Scope and limitations
 
 - **Not a drain**: existing sandboxes are not migrated or destroyed automatically.
+- **Multi-replica Cubemaster**: isolate/unisolate may hit any replica; MySQL is authoritative and Redis Stream broadcasts cordon changes so all replicas' schedulers converge quickly.
 - **Single-node / all-isolated clusters**: if no other schedulable node remains, new sandbox creates fail (no host selected).
 - **Orthogonal to health checks**: an isolated node can stay Healthy and may still appear in healthy-node listings; it is only excluded from the schedulable set.
 - **Independent of Kubernetes `kubectl cordon`**: this only affects CubeMaster scheduling; it does not cordon the Kubernetes Node.

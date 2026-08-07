@@ -128,6 +128,18 @@ func (c *Client) GetNode(ctx context.Context, nodeID string) (json.RawMessage, e
 	return c.get(ctx, fmt.Sprintf("/internal/meta/nodes/%s", escaped))
 }
 
+// IsolateNode cordons a node so CubeMaster stops scheduling new sandboxes onto it.
+func (c *Client) IsolateNode(ctx context.Context, nodeID string) (json.RawMessage, error) {
+	escaped := url.PathEscape(nodeID)
+	return c.put(ctx, fmt.Sprintf("/internal/meta/nodes/%s/isolation", escaped), nil)
+}
+
+// UnisolateNode removes the cordon so the node can receive new sandboxes again.
+func (c *Client) UnisolateNode(ctx context.Context, nodeID string) (json.RawMessage, error) {
+	escaped := url.PathEscape(nodeID)
+	return c.delete(ctx, fmt.Sprintf("/internal/meta/nodes/%s/isolation", escaped))
+}
+
 // ListSandboxes fetches the sandbox list from CubeMaster.
 func (c *Client) ListSandboxes(ctx context.Context) (json.RawMessage, error) {
 	return c.post(ctx, "/cube/sandbox/list", map[string]interface{}{
@@ -308,6 +320,30 @@ func (c *Client) post(ctx context.Context, path string, body interface{}) (json.
 		bodyReader = bytes.NewReader(b)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bodyReader)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return readResponse(resp)
+}
+
+func (c *Client) put(ctx context.Context, path string, body interface{}) (json.RawMessage, error) {
+	var bodyReader io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("marshal body: %w", err)
+		}
+		bodyReader = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+path, bodyReader)
 	if err != nil {
 		return nil, err
 	}

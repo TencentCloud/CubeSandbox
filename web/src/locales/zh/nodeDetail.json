@@ -23,5 +23,19 @@
   },
   "empty": {
     "sandboxes": "该节点上暂无运行中的沙箱。"
+  },
+  "isolation": {
+    "badge": "已隔离",
+    "isolate": "隔离",
+    "unisolate": "取消隔离",
+    "isolating": "隔离中…",
+    "unisolating": "取消隔离中…",
+    "confirmTitle": "隔离该节点？",
+    "confirmDesc": "隔离后，该节点将不再接收新的沙箱调度。已有沙箱不受影响。",
+    "confirm": "确认隔离",
+    "cancel": "取消",
+    "failed": "隔离操作失败。",
+    "isolatedToast": "节点已隔离",
+    "unisolatedToast": "已取消隔离"
   }
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/controlevents"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet/grpcconn"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/instancecache"
@@ -178,6 +179,13 @@ func coreInit(ctx context.Context, cfg *config.Config) error {
 	// stale until the next reconcile.
 	if err := lifecycle.Init(ctx); err != nil {
 		log.G(ctx).Warnf("lifecycle init fail (non-fatal): %v", err)
+	}
+
+	// controlevents fans out control-plane mutations (e.g. node isolation) to
+	// every Cubemaster replica via Redis Stream. Redis is a hard dependency:
+	// without it multi-replica cordon convergence is not guaranteed.
+	if err := controlevents.Init(ctx, nodemeta.ApplySchedulingDisabledLocal); err != nil {
+		return fmt.Errorf("controlevents init: %w", err)
 	}
 
 	scheduler.InitScheduler(ctx)
