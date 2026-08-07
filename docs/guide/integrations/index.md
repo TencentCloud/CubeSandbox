@@ -48,3 +48,4 @@ lang: en-US
 | Title | Author | Date | Tags |
 | --- | --- | --- | --- |
 | [Pi Agent Integration Guide](./pi-agent.md) | chaojixinren | 2026-07-01 | integration, pi-agent, coding-agent, agent |
+| [OpenHands Integration Guide](./openhands.md) | Fan-hr | 2026-07-28 | integration, openhands, coding-agent, agent |
