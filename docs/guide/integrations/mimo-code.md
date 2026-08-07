@@ -12,8 +12,6 @@ lang: en-US
 
 # MiMo Code Dual-Fork Rollout Reference Pattern
 
-[中文文档](../../zh/guide/integrations/mimo-code.md)
-
 This integration uses [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code)
 session forking and CubeSandbox full-VM snapshots to run multiple implementation
 candidates from one shared planning context.

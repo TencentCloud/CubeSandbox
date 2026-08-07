@@ -12,8 +12,6 @@ lang: zh-CN
 
 # MiMo Code 双分叉 Rollout 参考模式
 
-[English](../../../guide/integrations/mimo-code.md)
-
 本集成把 [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code) 的会话分叉与
 CubeSandbox 完整 VM 快照结合，让多个实现候选从同一个规划上下文出发。
 
