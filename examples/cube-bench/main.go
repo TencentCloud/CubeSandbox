@@ -387,11 +387,13 @@ func main() {
 		renderDryRunBanner(cfg)
 	}
 
+	client := RunWarmup(cfg, os.Stdout)
+
 	resultCh := make(chan IterResult, cfg.Total)
 
 	startTime := time.Now()
 
-	go RunBenchmark(cfg, resultCh)
+	go RunBenchmark(cfg, resultCh, client)
 
 	var allResults []IterResult
 
