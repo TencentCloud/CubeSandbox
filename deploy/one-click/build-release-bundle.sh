@@ -520,41 +520,27 @@ poll_web_build_async() {
   _collect_web_build_async
 }
 
-# Reap a still-running async web build on any exit (including an early failure
-# elsewhere), so the backgrounded npm process is never orphaned onto a
-# persistent host. No-op once build_web_dist has already collected it. npm forks
-# descendant workers (vite/esbuild), so signal the whole process group (the
-# build is launched under `set -m` with PGID == PID) -- otherwise the workers
-# survive as orphans. Fall back to signaling the single PID if the group-kill
-# fails.
+# Reap a still-running async web build on exit/signal so npm is not orphaned.
+# WEB_BUILD_ASYNC_PID is a wrapper; group-kill its children, then the wrapper.
 cleanup_web_build_async() {
+  local child
   [[ "${WEB_BUILD_ASYNC_PID}" -ne 0 ]] || return 0
   if kill -0 "${WEB_BUILD_ASYNC_PID}" 2>/dev/null; then
-    kill -- -"${WEB_BUILD_ASYNC_PID}" 2>/dev/null \
-      || kill "${WEB_BUILD_ASYNC_PID}" 2>/dev/null || true
+    while read -r child; do
+      [[ -n "${child}" ]] || continue
+      kill -- -"${child}" 2>/dev/null || kill "${child}" 2>/dev/null || true
+    done < <(pgrep -P "${WEB_BUILD_ASYNC_PID}" 2>/dev/null || true)
+    kill "${WEB_BUILD_ASYNC_PID}" 2>/dev/null || true
     wait "${WEB_BUILD_ASYNC_PID}" 2>/dev/null || true
   fi
 }
-# EXIT alone is not enough: bash does NOT run EXIT traps when the shell is
-# terminated by an uncaught signal (Ctrl-C -> SIGINT, or SIGTERM from a CI
-# timeout). Because the npm build runs in its own process group, a signal
-# delivered only to this script would not reach it and it would leak as an
-# orphan onto a persistent host. Trap
-# INT/TERM to reap it, then restore the default disposition and re-raise so the
-# script still exits with the correct 128+signum status (the EXIT trap that then
-# fires is a harmless no-op once the child is already reaped).
 trap cleanup_web_build_async EXIT
 trap 'cleanup_web_build_async; trap - INT; kill -INT $$' INT
 trap 'cleanup_web_build_async; trap - TERM; kill -TERM $$' TERM
 
-# start_web_build_async: kick off `npm ci && npm run build` in the background so
-# it overlaps the guest-image build. Deliberately conservative -- it only starts
-# the async build in the plain success case (npm present, source tree present,
-# no prebuilt-dist override, not explicitly disabled). In every other case it is
-# a no-op and build_web_dist falls through to its original synchronous path, so
-# validation errors (missing npm / missing WEB_SOURCE_DIR) surface with the
-# exact same message and behavior as before. Set ONE_CLICK_SEQUENTIAL_WEB_BUILD=1
-# to force the fully sequential build.
+# Overlap npm with guest-image build. No-op unless npm + source are available
+# and ONE_CLICK_SEQUENTIAL_WEB_BUILD is unset. Keep the job off the caller's
+# tty (setsid -w, stdin=/dev/null) so it cannot race sudo password echo-off.
 start_web_build_async() {
   [[ "${ONE_CLICK_SEQUENTIAL_WEB_BUILD:-}" != "1" ]] || return 0
   [[ -z "${WEB_DIST_OVERRIDE}" ]] || return 0
@@ -563,26 +549,32 @@ start_web_build_async() {
 
   mkdir -p "$(dirname "${WEB_BUILD_ASYNC_LOG}")"
   log "building web dashboard (async, overlapping runtime layout build)"
-  # Run in a fresh process group so cleanup_web_build_async can signal the whole
-  # group and reap npm's descendant workers (vite/esbuild).
-  #
-  # `set -m` (not setsid) is the primary path. It places the background job in
-  # its own process group with PGID == PID, so WEB_BUILD_ASYNC_PID is both the
-  # thing we `wait` on AND a valid `kill -- -PID` group target. Crucially, the
-  # backgrounded shell is a *real child* of this script, so `wait` blocks on the
-  # actual npm build and $? reflects its true exit status.
-  #
-  # setsid is deliberately NOT used here: when the caller is already a
-  # process-group leader (script launched via `setsid`, as a background job from
-  # an interactive shell, or by a job scheduler that puts each job in its own
-  # group), setsid must fork -- its parent exits 0 immediately, so $! captures a
-  # short-lived pid. `wait` would then return 0 at once (letting build_web_dist
-  # copy a half-built dist) and cleanup could not reach the detached npm build.
-  # `set -m` never forks and does not have this failure mode.
-  set -m
-  ( cd "${WEB_SOURCE_DIR}" && npm ci && npm run build ) >"${WEB_BUILD_ASYNC_LOG}" 2>&1 &
-  set +m
+  # Wrapper keeps wait/$! correct; avoid bare `setsid cmd &` (can exit early).
+  (
+    if command -v setsid >/dev/null 2>&1; then
+      setsid -w bash -c 'cd "$1" && npm ci && npm run build' bash "${WEB_SOURCE_DIR}" \
+        </dev/null >"${WEB_BUILD_ASYNC_LOG}" 2>&1
+      exit $?
+    fi
+    set -m
+    ( cd "${WEB_SOURCE_DIR}" && npm ci && npm run build ) \
+      </dev/null >"${WEB_BUILD_ASYNC_LOG}" 2>&1 &
+    local child=$!
+    set +m
+    wait "${child}"
+    exit $?
+  ) &
   WEB_BUILD_ASYNC_PID=$!
+}
+
+ensure_sudo_authenticated_for_packaging() {
+  [[ "${EUID}" -eq 0 ]] && return 0
+  if sudo -n true >/dev/null 2>&1; then
+    return 0
+  fi
+  require_cmd sudo
+  log "sudo authentication required for guest rootfs / runtime layout packaging"
+  sudo -v || die "sudo authentication failed (needed to package guest rootfs / runtime layout)"
 }
 
 build_web_dist() {
@@ -621,8 +613,8 @@ ensure_dir "${CUBE_WEBUI_TEMPLATE_DIR}"
 ensure_dir "${CUBE_SYSTEMD_TEMPLATE_DIR}"
 ensure_dir "${CUBE_PROXY_SOURCE_DIR}"
 
-# Start the WebUI build in the background so it overlaps the guest-image build
-# below (they are fully independent). Collected later in build_web_dist.
+# sudo first (quiet tty), then async web build overlapping guest-image below.
+ensure_sudo_authenticated_for_packaging
 start_web_build_async
 
 log "building runtime layout"
