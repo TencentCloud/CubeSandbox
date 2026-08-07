@@ -66,6 +66,66 @@ detect_primary_interface() {
     }'
 }
 
+# patch_cubelet_mtu <config>
+# Patch mvm_mtu in a Cubelet config.toml from CUBE_SANDBOX_NETWORK_MTU.
+# component-entrypoint.sh keeps a sibling copy (run_network_agent and
+# run_cubelet share one there) because the two scripts are self-contained.
+patch_cubelet_mtu() {
+  local cfg="$1"
+  [[ -n "${CUBE_SANDBOX_NETWORK_MTU:-}" && "${CUBE_SANDBOX_NETWORK_MTU}" != "0" ]] || return 0
+  # Reject anything that is not an integer so operators cannot inject
+  # replacement content via numeric-looking env variables. Underscores are
+  # valid inside TOML integer literals (`mvm_mtu = 1_500`); rejecting them
+  # here keeps the sed/post-check patterns simple and unambiguous.
+  [[ "${CUBE_SANDBOX_NETWORK_MTU}" =~ ^[0-9]+$ ]] || fail "CUBE_SANDBOX_NETWORK_MTU must be a non-negative integer"
+  # Strip leading zeros (string-only; they make -ge/-le parse the value as
+  # octal and would write invalid TOML). Length-check the stripped form
+  # BEFORE any arithmetic: bash's int64 arithmetic wraps absurdly long
+  # strings (e.g. `18446744073709552896` wraps to 1280), so a length gate
+  # applied after normalization would let a wrapped in-range value through.
+  local mtu_norm mtu_decimal
+  mtu_norm="$(printf '%s' "${CUBE_SANDBOX_NETWORK_MTU}" | sed 's/^0*//')"
+  [[ -n "${mtu_norm}" ]] || mtu_norm=0
+  # All-zero strings (`00`, `000000`, ...) normalize to 0, which keeps the
+  # packaged default — same no-op semantics as the `"0"` sentinel above.
+  [[ "${mtu_norm}" != "0" ]] || return 0
+  [[ "${#mtu_norm}" -le 5 ]] \
+    || fail "CUBE_SANDBOX_NETWORK_MTU is too long (max 5 digits, range 1280..65535)"
+  mtu_decimal=$((10#${mtu_norm}))
+  # The guest virtio-net device enforces MIN_MTU=1280
+  # (hypervisor/virtio-devices/src/net.rs:51), and the guest MTU is derived
+  # from the tap's actual MTU — so anything below 1280 would propagate into
+  # the guest below the VIRTIO spec minimum. The VMM's InvalidMtu validation
+  # never catches this because the shim leaves NetConfig.mtu unset. Keep the
+  # cap at u16 max for the virtio MTU field.
+  [[ "${mtu_decimal}" -ge 1280 && "${mtu_decimal}" -le 65535 ]] \
+    || fail "CUBE_SANDBOX_NETWORK_MTU must be within 1280..65535"
+  # A missing/renamed mvm_mtu key is non-fatal (warn + skip) so a future
+  # config.toml schema drift cannot crash-loop the node container. The
+  # pre-check shares the same anchor as the sed and post-check, including
+  # the optional spaces around '=', so an e.g. `mvm_mtu=1500` line (valid
+  # TOML without spaces) is found and rewritten rather than silently no-op'd.
+  if ! grep -qE '^[[:space:]]*mvm_mtu[[:space:]]*=' "${cfg}"; then
+    log "WARN: mvm_mtu key not found in ${cfg}; CUBE_SANDBOX_NETWORK_MTU not applied"
+    return 0
+  fi
+  # Match [0-9_] so a TOML integer with underscores (`mvm_mtu = 1_500`,
+  # valid TOML) is rewritten wholesale to `mvm_mtu = <decimal>` instead of
+  # mangling the leading digits into `1450_500` (still valid TOML, but a
+  # wrong MTU that would fail LinkSetMTU at sandbox-create time).
+  sed -i "s/^\([[:space:]]*\)mvm_mtu[[:space:]]*=[[:space:]]*[0-9_][0-9_]*/\1mvm_mtu = ${mtu_decimal}/" "${cfg}"
+  # Anchor the post-check to the end of the value (whitespace / comment /
+  # EOL) so a line whose value merely starts with the target (e.g.
+  # `mvm_mtu = 14500` for 1450) cannot log a false success. A non-digit
+  # boundary alone would not suffice (`mvm_mtu = 1450abc` would still
+  # match).
+  if grep -qE "^[[:space:]]*mvm_mtu[[:space:]]*=[[:space:]]*${mtu_decimal}([[:space:]]|#|\$)" "${cfg}"; then
+    log "patched Cubelet mvm_mtu = ${mtu_decimal}"
+  else
+    log "WARN: failed to patch mvm_mtu in ${cfg}; CUBE_SANDBOX_NETWORK_MTU not applied"
+  fi
+}
+
 validate_runtime_commands() {
   for cmd in mkfs.ext4 mount umount losetup cube-runtime containerd-shim-cube-rs cubecli cubevsmapdump; do
     require_cmd "${cmd}"
@@ -192,6 +252,7 @@ if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
   CIDR_ESC="$(sed_escape_replacement "${CUBE_SANDBOX_NETWORK_CIDR}")"
   sed -i "s|cidr = \"[^\"]*\"|cidr = \"${CIDR_ESC}\"|" "${CUBELET_CONFIG}"
 fi
+patch_cubelet_mtu "${CUBELET_CONFIG}"
 if [[ -n "${CUBE_TAP_INIT_NUM:-}" ]]; then
   # Reject anything that is not an integer so operators cannot inject
   # replacement content via numeric-looking env variables.

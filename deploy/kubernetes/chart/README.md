@@ -156,6 +156,7 @@ can set it to `false`.
 - runtime tools are available through `/usr/local/bin/containerd-shim-cube-rs`, `/usr/local/bin/cube-runtime`, `/usr/local/bin/cubecli`, and `/usr/local/bin/cubevsmapdump`;
 - `cubeNode.network.autoDetectEthName=true` auto-detects the primary host NIC and patches Cubelet `eth_name`;
 - `cubeNode.network.cidr` patches Cubelet cubevs/sandbox CIDR (default `172.16.0.0/18`, chosen to avoid common cluster Service CIDR `192.168.0.0/16` while keeping a /18 pool). A Helm `pre-install`/`pre-upgrade` Hook fails fast when this range overlaps the cluster Service CIDR or existing ClusterIPs; set `cubeNode.network.cidrSkipConflictCheck=true` only if you accept that risk.
+- `cubeNode.network.mtu` patches the sandbox tap MTU (`mvm_mtu` in Cubelet `config.toml`), default `0` keeps the packaged Cubelet default (1500). Set it to the Pod network MTU when the cluster's Pod MTU is smaller than 1500 (e.g. Calico VXLAN `1450`, IPIP `1480`): otherwise sandbox guests advertise TCP MSS for 1500 while the uplink silently drops larger frames — HTTPS handshakes stall and large downloads truncate. Valid range `1280..65535`; out-of-range values fail fast at node startup, and a missing `mvm_mtu` key in the staged config warns and skips.
 
 ### Guest kernel (bm vs PVM)
 
