@@ -463,8 +463,10 @@ web-sync-dev-env:
 
 # Run make fmt in each component directory that has a fmt target.
 # Components without formattable code (e.g. CubeProxy) are skipped.
-# Outside the builder, route through builder-run so agent/Makefile's
-# MUSL+SECCOMP parse-time libseccomp.a check does not fail on the host.
+# Outside the builder, Go/Rust fmt routes through builder-run so
+# agent/Makefile's MUSL+SECCOMP parse-time libseccomp.a check does not
+# fail on the host. Web fmt stays on the host: the builder image has no
+# npm (same split as fmt-check.yml).
 .PHONY: fmt
 fmt:
 ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
@@ -498,13 +500,13 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@$(MAKE) -C sdk/go fmt
 	@printf '  %-8s %s\n' "FMT" "examples/cube-bench"
 	@$(MAKE) -C examples/cube-bench fmt
+else
+	@$(MAKE) builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make fmt'
 	@printf '  %-8s %s\n' "FMT" "web"
 	@if command -v npm >/dev/null 2>&1; then \
 		$(MAKE) -C web fmt; \
 	else \
-		printf '  %-8s %s\n' "SKIP" "web (npm not available)"; \
+		printf '  %-8s %s\n' "SKIP" "web (npm not available on host)"; \
 	fi
-else
-	@$(MAKE) builder-image
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make fmt'
 endif
