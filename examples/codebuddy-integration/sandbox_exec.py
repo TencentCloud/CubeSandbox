@@ -1,0 +1,416 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 Tencent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Sandbox execution backend for CodeBuddy.
+
+CodeBuddy runs on the HOST (or inside an outer sandbox) and calls this
+script whenever it needs to execute untrusted code or shell commands inside
+an isolated CubeSandbox MicroVM. The pattern mirrors the same idea behind
+Claude Code's Bash hook — keep the LLM agent outside the danger zone,
+route every executable action through a fresh, disposable VM.
+
+Usage from a Python orchestrator or a shell:
+
+    python sandbox_exec.py --code "print(1+1)"
+    python sandbox_exec.py --file /path/to/script.py
+    python sandbox_exec.py --cmd "ls -la /workspace"
+    python sandbox_exec.py --pip requests --code "import requests; print(requests.__version__)"
+    python sandbox_exec.py --keep-alive --code "state = 42"     # reuse on next call
+    python sandbox_exec.py --reset --session session-id          # force a fresh one
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import re
+import shlex
+import stat
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+from dotenv import load_dotenv
+from e2b.sandbox.commands.command_handle import CommandExitException
+from e2b_code_interpreter import Sandbox
+
+logger = logging.getLogger(__name__)
+
+load_dotenv()
+
+# --- Configuration -----------------------------------------------------------
+
+# CUBE_API_URL / CUBE_API_KEY are the canonical names (documented in .env.example).
+# E2B_API_URL / E2B_API_KEY are accepted as legacy aliases so existing deployments
+# that only set the E2B_ names continue to work without changes.
+E2B_API_URL = os.getenv("CUBE_API_URL") or os.getenv("E2B_API_URL", "http://127.0.0.1:3000")
+E2B_API_KEY = os.getenv("CUBE_API_KEY") or os.getenv("E2B_API_KEY", "e2b_000000")
+TEMPLATE_ID = os.getenv("CUBE_TEMPLATE_ID", "")
+
+# Maximum command length to prevent resource exhaustion.
+MAX_COMMAND_LENGTH = 65536
+
+# Maximum code length to prevent resource exhaustion.
+MAX_CODE_LENGTH = 100_000
+
+# Maximum file size (bytes) for --file to prevent host OOM from reading huge files.
+MAX_FILE_LENGTH = 10 * 1024 * 1024  # 10 MB
+
+# Allowed directories for file operations.  Defaults to cwd so the script
+# works out-of-the-box in a project directory, but note that running from
+# / or /etc would open those entire trees.  In production set
+# ALLOWED_READ_DIRS explicitly (colon-separated list) so the directory
+# boundary is intentional and auditable.  The --file guard is the only
+# filesystem boundary between the host and the sandbox; there is no
+# chroot or mount namespace here.
+_ALLOWED_READ_DIRS = [Path.cwd()]
+if os.getenv("ALLOWED_READ_DIRS"):
+    for d in os.getenv("ALLOWED_READ_DIRS", "").split(":"):
+        if d:
+            _ALLOWED_READ_DIRS.append(Path(d).resolve())
+
+# PEP 508 package name validator — compiled once at module load.
+_PACKAGE_NAME_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$|^[A-Za-z0-9]$")
+
+# The session file lives under gettempdir() so `mktemp`/`/tmp` rotations can
+# reclaim it, but is scoped to the invoking UID and locked down with 0600 so
+# other users on a shared host cannot *read* it.  The O_NOFOLLOW + S_ISREG
+# double-check guards against symlink races that would otherwise let an attacker
+# point us at an arbitrary file before the write happens.
+#
+# Caveat — TOCTOU in the retry loop: between the FileExistsError unlink() and
+# the retry open(), a local attacker who can predict or observe SESSION_FILE
+# may re-create a symlink at the path.  O_NOFOLLOW makes open() fail with
+# ELOOP rather than following the link, but a persistent attacker can keep
+# re-creating the symlink and cause repeated failures.  The retry loop
+# mitigates but does not eliminate this window.  On a shared cluster where
+# untrusted users share a host's /tmp, use per-invocation sandboxes without
+# --keep-alive to avoid the session-file path entirely.
+SESSION_FILE = Path(tempfile.gettempdir()) / f"cubesandbox_codebuddy_session_{os.getuid()}"
+
+# Thread lock for sandbox access (prevents race conditions in multi-threaded usage).
+_sandbox_lock = threading.Lock()
+
+# In-process cache so consecutive --keep-alive calls inside the same Python
+# interpreter don't pay cold-start cost. Cross-process reuse goes through
+# SESSION_FILE.
+_sandbox: "Sandbox | None" = None
+
+
+def _write_session(sandbox_id: str) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+
+    # ELOOP means the path resolved to a symlink. This can happen in a
+    # TOCTOU window: between the FileExistsError unlink() and the retry
+    # open(), a hostile or coincidental symlink may appear at the path.
+    # A short retry gives the legitimate file a chance to win while
+    # preserving O_NOFOLLOW's guarantee that we never follow a symlink.
+    for attempt in range(3):
+        try:
+            fd = os.open(SESSION_FILE, flags, 0o600)
+        except FileExistsError:
+            # O_EXCL fails if file exists — unlink and retry.
+            SESSION_FILE.unlink(missing_ok=True)
+            continue
+        except OSError as e:
+            if hasattr(e, "errno") and e.errno == 40:  # ELOOP - symlink race
+                time.sleep(0.05 * (attempt + 1))  # brief backoff
+                continue
+            raise
+        break
+    else:
+        raise OSError(f"could not create session file after retries: {SESSION_FILE}")
+
+    try:
+        # Immediately verify it's a regular file before writing
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(f"session file is not a regular file: {SESSION_FILE}")
+        os.ftruncate(fd, 0)
+        os.write(fd, sandbox_id.encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _read_session() -> str | None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(SESSION_FILE, flags)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        with os.fdopen(fd, "r", encoding="utf-8") as fp:
+            value = fp.read().strip()
+            return value or None
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _get_sandbox(timeout: int = 300) -> "Sandbox":
+    """Get or create a reusable sandbox, reconnecting via session file when possible."""
+    global _sandbox
+    with _sandbox_lock:
+        if _sandbox is not None:
+            try:
+                _sandbox.set_timeout(timeout)  # refresh TTL
+                return _sandbox
+            except Exception:
+                try:
+                    _sandbox.kill()
+                except Exception:
+                    # Orphaned sandbox — set_timeout and kill both failed.
+                    # Log for operator visibility; the sandbox will remain alive
+                    # on the cluster until its TTL expires.
+                    logger.warning(
+                        "Failed to set timeout and kill sandbox; "
+                        "sandbox may be orphaned (id=%s)",
+                        getattr(_sandbox, "sandbox_id", "unknown")
+                    )
+                _sandbox = None
+
+        # Try cross-process reuse first.
+        sandbox_id = _read_session()
+        if sandbox_id:
+            try:
+                _sandbox = Sandbox.connect(sandbox_id)
+                _sandbox.set_timeout(timeout)
+                return _sandbox
+            except Exception:
+                SESSION_FILE.unlink(missing_ok=True)
+
+        if not TEMPLATE_ID:
+            raise SystemExit(
+                "CUBE_TEMPLATE_ID is not set. Set it in your .env or pass it via the environment."
+            )
+        _sandbox = Sandbox.create(TEMPLATE_ID, timeout=timeout)
+        _write_session(_sandbox.sandbox_id)
+        return _sandbox
+
+
+def _run(sandbox: "Sandbox", cmd: str, timeout: int = 120):
+    """Run a command in the sandbox, normalizing non-zero exits into a result object.
+
+    The e2b / cubesandbox SDK raises CommandExitException on non-zero exits;
+    swallowing it here lets callers handle success / failure uniformly instead
+    of catching at every call site.
+    """
+    try:
+        return sandbox.commands.run(cmd, timeout=timeout)
+    except CommandExitException as exc:
+        return exc
+
+
+# --- Public API --------------------------------------------------------------
+
+def exec_code(code: str, pip_packages: list[str] | None = None, timeout: int = 120) -> str:
+    """Execute Python code in the sandbox and return stdout (or stderr on failure)."""
+    if not isinstance(code, str):
+        return "[error] code must be a string"
+    if len(code) > MAX_CODE_LENGTH:
+        return f"[error] code exceeds maximum length of {MAX_CODE_LENGTH} bytes"
+    if not code.strip():
+        return "[error] code cannot be empty"
+
+    # Validate pip package names to prevent injection via malicious package names.
+    # Accept only simple names (letters, digits, hyphens, underscores, periods)
+    # following PEP 508 package name specification.
+    if pip_packages:
+        for pkg in pip_packages:
+            if not isinstance(pkg, str) or not _PACKAGE_NAME_RE.match(pkg):
+                return f"[error] invalid pip package name: {pkg!r}"
+            if len(pkg) > 128:  # PEP 508 recommends max 214 chars, be conservative
+                return f"[error] pip package name too long: {pkg!r}"
+
+    sandbox = _get_sandbox(timeout + 60)
+    if pip_packages:
+        r = _run(
+            sandbox,
+            "pip install " + " ".join(shlex.quote(p) for p in pip_packages),
+            timeout=60,
+        )
+        if r.exit_code != 0:
+            return f"[pip error] command failed (exit {r.exit_code})"
+    result = _run(sandbox, f"python3 -c {shlex.quote(code)}", timeout=timeout)
+    if result.exit_code == 0:
+        return result.stdout or ""
+    return f"[error] exit code {result.exit_code}"
+
+
+def exec_file(filepath: str, timeout: int = 120) -> str:
+    """Copy a local file into the sandbox and execute it.
+
+    Security: filepath is validated to be within allowed directories before reading.
+    Symlinks and absolute paths outside allowed directories are rejected.
+    """
+    # Resolve and validate the filepath
+    try:
+        resolved = Path(filepath).resolve()
+    except (ValueError, OSError):
+        return "[error] invalid filepath"
+
+    # Reject symlinks at the leaf — os.open with O_NOFOLLOW will also reject
+    # symlinks on intermediate components, but checking the leaf first keeps the
+    # error message clear and avoids hitting the OS penalty for deep paths.
+    try:
+        if Path(filepath).is_symlink():
+            return "[error] symlinks not allowed"
+    except (ValueError, OSError):
+        pass
+
+    # Check if path is within any allowed directory (use separator guard to prevent
+    # /workspace matching /workspace_evil)
+    if not any(
+        str(resolved).startswith(str(d) + os.sep) or str(resolved) == str(d)
+        for d in _ALLOWED_READ_DIRS
+    ):
+        return "[error] filepath not in allowed directories"
+
+    sandbox = _get_sandbox(timeout + 60)
+    fd = None
+    try:
+        fd = os.open(filepath, os.O_RDONLY | os.O_NOFOLLOW)
+        st = os.fstat(fd)
+        if st.st_size > MAX_FILE_LENGTH:
+            return f"[error] file exceeds maximum size of {MAX_FILE_LENGTH} bytes"
+        try:
+            raw = os.read(fd, st.st_size)
+        except OSError:
+            return "[error] cannot read file"
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return "[error] file is not valid UTF-8"
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+    sandbox.files.write("/tmp/codebuddy_script.py", content)
+    result = _run(sandbox, "python3 /tmp/codebuddy_script.py", timeout=timeout)
+    if result.exit_code == 0:
+        return result.stdout or ""
+    return f"[error] exit code {result.exit_code}"
+
+
+def exec_cmd(command: str, timeout: int = 120) -> str:
+    """Execute an arbitrary shell command in the sandbox.
+
+    Note: Commands are executed inside an isolated MicroVM, so the blast
+    radius of a malicious command is limited to that sandbox. However, be
+    aware that:
+    - The sandbox may have access to API keys injected via environment.
+    - Resource exhaustion attacks (infinite loops, memory allocation) are possible.
+    """
+    if not isinstance(command, str):
+        return "[error] command must be a string"
+    if len(command) > MAX_COMMAND_LENGTH:
+        return f"[error] command exceeds maximum length of {MAX_COMMAND_LENGTH} bytes"
+    if not command.strip():
+        return "[error] empty command"
+
+    sandbox = _get_sandbox(timeout + 60)
+    result = _run(sandbox, command, timeout=timeout)
+    if result.exit_code == 0:
+        return result.stdout or ""
+    return f"[error] exit code {result.exit_code}"
+
+
+def r_stderr(result) -> str:
+    """Extract stderr from a result object, sanitizing internal details."""
+    stderr = getattr(result, "stderr", None)
+    if stderr:
+        # Truncate to prevent large error output from leaking internal details
+        return stderr[:2048].strip()
+    exit_code = getattr(result, "exit_code", None)
+    if exit_code is not None:
+        return f"exit code {exit_code}"
+    return "unknown error"
+
+
+def cleanup() -> None:
+    """Destroy the cached sandbox and clear the session file."""
+    global _sandbox
+    with _sandbox_lock:
+        if _sandbox is not None:
+            try:
+                _sandbox.kill()
+            except Exception:
+                pass
+            _sandbox = None
+        try:
+            SESSION_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+# --- CLI ---------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Execute code or shell commands in an isolated CubeSandbox MicroVM."
+    )
+    parser.add_argument("--code", help="Python code to execute")
+    parser.add_argument("--file", help="Local Python file to copy into the sandbox and execute")
+    parser.add_argument("--cmd", help="Shell command to execute")
+    parser.add_argument("--pip", nargs="+", help="Pip packages to install before --code")
+    parser.add_argument("--timeout", type=int, default=120, help="Execution timeout in seconds")
+    parser.add_argument(
+        "--keep-alive",
+        action="store_true",
+        help="Keep the sandbox alive after this invocation so the next call "
+             "can reconnect via the session file instead of cold-starting. "
+             "On shared hosts where untrusted users share /tmp, prefer "
+             "per-invocation mode to avoid the session-file TOCTOU window.",
+    )
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="Destroy the cached sandbox before running, then exit.",
+    )
+    parser.add_argument(
+        "--session",
+        default=None,
+        help="(Reserved) per-session identifier. Currently unused — session reuse "
+             "is process-global. Documented so future per-session sandboxes "
+             "do not break callers.",
+    )
+    args = parser.parse_args()
+
+    if args.reset:
+        cleanup()
+        print("Sandbox destroyed. A new one will be created on next use.")
+        return
+
+    if not any((args.code, args.file, args.cmd)):
+        parser.print_help()
+        sys.exit(2)
+
+    if not TEMPLATE_ID:
+        print("Error: CUBE_TEMPLATE_ID not set in .env", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        if args.code:
+            print(exec_code(args.code, args.pip, args.timeout))
+        elif args.file:
+            print(exec_file(args.file, args.timeout))
+        elif args.cmd:
+            print(exec_cmd(args.cmd, args.timeout))
+    finally:
+        if not args.keep_alive:
+            cleanup()
+
+
+if __name__ == "__main__":
+    main()

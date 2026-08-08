@@ -1,0 +1,5 @@
+e2b>=2.4.1
+e2b-code-interpreter>=1.0.0
+cubesandbox>=0.3.0
+python-dotenv>=1.0.0
+pytest>=8.0.0
