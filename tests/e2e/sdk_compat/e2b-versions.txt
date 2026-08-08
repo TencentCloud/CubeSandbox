@@ -1,23 +1,31 @@
-# E2B Python SDK versions exercised by scripts/run_e2b_version_matrix.py.
+# E2B Python SDK versions this suite has been validated against.
 #
 # One pip requirement per line; blank lines and '#' comments are ignored. A line
-# may install more than one package, e.g.:
+# may pin more than one package, e.g.:
 #
 #   e2b==2.29.5 e2b-code-interpreter==2.9.0
 #
-# When a row does not install e2b-code-interpreter, the runner deselects the
-# run_code cases for that row and says so in the generated table.
+# Purpose: give consumers a stated compatibility range per CubeSandbox release
+# instead of leaving them to discover breakage in production. Install one line
+# into a fresh virtualenv, run the suite (see "E2B SDK Compatibility" in the
+# README), and record the outcome here when cutting a release.
 #
-# Keep the list short and meaningful — the point is to state a supported range,
-# not to test every release:
-#   * an old known-good version, so regressions in the compatibility surface show up
-#   * versions consumers reported problems with
-#   * the current latest
+# Keep the list short and meaningful: an old known-good version, versions
+# consumers reported problems with, and the current latest.
 #
-# Update this file when a new E2B minor ships, and publish the generated
-# reports/e2b-matrix/matrix.md with the CubeSandbox release notes.
-
+# Validated against CubeSandbox v0.5.1 (release, commit a164417) by a downstream
+# consumer, 2026-07-22 — commands.run, files.write, background + wait, on_stdout
+# streaming:
 e2b==2.21.0
 e2b==2.26.0
 e2b==2.29.5
+
+# Not yet validated by anyone; listed as the current upper bound to check when
+# cutting the next release:
 e2b==2.35.0
+
+# Known-bad, kept as a record rather than a target: on v0.5.1-rc5 (envd
+# self-reporting 0.5.11, the same string the working release reports),
+# e2b 2.26 and 2.29 hung silently in commands.run and the SDK timeout did not
+# fire. The pairing to watch is (CubeSandbox release, e2b version) — envd's own
+# version string does not distinguish the two builds.

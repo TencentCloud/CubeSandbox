@@ -176,50 +176,37 @@ export SDK_E2E_BACKENDS=e2b,cubesandbox
 pytest --run-e2e
 ```
 
-## E2B Version Matrix
+## E2B SDK Compatibility
 
-A single environment can only hold one version of a package, so the runs above
-validate whichever E2B SDK version happens to be installed. To state a
-*supported range* instead, `scripts/run_e2b_version_matrix.py` builds one
-virtualenv per pinned requirement, runs the same case selection against the same
-live backend in each, and merges the outcomes into one table:
+A single environment can only hold one version of a package, so any run above
+validates whichever E2B SDK version happens to be installed. `e2b-versions.txt`
+records the versions this suite is known to have been run against, so a consumer
+reading it can tell which SDK versions are expected to work with a given
+CubeSandbox release instead of discovering it by outage.
 
-```bash
-export CUBE_API_URL=http://127.0.0.1:3000
-export CUBE_TEMPLATE_ID=tpl-xxxxxxxxxxxxxxxxxxxxxxxx
-export E2B_API_KEY=<api-key-accepted-by-your-endpoint>
-
-python3 scripts/run_e2b_version_matrix.py --label v0.6.0
-```
-
-The versions live in `e2b-versions.txt`, one pip requirement per line; edit that
-file when a new E2B minor ships. Results are written to
-`reports/e2b-matrix/matrix.md` (publishable as-is, e.g. with the release notes)
-and `matrix.json` (machine readable), with failing case IDs listed per version.
+To check one version, install it and run the suite normally:
 
 ```bash
-# Preview the plan without creating environments or running tests
-python3 scripts/run_e2b_version_matrix.py --dry-run
-
-# One-off versions, wider selection, report instead of gate
-python3 scripts/run_e2b_version_matrix.py \
-  --spec 'e2b==2.29.5' --spec 'e2b==2.35.0' \
-  -m "smoke or p0 or p1" --exit-zero
-
-# Pair the core SDK with the code interpreter package
-python3 scripts/run_e2b_version_matrix.py --spec 'e2b==2.29.5 e2b-code-interpreter==2.9.0'
+pip install 'e2b==2.29.5'          # or a pinned e2b-code-interpreter
+pytest --run-e2e --sdk-e2e-backends=e2b -m "smoke or p0"
 ```
 
-Notes:
+Repeat per version in a fresh virtualenv, and record the outcome in
+`e2b-versions.txt` when cutting a release.
 
-- A row that does not install `e2b-code-interpreter` cannot run the `run_code`
-  cases. The runner deselects them for that row and says so in the table's Notes
-  column, rather than reporting a green row on quietly reduced coverage.
-- Virtualenvs are cached in `.venv-matrix/` and reused; pass `--recreate` to
-  rebuild them.
-- The exit code is non-zero when any version fails, so the matrix can gate a
-  release job; use `--exit-zero` for report-only runs.
-- Extra pytest flags need the dash attached, e.g. `--pytest-arg=-x`.
+Notes that make the matrix more than a version list:
+
+- **A version string is not a compatibility signal.** `e2b` 2.26/2.29
+  `commands.run` hung silently against envd on v0.5.1-rc5 (the SDK's own timeout
+  did not fire), and worked on the v0.5.1 release — while envd self-reported
+  `0.5.11` on both builds. Compatibility therefore has to be stated per
+  CubeSandbox release, not derived from envd's version.
+- **`e2b-code-interpreter` versions its own way.** Its 2.9.0 requires
+  `e2b>=2.26.0,<3.0.0`, so a row pinning an older `e2b` cannot also take the
+  current interpreter package — the `run_code` cases are unavailable there.
+- **Cases that need the interpreter.** Rows without `e2b-code-interpreter`
+  should deselect the `run_code` marker (`-m "(smoke or p0) and not run_code"`)
+  rather than report failures that are really a missing package.
 
 ## Environment
 
@@ -419,9 +406,8 @@ tests/e2e/sdk_compat/
   adapters/      # SDK-specific shims over a shared adapter interface
   framework/     # config, preflight, capability flags, cleanup, reporting
   cases/         # backend-neutral cases split by capability domain
-  scripts/       # runners that drive pytest, e.g. the E2B version matrix
   reports/       # local JSONL events, ignored except reports/.gitignore
-  e2b-versions.txt  # E2B SDK versions the matrix runner declares support for
+  e2b-versions.txt  # E2B SDK versions this suite has been validated against
 ```
 
 Current capability domains:

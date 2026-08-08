@@ -161,45 +161,32 @@ export SDK_E2E_BACKENDS=e2b,cubesandbox
 pytest --run-e2e
 ```
 
-## E2B 版本矩阵
+## E2B SDK 兼容性
 
-同一个环境里同一个包只能装一个版本，因此上面的执行方式只能验证“当前恰好装着的那个”
-E2B SDK 版本。如果要给出**受支持的版本区间**，使用
-`scripts/run_e2b_version_matrix.py`：它为每一条固定的 pip 依赖创建独立虚拟环境，在
-同一套用例选择、同一个实时后端上分别执行，最后汇总成一张表：
+同一个环境里同一个包只能装一个版本，因此上面任何一种执行方式验证的都只是"当前恰好装
+着的那个"版本。`e2b-versions.txt` 记录本套件实际验证过的版本，使用者读它即可判断某个
+CubeSandbox 版本预期能配合哪些 SDK 版本，而不必等线上故障才发现。
 
-```bash
-export CUBE_API_URL=http://127.0.0.1:3000
-export CUBE_TEMPLATE_ID=tpl-xxxxxxxxxxxxxxxxxxxxxxxx
-export E2B_API_KEY=<目标环境接受的 API key>
-
-python3 scripts/run_e2b_version_matrix.py --label v0.6.0
-```
-
-版本列表维护在 `e2b-versions.txt`，每行一条 pip 依赖；E2B 发布新的 minor 版本时更新
-该文件即可。结果写入 `reports/e2b-matrix/matrix.md`（可直接发布，例如随 release notes
-一起发出）和 `matrix.json`（机器可读），并按版本列出失败的用例 ID。
+验证某个版本时，装上它再照常执行：
 
 ```bash
-# 只打印执行计划，不创建环境、不跑测试
-python3 scripts/run_e2b_version_matrix.py --dry-run
-
-# 临时指定版本、扩大用例范围、只出报告不作为门禁
-python3 scripts/run_e2b_version_matrix.py \
-  --spec 'e2b==2.29.5' --spec 'e2b==2.35.0' \
-  -m "smoke or p0 or p1" --exit-zero
-
-# 核心 SDK 与 code interpreter 包配对安装
-python3 scripts/run_e2b_version_matrix.py --spec 'e2b==2.29.5 e2b-code-interpreter==2.9.0'
+pip install 'e2b==2.29.5'          # 或配对固定的 e2b-code-interpreter
+pytest --run-e2e --sdk-e2e-backends=e2b -m "smoke or p0"
 ```
 
-注意事项：
+每个版本在独立虚拟环境中重复一次，发版时把结果记入 `e2b-versions.txt`。
 
-- 未安装 `e2b-code-interpreter` 的行无法执行 `run_code` 用例。脚本会为该行自动排除这些
-  用例，并在表格的 Notes 列中写明，而不是在悄悄缩小覆盖面的情况下报绿。
-- 虚拟环境缓存在 `.venv-matrix/` 下并会复用，需要重建时加 `--recreate`。
-- 只要有任一版本失败，退出码即非 0，可直接用作发布门禁；仅出报告时使用 `--exit-zero`。
-- 透传给 pytest 的参数需要连着写短横线，例如 `--pytest-arg=-x`。
+几条让这份清单不只是版本号的说明：
+
+- **版本号本身不是兼容性信号。** `e2b` 2.26/2.29 的 `commands.run` 在 v0.5.1-rc5 的
+  envd 上静默挂死（SDK 自带的 timeout 不生效），在 v0.5.1 正式版上正常——而两个构建里
+  envd 自报的版本都是 `0.5.11`。所以兼容性必须按 CubeSandbox 版本声明，不能从 envd
+  版本推导。
+- **`e2b-code-interpreter` 有自己的版本序列。** 它的 2.9.0 要求
+  `e2b>=2.26.0,<3.0.0`，因此固定较低 `e2b` 版本的组合无法同时使用当前的 interpreter
+  包，该组合下 `run_code` 用例不可用。
+- **依赖 interpreter 的用例。** 未安装 `e2b-code-interpreter` 的组合应显式排除
+  `run_code`（`-m "(smoke or p0) and not run_code"`），而不是把"缺包"报成失败。
 
 ## 环境变量
 
@@ -398,9 +385,8 @@ tests/e2e/sdk_compat/
   framework/      配置、preflight、capability、清理、报告
   cases/          按 capability domain 划分的后端无关用例
   docs/           框架设计、用例编写、覆盖盘点与优化建议
-  scripts/        驱动 pytest 的执行脚本，例如 E2B 版本矩阵
   reports/        本地 JSONL 报告
-  e2b-versions.txt  版本矩阵声明支持的 E2B SDK 版本
+  e2b-versions.txt  本套件已验证过的 E2B SDK 版本
   README.md
   README_zh.md
 ```
