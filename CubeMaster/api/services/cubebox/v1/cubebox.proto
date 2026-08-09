@@ -620,6 +620,9 @@ message EgressRuleMatch {
   repeated string method = 4;
   optional string path = 5;
   optional string scheme = 7;
+  // L7 destination port. When set, `scheme` MUST also be set — together they
+  // pin the (host, port, scheme) tuple CubeEgress intercepts.
+  optional int32 port = 8;
 }
 
 message EgressRuleAction {

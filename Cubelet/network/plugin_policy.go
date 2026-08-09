@@ -67,13 +67,18 @@ func mapRunRequestEgressRuleMatch(in *cubebox.EgressRuleMatch) *networkruntime.E
 	if in == nil {
 		return nil
 	}
-	return &networkruntime.EgressRuleMatch{
+	out := &networkruntime.EgressRuleMatch{
 		SNI:    in.Sni,
 		Host:   in.Host,
 		Method: append([]string(nil), in.GetMethod()...),
 		Path:   in.Path,
 		Scheme: in.Scheme,
 	}
+	if in.Port != nil {
+		p := int(*in.Port)
+		out.Port = &p
+	}
+	return out
 }
 
 func mapRunRequestEgressRuleAction(in *cubebox.EgressRuleAction) *networkruntime.EgressRuleAction {

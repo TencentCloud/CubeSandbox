@@ -73,13 +73,18 @@ func toMatchInput(m *EgressRuleMatch) *cubeegress.MatchInput {
 	if m == nil {
 		return nil
 	}
-	return &cubeegress.MatchInput{
+	out := &cubeegress.MatchInput{
 		SNI:    m.SNI,
 		Host:   m.Host,
 		Method: append([]string(nil), m.Method...),
 		Path:   m.Path,
 		Scheme: m.Scheme,
 	}
+	if m.Port != nil {
+		p := *m.Port
+		out.Port = &p
+	}
+	return out
 }
 
 // toActionInput deep-copies the action section, including header-injection

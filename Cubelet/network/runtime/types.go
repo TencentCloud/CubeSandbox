@@ -122,12 +122,20 @@ type EgressRule struct {
 
 // EgressRuleMatch holds the per-request match conditions for an EgressRule.
 // All fields are optional; an empty match matches any request.
+//
+// Port and Scheme together control which TCP port CubeEgress intercepts on the
+// sandbox side. When both are omitted the rule applies to the default set
+// {80/http, 443/https}. When Port is set, Scheme MUST also be set to "http" or
+// "https" — every rule for the same (host, port) tuple must agree on the
+// scheme, because iptables can only steer a single tuple to one TPROXY
+// listener.
 type EgressRuleMatch struct {
 	SNI    *string  `json:"sni,omitempty"`
 	Host   *string  `json:"host,omitempty"`
 	Method []string `json:"method,omitempty"`
 	Path   *string  `json:"path,omitempty"`
 	Scheme *string  `json:"scheme,omitempty"`
+	Port   *int     `json:"port,omitempty"`
 }
 
 // EgressRuleAction holds the action taken when an EgressRule matches.

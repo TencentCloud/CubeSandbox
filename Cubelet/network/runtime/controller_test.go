@@ -5,9 +5,11 @@ import (
 	"errors"
 	"net"
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
+	"github.com/tencentcloud/CubeSandbox/CubeNet/cubevs"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/network/runtime/systemnet"
 )
 
@@ -759,4 +761,92 @@ func TestNewNetworkControllerFromDepsRequiresAdapters(t *testing.T) {
 	}); err == nil {
 		t.Fatal("expected missing adapter error")
 	}
+}
+
+func TestLoadL7MarksConfig(t *testing.T) {
+	withPath := func(t *testing.T, content *string) {
+		t.Helper()
+		old := l7MarksConfigPath
+		t.Cleanup(func() { l7MarksConfigPath = old })
+		if content == nil {
+			l7MarksConfigPath = filepath.Join(t.TempDir(), "absent.conf")
+			return
+		}
+		p := filepath.Join(t.TempDir(), "l7-marks.conf")
+		if err := os.WriteFile(p, []byte(*content), 0o644); err != nil {
+			t.Fatalf("write temp conf: %v", err)
+		}
+		l7MarksConfigPath = p
+	}
+
+	t.Run("absent file leaves defaults", func(t *testing.T) {
+		withPath(t, nil)
+		var p cubevs.Params
+		if err := loadL7MarksConfig(&p); err != nil {
+			t.Fatalf("absent file: %v", err)
+		}
+		if p.L7MarkHTTP != 0 || p.L7MarkHTTPS != 0 || p.L7MarkMask != 0 {
+			t.Fatalf("absent file set marks: %+v", p)
+		}
+	})
+
+	t.Run("override is applied", func(t *testing.T) {
+		conf := "# comment\nCUBE_L7_MARK_HTTP=0xCF010000\nCUBE_L7_MARK_HTTPS=0xCF020000\nCUBE_L7_MARK_MASK=0xFFFF0000\n"
+		withPath(t, &conf)
+		var p cubevs.Params
+		if err := loadL7MarksConfig(&p); err != nil {
+			t.Fatalf("override: %v", err)
+		}
+		if p.L7MarkHTTP != 0xCF010000 || p.L7MarkHTTPS != 0xCF020000 || p.L7MarkMask != 0xFFFF0000 {
+			t.Fatalf("override: got http=%#x https=%#x mask=%#x", p.L7MarkHTTP, p.L7MarkHTTPS, p.L7MarkMask)
+		}
+	})
+
+	t.Run("partial override keeps others zero", func(t *testing.T) {
+		conf := "CUBE_L7_MARK_HTTP=0xCF030000\n"
+		withPath(t, &conf)
+		var p cubevs.Params
+		if err := loadL7MarksConfig(&p); err != nil {
+			t.Fatalf("partial: %v", err)
+		}
+		if p.L7MarkHTTP != 0xCF030000 || p.L7MarkHTTPS != 0 || p.L7MarkMask != 0 {
+			t.Fatalf("partial: got http=%#x https=%#x mask=%#x", p.L7MarkHTTP, p.L7MarkHTTPS, p.L7MarkMask)
+		}
+	})
+
+	t.Run("malformed value errors", func(t *testing.T) {
+		conf := "CUBE_L7_MARK_HTTP=not-a-number\n"
+		withPath(t, &conf)
+		var p cubevs.Params
+		if err := loadL7MarksConfig(&p); err == nil {
+			t.Fatal("malformed value was not rejected")
+		}
+	})
+
+	t.Run("export-prefixed key is honored", func(t *testing.T) {
+		// Shell-legal `export KEY=value` must not be silently ignored —
+		// otherwise the dataplane stamps a different mark than iptables
+		// matches.
+		conf := "export CUBE_L7_MARK_HTTP=0xCF010000\nexport CUBE_L7_MARK_MASK=0xFFFF0000\n"
+		withPath(t, &conf)
+		var p cubevs.Params
+		if err := loadL7MarksConfig(&p); err != nil {
+			t.Fatalf("export-prefixed: %v", err)
+		}
+		if p.L7MarkHTTP != 0xCF010000 || p.L7MarkMask != 0xFFFF0000 {
+			t.Fatalf("export-prefixed: got http=%#x mask=%#x", p.L7MarkHTTP, p.L7MarkMask)
+		}
+	})
+
+	t.Run("inline comment on value is stripped", func(t *testing.T) {
+		conf := "CUBE_L7_MARK_HTTP=0xCF030000 # http listener mark\n"
+		withPath(t, &conf)
+		var p cubevs.Params
+		if err := loadL7MarksConfig(&p); err != nil {
+			t.Fatalf("inline comment: %v", err)
+		}
+		if p.L7MarkHTTP != 0xCF030000 {
+			t.Fatalf("inline comment: got http=%#x", p.L7MarkHTTP)
+		}
+	})
 }
