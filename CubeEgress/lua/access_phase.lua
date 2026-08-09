@@ -68,6 +68,7 @@
 -- deployments use "skipped" + admin API for policy installation.
 
 local policy = require "policy"
+local port_scheme = require "port_scheme"
 
 local _M = {}
 
@@ -143,8 +144,11 @@ local function rule_matches(m, ctx)
     if m.path ~= nil then
         if not path_match(m.path, ctx.path) then return false end
     end
-    if m.scheme ~= nil then
-        if string.lower(m.scheme) ~= ctx.scheme then return false end
+    -- Port and scheme form one semantic constraint. Omitted fields mean the
+    -- backward-compatible default set {80/http,443/https}, not a wildcard
+    -- over every custom port intercepted for the same host.
+    if not port_scheme.matches(m.port, m.scheme, ctx.dst_port, ctx.scheme) then
+        return false
     end
     return true
 end
@@ -294,6 +298,13 @@ local function build_ctx()
         method       = ngx.var.request_method,
         path         = ngx.var.uri,
         dst_ip       = dst_ip,
+        -- dst_port is the original sandbox-side destination port preserved
+        -- by TPROXY. In an IP_TRANSPARENT listener, nginx's $server_port is
+        -- read via getsockname() on the tproxy socket, which reports the
+        -- ORIGINAL dst — not the 8080/8443 listener port we bind to. Used
+        -- by rule_matches() to enforce match.port constraints on rules that
+        -- pin to a custom port (e.g. tcp/8443 for an internal API).
+        dst_port     = tonumber(ngx.var.server_port),
         scheme       = ngx.var.scheme,
     }
 end
@@ -408,6 +419,7 @@ function _M.decide()
         method           = ctx.method,
         path             = ctx.path,
         dst_ip           = ctx.dst_ip,
+        dst_port         = ctx.dst_port,
         scheme           = ctx.scheme,
         policy_id        = nil,
         rule_id          = nil,

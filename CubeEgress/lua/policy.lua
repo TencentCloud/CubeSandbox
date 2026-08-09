@@ -19,6 +19,7 @@ local cjson = require "cjson.safe"
 -- resty.openssl.digest is already used by cert_signer.lua (sha256 leaf
 -- signing), so the runtime cost of pulling it in here is amortized.
 local digest_lib = require "resty.openssl.digest"
+local port_scheme = require "port_scheme"
 
 local _M = {}
 
@@ -31,6 +32,7 @@ local INDEX_LOCK_TIMEOUT_MS = 1000
 -- per-entry limit; anything larger is almost certainly a misconfiguration
 -- (and would bloat policy_store fast).
 local SECRET_MAX_BYTES = 65536
+local MAX_L7_PORTS_PER_HOST = 8
 
 -- ---------- validation ----------
 
@@ -50,8 +52,114 @@ local function is_valid_sandbox_ip(s)
     return true
 end
 
+-- Strict IPv4 (+optional /prefix) parse, mirroring Go's netip acceptance:
+-- no leading zeros, octets <= 255, prefix <= 32. Returns the canonical
+-- dotted-quad and prefix (default 32), or nil.
+local function parse_ipv4_cidr(s)
+    local a, b, c, d, prefix = string.match(s, "^([0-9]+)%.([0-9]+)%.([0-9]+)%.([0-9]+)/([0-9]+)$")
+    if not a then
+        a, b, c, d = string.match(s, IPV4_PATTERN)
+    end
+    if not a then return nil end
+    local octets = {}
+    for _, octet in ipairs({a, b, c, d}) do
+        if #octet > 1 and string.sub(octet, 1, 1) == "0" then return nil end
+        local n = tonumber(octet)
+        if not n or n > 255 then return nil end
+        octets[#octets + 1] = tostring(n)
+    end
+    if prefix then
+        prefix = tonumber(prefix)
+        if not prefix or prefix > 32 then return nil end
+    else
+        prefix = 32
+    end
+    return table.concat(octets, "."), prefix
+end
+
+-- Canonicalize a rule host/sni for conflict-detection aggregation.
+-- Returns the canonical identity, or (nil, reason) when the value must be
+-- rejected outright. Kept in lock-step with Go's l7GroupKey/classifyL7Target:
+--   - DNS names: lowercase + strip one trailing dot (no whitespace trim on
+--     either side — padded values are rejected, not repaired).
+--   - "1.2.3.4" and "1.2.3.4/32" map to the same identity (Go groups both
+--     via parseCIDR), so a per-(host,port) scheme conflict between the two
+--     spellings is detected instead of bypassed.
+--   - Subnet CIDRs (prefixlen < 32) are rejected, as Go's classifyL7Target
+--     does: an L7 rule pins exactly one (host, port) listener tuple, and a
+--     subnet can never appear in an HTTP Host header or TLS SNI anyway.
+local function normalize_identity(value)
+    if type(value) ~= "string" or value == "" then return nil, "empty" end
+    -- Reject whitespace-padded values: request-time matching compares the
+    -- raw host/sni, so a padded identity would validate yet never match —
+    -- fail fast instead of accepting a dead rule.
+    if string.find(value, "^%s") or string.find(value, "%s$") then
+        return nil, "leading or trailing whitespace"
+    end
+    local identity = string.gsub(string.lower(value), "%.$", "")
+    if identity == "" then return nil, "empty" end
+
+    if string.find(identity, "/", 1, true) then
+        -- CIDR notation: only a /32 IPv4 literal is meaningful here.
+        local ip, prefix = parse_ipv4_cidr(identity)
+        if not ip then return nil, "invalid CIDR notation" end
+        if prefix < 32 then return nil, "subnet CIDR is not a valid L7 host" end
+        return ip
+    end
+    -- Dotted-quad-shaped values (digits and dots only) must be valid IPv4;
+    -- canonicalize so bare and /32 spellings aggregate identically.
+    if string.match(identity, "^[0-9.]+$") then
+        local ip = parse_ipv4_cidr(identity)
+        if not ip then return nil, "invalid IPv4 address" end
+        return ip
+    end
+    return identity
+end
+
+local function validate_match_tuples(match, rule_index, identities)
+    local tuples, err = port_scheme.expand(match.port, match.scheme)
+    if not tuples then
+        return false, string.format("rules[%d].match.%s", rule_index, err)
+    end
+
+    -- When both identities are present, Host is the policy aggregation key;
+    -- otherwise SNI is used. Request-time matching still evaluates both fields.
+    local raw_identity = match.host
+    if raw_identity == nil then raw_identity = match.sni end
+    if raw_identity == nil then return true end
+    local identity, identity_err = normalize_identity(raw_identity)
+    if not identity then
+        return false, string.format("rules[%d].match host/sni %q is invalid: %s",
+            rule_index, raw_identity, identity_err or "empty")
+    end
+
+    local state = identities[identity]
+    if not state then
+        state = {count = 0, ports = {}}
+        identities[identity] = state
+    end
+    for _, tuple in ipairs(tuples) do
+        local existing = state.ports[tuple.port]
+        if existing ~= nil and existing ~= tuple.scheme then
+            return false, string.format(
+                "rules[%d].match conflicts for host %q port %d: %s vs %s",
+                rule_index, identity, tuple.port, existing, tuple.scheme)
+        end
+        if existing == nil then
+            state.ports[tuple.port] = tuple.scheme
+            state.count = state.count + 1
+            if state.count > MAX_L7_PORTS_PER_HOST then
+                return false, string.format(
+                    "rules[%d].match exceeds %d L7 port tuples for host %q",
+                    rule_index, MAX_L7_PORTS_PER_HOST, identity)
+            end
+        end
+    end
+    return true
+end
+
 -- Validate policy structure. Returns (true, nil) or (false, err_string).
--- Strict on required fields; permissive on optional (forward-compat).
+-- Strict on required fields; permissive on unrelated optional fields.
 local function validate_policy(p)
     if type(p) ~= "table" then return false, "policy must be an object" end
     if type(p.policy_id) ~= "string" or p.policy_id == "" then
@@ -67,6 +175,7 @@ local function validate_policy(p)
         return false, "policy.rules must have at least one rule"
     end
     local seen_ids = {}
+    local identities = {}
     for i = 1, n do
         local r = p.rules[i]
         if type(r) ~= "table" then
@@ -82,6 +191,8 @@ local function validate_policy(p)
         if type(r.match) ~= "table" then
             return false, "rules[" .. i .. "].match required (object; empty {} allowed)"
         end
+        local match_ok, match_err = validate_match_tuples(r.match, i, identities)
+        if not match_ok then return false, match_err end
         if type(r.action) ~= "table" then
             return false, "rules[" .. i .. "].action required (object)"
         end
