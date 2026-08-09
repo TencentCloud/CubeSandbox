@@ -31,6 +31,16 @@ export type AuditLevel = "full" | "metadata" | "none";
  * Rule match conditions. All fields optional; an empty match matches any
  * request. Semantics: AND across fields, OR within ``method``. Comparisons on
  * sni/host/scheme are case-insensitive (server-enforced).
+ *
+ * ``port`` + ``scheme`` together drive which TCP port CubeEgress intercepts
+ * on the sandbox side. Both must be set together or both omitted:
+ *
+ * - Both omitted → default set ``{80/http, 443/https}`` (backward compatible).
+ * - Both set → CubeEgress intercepts only that (host, port, scheme) tuple.
+ *
+ * Every rule sharing the same ``(host, port)`` MUST agree on ``scheme`` —
+ * a port can only route to one nginx listener (HTTP → 8080, HTTPS → 8443).
+ * The server rejects the whole policy if it detects a mismatch.
  */
 export interface Match {
   sni?: string;
@@ -38,6 +48,7 @@ export interface Match {
   method?: Method[];
   path?: string;
   scheme?: Scheme;
+  port?: number;
 }
 
 /**
@@ -87,13 +98,65 @@ export function renderInject(inject: Inject): string {
   return fmt.replace("${SECRET}", inject.secret);
 }
 
+/**
+ * Normalize *value* (strip + lowercase) and validate against http/https.
+ *
+ * Returns the normalized scheme, or ``undefined`` when *value* is absent.
+ * Scheme matching is case-insensitive across the stack (Lua
+ * ``normalize_scheme`` and cubevs both lowercase/strip), so the SDK
+ * normalizes before the membership check and propagates the clean lowercase
+ * value downstream.
+ */
+function validateScheme(value: unknown, field: string): Scheme | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new Error(`${field} must be 'http' or 'https', got ${JSON.stringify(value)}`);
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized !== "http" && normalized !== "https") {
+    throw new Error(`${field} must be 'http' or 'https', got ${JSON.stringify(value)}`);
+  }
+  return normalized;
+}
+
+/**
+ * Client-side validation of the port/scheme pair, mirroring the Python SDK
+ * contract and the CubeAPI/CubeMaster server-side checks: a set port must be
+ * an integer in [1, 65535] and must be paired with a scheme. Scheme alone
+ * (no port) stays legal — it filters HTTP vs HTTPS on the default {80, 443}
+ * set, which is the classic behavior, not the port-scoped feature.
+ *
+ * Not strictly required (the server would reject the same shape) but catches
+ * typos before the network round-trip.
+ */
+function validateMatchPortScheme(match: Match): void {
+  if (match.port !== undefined) {
+    if (typeof match.port !== "number" || !Number.isInteger(match.port)) {
+      throw new Error(`match.port must be an int, got ${typeof match.port}`);
+    }
+    if (match.port < 1 || match.port > 65535) {
+      throw new Error(`match.port must be in [1, 65535], got ${match.port}`);
+    }
+    if (match.scheme === undefined) {
+      throw new Error("match.port requires match.scheme to be set");
+    }
+  }
+}
+
 function serializeMatch(match: Match): Record<string, unknown> {
+  // Validate and normalize before emitting the wire form so the canonical
+  // lowercase scheme reaches the server regardless of caller casing.
+  const scheme = validateScheme(match.scheme, "match.scheme");
+  validateMatchPortScheme(match);
   const out: Record<string, unknown> = {};
   if (match.sni !== undefined) out.sni = match.sni;
   if (match.host !== undefined) out.host = match.host;
   if (match.method !== undefined) out.method = [...match.method];
   if (match.path !== undefined) out.path = match.path;
-  if (match.scheme !== undefined) out.scheme = match.scheme;
+  if (scheme !== undefined) out.scheme = scheme;
+  if (match.port !== undefined) out.port = match.port;
   return out;
 }
 
