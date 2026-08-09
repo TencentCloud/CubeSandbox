@@ -23,13 +23,13 @@ func reapDNSState() {
 	reapDNSQueryTrack(now)
 }
 
-// reapDNSLearnedPolicies scans allow_out_v2 and removes expired DNS-learned entries.
+// reapDNSLearnedPolicies scans allow_out_v3 and removes expired DNS-learned entries.
 func reapDNSLearnedPolicies(now uint64) {
-	allowOut, err := loadPinnedMap(MapNameAllowOutV2)
+	allowOut, err := loadPinnedMap(MapNameAllowOutV3)
 	if err != nil {
 		enqueueEvent(Event{
 			Error:   err,
-			Message: "failed to load allow_out_v2 map",
+			Message: "failed to load allow_out_v3 map",
 		})
 		return
 	}
@@ -51,13 +51,13 @@ func reapDNSLearnedPolicies(now uint64) {
 	if err := iter.Err(); err != nil {
 		enqueueEvent(Event{
 			Error:   err,
-			Message: "failed to iterate allow_out_v2 map",
+			Message: "failed to iterate allow_out_v3 map",
 		})
 		return
 	}
 }
 
-// reapDNSLearnedPoliciesForInnerMap deletes expired DNS-learned entries from one allow_out_v2 inner map.
+// reapDNSLearnedPoliciesForInnerMap deletes expired DNS-learned entries from one allow_out_v3 inner map.
 func reapDNSLearnedPoliciesForInnerMap(innerMapID uint32, now uint64) error {
 	inner, err := ebpf.NewMapFromID(ebpf.MapID(innerMapID))
 	if err != nil {
@@ -66,12 +66,12 @@ func reapDNSLearnedPoliciesForInnerMap(innerMapID uint32, now uint64) error {
 	defer inner.Close()
 
 	var (
-		key   lpmKey
-		value netPolicyValueV2
+		key   lpmKeyV3
+		value netPolicyValueV3
 	)
 	iter := inner.Iterate()
 	for iter.Next(&key, &value) {
-		if !netPolicyValueV2Expired(value, now) {
+		if !netPolicyValueV3Expired(value, now) {
 			continue
 		}
 		if err := inner.Delete(&key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
@@ -79,7 +79,7 @@ func reapDNSLearnedPoliciesForInnerMap(innerMapID uint32, now uint64) error {
 		}
 	}
 	if err := iter.Err(); err != nil {
-		return fmt.Errorf("failed to iterate allow_out_v2 inner map: %w", err)
+		return fmt.Errorf("failed to iterate allow_out_v3 inner map: %w", err)
 	}
 	return nil
 }

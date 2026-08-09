@@ -8,11 +8,22 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+// L7Target describes one (host-or-CIDR, port, scheme) tuple carried inside
+// MVMOptions.L7AllowOut. Host is either a domain (with optional wildcard) or
+// an IPv4 / IPv4-CIDR literal. Port == 0 with SchemeNone signals the legacy
+// default port set {80/http, 443/https}; when Port > 0, Scheme must be
+// L7SchemeHTTP or L7SchemeHTTPS.
+type L7Target struct {
+	Host   string
+	Port   uint16 // 0 = unspecified (default port set)
+	Scheme uint8  // one of L7SchemeNone / L7SchemeHTTP / L7SchemeHTTPS
+}
+
 type MVMOptions struct {
 	AllowInternetAccess *bool
-	AllowOut            *[]string // CIDR, IP, or domain
-	L7AllowOut          *[]string // CIDR, IP, or domain that requires L7 policy handling
-	DenyOut             *[]string // CIDR or IP
+	AllowOut            *[]string   // CIDR, IP, or domain
+	L7AllowOut          *[]L7Target // Host + optional (port, scheme) for L7 policy handling
+	DenyOut             *[]string   // CIDR or IP
 }
 
 type tapMetadataMapOps interface {

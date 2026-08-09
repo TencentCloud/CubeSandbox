@@ -24,7 +24,7 @@ static __always_inline bool create_udp_sessions(struct __sk_buff *skb,
 						struct snat_ip *snat_ip, __u16 snat_port)
 {
 	return create_nat_session(skb, ekey, now_ns, vm_ifindex, snat_ip, snat_port,
-				  UDP_CT_UNREPLIED);
+				  UDP_CT_UNREPLIED, SNAT_PACKET, L7_SCHEME_NONE);
 }
 
 #endif /* __UDP_H */

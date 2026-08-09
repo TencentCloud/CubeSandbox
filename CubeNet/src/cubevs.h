@@ -37,6 +37,36 @@
 #define DNS_POLICY_FLAG_LEARNING_ENABLED	1
 #define NET_POLICY_FLAG_L7_REQUIRED	1
 #define NSEC_PER_SEC			1000000000ULL
+
+/* L7 scheme values embedded in dns_allow_value / net_policy_value_v2 per-port
+ * entries. Used by the eBPF datapath to compute skb->mark so CubeEgress's
+ * iptables TPROXY rules can steer HTTP vs HTTPS traffic to distinct listeners
+ * without depending on the destination port number. Keep in sync with
+ * cubevs/cubevs.go (L7SchemeHTTP / L7SchemeHTTPS).
+ */
+#define L7_SCHEME_NONE	0
+#define L7_SCHEME_HTTP	1
+#define L7_SCHEME_HTTPS	2
+
+/* Maximum number of (port, scheme) tuples a single L7 rule host may declare.
+ * Bounded so the map value size stays small and BPF verifier can unroll the
+ * lookup loop. Users needing more should merge rules or reuse ports.
+ */
+#define MAX_L7_PORTS_PER_HOST	8
+
+/* skb->mark encoding for L7 redirect. The high 16 bits carry a cube-owned
+ * prefix (0xCE?? masked by cube_l7_mark_mask) so cube marks do not collide
+ * with unrelated mark bits users may set elsewhere. iptables uses
+ * `-m mark --mark VAL/MASK` to match on cube-owned bits only.
+ *
+ * These are const volatile globals (not macros) so a deployment can override
+ * them at load time from userspace (rewriteConstants, sourced from the same
+ * install-time config the iptables init script reads), keeping the dataplane
+ * and iptables in lock-step. Defaults match the shipped values.
+ */
+const volatile __u32 cube_l7_mark_mask = 0xFFFF0000u;
+const volatile __u32 cube_l7_mark_http = 0xCE010000u;
+const volatile __u32 cube_l7_mark_https = 0xCE020000u;
 #define DNS_QUERY_TRACK_TTL_NS		(10ULL * NSEC_PER_SEC)
 
 /* https://en.wikipedia.org/wiki/IPv4#Header
@@ -142,15 +172,53 @@ struct lpm_key {
 	__u32 ip;
 };
 
+/* LPM key for allow_out_v3. Carries the destination IP (32-bit, network
+ * byte order) and an optional destination port (16-bit, network byte order)
+ * so a single longest-prefix lookup resolves:
+ *   - exact (ip, port): prefixlen = 48  (ip[4] + port[2])
+ *   - ip only (any port): prefixlen = 32  (ip[4], port ignored)
+ *   - ip/mask subnet:        prefixlen < 32  (only top bits of ip matter)
+ * The struct is padded to 12 bytes (8-byte data payload) so the trie's
+ * word-wise compare stays 4-byte aligned on every kernel. Insert and
+ * lookup MUST both fill ip/port from network-byte-order bytes (matching
+ * iphdr->daddr / tcphdr->dest), never from a host-byte-order integer
+ * shift — otherwise the exact (ip, port) match silently fails.
+ */
+struct lpm_key_v3 {
+	__u32 prefixlen;
+	__u32 ip;     /* network byte order */
+	__u16 port;   /* network byte order; 0 when key is ip-only/subnet */
+	__u16 _pad;   /* 0; keeps the data payload at 8 bytes */
+};
+
 struct dns_allow_key {
 	__u32 prefixlen;
 	char name[MAX_DNS_NAME_LEN];
 };
 
+/* Per-host L7 port entry. Attached inline to both dns_allow_value and
+ * net_policy_value_v2 so the datapath can pick the right scheme for a given
+ * destination port without a second map lookup. port is in network byte order
+ * (matches tcphdr->dest), scheme is one of L7_SCHEME_HTTP / L7_SCHEME_HTTPS.
+ */
+struct l7_port_entry {
+	__u16 port;   /* network byte order */
+	__u8 scheme;
+	__u8 _pad;
+};
+
+/* dns_allow_value carries the L7 policy attached to a matched DNS name.
+ * port_count = 0 is the "unspecified" case: the datapath applies the default
+ * port set {80/http, 443/https} for backward compatibility with rules that
+ * omit port. port_count > 0 restricts L7 handling to the listed (port, scheme)
+ * tuples only.
+ */
 struct dns_allow_value {
 	__u32 name_len;
 	__u8 flags;
-	__u8 reserved[3];
+	__u8 port_count;
+	__u8 reserved[2];
+	struct l7_port_entry ports[MAX_L7_PORTS_PER_HOST];
 };
 
 struct dns_query_track_key {
@@ -165,7 +233,9 @@ struct dns_query_track_key {
 struct dns_query_track_value {
 	__u64 expires_at_ns;
 	__u8 flags;
-	__u8 reserved[7];
+	__u8 port_count;
+	__u8 reserved[6];
+	struct l7_port_entry ports[MAX_L7_PORTS_PER_HOST];
 };
 
 /* Per-packet query parser state shared by the DNS tail-call pipeline. */
@@ -182,10 +252,34 @@ struct dns_query_state {
 	char name[MAX_DNS_NAME_LEN];
 };
 
+/* net_policy_value_v2 stores the per-sandbox allow_out_v2 verdict. This is the
+ * legacy 16-byte layout read only when migrating a pre-v3 allow_out_v2 map to
+ * allow_out_v3; the current dataplane uses net_policy_value_v3.
+ */
 struct net_policy_value_v2 {
 	__u64 expires_at_ns;
 	__u8 flags;
 	__u8 reserved[7];
+};
+
+/* Per-sandbox allow_out_v3 verdict. Unlike v2, the port lives in the
+ * LPM key (see lpm_key_v3), so the value no longer needs the 8-tuple
+ * (port, scheme) array: the scheme is resolved at insert time and
+ * stored here directly. A zero expires_at_ns is a static entry; a
+ * non-zero expires_at_ns is a temporary DNS-learned entry.
+ */
+struct net_policy_value_v3 {
+	__u64 expires_at_ns;
+	__u8 flags;
+	__u8 scheme;   /* L7_SCHEME_* */
+	/* prefixlen of the lpm_key_v3 this value was written under. LPM trie
+	 * lookups are longest-prefix, so a lookup for key K may return an
+	 * entry written under a SHORTER covering key; writers that mean to
+	 * merge with an existing entry for the EXACT same key must compare
+	 * this field against their key's prefixlen first.
+	 */
+	__u8 key_prefixlen;
+	__u8 reserved[5];
 };
 
 struct mvm_port {
@@ -214,7 +308,9 @@ struct nat_session {
 	__u16 vm_port;
 	__u8 state;
 	__u8 active_close;
-	__u8 reserved[34];
+	__u8 packet_class;	/* SNAT_PACKET or L7PROXY_PACKET */
+	__u8 l7_scheme;		/* L7_SCHEME_*; NONE for non-L7 sessions */
+	__u8 reserved[32];
 };
 
 struct ingress_session {
@@ -275,24 +371,29 @@ static __always_inline int _()
 {
 	int b[sizeof(struct mvm_meta) == 128 ? 1 : -1] = {};
 	int d[sizeof(struct lpm_key) == 8 ? 1 : -1] = {};
+	int dv3[sizeof(struct lpm_key_v3) == 12 ? 1 : -1] = {};
 	int r[sizeof(struct net_policy_value_v2) == 16 ? 1 : -1] = {};
+	int rv3[sizeof(struct net_policy_value_v3) == 16 ? 1 : -1] = {};
 	int f[sizeof(struct dns_allow_key) == MAX_DNS_NAME_LEN + 4 ? 1 : -1] = {};
-	int g[sizeof(struct dns_allow_value) == 8 ? 1 : -1] = {};
+	int g[sizeof(struct dns_allow_value) == 40 ? 1 : -1] = {};
 	int h[sizeof(struct dns_query_track_key) == 24 ? 1 : -1] = {};
-	int i[sizeof(struct dns_query_track_value) == 16 ? 1 : -1] = {};
+	int i[sizeof(struct dns_query_track_value) == 48 ? 1 : -1] = {};
 	int l[sizeof(struct mvm_port) == 8 ? 1 : -1] = {};
 	int n[sizeof(struct session_key) % 20 == 0 ? 1 : -1] = {};
-	int o[sizeof(struct nat_session) % 64 == 0 ? 1 : -1] = {};
+	int o[sizeof(struct nat_session) == 64 ? 1 : -1] = {};
 	int p[sizeof(struct ingress_session) % 16 == 0 ? 1 : -1] = {};
 	int q[sizeof(struct snat_ip) % 16 == 0 ? 1 : -1] = {};
+	int s[sizeof(struct l7_port_entry) == 4 ? 1 : -1] = {};
 
-	return b[0] + d[0] + r[0] + f[0] + g[0] + h[0] + i[0] + l[0] + n[0] + o[0] + p[0] + q[0];
+	return b[0] + d[0] + dv3[0] + r[0] + rv3[0] + f[0] + g[0] + h[0] + i[0] + l[0] + n[0] + o[0] + p[0] + q[0] + s[0];
 }
 
 static __always_inline __attribute__((used)) __u32 __btf_pin(void)
 {
 	return __builtin_btf_type_id(*(struct lpm_key *)0, BPF_TYPE_ID_LOCAL) +
 	       __builtin_btf_type_id(*(struct net_policy_value_v2 *)0, BPF_TYPE_ID_LOCAL) +
+	       __builtin_btf_type_id(*(struct lpm_key_v3 *)0, BPF_TYPE_ID_LOCAL) +
+	       __builtin_btf_type_id(*(struct net_policy_value_v3 *)0, BPF_TYPE_ID_LOCAL) +
 	       __builtin_btf_type_id(*(struct dns_allow_key *)0, BPF_TYPE_ID_LOCAL) +
 	       __builtin_btf_type_id(*(struct dns_allow_value *)0, BPF_TYPE_ID_LOCAL);
 }

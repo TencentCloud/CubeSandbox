@@ -25,8 +25,13 @@ var alwaysDeniedSandboxCIDRs = []string{
 var alwaysDeniedSandboxEntries = mustBuildDenyOutPolicyEntries(alwaysDeniedSandboxCIDRs)
 
 type allowOutPolicyEntry struct {
-	key    lpmKey
-	flags  uint8
+	key   lpmKey
+	flags uint8
+	// ports is inherited by dns_learn_response_ip into net_policy_value_v3.ports
+	// when a domain rule with an explicit (port, scheme) set is learned into
+	// allow_out_v3. Empty for legacy port-agnostic rules (the datapath falls
+	// back to the default 80/443 set in that case).
+	ports  []l7PortEntry
 	source string
 }
 
@@ -64,11 +69,19 @@ func newInnerLPMMapWithValueSize(valueSize uint32, keyType, valueType btf.Type) 
 }
 
 func newInnerAllowOutMap() (*ebpf.Map, error) {
-	return newInnerLPMMapWithValueSize(uint32(unsafe.Sizeof(netPolicyValueV2{})), btfTypeLPMKey, btfTypePolicyValue)
+	return ebpf.NewMap(&ebpf.MapSpec{
+		Type:       ebpf.LPMTrie,
+		KeySize:    uint32(unsafe.Sizeof(lpmKeyV3{})),
+		ValueSize:  uint32(unsafe.Sizeof(netPolicyValueV3{})),
+		MaxEntries: maxNetPolicyEntries,
+		Flags:      unix.BPF_F_NO_PREALLOC,
+		Key:        btfTypeLPMKey,
+		Value:      btfTypePolicyValue,
+	})
 }
 
-func ensureAllowOutV2InnerMap(outerMap *ebpf.Map, ifindex uint32) error {
-	return ensureInnerMapWithFactory(outerMap, ifindex, MapNameAllowOutV2, newInnerAllowOutMap)
+func ensureAllowOutV3InnerMap(outerMap *ebpf.Map, ifindex uint32) error {
+	return ensureInnerMapWithFactory(outerMap, ifindex, MapNameAllowOutV3, newInnerAllowOutMap)
 }
 
 func ensureDenyOutInnerMap(outerMap *ebpf.Map, ifindex uint32) error {
@@ -104,16 +117,16 @@ func ensureInnerMapWithFactory(outerMap *ebpf.Map, ifindex uint32, mapName strin
 }
 
 // initNetPolicy creates inner LPM trie maps for the given ifindex
-// in allow_out_v2, deny_out and dns_allow hash-of-maps, if not already present.
+// in allow_out_v3, deny_out and dns_allow_v2 hash-of-maps, if not already present.
 // This should be called during AttachFilter.
 func initNetPolicy(ifindex uint32) error {
-	allowOut, err := loadPinnedMap(MapNameAllowOutV2)
+	allowOut, err := loadPinnedMap(MapNameAllowOutV3)
 	if err != nil {
 		return err
 	}
 	defer allowOut.Close()
 
-	err = ensureAllowOutV2InnerMap(allowOut, ifindex)
+	err = ensureAllowOutV3InnerMap(allowOut, ifindex)
 	if err != nil {
 		return err
 	}
@@ -139,7 +152,7 @@ func flushInnerMap(outerMap *ebpf.Map, ifindex uint32) error {
 }
 
 func flushAllowOutInnerMap(outerMap *ebpf.Map, ifindex uint32) error {
-	return flushInnerMapWithValue(outerMap, ifindex, new(netPolicyValueV2))
+	return flushInnerMapWithValue(outerMap, ifindex, new(netPolicyValueV3))
 }
 
 func flushInnerMapWithValue(outerMap *ebpf.Map, ifindex uint32, value any) error {
@@ -186,10 +199,10 @@ func lookupInnerMap(outerMap *ebpf.Map, ifindex uint32) (*ebpf.Map, error) {
 }
 
 // cleanupNetPolicy flushes all entries in the inner LPM trie maps
-// for the given ifindex in both allow_out_v2 and deny_out.
-// This should be called during DeleteTAPDevice.
+// for the given ifindex in both allow_out_v3 and deny_out.
+// This should be called during DelTAPDevice.
 func cleanupNetPolicy(ifindex uint32) error {
-	allowOut, err := loadPinnedMap(MapNameAllowOutV2)
+	allowOut, err := loadPinnedMap(MapNameAllowOutV3)
 	if err != nil {
 		return err
 	}
@@ -197,7 +210,7 @@ func cleanupNetPolicy(ifindex uint32) error {
 
 	err = flushAllowOutInnerMap(allowOut, ifindex)
 	if err != nil {
-		return fmt.Errorf("flush %s failed: %w", MapNameAllowOutV2, err)
+		return fmt.Errorf("flush %s failed: %w", MapNameAllowOutV3, err)
 	}
 
 	denyOut, err := loadPinnedMap(MapNameDenyOut)
@@ -289,37 +302,255 @@ func mustBuildDenyOutPolicyEntries(cidrs []string) []denyOutPolicyEntry {
 	return entries
 }
 
-func buildAllowOutPolicyEntries(allowOutCIDRs, l7AllowOutCIDRs []string) ([]allowOutPolicyEntry, error) {
-	entries := make([]allowOutPolicyEntry, 0, len(allowOutCIDRs)+len(l7AllowOutCIDRs))
-	indexByKey := make(map[lpmKey]int, len(allowOutCIDRs)+len(l7AllowOutCIDRs))
+func buildAllowOutPolicyEntries(allowOutCIDRs []string) ([]allowOutPolicyEntry, error) {
+	entries := make([]allowOutPolicyEntry, 0, len(allowOutCIDRs))
+	indexByKey := make(map[lpmKey]int, len(allowOutCIDRs))
 
-	add := func(cidrs []string, flags uint8) error {
-		for _, cidr := range cidrs {
-			key, err := parseCIDR(cidr)
-			if err != nil {
-				return err
-			}
-			if idx, ok := indexByKey[key]; ok {
-				entries[idx].flags |= flags
-				continue
-			}
-			indexByKey[key] = len(entries)
-			entries = append(entries, allowOutPolicyEntry{
-				key:    key,
-				flags:  flags,
-				source: cidr,
-			})
+	for _, cidr := range allowOutCIDRs {
+		key, err := parseCIDR(cidr)
+		if err != nil {
+			return nil, err
 		}
-		return nil
-	}
-
-	if err := add(allowOutCIDRs, 0); err != nil {
-		return nil, err
-	}
-	if err := add(l7AllowOutCIDRs, uint8(netPolicyFlagL7Required)); err != nil {
-		return nil, err
+		if _, ok := indexByKey[key]; ok {
+			continue
+		}
+		indexByKey[key] = len(entries)
+		entries = append(entries, allowOutPolicyEntry{
+			key:    key,
+			source: cidr,
+		})
 	}
 	return entries, nil
+}
+
+// ntohsPort converts a network-order uint16 back to a host-order integer for
+// use in error messages. eBPF stores ports in NBO to avoid conversions on hot
+// paths; users see host order in their config.
+func ntohsPort(p uint16) uint16 {
+	return (p>>8)&0xff | (p<<8)&0xff00
+}
+
+// htonsPort converts host-order integer to network byte order for storage
+// alongside the eBPF datapath's tcphdr->dest comparisons.
+func htonsPort(p uint16) uint16 {
+	return (p>>8)&0xff | (p<<8)&0xff00
+}
+
+// expandDefaultPortSet returns the (port, scheme) tuples applied when a user
+// rule omits both port and scheme: the classic {80/http, 443/https}. Kept as a
+// helper so the datapath fallback in mvmtap.bpf.c (port_count==0 branch) and
+// the userspace expansion stay in lockstep.
+func expandDefaultPortSet() []l7PortEntry {
+	return []l7PortEntry{
+		{Port: htonsPort(80), Scheme: L7SchemeHTTP},
+		{Port: htonsPort(443), Scheme: L7SchemeHTTPS},
+	}
+}
+
+// l7TargetKind separates L7Target hosts into the two datapath maps: CIDR
+// literals go to allow_out_v3 as static entries; domain names go to dns_allow_v2
+// so their (port, scheme) set follows learned IPs into allow_out_v3 at
+// response time.
+type l7TargetKind int
+
+const (
+	l7KindCIDR l7TargetKind = iota
+	l7KindDomain
+)
+
+func classifyL7Target(host string) (l7TargetKind, error) {
+	if isIPv4Target(host) {
+		// An L7 host must be a single host, not a subnet CIDR: the datapath
+		// matches exact (ip, port)/48 pairs and cannot express a subnet+port
+		// rule, so reject network blocks here instead of silently narrowing
+		// them to the network address downstream.
+		key, err := parseCIDR(host)
+		if err != nil {
+			return 0, err
+		}
+		if key.Prefixlen < 32 {
+			return 0, fmt.Errorf("invalid l7_allow_out host %s: subnet CIDR not supported for L7 rules, use a single host IP or a domain name", host) //nolint:err113
+		}
+		return l7KindCIDR, nil
+	}
+	if strings.Contains(host, "/") {
+		return 0, fmt.Errorf("invalid l7_allow_out CIDR target: %s", host) //nolint:err113
+	}
+	if net.ParseIP(host) != nil || isDottedDecimalLikeTarget(host) {
+		return 0, fmt.Errorf("unsupported l7_allow_out IP target: %s", host) //nolint:err113
+	}
+	if !isDNSAllowTarget(host) {
+		return 0, fmt.Errorf("invalid l7_allow_out domain target: %s", host) //nolint:err113
+	}
+	return l7KindDomain, nil
+}
+
+// l7GroupKey returns a canonical grouping key for an L7 target host. Raw
+// variants that resolve to the same datapath key — DNS names differing only by
+// case or a trailing dot, CIDRs differing only by notation (e.g. "1.2.3.4" vs
+// "1.2.3.4/32") — map to one key so buildL7Plan aggregates their port sets and
+// detects (host, port) scheme conflicts, instead of letting them collide
+// later in a last-write-wins same-key merge that silently drops ports and
+// bypasses conflict detection.
+func l7GroupKey(host string) (string, error) {
+	kind, err := classifyL7Target(host)
+	if err != nil {
+		return "", err
+	}
+	if kind == l7KindCIDR {
+		key, err := parseCIDR(host)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("cidr:%d:%08x", key.Prefixlen, key.IP), nil
+	}
+	// Match makeDNSAllowRule's case / trailing-dot normalisation.
+	return "dns:" + strings.ToLower(strings.TrimSuffix(host, ".")), nil
+}
+
+// buildL7Plan merges rule targets by host, enforces (host, port) scheme
+// consistency, and produces:
+//   - allow_out_v3 static entries for IP/CIDR hosts (with port_count / ports
+//     inherited from the merged tuple set),
+//   - dns_allow_v2 rules for domain hosts (with the same port set).
+//
+// A target with Port == 0 && Scheme == L7SchemeNone means "unspecified": it
+// expands to {80/http, 443/https} for merging purposes. Empty port_count is
+// only preserved when *every* rule for that host is unspecified — the moment a
+// user attaches an explicit (port, scheme) the port set becomes explicit and
+// the datapath skips the default-set fallback.
+func buildL7Plan(targets []L7Target) (l7CIDRs []allowOutPolicyEntry,
+	l7DNS []dnsAllowRule, err error) {
+
+	// Group by canonical host key (see l7GroupKey), not the raw host string,
+	// so that raw variants resolving to the same datapath key aggregate into
+	// one host. Track scheme per port to detect conflicts early.
+	type hostState struct {
+		raw         string           // first-seen raw host, used for output + errors
+		portScheme  map[uint16]uint8 // key: NBO port, value: scheme
+		portOrder   []uint16         // first appearance order for deterministic overflow
+		anyExplicit bool
+	}
+	byHost := make(map[string]*hostState, len(targets))
+	hostOrder := make([]string, 0, len(targets))
+
+	for _, tgt := range targets {
+		host := tgt.Host
+		gkey, gerr := l7GroupKey(host)
+		if gerr != nil {
+			return nil, nil, gerr
+		}
+		st, ok := byHost[gkey]
+		if !ok {
+			st = &hostState{raw: host, portScheme: make(map[uint16]uint8)}
+			byHost[gkey] = st
+			hostOrder = append(hostOrder, gkey)
+		}
+		if tgt.Port == 0 && tgt.Scheme == L7SchemeNone {
+			// Unspecified rule — expand to default set for conflict checking.
+			for _, def := range expandDefaultPortSet() {
+				if existing, ok := st.portScheme[def.Port]; ok {
+					if existing != def.Scheme {
+						return nil, nil, fmt.Errorf(
+							"l7 rule conflict for %s port %d: scheme %d vs %d (via default set)", //nolint:err113
+							host, ntohsPort(def.Port), existing, def.Scheme)
+					}
+				} else {
+					st.portOrder = append(st.portOrder, def.Port)
+				}
+				st.portScheme[def.Port] = def.Scheme
+			}
+			continue
+		}
+		if tgt.Port == 0 || (tgt.Scheme != L7SchemeHTTP && tgt.Scheme != L7SchemeHTTPS) {
+			return nil, nil, fmt.Errorf(
+				"invalid l7 target %s: port and scheme must both be set (port=%d scheme=%d)", //nolint:err113
+				host, tgt.Port, tgt.Scheme)
+		}
+		port := htonsPort(tgt.Port)
+		if existing, ok := st.portScheme[port]; ok {
+			if existing != tgt.Scheme {
+				return nil, nil, fmt.Errorf(
+					"l7 rule conflict for %s port %d: scheme %d vs %d", //nolint:err113
+					host, tgt.Port, existing, tgt.Scheme)
+			}
+		} else {
+			st.portOrder = append(st.portOrder, port)
+		}
+		st.portScheme[port] = tgt.Scheme
+		st.anyExplicit = true
+	}
+
+	// Materialise per-host port entries. Order host iteration to keep output
+	// deterministic (test assertions compare slices directly). hostOrder holds
+	// canonical group keys; the first-seen raw host drives classification and
+	// key construction (it resolves to the same datapath key as the group).
+	for _, gkey := range hostOrder {
+		st := byHost[gkey]
+		host := st.raw
+		var ports []l7PortEntry
+		if st.anyExplicit || len(st.portScheme) != len(expandDefaultPortSet()) {
+			// Emit the full port list when an explicit (port, scheme) rule is
+			// attached. The second disjunct is defensive: it is unreachable
+			// today (a pure-default host always has exactly the default set's
+			// two tuples) but guards against expandDefaultPortSet() changing
+			// cardinality, which would otherwise silently drop a tuple here.
+			ports = make([]l7PortEntry, 0, len(st.portOrder))
+			for _, p := range st.portOrder {
+				ports = append(ports, l7PortEntry{Port: p, Scheme: st.portScheme[p]})
+			}
+			if len(ports) > maxL7PortsPerHost {
+				return nil, nil, fmt.Errorf(
+					"l7 rule exceeds %d port tuples for %s", //nolint:err113
+					maxL7PortsPerHost, host)
+			}
+		}
+		// ports == nil for pure-default hosts: signal "use default set" to the
+		// datapath (port_count = 0).
+
+		kind, cerr := classifyL7Target(host)
+		if cerr != nil {
+			return nil, nil, cerr
+		}
+		switch kind {
+		case l7KindCIDR:
+			key, perr := parseCIDR(host)
+			if perr != nil {
+				return nil, nil, perr
+			}
+			l7CIDRs = append(l7CIDRs, allowOutPolicyEntry{
+				key:    key,
+				flags:  uint8(netPolicyFlagL7Required),
+				ports:  ports,
+				source: host,
+			})
+		case l7KindDomain:
+			key, value, merr := makeDNSAllowRule(host, uint8(netPolicyFlagL7Required))
+			if merr != nil {
+				return nil, nil, merr
+			}
+			applyPortsToDNSAllowValue(&value, ports)
+			l7DNS = append(l7DNS, dnsAllowRule{
+				key:    key,
+				value:  value,
+				domain: host,
+			})
+		}
+	}
+	return l7CIDRs, l7DNS, nil
+}
+
+// applyPortsToDNSAllowValue copies ports into the DNS allow value. len(ports)==0
+// leaves PortCount=0 so the datapath falls back to {80,443} at match time.
+func applyPortsToDNSAllowValue(v *dnsAllowValue, ports []l7PortEntry) {
+	if len(ports) == 0 {
+		v.PortCount = 0
+		return
+	}
+	v.PortCount = uint8(len(ports))
+	for i, p := range ports {
+		v.Ports[i] = p
+	}
 }
 
 func buildDenyOutPolicyEntries(cidrs []string) ([]denyOutPolicyEntry, error) {
@@ -352,23 +583,30 @@ func buildNetPolicyPlan(opts MVMOptions) (*netPolicyPlan, error) {
 		return nil, err
 	}
 
-	var l7AllowOut []string
+	var l7Targets []L7Target
 	if opts.L7AllowOut != nil {
-		l7AllowOut = *opts.L7AllowOut
+		l7Targets = *opts.L7AllowOut
 	}
-	l7AllowOutCIDRs, l7DNSAllowDomains, err := splitAllowOutTargets(l7AllowOut)
+	l7CIDRs, l7DNSRules, err := buildL7Plan(l7Targets)
 	if err != nil {
 		return nil, err
 	}
 
-	allowOutEntries, err := buildAllowOutPolicyEntries(allowOutCIDRs, l7AllowOutCIDRs)
+	baseAllowOutEntries, err := buildAllowOutPolicyEntries(allowOutCIDRs)
 	if err != nil {
 		return nil, err
 	}
-	dnsAllowRules, err := buildDNSAllowRules(dnsAllowDomains, l7DNSAllowDomains)
+	// Merge non-L7 allow_out CIDRs with L7 CIDRs. If the same key appears in
+	// both, keep the L7 entry (its flags + ports are strictly a superset).
+	allowOutEntries := mergeAllowOutWithL7(baseAllowOutEntries, l7CIDRs)
+
+	// Domain rules: non-L7 domains get flags=0 and no port set; L7 domain
+	// rules already carry flags + ports from buildL7Plan. Merge by key.
+	dnsAllowRules, err := buildDNSAllowRules(dnsAllowDomains)
 	if err != nil {
 		return nil, err
 	}
+	dnsAllowRules = mergeDNSAllowRules(dnsAllowRules, l7DNSRules)
 
 	var denyOutEntries []denyOutPolicyEntry
 	if opts.AllowInternetAccess != nil && !*opts.AllowInternetAccess {
@@ -389,12 +627,73 @@ func buildNetPolicyPlan(opts MVMOptions) (*netPolicyPlan, error) {
 		allowOutEntries: allowOutEntries,
 		dnsAllowRules:   dnsAllowRules,
 		denyOutEntries:  denyOutEntries,
-		dnsPolicyFlags:  dnsPolicyFlagsForDomains(dnsAllowDomains, l7DNSAllowDomains),
+		dnsPolicyFlags:  dnsPolicyFlagsForDomains(dnsAllowDomains, l7DNSDomainNames(l7DNSRules)),
 	}
 	if err := validateNetPolicyPlan(plan); err != nil {
 		return nil, err
 	}
 	return plan, nil
+}
+
+// l7DNSDomainNames pulls the raw domain string out of each L7 dns rule so
+// dnsPolicyFlagsForDomains can decide whether to enable DNS learning. Only the
+// count matters — the caller only tests len>0.
+func l7DNSDomainNames(rules []dnsAllowRule) []string {
+	out := make([]string, 0, len(rules))
+	for _, r := range rules {
+		out = append(out, r.domain)
+	}
+	return out
+}
+
+// mergeAllowOutWithL7 combines the non-L7 base entries with the L7 entries.
+// When the same LPM key appears in both, the L7 version wins (its flags and
+// port set describe a strictly wider policy).
+func mergeAllowOutWithL7(base, l7 []allowOutPolicyEntry) []allowOutPolicyEntry {
+	if len(l7) == 0 {
+		return base
+	}
+	byKey := make(map[lpmKey]int, len(base)+len(l7))
+	out := make([]allowOutPolicyEntry, 0, len(base)+len(l7))
+	for _, e := range base {
+		byKey[e.key] = len(out)
+		out = append(out, e)
+	}
+	for _, e := range l7 {
+		if idx, ok := byKey[e.key]; ok {
+			out[idx].flags |= e.flags
+			out[idx].ports = e.ports
+			continue
+		}
+		byKey[e.key] = len(out)
+		out = append(out, e)
+	}
+	return out
+}
+
+// mergeDNSAllowRules combines the non-L7 domain rules with the L7 domain rules.
+// Same-key entries merge flags (OR) and adopt the L7 rule's port set.
+func mergeDNSAllowRules(base, l7 []dnsAllowRule) []dnsAllowRule {
+	if len(l7) == 0 {
+		return base
+	}
+	byKey := make(map[dnsAllowKey]int, len(base)+len(l7))
+	out := make([]dnsAllowRule, 0, len(base)+len(l7))
+	for _, r := range base {
+		byKey[r.key] = len(out)
+		out = append(out, r)
+	}
+	for _, r := range l7 {
+		if idx, ok := byKey[r.key]; ok {
+			out[idx].value.Flags |= r.value.Flags
+			out[idx].value.PortCount = r.value.PortCount
+			out[idx].value.Ports = r.value.Ports
+			continue
+		}
+		byKey[r.key] = len(out)
+		out = append(out, r)
+	}
+	return out
 }
 
 func appendDenyOutPolicyEntries(dst, src []denyOutPolicyEntry) []denyOutPolicyEntry {
@@ -424,14 +723,88 @@ func effectiveDenyOutEntriesForReplace(plan *netPolicyPlan) []denyOutPolicyEntry
 	return appendDenyOutPolicyEntries(entries, alwaysDeniedSandboxEntries)
 }
 
+// expandedAllowOutEntryCount returns the number of allow_out_v3 inner-map
+// entries a plan actually occupies: one per plain (non-L7) allow, and
+// len(ports) per L7 rule — or the default {80, 443} set when the L7 rule has
+// no explicit ports. The inner LPM trie is bounded by maxNetPolicyEntries, so
+// budget validation must use this expanded count, not len(allowOutEntries)
+// (which counts one per host and undercounts multi-port L7 rules, letting
+// population overflow mid-write with E2BIG and leave a half-populated map).
+func expandedAllowOutEntryCount(entries []allowOutPolicyEntry) int {
+	defaultPorts := len(expandDefaultPortSet())
+	total := 0
+	for _, e := range entries {
+		if e.flags&netPolicyFlagL7Required != 0 {
+			n := len(e.ports)
+			if n == 0 {
+				n = defaultPorts
+			}
+			total += n
+			continue
+		}
+		total++
+	}
+	return total
+}
+
 func validateNetPolicyPlan(plan *netPolicyPlan) error {
-	if err := validateNetPolicyEntryCount("network.allow_out_v2", len(plan.allowOutEntries), maxNetPolicyEntries); err != nil {
+	if err := validateNetPolicyEntryCount("network.allow_out_v3", expandedAllowOutEntryCount(plan.allowOutEntries), maxNetPolicyEntries); err != nil {
 		return err
 	}
 	if err := validateNetPolicyEntryCount("network.dns_allow", len(plan.dnsAllowRules), maxDNSAllowDomains); err != nil {
 		return err
 	}
 	return validateNetPolicyEntryCount("network.deny_out", len(effectiveDenyOutEntriesForReplace(plan)), maxNetPolicyEntries)
+}
+
+func validateNetPolicyEntryCounts(allowOutCIDRs, l7AllowOutCIDRs, dnsAllowDomains, l7DNSAllowDomains, denyOut []string) error {
+	if count, err := countUniqueLPMEntries(allowOutCIDRs, l7AllowOutCIDRs); err != nil {
+		return err
+	} else if err := validateNetPolicyEntryCount("network.allow_out_v3", count, maxNetPolicyEntries); err != nil {
+		return err
+	}
+
+	if count, err := countUniqueDNSAllowEntries(dnsAllowDomains, l7DNSAllowDomains); err != nil {
+		return err
+	} else if err := validateNetPolicyEntryCount("network.dns_allow", count, maxDNSAllowDomains); err != nil {
+		return err
+	}
+
+	if count, err := countUniqueLPMEntries(denyOut); err != nil {
+		return err
+	} else if err := validateNetPolicyEntryCount("network.deny_out", count, maxNetPolicyEntries); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func countUniqueLPMEntries(groups ...[]string) (int, error) {
+	seen := make(map[lpmKey]struct{})
+	for _, group := range groups {
+		for _, cidr := range group {
+			key, err := parseCIDR(cidr)
+			if err != nil {
+				return 0, err
+			}
+			seen[key] = struct{}{}
+		}
+	}
+	return len(seen), nil
+}
+
+func countUniqueDNSAllowEntries(groups ...[]string) (int, error) {
+	seen := make(map[dnsAllowKey]struct{})
+	for _, group := range groups {
+		for _, domain := range group {
+			key, _, err := makeDNSAllowRule(domain, 0)
+			if err != nil {
+				return 0, err
+			}
+			seen[key] = struct{}{}
+		}
+	}
+	return len(seen), nil
 }
 
 func validateNetPolicyEntryCount(field string, count int, maxEntries int) error {
@@ -474,7 +847,7 @@ func setDNSPolicyFlags(ifindex uint32, flags uint8) error {
 }
 
 // splitAllowOutTargets separates user-facing allow_out targets into IPv4/CIDR
-// entries for allow_out_v2 and DNS names for dns_allow.
+// entries for allow_out_v3 and DNS names for dns_allow_v2.
 func splitAllowOutTargets(targets []string) ([]string, []string, error) {
 	cidrs := make([]string, 0, len(targets))
 	domains := make([]string, 0, len(targets))
@@ -585,7 +958,18 @@ func populateInnerMap(outerMap *ebpf.Map, ifindex uint32, entries []denyOutPolic
 	return nil
 }
 
-// populateAllowOutInnerMap inserts pre-parsed static allow_out_v2 entries.
+// populateAllowOutInnerMap inserts pre-parsed static allow_out_v3 entries.
+//
+// v3 carries the port in the LPM key, so an L7 entry (flags &
+// netPolicyFlagL7Required) is materialised as one exact (ip, port)/48 entry
+// per (port, scheme) tuple — a default port set expands to {80/http,
+// 443/https}. A plain allow is a single ip-only (or subnet) /32 entry
+// with scheme = NONE. When a static (ip, port) key already holds a
+// DNS-learned entry, the learned flags are merged in but the static (zero)
+// expiry wins — the entry becomes permanent. Keeping the learned TTL
+// instead would let the reaper delete the entry at the old TTL and
+// silently drop the static verdict; a later DNS refresh preserves the
+// static zero expiry (dns_response.h same-key rule).
 func populateAllowOutInnerMap(outerMap *ebpf.Map, ifindex uint32, entries []allowOutPolicyEntry) error {
 	var innerMapID uint32
 	err := outerMap.Lookup(&ifindex, &innerMapID)
@@ -600,26 +984,52 @@ func populateAllowOutInnerMap(outerMap *ebpf.Map, ifindex uint32, entries []allo
 	defer inner.Close()
 
 	for _, entry := range entries {
-		val := netPolicyValueV2{Flags: entry.flags}
-		var oldVal netPolicyValueV2
-		if err := inner.Lookup(&entry.key, &oldVal); err == nil {
-			// Static allow entries never expire, but they must preserve existing flags.
-			val.Flags |= oldVal.Flags
-		} else if !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return fmt.Errorf("inner map lookup failed: %w, cidr: %s", err, entry.source)
+		if entry.flags&netPolicyFlagL7Required != 0 {
+			ports := entry.ports
+			if len(ports) == 0 {
+				ports = expandDefaultPortSet()
+			}
+			for _, p := range ports {
+				key := lpmKeyV3{Prefixlen: 48, IP: entry.key.IP, Port: p.Port}
+				val := netPolicyValueV3{Flags: entry.flags, Scheme: p.Scheme, KeyPrefixlen: 48}
+				var oldVal netPolicyValueV3
+				lerr := inner.Lookup(&key, &oldVal)
+				switch {
+				case lerr == nil:
+					// LPM lookup is longest-prefix: only merge with
+					// an entry written under the EXACT same key,
+					// never with a shorter covering entry (whose
+					// flags would otherwise leak into this /48).
+					// Flags only: the static (zero) expiry wins over
+					// a learned same-key entry, so the entry becomes
+					// permanent rather than ageing out at the old TTL.
+					if oldVal.KeyPrefixlen == uint8(key.Prefixlen) {
+						val.Flags |= oldVal.Flags
+					}
+				case !errors.Is(lerr, ebpf.ErrKeyNotExist):
+					return fmt.Errorf("inner map lookup failed: %w, cidr: %s", lerr, entry.source)
+				}
+				if uerr := inner.Update(&key, &val, ebpf.UpdateAny); uerr != nil {
+					return fmt.Errorf("inner map update failed: %w, cidr: %s", uerr, entry.source)
+				}
+			}
+			continue
 		}
 
-		err = inner.Update(&entry.key, &val, ebpf.UpdateAny)
-		if err != nil {
-			return fmt.Errorf("inner map update failed: %w, cidr: %s", err, entry.source)
+		// Plain allow: ip-only / subnet key with port = 0, scheme = NONE.
+		key := lpmKeyV3{Prefixlen: entry.key.Prefixlen, IP: entry.key.IP, Port: 0}
+		val := netPolicyValueV3{Flags: entry.flags, KeyPrefixlen: uint8(key.Prefixlen)}
+		if uerr := inner.Update(&key, &val, ebpf.UpdateAny); uerr != nil {
+			return fmt.Errorf("inner map update failed: %w, cidr: %s", uerr, entry.source)
 		}
 	}
 	return nil
 }
 
-// netPolicyValueV2Expired reports whether a v2 allow entry is a dynamic entry
-// whose DNS-learned TTL has expired. Static entries have ExpiresAtNS set to 0.
-func netPolicyValueV2Expired(value netPolicyValueV2, now uint64) bool {
+// netPolicyValueV3Expired reports whether a v3 allow entry is a dynamic
+// entry whose DNS-learned TTL has expired. Static entries have ExpiresAtNS
+// set to 0.
+func netPolicyValueV3Expired(value netPolicyValueV3, now uint64) bool {
 	return value.ExpiresAtNS != 0 && value.ExpiresAtNS <= now
 }
 
@@ -627,10 +1037,10 @@ func netPolicyValueV2Expired(value netPolicyValueV2, now uint64) bool {
 // based on MVMOptions.
 //
 // Rules:
-//   - AllowOut IP/CIDR targets are inserted into allow_out_v2 inner map.
-//   - L7AllowOut IP/CIDR targets are inserted into allow_out_v2 with the L7 flag.
-//   - AllowOut domain targets are inserted into dns_allow inner map.
-//   - L7AllowOut domain targets are inserted into dns_allow with the L7 flag.
+//   - AllowOut IP/CIDR targets are inserted into allow_out_v3 inner map.
+//   - L7AllowOut IP/CIDR targets are inserted into allow_out_v3 with the L7 flag.
+//   - AllowOut domain targets are inserted into dns_allow_v2 inner map.
+//   - L7AllowOut domain targets are inserted into dns_allow_v2 with the L7 flag.
 //   - Default private/link-local DenyOut ranges are preloaded when a TAP enters
 //     the free pool. Replace paths replay them after flushing policy maps.
 //   - AllowInternetAccess=false: DenyOut is set to "0.0.0.0/0" (deny all).
@@ -640,7 +1050,7 @@ func applyNetPolicy(ifindex uint32, opts MVMOptions) error {
 
 // replaceNetPolicy replaces all configured egress policy for an ifindex.
 // It is used by TAP upsert/recovery paths so removed policy entries do not
-// survive cubelet network runtime restart/recovery.
+// survive a network-agent restart.
 func replaceNetPolicy(ifindex uint32, opts MVMOptions) error {
 	return applyNetPolicyWithMode(ifindex, opts, true)
 }
@@ -652,27 +1062,27 @@ func applyNetPolicyWithMode(ifindex uint32, opts MVMOptions, replace bool) error
 	}
 
 	if replace || len(plan.allowOutEntries) > 0 {
-		allowOutMap, err := loadPinnedMap(MapNameAllowOutV2)
+		allowOutMap, err := loadPinnedMap(MapNameAllowOutV3)
 		if err != nil {
 			return err
 		}
 		defer allowOutMap.Close()
 
-		if err := ensureAllowOutV2InnerMap(allowOutMap, ifindex); err != nil {
+		if err := ensureAllowOutV3InnerMap(allowOutMap, ifindex); err != nil {
 			return err
 		}
 		if replace {
 			if err := flushAllowOutInnerMap(allowOutMap, ifindex); err != nil {
-				return fmt.Errorf("flush %s failed: %w", MapNameAllowOutV2, err)
+				return fmt.Errorf("flush %s failed: %w", MapNameAllowOutV3, err)
 			}
 		}
 		err = populateAllowOutInnerMap(allowOutMap, ifindex, plan.allowOutEntries)
 		if err != nil {
-			return fmt.Errorf("populate %s failed: %w", MapNameAllowOutV2, err)
+			return fmt.Errorf("populate %s failed: %w", MapNameAllowOutV3, err)
 		}
 	}
 	if err := applyDNSAllow(ifindex, plan.dnsAllowRules, replace); err != nil {
-		return fmt.Errorf("populate %s failed: %w", MapNameDNSAllow, err)
+		return fmt.Errorf("populate %s failed: %w", MapNameDNSAllowV2, err)
 	}
 
 	denyOutEntries := plan.denyOutEntries

@@ -7,6 +7,35 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestSessionClassificationStrings(t *testing.T) {
+	for _, tt := range []struct {
+		value uint8
+		want  string
+	}{
+		{0, "snat"},
+		{1, "l7_proxy"},
+		{9, "unknown(9)"},
+	} {
+		if got := packetClassToString(tt.value); got != tt.want {
+			t.Fatalf("packetClassToString(%d)=%q, want %q", tt.value, got, tt.want)
+		}
+	}
+
+	for _, tt := range []struct {
+		value uint8
+		want  string
+	}{
+		{L7SchemeNone, "none"},
+		{L7SchemeHTTP, "http"},
+		{L7SchemeHTTPS, "https"},
+		{9, "unknown(9)"},
+	} {
+		if got := l7SchemeToString(tt.value); got != tt.want {
+			t.Fatalf("l7SchemeToString(%d)=%q, want %q", tt.value, got, tt.want)
+		}
+	}
+}
+
 func TestBusinessMapNamesReturnsCopy(t *testing.T) {
 	names := BusinessMapNames()
 	if len(names) == 0 {
@@ -21,15 +50,15 @@ func TestBusinessMapNamesReturnsCopy(t *testing.T) {
 
 func TestNormalizeBusinessMapNames(t *testing.T) {
 	got, err := normalizeBusinessMapNames([]string{
-		MapNameDNSAllow,
-		MapNameDNSAllow,
-		MapNameAllowOutV2,
+		MapNameDNSAllowV2,
+		MapNameDNSAllowV2,
+		MapNameAllowOutV3,
 	})
 	if err != nil {
 		t.Fatalf("normalizeBusinessMapNames returned error: %v", err)
 	}
 
-	want := []string{MapNameDNSAllow, MapNameAllowOutV2}
+	want := []string{MapNameDNSAllowV2, MapNameAllowOutV3}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("normalizeBusinessMapNames()=%v, want %v", got, want)
 	}

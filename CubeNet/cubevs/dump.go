@@ -91,6 +91,10 @@ type EgressSessionDump struct {
 	StateRaw       uint8          `json:"state_raw"`
 	ActiveClose    bool           `json:"active_close"`
 	ActiveCloseRaw uint8          `json:"active_close_raw"`
+	PacketClass    string         `json:"packet_class"`
+	PacketClassRaw uint8          `json:"packet_class_raw"`
+	L7Scheme       string         `json:"l7_scheme"`
+	L7SchemeRaw    uint8          `json:"l7_scheme_raw"`
 }
 
 type IngressSessionDump struct {
@@ -115,6 +119,11 @@ type PolicyEntryDump struct {
 	L7Required  bool   `json:"l7_required"`
 	Flags       uint8  `json:"flags"`
 	Static      bool   `json:"static"`
+	// L7 port tuples inherited from a matched dns_allow_value at DNS-learn
+	// time (or attached directly to an L7 IP/CIDR rule). Empty when the
+	// datapath falls back to the default {80/http, 443/https} port set.
+	PortCount uint8             `json:"port_count"`
+	Ports     []L7PortEntryDump `json:"ports,omitempty"`
 }
 
 type DenyPolicyMapDump struct {
@@ -142,6 +151,10 @@ type DNSAllowRuleDump struct {
 	Flags      uint8  `json:"flags"`
 	NameLen    uint32 `json:"name_len"`
 	Prefixlen  uint32 `json:"prefixlen"`
+	// L7 port tuples the userspace built from rules sharing this host.
+	// Empty when the datapath falls back to the default {80/http, 443/https}.
+	PortCount uint8             `json:"port_count"`
+	Ports     []L7PortEntryDump `json:"ports,omitempty"`
 }
 
 type DNSQueryTrackDump struct {
@@ -156,6 +169,19 @@ type DNSQueryTrackDump struct {
 	Expired     bool   `json:"expired"`
 	L7Required  bool   `json:"l7_required"`
 	Flags       uint8  `json:"flags"`
+	// L7 port tuples copied verbatim from the matched dns_allow_value so the
+	// response handler can rebuild net_policy_value_v3 without a second
+	// dns_allow lookup.
+	PortCount uint8             `json:"port_count"`
+	Ports     []L7PortEntryDump `json:"ports,omitempty"`
+}
+
+// L7PortEntryDump is the JSON-friendly view of one (port, scheme) tuple.
+// Port is emitted in host byte order (matches the port number users write in
+// their policy YAML) even though it is stored in NBO on the datapath.
+type L7PortEntryDump struct {
+	Port   uint16 `json:"port"`
+	Scheme string `json:"scheme"` // "http" | "https" | ""(未知)
 }
 
 const mapNameSNATIPList = mapSNATIPList
@@ -168,9 +194,9 @@ var businessMapDumpOrder = []string{
 	MapNameEgressSessions,
 	MapNameIngressSessions,
 	mapNameSNATIPList,
-	MapNameAllowOutV2,
+	MapNameAllowOutV3,
 	MapNameDenyOut,
-	MapNameDNSAllow,
+	MapNameDNSAllowV2,
 	MapNameDNSQueryTrack,
 }
 
@@ -184,9 +210,9 @@ var businessMapDumpers = map[string]businessMapDumper{
 	MapNameEgressSessions:       dumpEgressSessions,
 	MapNameIngressSessions:      dumpIngressSessions,
 	mapNameSNATIPList:           dumpSNATIPList,
-	MapNameAllowOutV2:           dumpAllowOutV2,
+	MapNameAllowOutV3:           dumpAllowOutV3,
 	MapNameDenyOut:              dumpDenyOut,
-	MapNameDNSAllow:             dumpDNSAllow,
+	MapNameDNSAllowV2:           dumpDNSAllow,
 	MapNameDNSQueryTrack:        dumpDNSQueryTrack,
 }
 
@@ -411,6 +437,10 @@ func dumpEgressSessions(opts DumpOptions, now uint64) (any, error) {
 			StateRaw:       value.State,
 			ActiveClose:    value.ActiveClose != 0,
 			ActiveCloseRaw: value.ActiveClose,
+			PacketClass:    packetClassToString(value.PacketClass),
+			PacketClassRaw: value.PacketClass,
+			L7Scheme:       l7SchemeToString(value.L7Scheme),
+			L7SchemeRaw:    value.L7Scheme,
 		})
 	}
 	return entries, wrapIterErr(iter.Err(), MapNameEgressSessions)
@@ -448,8 +478,8 @@ func dumpIngressSessions(opts DumpOptions, _ uint64) (any, error) {
 	return entries, wrapIterErr(iter.Err(), MapNameIngressSessions)
 }
 
-func dumpAllowOutV2(opts DumpOptions, now uint64) (any, error) {
-	return dumpPolicyMap(opts, now, MapNameAllowOutV2)
+func dumpAllowOutV3(opts DumpOptions, now uint64) (any, error) {
+	return dumpPolicyMap(opts, now, MapNameAllowOutV3)
 }
 
 func dumpPolicyMap(opts DumpOptions, now uint64, mapName string) (any, error) {
@@ -482,13 +512,13 @@ func dumpPolicyInnerMap(innerMapID uint32, now uint64) ([]PolicyEntryDump, error
 	defer inner.Close()
 
 	entries := make([]PolicyEntryDump, 0)
-	seen := make(map[lpmKey]struct{})
-	var key lpmKey
-	var value netPolicyValueV2
+	seen := make(map[lpmKeyV3]struct{})
+	var key lpmKeyV3
+	var value netPolicyValueV3
 	iter := inner.Iterate()
 	for iter.Next(&key, &value) {
 		if _, ok := seen[key]; ok {
-			return nil, fmt.Errorf("policy inner map iteration returned duplicate key: %s", dumpLPMCIDR(key)) //nolint:err113
+			return nil, fmt.Errorf("policy inner map iteration returned duplicate key: %s", dumpLPMCIDRV3(key)) //nolint:err113
 		}
 		seen[key] = struct{}{}
 		if len(seen) > maxNetPolicyEntries {
@@ -496,11 +526,21 @@ func dumpPolicyInnerMap(innerMapID uint32, now uint64) ([]PolicyEntryDump, error
 		}
 
 		entry := PolicyEntryDump{
-			CIDR:       dumpLPMCIDR(key),
-			Expired:    netPolicyValueV2Expired(value, now),
+			CIDR:       dumpLPMCIDRV3(key),
+			Expired:    netPolicyValueV3Expired(value, now),
 			L7Required: value.Flags&uint8(netPolicyFlagL7Required) != 0,
 			Flags:      value.Flags,
 			Static:     value.ExpiresAtNS == 0,
+		}
+		// v3 carries the port in the key and the scheme in the value, so a
+		// single (ip, port)/48 entry is reported as one L7 (port, scheme)
+		// tuple; ip-only / subnet entries carry no port.
+		if key.Port != 0 && value.Scheme != L7SchemeNone {
+			entry.PortCount = 1
+			entry.Ports = []L7PortEntryDump{{
+				Port:   ntohsPort(key.Port),
+				Scheme: l7SchemeToString(value.Scheme),
+			}}
 		}
 		if value.ExpiresAtNS != 0 {
 			entry.ExpiresAtNS = value.ExpiresAtNS
@@ -510,6 +550,13 @@ func dumpPolicyInnerMap(innerMapID uint32, now uint64) ([]PolicyEntryDump, error
 		entries = append(entries, entry)
 	}
 	return entries, wrapIterErr(iter.Err(), "policy inner")
+}
+
+func dumpLPMCIDRV3(key lpmKeyV3) string {
+	if key.Port != 0 {
+		return fmt.Sprintf("%s/%d:%d", uint32ToIP(key.IP).String(), key.Prefixlen, ntohsPort(key.Port))
+	}
+	return fmt.Sprintf("%s/%d", uint32ToIP(key.IP).String(), key.Prefixlen)
 }
 
 func dumpDenyOut(opts DumpOptions, _ uint64) (any, error) {
@@ -564,7 +611,7 @@ func dumpDenyInnerMap(innerMapID uint32) ([]DenyPolicyEntryDump, error) {
 }
 
 func dumpDNSAllow(opts DumpOptions, _ uint64) (any, error) {
-	outer, err := loadPinnedMap(MapNameDNSAllow)
+	outer, err := loadPinnedMap(MapNameDNSAllowV2)
 	if err != nil {
 		return nil, err
 	}
@@ -576,10 +623,10 @@ func dumpDNSAllow(opts DumpOptions, _ uint64) (any, error) {
 	}
 
 	entries := make([]DNSAllowMapDump, 0)
-	err = dumpSelectedInnerMapIDs(opts, outer, MapNameDNSAllow, func(ifindex uint32, innerMapID uint32) error {
+	err = dumpSelectedInnerMapIDs(opts, outer, MapNameDNSAllowV2, func(ifindex uint32, innerMapID uint32) error {
 		innerDump, err := dumpDNSAllowInnerMap(innerMapID)
 		if err != nil {
-			return fmt.Errorf("dump %s inner map failed: %w, ifindex: %d", MapNameDNSAllow, err, ifindex)
+			return fmt.Errorf("dump %s inner map failed: %w, ifindex: %d", MapNameDNSAllowV2, err, ifindex)
 		}
 		innerDump.Ifindex = ifindex
 		if meta, ok := metadata[ifindex]; ok {
@@ -660,6 +707,8 @@ func dumpDNSQueryTrack(opts DumpOptions, now uint64) (any, error) {
 			Expired:     value.ExpiresAtNS <= now,
 			L7Required:  value.Flags&uint8(netPolicyFlagL7Required) != 0,
 			Flags:       value.Flags,
+			PortCount:   value.PortCount,
+			Ports:       l7PortEntriesToDump(value.Ports[:], value.PortCount),
 		})
 	}
 	return entries, wrapIterErr(iter.Err(), MapNameDNSQueryTrack)
@@ -830,11 +879,59 @@ func dumpDNSAllowRule(key dnsAllowKey, value dnsAllowValue) (DNSAllowRuleDump, e
 		Flags:      value.Flags,
 		NameLen:    value.NameLen,
 		Prefixlen:  key.Prefixlen,
+		PortCount:  value.PortCount,
+		Ports:      l7PortEntriesToDump(value.Ports[:], value.PortCount),
 	}, nil
 }
 
 func ifindexMatches(opts DumpOptions, ifindex uint32) bool {
 	return !opts.FilterIfindex || opts.Ifindex == ifindex
+}
+
+// l7PortEntriesToDump converts the fixed-size ports array embedded in the
+// datapath value into a JSON-friendly slice sized to port_count. Ports are
+// stored in network byte order on the datapath (matching tcphdr->dest) but
+// emitted in host byte order here so the JSON is directly comparable to the
+// port numbers users write in their rules.
+func l7PortEntriesToDump(ports []l7PortEntry, count uint8) []L7PortEntryDump {
+	if count == 0 {
+		return nil
+	}
+	if int(count) > len(ports) {
+		count = uint8(len(ports))
+	}
+	out := make([]L7PortEntryDump, 0, count)
+	for i := uint8(0); i < count; i++ {
+		out = append(out, L7PortEntryDump{
+			Port:   ntohs(ports[i].Port),
+			Scheme: l7SchemeToString(ports[i].Scheme),
+		})
+	}
+	return out
+}
+
+func packetClassToString(class uint8) string {
+	switch class {
+	case 0:
+		return "snat"
+	case 1:
+		return "l7_proxy"
+	default:
+		return fmt.Sprintf("unknown(%d)", class)
+	}
+}
+
+func l7SchemeToString(s uint8) string {
+	switch s {
+	case L7SchemeNone:
+		return "none"
+	case L7SchemeHTTP:
+		return "http"
+	case L7SchemeHTTPS:
+		return "https"
+	default:
+		return fmt.Sprintf("unknown(%d)", s)
+	}
 }
 
 func remainingNS(expiresAt, now uint64) int64 {
