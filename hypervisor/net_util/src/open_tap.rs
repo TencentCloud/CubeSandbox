@@ -73,6 +73,10 @@ pub fn open_tap(
     let mut taps: Vec<Tap> = Vec::new();
     let mut ifname: String = String::new();
     let vnet_hdr_size = vnet_hdr_len() as i32;
+    // Check if the given interface exists before we create it.
+    let tap_existed = if_name.map_or(false, |n| {
+        Path::new(&format!("/sys/class/net/{n}")).exists()
+    });
 
     if num_rx_q == 1 {
         if let Some(name) = if_name {
@@ -105,11 +109,19 @@ pub fn open_tap(
                 Some(name) => Tap::open_named(name, num_rx_q, flags).map_err(Error::TapOpen)?,
                 None => Tap::new(num_rx_q).map_err(Error::TapOpen)?,
             };
-            if let Some(ip) = ip_addr {
-                tap.set_ip_addr(ip).map_err(Error::TapSetIp)?;
-            }
-            if let Some(mask) = netmask {
-                tap.set_netmask(mask).map_err(Error::TapSetNetmask)?;
+            // Don't overwrite ip configuration of existing interfaces:
+            if !tap_existed {
+                if let Some(ip) = ip_addr {
+                    tap.set_ip_addr(ip).map_err(Error::TapSetIp)?;
+                }
+                if let Some(mask) = netmask {
+                    tap.set_netmask(mask).map_err(Error::TapSetNetmask)?;
+                }
+            } else {
+                warn!(
+                    "Tap {} already exists. IP configuration will not be overwritten.",
+                    if_name.unwrap_or_default()
+                );
             }
             if let Some(mac) = host_mac {
                 tap.set_mac_addr(*mac).map_err(Error::TapSetMac)?

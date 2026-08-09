@@ -7402,7 +7402,10 @@ mod common_sequential {
         let vsock_id = "_vsock0";
 
         let net_id = "net123";
-        let tap_name = "vmtap0";
+        // Use a name that cannot collide with the auto-assigned `vmtap%d`
+        // taps used by parallel tests (open_named("vmtap%d") starts at
+        // vmtap0), otherwise OpenTap fails with "Device or resource busy".
+        let tap_name = "src-tap0";
         let net_params = format!(
             "id={},tap={},mac={},ip={},mask=255.255.255.0",
             net_id, tap_name, guest.network.guest_mac, guest.network.host_ip
