@@ -1,28 +1,55 @@
 #!/usr/bin/env python3
-"""Risky command classifier.  从严 (strict): over-classify, parse compound commands."""
+"""Risky command classifier.
+
+Parses the whole command with bashlex — a Python port of bash's own parser —
+and evaluates risk from the AST structure (assignments, redirects, wrapper
+prefixes, subshells, pipelines).  Anything the parser cannot handle is
+treated as risky (fail-safe).
+"""
 
 from __future__ import annotations
 
 import os
 import re
 import sys
-from typing import Set, List, Tuple, Optional
+from typing import List, Optional, Set, Tuple
+
+try:
+    import bashlex
+except ImportError:  # pragma: no cover - deployment error path
+    bashlex = None  # type: ignore[assignment]
+
+SENTINEL_PREFIX = "cubesandbox-rollback"
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-SENTINEL_PREFIX = "cubesandbox-rollback"
 
-# Prefixes to skip before extracting the real first word
-_SKIPPABLE_PREFIXES: tuple = ("sudo", "env", "nohup", "nice")
+# Wrapper commands: skipped to find the real command word
+_WRAPPER_CMDS: frozenset = frozenset({
+    "sudo", "env", "nohup", "nice", "timeout", "command", "exec",
+    "setsid", "doas", "su",
+})
 
-# Commands whose *presence* makes a compound segment risky
+# Wrapper options that consume a following value (else the value would be
+# mistaken for the command word).  Unknown options are skipped bare — a
+# heuristic; see README "Known limitations".
+_WRAPPER_OPT_WITH_VALUE: dict = {
+    "sudo":   {"-u", "-g", "-p", "-C", "-h", "--user", "--group", "--prompt"},
+    "env":    {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
+    "nice":   {"-n", "--adjustment"},
+    "timeout": {"-s", "-k", "-f", "--signal", "--kill-after"},
+}
+
+# Commands whose *presence* makes a command risky
 _RISKY_FIRST_WORDS: Set[str] = {
     "rm", "rmdir", "chmod", "chown", "mv", "dd", "shred", "mkfs", "fdisk",
     "apt", "apt-get", "dnf", "yum", "pacman", "brew", "snap",
 }
 
-# Commands that are risky only with specific subcommands
+# Commands that are risky only with specific subcommands.
+# against every trailing token (a `git log reset` style false positive is a
+# harmless extra snapshot; a missed `git -C repo reset --hard` is not).
 _RISKY_WITH_SUB: dict = {
     "git":  {"reset", "clean"},
     "npm":  {"install", "uninstall", "update"},
@@ -32,155 +59,283 @@ _RISKY_WITH_SUB: dict = {
     "pnpm": {"add", "remove"},
     "cargo": {"install", "uninstall"},
     "go":   {"install", "get"},
-    "make":  {"install"},
+    "make": {"install"},
 }
 
 # Commands dangerous when used with -o / -O / --output
 _RISKY_OUTPUT_CMDS: Set[str] = {"curl", "wget"}
 
-# regex for -o / -O / --output flag (short or long, outside quotes)
-_OUTPUT_FLAG_RE = re.compile(r"(?:\s|^)(?:-[oO]\b|--output\b)")
+# curl|bash style: download on the left, interpreter on the right
+_DOWNLOAD_CMDS: Set[str] = {"curl", "wget"}
+_EXEC_CMDS: Set[str] = {
+    "bash", "sh", "zsh", "dash", "ksh", "fish",
+    "python", "python3", "python2", "perl", "php", "ruby", "node", "lua",
+}
+
+# Redirect operators that write to a file (vs `<`, `<<` which only read)
+_WRITE_REDIR_TYPES: frozenset = frozenset({">", ">>", ">&", "&>", "&>>", ">|", "<>"})
+
+_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_NUM_RE = re.compile(r"^[0-9]+$")
+_FD_REF_RE = re.compile(r"^&[0-9]+$")
+_OUTPUT_FLAG_RE = re.compile(r"^(?:-[oO]\b|--output(?:-document)?\b)")
 
 # ---------------------------------------------------------------------------
-# Helpers
+# AST helpers
 # ---------------------------------------------------------------------------
-def _strip_quoted(text: str) -> str:
-    """Remove single- and double-quoted substrings."""
-    return re.sub(r"""('[^']*'|"[^"]*")""", "", text)
+def _norm_command_word(w: str) -> str:
+    """Basename + strip backslash escapes + lowercase."""
+    return os.path.basename(w.lstrip("\\")).lower()
 
 
-def _first_word(segment: str) -> str:
-    """Return the first non-empty whitespace-delimited token, lowercased,
-    after skipping `sudo`, `env`, `nohup`, `nice` prefixes.  basename
-    normalises absolute paths (e.g. `/usr/bin/rm` → `rm`)."""
-    seg = segment.strip()
-    if not seg:
-        return ""
-    parts = seg.split(None)
-    idx = 0
-    # Walk past skippable prefixes
-    while idx < len(parts) and parts[idx].lower() in _SKIPPABLE_PREFIXES:
-        idx += 1
-    if idx >= len(parts):
-        return ""
-    return os.path.basename(parts[idx].lower())
+def _unwrap_index(words: List[str]) -> int:
+    """Index of the real command word.
 
-
-_REDIR_RE = re.compile(
-    r'(?:^|\s)([0-9]{1,2}>>?|&>>?|>&>?|>>?)\s*(\S+)'
-)
-
-
-def _has_destructive_redirect(segment: str) -> bool:
-    """True if the segment has a redirect that writes to a real file.
-
-    Safe targets (/dev/null, fd refs like &1/&2, any /dev/* path) are NOT
-    destructive — so the ubiquitous `2>/dev/null` / `2>&1` / `>/dev/null`
-    never triggers a snapshot.  The operator forms `&>` and the csh-style
-    `>&` are parsed as a single operator (not `>` + a `&` target), and
-    fd-duplication targets like `2>&1` / `>&1` are treated as safe.
-    Only writes to an actual file or directory count.
+    Skips wrapper prefixes (``sudo`` / ``env`` / ``nohup`` / ``nice`` /
+    ``timeout`` …) along with their options and option values, then skips
+    leading ``VAR=value`` tokens (``env FOO=bar npm install``).
     """
-    for op, target in _REDIR_RE.findall(_strip_quoted(segment)):
-        if _is_safe_redirect_target(op, target):
-            continue
-        return True
-    return False
+    i = 0
+    n = len(words)
+    while i < n and words[i] in _WRAPPER_CMDS:
+        wrapper = words[i]
+        i += 1
+        while i < n:
+            w = words[i]
+            if w.startswith("-"):
+                i += 1
+                if i < n and w in _WRAPPER_OPT_WITH_VALUE.get(wrapper, ()):
+                    i += 1  # option value
+                continue
+            if wrapper in ("timeout", "nice") and _NUM_RE.match(w):
+                i += 1  # bare duration / priority
+                continue
+            break
+    while i < n and _ASSIGN_RE.match(words[i]):
+        i += 1  # env FOO=bar cmd
+    return i
 
 
-def _is_safe_redirect_target(op: str, target: str) -> bool:
-    """True if a redirect targets /dev/null or a file descriptor.
+def _command_parts(cmd_node) -> Tuple[List[str], List]:
+    """Return (words, redirects) from a bashlex command node."""
+    words: List[str] = []
+    redirects: List = []
+    for part in cmd_node.parts:
+        if part.kind == "word":
+            words.append(part.word)
+        elif part.kind == "redirect":
+            redirects.append(part)
+    return words, redirects
 
-    ``2>&1`` / ``1>&2`` parse as fd-prefixed operator + ``&N`` target;
-    the csh-style ``>&1`` parses as ``>&`` operator + ``N`` target.  Both
-    duplicate to an existing descriptor and never touch the filesystem.
+
+def _redirect_destructive(rd) -> bool:
+    """True if a redirect writes to a real file.
+
+    Safe targets: /dev/* paths and fd references (``2>&1`` / ``>&1`` /
+    ``>&2``).  Anything else — including quoted targets and unparseable
+    opaque words — counts as destructive (fail-safe).
     """
-    if target == '/dev/null' or target.startswith('/dev/'):
-        return True
-    if re.fullmatch(r'&[0-9]+', target):
-        return True  # 2>&1 / 1>&2 / 2>&3 style fd duplication
-    if op.startswith('>&') and re.fullmatch(r'[0-9]+', target):
-        return True  # csh-style >&1 (dup stdout to fd 1)
-    return False
+    if rd.type not in _WRITE_REDIR_TYPES:
+        return False  # <, << heredoc, etc. only read
+    out = rd.output
+    if isinstance(out, int):
+        return False  # 2>&1 → fd 1
+    if isinstance(out, str):
+        if out.isdigit():
+            return False  # >&2 parsed as string fd
+        target = out
+    else:
+        target = getattr(out, "word", None)
+    if target is None:
+        return True  # opaque target → destructive (fail-safe)
+    if target.startswith("/dev/"):
+        return False
+    if _FD_REF_RE.match(target):
+        return False
+    return True
 
 
-def _has_output_flag(segment: str) -> bool:
-    """True if the segment has -o / -O / --output flag (for curl/wget)."""
-    cleaned = _strip_quoted(segment)
-    return bool(_OUTPUT_FLAG_RE.search(cleaned))
+def _find_risky_subcommand(fw: str, words: List[str], start: int) -> Optional[str]:
+    """Return the risky subcommand token if any trailing token matches."""
+    risky_subs = _RISKY_WITH_SUB.get(fw, frozenset())
+    for w in words[start:]:
+        n = _norm_command_word(w)
+        if n in risky_subs:
+            return n
+    return None
 
 
-# ---------------------------------------------------------------------------
-# Quote-aware compound split
-# ---------------------------------------------------------------------------
-def _is_inside_quotes(command: str, pos: int) -> bool:
-    """Return True if position `pos` in `command` is inside single or double quotes."""
-    in_single = in_double = False
-    for i, ch in enumerate(command[:pos]):
-        if ch == "'" and not in_double:
-            in_single = not in_single
-        elif ch == '"' and not in_single:
-            in_double = not in_double
-    # At the boundary, we consider the separator to be outside quotes
-    # only if both states are "closed" at the character just before pos.
-    return in_single or in_double
+def _has_output_flag(words: List[str]) -> bool:
+    return any(_OUTPUT_FLAG_RE.match(w) for w in words)
 
 
-def split_compound(command: str) -> List[str]:
-    """Split by &&, ||, ;, | that are NOT inside quotes. Return list of segments."""
-    sep_re = re.compile(r"(&&|\|\||;|\|)")
-    segments: List[str] = []
-    last = 0
-    for m in sep_re.finditer(command):
-        if _is_inside_quotes(command, m.start()):
+_SINGLE_CHILD_ATTRS = ("command", "list", "body")
+
+
+def _children(node):
+    """Yield child AST nodes of any bashlex node.
+
+    bashlex uses a ``parts`` list for compound nodes (list/pipeline/command),
+    singular ``command`` / ``body`` attributes for substitutions and function
+    bodies, and a *list-valued* ``list`` attribute on ``compound`` nodes
+    (subshells/braces).  Normalise all shapes so callers can walk the tree
+    uniformly.  Children are deduplicated by identity (a function body may be
+    reachable both via ``parts`` and via ``body``).
+    """
+    seen: set = set()
+    for child in getattr(node, "parts", None) or []:
+        if id(child) not in seen:
+            seen.add(id(child))
+            yield child
+    for attr in _SINGLE_CHILD_ATTRS:
+        v = getattr(node, attr, None)
+        if v is None:
             continue
-        segments.append(command[last:m.start()].strip())
-        last = m.end()
-    if last < len(command):
-        segments.append(command[last:].strip())
-    return [s for s in segments if s]
+        if isinstance(v, list):
+            for child in v:
+                if hasattr(child, "kind") and id(child) not in seen:
+                    seen.add(id(child))
+                    yield child
+        elif hasattr(v, "kind") and id(v) not in seen:
+            seen.add(id(v))
+            yield v
+
+
+def _has_self_pipe(node) -> bool:
+    """True if the subtree contains a pipeline whose ends run the same
+    command — the fork-bomb signature `:(){ :|:& };:` pipes `:` into `:`.
+    A normal `ls | grep` pipe has different names and is not flagged."""
+    if node.kind == "pipeline":
+        cmds = [p for p in node.parts if getattr(p, "kind", None) == "command"]
+        if len(cmds) >= 2:
+            names = []
+            for c in cmds:
+                words, _ = _command_parts(c)
+                i = _unwrap_index(words)
+                names.append(_norm_command_word(words[i]) if i < len(words) else "")
+            if names and names[0] and names[0] == names[-1]:
+                return True
+    return any(_has_self_pipe(c) for c in _children(node))
+
+
+def _command_in_subst(node) -> Optional[str]:
+    """First command name inside a process/command substitution."""
+    for n in _children(node):
+        if n.kind == "command":
+            words, _ = _command_parts(n)
+            i = _unwrap_index(words)
+            if i < len(words):
+                return _norm_command_word(words[i])
+        elif n.kind in ("list", "pipeline", "commandsubstitution",
+                        "processsubstitution"):
+            r = _command_in_subst(n)
+            if r:
+                return r
+    return None
 
 
 # ---------------------------------------------------------------------------
-# Per-segment risk evaluation  (whitelist checked here — 从严: per-segment)
+# Per-node evaluation
 # ---------------------------------------------------------------------------
-def _segment_risky(segment: str, safe: Set[str]) -> Optional[str]:
-    """Return the matched risky word/subcommand, or None if safe."""
-    fw = _first_word(segment)
+def _check_command_node(cmd_node, safe: Set[str], out: List[str]) -> None:
+    words, redirects = _command_parts(cmd_node)
+
+    # Recurse into nested substitutions / subshells FIRST, and always —
+    # even when the outer command word is missing or whitelisted
+    # (`VAR=$(rm -rf /tmp)` has no command word at all; the risky command
+    # lives inside the assignment).
+    for part in cmd_node.parts:
+        if part.kind in ("word", "assignment"):
+            _check_tree(list(_children(part)), safe, out)
+        elif part.kind in ("commandsubstitution", "processsubstitution",
+                           "subshell", "function", "heredoc"):
+            _check_tree([part], safe, out)
+
+    # Destructive redirect (checked before the whitelist — a redirect
+    # writes/changes files even for whitelisted commands)
+    for rd in redirects:
+        if _redirect_destructive(rd):
+            target = getattr(rd.output, "word", rd.output)
+            out.append(f"redirect > {target!r}")
+            return
+
+    start = _unwrap_index(words)
+    if start >= len(words):
+        return
+    fw = _norm_command_word(words[start])
     if not fw:
-        return None
-
-    # Redirect check (从严: any redirect to a real file makes it risky — even
-    # for whitelisted commands, since a redirect writes/changes files;
-    # /dev/null and fd refs like &1/&2 are harmless and excluded)
-    if _has_destructive_redirect(segment):
-        return f">{fw} (redirect)"
+        return
 
     # Whitelist applies only to non-redirecting commands
     if fw in safe:
+        return
+
+    if fw in _RISKY_FIRST_WORDS:
+        out.append(fw)
+        return
+    if fw in _RISKY_WITH_SUB:
+        sub = _find_risky_subcommand(fw, words, start + 1)
+        if sub:
+            out.append(f"{fw} {sub}")
+            return
+    if fw in _RISKY_OUTPUT_CMDS and _has_output_flag(words[start + 1:]):
+        out.append(f"{fw} (output flag)")
+        return
+
+    # exec <(download): `bash <(curl …)` style — interpreter consumes a
+    # download process substitution
+    if fw in _EXEC_CMDS:
+        for part in cmd_node.parts:
+            if part.kind == "word":
+                for sub in _children(part):
+                    if sub.kind == "processsubstitution":
+                        inner = _command_in_subst(sub)
+                        if inner in _DOWNLOAD_CMDS:
+                            out.append(f"exec <(download): {fw} <({inner} …)")
+                            return
+
+
+def _pipeline_risky(pipe_node) -> Optional[str]:
+    """curl|bash style: download command piped into an interpreter."""
+    cmds = [p for p in pipe_node.parts if getattr(p, "kind", None) == "command"]
+    if len(cmds) < 2:
         return None
 
-    # Unconditional risky first-words
-    if fw in _RISKY_FIRST_WORDS:
-        return fw
+    def _name_of(c) -> Optional[str]:
+        words, _ = _command_parts(c)
+        i = _unwrap_index(words)
+        return _norm_command_word(words[i]) if i < len(words) else None
 
-    # Risky first-word + subcommand check
-    if fw in _RISKY_WITH_SUB:
-        # Skip sudo/env prefixes before checking subcommand
-        parts = segment.strip().split(None)
-        sub_idx = 1
-        while sub_idx < len(parts) and parts[sub_idx].lower() in _SKIPPABLE_PREFIXES:
-            sub_idx += 1
-        if sub_idx < len(parts):
-            sub = os.path.basename(parts[sub_idx].lower())
-            if sub in _RISKY_WITH_SUB[fw]:
-                return f"{fw} {sub}"
-
-    # curl/wget with -o / -O / --output flag
-    if fw in _RISKY_OUTPUT_CMDS and _has_output_flag(segment):
-        return f"{fw} (output flag)"
-
+    first = _name_of(cmds[0])
+    last = _name_of(cmds[-1])
+    if first in _DOWNLOAD_CMDS and last in _EXEC_CMDS:
+        return f"pipe: {first} | {last}"
     return None
+
+
+def _check_tree(nodes, safe: Set[str], out: List[str]) -> None:
+    for node in nodes:
+        k = node.kind
+        if k == "command":
+            _check_command_node(node, safe, out)
+        elif k == "pipeline":
+            r = _pipeline_risky(node)
+            if r:
+                out.append(r)
+            for p in node.parts:
+                if getattr(p, "kind", None) == "command":
+                    _check_tree([p], safe, out)
+        elif k == "list":
+            _check_tree(list(_children(node)), safe, out)
+        elif k in ("subshell", "compound", "commandsubstitution",
+                   "processsubstitution", "function", "heredoc",
+                   "word", "assignment"):
+            if k == "function" and _has_self_pipe(node):
+                # Fork-bomb signature: `:(){ :|:& };:` — a function whose
+                # body pipes its own name.
+                out.append("fork bomb (function body pipeline)")
+            _check_tree(list(_children(node)), safe, out)
+        # operator / pipe / parameter / comment / redirect: nothing to check
 
 
 # ---------------------------------------------------------------------------
@@ -200,31 +355,51 @@ def is_sentinel(command: str) -> bool:
 
 
 def parse_sentinel(command: str) -> Tuple[str, Optional[str]]:
-    """Return (subcommand, argument) from a sentinel command."""
+    """Return (subcommand, argument) from a sentinel command.
+
+    Quoted arguments survive parsing (``checkpoint "my milestone"`` keeps
+    the spaces); unparseable input (e.g. unterminated quote) falls back to
+    a plain whitespace split rather than crashing.
+    """
     parts = command.strip().split(None, 2)
     if len(parts) < 2:
         return ("last", None)
-    return (parts[1].lower(), parts[2] if len(parts) > 2 else None)
+    try:
+        import shlex
+        shlexed = shlex.split(command)
+    except ValueError:
+        shlexed = parts
+    if len(shlexed) < 2:
+        return ("last", None)
+    return (shlexed[1].lower(),
+            shlexed[2] if len(shlexed) > 2 else None)
 
 
 def is_risky(command: str, safe: Set[str]) -> bool:
-    """从严: compound commands checked per-segment. Any risky segment → risky.
-    Whitelist is checked *per segment*, not whole-command."""
+    """
+    Fail-safe: commands bashlex cannot parse (arithmetic expansion, `[[ ]]`,
+    fork bombs, …) are treated as risky rather than silently safe.
+    """
     cmd = command.strip()
     if not cmd:
         return False
     if is_sentinel(cmd):
         return False  # sentinel itself is never risky
+    if cmd.startswith("#"):
+        return False  # pure comment
 
-    segments = split_compound(cmd)
-    # Always check per-segment — even for single-segment commands
-    for seg in segments:
-        if not seg:
-            continue
-        if _segment_risky(seg, safe):
-            return True
-    # If no compound (i.e. split_compound returned empty because there are no
-    # separators), check the whole command as a single segment.
-    if not segments:
-        return _segment_risky(cmd, safe) is not None
-    return False
+    if bashlex is None:
+        # Deployment error: classifier unavailable → over-approximate.
+        print("cubesandbox-risky: bashlex not installed; treating command as "
+              "risky (fail-safe). Install requirements: "
+              "`pip install -r requirements.txt`", file=sys.stderr)
+        return True
+
+    try:
+        ast = bashlex.parse(cmd)
+    except Exception:
+        return True  # unparseable → risky (fail-safe)
+
+    reasons: List[str] = []
+    _check_tree(ast, safe, reasons)
+    return bool(reasons)

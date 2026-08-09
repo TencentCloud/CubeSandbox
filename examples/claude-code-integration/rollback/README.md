@@ -5,8 +5,8 @@ CubeSandbox MicroVMs. Before risky commands a sandbox snapshot is taken
 automatically; if the command breaks the environment, the agent runs
 `cubesandbox-rollback last` to restore the previous filesystem state. This
 example is a companion layer to the CubeSandbox Claude Code hooks
-(`examples/claude-code-integration/hooks/`, below: **#765**), which redirect
-every Bash tool call into an isolated sandbox.
+(`examples/claude-code-integration/hooks/`, below: **cubesandbox-hook**
+(PR #765)), which redirect every Bash tool call into an isolated sandbox.
 
 ## Why
 
@@ -17,17 +17,18 @@ agent roll back to the last good state on demand.
 
 ## Architecture
 
-- **Companion layer to #765.** It never imports #765 modules and never writes
-  #765's state. It only *reads* `~/.cache/cubesandbox-hook/<sha256(session_id)>.json`
-  (fields `sandbox_id`, `mount`, `state_token`) to find the session's sandbox.
-  If #765 is absent or the sandbox does not exist yet, the hooks degrade
-  gracefully (skip / no-op). The digest function is duplicated to match #765
+- **Companion layer to cubesandbox-hook.** It never imports cubesandbox-hook
+  modules and never writes cubesandbox-hook's state. It only *reads*
+  `~/.cache/cubesandbox-hook/<sha256(session_id)>.json` (fields `sandbox_id`,
+  `mount`, `state_token`) to find the session's sandbox. If cubesandbox-hook
+  is absent or the sandbox does not exist yet, the hooks degrade gracefully
+  (skip / no-op). The digest function is duplicated to match cubesandbox-hook
   exactly, so both plugins address the same session.
 - **Parallel-hook safety.** Claude Code runs multiple PreToolUse hooks in
   parallel; each receives the original tool input, `deny` has highest
   precedence, and `updatedInput` is not seen by other hooks. Our hooks return
   only `{}` (no opinion) or `deny` — never `updatedInput` — so they coexist
-  with #765's rewrite hook without fighting over the command.
+  with cubesandbox-hook's rewrite hook without fighting over the command.
 - **Deny channel.** Verified with live sessions: Claude Code renders
   `permissionDecisionReason` to the agent but not `hookSpecificOutput.stdout`.
   All user-facing output (rollback results, snapshot lists, errors) is carried
@@ -40,25 +41,25 @@ agent roll back to the last good state on demand.
 
 | File | Role |
 |---|---|
-| `cubesandbox_lib.py` | Shared utilities: session digest (must match #765), atomic state I/O with `flock`, sandbox client, config-hash staleness check, orphan cleanup |
-| `cubesandbox_risky.py` | Risk classifier. Strict: compound commands are split per segment (quote-aware, `&&`/`\|\|`/`;`/`\|`), `sudo`/`env`/`nohup`/`nice` stripped, destructive redirects detected (`/dev/null`, `/dev/*` and fd refs `&1`/`&2` excluded), `curl`/`wget` `-o`/`-O`/`--output` flagged |
-| `cubesandbox_snapshot.py` | PreToolUse/Bash: risky command → `create_snapshot()` → record it → return `{}` (fail-open) |
-| `cubesandbox_rollback.py` | PreToolUse/Bash: sentinel command → `deny` + rollback / list / drop (fail-closed) |
+| `cubesandbox_lib.py` | Shared utilities: session digest (must match cubesandbox-hook), atomic state I/O with `flock`, sandbox client, loads `~/.claude/hooks/cubesandbox.env` into the hook process at startup (without overriding existing env vars), pure helpers for snapshot find/prune/evict, orphan cleanup |
+| `cubesandbox_risky.py` | Risk classifier. AST-based (bashlex): parses the whole command with bash's own grammar instead of regex. Unwraps `sudo`/`env`/`nohup`/`nice`/`timeout`/`exec` prefixes and leading `VAR=value` assignments, evaluates every pipeline/compound segment and nested `$()`/`<( )` substitution independently, detects destructive redirects (`/dev/null` and fd refs `&1`/`&2` excluded), flags `curl`/`wget` `-o`/`-O`/`--output`, `curl|bash`-style download-to-interpreter pipes, and fork bombs. Unparseable commands are treated as risky (fail-safe) |
+| `cubesandbox_snapshot.py` | PreToolUse/Bash: risky command → `create_snapshot()` → record it → ring-buffer eviction of auto snapshots and undo-point invalidation → return `{}` (fail-open) |
+| `cubesandbox_rollback.py` | PreToolUse/Bash: sentinel command → `deny` + multi-point rollback (`last` / index / snapshot id), `checkpoint`, `undo`, `list`, `drop` (fail-closed) |
 | `cubesandbox_session.py` | SessionStart: injects rollback awareness into the agent's context |
-| `cubesandbox_poststart.py` | PostToolUse/Bash: `<initial>` baseline snapshot after the first command |
-| `install_rollback.sh` | Idempotent install/uninstall. Registers hooks in the project's `.claude/settings.json` and installs `SKILL.md` as a skill. Never touches user-level `~/.claude/settings.json` (#765's domain) |
+| `cubesandbox_poststart.py` | PostToolUse/Bash: `<initial>` baseline snapshot (`kind: baseline`, never auto-evicted) after the first command |
+| `install_rollback.sh` | Idempotent install/uninstall. Registers hooks in the project's `.claude/settings.json` and installs `SKILL.md` as a skill. Never touches user-level `~/.claude/settings.json` (cubesandbox-hook's domain) |
 | `SKILL.md` | Agent-facing command reference (installed to `.claude/skills/cubesandbox-rollback/`) |
-| `.env.example` | Optional `CUBE_ROLLBACK_SAFE` whitelist; API/template config is shared from #765's `.env` |
+| `.env.example` | Optional `CUBE_ROLLBACK_SAFE` whitelist and `CUBE_ROLLBACK_MAX_AUTO_SNAPSHOTS` ring-buffer cap; API/template config is read from `~/.claude/hooks/cubesandbox.env` at hook startup (cubesandbox-hook's env file), or from the shell environment |
 
 Own state lives in `~/.cache/cubesandbox-rollback/<sha256(session_id)>.json`
-(written atomically, serialized with `flock`); if #765's state file disappears,
-the rollback state is treated as orphaned and cleaned up.
+(written atomically, serialized with `flock`); if cubesandbox-hook's state
+file disappears, the rollback state is treated as orphaned and cleaned up.
 
 ## Installation
 
-Prerequisites: a running CubeSandbox deployment, the #765 hooks installed, and
-`claude` launched **from the project root** (project-level `settings.json` and
-the skill only load there).
+Prerequisites: a running CubeSandbox deployment, the cubesandbox-hook hooks
+installed, and `claude` launched **from the project root** (project-level
+`settings.json` and the skill only load there).
 
 ```bash
 # from the project you want protected
@@ -80,20 +81,58 @@ can then use:
 
 | Command | Effect |
 |---|---|
-| `cubesandbox-rollback last` | Restore the sandbox to the most recent snapshot |
-| `cubesandbox-rollback list` | List available snapshots (index, id, time, command) |
-| `cubesandbox-rollback drop <snapshot-id>` | Delete a snapshot |
+| `cubesandbox-rollback last` | Roll back to the most recent snapshot (default) |
+| `cubesandbox-rollback <N>` | Roll back to the snapshot at list index N |
+| `cubesandbox-rollback <snapshot-id>` | Roll back to a specific snapshot |
+| `cubesandbox-rollback list` | List snapshots: `[N] id time [kind] command` |
+| `cubesandbox-rollback checkpoint <name>` | Explicit milestone snapshot, never auto-evicted |
+| `cubesandbox-rollback undo` | Undo the last rollback (invalidated once a new snapshot is taken) |
+| `cubesandbox-rollback drop <last\|N\|snapshot-id>` | Delete a snapshot (local + backend) |
+
+Snapshots come in three kinds: `baseline` (taken at session start, never
+auto-evicted), `auto` (taken before risky commands, kept in a ring buffer
+capped by `CUBE_ROLLBACK_MAX_AUTO_SNAPSHOTS`), and `checkpoint` (user-named,
+never auto-evicted).
+
+### Snapshot lifecycle
+
+Auto snapshots are kept in a ring buffer of `CUBE_ROLLBACK_MAX_AUTO_SNAPSHOTS`
+(default 30, env-configurable); when the cap is exceeded, the oldest auto
+snapshot is deleted from the backend. Baseline snapshots and explicit
+checkpoints are never auto-evicted — drop them manually.
+
+Rolling back to a checkpoint discards all snapshots after it (deleted from the
+backend; the discarded list is shown in the message) but keeps a hidden undo
+point: `cubesandbox-rollback undo` restores the pre-rollback state. The undo
+point is deleted as soon as a new snapshot is taken (either auto or
+checkpoint).
 
 ### Risk classification
+
+The classifier parses each command with [bashlex](https://pypi.org/project/bashlex/)
+(a Python port of bash's own parser) and evaluates every segment of the AST —
+this is the same approach as OpenHands SDK, toad, and connectonion. Regex
+parsing is deliberately not used: regex-based classifiers are trivially
+bypassed by prefixes, quoted targets, or unspaced operators.
 
 Snapshot-triggering commands include `rm`, `rmdir`, `chmod`, `chown`, `mv`,
 `dd`, `shred`, `mkfs`, `fdisk`, `apt*`, `dnf`, `yum`, `brew`, `snap`; risky
 subcommands such as `git reset`/`git clean`, `npm install`/`uninstall`/`update`,
 `pip install`/`uninstall`, `yarn add`/`remove`, `cargo install`, `go install`,
-`make install`; `curl`/`wget` writing via `-o`/`-O`/`--output`; and any
-redirect to a real file. Redirects to `/dev/null` or file descriptors (`2>&1`)
-are excluded, and the `cubesandbox-rollback` sentinel itself is never
-snapshotted.
+`make install`; `curl`/`wget` writing via `-o`/`-O`/`--output`; `curl|bash`-
+style download-to-interpreter pipes; and any redirect to a real file
+(including quoted and unspaced targets like `> "out file.txt"` or `echo x>f`).
+The following are *not* snapshot triggers:
+
+- wrapper prefixes (`sudo`/`env`/`nohup`/`nice`/`timeout`/`exec`/`setsid`)
+  and leading `VAR=value` assignments — the real command is extracted from
+  behind them, so `sudo git reset --hard` and `DEBUG=1 npm install` trigger;
+- redirects to `/dev/null` or file descriptors (`2>&1`, `>&1`, `>/dev/null`);
+- the `cubesandbox-rollback` sentinel itself.
+
+**Fail-safe**: commands bashlex cannot parse (arithmetic expansion
+`$((1 > 0))`, `[[ ]]` tests, fork bombs) are treated as risky rather than
+silently safe — an extra snapshot is harmless, a missed one is not.
 
 To whitelist commands that must never trigger a snapshot, export
 `CUBE_ROLLBACK_SAFE` (comma-separated), e.g.:

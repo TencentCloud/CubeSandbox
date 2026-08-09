@@ -7,12 +7,16 @@ import json
 import sys
 
 MESSAGE = (
-    "CubeSandbox Rollback is active. Snapshots are taken automatically "
-    "before risky commands (rm, npm install, git reset, etc.). If a "
-    "command breaks the environment, run `cubesandbox-rollback last` to "
-    "restore the previous state. Use `cubesandbox-rollback list` to see "
-    "available snapshots. Use `cubesandbox-rollback drop <id>` to delete "
-    "a snapshot."
+    "CubeSandbox Rollback is active. A snapshot is taken automatically "
+    "before every risky command (rm, npm install, git reset, etc.), and a "
+    "baseline snapshot marks the session start. Run `cubesandbox-rollback "
+    "list` to see all snapshots; roll back to any of them with "
+    "`cubesandbox-rollback last`, `cubesandbox-rollback <N>`, or "
+    "`cubesandbox-rollback <snapshot-id>`. Use `cubesandbox-rollback "
+    "checkpoint <name>` to save a named milestone before a refactor. "
+    "After a rollback, `cubesandbox-rollback undo` restores the previous "
+    "state until a new snapshot is taken, and `cubesandbox-rollback drop "
+    "<last|N|snapshot-id>` deletes a snapshot."
 )
 
 

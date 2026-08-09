@@ -12,8 +12,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 
 from cubesandbox_lib import (
-    get_config_hash,
     get_sandbox_client,
+    load_hook_env,
     read_my_state,
     read_sandbox_state,
     write_my_state,
@@ -21,6 +21,8 @@ from cubesandbox_lib import (
 
 
 def main() -> int:
+    load_hook_env()
+
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -37,22 +39,15 @@ def main() -> int:
     session_id = payload.get("session_id", "default")
     my = read_my_state(session_id)
 
-    # Already have snapshots → not the first command
+    # Already have snapshots → not the first command (baseline already exists)
     if my.get("snapshots"):
         print("{}")
         return 0
 
-    # First command: we need a sandbox (#765 should have created one)
+    # First command: we need a sandbox (cubesandbox-hook should have created one)
     sstate = read_sandbox_state(session_id)
     if not sstate or not sstate.get("sandbox_id"):
         print("[cubesandbox-poststart] no sandbox yet", file=sys.stderr)
-        print("{}")
-        return 0
-
-    stored = my.get("config_hash", "")
-    current = get_config_hash()
-    if stored and stored != current:
-        print("[cubesandbox-poststart] config stale", file=sys.stderr)
         print("{}")
         return 0
 
@@ -66,11 +61,11 @@ def main() -> int:
 
     my.setdefault("snapshots", []).append({
         "snapshot_id": snapshot.snapshot_id,
-        "name": getattr(snapshot, "name", ""),
+        "kind": "baseline",
+        "name": "<initial>",
         "command": "<initial>",
         "timestamp": int(time.time()),
     })
-    my["config_hash"] = get_config_hash()
     try:
         write_my_state(session_id, my)
     except Exception as exc:

@@ -12,23 +12,19 @@ HOOKS_DIR="${HOME}/.claude/hooks/rollback"
 _find_project_root() {
     local dir
     dir="${1:-$PWD}"
-    while [[ "$dir" != "/" ]]; do
-        if [[ -d "${dir}/.git" ]]; then
-            echo "$dir"
-            return 0
-        fi
-        dir="$(dirname "$dir")"
-    done
+    if git -C "$dir" rev-parse --show-toplevel 2>/dev/null; then
+        return 0
+    fi
     echo "$PWD"
     return 1
 }
 
-PROJECT_ROOT="$(_find_project_root)"
+PROJECT_ROOT="$(_find_project_root || true)"
 PROJECT_SETTINGS="${PROJECT_ROOT}/.claude/settings.json"
 SKILL_DIR="${PROJECT_ROOT}/.claude/skills/cubesandbox-rollback"
 
 # ---------------------------------------------------------------------------
-# Helper: read/write JSON settings without jq (fallback to python)
+# Helper: read/write JSON settings
 # ---------------------------------------------------------------------------
 _HAS_JQ=false
 if command -v jq &>/dev/null; then _HAS_JQ=true; fi
@@ -180,7 +176,7 @@ The installer:
   - Copies hook scripts to ~/.claude/hooks/rollback/
   - Registers hooks in <project>/.claude/settings.json
   - Creates a skill at <project>/.claude/skills/cubesandbox-rollback/
-  - NEVER touches ~/.claude/settings.json (#765's domain)
+  - NEVER touches ~/.claude/settings.json (cubesandbox-hook's domain)
 EOF
 }
 
@@ -216,21 +212,23 @@ do_install() {
     cp "${SCRIPT_DIR}/SKILL.md" "${SKILL_DIR}/"
     echo "  done"
 
-    # 4. Check #765
+    # 4. Check cubesandbox-hook
     if [[ -f "${HOME}/.claude/settings.json" ]]; then
-        echo "  #765 user-level settings.json: found"
+        echo "  cubesandbox-hook user-level settings.json: found"
     else
-        echo "  ⚠  #765 user-level settings.json NOT found — install #765 first"
+        echo "  ⚠  cubesandbox-hook user-level settings.json NOT found — install cubesandbox-hook first"
     fi
 
     # 5. Deps
     if command -v pip &>/dev/null; then
-        if python3 -c "import cubesandbox" 2>/dev/null; then
-            echo "  cubesandbox-sdk: installed"
-        else
-            echo "  Installing cubesandbox-sdk via pip ..."
-            pip install cubesandbox-sdk
-        fi
+        for dep in cubesandbox bashlex; do
+            if python3 -c "import ${dep}" 2>/dev/null; then
+                echo "  ${dep}: installed"
+            else
+                echo "  Installing ${dep} via pip ..."
+                pip install "${dep}"
+            fi
+        done
     fi
 
     echo "=== Install complete ==="
