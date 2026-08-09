@@ -101,9 +101,10 @@ func (l *local) loop(ctx context.Context) {
 					CubeLog.WithContext(context.Background()).Errorf("loop_all:%s", err)
 				}
 				if log.IsDebug() {
-					CubeLog.WithContext(context.Background()).Debugf("loop_all:%s", GetNodes(-1).String())
+					nodes := GetNodes(-1)
+					CubeLog.WithContext(context.Background()).Debugf("loop_all,size:%d,nodes:%s",
+						nodes.Len(), nodes.String())
 				}
-				CubeLog.WithContext(context.Background()).Errorf("loop_all,size:%d", l.cache.ItemCount())
 			}, func(panicError interface{}) {
 				checkDeadline = time.Now().Add(config.GetConfig().Common.SyncMetaDataInterval)
 				CubeLog.WithContext(context.Background()).Fatalf("loop panic:%v", panicError)
