@@ -344,6 +344,72 @@ func TestMergeCubeNetworkConfigValuesPreservesExistingCIDRs(t *testing.T) {
 	}
 }
 
+func TestMergeCubeNetworkConfigValuesPreservesRulesAndAllowPublicTraffic(t *testing.T) {
+	host := "api.internal.example.com"
+	scheme := "https"
+	port := 8443
+	audit := "full"
+	format := "Bearer ${SECRET}"
+	allowPublic := false
+	existing := &types.CubeNetworkConfig{
+		AllowPublicTraffic: &allowPublic,
+		Rules: []*types.EgressRule{
+			{
+				Name: "api-8443-https",
+				Match: &types.EgressRuleMatch{
+					Host:   &host,
+					Scheme: &scheme,
+					Port:   &port,
+				},
+				Action: &types.EgressRuleAction{
+					Allow: true,
+					Audit: &audit,
+					Inject: []*types.EgressRuleInject{
+						{Header: "Authorization", Secret: "s3cret", Format: &format},
+					},
+				},
+			},
+		},
+	}
+
+	// Any --allow-* flag triggers the merge path, which clones `existing`.
+	got := mergeCubeNetworkConfigValues(existing, false, false, []string{"10.0.0.0/8"}, nil)
+	if got == nil {
+		t.Fatal("got nil merged config")
+	}
+	if got.AllowPublicTraffic == nil || *got.AllowPublicTraffic != false {
+		t.Fatalf("AllowPublicTraffic=%v, want pointer to false (template value preserved)", got.AllowPublicTraffic)
+	}
+	if len(got.Rules) != 1 {
+		t.Fatalf("Rules=%v, want the template rule preserved", got.Rules)
+	}
+	rule := got.Rules[0]
+	if rule.Name != "api-8443-https" || rule.Match == nil || rule.Match.Port == nil || *rule.Match.Port != 8443 {
+		t.Fatalf("rule=%+v, want port-pinned rule preserved", rule)
+	}
+	if rule.Action == nil || len(rule.Action.Inject) != 1 || rule.Action.Inject[0].Header != "Authorization" {
+		t.Fatalf("action=%+v, want inject preserved", rule.Action)
+	}
+
+	// The clone must be deep: mutating the merged copy must not touch the template.
+	*got.AllowPublicTraffic = true
+	*rule.Match.Port = 443
+	*rule.Match.Host = "mutated.example.com"
+	*rule.Action.Inject[0].Format = "mutated"
+	if *existing.AllowPublicTraffic != false {
+		t.Fatal("mutation of merged AllowPublicTraffic leaked into template")
+	}
+	if *existing.Rules[0].Match.Port != 8443 {
+		t.Fatal("mutation of merged Match.Port leaked into template")
+	}
+	if *existing.Rules[0].Match.Host != "api.internal.example.com" {
+		t.Fatal("mutation of merged Match.Host leaked into template")
+	}
+	if *existing.Rules[0].Action.Inject[0].Format != "Bearer ${SECRET}" {
+		t.Fatal("mutation of merged Inject.Format leaked into template")
+	}
+}
+
 func TestRedoCommandParsesNodeScope(t *testing.T) {
 	ctx := newRedoContext(t, []string{
 		"--template-id", "tpl-1",

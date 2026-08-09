@@ -87,12 +87,48 @@ func checkParam(req *types.CreateCubeSandboxReq) error {
 		return ret.Err(errorcode.ErrorCode_MasterParamsError, "containers param is nil")
 	}
 
-	if req.CubeNetworkConfig != nil && req.CubeNetworkConfig.MaskRequestHost != nil {
-		if err := validateMaskRequestHost(*req.CubeNetworkConfig.MaskRequestHost); err != nil {
-			return ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
+	if req.CubeNetworkConfig != nil {
+		if req.CubeNetworkConfig.MaskRequestHost != nil {
+			if err := validateMaskRequestHost(*req.CubeNetworkConfig.MaskRequestHost); err != nil {
+				return ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
+			}
+		}
+		for i, rule := range req.CubeNetworkConfig.Rules {
+			if rule == nil {
+				continue
+			}
+			if err := validateEgressRuleMatch(rule.Match, i); err != nil {
+				return ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
+			}
 		}
 	}
 
+	return nil
+}
+
+// validateEgressRuleMatch enforces the port/scheme contract on one egress
+// rule match, mirroring the SDK client-side check and the CubeEgress Lua
+// validation: a set Port must be in [1, 65535] and must be paired with
+// Scheme, and a set Scheme must be http or https (case-insensitive —
+// downstream normalizes to lowercase).
+func validateEgressRuleMatch(match *types.EgressRuleMatch, index int) error {
+	if match == nil {
+		return nil
+	}
+	if match.Port != nil {
+		if *match.Port < 1 || *match.Port > 65535 {
+			return fmt.Errorf("network.rules[%d].match.port must be in [1, 65535], got %d", index, *match.Port)
+		}
+		if match.Scheme == nil {
+			return fmt.Errorf("network.rules[%d].match.port requires match.scheme to be set", index)
+		}
+	}
+	if match.Scheme != nil {
+		scheme := strings.ToLower(strings.TrimSpace(*match.Scheme))
+		if scheme != "http" && scheme != "https" {
+			return fmt.Errorf("network.rules[%d].match.scheme must be 'http' or 'https', got %q", index, *match.Scheme)
+		}
+	}
 	return nil
 }
 
@@ -317,13 +353,18 @@ func mapEgressRuleMatch(in *types.EgressRuleMatch) *cubebox.EgressRuleMatch {
 	if in == nil {
 		return nil
 	}
-	return &cubebox.EgressRuleMatch{
+	out := &cubebox.EgressRuleMatch{
 		Sni:    in.SNI,
 		Host:   in.Host,
 		Method: append([]string(nil), in.Method...),
 		Path:   in.Path,
 		Scheme: in.Scheme,
 	}
+	if in.Port != nil {
+		p := int32(*in.Port)
+		out.Port = &p
+	}
+	return out
 }
 
 func mapEgressRuleAction(in *types.EgressRuleAction) *cubebox.EgressRuleAction {

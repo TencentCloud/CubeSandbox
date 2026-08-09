@@ -17,9 +17,9 @@ use crate::{
     },
     error::{AppError, AppResult},
     models::{
-        EgressRule, LogLevel as ModelLogLevel, NewSandbox, Sandbox, SandboxAutoResume,
-        SandboxDetail, SandboxLifecycleConfig, SandboxLog, SandboxLogEntry, SandboxLogs,
-        SandboxLogsV2Response, SandboxNetworkConfig, SandboxOnTimeout, SandboxState,
+        EgressRule, EgressRuleMatch, LogLevel as ModelLogLevel, NewSandbox, Sandbox,
+        SandboxAutoResume, SandboxDetail, SandboxLifecycleConfig, SandboxLog, SandboxLogEntry,
+        SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxOnTimeout, SandboxState,
         SandboxVolumeMount,
     },
 };
@@ -1049,6 +1049,12 @@ pub(crate) fn build_cube_network_config(
         allow_internet_access == Some(false),
     )?;
 
+    if let Some(rs) = network.and_then(|n| n.rules.as_ref()) {
+        for (index, rule) in rs.iter().enumerate() {
+            validate_egress_rule_match(&rule.r#match, index)?;
+        }
+    }
+
     let rules: Vec<CubeEgressRule> = network
         .and_then(|n| n.rules.as_ref())
         .map(|rs| rs.iter().map(map_egress_rule).collect())
@@ -1080,6 +1086,33 @@ pub(crate) fn build_cube_network_config(
     }))
 }
 
+/// Validate the port/scheme pair on one egress rule match, mirroring the
+/// SDK client-side contract and the CubeEgress Lua validation: a set port
+/// must be in [1, 65535] and must be paired with a scheme, and a set scheme
+/// must be http or https (case-insensitive — downstream normalizes).
+fn validate_egress_rule_match(rule_match: &EgressRuleMatch, index: usize) -> AppResult<()> {
+    if let Some(port) = rule_match.port {
+        if !(1..=65535).contains(&port) {
+            return Err(AppError::BadRequest(format!(
+                "network.rules[{index}].match.port must be in [1, 65535], got {port}"
+            )));
+        }
+        if rule_match.scheme.is_none() {
+            return Err(AppError::BadRequest(format!(
+                "network.rules[{index}].match.port requires match.scheme to be set"
+            )));
+        }
+    }
+    if let Some(scheme) = rule_match.scheme.as_deref() {
+        if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+            return Err(AppError::BadRequest(format!(
+                "network.rules[{index}].match.scheme must be 'http' or 'https', got {scheme:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn map_egress_rule(rule: &EgressRule) -> CubeEgressRule {
     CubeEgressRule {
         name: rule.name.clone(),
@@ -1089,6 +1122,7 @@ fn map_egress_rule(rule: &EgressRule) -> CubeEgressRule {
             method: rule.r#match.method.clone(),
             path: rule.r#match.path.clone(),
             scheme: rule.r#match.scheme.clone(),
+            port: rule.r#match.port,
         },
         action: CubeEgressRuleAction {
             allow: rule.action.allow,
@@ -1342,6 +1376,7 @@ mod tests {
                         method: Some(vec!["POST".to_string()]),
                         path: Some("/v1/chat".to_string()),
                         sni: Some("api.deepseek.com".to_string()),
+                        port: None,
                     },
                     action: EgressRuleAction {
                         allow: true,
@@ -1408,6 +1443,91 @@ mod tests {
         // None fields are skipped on the wire.
         assert!(rule["action"].get("audit").is_none());
         assert!(rule["action"].get("inject").is_none());
+    }
+
+    fn network_with_match(rule_match: EgressRuleMatch) -> SandboxNetworkConfig {
+        SandboxNetworkConfig {
+            allow_public_traffic: None,
+            allow_out: None,
+            deny_out: None,
+            mask_request_host: None,
+            rules: Some(vec![EgressRule {
+                name: "r1".to_string(),
+                r#match: rule_match,
+                action: EgressRuleAction {
+                    allow: true,
+                    audit: None,
+                    inject: None,
+                },
+            }]),
+        }
+    }
+
+    #[test]
+    fn egress_match_port_requires_scheme() {
+        let err = build_cube_network_config(
+            None,
+            Some(&network_with_match(EgressRuleMatch {
+                port: Some(8443),
+                ..Default::default()
+            })),
+        )
+        .expect_err("port without scheme must be rejected");
+        assert!(err.to_string().contains("requires match.scheme"), "{err}");
+    }
+
+    #[test]
+    fn egress_match_port_range_enforced() {
+        for port in [0, -1, 65536, 99999] {
+            let err = build_cube_network_config(
+                None,
+                Some(&network_with_match(EgressRuleMatch {
+                    port: Some(port),
+                    scheme: Some("https".to_string()),
+                    ..Default::default()
+                })),
+            )
+            .expect_err("out-of-range port must be rejected");
+            assert!(err.to_string().contains("[1, 65535]"), "{err}");
+        }
+    }
+
+    #[test]
+    fn egress_match_invalid_scheme_rejected() {
+        let err = build_cube_network_config(
+            None,
+            Some(&network_with_match(EgressRuleMatch {
+                scheme: Some("ftp".to_string()),
+                ..Default::default()
+            })),
+        )
+        .expect_err("non-http(s) scheme must be rejected");
+        assert!(
+            err.to_string().contains("must be 'http' or 'https'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn egress_match_valid_port_scheme_accepted() {
+        build_cube_network_config(
+            None,
+            Some(&network_with_match(EgressRuleMatch {
+                port: Some(8443),
+                scheme: Some("https".to_string()),
+                ..Default::default()
+            })),
+        )
+        .expect("valid port+scheme pair");
+        // Case variants are accepted (downstream normalizes to lowercase).
+        build_cube_network_config(
+            None,
+            Some(&network_with_match(EgressRuleMatch {
+                scheme: Some("HTTPS".to_string()),
+                ..Default::default()
+            })),
+        )
+        .expect("uppercase scheme is accepted");
     }
 
     #[test]
