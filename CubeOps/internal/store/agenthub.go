@@ -682,6 +682,7 @@ func scanInstances(rows *sql.Rows) ([]AgentInstance, error) {
 		gatewayURL := fmt.Sprintf("https://%d-%s.%s", gatewayPort, inst.SandboxID, domain)
 		if gatewayToken.Valid && gatewayToken.String != "" {
 			gatewayURL = gatewayURL + "#token=" + gatewayToken.String
+			inst.GatewayToken = gatewayToken.String
 		}
 		inst.GatewayURL = gatewayURL
 		inst.EnvURL = fmt.Sprintf("http://%d-%s.%s", envPort, inst.SandboxID, domain)
