@@ -1,8 +1,8 @@
 COVERAGE_PROFILE=.coverage
 COVERAGE_REPORT=coverage.html
 
-BPF_GENS := $(wildcard *_bpfel.go)
-BPF_OBJS := $(wildcard *_bpfel.o)
+BPF_GENS := $(wildcard *_bpfel*.go)
+BPF_OBJS := $(wildcard *_bpfel*.o)
 
 ifeq ($(V),1)
 	Q =

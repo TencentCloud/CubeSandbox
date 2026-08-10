@@ -860,6 +860,7 @@ Device specifies a host device to mount into a container.
 | method | [string](#string) | repeated |  |
 | path | [string](#string) | optional |  |
 | scheme | [string](#string) | optional |  |
+| port | [int32](#int32) | optional | L7 destination port. When set, `scheme` MUST also be set — together they pin the (host, port, scheme) tuple CubeEgress intercepts via skb-&gt;mark &#43; iptables TPROXY. Both omitted keeps the legacy default {80/http, 443/https} behavior. |
 
 
 
