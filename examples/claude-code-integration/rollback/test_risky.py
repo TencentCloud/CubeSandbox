@@ -57,6 +57,9 @@ check("sudo yarn add foo", "sudo yarn add foo", True)
 check("sudo -u root rm -rf /tmp/x", "sudo -u root rm -rf /tmp/x", True)
 check("nice -n 5 npm install", "nice -n 5 npm install", True)
 check("timeout 10 git reset --hard", "timeout 10 git reset --hard", True)
+check("timeout suffixed duration", "timeout 10s git reset --hard", True)
+check("timeout min duration", "timeout 5m npm install", True)
+check("timeout hour duration", "timeout 1h rm -rf /tmp/x", True)
 check("env FOO=bar npm install", "env FOO=bar npm install", True)
 check("DEBUG=1 npm install", "DEBUG=1 npm install", True)
 check("FOO=bar rm -rf /tmp/x", "FOO=bar rm -rf /tmp/x", True)
@@ -123,6 +126,15 @@ check("assignment plain safe", "DEBUG=1 echo hi", False)
 check("env assignment safe", "env FOO=1 echo hi", False)
 
 # ---------------------------------------------------------------------------
+# Comment handling: comment-only input is safe; a leading comment/shebang
+# followed by a real command must still be classified
+# ---------------------------------------------------------------------------
+print("== comment handling ==")
+check("comment-only", "# just a comment", False)
+check("comment then risky cmd", "# install dependencies\nnpm install", True)
+check("shebang then risky cmd", "#!/bin/bash\nrm -rf /tmp/important", True)
+
+# ---------------------------------------------------------------------------
 # Whitelist behavior
 # ---------------------------------------------------------------------------
 print("== whitelist behavior ==")
@@ -140,8 +152,16 @@ check("whitelist git reset", "git reset --hard", False, safe={"git"},
 print("== sentinel / whitelist parsing ==")
 check("sentinel never risky", "cubesandbox-rollback last", False)
 check("sentinel in compound", "cubesandbox-rollback drop snap-1 && ls", False)
+check("bare sentinel safe", "cubesandbox-rollback", False)
+check("prefix-named tool not sentinel", "cubesandbox-rollback-helper", False,
+      note="word boundary required — else a real rollback would run")
+check("prefix tool + risky compound", "cubesandbox-rollback-tool.py && rm -rf x", True,
+      note="prefix tool is not the sentinel, so rm -rf must be flagged")
 assert is_sentinel("cubesandbox-rollback last")
+assert is_sentinel("cubesandbox-rollback")
 assert not is_sentinel("ls -la")
+assert not is_sentinel("cubesandbox-rollback-helper")
+assert not is_sentinel("cubesandbox-rollback-tool.py")
 assert parse_sentinel("cubesandbox-rollback drop snap-1") == ("drop", "snap-1")
 assert parse_sentinel("cubesandbox-rollback") == ("last", None)
 assert parse_sentinel('cubesandbox-rollback checkpoint "my milestone"') == ("checkpoint", "my milestone")

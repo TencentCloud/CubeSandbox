@@ -269,11 +269,8 @@ def main() -> int:
         return _cmd_drop(session_id, arg)
 
     # Rollback path: "last" | <N> | <snapshot-id> (bare sentinel → "last").
-    # Anything else is an unknown subcommand — deny with usage instead of
-    # silently rolling back.
-    if sub != "last" and not sub.isdigit() and not sub.startswith("snap-"):
-        return _deny(USAGE)
-
+    # Any other token is treated as a snapshot-id candidate; unmatched ids
+    # produce "No such snapshot." from _cmd_rollback.
     return _cmd_rollback(session_id, sub)
 
 

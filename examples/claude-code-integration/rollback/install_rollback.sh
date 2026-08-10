@@ -123,24 +123,30 @@ except (FileNotFoundError, json.JSONDecodeError):
 
 hooks = cfg.get("hooks", {})
 
+
+def _hook_cmd(h, default=""):
+    """CC hooks may be dicts ({type, command}) or plain strings."""
+    return h.get("command", default) if isinstance(h, dict) else h
+
+
 # Remove our commands from PreToolUse/Bash
 for b in hooks.get("PreToolUse", []):
     if isinstance(b, dict) and b.get("matcher") == "Bash":
         b["hooks"] = [h for h in b.get("hooks", [])
-                       if h.get("command", "").find("cubesandbox_rollback") == -1
-                       and h.get("command", "").find("cubesandbox_snapshot") == -1]
+                       if _hook_cmd(h).find("cubesandbox_rollback") == -1
+                       and _hook_cmd(h).find("cubesandbox_snapshot") == -1]
 
 # Remove SessionStart hooks
 for b in hooks.get("SessionStart", []):
     if isinstance(b, dict):
         b["hooks"] = [h for h in b.get("hooks", [])
-                       if h.get("command", "").find("cubesandbox_session") == -1]
+                       if _hook_cmd(h).find("cubesandbox_session") == -1]
 
 # Remove PostToolUse/Bash hooks
 for b in hooks.get("PostToolUse", []):
     if isinstance(b, dict) and b.get("matcher") == "Bash":
         b["hooks"] = [h for h in b.get("hooks", [])
-                       if h.get("command", "").find("cubesandbox_poststart") == -1]
+                       if _hook_cmd(h).find("cubesandbox_poststart") == -1]
 
 # Remove empty blocks
 for key in ("PreToolUse", "SessionStart", "PostToolUse"):

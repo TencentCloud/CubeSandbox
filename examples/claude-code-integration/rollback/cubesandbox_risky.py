@@ -76,7 +76,7 @@ _EXEC_CMDS: Set[str] = {
 _WRITE_REDIR_TYPES: frozenset = frozenset({">", ">>", ">&", "&>", "&>>", ">|", "<>"})
 
 _ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-_NUM_RE = re.compile(r"^[0-9]+$")
+_NUM_RE = re.compile(r"^[0-9]+(?:[smhd])?$")  # GNU timeout accepts 10s/5m/1h
 _FD_REF_RE = re.compile(r"^&[0-9]+$")
 _OUTPUT_FLAG_RE = re.compile(r"^(?:-[oO]\b|--output(?:-document)?\b)")
 
@@ -350,8 +350,14 @@ def load_safe_whitelist() -> Set[str]:
 
 
 def is_sentinel(command: str) -> bool:
-    """True if the command starts with `cubesandbox-rollback`."""
-    return command.strip().startswith(SENTINEL_PREFIX)
+    """True if the command is the rollback sentinel (or a call to it).
+
+    Requires a word boundary after the prefix so similarly-named tools
+    (``cubesandbox-rollback-helper``) are not mistaken for the sentinel —
+    a mistaken match would run a real rollback and deny the command.
+    """
+    cmd = command.strip()
+    return cmd == SENTINEL_PREFIX or cmd.startswith(SENTINEL_PREFIX + " ")
 
 
 def parse_sentinel(command: str) -> Tuple[str, Optional[str]]:
@@ -385,8 +391,10 @@ def is_risky(command: str, safe: Set[str]) -> bool:
         return False
     if is_sentinel(cmd):
         return False  # sentinel itself is never risky
-    if cmd.startswith("#"):
-        return False  # pure comment
+    if all(not ln.strip() or ln.strip().startswith("#")
+           for ln in cmd.splitlines()):
+        return False  # comment-only input; a leading comment + real command
+        # still reaches bashlex below
 
     if bashlex is None:
         # Deployment error: classifier unavailable → over-approximate.
