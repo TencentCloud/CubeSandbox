@@ -170,6 +170,7 @@ One-click does not create an extra global `configs/` layer on the target machine
   - `cubelet_conf.default_timeout_insec`: cluster default sandbox idle TTL when the client omits `timeout`; unset or `<= 0` means **no cluster-wide idle timeout** (shipped default `-1`). See [lifecycle — Operational Notes](../../docs/guide/lifecycle.md#cluster-default-idle-timeout-default_timeout_insec).
 - `Cubelet/config/` → `Cubelet/config/`
 - `Cubelet/dynamicconf/` → `Cubelet/dynamicconf/`
+- `CUBE_L7_MARK_{HTTP,HTTPS,MASK}` (env) → `/etc/cubeegress/l7-marks.conf` — the L7 egress skb->mark values shared by Cubelet's embedded network runtime eBPF dataplane (which stamps `skb->mark`) and the `cube-proxy-iptables-init` TPROXY rules (which match it). Both read the same file, and both validate the values (`HTTP != HTTPS`, bits confined to the mask). See `env.example` for the shipped defaults and how to override them.
 - `CubeAPI/bin/cube-api` → `/usr/local/services/cubetoolbox/CubeAPI/bin/cube-api`
 - `support/` → `/usr/local/services/cubetoolbox/support/`
 - `cubeproxy/` → `/usr/local/services/cubetoolbox/cubeproxy/`
