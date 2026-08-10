@@ -48,3 +48,4 @@ lang: zh-CN
 | 标题 | 作者 | 日期 | 标签 |
 | --- | --- | --- | --- |
 | [Pi Agent 集成指南](./pi-agent.md) | chaojixinren | 2026-07-01 | integration, pi-agent, coding-agent, agent |
+| [OpenCode 集成指南（插件钩子方案）](./opencode-plugin.md) | Tantanovo | 2026-07-31 | integration, opencode, coding-agent, plugin |
