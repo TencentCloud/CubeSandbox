@@ -39,8 +39,10 @@ def main() -> int:
     session_id = payload.get("session_id", "default")
     my = read_my_state(session_id)
 
-    # Already have snapshots → not the first command (baseline already exists)
-    if my.get("snapshots"):
+    # Baseline already exists → nothing to do (auto snapshots don't count:
+    # an `auto` snapshot from a risky first command must not suppress the
+    # baseline, or `rollback last` would skip it forever)
+    if any(s.get("kind") == "baseline" for s in my.get("snapshots", [])):
         print("{}")
         return 0
 

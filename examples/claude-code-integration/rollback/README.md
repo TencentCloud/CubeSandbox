@@ -99,13 +99,14 @@ never auto-evicted).
 Auto snapshots are kept in a ring buffer of `CUBE_ROLLBACK_MAX_AUTO_SNAPSHOTS`
 (default 30, env-configurable); when the cap is exceeded, the oldest auto
 snapshot is deleted from the backend. Baseline snapshots and explicit
-checkpoints are never auto-evicted — drop them manually.
+checkpoints are never auto-evicted by the ring buffer — drop them manually.
 
-Rolling back to a checkpoint discards all snapshots after it (deleted from the
-backend; the discarded list is shown in the message) but keeps a hidden undo
-point: `cubesandbox-rollback undo` restores the pre-rollback state. The undo
-point is deleted as soon as a new snapshot is taken (either auto or
-checkpoint).
+Rolling back to an early snapshot deletes all later snapshots from the
+plugin's index AND the backend — including named checkpoints; only the
+immediately preceding state is preserved as the hidden undo point, so
+`cubesandbox-rollback undo` restores the pre-rollback state. The discarded
+list is shown in the rollback message. The undo point is deleted as soon as a
+new snapshot is taken (either auto or checkpoint).
 
 ### Risk classification
 

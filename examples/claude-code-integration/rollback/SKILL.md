@@ -25,5 +25,8 @@ restores the pre-rollback state.
   not process memory or the Claude Code transcript
 - Auto snapshots beyond the ring-buffer cap are evicted; use
   `cubesandbox-rollback checkpoint <name>` for milestones you need to keep
+- Rolling back to an early snapshot deletes all later snapshots from the
+  plugin's index and the backend, including named checkpoints — only the
+  immediately preceding state is kept as the undo point
 - This plugin must coexist with the cubesandbox-hook CubeSandbox hooks
   (`examples/claude-code-integration/hooks/`)

@@ -227,7 +227,7 @@ do_install() {
 
     # 5. Deps
     if command -v pip &>/dev/null; then
-        for dep in cubesandbox bashlex; do
+        for dep in cubesandbox bashlex dotenv; do
             if python3 -c "import ${dep}" 2>/dev/null; then
                 echo "  ${dep}: installed"
             else

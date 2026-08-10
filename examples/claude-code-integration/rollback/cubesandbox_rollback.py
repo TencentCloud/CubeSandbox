@@ -99,8 +99,8 @@ def _cmd_checkpoint(session_id: str, command: str, arg: str | None) -> int:
         return _deny(f"Checkpoint failed: {exc}")
 
     # A checkpoint is new activity — invalidate any pending undo point
-    if my.get("undo"):
-        delete_snapshot_backend(my["undo"].get("snapshot_id"))
+    old_undo = my.get("undo")
+    if old_undo:
         my["undo"] = None
 
     my.setdefault("snapshots", []).append({
@@ -114,6 +114,10 @@ def _cmd_checkpoint(session_id: str, command: str, arg: str | None) -> int:
         write_my_state(session_id, my)
     except Exception as exc:
         return _deny(f"Checkpoint state write error: {exc}")
+    # State persisted first — backend delete is best-effort, so a state-write
+    # failure never leaves a local entry pointing at a deleted snapshot.
+    if old_undo:
+        delete_snapshot_backend(old_undo.get("snapshot_id"))
     return _deny(f"Checkpoint `{name}` saved: {snapshot.snapshot_id}")
 
 
@@ -158,11 +162,13 @@ def _cmd_drop(session_id: str, arg: str | None) -> int:
         return _deny(f"Snapshot `{arg}` not found.")
     target = snaps[idx]
     my["snapshots"] = snaps[:idx] + snaps[idx + 1:]
-    delete_snapshot_backend(target.get("snapshot_id"))
     try:
         write_my_state(session_id, my)
     except Exception as exc:
         return _deny(f"Snapshot drop state write error: {exc}")
+    # State persisted first — backend delete is best-effort, so a state-write
+    # failure never leaves a local entry pointing at a deleted snapshot.
+    delete_snapshot_backend(target.get("snapshot_id"))
     return _deny(f"Snapshot `{target.get('snapshot_id')}` dropped.")
 
 
@@ -207,13 +213,10 @@ def _cmd_rollback(session_id: str, target: str) -> int:
         return _deny(f"Rollback failed: {exc}")
 
     # Rollback succeeded — old undo point (if any) is now stale
-    if my.get("undo"):
-        delete_snapshot_backend(my["undo"].get("snapshot_id"))
+    old_undo = my.get("undo")
 
-    # Prune snapshots taken after the rollback target (backend + local)
+    # Prune snapshots taken after the rollback target
     kept, dropped = prune_after(snaps, idx)
-    for s in dropped:
-        delete_snapshot_backend(s.get("snapshot_id"))
 
     my["snapshots"] = kept
     my["undo"] = new_undo
@@ -221,6 +224,15 @@ def _cmd_rollback(session_id: str, target: str) -> int:
         write_my_state(session_id, my)
     except Exception as exc:
         return _deny(f"Rollback state write error: {exc}")
+
+    # State persisted first — backend deletes are best-effort, so a
+    # state-write failure never leaves local entries pointing at deleted
+    # snapshots.  The fresh undo snapshot (`new_undo`) stays in the backend
+    # and is referenced by the persisted state, so it is NOT deleted here.
+    if old_undo:
+        delete_snapshot_backend(old_undo.get("snapshot_id"))
+    for s in dropped:
+        delete_snapshot_backend(s.get("snapshot_id"))
 
     msg = (f"Rollback complete. State restored to snapshot "
            f"`{target_snap['snapshot_id']}` from command "
