@@ -200,7 +200,7 @@ func lookupInnerMap(outerMap *ebpf.Map, ifindex uint32) (*ebpf.Map, error) {
 
 // cleanupNetPolicy flushes all entries in the inner LPM trie maps
 // for the given ifindex in both allow_out_v3 and deny_out.
-// This should be called during DelTAPDevice.
+// This should be called during DeleteTAPDevice.
 func cleanupNetPolicy(ifindex uint32) error {
 	allowOut, err := loadPinnedMap(MapNameAllowOutV3)
 	if err != nil {

@@ -72,7 +72,7 @@ func AddTAPDevice(ifindex uint32, ip net.IP, id string, version uint32, opts MVM
 
 // UpsertTAPDeviceMetadata registers or refreshes TAP metadata without touching
 // per-sandbox policy maps. Recovery paths use this to repair metadata while
-// preserving allow_out_v2, deny_out and dns_allow contents.
+// preserving allow_out_v3, deny_out and dns_allow_v2 contents.
 func UpsertTAPDeviceMetadata(ifindex uint32, ip net.IP, id string, version uint32) error {
 	if len(id) > maxIDLength {
 		return ErrTooLong
