@@ -76,14 +76,14 @@ function TemplatePicker({
           <button
             key={tpl.templateID}
             type="button"
-            disabled={!isReady || isStale}
+            disabled={!isReady}
             onClick={() => onSelect(tpl.templateID)}
             className={cn(
               'flex flex-col gap-1 rounded-lg border px-4 py-3 text-left transition-colors',
               isSelected
                 ? 'border-primary bg-primary/10 ring-1 ring-primary'
                 : 'border-border bg-card hover:border-primary/50 hover:bg-muted/40',
-              (!isReady || isStale) && 'cursor-not-allowed opacity-50',
+              !isReady && 'cursor-not-allowed opacity-50',
             )}
           >
             <div className="flex items-center justify-between gap-2">
@@ -91,7 +91,7 @@ function TemplatePicker({
               <Badge
                 tone={
                   isStale
-                    ? 'err'
+                    ? 'warn'
                     : statusLower === 'ready'
                       ? 'ok'
                       : statusLower === 'building'
@@ -226,7 +226,7 @@ export default function SandboxNewPage() {
 
   const selectedCompat = compat?.templates.find((row) => row.templateID === form.templateID);
   const selectedTemplateStale = selectedCompat?.overall === 'STALE';
-  const canSubmit = !!form.templateID && !selectedTemplateStale && !create.isPending;
+  const canSubmit = !!form.templateID && !create.isPending;
 
   return (
     <div className="animate-fade-in space-y-5">
@@ -250,7 +250,7 @@ export default function SandboxNewPage() {
           <p className="text-xs text-muted-foreground">{t('form.templateRequired')}</p>
         )}
         {selectedTemplateStale && (
-          <p className="text-xs text-destructive">{t('compat.staleHelp')}</p>
+          <p className="text-xs text-muted-foreground">{t('compat.staleHelp')}</p>
         )}
       </Section>
 

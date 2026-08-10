@@ -27,7 +27,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/components"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/version"
 )
 
@@ -152,11 +152,11 @@ type Collector struct {
 	kernelLinkRead   bool
 }
 
-// NewCollector builds a collector rooted at baseDir. An empty baseDir falls
-// back to the component manager's default versioned base dir.
+// NewCollector builds a collector rooted at baseDir (default: live toolbox).
+// It does not scan component_versions inventory.
 func NewCollector(baseDir string) *Collector {
 	if baseDir == "" {
-		baseDir = components.DefaultConfig().VersionedBaseDir
+		baseDir = templatetypes.DefaultToolboxRoot
 	}
 	bootstrap := strings.TrimSpace(os.Getenv("STATE_DIR"))
 	if bootstrap == "" {
@@ -392,12 +392,10 @@ func (c *Collector) kernelFromJSONLocked() (ComponentVersion, string) {
 	if !ok {
 		return ComponentVersion{}, "kernel: missing variant " + variant
 	}
-	identity := strings.TrimSpace(entry.Version)
+	// Digest-only identity.
+	identity := templatetypes.ContentAddressedKernelIdentity(entry.DigestSHA256)
 	if identity == "" {
-		identity = kernelArtifactIdentity(entry.Tag, entry.DigestSHA256)
-	}
-	if identity == "" {
-		return ComponentVersion{}, "kernel: empty identity for " + variant
+		return ComponentVersion{}, "kernel: empty digest identity for " + variant
 	}
 	return ComponentVersion{
 		Component: ComponentKernel,
@@ -433,31 +431,26 @@ func (c *Collector) activeKernelVariantLocked() string {
 
 func (c *Collector) kernelVersionLocked(man *releaseManifest) ComponentVersion {
 	variant := c.activeKernelVariantLocked()
+	digest := man.Kernel.VMLinuxDigest
+	source := SourceManifest
 	switch variant {
 	case "pvm":
-		return ComponentVersion{
-			Component: ComponentKernel,
-			Version:   kernelArtifactIdentity(man.Kernel.PVMVersion, man.Kernel.VMLinuxPVMDigest),
-			Source:    SourceFile,
-			Variant:   "pvm",
-		}
+		digest = man.Kernel.VMLinuxPVMDigest
+		source = SourceFile
 	case "bm":
-		return ComponentVersion{
-			Component: ComponentKernel,
-			Version:   kernelArtifactIdentity(man.Kernel.Version, man.Kernel.VMLinuxDigest),
-			Source:    SourceFile,
-			Variant:   "bm",
-		}
+		source = SourceFile
+	default:
+		variant = "bm"
 	}
-	identity := kernelArtifactIdentity(man.Kernel.Version, man.Kernel.VMLinuxDigest)
+	identity := templatetypes.ContentAddressedKernelIdentity(digest)
 	if identity == "" {
 		return ComponentVersion{}
 	}
 	return ComponentVersion{
 		Component: ComponentKernel,
 		Version:   identity,
-		Source:    SourceManifest,
-		Variant:   "bm",
+		Source:    source,
+		Variant:   variant,
 	}
 }
 

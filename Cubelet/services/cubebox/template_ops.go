@@ -241,25 +241,30 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	rsp.RootfsDev = rootfsObject.DevPath
 	rsp.MemoryDev = memoryObject.DevPath
 	rsp.RootfsSizeBytes = rootfsObject.SizeBytes
-	versions := collectGuestEnvironmentVersions()
+	// Capture first so the Commit RPC response matches catalog ComponentVersions
+	// (pinned sandbox versions), not whatever is currently in the live toolbox.
+	CaptureForCubeBox(cb)
+	versions := guestEnvironmentVersionsFromCubeBox(cb)
 	rsp.GuestImageVersion = versions.GuestImage
 	rsp.AgentVersion = versions.Agent
 	rsp.KernelVersion = versions.Kernel
+	rsp.ShimVersion = versions.Shim
 	// The source sandbox stays running through commit, so probe its real envd
 	// version in-guest after the memory snapshot. Best-effort: empty on failure.
 	rsp.EnvdVersion = s.collectEnvdVersion(ctx, rsp.SandboxID)
 	if err := storage.WriteSnapshotCatalog(&storage.SnapshotCatalogEntry{
-		SnapshotID:      rsp.TemplateID,
-		InstanceType:    "cubebox",
-		SpecDir:         specDir,
-		SnapshotPath:    snapshotPath,
-		MetaDir:         snapshotPath,
-		RootfsVol:       rootfsObject.Name,
-		RootfsKind:      rootfsObject.Kind,
-		MemoryVol:       memoryObject.Name,
-		MemoryKind:      memoryObject.Kind,
-		RootfsSizeBytes: rootfsObject.SizeBytes,
-		Kind:            storage.CatalogKindRuntimeSnapshot,
+		SnapshotID:        rsp.TemplateID,
+		InstanceType:      "cubebox",
+		SpecDir:           specDir,
+		SnapshotPath:      snapshotPath,
+		MetaDir:           snapshotPath,
+		RootfsVol:         rootfsObject.Name,
+		RootfsKind:        rootfsObject.Kind,
+		MemoryVol:         memoryObject.Name,
+		MemoryKind:        memoryObject.Kind,
+		RootfsSizeBytes:   rootfsObject.SizeBytes,
+		ComponentVersions: cloneStringMap(cb.ComponentVersions),
+		Kind:              storage.CatalogKindRuntimeSnapshot,
 	}); err != nil {
 		// Catalog write failures do not invalidate the snapshot: master will
 		// still receive the physical references in the response and rollback

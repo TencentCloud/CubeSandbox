@@ -105,6 +105,13 @@ func (cb *CubeBox) DeepCopy() *CubeBox {
 		copied.LocalRunTemplate = &templateCopy
 	}
 
+	if cb.ComponentVersions != nil {
+		copied.ComponentVersions = make(map[string]string, len(cb.ComponentVersions))
+		for k, v := range cb.ComponentVersions {
+			copied.ComponentVersions[k] = v
+		}
+	}
+
 	if cb.ImageReferences != nil {
 		copied.ImageReferences = make(map[string]ImageReference, len(cb.ImageReferences))
 		for k, v := range cb.ImageReferences {

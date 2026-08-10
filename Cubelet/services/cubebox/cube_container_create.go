@@ -196,6 +196,11 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 
 	log.G(ctx).Infof("create sandbox with namespace %s", sandBox.Namespace)
 
+	seedCubeBoxComponentVersionsFromRequest(sandBox, flowOpts)
+	if err := EnsureCubeBoxComponents(ctx, sandBox); err != nil {
+		return err
+	}
+
 	if flowOpts.UserData != nil && flowOpts.UserData.K8sPod != nil {
 		sandBox.GetOrCreatePodConfig().SetK8sPod(ctx, flowOpts.UserData.K8sPod)
 	}
@@ -352,6 +357,7 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 				containerLog.Errorf("post create container failed, err: %v", err)
 			}
 		}
+		CaptureForCubeBox(sandBox)
 		return nil
 	}(); err != nil {
 		return err

@@ -163,6 +163,10 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 	}
 	annotations[constants.AnnotationsVMKernelPath] = kernelPath
 	annotations[constants.AnnotationsProduct] = e.config.instanceType
+	if appImageID == "" {
+		annotations[constants.AnnotationsVMOSImagePath] = filepath.Join(e.config.BasePath, "cube-image", "cube-guest-image-cpu.img")
+		annotations[constants.AnnotationsVMAgentPath] = filepath.Join(e.config.BasePath, "cube-agent", "cube-agent.ext4")
+	}
 
 	if flowOpts.IsCreateSnapshot() {
 		annotations[constants.AnnotationAppSnapshotCreate] = "true"
@@ -194,7 +198,10 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 				return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
 			}
 			annotations[constants.AnnotationsVMKernelPath] = kernelPath
-			annotations[constants.AnnotationsVMImagePath] = imagePath
+			annotations[constants.AnnotationsVMOSImagePath] = imagePath
+			if agentPath := resolveTemplateComponentPath(flowOpts.LocalRunTemplate, templatetypes.CubeComponentCubeAgent); agentPath != "" {
+				annotations[constants.AnnotationsVMAgentPath] = agentPath
+			}
 		} else {
 
 			snapBasePath = filepath.Join(e.getSnapShotFilePath(templateID), "")
@@ -422,12 +429,8 @@ func (e *cubeboxInstancePlugin) resolveSnapshotRuntimeArtifacts(
 	var imagePath string
 
 	if localTemplate != nil {
-		if component, ok := localTemplate.Componts[templatetypes.CubeComponentCubeKernel]; ok {
-			kernelPath = strings.TrimSpace(component.Component.Path)
-		}
-		if component, ok := localTemplate.Componts[templatetypes.CubeComponentCubeImage]; ok {
-			imagePath = strings.TrimSpace(component.Component.Path)
-		}
+		kernelPath = resolveTemplateComponentPath(localTemplate, templatetypes.CubeComponentCubeKernel)
+		imagePath = resolveTemplateComponentPath(localTemplate, templatetypes.CubeComponentCubeImage)
 	}
 	if kernelPath != "" && imagePath != "" {
 		return kernelPath, imagePath, nil
@@ -466,6 +469,17 @@ func (e *cubeboxInstancePlugin) resolveSnapshotRuntimeArtifacts(
 		return "", "", fmt.Errorf("template have no os image component")
 	}
 	return kernelPath, imagePath, nil
+}
+
+func resolveTemplateComponentPath(localTemplate *templatetypes.LocalRunTemplate, name templatetypes.CubeComponent) string {
+	if localTemplate == nil || localTemplate.Componts == nil {
+		return ""
+	}
+	component, ok := localTemplate.Componts[name]
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(component.Component.Path)
 }
 
 func (e *cubeboxInstancePlugin) resolveSnapshotPaths(templateID, rawPath string, req *cubebox.RunCubeSandboxRequest) (*snapshotPaths, error) {

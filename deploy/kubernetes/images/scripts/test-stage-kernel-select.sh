@@ -159,4 +159,96 @@ ensure_component_version_json cube-agent "${TMP}/agent"
 grep -q 'cube-agent' "${TMP}/agent/version.json"
 printf 'ok: cube-agent synthesizes from version marker\n'
 
+# --- inventory helpers ---
+COMPONENT_VERSIONS_ROOT="${TMP}/component_versions"
+src="${TMP}/inv-shim"
+mkdir -p "${src}/bin"
+: >"${src}/bin/containerd-shim-cube-rs"
+printf '{"schema_version":1,"components":{"containerd-shim-cube-rs":{"version":"shim-v9"},"cube-runtime":{"version":"shim-v9"}}}\n' \
+  >"${src}/version.json"
+CUBE_COMPONENT=cube-shim
+assert_eq "$(resolve_component_version "${src}" cube-shim)" "shim-v9" "resolve version.json for cube-shim"
+inventory_component_version "${src}" "cube-shim"
+[[ -d "${COMPONENT_VERSIONS_ROOT}/cube-shim/shim-v9" ]] || { echo "FAIL: inventory dir missing"; exit 1; }
+[[ -f "${COMPONENT_VERSIONS_ROOT}/cube-shim/shim-v9/bin/containerd-shim-cube-rs" ]] || { echo "FAIL: inventory leaf missing"; exit 1; }
+printf 'ok: inventory writes COMPONENT_VERSIONS_ROOT/cube-shim/<ver>\n'
+
+inventory_component_version "${src}" "cube-shim"
+[[ -d "${COMPONENT_VERSIONS_ROOT}/cube-shim/shim-v9" ]] || { echo "FAIL: inventory lost on skip"; exit 1; }
+printf 'ok: same-version inventory skipped\n'
+
+src_bad="${TMP}/inv-agent-bad"
+mkdir -p "${src_bad}"
+printf 'unknown\n' >"${src_bad}/version"
+CUBE_COMPONENT=cube-agent
+assert_eq "$(resolve_component_version "${src_bad}" cube-agent || true)" "" "unknown version rejected"
+if ( inventory_component_version "${src_bad}" "cube-agent" ) 2>/dev/null; then
+  echo "FAIL: unknown version must hard-fail inventory" >&2
+  exit 1
+fi
+printf 'ok: unknown version hard-fails inventory\n'
+
+is_inventory_component cube-shim
+is_inventory_component cube-kernel
+is_inventory_component cube-guest
+is_inventory_component cube-agent
+if is_inventory_component cubelet; then
+  echo "FAIL: cubelet must not be inventory component" >&2
+  exit 1
+fi
+printf 'ok: inventory component set is shim/kernel/guest/agent\n'
+
+# --- kernel dual-variant inventory ---
+ksrc="${TMP}/inv-kernel"
+mkdir -p "${ksrc}"
+printf 'bm-kernel-bytes\n' >"${ksrc}/vmlinux-bm"
+printf 'pvm-kernel-bytes\n' >"${ksrc}/vmlinux-pvm"
+bm_digest="$(file_sha256_hex "${ksrc}/vmlinux-bm")"
+pvm_digest="$(file_sha256_hex "${ksrc}/vmlinux-pvm")"
+bm_short="sha256-${bm_digest:0:12}"
+pvm_short="sha256-${pvm_digest:0:12}"
+CUBE_COMPONENT=cube-kernel
+inventory_kernel_content_variants "${ksrc}" "cube-kernel-scf"
+[[ -d "${COMPONENT_VERSIONS_ROOT}/cube-kernel-scf/${bm_short}" ]] || { echo "FAIL: missing bm inventory"; exit 1; }
+[[ -d "${COMPONENT_VERSIONS_ROOT}/cube-kernel-scf/${pvm_short}" ]] || { echo "FAIL: missing pvm inventory"; exit 1; }
+assert_eq "$(cat "${COMPONENT_VERSIONS_ROOT}/cube-kernel-scf/${bm_short}/variant")" "bm" "bm variant marker"
+assert_eq "$(cat "${COMPONENT_VERSIONS_ROOT}/cube-kernel-scf/${pvm_short}/variant")" "pvm" "pvm variant marker"
+assert_eq "$(readlink "${COMPONENT_VERSIONS_ROOT}/cube-kernel-scf/${pvm_short}/vmlinux")" "vmlinux-pvm" "pvm vmlinux link"
+assert_eq "$(tr -d '[:space:]' < "${COMPONENT_VERSIONS_ROOT}/cube-kernel-scf/${pvm_short}/version")" "sha256:${pvm_digest}" "pvm version digest"
+if ls -d "${COMPONENT_VERSIONS_ROOT}/cube-kernel-scf/"*@* >/dev/null 2>&1; then
+  echo "FAIL: must not create tag@digest inventory dirs" >&2
+  exit 1
+fi
+printf 'ok: kernel dual content inventory with variant markers\n'
+
+# --- kernel version.json digest rewrite (legacy tag-only JSON) ---
+kdst="${TMP}/kernel-json"
+mkdir -p "${kdst}"
+printf 'bm-kernel-bytes\n' >"${kdst}/vmlinux-bm"
+printf 'pvm-kernel-bytes\n' >"${kdst}/vmlinux-pvm"
+bm_digest="$(file_sha256_hex "${kdst}/vmlinux-bm")"
+pvm_digest="$(file_sha256_hex "${kdst}/vmlinux-pvm")"
+bm_short="sha256-${bm_digest:0:12}"
+pvm_short="sha256-${pvm_digest:0:12}"
+printf '{"schema_version":1,"variants":{"bm":{"version":"v-tag","tag":"v-tag"},"pvm":{"version":"v-tag","tag":"v-tag"}}}\n' \
+  >"${kdst}/version.json"
+ensure_component_version_json cube-kernel "${kdst}"
+grep -q "\"digest_sha256\": \"sha256:${bm_digest}\"" "${kdst}/version.json" \
+  || { echo "FAIL: bm digest not rewritten"; exit 1; }
+grep -q "\"digest_sha256\": \"sha256:${pvm_digest}\"" "${kdst}/version.json" \
+  || { echo "FAIL: pvm digest not rewritten"; exit 1; }
+grep -q "\"version\": \"${bm_short}\"" "${kdst}/version.json" \
+  || { echo "FAIL: bm short version not rewritten"; exit 1; }
+grep -q "\"version\": \"${pvm_short}\"" "${kdst}/version.json" \
+  || { echo "FAIL: pvm short version not rewritten"; exit 1; }
+assert_eq "$(tr -d '[:space:]' < "${kdst}/version")" "sha256:${bm_digest}" "bm version marker"
+printf 'ok: tag-only kernel version.json rewritten with digests\n'
+
+# Idempotent: complete digest JSON must not be rewritten to something else.
+cp "${kdst}/version.json" "${kdst}/version.json.before"
+ensure_component_version_json cube-kernel "${kdst}"
+cmp -s "${kdst}/version.json.before" "${kdst}/version.json" \
+  || { echo "FAIL: complete digest JSON should not be rewritten"; exit 1; }
+printf 'ok: complete kernel version.json left unchanged\n'
+
 printf 'ALL PASS\n'

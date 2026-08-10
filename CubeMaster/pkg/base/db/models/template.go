@@ -55,6 +55,7 @@ type TemplateReplica struct {
 	GuestImageVersion string `json:"guest_image_version" gorm:"column:guest_image_version"`
 	AgentVersion      string `json:"agent_version" gorm:"column:agent_version"`
 	KernelVersion     string `json:"kernel_version" gorm:"column:kernel_version"`
+	ShimVersion       string `json:"shim_version" gorm:"column:shim_version"`
 	CompatStatus      string `json:"compat_status" gorm:"column:compat_status"`
 	CompatPolicy      string `json:"compat_policy" gorm:"column:compat_policy"`
 	CompatCheckedUnix int64  `json:"compat_checked_unix" gorm:"column:compat_checked_unix"`

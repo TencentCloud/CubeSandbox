@@ -56,7 +56,14 @@ export ONE_CLICK_CUBE_KERNEL_VMLINUX=/abs/path/to/vmlinux
 export ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX=/abs/path/to/vmlinux-pvm
 ```
 
-The installed runtime still uses `cube-kernel-scf/vmlinux` as the active guest kernel path. The package stores the ordinary guest kernel as `vmlinux-bm` and keeps `vmlinux` as a symlink: by default it points to `vmlinux-bm`; if the target machine sets `CUBE_PVM_ENABLE=1` during installation, the installer points it to `vmlinux-pvm`.
+Kernel multi-version inventory (content-addressed):
+
+- On install, `vmlinux-bm` / `vmlinux-pvm` are each inventoried under `component_versions/cube-kernel-scf/sha256-<12 hex>/`
+- Each inventory dir contains: `vmlinux-bm|pvm`, `vmlinux` symlink, `variant` (`bm`/`pvm`), and `version` (`sha256:<64 hex>` for shim)
+- `KERNEL_TAG` / `PVM_KERNEL_TAG` are **not** inventory directory names; `release-manifest` `kernel.version` / `pvm_version` also record content short hashes
+- Ensure maps the digest from Master identity onto that short key
+
+The installed runtime still uses `cube-kernel-scf/vmlinux` as the active guest kernel path. The package stores `vmlinux-bm` and keeps `vmlinux` as a symlink: by default it points to `vmlinux-bm`; if the target machine sets `CUBE_PVM_ENABLE=1` during installation, the installer points it to `vmlinux-pvm`.
 
 The guest image no longer depends on a local zip file. By default it is generated locally from `deploy/guest-image/Dockerfile` during the one-click release package build. Common override parameters:
 

@@ -221,6 +221,14 @@ const (
 	MasterAnnotationNetworkPolicyDefault             = "cube.master.network.policy.default"
 )
 
+// Inventory version annotations used by Ensure
+const (
+	MasterAnnotationComponentCubeShimVersion   = "cube.master.components.cube-shim.version"
+	MasterAnnotationComponentCubeKernelVersion = "cube.master.components.cube-kernel-scf.version"
+	MasterAnnotationComponentCubeImageVersion  = "cube.master.components.cube-image.version"
+	MasterAnnotationComponentCubeAgentVersion  = "cube.master.components.cube-agent.version"
+)
+
 const (
 	AnnotationPmem          = "cube.pmem"
 	AnnotationsVFIONet      = "cube.vfio.net"
@@ -236,8 +244,9 @@ const (
 	AnnotationsNetCubeVips        = "cube.net.vips"
 	AnnotationsCgroupPath         = "cube.sandbox_cgroup_path"
 	AnnotationsRuntimeCfgPath     = "cube.runtime.config.path"
-	AnnotationsVMImagePath        = "cube.vm.image.path"
+	AnnotationsVMOSImagePath      = "cube.vm.os-image.path"
 	AnnotationsVMKernelPath       = "cube.vm.kernel.path"
+	AnnotationsVMAgentPath        = "cube.vm.agent.path"
 	AnnotationsRootfsWritableKey  = "cube.rootfs.wlayer.path"
 	AnnotationsRootfsWlayerSubdir = "cube.rootfs.wlayer.subdir"
 	AnnotationsCubeMsgKey         = "cube.msg.dev.path"

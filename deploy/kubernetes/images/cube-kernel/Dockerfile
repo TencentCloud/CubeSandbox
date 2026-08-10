@@ -51,10 +51,25 @@ RUN set -eux; \
       exit 1; \
     fi; \
     rm -rf /tmp/kernel-artifacts; \
-    BM="${CUBE_KERNEL_BM_VERSION:-${CUBE_VERSION}}"; \
-    PVM="${CUBE_KERNEL_PVM_VERSION:-${CUBE_VERSION}}"; \
-    printf '{"schema_version":1,"variants":{"bm":{"version":"%s","tag":"%s"},"pvm":{"version":"%s","tag":"%s"}}}\n' \
-      "${BM}" "${BM}" "${PVM}" "${PVM}" > ${IMAGE_ROOT}/cube-kernel-scf/version.json; \
+    BM_TAG="${CUBE_KERNEL_BM_VERSION:-${CUBE_VERSION}}"; \
+    PVM_TAG="${CUBE_KERNEL_PVM_VERSION:-${CUBE_VERSION}}"; \
+    BM_DIGEST="$(sha256sum -- ${IMAGE_ROOT}/cube-kernel-scf/vmlinux-bm | awk '{print $1}')"; \
+    test -n "${BM_DIGEST}"; \
+    BM_SHORT="sha256-$(printf '%s' "${BM_DIGEST}" | cut -c1-12)"; \
+    printf 'sha256:%s\n' "${BM_DIGEST}" > ${IMAGE_ROOT}/cube-kernel-scf/version; \
+    { \
+      printf '{\n  "schema_version": 1,\n  "variants": {\n'; \
+      printf '    "bm": {"version": "%s", "digest_sha256": "sha256:%s", "tag": "%s"}' \
+        "${BM_SHORT}" "${BM_DIGEST}" "${BM_TAG}"; \
+      if [ -f ${IMAGE_ROOT}/cube-kernel-scf/vmlinux-pvm ]; then \
+        PVM_DIGEST="$(sha256sum -- ${IMAGE_ROOT}/cube-kernel-scf/vmlinux-pvm | awk '{print $1}')"; \
+        test -n "${PVM_DIGEST}"; \
+        PVM_SHORT="sha256-$(printf '%s' "${PVM_DIGEST}" | cut -c1-12)"; \
+        printf ',\n    "pvm": {"version": "%s", "digest_sha256": "sha256:%s", "tag": "%s"}' \
+          "${PVM_SHORT}" "${PVM_DIGEST}" "${PVM_TAG}"; \
+      fi; \
+      printf '\n  }\n}\n'; \
+    } > ${IMAGE_ROOT}/cube-kernel-scf/version.json; \
     chmod +x /usr/local/bin/component-entrypoint.sh; \
     test -f ${IMAGE_ROOT}/cube-kernel-scf/vmlinux-bm; \
     test -L ${IMAGE_ROOT}/cube-kernel-scf/vmlinux

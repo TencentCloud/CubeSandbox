@@ -13,6 +13,7 @@ func RegisterMetaRoutes(g *gin.RouterGroup) {
 	g.POST(registerNodeAction, registerNodeGinHandler)
 	g.GET(nodesAction, listNodesGinHandler)
 	g.GET(versionMatrixAction, versionMatrixGinHandler)
+	g.GET(templateComponentVersionsAction, templateComponentVersionsGinHandler)
 	g.GET(nodeAction, getNodeGinHandler)
 	g.POST(nodeStatusAction, updateNodeStatusGinHandler)
 	g.POST(nodeLabelsAction, updateNodeLabelsGinHandler)

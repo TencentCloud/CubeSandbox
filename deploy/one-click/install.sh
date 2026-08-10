@@ -997,6 +997,178 @@ select_installed_kernel_vmlinux() {
   fi
 }
 
+# component_versions root.
+COMPONENT_VERSIONS_ROOT="${COMPONENT_VERSIONS_ROOT:-/data/cubelet/root/component_versions}"
+
+# Inventory each present kernel variant by content short-hash.
+# Layout: vmlinux-bm|pvm, vmlinux symlink, variant, version=sha256:<64>.
+inventory_kernel_content_variants() {
+  local src_dir="$1"
+  local name="cube-kernel-scf"
+  local file variant digest short_key dst tmp parent
+
+  [[ -d "${src_dir}" ]] || return 0
+
+  for variant in bm pvm; do
+    file="${src_dir}/vmlinux-${variant}"
+    [[ -f "${file}" ]] || continue
+    digest="$(file_sha256_hex "${file}")" || die "cannot hash ${file}"
+    short_key="sha256-${digest:0:12}"
+    dst="${COMPONENT_VERSIONS_ROOT}/${name}/${short_key}"
+    if [[ -d "${dst}" ]]; then
+      log "inventory skip (exists): ${dst}"
+      continue
+    fi
+    parent="$(dirname "${dst}")"
+    mkdir -p "${parent}"
+    tmp="${dst}.new.$$"
+    rm -rf "${tmp}"
+    mkdir -p "${tmp}"
+    cp -a "${file}" "${tmp}/vmlinux-${variant}"
+    ln -sfn "vmlinux-${variant}" "${tmp}/vmlinux"
+    printf '%s\n' "${variant}" > "${tmp}/variant"
+    printf 'sha256:%s\n' "${digest}" > "${tmp}/version"
+    if [[ -e "${dst}" ]]; then
+      rm -rf "${tmp}"
+      log "inventory skip (race exists): ${dst}"
+      continue
+    fi
+    mv "${tmp}" "${dst}"
+    log "inventory kernel ${variant} -> ${dst}"
+  done
+}
+# Extract "version" under a nested JSON object key (no jq).
+_one_click_json_object_version() {
+  local file="$1" key="$2"
+  local collapsed
+  [[ -f "${file}" ]] || return 0
+  collapsed="$(tr '\n' ' ' < "${file}" 2>/dev/null || true)"
+  [[ -n "${collapsed}" ]] || return 0
+  printf '%s' "${collapsed}" | sed -n \
+    "s/.*\"${key}\"[[:space:]]*:[[:space:]]*{[^}]*\"version\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" \
+    | head -n1
+}
+
+_one_click_json_field() {
+  local file="$1" parent="$2" field="$3"
+  local collapsed
+  [[ -f "${file}" ]] || return 0
+  collapsed="$(tr '\n' ' ' < "${file}" 2>/dev/null || true)"
+  [[ -n "${collapsed}" ]] || return 0
+  printf '%s' "${collapsed}" | sed -n \
+    "s/.*\"${parent}\"[[:space:]]*:[[:space:]]*{[^}]*\"${field}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" \
+    | head -n1
+}
+
+# Resolve inventory version for a package component directory.
+_one_click_resolve_component_version() {
+  local src="$1"
+  local name="$2"
+  local json="${src}/version.json"
+  local manifest=""
+  if [[ -f "${PKG_ROOT}/release-manifest.json" ]]; then
+    manifest="${PKG_ROOT}/release-manifest.json"
+  elif [[ -f "${SCRIPT_DIR}/release-manifest.json" ]]; then
+    manifest="${SCRIPT_DIR}/release-manifest.json"
+  fi
+  local ver="" key
+
+  if [[ -f "${json}" ]]; then
+    case "${name}" in
+      cube-shim)
+        for key in containerd-shim-cube-rs cube-runtime; do
+          ver="$(_one_click_json_object_version "${json}" "${key}")"
+          [[ -n "${ver}" ]] && break
+        done
+        ;;
+      cube-image)
+        ver="$(_one_click_json_object_version "${json}" "guest-image")"
+        ;;
+      cube-agent)
+        ver="$(_one_click_json_object_version "${json}" "cube-agent")"
+        ;;
+    esac
+  fi
+
+  if [[ -z "${ver}" && -f "${src}/version" ]]; then
+    ver="$(tr -d '[:space:]' < "${src}/version" 2>/dev/null || true)"
+  fi
+
+  if [[ -z "${ver}" && -f "${manifest}" ]]; then
+    case "${name}" in
+      cube-shim)
+        for key in containerd-shim-cube-rs cube-runtime; do
+          ver="$(_one_click_json_object_version "${manifest}" "${key}")"
+          [[ -n "${ver}" ]] && break
+        done
+        ;;
+      cube-image)
+        ver="$(_one_click_json_field "${manifest}" "guest_image" "version")"
+        ;;
+      cube-agent)
+        ver="$(_one_click_json_object_version "${manifest}" "cube-agent")"
+        if [[ -z "${ver}" || "${ver}" == "unknown" ]]; then
+          ver="$(_one_click_json_field "${manifest}" "guest_image" "agent_version")"
+        fi
+        ;;
+    esac
+  fi
+
+  ver="$(printf '%s' "${ver}" | tr -d '[:space:]')"
+  case "${ver}" in
+    ""|unknown|UNKNOWN) return 0 ;;
+  esac
+  if [[ "${ver}" == */* || "${ver}" == *..* ]]; then
+    return 0
+  fi
+  printf '%s\n' "${ver}"
+}
+
+# Copy PKG component tree into COMPONENT_VERSIONS_ROOT/<name>/<ver>/ before
+# destructive toolbox replace. Same version present → skip. Fail hard on
+# unresolved version.
+inventory_component_version() {
+  local src_dir="$1"
+  local name="$2"
+  local ver dst tmp parent
+
+  [[ -d "${src_dir}" ]] || return 0
+
+  ver="$(_one_click_resolve_component_version "${src_dir}" "${name}")"
+  [[ -n "${ver}" ]] || die "cannot resolve version for ${name} under ${src_dir} (need version.json, version, or release-manifest; unknown forbidden)"
+
+  dst="${COMPONENT_VERSIONS_ROOT}/${name}/${ver}"
+  if [[ -d "${dst}" ]]; then
+    log "inventory skip (exists): ${dst}"
+    return 0
+  fi
+
+  parent="$(dirname "${dst}")"
+  mkdir -p "${parent}"
+  tmp="${dst}.new.$$"
+  rm -rf "${tmp}"
+  cp -a "${src_dir}" "${tmp}"
+  if [[ -e "${dst}" ]]; then
+    rm -rf "${tmp}"
+    log "inventory skip (race exists): ${dst}"
+    return 0
+  fi
+  mv "${tmp}" "${dst}"
+  log "inventory ${src_dir} -> ${dst}"
+}
+
+inventory_package_component_versions() {
+  local name
+  for name in cube-shim cube-image cube-agent; do
+    if [[ -d "${PKG_ROOT}/${name}" ]]; then
+      inventory_component_version "${PKG_ROOT}/${name}" "${name}"
+    fi
+  done
+  if [[ -d "${PKG_ROOT}/cube-kernel-scf" ]]; then
+    inventory_kernel_content_variants "${PKG_ROOT}/cube-kernel-scf"
+  fi
+}
+
 configure_tencent_docker_mirror() {
   local enable_mirror="${ONE_CLICK_ENABLE_TENCENT_DOCKER_MIRROR:-0}"
   local mirror_url="${ONE_CLICK_TENCENT_DOCKER_MIRROR_URL:-https://mirror.ccs.tencentyun.com}"
@@ -1282,6 +1454,10 @@ if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
 fi
 
 assert_safe_install_prefix "${INSTALL_PREFIX}"
+
+# Inventory component_versions before replacing toolbox.
+inventory_package_component_versions
+
 rm -rf \
   "${INSTALL_PREFIX}/network-agent" \
   "${INSTALL_PREFIX}/CubeAPI" \

@@ -46,6 +46,9 @@ timestamp-prefixed migrations (`YYYYMMDDhhmmss_<description>.sql`).
   `SELECT cubemaster_acquire_migration_lock('cubemaster_migration_<version>_<name>', 60);`
   and release at the bottom:
   `SELECT pg_advisory_unlock(hashtext('cubemaster_migration_<version>_<name>'));`
+  Use the **same** lock string as the MySQL sibling (including any abbreviated
+  suffix). MySQL `GET_LOCK` is limited to 64 characters, so long descriptions
+  must be shortened in both dialects (e.g. `_shim_ver`).
 - Provide a symmetric `-- +goose Down` (the `0001` baseline is the only
   exception — it is irreversible).
 

@@ -320,6 +320,48 @@ ensure_file() {
   [[ -f "${path}" ]] || die "required file not found: ${path}"
 }
 
+# sha256 hex of a file (no "sha256:" prefix).
+file_sha256_hex() {
+  local path="$1"
+  local digest=""
+  [[ -f "${path}" ]] || return 1
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest="$(sha256sum -- "${path}" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    digest="$(shasum -a 256 -- "${path}" | awk '{print $1}')"
+  elif command -v openssl >/dev/null 2>&1; then
+    digest="$(openssl dgst -sha256 -- "${path}" | awk '{print $NF}')"
+  else
+    return 1
+  fi
+  [[ -n "${digest}" ]] || return 1
+  printf '%s\n' "${digest}"
+}
+
+# "sha256-<12>" from file content.
+file_content_version() {
+  local path="$1"
+  local digest=""
+  digest="$(file_sha256_hex "${path}")" || return 1
+  printf 'sha256-%s\n' "${digest:0:12}"
+}
+
+# Use tag when set; otherwise derive from file content.
+resolve_tagged_or_content_version() {
+  local tag="${1:-}"
+  local path="${2:-}"
+  tag="$(printf '%s' "${tag}" | tr -d '[:space:]')"
+  case "${tag}" in
+    ""|unknown|UNKNOWN) ;;
+    *)
+      printf '%s\n' "${tag}"
+      return 0
+      ;;
+  esac
+  [[ -n "${path}" && -f "${path}" ]] || return 1
+  file_content_version "${path}"
+}
+
 # Escape VALUE so it can be used safely as the replacement text in a sed
 # `s<delim>...<delim>...<delim>` expression. Escapes backslashes, '&' (the
 # whole-match reference), '"' (install.sh embeds results in double-quoted YAML

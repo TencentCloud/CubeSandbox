@@ -329,7 +329,7 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		Phase:        ReplicaPhaseReady,
 		LastJobID:    jobID,
 	}
-	bindGuestVersionToReplica(&replica, commitRsp.GetGuestImageVersion(), commitRsp.GetAgentVersion(), commitRsp.GetKernelVersion())
+	bindGuestVersionToReplica(&replica, commitRsp.GetGuestImageVersion(), commitRsp.GetAgentVersion(), commitRsp.GetKernelVersion(), commitRsp.GetShimVersion())
 	_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 		"phase":    JobPhaseRegistering,
 		"progress": 85,

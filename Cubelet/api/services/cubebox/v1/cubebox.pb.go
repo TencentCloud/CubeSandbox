@@ -4373,7 +4373,9 @@ type AppSnapshotResponse struct {
 	// Guest kernel artifact identity bound when this snapshot was created.
 	KernelVersion string `protobuf:"bytes,13,opt,name=kernel_version,json=kernelVersion,proto3" json:"kernel_version,omitempty"`
 	// envd semantic version collected in-guest at snapshot time (best-effort).
-	EnvdVersion   string `protobuf:"bytes,14,opt,name=envd_version,json=envdVersion,proto3" json:"envd_version,omitempty"`
+	EnvdVersion string `protobuf:"bytes,14,opt,name=envd_version,json=envdVersion,proto3" json:"envd_version,omitempty"`
+	// cube-shim (and sibling cube-runtime) version bound when this snapshot was created.
+	ShimVersion   string `protobuf:"bytes,15,opt,name=shim_version,json=shimVersion,proto3" json:"shim_version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4506,6 +4508,13 @@ func (x *AppSnapshotResponse) GetEnvdVersion() string {
 	return ""
 }
 
+func (x *AppSnapshotResponse) GetShimVersion() string {
+	if x != nil {
+		return x.ShimVersion
+	}
+	return ""
+}
+
 type CommitSandboxRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// requestID reqID
@@ -4611,7 +4620,9 @@ type CommitSandboxResponse struct {
 	// Guest kernel artifact identity bound when this snapshot was created.
 	KernelVersion string `protobuf:"bytes,15,opt,name=kernel_version,json=kernelVersion,proto3" json:"kernel_version,omitempty"`
 	// envd semantic version collected in-guest at commit time (best-effort).
-	EnvdVersion   string `protobuf:"bytes,16,opt,name=envd_version,json=envdVersion,proto3" json:"envd_version,omitempty"`
+	EnvdVersion string `protobuf:"bytes,16,opt,name=envd_version,json=envdVersion,proto3" json:"envd_version,omitempty"`
+	// cube-shim (and sibling cube-runtime) version bound when this snapshot was created.
+	ShimVersion   string `protobuf:"bytes,17,opt,name=shim_version,json=shimVersion,proto3" json:"shim_version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4754,6 +4765,13 @@ func (x *CommitSandboxResponse) GetKernelVersion() string {
 func (x *CommitSandboxResponse) GetEnvdVersion() string {
 	if x != nil {
 		return x.EnvdVersion
+	}
+	return ""
+}
+
+func (x *CommitSandboxResponse) GetShimVersion() string {
+	if x != nil {
+		return x.ShimVersion
 	}
 	return ""
 }
@@ -6839,7 +6857,7 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\x03ret\x18\x02 \x01(\v2\".cubelet.services.errorcode.v1.RetR\x03ret\"\x92\x01\n" +
 	"\x12AppSnapshotRequest\x12Y\n" +
 	"\x0ecreate_request\x18\x01 \x01(\v22.cubelet.services.cubebox.v1.RunCubeSandboxRequestR\rcreateRequest\x12!\n" +
-	"\fsnapshot_dir\x18\x02 \x01(\tR\vsnapshotDir\"\x96\x04\n" +
+	"\fsnapshot_dir\x18\x02 \x01(\tR\vsnapshotDir\"\xb9\x04\n" +
 	"\x13AppSnapshotResponse\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x124\n" +
 	"\x03ret\x18\x02 \x01(\v2\".cubelet.services.errorcode.v1.RetR\x03ret\x12\x1c\n" +
@@ -6861,14 +6879,15 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\x13guest_image_version\x18\v \x01(\tR\x11guestImageVersion\x12#\n" +
 	"\ragent_version\x18\f \x01(\tR\fagentVersion\x12%\n" +
 	"\x0ekernel_version\x18\r \x01(\tR\rkernelVersion\x12!\n" +
-	"\fenvd_version\x18\x0e \x01(\tR\venvdVersion\"\x95\x01\n" +
+	"\fenvd_version\x18\x0e \x01(\tR\venvdVersion\x12!\n" +
+	"\fshim_version\x18\x0f \x01(\tR\vshimVersion\"\x95\x01\n" +
 	"\x14CommitSandboxRequest\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x12\x1c\n" +
 	"\tsandboxID\x18\x02 \x01(\tR\tsandboxID\x12\x1e\n" +
 	"\n" +
 	"templateID\x18\x03 \x01(\tR\n" +
 	"templateID\x12!\n" +
-	"\fsnapshot_dir\x18\x04 \x01(\tR\vsnapshotDir\"\xd6\x04\n" +
+	"\fsnapshot_dir\x18\x04 \x01(\tR\vsnapshotDir\"\xf9\x04\n" +
 	"\x15CommitSandboxResponse\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x124\n" +
 	"\x03ret\x18\x02 \x01(\v2\".cubelet.services.errorcode.v1.RetR\x03ret\x12\x1c\n" +
@@ -6894,7 +6913,8 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\x13guest_image_version\x18\r \x01(\tR\x11guestImageVersion\x12#\n" +
 	"\ragent_version\x18\x0e \x01(\tR\fagentVersion\x12%\n" +
 	"\x0ekernel_version\x18\x0f \x01(\tR\rkernelVersion\x12!\n" +
-	"\fenvd_version\x18\x10 \x01(\tR\venvdVersion\"\x89\x02\n" +
+	"\fenvd_version\x18\x10 \x01(\tR\venvdVersion\x12!\n" +
+	"\fshim_version\x18\x11 \x01(\tR\vshimVersion\"\x89\x02\n" +
 	"\x16RollbackSandboxRequest\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x12\x1c\n" +
 	"\tsandboxID\x18\x02 \x01(\tR\tsandboxID\x12\x1e\n" +

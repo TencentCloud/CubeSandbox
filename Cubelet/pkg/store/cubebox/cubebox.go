@@ -146,6 +146,9 @@ type CubeBox struct {
 
 	LocalRunTemplate *templatetypes.LocalRunTemplate
 
+	// ComponentVersions: inventory dir name → version string (no absolute paths).
+	ComponentVersions map[string]string `json:"component_versions,omitempty"`
+
 	ImageReferences map[string]ImageReference
 
 	HostMetricsBaseline                    *HostMetricsBaseline `json:"host_metrics_baseline,omitempty"`

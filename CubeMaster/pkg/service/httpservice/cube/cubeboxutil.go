@@ -581,6 +581,7 @@ func bindSnapshotCreateReplica(ctx context.Context, snapshotID string, reqInOut 
 	}
 	reqInOut.Annotations[constants.CubeAnnotationRuntimeSnapshotID] = strings.TrimSpace(snapshotID)
 	reqInOut.Annotations[constants.CubeAnnotationRuntimeSnapshotAttachedAt] = time.Now().UTC().Format(time.RFC3339Nano)
+	injectReplicaComponentVersionAnnotations(reqInOut.Annotations, replica)
 	return nil
 }
 
@@ -592,13 +593,34 @@ func bindSnapshotCreateReplica(ctx context.Context, snapshotID string, reqInOut 
 // memory_vol/memory_kind annotation keys no longer exist as constants.
 func bindAppSnapshotTemplateReplica(ctx context.Context, templateID string, reqInOut *types.CreateCubeSandboxReq) error {
 	preferredNodeID := preferredDistributionNodeID(reqInOut)
-	if _, err := resolveTemplateReadyReplicaFn(ctx, templateID, preferredNodeID); err != nil {
+	replica, err := resolveTemplateReadyReplicaFn(ctx, templateID, preferredNodeID)
+	if err != nil {
 		return fmt.Errorf("template %s has no bindable ready replica: %w", templateID, err)
 	}
 	if reqInOut.Annotations == nil {
 		reqInOut.Annotations = map[string]string{}
 	}
+	injectReplicaComponentVersionAnnotations(reqInOut.Annotations, replica)
 	return nil
+}
+
+func injectReplicaComponentVersionAnnotations(annotations map[string]string, replica templatecenter.ReplicaStatus) {
+	if annotations == nil {
+		return
+	}
+	set := func(key, ver string) {
+		ver = strings.TrimSpace(ver)
+		if ver == "" {
+			return
+		}
+		if strings.TrimSpace(annotations[key]) == "" {
+			annotations[key] = ver
+		}
+	}
+	set(constants.CubeAnnotationComponentCubeImageVersion, replica.GuestImageVersion)
+	set(constants.CubeAnnotationComponentCubeAgentVersion, replica.AgentVersion)
+	set(constants.CubeAnnotationComponentCubeKernelVersion, replica.KernelVersion)
+	set(constants.CubeAnnotationComponentCubeShimVersion, replica.ShimVersion)
 }
 
 func preferredDistributionNodeID(req *types.CreateCubeSandboxReq) string {

@@ -144,4 +144,28 @@ else
   log "PVM kernel vmlinux not found; packaging ordinary kernel only"
 fi
 
+# Kernel version.json: variants keyed by file digest.
+bm_digest="$(file_sha256_hex "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-bm")" \
+  || die "cannot hash vmlinux-bm"
+bm_short="sha256-${bm_digest:0:12}"
+pvm_digest=""
+pvm_short=""
+if [[ -f "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-pvm" ]]; then
+  pvm_digest="$(file_sha256_hex "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-pvm")" \
+    || die "cannot hash vmlinux-pvm"
+  pvm_short="sha256-${pvm_digest:0:12}"
+fi
+
+{
+  printf '{\n  "schema_version": 1,\n  "variants": {\n'
+  printf '    "bm": {"version": "%s", "digest_sha256": "sha256:%s"}' "${bm_short}" "${bm_digest}"
+  if [[ -n "${pvm_digest}" ]]; then
+    printf ',\n    "pvm": {"version": "%s", "digest_sha256": "sha256:%s"}' "${pvm_short}" "${pvm_digest}"
+  fi
+  printf '\n  }\n}\n'
+} > "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/version.json"
+
+printf 'sha256:%s\n' "${bm_digest}" > "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/version"
+log "wrote cube-kernel-scf version.json (bm=${bm_short}${pvm_short:+ pvm=${pvm_short}})"
+
 log "runtime layout ready: ${RUNTIME_LAYOUT_DIR}"

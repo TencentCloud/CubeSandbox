@@ -221,14 +221,43 @@ generate_release_manifest() {
   local kernel_vmlinux="${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-bm"
   local kernel_pvm_vmlinux="${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-pvm"
 
-  # Kernel versions (use CI env or hardcoded tags from release-one-click.yml).
-  local kernel_version="${KERNEL_TAG:-unknown}"
-  local kernel_pvm_version="${PVM_KERNEL_TAG:-unknown}"
-  if [[ "${kernel_version}" == "unknown" ]]; then
-    log "WARNING: KERNEL_TAG is not set; release manifest will record kernel.version=unknown"
+  # Prefer version.json variant digests for kernel inventory keys.
+  local kernel_version=""
+  local kernel_pvm_version=""
+  local kernel_json="${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/version.json"
+  if [[ -f "${kernel_json}" ]]; then
+    kernel_version="$(python3 - "${kernel_json}" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(((d.get("variants") or {}).get("bm") or {}).get("version") or "", end="")
+PY
+)"
+    kernel_pvm_version="$(python3 - "${kernel_json}" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(((d.get("variants") or {}).get("pvm") or {}).get("version") or "", end="")
+PY
+)"
   fi
-  if [[ -f "${kernel_pvm_vmlinux}" && "${kernel_pvm_version}" == "unknown" ]]; then
-    log "WARNING: PVM_KERNEL_TAG is not set; release manifest will record kernel.pvm_version=unknown"
+  if [[ -z "${kernel_version}" || "${kernel_version}" == "unknown" ]]; then
+    kernel_version="$(file_content_version "${kernel_vmlinux}")" || kernel_version="unknown"
+  fi
+  if [[ "${kernel_version}" == "unknown" ]]; then
+    log "WARNING: cannot resolve kernel.version (no vmlinux-bm); manifest will record unknown"
+  else
+    log "release manifest kernel.version=${kernel_version} (content short hash)"
+  fi
+
+  if [[ -z "${kernel_pvm_version}" || "${kernel_pvm_version}" == "unknown" ]]; then
+    if [[ -f "${kernel_pvm_vmlinux}" ]]; then
+      kernel_pvm_version="$(file_content_version "${kernel_pvm_vmlinux}")" \
+        || kernel_pvm_version="unknown"
+      log "release manifest kernel.pvm_version=${kernel_pvm_version} (content short hash)"
+    else
+      kernel_pvm_version="unknown"
+    fi
+  else
+    log "release manifest kernel.pvm_version=${kernel_pvm_version} (content short hash)"
   fi
 
   # Agent digest: prefer cube-agent.ext4; fall back to ELF binary for older layouts.

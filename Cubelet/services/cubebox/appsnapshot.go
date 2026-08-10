@@ -23,10 +23,12 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
+	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
@@ -389,10 +391,13 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	rsp.RootfsKind = rootfsObject.Kind
 	rsp.MemoryKind = memoryObject.Kind
 	rsp.RootfsSizeBytes = rootfsObject.SizeBytes
-	versions := collectGuestEnvironmentVersions()
+	// One live inventory scan fills both the RPC response and catalog pins.
+	frozenVersions := inventoryVersionsFromLive()
+	versions := guestEnvironmentVersionsFromComponentMap(frozenVersions, guestEnvironmentVersions{})
 	rsp.GuestImageVersion = versions.GuestImage
 	rsp.AgentVersion = versions.Agent
 	rsp.KernelVersion = versions.Kernel
+	rsp.ShimVersion = versions.Shim
 	rsp.EnvdVersion = envdVersion
 
 	// Persist the catalog entry so subsequent create-from-template and
@@ -400,19 +405,20 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	// rootfs name is deterministic on cubelet side; we record it so cleanup
 	// works even if the live volume has already been removed by other paths.
 	if err := storage.WriteSnapshotCatalog(&storage.SnapshotCatalogEntry{
-		SnapshotID:      templateID,
-		InstanceType:    "cubebox",
-		SpecDir:         specDir,
-		SnapshotPath:    snapshotPath,
-		MetaDir:         snapshotPath,
-		RootfsVol:       rootfsObject.Name,
-		RootfsKind:      rootfsObject.Kind,
-		MemoryVol:       memoryObject.Name,
-		MemoryKind:      memoryObject.Kind,
-		BuildRootfsVol:  storage.TemplateBuildRootfsName(templateID),
-		BuildRootfsKind: storage.CowKindVolume,
-		RootfsSizeBytes: rootfsObject.SizeBytes,
-		Kind:            storage.CatalogKindTemplate,
+		SnapshotID:        templateID,
+		InstanceType:      "cubebox",
+		SpecDir:           specDir,
+		SnapshotPath:      snapshotPath,
+		MetaDir:           snapshotPath,
+		RootfsVol:         rootfsObject.Name,
+		RootfsKind:        rootfsObject.Kind,
+		MemoryVol:         memoryObject.Name,
+		MemoryKind:        memoryObject.Kind,
+		BuildRootfsVol:    storage.TemplateBuildRootfsName(templateID),
+		BuildRootfsKind:   storage.CowKindVolume,
+		RootfsSizeBytes:   rootfsObject.SizeBytes,
+		ComponentVersions: frozenVersions,
+		Kind:              storage.CatalogKindTemplate,
 	}); err != nil {
 		// Catalog write failures do not invalidate the snapshot: master will
 		// still receive the physical references in the response and the
@@ -637,9 +643,13 @@ func (s *service) executeCubeRuntimeSnapshot(ctx context.Context, sandboxID stri
 
 	args := buildCubeRuntimeSnapshotArgs(sandboxID, spec, snapshotPath, memoryVol, snapshotType)
 
-	stepLog.Infof("Executing: %s %v", DefaultCubeRuntimePath, args)
+	runtimePath, err := s.resolveCubeRuntimePath(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+	stepLog.Infof("Executing: %s %v", runtimePath, args)
 
-	cmd := exec.CommandContext(ctx, DefaultCubeRuntimePath, args...)
+	cmd := exec.CommandContext(ctx, runtimePath, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		stepLog.Errorf("cube-runtime snapshot failed: %v, output: %s", err, string(output))
@@ -648,6 +658,73 @@ func (s *service) executeCubeRuntimeSnapshot(ctx context.Context, sandboxID stri
 
 	stepLog.Infof("cube-runtime snapshot output: %s", string(output))
 	return nil
+}
+
+// resolveCubeRuntimePath picks cube-runtime matching the sandbox shim version,
+// or DefaultCubeRuntimePath when none is pinned.
+func (s *service) resolveCubeRuntimePath(ctx context.Context, sandboxID string) (string, error) {
+	cb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, sandboxID)
+	if err != nil || cb == nil {
+		if pathExists(DefaultCubeRuntimePath) {
+			return DefaultCubeRuntimePath, nil
+		}
+		return "", fmt.Errorf("cube-runtime not found at %s (sandbox %s lookup failed: %v)", DefaultCubeRuntimePath, sandboxID, err)
+	}
+
+	if path := cubeRuntimeBesideShimPath(cb); path != "" {
+		return path, nil
+	}
+
+	var shimVer string
+	if cb.ComponentVersions != nil {
+		shimVer = strings.TrimSpace(cb.ComponentVersions[templatetypes.CubeComponentCubeShim])
+	}
+	if shimVer == "" && cb.LocalRunTemplate != nil && cb.LocalRunTemplate.Componts != nil {
+		if shim, ok := cb.LocalRunTemplate.Componts[templatetypes.CubeComponentCubeShim]; ok {
+			shimVer = strings.TrimSpace(shim.Component.Version)
+		}
+	}
+	if shimVer != "" {
+		candidate := templatetypes.VersionedLocalPath(
+			templatetypes.DefaultVersionedBaseDir,
+			templatetypes.CubeComponentCubeShim,
+			shimVer,
+			templatetypes.RelativePathCubeRuntime,
+		)
+		if pathExists(candidate) {
+			return candidate, nil
+		}
+		return "", fmt.Errorf("cube-runtime missing for shim version %s at %s", shimVer, candidate)
+	}
+
+	if pathExists(DefaultCubeRuntimePath) {
+		return DefaultCubeRuntimePath, nil
+	}
+	return "", fmt.Errorf("cube-runtime not found at %s", DefaultCubeRuntimePath)
+}
+
+func cubeRuntimeBesideShimPath(cb *cubeboxstore.CubeBox) string {
+	if cb == nil || cb.LocalRunTemplate == nil || cb.LocalRunTemplate.Componts == nil {
+		return ""
+	}
+	shim, ok := cb.LocalRunTemplate.Componts[templatetypes.CubeComponentCubeShim]
+	if !ok {
+		return ""
+	}
+	shimPath := strings.TrimSpace(shim.Component.Path)
+	if shimPath == "" || !strings.HasPrefix(shimPath, "/") {
+		return ""
+	}
+	candidate := filepath.Join(filepath.Dir(shimPath), "cube-runtime")
+	if pathExists(candidate) {
+		return candidate
+	}
+	return ""
+}
+
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func snapshotContainerIDFromAnnotations(annotations map[string]string, sandboxID string) string {

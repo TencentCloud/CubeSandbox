@@ -123,4 +123,8 @@ spec:
           hostPath:
             path: {{ .Values.hostPaths.bootstrapState }}
             type: DirectoryOrCreate
+        - name: data-cubelet
+          hostPath:
+            path: {{ .Values.hostPaths.dataCubelet }}
+            type: DirectoryOrCreate
 {{- end }}

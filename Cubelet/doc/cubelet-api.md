@@ -260,6 +260,7 @@ AppSnapshotResponse is the response for app snapshot creation.
 | agent_version | [string](#string) |  | cube-agent version bound when this snapshot was created. |
 | kernel_version | [string](#string) |  | Guest kernel artifact identity bound when this snapshot was created. |
 | envd_version | [string](#string) |  | envd semantic version collected in-guest at snapshot time (best-effort). |
+| shim_version | [string](#string) |  | cube-shim (and sibling cube-runtime) version bound when this snapshot was created. |
 
 
 
@@ -410,6 +411,7 @@ Capability contains the container capabilities to add or drop
 | agent_version | [string](#string) |  | cube-agent version bound when this snapshot was created. |
 | kernel_version | [string](#string) |  | Guest kernel artifact identity bound when this snapshot was created. |
 | envd_version | [string](#string) |  | envd semantic version collected in-guest at commit time (best-effort). |
+| shim_version | [string](#string) |  | cube-shim (and sibling cube-runtime) version bound when this snapshot was created. |
 
 
 

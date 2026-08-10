@@ -97,6 +97,11 @@ const (
 	// CubeAnnotationComponentEnvdVersion carries the real envd semantic version
 	// collected at template-creation time and propagated to sandbox instances.
 	CubeAnnotationComponentEnvdVersion = "cube.master.components.envd.version"
+	// Component version annotations (dir name → version string).
+	CubeAnnotationComponentCubeShimVersion   = "cube.master.components.cube-shim.version"
+	CubeAnnotationComponentCubeKernelVersion = "cube.master.components.cube-kernel-scf.version"
+	CubeAnnotationComponentCubeImageVersion  = "cube.master.components.cube-image.version"
+	CubeAnnotationComponentCubeAgentVersion  = "cube.master.components.cube-agent.version"
 )
 const (
 	CubeAnnotationsUseNetFileCache = "cube.instance.use_netfile_cache"

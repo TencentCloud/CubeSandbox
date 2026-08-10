@@ -6,8 +6,11 @@ package components
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"path"
+	"strings"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/nodedistribution/distribution"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
@@ -16,18 +19,16 @@ import (
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
-type ComponentManagerConfig struct {
-	VersionedBaseDir    string `toml:"versioned_base_dir"`
-	EnableFallbackRetry bool   `toml:"enable_fallback_retry"`
+// ErrComponentVersionMissing means the requested version is not in local inventory.
+var ErrComponentVersionMissing = errors.New("component version missing on node")
 
-	FallbackRetryComponentDir string `toml:"fallback_retry_component_dir"`
+type ComponentManagerConfig struct {
+	VersionedBaseDir string `toml:"versioned_base_dir"`
 }
 
 func DefaultConfig() *ComponentManagerConfig {
 	return &ComponentManagerConfig{
-		VersionedBaseDir:          "/usr/local/services/cubetoolbox",
-		EnableFallbackRetry:       false,
-		FallbackRetryComponentDir: "/usr/local/services/cubetoolbox",
+		VersionedBaseDir: templatetypes.DefaultVersionedBaseDir,
 	}
 }
 
@@ -36,11 +37,60 @@ type ComponentManager struct {
 }
 
 func NewComponentManager(config *ComponentManagerConfig) *ComponentManager {
+	if config == nil {
+		config = DefaultConfig()
+	}
+	if strings.TrimSpace(config.VersionedBaseDir) == "" {
+		config.VersionedBaseDir = templatetypes.DefaultVersionedBaseDir
+	}
 	cm := &ComponentManager{
 		config: config,
 	}
 	distribution.RegisterHandler(distribution.ResourceTaskTypeComponent, cm)
 	return cm
+}
+
+// Ensure resolves name/version/relativePath to an absolute LocalPath in inventory.
+// Missing directory or file returns ErrComponentVersionMissing.
+func (c *ComponentManager) Ensure(ctx context.Context, name, version, relativePath string) (string, error) {
+	_ = ctx
+	name = strings.TrimSpace(name)
+	version = strings.TrimSpace(version)
+	relativePath = strings.TrimSpace(relativePath)
+	if name == "" {
+		return "", fmt.Errorf("component name is empty")
+	}
+	if version == "" {
+		return "", fmt.Errorf("component %s version is empty", name)
+	}
+	version = templatetypes.InventoryVersionKey(version)
+	if version == "" {
+		return "", fmt.Errorf("component %s version is empty after inventory-key normalize", name)
+	}
+	if relativePath == "" {
+		relativePath = templatetypes.DefaultRelativePath(name)
+	}
+	if relativePath == "" {
+		return "", fmt.Errorf("component %s relative path is empty", name)
+	}
+
+	versionedDir := templatetypes.VersionedComponentDir(c.config.VersionedBaseDir, name, version)
+	ok, err := utils.DenExist(versionedDir)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("%w: dir %s (component=%s version=%s)", ErrComponentVersionMissing, versionedDir, name, version)
+	}
+
+	localPath := path.Join(versionedDir, relativePath)
+	if _, err := os.Stat(localPath); err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("%w: file %s (component=%s version=%s path=%s)", ErrComponentVersionMissing, localPath, name, version, relativePath)
+		}
+		return "", err
+	}
+	return localPath, nil
 }
 
 func (c *ComponentManager) Handle(ctx context.Context, task *distribution.SubTaskDefine) (status distribution.TaskStatus, err error) {
@@ -61,41 +111,27 @@ func (c *ComponentManager) Handle(ctx context.Context, task *distribution.SubTas
 			baseStatus.AddError(ctx, err)
 		} else {
 			baseStatus.SetStatus(distribution.TaskStatus_SUCCESS, "")
-			logEntry.Infof("handle component task success")
+			logEntry.Infof("handle component task success local_path=%s", baseStatus.LocalComponent.Component.Path)
 		}
 	}()
-	if component.Name == "" {
-		err = fmt.Errorf("component name is empty")
-		return
-	}
-	componentVersionedDir := path.Join(c.config.VersionedBaseDir, component.Name, component.Version)
-	var ok bool
-	ok, err = utils.DenExist(componentVersionedDir)
-	if !ok {
-		if c.config.EnableFallbackRetry {
-			componentVersionedDir = path.Join(c.config.FallbackRetryComponentDir, component.Name)
-			ok, err = utils.DenExist(componentVersionedDir)
-			if ok {
-				baseStatus.LocalComponent.Component.Path = componentVersionedDir
-				return
-			}
-		}
-		if err == nil {
-			err = fmt.Errorf("component versioned dir %s not exist", componentVersionedDir)
-		}
-		return
-	}
 
-	baseStatus.LocalComponent.Component.Path = componentVersionedDir
+	relativePath := strings.TrimSpace(component.Path)
+	localPath, ensureErr := c.Ensure(ctx, component.Name, component.Version, relativePath)
+	if ensureErr != nil {
+		err = ensureErr
+		return
+	}
+	baseStatus.LocalComponent.Component.Path = localPath
 	return
 }
 
 func (c *ComponentManager) IsReady() bool {
 	ok, _ := utils.DenExist(c.config.VersionedBaseDir)
-	if !ok && c.config.EnableFallbackRetry {
-		ok, _ = utils.DenExist(c.config.FallbackRetryComponentDir)
-	}
 	return ok
+}
+
+func (c *ComponentManager) Config() *ComponentManagerConfig {
+	return c.config
 }
 
 var _ distribution.TaskHandler = &ComponentManager{}

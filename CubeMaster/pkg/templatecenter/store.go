@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,7 +27,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -80,27 +78,7 @@ var (
 	ErrNoTemplateNodes             = errors.New("no healthy nodes available for template creation")
 	ErrDuplicateTemplate           = errors.New("template already exists")
 	ErrTemplateAttemptInProgress   = errors.New("template attempt is already in progress")
-	ErrTemplateStaleNeedsRedo      = errors.New("template stale needs redo")
 )
-
-type TemplateStaleNeedsRedoError struct {
-	TemplateID string
-	Nodes      []string
-}
-
-func (e *TemplateStaleNeedsRedoError) Error() string {
-	if e == nil {
-		return ErrTemplateStaleNeedsRedo.Error()
-	}
-	if len(e.Nodes) == 0 {
-		return fmt.Sprintf("template %s is stale and needs redo", e.TemplateID)
-	}
-	return fmt.Sprintf("template %s is stale on nodes [%s] and needs redo", e.TemplateID, strings.Join(e.Nodes, ", "))
-}
-
-func (e *TemplateStaleNeedsRedoError) Unwrap() error {
-	return ErrTemplateStaleNeedsRedo
-}
 
 type localStore struct {
 	db     *gorm.DB
@@ -133,6 +111,7 @@ type ReplicaStatus struct {
 	GuestImageVersion string `json:"guest_image_version,omitempty"`
 	AgentVersion      string `json:"agent_version,omitempty"`
 	KernelVersion     string `json:"kernel_version,omitempty"`
+	ShimVersion       string `json:"shim_version,omitempty"`
 	CompatStatus      string `json:"compat_status,omitempty"`
 	CompatPolicy      string `json:"compat_policy,omitempty"`
 	CompatCheckedUnix int64  `json:"compat_checked_unix,omitempty"`
@@ -622,7 +601,7 @@ func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtyp
 	}
 	replica.Status = ReplicaStatusReady
 	replica.Phase = ReplicaPhaseReady
-	bindGuestVersionToReplica(&replica, rsp.GetGuestImageVersion(), rsp.GetAgentVersion(), rsp.GetKernelVersion())
+	bindGuestVersionToReplica(&replica, rsp.GetGuestImageVersion(), rsp.GetAgentVersion(), rsp.GetKernelVersion(), rsp.GetShimVersion())
 	envdVersion := sanitizeEnvdVersion(rsp.GetEnvdVersion())
 	// v4: AppSnapshot replica is "thin" -- physical refs are owned by cubelet's
 	// local catalog. Master only persists control-plane state (status / phase /
@@ -1205,16 +1184,20 @@ func evaluateCompat(replica ReplicaStatus, currentGuestImage, currentAgent, _ st
 }
 
 func isReplicaSchedulable(replica ReplicaStatus) bool {
-	return replica.Status == ReplicaStatusReady && normalizeCompatStatus(replica.CompatStatus) != CompatStatusStale
+	return replica.Status == ReplicaStatusReady
 }
 
-func bindGuestVersionToReplica(replica *ReplicaStatus, guestImageVersion, agentVersion, kernelVersion string) {
+// bindGuestVersionToReplica records pin versions on the replica. CompatStatus
+// still compares guest[+agent] only; kernel/shim are stored for create inject
+// and do not participate in evaluateCompat.
+func bindGuestVersionToReplica(replica *ReplicaStatus, guestImageVersion, agentVersion, kernelVersion, shimVersion string) {
 	if replica == nil {
 		return
 	}
 	replica.GuestImageVersion = normalizeComponentVersion(guestImageVersion)
 	replica.AgentVersion = normalizeComponentVersion(agentVersion)
 	replica.KernelVersion = normalizeComponentVersion(kernelVersion)
+	replica.ShimVersion = normalizeComponentVersion(shimVersion)
 	replica.CompatPolicy = CompatPolicyStrict
 	replica.CompatStatus = evaluateCompat(*replica, replica.GuestImageVersion, replica.AgentVersion, replica.KernelVersion)
 	replica.CompatCheckedUnix = time.Now().Unix()
@@ -1236,6 +1219,7 @@ func replicaModelToStatus(replica models.TemplateReplica) ReplicaStatus {
 		GuestImageVersion: replica.GuestImageVersion,
 		AgentVersion:      replica.AgentVersion,
 		KernelVersion:     replica.KernelVersion,
+		ShimVersion:       replica.ShimVersion,
 		CompatStatus:      normalizeCompatStatus(replica.CompatStatus),
 		CompatPolicy:      normalizeCompatPolicy(replica.CompatPolicy),
 		CompatCheckedUnix: replica.CompatCheckedUnix,
@@ -1259,6 +1243,7 @@ func replicaStatusToModel(templateID, instanceType string, replica ReplicaStatus
 		GuestImageVersion: replica.GuestImageVersion,
 		AgentVersion:      replica.AgentVersion,
 		KernelVersion:     replica.KernelVersion,
+		ShimVersion:       replica.ShimVersion,
 		CompatStatus:      normalizeCompatStatus(replica.CompatStatus),
 		CompatPolicy:      normalizeCompatPolicy(replica.CompatPolicy),
 		CompatCheckedUnix: replica.CompatCheckedUnix,
@@ -1282,10 +1267,12 @@ func replicaStatusUpdateFields(instanceType string, replica ReplicaStatus) map[s
 	if normalizeCompatStatus(replica.CompatStatus) != CompatStatusUnknown ||
 		normalizeComponentVersion(replica.GuestImageVersion) != "" ||
 		normalizeComponentVersion(replica.AgentVersion) != "" ||
-		normalizeComponentVersion(replica.KernelVersion) != "" {
+		normalizeComponentVersion(replica.KernelVersion) != "" ||
+		normalizeComponentVersion(replica.ShimVersion) != "" {
 		fields["guest_image_version"] = normalizeComponentVersion(replica.GuestImageVersion)
 		fields["agent_version"] = normalizeComponentVersion(replica.AgentVersion)
 		fields["kernel_version"] = normalizeComponentVersion(replica.KernelVersion)
+		fields["shim_version"] = normalizeComponentVersion(replica.ShimVersion)
 		fields["compat_status"] = normalizeCompatStatus(replica.CompatStatus)
 		fields["compat_policy"] = normalizeCompatPolicy(replica.CompatPolicy)
 		fields["compat_checked_unix"] = replica.CompatCheckedUnix
@@ -1363,16 +1350,9 @@ func isTemplateReplicaSchedulable(ctx context.Context, templateID, nodeID string
 	return isReplicaSchedulableNow(ctx, replicaModelToStatus(replica))
 }
 
-func effectiveCompatStatus(ctx context.Context, replica ReplicaStatus) string {
-	current, ok := nodemeta.GetNodeComponentVersions(ctx, replica.NodeID)
-	if !ok {
-		return normalizeCompatStatus(replica.CompatStatus)
-	}
-	return evaluateCompat(replica, current[compatComponentGuestImage], current[compatComponentAgent], current[compatComponentKernel])
-}
-
 func isReplicaSchedulableNow(ctx context.Context, replica ReplicaStatus) bool {
-	return strings.TrimSpace(replica.Status) == ReplicaStatusReady && effectiveCompatStatus(ctx, replica) != CompatStatusStale
+	_ = ctx
+	return strings.TrimSpace(replica.Status) == ReplicaStatusReady
 }
 
 func EnsureTemplateLocalityReady(ctx context.Context, templateID, instanceType string) error {
@@ -1416,7 +1396,6 @@ func EnsureTemplateLocalityReady(ctx context.Context, templateID, instanceType s
 	reportTemplateCacheMetric(ctx, constants.ActionTemplateLocalityMiss, 0)
 	if isReady() {
 		matched := false
-		staleNodes := make([]string, 0)
 		err := withTemplateReadLock(templateID, func() error {
 			dbStart := time.Now()
 			replicas, err := ListReplicas(ctx, templateID)
@@ -1428,13 +1407,6 @@ func EnsureTemplateLocalityReady(ctx context.Context, templateID, instanceType s
 			for _, replica := range replicas {
 				status := replicaModelToStatus(replica)
 				if !isReplicaSchedulableNow(ctx, status) {
-					if status.Status == ReplicaStatusReady && effectiveCompatStatus(ctx, status) == CompatStatusStale {
-						if _, ok := healthyNodeIDs[replica.NodeID]; ok {
-							staleNodes = append(staleNodes, replica.NodeID)
-						} else if _, ok := healthyNodeIPs[replica.NodeIP]; ok {
-							staleNodes = append(staleNodes, replica.NodeIP)
-						}
-					}
 					continue
 				}
 				readyReplicas = append(readyReplicas, status)
@@ -1454,10 +1426,6 @@ func EnsureTemplateLocalityReady(ctx context.Context, templateID, instanceType s
 		}
 		if matched {
 			return nil
-		}
-		if len(staleNodes) > 0 {
-			sort.Strings(staleNodes)
-			return &TemplateStaleNeedsRedoError{TemplateID: templateID, Nodes: staleNodes}
 		}
 	}
 	return ErrTemplateHasNoReadyReplica

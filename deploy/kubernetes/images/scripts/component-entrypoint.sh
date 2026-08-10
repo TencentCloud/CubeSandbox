@@ -14,6 +14,7 @@ set -euo pipefail
 
 IMAGE_ROOT="${IMAGE_ROOT:-/opt/cube-image}"
 TOOLBOX_ROOT="${TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
+COMPONENT_VERSIONS_ROOT="${COMPONENT_VERSIONS_ROOT:-/data/cubelet/root/component_versions}"
 CUBE_COMPONENT="${CUBE_COMPONENT:-}"
 CUBE_ROLE="${CUBE_ROLE:-install}"
 CUBE_PID_DIR="${CUBE_PID_DIR:-/run/cube-node}"
@@ -21,6 +22,139 @@ STATE_DIR="${STATE_DIR:-/var/lib/cube-node-bootstrap}"
 
 log() { printf '[cube-component:%s:%s] %s\n' "${CUBE_COMPONENT:-?}" "${CUBE_ROLE}" "$*"; }
 fail() { printf '[cube-component:%s:%s] ERROR: %s\n' "${CUBE_COMPONENT:-?}" "${CUBE_ROLE}" "$*" >&2; exit 1; }
+
+# Components staged into COMPONENT_VERSIONS_ROOT before toolbox replace.
+is_inventory_component() {
+  case "$1" in
+    cube-shim|cube-kernel|cube-guest|cube-agent) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Read "version" under a nested JSON object key (no jq).
+json_object_version() {
+  local file="$1" key="$2"
+  local collapsed
+  [[ -f "${file}" ]] || return 0
+  collapsed="$(tr '\n' ' ' < "${file}" 2>/dev/null || true)"
+  [[ -n "${collapsed}" ]] || return 0
+  printf '%s' "${collapsed}" | sed -n \
+    "s/.*\"${key}\"[[:space:]]*:[[:space:]]*{[^}]*\"version\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" \
+    | head -n1
+}
+
+# Prefer version.json, else single-line version file. Empty means fail upstream.
+resolve_component_version() {
+  local src="$1"
+  local component="$2"
+  local json="${src}/version.json"
+  local ver="" key
+
+  if [[ -f "${json}" ]]; then
+    case "${component}" in
+      cube-shim)
+        for key in containerd-shim-cube-rs cube-runtime; do
+          ver="$(json_object_version "${json}" "${key}")"
+          [[ -n "${ver}" ]] && break
+        done
+        ;;
+      cube-kernel)
+        ;;
+      cube-guest)
+        ver="$(json_object_version "${json}" "guest-image")"
+        ;;
+      cube-agent)
+        ver="$(json_object_version "${json}" "cube-agent")"
+        ;;
+    esac
+  fi
+
+  if [[ -z "${ver}" && -f "${src}/version" ]]; then
+    ver="$(tr -d '[:space:]' < "${src}/version" 2>/dev/null || true)"
+  fi
+
+  ver="$(printf '%s' "${ver}" | tr -d '[:space:]')"
+  case "${ver}" in
+    ""|unknown|UNKNOWN) return 0 ;;
+  esac
+  if [[ "${ver}" == */* || "${ver}" == *..* ]]; then
+    return 0
+  fi
+  printf '%s\n' "${ver}"
+}
+
+# Copy src into COMPONENT_VERSIONS_ROOT/<rel>/<version>/ (skip if present).
+inventory_component_version() {
+  local src="$1"
+  local rel="$2"
+  local ver dst parent
+  ver="$(resolve_component_version "${src}" "${CUBE_COMPONENT}")"
+  [[ -n "${ver}" ]] || fail "cannot resolve version for ${CUBE_COMPONENT} under ${src} (need version.json or version; unknown forbidden)"
+  dst="${COMPONENT_VERSIONS_ROOT}/${rel}/${ver}"
+  if [[ -d "${dst}" ]]; then
+    log "inventory skip (exists): ${dst}"
+    return 0
+  fi
+  parent="$(dirname "${dst}")"
+  mkdir -p "${parent}"
+  log "inventory ${src} -> ${dst}"
+  atomic_replace_dir "${src}" "${dst}"
+}
+
+file_sha256_hex() {
+  local path="$1"
+  local digest=""
+  [[ -f "${path}" ]] || return 1
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest="$(sha256sum -- "${path}" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    digest="$(shasum -a 256 -- "${path}" | awk '{print $1}')"
+  else
+    return 1
+  fi
+  [[ -n "${digest}" ]] || return 1
+  printf '%s\n' "${digest}"
+}
+
+# Inventory each present kernel variant by content short-hash.
+inventory_kernel_content_variants() {
+  local src="$1"
+  local rel="$2"
+  local file variant digest short_key dst tmp parent
+
+  [[ -d "${src}" ]] || fail "kernel image bypass missing: ${src}"
+
+  for variant in bm pvm; do
+    file="${src}/vmlinux-${variant}"
+    [[ -f "${file}" ]] || continue
+    digest="$(file_sha256_hex "${file}")" || fail "cannot hash ${file}"
+    short_key="sha256-${digest:0:12}"
+    dst="${COMPONENT_VERSIONS_ROOT}/${rel}/${short_key}"
+    if [[ -d "${dst}" ]]; then
+      log "inventory skip (exists): ${dst}"
+      continue
+    fi
+    parent="$(dirname "${dst}")"
+    mkdir -p "${parent}"
+    tmp="${dst}.new.$$"
+    rm -rf "${tmp}"
+    mkdir -p "${tmp}"
+    cp -a "${file}" "${tmp}/vmlinux-${variant}"
+    ln -sfn "vmlinux-${variant}" "${tmp}/vmlinux"
+    printf '%s\n' "${variant}" > "${tmp}/variant"
+    printf 'sha256:%s\n' "${digest}" > "${tmp}/version"
+    if [[ -e "${dst}" ]]; then
+      rm -rf "${tmp}"
+      log "inventory skip (race exists): ${dst}"
+      continue
+    fi
+    mv "${tmp}" "${dst}"
+    log "inventory kernel ${variant} -> ${dst}"
+  done
+  if [[ ! -f "${src}/vmlinux-bm" && ! -f "${src}/vmlinux-pvm" ]]; then
+    fail "cube-kernel inventory requires vmlinux-bm and/or vmlinux-pvm under ${src}"
+  fi
+}
 
 apply_effective_pvm_from_state() {
   local path="${STATE_DIR}/effective-pvm"
@@ -161,6 +295,14 @@ stage_component() {
     [[ -n "${preserved_kernel}" ]] && log "preserved guest kernel selection: ${preserved_kernel}"
   fi
 
+  if is_inventory_component "${CUBE_COMPONENT}"; then
+    if [[ "${CUBE_COMPONENT}" == "cube-kernel" ]]; then
+      inventory_kernel_content_variants "${src}" "${rel}"
+    else
+      inventory_component_version "${src}" "${rel}"
+    fi
+  fi
+
   log "staging ${src} -> ${dst} (atomic replace)"
   atomic_replace_dir "${src}" "${dst}"
 
@@ -222,13 +364,67 @@ write_atomic() {
   mv -f "${tmp}" "${dest}"
 }
 
+# True when kernel version.json is missing digests for present vmlinux variants.
+kernel_version_json_needs_digest_rewrite() {
+  local dst="$1"
+  local json="${dst}/version.json"
+  local collapsed=""
+
+  [[ -f "${dst}/vmlinux-bm" || -f "${dst}/vmlinux-pvm" ]] || return 1
+  if [[ ! -f "${json}" ]]; then
+    return 0
+  fi
+  collapsed="$(tr '\n' ' ' < "${json}" 2>/dev/null || true)"
+  if [[ -f "${dst}/vmlinux-bm" ]]; then
+    printf '%s' "${collapsed}" | grep -Eq '"bm"[[:space:]]*:[[:space:]]*\{[^}]*"digest_sha256"[[:space:]]*:[[:space:]]*"sha256:[0-9a-f]{64}"' \
+      || return 0
+  fi
+  if [[ -f "${dst}/vmlinux-pvm" ]]; then
+    printf '%s' "${collapsed}" | grep -Eq '"pvm"[[:space:]]*:[[:space:]]*\{[^}]*"digest_sha256"[[:space:]]*:[[:space:]]*"sha256:[0-9a-f]{64}"' \
+      || return 0
+  fi
+  return 1
+}
+
+write_kernel_version_json_from_content() {
+  local dst="$1"
+  local json="${dst}/version.json"
+  local bm_digest pvm_digest bm_short pvm_short first=1
+
+  {
+    printf '{\n  "schema_version": 1,\n  "variants": {\n'
+    if [[ -f "${dst}/vmlinux-bm" ]]; then
+      bm_digest="$(file_sha256_hex "${dst}/vmlinux-bm")" || true
+      if [[ -n "${bm_digest}" ]]; then
+        bm_short="sha256-${bm_digest:0:12}"
+        printf '    "bm": {"version": "%s", "digest_sha256": "sha256:%s"}' \
+          "$(json_escape "${bm_short}")" "$(json_escape "${bm_digest}")"
+        first=0
+        printf 'sha256:%s\n' "${bm_digest}" > "${dst}/version"
+      fi
+    fi
+    if [[ -f "${dst}/vmlinux-pvm" ]]; then
+      pvm_digest="$(file_sha256_hex "${dst}/vmlinux-pvm")" || true
+      if [[ -n "${pvm_digest}" ]]; then
+        pvm_short="sha256-${pvm_digest:0:12}"
+        [[ "${first}" == "1" ]] || printf ','
+        printf '\n    "pvm": {"version": "%s", "digest_sha256": "sha256:%s"}' \
+          "$(json_escape "${pvm_short}")" "$(json_escape "${pvm_digest}")"
+      fi
+    fi
+    printf '\n  }\n}\n'
+  } | write_atomic "${json}"
+  log "wrote content-addressed ${json}"
+}
+
 ensure_component_version_json() {
   local component="$1"
   local dst="$2"
   local json="${dst}/version.json"
-  [[ -f "${json}" ]] && return 0
+
   case "${component}" in
     cube-guest)
+      [[ -f "${json}" ]] && return 0
       local img_ver
       img_ver="$(tr -d '[:space:]' < "${dst}/version" 2>/dev/null || true)"
       [[ -n "${img_ver}" ]] || return 0
@@ -240,6 +436,7 @@ ensure_component_version_json() {
       log "synthesized ${json}"
       ;;
     cube-agent)
+      [[ -f "${json}" ]] && return 0
       local agent_ver
       agent_ver="$(tr -d '[:space:]' < "${dst}/version" 2>/dev/null || true)"
       [[ -n "${agent_ver}" ]] || return 0
@@ -249,6 +446,11 @@ ensure_component_version_json() {
         printf '  }\n}\n'
       } | write_atomic "${json}"
       log "synthesized ${json}"
+      ;;
+    cube-kernel)
+      if kernel_version_json_needs_digest_rewrite "${dst}"; then
+        write_kernel_version_json_from_content "${dst}"
+      fi
       ;;
   esac
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/containerd/plugin/registry"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/components"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/multimeta"
 )
 
@@ -33,6 +34,7 @@ func registerCubeRunTemplateResourceManager() {
 				return nil, fmt.Errorf("unable to get multi meta store: %w", err)
 			}
 			metaDB := obj.(multimeta.MetadataDBAPI)
+			_ = components.NewComponentManager(components.DefaultConfig())
 			return runtemplate.NewCubeRunTemplateManager(metaDB, nil)
 		},
 	})

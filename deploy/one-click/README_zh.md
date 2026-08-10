@@ -56,7 +56,14 @@ export ONE_CLICK_CUBE_KERNEL_VMLINUX=/abs/path/to/vmlinux
 export ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX=/abs/path/to/vmlinux-pvm
 ```
 
-运行时仍然使用 `cube-kernel-scf/vmlinux`。默认情况下该文件是普通 guest kernel；如果目标机安装时设置 `CUBE_PVM_ENABLE=1`，安装脚本会把包内的 `vmlinux-pvm` 覆盖安装为 `cube-kernel-scf/vmlinux`。
+内核多版本库存（内容寻址）：
+
+- 安装时对 `vmlinux-bm` / `vmlinux-pvm` **分别**按内容 sha256 入库到 `component_versions/cube-kernel-scf/sha256-<12位>/`
+- 每个库存目录内：`vmlinux-bm|pvm`、`vmlinux` 软链、`variant`（`bm`/`pvm`）、`version`（`sha256:<64位>`，供 shim 比对）
+- `KERNEL_TAG` / `PVM_KERNEL_TAG` **不作为**库存目录名；`release-manifest` 的 `kernel.version` / `pvm_version` 同样记录内容短哈希
+- Ensure 从 Master identity 中的 digest 映射到上述短 key
+
+运行时仍然使用 `cube-kernel-scf/vmlinux`。包内保留 `vmlinux-bm`，`vmlinux` 为软链：默认指向 `vmlinux-bm`；目标机安装时设 `CUBE_PVM_ENABLE=1` 则指向 `vmlinux-pvm`。
 
 guest image 不再依赖本地 zip。默认在构建 one-click 发布包时基于 `deploy/guest-image/Dockerfile` 本地生成。常用覆盖参数如下：
 
