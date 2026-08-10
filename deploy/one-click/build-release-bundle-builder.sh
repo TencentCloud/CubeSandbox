@@ -61,9 +61,11 @@ go_version_ldflags() {
 
 CUBEMASTER_VERSION_PKG="github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version"
 CUBELET_VERSION_PKG="github.com/tencentcloud/CubeSandbox/Cubelet/pkg/version"
+CUBEOPS_VERSION_PKG="github.com/tencentcloud/CubeSandbox/CubeOps/internal/version"
 
 CUBEMASTER_LDFLAGS="$(go_version_ldflags "${CUBEMASTER_VERSION_PKG}")"
 CUBELET_LDFLAGS="$(go_version_ldflags "${CUBELET_VERSION_PKG}")"
+CUBEOPS_LDFLAGS="$(go_version_ldflags "${CUBEOPS_VERSION_PKG}")"
 
 PREBUILT_DIR="/workspace/deploy/one-click/.work/prebuilt"
 mkdir -p "${PREBUILT_DIR}"
@@ -346,7 +348,7 @@ track_cube_api() {
 track_cubeops() {
   cd /workspace/CubeOps
   go mod download
-  go build -ldflags "-s -w" -o "${PREBUILT_DIR}/cubeops" ./cmd/cubeops
+  go build -ldflags "${CUBEOPS_LDFLAGS}" -o "${PREBUILT_DIR}/cubeops" ./cmd/cubeops
 }
 
 track_netstack() {

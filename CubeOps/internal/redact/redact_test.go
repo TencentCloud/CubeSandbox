@@ -139,7 +139,10 @@ func TestValue_RedactsInSlice(t *testing.T) {
 	}
 }
 
-func TestSecret_FormatsRedactedButMarshalsPlaintext(t *testing.T) {
+// TestSecret_FormatsAndMarshalsRedacted pins the safe-by-default invariant:
+// every formatter returns the redacted marker, so a Secret leaf in a
+// WithFields payload cannot leak the plaintext via jsoniter.
+func TestSecret_FormatsAndMarshalsRedacted(t *testing.T) {
 	const value = "sk-DO-NOT-LOG"
 	secret := Secret(value)
 
@@ -150,12 +153,28 @@ func TestSecret_FormatsRedactedButMarshalsPlaintext(t *testing.T) {
 		t.Fatalf("Go-formatted secret = %q, want %q", got, redacted)
 	}
 
-	encoded, err := json.Marshal(map[string]interface{}{"secret": secret})
+	encoded, err := json.Marshal(secret)
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
 	}
-	if got := string(encoded); got != `{"secret":"sk-DO-NOT-LOG"}` {
-		t.Fatalf("encoded secret = %s, want plaintext transport value", got)
+	if got := string(encoded); got != `"`+redacted+`"` {
+		t.Fatalf("encoded secret = %s, want %q", got, `"`+redacted+`"`)
+	}
+
+	mapEncoded, err := json.Marshal(map[string]interface{}{"value": secret})
+	if err != nil {
+		t.Fatalf("json.Marshal map: %v", err)
+	}
+	if strings.Contains(string(mapEncoded), value) {
+		t.Fatalf("map-encoded secret leaked plaintext: %s", mapEncoded)
+	}
+}
+
+// TestSecret_RevealReturnsPlaintext: Reveal() is the only plaintext path.
+func TestSecret_RevealReturnsPlaintext(t *testing.T) {
+	const value = "sk-DO-NOT-LOG"
+	if got := Secret(value).Reveal(); got != value {
+		t.Errorf("Reveal() = %q, want %q", got, value)
 	}
 }
 

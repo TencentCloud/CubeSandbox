@@ -29,7 +29,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/crypto"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
-	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/redact"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
 )
 
@@ -921,7 +920,9 @@ func LLMEgressRule(llm *LLMConfig) (map[string]interface{}, error) {
 			"inject": []map[string]interface{}{
 				{
 					"header": "Authorization",
-					"secret": redact.Secret(llm.APIKey),
+					// Plaintext API key injected as the egress Authorization header.
+					// redact.Value() masks it by name at the log call site.
+					"secret": llm.APIKey,
 					"format": format,
 				},
 			},

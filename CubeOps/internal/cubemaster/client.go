@@ -311,7 +311,13 @@ func (c *Client) get(ctx context.Context, path string) (json.RawMessage, error) 
 	if err != nil {
 		return nil, err
 	}
-	setTraceHeaders(req, RequestIDFromContext(ctx))
+	rid := RequestIDFromContext(ctx)
+	setTraceHeaders(req, rid)
+	// Inject RequestID into query params for cross-service trace correlation.
+	q := req.URL.Query()
+	q.Set("requestID", rid)
+	q.Set("request_id", rid)
+	req.URL.RawQuery = q.Encode()
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err

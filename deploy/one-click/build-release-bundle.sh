@@ -637,6 +637,7 @@ mkdir -p "${CORE_BIN_DIR}"
 
 CUBEMASTER_VERSION_PKG="github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version"
 CUBELET_VERSION_PKG="github.com/tencentcloud/CubeSandbox/Cubelet/pkg/version"
+CUBEOPS_VERSION_PKG="github.com/tencentcloud/CubeSandbox/CubeOps/internal/version"
 
 build_or_copy_go_binary \
   "cubemaster" "${CUBEMASTER_BIN_OVERRIDE}" \
@@ -661,7 +662,7 @@ build_or_copy_rust_binary \
 build_or_copy_go_binary \
   "cubeops" "${CUBE_OPS_BIN_OVERRIDE}" \
   "${ROOT_DIR}/CubeOps" "${CUBE_OPS_BUILD_MODE}" \
-  "${CORE_BIN_DIR}/cubeops" ./cmd/cubeops
+  "${CORE_BIN_DIR}/cubeops" ./cmd/cubeops "${CUBEOPS_VERSION_PKG}"
 
 build_or_copy_go_binary \
   "cubevsmapdump" "${CUBEVSMAPDUMP_BIN_OVERRIDE}" \

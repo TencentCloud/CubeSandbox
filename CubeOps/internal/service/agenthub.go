@@ -463,8 +463,8 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 	if err != nil {
 		return nil, NewInternal("failed to build network config: " + err.Error())
 	}
-	// redact.Value here masks the embedded Secret(llm.APIKey) leaf that
-	// jsoniter would otherwise emit verbatim.
+	// redact.Value masks the "secret" key by name so the plaintext API key
+	// never appears in logs.
 	logging.G(ctx).WithFields(map[string]interface{}{"network_config": redact.Value(networkConfig)}).Debugf("agenthub: built egress network config")
 
 	// --- Shared-files + published-template fast-path detection ---
@@ -1272,6 +1272,7 @@ func (s *AgentHubService) CloneAgent(ctx context.Context, req CloneAgentRequest)
 	if cloneLLMCfgForNet, _ := ResolveLLMConfig(ctx, s.Store); cloneLLMCfgForNet != nil {
 		if nc, err := AgenthubNetworkConfig(cloneLLMCfgForNet); err == nil {
 			networkConfig = nc
+			// redact.Value masks "secret" by name; see the call site above.
 			logging.G(ctx).WithFields(map[string]interface{}{"network_config": redact.Value(networkConfig)}).Debugf("agenthub: built egress network config (clone)")
 		}
 	}

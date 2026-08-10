@@ -5,12 +5,16 @@ package service
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/redact"
 )
 
-func TestLLMEgressRuleProtectsAPIKeyWhenFormatted(t *testing.T) {
+// TestLLMEgressRule_PlaintextForTransportAndRedactedForLog verifies that
+// LLMEgressRule returns the plaintext API key for transport while redact.Value()
+// masks it in logs.
+func TestLLMEgressRule_PlaintextForTransportAndRedactedForLog(t *testing.T) {
 	const apiKey = "sk-DO-NOT-LOG"
 
 	rule, err := LLMEgressRule(&LLMConfig{
@@ -22,23 +26,33 @@ func TestLLMEgressRuleProtectsAPIKeyWhenFormatted(t *testing.T) {
 		t.Fatalf("LLMEgressRule: %v", err)
 	}
 
-	action, ok := rule["action"].(map[string]interface{})
-	if !ok {
-		t.Fatal("action has unexpected type")
-	}
-	inject, ok := action["inject"].([]map[string]interface{})
-	if !ok || len(inject) != 1 {
-		t.Fatalf("inject has unexpected value: %#v", action["inject"])
-	}
-	if got := fmt.Sprint(inject[0]["secret"]); got != "***REDACTED***" {
-		t.Fatalf("formatted secret = %q, want redacted value", got)
-	}
-
+	// 1. Transport payload must carry the plaintext API key.
 	payload, err := json.Marshal(rule)
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
 	}
 	if !strings.Contains(string(payload), apiKey) {
-		t.Fatalf("transport payload does not contain the API key required by CubeEgress: %s", payload)
+		t.Fatalf("transport payload missing the API key: %s", payload)
+	}
+
+	// 2. After redact.Value(), the rule must be safe to log.
+	redactedRule := redact.Value(rule).(map[string]interface{})
+	action := redactedRule["action"].(map[string]interface{})
+	inject := action["inject"].([]interface{})
+	inj0 := inject[0].(map[string]interface{})
+
+	if got := inj0["secret"]; got != "***REDACTED***" {
+		t.Errorf("redacted secret leaf = %v, want \"***REDACTED***\"", got)
+	}
+
+	redactedPayload, err := json.Marshal(redactedRule)
+	if err != nil {
+		t.Fatalf("json.Marshal(redacted): %v", err)
+	}
+	if strings.Contains(string(redactedPayload), apiKey) {
+		t.Errorf("redacted payload leaked the API key: %s", redactedPayload)
+	}
+	if !strings.Contains(string(redactedPayload), "Bearer ${SECRET}") {
+		t.Errorf("redacted payload dropped the \"format\" field: %s", redactedPayload)
 	}
 }

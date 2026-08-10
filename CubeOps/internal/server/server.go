@@ -7,6 +7,7 @@ import (
 	"context"
 	"net/http"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -76,12 +77,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // buildRouter configures all routes on a gin engine.
 func (s *Server) buildRouter() *gin.Engine {
 	// We use gin.New() rather than gin.Default() so we can attach our own
-	// cubelog-based access logger and recovery handler. gin.Default() writes to
-	// stdout and bypasses any logger the operator has configured.
+	// cubelog-based access logger and recovery handler. gin.Default() writes
+	// to stdout and bypasses any logger the operator has configured.
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(requestLogger())
-	r.Use(gin.Recovery())
+	r.Use(cubeopsRecovery())
 
 	// Health check (no auth) — defined at the root rather than under /api/v1
 	// because external load balancers and k8s probes hit it without a prefix.
@@ -175,6 +176,24 @@ func requestLogger() gin.HandlerFunc {
 // traceFieldPattern is the allowed charset for inbound X-RequestID and
 // X-Caller values. Anything outside it falls back to a safe default.
 var traceFieldPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// cubeopsRecovery logs panics through cubelog with the inbound RequestID.
+// Must be registered after requestLogger. Mirrors gin.Recovery's write guard.
+func cubeopsRecovery() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		defer func() {
+			if r := recover(); r != nil {
+				stack := debug.Stack()
+				logging.G(c.Request.Context()).Errorf(
+					"panic recovered: err=%q\n%s", r, stack)
+				if !c.Writer.Written() {
+					c.AbortWithStatus(http.StatusInternalServerError)
+				}
+			}
+		}()
+		c.Next()
+	}
+}
 
 func requestIDFromHeader(c *gin.Context) string {
 	for _, h := range []string{"X-RequestID", "X-Request-ID"} {

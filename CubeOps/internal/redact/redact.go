@@ -1,17 +1,11 @@
 // Copyright (c) 2026 Tencent Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package redact provides helpers to mask sensitive fields before logging
-// or otherwise exposing structured data.
+// Package redact masks sensitive fields before logging.
 //
-// The intended use case is logging request bodies that may contain
-// credentials (e.g. cube_network_config carries an LLM API key in an
-// egress rule's "secret" field). Logging the raw value at Info level
-// leaks the credential into log aggregation systems (ELK, Loki, etc.).
-//
-// The masker is intentionally conservative: it only redacts fields whose
-// name matches a known sensitive pattern. Unknown fields are passed
-// through unchanged so the log remains useful for debugging.
+// Secret is safe-by-default: all its formatters return the redacted marker,
+// so it can be passed to a logger without an outer redact.Value() wrapper.
+// Use Reveal() to read the plaintext at the outbound API boundary.
 package redact
 
 import (
@@ -24,14 +18,8 @@ import (
 // redacted is the placeholder written in place of a sensitive value.
 const redacted = "***REDACTED***"
 
-// Secret wraps a credential so that fmt/String/GoString formatting is
-// redacted, but it still json.Marshal()s to the plaintext required by the
-// downstream API.
-//
-// That makes Secret safe for transport only: log codecs honouring MarshalJSON
-// (cubelog's jsoniter does) emit the credential verbatim. So a Secret may only
-// reach a log line via String()/%v, LogValue(), or Value()/JSON() on the
-// enclosing map — the latter also catch Secret leaves under harmless key names.
+// Secret wraps a credential so formatters always redact it. Call Reveal() to
+// access the plaintext at the outbound API boundary.
 type Secret string
 
 func (s Secret) String() string {
@@ -42,14 +30,27 @@ func (s Secret) GoString() string {
 	return redacted
 }
 
+// MarshalJSON emits the redacted marker so cubelog's jsoniter codec never
+// leaks the plaintext through a WithFields payload.
 func (s Secret) MarshalJSON() ([]byte, error) {
-	return json.Marshal(string(s))
+	return json.Marshal(redacted)
 }
 
-// LogValue implements slog.LogValuer so structured slog handlers render the
-// placeholder rather than invoking MarshalJSON on the plaintext.
+// UnmarshalJSON discards input. Secret is write-only from the JSON
+// perspective; inbound credentials must be assigned via Secret(s).
+func (s *Secret) UnmarshalJSON([]byte) error {
+	*s = ""
+	return nil
+}
+
 func (s Secret) LogValue() slog.Value {
 	return slog.StringValue(redacted)
+}
+
+// Reveal returns the plaintext. Call only at the outbound API boundary;
+// never log the result.
+func (s Secret) Reveal() string {
+	return string(s)
 }
 
 // sensitiveKeys is the lower-cased set of map keys that must never be
