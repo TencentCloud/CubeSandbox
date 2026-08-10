@@ -8,7 +8,11 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any
 
-from adapters import connect_adapter, create_adapter, list_sandboxes
+from adapters import (
+    connect_adapter,
+    create_adapter_with_capacity_retry,
+    list_sandboxes,
+)
 from adapters.base import SandboxAdapter
 from framework.cleanup import safe_kill
 from framework.config import SdkE2EConfig
@@ -179,7 +183,7 @@ def create_control_sandbox(
     *,
     metadata: dict[str, str] | None = None,
 ) -> SandboxAdapter:
-    return create_adapter(
+    return create_adapter_with_capacity_retry(
         backend,
         config,
         metadata={

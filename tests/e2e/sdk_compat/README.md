@@ -6,10 +6,11 @@ same backend-neutral cases run against:
 - `cubesandbox`: the CubeSandbox Python SDK from `sdk/python`.
 - `e2b`: the E2B Python SDK (`e2b-code-interpreter` or `e2b`) against a CubeSandbox-compatible backend.
 
-The suite is opt-in. Without `--run-e2e`, pytest collection is safe and all cases
-are skipped. Live runs default to the `cubesandbox` backend so PR-gate runs stay
-small and stable. Use `SDK_E2E_BACKENDS=e2b,cubesandbox` for dual-SDK
-compatibility runs.
+The suite is opt-in. Without `--run-e2e`, pytest collection is safe and every
+live case is skipped; only hermetic pure-logic unit tests marked `framework`
+run. Live runs default to the `cubesandbox` backend so PR-gate runs stay small
+and stable. Use `SDK_E2E_BACKENDS=e2b,cubesandbox` for dual-SDK compatibility
+runs.
 
 Documentation:
 
@@ -212,6 +213,24 @@ Optional:
 - `SDK_E2E_API_TIMEOUT`: CubeAPI control-plane request timeout in seconds for
   preflight, diagnostics, and cleanup. Defaults to `5`.
 - `SDK_E2E_CREATE_TIMEOUT`: sandbox create timeout in seconds. Defaults to `120`.
+- `SDK_E2E_CREATE_CAPACITY_RETRIES`: extra sandbox-create attempts when the
+  scheduler transiently returns `no more resource` (error code `130597`),
+  giving the just-freed node time to be reclaimed. Defaults to `5`. Set to `0`
+  to disable and fail fast on the first capacity error.
+- `SDK_E2E_CREATE_CAPACITY_BACKOFF`: base backoff in seconds for capacity
+  retries; grows exponentially per attempt, with full jitter so parallel
+  workers do not retry in lockstep. Defaults to `2`.
+- `SDK_E2E_CREATE_CAPACITY_BACKOFF_MAX`: cap on the capacity-retry backoff in
+  seconds. Defaults to `30`. A value `<= 0` disables the per-delay cap (delays
+  then grow up to an internal `3600`s ceiling) — it does **not** mean "no
+  backoff", so keep it positive unless you intend uncapped growth.
+- `SDK_E2E_CREATE_CAPACITY_BUDGET`: total wall-clock seconds spent **sleeping**
+  across all capacity retries for a single create. Defaults to `90`. Set to `0`
+  to disable and rely on `RETRIES` alone. This caps only the cumulative backoff
+  sleep, not the `create()` calls themselves: each attempt can still run up to
+  `SDK_E2E_CREATE_TIMEOUT`, so a slow-to-reject scheduler can take up to roughly
+  `(RETRIES + 1) × CREATE_TIMEOUT + BUDGET` per test. On the fast-rejection path
+  (immediate HTTP 500) the budget effectively bounds per-create retry time.
 - `SDK_E2E_COMMAND_TIMEOUT`: command timeout in seconds. Defaults to `30`.
 - `SDK_E2E_RUN_CODE_TIMEOUT`: code execution timeout in seconds. Defaults to `60`.
 - `SDK_E2E_NETWORK_PROBE_TIMEOUT`: TCP probe socket timeout in seconds for

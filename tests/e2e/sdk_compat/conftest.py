@@ -16,13 +16,20 @@ ROOT = Path(__file__).resolve().parents[3]
 SDK_COMPAT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(SDK_COMPAT_ROOT))
 
-from adapters import create_adapter  # noqa: E402
+from adapters import create_adapter_with_capacity_retry  # noqa: E402
+from framework.capabilities import (  # noqa: E402
+    CODE_INTERPRETER,
+    capabilities_for_backend,
+)
 from framework.cleanup import safe_kill  # noqa: E402
-from framework.capabilities import CODE_INTERPRETER, capabilities_for_backend  # noqa: E402
 from framework.config import SdkE2EConfig  # noqa: E402
 from framework.preflight import run_preflight  # noqa: E402
 from framework.reporting import JsonlReporter  # noqa: E402
-from framework.trace import TraceCollector, reset_current_trace, set_current_trace  # noqa: E402
+from framework.trace import (  # noqa: E402
+    TraceCollector,
+    reset_current_trace,
+    set_current_trace,
+)
 
 
 def _load_dotenv(path: Path) -> None:
@@ -119,7 +126,11 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     if not config.getoption("--run-e2e"):
         skip = pytest.mark.skip(reason="live SDK E2E disabled; pass --run-e2e to run")
         for item in items:
-            item.add_marker(skip)
+            # Only ``framework`` tests are hermetic pure-logic unit tests that run
+            # on every gate. Everything else (including any test that forgets a
+            # marker) is treated as live and skipped, so the gate stays hermetic.
+            if not item.get_closest_marker("framework"):
+                item.add_marker(skip)
         return
     if volume_skip is None:
         return
@@ -302,11 +313,21 @@ def sdk_sandbox(
                 f"template_id={node_config.cube_template_id} "
                 f"nodeid={request.node.nodeid}"
             )
-            adapter = create_adapter(
+
+            def _log_capacity_retry(attempt: int, delay: float, exc: BaseException) -> None:
+                _setup_log(
+                    f"scheduler out of capacity creating sandbox "
+                    f"backend={sdk_backend} nodeid={request.node.nodeid}; "
+                    f"retry {attempt}/{node_config.create_capacity_retries} "
+                    f"in {delay:.1f}s: {exc}"
+                )
+
+            adapter = create_adapter_with_capacity_retry(
                 sdk_backend,
                 node_config,
                 metadata=metadata,
                 create_options=create_options,
+                on_retry=_log_capacity_retry,
             )
         except ImportError as exc:
             pytest.skip(str(exc))

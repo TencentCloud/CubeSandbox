@@ -8,7 +8,8 @@
   的后端。
 
 测试套件默认不执行在线测试。未指定 `--run-e2e` 时，pytest 只进行安全的
-收集。默认后端是 `cubesandbox`；使用
+收集：所有在线用例都会被跳过，仅运行标记为 `framework` 的纯逻辑单元测试。
+默认后端是 `cubesandbox`；使用
 `SDK_E2E_BACKENDS=e2b,cubesandbox` 执行双后端兼容性测试。
 
 相关文档：
@@ -193,6 +194,20 @@ cp env.example .env
 - `SDK_E2E_API_TIMEOUT`：CubeAPI 控制面请求超时，用于 preflight、诊断
   和清理，默认 `5` 秒；
 - `SDK_E2E_CREATE_TIMEOUT`：创建超时，默认 `120` 秒；
+- `SDK_E2E_CREATE_CAPACITY_RETRIES`：当调度器瞬时返回 `no more resource`
+  （错误码 `130597`）时，额外重试创建 sandbox 的次数，给刚释放的节点留出回收
+  时间，默认 `5`；设为 `0` 可关闭重试、遇到容量错误即失败；
+- `SDK_E2E_CREATE_CAPACITY_BACKOFF`：容量重试的基础退避秒数，按次指数增长，
+  并加入完全抖动（full jitter），避免并行 worker 同步重试，默认 `2`；
+- `SDK_E2E_CREATE_CAPACITY_BACKOFF_MAX`：容量重试退避的上限秒数，默认 `30`；
+  取值 `<= 0` 表示关闭单次退避上限（退避将增长至内置的 `3600` 秒上限），
+  并非“无退避”，除非确实需要无上限增长，否则请保持为正值；
+- `SDK_E2E_CREATE_CAPACITY_BUDGET`：单次创建在所有容量重试中累计的**休眠**时间
+  上限（秒），默认 `90`；设为 `0` 可关闭、仅依赖 `RETRIES`。它仅约束累计退避
+  休眠，不约束 `create()` 调用本身：每次尝试仍可耗时至多 `SDK_E2E_CREATE_TIMEOUT`，
+  因此在调度器缓慢拒绝时，单个用例最坏可耗时约
+  `(RETRIES + 1) × CREATE_TIMEOUT + BUDGET`。在快速拒绝路径（立即返回 HTTP 500）
+  下，该预算可有效约束单次创建的重试时长；
 - `SDK_E2E_COMMAND_TIMEOUT`：命令超时，默认 `30` 秒；
 - `SDK_E2E_RUN_CODE_TIMEOUT`：代码执行超时，默认 `60` 秒；
 - `SDK_E2E_NETWORK_PROBE_TIMEOUT`：network policy 用例中的 TCP socket
