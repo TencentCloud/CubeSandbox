@@ -1675,22 +1675,17 @@ mod tests {
     /// The inbound API mirrors the e2b `lifecycle` object (camelCase nested
     /// struct). CubeAPI then translates it to the two CubeMaster-side bools
     /// when constructing the create-sandbox RPC. Verify the translation
-    /// covers each meaningful combination.
+    /// covers each meaningful combination via the real resolver.
     #[test]
     fn lifecycle_object_translates_to_cubemaster_bools() {
-        use crate::models::{NewSandbox, SandboxOnTimeout};
+        use crate::models::NewSandbox;
 
-        // Helper that mimics services::create_sandbox's lifecycle decoding.
-        fn translate(body: &NewSandbox) -> (bool, bool) {
-            body.lifecycle
-                .as_ref()
-                .map(|lc| {
-                    (
-                        matches!(lc.on_timeout, SandboxOnTimeout::Pause),
-                        lc.auto_resume,
-                    )
-                })
-                .unwrap_or((false, false))
+        fn flags(body: &NewSandbox) -> (bool, bool) {
+            resolve_lifecycle_flags(
+                body.lifecycle.as_ref(),
+                body.auto_pause,
+                body.auto_resume.as_ref(),
+            )
         }
 
         // Absent lifecycle => preserve historical behaviour.
@@ -1698,7 +1693,7 @@ mod tests {
             "templateID": "tpl",
         }))
         .unwrap();
-        assert_eq!(translate(&absent), (false, false));
+        assert_eq!(flags(&absent), (false, false));
 
         // Explicit kill (with auto_resume=true) is still kill — auto_resume
         // doesn't auto-imply pause. Server-side enforcement of the e2b
@@ -1709,7 +1704,7 @@ mod tests {
             "lifecycle": {"onTimeout": "kill", "autoResume": true},
         }))
         .unwrap();
-        assert_eq!(translate(&kill), (false, true));
+        assert_eq!(flags(&kill), (false, true));
 
         // Pause + auto_resume — the canonical e2b auto-resume case.
         let pause_with_resume: NewSandbox = serde_json::from_value(serde_json::json!({
@@ -1717,7 +1712,7 @@ mod tests {
             "lifecycle": {"onTimeout": "pause", "autoResume": true},
         }))
         .unwrap();
-        assert_eq!(translate(&pause_with_resume), (true, true));
+        assert_eq!(flags(&pause_with_resume), (true, true));
 
         // Some Python SDK versions and direct callers may send the Pythonic
         // snake_case shape. Keep accepting it so lifecycle does not silently
@@ -1727,7 +1722,7 @@ mod tests {
             "lifecycle": {"on_timeout": "pause", "auto_resume": true},
         }))
         .unwrap();
-        assert_eq!(translate(&snake_case_pause_with_resume), (true, true));
+        assert_eq!(flags(&snake_case_pause_with_resume), (true, true));
 
         // Pause without auto_resume — caller must call connect() manually.
         let pause_only: NewSandbox = serde_json::from_value(serde_json::json!({
@@ -1735,7 +1730,7 @@ mod tests {
             "lifecycle": {"onTimeout": "pause"},
         }))
         .unwrap();
-        assert_eq!(translate(&pause_only), (true, false));
+        assert_eq!(flags(&pause_only), (true, false));
 
         // Empty lifecycle object — defaults: kill on timeout, no auto-resume.
         let empty: NewSandbox = serde_json::from_value(serde_json::json!({
@@ -1743,7 +1738,104 @@ mod tests {
             "lifecycle": {},
         }))
         .unwrap();
-        assert_eq!(translate(&empty), (false, false));
+        assert_eq!(flags(&empty), (false, false));
+
+        // e2b SDK wire shape: flattened top-level fields, no nested lifecycle.
+        let flat: NewSandbox = serde_json::from_value(serde_json::json!({
+            "templateID": "tpl",
+            "autoPause": true,
+            "autoResume": { "enabled": true },
+        }))
+        .unwrap();
+        assert_eq!(flags(&flat), (true, true));
+    }
+
+    /// The failure mode this PR fixes is silent drop between inbound flat
+    /// fields and the CubeMaster create body. Deserialization and
+    /// `resolve_lifecycle_flags` alone cannot catch a regression that unbinds
+    /// `auto_pause`/`auto_resume` from the `NewSandbox` destructuring (`..`
+    /// still compiles). Drive the full service path and assert the outbound
+    /// flags.
+    #[tokio::test]
+    async fn create_sandbox_forwards_e2b_flat_lifecycle_flags_to_cubemaster() {
+        #[derive(Clone, Default)]
+        struct Capture {
+            create_body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn create_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            *capture.create_body.lock().await = Some(body);
+            Json(serde_json::json!({
+                "requestID": "req-1",
+                "sandbox_id": "sb-flat-lifecycle",
+                "ret": { "ret_code": 0, "ret_msg": "ok" }
+            }))
+        }
+
+        async fn spawn_server(app: Router) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("listener should bind");
+            let addr = listener.local_addr().expect("listener addr");
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("server should run");
+            });
+            format!("http://{}", addr)
+        }
+
+        let capture = Capture::default();
+        let cubemaster_url = spawn_server(
+            Router::new()
+                .route("/cube/sandbox", post(create_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+
+        let service = SandboxService::new(
+            CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
+            "cubebox".to_string(),
+            "cube.app".to_string(),
+        );
+
+        let sandbox = service
+            .create_sandbox(NewSandbox {
+                template_id: "tpl-1".to_string(),
+                timeout: Some(30),
+                lifecycle: None,
+                auto_pause: Some(true),
+                auto_resume: Some(SandboxAutoResume::Config { enabled: true }),
+                secure: None,
+                allow_internet_access: None,
+                network: None,
+                metadata: None,
+                distribution_scope: None,
+                env_vars: None,
+                mcp: None,
+                volume_mounts: None,
+            })
+            .await
+            .expect("sandbox create should succeed");
+
+        assert_eq!(sandbox.sandbox_id, "sb-flat-lifecycle");
+        let create_body = capture
+            .create_body
+            .lock()
+            .await
+            .clone()
+            .expect("create body");
+        assert_eq!(
+            create_body.get("auto_pause"),
+            Some(&serde_json::Value::Bool(true)),
+            "flat autoPause must reach CubeMaster, got: {create_body}"
+        );
+        assert_eq!(
+            create_body.get("auto_resume"),
+            Some(&serde_json::Value::Bool(true)),
+            "flat autoResume must reach CubeMaster, got: {create_body}"
+        );
     }
 
     #[tokio::test]
