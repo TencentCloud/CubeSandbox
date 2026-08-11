@@ -98,10 +98,12 @@ except ImportError as exc:
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 # Container + admin-port wiring. cube-egress's admin loopback listens on
-# 127.0.0.1:9090 (declared in CubeEgress/nginx.conf). The container is named
-# ``cube-egress`` by the systemd unit ``cube-sandbox-cube-egress.service``.
+# 127.0.0.1:9091 (declared in CubeEgress/nginx.conf; moved off :9090 by #1285
+# because CubeProxy's plaintext gRPC serves :9090 on all-in-one hosts). The
+# container is named ``cube-egress`` by the systemd unit
+# ``cube-sandbox-cube-egress.service``.
 CUBE_EGRESS_CONTAINER     = "cube-egress"
-CUBE_EGRESS_HEALTH_URL    = "http://127.0.0.1:9090/admin/v1/health"
+CUBE_EGRESS_HEALTH_URL    = "http://127.0.0.1:9091/admin/v1/health"
 RESTART_BOOTSTRAP_TIMEOUT = 60   # seconds
 
 
@@ -118,13 +120,13 @@ def _restart_cube_egress() -> None:
     """``docker restart cube-egress`` and wait until it is serving again.
 
     "Serving" is observed via the admin /health endpoint:
-      - it must answer at all (worker accepting on :9090)
+      - it must answer at all (worker accepting on :9091)
       - bootstrap_status must reach "ready" (worker has fetched the
-        policy dump from network-agent's :19090/v1/policies/dump)
+        policy dump from Cubelet's /v1/policies/dump)
 
     We deliberately do NOT re-install the test's policy ourselves —
     the whole point of the second pass is to verify cube-egress
-    rebuilt its in-memory policy_store from network-agent on cold
+    rebuilt its in-memory policy_store from Cubelet on cold
     start. If bootstrap landed on "skipped" (because
     CUBE_EGRESS_BOOTSTRAP_URL wasn't set on the container), the
     second pass would see policy_count=0 and most cases would 403,
