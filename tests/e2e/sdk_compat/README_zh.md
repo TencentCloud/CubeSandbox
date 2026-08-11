@@ -170,8 +170,15 @@ CubeSandbox 版本预期能配合哪些 SDK 版本，而不必等线上故障才
 验证某个版本时，装上它再照常执行：
 
 ```bash
-pip install 'e2b==2.29.5'          # 或配对固定的 e2b-code-interpreter
+# 完整覆盖：配对安装 interpreter 包，run_code 用例依赖它。
+pip install 'e2b==2.21.0' 'e2b-code-interpreter==2.8.1'
 pytest --run-e2e --sdk-e2e-backends=e2b -m "smoke or p0"
+
+# 只装核心 SDK 时**必须**排除 run_code：这些用例是 p0，而 e2b 后端无条件声明了
+# run_code capability，不排除就会被收集、在纯 SDK 上调用 Sandbox.run_code，
+# 最终报成失败——而那只是缺包，不是真的不兼容。
+pip install 'e2b==2.29.5'
+pytest --run-e2e --sdk-e2e-backends=e2b -m "(smoke or p0) and not run_code"
 ```
 
 每个版本在独立虚拟环境中重复一次，发版时把结果记入 `e2b-versions.txt`。

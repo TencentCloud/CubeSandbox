@@ -187,8 +187,16 @@ CubeSandbox release instead of discovering it by outage.
 To check one version, install it and run the suite normally:
 
 ```bash
-pip install 'e2b==2.29.5'          # or a pinned e2b-code-interpreter
+# Full coverage: pair the interpreter package, because the run_code cases need it.
+pip install 'e2b==2.21.0' 'e2b-code-interpreter==2.8.1'
 pytest --run-e2e --sdk-e2e-backends=e2b -m "smoke or p0"
+
+# Core SDK only: run_code MUST be deselected. Those cases are p0 and the e2b
+# backend declares the run_code capability unconditionally, so without the
+# deselect they are collected, call Sandbox.run_code on the plain SDK, and fail
+# for a missing package rather than a real incompatibility.
+pip install 'e2b==2.29.5'
+pytest --run-e2e --sdk-e2e-backends=e2b -m "(smoke or p0) and not run_code"
 ```
 
 Repeat per version in a fresh virtualenv, and record the outcome in

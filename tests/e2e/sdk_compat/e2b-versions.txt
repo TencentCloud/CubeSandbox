@@ -1,31 +1,49 @@
 # E2B Python SDK versions this suite has been validated against.
 #
 # One pip requirement per line; blank lines and '#' comments are ignored. A line
-# may pin more than one package, e.g.:
-#
-#   e2b==2.29.5 e2b-code-interpreter==2.9.0
+# may pin more than one package — pair `e2b-code-interpreter` when the row should
+# cover the `run_code` cases, since those need the interpreter package (a row
+# pinning only `e2b` must deselect them: -m "(smoke or p0) and not run_code").
 #
 # Purpose: give consumers a stated compatibility range per CubeSandbox release
 # instead of leaving them to discover breakage in production. Install one line
 # into a fresh virtualenv, run the suite (see "E2B SDK Compatibility" in the
 # README), and record the outcome here when cutting a release.
-#
-# Keep the list short and meaningful: an old known-good version, versions
-# consumers reported problems with, and the current latest.
-#
-# Validated against CubeSandbox v0.5.1 (release, commit a164417) by a downstream
-# consumer, 2026-07-22 — commands.run, files.write, background + wait, on_stdout
-# streaming:
-e2b==2.21.0
+
+# --- Validated against CubeSandbox v0.5.1 (release, commit a164417) -----------
+# By a downstream consumer, 2026-07-22: commands.run, files.write, background +
+# wait, on_stdout streaming. The first row is that consumer's production pairing
+# and has carried real traffic since.
+e2b==2.21.0 e2b-code-interpreter==2.8.1
 e2b==2.26.0
 e2b==2.29.5
 
-# Not yet validated by anyone; listed as the current upper bound to check when
-# cutting the next release:
+# --- Not yet validated by anyone --------------------------------------------
+# Listed as the upper bound to check when cutting the next release.
 e2b==2.35.0
 
-# Known-bad, kept as a record rather than a target: on v0.5.1-rc5 (envd
-# self-reporting 0.5.11, the same string the working release reports),
-# e2b 2.26 and 2.29 hung silently in commands.run and the SDK timeout did not
-# fire. The pairing to watch is (CubeSandbox release, e2b version) — envd's own
-# version string does not distinguish the two builds.
+# --- Known bad ---------------------------------------------------------------
+# Kept as a record rather than a target.
+#
+# 1) e2b 2.26 / 2.29 against CubeSandbox v0.5.1-rc5: commands.run hung silently
+#    and the SDK's own timeout did not fire. Fixed by the v0.5.1 release, with
+#    envd self-reporting 0.5.11 on BOTH builds — which is why compatibility has
+#    to be stated per CubeSandbox release and cannot be derived from envd's
+#    version string.
+#
+# 2) e2b >= 2.38.0 paired with e2b-code-interpreter 2.9.0:
+#       TypeError: get_transport() got an unexpected keyword argument 'http2'
+#    This is a break between the two E2B packages, not a CubeSandbox
+#    incompatibility. e2b 2.38.0 replaced the httpx transport with a pyqwest one
+#    and dropped the `http2` parameter (`e2b/api/client_sync/__init__.py`), while
+#    e2b-code-interpreter 2.9.0 still calls `get_transport(config, http2=False)`
+#    (`code_interpreter_sync.py:84`, `code_interpreter_async.py:89`). Verified
+#    signatures: 2.29.5 / 2.32.0 / 2.35.0 / 2.36.0 / 2.37.0 / 2.37.1 all accept
+#    `http2`; 2.38.0 does not. So the last interpreter-compatible core is 2.37.1.
+#
+#    Worth checking separately when a compatible pair appears: the interpreter
+#    forced HTTP/1.1 on purpose — under HTTP/2 multiplexing a client disconnect
+#    from the streaming /execute endpoint may not reach the server, leaving
+#    long-running executions uncancellable. 2.38.0 lets ALPN pick the version,
+#    so that behaviour needs a look against CubeProxy/envd rather than being
+#    assumed harmless.
