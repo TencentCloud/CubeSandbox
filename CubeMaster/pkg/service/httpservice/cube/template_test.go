@@ -339,7 +339,7 @@ func TestSetTemplateAliasHandler_ResolvesIdentifier_And_ReturnsUpdatedDetail(t *
 
 // TestSetTemplateAliasHandler_ClearPath_NoBody verifies that a PUT with no
 // body is treated as a clear (alias=""), matching the shared contract
-// ("alias 省略 / null / "" → 清除").
+// ("omitted / null / empty alias -> clear").
 func TestSetTemplateAliasHandler_ClearPath_NoBody(t *testing.T) {
 	origResolveFn := resolveTemplateIdentifierFn
 	origSetFn := setTemplateAliasFn
@@ -516,6 +516,36 @@ func TestSetTemplateAliasHandler_409_OnDuplicateAlias(t *testing.T) {
 	// we use the message form so the test does not import the mysql driver.
 	setTemplateAliasFn = func(ctx context.Context, templateID, alias string) error {
 		return errors.New("Error 1062 (23000): Duplicate entry 'my-alias' for key 'alias_key' unique_constraint")
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/cube/template/tpl-1/alias",
+		strings.NewReader(`{"alias":"my-alias"}`))
+	rt := &CubeLog.RequestTrace{}
+	resp := setTemplateAlias(req, rt, "tpl-1")
+
+	got, ok := resp.(*templateResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_Conflict), got.Ret.RetCode)
+	assert.Equal(t, int64(errorcode.ErrorCode_Conflict), rt.RetCode)
+}
+
+// TestSetTemplateAliasHandler_409_OnNotReady verifies that a non-READY target
+// is mapped to ErrorCode_Conflict (130409) -> CubeAPI HTTP 409, giving the
+// client a clear retry signal (design §3.3, §3.5).
+func TestSetTemplateAliasHandler_409_OnNotReady(t *testing.T) {
+	origResolveFn := resolveTemplateIdentifierFn
+	origSetFn := setTemplateAliasFn
+	t.Cleanup(func() {
+		resolveTemplateIdentifierFn = origResolveFn
+		setTemplateAliasFn = origSetFn
+	})
+	resolveTemplateIdentifierFn = func(ctx context.Context, identifier string) (string, error) {
+		return identifier, nil
+	}
+	setTemplateAliasFn = func(ctx context.Context, templateID, alias string) error {
+		return templatecenter.ErrTemplateNotReady
 	}
 
 	req := httptest.NewRequest(http.MethodPut, "/cube/template/tpl-1/alias",

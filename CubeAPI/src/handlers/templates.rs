@@ -220,9 +220,9 @@ pub async fn update_template(
     request_body = SetTemplateAliasRequest,
     responses(
         (status = 200, description = "Alias updated", body = TemplateDetail),
-        (status = 400, description = "Invalid alias", body = ApiError),
+        (status = 400, description = "Invalid alias, or alias requested on a snapshot (not applicable)", body = ApiError),
         (status = 404, description = "Template not found", body = ApiError),
-        (status = 409, description = "Concurrent alias claim conflict", body = ApiError),
+        (status = 409, description = "Template is not READY, or concurrent alias claim conflict; retry may succeed", body = ApiError),
         (status = 500, description = "Unexpected backend error", body = ApiError)
     )
 )]

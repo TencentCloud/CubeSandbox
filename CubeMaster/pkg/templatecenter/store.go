@@ -1019,14 +1019,15 @@ func claimTemplateAlias(ctx context.Context, templateID, alias string) error {
 				Update("display_name", alias).Error; err != nil {
 				return fmt.Errorf("claim alias %q for template %s fail: %w", alias, templateID, err)
 			}
-			// Confirm the target still exists and now holds the alias. If it was
-			// hard-deleted between GetDefinition and this transaction the claim
-			// UPDATE matched 0 rows; returning here rolls back the release above so
-			// the original holder keeps its alias. A SELECT (not RowsAffected)
-			// avoids MySQL's rows-changed conflation with idempotent re-claims.
+			// Confirm the target still exists, holds the alias, and is not
+			// DELETING. If it was hard-deleted (or flipped to DELETING) between
+			// GetDefinition and this transaction the confirm matches 0 rows;
+			// returning here rolls back the release so the original holder keeps
+			// its alias. A SELECT (not RowsAffected) avoids MySQL's rows-changed
+			// conflation with idempotent re-claims.
 			var claimed int64
 			if err := tx.Table(constants.TemplateDefinitionTableName).
-				Where("template_id = ? AND alias_key = ?", templateID, alias).
+				Where("template_id = ? AND alias_key = ? AND status <> ?", templateID, alias, StatusDeleting).
 				Count(&claimed).Error; err != nil {
 				return fmt.Errorf("confirm alias claim for template %s fail: %w", templateID, err)
 			}
@@ -1113,10 +1114,10 @@ func claimAliasForReadyTemplate(ctx context.Context, templateID, alias string) (
 //	                    holder inside the same transaction, then UPDATE on the
 //	                    target template).
 //
-// The target must be a READY template: non-READY is rejected with
-// ErrTemplateNotReady, so an alias never points at a building/failed template
-// and the create-time claim (claimAliasForReadyTemplate) can't silently
-// overwrite an operator change once the build finishes. Snapshots are rejected
+// Claim requires the target to be READY (non-READY → ErrTemplateNotReady), so
+// an alias never points at a building/failed template. Clear is allowed for any
+// non-DELETING template, so an alias stuck on a FAILED template can be released
+// without deleting the template. Snapshots are rejected
 // (ErrAliasNotApplicableToSnapshot) because their display_name is an
 // informational label, not a unique alias (alias_key is always NULL per the
 // STORED generated column). DELETING templates return ErrTemplateNotFound,
@@ -1139,7 +1140,9 @@ func SetTemplateAlias(ctx context.Context, templateID, alias string) error {
 	if def.Status == StatusDeleting {
 		return ErrTemplateNotFound
 	}
-	if def.Status != StatusReady {
+	// Claim requires READY; clear is allowed for any non-DELETING template so a
+	// stuck alias (e.g. on a FAILED template) can always be released.
+	if alias != "" && def.Status != StatusReady {
 		return ErrTemplateNotReady
 	}
 	if alias == "" {

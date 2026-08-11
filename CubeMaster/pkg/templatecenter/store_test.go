@@ -772,6 +772,51 @@ func TestSetTemplateAlias_RejectsNotReady(t *testing.T) {
 	assert.ErrorIs(t, err, ErrTemplateNotReady)
 }
 
+// TestSetTemplateAlias_ClearAllowedOnFailed verifies the clear path is allowed
+// for any non-DELETING template, so an alias stuck on a FAILED template can be
+// released without deleting the template (claim still requires READY).
+func TestSetTemplateAlias_ClearAllowedOnFailed(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(GetDefinition, func(ctx context.Context, templateID string) (*models.TemplateDefinition, error) {
+		return &models.TemplateDefinition{TemplateID: templateID, Kind: TemplateKindTemplate, Status: StatusFailed}, nil
+	})
+	called := false
+	patches.ApplyFunc(updateDefinitionFields, func(ctx context.Context, templateID string, values map[string]any) error {
+		called = true
+		return nil
+	})
+	err := SetTemplateAlias(context.Background(), "tpl-failed-1", "")
+	assert.NoError(t, err)
+	assert.True(t, called, "clear on a FAILED template must reach updateDefinitionFields")
+}
+
+// TestSetTemplateAlias_IdempotentReclaimSucceeds locks the MySQL rows-changed
+// regression: re-claiming the alias a template already holds must succeed, not
+// 404 (the earlier RowsAffected==0 check broke this).
+func TestSetTemplateAlias_IdempotentReclaimSucceeds(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(GetDefinition, func(ctx context.Context, templateID string) (*models.TemplateDefinition, error) {
+		return &models.TemplateDefinition{TemplateID: templateID, Kind: TemplateKindTemplate, Status: StatusReady}, nil
+	})
+	patches.ApplyFunc(claimTemplateAlias, func(ctx context.Context, templateID, alias string) error {
+		return nil
+	})
+	err := SetTemplateAlias(context.Background(), "tpl-1", "my-alias")
+	assert.NoError(t, err)
+}
+
+// TestIsDeadlockError covers the PostgreSQL deadlock/lock-timeout SQLSTATEs
+// (string-matched) and confirms unrelated errors (incl. duplicate-key) are not
+// treated as retriable deadlocks.
+func TestIsDeadlockError(t *testing.T) {
+	assert.True(t, isDeadlockError(errors.New("ERROR: deadlock detected; SQLSTATE 40P01")))
+	assert.True(t, isDeadlockError(errors.New("ERROR: lock not available; SQLSTATE 55P03")))
+	assert.False(t, isDeadlockError(errors.New("Error 1062 (23000): Duplicate entry for key 'alias_key'")))
+	assert.False(t, isDeadlockError(errors.New("connection reset by peer")))
+}
+
 // TestSetTemplateAlias_ValidatesAlias verifies that invalid alias strings
 // are rejected before any DB access, and that the rejection wraps
 // ErrInvalidAlias so the HTTP handler can map it to 400 (vs. raw DB errors
