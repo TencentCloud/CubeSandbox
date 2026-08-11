@@ -79,7 +79,13 @@ class SandboxAdapter(ABC):
         raise UnsupportedCapability(self.backend, "filesystem_extended")
 
     @abstractmethod
-    def run_code(self, code: str, *, timeout: int = 60) -> CodeResult:
+    def run_code(
+        self,
+        code: str,
+        *,
+        env_vars: dict[str, str] | None = None,
+        timeout: int = 60,
+    ) -> CodeResult:
         raise NotImplementedError
 
     def pause(self, *, timeout: int = 60) -> None:
