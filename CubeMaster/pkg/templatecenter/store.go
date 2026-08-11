@@ -1149,13 +1149,84 @@ func SetTemplateAlias(ctx context.Context, templateID, alias string) error {
 		// Clear path. updateDefinitionFields (snapshot_ops.go:1031) writes
 		// "updated_at" into the caller's map, so pass a fresh map to avoid
 		// polluting any caller-held state.
-		return updateDefinitionFields(ctx, templateID, map[string]any{"display_name": ""})
+		if err := updateDefinitionFields(ctx, templateID, map[string]any{"display_name": ""}); err != nil {
+			return err
+		}
+		// Reflect the clear in the image job so a later redo/rebuild doesn't
+		// re-claim the original alias and silently re-add it (design §3.6).
+		syncTemplateImageJobAliasBestEffort(ctx, templateID, "")
+		return nil
 	}
-	// Claim path — claimTemplateAlias does release+claim+confirm in one
-	// transaction: if the target is hard-deleted between GetDefinition and the
-	// claim, the confirmation query fails the transaction (rolling back the
-	// release) → ErrTemplateNotFound → handler maps to 404.
-	return claimTemplateAlias(ctx, templateID, alias)
+	// Claim path. claimTemplateAlias does release+claim+confirm in one
+	// transaction (a hard-deleted target rolls back the release → 404).
+	// Record the current holder first so its image-job alias can be cleared
+	// too — otherwise a redo of the old holder would reclaim the alias and
+	// silently steal it back from this template.
+	oldHolder := ""
+	if cur, err := GetTemplateByAlias(ctx, alias); err == nil && cur != nil && cur.TemplateID != templateID {
+		oldHolder = cur.TemplateID
+	}
+	if err := claimTemplateAlias(ctx, templateID, alias); err != nil {
+		return err
+	}
+	syncTemplateImageJobAliasBestEffort(ctx, templateID, alias)
+	if oldHolder != "" {
+		syncTemplateImageJobAliasBestEffort(ctx, oldHolder, "")
+	}
+	return nil
+}
+
+// syncTemplateImageJobAlias best-effort syncs the operator's alias change into
+// every image job's stored RequestJSON for the template, so a later
+// rebuild/redo re-claims the operator's current alias instead of the frozen
+// create-time value (which would silently revert a set/clear/transfer — see
+// design §3.6). display_name stays the source of truth for resolution; this
+// only prevents redo revert, so the best-effort wrapper logs failures instead
+// of failing the alias op. A generic JSON edit (not a struct round-trip)
+// preserves unrelated fields — notably RegistryPassword, which
+// marshalTemplateImageJobRequest would strip.
+func syncTemplateImageJobAlias(ctx context.Context, templateID, alias string) error {
+	if !isReady() {
+		return nil // store not initialized (e.g. unit tests) — skip best-effort sync
+	}
+	jobs, err := listTemplateImageJobsByTemplateID(ctx, templateID)
+	if err != nil {
+		return fmt.Errorf("list image jobs for template %s: %w", templateID, err)
+	}
+	for i := range jobs {
+		payload := jobs[i].RequestJSON
+		if payload == "" {
+			continue
+		}
+		dec := json.NewDecoder(strings.NewReader(payload))
+		dec.UseNumber()
+		var m map[string]any
+		if err := dec.Decode(&m); err != nil {
+			continue // skip unparseable jobs rather than aborting the alias op
+		}
+		if cur, _ := m["alias"].(string); cur == alias {
+			continue
+		}
+		if alias == "" {
+			delete(m, "alias")
+		} else {
+			m["alias"] = alias
+		}
+		newPayload, err := json.Marshal(m)
+		if err != nil {
+			return fmt.Errorf("re-marshal image job request for template %s: %w", templateID, err)
+		}
+		if err := updateTemplateImageJob(ctx, jobs[i].JobID, map[string]any{"request_json": string(newPayload)}); err != nil {
+			return fmt.Errorf("sync image job alias for template %s: %w", templateID, err)
+		}
+	}
+	return nil
+}
+
+func syncTemplateImageJobAliasBestEffort(ctx context.Context, templateID, alias string) {
+	if err := syncTemplateImageJobAlias(ctx, templateID, alias); err != nil {
+		log.G(ctx).Warnf("best-effort image job alias sync for template %s to %q failed: %v", templateID, alias, err)
+	}
 }
 
 func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.CreateCubeSandboxReq, error) {

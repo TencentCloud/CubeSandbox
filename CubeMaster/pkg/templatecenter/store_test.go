@@ -817,6 +817,56 @@ func TestIsDeadlockError(t *testing.T) {
 	assert.False(t, isDeadlockError(errors.New("connection reset by peer")))
 }
 
+// TestSyncTemplateImageJobAlias_UpdatesAliasAndPreservesOthers verifies the
+// helper rewrites the alias in the image job's RequestJSON while preserving
+// unrelated fields (notably registry_password, which the struct marshaler
+// would strip).
+func TestSyncTemplateImageJobAlias_UpdatesAliasAndPreservesOthers(t *testing.T) {
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	defer func() { store.db = oldDB }()
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(listTemplateImageJobsByTemplateID, func(ctx context.Context, templateID string) ([]models.TemplateImageJob, error) {
+		return []models.TemplateImageJob{{JobID: "job-1", RequestJSON: `{"alias":"old","source_image_ref":"img","registry_password":"secret"}`}}, nil
+	})
+	var captured string
+	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, values map[string]any) error {
+		captured = values["request_json"].(string)
+		return nil
+	})
+
+	require.NoError(t, syncTemplateImageJobAlias(context.Background(), "tpl-1", "new"))
+	assert.Contains(t, captured, `"alias":"new"`)
+	assert.Contains(t, captured, `"source_image_ref":"img"`)
+	assert.Contains(t, captured, `"registry_password":"secret"`)
+	assert.NotContains(t, captured, `"old"`)
+}
+
+// TestSetTemplateAlias_ClaimSyncsJobAliasForTargetAndOldHolder verifies that a
+// claim syncs the operator alias into the target's image job AND clears the
+// old holder's image-job alias, so a later redo of either doesn't revert the
+// transfer (design §3.6).
+func TestSetTemplateAlias_ClaimSyncsJobAliasForTargetAndOldHolder(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(GetDefinition, func(ctx context.Context, templateID string) (*models.TemplateDefinition, error) {
+		return &models.TemplateDefinition{TemplateID: templateID, Kind: TemplateKindTemplate, Status: StatusReady}, nil
+	})
+	patches.ApplyFunc(GetTemplateByAlias, func(ctx context.Context, alias string) (*models.TemplateDefinition, error) {
+		return &models.TemplateDefinition{TemplateID: "tpl-old"}, nil
+	})
+	patches.ApplyFunc(claimTemplateAlias, func(ctx context.Context, templateID, alias string) error { return nil })
+	var syncs []string
+	patches.ApplyFunc(syncTemplateImageJobAlias, func(ctx context.Context, templateID, alias string) error {
+		syncs = append(syncs, templateID+"="+alias)
+		return nil
+	})
+
+	require.NoError(t, SetTemplateAlias(context.Background(), "tpl-target", "new"))
+	assert.ElementsMatch(t, []string{"tpl-target=new", "tpl-old="}, syncs)
+}
+
 // TestSetTemplateAlias_ValidatesAlias verifies that invalid alias strings
 // are rejected before any DB access, and that the rejection wraps
 // ErrInvalidAlias so the HTTP handler can map it to 400 (vs. raw DB errors
