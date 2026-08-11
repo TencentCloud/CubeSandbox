@@ -96,9 +96,9 @@ spec:
           printf '%s\n' "${proxy_pods_json}" \
             | grep -oE '"ready"[[:space:]]*:[[:space:]]*true' | grep -q true
           echo '[health-test] check CubeProxy ClusterIP Service HTTP'
-          curl --connect-timeout 5 --max-time 15 -fsS -o /dev/null \
+          curl --connect-timeout 5 --max-time 15 -sS -o /dev/null \
             "http://{{ include "cube.proxyName" . }}.{{ .Release.Namespace }}.svc.{{ include "cube.clusterDomain" . }}:{{ .Values.cubeProxy.ports.http.containerPort }}/" \
-            || echo '[health-test] cube-proxy Service HTTP soft-failed (may require Host header / TLS path)'
+            || { echo '[health-test] cube-proxy Service unreachable'; exit 1; }
           {{- end }}
 
           {{- if .Values.cubeNode.enabled }}
