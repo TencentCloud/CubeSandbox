@@ -128,6 +128,17 @@ impl SandBox {
         self.conf.app_snapshot_restore
     }
 
+    /// True when Cubelet recreates the same sandbox from a pause snapshot.
+    /// Guest mounts (virtiofs + binds) are already in restored memory.
+    pub fn pause_resume(&self) -> bool {
+        self.spec
+            .annotations()
+            .as_ref()
+            .and_then(|anno| anno.get(config::ANNO_PAUSE_SNAPSHOT_ID))
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+    }
+
     pub fn normal_create(&self) -> bool {
         !(self.conf.app_snapshot_create || self.conf.app_snapshot_restore)
     }
@@ -280,7 +291,11 @@ impl SandBox {
                 storages.push(virtiofs);
             }
         }
-        if !self.app_snapshot_create() {
+        // Pause resume: keep virtiofs devices (restore_virtiofs_configs) but do
+        // not ask the agent to remount — guest mountpoints are already live.
+        let skip_virtiofs_guest_mount =
+            self.app_snapshot_restore() && self.pause_resume();
+        if !self.app_snapshot_create() && !skip_virtiofs_guest_mount {
             for fs in self.conf.virtiofs.iter() {
                 debugf!(self.log, "add virtiofs: {:?}", fs.id.clone());
                 let mut virtiofs = agent::Storage {
@@ -299,6 +314,11 @@ impl SandBox {
                 }
                 storages.push(virtiofs);
             }
+        } else if skip_virtiofs_guest_mount {
+            infof!(
+                self.log,
+                "pause resume: skip virtio-fs storages for agent (guest mounts kept)"
+            );
         }
 
         let anno = self.spec.annotations().as_ref().unwrap();
@@ -1294,6 +1314,28 @@ impl SandBox {
     }
 
     pub async fn pause_vm(&mut self) -> CResult<()> {
+        // Legacy path: hardcoded pausevm directory, no CubeCow memory volume.
+        // Prefer `pause_vm_to_snapshot` with Cubelet-provided destination +
+        // memory_vol_url so pause artifacts share the CommitSandbox layout.
+        let snapshot_path = format!("{}/{}", PAUSE_VM_SNAPSHOT_BASE, self.id);
+        self.pause_vm_to_snapshot(&snapshot_path, None).await
+    }
+
+    /// Pause the MicroVM into a snapshot at `destination_path`.
+    ///
+    /// * `destination_path` – host **spec dir** (`…/<snapID>/<N>C<M>M[.tmp]`).
+    ///   Hypervisor config/state go under `destination_path/snapshot/`;
+    ///   `metadata.json` is written beside it — same layout as CommitSandbox
+    ///   so Resume can use `get_snapshot_dir(base, cpu, mem)`.
+    /// * `memory_vol_url` – optional CubeCow (or device) URL for memory ranges.
+    ///
+    /// On success the MicroVM is deleted (`pause2snapshot`). The shim process
+    /// is left for the caller to exit (see `PauseToSnapshot` update_ext).
+    pub async fn pause_vm_to_snapshot(
+        &mut self,
+        destination_path: &str,
+        memory_vol_url: Option<String>,
+    ) -> CResult<()> {
         {
             let mut state = self.state.lock().await;
             if *state != SandBoxState::Normal {
@@ -1310,18 +1352,60 @@ impl SandBox {
 
         let ch = self.ch.as_mut().unwrap().lock().await;
 
-        let snapshot_path = format!("{}/{}", PAUSE_VM_SNAPSHOT_BASE, self.id);
-        recreate_dir(&snapshot_path, "mkdir snapshot dir failed")?;
+        let spec_dir = destination_path
+            .strip_prefix("file://")
+            .unwrap_or(destination_path);
+        recreate_dir(spec_dir, "mkdir pause snapshot spec dir failed")?;
 
-        ch.pause_vm_cube(format!("file://{}", snapshot_path).as_str())
+        let mut snapshot_dir = PathBuf::from(spec_dir);
+        snapshot_dir.push("snapshot");
+        stdfs::create_dir_all(&snapshot_dir).map_err(|e| {
+            format!(
+                "mkdir pause snapshot dir failed:{}:{}",
+                snapshot_dir.display(),
+                e
+            )
+        })?;
+
+        let destination_url = format!("file://{}", snapshot_dir.display());
+        ch.pause_vm_cube_with_config(&destination_url, memory_vol_url)
             .await?;
 
-        //vmshutdown event
+        // vmshutdown event after pause2snapshot deletes the MicroVM
         let _ = ch
             .wait_notify(Duration::from_nanos(self.ctx.timeout_nano as u64))
             .await?;
+        drop(ch);
+
+        // metadata.json is required by restore_vm (SnapshotInfo::load / eq).
+        // Guest container id (often tpl-*_0) must be preserved so Resume create
+        // matches the restored agent process table.
+        self.store_pause_snapshot_metadata(spec_dir).await?;
 
         Ok(())
+    }
+
+    async fn store_pause_snapshot_metadata(&self, spec_dir: &str) -> CResult<()> {
+        let mut snap_info =
+            SnapshotInfo::new(self.conf.vm_res.cpu, self.conf.vm_res.snap_memory);
+        snap_info.set_image_version_for_path(self.conf.os_image_path.as_str())?;
+        snap_info.set_agent_version(self.conf.agent_path.as_str())?;
+        snap_info.set_kernel_version(self.conf.kernel.as_str())?;
+        snap_info.set_disks(&self.conf.disk);
+        snap_info.set_pmems(&self.conf.pmem);
+        {
+            let containers = self.containers.lock().await;
+            if let Some(c) = containers.values().next() {
+                let guest_id = c.get_id();
+                if !guest_id.is_empty() {
+                    snap_info.app_snapshot_container_id = Some(guest_id);
+                }
+            }
+        }
+
+        let mut metadata = PathBuf::from(spec_dir);
+        metadata.push("metadata.json");
+        snap_info.store(metadata.as_path())
     }
 
     pub async fn resume_vm(&mut self) -> CResult<()> {

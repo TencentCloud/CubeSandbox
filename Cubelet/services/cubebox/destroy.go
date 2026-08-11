@@ -45,13 +45,20 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 	}
 
 	sandBoxID := opts.SandboxID
+	keepPausedTombstone := shouldKeepPausedTombstone(opts)
 	defer func() {
-
-		if err == nil {
-			err = l.cubeboxManger.Delete(ctx, &cubes.DeleteOption{
-				CubeboxID: sandBoxID,
-			})
+		if err != nil {
+			return
 		}
+		if keepPausedTombstone {
+			if ferr := l.finalizePausedTombstone(ctx, sandBoxID); ferr != nil {
+				log.G(ctx).Warnf("finalize paused tombstone %s: %v", sandBoxID, ferr)
+			}
+			return
+		}
+		err = l.cubeboxManger.Delete(ctx, &cubes.DeleteOption{
+			CubeboxID: sandBoxID,
+		})
 	}()
 	sb, err := l.cubeboxManger.Get(ctx, sandBoxID)
 	if err != nil {
@@ -122,7 +129,22 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 		if _, err := l.localTask.Delete(ctx, &tasks.DeleteTaskRequest{
 			ContainerID: sb.ID,
 		}); err != nil {
-			result = multierror.Append(result, fmt.Errorf("delete sandbox by binary failed: %w", err))
+			// PauseToSnapshot already deleted the MicroVM and may have exited the
+			// shim; Destroy only needs to wipe live runtime + keep PAUSED tombstone.
+			if keepPausedTombstone && pauseDestroyDeleteIgnorable(err) {
+				log.G(ctx).Warnf("pause post-cleanup delete sandbox %s ignored: %v", sb.ID, err)
+			} else {
+				result = multierror.Append(result, fmt.Errorf("delete sandbox by binary failed: %w", err))
+			}
+		}
+		// Keep only the BoltDB PAUSED tombstone; drop containerd metadata so
+		// same-ID Resume Create does not hit "container already exists".
+		if keepPausedTombstone {
+			for _, id := range pausedTombstoneContainerIDs(sb) {
+				if err := l.client.ContainerService().Delete(ctx, id); err != nil && !errdefs.IsNotFound(err) {
+					log.G(ctx).Warnf("pause post-cleanup delete containerd %s: %v", id, err)
+				}
+			}
 		}
 	} else {
 
@@ -171,6 +193,79 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 		return ret.Errorf(errorcode.ErrorCode_RemoveContainerFailed, "%s", er.Error())
 	}
 	return nil
+}
+
+// shouldKeepPausedTombstone is true for Pause post-cleanup Destroy: wipe the
+// live runtime but keep a PAUSED CubeBox in the local store so Master List/Info
+// (via Cubelet List) still sees the sandbox.
+func shouldKeepPausedTombstone(opts *workflow.DestroyContext) bool {
+	if opts == nil || opts.DestroyInfo == nil {
+		return false
+	}
+	ann := opts.DestroyInfo.GetAnnotations()
+	if ann == nil {
+		return false
+	}
+	if ann[constants.AnnotationPauseDeleteTombstone] == "true" {
+		return false
+	}
+	return ann[constants.AnnotationPausePostCleanup] == "true"
+}
+
+// pauseDestroyDeleteIgnorable is true when Delete fails because PauseToSnapshot
+// already tore down the MicroVM / exited the shim.
+func pauseDestroyDeleteIgnorable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "ttrpc: closed") ||
+		strings.Contains(msg, "sandbox not in normal state") ||
+		strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "no running task")
+}
+
+func (l *local) finalizePausedTombstone(ctx context.Context, sandboxID string) error {
+	sb, err := l.cubeboxManger.Get(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+	sb.Lock()
+	defer sb.Unlock()
+
+	// Keep UserMarkDeletedTime until the full workflow Destroy (including storage
+	// CDP hooks) finishes; service.Destroy clears it after engine.Destroy succeeds.
+	now := time.Now().UnixNano()
+	for _, c := range sb.AllContainers() {
+		if c == nil || c.Status == nil {
+			continue
+		}
+		_ = c.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
+			status.Removing = false
+			status.Pid = 0
+			status.FinishedAt = 0
+			status.Unknown = false
+			status.PausingAt = 0
+			if status.PausedAt == 0 {
+				status.PausedAt = now
+			}
+			return status, nil
+		})
+	}
+	if main := sb.FirstContainer(); main != nil && main.Status != nil {
+		_ = main.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
+			status.Removing = false
+			status.Pid = 0
+			status.FinishedAt = 0
+			status.Unknown = false
+			status.PausingAt = 0
+			if status.PausedAt == 0 {
+				status.PausedAt = now
+			}
+			return status, nil
+		})
+	}
+	return l.cubeboxManger.SyncByID(ctx, sandboxID)
 }
 
 func sandboxDeletable(sb *cubeboxstore.CubeBox, filter *cubebox.CubeSandboxFilter) bool {

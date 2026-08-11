@@ -226,14 +226,27 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 
 		annotations[constants.AnnotationAppSnapshotContainerID] = snapshotRestoreContainerID(templateID, snapSpecPath)
 
+		// Pause resume: guest virtiofs + container binds are already live in the
+		// restored memory. Tell the shim (via pause.snapshot.id on the sandbox
+		// OCI annotations) not to replay virtio-fs storages to the agent, and
+		// do not emit PropagationExecMounts. Still emit AnnotationVirtiofs so
+		// the hypervisor reconnects the same hostdir share devices.
+		if flowOpts.IsPauseResume() {
+			if pauseID := strings.TrimSpace(realReq.GetAnnotations()[constants.MasterAnnotationPauseSnapshotID]); pauseID != "" {
+				annotations[constants.MasterAnnotationPauseSnapshotID] = pauseID
+			}
+		}
+
 		sandbox := cubeboxstore.GetCubeBox(ctx)
 		if sandbox != nil && sandbox.FirstContainer() != nil {
-			opts, err := generateRestoreVirtiofsOpt(ctx, flowOpts, sandbox.FirstContainer().Config)
-			if err != nil {
-				return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
+			if !flowOpts.IsPauseResume() {
+				opts, err := generateRestoreVirtiofsOpt(ctx, flowOpts, sandbox.FirstContainer().Config)
+				if err != nil {
+					return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
+				}
+				specOpts = append(specOpts, opts...)
 			}
-			specOpts = append(specOpts, opts...)
-			opts, err = generateSandboxVirtiofsOpt(ctx, flowOpts, false)
+			opts, err := generateSandboxVirtiofsOpt(ctx, flowOpts, false)
 			if err != nil {
 				return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
 			}
@@ -293,11 +306,15 @@ func (e *cubeboxInstancePlugin) CreateContainer(ctx context.Context, cubeBox *cu
 			specOpts = append(specOpts, oci.WithAnnotations(map[string]string{
 				constants.AnnotationAppSnapshotContainerID: snapshotContainerID,
 			}))
-			opts, err := generateRestoreVirtiofsOpt(ctx, flowOpts, c.Config)
-			if err != nil {
-				return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
+			// Pause resume keeps existing container mounts; only new-start-from-snap
+			// needs propagation exec.mount annotations for do_exec_mount.
+			if !flowOpts.IsPauseResume() {
+				opts, err := generateRestoreVirtiofsOpt(ctx, flowOpts, c.Config)
+				if err != nil {
+					return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
+				}
+				specOpts = append(specOpts, opts...)
 			}
-			specOpts = append(specOpts, opts...)
 		}
 	}
 

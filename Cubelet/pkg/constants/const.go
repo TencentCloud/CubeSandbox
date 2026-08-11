@@ -203,6 +203,21 @@ const (
 	// matches the memory file recorded here.
 	MasterAnnotationRuntimeRestoreSnapshotID         = "cube.master.runtime.restore.snapshot.id"
 	MasterAnnotationRuntimeRestoreSnapshotAttachedAt = "cube.master.runtime.restore.snapshot.attached_at"
+	// MasterAnnotationPauseSnapshotID is the Master-allocated pause snapshot
+	// id (same snap-* format as normal Commit snapshots). Cubelet only stores
+	// the local catalog under this id; Kind=pause_snapshot.
+	MasterAnnotationPauseSnapshotID = "cube.master.pause.snapshot.id"
+	// MasterAnnotationDesiredSandboxID asks createid to use this sandbox ID
+	// instead of generating a new one (Resume-from-pause / same-ID recreate).
+	MasterAnnotationDesiredSandboxID = "cube.master.desired.sandbox.id"
+	// AnnotationPausePostCleanup is set by Master on Destroy after Pause:
+	// skip auto-resume-before-delete, Detach volumes, wipe live runtime, keep
+	// the pause snapshot catalog AND a PAUSED CubeBox row for List/Info.
+	AnnotationPausePostCleanup = "cube.pause.skip_auto_resume"
+	// AnnotationPauseDeleteTombstone is set when deleting a paused sandbox for
+	// good: skip auto-resume and remove the PAUSED CubeBox store row (after
+	// pause-snap CleanupTemplate on Master).
+	AnnotationPauseDeleteTombstone = "cube.pause.delete_tombstone"
 
 	MasterAnnotationAppSnapshotVersion               = "cube.master.appsnapshot.version"
 	MasterAnnotationRootfsArtifactID                 = "cube.master.rootfs.artifact.id"

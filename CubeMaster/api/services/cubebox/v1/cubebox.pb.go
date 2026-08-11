@@ -5210,9 +5210,13 @@ type CleanupTemplateResponse struct {
 	// Ret.
 	Ret *v11.Ret `protobuf:"bytes,2,opt,name=ret,proto3" json:"ret,omitempty"`
 	// Logical template ID.
-	TemplateID    string `protobuf:"bytes,3,opt,name=templateID,proto3" json:"templateID,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	TemplateID string `protobuf:"bytes,3,opt,name=templateID,proto3" json:"templateID,omitempty"`
+	// Plugin volume IDs found in pause sandbox_spec.json before local delete.
+	// Empty for normal templates / when the spec is absent. Master uses this
+	// only when deleting a paused sandbox (not on Resume G5 cleanup).
+	PluginVolumeIds []string `protobuf:"bytes,4,rep,name=plugin_volume_ids,json=pluginVolumeIds,proto3" json:"plugin_volume_ids,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *CleanupTemplateResponse) Reset() {
@@ -5264,6 +5268,13 @@ func (x *CleanupTemplateResponse) GetTemplateID() string {
 		return x.TemplateID
 	}
 	return ""
+}
+
+func (x *CleanupTemplateResponse) GetPluginVolumeIds() []string {
+	if x != nil {
+		return x.PluginVolumeIds
+	}
+	return nil
 }
 
 type ListSandboxSnapshotsRequest struct {
@@ -6972,13 +6983,14 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"templateID\x18\x02 \x01(\tR\n" +
 	"templateID\x12\"\n" +
 	"\fsnapshotPath\x18\x03 \x01(\tR\fsnapshotPath\x12C\n" +
-	"\aobjects\x18\x04 \x03(\v2).cubelet.services.cubebox.v1.CowObjectRefR\aobjects\"\x8d\x01\n" +
+	"\aobjects\x18\x04 \x03(\v2).cubelet.services.cubebox.v1.CowObjectRefR\aobjects\"\xb9\x01\n" +
 	"\x17CleanupTemplateResponse\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x124\n" +
 	"\x03ret\x18\x02 \x01(\v2\".cubelet.services.errorcode.v1.RetR\x03ret\x12\x1e\n" +
 	"\n" +
 	"templateID\x18\x03 \x01(\tR\n" +
-	"templateID\"\xb9\x01\n" +
+	"templateID\x12*\n" +
+	"\x11plugin_volume_ids\x18\x04 \x03(\tR\x0fpluginVolumeIds\"\xb9\x01\n" +
 	"\x1bListSandboxSnapshotsRequest\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x12\x1c\n" +
 	"\tsandboxID\x18\x02 \x01(\tR\tsandboxID\x12C\n" +

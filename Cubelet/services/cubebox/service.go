@@ -6,6 +6,7 @@ package cubebox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"runtime/debug"
@@ -29,6 +30,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/runc"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/resourcesource"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
@@ -238,6 +240,13 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		ExtInfo:   map[string][]byte{},
 	}
 
+	// Pause Resume: Master sends a thin Create (ids only); expand containers /
+	// volumes / annotations from sandbox_spec.json packed in the pause snap.
+	if err := expandPauseSnapshotPackage(req); err != nil {
+		rsp.Ret.RetMsg = err.Error()
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		return rsp, nil
+	}
 	if err := checkParam(ctx, req); err != nil {
 		rerr, _ := ret.FromError(err)
 		rsp.Ret.RetMsg = rerr.Message()
@@ -661,7 +670,7 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 		sb, ctx, getErr = s.loadDestroySandboxRuntime(destroyCtx, req.SandboxID)
 		ctx = log.WithLogger(ctx, stepLog)
 
-		if getErr == nil && constants.IsCubeRuntime(ctx) {
+		if getErr == nil && constants.IsCubeRuntime(ctx) && !isPausePostCleanup(req) {
 			autoResumed, budget, resumeRet := s.resumePausedSandboxForDestroy(ctx, sb)
 			if resumeRet != nil {
 				rsp.Ret.RetMsg = resumeRet.RetMsg
@@ -682,6 +691,8 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 		// Do not mark the sandbox as deleted until the paused preflight has
 		// reached RUNNING. A rejected or failed auto-resume returns above; direct
 		// running deletes retain the existing marker-before-destroy behavior.
+		// Pause post-cleanup also needs the mark so storage CDP hooks allow wiping
+		// live volumes; finalizePausedTombstone clears it and keeps the PAUSED row.
 		if sb.UserMarkDeletedTime == nil {
 			now := time.Now()
 			sb.UserMarkDeletedTime = &now
@@ -702,10 +713,74 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 		}
 	}
 
+	// Only GC leftover pause snaps after a successful Running life (Master G5
+	// CleanupTemplate missed). Never GC on Create failover Destroy — that would
+	// delete the only pause copy while the sandbox is still Paused/resuming.
+	pauseSnapToGC := ""
+	if getErr == nil && sb != nil && !isPausePostCleanup(req) {
+		if st := sb.GetStatus(); st != nil && st.Get().State() == cubebox.ContainerState_CONTAINER_RUNNING {
+			pauseSnapToGC = pauseSnapshotIDForGC(sb)
+		}
+	}
+
+	// Final delete of a paused sandbox: only drop the PAUSED CubeBox store row.
+	// Live runtime / volumes were already cleaned on Pause; snap GC is Master's job.
+	if isPauseDeleteTombstone(req) {
+		if getErr != nil {
+			if errors.Is(getErr, utils.ErrorKeyNotFound) {
+				rsp.Ret.RetCode = errorcode.ErrorCode_Success
+				rsp.Ret.RetMsg = "success"
+				return rsp, nil
+			}
+			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+			rsp.Ret.RetMsg = getErr.Error()
+			return rsp, nil
+		}
+		_ = runc.Clean(ctx, req.SandboxID)
+		if delErr := s.cubeboxMgr.cubeboxManger.Delete(ctx, &cubes.DeleteOption{CubeboxID: req.SandboxID}); delErr != nil {
+			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+			rsp.Ret.RetMsg = delErr.Error()
+			return rsp, nil
+		}
+		rsp.Ret.RetCode = errorcode.ErrorCode_Success
+		rsp.Ret.RetMsg = "success"
+		return rsp, nil
+	}
+
 	err, _ := ret.FromError(s.engine.Destroy(ctx, destroyInfo))
 	rsp.Ret.RetMsg = err.Message()
 	rsp.Ret.RetCode = err.Code()
+	if rsp.Ret.RetCode == errorcode.ErrorCode_Success && isPausePostCleanup(req) && !isPauseDeleteTombstone(req) {
+		// Storage CDP required UserMarkDeletedTime during Destroy; clear it now so
+		// the PAUSED CubeBox tombstone is not treated as user-deleted by GC/List.
+		if sb2, get2 := s.cubeboxMgr.cubeboxManger.Get(ctx, req.SandboxID); get2 == nil && sb2 != nil {
+			sb2.Lock()
+			sb2.UserMarkDeletedTime = nil
+			sb2.DeleteRequestID = ""
+			sb2.Unlock()
+			_ = s.cubeboxMgr.cubeboxManger.SyncByID(ctx, req.SandboxID)
+		}
+	}
+	if rsp.Ret.RetCode == errorcode.ErrorCode_Success && pauseSnapToGC != "" {
+		s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, pauseSnapToGC)
+	}
 	return rsp, nil
+}
+
+func isPausePostCleanup(req *cubebox.DestroyCubeSandboxRequest) bool {
+	if req == nil || req.GetAnnotations() == nil {
+		return false
+	}
+	// Both pause wipe (keep tombstone) and final pause delete skip auto-resume.
+	return req.GetAnnotations()[constants.AnnotationPausePostCleanup] == "true" ||
+		req.GetAnnotations()[constants.AnnotationPauseDeleteTombstone] == "true"
+}
+
+func isPauseDeleteTombstone(req *cubebox.DestroyCubeSandboxRequest) bool {
+	if req == nil || req.GetAnnotations() == nil {
+		return false
+	}
+	return req.GetAnnotations()[constants.AnnotationPauseDeleteTombstone] == "true"
 }
 
 func (s *service) loadDestroySandboxRuntime(ctx context.Context, sandboxID string) (*cubeboxstore.CubeBox, context.Context, error) {

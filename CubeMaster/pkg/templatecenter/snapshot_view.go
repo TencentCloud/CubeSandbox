@@ -72,6 +72,8 @@ func ListSnapshots(ctx context.Context, opts *ListSnapshotsOptions) ([]SnapshotI
 	normalized := normalizeListSnapshotsOptions(opts)
 	filtered := make([]SnapshotInfo, 0, len(infos))
 	for _, info := range infos {
+		// Pause snaps share snap-* IDs but Kind=pause_snapshot; never list them
+		// as user-visible normal snapshots.
 		if !strings.EqualFold(strings.TrimSpace(info.Kind), TemplateKindSnapshot) {
 			continue
 		}

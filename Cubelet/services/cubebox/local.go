@@ -592,6 +592,14 @@ func makeContainerConfigToSave(cfg *cubebox.ContainerConfig) *cubebox.ContainerC
 		Name:        cfg.GetName(),
 		Annotations: maps.Clone(cfg.GetAnnotations()),
 		Image:       cfg.GetImage(),
+		// Keep recreate-critical fields for Pause→Resume (sandbox_spec.json).
+		Command:      append([]string{}, cfg.GetCommand()...),
+		Args:         append([]string{}, cfg.GetArgs()...),
+		WorkingDir:   cfg.GetWorkingDir(),
+		Envs:         cfg.GetEnvs(),
+		RLimit:       cfg.GetRLimit(),
+		Probe:        cfg.GetProbe(),
+		SecurityContext: cfg.GetSecurityContext(),
 		Resources: &cubebox.Resource{
 			Cpu:      cfg.GetResources().GetCpu(),
 			CpuLimit: cfg.GetResources().GetCpuLimit(),

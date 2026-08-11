@@ -71,6 +71,11 @@ func SandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq) (rsp *types.
 	}
 
 	if len(rsp.Data) == 0 {
+		// Fallback: older Cubelets may wipe the CubeBox on Pause. Prefer
+		// Cubelet List (PAUSED tombstone). Synthesize only when List is empty.
+		if fillPausedSandboxInfoFromMaster(ctx, req, rsp) {
+			return
+		}
 		setError(errorcode.ErrorCode_NotFoundAtCubelet, rsp)
 		return
 	}
@@ -233,4 +238,45 @@ func getContainerName(label map[string]string) string {
 		return name
 	}
 	return ""
+}
+
+// fillPausedSandboxInfoFromMaster synthesizes a paused sandbox view when
+// Cubelet no longer has a live CubeBox (CubeCow Pause wiped it) but Master
+// still tracks the sandbox via proxy/cache for Resume.
+func fillPausedSandboxInfoFromMaster(ctx context.Context, req *types.GetCubeSandboxReq, rsp *types.GetCubeSandboxRes) bool {
+	if req == nil || rsp == nil || req.SandboxID == "" {
+		return false
+	}
+	proxyMap, ok := localcache.GetSandboxProxyMap(ctx, req.SandboxID)
+	if !ok || proxyMap == nil {
+		return false
+	}
+	// Master only tracks paused sandboxID ↔ snapshotID (pausesnap). Absent
+	// binding means this is not a paused sandbox — do not synthesize.
+	snapID := lookupPauseSnapshotID(ctx, req.SandboxID)
+	if snapID == "" {
+		return false
+	}
+	one := &types.SandboxData{
+		SandboxID: req.SandboxID,
+		Status:    int32(cubebox.ContainerState_CONTAINER_PAUSED),
+		HostIP:    proxyMap.HostIP,
+		SandboxIP: proxyMap.SandboxIP,
+		Annotations: map[string]string{
+			constants.CubeAnnotationPauseSnapshotID: snapID,
+		},
+		Containers: []*types.ContainerInfo{
+			{
+				ContainerID: req.SandboxID,
+				Status:      int32(cubebox.ContainerState_CONTAINER_PAUSED),
+			},
+		},
+	}
+	if n, exist := localcache.GetNodesByIp(proxyMap.HostIP); exist {
+		one.HostID = n.ID()
+	}
+	rsp.Data = []*types.SandboxData{one}
+	rsp.Ret.RetCode = int(errorcode.ErrorCode_Success)
+	rsp.Ret.RetMsg = errorcode.ErrorCode_Success.String()
+	return true
 }

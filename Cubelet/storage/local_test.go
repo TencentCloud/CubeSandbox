@@ -213,6 +213,8 @@ type fakeCowVolumeManager struct {
 	metrics             map[string]uint64
 }
 
+func (m *fakeCowVolumeManager) Name() string { return "xfscow" }
+
 func (m *fakeCowVolumeManager) CreateDefaultMediumVolume(ctx context.Context, sandboxID, volumeName string, sizeBytes uint64) (*cowVolume, error) {
 	_ = ctx
 	m.mu.Lock()

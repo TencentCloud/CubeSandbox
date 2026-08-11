@@ -77,6 +77,11 @@ func SandboxLifecycleState(sandboxID string) string {
 	return join(Prefix, Version, ScopeShared, "sandbox", "lifecycle", "state", sandboxID)
 }
 
+// LockSandbox is the Master op lock for pause / resume / delete on one sandbox.
+func LockSandbox(sandboxID string) string {
+	return join("master", "lock", "sb", sandboxID)
+}
+
 // ---- legacy key builders (read fallback / delete cleanup only) ----
 
 // LegacyNodeMetric is the bare node ID used before namespacing.

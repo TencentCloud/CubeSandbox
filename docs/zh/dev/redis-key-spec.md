@@ -64,6 +64,7 @@ cube:{ver}:{scope}:{resource}[:{sub}...]:{id}
 | 沙箱 lifecycle 注册表 | `cube:v1:shared:sandbox:lifecycle:meta` | Hash | shared | CubeMaster | cube-lifecycle-manager | 无（生命周期由 `HDEL` 管理） |
 | 沙箱 lifecycle 事件流 | `cube:v1:shared:sandbox:lifecycle:events` | Stream | shared | CubeMaster | cube-lifecycle-manager | MAXLEN ~ 100000 |
 | 沙箱 lifecycle 状态 | `cube:v1:shared:sandbox:lifecycle:state:{sandboxID}` | String | shared | cube-lifecycle-manager | cube-lifecycle-manager | SET TTL（默认 60s） |
+| 沙箱操作锁（pause/resume/delete） | `master:lock:sb:{sandboxID}` | String | master | CubeMaster | CubeMaster | SET NX EX 10s（解锁 DEL；不续期） |
 | CubeProxy 副本注册表 | `cube:v1:shared:cube_proxy:registry` | Hash | shared | CubeProxy | cube-lifecycle-manager | 无（心跳超时后由 `HDEL` 清理） |
 | CubeProxy 副本心跳 | `cube:v1:shared:cube_proxy:heartbeat` | Sorted Set | shared | CubeProxy | cube-lifecycle-manager | 无（`ZREMRANGEBYSCORE` 清理，默认 15s 过期） |
 

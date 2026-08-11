@@ -978,6 +978,9 @@ message CleanupTemplateResponse {
   cubelet.services.errorcode.v1.Ret ret = 2;
   // Logical template ID.
   string templateID = 3;
+  // Deprecated: unused. Pause/Resume volume refcounts follow normal
+  // Create/Destroy ExtInfo events; CleanupTemplate does not adjust them.
+  repeated string plugin_volume_ids = 4;
 }
 
 message ListSandboxSnapshotsRequest {

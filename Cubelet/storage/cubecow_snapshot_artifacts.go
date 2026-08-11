@@ -6,17 +6,15 @@ package storage
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
-	"time"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubecow"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 )
 
 const (
-	CowKindVolume   = cowKindVolume
-	CowKindSnapshot = cowKindSnapshot
+	CowKindVolume   = cow.KindVolume
+	CowKindSnapshot = cow.KindSnapshot
 )
 
 // cowMetricKeys mirrors the keys the cubecow Rust crate emits via
@@ -63,83 +61,37 @@ func IsCowBackend() bool {
 	return localStorage != nil && localStorage.useCowStorage()
 }
 
-func GetSandboxRootfsForSnapshot(ctx context.Context, sandboxID, preferredVolumeName string) (*CowSnapshotObject, error) {
+// ActiveCowStore returns the process-wide CoW Store (xfscow today), or nil
+// when storage is not initialized / not using a CoW backend.
+func ActiveCowStore() cow.Store {
 	if localStorage == nil {
-		return nil, fmt.Errorf("storage is not initialized")
+		return nil
 	}
-	if !localStorage.useCowStorage() {
-		return nil, fmt.Errorf("storage backend is not cubecow")
-	}
-	info, err := localStorage.readBackendFileInfo(ctx, sandboxID)
-	if err != nil {
-		return nil, err
-	}
-	rootfs, err := selectSnapshotRootfs(info, preferredVolumeName)
-	if err != nil {
-		return nil, err
-	}
-	return backendFileInfoToSnapshotObject(ctx, localStorage.cowManager, rootfs)
+	return localStorage.cowManager
+}
+
+// Compatibility aliases — prefer GetSandboxRootfs / CommitRootfs / CreateMemoryVolume /
+// CommitMemoryFromBase / CommitRootfsFromBuild / DeleteObject / DeactivateObject /
+// ResolveObjectPath / CleanupObjects / InspectObjects / ObjectMetrics.
+
+func GetSandboxRootfsForSnapshot(ctx context.Context, sandboxID, preferredVolumeName string) (*CowSnapshotObject, error) {
+	return GetSandboxRootfs(ctx, sandboxID, preferredVolumeName)
 }
 
 func CommitTemplateRootfs(ctx context.Context, source *CowSnapshotObject, templateID string) (*CowSnapshotObject, error) {
-	manager, err := requireCowManager()
-	if err != nil {
-		return nil, err
-	}
-	if source == nil || source.Name == "" {
-		return nil, fmt.Errorf("source rootfs is required")
-	}
-	volume, err := manager.CommitTemplateRootfs(ctx, source.Name, templateID)
-	if err != nil {
-		return nil, err
-	}
-	return cubecowVolumeToSnapshotObjectWithoutActivation(ctx, manager, volume)
+	return CommitRootfs(ctx, source, templateID)
 }
 
 func CreateTemplateRootfsFromBuild(ctx context.Context, templateID string) (*CowSnapshotObject, error) {
-	manager, err := requireCowManager()
-	if err != nil {
-		return nil, err
-	}
-	volume, err := manager.CommitTemplateRootfs(ctx, cowTemplateBuildRootfsName(templateID), templateID)
-	if err != nil {
-		return nil, err
-	}
-	return cubecowVolumeToSnapshotObjectWithoutActivation(ctx, manager, volume)
+	return CommitRootfsFromBuild(ctx, templateID)
 }
 
 func CreateTemplateMemoryVolume(ctx context.Context, templateID string, sizeBytes uint64) (*CowSnapshotObject, error) {
-	manager, err := requireCowManager()
-	if err != nil {
-		return nil, err
-	}
-	volume, err := manager.CreateMemoryVolume(ctx, templateID, sizeBytes)
-	if err != nil {
-		return nil, err
-	}
-	return cubecowVolumeToSnapshotObject(ctx, manager, volume)
+	return CreateMemoryVolume(ctx, templateID, sizeBytes)
 }
 
-// CommitTemplateMemoryFromBase clones an existing memory object (typically the
-// memory blob backing the sandbox's current base snapshot/template) into the
-// canonical template memory name for templateID. The resulting object is a
-// cubecow snapshot whose content starts as an exact reflink-shared copy of the
-// source, making it a valid base for the hypervisor's incremental
-// (pagemap_anon) memory snapshot, which only writes CoW anonymous pages and
-// relies on the rest of memory being preserved from the base file.
 func CommitTemplateMemoryFromBase(ctx context.Context, source *CowSnapshotObject, templateID string, sizeBytes uint64) (*CowSnapshotObject, error) {
-	manager, err := requireCowManager()
-	if err != nil {
-		return nil, err
-	}
-	if source == nil || strings.TrimSpace(source.Name) == "" {
-		return nil, fmt.Errorf("source memory object is required")
-	}
-	volume, err := manager.CommitTemplateMemory(ctx, source.Name, templateID, sizeBytes)
-	if err != nil {
-		return nil, err
-	}
-	return cubecowVolumeToSnapshotObject(ctx, manager, volume)
+	return CommitMemoryFromBase(ctx, source, templateID, sizeBytes)
 }
 
 func DefaultTemplateObjectRefs(templateID string) []CowObjectRef {
@@ -164,23 +116,7 @@ func TemplateBuildRootfsName(templateID string) string {
 // (kind=snapshot, used for incremental memory snapshots) work alongside
 // the legacy empty-volume layout (kind=volume).
 func ResolveSnapshotForRollback(ctx context.Context, rootfsVol, memoryVol, memoryKind string) (*CowRollbackSnapshotRefs, error) {
-	manager, err := requireCowManager()
-	if err != nil {
-		return nil, err
-	}
-	rootfs, err := resolveCowObject(ctx, manager, rootfsVol, cowKindSnapshot, 0)
-	if err != nil {
-		return nil, err
-	}
-	normalizedMemoryKind, err := resolveRollbackMemoryKind(memoryKind)
-	if err != nil {
-		return nil, err
-	}
-	memory, err := resolveCowObject(ctx, manager, memoryVol, normalizedMemoryKind, 0)
-	if err != nil {
-		return nil, err
-	}
-	return &CowRollbackSnapshotRefs{Rootfs: rootfs, Memory: memory}, nil
+	return ResolveRollbackRefs(ctx, rootfsVol, memoryVol, memoryKind)
 }
 
 // resolveRollbackMemoryKind defaults to the legacy "volume" kind so that
@@ -196,169 +132,35 @@ func resolveRollbackMemoryKind(kind string) (string, error) {
 }
 
 func RollbackDeriveNewGen(ctx context.Context, sandboxID, snapshotRootfsVol string, newGen uint32, desiredSizeBytes uint64) (*CowSnapshotObject, error) {
-	manager, err := requireCowManager()
-	if err != nil {
-		return nil, err
-	}
-	volume, err := manager.RollbackDeriveNewGen(ctx, sandboxID, snapshotRootfsVol, newGen, desiredSizeBytes)
-	if err != nil {
-		return nil, err
-	}
-	return cubecowVolumeToSnapshotObject(ctx, manager, volume)
+	return DeriveRollbackRootfs(ctx, sandboxID, snapshotRootfsVol, newGen, desiredSizeBytes)
 }
 
 func PersistSandboxRootfsAfterRollback(ctx context.Context, sandboxID string, rootfs *CowSnapshotObject) error {
-	if localStorage == nil {
-		return fmt.Errorf("storage is not initialized")
-	}
-	if rootfs == nil || rootfs.Name == "" {
-		return fmt.Errorf("rollback rootfs is required")
-	}
-	info, err := localStorage.readBackendFileInfo(ctx, sandboxID)
-	if err != nil {
-		return err
-	}
-	current, err := selectSnapshotRootfs(info, rootfs.MountName)
-	if err != nil {
-		return err
-	}
-	current.VolumeName = rootfs.Name
-	current.Kind = rootfs.Kind
-	current.Gen = rootfs.Gen
-	current.FilePath = rootfs.DevPath
-	current.SizeLimit = int64(rootfs.SizeBytes)
-	info.UpdateAt = time.Now()
-	return localStorage.writeBackendFileInfo(ctx, sandboxID, info)
+	return PersistSandboxRootfs(ctx, sandboxID, rootfs)
 }
 
 func DeleteCowObject(ctx context.Context, name, kind string) error {
-	manager, err := requireCowManager()
-	if err != nil {
-		return err
-	}
-	return manager.DeleteByKind(ctx, name, kind)
+	return DeleteObject(ctx, name, kind)
 }
 
 func DeactivateCowObject(ctx context.Context, name, kind string) error {
-	manager, err := requireCowManager()
-	if err != nil {
-		return err
-	}
-	return manager.DeactivateByKind(ctx, name, kind)
+	return DeactivateObject(ctx, name, kind)
 }
 
 func ResolveCowDevPath(ctx context.Context, name, kind string) (string, error) {
-	manager, err := requireCowManager()
-	if err != nil {
-		return "", err
-	}
-	normalizedKind, err := normalizeCowKind(kind)
-	if err != nil {
-		return "", err
-	}
-	return manager.ResolveDevPath(ctx, name, normalizedKind)
+	return ResolveObjectPath(ctx, name, kind)
 }
 
 func CleanupCowTemplateObjects(ctx context.Context, refs []CowObjectRef) error {
-	manager, err := requireCowManager()
-	if err != nil {
-		return err
-	}
-	// FIX-3: best-effort cleanup. A single object failing (e.g. a missing or
-	// kind-mismatched entry) must not abort cleanup of the remaining objects,
-	// otherwise sibling cubecow objects leak. Errors are aggregated; the caller
-	// (CubeMaster) keeps template metadata on failure and retries, and each
-	// DeleteByKind is idempotent (NotFound -> success).
-	var cleanupErr error
-	for _, ref := range refs {
-		if strings.TrimSpace(ref.Name) == "" {
-			continue
-		}
-		kind, err := normalizeCowKindForRole(ref.Kind, ref.Role)
-		if err != nil {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup cubecow object %q: %w", ref.Name, err))
-			continue
-		}
-		if err := manager.DeleteByKind(ctx, ref.Name, kind); err != nil {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup cubecow object %q: %w", ref.Name, err))
-			continue
-		}
-	}
-	return cleanupErr
+	return CleanupObjects(ctx, refs)
 }
 
 func InspectCowObjects(ctx context.Context, refs []CowObjectRef) ([]CowObjectStatus, error) {
-	manager, err := requireCowManager()
-	if err != nil {
-		return nil, err
-	}
-	statuses := make([]CowObjectStatus, 0, len(refs))
-	for _, ref := range refs {
-		status := CowObjectStatus{
-			Name: ref.Name,
-			Kind: ref.Kind,
-			Role: ref.Role,
-		}
-		if strings.TrimSpace(ref.Name) == "" {
-			statuses = append(statuses, status)
-			continue
-		}
-		kind, err := normalizeCowKind(ref.Kind)
-		if err != nil {
-			return nil, fmt.Errorf("inspect cubecow object %q: %w", ref.Name, err)
-		}
-		status.Kind = kind
-		info, err := manager.GetVolumeInfo(ctx, ref.Name)
-		if err != nil {
-			if isCowSemantic(err, cubecow.SemNotFound) {
-				statuses = append(statuses, status)
-				continue
-			}
-			return nil, fmt.Errorf("inspect cubecow object %q: %w", ref.Name, err)
-		}
-		if info == nil {
-			statuses = append(statuses, status)
-			continue
-		}
-		status.Exists = true
-		status.DevicePath = info.DevicePath
-		status.SizeBytes = info.SizeBytes
-		statuses = append(statuses, status)
-	}
-	return statuses, nil
+	return InspectObjects(ctx, refs)
 }
 
 func GetCowMetrics(ctx context.Context) (map[string]uint64, error) {
-	manager, err := requireCowManager()
-	if err != nil {
-		return nil, err
-	}
-	metrics, err := manager.GetMetrics(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for _, key := range cowMetricKeys {
-		if _, ok := metrics[key]; !ok {
-			return nil, fmt.Errorf("cubecow metric %q is missing", key)
-		}
-	}
-	return metrics, nil
-}
-
-func requireCowManager() (cowVolumeManager, error) {
-	if localStorage == nil {
-		return nil, fmt.Errorf("storage is not initialized")
-	}
-	if !localStorage.useCowStorage() {
-		return nil, fmt.Errorf("storage backend is not cubecow")
-	}
-	if err := localStorage.ensureCowManager(); err != nil {
-		return nil, err
-	}
-	if localStorage.cowManager == nil {
-		return nil, fmt.Errorf("cubecow manager not initialized")
-	}
-	return localStorage.cowManager, nil
+	return ObjectMetrics(ctx)
 }
 
 func selectSnapshotRootfs(info *StorageInfo, preferredVolumeName string) (*BackendFileInfo, error) {

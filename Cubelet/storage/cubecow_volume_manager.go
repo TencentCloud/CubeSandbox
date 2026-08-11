@@ -10,11 +10,13 @@ import (
 	"fmt"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubecow"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow/xfscow"
 )
 
 const (
-	cowKindVolume   = "volume"
-	cowKindSnapshot = "snapshot"
+	cowKindVolume   = cow.KindVolume
+	cowKindSnapshot = cow.KindSnapshot
 )
 
 var ErrCowObjectMissing = errors.New("cubecow object missing")
@@ -47,21 +49,9 @@ func (e *CowObjectMissingError) Is(target error) bool {
 	return target == ErrCowObjectMissing
 }
 
-type cowVolumeManager interface {
-	CreateDefaultMediumVolume(ctx context.Context, sandboxID, volumeName string, sizeBytes uint64) (*cowVolume, error)
-	CreateSandboxRootfsFromTemplate(ctx context.Context, sandboxID, templateID string, gen uint32, desiredSizeBytes uint64) (*cowVolume, error)
-	RollbackDeriveNewGen(ctx context.Context, sandboxID, snapshotRootfsVol string, gen uint32, desiredSizeBytes uint64) (*cowVolume, error)
-	CreateTemplateBuildRootfs(ctx context.Context, templateID string, sizeBytes uint64) (*cowVolume, error)
-	CommitTemplateRootfs(ctx context.Context, sourceName, templateID string) (*cowVolume, error)
-	CreateMemoryVolume(ctx context.Context, templateID string, sizeBytes uint64) (*cowVolume, error)
-	CommitTemplateMemory(ctx context.Context, sourceName, templateID string, sizeBytes uint64) (*cowVolume, error)
-	DeleteByKind(ctx context.Context, name, kind string) error
-	DeactivateByKind(ctx context.Context, name, kind string) error
-	ResolveDevPath(ctx context.Context, name, kind string) (string, error)
-	GetSizeBytes(ctx context.Context, name string) (uint64, error)
-	GetVolumeInfo(ctx context.Context, name string) (*cubecow.Volume, error)
-	GetMetrics(ctx context.Context) (map[string]uint64, error)
-}
+// cowVolumeManager is the in-package Store handle used by local storage.
+// Prefer [cow.Store] / [ActiveCowStore] for new code.
+type cowVolumeManager = cow.Store
 
 type cowEngine interface {
 	CreateVolume(name string, sizeBytes uint64) (string, error)
@@ -76,29 +66,37 @@ type cowEngine interface {
 	GetMetrics() (map[string]uint64, error)
 }
 
-type cowVolume struct {
-	VolumeName string
-	Kind       string
-	Gen        uint32
-	FilePath   string
-}
+// cowVolume is the historical name for a CoW object handle.
+type cowVolume = cow.Object
 
-type CowVolumeManager struct {
+// XfsCow is the local XFS/reflink CoW Store implementation (cubecow).
+// It is the concrete subclass of [cow.Store] used when storage_backend=cubecow.
+type XfsCow struct {
 	engine cowEngine
 }
 
-func newCowVolumeManager(engine *cubecow.Engine) *CowVolumeManager {
-	return &CowVolumeManager{engine: engine}
+// CowVolumeManager is a historical alias for [XfsCow].
+type CowVolumeManager = XfsCow
+
+func newCowVolumeManager(engine *cubecow.Engine) *XfsCow {
+	return &XfsCow{engine: engine}
 }
+
+// Name implements [cow.Store].
+func (m *XfsCow) Name() string {
+	return xfscow.Name
+}
+
+var _ cow.Store = (*XfsCow)(nil)
 
 var initDefaultMediumDevice = initExt4BlockDevice
 
-func (m *CowVolumeManager) CreateDefaultMediumVolume(ctx context.Context, sandboxID, volumeName string, sizeBytes uint64) (*cowVolume, error) {
+func (m *XfsCow) CreateDefaultMediumVolume(ctx context.Context, sandboxID, volumeName string, sizeBytes uint64) (*cowVolume, error) {
 	name := fmt.Sprintf("sb-%s-%s", sandboxID, volumeName)
 	return m.createInitializedVolume(ctx, name, sizeBytes)
 }
 
-func (m *CowVolumeManager) createInitializedVolume(ctx context.Context, name string, sizeBytes uint64) (*cowVolume, error) {
+func (m *XfsCow) createInitializedVolume(ctx context.Context, name string, sizeBytes uint64) (*cowVolume, error) {
 	devPath, created, err := m.createOrResolveVolumePath(ctx, name, sizeBytes)
 	if err != nil {
 		return nil, err
@@ -111,7 +109,7 @@ func (m *CowVolumeManager) createInitializedVolume(ctx context.Context, name str
 	return newCowVolume(name, cowKindVolume, 0, devPath), nil
 }
 
-func (m *CowVolumeManager) createOrResolveVolumePath(ctx context.Context, name string, sizeBytes uint64) (string, bool, error) {
+func (m *XfsCow) createOrResolveVolumePath(ctx context.Context, name string, sizeBytes uint64) (string, bool, error) {
 	devPath, err := m.engine.CreateVolume(name, sizeBytes)
 	if err != nil {
 		if !isCowSemantic(err, cubecow.SemAlreadyExists) {
@@ -126,7 +124,7 @@ func (m *CowVolumeManager) createOrResolveVolumePath(ctx context.Context, name s
 	return devPath, true, nil
 }
 
-func (m *CowVolumeManager) initializeNewDefaultMediumVolume(ctx context.Context, name, devPath string) error {
+func (m *XfsCow) initializeNewDefaultMediumVolume(ctx context.Context, name, devPath string) error {
 	if err := initDefaultMediumDevice(devPath); err != nil {
 		if cleanupErr := m.DeleteByKind(ctx, name, cowKindVolume); cleanupErr != nil {
 			return fmt.Errorf("initialize cubecow default medium %s at %s: %w (cleanup failed: %v)", name, devPath, err, cleanupErr)
@@ -136,12 +134,12 @@ func (m *CowVolumeManager) initializeNewDefaultMediumVolume(ctx context.Context,
 	return nil
 }
 
-func (m *CowVolumeManager) CreateSandboxRootfsFromTemplate(ctx context.Context, sandboxID, templateID string, gen uint32, desiredSizeBytes uint64) (*cowVolume, error) {
+func (m *XfsCow) CreateSandboxRootfsFromTemplate(ctx context.Context, sandboxID, templateID string, gen uint32, desiredSizeBytes uint64) (*cowVolume, error) {
 	sourceName := cowTemplateRootfsName(templateID)
 	return m.RollbackDeriveNewGen(ctx, sandboxID, sourceName, gen, desiredSizeBytes)
 }
 
-func (m *CowVolumeManager) RollbackDeriveNewGen(ctx context.Context, sandboxID, snapshotRootfsVol string, gen uint32, desiredSizeBytes uint64) (*cowVolume, error) {
+func (m *XfsCow) RollbackDeriveNewGen(ctx context.Context, sandboxID, snapshotRootfsVol string, gen uint32, desiredSizeBytes uint64) (*cowVolume, error) {
 	if snapshotRootfsVol == "" {
 		return nil, fmt.Errorf("snapshot rootfs volume is required")
 	}
@@ -163,7 +161,7 @@ func (m *CowVolumeManager) RollbackDeriveNewGen(ctx context.Context, sandboxID, 
 	return newCowVolume(snapshotName, cowKindSnapshot, gen, devPath), nil
 }
 
-func (m *CowVolumeManager) resizeSnapshotIfTooSmall(snapshotName string, desiredSizeBytes uint64) (bool, error) {
+func (m *XfsCow) resizeSnapshotIfTooSmall(snapshotName string, desiredSizeBytes uint64) (bool, error) {
 	if desiredSizeBytes == 0 {
 		return false, nil
 	}
@@ -180,11 +178,11 @@ func (m *CowVolumeManager) resizeSnapshotIfTooSmall(snapshotName string, desired
 	return true, nil
 }
 
-func (m *CowVolumeManager) CreateTemplateBuildRootfs(ctx context.Context, templateID string, sizeBytes uint64) (*cowVolume, error) {
+func (m *XfsCow) CreateTemplateBuildRootfs(ctx context.Context, templateID string, sizeBytes uint64) (*cowVolume, error) {
 	return m.createInitializedTemplateVolume(ctx, cowTemplateBuildRootfsName(templateID), sizeBytes)
 }
 
-func (m *CowVolumeManager) CommitTemplateRootfs(ctx context.Context, sourceName, templateID string) (*cowVolume, error) {
+func (m *XfsCow) CommitTemplateRootfs(ctx context.Context, sourceName, templateID string) (*cowVolume, error) {
 	snapshotName := cowTemplateRootfsName(templateID)
 	devPath, err := m.createTemplateSnapshotPath(sourceName, snapshotName)
 	if err != nil {
@@ -193,7 +191,7 @@ func (m *CowVolumeManager) CommitTemplateRootfs(ctx context.Context, sourceName,
 	return newCowVolume(snapshotName, cowKindSnapshot, 0, devPath), nil
 }
 
-func (m *CowVolumeManager) CreateMemoryVolume(ctx context.Context, templateID string, sizeBytes uint64) (*cowVolume, error) {
+func (m *XfsCow) CreateMemoryVolume(ctx context.Context, templateID string, sizeBytes uint64) (*cowVolume, error) {
 	name := cowTemplateMemoryName(templateID)
 	devPath, err := m.createTemplateVolumePath(name, sizeBytes)
 	if err != nil {
@@ -225,7 +223,7 @@ func (m *CowVolumeManager) CreateMemoryVolume(ctx context.Context, templateID st
 // activate=true is passed through so callers immediately receive a usable
 // device path. With the reflink backend, activation is effectively a no-op
 // (snapshots are addressable via their filesystem path).
-func (m *CowVolumeManager) CommitTemplateMemory(ctx context.Context, sourceName, templateID string, sizeBytes uint64) (*cowVolume, error) {
+func (m *XfsCow) CommitTemplateMemory(ctx context.Context, sourceName, templateID string, sizeBytes uint64) (*cowVolume, error) {
 	snapshotName := cowTemplateMemoryName(templateID)
 	devPath, err := m.engine.CreateSnapshot(sourceName, snapshotName, true)
 	if err != nil {
@@ -264,7 +262,7 @@ func (m *CowVolumeManager) CommitTemplateMemory(ctx context.Context, sourceName,
 	return newCowVolume(snapshotName, cowKindSnapshot, 0, devPath), nil
 }
 
-func (m *CowVolumeManager) createInitializedTemplateVolume(ctx context.Context, name string, sizeBytes uint64) (*cowVolume, error) {
+func (m *XfsCow) createInitializedTemplateVolume(ctx context.Context, name string, sizeBytes uint64) (*cowVolume, error) {
 	devPath, err := m.createTemplateVolumePath(name, sizeBytes)
 	if err != nil {
 		return nil, err
@@ -275,7 +273,7 @@ func (m *CowVolumeManager) createInitializedTemplateVolume(ctx context.Context, 
 	return newCowVolume(name, cowKindVolume, 0, devPath), nil
 }
 
-func (m *CowVolumeManager) createTemplateVolumePath(name string, sizeBytes uint64) (string, error) {
+func (m *XfsCow) createTemplateVolumePath(name string, sizeBytes uint64) (string, error) {
 	devPath, err := m.engine.CreateVolume(name, sizeBytes)
 	if err != nil {
 		if isCowSemantic(err, cubecow.SemAlreadyExists) {
@@ -286,7 +284,7 @@ func (m *CowVolumeManager) createTemplateVolumePath(name string, sizeBytes uint6
 	return devPath, nil
 }
 
-func (m *CowVolumeManager) createTemplateSnapshotPath(sourceName, snapshotName string) (string, error) {
+func (m *XfsCow) createTemplateSnapshotPath(sourceName, snapshotName string) (string, error) {
 	devPath, err := m.engine.CreateSnapshot(sourceName, snapshotName, false)
 	if err != nil {
 		if isCowSemantic(err, cubecow.SemAlreadyExists) {
@@ -297,7 +295,7 @@ func (m *CowVolumeManager) createTemplateSnapshotPath(sourceName, snapshotName s
 	return devPath, nil
 }
 
-func (m *CowVolumeManager) ensureVolumeSizeAtLeast(ctx context.Context, name string, requestedSizeBytes uint64) error {
+func (m *XfsCow) ensureVolumeSizeAtLeast(ctx context.Context, name string, requestedSizeBytes uint64) error {
 	if requestedSizeBytes == 0 {
 		return nil
 	}
@@ -330,7 +328,7 @@ func newCowVolume(name, kind string, gen uint32, devPath string) *cowVolume {
 	}
 }
 
-func (m *CowVolumeManager) createOrResolveSnapshotPathFromSource(ctx context.Context, sourceName, snapshotName string) (string, error) {
+func (m *XfsCow) createOrResolveSnapshotPathFromSource(ctx context.Context, sourceName, snapshotName string) (string, error) {
 	devPath, err := m.engine.CreateSnapshot(sourceName, snapshotName, true)
 	if err != nil {
 		if !isCowSemantic(err, cubecow.SemAlreadyExists) {
@@ -347,7 +345,7 @@ func (m *CowVolumeManager) createOrResolveSnapshotPathFromSource(ctx context.Con
 	return devPath, nil
 }
 
-func (m *CowVolumeManager) ensureSnapshotOrigin(sourceName, snapshotName string) error {
+func (m *XfsCow) ensureSnapshotOrigin(sourceName, snapshotName string) error {
 	result, err := m.engine.ListSnapshots(sourceName, 0, "")
 	if err != nil {
 		return fmt.Errorf("verify existing snapshot %s origin from %s: %w", snapshotName, sourceName, err)
@@ -367,7 +365,7 @@ func (m *CowVolumeManager) ensureSnapshotOrigin(sourceName, snapshotName string)
 	return fmt.Errorf("%w: name=%s kind=%s origin=%s", ErrCowObjectAlreadyExists, snapshotName, cowKindSnapshot, sourceName)
 }
 
-func (m *CowVolumeManager) DeleteByKind(ctx context.Context, name, kind string) error {
+func (m *XfsCow) DeleteByKind(ctx context.Context, name, kind string) error {
 	_ = ctx
 	deleteFn, err := m.deleteFunc(kind)
 	if err != nil {
@@ -399,7 +397,7 @@ func (m *CowVolumeManager) DeleteByKind(ctx context.Context, name, kind string) 
 	return err
 }
 
-func (m *CowVolumeManager) DeactivateByKind(ctx context.Context, name, kind string) error {
+func (m *XfsCow) DeactivateByKind(ctx context.Context, name, kind string) error {
 	_ = ctx
 	if _, err := m.deleteFunc(kind); err != nil {
 		return err
@@ -407,7 +405,7 @@ func (m *CowVolumeManager) DeactivateByKind(ctx context.Context, name, kind stri
 	return m.engine.DeactivateVolume(name)
 }
 
-func (m *CowVolumeManager) ResolveDevPath(ctx context.Context, name, kind string) (string, error) {
+func (m *XfsCow) ResolveDevPath(ctx context.Context, name, kind string) (string, error) {
 	_ = ctx
 	if _, err := m.deleteFunc(kind); err != nil {
 		return "", err
@@ -432,7 +430,7 @@ func (m *CowVolumeManager) ResolveDevPath(ctx context.Context, name, kind string
 	return info.DevicePath, nil
 }
 
-func (m *CowVolumeManager) GetSizeBytes(ctx context.Context, name string) (uint64, error) {
+func (m *XfsCow) GetSizeBytes(ctx context.Context, name string) (uint64, error) {
 	_ = ctx
 	info, err := m.engine.GetVolumeInfo(name)
 	if err != nil {
@@ -444,17 +442,17 @@ func (m *CowVolumeManager) GetSizeBytes(ctx context.Context, name string) (uint6
 	return info.SizeBytes, nil
 }
 
-func (m *CowVolumeManager) GetVolumeInfo(ctx context.Context, name string) (*cubecow.Volume, error) {
+func (m *XfsCow) GetVolumeInfo(ctx context.Context, name string) (*cubecow.Volume, error) {
 	_ = ctx
 	return m.engine.GetVolumeInfo(name)
 }
 
-func (m *CowVolumeManager) GetMetrics(ctx context.Context) (map[string]uint64, error) {
+func (m *XfsCow) GetMetrics(ctx context.Context) (map[string]uint64, error) {
 	_ = ctx
 	return m.engine.GetMetrics()
 }
 
-func (m *CowVolumeManager) deleteFunc(kind string) (func(string) error, error) {
+func (m *XfsCow) deleteFunc(kind string) (func(string) error, error) {
 	switch kind {
 	case cowKindVolume:
 		return m.engine.DeleteVolume, nil
@@ -468,7 +466,7 @@ func (m *CowVolumeManager) deleteFunc(kind string) (func(string) error, error) {
 // oppositeDeleteFunc returns the delete function for the other cubecow kind, so
 // DeleteByKind can recover when the recorded kind does not match the object's
 // real type. Returns nil for an unrecognized kind.
-func (m *CowVolumeManager) oppositeDeleteFunc(kind string) func(string) error {
+func (m *XfsCow) oppositeDeleteFunc(kind string) func(string) error {
 	switch kind {
 	case cowKindVolume:
 		return m.engine.DeleteSnapshot

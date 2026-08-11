@@ -70,15 +70,30 @@ const (
 	CubeAnnotationAppSnapshotVersion         = "cube.master.appsnapshot.version"
 	CubeAnnotationAppSnapshotTemplateVersion = "cube.master.appsnapshot.template.version"
 	CubeAnnotationRuntimeSnapshotID          = "cube.master.runtime.snapshot.id"
-	CubeAnnotationRuntimeSnapshotAttachedAt  = "cube.master.runtime.snapshot.attached_at"
-	CubeAnnotationRootfsArtifactID           = "cube.master.rootfs.artifact.id"
-	CubeAnnotationRootfsArtifactJobID        = "cube.master.rootfs.artifact.job_id"
-	CubeAnnotationRootfsArtifactURL          = "cube.master.rootfs.artifact.url"
-	CubeAnnotationRootfsArtifactToken        = "cube.master.rootfs.artifact.token"
-	CubeAnnotationRootfsArtifactSHA256       = "cube.master.rootfs.artifact.sha256"
-	CubeAnnotationRootfsArtifactSizeBytes    = "cube.master.rootfs.artifact.size_bytes"
-	CubeAnnotationWritableLayerSize          = "cube.master.rootfs.writable_layer_size"
-	CubeAnnotationTemplateSpecFingerprint    = "cube.master.template.spec_fingerprint"
+	// CubeAnnotationDesiredSandboxID asks Cubelet createid to reuse this
+	// sandbox ID (Resume-from-pause same-ID recreate).
+	CubeAnnotationDesiredSandboxID = "cube.master.desired.sandbox.id"
+	// CubeAnnotationPauseSnapshotID is the pause snapshot id allocated by
+	// Master (same snap-* format as normal snapshots). DB Kind=pause_snapshot;
+	// Cubelet only keeps the local catalog under that id.
+	CubeAnnotationPauseSnapshotID = "cube.master.pause.snapshot.id"
+	// CubeAnnotationPauseSkipAutoResume is set on Destroy after Pause so
+	// Cubelet Detaches volumes / wipes the live runtime without waking the
+	// exited shim, while keeping the pause snapshot catalog and a PAUSED
+	// CubeBox row for List/Info.
+	CubeAnnotationPauseSkipAutoResume = "cube.pause.skip_auto_resume"
+	// CubeAnnotationPauseDeleteTombstone removes the PAUSED CubeBox store row
+	// when the user deletes a paused sandbox (paired with skip_auto_resume).
+	CubeAnnotationPauseDeleteTombstone      = "cube.pause.delete_tombstone"
+	CubeAnnotationRuntimeSnapshotAttachedAt = "cube.master.runtime.snapshot.attached_at"
+	CubeAnnotationRootfsArtifactID          = "cube.master.rootfs.artifact.id"
+	CubeAnnotationRootfsArtifactJobID       = "cube.master.rootfs.artifact.job_id"
+	CubeAnnotationRootfsArtifactURL         = "cube.master.rootfs.artifact.url"
+	CubeAnnotationRootfsArtifactToken       = "cube.master.rootfs.artifact.token"
+	CubeAnnotationRootfsArtifactSHA256      = "cube.master.rootfs.artifact.sha256"
+	CubeAnnotationRootfsArtifactSizeBytes   = "cube.master.rootfs.artifact.size_bytes"
+	CubeAnnotationWritableLayerSize         = "cube.master.rootfs.writable_layer_size"
+	CubeAnnotationTemplateSpecFingerprint   = "cube.master.template.spec_fingerprint"
 	// CubeAnnotationCreateTimeEnvVars stores the serialized create-time env map
 	// that CubeMaster passes to cubelet for envd initialization.
 	CubeAnnotationCreateTimeEnvVars = "cube.master.internal.create_time_env_vars"

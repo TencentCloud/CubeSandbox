@@ -24,6 +24,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
@@ -84,6 +85,13 @@ func (s *service) Update(ctx context.Context, req *cubebox.UpdateCubeSandboxRequ
 
 	sb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, req.SandboxID)
 	if err != nil {
+		// After CubeCow Pause the live sandbox is gone. Resume is Master
+		// Create(same sandboxID from pause snap), not Update(resume).
+		if action == constants.UpdateActionResume && storage.IsCowBackend() {
+			rsp.Ret.RetMsg = "cubecow pause resume is owned by CubeMaster Create; Update(resume) is not supported"
+			rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+			return rsp, nil
+		}
 		rsp.Ret.RetMsg = err.Error()
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		return rsp, nil
@@ -95,8 +103,18 @@ func (s *service) Update(ctx context.Context, req *cubebox.UpdateCubeSandboxRequ
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		return rsp, nil
 	case constants.UpdateActionPause:
+		// CubeCow: Master-allocated snap-* catalog + shim exit + wipe live
+		// sandbox. Legacy pausevm remains for non-cubecow backends.
+		if storage.IsCowBackend() {
+			return s.updateWithPauseCow(ctx, req, sb)
+		}
 		return s.UpdateWithPause(ctx, req, sb)
 	case constants.UpdateActionResume:
+		if storage.IsCowBackend() {
+			rsp.Ret.RetMsg = "cubecow pause resume is owned by CubeMaster Create; Update(resume) is not supported"
+			rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+			return rsp, nil
+		}
 		return s.UpdateWithResume(ctx, req, sb)
 	default:
 		rsp.Ret.RetMsg = "invalid update action"

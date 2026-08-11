@@ -29,6 +29,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -264,6 +265,7 @@ func Init(ctx context.Context) error {
 		if initErr = sandboxspec.Init(store.db); initErr != nil {
 			return
 		}
+		pausesnap.Init(store.db)
 		configureSnapshotRuntimeRefHooks()
 		configureSandboxSpecHooks()
 		configureCompatHooks()

@@ -3,7 +3,7 @@
 //
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use containerd_shim::event::Event;
@@ -574,9 +574,34 @@ impl Task for TaskService {
             self.log.clone(),
         );
         let mut sb = self.sandbox.lock().await;
+        // After PauseToSnapshot the MicroVM is already gone; Cubelet Destroy
+        // (cube.pause.skip_auto_resume) still calls Delete to reap the task.
+        // Treat delete-while-paused as success and exit the shim (same as shutdown).
         if sb.paused().await {
-            errf!(self.log, "sandbox not in normal state");
-            return Err(Others(format!("sandbox not in normal state")));
+            infof!(
+                self.log,
+                "delete after pause-to-snapshot; treating as success and exiting shim"
+            );
+            let exit_tm = protobuf::well_known_types::timestamp::Timestamp {
+                seconds: chrono::Utc::now().timestamp(),
+                ..Default::default()
+            };
+            let pid = sb.pid();
+            drop(sb);
+            let exit = self.exit.clone();
+            let log = self.log.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                infof!(log, "pause-to-snapshot delete: signaling shim exit");
+                exit.signal();
+            });
+            stat.set_ok();
+            return Ok(api::DeleteResponse {
+                pid,
+                exit_status: 0,
+                exited_at: Some(exit_tm).into(),
+                ..Default::default()
+            });
         }
         let (exit_code, exit_tm) = {
             if req.exec_id.is_empty() {
@@ -670,31 +695,46 @@ impl Task for TaskService {
         req: api::UpdateTaskRequest,
     ) -> TtrpcResult<api::Empty> {
         infof!(self.log, "update req start, id:{}", &req.id);
-        let mut sb = self.sandbox.lock().await;
-        if sb.paused().await {
-            errf!(self.log, "sandbox not in normal state");
-            return Err(Others(format!("sandbox not in normal state")));
-        }
-        if let Some(resource) = req.resources.as_ref() {
-            let res = Utils::get_oci_res(resource.value.as_slice())
-                .map_err(|e| Error::Other(format!("Invalid format process config:{}", e)))?;
-            sb.update_container(&req.id, &res).await.map_err(|e| {
-                errf!(self.log, "update container failed:{}", e);
-                e
-            })?;
-        }
+        let outcome = {
+            let mut sb = self.sandbox.lock().await;
+            if sb.paused().await {
+                errf!(self.log, "sandbox not in normal state");
+                return Err(Others(format!("sandbox not in normal state")));
+            }
+            if let Some(resource) = req.resources.as_ref() {
+                let res = Utils::get_oci_res(resource.value.as_slice())
+                    .map_err(|e| Error::Other(format!("Invalid format process config:{}", e)))?;
+                sb.update_container(&req.id, &res).await.map_err(|e| {
+                    errf!(self.log, "update container failed:{}", e);
+                    e
+                })?;
+            }
 
-        sb.update_sandbox(&req.annotations).await.map_err(|e| {
-            errf!(self.log, "update sandbox failed:{}", e.clone());
-            Error::Other(format!("update sandbox failed:{}", e))
-        })?;
-
-        update_ext::update_route(&mut sb, &req.annotations, &self.log)
-            .await
-            .map_err(|e| {
+            sb.update_sandbox(&req.annotations).await.map_err(|e| {
                 errf!(self.log, "update sandbox failed:{}", e.clone());
                 Error::Other(format!("update sandbox failed:{}", e))
             })?;
+
+            update_ext::update_route(&mut sb, &req.annotations, &self.log)
+                .await
+                .map_err(|e| {
+                    errf!(self.log, "update sandbox failed:{}", e.clone());
+                    Error::Other(format!("update sandbox failed:{}", e))
+                })?
+        };
+
+        // PauseToSnapshot: MicroVM is already deleted and the durable snapshot
+        // is on disk. Exit the shim process after the Update response can flush
+        // so Cubelet can recreate from catalog on Resume (same sandboxID).
+        if outcome.exit_shim {
+            let exit = self.exit.clone();
+            let log = self.log.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                infof!(log, "pause to snapshot: signaling shim exit");
+                exit.signal();
+            });
+        }
 
         infof!(self.log, "update req finish");
         Ok(api::Empty::default())
@@ -722,21 +762,28 @@ impl Task for TaskService {
         infof!(self.log, "shutdown req start");
 
         let mut sb = self.sandbox.lock().await;
-        if sb.paused().await {
-            errf!(self.log, "sandbox not in normal state");
-            return Err(Others(format!("sandbox not in normal state")));
-        }
-        if !sb.is_empty().await {
+        // After PauseToSnapshot the sandbox is Paused (MicroVM already gone).
+        // Allow shutdown so Cubelet can reap the shim; skip destroy_sandbox
+        // when already paused because there is no live VM to tear down.
+        let already_paused = sb.paused().await;
+        if !already_paused && !sb.is_empty().await {
             infof!(
                 self.log,
                 "sandbox not empty, do nothing, shutdown req finish"
             );
             return Ok(api::Empty::default());
         }
-        if let Err(e) = sb.destroy_sandbox().await {
-            errf!(self.log, "shutdown failed:{}", e)
+        if !already_paused {
+            if let Err(e) = sb.destroy_sandbox().await {
+                errf!(self.log, "shutdown failed:{}", e)
+            } else {
+                infof!(self.log, "shutdown req finish");
+            }
         } else {
-            infof!(self.log, "shutdown req finish");
+            infof!(
+                self.log,
+                "shutdown after pause-to-snapshot; signaling shim exit"
+            );
         }
         self.exit.signal();
         Ok(api::Empty::default())

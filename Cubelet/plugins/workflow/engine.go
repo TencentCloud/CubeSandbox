@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -175,6 +176,18 @@ func (b *CreateContext) IsRetoreSnapshot() bool {
 	return !ok
 }
 
+// IsPauseResume is true when Master asks Cubelet to recreate the same sandbox
+// from a pause snapshot (cube.master.pause.snapshot.id). Distinct from
+// create-from-template / create-from-normal-snapshot: guest memory already has
+// container bind mounts, so Cubelet must not re-emit propagation exec.mount /
+// umount annotations.
+func (b *CreateContext) IsPauseResume() bool {
+	if b == nil || b.ReqInfo == nil {
+		return false
+	}
+	return strings.TrimSpace(b.ReqInfo.GetAnnotations()[constants.MasterAnnotationPauseSnapshotID]) != ""
+}
+
 func (b *CreateContext) GetSnapshotTemplateID() (string, bool) {
 	if b.ReqInfo == nil {
 		return "", false
@@ -182,11 +195,25 @@ func (b *CreateContext) GetSnapshotTemplateID() (string, bool) {
 	if b.GetInstanceType() != cubebox.InstanceType_cubebox.String() {
 		return "", false
 	}
-	v, ok := b.ReqInfo.GetAnnotations()[constants.MasterAnnotationAppSnapshotTemplateID]
-	if !ok || v == "" {
-		return "", false
+	ann := b.ReqInfo.GetAnnotations()
+	// Pause resume: Master sets pause.snapshot.id + runtime.snapshot.id=snap-*.
+	// Prefer runtime id so restore uses the pause catalog, not the original tpl-*.
+	if strings.TrimSpace(ann[constants.MasterAnnotationPauseSnapshotID]) != "" {
+		if v := strings.TrimSpace(ann[constants.MasterAnnotationRuntimeSnapshotID]); v != "" {
+			return v, true
+		}
 	}
-	return v, true
+	v, ok := ann[constants.MasterAnnotationAppSnapshotTemplateID]
+	if ok && v != "" {
+		return v, true
+	}
+	// Runtime / pause snapshots restore from the local catalog via
+	// cube.master.runtime.snapshot.id (pause uses Master-allocated snap-*).
+	v = ann[constants.MasterAnnotationRuntimeSnapshotID]
+	if v != "" {
+		return v, true
+	}
+	return "", false
 }
 
 func (b *CreateContext) IsCubeboxV2() bool {
