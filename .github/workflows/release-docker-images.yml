@@ -22,21 +22,26 @@ on:
         required: false
         type: string
         default: all
-      allow_kernel_release_fallback:
-        description: 'If image_tag Release is missing, download cube-kernel vmlinux from the latest Release (disable when called from release-one-click)'
+      kernel_bm_amd64_release_tag:
+        description: 'Dedicated kernel-release-* tag for vmlinux-amd64 (empty = read deploy/release-assets.yaml)'
         required: false
-        type: boolean
-        default: true
-      allow_guest_release_fallback:
-        description: 'If cube-guest-image asset is missing on image_tag, try latest Release asset, then extract cube-image from the latest one-click bundle (disable when called from release-one-click)'
+        type: string
+        default: ''
+      kernel_bm_arm64_release_tag:
+        description: 'Dedicated kernel-release-* tag for vmlinux-arm64 (empty = read deploy/release-assets.yaml)'
         required: false
-        type: boolean
-        default: true
-      allow_pvm_host_release_fallback:
-        description: 'If image_tag Release is missing, download PVM host rpm/deb from the latest Release (disable when called from release-one-click)'
+        type: string
+        default: ''
+      kernel_pvm_release_tag:
+        description: 'Dedicated kernel-release-* tag for vmlinux-pvm + PVM host packages (empty = read deploy/release-assets.yaml)'
         required: false
-        type: boolean
-        default: true
+        type: string
+        default: ''
+      guest_image_release_tag:
+        description: 'Dedicated guest-image-* tag for cube-guest-image assets (empty = read deploy/release-assets.yaml)'
+        required: false
+        type: string
+        default: ''
       skip_version_check:
         description: 'Skip bump-image.sh --check (manual/dev builds only; leave false for real releases)'
         required: false
@@ -58,21 +63,26 @@ on:
         required: false
         type: string
         default: all
-      allow_kernel_release_fallback:
-        description: 'If false, cube-kernel must download vmlinux from image_tag Release only (no latest fallback)'
+      kernel_bm_amd64_release_tag:
+        description: 'Dedicated kernel-release-* tag for vmlinux-amd64 (empty = read deploy/release-assets.yaml)'
         required: false
-        type: boolean
-        default: true
-      allow_guest_release_fallback:
-        description: 'If false, cube-guest must download rootfs from image_tag Release only (no latest / one-click fallback)'
+        type: string
+        default: ''
+      kernel_bm_arm64_release_tag:
+        description: 'Dedicated kernel-release-* tag for vmlinux-arm64 (empty = read deploy/release-assets.yaml)'
         required: false
-        type: boolean
-        default: true
-      allow_pvm_host_release_fallback:
-        description: 'If false, cube-pvm-host-bootstrap must download rpm/deb from image_tag Release only (no latest fallback)'
+        type: string
+        default: ''
+      kernel_pvm_release_tag:
+        description: 'Dedicated kernel-release-* tag for vmlinux-pvm + PVM host packages (empty = read deploy/release-assets.yaml)'
         required: false
-        type: boolean
-        default: true
+        type: string
+        default: ''
+      guest_image_release_tag:
+        description: 'Dedicated guest-image-* tag (empty = read deploy/release-assets.yaml)'
+        required: false
+        type: string
+        default: ''
       skip_version_check:
         description: 'Skip bump-image.sh --check (manual/dev builds only)'
         required: false
@@ -106,10 +116,66 @@ jobs:
         if: inputs.skip_version_check != true
         run: scripts/bump-image.sh --check "${{ inputs.image_tag }}"
 
+  resolve_asset_tags:
+    name: Resolve kernel / guest-image Release tags
+    runs-on: ubuntu-latest
+    needs: verify_versions
+    if: github.repository == 'TencentCloud/CubeSandbox'
+    outputs:
+      kernel_bm_amd64_release_tag: ${{ steps.resolve.outputs.kernel_bm_amd64_release_tag }}
+      kernel_bm_arm64_release_tag: ${{ steps.resolve.outputs.kernel_bm_arm64_release_tag }}
+      kernel_pvm_release_tag: ${{ steps.resolve.outputs.kernel_pvm_release_tag }}
+      guest_image_release_tag: ${{ steps.resolve.outputs.guest_image_release_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
+
+      - name: Install PyYAML
+        run: pip install pyyaml
+
+      - name: Resolve dedicated asset Release tags
+        id: resolve
+        env:
+          INPUT_KERNEL_BM_AMD64_RELEASE_TAG: ${{ inputs.kernel_bm_amd64_release_tag }}
+          INPUT_KERNEL_BM_ARM64_RELEASE_TAG: ${{ inputs.kernel_bm_arm64_release_tag }}
+          INPUT_KERNEL_PVM_RELEASE_TAG: ${{ inputs.kernel_pvm_release_tag }}
+          INPUT_GUEST_IMAGE_RELEASE_TAG: ${{ inputs.guest_image_release_tag }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${INPUT_KERNEL_BM_AMD64_RELEASE_TAG}" \
+             && -n "${INPUT_KERNEL_BM_ARM64_RELEASE_TAG}" \
+             && -n "${INPUT_KERNEL_PVM_RELEASE_TAG}" \
+             && -n "${INPUT_GUEST_IMAGE_RELEASE_TAG}" ]]; then
+            KERNEL_BM_AMD64_RELEASE_TAG="${INPUT_KERNEL_BM_AMD64_RELEASE_TAG}"
+            KERNEL_BM_ARM64_RELEASE_TAG="${INPUT_KERNEL_BM_ARM64_RELEASE_TAG}"
+            KERNEL_PVM_RELEASE_TAG="${INPUT_KERNEL_PVM_RELEASE_TAG}"
+            GUEST_IMAGE_RELEASE_TAG="${INPUT_GUEST_IMAGE_RELEASE_TAG}"
+          else
+            eval "$(scripts/read-release-assets.sh)"
+            [[ -n "${INPUT_KERNEL_BM_AMD64_RELEASE_TAG}" ]] && KERNEL_BM_AMD64_RELEASE_TAG="${INPUT_KERNEL_BM_AMD64_RELEASE_TAG}"
+            [[ -n "${INPUT_KERNEL_BM_ARM64_RELEASE_TAG}" ]] && KERNEL_BM_ARM64_RELEASE_TAG="${INPUT_KERNEL_BM_ARM64_RELEASE_TAG}"
+            [[ -n "${INPUT_KERNEL_PVM_RELEASE_TAG}" ]] && KERNEL_PVM_RELEASE_TAG="${INPUT_KERNEL_PVM_RELEASE_TAG}"
+            [[ -n "${INPUT_GUEST_IMAGE_RELEASE_TAG}" ]] && GUEST_IMAGE_RELEASE_TAG="${INPUT_GUEST_IMAGE_RELEASE_TAG}"
+          fi
+          {
+            echo "kernel_bm_amd64_release_tag=${KERNEL_BM_AMD64_RELEASE_TAG}"
+            echo "kernel_bm_arm64_release_tag=${KERNEL_BM_ARM64_RELEASE_TAG}"
+            echo "kernel_pvm_release_tag=${KERNEL_PVM_RELEASE_TAG}"
+            echo "guest_image_release_tag=${GUEST_IMAGE_RELEASE_TAG}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "using BM amd64 Release ${KERNEL_BM_AMD64_RELEASE_TAG}"
+          echo "using BM arm64 Release ${KERNEL_BM_ARM64_RELEASE_TAG}"
+          echo "using PVM Release ${KERNEL_PVM_RELEASE_TAG}"
+          echo "using guest-image Release ${GUEST_IMAGE_RELEASE_TAG}"
+
   prepare:
     name: Resolve component matrix
     runs-on: ubuntu-latest
-    needs: verify_versions
+    needs:
+      - verify_versions
+      - resolve_asset_tags
     if: github.repository == 'TencentCloud/CubeSandbox'
     outputs:
       build: ${{ steps.filter.outputs.build }}
@@ -330,7 +396,7 @@ jobs:
   build_images:
     name: ${{ matrix.component }} (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
-    needs: [verify_versions, prepare]
+    needs: [verify_versions, resolve_asset_tags, prepare]
     if: github.repository == 'TencentCloud/CubeSandbox'
     strategy:
       fail-fast: false
@@ -369,192 +435,136 @@ jobs:
         if: matrix.component == 'cube-kernel'
         env:
           GH_TOKEN: ${{ github.token }}
-          IMAGE_TAG: ${{ inputs.image_tag }}
           ARCH: ${{ matrix.arch }}
-          ALLOW_KERNEL_RELEASE_FALLBACK: ${{ inputs.allow_kernel_release_fallback }}
+          KERNEL_BM_AMD64_RELEASE_TAG: ${{ needs.resolve_asset_tags.outputs.kernel_bm_amd64_release_tag }}
+          KERNEL_BM_ARM64_RELEASE_TAG: ${{ needs.resolve_asset_tags.outputs.kernel_bm_arm64_release_tag }}
+          KERNEL_PVM_RELEASE_TAG: ${{ needs.resolve_asset_tags.outputs.kernel_pvm_release_tag }}
         run: |
           set -euo pipefail
           mkdir -p cube-kernel-ctx/artifacts cube-kernel-ctx/scripts
           rm -rf /tmp/cube-kernel-dl
           mkdir -p /tmp/cube-kernel-dl
 
-          # Prefer the same tag as image_tag. Optional fallback to latest Release
-          # (manual workflow_dispatch); release-one-click disables fallback.
-          if gh release view "${IMAGE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            KERNEL_RELEASE_TAG="${IMAGE_TAG}"
-            echo "using kernel assets from Release tag ${KERNEL_RELEASE_TAG} (matches image_tag)"
-          elif [[ "${ALLOW_KERNEL_RELEASE_FALLBACK}" == "true" ]]; then
-            KERNEL_RELEASE_TAG="$(
-              gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name
-            )"
-            [[ -n "${KERNEL_RELEASE_TAG}" && "${KERNEL_RELEASE_TAG}" != "null" ]] \
-              || { echo "no GitHub Release found for ${IMAGE_TAG} and no latest release available" >&2; exit 1; }
-            echo "Release ${IMAGE_TAG} not found; falling back to latest Release ${KERNEL_RELEASE_TAG} for kernel assets"
+          if [[ "${ARCH}" == "amd64" ]]; then
+            BM_RELEASE_TAG="${KERNEL_BM_AMD64_RELEASE_TAG}"
           else
-            echo "Release ${IMAGE_TAG} not found and kernel release fallback is disabled (expected after publish_kernel_amd64/arm64)" >&2
-            exit 1
+            BM_RELEASE_TAG="${KERNEL_BM_ARM64_RELEASE_TAG}"
           fi
+          PVM_RELEASE_TAG="${KERNEL_PVM_RELEASE_TAG}"
 
-          gh release download "${KERNEL_RELEASE_TAG}" \
+          require_release() {
+            local tag="$1"
+            local label="$2"
+            if [[ -z "${tag}" ]]; then
+              echo "${label} release tag is empty" >&2
+              exit 1
+            fi
+            if ! gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+              echo "pinned ${label} Release not found: ${tag}" >&2
+              exit 1
+            fi
+            echo "using ${label} assets from dedicated Release ${tag}"
+          }
+
+          require_release "${BM_RELEASE_TAG}" "BM ${ARCH}"
+          require_release "${PVM_RELEASE_TAG}" "PVM"
+
+          mkdir -p /tmp/cube-kernel-dl/bm-meta /tmp/cube-kernel-dl/pvm-meta
+
+          gh release download "${BM_RELEASE_TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
             --dir /tmp/cube-kernel-dl \
             --pattern "vmlinux-${ARCH}"
           test -f "/tmp/cube-kernel-dl/vmlinux-${ARCH}" \
-            || { echo "missing Release asset vmlinux-${ARCH} on ${KERNEL_RELEASE_TAG}" >&2; exit 1; }
+            || { echo "missing Release asset vmlinux-${ARCH} on ${BM_RELEASE_TAG}" >&2; exit 1; }
           install -m 0644 "/tmp/cube-kernel-dl/vmlinux-${ARCH}" cube-kernel-ctx/artifacts/vmlinux-bm
-          # PVM guest kernel is amd64-only. Prefer arch-suffixed asset (newer
-          # release-one-click uploads); fall back to legacy un-suffixed name
-          # used by published releases such as v0.5.1 (vmlinux-pvm only).
-          if gh release download "${KERNEL_RELEASE_TAG}" \
+
+          gh release download "${BM_RELEASE_TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --dir /tmp/cube-kernel-dl \
-            --pattern "vmlinux-pvm-${ARCH}"; then
-            install -m 0644 "/tmp/cube-kernel-dl/vmlinux-pvm-${ARCH}" cube-kernel-ctx/artifacts/vmlinux-pvm
-          elif [[ "${ARCH}" == "amd64" ]] \
-            && gh release download "${KERNEL_RELEASE_TAG}" \
+            --dir /tmp/cube-kernel-dl/bm-meta \
+            --pattern "kernel-metadata.json"
+          test -f /tmp/cube-kernel-dl/bm-meta/kernel-metadata.json \
+            || { echo "missing kernel-metadata.json on ${BM_RELEASE_TAG}" >&2; exit 1; }
+
+          # PVM guest kernel is amd64-only.
+          if [[ "${ARCH}" == "amd64" ]]; then
+            gh release download "${PVM_RELEASE_TAG}" \
               --repo "${GITHUB_REPOSITORY}" \
               --dir /tmp/cube-kernel-dl \
-              --pattern "vmlinux-pvm"; then
-            echo "using legacy Release asset vmlinux-pvm on ${KERNEL_RELEASE_TAG} (no vmlinux-pvm-${ARCH})"
-            install -m 0644 "/tmp/cube-kernel-dl/vmlinux-pvm" cube-kernel-ctx/artifacts/vmlinux-pvm
-          elif [[ "${ARCH}" == "amd64" ]]; then
-            echo "missing Release asset vmlinux-pvm-${ARCH} (and legacy vmlinux-pvm) on ${KERNEL_RELEASE_TAG}" >&2
-            exit 1
+              --pattern "vmlinux-pvm-${ARCH}"
+            test -f "/tmp/cube-kernel-dl/vmlinux-pvm-${ARCH}" \
+              || { echo "missing Release asset vmlinux-pvm-${ARCH} on ${PVM_RELEASE_TAG}" >&2; exit 1; }
+            install -m 0644 "/tmp/cube-kernel-dl/vmlinux-pvm-${ARCH}" cube-kernel-ctx/artifacts/vmlinux-pvm
           else
-            echo "no vmlinux-pvm-${ARCH} on ${KERNEL_RELEASE_TAG}; building BM-only cube-kernel for ${ARCH}"
+            echo "no PVM guest kernel for ${ARCH}; building BM-only cube-kernel"
           fi
+
+          if [[ "${PVM_RELEASE_TAG}" == "${BM_RELEASE_TAG}" ]]; then
+            cp /tmp/cube-kernel-dl/bm-meta/kernel-metadata.json \
+              /tmp/cube-kernel-dl/pvm-meta/kernel-metadata.json
+          else
+            gh release download "${PVM_RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --dir /tmp/cube-kernel-dl/pvm-meta \
+              --pattern "kernel-metadata.json"
+            test -f /tmp/cube-kernel-dl/pvm-meta/kernel-metadata.json \
+              || { echo "missing kernel-metadata.json on ${PVM_RELEASE_TAG}" >&2; exit 1; }
+          fi
+
+          eval "$(scripts/read-kernel-metadata.sh /tmp/cube-kernel-dl/bm-meta/kernel-metadata.json)"
+          BM_SOURCE_TAG="${KERNEL_BM_SOURCE_TAG}"
+          eval "$(scripts/read-kernel-metadata.sh /tmp/cube-kernel-dl/pvm-meta/kernel-metadata.json)"
+          PVM_SOURCE_TAG="${KERNEL_PVM_SOURCE_TAG}"
+
           install -m 0755 \
             deploy/kubernetes/images/scripts/component-entrypoint.sh \
             cube-kernel-ctx/scripts/component-entrypoint.sh
-          echo "asset_tag=${KERNEL_RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "asset_tag_bm=${BM_SOURCE_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "asset_tag_pvm=${PVM_SOURCE_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "bm_source=${BM_SOURCE_TAG} pvm_source=${PVM_SOURCE_TAG} (releases bm=${BM_RELEASE_TAG} pvm=${PVM_RELEASE_TAG})"
 
       - name: Stage cube-guest artifacts from Release
         id: stage_guest
         if: matrix.component == 'cube-guest'
         env:
           GH_TOKEN: ${{ github.token }}
-          IMAGE_TAG: ${{ inputs.image_tag }}
           ARCH: ${{ matrix.arch }}
-          ALLOW_GUEST_RELEASE_FALLBACK: ${{ inputs.allow_guest_release_fallback }}
+          GUEST_IMAGE_RELEASE_TAG: ${{ needs.resolve_asset_tags.outputs.guest_image_release_tag }}
         run: |
           set -euo pipefail
           mkdir -p cube-guest-ctx/package/cube-image cube-guest-ctx/scripts
-          rm -rf /tmp/cube-guest-dl /tmp/cube-guest-oneclick
+          rm -rf /tmp/cube-guest-dl
           mkdir -p /tmp/cube-guest-dl
 
-          latest_release_tag() {
-            gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name
-          }
-
-          # Try dedicated Release asset cube-guest-image-${ARCH}.tar.gz on a tag.
-          try_guest_asset() {
-            local tag="$1"
-            rm -rf /tmp/cube-guest-dl
-            mkdir -p /tmp/cube-guest-dl
-            if ! gh release download "${tag}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --dir /tmp/cube-guest-dl \
-              --pattern "cube-guest-image-${ARCH}.tar.gz"; then
-              return 1
-            fi
-            [[ -f "/tmp/cube-guest-dl/cube-guest-image-${ARCH}.tar.gz" ]] || return 1
-            rm -rf cube-guest-ctx/package/cube-image
-            mkdir -p cube-guest-ctx/package/cube-image
-            tar -xzf "/tmp/cube-guest-dl/cube-guest-image-${ARCH}.tar.gz" \
-              -C cube-guest-ctx/package/cube-image
-            return 0
-          }
-
-          # Extract cube-image/ from the arch-specific one-click bundle on a tag.
-          # Layout: cube-sandbox-one-click-<tag>-<arch>.tar.gz
-          #   → …/assets/package/sandbox-package.tar.gz
-          #   → sandbox-package/cube-image/{cube-guest-image-cpu.img,version}
-          try_oneclick_bundle() {
-            local tag="$1"
-            local bundle="cube-sandbox-one-click-${tag}-${ARCH}.tar.gz"
-            rm -rf /tmp/cube-guest-oneclick
-            mkdir -p /tmp/cube-guest-oneclick/bundle /tmp/cube-guest-oneclick/package
-            if ! gh release download "${tag}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --dir /tmp/cube-guest-oneclick \
-              --pattern "${bundle}"; then
-              return 1
-            fi
-            [[ -f "/tmp/cube-guest-oneclick/${bundle}" ]] || return 1
-            tar -xzf "/tmp/cube-guest-oneclick/${bundle}" -C /tmp/cube-guest-oneclick/bundle
-            local inner
-            # Exact layout from build-release-bundle.sh:
-            #   cube-sandbox-one-click-<dist>/assets/package/sandbox-package.tar.gz
-            inner="$(find /tmp/cube-guest-oneclick/bundle -type f \
-              -path '*/assets/package/sandbox-package.tar.gz' | head -n1)"
-            [[ -n "${inner}" && -f "${inner}" ]] \
-              || { echo "one-click bundle ${bundle} has no assets/package/sandbox-package.tar.gz" >&2; return 1; }
-            tar -xzf "${inner}" -C /tmp/cube-guest-oneclick/package
-            local img_dir="/tmp/cube-guest-oneclick/package/sandbox-package/cube-image"
-            [[ -d "${img_dir}" ]] \
-              || { echo "sandbox-package missing cube-image/ in ${bundle}" >&2; return 1; }
-            rm -rf cube-guest-ctx/package/cube-image
-            mkdir -p cube-guest-ctx/package/cube-image
-            cp -a "${img_dir}/." cube-guest-ctx/package/cube-image/
-            return 0
-          }
-
-          GUEST_SOURCE=""
-          GUEST_RELEASE_TAG=""
-
-          # 1) Prefer dedicated guest asset on image_tag Release (when it exists).
-          if gh release view "${IMAGE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            if try_guest_asset "${IMAGE_TAG}"; then
-              GUEST_RELEASE_TAG="${IMAGE_TAG}"
-              GUEST_SOURCE="release-asset:${IMAGE_TAG}"
-              echo "using guest assets from Release tag ${IMAGE_TAG} (matches image_tag)"
-            elif [[ "${ALLOW_GUEST_RELEASE_FALLBACK}" != "true" ]]; then
-              echo "missing Release asset cube-guest-image-${ARCH}.tar.gz on ${IMAGE_TAG} and guest fallback is disabled" >&2
-              exit 1
-            else
-              echo "Release ${IMAGE_TAG} has no cube-guest-image-${ARCH}.tar.gz; trying fallbacks"
-            fi
-          elif [[ "${ALLOW_GUEST_RELEASE_FALLBACK}" != "true" ]]; then
-            echo "Release ${IMAGE_TAG} not found and guest release fallback is disabled (expected after publish_guest_release_assets)" >&2
+          if [[ -z "${GUEST_IMAGE_RELEASE_TAG}" ]]; then
+            echo "guest_image_release_tag is empty" >&2
             exit 1
-          else
-            echo "Release ${IMAGE_TAG} not found; trying fallbacks for guest assets"
+          fi
+          if ! gh release view "${GUEST_IMAGE_RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "pinned guest-image Release not found: ${GUEST_IMAGE_RELEASE_TAG}" >&2
+            exit 1
           fi
 
-          # 2) Dedicated guest asset on latest Release.
-          # 3) If latest also lacks cube-guest-image-*.tar.gz, unpack cube-image
-          #    from the latest one-click install package.
-          if [[ -z "${GUEST_SOURCE}" && "${ALLOW_GUEST_RELEASE_FALLBACK}" == "true" ]]; then
-            LATEST_TAG="$(latest_release_tag)"
-            [[ -n "${LATEST_TAG}" && "${LATEST_TAG}" != "null" ]] \
-              || { echo "no latest GitHub Release available for guest fallback" >&2; exit 1; }
-            if try_guest_asset "${LATEST_TAG}"; then
-              GUEST_RELEASE_TAG="${LATEST_TAG}"
-              GUEST_SOURCE="release-asset:${LATEST_TAG}"
-              echo "using guest assets from latest Release ${LATEST_TAG}"
-            elif try_oneclick_bundle "${LATEST_TAG}"; then
-              GUEST_RELEASE_TAG="${LATEST_TAG}"
-              GUEST_SOURCE="one-click-bundle:${LATEST_TAG}"
-              echo "latest Release ${LATEST_TAG} has no cube-guest-image-${ARCH}.tar.gz; extracted cube-image from one-click bundle"
-            else
-              echo "failed to obtain cube-guest rootfs: no cube-guest-image-${ARCH}.tar.gz on ${IMAGE_TAG}/latest and one-click bundle fallback failed on ${LATEST_TAG}" >&2
-              exit 1
-            fi
-          fi
+          gh release download "${GUEST_IMAGE_RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir /tmp/cube-guest-dl \
+            --pattern "cube-guest-image-${ARCH}.tar.gz"
+          test -f "/tmp/cube-guest-dl/cube-guest-image-${ARCH}.tar.gz" \
+            || { echo "missing Release asset cube-guest-image-${ARCH}.tar.gz on ${GUEST_IMAGE_RELEASE_TAG}" >&2; exit 1; }
 
-          [[ -n "${GUEST_SOURCE}" ]] || { echo "internal error: guest source unset" >&2; exit 1; }
+          tar -xzf "/tmp/cube-guest-dl/cube-guest-image-${ARCH}.tar.gz" \
+            -C cube-guest-ctx/package/cube-image
+          echo "using guest assets from dedicated Release ${GUEST_IMAGE_RELEASE_TAG}"
 
           test -f cube-guest-ctx/package/cube-image/cube-guest-image-cpu.img
           test -f cube-guest-ctx/package/cube-image/version
-          # agent-version is legacy (agent baked into guest). Independent agent is
-          # published as cube-agent-${ARCH}.tar.gz / cube-agent image.
-          test ! -f cube-guest-ctx/package/cube-image/agent-version || \
-            echo "warning: legacy agent-version present in guest assets (ignored)"
+          test ! -f cube-guest-ctx/package/cube-image/agent-version \
+            || { echo "unexpected agent-version in guest assets (agent is separate)" >&2; exit 1; }
           install -m 0755 \
             deploy/kubernetes/images/scripts/component-entrypoint.sh \
             cube-guest-ctx/scripts/component-entrypoint.sh
-          echo "asset_tag=${GUEST_RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
-          echo "guest_source=${GUEST_SOURCE}" >> "${GITHUB_OUTPUT}"
+          echo "asset_tag=${GUEST_IMAGE_RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "guest_source=release-asset:${GUEST_IMAGE_RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
 
       - name: Stage cube-agent artifacts from Release
         id: stage_agent
@@ -563,112 +573,34 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           IMAGE_TAG: ${{ inputs.image_tag }}
           ARCH: ${{ matrix.arch }}
-          ALLOW_GUEST_RELEASE_FALLBACK: ${{ inputs.allow_guest_release_fallback }}
         run: |
           set -euo pipefail
           mkdir -p cube-agent-ctx/package/cube-agent cube-agent-ctx/scripts
-          rm -rf /tmp/cube-agent-dl /tmp/cube-agent-oneclick
+          rm -rf /tmp/cube-agent-dl
           mkdir -p /tmp/cube-agent-dl
 
-          latest_release_tag() {
-            gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name
-          }
-
-          try_agent_asset() {
-            local tag="$1"
-            rm -rf /tmp/cube-agent-dl
-            mkdir -p /tmp/cube-agent-dl
-            if ! gh release download "${tag}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --dir /tmp/cube-agent-dl \
-              --pattern "cube-agent-${ARCH}.tar.gz"; then
-              return 1
-            fi
-            [[ -f "/tmp/cube-agent-dl/cube-agent-${ARCH}.tar.gz" ]] || return 1
-            rm -rf cube-agent-ctx/package/cube-agent
-            mkdir -p cube-agent-ctx/package/cube-agent
-            tar -xzf "/tmp/cube-agent-dl/cube-agent-${ARCH}.tar.gz" \
-              -C cube-agent-ctx/package/cube-agent
-            return 0
-          }
-
-          # Fallback: extract cube-agent/ from one-click sandbox-package.
-          try_oneclick_bundle() {
-            local tag="$1"
-            local bundle="cube-sandbox-one-click-${tag}-${ARCH}.tar.gz"
-            rm -rf /tmp/cube-agent-oneclick
-            mkdir -p /tmp/cube-agent-oneclick/bundle /tmp/cube-agent-oneclick/package
-            if ! gh release download "${tag}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --dir /tmp/cube-agent-oneclick \
-              --pattern "${bundle}"; then
-              return 1
-            fi
-            [[ -f "/tmp/cube-agent-oneclick/${bundle}" ]] || return 1
-            tar -xzf "/tmp/cube-agent-oneclick/${bundle}" -C /tmp/cube-agent-oneclick/bundle
-            local inner
-            inner="$(find /tmp/cube-agent-oneclick/bundle -type f \
-              -path '*/assets/package/sandbox-package.tar.gz' | head -n1)"
-            [[ -n "${inner}" && -f "${inner}" ]] \
-              || { echo "one-click bundle ${bundle} has no assets/package/sandbox-package.tar.gz" >&2; return 1; }
-            tar -xzf "${inner}" -C /tmp/cube-agent-oneclick/package
-            local agent_dir="/tmp/cube-agent-oneclick/package/sandbox-package/cube-agent"
-            [[ -d "${agent_dir}" ]] \
-              || { echo "sandbox-package missing cube-agent/ in ${bundle}" >&2; return 1; }
-            rm -rf cube-agent-ctx/package/cube-agent
-            mkdir -p cube-agent-ctx/package/cube-agent
-            cp -a "${agent_dir}/." cube-agent-ctx/package/cube-agent/
-            return 0
-          }
-
-          AGENT_SOURCE=""
-          AGENT_RELEASE_TAG=""
-
-          if gh release view "${IMAGE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            if try_agent_asset "${IMAGE_TAG}"; then
-              AGENT_RELEASE_TAG="${IMAGE_TAG}"
-              AGENT_SOURCE="release-asset:${IMAGE_TAG}"
-              echo "using agent assets from Release tag ${IMAGE_TAG}"
-            elif [[ "${ALLOW_GUEST_RELEASE_FALLBACK}" != "true" ]]; then
-              echo "missing Release asset cube-agent-${ARCH}.tar.gz on ${IMAGE_TAG} and fallback is disabled" >&2
-              exit 1
-            else
-              echo "Release ${IMAGE_TAG} has no cube-agent-${ARCH}.tar.gz; trying fallbacks"
-            fi
-          elif [[ "${ALLOW_GUEST_RELEASE_FALLBACK}" != "true" ]]; then
-            echo "Release ${IMAGE_TAG} not found and agent fallback is disabled" >&2
+          if ! gh release view "${IMAGE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "product Release not found for agent assets: ${IMAGE_TAG}" >&2
             exit 1
-          else
-            echo "Release ${IMAGE_TAG} not found; trying fallbacks for agent assets"
           fi
-
-          if [[ -z "${AGENT_SOURCE}" && "${ALLOW_GUEST_RELEASE_FALLBACK}" == "true" ]]; then
-            LATEST_TAG="$(latest_release_tag)"
-            [[ -n "${LATEST_TAG}" && "${LATEST_TAG}" != "null" ]] \
-              || { echo "no latest GitHub Release available for agent fallback" >&2; exit 1; }
-            if try_agent_asset "${LATEST_TAG}"; then
-              AGENT_RELEASE_TAG="${LATEST_TAG}"
-              AGENT_SOURCE="release-asset:${LATEST_TAG}"
-              echo "using agent assets from latest Release ${LATEST_TAG}"
-            elif try_oneclick_bundle "${LATEST_TAG}"; then
-              AGENT_RELEASE_TAG="${LATEST_TAG}"
-              AGENT_SOURCE="one-click-bundle:${LATEST_TAG}"
-              echo "latest Release ${LATEST_TAG} has no cube-agent-${ARCH}.tar.gz; extracted cube-agent from one-click bundle"
-            else
-              echo "failed to obtain cube-agent artifacts: no cube-agent-${ARCH}.tar.gz on ${IMAGE_TAG}/latest and one-click fallback failed on ${LATEST_TAG}" >&2
-              exit 1
-            fi
+          if ! gh release download "${IMAGE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir /tmp/cube-agent-dl \
+            --pattern "cube-agent-${ARCH}.tar.gz"; then
+            echo "missing Release asset cube-agent-${ARCH}.tar.gz on ${IMAGE_TAG}" >&2
+            exit 1
           fi
-
-          [[ -n "${AGENT_SOURCE}" ]] || { echo "internal error: agent source unset" >&2; exit 1; }
+          tar -xzf "/tmp/cube-agent-dl/cube-agent-${ARCH}.tar.gz" \
+            -C cube-agent-ctx/package/cube-agent
+          echo "using agent assets from product Release ${IMAGE_TAG}"
 
           test -f cube-agent-ctx/package/cube-agent/cube-agent.ext4
           test -f cube-agent-ctx/package/cube-agent/version
           install -m 0755 \
             deploy/kubernetes/images/scripts/component-entrypoint.sh \
             cube-agent-ctx/scripts/component-entrypoint.sh
-          echo "asset_tag=${AGENT_RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
-          echo "agent_source=${AGENT_SOURCE}" >> "${GITHUB_OUTPUT}"
+          echo "asset_tag=${IMAGE_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "agent_source=release-asset:${IMAGE_TAG}" >> "${GITHUB_OUTPUT}"
 
       - name: Stage cube-egress-net context
         if: matrix.component == 'cube-egress-net'
@@ -706,8 +638,7 @@ jobs:
         if: matrix.component == 'cube-pvm-host-bootstrap'
         env:
           GH_TOKEN: ${{ github.token }}
-          IMAGE_TAG: ${{ inputs.image_tag }}
-          ALLOW_PVM_HOST_RELEASE_FALLBACK: ${{ inputs.allow_pvm_host_release_fallback }}
+          KERNEL_PVM_RELEASE_TAG: ${{ needs.resolve_asset_tags.outputs.kernel_pvm_release_tag }}
         run: |
           set -euo pipefail
           mkdir -p cube-pvm-host-bootstrap-ctx/scripts cube-pvm-host-bootstrap-ctx/artifacts
@@ -726,28 +657,21 @@ jobs:
               "cube-pvm-host-bootstrap-ctx/scripts/${script}"
           done
 
-          # Prefer the same tag as image_tag. Optional fallback to latest Release
-          # (manual workflow_dispatch); release-one-click disables fallback.
-          if gh release view "${IMAGE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            PVM_HOST_RELEASE_TAG="${IMAGE_TAG}"
-            echo "using PVM host packages from Release tag ${PVM_HOST_RELEASE_TAG} (matches image_tag)"
-          elif [[ "${ALLOW_PVM_HOST_RELEASE_FALLBACK}" == "true" ]]; then
-            PVM_HOST_RELEASE_TAG="$(
-              gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name
-            )"
-            [[ -n "${PVM_HOST_RELEASE_TAG}" && "${PVM_HOST_RELEASE_TAG}" != "null" ]] \
-              || { echo "no GitHub Release found for ${IMAGE_TAG} and no latest release available" >&2; exit 1; }
-            echo "Release ${IMAGE_TAG} not found; falling back to latest Release ${PVM_HOST_RELEASE_TAG} for PVM host packages"
-          else
-            echo "Release ${IMAGE_TAG} not found and PVM host release fallback is disabled (expected after wait_pvm_host_release_assets)" >&2
+          if [[ -z "${KERNEL_PVM_RELEASE_TAG}" ]]; then
+            echo "kernel_pvm_release_tag is empty" >&2
             exit 1
           fi
+          if ! gh release view "${KERNEL_PVM_RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "pinned PVM Release not found: ${KERNEL_PVM_RELEASE_TAG}" >&2
+            exit 1
+          fi
+          echo "using PVM host packages from dedicated PVM Release ${KERNEL_PVM_RELEASE_TAG}"
 
-          gh release download "${PVM_HOST_RELEASE_TAG}" \
+          gh release download "${KERNEL_PVM_RELEASE_TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
             --dir /tmp/cube-pvm-host-dl \
             --pattern "*.rpm" || true
-          gh release download "${PVM_HOST_RELEASE_TAG}" \
+          gh release download "${KERNEL_PVM_RELEASE_TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
             --dir /tmp/cube-pvm-host-dl \
             --pattern "*.deb" || true
@@ -782,14 +706,14 @@ jobs:
           shopt -u nullglob
 
           [[ -n "${rpm_src}" ]] \
-            || { echo "missing main PVM host kernel RPM on ${PVM_HOST_RELEASE_TAG}" >&2; ls -la /tmp/cube-pvm-host-dl >&2 || true; exit 1; }
+            || { echo "missing main PVM host kernel RPM on ${KERNEL_PVM_RELEASE_TAG}" >&2; ls -la /tmp/cube-pvm-host-dl >&2 || true; exit 1; }
           [[ -n "${deb_src}" ]] \
-            || { echo "missing main PVM host kernel DEB on ${PVM_HOST_RELEASE_TAG}" >&2; ls -la /tmp/cube-pvm-host-dl >&2 || true; exit 1; }
+            || { echo "missing main PVM host kernel DEB on ${KERNEL_PVM_RELEASE_TAG}" >&2; ls -la /tmp/cube-pvm-host-dl >&2 || true; exit 1; }
 
           install -m 0644 "${rpm_src}" cube-pvm-host-bootstrap-ctx/artifacts/kernel-pvm-host.rpm
           install -m 0644 "${deb_src}" cube-pvm-host-bootstrap-ctx/artifacts/linux-image-pvm-host.deb
-          echo "asset_tag=${PVM_HOST_RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
-          echo "staged rpm=$(basename "${rpm_src}") deb=$(basename "${deb_src}") from ${PVM_HOST_RELEASE_TAG}"
+          echo "asset_tag=${KERNEL_PVM_RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "staged rpm=$(basename "${rpm_src}") deb=$(basename "${deb_src}") from ${KERNEL_PVM_RELEASE_TAG}"
 
       - name: Build and push per-arch image
         uses: docker/build-push-action@v6
@@ -809,8 +733,8 @@ jobs:
             CUBE_BUILD_TIME=${{ steps.meta.outputs.build_time }}
             CUBE_PROXY_BASE_IMAGE=${{ env.OPENRESTY_BASE_IMAGE }}
             OPENRESTY_BASE_IMAGE=${{ env.OPENRESTY_BASE_IMAGE }}
-            CUBE_KERNEL_BM_VERSION=${{ steps.stage_kernel.outputs.asset_tag || inputs.image_tag }}
-            CUBE_KERNEL_PVM_VERSION=${{ steps.stage_kernel.outputs.asset_tag || inputs.image_tag }}
+            CUBE_KERNEL_BM_VERSION=${{ steps.stage_kernel.outputs.asset_tag_bm || inputs.image_tag }}
+            CUBE_KERNEL_PVM_VERSION=${{ steps.stage_kernel.outputs.asset_tag_pvm || inputs.image_tag }}
           tags: |
             ghcr.io/tencentcloud/${{ matrix.image }}:${{ inputs.image_tag }}-${{ matrix.arch }}
             cube-sandbox-int.tencentcloudcr.com/cube-sandbox/${{ matrix.image }}:${{ inputs.image_tag }}-${{ matrix.arch }}
