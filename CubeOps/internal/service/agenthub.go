@@ -42,6 +42,19 @@ type CubeMasterClient interface {
 // SDKInstanceType is the CubeMaster instance_type used for AgentHub sandboxes.
 const SDKInstanceType = "cubebox"
 
+// defaultAgentTemplateID is the last-resort template identifier CreateInstance
+// uses when the caller supplies neither a snapshot nor a templateId and no
+// AgentHub template is registered to default to.
+//
+// Nothing in this repository provisions a template under this identifier: it is
+// not a tpl-/snap- id, so CubeMaster resolves it through GetTemplateByAlias,
+// and it only resolves on installs where an operator happened to claim it as a
+// template alias. Reaching it therefore means "no template is registered",
+// which CreateInstance reports as such instead of surfacing CubeMaster's
+// not-found. Kept as a fallback rather than dropped so that installs which do
+// carry the alias keep working.
+const defaultAgentTemplateID = "wecom-ds-openclaw"
+
 // ── Error ───────────────────────────────────────────────────────────────────
 
 // Error is the service-layer error type. It carries an HTTP status code so
@@ -105,6 +118,13 @@ func wrapCMError(err error) *Error {
 	}
 }
 
+// isCMNotFound reports whether err is a CubeMaster not-found (130404). Callers
+// that need the full status mapping should use wrapCMError instead.
+func isCMNotFound(err error) bool {
+	var cmErr *cubemaster.CMError
+	return errors.As(err, &cmErr) && cmErr.IsNotFound()
+}
+
 // ── AgentStore interface ────────────────────────────────────────────────────
 
 // AgentStore is the subset of *store.Store that AgentHubService depends on.
@@ -123,6 +143,7 @@ type AgentStore interface {
 	GetAgentSnapshot(ctx context.Context, agentID, snapshotID string) (*store.AgentSnapshot, error)
 	DeleteAgentSnapshot(ctx context.Context, agentID, snapshotID string) error
 	GetAgentTemplate(ctx context.Context, templateID string) (*store.AgentTemplate, error)
+	ListAgentTemplates(ctx context.Context, limit, offset int) ([]store.AgentTemplate, error)
 	RecordOperation(ctx context.Context, agentID, sandboxID, operationType, status, errMsg string) error
 	LatestHealthySnapshot(ctx context.Context, agentID string) (string, error)
 	SetBaseSnapshotID(ctx context.Context, agentID, snapshotID string) error
@@ -391,6 +412,34 @@ type CreateInstanceResult struct {
 	Instance *store.AgentInstance
 }
 
+// defaultTemplateID picks the template CreateInstance uses when the caller
+// omits templateId: the recommended registered template if there is one,
+// otherwise the most recently registered one (ListAgentTemplates orders by
+// created_at DESC). The recommended flag is what the Dashboard sets on every
+// template it registers from the market.
+//
+// ok is false when no AgentHub template is registered at all — or when the
+// listing failed, which is indistinguishable from the caller's point of view
+// and is logged. In that case the returned id is defaultAgentTemplateID, which
+// the caller passes to CubeMaster anyway so that installs carrying that alias
+// keep working.
+func (s *AgentHubService) defaultTemplateID(ctx context.Context) (id string, ok bool) {
+	templates, err := s.Store.ListAgentTemplates(ctx, store.DefaultListLimit, 0)
+	if err != nil {
+		logging.G(ctx).Warnf("failed to list agent templates while choosing a default: %v", err)
+		return defaultAgentTemplateID, false
+	}
+	for _, tmpl := range templates {
+		if tmpl.Recommended {
+			return tmpl.TemplateID, true
+		}
+	}
+	if len(templates) > 0 {
+		return templates[0].TemplateID, true
+	}
+	return defaultAgentTemplateID, false
+}
+
 // CreateInstance orchestrates the full agent creation flow:
 //
 //  1. Resolve LLM config + domain + egress network config from settings.
@@ -431,6 +480,10 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 	snapshotID := strings.TrimSpace(req.SnapshotID)
 	rootfsSourceType := "template"
 	rootfsSourceID := ""
+	// Set when the request named no template and none is registered, so the
+	// unprovisioned defaultAgentTemplateID was used; lets the CreateSandbox
+	// error below name the real problem.
+	noTemplateRegistered := false
 	if snapshotID != "" {
 		rootfsSourceType = "snapshot"
 		rootfsSourceID = snapshotID
@@ -438,7 +491,9 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 		if req.TemplateID != "" {
 			rootfsSourceID = req.TemplateID
 		} else {
-			rootfsSourceID = "wecom-ds-openclaw"
+			var resolved bool
+			rootfsSourceID, resolved = s.defaultTemplateID(ctx)
+			noTemplateRegistered = !resolved
 		}
 	}
 	templateID := rootfsSourceID
@@ -535,6 +590,14 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 	// --- Create sandbox ---
 	sandboxResp, err := s.CM.CreateSandbox(ctx, cmReq)
 	if err != nil {
+		// The caller named no template, none is registered, and CubeMaster
+		// could not resolve the fallback either. Report the missing
+		// registration rather than a not-found for an identifier the caller
+		// never supplied.
+		if noTemplateRegistered && isCMNotFound(err) {
+			return nil, NewBadRequest("no agent template is registered: register one from the template market " +
+				"(POST /agenthub/templates/market), or pass templateId explicitly")
+		}
 		return nil, NewBadGateway("failed to create sandbox: " + err.Error())
 	}
 	var sbResult struct {
