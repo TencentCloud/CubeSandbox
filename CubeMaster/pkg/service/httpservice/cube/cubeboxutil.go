@@ -68,7 +68,7 @@ func dealCubeboxReqTemplateByLocalConfig(ctx context.Context, reqInOut *types.Cr
 	dealVolumeTemplate(reqInOut.Volumes, templateReq.Volumes)
 
 	for i, ctr := range reqInOut.Containers {
-		if err := applyTemplateToContainer(ctr, templateReq.Containers[i], i); err != nil {
+		if err := applyTemplateToContainer(ctx, ctr, templateReq.Containers[i], i); err != nil {
 			return err
 		}
 	}
@@ -102,7 +102,7 @@ func validateTemplateRequirements(templateReq *types.CreateCubeSandboxReq, req *
 	return nil
 }
 
-func applyTemplateToContainer(ctr *types.Container, templateCtr *types.Container, index int) error {
+func applyTemplateToContainer(ctx context.Context, ctr *types.Container, templateCtr *types.Container, index int) error {
 	if ctr.Name == "" {
 		ctr.Name = templateCtr.Name
 		if ctr.Name == "" {
@@ -123,6 +123,15 @@ func applyTemplateToContainer(ctr *types.Container, templateCtr *types.Container
 	ctr.Syscalls = templateCtr.Syscalls
 	ctr.Sysctls = templateCtr.Sysctls
 	ctr.SecurityContext = templateCtr.SecurityContext
+	// Lifecycle hooks are template-sourced (set at template build, not
+	// create-overridable). Copied unconditionally, mirroring Sysctls; NOT added
+	// to WhitelistReqTag (that would make them request-sourced / dead config).
+	// Warn if the create request supplied lifecycle_hooks — it will be silently
+	// overwritten by the template's value (footgun: user thinks their hooks ran).
+	if ctr.LifecycleHooks != nil {
+		log.G(ctx).Warnf("request-supplied lifecycle_hooks on container %q is ignored; lifecycle hooks are template-sourced", ctr.Name)
+	}
+	ctr.LifecycleHooks = templateCtr.LifecycleHooks
 
 	ctr.Envs = append(ctr.Envs, templateCtr.Envs...)
 	applyTemplateVolumeMounts(templateCtr, ctr)
@@ -496,7 +505,7 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 			reqInOut.Containers = append(reqInOut.Containers, templateCtr)
 			continue
 		}
-		if err := applyTemplateToContainer(reqInOut.Containers[i], templateCtr, i); err != nil {
+		if err := applyTemplateToContainer(ctx, reqInOut.Containers[i], templateCtr, i); err != nil {
 			return err
 		}
 	}

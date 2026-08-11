@@ -634,6 +634,11 @@ func makeContainerConfigToSave(cfg *cubebox.ContainerConfig) *cubebox.ContainerC
 			_ = protobuf.Unmarshal(inPostStop, ret.Poststop)
 		}
 	}
+	if cfg.GetLifecycleHooks() != nil {
+		ret.LifecycleHooks = &cubebox.LifecycleHooks{}
+		inHooks, _ := protobuf.Marshal(cfg.GetLifecycleHooks())
+		_ = protobuf.Unmarshal(inHooks, ret.LifecycleHooks)
+	}
 	if ret.Annotations == nil {
 		ret.Annotations = make(map[string]string)
 	}

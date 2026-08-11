@@ -230,6 +230,14 @@ func (s *service) updateWithPauseCow(
 	}
 	doPreStop(workCtx, sb.FirstContainer())
 
+	// prePause lifecycle hook (issue #1308): run before the VM is frozen
+	// (PauseToSnapshot), while the guest is still running and reachable. On ABORT
+	// failure the pause is abandoned (the sandbox stays running) and the hook
+	// error is returned; under IGNORE the failure is logged and pause proceeds.
+	if hookRet := s.cubeboxMgr.runPrePauseHookResult(workCtx, sb, req.RequestID); hookRet != nil {
+		return failPause(hookRet.RetCode, hookRet.RetMsg)
+	}
+
 	task, err := sb.FirstContainer().Container.Task(workCtx, nil)
 	if err != nil {
 		return failPause(errorcode.ErrorCode_TaskPauseFailed, err.Error())

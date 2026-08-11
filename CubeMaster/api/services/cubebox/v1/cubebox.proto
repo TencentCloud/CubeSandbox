@@ -294,6 +294,47 @@ message PostStop {
   LifecycleHandler lifecyle_handler = 2;
 }
 
+// ExecAction runs a command inside the sandbox guest via containerd task.Exec.
+message ExecAction {
+  // Command is argv; command[0] is the executable path. Required (length >= 1).
+  repeated string command = 1;
+  // Optional working directory inside the sandbox. Empty = container default.
+  optional string working_dir = 2;
+}
+
+// LifecycleHookHandler selects how an in-sandbox lifecycle hook is executed.
+// Exactly one of exec / http_get must be set.
+message LifecycleHookHandler {
+  ExecAction    exec = 1;
+  HTTPGetAction http_get = 2;
+}
+
+// HookFailurePolicy decides what happens when an in-sandbox lifecycle hook
+// fails (non-zero exec exit, non-2xx HTTP, or timeout).
+enum HookFailurePolicy {
+  HOOK_FAILURE_POLICY_ABORT = 0;
+  HOOK_FAILURE_POLICY_IGNORE = 1;
+}
+
+// LifecycleHook describes one in-sandbox hook Cubelet executes around a
+// pause/resume transition.
+message LifecycleHook {
+  LifecycleHookHandler handler = 1;
+  // Bounded execution timeout in milliseconds. Must be > 0 and <= 30000.
+  int32 timeout_ms = 2;
+  // Failure policy. Defaults to ABORT (the zero value) when unset.
+  HookFailurePolicy failure_policy = 3;
+}
+
+// LifecycleHooks groups the in-sandbox pause/resume hooks. All optional.
+message LifecycleHooks {
+  // pre_pause runs before the VM state is persisted (before task.Pause).
+  LifecycleHook pre_pause = 1;
+  // post_resume runs after the guest and envd are available, before the
+  // sandbox is reported ready (after task.Resume).
+  LifecycleHook post_resume = 2;
+}
+
 message Hook {
   string path = 1;
   repeated string args = 2;
@@ -368,6 +409,8 @@ message ContainerConfig {
   Hooks hooks = 20;
   // CDI
   OCIConfig oci_config = 21;
+  // In-sandbox pause/resume lifecycle hooks.
+  LifecycleHooks lifecycle_hooks = 22;
 }
 
 message OCIConfig {
