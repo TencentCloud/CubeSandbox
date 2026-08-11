@@ -994,13 +994,25 @@ func ResolveTemplateIdentifier(ctx context.Context, identifier string) (string, 
 // from any other non-deleting template that currently holds it, then sets
 // display_name on the target template. Call this only for a non-FAILED template
 // so an alias never points to a broken one (callers gate on status != FAILED).
-func claimTemplateAlias(ctx context.Context, templateID, alias string) error {
+func claimTemplateAlias(ctx context.Context, templateID, alias string, requireReady bool) error {
 	alias = strings.TrimSpace(alias)
 	if alias == "" {
 		return nil
 	}
 	if !isReady() {
 		return ErrTemplateStoreNotInitialized
+	}
+	// Status predicate for the claim/confirm. The shared create/redo path
+	// (claimAliasForReadyTemplate) only excludes DELETING — it legitimately
+	// claims at PARTIALLY_READY, before READY is published. The operator
+	// SetTemplateAlias path (requireReady) additionally requires READY so a
+	// target that starts rebuilding between GetDefinition and the claim can't
+	// receive an alias (design §3.5).
+	statusExpr := "status <> ?"
+	statusVal := StatusDeleting
+	if requireReady {
+		statusExpr = "status = ?"
+		statusVal = StatusReady
 	}
 	// Two concurrent SetTemplateAlias calls swapping aliases between the same
 	// pair of templates can InnoDB-deadlock (the release locks one row, the
@@ -1015,23 +1027,32 @@ func claimTemplateAlias(ctx context.Context, templateID, alias string) error {
 				return fmt.Errorf("release stale alias %q fail: %w", alias, err)
 			}
 			if err := tx.Table(constants.TemplateDefinitionTableName).
-				Where("template_id = ?", templateID).
+				Where(fmt.Sprintf("template_id = ? AND %s", statusExpr), templateID, statusVal).
 				Update("display_name", alias).Error; err != nil {
 				return fmt.Errorf("claim alias %q for template %s fail: %w", alias, templateID, err)
 			}
-			// Confirm the target still exists, holds the alias, and is not
-			// DELETING. If it was hard-deleted (or flipped to DELETING) between
-			// GetDefinition and this transaction the confirm matches 0 rows;
-			// returning here rolls back the release so the original holder keeps
-			// its alias. A SELECT (not RowsAffected) avoids MySQL's rows-changed
-			// conflation with idempotent re-claims.
+			// Confirm the target still exists, holds the alias, and satisfies the
+			// status predicate. If it was hard-deleted / flipped to DELETING /
+			// (operator path) no longer READY between GetDefinition and this
+			// transaction, the confirm matches 0 rows and returning here rolls
+			// back the release so the original holder keeps its alias. A SELECT
+			// (not RowsAffected) avoids MySQL's rows-changed conflation.
 			var claimed int64
 			if err := tx.Table(constants.TemplateDefinitionTableName).
-				Where("template_id = ? AND alias_key = ? AND status <> ?", templateID, alias, StatusDeleting).
+				Where(fmt.Sprintf("template_id = ? AND alias_key = ? AND %s", statusExpr), templateID, alias, statusVal).
 				Count(&claimed).Error; err != nil {
 				return fmt.Errorf("confirm alias claim for template %s fail: %w", templateID, err)
 			}
 			if claimed == 0 {
+				// Operator path: distinguish "deleted" (404) from "exists but no
+				// longer READY" (409, retry once it rebuilds to READY).
+				if requireReady {
+					var exists int64
+					if err := tx.Table(constants.TemplateDefinitionTableName).
+						Where("template_id = ?", templateID).Count(&exists).Error; err == nil && exists > 0 {
+						return ErrTemplateNotReady
+					}
+				}
 				return ErrTemplateNotFound
 			}
 			return nil
@@ -1093,7 +1114,7 @@ func claimAliasForReadyTemplate(ctx context.Context, templateID, alias string) (
 	if alias == "" {
 		return "", ""
 	}
-	if claimErr := claimTemplateAlias(ctx, templateID, alias); claimErr != nil {
+	if claimErr := claimTemplateAlias(ctx, templateID, alias, false); claimErr != nil {
 		if isDuplicateAliasError(claimErr) {
 			log.G(ctx).Infof("alias %q concurrently claimed by another template; template %s is READY without alias", alias, templateID)
 			return "", ""
@@ -1166,14 +1187,58 @@ func SetTemplateAlias(ctx context.Context, templateID, alias string) error {
 	if cur, err := GetTemplateByAlias(ctx, alias); err == nil && cur != nil && cur.TemplateID != templateID {
 		oldHolder = cur.TemplateID
 	}
-	if err := claimTemplateAlias(ctx, templateID, alias); err != nil {
+	if err := claimTemplateAlias(ctx, templateID, alias, true); err != nil {
 		return err
 	}
 	syncTemplateImageJobAliasBestEffort(ctx, templateID, alias)
 	if oldHolder != "" {
 		syncTemplateImageJobAliasBestEffort(ctx, oldHolder, "")
 	}
+	// Also clear the alias from any OTHER template's in-progress build job, so a
+	// still-building template created with this alias can't reclaim it on
+	// completion and steal it back (design §3.6).
+	clearAliasFromOtherInProgressJobsBestEffort(ctx, alias, templateID)
 	return nil
+}
+
+// applyAliasToRequestJSON returns payload with its "alias" field set to alias
+// (omitted when alias is ""), preserving every other field byte-for-byte via a
+// generic JSON edit (UseNumber keeps numeric precision; unrelated fields like
+// RegistryPassword are untouched — marshalTemplateImageJobRequest would strip
+// them). changed is false when the alias already matched.
+func applyAliasToRequestJSON(payload, alias string) (string, bool, error) {
+	dec := json.NewDecoder(strings.NewReader(payload))
+	dec.UseNumber()
+	var m map[string]any
+	if err := dec.Decode(&m); err != nil {
+		return "", false, err
+	}
+	if cur, _ := m["alias"].(string); cur == alias {
+		return payload, false, nil
+	}
+	if alias == "" {
+		delete(m, "alias")
+	} else {
+		m["alias"] = alias
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return "", false, err
+	}
+	return string(out), true, nil
+}
+
+// aliasFromRequestJSON reads the "alias" field from a job's RequestJSON (""
+// if absent/unparseable).
+func aliasFromRequestJSON(payload string) string {
+	dec := json.NewDecoder(strings.NewReader(payload))
+	dec.UseNumber()
+	var m map[string]any
+	if err := dec.Decode(&m); err != nil {
+		return ""
+	}
+	a, _ := m["alias"].(string)
+	return a
 }
 
 // syncTemplateImageJobAlias best-effort syncs the operator's alias change into
@@ -1182,9 +1247,7 @@ func SetTemplateAlias(ctx context.Context, templateID, alias string) error {
 // create-time value (which would silently revert a set/clear/transfer — see
 // design §3.6). display_name stays the source of truth for resolution; this
 // only prevents redo revert, so the best-effort wrapper logs failures instead
-// of failing the alias op. A generic JSON edit (not a struct round-trip)
-// preserves unrelated fields — notably RegistryPassword, which
-// marshalTemplateImageJobRequest would strip.
+// of failing the alias op.
 func syncTemplateImageJobAlias(ctx context.Context, templateID, alias string) error {
 	if !isReady() {
 		return nil // store not initialized (e.g. unit tests) — skip best-effort sync
@@ -1194,30 +1257,59 @@ func syncTemplateImageJobAlias(ctx context.Context, templateID, alias string) er
 		return fmt.Errorf("list image jobs for template %s: %w", templateID, err)
 	}
 	for i := range jobs {
-		payload := jobs[i].RequestJSON
-		if payload == "" {
+		if jobs[i].RequestJSON == "" {
 			continue
 		}
-		dec := json.NewDecoder(strings.NewReader(payload))
-		dec.UseNumber()
-		var m map[string]any
-		if err := dec.Decode(&m); err != nil {
+		newPayload, changed, err := applyAliasToRequestJSON(jobs[i].RequestJSON, alias)
+		if err != nil {
 			continue // skip unparseable jobs rather than aborting the alias op
 		}
-		if cur, _ := m["alias"].(string); cur == alias {
+		if !changed {
 			continue
 		}
-		if alias == "" {
-			delete(m, "alias")
-		} else {
-			m["alias"] = alias
-		}
-		newPayload, err := json.Marshal(m)
-		if err != nil {
-			return fmt.Errorf("re-marshal image job request for template %s: %w", templateID, err)
-		}
-		if err := updateTemplateImageJob(ctx, jobs[i].JobID, map[string]any{"request_json": string(newPayload)}); err != nil {
+		if err := updateTemplateImageJob(ctx, jobs[i].JobID, map[string]any{"request_json": newPayload}); err != nil {
 			return fmt.Errorf("sync image job alias for template %s: %w", templateID, err)
+		}
+	}
+	return nil
+}
+
+// listInProgressImageJobs returns image jobs in a PENDING/RUNNING (building) state.
+func listInProgressImageJobs(ctx context.Context) ([]models.TemplateImageJob, error) {
+	var records []models.TemplateImageJob
+	err := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+		Where("status IN ?", []string{JobStatusPending, JobStatusRunning}).
+		Find(&records).Error
+	return records, err
+}
+
+// clearAliasFromOtherInProgressJobs clears alias from in-progress (PENDING/
+// RUNNING) image jobs of OTHER templates. A still-building template whose
+// create-time RequestJSON.alias was this alias hasn't claimed it yet, so the
+// SetTemplateAlias transfer wouldn't have touched its job — without this, its
+// build completion would reclaim the alias and silently steal it back from the
+// operator's target. Best-effort.
+func clearAliasFromOtherInProgressJobs(ctx context.Context, alias, keepTemplateID string) error {
+	if !isReady() {
+		return nil
+	}
+	jobs, err := listInProgressImageJobs(ctx)
+	if err != nil {
+		return fmt.Errorf("list in-progress image jobs: %w", err)
+	}
+	for i := range jobs {
+		if jobs[i].TemplateID == keepTemplateID || jobs[i].RequestJSON == "" {
+			continue
+		}
+		if aliasFromRequestJSON(jobs[i].RequestJSON) != alias {
+			continue
+		}
+		newPayload, _, err := applyAliasToRequestJSON(jobs[i].RequestJSON, "")
+		if err != nil {
+			continue
+		}
+		if err := updateTemplateImageJob(ctx, jobs[i].JobID, map[string]any{"request_json": newPayload}); err != nil {
+			return fmt.Errorf("clear alias from in-progress job %s: %w", jobs[i].JobID, err)
 		}
 	}
 	return nil
@@ -1226,6 +1318,12 @@ func syncTemplateImageJobAlias(ctx context.Context, templateID, alias string) er
 func syncTemplateImageJobAliasBestEffort(ctx context.Context, templateID, alias string) {
 	if err := syncTemplateImageJobAlias(ctx, templateID, alias); err != nil {
 		log.G(ctx).Warnf("best-effort image job alias sync for template %s to %q failed: %v", templateID, alias, err)
+	}
+}
+
+func clearAliasFromOtherInProgressJobsBestEffort(ctx context.Context, alias, keepTemplateID string) {
+	if err := clearAliasFromOtherInProgressJobs(ctx, alias, keepTemplateID); err != nil {
+		log.G(ctx).Warnf("best-effort clear of in-progress alias %q (keep %s) failed: %v", alias, keepTemplateID, err)
 	}
 }
 

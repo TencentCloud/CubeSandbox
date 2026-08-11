@@ -867,6 +867,35 @@ func TestSetTemplateAlias_ClaimSyncsJobAliasForTargetAndOldHolder(t *testing.T) 
 	assert.ElementsMatch(t, []string{"tpl-target=new", "tpl-old="}, syncs)
 }
 
+// TestClearAliasFromOtherInProgressJobs verifies that claiming an alias clears
+// it from OTHER templates' in-progress build jobs (so a still-building template
+// created with that alias can't reclaim it on completion), while leaving the
+// keep template and unrelated-alias jobs untouched.
+func TestClearAliasFromOtherInProgressJobs(t *testing.T) {
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	defer func() { store.db = oldDB }()
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(listInProgressImageJobs, func(ctx context.Context) ([]models.TemplateImageJob, error) {
+		return []models.TemplateImageJob{
+			{JobID: "j-other", TemplateID: "tpl-other", RequestJSON: `{"alias":"x","source_image_ref":"img"}`},
+			{JobID: "j-keep", TemplateID: "tpl-keep", RequestJSON: `{"alias":"x","source_image_ref":"img"}`},
+			{JobID: "j-unrelated", TemplateID: "tpl-third", RequestJSON: `{"alias":"y","source_image_ref":"img"}`},
+		}, nil
+	})
+	var updated []string
+	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, values map[string]any) error {
+		updated = append(updated, jobID+"|"+values["request_json"].(string))
+		return nil
+	})
+
+	require.NoError(t, clearAliasFromOtherInProgressJobs(context.Background(), "x", "tpl-keep"))
+	require.Len(t, updated, 1)
+	assert.Contains(t, updated[0], "j-other|")
+	assert.NotContains(t, updated[0], `"alias"`)
+}
+
 // TestSetTemplateAlias_ValidatesAlias verifies that invalid alias strings
 // are rejected before any DB access, and that the rejection wraps
 // ErrInvalidAlias so the HTTP handler can map it to 400 (vs. raw DB errors

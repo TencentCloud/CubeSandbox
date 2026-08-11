@@ -55,8 +55,11 @@ needs a `ret_code` that one of those classifiers recognizes.
 
 An alias must match `^[a-z0-9][a-z0-9-]{0,63}$` and **not** start with `tpl-` /
 `snap-` (including the bare prefixes). Enforced **only** by CubeMaster's
-`validateTemplateAlias` (`request_validation.go`). CubeAPI and the SDKs do not
-re-validate, so the rule cannot drift between layers.
+`validateTemplateAlias` (`request_validation.go`); CubeAPI and the SDKs do not
+re-validate, so the rule cannot drift between layers. `validateTemplateAlias` is
+shared with the create/normalize path, so this also tightens create-time aliases
+— the bare prefixes `tpl-`/`snap-` (which collide with ID prefixes) are now
+rejected on create too, not just on set.
 
 ### 3.5 READY requirement
 

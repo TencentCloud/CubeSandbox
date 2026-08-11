@@ -146,7 +146,7 @@ func TestClaimTemplateAliasConcurrentIsMutex(t *testing.T) {
 	resCh := make(chan result, 2)
 	for _, id := range []string{tplA, tplB} {
 		go func(templateID string) {
-			resCh <- result{err: claimTemplateAlias(context.Background(), templateID, alias)}
+			resCh <- result{err: claimTemplateAlias(context.Background(), templateID, alias, false)}
 		}(id)
 	}
 	r1, r2 := <-resCh, <-resCh
