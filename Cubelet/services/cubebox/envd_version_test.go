@@ -139,7 +139,7 @@ func TestAbortProbeKillsOnProbeError(t *testing.T) {
 			statusCh := make(chan containerd.ExitStatus, 1)
 			statusCh <- *containerd.NewExitStatus(137, time.Now(), nil)
 
-			abortProbe(process, statusCh, testProbeLogger(), "start", tt.err)
+			abortProbe(process, statusCh, testProbeLogger(), "collect envd version", "start", tt.err)
 
 			assert.Equal(t, 1, process.killCount())
 		})
@@ -150,6 +150,6 @@ func TestKillProbeProcessNilStatusCh(t *testing.T) {
 	t.Parallel()
 
 	process := &stubProbeProcess{}
-	killProbeProcess(process, nil, testProbeLogger())
+	killProbeProcess(process, nil, testProbeLogger(), "collect envd version")
 	assert.Equal(t, 1, process.killCount())
 }
