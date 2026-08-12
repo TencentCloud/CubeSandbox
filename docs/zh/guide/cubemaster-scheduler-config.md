@@ -12,7 +12,7 @@ CubeMaster 调度配置位于 CubeMaster 的 `conf.yaml`：
 |----------|----------|----------|
 | one-click / systemd | `/usr/local/services/cubetoolbox/CubeMaster/conf.yaml` | 修改后重启 `cube-sandbox-cubemaster.service` |
 | 源码配置模板 | `configs/single-node/cubemaster.yaml` | 重新打包或拷贝到运行环境 |
-| Tencent Cloud Terraform / TKE | `deploy/one-click/terraform/tencentcloud/tke-addons.tf` 中的 `kubernetes_secret.cubemaster_config` | 修改 Terraform 通过 `yamlencode` 生成的配置，重新 apply Terraform，并重启或滚动更新 cube-master Pod |
+| Tencent Cloud Terraform / TKE | `deploy/one-click/terraform/tencentcloud/tke-addons.tf` 中的 `kubernetes_secret.cubemaster_conf` | 修改 Terraform 通过 `yamlencode` 生成的配置，重新 apply Terraform，并重启或滚动更新 cube-master Pod |
 | Kubernetes / Helm chart | `deploy/kubernetes/chart/files/cube-master/conf.yaml`，由 `deploy/kubernetes/chart/templates/master-config-secret.yaml` 渲染 | 修改 chart 文件或渲染后的 Secret，并重启或滚动更新 cube-master Pod |
 
 Cubelet 节点元数据和资源配额不在 CubeMaster 配置里，而是由每台 Cubelet 上报。one-click 环境中的主要入口是：

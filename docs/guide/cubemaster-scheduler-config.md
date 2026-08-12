@@ -12,7 +12,7 @@ CubeMaster scheduler configuration is stored in CubeMaster's `conf.yaml`:
 |------------|-----------------|--------------|
 | one-click / systemd | `/usr/local/services/cubetoolbox/CubeMaster/conf.yaml` | Restart `cube-sandbox-cubemaster.service` |
 | source config template | `configs/single-node/cubemaster.yaml` | Rebuild the bundle or copy it into the runtime environment |
-| Tencent Cloud Terraform / TKE | `deploy/one-click/terraform/tencentcloud/tke-addons.tf` (`kubernetes_secret.cubemaster_config`) | Update the Terraform-generated `yamlencode` configuration, re-apply Terraform, and restart or roll cube-master Pods |
+| Tencent Cloud Terraform / TKE | `deploy/one-click/terraform/tencentcloud/tke-addons.tf` (`kubernetes_secret.cubemaster_conf`) | Update the Terraform-generated `yamlencode` configuration, re-apply Terraform, and restart or roll cube-master Pods |
 | Kubernetes / Helm chart | `deploy/kubernetes/chart/files/cube-master/conf.yaml`, rendered by `deploy/kubernetes/chart/templates/master-config-secret.yaml` | Update the chart file or rendered Secret and restart or roll cube-master Pods |
 
 Cubelet node metadata and quota are not configured in CubeMaster. Each Cubelet reports them to CubeMaster. In one-click deployments, the main inputs are:
