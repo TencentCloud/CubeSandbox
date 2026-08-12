@@ -1049,7 +1049,10 @@ func claimTemplateAlias(ctx context.Context, templateID, alias string, requireRe
 				if requireReady {
 					var exists int64
 					if err := tx.Table(constants.TemplateDefinitionTableName).
-						Where("template_id = ?", templateID).Count(&exists).Error; err == nil && exists > 0 {
+						Where("template_id = ?", templateID).Count(&exists).Error; err != nil {
+						return fmt.Errorf("confirm existence for template %s fail: %w", templateID, err)
+					}
+					if exists > 0 {
 						return ErrTemplateNotReady
 					}
 				}
@@ -1241,6 +1244,21 @@ func aliasFromRequestJSON(payload string) string {
 	return a
 }
 
+// currentJobAlias re-reads the alias from the image job's stored RequestJSON.
+// The create/redo finalize path must call this at claim time (not use the
+// in-memory req.Alias captured at submit): SetTemplateAlias syncs operator
+// set/clear/transfer changes into the job's RequestJSON, and only a DB re-read
+// makes an in-flight create/redo honor an operator change made after the build
+// started (design §3.6). Returns ok=false only on a read failure so callers can
+// fall back to the in-memory alias; a successfully-read "" is a real "cleared".
+func currentJobAlias(ctx context.Context, jobID string) (string, bool) {
+	job, err := getTemplateImageJobRecordByID(ctx, jobID)
+	if err != nil || job == nil {
+		return "", false
+	}
+	return aliasFromRequestJSON(job.RequestJSON), true
+}
+
 // syncTemplateImageJobAlias best-effort syncs the operator's alias change into
 // every image job's stored RequestJSON for the template, so a later
 // rebuild/redo re-claims the operator's current alias instead of the frozen
@@ -1268,7 +1286,11 @@ func syncTemplateImageJobAlias(ctx context.Context, templateID, alias string) er
 			continue
 		}
 		if err := updateTemplateImageJob(ctx, jobs[i].JobID, map[string]any{"request_json": newPayload}); err != nil {
-			return fmt.Errorf("sync image job alias for template %s: %w", templateID, err)
+			// Best-effort: a single job update failure (e.g. the job row was
+			// deleted mid-scan, ErrRecordNotFound) must not abort syncing the
+			// template's remaining jobs.
+			log.G(ctx).Warnf("sync image job alias: update job %s for template %s failed: %v", jobs[i].JobID, templateID, err)
+			continue
 		}
 	}
 	return nil

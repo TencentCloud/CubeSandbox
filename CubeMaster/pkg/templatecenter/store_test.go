@@ -896,6 +896,48 @@ func TestClearAliasFromOtherInProgressJobs(t *testing.T) {
 	assert.NotContains(t, updated[0], `"alias"`)
 }
 
+// TestCurrentJobAlias_ReadsSyncedAlias verifies currentJobAlias re-reads the
+// alias from the job's RequestJSON at finalize time (the in-memory req.Alias is
+// frozen at submit, so only a DB re-read honors an operator change made after
+// the build started — design §3.6, the P1 fix).
+func TestCurrentJobAlias_ReadsSyncedAlias(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(getTemplateImageJobRecordByID, func(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
+		return &models.TemplateImageJob{JobID: jobID, RequestJSON: `{"alias":"synced","source_image_ref":"img"}`}, nil
+	})
+	a, ok := currentJobAlias(context.Background(), "job-1")
+	assert.True(t, ok)
+	assert.Equal(t, "synced", a)
+}
+
+// TestCurrentJobAlias_HonorsClearedAlias verifies a cleared job RequestJSON
+// yields ("", true) — so finalize honors an operator clear instead of falling
+// back to the frozen create-time alias.
+func TestCurrentJobAlias_HonorsClearedAlias(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(getTemplateImageJobRecordByID, func(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
+		return &models.TemplateImageJob{JobID: jobID, RequestJSON: `{"source_image_ref":"img"}`}, nil // alias cleared
+	})
+	a, ok := currentJobAlias(context.Background(), "job-1")
+	assert.True(t, ok)
+	assert.Equal(t, "", a)
+}
+
+// TestCurrentJobAlias_ReadErrorFallsBack verifies a read failure returns
+// ok=false so the caller can fall back to the in-memory alias.
+func TestCurrentJobAlias_ReadErrorFallsBack(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(getTemplateImageJobRecordByID, func(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
+		return nil, errors.New("db unavailable")
+	})
+	a, ok := currentJobAlias(context.Background(), "job-1")
+	assert.False(t, ok)
+	assert.Equal(t, "", a)
+}
+
 // TestSetTemplateAlias_ValidatesAlias verifies that invalid alias strings
 // are rejected before any DB access, and that the rejection wraps
 // ErrInvalidAlias so the HTTP handler can map it to 400 (vs. raw DB errors

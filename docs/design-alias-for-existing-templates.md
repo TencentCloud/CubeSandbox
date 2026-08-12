@@ -63,34 +63,50 @@ rejected on create too, not just on set.
 
 ### 3.5 READY requirement
 
-The target **must be `READY`**; any other status → `ErrTemplateNotReady`
-(409). Rationale:
+- **Claim** requires the target to be `READY`; any other status →
+  `ErrTemplateNotReady` (409) — an alias must never resolve to a building or
+  failed template, and the `READY` predicate is enforced *inside* the claim
+  transaction (`claimTemplateAlias(..., requireReady=true)`), not only by the
+  out-of-transaction `GetDefinition` check.
+- **Clear** is allowed for any non-`DELETING` template (including `FAILED`),
+  so an alias stuck on a failed template can be released without deleting the
+  template.
 
-- An alias must never resolve to a building or failed template.
-- Requiring `READY` prevents the create-time claim
-  (`claimAliasForReadyTemplate`, run at build completion) from silently
-  overwriting an operator-set alias — the failure mode that made the earlier
-  "non-READY allowed" behavior unsafe.
-- Consistent with the create path, which claims only after the build reaches a
-  non-FAILED status.
+Note: READY constrains only the *target* of an operator `set_alias`. It does
+**not** by itself stop a *different* template's in-flight create/redo from
+reclaiming an alias at build completion — that is handled by the job-sync +
+finalize re-read invariant in §3.6.
 
 ### 3.6 Concurrency / atomicity
 
 `claimTemplateAlias` runs **release + claim + confirm** in one transaction:
 
-1. **Release** — `UPDATE display_name='' WHERE alias_key=? AND template_id<>target`
-   (clears the alias from any other holder).
-2. **Claim** — `UPDATE display_name=alias WHERE template_id=target`.
-3. **Confirm** — `SELECT COUNT(*) WHERE template_id=target AND alias_key=alias`.
-   If `0` (target hard-deleted between `GetDefinition` and the claim), return
-   `ErrTemplateNotFound` so the **whole transaction — including the release —
-   rolls back** (another template's alias is never silently cleared). The
-   `SELECT` (not `RowsAffected`) avoids MySQL's rows-changed conflation with
-   idempotent re-claims.
+1. **Release** — `UPDATE display_name='' WHERE alias_key=? AND template_id<>target`.
+2. **Claim** — `UPDATE display_name=alias WHERE template_id=target` (operator
+   path additionally requires `status='READY'`; create/redo path requires
+   `status<>'DELETING'` so it can claim at `PARTIALLY_READY`).
+3. **Confirm** — `SELECT COUNT(*) WHERE template_id=target AND alias_key=alias`
+   (plus the same status predicate). If `0`, the transaction rolls back the
+   release (another template's alias is never silently cleared): the operator
+   path distinguishes "exists but not READY" (409) from "gone" (404). A SELECT
+   (not `RowsAffected`) avoids MySQL's rows-changed conflation with idempotent
+   re-claims.
 
-Two concurrent swaps between the same pair of templates can deadlock
-(MySQL `1205`/`1213`, PostgreSQL `40P01`/`55P03`); the transaction is retried
-once (`isDeadlockError`).
+Two concurrent swaps between the same pair of templates can deadlock (MySQL
+`1205`/`1213`, PostgreSQL `40P01`/`55P03`); the transaction is retried once.
+
+**Anti-steal-back invariant (operator vs create/redo).** A create/redo
+completion claims the alias captured in the job's `RequestJSON` *at submit
+time*. To keep an operator `set_alias` from being silently reverted by a build
+that was already running (or starts later), `SetTemplateAlias` syncs the
+operator's change into the affected jobs' `RequestJSON`
+(`syncTemplateImageJobAlias` for the target/old holder;
+`clearAliasFromOtherInProgressJobs` for other in-progress builds), **and the
+finalize path re-reads the alias from the DB** (`currentJobAlias`) instead of
+the in-memory frozen value — so an in-flight create/redo honors the operator's
+set/clear/transfer. This sync is best-effort (failures are logged, the API
+still returns 200); the narrow residual race is an operator `set_alias` landing
+between a job's last `RequestJSON` sync and its finalize re-read.
 
 ### 3.7 Snapshots
 
