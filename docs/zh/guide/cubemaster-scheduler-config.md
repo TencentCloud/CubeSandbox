@@ -40,7 +40,7 @@ host:
 一次 sandbox 创建请求进入 CubeMaster 后，调度大致分为四步：
 
 1. **解析请求约束**：读取 `instance_type`、模板 ID、资源规格、显式 host IP、node affinity / annotations 等条件。
-2. **预过滤节点**：排除不健康、资源上报过期、超过 MVM 上限、磁盘使用过高、模板本地副本不可用、实时创建数过高或不满足 affinity 的节点。
+2. **预过滤节点**：排除不健康、资源上报过期、超过 MVM 上限、模板本地副本不可用、实时或本地观测创建数过高、不满足 affinity 的节点；启用 `disk` filter 或 backoff 路径时，也会排除磁盘使用过高的节点。
 3. **节点评分**：对过滤后的候选节点计算分数，例如基于 `mvm_num`、`local_create_num`、`quota_cpu_usage`、`quota_mem_usage` 做加权平均。
 4. **最终选择**：从评分靠前的一组节点中选择。`priority_select_num` 控制进入最终随机选择的高分节点数量，`least_select_name` 默认为 `random`。
 
@@ -83,13 +83,13 @@ scheduler:
 |------|------|
 | `priority_select_num` | 从评分最高的前 N 个节点中做最终选择。多节点建议大于 `1`，小集群可从 `3` 开始。 |
 | `metric_update_timeout` | 节点资源指标多久未更新后视为不可调度。应明显大于 Cubelet 上报周期。 |
-| `local_metric_update_timeout` | 本地指标多久未更新后视为不可调度。通常与 `metric_update_timeout` 保持一致。 |
+| `local_metric_update_timeout` | 预留的本地指标超时字段。当前 prefilter 对全局指标和本地指标的新鲜度检查都使用 `metric_update_timeout`。 |
 | `filter.enable_filters` | 启用调度过滤器。常见过滤器包括 CPU、内存、模板本地性和实时创建并发。 |
 | `score.enable_scorers` | 启用评分器。多机部署通常启用 `real_time_weighted_average`。 |
-| `score.resource_weights` | 控制 MVM 数、创建并发、CPU/内存 quota 使用率等因子的权重。权重越高，该因子对分数影响越大。 |
+| `score.resource_weights` | 控制 MVM 数、创建并发、CPU/内存 quota 使用率等因子的权重。权重越高，该因子对分数影响越大；对应因子也必须列在 `score.plugin_conf.real_time_weighted_average.enable_weight_factors` 中。 |
 | `overcommit_ratio` / `overcommit_ratio_conf` | 对 Cubelet 上报 quota 应用 CPU/内存超卖比例。默认 CPU 为 `3`、内存为 `2`，可按实例类型覆盖。 |
 | `node_max_mvm_num` / `node_max_mvm_num_conf` | 全局或按实例类型限制单节点 MVM 数。Cubelet 上报的 `max_mvm_num` 也会参与实际上限计算。 |
-| `disk_usage_max_percent` | 过滤磁盘使用率过高的节点，避免继续调度到快满的机器。 |
+| `disk_usage_max_percent` | `disk` filter 和 backoff 路径使用的磁盘水位阈值，用于避免继续调度到快满的机器。 |
 | `affinityconf` / `node_affinity_selector_allowed_keys` | 控制按 cluster label、zone、CPU 类型、机型等做亲和或约束选择。 |
 
 ## 节点元数据如何影响调度
@@ -103,7 +103,7 @@ Cubelet 会通过 CubeMaster 的 `/internal/meta` 接口注册节点并持续上
 | `quota_cpu` | `host.quota.mcpu_limit` 或宿主机推导值 | CPU 可调度容量的基础值，叠加 overcommit 后参与 CPU 过滤和评分。 |
 | `quota_mem_mb` | `host.quota.mem_limit` 或宿主机推导值 | 内存可调度容量的基础值，叠加 overcommit 后参与内存过滤和评分。 |
 | `max_mvm_num` | `host.quota.mvm_limit` 或按内存推导 | 单节点可承载的 MVM 数上限，超过后节点会被过滤。 |
-| `create_concurrent_num` | `host.quota.creation_concurrent_num` | 限制单节点并发创建。`0` 表示不额外限制，但仍受资源和其他过滤器限制。 |
+| `create_concurrent_num` | `host.quota.creation_concurrent_num` | 节点上报的创建并发配置。`0` 表示 Cubelet 不设置额外 engine flow limit，但 CubeMaster 调度层仍会回落到 `cubelet_conf.create_concurrent_limit`。 |
 | allocated / disk usage / cgroup metrics | Cubelet 周期上报 | 用于判断当前资源使用率、磁盘水位和评分因子。 |
 
 这些值是每个计算节点独立配置和上报的。异构集群中，不同节点可以有不同实例类型、标签、配额和并发上限。
@@ -159,6 +159,14 @@ scheduler:
       local_create_num: 3
       quota_cpu_usage: 1
       quota_mem_usage: 1
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 1.0
+        enable_weight_factors:
+          - mvm_num
+          - local_create_num
+          - quota_cpu_usage
+          - quota_mem_usage
 ```
 
 建议：
@@ -215,7 +223,7 @@ cubemastercli tpl redo \
 - `host.quota.mcpu_limit`、`host.quota.mem_limit`、`host.quota.mvm_limit` 是否仍为默认推导值。
 - `overcommit_ratio` 是否过低或按类型覆盖不符合预期。
 - `mvm_num` 是否达到 `max_mvm_num` 或 `node_max_mvm_num_conf` 上限。
-- `create_concurrent_num` 是否限制了当前节点的创建并发。
+- 有效创建并发上限是否阻塞了当前节点。注意 `create_concurrent_num: 0` 在调度层仍会回落到 CubeMaster 的 `cubelet_conf.create_concurrent_limit`。
 
 常用入口：
 
@@ -259,6 +267,7 @@ sudo tail -F /data/log/Cubelet/Cubelet-req.log
 如果多机集群中新 sandbox 仍明显集中在一台机器：
 
 - 确认 `score.enable_scorers` 已启用。
+- 启用 `real_time_weighted_average` 时，确认 `score.plugin_conf.real_time_weighted_average.enable_weight_factors` 包含预期因子。
 - 将 `priority_select_num` 设置为大于 `1`。
 - 检查 `local_create_num`、`mvm_num`、`quota_cpu_usage`、`quota_mem_usage` 权重是否存在。
 - 确认各节点模板副本都可用，否则 `template_locality` 会让候选节点集合变小。

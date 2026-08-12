@@ -40,7 +40,7 @@ host:
 For each sandbox create request, scheduling roughly follows four steps:
 
 1. **Resolve request constraints**: read `instance_type`, template ID, resource requirements, explicit host IPs, node affinity / annotations, and similar constraints.
-2. **Filter nodes**: remove unhealthy nodes, stale metric nodes, nodes over MVM limits, nodes with high disk usage, nodes without local template replicas, nodes with too many real-time creates, or nodes that do not satisfy affinity.
+2. **Filter nodes**: remove unhealthy nodes, stale metric nodes, nodes over MVM limits, nodes without local template replicas, nodes with too many real-time or locally observed creates, nodes that do not satisfy affinity, and, when the disk filter or backoff path is active, nodes with high disk usage.
 3. **Score nodes**: score remaining candidates, for example using weighted `mvm_num`, `local_create_num`, `quota_cpu_usage`, and `quota_mem_usage`.
 4. **Pick the final node**: choose from the highest-scored candidate set. `priority_select_num` controls how many top nodes are eligible for final random selection, and `least_select_name` defaults to `random`.
 
@@ -83,13 +83,13 @@ scheduler:
 |-------|---------|
 | `priority_select_num` | Final selection is made from the top N scored nodes. Use a value greater than `1` for multi-node clusters; `3` is a good starting point for small clusters. |
 | `metric_update_timeout` | Treat resource metrics as stale after this duration. It should be much larger than the Cubelet report interval. |
-| `local_metric_update_timeout` | Treat local metrics as stale after this duration. Usually keep it aligned with `metric_update_timeout`. |
+| `local_metric_update_timeout` | Reserved local-metric timeout field. Current prefilter logic gates both global and local metric freshness with `metric_update_timeout`. |
 | `filter.enable_filters` | Enables scheduling filters. Common filters include CPU, memory, template locality, and real-time create concurrency. |
 | `score.enable_scorers` | Enables scoring plugins. Multi-node deployments usually enable `real_time_weighted_average`. |
-| `score.resource_weights` | Controls the influence of MVM count, create concurrency, CPU quota usage, and memory quota usage. Higher weight means stronger influence. |
+| `score.resource_weights` | Controls the influence of MVM count, create concurrency, CPU quota usage, and memory quota usage. Higher weight means stronger influence; factors must also be listed under `score.plugin_conf.real_time_weighted_average.enable_weight_factors`. |
 | `overcommit_ratio` / `overcommit_ratio_conf` | Applies CPU/memory overcommit ratios to Cubelet-reported quota. Defaults are CPU `3` and memory `2`; overrides can be set per instance type. |
 | `node_max_mvm_num` / `node_max_mvm_num_conf` | Global or per-instance-type single-node MVM limits. Cubelet-reported `max_mvm_num` also participates in the effective limit. |
-| `disk_usage_max_percent` | Filters nodes with high disk usage to avoid placing more sandboxes on nearly full machines. |
+| `disk_usage_max_percent` | Threshold used by the `disk` filter and backoff path to avoid placing more sandboxes on nearly full machines. |
 | `affinityconf` / `node_affinity_selector_allowed_keys` | Controls affinity and constraints by cluster label, zone, CPU type, instance type, and other allowed selector keys. |
 
 ## How node metadata affects scheduling
@@ -103,7 +103,7 @@ Cubelet registers nodes and continuously reports status through CubeMaster's `/i
 | `quota_cpu` | `host.quota.mcpu_limit` or derived from host resources | Base schedulable CPU capacity, with overcommit applied before CPU filtering and scoring. |
 | `quota_mem_mb` | `host.quota.mem_limit` or derived from host resources | Base schedulable memory capacity, with overcommit applied before memory filtering and scoring. |
 | `max_mvm_num` | `host.quota.mvm_limit` or memory-derived default | Single-node MVM limit. Nodes at the limit are filtered out. |
-| `create_concurrent_num` | `host.quota.creation_concurrent_num` | Limits per-node concurrent creation. `0` means no additional cap, but resource and other filters still apply. |
+| `create_concurrent_num` | `host.quota.creation_concurrent_num` | Reported per-node create concurrency. `0` means Cubelet does not set an additional engine flow limit, but CubeMaster scheduling still falls back to `cubelet_conf.create_concurrent_limit`. |
 | allocated / disk usage / cgroup metrics | Periodic Cubelet reports | Used for current resource usage, disk watermarks, and scoring factors. |
 
 These values are configured and reported per compute node. Heterogeneous clusters can use different instance types, labels, quota, and create-concurrency limits on different nodes.
@@ -159,6 +159,14 @@ scheduler:
       local_create_num: 3
       quota_cpu_usage: 1
       quota_mem_usage: 1
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 1.0
+        enable_weight_factors:
+          - mvm_num
+          - local_create_num
+          - quota_cpu_usage
+          - quota_mem_usage
 ```
 
 Recommendations:
@@ -215,7 +223,7 @@ Check:
 - Whether `host.quota.mcpu_limit`, `host.quota.mem_limit`, and `host.quota.mvm_limit` still use low derived defaults.
 - Whether `overcommit_ratio` is too low or per-type overrides are not what you expected.
 - Whether `mvm_num` reached `max_mvm_num` or `node_max_mvm_num_conf`.
-- Whether `create_concurrent_num` is limiting per-node creation concurrency.
+- Whether the effective create concurrency limit is blocking the node. Remember that `create_concurrent_num: 0` still falls back to CubeMaster's `cubelet_conf.create_concurrent_limit` at the scheduler layer.
 
 Useful entry points:
 
@@ -259,6 +267,7 @@ If a request uses node affinity, cluster labels, or a specific instance type but
 If new sandboxes still concentrate on one machine in a multi-node cluster:
 
 - Confirm `score.enable_scorers` is enabled.
+- Confirm `score.plugin_conf.real_time_weighted_average.enable_weight_factors` includes the expected factors when `real_time_weighted_average` is enabled.
 - Set `priority_select_num` to a value greater than `1`.
 - Check that weights for `local_create_num`, `mvm_num`, `quota_cpu_usage`, and `quota_mem_usage` are configured.
 - Confirm templates are available on all intended nodes; otherwise `template_locality` shrinks the candidate set.
