@@ -1,9 +1,11 @@
 # E2B Python SDK versions this suite has been validated against.
 #
-# One pip requirement per line; blank lines and '#' comments are ignored. A line
-# may pin more than one package — pair `e2b-code-interpreter` when the row should
-# cover the `run_code` cases, since those need the interpreter package (a row
-# pinning only `e2b` must deselect them: -m "(smoke or p0) and not run_code").
+# Nothing in this repository parses this file — it is read by people, and the
+# lines are written as pip arguments only so they can be pasted straight into
+# `pip install`. Each line names one package set that was actually run; pair
+# `e2b-code-interpreter` with `e2b` when the line should cover the `run_code`
+# cases, since those need the interpreter package (a line pinning only `e2b`
+# must deselect them: -m "(smoke or p0) and not run_code").
 #
 # Purpose: give consumers a stated compatibility range per CubeSandbox release
 # instead of leaving them to discover breakage in production. Install one line
@@ -40,6 +42,20 @@ e2b==2.35.0
 #    (`code_interpreter_sync.py:84`, `code_interpreter_async.py:89`). Verified
 #    signatures: 2.29.5 / 2.32.0 / 2.35.0 / 2.36.0 / 2.37.0 / 2.37.1 all accept
 #    `http2`; 2.38.0 does not. So the last interpreter-compatible core is 2.37.1.
+#
+#    Re-confirm when a new e2b minor ships — one clean virtualenv per version,
+#    no live backend needed, seconds per version:
+#
+#      for v in 2.37.1 2.38.0 <new>; do
+#        python3 -m venv "/tmp/e2b-$v" && "/tmp/e2b-$v/bin/pip" -q install "e2b==$v"
+#        printf '%s ' "$v"
+#        "/tmp/e2b-$v/bin/python" -c 'import inspect
+#      from e2b.api.client_sync import get_transport
+#      print(inspect.signature(get_transport))'
+#      done
+#
+#    A signature still carrying `http2` means e2b-code-interpreter 2.9.0 works
+#    with that core; a signature without it means this break applies.
 #
 #    Worth checking separately when a compatible pair appears: the interpreter
 #    forced HTTP/1.1 on purpose — under HTTP/2 multiplexing a client disconnect
