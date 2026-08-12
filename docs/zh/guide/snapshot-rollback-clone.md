@@ -2,7 +2,7 @@
 
 本文介绍 Cube Sandbox Python SDK 提供的三组进阶接口：
 
-- **快照（Snapshot）**：把一个运行中的沙箱的完整状态（内存 + 文件系统）持久化为一份镜像，后续可以反复用来创建新沙箱或执行回滚。
+- **快照（Snapshot）**：把一个运行中的沙箱的完整状态（内存 + 文件系统）持久化为一份镜像，后续可以反复用来创建新沙箱或执行回滚。快照也可以不含内存——例如从导入的磁盘制品注册的快照——恢复这类快照时会在快照文件系统上冷启动一个全新的 guest，而不是恢复执行现场。
 - **克隆（Clone）**：对一个正在运行的沙箱调用 `clone()`，可以立即派生出 N 个完全独立的副本，每个副本都从源沙箱的当前状态出发，互不干扰。
 - **回滚（Rollback）**：把一个正在运行的沙箱原地恢复到先前某次快照的状态，沙箱 ID 不变，可以继续执行。
 
@@ -136,6 +136,31 @@ with Sandbox.create(template=new_snap.snapshot_id) as forked:
     out = forked.run_code("print(open('/tmp/v.txt').read())").logs.stdout[0]
     assert out.strip() == "v3"
 ```
+
+## 导入磁盘快照（面向运维）
+
+`POST /cube/snapshot/import`（CubeMaster 内部 API）可以在没有运行中沙箱的情况下，把预先放置在节点上的可写层磁盘制品（例如从另一个节点导出的）注册为一份快照。生成的快照不含内存镜像：恢复它会在导入的文件系统上冷启动一个全新的 guest，且不能作为回滚目标。
+
+```bash
+curl -X POST "$CUBE_MASTER_URL/cube/snapshot/import" -d '{
+  "request_id": "import-1",
+  "host_ip": "10.0.0.8",
+  "rootfs_source_path": "/data/cubelet/storage/import/rootfs.vol",
+  "create_spec": {"containers": [{"name": "c0", "image": {"image": "ubuntu:22.04"},
+                  "resources": {"cpu": "1", "mem": "1Gi"},
+                  "volume_mounts": [{"name": "tmp", "container_path": "/"}]}],
+                  "volumes": [{"name": "tmp", "volume_source": {"empty_dir": {"size_limit": "1Gi"}}}]}
+}'
+```
+
+运维契约：
+
+- 制品必须是目标节点上 `<data_path>/import/` 目录下的普通文件，且与 cubelet 的卷存储位于同一文件系统（内容通过 reflink 引用，不做拷贝）。
+- 制品内必须恰好包含一份 overlay upper 布局（`.../upper` + `.../work`），即导出沙箱可写层得到的结构。平台导出的布局为 `disk/<container-id>/{upper,work}`（两层目录），探测最多扫描到该深度。
+- `create_spec` 只能声明一个容器：制品只携带一份 overlay upper 层，因此只能支撑一个容器的可写 rootfs。
+- `create_spec` 的镜像**必须**与制品可写层构建时所基于的镜像一致；这一点不做校验，不一致会在恢复时表现为文件系统错乱。
+- 导入不会消费制品文件：导入成功后请自行清理。
+- `request_id` 对导入成功的请求幂等：以相同参数重试会返回已导入的快照，不会重复导入。导入失败对该 `request_id` 是终态，重试会返回记录下来的失败，需要换一个新的 `request_id`。
 
 ## 最佳实践
 

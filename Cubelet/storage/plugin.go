@@ -198,12 +198,22 @@ func (c *Config) cowReflinkRootDir() (string, error) {
 // persistent state instead of accidentally landing on the OS disk
 // under cubecow's library-level fallback.
 func defaultReflinkAutoRootDir(dataPath string) string {
+	return filepath.Join(storageBaseDir(dataPath), "cubecow-reflink")
+}
+
+func storageBaseDir(dataPath string) string {
 	storageDir := fmt.Sprintf("%v.%v", constants.InternalPlugin, constants.StorageID)
 	baseDir := filepath.Clean(dataPath)
 	if filepath.Base(baseDir) == storageDir {
 		baseDir = filepath.Dir(baseDir)
 	}
-	return filepath.Join(baseDir, "cubecow-reflink")
+	return baseDir
+}
+
+// defaultImportStagingDir sits next to `cubecow-reflink/` on the same
+// filesystem so reflinking a staged artifact into a volume never crosses mounts.
+func defaultImportStagingDir(dataPath string) string {
+	return filepath.Join(storageBaseDir(dataPath), "import")
 }
 
 func (c *Config) cowStartupCommands() []string {
@@ -235,6 +245,12 @@ func initCowEngineWithConfig(cfg *Config) (*cubecow.Engine, string, error) {
 	}
 	if err := cfg.PrepareCowInlineConfig(); err != nil {
 		return nil, "", err
+	}
+	// Best-effort: only snapshot import needs this directory, so a node that
+	// never imports must not fail to start over it. A missing staging dir
+	// surfaces as a parameter error on the import itself.
+	if err := os.MkdirAll(defaultImportStagingDir(cfg.DataPath), 0o700); err != nil {
+		CubeLog.Warnf("create import staging dir: %v", err)
 	}
 	payload, err := cfg.BuildCowInitJSON()
 	if err != nil {

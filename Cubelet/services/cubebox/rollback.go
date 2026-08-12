@@ -292,6 +292,11 @@ func resolveRollbackTargets(ctx context.Context, req *cubebox.RollbackSandboxReq
 	if err != nil {
 		return "", "", "", "", fmt.Errorf("rollback: local snapshot catalog lookup for %s failed: %w", req.GetSnapshotID(), err)
 	}
+	// Covers any entry without a memory image, not just an imported one: with
+	// nothing to resume from there is no rollback target either way.
+	if strings.TrimSpace(entry.MemoryVol) == "" {
+		return "", "", "", "", fmt.Errorf("rollback: snapshot %s has no memory image; rollback is not supported for a memory-less snapshot", req.GetSnapshotID())
+	}
 	return entry.RootfsVol, entry.MemoryVol, entry.MemoryKind, entry.MetaDir, nil
 }
 

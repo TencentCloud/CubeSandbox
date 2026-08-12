@@ -16,6 +16,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 )
 
 func init() {
@@ -63,6 +64,16 @@ func (l *appsnapshotCompleter) Create(ctx context.Context, opts *workflow.Create
 	}
 
 	if !opts.IsCubeboxV2() {
+		return nil
+	}
+
+	// A disk-only snapshot is registered from a disk artifact rather than
+	// captured from a running VM, so it has no run-template metadata to find:
+	// there is no snapshot/config.json to recover from, and the cold-boot
+	// restore path never reads LocalRunTemplate. Requiring one here would fail
+	// the create before storage or cbri ever run. A catalog lookup failure
+	// falls through, keeping the requirement for every other restore.
+	if entry, err := storage.GetLocalSnapshot(ctx, templateID); err == nil && entry != nil && entry.DiskOnly {
 		return nil
 	}
 

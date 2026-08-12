@@ -75,7 +75,7 @@ func getActiveSnapshotJobByResourceID(ctx context.Context, resourceID string) (*
 	record := &models.TemplateImageJob{}
 	err := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
 		Where("resource_id = ? AND operation IN ? AND status IN ?", resourceID,
-			[]string{JobOperationSnapshotCreate, JobOperationSnapshotRollback, JobOperationSnapshotDelete},
+			[]string{JobOperationSnapshotCreate, JobOperationSnapshotImport, JobOperationSnapshotRollback, JobOperationSnapshotDelete},
 			[]string{JobStatusPending, JobStatusRunning}).
 		Order("id desc").First(record).Error
 	if err != nil {

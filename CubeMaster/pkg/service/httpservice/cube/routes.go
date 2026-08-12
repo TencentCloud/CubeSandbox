@@ -45,6 +45,7 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	g.POST(SnapshotAction, createSnapshotGinHandler)
 	g.GET(SnapshotAction, getSnapshotGinHandler)
 	g.GET(SnapshotStorageAction, handleSnapshotStorageAction)
+	g.POST(SnapshotImportAction, importSnapshotGinHandler)
 	g.GET(SnapshotAction+"/:snapshot_id", getSnapshotGinHandler)
 	g.DELETE(SnapshotAction+"/:snapshot_id", deleteSnapshotGinHandler)
 	g.GET(OperationAction+"/:operation_id", handleSnapshotOperationAction)

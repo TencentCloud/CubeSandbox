@@ -175,70 +175,81 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 
 	} else if templateID, ok := flowOpts.GetSnapshotTemplateID(); ok {
 
-		var snapBasePath, snapSpecPath string
+		diskOnly, memoryVolURL := storage.DiskOnlyRestore(flowOpts.StorageInfo)
+		if diskOnly {
+			// No memory volume to resume: keep the restore identity, the shim
+			// cold-boots on the snapshot-derived writable layer. The marker is
+			// what tells the shim this is intentional, so a restore that merely
+			// failed to resolve a memory volume still fails there.
+			annotations[constants.AnnotationAppSnapshotRestore] = "true"
+			annotations[constants.AnnotationVMSnapshotDiskOnly] = "true"
+			logEntry.WithField("template_id", templateID).Warnf("disk-only snapshot restore: cold boot with snapshot rootfs")
 
-		if flowOpts.IsCubeboxV2() {
-			if flowOpts.LocalRunTemplate == nil {
-				logEntry.Errorf("check snapshot path failed: %s", "local run template is nil")
-				return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, "local snapshot not exist")
+			sandbox := cubeboxstore.GetCubeBox(ctx)
+			if sandbox != nil && sandbox.FirstContainer() != nil {
+				opts, err := generateSandboxVirtiofsOpt(ctx, flowOpts, true)
+				if err != nil {
+					return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
+				}
+				specOpts = append(specOpts, opts...)
 			}
-			paths, err := e.resolveSnapshotPaths(templateID, flowOpts.LocalRunTemplate.Snapshot.Snapshot.Path, flowOpts.ReqInfo)
-			if err != nil {
-				return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
-			}
-			snapBasePath = paths.Base
-			snapSpecPath = paths.Spec
-
-			kernelPath, imagePath, err := e.resolveSnapshotRuntimeArtifacts(snapSpecPath, flowOpts.LocalRunTemplate)
-			if err != nil {
-				return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
-			}
-			annotations[constants.AnnotationsVMKernelPath] = kernelPath
-			annotations[constants.AnnotationsVMImagePath] = imagePath
 		} else {
-
-			snapBasePath = filepath.Join(e.getSnapShotFilePath(templateID), "")
-			if exists, err := utils.DenExist(snapBasePath); err != nil || !exists {
-				logEntry.Errorf("check snapshot path %s failed: %v", snapBasePath, err)
-				return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, "snapshot not exist")
+			if memoryVolURL == "" {
+				// Unresolved storage info would silently cold-boot at the shim.
+				return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, "snapshot restore: missing prefetched memory volume in storage info")
 			}
-		}
 
-		annotations[constants.AnnotationVMSnapshotPath] = snapBasePath
-		memoryVolURL := snapshotRestoreMemoryVolURLFromStorageInfo(flowOpts)
-		if memoryVolURL != "" {
+			var snapBasePath, snapSpecPath string
+
+			if flowOpts.IsCubeboxV2() {
+				if flowOpts.LocalRunTemplate == nil {
+					logEntry.Errorf("check snapshot path failed: %s", "local run template is nil")
+					return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, "local snapshot not exist")
+				}
+				paths, err := e.resolveSnapshotPaths(templateID, flowOpts.LocalRunTemplate.Snapshot.Snapshot.Path, flowOpts.ReqInfo)
+				if err != nil {
+					return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
+				}
+				snapBasePath = paths.Base
+				snapSpecPath = paths.Spec
+
+				kernelPath, imagePath, err := e.resolveSnapshotRuntimeArtifacts(snapSpecPath, flowOpts.LocalRunTemplate)
+				if err != nil {
+					return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
+				}
+				annotations[constants.AnnotationsVMKernelPath] = kernelPath
+				annotations[constants.AnnotationsVMImagePath] = imagePath
+			} else {
+
+				snapBasePath = filepath.Join(e.getSnapShotFilePath(templateID), "")
+				if exists, err := utils.DenExist(snapBasePath); err != nil || !exists {
+					logEntry.Errorf("check snapshot path %s failed: %v", snapBasePath, err)
+					return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, "snapshot not exist")
+				}
+			}
+
+			annotations[constants.AnnotationVMSnapshotPath] = snapBasePath
 			annotations[constants.AnnotationVMSnapshotMemoryVolURL] = memoryVolURL
 			logEntry.WithField("memory_vol_url", memoryVolURL).Warnf("resolved snapshot restore memory volume")
-		} else {
-			// v4: physical refs live in cubelet's snapshot catalog keyed by
-			// logical id (runtime snapshot id / appsnapshot template id).
-			// If neither annotation is present, the request is not a snapshot
-			// restore at all; otherwise the catalog entry for the logical id
-			// is missing/empty and Cubelet has already returned a fail-fast
-			// error upstream of this point.
-			logEntry.WithFields(CubeLog.Fields{
-				"runtime_snapshot_id": realReq.GetAnnotations()[constants.MasterAnnotationRuntimeSnapshotID],
-				"appsnapshot_tpl_id":  realReq.GetAnnotations()[constants.MasterAnnotationAppSnapshotTemplateID],
-			}).Warnf("missing snapshot restore memory volume")
-		}
 
-		annotations[constants.AnnotationAppSnapshotRestore] = "true"
+			annotations[constants.AnnotationAppSnapshotRestore] = "true"
 
-		annotations[constants.AnnotationAppSnapshotContainerID] = snapshotRestoreContainerID(templateID, snapSpecPath)
+			annotations[constants.AnnotationAppSnapshotContainerID] = snapshotRestoreContainerID(templateID, snapSpecPath)
 
-		sandbox := cubeboxstore.GetCubeBox(ctx)
-		if sandbox != nil && sandbox.FirstContainer() != nil {
-			opts, err := generateRestoreVirtiofsOpt(ctx, flowOpts, sandbox.FirstContainer().Config)
-			if err != nil {
-				return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
+			sandbox := cubeboxstore.GetCubeBox(ctx)
+			if sandbox != nil && sandbox.FirstContainer() != nil {
+				opts, err := generateRestoreVirtiofsOpt(ctx, flowOpts, sandbox.FirstContainer().Config)
+				if err != nil {
+					return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
+				}
+				specOpts = append(specOpts, opts...)
+				opts, err = generateSandboxVirtiofsOpt(ctx, flowOpts, false)
+				if err != nil {
+					return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
+				}
+				specOpts = append(specOpts, opts...)
+
 			}
-			specOpts = append(specOpts, opts...)
-			opts, err = generateSandboxVirtiofsOpt(ctx, flowOpts, false)
-			if err != nil {
-				return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
-			}
-			specOpts = append(specOpts, opts...)
-
 		}
 	} else {
 
@@ -285,19 +296,22 @@ func (e *cubeboxInstancePlugin) CreateContainer(ctx context.Context, cubeBox *cu
 				constants.AnnotationPropagationContainerMounts: virtiofs.GenPropagationContainerDirs(),
 			}))
 		} else if templateID, ok := flowOpts.GetSnapshotTemplateID(); ok {
-
-			snapshotContainerID := templateID
-			if innerIndex, ok := ctx.Value(constants.KCubeIndexContext).(string); ok {
-				snapshotContainerID += "_" + innerIndex
+			// A disk-only cold boot creates the container anew instead of
+			// re-attaching to the snapshot's container.
+			if diskOnly, _ := storage.DiskOnlyRestore(flowOpts.StorageInfo); !diskOnly {
+				snapshotContainerID := templateID
+				if innerIndex, ok := ctx.Value(constants.KCubeIndexContext).(string); ok {
+					snapshotContainerID += "_" + innerIndex
+				}
+				specOpts = append(specOpts, oci.WithAnnotations(map[string]string{
+					constants.AnnotationAppSnapshotContainerID: snapshotContainerID,
+				}))
+				opts, err := generateRestoreVirtiofsOpt(ctx, flowOpts, c.Config)
+				if err != nil {
+					return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
+				}
+				specOpts = append(specOpts, opts...)
 			}
-			specOpts = append(specOpts, oci.WithAnnotations(map[string]string{
-				constants.AnnotationAppSnapshotContainerID: snapshotContainerID,
-			}))
-			opts, err := generateRestoreVirtiofsOpt(ctx, flowOpts, c.Config)
-			if err != nil {
-				return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
-			}
-			specOpts = append(specOpts, opts...)
 		}
 	}
 
@@ -532,17 +546,6 @@ func inferSnapshotResDirFromRequest(req *cubebox.RunCubeSandboxRequest) (string,
 	}
 
 	return fmt.Sprintf("%dC%dM", cpu, mem), nil
-}
-
-func snapshotRestoreMemoryVolURLFromStorageInfo(flowOpts *workflow.CreateContext) string {
-	if flowOpts == nil || flowOpts.StorageInfo == nil {
-		return ""
-	}
-	info, ok := flowOpts.StorageInfo.(*storage.StorageInfo)
-	if !ok || info == nil {
-		return ""
-	}
-	return strings.TrimSpace(info.RestoreMemoryVolURL)
 }
 
 type snapshotMetadata struct {

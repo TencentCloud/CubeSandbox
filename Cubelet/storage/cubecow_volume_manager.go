@@ -52,6 +52,7 @@ type cowVolumeManager interface {
 	CreateSandboxRootfsFromTemplate(ctx context.Context, sandboxID, templateID string, gen uint32, desiredSizeBytes uint64) (*cowVolume, error)
 	RollbackDeriveNewGen(ctx context.Context, sandboxID, snapshotRootfsVol string, gen uint32, desiredSizeBytes uint64) (*cowVolume, error)
 	CreateTemplateBuildRootfs(ctx context.Context, templateID string, sizeBytes uint64) (*cowVolume, error)
+	CreateRawVolume(ctx context.Context, name string, sizeBytes uint64) (*cowVolume, error)
 	CommitTemplateRootfs(ctx context.Context, sourceName, templateID string) (*cowVolume, error)
 	CreateMemoryVolume(ctx context.Context, templateID string, sizeBytes uint64) (*cowVolume, error)
 	CommitTemplateMemory(ctx context.Context, sourceName, templateID string, sizeBytes uint64) (*cowVolume, error)
@@ -182,6 +183,17 @@ func (m *CowVolumeManager) resizeSnapshotIfTooSmall(snapshotName string, desired
 
 func (m *CowVolumeManager) CreateTemplateBuildRootfs(ctx context.Context, templateID string, sizeBytes uint64) (*cowVolume, error) {
 	return m.createInitializedTemplateVolume(ctx, cowTemplateBuildRootfsName(templateID), sizeBytes)
+}
+
+func (m *CowVolumeManager) CreateRawVolume(ctx context.Context, name string, sizeBytes uint64) (*cowVolume, error) {
+	devPath, err := m.createTemplateVolumePath(name, sizeBytes)
+	if err != nil {
+		return nil, err
+	}
+	if resolved, resolveErr := m.ResolveDevPath(ctx, name, cowKindVolume); resolveErr == nil && resolved != "" {
+		devPath = resolved
+	}
+	return newCowVolume(name, cowKindVolume, 0, devPath), nil
 }
 
 func (m *CowVolumeManager) CommitTemplateRootfs(ctx context.Context, sourceName, templateID string) (*cowVolume, error) {

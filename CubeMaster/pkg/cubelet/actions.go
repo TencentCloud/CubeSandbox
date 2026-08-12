@@ -67,6 +67,17 @@ func CommitSandbox(ctx context.Context, calleeEp string,
 	return c.CommitSandbox(ctx, req)
 }
 
+func ImportSnapshot(ctx context.Context, calleeEp string,
+	req *cubebox.ImportSnapshotRequest) (*cubebox.ImportSnapshotResponse, error) {
+	conn, err := grpcconn.GetWorkerConn(ctx, calleeEp)
+	if err != nil {
+		return nil, ret.Err(errorcode.ErrorCode_ConnHostFailed, err.Error())
+	}
+	defer conn.Close()
+	c := cubebox.NewCubeboxMgrClient(conn.Value())
+	return c.ImportSnapshot(ctx, req)
+}
+
 func RollbackSandbox(ctx context.Context, calleeEp string,
 	req *cubebox.RollbackSandboxRequest) (*cubebox.RollbackSandboxResponse, error) {
 	conn, err := grpcconn.GetWorkerConn(ctx, calleeEp)

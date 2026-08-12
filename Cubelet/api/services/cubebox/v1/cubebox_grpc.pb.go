@@ -30,6 +30,7 @@ const (
 	CubeboxMgr_Exec_FullMethodName                      = "/cubelet.services.cubebox.v1.CubeboxMgr/Exec"
 	CubeboxMgr_AppSnapshot_FullMethodName               = "/cubelet.services.cubebox.v1.CubeboxMgr/AppSnapshot"
 	CubeboxMgr_CommitSandbox_FullMethodName             = "/cubelet.services.cubebox.v1.CubeboxMgr/CommitSandbox"
+	CubeboxMgr_ImportSnapshot_FullMethodName            = "/cubelet.services.cubebox.v1.CubeboxMgr/ImportSnapshot"
 	CubeboxMgr_RollbackSandbox_FullMethodName           = "/cubelet.services.cubebox.v1.CubeboxMgr/RollbackSandbox"
 	CubeboxMgr_CleanupTemplate_FullMethodName           = "/cubelet.services.cubebox.v1.CubeboxMgr/CleanupTemplate"
 	CubeboxMgr_ListSandboxSnapshots_FullMethodName      = "/cubelet.services.cubebox.v1.CubeboxMgr/ListSandboxSnapshots"
@@ -58,6 +59,9 @@ type CubeboxMgrClient interface {
 	AppSnapshot(ctx context.Context, in *AppSnapshotRequest, opts ...grpc.CallOption) (*AppSnapshotResponse, error)
 	// CommitSandbox snapshots an existing running sandbox into a template snapshot.
 	CommitSandbox(ctx context.Context, in *CommitSandboxRequest, opts ...grpc.CallOption) (*CommitSandboxResponse, error)
+	// ImportSnapshot registers a memory-less snapshot from an on-node disk
+	// artifact; create-from-snapshot cold-boots it.
+	ImportSnapshot(ctx context.Context, in *ImportSnapshotRequest, opts ...grpc.CallOption) (*ImportSnapshotResponse, error)
 	// RollbackSandbox restores a running sandbox to a committed snapshot.
 	RollbackSandbox(ctx context.Context, in *RollbackSandboxRequest, opts ...grpc.CallOption) (*RollbackSandboxResponse, error)
 	// CleanupTemplate removes local template snapshot/base data from this node.
@@ -154,6 +158,16 @@ func (c *cubeboxMgrClient) CommitSandbox(ctx context.Context, in *CommitSandboxR
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CommitSandboxResponse)
 	err := c.cc.Invoke(ctx, CubeboxMgr_CommitSandbox_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *cubeboxMgrClient) ImportSnapshot(ctx context.Context, in *ImportSnapshotRequest, opts ...grpc.CallOption) (*ImportSnapshotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ImportSnapshotResponse)
+	err := c.cc.Invoke(ctx, CubeboxMgr_ImportSnapshot_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -258,6 +272,9 @@ type CubeboxMgrServer interface {
 	AppSnapshot(context.Context, *AppSnapshotRequest) (*AppSnapshotResponse, error)
 	// CommitSandbox snapshots an existing running sandbox into a template snapshot.
 	CommitSandbox(context.Context, *CommitSandboxRequest) (*CommitSandboxResponse, error)
+	// ImportSnapshot registers a memory-less snapshot from an on-node disk
+	// artifact; create-from-snapshot cold-boots it.
+	ImportSnapshot(context.Context, *ImportSnapshotRequest) (*ImportSnapshotResponse, error)
 	// RollbackSandbox restores a running sandbox to a committed snapshot.
 	RollbackSandbox(context.Context, *RollbackSandboxRequest) (*RollbackSandboxResponse, error)
 	// CleanupTemplate removes local template snapshot/base data from this node.
@@ -310,6 +327,9 @@ func (UnimplementedCubeboxMgrServer) AppSnapshot(context.Context, *AppSnapshotRe
 }
 func (UnimplementedCubeboxMgrServer) CommitSandbox(context.Context, *CommitSandboxRequest) (*CommitSandboxResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CommitSandbox not implemented")
+}
+func (UnimplementedCubeboxMgrServer) ImportSnapshot(context.Context, *ImportSnapshotRequest) (*ImportSnapshotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ImportSnapshot not implemented")
 }
 func (UnimplementedCubeboxMgrServer) RollbackSandbox(context.Context, *RollbackSandboxRequest) (*RollbackSandboxResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RollbackSandbox not implemented")
@@ -478,6 +498,24 @@ func _CubeboxMgr_CommitSandbox_Handler(srv interface{}, ctx context.Context, dec
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(CubeboxMgrServer).CommitSandbox(ctx, req.(*CommitSandboxRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CubeboxMgr_ImportSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ImportSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CubeboxMgrServer).ImportSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CubeboxMgr_ImportSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CubeboxMgrServer).ImportSnapshot(ctx, req.(*ImportSnapshotRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -660,6 +698,10 @@ var CubeboxMgr_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CommitSandbox",
 			Handler:    _CubeboxMgr_CommitSandbox_Handler,
+		},
+		{
+			MethodName: "ImportSnapshot",
+			Handler:    _CubeboxMgr_ImportSnapshot_Handler,
 		},
 		{
 			MethodName: "RollbackSandbox",

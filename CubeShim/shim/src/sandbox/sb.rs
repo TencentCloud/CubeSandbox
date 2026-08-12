@@ -128,8 +128,18 @@ impl SandBox {
         self.conf.app_snapshot_restore
     }
 
+    pub fn disk_only_restore(&self) -> bool {
+        self.conf.app_snapshot_restore
+            && self.conf.snapshot_memory_vol_url.is_none()
+            && self.conf.snapshot_disk_only
+    }
+
+    pub fn resume_restore(&self) -> bool {
+        self.conf.app_snapshot_restore && self.conf.snapshot_memory_vol_url.is_some()
+    }
+
     pub fn normal_create(&self) -> bool {
-        !(self.conf.app_snapshot_create || self.conf.app_snapshot_restore)
+        !(self.conf.app_snapshot_create || self.resume_restore())
     }
 
     pub fn inited(&self) -> bool {
@@ -151,16 +161,32 @@ impl SandBox {
                 .and_then(|anno| anno.get(config::ANNO_SNAPSHOT_MEMORY_VOL_URL))
                 .map(|value| value.trim())
                 .unwrap_or("");
-            if snapshot_memory_vol_url.is_empty() {
-                let mut annotation_keys = annotations
-                    .as_ref()
-                    .map(|anno| anno.keys().cloned().collect::<Vec<_>>())
-                    .unwrap_or_default();
-                annotation_keys.sort();
+            if self.conf.snapshot_disk_only && !snapshot_memory_vol_url.is_empty() {
                 return Err(format!(
-                    "app snapshot restore requires fresh memory_vol_url annotation (cube.vm.snapshot.memory_vol_url); upstream must resolve the template memory volume for this start, snapshot_base:{}, annotation_keys:{:?}",
-                    snapshot_base, annotation_keys
+                    "app snapshot restore carries both the disk-only marker (cube.vm.snapshot.disk_only) and a memory volume url (cube.vm.snapshot.memory_vol_url); refusing to guess which one was intended, snapshot_base:{}",
+                    snapshot_base
                 ));
+            }
+            if snapshot_memory_vol_url.is_empty() {
+                // A disk-only restore has to say so. Without the marker an empty
+                // memory volume means the restore could not be resolved, and
+                // cold-booting it would silently drop the snapshot's memory state.
+                if !self.conf.snapshot_disk_only {
+                    let mut annotation_keys = annotations
+                        .as_ref()
+                        .map(|anno| anno.keys().cloned().collect::<Vec<_>>())
+                        .unwrap_or_default();
+                    annotation_keys.sort();
+                    return Err(format!(
+                        "app snapshot restore requires either a memory_vol_url annotation (cube.vm.snapshot.memory_vol_url) or an explicit disk-only marker (cube.vm.snapshot.disk_only); upstream must resolve the template memory volume for this start, snapshot_base:{}, annotation_keys:{:?}",
+                        snapshot_base, annotation_keys
+                    ));
+                }
+                infof!(
+                    self.log,
+                    "disk-only snapshot restore init: no memory volume, cold boot with snapshot rootfs, snapshot_base:{}",
+                    snapshot_base
+                );
             } else {
                 infof!(
                     self.log,
@@ -454,7 +480,7 @@ impl SandBox {
         }
 
         //add vfio device
-        if !self.app_snapshot_restore() {
+        if !self.resume_restore() {
             self.add_device().await?;
         }
 
@@ -486,7 +512,7 @@ impl SandBox {
             req.start_mode = protoc::agent::StartMode::SNAPSHOT;
         }
 
-        if self.app_snapshot_restore() {
+        if self.resume_restore() {
             req.start_mode = protoc::agent::StartMode::RESTORE;
         }
 
@@ -837,7 +863,12 @@ impl SandBox {
         }
         let mut snapshot = false;
 
-        if self.by_snapshot() {
+        if self.disk_only_restore() {
+            infof!(
+                self.log,
+                "disk-only snapshot restore: skip vm-snapshot restore, cold boot"
+            );
+        } else if self.by_snapshot() {
             match self.restore_vm().await {
                 Ok(_) => {
                     snapshot = true;
@@ -1496,6 +1527,40 @@ mod tests {
     use super::normalize_dns_for_agent;
     use super::Log;
     use super::SandBox;
+
+    #[test]
+    fn test_restore_flavor_predicates() {
+        let log = Log::default();
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(128);
+        let mut sb = SandBox::new("ut".to_string(), log, false, tx);
+
+        assert!(!sb.disk_only_restore());
+        assert!(!sb.resume_restore());
+        assert!(sb.normal_create());
+
+        // Restore without the marker is not disk-only: init rejects it rather
+        // than cold-booting a restore that simply failed to resolve.
+        sb.conf.app_snapshot_restore = true;
+        assert!(!sb.disk_only_restore());
+        assert!(!sb.resume_restore());
+
+        sb.conf.snapshot_disk_only = true;
+        assert!(sb.disk_only_restore());
+        assert!(!sb.resume_restore());
+        assert!(sb.normal_create());
+
+        sb.conf.snapshot_memory_vol_url = Some("file:///dev/mapper/mem".to_string());
+        assert!(!sb.disk_only_restore());
+        assert!(sb.resume_restore());
+        assert!(!sb.normal_create());
+
+        sb.conf.app_snapshot_restore = false;
+        sb.conf.snapshot_memory_vol_url = None;
+        sb.conf.app_snapshot_create = true;
+        assert!(!sb.disk_only_restore());
+        assert!(!sb.resume_restore());
+        assert!(!sb.normal_create());
+    }
 
     #[tokio::test]
     async fn test_sandbox_prepare_resource() {

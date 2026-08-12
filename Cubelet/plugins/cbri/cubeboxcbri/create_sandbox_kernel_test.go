@@ -24,6 +24,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 )
 
 func TestCreateSandboxCreateSnapshotRefreshesArtifactKernel(t *testing.T) {
@@ -107,6 +108,7 @@ func TestCreateSandboxRestoreDoesNotRefreshArtifactKernel(t *testing.T) {
 				},
 			},
 		},
+		StorageInfo: &storage.StorageInfo{RestoreMemoryVolURL: "file:///dev/mapper/tpl-memory"},
 	}
 	ctx := constants.WithAppImageID(context.Background(), artifactID)
 

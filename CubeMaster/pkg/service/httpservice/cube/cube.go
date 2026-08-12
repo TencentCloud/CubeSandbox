@@ -27,6 +27,7 @@ const (
 	SandboxRollbackAction          = "/sandbox/rollback"
 	SnapshotAction                 = "/snapshot"
 	SnapshotStorageAction          = "/snapshot/storage"
+	SnapshotImportAction           = "/snapshot/import"
 	OperationAction                = "/operation"
 	TemplateAction                 = "/template"
 	TemplateCompatAction           = "/template/compat"

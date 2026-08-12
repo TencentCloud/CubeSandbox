@@ -43,6 +43,14 @@ type SnapshotCatalogEntry struct {
 	RootfsKind   string `json:"rootfs_kind"`
 	MemoryVol    string `json:"memory_vol"`
 	MemoryKind   string `json:"memory_kind"`
+	// WlayerSubdir is the overlay-upper subdir inside the rootfs artifact,
+	// e.g. "disk/<container-id>". Empty means the default layout.
+	WlayerSubdir string `json:"wlayer_subdir,omitempty"`
+	// DiskOnly records that this entry was written for a snapshot that carries
+	// no memory image by design. A blank MemoryVol alone does not imply it: on
+	// a stale or partial record it means the memory reference is unknown, which
+	// must fail closed rather than cold-boot.
+	DiskOnly bool `json:"disk_only,omitempty"`
 	// BuildRootfsVol/Kind track the temporary writable working layer created
 	// during template build (AppSnapshot path). They must be cleaned up at
 	// template delete time. Empty for runtime snapshots (CommitSandbox), which

@@ -36,6 +36,7 @@ const (
 	JobOperationCommit           = "COMMIT"
 	JobOperationLegacy           = "LEGACY"
 	JobOperationSnapshotCreate   = "SNAPSHOT_CREATE"
+	JobOperationSnapshotImport   = "SNAPSHOT_IMPORT"
 	JobOperationSnapshotRollback = "SNAPSHOT_ROLLBACK"
 	JobOperationSnapshotDelete   = "SNAPSHOT_DELETE"
 
