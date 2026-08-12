@@ -28,6 +28,7 @@ type SnapshotInfo struct {
 	DisplayName               string                             `json:"display_name,omitempty"`
 	OriginSandboxID           string                             `json:"origin_sandbox_id,omitempty"`
 	OriginNodeID              string                             `json:"origin_node_id,omitempty"`
+	OriginHostFactsJSON       string                             `json:"origin_host_facts_json,omitempty"`
 	StorageBackend            string                             `json:"storage_backend,omitempty"`
 	Retain                    bool                               `json:"retain,omitempty"`
 	RootfsSizeBytesAtSnapshot uint64                             `json:"rootfs_size_bytes_at_snapshot,omitempty"`
@@ -199,6 +200,7 @@ func snapshotInfoFromTemplateInfo(info *TemplateInfo, createReq *sandboxtypes.Cr
 		DisplayName:               info.DisplayName,
 		OriginSandboxID:           info.OriginSandboxID,
 		OriginNodeID:              info.OriginNodeID,
+		OriginHostFactsJSON:       info.OriginHostFactsJSON,
 		StorageBackend:            info.StorageBackend,
 		Retain:                    info.Retain,
 		RootfsSizeBytesAtSnapshot: info.RootfsSizeBytesAtSnapshot,

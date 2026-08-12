@@ -46,6 +46,7 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	g.GET(SnapshotAction, getSnapshotGinHandler)
 	g.GET(SnapshotStorageAction, handleSnapshotStorageAction)
 	g.GET(SnapshotAction+"/:snapshot_id", getSnapshotGinHandler)
+	g.GET(SnapshotAction+"/:snapshot_id/restore-compat", restoreCompatGinHandler)
 	g.DELETE(SnapshotAction+"/:snapshot_id", deleteSnapshotGinHandler)
 	g.GET(OperationAction+"/:operation_id", handleSnapshotOperationAction)
 

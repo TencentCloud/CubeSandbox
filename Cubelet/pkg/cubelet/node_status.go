@@ -21,6 +21,7 @@ import (
 	cubeletnodemeta "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/nodestatus"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/resourcesource"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/versioninfo"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/masterclient"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -518,6 +519,7 @@ func (kl *Cubelet) buildRegisterRequest(node *cubeletnodemeta.Node) *masterclien
 	versions, incomplete := kl.collectVersionReport()
 	req.Versions = versions
 	req.InventoryIncomplete = incomplete
+	req.HostFacts = collectHostFactsReport()
 	return req
 }
 
@@ -532,7 +534,31 @@ func (kl *Cubelet) buildStatusRequest(node *cubeletnodemeta.Node) *masterclient.
 	versions, incomplete := kl.collectVersionReport()
 	req.Versions = versions
 	req.InventoryIncomplete = incomplete
+	req.HostFacts = collectHostFactsReport()
 	return req
+}
+
+// collectHostFactsReport maps the cached host facts into the master transport
+// type. Returns nil when nothing meaningful was collected so the master treats
+// this heartbeat as carrying no host-facts update.
+func collectHostFactsReport() *masterclient.HostFacts {
+	f := versioninfo.CollectHostFacts()
+	if f.CPUVendor == "" && f.CPUModel == "" && f.CPUIDHash == "" &&
+		f.HostKernelRelease == "" && f.HostKernelFingerprint == "" && f.KVMAPIVersion == 0 &&
+		f.KVMModuleFingerprint == "" && f.KVMModuleTaint == "" {
+		return nil
+	}
+	return &masterclient.HostFacts{
+		CPUVendor:             f.CPUVendor,
+		CPUModel:              f.CPUModel,
+		CPUIDHash:             f.CPUIDHash,
+		HostKernelRelease:     f.HostKernelRelease,
+		HostKernelFingerprint: f.HostKernelFingerprint,
+		KVMAPIVersion:         f.KVMAPIVersion,
+		KVMModuleFingerprint:  f.KVMModuleFingerprint,
+		KVMModuleTaint:        f.KVMModuleTaint,
+		KVMModuleScanned:      f.KVMModuleScanned,
+	}
 }
 
 func (kl *Cubelet) collectVersionReport() ([]masterclient.ComponentVersion, bool) {

@@ -125,6 +125,7 @@ type TemplateInfo struct {
 	Kind                      string          `json:"kind,omitempty"`
 	OriginSandboxID           string          `json:"origin_sandbox_id,omitempty"`
 	OriginNodeID              string          `json:"origin_node_id,omitempty"`
+	OriginHostFactsJSON       string          `json:"origin_host_facts_json,omitempty"`
 	DisplayName               string          `json:"display_name,omitempty"`
 	StorageBackend            string          `json:"storage_backend,omitempty"`
 	Retain                    bool            `json:"retain,omitempty"`
@@ -154,6 +155,7 @@ func templateInfoFromDefinition(def models.TemplateDefinition) TemplateInfo {
 		Kind:                      def.Kind,
 		OriginSandboxID:           def.OriginSandboxID,
 		OriginNodeID:              def.OriginNodeID,
+		OriginHostFactsJSON:       def.OriginHostFactsJSON,
 		DisplayName:               def.DisplayName,
 		StorageBackend:            def.StorageBackend,
 		Retain:                    def.Retain,
@@ -171,6 +173,7 @@ type definitionCreateOptions struct {
 	Kind                      string
 	OriginSandboxID           string
 	OriginNodeID              string
+	OriginHostFactsJSON       string
 	DisplayName               string
 	StorageBackend            string
 	Retain                    bool

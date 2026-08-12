@@ -20,6 +20,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -203,6 +204,7 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 			Kind:                      TemplateKindSnapshot,
 			OriginSandboxID:           sandboxID,
 			OriginNodeID:              nodeID,
+			OriginHostFactsJSON:       originHostFactsJSON(ctx, nodeID),
 			DisplayName:               displayName,
 			StorageBackend:            StorageBackendCow,
 			RootfsSizeBytesAtSnapshot: parseSystemDiskSizeBytes(storedReq),
@@ -1082,6 +1084,7 @@ func createDefinitionTx(ctx context.Context, tx *gorm.DB, templateID string, sto
 		Kind:                      kind,
 		OriginSandboxID:           opts.OriginSandboxID,
 		OriginNodeID:              opts.OriginNodeID,
+		OriginHostFactsJSON:       opts.OriginHostFactsJSON,
 		DisplayName:               opts.DisplayName,
 		StorageBackend:            opts.StorageBackend,
 		Retain:                    opts.Retain,
@@ -1099,6 +1102,32 @@ func createDefinitionTx(ctx context.Context, tx *gorm.DB, templateID string, sto
 		return err
 	}
 	return nil
+}
+
+// originHostFactsJSON snapshots the origin node's current host facts (CPU
+// feature set, host kernel, KVM ABI) at snapshot-create time so a later
+// restore-compat judgment compares against the fingerprint as it was when the
+// snapshot was captured, immune to subsequent drift on the origin node.
+//
+// Host facts are boot-static, so when the live node is momentarily unhealthy
+// (heartbeat expiry at exactly the async create moment) we fall back to the
+// node's last-persisted facts rather than freezing an empty string — otherwise
+// a transient blip would permanently degrade the snapshot to
+// origin_fingerprint_unknown with no backfill path. Returns "" only when no
+// facts are available from either source (older cubelet that never reported).
+func originHostFactsJSON(ctx context.Context, nodeID string) string {
+	facts, ok := nodemeta.GetNodeHostFacts(ctx, nodeID)
+	if !ok || facts == nil {
+		facts, ok = nodemeta.GetPersistedNodeHostFacts(ctx, nodeID)
+		if !ok || facts == nil {
+			return ""
+		}
+	}
+	raw, err := json.Marshal(facts)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
 }
 
 func getSandboxData(ctx context.Context, sandboxID, instanceType string) (*sandboxtypes.SandboxData, error) {

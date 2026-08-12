@@ -33,6 +33,7 @@ var (
 	rollbackSnapshotFn     = templatecenter.RollbackSandboxToSnapshot
 	getSnapshotOperationFn = templatecenter.GetSnapshotOperation
 	resolveSnapshotHostFn  = resolveSandboxHost
+	restoreCompatFn        = templatecenter.EvaluateSnapshotRestoreCompat
 )
 
 const snapshotResponseWriteDeadlineBuffer = 30 * time.Second
@@ -82,6 +83,16 @@ type snapshotStorageResponse struct {
 type operationResponse struct {
 	*types.Res
 	Operation *operationResource `json:"operation,omitempty"`
+}
+
+type restoreCompatResponse struct {
+	*types.Res
+	Compatible bool                                    `json:"compatible"`
+	SnapshotID string                                  `json:"snapshot_id,omitempty"`
+	OriginNode string                                  `json:"origin_node,omitempty"`
+	TargetNode string                                  `json:"target_node,omitempty"`
+	Reason     string                                  `json:"reason,omitempty"`
+	Dimensions []templatecenter.RestoreCompatDimension `json:"dimensions,omitempty"`
 }
 
 type snapshotResource struct {
@@ -137,6 +148,48 @@ func createSnapshotGinHandler(c *gin.Context) {
 func getSnapshotGinHandler(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
 	common.WriteAPI(c, getSnapshot(c.Request, rt, c.Param("snapshot_id")))
+}
+
+func restoreCompatGinHandler(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	common.WriteAPI(c, restoreCompat(c.Request, rt, c.Param("snapshot_id")))
+}
+
+// restoreCompat fronts GET /cube/snapshot/{snapshot_id}/restore-compat?target_node=B
+// and judges whether the snapshot (created on its origin node A) can be restored
+// on target node B, requiring strict equality of CPU feature set and host
+// kernel + KVM ABI.
+func restoreCompat(r *http.Request, rt *CubeLog.RequestTrace, snapshotID string) interface{} {
+	requestID := requestIDFromQuery(r)
+	targetNode := strings.TrimSpace(r.URL.Query().Get("target_node"))
+	if strings.TrimSpace(snapshotID) == "" || targetNode == "" {
+		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
+		return &restoreCompatResponse{
+			Res: &types.Res{RequestID: requestID, Ret: &types.Ret{
+				RetCode: int(errorcode.ErrorCode_MasterParamsError),
+				RetMsg:  "snapshot_id and target_node are required",
+			}},
+		}
+	}
+	result, err := restoreCompatFn(r.Context(), snapshotID, targetNode)
+	if err != nil {
+		code := snapshotErrorCode(err)
+		rt.RetCode = int64(code)
+		return &restoreCompatResponse{
+			Res: &types.Res{RequestID: requestID, Ret: &types.Ret{RetCode: code, RetMsg: err.Error()}},
+		}
+	}
+	rt.RequestID = requestID
+	rt.RetCode = int64(errorcode.ErrorCode_Success)
+	return &restoreCompatResponse{
+		Res:        &types.Res{RequestID: requestID, Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success), RetMsg: "success"}},
+		Compatible: result.Compatible,
+		SnapshotID: result.SnapshotID,
+		OriginNode: result.OriginNode,
+		TargetNode: result.TargetNode,
+		Reason:     result.Reason,
+		Dimensions: result.Dimensions,
+	}
 }
 
 func deleteSnapshotGinHandler(c *gin.Context) {
