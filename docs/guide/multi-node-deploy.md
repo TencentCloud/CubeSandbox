@@ -147,6 +147,8 @@ scheduler:
 
 For multi-node clusters, set `scheduler.priority_select_num` to a value greater than `1` so CubeMaster randomly selects from the top scored nodes. The shipped default config uses `priority_select_num: 1`, which means scoring only determines which single node receives the next sandbox. Use `3` as a starting point for small clusters and tune it based on your node count. `scheduler.least_select_name` defaults to `random`, so it usually does not need to be set explicitly.
 
+For the complete CubeMaster scheduler reference, including Cubelet node reports, quota / label / concurrency effects, and template redo after adding compute nodes, see [CubeMaster Scheduler Configuration](./cubemaster-scheduler-config.md).
+
 After updating `cubemaster.yaml`, restart CubeMaster with your normal deployment procedure so the scheduler loads the new scoring configuration.
 
 ## Common Operations

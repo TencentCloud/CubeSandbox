@@ -138,7 +138,7 @@ Under `cubelet_conf`:
 | `create_timeout_insec` | Create/scheduling RPC deadline only — **not** sandbox idle TTL. Defaults to `300` when unset. |
 | `common_timeout_insec` | Generic CubeMaster→Cubelet RPC timeout for non-create paths. |
 
-After changing `default_timeout_insec`, restart CubeMaster and read [Sandbox lifecycle — Operational Notes](lifecycle.md#cluster-default-idle-timeout-default_timeout_insec) for client-visible behavior.
+After changing `default_timeout_insec`, restart CubeMaster and read [Sandbox lifecycle — Operational Notes](lifecycle.md#cluster-default-idle-timeout-default_timeout_insec) for client-visible behavior. For node selection, quota, labels, scheduler scoring, or template redo after adding compute nodes, see [CubeMaster Scheduler Configuration](./cubemaster-scheduler-config.md).
 
 ### Scenario B: a service is failing or restart-looping
 
@@ -430,5 +430,6 @@ sudo ss -lntp 'sport = :3000'
 
 - [Quick Start](./quickstart.md) — installation entry point
 - [Multi-Node Cluster](./multi-node-deploy.md) — service subset on compute nodes
+- [CubeMaster Scheduler Configuration](./cubemaster-scheduler-config.md) — node selection, quota, labels, scoring, and template redo
 - [Deployment Troubleshooting](./troubleshooting/deployment.md) — XFS, CIDR conflicts, etc.
 - [Templates Troubleshooting](./troubleshooting/templates.md) — template-build issues

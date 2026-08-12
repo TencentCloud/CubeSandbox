@@ -138,7 +138,7 @@ sudo systemctl restart cube-sandbox-<service>.service
 | `create_timeout_insec` | 仅限制创建/调度 RPC 的截止时间，**不是**沙箱空闲 TTL。未配置时默认 `300`。 |
 | `common_timeout_insec` | CubeMaster 访问 Cubelet 的通用 RPC 超时（非 create 专用）。 |
 
-修改 `default_timeout_insec` 后需重启 CubeMaster；客户端可见语义见[沙箱生命周期 — 设计与运维要点](lifecycle.md#集群默认空闲超时default_timeout_insec)。
+修改 `default_timeout_insec` 后需重启 CubeMaster；客户端可见语义见[沙箱生命周期 — 设计与运维要点](lifecycle.md#集群默认空闲超时default_timeout_insec)。如果要调整节点选择、quota、label、调度评分或新增计算节点后的 template redo，请参阅[CubeMaster 调度器配置参考](./cubemaster-scheduler-config.md)。
 
 ### 场景 B：服务挂了 / 反复重启
 
@@ -430,5 +430,6 @@ sudo ss -lntp 'sport = :3000'
 
 - [快速开始](./quickstart.md) — 安装入口
 - [多机集群部署](./multi-node-deploy.md) — 计算节点的服务子集
+- [CubeMaster 调度器配置参考](./cubemaster-scheduler-config.md) — 节点选择、quota、label、评分和 template redo
 - [部署相关排障](./troubleshooting/deployment.md) — XFS / 网段冲突等环境问题
 - [模板相关排障](./troubleshooting/templates.md) — 模板创建相关问题
