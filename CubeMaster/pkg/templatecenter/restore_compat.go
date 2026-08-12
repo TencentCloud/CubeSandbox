@@ -43,10 +43,13 @@ type RestoreCompatResult struct {
 }
 
 // EvaluateSnapshotRestoreCompat judges whether snapshotID (created on its origin
-// node A) can be restored on targetNode B, requiring strict equality of the CPU
-// feature set (vendor / model / CPUID hash) and the host kernel + KVM ABI. Guest
-// component versions (guest-image, cube-agent) are compared as informational,
-// non-required dimensions.
+// node A) can be restored on targetNode B. The v1 policy requires strict
+// equality of only two dimensions — cpuid_hash and host_kernel_release — plus an
+// absolute kvm_module_taint security gate. The richer facts (cpu_vendor /
+// cpu_model / host_kernel_fingerprint / kvm_api_version / kvm_module_fingerprint)
+// and the guest component versions are still reported, but only as informational
+// (non-required) dimensions so they do not block restore yet; they exist for
+// debugging and a future, tighter policy.
 //
 // The origin fingerprint is the one frozen into the snapshot at create time, so
 // the judgment is immune to later host drift on A. When either side lacks usable
@@ -119,20 +122,25 @@ func parseFrozenHostFacts(raw string) *nodemeta.HostFacts {
 	return &facts
 }
 
+// buildHostFactDimensions builds the strict-equality comparisons. The v1 policy
+// makes only cpuid_hash and host_kernel_release required (blocking); the richer
+// facts are collected and reported but demoted to informational so boot-param
+// drift, rolling kvm.ko upgrades and marketing model strings do not split the
+// node pool. The kvm_module_taint gate stays required — see below.
 func buildHostFactDimensions(origin, target *nodemeta.HostFacts) []RestoreCompatDimension {
 	dims := []RestoreCompatDimension{
-		newDimension("cpu_vendor", true, origin.CPUVendor, target.CPUVendor),
-		newDimension("cpu_model", true, origin.CPUModel, target.CPUModel),
 		newDimension("cpuid_hash", true, origin.CPUIDHash, target.CPUIDHash),
-		// The kernel verdict is the folded fingerprint (release + normalised boot
-		// cmdline + taint mask), not the bare release string, so a matching
-		// version with divergent boot params or taint state still fails.
-		newDimension("host_kernel_fingerprint", true, kernelFingerprint(origin), kernelFingerprint(target)),
-		newDimension("kvm_api_version", true, kvmVersionString(origin.KVMAPIVersion), kvmVersionString(target.KVMAPIVersion)),
-		// KVM module build identity (srcversion + initstate + sizes) must match:
-		// a differently-built kvm.ko changes the restore ABI even when the API
-		// version stays 12.
-		newDimension("kvm_module_fingerprint", true, origin.KVMModuleFingerprint, target.KVMModuleFingerprint),
+		newDimension("host_kernel_release", true, origin.HostKernelRelease, target.HostKernelRelease),
+		// Informational only: reported for debugging and a future tighter policy.
+		newDimension("cpu_vendor", false, origin.CPUVendor, target.CPUVendor),
+		newDimension("cpu_model", false, origin.CPUModel, target.CPUModel),
+		// The folded fingerprint (release + normalised boot cmdline) is stricter
+		// than the bare release; kept as a diagnostic signal only.
+		kernelFingerprintDimension(origin, target),
+		newDimension("kvm_api_version", false, kvmVersionString(origin.KVMAPIVersion), kvmVersionString(target.KVMAPIVersion)),
+		// KVM module build identity (srcversion + initstate + sizes); a differently
+		// built kvm.ko changes the restore ABI, but this is informational in v1.
+		newDimension("kvm_module_fingerprint", false, origin.KVMModuleFingerprint, target.KVMModuleFingerprint),
 	}
 	dims = append(dims, kvmModuleTaintDimension(origin, target)...)
 	return dims
@@ -172,14 +180,20 @@ func kvmModuleTaintDimension(origin, target *nodemeta.HostFacts) []RestoreCompat
 	}}
 }
 
-// kernelFingerprint returns the folded host-kernel digest, falling back to the
-// bare release string for facts frozen before the fingerprint field existed so
-// pre-upgrade snapshots still compare on the best available signal.
-func kernelFingerprint(f *nodemeta.HostFacts) string {
-	if f.HostKernelFingerprint != "" {
-		return f.HostKernelFingerprint
+// kernelFingerprintDimension compares the folded host-kernel digest. When either
+// side lacks a fingerprint (e.g. a pre-upgrade snapshot frozen before the field
+// existed, or an old cubelet target reporting release-only), both sides fall
+// back to the bare kernel release so the comparison stays like-for-like —
+// comparing a "sha256:…" digest against a "5.15.0" release could never match and
+// would report a spurious mismatch during a mixed-version rolling upgrade. This
+// dimension is informational only, so it never blocks; the fallback keeps the
+// reported match/mismatch meaningful for diagnosis.
+func kernelFingerprintDimension(origin, target *nodemeta.HostFacts) RestoreCompatDimension {
+	o, t := origin.HostKernelFingerprint, target.HostKernelFingerprint
+	if o == "" || t == "" {
+		o, t = origin.HostKernelRelease, target.HostKernelRelease
 	}
-	return f.HostKernelRelease
+	return newDimension("host_kernel_fingerprint", false, o, t)
 }
 
 // buildGuestDimensions compares the guest-environment versions from the ready
@@ -221,12 +235,18 @@ func replicaGuestVersions(info *SnapshotInfo) (guestImage, agent string) {
 	return guestImage, agent
 }
 
+// newDimension builds one comparison. A dimension matches only when BOTH sides
+// carry a non-empty value that is equal: two empty values are treated as "not
+// verified", not a match. This keeps required dimensions failing closed when a
+// signal is missing on both sides (e.g. neither cubelet could open /dev/kvm or
+// read /sys/module), instead of passing vacuously ("" == ""), and keeps the
+// informational match:true flag honest — it always means "verified equal".
 func newDimension(name string, required bool, origin, target string) RestoreCompatDimension {
 	origin = strings.TrimSpace(origin)
 	target = strings.TrimSpace(target)
 	return RestoreCompatDimension{
 		Name:     name,
-		Match:    origin == target,
+		Match:    origin != "" && origin == target,
 		Required: required,
 		Origin:   origin,
 		Target:   target,

@@ -23,37 +23,54 @@ func intelFacts() *nodemeta.HostFacts {
 	}
 }
 
+// The v1 policy makes ONLY cpuid_hash and host_kernel_release required; every
+// other host-fact dimension is informational.
 func TestBuildHostFactDimensions_Identical(t *testing.T) {
 	dims := buildHostFactDimensions(intelFacts(), intelFacts())
 	if !allRequiredDimensionsMatch(dims) {
 		t.Fatalf("identical hosts must be compatible, dims=%+v", dims)
 	}
+	requiredByName := map[string]bool{}
 	for _, d := range dims {
-		if !d.Required {
-			t.Errorf("host-fact dimension %q must be required", d.Name)
+		requiredByName[d.Name] = d.Required
+	}
+	wantRequired := map[string]bool{"cpuid_hash": true, "host_kernel_release": true}
+	for name, required := range requiredByName {
+		if wantRequired[name] != required {
+			t.Errorf("dimension %q Required=%v, want %v", name, required, wantRequired[name])
+		}
+	}
+	for name := range wantRequired {
+		if _, ok := requiredByName[name]; !ok {
+			t.Errorf("expected required dimension %q missing", name)
 		}
 	}
 }
 
+// A mismatch on a required key (cpuid_hash / host_kernel_release) must block
+// restore; a mismatch on any demoted (informational) fact must NOT.
 func TestBuildHostFactDimensions_Mismatch(t *testing.T) {
 	cases := []struct {
-		name    string
-		mutate  func(f *nodemeta.HostFacts)
-		wantDim string
+		name        string
+		mutate      func(f *nodemeta.HostFacts)
+		wantDim     string
+		wantBlocked bool
 	}{
-		{"cpuid", func(f *nodemeta.HostFacts) { f.CPUIDHash = "sha256:other" }, "cpuid_hash"},
-		{"kernel_fingerprint", func(f *nodemeta.HostFacts) { f.HostKernelFingerprint = "sha256:other-kernel" }, "host_kernel_fingerprint"},
-		{"kvm", func(f *nodemeta.HostFacts) { f.KVMAPIVersion = 13 }, "kvm_api_version"},
-		{"kvm_module", func(f *nodemeta.HostFacts) { f.KVMModuleFingerprint = "sha256:other-kvmmod" }, "kvm_module_fingerprint"},
-		{"vendor", func(f *nodemeta.HostFacts) { f.CPUVendor = "AuthenticAMD" }, "cpu_vendor"},
+		{"cpuid", func(f *nodemeta.HostFacts) { f.CPUIDHash = "sha256:other" }, "cpuid_hash", true},
+		{"kernel_release", func(f *nodemeta.HostFacts) { f.HostKernelRelease = "6.1.0" }, "host_kernel_release", true},
+		{"kernel_fingerprint", func(f *nodemeta.HostFacts) { f.HostKernelFingerprint = "sha256:other-kernel" }, "host_kernel_fingerprint", false},
+		{"kvm", func(f *nodemeta.HostFacts) { f.KVMAPIVersion = 13 }, "kvm_api_version", false},
+		{"kvm_module", func(f *nodemeta.HostFacts) { f.KVMModuleFingerprint = "sha256:other-kvmmod" }, "kvm_module_fingerprint", false},
+		{"vendor", func(f *nodemeta.HostFacts) { f.CPUVendor = "AuthenticAMD" }, "cpu_vendor", false},
+		{"model", func(f *nodemeta.HostFacts) { f.CPUModel = "EPYC 7K62" }, "cpu_model", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			target := intelFacts()
 			tc.mutate(target)
 			dims := buildHostFactDimensions(intelFacts(), target)
-			if allRequiredDimensionsMatch(dims) {
-				t.Fatalf("mismatch on %s must be incompatible", tc.name)
+			if got := !allRequiredDimensionsMatch(dims); got != tc.wantBlocked {
+				t.Fatalf("mismatch on %s blocked=%v, want %v", tc.name, got, tc.wantBlocked)
 			}
 			var found bool
 			for _, d := range dims {
@@ -71,33 +88,83 @@ func TestBuildHostFactDimensions_Mismatch(t *testing.T) {
 	}
 }
 
-// A snapshot frozen before the fingerprint field existed must still compare on
-// the bare kernel release, and a release mismatch must flip the verdict.
-func TestBuildHostFactDimensions_KernelReleaseFallback(t *testing.T) {
+// A required dimension whose signal is missing on BOTH sides must fail closed,
+// not pass vacuously (""=="" is "not verified", not "compatible"). Here both
+// hosts lack a cpuid_hash, so the required cpuid dimension must block restore.
+func TestBuildHostFactDimensions_BothEmptyRequiredFailsClosed(t *testing.T) {
 	origin := intelFacts()
-	origin.HostKernelFingerprint = ""
+	origin.CPUIDHash = ""
 	target := intelFacts()
-	target.HostKernelFingerprint = ""
-	target.HostKernelRelease = "6.1.0"
+	target.CPUIDHash = ""
 
 	dims := buildHostFactDimensions(origin, target)
 	if allRequiredDimensionsMatch(dims) {
-		t.Fatalf("release mismatch (no fingerprint) must be incompatible")
+		t.Fatalf("both-empty required cpuid_hash must fail closed")
 	}
+	for _, d := range dims {
+		if d.Name == "cpuid_hash" && d.Match {
+			t.Errorf("both-empty cpuid_hash must not report match:true")
+		}
+	}
+}
+
+// An informational dimension with no signal on either side must report
+// match:false ("not verified"), never a vacuous match:true — the response must
+// distinguish "verified equal" from "couldn't check either side".
+func TestBuildHostFactDimensions_BothEmptyInformationalNotVerified(t *testing.T) {
+	origin := intelFacts()
+	origin.KVMAPIVersion = 0
+	origin.KVMModuleFingerprint = ""
+	target := intelFacts()
+	target.KVMAPIVersion = 0
+	target.KVMModuleFingerprint = ""
+
+	dims := buildHostFactDimensions(origin, target)
+	// Required keys still match, so the verdict stays compatible...
+	if !allRequiredDimensionsMatch(dims) {
+		t.Fatalf("required keys match; verdict should stay compatible")
+	}
+	// ...but the unverifiable KVM dimensions must not claim a match.
+	for _, d := range dims {
+		if (d.Name == "kvm_api_version" || d.Name == "kvm_module_fingerprint") && d.Match {
+			t.Errorf("both-empty %q must report match:false (not verified)", d.Name)
+		}
+	}
+}
+
+// When either side lacks a folded fingerprint, the kernel-fingerprint dimension
+// must fall back to comparing bare release on BOTH sides, so a mixed-version
+// rolling upgrade with a matching release reports match:true — never a spurious
+// hash-vs-release mismatch.
+func TestBuildHostFactDimensions_KernelFingerprintFallback(t *testing.T) {
+	origin := intelFacts() // has HostKernelFingerprint set, release 5.15.0
+	target := intelFacts()
+	target.HostKernelFingerprint = "" // old cubelet: release-only
+	target.HostKernelRelease = "5.15.0"
+
+	dims := buildHostFactDimensions(origin, target)
 	var found bool
 	for _, d := range dims {
 		if d.Name == "host_kernel_fingerprint" {
 			found = true
-			if d.Match {
-				t.Errorf("kernel dimension should not match on release fallback")
+			if !d.Match {
+				t.Errorf("matching release must fall back to match:true, got %+v", d)
 			}
-			if d.Origin != "5.15.0" || d.Target != "6.1.0" {
-				t.Errorf("fallback must compare bare release, got origin=%q target=%q", d.Origin, d.Target)
+			if d.Origin != "5.15.0" || d.Target != "5.15.0" {
+				t.Errorf("fallback must compare bare release on both sides, got origin=%q target=%q", d.Origin, d.Target)
 			}
 		}
 	}
 	if !found {
-		t.Errorf("host_kernel_fingerprint dimension missing")
+		t.Fatalf("host_kernel_fingerprint dimension missing")
+	}
+
+	// A genuine release mismatch under the fallback must report match:false.
+	target.HostKernelRelease = "6.1.0"
+	for _, d := range buildHostFactDimensions(origin, target) {
+		if d.Name == "host_kernel_fingerprint" && d.Match {
+			t.Errorf("differing release under fallback must not match")
+		}
 	}
 }
 

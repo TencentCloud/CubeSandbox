@@ -213,13 +213,13 @@ func printNodeSummary(nodes []*node.Node, scoreOnly bool) {
 		_ = w.Flush()
 		return
 	}
-	fmt.Fprintln(w, "NODE_ID\tNODE_IP\tINSTANCE_TYPE\tZONE\tCPU_TYPE\tHEALTHY\tSCHEDULING_DISABLED\tHOST_STATUS\tCPU_VENDOR\tCPUID\tKERNEL_FP\tKVM_VER\tKVM_TAINT")
+	fmt.Fprintln(w, "NODE_ID\tNODE_IP\tINSTANCE_TYPE\tZONE\tCPU_TYPE\tHEALTHY\tSCHEDULING_DISABLED\tHOST_STATUS\tCPU_VENDOR\tCPUID\tKERNEL_REL\tKERNEL_FP\tKVM_VER\tKVM_TAINT")
 	for _, item := range nodes {
-		cpuVendor, cpuid, kernelFP, kvmVer, kvmTaint := formatHostFacts(item.HostFacts)
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%t\t%t\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		cpuVendor, cpuid, kernelRel, kernelFP, kvmVer, kvmTaint := formatHostFacts(item.HostFacts)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%t\t%t\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			item.ID(), item.HostIP(), item.InstanceType, item.Zone, item.CPUType, item.Healthy,
 			item.SchedulingDisabled(), item.HostStatus,
-			cpuVendor, cpuid, kernelFP, kvmVer, kvmTaint,
+			cpuVendor, cpuid, kernelRel, kernelFP, kvmVer, kvmTaint,
 		)
 	}
 	_ = w.Flush()
@@ -227,9 +227,9 @@ func printNodeSummary(nodes []*node.Node, scoreOnly bool) {
 
 // formatHostFacts renders the host facts as compact table cells. Long sha256
 // fingerprints are abbreviated for readability; use --json for full values.
-func formatHostFacts(f *node.HostFacts) (cpuVendor, cpuid, kernelFP, kvmVer, kvmTaint string) {
+func formatHostFacts(f *node.HostFacts) (cpuVendor, cpuid, kernelRel, kernelFP, kvmVer, kvmTaint string) {
 	if f == nil {
-		return "-", "-", "-", "-", "-"
+		return "-", "-", "-", "-", "-", "-"
 	}
 	kvmVer = "-"
 	if f.KVMAPIVersion != 0 {
@@ -239,7 +239,7 @@ func formatHostFacts(f *node.HostFacts) (cpuVendor, cpuid, kernelFP, kvmVer, kvm
 	if kvmTaint == "" {
 		kvmTaint = "-"
 	}
-	return orDash(f.CPUVendor), shortHash(f.CPUIDHash), shortHash(f.HostKernelFingerprint), kvmVer, kvmTaint
+	return orDash(f.CPUVendor), shortHash(f.CPUIDHash), orDash(f.HostKernelRelease), shortHash(f.HostKernelFingerprint), kvmVer, kvmTaint
 }
 
 func orDash(s string) string {

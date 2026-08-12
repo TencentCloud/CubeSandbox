@@ -84,6 +84,7 @@ func TestPrintNodeSummaryIncludesHostFacts(t *testing.T) {
 				HostFacts: &node.HostFacts{
 					CPUVendor:             "GenuineIntel",
 					CPUIDHash:             "sha256:aabbccddeeff00112233",
+					HostKernelRelease:     "5.15.0",
 					HostKernelFingerprint: "sha256:1122334455667788",
 					KVMAPIVersion:         12,
 					KVMModuleTaint:        "EO",
@@ -93,8 +94,8 @@ func TestPrintNodeSummaryIncludesHostFacts(t *testing.T) {
 	})
 
 	for _, wanted := range []string{
-		"CPU_VENDOR", "CPUID", "KERNEL_FP", "KVM_VER", "KVM_TAINT",
-		"GenuineIntel", "sha256:aabbccddeeff", "sha256:112233445566", "12", "EO",
+		"CPU_VENDOR", "CPUID", "KERNEL_REL", "KERNEL_FP", "KVM_VER", "KVM_TAINT",
+		"GenuineIntel", "sha256:aabbccddeeff", "5.15.0", "sha256:112233445566", "12", "EO",
 	} {
 		if !strings.Contains(output, wanted) {
 			t.Fatalf("output=%q, missing %q", output, wanted)
@@ -113,7 +114,7 @@ func TestPrintNodeSummaryHostFactsAbsent(t *testing.T) {
 		}, false)
 	})
 	// Header columns are always present; missing facts render as "-".
-	for _, wanted := range []string{"CPU_VENDOR", "KVM_TAINT"} {
+	for _, wanted := range []string{"CPU_VENDOR", "KERNEL_REL", "KVM_TAINT"} {
 		if !strings.Contains(output, wanted) {
 			t.Fatalf("output=%q, missing header %q", output, wanted)
 		}
@@ -122,17 +123,17 @@ func TestPrintNodeSummaryHostFactsAbsent(t *testing.T) {
 
 func TestFormatHostFacts(t *testing.T) {
 	t.Run("nil facts all dashes", func(t *testing.T) {
-		vendor, cpuid, kernelFP, kvmVer, kvmTaint := formatHostFacts(nil)
-		for _, got := range []string{vendor, cpuid, kernelFP, kvmVer, kvmTaint} {
+		vendor, cpuid, kernelRel, kernelFP, kvmVer, kvmTaint := formatHostFacts(nil)
+		for _, got := range []string{vendor, cpuid, kernelRel, kernelFP, kvmVer, kvmTaint} {
 			if got != "-" {
 				t.Errorf("nil facts must render every cell as \"-\", got %q", got)
 			}
 		}
 	})
 	t.Run("empty fields render dash", func(t *testing.T) {
-		vendor, cpuid, kernelFP, kvmVer, kvmTaint := formatHostFacts(&node.HostFacts{})
+		vendor, cpuid, kernelRel, kernelFP, kvmVer, kvmTaint := formatHostFacts(&node.HostFacts{})
 		for name, got := range map[string]string{
-			"vendor": vendor, "cpuid": cpuid, "kernelFP": kernelFP,
+			"vendor": vendor, "cpuid": cpuid, "kernelRel": kernelRel, "kernelFP": kernelFP,
 			"kvmVer": kvmVer, "kvmTaint": kvmTaint,
 		} {
 			if got != "-" {
@@ -141,9 +142,10 @@ func TestFormatHostFacts(t *testing.T) {
 		}
 	})
 	t.Run("populated fields", func(t *testing.T) {
-		vendor, cpuid, kernelFP, kvmVer, kvmTaint := formatHostFacts(&node.HostFacts{
+		vendor, cpuid, kernelRel, kernelFP, kvmVer, kvmTaint := formatHostFacts(&node.HostFacts{
 			CPUVendor:             "GenuineIntel",
 			CPUIDHash:             "sha256:aabbccddeeff0011",
+			HostKernelRelease:     "5.15.0",
 			HostKernelFingerprint: "sha256:1122334455667788",
 			KVMAPIVersion:         12,
 			KVMModuleTaint:        "EO",
@@ -153,6 +155,9 @@ func TestFormatHostFacts(t *testing.T) {
 		}
 		if cpuid != "sha256:aabbccddeeff" {
 			t.Errorf("cpuid = %q, want truncated", cpuid)
+		}
+		if kernelRel != "5.15.0" {
+			t.Errorf("kernelRel = %q, want 5.15.0", kernelRel)
 		}
 		if kernelFP != "sha256:112233445566" {
 			t.Errorf("kernelFP = %q, want truncated", kernelFP)
