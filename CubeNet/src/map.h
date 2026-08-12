@@ -96,6 +96,20 @@ struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } snat_iplist SEC(".maps");
 
+/* Direct-egress on-link neighbor cache.
+ *
+ * key:   destination IPv4 address in packet-byte layout
+ * value: destination MAC plus probe deadline; an all-zero MAC means initial
+ *        resolution is pending
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, MAX_ENTRIES);
+	__type(key, __u32);
+	__type(value, struct direct_neighbor);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+} direct_neigh SEC(".maps");
+
 /* Egress allow list v2 (hash of maps)
  *
  * key:   ifindex of the TAP device

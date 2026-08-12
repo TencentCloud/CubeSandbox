@@ -34,6 +34,7 @@ type Params struct {
 	// Ifindex, IP and MAC address of Node itself
 	NodeIfindex uint32
 	NodeIP      net.IP
+	NodeIPMask  net.IPMask
 	NodeMacAddr net.HardwareAddr
 	// MAC address of the Node gateway (next hop)
 	NodeGatewayMacAddr net.HardwareAddr
@@ -154,11 +155,12 @@ const (
 	MapNameRemotePortMapping    = "remote_port_mapping"
 	MapNameLocalPortMapping     = "local_port_mapping"
 	// MapNameAllowOut is the cube-v0.2.0 legacy migration source.
-	MapNameAllowOut      = "allow_out"
-	MapNameAllowOutV2    = "allow_out_v2"
-	MapNameDenyOut       = "deny_out"
-	MapNameDNSAllow      = "dns_allow"
-	MapNameDNSQueryTrack = "dns_query_track"
+	MapNameAllowOut        = "allow_out"
+	MapNameAllowOutV2      = "allow_out_v2"
+	MapNameDenyOut         = "deny_out"
+	MapNameDNSAllow        = "dns_allow"
+	MapNameDNSQueryTrack   = "dns_query_track"
+	MapNameDirectNeighbors = "direct_neigh"
 	// constants referenced by BPF programs.
 	globalNameMVMInnerIP           = "mvm_inner_ip"
 	globalNameMVMMacaddrP1         = "mvm_macaddr_p1"
@@ -174,6 +176,7 @@ const (
 	globalNameEgressDMacaddrP2     = "egress_dmacaddr_p2"
 	globalNameEgressRedirectFlags  = "egress_redirect_flags"
 	globalNameNodeIP               = "nodenic_ip"
+	globalNameNodeNetmask          = "nodenic_netmask"
 	globalNameNodeIfindex          = "nodenic_ifindex"
 	globalNameNodeMacaddrP1        = "nodenic_macaddr_p1"
 	globalNameNodeMacaddrP2        = "nodenic_macaddr_p2"

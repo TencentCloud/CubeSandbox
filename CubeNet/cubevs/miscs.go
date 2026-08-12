@@ -31,7 +31,8 @@ func init() {
 	_ = rlimit.RemoveMemlock()
 }
 
-func rewriteConstants(vars map[string]*ebpf.VariableSpec, params Params) error {
+func rewriteConstants(spec *ebpf.CollectionSpec, params Params) error {
+	vars := spec.Variables
 	var err error
 	err = errors.Join(err, vars[globalNameMVMInnerIP].Set(ipToUint32(params.MVMInnerIP)))
 	err = errors.Join(err, vars[globalNameMVMMacaddrP1].Set(hardwareAddrToUint32(params.MVMMacAddr)))
@@ -57,6 +58,13 @@ func rewriteConstants(vars map[string]*ebpf.VariableSpec, params Params) error {
 		err = errors.Join(err, v.Set(params.EgressRedirectFlags))
 	}
 	err = errors.Join(err, vars[globalNameNodeIP].Set(ipToUint32(params.NodeIP)))
+	if spec.Programs[programNameFromCube] != nil {
+		nodeNetmask, netmaskErr := ipMaskToUint32(params.NodeIPMask)
+		err = errors.Join(err, netmaskErr)
+		if netmaskErr == nil {
+			err = errors.Join(err, vars[globalNameNodeNetmask].Set(nodeNetmask))
+		}
+	}
 	err = errors.Join(err, vars[globalNameNodeIfindex].Set(params.NodeIfindex))
 	err = errors.Join(err, vars[globalNameNodeMacaddrP1].Set(hardwareAddrToUint32(params.NodeMacAddr)))
 	err = errors.Join(err, vars[globalNameNodeMacaddrP2].Set(hardwareAddrToUint16(params.NodeMacAddr)))
@@ -193,7 +201,7 @@ func loadObject(params Params, loader func() (*ebpf.CollectionSpec, error), name
 		return fmt.Errorf("%s populateDNSTailCalls failed: %w", name, err)
 	}
 
-	err = rewriteConstants(spec.Variables, params)
+	err = rewriteConstants(spec, params)
 	if err != nil {
 		return fmt.Errorf("%s rewriteConstants failed: %w", name, err)
 	}
@@ -231,6 +239,9 @@ func Init(params Params) error {
 	_ = os.Remove(pinPath("tungrp_to_tuns")) // NOCC:Path Traversal()
 	// dns_query_track is runtime pending-query state, not persisted policy.
 	_ = os.Remove(pinPath(MapNameDNSQueryTrack)) // NOCC:Path Traversal()
+	// Direct-neighbor state is tied to the current host interface and must not
+	// survive a CubeVS restart with stale MAC addresses.
+	_ = os.Remove(pinPath(MapNameDirectNeighbors)) // NOCC:Path Traversal()
 
 	err := loadObject(params, loadLocalgw, "loadLocalgw")
 	if err != nil {

@@ -289,6 +289,7 @@ func initCubeVS(cfg Config, device *systemnet.HostDevice, cubeDev *systemnet.Cub
 		CubeRouterIfindex:   cubeRouterIfindex,
 		NodeIfindex:         uint32(device.Index),
 		NodeIP:              device.IP,
+		NodeIPMask:          device.IPMask,
 		NodeMacAddr:         device.Mac,
 		NodeGatewayMacAddr:  device.GatewayMac,
 	}

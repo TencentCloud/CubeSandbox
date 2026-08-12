@@ -3,6 +3,7 @@ package cubevs
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"net"
 )
 
@@ -24,6 +25,19 @@ func ipToUint32(ip net.IP) uint32 {
 	}
 
 	return uint32(ip[0]) | uint32(ip[1])<<8 | uint32(ip[2])<<16 | uint32(ip[3])<<24
+}
+
+// ipMaskToUint32 converts an IPv4 mask to the byte layout used by IPv4
+// addresses in BPF packet headers on little-endian hosts.
+func ipMaskToUint32(mask net.IPMask) (uint32, error) {
+	if len(mask) != net.IPv4len {
+		return 0, fmt.Errorf("invalid IPv4 mask length: %d", len(mask))
+	}
+	if _, bits := mask.Size(); bits != 32 {
+		return 0, fmt.Errorf("invalid IPv4 mask: %v", mask)
+	}
+
+	return uint32(mask[0]) | uint32(mask[1])<<8 | uint32(mask[2])<<16 | uint32(mask[3])<<24, nil
 }
 
 // hardwareAddrToUint32 converts the first 4 bytes of MAC address to a uint32.

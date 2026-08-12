@@ -30,6 +30,7 @@ type HostDevice struct {
 	Index      int
 	Name       string
 	IP         net.IP
+	IPMask     net.IPMask
 	Mac        net.HardwareAddr
 	GatewayMac net.HardwareAddr
 }
@@ -41,12 +42,20 @@ func GetHostDevice(ifName string) (*HostDevice, error) {
 	if err != nil {
 		return nil, err
 	}
-	addrs, err := netlink.AddrList(link, netlink.FAMILY_V4)
+	addrs, err := netlinkAddrList(link, netlink.FAMILY_V4)
 	if err != nil {
 		return nil, err
 	}
 	if len(addrs) != 1 {
 		return nil, fmt.Errorf("ipv4 address on %s is not unique", ifName)
+	}
+	if addrs[0].IPNet == nil {
+		return nil, fmt.Errorf("invalid ipv4 address on %s", ifName)
+	}
+	ip := addrs[0].IP.To4()
+	_, bits := addrs[0].Mask.Size()
+	if ip == nil || bits != 32 {
+		return nil, fmt.Errorf("invalid ipv4 address on %s", ifName)
 	}
 	gwMac, err := GetGatewayMacAddr(ifName)
 	if err != nil {
@@ -59,7 +68,8 @@ func GetHostDevice(ifName string) (*HostDevice, error) {
 	return &HostDevice{
 		Index:      link.Attrs().Index,
 		Name:       link.Attrs().Name,
-		IP:         addrs[0].IP,
+		IP:         append(net.IP(nil), ip...),
+		IPMask:     append(net.IPMask(nil), addrs[0].Mask...),
 		Mac:        link.Attrs().HardwareAddr,
 		GatewayMac: gatewayMac,
 	}, nil

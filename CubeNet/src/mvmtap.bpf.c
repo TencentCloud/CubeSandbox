@@ -106,6 +106,156 @@ static __always_inline bool should_do_nat(const struct iphdr *l3)
 	return true;
 }
 
+/* Direct egress normally bypasses the host network stack and sends packets to
+ * the node gateway MAC. On-link destinations need the real neighbor MAC from
+ * the ARP-learned cache instead.
+ * "On-link" deliberately means the primary node IPv4 prefix here, not every
+ * directly connected route that may exist on a multi-homed host.
+ */
+static __always_inline bool direct_egress_is_onlink(__u32 daddr)
+{
+	return egress_redirect_flags == 0 &&
+	       (daddr & nodenic_netmask) == (nodenic_ip & nodenic_netmask);
+}
+
+static __always_inline bool direct_neighbor_is_zero(const struct direct_neighbor *neighbor)
+{
+	const union macaddr *macaddr = (const union macaddr *)neighbor->addr;
+
+	return macaddr->p1 == 0 && macaddr->p2 == 0;
+}
+
+#define DIRECT_ARP_PRESERVED_LEN	96
+#define DIRECT_ARP_HEADROOM	32
+#define DIRECT_ARP_FRAME_LEN		(DIRECT_ARP_PRESERVED_LEN + DIRECT_ARP_HEADROOM)
+#define DIRECT_ARP_ZERO_CHUNK_LEN	32
+
+static __always_inline long direct_egress_clear_arp_padding(struct __sk_buff *skb)
+{
+	unsigned char zeroes[DIRECT_ARP_ZERO_CHUNK_LEN] = {};
+	long err;
+
+	err = bpf_skb_store_bytes(skb, sizeof(struct arp_packet),
+				  zeroes, sizeof(zeroes), 0);
+	if (err)
+		return err;
+	err = bpf_skb_store_bytes(skb,
+				  sizeof(struct arp_packet) + DIRECT_ARP_ZERO_CHUNK_LEN,
+				  zeroes, sizeof(zeroes), 0);
+	if (err)
+		return err;
+	return bpf_skb_store_bytes(skb,
+				   sizeof(struct arp_packet) + 2 * DIRECT_ARP_ZERO_CHUNK_LEN,
+				   zeroes,
+				   DIRECT_ARP_FRAME_LEN - sizeof(struct arp_packet) -
+				   2 * DIRECT_ARP_ZERO_CHUNK_LEN, 0);
+}
+
+static __always_inline int direct_egress_arp_request(struct __sk_buff *skb,
+						      __u32 dst_ifindex, __u32 daddr)
+{
+	struct arp_packet packet = {};
+	union macaddr *macaddr;
+	long err;
+
+	__builtin_memset(packet.eth.h_dest, 0xff, ETH_ALEN);
+	macaddr = (union macaddr *)packet.eth.h_source;
+	macaddr->p1 = nodenic_macaddr_p1;
+	macaddr->p2 = nodenic_macaddr_p2;
+	packet.eth.h_proto = bpf_htons(ETH_P_ARP);
+
+	packet.arp.ar_hrd = bpf_htons(ARPHRD_ETHER);
+	packet.arp.ar_pro = bpf_htons(ETH_P_IP);
+	packet.arp.ar_hln = ETH_ALEN;
+	packet.arp.ar_pln = sizeof(__be32);
+	packet.arp.ar_op = bpf_htons(ARPOP_REQUEST);
+	macaddr = (union macaddr *)packet.arp.ar_sha;
+	macaddr->p1 = nodenic_macaddr_p1;
+	macaddr->p2 = nodenic_macaddr_p2;
+	packet.arp.ar_sip = nodenic_ip;
+	packet.arp.ar_tip = daddr;
+
+	/* TAP packets may carry CHECKSUM_PARTIAL metadata. Preserve enough space for
+	 * the delayed checksum write, move it beyond the ARP header, then clear the
+	 * entire padding so no original packet data is broadcast. change_tail also
+	 * clears any GSO state.
+	 */
+	err = bpf_skb_change_tail(skb, DIRECT_ARP_PRESERVED_LEN, 0);
+	if (err)
+		return TC_ACT_SHOT;
+	err = bpf_skb_change_head(skb, DIRECT_ARP_HEADROOM, 0);
+	if (err)
+		return TC_ACT_SHOT;
+	err = bpf_skb_store_bytes(skb, 0, &packet, sizeof(packet), 0);
+	if (err)
+		return TC_ACT_SHOT;
+	err = direct_egress_clear_arp_padding(skb);
+	if (err)
+		return TC_ACT_SHOT;
+
+	return bpf_redirect(dst_ifindex, 0);
+}
+
+static __always_inline int redirect_egress(struct __sk_buff *skb, __u32 dst_ifindex,
+					   __u32 daddr)
+{
+	struct direct_neighbor pending = {};
+	struct direct_neighbor *neighbor;
+	union macaddr *neighbor_mac;
+	struct ethhdr *l2;
+	void *data, *data_end;
+	__u64 now;
+	long err;
+
+	if (!direct_egress_is_onlink(daddr))
+		return bpf_redirect(dst_ifindex, egress_redirect_flags);
+
+	neighbor = bpf_map_lookup_elem(&direct_neigh, &daddr);
+	if (neighbor && !direct_neighbor_is_zero(neighbor))
+		goto redirect_neighbor;
+
+	/* Keep a pending entry so from_world only learns neighbors requested by
+	 * this path. Rate-limit ARP retries per destination while waiting for a
+	 * reply so unresolved floods do not emit one broadcast per packet.
+	 */
+	now = bpf_ktime_get_ns();
+	if (neighbor) {
+		if (neighbor->next_probe_at_ns > now)
+			return TC_ACT_SHOT;
+
+		/* Do not replace the whole value here: learn_direct_neighbor may have
+		 * installed a MAC after the lookup above. Updating only the deadline
+		 * cannot overwrite that learned state. Refresh the lookup because an LRU
+		 * hash update replaces the entry rather than updating it in place.
+		 */
+		neighbor->next_probe_at_ns = now + DIRECT_NEIGH_PROBE_INTERVAL_NS;
+		neighbor = bpf_map_lookup_elem(&direct_neigh, &daddr);
+		if (neighbor && !direct_neighbor_is_zero(neighbor))
+			goto redirect_neighbor;
+	} else {
+		pending.next_probe_at_ns = now + DIRECT_NEIGH_PROBE_INTERVAL_NS;
+		err = bpf_map_update_elem(&direct_neigh, &daddr, &pending, BPF_NOEXIST);
+		if (err)
+			return TC_ACT_SHOT;
+	}
+
+	return direct_egress_arp_request(skb, dst_ifindex, daddr);
+
+redirect_neighbor:
+	err = bpf_skb_pull_data(skb, sizeof(struct ethhdr));
+	if (err)
+		return TC_ACT_SHOT;
+	data = (void *)(__u64)skb->data;
+	data_end = (void *)(__u64)skb->data_end;
+	if (data + sizeof(struct ethhdr) > data_end)
+		return TC_ACT_SHOT;
+	l2 = data;
+	neighbor_mac = (union macaddr *)neighbor->addr;
+	set_mac_pair(l2, nodenic_macaddr_p1, nodenic_macaddr_p2,
+		     neighbor_mac->p1, neighbor_mac->p2);
+	return bpf_redirect(dst_ifindex, 0);
+}
+
 /*
  * Check whether a TCP flow should be redirected to the L7 proxy.
  *
@@ -648,12 +798,13 @@ static __noinline __attribute__((noinline)) __u32 do_udp_nat(struct __sk_buff *s
  * cannot make bpf-to-bpf calls (see do_udp_nat_inline()'s comment).
  */
 static __always_inline int finish_udp_nat_inline(struct __sk_buff *skb,
-						 struct mvm_meta *mvm_meta)
+						 struct mvm_meta *mvm_meta,
+						 __u32 daddr)
 {
 	__u32 dst_ifindex = do_udp_nat_inline(skb, mvm_meta);
 
 	if (dst_ifindex)
-		return bpf_redirect(dst_ifindex, egress_redirect_flags);
+		return redirect_egress(skb, dst_ifindex, daddr);
 
 	return TC_ACT_SHOT;
 }
@@ -661,10 +812,14 @@ static __always_inline int finish_udp_nat_inline(struct __sk_buff *skb,
 /* Subprog-based version used by dns_finish. */
 static __always_inline int finish_udp_nat(struct __sk_buff *skb, struct mvm_meta *mvm_meta)
 {
+	__u32 daddr;
 	__u32 dst_ifindex = do_udp_nat(skb, mvm_meta);
 
-	if (dst_ifindex)
-		return bpf_redirect(dst_ifindex, egress_redirect_flags);
+	if (dst_ifindex) {
+		if (bpf_skb_load_bytes(skb, IP_DADDR_OFF, &daddr, sizeof(daddr)))
+			return TC_ACT_SHOT;
+		return redirect_egress(skb, dst_ifindex, daddr);
+	}
 
 	return TC_ACT_SHOT;
 }
@@ -878,24 +1033,26 @@ int dns_finish(struct __sk_buff *skb)
 	if (!mvm_meta)
 		return TC_ACT_SHOT;
 	if (!dns_policy_enabled(mvm_meta))
-		return finish_udp_nat(skb, mvm_meta);
+		goto do_nat;
 
 	inner_map = bpf_map_lookup_elem(&dns_allow, &ifindex);
 	if (!inner_map)
-		return finish_udp_nat(skb, mvm_meta);
+		goto do_nat;
 
 	question_cursor = state->dns_off + DNS_HDR_LEN;
 	if (state->failed)
-		return finish_udp_nat(skb, mvm_meta);
+		goto do_nat;
 	if (!dns_hash_qname(skb, &question_cursor, &question_footer,
 					&qname_hash))
-		return finish_udp_nat(skb, mvm_meta);
+		goto do_nat;
 
 	matched = dns_allow_match_value(inner_map, question);
 	if (!matched)
-		return finish_udp_nat(skb, mvm_meta);
+		goto do_nat;
 
 	dns_track_allowed_query(skb, state, matched->flags, qname_hash);
+
+do_nat:
 	return finish_udp_nat(skb, mvm_meta);
 }
 
@@ -1039,7 +1196,7 @@ int from_cube(struct __sk_buff *skb)
 			return bpf_redirect(cubegw0_ifindex, BPF_F_INGRESS);
 		tcp_ret = do_tcp_nat(skb, mvm_meta);
 		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_OK)
-			return bpf_redirect(TCP_NAT_IFINDEX(tcp_ret), egress_redirect_flags);
+			return redirect_egress(skb, TCP_NAT_IFINDEX(tcp_ret), daddr);
 		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_RESET)
 			return tcp_reply_reset(skb, ifindex);
 	}
@@ -1055,13 +1212,13 @@ int from_cube(struct __sk_buff *skb)
 				return ret;
 		}
 
-		return finish_udp_nat_inline(skb, mvm_meta);
+		return finish_udp_nat_inline(skb, mvm_meta, daddr);
 	}
 
 	if (proto == IPPROTO_ICMP) {
 		dst_ifindex = do_icmp_nat(skb, mvm_meta);
 		if (dst_ifindex)
-			return bpf_redirect(dst_ifindex, egress_redirect_flags);
+			return redirect_egress(skb, dst_ifindex, daddr);
 	}
 
 	return TC_ACT_SHOT;

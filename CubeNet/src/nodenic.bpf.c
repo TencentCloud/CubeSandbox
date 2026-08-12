@@ -17,6 +17,50 @@
 #include "dns_query.h"
 #include "dns_response.h"
 
+/* Learn the sender of an ARP packet only when direct egress already created a
+ * pending cache entry for that IP. This also refreshes an existing entry when
+ * the peer announces a MAC change.
+ */
+static __always_inline void learn_direct_neighbor(struct __sk_buff *skb)
+{
+	struct direct_neighbor neighbor = {};
+	struct arp_packet *packet;
+	union macaddr *eth_src, *arp_src, *mac;
+	void *data, *data_end;
+	__u32 ip;
+
+	if (skb->ifindex != nodenic_ifindex ||
+	    bpf_skb_pull_data(skb, sizeof(struct arp_packet)))
+		return;
+
+	data = (void *)(__u64)skb->data;
+	data_end = (void *)(__u64)skb->data_end;
+	if (data + sizeof(struct arp_packet) > data_end)
+		return;
+
+	packet = data;
+	if (packet->eth.h_proto != bpf_htons(ETH_P_ARP) ||
+	    packet->arp.ar_hrd != bpf_htons(ARPHRD_ETHER) ||
+	    packet->arp.ar_pro != bpf_htons(ETH_P_IP) ||
+	    packet->arp.ar_hln != ETH_ALEN ||
+	    packet->arp.ar_pln != sizeof(__be32) ||
+	    (packet->arp.ar_op != bpf_htons(ARPOP_REQUEST) &&
+	     packet->arp.ar_op != bpf_htons(ARPOP_REPLY)))
+		return;
+
+	eth_src = (union macaddr *)packet->eth.h_source;
+	arp_src = (union macaddr *)packet->arp.ar_sha;
+	if (eth_src->p1 != arp_src->p1 || eth_src->p2 != arp_src->p2 ||
+	    (arp_src->addr[0] & 1) || (arp_src->p1 == 0 && arp_src->p2 == 0))
+		return;
+
+	mac = (union macaddr *)neighbor.addr;
+	mac->p1 = arp_src->p1;
+	mac->p2 = arp_src->p2;
+	ip = packet->arp.ar_sip;
+	bpf_map_update_elem(&direct_neigh, &ip, &neighbor, BPF_EXIST);
+}
+
 static int tcp_nat_proxy(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr *l3, struct tcphdr *l4,
 			 struct mvm_port *mvm_port)
 {
@@ -350,7 +394,10 @@ static int icmp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iph
 	return bpf_redirect(sess->vm_ifindex, 0);
 }
 
-static int do_icmp_nat(struct __sk_buff *skb)
+/* from_world performs a DNS tail call, so these dispatch helpers must remain
+ * inline for kernels that reject tail calls from programs with BPF subcalls.
+ */
+static __always_inline int do_icmp_nat(struct __sk_buff *skb)
 {
 	struct ethhdr *l2;
 	struct iphdr *l3;
@@ -362,7 +409,7 @@ static int do_icmp_nat(struct __sk_buff *skb)
 	return icmp_nat_session(skb, l2, l3, l4);
 }
 
-static int do_udp_nat(struct __sk_buff *skb)
+static __always_inline int do_udp_nat(struct __sk_buff *skb)
 {
 	struct ethhdr *l2;
 	struct iphdr *l3;
@@ -374,7 +421,7 @@ static int do_udp_nat(struct __sk_buff *skb)
 	return udp_nat_session(skb, l2, l3, l4);
 }
 
-static int do_tcp_nat(struct __sk_buff *skb)
+static __always_inline int do_tcp_nat(struct __sk_buff *skb)
 {
 	struct mvm_port *mvm_port;
 	struct ethhdr *l2;
@@ -409,6 +456,10 @@ int from_world(struct __sk_buff *skb)
 	struct iphdr *l3;
 	int ret;
 
+	if (skb->protocol == bpf_htons(ETH_P_ARP)) {
+		learn_direct_neighbor(skb);
+		return TC_ACT_OK;
+	}
 	if (skb->protocol != bpf_htons(ETH_P_IP))
 		return TC_ACT_OK;
 
