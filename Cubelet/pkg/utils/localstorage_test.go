@@ -5,6 +5,7 @@
 package utils
 
 import (
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -17,6 +18,96 @@ import (
 	"github.com/stretchr/testify/assert"
 	bolt "go.etcd.io/bbolt"
 )
+
+func TestDeleteWithTxCallbackErrorRollsBack(t *testing.T) {
+	db, err := NewCubeStore(filepath.Join(t.TempDir(), "meta.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.Set("bucket", "key", []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+	want := errors.New("callback failed")
+	if err := db.DeleteWithTx("bucket", "key", func() error { return want }); !errors.Is(err, want) {
+		t.Fatalf("DeleteWithTx error = %v, want %v", err, want)
+	}
+	if got, err := db.Get("bucket", "key"); err != nil || string(got) != "value" {
+		t.Fatalf("deleted value after callback failure: %q, %v", got, err)
+	}
+}
+
+// TestDeleteWithTxCallbackSuccessCommits is the positive counterpart: when the
+// callback succeeds the delete must commit and DeleteWithTx must return nil.
+// This guards against a regression where propagating the callback error would
+// also surface a spurious error on the happy path.
+func TestDeleteWithTxCallbackSuccessCommits(t *testing.T) {
+	db, err := NewCubeStore(filepath.Join(t.TempDir(), "meta.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.Set("bucket", "key", []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+
+	called := false
+	if err := db.DeleteWithTx("bucket", "key", func() error {
+		called = true
+		return nil
+	}); err != nil {
+		t.Fatalf("DeleteWithTx returned error on success: %v", err)
+	}
+	if !called {
+		t.Fatal("callback was not invoked")
+	}
+	if _, err := db.Get("bucket", "key"); !errors.Is(err, ErrorKeyNotFound) {
+		t.Fatalf("key still present after successful delete: err=%v", err)
+	}
+}
+
+// TestDeleteWithTxNilCallbackDeletes covers the plain-delete path (nil callback,
+// used by Delete): the key is removed and no error is returned.
+func TestDeleteWithTxNilCallbackDeletes(t *testing.T) {
+	db, err := NewCubeStore(filepath.Join(t.TempDir(), "meta.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.Set("bucket", "key", []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.DeleteWithTx("bucket", "key", nil); err != nil {
+		t.Fatalf("DeleteWithTx(nil) returned error: %v", err)
+	}
+	if _, err := db.Get("bucket", "key"); !errors.Is(err, ErrorKeyNotFound) {
+		t.Fatalf("key still present after nil-callback delete: err=%v", err)
+	}
+}
+
+// TestDeleteWithTxBucketNotFoundSkipsCallback covers the early-return path: when
+// the bucket does not exist the transaction aborts with ErrorBucketNotFound
+// before the callback runs, so cascading-cleanup callbacks must not fire.
+func TestDeleteWithTxBucketNotFoundSkipsCallback(t *testing.T) {
+	db, err := NewCubeStore(filepath.Join(t.TempDir(), "meta.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	called := false
+	err = db.DeleteWithTx("missing", "key", func() error {
+		called = true
+		return nil
+	})
+	if !errors.Is(err, ErrorBucketNotFound) {
+		t.Fatalf("DeleteWithTx error = %v, want %v", err, ErrorBucketNotFound)
+	}
+	if called {
+		t.Fatal("callback ran despite missing bucket")
+	}
+}
 
 func TestSet_SingleDb(t *testing.T) {
 	basePath := t.TempDir()
