@@ -434,6 +434,67 @@ func TestCreateInstance_DefaultTemplateSelection(t *testing.T) {
 	}
 }
 
+// TestCreateInstance_RecommendedBeyondFirstPage verifies that the recommended
+// preference is exact rather than window-limited: a recommended template that
+// only appears on a later page still wins over the newest one.
+func TestCreateInstance_RecommendedBeyondFirstPage(t *testing.T) {
+	full := make([]store.AgentTemplate, store.MaxListLimit)
+	for i := range full {
+		full[i] = store.AgentTemplate{TemplateID: "tpl-filler", Recommended: false}
+	}
+	full[0].TemplateID = "tpl-newest"
+
+	cm := &fakeServiceCM{}
+	st := llmKeyStore()
+	st.listAgentTemplates = func(_ context.Context, limit, offset int) ([]store.AgentTemplate, error) {
+		if offset == 0 {
+			return full, nil // exactly one full page, so a second is fetched
+		}
+		return []store.AgentTemplate{{TemplateID: "tpl-recommended", Recommended: true}}, nil
+	}
+	svc := newTestService(st, cm)
+
+	if _, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+		Name:   "my-agent",
+		Engine: "openclaw",
+	}); err != nil {
+		t.Fatalf("CreateInstance returned error: %v", err)
+	}
+	if got := rootfsSourceID(t, cm); got != "tpl-recommended" {
+		t.Errorf("rootfs_source_id = %q, want tpl-recommended", got)
+	}
+}
+
+// TestCreateInstance_TemplateListingFailureIsNotReportedAsUnregistered
+// verifies that a failed registry read is not turned into "no agent template
+// is registered": the listing never happened, so CubeMaster's own error is
+// what the caller gets.
+func TestCreateInstance_TemplateListingFailureIsNotReportedAsUnregistered(t *testing.T) {
+	cm := &fakeServiceCM{
+		createSandboxErr: &cubemaster.CMError{RetCode: 130404, RetMsg: "template not found"},
+	}
+	st := llmKeyStore()
+	st.listAgentTemplates = func(_ context.Context, _, _ int) ([]store.AgentTemplate, error) {
+		return nil, errors.New("dial tcp: connection refused")
+	}
+	svc := newTestService(st, cm)
+
+	_, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+		Name:   "my-agent",
+		Engine: "openclaw",
+	})
+	var svcErr *Error
+	if !errors.As(err, &svcErr) {
+		t.Fatalf("error is not *service.Error: %v", err)
+	}
+	if svcErr.Status != 502 {
+		t.Errorf("status = %d, want 502", svcErr.Status)
+	}
+	if strings.Contains(svcErr.Message, "no agent template is registered") {
+		t.Errorf("message = %q, should not claim an empty registry when the listing failed", svcErr.Message)
+	}
+}
+
 // TestCreateInstance_ExplicitTemplateIDWins verifies that an explicit
 // templateId is used as-is and the registered-template lookup is skipped.
 func TestCreateInstance_ExplicitTemplateIDWins(t *testing.T) {

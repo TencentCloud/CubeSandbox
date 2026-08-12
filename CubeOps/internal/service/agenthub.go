@@ -418,24 +418,45 @@ type CreateInstanceResult struct {
 // created_at DESC). The recommended flag is what the Dashboard sets on every
 // template it registers from the market.
 //
-// ok is false when no AgentHub template is registered at all — or when the
-// listing failed, which is indistinguishable from the caller's point of view
-// and is logged. In that case the returned id is defaultAgentTemplateID, which
-// the caller passes to CubeMaster anyway so that installs carrying that alias
-// keep working.
-func (s *AgentHubService) defaultTemplateID(ctx context.Context) (id string, ok bool) {
-	templates, err := s.Store.ListAgentTemplates(ctx, store.DefaultListLimit, 0)
-	if err != nil {
-		logging.G(ctx).Warnf("failed to list agent templates while choosing a default: %v", err)
-		return defaultAgentTemplateID, false
-	}
-	for _, tmpl := range templates {
-		if tmpl.Recommended {
-			return tmpl.TemplateID, true
+// The preference is exact rather than window-limited: pages are walked until
+// one comes back short, so a recommended template still wins when newer
+// non-recommended ones were registered after it. Any realistic registry fits
+// in the first page, so this is one query in practice.
+//
+// none is true only when the registry was read successfully and holds nothing.
+// A failed read returns none=false — the caller must not report "nothing is
+// registered" on the strength of a listing that never happened. Either way the
+// returned id is then defaultAgentTemplateID, which the caller still passes to
+// CubeMaster so installs carrying that alias keep working.
+func (s *AgentHubService) defaultTemplateID(ctx context.Context) (id string, none bool) {
+	mostRecent := ""
+	for offset := 0; ; offset += store.MaxListLimit {
+		page, err := s.Store.ListAgentTemplates(ctx, store.MaxListLimit, offset)
+		if err != nil {
+			logging.G(ctx).Warnf("failed to list agent templates while choosing a default: %v", err)
+			break
+		}
+		for _, tmpl := range page {
+			if tmpl.Recommended {
+				return tmpl.TemplateID, false
+			}
+		}
+		if mostRecent == "" && len(page) > 0 {
+			mostRecent = page[0].TemplateID
+		}
+		if len(page) < store.MaxListLimit {
+			// Short page: the registry is exhausted and held no recommended
+			// template, so mostRecent (if any) is the answer.
+			if mostRecent != "" {
+				return mostRecent, false
+			}
+			return defaultAgentTemplateID, true
 		}
 	}
-	if len(templates) > 0 {
-		return templates[0].TemplateID, true
+	// Listing failed part-way. Use anything already seen, and do not claim the
+	// registry is empty.
+	if mostRecent != "" {
+		return mostRecent, false
 	}
 	return defaultAgentTemplateID, false
 }
@@ -480,9 +501,10 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 	snapshotID := strings.TrimSpace(req.SnapshotID)
 	rootfsSourceType := "template"
 	rootfsSourceID := ""
-	// Set when the request named no template and none is registered, so the
-	// unprovisioned defaultAgentTemplateID was used; lets the CreateSandbox
-	// error below name the real problem.
+	// Set when the request named no template and the registry was read and
+	// found empty, so the unprovisioned defaultAgentTemplateID was used; lets
+	// the CreateSandbox error below name the real problem. Deliberately not
+	// set when the registry could not be read — see defaultTemplateID.
 	noTemplateRegistered := false
 	if snapshotID != "" {
 		rootfsSourceType = "snapshot"
@@ -491,9 +513,7 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 		if req.TemplateID != "" {
 			rootfsSourceID = req.TemplateID
 		} else {
-			var resolved bool
-			rootfsSourceID, resolved = s.defaultTemplateID(ctx)
-			noTemplateRegistered = !resolved
+			rootfsSourceID, noTemplateRegistered = s.defaultTemplateID(ctx)
 		}
 	}
 	templateID := rootfsSourceID
