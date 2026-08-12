@@ -49,19 +49,12 @@ host:
 
 ## 关键 scheduler 字段
 
-推荐把下面的 scheduler 片段合并到现有 `cubemaster.yaml` 的 `scheduler` 段中。不要覆盖已有的 `filter`、超时、overcommit 或实例类型专用配置。
+推荐把下面的评分相关配置合并到现有 `cubemaster.yaml` 的 `scheduler` 段中。除非确实要替换，否则请保留已有的 `filter`、超时、overcommit 和实例类型专用配置。
 
 ```yaml
 scheduler:
+  # 保留当前部署已有的 filter、超时、overcommit 和其他 scheduler 配置。
   priority_select_num: 3
-  metric_update_timeout: 300s
-  local_metric_update_timeout: 300s
-  filter:
-    enable_filters:
-      - cpu
-      - mem
-      - template_locality
-      - realtime_create_num
   score:
     enable_scorers:
       - real_time_weighted_average
@@ -139,7 +132,7 @@ Cubelet 会通过 CubeMaster 的 `/internal/meta` 接口注册节点并持续上
 
 ### 小测试集群
 
-适合 POC、功能验证和少量并发：
+适合 POC、功能验证和少量并发。下面是新建小测试集群可用的完整起始配置，包含随项目提供的超时和过滤器默认值；如果是在已有部署上调整，请按需合并，不要盲目替换无关的 scheduler 配置。
 
 ```yaml
 scheduler:

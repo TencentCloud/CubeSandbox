@@ -49,19 +49,12 @@ Without scoring, CubeMaster still filters nodes but may choose from the filtered
 
 ## Key scheduler fields
 
-Merge the following fields into the existing `scheduler` section of `cubemaster.yaml`. Do not overwrite existing `filter`, timeout, overcommit, or instance-type-specific settings.
+Merge the following scoring fields into the existing `scheduler` section of `cubemaster.yaml`. Keep your existing `filter`, timeout, overcommit, and instance-type-specific settings unless you intentionally want to replace them.
 
 ```yaml
 scheduler:
+  # Keep your existing filter, timeout, overcommit, and other scheduler settings.
   priority_select_num: 3
-  metric_update_timeout: 300s
-  local_metric_update_timeout: 300s
-  filter:
-    enable_filters:
-      - cpu
-      - mem
-      - template_locality
-      - realtime_create_num
   score:
     enable_scorers:
       - real_time_weighted_average
@@ -139,7 +132,7 @@ These values are configured and reported per compute node. Heterogeneous cluster
 
 ### Small test cluster
 
-Suitable for POC, functional validation, and low concurrency:
+Suitable for POC, functional validation, and low concurrency. This is a complete starting point for a new small test cluster and includes the shipped timeout/filter defaults; when updating an existing deployment, merge these values instead of replacing unrelated scheduler settings blindly.
 
 ```yaml
 scheduler:
