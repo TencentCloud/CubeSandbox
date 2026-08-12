@@ -1444,6 +1444,18 @@ func toSchedulerNode(snap *NodeSnapshot) *node.Node {
 		// correctly be excluded by the timeout filter until cubelet
 		// reports usage.
 	}
+	if snap.HostFacts != nil {
+		n.HostFacts = &node.HostFacts{
+			CPUVendor:             snap.HostFacts.CPUVendor,
+			CPUModel:              snap.HostFacts.CPUModel,
+			CPUIDHash:             snap.HostFacts.CPUIDHash,
+			HostKernelRelease:     snap.HostFacts.HostKernelRelease,
+			HostKernelFingerprint: snap.HostFacts.HostKernelFingerprint,
+			KVMAPIVersion:         snap.HostFacts.KVMAPIVersion,
+			KVMModuleFingerprint:  snap.HostFacts.KVMModuleFingerprint,
+			KVMModuleTaint:        snap.HostFacts.KVMModuleTaint,
+		}
+	}
 	n.SetSchedulingDisabled(snapshotSchedulingDisabled(snap))
 	return n
 }

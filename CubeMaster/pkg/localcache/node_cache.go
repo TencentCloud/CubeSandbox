@@ -312,6 +312,11 @@ func (l *local) updateNodeFromMetaData(n *node.Node) error {
 		old.CPUType = n.CPUType
 		old.InstanceType = n.InstanceType
 		old.OssClusterLabel = n.OssClusterLabel
+		// Host facts must be refreshed on every metadata sync: KVM module state
+		// is re-read on each heartbeat (kvm.ko reload / out-of-tree sibling), and
+		// a node that first reported facts after being cached would otherwise
+		// render them as "-" forever in cubemastercli node list.
+		old.HostFacts = n.HostFacts
 		var labels map[string]string
 		if n.NodeLabels != nil {
 			labels = make(map[string]string, len(n.NodeLabels))

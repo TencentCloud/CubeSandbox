@@ -17,6 +17,19 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 )
 
+// HostFacts is the scheduler-side view of a node's static host identity. It
+// duplicates nodemeta.HostFacts to keep base/node free of a nodemeta import.
+type HostFacts struct {
+	CPUVendor             string `json:"cpu_vendor,omitempty"`
+	CPUModel              string `json:"cpu_model,omitempty"`
+	CPUIDHash             string `json:"cpuid_hash,omitempty"`
+	HostKernelRelease     string `json:"host_kernel_release,omitempty"`
+	HostKernelFingerprint string `json:"host_kernel_fingerprint,omitempty"`
+	KVMAPIVersion         int    `json:"kvm_api_version,omitempty"`
+	KVMModuleFingerprint  string `json:"kvm_module_fingerprint,omitempty"`
+	KVMModuleTaint        string `json:"kvm_module_taint,omitempty"`
+}
+
 type Node struct {
 	Index int    `json:"Index,omitempty"`
 	InsID string `json:"InstanceID,omitempty"`
@@ -90,6 +103,12 @@ type Node struct {
 	NicQueues      int64 `json:"nic_queues,omitempty"`
 
 	NodeLabels map[string]string `json:"NodeLabels,omitempty"`
+
+	// HostFacts carries the host-level identity (CPU feature set, host kernel,
+	// KVM ABI) used for cross-node snapshot restore compatibility. A local copy
+	// of nodemeta.HostFacts kept here to avoid the nodemeta → base/node import
+	// cycle, mirroring how masterclient.HostFacts duplicates the same shape.
+	HostFacts *HostFacts `json:"HostFacts,omitempty"`
 
 	// schedulingDisabled is the cordon flag (true → block new sandboxes).
 	// Exposed via SchedulingDisabled() / JSON as "SchedulingDisabled".
@@ -189,6 +208,10 @@ func (n *Node) Clone() *Node {
 		for k, v := range n.NodeLabels {
 			cloned.NodeLabels[k] = v
 		}
+	}
+	if n.HostFacts != nil {
+		hf := *n.HostFacts
+		cloned.HostFacts = &hf
 	}
 	return &cloned
 }

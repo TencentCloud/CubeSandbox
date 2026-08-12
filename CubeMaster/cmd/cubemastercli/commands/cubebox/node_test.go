@@ -74,6 +74,116 @@ func TestPrintNodeSummaryOmitsCapacityColumns(t *testing.T) {
 	}
 }
 
+func TestPrintNodeSummaryIncludesHostFacts(t *testing.T) {
+	output := captureStdout(t, func() {
+		printNodeSummary([]*node.Node{
+			{
+				InsID:      "node-1",
+				IP:         "10.0.0.1",
+				HostStatus: "RUNNING",
+				HostFacts: &node.HostFacts{
+					CPUVendor:             "GenuineIntel",
+					CPUIDHash:             "sha256:aabbccddeeff00112233",
+					HostKernelFingerprint: "sha256:1122334455667788",
+					KVMAPIVersion:         12,
+					KVMModuleTaint:        "EO",
+				},
+			},
+		}, false)
+	})
+
+	for _, wanted := range []string{
+		"CPU_VENDOR", "CPUID", "KERNEL_FP", "KVM_VER", "KVM_TAINT",
+		"GenuineIntel", "sha256:aabbccddeeff", "sha256:112233445566", "12", "EO",
+	} {
+		if !strings.Contains(output, wanted) {
+			t.Fatalf("output=%q, missing %q", output, wanted)
+		}
+	}
+	// Full 20-char cpuid hex must be truncated to 12 chars.
+	if strings.Contains(output, "aabbccddeeff00112233") {
+		t.Fatalf("output=%q, cpuid hash should be truncated", output)
+	}
+}
+
+func TestPrintNodeSummaryHostFactsAbsent(t *testing.T) {
+	output := captureStdout(t, func() {
+		printNodeSummary([]*node.Node{
+			{InsID: "node-1", IP: "10.0.0.1", HostStatus: "RUNNING"},
+		}, false)
+	})
+	// Header columns are always present; missing facts render as "-".
+	for _, wanted := range []string{"CPU_VENDOR", "KVM_TAINT"} {
+		if !strings.Contains(output, wanted) {
+			t.Fatalf("output=%q, missing header %q", output, wanted)
+		}
+	}
+}
+
+func TestFormatHostFacts(t *testing.T) {
+	t.Run("nil facts all dashes", func(t *testing.T) {
+		vendor, cpuid, kernelFP, kvmVer, kvmTaint := formatHostFacts(nil)
+		for _, got := range []string{vendor, cpuid, kernelFP, kvmVer, kvmTaint} {
+			if got != "-" {
+				t.Errorf("nil facts must render every cell as \"-\", got %q", got)
+			}
+		}
+	})
+	t.Run("empty fields render dash", func(t *testing.T) {
+		vendor, cpuid, kernelFP, kvmVer, kvmTaint := formatHostFacts(&node.HostFacts{})
+		for name, got := range map[string]string{
+			"vendor": vendor, "cpuid": cpuid, "kernelFP": kernelFP,
+			"kvmVer": kvmVer, "kvmTaint": kvmTaint,
+		} {
+			if got != "-" {
+				t.Errorf("empty %s must render \"-\", got %q", name, got)
+			}
+		}
+	})
+	t.Run("populated fields", func(t *testing.T) {
+		vendor, cpuid, kernelFP, kvmVer, kvmTaint := formatHostFacts(&node.HostFacts{
+			CPUVendor:             "GenuineIntel",
+			CPUIDHash:             "sha256:aabbccddeeff0011",
+			HostKernelFingerprint: "sha256:1122334455667788",
+			KVMAPIVersion:         12,
+			KVMModuleTaint:        "EO",
+		})
+		if vendor != "GenuineIntel" {
+			t.Errorf("vendor = %q", vendor)
+		}
+		if cpuid != "sha256:aabbccddeeff" {
+			t.Errorf("cpuid = %q, want truncated", cpuid)
+		}
+		if kernelFP != "sha256:112233445566" {
+			t.Errorf("kernelFP = %q, want truncated", kernelFP)
+		}
+		if kvmVer != "12" {
+			t.Errorf("kvmVer = %q, want 12", kvmVer)
+		}
+		if kvmTaint != "EO" {
+			t.Errorf("kvmTaint = %q, want EO", kvmTaint)
+		}
+	})
+}
+
+func TestShortHash(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"", "-"},
+		{"sha256:aabbccddeeff00112233", "sha256:aabbccddeeff"},
+		{"sha256:short", "sha256:short"},
+		{"nocolonbutlongvalue", "nocolonbutlo"}, // no colon, truncated to 12 chars
+		{"short", "short"},
+	}
+	for _, tc := range cases {
+		if got := shortHash(tc.in); got != tc.want {
+			t.Errorf("shortHash(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestPrintNodeSummaryScoreOnlyKeepsScoreColumns(t *testing.T) {
 	output := captureStdout(t, func() {
 		printNodeSummary([]*node.Node{

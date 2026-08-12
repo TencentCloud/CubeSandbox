@@ -67,3 +67,32 @@ func TestUpdateNodeFromMetaDataPropagatesSchedulingDisabled(t *testing.T) {
 		t.Fatalf("got allowed=%v disabled=%v", got.SchedulingAllowed(), got.SchedulingDisabled())
 	}
 }
+
+func TestUpdateNodeFromMetaDataRefreshesHostFacts(t *testing.T) {
+	origCache := l.cache
+	origSorted := l.sortedNodesByClusters
+	defer func() {
+		l.cache = origCache
+		l.sortedNodesByClusters = origSorted
+	}()
+	l.cache = cache.New(0, 0)
+	l.sortedNodesByClusters = map[string]node.NodeList{}
+
+	// Node was first cached before it reported any host facts.
+	existing := &node.Node{InsID: "n1", IP: "10.0.0.1", Healthy: true, InstanceType: "valid"}
+	l.cache.SetDefault("n1", existing)
+
+	// A later heartbeat carries fresh facts (e.g. reloaded kvm.ko taint).
+	incoming := &node.Node{InsID: "n1", IP: "10.0.0.1", Healthy: true, InstanceType: "valid",
+		HostFacts: &node.HostFacts{CPUIDHash: "sha256:x", KVMModuleTaint: "E"}}
+	if err := l.updateNodeFromMetaData(incoming); err != nil {
+		t.Fatalf("updateNodeFromMetaData: %v", err)
+	}
+	got, ok := GetNode("n1")
+	if !ok || got.HostFacts == nil {
+		t.Fatalf("host facts not propagated: %+v", got)
+	}
+	if got.HostFacts.CPUIDHash != "sha256:x" || got.HostFacts.KVMModuleTaint != "E" {
+		t.Fatalf("stale host facts: %+v", got.HostFacts)
+	}
+}

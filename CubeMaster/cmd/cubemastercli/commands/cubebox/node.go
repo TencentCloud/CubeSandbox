@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -212,14 +213,59 @@ func printNodeSummary(nodes []*node.Node, scoreOnly bool) {
 		_ = w.Flush()
 		return
 	}
-	fmt.Fprintln(w, "NODE_ID\tNODE_IP\tINSTANCE_TYPE\tZONE\tCPU_TYPE\tHEALTHY\tSCHEDULING_DISABLED\tHOST_STATUS")
+	fmt.Fprintln(w, "NODE_ID\tNODE_IP\tINSTANCE_TYPE\tZONE\tCPU_TYPE\tHEALTHY\tSCHEDULING_DISABLED\tHOST_STATUS\tCPU_VENDOR\tCPUID\tKERNEL_FP\tKVM_VER\tKVM_TAINT")
 	for _, item := range nodes {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%t\t%t\t%s\n",
+		cpuVendor, cpuid, kernelFP, kvmVer, kvmTaint := formatHostFacts(item.HostFacts)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%t\t%t\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			item.ID(), item.HostIP(), item.InstanceType, item.Zone, item.CPUType, item.Healthy,
 			item.SchedulingDisabled(), item.HostStatus,
+			cpuVendor, cpuid, kernelFP, kvmVer, kvmTaint,
 		)
 	}
 	_ = w.Flush()
+}
+
+// formatHostFacts renders the host facts as compact table cells. Long sha256
+// fingerprints are abbreviated for readability; use --json for full values.
+func formatHostFacts(f *node.HostFacts) (cpuVendor, cpuid, kernelFP, kvmVer, kvmTaint string) {
+	if f == nil {
+		return "-", "-", "-", "-", "-"
+	}
+	kvmVer = "-"
+	if f.KVMAPIVersion != 0 {
+		kvmVer = fmt.Sprintf("%d", f.KVMAPIVersion)
+	}
+	kvmTaint = f.KVMModuleTaint
+	if kvmTaint == "" {
+		kvmTaint = "-"
+	}
+	return orDash(f.CPUVendor), shortHash(f.CPUIDHash), shortHash(f.HostKernelFingerprint), kvmVer, kvmTaint
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// shortHash trims a "sha256:<hex>" fingerprint to its algorithm prefix plus the
+// first 12 hex chars so the table stays readable; "" becomes "-".
+func shortHash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	prefix, hexPart, found := strings.Cut(s, ":")
+	if !found {
+		if len(s) > 12 {
+			return s[:12]
+		}
+		return s
+	}
+	if len(hexPart) > 12 {
+		hexPart = hexPart[:12]
+	}
+	return prefix + ":" + hexPart
 }
 
 func formatNodeTime(t time.Time) string {
