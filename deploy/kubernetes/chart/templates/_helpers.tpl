@@ -391,6 +391,62 @@ http {
 {{- printf "%s:%v" (include "cube.lifecycleManagerFQDN" .) .Values.lifecycleManager.service.port -}}
 {{- end -}}
 
+{{- define "cube.evictionWebhookName" -}}
+{{- printf "%s-eviction-webhook" (include "cube.fullname" .) -}}
+{{- end -}}
+
+{{- define "cube.evictionWebhookServiceAccountName" -}}
+{{- $webhook := default dict .Values.evictionWebhook -}}
+{{- $override := dig "serviceAccountName" "" $webhook -}}
+{{- if $override -}}{{- $override -}}{{- else -}}{{- include "cube.evictionWebhookName" . -}}{{- end -}}
+{{- end -}}
+
+{{/*
+Cluster-scoped resource base name for eviction-webhook (ClusterRole /
+ClusterRoleBinding / ValidatingWebhookConfiguration). Release + namespace
+hashed so separate releases / namespaces never collide.
+*/}}
+{{- define "cube.evictionWebhookClusterScopedName" -}}
+{{- $base := include "cube.fullname" . | trunc 41 | trimSuffix "-" -}}
+{{- printf "cube-eviction-webhook-%s-%s" $base (include "cube.releaseIdentityHash" .) -}}
+{{- end -}}
+
+{{- define "cube.evictionWebhookEnabled" -}}
+{{- $webhook := default dict .Values.evictionWebhook -}}
+{{- if and (dig "enabled" false $webhook) (include "cube.masterEndpoint" .) -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{- define "cube.evictionWebhookMasterURL" -}}
+{{- $override := dig "cubeMasterURL" "" (default dict .Values.evictionWebhook) -}}
+{{- if $override -}}{{- $override -}}{{- else -}}{{- printf "http://%s" (include "cube.masterEndpoint" .) -}}{{- end -}}
+{{- end -}}
+
+{{- define "cube.evictionWebhookServiceFQDN" -}}
+{{- printf "%s.%s.svc.%s" (include "cube.evictionWebhookName" .) .Release.Namespace (include "cube.clusterDomain" .) -}}
+{{- end -}}
+
+{{- define "cube.evictionWebhookTLSSecretName" -}}
+{{- $webhook := default dict .Values.evictionWebhook -}}
+{{- $tls := default dict $webhook.tls -}}
+{{- if and (eq (dig "mode" "" $tls) "existingSecret") (dig "existingSecret" "" $tls) -}}
+{{- dig "existingSecret" "" $tls -}}
+{{- else if dig "secretName" "" $tls -}}
+{{- dig "secretName" "" $tls -}}
+{{- else -}}
+{{- printf "%s-eviction-webhook-tls" (include "cube.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "cube.evictionWebhookStatePVCName" -}}
+{{- $webhook := default dict .Values.evictionWebhook -}}
+{{- $persistence := default dict $webhook.persistence -}}
+{{- if $persistence.existingClaim -}}
+{{- $persistence.existingClaim -}}
+{{- else -}}
+{{- printf "%s-eviction-webhook-state" (include "cube.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "cube.configureClusterDNS" -}}
 {{- if and .Values.cubeProxy.configureClusterDNS (eq (include "cube.proxyEnabled" .) "true") -}}true{{- else -}}false{{- end -}}
 {{- end -}}

@@ -181,25 +181,24 @@ Latency: pressure detected → sandbox paused **< 1 s**; pressure cleared → sa
 
 ### Deploy
 
+eviction-webhook ships as an optional component of the top-level Helm chart at
+[`deploy/kubernetes/chart`](../deploy/kubernetes/chart) — it is not deployed via
+standalone manifests.
+
 ```bash
-# 1. TLS certificate (cert-manager injects caBundle automatically)
-kubectl apply -f deploy/kubernetes/cert.yaml
+# Enable it alongside (or on top of) an existing cube release.
+helm upgrade --install cube deploy/kubernetes/chart \
+  --namespace cube-system \
+  --set evictionWebhook.enabled=true
 
-# 2. CubeMaster authentication credentials
-kubectl create secret generic eviction-webhook-auth \
-  --from-literal=user_id=<user_id> \
-  --from-literal=secret_key=<secret_key> \
-  -n cube-system
-
-# 3. RBAC, Deployment, and ValidatingWebhookConfiguration
-kubectl apply -f deploy/kubernetes/rbac.yaml
-kubectl apply -f deploy/kubernetes/deployment.yaml
-kubectl apply -f deploy/kubernetes/webhook.yaml
-
-# 4. Verify
+# Verify
 kubectl rollout status deployment/eviction-webhook -n cube-system
 kubectl logs -f -n cube-system -l app=eviction-webhook
 ```
+
+See [`evictionWebhook.*`](../deploy/kubernetes/chart/values.yaml) in `values.yaml` for
+TLS mode, auth credentials, and other chart-level knobs (auth credentials are
+auto-generated and persisted in the release Secret when left empty).
 
 ### Configuration
 
@@ -208,6 +207,7 @@ kubectl logs -f -n cube-system -l app=eviction-webhook
 | `CUBE_MASTER_URL` | CubeMaster service endpoint | *(required)* |
 | `CUBE_AUTH_ENABLE` | Enable HMAC authentication | `true` |
 | `EVENT_REPORT_ENABLE` | Report eviction events to CubeMaster | `false` |
+| `RECOVERY_ENABLE` | Cordon the node and pause/resume the sandbox on interception. Set to `false` to only deny the eviction, without the automatic cordon/pause/resume side effect. | `true` |
 | `AUDIT_LOG_PATH` | Local NDJSON audit log path | `/var/log/eviction-webhook/events.ndjson` |
 | `RECOVERY_STATE_PATH` | Persisted recovery state path | `/var/lib/eviction-webhook/recovery-state.json` |
 | `METRICS_ADDR` | Prometheus metrics listen address | `:8888` |
@@ -228,7 +228,6 @@ kubectl logs -f -n cube-system -l app=eviction-webhook
 | `eviction_webhook_cubemaster_api_latency_seconds` | Histogram | CubeMaster API call latency |
 | `eviction_webhook_cubemaster_errors_total` | Counter | CubeMaster API errors |
 | `eviction_webhook_isolated_nodes_total` | Counter | Total nodes isolated |
-| `eviction_webhook_paused_sandboxes` | Gauge | Current number of paused sandboxes |
 
 ```bash
 kubectl port-forward -n cube-system svc/eviction-webhook 8888:8888
@@ -255,8 +254,7 @@ go test -timeout 60s ./...
 ## Further Reading
 
 - [Design Document](docs/eviction-webhook-research.md) — detailed background, K8s eviction mechanics, CubeMaster API research
-- [Operations Guide](docs/OPERATIONS.md) — troubleshooting, zero-downtime upgrades, alert rules
-- [Quick Reference](docs/QUICK_REFERENCE.md) — command cheatsheet, key metrics table
+- [Eviction Protection Guide](../docs/guide/eviction-protection.md) — deployment verification, monitoring, troubleshooting, upgrades
 
 ---
 

@@ -233,3 +233,23 @@
 {{- fail "volumeCos.enabled=true requires volumeCos.existingSecret or volumeCos.secretId/secretKey/bucket" }}
 {{- end }}
 {{- end }}
+{{- if .Values.evictionWebhook.enabled }}
+{{- if not (include "cube.masterEndpoint" .) }}
+{{- fail "evictionWebhook.enabled=true requires a CubeMaster endpoint (controlPlane.master or externalControlPlane.masterEndpoint)" }}
+{{- end }}
+{{- if not (has .Values.evictionWebhook.tls.mode (list "existingSecret" "certManager" "selfSigned" "inline")) }}
+{{- fail "evictionWebhook.tls.mode must be one of: existingSecret, certManager, selfSigned, inline" }}
+{{- end }}
+{{- if and (eq .Values.evictionWebhook.tls.mode "existingSecret") (not .Values.evictionWebhook.tls.existingSecret) }}
+{{- fail "evictionWebhook.tls.mode=existingSecret requires evictionWebhook.tls.existingSecret" }}
+{{- end }}
+{{- if and (eq .Values.evictionWebhook.tls.mode "inline") (or (not .Values.evictionWebhook.tls.inline.cert) (not .Values.evictionWebhook.tls.inline.key) (not .Values.evictionWebhook.tls.inline.ca)) }}
+{{- fail "evictionWebhook.tls.mode=inline requires evictionWebhook.tls.inline.cert/key/ca" }}
+{{- end }}
+{{- if and (eq .Values.evictionWebhook.tls.mode "certManager") (not .Values.evictionWebhook.tls.certManager.issuerRef.name) }}
+{{- fail "evictionWebhook.tls.mode=certManager requires evictionWebhook.tls.certManager.issuerRef.name" }}
+{{- end }}
+{{- if not .Values.images.evictionWebhook.repository }}
+{{- fail "evictionWebhook.enabled=true requires images.evictionWebhook.repository" }}
+{{- end }}
+{{- end }}

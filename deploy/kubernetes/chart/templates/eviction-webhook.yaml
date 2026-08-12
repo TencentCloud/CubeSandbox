@@ -1,0 +1,403 @@
+{{- if eq (include "cube.evictionWebhookEnabled" .) "true" }}
+{{- $webhook := default dict .Values.evictionWebhook -}}
+{{- $tls := default dict $webhook.tls -}}
+{{- $persistence := default dict $webhook.persistence -}}
+{{- $auth := default dict $webhook.auth -}}
+{{- $selfSignedCfg := default dict $tls.selfSigned -}}
+{{- $certManagerCfg := default dict $tls.certManager -}}
+{{- $svcName := include "cube.evictionWebhookName" . -}}
+{{- $svcFQDN := include "cube.evictionWebhookServiceFQDN" . -}}
+{{- $tlsSecretName := include "cube.evictionWebhookTLSSecretName" . -}}
+{{- $authSecretName := printf "%s-auth" $svcName -}}
+{{- $certKey := default "tls.crt" $tls.certSecretKey -}}
+{{- $keyKey := default "tls.key" $tls.keySecretKey -}}
+{{- $caKey := default "ca.crt" $tls.caSecretKey -}}
+{{- $existingTLS := lookup "v1" "Secret" .Release.Namespace $tlsSecretName -}}
+{{- $dnsNames := list $svcName (printf "%s.%s.svc" $svcName .Release.Namespace) $svcFQDN -}}
+{{- range $selfSignedCfg.dnsNames }}
+{{- $dnsNames = append $dnsNames . }}
+{{- end }}
+{{- range $certManagerCfg.dnsNames }}
+{{- $dnsNames = append $dnsNames . }}
+{{- end }}
+{{- $dnsNames = uniq $dnsNames -}}
+{{- /* Shared self-signed material (raw PEM for the Secret, b64 CA for the VWC). */ -}}
+{{- $selfSignedHasExisting := and (eq $tls.mode "selfSigned") $existingTLS (hasKey $existingTLS.data $certKey) (hasKey $existingTLS.data $keyKey) (hasKey $existingTLS.data $caKey) -}}
+{{- $selfSignedCertRaw := "" -}}
+{{- $selfSignedKeyRaw := "" -}}
+{{- $selfSignedCARaw := "" -}}
+{{- $selfSignedCAB64 := "" -}}
+{{- if $selfSignedHasExisting -}}
+{{- $selfSignedCAB64 = index $existingTLS.data $caKey -}}
+{{- else if eq $tls.mode "selfSigned" -}}
+{{- $commonName := default $svcFQDN $selfSignedCfg.commonName -}}
+{{- $ca := genCA (printf "%s-eviction-webhook-ca" (include "cube.fullname" .)) (int $selfSignedCfg.caValidityDays) -}}
+{{- $cert := genSignedCert $commonName (list) $dnsNames (int $selfSignedCfg.certValidityDays) $ca -}}
+{{- $selfSignedCertRaw = $cert.Cert -}}
+{{- $selfSignedKeyRaw = $cert.Key -}}
+{{- $selfSignedCARaw = $ca.Cert -}}
+{{- $selfSignedCAB64 = $ca.Cert | b64enc -}}
+{{- end -}}
+{{- /* Auth credentials: auto-generate (and persist across upgrades) when empty. */ -}}
+{{- $authUserID := default "" $auth.userID -}}
+{{- $authSecretKey := default "" $auth.secretKey -}}
+{{- if and $auth.enabled (or (not $authUserID) (not $authSecretKey)) -}}
+{{- $existingAuth := lookup "v1" "Secret" .Release.Namespace $authSecretName -}}
+{{- if and $existingAuth (index $existingAuth.data "user_id") (index $existingAuth.data "secret_key") -}}
+{{- $authUserID = index $existingAuth.data "user_id" | b64dec -}}
+{{- $authSecretKey = index $existingAuth.data "secret_key" | b64dec -}}
+{{- else -}}
+{{- if not $authUserID }}
+{{- $authUserID = printf "eviction-webhook-%s" (randAlphaNum 8) }}
+{{- end -}}
+{{- if not $authSecretKey }}
+{{- $authSecretKey = randAlphaNum 32 }}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if $auth.enabled }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $authSecretName }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: eviction-webhook
+type: Opaque
+stringData:
+  user_id: {{ $authUserID | quote }}
+  secret_key: {{ $authSecretKey | quote }}
+{{- end }}
+{{- if eq $tls.mode "inline" }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $tlsSecretName }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: eviction-webhook
+type: Opaque
+stringData:
+  {{ $certKey | quote }}: |-
+{{ $tls.inline.cert | nindent 4 }}
+  {{ $keyKey | quote }}: |-
+{{ $tls.inline.key | nindent 4 }}
+  {{ $caKey | quote }}: |-
+{{ $tls.inline.ca | nindent 4 }}
+{{- else if eq $tls.mode "selfSigned" }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $tlsSecretName }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: eviction-webhook
+type: Opaque
+{{- if $selfSignedHasExisting }}
+data:
+  {{ $certKey | quote }}: {{ index $existingTLS.data $certKey | quote }}
+  {{ $keyKey | quote }}: {{ index $existingTLS.data $keyKey | quote }}
+  {{ $caKey | quote }}: {{ index $existingTLS.data $caKey | quote }}
+{{- else }}
+stringData:
+  {{ $certKey | quote }}: |-
+{{ $selfSignedCertRaw | nindent 4 }}
+  {{ $keyKey | quote }}: |-
+{{ $selfSignedKeyRaw | nindent 4 }}
+  {{ $caKey | quote }}: |-
+{{ $selfSignedCARaw | nindent 4 }}
+{{- end }}
+{{- else if eq $tls.mode "certManager" }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $tlsSecretName }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: eviction-webhook
+spec:
+  secretName: {{ $tlsSecretName }}
+  commonName: {{ default $svcFQDN $certManagerCfg.commonName | quote }}
+  dnsNames:
+    {{- toYaml $dnsNames | nindent 4 }}
+  {{- with $certManagerCfg.duration }}
+  duration: {{ . | quote }}
+  {{- end }}
+  {{- with $certManagerCfg.renewBefore }}
+  renewBefore: {{ . | quote }}
+  {{- end }}
+  usages:
+    {{- toYaml (default (list "digital signature" "key encipherment" "server auth") $certManagerCfg.usages) | nindent 4 }}
+  issuerRef:
+    group: {{ $certManagerCfg.issuerRef.group | quote }}
+    kind: {{ $certManagerCfg.issuerRef.kind | quote }}
+    name: {{ $certManagerCfg.issuerRef.name | quote }}
+{{- end }}
+{{- if and $persistence.enabled (not $persistence.existingClaim) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "cube.evictionWebhookStatePVCName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: eviction-webhook
+spec:
+  accessModes:
+    {{- toYaml $persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ $persistence.size | quote }}
+  {{- $sc := include "cube.persistenceStorageClassName" (dict "root" . "component" $persistence) -}}
+  {{- if $sc }}
+  storageClassName: {{ $sc | quote }}
+  {{- end }}
+{{- end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "cube.evictionWebhookServiceAccountName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: eviction-webhook
+  {{- with $webhook.serviceAccountAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "cube.evictionWebhookClusterScopedName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: eviction-webhook
+rules:
+  # Webhook needs to read Pods (node-name resolution) and watch Node
+  # MemoryPressure conditions to pause/resume sandboxes.
+  - apiGroups: [""]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "cube.evictionWebhookClusterScopedName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: eviction-webhook
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "cube.evictionWebhookClusterScopedName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cube.evictionWebhookServiceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $svcName }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: eviction-webhook
+spec:
+  replicas: {{ $webhook.replicas }}
+  {{- include "cube.deploymentStrategy" (dict "root" . "strategy" $webhook.deploymentStrategy) | nindent 2 }}
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: eviction-webhook
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: eviction-webhook
+      {{- with $webhook.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "cube.evictionWebhookServiceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+        - name: eviction-webhook
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.evictionWebhook "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.evictionWebhook.pullPolicy }}
+          ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+            - name: metrics
+              containerPort: 8888
+              protocol: TCP
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: LISTEN_ADDR
+              value: {{ $webhook.listenAddr | quote }}
+            - name: METRICS_ADDR
+              value: {{ $webhook.metricsAddr | quote }}
+            - name: TLS_CERT_FILE
+              value: {{ printf "/etc/eviction-webhook/tls/%s" $certKey | quote }}
+            - name: TLS_KEY_FILE
+              value: {{ printf "/etc/eviction-webhook/tls/%s" $keyKey | quote }}
+            - name: CUBE_MASTER_URL
+              value: {{ include "cube.evictionWebhookMasterURL" . | quote }}
+            - name: EVENT_REPORT_ENABLE
+              value: {{ ternary "true" "false" $webhook.eventReportEnabled | quote }}
+            - name: RECOVERY_ENABLE
+              value: {{ ternary "true" "false" $webhook.recoveryEnabled | quote }}
+            - name: CUBE_AUTH_ENABLE
+              value: {{ ternary "true" "false" $auth.enabled | quote }}
+            - name: DEBUG
+              value: {{ ternary "true" "false" $webhook.debug | quote }}
+            - name: AUDIT_LOG_PATH
+              value: /var/log/eviction-webhook/events.ndjson
+            - name: RECOVERY_STATE_PATH
+              value: /var/lib/eviction-webhook/recovery-state.json
+            {{- if $auth.enabled }}
+            - name: CUBE_AUTH_USER_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $authSecretName }}
+                  key: user_id
+            - name: CUBE_AUTH_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $authSecretName }}
+                  key: secret_key
+            {{- end }}
+            {{- with $webhook.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/eviction-webhook/tls
+              readOnly: true
+            - name: audit-log
+              mountPath: /var/log/eviction-webhook
+            - name: recovery-state
+              mountPath: /var/lib/eviction-webhook
+          {{- if $webhook.probes.readiness.enabled }}
+          readinessProbe:
+            httpGet:
+              path: {{ $webhook.probes.readiness.path | quote }}
+              port: {{ $webhook.probes.readiness.port }}
+              scheme: HTTPS
+            initialDelaySeconds: {{ $webhook.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ $webhook.probes.readiness.periodSeconds }}
+            failureThreshold: {{ $webhook.probes.readiness.failureThreshold }}
+          {{- end }}
+          {{- if $webhook.probes.liveness.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ $webhook.probes.liveness.path | quote }}
+              port: {{ $webhook.probes.liveness.port }}
+              scheme: HTTPS
+            initialDelaySeconds: {{ $webhook.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ $webhook.probes.liveness.periodSeconds }}
+            failureThreshold: {{ $webhook.probes.liveness.failureThreshold }}
+          {{- end }}
+          {{- with $webhook.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ $tlsSecretName }}
+        - name: audit-log
+          emptyDir: {}
+        - name: recovery-state
+          {{- if and $persistence.enabled (not $persistence.existingClaim) }}
+          persistentVolumeClaim:
+            claimName: {{ include "cube.evictionWebhookStatePVCName" . }}
+          {{- else if $persistence.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ $persistence.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $svcName }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: eviction-webhook
+  {{- with $webhook.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $webhook.service.type }}
+  selector:
+    {{- include "cube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: eviction-webhook
+  ports:
+    - name: https
+      port: {{ $webhook.service.port }}
+      targetPort: https
+      protocol: TCP
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "cube.evictionWebhookClusterScopedName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: eviction-webhook
+  {{- if eq $tls.mode "certManager" }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ printf "%s/%s" .Release.Namespace $tlsSecretName | quote }}
+  {{- end }}
+webhooks:
+  - name: eviction.cube.tencent.com
+    admissionReviewVersions: ["v1"]
+    sideEffects: {{ $webhook.webhook.sideEffects | quote }}
+    timeoutSeconds: {{ $webhook.webhook.timeoutSeconds }}
+    failurePolicy: {{ $webhook.webhook.failurePolicy | quote }}
+    rules:
+      {{- toYaml $webhook.webhook.rules | nindent 6 }}
+    {{- with $webhook.webhook.objectSelector }}
+    objectSelector:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with $webhook.webhook.namespaceSelector }}
+    namespaceSelector:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    clientConfig:
+      service:
+        name: {{ $svcName }}
+        namespace: {{ .Release.Namespace }}
+        path: /webhook/eviction
+        port: {{ $webhook.service.port }}
+      {{- if eq $tls.mode "certManager" }}
+      # caBundle is injected by cert-manager via the annotation above.
+      {{- else if eq $tls.mode "selfSigned" }}
+      caBundle: {{ $selfSignedCAB64 | quote }}
+      {{- else if eq $tls.mode "inline" }}
+      caBundle: {{ $tls.inline.ca | b64enc | quote }}
+      {{- else }}
+      {{- if and $existingTLS (index $existingTLS.data $caKey) }}
+      caBundle: {{ index $existingTLS.data $caKey | quote }}
+      {{- end }}
+      {{- end }}
+{{- end }}

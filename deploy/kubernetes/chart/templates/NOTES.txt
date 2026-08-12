@@ -72,6 +72,11 @@ Cube Proxy Deployment:
   Lifecycle Manager: {{ include "cube.lifecycleManagerName" . }}:{{ .Values.lifecycleManager.service.port }}
 {{- end }}
 {{- end }}
+{{- if eq (include "cube.evictionWebhookEnabled" .) "true" }}
+
+Eviction Webhook Deployment:
+  {{ include "cube.evictionWebhookName" . }} (VWC {{ include "cube.evictionWebhookClusterScopedName" . }}, failurePolicy={{ .Values.evictionWebhook.webhook.failurePolicy }})
+{{- end }}
 
 {{- /* Status facts: past-tense / current config — not failure messages. */}}
 Status:

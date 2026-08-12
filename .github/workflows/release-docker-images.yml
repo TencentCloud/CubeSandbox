@@ -18,7 +18,7 @@ on:
         type: string
         default: ''
       components:
-        description: 'Comma-separated components to build, or "all" (cube-egress, cube-egress-net, cube-master, cubemastercli, cubelet, cube-shim, cube-kernel, cube-guest, cube-agent, cube-pvm-host-bootstrap, cube-node-init, cube-wait-node-prep, cube-api, cube-ops, cube-proxy, webui, cube-lifecycle-manager)'
+        description: 'Comma-separated components to build, or "all" (cube-egress, cube-egress-net, cube-master, cubemastercli, cubelet, cube-shim, cube-kernel, cube-guest, cube-agent, cube-pvm-host-bootstrap, cube-node-init, cube-wait-node-prep, cube-api, cube-ops, cube-proxy, webui, cube-lifecycle-manager, eviction-webhook)'
         required: false
         type: string
         default: all
@@ -219,6 +219,7 @@ jobs:
               "cube-proxy",
               "webui",
               "cube-lifecycle-manager",
+              "eviction-webhook",
           }
           if selected is not None:
               unknown = sorted(selected - known)
@@ -351,6 +352,14 @@ jobs:
                   "context": "cube-lifecycle-manager",
                   "dockerfile": "cube-lifecycle-manager/Dockerfile",
                   "cache_scope": "cube-lifecycle-manager",
+              },
+              {
+                  # Registry repo name must match chart values.yaml (eviction-webhook).
+                  "component": "eviction-webhook",
+                  "image": "eviction-webhook",
+                  "context": "eviction-webhook",
+                  "dockerfile": "eviction-webhook/Dockerfile",
+                  "cache_scope": "eviction-webhook",
               },
           ]
           arches = [
