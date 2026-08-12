@@ -191,12 +191,19 @@ To check one version, install it and run the suite normally:
 pip install 'e2b==2.21.0' 'e2b-code-interpreter==2.8.1'
 pytest --run-e2e --sdk-e2e-backends=e2b -m "smoke or p0"
 
-# Core SDK only: run_code MUST be deselected. Those cases are p0 and the e2b
+# Core SDK only: the interpreter-dependent cases MUST be deselected. The e2b
 # backend declares the run_code capability unconditionally, so without the
 # deselect they are collected, call Sandbox.run_code on the plain SDK, and fail
 # for a missing package rather than a real incompatibility.
+#
+# Deselect on `requires_code_interpreter`, not on the `run_code` marker: that
+# marker lives only in cases/run_code/, while cases/lifecycle/test_pause_resume.py
+# and test_auto_lifecycle.py also call run_code and carry only the capability
+# marker. At "smoke or p0" both spellings happen to select the same 21 cases; at
+# "p0 or p1" `not run_code` leaves 87 and `not requires_code_interpreter` leaves
+# 82 — those 5 are exactly the ones that would fail on a missing package.
 pip install 'e2b==2.29.5'
-pytest --run-e2e --sdk-e2e-backends=e2b -m "(smoke or p0) and not run_code"
+pytest --run-e2e --sdk-e2e-backends=e2b -m "(smoke or p0) and not requires_code_interpreter"
 ```
 
 Repeat per version in a fresh virtualenv, and record the outcome in
@@ -212,9 +219,12 @@ Notes that make the matrix more than a version list:
 - **`e2b-code-interpreter` versions its own way.** Its 2.9.0 requires
   `e2b>=2.26.0,<3.0.0`, so a row pinning an older `e2b` cannot also take the
   current interpreter package — the `run_code` cases are unavailable there.
-- **Cases that need the interpreter.** Rows without `e2b-code-interpreter`
-  should deselect the `run_code` marker (`-m "(smoke or p0) and not run_code"`)
-  rather than report failures that are really a missing package.
+- **Cases that need the interpreter.** Lines without `e2b-code-interpreter`
+  should deselect on the capability marker
+  (`-m "(smoke or p0) and not requires_code_interpreter"`) rather than report
+  failures that are really a missing package. The `run_code` marker is not
+  enough — it only covers `cases/run_code/`, while `cases/lifecycle/` has
+  interpreter-dependent cases carrying just the capability marker.
 
 ## Environment
 

@@ -174,11 +174,17 @@ CubeSandbox 版本预期能配合哪些 SDK 版本，而不必等线上故障才
 pip install 'e2b==2.21.0' 'e2b-code-interpreter==2.8.1'
 pytest --run-e2e --sdk-e2e-backends=e2b -m "smoke or p0"
 
-# 只装核心 SDK 时**必须**排除 run_code：这些用例是 p0，而 e2b 后端无条件声明了
+# 只装核心 SDK 时**必须**排除依赖 interpreter 的用例：e2b 后端无条件声明了
 # run_code capability，不排除就会被收集、在纯 SDK 上调用 Sandbox.run_code，
 # 最终报成失败——而那只是缺包，不是真的不兼容。
+#
+# 要按 `requires_code_interpreter` 排除，而不是按 `run_code` marker：后者只存在于
+# cases/run_code/ 下，而 cases/lifecycle/test_pause_resume.py 与 test_auto_lifecycle.py
+# 同样调用 run_code、却只带 capability marker。在 "smoke or p0" 下两种写法恰好都选中
+# 21 个用例；在 "p0 or p1" 下 `not run_code` 收集 87 个、`not requires_code_interpreter`
+# 收集 82 个——差的这 5 个正是会因缺包而失败的那批。
 pip install 'e2b==2.29.5'
-pytest --run-e2e --sdk-e2e-backends=e2b -m "(smoke or p0) and not run_code"
+pytest --run-e2e --sdk-e2e-backends=e2b -m "(smoke or p0) and not requires_code_interpreter"
 ```
 
 每个版本在独立虚拟环境中重复一次，发版时把结果记入 `e2b-versions.txt`。
@@ -192,8 +198,10 @@ pytest --run-e2e --sdk-e2e-backends=e2b -m "(smoke or p0) and not run_code"
 - **`e2b-code-interpreter` 有自己的版本序列。** 它的 2.9.0 要求
   `e2b>=2.26.0,<3.0.0`，因此固定较低 `e2b` 版本的组合无法同时使用当前的 interpreter
   包，该组合下 `run_code` 用例不可用。
-- **依赖 interpreter 的用例。** 未安装 `e2b-code-interpreter` 的组合应显式排除
-  `run_code`（`-m "(smoke or p0) and not run_code"`），而不是把"缺包"报成失败。
+- **依赖 interpreter 的用例。** 未安装 `e2b-code-interpreter` 的组合应按 capability
+  marker 排除（`-m "(smoke or p0) and not requires_code_interpreter"`），而不是把
+  "缺包"报成失败。只排除 `run_code` marker 不够：它仅覆盖 `cases/run_code/`，而
+  `cases/lifecycle/` 下也有只带 capability marker 的依赖 interpreter 用例。
 
 ## 环境变量
 
