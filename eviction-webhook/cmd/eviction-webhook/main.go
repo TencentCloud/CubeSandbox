@@ -99,14 +99,6 @@ func run() error {
 
 	cmClient := cubemaster.New(cfg.CubeMasterURL, cfg.AuthUserID, cfg.AuthSecretKey, cfg.AuthEnabled)
 
-	// ── Recovery manager ──────────────────────────────────────────────────
-	statePath := envOrDefault("RECOVERY_STATE_PATH", "/var/lib/eviction-webhook/recovery-state.json")
-	recoveryMgr, err := recovery.NewWithPersister(cmClient, statePath)
-	if err != nil {
-		logger.Warn("recovery persisted state unavailable, starting clean", zap.Error(err))
-		recoveryMgr = recovery.New(cmClient)
-	}
-
 	nodePressure := func(ctx context.Context, nodeName string) (bool, bool, error) {
 		node, err := k8sClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
 		if err != nil {
@@ -114,20 +106,36 @@ func run() error {
 		}
 		return nodewatch.HasMemoryPressure(node), nodewatch.HasResourcePressure(node), nil
 	}
-	recoveryMgr.SetPressureChecker(func(ctx context.Context, nodeName string) (bool, error) {
-		_, underResourcePressure, err := nodePressure(ctx, nodeName)
-		return underResourcePressure, err
-	})
 
-	// ── Node watcher ──────────────────────────────────────────────────────
-	logger.Info("starting node watcher")
-	if err := nodewatch.StartAsyncWithPressureDetected(ctx, k8sClient, recoveryMgr.OnPressureRelief, recoveryMgr.OnPressureDetected); err != nil {
-		logger.Warn("node watcher failed to start", zap.Error(err))
+	// ── Recovery manager ──────────────────────────────────────────────────
+	// RECOVERY_ENABLE=false still denies the eviction (the MicroVM is protected)
+	// but skips the cordon/pause/resume side effect entirely: no node watcher,
+	// no persisted recovery state, no CubeMaster isolate/pause/resume calls.
+	var handlerRecoveryMgr admission.RecoveryManager
+	if cfg.RecoveryEnabled {
+		statePath := envOrDefault("RECOVERY_STATE_PATH", "/var/lib/eviction-webhook/recovery-state.json")
+		recoveryMgr, err := recovery.NewWithPersister(cmClient, statePath)
+		if err != nil {
+			logger.Warn("recovery persisted state unavailable, starting clean", zap.Error(err))
+			recoveryMgr = recovery.New(cmClient)
+		}
+		recoveryMgr.SetPressureChecker(func(ctx context.Context, nodeName string) (bool, error) {
+			_, underResourcePressure, err := nodePressure(ctx, nodeName)
+			return underResourcePressure, err
+		})
+
+		logger.Info("starting node watcher")
+		if err := nodewatch.StartAsyncWithPressureDetected(ctx, k8sClient, recoveryMgr.OnPressureRelief, recoveryMgr.OnPressureDetected); err != nil {
+			logger.Warn("node watcher failed to start", zap.Error(err))
+		}
+		recoveryMgr.ReconcileRestored(ctx)
+		handlerRecoveryMgr = recoveryMgr
+	} else {
+		logger.Info("recovery disabled (RECOVERY_ENABLE=false): evictions will still be denied, but no cordon/pause/resume will be triggered")
 	}
-	recoveryMgr.ReconcileRestored(ctx)
 
 	// ── Admission handler ─────────────────────────────────────────────────
-	handler := admission.NewWithLogger(podCache, auditStore, rep, recoveryMgr, logger)
+	handler := admission.NewWithLogger(podCache, auditStore, rep, handlerRecoveryMgr, logger)
 	handler.SetPressureChecker(func(ctx context.Context, nodeName string) (bool, error) {
 		underMemoryPressure, _, err := nodePressure(ctx, nodeName)
 		return underMemoryPressure, err
@@ -215,6 +223,7 @@ type config struct {
 	AuditLogPath       string
 	CubeMasterURL      string
 	EventReportEnabled bool
+	RecoveryEnabled    bool
 	AuthEnabled        bool
 	AuthUserID         string
 	AuthSecretKey      string
@@ -235,6 +244,7 @@ func loadConfig() (config, error) {
 		AuditLogPath:       envOrDefault("AUDIT_LOG_PATH", "/var/log/eviction-webhook/events.ndjson"),
 		CubeMasterURL:      cubeMasterURL,
 		EventReportEnabled: os.Getenv("EVENT_REPORT_ENABLE") == "true",
+		RecoveryEnabled:    os.Getenv("RECOVERY_ENABLE") != "false",
 		AuthEnabled:        os.Getenv("CUBE_AUTH_ENABLE") == "true",
 		AuthUserID:         os.Getenv("CUBE_AUTH_USER_ID"),
 		AuthSecretKey:      os.Getenv("CUBE_AUTH_SECRET_KEY"),
