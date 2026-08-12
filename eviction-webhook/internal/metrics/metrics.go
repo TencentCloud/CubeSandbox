@@ -55,14 +55,6 @@ var IsolatedNodesTotal = promauto.NewCounter(
 	},
 )
 
-// PausedSandboxesGauge tracks current number of paused sandboxes.
-var PausedSandboxesGauge = promauto.NewGauge(
-	prometheus.GaugeOpts{
-		Name: "eviction_webhook_paused_sandboxes",
-		Help: "Current number of paused sandboxes",
-	},
-)
-
 // WebhookLatencySeconds measures webhook request latency.
 var WebhookLatencySeconds = promauto.NewHistogramVec(
 	prometheus.HistogramOpts{

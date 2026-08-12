@@ -4,6 +4,9 @@
 package auth
 
 import (
+	"crypto/hmac"
+	"crypto/sha1"
+	"encoding/base64"
 	"strconv"
 	"testing"
 	"time"
@@ -135,4 +138,41 @@ func TestGenerateNonceIsNumeric(t *testing.T) {
 	v, err := strconv.ParseUint(nonce, 10, 64)
 	require.NoError(t, err, "nonce %q must be a valid uint64 string", nonce)
 	assert.Greater(t, v, uint64(0), "nonce must be > 0")
+}
+
+// TestHeadersSigningMatchesCubeMaster independently reimplements CubeMaster's
+// CheckSign algorithm and recomputes the signature from the emitted headers.
+// Unlike the other tests in this file (which call Headers and assert on its
+// own output), this guards against the case where an internal refactor makes
+// Headers self-consistent but silently drifts from the wire format CubeMaster
+// actually verifies.
+func TestHeadersSigningMatchesCubeMaster(t *testing.T) {
+	userID := "eviction-webhook"
+	secretKey := "test-secret-key-cube-master"
+
+	h, err := Headers(userID, secretKey)
+	require.NoError(t, err)
+
+	version := h.Get("Cube_version")
+	uid := h.Get("Cube_user_id")
+	ts := h.Get("Cube_timestamp")
+	nonce := h.Get("Cube_nonce")
+	sgnMethod := h.Get("Cube_sgn_method")
+	signature := h.Get("Cube_signature")
+
+	assert.Equal(t, "2023", version)
+	assert.Equal(t, userID, uid)
+	assert.Equal(t, "sha1", sgnMethod)
+
+	timestamp, err := strconv.ParseInt(ts, 10, 64)
+	require.NoError(t, err, "timestamp not an integer: %s", ts)
+	assert.InDelta(t, time.Now().Unix(), timestamp, 10, "timestamp should be within ±10s")
+
+	// CubeMaster's CheckSign: sign("version.userID.timestamp.nonce.sgnMethod", secretKey).
+	toSign := version + "." + uid + "." + ts + "." + nonce + "." + sgnMethod
+	mac := hmac.New(sha1.New, []byte(secretKey))
+	mac.Write([]byte(toSign)) //nolint:errcheck
+	expectedSig := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+
+	assert.Equal(t, expectedSig, signature, "signature must match an independent re-implementation of CubeMaster's CheckSign")
 }

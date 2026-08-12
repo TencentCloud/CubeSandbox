@@ -27,12 +27,6 @@ func TestIsolatedNodesTotalIncrements(t *testing.T) {
 	assert.Equal(t, before+1, after)
 }
 
-func TestPausedSandboxesGaugeSetAndGet(t *testing.T) {
-	PausedSandboxesGauge.Set(5)
-	assert.Equal(t, float64(5), testutil.ToFloat64(PausedSandboxesGauge))
-	PausedSandboxesGauge.Set(0)
-}
-
 func TestCubeMasterAPIErrorsTotalIncrements(t *testing.T) {
 	before := testutil.ToFloat64(CubeMasterAPIErrorsTotal.WithLabelValues("PauseSandbox", "timeout"))
 	CubeMasterAPIErrorsTotal.WithLabelValues("PauseSandbox", "timeout").Inc()
@@ -75,7 +69,6 @@ func TestAllMetricsAreRegistered(t *testing.T) {
 		"eviction_webhook_cubemaster_api_latency_seconds",
 		"eviction_webhook_cubemaster_errors_total",
 		"eviction_webhook_isolated_nodes_total",
-		"eviction_webhook_paused_sandboxes",
 		"eviction_webhook_request_latency_seconds",
 	}
 	for _, name := range expected {
