@@ -83,7 +83,11 @@ cd "$REPO_ROOT"
 WITH_TESTS=(
 	"cubeops|Go|0|make cubeops-test"
 	"cubemaster|Go|0|make builder-run BUILDER_CMD='cd /workspace/CubeMaster && go mod download && make proto && if [ -f test/conf.yaml ]; then export CUBE_MASTER_CONFIG_PATH=/workspace/CubeMaster/test/conf.yaml; fi && CI=true go test -short -timeout=20m ./api/... ./pkg/...'"
-	"network-agent|Go|0|make network-agent-test"
+	# cubelet-network: the standalone network-agent module was removed in #1285 and
+	# folded into Cubelet/network/runtime (NetworkController). Its tests moved there
+	# and need the generated CubeNet/cubevs code but no cubecow/CGO, so build cubevs
+	# then run just the runtime package rather than the whole Cubelet suite.
+	"cubelet-network|Go|0|make builder-run BUILDER_CMD='cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && go mod download && go test ./network/runtime/...'"
 	"cubecow|Go+CGO|0|make cubecow-test-native"
 	"cube-lifecycle-manager|Go|0|make builder-run BUILDER_CMD='cd /workspace/cube-lifecycle-manager && go mod download && go test ./...'"
 	"cube-api|Rust|0|make cube-api-test"
