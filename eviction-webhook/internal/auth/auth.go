@@ -49,6 +49,22 @@ func Headers(userID, secretKey string) (http.Header, error) {
 	return h, nil
 }
 
+// Attach signs the request with the six HMAC headers from Headers and sets
+// them directly on req. Both the reporter and the cubemaster client use this
+// to avoid re-implementing the same header-copy loop.
+func Attach(req *http.Request, userID, secretKey string) error {
+	h, err := Headers(userID, secretKey)
+	if err != nil {
+		return fmt.Errorf("build auth headers: %w", err)
+	}
+	for k, vs := range h {
+		for _, v := range vs {
+			req.Header.Set(k, v)
+		}
+	}
+	return nil
+}
+
 func generateNonce() (string, error) {
 	var buf [8]byte
 	if _, err := rand.Read(buf[:]); err != nil {

@@ -306,7 +306,7 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte) ([]by
 	}
 
 	if c.authEnabled {
-		if err := c.setAuthHeaders(req); err != nil {
+		if err := auth.Attach(req, c.userID, c.secretKey); err != nil {
 			return nil, fmt.Errorf("auth headers: %w", err)
 		}
 	}
@@ -332,19 +332,4 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte) ([]by
 
 	metrics.CubeMasterAPILatencySeconds.WithLabelValues(method, "200").Observe(elapsed)
 	return respBody, nil
-}
-
-// setAuthHeaders attaches the six HMAC-SHA1 headers that CubeMaster's auth
-// middleware verifies.
-func (c *Client) setAuthHeaders(req *http.Request) error {
-	authHdrs, err := auth.Headers(c.userID, c.secretKey)
-	if err != nil {
-		return fmt.Errorf("build auth headers: %w", err)
-	}
-	for k, vs := range authHdrs {
-		for _, v := range vs {
-			req.Header.Set(k, v)
-		}
-	}
-	return nil
 }

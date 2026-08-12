@@ -21,8 +21,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tencentcloud/CubeSandbox/eviction-webhook/internal/admission"
+	"github.com/tencentcloud/CubeSandbox/eviction-webhook/internal/podinformer"
 	"github.com/tencentcloud/CubeSandbox/eviction-webhook/internal/store"
-	"github.com/tencentcloud/CubeSandbox/eviction-webhook/pkg/types"
 )
 
 // TestIntegration_KubeletEvictionIsIntercepted verifies the core eviction interception flow.
@@ -143,31 +143,11 @@ func TestIntegration_AdminEvictionIsAllowed(t *testing.T) {
 	assert.True(t, responseReview.Response.Allowed, "admin eviction should be allowed")
 }
 
-// MockPodGetter implements admission.PodGetter for testing.
-type MockPodGetter struct {
-	pods map[string]*corev1.Pod
+// NewMockPodGetter creates a podinformer.Fake with test data.
+func NewMockPodGetter(pods map[string]*corev1.Pod) *podinformer.Fake {
+	return &podinformer.Fake{Pods: pods}
 }
 
-// NewMockPodGetter creates a new MockPodGetter with test data.
-func NewMockPodGetter(pods map[string]*corev1.Pod) *MockPodGetter {
-	return &MockPodGetter{pods: pods}
-}
-
-// Get returns a pod by namespace/name key.
-func (m *MockPodGetter) Get(namespace, name string) (*corev1.Pod, bool) {
-	key := namespace + "/" + name
-	pod, ok := m.pods[key]
-	return pod, ok
-}
-
-// stubRecoveryManager implements admission.RecoveryManager for testing.
-type stubRecoveryManager struct {
-	calls []*types.EvictionEvent
-}
-
-func (s *stubRecoveryManager) OnEviction(event *types.EvictionEvent) {
-	s.calls = append(s.calls, event)
-}
 
 // TestIntegration_EvictionAuditLogPersisted verifies that the audit store persists the event.
 //
@@ -253,9 +233,9 @@ func TestIntegration_EvictionAuditLogPersisted(t *testing.T) {
 // is called with the correct event when a kubelet eviction is intercepted.
 //
 // Scenario: recovery manager is notified on kubelet eviction
-// Given: A handler wired to a stubRecoveryManager
+// Given: A handler wired to an admission.FakeRecoveryManager
 // When: kubelet sends an eviction request from worker-99
-// Then: stubRecoveryManager.OnEviction is called exactly once with NodeName == "worker-99"
+// Then: FakeRecoveryManager.OnEviction is called exactly once with NodeName == "worker-99"
 func TestIntegration_RecoveryManagerReceivesEvictionEvent(t *testing.T) {
 	// Given: audit store (required by New)
 	auditPath := t.TempDir() + "/audit.ndjson"
@@ -275,7 +255,7 @@ func TestIntegration_RecoveryManagerReceivesEvictionEvent(t *testing.T) {
 		},
 	})
 
-	stub := &stubRecoveryManager{}
+	stub := &admission.FakeRecoveryManager{}
 	handler := admission.NewWithRecovery(podGetter, auditStore, nil, stub)
 
 	review := admissionv1.AdmissionReview{
@@ -306,8 +286,8 @@ func TestIntegration_RecoveryManagerReceivesEvictionEvent(t *testing.T) {
 	require.NotNil(t, responseReview.Response)
 	assert.False(t, responseReview.Response.Allowed, "kubelet eviction should be denied")
 
-	require.Len(t, stub.calls, 1, "OnEviction must be called exactly once")
-	assert.Equal(t, "worker-99", stub.calls[0].NodeName, "NodeName must equal the kubelet node identity")
+	require.Len(t, stub.Events, 1, "OnEviction must be called exactly once")
+	assert.Equal(t, "worker-99", stub.Events[0].NodeName, "NodeName must equal the kubelet node identity")
 }
 
 // TestIntegration_MultipleEvictionsDenied verifies that multiple independent eviction

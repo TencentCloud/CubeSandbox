@@ -7,6 +7,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha1"
 	"encoding/base64"
+	"net/http"
 	"strconv"
 	"testing"
 	"time"
@@ -175,4 +176,18 @@ func TestHeadersSigningMatchesCubeMaster(t *testing.T) {
 	expectedSig := base64.StdEncoding.EncodeToString(mac.Sum(nil))
 
 	assert.Equal(t, expectedSig, signature, "signature must match an independent re-implementation of CubeMaster's CheckSign")
+}
+
+// TestAttachSetsHeadersOnRequest verifies that Attach copies all six Headers
+// onto the given request (the shared helper both reporter and cubemaster use
+// instead of each re-implementing the same header-copy loop).
+func TestAttachSetsHeadersOnRequest(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "http://example.invalid", nil)
+	require.NoError(t, err)
+
+	err = Attach(req, testUserID, testSecretKey)
+	require.NoError(t, err)
+
+	assert.Equal(t, testUserID, req.Header.Get("Cube_user_id"))
+	assert.NotEmpty(t, req.Header.Get("Cube_signature"))
 }

@@ -125,14 +125,8 @@ func (r *Reporter) send(ctx context.Context, body []byte) error {
 	req.Header.Set("Content-Type", "application/json")
 
 	if r.authEnabled {
-		authHdrs, err := auth.Headers(r.userID, r.secretKey)
-		if err != nil {
+		if err := auth.Attach(req, r.userID, r.secretKey); err != nil {
 			return fmt.Errorf("build auth headers: %w", err)
-		}
-		for k, vs := range authHdrs {
-			for _, v := range vs {
-				req.Header.Set(k, v)
-			}
 		}
 	}
 

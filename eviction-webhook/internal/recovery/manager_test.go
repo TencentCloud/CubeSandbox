@@ -230,6 +230,11 @@ func TestOnPressureReliefResumesAndUncordons(t *testing.T) {
 	assert.Equal(t, "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6", mock.resumed[0])
 	require.Len(t, mock.unisolated, 1)
 	assert.Equal(t, "worker-02", mock.unisolated[0])
+
+	// After relief, internal state must be cleared.
+	for _, n := range mgr.IsolatedNodes() {
+		assert.NotEqual(t, "worker-02", n, "worker-02 should be removed from isolated nodes after relief")
+	}
 }
 
 func TestOnPressureReliefNoopWhenNothingRecorded(t *testing.T) {
@@ -243,40 +248,6 @@ func TestOnPressureReliefNoopWhenNothingRecorded(t *testing.T) {
 
 	assert.Empty(t, mock.unisolated, "expected no UnisolateNode calls for unknown node")
 	assert.Empty(t, mock.resumed, "expected no ResumeSandbox calls for unknown node")
-}
-
-func TestOnPressureReliefClearsState(t *testing.T) {
-	mock := &mockCubeMaster{
-		listResult: []cubemaster.SandboxBrief{
-			{SandboxID: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"},
-		},
-	}
-	mgr := newTestManager(mock)
-
-	mgr.OnEviction(&types.EvictionEvent{
-		EventID:      "uid-state",
-		PodName:      "sandbox-pod-state",
-		NodeName:     "worker-03",
-		InstanceType: "cubebox",
-	})
-	eventually(t, func() bool {
-		mock.mu.Lock()
-		defer mock.mu.Unlock()
-		return len(mock.paused) == 1
-	})
-
-	mgr.OnPressureRelief("worker-03")
-	eventually(t, func() bool {
-		mock.mu.Lock()
-		defer mock.mu.Unlock()
-		return len(mock.resumed) == 1 && len(mock.unisolated) == 1
-	})
-
-	// After relief, internal state must be cleared.
-	nodes := mgr.IsolatedNodes()
-	for _, n := range nodes {
-		assert.NotEqual(t, "worker-03", n, "worker-03 should be removed from isolated nodes after relief")
-	}
 }
 
 func TestOnPressureReliefKeepsStateOnResumeFailure(t *testing.T) {
@@ -989,12 +960,11 @@ func TestScheduleAPIEvictionReliefWithNoPressureChecker(t *testing.T) {
 	})
 }
 
-// TestScheduleAPIEvictionReliefAlreadyRelieved exercises the pressure-checker
-// path of the relief flow. We cannot wait 5 minutes for the real goroutine
-// spawned by scheduleAPIEvictionRelief, so we call OnPressureRelief directly
-// (which uses the same checker) to verify that a checker returning (false, nil)
-// causes resumed+unisolated to be called.
-func TestScheduleAPIEvictionReliefAlreadyRelieved(t *testing.T) {
+// TestOnPressureReliefResumesWhenCheckerReportsClear exercises the
+// pressure-checker branch of OnPressureRelief where the checker itself
+// reports pressure has cleared (false, nil): resumed+unisolated must be
+// called, unlike the "still pressured" and "checker error" branches.
+func TestOnPressureReliefResumesWhenCheckerReportsClear(t *testing.T) {
 	id := "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
 	var checkerCalled atomic.Int32
 
@@ -1018,11 +988,6 @@ func TestScheduleAPIEvictionReliefAlreadyRelieved(t *testing.T) {
 		return false, nil // pressure already gone
 	})
 
-	// Kick off the background goroutine (it will sleep 5 min then call OnPressureRelief).
-	mgr.scheduleAPIEvictionRelief("node-x")
-
-	// Invoke OnPressureRelief directly to exercise the identical code path
-	// without waiting for the 5-minute timer.
 	mgr.OnPressureRelief("node-x")
 
 	eventually(t, func() bool {

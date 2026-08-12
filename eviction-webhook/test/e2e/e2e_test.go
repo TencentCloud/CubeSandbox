@@ -25,6 +25,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/tencentcloud/CubeSandbox/eviction-webhook/internal/admission"
+	"github.com/tencentcloud/CubeSandbox/eviction-webhook/internal/podinformer"
 	"github.com/tencentcloud/CubeSandbox/eviction-webhook/internal/reporter"
 	"github.com/tencentcloud/CubeSandbox/eviction-webhook/internal/store"
 	"github.com/tencentcloud/CubeSandbox/eviction-webhook/pkg/types"
@@ -55,7 +56,7 @@ func TestE2EFullFlow(t *testing.T) {
 	rep := reporter.New(cubeSrv.URL, "e2e-user", "e2e-secret", false, reporter.WithRetry(1, 10*time.Millisecond))
 
 	// ── 4. Pod getter with predefined test data ──
-	podGetter := &fakePodGetter{pods: map[string]*corev1.Pod{
+	podGetter := &podinformer.Fake{Pods: map[string]*corev1.Pod{
 		"cube-system/sandbox-e2e-001": {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "sandbox-e2e-001",
@@ -188,7 +189,7 @@ func TestE2EEvictionAlwaysDenied(t *testing.T) {
 
 			var pg admission.PodGetter
 			if tc.podInCache {
-				pg = &fakePodGetter{pods: map[string]*corev1.Pod{
+				pg = &podinformer.Fake{Pods: map[string]*corev1.Pod{
 					"cube-system/sandbox-e2e-fo": {ObjectMeta: metav1.ObjectMeta{
 						Name:      "sandbox-e2e-fo",
 						Namespace: "cube-system",
@@ -196,7 +197,7 @@ func TestE2EEvictionAlwaysDenied(t *testing.T) {
 					}},
 				}}
 			} else {
-				pg = &fakePodGetter{pods: map[string]*corev1.Pod{}}
+				pg = &podinformer.Fake{Pods: map[string]*corev1.Pod{}}
 			}
 
 			handler := admission.New(pg, auditStore, rep)
@@ -230,7 +231,7 @@ func TestE2EEvictionAlwaysDenied(t *testing.T) {
 
 // TestE2EHealthz verifies the health endpoint.
 func TestE2EHealthz(t *testing.T) {
-	handler := admission.New(&fakePodGetter{}, nil, &nilReporter{})
+	handler := admission.New(&podinformer.Fake{}, nil, &nilReporter{})
 	tlsSrv := startTLSWebhookServer(t, handler)
 	defer tlsSrv.Close()
 
@@ -344,15 +345,6 @@ func httpsGet(url string) (*http.Response, error) {
 	}
 	client := &http.Client{Transport: tr, Timeout: 5 * time.Second}
 	return client.Get(url)
-}
-
-type fakePodGetter struct {
-	pods map[string]*corev1.Pod
-}
-
-func (f *fakePodGetter) Get(namespace, name string) (*corev1.Pod, bool) {
-	pod, ok := f.pods[namespace+"/"+name]
-	return pod, ok
 }
 
 type nilReporter struct{}

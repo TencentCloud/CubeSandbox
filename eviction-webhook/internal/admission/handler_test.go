@@ -23,25 +23,17 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"go.uber.org/zap"
 
+	"github.com/tencentcloud/CubeSandbox/eviction-webhook/internal/podinformer"
 	"github.com/tencentcloud/CubeSandbox/eviction-webhook/internal/store"
 	"github.com/tencentcloud/CubeSandbox/eviction-webhook/pkg/types"
 )
 
 // ── Test doubles ────────────────────────────────────────────────────────────
 
-type mockPodGetter struct {
-	pods map[string]*corev1.Pod
-}
-
-func (m *mockPodGetter) Get(namespace, name string) (*corev1.Pod, bool) {
-	pod, ok := m.pods[namespace+"/"+name]
-	return pod, ok
-}
-
-func newMockPodGetter(pods ...*corev1.Pod) *mockPodGetter {
-	m := &mockPodGetter{pods: make(map[string]*corev1.Pod)}
+func newMockPodGetter(pods ...*corev1.Pod) *podinformer.Fake {
+	m := &podinformer.Fake{Pods: make(map[string]*corev1.Pod)}
 	for _, p := range pods {
-		m.pods[p.Namespace+"/"+p.Name] = p
+		m.Pods[p.Namespace+"/"+p.Name] = p
 	}
 	return m
 }
@@ -55,14 +47,6 @@ func (s *stubReporter) Report(event *types.EvictionEvent) <-chan struct{} {
 	ch := make(chan struct{})
 	close(ch)
 	return ch
-}
-
-type stubRecoveryManager struct {
-	events []*types.EvictionEvent
-}
-
-func (s *stubRecoveryManager) OnEviction(event *types.EvictionEvent) {
-	s.events = append(s.events, event)
 }
 
 // ── Helper ───────────────────────────────────────────────────────────────────
@@ -152,13 +136,13 @@ func TestHandleTriggersRecoveryOnlyForNodeUser(t *testing.T) {
 	auditStore, _ := store.New(filepath.Join(t.TempDir(), "audit.ndjson"))
 	defer auditStore.Close()
 
-	recoveryMgr := &stubRecoveryManager{}
+	recoveryMgr := &FakeRecoveryManager{}
 	h := NewWithRecovery(newMockPodGetter(), auditStore, nil, recoveryMgr)
 
 	// kubelet eviction → denied, recovery triggered
 	resp := h.handle(kubeletRequest("uid-node", "sandbox-node", "cube-system", "worker-01"))
 	assert.False(t, resp.Allowed)
-	assert.Len(t, recoveryMgr.events, 1)
+	assert.Len(t, recoveryMgr.Events, 1)
 
 	// admin eviction → allowed, recovery NOT triggered
 	resp = h.handle(&admissionv1.AdmissionRequest{
@@ -168,7 +152,7 @@ func TestHandleTriggersRecoveryOnlyForNodeUser(t *testing.T) {
 		UserInfo:  authenticationv1.UserInfo{Username: "admin@example.com"},
 	})
 	assert.True(t, resp.Allowed)
-	assert.Len(t, recoveryMgr.events, 1, "admin eviction must not trigger recovery")
+	assert.Len(t, recoveryMgr.Events, 1, "admin eviction must not trigger recovery")
 }
 
 func TestHandleKubeletEvictionRequiresMemoryPressure(t *testing.T) {
@@ -186,7 +170,7 @@ func TestHandleKubeletEvictionRequiresMemoryPressure(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			recoveryMgr := &stubRecoveryManager{}
+			recoveryMgr := &FakeRecoveryManager{}
 			h := NewWithRecovery(newMockPodGetter(), nil, nil, recoveryMgr)
 			h.SetPressureChecker(func(context.Context, string) (bool, error) {
 				return tc.underPressure, tc.checkErr
@@ -194,7 +178,7 @@ func TestHandleKubeletEvictionRequiresMemoryPressure(t *testing.T) {
 
 			resp := h.handle(kubeletRequest("uid-"+tc.name, "sandbox-"+tc.name, "cube-system", "worker-01"))
 			assert.Equal(t, tc.wantAllowed, resp.Allowed)
-			assert.Len(t, recoveryMgr.events, tc.wantRecovery)
+			assert.Len(t, recoveryMgr.Events, tc.wantRecovery)
 		})
 	}
 }
