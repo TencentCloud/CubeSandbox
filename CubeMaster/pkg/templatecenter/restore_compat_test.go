@@ -5,6 +5,8 @@
 package templatecenter
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
@@ -280,5 +282,195 @@ func TestKVMVersionString(t *testing.T) {
 	}
 	if kvmVersionString(12) != "12" {
 		t.Errorf("12 must map to \"12\"")
+	}
+}
+
+// stubCandidates installs a fake QueryHostFactCandidates that emulates the real
+// DB seam: when matchAll is false it returns only nodes whose required equality
+// keys (cpuid_hash, host_kernel_release) equal the requested keys — mirroring
+// the indexed SELECT. Unhealthy / no-facts nodes are assumed already excluded by
+// the query, so pass only nodes that would survive the join. The taint gate is
+// deliberately NOT emulated here: it must be applied in-app by listCompatibleNodes.
+func stubCandidates(t *testing.T, all []*nodemeta.CandidateNode, err error) {
+	t.Helper()
+	orig := queryCandidatesFn
+	t.Cleanup(func() { queryCandidatesFn = orig })
+	queryCandidatesFn = func(_ context.Context, cpuidHash, kernelRelease string, matchAll bool) ([]*nodemeta.CandidateNode, error) {
+		if err != nil {
+			return nil, err
+		}
+		if matchAll {
+			return all, nil
+		}
+		out := make([]*nodemeta.CandidateNode, 0, len(all))
+		for _, c := range all {
+			if c.HostFacts != nil && c.HostFacts.CPUIDHash == cpuidHash && c.HostFacts.HostKernelRelease == kernelRelease {
+				out = append(out, c)
+			}
+		}
+		return out, nil
+	}
+}
+
+func TestListCompatibleNodesForFactors_FiltersByDefault(t *testing.T) {
+	match := intelFacts()
+	mismatch := intelFacts()
+	mismatch.CPUIDHash = "sha256:other"
+	// Tainted node shares the required keys (so the SQL predicate returns it) but
+	// must still be rejected in-app by the kvm_module_taint gate.
+	tainted := intelFacts()
+	tainted.KVMModuleTaint = "E"
+
+	stubCandidates(t, []*nodemeta.CandidateNode{
+		{NodeID: "ok", HostIP: "10.0.0.1", HostFacts: match},
+		{NodeID: "cpuid-mismatch", HostFacts: mismatch},
+		{NodeID: "tainted", HostFacts: tainted},
+	}, nil)
+
+	res, err := ListCompatibleNodesForFactors(context.Background(), intelFacts(), false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res.Nodes) != 1 {
+		t.Fatalf("want 1 matching node, got %d: %+v", len(res.Nodes), res.Nodes)
+	}
+	if res.Nodes[0].NodeID != "ok" || !res.Nodes[0].Compatible || res.Nodes[0].NodeIP != "10.0.0.1" {
+		t.Errorf("unexpected node: %+v", res.Nodes[0])
+	}
+}
+
+// Bare-factor results must carry the partial-policy warning: the caller cannot
+// supply the origin kvm_module_taint, so the taint gate is not evaluated and the
+// verdict is a subset of the by-snapshot policy. By-snapshot results must not.
+func TestListCompatibleNodesForFactors_CarriesPartialPolicyWarning(t *testing.T) {
+	stubCandidates(t, []*nodemeta.CandidateNode{
+		{NodeID: "ok", HostFacts: intelFacts()},
+	}, nil)
+
+	res, err := ListCompatibleNodesForFactors(context.Background(), intelFacts(), false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Warning != RestoreCompatWarnBareFactorPartialPolicy {
+		t.Fatalf("bare-factor result must carry the partial-policy warning, got %q", res.Warning)
+	}
+}
+
+func TestListCompatibleNodesForFactors_IncludeAllReturnsRejected(t *testing.T) {
+	mismatch := intelFacts()
+	mismatch.CPUIDHash = "sha256:other"
+	stubCandidates(t, []*nodemeta.CandidateNode{
+		{NodeID: "ok", HostFacts: intelFacts()},
+		{NodeID: "bad", HostFacts: mismatch},
+	}, nil)
+
+	res, err := ListCompatibleNodesForFactors(context.Background(), intelFacts(), true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res.Nodes) != 2 {
+		t.Fatalf("include_all must return every evaluated node, got %d", len(res.Nodes))
+	}
+	byID := map[string]CompatibleNode{}
+	for _, n := range res.Nodes {
+		byID[n.NodeID] = n
+	}
+	if !byID["ok"].Compatible {
+		t.Errorf("ok node should be compatible")
+	}
+	if byID["bad"].Compatible {
+		t.Errorf("bad node should be incompatible")
+	}
+	if len(byID["bad"].Dimensions) == 0 {
+		t.Errorf("rejected node must carry dimensions for diagnosis")
+	}
+}
+
+// A node the SQL matched on the two required keys must still be rejected in-app
+// when it carries a suspicious kvm_module_taint, so the aggregate verdict never
+// drifts from single-node EvaluateSnapshotRestoreCompat.
+func TestListCompatibleNodesForFactors_TaintGateAppliedInApp(t *testing.T) {
+	tainted := intelFacts()
+	tainted.KVMModuleTaint = "O"
+	stubCandidates(t, []*nodemeta.CandidateNode{
+		{NodeID: "tainted", HostFacts: tainted},
+	}, nil)
+
+	// Default mode: the tainted node shares the required keys but is filtered out.
+	res, err := ListCompatibleNodesForFactors(context.Background(), intelFacts(), false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res.Nodes) != 0 {
+		t.Fatalf("tainted node must be rejected in-app, got %+v", res.Nodes)
+	}
+
+	// include_all mode: returned but reported incompatible with the taint dim.
+	res, err = ListCompatibleNodesForFactors(context.Background(), intelFacts(), true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res.Nodes) != 1 || res.Nodes[0].Compatible {
+		t.Fatalf("tainted node must be reported incompatible: %+v", res.Nodes)
+	}
+	var sawTaint bool
+	for _, d := range res.Nodes[0].Dimensions {
+		if d.Name == "kvm_module_taint" && d.Required && !d.Match {
+			sawTaint = true
+		}
+	}
+	if !sawTaint {
+		t.Errorf("expected a failing required kvm_module_taint dimension: %+v", res.Nodes[0].Dimensions)
+	}
+}
+
+// Rejected nodes must carry a human-readable Reason summarising the verdict so a
+// caller does not have to re-derive it from the dimensions; compatible nodes must
+// leave it empty. A required equality mismatch names the dimension; the taint gate
+// reads as a gate with the offending taint letters.
+func TestListCompatibleNodesForFactors_PopulatesReason(t *testing.T) {
+	mismatch := intelFacts()
+	mismatch.CPUIDHash = "sha256:other"
+	tainted := intelFacts()
+	tainted.KVMModuleTaint = "O"
+	stubCandidates(t, []*nodemeta.CandidateNode{
+		{NodeID: "ok", HostFacts: intelFacts()},
+		{NodeID: "cpuid-mismatch", HostFacts: mismatch},
+		{NodeID: "tainted", HostFacts: tainted},
+	}, nil)
+
+	res, err := ListCompatibleNodesForFactors(context.Background(), intelFacts(), true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	byID := map[string]CompatibleNode{}
+	for _, n := range res.Nodes {
+		byID[n.NodeID] = n
+	}
+	if r := byID["ok"].Reason; r != "" {
+		t.Errorf("compatible node must have empty reason, got %q", r)
+	}
+	if r := byID["cpuid-mismatch"].Reason; r != "required dimension mismatch: cpuid_hash" {
+		t.Errorf("cpuid mismatch reason = %q", r)
+	}
+	if r := byID["tainted"].Reason; r != "kvm_module_taint gate: target module tainted (O)" {
+		t.Errorf("taint reason = %q", r)
+	}
+}
+
+func TestListCompatibleNodesForFactors_NoFactors(t *testing.T) {
+	if _, err := ListCompatibleNodesForFactors(context.Background(), nil, false); !errors.Is(err, ErrRestoreCompatNoFactors) {
+		t.Errorf("nil factors err = %v, want ErrRestoreCompatNoFactors", err)
+	}
+	if _, err := ListCompatibleNodesForFactors(context.Background(), &nodemeta.HostFacts{}, false); !errors.Is(err, ErrRestoreCompatNoFactors) {
+		t.Errorf("zero factors err = %v, want ErrRestoreCompatNoFactors", err)
+	}
+}
+
+func TestListCompatibleNodesForFactors_ListError(t *testing.T) {
+	wantErr := errors.New("registry down")
+	stubCandidates(t, nil, wantErr)
+	if _, err := ListCompatibleNodesForFactors(context.Background(), intelFacts(), false); !errors.Is(err, wantErr) {
+		t.Errorf("err = %v, want %v", err, wantErr)
 	}
 }

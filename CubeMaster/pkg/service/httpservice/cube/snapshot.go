@@ -17,6 +17,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -34,6 +35,9 @@ var (
 	getSnapshotOperationFn = templatecenter.GetSnapshotOperation
 	resolveSnapshotHostFn  = resolveSandboxHost
 	restoreCompatFn        = templatecenter.EvaluateSnapshotRestoreCompat
+
+	listCompatibleNodesForSnapshotFn = templatecenter.ListCompatibleNodesForSnapshot
+	listCompatibleNodesForFactorsFn  = templatecenter.ListCompatibleNodesForFactors
 )
 
 const snapshotResponseWriteDeadlineBuffer = 30 * time.Second
@@ -93,6 +97,15 @@ type restoreCompatResponse struct {
 	TargetNode string                                  `json:"target_node,omitempty"`
 	Reason     string                                  `json:"reason,omitempty"`
 	Dimensions []templatecenter.RestoreCompatDimension `json:"dimensions,omitempty"`
+}
+
+type compatibleNodesResponse struct {
+	*types.Res
+	SnapshotID string                          `json:"snapshot_id,omitempty"`
+	OriginNode string                          `json:"origin_node,omitempty"`
+	Reason     string                          `json:"reason,omitempty"`
+	Warning    string                          `json:"warning,omitempty"`
+	Nodes      []templatecenter.CompatibleNode `json:"nodes"`
 }
 
 type snapshotResource struct {
@@ -190,6 +203,126 @@ func restoreCompat(r *http.Request, rt *CubeLog.RequestTrace, snapshotID string)
 		Reason:     result.Reason,
 		Dimensions: result.Dimensions,
 	}
+}
+
+func compatibleNodesGinHandler(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	common.WriteAPI(c, compatibleNodes(c.Request, rt, c.Param("snapshot_id")))
+}
+
+func compatibleNodesByFactorsGinHandler(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	common.WriteAPI(c, compatibleNodesByFactors(c.Request, rt))
+}
+
+// compatibleNodesByFactors fronts GET /cube/snapshot/compatible-nodes-by-factors
+// — the snapshot-less form of the compatible-nodes lookup. The caller supplies
+// the required host facts (cpuid_hash + host_kernel_release) directly, so there
+// is no snapshot_id segment to pass. See compatibleNodes for the shared
+// by-factor judgment.
+func compatibleNodesByFactors(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
+	requestID := requestIDFromQuery(r)
+	query := r.URL.Query()
+	includeAll := strings.EqualFold(query.Get("include_all"), "true") || query.Get("include_all") == "1"
+	cpuidHash := strings.TrimSpace(query.Get("cpuid_hash"))
+	kernelRelease := strings.TrimSpace(query.Get("host_kernel_release"))
+	result, resp := listCompatibleNodesByFactors(r, rt, requestID, cpuidHash, kernelRelease, includeAll)
+	if resp != nil {
+		return resp
+	}
+	return compatibleNodesSuccess(rt, requestID, result)
+}
+
+// listCompatibleNodesByFactors runs the bare-factor judgment shared by both the
+// dedicated route and the legacy query-param mode on /compatible-nodes. It
+// returns either a result or a ready-to-send error response (exactly one is
+// non-nil). Both required dimensions must be supplied together: with only one,
+// the missing required dimension fails closed against every candidate and the
+// caller gets a silently-empty list, so the under-specified query is rejected.
+func listCompatibleNodesByFactors(r *http.Request, rt *CubeLog.RequestTrace, requestID, cpuidHash, kernelRelease string, includeAll bool) (*templatecenter.CompatibleNodesResult, *compatibleNodesResponse) {
+	if cpuidHash == "" || kernelRelease == "" {
+		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
+		return nil, &compatibleNodesResponse{
+			Res: &types.Res{RequestID: requestID, Ret: &types.Ret{
+				RetCode: int(errorcode.ErrorCode_MasterParamsError),
+				RetMsg:  "bare-factor mode requires both cpuid_hash and host_kernel_release",
+			}},
+		}
+	}
+	factors := &nodemeta.HostFacts{
+		CPUIDHash:         cpuidHash,
+		HostKernelRelease: kernelRelease,
+	}
+	result, err := listCompatibleNodesForFactorsFn(r.Context(), factors, includeAll)
+	if err != nil {
+		return nil, compatibleNodesErrorResponse(rt, requestID, err)
+	}
+	return result, nil
+}
+
+// compatibleNodesErrorResponse maps a listing error to a response.
+func compatibleNodesErrorResponse(rt *CubeLog.RequestTrace, requestID string, err error) *compatibleNodesResponse {
+	code := snapshotErrorCode(err)
+	if errors.Is(err, templatecenter.ErrRestoreCompatNoFactors) {
+		code = int(errorcode.ErrorCode_MasterParamsError)
+	}
+	rt.RetCode = int64(code)
+	return &compatibleNodesResponse{
+		Res: &types.Res{RequestID: requestID, Ret: &types.Ret{RetCode: code, RetMsg: err.Error()}},
+	}
+}
+
+// compatibleNodesSuccess builds the success response from a result.
+func compatibleNodesSuccess(rt *CubeLog.RequestTrace, requestID string, result *templatecenter.CompatibleNodesResult) *compatibleNodesResponse {
+	rt.RequestID = requestID
+	rt.RetCode = int64(errorcode.ErrorCode_Success)
+	return &compatibleNodesResponse{
+		Res:        &types.Res{RequestID: requestID, Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success), RetMsg: "success"}},
+		SnapshotID: result.SnapshotID,
+		OriginNode: result.OriginNode,
+		Reason:     result.Reason,
+		Warning:    result.Warning,
+		Nodes:      result.Nodes,
+	}
+}
+
+// compatibleNodes fronts GET /cube/snapshot/{snapshot_id}/compatible-nodes and
+// returns every healthy node whose required host facts match, in a single call.
+// Two modes share the route: by-snapshot (default) uses the snapshot's frozen
+// origin facts; bare-factor (when cpuid_hash query is present) judges against
+// caller-supplied facts for snapshot-less diagnosis. The bare-factor mode is
+// also served without a dummy snapshot_id segment by the dedicated
+// /compatible-nodes-by-factors route (compatibleNodesByFactors). ?include_all=true
+// returns every evaluated node with its dimensions instead of only the matching ones.
+func compatibleNodes(r *http.Request, rt *CubeLog.RequestTrace, snapshotID string) interface{} {
+	requestID := requestIDFromQuery(r)
+	query := r.URL.Query()
+	includeAll := strings.EqualFold(query.Get("include_all"), "true") || query.Get("include_all") == "1"
+
+	cpuidHash := strings.TrimSpace(query.Get("cpuid_hash"))
+	kernelRelease := strings.TrimSpace(query.Get("host_kernel_release"))
+	if cpuidHash != "" || kernelRelease != "" {
+		result, resp := listCompatibleNodesByFactors(r, rt, requestID, cpuidHash, kernelRelease, includeAll)
+		if resp != nil {
+			return resp
+		}
+		return compatibleNodesSuccess(rt, requestID, result)
+	}
+
+	if strings.TrimSpace(snapshotID) == "" {
+		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
+		return &compatibleNodesResponse{
+			Res: &types.Res{RequestID: requestID, Ret: &types.Ret{
+				RetCode: int(errorcode.ErrorCode_MasterParamsError),
+				RetMsg:  "snapshot_id or cpuid_hash is required",
+			}},
+		}
+	}
+	result, err := listCompatibleNodesForSnapshotFn(r.Context(), snapshotID, includeAll)
+	if err != nil {
+		return compatibleNodesErrorResponse(rt, requestID, err)
+	}
+	return compatibleNodesSuccess(rt, requestID, result)
 }
 
 func deleteSnapshotGinHandler(c *gin.Context) {

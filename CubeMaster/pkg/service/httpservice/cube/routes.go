@@ -45,8 +45,13 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	g.POST(SnapshotAction, createSnapshotGinHandler)
 	g.GET(SnapshotAction, getSnapshotGinHandler)
 	g.GET(SnapshotStorageAction, handleSnapshotStorageAction)
+	// Bare-factor compatible-nodes: an explicit static route (ahead of the
+	// /snapshot/:snapshot_id param route) for snapshot-less diagnosis, so callers
+	// don't have to pass a dummy snapshot_id segment.
+	g.GET(SnapshotCompatibleNodesByFactorsAction, compatibleNodesByFactorsGinHandler)
 	g.GET(SnapshotAction+"/:snapshot_id", getSnapshotGinHandler)
 	g.GET(SnapshotAction+"/:snapshot_id/restore-compat", restoreCompatGinHandler)
+	g.GET(SnapshotAction+"/:snapshot_id/compatible-nodes", compatibleNodesGinHandler)
 	g.DELETE(SnapshotAction+"/:snapshot_id", deleteSnapshotGinHandler)
 	g.GET(OperationAction+"/:operation_id", handleSnapshotOperationAction)
 

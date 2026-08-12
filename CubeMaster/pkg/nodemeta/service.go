@@ -858,6 +858,70 @@ func GetPersistedNodeHostFacts(ctx context.Context, nodeID string) (*HostFacts, 
 	return facts, true
 }
 
+// CandidateNode is one healthy node's full host facts, returned by the
+// host-fact candidate query. HostFacts is decoded from host_facts_json so the
+// caller can apply the taint gate and build the per-node dimensions.
+type CandidateNode struct {
+	NodeID    string
+	HostIP    string
+	HostFacts *HostFacts
+}
+
+// QueryHostFactCandidates returns the healthy nodes to evaluate for restore
+// compatibility, pushing the two required (blocking) equality keys down to the
+// database so the common path is a single indexed SELECT instead of a full
+// in-memory scan + JSON decode of every node.
+//
+// It joins t_cube_node_registration against t_cube_node_status and keeps only
+// rows whose heartbeat is within the health timeout (the same freshness rule the
+// in-memory view applies), so a stale-heartbeat node is never offered as a
+// restore target.
+//
+// The two required keys are equality-filtered in SQL. Everything else — the
+// absolute kvm_module_taint gate and the informational dimensions — stays in
+// host_facts_json and is applied in-app by the caller, because the taint gate is
+// not an origin==target comparison and cannot be expressed as a column predicate.
+//
+// When matchAll is true the required-key predicate is dropped and every healthy
+// node with facts is returned, so a diagnostic caller (include_all) can see why
+// each node fails; the caller still runs the full judgment per node.
+//
+// ARM-safe: the required keys are cpuid_hash and host_kernel_release, both
+// populated on aarch64 (cpu_vendor/cpu_model are empty there and are never part
+// of the predicate).
+func QueryHostFactCandidates(ctx context.Context, requiredCPUIDHash, requiredKernelRelease string, matchAll bool) ([]*CandidateNode, error) {
+	cutoff := time.Now().Add(-healthTimeout()).Unix()
+	q := global.db.WithContext(ctx).
+		Table(constants.NodeMetaRegistrationTable+" AS reg").
+		Select("reg.node_id AS node_id, reg.host_ip AS host_ip, reg.host_facts_json AS host_facts_json").
+		Joins("JOIN "+constants.NodeMetaStatusTable+" AS st ON st.node_id = reg.node_id").
+		Where("st.healthy = ?", true).
+		Where("st.heartbeat_unix >= ?", cutoff).
+		Where("reg.host_facts_json <> ''")
+	if !matchAll {
+		q = q.Where("reg.cpuid_hash = ?", requiredCPUIDHash).
+			Where("reg.host_kernel_release = ?", requiredKernelRelease)
+	}
+	var rows []struct {
+		NodeID        string
+		HostIP        string
+		HostFactsJSON string
+	}
+	if err := q.Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]*CandidateNode, 0, len(rows))
+	for _, r := range rows {
+		facts := unmarshalHostFacts(r.HostFactsJSON)
+		if facts == nil {
+			continue
+		}
+		out = append(out, &CandidateNode{NodeID: r.NodeID, HostIP: r.HostIP, HostFacts: facts})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].NodeID < out[j].NodeID })
+	return out, nil
+}
+
 // fanOutResourceMetric is best-effort: write failures to Redis fall back
 // to in-process update so the receiving replica still schedules correctly,
 // and the next heartbeat (≤NodeStatusUpdateFrequency) reattempts the write.
