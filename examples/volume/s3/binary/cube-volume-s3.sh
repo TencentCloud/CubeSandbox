@@ -26,11 +26,12 @@
 #   BUCKET=my-bucket
 #   ENDPOINT=https://<your-s3-endpoint>   # required; see volume-s3.conf.example
 #   REGION=us-east-1                      # optional, default us-east-1
+#   S3FS_EXTRA_OPTS="-ouse_path_request_style"   # optional, appended to s3fs
 #
 # Path overrides (defaults are correct for a normal root-run deployment; these
 # exist so the plugin can be exercised without root, e.g. in CI):
 #   CUBE_S3_CONFIG       config file path
-#   CUBE_S3_PASSWD_FILE  s3fs credential file  (default /etc/cube/.passwd-s3fs-volume)
+#   CUBE_S3_PASSWD_FILE  s3fs credential file  (default /etc/cube/.passwd-s3fs-volume-<bucket>)
 #   CUBE_S3_LOCK_DIR     attach/detach locks   (default /run/cube-volume-s3)
 #
 # The FUSE mount path is not configured here: Cubelet passes it on attach via
@@ -67,9 +68,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${CUBE_S3_CONFIG:-${SCRIPT_DIR}/volume-s3.conf}"
 # Per-volume attach/detach lock directory.
 LOCK_DIR="${CUBE_S3_LOCK_DIR:-/run/cube-volume-s3}"
-# s3fs credential file written at attach. Override only if /etc/cube is not
-# writable on your nodes; s3fs requires it to be mode 600.
-PASSWD_FILE="${CUBE_S3_PASSWD_FILE:-/etc/cube/.passwd-s3fs-volume}"
 
 DEFAULT_REGION="us-east-1"
 
@@ -92,7 +90,11 @@ load_config() {
 
 # Write the s3fs credential file: BUCKET:AccessKeyId:SecretAccessKey (mode 600).
 # s3fs reads this file when mounting; we refresh it only when credentials change.
+# The path is per-bucket so several plugin instances (different driver names,
+# different buckets) on one node never race on a shared credential file.
+# Call after load_config — the filename derives from BUCKET.
 ensure_passwd_file() {
+    PASSWD_FILE="${CUBE_S3_PASSWD_FILE:-/etc/cube/.passwd-s3fs-volume-${BUCKET}}"
     mkdir -p "$(dirname "$PASSWD_FILE")"
     local content="${BUCKET}:${ACCESS_KEY_ID}:${SECRET_ACCESS_KEY}"
     if [[ "$(cat "$PASSWD_FILE" 2>/dev/null)" != "$content" ]]; then
@@ -167,10 +169,12 @@ s3_create_dir() {
     log "aws: create $(s3_subdir "$volume_id")/.keep"
     local out rc=0
     set +e
+    # --body /dev/null uploads a real zero-byte body; some S3-compatible
+    # gateways reject body-less zero-length PUTs.
     out="$(aws_run s3api put-object \
         --bucket "$BUCKET" \
         --key "$(s3_subdir "$volume_id")/.keep" \
-        --content-length 0 2>&1)"
+        --body /dev/null 2>&1)"
     rc=$?
     set -e
     if [[ "$rc" -ne 0 ]]; then
@@ -221,6 +225,15 @@ s3fs_mount_volume() {
 
     mkdir -p "$mnt"
     log "s3fs: mounting ${BUCKET}:/$(s3_subdir "$volume_id") -> ${mnt}"
+
+    # Optional extra s3fs options from volume-s3.conf, whitespace-separated,
+    # e.g. S3FS_EXTRA_OPTS="-ouse_path_request_style" for MinIO or for bucket
+    # names containing dots.
+    local extra_opts=()
+    if [[ -n "${S3FS_EXTRA_OPTS:-}" ]]; then
+        read -r -a extra_opts <<< "$S3FS_EXTRA_OPTS"
+    fi
+
     local out rc=0
     set +e
     # -o endpoint      : region used for SigV4 signing
@@ -233,7 +246,8 @@ s3fs_mount_volume() {
         "-oendpoint=${REGION}"          \
         "-opasswd_file=${PASSWD_FILE}"  \
         "-oallow_other"                 \
-        "-ononempty" 2>&1)"
+        "-ononempty"                    \
+        ${extra_opts[@]+"${extra_opts[@]}"} 2>&1)"
     rc=$?
     set -e
     # s3fs can exit 0 even when auth fails; require a real mountpoint.

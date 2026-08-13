@@ -145,6 +145,7 @@ Then edit `volume-s3.conf` on each node:
 | `BUCKET` | Bucket holding all volumes | yes |
 | `ENDPOINT` | S3-compatible endpoint URL (see [Choosing an endpoint](#choosing-an-endpoint)) | yes |
 | `REGION` | SigV4 signing region; default `us-east-1` | no |
+| `S3FS_EXTRA_OPTS` | Extra s3fs mount options, whitespace-separated (e.g. `-ouse_path_request_style` for MinIO) | no |
 
 The config must be root-owned and mode `600` — it holds a secret in plaintext and is `source`d by the plugin:
 
@@ -325,7 +326,7 @@ python3 verify_volume.py
 | `no plugin registered for driver "s3"` | Cubelet missing the same-name plugin, or not restarted |
 | Attach fails, `s3fs mount failed` | `ls /dev/fuse`; credentials and `ENDPOINT` in `volume-s3.conf`; run the manual attach in [§5](#5-restart-services-and-verify) to see the s3fs error |
 | `InvalidAccessKeyId` / `SignatureDoesNotMatch` | Key pair wrong, lacks bucket permission, or `REGION` doesn't match what the endpoint expects for SigV4 |
-| Bucket name contains dots | s3fs uses virtual-hosted-style addressing by default, which breaks TLS for dotted names. Use a bucket without dots, or add `-ouse_path_request_style` to the mount options (MinIO usually needs it too) |
+| Bucket name contains dots | s3fs uses virtual-hosted-style addressing by default, which breaks TLS for dotted names. Use a bucket without dots, or set `S3FS_EXTRA_OPTS=-ouse_path_request_style` in `volume-s3.conf` (MinIO usually needs it too) |
 | SDK write fails | `CUBE_PROXY_NODE_IP` unset; CubeAPI or template not READY |
 | `Volume.create` without driver not using s3 | The **first** entry in `volume_plugins` is the default driver |
 

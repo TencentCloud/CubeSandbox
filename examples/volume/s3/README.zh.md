@@ -145,6 +145,7 @@ sudo install -m 0600 volume-s3.conf.example \
 | `BUCKET` | 存放所有 Volume 的存储桶 | 是 |
 | `ENDPOINT` | S3 兼容 Endpoint 地址（见[选择 Endpoint](#选择-endpoint)） | 是 |
 | `REGION` | SigV4 签名地域，默认 `us-east-1` | 否 |
+| `S3FS_EXTRA_OPTS` | 额外的 s3fs 挂载选项，空格分隔（如 MinIO 需要的 `-ouse_path_request_style`） | 否 |
 
 该配置文件必须为 root 所有、权限 `600` —— 其中以明文保存密钥，且会被插件 `source` 执行：
 
@@ -325,7 +326,7 @@ python3 verify_volume.py
 | `no plugin registered for driver "s3"` | Cubelet 缺少同名插件，或未重启 |
 | attach 失败，提示 `s3fs mount failed` | 检查 `ls /dev/fuse`、`volume-s3.conf` 中的凭证与 `ENDPOINT`；执行 [§5](#5-重启服务并验证) 的手动 attach 查看 s3fs 报错 |
 | `InvalidAccessKeyId` / `SignatureDoesNotMatch` | 密钥对错误、缺少桶权限，或 `REGION` 与 Endpoint 期望的 SigV4 地域不匹配 |
-| 存储桶名包含点号 | s3fs 默认使用 virtual-hosted 风格寻址，带点号的桶名会导致 TLS 校验失败。请改用不含点号的桶名，或追加 `-ouse_path_request_style`（MinIO 通常也需要该选项） |
+| 存储桶名包含点号 | s3fs 默认使用 virtual-hosted 风格寻址，带点号的桶名会导致 TLS 校验失败。请改用不含点号的桶名，或在 `volume-s3.conf` 中设置 `S3FS_EXTRA_OPTS=-ouse_path_request_style`（MinIO 通常也需要该选项） |
 | SDK 写入失败 | 未设置 `CUBE_PROXY_NODE_IP`；CubeAPI 或模板未就绪 |
 | `Volume.create` 未指定 driver 时没有走 s3 | `volume_plugins` 的**第一项**才是默认 driver |
 
