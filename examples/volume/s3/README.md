@@ -2,7 +2,7 @@
 
 Use any S3-compatible object storage as persistent storage for CubeSandbox volumes: create a Volume → mount it in a sandbox → read/write → unmount → delete.
 
-The plugin is built entirely on standard tooling — **s3fs** for the mount and the **AWS CLI** for the control plane. Nothing in it is vendor-specific: the storage provider is just the `ENDPOINT` URL in the config file. Tested endpoints include AWS S3, [Tigris](https://www.tigrisdata.com/), MinIO, and Cloudflare R2.
+The plugin is built entirely on standard tooling — **s3fs** for the mount and the **AWS CLI** for the control plane. Nothing in it is vendor-specific: the storage provider is just the `ENDPOINT` URL in the config file, so it targets any S3-compatible endpoint — AWS S3, [Tigris](https://www.tigrisdata.com/), MinIO, Cloudflare R2, and the like.
 
 > **Version requirement:** Cube platform **≥ 0.6.0**, Python SDK **`cubesandbox` ≥ 0.6.0**.
 > Protocol and Hook details: [Volume Plugin framework](../../../docs/guide/volume-plugin.md).
@@ -312,6 +312,9 @@ export CUBE_API_URL=http://127.0.0.1:3000
 export CUBE_TEMPLATE_ID=tpl-xxxx
 export CUBE_PROXY_NODE_IP=127.0.0.1
 export CUBE_VOLUME_DRIVERS=s3
+# The script skips driver names cfs/s3/nfs by default (undeployed in the COS
+# demo environment); clear the skip list since s3 IS deployed here:
+export CUBE_VOLUME_SKIP_DRIVERS=
 
 python3 verify_volume.py
 ```

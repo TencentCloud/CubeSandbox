@@ -108,6 +108,7 @@ aws s3 ls "s3://my-cube-volumes/volumes/" --recursive --endpoint-url https://t3.
 
 ## 注意事项
 
+- **保持默认的 virtual-hosted 寻址方式。** 对 Tigris **不要**设置 `S3FS_EXTRA_OPTS=-ouse_path_request_style`：[2025-02-19 之后创建的存储桶仅支持 virtual-hosted 风格 URL](https://www.tigrisdata.com/blog/virtual-hosted-urls/)，而这正是 s3fs 的默认行为。（这与通常需要 path-style 的 MinIO 恰好相反。）
 - **凭证不会进入沙箱。** 凭证保存在 CubeMaster 与 Cubelet 上 root 所有、权限 `600` 的配置文件中，microVM 只看到一个已挂载的文件系统。请勿将其传入模板。
 - **对象存储不是 POSIX 文件系统。** s3fs 只是模拟：随机写会重写整个对象，`rename` 实际是「复制再删除」，且跨节点没有文件锁。用于工作区、数据集、模型权重和产物输出没有问题，但不适合数据库文件，也不适合多节点并发写入的构建缓存。
 - **RefCount 是按节点统计的。** 同一节点上的两个沙箱共用一个 s3fs 挂载；同一 Volume 在第二个节点上会独立挂载。

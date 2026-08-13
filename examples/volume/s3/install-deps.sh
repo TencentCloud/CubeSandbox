@@ -36,7 +36,7 @@ while [[ $# -gt 0 ]]; do
         --jq)         WANT_JQ=1;   shift ;;
         --all)        WANT_S3FS=1; WANT_AWS=1; WANT_JQ=1; shift ;;
         --check-only) CHECK_ONLY=1; shift ;;
-        -h|--help)    sed -n '4,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)    sed -n '4,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)            die "unknown argument: $1" ;;
     esac
 done

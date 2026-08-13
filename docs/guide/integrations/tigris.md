@@ -108,6 +108,7 @@ aws s3 ls "s3://my-cube-volumes/volumes/" --recursive --endpoint-url https://t3.
 
 ## Caveats
 
+- **Keep the default virtual-hosted addressing.** Do **not** set `S3FS_EXTRA_OPTS=-ouse_path_request_style` for Tigris: [buckets created after 2025-02-19 support virtual-hosted-style URLs only](https://www.tigrisdata.com/blog/virtual-hosted-urls/), which is s3fs's default. (This is the opposite of MinIO, which usually needs path-style.)
 - **Credentials stay outside the sandbox.** They live in a root-owned, mode-`600` config on CubeMaster and Cubelet; the microVM only ever sees a mounted filesystem. Do not pass them into templates.
 - **Object storage is not a POSIX filesystem.** s3fs emulates one. Random writes rewrite the whole object, `rename` is a copy-then-delete, and there is no locking between nodes. Fine for workspaces, datasets, model weights, and outputs — not for a database file or a build cache with concurrent writers on multiple nodes.
 - **RefCount is per node.** Two sandboxes on the same node share one s3fs mount; the same volume on a second node mounts separately.

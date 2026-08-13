@@ -2,7 +2,7 @@
 
 使用任意 S3 兼容对象存储作为 CubeSandbox Volume 的持久化存储：创建 Volume → 在沙箱中挂载 → 读写 → 卸载 → 删除。
 
-插件完全基于通用工具构建 —— 挂载使用 **s3fs**，控制面使用 **AWS CLI**。插件本身不绑定任何厂商：存储后端只是配置文件中的 `ENDPOINT` 地址。已验证的 Endpoint 包括 AWS S3、[Tigris](https://www.tigrisdata.com/)、MinIO 与 Cloudflare R2。
+插件完全基于通用工具构建 —— 挂载使用 **s3fs**，控制面使用 **AWS CLI**。插件本身不绑定任何厂商：存储后端只是配置文件中的 `ENDPOINT` 地址，因此可对接任意 S3 兼容 Endpoint —— 例如 AWS S3、[Tigris](https://www.tigrisdata.com/)、MinIO、Cloudflare R2 等。
 
 > **版本要求：** Cube 平台 **≥ 0.6.0**，Python SDK **`cubesandbox` ≥ 0.6.0**。
 > 协议与 Hook 细节：[Volume 插件开发框架](../../../docs/zh/guide/volume-plugin.md)。
@@ -312,6 +312,9 @@ export CUBE_API_URL=http://127.0.0.1:3000
 export CUBE_TEMPLATE_ID=tpl-xxxx
 export CUBE_PROXY_NODE_IP=127.0.0.1
 export CUBE_VOLUME_DRIVERS=s3
+# 脚本默认跳过 cfs/s3/nfs 这几个 driver 名（COS 演示环境中未部署）；
+# 本环境已部署 s3，需清空跳过列表：
+export CUBE_VOLUME_SKIP_DRIVERS=
 
 python3 verify_volume.py
 ```
