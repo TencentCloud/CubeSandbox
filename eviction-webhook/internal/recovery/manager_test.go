@@ -128,6 +128,41 @@ func newTestManager(mock *mockCubeMaster) *Manager {
 	return mgr
 }
 
+func TestSandboxInstanceType(t *testing.T) {
+	tests := []struct {
+		name              string
+		sandbox           cubemaster.SandboxBrief
+		eventInstanceType string
+		want              string
+	}{
+		{
+			name: "sandbox label takes precedence",
+			sandbox: cubemaster.SandboxBrief{
+				Labels: map[string]string{instanceTypeLabel: "microvm"},
+			},
+			eventInstanceType: "cubebox",
+			want:              "microvm",
+		},
+		{
+			name:              "event type is used when label is missing",
+			sandbox:           cubemaster.SandboxBrief{},
+			eventInstanceType: "custom",
+			want:              "custom",
+		},
+		{
+			name:    "cubebox is the compatibility default",
+			sandbox: cubemaster.SandboxBrief{},
+			want:    "cubebox",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, sandboxInstanceType(tt.sandbox, tt.eventInstanceType))
+		})
+	}
+}
+
 func eventually(t *testing.T, condition func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -311,7 +346,10 @@ func TestOnPressureReliefKeepsStateOnResumeFailure(t *testing.T) {
 func TestPressureReliefDuringPauseIsNotLost(t *testing.T) {
 	id := "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
 	mock := &mockCubeMaster{
-		listResult:   []cubemaster.SandboxBrief{{SandboxID: id, InstanceType: "microvm"}},
+		listResult: []cubemaster.SandboxBrief{{
+			SandboxID: id,
+			Labels:    map[string]string{instanceTypeLabel: "microvm"},
+		}},
 		pauseStarted: make(chan struct{}, 1),
 		pauseRelease: make(chan struct{}),
 	}
@@ -348,7 +386,10 @@ func TestListFailureRetriesProtection(t *testing.T) {
 			return false
 		}
 		mock.listErr = nil
-		mock.listResult = []cubemaster.SandboxBrief{{SandboxID: id, InstanceType: "cubebox"}}
+		mock.listResult = []cubemaster.SandboxBrief{{
+			SandboxID: id,
+			Labels:    map[string]string{instanceTypeLabel: "cubebox"},
+		}}
 		return true
 	})
 	eventually(t, func() bool {

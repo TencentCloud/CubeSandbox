@@ -188,7 +188,7 @@ func TestListSandboxesByNode(t *testing.T) {
 		w.Write([]byte(`{
 			"ret": {"ret_code": 200, "ret_msg": "ok"},
 			"data": [
-				{"sandbox_id": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6", "status": 2, "instance_type": "microvm"},
+				{"sandbox_id": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6", "status": 2, "labels": {"cube.master.instance.type": "microvm"}},
 				{"sandbox_id": "f1e2d3c4b5a6f7e8d9c0b1a2f3e4d5c6", "status": 2}
 			]
 		}`))
@@ -205,12 +205,11 @@ func TestListSandboxesByNode(t *testing.T) {
 	var req listSandboxesReq
 	require.NoError(t, json.Unmarshal(body, &req))
 	assert.Equal(t, "worker-01", req.HostID)
-	assert.True(t, req.AllInstanceTypes)
 
 	// Verify response parsing.
 	require.Len(t, sandboxes, 2)
 	assert.Equal(t, "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6", sandboxes[0].SandboxID)
-	assert.Equal(t, "microvm", sandboxes[0].InstanceType)
+	assert.Equal(t, "microvm", sandboxes[0].Labels["cube.master.instance.type"])
 	assert.Equal(t, "f1e2d3c4b5a6f7e8d9c0b1a2f3e4d5c6", sandboxes[1].SandboxID)
 }
 

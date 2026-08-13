@@ -73,7 +73,9 @@ func handleListAction(c *gin.Context) {
 	}
 
 	rt.RequestID = req.RequestID
-	applyListInstanceTypeDefault(req)
+	if req.InstanceType == "" {
+		req.InstanceType = cubebox.InstanceType_cubebox.String()
+	}
 	rt.InstanceType = req.InstanceType
 	ctx := log.WithLogger(c.Request.Context(), log.G(c.Request.Context()).WithFields(map[string]any{
 		"RequestId":    req.RequestID,
@@ -81,10 +83,4 @@ func handleListAction(c *gin.Context) {
 	}))
 	rsp = sandbox.ListSandbox(ctx, req)
 	common.WriteListAPI(c, rsp)
-}
-
-func applyListInstanceTypeDefault(req *types.ListCubeSandboxReq) {
-	if req.InstanceType == "" && !req.AllInstanceTypes {
-		req.InstanceType = cubebox.InstanceType_cubebox.String()
-	}
 }

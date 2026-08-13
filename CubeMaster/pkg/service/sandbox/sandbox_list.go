@@ -190,20 +190,19 @@ func doOneList(ctx context.Context, req *types.ListCubeSandboxReq, tmpNode *node
 				case <-ctx.Done():
 					return
 				case resChan <- &types.SandboxBriefData{
-					SandboxID:    sandbox.GetId(),
-					InstanceType: firstNonEmpty(labels[constants.CubeAnnotationsInsType], tmpNode.InstanceType, req.InstanceType),
-					HostID:       tmpNode.InsID,
-					Status:       int32(container.GetState()),
-					HostIP:       tmpNode.HostIP(),
-					TemplateID:   templateID,
-					CpuCount:     parseCPUCount(container.GetResources().GetCpu()),
-					MemoryMB:     parseMemoryMB(container.GetResources().GetMem()),
-					Annotations:  buildAnnotationsFromLabels(labels),
-					Labels:       labels,
-					NameSpace:    sandbox.GetNamespace(),
-					CreateAt:     sandbox.GetCreatedAt(),
-					PauseAt:      container.GetPausedAt(),
-					EndAt:        LookupSandboxEndAt(ctx, sandbox.GetId()),
+					SandboxID:   sandbox.GetId(),
+					HostID:      tmpNode.InsID,
+					Status:      int32(container.GetState()),
+					HostIP:      tmpNode.HostIP(),
+					TemplateID:  templateID,
+					CpuCount:    parseCPUCount(container.GetResources().GetCpu()),
+					MemoryMB:    parseMemoryMB(container.GetResources().GetMem()),
+					Annotations: buildAnnotationsFromLabels(labels),
+					Labels:      labels,
+					NameSpace:   sandbox.GetNamespace(),
+					CreateAt:    sandbox.GetCreatedAt(),
+					PauseAt:     container.GetPausedAt(),
+					EndAt:       LookupSandboxEndAt(ctx, sandbox.GetId()),
 					VolumeMounts: volumeMountsToContainerInfo(
 						collectVolumeMountsFromContainers(sandbox.GetContainers())),
 				}:
@@ -212,15 +211,6 @@ func doOneList(ctx context.Context, req *types.ListCubeSandboxReq, tmpNode *node
 			}
 		}
 	}
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 func matchFilter(labels map[string]string) bool {

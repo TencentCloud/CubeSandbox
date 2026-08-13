@@ -85,10 +85,9 @@ type cubeMasterRes struct {
 
 // listSandboxesReq is the wire shape for POST /cube/sandbox/list.
 type listSandboxesReq struct {
-	RequestID        string `json:"requestID,omitempty"`
-	HostID           string `json:"host_id,omitempty"`
-	Size             int    `json:"size,omitempty"`
-	AllInstanceTypes bool   `json:"all_instance_types,omitempty"`
+	RequestID string `json:"requestID,omitempty"`
+	HostID    string `json:"host_id,omitempty"`
+	Size      int    `json:"size,omitempty"`
 }
 
 // metaNodeResponse is the response envelope from GET /internal/meta/nodes/:node_id.
@@ -111,9 +110,9 @@ type cubeMasterRet struct {
 // SandboxBrief is the minimal sandbox info returned by ListSandboxesByNode.
 // Mirrors a subset of CubeMaster's SandboxBriefData.
 type SandboxBrief struct {
-	SandboxID    string `json:"sandbox_id,omitempty"`
-	Status       int32  `json:"status,omitempty"`
-	InstanceType string `json:"instance_type,omitempty"`
+	SandboxID string            `json:"sandbox_id,omitempty"`
+	Status    int32             `json:"status,omitempty"`
+	Labels    map[string]string `json:"labels,omitempty"`
 }
 
 // listSandboxesRes is the response envelope from POST /cube/sandbox/list.
@@ -164,10 +163,9 @@ func (c *Client) ResumeSandbox(ctx context.Context, sandboxID, instanceType, req
 // hostID is resolved via ResolveHostID if the initial lookup fails.
 func (c *Client) ListSandboxesByNode(ctx context.Context, hostID string) ([]SandboxBrief, error) {
 	body, err := json.Marshal(&listSandboxesReq{
-		RequestID:        fmt.Sprintf("eviction-list-%d", time.Now().UnixNano()),
-		HostID:           hostID,
-		Size:             1000, // large enough to get all sandboxes on one node
-		AllInstanceTypes: true,
+		RequestID: fmt.Sprintf("eviction-list-%d", time.Now().UnixNano()),
+		HostID:    hostID,
+		Size:      1000, // large enough to get all sandboxes on one node
 	})
 	if err != nil {
 		return nil, err

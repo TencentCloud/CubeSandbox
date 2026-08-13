@@ -31,6 +31,7 @@ const (
 	apiEvictionReliefDelay = 5 * time.Minute
 	reliefRetryDelay       = 30 * time.Second
 	protectionRetryDelay   = 30 * time.Second
+	instanceTypeLabel      = "cube.master.instance.type"
 )
 
 // cubeMasterIface abstracts the CubeMaster client for testability.
@@ -353,15 +354,7 @@ func (m *Manager) applyEviction(nodeName, eventID, instanceType string) {
 			log.Printf("[recovery] sandbox %s already paused for node=%s, skipping", sb.SandboxID, nodeName)
 			continue
 		}
-		it := sb.InstanceType
-		if it == "" {
-			it = instanceType
-		}
-		if it == "" {
-			// Backward compatibility with older CubeMaster responses, whose list
-			// endpoint only returned cubebox sandboxes and omitted this field.
-			it = "cubebox"
-		}
+		it := sandboxInstanceType(sb, instanceType)
 		requestID := fmt.Sprintf("eviction-pause-%s", eventID)
 		if err := m.client().PauseSandbox(ctx, sb.SandboxID, it, requestID); err != nil {
 			log.Printf("[recovery] PauseSandbox failed sandboxID=%s err=%v", sb.SandboxID, err)
@@ -386,6 +379,18 @@ func (m *Manager) applyEviction(nodeName, eventID, instanceType string) {
 	}
 
 	log.Printf("[recovery] eviction applied node=%s paused=%d/%d", nodeName, len(paused), len(sandboxes))
+}
+
+func sandboxInstanceType(sb cubemaster.SandboxBrief, eventInstanceType string) string {
+	if instanceType := sb.Labels[instanceTypeLabel]; instanceType != "" {
+		return instanceType
+	}
+	if eventInstanceType != "" {
+		return eventInstanceType
+	}
+	// Backward compatibility for old sandboxes that predate the instance type
+	// label and for events whose Pod metadata is unavailable.
+	return "cubebox"
 }
 
 func (m *Manager) isSandboxPaused(nodeName, sandboxID string) bool {
