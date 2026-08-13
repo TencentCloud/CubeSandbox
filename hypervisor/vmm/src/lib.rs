@@ -77,6 +77,7 @@ pub mod device_tree;
 #[cfg(feature = "guest_debug")]
 mod gdb;
 pub mod interrupt;
+mod kernel_release;
 pub mod memory_manager;
 pub mod migration;
 pub mod pagemap_anon;
