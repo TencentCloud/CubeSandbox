@@ -420,6 +420,31 @@ http://<控制节点 IP>:12088
 | **沙箱异常恢复** | 自动检测并恢复 VM Crash、shim 卡死、网络分区等异常，支持可配置恢复策略 |
 | **调度与运维能力增强** | 资源感知调度、亲和规则、在线均衡与带迁移的节点排空 |
 
+## 赞助商
+
+<table>
+  <tr>
+    <td align="center">
+      <a href="https://cloud.tencent.com/">
+        <img src="./docs/assets/tcloud_logo_zh.png" alt="腾讯云" height="40">
+      </a>
+    </td>
+    <td align="center">
+      <a href="https://www.arm.com/">
+        <img src="./docs/assets/arm-logo.svg" alt="Arm" height="40">
+      </a>
+    </td>
+  </tr>
+</table>
+
+## 贡献者
+
+感谢所有贡献者：
+
+<a href="https://github.com/tencentcloud/CubeSandbox/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=tencentcloud/CubeSandbox" alt="贡献者" />
+</a>
+
 ## 许可证
 
 Cube Sandbox 使用 [Apache License 2.0](./LICENSE) 开源许可证。

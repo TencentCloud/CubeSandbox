@@ -407,6 +407,31 @@ We welcome contributions of all kinds—whether it's a bug report, feature sugge
 | **Sandbox Fault Recovery** | Automatic detection and recovery of crashed VMs, stuck shim processes, and network partitions with configurable recovery policies |
 | **Scheduling & Operations Enhancements** | Resource-aware placement, affinity rules, live rebalancing, and node drain with sandbox migration |
 
+## Sponsors
+
+<table>
+  <tr>
+    <td align="center">
+      <a href="https://www.tencentcloud.com/">
+        <img src="./docs/assets/tcloud_logo_en.png" alt="Tencent Cloud" height="40">
+      </a>
+    </td>
+    <td align="center">
+      <a href="https://www.arm.com/">
+        <img src="./docs/assets/arm-logo.svg" alt="Arm" height="40">
+      </a>
+    </td>
+  </tr>
+</table>
+
+## Contributors
+
+Thanks to all contributors:
+
+<a href="https://github.com/tencentcloud/CubeSandbox/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=tencentcloud/CubeSandbox" alt="Contributors" />
+</a>
+
 ## License
 
 CubeSandbox is released under the [Apache License 2.0](./LICENSE).
