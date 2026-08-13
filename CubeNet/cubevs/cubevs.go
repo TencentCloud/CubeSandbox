@@ -155,12 +155,11 @@ const (
 	MapNameRemotePortMapping    = "remote_port_mapping"
 	MapNameLocalPortMapping     = "local_port_mapping"
 	// MapNameAllowOut is the cube-v0.2.0 legacy migration source.
-	MapNameAllowOut        = "allow_out"
-	MapNameAllowOutV2      = "allow_out_v2"
-	MapNameDenyOut         = "deny_out"
-	MapNameDNSAllow        = "dns_allow"
-	MapNameDNSQueryTrack   = "dns_query_track"
-	MapNameDirectNeighbors = "direct_neigh"
+	MapNameAllowOut      = "allow_out"
+	MapNameAllowOutV2    = "allow_out_v2"
+	MapNameDenyOut       = "deny_out"
+	MapNameDNSAllow      = "dns_allow"
+	MapNameDNSQueryTrack = "dns_query_track"
 	// constants referenced by BPF programs.
 	globalNameMVMInnerIP           = "mvm_inner_ip"
 	globalNameMVMMacaddrP1         = "mvm_macaddr_p1"

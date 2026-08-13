@@ -17,7 +17,7 @@
 #include "dns_query.h"
 #include "dns_response.h"
 
-/* Learn the sender of an ARP packet only when direct egress already created a
+/* Learn the sender of an ARP reply only when direct egress already created a
  * pending cache entry for that IP. This also refreshes an existing entry when
  * the peer announces a MAC change.
  */
@@ -44,12 +44,12 @@ static __always_inline void learn_direct_neighbor(struct __sk_buff *skb)
 	    packet->arp.ar_pro != bpf_htons(ETH_P_IP) ||
 	    packet->arp.ar_hln != ETH_ALEN ||
 	    packet->arp.ar_pln != sizeof(__be32) ||
-	    (packet->arp.ar_op != bpf_htons(ARPOP_REQUEST) &&
-	     packet->arp.ar_op != bpf_htons(ARPOP_REPLY)))
+	    packet->arp.ar_op != bpf_htons(ARPOP_REPLY))
 		return;
 
 	eth_src = (union macaddr *)packet->eth.h_source;
 	arp_src = (union macaddr *)packet->arp.ar_sha;
+	/* Only trust a nonzero unicast sender MAC that matches the Ethernet header. */
 	if (eth_src->p1 != arp_src->p1 || eth_src->p2 != arp_src->p2 ||
 	    (arp_src->addr[0] & 1) || (arp_src->p1 == 0 && arp_src->p2 == 0))
 		return;
@@ -57,6 +57,8 @@ static __always_inline void learn_direct_neighbor(struct __sk_buff *skb)
 	mac = (union macaddr *)neighbor.addr;
 	mac->p1 = arp_src->p1;
 	mac->p2 = arp_src->p2;
+	neighbor.next_probe_at_ns = bpf_ktime_get_ns() +
+				    DIRECT_NEIGH_REVALIDATE_INTERVAL_NS;
 	ip = packet->arp.ar_sip;
 	bpf_map_update_elem(&direct_neigh, &ip, &neighbor, BPF_EXIST);
 }
@@ -394,9 +396,7 @@ static int icmp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iph
 	return bpf_redirect(sess->vm_ifindex, 0);
 }
 
-/* from_world performs a DNS tail call, so these dispatch helpers must remain
- * inline for kernels that reject tail calls from programs with BPF subcalls.
- */
+/* Linux 5.4 rejects tail calls from programs with BPF subcalls. */
 static __always_inline int do_icmp_nat(struct __sk_buff *skb)
 {
 	struct ethhdr *l2;

@@ -38,8 +38,8 @@
 #define NET_POLICY_FLAG_L7_REQUIRED	1
 #define NSEC_PER_SEC			1000000000ULL
 #define DNS_QUERY_TRACK_TTL_NS		(10ULL * NSEC_PER_SEC)
-/* Min interval between ARP probes for the same unresolved on-link neighbor. */
-#define DIRECT_NEIGH_PROBE_INTERVAL_NS	(1ULL * NSEC_PER_SEC)
+#define DIRECT_NEIGH_PROBE_INTERVAL_NS		(1ULL * NSEC_PER_SEC)
+#define DIRECT_NEIGH_REVALIDATE_INTERVAL_NS	(5ULL * 60 * NSEC_PER_SEC)
 
 /* https://en.wikipedia.org/wiki/IPv4#Header
  *
@@ -140,7 +140,6 @@ struct arp_packet {
 struct direct_neighbor {
 	unsigned char addr[ETH_ALEN];
 	__u16 reserved;
-	/* Suppresses repeated ARP probes while resolution is pending. */
 	__u64 next_probe_at_ns;
 };
 
