@@ -917,10 +917,15 @@ evictionWebhook:
   # (protect the MicroVM) without the automatic cordon/pause/resume side effect.
   recoveryEnabled: true
   # HMAC request signing for CubeMaster calls. Must match CubeMaster's auth
-  # config (files/cube-master/conf.yaml auth.enable). When enabled with empty
-  # credentials the chart auto-generates and persists them in the release Secret.
+  # config (files/cube-master/conf.yaml auth.enable). Prefer an existing Secret
+  # shared with CubeMaster; credentials are never generated automatically.
   auth:
     enabled: false
+    existingSecret: ""
+    userIDKey: user_id
+    secretKeyKey: secret_key
+    # Inline values are supported for compatibility. Both are required when
+    # existingSecret is empty and must exactly match CubeMaster's credentials.
     userID: ""
     secretKey: ""
   listenAddr: ":8443"
@@ -979,7 +984,7 @@ evictionWebhook:
     # cluster-wide evictions working (fail open) if the webhook is unavailable.
     failurePolicy: Ignore
     timeoutSeconds: 5
-    sideEffects: None
+    sideEffects: NoneOnDryRun
     rules:
       - apiGroups: ["policy", ""]
         apiVersions: ["v1"]

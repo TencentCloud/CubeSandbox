@@ -9,6 +9,11 @@
 {{- $svcFQDN := include "cube.evictionWebhookServiceFQDN" . -}}
 {{- $tlsSecretName := include "cube.evictionWebhookTLSSecretName" . -}}
 {{- $authSecretName := printf "%s-auth" $svcName -}}
+{{- if $auth.existingSecret -}}
+{{- $authSecretName = $auth.existingSecret -}}
+{{- end -}}
+{{- $authUserIDKey := default "user_id" $auth.userIDKey -}}
+{{- $authSecretKeyKey := default "secret_key" $auth.secretKeyKey -}}
 {{- $certKey := default "tls.crt" $tls.certSecretKey -}}
 {{- $keyKey := default "tls.key" $tls.keySecretKey -}}
 {{- $caKey := default "ca.crt" $tls.caSecretKey -}}
@@ -38,24 +43,9 @@
 {{- $selfSignedCARaw = $ca.Cert -}}
 {{- $selfSignedCAB64 = $ca.Cert | b64enc -}}
 {{- end -}}
-{{- /* Auth credentials: auto-generate (and persist across upgrades) when empty. */ -}}
 {{- $authUserID := default "" $auth.userID -}}
 {{- $authSecretKey := default "" $auth.secretKey -}}
-{{- if and $auth.enabled (or (not $authUserID) (not $authSecretKey)) -}}
-{{- $existingAuth := lookup "v1" "Secret" .Release.Namespace $authSecretName -}}
-{{- if and $existingAuth (index $existingAuth.data "user_id") (index $existingAuth.data "secret_key") -}}
-{{- $authUserID = index $existingAuth.data "user_id" | b64dec -}}
-{{- $authSecretKey = index $existingAuth.data "secret_key" | b64dec -}}
-{{- else -}}
-{{- if not $authUserID }}
-{{- $authUserID = printf "eviction-webhook-%s" (randAlphaNum 8) }}
-{{- end -}}
-{{- if not $authSecretKey }}
-{{- $authSecretKey = randAlphaNum 32 }}
-{{- end -}}
-{{- end -}}
-{{- end -}}
-{{- if $auth.enabled }}
+{{- if and $auth.enabled (not $auth.existingSecret) }}
 ---
 apiVersion: v1
 kind: Secret
@@ -66,8 +56,8 @@ metadata:
     app.kubernetes.io/component: eviction-webhook
 type: Opaque
 stringData:
-  user_id: {{ $authUserID | quote }}
-  secret_key: {{ $authSecretKey | quote }}
+  {{ $authUserIDKey }}: {{ $authUserID | quote }}
+  {{ $authSecretKeyKey }}: {{ $authSecretKey | quote }}
 {{- end }}
 {{- if eq $tls.mode "inline" }}
 ---
@@ -275,12 +265,12 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: {{ $authSecretName }}
-                  key: user_id
+                  key: {{ $authUserIDKey }}
             - name: CUBE_AUTH_SECRET_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ $authSecretName }}
-                  key: secret_key
+                  key: {{ $authSecretKeyKey }}
             {{- end }}
             {{- with $webhook.env }}
             {{- toYaml . | nindent 12 }}

@@ -523,7 +523,8 @@ type ListCubeSandboxReq struct {
 	StartIdx  int    `json:"start_idx,omitempty"`
 	Size      int    `json:"size,omitempty"`
 
-	HostID string `json:"host_id,omitempty"`
+	HostID           string `json:"host_id,omitempty"`
+	AllInstanceTypes bool   `json:"all_instance_types,omitempty"`
 
 	Filter       *CubeSandboxFilter `json:"filter,omitempty"`
 	InstanceType string             `json:"instance_type,omitempty"`
@@ -540,6 +541,7 @@ type ListCubeSandboxRes struct {
 
 type SandboxBriefData struct {
 	SandboxID    string             `json:"sandbox_id,omitempty"`
+	InstanceType string             `json:"instance_type,omitempty"`
 	Status       int32              `json:"status,omitempty"`
 	HostID       string             `json:"host_id,omitempty"`
 	HostIP       string             `json:"host_ip,omitempty"`

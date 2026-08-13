@@ -234,6 +234,24 @@
 {{- end }}
 {{- end }}
 {{- if .Values.evictionWebhook.enabled }}
+{{- if ne (int .Values.evictionWebhook.replicas) 1 }}
+{{- fail "evictionWebhook.replicas must be 1 because recovery uses local state and leader election is not implemented" }}
+{{- end }}
+{{- if ne (.Values.evictionWebhook.webhook.sideEffects | default "") "NoneOnDryRun" }}
+{{- fail "evictionWebhook.webhook.sideEffects must be NoneOnDryRun because normal requests have recovery side effects while dry-run requests do not" }}
+{{- end }}
+{{- $evictionAuth := default dict .Values.evictionWebhook.auth -}}
+{{- if $evictionAuth.enabled }}
+{{- if and $evictionAuth.existingSecret (or $evictionAuth.userID $evictionAuth.secretKey) }}
+{{- fail "evictionWebhook.auth.existingSecret cannot be combined with inline userID/secretKey" }}
+{{- end }}
+{{- if and (not $evictionAuth.existingSecret) (or (not $evictionAuth.userID) (not $evictionAuth.secretKey)) }}
+{{- fail "evictionWebhook.auth.enabled=true requires auth.existingSecret or both auth.userID and auth.secretKey; credentials must match CubeMaster" }}
+{{- end }}
+{{- if and $evictionAuth.existingSecret (or (not $evictionAuth.userIDKey) (not $evictionAuth.secretKeyKey)) }}
+{{- fail "evictionWebhook.auth.existingSecret requires auth.userIDKey and auth.secretKeyKey" }}
+{{- end }}
+{{- end }}
 {{- if not (include "cube.masterEndpoint" .) }}
 {{- fail "evictionWebhook.enabled=true requires a CubeMaster endpoint (controlPlane.master or externalControlPlane.masterEndpoint)" }}
 {{- end }}

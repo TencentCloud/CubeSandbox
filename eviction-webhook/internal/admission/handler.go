@@ -15,11 +15,11 @@ import (
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
-	"go.uber.org/zap"
 
 	"github.com/tencentcloud/CubeSandbox/eviction-webhook/internal/metrics"
 	"github.com/tencentcloud/CubeSandbox/eviction-webhook/internal/store"
@@ -145,16 +145,17 @@ func (h *Handler) handle(req *admissionv1.AdmissionRequest) *admissionv1.Admissi
 		InstanceType:  instanceType,
 		InterceptedAt: interceptedAt,
 	}
+	dryRun := req.DryRun != nil && *req.DryRun
 
 	// 1. Persist locally (audit trail).
-	if h.store != nil {
+	if !dryRun && h.store != nil {
 		if err := h.store.Save(event); err != nil {
 			logger.Error("audit store save failed", zap.Error(err))
 		}
 	}
 
 	// 2. Report event to CubeMaster (async, non-blocking).
-	if h.reporter != nil {
+	if !dryRun && h.reporter != nil {
 		h.reporter.Report(event)
 	}
 
@@ -182,10 +183,14 @@ func (h *Handler) handle(req *admissionv1.AdmissionRequest) *admissionv1.Admissi
 	}
 
 	// 5. Intercept: trigger recovery.
-	metrics.EvictionInterceptedTotal.WithLabelValues(nodeName, instanceType, "kubelet").Inc()
-	if h.recoveryMgr != nil {
+	if !dryRun {
+		metrics.EvictionInterceptedTotal.WithLabelValues(nodeName, instanceType, "kubelet").Inc()
+	}
+	if !dryRun && h.recoveryMgr != nil {
 		h.recoveryMgr.OnEviction(event)
-		metrics.IsolatedNodesTotal.Inc()
+	}
+	if dryRun {
+		return denyResponse(string(req.UID), "dry-run: eviction would be intercepted by eviction-webhook; no recovery side effects were initiated")
 	}
 
 	logger.Info("eviction intercepted, recovery initiated",

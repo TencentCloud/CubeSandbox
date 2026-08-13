@@ -5,6 +5,12 @@ package sandbox
 
 import "testing"
 
+func TestFirstNonEmpty(t *testing.T) {
+	if got := firstNonEmpty("", "microvm", "cubebox"); got != "microvm" {
+		t.Fatalf("firstNonEmpty returned %q, want microvm", got)
+	}
+}
+
 func TestParseCPUCount(t *testing.T) {
 	tests := []struct {
 		name  string

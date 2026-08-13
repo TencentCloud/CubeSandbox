@@ -99,12 +99,12 @@ func run() error {
 
 	cmClient := cubemaster.New(cfg.CubeMasterURL, cfg.AuthUserID, cfg.AuthSecretKey, cfg.AuthEnabled)
 
-	nodePressure := func(ctx context.Context, nodeName string) (bool, bool, error) {
+	memoryPressure := func(ctx context.Context, nodeName string) (bool, error) {
 		node, err := k8sClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
 		if err != nil {
-			return false, false, err
+			return false, err
 		}
-		return nodewatch.HasMemoryPressure(node), nodewatch.HasResourcePressure(node), nil
+		return nodewatch.HasMemoryPressure(node), nil
 	}
 
 	// ── Recovery manager ──────────────────────────────────────────────────
@@ -116,12 +116,10 @@ func run() error {
 		statePath := envOrDefault("RECOVERY_STATE_PATH", "/var/lib/eviction-webhook/recovery-state.json")
 		recoveryMgr, err := recovery.NewWithPersister(cmClient, statePath)
 		if err != nil {
-			logger.Warn("recovery persisted state unavailable, starting clean", zap.Error(err))
-			recoveryMgr = recovery.New(cmClient)
+			return fmt.Errorf("initialize recovery manager: %w", err)
 		}
 		recoveryMgr.SetPressureChecker(func(ctx context.Context, nodeName string) (bool, error) {
-			_, underResourcePressure, err := nodePressure(ctx, nodeName)
-			return underResourcePressure, err
+			return memoryPressure(ctx, nodeName)
 		})
 
 		logger.Info("starting node watcher")
@@ -137,8 +135,7 @@ func run() error {
 	// ── Admission handler ─────────────────────────────────────────────────
 	handler := admission.NewWithLogger(podCache, auditStore, rep, handlerRecoveryMgr, logger)
 	handler.SetPressureChecker(func(ctx context.Context, nodeName string) (bool, error) {
-		underMemoryPressure, _, err := nodePressure(ctx, nodeName)
-		return underMemoryPressure, err
+		return memoryPressure(ctx, nodeName)
 	})
 
 	// ── Webhook TLS server ────────────────────────────────────────────────
@@ -235,6 +232,12 @@ func loadConfig() (config, error) {
 	if cubeMasterURL == "" {
 		return config{}, fmt.Errorf("required environment variable CUBE_MASTER_URL is not set")
 	}
+	authEnabled := os.Getenv("CUBE_AUTH_ENABLE") == "true"
+	authUserID := os.Getenv("CUBE_AUTH_USER_ID")
+	authSecretKey := os.Getenv("CUBE_AUTH_SECRET_KEY")
+	if authEnabled && (authUserID == "" || authSecretKey == "") {
+		return config{}, fmt.Errorf("CUBE_AUTH_ENABLE=true requires CUBE_AUTH_USER_ID and CUBE_AUTH_SECRET_KEY")
+	}
 	return config{
 		ListenAddr:         envOrDefault("LISTEN_ADDR", ":8443"),
 		MetricsAddr:        envOrDefault("METRICS_ADDR", ":8888"),
@@ -245,9 +248,9 @@ func loadConfig() (config, error) {
 		CubeMasterURL:      cubeMasterURL,
 		EventReportEnabled: os.Getenv("EVENT_REPORT_ENABLE") == "true",
 		RecoveryEnabled:    os.Getenv("RECOVERY_ENABLE") != "false",
-		AuthEnabled:        os.Getenv("CUBE_AUTH_ENABLE") == "true",
-		AuthUserID:         os.Getenv("CUBE_AUTH_USER_ID"),
-		AuthSecretKey:      os.Getenv("CUBE_AUTH_SECRET_KEY"),
+		AuthEnabled:        authEnabled,
+		AuthUserID:         authUserID,
+		AuthSecretKey:      authSecretKey,
 		Debug:              os.Getenv("DEBUG") == "true",
 	}, nil
 }

@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -33,6 +34,10 @@ type mockCubeMaster struct {
 	resolvedIDs   map[string]string         // optional ResolveHostID mapping
 	resolveErr    error
 	listHostIDs   []string
+	pauseTypes    map[string]string
+	resumeTypes   map[string]string
+	pauseStarted  chan struct{}
+	pauseRelease  chan struct{}
 }
 
 func (m *mockCubeMaster) IsolateNode(_ context.Context, nodeID string) error {
@@ -52,23 +57,40 @@ func (m *mockCubeMaster) UnisolateNode(_ context.Context, nodeID string) error {
 	return nil
 }
 
-func (m *mockCubeMaster) PauseSandbox(_ context.Context, sandboxID, _, _ string) error {
+func (m *mockCubeMaster) PauseSandbox(_ context.Context, sandboxID, instanceType, _ string) error {
+	if m.pauseStarted != nil {
+		select {
+		case m.pauseStarted <- struct{}{}:
+		default:
+		}
+	}
+	if m.pauseRelease != nil {
+		<-m.pauseRelease
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.pauseFailIDs != nil && m.pauseFailIDs[sandboxID] {
 		return fmt.Errorf("forced pause failure for %s", sandboxID)
 	}
 	m.paused = append(m.paused, sandboxID)
+	if m.pauseTypes == nil {
+		m.pauseTypes = make(map[string]string)
+	}
+	m.pauseTypes[sandboxID] = instanceType
 	return nil
 }
 
-func (m *mockCubeMaster) ResumeSandbox(_ context.Context, sandboxID, _, _ string) error {
+func (m *mockCubeMaster) ResumeSandbox(_ context.Context, sandboxID, instanceType, _ string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.resumeFailIDs != nil && m.resumeFailIDs[sandboxID] {
 		return fmt.Errorf("forced resume failure for %s", sandboxID)
 	}
 	m.resumed = append(m.resumed, sandboxID)
+	if m.resumeTypes == nil {
+		m.resumeTypes = make(map[string]string)
+	}
+	m.resumeTypes[sandboxID] = instanceType
 	return nil
 }
 
@@ -272,15 +294,68 @@ func TestOnPressureReliefKeepsStateOnResumeFailure(t *testing.T) {
 
 	mgr.OnPressureRelief("worker-resume-fail")
 	eventually(t, func() bool {
-		mock.mu.Lock()
-		defer mock.mu.Unlock()
-		return len(mock.unisolated) == 1
+		mgr.mu.Lock()
+		defer mgr.mu.Unlock()
+		return len(mgr.paused["worker-resume-fail"]) == 1
 	})
 
 	mgr.mu.Lock()
 	defer mgr.mu.Unlock()
 	require.Len(t, mgr.paused["worker-resume-fail"], 1, "expected paused state to remain after resume failure")
-	assert.Empty(t, mgr.isolated["worker-resume-fail"], "expected isolated state to clear after successful unisolate")
+	assert.NotEmpty(t, mgr.isolated["worker-resume-fail"], "expected isolation to remain until every sandbox resumes")
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	assert.Empty(t, mock.unisolated, "must not unisolate while a sandbox remains paused")
+}
+
+func TestPressureReliefDuringPauseIsNotLost(t *testing.T) {
+	id := "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+	mock := &mockCubeMaster{
+		listResult:   []cubemaster.SandboxBrief{{SandboxID: id, InstanceType: "microvm"}},
+		pauseStarted: make(chan struct{}, 1),
+		pauseRelease: make(chan struct{}),
+	}
+	mgr := newTestManager(mock)
+	mgr.OnPressureDetected("worker-race")
+	select {
+	case <-mock.pauseStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pause did not start")
+	}
+	mgr.OnPressureRelief("worker-race")
+	close(mock.pauseRelease)
+	eventually(t, func() bool {
+		mock.mu.Lock()
+		defer mock.mu.Unlock()
+		return len(mock.resumed) == 1 && len(mock.unisolated) == 1
+	})
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	assert.Equal(t, "microvm", mock.pauseTypes[id])
+	assert.Equal(t, "microvm", mock.resumeTypes[id])
+}
+
+func TestListFailureRetriesProtection(t *testing.T) {
+	id := "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+	mock := &mockCubeMaster{listErr: fmt.Errorf("temporary list failure")}
+	mgr := newTestManager(mock)
+	mgr.retryDelay = 10 * time.Millisecond
+	mgr.OnPressureDetected("worker-retry")
+	eventually(t, func() bool {
+		mock.mu.Lock()
+		defer mock.mu.Unlock()
+		if len(mock.listHostIDs) < 1 {
+			return false
+		}
+		mock.listErr = nil
+		mock.listResult = []cubemaster.SandboxBrief{{SandboxID: id, InstanceType: "cubebox"}}
+		return true
+	})
+	eventually(t, func() bool {
+		mock.mu.Lock()
+		defer mock.mu.Unlock()
+		return len(mock.listHostIDs) >= 2 && len(mock.paused) == 1
+	})
 }
 
 func TestOnPressureReliefKeepsIsolationOnUnisolateFailure(t *testing.T) {
@@ -653,10 +728,10 @@ func TestReconcileRestoredSkipsOnPressureCheckError(t *testing.T) {
 	assert.Empty(t, mock.resumed, "expected no ResumeSandbox call on pressure check error")
 }
 
-// TestOnPressureDetectedSkipsAlreadyIsolated verifies that when a node is
-// already in the isolated map, OnPressureDetected returns early without
-// triggering startEviction (no IsolateNode or PauseSandbox calls).
-func TestOnPressureDetectedSkipsAlreadyIsolated(t *testing.T) {
+// TestOnPressureDetectedCompletesProtectionForAlreadyIsolatedNode verifies
+// that an isolated node still reconciles sandbox pause work. This is required
+// after a previous list or pause failure left protection incomplete.
+func TestOnPressureDetectedCompletesProtectionForAlreadyIsolatedNode(t *testing.T) {
 	mock := &mockCubeMaster{
 		listResult: []cubemaster.SandboxBrief{
 			{SandboxID: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"},
@@ -670,13 +745,16 @@ func TestOnPressureDetectedSkipsAlreadyIsolated(t *testing.T) {
 
 	mgr.OnPressureDetected("worker-already-isolated")
 
-	// Give any accidental goroutines time to fire.
-	time.Sleep(50 * time.Millisecond)
+	eventually(t, func() bool {
+		mock.mu.Lock()
+		defer mock.mu.Unlock()
+		return len(mock.paused) == 1
+	})
 
 	mock.mu.Lock()
 	defer mock.mu.Unlock()
 	assert.Empty(t, mock.isolated, "expected no IsolateNode call for already-isolated node")
-	assert.Empty(t, mock.paused, "expected no PauseSandbox call for already-isolated node")
+	assert.Len(t, mock.paused, 1, "expected incomplete pause work to be reconciled")
 }
 
 // TestOnPressureDetectedTriggerIsolation verifies that when a node is NOT yet
@@ -747,6 +825,7 @@ func TestNewWithPersisterLoadsExistingState(t *testing.T) {
 	require.NotNil(t, mgr)
 	assert.Len(t, mgr.isolated, 1)
 	assert.Equal(t, "host-saved", mgr.isolated["worker-saved"])
+	assert.True(t, mgr.desiredProtected["worker-saved"], "v1 state should migrate with protected intent")
 	require.Len(t, mgr.paused["worker-saved"], 1)
 	assert.Equal(t, "aabbccddeeff00112233445566778899", mgr.paused["worker-saved"][0].SandboxID)
 }
@@ -774,10 +853,12 @@ func TestPersistSavesAndLoadsRoundTrip(t *testing.T) {
 	p := newPersister(dir + "/recovery.json")
 
 	state := persistState{
+		Version: currentPersistVersion,
 		Paused: map[string][]PausedSandbox{
 			"node-rt": {{SandboxID: "aabbccdd", InstanceType: "cubebox", EventID: "e-rt"}},
 		},
-		Isolated: map[string]string{"node-rt": "host-rt"},
+		Isolated:         map[string]string{"node-rt": "host-rt"},
+		DesiredProtected: map[string]bool{"node-rt": true},
 	}
 	require.NoError(t, p.save(state))
 
@@ -786,6 +867,15 @@ func TestPersistSavesAndLoadsRoundTrip(t *testing.T) {
 	assert.Equal(t, "host-rt", loaded.Isolated["node-rt"])
 	require.Len(t, loaded.Paused["node-rt"], 1)
 	assert.Equal(t, "aabbccdd", loaded.Paused["node-rt"][0].SandboxID)
+	assert.True(t, loaded.DesiredProtected["node-rt"])
+}
+
+func TestPersisterRejectsFutureVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "future.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"version":999,"paused":{},"isolated":{}}`), 0o644))
+	_, err := newPersister(path).load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported recovery state version")
 }
 
 // TestIsolatedNodesReturnsAllKeys verifies that IsolatedNodes returns every
@@ -878,7 +968,8 @@ func TestReconcileRestoredNoPausedNoIsolated(t *testing.T) {
 
 // TestReconcileRestoredPausedOnlyNodeNoIsolation covers the branch where a
 // node appears in paused but NOT in isolated (cubeMasterNodeID == "").
-// Under pressure this path logs and skips (no IsolateNode call).
+// Under pressure this path resolves and restores isolation instead of leaving
+// a paused sandbox on an unprotected node.
 func TestReconcileRestoredPausedOnlyNodeUnderPressure(t *testing.T) {
 	id := "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
 	mock := &mockCubeMaster{}
@@ -894,12 +985,15 @@ func TestReconcileRestoredPausedOnlyNodeUnderPressure(t *testing.T) {
 	})
 
 	mgr.ReconcileRestored(context.Background())
-	time.Sleep(50 * time.Millisecond)
+	eventually(t, func() bool {
+		mock.mu.Lock()
+		defer mock.mu.Unlock()
+		return len(mock.isolated) == 1
+	})
 
 	mock.mu.Lock()
 	defer mock.mu.Unlock()
-	// cubeMasterNodeID is "" so IsolateNode must NOT be called.
-	assert.Empty(t, mock.isolated, "expected no IsolateNode when no cubeMasterNodeID stored")
+	assert.Equal(t, []string{"worker-paused-only"}, mock.isolated)
 }
 
 // TestPersistWithActivePersisterWritesToDisk verifies the real disk-write path

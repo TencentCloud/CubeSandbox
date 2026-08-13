@@ -30,6 +30,7 @@ import (
 const (
 	apiEvictionReliefDelay = 5 * time.Minute
 	reliefRetryDelay       = 30 * time.Second
+	protectionRetryDelay   = 30 * time.Second
 )
 
 // cubeMasterIface abstracts the CubeMaster client for testability.
@@ -67,7 +68,12 @@ type Manager struct {
 	isolated map[string]string
 	// evictionInFlight deduplicates concurrent recovery work for the same node.
 	evictionInFlight map[string]bool
+	reliefInFlight   map[string]bool
+	// desiredProtected is the latest desired state from pressure events. It
+	// prevents a relief event that arrives during pause from being lost.
+	desiredProtected map[string]bool
 	pressureChecker  PressureChecker
+	retryDelay       time.Duration
 	// persister saves state to disk for restart recovery.
 	persister *persister
 }
@@ -79,6 +85,8 @@ func New(cm *cubemaster.Client) *Manager {
 		paused:           make(map[string][]PausedSandbox),
 		isolated:         make(map[string]string),
 		evictionInFlight: make(map[string]bool),
+		reliefInFlight:   make(map[string]bool),
+		desiredProtected: make(map[string]bool),
 	}
 }
 
@@ -96,6 +104,8 @@ func NewWithPersister(cm *cubemaster.Client, statePath string) (*Manager, error)
 		paused:           state.Paused,
 		isolated:         state.Isolated,
 		evictionInFlight: make(map[string]bool),
+		reliefInFlight:   make(map[string]bool),
+		desiredProtected: state.DesiredProtected,
 		persister:        p,
 	}
 
@@ -130,13 +140,23 @@ func (m *Manager) persist() {
 	}
 	m.mu.Lock()
 	state := persistState{
-		Paused:   clonePaused(m.paused),
-		Isolated: cloneIsolated(m.isolated),
+		Version:          currentPersistVersion,
+		Paused:           clonePaused(m.paused),
+		Isolated:         cloneIsolated(m.isolated),
+		DesiredProtected: cloneDesired(m.desiredProtected),
 	}
 	m.mu.Unlock()
 	if err := m.persister.save(state); err != nil {
 		log.Printf("[recovery] persist state failed: %v", err)
 	}
+}
+
+func cloneDesired(src map[string]bool) map[string]bool {
+	dst := make(map[string]bool, len(src))
+	for node, desired := range src {
+		dst[node] = desired
+	}
+	return dst
 }
 
 func clonePaused(src map[string][]PausedSandbox) map[string][]PausedSandbox {
@@ -161,23 +181,33 @@ func cloneIsolated(src map[string]string) map[string]string {
 // Eviction request). We proactively cordon the node and pause sandboxes.
 func (m *Manager) OnPressureDetected(nodeName string) {
 	m.mu.Lock()
-	alreadyIsolated := m.isolated[nodeName] != ""
-	m.mu.Unlock()
-
-	if alreadyIsolated {
-		log.Printf("[recovery] pressure detected on already-isolated node=%s, skipping", nodeName)
-		return
+	if m.desiredProtected == nil {
+		m.desiredProtected = make(map[string]bool)
 	}
+	m.desiredProtected[nodeName] = true
+	m.mu.Unlock()
+	m.persist()
 
 	log.Printf("[recovery] pressure detected node=%s (proactive isolation)", nodeName)
 	// Use empty instanceType — will default to "cubebox".
-	m.startEviction(nodeName, "pressure-detected-"+nodeName, "")
+	if m.startEviction(nodeName, "pressure-detected-"+nodeName, "") {
+		// Use the same delayed safety reconciliation as the admission path so
+		// a missed watcher relief transition cannot strand paused sandboxes.
+		m.scheduleAPIEvictionRelief(nodeName)
+	}
 }
 
 // OnEviction is called by the admission handler on each intercepted eviction.
 // It cordons the node and pauses ALL sandboxes on that node, since the entire
 // node is under memory pressure. All CubeMaster calls are asynchronous.
 func (m *Manager) OnEviction(event *types.EvictionEvent) {
+	m.mu.Lock()
+	if m.desiredProtected == nil {
+		m.desiredProtected = make(map[string]bool)
+	}
+	m.desiredProtected[event.NodeName] = true
+	m.mu.Unlock()
+	m.persist()
 	if m.startEviction(event.NodeName, event.EventID, event.InstanceType) {
 		m.scheduleAPIEvictionRelief(event.NodeName)
 	}
@@ -220,21 +250,19 @@ func (m *Manager) ReconcileRestored(ctx context.Context) {
 			m.OnPressureRelief(nodeName)
 			continue
 		}
-		if cubeMasterNodeID == "" {
-			log.Printf("[recovery] startup reconciliation keeps node=%s under pressure with no isolation state to reassert", nodeName)
-			continue
+		if cubeMasterNodeID != "" {
+			go func(nodeName, cubeMasterNodeID string) {
+				reassertCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := m.client().IsolateNode(reassertCtx, cubeMasterNodeID); err != nil {
+					log.Printf("[recovery] startup reconciliation re-isolate failed node=%s cubeMasterNodeID=%s err=%v", nodeName, cubeMasterNodeID, err)
+					m.scheduleProtectionRetry(nodeName, "startup-reconcile-"+nodeName, "")
+					return
+				}
+				log.Printf("[recovery] startup reconciliation reasserted isolation node=%s cubeMasterNodeID=%s", nodeName, cubeMasterNodeID)
+			}(nodeName, cubeMasterNodeID)
 		}
-		go func(nodeName, cubeMasterNodeID string) {
-			reassertCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if err := m.client().IsolateNode(reassertCtx, cubeMasterNodeID); err != nil {
-				log.Printf("[recovery] startup reconciliation re-isolate failed node=%s cubeMasterNodeID=%s err=%v",
-					nodeName, cubeMasterNodeID, err)
-				return
-			}
-			log.Printf("[recovery] startup reconciliation reasserted isolation node=%s cubeMasterNodeID=%s",
-				nodeName, cubeMasterNodeID)
-		}(nodeName, cubeMasterNodeID)
+		m.OnPressureDetected(nodeName)
 	}
 }
 
@@ -242,6 +270,11 @@ func (m *Manager) startEviction(nodeName, eventID, instanceType string) bool {
 	m.mu.Lock()
 	if m.evictionInFlight == nil {
 		m.evictionInFlight = make(map[string]bool)
+	}
+	if m.reliefInFlight[nodeName] {
+		m.mu.Unlock()
+		log.Printf("[recovery] relief in flight node=%s, protection will reconcile after relief", nodeName)
+		return false
 	}
 	if m.evictionInFlight[nodeName] {
 		m.mu.Unlock()
@@ -255,7 +288,11 @@ func (m *Manager) startEviction(nodeName, eventID, instanceType string) bool {
 		defer func() {
 			m.mu.Lock()
 			delete(m.evictionInFlight, nodeName)
+			desired := m.desiredProtected[nodeName]
 			m.mu.Unlock()
+			if !desired {
+				m.reconcileRelief(nodeName)
+			}
 		}()
 		m.applyEviction(nodeName, eventID, instanceType)
 	}()
@@ -269,6 +306,7 @@ func (m *Manager) applyEviction(nodeName, eventID, instanceType string) {
 	cubeMasterNodeID, err := m.client().ResolveHostID(ctx, nodeName)
 	if err != nil {
 		log.Printf("[recovery] ResolveHostID failed node=%s err=%v", nodeName, err)
+		m.scheduleProtectionRetry(nodeName, eventID, instanceType)
 		return
 	}
 
@@ -284,6 +322,7 @@ func (m *Manager) applyEviction(nodeName, eventID, instanceType string) {
 		if err := m.client().IsolateNode(ctx, cubeMasterNodeID); err != nil {
 			log.Printf("[recovery] IsolateNode failed node=%s cubeMasterNodeID=%s err=%v", nodeName, cubeMasterNodeID, err)
 			metrics.CubeMasterAPIErrorsTotal.WithLabelValues("IsolateNode", "error").Inc()
+			m.scheduleProtectionRetry(nodeName, eventID, instanceType)
 			// Continue — still try to pause sandboxes.
 		} else {
 			metrics.IsolatedNodesTotal.Inc()
@@ -298,6 +337,7 @@ func (m *Manager) applyEviction(nodeName, eventID, instanceType string) {
 	sandboxes, err := m.client().ListSandboxesByNode(ctx, cubeMasterNodeID)
 	if err != nil {
 		log.Printf("[recovery] ListSandboxesByNode failed node=%s err=%v", nodeName, err)
+		m.scheduleProtectionRetry(nodeName, eventID, instanceType)
 		return
 	}
 	if len(sandboxes) == 0 {
@@ -306,19 +346,26 @@ func (m *Manager) applyEviction(nodeName, eventID, instanceType string) {
 	}
 
 	// 3. Pause each sandbox and record it for later resumption.
-	it := instanceType
-	if it == "" {
-		it = "cubebox"
-	}
 	var paused []PausedSandbox
+	needsRetry := false
 	for _, sb := range sandboxes {
 		if m.isSandboxPaused(nodeName, sb.SandboxID) {
 			log.Printf("[recovery] sandbox %s already paused for node=%s, skipping", sb.SandboxID, nodeName)
 			continue
 		}
+		it := sb.InstanceType
+		if it == "" {
+			it = instanceType
+		}
+		if it == "" {
+			// Backward compatibility with older CubeMaster responses, whose list
+			// endpoint only returned cubebox sandboxes and omitted this field.
+			it = "cubebox"
+		}
 		requestID := fmt.Sprintf("eviction-pause-%s", eventID)
 		if err := m.client().PauseSandbox(ctx, sb.SandboxID, it, requestID); err != nil {
 			log.Printf("[recovery] PauseSandbox failed sandboxID=%s err=%v", sb.SandboxID, err)
+			needsRetry = true
 			continue // try the rest
 		}
 		ps := PausedSandbox{
@@ -333,6 +380,9 @@ func (m *Manager) applyEviction(nodeName, eventID, instanceType string) {
 
 	if len(paused) > 0 {
 		m.persist()
+	}
+	if needsRetry {
+		m.scheduleProtectionRetry(nodeName, eventID, instanceType)
 	}
 
 	log.Printf("[recovery] eviction applied node=%s paused=%d/%d", nodeName, len(paused), len(sandboxes))
@@ -367,13 +417,37 @@ func sandboxPausedLocked(sandboxes []PausedSandbox, sandboxID string) bool {
 // It resumes all paused sandboxes on the node and uncordons it.
 func (m *Manager) OnPressureRelief(nodeName string) {
 	m.mu.Lock()
+	if m.desiredProtected == nil {
+		m.desiredProtected = make(map[string]bool)
+	}
+	m.desiredProtected[nodeName] = false
+	inFlight := m.evictionInFlight[nodeName]
+	m.mu.Unlock()
+	m.persist()
+	if inFlight {
+		log.Printf("[recovery] pressure relief recorded while protection is in flight node=%s", nodeName)
+		return
+	}
+	m.reconcileRelief(nodeName)
+}
+
+func (m *Manager) reconcileRelief(nodeName string) {
+	m.mu.Lock()
 	sandboxes := append([]PausedSandbox{}, m.paused[nodeName]...)
 	isolatedNodeID := m.isolated[nodeName]
 	wasIsolated := isolatedNodeID != ""
 	checker := m.pressureChecker
+	if m.desiredProtected[nodeName] || m.evictionInFlight[nodeName] || m.reliefInFlight[nodeName] {
+		m.mu.Unlock()
+		return
+	}
 	m.mu.Unlock()
 
 	if len(sandboxes) == 0 && !wasIsolated {
+		m.mu.Lock()
+		delete(m.desiredProtected, nodeName)
+		m.mu.Unlock()
+		m.persist()
 		return
 	}
 	if checker != nil {
@@ -393,7 +467,26 @@ func (m *Manager) OnPressureRelief(nodeName string) {
 	}
 
 	log.Printf("[recovery] pressure relieved node=%s resuming %d sandboxes", nodeName, len(sandboxes))
-	go m.applyRelief(nodeName, isolatedNodeID, sandboxes, wasIsolated)
+	m.mu.Lock()
+	if m.reliefInFlight == nil {
+		m.reliefInFlight = make(map[string]bool)
+	}
+	if m.reliefInFlight[nodeName] {
+		m.mu.Unlock()
+		return
+	}
+	m.reliefInFlight[nodeName] = true
+	m.mu.Unlock()
+	go func() {
+		m.applyRelief(nodeName, isolatedNodeID, sandboxes, wasIsolated)
+		m.mu.Lock()
+		delete(m.reliefInFlight, nodeName)
+		desired := m.desiredProtected[nodeName]
+		m.mu.Unlock()
+		if desired {
+			m.startEviction(nodeName, "pressure-redetected-"+nodeName, "")
+		}
+	}()
 }
 
 func (m *Manager) applyRelief(nodeName, isolatedNodeID string, sandboxes []PausedSandbox, wasIsolated bool) {
@@ -421,8 +514,12 @@ func (m *Manager) applyRelief(nodeName, isolatedNodeID string, sandboxes []Pause
 	}
 
 	// Uncordon the node so new sandboxes can be scheduled again.
+	allResumed := len(resumed) == len(sandboxes)
 	unisolated := !wasIsolated
-	if wasIsolated {
+	m.mu.Lock()
+	stillRelieved := !m.desiredProtected[nodeName]
+	m.mu.Unlock()
+	if wasIsolated && allResumed && stillRelieved {
 		if err := m.client().UnisolateNode(ctx, isolatedNodeID); err != nil {
 			log.Printf("[recovery] UnisolateNode failed node=%s cubeMasterNodeID=%s err=%v", nodeName, isolatedNodeID, err)
 			metrics.CubeMasterAPIErrorsTotal.WithLabelValues("UnisolateNode", "error").Inc()
@@ -446,6 +543,9 @@ func (m *Manager) applyRelief(nodeName, isolatedNodeID string, sandboxes []Pause
 	if unisolated {
 		delete(m.isolated, nodeName)
 	}
+	if len(remaining) == 0 && unisolated {
+		delete(m.desiredProtected, nodeName)
+	}
 	m.mu.Unlock()
 	m.persist()
 
@@ -456,9 +556,32 @@ func (m *Manager) applyRelief(nodeName, isolatedNodeID string, sandboxes []Pause
 
 func (m *Manager) scheduleReliefRetry(nodeName string) {
 	go func() {
-		time.Sleep(reliefRetryDelay)
-		m.OnPressureRelief(nodeName)
+		time.Sleep(m.effectiveRetryDelay(reliefRetryDelay))
+		m.reconcileRelief(nodeName)
 	}()
+}
+
+func (m *Manager) scheduleProtectionRetry(nodeName, eventID, instanceType string) {
+	go func() {
+		time.Sleep(m.effectiveRetryDelay(protectionRetryDelay))
+		m.mu.Lock()
+		desired := m.desiredProtected[nodeName]
+		m.mu.Unlock()
+		if desired {
+			m.startEviction(nodeName, eventID, instanceType)
+		} else {
+			m.reconcileRelief(nodeName)
+		}
+	}()
+}
+
+func (m *Manager) effectiveRetryDelay(fallback time.Duration) time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.retryDelay > 0 {
+		return m.retryDelay
+	}
+	return fallback
 }
 
 func (m *Manager) scheduleAPIEvictionRelief(nodeName string) {

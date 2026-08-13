@@ -16,12 +16,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 	admissionv1 "k8s.io/api/admission/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
-	"go.uber.org/zap"
 
 	"github.com/tencentcloud/CubeSandbox/eviction-webhook/internal/podinformer"
 	"github.com/tencentcloud/CubeSandbox/eviction-webhook/internal/store"
@@ -181,6 +181,37 @@ func TestHandleKubeletEvictionRequiresMemoryPressure(t *testing.T) {
 			assert.Len(t, recoveryMgr.Events, tc.wantRecovery)
 		})
 	}
+}
+
+func TestHandleDryRunHasNoSideEffects(t *testing.T) {
+	auditPath := filepath.Join(t.TempDir(), "audit.ndjson")
+	auditStore, err := store.New(auditPath)
+	require.NoError(t, err)
+	defer auditStore.Close()
+
+	reporter := &stubReporter{}
+	recoveryMgr := &FakeRecoveryManager{}
+	h := NewWithRecovery(
+		newMockPodGetter(newSandboxPod("sandbox-dry-run", "cube-system", "cubebox")),
+		auditStore,
+		reporter,
+		recoveryMgr,
+	)
+	h.SetPressureChecker(func(context.Context, string) (bool, error) { return true, nil })
+	dryRun := true
+	req := kubeletRequest("uid-dry-run", "sandbox-dry-run", "cube-system", "worker-01")
+	req.DryRun = &dryRun
+
+	resp := h.handle(req)
+
+	assert.False(t, resp.Allowed, "dry-run must report the same decision as a real request")
+	assert.Contains(t, resp.Result.Message, "no recovery side effects")
+	assert.Empty(t, reporter.events)
+	assert.Empty(t, recoveryMgr.Events)
+	require.NoError(t, auditStore.Close())
+	data, err := os.ReadFile(auditPath)
+	require.NoError(t, err)
+	assert.Empty(t, data)
 }
 
 func TestNodeFromUserInfo(t *testing.T) {
