@@ -201,7 +201,8 @@ export default withMermaid(defineConfig({
                   text: 'Use Cases',
                   link: '/guide/usecases/',
                   items: [
-                    { text: 'trpc-agent-go', link: '/guide/usecases/trpc-agent-go' }
+                    { text: 'trpc-agent-go', link: '/guide/usecases/trpc-agent-go' },
+                    { text: 'Lexmount AI', link: '/guide/usecases/lexmount-browser-agent' }
                   ]
                 },
                 { text: 'Cube 100 Program', link: '/guide/cube100' },
@@ -352,7 +353,8 @@ export default withMermaid(defineConfig({
                   text: '应用案例',
                   link: '/zh/guide/usecases/',
                   items: [
-                    { text: 'trpc-agent-go', link: '/zh/guide/usecases/trpc-agent-go' }
+                    { text: 'trpc-agent-go', link: '/zh/guide/usecases/trpc-agent-go' },
+                    { text: 'Lexmount AI', link: '/zh/guide/usecases/lexmount-browser-agent' }
                   ]
                 },
                 { text: 'Cube 100 计划', link: '/zh/guide/cube100' },
