@@ -115,6 +115,24 @@ struct Cli {
     #[arg(long, value_name = "DOMAIN")]
     sandbox_domain: Option<String>,
 
+    /// Comma-separated webhook endpoint URLs (default: "" = disabled).
+    ///
+    /// Overrides the CUBE_WEBHOOK_URLS environment variable.
+    #[arg(long, value_name = "URLS")]
+    webhook_urls: Option<String>,
+
+    /// Comma-separated webhook event types to subscribe to.
+    ///
+    /// Overrides the CUBE_WEBHOOK_EVENTS environment variable.
+    #[arg(long, value_name = "EVENTS")]
+    webhook_events: Option<String>,
+
+    /// Shared secret for HMAC-SHA256 webhook signing.
+    ///
+    /// Overrides the CUBE_WEBHOOK_SECRET environment variable.
+    #[arg(long, value_name = "SECRET")]
+    webhook_secret: Option<String>,
+
     /// Export the current OpenAPI spec to a YAML file and exit.
     #[arg(long, value_name = "PATH")]
     export_openapi: Option<String>,
@@ -167,6 +185,15 @@ fn main() -> anyhow::Result<()> {
     if let Some(v) = cli.sandbox_domain {
         cfg.sandbox_domain = v;
     }
+    if let Some(v) = cli.webhook_urls {
+        cfg.webhook_urls = v;
+    }
+    if let Some(v) = cli.webhook_events {
+        cfg.webhook_events = v;
+    }
+    if let Some(v) = cli.webhook_secret {
+        cfg.webhook_secret = v;
+    }
 
     // ── Tracing (stdout) ───────────────────────────────────────────────────
     // RUST_LOG env var takes precedence; --debug / --log-level / config is fallback.
@@ -209,15 +236,68 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
 
     let file_logger = FileLogger::new(cfg.log_dir.clone(), cfg.log_prefix.clone()).await?;
 
-    // FilteredLogger gates by level → MultiLogger fans out to file (+ future backends)
-    let logger: logging::ArcLogger = arc(FilteredLogger::new(
-        arc(
-            MultiLogger::new().add(arc(file_logger)), // Uncomment to add more backends:
-                                                      // .add(arc(logging::http::HttpLogger::new(Default::default())))
-                                                      // .add(arc(logging::otlp::OtlpLogger::new()))
-        ),
-        min_level,
-    ));
+    let mut multi = MultiLogger::new().add(arc(file_logger));
+
+    // ── Conditional: Webhook (HttpLogger) ───────────────────────────────
+    if !cfg.webhook_urls.trim().is_empty() {
+        use logging::http::{HttpLogger, HttpLoggerConfig};
+        use std::collections::HashSet;
+
+        let targets: Vec<String> = cfg
+            .webhook_urls
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if !targets.is_empty() {
+            // HTTPS warning for non-loopback plaintext URLs
+            for url in &targets {
+                let host = logging::http::redact_url(url);
+                let is_loopback = host == "localhost"
+                    || host == "127.0.0.1"
+                    || host == "::1"
+                    || host.starts_with("[::1]");
+                if !url.starts_with("https://") && !is_loopback {
+                    tracing::warn!("webhook URL uses HTTP (not HTTPS): {host}", host = host);
+                }
+            }
+
+            let subscribed_events: HashSet<String> = cfg
+                .webhook_events
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            if subscribed_events.is_empty() {
+                tracing::info!("webhook: no event filter configured, subscribing to all events");
+            }
+
+            let target_count = targets.len();
+
+            let webhook_config = HttpLoggerConfig {
+                targets,
+                subscribed_events,
+                secret: cfg.webhook_secret.clone(),
+                max_concurrency: 64,
+                http_client: reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()
+                    .expect("failed to build webhook HTTP client"),
+            };
+            multi = multi.add(arc(HttpLogger::new(webhook_config)));
+            tracing::info!(
+                webhook_target_count = target_count,
+                webhook_events = %cfg.webhook_events,
+                signing = !cfg.webhook_secret.is_empty(),
+                "webhook logger enabled"
+            );
+        }
+    }
+
+    // FilteredLogger gates by level → MultiLogger fans out
+    let logger: logging::ArcLogger = arc(FilteredLogger::new(arc(multi), min_level));
 
     tracing::info!(
         log_dir = %cfg.log_dir,

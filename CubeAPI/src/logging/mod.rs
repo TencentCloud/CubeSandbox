@@ -20,7 +20,7 @@
 //! | `multi`        | Fan-out to N backends         | ✅ Ready |
 //! | `filtered`     | Min-level gate wrapper        | ✅ Ready |
 //! | `otlp`         | OpenTelemetry OTLP exporter   | 🔲 Stub  |
-//! | `http`         | Generic HTTP webhook          | 🔲 Stub  |
+//! | `http`         | Webhook event notification    | ✅ Ready |
 
 pub mod file;
 pub mod filtered;

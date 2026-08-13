@@ -82,3 +82,4 @@ __pycache__
 !/tests/perf/cubebench.sh
 
 web/tsconfig.tsbuildinfo
+examples/webhook-receiver/Cargo.lock
