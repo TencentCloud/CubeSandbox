@@ -50,7 +50,8 @@ type Config struct {
 	//     - name: cos-rpc
 	//       type: rpc
 	//       socket_path: /run/cube-volume-cos-rpc.sock
-	VolumePlugins []volumeplugin.Config `yaml:"volume_plugins"`
+	VolumePlugins   []volumeplugin.Config `yaml:"volume_plugins"`
+	TemplatePreheat *TemplatePreheatConf  `yaml:"template_preheat"`
 }
 
 type CommonConf struct {
@@ -648,6 +649,57 @@ type CubeEgressConf struct {
 // to start).
 const DefaultCubeEgressCAPath = "/etc/cube/ca/cube-root-ca.crt"
 
+// TemplatePreheatConf controls the background template preheat controller
+// (issue #182). Disabled by default (nil or Enabled=false). When enabled,
+// the controller maintains operator-declared pinned templates at a minimum
+// replica count on selector-matching nodes, bounded by per-node storage
+// budgets. See CubeMaster/pkg/templatecenter/preheat_controller.go.
+type TemplatePreheatConf struct {
+	Enabled bool `yaml:"enabled"`
+
+	// DownloadBaseURL is the base URL for rootfs artifact downloads.
+	// Required when Enabled=true. This is the same base the manual
+	// tpl redo path derives from the incoming HTTP request.
+	DownloadBaseURL string `yaml:"download_base_url"`
+
+	// PinnedTemplates are the operator-declared templates to preheat.
+	PinnedTemplates []PinnedTemplateConf `yaml:"pinned_templates"`
+
+	// PerNodeMaxTemplates caps the total number of READY template replicas
+	// (from any source) on a single node. Defaults to 20 in preHandle.
+	PerNodeMaxTemplates int `yaml:"per_node_max_templates"`
+
+	// PerNodeMaxBytes caps the total bytes of READY template replicas on a
+	// single node. Defaults to 200 GiB in preHandle.
+	PerNodeMaxBytes int64 `yaml:"per_node_max_bytes"`
+
+	// PerTemplateMinRedoInterval is the cooldown between redo submissions
+	// for the same template. Defaults to 10m in preHandle.
+	PerTemplateMinRedoInterval time.Duration `yaml:"per_template_min_redo_interval"`
+}
+
+// PinnedTemplateConf declares a single template to preheat.
+type PinnedTemplateConf struct {
+	TemplateID string `yaml:"template_id"`
+
+	// Priority orders pinned templates when budgets are tight.
+	// Higher priority is evaluated first.
+	Priority int `yaml:"priority"`
+
+	// NodeSelector matches node labels. An empty selector matches all
+	// nodes of the template's instance type. The instance type itself
+	// is always enforced from the template definition (not configurable
+	// via selector) because the redo path filters by instance type first.
+	NodeSelector map[string]string `yaml:"node_selector"`
+
+	// MinReplicas is the cluster-level desired floor of READY replicas
+	// across the node set matching NodeSelector + instance type.
+	MinReplicas int `yaml:"min_replicas"`
+
+	// MaxReplicas is the hard cluster-level ceiling.
+	MaxReplicas int `yaml:"max_replicas"`
+}
+
 type AppHookConfig struct {
 	PrestartHookByEnvKeys map[string][]*types.Hook `yaml:"prestart_hook_by_env_keys"`
 
@@ -773,6 +825,9 @@ func preHandle(config *Config) (*Config, error) {
 	if preHandleAuthConf(config) != nil {
 		return nil, errors.New("preHandleAuthConf failed")
 	}
+	if err := preHandleTemplatePreheat(config); err != nil {
+		return nil, err
+	}
 	return config, nil
 }
 func preComHandleConf(config *Config) error {
@@ -869,6 +924,51 @@ func preHandleAuthConf(config *Config) error {
 		config.AuthConf.SignatureExpireTimeInsec = 120
 	}
 
+	return nil
+}
+
+func preHandleTemplatePreheat(config *Config) error {
+	if config.TemplatePreheat == nil {
+		return nil // disabled by default — nil block means feature off
+	}
+	p := config.TemplatePreheat
+	// Defaults and normalization. <= 0 (including a negative typo) falls back
+	// to the default: a negative budget would otherwise silently disable the
+	// per-node guard in selectCandidates, which checks `> 0`.
+	if p.PerNodeMaxTemplates <= 0 {
+		p.PerNodeMaxTemplates = 20
+	}
+	if p.PerNodeMaxBytes <= 0 {
+		p.PerNodeMaxBytes = 200 * 1024 * 1024 * 1024 // 200 GiB
+	}
+	if p.PerTemplateMinRedoInterval <= 0 {
+		p.PerTemplateMinRedoInterval = 10 * time.Minute
+	}
+	// Enforce pinned-template validity only when the feature is on, so a stale
+	// or malformed block cannot block startup while preheat is disabled.
+	if !p.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(p.DownloadBaseURL) == "" {
+		return errors.New("template_preheat: download_base_url is required when enabled")
+	}
+	seen := make(map[string]struct{}, len(p.PinnedTemplates))
+	for _, pt := range p.PinnedTemplates {
+		if pt.TemplateID == "" {
+			return errors.New("template_preheat: pinned template has empty template_id")
+		}
+		if pt.MinReplicas < 0 {
+			return fmt.Errorf("template_preheat: min_replicas must be >= 0 for template %s", pt.TemplateID)
+		}
+		if pt.MaxReplicas < pt.MinReplicas {
+			return fmt.Errorf("template_preheat: max_replicas (%d) < min_replicas (%d) for template %s",
+				pt.MaxReplicas, pt.MinReplicas, pt.TemplateID)
+		}
+		if _, dup := seen[pt.TemplateID]; dup {
+			return fmt.Errorf("template_preheat: duplicate pinned template %s", pt.TemplateID)
+		}
+		seen[pt.TemplateID] = struct{}{}
+	}
 	return nil
 }
 func preHandleCubeletConf(config *Config) error {

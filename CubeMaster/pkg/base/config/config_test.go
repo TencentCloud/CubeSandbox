@@ -346,3 +346,53 @@ func TestGetAllowedHostMountPrefixes_DefaultDefensiveCopy(t *testing.T) {
 	got2 := GetAllowedHostMountPrefixes()
 	assert.Equal(t, "/data/shared/", got2[0])
 }
+
+func TestPreHandleTemplatePreheat(t *testing.T) {
+	// nil block is a no-op (feature disabled by default).
+	assert.NoError(t, preHandleTemplatePreheat(&Config{}))
+
+	// Disabled with a malformed pinned block: defaults still normalize, but
+	// validation is skipped so a stale block cannot block startup.
+	disabledBad := &Config{TemplatePreheat: &TemplatePreheatConf{
+		Enabled:         false,
+		PerNodeMaxBytes: -1,
+		PinnedTemplates: []PinnedTemplateConf{{TemplateID: "", MinReplicas: 5, MaxReplicas: 1}},
+	}}
+	assert.NoError(t, preHandleTemplatePreheat(disabledBad))
+	assert.Equal(t, int64(200*1024*1024*1024), disabledBad.TemplatePreheat.PerNodeMaxBytes, "negative budget normalized to default")
+
+	// Enabled, valid: defaults applied, no error.
+	valid := &Config{TemplatePreheat: &TemplatePreheatConf{
+		Enabled:         true,
+		DownloadBaseURL: "http://master:8089",
+		PinnedTemplates: []PinnedTemplateConf{
+			{TemplateID: "tpl-a", Priority: 10, MinReplicas: 2, MaxReplicas: 3},
+		},
+	}}
+	assert.NoError(t, preHandleTemplatePreheat(valid))
+	assert.Equal(t, 20, valid.TemplatePreheat.PerNodeMaxTemplates)
+	cases := map[string]struct {
+		enabled bool
+		url     string
+		pinned  []PinnedTemplateConf
+	}{
+		"empty template_id":         {true, "http://x", []PinnedTemplateConf{{TemplateID: ""}}},
+		"min negative":              {true, "http://x", []PinnedTemplateConf{{TemplateID: "tpl-a", MinReplicas: -1}}},
+		"max < min":                 {true, "http://x", []PinnedTemplateConf{{TemplateID: "tpl-a", MinReplicas: 3, MaxReplicas: 2}}},
+		"missing download_base_url": {true, "", []PinnedTemplateConf{{TemplateID: "tpl-a", MaxReplicas: 2}}},
+		"duplicate": {true, "http://x", []PinnedTemplateConf{
+			{TemplateID: "tpl-a", MaxReplicas: 2},
+			{TemplateID: "tpl-a", MaxReplicas: 2},
+		}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := preHandleTemplatePreheat(&Config{TemplatePreheat: &TemplatePreheatConf{
+				Enabled:         tc.enabled,
+				DownloadBaseURL: tc.url,
+				PinnedTemplates: tc.pinned,
+			}})
+			assert.Error(t, err, "expected validation error for %s", name)
+		})
+	}
+}
