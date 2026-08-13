@@ -18,6 +18,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 )
@@ -454,6 +455,11 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 	templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveKind, time.Since(stageStart))
 	if err != nil {
 		return fmt.Errorf("failed to resolve template kind: %w", err)
+	}
+	// Pause-produced snaps (Kind=pause_snapshot) are internal Resume artifacts:
+	// invisible on Snapshot List/Info and not usable to create a new sandbox.
+	if strings.EqualFold(strings.TrimSpace(templateKind), pausesnap.KindPauseSnapshot) {
+		return fmt.Errorf("%w: %s", templatecenter.ErrSnapshotNotFound, templateID)
 	}
 	if resolved := templateResolveResultFromContext(ctx); resolved != nil {
 		resolved.TemplateID = templateID

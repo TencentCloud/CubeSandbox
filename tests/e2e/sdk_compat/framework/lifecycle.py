@@ -79,6 +79,45 @@ def wait_until_running(adapter: SandboxAdapter, *, timeout: float = 90) -> str:
     return wait_until_state(adapter, RUNNING_STATES, timeout=timeout)
 
 
+def wait_until_data_plane_ready(
+    adapter: SandboxAdapter,
+    *,
+    timeout: float = 90,
+    command_timeout: float = 10,
+) -> None:
+    """Wait until guest command/file path is usable after create/resume.
+
+    Control-plane ``running`` can precede CubeProxy/envd readiness; callers that
+    hit the data plane immediately after resume should use this helper.
+    """
+    last_error = "not attempted"
+
+    def _ready() -> bool:
+        nonlocal last_error
+        try:
+            result = adapter.run_command("true", timeout=int(command_timeout))
+            if getattr(result, "exit_code", 0) == 0:
+                return True
+            last_error = (
+                f"exit_code={getattr(result, 'exit_code', None)} "
+                f"stdout={getattr(result, 'stdout', '')!r} "
+                f"stderr={getattr(result, 'stderr', '')!r}"
+            )
+        except Exception as exc:  # noqa: BLE001 - probe until ready or timeout
+            last_error = f"{type(exc).__name__}: {exc}"
+        return False
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _ready():
+            return
+        time.sleep(1)
+    raise AssertionError(
+        f"timed out waiting for data-plane ready within {timeout}s "
+        f"(last={last_error})"
+    )
+
+
 def idle_past_timeout(idle_timeout: int, *, margin: int = IDLE_WAIT_MARGIN) -> None:
     time.sleep(idle_timeout + margin)
 

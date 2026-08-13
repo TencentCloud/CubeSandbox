@@ -131,13 +131,13 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	}
 	memorySizeBytes := snapshotMemorySizeBytes(resourceSpec.Memory)
 
-	sourceRootfs, err := storage.GetSandboxRootfsForSnapshot(ctx, rsp.SandboxID, rootVolumeName)
+	sourceRootfs, err := storage.GetSandboxRootfs(ctx, rsp.SandboxID, rootVolumeName)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve sandbox rootfs: %v", err)
 		return rsp, nil
 	}
-	rootfsObject, err := storage.CommitTemplateRootfs(ctx, sourceRootfs, rsp.TemplateID)
+	rootfsObject, err := storage.CommitRootfs(ctx, sourceRootfs, rsp.TemplateID)
 	if err != nil {
 		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
 			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
@@ -157,7 +157,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	//     snapshot.
 	memoryObject, snapshotTypeForCmd, err := prepareCommitMemoryArtifact(ctx, stepLog, cb, rsp.TemplateID, memorySizeBytes)
 	if err != nil {
-		if cleanupErr := storage.DeleteCowObject(ctx, rootfsObject.Name, rootfsObject.Kind); cleanupErr != nil {
+		if cleanupErr := storage.DeleteObject(ctx, rootfsObject.Name, rootfsObject.Kind); cleanupErr != nil {
 			stepLog.Warnf("failed to cleanup rootfs snapshot after memory artifact failure: %v", cleanupErr)
 		}
 		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
@@ -283,22 +283,35 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 }
 
 func validateCommitSandboxTarget(cb *cubeboxstore.CubeBox) (string, error) {
+	return validateSnapshotSandboxTarget(cb, true /* rejectHostDeps */)
+}
+
+// validatePauseSandboxTarget is the Pause/CoW gate: running + writable rootfs.
+// Unlike CommitSandbox, host-mount / host_dir / sandbox_path binds are allowed —
+// Cubelet re-binds the same hostdir path on Resume (same sandboxID).
+func validatePauseSandboxTarget(cb *cubeboxstore.CubeBox) (string, error) {
+	return validateSnapshotSandboxTarget(cb, false /* rejectHostDeps */)
+}
+
+func validateSnapshotSandboxTarget(cb *cubeboxstore.CubeBox, rejectHostDeps bool) (string, error) {
 	if cb == nil {
 		return "", errors.New("sandbox is not found")
 	}
 	if cb.GetStatus() == nil || cb.GetStatus().Get().State() != cubebox.ContainerState_CONTAINER_RUNNING {
 		return "", fmt.Errorf("sandbox %s is not running", cb.ID)
 	}
-	for _, container := range cb.AllContainers() {
-		if container == nil || container.Config == nil {
-			continue
+	if rejectHostDeps {
+		for _, container := range cb.AllContainers() {
+			if container == nil || container.Config == nil {
+				continue
+			}
+			if err := validateNoHostPathVolumes(container.Config); err != nil {
+				return "", err
+			}
 		}
-		if err := validateNoHostPathVolumes(container.Config); err != nil {
+		if err := validateCommitVolumeSources(cb); err != nil {
 			return "", err
 		}
-	}
-	if err := validateCommitVolumeSources(cb); err != nil {
-		return "", err
 	}
 	rootVolumeName := ""
 	for _, container := range cb.AllContainers() {
@@ -423,7 +436,7 @@ func (s *service) CleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
 		return rsp, nil
 	}
 	if storage.IsCowBackend() {
-		if err := storage.CleanupCowTemplateObjects(ctx, refs); err != nil {
+		if err := storage.CleanupObjects(ctx, refs); err != nil {
 			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 			rsp.Ret.RetMsg = fmt.Sprintf("failed to cleanup cubecow objects: %v", err)
 			return rsp, nil

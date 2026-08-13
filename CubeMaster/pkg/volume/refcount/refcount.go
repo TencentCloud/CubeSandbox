@@ -37,6 +37,36 @@ type Event struct {
 	Referenced int    `json:"referenced"`
 }
 
+// ReleasedVolumeIDs returns volume IDs for which the node stopped referencing
+// the volume (referenced=0 / 1→0). Used by Pause to remember which plugin
+// volumes a sandbox had so Resume can refuse to start if they were deleted.
+func ReleasedVolumeIDs(extInfo map[string][]byte) []string {
+	if len(extInfo) == 0 {
+		return nil
+	}
+	raw, ok := extInfo[ExtInfoKey]
+	if !ok || len(raw) == 0 {
+		return nil
+	}
+	var events []Event
+	if err := json.Unmarshal(raw, &events); err != nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(events))
+	out := make([]string, 0, len(events))
+	for _, e := range events {
+		if e.VolumeID == "" || e.Referenced != 0 {
+			continue
+		}
+		if _, ok := seen[e.VolumeID]; ok {
+			continue
+		}
+		seen[e.VolumeID] = struct{}{}
+		out = append(out, e.VolumeID)
+	}
+	return out
+}
+
 // ApplyFromExtInfo parses the volume reference-state events embedded in a
 // Cubelet create/destroy response ext_info map and applies each one to
 // t_cube_volume.refcount: referenced=1 → +1 (a node started referencing the

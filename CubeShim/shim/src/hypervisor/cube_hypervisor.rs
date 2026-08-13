@@ -287,8 +287,21 @@ impl CubeHypervisor {
     }
 
     pub async fn pause_vm_cube(&self, path: &str) -> CResult<()> {
+        self.pause_vm_cube_with_config(path, None).await
+    }
+
+    /// Pause the VM and write a snapshot. When `memory_vol_url` is set, memory
+    /// ranges are stored on that CubeCow (or other) volume while config/state
+    /// still land under `destination_url` — the same layout CommitSandbox /
+    /// cube-runtime snapshot uses.
+    pub async fn pause_vm_cube_with_config(
+        &self,
+        destination_url: &str,
+        memory_vol_url: Option<String>,
+    ) -> CResult<()> {
         let snap_config = Arc::new(SnapshotConfig {
-            destination_url: path.to_string(),
+            destination_url: destination_url.to_string(),
+            memory_vol_url,
             ..Default::default()
         });
         let ch = self.ch.as_ref().unwrap().lock().await;

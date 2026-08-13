@@ -304,3 +304,33 @@ func TestGenerateRestoreVirtiofsOptOrdersParentBeforeNestedChildForAllAccessMode
 		})
 	}
 }
+
+func TestGenerateRestoreVirtiofsOptSkipsPauseResume(t *testing.T) {
+	t.Parallel()
+
+	flowOpts := &workflow.CreateContext{
+		ReqInfo: &cubebox.RunCubeSandboxRequest{
+			Annotations: map[string]string{
+				constants.MasterAnnotationPauseSnapshotID:   "snap-pause1",
+				constants.MasterAnnotationRuntimeSnapshotID: "snap-pause1",
+			},
+		},
+		StorageInfo: &storage.StorageInfo{
+			HostDirBackendInfos: map[string]*storage.HostDirBackendInfo{
+				"writable": {
+					VolumeName: "writable",
+					BindPath:   "/data/cubelet/hostdir/sandbox/writable",
+				},
+			},
+		},
+	}
+	containerReq := &cubebox.ContainerConfig{
+		VolumeMounts: []*cubebox.VolumeMounts{
+			{Name: "writable", ContainerPath: "/mnt/data"},
+		},
+	}
+
+	specOpts, err := generateRestoreVirtiofsOpt(context.Background(), flowOpts, containerReq)
+	require.NoError(t, err)
+	require.Empty(t, specOpts)
+}

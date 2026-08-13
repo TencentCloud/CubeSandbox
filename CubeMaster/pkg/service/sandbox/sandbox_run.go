@@ -42,6 +42,7 @@ import (
 )
 
 var setSandboxProxyMapFn = localcache.SetSandboxProxyMap
+var getSandboxProxyMapFn = localcache.GetSandboxProxyMap
 
 type createSandboxContext struct {
 	selctx           *selctx.SelectorCtx

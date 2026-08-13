@@ -32,6 +32,7 @@ pytest --run-e2e -m "lifecycle and slow"
 | `cases/lifecycle/test_connect.py` | connect 既有实例、ID 与文件/命令可用性 | `lifecycle` | P1 |
 | `cases/lifecycle/test_create_options.py` | metadata、env vars、timeout 和创建参数后的 command | `lifecycle` | P1 |
 | `cases/lifecycle/test_pause_resume.py` | SDK pause、connect resume、文件/env/kernel 状态保留 | `pause_resume`，部分需 Code Interpreter | P1 |
+| `cases/lifecycle/test_pause_resume_network.py` | pause/resume 后仍保持出站 deny/allowlist 与限制公网访问 token | `pause_resume` + 网络能力；ingress token 用例需 CubeProxy | P1 + `requires_internet` |
 | `cases/lifecycle/test_kill.py` | kill 后不可连接、列表移除、重复 kill 终态语义 | `lifecycle` | P1 |
 | `cases/lifecycle/test_auto_lifecycle.py` | auto-pause、手动/自动恢复、重入、auto-kill、主动 pause 与 timeout 的交互 | `platform_lifecycle`、CubeProxy、lifecycle-manager；部分需 Code Interpreter | P1 + `slow`，每日运行 |
 
@@ -96,6 +97,16 @@ pytest --run-e2e -m "lifecycle and slow"
 - 无公网时 sandbox 内部 command 仍可运行；
 - 限制公网 URL 访问时，缺失/错误 token 返回 403，`e2b-traffic-access-token`
   与 `cube-traffic-access-token` 携带正确 token 时均可访问。
+
+`cases/lifecycle/test_pause_resume_network.py` 覆盖 SDK pause + connect resume
+后同一批创建时策略仍生效：
+
+- `allow_internet_access=False` 与 `deny_out=0.0.0.0/0` 仍阻断出站；
+- allowlist（禁用公网 + `allow_out`）仍只放行列出的 target；
+- 限制公网访问在 resume 后仍要求 traffic access token（覆盖 CubeProxy
+  HostIP 改写路径）。
+
+共享 TCP / 公网访问探测 helper 在 `framework/network_probe.py`。
 
 当前以可配置的公共 TCP endpoint 验证 L3/L4 出站策略。用例带
 `requires_internet`，运行器没有稳定公网时应使用

@@ -41,6 +41,7 @@ type Config struct {
 	ReqTemplateConf  *ReqTemplateConf      `yaml:"req_template_conf"`
 	HookWhitelist    *HookWhitelist        `yaml:"hook_whitelist"`
 	CubeEgressConf   *CubeEgressConf       `yaml:"cube_egress_conf"`
+	CubeProxyConf    *CubeProxyConf        `yaml:"cube_proxy_conf"`
 
 	// VolumePlugins lists external Controller Hook Plugin configurations.
 	// Types: binary (fork CLI) or rpc (gRPC VolumeControllerService).
@@ -150,6 +151,24 @@ type ExtraConf struct {
 	// A hostPath is allowed if it is under at least one prefix.
 	// Default (when empty): ["/data/shared/"].
 	AllowedHostMountPrefixes []string `yaml:"allowed_host_mount_prefixes"`
+}
+
+// CubeProxyConf controls how CubeMaster invalidates CubeProxy local routing
+// caches after Resume rewrites Redis SandboxIP / port mappings.
+type CubeProxyConf struct {
+	// AdminPort is the per-node CubeProxy admin listen port used when the
+	// Redis registry is empty (default 8082).
+	AdminPort int `yaml:"admin_port"`
+	// AdminToken is sent as X-Cube-Admin-Token when non-empty (must match
+	// CubeProxy $cube_admin_token).
+	AdminToken string `yaml:"admin_token"`
+	// AdminURLs optionally lists static admin base URLs (e.g. http://ip:8082).
+	// When set, InvalidateBackendCache broadcasts to these instead of reading
+	// the Redis CubeProxy registry.
+	AdminURLs []string `yaml:"admin_urls"`
+	// HeartbeatTTLMs is how fresh a registry heartbeat must be to treat a
+	// replica as live (default 15000).
+	HeartbeatTTLMs int64 `yaml:"heartbeat_ttl_ms"`
 }
 
 type RedisConf struct {
@@ -854,6 +873,16 @@ func preComHandleConf(config *Config) error {
 	}
 	if config.Common.DbRetryInterval == 0 {
 		config.Common.DbRetryInterval = 5 * time.Millisecond
+	}
+
+	if config.CubeProxyConf == nil {
+		config.CubeProxyConf = &CubeProxyConf{}
+	}
+	if config.CubeProxyConf.AdminPort == 0 {
+		config.CubeProxyConf.AdminPort = 8082
+	}
+	if config.CubeProxyConf.HeartbeatTTLMs == 0 {
+		config.CubeProxyConf.HeartbeatTTLMs = 15000
 	}
 
 	if config.Common.MaxNICQueue == 0 {

@@ -97,6 +97,13 @@ func generateSandboxVirtiofsOpt(ctx context.Context, flowOpts *workflow.CreateCo
 
 func generateRestoreVirtiofsOpt(ctx context.Context, flowOpts *workflow.CreateContext, containerReq *cubebox.ContainerConfig) ([]oci.SpecOpts, error) {
 	var specOpts []oci.SpecOpts
+	// Pause resume: container /mnt/* binds are already in guest memory. Re-emitting
+	// exec.mounts would re-enter do_exec_mount and fail (ENOENT on /.container_rw/...).
+	// New start from template/normal snapshot still needs these annotations.
+	if flowOpts != nil && flowOpts.IsPauseResume() {
+		log.G(ctx).Infof("[hostdir] pause resume: skip propagation exec.mount / umount annotations")
+		return specOpts, nil
+	}
 	if flowOpts.StorageInfo == nil {
 		return specOpts, nil
 	}

@@ -68,6 +68,10 @@ const (
 	// CatalogKindTemplate is produced by AppSnapshot (building a template
 	// from an image / one-shot sandbox).
 	CatalogKindTemplate = "template"
+	// CatalogKindPauseSnapshot is produced by Pause when the MicroVM is
+	// snapshotted into CubeCow and the shim exits. Resume recreates the
+	// sandbox from this catalog entry with the same sandboxID.
+	CatalogKindPauseSnapshot = "pause_snapshot"
 )
 
 // SnapshotCatalogEntryResolved enriches a catalog entry with freshly re-resolved
@@ -262,11 +266,11 @@ func ResolveLocalSnapshot(ctx context.Context, snapshotID string) (*SnapshotCata
 		return nil, err
 	}
 	out := &SnapshotCatalogEntryResolved{SnapshotCatalogEntry: *entry}
-	rootfsDev, err := ResolveCowDevPath(ctx, entry.RootfsVol, entry.RootfsKind)
+	rootfsDev, err := ResolveObjectPath(ctx, entry.RootfsVol, entry.RootfsKind)
 	if err != nil {
 		return nil, fmt.Errorf("resolve rootfs dev: %w", err)
 	}
-	memoryDev, err := ResolveCowDevPath(ctx, entry.MemoryVol, entry.MemoryKind)
+	memoryDev, err := ResolveObjectPath(ctx, entry.MemoryVol, entry.MemoryKind)
 	if err != nil {
 		return nil, fmt.Errorf("resolve memory dev: %w", err)
 	}

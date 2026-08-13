@@ -30,6 +30,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/instancecache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxlock"
 	volrefcount "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/refcount"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
@@ -236,43 +238,57 @@ func (h *DestroySandboxTaskHandler) HandleTask(ctx context.Context, t *Task) err
 		return nil
 	}
 
-	hostIP := strings.Split(t.CallEp, ":")[0]
-	_, ok = localcache.GetNodesByIp(hostIP)
-	if ok {
-
-		rsp, err := cubelet.Destroy(ctx, t.CallEp, req)
-		defer func() {
-			if log.IsDebug() {
-				log.G(ctx).Debugf("Destroy_rsp:%+v", utils.InterfaceToString(rsp))
-			}
-		}()
-
+	err := sandboxlock.WithLock(ctx, req.GetSandboxID(), sandboxlock.Options{
+		Value: "delete",
+		TTL:   sandboxlock.DeleteTTL,
+	}, func(ctx context.Context) error {
+		ctx = context.WithoutCancel(ctx)
+		hostIP := strings.Split(t.CallEp, ":")[0]
+		_, nodeOK := localcache.GetNodesByIp(hostIP)
+		handled, err := pausesnap.TryDeletePaused(ctx, req.GetRequestID(), req.GetSandboxID(), hostIP)
 		if err != nil {
-			log.G(ctx).Errorf("Destroy fail:%+v", err)
-
+			log.G(ctx).Errorf("delete paused sandbox fail:%+v", err)
 			return ret.Errorf(errorcode.ErrorCode_MasterRateLimitedError, "%s", err.Error())
 		}
-		if rsp.GetRet().GetRetCode() != cubeleterrorcode.ErrorCode_Success &&
-			rsp.GetRet().GetRetCode() != cubeleterrorcode.ErrorCode_OK {
-			log.G(ctx).Errorf("Destroy error:%+v", rsp)
-			return ret.Errorf(errorcode.MasterCode(rsp.GetRet().GetRetCode()), "%s", rsp.GetRet().GetRetMsg())
-		}
-		// Apply any node-level volume ref-count transitions (1→0) reported by
-		// Cubelet so the volume DB releases the reference held by this node.
-		volrefcount.ApplyFromExtInfo(ctx, rsp.GetExtInfo())
-	}
+		if !handled && nodeOK {
+			rsp, err := cubelet.Destroy(ctx, t.CallEp, req)
+			defer func() {
+				if log.IsDebug() {
+					log.G(ctx).Debugf("Destroy_rsp:%+v", utils.InterfaceToString(rsp))
+				}
+			}()
 
-	if t.InsType() == cubebox.InstanceType_cubebox.String() {
-		err := localcache.DeleteSandboxProxyMap(ctx, req.GetSandboxID())
-		if err != nil {
+			if err != nil {
+				log.G(ctx).Errorf("Destroy fail:%+v", err)
 
-			log.G(ctx).Errorf("DeleteSandboxProxyMap:%+v", err)
-			return ret.Errorf(errorcode.ErrorCode_MasterRateLimitedError, "DeleteSandboxProxyMap failed: %s", err.Error())
+				return ret.Errorf(errorcode.ErrorCode_MasterRateLimitedError, "%s", err.Error())
+			}
+			if rsp.GetRet().GetRetCode() != cubeleterrorcode.ErrorCode_Success &&
+				rsp.GetRet().GetRetCode() != cubeleterrorcode.ErrorCode_OK {
+				log.G(ctx).Errorf("Destroy error:%+v", rsp)
+				return ret.Errorf(errorcode.MasterCode(rsp.GetRet().GetRetCode()), "%s", rsp.GetRet().GetRetMsg())
+			}
+			// Apply any node-level volume ref-count transitions (1→0) reported by
+			// Cubelet so the volume DB releases the reference held by this node.
+			volrefcount.ApplyFromExtInfo(ctx, rsp.GetExtInfo())
 		}
-		localcache.DeleteSandboxCache(req.GetSandboxID())
-		if err := runAfterDestroyTaskSuccessHook(ctx, req.GetSandboxID()); err != nil {
-			log.G(ctx).Warnf("release snapshot runtime refs after destroy failed: %v", err)
+
+		if t.InsType() == cubebox.InstanceType_cubebox.String() {
+			err := localcache.DeleteSandboxProxyMap(ctx, req.GetSandboxID())
+			if err != nil {
+
+				log.G(ctx).Errorf("DeleteSandboxProxyMap:%+v", err)
+				return ret.Errorf(errorcode.ErrorCode_MasterRateLimitedError, "DeleteSandboxProxyMap failed: %s", err.Error())
+			}
+			localcache.DeleteSandboxCache(req.GetSandboxID())
+			if err := runAfterDestroyTaskSuccessHook(ctx, req.GetSandboxID()); err != nil {
+				log.G(ctx).Warnf("release snapshot runtime refs after destroy failed: %v", err)
+			}
 		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 	return nil
 }

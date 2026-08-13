@@ -13,6 +13,7 @@
 -- {"error": "..."} body.
 
 local cjson = require "cjson.safe"
+local backend_cache = require "backend_cache"
 
 local META  = ngx.shared.cube_sandbox_meta
 local STATE = ngx.shared.cube_sandbox_state
@@ -108,7 +109,26 @@ local function handle_meta_delete()
     META:delete(sid)
     STATE:delete(sid)
     LAST:delete(sid)
-    return reply(ngx.HTTP_OK, { ok = true })
+    -- Drop stale SandboxIP / host-port routing cache too; otherwise a later
+    -- recreate/resume with the same sandbox_id can keep serving the old
+    -- backend until TTL expires (and hits renew TTL).
+    local deleted = backend_cache.delete_sandbox(sid)
+    return reply(ngx.HTTP_OK, { ok = true, backend_cache_deleted = deleted })
+end
+
+-- POST /admin/backend_cache/delete
+--   body: {"sandbox_id": "..."}
+--   semantics: drop ngx.shared.local_cache routing entries for this sandbox
+--              ({sid}:meta_cached, {sid}:{port}:backend_*, Redis field mirrors).
+--              Used by CubeMaster after Resume rewrites Redis SandboxIP/ports.
+local function handle_backend_cache_delete()
+    local obj, err = read_json_body()
+    if not obj then return reply_error(ngx.HTTP_BAD_REQUEST, err) end
+    local sid, e2 = require_string(obj, "sandbox_id")
+    if not sid then return reply_error(ngx.HTTP_BAD_REQUEST, e2) end
+
+    local deleted = backend_cache.delete_sandbox(sid)
+    return reply(ngx.HTTP_OK, { ok = true, deleted = deleted })
 end
 
 -- POST /admin/state
@@ -203,6 +223,8 @@ local function dispatch()
         return handle_meta_upsert()
     elseif uri == "/admin/meta/delete" and method == "POST" then
         return handle_meta_delete()
+    elseif uri == "/admin/backend_cache/delete" and method == "POST" then
+        return handle_backend_cache_delete()
     elseif uri == "/admin/state" and method == "POST" then
         return handle_state()
     elseif uri == "/admin/last_active" and method == "GET" then

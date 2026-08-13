@@ -21,14 +21,24 @@ import (
 
 func Destroy(ctx context.Context, calleeEp string,
 	req *cubebox.DestroyCubeSandboxRequest) (*cubebox.DestroyCubeSandboxResponse, error) {
+	return DestroyWithTimeout(ctx, calleeEp, req,
+		time.Duration(config.GetConfig().CubeletConf.CommonTimeoutInsec)*time.Second)
+}
+
+// DestroyWithTimeout is Destroy with an explicit RPC deadline. Pause post-
+// snapshot cleanup uses a longer budget under concurrent load.
+func DestroyWithTimeout(ctx context.Context, calleeEp string,
+	req *cubebox.DestroyCubeSandboxRequest, timeout time.Duration) (*cubebox.DestroyCubeSandboxResponse, error) {
 	conn, err := grpcconn.GetWorkerConn(ctx, calleeEp)
 	if err != nil {
 		return nil, ret.Err(errorcode.ErrorCode_ConnHostFailed, err.Error())
 	}
 	defer conn.Close()
 	c := cubebox.NewCubeboxMgrClient(conn.Value())
-	ctx, cancel := context.WithTimeout(context.Background(),
-		time.Duration(config.GetConfig().CubeletConf.CommonTimeoutInsec)*time.Second)
+	if timeout <= 0 {
+		timeout = time.Duration(config.GetConfig().CubeletConf.CommonTimeoutInsec) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return c.Destroy(ctx, req)
 }
@@ -183,14 +193,25 @@ func GetCubeletAddr(hostIP string) string {
 
 func Update(ctx context.Context, calleeEp string,
 	req *cubebox.UpdateCubeSandboxRequest) (*cubebox.UpdateCubeSandboxResponse, error) {
+	return UpdateWithTimeout(ctx, calleeEp, req,
+		time.Duration(config.GetConfig().CubeletConf.CommonTimeoutInsec)*time.Second)
+}
+
+// UpdateWithTimeout is Update with an explicit RPC deadline. Pause uses a longer
+// budget so Master waits for Cubelet; on expiry Master must not abort/cleanup
+// in-flight Cubelet work.
+func UpdateWithTimeout(ctx context.Context, calleeEp string,
+	req *cubebox.UpdateCubeSandboxRequest, timeout time.Duration) (*cubebox.UpdateCubeSandboxResponse, error) {
 	conn, err := grpcconn.GetWorkerConn(ctx, calleeEp)
 	if err != nil {
 		return nil, ret.Err(errorcode.ErrorCode_ConnHostFailed, err.Error())
 	}
 	defer conn.Close()
 	c := cubebox.NewCubeboxMgrClient(conn.Value())
-	ctx, cancel := context.WithTimeout(context.Background(),
-		time.Duration(config.GetConfig().CubeletConf.CommonTimeoutInsec)*time.Second)
+	if timeout <= 0 {
+		timeout = time.Duration(config.GetConfig().CubeletConf.CommonTimeoutInsec) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return c.Update(ctx, req)
 }

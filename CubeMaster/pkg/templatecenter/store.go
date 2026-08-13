@@ -27,6 +27,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -202,6 +203,11 @@ func ListTemplates(ctx context.Context) ([]TemplateInfo, error) {
 
 	out := make([]TemplateInfo, 0, len(defs))
 	for _, def := range defs {
+		// Pause-produced snaps are internal Resume artifacts (Kind=pause_snapshot).
+		// Keep them out of template/snapshot list surfaces.
+		if strings.EqualFold(strings.TrimSpace(def.Kind), pausesnap.KindPauseSnapshot) {
+			continue
+		}
 		imageInfo := extractImageInfoFromRequestJSON(def.RequestJSON)
 		if latestJob := latestJobByTemplateID[def.TemplateID]; latestJob != nil {
 			imageInfo = composeImageInfo(latestJob.SourceImageRef, latestJob.SourceImageDigest)
@@ -243,6 +249,7 @@ func Init(ctx context.Context) error {
 		if initErr = sandboxspec.Init(store.db); initErr != nil {
 			return
 		}
+		pausesnap.Init(store.db)
 		configureSnapshotRuntimeRefHooks()
 		configureSandboxSpecHooks()
 		configureCompatHooks()
@@ -791,6 +798,10 @@ func GetTemplateInfo(ctx context.Context, templateID string) (*TemplateInfo, err
 		}
 		info := templateInfoFromJob(job)
 		return &info, nil
+	}
+	// Pause snaps are not user-visible templates/snapshots.
+	if strings.EqualFold(strings.TrimSpace(def.Kind), pausesnap.KindPauseSnapshot) {
+		return nil, ErrTemplateNotFound
 	}
 	replicas, err := ListReplicas(ctx, templateID)
 	if err != nil {

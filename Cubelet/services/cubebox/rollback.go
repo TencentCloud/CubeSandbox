@@ -27,6 +27,8 @@ const (
 	shimUpdateActionAnnotation          = "cube.shimapi.update.action"
 	shimUpdateRollbackRestoreAnnotation = "cube.shimapi.update.rollback.restore_config"
 	shimUpdateRollbackAction            = "RollbackSnapshot"
+	shimUpdatePauseSnapshotAnnotation   = "cube.shimapi.update.pause.snapshot_config"
+	shimUpdatePauseToSnapshotAction     = "PauseToSnapshot"
 )
 
 type rollbackRestoreConfig struct {
@@ -95,7 +97,7 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
-	currentRootfs, err := storage.GetSandboxRootfsForSnapshot(ctx, req.GetSandboxID(), rootVolumeName)
+	currentRootfs, err := storage.GetSandboxRootfs(ctx, req.GetSandboxID(), rootVolumeName)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve current rootfs: %v", err)
@@ -115,14 +117,14 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 		return rsp, nil
 	}
 
-	refs, err := storage.ResolveSnapshotForRollback(ctx, rootfsVol, memoryVol, memoryKind)
+	refs, err := storage.ResolveRollbackRefs(ctx, rootfsVol, memoryVol, memoryKind)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve snapshot objects: %v", err)
 		return rsp, nil
 	}
 
-	newRootfs, err := storage.RollbackDeriveNewGen(ctx, req.GetSandboxID(), refs.Rootfs.Name, req.GetNewGen(), req.GetDesiredSize())
+	newRootfs, err := storage.DeriveRollbackRootfs(ctx, req.GetSandboxID(), refs.Rootfs.Name, req.GetNewGen(), req.GetDesiredSize())
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to derive rollback rootfs: %v", err)
@@ -131,7 +133,7 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	cleanupNewRootfs := true
 	defer func() {
 		if cleanupNewRootfs {
-			if cleanupErr := storage.DeleteCowObject(ctx, newRootfs.Name, newRootfs.Kind); cleanupErr != nil {
+			if cleanupErr := storage.DeleteObject(ctx, newRootfs.Name, newRootfs.Kind); cleanupErr != nil {
 				stepLog.Warnf("failed to cleanup derived rollback rootfs %s: %v", newRootfs.Name, cleanupErr)
 			}
 		}
@@ -190,7 +192,7 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	resetSandboxStatusAfterRollback(cb)
 
 	newRootfs.MountName = currentRootfs.MountName
-	if err := storage.PersistSandboxRootfsAfterRollback(ctx, req.GetSandboxID(), newRootfs); err != nil {
+	if err := storage.PersistSandboxRootfs(ctx, req.GetSandboxID(), newRootfs); err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("rollback restored VM but failed to persist storage info: %v", err)
 		return rsp, nil
@@ -210,7 +212,7 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	); err != nil {
 		stepLog.Warnf("rollback succeeded but guest metrics epoch remains pending or prepared: %v", err)
 	}
-	if err := storage.DeleteCowObject(ctx, currentRootfs.Name, currentRootfs.Kind); err != nil {
+	if err := storage.DeleteObject(ctx, currentRootfs.Name, currentRootfs.Kind); err != nil {
 		rsp.OldRootfsDeleted = false
 		rsp.Ret.RetMsg = fmt.Sprintf("rollback succeeded; old rootfs cleanup deferred: %v", err)
 		stepLog.Warnf("rollback succeeded but failed to delete old rootfs %s: %v", currentRootfs.Name, err)

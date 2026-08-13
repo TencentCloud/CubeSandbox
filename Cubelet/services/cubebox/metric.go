@@ -309,7 +309,7 @@ func filesystemFillPercent(path string) float64 {
 }
 
 func cubecowFillPercent() (float64, bool) {
-	metrics, err := storage.GetCowMetrics(context.Background())
+	metrics, err := storage.ObjectMetrics(context.Background())
 	if err != nil {
 		log.G(context.Background()).Debugf("get cubecow metrics failed: %v", err)
 		return 0, false

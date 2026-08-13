@@ -45,6 +45,14 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 	if opts == nil {
 		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, "opts nil")
 	}
+
+	// Resume-from-pause (and other same-ID recreate paths) pass an explicit
+	// sandbox ID via annotation so the new shim/task reuses the caller's ID.
+	if desired := desiredSandboxID(opts); desired != "" {
+		opts.SandboxID = desired
+		return nil
+	}
+
 	opts.SandboxID = utils.GenerateID()
 
 	if opts.IsCreateSnapshot() {
@@ -57,6 +65,17 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 		opts.SandboxID = templateID + "_" + "0"
 	}
 	return nil
+}
+
+func desiredSandboxID(opts *workflow.CreateContext) string {
+	if opts == nil || opts.ReqInfo == nil {
+		return ""
+	}
+	annos := opts.ReqInfo.GetAnnotations()
+	if len(annos) == 0 {
+		return ""
+	}
+	return annos[constants.MasterAnnotationDesiredSandboxID]
 }
 
 func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) error {

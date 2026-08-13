@@ -94,6 +94,7 @@
     - [UpdateCubeSandboxRequest](#cubelet-services-cubebox-v1-UpdateCubeSandboxRequest)
     - [UpdateCubeSandboxRequest.AnnotationsEntry](#cubelet-services-cubebox-v1-UpdateCubeSandboxRequest-AnnotationsEntry)
     - [UpdateCubeSandboxResponse](#cubelet-services-cubebox-v1-UpdateCubeSandboxResponse)
+    - [UpdateCubeSandboxResponse.ExtInfoEntry](#cubelet-services-cubebox-v1-UpdateCubeSandboxResponse-ExtInfoEntry)
     - [Volume](#cubelet-services-cubebox-v1-Volume)
     - [VolumeMounts](#cubelet-services-cubebox-v1-VolumeMounts)
     - [VolumeSource](#cubelet-services-cubebox-v1-VolumeSource)
@@ -363,6 +364,7 @@ Capability contains the container capabilities to add or drop
 | requestID | [string](#string) |  | requestID reqID |
 | ret | [cubelet.services.errorcode.v1.Ret](#cubelet-services-errorcode-v1-Ret) |  | Ret. |
 | templateID | [string](#string) |  | Logical template ID. |
+| plugin_volume_ids | [string](#string) | repeated | Deprecated: unused. Pause/Resume volume refcounts follow normal Create/Destroy ExtInfo events; CleanupTemplate does not adjust them. |
 
 
 
@@ -1841,6 +1843,23 @@ TCPSocketAction describes an action based on opening a socket.
 | ----- | ---- | ----- | ----------- |
 | requestID | [string](#string) |  | requestID reqID |
 | ret | [cubelet.services.errorcode.v1.Ret](#cubelet-services-errorcode-v1-Ret) |  | Ret. |
+| ext_info | [UpdateCubeSandboxResponse.ExtInfoEntry](#cubelet-services-cubebox-v1-UpdateCubeSandboxResponse-ExtInfoEntry) | repeated | Same shape as DestroyCubeSandboxResponse.ext_info. Pause returns volume ref-count events after in-process keep_tombstone cleanup. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-UpdateCubeSandboxResponse-ExtInfoEntry"></a>
+
+### UpdateCubeSandboxResponse.ExtInfoEntry
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| key | [string](#string) |  |  |
+| value | [bytes](#bytes) |  |  |
 
 
 

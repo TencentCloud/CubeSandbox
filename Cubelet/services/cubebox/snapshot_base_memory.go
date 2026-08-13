@@ -134,7 +134,7 @@ func resolveMemoryObjectFromSnapshotID(ctx context.Context, snapshotID string) (
 	if memoryKind == "" {
 		memoryKind = storage.CowKindVolume
 	}
-	devPath, err := storage.ResolveCowDevPath(ctx, memoryVol, memoryKind)
+	devPath, err := storage.ResolveObjectPath(ctx, memoryVol, memoryKind)
 	if err != nil {
 		return nil, fmt.Errorf("%w: resolve %s/%s: %v", ErrNoBaseMemoryForIncremental, memoryVol, memoryKind, err)
 	}
@@ -195,7 +195,7 @@ func prepareCommitMemoryArtifact(
 	// ─── Tier 1: soft-dirty over previous-snapshot base ───────────────
 	baseMemoryObject, baseErr := resolveBaseMemoryObject(ctx, cb)
 	if baseErr == nil {
-		memoryObject, err := storage.CommitTemplateMemoryFromBase(ctx, baseMemoryObject, templateID, memorySizeBytes)
+		memoryObject, err := storage.CommitMemoryFromBase(ctx, baseMemoryObject, templateID, memorySizeBytes)
 		if err != nil {
 			return nil, "", err
 		}
@@ -216,7 +216,7 @@ func prepareCommitMemoryArtifact(
 	// which makes its bitmap consistent with this base.
 	restoreBase, restoreErr := resolveRestoreBaseMemoryObject(ctx, cb)
 	if restoreErr == nil {
-		memoryObject, err := storage.CommitTemplateMemoryFromBase(ctx, restoreBase, templateID, memorySizeBytes)
+		memoryObject, err := storage.CommitMemoryFromBase(ctx, restoreBase, templateID, memorySizeBytes)
 		if err != nil {
 			return nil, "", err
 		}
@@ -232,7 +232,7 @@ func prepareCommitMemoryArtifact(
 	// ─── Tier 3: full + fresh empty volume ────────────────────────────
 	stepLog.Warnf("CommitSandbox: both previous-snapshot base (%v) and last-restore base (%v) "+
 		"unavailable; falling back to full snapshot", baseErr, restoreErr)
-	memoryObject, err := storage.CreateTemplateMemoryVolume(ctx, templateID, memorySizeBytes)
+	memoryObject, err := storage.CreateMemoryVolume(ctx, templateID, memorySizeBytes)
 	if err != nil {
 		return nil, "", err
 	}

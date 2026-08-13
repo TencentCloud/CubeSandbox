@@ -308,6 +308,56 @@ func TestValidateCommitSandboxTargetRejectsHostPath(t *testing.T) {
 	assert.Contains(t, err.Error(), "hostPath")
 }
 
+func TestValidatePauseSandboxTargetAllowsHostPath(t *testing.T) {
+	cb := &cubeboxstore.CubeBox{
+		Metadata: cubeboxstore.Metadata{ID: "sandbox"},
+	}
+	cb.AddContainer(&cubeboxstore.Container{
+		Metadata: cubeboxstore.Metadata{
+			ID: "sandbox",
+			Config: &cubeboxv1.ContainerConfig{
+				VolumeMounts: []*cubeboxv1.VolumeMounts{{
+					Name:          "root",
+					ContainerPath: "/",
+				}, {
+					Name:     "host",
+					HostPath: "/var/lib/data",
+				}},
+			},
+		},
+		Status: cubeboxstore.StoreStatus(cubeboxstore.Status{StartedAt: time.Now().UnixNano()}),
+		IsPod:  true,
+	})
+
+	root, err := validatePauseSandboxTarget(cb)
+	require.NoError(t, err)
+	assert.Equal(t, "root", root)
+}
+
+func TestValidatePauseSandboxTargetAllowsHostDirVolume(t *testing.T) {
+	cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{{
+		Name: "host",
+		VolumeSource: &cubeboxv1.VolumeSource{
+			HostDirVolumes: &cubeboxv1.HostDirVolumeSources{
+				VolumeSources: []*cubeboxv1.HostDirSource{{
+					Name:     "host",
+					HostPath: "/var/lib/data",
+				}},
+			},
+		},
+	}}, []*cubeboxv1.VolumeMounts{{
+		Name:          "root",
+		ContainerPath: "/",
+	}, {
+		Name:          "host",
+		ContainerPath: "/data",
+	}})
+
+	root, err := validatePauseSandboxTarget(cb)
+	require.NoError(t, err)
+	assert.Equal(t, "root", root)
+}
+
 func TestValidateCommitSandboxTargetRejectsHostDirVolume(t *testing.T) {
 	cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{{
 		Name: "host",

@@ -82,3 +82,6 @@ __pycache__
 !/tests/perf/cubebench.sh
 
 web/tsconfig.tsbuildinfo
+
+# Local toolchain downloads (e.g. portable protoc)
+.tools/

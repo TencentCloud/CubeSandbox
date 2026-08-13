@@ -78,12 +78,18 @@ func TestQueueBlock(t *testing.T) {
 }
 
 func TestQueueWorker(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
 	opt := &Options{
 		QueueSize: 2,
-		WorkerNum: 3,
+		WorkerNum: 1,
 	}
 	wh := func(data interface{}) error {
-		time.Sleep(time.Second)
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
 		return nil
 	}
 	qw := NewQueueWorker(opt, wh)
@@ -91,15 +97,27 @@ func TestQueueWorker(t *testing.T) {
 	if err := qw.Push(1); err != nil {
 		t.Errorf("Push error: %v", err)
 	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not pick up the first item")
+	}
 
 	if err := qw.Push(2); err != nil {
 		t.Errorf("Push error: %v", err)
 	}
-
-	if err := qw.Push(3); err == nil {
+	if err := qw.Push(3); err != nil {
+		t.Errorf("Push error: %v", err)
+	}
+	if err := qw.Push(4); err == nil {
 		t.Error("Push should return error when queue is full")
 	}
-	time.Sleep(2 * time.Second)
+
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && qw.Len() != 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if v := qw.Len(); v != 0 {
 		t.Errorf("Len should be 0: %v", v)
 	}

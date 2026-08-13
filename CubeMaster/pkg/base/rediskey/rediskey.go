@@ -77,6 +77,24 @@ func SandboxLifecycleState(sandboxID string) string {
 	return join(Prefix, Version, ScopeShared, "sandbox", "lifecycle", "state", sandboxID)
 }
 
+// CubeProxyRegistry is the Hash of live CubeProxy replica endpoints
+// (proxy_id → JSON {admin_url,...}). Written by CubeProxy; read by CLM/Master.
+func CubeProxyRegistry() string {
+	return join(Prefix, Version, ScopeShared, "cube_proxy", "registry")
+}
+
+// CubeProxyHeartbeat is the Sorted Set of CubeProxy replica heartbeats
+// (score=unix_ms, member=proxy_id).
+func CubeProxyHeartbeat() string {
+	return join(Prefix, Version, ScopeShared, "cube_proxy", "heartbeat")
+}
+
+// LockSandbox is the Master op lock for pause / resume / delete on one sandbox.
+// Format: cube:v1:master:lock:sandbox:{sandboxID}
+func LockSandbox(sandboxID string) string {
+	return join(Prefix, Version, ScopeMaster, "lock", "sandbox", sandboxID)
+}
+
 // ---- legacy key builders (read fallback / delete cleanup only) ----
 
 // LegacyNodeMetric is the bare node ID used before namespacing.

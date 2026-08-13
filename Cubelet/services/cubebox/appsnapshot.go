@@ -259,7 +259,7 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		stepLog.Warnf("Failed to remove existing temp directory: %v", err)
 	}
 
-	memoryObject, err = storage.CreateTemplateMemoryVolume(ctx, templateID, memorySizeBytes)
+	memoryObject, err = storage.CreateMemoryVolume(ctx, templateID, memorySizeBytes)
 	if err != nil {
 		stepLog.Errorf("Failed to create template memory volume: %v", err)
 		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
@@ -307,7 +307,7 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		return rsp, nil
 	}
 
-	rootfsObject, err = storage.CreateTemplateRootfsFromBuild(ctx, templateID)
+	rootfsObject, err = storage.CommitRootfsFromBuild(ctx, templateID)
 	if err != nil {
 		stepLog.Errorf("Failed to create template rootfs snapshot: %v", err)
 		os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
@@ -789,7 +789,7 @@ func cleanupCowSnapshotObject(ctx context.Context, stepLog *log.CubeWrapperLogEn
 	if object == nil || object.Name == "" {
 		return
 	}
-	if cleanupErr := storage.DeleteCowObject(ctx, object.Name, object.Kind); cleanupErr != nil {
+	if cleanupErr := storage.DeleteObject(ctx, object.Name, object.Kind); cleanupErr != nil {
 		stepLog.Warnf("failed to cleanup %s %s: %v", objectLabel, object.Name, cleanupErr)
 	}
 }
@@ -805,7 +805,7 @@ func deactivateCowSnapshotObject(ctx context.Context, stepLog *log.CubeWrapperLo
 	if object == nil || object.Name == "" {
 		return nil
 	}
-	if err := storage.DeactivateCowObject(ctx, object.Name, object.Kind); err != nil {
+	if err := storage.DeactivateObject(ctx, object.Name, object.Kind); err != nil {
 		return fmt.Errorf("deactivate %s %s: %w", objectLabel, object.Name, err)
 	}
 	stepLog.Infof("deactivated %s %s", objectLabel, object.Name)

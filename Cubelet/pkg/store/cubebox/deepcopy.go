@@ -45,6 +45,23 @@ func (cb *CubeBox) DeepCopy() *CubeBox {
 		}
 	}
 
+	copied.NetworkType = cb.NetworkType
+	copied.RuntimeHandler = cb.RuntimeHandler
+	if cb.ExposedPorts != nil {
+		copied.ExposedPorts = append([]int64(nil), cb.ExposedPorts...)
+	}
+	if cb.CubeNetworkConfig != nil {
+		copied.CubeNetworkConfig = proto.Clone(cb.CubeNetworkConfig).(*cubebox.CubeNetworkConfig)
+	}
+	if cb.Volumes != nil {
+		copied.Volumes = make([]*cubebox.Volume, len(cb.Volumes))
+		for i, v := range cb.Volumes {
+			if v != nil {
+				copied.Volumes[i] = proto.Clone(v).(*cubebox.Volume)
+			}
+		}
+	}
+
 	if cb.Containers != nil {
 		copied.Containers = make(map[string]*Container, len(cb.Containers))
 		for k, v := range cb.Containers {

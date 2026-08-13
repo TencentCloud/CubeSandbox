@@ -25,6 +25,10 @@ use crate::{
 
 const DEFAULT_ROUTE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Pause / Resume / Connect share Master↔Cubelet Pause budget
+/// (`pauseCubeletRPCTimeout` = 120s).
+const PAUSE_RESUME_ROUTE_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Timeout budget for routes that front a *synchronous* CubeMaster operation
 /// which can legitimately take well beyond the default 30 s — currently
 /// snapshot create (`POST /sandboxes/:id/snapshots`) and snapshot/template
@@ -47,6 +51,10 @@ pub fn build_router(state: AppState) -> Router {
         Router::new().merge(build_e2b_router(&state, auth_configured)),
         DEFAULT_ROUTE_TIMEOUT,
     );
+    let pause_resume_router = apply_http_layers(
+        Router::new().merge(build_e2b_pause_resume_router(&state, auth_configured)),
+        PAUSE_RESUME_ROUTE_TIMEOUT,
+    );
     let snapshot_long_router = apply_http_layers(
         Router::new().merge(build_e2b_snapshot_long_router(&state, auth_configured)),
         SNAPSHOT_LONG_ROUTE_TIMEOUT,
@@ -54,6 +62,7 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .merge(standard_router)
+        .merge(pause_resume_router)
         .merge(snapshot_long_router)
         .with_state(state)
 }
@@ -97,6 +106,15 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
             "/sandboxes/:sandboxID/refreshes",
             post(sandboxes::refresh_sandbox),
         )
+        .route("/snapshots", get(snapshots::list_snapshots));
+
+    with_auth_and_rate_limit(routes, state, auth_configured)
+}
+
+/// Pause / Resume / Connect use the 120s lifecycle budget; keep them off the
+/// default 30s TimeoutLayer.
+fn build_e2b_pause_resume_router(state: &AppState, auth_configured: bool) -> Router<AppState> {
+    let routes = Router::new()
         .route(
             "/sandboxes/:sandboxID/pause",
             post(sandboxes::pause_sandbox),
@@ -108,8 +126,7 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
         .route(
             "/sandboxes/:sandboxID/connect",
             post(sandboxes::connect_sandbox),
-        )
-        .route("/snapshots", get(snapshots::list_snapshots));
+        );
 
     with_auth_and_rate_limit(routes, state, auth_configured)
 }

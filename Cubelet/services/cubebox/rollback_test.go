@@ -265,6 +265,52 @@ func TestHandleContainerExitSkipsRollingBack(t *testing.T) {
 	assert.True(t, got.RollingBack, "RollingBack flag must survive the handler")
 }
 
+func TestHandleContainerExitSkipsPauseLifecycle(t *testing.T) {
+	now := time.Now().UnixNano()
+	cases := []struct {
+		name string
+		pre  cubeboxstore.Status
+	}{
+		{
+			name: "pausing",
+			pre: cubeboxstore.Status{
+				StartedAt: now - int64(time.Minute),
+				PausingAt: now,
+				Pid:       99,
+			},
+		},
+		{
+			name: "paused",
+			pre: cubeboxstore.Status{
+				StartedAt: now - int64(time.Minute),
+				PausedAt:  now,
+				Pid:       99,
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cntr := &cubeboxstore.Container{
+				Metadata: cubeboxstore.Metadata{ID: "ctr-pause"},
+				Status:   cubeboxstore.StoreStatus(tc.pre),
+			}
+			em := (*eventMonitor)(nil)
+			err := em.handleContainerExit(context.Background(), &eventtypes.TaskExit{
+				ContainerID: "ctr-pause",
+				ID:          "ctr-pause",
+				Pid:         99,
+				ExitStatus:  0,
+			}, cntr)
+			require.NoError(t, err)
+			got := cntr.Status.Get()
+			assert.Equal(t, int64(0), got.FinishedAt)
+			assert.Equal(t, tc.pre.PausingAt, got.PausingAt)
+			assert.Equal(t, tc.pre.PausedAt, got.PausedAt)
+			assert.True(t, cntr.Status.IsPaused())
+		})
+	}
+}
+
 func TestScanDeadContainerSkipsRollingBack(t *testing.T) {
 	staleFinishedAt := time.Now().Add(-time.Hour).UnixNano()
 	cb := newCubeboxWithStatusForTest("sb-deadgc-skip", cubeboxstore.Status{
