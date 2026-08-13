@@ -760,8 +760,8 @@ mod tests {
     /// `filter_memory_ranges_by_soft_dirty` does.
     ///
     /// Skipped silently when the host kernel lacks `CONFIG_MEM_SOFT_DIRTY=y`,
-    /// or when the test process lacks CAP_SYS_ADMIN to read PFNs from
-    /// /proc/self/pagemap and classify anonymous pages through /proc/kpageflags.
+    /// or when the kpageflags fallback needs `CAP_SYS_ADMIN` and the test
+    /// process does not have it.
     #[test]
     fn test_filter_memory_ranges_by_anon_and_soft_dirty_end_to_end() {
         let _guard = CLEAR_REFS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -823,7 +823,17 @@ mod tests {
                 Ok(result) => result,
                 Err(SoftDirtyError::AnonProbe(pagemap_anon::PagemapAnonError::NoCapSysAdmin)) => {
                     eprintln!(
-                        "no CAP_SYS_ADMIN to read pagemap PFNs; skipping {}",
+                        "kpageflags path needs CAP_SYS_ADMIN; skipping {}",
+                        "test_filter_memory_ranges_by_anon_and_soft_dirty_end_to_end"
+                    );
+                    return;
+                }
+                Err(SoftDirtyError::AnonProbe(pagemap_anon::PagemapAnonError::OpenFailed {
+                    path,
+                    ..
+                })) if path == "/proc/kpageflags" => {
+                    eprintln!(
+                        "cannot open /proc/kpageflags; skipping {}",
                         "test_filter_memory_ranges_by_anon_and_soft_dirty_end_to_end"
                     );
                     return;
