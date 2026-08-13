@@ -101,7 +101,7 @@ impl SandboxService {
             .cubemaster
             .list_sandboxes(&req)
             .await
-            .map_err(internal_error)?;
+            .map_err(params_error_or_internal)?;
 
         ensure_create_result(resp.ret.ret_code, resp.ret.ret_msg)?;
 
@@ -274,7 +274,7 @@ impl SandboxService {
             .cubemaster
             .create_sandbox(&req)
             .await
-            .map_err(internal_error)?;
+            .map_err(params_error_or_internal)?;
 
         resp.ret.into_result().map_err(internal_error)?;
 
@@ -431,7 +431,7 @@ impl SandboxService {
             Err(e) if e.is_not_found() => {
                 Err(AppError::NotFound(format!("sandbox {} not found", sandbox_id)))
             }
-            Err(e) => Err(internal_error(e)),
+            Err(e) => Err(params_error_or_internal(e)),
         }
     }
 
@@ -468,7 +468,7 @@ impl SandboxService {
                 "sandbox {} not found",
                 sandbox_id
             ))),
-            Err(e) => Err(internal_error(e)),
+            Err(e) => Err(params_error_or_internal(e)),
         }
     }
 
@@ -484,7 +484,7 @@ impl SandboxService {
             .cubemaster
             .set_sandbox_timeout(&req)
             .await
-            .map_err(internal_error)?;
+            .map_err(|e| sandbox_not_found_or_internal(e, sandbox_id))?;
 
         resp.ret
             .into_result()
@@ -505,7 +505,7 @@ impl SandboxService {
             .cubemaster
             .refresh_sandbox(&req)
             .await
-            .map_err(internal_error)?;
+            .map_err(|e| sandbox_not_found_or_internal(e, sandbox_id))?;
 
         resp.ret
             .into_result()
@@ -522,13 +522,7 @@ impl SandboxService {
             .cubemaster
             .get_sandbox(sandbox_id, &self.instance_type)
             .await
-            .map_err(|e| {
-                if e.is_not_found() {
-                    AppError::NotFound(format!("sandbox {} not found", sandbox_id))
-                } else {
-                    internal_error(e)
-                }
-            })?;
+            .map_err(|e| sandbox_not_found_or_internal(e, sandbox_id))?;
 
         if !is_success_ret_code(resp.ret.ret_code) {
             if resp.ret.ret_code == RET_CODE_NOT_FOUND {
@@ -695,6 +689,21 @@ fn internal_error(error: impl std::fmt::Display) -> AppError {
     AppError::Internal(anyhow::anyhow!(error.to_string()))
 }
 
+// parse_response converts every non-success ret_code into CubeMasterError::Api before
+// the envelope reaches the caller, so a rejection of the client's own input has to be
+// classified here — the ret.into_result()/ensure_* checks never observe it.
+fn params_error_or_internal(e: CubeMasterError) -> AppError {
+    if e.is_invalid_path_parameter() || e.is_params_error() {
+        // Same reasoning as templates::map_err: the caller sent something invalid, so
+        // this is a 400. Reporting it as 500 misleads clients into retrying a request
+        // that can never succeed, and charges a client mistake against the
+        // server-side success-rate SLI.
+        AppError::BadRequest(e.to_string())
+    } else {
+        internal_error(e)
+    }
+}
+
 fn ensure_create_result(ret_code: i32, ret_msg: String) -> AppResult<()> {
     if is_success_ret_code(ret_code) {
         return Ok(());
@@ -712,7 +721,7 @@ fn sandbox_not_found_or_internal(e: CubeMasterError, sandbox_id: &str) -> AppErr
     if e.is_not_found() {
         AppError::NotFound(format!("sandbox {} not found", sandbox_id))
     } else {
-        internal_error(e)
+        params_error_or_internal(e)
     }
 }
 
@@ -1136,6 +1145,142 @@ mod tests {
     };
     use serde_json::Value;
     use tokio::sync::Mutex;
+
+    async fn spawn_fake_cubemaster(app: Router) -> SandboxService {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("server should run");
+        });
+        SandboxService::new(
+            CubeMasterClient::new(format!("http://{}", addr), reqwest::Client::new()),
+            "cubebox".to_string(),
+            "cube.app".to_string(),
+        )
+    }
+
+    fn ret_envelope(ret_code: i32, ret_msg: &str) -> Json<Value> {
+        Json(serde_json::json!({
+            "requestID": "req-1",
+            "ret": { "ret_code": ret_code, "ret_msg": ret_msg }
+        }))
+    }
+
+    fn params_error_reason() -> &'static str {
+        r#""host-mount" entry[0]: hostPath "/tmp" is not within an allowed mount prefix"#
+    }
+
+    fn probe_sandbox() -> NewSandbox {
+        NewSandbox {
+            template_id: "tpl-1".to_string(),
+            timeout: Some(30),
+            lifecycle: None,
+            auto_pause: None,
+            auto_resume: None,
+            secure: None,
+            allow_internet_access: None,
+            network: None,
+            metadata: None,
+            distribution_scope: None,
+            env_vars: None,
+            mcp: None,
+            volume_mounts: None,
+        }
+    }
+
+    fn assert_bad_request(err: AppError, expected_reason: &str) {
+        assert!(
+            matches!(err, AppError::BadRequest(ref m) if m.contains(expected_reason)),
+            "expected BadRequest carrying the backend reason, got {err:?}"
+        );
+        assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+    }
+
+    // CubeMaster returns MasterParamsError (130400) when the request itself is
+    // rejected — e.g. a host-mount hostPath outside allowed_host_mount_prefixes.
+    // templates::map_err already treats it as 400 via is_params_error(); the sandbox
+    // paths were reporting it as 500, which misleads clients into retrying a request
+    // that can never succeed and charges a client mistake against the server-side
+    // success-rate SLI.
+    //
+    // Driven end-to-end through the service so the assertion covers the path the
+    // request actually takes: parse_response raises CubeMasterError::Api before the
+    // envelope is visible, so the fix has to sit on the transport error.
+    #[tokio::test]
+    async fn create_sandbox_maps_cubemaster_params_error_to_bad_request() {
+        let reason = params_error_reason();
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox",
+            post(move || async move { ret_envelope(130400, reason) }),
+        ))
+        .await;
+
+        let err = service
+            .create_sandbox(probe_sandbox())
+            .await
+            .expect_err("rejected create should not succeed");
+        assert_bad_request(err, reason);
+    }
+
+    #[tokio::test]
+    async fn set_timeout_maps_cubemaster_params_error_to_bad_request() {
+        let reason = "timeout must be positive";
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/timeout",
+            post(move || async move { ret_envelope(130400, reason) }),
+        ))
+        .await;
+
+        let err = service
+            .set_timeout("sbx-1", -1)
+            .await
+            .expect_err("rejected timeout update should not succeed");
+        assert_bad_request(err, reason);
+    }
+
+    #[tokio::test]
+    async fn refresh_maps_cubemaster_params_error_to_bad_request() {
+        let reason = "duration out of range";
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/refresh",
+            post(move || async move { ret_envelope(130400, reason) }),
+        ))
+        .await;
+
+        let err = service
+            .refresh("sbx-1", 1 << 30)
+            .await
+            .expect_err("rejected refresh should not succeed");
+        assert_bad_request(err, reason);
+    }
+
+    // Negative control: genuine backend faults must keep counting as 5xx, and
+    // 130408 CubeletUnHealthy must not be swept up by the 1304xx prefix.
+    #[tokio::test]
+    async fn create_sandbox_keeps_backend_faults_internal() {
+        for ret_code in [130408, 130593] {
+            let service = spawn_fake_cubemaster(Router::new().route(
+                "/cube/sandbox",
+                post(move || async move { ret_envelope(ret_code, "backend fault") }),
+            ))
+            .await;
+
+            let err = service
+                .create_sandbox(probe_sandbox())
+                .await
+                .expect_err("backend fault should not succeed");
+            assert!(
+                matches!(err, AppError::Internal(_)),
+                "ret_code {ret_code} must stay 5xx, got {err:?}"
+            );
+            assert_eq!(
+                err.into_response().status(),
+                StatusCode::INTERNAL_SERVER_ERROR
+            );
+        }
+    }
 
     #[test]
     fn map_volume_mounts_returns_none_for_empty_input() {
