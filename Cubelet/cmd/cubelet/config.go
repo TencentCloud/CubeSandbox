@@ -164,6 +164,11 @@ func platformAgnosticDefaultConfig() *srvconfig.Config {
 		},
 		PidFile:           "/run/cube-let.pid",
 		DynamicConfigPath: "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.yaml",
+		CubeLog: srvconfig.CubeLogConfig{
+			Path:     srvconfig.DefaultCubeLogPath,
+			FileNum:  srvconfig.DefaultCubeLogFileNum,
+			FileSize: srvconfig.DefaultCubeLogFileSize,
+		},
 	}
 	return baseConfig
 }

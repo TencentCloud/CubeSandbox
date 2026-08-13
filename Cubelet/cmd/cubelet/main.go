@@ -262,18 +262,18 @@ func App() *cli.App {
 		},
 		&cli.StringFlag{
 			Name:  "logpath",
-			Value: "/data/log/Cubelet",
+			Value: srvconfig.DefaultCubeLogPath,
 			Usage: "cubelog log directory",
 		},
 		&cli.IntFlag{
 			Name:  "log-roll-num",
-			Value: 10,
+			Value: srvconfig.DefaultCubeLogFileNum,
 			Usage: "cubelog files roll number",
 		},
-		&cli.IntFlag{
+		&cli.StringFlag{
 			Name:  "log-roll-size",
-			Value: 500,
-			Usage: "cubelog files roll size(MB)",
+			Value: string(srvconfig.DefaultCubeLogFileSize),
+			Usage: "cubelog files roll size (500m, 1g; unitless integer is MiB)",
 		},
 		&cli.IntFlag{
 			Name:  "state-tmpfs-size",
@@ -324,6 +324,9 @@ func App() *cli.App {
 		if err := applyFlags(context, config); err != nil {
 			return err
 		}
+		if err := config.CubeLog.ApplyDefaults(); err != nil {
+			return err
+		}
 		ensureRequiredPlugins(config)
 
 		_, err = dynamConf.Init(config.DynamicConfigPath, context.Bool("no-dynamic-path"))
@@ -331,7 +334,7 @@ func App() *cli.App {
 			return err
 		}
 
-		initCubeLog(context, "Cubelet", context.String("logpath"))
+		initCubeLog("Cubelet", config.CubeLog)
 
 		if err := server.CreateTopLevelDirectories(config); err != nil {
 			return err
@@ -578,6 +581,16 @@ func applyFlags(context *cli.Context, config *srvconfig.Config) error {
 		if s := context.String(v.name); s != "" {
 			*v.d = s
 		}
+	}
+
+	if context.IsSet("logpath") {
+		config.CubeLog.Path = context.String("logpath")
+	}
+	if context.IsSet("log-roll-num") {
+		config.CubeLog.FileNum = context.Int("log-roll-num")
+	}
+	if context.IsSet("log-roll-size") {
+		config.CubeLog.FileSize = srvconfig.CubeLogFileSize(context.String("log-roll-size"))
 	}
 	return nil
 }

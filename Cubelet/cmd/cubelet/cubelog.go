@@ -7,15 +7,13 @@ package main
 import (
 	"fmt"
 
-	"github.com/urfave/cli/v2"
-
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/version"
+	srvconfig "github.com/tencentcloud/CubeSandbox/Cubelet/services/server/config"
 	cubelog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
-func initCubeLog(context *cli.Context, module, logPath string) {
-
+func initCubeLog(module string, logCfg srvconfig.CubeLogConfig) {
 	cubelog.SetModuleName(module)
 
 	cubelog.EnableFileLog()
@@ -27,14 +25,15 @@ func initCubeLog(context *cli.Context, module, logPath string) {
 
 	cubelog.EnableLogMetric()
 
+	logPath := logCfg.Path
 	if logPath == "" {
 		logPath = fmt.Sprintf("/data/log/%s", module)
 	}
 	cubelog.Create(logPath)
 	traceLogName := fmt.Sprintf("%s-stat", module)
 
-	num := context.Int("log-roll-num")
-	size := context.Int("log-roll-size")
+	num := logCfg.FileNum
+	size := logCfg.FileSizeMB()
 
 	cubelog.SetTraceOutput(cubelog.NewRollFileWriter(logPath, traceLogName, num, size))
 

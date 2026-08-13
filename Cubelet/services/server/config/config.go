@@ -28,10 +28,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 
 	srvconfig "github.com/containerd/containerd/v2/cmd/containerd/server/config"
 	"github.com/containerd/log"
+	"github.com/docker/go-units"
 	"github.com/imdario/mergo"
 	"github.com/pelletier/go-toml/v2"
 
@@ -50,7 +52,16 @@ type Config struct {
 	OperationServer OperationServerConfig `toml:"operation_server"`
 
 	DynamicConfigPath string `toml:"dynamic_config_path"`
+
+	CubeLog CubeLogConfig `toml:"cubelog"`
 }
+
+const (
+	DefaultCubeLogPath       = "/data/log/Cubelet"
+	DefaultCubeLogFileNum    = 10
+	DefaultCubeLogFileSize   = CubeLogFileSize("500m")
+	DefaultCubeLogFileSizeMB = 500
+)
 
 type StreamProcessor struct {
 	Accepts []string `toml:"accepts"`
@@ -79,6 +90,94 @@ type CubeTapConfig struct {
 
 type HttpConfig struct {
 	Address string `toml:"address"`
+}
+
+// CubeLogFileSize is a human-readable roll size such as "500m" or "1g".
+// A unitless integer (toml 500 or CLI --log-roll-size 500) means MiB.
+type CubeLogFileSize string
+
+func (s *CubeLogFileSize) UnmarshalText(text []byte) error {
+	*s = CubeLogFileSize(strings.TrimSpace(string(text)))
+	return nil
+}
+
+// CubeLogConfig is the process-lifetime cubelog roll policy. Changing these
+// values requires a cubelet restart; they are not hot-reloaded from dynamicconf.
+type CubeLogConfig struct {
+	Path     string          `toml:"path"`
+	FileNum  int             `toml:"file_num"`
+	FileSize CubeLogFileSize `toml:"file_size"`
+
+	fileSizeMB int
+}
+
+// ApplyDefaults fills empty path and non-positive roll limits with the
+// historical CLI defaults. file_size that resolves to <= 0 MiB would otherwise
+// rotate on every write. Invalid size strings return an error so a typo does
+// not silently fall back.
+func (c *CubeLogConfig) ApplyDefaults() error {
+	if c == nil {
+		return nil
+	}
+	if c.Path == "" {
+		c.Path = DefaultCubeLogPath
+	}
+	if c.FileNum <= 0 {
+		c.FileNum = DefaultCubeLogFileNum
+	}
+	if cubeLogFileSizeIsNonPositive(string(c.FileSize)) {
+		c.FileSize = DefaultCubeLogFileSize
+	}
+	mb, err := ParseCubeLogFileSize(c.FileSize)
+	if err != nil {
+		return fmt.Errorf("cubelog.file_size: %w", err)
+	}
+	c.fileSizeMB = mb
+	return nil
+}
+
+// FileSizeMB returns the resolved roll size in MiB. ApplyDefaults must run first.
+func (c *CubeLogConfig) FileSizeMB() int {
+	if c == nil || c.fileSizeMB <= 0 {
+		return DefaultCubeLogFileSizeMB
+	}
+	return c.fileSizeMB
+}
+
+// ParseCubeLogFileSize converts a toml/CLI size to MiB.
+// "500m", "1g", "2Gi" use binary units (1024). A unitless integer is MiB.
+// Empty or non-positive values return the default 500MiB.
+func ParseCubeLogFileSize(size CubeLogFileSize) (int, error) {
+	s := strings.TrimSpace(string(size))
+	if cubeLogFileSizeIsNonPositive(s) {
+		return DefaultCubeLogFileSizeMB, nil
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return int(n), nil
+	}
+	bytes, err := units.RAMInBytes(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid size %q: %w", s, err)
+	}
+	mb := bytes / units.MiB
+	if mb <= 0 {
+		return 0, fmt.Errorf("size %q is smaller than 1MiB", s)
+	}
+	return int(mb), nil
+}
+
+// cubeLogFileSizeIsNonPositive reports clamp-to-default cases:
+// empty, unitless n <= 0, or a unit string that parses to <= 0 bytes.
+func cubeLogFileSizeIsNonPositive(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return true
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return n <= 0
+	}
+	bytes, err := units.RAMInBytes(s)
+	return err == nil && bytes <= 0
 }
 
 func (c *Config) Decode(ctx context.Context, id string, config interface{}) (interface{}, error) {
