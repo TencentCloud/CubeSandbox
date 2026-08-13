@@ -5,9 +5,12 @@
 package runtemplate
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 )
 
 func TestRecoveredLocalTemplateFromSnapshotPath(t *testing.T) {
@@ -49,5 +52,86 @@ func TestRecoveredLocalTemplateFromSnapshotPathRejectsTemporaryDir(t *testing.T)
 
 	if template := recoveredLocalTemplateFromSnapshotPath(snapshotPath); template != nil {
 		t.Fatalf("expected nil for temporary snapshot path, got %+v", template)
+	}
+}
+
+func TestRemoveMissingLocalTemplates(t *testing.T) {
+	existingPath := t.TempDir()
+	missingPath := filepath.Join(t.TempDir(), "missing")
+	db := &mockMetadataDB{data: make(map[string][]byte)}
+	manager, err := NewCubeRunTemplateManager(db, nil)
+	if err != nil {
+		t.Fatalf("create local template manager: %v", err)
+	}
+
+	templates := []*templatetypes.LocalRunTemplate{
+		newLocalRunTemplateForPath("tpl-existing", existingPath),
+		newLocalRunTemplateForPath("snap-missing", missingPath),
+		newLocalRunTemplateForPath("tpl-missing", missingPath),
+		newLocalRunTemplateForPath("tpl-no-path", ""),
+	}
+	for _, template := range templates {
+		if err := manager.store.Update(template); err != nil {
+			t.Fatalf("seed template %s: %v", template.TemplateID, err)
+		}
+	}
+
+	if err := manager.removeMissingLocalTemplates(context.Background()); err != nil {
+		t.Fatalf("remove missing local templates: %v", err)
+	}
+	got, err := manager.store.ListGeneric()
+	if err != nil {
+		t.Fatalf("list local templates: %v", err)
+	}
+	gotIDs := make(map[string]bool, len(got))
+	for _, template := range got {
+		gotIDs[template.TemplateID] = true
+	}
+	if gotIDs["snap-missing"] {
+		t.Fatal("missing snapshot metadata was not removed")
+	}
+	if gotIDs["tpl-missing"] {
+		t.Fatal("missing template metadata was not removed")
+	}
+	if !gotIDs["tpl-existing"] {
+		t.Fatal("existing template metadata was removed")
+	}
+	if !gotIDs["tpl-no-path"] {
+		t.Fatal("template metadata without a local path was removed")
+	}
+}
+
+func TestRemoveMissingLocalTemplatesKeepsTemporarySnapshot(t *testing.T) {
+	snapshotPath := filepath.Join(t.TempDir(), "snapshot")
+	if err := os.MkdirAll(snapshotPath+".tmp", 0o755); err != nil {
+		t.Fatalf("create temporary snapshot directory: %v", err)
+	}
+	db := &mockMetadataDB{data: make(map[string][]byte)}
+	manager, err := NewCubeRunTemplateManager(db, nil)
+	if err != nil {
+		t.Fatalf("create local template manager: %v", err)
+	}
+	template := newLocalRunTemplateForPath("tpl-publishing", snapshotPath)
+	if err := manager.store.Update(template); err != nil {
+		t.Fatalf("seed template: %v", err)
+	}
+
+	if err := manager.removeMissingLocalTemplates(context.Background()); err != nil {
+		t.Fatalf("remove missing local templates: %v", err)
+	}
+	if _, err := manager.store.GetGeneric(template.DistributionTaskID); err != nil {
+		t.Fatalf("template metadata was removed while temporary snapshot exists: %v", err)
+	}
+}
+
+func newLocalRunTemplateForPath(templateID, snapshotPath string) *templatetypes.LocalRunTemplate {
+	return &templatetypes.LocalRunTemplate{
+		DistributionReference: templatetypes.DistributionReference{
+			TemplateID:         templateID,
+			DistributionTaskID: "recovered-" + templateID,
+		},
+		Snapshot: templatetypes.LocalSnapshot{
+			Snapshot: templatetypes.Snapshot{Path: snapshotPath},
+		},
 	}
 }
