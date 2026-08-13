@@ -6,6 +6,7 @@ package sandbox
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,6 +18,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
@@ -70,6 +72,11 @@ func SandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq) (rsp *types.
 		return
 	}
 
+	// Pause binding wins over Cubelet EXITED flicker / empty List: READY →
+	// paused tombstone view; FAILED → keep sandbox record with error.
+	if fillPauseBindingInfoFromMaster(ctx, req, rsp) {
+		return
+	}
 	if len(rsp.Data) == 0 {
 		setError(errorcode.ErrorCode_NotFoundAtCubelet, rsp)
 		return
@@ -233,4 +240,94 @@ func getContainerName(label map[string]string) string {
 		return name
 	}
 	return ""
+}
+
+// fillPauseBindingInfoFromMaster synthesizes Info from the pausesnap binding
+// when present. READY → PAUSED. CREATING/FAILED prefer Cubelet PAUSING/PAUSED
+// when the node already finished Pause (Master RPC may have timed out); otherwise
+// CREATING → PAUSING and FAILED → UNKNOWN + pause error. Overrides Cubelet
+// EXITED flicker during CoW Pause.
+func fillPauseBindingInfoFromMaster(ctx context.Context, req *types.GetCubeSandboxReq, rsp *types.GetCubeSandboxRes) bool {
+	if req == nil || rsp == nil || req.SandboxID == "" {
+		return false
+	}
+	proxyMap, ok := localcache.GetSandboxProxyMap(ctx, req.SandboxID)
+	if !ok || proxyMap == nil {
+		return false
+	}
+	rec, err := pausesnap.GetBySandbox(ctx, req.SandboxID)
+	if err != nil || rec == nil || strings.TrimSpace(rec.SnapshotID) == "" {
+		return false
+	}
+	status := strings.ToUpper(strings.TrimSpace(rec.Status))
+	ann := map[string]string{
+		constants.CubeAnnotationPauseSnapshotID: rec.SnapshotID,
+	}
+	var st int32
+	switch status {
+	case "READY":
+		st = int32(cubebox.ContainerState_CONTAINER_PAUSED)
+	case pausesnap.StatusFailed:
+		// Master timed out / failed, but Cubelet may still have reached PAUSED.
+		// Prefer the node view so Info/List stay usable; Resume heals separately.
+		if cubeletReportsPauseState(rsp) {
+			return false
+		}
+		st = int32(cubebox.ContainerState_CONTAINER_UNKNOWN)
+		errMsg := strings.TrimSpace(rec.LastError)
+		if errMsg == "" {
+			errMsg = "pause failed; sandbox may be unrecoverable"
+		}
+		ann[constants.CubeAnnotationPauseError] = errMsg
+	case "CREATING":
+		// Still in flight. Prefer Cubelet PAUSING/PAUSED when present.
+		if cubeletReportsPauseState(rsp) {
+			return false
+		}
+		st = int32(cubebox.ContainerState_CONTAINER_PAUSING)
+	default:
+		return false
+	}
+	// The pause binding replaces Cubelet's normal info payload with a synthetic
+	// paused view. Carry the lifecycle fields into that replacement so clients
+	// do not lose endAt or the explicit never-timeout signal while paused.
+	endAt, timeoutSeconds := LookupSandboxTimeout(ctx, req.SandboxID)
+	one := &types.SandboxData{
+		SandboxID:      req.SandboxID,
+		Status:         st,
+		HostIP:         proxyMap.HostIP,
+		SandboxIP:      proxyMap.SandboxIP,
+		Annotations:    ann,
+		EndAt:          endAt,
+		TimeoutSeconds: timeoutSeconds,
+		Containers: []*types.ContainerInfo{
+			{
+				ContainerID: req.SandboxID,
+				Status:      st,
+			},
+		},
+	}
+	if n, exist := localcache.GetNodesByIp(proxyMap.HostIP); exist {
+		one.HostID = n.ID()
+	}
+	rsp.Data = []*types.SandboxData{one}
+	rsp.Ret.RetCode = int(errorcode.ErrorCode_Success)
+	rsp.Ret.RetMsg = errorcode.ErrorCode_Success.String()
+	return true
+}
+
+func cubeletReportsPauseState(rsp *types.GetCubeSandboxRes) bool {
+	if rsp == nil {
+		return false
+	}
+	for _, d := range rsp.Data {
+		if d == nil {
+			continue
+		}
+		if d.Status == int32(cubebox.ContainerState_CONTAINER_PAUSING) ||
+			d.Status == int32(cubebox.ContainerState_CONTAINER_PAUSED) {
+			return true
+		}
+	}
+	return false
 }

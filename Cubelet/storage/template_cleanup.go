@@ -51,6 +51,18 @@ func CleanupTemplateLocalData(ctx context.Context, templateID, snapshotPath stri
 
 	if snapshotPath != "" {
 		remove(snapshotPath)
+		// Catalog SnapshotPath is .../cubebox/<id>/<specDir>. Removing only the
+		// leaf leaves an empty <id> parent behind (observed as empty dirs under
+		// DefaultSnapshotDir/cubebox). When the leaf's parent is the snap/template
+		// id directory, remove that too. Skip when snapshotPath already points at
+		// the id directory (catalog-miss / ensureSnapshotCleanupPath path).
+		cleanSnap := filepath.Clean(snapshotPath)
+		if filepath.Base(cleanSnap) != templateID {
+			parent := filepath.Dir(cleanSnap)
+			if filepath.Base(parent) == templateID {
+				remove(parent)
+			}
+		}
 	}
 
 	localStorage.tmpPoolFormat.Delete(templateID)

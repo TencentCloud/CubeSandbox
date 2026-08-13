@@ -80,6 +80,13 @@ func RecoverPod(ctx context.Context, client *containerd.Client, cb *cubeboxstore
 	if cb.Version == "" {
 		cb.Version = cb.GetVersion()
 	}
+	// Paused tombstones have no live containerd/shim task; keep store as-is for List.
+	if cb.GetStatus() != nil && cb.GetStatus().IsPaused() {
+		if cb.SandboxID == "" {
+			cb.SandboxID = cb.ID
+		}
+		return nil
+	}
 
 	var mainContainer *cubeboxstore.Container
 

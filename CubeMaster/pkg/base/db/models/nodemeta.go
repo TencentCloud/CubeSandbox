@@ -25,6 +25,16 @@ type NodeRegistration struct {
 	QuotaMemMB          int64  `gorm:"column:quota_mem_mb"`
 	CreateConcurrentNum int64  `gorm:"column:create_concurrent_num"`
 	MaxMvmNum           int64  `gorm:"column:max_mvm_num"`
+	HostFactsJSON       string `gorm:"column:host_facts_json"`
+	// Promoted queryable host-fact keys, denormalised from HostFactsJSON so the
+	// compatible-nodes lookup can filter server-side on the two required
+	// (blocking) restore-compat keys. CPUVendor/CPUModel are informational
+	// (empty on ARM) and are stored but not indexed. host_facts_json remains the
+	// source of truth for the full fact set (taint gate + informational dims).
+	CPUVendor         string `gorm:"column:cpu_vendor"`
+	CPUModel          string `gorm:"column:cpu_model"`
+	CPUIDHash         string `gorm:"column:cpuid_hash"`
+	HostKernelRelease string `gorm:"column:host_kernel_release"`
 }
 
 func (NodeRegistration) TableName() string {

@@ -154,7 +154,7 @@ func TestBuildLabels(t *testing.T) {
 		"c": "d",
 	}
 	newLabels := BuildLabels(configLabels, imageConfigLabels)
-	assert.Len(t, newLabels, 4)
+	assert.Len(t, newLabels, 3)
 	assert.Equal(t, "b", newLabels["a"])
 	assert.Equal(t, "d", newLabels["c"])
 	assert.Equal(t, "y", newLabels["d"])

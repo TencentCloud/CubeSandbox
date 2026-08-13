@@ -83,7 +83,11 @@ cd "$REPO_ROOT"
 WITH_TESTS=(
 	"cubeops|Go|0|make cubeops-test"
 	"cubemaster|Go|0|make builder-run BUILDER_CMD='cd /workspace/CubeMaster && go mod download && make proto && if [ -f test/conf.yaml ]; then export CUBE_MASTER_CONFIG_PATH=/workspace/CubeMaster/test/conf.yaml; fi && CI=true go test -short -timeout=20m ./api/... ./pkg/...'"
-	"network-agent|Go|0|make network-agent-test"
+	# cubelet-network: the standalone network-agent module was removed in #1285 and
+	# folded into Cubelet/network/runtime (NetworkController). Its tests moved there
+	# and need the generated CubeNet/cubevs code but no cubecow/CGO, so build cubevs
+	# then run just the runtime package rather than the whole Cubelet suite.
+	"cubelet-network|Go|0|make builder-run BUILDER_CMD='cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && go mod download && go test ./network/runtime/...'"
 	"cubecow|Go+CGO|0|make cubecow-test-native"
 	"cube-lifecycle-manager|Go|0|make builder-run BUILDER_CMD='cd /workspace/cube-lifecycle-manager && go mod download && go test ./...'"
 	"cube-api|Rust|0|make cube-api-test"
@@ -95,11 +99,29 @@ WITH_TESTS=(
 	# toolchain is sufficient and skipping the container is faster.
 	"cubelog|Go|0|cd cubelog && go test -short ./..."
 	"cubedb|Go|0|cd CubeDB && go mod download && go test ./..."
+	# cubelet runs only ./pkg/... here; the cgroupfs/host-cap-dependent tests
+	# live under ./plugins/... and ./services/... and are not in this set, so
+	# the pkg tests are self-contained in the builder.
+	"cubelet|Go|0|make builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && make proto && go test -short ./pkg/...'"
+	# Only unit tests (--lib --bins) run here; the tests/integration.rs target
+	# needs a full VM (OS disk images, sudo/ip networking, VFIO, windows guest)
+	# and is excluded so `run.sh hypervisor` exercises the self-contained tests.
+	# This entry does NOT pass /dev/kvm into the builder, so the vmm/hypervisor
+	# crate tests that open /dev/kvm at runtime are never reached here — see
+	# `hypervisor-kvm` below for those.
+	"hypervisor|Rust|1|make builder-run BUILDER_CMD='cd /workspace/hypervisor && cargo test --features kvm --lib --bins'"
 )
 
 GATED_TESTS=(
-	"cubelet|Go|0|some pkg tests need a writable cgroupfs / host caps the builder lacks|make builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && make proto && go test -short ./pkg/...'"
-	"hypervisor|Rust|1|integration tests need a full VM (windows guest, RAM hotplug)|make builder-run BUILDER_CMD='cd /workspace/hypervisor && cargo test --features kvm'"
+	# hypervisor-kvm exercises the tests that need a real /dev/kvm at runtime:
+	# the `vmm` and `hypervisor` crate unit tests call hypervisor::new() /
+	# create_vm(), which fail without KVM (verified: 4/4 vmm cpu:: tests fail with
+	# no device, pass with it). The device is passed into the builder container via
+	# BUILDER_RUN_EXTRA_MOUNTS='--device /dev/kvm'. Scoped to these two crates
+	# rather than the whole workspace because a full --workspace test build trips a
+	# pre-existing `#![deny(missing_docs)]` error in the rate_limiter crate that is
+	# unrelated to KVM. needs_kvm=1 so `--no-kvm` skips it.
+	"hypervisor-kvm|Rust|1|runtime KVM tests need /dev/kvm passed into the builder (vmm+hypervisor crates)|make builder-run BUILDER_RUN_EXTRA_MOUNTS='--device /dev/kvm' BUILDER_CMD='cd /workspace/hypervisor && cargo test --features kvm -p vmm -p hypervisor --lib --bins'"
 )
 
 NO_TESTS=(

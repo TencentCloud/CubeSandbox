@@ -2594,6 +2594,10 @@ impl VmConfig {
         if let Some(balloon) = &self.balloon {
             let mut ram_size = self.memory.size;
 
+            if let Some(hotplugged_size) = &self.memory.hotplugged_size {
+                ram_size += hotplugged_size;
+            }
+
             if let Some(zones) = &self.memory.zones {
                 for zone in zones {
                     ram_size += zone.size;

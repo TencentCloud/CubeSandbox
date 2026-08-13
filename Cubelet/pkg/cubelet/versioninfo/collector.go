@@ -27,7 +27,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/components"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/version"
 )
 
@@ -52,10 +52,13 @@ const (
 	manifestFileName     = "release-manifest.json"
 	componentVersionJSON = "version.json"
 	guestImageVerPath    = "cube-image/version"
-	guestAgentVerPath    = "cube-image/agent-version"
-	kernelVmlinuxPath    = "cube-kernel-scf/vmlinux"
-	cubeEgressVerPath    = "cube-egress/version"
-	maxVersionJSONBytes  = 64 << 10
+	// Preferred agent version marker (independent cube-agent component).
+	agentVerPath = "cube-agent/version"
+	// Legacy bake-into-guest-image marker; read as fallback during transition.
+	legacyGuestAgentVerPath = "cube-image/agent-version"
+	kernelVmlinuxPath       = "cube-kernel-scf/vmlinux"
+	cubeEgressVerPath       = "cube-egress/version"
+	maxVersionJSONBytes     = 64 << 10
 )
 
 // oneClickInstallLayout maps manifest component keys to the concrete one-click
@@ -65,7 +68,6 @@ var oneClickInstallLayout = map[string][][]string{
 	"cubemastercli":           {{"CubeMaster", "bin", "cubemastercli"}},
 	"cube-api":                {{"CubeAPI", "bin", "cube-api"}},
 	"cubecli":                 {{"Cubelet", "bin", "cubecli"}},
-	"network-agent":           {{"network-agent", "bin", "network-agent"}},
 	"containerd-shim-cube-rs": {{"cube-shim", "bin", "containerd-shim-cube-rs"}},
 	"cube-runtime":            {{"cube-shim", "bin", "cube-runtime"}},
 	"cube-egress":             {{"cube-egress", "version"}},
@@ -74,11 +76,11 @@ var oneClickInstallLayout = map[string][][]string{
 // pathAllowlist restricts which component keys may be accepted from each
 // directory's version.json.
 var pathAllowlist = map[string]map[string]struct{}{
-	"Cubelet":       {"cubelet": {}, "cubecli": {}},
-	"network-agent": {"network-agent": {}},
-	"cube-shim":     {"containerd-shim-cube-rs": {}, "cube-runtime": {}},
-	"cube-image":    {"guest-image": {}, "cube-agent": {}},
-	"cube-egress":   {"cube-egress": {}},
+	"Cubelet":     {"cubelet": {}, "cubecli": {}},
+	"cube-shim":   {"containerd-shim-cube-rs": {}, "cube-runtime": {}},
+	"cube-image":  {"guest-image": {}},
+	"cube-agent":  {"cube-agent": {}},
+	"cube-egress": {"cube-egress": {}},
 }
 
 // ComponentVersion is a pure-data version record.
@@ -150,11 +152,11 @@ type Collector struct {
 	kernelLinkRead   bool
 }
 
-// NewCollector builds a collector rooted at baseDir. An empty baseDir falls
-// back to the component manager's default versioned base dir.
+// NewCollector builds a collector rooted at baseDir (default: live toolbox).
+// It does not scan component_versions inventory.
 func NewCollector(baseDir string) *Collector {
 	if baseDir == "" {
-		baseDir = components.DefaultConfig().VersionedBaseDir
+		baseDir = templatetypes.DefaultToolboxRoot
 	}
 	bootstrap := strings.TrimSpace(os.Getenv("STATE_DIR"))
 	if bootstrap == "" {
@@ -243,7 +245,7 @@ func (c *Collector) CollectReport() CollectReport {
 	add(ComponentVersion{Component: ComponentGuestImage, Version: c.guestImageVersionLocked(), Source: SourceFile})
 	add(ComponentVersion{
 		Component: ComponentCubeAgent,
-		Version:   c.readSingleLine(filepath.Join(c.baseDir, guestAgentVerPath)),
+		Version:   c.agentVersionLocked(),
 		Source:    SourceFile,
 	})
 	add(ComponentVersion{
@@ -297,9 +299,9 @@ func (c *Collector) detectStageGapsLocked(report *CollectReport) {
 	}
 	checks := []staged{
 		{"Cubelet", ".staged-cubelet", ".staging-cubelet"},
-		{"network-agent", ".staged-network-agent", ".staging-network-agent"},
 		{"cube-shim", ".staged-cube-shim", ".staging-cube-shim"},
 		{"cube-image", ".staged-cube-guest", ".staging-cube-guest"},
+		{"cube-agent", ".staged-cube-agent", ".staging-cube-agent"},
 		{"cube-kernel-scf", ".staged-cube-kernel", ".staging-cube-kernel"},
 	}
 	for _, ch := range checks {
@@ -390,12 +392,10 @@ func (c *Collector) kernelFromJSONLocked() (ComponentVersion, string) {
 	if !ok {
 		return ComponentVersion{}, "kernel: missing variant " + variant
 	}
-	identity := strings.TrimSpace(entry.Version)
+	// Digest-only identity.
+	identity := templatetypes.ContentAddressedKernelIdentity(entry.DigestSHA256)
 	if identity == "" {
-		identity = kernelArtifactIdentity(entry.Tag, entry.DigestSHA256)
-	}
-	if identity == "" {
-		return ComponentVersion{}, "kernel: empty identity for " + variant
+		return ComponentVersion{}, "kernel: empty digest identity for " + variant
 	}
 	return ComponentVersion{
 		Component: ComponentKernel,
@@ -431,31 +431,26 @@ func (c *Collector) activeKernelVariantLocked() string {
 
 func (c *Collector) kernelVersionLocked(man *releaseManifest) ComponentVersion {
 	variant := c.activeKernelVariantLocked()
+	digest := man.Kernel.VMLinuxDigest
+	source := SourceManifest
 	switch variant {
 	case "pvm":
-		return ComponentVersion{
-			Component: ComponentKernel,
-			Version:   kernelArtifactIdentity(man.Kernel.PVMVersion, man.Kernel.VMLinuxPVMDigest),
-			Source:    SourceFile,
-			Variant:   "pvm",
-		}
+		digest = man.Kernel.VMLinuxPVMDigest
+		source = SourceFile
 	case "bm":
-		return ComponentVersion{
-			Component: ComponentKernel,
-			Version:   kernelArtifactIdentity(man.Kernel.Version, man.Kernel.VMLinuxDigest),
-			Source:    SourceFile,
-			Variant:   "bm",
-		}
+		source = SourceFile
+	default:
+		variant = "bm"
 	}
-	identity := kernelArtifactIdentity(man.Kernel.Version, man.Kernel.VMLinuxDigest)
+	identity := templatetypes.ContentAddressedKernelIdentity(digest)
 	if identity == "" {
 		return ComponentVersion{}
 	}
 	return ComponentVersion{
 		Component: ComponentKernel,
 		Version:   identity,
-		Source:    SourceManifest,
-		Variant:   "bm",
+		Source:    source,
+		Variant:   variant,
 	}
 }
 
@@ -542,6 +537,14 @@ func (c *Collector) guestImageVersionLocked() string {
 	}
 	c.guestImageVer = firstLine(data)
 	return c.guestImageVer
+}
+
+// agentVersionLocked prefers cube-agent/version, then legacy cube-image/agent-version.
+func (c *Collector) agentVersionLocked() string {
+	if v := c.readSingleLine(filepath.Join(c.baseDir, agentVerPath)); v != "" {
+		return v
+	}
+	return c.readSingleLine(filepath.Join(c.baseDir, legacyGuestAgentVerPath))
 }
 
 func (c *Collector) readSingleLine(path string) string {

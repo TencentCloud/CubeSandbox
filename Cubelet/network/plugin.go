@@ -28,7 +28,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/multimeta"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
 type delegateNetworkManager struct {
@@ -73,7 +73,7 @@ func init() {
 			if m.config.RootPath == "" {
 				m.config.RootPath = ic.Properties[plugins.PropertyStateDir]
 			}
-			if err = m.initDb(); err != nil {
+			if err = m.initDB(); err != nil {
 				return nil, err
 			}
 			m.allocationStore, err = networkstore.RecoverFromDB(m.db)
@@ -109,7 +109,7 @@ func (m *delegateNetworkManager) Init(ctx context.Context, opts *workflow.InitIn
 		return fmt.Errorf("%v  RemoveAll failed:%v", filepath.Join(m.config.RootPath, "db"), err.Error())
 	}
 
-	if err := m.initDb(); err != nil {
+	if err = m.initDB(); err != nil {
 		return err
 	}
 	m.allocationStore, err = networkstore.RecoverFromDB(m.db)
@@ -121,7 +121,7 @@ func (m *delegateNetworkManager) Init(ctx context.Context, opts *workflow.InitIn
 	return nil
 }
 
-func (m *delegateNetworkManager) initDb() error {
+func (m *delegateNetworkManager) initDB() error {
 	basePath := filepath.Join(m.config.RootPath, "db")
 	if err := os.MkdirAll(path.Clean(basePath), os.ModeDir|0755); err != nil {
 		return fmt.Errorf("init dir failed %s", err.Error())
@@ -185,27 +185,39 @@ func (m *delegateNetworkManager) Destroy(ctx context.Context, opts *workflow.Des
 		}
 	}()
 
-	alloc, err := m.allocationStore.Get(opts.SandboxID)
-	if err != nil {
-		if errors.Is(err, utils.ErrorKeyNotFound) {
-			log.G(ctx).Errorf("network %s not found", opts.SandboxID)
-			return nil
+	var alloc networkstore.NetworkAllocation
+	allocFound := false
+	if m.allocationStore != nil {
+		var getErr error
+		alloc, getErr = m.allocationStore.Get(opts.SandboxID)
+		if getErr != nil {
+			if !errors.Is(getErr, utils.ErrorKeyNotFound) {
+				return getErr
+			}
+			log.G(ctx).Warnf("network allocation metadata %s not found; destroying runtime state anyway", opts.SandboxID)
+		} else {
+			allocFound = true
 		}
-		return err
 	}
 
-	switch alloc.NetworkType {
-	case cubebox.NetworkType_tap.String():
+	if allocFound {
+		switch alloc.NetworkType {
+		case cubebox.NetworkType_tap.String():
+			err = m.tapPlugin.Destroy(ctx, opts)
+		default:
+			return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid network type %s", alloc.NetworkType)
+		}
+	} else {
 		err = m.tapPlugin.Destroy(ctx, opts)
-	default:
-		return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid network type %s", alloc.NetworkType)
 	}
 	if err != nil {
 		return ret.Errorf(errorcode.ErrorCode_DestroyNetworkFailed, "%s", err.Error())
 	}
 
-	if err := m.allocationStore.DeleteSync(opts.SandboxID); err != nil {
-		return ret.Errorf(errorcode.ErrorCode_UpdateLocalMetaDataFailed, "%s", err.Error())
+	if allocFound {
+		if err := m.allocationStore.DeleteSync(opts.SandboxID); err != nil {
+			return ret.Errorf(errorcode.ErrorCode_UpdateLocalMetaDataFailed, "%s", err.Error())
+		}
 	}
 
 	return nil

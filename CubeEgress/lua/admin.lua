@@ -1,8 +1,9 @@
 -- CubeSandbox cube-egress — Admin API router.
 --
--- Listening: 127.0.0.1:9090 (loopback only). Wired in nginx.conf in a
--- dedicated server block. NOT reachable by sandboxes; only by the
--- external management system on the same host.
+-- Listening: 127.0.0.1:9091 by default (loopback only; override with
+-- CUBE_EGRESS_ADMIN_PORT). Wired in nginx.conf in a dedicated server
+-- block. NOT reachable by sandboxes; only by the external management
+-- system on the same host.
 --
 -- Endpoints (all under /admin/v1):
 --   GET    /policies                  — full dump (sandbox_ip → REDACTED policy)

@@ -43,7 +43,7 @@ func (s *service) ListSandboxSnapshots(ctx context.Context, req *cubebox.ListSan
 		rsp.Ret.RetMsg = "ListSandboxSnapshots requires storage_backend=cubecow"
 		return rsp, nil
 	}
-	statuses, err := storage.InspectCowObjects(ctx, refs)
+	statuses, err := storage.InspectObjects(ctx, refs)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to inspect cubecow objects: %v", err)
@@ -90,7 +90,7 @@ func (s *service) GetStorageMetrics(ctx context.Context, req *cubebox.GetStorage
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve node id: %v", err)
 		return rsp, nil
 	}
-	metrics, err := storage.GetCowMetrics(ctx)
+	metrics, err := storage.ObjectMetrics(ctx)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to collect storage metrics: %v", err)

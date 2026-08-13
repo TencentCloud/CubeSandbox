@@ -1,8 +1,8 @@
 [Unit]
 Description=Cube Sandbox cube-egress host network rules (TPROXY + ip rule)
-After=network-online.target cube-sandbox-network-agent.service
+After=network-online.target cube-sandbox-cubelet.service
 Wants=network-online.target
-Requires=cube-sandbox-network-agent.service
+Requires=cube-sandbox-cubelet.service
 ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
 PartOf=cube-sandbox-control.target cube-sandbox-compute.target
 

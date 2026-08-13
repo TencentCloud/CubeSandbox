@@ -77,6 +77,38 @@ cubemastercli tpl create-from-image \
 
 > **镜像仓库说明：** 国内优先使用 `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest`；境外访问推荐使用 `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest`。
 
+#### 可选 — 在模板构建阶段注入 envd
+
+默认情况下，Cube 会按原样使用镜像，不会注入 `envd`。如果你的开发环境或代码沙箱镜像尚未包含 `envd`，或需要使用受控版本的 `envd`，可以显式开启：
+
+```bash
+cubemastercli tpl create-from-image \
+  --image     <your-image> \
+  --writable-layer-size 1G \
+  --expose-port 49983 \
+  --probe 49983 \
+  --probe-path /health \
+  --enable-inject-envd
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--enable-inject-envd` | 从 `cubemastercli` 上传一个 `envd` 二进制并写入模板 rootfs。 |
+| `--envd-path` | 运行 `cubemastercli` 的机器上的本地路径；仅在设置 `--enable-inject-envd` 时生效。若省略该参数，`cubemastercli` 会在可用时使用构建期内嵌的默认 `envd`。 |
+
+设置 `--enable-inject-envd` 后，`cubemastercli` 会选择 `envd` 二进制并通过 create-from-image 的 multipart 请求上传给 CubeMaster。`--envd-path` 是 `cubemastercli` 本地路径，不是 CubeMaster 宿主机路径，也不会作为路径发送给 CubeMaster。CubeMaster 只校验并注入本次请求上传的二进制，将其写入模板 rootfs 内的 `/usr/local/bin/envd`，并把 `sha256(uploaded bytes)` 纳入 rootfs artifact 指纹，避免复用由不同 `envd` 构建出的 artifact。
+
+上传的 `envd` 必须是非空 ELF 二进制，大小不能超过 16 MiB，并且需要与目标模板 rootfs 的操作系统和 CPU 架构兼容。例如，为 Linux x86_64 镜像注入的 `envd` 应该是可在该环境中运行的 Linux x86_64 ELF；如果模板镜像是其他架构，需要提供对应架构的 `envd`。
+
+如果 `cubemastercli` 构建时没有内嵌默认 `envd`，则使用 `--enable-inject-envd` 时必须显式传入 `--envd-path`。
+
+构建带内嵌默认 `envd` 的 `cubemastercli` 时，请先准备好 `envd` 二进制，然后在构建时传入 `ENVD_LOCAL_PATH`：
+
+```bash
+# 可使用官方 envd artifact（发布后）或开发环境中本地构建的 envd。
+make cubemastercli ENVD_LOCAL_PATH=/path/to/envd
+```
+
 ---
 
 ## 第二步 — 监控进度

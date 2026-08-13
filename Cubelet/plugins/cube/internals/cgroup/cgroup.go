@@ -224,6 +224,9 @@ func SetCubeboxCgroupLimit(ctx context.Context, group string, cpuQ resource.Quan
 }
 
 func AddProc(path string, pid uint64) error {
+	if l.poolV1Handle == nil {
+		return fmt.Errorf("cgroup plugin not initialized")
+	}
 	var err error
 
 	delay := 10 * time.Millisecond

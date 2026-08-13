@@ -2,7 +2,8 @@
 #
 # Guest rootfs image helpers shared by build-guest-image.sh and build-vm-assets.sh.
 # Requires lib/common.sh already sourced, plus:
-#   ROOT_DIR, CUBE_VERSION, CUBE_AGENT_BIN_OVERRIDE, CUBE_AGENT_BUILD_MODE
+#   ROOT_DIR, CUBE_VERSION, CUBE_INIT_BIN_OVERRIDE / CUBE_INIT_BUILD_MODE
+#   CUBE_AGENT_BIN_OVERRIDE, CUBE_AGENT_BUILD_MODE (for cube-agent.ext4)
 #   GUEST_IMAGE_WORK_DIR, GUEST_ROOTFS_DIR, GUEST_ROOTFS_TAR
 #   GUEST_IMAGE_DOCKERFILE, GUEST_IMAGE_CONTEXT_DIR, GUEST_IMAGE_REF, GUEST_IMAGE_VERSION
 # This file is a sourced library; do not set shell options here.
@@ -274,7 +275,7 @@ remove_path_with_optional_sudo() {
   }
 }
 
-inject_agent_into_guest_rootfs() {
+inject_init_into_guest_rootfs() {
   local guest_rootfs_dir="$1"
   local init_path="${guest_rootfs_dir}/sbin/init"
   local init_backup_path="${guest_rootfs_dir}/sbin/init.original"
@@ -284,7 +285,7 @@ inject_agent_into_guest_rootfs() {
   local hosts_tmp="${GUEST_IMAGE_WORK_DIR}/hosts"
   local resolv_tmp="${GUEST_IMAGE_WORK_DIR}/resolv.conf"
 
-  ensure_file "${AGENT_BIN}"
+  ensure_file "${INIT_BIN}"
 
   mkdir -p "${guest_rootfs_dir}/sbin" "${guest_rootfs_dir}/etc"
 
@@ -296,7 +297,7 @@ inject_agent_into_guest_rootfs() {
     }
   fi
 
-  copy_binary_with_deps "${AGENT_BIN}" "/sbin/init" "${guest_rootfs_dir}"
+  copy_binary_with_deps "${INIT_BIN}" "/sbin/init" "${guest_rootfs_dir}"
 
   if [[ ! -e "${rc_local_path}" ]]; then
     cat > "${rc_local_tmp}" <<'EOF'
@@ -341,10 +342,123 @@ EOF
   }
 }
 
+build_cube_init() {
+  if [[ -n "${CUBE_INIT_BIN_OVERRIDE:-}" ]]; then
+    ensure_file "${CUBE_INIT_BIN_OVERRIDE}"
+    log "using prebuilt cube-init: ${CUBE_INIT_BIN_OVERRIDE}"
+    printf '%s\n' "${CUBE_INIT_BIN_OVERRIDE}"
+    return 0
+  fi
+
+  case "${CUBE_INIT_BUILD_MODE:-local}" in
+    local)
+      require_cmd make
+      log "building cube-init via make"
+      (cd "${ROOT_DIR}/guest-init" && make) >&2
+      ;;
+    docker)
+      require_cmd make
+      require_cmd docker
+      log "building cube-init via make in builder"
+      (cd "${ROOT_DIR}" && make cube-init) >&2
+      find_built_binary "${ROOT_DIR}/_output/bin" "cube-init"
+      return 0
+      ;;
+    *)
+      die "unsupported ONE_CLICK_CUBE_INIT_BUILD_MODE: ${CUBE_INIT_BUILD_MODE}"
+      ;;
+  esac
+
+  find_built_binary "${ROOT_DIR}/guest-init/target" "cube-init"
+}
+
+# Build an independent cube-agent.ext4 containing only /cube-agent (2 MiB aligned).
+# Does NOT package e2fsprogs tools. Agent binary must be a static ELF.
+install_static_agent_binary() {
+  local src_bin="$1"
+  local dst_root="$2"
+  local dst="${dst_root}/cube-agent"
+  local ldd_out=""
+
+  ensure_file "${src_bin}"
+  mkdir -p "${dst_root}"
+
+  # Refuse dynamic binaries so host ABI/libs never leak into the plane file.
+  if command -v ldd >/dev/null 2>&1; then
+    ldd_out="$(ldd "${src_bin}" 2>&1 || true)"
+    if printf '%s\n' "${ldd_out}" | grep -qE '=>|[[:space:]]/lib|ld-linux|ld-musl'; then
+      die "cube-agent for agent.ext4 must be a static ELF (got dynamic deps): ${src_bin}"
+    fi
+  fi
+  if command -v file >/dev/null 2>&1; then
+    if ! file -b "${src_bin}" | grep -qiE 'ELF.*(statically linked|static-pie|static )'; then
+      # Some file(1) versions only say "ELF 64-bit LSB executable" for musl static;
+      # if ldd already confirmed non-dynamic, accept. Otherwise fail closed when
+      # ldd was unavailable.
+      if ! command -v ldd >/dev/null 2>&1; then
+        die "cube-agent for agent.ext4 must be a static ELF (file(1) check failed): ${src_bin}"
+      fi
+    fi
+  fi
+
+  install -m 0755 "${src_bin}" "${dst}"
+  [[ -x "${dst}" ]] || die "failed to install ${dst}"
+}
+
+build_agent_ext4_artifacts() {
+  local agent_bin="$1"
+  local output_img="$2"
+  local output_version="$3"
+  local work_dir="${GUEST_IMAGE_WORK_DIR:-${ONE_CLICK_WORK_ROOT:-.}/agent-ext4-build}/agent-rootfs"
+  local rootfs_size_bytes
+  local image_size_bytes
+  local stage_dir
+  local stage_img
+  local stage_version
+
+  ensure_file "${agent_bin}"
+  mkdir -p "$(dirname "${output_img}")" "$(dirname "${output_version}")"
+  remove_path_with_optional_sudo "${work_dir}"
+  mkdir -p "${work_dir}"
+
+  install_static_agent_binary "${agent_bin}" "${work_dir}"
+
+  rootfs_size_bytes="$(directory_size_bytes "${work_dir}")"
+  # Agent ext4 is tiny; start from at least 16 MiB then shrink+align.
+  image_size_bytes="$(( rootfs_size_bytes + 8 * 1024 * 1024 ))"
+  if (( image_size_bytes < 16 * 1024 * 1024 )); then
+    image_size_bytes="$((16 * 1024 * 1024))"
+  fi
+  # Round up to 2 MiB for truncate before mkfs.
+  image_size_bytes="$(( ((image_size_bytes + PMEM_ALIGN_BYTES - 1) / PMEM_ALIGN_BYTES) * PMEM_ALIGN_BYTES ))"
+
+  # Build into a staging directory then rename for a more atomic publish.
+  stage_dir="$(dirname "${output_img}")/.cube-agent-stage.$$"
+  remove_path_with_optional_sudo "${stage_dir}"
+  mkdir -p "${stage_dir}"
+  stage_img="${stage_dir}/cube-agent.ext4"
+  stage_version="${stage_dir}/version"
+
+  truncate -s "${image_size_bytes}" "${stage_img}"
+  run_mkfs_ext4_with_optional_sudo -F -b 4096 -d "${work_dir}" "${stage_img}" >&2
+
+  # Minimal reserved headroom for agent.ext4 (still 2 MiB aligned by shrink).
+  SHRINK_RESERVED_BYTES="${ONE_CLICK_AGENT_EXT4_RESERVED_BYTES:-$((2 * 1024 * 1024))}" \
+    shrink_ext4_image "${stage_img}"
+
+  printf '%s\n' "${CUBE_VERSION}" > "${stage_version}"
+  remove_path_with_optional_sudo "${work_dir}"
+
+  mv -f "${stage_img}" "${output_img}"
+  mv -f "${stage_version}" "${output_version}"
+  remove_path_with_optional_sudo "${stage_dir}"
+  log "cube-agent.ext4 ready: ${output_img}"
+}
+
+
 build_guest_image_artifacts() {
   local output_img="$1"
   local output_version="$2"
-  local output_agent_version="$3"
   local rootfs_size_bytes
   local image_size_bytes
   local guest_container_id=""
@@ -352,7 +466,7 @@ build_guest_image_artifacts() {
   ensure_dir "${GUEST_IMAGE_CONTEXT_DIR}"
   ensure_file "${GUEST_IMAGE_DOCKERFILE}"
 
-  mkdir -p "${GUEST_IMAGE_WORK_DIR}" "$(dirname "${output_img}")" "$(dirname "${output_version}")" "$(dirname "${output_agent_version}")"
+  mkdir -p "${GUEST_IMAGE_WORK_DIR}" "$(dirname "${output_img}")" "$(dirname "${output_version}")"
   remove_path_with_optional_sudo "${GUEST_ROOTFS_DIR}" "${GUEST_ROOTFS_TAR}"
 
   log "building guest image from ${GUEST_IMAGE_DOCKERFILE}"
@@ -366,7 +480,7 @@ build_guest_image_artifacts() {
 
   mkdir -p "${GUEST_ROOTFS_DIR}"
   tar -xf "${GUEST_ROOTFS_TAR}" -C "${GUEST_ROOTFS_DIR}"
-  inject_agent_into_guest_rootfs "${GUEST_ROOTFS_DIR}"
+  inject_init_into_guest_rootfs "${GUEST_ROOTFS_DIR}"
 
   rootfs_size_bytes="$(directory_size_bytes "${GUEST_ROOTFS_DIR}")"
   image_size_bytes="$(calculate_guest_image_size_bytes "${rootfs_size_bytes}")"
@@ -379,7 +493,6 @@ build_guest_image_artifacts() {
   shrink_ext4_image "${output_img}"
 
   printf '%s\n' "${GUEST_IMAGE_VERSION}" > "${output_version}"
-  printf '%s\n' "${CUBE_VERSION}" > "${output_agent_version}"
 
   docker rm -f "${guest_container_id}" >/dev/null 2>&1 || true
   guest_container_id=""

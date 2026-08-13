@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Build guest rootfs artifacts (cube-guest-image-cpu.img + version + agent-version).
+# Build guest rootfs artifacts (cube-guest-image-cpu.img + version).
+# Guest image contains cube-init as /sbin/init (NOT cube-agent).
 #
 # Usage:
-#   OUTPUT_DIR=/path/to/cube-image [ONE_CLICK_CUBE_AGENT_BIN=/path/to/cube-agent] \
+#   OUTPUT_DIR=/path/to/cube-image [ONE_CLICK_CUBE_INIT_BIN=/path/to/cube-init] \
 #     CUBE_VERSION=v0.6.0 ./deploy/one-click/build-guest-image.sh
 #
-# When ONE_CLICK_CUBE_AGENT_BIN is unset, cube-agent is built locally (or via
-# ONE_CLICK_CUBE_AGENT_BUILD_MODE=docker).
+# When ONE_CLICK_CUBE_INIT_BIN is unset, cube-init is built locally (or via
+# ONE_CLICK_CUBE_INIT_BUILD_MODE=docker).
 #
 # When ONE_CLICK_GUEST_IMAGE_TAR is set to a cube-guest-image-*.tar.gz (same
 # layout as the Release / docker asset), extract it into OUTPUT_DIR and skip
@@ -32,7 +33,6 @@ install_prebuilt_guest_image_tar() {
   local required=(
     cube-guest-image-cpu.img
     version
-    agent-version
   )
   local name
 
@@ -80,8 +80,8 @@ GUEST_IMAGE_CONTEXT_DIR="${ONE_CLICK_GUEST_IMAGE_CONTEXT_DIR:-$(dirname "${GUEST
 GUEST_IMAGE_REF="${ONE_CLICK_GUEST_IMAGE_REF:-cube-sandbox-guest-image:one-click}"
 GUEST_IMAGE_VERSION="${ONE_CLICK_GUEST_IMAGE_VERSION:-${CUBE_VERSION:-${LATEST_RELEASE_TAG:-$(latest_git_revision "${ROOT_DIR}")}}}"
 
-CUBE_AGENT_BUILD_MODE="${ONE_CLICK_CUBE_AGENT_BUILD_MODE:-local}"
-CUBE_AGENT_BIN_OVERRIDE="${ONE_CLICK_CUBE_AGENT_BIN:-}"
+CUBE_INIT_BUILD_MODE="${ONE_CLICK_CUBE_INIT_BUILD_MODE:-local}"
+CUBE_INIT_BIN_OVERRIDE="${ONE_CLICK_CUBE_INIT_BIN:-}"
 
 # shellcheck source=./lib/guest-image.sh
 source "${SCRIPT_DIR}/lib/guest-image.sh"
@@ -98,7 +98,7 @@ require_cmd tar
 
 ensure_mkfs_ext4_supports_populate_dir
 
-AGENT_BIN="$(build_cube_agent)"
+INIT_BIN="$(build_cube_init)"
 
 remove_path_with_optional_sudo "${GUEST_IMAGE_WORK_DIR}"
 mkdir -p "${OUTPUT_DIR}"
@@ -106,7 +106,6 @@ mkdir -p "${OUTPUT_DIR}"
 log "building guest image artifacts into ${OUTPUT_DIR}"
 build_guest_image_artifacts \
   "${OUTPUT_DIR}/cube-guest-image-cpu.img" \
-  "${OUTPUT_DIR}/version" \
-  "${OUTPUT_DIR}/agent-version"
+  "${OUTPUT_DIR}/version"
 
 log "guest image artifacts ready: ${OUTPUT_DIR}"

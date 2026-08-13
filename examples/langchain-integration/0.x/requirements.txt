@@ -1,0 +1,8 @@
+# LangChain 0.x (legacy AgentExecutor API) — works on Python 3.9+
+# Pinned to a verified-compatible pair.
+langchain==0.3.23
+langchain-openai==0.3.12
+# Official CubeSandbox Python SDK (from cubesandbox import Sandbox).
+# >=0.6.0 for the envd-process commands/files API this demo relies on.
+cubesandbox>=0.6.0
+python-dotenv

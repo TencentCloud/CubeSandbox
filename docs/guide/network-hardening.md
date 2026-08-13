@@ -21,7 +21,8 @@ entire page and apply at least one of the hardening strategies below.
 | CubeAPI | `0.0.0.0` | 3000 | `CUBE_API_BIND` in `.env` | Sandbox lifecycle API |
 | Cubelet gRPC | `0.0.0.0` | 9999 | `tcp_address` in `Cubelet/config/config.toml` | Node management RPC, **no TLS** |
 | Cubelet HTTP | `0.0.0.0` | 9998 | `[http] address` in `Cubelet/config/config.toml` | Debug / metrics |
-| cube-proxy | `0.0.0.0` | 80 / 443 | `CUBE_PROXY_HTTP_PORT` / `CUBE_PROXY_HTTPS_PORT` | Intentionally public-facing |
+| cube-proxy | `0.0.0.0` | 80 / 443 / 9090 | `CUBE_PROXY_HTTP_PORT` / `CUBE_PROXY_HTTPS_PORT` / `CUBE_PROXY_GRPC_PORT` | Intentionally public-facing |
+| cube-egress admin | `127.0.0.1` | 9091 | `CUBE_EGRESS_ADMIN_PORT` in `.env` (keep Cubelet `cube_egress_admin_url` in sync) | Loopback-only policy API |
 | WebUI | `0.0.0.0` | 12088 | `WEB_UI_HOST_PORT` in `.env` (port only) | Dashboard |
 | MySQL | `127.0.0.1` | 3306 | Hardcoded in compose template | Already loopback-only |
 | Redis | `127.0.0.1` | 6379 | Hardcoded in compose template | Already loopback-only |
@@ -182,6 +183,7 @@ sudo ufw allow from 10.0.0.0/24 to any port 12088 proto tcp  # WebUI
 sudo ufw allow 22/tcp     # SSH
 sudo ufw allow 80/tcp     # cube-proxy (public if needed)
 sudo ufw allow 443/tcp    # cube-proxy TLS
+sudo ufw allow 9090/tcp   # cube-proxy plaintext gRPC (public if needed — restrict to trusted networks)
 sudo ufw enable
 ```
 

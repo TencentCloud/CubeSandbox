@@ -13,6 +13,30 @@ if [[ -f "${ENV_FILE}" ]]; then
   load_env_file "${ENV_FILE}"
 fi
 
+# tar_czf: create a gzip-compressed tarball, using pigz (parallel gzip) when it
+# is installed and falling back to tar's built-in single-threaded gzip
+# otherwise. The output is a standard .tar.gz in both cases, so consumers /
+# `tar xzf` are unaffected -- pigz only speeds up compression of the large guest
+# image + kernel payloads on multi-core hosts. ONE_CLICK_DISABLE_PIGZ=1 forces
+# the portable single-tool gzip path for environments that want a consistent,
+# single-threaded compressor rather than pigz's parallel block framing. (Note:
+# neither path is strictly bit-for-bit reproducible -- gzip still records an
+# mtime/OS byte in its header.)
+tar_czf() {
+  local out="$1"
+  local base_dir="$2"
+  local member="$3"
+  if [[ "${ONE_CLICK_DISABLE_PIGZ:-}" != "1" ]] && command -v pigz >/dev/null 2>&1; then
+    # Run the pipeline in a subshell with pipefail set there, so a tar failure
+    # in the pipe is caught even if a caller ever clears the global setting --
+    # and the option change stays scoped to the subshell instead of leaking back
+    # into the caller. This produces the shipped tarball.
+    ( set -o pipefail; tar -C "${base_dir}" -cf - "${member}" | pigz > "${out}" )
+  else
+    tar -C "${base_dir}" -czf "${out}" "${member}"
+  fi
+}
+
 WORK_ROOT="${ONE_CLICK_WORK_ROOT:-${SCRIPT_DIR}/.work}"
 RUNTIME_LAYOUT_DIR="${ONE_CLICK_RUNTIME_LAYOUT_DIR:-${WORK_ROOT}/runtime-layout}"
 CORE_BIN_DIR="${WORK_ROOT}/core-bin"
@@ -37,7 +61,12 @@ CUBE_VERSION_FROM_ENV="${CUBE_VERSION:-}"
 LATEST_RELEASE_TAG="$(git -C "${ROOT_DIR}" describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
 : "${CUBE_VERSION:=${LATEST_RELEASE_TAG:-0.0.0-dev}}"
 : "${CUBE_COMMIT:=$(git -C "${ROOT_DIR}" rev-parse HEAD 2>/dev/null || echo 'unknown')}"
-: "${CUBE_BUILD_TIME:=$(date -u +'%Y-%m-%dT%H:%M:%SZ')}"
+# Anchor to the HEAD commit date (UTC) so repeated builds on the same commit
+# embed a byte-identical value and reuse incremental caches; keep the manifest
+# built_at in step with the binaries' BuildTime when this script is invoked
+# directly. The builder wrapper exports the same value and pre-empts this. Falls
+# back to wall-clock outside a git tree; still overridable via the environment.
+: "${CUBE_BUILD_TIME:=$(TZ=UTC0 git -C "${ROOT_DIR}" show -s --format=%cd --date=format-local:'%Y-%m-%dT%H:%M:%SZ' HEAD 2>/dev/null || date -u +'%Y-%m-%dT%H:%M:%SZ')}"
 export CUBE_VERSION CUBE_COMMIT CUBE_BUILD_TIME
 
 DIST_VERSION="${ONE_CLICK_DIST_VERSION:-${CUBE_VERSION_FROM_ENV:-${LATEST_RELEASE_TAG:-$(latest_git_revision "${ROOT_DIR}")}}}"
@@ -48,7 +77,6 @@ CUBEMASTER_BUILD_MODE="${ONE_CLICK_CUBEMASTER_BUILD_MODE:-local}"
 CUBELET_BUILD_MODE="${ONE_CLICK_CUBELET_BUILD_MODE:-local}"
 API_BUILD_MODE="${ONE_CLICK_CUBE_API_BUILD_MODE:-local}"
 CUBE_OPS_BUILD_MODE="${ONE_CLICK_CUBE_OPS_BUILD_MODE:-local}"
-NETWORK_AGENT_BUILD_MODE="${ONE_CLICK_NETWORK_AGENT_BUILD_MODE:-local}"
 CUBEVSMAPDUMP_BUILD_MODE="${ONE_CLICK_CUBEVSMAPDUMP_BUILD_MODE:-local}"
 
 CUBEMASTER_BIN_OVERRIDE="${ONE_CLICK_CUBEMASTER_BIN:-}"
@@ -57,7 +85,6 @@ CUBELET_BIN_OVERRIDE="${ONE_CLICK_CUBELET_BIN:-}"
 CUBECLI_BIN_OVERRIDE="${ONE_CLICK_CUBECLI_BIN:-}"
 API_BIN_OVERRIDE="${ONE_CLICK_CUBE_API_BIN:-}"
 CUBE_OPS_BIN_OVERRIDE="${ONE_CLICK_CUBE_OPS_BIN:-}"
-NETWORK_AGENT_BIN_OVERRIDE="${ONE_CLICK_NETWORK_AGENT_BIN:-}"
 CUBEVSMAPDUMP_BIN_OVERRIDE="${ONE_CLICK_CUBEVSMAPDUMP_BIN:-}"
 
 go_version_ldflags() {
@@ -177,40 +204,76 @@ generate_release_manifest() {
     guest_image_version="$(head -n1 "${guest_image_ver_file}" | tr -d '[:space:]')"
   fi
 
+  # Prefer independent cube-agent/version; fall back to legacy cube-image/agent-version.
   local guest_agent_version="${cube_version}"
-  local guest_agent_ver_file="${RUNTIME_LAYOUT_DIR}/cube-image/agent-version"
+  local guest_agent_ver_file="${RUNTIME_LAYOUT_DIR}/cube-agent/version"
   if [[ -f "${guest_agent_ver_file}" ]]; then
     guest_agent_version="$(head -n1 "${guest_agent_ver_file}" | tr -d '[:space:]')"
+  elif [[ -f "${RUNTIME_LAYOUT_DIR}/cube-image/agent-version" ]]; then
+    guest_agent_version="$(head -n1 "${RUNTIME_LAYOUT_DIR}/cube-image/agent-version" | tr -d '[:space:]')"
   fi
 
   # Guest-image path
   local guest_image_path="${RUNTIME_LAYOUT_DIR}/cube-image/cube-guest-image-cpu.img"
+  local agent_ext4_path="${RUNTIME_LAYOUT_DIR}/cube-agent/cube-agent.ext4"
 
   # Kernel paths
   local kernel_vmlinux="${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-bm"
   local kernel_pvm_vmlinux="${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-pvm"
 
-  # Kernel versions (use CI env or hardcoded tags from release-one-click.yml).
-  local kernel_version="${KERNEL_TAG:-unknown}"
-  local kernel_pvm_version="${PVM_KERNEL_TAG:-unknown}"
-  if [[ "${kernel_version}" == "unknown" ]]; then
-    log "WARNING: KERNEL_TAG is not set; release manifest will record kernel.version=unknown"
+  # Prefer version.json variant digests for kernel inventory keys.
+  local kernel_version=""
+  local kernel_pvm_version=""
+  local kernel_json="${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/version.json"
+  if [[ -f "${kernel_json}" ]]; then
+    kernel_version="$(python3 - "${kernel_json}" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(((d.get("variants") or {}).get("bm") or {}).get("version") or "", end="")
+PY
+)"
+    kernel_pvm_version="$(python3 - "${kernel_json}" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(((d.get("variants") or {}).get("pvm") or {}).get("version") or "", end="")
+PY
+)"
   fi
-  if [[ -f "${kernel_pvm_vmlinux}" && "${kernel_pvm_version}" == "unknown" ]]; then
-    log "WARNING: PVM_KERNEL_TAG is not set; release manifest will record kernel.pvm_version=unknown"
+  if [[ -z "${kernel_version}" || "${kernel_version}" == "unknown" ]]; then
+    kernel_version="$(file_content_version "${kernel_vmlinux}")" || kernel_version="unknown"
+  fi
+  if [[ "${kernel_version}" == "unknown" ]]; then
+    log "WARNING: cannot resolve kernel.version (no vmlinux-bm); manifest will record unknown"
+  else
+    log "release manifest kernel.version=${kernel_version} (content short hash)"
   fi
 
-  # Agent binary: prefer CI override, then search known build output paths.
-  local agent_bin="${ONE_CLICK_CUBE_AGENT_BIN:-}"
-  if [[ -z "${agent_bin}" ]]; then
-    for candidate in \
-      "${ROOT_DIR}/agent/target/x86_64-unknown-linux-musl/release/cube-agent" \
-      "${ROOT_DIR}/agent/target/release/cube-agent"; do
-      if [[ -f "${candidate}" ]]; then
-        agent_bin="${candidate}"
-        break
-      fi
-    done
+  if [[ -z "${kernel_pvm_version}" || "${kernel_pvm_version}" == "unknown" ]]; then
+    if [[ -f "${kernel_pvm_vmlinux}" ]]; then
+      kernel_pvm_version="$(file_content_version "${kernel_pvm_vmlinux}")" \
+        || kernel_pvm_version="unknown"
+      log "release manifest kernel.pvm_version=${kernel_pvm_version} (content short hash)"
+    else
+      kernel_pvm_version="unknown"
+    fi
+  else
+    log "release manifest kernel.pvm_version=${kernel_pvm_version} (content short hash)"
+  fi
+
+  # Agent digest: prefer cube-agent.ext4; fall back to ELF binary for older layouts.
+  local agent_artifact="${agent_ext4_path}"
+  if [[ ! -f "${agent_artifact}" ]]; then
+    agent_artifact="${ONE_CLICK_CUBE_AGENT_BIN:-}"
+    if [[ -z "${agent_artifact}" ]]; then
+      for candidate in \
+        "${ROOT_DIR}/agent/target/x86_64-unknown-linux-musl/release/cube-agent" \
+        "${ROOT_DIR}/agent/target/release/cube-agent"; do
+        if [[ -f "${candidate}" ]]; then
+          agent_artifact="${candidate}"
+          break
+        fi
+      done
+    fi
   fi
 
   # Shim + runtime binaries: already copied to RUNTIME_LAYOUT_DIR by build-vm-assets.sh.
@@ -220,7 +283,7 @@ generate_release_manifest() {
   python3 - "${output}" "${release_version}" "${cube_version}" "${cube_commit}" "${cube_build_time}" \
       "${guest_image_version}" "${guest_agent_version}" "${kernel_version}" "${kernel_pvm_version}" \
       "${CORE_BIN_DIR}" \
-      "${agent_bin}" "${shim_bin}" "${runtime_bin}" \
+      "${agent_artifact}" "${shim_bin}" "${runtime_bin}" \
       "${guest_image_path}" "${kernel_vmlinux}" "${kernel_pvm_vmlinux}" <<'PY'
 import json, os, sys, hashlib
 
@@ -265,7 +328,7 @@ def optional_sha256(path):
 components = {}
 
 # ── Go binaries from CORE_BIN_DIR ──
-for name in ["cubemaster", "cubemastercli", "cubelet", "cubecli", "network-agent"]:
+for name in ["cubemaster", "cubemastercli", "cubelet", "cubecli"]:
     path = os.path.join(core_bin_dir, name)
     components[name] = {
         "version": cube_version,
@@ -405,6 +468,9 @@ generate_cube_proxy_nginx_template() {
 # the backend instead of redirecting to HTTPS, because some upstream clients
 # require plain HTTP. If you need a 301 redirect, override the HTTP server
 # block in your own deployment.
+#
+# The gRPC server block (port __CUBE_PROXY_GRPC_PORT__) is a plaintext HTTP/2
+# listener for sandbox gRPC ingress.
 EOF
 )
 
@@ -414,6 +480,7 @@ EOF
       -e 's|^worker_processes [0-9]\+;|worker_processes auto;|' \
       -e 's|^\(\s*listen \)8081\( reuseport;\)|\1__CUBE_PROXY_HTTP_PORT__\2|' \
       -e 's|^\(\s*listen \)8080\( ssl reuseport;\)|\1__CUBE_PROXY_HTTPS_PORT__\2|' \
+      -e 's|^\(\s*listen \)9090\( http2 reuseport;\)|\1__CUBE_PROXY_GRPC_PORT__\2|' \
       -e 's|^\(\s*set \$host_proxy_port \)8081;|\1__CUBE_PROXY_HTTP_PORT__;|' \
       -e 's|^\(\s*set \$host_proxy_port \)8080;|\1__CUBE_PROXY_HTTPS_PORT__;|' \
       -e 's|^\(\s*listen \)127\.0\.0\.1:8082;|\1__CUBE_PROXY_ADMIN_LISTEN__:8082;|' \
@@ -422,11 +489,119 @@ EOF
       "${src}"
   } > "${dst}"
 
-  for token in __CUBE_PROXY_HTTP_PORT__ __CUBE_PROXY_HTTPS_PORT__ __CUBE_PROXY_ADMIN_LISTEN__ __CUBE_PROXY_SSL_CERT__ __CUBE_PROXY_SSL_KEY__; do
+  for token in __CUBE_PROXY_HTTP_PORT__ __CUBE_PROXY_HTTPS_PORT__ __CUBE_PROXY_GRPC_PORT__ __CUBE_PROXY_ADMIN_LISTEN__ __CUBE_PROXY_SSL_CERT__ __CUBE_PROXY_SSL_KEY__; do
     if ! grep -q -F "${token}" "${dst}"; then
       die "generated nginx.conf.template is missing placeholder ${token}; upstream CubeProxy/nginx.conf may have changed"
     fi
   done
+}
+
+# WebUI (npm) build state. The npm build only reads WEB_SOURCE_DIR and writes
+# WEB_SOURCE_DIR/dist; it shares no inputs or outputs with the guest-image /
+# runtime-layout build, so it can run concurrently with build-vm-assets.sh and
+# then be collected later. WEB_BUILD_ASYNC_PID is the backgrounded builder (0 =
+# none started; the synchronous path in build_web_dist runs instead).
+WEB_BUILD_ASYNC_PID=0
+# Set to 1 once a successful async build has been collected and its dist is on
+# disk, so build_web_dist copies the result instead of re-`wait`ing a
+# already-reaped pid (which would return 127 and be misread as a failure) or
+# rebuilding synchronously.
+WEB_BUILD_ASYNC_DONE=0
+WEB_BUILD_ASYNC_LOG="${WORK_ROOT}/web-build.log"
+
+# Replay the captured async web-build log to stderr. Called on both success and
+# failure so that tsc/vite diagnostics that exit 0 (warnings) stay visible --
+# mirroring the builder-track policy where every track's log is always replayed
+# on completion, not only on failure.
+_replay_web_build_log() {
+  echo "[one-click] ----- begin web build log -----" >&2
+  cat "${WEB_BUILD_ASYNC_LOG}" >&2 || true
+  echo "[one-click] ----- end web build log -----" >&2
+}
+
+# Wait for the in-flight async build, replay its log, and die on failure. Clears
+# WEB_BUILD_ASYNC_PID (so the EXIT trap and any later call become no-ops) and
+# marks the dist ready on success. Caller must have confirmed WEB_BUILD_ASYNC_PID
+# is nonzero.
+_collect_web_build_async() {
+  local web_pid="${WEB_BUILD_ASYNC_PID}"
+  WEB_BUILD_ASYNC_PID=0
+  if ! wait "${web_pid}"; then
+    _replay_web_build_log
+    die "web dashboard build failed"
+  fi
+  _replay_web_build_log
+  WEB_BUILD_ASYNC_DONE=1
+}
+
+# Non-blocking check: if the async web build has ALREADY exited, collect it now.
+# On failure this aborts immediately -- so a fast failure (bad lockfile, TS
+# error) surfaces before the remaining serial work (component binary builds +
+# packaging) runs, instead of being masked until build_web_dist near the very
+# end. If the build is still running, return at once and let it keep overlapping.
+# No-op when no async build is in flight or it was already collected.
+poll_web_build_async() {
+  [[ "${WEB_BUILD_ASYNC_PID}" -ne 0 ]] || return 0
+  kill -0 "${WEB_BUILD_ASYNC_PID}" 2>/dev/null && return 0
+  log "async web dashboard build finished early; collecting"
+  _collect_web_build_async
+}
+
+# Reap a still-running async web build on exit/signal so npm is not orphaned.
+# WEB_BUILD_ASYNC_PID is a wrapper; group-kill its children, then the wrapper.
+cleanup_web_build_async() {
+  local child
+  [[ "${WEB_BUILD_ASYNC_PID}" -ne 0 ]] || return 0
+  if kill -0 "${WEB_BUILD_ASYNC_PID}" 2>/dev/null; then
+    while read -r child; do
+      [[ -n "${child}" ]] || continue
+      kill -- -"${child}" 2>/dev/null || kill "${child}" 2>/dev/null || true
+    done < <(pgrep -P "${WEB_BUILD_ASYNC_PID}" 2>/dev/null || true)
+    kill "${WEB_BUILD_ASYNC_PID}" 2>/dev/null || true
+    wait "${WEB_BUILD_ASYNC_PID}" 2>/dev/null || true
+  fi
+}
+trap cleanup_web_build_async EXIT
+trap 'cleanup_web_build_async; trap - INT; kill -INT $$' INT
+trap 'cleanup_web_build_async; trap - TERM; kill -TERM $$' TERM
+
+# Overlap npm with guest-image build. No-op unless npm + source are available
+# and ONE_CLICK_SEQUENTIAL_WEB_BUILD is unset. Keep the job off the caller's
+# tty (setsid -w, stdin=/dev/null) so it cannot race sudo password echo-off.
+start_web_build_async() {
+  [[ "${ONE_CLICK_SEQUENTIAL_WEB_BUILD:-}" != "1" ]] || return 0
+  [[ -z "${WEB_DIST_OVERRIDE}" ]] || return 0
+  command -v npm >/dev/null 2>&1 || return 0
+  [[ -d "${WEB_SOURCE_DIR}" ]] || return 0
+
+  mkdir -p "$(dirname "${WEB_BUILD_ASYNC_LOG}")"
+  log "building web dashboard (async, overlapping runtime layout build)"
+  # Wrapper keeps wait/$! correct; avoid bare `setsid cmd &` (can exit early).
+  (
+    if command -v setsid >/dev/null 2>&1; then
+      setsid -w bash -c 'cd "$1" && npm ci && npm run build' bash "${WEB_SOURCE_DIR}" \
+        </dev/null >"${WEB_BUILD_ASYNC_LOG}" 2>&1
+      exit $?
+    fi
+    set -m
+    ( cd "${WEB_SOURCE_DIR}" && npm ci && npm run build ) \
+      </dev/null >"${WEB_BUILD_ASYNC_LOG}" 2>&1 &
+    local child=$!
+    set +m
+    wait "${child}"
+    exit $?
+  ) &
+  WEB_BUILD_ASYNC_PID=$!
+}
+
+ensure_sudo_authenticated_for_packaging() {
+  [[ "${EUID}" -eq 0 ]] && return 0
+  if sudo -n true >/dev/null 2>&1; then
+    return 0
+  fi
+  require_cmd sudo
+  log "sudo authentication required for guest rootfs / runtime layout packaging"
+  sudo -v || die "sudo authentication failed (needed to package guest rootfs / runtime layout)"
 }
 
 build_web_dist() {
@@ -438,6 +613,14 @@ build_web_dist() {
     log "using prebuilt web dist: ${WEB_DIST_OVERRIDE}"
     ensure_dir "${WEB_DIST_OVERRIDE}"
     copy_dir_contents "${WEB_DIST_OVERRIDE}" "${output_dir}"
+  elif [[ "${WEB_BUILD_ASYNC_DONE}" -eq 1 ]]; then
+    # Already collected by an earlier poll_web_build_async (finished-early path).
+    log "using async web dashboard build collected earlier"
+    copy_dir_contents "${WEB_SOURCE_DIR}/dist" "${output_dir}"
+  elif [[ "${WEB_BUILD_ASYNC_PID}" -ne 0 ]]; then
+    log "collecting async web dashboard build"
+    _collect_web_build_async
+    copy_dir_contents "${WEB_SOURCE_DIR}/dist" "${output_dir}"
   else
     log "building web dashboard"
     require_cmd npm
@@ -457,8 +640,20 @@ ensure_dir "${CUBE_WEBUI_TEMPLATE_DIR}"
 ensure_dir "${CUBE_SYSTEMD_TEMPLATE_DIR}"
 ensure_dir "${CUBE_PROXY_SOURCE_DIR}"
 
+# sudo first (quiet tty), then async web build overlapping guest-image below.
+ensure_sudo_authenticated_for_packaging
+start_web_build_async
+
 log "building runtime layout"
 "${SCRIPT_DIR}/build-vm-assets.sh"
+
+# The guest-image build above is the long pole the async web build overlaps. By
+# the time it returns, a fast web-build failure (bad lockfile, TS error) has
+# usually already happened -- surface it now rather than masking it behind the
+# remaining component-binary builds and packaging that still precede
+# build_web_dist. Non-blocking: if the web build is still running it keeps
+# overlapping and is collected later.
+poll_web_build_async
 
 log "packaging fixed kernel artifact zip"
 package_kernel_artifact_zip \
@@ -471,7 +666,7 @@ mkdir -p "${CORE_BIN_DIR}"
 
 CUBEMASTER_VERSION_PKG="github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version"
 CUBELET_VERSION_PKG="github.com/tencentcloud/CubeSandbox/Cubelet/pkg/version"
-NETAGENT_VERSION_PKG="github.com/tencentcloud/CubeSandbox/network-agent/pkg/version"
+CUBEOPS_VERSION_PKG="github.com/tencentcloud/CubeSandbox/CubeOps/internal/version"
 
 build_or_copy_go_binary \
   "cubemaster" "${CUBEMASTER_BIN_OVERRIDE}" \
@@ -496,19 +691,14 @@ build_or_copy_rust_binary \
 build_or_copy_go_binary \
   "cubeops" "${CUBE_OPS_BIN_OVERRIDE}" \
   "${ROOT_DIR}/CubeOps" "${CUBE_OPS_BUILD_MODE}" \
-  "${CORE_BIN_DIR}/cubeops" ./cmd/cubeops
-build_or_copy_go_binary \
-  "network-agent" "${NETWORK_AGENT_BIN_OVERRIDE}" \
-  "${ROOT_DIR}/network-agent" "${NETWORK_AGENT_BUILD_MODE}" \
-  "${CORE_BIN_DIR}/network-agent" ./cmd/network-agent "${NETAGENT_VERSION_PKG}"
+  "${CORE_BIN_DIR}/cubeops" ./cmd/cubeops "${CUBEOPS_VERSION_PKG}"
+
 build_or_copy_go_binary \
   "cubevsmapdump" "${CUBEVSMAPDUMP_BIN_OVERRIDE}" \
   "${ROOT_DIR}/CubeNet/cubevs" "${CUBEVSMAPDUMP_BUILD_MODE}" \
   "${CORE_BIN_DIR}/cubevsmapdump" ./cmd/cubevsmapdump
 
 mkdir -p \
-  "${PACKAGE_ROOT}/network-agent/bin" \
-  "${PACKAGE_ROOT}/network-agent/state" \
   "${PACKAGE_ROOT}/CubeAPI/bin" \
   "${PACKAGE_ROOT}/CubeOps/bin" \
   "${PACKAGE_ROOT}/CubeMaster/bin" \
@@ -525,7 +715,7 @@ mkdir -p \
   "${PACKAGE_ROOT}/support" \
   "${PACKAGE_ROOT}/support/bin" \
   "${PACKAGE_ROOT}/systemd" \
-  "${PACKAGE_ROOT}/cube-vs/network" \
+  "${PACKAGE_ROOT}/cube-vs/network/bin" \
   "${PACKAGE_ROOT}/cube-snapshot" \
   "${PACKAGE_ROOT}/scripts/one-click" \
   "${PACKAGE_ROOT}/scripts/systemd" \
@@ -533,9 +723,7 @@ mkdir -p \
   "${PACKAGE_ROOT}/cube-egress" \
   "${PACKAGE_ROOT}/terraform/tencentcloud"
 
-copy_file "${CORE_BIN_DIR}/network-agent" "${PACKAGE_ROOT}/network-agent/bin/network-agent"
-copy_file "${CORE_BIN_DIR}/cubevsmapdump" "${PACKAGE_ROOT}/network-agent/bin/cubevsmapdump"
-copy_file "${ROOT_DIR}/configs/single-node/network-agent.yaml" "${PACKAGE_ROOT}/network-agent/network-agent.yaml"
+copy_file "${CORE_BIN_DIR}/cubevsmapdump" "${PACKAGE_ROOT}/cube-vs/network/bin/cubevsmapdump"
 
 # Lay down the one-click CubeAPI assets (Dockerfile, etc.) first, then copy the
 # binary on top: copy_dir_contents rm -rf's the destination, so copying the
@@ -616,6 +804,9 @@ copy_file "${MKCERT_BIN_ASSET}" "${PACKAGE_ROOT}/support/bin/mkcert"
 copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-shim" "${PACKAGE_ROOT}/cube-shim"
 copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf" "${PACKAGE_ROOT}/cube-kernel-scf"
 copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-image" "${PACKAGE_ROOT}/cube-image"
+if [[ -d "${RUNTIME_LAYOUT_DIR}/cube-agent" ]]; then
+  copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-agent" "${PACKAGE_ROOT}/cube-agent"
+fi
 
 # Ship the entire scripts/one-click directory: the systemd unit scripts
 # delegate container lifecycle to the compose-based up-/down- helpers
@@ -688,7 +879,7 @@ find "${PACKAGE_ROOT}/scripts/cube-egress" -type f -name "*.sh" -exec chmod +x {
 find "${PACKAGE_ROOT}/terraform" -type f -name "*.sh" -exec chmod +x {} \;
 
 mkdir -p "$(dirname "${PACKAGE_TAR}")"
-tar -C "${WORK_ROOT}" -czf "${PACKAGE_TAR}" "sandbox-package"
+tar_czf "${PACKAGE_TAR}" "${WORK_ROOT}" "sandbox-package"
 
 mkdir -p "${DIST_ROOT}/assets/package" "${DIST_ROOT}/assets/kernel-artifacts" "${DIST_ROOT}/lib" "${DIST_ROOT}/scripts/common"
 copy_file "${SCRIPT_DIR}/README.md" "${DIST_ROOT}/README.md"
@@ -763,5 +954,5 @@ EOF
 # exported by build-vm-assets.sh.
 generate_release_manifest "${DIST_ROOT}" "${DIST_VERSION}"
 
-tar -C "${SCRIPT_DIR}/dist" -czf "${DIST_TAR}" "cube-sandbox-one-click-${DIST_VERSION}"
+tar_czf "${DIST_TAR}" "${SCRIPT_DIR}/dist" "cube-sandbox-one-click-${DIST_VERSION}"
 log "release bundle ready: ${DIST_TAR}"

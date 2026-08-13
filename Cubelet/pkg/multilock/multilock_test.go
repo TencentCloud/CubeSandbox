@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"math/rand"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -43,20 +45,31 @@ func TestMultiLock_Lifetime(t *testing.T) {
 	mlock := NewMultiLock(o)
 	key := "test_key"
 	l := mlock.Get(key)
+	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			l.LockAt()
 			defer l.UnlockAt()
 			_ = uuid.New().String()
 		}()
 	}
-	time.Sleep(4 * time.Second)
-	_, ok := mlock.Load(key)
-	if ok {
-		t.Errorf("Lock at key '%s' still life", key)
+	wg.Wait()
+
+	lock := l.(*rwLock)
+	atomic.StoreInt64(&lock.updateAt, time.Now().Unix()-o.ExpiredInSecond-1)
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := mlock.Load(key); !ok {
+			l.LockAt()
+			l.UnlockAt()
+			return
+		}
+		time.Sleep(o.CheckInterval)
 	}
-	l.LockAt()
-	l.UnlockAt()
+	t.Fatalf("Lock at key '%s' was not removed after expiration", key)
 }
 
 func TestMultiLock_LockAt(t *testing.T) {

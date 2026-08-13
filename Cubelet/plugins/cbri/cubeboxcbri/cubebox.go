@@ -163,6 +163,10 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 	}
 	annotations[constants.AnnotationsVMKernelPath] = kernelPath
 	annotations[constants.AnnotationsProduct] = e.config.instanceType
+	if appImageID == "" {
+		annotations[constants.AnnotationsVMOSImagePath] = filepath.Join(e.config.BasePath, "cube-image", "cube-guest-image-cpu.img")
+		annotations[constants.AnnotationsVMAgentPath] = filepath.Join(e.config.BasePath, "cube-agent", "cube-agent.ext4")
+	}
 
 	if flowOpts.IsCreateSnapshot() {
 		annotations[constants.AnnotationAppSnapshotCreate] = "true"
@@ -194,7 +198,10 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 				return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
 			}
 			annotations[constants.AnnotationsVMKernelPath] = kernelPath
-			annotations[constants.AnnotationsVMImagePath] = imagePath
+			annotations[constants.AnnotationsVMOSImagePath] = imagePath
+			if agentPath := resolveTemplateComponentPath(flowOpts.LocalRunTemplate, templatetypes.CubeComponentCubeAgent); agentPath != "" {
+				annotations[constants.AnnotationsVMAgentPath] = agentPath
+			}
 		} else {
 
 			snapBasePath = filepath.Join(e.getSnapShotFilePath(templateID), "")
@@ -226,14 +233,27 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 
 		annotations[constants.AnnotationAppSnapshotContainerID] = snapshotRestoreContainerID(templateID, snapSpecPath)
 
+		// Pause resume: guest virtiofs + container binds are already live in the
+		// restored memory. Tell the shim (via pause.snapshot.id on the sandbox
+		// OCI annotations) not to replay virtio-fs storages to the agent, and
+		// do not emit PropagationExecMounts. Still emit AnnotationVirtiofs so
+		// the hypervisor reconnects the same hostdir share devices.
+		if flowOpts.IsPauseResume() {
+			if pauseID := strings.TrimSpace(realReq.GetAnnotations()[constants.MasterAnnotationPauseSnapshotID]); pauseID != "" {
+				annotations[constants.MasterAnnotationPauseSnapshotID] = pauseID
+			}
+		}
+
 		sandbox := cubeboxstore.GetCubeBox(ctx)
 		if sandbox != nil && sandbox.FirstContainer() != nil {
-			opts, err := generateRestoreVirtiofsOpt(ctx, flowOpts, sandbox.FirstContainer().Config)
-			if err != nil {
-				return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
+			if !flowOpts.IsPauseResume() {
+				opts, err := generateRestoreVirtiofsOpt(ctx, flowOpts, sandbox.FirstContainer().Config)
+				if err != nil {
+					return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
+				}
+				specOpts = append(specOpts, opts...)
 			}
-			specOpts = append(specOpts, opts...)
-			opts, err = generateSandboxVirtiofsOpt(ctx, flowOpts, false)
+			opts, err := generateSandboxVirtiofsOpt(ctx, flowOpts, false)
 			if err != nil {
 				return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
 			}
@@ -293,11 +313,15 @@ func (e *cubeboxInstancePlugin) CreateContainer(ctx context.Context, cubeBox *cu
 			specOpts = append(specOpts, oci.WithAnnotations(map[string]string{
 				constants.AnnotationAppSnapshotContainerID: snapshotContainerID,
 			}))
-			opts, err := generateRestoreVirtiofsOpt(ctx, flowOpts, c.Config)
-			if err != nil {
-				return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
+			// Pause resume keeps existing container mounts; only new-start-from-snap
+			// needs propagation exec.mount annotations for do_exec_mount.
+			if !flowOpts.IsPauseResume() {
+				opts, err := generateRestoreVirtiofsOpt(ctx, flowOpts, c.Config)
+				if err != nil {
+					return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
+				}
+				specOpts = append(specOpts, opts...)
 			}
-			specOpts = append(specOpts, opts...)
 		}
 	}
 
@@ -422,12 +446,8 @@ func (e *cubeboxInstancePlugin) resolveSnapshotRuntimeArtifacts(
 	var imagePath string
 
 	if localTemplate != nil {
-		if component, ok := localTemplate.Componts[templatetypes.CubeComponentCubeKernel]; ok {
-			kernelPath = strings.TrimSpace(component.Component.Path)
-		}
-		if component, ok := localTemplate.Componts[templatetypes.CubeComponentCubeImage]; ok {
-			imagePath = strings.TrimSpace(component.Component.Path)
-		}
+		kernelPath = resolveTemplateComponentPath(localTemplate, templatetypes.CubeComponentCubeKernel)
+		imagePath = resolveTemplateComponentPath(localTemplate, templatetypes.CubeComponentCubeImage)
 	}
 	if kernelPath != "" && imagePath != "" {
 		return kernelPath, imagePath, nil
@@ -466,6 +486,17 @@ func (e *cubeboxInstancePlugin) resolveSnapshotRuntimeArtifacts(
 		return "", "", fmt.Errorf("template have no os image component")
 	}
 	return kernelPath, imagePath, nil
+}
+
+func resolveTemplateComponentPath(localTemplate *templatetypes.LocalRunTemplate, name templatetypes.CubeComponent) string {
+	if localTemplate == nil || localTemplate.Componts == nil {
+		return ""
+	}
+	component, ok := localTemplate.Componts[name]
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(component.Component.Path)
 }
 
 func (e *cubeboxInstancePlugin) resolveSnapshotPaths(templateID, rawPath string, req *cubebox.RunCubeSandboxRequest) (*snapshotPaths, error) {

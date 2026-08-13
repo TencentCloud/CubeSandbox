@@ -28,7 +28,22 @@ cubeProxy:
   #   annotations:
   #     service.cloud.tencent.com/security-groups: "sg-xxxxxxxx"
   # No Ingress controller? Set cubeProxy.ingress.enabled: false and expose
-  # the ClusterIP Service yourself.
+  # the Service yourself, e.g. NodePort with fixed host ports:
+  # service:
+  #   type: NodePort
+  #   nodePorts:
+  #     http: 30080
+  #     https: 30443
+  #     grpc: 30090
+  # ingress:
+  #   enabled: false
+
+# Optional: expose CubeAPI on a fixed NodePort (with service.type=NodePort):
+# controlPlane:
+#   api:
+#     service:
+#       type: NodePort
+#       nodePort: 30030
 
 # REQUIRED: validate.yaml refuses CHANGE_ME_* sentinels from values.yaml.
 mysql:
@@ -50,6 +65,11 @@ mysql:
 redis:
   host: ""
   password: "replace-me-redis-password"
+  # External Redis Sentinel (skips chart-managed redis). Example:
+  # masterName: mymaster
+  # sentinelNodes: "10.0.0.11:26379,10.0.0.12:26379,10.0.0.13:26379"
+  # sentinelPassword: ""   # leave empty when Sentinel has no requirepass
+  # password: "replace-me-redis-master-password"
 
 # --- Persistence (optional) ---
 # Default: leave unset → CubeMaster / MySQL / Redis PVCs use the cluster's

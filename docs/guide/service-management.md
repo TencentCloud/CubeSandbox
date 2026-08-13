@@ -66,10 +66,9 @@ The target lists its child services via `Wants=`; each service declares membersh
 | `cube-sandbox-redis.service` | Docker container | `6379` | control | docker |
 | `cube-sandbox-cubemaster.service` | Host process | `8089` | control | mysql, redis |
 | `cube-sandbox-cube-api.service` | Host process | `3000` (E2B-compatible API) | control | cubemaster |
-| `cube-sandbox-network-agent.service` | Host process | `19090` (health) | control / compute | network |
-| `cube-sandbox-cubelet.service` | Host process | `9999` (gRPC) | control / compute | network-agent + `/data/cubelet` (XFS) |
+| `cube-sandbox-cubelet.service` | Host process | `9999` (gRPC), HTTP diagnostics | control / compute | embedded network runtime + `/data/cubelet` (XFS) |
 | `cube-sandbox-coredns.service` | Docker container | `127.0.0.54:53` or `169.254.254.53:53` | control | docker |
-| `cube-sandbox-cube-proxy.service` | Docker container | `443` (TLS) / `80` | control | docker, redis |
+| `cube-sandbox-cube-proxy.service` | Docker container | `443` (TLS) / `80` / `9090` (gRPC) | control | docker, redis |
 | `cube-sandbox-dns.service` | oneshot (no daemon) | — | control | coredns (`BindsTo`) |
 | `cube-sandbox-webui.service` | Docker container | `12088` | control | docker, cube-api |
 
@@ -83,7 +82,7 @@ docker.service
    └─ coredns.service ─ dns.service (oneshot, BindsTo coredns)
 
 network-online.target
-   └─ network-agent.service ─ cubelet.service
+   └─ cubelet.service (embedded network runtime)
 ```
 
 Dependencies only express **startup ordering** via `After=` / `Wants=`. If an upstream service crashes at runtime, downstreams are **not** automatically restarted — cubelet won't be cycled just because cube-api died, and vice versa.
@@ -95,7 +94,7 @@ Dependencies only express **startup ordering** via `After=` / `Wants=`. If an up
 The two most common config entry points:
 
 - Top-level env: `/usr/local/services/cubetoolbox/.one-click.env`
-- Per-component: `Cubelet/config/config.toml`, `Cubelet/dynamicconf/conf.yaml`, `CubeMaster/conf.yaml`, `network-agent/network-agent.yaml`, `cubeproxy/global.conf`, `coredns/Corefile`
+- Per-component: `Cubelet/config/config.toml`, `Cubelet/dynamicconf/conf.yaml`, `CubeMaster/conf.yaml`, `cubeproxy/global.conf`, `coredns/Corefile`
 
 Restart the **service that consumes that config**:
 
@@ -139,7 +138,7 @@ Under `cubelet_conf`:
 | `create_timeout_insec` | Create/scheduling RPC deadline only — **not** sandbox idle TTL. Defaults to `300` when unset. |
 | `common_timeout_insec` | Generic CubeMaster→Cubelet RPC timeout for non-create paths. |
 
-After changing `default_timeout_insec`, restart CubeMaster and read [Sandbox lifecycle — Operational Notes](lifecycle.md#cluster-default-idle-timeout-default_timeout_insec) for client-visible behavior.
+After changing `default_timeout_insec`, restart CubeMaster and read [Sandbox lifecycle — Operational Notes](lifecycle.md#cluster-default-idle-timeout-default_timeout_insec) for client-visible behavior. For node selection, quota, labels, scheduler scoring, or template redo after adding compute nodes, see [CubeMaster Scheduler Configuration](./cubemaster-scheduler-config.md).
 
 ### Scenario B: a service is failing or restart-looping
 
@@ -227,14 +226,13 @@ CubeSandbox has multiple log sources, including component-specific in-container 
 
 ### `/data/log/` runtime logs (primary)
 
-> ⚠️ Cubelet / CubeMaster / CubeAPI / network-agent / CubeShim / VMM all write **business request + stat + audit + VMM lifecycle** logs to `/data/log/`. They do **not** show up in `journalctl` — read the files directly.
+> ⚠️ Cubelet / CubeMaster / CubeAPI / CubeShim / VMM all write **business request + stat + audit + VMM lifecycle** logs to `/data/log/`. They do **not** show up in `journalctl` — read the files directly.
 
 | Module | Directory | Main files |
 |---|---|---|
 | Cubelet | `/data/log/Cubelet/` | `Cubelet-req.log` (requests)<br>`Cubelet-stat.log` (metrics/stats) |
 | CubeMaster | `/data/log/CubeMaster/` | `cubemaster-req.log` |
 | CubeAPI | `/data/log/CubeAPI/` | `cube-api-YYYY-MM-DD.log` (daily-rotated) |
-| network-agent | `/data/log/network-agent/` | `network-agent-req.log` |
 | CubeShim | `/data/log/CubeShim/` | `cube-shim-req.log`, `cube-shim-stat.log` |
 | Hypervisor (VMM) | `/data/log/CubeVmm/` | `vmm.log` (one entry per sandbox creation) |
 | cube-proxy | `/data/log/cube-proxy/` | `error.log`, `access.log` (see below) |
@@ -297,7 +295,7 @@ sudo /usr/local/services/cubetoolbox/scripts/cube-diag/collect-logs.sh
 
 It collects everything into `cube-diag-<timestamp>/`:
 
-- Tails of `/data/log/CubeMaster|Cubelet|CubeAPI|CubeShim|CubeVmm|network-agent/`
+- Tails of `/data/log/CubeMaster|Cubelet|CubeAPI|CubeShim|CubeVmm/`
 - `/data/log/cube-proxy/` access/error logs
 - `dmesg` / process list / ports / mounts / cgroup / cpuinfo
 - Major config files (with secrets redacted)
@@ -387,7 +385,7 @@ Common root causes:
 
 - Container build needs the network (e.g. `cube-proxy`'s `apk update`) and the upstream mirror is flaky — see [Deployment Troubleshooting](./troubleshooting/deployment.md)
 - `ExecStartPost` health probe timeout (port already in use, upstream not yet ready)
-- For `cube-sandbox-cube-proxy.service`, `CUBE_PROXY_HTTP_PORT` is the actual nginx HTTP proxy listener used by the post-start TCP check. `CUBE_PROXY_HOST_PORT` is deprecated and ignored; set `CUBE_PROXY_HTTP_PORT` instead if you need a non-default check port.
+- For `cube-sandbox-cube-proxy.service`, `CUBE_PROXY_HTTP_PORT` and `CUBE_PROXY_GRPC_PORT` are the nginx listeners checked by the post-start TCP probe. `CUBE_PROXY_HOST_PORT` is deprecated and ignored; set `CUBE_PROXY_HTTP_PORT` instead if you need a non-default HTTP check port.
 - `/data/log` or `/data/cubelet` missing / wrong permissions / XFS not mounted
 
 ### Dashboard / API unreachable
@@ -426,12 +424,12 @@ sudo ss -lntp 'sport = :3000'
 | `cube-api` | ✅ | — |
 | `webui` | ✅ | — |
 | `cube-proxy` / `coredns` / `dns` | ✅ | — |
-| `network-agent` | ✅ | ✅ |
 | `cubelet` | ✅ | ✅ |
 
 ### See also
 
 - [Quick Start](./quickstart.md) — installation entry point
 - [Multi-Node Cluster](./multi-node-deploy.md) — service subset on compute nodes
+- [CubeMaster Scheduler Configuration](./cubemaster-scheduler-config.md) — node selection, quota, labels, scoring, and template redo
 - [Deployment Troubleshooting](./troubleshooting/deployment.md) — XFS, CIDR conflicts, etc.
 - [Templates Troubleshooting](./troubleshooting/templates.md) — template-build issues

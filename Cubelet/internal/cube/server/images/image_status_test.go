@@ -56,11 +56,12 @@ func TestImageStatus(t *testing.T) {
 		RepoDigests: []string{"gcr.io/library/busybox@sha256:e6693c20186f837fc393390135d8a598a96a833917917789d63766cab6c59582"},
 		Size_:       uint64(1234),
 		Username:    "user",
+		Spec:        &runtime.ImageSpec{},
 	}
 
 	c, g := NewTestCRIService()
 	t.Logf("should return nil image spec without error for non-exist image")
-	resp, err := c.ImageStatus(context.Background(), &runtime.ImageStatusRequest{
+	resp, err := c.ImageStatus(ctx, &runtime.ImageStatusRequest{
 		Image: &runtime.ImageSpec{Image: testID},
 	})
 	assert.NoError(t, err)
@@ -71,7 +72,7 @@ func TestImageStatus(t *testing.T) {
 	assert.NoError(t, err)
 
 	t.Logf("should return correct image status for exist image")
-	resp, err = g.ImageStatus(context.Background(), &runtime.ImageStatusRequest{
+	resp, err = g.ImageStatus(ctx, &runtime.ImageStatusRequest{
 		Image: &runtime.ImageSpec{Image: testID},
 	})
 	assert.NoError(t, err)

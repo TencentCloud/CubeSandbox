@@ -21,8 +21,8 @@ import (
 	cubeletnodemeta "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/nodestatus"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/resourcesource"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/versioninfo"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/masterclient"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/networkagentclient"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -134,18 +134,11 @@ func (kl *Cubelet) defaultNodeStatusFuncs() []func(context.Context, *cubeletnode
 
 func (kl *Cubelet) runtimeErrorsFunc() error { return nil }
 func (kl *Cubelet) storageErrorsFunc() error { return nil }
-func (kl *Cubelet) networkErrorsFunc() error {
-	cfg := config.GetConfig()
-	if cfg == nil || cfg.Common == nil || !cfg.Common.EnableNetworkAgent {
-		return nil
-	}
-	if kl.networkAgentClient == nil {
-		return fmt.Errorf("network-agent client is not configured")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	return kl.networkAgentClient.Health(ctx, &networkagentclient.HealthRequest{})
-}
+
+// networkErrorsFunc no longer probes a standalone network-agent. Network setup is
+// owned by Cubelet's embedded network runtime, so runtime failures are surfaced on
+// create/release paths instead of node readiness checking an external daemon.
+func (kl *Cubelet) networkErrorsFunc() error                       { return nil }
 func (kl *Cubelet) nodeShutdownManagerErrorsFunc() error           { return nil }
 func (kl *Cubelet) recordEventFunc(eventType string, event string) {}
 
@@ -526,6 +519,7 @@ func (kl *Cubelet) buildRegisterRequest(node *cubeletnodemeta.Node) *masterclien
 	versions, incomplete := kl.collectVersionReport()
 	req.Versions = versions
 	req.InventoryIncomplete = incomplete
+	req.HostFacts = collectHostFactsReport()
 	return req
 }
 
@@ -540,7 +534,31 @@ func (kl *Cubelet) buildStatusRequest(node *cubeletnodemeta.Node) *masterclient.
 	versions, incomplete := kl.collectVersionReport()
 	req.Versions = versions
 	req.InventoryIncomplete = incomplete
+	req.HostFacts = collectHostFactsReport()
 	return req
+}
+
+// collectHostFactsReport maps the cached host facts into the master transport
+// type. Returns nil when nothing meaningful was collected so the master treats
+// this heartbeat as carrying no host-facts update.
+func collectHostFactsReport() *masterclient.HostFacts {
+	f := versioninfo.CollectHostFacts()
+	if f.CPUVendor == "" && f.CPUModel == "" && f.CPUIDHash == "" &&
+		f.HostKernelRelease == "" && f.HostKernelFingerprint == "" && f.KVMAPIVersion == 0 &&
+		f.KVMModuleFingerprint == "" && f.KVMModuleTaint == "" {
+		return nil
+	}
+	return &masterclient.HostFacts{
+		CPUVendor:             f.CPUVendor,
+		CPUModel:              f.CPUModel,
+		CPUIDHash:             f.CPUIDHash,
+		HostKernelRelease:     f.HostKernelRelease,
+		HostKernelFingerprint: f.HostKernelFingerprint,
+		KVMAPIVersion:         f.KVMAPIVersion,
+		KVMModuleFingerprint:  f.KVMModuleFingerprint,
+		KVMModuleTaint:        f.KVMModuleTaint,
+		KVMModuleScanned:      f.KVMModuleScanned,
+	}
 }
 
 func (kl *Cubelet) collectVersionReport() ([]masterclient.ComponentVersion, bool) {

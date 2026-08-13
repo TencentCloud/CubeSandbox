@@ -68,7 +68,7 @@ Subcommands:
 
 Known components:
   cubemaster, cubemastercli, cubelet, cubecli,
-  network-agent, cube-api, cube-runtime, containerd-shim-cube-rs
+  cube-api, cube-runtime, containerd-shim-cube-rs
 
 Environment overrides:
   VM_USER, VM_PASSWORD, SSH_HOST, SSH_PORT
@@ -157,7 +157,6 @@ component_remote_dir() {
   case "$1" in
     cubemaster|cubemastercli) printf '%s/CubeMaster/bin\n' "${TOOLBOX_ROOT}" ;;
     cubelet|cubecli) printf '%s/Cubelet/bin\n' "${TOOLBOX_ROOT}" ;;
-    network-agent) printf '%s/network-agent/bin\n' "${TOOLBOX_ROOT}" ;;
     cube-api) printf '%s/CubeAPI/bin\n' "${TOOLBOX_ROOT}" ;;
     # Keep one-click's /usr/local/bin symlinks intact by updating the real install path.
     cube-runtime|containerd-shim-cube-rs) printf '%s/cube-shim/bin\n' "${TOOLBOX_ROOT}" ;;
@@ -168,7 +167,6 @@ component_remote_dir() {
 ALL_COMPONENTS=(
   cubemaster cubemastercli
   cubelet cubecli
-  network-agent
   cube-api
   cube-runtime containerd-shim-cube-rs
 )

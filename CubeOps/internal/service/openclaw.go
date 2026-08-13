@@ -17,7 +17,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -29,6 +28,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/crypto"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
 )
 
@@ -202,32 +202,23 @@ func ReadOpenclawGatewayTokenFromHost(statePath string) string {
 	return strings.TrimSpace(v.Gateway.Auth.Token)
 }
 
-// ResolveGatewayToken reads the gateway token with the same priority as the
-// old Rust code (CubeAPI/src/handlers/agenthub.rs):
-//  1. host-side file (shared_files mode only)
-//  2. sandbox-side file via envd (single read)
-//  3. fallback (the token CubeOps generated and passed to the apply script)
-//
-// A 5-second sleep is performed first to let OpenClaw finish its in-process
-// config reload after the apply script writes openclaw.json. Without this
-// delay, the host/sandbox file may still contain a transient token that
-// OpenClaw generates during startup, which differs from the token the apply
-// script wrote. This matches the Rust `tokio::time::sleep(Duration::from_secs(5))`.
-func ResolveGatewayToken(httpClient *http.Client, sandboxID, domain, hostStatePath, fallbackToken string) string {
+// ResolveGatewayToken returns the OpenClaw gateway token, matching the
+// priority used by the old Rust handler (CubeAPI/src/handlers/agenthub.rs):
+// host file → sandbox file (via envd) → fallback (the token CubeOps passed
+// to the apply script). The 5s sleep lets OpenClaw finish its in-process
+// reload before we read the freshly written openclaw.json.
+func ResolveGatewayToken(ctx context.Context, httpClient *http.Client, sandboxID, domain, hostStatePath, fallbackToken string) string {
 	time.Sleep(5 * time.Second)
 
 	if hostToken := ReadOpenclawGatewayTokenFromHost(hostStatePath); hostToken != "" {
-		slog.Info("ResolveGatewayToken: using host-side token",
-			"sandboxID", sandboxID, "hostStatePath", hostStatePath)
+		logging.G(ctx).Debugf("ResolveGatewayToken: using host-side token: sandboxID=%q hostStatePath=%q", sandboxID, hostStatePath)
 		return hostToken
 	}
 	if sandboxToken := readOpenclawGatewayToken(httpClient, sandboxID, domain); sandboxToken != "" {
-		slog.Info("ResolveGatewayToken: using sandbox-side token",
-			"sandboxID", sandboxID)
+		logging.G(ctx).Debugf("ResolveGatewayToken: using sandbox-side token: sandboxID=%q", sandboxID)
 		return sandboxToken
 	}
-	slog.Info("ResolveGatewayToken: using fallback (generated) token",
-		"sandboxID", sandboxID)
+	logging.G(ctx).Debugf("ResolveGatewayToken: using fallback (generated) token: sandboxID=%q", sandboxID)
 	return fallbackToken
 }
 
@@ -744,7 +735,7 @@ type OpenclawApplyOptions struct {
 }
 
 // OpenclawApplySpec renders the JSON spec handed to the sandbox apply script.
-func OpenclawApplySpec(plan *LLMRuntimePlan, opts *OpenclawApplyOptions) map[string]interface{} {
+func OpenclawApplySpec(ctx context.Context, plan *LLMRuntimePlan, opts *OpenclawApplyOptions) map[string]interface{} {
 	// Defensive: every production caller supplies non-nil opts, but tests and
 	// future refactors might not. Default to merge_llm (the safe no-op mode)
 	// rather than panicking on a nil deref.
@@ -794,9 +785,9 @@ func OpenclawApplySpec(plan *LLMRuntimePlan, opts *OpenclawApplyOptions) map[str
 		if host := extractHostFromURL(plan.UpstreamBaseURL); host != "" {
 			if ips, err := net.LookupHost(host); err == nil && len(ips) > 0 {
 				spec["llmHostIp"] = ips[0]
-				slog.Info("resolved LLM host IP for /etc/hosts", "host", host, "ip", ips[0])
+				logging.G(ctx).Debugf("resolved LLM host IP for /etc/hosts: host=%s ip=%s", host, ips[0])
 			} else {
-				slog.Warn("failed to resolve LLM host IP", "host", host, "err", err)
+				logging.G(ctx).Warnf("failed to resolve LLM host IP: host=%s err=%q", host, err.Error())
 			}
 		}
 	}
@@ -814,8 +805,8 @@ func egressCAPem() string {
 // The store parameter was historically present but unused inside this
 // function; it has been dropped so the signature matches the applyFn field
 // on AgentHubService (which needs to be injectable for tests).
-func ApplyOpenclawRuntime(httpClient *http.Client, sandboxID, domain string, plan *LLMRuntimePlan, opts *OpenclawApplyOptions) (*CommandOutput, error) {
-	spec := OpenclawApplySpec(plan, opts)
+func ApplyOpenclawRuntime(ctx context.Context, httpClient *http.Client, sandboxID, domain string, plan *LLMRuntimePlan, opts *OpenclawApplyOptions) (*CommandOutput, error) {
+	spec := OpenclawApplySpec(ctx, plan, opts)
 	specBytes, err := json.Marshal(spec)
 	if err != nil {
 		return nil, fmt.Errorf("marshal apply spec: %w", err)
@@ -929,6 +920,8 @@ func LLMEgressRule(llm *LLMConfig) (map[string]interface{}, error) {
 			"inject": []map[string]interface{}{
 				{
 					"header": "Authorization",
+					// Plaintext API key injected as the egress Authorization header.
+					// redact.Value() masks it by name at the log call site.
 					"secret": llm.APIKey,
 					"format": format,
 				},

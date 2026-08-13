@@ -324,13 +324,16 @@ eth_name = "eth0"
 cidr = "192.168.0.0/18"
 cube_router_enable = false
 cube_router_cidr = ""
+cube_egress_admin_url = "http://127.0.0.1:9091"
 EOF
 
-  patch_cubelet_config_template "${cfg}" "ens3" "10.123.0.0/16" "1" "172.20.0.0/16" >/dev/null 2>&1
+  patch_cubelet_config_template "${cfg}" "ens3" "10.123.0.0/16" "1" "172.20.0.0/16" "9092" >/dev/null 2>&1
   grep -Fq 'eth_name = "ens3"' "${cfg}" || fail "patch should update eth_name"
   grep -Fq 'cidr = "10.123.0.0/16"' "${cfg}" || fail "patch should update cidr"
   grep -Fq 'cube_router_enable = true' "${cfg}" || fail "patch should update cube_router_enable"
   grep -Fq 'cube_router_cidr = "172.20.0.0/16"' "${cfg}" || fail "patch should update cube_router_cidr"
+  grep -Fq 'cube_egress_admin_url = "http://127.0.0.1:9092"' "${cfg}" \
+    || fail "patch should update cube_egress_admin_url from CUBE_EGRESS_ADMIN_PORT"
 
   local default_router_cidr_cfg="${TMP_DIR}/cubelet-default-router-cidr.toml"
   cat > "${default_router_cidr_cfg}" <<'EOF'

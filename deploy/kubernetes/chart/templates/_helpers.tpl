@@ -632,8 +632,27 @@ CUBE_SANDBOX_MYSQL_* alone is always assembled as mysql://.
 {{- if .Values.redis.host -}}{{ .Values.redis.host }}{{- else -}}{{ include "cube.redisName" . }}.{{ .Release.Namespace }}.svc.{{ include "cube.clusterDomain" . }}{{- end -}}
 {{- end -}}
 
+{{- /* Non-empty redis.masterName selects external Redis Sentinel (skips chart redis). */ -}}
+{{- define "cube.redisSentinelEnabled" -}}
+{{- if ne (((.Values.redis).masterName) | default "") "" -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{- /* Count non-empty comma-separated sentinel endpoints after trim. */ -}}
+{{- define "cube.redisSentinelEndpointCount" -}}
+{{- $n := 0 -}}
+{{- range $p := splitList "," (((.Values.redis).sentinelNodes) | default "") -}}
+{{- if ne ($p | trim) "" -}}{{- $n = add $n 1 -}}{{- end -}}
+{{- end -}}
+{{- $n -}}
+{{- end -}}
+
 {{- define "cube.redisBuiltinEnabled" -}}
-{{- if and (or .Values.controlPlane.enabled (eq (include "cube.proxyEnabled" .) "true")) .Values.redis.enabled (not .Values.redis.host) -}}true{{- else -}}false{{- end -}}
+{{- if and (or .Values.controlPlane.enabled (eq (include "cube.proxyEnabled" .) "true")) .Values.redis.enabled (not .Values.redis.host) (ne (include "cube.redisSentinelEnabled" .) "true") -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{- /* Master conf nodes: empty under Sentinel; else host:port. */ -}}
+{{- define "cube.redisNodes" -}}
+{{- if eq (include "cube.redisSentinelEnabled" .) "true" -}}{{- else -}}{{ printf "%s:%v" (include "cube.redisHost" .) .Values.redis.port }}{{- end -}}
 {{- end -}}
 
 {{- define "cube.egressNetProbeCommand" -}}
@@ -778,7 +797,7 @@ Toolbox is mounted whole at the fixed path.
 {{- end -}}
 
 {{/*
-Privileged securityContext shared by cubelet / network-agent / placeholder slots.
+Privileged securityContext shared by cubelet / placeholder slots.
 Must stay identical across frozen Big Pod containers (securityContext is not InPlace).
 */}}
 {{- define "cube.nodeDataplaneSecurityContext" -}}
@@ -801,6 +820,8 @@ Installer: toolbox only (no dataplane mounts).
   mountPath: /usr/local/services/cubetoolbox
 - name: bootstrap-state
   mountPath: {{ .Values.hostPaths.bootstrapState }}
+- name: data-cubelet
+  mountPath: {{ .Values.hostPaths.dataCubelet }}
 {{- end -}}
 
 {{- define "cube.installerComponentEnv" -}}
@@ -811,6 +832,8 @@ Installer: toolbox only (no dataplane mounts).
   value: /opt/cube-image
 - name: STATE_DIR
   value: {{ .Values.hostPaths.bootstrapState | quote }}
+- name: COMPONENT_VERSIONS_ROOT
+  value: {{ printf "%s/root/component_versions" .Values.hostPaths.dataCubelet | quote }}
 - name: CUBE_PVM_ENABLE
   value: {{ ternary "1" "0" .Values.cubeNode.pvmGuestKernel.enabled | quote }}
 {{- end -}}
@@ -929,6 +952,8 @@ Bootstrap: host mutation mounts for pvm / node-init.
   value: {{ .Values.cubeNode.network.ethName | quote }}
 - name: CUBE_SANDBOX_NETWORK_CIDR
   value: {{ .Values.cubeNode.network.cidr | quote }}
+- name: CUBE_EGRESS_ADMIN_PORT
+  value: {{ .Values.cubeEgress.adminPort | quote }}
 - name: CUBE_SANDBOX_DNS_SERVERS
   {{- if .Values.cubeNode.dns.sandbox.nameservers }}
   value: {{ join "," .Values.cubeNode.dns.sandbox.nameservers | quote }}

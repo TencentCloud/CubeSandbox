@@ -113,7 +113,7 @@ func WrapWithDefaultError(err error, defaultErr errorcode.ErrorCode) error {
 	if ok {
 		return err
 	}
-	return Errorf(defaultErr, err.Error())
+	return Errorf(defaultErr, "%s", err.Error())
 }
 
 func FetchErrorCode(err error) string {

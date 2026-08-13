@@ -13,6 +13,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/cubemaster"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
+	cubelog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"gorm.io/gorm"
 )
 
@@ -168,22 +169,26 @@ type fakeServiceCM struct {
 	listTemplatesErr   error
 }
 
-func (f *fakeServiceCM) CreateSandbox(_ context.Context, body interface{}) (json.RawMessage, error) {
+func (f *fakeServiceCM) CreateSandbox(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	cubemaster.EnsureRequestID(ctx, body)
 	f.createSandboxBody = decodeBody(body)
 	if f.createSandboxResp == nil {
 		f.createSandboxResp = json.RawMessage(`{"sandbox_id":"sb-test-123","ret":{"ret_code":0}}`)
 	}
 	return f.createSandboxResp, f.createSandboxErr
 }
-func (f *fakeServiceCM) DeleteSandbox(_ context.Context, body interface{}) (json.RawMessage, error) {
+func (f *fakeServiceCM) DeleteSandbox(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	cubemaster.EnsureRequestID(ctx, body)
 	f.deleteSandboxBodies = append(f.deleteSandboxBodies, decodeBody(body))
 	return nil, f.deleteSandboxErr
 }
-func (f *fakeServiceCM) UpdateSandbox(_ context.Context, body interface{}) (json.RawMessage, error) {
+func (f *fakeServiceCM) UpdateSandbox(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	cubemaster.EnsureRequestID(ctx, body)
 	f.updateSandboxBody = decodeBody(body)
 	return nil, f.updateSandboxErr
 }
-func (f *fakeServiceCM) CreateSnapshot(_ context.Context, body interface{}) (json.RawMessage, error) {
+func (f *fakeServiceCM) CreateSnapshot(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	cubemaster.EnsureRequestID(ctx, body)
 	f.createSnapshotBody = decodeBody(body)
 	return f.createSnapshotResp, f.createSnapshotErr
 }
@@ -191,7 +196,8 @@ func (f *fakeServiceCM) DeleteSnapshot(_ context.Context, snapshotID string) (js
 	f.deleteSnapshotID = snapshotID
 	return nil, f.deleteSnapshotErr
 }
-func (f *fakeServiceCM) RollbackSandbox(_ context.Context, sandboxID string, body interface{}) (json.RawMessage, error) {
+func (f *fakeServiceCM) RollbackSandbox(ctx context.Context, sandboxID string, body interface{}) (json.RawMessage, error) {
+	cubemaster.EnsureRequestID(ctx, body)
 	f.rollbackBody = decodeBody(body)
 	return nil, f.rollbackErr
 }
@@ -216,10 +222,10 @@ func newTestService(s AgentStore, cm *fakeServiceCM) *AgentHubService {
 		Store:      s,
 		CM:         cm,
 		envdClient: nil,
-		applyFn: func(_ *http.Client, _ string, _ string, _ *LLMRuntimePlan, _ *OpenclawApplyOptions) (*CommandOutput, error) {
+		applyFn: func(_ context.Context, _ *http.Client, _ string, _ string, _ *LLMRuntimePlan, _ *OpenclawApplyOptions) (*CommandOutput, error) {
 			return &CommandOutput{ExitCode: 0, Stdout: "applied", Stderr: ""}, nil
 		},
-		resolveGatewayFn: func(_ *http.Client, _ string, _ string, _ string, fallback string) string {
+		resolveGatewayFn: func(_ context.Context, _ *http.Client, _ string, _ string, _ string, fallback string) string {
 			return fallback
 		},
 		restartFn: func(_ *store.AgentInstance) (*CommandOutput, error) {
@@ -356,11 +362,14 @@ func TestCreateInstance_ApplyFailureCompensates(t *testing.T) {
 	}
 	svc := newTestService(st, cm)
 	// Override applyFn to fail.
-	svc.applyFn = func(_ *http.Client, _ string, _ string, _ *LLMRuntimePlan, _ *OpenclawApplyOptions) (*CommandOutput, error) {
+	svc.applyFn = func(_ context.Context, _ *http.Client, _ string, _ string, _ *LLMRuntimePlan, _ *OpenclawApplyOptions) (*CommandOutput, error) {
 		return nil, errors.New("envd unreachable")
 	}
 
-	_, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+	const inboundReqID = "svc-inbound-req-123"
+	ctx := cubelog.WithRequestTrace(context.Background(), &cubelog.RequestTrace{RequestID: inboundReqID})
+
+	_, err := svc.CreateInstance(ctx, CreateInstanceRequest{
 		Name:   "x",
 		Engine: "openclaw",
 	})
@@ -384,8 +393,8 @@ func TestCreateInstance_ApplyFailureCompensates(t *testing.T) {
 		t.Errorf("compensation instance_type = %v, want cubebox", comp["instance_type"])
 	}
 	reqID, _ := comp["requestID"].(string)
-	if !strings.HasPrefix(reqID, "cubeops-compensate-apply_openclaw-") {
-		t.Errorf("compensation requestID = %q, want prefix cubeops-compensate-apply_openclaw-", reqID)
+	if reqID != inboundReqID {
+		t.Errorf("compensation requestID = %q, want %q", reqID, inboundReqID)
 	}
 }
 
@@ -407,7 +416,10 @@ func TestCreateInstance_UpsertFailureCompensates(t *testing.T) {
 	}
 	svc := newTestService(st, cm)
 
-	_, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+	const inboundReqID = "svc-inbound-req-456"
+	ctx := cubelog.WithRequestTrace(context.Background(), &cubelog.RequestTrace{RequestID: inboundReqID})
+
+	_, err := svc.CreateInstance(ctx, CreateInstanceRequest{
 		Name:   "x",
 		Engine: "openclaw",
 	})
@@ -420,8 +432,8 @@ func TestCreateInstance_UpsertFailureCompensates(t *testing.T) {
 	}
 	comp := cm.deleteSandboxBodies[0]
 	reqID, _ := comp["requestID"].(string)
-	if !strings.HasPrefix(reqID, "cubeops-compensate-upsert_instance-") {
-		t.Errorf("compensation requestID = %q, want prefix cubeops-compensate-upsert_instance-", reqID)
+	if reqID != inboundReqID {
+		t.Errorf("compensation requestID = %q, want %q", reqID, inboundReqID)
 	}
 }
 
@@ -556,11 +568,14 @@ func TestCloneAgent_ApplyFailureCompensates(t *testing.T) {
 		},
 	}
 	svc := newTestService(st, cm)
-	svc.applyFn = func(_ *http.Client, _ string, _ string, _ *LLMRuntimePlan, _ *OpenclawApplyOptions) (*CommandOutput, error) {
+	svc.applyFn = func(_ context.Context, _ *http.Client, _ string, _ string, _ *LLMRuntimePlan, _ *OpenclawApplyOptions) (*CommandOutput, error) {
 		return nil, errors.New("envd unreachable")
 	}
 
-	_, err := svc.CloneAgent(context.Background(), CloneAgentRequest{
+	const inboundReqID = "svc-inbound-req-789"
+	ctx := cubelog.WithRequestTrace(context.Background(), &cubelog.RequestTrace{RequestID: inboundReqID})
+
+	_, err := svc.CloneAgent(ctx, CloneAgentRequest{
 		AgentID: "agent-src",
 	})
 	if err == nil {
@@ -578,8 +593,8 @@ func TestCloneAgent_ApplyFailureCompensates(t *testing.T) {
 		t.Errorf("compensation sandbox_id = %v, want sb-test-123", comp["sandbox_id"])
 	}
 	reqID, _ := comp["requestID"].(string)
-	if !strings.HasPrefix(reqID, "cubeops-clone-") {
-		t.Errorf("compensation requestID = %q, want prefix cubeops-clone-", reqID)
+	if reqID != inboundReqID {
+		t.Errorf("compensation requestID = %q, want %q", reqID, inboundReqID)
 	}
 }
 

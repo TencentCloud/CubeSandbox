@@ -1,4 +1,4 @@
-# 网络模型 (CubeVS)
+# CubeVS 网络模型
 
 Cube-Sandbox 为每个沙箱提供独立的虚拟网络，使其拥有私有的外部连接能力，同时完全在内核态执行每沙箱的安全策略。实现这一切的子系统称为 **CubeVS** —— 一个专为沙箱场景设计的网络虚拟化层，由三个 eBPF 程序、一组共享的 BPF Map 和一个 Go 控制面库组成。
 
@@ -268,6 +268,8 @@ Go API 提供了 `AddPortMapping()`、`DelPortMapping()`、`ListPortMapping()` �
 | `20000`--`29999` | CubeProxy 访问沙箱所用的端口范围 |
 | `30000`--`65535` | 沙箱出站报文经 SNAT 使用的源端口 |
 
+Cubelet 内嵌网络运行时为沙箱 port mapping 分配宿主端口时，**仅使用** `20000`--`29999`。产品创建路径通过 `exposedPorts` 声明容器端口，并始终请求自动分配宿主端口（`HostPort=0`），用户无法指定具体 host port。运行时再从该管理段中分配空闲端口，并在创建响应中返回映射结果。
+
 ---
 
 ## 8. TAP 设备生命周期
@@ -284,7 +286,7 @@ Go API 提供了 `AddPortMapping()`、`DelPortMapping()`、`ListPortMapping()` �
 
 ## 9. 初始化
 
-`Init()` 在网络代理启动时调用一次，将三个 BPF 程序及其 Map 加载并固定到 `/sys/fs/bpf/` 下。在加载之前，先将宿主机相关的常量（沙箱 IP 与网关 IP，cube-dev 接口索引/IP/MAC，宿主机网卡接口索引/IP/MAC，下一跳网关 MAC）注入到 BPF 字节码中。随后挂载共享 TC 过滤器：`from_envoy` 挂到 cube-dev 的 egress，`from_world` 挂到宿主机网卡的 ingress。每 TAP 的 `from_cube` 过滤器在稍后随沙箱的创建逐个挂载（见 §8）。
+`cubevs.Init()` 在 Cubelet 内嵌网络运行时启动时调用一次（网络插件 / `NetworkController` 初始化阶段）。在加载之前，先将宿主机相关的常量（沙箱 IP 与网关 IP，cube-dev 接口索引/IP/MAC，宿主机网卡接口索引/IP/MAC，下一跳网关 MAC）注入到 BPF 字节码中，然后将三个 BPF 程序及其 Map 加载并固定到 `/sys/fs/bpf/` 下。随后挂载共享 TC 过滤器：`from_envoy` 挂到 cube-dev 的 egress，`from_world` 挂到宿主机网卡的 ingress。每 TAP 的 `from_cube` 过滤器在稍后随沙箱的创建逐个挂载（见 §8）。
 
 ---
 

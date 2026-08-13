@@ -22,11 +22,11 @@ import (
 
 // Client wraps a go-redis client with lifecycle-shaped methods.
 type Client struct {
-	rdb *redis.Client
+	rdb redis.UniversalClient
 	log *zap.Logger
 }
 
-func New(rdb *redis.Client, log *zap.Logger) *Client {
+func New(rdb redis.UniversalClient, log *zap.Logger) *Client {
 	return &Client{rdb: rdb, log: log}
 }
 

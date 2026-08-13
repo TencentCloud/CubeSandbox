@@ -9,10 +9,13 @@ import "context"
 // recordingTimeoutProvider is shared by tests that need to verify calls to
 // TimeoutProvider without using the lifecycle metadata store.
 type recordingTimeoutProvider struct {
-	sandboxID   string
-	timeout     int
-	calls       int
-	rebaseCalls int
+	sandboxID     string
+	timeout       int
+	calls         int
+	rebaseCalls   int
+	lookupEndAt   int64
+	lookupTimeout *int
+	lookupCalls   int
 }
 
 func (p *recordingTimeoutProvider) RefreshTimeout(_ context.Context, sandboxID string, timeoutSeconds int) (int64, error) {
@@ -28,6 +31,8 @@ func (p *recordingTimeoutProvider) RebaseTimeoutWindow(_ context.Context, sandbo
 	return 12345, nil
 }
 
-func (p *recordingTimeoutProvider) LookupTimeout(_ context.Context, _ string) (int64, *int, error) {
-	return 0, nil, nil
+func (p *recordingTimeoutProvider) LookupTimeout(_ context.Context, sandboxID string) (int64, *int, error) {
+	p.sandboxID = sandboxID
+	p.lookupCalls++
+	return p.lookupEndAt, p.lookupTimeout, nil
 }

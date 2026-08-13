@@ -13,8 +13,7 @@ import (
 
 	jsoniter "github.com/json-iterator/go"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/network"
-	netproto "github.com/tencentcloud/CubeSandbox/Cubelet/network/proto"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
 type Req struct {
@@ -31,7 +30,6 @@ const (
 	Success         errCode = 0
 	ParseJsonFailed         = iota + 1000
 	CannotFindDevice
-	TapDoesNotMatchId
 )
 
 const (
@@ -61,19 +59,19 @@ func matchTapFd(buf []byte) (errCode errCode, retFile *os.File, du1, du2 time.Du
 	du1 = time.Since(startTime)
 	startTime = time.Now()
 
-	mvmNet, exist := network.Name2MvmNet.Load(req.Name)
-	if !exist {
+	file, err := network.GetTapFileForShim(req.SandboxId, req.Name)
+	if err != nil {
+		CubeLog.Warnf("get one-shot tap fd for shim failed: sandbox_id=%s tap_name=%s err=%v", req.SandboxId, req.Name, err)
 		return CannotFindDevice, nil, du1, du2
 	}
-	m := mvmNet.(*netproto.MvmNet)
 
-	if m.ID != req.SandboxId {
-		return TapDoesNotMatchId, nil, du1, du2
+	if file == nil {
+		return CannotFindDevice, nil, du1, du2
 	}
 
 	du2 = time.Since(startTime)
 
-	return Success, m.Tap.File, du1, du2
+	return Success, file, du1, du2
 }
 
 func run(beginTime time.Time, conn *net.UnixConn) {
@@ -107,6 +105,9 @@ func run(beginTime time.Time, conn *net.UnixConn) {
 	startTime = time.Now()
 
 	errCode, retFile, du1, du2 := matchTapFd(buf[0:n])
+	if retFile != nil {
+		defer retFile.Close()
+	}
 	var b []byte
 	successFlag := false
 	switch errCode {
@@ -117,8 +118,6 @@ func run(beginTime time.Time, conn *net.UnixConn) {
 		b = []byte(`{"errCode":"1001","errMsg":"Parse json failed"}`)
 	case CannotFindDevice:
 		b = []byte(`{"errCode":"1002","errMsg":"Device cannot be found by current name"}`)
-	case TapDoesNotMatchId:
-		b = []byte(`{"errCode":"1003","errMsg":"The device name does not match the sandboxID"}`)
 	default:
 		b = []byte(`{"errCode":"-1","errMsg":"Unknown"}`)
 	}

@@ -24,6 +24,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
@@ -84,6 +85,11 @@ func (s *service) Update(ctx context.Context, req *cubebox.UpdateCubeSandboxRequ
 
 	sb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, req.SandboxID)
 	if err != nil {
+		if action == constants.UpdateActionResume {
+			rsp.Ret.RetMsg = "pause resume is owned by CubeMaster Create; Update(resume) is not supported"
+			rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+			return rsp, nil
+		}
 		rsp.Ret.RetMsg = err.Error()
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		return rsp, nil
@@ -95,9 +101,18 @@ func (s *service) Update(ctx context.Context, req *cubebox.UpdateCubeSandboxRequ
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		return rsp, nil
 	case constants.UpdateActionPause:
-		return s.UpdateWithPause(ctx, req, sb)
+		// Pause is CubeCow-only: Master-allocated snap-* + PauseToSnapshot + shim exit.
+		if !storage.IsCowBackend() {
+			rsp.Ret.RetMsg = "pause requires cubecow storage backend; legacy pausevm is removed"
+			rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+			return rsp, nil
+		}
+		return s.updateWithPauseCow(ctx, req, sb)
 	case constants.UpdateActionResume:
-		return s.UpdateWithResume(ctx, req, sb)
+		// Resume is Master Create(same sandboxID from pause snap), not Update(resume).
+		rsp.Ret.RetMsg = "pause resume is owned by CubeMaster Create; Update(resume) is not supported"
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		return rsp, nil
 	default:
 		rsp.Ret.RetMsg = "invalid update action"
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
@@ -121,127 +136,6 @@ func addPauseResumeMetaData(ctx context.Context, req *cubebox.UpdateCubeSandboxR
 	return addSandboxTaskMetaData(ctx, req.SandboxID)
 }
 
-func (s *service) UpdateWithPause(ctx context.Context, req *cubebox.UpdateCubeSandboxRequest, sb *cubeboxstore.CubeBox) (*cubebox.UpdateCubeSandboxResponse, error) {
-	rsp := &cubebox.UpdateCubeSandboxResponse{
-		RequestID: req.RequestID,
-		Ret:       &errorcode.Ret{RetCode: errorcode.ErrorCode_Success},
-	}
-	if sb.GetStatus().IsPaused() {
-		rsp.Ret.RetMsg = "sandbox is already paused"
-		rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
-		return rsp, nil
-	}
-	if sb.GetStatus().IsTerminated() {
-		// IsTerminated() covers both EXITED (FinishedAt!=0) and UNKNOWN
-		// (Unknown=true). The legacy "sandbox is terminating" wording wrongly
-		// implied a user-driven delete is in flight; use the same wording as
-		// rollback.go's precheck so operators can tell the two states apart
-		// from the message alone.
-		rsp.Ret.RetMsg = "sandbox is not running"
-		rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
-		return rsp, nil
-	}
-
-	ns := sb.Namespace
-	if ns == "" {
-		ns = namespaces.Default
-	}
-	ctx = namespaces.WithNamespace(ctx, ns)
-	ctx = constants.WithPreStopType(ctx, constants.PreStopTypePause)
-	task, err := sb.FirstContainer().Container.Task(ctx, nil)
-	if err != nil {
-		rsp.Ret.RetMsg = err.Error()
-		rsp.Ret.RetCode = errorcode.ErrorCode_TaskPauseFailed
-		return rsp, nil
-	}
-	log.G(ctx).Infof("UpdateWithPause:%s", utils.InterfaceToString(req))
-	ctx = addPauseResumeMetaData(ctx, req)
-	defer func() {
-
-		s.cubeboxMgr.cubeboxManger.SyncByID(ctx, sb.ID)
-	}()
-	defer utils.Recover()
-	for _, c := range sb.AllContainers() {
-		if c.Status != nil {
-			c.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
-				status.PausingAt = time.Now().UnixNano()
-				return status, nil
-			})
-		}
-	}
-
-	for _, c := range sb.All() {
-		doPreStop(ctx, c)
-	}
-
-	doPreStop(ctx, sb.FirstContainer())
-
-	// Give task.Pause an explicit timeout so it cannot be stretched out
-	// arbitrarily by the upstream ctx; otherwise, once the upstream ctx is
-	// cancelled the cubelet view stays stuck at PAUSING while cubeshim is
-	// already PAUSED.
-	pauseCtx, pauseCancel := context.WithTimeout(ctx, taskPauseTimeout)
-	defer pauseCancel()
-	if pauseErr := task.Pause(pauseCtx); pauseErr != nil {
-		// Even when ttrpc reports an error (DeadlineExceeded / canceled /
-		// ttrpc closed), cubeshim may have actually paused the VM. Query the
-		// real status once with an independent, ctx-immune short timeout and
-		// persist the truth, so the state never stays stuck at PAUSING.
-		reconcileStatusAfterPauseError(ctx, sb, task, pauseErr)
-		rsp.Ret.RetMsg = pauseErr.Error()
-		rsp.Ret.RetCode = errorcode.ErrorCode_TaskPauseFailed
-		return rsp, nil
-	}
-	for _, c := range sb.AllContainers() {
-		if c.Status != nil {
-			c.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
-				status.PausedAt = time.Now().UnixNano()
-				status.PausingAt = 0
-				return status, nil
-			})
-		}
-	}
-	return rsp, nil
-}
-
-func (s *service) UpdateWithResume(ctx context.Context, req *cubebox.UpdateCubeSandboxRequest, sb *cubeboxstore.CubeBox) (*cubebox.UpdateCubeSandboxResponse, error) {
-	rsp := &cubebox.UpdateCubeSandboxResponse{
-		RequestID: req.RequestID,
-		Ret:       &errorcode.Ret{RetCode: errorcode.ErrorCode_Success},
-	}
-	if !sb.GetStatus().IsPaused() {
-		// Split the non-paused case into two: an already-running sandbox is
-		// the *goal state* of resume, so we surface it as TaskStateInvalid
-		// (130490) which the CLM / CubeProxy treat as an idempotent
-		// success and use to reconcile a stale local "paused" cache. Any
-		// other non-paused state (Exited / Unknown / Created / ...) is a
-		// genuine resume failure and keeps TaskResumeFailed (130589).
-		state := sb.GetStatus().Get().State()
-		if state == cubebox.ContainerState_CONTAINER_RUNNING {
-			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
-			rsp.Ret.RetMsg = "sandbox already running"
-		} else {
-			rsp.Ret.RetCode = errorcode.ErrorCode_TaskResumeFailed
-			rsp.Ret.RetMsg = fmt.Sprintf("sandbox not resumable in state=%s", state)
-		}
-		return rsp, nil
-	}
-
-	log.G(ctx).Infof("UpdateWithResume:%s", utils.InterfaceToString(req))
-	now := time.Now()
-	result := s.resumeLocked(ctx, sb, resumeOptions{
-		taskDeadline:      now.Add(taskResumeTimeout),
-		reconcileDeadline: now.Add(taskResumeTimeout + reconcileStatusTimeout),
-		persist:           true,
-	})
-	// Preserve the explicit Resume contract: an RPC error remains visible to
-	// its caller even when reconciliation has already converged the local state
-	// to RUNNING. Delete has a different terminal goal and handles that result
-	// separately in resumePausedSandboxForDestroy.
-	rsp.Ret = result.ret
-	return rsp, nil
-}
-
 // resumeTask is the narrow part of containerd.Task needed by the resume
 // transition. Keeping the core on this interface makes its timeout and
 // reconciliation rules deterministic to test without a live containerd task.
@@ -254,7 +148,7 @@ type resumeOptions struct {
 	taskDeadline      time.Time
 	reconcileDeadline time.Time
 	persist           bool
-	skipAdmission     bool // true only for delete-triggered auto-resume; overcommit is bounded by destroy deadline
+	skipAdmission     bool // when true, skip paused-resource admission (tests / special callers)
 }
 
 type resumeResult struct {

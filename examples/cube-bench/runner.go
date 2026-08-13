@@ -116,34 +116,45 @@ func benchOneDry(cfg *Config, seq int) IterResult {
 	return r
 }
 
-func RunBenchmark(cfg *Config, resultCh chan<- IterResult) {
+func newHTTPClient(concurrency int) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			MaxIdleConns:        concurrency + 20,
+			MaxIdleConnsPerHost: concurrency + 20,
+			MaxConnsPerHost:     concurrency + 20,
+			IdleConnTimeout:     90 * time.Second,
+		},
+		Timeout: 120 * time.Second,
+	}
+}
+
+// RunWarmup completes before the benchmark UI starts so its output cannot
+// interfere with Bubble Tea's terminal rendering. Warmup time is intentionally
+// excluded from the measured benchmark duration.
+func RunWarmup(cfg *Config, out io.Writer) *http.Client {
+	if cfg.DryRun || cfg.Warmup == 0 {
+		return nil
+	}
+
+	client := newHTTPClient(cfg.Concurrency)
+	for i := 0; i < cfg.Warmup; i++ {
+		r := benchOne(client, cfg, 0)
+		if r.Err == "" {
+			fmt.Fprintf(out, "    warmup [%d/%d] ok\n", i+1, cfg.Warmup)
+		} else {
+			fmt.Fprintf(out, "    warmup [%d/%d] failed: %s\n", i+1, cfg.Warmup, r.Err)
+		}
+	}
+	fmt.Fprintln(out)
+	return client
+}
+
+func RunBenchmark(cfg *Config, resultCh chan<- IterResult, client *http.Client) {
 	sem := make(chan struct{}, cfg.Concurrency)
 	var wg sync.WaitGroup
 
-	var client *http.Client
-	if !cfg.DryRun {
-		client = &http.Client{
-			Transport: &http.Transport{
-				MaxIdleConns:        cfg.Concurrency + 20,
-				MaxIdleConnsPerHost: cfg.Concurrency + 20,
-				MaxConnsPerHost:     cfg.Concurrency + 20,
-				IdleConnTimeout:     90 * time.Second,
-			},
-			Timeout: 120 * time.Second,
-		}
-
-		// Warmup
-		for i := 0; i < cfg.Warmup; i++ {
-			r := benchOne(client, cfg, 0)
-			if r.Err == "" {
-				fmt.Printf("    warmup [%d/%d] ok\n", i+1, cfg.Warmup)
-			} else {
-				fmt.Printf("    warmup [%d/%d] failed: %s\n", i+1, cfg.Warmup, r.Err)
-			}
-		}
-		if cfg.Warmup > 0 {
-			fmt.Println()
-		}
+	if !cfg.DryRun && client == nil {
+		client = newHTTPClient(cfg.Concurrency)
 	}
 
 	for i := 0; i < cfg.Total; i++ {

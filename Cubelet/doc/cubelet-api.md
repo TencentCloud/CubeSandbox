@@ -94,6 +94,7 @@
     - [UpdateCubeSandboxRequest](#cubelet-services-cubebox-v1-UpdateCubeSandboxRequest)
     - [UpdateCubeSandboxRequest.AnnotationsEntry](#cubelet-services-cubebox-v1-UpdateCubeSandboxRequest-AnnotationsEntry)
     - [UpdateCubeSandboxResponse](#cubelet-services-cubebox-v1-UpdateCubeSandboxResponse)
+    - [UpdateCubeSandboxResponse.ExtInfoEntry](#cubelet-services-cubebox-v1-UpdateCubeSandboxResponse-ExtInfoEntry)
     - [Volume](#cubelet-services-cubebox-v1-Volume)
     - [VolumeMounts](#cubelet-services-cubebox-v1-VolumeMounts)
     - [VolumeSource](#cubelet-services-cubebox-v1-VolumeSource)
@@ -260,6 +261,7 @@ AppSnapshotResponse is the response for app snapshot creation.
 | agent_version | [string](#string) |  | cube-agent version bound when this snapshot was created. |
 | kernel_version | [string](#string) |  | Guest kernel artifact identity bound when this snapshot was created. |
 | envd_version | [string](#string) |  | envd semantic version collected in-guest at snapshot time (best-effort). |
+| shim_version | [string](#string) |  | cube-shim (and sibling cube-runtime) version bound when this snapshot was created. |
 
 
 
@@ -362,6 +364,7 @@ Capability contains the container capabilities to add or drop
 | requestID | [string](#string) |  | requestID reqID |
 | ret | [cubelet.services.errorcode.v1.Ret](#cubelet-services-errorcode-v1-Ret) |  | Ret. |
 | templateID | [string](#string) |  | Logical template ID. |
+| plugin_volume_ids | [string](#string) | repeated | Deprecated: unused. Pause/Resume volume refcounts follow normal Create/Destroy ExtInfo events; CleanupTemplate does not adjust them. |
 
 
 
@@ -410,6 +413,7 @@ Capability contains the container capabilities to add or drop
 | agent_version | [string](#string) |  | cube-agent version bound when this snapshot was created. |
 | kernel_version | [string](#string) |  | Guest kernel artifact identity bound when this snapshot was created. |
 | envd_version | [string](#string) |  | envd semantic version collected in-guest at commit time (best-effort). |
+| shim_version | [string](#string) |  | cube-shim (and sibling cube-runtime) version bound when this snapshot was created. |
 
 
 
@@ -433,6 +437,7 @@ Capability contains the container capabilities to add or drop
 | finished_at | [int64](#int64) |  | exit time of the container in nanoseconds. |
 | labels | [Container.LabelsEntry](#cubelet-services-cubebox-v1-Container-LabelsEntry) | repeated |  |
 | paused_at | [int64](#int64) |  |  |
+| volume_mounts | [VolumeMounts](#cubelet-services-cubebox-v1-VolumeMounts) | repeated | Mounts declared on the container spec (including host-dir mounts). |
 
 
 
@@ -1838,6 +1843,23 @@ TCPSocketAction describes an action based on opening a socket.
 | ----- | ---- | ----- | ----------- |
 | requestID | [string](#string) |  | requestID reqID |
 | ret | [cubelet.services.errorcode.v1.Ret](#cubelet-services-errorcode-v1-Ret) |  | Ret. |
+| ext_info | [UpdateCubeSandboxResponse.ExtInfoEntry](#cubelet-services-cubebox-v1-UpdateCubeSandboxResponse-ExtInfoEntry) | repeated | Same shape as DestroyCubeSandboxResponse.ext_info. Pause returns volume ref-count events after in-process keep_tombstone cleanup. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-UpdateCubeSandboxResponse-ExtInfoEntry"></a>
+
+### UpdateCubeSandboxResponse.ExtInfoEntry
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| key | [string](#string) |  |  |
+| value | [bytes](#bytes) |  |  |
 
 
 

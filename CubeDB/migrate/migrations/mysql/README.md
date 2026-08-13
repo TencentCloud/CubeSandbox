@@ -86,7 +86,12 @@ content rules below.
   `CALL cubemaster_acquire_migration_lock('cubemaster_migration_<version>_<name>', 60);`
   at the top and
   `SELECT RELEASE_LOCK('cubemaster_migration_<version>_<name>');` at the
-  bottom. The lock name must match the filename.
+  bottom. Prefer a lock name derived from the filename, but **MySQL
+  `GET_LOCK` names must be ≤ 64 characters** (Error 4163 otherwise). When the
+  full `cubemaster_migration_<version>_<description>` string would exceed 64
+  chars, abbreviate the description suffix (examples already in-tree:
+  `_shim_ver`, `_rt_active`, `_tpl_alias_unique`). Keep Up/Down and
+  `RELEASE_LOCK` strings identical.
 - Provide a symmetric `-- +goose Down` (the `0001` baseline is the only
   exception — it is irreversible).
 

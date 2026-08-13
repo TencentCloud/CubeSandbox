@@ -88,7 +88,12 @@ func (c *CubeImageService) RemoveImage(ctx context.Context, imageSpec *runtime.I
 		return fmt.Errorf("image %q do not be allowed to delete: %w", imageSpec.GetImage(), err)
 	}
 	if c.imageDeleteScheduler == nil {
+		// The scheduler is wired unconditionally at service init, so a nil here
+		// means the service is only partially constructed (tests/misconfig).
+		// Treat as a graceful no-op: there is no inline delete path yet, and the
+		// image record is left intact for a later cycle once the scheduler exists.
 		stepLog.Warnf("image delete scheduler have not init")
+		return nil
 	}
 	task := &deleteImageTask{
 		imageID: image.ID,

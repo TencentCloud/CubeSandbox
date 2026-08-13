@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,7 +27,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -80,27 +79,7 @@ var (
 	ErrNoTemplateNodes             = errors.New("no healthy nodes available for template creation")
 	ErrDuplicateTemplate           = errors.New("template already exists")
 	ErrTemplateAttemptInProgress   = errors.New("template attempt is already in progress")
-	ErrTemplateStaleNeedsRedo      = errors.New("template stale needs redo")
 )
-
-type TemplateStaleNeedsRedoError struct {
-	TemplateID string
-	Nodes      []string
-}
-
-func (e *TemplateStaleNeedsRedoError) Error() string {
-	if e == nil {
-		return ErrTemplateStaleNeedsRedo.Error()
-	}
-	if len(e.Nodes) == 0 {
-		return fmt.Sprintf("template %s is stale and needs redo", e.TemplateID)
-	}
-	return fmt.Sprintf("template %s is stale on nodes [%s] and needs redo", e.TemplateID, strings.Join(e.Nodes, ", "))
-}
-
-func (e *TemplateStaleNeedsRedoError) Unwrap() error {
-	return ErrTemplateStaleNeedsRedo
-}
 
 type localStore struct {
 	db     *gorm.DB
@@ -133,6 +112,7 @@ type ReplicaStatus struct {
 	GuestImageVersion string `json:"guest_image_version,omitempty"`
 	AgentVersion      string `json:"agent_version,omitempty"`
 	KernelVersion     string `json:"kernel_version,omitempty"`
+	ShimVersion       string `json:"shim_version,omitempty"`
 	CompatStatus      string `json:"compat_status,omitempty"`
 	CompatPolicy      string `json:"compat_policy,omitempty"`
 	CompatCheckedUnix int64  `json:"compat_checked_unix,omitempty"`
@@ -146,6 +126,7 @@ type TemplateInfo struct {
 	Kind                      string          `json:"kind,omitempty"`
 	OriginSandboxID           string          `json:"origin_sandbox_id,omitempty"`
 	OriginNodeID              string          `json:"origin_node_id,omitempty"`
+	OriginHostFactsJSON       string          `json:"origin_host_facts_json,omitempty"`
 	DisplayName               string          `json:"display_name,omitempty"`
 	StorageBackend            string          `json:"storage_backend,omitempty"`
 	Retain                    bool            `json:"retain,omitempty"`
@@ -175,6 +156,7 @@ func templateInfoFromDefinition(def models.TemplateDefinition) TemplateInfo {
 		Kind:                      def.Kind,
 		OriginSandboxID:           def.OriginSandboxID,
 		OriginNodeID:              def.OriginNodeID,
+		OriginHostFactsJSON:       def.OriginHostFactsJSON,
 		DisplayName:               def.DisplayName,
 		StorageBackend:            def.StorageBackend,
 		Retain:                    def.Retain,
@@ -192,6 +174,7 @@ type definitionCreateOptions struct {
 	Kind                      string
 	OriginSandboxID           string
 	OriginNodeID              string
+	OriginHostFactsJSON       string
 	DisplayName               string
 	StorageBackend            string
 	Retain                    bool
@@ -223,6 +206,11 @@ func ListTemplates(ctx context.Context) ([]TemplateInfo, error) {
 
 	out := make([]TemplateInfo, 0, len(defs))
 	for _, def := range defs {
+		// Pause-produced snaps are internal Resume artifacts (Kind=pause_snapshot).
+		// Keep them out of template/snapshot list surfaces.
+		if strings.EqualFold(strings.TrimSpace(def.Kind), pausesnap.KindPauseSnapshot) {
+			continue
+		}
 		imageInfo := extractImageInfoFromRequestJSON(def.RequestJSON)
 		if latestJob := latestJobByTemplateID[def.TemplateID]; latestJob != nil {
 			imageInfo = composeImageInfo(latestJob.SourceImageRef, latestJob.SourceImageDigest)
@@ -251,7 +239,7 @@ func ListTemplates(ctx context.Context) ([]TemplateInfo, error) {
 
 func Init(ctx context.Context) error {
 	_ = ctx
-	if config.GetInstanceConfig() == nil {
+	if config.GetDbConfig() == nil {
 		return ErrTemplateStoreNotInitialized
 	}
 	var initErr error
@@ -259,11 +247,12 @@ func Init(ctx context.Context) error {
 		// Schema is owned by pkg/base/dao/migrate and applied in main.go
 		// before any business package Init runs; here we only attach to
 		// the existing *gorm.DB.
-		store.db = db.Init(config.GetInstanceConfig())
-		store.dbAddr = config.GetInstanceConfig().Addr
+		store.db = db.Init(config.GetDbConfig())
+		store.dbAddr = config.GetDbConfig().Addr
 		if initErr = sandboxspec.Init(store.db); initErr != nil {
 			return
 		}
+		pausesnap.Init(store.db)
 		configureSnapshotRuntimeRefHooks()
 		configureSandboxSpecHooks()
 		configureCompatHooks()
@@ -447,7 +436,10 @@ func CreateTemplate(ctx context.Context, req *sandboxtypes.CreateCubeSandboxReq)
 	if persistErr != nil {
 		return nil, persistErr
 	}
-	return finalizeTemplateReplicas(ctx, templateID, createReq.InstanceType, constants.GetAppSnapshotVersion(createReq.Annotations), replicas)
+	// The synchronous CreateCubeSandboxReq path carries no template alias (that
+	// is exclusive to CreateTemplateFromImageReq), so no alias is claimed here.
+	info, _, finalizeErr := finalizeTemplateReplicas(ctx, templateID, createReq.InstanceType, constants.GetAppSnapshotVersion(createReq.Annotations), "", replicas)
+	return info, finalizeErr
 }
 
 func healthyTemplateNodes(instanceType string) []*node.Node {
@@ -619,7 +611,7 @@ func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtyp
 	}
 	replica.Status = ReplicaStatusReady
 	replica.Phase = ReplicaPhaseReady
-	bindGuestVersionToReplica(&replica, rsp.GetGuestImageVersion(), rsp.GetAgentVersion(), rsp.GetKernelVersion())
+	bindGuestVersionToReplica(&replica, rsp.GetGuestImageVersion(), rsp.GetAgentVersion(), rsp.GetKernelVersion(), rsp.GetShimVersion())
 	envdVersion := sanitizeEnvdVersion(rsp.GetEnvdVersion())
 	// v4: AppSnapshot replica is "thin" -- physical refs are owned by cubelet's
 	// local catalog. Master only persists control-plane state (status / phase /
@@ -666,28 +658,43 @@ func ensureRuntimeTemplateRequest(req *sandboxtypes.CreateCubeSandboxReq) {
 	}
 }
 
-func refreshTemplateReplicaSummary(ctx context.Context, templateID string) error {
+// refreshTemplateReplicaSummary recomputes the template's aggregate status from
+// its replicas and publishes it. When the template is not FAILED it claims the
+// requested alias *before* publishing the status, so a client that observes the
+// template as READY (e.g. by polling GetTemplateInfo) is guaranteed the alias
+// already resolves — closing the create/claim publish-ordering race. The
+// returned claimWarning is non-empty when the alias could not be claimed for a
+// non-duplicate reason.
+func refreshTemplateReplicaSummary(ctx context.Context, templateID, alias string) (claimWarning string, err error) {
 	replicas, err := ListReplicas(ctx, templateID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	current := make([]ReplicaStatus, 0, len(replicas))
 	for _, replica := range replicas {
 		current = append(current, replicaModelToStatus(replica))
 	}
 	status, lastError := summarizeStatus(current)
+	// NB: claimAliasForReadyTemplate and UpdateDefinitionStatus each use their own
+	// DB transaction. A crash between the two leaves the alias claimed but the
+	// status at its previous value — strictly safer than the reverse ordering, but
+	// not fully atomic.
+	if status != StatusFailed {
+		claimWarning, _ = claimAliasForReadyTemplate(ctx, templateID, alias)
+	}
 	if err := UpdateDefinitionStatus(ctx, templateID, status, lastError); err != nil {
-		return err
+		return "", err
 	}
 	localcache.InvalidateImageState(templateID)
 	setTemplateLocalityCache(templateID, current)
 	registerReadyTemplateReplicas(templateID, current)
-	return nil
+	return claimWarning, nil
 }
 
 // createDefinitionWithOptions wraps createDefinitionTx in a real DB transaction
 // so the INSERT is atomic. Alias claiming is NOT done here — it happens
-// separately in claimTemplateAlias after the template reaches READY.
+// separately when the template reaches a non-FAILED status, before that status
+// is published (see claimAliasForReadyTemplate).
 func createDefinitionWithOptions(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string, opts definitionCreateOptions) error {
 	return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		return createDefinitionTx(ctx, tx, templateID, storedReq, instanceType, version, opts)
@@ -718,13 +725,38 @@ func ensureTemplateDefinitionWithOptions(ctx context.Context, templateID string,
 	return true, nil
 }
 
-func finalizeTemplateReplicas(ctx context.Context, templateID, instanceType, version string, replicas []ReplicaStatus) (*TemplateInfo, error) {
+// finalizeTemplateReplicas publishes the aggregate template status computed from
+// its replicas. When the template reaches a non-FAILED status it claims the
+// requested alias *before* publishing the status via UpdateDefinitionStatus, so
+// a client that observes the template as READY is guaranteed the alias already
+// resolves — closing the create/claim publish-ordering race.
+//
+// A side effect of that ordering is that the alias becomes resolvable while the
+// status is still the pre-publish value (PENDING/PARTIALLY_READY): alias
+// resolution no longer implies READY. This is intended and strictly safer than
+// the old 404 race; callers must not assume "alias resolves" ⇒ "READY".
+//
+// The returned claim warning (non-empty only when the alias could not be
+// claimed for a non-duplicate reason) and the claimed alias are separate,
+// mutually-exclusive results: on success the alias is reflected in
+// TemplateInfo.DisplayName and the warning is empty; on a non-duplicate claim
+// failure the warning is set and DisplayName stays empty.
+func finalizeTemplateReplicas(ctx context.Context, templateID, instanceType, version, alias string, replicas []ReplicaStatus) (*TemplateInfo, string, error) {
 	setTemplateLocalityCache(templateID, replicas)
 	registerReadyTemplateReplicas(templateID, replicas)
 
 	status, lastError := summarizeStatus(replicas)
+	claimWarning := ""
+	displayName := ""
+	// NB: claimAliasForReadyTemplate and UpdateDefinitionStatus each use their own
+	// DB transaction. A crash between the two leaves the alias claimed but the
+	// status at its previous value — strictly safer than the reverse ordering, but
+	// not fully atomic.
+	if status != StatusFailed {
+		claimWarning, displayName = claimAliasForReadyTemplate(ctx, templateID, alias)
+	}
 	if err := UpdateDefinitionStatus(ctx, templateID, status, lastError); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	info := &TemplateInfo{
 		TemplateID:   templateID,
@@ -732,15 +764,16 @@ func finalizeTemplateReplicas(ctx context.Context, templateID, instanceType, ver
 		Version:      version,
 		Status:       status,
 		LastError:    lastError,
+		DisplayName:  displayName,
 		Replicas:     replicas,
 	}
 	if status == StatusFailed {
 		if lastError == "" {
 			lastError = "template creation failed on all nodes"
 		}
-		return info, fmt.Errorf("template %s creation failed: %s", templateID, lastError)
+		return info, claimWarning, fmt.Errorf("template %s creation failed: %s", templateID, lastError)
 	}
-	return info, nil
+	return info, claimWarning, nil
 }
 
 func UpdateDefinitionStatus(ctx context.Context, templateID, status, lastError string) error {
@@ -768,6 +801,10 @@ func GetTemplateInfo(ctx context.Context, templateID string) (*TemplateInfo, err
 		}
 		info := templateInfoFromJob(job)
 		return &info, nil
+	}
+	// Pause snaps are not user-visible templates/snapshots.
+	if strings.EqualFold(strings.TrimSpace(def.Kind), pausesnap.KindPauseSnapshot) {
+		return nil, ErrTemplateNotFound
 	}
 	replicas, err := ListReplicas(ctx, templateID)
 	if err != nil {
@@ -906,8 +943,9 @@ func GetDefinition(ctx context.Context, templateID string) (*models.TemplateDefi
 // 20260704120000) so it is inherently scoped to template-kind rows: a snapshot
 // carries its own informational display_name (NULL alias_key) and can never
 // match. The write path that owns template aliases is claimTemplateAlias
-// (called post-READY); without the alias_key filter, a snapshot sharing the
-// alias could shadow the owning template and resolve the alias to a snap-* id.
+// (invoked once the template reaches a non-FAILED status, before that status is
+// published); without the alias_key filter, a snapshot sharing the alias could
+// shadow the owning template and resolve the alias to a snap-* id.
 func GetTemplateByAlias(ctx context.Context, alias string) (*models.TemplateDefinition, error) {
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
@@ -951,8 +989,8 @@ func ResolveTemplateIdentifier(ctx context.Context, identifier string) (string, 
 
 // claimTemplateAlias atomically claims an alias for a template: releases it
 // from any other non-deleting template that currently holds it, then sets
-// display_name on the target template. Call this only after the template is
-// confirmed READY so an alias never points to a broken template.
+// display_name on the target template. Call this only for a non-FAILED template
+// so an alias never points to a broken one (callers gate on status != FAILED).
 func claimTemplateAlias(ctx context.Context, templateID, alias string) error {
 	alias = strings.TrimSpace(alias)
 	if alias == "" {
@@ -989,12 +1027,14 @@ func isDuplicateAliasError(err error) bool {
 	return strings.Contains(s, "23505") || strings.Contains(s, "unique_constraint")
 }
 
-// claimAliasAfterReady is the shared claim-after-READY pattern used by both
-// image_job_runner and redo. It attempts to claim the alias for a template
-// that has just reached READY. Returns a warning string (non-empty if the
-// claim failed for a non-duplicate reason) and the refreshed DisplayName
-// (non-empty if the claim succeeded).
-func claimAliasAfterReady(ctx context.Context, templateID, alias string) (claimWarning, displayName string) {
+// claimAliasForReadyTemplate is the shared alias-claim helper used by both the
+// image-job and redo paths. It is called for a template that has reached a
+// non-FAILED status, and — per the create/claim ordering fix — runs *before*
+// that status is published, so a client that later observes READY is guaranteed
+// the alias already resolves. Returns a warning string (non-empty only if the
+// claim failed for a non-duplicate reason) and the claimed DisplayName
+// (the alias itself on success); the two are mutually exclusive.
+func claimAliasForReadyTemplate(ctx context.Context, templateID, alias string) (claimWarning, displayName string) {
 	alias = strings.TrimSpace(alias)
 	if alias == "" {
 		return "", ""
@@ -1002,16 +1042,14 @@ func claimAliasAfterReady(ctx context.Context, templateID, alias string) (claimW
 	if claimErr := claimTemplateAlias(ctx, templateID, alias); claimErr != nil {
 		if isDuplicateAliasError(claimErr) {
 			log.G(ctx).Infof("alias %q concurrently claimed by another template; template %s is READY without alias", alias, templateID)
-		} else {
-			log.G(ctx).Warnf("claim alias %q for template %s fail: %v", alias, templateID, claimErr)
-			return fmt.Sprintf("template is ready but alias %q could not be claimed: %v", alias, claimErr), ""
+			return "", ""
 		}
-	} else if refreshed, refreshErr := GetTemplateInfo(ctx, templateID); refreshErr == nil && refreshed != nil {
-		return "", refreshed.DisplayName
-	} else {
-		return "", alias
+		log.G(ctx).Warnf("claim alias %q for template %s fail: %v", alias, templateID, claimErr)
+		return fmt.Sprintf("template is ready but alias %q could not be claimed: %v", alias, claimErr), ""
 	}
-	return "", ""
+	// The claim just wrote display_name = alias, so the claimed display name is
+	// the alias itself — no read-back needed.
+	return "", alias
 }
 func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.CreateCubeSandboxReq, error) {
 	cacheStart := time.Now()
@@ -1160,16 +1198,20 @@ func evaluateCompat(replica ReplicaStatus, currentGuestImage, currentAgent, _ st
 }
 
 func isReplicaSchedulable(replica ReplicaStatus) bool {
-	return replica.Status == ReplicaStatusReady && normalizeCompatStatus(replica.CompatStatus) != CompatStatusStale
+	return replica.Status == ReplicaStatusReady
 }
 
-func bindGuestVersionToReplica(replica *ReplicaStatus, guestImageVersion, agentVersion, kernelVersion string) {
+// bindGuestVersionToReplica records pin versions on the replica. CompatStatus
+// still compares guest[+agent] only; kernel/shim are stored for create inject
+// and do not participate in evaluateCompat.
+func bindGuestVersionToReplica(replica *ReplicaStatus, guestImageVersion, agentVersion, kernelVersion, shimVersion string) {
 	if replica == nil {
 		return
 	}
 	replica.GuestImageVersion = normalizeComponentVersion(guestImageVersion)
 	replica.AgentVersion = normalizeComponentVersion(agentVersion)
 	replica.KernelVersion = normalizeComponentVersion(kernelVersion)
+	replica.ShimVersion = normalizeComponentVersion(shimVersion)
 	replica.CompatPolicy = CompatPolicyStrict
 	replica.CompatStatus = evaluateCompat(*replica, replica.GuestImageVersion, replica.AgentVersion, replica.KernelVersion)
 	replica.CompatCheckedUnix = time.Now().Unix()
@@ -1191,6 +1233,7 @@ func replicaModelToStatus(replica models.TemplateReplica) ReplicaStatus {
 		GuestImageVersion: replica.GuestImageVersion,
 		AgentVersion:      replica.AgentVersion,
 		KernelVersion:     replica.KernelVersion,
+		ShimVersion:       replica.ShimVersion,
 		CompatStatus:      normalizeCompatStatus(replica.CompatStatus),
 		CompatPolicy:      normalizeCompatPolicy(replica.CompatPolicy),
 		CompatCheckedUnix: replica.CompatCheckedUnix,
@@ -1214,6 +1257,7 @@ func replicaStatusToModel(templateID, instanceType string, replica ReplicaStatus
 		GuestImageVersion: replica.GuestImageVersion,
 		AgentVersion:      replica.AgentVersion,
 		KernelVersion:     replica.KernelVersion,
+		ShimVersion:       replica.ShimVersion,
 		CompatStatus:      normalizeCompatStatus(replica.CompatStatus),
 		CompatPolicy:      normalizeCompatPolicy(replica.CompatPolicy),
 		CompatCheckedUnix: replica.CompatCheckedUnix,
@@ -1237,10 +1281,12 @@ func replicaStatusUpdateFields(instanceType string, replica ReplicaStatus) map[s
 	if normalizeCompatStatus(replica.CompatStatus) != CompatStatusUnknown ||
 		normalizeComponentVersion(replica.GuestImageVersion) != "" ||
 		normalizeComponentVersion(replica.AgentVersion) != "" ||
-		normalizeComponentVersion(replica.KernelVersion) != "" {
+		normalizeComponentVersion(replica.KernelVersion) != "" ||
+		normalizeComponentVersion(replica.ShimVersion) != "" {
 		fields["guest_image_version"] = normalizeComponentVersion(replica.GuestImageVersion)
 		fields["agent_version"] = normalizeComponentVersion(replica.AgentVersion)
 		fields["kernel_version"] = normalizeComponentVersion(replica.KernelVersion)
+		fields["shim_version"] = normalizeComponentVersion(replica.ShimVersion)
 		fields["compat_status"] = normalizeCompatStatus(replica.CompatStatus)
 		fields["compat_policy"] = normalizeCompatPolicy(replica.CompatPolicy)
 		fields["compat_checked_unix"] = replica.CompatCheckedUnix
@@ -1318,16 +1364,9 @@ func isTemplateReplicaSchedulable(ctx context.Context, templateID, nodeID string
 	return isReplicaSchedulableNow(ctx, replicaModelToStatus(replica))
 }
 
-func effectiveCompatStatus(ctx context.Context, replica ReplicaStatus) string {
-	current, ok := nodemeta.GetNodeComponentVersions(ctx, replica.NodeID)
-	if !ok {
-		return normalizeCompatStatus(replica.CompatStatus)
-	}
-	return evaluateCompat(replica, current[compatComponentGuestImage], current[compatComponentAgent], current[compatComponentKernel])
-}
-
 func isReplicaSchedulableNow(ctx context.Context, replica ReplicaStatus) bool {
-	return strings.TrimSpace(replica.Status) == ReplicaStatusReady && effectiveCompatStatus(ctx, replica) != CompatStatusStale
+	_ = ctx
+	return strings.TrimSpace(replica.Status) == ReplicaStatusReady
 }
 
 func EnsureTemplateLocalityReady(ctx context.Context, templateID, instanceType string) error {
@@ -1371,7 +1410,6 @@ func EnsureTemplateLocalityReady(ctx context.Context, templateID, instanceType s
 	reportTemplateCacheMetric(ctx, constants.ActionTemplateLocalityMiss, 0)
 	if isReady() {
 		matched := false
-		staleNodes := make([]string, 0)
 		err := withTemplateReadLock(templateID, func() error {
 			dbStart := time.Now()
 			replicas, err := ListReplicas(ctx, templateID)
@@ -1383,13 +1421,6 @@ func EnsureTemplateLocalityReady(ctx context.Context, templateID, instanceType s
 			for _, replica := range replicas {
 				status := replicaModelToStatus(replica)
 				if !isReplicaSchedulableNow(ctx, status) {
-					if status.Status == ReplicaStatusReady && effectiveCompatStatus(ctx, status) == CompatStatusStale {
-						if _, ok := healthyNodeIDs[replica.NodeID]; ok {
-							staleNodes = append(staleNodes, replica.NodeID)
-						} else if _, ok := healthyNodeIPs[replica.NodeIP]; ok {
-							staleNodes = append(staleNodes, replica.NodeIP)
-						}
-					}
 					continue
 				}
 				readyReplicas = append(readyReplicas, status)
@@ -1409,10 +1440,6 @@ func EnsureTemplateLocalityReady(ctx context.Context, templateID, instanceType s
 		}
 		if matched {
 			return nil
-		}
-		if len(staleNodes) > 0 {
-			sort.Strings(staleNodes)
-			return &TemplateStaleNeedsRedoError{TemplateID: templateID, Nodes: staleNodes}
 		}
 	}
 	return ErrTemplateHasNoReadyReplica

@@ -1,0 +1,165 @@
+name: Release Guest Image
+
+# Triggered by dedicated guest-image-* tags. Builds cube-guest-image for
+# amd64/arm64 and uploads to the same GitHub Release. Cube product (v*)
+# releases only download from this Release via deploy/release-assets.yaml.
+# cube-agent stays on the product v* release path.
+
+on:
+  push:
+    tags:
+      - 'guest-image-*'
+  workflow_dispatch:
+
+concurrency:
+  group: release-guest-image-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: write
+  packages: read
+
+env:
+  BUILDER_IMAGE: ghcr.io/tencentcloud/cubesandbox-builder:ubuntu2004
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  ensure_release:
+    name: Ensure guest-image GitHub Release exists
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure GitHub Release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          case "${tag}" in
+            guest-image-*) ;;
+            *)
+              echo "expected guest-image-* tag, got: ${tag}" >&2
+              exit 1
+              ;;
+          esac
+          gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 || \
+            gh release create "${tag}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${tag}" \
+              --notes "Dedicated cube-guest-image release."
+
+  build_guest_image:
+    name: Build guest image (${{ matrix.arch }})
+    needs: ensure_release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      BUNDLE_ARCH: ${{ matrix.arch }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install guest image tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends e2fsprogs
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull builder image
+        run: docker pull "${BUILDER_IMAGE}"
+
+      - name: Build cube-init in builder
+        env:
+          CUBE_VERSION: ${{ github.ref_name }}
+          CUBE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          CUBE_BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          export CUBE_VERSION CUBE_COMMIT CUBE_BUILD_TIME
+          make builder-run \
+            BUILDER_IMAGE="${BUILDER_IMAGE}" \
+            BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/guest-init && make -j1 && make BINDIR=/workspace/_output/bin install'
+          test -x _output/bin/cube-init
+
+      - name: Build guest image artifact
+        env:
+          CUBE_VERSION: ${{ github.ref_name }}
+          CUBE_COMMIT: ${{ github.sha }}
+          ONE_CLICK_CUBE_INIT_BIN: ${{ github.workspace }}/_output/bin/cube-init
+          OUTPUT_DIR: ${{ github.workspace }}/guest-release-assets/cube-image
+        run: |
+          set -euo pipefail
+          CUBE_BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          export CUBE_VERSION CUBE_COMMIT CUBE_BUILD_TIME
+          mkdir -p "${OUTPUT_DIR}"
+          ./deploy/one-click/build-guest-image.sh
+          test -f "${OUTPUT_DIR}/cube-guest-image-cpu.img"
+          test -f "${OUTPUT_DIR}/version"
+          test ! -f "${OUTPUT_DIR}/agent-version"
+
+      - name: Pack guest Release asset
+        run: |
+          set -euo pipefail
+          tar -C guest-release-assets/cube-image -czf \
+            "guest-release-assets/cube-guest-image-${BUNDLE_ARCH}.tar.gz" .
+          ls -lh "guest-release-assets/cube-guest-image-${BUNDLE_ARCH}.tar.gz"
+
+      - name: Upload guest image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: guest-image-${{ matrix.arch }}
+          path: guest-release-assets/cube-guest-image-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Upload guest-image assets to Release
+    needs:
+      - ensure_release
+      - build_guest_image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download guest image artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: guest-release-assets
+          pattern: guest-image-*
+          merge-multiple: true
+
+      - name: Verify release assets
+        run: |
+          set -euo pipefail
+          test -f guest-release-assets/cube-guest-image-amd64.tar.gz
+          test -f guest-release-assets/cube-guest-image-arm64.tar.gz
+          ls -lh guest-release-assets/
+
+      - name: Upload assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "${GITHUB_REF_NAME}" \
+            guest-release-assets/cube-guest-image-amd64.tar.gz \
+            guest-release-assets/cube-guest-image-arm64.tar.gz \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
+          echo "Published guest-image assets to Release ${GITHUB_REF_NAME}"
+          gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --json assets \
+            --jq '.assets[].name'

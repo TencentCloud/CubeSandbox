@@ -33,6 +33,7 @@ pytest --run-e2e -m "lifecycle and slow"
 | `cases/lifecycle/test_connect.py` | connect to an existing sandbox, ID and file/command usability | `lifecycle` | P1 |
 | `cases/lifecycle/test_create_options.py` | metadata, env vars, timeout, command after create options | `lifecycle` | P1 |
 | `cases/lifecycle/test_pause_resume.py` | SDK pause, connect resume, file/env/kernel preservation | `pause_resume`, partially Code Interpreter | P1 |
+| `cases/lifecycle/test_pause_resume_network.py` | pause/resume keeps egress deny/allowlist and restricted public-access token | `pause_resume` + network capabilities; CubeProxy for ingress token case | P1 + `requires_internet` |
 | `cases/lifecycle/test_kill.py` | unusable after kill, list removal, idempotent terminal semantics | `lifecycle` | P1 |
 | `cases/lifecycle/test_auto_lifecycle.py` | auto-pause, manual/auto resume, reentrant resume, auto-kill, manual pause before timeout | `platform_lifecycle`, CubeProxy, lifecycle-manager, partially Code Interpreter | P1 + `slow`, daily run |
 
@@ -101,6 +102,18 @@ These scenarios require Code Interpreter support and validate normalized
 - restricted public URL access: missing or invalid token returns 403, while
   `e2b-traffic-access-token` and `cube-traffic-access-token` both work with the
   correct token.
+
+`cases/lifecycle/test_pause_resume_network.py` covers the same create-time
+policies after an SDK pause + connect resume:
+
+- `allow_internet_access=False` and `deny_out=0.0.0.0/0` still block egress;
+- allowlist (`allow_out` with public internet disabled) still permits only the
+  listed target;
+- restricted public access still requires a traffic access token after resume
+  (CubeProxy HostIP rewrite path).
+
+Shared TCP / public-access probe helpers live in
+`framework/network_probe.py`.
 
 The current network suite uses configurable public TCP targets for L3/L4 egress
 checks. Cases are marked `requires_internet`; runners without stable public

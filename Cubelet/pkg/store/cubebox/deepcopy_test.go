@@ -43,6 +43,13 @@ func TestCubeBoxDeepCopy(t *testing.T) {
 				HostPort:      80,
 			},
 		},
+		NetworkType:    "tap",
+		RuntimeHandler: "cube",
+		ExposedPorts:   []int64{8080, 443},
+		CubeNetworkConfig: &cubebox.CubeNetworkConfig{
+			AllowOut: []string{"10.0.0.0/8"},
+		},
+		Volumes: []*cubebox.Volume{{Name: "tmp"}},
 		ImageReferences: map[string]ImageReference{
 			"img1": {
 				ID:         "img1",
@@ -73,6 +80,27 @@ func TestCubeBoxDeepCopy(t *testing.T) {
 
 	if copied.Namespace != original.Namespace {
 		t.Errorf("Namespace not copied correctly")
+	}
+
+	if copied.NetworkType != original.NetworkType || copied.RuntimeHandler != original.RuntimeHandler {
+		t.Errorf("network recreate fields not copied")
+	}
+	if len(copied.ExposedPorts) != 2 || copied.ExposedPorts[0] != 8080 {
+		t.Errorf("ExposedPorts not copied: %v", copied.ExposedPorts)
+	}
+	if copied.CubeNetworkConfig == nil || len(copied.CubeNetworkConfig.AllowOut) != 1 {
+		t.Errorf("CubeNetworkConfig not copied")
+	}
+	copied.CubeNetworkConfig.AllowOut[0] = "mutated"
+	if original.CubeNetworkConfig.AllowOut[0] == "mutated" {
+		t.Errorf("Modifying copied CubeNetworkConfig affected original")
+	}
+	if len(copied.Volumes) != 1 || copied.Volumes[0].GetName() != "tmp" {
+		t.Errorf("Volumes not copied")
+	}
+	copied.Volumes[0].Name = "mutated"
+	if original.Volumes[0].GetName() == "mutated" {
+		t.Errorf("Modifying copied Volumes affected original")
 	}
 
 	copied.Annotations["key1"] = "modified"

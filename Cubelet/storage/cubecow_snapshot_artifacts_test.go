@@ -18,20 +18,20 @@ func useTestCowStorage(t *testing.T, engine *fakeCowEngine) {
 	previousLocalStorage := localStorage
 	localStorage = &local{
 		config:     &Config{StorageBackend: "cubecow"},
-		cowManager: &CowVolumeManager{engine: engine},
+		cowManager: &XfsCow{engine: engine},
 	}
 	t.Cleanup(func() {
 		localStorage = previousLocalStorage
 	})
 }
 
-func TestCleanupCowTemplateObjectsDispatchesByKind(t *testing.T) {
+func TestCleanupObjectsDispatchesByKind(t *testing.T) {
 	engine := &fakeCowEngine{
 		deleteSnapshotErr: &cubecow.CowError{Code: cubecow.SemNotFound, RawRC: int32(cubecow.SemNotFound)},
 	}
 	useTestCowStorage(t, engine)
 
-	err := CleanupCowTemplateObjects(context.Background(), []CowObjectRef{
+	err := CleanupObjects(context.Background(), []CowObjectRef{
 		{Name: "tpl-1-rootfs", Kind: CowKindSnapshot, Role: "rootfs"},
 		{Name: "tpl-1-memory", Kind: CowKindVolume, Role: "memory"},
 		{Name: "tpl-1-build-rootfs", Kind: CowKindVolume, Role: "build_rootfs"},
@@ -41,7 +41,7 @@ func TestCleanupCowTemplateObjectsDispatchesByKind(t *testing.T) {
 	assert.Equal(t, []string{"tpl-1-memory", "tpl-1-build-rootfs"}, engine.deletedVolumes)
 }
 
-func TestInspectCowObjectsReportsExistingAndMissing(t *testing.T) {
+func TestInspectObjectsReportsExistingAndMissing(t *testing.T) {
 	engine := &fakeCowEngine{
 		volumeInfos: map[string]*cubecow.Volume{
 			"tpl-1-rootfs": {DevicePath: "/dev/mapper/tpl-1-rootfs", SizeBytes: 4096},
@@ -49,7 +49,7 @@ func TestInspectCowObjectsReportsExistingAndMissing(t *testing.T) {
 	}
 	useTestCowStorage(t, engine)
 
-	statuses, err := InspectCowObjects(context.Background(), []CowObjectRef{
+	statuses, err := InspectObjects(context.Background(), []CowObjectRef{
 		{Name: "tpl-1-rootfs", Kind: CowKindSnapshot, Role: "rootfs"},
 		{Name: "tpl-1-memory", Kind: CowKindVolume, Role: "memory"},
 	})
@@ -62,7 +62,7 @@ func TestInspectCowObjectsReportsExistingAndMissing(t *testing.T) {
 	assert.Empty(t, statuses[1].DevicePath)
 }
 
-func TestGetCowMetricsValidatesRequiredKeys(t *testing.T) {
+func TestObjectMetricsValidatesRequiredKeys(t *testing.T) {
 	engine := &fakeCowEngine{
 		metrics: map[string]uint64{
 			"total_bytes":  100,
@@ -72,13 +72,13 @@ func TestGetCowMetricsValidatesRequiredKeys(t *testing.T) {
 	}
 	useTestCowStorage(t, engine)
 
-	metrics, err := GetCowMetrics(context.Background())
+	metrics, err := ObjectMetrics(context.Background())
 	require.Nil(t, metrics)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "snapshot_count")
 }
 
-func TestResolveSnapshotForRollbackHonorsMemoryKindSnapshot(t *testing.T) {
+func TestResolveRollbackRefsHonorsMemoryKindSnapshot(t *testing.T) {
 	engine := &fakeCowEngine{
 		volumeInfos: map[string]*cubecow.Volume{
 			"tpl-1-rootfs": {DevicePath: "/dev/mapper/tpl-1-rootfs", SizeBytes: 4096},
@@ -87,17 +87,14 @@ func TestResolveSnapshotForRollbackHonorsMemoryKindSnapshot(t *testing.T) {
 	}
 	useTestCowStorage(t, engine)
 
-	refs, err := ResolveSnapshotForRollback(context.Background(), "tpl-1-rootfs", "tpl-1-memory", CowKindSnapshot)
+	refs, err := ResolveRollbackRefs(context.Background(), "tpl-1-rootfs", "tpl-1-memory", CowKindSnapshot)
 	require.NoError(t, err)
 	require.NotNil(t, refs.Memory)
-	// Snapshot-kind memory blob is what the incremental CommitSandbox path
-	// records, and rollback must round-trip it as-is so DeleteSnapshot (not
-	// DeleteVolume) is the eventual cleanup verb.
 	assert.Equal(t, CowKindSnapshot, refs.Memory.Kind)
 	assert.Equal(t, "/dev/mapper/tpl-1-memory", refs.Memory.DevPath)
 }
 
-func TestResolveSnapshotForRollbackDefaultsMemoryKindToVolume(t *testing.T) {
+func TestResolveRollbackRefsDefaultsMemoryKindToVolume(t *testing.T) {
 	engine := &fakeCowEngine{
 		volumeInfos: map[string]*cubecow.Volume{
 			"tpl-1-rootfs": {DevicePath: "/dev/mapper/tpl-1-rootfs", SizeBytes: 4096},
@@ -106,15 +103,13 @@ func TestResolveSnapshotForRollbackDefaultsMemoryKindToVolume(t *testing.T) {
 	}
 	useTestCowStorage(t, engine)
 
-	// Legacy callers (and historical on-disk catalog entries) leave kind
-	// empty; defaulting to volume preserves the pre-incremental behavior.
-	refs, err := ResolveSnapshotForRollback(context.Background(), "tpl-1-rootfs", "tpl-1-memory", "")
+	refs, err := ResolveRollbackRefs(context.Background(), "tpl-1-rootfs", "tpl-1-memory", "")
 	require.NoError(t, err)
 	require.NotNil(t, refs.Memory)
 	assert.Equal(t, CowKindVolume, refs.Memory.Kind)
 }
 
-func TestCommitTemplateMemoryFromBaseProducesSnapshotObject(t *testing.T) {
+func TestCommitMemoryFromBaseProducesSnapshotObject(t *testing.T) {
 	engine := &fakeCowEngine{
 		createSnapshotPath: "/dev/mapper/tpl-snap-memory",
 		volumeInfos: map[string]*cubecow.Volume{
@@ -123,7 +118,7 @@ func TestCommitTemplateMemoryFromBaseProducesSnapshotObject(t *testing.T) {
 	}
 	useTestCowStorage(t, engine)
 
-	obj, err := CommitTemplateMemoryFromBase(context.Background(), &CowSnapshotObject{Name: "tpl-base-memory", Kind: CowKindVolume}, "snap", 4096)
+	obj, err := CommitMemoryFromBase(context.Background(), &CowSnapshotObject{Name: "tpl-base-memory", Kind: CowKindVolume}, "snap", 4096)
 	require.NoError(t, err)
 	require.NotNil(t, obj)
 	assert.Equal(t, "tpl-snap-memory", obj.Name)
@@ -133,16 +128,16 @@ func TestCommitTemplateMemoryFromBaseProducesSnapshotObject(t *testing.T) {
 	assert.Equal(t, [][2]string{{"tpl-base-memory", "tpl-snap-memory"}}, engine.createSnapshots)
 }
 
-func TestCommitTemplateMemoryFromBaseRejectsMissingSource(t *testing.T) {
+func TestCommitMemoryFromBaseRejectsMissingSource(t *testing.T) {
 	useTestCowStorage(t, &fakeCowEngine{})
 
-	obj, err := CommitTemplateMemoryFromBase(context.Background(), nil, "snap", 4096)
+	obj, err := CommitMemoryFromBase(context.Background(), nil, "snap", 4096)
 	require.Error(t, err)
 	assert.Nil(t, obj)
 	assert.Contains(t, err.Error(), "source memory object is required")
 }
 
-func TestGetCowMetricsSuccess(t *testing.T) {
+func TestObjectMetricsSuccess(t *testing.T) {
 	engine := &fakeCowEngine{
 		metrics: map[string]uint64{
 			"total_bytes":    100,
@@ -153,7 +148,7 @@ func TestGetCowMetricsSuccess(t *testing.T) {
 	}
 	useTestCowStorage(t, engine)
 
-	metrics, err := GetCowMetrics(context.Background())
+	metrics, err := ObjectMetrics(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, uint64(3), metrics["snapshot_count"])
 }

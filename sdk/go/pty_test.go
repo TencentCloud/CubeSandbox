@@ -26,7 +26,7 @@ func newPtyTestSandbox(t *testing.T, server *httptest.Server) *Sandbox {
 		SandboxDomain:  "cube.test",
 		RequestTimeout: 5 * time.Second,
 	})
-	return &Sandbox{client: client, SandboxID: "sb-pty", EnvdAccessToken: "tok"}
+	return &Sandbox{client: client, SandboxID: "sb-pty", EnvdAccessToken: "tok", TrafficAccessToken: "traffic-token"}
 }
 
 // ptyDataFrame builds a Connect data frame carrying base64-encoded PTY output.
@@ -49,12 +49,15 @@ func decodeEnvelopeJSON(t *testing.T, body []byte, v any) {
 
 func TestPtyCreateStreamsAndWaits(t *testing.T) {
 	var gotPath, gotCT, gotAuth, gotToken string
+	var gotE2BToken, gotCubeToken string
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotCT = r.Header.Get("Content-Type")
 		gotAuth = r.Header.Get("Authorization")
 		gotToken = r.Header.Get("X-Access-Token")
+		gotE2BToken = r.Header.Get("e2b-traffic-access-token")
+		gotCubeToken = r.Header.Get("cube-traffic-access-token")
 		gotBody, _ = io.ReadAll(r.Body)
 
 		w.Header().Set("Content-Type", connectContentType)
@@ -101,6 +104,9 @@ func TestPtyCreateStreamsAndWaits(t *testing.T) {
 	}
 	if gotToken != "tok" {
 		t.Fatalf("X-Access-Token=%q, want tok", gotToken)
+	}
+	if gotE2BToken != "traffic-token" || gotCubeToken != "traffic-token" {
+		t.Fatalf("traffic tokens=%q/%q, want traffic-token", gotE2BToken, gotCubeToken)
 	}
 
 	var req ptyStartRequest

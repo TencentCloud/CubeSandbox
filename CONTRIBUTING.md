@@ -52,7 +52,7 @@ make builder-image MIRROR=cn
 # Start an interactive shell inside the builder
 make builder-shell
 
-# Build all Go components (CubeMaster, Cubelet, network-agent)
+# Build all Go components (CubeMaster, Cubelet, …)
 make all
 
 # Build individual components
@@ -76,7 +76,6 @@ See the [Makefile](./Makefile) for the full list of build targets.
 | `agent/` | Rust | In-guest daemon running inside each sandbox |
 | `hypervisor/` | Rust | KVM-based MicroVM manager (Cloud Hypervisor fork) |
 | `mvs/` / `CubeNet/` | Go | CubeVS eBPF-based network isolation |
-| `network-agent/` | Go | Network management service |
 | `deploy/` | Shell | Deployment scripts and guest image tooling |
 | `examples/` | Python | SDK examples and end-to-end scenarios |
 | `docs/` | Markdown | VitePress documentation site (EN + ZH) |

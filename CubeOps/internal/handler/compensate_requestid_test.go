@@ -6,22 +6,18 @@ package handler
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
+
+	cubelog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
-// TestS3_DeleteSandboxRequestBody_UsesRequestID verifies that the request
-// body sent to CubeMaster DeleteSandbox uses the JSON key "requestID" (not
-// "request_id" or "RequestID"), matching DeleteCubeSandboxReq's json tag.
-//
-// This is a contract test: it captures the actual map sent by the handler
-// and asserts the field name. The existing fault-injection tests
-// (agenthub_fault_injection_test.go) also assert this, but they require
-// Docker (dockertest). This test runs without Docker by invoking the
-// compensation path directly with a fake CM.
-//
-// See review S3.
-func TestS3_DeleteSandboxRequestBody_UsesRequestID(t *testing.T) {
+// TestCompensateDeleteSandbox_CorrelatesRequestID verifies that the
+// compensation DeleteSandbox body carries the inbound RequestTrace.RequestID
+// so CubeMaster stat logs can be joined with the CubeOps request.
+func TestCompensateDeleteSandbox_CorrelatesRequestID(t *testing.T) {
+	const inboundReqID = "inbound-req-123"
+	ctx := cubelog.WithRequestTrace(context.Background(), &cubelog.RequestTrace{RequestID: inboundReqID})
+
 	var capturedBody map[string]interface{}
 	cm := &fakeCM{
 		deleteSandbox: func(_ context.Context, body interface{}) (json.RawMessage, error) {
@@ -31,37 +27,22 @@ func TestS3_DeleteSandboxRequestBody_UsesRequestID(t *testing.T) {
 		},
 	}
 
-	// compensateDeleteSandbox sends a DeleteSandbox request with a
-	// "requestID" key. We call it directly — it only needs cm, not store.
 	h := &AgentHubHandler{cm: cm}
-	h.compensateDeleteSandbox(context.Background(), "sb-test", "unit-test")
+	h.compensateDeleteSandbox(ctx, "sb-test", "unit-test")
 
 	if capturedBody == nil {
 		t.Fatal("DeleteSandbox was not called")
 	}
-
-	// S3 fix: must use "requestID", NOT "request_id" or "RequestID".
-	reqID, ok := capturedBody["requestID"].(string)
-	if !ok || reqID == "" {
-		t.Errorf("requestID = %v, want non-empty string; full body = %v",
-			capturedBody["requestID"], capturedBody)
-	}
-	if _, exists := capturedBody["request_id"]; exists {
-		t.Error(`body contains "request_id" — must be "requestID" (S3)`)
-	}
-	if _, exists := capturedBody["RequestID"]; exists {
-		t.Error(`body contains "RequestID" — must be "requestID" (S3)`)
-	}
-
-	// Verify the prefix matches the compensation convention.
-	if !strings.HasPrefix(reqID, "cubeops-compensate-") {
-		t.Errorf("requestID = %q, want prefix %q", reqID, "cubeops-compensate-")
+	for _, key := range []string{"requestID", "RequestID", "request_id"} {
+		if got := capturedBody[key]; got != inboundReqID {
+			t.Errorf("%s = %v, want %q", key, got, inboundReqID)
+		}
 	}
 }
 
-// TestS3_DeleteSandboxRequestBody_HasSandboxIDAndInstanceType verifies the
-// other required fields are present in the DeleteSandbox body.
-func TestS3_DeleteSandboxRequestBody_HasSandboxIDAndInstanceType(t *testing.T) {
+// TestCompensateDeleteSandbox_HasSandboxIDAndInstanceType verifies the other
+// required fields are present in the DeleteSandbox body.
+func TestCompensateDeleteSandbox_HasSandboxIDAndInstanceType(t *testing.T) {
 	var capturedBody map[string]interface{}
 	cm := &fakeCM{
 		deleteSandbox: func(_ context.Context, body interface{}) (json.RawMessage, error) {

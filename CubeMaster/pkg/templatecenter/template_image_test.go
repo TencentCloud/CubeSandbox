@@ -1181,7 +1181,7 @@ func TestBuildRootfsArtifactFinalizesBuildResult(t *testing.T) {
 		return &latest, nil
 	})
 
-	got, generatedReq, err := buildRootfsArtifact(context.Background(), artifact, req, source, "http://master.example", nil, "")
+	got, generatedReq, err := buildRootfsArtifact(context.Background(), artifact, req, source, "http://master.example", nil, "", nil)
 	if err != nil {
 		t.Fatalf("buildRootfsArtifact failed: %v", err)
 	}
@@ -1499,8 +1499,8 @@ func TestRunRedoTemplateImageJobRegeneratesRequestForRedoTemplateID(t *testing.T
 		capturedReq = req
 		return []ReplicaStatus{{NodeID: "node-a", Status: ReplicaStatusReady}}, nil
 	})
-	patches.ApplyFunc(refreshTemplateReplicaSummary, func(ctx context.Context, templateID string) error {
-		return nil
+	patches.ApplyFunc(refreshTemplateReplicaSummary, func(ctx context.Context, templateID, alias string) (string, error) {
+		return "", nil
 	})
 	patches.ApplyFunc(GetTemplateInfo, func(ctx context.Context, templateID string) (*TemplateInfo, error) {
 		return &TemplateInfo{TemplateID: templateID, Status: StatusReady}, nil
@@ -1522,6 +1522,67 @@ func TestRunRedoTemplateImageJobRegeneratesRequestForRedoTemplateID(t *testing.T
 	}
 	if got := capturedReq.Containers[0].Command; !reflect.DeepEqual(got, []string{"/bin/sh"}) {
 		t.Fatalf("generated request command = %v, want image config entrypoint", got)
+	}
+}
+
+func TestRunRedoTemplateImageJobRejectsEnvdEnabledBuildRedo(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	targets := []*node.Node{{InsID: "node-a", IP: "**.*.*.*", Healthy: true}}
+	var lastUpdate map[string]any
+	patches.ApplyFunc(getTemplateImageJobRecordByID, func(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
+		return &models.TemplateImageJob{
+			JobID:       jobID,
+			TemplateID:  "tpl-envd",
+			ResumePhase: JobPhaseBuildingExt4,
+		}, nil
+	})
+	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, values map[string]any) error {
+		lastUpdate = values
+		return nil
+	})
+	patches.ApplyFunc(unmarshalTemplateImageJobRequest, func(payload string) (*types.CreateTemplateFromImageReq, error) {
+		return &types.CreateTemplateFromImageReq{
+			Request:           &types.Request{RequestID: "req-1"},
+			TemplateID:        "tpl-envd",
+			InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+			WritableLayerSize: "20Gi",
+			SourceImageRef:    "private.example/app:latest",
+			ContainerOverrides: &types.ContainerOverrides{
+				Annotations: map[string]string{
+					constants.CubeAnnotationsInjectEnvd: constants.CubeAnnotationsInjectEnvdOptIn,
+				},
+			},
+		}, nil
+	})
+	patches.ApplyFunc(ListReplicas, func(ctx context.Context, templateID string) ([]models.TemplateReplica, error) {
+		return []models.TemplateReplica{{NodeID: "node-a", Status: ReplicaStatusFailed}}, nil
+	})
+	patches.ApplyFunc(resolveRedoTargets, func(instanceType string, req *types.RedoTemplateFromImageReq, replicas []models.TemplateReplica) ([]*node.Node, error) {
+		return targets, nil
+	})
+	patches.ApplyFunc(image.PrepareLocalSource, func(ctx context.Context, spec image.SourceSpec) (*image.PreparedSource, error) {
+		t.Fatal("PrepareLocalSource should not be called for envd-enabled build redo")
+		return nil, nil
+	})
+
+	runRedoTemplateImageJob(context.Background(), "job-envd", &types.RedoTemplateFromImageReq{
+		Request:    &types.Request{RequestID: "req-redo"},
+		TemplateID: "tpl-envd",
+	}, "http://master.example")
+
+	if lastUpdate == nil {
+		t.Fatal("expected job status update")
+	}
+	if lastUpdate["status"] != JobStatusFailed {
+		t.Fatalf("unexpected status update: %+v", lastUpdate)
+	}
+	if lastUpdate["phase"] != JobPhaseBuildingExt4 {
+		t.Fatalf("unexpected phase update: %+v", lastUpdate)
+	}
+	if got, _ := lastUpdate["error_message"].(string); !strings.Contains(got, "redo cannot rebuild envd-enabled template rootfs") {
+		t.Fatalf("unexpected error message: %q", got)
 	}
 }
 

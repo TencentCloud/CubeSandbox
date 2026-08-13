@@ -76,41 +76,45 @@ locals {
       replace(
         replace(
           replace(
-            fileexists("${path.module}/cubeproxy-nginx.conf") ? file("${path.module}/cubeproxy-nginx.conf") : (
-              fileexists("${path.module}/../../cubeproxy/nginx.conf.template") ? file("${path.module}/../../cubeproxy/nginx.conf.template") : <<-EOF
-                user root;
-                worker_processes auto;
-                error_log /data/log/cube-proxy/error.log notice;
-                daemon off;
-                events { worker_connections 100000; }
-                http {
-                  include mime.types;
-                  default_type application/octet-stream;
-                  server {
-                    listen __CUBE_PROXY_HTTP_PORT__;
-                    server_name _;
-                    location / { return 404; }
+            replace(
+              fileexists("${path.module}/cubeproxy-nginx.conf") ? file("${path.module}/cubeproxy-nginx.conf") : (
+                fileexists("${path.module}/../../cubeproxy/nginx.conf.template") ? file("${path.module}/../../cubeproxy/nginx.conf.template") : <<-EOF
+                  user root;
+                  worker_processes auto;
+                  error_log /data/log/cube-proxy/error.log notice;
+                  daemon off;
+                  events { worker_connections 100000; }
+                  http {
+                    include mime.types;
+                    default_type application/octet-stream;
+                    server {
+                      listen __CUBE_PROXY_HTTP_PORT__;
+                      server_name _;
+                      location / { return 404; }
+                    }
+                    server {
+                      listen __CUBE_PROXY_HTTPS_PORT__ ssl;
+                      server_name _;
+                      ssl_certificate /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_CERT__;
+                      ssl_certificate_key /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_KEY__;
+                      location / { return 404; }
+                    }
+                    server {
+                      listen __CUBE_PROXY_ADMIN_LISTEN__:8082;
+                      server_name _;
+                      location / { return 404; }
+                    }
                   }
-                  server {
-                    listen __CUBE_PROXY_HTTPS_PORT__ ssl;
-                    server_name _;
-                    ssl_certificate /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_CERT__;
-                    ssl_certificate_key /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_KEY__;
-                    location / { return 404; }
-                  }
-                  server {
-                    listen __CUBE_PROXY_ADMIN_LISTEN__:8082;
-                    server_name _;
-                    location / { return 404; }
-                  }
-                }
-              EOF
+                EOF
+              ),
+              "__CUBE_PROXY_HTTP_PORT__",
+              "8081"
             ),
-            "__CUBE_PROXY_HTTP_PORT__",
-            "8081"
+            "__CUBE_PROXY_HTTPS_PORT__",
+            "8080"
           ),
-          "__CUBE_PROXY_HTTPS_PORT__",
-          "8080"
+          "__CUBE_PROXY_GRPC_PORT__",
+          "9090"
         ),
         "__CUBE_PROXY_SSL_CERT__",
         "cube.app+3.pem"
@@ -306,18 +310,6 @@ resource "kubernetes_secret" "cubemaster_conf" {
         # is populated, and deploy/one-click/tests/test_package_layout.sh statically
         # checks THIS template uses cube_network_config (and not cubevs_context).
         cube_box_req_template = "{\"volumes\":[{\"name\":\"tmp\",\"volume_source\":{\"empty_dir\":{\"medium\":0}}}],\"containers\":[{\"name\":\"cubebox-default\",\"envs\":[{\"key\":\"TZ\",\"value\":\"Asia/Shanghai\"},{\"key\":\"TERM\",\"value\":\"xterm\"}],\"volume_mounts\":[{\"name\":\"tmp\",\"container_path\":\"/\"}],\"security_context\":{\"privileged\":true,\"readonly_rootfs\":false,\"no_new_privs\":false}}],\"network_type\":\"tap\",\"cube_network_config\":{\"allowInternetAccess\":true,\"denyOut\":[\"10.0.0.0/8\",\"100.64.0.0/10\",\"172.16.0.0/12\",\"192.168.0.0/16\"]}}"
-      }
-      ossdb_config = {
-        addr                       = "${tencentcloud_mysql_instance.mysql.intranet_ip}:3306"
-        user                       = local.cube_user
-        pwd                        = local.cube_password
-        db_name                    = local.cube_db
-        conn_timeout               = 5
-        read_timeout               = 5
-        write_timeout              = 5
-        max_idle_conns             = 5
-        max_open_conns             = 20
-        max_conn_life_time_seconds = 300
       }
       instance_db_config = {
         addr                       = "${tencentcloud_mysql_instance.mysql.intranet_ip}:3306"
@@ -1000,6 +992,11 @@ resource "kubernetes_deployment" "cube_proxy" {
             protocol       = "TCP"
           }
           port {
+            name           = "grpc"
+            container_port = 9090
+            protocol       = "TCP"
+          }
+          port {
             name           = "http80"
             container_port = 80
             protocol       = "TCP"
@@ -1194,7 +1191,7 @@ resource "kubernetes_deployment" "cube_proxy" {
   }
 }
 
-# cube-proxy CLB Service (public network 80/443)
+# cube-proxy CLB Service (public network 80/443/9090)
 resource "kubernetes_service" "cube_proxy" {
   count = local.deploy_addons ? 1 : 0
   metadata {
@@ -1203,7 +1200,7 @@ resource "kubernetes_service" "cube_proxy" {
     # Public mode: a public CLB billed by traffic (internet-charge-type).
     # Internal mode (default): pin to a VPC-internal subnet for a private VIP.
     annotations = merge({
-      "service.cloud.tencent.com/specify-protocol"        = "{\"80\":{\"protocol\":[\"TCP\"]},\"443\":{\"protocol\":[\"TCP\"]}}"
+      "service.cloud.tencent.com/specify-protocol"        = "{\"80\":{\"protocol\":[\"TCP\"]},\"443\":{\"protocol\":[\"TCP\"]},\"9090\":{\"protocol\":[\"TCP\"]}}"
       "service.cloud.tencent.com/modification-protection" = "false"
       "service.cloud.tencent.com/pass-to-target"          = "true"
       "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.clb.id
@@ -1216,6 +1213,10 @@ resource "kubernetes_service" "cube_proxy" {
   lifecycle {
     # TKE controller-manager injects runtime annotations (e.g. bindedip,
     # loadbalanceId) that would otherwise cause perpetual drift on every plan.
+    # NOTE: because annotations are ignored after create, upgrading an existing
+    # cluster will add Service port 9090 via spec.ports but will NOT refresh
+    # specify-protocol. Operators must manually patch the annotation to include
+    # 9090, or recreate this Service, for CLB to expose plaintext gRPC.
     ignore_changes = [
       metadata[0].annotations,
     ]
@@ -1240,6 +1241,12 @@ resource "kubernetes_service" "cube_proxy" {
       name        = "tcp-ssl-443"
       port        = 443
       target_port = 8080
+      protocol    = "TCP"
+    }
+    port {
+      name        = "tcp-grpc-9090"
+      port        = 9090
+      target_port = 9090
       protocol    = "TCP"
     }
   }

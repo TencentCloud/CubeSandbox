@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 )
 
 func versionOf(t *testing.T, list []ComponentVersion, component string) (ComponentVersion, bool) {
@@ -31,7 +33,6 @@ func writeManifest(t *testing.T, dir string) {
     "cube-api": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
     "cubelet": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
     "cubecli": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
-    "network-agent": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
     "containerd-shim-cube-rs": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
     "cube-runtime": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
     "cube-egress": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
@@ -41,14 +42,19 @@ func writeManifest(t *testing.T, dir string) {
   "kernel": {
     "version": "5.10.0-100",
     "pvm_version": "6.6.69-1.2.cubesandbox",
-    "vmlinux_digest_sha256": "sha256:ordinary",
-    "vmlinux_pvm_digest_sha256": "sha256:pvm"
+    "vmlinux_digest_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "vmlinux_pvm_digest_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
   }
 }`
 	if err := os.WriteFile(filepath.Join(dir, manifestFileName), []byte(manifest), 0o644); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
 }
+
+const (
+	testBMKernelIdentity  = "sha256-aaaaaaaaaaaa@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testPVMKernelIdentity = "sha256-bbbbbbbbbbbb@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+)
 
 func mkComponentDir(t *testing.T, base, name string) {
 	t.Helper()
@@ -121,7 +127,6 @@ func TestCollectRecognizesOneClickInstallLayout(t *testing.T) {
 	mkComponentFile(t, dir, "CubeMaster", "bin", "cubemastercli")
 	mkComponentFile(t, dir, "CubeAPI", "bin", "cube-api")
 	mkComponentFile(t, dir, "Cubelet", "bin", "cubecli")
-	mkComponentFile(t, dir, "network-agent", "bin", "network-agent")
 	mkComponentFile(t, dir, "cube-shim", "bin", "containerd-shim-cube-rs")
 	mkComponentFile(t, dir, "cube-shim", "bin", "cube-runtime")
 	mkComponentFile(t, dir, "cube-egress", "version")
@@ -134,7 +139,6 @@ func TestCollectRecognizesOneClickInstallLayout(t *testing.T) {
 		"cubemastercli",
 		"cube-api",
 		"cubecli",
-		"network-agent",
 		"containerd-shim-cube-rs",
 		"cube-runtime",
 	} {
@@ -176,7 +180,7 @@ func TestCollectCubeletFromBinaryAndSpecialComponents(t *testing.T) {
 	}
 
 	kernel, ok := versionOf(t, got, ComponentKernel)
-	if !ok || kernel.Version != "5.10.0-100@sha256:ordinary" {
+	if !ok || kernel.Version != testBMKernelIdentity {
 		t.Errorf("kernel must come from kernel identity, got %+v ok=%v", kernel, ok)
 	}
 
@@ -231,7 +235,7 @@ func TestCollectKernelFromActiveOrdinarySymlink(t *testing.T) {
 	got := c.Collect()
 
 	kernel, ok := versionOf(t, got, ComponentKernel)
-	if !ok || kernel.Version != "5.10.0-100@sha256:ordinary" || kernel.Source != SourceFile {
+	if !ok || kernel.Version != testBMKernelIdentity || kernel.Source != SourceFile {
 		t.Fatalf("kernel must follow ordinary active symlink, got %+v ok=%v", kernel, ok)
 	}
 }
@@ -245,7 +249,7 @@ func TestCollectKernelFromActivePVMSymlink(t *testing.T) {
 	got := c.Collect()
 
 	kernel, ok := versionOf(t, got, ComponentKernel)
-	if !ok || kernel.Version != "6.6.69-1.2.cubesandbox@sha256:pvm" || kernel.Source != SourceFile {
+	if !ok || kernel.Version != testPVMKernelIdentity || kernel.Source != SourceFile {
 		t.Fatalf("kernel must follow PVM active symlink, got %+v ok=%v", kernel, ok)
 	}
 }
@@ -259,8 +263,8 @@ func TestCollectKernelIdentityFallsBackToDigestWhenTagUnknown(t *testing.T) {
   "kernel": {
     "version": "unknown",
     "pvm_version": "unknown",
-    "vmlinux_digest_sha256": "sha256:ordinary",
-    "vmlinux_pvm_digest_sha256": "sha256:pvm"
+    "vmlinux_digest_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "vmlinux_pvm_digest_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
   }
 }`
 	if err := os.WriteFile(filepath.Join(dir, manifestFileName), []byte(manifest), 0o644); err != nil {
@@ -272,7 +276,7 @@ func TestCollectKernelIdentityFallsBackToDigestWhenTagUnknown(t *testing.T) {
 	got := c.Collect()
 
 	kernel, ok := versionOf(t, got, ComponentKernel)
-	if !ok || kernel.Version != "sha256:pvm" || kernel.Source != SourceFile {
+	if !ok || kernel.Version != testPVMKernelIdentity || kernel.Source != SourceFile {
 		t.Fatalf("kernel must use digest when tag is unknown, got %+v ok=%v", kernel, ok)
 	}
 }
@@ -292,8 +296,21 @@ func TestCollectKernelIdentityFallbackForLegacyNonSymlink(t *testing.T) {
 	got := c.Collect()
 
 	kernel, ok := versionOf(t, got, ComponentKernel)
-	if !ok || kernel.Version != "5.10.0-100@sha256:ordinary" || kernel.Source != SourceManifest {
+	if !ok || kernel.Version != testBMKernelIdentity || kernel.Source != SourceManifest {
 		t.Fatalf("legacy non-symlink kernel must fall back to ordinary identity, got %+v ok=%v", kernel, ok)
+	}
+}
+
+func TestKernelContentIdentity(t *testing.T) {
+	full := "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	if got := templatetypes.ContentAddressedKernelIdentity(full); got != "sha256-cccccccccccc@"+full {
+		t.Fatalf("ContentAddressedKernelIdentity=%q", got)
+	}
+	if got := templatetypes.ContentAddressedKernelIdentity("unknown"); got != "" {
+		t.Fatalf("unknown digest must be empty, got %q", got)
+	}
+	if got := templatetypes.ContentAddressedKernelIdentity("sha256:nothex!!!!"); got != "sha256:nothex!!!!" {
+		t.Fatalf("non-hex digest returns as-is, got %q", got)
 	}
 }
 
@@ -325,13 +342,13 @@ func TestKernelSymlinkReread(t *testing.T) {
 	mkKernelLayout(t, dir, "vmlinux-bm")
 
 	c := NewCollector(dir)
-	if kernel, _ := versionOf(t, c.Collect(), ComponentKernel); kernel.Version != "5.10.0-100@sha256:ordinary" {
+	if kernel, _ := versionOf(t, c.Collect(), ComponentKernel); kernel.Version != testBMKernelIdentity {
 		t.Fatalf("expected ordinary kernel, got %q", kernel.Version)
 	}
 
 	time.Sleep(10 * time.Millisecond)
 	mkKernelLayout(t, dir, "vmlinux-pvm")
-	if kernel, _ := versionOf(t, c.Collect(), ComponentKernel); kernel.Version != "6.6.69-1.2.cubesandbox@sha256:pvm" {
+	if kernel, _ := versionOf(t, c.Collect(), ComponentKernel); kernel.Version != testPVMKernelIdentity {
 		t.Fatalf("expected PVM kernel after symlink switch, got %q", kernel.Version)
 	}
 }
@@ -425,6 +442,7 @@ func TestCollectAgentVersionFileWithoutManifest(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(imgDir, "version"), []byte("guest-v1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Legacy fallback: cube-image/agent-version
 	if err := os.WriteFile(filepath.Join(imgDir, "agent-version"), []byte("agent-v1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -434,31 +452,57 @@ func TestCollectAgentVersionFileWithoutManifest(t *testing.T) {
 
 	agent, ok := versionOf(t, got, ComponentCubeAgent)
 	if !ok || agent.Version != "agent-v1" || agent.Source != SourceFile {
-		t.Fatalf("cube-agent from agent-version file, got %+v ok=%v", agent, ok)
+		t.Fatalf("cube-agent from legacy agent-version file, got %+v ok=%v", agent, ok)
 	}
 }
 
-func TestCollectVersionJSONWithoutManifest(t *testing.T) {
+func TestCollectAgentVersionPrefersIndependentDir(t *testing.T) {
 	dir := t.TempDir()
-	na := filepath.Join(dir, "network-agent")
-	if err := os.MkdirAll(na, 0o755); err != nil {
+	imgDir := filepath.Join(dir, "cube-image")
+	agentDir := filepath.Join(dir, "cube-agent")
+	if err := os.MkdirAll(imgDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	body := `{
-  "schema_version": 1,
-  "components": {
-    "network-agent": {"version": "na-1.0", "commit": "abc"}
-  }
-}`
-	if err := os.WriteFile(filepath.Join(na, "version.json"), []byte(body), 0o644); err != nil {
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(imgDir, "agent-version"), []byte("legacy-agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "version"), []byte("agent-v2\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	c := NewCollector(dir)
 	got := c.Collect()
-	v, ok := versionOf(t, got, "network-agent")
-	if !ok || v.Version != "na-1.0" || v.Source != SourceComponentJSON {
-		t.Fatalf("network-agent from version.json, got %+v ok=%v", v, ok)
+
+	agent, ok := versionOf(t, got, ComponentCubeAgent)
+	if !ok || agent.Version != "agent-v2" || agent.Source != SourceFile {
+		t.Fatalf("cube-agent must prefer cube-agent/version, got %+v ok=%v", agent, ok)
+	}
+}
+
+func TestCollectVersionJSONWithoutManifest(t *testing.T) {
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "cube-shim")
+	if err := os.MkdirAll(shim, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{
+  "schema_version": 1,
+  "components": {
+    "cube-runtime": {"version": "runtime-1.0", "commit": "abc"}
+  }
+}`
+	if err := os.WriteFile(filepath.Join(shim, "version.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewCollector(dir)
+	got := c.Collect()
+	v, ok := versionOf(t, got, "cube-runtime")
+	if !ok || v.Version != "runtime-1.0" || v.Source != SourceComponentJSON {
+		t.Fatalf("cube-runtime from version.json, got %+v ok=%v", v, ok)
 	}
 }
 
@@ -468,8 +512,8 @@ func TestCollectKernelFromVersionJSONAndActiveSymlink(t *testing.T) {
 	body := `{
   "schema_version": 1,
   "variants": {
-    "bm": {"version": "bm@sha256:bm"},
-    "pvm": {"version": "pvm@sha256:pvm"}
+    "bm": {"version": "sha256-aaaaaaaaaaaa", "digest_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    "pvm": {"version": "sha256-bbbbbbbbbbbb", "digest_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
   }
 }`
 	if err := os.WriteFile(filepath.Join(dir, "cube-kernel-scf", "version.json"), []byte(body), 0o644); err != nil {
@@ -479,18 +523,18 @@ func TestCollectKernelFromVersionJSONAndActiveSymlink(t *testing.T) {
 	c := NewCollector(dir)
 	got := c.Collect()
 	k, ok := versionOf(t, got, ComponentKernel)
-	if !ok || k.Version != "pvm@sha256:pvm" || k.Variant != "pvm" || k.Source != SourceComponentJSON {
+	if !ok || k.Version != testPVMKernelIdentity || k.Variant != "pvm" || k.Source != SourceComponentJSON {
 		t.Fatalf("kernel from version.json+symlink, got %+v ok=%v", k, ok)
 	}
 }
 
 func TestCollectReportMarksMalformedJSONIncomplete(t *testing.T) {
 	dir := t.TempDir()
-	na := filepath.Join(dir, "network-agent")
-	if err := os.MkdirAll(na, 0o755); err != nil {
+	shim := filepath.Join(dir, "cube-shim")
+	if err := os.MkdirAll(shim, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(na, "version.json"), []byte("{not-json"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(shim, "version.json"), []byte("{not-json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	c := NewCollector(dir)
@@ -526,10 +570,10 @@ func TestCollectEgressVersionJSON(t *testing.T) {
 
 func TestCollectStageGapMarksIncomplete(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, ".staged-network-agent"), []byte("staged\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ".staged-cube-shim"), []byte("staged\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Sentinel present but network-agent/ directory missing → mid-stage gap.
+	// Sentinel present but cube-shim/ directory missing → mid-stage gap.
 	c := NewCollector(dir)
 	report := c.CollectReport()
 	if !report.Incomplete {
@@ -552,7 +596,11 @@ func TestCollectStagingMarkerMarksIncomplete(t *testing.T) {
 func TestCollectMalformedJSONDoesNotFallBackToMarker(t *testing.T) {
 	dir := t.TempDir()
 	img := filepath.Join(dir, "cube-image")
+	agentDir := filepath.Join(dir, "cube-agent")
 	if err := os.MkdirAll(img, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(img, "version.json"), []byte("{bad"), 0o644); err != nil {
@@ -561,19 +609,22 @@ func TestCollectMalformedJSONDoesNotFallBackToMarker(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(img, "version"), []byte("legacy-guest\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(img, "agent-version"), []byte("legacy-agent\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(agentDir, "version.json"), []byte("{bad"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "version"), []byte("agent-v1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	c := NewCollector(dir)
 	report := c.CollectReport()
 	if !report.Incomplete {
-		t.Fatal("expected incomplete on malformed cube-image/version.json")
+		t.Fatal("expected incomplete on malformed version.json")
 	}
 	if _, ok := versionOf(t, report.Versions, ComponentGuestImage); ok {
 		t.Fatal("malformed version.json must not fall back to guest-image marker")
 	}
 	if _, ok := versionOf(t, report.Versions, ComponentCubeAgent); ok {
-		t.Fatal("malformed version.json must not fall back to agent-version marker")
+		t.Fatal("malformed cube-agent/version.json must not fall back to version marker")
 	}
 }
 
@@ -584,8 +635,8 @@ func TestCollectKernelPrefersVmlinuxActiveOverArtifactSymlink(t *testing.T) {
 	body := `{
   "schema_version": 1,
   "variants": {
-    "bm": {"version": "bm@sha256:bm"},
-    "pvm": {"version": "pvm@sha256:pvm"}
+    "bm": {"version": "sha256-aaaaaaaaaaaa", "digest_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    "pvm": {"version": "sha256-bbbbbbbbbbbb", "digest_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
   }
 }`
 	if err := os.WriteFile(filepath.Join(dir, "cube-kernel-scf", "version.json"), []byte(body), 0o644); err != nil {
@@ -598,7 +649,7 @@ func TestCollectKernelPrefersVmlinuxActiveOverArtifactSymlink(t *testing.T) {
 	c := NewCollectorWithDirs(dir, boot)
 	got := c.Collect()
 	k, ok := versionOf(t, got, ComponentKernel)
-	if !ok || k.Version != "pvm@sha256:pvm" || k.Variant != "pvm" {
+	if !ok || k.Version != testPVMKernelIdentity || k.Variant != "pvm" {
 		t.Fatalf("vmlinux-active should win over artifact bm symlink, got %+v ok=%v", k, ok)
 	}
 }

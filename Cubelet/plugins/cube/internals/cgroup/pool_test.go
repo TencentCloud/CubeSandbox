@@ -7,20 +7,76 @@ package cgroup
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 
+	"github.com/containerd/cgroups/v3"
+	"github.com/containerd/cgroups/v3/cgroup1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cgroup/handle"
 )
 
 var testLock sync.Mutex
 
+func requireWritableCgroupFilesystem(t *testing.T) {
+	t.Helper()
+
+	if cgroups.Mode() == cgroups.Unified {
+		probeWritableCgroupDirectory(t, handle.RootMountPoint)
+		return
+	}
+
+	subsystems, err := cgroup1.Default()
+	if err != nil {
+		t.Skipf("requires available cgroup v1 controllers: %v", err)
+	}
+
+	required := map[cgroup1.Name]bool{
+		cgroup1.Cpu:    false,
+		cgroup1.Memory: false,
+		cgroup1.Cpuset: false,
+	}
+	for _, subsystem := range subsystems {
+		if _, ok := required[subsystem.Name()]; !ok {
+			continue
+		}
+		pather, ok := subsystem.(interface{ Path(string) string })
+		if !ok {
+			t.Skipf("cgroup v1 controller %q does not expose its mount path", subsystem.Name())
+		}
+		probeWritableCgroupDirectory(t, pather.Path(""))
+		required[subsystem.Name()] = true
+	}
+	for controller, found := range required {
+		if !found {
+			t.Skipf("requires cgroup v1 controller %q", controller)
+		}
+	}
+}
+
+func probeWritableCgroupDirectory(t *testing.T, root string) {
+	t.Helper()
+
+	probe, err := os.MkdirTemp(root, ".cubelet-cgroup-test-")
+	if err != nil {
+		t.Skipf("requires writable cgroup directory %q: %v", root, err)
+	}
+	t.Cleanup(func() {
+		_ = os.Remove(probe)
+	})
+	if err := os.Remove(probe); err != nil {
+		t.Fatalf("remove writable cgroup probe %q: %v", probe, err)
+	}
+}
+
 func TestPoolBasicOP(t *testing.T) {
 	utils.SkipCI(t)
+	requireWritableCgroupFilesystem(t)
 
 	ctx := context.Background()
 	testLock.Lock()
@@ -102,6 +158,7 @@ func TestPoolBasicOP(t *testing.T) {
 
 func TestPoolTidy(t *testing.T) {
 	utils.SkipCI(t)
+	requireWritableCgroupFilesystem(t)
 
 	testLock.Lock()
 	defer testLock.Unlock()
@@ -148,6 +205,7 @@ func TestPoolTidy(t *testing.T) {
 
 func TestPoolExpand(t *testing.T) {
 	utils.SkipCI(t)
+	requireWritableCgroupFilesystem(t)
 
 	ctx := context.Background()
 

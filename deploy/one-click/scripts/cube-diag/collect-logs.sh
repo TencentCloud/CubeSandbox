@@ -12,7 +12,6 @@
 #   /data/log/CubeAPI/                 cube-api rotated daily logs
 #   /data/log/CubeShim/                CubeShim request/stat logs
 #   /data/log/CubeVmm/                 VMM logs
-#   /data/log/network-agent/           network-agent request logs
 #   /data/log/cube-proxy/              cube-proxy access/error logs
 #   dmesg                              kernel ring buffer
 #   process/env snapshot               ps, ports, mounts, cgroup, cpuinfo, …
@@ -24,7 +23,7 @@
 # Options:
 #   --module <name>     Collect only the specified module(s); repeat for multiple.
 #                       Module names: cubemaster cubelet cube-api cubeshim
-#                       cubevmm network-agent cube-proxy runtime dmesg env configs
+#                       cubevmm cube-proxy runtime dmesg env configs
 #                       Default: all modules
 #   --lines <n>         Tail N lines per log file (default: 2000)
 #   --all-lines         Collect entire log files (may be very large)
@@ -49,7 +48,6 @@ Log sources:
   /data/log/CubeAPI/                 cube-api rotated daily logs
   /data/log/CubeShim/                CubeShim request/stat logs
   /data/log/CubeVmm/                 VMM logs
-  /data/log/network-agent/           network-agent request logs
   /data/log/cube-proxy/              cube-proxy access/error logs
   dmesg                              Full kernel ring buffer + filtered views
   env                                Process list, ports, mounts, cgroup, cpuinfo, ...
@@ -59,7 +57,7 @@ Options:
   --module <name>   Collect only the specified module. Repeat to select multiple.
                     Available modules:
                       cubemaster  cubelet  cube-api  cubeshim  cubevmm
-                      network-agent  cube-proxy  runtime  dmesg  env  configs
+                      cube-proxy  runtime  dmesg  env  configs
                     Default: all modules
   --lines <n>       Tail N lines per log file (default: 2000)
   --all-lines       Copy entire log files without truncation.
@@ -132,7 +130,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # If no --module given, collect everything
-_ALL_MODULES=(cubemaster cubelet cube-api cubeshim cubevmm network-agent cube-proxy runtime dmesg env configs)
+_ALL_MODULES=(cubemaster cubelet cube-api cubeshim cubevmm cube-proxy runtime dmesg env configs)
 if [[ "${#SELECTED_MODULES[@]}" -eq 0 ]]; then
   SELECTED_MODULES=("${_ALL_MODULES[@]}")
 fi
@@ -244,13 +242,7 @@ collect_cubevmm() {
   _collect_data_log_dir "${DATA_LOG_DIR}/CubeVmm" "${dest}"
 }
 
-collect_network_agent() {
-  _info "── network-agent ──"
-  local dest="${OUT_DIR}/network-agent"
-  mkdir -p "${dest}"
-  _collect_data_log_dir "${DATA_LOG_DIR}/network-agent" "${dest}"
-  _collect_log "${RUNTIME_LOG_DIR}/network-agent.log" "${dest}"
-}
+
 
 collect_cube_proxy() {
   _info "── cube-proxy ──"
@@ -273,7 +265,7 @@ collect_runtime() {
 
   # Process snapshot
   _capture "ps_cube" "${dest}/ps-cube.txt" \
-    bash -c 'ps auxww | grep -E "cube|cubelet|cubemaster|network-agent|containerd-shim" | grep -v grep || true'
+    bash -c 'ps auxww | grep -E "cube|cubelet|cubemaster|containerd-shim" | grep -v grep || true'
   _capture "ports"   "${dest}/ports.txt"   ss -tlnp
 
   {
@@ -380,7 +372,6 @@ main() {
   _module_selected "cube-api"      && collect_cube_api
   _module_selected "cubeshim"      && collect_cubeshim
   _module_selected "cubevmm"       && collect_cubevmm
-  _module_selected "network-agent" && collect_network_agent
   _module_selected "cube-proxy"    && collect_cube_proxy
   _module_selected "runtime"       && collect_runtime
   _module_selected "dmesg"         && collect_dmesg

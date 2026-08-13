@@ -255,6 +255,8 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 		return nil, ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
 	}
 
+	injectEnvdSidecar(ctx, req, out)
+
 	if err = checkAndGetVolumes(req, out); err != nil {
 		return nil, ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
 	}
@@ -359,6 +361,15 @@ func formatConstructCubeNetworkConfig(in *cubebox.CubeNetworkConfig) string {
 	return fmt.Sprintf("allow_internet_access=%s allow_out=%v deny_out=%v rules=%d", allowInternetAccess, in.GetAllowOut(), in.GetDenyOut(), len(in.GetRules()))
 }
 
+func appendExposedPortIfMissing(out *cubebox.RunCubeSandboxRequest, port int64) {
+	for _, existing := range out.ExposedPorts {
+		if existing == port {
+			return
+		}
+	}
+	out.ExposedPorts = append(out.ExposedPorts, port)
+}
+
 func getExposedPorts(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSandboxRequest) error {
 
 	if config.GetConfig().CubeletConf.EnableExposedPort {
@@ -376,7 +387,7 @@ func getExposedPorts(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSandbo
 			if err != nil {
 				return ret.Errorf(errorcode.ErrorCode_MasterParamsError, "com.exposed_ports:%s,invalid:%v", p, err.Error())
 			}
-			out.ExposedPorts = append(out.ExposedPorts, v)
+			appendExposedPortIfMissing(out, v)
 		}
 		if len(out.GetExposedPorts()) <= 0 {
 			return ret.Errorf(errorcode.ErrorCode_MasterParamsError, "com.exposed_ports is empty")

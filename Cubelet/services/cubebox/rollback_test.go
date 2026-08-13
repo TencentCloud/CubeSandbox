@@ -7,6 +7,7 @@ package cubebox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -95,6 +96,96 @@ func TestSetSandboxRollingBackHandlesNilCubebox(t *testing.T) {
 	require.NotPanics(t, func() { setSandboxRollingBack(nil, false) })
 }
 
+func TestRunRollbackWithPreparedGuestMetricsOrdersPreparationBeforeRestore(t *testing.T) {
+	cb := newCubeboxWithStatusForTest("sb-order", cubeboxstore.Status{StartedAt: 1})
+	steps := make([]string, 0, 2)
+
+	err := runRollbackWithPreparedGuestMetrics(
+		cb,
+		func() error {
+			steps = append(steps, "preflight")
+			return nil
+		},
+		func() error {
+			require.True(t, cb.GetStatus().Get().RollingBack)
+			steps = append(steps, "prepare")
+			return nil
+		},
+		func() error {
+			require.True(t, cb.GetStatus().Get().RollingBack)
+			steps = append(steps, "restore")
+			return nil
+		},
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"preflight", "prepare", "restore"}, steps)
+	require.False(t, cb.GetStatus().Get().RollingBack)
+}
+
+func TestRunRollbackWithPreparedGuestMetricsStopsBeforeRestoreWhenPreparationFails(t *testing.T) {
+	cb := newCubeboxWithStatusForTest("sb-prepare-fail", cubeboxstore.Status{StartedAt: 1})
+	restoreCalled := false
+
+	err := runRollbackWithPreparedGuestMetrics(
+		cb,
+		func() error { return nil },
+		func() error { return errors.New("metadata unavailable") },
+		func() error {
+			restoreCalled = true
+			return nil
+		},
+	)
+
+	require.ErrorContains(t, err, "prepare guest metrics epoch")
+	require.False(t, restoreCalled)
+	require.False(t, cb.GetStatus().Get().RollingBack)
+}
+
+func TestRunRollbackWithPreparedGuestMetricsKeepsCurrentEpochWhenPreflightFails(t *testing.T) {
+	cb := newCubeboxWithStatusForTest("sb-preflight-fail", cubeboxstore.Status{StartedAt: 1})
+	startedAt := time.Date(2026, time.July, 21, 1, 0, 0, 0, time.UTC)
+	require.NoError(t, cb.BeginGuestMetricsEpoch(cubeboxstore.GuestMetricsEpochFreshCreate, startedAt))
+	previous := cb.GuestMetricsEpochCopy()
+	prepareCalled := false
+	restoreCalled := false
+
+	err := runRollbackWithPreparedGuestMetrics(
+		cb,
+		func() error { return errors.New("task is unavailable") },
+		func() error {
+			prepareCalled = true
+			return cb.PrepareRollbackGuestMetricsEpoch(startedAt.Add(time.Minute))
+		},
+		func() error {
+			restoreCalled = true
+			return nil
+		},
+	)
+
+	require.ErrorContains(t, err, "preflight sandbox runtime rollback")
+	require.False(t, prepareCalled)
+	require.False(t, restoreCalled)
+	require.Equal(t, previous, cb.GuestMetricsEpochCopy())
+	require.False(t, cb.GetStatus().Get().RollingBack)
+}
+
+func TestRunRollbackWithPreparedGuestMetricsKeepsPreparedEpochOnRestoreFailure(t *testing.T) {
+	cb := newCubeboxWithStatusForTest("sb-restore-fail", cubeboxstore.Status{StartedAt: 1})
+	startedAt := time.Date(2026, time.July, 21, 1, 0, 0, 0, time.UTC)
+
+	err := runRollbackWithPreparedGuestMetrics(
+		cb,
+		func() error { return nil },
+		func() error { return cb.PrepareRollbackGuestMetricsEpoch(startedAt) },
+		func() error { return errors.New("shim restore failed after runtime mutation") },
+	)
+
+	require.ErrorContains(t, err, "restore sandbox runtime")
+	require.Equal(t, cubeboxstore.GuestMetricsEpochPrepared, cb.GuestMetricsEpochCopy().State)
+	require.False(t, cb.GetStatus().Get().RollingBack)
+}
+
 func TestResetSandboxStatusAfterRollbackScrubsTerminatedMarkers(t *testing.T) {
 	preStarted := time.Now().Add(-time.Hour).UnixNano()
 	pre := cubeboxstore.Status{
@@ -172,6 +263,52 @@ func TestHandleContainerExitSkipsRollingBack(t *testing.T) {
 	assert.Equal(t, int32(0), got.ExitCode, "ExitCode must remain unstamped")
 	assert.Equal(t, uint32(12345), got.Pid, "Pid must remain unchanged")
 	assert.True(t, got.RollingBack, "RollingBack flag must survive the handler")
+}
+
+func TestHandleContainerExitSkipsPauseLifecycle(t *testing.T) {
+	now := time.Now().UnixNano()
+	cases := []struct {
+		name string
+		pre  cubeboxstore.Status
+	}{
+		{
+			name: "pausing",
+			pre: cubeboxstore.Status{
+				StartedAt: now - int64(time.Minute),
+				PausingAt: now,
+				Pid:       99,
+			},
+		},
+		{
+			name: "paused",
+			pre: cubeboxstore.Status{
+				StartedAt: now - int64(time.Minute),
+				PausedAt:  now,
+				Pid:       99,
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cntr := &cubeboxstore.Container{
+				Metadata: cubeboxstore.Metadata{ID: "ctr-pause"},
+				Status:   cubeboxstore.StoreStatus(tc.pre),
+			}
+			em := (*eventMonitor)(nil)
+			err := em.handleContainerExit(context.Background(), &eventtypes.TaskExit{
+				ContainerID: "ctr-pause",
+				ID:          "ctr-pause",
+				Pid:         99,
+				ExitStatus:  0,
+			}, cntr)
+			require.NoError(t, err)
+			got := cntr.Status.Get()
+			assert.Equal(t, int64(0), got.FinishedAt)
+			assert.Equal(t, tc.pre.PausingAt, got.PausingAt)
+			assert.Equal(t, tc.pre.PausedAt, got.PausedAt)
+			assert.True(t, cntr.Status.IsPaused())
+		})
+	}
 }
 
 func TestScanDeadContainerSkipsRollingBack(t *testing.T) {

@@ -11,7 +11,16 @@
 #     /usr/local/services/cubetoolbox/cube-shim/bin/cube-runtime
 #   guest kernel:
 #     /usr/local/services/cubetoolbox/cube-kernel-scf/vmlinux
-#   guest image:
+#   guest image (pmem0, contains cube-init as /sbin/init):
 #     /usr/local/services/cubetoolbox/cube-image/cube-guest-image-cpu.img
-#   guest init:
-#     built into guest image as /sbin/init
+#   cube-agent.ext4 (pmem1, independent agent plane file):
+#     /usr/local/services/cubetoolbox/cube-agent/cube-agent.ext4
+#
+# Guest boot topology:
+#   /dev/pmem0 = guest OS image (cube-init PID1 mounts pmem1 then execs agent)
+#   /dev/pmem1 = cube-agent.ext4 mounted at /run/support (ext4,ro,dax)
+#   /dev/pmemN (N>=2) = business/user pmems
+#
+# Optional OCI annotations (override defaults per sandbox):
+#   cube.vm.os-image.path  → guest OS image path
+#   cube.vm.agent.path     → cube-agent.ext4 path

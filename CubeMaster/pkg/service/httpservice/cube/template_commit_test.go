@@ -45,6 +45,18 @@ func invokeCommitHandler(t *testing.T, req *http.Request, rt *CubeLog.RequestTra
 	return got
 }
 
+// withCommitStub swaps the submitTemplateCommitFn seam for the duration of the
+// test and restores it via t.Cleanup. Any test that drives
+// handleSandboxCommitAction past host resolution must call this, or the handler
+// would invoke the real templatecenter.SubmitTemplateCommit and hit storage;
+// routing the swap through one helper keeps that requirement self-documenting.
+func withCommitStub(t *testing.T, fn func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, templateID string, override *types.CreateCubeSandboxReq) (*types.TemplateImageJobInfo, error)) {
+	t.Helper()
+	orig := submitTemplateCommitFn
+	t.Cleanup(func() { submitTemplateCommitFn = orig })
+	submitTemplateCommitFn = fn
+}
+
 func TestHandleSandboxCommitActionRejectsEmptyRequestID(t *testing.T) {
 	registerKnownSandboxTestID(t)
 
@@ -92,9 +104,15 @@ func TestHandleSandboxCommitActionAllowsMissingCreateRequest(t *testing.T) {
 	patches.ApplyFunc(localcache.GetNodesByIp, func(ip string) (*node.Node, bool) {
 		return &node.Node{InsID: "node-1", IP: ip}, true
 	})
+	var called bool
 	var gotRequestID, gotSandboxID, gotTemplateID string
 	var gotOverride *types.CreateCubeSandboxReq
-	patches.ApplyFunc(templatecenter.SubmitTemplateCommit, func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, templateID string, override *types.CreateCubeSandboxReq) (*types.TemplateImageJobInfo, error) {
+	// Swap the submitTemplateCommitFn seam (not templatecenter.SubmitTemplateCommit
+	// directly): overriding a package var with a plain closure captures every
+	// argument reliably on any arch, whereas gomonkey cannot read a patched
+	// function's 6th+ argument on arm64 (register-ABI stack spill).
+	withCommitStub(t, func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, templateID string, override *types.CreateCubeSandboxReq) (*types.TemplateImageJobInfo, error) {
+		called = true
 		gotRequestID = requestID
 		gotSandboxID = sandboxID
 		gotTemplateID = templateID
@@ -107,9 +125,12 @@ func TestHandleSandboxCommitActionAllowsMissingCreateRequest(t *testing.T) {
 	rt := &CubeLog.RequestTrace{}
 	got := invokeCommitHandler(t, req, rt)
 	assert.Equal(t, int(errorcode.ErrorCode_Success), got.Res.Ret.RetCode)
+	assert.True(t, called)
 	assert.Equal(t, "req-1", gotRequestID)
 	assert.Equal(t, "sb-1", gotSandboxID)
-	assert.Equal(t, got.TemplateID, gotTemplateID)
+	// The handler auto-generates a tpl- id, submits it, and echoes the same id.
+	assert.True(t, strings.HasPrefix(gotTemplateID, "tpl-"), gotTemplateID)
+	assert.Equal(t, gotTemplateID, got.TemplateID)
 	assert.Nil(t, gotOverride)
 }
 
@@ -123,7 +144,7 @@ func TestHandleSandboxCommitActionSanitizesInternalErrors(t *testing.T) {
 	patches.ApplyFunc(localcache.GetNodesByIp, func(ip string) (*node.Node, bool) {
 		return &node.Node{InsID: "node-1", IP: ip}, true
 	})
-	patches.ApplyFunc(templatecenter.SubmitTemplateCommit, func(context.Context, string, string, string, string, string, *types.CreateCubeSandboxReq) (*types.TemplateImageJobInfo, error) {
+	withCommitStub(t, func(context.Context, string, string, string, string, string, *types.CreateCubeSandboxReq) (*types.TemplateImageJobInfo, error) {
 		return nil, fmt.Errorf("load sandbox spec: dial tcp 10.0.0.2:3306: connection refused")
 	})
 
@@ -142,15 +163,15 @@ func TestHandleSandboxCommitActionIgnoresProvidedTemplateID(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 
-	var submittedTemplateID string
 	patches.ApplyFunc(localcache.GetNodesByIp, func(ip string) (*node.Node, bool) {
 		return &node.Node{InsID: "node-1", IP: ip}, true
 	})
-	patches.ApplyFunc(templatecenter.SubmitTemplateCommit, func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, templateID string, req *types.CreateCubeSandboxReq) (*types.TemplateImageJobInfo, error) {
+	var submittedTemplateID string
+	withCommitStub(t, func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, templateID string, req *types.CreateCubeSandboxReq) (*types.TemplateImageJobInfo, error) {
 		submittedTemplateID = templateID
 		return &types.TemplateImageJobInfo{
 			JobID:      "job-1",
-			TemplateID: submittedTemplateID,
+			TemplateID: templateID,
 		}, nil
 	})
 
@@ -171,11 +192,15 @@ func TestHandleSandboxCommitActionIgnoresProvidedTemplateID(t *testing.T) {
 	rt := &CubeLog.RequestTrace{}
 	got := invokeCommitHandler(t, req, rt)
 
+	// The handler must ignore the user-supplied template_id and the annotation
+	// value, auto-generating a tpl- prefixed id that it both submits and echoes.
+	// Capturing the submitted arg (via the submitTemplateCommit seam) lets us
+	// assert the id actually handed to the commit call, not just the response.
 	assert.Equal(t, int(errorcode.ErrorCode_Success), got.Res.Ret.RetCode)
+	assert.True(t, strings.HasPrefix(submittedTemplateID, "tpl-"), submittedTemplateID)
 	assert.Equal(t, submittedTemplateID, got.TemplateID)
-	assert.NotEqual(t, "custom-template", got.TemplateID)
+	assert.NotEqual(t, "custom-template", submittedTemplateID)
 	assert.NotEqual(t, "sb-bad", submittedTemplateID)
-	assert.True(t, strings.HasPrefix(got.TemplateID, "tpl-"), got.TemplateID)
 }
 
 func TestCommitTemplateErrorCode(t *testing.T) {

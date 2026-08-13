@@ -92,6 +92,38 @@ cubemastercli tpl create-from-image \
 
 > **Image registry:** Use `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` (recommended for international access). If you are in mainland China, use `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` instead.
 
+#### Optional — inject envd at template build time
+
+By default, Cube uses the image as-is and does not inject `envd`. For dev or code-sandbox images that do not already include `envd`, or that need a controlled `envd` version, opt in explicitly:
+
+```bash
+cubemastercli tpl create-from-image \
+  --image     <your-image> \
+  --writable-layer-size 1G \
+  --expose-port 49983 \
+  --probe 49983 \
+  --probe-path /health \
+  --enable-inject-envd
+```
+
+| Flag | Description |
+|------|-------------|
+| `--enable-inject-envd` | Upload an `envd` binary from `cubemastercli` and bake it into the template rootfs. |
+| `--envd-path` | Local path on the machine running `cubemastercli`; used only when `--enable-inject-envd` is set. If omitted, `cubemastercli` uses its embedded default `envd` binary when available. |
+
+When `--enable-inject-envd` is set, `cubemastercli` uploads the selected `envd` binary with the create-from-image request. `--envd-path` is local to `cubemastercli`; it is not a CubeMaster host path and is never sent to CubeMaster as a path. CubeMaster validates the uploaded bytes, writes the binary to `/usr/local/bin/envd` inside the template rootfs, and includes `sha256(uploaded bytes)` in the rootfs artifact fingerprint.
+
+The uploaded `envd` must be a non-empty ELF binary no larger than 16 MiB, and it must be compatible with the target template rootfs operating system and CPU architecture. For example, a Linux x86_64 template image should receive a Linux x86_64 `envd` ELF; templates for other architectures need a matching `envd` binary.
+
+If `cubemastercli` was built without an embedded `envd` binary, `--enable-inject-envd` requires `--envd-path`.
+
+To build a `cubemastercli` binary with an embedded default `envd`, prepare the binary before building and pass `ENVD_LOCAL_PATH`:
+
+```bash
+# Use the official envd artifact once available, or a locally built envd binary for development builds.
+make cubemastercli ENVD_LOCAL_PATH=/path/to/envd
+```
+
 ---
 
 ## Step 2 — Monitor Progress

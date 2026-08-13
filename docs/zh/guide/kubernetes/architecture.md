@@ -18,7 +18,7 @@
 | 管理入口 | WebUI | Deployment + Service + ConfigMap | 静态控制台；`/opsapi/`、`/cubeapi/v1/` 反代到 CubeOps（依赖 `cubeOps.enabled`） |
 | 运维入口 | cubemastercli | Deployment | `kubectl exec` 用 CLI；注入本 Release 的 CubeMaster endpoint |
 | 依赖存储 | MySQL / Redis | 内置 StatefulSet 或第三方 | 业务数据 / Proxy 与 lifecycle 状态 |
-| 计算面 · 运行时 | `cube-node`（Big Pod） | 原生 `apps/v1` DaemonSet | `wait-node-prep` init + cubelet / network-agent + 可选 egress |
+| 计算面 · 运行时 | `cube-node`（Big Pod） | 原生 `apps/v1` DaemonSet | `wait-node-prep` init + 内嵌 network runtime 的 cubelet + 可选 egress |
 | 计算面 · 产物 | `cube-node-installer` | 原生 `apps/v1` DaemonSet | 将 shim / kernel / guest 安装到宿主机 toolbox |
 | 计算面 · 节点引导 | `cube-node-bootstrap` | 原生 `apps/v1` DaemonSet | `wait-pvm-host`、`cube-node-init`、写 `node-prep-ready` |
 | 计算面 · PVM 宿主机 | `cube-node-pvm` | 原生 `apps/v1` DaemonSet（仅 `placement.pvm`） | PVM host kernel 安装（可 reboot）；管理 L0 污点并写指纹 |
@@ -60,7 +60,7 @@ flowchart TB
     end
     subgraph NODE["cube-node Big Pod"]
       WAIT["init: wait-node-prep（就绪后退出）"]
-      RUN["cubelet + network-agent"]
+      RUN["cubelet + embedded network runtime"]
       EG["cube-egress + cube-egress-net"]
     end
   end
@@ -130,8 +130,7 @@ flowchart TB
 | 容器 | 镜像 | 职责 |
 | --- | --- | --- |
 | `wait-node-prep`（init） | `images.waitNodePrep` | 只读 hostPath `node-prep-ready` 自描述指纹；匹配后退出，主容器才启动 |
-| `network-agent` | `images.networkAgent` | self-stage 后启动 |
-| `cubelet` | `images.cubelet` | self-stage 后启动 |
+| `cubelet` | `images.cubelet` | self-stage 后启动；包含内嵌 network runtime 和 CubeVS 工具 |
 | `cube-egress` / `cube-egress-net` | 对应镜像 | 可选；透明出站 / TPROXY |
 
 **容器名 / volumeMount / securityContext / imagePullPolicy 变更同样 recreate**。
@@ -294,8 +293,9 @@ sequenceDiagram
 
 探针约定：
 
-- cubelet：startup 等 9999；readiness 默认 exec（9999 + network-agent `/readyz` + sock）；liveness 查 9999。
-- `cube-egress`：`127.0.0.1:9090/admin/v1/health`。
+- cubelet：startup 等 9999；readiness 默认 exec（9999 + Cubelet 本地 socket）；liveness 查 9999。
+- network-agent 合入 Cubelet 后，节点就绪 / `NotReady` 不再探测独立网络进程。运行期网络退化（例如 TAP 池耗尽、CubeEgress 持续推送失败）会体现在 create/release 失败与本地诊断上，而不会把节点打成 NotReady。请改看创建失败率、TAP 池状态（`cubecli container taps` / loopback `GET /v1/network/taps`）以及 CubeEgress 健康，而不是只依赖节点 Ready。
+- `cube-egress`：`127.0.0.1:9091/admin/v1/health`（默认；`cubeEgress.adminPort`）。
 - `cube-egress-net`：`cube-dev`、ip rule、table 100、mangle `TRANSPROXY`。
 
 ### 4.4 注册与验收关注点
@@ -415,7 +415,7 @@ externalControlPlane:
 | `<release>-mysql-test` / `redis-test` | 内置依赖连通性 |
 | `<release>-dns-test` | `cube.app` / wildcard → Proxy Service |
 | `<release>-node-image-test` | 镜像内 runtime 工具与 asset |
-| `<release>-node-runtime-test` | `/dev/kvm`、cubelet / network-agent socket |
+| `<release>-node-runtime-test` | `/dev/kvm`、cubelet socket、内嵌 network runtime |
 
 ```bash
 helm test <release> -n <namespace> --timeout 20m --logs

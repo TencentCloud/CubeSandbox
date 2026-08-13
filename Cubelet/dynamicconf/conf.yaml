@@ -10,9 +10,16 @@ common:
   disable_host_cgroup: true
   # Disable the legacy netfile.
   disable_host_netfile: true
-  # Default DNS servers for guest containers. dns_config.servers in a template or request takes precedence.
+  # Default DNS servers for guest containers.
+  # When a template/request sets dns_config.servers, the whole guest DNS config
+  # comes from the request (servers plus any request searches/options); defaults
+  # for searches/options are not mixed in. With no request servers, empty
+  # dns_config.searches / dns_config.options fall back to the defaults below.
   default_dns_servers:
     - 119.29.29.29
+  # Default search domains / options for guest resolv.conf (e.g. followNodeDns).
+  default_dns_searches: []
+  default_dns_options: []
 
 host:
   scheduler_label: "default-cluster"

@@ -101,9 +101,10 @@ func (l *local) loop(ctx context.Context) {
 					CubeLog.WithContext(context.Background()).Errorf("loop_all:%s", err)
 				}
 				if log.IsDebug() {
-					CubeLog.WithContext(context.Background()).Debugf("loop_all:%s", GetNodes(-1).String())
+					nodes := GetNodes(-1)
+					CubeLog.WithContext(context.Background()).Debugf("loop_all,size:%d,nodes:%s",
+						nodes.Len(), nodes.String())
 				}
-				CubeLog.WithContext(context.Background()).Errorf("loop_all,size:%d", l.cache.ItemCount())
 			}, func(panicError interface{}) {
 				checkDeadline = time.Now().Add(config.GetConfig().Common.SyncMetaDataInterval)
 				CubeLog.WithContext(context.Background()).Fatalf("loop panic:%v", panicError)
@@ -311,6 +312,11 @@ func (l *local) updateNodeFromMetaData(n *node.Node) error {
 		old.CPUType = n.CPUType
 		old.InstanceType = n.InstanceType
 		old.OssClusterLabel = n.OssClusterLabel
+		// Host facts must be refreshed on every metadata sync: KVM module state
+		// is re-read on each heartbeat (kvm.ko reload / out-of-tree sibling), and
+		// a node that first reported facts after being cached would otherwise
+		// render them as "-" forever in cubemastercli node list.
+		old.HostFacts = n.HostFacts
 		var labels map[string]string
 		if n.NodeLabels != nil {
 			labels = make(map[string]string, len(n.NodeLabels))

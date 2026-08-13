@@ -257,6 +257,9 @@ message NetworkStats {
 message StatsContainerResponse {
 	CgroupStats cgroup_stats = 1;
 	repeated NetworkStats network_stats = 2;
+	// Version 1 certifies unified cgroup v2 workload accounting with all
+	// container-owned processes below the reported accounting cgroup.
+	uint32 resource_metrics_version = 3;
 }
 
 message WriteStreamRequest {

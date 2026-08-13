@@ -1,0 +1,436 @@
+name: Release Kernel Assets
+
+# Triggered by dedicated kernel-release-* tags (artifact-store versions such as
+# kernel-release-v1.0.0 — not OpenCloudOS/PVM source tags). Builds BM guest
+# vmlinux (amd64/arm64), PVM guest vmlinux, and PVM host deb/rpm, then uploads
+# all assets onto the same GitHub Release. Cube product (v*) releases only
+# download from this Release via deploy/release-assets.yaml.
+
+on:
+  push:
+    tags:
+      - 'kernel-release-*'
+  workflow_dispatch:
+
+concurrency:
+  group: release-kernel-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: write
+
+env:
+  KERNEL_TAG: 6.6.119-49.6
+  KERNEL_ARCHIVE_URL: https://cnb.cool/CubeSandbox/OpenCloudOS-Kernel/-/git/archive/6.6.119-49.6.zip
+  PVM_KERNEL_TAG: 6.6.69-1.2.cubesandbox
+  PVM_VMLINUX_CACHE_PATH: kernel-cache/vmlinux-pvm
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  ensure_release:
+    name: Ensure kernel GitHub Release exists
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure GitHub Release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          case "${tag}" in
+            kernel-release-*) ;;
+            *)
+              echo "expected kernel-release-* tag, got: ${tag}" >&2
+              exit 1
+              ;;
+          esac
+          gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 || \
+            gh release create "${tag}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${tag}" \
+              --notes "Dedicated kernel assets release (BM + PVM guest + PVM host)."
+
+  build_bm:
+    name: Build BM vmlinux (${{ matrix.kernel_arch }})
+    needs: ensure_release
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ubuntu:24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kernel_arch: x86_64
+            kbuild_arch: x86
+            bundle_arch: amd64
+            runner: arc-runner-set-16c32g-containerd
+          - kernel_arch: aarch64
+            kbuild_arch: arm64
+            bundle_arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      KERNEL_ARCH: ${{ matrix.kernel_arch }}
+      KBUILD_ARCH: ${{ matrix.kbuild_arch }}
+      BUNDLE_ARCH: ${{ matrix.bundle_arch }}
+      VMLINUX_CACHE_PATH: kernel-cache/${{ matrix.kernel_arch }}/vmlinux
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute vmlinux cache metadata
+        id: vmlinux_metadata
+        run: |
+          config_hash="$(sha256sum "configs/kernel-oc9.${KERNEL_ARCH}.config" | awk '{print $1}')"
+          echo "cache_key=vmlinux-opencloudos-${KERNEL_TAG}-${KERNEL_ARCH}-${config_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
+
+      - name: Install kernel build dependencies
+        run: |
+          apt-get update
+          apt-get install -y file sudo build-essential git bc bison flex \
+            libelf-dev libssl-dev libncurses-dev dwarves cpio kmod \
+            fakeroot rsync dpkg-dev debhelper wget curl ca-certificates python3 unzip
+
+      - name: Restore cached vmlinux
+        id: restore_vmlinux
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.VMLINUX_CACHE_PATH }}
+          key: ${{ steps.vmlinux_metadata.outputs.cache_key }}
+
+      - name: Download kernel source archive
+        if: steps.restore_vmlinux.outputs.cache-hit != 'true'
+        run: curl -fL "${KERNEL_ARCHIVE_URL}" -o opencloudos-kernel.zip
+
+      - name: Extract kernel source archive
+        if: steps.restore_vmlinux.outputs.cache-hit != 'true'
+        run: |
+          rm -rf kernel-source
+          mkdir -p kernel-source
+          unzip -q opencloudos-kernel.zip -d kernel-source
+          shopt -s nullglob
+          if [[ ! -f kernel-source/Makefile ]]; then
+            dirs=(kernel-source/*/)
+            if [[ "${#dirs[@]}" -ne 1 ]]; then
+              echo "unexpected archive layout: no Makefile at root and ${#dirs[@]} top-level dirs" >&2
+              exit 1
+            fi
+            echo "KERNEL_SRC=${dirs[0]%/}" >> "${GITHUB_ENV}"
+          else
+            echo "KERNEL_SRC=kernel-source" >> "${GITHUB_ENV}"
+          fi
+
+      - name: Configure kernel
+        if: steps.restore_vmlinux.outputs.cache-hit != 'true'
+        run: |
+          cp "configs/kernel-oc9.${KERNEL_ARCH}.config" "${KERNEL_SRC}/.config"
+          make -C "${KERNEL_SRC}" ARCH="${KBUILD_ARCH}" olddefconfig
+
+      - name: Build vmlinux
+        if: steps.restore_vmlinux.outputs.cache-hit != 'true'
+        run: |
+          (
+            cd "${KERNEL_SRC}"
+            if [[ "${KERNEL_ARCH}" == "x86_64" ]]; then
+              KCFLAGS="-Wa,-mx86-used-note=no" make ARCH="${KBUILD_ARCH}" -j "$(nproc)" vmlinux
+            else
+              make ARCH="${KBUILD_ARCH}" -j "$(nproc)" Image
+              cp arch/arm64/boot/Image vmlinux
+            fi
+          )
+          install -D -m 0644 "${KERNEL_SRC}/vmlinux" "${VMLINUX_CACHE_PATH}"
+
+      - name: Verify vmlinux
+        run: |
+          test -f "${VMLINUX_CACHE_PATH}"
+          file "${VMLINUX_CACHE_PATH}"
+
+      - name: Save vmlinux cache
+        if: steps.restore_vmlinux.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.VMLINUX_CACHE_PATH }}
+          key: ${{ steps.vmlinux_metadata.outputs.cache_key }}
+
+      - name: Stage BM release asset
+        run: |
+          rm -rf bm-release-assets
+          mkdir -p bm-release-assets
+          install -D -m 0644 "${VMLINUX_CACHE_PATH}" "bm-release-assets/vmlinux-${BUNDLE_ARCH}"
+
+      - name: Upload BM vmlinux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-bm-${{ matrix.bundle_arch }}
+          path: bm-release-assets/vmlinux-${{ matrix.bundle_arch }}
+          if-no-files-found: error
+          retention-days: 14
+
+  build_pvm_guest:
+    name: Build PVM guest vmlinux (x86_64)
+    needs: ensure_release
+    runs-on: arc-runner-set-16c32g-containerd
+    container:
+      image: ubuntu:24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install verification tools
+        run: |
+          apt-get update
+          apt-get install -y file sudo build-essential git bc bison flex \
+            libelf-dev libssl-dev libncurses-dev dwarves cpio kmod \
+            fakeroot rsync dpkg-dev debhelper wget curl ca-certificates python3
+
+      - name: Compute PVM vmlinux cache metadata
+        id: pvm_vmlinux_metadata
+        run: |
+          source_hash="$(
+            sha256sum \
+              deploy/pvm/build-pvm-guest-vmlinux.sh \
+              deploy/pvm/common.sh \
+              deploy/pvm/configs/pvm_guest \
+              | sha256sum \
+              | awk '{print $1}'
+          )"
+          echo "cache_key=vmlinux-pvm-${PVM_KERNEL_TAG}-x86_64-${source_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
+
+      - name: Restore cached PVM vmlinux
+        id: restore_pvm_vmlinux
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.PVM_VMLINUX_CACHE_PATH }}
+          key: ${{ steps.pvm_vmlinux_metadata.outputs.cache_key }}
+
+      - name: Build PVM guest vmlinux
+        if: steps.restore_pvm_vmlinux.outputs.cache-hit != 'true'
+        run: |
+          WORK_DIR="${GITHUB_WORKSPACE}/pvm-guest-build" \
+          OUTPUT_DIR="${GITHUB_WORKSPACE}/pvm-guest-build/output" \
+            bash deploy/pvm/build-pvm-guest-vmlinux.sh
+          install -D -m 0644 \
+            "${GITHUB_WORKSPACE}/pvm-guest-build/output/vmlinux" \
+            "${PVM_VMLINUX_CACHE_PATH}"
+
+      - name: Verify PVM vmlinux
+        run: |
+          test -f "${PVM_VMLINUX_CACHE_PATH}"
+          file "${PVM_VMLINUX_CACHE_PATH}"
+
+      - name: Save PVM vmlinux cache
+        if: steps.restore_pvm_vmlinux.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.PVM_VMLINUX_CACHE_PATH }}
+          key: ${{ steps.pvm_vmlinux_metadata.outputs.cache_key }}
+
+      - name: Stage PVM guest release asset
+        run: |
+          rm -rf pvm-guest-release-assets
+          mkdir -p pvm-guest-release-assets
+          install -D -m 0644 "${PVM_VMLINUX_CACHE_PATH}" \
+            pvm-guest-release-assets/vmlinux-pvm-amd64
+
+      - name: Upload PVM guest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-pvm-guest-amd64
+          path: pvm-guest-release-assets/vmlinux-pvm-amd64
+          if-no-files-found: error
+          retention-days: 14
+
+  build_pvm_host_deb:
+    name: Build PVM host kernel (deb)
+    needs: ensure_release
+    runs-on: arc-runner-set-16c32g-containerd
+    container:
+      image: ubuntu:24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install verification tools
+        run: |
+          apt-get update
+          apt-get install -y file sudo build-essential git bc bison flex \
+            libelf-dev libssl-dev libncurses-dev dwarves cpio kmod \
+            fakeroot rsync dpkg-dev debhelper wget curl ca-certificates python3
+
+      - name: Build DEB package
+        run: |
+          WORK_DIR="${GITHUB_WORKSPACE}/pvm-host-build" \
+          OUTPUT_DIR="${GITHUB_WORKSPACE}/pvm-host-build/output" \
+            bash deploy/pvm/build-pvm-host-kernel-pkg.sh
+
+      - name: Verify package artifacts
+        run: |
+          shopt -s nullglob
+          packages=(pvm-host-build/output/*.deb)
+          if [[ "${#packages[@]}" -eq 0 ]]; then
+            echo "No deb packages were produced" >&2
+            exit 1
+          fi
+          ls -lh "${packages[@]}"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-pvm-host-deb
+          path: pvm-host-build/output/*.deb
+          if-no-files-found: error
+          retention-days: 14
+
+  build_pvm_host_rpm:
+    name: Build PVM host kernel (rpm)
+    needs: ensure_release
+    runs-on: arc-runner-set-16c32g-containerd
+    container:
+      image: opencloudos/opencloudos9-minimal:latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Switch OpenCloudOS repos to Tencent mirrors
+        run: |
+          set -euo pipefail
+          sed -i "s#https://mirrors.opencloudos.tech/opencloudos/#https://mirrors.tencent.com/opencloudos/#g" /etc/yum.repos.d/OpenCloudOS.repo
+          if [[ -f /etc/yum.repos.d/epol.repo ]]; then
+            sed -i "s#http://mirrors.tencent.com/epol/#https://mirrors.tencent.com/epol/#g" /etc/yum.repos.d/epol.repo
+          fi
+          dnf clean all
+          rm -rf /var/cache/dnf/*
+
+      - name: Build RPM package
+        run: |
+          WORK_DIR="${GITHUB_WORKSPACE}/pvm-host-build" \
+          OUTPUT_DIR="${GITHUB_WORKSPACE}/pvm-host-build/output" \
+            bash deploy/pvm/build-pvm-host-kernel-pkg.sh
+
+      - name: Verify package artifacts
+        run: |
+          shopt -s nullglob
+          packages=(pvm-host-build/output/*.rpm)
+          if [[ "${#packages[@]}" -eq 0 ]]; then
+            echo "No rpm packages were produced" >&2
+            exit 1
+          fi
+          ls -lh "${packages[@]}"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-pvm-host-rpm
+          path: pvm-host-build/output/*.rpm
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Upload kernel assets to Release
+    needs:
+      - ensure_release
+      - build_bm
+      - build_pvm_guest
+      - build_pvm_host_deb
+      - build_pvm_host_rpm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all kernel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: kernel-release-assets
+          pattern: kernel-*
+          merge-multiple: true
+
+      - name: Verify release assets
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          ls -lhR kernel-release-assets
+          test -f kernel-release-assets/vmlinux-amd64
+          test -f kernel-release-assets/vmlinux-arm64
+          test -f kernel-release-assets/vmlinux-pvm-amd64
+
+          has_rpm=0
+          has_deb=0
+          for f in kernel-release-assets/*.rpm; do
+            base="$(basename "${f}")"
+            case "${base}" in
+              kernel-*opencloudos9.cubesandbox.pvm.host*.x86_64.rpm)
+                case "${base}" in
+                  *headers*) ;;
+                  *) has_rpm=1 ;;
+                esac
+                ;;
+            esac
+          done
+          for f in kernel-release-assets/*.deb; do
+            base="$(basename "${f}")"
+            case "${base}" in
+              linux-image-*opencloudos9.cubesandbox.pvm.host*_amd64.deb)
+                case "${base}" in
+                  *-dbg_*) ;;
+                  *) has_deb=1 ;;
+                esac
+                ;;
+            esac
+          done
+          if [[ "${has_rpm}" -ne 1 || "${has_deb}" -ne 1 ]]; then
+            echo "missing main PVM host rpm/deb packages" >&2
+            ls -lh kernel-release-assets/*.{deb,rpm} 2>/dev/null || true
+            exit 1
+          fi
+
+      - name: Write kernel-metadata.json
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+
+          meta = {
+              "schema_version": 1,
+              "release_tag": os.environ["GITHUB_REF_NAME"],
+              "bm": {
+                  "source_tag": os.environ["KERNEL_TAG"],
+                  "archive_url": os.environ["KERNEL_ARCHIVE_URL"],
+              },
+              "pvm": {
+                  "source_tag": os.environ["PVM_KERNEL_TAG"],
+              },
+          }
+          path = "kernel-release-assets/kernel-metadata.json"
+          with open(path, "w", encoding="utf-8") as f:
+              json.dump(meta, f, indent=2, sort_keys=True)
+              f.write("\n")
+          print(f"wrote {path}")
+          print(json.dumps(meta, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(
+            kernel-release-assets/kernel-metadata.json
+            kernel-release-assets/vmlinux-amd64
+            kernel-release-assets/vmlinux-arm64
+            kernel-release-assets/vmlinux-pvm-amd64
+            kernel-release-assets/*.deb
+            kernel-release-assets/*.rpm
+          )
+          gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
+          echo "Published kernel assets to Release ${GITHUB_REF_NAME}"
+          gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --json assets \
+            --jq '.assets[].name'

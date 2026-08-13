@@ -65,15 +65,6 @@ func (b *boundedBuffer) String() string {
 	return b.buf.String()
 }
 
-// parseEnvdVersionFromOutput prefers semver from stdout; falls back to stderr
-// only when stdout has no match (e.g. envd logs warnings to stderr).
-func parseEnvdVersionFromOutput(stdout, stderr string) string {
-	if v := envdSemverRe.FindString(stdout); v != "" {
-		return v
-	}
-	return envdSemverRe.FindString(stderr)
-}
-
 // runProbeCall runs fn in a goroutine so a blocking containerd/shim RPC cannot
 // stall the snapshot/commit path past execCtx's deadline.
 func runProbeCall[T any](ctx context.Context, fn func() (T, error)) (T, error) {
@@ -190,10 +181,12 @@ func (s *service) collectEnvdVersion(ctx context.Context, sandboxID string) (ver
 	pspec.Args = []string{"envd", "--version"}
 
 	stdout := &boundedBuffer{limit: envdVersionOutputLimit}
-	stderr := &boundedBuffer{limit: envdVersionOutputLimit}
 	execID := envdVersionExecIDPrefix + uuid.New().String()
 	process, err := runProbeCall(execCtx, func() (containerd.Process, error) {
-		return task.Exec(execCtx, execID, pspec, cio.NewCreator(cio.WithStreams(nil, stdout, stderr), cio.WithTerminal))
+		// A terminal merges stderr into stdout. Do not request a separate stderr
+		// FIFO: containerd does not create one for terminal IO, while passfd would
+		// otherwise try to open the non-existent path when the process starts.
+		return task.Exec(execCtx, execID, pspec, cio.NewCreator(cio.WithStreams(nil, stdout, nil), cio.WithTerminal))
 	})
 	if err != nil {
 		if probeCallTimedOut(err) {
@@ -237,7 +230,7 @@ func (s *service) collectEnvdVersion(ctx context.Context, sandboxID string) (ver
 		}
 	}
 
-	version = parseEnvdVersionFromOutput(stdout.String(), stderr.String())
+	version = envdSemverRe.FindString(stdout.String())
 	if version == "" {
 		logger.Warnf("collect envd version: no semver in output")
 		return ""

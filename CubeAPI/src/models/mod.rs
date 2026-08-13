@@ -138,6 +138,25 @@ pub struct SandboxLifecycleConfig {
     pub auto_resume: bool,
 }
 
+/// Wire shape of the top-level `autoResume` field the e2b SDK sends. Current
+/// SDK releases send `{"enabled": true}`; older ones and hand-rolled clients
+/// send a bare `true`. Both mean the same thing, so accept either rather than
+/// rejecting on shape.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
+#[serde(untagged)]
+pub enum SandboxAutoResume {
+    Enabled(bool),
+    Config { enabled: bool },
+}
+
+impl SandboxAutoResume {
+    pub fn enabled(&self) -> bool {
+        match self {
+            Self::Enabled(enabled) | Self::Config { enabled } => *enabled,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxOnTimeout {
@@ -190,6 +209,17 @@ pub struct NewSandbox {
     /// (None) means today's behaviour: idle sandboxes are killed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<SandboxLifecycleConfig>,
+
+    /// e2b SDK compatibility: the SDK flattens its user-facing `lifecycle`
+    /// object into top-level `autoPause` / `autoResume` before it hits the
+    /// wire, so `lifecycle` never arrives from an SDK caller. Ignored when
+    /// `lifecycle` is present.
+    #[serde(rename = "autoPause", alias = "auto_pause", default)]
+    pub auto_pause: Option<bool>,
+
+    /// See `auto_pause`. Only meaningful alongside `autoPause = true`.
+    #[serde(rename = "autoResume", alias = "auto_resume", default)]
+    pub auto_resume: Option<SandboxAutoResume>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secure: Option<bool>,

@@ -245,7 +245,7 @@ free -h
 
 **调大 tap 预建池的操作步骤：**
 
-tap 池目标数由 cubelet 配置中的 `tap_init_num` 指定（默认 **500**），但该参数实际由 **network-agent**（启动时带 `--cubelet-config` 读取同一份 cubelet 配置）消费、预建 tap 设备，因此修改后需重启 **network-agent**（而非 cubelet）使其生效。目标密度需在该值以内——例如要压测到 1000 个沙箱，需先将 `tap_init_num` 调到 1000（或更高）。
+tap 池目标数由 cubelet 配置中的 `tap_init_num` 指定（默认 **500**），该参数现在由 **cubelet 内置 network runtime** 消费并预建 tap 设备，因此修改后需重启 **cubelet** 使其生效。目标密度需在该值以内——例如要压测到 1000 个沙箱，需先将 `tap_init_num` 调到 1000（或更高）。
 
 ```bash
 # 1. 编辑 cubelet 配置，调大 [plugins."io.cubelet.internal.v1.network"] 段下的 tap_init_num
@@ -253,8 +253,8 @@ vi /usr/local/services/cubetoolbox/Cubelet/config/config.toml
 #   [plugins."io.cubelet.internal.v1.network"]
 #     tap_init_num = 1000        # 默认 500；压测 1000 需调到 1000 以上
 
-# 2. 重启 network-agent，使其按新目标重新预建 tap 池
-systemctl restart cube-sandbox-network-agent.service
+# 2. 重启 cubelet，使内置 network runtime 按新目标重新预建 tap 池
+systemctl restart cube-sandbox-cubelet.service
 ```
 
 **单机可运行实例数估算（BMI5，375 GiB 内存）：**

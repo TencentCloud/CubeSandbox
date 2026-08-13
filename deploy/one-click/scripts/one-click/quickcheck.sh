@@ -8,9 +8,8 @@ source "${SCRIPT_DIR}/common.sh"
 # Readiness budget for the post-start quickcheck. quickcheck runs immediately
 # after the units are (re)started -- e.g. install.sh's `systemctl enable --now
 # <target>` -- but systemd considers a service "started" as soon as its
-# ExecStart is launched: the cubelet / network-agent daemons still need a brief
-# moment to bind their unix sockets (/data/cubelet/cubelet.sock,
-# /tmp/cube/network-agent-grpc.sock) and serve their HTTP health endpoints.
+# ExecStart is launched: cubelet still needs a brief moment to bind its unix
+# socket (/data/cubelet/cubelet.sock) and serve its HTTP endpoints.
 # Probing exactly once therefore loses a startup race and returns a
 # false-negative install failure even though the node comes up healthy seconds
 # later.
@@ -142,6 +141,13 @@ http_ok() {
 check_http() {
   local url="$1"
   wait_until "endpoint not healthy: ${url}" http_ok "${url}"
+}
+
+validate_http_url() {
+  local url="$1"
+  local name="$2"
+  [[ "${url}" =~ ^https?://[^[:space:]/?#]+(:[0-9]{1,5})?(/[^[:space:]]*)?$ ]] \
+    || die "${name} must be an http(s) URL without whitespace: ${url}"
 }
 
 check_socket() {
@@ -283,7 +289,7 @@ quickcheck_main() {
 
   local MASTER_ADDR
   MASTER_ADDR="$(resolve_control_plane_cubemaster_addr)"
-  local NA_HEALTH_ADDR="${NETWORK_AGENT_HEALTH_ADDR:-127.0.0.1:19090}"
+  local CUBELET_EGRESS_DUMP_URL="${CUBELET_EGRESS_DUMP_URL:-http://127.0.0.1:9998/v1/policies/dump}"
   local CUBE_API_HEALTH_ADDR="${CUBE_API_HEALTH_ADDR:-127.0.0.1:3000}"
   local CUBE_OPS_HEALTH_ADDR="${CUBE_OPS_HEALTH_ADDR:-127.0.0.1:3010}"
   local ROLE
@@ -294,13 +300,14 @@ quickcheck_main() {
   # not exist, so the corresponding checks must be skipped.
   local EXTERNAL_MYSQL_HOST="${CUBE_EXTERNAL_MYSQL_HOST:-}"
   local EXTERNAL_REDIS_HOST="${CUBE_EXTERNAL_REDIS_HOST:-}"
+  local EXTERNAL_REDIS_MASTER_NAME="${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}"
 
   # Validate the host:port / IP values before they are interpolated into curl
   # URLs and grep patterns. resolve_control_plane_cubemaster_addr already
   # validates the compute-role address, but the control-plane default and the
   # health-endpoint overrides reach curl unchecked otherwise.
   validate_host_port "${MASTER_ADDR}" "cubemaster address"
-  validate_host_port "${NA_HEALTH_ADDR}" "NETWORK_AGENT_HEALTH_ADDR"
+  validate_http_url "${CUBELET_EGRESS_DUMP_URL}" "CUBELET_EGRESS_DUMP_URL"
   if [[ "${ROLE}" != "compute" ]]; then
     validate_host_port "${CUBE_API_HEALTH_ADDR}" "CUBE_API_HEALTH_ADDR"
     validate_host_port "${CUBE_OPS_HEALTH_ADDR}" "CUBE_OPS_HEALTH_ADDR"
@@ -310,14 +317,13 @@ quickcheck_main() {
 
   echo "[quickcheck] role=${ROLE}"
   echo "[quickcheck] cubemaster=${MASTER_ADDR}"
-  echo "[quickcheck] network-agent-health=${NA_HEALTH_ADDR}"
+  echo "[quickcheck] cubelet-egress-dump=${CUBELET_EGRESS_DUMP_URL}"
   if [[ "${ROLE}" != "compute" ]]; then
     echo "[quickcheck] cube-api-health=${CUBE_API_HEALTH_ADDR}"
     echo "[quickcheck] cubeops-health=${CUBE_OPS_HEALTH_ADDR}"
   fi
 
   echo "[quickcheck] check systemd units"
-  check_unit_active cube-sandbox-network-agent.service
   check_unit_active cube-sandbox-cubelet.service
   if [[ "${ROLE}" != "compute" ]]; then
     if [[ -n "${EXTERNAL_MYSQL_HOST}" ]]; then
@@ -325,8 +331,12 @@ quickcheck_main() {
     else
       check_unit_active cube-sandbox-mysql.service
     fi
-    if [[ -n "${EXTERNAL_REDIS_HOST}" ]]; then
-      echo "[quickcheck] external Redis (${EXTERNAL_REDIS_HOST}); skipping local redis unit check"
+    if [[ -n "${EXTERNAL_REDIS_HOST}" || -n "${EXTERNAL_REDIS_MASTER_NAME}" ]]; then
+      if [[ -n "${EXTERNAL_REDIS_MASTER_NAME}" ]]; then
+        echo "[quickcheck] external Redis Sentinel (${EXTERNAL_REDIS_MASTER_NAME}); skipping local redis unit check"
+      else
+        echo "[quickcheck] external Redis (${EXTERNAL_REDIS_HOST}); skipping local redis unit check"
+      fi
     else
       check_unit_active cube-sandbox-redis.service
     fi
@@ -344,7 +354,7 @@ quickcheck_main() {
   if command -v docker >/dev/null 2>&1 && [[ "${ROLE}" != "compute" ]]; then
     echo "[quickcheck] check container runtime state"
     [[ -n "${EXTERNAL_MYSQL_HOST}" ]] || check_container_ready "${CUBE_SANDBOX_MYSQL_CONTAINER:-cube-sandbox-mysql}"
-    [[ -n "${EXTERNAL_REDIS_HOST}" ]] || check_container_ready "${CUBE_SANDBOX_REDIS_CONTAINER:-cube-sandbox-redis}"
+    [[ -n "${EXTERNAL_REDIS_HOST}" || -n "${EXTERNAL_REDIS_MASTER_NAME}" ]] || check_container_ready "${CUBE_SANDBOX_REDIS_CONTAINER:-cube-sandbox-redis}"
     check_container_ready "${CUBE_PROXY_CONTAINER_NAME:-cube-proxy}"
     check_container_ready "${CUBE_PROXY_COREDNS_CONTAINER:-cube-proxy-coredns}"
     if [[ "${WEB_UI_ENABLE:-1}" == "1" ]]; then
@@ -352,39 +362,35 @@ quickcheck_main() {
     fi
   fi
 
-  echo "[quickcheck] 1/5 check network-agent healthz"
-  check_http "http://${NA_HEALTH_ADDR}/healthz"
+  echo "[quickcheck] 1/4 check Cubelet embedded network runtime egress dump"
+  check_http "${CUBELET_EGRESS_DUMP_URL}"
 
-  echo "[quickcheck] 2/5 check network-agent readyz"
-  check_http "http://${NA_HEALTH_ADDR}/readyz"
-
-  echo "[quickcheck] 3/5 check cubemaster /notify/health"
+  echo "[quickcheck] 2/4 check cubemaster /notify/health"
   check_http "http://${MASTER_ADDR}/notify/health"
 
   if [[ "${ROLE}" == "compute" ]]; then
     [[ -n "${NODE_ID}" ]] || die "CUBE_SANDBOX_NODE_IP is required for compute quickcheck"
     validate_ipv4_literal "${NODE_ID}" "CUBE_SANDBOX_NODE_IP"
-    echo "[quickcheck] 4/5 check cubemaster node registration"
+    echo "[quickcheck] 3/4 check cubemaster node registration"
     check_node_registration "${NODE_ID}" "${MASTER_ADDR}"
 
-    echo "[quickcheck] 5/5 check essential sockets and runtime assets"
+    echo "[quickcheck] 4/4 check essential sockets and runtime assets"
     check_socket "/data/cubelet/cubelet.sock"
-    check_socket "/tmp/cube/network-agent-grpc.sock"
     check_file "${TOOLBOX_ROOT}/Cubelet/config/config.toml"
     check_file "${TOOLBOX_ROOT}/Cubelet/dynamicconf/conf.yaml"
     check_file "${TOOLBOX_ROOT}/cube-shim/conf/config-cube.toml"
     check_file "${TOOLBOX_ROOT}/cube-kernel-scf/vmlinux"
     check_file "${TOOLBOX_ROOT}/cube-image/cube-guest-image-cpu.img"
+    check_file "${TOOLBOX_ROOT}/cube-agent/cube-agent.ext4"
   else
-    echo "[quickcheck] 4/6 check cube-api /health"
+    echo "[quickcheck] 3/5 check cube-api /health"
     check_http "http://${CUBE_API_HEALTH_ADDR}/health"
 
-    echo "[quickcheck] 5/6 check cubeops /health"
+    echo "[quickcheck] 4/5 check cubeops /health"
     check_http "http://${CUBE_OPS_HEALTH_ADDR}/health"
 
-    echo "[quickcheck] 6/6 check essential sockets and config"
+    echo "[quickcheck] 5/5 check essential sockets and config"
     check_socket "/data/cubelet/cubelet.sock"
-    check_socket "/tmp/cube/network-agent-grpc.sock"
     check_executable "${TOOLBOX_ROOT}/CubeAPI/bin/cube-api"
     check_executable "${TOOLBOX_ROOT}/CubeOps/bin/cubeops"
     check_file "${TOOLBOX_ROOT}/CubeMaster/conf.yaml"

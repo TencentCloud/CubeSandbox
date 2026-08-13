@@ -1,7 +1,7 @@
 [Unit]
 Description=Cube Sandbox Cubelet
-After=network-online.target cube-sandbox-network-agent.service
-Wants=network-online.target cube-sandbox-network-agent.service
+After=network-online.target
+Wants=network-online.target
 ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
 RequiresMountsFor=/data/cubelet /data/cube-shim /data/snapshot_pack
 PartOf=cube-sandbox-control.target cube-sandbox-compute.target

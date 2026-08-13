@@ -23,7 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/network/proto"
+	networktypes "github.com/tencentcloud/CubeSandbox/Cubelet/network/types"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
@@ -56,8 +56,8 @@ func TestProbeErrIp(t *testing.T) {
 		},
 	}
 	createInfo := &workflow.CreateContext{
-		NetworkInfo: &proto.ShimNetReq{
-			Interfaces: []*proto.Interface{
+		NetworkInfo: &networktypes.ShimNetReq{
+			Interfaces: []*networktypes.Interface{
 				{
 					IPAddr: net.ParseIP("invalid"),
 				},
@@ -98,8 +98,8 @@ func TestProbeErrTimeout(t *testing.T) {
 		},
 	}
 	createInfo := &workflow.CreateContext{
-		NetworkInfo: &proto.ShimNetReq{
-			Interfaces: []*proto.Interface{
+		NetworkInfo: &networktypes.ShimNetReq{
+			Interfaces: []*networktypes.Interface{
 				{
 					IPAddr: net.ParseIP("127.0.0.1"),
 				},
@@ -137,8 +137,8 @@ func TestProbeErrAction(t *testing.T) {
 		},
 	}
 	createInfo := &workflow.CreateContext{
-		NetworkInfo: &proto.ShimNetReq{
-			Interfaces: []*proto.Interface{
+		NetworkInfo: &networktypes.ShimNetReq{
+			Interfaces: []*networktypes.Interface{
 				{
 					IPAddr: net.ParseIP("127.0.0.1"),
 				},
@@ -398,8 +398,8 @@ func TestProbe(t *testing.T) {
 		},
 	}
 	createInfo := &workflow.CreateContext{}
-	createInfo.NetworkInfo = &proto.ShimNetReq{
-		Interfaces: []*proto.Interface{
+	createInfo.NetworkInfo = &networktypes.ShimNetReq{
+		Interfaces: []*networktypes.Interface{
 			{
 				IPAddr: net.ParseIP("127.0.0.1"),
 			},
@@ -452,8 +452,8 @@ func TestProbeReqTimeout(t *testing.T) {
 		},
 	}
 	createInfo := &workflow.CreateContext{}
-	createInfo.NetworkInfo = &proto.ShimNetReq{
-		Interfaces: []*proto.Interface{
+	createInfo.NetworkInfo = &networktypes.ShimNetReq{
+		Interfaces: []*networktypes.Interface{
 			{
 				IPAddr: net.ParseIP(testHost),
 			},
@@ -548,8 +548,8 @@ func TestHttpProbe(t *testing.T) {
 		},
 	}
 	createInfo := &workflow.CreateContext{}
-	createInfo.NetworkInfo = &proto.ShimNetReq{
-		Interfaces: []*proto.Interface{
+	createInfo.NetworkInfo = &networktypes.ShimNetReq{
+		Interfaces: []*networktypes.Interface{
 			{
 				IPAddr: net.ParseIP("127.0.0.1"),
 			},
@@ -637,8 +637,8 @@ func TestProbeTimeoutMsDefault(t *testing.T) {
 				},
 			}
 			createInfo := &workflow.CreateContext{}
-			createInfo.NetworkInfo = &proto.ShimNetReq{
-				Interfaces: []*proto.Interface{
+			createInfo.NetworkInfo = &networktypes.ShimNetReq{
+				Interfaces: []*networktypes.Interface{
 					{
 						IPAddr: net.ParseIP(testHost),
 					},
@@ -707,8 +707,8 @@ func TestProbeTimeoutMsWithHttpProbe(t *testing.T) {
 		},
 	}
 	createInfo := &workflow.CreateContext{}
-	createInfo.NetworkInfo = &proto.ShimNetReq{
-		Interfaces: []*proto.Interface{
+	createInfo.NetworkInfo = &networktypes.ShimNetReq{
+		Interfaces: []*networktypes.Interface{
 			{
 				IPAddr: net.ParseIP("127.0.0.1"),
 			},
@@ -779,8 +779,8 @@ func TestProbeTimeoutMsWithPing(t *testing.T) {
 				},
 			}
 			createInfo := &workflow.CreateContext{}
-			createInfo.NetworkInfo = &proto.ShimNetReq{
-				Interfaces: []*proto.Interface{
+			createInfo.NetworkInfo = &networktypes.ShimNetReq{
+				Interfaces: []*networktypes.Interface{
 					{
 						IPAddr: net.ParseIP(testHost),
 					},
@@ -894,8 +894,8 @@ func TestProbeTimeoutFailure(t *testing.T) {
 				},
 			}
 			createInfo := &workflow.CreateContext{}
-			createInfo.NetworkInfo = &proto.ShimNetReq{
-				Interfaces: []*proto.Interface{
+			createInfo.NetworkInfo = &networktypes.ShimNetReq{
+				Interfaces: []*networktypes.Interface{
 					{
 						IPAddr: net.ParseIP("127.0.0.1"),
 					},
@@ -977,8 +977,8 @@ func TestProbeConcurrent(t *testing.T) {
 				},
 			}
 			createInfo := &workflow.CreateContext{}
-			createInfo.NetworkInfo = &proto.ShimNetReq{
-				Interfaces: []*proto.Interface{
+			createInfo.NetworkInfo = &networktypes.ShimNetReq{
+				Interfaces: []*networktypes.Interface{
 					{
 						IPAddr: net.ParseIP("127.0.0.1"),
 					},
@@ -1103,8 +1103,8 @@ func TestProbeConcurrentMixed(t *testing.T) {
 				},
 			}
 			createInfo := &workflow.CreateContext{}
-			createInfo.NetworkInfo = &proto.ShimNetReq{
-				Interfaces: []*proto.Interface{
+			createInfo.NetworkInfo = &networktypes.ShimNetReq{
+				Interfaces: []*networktypes.Interface{
 					{
 						IPAddr: net.ParseIP("127.0.0.1"),
 					},

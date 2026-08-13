@@ -70,15 +70,31 @@ const (
 	CubeAnnotationAppSnapshotVersion         = "cube.master.appsnapshot.version"
 	CubeAnnotationAppSnapshotTemplateVersion = "cube.master.appsnapshot.template.version"
 	CubeAnnotationRuntimeSnapshotID          = "cube.master.runtime.snapshot.id"
-	CubeAnnotationRuntimeSnapshotAttachedAt  = "cube.master.runtime.snapshot.attached_at"
-	CubeAnnotationRootfsArtifactID           = "cube.master.rootfs.artifact.id"
-	CubeAnnotationRootfsArtifactJobID        = "cube.master.rootfs.artifact.job_id"
-	CubeAnnotationRootfsArtifactURL          = "cube.master.rootfs.artifact.url"
-	CubeAnnotationRootfsArtifactToken        = "cube.master.rootfs.artifact.token"
-	CubeAnnotationRootfsArtifactSHA256       = "cube.master.rootfs.artifact.sha256"
-	CubeAnnotationRootfsArtifactSizeBytes    = "cube.master.rootfs.artifact.size_bytes"
-	CubeAnnotationWritableLayerSize          = "cube.master.rootfs.writable_layer_size"
-	CubeAnnotationTemplateSpecFingerprint    = "cube.master.template.spec_fingerprint"
+	// CubeAnnotationDesiredSandboxID asks Cubelet createid to reuse this
+	// sandbox ID (Resume-from-pause same-ID recreate).
+	CubeAnnotationDesiredSandboxID = "cube.master.desired.sandbox.id"
+	// CubeAnnotationPauseSnapshotID is the pause snapshot id allocated by
+	// Master (same snap-* format as normal snapshots). DB Kind=pause_snapshot;
+	// Cubelet only keeps the local catalog under that id.
+	CubeAnnotationPauseSnapshotID = "cube.master.pause.snapshot.id"
+	// CubeAnnotationPauseKeepTombstone is used by Cubelet's in-process Destroy
+	// after PauseToSnapshot (Master no longer issues a separate Destroy RPC).
+	CubeAnnotationPauseKeepTombstone = "cube.pause.keep_tombstone"
+	// CubeAnnotationPauseDeleteTombstone removes the PAUSED CubeBox store row
+	// when the user deletes a paused sandbox.
+	CubeAnnotationPauseDeleteTombstone = "cube.pause.delete_tombstone"
+	// CubeAnnotationPauseError surfaces a terminal Pause failure on Info/List
+	// (sandbox record kept; Resume rejected). Pause snaps stay internal.
+	CubeAnnotationPauseError                = "cube.pause.error"
+	CubeAnnotationRuntimeSnapshotAttachedAt = "cube.master.runtime.snapshot.attached_at"
+	CubeAnnotationRootfsArtifactID          = "cube.master.rootfs.artifact.id"
+	CubeAnnotationRootfsArtifactJobID       = "cube.master.rootfs.artifact.job_id"
+	CubeAnnotationRootfsArtifactURL         = "cube.master.rootfs.artifact.url"
+	CubeAnnotationRootfsArtifactToken       = "cube.master.rootfs.artifact.token"
+	CubeAnnotationRootfsArtifactSHA256      = "cube.master.rootfs.artifact.sha256"
+	CubeAnnotationRootfsArtifactSizeBytes   = "cube.master.rootfs.artifact.size_bytes"
+	CubeAnnotationWritableLayerSize         = "cube.master.rootfs.writable_layer_size"
+	CubeAnnotationTemplateSpecFingerprint   = "cube.master.template.spec_fingerprint"
 	// CubeAnnotationCreateTimeEnvVars stores the serialized create-time env map
 	// that CubeMaster passes to cubelet for envd initialization.
 	CubeAnnotationCreateTimeEnvVars = "cube.master.internal.create_time_env_vars"
@@ -86,12 +102,22 @@ const (
 
 	CubeAnnotationsVirtiofsCache = "cube.master.virtiofs.cache"
 
+	CubeAnnotationsInjectEnvd      = "cube.master.inject_envd"
+	CubeAnnotationsInjectEnvdOptIn = "true"
+	CubeEnvdInImagePath            = "/usr/local/bin/envd"
+	MaxEnvdPayloadBytes            = 16 * 1024 * 1024
+
 	// CubeAnnotationComponentsPrefix is the namespace for pre-installed
 	// runtime-component metadata carried on templates/sandboxes.
 	CubeAnnotationComponentsPrefix = "cube.master.components."
 	// CubeAnnotationComponentEnvdVersion carries the real envd semantic version
 	// collected at template-creation time and propagated to sandbox instances.
 	CubeAnnotationComponentEnvdVersion = "cube.master.components.envd.version"
+	// Component version annotations (dir name → version string).
+	CubeAnnotationComponentCubeShimVersion   = "cube.master.components.cube-shim.version"
+	CubeAnnotationComponentCubeKernelVersion = "cube.master.components.cube-kernel-scf.version"
+	CubeAnnotationComponentCubeImageVersion  = "cube.master.components.cube-image.version"
+	CubeAnnotationComponentCubeAgentVersion  = "cube.master.components.cube-agent.version"
 )
 const (
 	CubeAnnotationsUseNetFileCache = "cube.instance.use_netfile_cache"

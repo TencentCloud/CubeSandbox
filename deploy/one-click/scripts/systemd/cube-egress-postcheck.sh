@@ -18,7 +18,7 @@ wait_for_container_health "${CUBE_EGRESS_CONTAINER}" 40 2 \
   || die "cube-egress container not running"
 
 # Admin API on loopback (always reachable in --network=host mode).
-ADMIN_PORT="${CUBE_EGRESS_ADMIN_PORT:-9090}"
+ADMIN_PORT="${CUBE_EGRESS_ADMIN_PORT:-9091}"
 wait_for_tcp_port "${ADMIN_PORT}" 30 2 \
   || die "cube-egress admin listener (:${ADMIN_PORT}) not bound"
 

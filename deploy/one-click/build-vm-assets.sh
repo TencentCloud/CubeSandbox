@@ -113,6 +113,7 @@ mkdir -p \
   "${RUNTIME_LAYOUT_DIR}/cube-shim/bin" \
   "${RUNTIME_LAYOUT_DIR}/cube-shim/conf" \
   "${RUNTIME_LAYOUT_DIR}/cube-image" \
+  "${RUNTIME_LAYOUT_DIR}/cube-agent" \
   "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf"
 
 log "copying runtime binaries"
@@ -124,6 +125,11 @@ prepare_runtime_config "${RUNTIME_LAYOUT_DIR}/cube-shim/conf/config-cube.toml"
 log "building guest image artifacts via build-guest-image.sh"
 OUTPUT_DIR="${RUNTIME_LAYOUT_DIR}/cube-image" \
   "${SCRIPT_DIR}/build-guest-image.sh"
+
+log "building cube-agent.ext4 via build-agent-ext4.sh"
+OUTPUT_DIR="${RUNTIME_LAYOUT_DIR}/cube-agent" \
+  "${SCRIPT_DIR}/build-agent-ext4.sh"
+
 log "copying ordinary guest kernel vmlinux"
 copy_file "${CUBE_KERNEL_VMLINUX}" "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-bm"
 ensure_file "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-bm"
@@ -137,5 +143,29 @@ elif [[ -n "${ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX:-}" ]]; then
 else
   log "PVM kernel vmlinux not found; packaging ordinary kernel only"
 fi
+
+# Kernel version.json: variants keyed by file digest.
+bm_digest="$(file_sha256_hex "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-bm")" \
+  || die "cannot hash vmlinux-bm"
+bm_short="sha256-${bm_digest:0:12}"
+pvm_digest=""
+pvm_short=""
+if [[ -f "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-pvm" ]]; then
+  pvm_digest="$(file_sha256_hex "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-pvm")" \
+    || die "cannot hash vmlinux-pvm"
+  pvm_short="sha256-${pvm_digest:0:12}"
+fi
+
+{
+  printf '{\n  "schema_version": 1,\n  "variants": {\n'
+  printf '    "bm": {"version": "%s", "digest_sha256": "sha256:%s"}' "${bm_short}" "${bm_digest}"
+  if [[ -n "${pvm_digest}" ]]; then
+    printf ',\n    "pvm": {"version": "%s", "digest_sha256": "sha256:%s"}' "${pvm_short}" "${pvm_digest}"
+  fi
+  printf '\n  }\n}\n'
+} > "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/version.json"
+
+printf 'sha256:%s\n' "${bm_digest}" > "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/version"
+log "wrote cube-kernel-scf version.json (bm=${bm_short}${pvm_short:+ pvm=${pvm_short}})"
 
 log "runtime layout ready: ${RUNTIME_LAYOUT_DIR}"

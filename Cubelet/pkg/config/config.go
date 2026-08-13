@@ -21,12 +21,6 @@ import (
 
 var cfg *Config
 
-var networkAgentOverride struct {
-	enable   bool
-	endpoint string
-	set      bool
-}
-
 type MetaServerConfig struct {
 	MetaServerEndpoint  string `yaml:"meta_server_endpoint,omitempty"`
 	NodeStatusMaxImages int32  `yaml:"node_status_max_images,omitempty"`
@@ -83,8 +77,6 @@ type HostConfigGC struct {
 type CommonConf struct {
 	CommonTimeout         time.Duration `yaml:"common_timeout"`
 	LogLevel              string        `yaml:"log_level"`
-	EnableNetworkAgent    bool          `yaml:"enable_network_agent"`
-	NetworkAgentEndpoint  string        `yaml:"network_agent_endpoint"`
 	DescribeAsyncInterval time.Duration `yaml:"describe_asynchronous"`
 	EnablePFMode          bool          `yaml:"enable_pf_mode"`
 	DescribeBDFInterval   time.Duration `yaml:"describe_bdf"`
@@ -112,8 +104,10 @@ type CommonConf struct {
 
 	DisableHostNetfile bool `yaml:"disable_host_netfile"`
 
-	DefaultDNSServers []string      `yaml:"default_dns_servers"`
-	ReconcileInterval time.Duration `yaml:"reconcile_interval"`
+	DefaultDNSServers  []string      `yaml:"default_dns_servers"`
+	DefaultDNSSearches []string      `yaml:"default_dns_searches"`
+	DefaultDNSOptions  []string      `yaml:"default_dns_options"`
+	ReconcileInterval  time.Duration `yaml:"reconcile_interval"`
 
 	DisableCubeBoxTemplateBaseFormatPoolOfNumberVer bool `yaml:"disable_cube_box_template_base_format_pool_of_number_ver"`
 }
@@ -148,12 +142,6 @@ func Init(configPath string, useDefault bool) (*Config, error) {
 	return newCfg, nil
 }
 
-func SetNetworkAgentOverride(enable bool, endpoint string) {
-	networkAgentOverride.enable = enable
-	networkAgentOverride.endpoint = endpoint
-	networkAgentOverride.set = true
-}
-
 func validate(cfg *Config) error {
 	if cfg == nil {
 		return fmt.Errorf("config is nil")
@@ -186,8 +174,28 @@ func validate(cfg *Config) error {
 				return fmt.Errorf("invalid common.default_dns_servers entry: %q", dns)
 			}
 		}
+		for _, search := range cfg.Common.DefaultDNSSearches {
+			if !validDNSConfigToken(search) {
+				return fmt.Errorf("invalid common.default_dns_searches entry: %q", search)
+			}
+		}
+		for _, option := range cfg.Common.DefaultDNSOptions {
+			if !validDNSConfigToken(option) {
+				return fmt.Errorf("invalid common.default_dns_options entry: %q", option)
+			}
+		}
 	}
 	return nil
+}
+
+// validDNSConfigToken mirrors netfile token rules for search/options config entries.
+func validDNSConfigToken(item string) bool {
+	for _, r := range item {
+		if r <= ' ' || r == 0x7f || r == '#' || r == ';' {
+			return false
+		}
+	}
+	return true
 }
 
 func preHandle(config *Config) (*Config, error) {
@@ -198,16 +206,6 @@ func preHandle(config *Config) (*Config, error) {
 		config.Common = &CommonConf{}
 	}
 
-	if networkAgentOverride.set {
-		config.Common.EnableNetworkAgent = networkAgentOverride.enable
-		if networkAgentOverride.endpoint != "" {
-			config.Common.NetworkAgentEndpoint = networkAgentOverride.endpoint
-		}
-	}
-
-	if config.Common.NetworkAgentEndpoint == "" {
-		config.Common.NetworkAgentEndpoint = "grpc+unix:///run/cube/network-agent-grpc.sock"
-	}
 	if config.HostConf == nil {
 		config.HostConf = &HostConf{}
 	}
@@ -253,17 +251,9 @@ func preHandle(config *Config) (*Config, error) {
 	if config.Common.GetBDFByIfNameCmd == "" {
 		config.Common.GetBDFByIfNameCmd = "/usr/local/services/AdamPlugins-1.0/snhost_snic_sdk/cath/bm/tools/get_bdf_by_ifname"
 	}
-	if len(config.Common.DefaultDNSServers) > 0 {
-		normalized := make([]string, 0, len(config.Common.DefaultDNSServers))
-		for _, dns := range config.Common.DefaultDNSServers {
-			dns = strings.TrimSpace(dns)
-			if dns == "" {
-				continue
-			}
-			normalized = append(normalized, dns)
-		}
-		config.Common.DefaultDNSServers = normalized
-	}
+	config.Common.DefaultDNSServers = normalizeStringList(config.Common.DefaultDNSServers)
+	config.Common.DefaultDNSSearches = normalizeStringList(config.Common.DefaultDNSSearches)
+	config.Common.DefaultDNSOptions = normalizeStringList(config.Common.DefaultDNSOptions)
 
 	if config.Tenant == nil {
 		config.Tenant = &TenantManager{
@@ -302,6 +292,21 @@ func preHandle(config *Config) (*Config, error) {
 		config.Common.ReconcileInterval = time.Minute * 5
 	}
 	return config, nil
+}
+
+func normalizeStringList(values []string) []string {
+	if len(values) == 0 {
+		return values
+	}
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		normalized = append(normalized, value)
+	}
+	return normalized
 }
 
 //go:noinline

@@ -21,7 +21,7 @@ require_root
 INIT_SCRIPT="${CUBE_EGRESS_NET_INIT:-${TOOLBOX_ROOT}/scripts/cube-egress/cube-proxy-iptables-init.sh}"
 ensure_executable "${INIT_SCRIPT}"
 
-# cube-dev is created lazily by network-agent at first-sandbox time,
+# cube-dev is created lazily by Cubelet's embedded network runtime at first-sandbox time,
 # so on a fresh boot it isn't there yet. We give it a short window to
 # appear (covers the common case where someone restarts services after
 # already having sandboxes), then bail out *successfully* if it still
@@ -39,7 +39,7 @@ for _ in {1..30}; do
 done
 if ! ip link show "${INGRESS_IFACE}" >/dev/null 2>&1; then
   log "WARN: interface ${INGRESS_IFACE} not present after 30s; deferring iptables install"
-  log "      (network-agent creates ${INGRESS_IFACE} on the first sandbox; restart this unit then)"
+  log "      (Cubelet's embedded network runtime creates ${INGRESS_IFACE} on the first sandbox; restart this unit then)"
   exit 0
 fi
 

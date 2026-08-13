@@ -22,7 +22,7 @@ The compute plane is split into four lines. For day-to-day upgrades, **only chan
 
 | What you want to upgrade | Which workload | What to change in values | Will it recreate the Big Pod? |
 | --- | --- | --- | --- |
-| cubelet / network-agent / wait-node-prep / slot images or resources | **Big Pod** (`cube-node`) | `images.cubelet`, etc. | **Yes** (interrupts sandboxes) |
+| cubelet / wait-node-prep / slot images or resources | **Big Pod** (`cube-node`) | `images.cubelet`, etc. | **Yes** (interrupts sandboxes) |
 | shim / kernel / guest artifacts | **Installer** | `images.cubeShim`, etc. | No (Big Pod template unchanged) |
 | node-init / node preflight logic | **Bootstrap** | `images.nodeInit` | No (Big Pod template unchanged) |
 | PVM host kernel-swap scripts | **cube-node-pvm** | `images.pvmHostBootstrap` | No (but the node may reboot) |
@@ -45,8 +45,6 @@ images:
   cubelet:
     tag: v0.5.2
   # Add others only if you need them together, e.g.:
-  # networkAgent:
-  #   tag: v0.5.2
   # cubeShim:
   #   tag: v0.5.2
 ```
@@ -151,8 +149,7 @@ Use this when you need “which image key maps to which container”:
 
 | values key | Workload | Container |
 | --- | --- | --- |
-| `images.cubelet` | Big Pod | `cubelet` |
-| `images.networkAgent` | Big Pod | `network-agent` |
+| `images.cubelet` | Big Pod | `cubelet` (includes the embedded network runtime) |
 | `images.waitNodePrep` | Big Pod / Bootstrap | Big Pod `wait-node-prep` init; Bootstrap write-ready also uses it |
 | `images.cubeShim` | Installer | `cube-shim-install` |
 | `images.cubeKernel` | Installer | `cube-kernel-install` |

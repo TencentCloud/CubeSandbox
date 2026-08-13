@@ -21,12 +21,16 @@
 package runtime
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/containerd/containerd/v2/plugins"
+	"github.com/containerd/containerd/v2/version"
+
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 )
 
 func TestCRIRuntimePluginConfigMigration(t *testing.T) {
@@ -49,8 +53,12 @@ func TestCRIRuntimePluginConfigMigration(t *testing.T) {
 	pluginConfigs := map[string]interface{}{
 		string(plugins.GRPCPlugin) + ".cri": grpcCri,
 	}
+	// Use one below the current config version so the migration path is
+	// always exercised, matching the real call site that only migrates
+	// legacy configs (config.Version < version.ConfigVersion).
+	require.NoError(t, configMigration(context.Background(), version.ConfigVersion-1, pluginConfigs))
 
-	runtimeConf, ok := pluginConfigs[string(plugins.CRIServicePlugin)+".runtime"].(map[string]interface{})
+	runtimeConf, ok := pluginConfigs[string(constants.CubeServicePlugin)+".runtime"].(map[string]interface{})
 	require.True(t, ok)
 	require.NotNil(t, runtimeConf)
 	assert.Equal(t, grpcCri["enable_selinux"], runtimeConf["enable_selinux"])

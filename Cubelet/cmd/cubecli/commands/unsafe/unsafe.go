@@ -21,7 +21,6 @@ var Command = &cli.Command{
 	Subcommands: []*cli.Command{
 		Init,
 		RestoreDB,
-		DestroyTap,
 		RemoveImage,
 		cubebox.Destroy,
 		cubebox.DestroyAll,

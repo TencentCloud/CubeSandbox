@@ -13,6 +13,10 @@ UID := $(shell id -u)
 GID := $(shell id -g)
 OUTPUT_DIR ?= $(ROOT_DIR)/_output/bin
 RELEASE_DIR ?= $(ROOT_DIR)/_output/release
+# Host path for cube-agent.ext4 (+ version). Must be under the workspace so the
+# builder container can write it via the /workspace mount.
+AGENT_EXT4_OUTPUT_DIR ?= $(ROOT_DIR)/_output/cube-agent
+AGENT_EXT4_CONTAINER_DIR := /workspace/$(patsubst $(ROOT_DIR)/%,%,$(abspath $(AGENT_EXT4_OUTPUT_DIR)))
 MANUAL_DEPLOY_SCRIPT ?= $(ROOT_DIR)/deploy/one-click/deploy-manual.sh
 WEB_DIR ?= $(ROOT_DIR)/web
 CUBECOW_DIR ?= $(ROOT_DIR)/cubecow
@@ -44,17 +48,18 @@ RUST_PROJECT_DIRS := \
 	$(ROOT_DIR)/CubeAPI \
 	$(ROOT_DIR)/CubeShim \
 	$(ROOT_DIR)/agent \
+	$(ROOT_DIR)/guest-init \
 	$(ROOT_DIR)/cubecow \
 	$(ROOT_DIR)/hypervisor
 
 BINARIES := \
 	agent \
+	cube-init \
 	cubeapi \
 	cubelet \
 	cubemaster \
 	cubeops \
 	cubevsmapdump \
-	network-agent \
 	shim \
 	#
 
@@ -107,9 +112,13 @@ help:
 	@printf "  cubecow-sdk   Build cubecow static library for Cubelet\n"
 	@printf "  cubecow-smoke Build cubecow smoke test CLI in Docker\n"
 	@printf "  cubecow-test-native Build SDK artifacts and run native tests in Docker\n"
-	@printf "  network-agent Build network-agent in Docker\n"
 	@printf "  cube-proxy-sidecar Build cube-proxy-sidecar (developer-only; not in 'all')\n"
 	@printf "  agent         Build cube-agent in Docker\n"
+	@printf "  cube-init     Build cube-init (guest PID1) in Docker (alias: guest-init)\n"
+	@printf "  guest-init    Alias for cube-init (source dir guest-init/)\n"
+	@printf "  agent-ext4    Build independent cube-agent.ext4 (+ version) in Docker (alias: cube-agent-ext4)\n"
+	@printf "  cube-agent-ext4 Alias for agent-ext4\n"
+	@printf "  pmem-assets   Build cube-init + cube-agent.ext4 (agent-independent pmem essentials)\n"
 	@printf "  cubeapi       Build CubeAPI (cube-api) in Docker\n"
 	@printf "  cube-api      Alias of cubeapi\n"
 	@printf "  cubeops       Build CubeOps in Docker\n"
@@ -121,9 +130,14 @@ help:
 	@printf "  cube-api-test Run CubeAPI unit tests in Docker\n"
 	@printf "  cubeops-test  Run CubeOps unit tests in Docker\n"
 	@printf "  shim-test     Run CubeShim unit tests in Docker\n"
-	@printf "  network-agent-test Run network-agent unit tests in Docker\n"
+	@printf "  cubelog-test  Run cubelog unit tests on the host\n"
+	@printf "  cubedb-test   Run CubeDB unit tests on the host\n"
+	@printf "  cube-lifecycle-manager-test Run cube-lifecycle-manager unit tests in Docker\n"
+	@printf "  cubelet-pkg-test Run Cubelet ./pkg/... unit tests in Docker (no coverage)\n"
+	@printf "  agent-test    Run cube-agent unit tests in Docker\n"
+	@printf "  hypervisor-test Run hypervisor --lib --bins unit tests in Docker\n"
 	@printf "  guest-kernel  Build guest kernel vmlinux/Image (KERNEL_SRC=...; native or cross x86_64<->aarch64)\n"
-	@printf "  all           Build cubemaster, cubelet, network-agent and cubevsmapdump in Docker\n"
+	@printf "  all           Build all default binaries in Docker\n"
 	@printf "  manual-release Build binaries and package manual update tarball\n"
 	@printf "  clean-rust-target-dirs Remove target/ in every top-level Rust project\n"
 	@printf "  web-install   Install WebUI npm dependencies\n"
@@ -132,13 +146,14 @@ help:
 	@printf "  web-preview   Preview built WebUI assets\n"
 	@printf "  web-lint      Run WebUI lint checks\n"
 	@printf "  web-fmt       Format WebUI sources\n"
-	@printf "  fmt            Format code in all component directories\n"
+	@printf "  fmt           Format all component directories\n"
 	@printf "  web-api-sync  Export OpenAPI and regenerate WebUI schema types\n"
 	@printf "  web-sync-dev-env Build and deploy WebUI into dev-env VM\n"
 	@printf "\nNotes:\n"
 	@printf "  - builder-shell forwards ~/.git-credentials when present\n"
 	@printf "  - builder-run reuses the same mounted workspace and persisted HOME\n"
 	@printf "  - binary outputs are written to %s\n" "$(OUTPUT_DIR)"
+	@printf "  - cube-agent.ext4 outputs are written to %s\n" "$(AGENT_EXT4_OUTPUT_DIR)"
 	@printf "  - release outputs are written to %s\n" "$(RELEASE_DIR)"
 	@printf "  - Run 'make builder-image' first if image %s is missing\n" "$(BUILDER_IMAGE)"
 
@@ -199,6 +214,7 @@ endif
 		-e CUBE_VERSION \
 		-e CUBE_COMMIT \
 		-e CUBE_BUILD_TIME \
+		-e ONE_CLICK_BUILD_JOBS \
 		-v "$(ROOT_DIR)":/workspace \
 		-v "$(BUILDER_HOME)":$(BUILDER_CONTAINER_HOME) \
 		$(BUILDER_RUN_EXTRA_MOUNTS) \
@@ -250,17 +266,14 @@ cubemaster: builder-image
 .PHONY: cubelet
 cubelet: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && make proto && make build && cp build/cubelet build/cubecli /workspace/_output/bin/'
+	# Cubelet embeds the network runtime and links CubeNet/cubevs; bpf2go outputs
+	# are gitignored, so generate them before compiling cubelet.
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && go mod download && make proto && make build && cp build/cubelet build/cubecli /workspace/_output/bin/'
 
 .PHONY: cubevsmapdump
 cubevsmapdump: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
 	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeNet/cubevs && make gen && go build -o /workspace/_output/bin/cubevsmapdump ./cmd/cubevsmapdump'
-
-.PHONY: network-agent
-network-agent: builder-image
-	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeNet && make -C cubevs gen && cd /workspace/network-agent && make proto && make build && cp bin/network-agent /workspace/_output/bin/network-agent'
 
 .PHONY: cube-proxy-sidecar
 cube-proxy-sidecar: builder-image
@@ -271,6 +284,32 @@ cube-proxy-sidecar: builder-image
 agent: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
 	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/agent && make -j1 &&  make BINDIR=/workspace/_output/bin install'
+
+.PHONY: cube-init guest-init
+cube-init guest-init: builder-image
+	@mkdir -p "$(OUTPUT_DIR)"
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/guest-init && make -j1 && make BINDIR=/workspace/_output/bin install'
+
+# Independent cube-agent.ext4 plane file for virtio-pmem1 (agent-independent pmem).
+# Builds the musl-static cube-agent inside the builder, then packages
+# cube-agent.ext4 + version via deploy/one-click/build-agent-ext4.sh.
+# Override output with: make agent-ext4 AGENT_EXT4_OUTPUT_DIR=$$PWD/_output/cube-agent
+# (path must stay under the repo so the builder /workspace mount can write it)
+# Reuse a prebuilt binary already under the workspace:
+#   ONE_CLICK_CUBE_AGENT_BIN=/workspace/_output/bin/cube-agent make agent-ext4
+.PHONY: agent-ext4 cube-agent-ext4
+agent-ext4 cube-agent-ext4: builder-image
+	@case "$(abspath $(AGENT_EXT4_OUTPUT_DIR))" in \
+		"$(ROOT_DIR)"|"$(ROOT_DIR)"/*) ;; \
+		*) echo "ERROR: AGENT_EXT4_OUTPUT_DIR must be under $(ROOT_DIR) (got $(AGENT_EXT4_OUTPUT_DIR))"; exit 1 ;; \
+	esac
+	@mkdir -p "$(AGENT_EXT4_OUTPUT_DIR)"
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p $(AGENT_EXT4_CONTAINER_DIR) && OUTPUT_DIR=$(AGENT_EXT4_CONTAINER_DIR) $(if $(strip $(ONE_CLICK_CUBE_AGENT_BIN)),ONE_CLICK_CUBE_AGENT_BIN=$(ONE_CLICK_CUBE_AGENT_BIN) )bash /workspace/deploy/one-click/build-agent-ext4.sh'
+
+# Essentials for agent-independent pmem: guest PID1 binary + agent plane file.
+# Does not build the full guest OS image or shim/kernel (use one-click for that).
+.PHONY: pmem-assets
+pmem-assets: cube-init agent-ext4
 
 .PHONY: cubeapi
 cubeapi: builder-image
@@ -283,7 +322,7 @@ cube-api: cubeapi
 .PHONY: cubeops
 cubeops: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD="mkdir -p /workspace/_output/bin && cd /workspace/CubeOps && go mod download && CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -ldflags '-s -w -X main.Version=$(CUBE_VERSION) -X main.Commit=$(CUBE_COMMIT) -X main.BuildTime=$(CUBE_BUILD_TIME)' -o /workspace/_output/bin/cubeops ./cmd/cubeops"
+	$(MAKE) builder-run BUILDER_CMD="mkdir -p /workspace/_output/bin && cd /workspace/CubeOps && go mod download && CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -ldflags '-s -w -X github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.Version=$(CUBE_VERSION) -X github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.Commit=$(CUBE_COMMIT) -X github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.BuildTime=$(CUBE_BUILD_TIME)' -o /workspace/_output/bin/cubeops ./cmd/cubeops"
 
 .PHONY: cubeops-test
 cubeops-test: builder-image
@@ -295,11 +334,7 @@ cubemaster-test: builder-image
 
 .PHONY: cubelet-test
 cubelet-test: builder-image
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && make test'
-
-.PHONY: network-agent-test
-network-agent-test: builder-image
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace/network-agent && go mod download && make test'
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && go mod download && make test'
 
 .PHONY: cube-proxy-test
 cube-proxy-test:
@@ -312,6 +347,41 @@ cube-api-test: builder-image
 .PHONY: shim-test
 shim-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeShim && make test'
+
+# cubelog/cubedb run on the host: both are pure Go with no CGO and no
+# builder-only deps, so the host toolchain is sufficient and skipping the
+# container is faster.
+.PHONY: cubelog-test
+cubelog-test:
+	cd cubelog && go test -short ./...
+
+.PHONY: cubedb-test
+cubedb-test:
+	cd CubeDB && go mod download && go test ./...
+
+.PHONY: cube-lifecycle-manager-test
+cube-lifecycle-manager-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/cube-lifecycle-manager && go mod download && go test ./...'
+
+# cubelet-pkg-test bypasses cubelet-test: that target runs `go test
+# -coverprofile`, and the builder's Go toolchain lacks the `covdata` tool, so
+# any coverage build fails. Run only ./pkg/... with -short (skips the
+# Redis/KVM-dependent cases), which is self-contained in the builder.
+.PHONY: cubelet-pkg-test
+cubelet-pkg-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && make proto && go test -short ./pkg/...'
+
+.PHONY: agent-test
+agent-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/agent && make test'
+
+# Only unit tests (--lib --bins) run here; the tests/integration.rs target
+# needs a full VM. This does not pass /dev/kvm into the builder, so the
+# runtime-KVM vmm tests are not reached (see tests/unittest/run.sh
+# hypervisor-kvm for those).
+.PHONY: hypervisor-test
+hypervisor-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/hypervisor && cargo test --features kvm --lib --bins'
 
 .PHONY: shim
 shim: builder-image
@@ -342,7 +412,7 @@ manual-release: all
 	@mkdir -p "$(RELEASE_DIR)"
 	@PKG_TS="$$(date +%Y%m%d-%H%M%S)"; \
 	PKG_NAME="cube-manual-update-$${PKG_TS}.tar.gz"; \
-	tar -C "$(OUTPUT_DIR)" -czf "$(RELEASE_DIR)/$${PKG_NAME}" cubemaster cubemastercli cubelet cubecli network-agent cubevsmapdump; \
+	tar -C "$(OUTPUT_DIR)" -czf "$(RELEASE_DIR)/$${PKG_NAME}" cubemaster cubemastercli cubelet cubecli cubevsmapdump; \
 	sha256sum "$(RELEASE_DIR)/$${PKG_NAME}" > "$(RELEASE_DIR)/$${PKG_NAME}.sha256"; \
 	install -m 0755 "$(MANUAL_DEPLOY_SCRIPT)" "$(RELEASE_DIR)/deploy-manual.sh"; \
 	printf 'Manual release ready:\n  %s\n  %s\n  %s\n' \
@@ -384,10 +454,17 @@ web-sync-dev-env:
 
 # Run make fmt in each component directory that has a fmt target.
 # Components without formattable code (e.g. CubeProxy) are skipped.
+# Outside the builder, Go/Rust fmt routes through builder-run so
+# agent/Makefile's MUSL+SECCOMP parse-time libseccomp.a check does not
+# fail on the host. Web fmt stays on the host: the builder image has no
+# npm (same split as fmt-check.yml).
 .PHONY: fmt
 fmt:
+ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@printf '  %-8s %s\n' "FMT" "agent"
 	@$(MAKE) -C agent fmt
+	@printf '  %-8s %s\n' "FMT" "guest-init"
+	@$(MAKE) -C guest-init fmt
 	@printf '  %-8s %s\n' "FMT" "cubecow"
 	@$(MAKE) -C cubecow fmt
 	@printf '  %-8s %s\n' "FMT" "CubeAPI"
@@ -408,15 +485,17 @@ fmt:
 	@$(MAKE) -C cube-lifecycle-manager fmt
 	@printf '  %-8s %s\n' "FMT" "hypervisor"
 	@$(MAKE) -C hypervisor fmt
-	@printf '  %-8s %s\n' "FMT" "network-agent"
-	@$(MAKE) -C network-agent fmt
 	@printf '  %-8s %s\n' "FMT" "sdk/go"
 	@$(MAKE) -C sdk/go fmt
 	@printf '  %-8s %s\n' "FMT" "examples/cube-bench"
 	@$(MAKE) -C examples/cube-bench fmt
+else
+	@$(MAKE) builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make fmt'
 	@printf '  %-8s %s\n' "FMT" "web"
 	@if command -v npm >/dev/null 2>&1; then \
 		$(MAKE) -C web fmt; \
 	else \
-		printf '  %-8s %s\n' "SKIP" "web (npm not available)"; \
+		printf '  %-8s %s\n' "SKIP" "web (npm not available on host)"; \
 	fi
+endif

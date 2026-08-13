@@ -6,7 +6,6 @@ package lifecycle
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
@@ -59,29 +58,14 @@ type storeTimeoutProvider struct {
 	store *Store
 }
 
-// RefreshTimeout reads the existing meta (preserving fields the request
-// doesn't carry: AutoPause / AutoResume / TemplateID / HostID / HostIP /
-// InstanceType), rewrites CreatedAt + TimeoutSeconds + EndAt, and publishes
-// an OpUpdate event so every sidecar replica converges on the new view.
+// RefreshTimeout atomically replaces TimeoutSeconds, starts a new timeout
+// window, and publishes the matching snapshot so Redis and every lifecycle
+// consumer observe the same update order.
 func (p *storeTimeoutProvider) RefreshTimeout(ctx context.Context, sandboxID string, timeoutSeconds int) (int64, error) {
 	if p == nil || p.store == nil {
 		return 0, nil
 	}
-	meta, err := p.store.LoadMeta(ctx, sandboxID)
-	if err != nil {
-		return 0, err
-	}
-	if meta == nil {
-		return 0, nil
-	}
-
-	now := time.Now().UnixMilli()
-	ts := timeoutSeconds
-	meta.TimeoutSeconds = &ts
-	meta.CreatedAt = now
-	meta.EndAt = projectedEndAt(now, timeoutSeconds)
-	p.store.PublishUpdate(ctx, meta)
-	return meta.EndAt, nil
+	return p.store.SetTimeoutWindow(ctx, sandboxID, time.Now().UnixMilli(), timeoutSeconds)
 }
 
 // RebaseTimeoutWindow preserves the timeout already stored in lifecycle
@@ -92,22 +76,7 @@ func (p *storeTimeoutProvider) RebaseTimeoutWindow(ctx context.Context, sandboxI
 	if p == nil || p.store == nil {
 		return 0, nil
 	}
-	meta, err := p.store.LoadMeta(ctx, sandboxID)
-	if err != nil {
-		return 0, err
-	}
-	if meta == nil {
-		return 0, fmt.Errorf("lifecycle metadata for sandbox %s was not found", sandboxID)
-	}
-	if meta.TimeoutSeconds == nil {
-		return 0, fmt.Errorf("lifecycle metadata for sandbox %s has no timeout", sandboxID)
-	}
-
-	now := time.Now().UnixMilli()
-	meta.CreatedAt = now
-	meta.EndAt = projectedEndAt(now, *meta.TimeoutSeconds)
-	p.store.PublishUpdate(ctx, meta)
-	return meta.EndAt, nil
+	return p.store.RebaseTimeoutWindow(ctx, sandboxID, time.Now().UnixMilli())
 }
 
 // projectedEndAt maps idle TTL to EndAt (unix ms). See docs/guide/lifecycle.md.

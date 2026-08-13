@@ -42,6 +42,9 @@ BUILD_FLAGS=-ldflags "-s -w \
   -X '$(VERSION_PKG).Version=$(CUBE_VERSION)' \
   -X '$(VERSION_PKG).Commit=$(CUBE_COMMIT)' \
   -X '$(VERSION_PKG).BuildTime=$(CUBE_BUILD_TIME)'"
+ENVD_LOCAL_PATH ?=
+ENVD_EMBED_ASSET := $(ROOT_DIR)/cmd/cubemastercli/internal/envd/assets/envd
+ENVD_BUILD_TAGS := $(if $(strip $(ENVD_LOCAL_PATH)),embed_envd,)
 DATE:=$(shell date +'%Y%m%d-%H%M%S')
 
 NAMESPACE?=cubemaster
@@ -72,13 +75,39 @@ check-proto-tools:
 	@command -v protoc-gen-go-grpc >/dev/null 2>&1 || { echo "error: protoc-gen-go-grpc not installed"; exit 1; }
 	@if [ -z "$(PROTOBUF_INCLUDE_DIR)" ]; then echo "error: protobuf include directory not found"; exit 1; fi
 
+.PHONY: prepare-cubemastercli-envd cleanup-cubemastercli-envd
+prepare-cubemastercli-envd:
+ifneq ($(strip $(ENVD_LOCAL_PATH)),)
+	@test -f "$(ENVD_LOCAL_PATH)" || { echo "error: ENVD_LOCAL_PATH must point to a regular file: $(ENVD_LOCAL_PATH)"; exit 1; }
+	@test -s "$(ENVD_LOCAL_PATH)" || { echo "error: ENVD_LOCAL_PATH must not be empty: $(ENVD_LOCAL_PATH)"; exit 1; }
+	@size=$$(wc -c < "$(ENVD_LOCAL_PATH)"); \
+		if [ "$$size" -gt 16777216 ]; then \
+			echo "error: ENVD_LOCAL_PATH exceeds 16MiB: $(ENVD_LOCAL_PATH)"; exit 1; \
+		fi
+	@magic=$$(LC_ALL=C dd if="$(ENVD_LOCAL_PATH)" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n'); \
+		if [ "$$magic" != "7f454c46" ]; then \
+			echo "error: ENVD_LOCAL_PATH must be an ELF binary: $(ENVD_LOCAL_PATH)"; exit 1; \
+		fi
+	@mkdir -p "$(dir $(ENVD_EMBED_ASSET))"
+	@cp "$(ENVD_LOCAL_PATH)" "$(ENVD_EMBED_ASSET)"
+endif
+
+cleanup-cubemastercli-envd:
+ifneq ($(strip $(ENVD_LOCAL_PATH)),)
+	@rm -f "$(ENVD_EMBED_ASSET)"
+endif
+
 $(APPS): deps
 	@echo "${GOOS}"
 	@echo "${CUBE_VERSION}"
 	$(call msg,Build app,$@)
-	$(Q)go build -o $(BUILD_DIR)/$@ \
-		$(BUILD_FLAGS) \
-		cmd/$@/*.go
+	$(Q)if [ "$@" = "cubemastercli" ] && [ -n "$(strip $(ENVD_LOCAL_PATH))" ]; then \
+		$(MAKE) prepare-cubemastercli-envd; \
+		trap '$(MAKE) cleanup-cubemastercli-envd' EXIT; \
+		go build -tags "$(ENVD_BUILD_TAGS)" -o $(BUILD_DIR)/$@ $(BUILD_FLAGS) cmd/$@/*.go; \
+	else \
+		go build -o $(BUILD_DIR)/$@ $(BUILD_FLAGS) cmd/$@/*.go; \
+	fi
 
 
 

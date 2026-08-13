@@ -75,8 +75,8 @@ func handleRedoTemplateAction(c *gin.Context) {
 }
 
 func createTemplateFromImage(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	req := &types.CreateTemplateFromImageReq{}
-	if err := common.GetBodyReq(r, req); err != nil {
+	req, envdPayload, err := parseCreateTemplateFromImageRequest(r)
+	if err != nil {
 		return &types.CreateTemplateFromImageRes{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
@@ -91,7 +91,7 @@ func createTemplateFromImage(r *http.Request, rt *CubeLog.RequestTrace) interfac
 		"Action":       "CreateTemplateFromImage",
 		"TemplateID":   req.TemplateID,
 	}))
-	job, err := templatecenter.SubmitTemplateFromImage(ctx, req, requestBaseURL(r))
+	job, err := templatecenter.SubmitTemplateFromImageWithEnvdPayload(ctx, req, requestBaseURL(r), envdPayload)
 	if err != nil {
 		return &types.CreateTemplateFromImageRes{
 			RequestID: req.RequestID,

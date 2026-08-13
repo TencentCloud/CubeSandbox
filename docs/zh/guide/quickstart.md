@@ -190,7 +190,7 @@ curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-cl
 
 ::: details 安装了哪些组件
 - E2B 兼容 REST API 监听在 `3000` 端口
-- CubeMaster、Cubelet、network-agent、CubeShim 作为宿主机进程运行
+- CubeMaster、内置 network runtime 的 Cubelet、CubeShim 作为宿主机进程运行
 - MySQL 和 Redis 通过 Docker Compose 管理
 - CubeProxy 提供 TLS（mkcert）和 CoreDNS 域名路由（`cube.app`）
 :::

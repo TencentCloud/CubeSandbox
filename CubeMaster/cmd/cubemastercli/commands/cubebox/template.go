@@ -788,6 +788,8 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.IntFlag{Name: "cpu", Value: 2000, Usage: "CPU millicores for the template container (default: 2000, i.e. 2 cores)"},
 		cli.IntFlag{Name: "memory", Value: 2000, Usage: "Memory for the template container in MB (default: 2000 MB)"},
 		cli.BoolTFlag{Name: "with-cube-ca", Usage: "bake the CubeEgress root CA at /etc/cube/ca/cube-root-ca.crt into the template rootfs so sandboxes trust CubeEgress's MITM. Pass --with-cube-ca=false to skip (default: true)"},
+		cli.BoolFlag{Name: "enable-inject-envd", Usage: "enable cubesandbox-envd injection for this template build"},
+		cli.StringFlag{Name: "envd-path", Usage: "local envd binary path to upload when --enable-inject-envd is set; defaults to the CLI-embedded envd if available"},
 		cli.BoolFlag{Name: "detach, no-wait", Usage: "submit and exit immediately instead of watching the job to completion"},
 		cli.DurationFlag{Name: "interval", Value: defaultWatchInterval, Usage: "poll interval while watching the job"},
 		cli.BoolFlag{Name: "json", Usage: "print raw json response"},
@@ -837,14 +839,28 @@ var TemplateCreateFromImageCommand = cli.Command{
 		if err != nil {
 			return err
 		}
-		body, err := jsoniter.Marshal(req)
+		envdPayload, err := selectEnvdUploadPayload(c)
 		if err != nil {
 			return err
 		}
 		url := fmt.Sprintf("http://%s/cube/template/from-image", net.JoinHostPort(host, port))
 		rsp := &templateImageJobResponse{}
-		if err := doHttpReq(c, url, http.MethodPost, req.RequestID, bytes.NewBuffer(body), rsp); err != nil {
-			return err
+		if envdPayload != nil {
+			body, contentType, err := buildCreateFromImageMultipartBody(req, envdPayload)
+			if err != nil {
+				return err
+			}
+			if err := doHttpReqWithContentType(c, url, http.MethodPost, req.RequestID, body, contentType, rsp); err != nil {
+				return err
+			}
+		} else {
+			body, err := jsoniter.Marshal(req)
+			if err != nil {
+				return err
+			}
+			if err := doHttpReq(c, url, http.MethodPost, req.RequestID, bytes.NewBuffer(body), rsp); err != nil {
+				return err
+			}
 		}
 		if rsp.Ret == nil {
 			return errors.New("empty response")
@@ -1382,8 +1398,9 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 	probePort := c.Int("probe")
 	cpuMillicores := c.Int("cpu")
 	memoryMB := c.Int("memory")
+	enableInjectEnvd := c.Bool("enable-inject-envd")
 
-	if len(cmds) == 0 && len(args) == 0 && len(rawEnvs) == 0 && len(dnsServers) == 0 && probePort == 0 && !c.IsSet("cpu") && !c.IsSet("memory") {
+	if len(cmds) == 0 && len(args) == 0 && len(rawEnvs) == 0 && len(dnsServers) == 0 && probePort == 0 && !c.IsSet("cpu") && !c.IsSet("memory") && !enableInjectEnvd {
 		return nil, nil
 	}
 
@@ -1437,6 +1454,12 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 			FailureThreshold: 60,
 			SuccessThreshold: 1,
 		}
+	}
+	if enableInjectEnvd {
+		if overrides.Annotations == nil {
+			overrides.Annotations = map[string]string{}
+		}
+		overrides.Annotations[constants.CubeAnnotationsInjectEnvd] = constants.CubeAnnotationsInjectEnvdOptIn
 	}
 	return overrides, nil
 }

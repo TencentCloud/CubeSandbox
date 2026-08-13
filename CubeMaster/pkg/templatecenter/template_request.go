@@ -30,6 +30,9 @@ func generateTemplateCreateRequest(req *types.CreateTemplateFromImageReq, artifa
 		constants.CubeAnnotationWritableLayerSize:          req.WritableLayerSize,
 		constants.CubeAnnotationTemplateSpecFingerprint:    artifact.TemplateSpecFingerprint,
 	}
+	if ShouldInjectEnvdIntoTemplate(req) {
+		annotations[constants.CubeAnnotationsInjectEnvd] = constants.CubeAnnotationsInjectEnvdOptIn
+	}
 	sizeGi, err := quantityToGi(req.WritableLayerSize)
 	if err == nil && sizeGi > 0 {
 		annotations[constants.CubeAnnotationsSystemDiskSize] = strconv.FormatInt(sizeGi, 10)

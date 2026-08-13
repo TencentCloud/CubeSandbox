@@ -82,6 +82,13 @@ tail -50 /data/log/CubeOps/cubeops-req.log
 tail -f /data/log/CubeOps/cubeops-req.log
 ```
 
+Every HTTP request receives an `X-RequestID` when one is not supplied. The
+request trace is attached to the request context, so request-scoped `cubelog`
+records include fields such as `RequestId`, `Action`, `Caller`, and
+`CalleeAction`. CubeMaster calls propagate `X-Caller: cubeops` and stamp the
+inbound `RequestID` into the outbound body and query string — that is how
+cross-service correlation works (CubeMaster ignores `X-RequestID`).
+
 Quick health check (no auth required):
 
 ```bash

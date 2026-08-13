@@ -6,15 +6,14 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxlock"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
 
@@ -46,65 +45,58 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 		rsp.Ret.RetMsg = "action should be pause or resume"
 		return
 	}
-	if ret := normalizeSandboxIDInReq(ctx, &req.SandboxID); ret != nil {
-		rsp.Ret = ret
-		return
-	}
 	if req.Action == "resume" && req.Timeout != nil && *req.Timeout < types.NeverTimeout {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
 		rsp.Ret.RetMsg = "timeout must be >= -1 (use -1 for never timeout)"
 		return
 	}
-
-	var hostIP string
-	if v := localcache.GetSandboxCache(req.SandboxID); v != nil {
-		hostIP = v.HostIP
-	} else if proxyMap, ok := localcache.GetSandboxProxyMap(ctx, req.SandboxID); ok {
-		hostIP = proxyMap.HostIP
-	} else {
-		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
-		rsp.Ret.RetMsg = "sandbox not found"
+	if ret := normalizeSandboxIDInReq(ctx, &req.SandboxID); ret != nil {
+		rsp.Ret = ret
 		return
 	}
-	if config.GetConfig().Common.MockUpdateAction {
-		publishUpdateTimeout(ctx, req)
-		rsp.Ret.RetCode = int(errorcode.ErrorCode_Success)
-		rsp.Ret.RetMsg = "mock update action success"
-		return
-	}
-	calleeEndpoint := cubelet.GetCubeletAddr(hostIP)
 
-	cubeletReq := &cubebox.UpdateCubeSandboxRequest{
-		RequestID: req.RequestID,
-		SandboxID: req.SandboxID,
-		Annotations: map[string]string{
-			constants.CubeAnnotationsUpdateAction: req.Action,
-			constants.CubeAnnotationsInsType:      req.InstanceType,
-		},
+	// Covers API pause/resume and CLM auto-pause/auto-resume (both hit Update).
+	// Hold until pause/resume reaches a terminal Master outcome; concurrent
+	// delete/resume/pause on the same sandboxID must wait or Conflict.
+	lockOpts := sandboxlock.Options{Value: req.Action}
+	switch req.Action {
+	case "pause":
+		lockOpts.TTL = sandboxlock.PauseTTL
+	case "resume":
+		lockOpts.TTL = sandboxlock.ResumeTTL
 	}
-	cubeRsp, err := cubelet.Update(ctx, calleeEndpoint, cubeletReq)
-	if err != nil || cubeRsp == nil {
-		rsp.Ret.RetCode = int(errorcode.ErrorCode_ReqCubeAPIFailed)
-		if err != nil {
-			rsp.Ret.RetMsg = err.Error()
+	err := sandboxlock.WithLock(ctx, req.SandboxID, lockOpts, func(ctx context.Context) error {
+		// Client/HTTP cancel must not abort bookkeeping or release the lock
+		// while SAVE/Create/Destroy is still in flight on Cubelet.
+		ctx = context.WithoutCancel(ctx)
+		var hostIP string
+		if v := localcache.GetSandboxCache(req.SandboxID); v != nil {
+			hostIP = v.HostIP
+		} else if proxyMap, ok := localcache.GetSandboxProxyMap(ctx, req.SandboxID); ok {
+			hostIP = proxyMap.HostIP
+		} else if ip, ok := resolvePauseHostIP(ctx, req.SandboxID); ok {
+			hostIP = ip
 		} else {
-			rsp.Ret.RetMsg = "cubelet response is nil"
+			rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
+			rsp.Ret.RetMsg = "sandbox not found"
+			return nil
 		}
-		return
-	}
-	if cubeRsp.GetRet() == nil {
-		rsp.Ret.RetCode = int(errorcode.ErrorCode_Unknown)
-		rsp.Ret.RetMsg = "cubelet response ret is nil"
-		return
-	}
-	rsp.Ret.RetCode = int(cubeRsp.GetRet().GetRetCode())
-	rsp.Ret.RetMsg = cubeRsp.GetRet().GetRetMsg()
-	if rsp.Ret.RetCode == int(errorcode.ErrorCode_Success) {
-		publishUpdateTimeout(ctx, req)
-		// Only on genuine success — IsAlreadyInState / NotFound are handled
-		// upstream by CLM's own reconciliation and would send misleading
-		// state signals through the lifecycle channel.
-		runAfterUpdateSandboxSuccessHook(ctx, req.SandboxID, req.InstanceType, req.Action, req.RequestID)
+		if config.GetConfig().Common.MockUpdateAction {
+			rsp.Ret.RetCode = int(errorcode.ErrorCode_Success)
+			rsp.Ret.RetMsg = "mock update action success"
+			return nil
+		}
+
+		switch req.Action {
+		case "pause":
+			*rsp = *pauseSandbox(ctx, req, hostIP)
+		case "resume":
+			*rsp = *resumeFromPauseSnapshot(ctx, req, hostIP)
+		}
+		return nil
+	})
+	if err != nil {
+		applyLifecycleLockError(rsp, err)
 	}
 	return
 }
@@ -129,4 +121,21 @@ func publishUpdateTimeout(ctx context.Context, req *types.UpdateRequest) {
 	// refreshTimeoutMeta updates lifecycle metadata through the timeout provider.
 	// Resume does not return endAt, so the computed value is intentionally ignored.
 	refreshTimeoutMeta(ctx, req.SandboxID, *req.Timeout)
+}
+
+func applyLifecycleLockError(rsp *types.Res, err error) {
+	if rsp == nil || err == nil {
+		return
+	}
+	switch {
+	case errors.Is(err, sandboxlock.ErrLockNotAcquired):
+		rsp.Ret.RetCode = int(errorcode.ErrorCode_Conflict)
+		rsp.Ret.RetMsg = "sandbox lifecycle operation in progress; retry later"
+	case errors.Is(err, sandboxlock.ErrRedisUnavailable):
+		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterInternalError)
+		rsp.Ret.RetMsg = err.Error()
+	default:
+		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterInternalError)
+		rsp.Ret.RetMsg = err.Error()
+	}
 }

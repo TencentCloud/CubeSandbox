@@ -52,6 +52,61 @@ func TestToSchedulerNodeDoesNotForgeMetricUpdate(t *testing.T) {
 	}
 }
 
+func TestToSchedulerNodeCopiesHostFacts(t *testing.T) {
+	snap := &NodeSnapshot{
+		NodeID:        "node-facts",
+		HostIP:        "10.0.0.2",
+		HeartbeatTime: time.Now(),
+		Healthy:       true,
+		HostFacts: &HostFacts{
+			CPUVendor:             "GenuineIntel",
+			CPUModel:              "Xeon 8255C",
+			CPUIDHash:             "sha256:cpu",
+			HostKernelRelease:     "5.15.0",
+			HostKernelFingerprint: "sha256:kernel",
+			KVMAPIVersion:         12,
+			KVMModuleFingerprint:  "sha256:kvmmod",
+			KVMModuleTaint:        "EO",
+		},
+	}
+	n := toSchedulerNode(snap)
+	if n == nil {
+		t.Fatal("toSchedulerNode returned nil")
+	}
+	if n.HostFacts == nil {
+		t.Fatal("HostFacts must be copied to the scheduler node")
+	}
+	if n.HostFacts.CPUVendor != "GenuineIntel" ||
+		n.HostFacts.CPUIDHash != "sha256:cpu" ||
+		n.HostFacts.HostKernelFingerprint != "sha256:kernel" ||
+		n.HostFacts.KVMAPIVersion != 12 ||
+		n.HostFacts.KVMModuleFingerprint != "sha256:kvmmod" ||
+		n.HostFacts.KVMModuleTaint != "EO" {
+		t.Errorf("HostFacts mismatch: %+v", n.HostFacts)
+	}
+	// Must be an independent copy, not the snapshot's pointer.
+	n.HostFacts.CPUVendor = "AuthenticAMD"
+	if snap.HostFacts.CPUVendor != "GenuineIntel" {
+		t.Errorf("scheduler node must not alias the snapshot HostFacts pointer")
+	}
+}
+
+func TestToSchedulerNodeNilHostFacts(t *testing.T) {
+	snap := &NodeSnapshot{
+		NodeID:        "node-no-facts",
+		HostIP:        "10.0.0.3",
+		HeartbeatTime: time.Now(),
+		Healthy:       true,
+	}
+	n := toSchedulerNode(snap)
+	if n == nil {
+		t.Fatal("toSchedulerNode returned nil")
+	}
+	if n.HostFacts != nil {
+		t.Errorf("nil snapshot HostFacts must yield nil node HostFacts, got %+v", n.HostFacts)
+	}
+}
+
 func TestToSchedulerNodeUsesPrecomputedHealth(t *testing.T) {
 	snap := &NodeSnapshot{
 		NodeID:          "node-health",

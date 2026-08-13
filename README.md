@@ -400,12 +400,37 @@ We welcome contributions of all kinds—whether it's a bug report, feature sugge
 
 | Feature | Description |
 |---|---|
-| **Kubernetes-Native Deployment** | Evolve from Helm-based deployment toward CRD- and Operator-centric native management, with smooth upgrade capabilities |
 | **Cross-Node Pause & Resume** | Suspend a sandbox on one node and resume it on another with full memory and filesystem state preserved |
+| **Cross-Node Snapshot-Based Sandbox Launch** | Create new sandboxes from a snapshot on a different node than the one where it was taken, backed by cluster-shared, on-demand-loading storage |
 | **E2B API Compatibility** | Close remaining gaps with the E2B specification for full drop-in compatibility |
 | **Control Plane / Data Plane Separation** | Decouple the control plane from the data plane so control plane upgrades or failures never affect sandboxes already in flight |
 | **Sandbox Fault Recovery** | Automatic detection and recovery of crashed VMs, stuck shim processes, and network partitions with configurable recovery policies |
 | **Scheduling & Operations Enhancements** | Resource-aware placement, affinity rules, live rebalancing, and node drain with sandbox migration |
+
+## Sponsors
+
+<table>
+  <tr>
+    <td align="center">
+      <a href="https://www.tencentcloud.com/">
+        <img src="./docs/assets/tcloud_logo_en.png" alt="Tencent Cloud" height="40">
+      </a>
+    </td>
+    <td align="center">
+      <a href="https://www.arm.com/">
+        <img src="./docs/assets/arm-logo.svg" alt="Arm" height="40">
+      </a>
+    </td>
+  </tr>
+</table>
+
+## Contributors
+
+Thanks to all contributors:
+
+<a href="https://github.com/tencentcloud/CubeSandbox/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=tencentcloud/CubeSandbox" alt="Contributors" />
+</a>
 
 ## License
 

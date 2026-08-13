@@ -18,7 +18,7 @@ import (
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
-func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTemplateFromImageReq, downloadBaseURL string) {
+func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTemplateFromImageReq, downloadBaseURL string, envdPayload *EnvdInjectionPayload) {
 	logger := log.G(ctx).WithFields(map[string]any{
 		"job_id":      jobID,
 		"template_id": req.TemplateID,
@@ -83,7 +83,11 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 		})
 		return
 	}
-	fingerprint := buildTemplateSpecFingerprintWithCA(req, source.Digest, caFingerprint)
+	envdSHA := ""
+	if envdPayload != nil {
+		envdSHA = envdPayload.SHA256
+	}
+	fingerprint := buildTemplateSpecFingerprintWithEnvdSHA(req, source.Digest, caFingerprint, envdSHA)
 	artifactID := buildArtifactID(fingerprint)
 	if err := updateTemplateImageJob(ctx, jobID, map[string]any{
 		"artifact_id":               artifactID,
@@ -94,7 +98,7 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 	}); err != nil {
 		logger.Errorf("update job source metadata fail: %v", err)
 	}
-	artifact, generatedReq, builtFreshArtifact, err := ensureRootfsArtifact(ctx, req, source, downloadBaseURL)
+	artifact, generatedReq, builtFreshArtifact, err := ensureRootfsArtifact(ctx, req, source, downloadBaseURL, envdPayload)
 	if err != nil {
 		if !pullProgressFlushed {
 			pullProgress.flush(false)
@@ -177,10 +181,14 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 		ArtifactID: artifact.ArtifactID,
 		JobID:      jobID,
 	})
+	// claimWarning is populated by finalizeTemplateReplicas, which claims the
+	// alias *before* publishing the READY status so a client that sees READY
+	// can always resolve the alias.
+	claimWarning := ""
 	if persistErr != nil {
 		err = persistErr
 	} else {
-		info, err = finalizeTemplateReplicas(ctx, req.TemplateID, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), replicas)
+		info, claimWarning, err = finalizeTemplateReplicas(ctx, req.TemplateID, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), req.Alias, replicas)
 	}
 	if err != nil {
 		if builtFreshArtifact {
@@ -197,15 +205,8 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 		})
 		return
 	}
-	// Claim alias after READY via the shared helper.
-	claimWarning := ""
-	if info.Status != StatusFailed {
-		warning, displayName := claimAliasAfterReady(ctx, req.TemplateID, req.Alias)
-		claimWarning = warning
-		if displayName != "" {
-			info.DisplayName = displayName
-		}
-	}
+	// Alias was already claimed by finalizeTemplateReplicas (before the READY
+	// status was published) to avoid the create/claim publish-ordering race.
 	resultPayload, _ := json.Marshal(info)
 	jobStatus := JobStatusReady
 	jobPhase := JobPhaseReady

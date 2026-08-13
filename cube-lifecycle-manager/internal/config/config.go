@@ -7,6 +7,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -21,6 +22,14 @@ type Config struct {
 	RedisAddr     string
 	RedisPassword string
 	RedisDB       int
+	// Sentinel mode: when RedisMasterName is set, RedisSentinelAddrs must be
+	// non-empty and go-redis FailoverClient is used instead of a fixed Addr.
+	RedisMasterName    string
+	RedisSentinelAddrs []string
+	// RedisSentinelPassword authenticates to sentinel instances. Leave empty
+	// when Sentinel has no requirepass; it is not the master password
+	// (RedisPassword still authenticates to the Redis master).
+	RedisSentinelPassword string
 
 	// CubeProxy admin endpoints to push to and pull from. Multiple endpoints
 	// are supported even though the recommended deployment is one sidecar
@@ -131,6 +140,15 @@ func Load() (*Config, error) {
 			c.RedisDB = n
 		}
 	}
+	if v := os.Getenv("CUBE_LCM_REDIS_MASTER_NAME"); v != "" {
+		c.RedisMasterName = v
+	}
+	if v := os.Getenv("CUBE_LCM_REDIS_SENTINEL_NODES"); v != "" {
+		c.RedisSentinelAddrs = parseSentinelAddrs(v)
+	}
+	if v := os.Getenv("CUBE_LCM_REDIS_SENTINEL_PASSWORD"); v != "" {
+		c.RedisSentinelPassword = v
+	}
 	if v := os.Getenv("CUBE_LCM_PROXY_ADMIN_URLS"); v != "" {
 		c.CubeProxyAdminURLs = splitAndTrim(v)
 	}
@@ -223,8 +241,12 @@ func Load() (*Config, error) {
 // Validate returns an error if the config has any field combination that the
 // sidecar can't proceed with.
 func (c *Config) Validate() error {
-	if c.RedisAddr == "" {
-		return errors.New("redis addr is empty")
+	if c.RedisMasterName != "" {
+		if len(c.RedisSentinelAddrs) == 0 {
+			return errors.New("CUBE_LCM_REDIS_SENTINEL_NODES is empty when CUBE_LCM_REDIS_MASTER_NAME is set")
+		}
+	} else if c.RedisAddr == "" {
+		return errors.New("CUBE_LCM_REDIS_ADDR is empty")
 	}
 	if len(c.CubeProxyAdminURLs) == 0 {
 		return errors.New("cube proxy admin urls is empty")
@@ -255,6 +277,23 @@ func splitAndTrim(s string) []string {
 		if p != "" {
 			out = append(out, p)
 		}
+	}
+	return out
+}
+
+// parseSentinelAddrs mirrors CubeMaster parseRedisAddrs / CubeProxy
+// split_host_port: bare host or bare [ipv6] defaults to Sentinel port 26379.
+func parseSentinelAddrs(s string) []string {
+	parts := splitAndTrim(s)
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if !strings.Contains(part, ":") {
+			part = net.JoinHostPort(part, "26379")
+		} else if strings.HasPrefix(part, "[") && strings.HasSuffix(part, "]") {
+			host := strings.TrimSuffix(strings.TrimPrefix(part, "["), "]")
+			part = net.JoinHostPort(host, "26379")
+		}
+		out = append(out, part)
 	}
 	return out
 }

@@ -4,13 +4,17 @@ on:
   push:
     branches: [master]
     paths:
+      - 'Cubelet/Dockerfile'
       - 'deploy/kubernetes/chart/**'
       - 'deploy/kubernetes/images/scripts/**'
+      - 'scripts/bump-image.sh'
       - '.github/workflows/kubernetes-chart-check.yml'
   pull_request:
     paths:
+      - 'Cubelet/Dockerfile'
       - 'deploy/kubernetes/chart/**'
       - 'deploy/kubernetes/images/scripts/**'
+      - 'scripts/bump-image.sh'
       - '.github/workflows/kubernetes-chart-check.yml'
   workflow_dispatch:
 
@@ -19,7 +23,16 @@ permissions:
 
 jobs:
   chart:
-    runs-on: ubuntu-latest
+    name: chart (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v6
       - uses: azure/setup-helm@v4
@@ -33,16 +46,6 @@ jobs:
             --set-string mysql.password=test \
             --set-string mysql.rootPassword=test \
             --set-string redis.password=test >/dev/null
-      - name: Enforce Big Pod template stability
-        run: sh deploy/kubernetes/chart/scripts/test-big-pod-inplace-guard.sh
-      - name: Guard PVM native DaemonSet GVK
-        run: sh deploy/kubernetes/chart/scripts/test-pvm-native-ds-gvk-guard.sh
-      - name: Guard cube-master Recreate strategy for RWO PVC
-        run: sh deploy/kubernetes/chart/scripts/test-master-recreate-strategy-guard.sh
-      - name: Guard cluster-scoped resource names
-        run: sh deploy/kubernetes/chart/scripts/test-cluster-resource-names.sh
-      - name: Guard database.driver postgres path
-        run: sh deploy/kubernetes/chart/scripts/test-database-postgres-guard.sh
       - name: Check startup-gate shell syntax
         run: |
           sh -n deploy/kubernetes/images/scripts/node-prep-lib.sh
@@ -50,5 +53,30 @@ jobs:
           sh -n deploy/kubernetes/images/scripts/pvm-startup-gate-reconcile.sh
           sh -n deploy/kubernetes/images/scripts/pvm-host-bootstrap.sh
           sh -n deploy/kubernetes/images/scripts/wait-node-prep.sh
-      - name: Test startup-gate state machine
-        run: sh deploy/kubernetes/images/scripts/test-pvm-startup-gate.sh
+      # Cloud-free chart/image guard suite (deploy/kubernetes/*/scripts/
+      # test-*.sh). Helm is installed above; every script is self-contained.
+      # Loop so new test-*.sh are picked up automatically instead of drifting
+      # out of CI. Run each under bash (a POSIX-sh superset): the suite mixes
+      # #!/bin/sh and #!/usr/bin/env bash scripts, and on ubuntu-latest sh is
+      # dash, which would choke on the bash-only ones (arrays, [[ ]], local).
+      - name: Kubernetes test suite
+        shell: bash
+        run: |
+          shopt -s nullglob
+          status=0
+          tests=(deploy/kubernetes/*/scripts/test-*.sh)
+          if [ "${#tests[@]}" -eq 0 ]; then
+            echo "::error::no deploy/kubernetes/*/scripts/test-*.sh found"
+            exit 1
+          fi
+          for t in "${tests[@]}"; do
+            echo "::group::${t}"
+            if bash "${t}"; then
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              echo "::error file=${t}::${t} failed"
+              status=1
+            fi
+          done
+          exit "${status}"

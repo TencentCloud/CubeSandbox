@@ -40,7 +40,7 @@ func TestIsMountPoint(t *testing.T) {
 		},
 		{
 			name: "test4",
-			args: args{"/root"},
+			args: args{t.TempDir()},
 			want: false,
 		},
 	}

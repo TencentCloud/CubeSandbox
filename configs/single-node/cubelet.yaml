@@ -1,7 +1,5 @@
 common:
   common_timeout: "10s"
-  enable_network_agent: true
-  network_agent_endpoint: "grpc+unix:///tmp/cube/network-agent-grpc.sock"
 
 host:
   scheduler_label: "default-cluster"

@@ -9,6 +9,7 @@
 # Reads the following env vars (populated by the Chart in the Pod spec):
 #   CUBE_PROXY_HTTP_LISTEN_PORT   - digits only, target HTTP listen port
 #   CUBE_PROXY_HTTPS_LISTEN_PORT  - digits only, target HTTPS listen port
+#   CUBE_PROXY_GRPC_LISTEN_PORT   - digits only, target plaintext gRPC listen port
 #   CUBE_PROXY_ADMIN_LISTEN       - admin server listen address (default 0.0.0.0)
 #   CUBE_PROXY_ADMIN_PORT         - admin server port (default 8082)
 #   CUBE_PROXY_ADMIN_TOKEN        - optional shared secret for /admin/*
@@ -18,6 +19,7 @@
 #   CUBE_PROXY_RESOLVER_TIMEOUT   - nginx `resolver_timeout` value
 #   CUBE_PROXY_RESOLVER_IPV6      - on/off
 #   REDIS_HOST, REDIS_PORT, REDIS_PASSWORD, REDIS_DB
+#   REDIS_MASTER_NAME, REDIS_SENTINEL_NODES, REDIS_SENTINEL_PASSWORD
 #   TIMEOUT_MIN, TIMEOUT_MAX
 #   NODE_IP, CUBE_SIDECAR_LISTEN_ADDR (cube-lifecycle-manager host:port)
 # Rewrites nginx.conf listen ports / admin bind in-place, then generates
@@ -27,9 +29,11 @@ set -eu
 
 mkdir -p /usr/local/openresty/nginx/conf/global /data /data/log/cube-proxy /cache
 
-case "${CUBE_PROXY_HTTP_LISTEN_PORT}:${CUBE_PROXY_HTTPS_LISTEN_PORT}" in
-  *[!0-9:]*|:*|*:)
-    echo "invalid CubeProxy listen ports: http=${CUBE_PROXY_HTTP_LISTEN_PORT} https=${CUBE_PROXY_HTTPS_LISTEN_PORT}" >&2
+CUBE_PROXY_GRPC_LISTEN_PORT="${CUBE_PROXY_GRPC_LISTEN_PORT:-9090}"
+
+case "${CUBE_PROXY_HTTP_LISTEN_PORT}:${CUBE_PROXY_HTTPS_LISTEN_PORT}:${CUBE_PROXY_GRPC_LISTEN_PORT}" in
+  *[!0-9:]*|:*|*:|::*|*::*)
+    echo "invalid CubeProxy listen ports: http=${CUBE_PROXY_HTTP_LISTEN_PORT} https=${CUBE_PROXY_HTTPS_LISTEN_PORT} grpc=${CUBE_PROXY_GRPC_LISTEN_PORT}" >&2
     exit 1
     ;;
 esac
@@ -52,6 +56,7 @@ esac
 sed -i \
   -e "s/listen 8081 reuseport;/listen ${CUBE_PROXY_HTTP_LISTEN_PORT} reuseport;/g" \
   -e "s/listen 8080 ssl reuseport;/listen ${CUBE_PROXY_HTTPS_LISTEN_PORT} ssl reuseport;/g" \
+  -e "s/listen 9090 http2 reuseport;/listen ${CUBE_PROXY_GRPC_LISTEN_PORT} http2 reuseport;/g" \
   -e "s/set \\\$host_proxy_port 8081;/set \\\$host_proxy_port ${CUBE_PROXY_HTTP_LISTEN_PORT};/g" \
   -e "s/set \\\$host_proxy_port 8080;/set \\\$host_proxy_port ${CUBE_PROXY_HTTPS_LISTEN_PORT};/g" \
   -e "s/listen 127\\.0\\.0\\.1:8082;/listen ${admin_listen}:${admin_port};/g" \
@@ -93,7 +98,8 @@ sidecar_addr="${CUBE_SIDECAR_LISTEN_ADDR:-}"
 
 # proxy_registry.lua publishes from ngx.timer, which has no nginx resolver.
 # Resolve a hostname REDIS target to an IP up-front when possible.
-if [ -n "${CUBE_PROXY_REGISTRY_REDIS_HOST:-}" ]; then
+# Sentinel mode does not need a fixed registry host.
+if [ -z "${CUBE_PROXY_REGISTRY_REDIS_MASTER_NAME:-}" ] && [ -n "${CUBE_PROXY_REGISTRY_REDIS_HOST:-}" ]; then
   case "${CUBE_PROXY_REGISTRY_REDIS_HOST}" in
     *[!0-9.]* )
       resolved="$(getent ahostsv4 "${CUBE_PROXY_REGISTRY_REDIS_HOST}" 2>/dev/null | awk 'NR==1 {print $1}')"
@@ -108,10 +114,13 @@ fi
 cat > /usr/local/openresty/nginx/conf/global/global.conf <<EOF
 resolver ${resolver_addrs} valid=${CUBE_PROXY_RESOLVER_VALID} ipv6=${CUBE_PROXY_RESOLVER_IPV6};
 resolver_timeout ${CUBE_PROXY_RESOLVER_TIMEOUT};
-set \$redis_ip "$(escape_nginx_value "${REDIS_HOST}")";
-set \$redis_port "$(escape_nginx_value "${REDIS_PORT}")";
-set \$redis_pd "$(escape_nginx_value "${REDIS_PASSWORD}")";
-set \$redis_index "$(escape_nginx_value "${REDIS_DB}")";
+set \$redis_ip "$(escape_nginx_value "${REDIS_HOST:-}")";
+set \$redis_port "$(escape_nginx_value "${REDIS_PORT:-6379}")";
+set \$redis_pd "$(escape_nginx_value "${REDIS_PASSWORD:-}")";
+set \$redis_master_name "$(escape_nginx_value "${REDIS_MASTER_NAME:-}")";
+set \$redis_sentinel_nodes "$(escape_nginx_value "${REDIS_SENTINEL_NODES:-}")";
+set \$redis_sentinel_pd "$(escape_nginx_value "${REDIS_SENTINEL_PASSWORD:-}")";
+set \$redis_index "$(escape_nginx_value "${REDIS_DB:-0}")";
 set \$timeout_min "$(escape_nginx_value "${TIMEOUT_MIN}")";
 set \$timeout_max "$(escape_nginx_value "${TIMEOUT_MAX}")";
 set \$cube_proxy_host_ip "$(escape_nginx_value "${NODE_IP}")";

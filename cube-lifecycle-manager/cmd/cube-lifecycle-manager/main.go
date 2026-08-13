@@ -15,7 +15,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/config"
@@ -24,6 +23,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/httpapi"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/lifecycle"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/proxypush"
+	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/redisclient"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/redisstream"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/registry"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/resumer"
@@ -54,18 +54,14 @@ func run() error {
 	}
 
 	logger.Info("cube-lifecycle-manager starting",
-		zap.String("redis_addr", cfg.RedisAddr),
+		zap.String("redis_addr", redisclient.DisplayAddr(cfg)),
 		zap.Strings("cube_proxy_admin_urls", cfg.CubeProxyAdminURLs),
 		zap.String("cubemaster_url", cfg.CubeMasterURL),
 		zap.String("listen_addr", cfg.ListenAddr),
 		zap.String("consumer_group", cfg.ConsumerGroup),
 		zap.String("consumer_name", cfg.ConsumerName))
 
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     cfg.RedisAddr,
-		Password: cfg.RedisPassword,
-		DB:       cfg.RedisDB,
-	})
+	rdb := redisclient.New(cfg)
 	defer func() { _ = rdb.Close() }()
 
 	stream := redisstream.New(rdb, logger.Named("redis"))

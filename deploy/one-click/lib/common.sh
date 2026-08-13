@@ -320,22 +320,63 @@ ensure_file() {
   [[ -f "${path}" ]] || die "required file not found: ${path}"
 }
 
-# Escape a string so it can be used safely as the replacement text in a sed
-# `s|...|...|` expression. Escapes the delimiter '|', backslashes, '&' (the
-# whole-match reference) and '"'. Mirrors the escape_sed helper in
-# up-support.sh, which escapes for the '/' delimiter instead.
-#
-# The '"' is escaped because the only caller (patch_cubemaster_external_deps in
-# install.sh) embeds the result inside double-quoted sed replacement strings
-# such as `pwd: "${value}"`; escaping it keeps a value that itself contains a
-# '"' from corrupting the rendered YAML.
+# sha256 hex of a file (no "sha256:" prefix).
+file_sha256_hex() {
+  local path="$1"
+  local digest=""
+  [[ -f "${path}" ]] || return 1
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest="$(sha256sum -- "${path}" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    digest="$(shasum -a 256 -- "${path}" | awk '{print $1}')"
+  elif command -v openssl >/dev/null 2>&1; then
+    digest="$(openssl dgst -sha256 -- "${path}" | awk '{print $NF}')"
+  else
+    return 1
+  fi
+  [[ -n "${digest}" ]] || return 1
+  printf '%s\n' "${digest}"
+}
+
+# "sha256-<12>" from file content.
+file_content_version() {
+  local path="$1"
+  local digest=""
+  digest="$(file_sha256_hex "${path}")" || return 1
+  printf 'sha256-%s\n' "${digest:0:12}"
+}
+
+# Use tag when set; otherwise derive from file content.
+resolve_tagged_or_content_version() {
+  local tag="${1:-}"
+  local path="${2:-}"
+  tag="$(printf '%s' "${tag}" | tr -d '[:space:]')"
+  case "${tag}" in
+    ""|unknown|UNKNOWN) ;;
+    *)
+      printf '%s\n' "${tag}"
+      return 0
+      ;;
+  esac
+  [[ -n "${path}" && -f "${path}" ]] || return 1
+  file_content_version "${path}"
+}
+
+# Escape VALUE so it can be used safely as the replacement text in a sed
+# `s<delim>...<delim>...<delim>` expression. Escapes backslashes, '&' (the
+# whole-match reference), '"' (install.sh embeds results in double-quoted YAML
+# snippets), and the substitution delimiter (default '|'). Pass the delimiter
+# actually used at the call site (e.g. '#') so values containing it do not
+# terminate the command.
 #
 # SECURITY: embedded newlines / carriage returns are stripped first as
 # defense-in-depth. An unescaped newline in the replacement text would
 # terminate the sed `s` command and let a crafted value (e.g. a password read
 # from .env) inject arbitrary sed commands into the rendered config.
 escape_sed() {
-  printf '%s' "$1" | tr -d '\n\r' | sed 's/[|\\&"]/\\&/g'
+  local value="$1"
+  local delim="${2:-|}"
+  printf '%s' "${value}" | tr -d '\n\r' | sed "s/[\\\\${delim}&\"]/\\\\&/g"
 }
 
 # Percent-encode a string for safe use as a URL component (e.g. the userinfo
@@ -624,6 +665,35 @@ upsert_env_kv() {
   mv -f "${tmp_file}" "${env_file}"
 }
 
+# remove_env_kv deletes KEY=... lines from env_file. Used when switching Redis
+# modes (Sentinel <-> standalone) so stale sentinel/host keys cannot keep the
+# previous mode alive via ":-" fallbacks in downstream scripts.
+remove_env_kv() {
+  local env_file="$1"
+  local key="$2"
+  local tmp_file
+  local old_umask
+  [[ -f "${env_file}" ]] || return 0
+
+  old_umask="$(umask)"
+  umask 077
+  tmp_file="$(mktemp "${env_file}.XXXXXX")"
+  umask "${old_umask}"
+  chmod 600 "${tmp_file}"
+
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    if [[ "${line}" == "${key}="* ]]; then
+      continue
+    fi
+    if ! printf '%s\n' "${line}" >> "${tmp_file}"; then
+      rm -f "${tmp_file}"
+      die "failed to rewrite ${env_file} while removing ${key}"
+    fi
+  done < "${env_file}"
+
+  mv -f "${tmp_file}" "${env_file}"
+}
+
 redis_cli_help_output() {
   command -v redis-cli >/dev/null 2>&1 || return 1
   redis-cli --help 2>&1 || true
@@ -688,6 +758,7 @@ patch_cubelet_config_template() {
   local network_cidr="${3:-}"
   local cube_router_enable="${4:-}"
   local cube_router_cidr="${5:-}"
+  local cube_egress_admin_port="${6:-}"
 
   ensure_file "${cubelet_config}"
   if [[ -L "${cubelet_config}" ]]; then
@@ -744,6 +815,24 @@ patch_cubelet_config_template() {
       log "patched cube-router CIDR: ${cube_router_cidr}"
     else
       log "WARNING: Cubelet config missing cube_router_cidr key; skipped cube-router CIDR patch (${cubelet_config})"
+    fi
+  fi
+
+  if [[ -n "${cube_egress_admin_port}" ]]; then
+    case "${cube_egress_admin_port}" in
+      *[!0-9]*|"")
+        die "invalid CUBE_EGRESS_ADMIN_PORT: ${cube_egress_admin_port}"
+        ;;
+    esac
+    local cube_egress_admin_url="http://127.0.0.1:${cube_egress_admin_port}"
+    if grep -Eq '^[[:space:]]*cube_egress_admin_url = "' "${cubelet_config}"; then
+      sed -i -E "s|^([[:space:]]*)cube_egress_admin_url = \"[^\"]*\"|\1cube_egress_admin_url = \"${cube_egress_admin_url}\"|" "${cubelet_config}"
+      if ! grep -Eq "^[[:space:]]*cube_egress_admin_url = \"${cube_egress_admin_url}\"\$" "${cubelet_config}"; then
+        log "WARNING: failed to patch cube_egress_admin_url in Cubelet config (${cubelet_config})"
+      fi
+      log "patched cube-egress admin URL: ${cube_egress_admin_url}"
+    else
+      log "WARNING: Cubelet config missing cube_egress_admin_url key; skipped admin URL patch (${cubelet_config})"
     fi
   fi
 }
@@ -1832,14 +1921,15 @@ _check_cidr_conflict() {
     elif (( cidr_net_start <= cd_net_end && cidr_net_end >= cd_net_start )); then
       # Different network that overlaps the requested CIDR -> disruptive change
       # on a host that already has a cube network. A reboot alone is NOT enough
-      # because the systemd target is enabled and network-agent rebuilds the old
-      # network from config.toml; a deterministic reset is required.
+      # because the systemd target is enabled and cubelet's embedded network
+      # runtime rebuilds the old network from config.toml; a deterministic reset
+      # is required.
       die "${cidr_label} '${cidr}' overlaps an existing cube-dev network (${cd_network}/${cd_mask}).
 
   Changing the sandbox CIDR on a host that already has a cube network is
   disruptive: the old cube-dev and the persistent z* TAP devices are left
   stale. A reboot alone is NOT enough -- the systemd target is enabled and
-  network-agent rebuilds the old network from config.toml on boot.
+  cubelet's embedded network runtime rebuilds the old network from config.toml on boot.
 
   To change the CIDR, fully reset the cube network first:
     sudo systemctl stop 'cube-sandbox-*.target'
@@ -1855,7 +1945,7 @@ _check_cidr_conflict() {
     CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK=1"
     fi
     # else: cube-dev exists but does not overlap the requested CIDR -> allow;
-    # network-agent will reconcile cube-dev to the new network.
+    # Cubelet's embedded network runtime will reconcile cube-dev to the new network.
   fi
 }
 

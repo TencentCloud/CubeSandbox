@@ -317,7 +317,7 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		Spec:         calculateRequestSpec(createReq),
 		Status:       ReplicaStatusReady,
 	}
-	bindGuestVersionToReplica(&replica, commitRsp.GetGuestImageVersion(), commitRsp.GetAgentVersion(), commitRsp.GetKernelVersion())
+	bindGuestVersionToReplica(&replica, commitRsp.GetGuestImageVersion(), commitRsp.GetAgentVersion(), commitRsp.GetKernelVersion(), commitRsp.GetShimVersion())
 	if err := UpsertReplica(ctx, templateID, createReq.InstanceType, replica); err != nil {
 		cleanupOnFailure(err)
 		return

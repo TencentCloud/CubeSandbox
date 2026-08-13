@@ -14,6 +14,7 @@ import (
 	"github.com/containerd/containerd/v2/core/containers"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
+	jsoniter "github.com/json-iterator/go"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/assert"
@@ -29,6 +30,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/volumefile"
+	cgroupp "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cgroup"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/images"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
@@ -195,67 +197,54 @@ func TestStoreNumaQueues(t *testing.T) {
 	}
 }
 
-func TestSandboxDNSServersFromContainers(t *testing.T) {
-	tests := []struct {
-		name       string
-		defaultDNS []string
-		req        *cubebox.RunCubeSandboxRequest
-		want       []string
-		wantErr    bool
-	}{
-		{
-			name: "aggregate unique dns servers in order",
-			req: &cubebox.RunCubeSandboxRequest{
-				Containers: []*cubebox.ContainerConfig{
-					{DnsConfig: &cubebox.DNSConfig{Servers: []string{"8.8.8.8", " 1.1.1.1 "}}},
-					{DnsConfig: &cubebox.DNSConfig{Servers: []string{"1.1.1.1", "9.9.9.9"}}},
-				},
-			},
-			want: []string{"1.1.1.1", "8.8.8.8", "9.9.9.9"},
-		},
-		{
-			name:       "fallback to cubelet default dns entries",
-			defaultDNS: []string{"1.1.1.1", "9.9.9.9"},
-			req: &cubebox.RunCubeSandboxRequest{
-				Containers: []*cubebox.ContainerConfig{
-					{DnsConfig: &cubebox.DNSConfig{Servers: []string{"", " "}}},
-				},
-			},
-			want: []string{"1.1.1.1", "9.9.9.9"},
-		},
-		{
-			name: "fallback to hardcoded dns server when config empty",
-			req: &cubebox.RunCubeSandboxRequest{
-				Containers: []*cubebox.ContainerConfig{{}},
-			},
-			want: []string{"119.29.29.29"},
-		},
-		{
-			name: "reject invalid dns server",
-			req: &cubebox.RunCubeSandboxRequest{
-				Containers: []*cubebox.ContainerConfig{
-					{DnsConfig: &cubebox.DNSConfig{Servers: []string{"not-an-ip"}}},
-				},
-			},
-			wantErr: true,
-		},
-	}
+func TestSandboxDNSLinesFromContainers(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	config.GetCommon().DefaultDNSServers = []string{"10.96.0.10"}
+	config.GetCommon().DefaultDNSSearches = []string{"default.svc.cluster.local", "svc.cluster.local"}
+	config.GetCommon().DefaultDNSOptions = []string{"ndots:5"}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := config.Init("", true)
-			require.NoError(t, err)
-			config.GetCommon().DefaultDNSServers = append([]string(nil), tt.defaultDNS...)
-			got, err := sandboxDNSServersFromContainers(tt.req)
-			if tt.wantErr {
-				require.Error(t, err)
-				return
-			}
-
-			require.NoError(t, err)
-			assert.Equal(t, tt.want, got)
+	t.Run("follow-node defaults", func(t *testing.T) {
+		got, err := sandboxDNSLinesFromContainers(&cubebox.RunCubeSandboxRequest{
+			Containers: []*cubebox.ContainerConfig{{}},
 		})
-	}
+		require.NoError(t, err)
+		assert.Equal(t, []string{
+			"search default.svc.cluster.local svc.cluster.local",
+			"10.96.0.10",
+			"options ndots:5",
+		}, got)
+	})
+
+	t.Run("explicit servers do not inherit default search/options", func(t *testing.T) {
+		got, err := sandboxDNSLinesFromContainers(&cubebox.RunCubeSandboxRequest{
+			Containers: []*cubebox.ContainerConfig{
+				{DnsConfig: &cubebox.DNSConfig{Servers: []string{"8.8.8.8"}}},
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"8.8.8.8"}, got)
+	})
+
+	t.Run("aggregate unique servers", func(t *testing.T) {
+		got, err := sandboxDNSLinesFromContainers(&cubebox.RunCubeSandboxRequest{
+			Containers: []*cubebox.ContainerConfig{
+				{DnsConfig: &cubebox.DNSConfig{Servers: []string{"8.8.8.8", " 1.1.1.1 "}}},
+				{DnsConfig: &cubebox.DNSConfig{Servers: []string{"1.1.1.1", "9.9.9.9"}}},
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"1.1.1.1", "8.8.8.8", "9.9.9.9"}, got)
+	})
+
+	t.Run("reject invalid server", func(t *testing.T) {
+		_, err := sandboxDNSLinesFromContainers(&cubebox.RunCubeSandboxRequest{
+			Containers: []*cubebox.ContainerConfig{
+				{DnsConfig: &cubebox.DNSConfig{Servers: []string{"not-an-ip"}}},
+			},
+		})
+		require.Error(t, err)
+	})
 }
 
 func TestAppendExt4NetfileMounts(t *testing.T) {
@@ -609,6 +598,10 @@ func TestPrepareVolumeAnnotations(t *testing.T) {
 		name      string
 		opts      *workflow.CreateContext
 		expectNil bool
+		// wantDiskIDs are the disk IDs expected, in order, after deserializing
+		// the annotation against the CubeShim consumer shape; empty when
+		// expectNil is true.
+		wantDiskIDs []string
 	}{
 		{
 			name: "no storage info",
@@ -635,7 +628,8 @@ func TestPrepareVolumeAnnotations(t *testing.T) {
 					},
 				},
 			},
-			expectNil: false,
+			expectNil:   false,
+			wantDiskIDs: []string{"sys-disk-1"},
 		},
 		{
 			name: "storage info with data disks",
@@ -650,7 +644,28 @@ func TestPrepareVolumeAnnotations(t *testing.T) {
 					},
 				},
 			},
-			expectNil: false,
+			expectNil:   false,
+			wantDiskIDs: []string{"data-disk-1"},
+		},
+		{
+			name: "system disk leads, then data disks in order",
+			opts: &workflow.CreateContext{
+				StorageInfo: &storage.StorageInfo{
+					CubePCISystemDiskInfo: &disk.CubePCISystemDiskInfo{
+						PCISystemDisk: disk.CubePCIDisk{
+							ID: "sys-disk-1",
+						},
+					},
+					CubePCIDiskInfo: &disk.CubePCIDiskInfo{
+						PCIDisks: []disk.CubePCIDisk{
+							{ID: "data-disk-1"},
+							{ID: "data-disk-2"},
+						},
+					},
+				},
+			},
+			expectNil:   false,
+			wantDiskIDs: []string{"sys-disk-1", "data-disk-1", "data-disk-2"},
 		},
 	}
 
@@ -665,10 +680,31 @@ func TestPrepareVolumeAnnotations(t *testing.T) {
 
 			if tt.expectNil {
 				assert.Nil(t, opts)
-			} else {
-				assert.NotNil(t, opts)
-				assert.Greater(t, len(opts), 0)
+				return
 			}
+			require.NotEmpty(t, opts)
+
+			// Apply the returned SpecOpts to an empty spec so we verify the
+			// annotation key and marshalled payload actually reach the OCI spec,
+			// not just that some opt was produced.
+			spec := &oci.Spec{}
+			for _, o := range opts {
+				require.NoError(t, o(ctx, nil, &containers.Container{}, spec))
+			}
+			payload, ok := spec.Annotations[constants.AnnotationsVFIODisk]
+			require.True(t, ok, "expected annotation %q to be set", constants.AnnotationsVFIODisk)
+
+			// Deserialize against the same flat-array shape CubeShim consumes
+			// (Vec<DeviceDisk>), so a divergence from the consumer contract
+			// fails here rather than at shim config-parse time.
+			var decoded []disk.CubePCIDisk
+			require.NoError(t, jsoniter.Unmarshal([]byte(payload), &decoded),
+				"annotation must deserialize as a flat disk array")
+			gotIDs := make([]string, 0, len(decoded))
+			for _, d := range decoded {
+				gotIDs = append(gotIDs, d.ID)
+			}
+			assert.Equal(t, tt.wantDiskIDs, gotIDs)
 		})
 	}
 }
@@ -804,6 +840,37 @@ func TestDeepCopyStringMap(t *testing.T) {
 			tt.validate(t, tt.input, result)
 		})
 	}
+}
+
+func TestApplyCgroupInfoToCubeBoxCopiesAssignmentBaseline(t *testing.T) {
+	baseline := &cubeboxstore.HostMetricsBaseline{
+		CGroupPath:      "/cube_sandbox/sandbox/7",
+		CPUUsageTotalNS: 100,
+	}
+	info := &cgroupp.Info{
+		CgroupID:            baseline.CGroupPath,
+		HostMetricsBaseline: baseline,
+	}
+	cb := &cubeboxstore.CubeBox{}
+
+	applyCgroupInfoToCubeBox(cb, info)
+
+	require.Equal(t, baseline.CGroupPath, cb.CGroupPath)
+	require.Equal(t, baseline, cb.HostMetricsBaselineCopy())
+	require.NotSame(t, baseline, cb.HostMetricsBaselineCopy())
+	require.False(t, cb.HostMetricsBaselineMissingAtAssignment)
+}
+
+func TestApplyCgroupInfoToCubeBoxMarksMissingAssignmentBaseline(t *testing.T) {
+	cb := &cubeboxstore.CubeBox{}
+
+	applyCgroupInfoToCubeBox(cb, &cgroupp.Info{
+		CgroupID:                               "/cube_sandbox/sandbox/8",
+		HostMetricsBaselineMissingAtAssignment: true,
+	})
+
+	require.Nil(t, cb.HostMetricsBaselineCopy())
+	require.True(t, cb.HostMetricsBaselineMissingAtAssignment)
 }
 
 func TestPrepareImagePmems(t *testing.T) {

@@ -17,7 +17,8 @@ import sys
 import uuid
 
 import pytest
-from adapters import create_adapter
+
+from adapters import create_adapter_with_capacity_retry
 from framework.capabilities import VOLUME_PLUGIN
 from framework.cleanup import safe_kill
 from framework.volume import managed_volume
@@ -54,7 +55,7 @@ def test_read_only_volume_attachment_rejects_mutations(
         read_write = None
         read_only = None
         try:
-            read_write = create_adapter(
+            read_write = create_adapter_with_capacity_retry(
                 sdk_backend,
                 sdk_e2e_config,
                 metadata={
@@ -69,7 +70,7 @@ def test_read_only_volume_attachment_rejects_mutations(
             read_write.write_file(seed_path, payload)
             assert read_write.read_file(seed_path) == payload
 
-            read_only = create_adapter(
+            read_only = create_adapter_with_capacity_retry(
                 sdk_backend,
                 sdk_e2e_config,
                 metadata={

@@ -1,4 +1,4 @@
-# Network (CubeVS)
+# CubeVS Network Model
 
 Cube-Sandbox isolates each sandbox with its own virtual network, giving every instance private connectivity to the outside world while enforcing per-sandbox security policies entirely in kernel space. The subsystem that makes this possible is **CubeVS** -- a purpose-built network virtualization layer composed of three eBPF programs, a set of shared BPF maps, and a Go control-plane library.
 
@@ -268,6 +268,8 @@ To prevent collisions between subsystems, the host's usable port space is partit
 | `20000`--`29999` | Ports CubeProxy uses to reach sandboxes |
 | `30000`--`65535` | Source ports used by SNAT for sandbox-originated traffic |
 
+Cubelet's embedded network runtime allocates host ports for sandbox port mappings only from `20000`--`29999`. The product create path exposes container ports via `exposedPorts` and always requests automatic host-port allocation (`HostPort=0`); users cannot choose a specific host port. The runtime then assigns a free port from this managed range and returns the mapping in the create response.
+
 ---
 
 ## 8. TAP Device Lifecycle
@@ -284,7 +286,7 @@ Each sandbox gets a dedicated TAP device that serves as its sole network interfa
 
 ## 9. Initialization
 
-`Init()` is called once when the network agent starts. It loads and pins the three BPF programs and their maps under `/sys/fs/bpf/`, injecting host-specific values (sandbox IP and gateway IP, cube-dev interface index/IP/MAC, host NIC interface index/IP/MAC, next-hop gateway MAC) into the BPF bytecode before load. It then attaches the shared TC filters: `from_envoy` to cube-dev's egress, and `from_world` to the host NIC's ingress. Per-TAP `from_cube` filters are attached later, one at a time, as sandboxes are created (§8).
+`cubevs.Init()` is called once when Cubelet's embedded network runtime starts (during network plugin / `NetworkController` startup). It loads and pins the three BPF programs and their maps under `/sys/fs/bpf/`, injecting host-specific values (sandbox IP and gateway IP, cube-dev interface index/IP/MAC, host NIC interface index/IP/MAC, next-hop gateway MAC) into the BPF bytecode before load. It then attaches the shared TC filters: `from_envoy` to cube-dev's egress, and `from_world` to the host NIC's ingress. Per-TAP `from_cube` filters are attached later, one at a time, as sandboxes are created (§8).
 
 ---
 

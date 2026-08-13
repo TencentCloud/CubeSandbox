@@ -4,7 +4,7 @@ This chart delivers CubeSandbox on Kubernetes/TKE as chart-managed resources.
 
 Current compute-plane shape (per compute node):
 
-- **`cube-node` (Big Pod)**: native `apps/v1` DaemonSet; `wait-node-prep` **initContainer** (exits when ready) + `cubelet` / `network-agent` + optional egress; Pod network (`hostNetwork=false`). Image/template changes recreate the Pod and interrupt sandboxes on that node.
+- **`cube-node` (Big Pod)**: native `apps/v1` DaemonSet; `wait-node-prep` **initContainer** (exits when ready) + `cubelet` with embedded network runtime + optional egress; Pod network (`hostNetwork=false`). Image/template changes recreate the Pod and interrupt sandboxes on that node.
 - **`cube-node-installer`**: native DaemonSet that stages shim / kernel / guest into the host toolbox tree.
 - **`cube-node-bootstrap`**: native DaemonSet that runs `wait-pvm-host` + `cube-node-init`, then writes `node-prep-ready`.
 - **`cube-node-pvm`**: native `apps/v1` DaemonSet scheduled only via `placement.pvm` (`allow-pvm-bootstrap`); installs PVM host kernel and writes fingerprint `pvm-host-ready`. Non-PVM compute nodes never pull this image.
@@ -42,8 +42,8 @@ See the [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) gu
 | `cube-pvm-host-bootstrap` | **cube-node-pvm** init. Installs/configures PVM host kernel and may reboot the node. |
 | `cube-node-init` | Bootstrap DaemonSet: `wait-pvm-host` + `cube-node-init`. Loads KVM, prepares host paths, validates `/dev/kvm` and XFS. |
 | `cube-wait-node-prep` | Big Pod `wait-node-prep` initContainer (poll `node-prep-ready` then exit), bootstrap write-ready, and PVM hold container. |
-| `cube-shim` / `cube-kernel` / `cube-guest` | Installer DaemonSet containers; stage artifacts into `/usr/local/services/cubetoolbox`. |
-| `cubelet` / `network-agent` | Big Pod runtime containers (self-stage then run). |
+| `cube-shim` / `cube-kernel` / `cube-guest` / `cube-agent` | Installer DaemonSet containers; stage artifacts into `/usr/local/services/cubetoolbox` (`cube-image/`, `cube-agent/cube-agent.ext4`, …). |
+| `cubelet` | Big Pod runtime container (self-stage then run; includes embedded network runtime and CubeVS tools). |
 | `cube-master` | Control-plane master; embedded schema migrations. |
 | `cube-api` | External E2B-compatible HTTP API. |
 | `cube-ops` | Ops/admin backend (JWT) + WebUI SDK proxy to CubeMaster. |
@@ -156,6 +156,14 @@ can set it to `false`.
 - runtime tools are available through `/usr/local/bin/containerd-shim-cube-rs`, `/usr/local/bin/cube-runtime`, `/usr/local/bin/cubecli`, and `/usr/local/bin/cubevsmapdump`;
 - `cubeNode.network.autoDetectEthName=true` auto-detects the primary host NIC and patches Cubelet `eth_name`;
 - `cubeNode.network.cidr` patches Cubelet cubevs/sandbox CIDR (default `172.16.0.0/18`, chosen to avoid common cluster Service CIDR `192.168.0.0/16` while keeping a /18 pool). A Helm `pre-install`/`pre-upgrade` Hook fails fast when this range overlaps the cluster Service CIDR or existing ClusterIPs; set `cubeNode.network.cidrSkipConflictCheck=true` only if you accept that risk.
+
+The `cube-node` Pod defaults `kubectl exec` to its `cubelet` container, where `cubecli` uses the node-local Cubelet and containerd sockets. In a multi-node cluster, select the Pod scheduled on the compute node you want to inspect:
+
+```bash
+kubectl get pods -n cube-system \
+  -l app.kubernetes.io/component=cube-node -o wide
+kubectl exec -n cube-system <cube-node-pod> -- cubecli ls
+```
 
 ### Guest kernel (bm vs PVM)
 
@@ -443,6 +451,8 @@ CubeProxy runs on the **Pod network** (no `hostNetwork`). Traffic path:
 
 TLS for `cube.app` / wildcards still terminates **inside CubeProxy**. The default Ingress annotations enable nginx-ingress SSL passthrough + HTTPS backend; override `cubeProxy.ingress.className` / `annotations` for TKE CLB or other controllers. Set `cubeProxy.ingress.enabled=false` if you manage the entrypoint yourself (keep the Service as backend).
 
+Without an Ingress / cloud LB, set `cubeProxy.service.type` / `controlPlane.api.service.type` to `NodePort` (or `LoadBalancer`) and optionally pin host ports via `cubeProxy.service.nodePorts.*` / `controlPlane.api.service.nodePort` (Kubernetes range `30000-32767`; empty keeps auto-allocation). Explicit `nodePort` values are rejected when `type` is still `ClusterIP`.
+
 When the sandbox owner is on a compute node, CubeProxy still uses Redis routing metadata to connect to the owner `HostIP:hostPort`. The chart patches the image's default nginx listeners to the configured `cubeProxy.ports.*.containerPort` values (default `80` / `443`).
 
 CubeProxy admin is reachable in-cluster at each Pod IP:`adminPort` (default `8082`) for cube-lifecycle-manager discovery; probes use the admin token header.
@@ -479,7 +489,8 @@ cubeProxy:
 cubeNode:
   dns:
     sandbox:
-      followNodeDns: true          # guests use node/cluster DNS
+      followNodeDns: true          # guests use node/cluster DNS (nameservers+search+options)
+                                   # explicit nameservers[] overrides and disables follow-node
 ```
 
 ## WebUI and CubeOps
@@ -510,7 +521,7 @@ The script collects Pods, DaemonSets, Deployments, StatefulSets, Services, Endpo
 
 `cubeEgress.enabled=true` runs CubeEgress inside the Cube Node Big Pod:
 
-- `cube-egress` mounts `/etc/cube/ca` and exposes the loopback admin API on `127.0.0.1:9090`;
+- `cube-egress` mounts `/etc/cube/ca` and exposes the loopback admin API on `127.0.0.1:9091` by default (`cubeEgress.adminPort` / `CUBE_EGRESS_ADMIN_PORT`);
 - `cube-egress-net` waits for the `cube-dev` interface, applies the upstream `CubeEgress/scripts/cube-proxy-iptables-init.sh` rules, periodically reapplies them, and removes them on Pod termination;
 - CubeMaster and CubeAPI both mount the same CA Secret at `/etc/cube/ca` so template CA bake and AgentHub/OpenClaw CA injection use the same trust root.
 
@@ -564,12 +575,11 @@ helm test cube -n cube-system --timeout 20m
 ## Upgrade policy
 
 `cube-node` is a native `apps/v1` DaemonSet. Bumping Big Pod runtime images
-(`images.cubelet`, `images.networkAgent`, `images.waitNodePrep`, …)
-or changing the Pod template **recreates** the Big Pod (Pod UID/IP/netns change)
-and **interrupts sandboxes on that node**. Artifact images bump only
-`cube-node-installer`; node-init images bump `cube-node-bootstrap`; PVM host
-image bumps only `cube-node-pvm`. See
-[Upgrade](https://cubesandbox.com/guide/kubernetes/upgrade).
+(`images.cubelet`, `images.waitNodePrep`, …) or changing the Pod template
+**recreates** the Big Pod (Pod UID/IP/netns change) and **interrupts sandboxes
+on that node**. Artifact images bump only `cube-node-installer`; node-init
+images bump `cube-node-bootstrap`; PVM host image bumps only `cube-node-pvm`.
+See [Upgrade](https://cubesandbox.com/guide/kubernetes/upgrade).
 
 Set `cubeNode.updateStrategy.type: OnDelete` for fully manual
 per-node upgrades.

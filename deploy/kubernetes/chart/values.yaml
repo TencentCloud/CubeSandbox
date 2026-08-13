@@ -17,8 +17,8 @@ global:
   # to mirror all images into a private registry without editing each entry
   # individually. Applies to the pvmHostBootstrap / nodeInit / node / master
   # / api / ops / cubemastercli / proxy / lifecycleManager / cubeEgress /
-  # cubeEgressNet / webui / cubelet / networkAgent / cubeShim / cubeKernel /
-  # cubeGuest / waitNodePrep / kubectl (alpine-k8s mirror) entries but not to
+  # cubeEgressNet / webui / cubelet / cubeShim / cubeKernel /
+  # cubeGuest / cubeAgent / waitNodePrep / kubectl (alpine-k8s mirror) entries but not to
   # third-party images such as mysql / redis.
   imageRegistry: ""
 
@@ -47,11 +47,6 @@ images:
     tag: v0.6.0
     pullPolicy: IfNotPresent
 
-  networkAgent:
-    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/network-agent
-    tag: v0.6.0
-    pullPolicy: IfNotPresent
-
   cubeShim:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-shim
     tag: v0.6.0
@@ -64,6 +59,11 @@ images:
 
   cubeGuest:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-guest
+    tag: v0.6.0
+    pullPolicy: IfNotPresent
+
+  cubeAgent:
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-agent
     tag: v0.6.0
     pullPolicy: IfNotPresent
 
@@ -270,6 +270,9 @@ controlPlane:
     service:
       type: ClusterIP
       port: 3000
+      # Optional host port when type is NodePort or LoadBalancer.
+      # Leave empty for Kubernetes auto-allocation. Must not be set for ClusterIP.
+      nodePort: ""
     internalLoadBalancer:
       enabled: false
       annotations: {}
@@ -470,8 +473,19 @@ redis:
     pullPolicy: IfNotPresent
   # Empty host installs and uses the chart-managed cube-redis service.
   # Non-empty host uses the configured third-party Redis service and skips cube-redis.
+  # Sentinel mode (non-empty masterName) skips cube-redis and must leave host empty.
   host: ""
   port: 6379
+  # Redis Sentinel (external). Non-empty masterName enables Sentinel for
+  # CubeMaster / CubeProxy / cube-lifecycle-manager; requires sentinelNodes.
+  # masterName and sentinelNodes must be set together (validated at render time).
+  masterName: ""
+  # Comma-separated sentinel endpoints, e.g. "10.0.0.11:26379,10.0.0.12:26379".
+  # Also accepts hostname and bracketed IPv6 ([2001:db8::10]:26379).
+  sentinelNodes: ""
+  # AUTH against Sentinel instances only. Leave empty when Sentinel has no requirepass
+  # (master password still uses redis.password).
+  sentinelPassword: ""
   # SECURITY: Override before any non-throwaway deployment. templates/validate.yaml
   # refuses to render when this equals the CHANGE_ME_* sentinel.
   password: CHANGE_ME_REDIS_PASSWORD
@@ -490,15 +504,17 @@ redis:
 
 cubeNode:
   enabled: true
-  podAnnotations: {}
+  podAnnotations:
+    # kubectl exec/logs without -c should enter the node-local Cubelet runtime.
+    kubectl.kubernetes.io/default-container: cubelet
   # Native apps/v1 DaemonSet. Image/tag/resource changes recreate the Pod
   # (PodIP / netns change; existing sandboxes on that node are interrupted).
   updateStrategy:
     type: RollingUpdate
     rollingUpdate:
       maxUnavailable: 1
-  # Give cubelet/network-agent time to exit cleanly on Pod delete. preStop only
-  # signals those processes via pidfile; containerd-shim-cube-rs / microVMs are left alone.
+  # Give cubelet time to exit cleanly on Pod delete. preStop only signals the
+  # cubelet pidfile; containerd-shim-cube-rs / microVMs are left alone.
   terminationGracePeriodSeconds: 30
 
   # Stable NodeID = Kubernetes node name (CUBE_SANDBOX_NODE_ID).
@@ -530,9 +546,10 @@ cubeNode:
   dns:
     clusterDomain: cluster.local
     sandbox:
-      # Guests inherit the cube-node Pod nameservers (cluster DNS) so they can
-      # resolve in-cluster Services and *.cubeProxy.domain.
-      # Set nameservers to an explicit list to override.
+      # Guests inherit the cube-node Pod DNS (nameservers + search + options,
+      # e.g. ndots:5) so they can resolve in-cluster Services and *.cubeProxy.domain.
+      # Set nameservers to an explicit list to override: that turns follow-node
+      # off for the whole guest DNS config (search/options are not copied either).
       followNodeDns: true
       nameservers: []
 
@@ -555,15 +572,13 @@ cubeNode:
     readiness:
       enabled: true
       tcpSocketPort: 9999
-      # Recovery gate: cubelet listening AND network-agent ready.
+      # Recovery gate: cubelet listening and serving its local socket.
       exec:
         - /bin/bash
         - -ec
         - |
           ss -lntp 2>/dev/null | grep -q ':9999' || exit 1
-          curl -fsS http://127.0.0.1:19090/readyz >/dev/null
           test -S /data/cubelet/cubelet.sock
-          test -S /tmp/cube/network-agent-grpc.sock
       initialDelaySeconds: 10
       periodSeconds: 10
       failureThreshold: 6
@@ -664,6 +679,17 @@ cubeProxy:
   service:
     type: ClusterIP
     annotations: {}
+    # Optional host ports when type is NodePort or LoadBalancer (range
+    # 30000-32767). Leave empty for auto-allocation. Must not be set for
+    # ClusterIP. Typical bare-metal / no-Ingress profile:
+    #   type: NodePort
+    #   nodePorts: { http: 30080, https: 30443, grpc: 30090 }
+    # and set ingress.enabled=false.
+    nodePorts:
+      http: ""
+      https: ""
+      grpc: ""
+      admin: ""
   ingress:
     # Requires a cluster Ingress Controller. Set false to manage the entrypoint
     # yourself (still keep the ClusterIP Service as the backend).
@@ -682,6 +708,9 @@ cubeProxy:
       containerPort: 80
     https:
       containerPort: 443
+    # Plaintext gRPC (HTTP/2) ingress; mirrors CubeProxy listen 9090.
+    grpc:
+      containerPort: 9090
   redis:
     # Empty host uses redis.host or chart-managed cube-redis.
     host: ""
@@ -774,7 +803,11 @@ cubeEgress:
   # Cube Node Big Pod gets a cube-egress sidecar and a cube-egress-net helper
   # sidecar that owns host TPROXY iptables/ip-rule state.
   enabled: true
-  bootstrapURL: http://127.0.0.1:19090/v1/policies/dump
+  # Loopback admin API port (policy push from Cubelet). Default 9091 avoids
+  # colliding with CubeProxy plaintext gRPC on 9090. Keep cubeNode / Cubelet
+  # cube_egress_admin_url in sync (chart sets CUBE_EGRESS_ADMIN_PORT on both).
+  adminPort: 9091
+  bootstrapURL: http://127.0.0.1:9998/v1/policies/dump
   debugDump: false
   ca:
     # Supported modes:
@@ -820,14 +853,15 @@ cubeEgress:
     readiness:
       enabled: true
       path: /admin/v1/health
-      port: 9090
+      # Defaults to cubeEgress.adminPort when unset in the template.
+      port: 9091
       initialDelaySeconds: 5
       periodSeconds: 10
       failureThreshold: 12
     liveness:
       enabled: true
       path: /admin/v1/health
-      port: 9090
+      port: 9091
       initialDelaySeconds: 30
       periodSeconds: 20
       failureThreshold: 6

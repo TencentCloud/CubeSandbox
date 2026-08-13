@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	gomock "go.uber.org/mock/gomock"
+	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	criimages "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/server/images"
@@ -25,7 +26,8 @@ import (
 
 func makeCubeBox(image string) *cubebox.CubeSandbox {
 	return &cubebox.CubeSandbox{
-		Id: uuid.New().String(),
+		Id:        uuid.New().String(),
+		Namespace: "test",
 		Containers: []*cubebox.Container{
 			{
 				Id:    "c1",
@@ -179,24 +181,33 @@ func TestDeleteUnusedImageByRecentlyUsed(t *testing.T) {
 	mockNamespaces := &mockNamespaces{namespaces: []string{"test", "default"}}
 
 	policy := ImageGCPolicy{
-		LeastUnusedTimeInterval: 1 * time.Nanosecond,
-		MaxDeletionPerCycle:     10,
+		LeastUnusedTimeInterval:  1 * time.Nanosecond,
+		MaxDeletionPerCycle:      10,
+		FreeDiskThresholdPercent: 50,
 	}
 
 	store, err := criimagestore.NewFakeStore(ctx, testImages)
 	require.NoError(t, err)
 	ctrl := gomock.NewController(t)
 	cirimage, _ := criimages.NewTestCRIServiceWithImageStore(store, ctrl)
-	m := NewImageGCManager(client, mockNamespaces, cirimage, policy, nil)
-	m.getDeviceIdleRatioFunc = makeDeviceIdleFunc(100)
+	spy := &removeSpyImageSvc{CubeImageSvcInterface: cirimage}
+	m := NewImageGCManager(client, mockNamespaces, spy, policy, nil)
+	m.getDeviceIdleRatioFunc = makeDeviceIdleFunc(0)
 
 	err = m.GarbageCollect(context.Background())
 	assert.NoError(t, err)
-	fmt.Println(fakeService.ImageDeleteEvent)
 
-	resp, err := cirimage.ListImage(ctx)
-	assert.NoError(t, err)
-	assert.Equal(t, 0, len(resp))
+	assert.ElementsMatch(t, []string{testImageId1, testImageId2, testImageId3}, spy.removed)
+}
+
+type removeSpyImageSvc struct {
+	criimages.CubeImageSvcInterface
+	removed []string
+}
+
+func (s *removeSpyImageSvc) RemoveImage(ctx context.Context, imageSpec *runtime.ImageSpec) error {
+	s.removed = append(s.removed, imageSpec.GetImage())
+	return s.CubeImageSvcInterface.RemoveImage(ctx, imageSpec)
 }
 
 func TestImageUsed(t *testing.T) {

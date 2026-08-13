@@ -1,6 +1,6 @@
 # 多机集群部署
 
-本指南介绍如何将单机 Cube Sandbox 部署扩展为多机集群，通过添加**计算节点**来实现。计算节点只运行沙箱运行时组件（`Cubelet`、`network-agent`、`CubeShim`），并向第一台机器上的控制面注册。
+本指南介绍如何将单机 Cube Sandbox 部署扩展为多机集群，通过添加**计算节点**来实现。计算节点只运行沙箱运行时组件（内置 network runtime 的 `Cubelet`、`CubeShim`），并向第一台机器上的控制面注册。
 
 ::: warning 生产环境注意
 如果您计划在生产环境中使用 Cube Sandbox，请参阅[网络加固](./network-hardening.md)指南，在将服务暴露到不可信网络之前完成安全加固。
@@ -17,7 +17,7 @@
 │              控制节点                    │
 │  CubeMaster, cube-api, CubeProxy,       │
 │  CoreDNS, MySQL, Redis,                 │
-│  Cubelet, network-agent                 │
+│  Cubelet (network runtime)              │
 └──────────────────┬──────────────────────┘
                    │  /internal/meta API
        ┌───────────┼───────────┐
@@ -25,12 +25,12 @@
 ┌────────────┐┌────────────┐┌────────────┐
 │ 计算节点 #1 ││ 计算节点 #2 ││ 计算节点 #N │
 │ Cubelet    ││ Cubelet    ││ Cubelet    │
-│ net-agent  ││ net-agent  ││ net-agent  │
+│ net runtime││ net runtime││ net runtime│
 └────────────┘└────────────┘└────────────┘
 ```
 
 - **控制节点**运行完整技术栈：编排调度（CubeMaster）、API 网关（cube-api）、代理（CubeProxy + CoreDNS）、数据库（MySQL + Redis），同时自身也作为计算节点。
-- 每个**计算节点**只运行 `Cubelet` 和 `network-agent`，向控制面 `CubeMaster` 注册并接收沙箱调度请求。
+- 每个**计算节点**只运行内置 network runtime 的 `Cubelet`，向控制面 `CubeMaster` 注册并接收沙箱调度请求。
 
 ## 前置条件
 
@@ -88,8 +88,8 @@ sudo ./install-compute.sh
 
 计算节点安装脚本会：
 
-1. 只安装 `Cubelet`、`network-agent`、`cube-shim`、`cube-image`、`cube-kernel-scf` 和运行时脚本
-2. 只启动宿主机进程：`network-agent`、`cubelet`
+1. 只安装内置 network runtime 的 `Cubelet`、`cube-shim`、`cube-image`、`cube-kernel-scf` 和运行时脚本
+2. 只启动宿主机进程：`cubelet`
 3. 自动把 `Cubelet` 的 `meta_server_endpoint` 指向控制面 `CubeMaster`
 4. 通过控制面的 `/internal/meta` 接口注册节点并上报状态
 
@@ -103,7 +103,7 @@ sudo ./smoke.sh
 
 计算节点模式下，`quickcheck.sh` 会验证：
 
-- 本机 `network-agent` 健康状态
+- 本机 `Cubelet` 及其内置 network runtime 健康状态
 - 控制面 `CubeMaster` 可达
 - 当前节点已出现在控制面的 `/internal/meta/nodes/{node_id}` 中
 
@@ -147,6 +147,8 @@ scheduler:
 
 对于多机集群，建议将 `scheduler.priority_select_num` 设置为大于 `1` 的值，让 CubeMaster 从评分最高的一组节点中随机选择。随项目提供的默认配置使用 `priority_select_num: 1`，这意味着评分只会决定下一个沙箱落到哪一个节点，而不会在多个高分节点之间分散放置。小规模集群可以从 `3` 开始，并根据节点数量继续调整。`scheduler.least_select_name` 默认值为 `random`，通常不需要显式设置。
 
+完整的 CubeMaster 调度配置、Cubelet 节点上报、quota / label / 并发对调度的影响，以及新增计算节点后的 template redo 操作，请参阅[CubeMaster 调度器配置参考](./cubemaster-scheduler-config.md)。
+
 更新 `cubemaster.yaml` 后，请按当前部署方式重启 CubeMaster，让调度器加载新的评分配置。
 
 ## 常用操作
@@ -157,7 +159,7 @@ scheduler:
 sudo ./down.sh
 ```
 
-计算节点模式下，该命令只会停止 `cubelet` 和 `network-agent`，不影响控制面或其他计算节点。
+计算节点模式下，该命令只会停止 `cubelet`，不影响控制面或其他计算节点。
 
 ### 重新安装
 

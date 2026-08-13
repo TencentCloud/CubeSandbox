@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
 )
 
 // loginLimiter is a per-IP sliding-window rate limiter for the login
@@ -102,6 +103,7 @@ func LoginRateLimit() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ip := clientIP(c)
 		if defaultLoginLimiter.isBlocked(ip) {
+			logging.G(c.Request.Context()).Warnf("login rate limit triggered: client_ip=%s path=%s", ip, c.Request.URL.Path)
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
 				"error": "too many failed login attempts, try again later",
 			})

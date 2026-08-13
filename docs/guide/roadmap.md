@@ -4,17 +4,13 @@
 
 ## Coming Soon
 
-### Kubernetes-Native Deployment
-
-Deploy and operate CubeSandbox entirely within a Kubernetes cluster using standard primitives — CRDs, operators, and native scheduling. Removes the need for out-of-band orchestration and makes CubeSandbox a first-class citizen in cloud-native environments.
-
-### Volume Support
-
-Persistent and shared volume support for sandboxes, compatible with the E2B volume protocol. Enables stateful workloads and shared data across sandbox instances.
-
 ### Cross-Node Pause and Resume
 
 Suspend a running sandbox on one node and resume it on a different node, with full memory and filesystem state preserved. Unlocks flexible bin-packing, host drain workflows, and cross-node sandbox migration.
+
+### Cross-Node Snapshot-Based Sandbox Launch
+
+Create new sandboxes from a snapshot on a different node than the one where the snapshot was taken, backed by a cluster-shared, on-demand-loading storage layer. The scheduler picks the source node first and transparently falls back to any node with the snapshot synced, so callers get elastic, cluster-wide scheduling from a single snapshot without waiting for a full data copy.
 
 ### E2B API Compatibility
 

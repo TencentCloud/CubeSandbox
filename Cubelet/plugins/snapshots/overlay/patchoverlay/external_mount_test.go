@@ -140,6 +140,14 @@ func TestGetCubeUpperAndWorkPath(t *testing.T) {
 		t.Fatalf("expected fallback work path on empty ref")
 	}
 
+	refDir := filepath.Join(root, refDirName, "ns", "abc")
+	if err := os.MkdirAll(filepath.Join(refDir, "fs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(refDir, "work"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
 	if got := enabled.getValidCubeUpperPath(ctx, id, infoRef); !strings.HasSuffix(got, "abc/fs") {
 		t.Fatalf("unexpected upper path %s", got)
 	}
@@ -207,7 +215,7 @@ func TestGetCleanupRefDirectories(t *testing.T) {
 
 	ctx := context.Background()
 	if err := o.ms.WithTransaction(ctx, true, func(tx context.Context) error {
-		_, err := storage.CreateSnapshot(tx, snapshots.KindActive, "key-keep", "", snapshots.WithLabels(map[string]string{
+		_, err := storage.CreateSnapshot(tx, snapshots.KindActive, "nsA/1/key-keep", "", snapshots.WithLabels(map[string]string{
 			constants.AnnotationSnapshotRef: constants.PrefixSha256 + "nsB",
 		}))
 		return err

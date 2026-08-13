@@ -190,6 +190,7 @@ class Sandbox:
         env_vars: Dict[str, str] | None = None,
         envs: Dict[str, str] | None = None,
         metadata: Dict[str, str] | None = None,
+        distribution_scope: list[str] | None = None,
         allow_internet_access: bool = True,
         network: Dict[str, Any] | None = None,
         lifecycle: Dict[str, Any] | None = None,
@@ -207,6 +208,8 @@ class Sandbox:
             envs: E2B-compatible alias for ``env_vars``. When both aliases are
                 provided, they must contain the same values.
             metadata: Arbitrary key-value metadata (e.g. network-policy, host-mount).
+            distribution_scope: Compute node IDs or host IPs eligible to run the
+                sandbox. Pass a single entry to pin the sandbox to one node.
             allow_internet_access: When ``False``, the sandbox is blocked from
                 making outbound traffic to the public internet.
             network: Egress network policy. Accepts keys:
@@ -279,6 +282,8 @@ class Sandbox:
             payload["envVars"] = sandbox_env_vars
         if metadata:
             payload["metadata"] = metadata
+        if distribution_scope:
+            payload["distributionScope"] = distribution_scope
         if not allow_internet_access:
             payload["allow_internet_access"] = False
         if network:

@@ -19,6 +19,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/membolt"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/multimeta"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
@@ -106,6 +107,7 @@ func (h *localCubeRunTemplateManager) EnsureCubeRunTemplate(ctx context.Context,
 	}
 	for _, template := range templates {
 		if template != nil {
+			hydrateLocalTemplateComponentVersions(template)
 			return template, nil
 		}
 	}
@@ -121,6 +123,7 @@ func (h *localCubeRunTemplateManager) EnsureCubeRunTemplate(ctx context.Context,
 	}
 	for _, template := range templates {
 		if template != nil {
+			hydrateLocalTemplateComponentVersions(template)
 			return template, nil
 		}
 	}
@@ -182,7 +185,7 @@ func recoveredLocalTemplateFromSnapshotPath(snapshotPath string) *templatetypes.
 		return nil
 	}
 	instanceType := filepath.Base(filepath.Dir(templateDir))
-	return &templatetypes.LocalRunTemplate{
+	template := &templatetypes.LocalRunTemplate{
 		DistributionReference: templatetypes.DistributionReference{
 			Namespace:          "default",
 			Name:               "recovered-" + templateID,
@@ -200,11 +203,34 @@ func recoveredLocalTemplateFromSnapshotPath(snapshotPath string) *templatetypes.
 		Volumes:  map[string]templatetypes.LocalBaseVolume{},
 		Componts: map[string]templatetypes.LocalComponent{},
 	}
+	hydrateLocalTemplateComponentVersions(template)
+	return template
 }
 
 func isTemporarySnapshotPath(snapshotPath string) bool {
 	base := filepath.Base(filepath.Clean(snapshotPath))
 	return strings.HasSuffix(base, ".tmp")
+}
+
+func hydrateLocalTemplateComponentVersions(local *templatetypes.LocalRunTemplate) {
+	if local == nil {
+		return
+	}
+	if len(templatetypes.VersionMapFromComponts(local)) > 0 {
+		return
+	}
+	snapshotPath := ""
+	if local.Snapshot.Snapshot.Path != "" {
+		snapshotPath = local.Snapshot.Snapshot.Path
+	}
+	if snapshotPath == "" {
+		return
+	}
+	entry, err := storage.ReadSnapshotCatalogAt(snapshotPath)
+	if err != nil || entry == nil || len(entry.ComponentVersions) == 0 {
+		return
+	}
+	templatetypes.ApplyVersionMap(local, entry.ComponentVersions)
 }
 
 type unusedTemplate struct {

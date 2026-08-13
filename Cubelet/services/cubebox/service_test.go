@@ -18,6 +18,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	imagesv1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/numa"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 )
 
@@ -162,16 +163,15 @@ func TestGetNextNumaNode(t *testing.T) {
 		numaNodeIndex: 0,
 	}
 
-	assert.Equal(t, int32(1), s.getNextNumaNode(), "First call should return 1")
+	nodeCount := int32(numa.GetNumaNodeCount())
+	require.Greater(t, nodeCount, int32(0), "numa node count should be positive")
 
-	assert.Equal(t, int32(0), s.getNextNumaNode(), "Second call should return 0")
-	assert.Equal(t, int32(1), s.getNextNumaNode(), "Third call should return 1")
-	assert.Equal(t, int32(0), s.getNextNumaNode(), "Fourth call should return 0")
-
-	for i := 0; i < 10; i++ {
-		s.getNextNumaNode()
+	// getNextNumaNode increments the index then takes modulo the node count,
+	// so the sequence cycles through 1, 2, ..., nodeCount-1, 0, 1, ...
+	for i := int32(1); i <= 3*nodeCount; i++ {
+		want := i % nodeCount
+		assert.Equalf(t, want, s.getNextNumaNode(), "call %d should return %d", i, want)
 	}
-	assert.Equal(t, int32(1), s.getNextNumaNode(), "After multiple calls, it should still cycle between 0 and 1")
 }
 
 func TestCubeboxSorting(t *testing.T) {
@@ -306,6 +306,56 @@ func TestValidateCommitSandboxTargetRejectsHostPath(t *testing.T) {
 	_, err := validateCommitSandboxTarget(cb)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "hostPath")
+}
+
+func TestValidatePauseSandboxTargetAllowsHostPath(t *testing.T) {
+	cb := &cubeboxstore.CubeBox{
+		Metadata: cubeboxstore.Metadata{ID: "sandbox"},
+	}
+	cb.AddContainer(&cubeboxstore.Container{
+		Metadata: cubeboxstore.Metadata{
+			ID: "sandbox",
+			Config: &cubeboxv1.ContainerConfig{
+				VolumeMounts: []*cubeboxv1.VolumeMounts{{
+					Name:          "root",
+					ContainerPath: "/",
+				}, {
+					Name:     "host",
+					HostPath: "/var/lib/data",
+				}},
+			},
+		},
+		Status: cubeboxstore.StoreStatus(cubeboxstore.Status{StartedAt: time.Now().UnixNano()}),
+		IsPod:  true,
+	})
+
+	root, err := validatePauseSandboxTarget(cb)
+	require.NoError(t, err)
+	assert.Equal(t, "root", root)
+}
+
+func TestValidatePauseSandboxTargetAllowsHostDirVolume(t *testing.T) {
+	cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{{
+		Name: "host",
+		VolumeSource: &cubeboxv1.VolumeSource{
+			HostDirVolumes: &cubeboxv1.HostDirVolumeSources{
+				VolumeSources: []*cubeboxv1.HostDirSource{{
+					Name:     "host",
+					HostPath: "/var/lib/data",
+				}},
+			},
+		},
+	}}, []*cubeboxv1.VolumeMounts{{
+		Name:          "root",
+		ContainerPath: "/",
+	}, {
+		Name:          "host",
+		ContainerPath: "/data",
+	}})
+
+	root, err := validatePauseSandboxTarget(cb)
+	require.NoError(t, err)
+	assert.Equal(t, "root", root)
 }
 
 func TestValidateCommitSandboxTargetRejectsHostDirVolume(t *testing.T) {

@@ -320,6 +320,10 @@ func checkDone(cancel context.CancelFunc) {
 }
 
 func doHttpReq(c *cli.Context, url, method, requestID string, body io.Reader, rsp interface{}) error {
+	return doHttpReqWithContentType(c, url, method, requestID, body, "", rsp)
+}
+
+func doHttpReqWithContentType(c *cli.Context, url, method, requestID string, body io.Reader, contentType string, rsp interface{}) error {
 	var ctx = context.Background()
 	var cancel context.CancelFunc
 	timeout := c.GlobalDuration("timeout")
@@ -336,6 +340,9 @@ func doHttpReq(c *cli.Context, url, method, requestID string, body io.Reader, rs
 		return err
 	}
 	httpReq.Header.Set(constants.Caller, "mastercli")
+	if contentType != "" {
+		httpReq.Header.Set("Content-Type", contentType)
+	}
 	if callerHostIP := c.String("callerhostip"); callerHostIP != "" {
 		httpReq.Header.Set(constants.CallerHostIP, callerHostIP)
 	}

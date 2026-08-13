@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
@@ -91,15 +92,31 @@ func TestReqResource(t *testing.T) {
 	assert.Equal(t, cpu.String(), "5")
 }
 func TestBackoffRetryDelay(t *testing.T) {
+	cfg := config.GetConfig().CubeletConf
+	maxDelay := time.Duration(cfg.MaxDelayInSecond) * time.Second
+
 	c := &createSandboxContext{}
-	for i := 0; i < int(config.GetConfig().CubeletConf.LoopMaxRetries); i++ {
+
+	// First call seeds the base delay.
+	c.backoffRetryDelay()
+	assert.Equal(t, cfg.BackoffRetryDelay, c.delay, "first backoff should be the base delay")
+
+	// Growth uses a random factor in [1.0, 1.8), so the exact delay at any
+	// given iteration is non-deterministic. Assert only the invariants that
+	// hold for every RNG sequence: the delay is monotonic non-decreasing and
+	// never exceeds the cap.
+	prev := c.delay
+	for i := 1; i < 21; i++ {
 		c.backoffRetryDelay()
-		t.Logf("i:%d, c.backoffRetryDelay:%v", i, c.delay.Milliseconds())
-		if i == 20 {
-			assert.Equal(t, float64(config.GetConfig().CubeletConf.MaxDelayInSecond), c.delay.Seconds())
-			break
-		}
+		assert.GreaterOrEqual(t, c.delay, prev, "backoff must not shrink")
+		assert.LessOrEqual(t, c.delay, maxDelay, "backoff must not exceed the cap")
+		prev = c.delay
 	}
+
+	// Once at the cap, further growth stays clamped regardless of the factor.
+	c.delay = maxDelay
+	c.backoffRetryDelay()
+	assert.Equal(t, maxDelay, c.delay, "backoff must stay clamped at the cap")
 }
 
 func init() {

@@ -11,6 +11,9 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+
+	"github.com/alicebob/miniredis/v2"
+	"github.com/gomodule/redigo/redis"
 )
 
 // recordedCall captures one Do invocation for later assertion.
@@ -26,6 +29,19 @@ type fakeRedis struct {
 	failHSET bool
 	failHDEL bool
 	failXADD bool
+}
+
+type redisServerDoer struct {
+	addr string
+}
+
+func (d redisServerDoer) Do(cmd string, args ...interface{}) (interface{}, error) {
+	conn, err := redis.Dial("tcp", d.addr)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return conn.Do(cmd, args...)
 }
 
 func (f *fakeRedis) Do(cmd string, args ...interface{}) (interface{}, error) {
@@ -141,6 +157,204 @@ func TestStore_PublishCreate_HSETFailureStillEmitsXADD(t *testing.T) {
 	if calls[1].cmd != "XADD" {
 		t.Fatalf("expected XADD as second call, got %s", calls[1].cmd)
 	}
+}
+
+func TestStore_RebaseTimeoutWindowAtomicallyUsesLatestTimeout(t *testing.T) {
+	server := miniredis.RunT(t)
+	doer := redisServerDoer{addr: server.Addr()}
+	store := NewStore(doer)
+
+	const (
+		sandboxID = "sbx-rebase-finite"
+		nowMs     = int64(1_720_000_000_000)
+		timeout   = 600
+	)
+	seedLifecycleMeta(t, doer, &SandboxLifecycleMeta{
+		SandboxID:      sandboxID,
+		TemplateID:     "tpl-preserved",
+		TimeoutSeconds: intPointer(timeout),
+		CreatedAt:      nowMs - 10_000,
+		EndAt:          nowMs + 590_000,
+	})
+
+	endAt, err := store.RebaseTimeoutWindow(context.Background(), sandboxID, nowMs)
+	if err != nil {
+		t.Fatalf("RebaseTimeoutWindow: %v", err)
+	}
+	wantEndAt := nowMs + timeout*1000
+	if endAt != wantEndAt {
+		t.Fatalf("endAt = %d, want %d", endAt, wantEndAt)
+	}
+
+	got := loadLifecycleMeta(t, doer, sandboxID)
+	if got.TimeoutSeconds == nil || *got.TimeoutSeconds != timeout {
+		t.Fatalf("timeout = %v, want %d", got.TimeoutSeconds, timeout)
+	}
+	if got.CreatedAt != nowMs || got.EndAt != wantEndAt {
+		t.Fatalf("rebased window = (%d, %d), want (%d, %d)", got.CreatedAt, got.EndAt, nowMs, wantEndAt)
+	}
+	if got.TemplateID != "tpl-preserved" {
+		t.Fatalf("unrelated metadata was not preserved: %+v", got)
+	}
+
+	eventMeta := loadOnlyUpdateEvent(t, doer, sandboxID)
+	if !reflect.DeepEqual(eventMeta, *got) {
+		t.Fatalf("event payload and stored snapshot differ: event=%+v stored=%+v", eventMeta, *got)
+	}
+}
+
+func TestStore_SetTimeoutWindowAtomicallyReplacesTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		timeout int
+		endAt   int64
+	}{
+		{name: "finite", timeout: 1200, endAt: 1_720_001_200_000},
+		{name: "never", timeout: -1, endAt: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := miniredis.RunT(t)
+			doer := redisServerDoer{addr: server.Addr()}
+			store := NewStore(doer)
+
+			const (
+				sandboxID = "sbx-set-timeout"
+				nowMs     = int64(1_720_000_000_000)
+			)
+			seedLifecycleMeta(t, doer, &SandboxLifecycleMeta{
+				SandboxID:      sandboxID,
+				TemplateID:     "tpl-preserved",
+				TimeoutSeconds: intPointer(60),
+				CreatedAt:      nowMs - 10_000,
+				EndAt:          nowMs + 50_000,
+			})
+
+			endAt, err := store.SetTimeoutWindow(context.Background(), sandboxID, nowMs, tc.timeout)
+			if err != nil {
+				t.Fatalf("SetTimeoutWindow: %v", err)
+			}
+			if endAt != tc.endAt {
+				t.Fatalf("endAt = %d, want %d", endAt, tc.endAt)
+			}
+
+			got := loadLifecycleMeta(t, doer, sandboxID)
+			if got.TimeoutSeconds == nil || *got.TimeoutSeconds != tc.timeout {
+				t.Fatalf("timeout = %v, want %d", got.TimeoutSeconds, tc.timeout)
+			}
+			if got.CreatedAt != nowMs || got.EndAt != tc.endAt || got.TemplateID != "tpl-preserved" {
+				t.Fatalf("unexpected timeout metadata: %+v", got)
+			}
+			eventMeta := loadOnlyUpdateEvent(t, doer, sandboxID)
+			if !reflect.DeepEqual(eventMeta, *got) {
+				t.Fatalf("event payload and stored snapshot differ: event=%+v stored=%+v", eventMeta, *got)
+			}
+		})
+	}
+}
+
+func TestStore_RebaseTimeoutWindowNeverTimeoutHasNoDeadline(t *testing.T) {
+	server := miniredis.RunT(t)
+	doer := redisServerDoer{addr: server.Addr()}
+	store := NewStore(doer)
+
+	const sandboxID = "sbx-rebase-never"
+	seedLifecycleMeta(t, doer, &SandboxLifecycleMeta{
+		SandboxID:      sandboxID,
+		TimeoutSeconds: intPointer(-1),
+		CreatedAt:      100,
+		EndAt:          12345,
+	})
+
+	endAt, err := store.RebaseTimeoutWindow(context.Background(), sandboxID, 200)
+	if err != nil {
+		t.Fatalf("RebaseTimeoutWindow: %v", err)
+	}
+	if endAt != 0 {
+		t.Fatalf("endAt = %d, want 0 for never-timeout", endAt)
+	}
+	got := loadLifecycleMeta(t, doer, sandboxID)
+	if got.TimeoutSeconds == nil || *got.TimeoutSeconds != -1 || got.CreatedAt != 200 || got.EndAt != 0 {
+		t.Fatalf("unexpected never-timeout metadata: %+v", got)
+	}
+}
+
+func TestStore_RebaseTimeoutWindowRejectsMissingMetadataOrTimeout(t *testing.T) {
+	server := miniredis.RunT(t)
+	doer := redisServerDoer{addr: server.Addr()}
+	store := NewStore(doer)
+
+	if _, err := store.RebaseTimeoutWindow(context.Background(), "missing", 200); err == nil {
+		t.Fatal("missing metadata should return an error")
+	}
+	if endAt, err := store.SetTimeoutWindow(context.Background(), "missing", 200, 60); err == nil || endAt != 0 {
+		t.Fatalf("explicit timeout with missing metadata should return an error: endAt=%d err=%v", endAt, err)
+	}
+	seedLifecycleMeta(t, doer, &SandboxLifecycleMeta{SandboxID: "missing-timeout"})
+	if _, err := store.RebaseTimeoutWindow(context.Background(), "missing-timeout", 200); err == nil {
+		t.Fatal("metadata without timeout should return an error")
+	}
+	length, err := redis.Int(doer.Do("XLEN", EventStreamKey))
+	if err != nil && err != redis.ErrNil {
+		t.Fatalf("XLEN: %v", err)
+	}
+	if length != 0 {
+		t.Fatalf("invalid rebases emitted %d update events", length)
+	}
+}
+
+func seedLifecycleMeta(t *testing.T, doer redisDoer, meta *SandboxLifecycleMeta) {
+	t.Helper()
+	payload, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("marshal lifecycle metadata: %v", err)
+	}
+	if _, err := doer.Do("HSET", MetaKey, meta.SandboxID, payload); err != nil {
+		t.Fatalf("seed lifecycle metadata: %v", err)
+	}
+}
+
+func loadLifecycleMeta(t *testing.T, doer redisDoer, sandboxID string) *SandboxLifecycleMeta {
+	t.Helper()
+	payload, err := redis.Bytes(doer.Do("HGET", MetaKey, sandboxID))
+	if err != nil {
+		t.Fatalf("load lifecycle metadata: %v", err)
+	}
+	var meta SandboxLifecycleMeta
+	if err := json.Unmarshal(payload, &meta); err != nil {
+		t.Fatalf("decode lifecycle metadata: %v", err)
+	}
+	return &meta
+}
+
+func loadOnlyUpdateEvent(t *testing.T, doer redisDoer, sandboxID string) SandboxLifecycleMeta {
+	t.Helper()
+	entries, err := redis.Values(doer.Do("XRANGE", EventStreamKey, "-", "+"))
+	if err != nil {
+		t.Fatalf("XRANGE: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("update events = %d, want 1", len(entries))
+	}
+	entry, err := redis.Values(entries[0], nil)
+	if err != nil || len(entry) != 2 {
+		t.Fatalf("decode stream entry: values=%v err=%v", entry, err)
+	}
+	fields, err := redis.StringMap(entry[1], nil)
+	if err != nil {
+		t.Fatalf("decode stream fields: %v", err)
+	}
+	if fields[FieldOp] != OpUpdate || fields[FieldSandboxID] != sandboxID {
+		t.Fatalf("unexpected update event: %+v", fields)
+	}
+	var meta SandboxLifecycleMeta
+	if err := json.Unmarshal([]byte(fields[FieldPayload]), &meta); err != nil {
+		t.Fatalf("decode update payload: %v", err)
+	}
+	return meta
+}
+
+func intPointer(value int) *int {
+	return &value
 }
 
 func TestStore_PublishDelete(t *testing.T) {

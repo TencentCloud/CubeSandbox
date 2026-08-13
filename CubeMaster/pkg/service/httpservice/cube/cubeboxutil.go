@@ -18,6 +18,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 )
@@ -455,6 +456,11 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 	if err != nil {
 		return fmt.Errorf("failed to resolve template kind: %w", err)
 	}
+	// Pause-produced snaps (Kind=pause_snapshot) are internal Resume artifacts:
+	// invisible on Snapshot List/Info and not usable to create a new sandbox.
+	if strings.EqualFold(strings.TrimSpace(templateKind), pausesnap.KindPauseSnapshot) {
+		return fmt.Errorf("%w: %s", templatecenter.ErrSnapshotNotFound, templateID)
+	}
 	if resolved := templateResolveResultFromContext(ctx); resolved != nil {
 		resolved.TemplateID = templateID
 		resolved.Kind = templateKind
@@ -581,6 +587,7 @@ func bindSnapshotCreateReplica(ctx context.Context, snapshotID string, reqInOut 
 	}
 	reqInOut.Annotations[constants.CubeAnnotationRuntimeSnapshotID] = strings.TrimSpace(snapshotID)
 	reqInOut.Annotations[constants.CubeAnnotationRuntimeSnapshotAttachedAt] = time.Now().UTC().Format(time.RFC3339Nano)
+	injectReplicaComponentVersionAnnotations(reqInOut.Annotations, replica)
 	return nil
 }
 
@@ -592,13 +599,34 @@ func bindSnapshotCreateReplica(ctx context.Context, snapshotID string, reqInOut 
 // memory_vol/memory_kind annotation keys no longer exist as constants.
 func bindAppSnapshotTemplateReplica(ctx context.Context, templateID string, reqInOut *types.CreateCubeSandboxReq) error {
 	preferredNodeID := preferredDistributionNodeID(reqInOut)
-	if _, err := resolveTemplateReadyReplicaFn(ctx, templateID, preferredNodeID); err != nil {
+	replica, err := resolveTemplateReadyReplicaFn(ctx, templateID, preferredNodeID)
+	if err != nil {
 		return fmt.Errorf("template %s has no bindable ready replica: %w", templateID, err)
 	}
 	if reqInOut.Annotations == nil {
 		reqInOut.Annotations = map[string]string{}
 	}
+	injectReplicaComponentVersionAnnotations(reqInOut.Annotations, replica)
 	return nil
+}
+
+func injectReplicaComponentVersionAnnotations(annotations map[string]string, replica templatecenter.ReplicaStatus) {
+	if annotations == nil {
+		return
+	}
+	set := func(key, ver string) {
+		ver = strings.TrimSpace(ver)
+		if ver == "" {
+			return
+		}
+		if strings.TrimSpace(annotations[key]) == "" {
+			annotations[key] = ver
+		}
+	}
+	set(constants.CubeAnnotationComponentCubeImageVersion, replica.GuestImageVersion)
+	set(constants.CubeAnnotationComponentCubeAgentVersion, replica.AgentVersion)
+	set(constants.CubeAnnotationComponentCubeKernelVersion, replica.KernelVersion)
+	set(constants.CubeAnnotationComponentCubeShimVersion, replica.ShimVersion)
 }
 
 func preferredDistributionNodeID(req *types.CreateCubeSandboxReq) string {

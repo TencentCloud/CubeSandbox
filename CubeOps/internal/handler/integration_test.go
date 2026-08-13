@@ -13,12 +13,14 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/ory/dockertest/v3"
 	"github.com/ory/dockertest/v3/docker"
 	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/crypto"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/handler"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
+	cubelog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
 func init() { gin.SetMode(gin.TestMode) }
@@ -102,6 +104,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	h := handler.NewAgentHubHandler(s, cm)
 
 	r := gin.New()
+	r.Use(requestTraceMiddleware())
 	g := r.Group("/api/v1")
 	h.Register(g)
 
@@ -116,6 +119,28 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 }
 
+// requestTraceMiddleware creates a request-scoped RequestTrace from the
+// X-RequestID header (or a fresh UUID) so that handler/service code can
+// correlate outbound CubeMaster requestIDs with the inbound request.
+func requestTraceMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		requestID := strings.TrimSpace(c.GetHeader("X-RequestID"))
+		if requestID == "" {
+			requestID = uuid.NewString()
+		}
+		rt := &cubelog.RequestTrace{
+			RequestID: requestID,
+			Action:    c.Request.Method,
+			Caller:    "cubeops-client",
+			Callee:    "cubeops",
+			CallerIP:  c.ClientIP(),
+		}
+		ctx := cubelog.WithRequestTrace(c.Request.Context(), rt)
+		c.Request = c.Request.WithContext(ctx)
+		c.Next()
+	}
+}
+
 // doRequest issues an HTTP request against the test router and returns the
 // response recorder.
 func doRequest(t *testing.T, env *testEnv, method, path, body string) *httptest.ResponseRecorder {
@@ -127,6 +152,7 @@ func doRequest(t *testing.T, env *testEnv, method, path, body string) *httptest.
 	} else {
 		req = httptest.NewRequest(method, path, nil)
 	}
+	req.Header.Set("X-RequestID", "test-req-id")
 	w := httptest.NewRecorder()
 	env.router.ServeHTTP(w, req)
 	return w

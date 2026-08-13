@@ -21,18 +21,19 @@ func (cb *CubeBox) DeepCopy() *CubeBox {
 	}
 
 	copied := &CubeBox{
-		Metadata:           cb.Metadata.DeepCopy(),
-		Namespace:          cb.Namespace,
-		AppID:              cb.AppID,
-		IP:                 cb.IP,
-		CGroupPath:         cb.CGroupPath,
-		FirstContainerName: cb.FirstContainerName,
-		NumaNode:           cb.NumaNode,
-		Queues:             cb.Queues,
-		Endpoint:           cb.Endpoint,
-		Version:            cb.Version,
-		RequestSource:      cb.RequestSource,
-		UserDeleteMark:     cb.UserDeleteMark.DeepCopy(),
+		Metadata:                               cb.Metadata.DeepCopy(),
+		Namespace:                              cb.Namespace,
+		AppID:                                  cb.AppID,
+		IP:                                     cb.IP,
+		CGroupPath:                             cb.CGroupPath,
+		FirstContainerName:                     cb.FirstContainerName,
+		NumaNode:                               cb.NumaNode,
+		Queues:                                 cb.Queues,
+		Endpoint:                               cb.Endpoint,
+		Version:                                cb.Version,
+		RequestSource:                          cb.RequestSource,
+		UserDeleteMark:                         cb.UserDeleteMark.DeepCopy(),
+		HostMetricsBaselineMissingAtAssignment: cb.HostMetricsBaselineMissingAtAssignment,
 	}
 
 	if cb.PortMappings != nil {
@@ -40,6 +41,23 @@ func (cb *CubeBox) DeepCopy() *CubeBox {
 		for i, pm := range cb.PortMappings {
 			if pm != nil {
 				copied.PortMappings[i] = proto.Clone(pm).(*cubebox.PortMapping)
+			}
+		}
+	}
+
+	copied.NetworkType = cb.NetworkType
+	copied.RuntimeHandler = cb.RuntimeHandler
+	if cb.ExposedPorts != nil {
+		copied.ExposedPorts = append([]int64(nil), cb.ExposedPorts...)
+	}
+	if cb.CubeNetworkConfig != nil {
+		copied.CubeNetworkConfig = proto.Clone(cb.CubeNetworkConfig).(*cubebox.CubeNetworkConfig)
+	}
+	if cb.Volumes != nil {
+		copied.Volumes = make([]*cubebox.Volume, len(cb.Volumes))
+		for i, v := range cb.Volumes {
+			if v != nil {
+				copied.Volumes[i] = proto.Clone(v).(*cubebox.Volume)
 			}
 		}
 	}
@@ -104,12 +122,22 @@ func (cb *CubeBox) DeepCopy() *CubeBox {
 		copied.LocalRunTemplate = &templateCopy
 	}
 
+	if cb.ComponentVersions != nil {
+		copied.ComponentVersions = make(map[string]string, len(cb.ComponentVersions))
+		for k, v := range cb.ComponentVersions {
+			copied.ComponentVersions[k] = v
+		}
+	}
+
 	if cb.ImageReferences != nil {
 		copied.ImageReferences = make(map[string]ImageReference, len(cb.ImageReferences))
 		for k, v := range cb.ImageReferences {
 			copied.ImageReferences[k] = v.DeepCopy()
 		}
 	}
+
+	copied.HostMetricsBaseline = cb.HostMetricsBaselineCopy()
+	copied.GuestMetricsEpoch = cb.GuestMetricsEpochCopy()
 
 	return copied
 }

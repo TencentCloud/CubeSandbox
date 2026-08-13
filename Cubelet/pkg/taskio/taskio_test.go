@@ -91,6 +91,11 @@ func TestTaskIO(t *testing.T) {
 	defer Clean(context.Background(), ctnID)
 
 	expected := 10
+	ch, err := Consume(cfg.Stdout)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	go func() {
 		f, err := fifo.OpenFifo(context.Background(), cfg.Stdout, syscall.O_WRONLY, 0600)
 		if err != nil {
@@ -105,10 +110,6 @@ func TestTaskIO(t *testing.T) {
 		cio.Close()
 	}()
 
-	ch, err := Consume(cfg.Stdout)
-	if err != nil {
-		t.Fatal(err)
-	}
 	actualCnt := 0
 	for range ch {
 		actualCnt++

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/urfave/cli"
 )
@@ -469,6 +470,20 @@ func TestParseContainerOverridesNoDNS(t *testing.T) {
 	}
 	if overrides.DnsConfig != nil {
 		t.Fatalf("expected DnsConfig to be nil when --dns is not set, got %+v", overrides.DnsConfig)
+	}
+}
+
+func TestParseContainerOverridesEnableInjectEnvd(t *testing.T) {
+	ctx := newCreateFromImageContext(t, []string{"--enable-inject-envd"})
+	overrides, err := parseContainerOverrides(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if overrides == nil || overrides.Annotations == nil {
+		t.Fatal("expected annotations to be set")
+	}
+	if got := overrides.Annotations[constants.CubeAnnotationsInjectEnvd]; got != constants.CubeAnnotationsInjectEnvdOptIn {
+		t.Fatalf("expected inject envd annotation=true, got %q", got)
 	}
 }
 

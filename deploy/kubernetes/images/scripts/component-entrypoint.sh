@@ -4,16 +4,17 @@
 #
 # Big Pod / Installer per-component entrypoint (REV3.1).
 # Env:
-#   CUBE_COMPONENT  cubelet|network-agent|cube-shim|cube-kernel|cube-guest
+#   CUBE_COMPONENT  cubelet|cube-shim|cube-kernel|cube-guest|cube-agent
 #   CUBE_ROLE       install|run
 #     install — artifact-only components on cube-node-installer Pod: stage + pause
-#     run     — cubelet / network-agent on Big Pod: self-stage then start the process
+#     run     — cubelet on Big Pod: self-stage then start the process
 #   IMAGE_ROOT      default /opt/cube-image
 #   TOOLBOX_ROOT    default /usr/local/services/cubetoolbox
 set -euo pipefail
 
 IMAGE_ROOT="${IMAGE_ROOT:-/opt/cube-image}"
 TOOLBOX_ROOT="${TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
+COMPONENT_VERSIONS_ROOT="${COMPONENT_VERSIONS_ROOT:-/data/cubelet/root/component_versions}"
 CUBE_COMPONENT="${CUBE_COMPONENT:-}"
 CUBE_ROLE="${CUBE_ROLE:-install}"
 CUBE_PID_DIR="${CUBE_PID_DIR:-/run/cube-node}"
@@ -21,6 +22,139 @@ STATE_DIR="${STATE_DIR:-/var/lib/cube-node-bootstrap}"
 
 log() { printf '[cube-component:%s:%s] %s\n' "${CUBE_COMPONENT:-?}" "${CUBE_ROLE}" "$*"; }
 fail() { printf '[cube-component:%s:%s] ERROR: %s\n' "${CUBE_COMPONENT:-?}" "${CUBE_ROLE}" "$*" >&2; exit 1; }
+
+# Components staged into COMPONENT_VERSIONS_ROOT before toolbox replace.
+is_inventory_component() {
+  case "$1" in
+    cube-shim|cube-kernel|cube-guest|cube-agent) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Read "version" under a nested JSON object key (no jq).
+json_object_version() {
+  local file="$1" key="$2"
+  local collapsed
+  [[ -f "${file}" ]] || return 0
+  collapsed="$(tr '\n' ' ' < "${file}" 2>/dev/null || true)"
+  [[ -n "${collapsed}" ]] || return 0
+  printf '%s' "${collapsed}" | sed -n \
+    "s/.*\"${key}\"[[:space:]]*:[[:space:]]*{[^}]*\"version\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" \
+    | head -n1
+}
+
+# Prefer version.json, else single-line version file. Empty means fail upstream.
+resolve_component_version() {
+  local src="$1"
+  local component="$2"
+  local json="${src}/version.json"
+  local ver="" key
+
+  if [[ -f "${json}" ]]; then
+    case "${component}" in
+      cube-shim)
+        for key in containerd-shim-cube-rs cube-runtime; do
+          ver="$(json_object_version "${json}" "${key}")"
+          [[ -n "${ver}" ]] && break
+        done
+        ;;
+      cube-kernel)
+        ;;
+      cube-guest)
+        ver="$(json_object_version "${json}" "guest-image")"
+        ;;
+      cube-agent)
+        ver="$(json_object_version "${json}" "cube-agent")"
+        ;;
+    esac
+  fi
+
+  if [[ -z "${ver}" && -f "${src}/version" ]]; then
+    ver="$(tr -d '[:space:]' < "${src}/version" 2>/dev/null || true)"
+  fi
+
+  ver="$(printf '%s' "${ver}" | tr -d '[:space:]')"
+  case "${ver}" in
+    ""|unknown|UNKNOWN) return 0 ;;
+  esac
+  if [[ "${ver}" == */* || "${ver}" == *..* ]]; then
+    return 0
+  fi
+  printf '%s\n' "${ver}"
+}
+
+# Copy src into COMPONENT_VERSIONS_ROOT/<rel>/<version>/ (skip if present).
+inventory_component_version() {
+  local src="$1"
+  local rel="$2"
+  local ver dst parent
+  ver="$(resolve_component_version "${src}" "${CUBE_COMPONENT}")"
+  [[ -n "${ver}" ]] || fail "cannot resolve version for ${CUBE_COMPONENT} under ${src} (need version.json or version; unknown forbidden)"
+  dst="${COMPONENT_VERSIONS_ROOT}/${rel}/${ver}"
+  if [[ -d "${dst}" ]]; then
+    log "inventory skip (exists): ${dst}"
+    return 0
+  fi
+  parent="$(dirname "${dst}")"
+  mkdir -p "${parent}"
+  log "inventory ${src} -> ${dst}"
+  atomic_replace_dir "${src}" "${dst}"
+}
+
+file_sha256_hex() {
+  local path="$1"
+  local digest=""
+  [[ -f "${path}" ]] || return 1
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest="$(sha256sum -- "${path}" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    digest="$(shasum -a 256 -- "${path}" | awk '{print $1}')"
+  else
+    return 1
+  fi
+  [[ -n "${digest}" ]] || return 1
+  printf '%s\n' "${digest}"
+}
+
+# Inventory each present kernel variant by content short-hash.
+inventory_kernel_content_variants() {
+  local src="$1"
+  local rel="$2"
+  local file variant digest short_key dst tmp parent
+
+  [[ -d "${src}" ]] || fail "kernel image bypass missing: ${src}"
+
+  for variant in bm pvm; do
+    file="${src}/vmlinux-${variant}"
+    [[ -f "${file}" ]] || continue
+    digest="$(file_sha256_hex "${file}")" || fail "cannot hash ${file}"
+    short_key="sha256-${digest:0:12}"
+    dst="${COMPONENT_VERSIONS_ROOT}/${rel}/${short_key}"
+    if [[ -d "${dst}" ]]; then
+      log "inventory skip (exists): ${dst}"
+      continue
+    fi
+    parent="$(dirname "${dst}")"
+    mkdir -p "${parent}"
+    tmp="${dst}.new.$$"
+    rm -rf "${tmp}"
+    mkdir -p "${tmp}"
+    cp -a "${file}" "${tmp}/vmlinux-${variant}"
+    ln -sfn "vmlinux-${variant}" "${tmp}/vmlinux"
+    printf '%s\n' "${variant}" > "${tmp}/variant"
+    printf 'sha256:%s\n' "${digest}" > "${tmp}/version"
+    if [[ -e "${dst}" ]]; then
+      rm -rf "${tmp}"
+      log "inventory skip (race exists): ${dst}"
+      continue
+    fi
+    mv "${tmp}" "${dst}"
+    log "inventory kernel ${variant} -> ${dst}"
+  done
+  if [[ ! -f "${src}/vmlinux-bm" && ! -f "${src}/vmlinux-pvm" ]]; then
+    fail "cube-kernel inventory requires vmlinux-bm and/or vmlinux-pvm under ${src}"
+  fi
+}
 
 apply_effective_pvm_from_state() {
   local path="${STATE_DIR}/effective-pvm"
@@ -39,10 +173,10 @@ apply_effective_pvm_from_state() {
 component_relpath() {
   case "$1" in
     cubelet) echo "Cubelet" ;;
-    network-agent) echo "network-agent" ;;
     cube-shim) echo "cube-shim" ;;
     cube-kernel) echo "cube-kernel-scf" ;;
     cube-guest) echo "cube-image" ;;
+    cube-agent) echo "cube-agent" ;;
     *) fail "unknown CUBE_COMPONENT=$1" ;;
   esac
 }
@@ -50,10 +184,10 @@ component_relpath() {
 component_sentinel() {
   case "$1" in
     cubelet) echo "${TOOLBOX_ROOT}/.staged-cubelet" ;;
-    network-agent) echo "${TOOLBOX_ROOT}/.staged-network-agent" ;;
     cube-shim) echo "${TOOLBOX_ROOT}/.staged-cube-shim" ;;
     cube-kernel) echo "${TOOLBOX_ROOT}/.staged-cube-kernel" ;;
     cube-guest) echo "${TOOLBOX_ROOT}/.staged-cube-guest" ;;
+    cube-agent) echo "${TOOLBOX_ROOT}/.staged-cube-agent" ;;
     *) fail "unknown CUBE_COMPONENT=$1" ;;
   esac
 }
@@ -161,6 +295,14 @@ stage_component() {
     [[ -n "${preserved_kernel}" ]] && log "preserved guest kernel selection: ${preserved_kernel}"
   fi
 
+  if is_inventory_component "${CUBE_COMPONENT}"; then
+    if [[ "${CUBE_COMPONENT}" == "cube-kernel" ]]; then
+      inventory_kernel_content_variants "${src}" "${rel}"
+    else
+      inventory_component_version "${src}" "${rel}"
+    fi
+  fi
+
   log "staging ${src} -> ${dst} (atomic replace)"
   atomic_replace_dir "${src}" "${dst}"
 
@@ -168,10 +310,7 @@ stage_component() {
     cubelet)
       chmod +x "${dst}/bin/cubelet" "${dst}/bin/cubecli" 2>/dev/null || true
       [[ -x "${dst}/bin/cubelet" ]] || fail "missing cubelet after stage"
-      ;;
-    network-agent)
-      chmod +x "${dst}/bin/network-agent" "${dst}/bin/cubevsmapdump" 2>/dev/null || true
-      [[ -x "${dst}/bin/network-agent" ]] || fail "missing network-agent after stage"
+      [[ -x "${dst}/bin/cubecli" ]] || fail "missing cubecli after stage"
       ;;
     cube-shim)
       chmod +x "${dst}/bin/cube-runtime" "${dst}/bin/containerd-shim-cube-rs" 2>/dev/null || true
@@ -190,6 +329,11 @@ stage_component() {
       ;;
     cube-guest)
       [[ -d "${dst}" ]] || fail "missing guest image dir ${dst}"
+      [[ -f "${dst}/cube-guest-image-cpu.img" ]] || fail "missing ${dst}/cube-guest-image-cpu.img"
+      ;;
+    cube-agent)
+      [[ -f "${dst}/cube-agent.ext4" ]] || fail "missing ${dst}/cube-agent.ext4"
+      [[ -f "${dst}/version" ]] || fail "missing ${dst}/version"
       ;;
   esac
 
@@ -220,33 +364,115 @@ write_atomic() {
   mv -f "${tmp}" "${dest}"
 }
 
+# True when kernel version.json is missing digests for present vmlinux variants.
+kernel_version_json_needs_digest_rewrite() {
+  local dst="$1"
+  local json="${dst}/version.json"
+  local collapsed=""
+
+  [[ -f "${dst}/vmlinux-bm" || -f "${dst}/vmlinux-pvm" ]] || return 1
+  if [[ ! -f "${json}" ]]; then
+    return 0
+  fi
+  collapsed="$(tr '\n' ' ' < "${json}" 2>/dev/null || true)"
+  if [[ -f "${dst}/vmlinux-bm" ]]; then
+    printf '%s' "${collapsed}" | grep -Eq '"bm"[[:space:]]*:[[:space:]]*\{[^}]*"digest_sha256"[[:space:]]*:[[:space:]]*"sha256:[0-9a-f]{64}"' \
+      || return 0
+  fi
+  if [[ -f "${dst}/vmlinux-pvm" ]]; then
+    printf '%s' "${collapsed}" | grep -Eq '"pvm"[[:space:]]*:[[:space:]]*\{[^}]*"digest_sha256"[[:space:]]*:[[:space:]]*"sha256:[0-9a-f]{64}"' \
+      || return 0
+  fi
+  return 1
+}
+
+write_kernel_version_json_from_content() {
+  local dst="$1"
+  local json="${dst}/version.json"
+  local bm_digest pvm_digest bm_short pvm_short first=1
+
+  {
+    printf '{\n  "schema_version": 1,\n  "variants": {\n'
+    if [[ -f "${dst}/vmlinux-bm" ]]; then
+      bm_digest="$(file_sha256_hex "${dst}/vmlinux-bm")" || true
+      if [[ -n "${bm_digest}" ]]; then
+        bm_short="sha256-${bm_digest:0:12}"
+        printf '    "bm": {"version": "%s", "digest_sha256": "sha256:%s"}' \
+          "$(json_escape "${bm_short}")" "$(json_escape "${bm_digest}")"
+        first=0
+        printf 'sha256:%s\n' "${bm_digest}" > "${dst}/version"
+      fi
+    fi
+    if [[ -f "${dst}/vmlinux-pvm" ]]; then
+      pvm_digest="$(file_sha256_hex "${dst}/vmlinux-pvm")" || true
+      if [[ -n "${pvm_digest}" ]]; then
+        pvm_short="sha256-${pvm_digest:0:12}"
+        [[ "${first}" == "1" ]] || printf ','
+        printf '\n    "pvm": {"version": "%s", "digest_sha256": "sha256:%s"}' \
+          "$(json_escape "${pvm_short}")" "$(json_escape "${pvm_digest}")"
+      fi
+    fi
+    printf '\n  }\n}\n'
+  } | write_atomic "${json}"
+  log "wrote content-addressed ${json}"
+}
+
 ensure_component_version_json() {
   local component="$1"
   local dst="$2"
   local json="${dst}/version.json"
-  [[ -f "${json}" ]] && return 0
+
   case "${component}" in
     cube-guest)
-      local img_ver agent_ver
+      [[ -f "${json}" ]] && return 0
+      local img_ver
       img_ver="$(tr -d '[:space:]' < "${dst}/version" 2>/dev/null || true)"
-      agent_ver="$(tr -d '[:space:]' < "${dst}/agent-version" 2>/dev/null || true)"
-      [[ -n "${img_ver}" || -n "${agent_ver}" ]] || return 0
+      [[ -n "${img_ver}" ]] || return 0
       {
         printf '{\n  "schema_version": 1,\n  "components": {\n'
-        local first=1
-        if [[ -n "${img_ver}" ]]; then
-          printf '    "guest-image": {"version": "%s"}' "$(json_escape "${img_ver}")"
-          first=0
-        fi
-        if [[ -n "${agent_ver}" ]]; then
-          [[ "${first}" -eq 1 ]] || printf ',\n'
-          printf '    "cube-agent": {"version": "%s"}' "$(json_escape "${agent_ver}")"
-        fi
-        printf '\n  }\n}\n'
+        printf '    "guest-image": {"version": "%s"}\n' "$(json_escape "${img_ver}")"
+        printf '  }\n}\n'
       } | write_atomic "${json}"
       log "synthesized ${json}"
       ;;
+    cube-agent)
+      [[ -f "${json}" ]] && return 0
+      local agent_ver
+      agent_ver="$(tr -d '[:space:]' < "${dst}/version" 2>/dev/null || true)"
+      [[ -n "${agent_ver}" ]] || return 0
+      {
+        printf '{\n  "schema_version": 1,\n  "components": {\n'
+        printf '    "cube-agent": {"version": "%s"}\n' "$(json_escape "${agent_ver}")"
+        printf '  }\n}\n'
+      } | write_atomic "${json}"
+      log "synthesized ${json}"
+      ;;
+    cube-kernel)
+      if kernel_version_json_needs_digest_rewrite "${dst}"; then
+        write_kernel_version_json_from_content "${dst}"
+      fi
+      ;;
   esac
+}
+
+stage_cubevs_tools() {
+  local src="${IMAGE_ROOT}/cube-vs/network/bin/cubevsmapdump"
+  local dst_dir="${TOOLBOX_ROOT}/cube-vs/network/bin"
+  local dst="${dst_dir}/cubevsmapdump"
+  local tmp="${dst}.tmp.$$"
+  [[ -f "${src}" ]] || fail "image bypass missing: ${src}"
+  mkdir -p "${dst_dir}"
+  cp "${src}" "${tmp}"
+  chmod +x "${tmp}"
+  mv -f "${tmp}" "${dst}"
+  [[ -x "${dst}" ]] || fail "missing cubevsmapdump after cube-vs install"
+  if [[ -f "${IMAGE_ROOT}/cube-vs/version.json" ]]; then
+    cp "${IMAGE_ROOT}/cube-vs/version.json" "${TOOLBOX_ROOT}/cube-vs/version.json.tmp.$$"
+    mv -f "${TOOLBOX_ROOT}/cube-vs/version.json.tmp.$$" "${TOOLBOX_ROOT}/cube-vs/version.json"
+  fi
+  mkdir -p /usr/local/bin
+  ln -sf "${dst}" /usr/local/bin/cubevsmapdump
+  log "installed cubevsmapdump -> ${dst}"
 }
 
 run_install() {
@@ -364,8 +590,42 @@ configure_sandbox_dns() {
       ' /etc/resolv.conf
     )"
     log "sandbox DNS follow-node nameservers: ${CUBE_SANDBOX_DNS_SERVERS:-<empty>}"
+    if [[ -z "${CUBE_SANDBOX_DNS_SEARCHES:-}" ]]; then
+      CUBE_SANDBOX_DNS_SEARCHES="$(
+        awk '
+          $1 ~ /^#/ { next }
+          $1 == "search" {
+            for (i = 2; i <= NF; i++) {
+              if ($i ~ /^[#;]/) break
+              if (seen[$i]++) continue
+              if (n++) printf ","
+              printf "%s", $i
+            }
+          }
+        ' /etc/resolv.conf
+      )"
+      log "sandbox DNS follow-node searches: ${CUBE_SANDBOX_DNS_SEARCHES:-<empty>}"
+    fi
+    if [[ -z "${CUBE_SANDBOX_DNS_OPTIONS:-}" ]]; then
+      CUBE_SANDBOX_DNS_OPTIONS="$(
+        awk '
+          $1 ~ /^#/ { next }
+          $1 == "options" {
+            for (i = 2; i <= NF; i++) {
+              if ($i ~ /^[#;]/) break
+              if (seen[$i]++) continue
+              if (n++) printf ","
+              printf "%s", $i
+            }
+          }
+        ' /etc/resolv.conf
+      )"
+      log "sandbox DNS follow-node options: ${CUBE_SANDBOX_DNS_OPTIONS:-<empty>}"
+    fi
   fi
   patch_common_yaml_list default_dns_servers "${CUBE_SANDBOX_DNS_SERVERS:-}"
+  patch_common_yaml_list default_dns_searches "${CUBE_SANDBOX_DNS_SEARCHES:-}"
+  patch_common_yaml_list default_dns_options "${CUBE_SANDBOX_DNS_OPTIONS:-}"
 }
 
 write_pidfile() {
@@ -389,79 +649,24 @@ kill_pidfile() {
   rm -f "${file}"
 }
 
-run_network_agent() {
-  local bin="${TOOLBOX_ROOT}/network-agent/bin/network-agent"
-  local cfg="${TOOLBOX_ROOT}/Cubelet/config/config.toml"
-  local state_dir="${NETWORK_AGENT_STATE_DIR:-/data/cubelet/network-agent/state}"
-  local health="${NETWORK_AGENT_HEALTH_URL:-http://127.0.0.1:19090/readyz}"
-  local pid
 
-  # Self-stage (no separate network-agent-install container).
-  stage_component "$(component_relpath network-agent)"
-  # Config lives under Cubelet tree — wait until cubelet run has staged it.
-  wait_sentinel "$(component_sentinel cubelet)" "cubelet-config"
-  [[ -x "${bin}" ]] || fail "missing ${bin}"
-  [[ -f "${cfg}" ]] || fail "missing ${cfg}"
-
-  mkdir -p "${state_dir}" "${TOOLBOX_ROOT}/cube-vs/network" /tmp/cube /data/log
-  rm -f /tmp/cube/network-agent.sock /tmp/cube/network-agent-grpc.sock /tmp/cube/network-agent-tap.sock || true
-
-  kill_pidfile network-agent
-
-  if [[ -z "${CUBE_SANDBOX_ETH_NAME:-}" && "${CUBE_SANDBOX_AUTO_DETECT_ETH:-true}" == "true" ]]; then
-    CUBE_SANDBOX_ETH_NAME="$(detect_primary_interface || true)"
-    [[ -n "${CUBE_SANDBOX_ETH_NAME}" ]] && log "auto detected primary interface: ${CUBE_SANDBOX_ETH_NAME}"
-  fi
-  if [[ -n "${CUBE_SANDBOX_ETH_NAME:-}" ]]; then
-    local eth_esc
-    eth_esc="$(sed_escape_replacement "${CUBE_SANDBOX_ETH_NAME}")"
-    sed -i "s/eth_name = \"[^\"]*\"/eth_name = \"${eth_esc}\"/" "${cfg}"
-  fi
-  if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
-    local cidr_esc
-    cidr_esc="$(sed_escape_replacement "${CUBE_SANDBOX_NETWORK_CIDR}")"
-    sed -i "s|cidr = \"[^\"]*\"|cidr = \"${cidr_esc}\"|" "${cfg}"
-  fi
-
-  log "starting network-agent"
-  "${bin}" --cubelet-config "${cfg}" --state-dir "${state_dir}" &
-  pid=$!
-  write_pidfile network-agent "${pid}"
-
-  cleanup() { kill_pidfile network-agent; }
-  trap cleanup TERM INT HUP EXIT
-
-  local i
-  for i in $(seq 1 120); do
-    if curl -fsS "${health}" >/dev/null 2>&1; then
-      log "network-agent ready"
-      break
-    fi
-    if ! kill -0 "${pid}" >/dev/null 2>&1; then
-      fail "network-agent exited before ready"
-    fi
-    [[ "${i}" -lt 120 ]] || fail "network-agent did not become ready"
-    sleep 1
-  done
-
-  while kill -0 "${pid}" >/dev/null 2>&1; do
-    sleep 10
-  done
-  fail "network-agent exited"
-}
 
 run_cubelet() {
   local bin="${TOOLBOX_ROOT}/Cubelet/bin/cubelet"
   local cfg="${TOOLBOX_ROOT}/Cubelet/config/config.toml"
   local dyn="${CUBELET_DYNAMICCONF:-${TOOLBOX_ROOT}/Cubelet/dynamicconf/conf.yaml}"
-  local pid launch
+  local i pid launch
 
-  # Self-stage (no separate cubelet-install container).
+  # Self-stage (no separate cubelet-install container). CubeVS tools are bundled
+  # with the cubelet image so cube-node-installer does not need an extra
+  # CubeVS installer container.
   stage_component "$(component_relpath cubelet)"
+  stage_cubevs_tools
   wait_sentinel "$(component_sentinel cube-shim)" "cube-shim"
   wait_sentinel "$(component_sentinel cube-kernel)" "cube-kernel"
   wait_sentinel "$(component_sentinel cube-guest)" "cube-guest"
-  wait_sentinel "$(component_sentinel network-agent)" "network-agent"
+  wait_sentinel "$(component_sentinel cube-agent)" "cube-agent"
+
 
   [[ -x "${bin}" ]] || fail "missing ${bin}"
   [[ -f "${cfg}" ]] || fail "missing ${cfg}"
@@ -491,6 +696,13 @@ run_cubelet() {
     cidr_esc="$(sed_escape_replacement "${CUBE_SANDBOX_NETWORK_CIDR}")"
     sed -i "s|cidr = \"[^\"]*\"|cidr = \"${cidr_esc}\"|" "${cfg}"
   fi
+  if [[ -n "${CUBE_EGRESS_ADMIN_PORT:-}" ]]; then
+    [[ "${CUBE_EGRESS_ADMIN_PORT}" =~ ^[0-9]+$ ]] || fail "CUBE_EGRESS_ADMIN_PORT must be a positive integer"
+    local egress_admin_url="http://127.0.0.1:${CUBE_EGRESS_ADMIN_PORT}"
+    local egress_admin_url_esc
+    egress_admin_url_esc="$(sed_escape_replacement "${egress_admin_url}")"
+    sed -i "s|cube_egress_admin_url = \"[^\"]*\"|cube_egress_admin_url = \"${egress_admin_url_esc}\"|" "${cfg}"
+  fi
   if [[ -n "${CUBE_TAP_INIT_NUM:-}" ]]; then
     [[ "${CUBE_TAP_INIT_NUM}" =~ ^[0-9]+$ ]] || fail "CUBE_TAP_INIT_NUM must be a non-negative integer"
     sed -i "s/tap_init_num = [0-9]\+/tap_init_num = ${CUBE_TAP_INIT_NUM}/" "${cfg}"
@@ -514,21 +726,14 @@ run_cubelet() {
     /data/cubelet/state \
     "${TOOLBOX_ROOT}/cube-snapshot" \
     "${TOOLBOX_ROOT}/cube-vs/network"
+  [[ -x "${TOOLBOX_ROOT}/cube-vs/network/bin/cubevsmapdump" ]] || fail "missing cubevsmapdump after cube-vs stage"
+  mkdir -p /usr/local/bin
+  ln -sf "${TOOLBOX_ROOT}/cube-vs/network/bin/cubevsmapdump" /usr/local/bin/cubevsmapdump
 
   if ! findmnt --mountpoint /data/cubelet/state >/dev/null 2>&1; then
     mount --bind /data/cubelet/state /data/cubelet/state
     log "bound /data/cubelet/state to hostPath (skip state tmpfs)"
   fi
-
-  # Wait for network-agent health before cubelet init (NA creates cube-dev).
-  local i
-  for i in $(seq 1 120); do
-    if curl -fsS "${NETWORK_AGENT_HEALTH_URL:-http://127.0.0.1:19090/readyz}" >/dev/null 2>&1; then
-      break
-    fi
-    [[ "${i}" -lt 120 ]] || fail "network-agent not healthy before cubelet start"
-    sleep 1
-  done
 
   kill_pidfile cubelet
 
@@ -565,7 +770,6 @@ main() {
     install) run_install ;;
     run)
       case "${CUBE_COMPONENT}" in
-        network-agent) run_network_agent ;;
         cubelet) run_cubelet ;;
         *) fail "CUBE_ROLE=run not supported for ${CUBE_COMPONENT}" ;;
       esac

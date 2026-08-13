@@ -386,6 +386,7 @@ var**. Inline fields accepted by `create`: `apiUrl`, `proxyNodeIp`,
 | `sb.getInfo()` | `GET /sandboxes/:id` — get sandbox state and metadata |
 | `sb.pause(options?)` | `POST /sandboxes/:id/pause` — pause sandbox |
 | `sb.resume(timeout?)` | `POST /sandboxes/:id/resume` — resume (deprecated, use `connect`) |
+| `sb.setTimeout(timeout)` | `POST /sandboxes/:id/timeout` — set sandbox idle timeout |
 | `sb.kill()` | `DELETE /sandboxes/:id` — destroy sandbox |
 | `sb.createSnapshot(name?)` | `POST /sandboxes/:id/snapshots` — create a snapshot |
 | `sb.rollback(snapshotId)` | `POST /sandboxes/:id/rollback` — roll back to a snapshot |

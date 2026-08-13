@@ -174,7 +174,7 @@ func (cs *CubeStore) DeleteWithTx(bucket, key string, callback func() error) (er
 		if callback != nil {
 			err = callback()
 		}
-		return nil
+		return err
 	})
 	return
 }

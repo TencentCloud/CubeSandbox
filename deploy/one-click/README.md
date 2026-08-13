@@ -5,7 +5,9 @@ This directory is used to build and deliver the single-machine one-click release
 ## Directory Overview
 
 - `build-release-bundle-builder.sh`: Recommended entry point. Compiles the components needed by one-click inside a builder image, then continues the release package assembly on the host machine.
-- `build-vm-assets.sh`: Builds `containerd-shim-cube-rs`, `cube-runtime`, and `cube-agent`; injects `cube-agent` into the guest image as `/sbin/init`; and collects the guest kernel.
+- `build-vm-assets.sh`: Builds `containerd-shim-cube-rs`, `cube-runtime`, guest image (with `cube-init` as `/sbin/init`), and independent `cube-agent.ext4`; collects the guest kernel.
+- `build-guest-image.sh`: Builds guest OS image with lightweight `cube-init` only (no baked-in agent).
+- `build-agent-ext4.sh`: Builds independent `cube-agent/cube-agent.ext4` (+ `version`) for virtio-pmem1.
 - `build-release-bundle.sh`: Low-level packaging entry point. Consumes either the source tree or `ONE_CLICK_*_BIN` pre-built artifacts, assembles `sandbox-package`, and produces the final release package.
 - `config-cube.toml`: Default one-click runtime configuration template.
 - `support/`: `docker compose` templates for MySQL/Redis, installed to `/usr/local/services/cubetoolbox/support/` on the target machine; `support/bin/mkcert` is the bundled mkcert binary.
@@ -19,6 +21,20 @@ This directory is used to build and deliver the single-machine one-click release
 - `lib/common.sh`: Common shell utility functions.
 - `scripts/one-click/`: Validation and maintenance helpers used by the systemd-managed deployment after installation.
 - `terraform/tencentcloud/`: Terraform deployer for a **clustered** CubeSandbox on Tencent Cloud (TKE control plane + CVM compute nodes). `create.sh` is the entry point; `destroy.sh` tears everything down. These files are shipped both at the release-bundle top level and inside `sandbox-package` (see "Tencent Cloud Cluster Deployment").
+
+## Root Makefile Targets (agent-independent pmem)
+
+From the repository root, these targets build via the unified builder image (`make builder-image` first if needed):
+
+```bash
+make cube-init          # guest PID1 binary → _output/bin/cube-init (alias: guest-init)
+make agent-ext4         # independent plane file → _output/cube-agent/{cube-agent.ext4,version}
+                        # (alias: cube-agent-ext4)
+make pmem-assets        # cube-init + agent-ext4
+make help               # list all root targets
+```
+
+For the full runtime layout (shim + guest image + agent.ext4 + kernel), use `./build-vm-assets.sh` or the release-bundle entry points below.
 
 ## Supported Operating Systems
 
@@ -40,7 +56,14 @@ export ONE_CLICK_CUBE_KERNEL_VMLINUX=/abs/path/to/vmlinux
 export ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX=/abs/path/to/vmlinux-pvm
 ```
 
-The installed runtime still uses `cube-kernel-scf/vmlinux` as the active guest kernel path. The package stores the ordinary guest kernel as `vmlinux-bm` and keeps `vmlinux` as a symlink: by default it points to `vmlinux-bm`; if the target machine sets `CUBE_PVM_ENABLE=1` during installation, the installer points it to `vmlinux-pvm`.
+Kernel multi-version inventory (content-addressed):
+
+- On install, `vmlinux-bm` / `vmlinux-pvm` are each inventoried under `component_versions/cube-kernel-scf/sha256-<12 hex>/`
+- Each inventory dir contains: `vmlinux-bm|pvm`, `vmlinux` symlink, `variant` (`bm`/`pvm`), and `version` (`sha256:<64 hex>` for shim)
+- `KERNEL_TAG` / `PVM_KERNEL_TAG` are **not** inventory directory names; `release-manifest` `kernel.version` / `pvm_version` also record content short hashes
+- Ensure maps the digest from Master identity onto that short key
+
+The installed runtime still uses `cube-kernel-scf/vmlinux` as the active guest kernel path. The package stores `vmlinux-bm` and keeps `vmlinux` as a symlink: by default it points to `vmlinux-bm`; if the target machine sets `CUBE_PVM_ENABLE=1` during installation, the installer points it to `vmlinux-pvm`.
 
 The guest image no longer depends on a local zip file. By default it is generated locally from `deploy/guest-image/Dockerfile` during the one-click release package build. Common override parameters:
 
@@ -72,9 +95,18 @@ Run the following from the repository root on the host machine (recommended):
 ./deploy/one-click/build-release-bundle-builder.sh
 ```
 
+To embed a default `envd` binary into the packaged `cubemastercli`, prepare the binary on the build host and pass `ENVD_LOCAL_PATH` to the recommended builder entry point:
+
+```bash
+ENVD_LOCAL_PATH=/abs/path/to/envd \
+./deploy/one-click/build-release-bundle-builder.sh
+```
+
+When this variable is set, the host wrapper copies the file into `deploy/one-click/.work/envd`; the builder container then builds `cubemastercli` with that file embedded. If `ENVD_LOCAL_PATH` is omitted, the packaged `cubemastercli` does not include a default `envd`, and template builds that opt in to envd injection must pass `--envd-path` at runtime.
+
 This entry point will:
 
-- Compile `cubemaster`, `cubemastercli`, `cubelet`, `cubecli`, `cube-api`, `network-agent`, `cube-agent`, `containerd-shim-cube-rs`, and `cube-runtime` inside a container using the root-level builder image.
+- Compile `cubemaster`, `cubemastercli`, `cubelet`, `cubecli`, `cube-api`, `cube-agent`, `containerd-shim-cube-rs`, and `cube-runtime` inside a container using the root-level builder image. The network runtime is embedded in `cubelet` and no standalone network runtime binary is built.
 - Run `go mod download` for `CubeMaster` and `Cubelet` inside the builder. The first build will fetch Go modules online; subsequent builds reuse the module cache under the builder's HOME directory.
 - Place the pre-built artifacts in `deploy/one-click/.work/prebuilt/`.
 - Return to the host machine and call `build-release-bundle.sh` to build the WebUI static assets, continue with guest image generation, and finish final packaging.
@@ -112,7 +144,8 @@ The release package contains:
 - `release-manifest.json`
 - `CubeAPI/bin/cube-api`
 - `containerd-shim-cube-rs`, `cube-runtime`
-- Locally built `cube-image/cube-guest-image-cpu.img`
+- Locally built `cube-image/cube-guest-image-cpu.img` (with `cube-init` as `/sbin/init`)
+- Independent `cube-agent/cube-agent.ext4` (+ `cube-agent/version`)
 - `cubeproxy/` directory and its build context
 - `support/` directory and its compose templates
 - `webui/` directory, its compose template, nginx configuration, and built `web/dist` assets
@@ -137,13 +170,12 @@ One-click does not create an extra global `configs/` layer on the target machine
   - `cubelet_conf.default_timeout_insec`: cluster default sandbox idle TTL when the client omits `timeout`; unset or `<= 0` means **no cluster-wide idle timeout** (shipped default `-1`). See [lifecycle — Operational Notes](../../docs/guide/lifecycle.md#cluster-default-idle-timeout-default_timeout_insec).
 - `Cubelet/config/` → `Cubelet/config/`
 - `Cubelet/dynamicconf/` → `Cubelet/dynamicconf/`
-- `configs/single-node/network-agent.yaml` → `network-agent/network-agent.yaml`
 - `CubeAPI/bin/cube-api` → `/usr/local/services/cubetoolbox/CubeAPI/bin/cube-api`
 - `support/` → `/usr/local/services/cubetoolbox/support/`
 - `cubeproxy/` → `/usr/local/services/cubetoolbox/cubeproxy/`
 - `webui/` → `/usr/local/services/cubetoolbox/webui/`
 
-`Cubelet` uses the existing `dynamicconf/conf.yaml` from the repository as-is. At runtime, `network-agent` preferentially reads the network plugin configuration from `Cubelet/config/config.toml` via `--cubelet-config` to stay consistent with `Cubelet`'s network parameters. `cube-api` reads environment variables directly from `.one-click.env` on startup, listening on `0.0.0.0:3000` by default and forwarding to the local `cubemaster`. MySQL/Redis are always deployed to `/usr/local/services/cubetoolbox/support` and run in Docker containers managed by dedicated systemd services on the target machine. `cube proxy` is always deployed to `/usr/local/services/cubetoolbox/cubeproxy`, built locally from the bundled build context, and managed by systemd. WebUI is deployed to `/usr/local/services/cubetoolbox/webui`, listens on `12088` by default, serves the packaged `webui/dist` directory through a standard nginx container, and proxies `/cubeapi` to CubeAPI through Docker `host-gateway` under systemd management.
+`Cubelet` uses the existing `dynamicconf/conf.yaml` from the repository as-is, and its embedded network runtime reads the network plugin configuration from `Cubelet/config/config.toml` directly. `cube-api` reads environment variables directly from `.one-click.env` on startup, listening on `0.0.0.0:3000` by default and forwarding to the local `cubemaster`. MySQL/Redis are always deployed to `/usr/local/services/cubetoolbox/support` and run in Docker containers managed by dedicated systemd services on the target machine. `cube proxy` is always deployed to `/usr/local/services/cubetoolbox/cubeproxy`, built locally from the bundled build context, and managed by systemd. WebUI is deployed to `/usr/local/services/cubetoolbox/webui`, listens on `12088` by default, serves the packaged `webui/dist` directory through a standard nginx container, and proxies `/cubeapi` to CubeAPI through Docker `host-gateway` under systemd management.
 
 ## Target Machine Installation
 
@@ -228,8 +260,8 @@ sudo ./install-compute.sh
 
 In compute node mode, the installer will:
 
-- Install `Cubelet`, `network-agent`, `cube-shim`, `cube-image`, `cube-kernel-scf`, `cube-egress`, the required scripts, and `docker`.
-- Start `network-agent` and `cubelet`, and bring up `cube-egress` via `cube-sandbox-compute.target` (the transparent egress MITM proxy, run as a docker container, which enforces per-sandbox egress policy).
+- Install `Cubelet` with the embedded network runtime, `cube-shim`, `cube-image`, `cube-kernel-scf`, `cube-egress`, the required scripts, and `docker`.
+- Start `cubelet`, and bring up `cube-egress` via `cube-sandbox-compute.target` (the transparent egress MITM proxy, run as a docker container, which enforces per-sandbox egress policy).
 - Before `cube-egress` starts, pull the MITM root CA (cert + key) from the control node's `/cube/ca/<file>` endpoint so it matches the CA baked into templates — templates then trust the leaf certs the compute-node `cube-egress` signs.
 - Point `Cubelet`'s `meta_server_endpoint` to `ONE_CLICK_CONTROL_PLANE_IP:8089`.
 - Automatically register the node via the control node's `/internal/meta` API.
@@ -293,6 +325,8 @@ Other common parameters:
 ```bash
 CUBE_PROXY_HTTPS_PORT=443
 CUBE_PROXY_HTTP_PORT=80
+CUBE_PROXY_GRPC_PORT=9090
+CUBE_EGRESS_ADMIN_PORT=9091
 # Deprecated: CUBE_PROXY_HOST_PORT is ignored; configure CUBE_PROXY_HTTP_PORT instead.
 CUBE_PROXY_CERT_DIR=/usr/local/services/cubetoolbox/cubeproxy/certs
 CUBE_PROXY_DNS_ANSWER_IP="${CUBE_SANDBOX_NODE_IP}"
@@ -313,10 +347,10 @@ During installation, the following steps are performed:
 - `cube-sandbox-*.service|target|timer` unit files are installed under `/etc/systemd/system/`, and both host processes and Docker containers are managed uniformly by systemd.
 - MySQL, Redis, cube proxy, WebUI, and CoreDNS still run in Docker, but their lifecycle is managed directly by dedicated systemd services instead of relying on runtime `docker compose up -d`.
 - If `resolvectl` is available, one-click creates a dedicated dummy link (default `cube-dns0`) with a local address, binds CoreDNS to `169.254.254.53` on that link by default, and routes `cube.app` through the link without affecting the host's default public DNS path. If `resolvectl` is unavailable on the target machine, the installer falls back to `NetworkManager + dnsmasq`: it still creates the same dummy link, asks `dnsmasq` to additionally listen on `169.254.254.53`, takes `/etc/resolv.conf` ownership away from NetworkManager (`rc-manager=unmanaged`) and rewrites it to point at the same non-loopback IP. This keeps the host resolver symmetrical with the `systemd-resolved` path and avoids the Docker daemon's silent fallback to public DNS (`8.8.8.8`) that happens when `/etc/resolv.conf` contains only loopback nameservers — without it, every container on the host (including `docker build`'s `apk update` step) ends up using DNS servers that internal machines cannot reach. On hosts where NetworkManager initializes its `dnsmasq` plugin but never spawns the child process (for example bonded interfaces managed via `ifcfg` + `assume`), set `CUBE_PROXY_DNSMASQ_MODE=standalone` so the DNS scripts launch and own `dnsmasq` directly instead of relying on the NetworkManager plugin; the client-facing resolver layout (dummy link, listen addresses, entry IP) is otherwise identical.
-- Host processes `network-agent`, `cubemaster`, `cube-api`, and `cubelet` are started through systemd, and `quickcheck.sh` verifies both unit state and service health.
+- Host processes `cubemaster`, `cube-api`, and `cubelet` are started through systemd, and `quickcheck.sh` verifies both unit state and service health.
 - A standard WebUI nginx container is started under `/usr/local/services/cubetoolbox/webui/`. It mounts `webui/dist` as read-only static content, publishes `WEB_UI_HOST_PORT` (`12088` by default), maps `host.docker.internal` to Docker `host-gateway`, and verifies `/health` through the nginx reverse proxy (served by CubeOps).
 
-Stopping one-click will simultaneously stop MySQL/Redis under `/usr/local/services/cubetoolbox/support`, WebUI, `cube proxy` / `CoreDNS`, and the host processes `network-agent` / `cubemaster` / `cube-api` / `cubelet`, and will roll back the host DNS routing configuration for `cube.app`.
+Stopping one-click will simultaneously stop MySQL/Redis under `/usr/local/services/cubetoolbox/support`, WebUI, `cube proxy` / `CoreDNS`, and the host processes `cubemaster` / `cube-api` / `cubelet`, and will roll back the host DNS routing configuration for `cube.app`.
 
 After deployment, to point the E2B official SDK to the one-click node, set the following on the client side:
 
@@ -427,7 +461,7 @@ sudo yum install -y e2fsprogs util-linux
 - The recommended entry point only runs component compilation inside the builder; guest image generation and final packaging are still performed on the host machine.
 - If invoking the low-level entry point `build-release-bundle.sh` directly, the build machine must also have local toolchains such as `go`, `cargo`, and `make` installed, depending on the build mode.
 - If using the low-level entry point directly or running the recommended entry point for the first time, the build machine must be able to download Go modules from the internet. Configure a usable `GOPROXY` in advance for restricted network environments.
-- If the VM path is enabled, the target machine must still satisfy the runtime permission requirements for `network-agent`, tap interfaces, routing, etc.
+- If the VM path is enabled, the target machine must still satisfy the runtime permission requirements for the Cubelet embedded network runtime, tap interfaces, routing, etc.
 
 ## Known Limitations
 

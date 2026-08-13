@@ -187,7 +187,7 @@ func lookupInnerMap(outerMap *ebpf.Map, ifindex uint32) (*ebpf.Map, error) {
 
 // cleanupNetPolicy flushes all entries in the inner LPM trie maps
 // for the given ifindex in both allow_out_v2 and deny_out.
-// This should be called during DelTAPDevice.
+// This should be called during DeleteTAPDevice.
 func cleanupNetPolicy(ifindex uint32) error {
 	allowOut, err := loadPinnedMap(MapNameAllowOutV2)
 	if err != nil {
@@ -209,18 +209,47 @@ func cleanupNetPolicy(ifindex uint32) error {
 	return flushInnerMap(denyOut, ifindex)
 }
 
-// PrepareTAPDevicePolicy clears per-sandbox policy residue, then installs
-// policy entries that are invariant for a TAP while it sits in the free pool.
-// Per-sandbox policy application can then skip rewriting these default
-// private/link-local deny ranges on every create.
-func PrepareTAPDevicePolicy(ifindex uint32) error {
+// CleanupTAPDevicePolicy removes sandbox-specific CubeVS policy residue for one
+// TAP ifindex. It does not install reusable-pool defaults and does not touch TAP
+// metadata; callers compose those steps explicitly.
+func CleanupTAPDevicePolicy(ifindex uint32) error {
 	if err := cleanupNetPolicy(ifindex); err != nil {
 		return err
 	}
 	if err := cleanupDNSAllow(ifindex); err != nil {
 		return err
 	}
+	return cleanupDNSPolicyFlags(ifindex)
+}
 
+func cleanupDNSPolicyFlags(ifindex uint32) error {
+	m, err := loadPinnedMap(MapNameIfindexToMVMMetadata)
+	if err != nil {
+		return err
+	}
+	defer m.Close()
+
+	var meta mvmMetadata
+	if err := m.Lookup(&ifindex, &meta); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return nil
+		}
+		return fmt.Errorf("map.Lookup failed: %w, name: %s", err, MapNameIfindexToMVMMetadata)
+	}
+	if meta.DNSPolicyFlags == 0 {
+		return nil
+	}
+	meta.DNSPolicyFlags = 0
+	if err := m.Update(&ifindex, &meta, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("map.Update failed: %w, name: %s", err, MapNameIfindexToMVMMetadata)
+	}
+	return nil
+}
+
+// InstallTAPDefaultDenyPolicy installs the invariant default deny entries
+// without clearing policy maps. Cleanup paths call this only after
+// CleanupTAPDevicePolicy has already removed per-sandbox policy residue.
+func InstallTAPDefaultDenyPolicy(ifindex uint32) error {
 	denyOut, err := loadPinnedMap(MapNameDenyOut)
 	if err != nil {
 		return err
@@ -403,56 +432,6 @@ func validateNetPolicyPlan(plan *netPolicyPlan) error {
 		return err
 	}
 	return validateNetPolicyEntryCount("network.deny_out", len(effectiveDenyOutEntriesForReplace(plan)), maxNetPolicyEntries)
-}
-
-func validateNetPolicyEntryCounts(allowOutCIDRs, l7AllowOutCIDRs, dnsAllowDomains, l7DNSAllowDomains, denyOut []string) error {
-	if count, err := countUniqueLPMEntries(allowOutCIDRs, l7AllowOutCIDRs); err != nil {
-		return err
-	} else if err := validateNetPolicyEntryCount("network.allow_out_v2", count, maxNetPolicyEntries); err != nil {
-		return err
-	}
-
-	if count, err := countUniqueDNSAllowEntries(dnsAllowDomains, l7DNSAllowDomains); err != nil {
-		return err
-	} else if err := validateNetPolicyEntryCount("network.dns_allow", count, maxDNSAllowDomains); err != nil {
-		return err
-	}
-
-	if count, err := countUniqueLPMEntries(denyOut); err != nil {
-		return err
-	} else if err := validateNetPolicyEntryCount("network.deny_out", count, maxNetPolicyEntries); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func countUniqueLPMEntries(groups ...[]string) (int, error) {
-	seen := make(map[lpmKey]struct{})
-	for _, group := range groups {
-		for _, cidr := range group {
-			key, err := parseCIDR(cidr)
-			if err != nil {
-				return 0, err
-			}
-			seen[key] = struct{}{}
-		}
-	}
-	return len(seen), nil
-}
-
-func countUniqueDNSAllowEntries(groups ...[]string) (int, error) {
-	seen := make(map[dnsAllowKey]struct{})
-	for _, group := range groups {
-		for _, domain := range group {
-			key, _, err := makeDNSAllowRule(domain, 0)
-			if err != nil {
-				return 0, err
-			}
-			seen[key] = struct{}{}
-		}
-	}
-	return len(seen), nil
 }
 
 func validateNetPolicyEntryCount(field string, count int, maxEntries int) error {
@@ -661,7 +640,7 @@ func applyNetPolicy(ifindex uint32, opts MVMOptions) error {
 
 // replaceNetPolicy replaces all configured egress policy for an ifindex.
 // It is used by TAP upsert/recovery paths so removed policy entries do not
-// survive a network-agent restart.
+// survive cubelet network runtime restart/recovery.
 func replaceNetPolicy(ifindex uint32, opts MVMOptions) error {
 	return applyNetPolicyWithMode(ifindex, opts, true)
 }

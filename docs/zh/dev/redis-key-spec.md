@@ -64,6 +64,7 @@ cube:{ver}:{scope}:{resource}[:{sub}...]:{id}
 | 沙箱 lifecycle 注册表 | `cube:v1:shared:sandbox:lifecycle:meta` | Hash | shared | CubeMaster | cube-lifecycle-manager | 无（生命周期由 `HDEL` 管理） |
 | 沙箱 lifecycle 事件流 | `cube:v1:shared:sandbox:lifecycle:events` | Stream | shared | CubeMaster | cube-lifecycle-manager | MAXLEN ~ 100000 |
 | 沙箱 lifecycle 状态 | `cube:v1:shared:sandbox:lifecycle:state:{sandboxID}` | String | shared | cube-lifecycle-manager | cube-lifecycle-manager | SET TTL（默认 60s） |
+| 沙箱操作锁（pause/resume/delete） | `cube:v1:master:lock:sandbox:{sandboxID}` | String | master | CubeMaster | CubeMaster | 按操作 SET NX EX：pause **180s**，resume/delete **120s**，其它 **60s**；解锁为 token 匹配的 Lua GET+DEL（不续期） |
 | CubeProxy 副本注册表 | `cube:v1:shared:cube_proxy:registry` | Hash | shared | CubeProxy | cube-lifecycle-manager | 无（心跳超时后由 `HDEL` 清理） |
 | CubeProxy 副本心跳 | `cube:v1:shared:cube_proxy:heartbeat` | Sorted Set | shared | CubeProxy | cube-lifecycle-manager | 无（`ZREMRANGEBYSCORE` 清理，默认 15s 过期） |
 
@@ -132,6 +133,7 @@ cube:{ver}:{scope}:{resource}[:{sub}...]:{id}
 | `sandbox:lifecycle:meta` | 无 TTL | 沙箱创建时写入，销毁时 `HDEL` |
 | `sandbox:lifecycle:events` | MAXLEN ~ | 每次 `XADD` 时裁剪（默认 ~100000） |
 | `sandbox:lifecycle:state` | SET TTL | 每次写入带 `EX`（cube-lifecycle-manager 默认 60s）；回滚或沙箱删除时释放 |
+| `lock:sandbox` | SET NX EX（按操作） | 仅作崩溃／泄漏兜底；正常解锁为 token 安全的 Lua（`GET` 匹配持锁 token 后才 `DEL`）。TTL：pause **180s**，resume/delete **120s**，默认 **60s**（见 `CubeMaster/pkg/sandboxlock`）。不续期。 |
 | `cube_proxy:registry` | 无 TTL（依赖心跳） | 每个 CubeProxy 副本启动时写入；对应心跳过期后由 cube-lifecycle-manager 通过 `HDEL` 清理 |
 | `cube_proxy:heartbeat` | Sorted Set 过期 | Score 为最近一次心跳的 unix ms，超过 `heartbeat_ttl`（默认 15s）的条目由 `ZREMRANGEBYSCORE` 清理 |
 | 缓存类（未来新增） | 必须设 TTL | 写入时显式声明，并在文档中登记 |
@@ -142,6 +144,7 @@ cube:{ver}:{scope}:{resource}[:{sub}...]:{id}
 
 - Key 构造：[`pkg/base/rediskey`](https://github.com/tencentcloud/CubeSandbox/blob/master/CubeMaster/pkg/base/rediskey/rediskey.go)
 - 业务读写：[`pkg/localcache`](https://github.com/tencentcloud/CubeSandbox/tree/master/CubeMaster/pkg/localcache)、[`pkg/instancecache`](https://github.com/tencentcloud/CubeSandbox/tree/master/CubeMaster/pkg/instancecache)
+- 沙箱生命周期锁：[`pkg/sandboxlock`](https://github.com/tencentcloud/CubeSandbox/blob/master/CubeMaster/pkg/sandboxlock/lock.go)
 - 配置项（`redis:` 段）：`node_metric_ttl_sec`（节点指标 TTL，秒）
 
 ### CubeProxy（OpenResty / Lua）

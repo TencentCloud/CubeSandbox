@@ -32,7 +32,7 @@ This deployment uses cloud resources to **quickly stand up a highly-available Cu
   │  ┌─────────┴────────┐       ┌───────────────┴─────┐    │
   │  │ Compute CVM ×N   │       │  TKE managed cluster      │
   │  │  Cubelet         │       │  cube-master (×1)         │
-  │  │  network-agent   │       │  cube-api (×1)            │
+  │  │  network runtime │       │  cube-api (×1)            │
   │  │  CubeEgress      │       │  cube-ops (×1)            │
   │  └──────────────────┘       │  cube-proxy (×1)          │
   │                             │  cube-lifecycle-manager   │
@@ -59,7 +59,7 @@ This deployment uses cloud resources to **quickly stand up a highly-available Cu
 | Jumpserver | CVM (public IP, SSH 443) | Build host (TCR mode) and bastion into the private VPC |
 | Load balancer | CLB (internal/public) | Fronts `cube-api` / `cube-proxy` / `cube-webui`; internal mode by default, user traffic entry point |
 | Control plane | Managed TKE cluster | Runs `cube-master` / `cube-api` / `cube-ops` / `cube-proxy` / `cube-lifecycle-manager` / `cube-webui` |
-| Compute node | CVM PVM | Runs `Cubelet` / `network-agent` / `CubeEgress`; **actually hosts sandboxes** |
+| Compute node | CVM PVM | Runs `Cubelet` with embedded network runtime and `CubeEgress`; **actually hosts sandboxes** |
 | Database | Cloud MySQL 8.0 + Redis 7.0 | VPC-internal only, no public access |
 | Shared storage | CFS (General Standard NFS, **optional**) | When `USE_CFS=true` and cubemaster has multiple replicas, ReadWriteMany share for `/data/CubeMaster/storage` |
 | Registry | TCR (basic, **optional**) | When `USE_TCR=true`; the jumpserver builds and pushes component images |
@@ -70,6 +70,8 @@ This deployment uses cloud resources to **quickly stand up a highly-available Cu
 - **`TENCENTCLOUD_COMPUTE_NODE_COUNT`**: number of **PVM compute nodes** running Cubelet; **sandboxes execute here**.
 Both default to `2` but serve completely different roles.
 :::
+
+Compute node count, instance type, Cubelet report frequency, quota, labels, and template replica availability all affect CubeMaster scheduling. For the complete configuration reference and the required `cubemastercli tpl redo` step after adding compute nodes, see [CubeMaster Scheduler Configuration](./cubemaster-scheduler-config.md).
 
 ## Default Deployment Mode
 

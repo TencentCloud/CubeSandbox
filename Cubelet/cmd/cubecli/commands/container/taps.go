@@ -5,130 +5,137 @@
 package container
 
 import (
-	gocontext "context"
+	"encoding/json"
 	"fmt"
-	"net"
-	"os"
-	"sort"
+	"net/http"
+	"net/url"
 	"strings"
-	"text/tabwriter"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/networkagentclient"
+	networkruntime "github.com/tencentcloud/CubeSandbox/Cubelet/network/runtime"
 	"github.com/urfave/cli/v2"
-	"github.com/vishvananda/netlink"
-	"golang.org/x/sys/unix"
 )
 
-const (
-	tapDeviceNamePrefix = "z"
-)
+const defaultCubeletHTTPAddress = "http://127.0.0.1:9998"
 
-type displayTap struct {
-	Name        string
-	IfIndex     int
-	Used        bool
-	InCubeVS    bool
-	PortMapping []networkagentclient.PortMapping
-}
-
+// ListTapCommand reads TAP state from Cubelet's embedded network runtime instead of
+// talking to the removed standalone network-agent process.
 var ListTapCommand = &cli.Command{
 	Name:  "taps",
-	Usage: "list all taps",
-	Flags: commands.NetworkAgentFlags(),
+	Usage: "list network runtime tap states from cubelet",
+	Flags: []cli.Flag{
+		&cli.StringFlag{
+			Name:    "http-address",
+			Usage:   "cubelet HTTP server address for network runtime diagnostics",
+			EnvVars: []string{"CUBELET_HTTP_ADDRESS"},
+			Value:   defaultCubeletHTTPAddress,
+		},
+		&cli.BoolFlag{
+			Name:  "json",
+			Usage: "output raw JSON response",
+		},
+	},
 	Action: func(clictx *cli.Context) error {
-		ctx, cancel := gocontext.WithTimeout(gocontext.Background(), clictx.Duration("timeout"))
-		defer cancel()
-
-		endpoint, err := commands.ResolveNetworkAgentEndpoint(clictx)
+		resp, err := fetchNetworkRuntimeTaps(clictx.String("http-address"), clictx.Duration("timeout"))
 		if err != nil {
-			return fmt.Errorf("resolve network-agent endpoint: %w", err)
+			return err
 		}
-		naClient, err := networkagentclient.NewClient(endpoint)
-		if err != nil {
-			return fmt.Errorf("create network-agent client for %q: %w", endpoint, err)
+		if clictx.Bool("json") {
+			commands.PrintAsJSON(resp)
+			return nil
 		}
-		listResp, err := naClient.ListNetworks(ctx, &networkagentclient.ListNetworksRequest{})
-		if err != nil {
-			return fmt.Errorf("list networks from network-agent: %w", err)
-		}
-
-		managedByIfindex := make(map[int]networkagentclient.NetworkState, len(listResp.Networks))
-		managedByTapName := make(map[string]networkagentclient.NetworkState, len(listResp.Networks))
-		for _, network := range listResp.Networks {
-			if network.TapIfIndex != 0 {
-				managedByIfindex[int(network.TapIfIndex)] = network
-			}
-			if network.TapName != "" {
-				managedByTapName[network.TapName] = network
-			}
-		}
-
-		links, err := netlink.LinkList()
-		if err != nil {
-			return fmt.Errorf("list netlink: %w", err)
-		}
-
-		w := tabwriter.NewWriter(os.Stdout, 4, 8, 4, ' ', 0)
-		fmt.Fprintln(w, "IP\tUSED\tINCUBEVS\tIFINDEX\tPORTMAPPING")
-		var displayed []displayTap
-		for _, link := range links {
-			tap, ok := link.(*netlink.Tuntap)
-			if !ok {
-				continue
-			}
-			if tap.Mode != netlink.TUNTAP_MODE_TAP {
-				continue
-			}
-			if !strings.HasPrefix(tap.Name, tapDeviceNamePrefix) {
-				continue
-			}
-
-			s := tap.Name[len(tapDeviceNamePrefix):]
-			ip := net.ParseIP(s)
-			if ip == nil {
-				fmt.Fprintf(os.Stderr, "invalid ip %q, skip", tap.Name)
-				continue
-			}
-
-			managed, incubevs := managedByIfindex[tap.Index]
-			if !incubevs {
-				managed, incubevs = managedByTapName[tap.Name]
-			}
-			pm := append([]networkagentclient.PortMapping(nil), managed.PortMappings...)
-			sort.Slice(pm, func(i, j int) bool {
-				if pm[i].ContainerPort == pm[j].ContainerPort {
-					return pm[i].HostPort < pm[j].HostPort
-				}
-				return pm[i].ContainerPort < pm[j].ContainerPort
-			})
-
-			displayed = append(displayed, displayTap{
-				Name:        s,
-				IfIndex:     tap.Index,
-				Used:        link.Attrs().RawFlags&unix.IFF_LOWER_UP > 0,
-				InCubeVS:    incubevs,
-				PortMapping: pm,
-			})
-		}
-
-		sort.Slice(displayed, func(i, j int) bool {
-			return displayed[i].Name < displayed[j].Name
-		})
-
-		for _, tap := range displayed {
-			fmt.Fprintf(w, "%s\t%t\t%t\t%d\t%v\n",
-				tap.Name, tap.Used, tap.InCubeVS, tap.IfIndex, displayPortMapping(tap.PortMapping))
-		}
-
-		return w.Flush()
+		return printNetworkRuntimeTaps(resp.Taps)
 	},
 }
 
-func displayPortMapping(m []networkagentclient.PortMapping) string {
-	var s []string
-	for _, p := range m {
-		s = append(s, fmt.Sprintf("%d->%d", p.ContainerPort, p.HostPort))
+// fetchNetworkRuntimeTaps performs the small diagnostic HTTP call used by the CLI.
+// Keeping this path HTTP-only lets operators inspect runtime state without reviving
+// the old network-agent gRPC client stack.
+func fetchNetworkRuntimeTaps(address string, timeout time.Duration) (*networkruntime.ListTapsResponse, error) {
+	endpoint, err := networkRuntimeTapsURL(address)
+	if err != nil {
+		return nil, err
 	}
-	return strings.Join(s, ",")
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Get(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("cubelet network taps request failed: status=%s", resp.Status)
+	}
+	var out networkruntime.ListTapsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode cubelet network taps response: %w", err)
+	}
+	return &out, nil
+}
+
+// networkRuntimeTapsURL accepts either a bare host:port or a full base URL, then
+// normalizes it to the fixed Cubelet diagnostics endpoint.
+func networkRuntimeTapsURL(address string) (string, error) {
+	address = strings.TrimSpace(address)
+	if address == "" {
+		address = defaultCubeletHTTPAddress
+	}
+	if !strings.Contains(address, "://") {
+		address = "http://" + address
+	}
+	u, err := url.Parse(address)
+	if err != nil {
+		return "", fmt.Errorf("parse cubelet HTTP address %q: %w", address, err)
+	}
+	u.Path = "/v1/network/taps"
+	u.RawQuery = ""
+	return u.String(), nil
+}
+
+// printNetworkRuntimeTaps renders the human-oriented view. The JSON flag keeps
+// the complete runtime response available for scripts and deeper debugging.
+func printNetworkRuntimeTaps(taps []networkruntime.TapState) error {
+	display := commands.NewDefaultTableDisplay()
+	display.AddRow([]string{"STATE", "SANDBOX", "OWNER", "TAP", "IFINDEX", "SANDBOX-IP", "RETRIES", "LAST-ERROR", "PORTS"})
+	for _, state := range taps {
+		display.AddRow([]string{
+			state.State,
+			state.SandboxID,
+			state.OwnerSandboxID,
+			state.TapName,
+			fmt.Sprintf("%d", state.TapIfIndex),
+			state.SandboxIP,
+			fmt.Sprintf("%d", state.RetryCount),
+			formatNetworkRuntimeLastError(state.LastError),
+			formatNetworkRuntimePorts(state.PortMappings),
+		})
+	}
+	return display.Flush()
+}
+
+func formatNetworkRuntimeLastError(lastError string) string {
+	lastError = strings.TrimSpace(lastError)
+	if lastError == "" {
+		return "-"
+	}
+	return lastError
+}
+
+func formatNetworkRuntimePorts(mappings []networkruntime.PortMapping) string {
+	if len(mappings) == 0 {
+		return "-"
+	}
+	parts := make([]string, 0, len(mappings))
+	for _, pm := range mappings {
+		protocol := pm.Protocol
+		if protocol == "" {
+			protocol = "tcp"
+		}
+		hostIP := pm.HostIP
+		if hostIP == "" {
+			hostIP = "127.0.0.1"
+		}
+		parts = append(parts, fmt.Sprintf("%s:%d->%d/%s", hostIP, pm.HostPort, pm.ContainerPort, protocol))
+	}
+	return strings.Join(parts, ",")
 }

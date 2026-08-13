@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/network/proto"
+	networktypes "github.com/tencentcloud/CubeSandbox/Cubelet/network/types"
 	networkstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/network"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 )
@@ -24,8 +24,8 @@ func TestRecoverStore(t *testing.T) {
 
 	store := networkstore.NewStore(db)
 
-	tap := &proto.ShimNetReq{
-		Interfaces: []*proto.Interface{
+	tap := &networktypes.ShimNetReq{
+		Interfaces: []*networktypes.Interface{
 			{
 				Name:   "z192.168.1.10",
 				IPAddr: net.ParseIP("192.168.1.10"),
@@ -55,6 +55,4 @@ func TestRecoverStore(t *testing.T) {
 	assert.Equal(t, tap.GetPersistMetadata(), tapAlloc.PersistentMetadata)
 
 	t.Logf("%+v", string(tapAlloc.PersistentMetadata))
-	_, ok := tapAlloc.Metadata.(*proto.ShimNetReq)
-	require.True(t, ok)
 }

@@ -19,6 +19,17 @@ import (
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
+// submitTemplateCommitFn indirects templatecenter.SubmitTemplateCommit so tests
+// can substitute a plain closure and capture every argument on any arch.
+// gomonkey cannot read a patched function's 6th+ argument on arm64 (register
+// ABI spills later args to the stack, which the trampoline forwards as raw
+// bytes), so swapping this seam instead of patching the function keeps arg
+// capture arch-independent.
+//
+// submitTemplateCommitFn must NOT be swapped concurrently: callers of
+// withCommitStub must not call t.Parallel() on any test that uses it.
+var submitTemplateCommitFn = templatecenter.SubmitTemplateCommit
+
 type commitTemplateRequest struct {
 	RequestID     string                      `json:"requestID,omitempty"`
 	SandboxID     string                      `json:"sandbox_id,omitempty"`
@@ -128,7 +139,7 @@ func handleSandboxCommitAction(c *gin.Context) {
 		"SandboxID":   req.SandboxID,
 		"SandboxHost": hostIP,
 	}))
-	job, err := templatecenter.SubmitTemplateCommit(ctx, req.RequestID, req.SandboxID, hostID, hostIP, req.TemplateID, req.CreateRequest)
+	job, err := submitTemplateCommitFn(ctx, req.RequestID, req.SandboxID, hostID, hostIP, req.TemplateID, req.CreateRequest)
 	if err != nil {
 		code := commitTemplateErrorCode(err)
 		log.G(ctx).Errorf("submit template commit failed: %v", err)

@@ -102,7 +102,7 @@ sudo ./smoke.sh
 
 - systemd units 是否 active
 - 控制节点依赖容器是否 ready
-- `network-agent` / `cubemaster` / `cube-api` 健康接口
+- `cubelet` 内置 network runtime / `cubemaster` / `cube-api` 健康接口
 - socket、配置文件、运行时资源是否存在
 
 如果你已经不在发布包目录，也可以直接执行：
@@ -174,7 +174,6 @@ sudo systemctl stop cube-sandbox-compute.target
 
 ```bash
 sudo systemctl status \
-  cube-sandbox-network-agent.service \
   cube-sandbox-cubelet.service \
   cube-sandbox-cubemaster.service \
   cube-sandbox-cube-api.service \
@@ -195,7 +194,6 @@ sudo systemctl status cube-sandbox-webui.service
 
 ```bash
 sudo systemctl status \
-  cube-sandbox-network-agent.service \
   cube-sandbox-cubelet.service
 ```
 
@@ -205,7 +203,6 @@ sudo systemctl status \
 
 ```bash
 sudo journalctl -u cube-sandbox-cubelet.service -n 200 --no-pager
-sudo journalctl -u cube-sandbox-network-agent.service -n 200 --no-pager
 sudo journalctl -u cube-sandbox-cubemaster.service -n 200 --no-pager
 sudo journalctl -u cube-sandbox-cube-api.service -n 200 --no-pager
 ```
@@ -222,7 +219,6 @@ sudo journalctl -u cube-sandbox-cubelet.service -f
 
 ```bash
 sudo systemctl restart cube-sandbox-cubelet.service
-sudo systemctl restart cube-sandbox-network-agent.service
 ```
 
 控制节点上也常见：
@@ -267,7 +263,7 @@ sudo ./deploy-manual.sh /path/to/cube-manual-update-*.tar.gz
 该脚本会：
 
 - 备份当前核心二进制
-- 替换 `cubemaster` / `cubemastercli` / `cubelet` / `cubecli` / `network-agent`（按角色处理）
+- 替换 `cubemaster` / `cubemastercli` / `cubelet` / `cubecli`（按角色处理；network runtime 已内置在 `cubelet` 中）
 - 用 `systemctl restart` 重启相关核心服务
 - 默认再跑一轮 quickcheck
 
@@ -299,7 +295,6 @@ sudo ./smoke.sh
 
 ```bash
 sudo journalctl -u cube-sandbox-cubelet.service -n 200 --no-pager
-sudo journalctl -u cube-sandbox-network-agent.service -n 200 --no-pager
 ```
 
 控制节点再补充：

@@ -14,13 +14,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/network/proto"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	networkstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/network"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow/provider"
 	srvconfig "github.com/tencentcloud/CubeSandbox/Cubelet/services/server/config"
 	"github.com/urfave/cli/v2"
 )
@@ -78,15 +75,6 @@ var list = &cli.Command{
 				log.Printf("[fatal]: id not match, %s, %s", id, net.SandboxID)
 				continue
 			}
-			var metadata provider.NetworkProvider
-			switch net.NetworkType {
-			case cubebox.NetworkType_tap.String():
-				metadata = &proto.ShimNetReq{}
-			default:
-				return fmt.Errorf("unknown instance type %s", net.NetworkType)
-			}
-			metadata.FromPersistMetadata(net.PersistentMetadata)
-			net.Metadata = metadata
 
 			fmt.Printf("%s|%d|%s|%s|%v\n", net.SandboxID, net.AppID, net.NetworkType, string(net.PersistentMetadata), time.Unix(net.Timestamp, 0).Format(time.DateTime))
 		}

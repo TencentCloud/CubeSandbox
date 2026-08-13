@@ -618,9 +618,11 @@ where
             file.seek(SeekFrom::Start(offset as u64))
                 .map_err(AsyncIoError::ReadVectored)?;
 
-            // Read vectored
-            file.read_vectored(slices.as_mut_slice())
-                .map_err(AsyncIoError::ReadVectored)?
+            let mut r = 0;
+            for b in slices.iter_mut() {
+                r += file.read(b).map_err(AsyncIoError::ReadVectored)?;
+            }
+            r
         };
 
         completion_list.push((user_data, result as i32));
@@ -650,9 +652,11 @@ where
             file.seek(SeekFrom::Start(offset as u64))
                 .map_err(AsyncIoError::WriteVectored)?;
 
-            // Write vectored
-            file.write_vectored(slices.as_slice())
-                .map_err(AsyncIoError::WriteVectored)?
+            let mut r = 0;
+            for b in slices.iter() {
+                r += file.write(b).map_err(AsyncIoError::WriteVectored)?;
+            }
+            r
         };
 
         completion_list.push((user_data, result as i32));

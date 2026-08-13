@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/cubemaster"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/handler"
 )
 
@@ -42,45 +43,55 @@ func (f *fakeCMHandler) GetSandbox(ctx context.Context, sandboxID, instanceType 
 	return nil, errMethodNotConfigured("GetSandbox")
 }
 func (f *fakeCMHandler) CreateSandbox(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	cubemaster.EnsureRequestID(ctx, body)
 	if f.createSandbox == nil {
 		return raw(`{"ret":{"ret_code":0},"data":{"sandbox_id":"sb-fake"}}`), nil
 	}
 	return f.createSandbox(ctx, body)
 }
 func (f *fakeCMHandler) DeleteSandbox(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	cubemaster.EnsureRequestID(ctx, body)
 	if f.deleteSandbox == nil {
 		return raw(`{"ret": {"ret_code": 0}}`), nil // default: success
 	}
 	return f.deleteSandbox(ctx, body)
 }
 func (f *fakeCMHandler) UpdateSandbox(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	cubemaster.EnsureRequestID(ctx, body)
 	if f.updateSandbox == nil {
 		return raw(`{"ret": {"ret_code": 0}}`), nil
 	}
 	return f.updateSandbox(ctx, body)
 }
 func (f *fakeCMHandler) ConnectSandboxWithBody(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	cubemaster.EnsureRequestID(ctx, body)
 	return nil, errMethodNotConfigured("ConnectSandboxWithBody")
 }
 func (f *fakeCMHandler) SetSandboxTimeout(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	cubemaster.EnsureRequestID(ctx, body)
 	return nil, errMethodNotConfigured("SetSandboxTimeout")
 }
 func (f *fakeCMHandler) RefreshSandbox(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	cubemaster.EnsureRequestID(ctx, body)
 	return nil, errMethodNotConfigured("RefreshSandbox")
 }
 func (f *fakeCMHandler) GetSandboxLogs(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	cubemaster.EnsureRequestID(ctx, body)
 	return nil, errMethodNotConfigured("GetSandboxLogs")
 }
 func (f *fakeCMHandler) ListSandboxesWithBody(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	cubemaster.EnsureRequestID(ctx, body)
 	return nil, errMethodNotConfigured("ListSandboxesWithBody")
 }
 func (f *fakeCMHandler) CreateSnapshot(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	cubemaster.EnsureRequestID(ctx, body)
 	if f.createSnapshot == nil {
 		return nil, errMethodNotConfigured("CreateSnapshot")
 	}
 	return f.createSnapshot(ctx, body)
 }
 func (f *fakeCMHandler) ListSnapshots(ctx context.Context, params map[string]string) (json.RawMessage, error) {
+	cubemaster.EnsureRequestIDQuery(ctx, params)
 	return nil, errMethodNotConfigured("ListSnapshots")
 }
 func (f *fakeCMHandler) DeleteSnapshot(ctx context.Context, snapshotID string) (json.RawMessage, error) {
@@ -90,6 +101,7 @@ func (f *fakeCMHandler) DeleteSnapshot(ctx context.Context, snapshotID string) (
 	return f.deleteSnapshot(ctx, snapshotID)
 }
 func (f *fakeCMHandler) RollbackSandbox(ctx context.Context, sandboxID string, body interface{}) (json.RawMessage, error) {
+	cubemaster.EnsureRequestID(ctx, body)
 	if f.rollbackSandbox == nil {
 		return nil, errMethodNotConfigured("RollbackSandbox")
 	}
@@ -102,24 +114,29 @@ func (f *fakeCMHandler) ListTemplates(ctx context.Context, templateID string, in
 	return f.listTemplates(ctx, templateID, includeRequest)
 }
 func (f *fakeCMHandler) CreateTemplateFromImage(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	cubemaster.EnsureRequestID(ctx, body)
 	return nil, errMethodNotConfigured("CreateTemplateFromImage")
 }
 func (f *fakeCMHandler) RedoTemplate(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	cubemaster.EnsureRequestID(ctx, body)
 	return nil, errMethodNotConfigured("RedoTemplate")
 }
 func (f *fakeCMHandler) DeleteTemplate(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	cubemaster.EnsureRequestID(ctx, body)
 	return nil, errMethodNotConfigured("DeleteTemplate")
 }
 func (f *fakeCMHandler) GetTemplateBuildStatus(ctx context.Context, buildID string) (json.RawMessage, error) {
 	return nil, errMethodNotConfigured("GetTemplateBuildStatus")
 }
 func (f *fakeCMHandler) StartTemplateBuild(ctx context.Context, buildID string, body interface{}) (json.RawMessage, error) {
+	cubemaster.EnsureRequestID(ctx, body)
 	return nil, errMethodNotConfigured("StartTemplateBuild")
 }
 func (f *fakeCMHandler) GetTemplateCompat(ctx context.Context) (json.RawMessage, error) {
 	return nil, errMethodNotConfigured("GetTemplateCompat")
 }
 func (f *fakeCMHandler) AdoptTemplateCompatBaseline(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	cubemaster.EnsureRequestID(ctx, body)
 	return nil, errMethodNotConfigured("AdoptTemplateCompatBaseline")
 }
 

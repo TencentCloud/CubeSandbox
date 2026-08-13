@@ -201,14 +201,11 @@ cube-lifecycle-manager（CLM）状态与数据流恢复不一致导致的数据�
 每个 `sdk_sandbox` 由当前测试独占。默认 teardown 使用 `safe_kill`：
 
 1. 查询实例状态；
-2. 对 paused 实例先尝试 `resume_or_connect`；
-3. 使用 SDK kill；
-4. SDK 失败时回退 `DELETE /sandboxes/{sandboxID}`；
-5. 关闭恢复后的 adapter 和原 adapter。
+2. 使用 SDK kill（服务端已支持直接删除 `paused`，无需先 resume）；
+3. SDK 失败时回退 `DELETE /sandboxes/{sandboxID}`；
+4. 关闭 adapter。
 
-当前 paused 实例需要先 `resume_or_connect` 再执行 kill。TODO：当服务端支持
-直接删除 paused 实例后，优化 `safe_kill`，优先直接删除 paused sandbox，并
-增加删除结果和实例列表的确认，避免不必要的 resume。
+若 `safe_kill` 仍保留对 paused 的 `resume_or_connect` 兼容分支，属于客户端保守策略，不是服务端硬性要求。
 
 清理错误记录在报告中，不应覆盖测试主体的失败。设置
 `SDK_E2E_KEEP_SANDBOX_ON_FAILURE=true` 时，只保留 setup/call 失败的实例；

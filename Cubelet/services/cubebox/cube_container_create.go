@@ -46,11 +46,13 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/capability"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/cgroup"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/command"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/disk"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/env"
 	localnetfile "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/netfile"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/pmem"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/rlimit"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/rootfs"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/runc"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/seccomp"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/sysctl"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/tmpfs"
@@ -69,7 +71,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/images"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
 const (
@@ -82,6 +84,36 @@ const (
 func init() {
 	typeurl.Register(&cubeboxstore.CubeBox{},
 		"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox", "CubeBox")
+}
+
+// pausedTombstoneContainerIDs returns containerd IDs that may remain after CoW
+// pause post-cleanup (sandbox ID + any stored container IDs).
+func pausedTombstoneContainerIDs(sb *cubeboxstore.CubeBox) []string {
+	if sb == nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	var ids []string
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	add(sb.ID)
+	add(sb.SandboxID)
+	for id, c := range sb.AllContainers() {
+		add(id)
+		if c != nil {
+			add(c.ID)
+		}
+	}
+	return ids
 }
 
 func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error {
@@ -109,6 +141,35 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 			return ret.Err(errorcode.ErrorCode_PreConditionFailed, "already exists")
 		}
 	}
+	// Resume-from-pause reuses the same sandboxID. Only a fully PAUSED tombstone
+	// may be replaced (not PAUSING — pause may still own the lifecycle lock /
+	// cleanup). Reject PAUSING and other non-paused collisions as already exists.
+	if desired := strings.TrimSpace(realReq.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID]); desired != "" {
+		if sb, err := l.cubeboxManger.Get(ctx, desired); err == nil && sb != nil && sb.SandboxID == desired {
+			st := sb.GetStatus()
+			if st != nil && st.Get().State() == cubebox.ContainerState_CONTAINER_PAUSED {
+				// CDP user-delete hook requires UserMarkDeletedTime before store delete.
+				if sb.UserMarkDeletedTime == nil {
+					now := time.Now()
+					sb.UserMarkDeletedTime = &now
+					_ = l.cubeboxManger.SyncByID(ctx, desired)
+				}
+				// Pause post-cleanup may leave containerd metadata; wipe before recreate.
+				_ = runc.Clean(ctx, desired)
+				for _, id := range pausedTombstoneContainerIDs(sb) {
+					if err := l.client.ContainerService().Delete(ctx, id); err != nil && !errdefs.IsNotFound(err) {
+						log.G(ctx).Warnf("replace paused sandbox: delete containerd %s: %v", id, err)
+					}
+				}
+				if delErr := l.cubeboxManger.Delete(ctx, &cubes.DeleteOption{CubeboxID: desired}); delErr != nil {
+					return ret.Errorf(errorcode.ErrorCode_PreConditionFailed,
+						"failed to replace paused sandbox %s: %v", desired, delErr)
+				}
+			} else {
+				return ret.Err(errorcode.ErrorCode_PreConditionFailed, "already exists")
+			}
+		}
+	}
 	opts.CubeBoxCreated = true
 	if err := l.createContainers(ctx, opts); err != nil {
 		return err
@@ -129,6 +190,20 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 			log.G(ctx).Debugf("set cubebox cgroup %s limit: mem %s, cpu %s", cgInfo.CgroupID,
 				cgInfo.ResourceQuantity.HostMemQ.String(), cgInfo.ResourceQuantity.HostCpuQ.String())
 		}
+	}
+
+	sandBox, err := l.cubeboxManger.Get(ctx, opts.GetSandboxID())
+	if err != nil {
+		log.G(ctx).Warnf("sandbox created but guest metrics epoch cannot be initialized: %v", err)
+		return nil
+	}
+	if err := beginFreshGuestMetricsEpochBestEffort(
+		ctx,
+		l.cubeboxManger,
+		sandBox,
+		time.Now().UTC(),
+	); err != nil {
+		log.G(ctx).Warnf("sandbox created but guest metrics epoch is not yet persisted: %v", err)
 	}
 
 	return nil
@@ -158,14 +233,18 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 			CreatedAt:    time.Now().UnixNano(),
 			InstanceType: flowOpts.GetInstanceType(),
 		},
-		IP:               getSandboxIp(flowOpts),
-		PortMappings:     getAllocatedPort(flowOpts),
-		NumaNode:         0,
-		Queues:           0,
-		OciRuntime:       &ociRuntime,
-		Version:          cubeboxstore.CurrentCubeboxVersion,
-		RequestSource:    getUserAgent(ctx),
-		LocalRunTemplate: flowOpts.LocalRunTemplate,
+		IP:                getSandboxIp(flowOpts),
+		PortMappings:      getAllocatedPort(flowOpts),
+		NumaNode:          0,
+		Queues:            0,
+		OciRuntime:        &ociRuntime,
+		Version:           cubeboxstore.CurrentCubeboxVersion,
+		RequestSource:     getUserAgent(ctx),
+		LocalRunTemplate:  flowOpts.LocalRunTemplate,
+		NetworkType:       realReq.GetNetworkType(),
+		RuntimeHandler:    realReq.GetRuntimeHandler(),
+		ExposedPorts:      append([]int64(nil), realReq.GetExposedPorts()...),
+		CubeNetworkConfig: cloneCubeNetworkConfig(realReq.GetCubeNetworkConfig()),
 	}
 	if sandBox.Metadata.Labels == nil {
 		sandBox.Metadata.Labels = make(map[string]string)
@@ -180,6 +259,11 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 	ctx = cubeboxstore.WithCubeBox(ctx, sandBox)
 
 	log.G(ctx).Infof("create sandbox with namespace %s", sandBox.Namespace)
+
+	seedCubeBoxComponentVersionsFromRequest(sandBox, flowOpts)
+	if err := EnsureCubeBoxComponents(ctx, sandBox); err != nil {
+		return err
+	}
 
 	if flowOpts.UserData != nil && flowOpts.UserData.K8sPod != nil {
 		sandBox.GetOrCreatePodConfig().SetK8sPod(ctx, flowOpts.UserData.K8sPod)
@@ -196,12 +280,19 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 		// reflinkable base after the most recent commit's snapshot is
 		// deleted.
 		setRuntimeRestoreBaseLabels(sandBox, snapshotID, now)
+		// Resume-from-pause stamps pause snapshot id so Destroy can GC a
+		// leftover pause catalog if Resume-time CleanupTemplate missed it.
+		if pauseID := strings.TrimSpace(realReq.GetAnnotations()[constants.MasterAnnotationPauseSnapshotID]); pauseID != "" {
+			if sandBox.Labels == nil {
+				sandBox.Labels = map[string]string{}
+			}
+			sandBox.Labels[constants.MasterAnnotationPauseSnapshotID] = pauseID
+		}
 	}
 
 	cgInfo, cgSet := flowOpts.CgroupInfo.(*cgroupp.Info)
 	if cgSet {
-		sandBox.ResourceWithOverHead = &cgInfo.ResourceQuantity
-		sandBox.CGroupPath = cgInfo.CgroupID
+		applyCgroupInfoToCubeBox(sandBox, cgInfo)
 	}
 
 	sandBox.Metadata.AddLabels(l.genListFilterLabels(ctx, realReq, sandBox))
@@ -338,6 +429,7 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 				containerLog.Errorf("post create container failed, err: %v", err)
 			}
 		}
+		CaptureForCubeBox(sandBox)
 		return nil
 	}(); err != nil {
 		return err
@@ -373,6 +465,16 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 	}
 
 	return nil
+}
+
+func applyCgroupInfoToCubeBox(sandBox *cubeboxstore.CubeBox, info *cgroupp.Info) {
+	if sandBox == nil || info == nil {
+		return
+	}
+	sandBox.ResourceWithOverHead = &info.ResourceQuantity
+	sandBox.CGroupPath = info.CgroupID
+	sandBox.RestoreHostMetricsBaseline(info.HostMetricsBaseline)
+	sandBox.HostMetricsBaselineMissingAtAssignment = info.HostMetricsBaselineMissingAtAssignment
 }
 
 func (l *local) cleanupAfterEnvdInitFailure(flowOpts *workflow.CreateContext,
@@ -427,14 +529,14 @@ func (l *local) genSandboxOptions(ctx context.Context, realReq *cubebox.RunCubeS
 		return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "generate storage medium annotation failed: %v", err)
 	}
 	additionalSandboxOpt = append(additionalSandboxOpt, sOpts...)
-	dnsServers, err := sandboxDNSServersFromContainers(realReq)
+	dnsLines, err := sandboxDNSLinesFromContainers(realReq)
 	if err != nil {
 		return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "generate sandbox dns annotation failed: %v", err)
 	}
-	if len(dnsServers) > 0 {
-		data, err := jsoniter.Marshal(dnsServers)
+	if len(dnsLines) > 0 {
+		data, err := jsoniter.Marshal(dnsLines)
 		if err != nil {
-			return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "marshal dns servers failed: %v", err)
+			return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "marshal dns lines failed: %v", err)
 		}
 		additionalSandboxOpt = append(additionalSandboxOpt, oci.WithAnnotations(map[string]string{
 			constants.AnnotationsSandboxDNS: string(data),
@@ -447,8 +549,12 @@ func (l *local) genSandboxOptions(ctx context.Context, realReq *cubebox.RunCubeS
 	return additionalSandboxOpt, nil
 }
 
-func sandboxDNSServersFromContainers(realReq *cubebox.RunCubeSandboxRequest) ([]string, error) {
-	return localnetfile.ResolveEffectiveDNSServers(realReq)
+func sandboxDNSLinesFromContainers(realReq *cubebox.RunCubeSandboxRequest) ([]string, error) {
+	cfg, err := localnetfile.ResolveEffectiveDNSConfig(realReq)
+	if err != nil {
+		return nil, err
+	}
+	return cfg.AnnotationLines(), nil
 }
 
 func (l *local) genImageReferenceForCubebox(ctx context.Context, flowOpts *workflow.CreateContext, sandBox *cubeboxstore.CubeBox) error {
@@ -1482,8 +1588,37 @@ func (l *local) prepareSandboxPathVolume(ctx context.Context, c *cubebox.Contain
 func (l *local) prepareVolumeAnnotations(ctx context.Context, opts *workflow.CreateContext,
 ) ([]oci.SpecOpts, error) {
 	_ = ctx
-	_ = opts
-	return nil, nil
+	if opts == nil || opts.StorageInfo == nil {
+		return nil, nil
+	}
+	sInfo, ok := opts.StorageInfo.(*storage.StorageInfo)
+	if !ok {
+		return nil, nil
+	}
+
+	hasSystemDisk := sInfo.CubePCISystemDiskInfo != nil
+	hasDataDisks := sInfo.CubePCIDiskInfo != nil && len(sInfo.CubePCIDiskInfo.PCIDisks) > 0
+	if !hasSystemDisk && !hasDataDisks {
+		return nil, nil
+	}
+
+	// CubeShim deserializes this annotation as a flat JSON array
+	// (Vec<DeviceDisk>) in sandbox/config.rs; the system disk leads so its
+	// index is stable, followed by the data disks in order.
+	vfioDisks := make([]disk.CubePCIDisk, 0, 1)
+	if hasSystemDisk {
+		vfioDisks = append(vfioDisks, sInfo.CubePCISystemDiskInfo.PCISystemDisk)
+	}
+	if hasDataDisks {
+		vfioDisks = append(vfioDisks, sInfo.CubePCIDiskInfo.PCIDisks...)
+	}
+	b, err := jsoniter.Marshal(vfioDisks)
+	if err != nil {
+		return nil, fmt.Errorf("marshal vfio disk info failed: %w", err)
+	}
+	return []oci.SpecOpts{oci.WithAnnotations(map[string]string{
+		constants.AnnotationsVFIODisk: string(b),
+	})}, nil
 }
 
 func isImageStorageMediaType(containerReq *cubebox.ContainerConfig, mediaType cubeimages.ImageStorageMediaType) bool {
@@ -1504,9 +1639,10 @@ func (l *local) storeNumaQueues(ctx context.Context, cubebox *cubeboxstore.CubeB
 			cubebox.Queues += tmpInfo.GetNICQueues()
 		}
 	}
-	if opts.NetworkInfo != nil {
-		cubebox.Queues += opts.NetworkInfo.GetNICQueues()
+	if cubebox.Labels == nil {
+		cubebox.Labels = make(map[string]string)
 	}
+	cubebox.Labels[constants.LabelNumaNode] = fmt.Sprintf("%d", cubebox.NumaNode)
 }
 
 func withRuntimePathOpt(cubebox *cubeboxstore.CubeBox) containerd.NewTaskOpts {

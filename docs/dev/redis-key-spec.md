@@ -64,6 +64,7 @@ The following are the standard keys currently registered in the system (`v1`). N
 | Sandbox lifecycle registry | `cube:v1:shared:sandbox:lifecycle:meta` | Hash | shared | CubeMaster | cube-lifecycle-manager | none (lifecycle via `HDEL`) |
 | Sandbox lifecycle events | `cube:v1:shared:sandbox:lifecycle:events` | Stream | shared | CubeMaster | cube-lifecycle-manager | MAXLEN ~ 100000 |
 | Sandbox lifecycle state | `cube:v1:shared:sandbox:lifecycle:state:{sandboxID}` | String | shared | cube-lifecycle-manager | cube-lifecycle-manager | SET TTL (default 60s) |
+| Sandbox op lock (pause/resume/delete) | `cube:v1:master:lock:sandbox:{sandboxID}` | String | master | CubeMaster | CubeMaster | SET NX EX by op: pause **180s**, resume/delete **120s**, other **60s**; unlock = token-matched Lua GET+DEL (no renew) |
 | CubeProxy replica registry | `cube:v1:shared:cube_proxy:registry` | Hash | shared | CubeProxy | cube-lifecycle-manager | none (evicted on heartbeat expiry via `HDEL`) |
 | CubeProxy replica heartbeat | `cube:v1:shared:cube_proxy:heartbeat` | Sorted Set | shared | CubeProxy | cube-lifecycle-manager | none (`ZREMRANGEBYSCORE` on expiry, default 15s) |
 
@@ -132,6 +133,7 @@ See the `redis` tags on `InstanceInfoMap` in [`CubeMaster/pkg/base/types/redis.g
 | `sandbox:lifecycle:meta` | No TTL | Written on sandbox create, `HDEL` on destroy |
 | `sandbox:lifecycle:events` | MAXLEN ~ | Stream trimmed on each `XADD` (default ~100000) |
 | `sandbox:lifecycle:state` | SET TTL | `EX` on each write (cube-lifecycle-manager default 60s); released on rollback or sandbox delete |
+| `lock:sandbox` | SET NX EX (op-specific) | Crash/leak safety net only; normal unlock is token-safe Lua (`GET` must match holder token before `DEL`). TTLs: pause **180s**, resume/delete **120s**, default **60s** (`CubeMaster/pkg/sandboxlock`). No renew. |
 | `cube_proxy:registry` | No TTL (heartbeat-derived) | Written by each CubeProxy replica on startup; entries are `HDEL`'d by cube-lifecycle-manager once the corresponding heartbeat expires |
 | `cube_proxy:heartbeat` | Sorted Set expiry | Score = last heartbeat unix ms; entries older than `heartbeat_ttl` (default 15s) are removed via `ZREMRANGEBYSCORE` |
 | Cache keys (future) | TTL required | Must be declared on write and registered in this document |
@@ -142,6 +144,7 @@ See the `redis` tags on `InstanceInfoMap` in [`CubeMaster/pkg/base/types/redis.g
 
 - Key builders: [`pkg/base/rediskey`](https://github.com/tencentcloud/CubeSandbox/blob/master/CubeMaster/pkg/base/rediskey/rediskey.go)
 - Business read/write: [`pkg/localcache`](https://github.com/tencentcloud/CubeSandbox/tree/master/CubeMaster/pkg/localcache), [`pkg/instancecache`](https://github.com/tencentcloud/CubeSandbox/tree/master/CubeMaster/pkg/instancecache)
+- Sandbox lifecycle lock: [`pkg/sandboxlock`](https://github.com/tencentcloud/CubeSandbox/blob/master/CubeMaster/pkg/sandboxlock/lock.go)
 - Config (`redis:` block): `node_metric_ttl_sec` (node-metric TTL in seconds)
 
 ### CubeProxy (OpenResty / Lua)

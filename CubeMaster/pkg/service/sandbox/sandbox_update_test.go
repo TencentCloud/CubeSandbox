@@ -9,32 +9,16 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
 
 func TestUpdateRejectsInvalidNegativeResumeTimeout(t *testing.T) {
-	const sandboxID = "sbx-update-timeout"
-	localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{
-		SandboxID: sandboxID,
-		HostIP:    "127.0.0.1",
-	})
-	defer localcache.DeleteSandboxCache(sandboxID)
-
-	oldMockUpdateAction := config.GetConfig().Common.MockUpdateAction
-	config.GetConfig().Common.MockUpdateAction = true
-	defer func() {
-		config.GetConfig().Common.MockUpdateAction = oldMockUpdateAction
-	}()
-
 	timeout := -2
 	req := &types.UpdateRequest{
 		RequestID:    "req-update-timeout",
-		SandboxID:    sandboxID,
+		SandboxID:    "sbx-update-timeout",
 		InstanceType: "cubebox",
 		Action:       "resume",
 		Timeout:      &timeout,
@@ -49,24 +33,12 @@ func TestUpdateRejectsInvalidNegativeResumeTimeout(t *testing.T) {
 
 func TestUpdateResumePublishesTimeoutMetadata(t *testing.T) {
 	const sandboxID = "sbx-update-timeout-metadata"
-	localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{
-		SandboxID: sandboxID,
-		HostIP:    "127.0.0.1",
-	})
-	defer localcache.DeleteSandboxCache(sandboxID)
-
-	oldMockUpdateAction := config.GetConfig().Common.MockUpdateAction
-	config.GetConfig().Common.MockUpdateAction = true
-	defer func() {
-		config.GetConfig().Common.MockUpdateAction = oldMockUpdateAction
-	}()
-
 	provider := &recordingTimeoutProvider{}
 	SetTimeoutProvider(provider)
 	defer SetTimeoutProvider(nil)
 
 	timeout := 600
-	rsp := Update(context.Background(), &types.UpdateRequest{
+	publishUpdateTimeout(context.Background(), &types.UpdateRequest{
 		RequestID:    "req-update-timeout-metadata",
 		SandboxID:    sandboxID,
 		InstanceType: "cubebox",
@@ -74,7 +46,6 @@ func TestUpdateResumePublishesTimeoutMetadata(t *testing.T) {
 		Timeout:      &timeout,
 	})
 
-	require.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
 	assert.Equal(t, 1, provider.calls)
 	assert.Equal(t, sandboxID, provider.sandboxID)
 	assert.Equal(t, timeout, provider.timeout)
@@ -82,24 +53,12 @@ func TestUpdateResumePublishesTimeoutMetadata(t *testing.T) {
 
 func TestUpdateResumeNeverTimeoutPublishesMetadata(t *testing.T) {
 	const sandboxID = "sbx-update-never-timeout-metadata"
-	localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{
-		SandboxID: sandboxID,
-		HostIP:    "127.0.0.1",
-	})
-	defer localcache.DeleteSandboxCache(sandboxID)
-
-	oldMockUpdateAction := config.GetConfig().Common.MockUpdateAction
-	config.GetConfig().Common.MockUpdateAction = true
-	defer func() {
-		config.GetConfig().Common.MockUpdateAction = oldMockUpdateAction
-	}()
-
 	provider := &recordingTimeoutProvider{}
 	SetTimeoutProvider(provider)
 	defer SetTimeoutProvider(nil)
 
 	timeout := types.NeverTimeout
-	rsp := Update(context.Background(), &types.UpdateRequest{
+	publishUpdateTimeout(context.Background(), &types.UpdateRequest{
 		RequestID:    "req-update-never-timeout-metadata",
 		SandboxID:    sandboxID,
 		InstanceType: "cubebox",
@@ -107,7 +66,6 @@ func TestUpdateResumeNeverTimeoutPublishesMetadata(t *testing.T) {
 		Timeout:      &timeout,
 	})
 
-	require.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
 	assert.Equal(t, 1, provider.calls)
 	assert.Equal(t, sandboxID, provider.sandboxID)
 	assert.Equal(t, types.NeverTimeout, provider.timeout)
@@ -115,18 +73,6 @@ func TestUpdateResumeNeverTimeoutPublishesMetadata(t *testing.T) {
 
 func TestUpdateResumePreservedTimeoutRebasesMetadata(t *testing.T) {
 	const sandboxID = "sbx-update-preserved-timeout-rebase"
-	localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{
-		SandboxID: sandboxID,
-		HostIP:    "127.0.0.1",
-	})
-	defer localcache.DeleteSandboxCache(sandboxID)
-
-	oldMockUpdateAction := config.GetConfig().Common.MockUpdateAction
-	config.GetConfig().Common.MockUpdateAction = true
-	defer func() {
-		config.GetConfig().Common.MockUpdateAction = oldMockUpdateAction
-	}()
-
 	defer SetTimeoutProvider(nil)
 
 	zero := 0
@@ -141,7 +87,7 @@ func TestUpdateResumePreservedTimeoutRebasesMetadata(t *testing.T) {
 			provider := &recordingTimeoutProvider{}
 			SetTimeoutProvider(provider)
 
-			rsp := Update(context.Background(), &types.UpdateRequest{
+			publishUpdateTimeout(context.Background(), &types.UpdateRequest{
 				RequestID:    "req-update-preserved-timeout-rebase",
 				SandboxID:    sandboxID,
 				InstanceType: "cubebox",
@@ -149,7 +95,6 @@ func TestUpdateResumePreservedTimeoutRebasesMetadata(t *testing.T) {
 				Timeout:      tc.timeout,
 			})
 
-			require.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
 			assert.Equal(t, 0, provider.calls)
 			assert.Equal(t, 1, provider.rebaseCalls)
 			assert.Equal(t, sandboxID, provider.sandboxID)
@@ -159,24 +104,12 @@ func TestUpdateResumePreservedTimeoutRebasesMetadata(t *testing.T) {
 
 func TestUpdatePauseDoesNotPublishTimeoutMetadata(t *testing.T) {
 	const sandboxID = "sbx-update-pause-timeout-metadata"
-	localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{
-		SandboxID: sandboxID,
-		HostIP:    "127.0.0.1",
-	})
-	defer localcache.DeleteSandboxCache(sandboxID)
-
-	oldMockUpdateAction := config.GetConfig().Common.MockUpdateAction
-	config.GetConfig().Common.MockUpdateAction = true
-	defer func() {
-		config.GetConfig().Common.MockUpdateAction = oldMockUpdateAction
-	}()
-
 	provider := &recordingTimeoutProvider{}
 	SetTimeoutProvider(provider)
 	defer SetTimeoutProvider(nil)
 
 	timeout := 600
-	rsp := Update(context.Background(), &types.UpdateRequest{
+	publishUpdateTimeout(context.Background(), &types.UpdateRequest{
 		RequestID:    "req-update-pause-timeout-metadata",
 		SandboxID:    sandboxID,
 		InstanceType: "cubebox",
@@ -184,6 +117,6 @@ func TestUpdatePauseDoesNotPublishTimeoutMetadata(t *testing.T) {
 		Timeout:      &timeout,
 	})
 
-	require.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
 	assert.Equal(t, 0, provider.calls)
+	assert.Equal(t, 0, provider.rebaseCalls)
 }

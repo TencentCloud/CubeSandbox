@@ -133,6 +133,15 @@ type CubeBox struct {
 
 	Volumes []*cubebox.Volume `json:"volumes,omitempty"`
 
+	// Recreate-needed Create fields for Pause→Resume (packed into sandbox_spec.json).
+	// Mirror Master sandboxspec's create-time CubeNetworkConfig / network_type /
+	// exposed_ports / runtime_handler — CubeBox previously dropped them, so Resume
+	// rebuilt the NIC with default egress policy.
+	NetworkType       string                     `json:"network_type,omitempty"`
+	RuntimeHandler    string                     `json:"runtime_handler,omitempty"`
+	ExposedPorts      []int64                    `json:"exposed_ports,omitempty"`
+	CubeNetworkConfig *cubebox.CubeNetworkConfig `json:"cube_network_config,omitempty"`
+
 	HotPlugDevices map[string]*shimtypes.CubeShimDevice `json:"hot_plug_devices,omitempty"`
 
 	HotPlugDisk map[string]*shimtypes.ChDiskDevice `json:"hot_plug_disk,omitempty"`
@@ -146,7 +155,17 @@ type CubeBox struct {
 
 	LocalRunTemplate *templatetypes.LocalRunTemplate
 
+	// ComponentVersions: inventory dir name → version string (no absolute paths).
+	ComponentVersions map[string]string `json:"component_versions,omitempty"`
+
 	ImageReferences map[string]ImageReference
+
+	HostMetricsBaseline                    *HostMetricsBaseline `json:"host_metrics_baseline,omitempty"`
+	HostMetricsBaselineMissingAtAssignment bool                 `json:"host_metrics_baseline_missing_at_assignment,omitempty"`
+	hostMetricsBaselineLock                sync.RWMutex         `json:"-"`
+
+	GuestMetricsEpoch     *GuestMetricsEpoch `json:"guest_metrics_epoch,omitempty"`
+	guestMetricsEpochLock sync.RWMutex       `json:"-"`
 
 	sync.RWMutex `json:"-"`
 }
@@ -220,9 +239,10 @@ func (cb *CubeBox) DeleteContainer(id string) {
 	if cb.ContainersMap == nil {
 		return
 	}
-	if container, err := cb.ContainersMap.Get(id); err == nil {
-		container.MarkDeleted()
-	}
+	// Hard-delete from the map: every caller Syncs/Updates the store right
+	// after and no code path looks the container up again to read its
+	// MarkDeleted marker, so there is nothing to soft-delete for.
+	cb.ContainersMap.DeleteContainer(id)
 }
 
 func (cb *CubeBox) All() map[string]*Container {

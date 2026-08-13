@@ -34,7 +34,6 @@ type Config struct {
 	AuthConf         *AuthConf             `yaml:"auth"`
 	Log              *log.Conf             `yaml:"log"`
 	CubeletConf      *CubeletConf          `yaml:"cubelet_conf"`
-	OssDBConfig      *DBConfig             `yaml:"ossdb_config"`
 	InstanceDBConfig *DBConfig             `yaml:"instance_db_config"`
 	RedisConf        *RedisConf            `yaml:"redis"`
 	ExtraConf        *ExtraConf            `yaml:"extra_conf"`
@@ -42,6 +41,7 @@ type Config struct {
 	ReqTemplateConf  *ReqTemplateConf      `yaml:"req_template_conf"`
 	HookWhitelist    *HookWhitelist        `yaml:"hook_whitelist"`
 	CubeEgressConf   *CubeEgressConf       `yaml:"cube_egress_conf"`
+	CubeProxyConf    *CubeProxyConf        `yaml:"cube_proxy_conf"`
 
 	// VolumePlugins lists external Controller Hook Plugin configurations.
 	// Types: binary (fork CLI) or rpc (gRPC VolumeControllerService).
@@ -153,6 +153,24 @@ type ExtraConf struct {
 	AllowedHostMountPrefixes []string `yaml:"allowed_host_mount_prefixes"`
 }
 
+// CubeProxyConf controls how CubeMaster invalidates CubeProxy local routing
+// caches after Resume rewrites Redis SandboxIP / port mappings.
+type CubeProxyConf struct {
+	// AdminPort is the per-node CubeProxy admin listen port used when the
+	// Redis registry is empty (default 8082).
+	AdminPort int `yaml:"admin_port"`
+	// AdminToken is sent as X-Cube-Admin-Token when non-empty (must match
+	// CubeProxy $cube_admin_token).
+	AdminToken string `yaml:"admin_token"`
+	// AdminURLs optionally lists static admin base URLs (e.g. http://ip:8082).
+	// When set, InvalidateBackendCache broadcasts to these instead of reading
+	// the Redis CubeProxy registry.
+	AdminURLs []string `yaml:"admin_urls"`
+	// HeartbeatTTLMs is how fresh a registry heartbeat must be to treat a
+	// replica as live (default 15000).
+	HeartbeatTTLMs int64 `yaml:"heartbeat_ttl_ms"`
+}
+
 type RedisConf struct {
 	Password    string `yaml:"password"`
 	MaxActive   int    `yaml:"max_active"`
@@ -162,6 +180,17 @@ type RedisConf struct {
 
 	Nodes    string `yaml:"nodes"`
 	MaxRetry int    `yaml:"max_retry"`
+
+	// MasterName enables Redis Sentinel mode when non-empty. SentinelNodes
+	// must list one or more sentinel endpoints (host:port, comma-separated).
+	MasterName string `yaml:"master_name"`
+
+	// SentinelNodes lists sentinel endpoints used when MasterName is set.
+	SentinelNodes string `yaml:"sentinel_nodes"`
+
+	// SentinelPassword authenticates to sentinel instances. Empty means no
+	// AUTH against sentinel (master Password is still used for the Redis master).
+	SentinelPassword string `yaml:"sentinel_password"`
 
 	// NodeMetricTTLSec is the safety TTL (seconds) for node-metric keys so an
 	// offline node's entry auto-expires; refreshed on every heartbeat write.
@@ -649,10 +678,6 @@ type HookWhitelist struct {
 }
 
 func GetDbConfig() *DBConfig {
-	return cfg.OssDBConfig
-}
-
-func GetInstanceConfig() *DBConfig {
 	return cfg.InstanceDBConfig
 }
 
@@ -848,6 +873,16 @@ func preComHandleConf(config *Config) error {
 	}
 	if config.Common.DbRetryInterval == 0 {
 		config.Common.DbRetryInterval = 5 * time.Millisecond
+	}
+
+	if config.CubeProxyConf == nil {
+		config.CubeProxyConf = &CubeProxyConf{}
+	}
+	if config.CubeProxyConf.AdminPort == 0 {
+		config.CubeProxyConf.AdminPort = 8082
+	}
+	if config.CubeProxyConf.HeartbeatTTLMs == 0 {
+		config.CubeProxyConf.HeartbeatTTLMs = 15000
 	}
 
 	if config.Common.MaxNICQueue == 0 {

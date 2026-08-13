@@ -40,6 +40,8 @@ import (
 	v2 "github.com/containerd/containerd/v2/core/runtime/v2"
 	"github.com/containerd/containerd/v2/core/sandbox"
 	"github.com/containerd/containerd/v2/plugins"
+	"github.com/containerd/errdefs/pkg/errgrpc"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func init() {
@@ -111,6 +113,10 @@ type controllerLocal struct {
 	state     string
 	shims     *v2.ShimManager
 	publisher events.Publisher
+}
+
+type taskStatsService interface {
+	Stats(context.Context, *task.StatsRequest) (*task.StatsResponse, error)
 }
 
 var _ sandbox.Controller = (*controllerLocal)(nil)
@@ -195,7 +201,42 @@ func (c *controllerLocal) Status(ctx context.Context, sandboxID string, verbose 
 }
 
 func (c *controllerLocal) Metrics(ctx context.Context, sandboxID string) (*types.Metric, error) {
-	return nil, nil
+	return c.taskMetrics(ctx, sandboxID, sandboxID)
+}
+
+func (c *controllerLocal) taskMetrics(ctx context.Context, sandboxID, containerID string) (*types.Metric, error) {
+	if sandboxID == "" {
+		return nil, fmt.Errorf("sandbox ID is required")
+	}
+	if containerID == "" {
+		return nil, fmt.Errorf("container ID is required")
+	}
+	svc, err := c.getSandbox(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	return metricFromTaskStats(ctx, svc, sandboxID, containerID)
+}
+
+func metricFromTaskStats(ctx context.Context, svc taskStatsService, sandboxID, containerID string) (*types.Metric, error) {
+	resp, err := svc.Stats(ctx, &task.StatsRequest{ID: containerID})
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to query workload metrics for %s/%s: %w",
+			sandboxID,
+			containerID,
+			errgrpc.ToNative(err),
+		)
+	}
+	raw := resp.GetStats()
+	if raw == nil {
+		return nil, fmt.Errorf("workload metrics for %s/%s are empty", sandboxID, containerID)
+	}
+	return &types.Metric{
+		Timestamp: timestamppb.Now(),
+		ID:        containerID,
+		Data:      raw,
+	}, nil
 }
 
 func (c *controllerLocal) Update(

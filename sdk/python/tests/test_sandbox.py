@@ -168,6 +168,19 @@ class TestCreate:
         body = m.call_args.kwargs["json"]
         assert body["metadata"] == meta
 
+    def test_create_sends_distribution_scope(self):
+        scope = ["node-a", "10.0.0.12"]
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(distribution_scope=scope, config=make_config())
+        body = m.call_args.kwargs["json"]
+        assert body["distributionScope"] == scope
+
+    def test_create_default_distribution_scope_omitted(self):
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(config=make_config())
+        body = m.call_args.kwargs["json"]
+        assert "distributionScope" not in body
+
     def test_create_template_not_found(self):
         with patch("requests.Session.post",
                    return_value=mock_response({"message": "template not found"}, status=404)):

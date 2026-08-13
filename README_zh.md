@@ -413,12 +413,37 @@ http://<控制节点 IP>:12088
 
 | 特性 | 说明 |
 |---|---|
-| **Kubernetes 原生部署** | 从 Helm 部署进一步走向以 CRD、Operator 为核心的原生管理，并补齐平滑升级能力。
 | **跨机暂停与恢复** | 在一台宿主机上暂停沙箱，在另一台上完整恢复内存和文件系统状态 |
+| **跨机 Snapshot 启动沙箱** | 基于集群共享、按需加载的存储层，允许在与快照制作时不同的节点上用该快照启动新沙箱 |
 | **E2B API 对齐补齐** | 补齐与 E2B 规范的剩余差距，实现完整的兼容替代 |
 | **控制面与数据面分离** | 解耦控制面与数据面，控制面升级或故障不影响已在运行的沙箱，保证全路径高可用 |
 | **沙箱异常恢复** | 自动检测并恢复 VM Crash、shim 卡死、网络分区等异常，支持可配置恢复策略 |
 | **调度与运维能力增强** | 资源感知调度、亲和规则、在线均衡与带迁移的节点排空 |
+
+## 赞助商
+
+<table>
+  <tr>
+    <td align="center">
+      <a href="https://cloud.tencent.com/">
+        <img src="./docs/assets/tcloud_logo_zh.png" alt="腾讯云" height="40">
+      </a>
+    </td>
+    <td align="center">
+      <a href="https://www.arm.com/">
+        <img src="./docs/assets/arm-logo.svg" alt="Arm" height="40">
+      </a>
+    </td>
+  </tr>
+</table>
+
+## 贡献者
+
+感谢所有贡献者：
+
+<a href="https://github.com/tencentcloud/CubeSandbox/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=tencentcloud/CubeSandbox" alt="贡献者" />
+</a>
 
 ## 许可证
 

@@ -9,10 +9,10 @@ PUSH=1 REGISTRY=cube-sandbox-int.tencentcloudcr.com/cube-sandbox IMAGE_TAG=v0.6.
 ```
 
 Before a real release, run `scripts/bump-image.sh vX.Y.Z` so hard-coded tags
-(including chart `deploy/kubernetes/chart/values.yaml` component image tags)
-match the release. `release-docker-images` runs `bump-image.sh --check` by
-default; for a manual/dev image-only build, set workflow input
-`skip_version_check=true`.
+(including chart `deploy/kubernetes/chart/values.yaml` component image tags and
+`Chart.yaml` version / appVersion) match the release. `release-docker-images`
+runs `bump-image.sh --check` by default; for a manual/dev image-only build, set
+workflow input `skip_version_check=true`.
 
 Use `NO_CACHE=1` when every Docker image layer must be rebuilt instead of
 using Docker's build cache:
@@ -47,8 +47,8 @@ temporary docker context (it does not mutate `PACKAGE_DIR`). Currently no
 package image uses an overlay.
 
 For source-built images (`cube-master`, `cubemastercli`, `cubelet`,
-`network-agent`, `cube-shim`, `cube-api`, `cube-ops`, `cube-proxy`, …), use
-`SOURCE_REF=""` to compile from the current worktree (see below).
+`cube-shim`, `cube-api`, `cube-ops`, `cube-proxy`, …), use `SOURCE_REF=""` to
+compile from the current worktree (see below).
 
 `cube-kernel` does not use the one-click package. It stages guest kernels from:
 
@@ -74,39 +74,47 @@ IMAGE_TAG=v0.6.0 ./deploy/kubernetes/images/build-cube-images.sh cube-kernel
 `cube-guest` does not use the one-click package. It stages guest rootfs from:
 
 1. `CUBE_GUEST_IMAGE_DIR` (directory containing `cube-guest-image-cpu.img`,
-   `version`, `agent-version`), or
+   `version`), or
 2. `CUBE_GUEST_IMAGE_TAR` (`.tar.gz` of those files), or
 3. Release asset `cube-guest-image-${arch}.tar.gz` (same `IMAGE_TAG` when
    present, otherwise latest GitHub Release).
+
+`cube-agent` stages the independent Agent plane file from:
+
+1. `CUBE_AGENT_IMAGE_DIR` (`cube-agent.ext4` + `version`), or
+2. `CUBE_AGENT_IMAGE_TAR`, or
+3. Release asset `cube-agent-${arch}.tar.gz`.
 
 ```bash
 CUBE_GUEST_IMAGE_DIR=/path/to/cube-image IMAGE_TAG=dev \
   ./deploy/kubernetes/images/build-cube-images.sh cube-guest
 
-IMAGE_TAG=v0.6.0 ./deploy/kubernetes/images/build-cube-images.sh cube-guest
+CUBE_AGENT_IMAGE_DIR=/path/to/cube-agent IMAGE_TAG=dev \
+  ./deploy/kubernetes/images/build-cube-images.sh cube-agent
+
+IMAGE_TAG=v0.6.0 ./deploy/kubernetes/images/build-cube-images.sh cube-guest cube-agent
 ```
 
 ## Pinning source to a release tag
 
-`cube-master`, `cubemastercli`, `cubelet`, `network-agent`, `cube-shim`,
-`cube-api`, `cube-ops`, `cube-proxy`, `cube-egress`, `cube-lifecycle-manager`, and
-`cube-webui` are compiled from repository source (rather than binaries in the
-release tarball). By default the script pins those source trees to
-`${SOURCE_REF}` (defaulting to `${VERSION}`, so `v0.5.1` for the default
-build). It exports `CubeMaster/`, `CubeAPI/`, `CubeProxy/`, `CubeEgress/`,
+`cube-master`, `cubemastercli`, `cubelet`, `cube-shim`, `cube-api`, `cube-ops`,
+`cube-proxy`, `cube-egress`, `cube-lifecycle-manager`, and `cube-webui` are
+compiled from repository source (rather than binaries in the release tarball).
+By default the script pins those source trees to `${SOURCE_REF}` (defaulting to
+`${VERSION}`, so `v0.5.1` for the default build). It exports `CubeMaster/`,
+`CubeAPI/`, `CubeProxy/`, `CubeEgress/`,
 `cube-lifecycle-manager/`, `web/`, and `deploy/one-click/webui/` at that git
 ref into `${BUILD_ROOT}/source-tree/` via `git archive` and points `REPO_ROOT`
 there for the duration of the build. When building `cube-master` or
 `cubemastercli`, it also exports `cubelog/`, `CubeDB/`, and `Cubelet/`;
 `cube-master` additionally exports `deploy/scripts/` (volume-deps installer) and
 `examples/volume/cos/` (Controller plugin binary + example conf).
-When building `cubelet`, it also exports `Cubelet/`, `cubelog/`, `cubecow/`,
-`deploy/scripts/`, `deploy/kubernetes/images/scripts/`, and
-`examples/volume/cos/`. When building `network-agent`, it also exports
-`network-agent/`, `CubeNet/`, `cubelog/`, `Cubelet/pkg/networkagentclient/`,
-`deploy/kubernetes/images/scripts/`, and `configs/single-node/`. When building
-`cube-shim`, it also exports `CubeShim/`, `hypervisor/`,
-`deploy/one-click/config-cube.toml`, and `deploy/kubernetes/images/scripts/`.
+When building `cubelet`, it also exports `Cubelet/`, `CubeNet/`, `cubelog/`,
+`cubecow/`, `deploy/scripts/`, `deploy/kubernetes/images/scripts/`, and
+`examples/volume/cos/` so the image can build both `cubelet` and
+`cubevsmapdump`. When building `cube-shim`, it also exports `CubeShim/`,
+`hypervisor/`, `deploy/one-click/config-cube.toml`, and
+`deploy/kubernetes/images/scripts/`.
 When building `cube-ops`, it also exports `CubeOps/` and `CubeDB/` (required by
 `CubeOps/Dockerfile`; not present on older release tags such as `v0.5.1` — use
 `SOURCE_REF=""` for worktree builds).
@@ -148,13 +156,13 @@ CUBE_NODE_BASE_IMAGE=ccr.ccs.tencentyun.com/pavleli/cube-node:v0.4.0-cubevsfix-2
   ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
-This keeps the CubeVS/network-agent runtime fix while preserving the chart-side
-entrypoint behavior.
+This keeps the CubeVS runtime fix while preserving the chart-side entrypoint
+behavior.
 
 ## Image source policy
 
 - `cube-node` continues to use `deploy/kubernetes/images/cube-node/Dockerfile`.
-  It is a Kubernetes delivery image that bundles the node-side runtime components required by the Cube Node Big Pod, including `Cubelet`, `network-agent`, `cube-shim`, `cube-kernel-scf`, `cube-image`, `cube-vs`, and `cube-snapshot`. `cube-egress` is intentionally not bundled in this image because it is delivered as a separate sidecar image.
+  It is a Kubernetes delivery image that bundles the node-side runtime components required by the Cube Node Big Pod, including `Cubelet`, `cube-shim`, `cube-kernel-scf`, `cube-image`, `cube-vs`, and `cube-snapshot`. `cube-egress` is intentionally not bundled in this image because it is delivered as a separate sidecar image.
   If `CUBE_NODE_BASE_IMAGE` is set, the build script rebases that image instead
   and only replaces `/usr/local/bin/cube-node-entrypoint.sh`.
 - `cube-node-init` (`wait-pvm-host` + `cube-node-init`) runs on the **`cube-node-bootstrap`** DaemonSet; `cube-pvm-host-bootstrap` runs on **`cube-node-pvm`** (placement.pvm only).
@@ -165,15 +173,11 @@ entrypoint behavior.
   (`DOCKER_BUILDKIT=1`) for the adjacent `Dockerfile.dockerignore`. No duplicate
   Dockerfile is kept under `deploy/kubernetes/images/`.
 - `cubelet` is built exactly like CI: context = repository root, file =
-  `Cubelet/Dockerfile` (multi-stage CGO + cubecow via `CUBE_BUILDER_IMAGE`),
-  with `CUBE_VERSION` / `CUBE_COMMIT` / `CUBE_BUILD_TIME`. Requires BuildKit for
-  the adjacent `Dockerfile.dockerignore`. No duplicate Dockerfile is kept under
-  `deploy/kubernetes/images/`.
-- `network-agent` is built exactly like CI: context = repository root, file =
-  `network-agent/Dockerfile` (multi-stage cubevs gen + `make proto` via
-  `CUBE_BUILDER_IMAGE`, packages `network-agent` + `cubevsmapdump`), with
-  `CUBE_VERSION` / `CUBE_COMMIT` / `CUBE_BUILD_TIME`. Requires BuildKit for the
-  adjacent `Dockerfile.dockerignore`. No duplicate Dockerfile is kept under
+  `Cubelet/Dockerfile` (multi-stage CGO + cubecow + CubeVS tools via
+  `CUBE_BUILDER_IMAGE`), with `CUBE_VERSION` / `CUBE_COMMIT` /
+  `CUBE_BUILD_TIME`. It packages `cubelet`, `cubecli`, and `cubevsmapdump` in
+  the cubelet image. Requires BuildKit for the adjacent
+  `Dockerfile.dockerignore`. No duplicate Dockerfile is kept under
   `deploy/kubernetes/images/`.
 - `cube-shim` is built exactly like CI: context = repository root, file =
   `CubeShim/Dockerfile` (multi-stage `cargo build --release --locked` via
@@ -189,9 +193,12 @@ entrypoint behavior.
   `release-docker-images.yml` (multi-arch; arm64 is BM-only when no PVM asset).
 - `cube-guest` is built from pre-built Release (or local) guest rootfs
   artifacts: context stages `package/cube-image/` (`cube-guest-image-cpu.img`,
-  `version`, `agent-version`); file =
+  `version`); file =
   `deploy/kubernetes/images/cube-guest/Dockerfile`. Same as CI
   `release-docker-images.yml` (downloads `cube-guest-image-${arch}.tar.gz`).
+- `cube-agent` stages `package/cube-agent/` (`cube-agent.ext4`, `version`) via
+  `deploy/kubernetes/images/cube-agent/Dockerfile` (Release asset
+  `cube-agent-${arch}.tar.gz`).
 - `cube-api` is built exactly like CI (`.github/workflows/release-docker-images.yml`):
   context = `CubeAPI`, file = `CubeAPI/Dockerfile`, with
   `CUBE_VERSION` / `CUBE_COMMIT` / `CUBE_BUILD_TIME`. No duplicate Dockerfile is

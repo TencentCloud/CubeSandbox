@@ -105,6 +105,17 @@ sb.pause(timeout=60, interval=0.5) # 自定义轮询参数
 sb2 = Sandbox.connect(sb.sandbox_id)
 ```
 
+### 指定计算节点
+
+通过计算节点 ID 或 Host IP 限定调度范围。只传一个节点即可将沙箱固定到
+该节点；如果目标节点无法运行对应模板，创建会失败。
+
+```python
+sb = Sandbox.create(
+    distribution_scope=["node-a"],
+)
+```
+
 ### 网络策略
 
 `network=` 内部可以组合两个层次：
@@ -307,7 +318,7 @@ with Sandbox.create(config=cfg) as sb:
 
 | 方法 | 说明 |
 |---|---|
-| `Sandbox.create(template, *, timeout, env_vars, metadata, volume_mounts, config)` | `POST /sandboxes` — 创建新沙箱（可选挂载卷） |
+| `Sandbox.create(template, *, timeout, env_vars, metadata, distribution_scope, volume_mounts, config)` | `POST /sandboxes` — 创建新沙箱（可限定计算节点或挂载卷） |
 | `Sandbox.connect(sandbox_id, *, config)` | `POST /sandboxes/:id/connect` — 连接（暂停状态下自动恢复） |
 | `Sandbox.list(config)` | `GET /sandboxes` — 列出运行中沙箱（v1） |
 | `Sandbox.list_v2(config)` | `GET /v2/sandboxes` — 列出沙箱（v2） |

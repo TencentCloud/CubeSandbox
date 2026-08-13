@@ -6,13 +6,13 @@ package store
 import (
 	"context"
 	"fmt"
-	"log/slog"
 
 	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
 	"github.com/tencentcloud/CubeSandbox/CubeDB/dao/driver/mysql"
 	"github.com/tencentcloud/CubeSandbox/CubeDB/dao/driver/postgres"
 	"github.com/tencentcloud/CubeSandbox/CubeDB/migrate"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/crypto"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
 	"gorm.io/gorm"
 )
 
@@ -33,12 +33,12 @@ func New(ctx context.Context, cfg dao.Config) (*Store, error) {
 	}
 
 	if migrate.AutoMigrationEnabled() {
-		slog.Info("running database migrations")
+		logging.G(ctx).Info("running database migrations")
 		if err := dao.Migrate(ctx); err != nil {
 			return nil, fmt.Errorf("schema migration failed: %w", err)
 		}
 	} else {
-		slog.Warn("CUBE_AUTO_MIGRATION=false: skipping schema migration; DDL must be applied out-of-band by a privileged account")
+		logging.G(ctx).Warn("CUBE_AUTO_MIGRATION=false: skipping schema migration; DDL must be applied out-of-band by a privileged account")
 	}
 
 	s := &Store{db: gormDB}
@@ -53,7 +53,7 @@ func New(ctx context.Context, cfg dao.Config) (*Store, error) {
 		return nil, fmt.Errorf("seed default admin: %w", err)
 	}
 
-	slog.Info("database initialised")
+	logging.G(ctx).Info("database initialised")
 	return s, nil
 }
 
@@ -100,7 +100,7 @@ func (s *Store) bootstrapMasterKey(ctx context.Context) error {
 		if err := crypto.InstallMasterKey(b64); err != nil {
 			return fmt.Errorf("install master key: %w", err)
 		}
-		slog.Info("master encryption key loaded from database")
+		logging.G(ctx).Info("master encryption key loaded from database")
 		return nil
 	}
 
@@ -116,7 +116,7 @@ func (s *Store) bootstrapMasterKey(ctx context.Context) error {
 	if err := crypto.InstallMasterKey(b64); err != nil {
 		return fmt.Errorf("install master key: %w", err)
 	}
-	slog.Info("master encryption key generated and persisted to t_system_setting")
+	logging.G(ctx).Info("master encryption key generated and persisted to t_system_setting")
 	return nil
 }
 
@@ -141,9 +141,9 @@ func (s *Store) BootstrapJWTSecret(ctx context.Context, envSecret string) (strin
 		return "", fmt.Errorf("persist JWT secret: %w", err)
 	}
 	if winner == generated {
-		slog.Info("JWT secret auto-generated and persisted to database (t_system_setting)")
+		logging.G(ctx).Info("JWT secret auto-generated and persisted to database (t_system_setting)")
 	} else {
-		slog.Info("JWT secret loaded from database (t_system_setting)")
+		logging.G(ctx).Info("JWT secret loaded from database (t_system_setting)")
 	}
 	return winner, nil
 }

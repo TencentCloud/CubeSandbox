@@ -1,12 +1,52 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
+
+func TestRunWarmupCompletesBeforeBenchmark(t *testing.T) {
+	requestBody, err := buildCreateRequestBody("tpl-warmup", "")
+	if err != nil {
+		t.Fatalf("buildCreateRequestBody returned error: %v", err)
+	}
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"sandboxID":"sb-warmup"}`)
+	}))
+	defer server.Close()
+
+	cfg := &Config{
+		Concurrency:    1,
+		Warmup:         3,
+		Mode:           "create-only",
+		APIURL:         server.URL,
+		requestBody:    requestBody,
+		requestHeaders: map[string]string{},
+	}
+	var output bytes.Buffer
+
+	client := RunWarmup(cfg, &output)
+
+	if requests != 3 {
+		t.Fatalf("requests=%d, want 3", requests)
+	}
+	if client == nil {
+		t.Fatal("RunWarmup returned a nil client")
+	}
+	want := "    warmup [1/3] ok\n    warmup [2/3] ok\n    warmup [3/3] ok\n\n"
+	if output.String() != want {
+		t.Fatalf("output=%q, want %q", output.String(), want)
+	}
+}
 
 func TestBenchOneSendsHostMountMetadata(t *testing.T) {
 	rawHostMount := `[

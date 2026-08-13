@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from adapters.base import SandboxAdapter
 from adapters.cubesandbox_adapter import CubeSandboxAdapter
 from adapters.e2b_adapter import E2BAdapter
 from adapters.tracing_adapter import wrap_adapter
 from framework.config import SdkE2EConfig
+from framework.create_retry import create_with_capacity_retry
 from framework.trace import get_current_trace, summarize_create_options
 
 _ADAPTERS = {
@@ -46,6 +49,35 @@ def create_adapter(
         output=lambda result: {"sandbox_id": result.sandbox_id},
     )
     return wrap_adapter(adapter, trace)
+
+
+def create_adapter_with_capacity_retry(
+    backend: str,
+    config: SdkE2EConfig,
+    *,
+    metadata: dict[str, str] | None = None,
+    create_options: dict | None = None,
+    on_retry: Callable[[int, float, BaseException], None] | None = None,
+) -> SandboxAdapter:
+    """``create_adapter`` that retries while the scheduler is out of capacity.
+
+    Use this at success-expecting create sites so a saturated shared CI node can
+    be reclaimed instead of failing the run. Do NOT use it where a create is
+    expected to be rejected (e.g. boundary/rejection tests).
+    """
+    return create_with_capacity_retry(
+        lambda: create_adapter(
+            backend,
+            config,
+            metadata=metadata,
+            create_options=create_options,
+        ),
+        retries=config.create_capacity_retries,
+        backoff=config.create_capacity_backoff,
+        backoff_max=config.create_capacity_backoff_max,
+        total_budget=config.create_capacity_budget,
+        on_retry=on_retry,
+    )
 
 
 def connect_adapter(backend: str, sandbox_id: str, config: SdkE2EConfig) -> SandboxAdapter:
@@ -104,4 +136,10 @@ def _entry_id(entry: dict):
     return entry.get("sandbox_id")
 
 
-__all__ = ["SandboxAdapter", "connect_adapter", "create_adapter", "list_sandboxes"]
+__all__ = [
+    "SandboxAdapter",
+    "connect_adapter",
+    "create_adapter",
+    "create_adapter_with_capacity_retry",
+    "list_sandboxes",
+]

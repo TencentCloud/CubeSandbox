@@ -6,6 +6,7 @@ import pytest
 
 from cubesandbox import Sandbox, Volume, VolumeInfo, VolumeMount
 from cubesandbox._config import Config
+from cubesandbox._volume import _serialize_volume_mounts
 
 
 def _config() -> Config:
@@ -70,4 +71,18 @@ def test_volume_mount_default_does_not_change_e2b_payload():
 
     assert post.call_args.kwargs["json"]["volumeMounts"] == [
         {"name": "workspace-vol", "path": "/workspace"}
+    ]
+
+
+def test_serialize_same_volume_preserves_access_mode_per_sandbox():
+    volume = VolumeInfo(volume_id="shared-vol", name="shared")
+
+    read_write = _serialize_volume_mounts({"/shared": volume})
+    read_only = _serialize_volume_mounts(
+        {"/shared": VolumeMount(volume, read_only=True)}
+    )
+
+    assert read_write == [{"name": "shared-vol", "path": "/shared"}]
+    assert read_only == [
+        {"name": "shared-vol", "path": "/shared", "readOnly": True}
     ]

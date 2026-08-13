@@ -6,7 +6,6 @@
 # Standalone script; no external dependencies.
 #
 # Checks whether all Cube Sandbox daemons are up and responding:
-#   • network-agent  (127.0.0.1:19090, /healthz, /readyz, UNIX sockets)
 #   • cubelet        (ports 9966/9998/9999, /data/cubelet/cubelet.sock, assets)
 #   • cubemaster     (port 8089, /notify/health)
 #   • cube-api       (port 3000, /health)
@@ -32,7 +31,6 @@ Usage: check-procs.sh [OPTIONS]
 Check whether all Cube Sandbox daemon processes are running and healthy.
 
 Processes / components checked:
-  network-agent        Port 19090, /healthz, /readyz, UNIX sockets
   cubelet              Ports 9966/9998/9999, /data/cubelet/cubelet.sock,
                        config files and runtime asset files
   cubemaster           Port 8089, /notify/health HTTP endpoint
@@ -56,7 +54,6 @@ Options:
 Environment variables:
   ONE_CLICK_DEPLOY_ROLE              control (default) or compute
   ONE_CLICK_RUNTIME_DIR              PID file directory (default: /var/run/cube-sandbox-one-click)
-  NETWORK_AGENT_HEALTH_ADDR          network-agent health address (default: 127.0.0.1:19090)
   CUBE_API_HEALTH_ADDR               cube-api health address (default: 127.0.0.1:3000)
   CUBEMASTER_ADDR                    cubemaster address (default: 127.0.0.1:8089)
   ONE_CLICK_CONTROL_PLANE_IP         Control plane IP for compute role
@@ -80,7 +77,6 @@ EOF
 # ── Config ─────────────────────────────────────────────────────────────────────
 TOOLBOX_ROOT="/usr/local/services/cubetoolbox"
 RUNTIME_DIR="${ONE_CLICK_RUNTIME_DIR:-/var/run/cube-sandbox-one-click}"
-NA_HEALTH_ADDR="${NETWORK_AGENT_HEALTH_ADDR:-127.0.0.1:19090}"
 CUBE_API_HEALTH_ADDR="${CUBE_API_HEALTH_ADDR:-127.0.0.1:3000}"
 CUBEMASTER_ADDR="${CUBEMASTER_ADDR:-127.0.0.1:8089}"
 
@@ -231,43 +227,7 @@ _check_container() {
 }
 
 # ── Check functions ────────────────────────────────────────────────────────────
-check_network_agent() {
-  section "network-agent"
 
-  if _pidfile_alive "network-agent"; then
-    pass "network_agent_pid" "pid=$(_pidfile_pid network-agent)"
-  elif _proc_running "${TOOLBOX_ROOT}/network-agent/bin/network-agent"; then
-    pass "network_agent_pid" "running (no pidfile)"
-  else
-    fail "network_agent_pid" "network-agent process not running"
-  fi
-
-  if _port_listening 19090; then
-    pass "network_agent_port" "127.0.0.1:19090 listening"
-  else
-    fail "network_agent_port" "127.0.0.1:19090 not listening"
-  fi
-
-  if _http_ok "http://${NA_HEALTH_ADDR}/healthz"; then
-    pass "network_agent_healthz" "/healthz → 200"
-  else
-    fail "network_agent_healthz" "http://${NA_HEALTH_ADDR}/healthz failed"
-  fi
-
-  if _http_ok "http://${NA_HEALTH_ADDR}/readyz"; then
-    pass "network_agent_readyz" "/readyz → 200"
-  else
-    fail "network_agent_readyz" "http://${NA_HEALTH_ADDR}/readyz failed (still initialising?)"
-  fi
-
-  for sock in network-agent-grpc.sock network-agent.sock; do
-    if [[ -S "/tmp/cube/${sock}" ]]; then
-      pass "sock_${sock%.sock}" "/tmp/cube/${sock} present"
-    else
-      warn "sock_${sock%.sock}" "/tmp/cube/${sock} missing"
-    fi
-  done
-}
 
 check_cubelet() {
   section "Cubelet"
@@ -299,7 +259,9 @@ check_cubelet() {
     "${TOOLBOX_ROOT}/Cubelet/dynamicconf/conf.yaml" \
     "${TOOLBOX_ROOT}/cube-shim/conf/config-cube.toml" \
     "${TOOLBOX_ROOT}/cube-kernel-scf/vmlinux" \
-    "${TOOLBOX_ROOT}/cube-image/cube-guest-image-cpu.img"; do
+    "${TOOLBOX_ROOT}/cube-image/cube-guest-image-cpu.img" \
+    "${TOOLBOX_ROOT}/cube-agent/cube-agent.ext4" \
+    "${TOOLBOX_ROOT}/cube-agent/version"; do
     local label; label="$(basename "${f}")"
     if [[ -f "${f}" ]]; then
       pass "asset_${label}" "${f}"
@@ -473,7 +435,6 @@ main() {
   echo "  Role   : ${ROLE}"
   echo "  Toolbox: ${TOOLBOX_ROOT}"
 
-  check_network_agent
   check_cubelet
   check_cubemaster
   check_cube_api

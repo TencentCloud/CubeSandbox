@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from adapters import create_adapter
+from adapters import create_adapter_with_capacity_retry
 from framework.capabilities import VOLUME_PLUGIN
 from framework.cleanup import safe_kill
 from framework.volume import (
@@ -43,7 +43,7 @@ def test_volume_bind_delete_conflict_then_unbind(sdk_backend, sdk_e2e_config):
     with managed_volume(sdk_e2e_config) as (volume_id, api):
         adapter = None
         try:
-            adapter = create_adapter(
+            adapter = create_adapter_with_capacity_retry(
                 sdk_backend,
                 sdk_e2e_config,
                 metadata={

@@ -5,7 +5,7 @@
 
 use protobuf::MessageField;
 
-use crate::cgroups::Manager as CgroupManager;
+use crate::cgroups::{Manager as CgroupManager, RESOURCE_METRICS_VERSION_V1};
 use crate::protocols::agent::{BlkioStats, CgroupStats, CpuStats, MemoryStats, PidsStats};
 use anyhow::Result;
 use cgroups::freezer::FreezerState;
@@ -39,6 +39,10 @@ impl CgroupManager for Manager {
             hugetlb_stats: HashMap::new(),
             ..Default::default()
         })
+    }
+
+    fn resource_metrics_version(&self) -> u32 {
+        RESOURCE_METRICS_VERSION_V1
     }
 
     fn freeze(&self, _: FreezerState) -> Result<()> {

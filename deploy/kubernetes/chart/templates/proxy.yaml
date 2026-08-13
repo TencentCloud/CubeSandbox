@@ -1,10 +1,15 @@
 {{- if eq (include "cube.proxyEnabled" .) "true" }}
-{{- $redisHost := default (include "cube.redisHost" .) .Values.cubeProxy.redis.host -}}
+{{- $redisSentinel := eq (include "cube.redisSentinelEnabled" .) "true" -}}
+{{- $redisHost := "" -}}
+{{- if not $redisSentinel -}}
+{{- $redisHost = default (include "cube.redisHost" .) .Values.cubeProxy.redis.host -}}
+{{- end -}}
 {{- $redisPort := default .Values.redis.port .Values.cubeProxy.redis.port -}}
 {{- /* proxy_registry.lua runs in ngx.timer and cannot use nginx location resolvers;
-     prefer a concrete IP (ClusterIP, or headless Endpoints address) for cosocket connect(). */ -}}
+     prefer a concrete IP (ClusterIP, or headless Endpoints address) for cosocket connect().
+     Sentinel mode resolves the master via SENTINEL, so skip ClusterIP baking. */ -}}
 {{- $redisRegistryHost := $redisHost -}}
-{{- if eq (include "cube.redisBuiltinEnabled" .) "true" }}
+{{- if and (not $redisSentinel) (eq (include "cube.redisBuiltinEnabled" .) "true") }}
 {{- $redisSvc := lookup "v1" "Service" .Release.Namespace (include "cube.redisName" .) -}}
 {{- if and $redisSvc $redisSvc.spec.clusterIP (ne $redisSvc.spec.clusterIP "None") -}}
 {{- $redisRegistryHost = $redisSvc.spec.clusterIP -}}
@@ -177,6 +182,15 @@ spec:
                   key: redis-password
             - name: REDIS_DB
               value: {{ .Values.cubeProxy.redis.db | quote }}
+            - name: REDIS_MASTER_NAME
+              value: {{ .Values.redis.masterName | default "" | quote }}
+            - name: REDIS_SENTINEL_NODES
+              value: {{ .Values.redis.sentinelNodes | default "" | quote }}
+            - name: REDIS_SENTINEL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: redis-sentinel-password
             - name: TIMEOUT_MIN
               value: {{ .Values.cubeProxy.timeout.min | quote }}
             - name: TIMEOUT_MAX
@@ -190,6 +204,8 @@ spec:
               value: {{ .Values.cubeProxy.ports.http.containerPort | quote }}
             - name: CUBE_PROXY_HTTPS_LISTEN_PORT
               value: {{ .Values.cubeProxy.ports.https.containerPort | quote }}
+            - name: CUBE_PROXY_GRPC_LISTEN_PORT
+              value: {{ .Values.cubeProxy.ports.grpc.containerPort | quote }}
             - name: CUBE_PROXY_ADMIN_LISTEN
               value: {{ .Values.cubeProxy.adminListen | quote }}
             - name: CUBE_PROXY_ADMIN_PORT
@@ -233,6 +249,15 @@ spec:
                   key: redis-password
             - name: CUBE_PROXY_REGISTRY_REDIS_DB
               value: {{ .Values.cubeProxy.redis.db | quote }}
+            - name: CUBE_PROXY_REGISTRY_REDIS_MASTER_NAME
+              value: {{ .Values.redis.masterName | default "" | quote }}
+            - name: CUBE_PROXY_REGISTRY_REDIS_SENTINEL_NODES
+              value: {{ .Values.redis.sentinelNodes | default "" | quote }}
+            - name: CUBE_PROXY_REGISTRY_REDIS_SENTINEL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: redis-sentinel-password
             {{- end }}
           ports:
             - name: http
@@ -240,6 +265,9 @@ spec:
               protocol: TCP
             - name: https
               containerPort: {{ .Values.cubeProxy.ports.https.containerPort }}
+              protocol: TCP
+            - name: grpc
+              containerPort: {{ .Values.cubeProxy.ports.grpc.containerPort }}
               protocol: TCP
             - name: admin
               containerPort: {{ .Values.cubeProxy.adminPort }}

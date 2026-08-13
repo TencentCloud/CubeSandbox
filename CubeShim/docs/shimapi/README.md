@@ -1,20 +1,20 @@
 # CubeShim Extended API (shimapi)
 
 CubeShim exposes an **extended control plane** on top of the standard containerd Shim v2 API.
-The extension uses containerd's `UpdateContainer` RPC, where the caller passes arbitrary
+The extension uses containerd's Task `Update` RPC, where the caller passes arbitrary
 `annotations` to trigger custom actions inside the shim.
 
 ## How It Works
 
-All shimapi actions are delivered via the **containerd Shim v2 `UpdateContainer` RPC**
-([spec](https://github.com/containerd/containerd/blob/main/core/runtime/v2/README.md)).
-The caller populates the `annotations` map on `UpdateContainerRequest`; CubeShim reads
+All shimapi actions are delivered via the **containerd Shim v2 Task `Update` RPC**
+([spec](https://github.com/containerd/containerd/blob/main/docs/runtime-v2.md)).
+The caller populates the `annotations` map on `UpdateTaskRequest`; CubeShim reads
 `cube.shimapi.update.action` and dispatches to the matching handler.
 
 ```
 caller (CubeAPI / CubeMaster)
     │
-    │  UpdateContainerRequest { id: <sandbox_id>, annotations: { ... } }
+    │  UpdateTaskRequest { id: <sandbox_id>, annotations: { ... } }
     │  (containerd Shim v2 / ttrpc)
     ▼
 CubeShim  →  update_ext::update_route()

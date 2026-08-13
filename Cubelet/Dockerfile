@@ -26,6 +26,7 @@ WORKDIR /workspace
 
 COPY cubecow/ /workspace/cubecow/
 COPY cubelog/ /workspace/cubelog/
+COPY CubeNet/ /workspace/CubeNet/
 COPY Cubelet/ /workspace/Cubelet/
 
 # cubecow static library (same as root `make cubecow-sdk` inside the builder).
@@ -47,6 +48,9 @@ RUN set -eux; \
       *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
     mkdir -p /out/bin; \
+    cd /workspace/CubeNet/cubevs; \
+    make gen; \
+    GOOS=linux GOARCH="${goarch}" go build -o /out/bin/cubevsmapdump ./cmd/cubevsmapdump; \
     cd /workspace/Cubelet; \
     go mod download; \
     make proto; \
@@ -61,8 +65,10 @@ RUN set -eux; \
 
 # Assemble one-click-compatible Cubelet tree for the runtime stage.
 RUN set -eux; \
-    mkdir -p /out/Cubelet/bin /out/Cubelet/config /out/Cubelet/dynamicconf /out/Cubelet/plugin; \
+    mkdir -p /out/Cubelet/bin /out/Cubelet/config /out/Cubelet/dynamicconf /out/Cubelet/plugin \
+             /out/cube-vs/network/bin; \
     cp /out/bin/cubelet /out/bin/cubecli /out/Cubelet/bin/; \
+    cp /out/bin/cubevsmapdump /out/cube-vs/network/bin/; \
     cp -a /workspace/Cubelet/config/. /out/Cubelet/config/; \
     cp -a /workspace/Cubelet/dynamicconf/. /out/Cubelet/dynamicconf/; \
     if [ -f /workspace/Cubelet/contrib/nicl ]; then \
@@ -83,7 +89,7 @@ ARG CUBE_VERSION=unknown
 ENV IMAGE_ROOT=/opt/cube-image
 ENV TOOLBOX_ROOT=/usr/local/services/cubetoolbox
 ENV CUBE_COMPONENT=cubelet
-ENV PATH="/usr/local/services/cubetoolbox/cube-shim/bin:${PATH}"
+ENV PATH="/usr/local/services/cubetoolbox/Cubelet/bin:/usr/local/services/cubetoolbox/cube-shim/bin:${PATH}"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -110,15 +116,19 @@ RUN chmod +x /tmp/docker-install-volume-deps.sh \
     && rm -f /tmp/docker-install-volume-deps.sh
 
 COPY --from=builder /out/Cubelet ${IMAGE_ROOT}/Cubelet
+COPY --from=builder /out/cube-vs ${IMAGE_ROOT}/cube-vs
 COPY examples/volume/cos/binary/cube-volume-cos.sh ${IMAGE_ROOT}/Cubelet/plugin/cube-volume-cos
 COPY examples/volume/cos/volume-cos.conf.example ${IMAGE_ROOT}/Cubelet/plugin/volume-cos.conf.example
 COPY deploy/kubernetes/images/scripts/component-entrypoint.sh /usr/local/bin/component-entrypoint.sh
 
 RUN printf '{"schema_version":1,"components":{"cubelet":{"version":"%s"},"cubecli":{"version":"%s"}}}\n' \
       "${CUBE_VERSION}" "${CUBE_VERSION}" > ${IMAGE_ROOT}/Cubelet/version.json \
+    && printf '{"schema_version":1,"components":{"cube-vs":{"version":"%s"},"cubevsmapdump":{"version":"%s"}}}\n' \
+      "${CUBE_VERSION}" "${CUBE_VERSION}" > ${IMAGE_ROOT}/cube-vs/version.json \
     && chmod +x \
       ${IMAGE_ROOT}/Cubelet/bin/cubelet \
       ${IMAGE_ROOT}/Cubelet/bin/cubecli \
+      ${IMAGE_ROOT}/cube-vs/network/bin/cubevsmapdump \
       ${IMAGE_ROOT}/Cubelet/plugin/cube-volume-cos \
       /usr/local/bin/component-entrypoint.sh \
     && mkdir -p \
@@ -131,7 +141,8 @@ RUN printf '{"schema_version":1,"components":{"cubelet":{"version":"%s"},"cubecl
       /tmp/cube \
       /run/cube-node \
     && "${IMAGE_ROOT}/Cubelet/bin/cubelet" --help >/dev/null \
-    && "${IMAGE_ROOT}/Cubelet/bin/cubecli" --help >/dev/null
+    && "${IMAGE_ROOT}/Cubelet/bin/cubecli" --help >/dev/null \
+    && "${IMAGE_ROOT}/cube-vs/network/bin/cubevsmapdump" --help >/dev/null
 
 EXPOSE 9999 9998 9966
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/component-entrypoint.sh"]

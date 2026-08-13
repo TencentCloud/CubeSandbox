@@ -1,0 +1,88 @@
+name: SDK Test Check
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'sdk/**'
+      - '.github/workflows/sdk-test-check.yml'
+  pull_request:
+    paths:
+      - 'sdk/**'
+      - '.github/workflows/sdk-test-check.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: sdk-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test ${{ matrix.display_name }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      # Every SDK is pure Go/Node/Python with no arch-specific code, but the
+      # repo keeps uniform amd64+arm64 coverage across workflows, so each SDK
+      # runs on both. The per-arch include entries attach the runner label; the
+      # per-sdk include entries attach the display name.
+      matrix:
+        sdk: [go, node, python]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - sdk: go
+            display_name: Go SDK
+          - sdk: node
+            display_name: Node SDK
+          - sdk: python
+            display_name: Python SDK
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # Each SDK needs its own host toolchain set up before the shared runner
+      # script (tests/unittest/run_sdk_test.sh) installs dependencies and runs
+      # the hermetic unit tests. The script is the single source of truth for
+      # the per-SDK commands, so CI and local runs share one code path; these
+      # setup steps only provide the toolchain + dependency cache.
+
+      # --- Go SDK ---
+      - name: Setup Go
+        if: matrix.sdk == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: sdk/go/go.sum
+
+      # --- Node SDK ---
+      - name: Setup Node
+        if: matrix.sdk == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sdk/node/package-lock.json
+
+      # --- Python SDK ---
+      - name: Setup Python
+        if: matrix.sdk == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: sdk/python/pyproject.toml
+
+      # --- Run tests via the shared runner ---
+      - name: Run ${{ matrix.display_name }} unit tests
+        # Defer to the same script local developers use. It installs deps and
+        # runs only the hermetic unit tests (each SDK's live/integration suite
+        # is gated by its own build tag / env flag / pytest non-collection).
+        run: tests/unittest/run_sdk_test.sh ${{ matrix.sdk }}

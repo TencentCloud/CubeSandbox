@@ -16,8 +16,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/cubemaster"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/httputil"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/service"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/translator"
+	cubelog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
 // DTO / transformation aliases re-exported from package translator so the
@@ -62,18 +64,16 @@ type SDKHandler struct {
 // NewSDKHandler creates a new SDK handler backed by the CubeMaster client.
 func NewSDKHandler(cm CubeMasterClient) *SDKHandler { return &SDKHandler{cm: cm} }
 
-// WithAgentHubService attaches an AgentHubService so that SDK template/snapshot
-// deletions can reverse-sync AgentHub registrations (soft-delete AgentHub
-// templates that referenced the just-deleted infra resource). Returns the
-// receiver for chaining.
+// WithAgentHubService attaches an AgentHubService so SDK template/snapshot
+// deletions can soft-delete AgentHub templates that reference the removed
+// resource. Returns the receiver for chaining.
 func (h *SDKHandler) WithAgentHubService(svc *service.AgentHubService) *SDKHandler {
 	h.agenthubSvc = svc
 	return h
 }
 
-// Register installs the SDK routes on the given router group. The SDK and
-// "v2 SDK" (E2B v2 compatible) prefixes share the same handlers; we register
-// them on a sub-group so the caller can mount at both prefixes.
+// Register installs the SDK and "v2 SDK" (E2B v2 compatible) routes onto a
+// shared sub-group so the caller can mount them at both prefixes.
 func (h *SDKHandler) Register(r *gin.RouterGroup) {
 	// Sandboxes
 	r.GET("/sandboxes", h.ListSandboxes)
@@ -110,46 +110,61 @@ func (h *SDKHandler) Register(r *gin.RouterGroup) {
 
 const sdkInstanceType = "cubebox"
 
-func sdkRequestID() string {
-	return fmt.Sprintf("cubeops-sdk-%d", time.Now().UnixNano())
+// updateTraceAndLogger writes dimensions (InstanceID/InstanceType/RetCode) to
+// rt and rebuilds the cached logger so subsequent log lines pick them up.
+func updateTraceAndLogger(ctx context.Context, rt *cubelog.RequestTrace, instanceID, instanceType string, retCode int) context.Context {
+	if rt == nil {
+		return ctx
+	}
+	if instanceID != "" {
+		rt.InstanceID = instanceID
+	}
+	if instanceType != "" {
+		rt.InstanceType = instanceType
+	}
+	if retCode != 0 {
+		rt.RetCode = int64(retCode)
+	}
+	return logging.WithLogger(ctx, logging.ReNewLogger(ctx))
 }
 
-// writeCMError maps a CubeMaster client error to the correct HTTP response.
-// If the error is a *cubemaster.CMError, it maps ret_code to 404/409/503
-// (with Retry-After for retryable errors). All other errors become 502.
-// This fixes R11: previously every business error was collapsed to 502,
-// losing 404/409/503 semantics that the WebUI relies on for error handling.
+// writeCMError maps a CubeMaster error to an HTTP response: CMError
+// ret_code → 404/409/503 (with Retry-After for retryable); other → 502.
 func writeCMError(c *gin.Context, err error) {
+	ctx := c.Request.Context()
+	rt := cubelog.GetTraceInfo(ctx)
 	var cmErr *cubemaster.CMError
 	if errors.As(err, &cmErr) {
+		ctx = updateTraceAndLogger(ctx, rt, "", sdkInstanceType, cmErr.RetCode)
 		switch {
 		case cmErr.IsNotFound():
+			logging.G(ctx).Errorf("sdk: cubemaster not found: %s", cmErr.RetMsg)
 			httputil.WriteError(c, http.StatusNotFound, cmErr.RetMsg)
 		case cmErr.IsConflict() || cmErr.IsCapacity():
+			logging.G(ctx).Errorf("sdk: cubemaster conflict/capacity: %s", cmErr.RetMsg)
 			httputil.WriteError(c, http.StatusConflict, cmErr.RetMsg)
 		case cmErr.RetryAfter() > 0:
 			c.Header("Retry-After", strconv.Itoa(cmErr.RetryAfter()))
+			logging.G(ctx).Errorf("sdk: cubemaster retryable error: retryAfter=%d: %s", cmErr.RetryAfter(), cmErr.RetMsg)
 			httputil.WriteError(c, http.StatusServiceUnavailable, cmErr.RetMsg)
 		default:
+			logging.G(ctx).Errorf("sdk: cubemaster error: %s", cmErr.RetMsg)
 			httputil.WriteError(c, http.StatusBadGateway, fmt.Sprintf("cubemaster error %d: %s", cmErr.RetCode, cmErr.RetMsg))
 		}
 		return
 	}
+	logging.G(ctx).Errorf("sdk: cubemaster transport error: %v", err)
 	httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 }
 
 // longOpTimeout is the per-request deadline for CubeMaster operations that
 // can legitimately take well beyond the default 30 s — currently snapshot
 // create, snapshot rollback, and template/snapshot delete. These are
-// synchronous Cubelet/LVM operations. See R12.
+// synchronous Cubelet/LVM operations.
 const longOpTimeout = 240 * time.Second
 
-// longOpCtx returns a context derived from the request context with a
-// longOpTimeout deadline. It is used for CubeMaster calls that front
-// synchronous, slow operations (snapshot create/rollback, template delete).
-// The caller MUST use this context (not c.Request.Context()) when calling
-// the CubeMaster client, because the HTTP client no longer has a global
-// 30 s timeout (R12 fix in cubemaster.New).
+// longOpCtx returns a request-derived context bounded by longOpTimeout,
+// for synchronous slow CubeMaster calls (snapshot/rollback, template delete).
 func longOpCtx(c *gin.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(c.Request.Context(), longOpTimeout)
 }
@@ -157,11 +172,10 @@ func longOpCtx(c *gin.Context) (context.Context, context.CancelFunc) {
 // ── Response transformation ─────────────────────────────────────────────────
 
 // writeSDKResponse unwraps CubeMaster's {ret, data} envelope, checks ret_code,
-// extracts the data field, converts all keys from snake_case to camelCase,
-// and writes the transformed JSON to the response.
-// For responses without a data field (action endpoints like pause/resume),
-// it returns the raw response with camelCase key conversion.
+// and writes the data payload (or the raw body for action endpoints without
+// a data field) with snake_case keys converted to camelCase.
 func writeSDKResponse(c *gin.Context, raw json.RawMessage) {
+	ctx := c.Request.Context()
 	var env cmEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
 		// Not a standard envelope — pass through as-is.
@@ -172,24 +186,31 @@ func writeSDKResponse(c *gin.Context, raw json.RawMessage) {
 	// Check ret_code for errors and map to appropriate HTTP status.
 	if env.Ret != nil && env.Ret.RetCode != 0 && env.Ret.RetCode != 200 {
 		msg := env.Ret.RetMsg
+		ctx = updateTraceAndLogger(ctx, cubelog.GetTraceInfo(ctx), "", sdkInstanceType, env.Ret.RetCode)
 		switch env.Ret.RetCode {
 		case 130404, 404:
 			// Not found — matches old CubeAPI map_err → AppError::NotFound
+			logging.G(ctx).Errorf("sdk: cubemaster not found: %s", msg)
 			httputil.WriteError(c, http.StatusNotFound, msg)
 		case 130409:
 			// Conflict — matches old CubeAPI map_err → AppError::Conflict
+			logging.G(ctx).Errorf("sdk: cubemaster conflict: %s", msg)
 			httputil.WriteError(c, http.StatusConflict, msg)
 		case 400:
+			logging.G(ctx).Errorf("sdk: cubemaster bad request: %s", msg)
 			httputil.WriteError(c, http.StatusBadRequest, msg)
 		case 130490:
 			// Sandbox is pausing — retryable. R11 fix: must be 503, not 502.
 			c.Header("Retry-After", "2")
+			logging.G(ctx).Errorf("sdk: cubemaster sandbox pausing: %s", msg)
 			httputil.WriteError(c, http.StatusServiceUnavailable, msg)
 		case 130589:
 			// Resume failed — retryable. R11 fix: must be 503, not 502.
 			c.Header("Retry-After", "5")
+			logging.G(ctx).Errorf("sdk: cubemaster resume failed: %s", msg)
 			httputil.WriteError(c, http.StatusServiceUnavailable, msg)
 		default:
+			logging.G(ctx).Errorf("sdk: cubemaster error: %s", msg)
 			httputil.WriteError(c, http.StatusBadGateway, fmt.Sprintf("cubemaster error %d: %s", env.Ret.RetCode, msg))
 		}
 		return
@@ -227,6 +248,7 @@ func writeSDKResponse(c *gin.Context, raw json.RawMessage) {
 // Used by rebuild/create template endpoints where the frontend expects
 // a top-level jobID field.
 func writeSDKJobResponse(c *gin.Context, raw json.RawMessage) {
+	ctx := c.Request.Context()
 	var env struct {
 		Ret *cmRet          `json:"ret,omitempty"`
 		Job json.RawMessage `json:"Job,omitempty"`
@@ -237,20 +259,26 @@ func writeSDKJobResponse(c *gin.Context, raw json.RawMessage) {
 	}
 	if env.Ret != nil && env.Ret.RetCode != 0 && env.Ret.RetCode != 200 {
 		msg := env.Ret.RetMsg
+		ctx = updateTraceAndLogger(ctx, cubelog.GetTraceInfo(ctx), "", sdkInstanceType, env.Ret.RetCode)
 		switch env.Ret.RetCode {
 		case 130404, 404:
+			logging.G(ctx).Errorf("sdk: cubemaster not found: %s", msg)
 			httputil.WriteError(c, http.StatusNotFound, msg)
 		case 130409:
+			logging.G(ctx).Errorf("sdk: cubemaster conflict: %s", msg)
 			httputil.WriteError(c, http.StatusConflict, msg)
 		case 130490:
 			// R11 fix: pausing → 503 + Retry-After, not 502.
 			c.Header("Retry-After", "2")
+			logging.G(ctx).Errorf("sdk: cubemaster sandbox pausing: %s", msg)
 			httputil.WriteError(c, http.StatusServiceUnavailable, msg)
 		case 130589:
 			// R11 fix: resume failed → 503 + Retry-After, not 502.
 			c.Header("Retry-After", "5")
+			logging.G(ctx).Errorf("sdk: cubemaster resume failed: %s", msg)
 			httputil.WriteError(c, http.StatusServiceUnavailable, msg)
 		default:
+			logging.G(ctx).Errorf("sdk: cubemaster error: %s", msg)
 			httputil.WriteError(c, http.StatusBadGateway, fmt.Sprintf("cubemaster error %d: %s", env.Ret.RetCode, msg))
 		}
 		return
@@ -267,7 +295,6 @@ func writeSDKJobResponse(c *gin.Context, raw json.RawMessage) {
 // ListSandboxes — GET /api/v1/sdk/sandboxes
 func (h *SDKHandler) ListSandboxes(c *gin.Context) {
 	body := map[string]interface{}{
-		"RequestID":     sdkRequestID(),
 		"instance_type": sdkInstanceType,
 		"start_idx":     0,
 		"size":          500,
@@ -299,8 +326,10 @@ func (h *SDKHandler) ListSandboxes(c *gin.Context) {
 
 // CreateSandbox — POST /api/v1/sdk/sandboxes
 func (h *SDKHandler) CreateSandbox(c *gin.Context) {
+	ctx := c.Request.Context()
 	var req map[string]interface{}
 	if err := c.ShouldBindJSON(&req); err != nil {
+		logging.G(ctx).Errorf("sdk: invalid JSON body: %v", err)
 		httputil.WriteError(c, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -310,12 +339,12 @@ func (h *SDKHandler) CreateSandbox(c *gin.Context) {
 	// CubeMaster's CreateCubeSandboxReq with required fields.
 	templateID := getString(req, "templateID")
 	if templateID == "" {
+		logging.G(ctx).Errorf("sdk: templateID is required")
 		httputil.WriteError(c, http.StatusBadRequest, "templateID is required")
 		return
 	}
 
 	cmReq := map[string]interface{}{
-		"requestID":     sdkRequestID(),
 		"instance_type": sdkInstanceType,
 		"template_id":   templateID,
 		"annotations": map[string]string{
@@ -330,23 +359,19 @@ func (h *SDKHandler) CreateSandbox(c *gin.Context) {
 		"auto_pause":    false,
 		"auto_resume":   false,
 	}
-	// R13 fix: forward autoPause from the WebUI request instead of hardcoding
-	// false. The WebUI sends autoPause=true when the user wants idle sandboxes
-	// to be paused (not killed) on timeout.
+	// forward autoPause from the request so idle sandboxes are paused (not
+	// killed) on timeout when the WebUI asks for it.
 	if v, ok := req["autoPause"].(bool); ok {
 		cmReq["auto_pause"] = v
 	}
-	// R13 fix: forward alias as a label so CubeMaster/Cubelet can display it.
+	//forward alias as a label so CubeMaster/Cubelet can display it.
 	if alias := getString(req, "alias"); alias != "" {
 		labels := cmReq["labels"].(map[string]string)
 		labels["alias"] = alias
 	}
-	// R13 fix: timeout semantics. The old code hardcoded 86400 as a default
-	// and only overrode it when timeout > 0. But timeout=0 from the WebUI
-	// means "use CubeMaster's default" — we should NOT send 86400 in that
-	// case. Instead, only set timeout when the client explicitly provides a
-	// positive value; omit the field entirely when 0 or absent so CubeMaster
-	// applies its own default.
+	// Only forward timeout when the client sends a positive value; 0 or
+	// absent means "use CubeMaster's default", so omit the field instead
+	// of sending the previous hardcoded 86400.
 	if v, ok := getFloat(req, "timeout"); ok && v > 0 {
 		cmReq["timeout"] = int(v)
 	} else {
@@ -372,36 +397,45 @@ func (h *SDKHandler) CreateSandbox(c *gin.Context) {
 
 // GetSandbox — GET /api/v1/sdk/sandboxes/{id}
 func (h *SDKHandler) GetSandbox(c *gin.Context) {
+	ctx := c.Request.Context()
+	rt := cubelog.GetTraceInfo(ctx)
 	sandboxID := c.Param("id")
-	raw, err := h.cm.GetSandbox(c.Request.Context(), sandboxID, sdkInstanceType)
+	if rt != nil {
+		rt.InstanceID = sandboxID
+		rt.InstanceType = sdkInstanceType
+		ctx = logging.WithLogger(ctx, logging.ReNewLogger(ctx))
+	}
+	raw, err := h.cm.GetSandbox(ctx, sandboxID, sdkInstanceType)
 	if err != nil {
 		writeCMError(c, err)
 		return
 	}
 
-	// Map CubeMaster's ret_code to HTTP status. The previous version
-	// skipped this and returned 200 + null body whenever the sandbox
-	// wasn't found, which violated REST conventions and confused SDK
-	// clients (review-bot flag: "Test gap: Confirms existing bug rather
-	// than correct behavior"). Matches the ret_code handling used by
-	// CreateSandbox and other SDK handlers above.
+	// Map ret_code to HTTP status; without it a missing sandbox would
+	// return 200 + null, violating REST and confusing SDK clients.
 	var env cmEnvelope
 	if err := json.Unmarshal(raw, &env); err == nil && env.Ret != nil && env.Ret.RetCode != 0 && env.Ret.RetCode != 200 {
 		msg := env.Ret.RetMsg
+		ctx = updateTraceAndLogger(ctx, rt, sandboxID, sdkInstanceType, env.Ret.RetCode)
 		switch env.Ret.RetCode {
 		case 130404, 404:
+			logging.G(ctx).Errorf("sdk: cubemaster not found: %s", msg)
 			httputil.WriteError(c, http.StatusNotFound, msg)
 		case 130409:
+			logging.G(ctx).Errorf("sdk: cubemaster conflict: %s", msg)
 			httputil.WriteError(c, http.StatusConflict, msg)
 		case 130490:
 			// R11 fix: pausing → 503 + Retry-After, not 502.
 			c.Header("Retry-After", "2")
+			logging.G(ctx).Errorf("sdk: cubemaster sandbox pausing: %s", msg)
 			httputil.WriteError(c, http.StatusServiceUnavailable, msg)
 		case 130589:
 			// R11 fix: resume failed → 503 + Retry-After, not 502.
 			c.Header("Retry-After", "5")
+			logging.G(ctx).Errorf("sdk: cubemaster resume failed: %s", msg)
 			httputil.WriteError(c, http.StatusServiceUnavailable, msg)
 		default:
+			logging.G(ctx).Errorf("sdk: cubemaster error: %s", msg)
 			httputil.WriteError(c, http.StatusBadGateway, fmt.Sprintf("cubemaster error %d: %s", env.Ret.RetCode, msg))
 		}
 		return
@@ -415,7 +449,6 @@ func (h *SDKHandler) GetSandbox(c *gin.Context) {
 func (h *SDKHandler) DeleteSandbox(c *gin.Context) {
 	sandboxID := c.Param("id")
 	body := map[string]interface{}{
-		"requestID":     sdkRequestID(),
 		"sandbox_id":    sandboxID,
 		"instance_type": sdkInstanceType,
 		"sync":          true,
@@ -455,16 +488,22 @@ func (h *SDKHandler) GetSandboxLogs(c *gin.Context) {
 
 // SetSandboxTimeout — POST /api/v1/sdk/sandboxes/{id}/timeout
 func (h *SDKHandler) SetSandboxTimeout(c *gin.Context) {
+	ctx := c.Request.Context()
 	sandboxID := c.Param("id")
+	if rt := cubelog.GetTraceInfo(ctx); rt != nil {
+		rt.InstanceID = sandboxID
+		rt.InstanceType = sdkInstanceType
+		ctx = logging.WithLogger(ctx, logging.ReNewLogger(ctx))
+	}
 	var req map[string]interface{}
 	if err := c.ShouldBindJSON(&req); err != nil {
+		logging.G(ctx).Errorf("sdk: invalid JSON body: %v", err)
 		httputil.WriteError(c, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	req["RequestID"] = sdkRequestID()
 	req["sandboxID"] = sandboxID
 	req["instanceType"] = sdkInstanceType
-	raw, err := h.cm.SetSandboxTimeout(c.Request.Context(), req)
+	raw, err := h.cm.SetSandboxTimeout(ctx, req)
 	if err != nil {
 		writeCMError(c, err)
 		return
@@ -474,16 +513,22 @@ func (h *SDKHandler) SetSandboxTimeout(c *gin.Context) {
 
 // RefreshSandbox — POST /api/v1/sdk/sandboxes/{id}/refreshes
 func (h *SDKHandler) RefreshSandbox(c *gin.Context) {
+	ctx := c.Request.Context()
 	sandboxID := c.Param("id")
+	if rt := cubelog.GetTraceInfo(ctx); rt != nil {
+		rt.InstanceID = sandboxID
+		rt.InstanceType = sdkInstanceType
+		ctx = logging.WithLogger(ctx, logging.ReNewLogger(ctx))
+	}
 	var req map[string]interface{}
 	if err := c.ShouldBindJSON(&req); err != nil {
+		logging.G(ctx).Errorf("sdk: invalid JSON body: %v", err)
 		httputil.WriteError(c, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	req["RequestID"] = sdkRequestID()
 	req["sandboxID"] = sandboxID
 	req["instanceType"] = sdkInstanceType
-	raw, err := h.cm.RefreshSandbox(c.Request.Context(), req)
+	raw, err := h.cm.RefreshSandbox(ctx, req)
 	if err != nil {
 		writeCMError(c, err)
 		return
@@ -500,7 +545,6 @@ func (h *SDKHandler) ResumeSandbox(c *gin.Context) { h.sandboxUpdateAction(c, "r
 func (h *SDKHandler) sandboxUpdateAction(c *gin.Context, action string) {
 	sandboxID := c.Param("id")
 	body := map[string]interface{}{
-		"requestID":     sdkRequestID(),
 		"sandbox_id":    sandboxID,
 		"instance_type": sdkInstanceType,
 		"action":        action,
@@ -515,9 +559,14 @@ func (h *SDKHandler) sandboxUpdateAction(c *gin.Context, action string) {
 
 // ConnectSandbox — POST /api/v1/sdk/sandboxes/{id}/connect
 func (h *SDKHandler) ConnectSandbox(c *gin.Context) {
+	ctx := c.Request.Context()
 	sandboxID := c.Param("id")
+	if rt := cubelog.GetTraceInfo(ctx); rt != nil {
+		rt.InstanceID = sandboxID
+		rt.InstanceType = sdkInstanceType
+		ctx = logging.WithLogger(ctx, logging.ReNewLogger(ctx))
+	}
 	body := map[string]interface{}{
-		"requestID":     sdkRequestID(),
 		"sandbox_id":    sandboxID,
 		"instance_type": sdkInstanceType,
 		"timeout":       86400,
@@ -530,7 +579,7 @@ func (h *SDKHandler) ConnectSandbox(c *gin.Context) {
 	if v, ok := req["timeout"]; ok {
 		body["timeout"] = v
 	}
-	raw, err := h.cm.ConnectSandboxWithBody(c.Request.Context(), body)
+	raw, err := h.cm.ConnectSandboxWithBody(ctx, body)
 	if err != nil {
 		writeCMError(c, err)
 		return
@@ -543,7 +592,6 @@ func (h *SDKHandler) ConnectSandbox(c *gin.Context) {
 // ListSnapshots — GET /api/v1/sdk/snapshots
 func (h *SDKHandler) ListSnapshots(c *gin.Context) {
 	params := map[string]string{
-		"request_id":    sdkRequestID(),
 		"instance_type": sdkInstanceType,
 	}
 	for _, k := range []string{"sandbox_id", "name", "status", "limit", "next_token"} {
@@ -561,13 +609,19 @@ func (h *SDKHandler) ListSnapshots(c *gin.Context) {
 
 // CreateSnapshot — POST /api/v1/sdk/sandboxes/{id}/snapshots
 func (h *SDKHandler) CreateSnapshot(c *gin.Context) {
+	ctx := c.Request.Context()
 	sandboxID := c.Param("id")
+	if rt := cubelog.GetTraceInfo(ctx); rt != nil {
+		rt.InstanceID = sandboxID
+		rt.InstanceType = sdkInstanceType
+		ctx = logging.WithLogger(ctx, logging.ReNewLogger(ctx))
+	}
 	var req map[string]interface{}
 	if err := c.ShouldBindJSON(&req); err != nil {
+		logging.G(ctx).Errorf("sdk: invalid JSON body: %v", err)
 		httputil.WriteError(c, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	req["request_id"] = sdkRequestID()
 	req["sandbox_id"] = sandboxID
 	ctx, cancel := longOpCtx(c)
 	defer cancel()
@@ -581,13 +635,19 @@ func (h *SDKHandler) CreateSnapshot(c *gin.Context) {
 
 // RollbackSandbox — POST /api/v1/sdk/sandboxes/{id}/rollback
 func (h *SDKHandler) RollbackSandbox(c *gin.Context) {
+	ctx := c.Request.Context()
 	sandboxID := c.Param("id")
+	if rt := cubelog.GetTraceInfo(ctx); rt != nil {
+		rt.InstanceID = sandboxID
+		rt.InstanceType = sdkInstanceType
+		ctx = logging.WithLogger(ctx, logging.ReNewLogger(ctx))
+	}
 	var req map[string]interface{}
 	if err := c.ShouldBindJSON(&req); err != nil {
+		logging.G(ctx).Errorf("sdk: invalid JSON body: %v", err)
 		httputil.WriteError(c, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	req["request_id"] = sdkRequestID()
 	req["instance_type"] = sdkInstanceType
 	ctx, cancel := longOpCtx(c)
 	defer cancel()
@@ -615,14 +675,20 @@ func (h *SDKHandler) ListTemplates(c *gin.Context) {
 
 // GetTemplate — GET /api/v1/sdk/templates/{id}
 func (h *SDKHandler) GetTemplate(c *gin.Context) {
+	ctx := c.Request.Context()
 	templateID := c.Param("id")
-	raw, err := h.cm.ListTemplates(c.Request.Context(), templateID, true)
+	if rt := cubelog.GetTraceInfo(ctx); rt != nil {
+		rt.InstanceID = templateID
+		ctx = logging.WithLogger(ctx, logging.ReNewLogger(ctx))
+	}
+	raw, err := h.cm.ListTemplates(ctx, templateID, true)
 	if err != nil {
 		writeCMError(c, err)
 		return
 	}
 	transformed := transformTemplateDetail(raw)
 	if transformed == nil {
+		logging.G(ctx).Errorf("sdk: template not found")
 		httputil.WriteError(c, http.StatusNotFound, "template not found")
 		return
 	}
@@ -630,15 +696,15 @@ func (h *SDKHandler) GetTemplate(c *gin.Context) {
 }
 
 // transformTemplateDetail converts CubeMaster's template detail response to
-// the frontend's expected format. Only top-level keys are converted to
-// camelCase; the nested `replicas` array and `createRequest` object keep
-// their internal snake_case structure (matching old CubeAPI behavior where
-// they were passed through as raw serde_json::Value without conversion).
+// the frontend's expected format. Only top-level keys become camelCase;
+// nested `replicas` and `createRequest` keep their internal snake_case
 
 // CreateTemplate — POST /api/v1/sdk/templates
 func (h *SDKHandler) CreateTemplate(c *gin.Context) {
+	ctx := c.Request.Context()
 	var req map[string]interface{}
 	if err := c.ShouldBindJSON(&req); err != nil {
+		logging.G(ctx).Errorf("sdk: invalid JSON body: %v", err)
 		httputil.WriteError(c, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -646,18 +712,18 @@ func (h *SDKHandler) CreateTemplate(c *gin.Context) {
 	// Validate required field.
 	image, _ := req["image"].(string)
 	if strings.TrimSpace(image) == "" {
+		logging.G(ctx).Errorf("sdk: image is required")
 		httputil.WriteError(c, http.StatusBadRequest, "image is required")
 		return
 	}
 
 	// Transform frontend request to CubeMaster format (matches old CubeAPI logic).
 	cmReq := transformCreateTemplateRequest(req)
-	cmReq["requestID"] = sdkRequestID()
 	if _, ok := cmReq["instance_type"]; !ok {
 		cmReq["instance_type"] = sdkInstanceType
 	}
 
-	raw, err := h.cm.CreateTemplateFromImage(c.Request.Context(), cmReq)
+	raw, err := h.cm.CreateTemplateFromImage(ctx, cmReq)
 	if err != nil {
 		writeCMError(c, err)
 		return
@@ -667,15 +733,20 @@ func (h *SDKHandler) CreateTemplate(c *gin.Context) {
 
 // RebuildTemplate — POST /api/v1/sdk/templates/{id}
 func (h *SDKHandler) RebuildTemplate(c *gin.Context) {
+	ctx := c.Request.Context()
 	templateID := c.Param("id")
+	if rt := cubelog.GetTraceInfo(ctx); rt != nil {
+		rt.InstanceID = templateID
+		ctx = logging.WithLogger(ctx, logging.ReNewLogger(ctx))
+	}
 	var req map[string]interface{}
 	if err := c.ShouldBindJSON(&req); err != nil {
+		logging.G(ctx).Errorf("sdk: invalid JSON body: %v", err)
 		httputil.WriteError(c, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	req["requestID"] = sdkRequestID()
 	req["template_id"] = templateID
-	raw, err := h.cm.RedoTemplate(c.Request.Context(), req)
+	raw, err := h.cm.RedoTemplate(ctx, req)
 	if err != nil {
 		writeCMError(c, err)
 		return
@@ -693,7 +764,6 @@ func (h *SDKHandler) RebuildTemplate(c *gin.Context) {
 func (h *SDKHandler) DeleteTemplate(c *gin.Context) {
 	templateID := c.Param("id")
 	body := map[string]interface{}{
-		"RequestID":     sdkRequestID(),
 		"template_id":   templateID,
 		"instance_type": sdkInstanceType,
 		"sync":          true,
@@ -724,7 +794,6 @@ func (h *SDKHandler) StartTemplateBuild(c *gin.Context) {
 	if req == nil {
 		req = map[string]interface{}{}
 	}
-	req["RequestID"] = sdkRequestID()
 	raw, err := h.cm.StartTemplateBuild(c.Request.Context(), buildID, req)
 	if err != nil {
 		writeCMError(c, err)
@@ -747,8 +816,13 @@ func (h *SDKHandler) GetTemplateBuildStatus(c *gin.Context) {
 // GetTemplateBuildLogs — GET /api/v1/sdk/templates/{id}/builds/{buildID}/logs
 // Matches old CubeAPI behavior: reuses build status endpoint and formats as log lines.
 func (h *SDKHandler) GetTemplateBuildLogs(c *gin.Context) {
+	ctx := c.Request.Context()
 	buildID := c.Param("buildID")
-	raw, err := h.cm.GetTemplateBuildStatus(c.Request.Context(), buildID)
+	if rt := cubelog.GetTraceInfo(ctx); rt != nil {
+		rt.InstanceID = buildID
+		ctx = logging.WithLogger(ctx, logging.ReNewLogger(ctx))
+	}
+	raw, err := h.cm.GetTemplateBuildStatus(ctx, buildID)
 	if err != nil {
 		writeCMError(c, err)
 		return
@@ -757,10 +831,13 @@ func (h *SDKHandler) GetTemplateBuildLogs(c *gin.Context) {
 	// Parse the CubeMaster build status response.
 	var env cmEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
+		logging.G(ctx).Errorf("sdk: failed to parse build status: %v", err)
 		httputil.WriteError(c, http.StatusInternalServerError, "failed to parse build status")
 		return
 	}
 	if env.Ret != nil && env.Ret.RetCode != 0 && env.Ret.RetCode != 200 {
+		ctx = updateTraceAndLogger(ctx, cubelog.GetTraceInfo(ctx), buildID, "", env.Ret.RetCode)
+		logging.G(ctx).Errorf("sdk: cubemaster error: %s", env.Ret.RetMsg)
 		httputil.WriteError(c, http.StatusBadGateway, fmt.Sprintf("cubemaster error %d: %s", env.Ret.RetCode, env.Ret.RetMsg))
 		return
 	}
@@ -825,8 +902,10 @@ func (h *SDKHandler) GetTemplateCompat(c *gin.Context) {
 // adopt_template_compat_baseline: sends {action:"adopt_baseline", template_id}
 // to CubeMaster and returns {updated: <count>}.
 func (h *SDKHandler) AdoptTemplateCompatBaseline(c *gin.Context) {
+	ctx := c.Request.Context()
 	templateID := c.Param("id")
 	if templateID == "" {
+		logging.G(ctx).Errorf("sdk: template id is required")
 		httputil.WriteError(c, http.StatusBadRequest, "template id is required")
 		return
 	}

@@ -106,6 +106,18 @@ sb.pause(timeout=60, interval=0.5) # custom poll params
 sb2 = Sandbox.connect(sb.sandbox_id)
 ```
 
+### Compute node placement
+
+Restrict scheduling to one or more compute node IDs or host IPs. A single
+entry pins the sandbox to that node; creation fails if the node cannot run the
+requested template.
+
+```python
+sb = Sandbox.create(
+    distribution_scope=["node-a"],
+)
+```
+
 ### Network policy
 
 Two layers can be combined inside `network=`:
@@ -320,7 +332,7 @@ with Sandbox.create(config=cfg) as sb:
 
 | Method | Description |
 |---|---|
-| `Sandbox.create(template, *, timeout, env_vars, envs, metadata, volume_mounts, config)` | `POST /sandboxes` — create a new sandbox (optionally mounting volumes); `envs` is the E2B-compatible alias for `env_vars` |
+| `Sandbox.create(template, *, timeout, env_vars, envs, metadata, distribution_scope, volume_mounts, config)` | `POST /sandboxes` — create a new sandbox (optionally restricted to specified compute nodes or mounting volumes); `envs` is the E2B-compatible alias for `env_vars` |
 | `Sandbox.connect(sandbox_id, *, config)` | `POST /sandboxes/:id/connect` — connect (auto-resumes if paused) |
 | `Sandbox.list(config)` | `GET /sandboxes` — list running sandboxes (v1) |
 | `Sandbox.list_v2(config)` | `GET /v2/sandboxes` — list sandboxes (v2) |

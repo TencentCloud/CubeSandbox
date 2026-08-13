@@ -66,10 +66,9 @@ Target 通过 `Wants=` 列出自己要拉起的 service；service 通过 `PartOf
 | `cube-sandbox-redis.service` | Docker 容器 | `6379` | control | docker |
 | `cube-sandbox-cubemaster.service` | 宿主机进程 | `8089` | control | mysql, redis |
 | `cube-sandbox-cube-api.service` | 宿主机进程 | `3000`（E2B 兼容 API） | control | cubemaster |
-| `cube-sandbox-network-agent.service` | 宿主机进程 | `19090`（health） | control / compute | network |
-| `cube-sandbox-cubelet.service` | 宿主机进程 | `9999`（gRPC） | control / compute | network-agent + `/data/cubelet`（XFS） |
+| `cube-sandbox-cubelet.service` | 宿主机进程 | `9999`（gRPC）、HTTP 诊断接口 | control / compute | 内置 network runtime + `/data/cubelet`（XFS） |
 | `cube-sandbox-coredns.service` | Docker 容器 | `127.0.0.54:53` 或 `169.254.254.53:53` | control | docker |
-| `cube-sandbox-cube-proxy.service` | Docker 容器 | `443`（TLS）/ `80` | control | docker, redis |
+| `cube-sandbox-cube-proxy.service` | Docker 容器 | `443`（TLS）/ `80` / `9090`（gRPC） | control | docker, redis |
 | `cube-sandbox-dns.service` | oneshot（无常驻进程） | — | control | coredns（`BindsTo`）|
 | `cube-sandbox-webui.service` | Docker 容器 | `12088` | control | docker, cube-api |
 
@@ -83,7 +82,7 @@ docker.service
    └─ coredns.service ─ dns.service (oneshot, BindsTo coredns)
 
 network-online.target
-   └─ network-agent.service ─ cubelet.service
+   └─ cubelet.service（内置 network runtime）
 ```
 
 依赖只通过 `After=` / `Wants=` 表达启动顺序；运行期某个上游挂了**不会**自动把下游也带翻 —— 所以 cubelet 不会因为 cube-api 挂了而被一起重启，反过来也是一样。
@@ -95,7 +94,7 @@ network-online.target
 最常见的两种配置入口：
 
 - 顶层环境：`/usr/local/services/cubetoolbox/.one-click.env`
-- 组件原生配置：`Cubelet/config/config.toml`、`Cubelet/dynamicconf/conf.yaml`、`CubeMaster/conf.yaml`、`network-agent/network-agent.yaml`、`cubeproxy/global.conf`、`coredns/Corefile`
+- 组件原生配置：`Cubelet/config/config.toml`、`Cubelet/dynamicconf/conf.yaml`、`CubeMaster/conf.yaml`、`cubeproxy/global.conf`、`coredns/Corefile`
 
 改完之后，重启**直接读这份配置的那个服务**：
 
@@ -139,7 +138,7 @@ sudo systemctl restart cube-sandbox-<service>.service
 | `create_timeout_insec` | 仅限制创建/调度 RPC 的截止时间，**不是**沙箱空闲 TTL。未配置时默认 `300`。 |
 | `common_timeout_insec` | CubeMaster 访问 Cubelet 的通用 RPC 超时（非 create 专用）。 |
 
-修改 `default_timeout_insec` 后需重启 CubeMaster；客户端可见语义见[沙箱生命周期 — 设计与运维要点](lifecycle.md#集群默认空闲超时default_timeout_insec)。
+修改 `default_timeout_insec` 后需重启 CubeMaster；客户端可见语义见[沙箱生命周期 — 设计与运维要点](lifecycle.md#集群默认空闲超时default_timeout_insec)。如果要调整节点选择、quota、label、调度评分或新增计算节点后的 template redo，请参阅[CubeMaster 调度器配置参考](./cubemaster-scheduler-config.md)。
 
 ### 场景 B：服务挂了 / 反复重启
 
@@ -227,14 +226,13 @@ CubeSandbox 有多种日志来源，其中也包括各组件自己的容器内�
 
 ### `/data/log/` 业务日志（重点）
 
-> ⚠️ Cubelet / CubeMaster / CubeAPI / network-agent / CubeShim / VMM 的「业务请求 + 统计 + 审计 + VMM 创建过程」日志**全部都写到 `/data/log/`**，**不会**进 journalctl，请直接读文件。
+> ⚠️ Cubelet / CubeMaster / CubeAPI / CubeShim / VMM 的「业务请求 + 统计 + 审计 + VMM 创建过程」日志**全部都写到 `/data/log/`**，**不会**进 journalctl，请直接读文件。
 
 | 模块 | 目录 | 主要文件 |
 |---|---|---|
 | Cubelet | `/data/log/Cubelet/` | `Cubelet-req.log`（请求）<br>`Cubelet-stat.log`（指标/统计）|
 | CubeMaster | `/data/log/CubeMaster/` | `cubemaster-req.log` |
 | CubeAPI | `/data/log/CubeAPI/` | `cube-api-YYYY-MM-DD.log`（按天滚动） |
-| network-agent | `/data/log/network-agent/` | `network-agent-req.log` |
 | CubeShim | `/data/log/CubeShim/` | `cube-shim-req.log`、`cube-shim-stat.log` |
 | Hypervisor (VMM) | `/data/log/CubeVmm/` | `vmm.log`（每次创建沙箱都会写 VMM 日志）|
 | cube-proxy | `/data/log/cube-proxy/` | `error.log`、`access.log`（见下文）|
@@ -297,7 +295,7 @@ sudo /usr/local/services/cubetoolbox/scripts/cube-diag/collect-logs.sh
 
 它会把以下内容统一收集到 `cube-diag-<时间戳>/` 目录下：
 
-- `/data/log/CubeMaster|Cubelet|CubeAPI|CubeShim|CubeVmm|network-agent/` 的 tail
+- `/data/log/CubeMaster|Cubelet|CubeAPI|CubeShim|CubeVmm/` 的 tail
 - `/data/log/cube-proxy/` 下的 access/error 日志
 - `dmesg` / 进程列表 / 端口 / 挂载 / cgroup / cpuinfo 等环境快照
 - 主要配置文件（敏感信息已脱敏）
@@ -387,7 +385,7 @@ sudo journalctl -u cube-sandbox-<service>.service -n 200 --no-pager
 
 - 容器镜像构建依赖外网（如 `cube-proxy` 的 `apk update`）暂时不可达 → 检查网络，或参阅[部署相关排障](./troubleshooting/deployment.md)
 - `ExecStartPost` 健康端口超时（端口被占用 / 上游服务还没起来）
-- 对 `cube-sandbox-cube-proxy.service`，`CUBE_PROXY_HTTP_PORT` 是 nginx 实际 HTTP 代理监听端口，也是启动后 TCP 检查使用的端口。`CUBE_PROXY_HOST_PORT` 已废弃且会被忽略；如果需要改检查端口，请改 `CUBE_PROXY_HTTP_PORT`。
+- 对 `cube-sandbox-cube-proxy.service`，`CUBE_PROXY_HTTP_PORT` 与 `CUBE_PROXY_GRPC_PORT` 是 systemd 启动后 TCP 检查所关注的 nginx 监听端口。`CUBE_PROXY_HOST_PORT` 已废弃且会被忽略；如果需要改 HTTP 检查端口，请改 `CUBE_PROXY_HTTP_PORT`。
 - `/data/log` 或 `/data/cubelet` 目录不存在 / 权限不对 / XFS 挂载错位
 
 ### Dashboard / API 无法访问
@@ -426,12 +424,12 @@ sudo ss -lntp 'sport = :3000'
 | `cube-api` | ✅ | — |
 | `webui` | ✅ | — |
 | `cube-proxy` / `coredns` / `dns` | ✅ | — |
-| `network-agent` | ✅ | ✅ |
 | `cubelet` | ✅ | ✅ |
 
 ### 相关文档
 
 - [快速开始](./quickstart.md) — 安装入口
 - [多机集群部署](./multi-node-deploy.md) — 计算节点的服务子集
+- [CubeMaster 调度器配置参考](./cubemaster-scheduler-config.md) — 节点选择、quota、label、评分和 template redo
 - [部署相关排障](./troubleshooting/deployment.md) — XFS / 网段冲突等环境问题
 - [模板相关排障](./troubleshooting/templates.md) — 模板创建相关问题

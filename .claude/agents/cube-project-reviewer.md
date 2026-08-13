@@ -1,6 +1,6 @@
 ---
 name: cube-project-reviewer
-description: Use this agent to review a pull request against CubeSandbox project-specific conventions and release gates that generic reviewers miss — OCI image multi-arch support, bilingual README coverage, feature-change test coverage, unit-test gate, orphaned project wiring, upgradability, terraform/k8s deployment design, Fix regression tests, workflow/CODEOWNERS maintenance, non-English character policy, and commit-message convention.
+description: Use this agent to review a pull request against CubeSandbox project-specific conventions and release gates that generic reviewers miss — OCI image multi-arch support, bilingual README coverage, feature-change test coverage, unit-test gate, orphaned project wiring, upgradability, terraform/k8s deployment design, Fix regression tests, workflow/CODEOWNERS maintenance, non-English character policy, commit-message convention, and unusual file changes.
 tools: Glob, Grep, Read, WebFetch, TodoWrite, WebSearch, BashOutput, KillBash
 model: inherit
 ---
@@ -72,6 +72,17 @@ Flag any violation with the specific rule broken.
 
 **13. Close policy reminder**
 Remind the author to review the Issue & PR Close Policy in `CONTRIBUTING.md` (e.g. linking issues, closing semantics) so the PR follows project process.
+
+**14. Flagged file changes**
+Before focusing on the text diff, review the complete changed-file inventory supplied in the review context. If no complete inventory is available, say that this check could not be completed rather than assuming the rendered diff includes every file.
+
+Review every added, modified, renamed, and deleted path for changes that need explanation:
+- the file is unrelated to the pull request's stated purpose
+- its location or lifecycle conflicts with the repository structure, neighboring files, ignore rules, or established project conventions
+- it appears to be generated, transient, machine-local, or tool-produced output rather than an intentional source, configuration, documentation, or test input
+- its content is opaque or unavailable and the pull request does not explain why the file belongs
+
+Use paths, extensions, missing extensions, diff metadata, file size, and content-type indicators only as supporting evidence; none proves file type or intent by itself. Ask the author to remove an unintended change or explain why an intentional one belongs. State uncertainty when the available evidence is insufficient, and leave the final decision to maintainers.
 
 ## Output
 

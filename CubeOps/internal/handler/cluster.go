@@ -11,7 +11,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/httputil"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
 )
+
+// logClusterStep logs a sub-step failure.
+func logClusterStep(ctx context.Context, step string, err error) {
+	logging.G(ctx).Warnf("cluster step %q failed: %v", step, err)
+}
 
 // ClusterHandler handles cluster-related HTTP requests.
 type ClusterHandler struct {
@@ -160,6 +166,7 @@ func (h *ClusterHandler) fetchUsedResources(ctx context.Context) map[string]stru
 } {
 	data, err := h.cm.ListSandboxes(ctx)
 	if err != nil {
+		logClusterStep(ctx, "list sandboxes", err)
 		return map[string]struct {
 			CPUMilli int64
 			MemoryMB int64
@@ -167,6 +174,7 @@ func (h *ClusterHandler) fetchUsedResources(ctx context.Context) map[string]stru
 	}
 	var resp cmSandboxListResponse
 	if err := json.Unmarshal(data, &resp); err != nil {
+		logClusterStep(ctx, "parse sandbox list", err)
 		return map[string]struct {
 			CPUMilli int64
 			MemoryMB int64
@@ -193,34 +201,40 @@ func (h *ClusterHandler) fetchUsedResources(ctx context.Context) map[string]stru
 
 // Overview handles GET /cluster/overview.
 func (h *ClusterHandler) Overview(c *gin.Context) {
-	data, err := h.cm.GetNodes(c.Request.Context())
+	ctx := c.Request.Context()
+	data, err := h.cm.GetNodes(ctx)
 	if err != nil {
+		logging.G(ctx).Errorf("cluster: failed to fetch overview: %v", err)
 		httputil.WriteError(c, http.StatusBadGateway, "failed to fetch cluster overview: "+err.Error())
 		return
 	}
 	var resp cmNodesResponse
 	if err := json.Unmarshal(data, &resp); err != nil {
+		logging.G(ctx).Errorf("cluster: failed to parse nodes response: %v", err)
 		httputil.WriteError(c, http.StatusInternalServerError, "failed to parse nodes response")
 		return
 	}
-	used := h.fetchUsedResources(c.Request.Context())
+	used := h.fetchUsedResources(ctx)
 	overview := buildOverview(resp.Data, used)
 	httputil.WriteJSON(c, http.StatusOK, overview)
 }
 
 // ListNodes handles GET /nodes.
 func (h *ClusterHandler) ListNodes(c *gin.Context) {
-	data, err := h.cm.GetNodes(c.Request.Context())
+	ctx := c.Request.Context()
+	data, err := h.cm.GetNodes(ctx)
 	if err != nil {
+		logging.G(ctx).Errorf("cluster: failed to fetch nodes: %v", err)
 		httputil.WriteError(c, http.StatusBadGateway, "failed to fetch nodes: "+err.Error())
 		return
 	}
 	var resp cmNodesResponse
 	if err := json.Unmarshal(data, &resp); err != nil {
+		logging.G(ctx).Errorf("cluster: failed to parse nodes response: %v", err)
 		httputil.WriteError(c, http.StatusInternalServerError, "failed to parse nodes response")
 		return
 	}
-	used := h.fetchUsedResources(c.Request.Context())
+	used := h.fetchUsedResources(ctx)
 	views := make([]nodeView, 0, len(resp.Data))
 	for _, s := range resp.Data {
 		views = append(views, toNodeView(s, used))
@@ -230,26 +244,30 @@ func (h *ClusterHandler) ListNodes(c *gin.Context) {
 
 // GetNode handles GET /nodes/{nodeID}.
 func (h *ClusterHandler) GetNode(c *gin.Context) {
+	ctx := c.Request.Context()
 	nodeID := c.Param("nodeID")
 	if nodeID == "" {
 		httputil.WriteError(c, http.StatusBadRequest, "nodeID is required")
 		return
 	}
-	data, err := h.cm.GetNode(c.Request.Context(), nodeID)
+	data, err := h.cm.GetNode(ctx, nodeID)
 	if err != nil {
+		logging.G(ctx).Errorf("cluster: failed to fetch node: nodeID=%s: %v", nodeID, err)
 		httputil.WriteError(c, http.StatusBadGateway, "failed to fetch node: "+err.Error())
 		return
 	}
 	var resp cmNodeResponse
 	if err := json.Unmarshal(data, &resp); err != nil {
+		logging.G(ctx).Errorf("cluster: failed to parse node response: nodeID=%s: %v", nodeID, err)
 		httputil.WriteError(c, http.StatusInternalServerError, "failed to parse node response")
 		return
 	}
 	if resp.Data == nil {
+		logging.G(ctx).Errorf("cluster: node not found: nodeID=%s", nodeID)
 		httputil.WriteError(c, http.StatusNotFound, fmt.Sprintf("node %s not found", nodeID))
 		return
 	}
-	used := h.fetchUsedResources(c.Request.Context())
+	used := h.fetchUsedResources(ctx)
 	httputil.WriteJSON(c, http.StatusOK, toNodeView(*resp.Data, used))
 }
 
@@ -258,18 +276,26 @@ func (h *ClusterHandler) GetNode(c *gin.Context) {
 // Empty/missing CubeMaster data returns an empty shell for the UI. Otherwise
 // keys are rewritten with camelCaseJSON (same path as writeSDKResponse).
 func (h *ClusterHandler) Versions(c *gin.Context) {
+	ctx := c.Request.Context()
 	empty := map[string]interface{}{
 		"controlPlane": map[string]string{},
 		"components":   []interface{}{},
 		"nodes":        []interface{}{},
 	}
-	data, err := h.cm.ClusterVersions(c.Request.Context())
+	data, err := h.cm.ClusterVersions(ctx)
 	if err != nil {
+		logging.G(ctx).Errorf("cluster: failed to fetch versions, returning empty shell: %v", err)
 		httputil.WriteJSON(c, http.StatusOK, empty)
 		return
 	}
 	var resp cmResponse
-	if err := json.Unmarshal(data, &resp); err != nil || len(resp.Data) == 0 || string(resp.Data) == "null" {
+	if err := json.Unmarshal(data, &resp); err != nil {
+		logging.G(ctx).Errorf("cluster: failed to parse versions response, returning empty shell: %v", err)
+		httputil.WriteJSON(c, http.StatusOK, empty)
+		return
+	}
+	if len(resp.Data) == 0 || string(resp.Data) == "null" {
+		logging.G(ctx).Infof("cluster: Versions returning empty shell: no data from cubemaster")
 		httputil.WriteJSON(c, http.StatusOK, empty)
 		return
 	}

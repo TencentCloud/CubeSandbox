@@ -83,6 +83,6 @@ COPY --from=builder /usr/local/openresty /usr/local/openresty
 
 WORKDIR /usr/local/openresty/nginx
 
-EXPOSE 8080 8443 9090
+EXPOSE 8080 8443 9091
 
 CMD ["openresty", "-g", "daemon off;"]

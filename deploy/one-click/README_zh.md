@@ -5,7 +5,9 @@
 ## 目录说明
 
 - `build-release-bundle-builder.sh`：推荐入口；先在 builder 镜像中编译 one-click 需要的组件，再在宿主机继续执行发布包打包。
-- `build-vm-assets.sh`：构建 `containerd-shim-cube-rs`、`cube-runtime`、`cube-agent`，把 `cube-agent` 注入 guest image 作为 `/sbin/init`，并收集 guest kernel。
+- `build-vm-assets.sh`：构建 `containerd-shim-cube-rs`、`cube-runtime`、含 `cube-init` 的 guest image，以及独立的 `cube-agent.ext4`；并收集 guest kernel。
+- `build-guest-image.sh`：构建仅含轻量 `cube-init`（作为 `/sbin/init`）的 guest OS 镜像。
+- `build-agent-ext4.sh`：构建独立 `cube-agent/cube-agent.ext4`（+ `version`），供 virtio-pmem1 注入。
 - `build-release-bundle.sh`：底层打包入口；消费源码树或 `ONE_CLICK_*_BIN` 预编译产物，组装 `sandbox-package` 并生成最终发布包。
 - `config-cube.toml`：one-click 默认 runtime 配置模板。
 - `support/`：MySQL/Redis 的 `docker compose` 模板，安装后落到 `/usr/local/services/cubetoolbox/support/`；`support/bin/mkcert` 为内置的 mkcert 二进制。
@@ -19,6 +21,20 @@
 - `lib/common.sh`：公共 shell 函数。
 - `scripts/one-click/`：systemd 托管部署安装后使用的校验与维护辅助脚本。
 - `terraform/tencentcloud/`：在腾讯云上部署**集群版** CubeSandbox 的 Terraform 部署器（TKE 控制面 + CVM 计算节点）。`create.sh` 为入口，`destroy.sh` 负责整体销毁。这些文件同时位于发布包顶层和 `sandbox-package` 内（见“腾讯云集群部署”）。
+
+## 根目录 Makefile Target（Agent 独立 pmem）
+
+在仓库根目录通过统一 builder 镜像构建（如缺少镜像先执行 `make builder-image`）：
+
+```bash
+make cube-init          # guest PID1 → _output/bin/cube-init（别名 guest-init）
+make agent-ext4         # 独立平面文件 → _output/cube-agent/{cube-agent.ext4,version}
+                        # （别名 cube-agent-ext4）
+make pmem-assets        # 一次产出 cube-init + agent-ext4
+make help               # 查看全部根 target
+```
+
+完整 runtime 布局（shim + guest image + agent.ext4 + kernel）请使用 `./build-vm-assets.sh` 或下方的发布包入口。
 
 ## 支持的操作系统
 
@@ -40,7 +56,14 @@ export ONE_CLICK_CUBE_KERNEL_VMLINUX=/abs/path/to/vmlinux
 export ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX=/abs/path/to/vmlinux-pvm
 ```
 
-运行时仍然使用 `cube-kernel-scf/vmlinux`。默认情况下该文件是普通 guest kernel；如果目标机安装时设置 `CUBE_PVM_ENABLE=1`，安装脚本会把包内的 `vmlinux-pvm` 覆盖安装为 `cube-kernel-scf/vmlinux`。
+内核多版本库存（内容寻址）：
+
+- 安装时对 `vmlinux-bm` / `vmlinux-pvm` **分别**按内容 sha256 入库到 `component_versions/cube-kernel-scf/sha256-<12位>/`
+- 每个库存目录内：`vmlinux-bm|pvm`、`vmlinux` 软链、`variant`（`bm`/`pvm`）、`version`（`sha256:<64位>`，供 shim 比对）
+- `KERNEL_TAG` / `PVM_KERNEL_TAG` **不作为**库存目录名；`release-manifest` 的 `kernel.version` / `pvm_version` 同样记录内容短哈希
+- Ensure 从 Master identity 中的 digest 映射到上述短 key
+
+运行时仍然使用 `cube-kernel-scf/vmlinux`。包内保留 `vmlinux-bm`，`vmlinux` 为软链：默认指向 `vmlinux-bm`；目标机安装时设 `CUBE_PVM_ENABLE=1` 则指向 `vmlinux-pvm`。
 
 guest image 不再依赖本地 zip。默认在构建 one-click 发布包时基于 `deploy/guest-image/Dockerfile` 本地生成。常用覆盖参数如下：
 
@@ -72,9 +95,18 @@ cp env.example .env
 ./deploy/one-click/build-release-bundle-builder.sh
 ```
 
+如果希望发布包里的 `cubemastercli` 内嵌默认 `envd`，请先在构建机准备好 `envd` 二进制文件，然后在推荐的 builder 入口中传入 `ENVD_LOCAL_PATH`：
+
+```bash
+ENVD_LOCAL_PATH=/abs/path/to/envd \
+./deploy/one-click/build-release-bundle-builder.sh
+```
+
+设置该变量后，宿主机 wrapper 会先把文件复制到 `deploy/one-click/.work/envd`，builder 容器再用这个文件构建内嵌 `envd` 的 `cubemastercli`。如果不设置 `ENVD_LOCAL_PATH`，发布包中的 `cubemastercli` 不包含默认 `envd`；运行时若模板构建启用 envd 注入，需要显式传入 `--envd-path`。
+
 这个入口会先：
 
-- 通过根目录 builder 镜像在容器内编译 `cubemaster`、`cubemastercli`、`cubelet`、`cubecli`、`cube-api`、`network-agent`、`cube-agent`、`containerd-shim-cube-rs`、`cube-runtime`
+- 通过根目录 builder 镜像在容器内编译 `cubemaster`、`cubemastercli`、`cubelet`、`cubecli`、`cube-api`、`cube-agent`、`containerd-shim-cube-rs`、`cube-runtime`；network runtime 已内置到 `cubelet`，不再构建独立网络运行时二进制
 - 在 builder 内对 `CubeMaster`、`Cubelet` 执行 `go mod download`，首次构建会在线拉取 Go modules，后续复用 builder HOME 下的模块缓存
 - 将预编译产物落到 `deploy/one-click/.work/prebuilt/`
 - 回到宿主机调用 `build-release-bundle.sh`，构建 WebUI 静态资源，继续 guest image 和最终打包
@@ -111,7 +143,8 @@ deploy/one-click/dist/cube-sandbox-one-click-<version>.tar.gz
 - `sandbox-package.tar.gz`
 - `CubeAPI/bin/cube-api`
 - `containerd-shim-cube-rs`、`cube-runtime`
-- 本地构建得到的 `cube-image/cube-guest-image-cpu.img`
+- 本地构建得到的 `cube-image/cube-guest-image-cpu.img`（含 `cube-init` 作为 `/sbin/init`）
+- 独立的 `cube-agent/cube-agent.ext4`（+ `cube-agent/version`）
 - `cubeproxy/` 目录（运行时拉取预构建镜像；`build-context` 仅供私有 TCR 重建）
 - `support/` 目录及其 compose 模板
 - `webui/` 目录、compose 模板、nginx 配置和已构建的 `web/dist` 静态资源
@@ -126,13 +159,12 @@ one-click 不会在目标机额外创建一层全局 `configs/`，而是直接�
   - `cubelet_conf.default_timeout_insec`: cluster default sandbox idle TTL when the client omits `timeout`; unset or `<= 0` means **no cluster-wide idle timeout** (shipped default `-1`). See [lifecycle — 设计与运维要点](../../docs/zh/guide/lifecycle.md#集群默认空闲超时default_timeout_insec)。
 - `Cubelet/config/` -> `Cubelet/config/`
 - `Cubelet/dynamicconf/` -> `Cubelet/dynamicconf/`
-- `configs/single-node/network-agent.yaml` -> `network-agent/network-agent.yaml`
 - `CubeAPI/bin/cube-api` -> `/usr/local/services/cubetoolbox/CubeAPI/bin/cube-api`
 - `support/` -> `/usr/local/services/cubetoolbox/support/`
 - `cubeproxy/` -> `/usr/local/services/cubetoolbox/cubeproxy/`
 - `webui/` -> `/usr/local/services/cubetoolbox/webui/`
 
-其中 `Cubelet` 直接使用仓库内现成的 `dynamicconf/conf.yaml`；`network-agent` 实际启动时优先通过 `--cubelet-config` 读取 `Cubelet/config/config.toml` 中的网络插件配置，以保证和 `Cubelet` 的网络参数保持一致；`cube-api` 则直接读取 `.one-click.env` 中的环境变量启动，默认监听 `0.0.0.0:3000` 并转发到本机 `cubemaster`。MySQL/Redis 固定部署到 `/usr/local/services/cubetoolbox/support`，以 Docker 容器运行并由专用 systemd service 管理；`cube proxy` 固定部署到 `/usr/local/services/cubetoolbox/cubeproxy`，从发布包内 build context 本地构建镜像，并由 systemd 管理。WebUI 固定部署到 `/usr/local/services/cubetoolbox/webui`，默认监听 `12088`，通过标准 nginx 容器托管发布包里的 `webui/dist`，并通过 Docker `host-gateway` 把 `/cubeapi` 反代到宿主机 CubeAPI；其生命周期同样由 systemd 托管。
+其中 `Cubelet` 直接使用仓库内现成的 `dynamicconf/conf.yaml`，其内置 network runtime 直接读取 `Cubelet/config/config.toml` 中的网络插件配置；`cube-api` 则直接读取 `.one-click.env` 中的环境变量启动，默认监听 `0.0.0.0:3000` 并转发到本机 `cubemaster`。MySQL/Redis 固定部署到 `/usr/local/services/cubetoolbox/support`，以 Docker 容器运行并由专用 systemd service 管理；`cube proxy` 固定部署到 `/usr/local/services/cubetoolbox/cubeproxy`，从发布包内 build context 本地构建镜像，并由 systemd 管理。WebUI 固定部署到 `/usr/local/services/cubetoolbox/webui`，默认监听 `12088`，通过标准 nginx 容器托管发布包里的 `webui/dist`，并通过 Docker `host-gateway` 把 `/cubeapi` 反代到宿主机 CubeAPI；其生命周期同样由 systemd 托管。
 
 ## 目标机安装
 
@@ -217,8 +249,8 @@ sudo ./install-compute.sh
 
 计算节点模式会：
 
-- 安装 `Cubelet`、`network-agent`、`cube-shim`、`cube-image`、`cube-kernel-scf`、`cube-egress` 和运行所需脚本，并安装 `docker`
-- 启动 `network-agent`、`cubelet`，并通过 `cube-sandbox-compute.target` 拉起 `cube-egress`（透明出网 MITM 代理，以 docker 容器运行，用于强制执行沙箱出网策略）
+- 安装内置 network runtime 的 `Cubelet`、`cube-shim`、`cube-image`、`cube-kernel-scf`、`cube-egress` 和运行所需脚本，并安装 `docker`
+- 启动 `cubelet`，并通过 `cube-sandbox-compute.target` 拉起 `cube-egress`（透明出网 MITM 代理，以 docker 容器运行，用于强制执行沙箱出网策略）
 - `cube-egress` 启动前会通过主节点的 `/cube/ca/<file>` 接口拉取与模板一致的 MITM 根 CA（含私钥），保证模板信任 compute 节点上 `cube-egress` 签发的叶子证书
 - 将 `Cubelet` 的 `meta_server_endpoint` 指向 `ONE_CLICK_CONTROL_PLANE_IP:8089`
 - 通过主节点的 `/internal/meta` 接口自动注册节点
@@ -280,6 +312,8 @@ CUBE_PROXY_DNS_ENABLE=1
 ```bash
 CUBE_PROXY_HTTPS_PORT=443
 CUBE_PROXY_HTTP_PORT=80
+CUBE_PROXY_GRPC_PORT=9090
+CUBE_EGRESS_ADMIN_PORT=9091
 # 已废弃：CUBE_PROXY_HOST_PORT 会被忽略；如需调整启动后检查端口，请配置 CUBE_PROXY_HTTP_PORT。
 CUBE_PROXY_CERT_DIR=/usr/local/services/cubetoolbox/cubeproxy/certs
 CUBE_PROXY_DNS_ANSWER_IP="${CUBE_SANDBOX_NODE_IP}"
@@ -300,10 +334,10 @@ CUBE_API_SANDBOX_DOMAIN=cube.app
 - 安装 `/etc/systemd/system/cube-sandbox-*.service|target|timer`，并把宿主机进程与容器统一交给 systemd 管理
 - MySQL、Redis、cube proxy、WebUI、CoreDNS 仍使用 Docker 运行，但生命周期改由各自的 systemd service 直接管理，而不是运行期依赖 `docker compose up -d`
 - 若目标机有 `resolvectl`，则创建专用 dummy link（默认 `cube-dns0`）并分配本地地址，`CoreDNS` 默认绑定到该链路地址 `169.254.254.53`，再把 `cube.app` 域名通过该链路路由到本地 DNS；若目标机没有 `resolvectl`，则回退到 `NetworkManager + dnsmasq`：同样会创建该 dummy link，并让 `dnsmasq` 在 `169.254.254.53` 上额外监听，安装器同时把 `/etc/resolv.conf` 从 NetworkManager 手里接管（`rc-manager=unmanaged`）并改写为指向该非 loopback IP。这样宿主与 `systemd-resolved` 路径保持对称，避免 Docker 在 `/etc/resolv.conf` 只剩 loopback nameserver 时默默回退到内置公网 DNS（`8.8.8.8`）——一旦回退，宿主上所有依赖域名解析的容器（典型如 `docker build` 跑 `apk update`）都会因为公网 DNS 在内网不可达而失败。若目标机上 NetworkManager 会初始化其 `dnsmasq` 插件但从不真正拉起子进程（例如通过 `ifcfg` + `assume` 管理的 bond 网卡），可设置 `CUBE_PROXY_DNSMASQ_MODE=standalone`，让 DNS 脚本直接拉起并管理 `dnsmasq`，而不再依赖 NetworkManager 插件；面向客户端的解析器布局（dummy link、监听地址、入口 IP）在其它方面完全一致。
-- 启动宿主机进程 `network-agent`、`cubemaster`、`cube-api`、`cubelet`，并在 `quickcheck.sh` 中校验 systemd 状态与业务健康检查
+- 启动宿主机进程 `cubemaster`、`cube-api`、`cubelet`，并在 `quickcheck.sh` 中校验 systemd 状态与业务健康检查
 - 在 `/usr/local/services/cubetoolbox/webui/` 下运行标准 WebUI nginx 容器。该容器只读挂载 `webui/dist` 静态资源，发布 `WEB_UI_HOST_PORT`（默认 `12088`），把 `host.docker.internal` 映射到 Docker `host-gateway`，并通过 nginx 反代校验 `/health`（由 CubeOps 提供）
 
-停止 one-click 时会同时停止 `/usr/local/services/cubetoolbox/support` 下的 MySQL/Redis、WebUI、`cube proxy` / `CoreDNS`、宿主机进程 `network-agent` / `cubemaster` / `cube-api` / `cubelet`，并回滚 `cube.app` 的宿主机 DNS 路由配置。
+停止 one-click 时会同时停止 `/usr/local/services/cubetoolbox/support` 下的 MySQL/Redis、WebUI、`cube proxy` / `CoreDNS`、宿主机进程 `cubemaster` / `cube-api` / `cubelet`，并回滚 `cube.app` 的宿主机 DNS 路由配置。
 
 部署完成后，如需让 E2B 官方 SDK 指向 one-click 节点，可以在客户端侧设置：
 
@@ -411,7 +445,7 @@ sudo yum install -y e2fsprogs util-linux
 - 推荐入口只把组件编译放进 builder；guest image 与最终打包仍在宿主机执行。
 - 若直接执行底层入口 `build-release-bundle.sh`，构建机还需要根据 build mode 自行准备 `go` / `cargo` / `make` 等本地工具链。
 - 若直接执行底层入口或首次使用推荐入口，构建机还需要能联网下载 Go modules；受限网络环境建议预先配置可用的 `GOPROXY`。
-- 若启用 VM 路径，目标机仍需满足 `network-agent`、tap、路由等运行权限要求。
+- 若启用 VM 路径，目标机仍需满足 `Cubelet` 内置 network runtime、tap、路由等运行权限要求。
 
 ## 已知限制
 

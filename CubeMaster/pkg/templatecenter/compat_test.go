@@ -4,7 +4,10 @@
 
 package templatecenter
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestEvaluateCompat(t *testing.T) {
 	tests := []struct {
@@ -119,14 +122,30 @@ func TestEvaluateCompat(t *testing.T) {
 
 func TestBindGuestVersionToReplica(t *testing.T) {
 	replica := ReplicaStatus{}
-	bindGuestVersionToReplica(&replica, " v1 ", "unknown", "k1")
+	bindGuestVersionToReplica(&replica, " v1 ", "unknown", "k1", "shim-1")
 	if replica.GuestImageVersion != "v1" {
 		t.Fatalf("guest version=%q, want v1", replica.GuestImageVersion)
 	}
 	if replica.AgentVersion != "" {
 		t.Fatalf("agent version=%q, want empty", replica.AgentVersion)
 	}
+	if replica.ShimVersion != "shim-1" {
+		t.Fatalf("shim version=%q, want shim-1", replica.ShimVersion)
+	}
 	if replica.CompatStatus != CompatStatusUnknown {
 		t.Fatalf("compat status=%s, want UNKNOWN", replica.CompatStatus)
+	}
+}
+
+func TestIsReplicaSchedulableAllowsStale(t *testing.T) {
+	readyStale := ReplicaStatus{Status: ReplicaStatusReady, CompatStatus: CompatStatusStale}
+	if !isReplicaSchedulable(readyStale) {
+		t.Fatal("READY+STALE replica must remain schedulable")
+	}
+	if !isReplicaSchedulableNow(context.Background(), readyStale) {
+		t.Fatal("READY+STALE replica must remain schedulable now")
+	}
+	if isReplicaSchedulable(ReplicaStatus{Status: ReplicaStatusFailed, CompatStatus: CompatStatusOK}) {
+		t.Fatal("non-READY replica must not be schedulable")
 	}
 }

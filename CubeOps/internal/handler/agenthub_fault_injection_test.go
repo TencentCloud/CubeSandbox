@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"strings"
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/cubemaster"
@@ -121,10 +120,10 @@ func TestAgentHub_DeleteInstance_SendsRequestIDAndCubebox(t *testing.T) {
 		t.Fatalf("status = %d, want 204; body=%s", w.Code, w.Body.String())
 	}
 
-	// R07 fix: request_id must be present and non-empty.
+	// requestID must equal the inbound trace RequestID.
 	reqID, ok := capturedBody["requestID"].(string)
-	if !ok || reqID == "" {
-		t.Errorf("request_id = %v, want non-empty string", capturedBody["requestID"])
+	if !ok || reqID != "test-req-id" {
+		t.Errorf("requestID = %v, want %q", capturedBody["requestID"], "test-req-id")
 	}
 	// R07 fix: instance_type must be "cubebox", not "openclaw" (inst.Engine).
 	instType, ok := capturedBody["instance_type"].(string)
@@ -274,10 +273,10 @@ func TestAgentHub_Rollback_SendsRequestID(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
 
-	// R08 fix: request_id must be present and non-empty.
+	//requestID must equal the inbound trace RequestID.
 	reqID, ok := capturedBody["requestID"].(string)
-	if !ok || reqID == "" {
-		t.Errorf("request_id = %v, want non-empty string; full body = %v", capturedBody["requestID"], capturedBody)
+	if !ok || reqID != "test-req-id" {
+		t.Errorf("requestID = %v, want %q", capturedBody["requestID"], "test-req-id")
 	}
 	// R08 fix: sandbox_id must be present.
 	sbID, ok := capturedBody["sandbox_id"].(string)
@@ -371,13 +370,10 @@ func TestAgentHub_R10_CompensateDeleteOnApplyFailure(t *testing.T) {
 		if sid != createdSandboxID {
 			t.Errorf("compensation DeleteSandbox called with sandbox_id=%q, want %q", sid, createdSandboxID)
 		}
-		// R07/R10: request_id must be present and non-empty.
+		// requestID must equal the inbound trace RequestID.
 		reqID, _ := reqMap["requestID"].(string)
-		if reqID == "" {
-			t.Error("compensation DeleteSandbox: request_id is empty, want non-empty")
-		}
-		if reqID != "" && !strings.HasPrefix(reqID, "cubeops-compensate-") {
-			t.Errorf("compensation DeleteSandbox: request_id = %q, want prefix \"cubeops-compensate-\"", reqID)
+		if reqID != "test-req-id" {
+			t.Errorf("compensation DeleteSandbox: requestID = %q, want %q", reqID, "test-req-id")
 		}
 		// R07/R10: instance_type must be "cubebox".
 		instType, _ := reqMap["instance_type"].(string)
@@ -458,14 +454,10 @@ func TestAgentHub_Recover_SendsRequestID(t *testing.T) {
 	// the rollback request body was correct.
 	w := doRequest(t, env, "POST", "/api/v1/agenthub/instances/agent-rec/recover", "")
 
-	// R08 fix: request_id must be present and non-empty.
+	//requestID must equal the inbound trace RequestID.
 	reqID, ok := capturedBody["requestID"].(string)
-	if !ok || reqID == "" {
-		t.Errorf("request_id = %v, want non-empty string; full body = %v", capturedBody["requestID"], capturedBody)
-	}
-	// R08 fix: the request_id must have the "cubeops-recover-" prefix.
-	if reqID != "" && !strings.HasPrefix(reqID, "cubeops-recover-") {
-		t.Errorf("request_id = %q, want prefix \"cubeops-recover-\"", reqID)
+	if !ok || reqID != "test-req-id" {
+		t.Errorf("requestID = %v, want %q; full body = %v", capturedBody["requestID"], "test-req-id", capturedBody)
 	}
 	// R08 fix: sandbox_id must be present.
 	sbID, ok := capturedBody["sandbox_id"].(string)
@@ -505,14 +497,10 @@ func TestAgentHub_PublishTemplate_SendsRequestID(t *testing.T) {
 		t.Fatalf("status = %d, want 201; body=%s", w.Code, w.Body.String())
 	}
 
-	// R08 fix: request_id must be present and non-empty.
+	// requestID must equal the inbound trace RequestID.
 	reqID, ok := capturedBody["requestID"].(string)
-	if !ok || reqID == "" {
-		t.Errorf("request_id = %v, want non-empty string; full body = %v", capturedBody["requestID"], capturedBody)
-	}
-	// R08 fix: the request_id must have the "cubeops-publish-" prefix.
-	if reqID != "" && !strings.HasPrefix(reqID, "cubeops-publish-") {
-		t.Errorf("request_id = %q, want prefix \"cubeops-publish-\"", reqID)
+	if !ok || reqID != "test-req-id" {
+		t.Errorf("requestID = %v, want %q; full body = %v", capturedBody["requestID"], "test-req-id", capturedBody)
 	}
 	// R08 fix: sandbox_id must be present.
 	sbID, ok := capturedBody["sandbox_id"].(string)
@@ -589,21 +577,10 @@ func TestAgentHub_CloneAgent_ApplyFailureSendsRequestID(t *testing.T) {
 		t.Fatal("expected DeleteSandbox to be called as compensation after clone apply failure, but it was not (S3)")
 	}
 
-	// S3 fix: must use "requestID" (not "request_id" or "RequestID").
+	//requestID must equal the inbound trace RequestID.
 	reqID, ok := deleteBody["requestID"].(string)
-	if !ok || reqID == "" {
-		t.Errorf("requestID = %v, want non-empty string; body = %v", deleteBody["requestID"], deleteBody)
-	}
-	if _, exists := deleteBody["request_id"]; exists {
-		t.Error(`body contains "request_id" — Clone compensation must use "requestID" (S3)`)
-	}
-	if _, exists := deleteBody["RequestID"]; exists {
-		t.Error(`body contains "RequestID" — Clone compensation must use "requestID" (S3)`)
-	}
-
-	// Prefix must be "cubeops-clone-".
-	if reqID != "" && !strings.HasPrefix(reqID, "cubeops-clone-") {
-		t.Errorf("requestID = %q, want prefix \"cubeops-clone-\" (S3)", reqID)
+	if !ok || reqID != "test-req-id" {
+		t.Errorf("requestID = %v, want %q; body = %v", deleteBody["requestID"], "test-req-id", deleteBody)
 	}
 
 	// Sandbox ID must match the created sandbox.
@@ -701,11 +678,8 @@ func TestAgentHub_CloneAgent_UpsertFailureCompensates(t *testing.T) {
 	}
 
 	reqID, ok := deleteBody["requestID"].(string)
-	if !ok || reqID == "" {
-		t.Errorf("requestID = %v, want non-empty; body = %v", deleteBody["requestID"], deleteBody)
-	}
-	if reqID != "" && !strings.HasPrefix(reqID, "cubeops-clone-") {
-		t.Errorf("requestID = %q, want prefix \"cubeops-clone-\" (S3)", reqID)
+	if !ok || reqID != "test-req-id" {
+		t.Errorf("requestID = %v, want %q; body = %v", deleteBody["requestID"], "test-req-id", deleteBody)
 	}
 
 	// No DB record for the clone sandbox.

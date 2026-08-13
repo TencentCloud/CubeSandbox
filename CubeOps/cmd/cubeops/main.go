@@ -6,7 +6,7 @@ package main
 import (
 	"context"
 	"errors"
-	"log/slog"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,18 +22,17 @@ import (
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
-		// Config load failed before logging is initialised; use a
-		// stdout-only slog so the error is still visible.
-		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-			Level: slog.LevelInfo,
-		})))
-		slog.Error("failed to load config", "error", err)
+		// Logging is not yet initialised here; write directly to stderr
+		// so a config-load failure is always visible regardless of
+		// cubelog's default-writer behaviour.
+		fmt.Fprintf(os.Stderr, "cubeops: failed to load config: %v\n", err)
 		os.Exit(1)
 	}
 
 	logging.Init(logging.Options{
 		Level:      cfg.LogLevel,
 		LogDir:     cfg.LogDir,
+		Module:     "cubeops",
 		FileNum:    cfg.LogFileNum,
 		FileSizeMB: cfg.LogFileSize,
 	})
@@ -44,7 +43,7 @@ func main() {
 	// Initialise database + migrations + master key
 	s, err := store.New(ctx, cfg.DaoConfig())
 	if err != nil {
-		slog.Error("failed to initialise database", "error", err)
+		logging.G(ctx).Errorf("failed to initialise database: err=%q", err.Error())
 		os.Exit(1)
 	}
 	defer s.Close()
@@ -53,7 +52,7 @@ func main() {
 	// auto-generate and persist to DB (zero-config deployment).
 	jwtSecret, err := s.BootstrapJWTSecret(ctx, cfg.JWTSecret)
 	if err != nil {
-		slog.Error("failed to bootstrap JWT secret", "error", err)
+		logging.G(ctx).Errorf("failed to bootstrap JWT secret: err=%q", err.Error())
 		os.Exit(1)
 	}
 	cfg.JWTSecret = jwtSecret
@@ -65,19 +64,19 @@ func main() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
-		slog.Info("received shutdown signal")
+		logging.G(context.Background()).Info("received shutdown signal")
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutdownCancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
-			slog.Error("server shutdown error", "error", err)
+			logging.G(shutdownCtx).Errorf("server shutdown error: err=%q", err.Error())
 		}
 		cancel()
 	}()
 
 	if err := srv.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		slog.Error("server error", "error", err)
+		logging.G(ctx).Errorf("server error: err=%q", err.Error())
 		os.Exit(1)
 	}
 
-	slog.Info("CubeOps stopped")
+	logging.G(ctx).Info("CubeOps stopped")
 }

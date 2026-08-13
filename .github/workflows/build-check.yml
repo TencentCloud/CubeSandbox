@@ -11,7 +11,6 @@ on:
       - 'Cubelet/**'
       - 'CubeShim/**'
       - 'agent/**'
-      - 'network-agent/**'
       - 'docker/Dockerfile.builder'
       - '.github/workflows/build-builder-image.yml'
       - '.github/workflows/build-check.yml'
@@ -25,7 +24,6 @@ on:
       - 'Cubelet/**'
       - 'CubeShim/**'
       - 'agent/**'
-      - 'network-agent/**'
       - 'docker/Dockerfile.builder'
       - '.github/workflows/build-builder-image.yml'
       - '.github/workflows/build-check.yml'
@@ -46,12 +44,24 @@ env:
 
 jobs:
   build:
-    name: Build ${{ matrix.component }}
-    runs-on: ubuntu-latest
+    name: Build ${{ matrix.component }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
+        # Build every component on both amd64 and arm64. The two axes are
+        # crossed automatically; the per-arch `include` entries attach the
+        # runner label, and the per-component `include` entries attach the
+        # make target + expected binaries. Architecture coverage catches
+        # arch-specific regressions (e.g. cfg(target_arch) code in the shim /
+        # hypervisor) that an amd64-only build would miss.
+        component: [CubeAPI, CubeOps, CubeMaster, Cubelet, agent, CubeShim]
+        arch: [amd64, arm64]
         include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
           - component: CubeAPI
             make_target: cubeapi
             expected_bins: |
@@ -79,10 +89,6 @@ jobs:
             expected_bins: |
               _output/bin/containerd-shim-cube-rs
               _output/bin/cube-runtime
-          - component: network-agent
-            make_target: network-agent
-            expected_bins: |
-              _output/bin/network-agent
 
     steps:
       - name: Checkout
@@ -196,8 +202,16 @@ jobs:
   # Docker smoke build for release images that use repo-root context +
   # adjacent Dockerfile.dockerignore (catches context/ignore regressions).
   docker-smoke:
-    name: Docker Smoke Build
-    runs-on: ubuntu-latest
+    name: Docker Smoke Build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -226,14 +240,6 @@ jobs:
         with:
           context: .
           file: Cubelet/Dockerfile
-          push: false
-          load: false
-
-      - name: Build network-agent image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: network-agent/Dockerfile
           push: false
           load: false
 

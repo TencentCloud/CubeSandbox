@@ -11,6 +11,8 @@
 !cubelog/**
 !cubecow
 !cubecow/**
+!CubeNet
+!CubeNet/**
 !deploy
 !deploy/scripts
 !deploy/scripts/docker-install-volume-deps.sh
