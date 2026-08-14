@@ -86,6 +86,27 @@ func (c *Client) Bootstrap(ctx context.Context) (map[string]lifecycle.SandboxLif
 	return out, nil
 }
 
+// LookupMeta returns the meta for a single sandbox from the meta HSet.
+// (nil, nil) means the field is absent — CubeMaster doesn't know the sandbox
+// (anymore). Used by the resumer's registry-miss fallback so a standby (or a
+// freshly-promoted leader whose bootstrap hasn't landed yet) can still serve
+// resume requests without waiting for the stream consumer to catch up.
+func (c *Client) LookupMeta(ctx context.Context, sandboxID string) (*lifecycle.SandboxLifecycleMeta, error) {
+	payload, err := c.rdb.HGet(ctx, lifecycle.MetaKey, sandboxID).Result()
+	if errors.Is(err, redis.Nil) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("hget %s %s: %w", lifecycle.MetaKey, sandboxID, err)
+	}
+	var meta lifecycle.SandboxLifecycleMeta
+	if err := json.Unmarshal([]byte(payload), &meta); err != nil {
+		return nil, fmt.Errorf("unmarshal meta for %s: %w", sandboxID, err)
+	}
+	meta.SandboxID = sandboxID
+	return &meta, nil
+}
+
 // EnsureGroup creates the consumer group on the events stream, ignoring
 // "BUSYGROUP" (group already exists) errors. MKSTREAM lets the group be
 // created before any events have been published.
@@ -160,6 +181,46 @@ func (c *Client) ReadGroup(ctx context.Context, group, consumer string, block ti
 // Ack marks the event as processed so it leaves the consumer's pending list.
 func (c *Client) Ack(ctx context.Context, group, id string) error {
 	return c.rdb.XAck(ctx, lifecycle.EventStreamKey, group, id).Err()
+}
+
+// ClaimPending transfers up to `count` stream entries that have been pending
+// for longer than minIdle — i.e. stuck on a dead or demoted consumer — to
+// `consumer`, returning them for processing. In active-standby mode the new
+// leader uses this to take over the previous leader's pending-entries list
+// (issue #1211); minIdle should be ≥ the leader lease TTL so entries a live
+// consumer is actively working on are never stolen. The caller must handle
+// and Ack the returned events just like ReadGroup output. Requires Redis
+// 6.2+ (XAUTOCLAIM).
+func (c *Client) ClaimPending(ctx context.Context, group, consumer string, minIdle time.Duration, count int64) ([]Event, error) {
+	msgs, _, err := c.rdb.XAutoClaim(ctx, &redis.XAutoClaimArgs{
+		Stream:   lifecycle.EventStreamKey,
+		Group:    group,
+		Consumer: consumer,
+		MinIdle:  minIdle,
+		Start:    "0-0",
+		Count:    count,
+	}).Result()
+	if err != nil {
+		return nil, fmt.Errorf("xautoclaim: %w", err)
+	}
+	var out []Event
+	for _, msg := range msgs {
+		// Entries the stream's MAXLEN trim has since deleted come back with
+		// no values; nothing to decode, nothing to ack (XAUTOCLAIM already
+		// dropped them from the PEL on Redis ≥ 7).
+		if len(msg.Values) == 0 {
+			continue
+		}
+		ev := decodeEvent(msg)
+		if ev != nil {
+			out = append(out, *ev)
+		} else {
+			c.log.Warn("redisstream: dropping unparseable claimed event",
+				zap.String("id", msg.ID), zap.Any("values", msg.Values))
+			_ = c.Ack(ctx, group, msg.ID)
+		}
+	}
+	return out, nil
 }
 
 // AcquireState performs a SET NX EX on the per-sandbox lifecycle state key with

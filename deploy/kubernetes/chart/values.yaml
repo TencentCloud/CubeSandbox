@@ -373,7 +373,23 @@ lifecycleManager:
   # is enabled; CubeProxy points $cube_sidecar_addr at this Service and
   # registers itself in Redis for CLM discovery.
   enabled: true
-  replicas: 1
+  # Two replicas run in active-standby mode (see ha below): only the leader
+  # drives pause/resume decisions, and a crashed leader is replaced within
+  # one leaderTTL. Set replicas: 1 to run a single instance.
+  replicas: 2
+  # Active-standby HA (issue #1211). Replicas elect a leader through a
+  # Redis lease; standbys report not-ready on /readyz so the Service routes
+  # resume traffic to the leader, and the leader periodically reconciles
+  # registry/proxy state against the authoritative meta hash.
+  ha:
+    enabled: true
+    # Lease expiry: a crashed leader blocks failover for at most this long.
+    leaderTTL: 15s
+    # Lease renewal cadence; must be well below leaderTTL.
+    leaderRenewInterval: 5s
+    # Full-resync cadence against the meta hash, and the minimum idle time
+    # before a dead leader's pending stream entries are claimed.
+    reconcileInterval: 60s
   podAnnotations: {}
   listenAddr: "0.0.0.0:8083"
   service:

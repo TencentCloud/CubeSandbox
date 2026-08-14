@@ -205,6 +205,62 @@ type stubFleetSize int
 
 func (s stubFleetSize) Snapshot() int { return int(s) }
 
+// stubGate is a LeaderGate that returns a caller-provided constant.
+type stubGate bool
+
+func (g stubGate) IsLeader() bool { return bool(g) }
+
+func TestReadyz_LeaderGate(t *testing.T) {
+	build := func(gate LeaderGate) *httptest.Server {
+		reg := registry.New()
+		reg.Upsert(lifecycle.SandboxLifecycleMeta{SandboxID: "sbx"})
+		r := resumer.New(resumer.Options{
+			Registry:     reg,
+			Redis:        newFakeStore(),
+			CubeMaster:   &fakeMaster{},
+			ProxyPush:    fakePush{},
+			StateLockTTL: time.Minute,
+			Log:          zap.NewNop(),
+		})
+		s := New(":0", r, reg, zap.NewNop()).WithLeaderGate(gate)
+		mux := http.NewServeMux()
+		mux.HandleFunc("/readyz", s.handleReadyz)
+		return httptest.NewServer(mux)
+	}
+
+	// Standby: not ready, so the Service keeps resume traffic away from it.
+	standby := build(stubGate(false))
+	defer standby.Close()
+	resp, err := http.Get(standby.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("standby /readyz should be 503, got %d: %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), `"role":"standby"`) {
+		t.Fatalf("standby /readyz should report role=standby: %s", body)
+	}
+
+	// Leader: ready.
+	leader := build(stubGate(true))
+	defer leader.Close()
+	resp2, err := http.Get(leader.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	body2, _ := io.ReadAll(resp2.Body)
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("leader /readyz should be 200, got %d: %s", resp2.StatusCode, body2)
+	}
+	if !strings.Contains(string(body2), `"role":"leader"`) {
+		t.Fatalf("leader /readyz should report role=leader: %s", body2)
+	}
+}
+
 func TestReadyz_ExposesFleetSizeWhenConfigured(t *testing.T) {
 	reg := registry.New()
 	reg.Upsert(lifecycle.SandboxLifecycleMeta{SandboxID: "sbx"})

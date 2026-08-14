@@ -6,6 +6,16 @@
 // between CubeMaster, CubeProxy, and Redis. It supersedes the older
 // in-container "cube-proxy-sidecar"; the wire protocol with CubeProxy
 // (admin push endpoints + /_sidecar_resume callback) is unchanged.
+//
+// Active-standby HA (issue #1211): when CUBE_LCM_HA_ENABLED=1, replicas
+// elect a leader through a Redis lease (internal/leaderelect). Only the
+// leader runs the stateful loops (stream consumer, sweeper, last-active
+// poller, reconciler); standbys keep the HTTP server up — gated to 503 on
+// /readyz so the Service routes resume traffic to the leader — and can
+// still serve /internal/resume through the meta-hash fallback. A crashed
+// leader is replaced within one leader TTL; the new leader bootstraps from
+// the meta hash, claims the dead consumer's pending stream entries, and
+// the reconciler converges whatever drift remains.
 package main
 
 import (
@@ -22,8 +32,10 @@ import (
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/discovery"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/eventbus"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/httpapi"
+	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/leaderelect"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/lifecycle"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/proxypush"
+	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/reconciler"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/redisclient"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/redisstream"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/registry"
@@ -60,7 +72,9 @@ func run() error {
 		zap.String("cubemaster_url", cfg.CubeMasterURL),
 		zap.String("listen_addr", cfg.ListenAddr),
 		zap.String("consumer_group", cfg.ConsumerGroup),
-		zap.String("consumer_name", cfg.ConsumerName))
+		zap.String("consumer_name", cfg.ConsumerName),
+		zap.Bool("ha_enabled", cfg.HAEnabled),
+		zap.String("instance_id", cfg.InstanceID))
 
 	rdb := redisclient.New(cfg)
 	defer func() { _ = rdb.Close() }()
@@ -84,9 +98,21 @@ func run() error {
 	rootCtx, cancel := signalContext()
 	defer cancel()
 
-	// startupTs marks the boundary between "bootstrap entries (HGETALL)"
-	// and "stream entries (XREADGROUP)" for the sweeper's warmup logic.
-	startupTs := time.Now()
+	// In active-standby mode the elector arbitrates which replica runs the
+	// leader loops. Construct it before discovery so the onJoin replay can
+	// consult leadership.
+	var elector *leaderelect.Elector
+	if cfg.HAEnabled {
+		elector, err = leaderelect.New(rdb, leaderelect.Config{
+			Key:           cfg.LeaderKey,
+			InstanceID:    cfg.InstanceID,
+			TTL:           cfg.LeaderTTL,
+			RenewInterval: cfg.LeaderRenewInterval,
+		}, logger.Named("leader"))
+		if err != nil {
+			return err
+		}
+	}
 
 	// Build the CubeProxy fleet. Two sources are supported:
 	//   * CUBE_LCM_PROXY_ADMIN_URLS non-empty  → static list (single-host dev)
@@ -117,6 +143,13 @@ func run() error {
 			HeartbeatTTL:    cfg.HeartbeatTTL,
 			RefreshInterval: cfg.DiscoveryRefresh,
 			OnJoin: func(ep discovery.Endpoint) {
+				// A standby must not replay: its registry is empty or stale,
+				// and the leader's own replay already delivers the fresh
+				// snapshot. (Discovery itself keeps running on standbys so
+				// the resume path's state pushes have a populated fleet.)
+				if elector != nil && !elector.IsLeader() {
+					return
+				}
 				// Replay the current registry snapshot to the newly-arrived
 				// proxy. We must not block the discovery refresh loop, so
 				// this runs in its own goroutine with a bounded context.
@@ -132,36 +165,115 @@ func run() error {
 
 	pushClient = proxypush.NewWithFleet(fleet, cfg.CubeAdminToken, cfg.HTTPTimeout, logger.Named("proxypush"))
 
-	// 1. Bootstrap the in-memory registry from the meta HSet. We do NOT push
-	//    entries to CubeProxy from here — the onJoin callback (or the static
-	//    fleet's initial replay below) is the single point that hydrates each
-	//    proxy. This keeps the "who pushes what to whom" invariant simple:
-	//    every meta hits every proxy exactly through the onJoin replay + the
-	//    stream consumer loop.
-	if err := bootstrapRegistry(rootCtx, stream, reg, startupTs, logger); err != nil {
-		return err
-	}
-	if staticFleet != nil {
-		// Static fleet doesn't emit onJoin events, so replay explicitly.
-		for _, ep := range staticFleet.Snapshot() {
-			replayRegistryTo(rootCtx, pushClient, reg, ep, logger.Named("replay"))
-		}
-	}
-
-	// 2. Ensure the consumer group exists.
-	if err := stream.EnsureGroup(rootCtx, cfg.ConsumerGroup); err != nil {
-		return err
-	}
-
 	resumeImpl := resumer.New(resumer.Options{
 		Registry:     reg,
 		Redis:        stream,
 		CubeMaster:   masterClient,
 		ProxyPush:    pushClient,
 		StateLockTTL: cfg.StateLockTTL,
-		Log:          logger.Named("resumer"),
-		EventBus:     bus,
+		// MetaLookup lets a standby (or a freshly promoted leader whose
+		// bootstrap hasn't landed yet) serve resume requests straight from
+		// the authoritative meta hash.
+		MetaLookup: stream,
+		Log:        logger.Named("resumer"),
+		EventBus:   bus,
 	})
+
+	apiSrv := httpapi.New(cfg.ListenAddr, resumeImpl, reg, logger.Named("http")).
+		WithFleetSizer(fleetSizer{fleet})
+	if elector != nil {
+		apiSrv = apiSrv.WithLeaderGate(elector)
+	}
+
+	// Loops that run on every replica: the HTTP server (standbys answer
+	// /healthz and can serve /internal/resume via the meta fallback) and,
+	// when enabled, proxy discovery. The eventbus subscriber also runs on
+	// every replica so a standby's waitForRunning still receives the
+	// cross-replica wakeup hints published by the leader. The leader-only
+	// loops either run directly (single-replica mode) or under the elector.
+	loopCount := 2
+	if discSvc != nil {
+		loopCount++
+	}
+	if cfg.EventBusEnabled {
+		loopCount++
+	}
+	errs := make(chan error, loopCount)
+
+	go func() { errs <- apiSrv.Run(rootCtx) }()
+	if discSvc != nil {
+		go func() { errs <- discSvc.Run(rootCtx) }()
+	}
+	if cfg.EventBusEnabled {
+		sub := eventbus.NewSubscriber(rdb, bus, logger.Named("eventbus"))
+		go func() { errs <- sub.Run(rootCtx) }()
+	}
+
+	leaderRun := func(ctx context.Context) error {
+		return runLeaderLoops(ctx, cfg, stream, masterClient, pushClient, reg, fleet, logger)
+	}
+	if elector != nil {
+		go func() {
+			errs <- elector.Run(rootCtx, leaderelect.Callbacks{
+				OnElected: func(leaderCtx context.Context) {
+					if err := leaderRun(leaderCtx); err != nil && !errors.Is(err, context.Canceled) {
+						logger.Error("leader loop failed; stepping down so a standby can take over",
+							zap.Error(err))
+						elector.StepDown()
+					}
+				},
+				OnLost: func() {
+					// Drop the view built while leader: a standby answers
+					// resume requests via the meta-hash fallback and must
+					// never consult (or replay) a frozen snapshot.
+					reg.Reset()
+				},
+			})
+		}()
+	} else {
+		go func() { errs <- leaderRun(rootCtx) }()
+	}
+
+	// First loop to return wins; we cancel siblings via context and drain.
+	first := <-errs
+	cancel()
+	for i := 0; i < loopCount-1; i++ {
+		<-errs
+	}
+	return first
+}
+
+// runLeaderLoops executes every leader-only responsibility: registry
+// bootstrap + fleet hydration, stream consumption, stale-pending-entry
+// claims, last-active polling, the idle sweeper, and the periodic
+// reconciler. It blocks until ctx is cancelled (leadership lost, or
+// shutdown) or a loop fails; the first error wins and cancels the rest.
+func runLeaderLoops(ctx context.Context, cfg *config.Config, stream *redisstream.Client,
+	masterClient *cubemasterclient.Client, pushClient *proxypush.Client, reg *registry.Registry,
+	fleet proxypush.Fleet, logger *zap.Logger) error {
+
+	// startupTs marks the boundary between "bootstrap entries (HGETALL)"
+	// and "stream entries (XREADGROUP)" for the sweeper's warmup logic. It
+	// re-anchors on every (re-)election so a promoted standby gets the same
+	// warmup protection as a freshly started process.
+	startupTs := time.Now()
+
+	// 1. Bootstrap the in-memory registry from the meta HSet, then hydrate
+	//    every currently-known proxy with the snapshot. This keeps the "who
+	//    pushes what to whom" invariant simple: every meta hits every proxy
+	//    exactly through the bootstrap replay (or discovery's onJoin for
+	//    later arrivals) + the stream consumer loop.
+	if err := bootstrapRegistry(ctx, stream, reg, startupTs, logger); err != nil {
+		return err
+	}
+	for _, ep := range fleet.Snapshot() {
+		replayRegistryTo(ctx, pushClient, reg, ep, logger.Named("replay"))
+	}
+
+	// 2. Ensure the consumer group exists.
+	if err := stream.EnsureGroup(ctx, cfg.ConsumerGroup); err != nil {
+		return err
+	}
 
 	sweep := sweeper.New(sweeper.Options{
 		Registry:           reg,
@@ -176,17 +288,14 @@ func run() error {
 		Log:                logger.Named("sweeper"),
 	})
 
-	apiSrv := httpapi.New(cfg.ListenAddr, resumeImpl, reg, logger.Named("http")).
-		WithFleetSizer(fleetSizer{fleet})
+	recon := reconciler.New(reconciler.Options{
+		Registry:  reg,
+		Redis:     stream,
+		ProxyPush: pushClient,
+		Interval:  cfg.ReconcileInterval,
+		Log:       logger.Named("reconciler"),
+	})
 
-	// 3. Run all background loops concurrently. First error cancels the rest.
-	loopCount := 4
-	if discSvc != nil {
-		loopCount++
-	}
-	if cfg.EventBusEnabled {
-		loopCount++
-	}
 	stateSyncDeps := statesync.Deps{
 		Registry:  reg,
 		Redis:     stream,
@@ -195,22 +304,22 @@ func run() error {
 		Log:       logger.Named("statesync"),
 	}
 
+	// 3. Run all leader loops concurrently. First error cancels the rest.
+	const loopCount = 5
 	errs := make(chan error, loopCount)
-	go func() {
-		errs <- consumeStream(rootCtx, stream, pushClient, reg, cfg, stateSyncDeps, logger.Named("stream"))
-	}()
-	go func() { errs <- pollLastActive(rootCtx, pushClient, reg, cfg.LastActivePoll, logger.Named("active")) }()
-	go func() { errs <- sweep.Run(rootCtx) }()
-	go func() { errs <- apiSrv.Run(rootCtx) }()
-	if discSvc != nil {
-		go func() { errs <- discSvc.Run(rootCtx) }()
-	}
-	if cfg.EventBusEnabled {
-		sub := eventbus.NewSubscriber(rdb, bus, logger.Named("eventbus"))
-		go func() { errs <- sub.Run(rootCtx) }()
-	}
+	loopCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	// First loop to return wins; we cancel siblings via context and drain.
+	go func() {
+		errs <- consumeStream(loopCtx, stream, pushClient, reg, cfg, stateSyncDeps, logger.Named("stream"))
+	}()
+	go func() {
+		errs <- claimStalePending(loopCtx, stream, pushClient, reg, cfg, stateSyncDeps, logger.Named("claim"))
+	}()
+	go func() { errs <- pollLastActive(loopCtx, pushClient, reg, cfg.LastActivePoll, logger.Named("active")) }()
+	go func() { errs <- sweep.Run(loopCtx) }()
+	go func() { errs <- recon.Run(loopCtx) }()
+
 	first := <-errs
 	cancel()
 	for i := 0; i < loopCount-1; i++ {
@@ -234,9 +343,10 @@ func (s fleetSizer) Snapshot() int {
 }
 
 // replayRegistryTo pushes every current registry entry to a single admin
-// endpoint. Used both by discovery.OnJoin (when a new CubeProxy arrives) and
-// by the static-fleet initialization path. Errors are logged but not
-// escalated: reconciliation eventually converges via the stream consumer.
+// endpoint. Used by discovery.OnJoin (when a new CubeProxy arrives) and by
+// the leadership bootstrap to hydrate the fleet. Errors are logged but not
+// escalated: reconciliation eventually converges via the stream consumer
+// and the periodic reconciler.
 func replayRegistryTo(ctx context.Context, push *proxypush.Client,
 	reg *registry.Registry, ep discovery.Endpoint, log *zap.Logger) {
 
@@ -271,14 +381,14 @@ func signalContext() (context.Context, context.CancelFunc) {
 }
 
 // bootstrapRegistry reads the meta HSet and hydrates the in-memory registry.
-// It does NOT push to CubeProxy: fleet hydration is the discovery.OnJoin
-// callback's job (or, for the static-fleet dev path, an explicit replay call
-// in run()). Keeping registry seeding and admin pushes separate simplifies
-// the invariant "every meta reaches every proxy through onJoin + stream".
+// It does NOT push to CubeProxy on its own: fleet hydration happens through
+// the replay calls in runLeaderLoops / discovery.OnJoin. Keeping registry
+// seeding and admin pushes separate simplifies the invariant "every meta
+// reaches every proxy through bootstrap replay + onJoin + stream".
 //
 // Bootstrap entries get their FirstSeenAt backdated to a fixed startup
 // timestamp so the sweeper's BootstrapWarmup gate can distinguish "loaded
-// from HGETALL at process start" (FirstSeenAt == startupTs) from "arrived
+// from HGETALL at (re-)election" (FirstSeenAt == startupTs) from "arrived
 // later via stream" (FirstSeenAt > startupTs).
 func bootstrapRegistry(ctx context.Context, stream *redisstream.Client,
 	reg *registry.Registry, startupTs time.Time, log *zap.Logger) error {
@@ -322,6 +432,47 @@ func consumeStream(ctx context.Context, stream *redisstream.Client, push *proxyp
 				log.Warn("ack failed",
 					zap.String("id", ev.StreamID), zap.Error(err))
 			}
+		}
+	}
+}
+
+// claimStalePending is the failover half of stream consumption: it
+// periodically takes over entries that were delivered to a consumer which
+// has since died or been demoted (in HA mode, typically the previous
+// leader) and feeds them through the same handler as live deliveries.
+// Without it those events would sit in the pending-entries list until the
+// stream's MAXLEN trim drops them, leaving registry/proxy state diverged.
+func claimStalePending(ctx context.Context, stream *redisstream.Client, push *proxypush.Client,
+	reg *registry.Registry, cfg *config.Config, ssDeps statesync.Deps, log *zap.Logger) error {
+
+	t := time.NewTicker(cfg.ReconcileInterval)
+	defer t.Stop()
+
+	for {
+		// minIdle == ReconcileInterval: comfortably longer than a slow
+		// handleEvent batch, so a live consumer's in-flight entries are
+		// never stolen, while a dead leader's leftovers are taken over
+		// within one reconcile interval of a promotion.
+		events, err := stream.ClaimPending(ctx, cfg.ConsumerGroup, cfg.ConsumerName,
+			cfg.ReconcileInterval, 100)
+		if err != nil {
+			log.Warn("xautoclaim failed; retrying next tick", zap.Error(err))
+		} else {
+			for _, ev := range events {
+				handleEvent(ctx, ev, push, reg, ssDeps, log)
+				if err := stream.Ack(ctx, cfg.ConsumerGroup, ev.StreamID); err != nil {
+					log.Warn("ack claimed event failed",
+						zap.String("id", ev.StreamID), zap.Error(err))
+				}
+			}
+			if len(events) > 0 {
+				log.Info("claimed stale pending events", zap.Int("count", len(events)))
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
 		}
 	}
 }

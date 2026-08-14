@@ -7,6 +7,7 @@ package resumer
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -700,5 +701,112 @@ func TestClassifyState(t *testing.T) {
 				t.Fatalf("classifyState(%q, %v) = (%v, %v)", tt.state, tt.ok, err, done)
 			}
 		})
+	}
+}
+
+// fakeMetaLookup is the test double for the resumer's registry-miss fallback
+// (redisstream.Client.LookupMeta in production).
+type fakeMetaLookup struct {
+	metas map[string]*lifecycle.SandboxLifecycleMeta
+	err   error
+	calls int32
+}
+
+func (f *fakeMetaLookup) LookupMeta(_ context.Context, sid string) (*lifecycle.SandboxLifecycleMeta, error) {
+	atomic.AddInt32(&f.calls, 1)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.metas[sid], nil
+}
+
+func TestResumer_RegistryMissFallsBackToMetaLookup(t *testing.T) {
+	reg := registry.New() // empty: simulates a standby / freshly promoted leader
+	store := newFakeStore()
+	master := &fakeMaster{}
+	push := &fakePush{}
+	lookup := &fakeMetaLookup{metas: map[string]*lifecycle.SandboxLifecycleMeta{
+		"sbx-failover": {
+			SandboxID: "sbx-failover", InstanceType: "cubebox", AutoResume: true,
+			CreatedAt: time.Now().Add(-1 * time.Hour).UnixMilli(),
+		},
+	}}
+
+	r := New(Options{
+		Registry:     reg,
+		Redis:        store,
+		CubeMaster:   master,
+		ProxyPush:    push,
+		StateLockTTL: 30 * time.Second,
+		MetaLookup:   lookup,
+		Log:          zap.NewNop(),
+	})
+
+	if err := r.Resume(context.Background(), "sbx-failover"); err != nil {
+		t.Fatalf("resume via meta fallback failed: %v", err)
+	}
+	if got := atomic.LoadInt32(&master.calls); got != 1 {
+		t.Fatalf("expected 1 master.Resume call, got %d", got)
+	}
+	if reg.Get("sbx-failover") != nil {
+		t.Fatal("fallback must not cache into the registry (standby entries would go stale)")
+	}
+	if got := store.state("sbx-failover"); got != "running" {
+		t.Fatalf("expected state running, got %q", got)
+	}
+}
+
+func TestResumer_RegistryMissLookupUnknown(t *testing.T) {
+	reg := registry.New()
+	lookup := &fakeMetaLookup{metas: map[string]*lifecycle.SandboxLifecycleMeta{}}
+	r := New(Options{
+		Registry:     reg,
+		Redis:        newFakeStore(),
+		CubeMaster:   &fakeMaster{},
+		ProxyPush:    &fakePush{},
+		StateLockTTL: 30 * time.Second,
+		MetaLookup:   lookup,
+		Log:          zap.NewNop(),
+	})
+
+	err := r.Resume(context.Background(), "sbx-nope")
+	if err == nil || err.Error() != "sandbox not in registry" {
+		t.Fatalf("expected sandbox-not-in-registry, got %v", err)
+	}
+	if got := atomic.LoadInt32(&lookup.calls); got != 1 {
+		t.Fatalf("expected 1 lookup call, got %d", got)
+	}
+}
+
+func TestResumer_RegistryMissLookupError(t *testing.T) {
+	reg := registry.New()
+	r := New(Options{
+		Registry:     reg,
+		Redis:        newFakeStore(),
+		CubeMaster:   &fakeMaster{},
+		ProxyPush:    &fakePush{},
+		StateLockTTL: 30 * time.Second,
+		MetaLookup:   &fakeMetaLookup{err: errors.New("redis hget failed")},
+		Log:          zap.NewNop(),
+	})
+
+	err := r.Resume(context.Background(), "sbx")
+	if err == nil || !strings.Contains(err.Error(), "meta fallback lookup") {
+		t.Fatalf("expected meta fallback lookup error, got %v", err)
+	}
+}
+
+func TestResumer_RegistryMissNoFallbackConfigured(t *testing.T) {
+	// Without MetaLookup the behavior is unchanged from before: a registry
+	// miss is a hard error.
+	master := &fakeMaster{}
+	r := newTestResumer(registry.New(), newFakeStore(), master, &fakePush{})
+
+	err := r.Resume(context.Background(), "sbx")
+	if err == nil || err.Error() != "sandbox not in registry" {
+		t.Fatalf("expected sandbox-not-in-registry, got %v", err)
+	}
+	if got := atomic.LoadInt32(&master.calls); got != 0 {
+		t.Fatalf("master must not be called, got %d calls", got)
 	}
 }

@@ -31,12 +31,21 @@ type FleetSizer interface {
 	Snapshot() int
 }
 
+// LeaderGate is an optional dependency for active-standby deployments
+// (issue #1211): when set, /readyz reports 503 while this replica is a
+// standby, so the Kubernetes Service only routes /internal/resume traffic
+// to the active leader.
+type LeaderGate interface {
+	IsLeader() bool
+}
+
 // Server wires resume/healthz handlers and runs a *http.Server.
 type Server struct {
 	addr     string
 	resumer  *resumer.Resumer
 	registry *registry.Registry
 	fleet    FleetSizer
+	leader   LeaderGate
 	log      *zap.Logger
 	srv      *http.Server
 }
@@ -48,6 +57,13 @@ func New(addr string, r *resumer.Resumer, reg *registry.Registry, log *zap.Logge
 // WithFleetSizer sets the optional fleet-size probe used by /readyz. Chainable.
 func (s *Server) WithFleetSizer(fs FleetSizer) *Server {
 	s.fleet = fs
+	return s
+}
+
+// WithLeaderGate sets the optional leadership probe used by /readyz in
+// active-standby mode. Chainable.
+func (s *Server) WithLeaderGate(g LeaderGate) *Server {
+	s.leader = g
 	return s
 }
 
@@ -143,12 +159,26 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	// Without a leader gate the process is a standalone (single-replica)
+	// deployment and is always "the leader" for readiness purposes.
+	role := "standalone"
+	if s.leader != nil {
+		if s.leader.IsLeader() {
+			role = "leader"
+		} else {
+			role = "standby"
+		}
+	}
 	resp := map[string]any{
-		"ok":           true,
+		"ok":           role != "standby",
+		"role":         role,
 		"registry_len": s.registry.Len(),
 	}
 	if s.fleet != nil {
 		resp["fleet_size"] = s.fleet.Snapshot()
+	}
+	if role == "standby" {
+		w.WriteHeader(http.StatusServiceUnavailable)
 	}
 	_ = json.NewEncoder(w).Encode(resp)
 }

@@ -7,6 +7,8 @@ package resumer
 import (
 	"context"
 	"time"
+
+	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/lifecycle"
 )
 
 // stateStore is the subset of redisstream.Client we use. Tests substitute an
@@ -25,6 +27,17 @@ type stateStore interface {
 // resumePauser describes the slice of CubeMaster client we need.
 type resumePauser interface {
 	Resume(ctx context.Context, sandboxID, instanceType string) error
+}
+
+// metaLookup is an optional fallback consulted when the in-memory registry
+// has no entry for a sandbox. In active-standby mode (issue #1211) a standby
+// replica — or a freshly promoted leader whose bootstrap hasn't landed yet —
+// has an empty/partial registry; looking the meta up directly from the
+// shared Redis hash lets those replicas still serve resume requests during
+// the failover window instead of failing with "sandbox not in registry".
+// Returns (nil, nil) when the sandbox is unknown to CubeMaster.
+type metaLookup interface {
+	LookupMeta(ctx context.Context, sandboxID string) (*lifecycle.SandboxLifecycleMeta, error)
 }
 
 // stateNotifier is the slice of proxypush.Client we use. DeleteMeta is

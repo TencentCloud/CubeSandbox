@@ -31,7 +31,10 @@ type Options struct {
 	CubeMaster   resumePauser
 	ProxyPush    stateNotifier
 	StateLockTTL time.Duration
-	Log          *zap.Logger
+	// MetaLookup is optional. When set, a registry miss is retried against
+	// the shared meta hash before failing — see iface.go for why.
+	MetaLookup metaLookup
+	Log        *zap.Logger
 	// EventBus, when non-nil, wakes waitForRunning via cross-replica
 	// StateNotify events. Nil is legal — the wait path degrades to
 	// polling only (the 100ms ticker), which is what happens when the
@@ -107,6 +110,25 @@ func (r *Resumer) Resume(ctx context.Context, sandboxID string) error {
 func (r *Resumer) doResume(ctx context.Context, sandboxID string) error {
 	start := time.Now()
 	entry := r.o.Registry.Get(sandboxID)
+	if entry == nil && r.o.MetaLookup != nil {
+		// Registry miss. In active-standby mode this replica may be a
+		// standby (or a leader whose bootstrap is still in flight) with an
+		// empty registry; fall back to the authoritative meta hash so the
+		// resume path keeps working through failovers. The result is used
+		// for this call only and deliberately NOT cached in the registry:
+		// on a standby nothing keeps a cached entry current (no stream
+		// consumer runs there), and on the leader hydration is owned by
+		// the stream consumer + reconciler.
+		meta, err := r.o.MetaLookup.LookupMeta(ctx, sandboxID)
+		if err != nil {
+			return errors.New("meta fallback lookup: " + err.Error())
+		}
+		if meta != nil {
+			entry = &registry.Entry{Meta: *meta}
+			r.o.Log.Info("registry miss; resolved via meta hash",
+				zap.String("sandbox_id", sandboxID))
+		}
+	}
 	if entry == nil {
 		return errors.New("sandbox not in registry")
 	}
