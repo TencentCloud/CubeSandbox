@@ -210,7 +210,7 @@ kubectl get pods -n cube-system -o wide
 
 # 2) 计算节点是否已注册到 CubeMaster
 kubectl exec -n cube-system deploy/cube-cubemastercli -- \
-  sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
+  sh -lc 'cubeopscli --address "$CUBEOPSCLI_ADDRESS" --port "$CUBEOPSCLI_PORT" node list'
 
 # 3) 内置端到端测试（约数分钟）
 helm test cube -n cube-system --timeout 20m --logs

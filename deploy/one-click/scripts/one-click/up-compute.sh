@@ -22,12 +22,15 @@ validate_cubelet_cow_startup_deps "${CUBELET_CONFIG}"
 ROLE="$(one_click_deploy_role)"
 [[ "${ROLE}" == "compute" ]] || die "up-compute.sh requires ONE_CLICK_DEPLOY_ROLE=compute"
 
-CONTROL_PLANE_ADDR="$(resolve_control_plane_cubemaster_addr)"
+OPS_ADDR="$(resolve_control_plane_cubeops_addr)"
+MASTER_HTTP_ADDR="$(resolve_control_plane_cubemaster_addr)"
 [[ -n "${CUBE_SANDBOX_NODE_IP:-}" ]] || die "CUBE_SANDBOX_NODE_IP is required for compute role"
 
 grep -Eq "meta_server_endpoint:" "${CUBELET_DYNAMICCONF}" || die "meta_server_endpoint missing in ${CUBELET_DYNAMICCONF}"
+grep -Eq "cubemaster_http_addr:" "${CUBELET_DYNAMICCONF}" || die "cubemaster_http_addr missing in ${CUBELET_DYNAMICCONF}"
 sed -i \
-  -e "s#^\([[:space:]]*meta_server_endpoint:[[:space:]]*\).*#\1\"${CONTROL_PLANE_ADDR}\"#" \
+  -e "s#^\([[:space:]]*meta_server_endpoint:[[:space:]]*\).*#\1\"${OPS_ADDR}\"#" \
+  -e "s#^\([[:space:]]*cubemaster_http_addr:[[:space:]]*\).*#\1\"${MASTER_HTTP_ADDR}\"#" \
   "${CUBELET_DYNAMICCONF}"
 
 mkdir -p \

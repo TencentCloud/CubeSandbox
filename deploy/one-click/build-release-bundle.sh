@@ -82,6 +82,7 @@ CUBELET_BIN_OVERRIDE="${ONE_CLICK_CUBELET_BIN:-}"
 CUBECLI_BIN_OVERRIDE="${ONE_CLICK_CUBECLI_BIN:-}"
 API_BIN_OVERRIDE="${ONE_CLICK_CUBE_API_BIN:-}"
 CUBE_OPS_BIN_OVERRIDE="${ONE_CLICK_CUBE_OPS_BIN:-}"
+CUBE_OPS_CLI_BIN_OVERRIDE="${ONE_CLICK_CUBE_OPS_CLI_BIN:-}"
 CUBEVSMAPDUMP_BIN_OVERRIDE="${ONE_CLICK_CUBEVSMAPDUMP_BIN:-}"
 
 go_version_ldflags() {
@@ -348,6 +349,14 @@ components["cubeops"] = {
     "commit": cube_commit,
     "build_time": cube_build_time,
     "digest_sha256": required_sha256(os.path.join(core_bin_dir, "cubeops")),
+}
+
+# ── cubeopscli from CORE_BIN_DIR ──
+components["cubeopscli"] = {
+    "version": cube_version,
+    "commit": cube_commit,
+    "build_time": cube_build_time,
+    "digest_sha256": required_sha256(os.path.join(core_bin_dir, "cubeopscli")),
 }
 
 # ── Rust binaries from build-vm-assets.sh ──
@@ -689,7 +698,10 @@ build_or_copy_go_binary \
   "cubeops" "${CUBE_OPS_BIN_OVERRIDE}" \
   "${ROOT_DIR}/CubeOps" "${CUBE_OPS_BUILD_MODE}" \
   "${CORE_BIN_DIR}/cubeops" ./cmd/cubeops "${CUBEOPS_VERSION_PKG}"
-
+build_or_copy_go_binary \
+  "cubeopscli" "${CUBE_OPS_CLI_BIN_OVERRIDE}" \
+  "${ROOT_DIR}/CubeOps" "${CUBE_OPS_BUILD_MODE}" \
+  "${CORE_BIN_DIR}/cubeopscli" ./cmd/cubeopscli
 build_or_copy_go_binary \
   "cubevsmapdump" "${CUBEVSMAPDUMP_BIN_OVERRIDE}" \
   "${ROOT_DIR}/CubeNet/cubevs" "${CUBEVSMAPDUMP_BUILD_MODE}" \
@@ -733,6 +745,7 @@ copy_file "${CORE_BIN_DIR}/cube-api" "${PACKAGE_ROOT}/CubeAPI/bin/cube-api"
 # extracted sandbox-package without the full source tree.
 copy_dir_contents "${SCRIPT_DIR}/CubeOps" "${PACKAGE_ROOT}/CubeOps"
 copy_file "${CORE_BIN_DIR}/cubeops" "${PACKAGE_ROOT}/CubeOps/bin/cubeops"
+copy_file "${CORE_BIN_DIR}/cubeopscli" "${PACKAGE_ROOT}/CubeOps/bin/cubeopscli"
 
 # Same ordering for CubeMaster so cubemaster/cubemastercli binaries survive the
 # copy_dir_contents wipe and coexist with the one-click CubeMaster assets.

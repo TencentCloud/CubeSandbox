@@ -374,13 +374,18 @@ ensure_source_tree() {
   SOURCE_TREE_STAMP="${SOURCE_TREE_DIR}/.exported-sha"
   # CubeOps is post-v0.5.1; only export when building cube-ops so older release
   # tags still work for cube-api / cube-proxy / webui / etc. cube-master /
-  # cubemastercli need cubelog / CubeDB / Cubelet; cube-master also needs
+  # cubemastercli need cubelog / CubeDB / Cubelet; cubemastercli also needs
+  # CubeOps (the image bundles both cubemastercli and cubeopscli binaries).
+  # cube-master also needs
   # deploy/scripts for volume-deps. cubelet needs Cubelet / CubeNet / cubelog /
   # cubecow / deploy scripts + volume plugin examples.
   # cube-shim needs CubeShim / hypervisor / config-cube.toml + entrypoint.
   SOURCE_EXPORT_SET="CubeMaster CubeAPI CubeProxy CubeEgress cube-lifecycle-manager web deploy/one-click/webui"
   if should_build cube-master || should_build cubemastercli; then
     SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} cubelog CubeDB Cubelet"
+  fi
+  if should_build cubemastercli; then
+    SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} CubeOps"
   fi
   if should_build cube-master; then
     SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} deploy/scripts examples/volume/cos examples/volume/s3"
@@ -448,6 +453,7 @@ make_hint_for_bin() {
   case "$1" in
     cubelet|cubecli) printf 'make cubelet' ;;
     cubemaster|cubemastercli) printf 'make cubemaster' ;;
+    cubeops) printf 'cd CubeOps && go build' ;;
     *) printf 'make <component>' ;;
   esac
 }
@@ -638,10 +644,12 @@ build_cube_master_image() {
 
 # Same as .github/workflows/release-docker-images.yml for component "cubemastercli":
 # context=., file=CubeMaster/docker/Dockerfile.cubemastercli, CUBE_* build-args.
+# The image bundles both cubemastercli (CubeMaster) and cubeopscli (CubeOps).
 build_cubemastercli_image() {
   [[ -f "${REPO_ROOT}/CubeMaster/docker/Dockerfile.cubemastercli" ]] \
     || fail "missing CubeMaster/docker/Dockerfile.cubemastercli in ${REPO_ROOT}"
   [[ -f "${REPO_ROOT}/CubeMaster/go.mod" ]] || fail "missing CubeMaster go.mod in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/CubeOps/go.mod" ]] || fail "missing CubeOps go.mod in ${REPO_ROOT}"
   [[ -d "${REPO_ROOT}/cubelog" ]] || fail "missing cubelog sibling module in ${REPO_ROOT}"
   [[ -d "${REPO_ROOT}/CubeDB" ]] || fail "missing CubeDB sibling module in ${REPO_ROOT}"
   [[ -d "${REPO_ROOT}/Cubelet" ]] || fail "missing Cubelet sibling module in ${REPO_ROOT}"

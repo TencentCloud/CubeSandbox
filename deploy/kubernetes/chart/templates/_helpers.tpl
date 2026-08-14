@@ -184,6 +184,10 @@ tolerations:
 {{- printf "%s-cubemastercli" (include "cube.fullname" .) -}}
 {{- end -}}
 
+{{- define "cube.cubeopscliName" -}}
+{{- printf "%s-cubeopscli" (include "cube.fullname" .) -}}
+{{- end -}}
+
 {{- define "cube.webuiName" -}}
 {{- printf "%s-webui" (include "cube.fullname" .) -}}
 {{- end -}}
@@ -400,6 +404,11 @@ http {
 {{- if and (dig "enabled" true $cubemastercli) (or .Values.controlPlane.enabled .Values.externalControlPlane.enabled) -}}true{{- else -}}false{{- end -}}
 {{- end -}}
 
+{{- define "cube.cubeopscliEnabled" -}}
+{{- $cubeopscli := default dict .Values.cubeopscli -}}
+{{- if and (dig "enabled" true $cubeopscli) (or (eq (include "cube.opsEnabled" .) "true") .Values.externalControlPlane.enabled) -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
 {{- define "cube.mysqlName" -}}
 {{- printf "%s-mysql" (include "cube.fullname" .) -}}
 {{- end -}}
@@ -604,11 +613,34 @@ enabled and the operator left volumeS3.endpoint empty, fill from chart MinIO
 {{- default "8089" $port -}}
 {{- end -}}
 
+{{- define "cube.cubeopscliOpsAddress" -}}
+{{- $endpoint := include "cube.opsEndpoint" . -}}
+{{- $withoutHTTP := trimPrefix "http://" (trimPrefix "https://" $endpoint) -}}
+{{- $hostPort := first (splitList "/" $withoutHTTP) -}}
+{{- regexReplaceAll ":[0-9]+$" $hostPort "" -}}
+{{- end -}}
+
+{{- define "cube.cubeopscliOpsPort" -}}
+{{- $endpoint := include "cube.opsEndpoint" . -}}
+{{- $withoutHTTP := trimPrefix "http://" (trimPrefix "https://" $endpoint) -}}
+{{- $hostPort := first (splitList "/" $withoutHTTP) -}}
+{{- $port := regexFind "[0-9]+$" $hostPort -}}
+{{- default "3010" $port -}}
+{{- end -}}
+
 {{- define "cube.apiEndpoint" -}}
 {{- if .Values.externalControlPlane.enabled -}}
 {{- .Values.externalControlPlane.apiEndpoint -}}
 {{- else -}}
 {{- printf "http://%s.%s.svc.%s:%v" (include "cube.apiName" .) .Release.Namespace (include "cube.clusterDomain" .) .Values.controlPlane.api.service.port -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "cube.opsEndpoint" -}}
+{{- if .Values.externalControlPlane.enabled -}}
+{{- .Values.externalControlPlane.opsEndpoint -}}
+{{- else -}}
+{{- printf "%s.%s.svc.%s:%v" (include "cube.opsName" .) .Release.Namespace (include "cube.clusterDomain" .) .Values.cubeOps.service.port -}}
 {{- end -}}
 {{- end -}}
 
@@ -1011,7 +1043,9 @@ Bootstrap: host mutation mounts for pvm / node-init.
   value: /run/cube-node
 - name: STATE_DIR
   value: {{ .Values.hostPaths.bootstrapState | quote }}
-- name: CUBE_MASTER_ENDPOINT
+- name: CUBE_OPS_ENDPOINT
+  value: {{ include "cube.opsEndpoint" . | quote }}
+- name: CUBE_MASTER_HTTP_ADDR
   value: {{ include "cube.masterEndpoint" . | quote }}
 - name: CUBE_SANDBOX_NODE_ID
   valueFrom:

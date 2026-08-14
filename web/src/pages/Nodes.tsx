@@ -8,7 +8,7 @@ import { clusterApi } from '@/api/client';
 import { Card, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Cpu, HardDrive, Server } from 'lucide-react';
+import { Cpu, HardDrive, Server, ShieldAlert } from 'lucide-react';
 import { cn, formatRelative } from '@/lib/utils';
 
 export default function NodesPage() {
@@ -61,6 +61,13 @@ export default function NodesPage() {
                         />
                       </span>
                       {n.hostname && n.hostname !== n.nodeID ? n.hostname : n.nodeID}
+                      {n.schedulingDisabled && (
+                        <ShieldAlert
+                          size={14}
+                          className="text-amber-400"
+                          aria-label={t('isolated')}
+                        />
+                      )}
                     </CardTitle>
                     {n.hostname && n.hostname !== n.nodeID && (
                       <CardDescription className="font-mono text-xs">{n.nodeID}</CardDescription>

@@ -263,36 +263,36 @@ check_bind_mount_source_file() {
   check_file "${path}" "expected bind mount source file not ready: ${path}"
 }
 
-# Wait for the node to register with cubemaster. A dedicated loop (rather than
+# Wait for the node to register with CubeOps. A dedicated loop (rather than
 # the generic wait_until) so the final failure preserves the distinction between
-# "could not reach cubemaster" and "registered but missing host_ip", which is
+# "could not reach CubeOps" and "registered but missing IP", which is
 # the difference between a connectivity problem and a cubelet/identity problem.
-# Once cubemaster has been reached at least once the more diagnostic
-# "missing host_ip" reason is kept sticky, so a momentary connectivity blip on
+# Once CubeOps has been reached at least once the more diagnostic
+# "missing IP" reason is kept sticky, so a momentary connectivity blip on
 # the final attempt does not mask the real (registration) problem.
 check_node_registration() {
   local node_id="$1"
-  local master_addr="$2"
+  local ops_addr="$2"
   local registration
   local reached=0
-  local last_reason="failed to query cubemaster node registration for ${node_id}"
+  local last_reason="failed to query CubeOps node registration for ${node_id}"
   while :; do
     if registration="$(curl -fsS \
         --connect-timeout "${QUICKCHECK_CURL_CONNECT_TIMEOUT}" \
         --max-time "${QUICKCHECK_CURL_MAX_TIME}" \
         --max-filesize "${QUICKCHECK_CURL_MAX_FILESIZE}" \
-        "http://${master_addr}/internal/meta/nodes/${node_id}" 2>/dev/null)"; then
-      if grep -Fq "\"host_ip\":\"${node_id}\"" <<<"${registration}"; then
+        "http://${ops_addr}/internal/v1/nodes/${node_id}" 2>/dev/null)"; then
+      if grep -Fq "\"IP\":\"${node_id}\"" <<<"${registration}"; then
         return 0
       fi
-      if grep -Fq '"host_ip":"' <<<"${registration}"; then
+      if grep -Fq '"IP":"' <<<"${registration}"; then
         reached=1
-        last_reason="cubemaster node registration missing host_ip=${node_id}"
+        last_reason="CubeOps node registration missing IP=${node_id}"
       elif (( reached == 0 )); then
-        last_reason="cubemaster node registration response missing host_ip field for ${node_id}"
+        last_reason="CubeOps node registration response missing IP field for ${node_id}"
       fi
     elif (( reached == 0 )); then
-      last_reason="failed to query cubemaster node registration for ${node_id}"
+      last_reason="failed to query CubeOps node registration for ${node_id}"
     fi
     if (( $(date +%s) >= QUICKCHECK_DEADLINE )); then
       die "${last_reason} (not ready within ${QUICKCHECK_READY_TIMEOUT}s)"
@@ -317,6 +317,13 @@ quickcheck_main() {
   ROLE="$(one_click_deploy_role)"
   local NODE_ID="${CUBE_SANDBOX_NODE_IP:-}"
 
+  # CubeOps address for node-registration check (compute role only). Control
+  # nodes hit the local cube-ops via CUBE_OPS_HEALTH_ADDR instead.
+  local OPS_ADDR=""
+  if [[ "${ROLE}" == "compute" ]]; then
+    OPS_ADDR="$(resolve_control_plane_cubeops_addr)"
+  fi
+
   # When external MySQL/Redis is configured the local container + systemd unit do
   # not exist, so the corresponding checks must be skipped.
   local EXTERNAL_MYSQL_HOST="${CUBE_EXTERNAL_MYSQL_HOST:-}"
@@ -329,6 +336,9 @@ quickcheck_main() {
   # health-endpoint overrides reach curl unchecked otherwise.
   validate_host_port "${MASTER_ADDR}" "cubemaster address"
   validate_http_url "${CUBELET_EGRESS_DUMP_URL}" "CUBELET_EGRESS_DUMP_URL"
+  if [[ "${ROLE}" == "compute" ]]; then
+    validate_host_port "${OPS_ADDR}" "cubeops address"
+  fi
   if [[ "${ROLE}" != "compute" ]]; then
     validate_host_port "${CUBE_API_HEALTH_ADDR}" "CUBE_API_HEALTH_ADDR"
     validate_host_port "${CUBE_OPS_HEALTH_ADDR}" "CUBE_OPS_HEALTH_ADDR"
@@ -339,6 +349,9 @@ quickcheck_main() {
   echo "[quickcheck] role=${ROLE}"
   echo "[quickcheck] cubemaster=${MASTER_ADDR}"
   echo "[quickcheck] cubelet-egress-dump=${CUBELET_EGRESS_DUMP_URL}"
+  if [[ "${ROLE}" == "compute" ]]; then
+    echo "[quickcheck] cubeops=${OPS_ADDR}"
+  fi
   if [[ "${ROLE}" != "compute" ]]; then
     echo "[quickcheck] cube-api-health=${CUBE_API_HEALTH_ADDR}"
     echo "[quickcheck] cubeops-health=${CUBE_OPS_HEALTH_ADDR}"
@@ -398,8 +411,8 @@ quickcheck_main() {
   if [[ "${ROLE}" == "compute" ]]; then
     [[ -n "${NODE_ID}" ]] || die "CUBE_SANDBOX_NODE_IP is required for compute quickcheck"
     validate_ipv4_literal "${NODE_ID}" "CUBE_SANDBOX_NODE_IP"
-    echo "[quickcheck] 3/4 check cubemaster node registration"
-    check_node_registration "${NODE_ID}" "${MASTER_ADDR}"
+    echo "[quickcheck] 3/4 check CubeOps node registration"
+    check_node_registration "${NODE_ID}" "${OPS_ADDR}"
 
     echo "[quickcheck] 4/4 check essential sockets and runtime assets"
     check_socket "/data/cubelet/cubelet.sock"

@@ -1,7 +1,7 @@
 [Unit]
 Description=Cube Sandbox CubeMaster
-After=network-online.target cube-sandbox-mysql.service cube-sandbox-redis.service
-Wants=network-online.target cube-sandbox-mysql.service cube-sandbox-redis.service
+After=network-online.target cube-sandbox-mysql.service cube-sandbox-redis.service cube-sandbox-cubeops.service
+Wants=network-online.target cube-sandbox-mysql.service cube-sandbox-redis.service cube-sandbox-cubeops.service
 ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
 RequiresMountsFor=/data/CubeMaster/storage
 PartOf=cube-sandbox-control.target

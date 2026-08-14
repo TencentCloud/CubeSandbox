@@ -88,7 +88,7 @@ scheduler:
 
 ## How node metadata affects scheduling
 
-Cubelet registers nodes and continuously reports status through CubeMaster's `/internal/meta` API. CubeMaster stores this metadata and keeps local cache snapshots for scheduling.
+Cubelet registers nodes and continuously reports status through CubeOps's `/internal/node-agent/v1` API. CubeOps persists this metadata to MySQL/Redis; CubeMaster syncs the node view from CubeOps every few seconds and keeps local cache snapshots for scheduling.
 
 | Cubelet-reported field | Source | Scheduling effect |
 |------------------------|--------|-------------------|
@@ -222,7 +222,7 @@ Check:
 Useful entry points:
 
 ```bash
-curl http://127.0.0.1:8089/internal/meta/nodes
+curl http://127.0.0.1:3010/internal/v1/nodes
 sudo tail -F /data/log/CubeMaster/cubemaster-req.log
 sudo tail -F /data/log/Cubelet/Cubelet-req.log
 ```

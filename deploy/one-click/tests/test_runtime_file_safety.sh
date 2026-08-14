@@ -212,8 +212,8 @@ test_one_click_scripts_do_not_require_ripgrep() {
 test_quickcheck_reports_node_registration_failure_explicitly() {
   local path="${ONE_CLICK_DIR}/scripts/one-click/quickcheck.sh"
 
-  assert_contains "${path}" "failed to query cubemaster node registration"
-  assert_contains "${path}" "cubemaster node registration missing host_ip="
+  assert_contains "${path}" "failed to query CubeOps node registration for "
+  assert_contains "${path}" "CubeOps node registration missing IP="
   assert_not_contains "${path}" "| rg -q"
 }
 
@@ -426,8 +426,8 @@ test_quickcheck_bind_mount_file_uses_specific_message() {
   assert_stdout_contains "${out}" "expected bind mount source file not ready: ${missing}"
 }
 
-test_quickcheck_node_registration_keeps_missing_host_ip_after_blip() {
-  # Once cubemaster has been reached (registration present but host_ip wrong), a
+test_quickcheck_node_registration_keeps_missing_ip_after_blip() {
+  # Once CubeOps has been reached (registration present but IP wrong), a
   # later connectivity blip must NOT downgrade the diagnostic reason back to
   # "failed to query". Drive the wall clock deterministically with a stubbed
   # date so the deadline is crossed exactly on the second iteration.
@@ -457,8 +457,8 @@ test_quickcheck_node_registration_keeps_missing_host_ip_after_blip() {
       n=$(( n + 1 ))
       printf '%s\n' "${n}" > "${curl_counter}"
       if (( n == 1 )); then
-        # Iteration 1: reachable cubemaster, wrong host_ip -> reached=1.
-        printf '{"host_ip":"10.0.0.99"}\n'
+        # Iteration 1: reachable CubeOps, wrong IP -> reached=1.
+        printf '{"IP":"10.0.0.99"}\n'
         return 0
       fi
       # Iteration 2: connectivity blip.
@@ -466,12 +466,12 @@ test_quickcheck_node_registration_keeps_missing_host_ip_after_blip() {
     }
     check_node_registration "10.0.0.10" "${MASTER_ADDR}"
   )"; then
-    fail "check_node_registration should die when host_ip never matches"
+    fail "check_node_registration should die when IP never matches"
   fi
-  assert_stdout_contains "${out}" "cubemaster node registration missing host_ip=10.0.0.10"
+  assert_stdout_contains "${out}" "CubeOps node registration missing IP=10.0.0.10"
   case "${out}" in
-    *"failed to query cubemaster node registration"*)
-      fail "reason must stay sticky as 'missing host_ip' after cubemaster was reached" ;;
+    *"failed to query CubeOps node registration for 10.0.0.10"*)
+      fail "reason must stay sticky as 'missing IP' after CubeOps was reached" ;;
   esac
 }
 
@@ -642,7 +642,7 @@ test_quickcheck_callers_do_not_wrap_in_retry_loop() {
   assert_not_contains "${upc}" 'for _ in {1..30}'
 }
 
-test_quickcheck_node_registration_prefers_missing_host_ip_reason() {
+test_quickcheck_node_registration_prefers_missing_ip_reason() {
   local out
   if out="$(
     exec 2>&1
@@ -652,13 +652,13 @@ test_quickcheck_node_registration_prefers_missing_host_ip_reason() {
     QUICKCHECK_READY_TIMEOUT=4
     QUICKCHECK_READY_INTERVAL=2
     QUICKCHECK_DEADLINE=$(( $(date +%s) - 1 ))
-    # Reachable cubemaster, but the registered host_ip never matches.
-    curl() { printf '{"host_ip":"10.0.0.99"}\n'; }
+    # Reachable CubeOps, but the registered IP never matches.
+    curl() { printf '{"IP":"10.0.0.99"}\n'; }
     check_node_registration "10.0.0.10" "${MASTER_ADDR}"
   )"; then
-    fail "check_node_registration should die when host_ip never matches"
+    fail "check_node_registration should die when IP never matches"
   fi
-  assert_stdout_contains "${out}" "cubemaster node registration missing host_ip=10.0.0.10"
+  assert_stdout_contains "${out}" "CubeOps node registration missing IP=10.0.0.10"
 }
 
 test_quickcheck_node_registration_reports_unreachable_reason() {
@@ -675,9 +675,9 @@ test_quickcheck_node_registration_reports_unreachable_reason() {
     curl() { return 7; }
     check_node_registration "10.0.0.10" "${MASTER_ADDR}"
   )"; then
-    fail "check_node_registration should die when cubemaster is unreachable"
+    fail "check_node_registration should die when CubeOps is unreachable"
   fi
-  assert_stdout_contains "${out}" "failed to query cubemaster node registration for 10.0.0.10"
+  assert_stdout_contains "${out}" "failed to query CubeOps node registration for 10.0.0.10"
 }
 
 test_quickcheck_node_registration_succeeds_on_first_match() {
@@ -688,13 +688,13 @@ test_quickcheck_node_registration_succeeds_on_first_match() {
     QUICKCHECK_READY_TIMEOUT=30
     QUICKCHECK_READY_INTERVAL=1
     QUICKCHECK_DEADLINE=$(( $(date +%s) + 30 ))
-    curl() { printf '{"host_ip":"10.0.0.10"}\n'; }
+    curl() { printf '{"IP":"10.0.0.10"}\n'; }
     check_node_registration "10.0.0.10" "${MASTER_ADDR}"
-  ) || fail "check_node_registration should succeed when host_ip matches on the first attempt"
+  ) || fail "check_node_registration should succeed when IP matches on the first attempt"
 }
 
-test_quickcheck_node_registration_response_missing_host_ip_field() {
-  # When curl returns valid JSON without a host_ip field, the reason must
+test_quickcheck_node_registration_response_missing_ip_field() {
+  # When curl returns valid JSON without an IP field, the reason must
   # distinguish "unrecognized response" from "known format, wrong IP".
   local out
   if out="$(
@@ -708,9 +708,9 @@ test_quickcheck_node_registration_response_missing_host_ip_field() {
     curl() { printf '{"error":"not ready"}\n'; }
     check_node_registration "10.0.0.10" "${MASTER_ADDR}"
   )"; then
-    fail "check_node_registration should die when response lacks host_ip"
+    fail "check_node_registration should die when response lacks IP field"
   fi
-  assert_stdout_contains "${out}" "response missing host_ip field"
+  assert_stdout_contains "${out}" "CubeOps node registration response missing IP field for 10.0.0.10"
 }
 
 test_quickcheck_check_socket_retries_then_succeeds() {
@@ -1072,9 +1072,9 @@ test_quickcheck_timeout_clamped_to_max
 test_quickcheck_timeout_overflow_falls_back_to_default
 test_quickcheck_check_executable_behaviour
 test_quickcheck_bind_mount_file_uses_specific_message
-test_quickcheck_node_registration_prefers_missing_host_ip_reason
+test_quickcheck_node_registration_prefers_missing_ip_reason
 test_quickcheck_node_registration_reports_unreachable_reason
-test_quickcheck_node_registration_keeps_missing_host_ip_after_blip
+test_quickcheck_node_registration_keeps_missing_ip_after_blip
 test_quickcheck_container_ready_retries_transient_states
 test_quickcheck_container_ready_dies_on_terminal_status
 test_quickcheck_container_ready_bounded_by_overall_deadline
@@ -1083,7 +1083,7 @@ test_quickcheck_container_ready_accepts_healthy_status
 test_quickcheck_budget_is_shared_across_sequential_probes
 test_quickcheck_callers_do_not_wrap_in_retry_loop
 test_quickcheck_node_registration_succeeds_on_first_match
-test_quickcheck_node_registration_response_missing_host_ip_field
+test_quickcheck_node_registration_response_missing_ip_field
 test_quickcheck_check_socket_retries_then_succeeds
 test_quickcheck_check_http_retries_then_succeeds
 test_quickcheck_check_unit_active_dies_fast_on_failed_unit

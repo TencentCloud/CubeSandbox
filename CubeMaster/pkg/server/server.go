@@ -22,7 +22,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/cube"
 	inner "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/inner"
-	metahttp "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/meta"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/middleware"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/notify"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
@@ -109,7 +108,6 @@ func (s *internalHttp) registerRoutes() {
 	notify.RegisterNotifyRoutes(root.Group(notify.NotifyURI()))
 	cube.RegisterCubeRoutes(root.Group(cube.CubeURI()))
 	inner.RegisterInnerRoutes(root.Group(inner.InnerURI()))
-	metahttp.RegisterMetaRoutes(root.Group(metahttp.MetaURI()))
 }
 
 func (s *internalHttp) Start() error {

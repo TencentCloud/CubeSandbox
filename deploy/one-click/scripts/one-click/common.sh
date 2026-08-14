@@ -209,6 +209,35 @@ resolve_control_plane_cubemaster_addr() {
   die "ONE_CLICK_CONTROL_PLANE_IP or ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR is required for compute role"
 }
 
+resolve_control_plane_cubeops_addr() {
+  local role
+  role="$(one_click_deploy_role)"
+  local addr="${ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR:-}"
+  local ip="${ONE_CLICK_CONTROL_PLANE_IP:-}"
+  local default_addr="${CUBEOPS_ADDR:-127.0.0.1:3010}"
+  local cubeops_port=3010
+
+  if [[ "${role}" != "compute" ]]; then
+    printf '%s\n' "${default_addr}"
+    return 0
+  fi
+
+  if [[ -n "${addr}" ]]; then
+    validate_host_port "${addr}" "ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR"
+    printf '%s\n' "${addr}"
+    return 0
+  fi
+
+  if [[ -n "${ip}" ]]; then
+    validate_ipv4_literal "${ip}" "ONE_CLICK_CONTROL_PLANE_IP"
+    validate_host_port "${ip}:${cubeops_port}" "ONE_CLICK_CONTROL_PLANE_IP-derived cubeops address"
+    printf '%s:%s\n' "${ip}" "${cubeops_port}"
+    return 0
+  fi
+
+  die "ONE_CLICK_CONTROL_PLANE_IP or ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR is required for compute role"
+}
+
 command_output_has_exact_line() {
   local needle="$1"
   shift

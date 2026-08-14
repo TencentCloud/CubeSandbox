@@ -2,24 +2,24 @@
 
 This guide explains how to expand a single-node Cube Sandbox deployment into a multi-node cluster by adding **compute nodes**. Compute nodes run only the sandbox runtime components (`Cubelet` with the embedded network runtime, `CubeShim`) and register themselves to the control plane on the first machine.
 
-::: warning Production Use
+:::: warning Production Use
 If you plan to use Cube Sandbox in a production environment, please refer to the [Network Hardening](./network-hardening.md) guide to secure your deployment before exposing services to untrusted networks.
-:::
+::::
 
-::: tip Prerequisite
+:::: tip Prerequisite
 You must have a working control node deployed via the [Self-Build Deployment Guide](./self-build-deploy.md) before adding compute nodes.
-:::
+::::
 
 ## Architecture Overview
 
 ```
 ┌─────────────────────────────────────────┐
 │           Control Node                  │
-│  CubeMaster, cube-api, CubeProxy,       │
-│  CoreDNS, MySQL, Redis,                 │
+│  CubeMaster, CubeOps, cube-api,         │
+│  CubeProxy, CoreDNS, MySQL, Redis,      │
 │  Cubelet (network runtime)              │
 └──────────────────┬──────────────────────┘
-                   │  /internal/meta API
+                   │  /internal/node-agent/v1 API
        ┌───────────┼───────────┐
        ▼           ▼           ▼
 ┌────────────┐┌────────────┐┌────────────┐
@@ -29,8 +29,8 @@ You must have a working control node deployed via the [Self-Build Deployment Gui
 └────────────┘└────────────┘└────────────┘
 ```
 
-- The **control node** runs the full stack: orchestration (CubeMaster), API gateway (cube-api), proxy (CubeProxy + CoreDNS), databases (MySQL + Redis), the bundled MinIO S3 volume store, and also acts as a compute node itself.
-- Each **compute node** runs only `Cubelet` with its embedded network runtime. It registers to the control-plane `CubeMaster` and receives sandbox scheduling requests.
+- The **control node** runs the full stack: orchestration (CubeMaster), node management (CubeOps), API gateway (cube-api), proxy (CubeProxy + CoreDNS), databases (MySQL + Redis), the bundled MinIO S3 volume store, and also acts as a compute node itself.
+- Each **compute node** runs only `Cubelet` with its embedded network runtime. It registers to the control-plane `CubeOps` and receives sandbox scheduling requests from `CubeMaster`.
 
 ## Prerequisites
 
@@ -39,7 +39,7 @@ Each compute node must meet the same hardware and software requirements as the c
 - **Physical machine or bare-metal server** (nested virtualization is not supported)
 - **x86_64** or **aarch64** (ARM64) architecture with **KVM enabled** (`ls /dev/kvm`)
 - **Docker** installed and running
-- **Network connectivity** to the control node (specifically to `CubeMaster` on port `8089` by default, and to the S3 endpoint — port `9000` with the bundled MinIO)
+- **Network connectivity** to the control node (specifically to `CubeOps` on port `3010` for node registration, and to the S3 endpoint — port `9000` with the bundled MinIO)
 
 For the full requirements list, see [Self-Build Deployment — Prerequisites](./self-build-deploy.md#prerequisites).
 
@@ -80,20 +80,20 @@ CUBE_S3_S3FS_EXTRA_OPTS=-ouse_path_request_style
 |----------|-------------|
 | `ONE_CLICK_DEPLOY_ROLE` | Must be set to `compute` for compute-only nodes |
 | `CUBE_SANDBOX_NODE_IP` | This node's primary network interface IP |
-| `ONE_CLICK_CONTROL_PLANE_IP` | The control node's IP; automatically expanded to `<ip>:8089` for CubeMaster |
+| `ONE_CLICK_CONTROL_PLANE_IP` | The control node's IP; automatically expanded to `<ip>:3010` for CubeOps node registration |
 | `CUBE_S3_*` | **Required.** The volume plugin hard-depends on S3. Compute nodes never deploy MinIO, so copy these from the control node's `.one-click.env` (or point them at your own S3-compatible store). With the bundled MinIO, also allow TCP 9000 from compute to the control node. |
 
 ::: tip Enforced at install time
 `install-compute.sh` validates `CUBE_S3_ENDPOINT` before touching any local configuration and aborts if it is missing, instructing you to copy `CUBE_S3_*` from the control node. Set these variables before running the installer.
 :::
 
-You can also specify the CubeMaster endpoint explicitly if it uses a non-default port:
+You can also specify the CubeOps endpoint explicitly if it uses a non-default port:
 
 ```bash
-ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR=<control-plane-ip>:8089
+ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR=<control-plane-ip>:3010
 ```
 
-`ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` takes precedence over `ONE_CLICK_CONTROL_PLANE_IP` when both are set.
+`ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR` takes precedence over `ONE_CLICK_CONTROL_PLANE_IP` when both are set.
 
 ## Step 3: Install
 
@@ -105,8 +105,8 @@ The compute-node install script will:
 
 1. Install only `Cubelet` with the embedded network runtime, `cube-shim`, `cube-image`, `cube-kernel-scf`, and the runtime scripts
 2. Start only the host process `cubelet`
-3. Automatically point `Cubelet`'s `meta_server_endpoint` to the control-plane `CubeMaster`
-4. Register the node and report status through the control plane `/internal/meta` API
+3. Automatically point `Cubelet`'s `meta_server_endpoint` to the control-plane `CubeOps`
+4. Register the node and report status through the control plane `/internal/node-agent/v1` API to CubeOps
 
 ## Verifying the Deployment
 
@@ -119,15 +119,15 @@ sudo ./smoke.sh
 In compute-node mode, `quickcheck.sh` verifies:
 
 - Local `Cubelet` and embedded network runtime health
-- Reachability of the control-plane `CubeMaster`
-- That the current node appears under `/internal/meta/nodes/{node_id}` on the control plane
+- Reachability of the control-plane `CubeOps`
+- That the current node appears under `/internal/v1/nodes/{node_id}` on the control plane
 
 ### Verify from the Control Node
 
 On the control node, you can confirm the compute node has registered:
 
 ```bash
-curl http://127.0.0.1:8089/internal/meta/nodes
+curl http://127.0.0.1:3010/internal/v1/nodes
 ```
 
 The response should include the compute node's IP and a healthy status.
@@ -199,8 +199,8 @@ Compute nodes use the same `.env` file format. The following variables are speci
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ONE_CLICK_DEPLOY_ROLE` | `control` | Must be set to `compute` |
-| `ONE_CLICK_CONTROL_PLANE_IP` | empty | Control-plane host IP; expanded to `<ip>:8089` by default |
-| `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` | empty | Explicit CubeMaster address; takes precedence over `ONE_CLICK_CONTROL_PLANE_IP` |
+| `ONE_CLICK_CONTROL_PLANE_IP` | empty | Control-plane host IP; expanded to `<ip>:3010` by default |
+| `ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR` | empty | Explicit CubeOps address; takes precedence over `ONE_CLICK_CONTROL_PLANE_IP` |
 | `CUBE_SANDBOX_NODE_IP` | `10.0.0.10` | **Required.** This node's primary network interface IP |
 | `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18` (from `config.toml`) | cubevs local network CIDR. Should match the control-plane value. IPv4 CIDR format (e.g., `10.100.0.0/18`), mask range /16–/24. Auto-detected for host network conflicts at install time. |
 | `CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK` | `0` | Set to `1` to skip CIDR conflict detection (not recommended). |
@@ -211,24 +211,24 @@ For the full configuration reference (build-time options, database, proxy, etc.)
 
 ## Troubleshooting
 
-### Compute Node Cannot Reach CubeMaster
+### Compute Node Cannot Reach CubeOps
 
 Verify network connectivity:
 
 ```bash
-curl http://<control-plane-ip>:8089/internal/meta/nodes
+curl http://<control-plane-ip>:3010/internal/v1/nodes
 ```
 
 If this fails, check:
-- Firewall rules on the control node (port `8089` must be accessible)
-- The `ONE_CLICK_CONTROL_PLANE_IP` or `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` value in `.env`
+- Firewall rules on the control node (port `3010` must be accessible)
+- The `ONE_CLICK_CONTROL_PLANE_IP` or `ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR` value in `.env`
 
 ### Node Not Appearing in Control Plane
 
 If `smoke.sh` passes locally but the node does not appear on the control plane:
 
 1. Check Cubelet logs: `/data/log/Cubelet/`
-2. Verify `meta_server_endpoint` in the Cubelet config points to the correct CubeMaster address
+2. Verify `meta_server_endpoint` in the Cubelet config points to the correct CubeOps address
 3. Ensure `CUBE_SANDBOX_NODE_IP` is correctly set to a routable IP (not `127.0.0.1`)
 
 For general troubleshooting (Docker, KVM, DNS, etc.), see [Self-Build Deployment — Troubleshooting](./self-build-deploy.md#troubleshooting).

@@ -18,15 +18,19 @@ CUBELET_DYNAMICCONF="${TOOLBOX_ROOT}/Cubelet/dynamicconf/conf.yaml"
 ensure_file "${CUBELET_DYNAMICCONF}"
 [[ -n "${CUBE_SANDBOX_NODE_IP:-}" ]] || die "CUBE_SANDBOX_NODE_IP is required for compute role"
 
-CONTROL_PLANE_ADDR="$(resolve_control_plane_cubemaster_addr)"
+OPS_ADDR="$(resolve_control_plane_cubeops_addr)"
+MASTER_HTTP_ADDR="$(resolve_control_plane_cubemaster_addr)"
 grep -Eq "meta_server_endpoint:" "${CUBELET_DYNAMICCONF}" || die "meta_server_endpoint missing in ${CUBELET_DYNAMICCONF}"
+grep -Eq "cubemaster_http_addr:" "${CUBELET_DYNAMICCONF}" || die "cubemaster_http_addr missing in ${CUBELET_DYNAMICCONF}"
 
-current_endpoint="$(sed -nE '/^[[:space:]]*meta_server_endpoint:[[:space:]]*"/{s/^[[:space:]]*meta_server_endpoint:[[:space:]]*"([^"]+)".*/\1/p;q;}' "${CUBELET_DYNAMICCONF}" 2>/dev/null || true)"
-if [[ "${current_endpoint}" == "${CONTROL_PLANE_ADDR}" ]]; then
+current_ops="$(sed -nE '/^[[:space:]]*meta_server_endpoint:[[:space:]]*"/{s/^[[:space:]]*meta_server_endpoint:[[:space:]]*"([^"]+)".*/\1/p;q;}' "${CUBELET_DYNAMICCONF}" 2>/dev/null || true)"
+current_master_http="$(sed -nE '/^[[:space:]]*cubemaster_http_addr:[[:space:]]*"/{s/^[[:space:]]*cubemaster_http_addr:[[:space:]]*"([^"]+)".*/\1/p;q;}' "${CUBELET_DYNAMICCONF}" 2>/dev/null || true)"
+if [[ "${current_ops}" == "${OPS_ADDR}" && "${current_master_http}" == "${MASTER_HTTP_ADDR}" ]]; then
   exit 0
 fi
 
 sed -i \
-  -e "s#^\([[:space:]]*meta_server_endpoint:[[:space:]]*\).*#\1\"${CONTROL_PLANE_ADDR}\"#" \
+  -e "s#^\([[:space:]]*meta_server_endpoint:[[:space:]]*\).*#\1\"${OPS_ADDR}\"#" \
+  -e "s#^\([[:space:]]*cubemaster_http_addr:[[:space:]]*\).*#\1\"${MASTER_HTTP_ADDR}\"#" \
   "${CUBELET_DYNAMICCONF}"
-log "updated cubelet dynamic meta_server_endpoint=${CONTROL_PLANE_ADDR}"
+log "updated cubelet dynamic meta_server_endpoint=${OPS_ADDR} cubemaster_http_addr=${MASTER_HTTP_ADDR}"

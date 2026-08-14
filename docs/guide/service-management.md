@@ -407,7 +407,7 @@ Walk through the layers in order:
 5. **Is the node (Cubelet) online and being scheduled?**
 
    ```bash
-   curl http://127.0.0.1:8089/internal/meta/nodes
+   curl http://127.0.0.1:3010/internal/v1/nodes
    sudo tail -F /data/log/Cubelet/Cubelet-req.log
    ```
 

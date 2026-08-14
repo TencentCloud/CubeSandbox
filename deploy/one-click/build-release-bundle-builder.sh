@@ -73,6 +73,7 @@ rm -f \
   "${PREBUILT_DIR}/cubecli" \
   "${PREBUILT_DIR}/cube-api" \
   "${PREBUILT_DIR}/cubeops" \
+  "${PREBUILT_DIR}/cubeopscli" \
   "${PREBUILT_DIR}/cubevsmapdump" \
   "${PREBUILT_DIR}/cube-agent" \
   "${PREBUILT_DIR}/cube-init" \
@@ -411,6 +412,9 @@ queue_track cubemaster track_cubemaster
 queue_track netstack   track_netstack
 queue_track cubeops    track_cubeops
 
+echo "[one-click] building cubeopscli in builder" >&2
+(cd /workspace/CubeOps && go build -ldflags "-s -w" -o "${PREBUILT_DIR}/cubeopscli" ./cmd/cubeopscli)
+
 run_tracks
 SCRIPT_EOF
 
@@ -433,6 +437,7 @@ for artifact in \
   cubecli \
   cube-api \
   cubeops \
+  cubeopscli \
   cubevsmapdump \
   cube-agent \
   cube-init \
@@ -449,6 +454,7 @@ ONE_CLICK_CUBELET_BIN="${PREBUILT_DIR}/cubelet" \
 ONE_CLICK_CUBECLI_BIN="${PREBUILT_DIR}/cubecli" \
 ONE_CLICK_CUBE_API_BIN="${PREBUILT_DIR}/cube-api" \
 ONE_CLICK_CUBE_OPS_BIN="${PREBUILT_DIR}/cubeops" \
+ONE_CLICK_CUBE_OPS_CLI_BIN="${PREBUILT_DIR}/cubeopscli" \
 ONE_CLICK_CUBEVSMAPDUMP_BIN="${PREBUILT_DIR}/cubevsmapdump" \
 ONE_CLICK_CUBE_AGENT_BIN="${PREBUILT_DIR}/cube-agent" \
 ONE_CLICK_CUBE_INIT_BIN="${PREBUILT_DIR}/cube-init" \

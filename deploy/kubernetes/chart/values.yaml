@@ -195,10 +195,11 @@ placement:
 
 externalControlPlane:
   # Compute-only mode equivalent to one-click ONE_CLICK_DEPLOY_ROLE=compute.
-  # When enabled, Cube Node and CubeAPI use the supplied CubeMaster endpoint
-  # instead of the chart-managed CubeMaster Service.
+  # When enabled, Cube Node and CubeAPI use the supplied endpoints instead of
+  # the chart-managed Services.
   enabled: false
-  masterEndpoint: ""
+  masterEndpoint: ""   # CubeMaster 8089 (artifacts, cubemastercli, api)
+  opsEndpoint: ""      # CubeOps 3010 (cubelet register/heartbeat)
   apiEndpoint: ""
 
 controlPlane:
@@ -297,6 +298,11 @@ cubemastercli:
   # CubeMaster/docker/Dockerfile.cubemastercli (CI + build-cube-images.sh).
   # The chart injects CUBEMASTERCLI_ADDRESS and CUBEMASTERCLI_PORT for
   # convenience; non-interactive commands should still pass those flags.
+  #
+  # The image also bundles the cubeopscli binary (from CubeOps). When
+  # cubeopscli is enabled (cubeOps.enabled or externalControlPlane.enabled),
+  # the chart injects CUBEOPSCLI_ADDRESS and CUBEOPSCLI_PORT so both CLIs
+  # are usable from the same Pod via kubectl exec.
   enabled: true
   replicas: 1
   podAnnotations: {}

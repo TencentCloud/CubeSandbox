@@ -1,13 +1,11 @@
-// Copyright (c) 2024 Tencent Inc.
+// Copyright (c) 2026 Tencent Inc.
 // SPDX-License-Identifier: Apache-2.0
-//
 
-package models
+package store
 
 import (
 	"time"
 
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"gorm.io/gorm"
 )
 
@@ -26,19 +24,13 @@ type NodeRegistration struct {
 	CreateConcurrentNum int64  `gorm:"column:create_concurrent_num"`
 	MaxMvmNum           int64  `gorm:"column:max_mvm_num"`
 	HostFactsJSON       string `gorm:"column:host_facts_json"`
-	// Promoted queryable host-fact keys, denormalised from HostFactsJSON so the
-	// compatible-nodes lookup can filter server-side on the two required
-	// (blocking) restore-compat keys. CPUVendor/CPUModel are informational
-	// (empty on ARM) and are stored but not indexed. host_facts_json remains the
-	// source of truth for the full fact set (taint gate + informational dims).
-	CPUVendor         string `gorm:"column:cpu_vendor"`
-	CPUModel          string `gorm:"column:cpu_model"`
+	// Redundant columns for QueryHostFactCandidates filtering
 	CPUIDHash         string `gorm:"column:cpuid_hash"`
 	HostKernelRelease string `gorm:"column:host_kernel_release"`
 }
 
 func (NodeRegistration) TableName() string {
-	return constants.NodeMetaRegistrationTable
+	return "t_cube_node_registration"
 }
 
 type NodeStatus struct {
@@ -52,14 +44,9 @@ type NodeStatus struct {
 }
 
 func (NodeStatus) TableName() string {
-	return constants.NodeMetaStatusTable
+	return "t_cube_node_status"
 }
 
-// NodeComponentVersion records the real version of a single component on a
-// single node. It intentionally does NOT embed gorm.Model: the table uses a
-// (node_id, component) unique key and the writer physically deletes stale
-// rows, so a soft-delete column would resurrect tombstoned rows on the next
-// upsert and hide them from Find().
 type NodeComponentVersion struct {
 	ID           uint   `gorm:"primarykey"`
 	NodeID       string `gorm:"column:node_id"`
@@ -74,5 +61,18 @@ type NodeComponentVersion struct {
 }
 
 func (NodeComponentVersion) TableName() string {
-	return constants.NodeComponentVersionTable
+	return "t_cube_node_component_version"
+}
+
+type NodeOperation struct {
+	ID        uint      `gorm:"primarykey"`
+	NodeID    string    `gorm:"column:node_id"`
+	Type      string    `gorm:"column:type"`
+	Operator  string    `gorm:"column:operator"`
+	Detail    string    `gorm:"column:detail"`
+	CreatedAt time.Time `gorm:"column:created_at"`
+}
+
+func (NodeOperation) TableName() string {
+	return "t_cube_node_operation"
 }

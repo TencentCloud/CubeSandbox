@@ -191,7 +191,7 @@ FLUSH PRIVILEGES;
 ```bash
 # 进入交互 shell（镜像内 bashrc 会自动补 --address / --port）
 kubectl -n cube-system exec -it -l app.kubernetes.io/component=cubemastercli -- bash
-cubemastercli node list
+cubeopscli node list
 cubemastercli sandbox list
 ```
 
@@ -199,7 +199,7 @@ cubemastercli sandbox list
 
 ```bash
 kubectl -n cube-system exec deploy/cube-cubemastercli -- \
-  sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
+  sh -lc 'cubeopscli --address "$CUBEOPSCLI_ADDRESS" --port "$CUBEOPSCLI_PORT" node list'
 ```
 
 ---
@@ -239,7 +239,7 @@ lsmod | grep kvm
 
 ```bash
 kubectl -n cube-system exec -l app.kubernetes.io/component=cubemastercli -- \
-  sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
+  sh -lc 'cubeopscli --address "$CUBEOPSCLI_ADDRESS" --port "$CUBEOPSCLI_PORT" node list'
 ```
 
 - `healthy: true` → 可创建沙箱

@@ -88,7 +88,7 @@ scheduler:
 
 ## 节点元数据如何影响调度
 
-Cubelet 会通过 CubeMaster 的 `/internal/meta` 接口注册节点并持续上报状态。CubeMaster 把这些数据写入元数据存储和本地缓存，调度时读取最新快照。
+Cubelet 会通过 CubeOps 的 `/internal/node-agent/v1` 接口注册节点并持续上报状态。CubeOps 将这些数据持久化到 MySQL/Redis，CubeMaster 每隔几秒从 CubeOps 同步节点视图并维护本地缓存，调度时读取最新快照。
 
 | Cubelet 上报字段 | 来源 | 调度影响 |
 |------------------|------|----------|
@@ -222,7 +222,7 @@ cubemastercli tpl redo \
 常用入口：
 
 ```bash
-curl http://127.0.0.1:8089/internal/meta/nodes
+curl http://127.0.0.1:3010/internal/v1/nodes
 sudo tail -F /data/log/CubeMaster/cubemaster-req.log
 sudo tail -F /data/log/Cubelet/Cubelet-req.log
 ```

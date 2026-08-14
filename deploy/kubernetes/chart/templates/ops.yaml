@@ -68,6 +68,15 @@ spec:
             # do not fail when Master already applied the same migrations.
             - name: CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK
               value: "true"
+            - name: REDIS_HOST
+              value: {{ include "cube.redisHost" . | quote }}
+            - name: REDIS_PORT
+              value: {{ .Values.redis.port | quote }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: redis-password
             {{- with .Values.cubeOps.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

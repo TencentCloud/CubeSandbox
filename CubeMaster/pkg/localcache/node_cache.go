@@ -97,8 +97,8 @@ func (l *local) loop(ctx context.Context) {
 					checkDeadline = time.Now().Add(config.GetConfig().Common.SyncMetaDataInterval)
 				}()
 
-				if err := l.syncAllFromDB(true); err != nil {
-					CubeLog.WithContext(context.Background()).Errorf("loop_all:%s", err)
+				if err := l.syncAllFromDB(ctx, true); err != nil {
+					CubeLog.WithContext(ctx).Errorf("loop_all:%s", err)
 				}
 				if log.IsDebug() {
 					nodes := GetNodes(-1)
@@ -121,6 +121,13 @@ func (l *local) dealEvent(ctx context.Context) {
 		case e := <-l.event:
 			recov.WithRecover(func() {
 				if e == nil {
+					return
+				}
+				if externalNodeLoader != nil {
+					// CubeOps mode: node data is authoritative from cubeops_loader
+					// (full sync every SyncMetaDataInterval). Ignore local DB
+					// events to avoid dual-source conflict.
+					CubeLog.WithContext(ctx).Debugf("dealEvent: ignored in CubeOps mode: type=%v ids=%v", e.Type, e.InsIDs)
 					return
 				}
 				if DEL == e.Type {
@@ -327,6 +334,14 @@ func (l *local) updateNodeFromMetaData(n *node.Node) error {
 		old.NodeLabels = labels
 		old.InvalidateLabelsCache()
 		old.SetSchedulingDisabled(n.SchedulingDisabled())
+		// On guest-image / cube-agent version change, trigger templatecenter's
+		// incremental compat scan.
+		if onNodeVersionsChanged != nil {
+			if compatVersionsChanged(old.Versions, n.Versions) {
+				go onNodeVersionsChanged(old.ID())
+			}
+		}
+		old.Versions = n.Versions
 		l.lockMetaData.Unlock()
 
 		l.updateSortedNodes(old)
@@ -362,4 +377,29 @@ func (l *local) updateNodeMetric(n *node.Node) error {
 	} else {
 		return fmt.Errorf("item %s doesn't exist", n.ID())
 	}
+}
+
+// compatVersionsChanged reports whether the guest-image or cube-agent version
+// differs between prev and next. These are the components templatecenter's
+// compat scan cares about.
+func compatVersionsChanged(prev, next []node.ComponentVersion) bool {
+	prevMap := compatRelevantVersions(prev)
+	nextMap := compatRelevantVersions(next)
+	for _, component := range []string{"guest-image", "cube-agent"} {
+		if prevMap[component] != nextMap[component] {
+			return true
+		}
+	}
+	return false
+}
+
+func compatRelevantVersions(versions []node.ComponentVersion) map[string]string {
+	out := map[string]string{"guest-image": "", "cube-agent": ""}
+	for _, v := range versions {
+		switch v.Component {
+		case "guest-image", "cube-agent":
+			out[v.Component] = v.Version
+		}
+	}
+	return out
 }

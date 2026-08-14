@@ -388,7 +388,7 @@ sudo /usr/local/services/cubetoolbox/scripts/cube-diag/collect-logs.sh \
 5. **节点（Cubelet）是否在线、是否收到调度**
 
    ```bash
-   curl http://127.0.0.1:8089/internal/meta/nodes
+   curl http://127.0.0.1:3010/internal/v1/nodes
    sudo tail -F /data/log/Cubelet/Cubelet-req.log
    ```
 

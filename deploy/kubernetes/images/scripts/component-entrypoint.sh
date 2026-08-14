@@ -769,16 +769,19 @@ run_cubelet() {
   [[ -x "${bin}" ]] || fail "missing ${bin}"
   [[ -f "${cfg}" ]] || fail "missing ${cfg}"
   [[ -f "${dyn}" ]] || fail "missing ${dyn}"
-  [[ -n "${CUBE_MASTER_ENDPOINT:-}" ]] || fail "CUBE_MASTER_ENDPOINT is required"
+  [[ -n "${CUBE_OPS_ENDPOINT:-}" ]] || fail "CUBE_OPS_ENDPOINT is required"
+  [[ -n "${CUBE_MASTER_HTTP_ADDR:-}" ]] || fail "CUBE_MASTER_HTTP_ADDR is required"
   [[ -n "${CUBE_SANDBOX_NODE_ID:-}${CUBE_SANDBOX_NODE_IP:-}" ]] || fail "CUBE_SANDBOX_NODE_ID or CUBE_SANDBOX_NODE_IP is required"
   [[ -n "${CUBE_SANDBOX_ENDPOINT_IP:-}" ]] || fail "CUBE_SANDBOX_ENDPOINT_IP is required"
 
   apply_effective_pvm_from_state
   select_guest_kernel "$(preserve_guest_kernel_selection "${TOOLBOX_ROOT}/cube-kernel-scf")"
 
-  local ep_esc
-  ep_esc="$(sed_escape_replacement "${CUBE_MASTER_ENDPOINT}")"
-  sed -i -e "s#^\([[:space:]]*meta_server_endpoint:[[:space:]]*\).*#\1\"${ep_esc}\"#" "${dyn}"
+  local ops_esc master_http_esc
+  ops_esc="$(sed_escape_replacement "${CUBE_OPS_ENDPOINT}")"
+  master_http_esc="$(sed_escape_replacement "${CUBE_MASTER_HTTP_ADDR}")"
+  sed -i -e "s#^\([[:space:]]*meta_server_endpoint:[[:space:]]*\).*#\1\"${ops_esc}\"#" "${dyn}"
+  sed -i -e "s#^\([[:space:]]*cubemaster_http_addr:[[:space:]]*\).*#\1\"${master_http_esc}\"#" "${dyn}"
   configure_sandbox_dns
 
   if [[ -z "${CUBE_SANDBOX_ETH_NAME:-}" && "${CUBE_SANDBOX_AUTO_DETECT_ETH:-true}" == "true" ]]; then

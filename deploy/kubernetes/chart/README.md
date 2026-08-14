@@ -400,7 +400,7 @@ the real binary:
 ```bash
 kubectl exec -n cube-system deploy/cube-cubemastercli -- cubemastercli --help
 kubectl exec -n cube-system deploy/cube-cubemastercli -- \
-  sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
+  sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" cubebox list'
 kubectl exec -n cube-system deploy/cube-cubemastercli -- \
   sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" template list'
 ```
@@ -408,6 +408,23 @@ kubectl exec -n cube-system deploy/cube-cubemastercli -- \
 The `cubemastercli` image is intentionally independent from `cube-master` and
 `cube-node`. It contains CLI/operator tooling only; the runtime images do not
 carry this operational entry point.
+
+## cubeopscli operational CLI
+
+The `cubeopscli` binary (from CubeOps, for node management: list/isolate/unisolate)
+is bundled inside the `cubemastercli` image. There is no separate
+`<release>-cubeopscli` Deployment — both CLIs live in the same
+`<release>-cubemastercli` Pod.
+
+When CubeOps is enabled (`cubeOps.enabled` or `externalControlPlane.enabled`),
+the chart injects `CUBEOPSCLI_ADDRESS` and `CUBEOPSCLI_PORT` into the
+cubemastercli Pod so both CLIs are usable via `kubectl exec`:
+
+```bash
+kubectl exec -n cube-system deploy/cube-cubemastercli -- cubeopscli --help
+kubectl exec -n cube-system deploy/cube-cubemastercli -- \
+  sh -lc 'cubeopscli --address "$CUBEOPSCLI_ADDRESS" --port "$CUBEOPSCLI_PORT" node list'
+```
 
 ## Cube Proxy Node
 
@@ -617,7 +634,7 @@ kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node -c cubelet 
 kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node -c wait-node-prep --tail=50
 kubectl logs -n cube-system deploy/cube-master -c cube-master --tail=100
 kubectl exec -n cube-system deploy/cube-cubemastercli -- \
-  sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
+  sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" cubebox list'
 helm test cube -n cube-system --timeout 20m
 ```
 

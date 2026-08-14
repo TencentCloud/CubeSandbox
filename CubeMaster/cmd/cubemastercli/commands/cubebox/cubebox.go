@@ -20,7 +20,6 @@ var Command = cli.Command{
 		DestroyCommand,
 		RollbackCommand,
 		SandboxCommand,
-		NodeCommand,
 		SnapshotCommand,
 		StorageCommand,
 		OperationCommand,

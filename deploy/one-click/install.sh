@@ -271,6 +271,7 @@ print_path_hint() {
     echo "[one-click]   cubevsmapdump"
     if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
       echo "[one-click]   cubemastercli"
+      echo "[one-click]   cubeopscli"
     fi
     echo
   } >&2
@@ -417,6 +418,9 @@ generate_cubemaster_config_ports() {
   # here. Defaults to 0.0.0.0 to stay reachable from compute nodes / host-net
   # cube-proxy; set CUBEMASTER_HTTP_BIND=127.0.0.1 to harden a lone node.
   local http_bind="${CUBEMASTER_HTTP_BIND:-0.0.0.0}"
+  # CubeOps base URL for node management (list/isolate/unisolate).
+  # Defaults to localhost:3010; CubeOps runs on the same control node.
+  local cube_ops_addr="${CUBEMASTER_CUBE_OPS_ADDR:-http://127.0.0.1:3010}"
 
   ensure_file "${cfg}"
   sed -i \
@@ -427,6 +431,7 @@ generate_cubemaster_config_ports() {
     -e "s|__CUBE_SANDBOX_REDIS_PORT__|${redis_port}|g" \
     -e "s|__CUBE_SANDBOX_REDIS_PASSWORD__|$(escape_sed "${redis_password}")|g" \
     -e "s|__CUBEMASTER_HTTP_BIND__|$(escape_sed "${http_bind}")|g" \
+    -e "s|__CUBEMASTER_CUBE_OPS_ADDR__|$(escape_sed "${cube_ops_addr}")|g" \
     "${cfg}"
 }
 
@@ -1826,7 +1831,7 @@ fi
 
 if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
   chmod +x "${INSTALL_PREFIX}/CubeAPI/bin/cube-api"
-  chmod +x "${INSTALL_PREFIX}/CubeOps/bin/cubeops"
+  chmod +x "${INSTALL_PREFIX}/CubeOps/bin/cubeops" "${INSTALL_PREFIX}/CubeOps/bin/cubeopscli"
   chmod +x "${INSTALL_PREFIX}/CubeMaster/bin/cubemaster" "${INSTALL_PREFIX}/CubeMaster/bin/cubemastercli"
 fi
 
@@ -1836,8 +1841,10 @@ ln -sf "${INSTALL_PREFIX}/Cubelet/bin/cubecli" /usr/local/bin/cubecli
 ln -sf "${INSTALL_PREFIX}/cube-vs/network/bin/cubevsmapdump" /usr/local/bin/cubevsmapdump
 if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
   ln -sf "${INSTALL_PREFIX}/CubeMaster/bin/cubemastercli" /usr/local/bin/cubemastercli
+  ln -sf "${INSTALL_PREFIX}/CubeOps/bin/cubeopscli" /usr/local/bin/cubeopscli
 else
   rm -f /usr/local/bin/cubemastercli
+  rm -f /usr/local/bin/cubeopscli
 fi
 
 restore_selinux_contexts

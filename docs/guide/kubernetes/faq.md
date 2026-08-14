@@ -191,7 +191,7 @@ FLUSH PRIVILEGES;
 ```bash
 # Interactive shell (bashrc in the image auto-fills --address / --port)
 kubectl -n cube-system exec -it -l app.kubernetes.io/component=cubemastercli -- bash
-cubemastercli node list
+cubeopscli node list
 cubemastercli sandbox list
 ```
 
@@ -199,7 +199,7 @@ Or one-liner (same as Chart `NOTES.txt`):
 
 ```bash
 kubectl -n cube-system exec deploy/cube-cubemastercli -- \
-  sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
+  sh -lc 'cubeopscli --address "$CUBEOPSCLI_ADDRESS" --port "$CUBEOPSCLI_PORT" node list'
 ```
 
 ---
@@ -239,7 +239,7 @@ Cloud VMs need PVM installed; physical machines need VT-x / AMD-V enabled.
 
 ```bash
 kubectl -n cube-system exec -l app.kubernetes.io/component=cubemastercli -- \
-  sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
+  sh -lc 'cubeopscli --address "$CUBEOPSCLI_ADDRESS" --port "$CUBEOPSCLI_PORT" node list'
 ```
 
 - `healthy: true` → you can create sandboxes

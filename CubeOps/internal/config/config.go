@@ -59,8 +59,11 @@ type Config struct {
 	// CubeAPI (for SDK endpoint proxy)
 	CubeAPIURL string `yaml:"cubeapi_url"`
 
-	// Redis (optional)
-	RedisURL string `yaml:"redis_url"`
+	// Redis (optional): REDIS_URL or the split REDIS_HOST/PORT/PASSWORD triple.
+	RedisURL      string `yaml:"redis_url"`
+	RedisHost     string `yaml:"redis_host"`
+	RedisPort     int    `yaml:"redis_port"`
+	RedisPassword string `yaml:"redis_password"`
 
 	// Sandbox domain exposed to SDK clients; matches SDK handler's
 	// CUBE_API_SANDBOX_DOMAIN env so the /config endpoint stays in sync.
@@ -324,6 +327,17 @@ func overrideFromEnv(cfg *Config) {
 	}
 	if v := os.Getenv("REDIS_URL"); v != "" {
 		cfg.RedisURL = v
+	}
+	if v := os.Getenv("REDIS_HOST"); v != "" {
+		cfg.RedisHost = v
+	}
+	if v := os.Getenv("REDIS_PORT"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil {
+			cfg.RedisPort = p
+		}
+	}
+	if v := os.Getenv("REDIS_PASSWORD"); v != "" {
+		cfg.RedisPassword = v
 	}
 	if v := os.Getenv("CUBE_API_SANDBOX_DOMAIN"); v != "" {
 		cfg.SandboxDomain = v

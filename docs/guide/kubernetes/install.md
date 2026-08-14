@@ -212,7 +212,7 @@ kubectl get pods -n cube-system -o wide
 
 # 2) Have compute nodes registered with CubeMaster?
 kubectl exec -n cube-system deploy/cube-cubemastercli -- \
-  sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
+  sh -lc 'cubeopscli --address "$CUBEOPSCLI_ADDRESS" --port "$CUBEOPSCLI_PORT" node list'
 
 # 3) Built-in end-to-end tests (a few minutes)
 helm test cube -n cube-system --timeout 20m --logs

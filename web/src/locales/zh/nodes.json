@@ -3,5 +3,6 @@
   "subtitle": "集群中各主机的容量、饱和度与状态。",
   "noNodes": "暂无已注册节点。",
   "cpu": "CPU",
-  "memory": "内存"
+  "memory": "内存",
+  "isolated": "已隔离"
 }

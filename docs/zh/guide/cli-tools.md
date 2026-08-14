@@ -8,11 +8,12 @@ CubeSandbox 随宿主机安装包提供多种运维和排障命令行工具。�
 
 | 工具 | 运行位置 | 访问对象 | 主要用途 |
 |------|----------|----------|----------|
-| `cubemastercli` | 控制节点、跳板机，或任何能访问 CubeMaster 的机器 | CubeMaster HTTP API，默认端口 `8089` | 集群级 sandbox、节点、模板、快照、volume 运维 |
+| `cubemastercli` | 控制节点、跳板机，或任何能访问 CubeMaster 的机器 | CubeMaster HTTP API，默认端口 `8089` | 集群级 sandbox、模板、快照、volume 运维 |
+| `cubeopscli` | 控制节点、跳板机，或任何能访问 CubeOps 的机器 | CubeOps HTTP API，默认端口 `3010` | 节点列表、隔离/解除隔离、删除节点 |
 | `cubecli` | 运行 Cubelet 和 containerd 的计算节点 | 本地 Cubelet/containerd 状态 | 单节点 sandbox/container 查看、容器 shell、日志、存储清理、本地运行时排障 |
 | `cube-runtime` | 承载目标 sandbox MVM 的计算节点 | 本地 CubeShim hybrid-vsock/debug console | 登录 guest MVM 或执行底层 VM snapshot 辅助操作 |
 
-一键安装会为 `cube-runtime`、`containerd-shim-cube-rs` 和 `cubecli` 创建 `/usr/local/bin` 软链接。`cubemastercli` 包含在发布包中，Terraform 跳板机也会安装它。
+一键安装会为 `cube-runtime`、`containerd-shim-cube-rs`、`cubecli`、`cubemastercli` 和 `cubeopscli` 创建 `/usr/local/bin` 软链接。`cubemastercli` 和 `cubeopscli` 包含在发布包中，Terraform 跳板机也会安装它们。
 
 ## `cubemastercli`
 
@@ -26,9 +27,6 @@ cubemastercli --address <cubemaster-host> --port 8089 version
 常用集群检查：
 
 ```bash
-# 查看所有节点及其健康/调度状态。
-cubemastercli --address <cubemaster-host> --port 8089 node list
-
 # 查看 CubeMaster 已知的所有 sandbox。
 cubemastercli --address <cubemaster-host> --port 8089 list --all
 
@@ -66,6 +64,21 @@ cubemastercli --address <cubemaster-host> --port 8089 cubebox destroy <sandbox-i
 ```
 
 多节点部署和模板分发背景见[多节点集群](./multi-node-deploy.md)。
+
+## `cubeopscli`
+
+`cubeopscli` 是节点管理 CLI。它访问 CubeOps，因此除非运行位置的默认地址正好可用，通常都需要指定 `--address` 和 `--port`。
+
+```bash
+cubeopscli --address <cubeops-host> --port 3010 node list
+cubeopscli --address <cubeops-host> --port 3010 node isolate <node-id>
+cubeopscli --address <cubeops-host> --port 3010 node unisolate <node-id>
+cubeopscli --address <cubeops-host> --port 3010 node delete <node-id>
+```
+
+删除节点要求节点**已隔离且无沙箱**；批量删除时单个节点失败不会中断后续节点，命令最终返回非零退出码。`delete` 的别名是 `rm`；用 `--force` 可在无法校验沙箱清单时强制删除（仍要求先隔离）。
+
+节点隔离与删除详细用法见[隔离节点](./node-isolation.md)。
 
 ## `cubecli`
 

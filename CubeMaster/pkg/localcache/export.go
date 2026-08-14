@@ -49,6 +49,17 @@ func RegisterNodeLoader(loader func(context.Context) ([]*node.Node, error)) {
 	externalNodeLoader = loader
 }
 
+// onNodeVersionsChanged fires when a node's component versions change between
+// sync cycles. Registered by nodemeta.Init to trigger templatecenter's compat
+// scan, avoiding an import cycle.
+var onNodeVersionsChanged func(nodeID string)
+
+// RegisterNodeVersionsChangedCallback sets the callback fired when a node's
+// component versions change during a sync cycle.
+func RegisterNodeVersionsChangedCallback(cb func(nodeID string)) {
+	onNodeVersionsChanged = cb
+}
+
 func Init(ctx context.Context) error {
 	start := time.Now()
 	l.event = make(chan *Event, 1000)
@@ -64,7 +75,7 @@ func Init(ctx context.Context) error {
 		l.sortedNodesByClusters[k] = node.NodeList{}
 	}
 
-	if err := l.loadAllFromDB(); err != nil {
+	if err := l.loadAllFromDB(context.Background()); err != nil {
 		return fmt.Errorf("loadAllFromDB:%v", err)
 	}
 
@@ -179,18 +190,24 @@ func GetNode(id string) (*node.Node, bool) {
 	return nil, false
 }
 
+// metadataHealthTimeout is the staleness window after which a node degrades
+// to unhealthy when CubeOps sync has stopped.
 func metadataHealthTimeout() time.Duration {
 	return nodehealth.MetadataTimeout(config.GetConfig().Common.SyncMetaDataInterval)
 }
 
+// cloneNodeWithCurrentHealth returns a defensive copy of n. It trusts the
+// CubeOps Healthy verdict while sync is fresh; degrades to unhealthy when
+// MetaDataUpdateAt is stale (CubeOps unreachable).
 func cloneNodeWithCurrentHealth(n *node.Node, now time.Time) *node.Node {
 	if n == nil {
 		return nil
 	}
 	current := n.Clone()
-	status := nodehealth.EvaluateFromFacts(n.ReportedReady, n.MetaDataUpdateAt, now, metadataHealthTimeout())
-	current.Healthy = status.Healthy
-	current.UnhealthyReason = status.UnhealthyReason
+	if !n.MetaDataUpdateAt.IsZero() && now.Sub(n.MetaDataUpdateAt) > metadataHealthTimeout() {
+		current.Healthy = false
+		current.UnhealthyReason = nodehealth.ReasonHeartbeatExpired
+	}
 	return current
 }
 
@@ -221,39 +238,6 @@ func NotifyEvent(e *Event) error {
 		return nil
 	default:
 		return errors.New("event full")
-	}
-}
-
-// EvictNode synchronously removes every scheduler-local view owned by nodeID.
-// It is used after a node deletion commits and by metadata reloads on replicas
-// that observe the deleted registration later.
-func EvictNode(nodeID string) {
-	if nodeID == "" {
-		return
-	}
-	SyncNodeTemplates(nodeID, nil)
-	if l.templateNodeCache != nil {
-		l.templateNodeCache.Delete(nodeID)
-	}
-	if l.cache == nil {
-		return
-	}
-	if existing, ok := l.cache.Get(nodeID); ok {
-		if n, valid := existing.(*node.Node); valid {
-			l.delNodeCache(n)
-			return
-		}
-	}
-	l.cache.Delete(nodeID)
-	// The cache entry may already be gone while a stale pointer still remains
-	// in any instance-type list. Without the original node we cannot derive its
-	// cluster, so remove the ID from every list.
-	l.lockSortedNodes.Lock()
-	defer l.lockSortedNodes.Unlock()
-	candidate := &node.Node{InsID: nodeID}
-	for product, nodes := range l.sortedNodesByClusters {
-		nodes.Remove(candidate)
-		l.sortedNodesByClusters[product] = nodes
 	}
 }
 

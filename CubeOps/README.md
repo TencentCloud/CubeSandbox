@@ -24,6 +24,8 @@ CubeOps exposes two API groups:
    snapshot CRUD. These endpoints call CubeMaster HTTP REST API directly
    (replacing the former CubeAPI reverse proxy).
 
+> **Single-replica**: CubeOps keeps node state in an in-process map alongside the DB. Multi-replica concurrent writes are not supported yet.
+
 ## Quick Start
 
 ```bash
@@ -139,7 +141,7 @@ individual fields without editing the YAML file.
 | `DATABASE_URL` | *(required)* | MySQL connection URL. If unset, built from `CUBE_SANDBOX_MYSQL_{HOST,PORT,USER,PASSWORD,DB}` env vars. |
 | `CUBE_MASTER_ADDR` | `http://127.0.0.1:8089` | CubeMaster base URL |
 | `CUBE_API_SANDBOX_DOMAIN` | `cube.app` | Sandbox domain (used by SDK handler for sandbox URL construction) |
-| `REDIS_URL` | *(optional)* | Redis for JWT blacklist |
+| `REDIS_URL` | *(optional)* | Redis connection URL. Alternatively use `REDIS_HOST`/`REDIS_PORT`/`REDIS_PASSWORD`. |
 
 **Resolution order**: environment variables > YAML file > built-in defaults.
 

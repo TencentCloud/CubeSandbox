@@ -49,9 +49,15 @@
 {{- if not .Values.externalControlPlane.masterEndpoint }}
 {{- fail "externalControlPlane.enabled=true requires externalControlPlane.masterEndpoint" }}
 {{- end }}
+{{- if not .Values.externalControlPlane.opsEndpoint }}
+{{- fail "externalControlPlane.enabled=true requires externalControlPlane.opsEndpoint" }}
+{{- end }}
 {{- end }}
 {{- if and .Values.cubeNode.enabled (not .Values.controlPlane.enabled) (not .Values.externalControlPlane.enabled) }}
 {{- fail "cubeNode.enabled=true with controlPlane.enabled=false requires externalControlPlane.enabled=true" }}
+{{- end }}
+{{- if and .Values.cubeNode.enabled .Values.controlPlane.enabled (ne (include "cube.opsEnabled" .) "true") }}
+{{- fail "cubeNode.enabled=true requires cubeOps.enabled=true (cubelet registers with CubeOps)" }}
 {{- end }}
 {{- if and .Values.cubeNode.enabled (not .Values.images.waitNodePrep.repository) }}
 {{- fail "cubeNode.enabled=true requires images.waitNodePrep.repository (Big Pod wait-node-prep initContainer)" }}

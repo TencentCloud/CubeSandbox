@@ -42,8 +42,11 @@ cubemaster_addr: "http://127.0.0.1:8089"
 # --- CubeAPI (deprecated SDK proxy) ---
 cubeapi_url: "http://127.0.0.1:3000"
 
-# --- Redis (optional, only needed if you add rate-limiting later) ---
+# --- Redis (optional, used for node metric fan-out) ---
 redis_url: ""
+redis_host: ""
+redis_port: 0
+redis_password: ""
 
 # --- Sandbox domain exposed to SDK clients via /config ---
 sandbox_domain: "cube.app"

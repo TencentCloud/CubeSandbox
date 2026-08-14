@@ -2,14 +2,18 @@
 # Copyright (C) 2026 Tencent. All rights reserved.
 #
 # Multi-stage build for cubemastercli (K8s operational CLI Pod).
+# This image bundles BOTH CLI binaries:
+#   - cubemastercli (from CubeMaster, talks to CubeMaster 8089)
+#   - cubeopscli   (from CubeOps,   talks to CubeOps   3010)
+# so a single Pod can serve both operational needs without a sidecar.
 #
 # Build context MUST be the repository root:
 #   docker build -f CubeMaster/docker/Dockerfile.cubemastercli -t cubemastercli:TAG .
 #
 # See .github/workflows/release-docker-images.yml.
 
-# ── Build stage ────────────────────────────────────────────────────────────────
-FROM golang:1.25-bookworm AS builder
+# ── Build stage: cubemastercli ─────────────────────────────────────────────────
+FROM golang:1.25-bookworm AS builder-master
 ARG TARGETARCH
 ARG CUBE_VERSION=0.0.0-dev
 ARG CUBE_COMMIT=unknown
@@ -42,6 +46,32 @@ RUN set -eux; \
         -X 'github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version.BuildTime=${CUBE_BUILD_TIME}'" \
       ./cmd/cubemastercli
 
+# ── Build stage: cubeopscli ────────────────────────────────────────────────────
+FROM golang:1.25-bookworm AS builder-ops
+ARG TARGETARCH
+
+WORKDIR /src
+
+COPY CubeOps/go.mod CubeOps/go.sum ./
+COPY CubeDB/go.mod CubeDB/go.sum /CubeDB/
+COPY cubelog/go.mod cubelog/go.sum /cubelog/
+RUN go mod download
+
+COPY CubeOps/ ./
+COPY CubeDB/ /CubeDB/
+COPY cubelog/ /cubelog/
+
+ENV CGO_ENABLED=0
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) goarch=amd64 ;; \
+      arm64) goarch=arm64 ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    GOOS=linux GOARCH="${goarch}" go build -o /out/cubeopscli \
+      -ldflags "-s -w" \
+      ./cmd/cubeopscli
+
 # ── Runtime stage ──────────────────────────────────────────────────────────────
 FROM ubuntu:24.04
 
@@ -54,10 +84,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && update-ca-certificates
 
-COPY --from=builder --chmod=0755 /out/cubemastercli /usr/local/bin/cubemastercli
+COPY --from=builder-master --chmod=0755 /out/cubemastercli /usr/local/bin/cubemastercli
+COPY --from=builder-ops    --chmod=0755 /out/cubeopscli   /usr/local/bin/cubeopscli
 
-# Fail early if the binary cannot exec in this image.
+# Fail early if either binary cannot exec in this image.
 RUN ["/usr/local/bin/cubemastercli", "--help"]
+RUN ["/usr/local/bin/cubeopscli", "--help"]
 
 # Interactive bash helper for kubectl exec -it ... -- bash:
 # inject CUBEMASTERCLI_ADDRESS / CUBEMASTERCLI_PORT when flags are omitted.
@@ -99,5 +131,40 @@ RUN { \
           '}'; \
       } >/etc/cubemastercli-interactive.bashrc \
     && printf '\n%s\n' '[ -f /etc/cubemastercli-interactive.bashrc ] && . /etc/cubemastercli-interactive.bashrc' >>/root/.bashrc
+
+# Interactive bash helper for cubeopscli (same pattern as above).
+RUN { \
+        printf '%s\n' \
+          '__cube_cubeopscli_has_flag() {' \
+          '    local flag="$1"' \
+          '    shift' \
+          '' \
+          '    while [ "$#" -gt 0 ]; do' \
+          '        case "$1" in' \
+          '            "${flag}"|"${flag}"=*)' \
+          '                return 0' \
+          '                ;;' \
+          '        esac' \
+          '        shift' \
+          '    done' \
+          '' \
+          '    return 1' \
+          '}' \
+          '' \
+          'cubeopscli() {' \
+          '    local args=()' \
+          '' \
+          '    if [ -n "${CUBEOPSCLI_ADDRESS:-}" ] && ! __cube_cubeopscli_has_flag "--address" "$@"; then' \
+          '        args+=(--address "${CUBEOPSCLI_ADDRESS}")' \
+          '    fi' \
+          '' \
+          '    if [ -n "${CUBEOPSCLI_PORT:-}" ] && ! __cube_cubeopscli_has_flag "--port" "$@"; then' \
+          '        args+=(--port "${CUBEOPSCLI_PORT}")' \
+          '    fi' \
+          '' \
+          '    command /usr/local/bin/cubeopscli "${args[@]}" "$@"' \
+          '}'; \
+      } >/etc/cubeopscli-interactive.bashrc \
+    && printf '\n%s\n' '[ -f /etc/cubeopscli-interactive.bashrc ] && . /etc/cubeopscli-interactive.bashrc' >>/root/.bashrc
 
 CMD ["sleep", "infinity"]

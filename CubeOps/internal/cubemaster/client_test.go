@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -460,5 +461,99 @@ func TestClient_FullRetCodeRoundTrip(t *testing.T) {
 				t.Errorf("RetryAfter = %d, want %d", cmErr.RetryAfter(), tt.retryAfter)
 			}
 		})
+	}
+}
+
+// TestCountNodeSandboxes covers the data-shape matrix; unrecognised shapes
+// must error (fail-closed), never return a silent zero.
+func TestCountNodeSandboxes(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		want    int
+		wantErr string // non-empty substring expected when an error is wanted
+		isCM    bool   // error must be *CMError
+	}{
+		// Array shape.
+		{"array empty", `{"ret":{"ret_code":0},"data":[]}`, 0, "", false},
+		{"array one", `{"ret":{"ret_code":0},"data":[{"id":"sb-1"}]}`, 1, "", false},
+		// JSON null decodes to a nil slice (count 0) with err == nil.
+		{"null data", `{"ret":{"ret_code":0},"data":null}`, 0, "", false},
+		// { "list": [...] } shape.
+		{"list empty", `{"ret":{"ret_code":0},"data":{"list":[]}}`, 0, "", false},
+		{"list one", `{"ret":{"ret_code":0},"data":{"list":[{"id":"sb-1"}]}}`, 1, "", false},
+		// { "sandboxes": [...] } shape.
+		{"sandboxes one", `{"ret":{"ret_code":0},"data":{"sandboxes":[{"id":"sb-1"}]}}`, 1, "", false},
+		// list + sandboxes counts add up.
+		{"list and sandboxes", `{"ret":{"ret_code":0},"data":{"list":[{"id":"a"}],"sandboxes":[{"id":"b"},{"id":"c"}]}}`, 3, "", false},
+		// Business error.
+		{"ret_code non-zero", `{"ret":{"ret_code":130404,"ret_msg":"not found"},"data":null}`, 0, "not found", true},
+		// Unrecognised shapes must fail closed.
+		{"string data", `{"ret":{"ret_code":0},"data":"foo"}`, 0, "unexpected data shape", false},
+		{"number data", `{"ret":{"ret_code":0},"data":123}`, 0, "unexpected data shape", false},
+		{"object without list", `{"ret":{"ret_code":0},"data":{"foo":1}}`, 0, "unexpected data shape", false},
+		// list key with a non-array value must surface a decode error.
+		{"list not array", `{"ret":{"ret_code":0},"data":{"list":1}}`, 0, "unmarshal list", false},
+		// Malformed envelope.
+		{"malformed envelope", `not json`, 0, "unmarshal envelope", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.URL.Query().Get("host_id"); got != "10.0.0.1" {
+					t.Errorf("host_id query = %q, want 10.0.0.1", got)
+				}
+				if got := r.URL.Query().Get("size"); got != "1" {
+					t.Errorf("size query = %q, want 1", got)
+				}
+				fmt.Fprint(w, tc.body)
+			}))
+			defer srv.Close()
+
+			got, err := New(srv.URL).CountNodeSandboxes(context.Background(), "10.0.0.1")
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %q, want substring %q", err.Error(), tc.wantErr)
+				}
+				if tc.isCM {
+					var cmErr *CMError
+					if !errorAs(err, &cmErr) {
+						t.Fatalf("expected *CMError, got %T: %v", err, err)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("count = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCountNodeSandboxes_EmptyHostID verifies the argument guard.
+func TestCountNodeSandboxes_EmptyHostID(t *testing.T) {
+	_, err := New("http://localhost:1").CountNodeSandboxes(context.Background(), "")
+	if err == nil || !strings.Contains(err.Error(), "host_id is required") {
+		t.Fatalf("expected host_id required error, got: %v", err)
+	}
+}
+
+// TestCountNodeSandboxes_HTTPError verifies transport/HTTP errors propagate.
+func TestCountNodeSandboxes_HTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	_, err := New(srv.URL).CountNodeSandboxes(context.Background(), "10.0.0.1")
+	if err == nil {
+		t.Fatal("expected error for HTTP 503, got nil")
 	}
 }

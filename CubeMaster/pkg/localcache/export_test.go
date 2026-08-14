@@ -5,10 +5,12 @@
 package localcache
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/patrickmn/go-cache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	fwk "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/framework"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/nodehealth"
@@ -157,36 +159,6 @@ func TestGetHealthyNodesByInstanceType(t *testing.T) {
 	}
 }
 
-func TestEvictNodeRemovesStaleEntryFromEveryCluster(t *testing.T) {
-	origNodesByClusters := l.sortedNodesByClusters
-	origCache := l.cache
-	origImageCache := l.imageCache
-	origTemplateNodeCache := l.templateNodeCache
-	defer func() {
-		l.sortedNodesByClusters = origNodesByClusters
-		l.cache = origCache
-		l.imageCache = origImageCache
-		l.templateNodeCache = origTemplateNodeCache
-	}()
-
-	stale := &node.Node{InsID: "deleted"}
-	l.cache = cache.New(0, 0)
-	l.imageCache = cache.New(0, 0)
-	l.templateNodeCache = cache.New(0, 0)
-	l.sortedNodesByClusters = map[string]node.NodeList{
-		"default": {stale},
-		"gpu":     {stale},
-	}
-
-	EvictNode("deleted")
-
-	for cluster, nodes := range l.sortedNodesByClusters {
-		if len(nodes) != 0 {
-			t.Fatalf("cluster %s still contains deleted node: %+v", cluster, nodes)
-		}
-	}
-}
-
 func TestSyncNodeTemplatesReconcilesHeartbeatState(t *testing.T) {
 	origCache := l.cache
 	origImageCache := l.imageCache
@@ -297,62 +269,81 @@ func TestInvalidateImageStateAllowsHeartbeatToRebuildLocality(t *testing.T) {
 	}
 }
 
-func TestGetNodeRefreshesCurrentHealthFromCachedFacts(t *testing.T) {
+func TestGetNodeTrustsCubeOpsHealthVerdict(t *testing.T) {
 	origCache := l.cache
 	defer func() {
 		l.cache = origCache
 	}()
 
 	l.cache = cache.New(0, 0)
-	staleHeartbeat := time.Now().Add(-(metadataHealthTimeout() + time.Second))
-	l.cache.SetDefault("node-stale", &node.Node{
-		InsID:            "node-stale",
+	// CubeOps marked this node unhealthy; sync is fresh so verdict is trusted.
+	l.cache.SetDefault("node-unhealthy", &node.Node{
+		InsID:            "node-unhealthy",
 		IP:               "10.0.0.1",
 		ReportedReady:    true,
-		Healthy:          true,
-		MetaDataUpdateAt: staleHeartbeat,
+		Healthy:          false,
+		UnhealthyReason:  nodehealth.ReasonHeartbeatExpired,
+		MetaDataUpdateAt: time.Now(),
 	})
 
-	got, ok := GetNode("node-stale")
+	got, ok := GetNode("node-unhealthy")
 	if !ok || got == nil {
 		t.Fatal("expected node to exist")
 	}
 	if got.Healthy {
-		t.Fatal("stale heartbeat should be reflected as unhealthy")
+		t.Fatal("should trust CubeOps unhealthy verdict")
 	}
 	if got.UnhealthyReason != nodehealth.ReasonHeartbeatExpired {
 		t.Fatalf("UnhealthyReason=%s want %s", got.UnhealthyReason, nodehealth.ReasonHeartbeatExpired)
 	}
-	raw, ok := l.cache.Get("node-stale")
-	if !ok {
-		t.Fatal("expected cached node to remain in cache")
+}
+
+func TestGetNodeDegradesOnStaleSync(t *testing.T) {
+	origCache := l.cache
+	defer func() {
+		l.cache = origCache
+	}()
+
+	l.cache = cache.New(0, 0)
+	// CubeOps says healthy, but sync is stale (CubeOps unreachable) → degrade.
+	l.cache.SetDefault("node-stale-sync", &node.Node{
+		InsID:            "node-stale-sync",
+		IP:               "10.0.0.1",
+		ReportedReady:    true,
+		Healthy:          true,
+		MetaDataUpdateAt: time.Now().Add(-(metadataHealthTimeout() + time.Second)),
+	})
+
+	got, ok := GetNode("node-stale-sync")
+	if !ok || got == nil {
+		t.Fatal("expected node to exist")
 	}
-	cached, ok := raw.(*node.Node)
-	if !ok {
-		t.Fatal("expected cached node type")
+	if got.Healthy {
+		t.Fatal("stale sync should degrade to unhealthy")
 	}
-	if !cached.Healthy {
-		t.Fatal("read path should not mutate cached health state")
+	if got.UnhealthyReason != nodehealth.ReasonHeartbeatExpired {
+		t.Fatalf("UnhealthyReason=%s want %s", got.UnhealthyReason, nodehealth.ReasonHeartbeatExpired)
 	}
 }
 
-func TestGetHealthyNodesByInstanceTypeFiltersExpiredHeartbeat(t *testing.T) {
+func TestGetHealthyNodesByInstanceTypeTrustsCubeOpsHealth(t *testing.T) {
 	origNodesByClusters := l.sortedNodesByClusters
 	defer func() {
 		l.sortedNodesByClusters = origNodesByClusters
 	}()
 
+	now := time.Now()
 	fresh := &node.Node{
 		InsID:            "node-fresh",
 		ReportedReady:    true,
 		Healthy:          true,
-		MetaDataUpdateAt: time.Now(),
+		MetaDataUpdateAt: now,
 	}
 	stale := &node.Node{
 		InsID:            "node-stale",
 		ReportedReady:    true,
-		Healthy:          true,
-		MetaDataUpdateAt: time.Now().Add(-(metadataHealthTimeout() + time.Second)),
+		Healthy:          false, // CubeOps already marked this unhealthy
+		MetaDataUpdateAt: now,
 	}
 	l.sortedNodesByClusters = map[string]node.NodeList{
 		"valid": {fresh, stale},
@@ -365,25 +356,22 @@ func TestGetHealthyNodesByInstanceTypeFiltersExpiredHeartbeat(t *testing.T) {
 	if got[0].ID() != fresh.ID() {
 		t.Fatalf("healthy node=%s want %s", got[0].ID(), fresh.ID())
 	}
-	if !stale.Healthy {
-		t.Fatal("read path should not mutate source node health state")
-	}
 }
 
-func TestGetNodesByIpRefreshesCurrentHealthFromCachedFacts(t *testing.T) {
+func TestGetNodesByIpTrustsCubeOpsHealthVerdict(t *testing.T) {
 	origCache := l.cache
 	defer func() {
 		l.cache = origCache
 	}()
 
 	l.cache = cache.New(0, 0)
-	staleHeartbeat := time.Now().Add(-(metadataHealthTimeout() + time.Second))
-	l.cache.SetDefault("node-stale", &node.Node{
-		InsID:            "node-stale",
+	l.cache.SetDefault("node-unhealthy", &node.Node{
+		InsID:            "node-unhealthy",
 		IP:               "10.0.0.9",
 		ReportedReady:    true,
-		Healthy:          true,
-		MetaDataUpdateAt: staleHeartbeat,
+		Healthy:          false,
+		UnhealthyReason:  nodehealth.ReasonHeartbeatExpired,
+		MetaDataUpdateAt: time.Now(),
 	})
 
 	got, ok := GetNodesByIp("10.0.0.9")
@@ -391,7 +379,7 @@ func TestGetNodesByIpRefreshesCurrentHealthFromCachedFacts(t *testing.T) {
 		t.Fatal("expected node to exist")
 	}
 	if got.Healthy {
-		t.Fatal("stale heartbeat should be reflected as unhealthy")
+		t.Fatal("should trust CubeOps unhealthy verdict")
 	}
 	if got.UnhealthyReason != nodehealth.ReasonHeartbeatExpired {
 		t.Fatalf("UnhealthyReason=%s want %s", got.UnhealthyReason, nodehealth.ReasonHeartbeatExpired)
@@ -434,5 +422,98 @@ func TestNodeConcurrentCountersUpdateCachedNodeFromReadClone(t *testing.T) {
 	}
 	if cached.LocalCreateNum != 0 {
 		t.Fatalf("LocalCreateNum=%d want 0", cached.LocalCreateNum)
+	}
+}
+
+func TestSyncNodeTemplates_EmptyListCleansUp(t *testing.T) {
+	origCache := l.cache
+	origImageCache := l.imageCache
+	origTemplateNodeCache := l.templateNodeCache
+	defer func() {
+		l.cache = origCache
+		l.imageCache = origImageCache
+		l.templateNodeCache = origTemplateNodeCache
+	}()
+
+	l.cache = cache.New(0, 0)
+	l.imageCache = cache.New(0, 0)
+	l.templateNodeCache = cache.New(0, 0)
+	l.cache.SetDefault("node-a", &node.Node{InsID: "node-a", IP: "127.0.0.1", Healthy: true})
+
+	RegisterTemplateReplica("tpl-old", "node-a", 1)
+	RegisterTemplateReplica("tpl-stale", "node-a", 1)
+
+	SyncNodeTemplates("node-a", []string{})
+
+	if state := GetImageStateByNode("tpl-old", "node-a"); state != nil {
+		t.Fatal("tpl-old should be removed after empty heartbeat")
+	}
+	if state := GetImageStateByNode("tpl-stale", "node-a"); state != nil {
+		t.Fatal("tpl-stale should be removed after empty heartbeat")
+	}
+	if templates, ok := getCachedNodeTemplateSet("node-a"); !ok || len(templates) != 0 {
+		t.Fatalf("expected empty template set, got %v", templates)
+	}
+}
+
+func TestSyncAllFromDB_ExternalLoaderSyncsTemplates(t *testing.T) {
+	origLoader := externalNodeLoader
+	origCache := l.cache
+	origImageCache := l.imageCache
+	origTemplateNodeCache := l.templateNodeCache
+	origSorted := l.sortedNodesByClusters
+	defer func() {
+		externalNodeLoader = origLoader
+		l.cache = origCache
+		l.imageCache = origImageCache
+		l.templateNodeCache = origTemplateNodeCache
+		l.sortedNodesByClusters = origSorted
+	}()
+
+	l.cache = cache.New(0, 0)
+	l.imageCache = cache.New(0, 0)
+	l.templateNodeCache = cache.New(0, 0)
+	l.sortedNodesByClusters = map[string]node.NodeList{
+		constants.DefaultInstanceTypeName: {},
+	}
+
+	externalNodeLoader = func(_ context.Context) ([]*node.Node, error) {
+		return []*node.Node{
+			{
+				InsID:            "node-1",
+				IP:               "10.0.0.1",
+				Healthy:          true,
+				MetaDataUpdateAt: time.Now(),
+				LocalTemplates:   []string{"tpl-1", "tpl-2"},
+			},
+		}, nil
+	}
+
+	if err := l.syncAllFromDB(context.Background(), false); err != nil {
+		t.Fatalf("syncAllFromDB: %v", err)
+	}
+
+	n, ok := GetNode("node-1")
+	if !ok || n == nil {
+		t.Fatal("expected node-1 in cache")
+	}
+	if n.IP != "10.0.0.1" {
+		t.Errorf("IP = %s, want 10.0.0.1", n.IP)
+	}
+	if state := GetImageStateByNode("tpl-1", "node-1"); state == nil {
+		t.Fatal("expected tpl-1 locality")
+	}
+	if state := GetImageStateByNode("tpl-2", "node-1"); state == nil {
+		t.Fatal("expected tpl-2 locality")
+	}
+	if templates, ok := getCachedNodeTemplateSet("node-1"); !ok {
+		t.Fatal("expected node template membership cache")
+	} else {
+		if _, exists := templates["tpl-1"]; !exists {
+			t.Fatal("tpl-1 missing from membership cache")
+		}
+		if _, exists := templates["tpl-2"]; !exists {
+			t.Fatal("tpl-2 missing from membership cache")
+		}
 	}
 }

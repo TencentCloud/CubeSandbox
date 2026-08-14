@@ -116,7 +116,11 @@ Useful commands:
   kubectl exec -n {{ .Release.Namespace }} <cube-node-pod> -- cubecli ls
 {{- if eq (include "cube.cubemastercliEnabled" .) "true" }}
   kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.cubemastercliName" . }} -- cubemastercli --help
-  kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.cubemastercliName" . }} -- sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
+  kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.cubemastercliName" . }} -- sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" cubebox list'
+{{- end }}
+{{- if eq (include "cube.cubeopscliEnabled" .) "true" }}
+  kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.cubemastercliName" . }} -- cubeopscli --help
+  kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.cubemastercliName" . }} -- sh -lc 'cubeopscli --address "$CUBEOPSCLI_ADDRESS" --port "$CUBEOPSCLI_PORT" node list'
 {{- end }}
   helm test {{ .Release.Name }} -n {{ .Release.Namespace }} --timeout 20m
 {{- if .Values.diagnostics.enabled }}

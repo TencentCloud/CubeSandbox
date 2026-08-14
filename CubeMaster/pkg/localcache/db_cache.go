@@ -32,11 +32,11 @@ func (l *local) DB() *gorm.DB {
 	return l.db
 }
 
-func (l *local) loadAllFromDB() error {
-	return l.syncAllFromDB(false)
+func (l *local) loadAllFromDB(ctx context.Context) error {
+	return l.syncAllFromDB(ctx, false)
 }
 
-func (l *local) syncAllFromDB(update bool) error {
+func (l *local) syncAllFromDB(ctx context.Context, update bool) error {
 	startTime := time.Now()
 	retCode := 200
 	defer func() {
@@ -44,11 +44,13 @@ func (l *local) syncAllFromDB(update bool) error {
 	}()
 
 	if externalNodeLoader != nil {
-		nodes, err := externalNodeLoader(context.Background())
+		nodes, err := externalNodeLoader(ctx)
 		if err != nil {
 			retCode = 500
 			return err
 		}
+
+		log.G(ctx).Infof("syncAllFromDB: externalNodeLoader returned %d nodes", len(nodes))
 
 		allFromDb := make(map[string]struct{}, len(nodes))
 		for _, n := range nodes {
@@ -61,6 +63,10 @@ func (l *local) syncAllFromDB(update bool) error {
 				}
 			} else {
 				l.addNodeCache(n)
+			}
+			if n.InsID != "" {
+				log.G(ctx).Infof("syncAllFromDB: node=%s LocalTemplates=%v", n.InsID, n.LocalTemplates)
+				SyncNodeTemplates(n.InsID, n.LocalTemplates)
 			}
 			allFromDb[n.InsID] = struct{}{}
 		}

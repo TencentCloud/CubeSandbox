@@ -46,16 +46,10 @@ if [[ -n "${CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK:-}" ]]; then
   export CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK
 fi
 
-# Redis (optional, for JWT blacklist / logout invalidation).
-# When REDIS_URL is unset but Redis container is running, build it from
-# the one-click Redis variables.
-if [[ -z "${REDIS_URL:-}" && -n "${CUBE_SANDBOX_REDIS_HOST:-}" ]]; then
-  redis_pass="${CUBE_SANDBOX_REDIS_PASSWORD:-}"
-  redis_auth=""
-  if [[ -n "${redis_pass}" ]]; then
-    redis_auth=":${redis_pass}@"
-  fi
-  export REDIS_URL="redis://${redis_auth}${CUBE_SANDBOX_REDIS_HOST}:${CUBE_SANDBOX_REDIS_PORT:-6379}"
-fi
+# Redis (optional). Split HOST/PORT/PASSWORD avoids embedding the password
+# in REDIS_URL; CubeOps assembles the connection internally.
+export REDIS_HOST="${CUBE_SANDBOX_REDIS_HOST:-127.0.0.1}"
+export REDIS_PORT="${CUBE_SANDBOX_REDIS_PORT:-6379}"
+export REDIS_PASSWORD="${CUBE_SANDBOX_REDIS_PASSWORD:-}"
 
 exec "${CUBE_OPS_BIN}"

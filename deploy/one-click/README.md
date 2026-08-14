@@ -270,8 +270,8 @@ In compute node mode, the installer will:
 - Install `Cubelet` with the embedded network runtime, `cube-shim`, `cube-image`, `cube-kernel-scf`, `cube-egress`, the required scripts, and `docker`.
 - Start `cubelet`, and bring up `cube-egress` via `cube-sandbox-compute.target` (the transparent egress MITM proxy, run as a docker container, which enforces per-sandbox egress policy).
 - Before `cube-egress` starts, pull the MITM root CA (cert + key) from the control node's `/cube/ca/<file>` endpoint so it matches the CA baked into templates — templates then trust the leaf certs the compute-node `cube-egress` signs.
-- Point `Cubelet`'s `meta_server_endpoint` to `ONE_CLICK_CONTROL_PLANE_IP:8089`.
-- Automatically register the node via the control node's `/internal/meta` API.
+- Point `Cubelet`'s `meta_server_endpoint` to `ONE_CLICK_CONTROL_PLANE_IP:3010` (CubeOps node-agent).
+- Automatically register the node via the control node's `/internal/node-agent/v1` API.
 
 Notes:
 

@@ -1,5 +1,6 @@
 {{- if eq (include "cube.cubemastercliEnabled" .) "true" }}
 {{- $cubemastercli := default dict .Values.cubemastercli -}}
+{{- $cubeopscliEnabled := eq (include "cube.cubeopscliEnabled" .) "true" -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -54,6 +55,12 @@ spec:
               value: {{ include "cube.cubemastercliMasterAddress" . | quote }}
             - name: CUBEMASTERCLI_PORT
               value: {{ include "cube.cubemastercliMasterPort" . | quote }}
+            {{- if $cubeopscliEnabled }}
+            - name: CUBEOPSCLI_ADDRESS
+              value: {{ include "cube.cubeopscliOpsAddress" . | quote }}
+            - name: CUBEOPSCLI_PORT
+              value: {{ include "cube.cubeopscliOpsPort" . | quote }}
+            {{- end }}
             {{- with (dig "env" list $cubemastercli) }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -63,7 +70,7 @@ spec:
               command:
                 - /bin/sh
                 - -ec
-                - cubemastercli --address "${CUBEMASTERCLI_ADDRESS}" --port "${CUBEMASTERCLI_PORT}" node list >/tmp/cubemastercli-node-list.out
+                - cubemastercli --address "${CUBEMASTERCLI_ADDRESS}" --port "${CUBEMASTERCLI_PORT}" cubebox list >/dev/null
             initialDelaySeconds: {{ dig "probes" "readiness" "initialDelaySeconds" 5 $cubemastercli }}
             periodSeconds: {{ dig "probes" "readiness" "periodSeconds" 10 $cubemastercli }}
             failureThreshold: {{ dig "probes" "readiness" "failureThreshold" 12 $cubemastercli }}
