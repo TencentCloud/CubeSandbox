@@ -122,6 +122,33 @@ func TestSDK_GetSandbox_Success(t *testing.T) {
 	}
 }
 
+func TestSDK_GetSandbox_UnknownStateIsNotReportedAsRunning(t *testing.T) {
+	cm := &fakeCM{
+		getSandbox: func(_ context.Context, _, _ string) (json.RawMessage, error) {
+			return raw(`{
+				"ret": {"ret_code": 0},
+				"data": [{
+					"sandbox_id": "sb-unknown", "status": 3,
+					"containers": [], "annotations": {}, "labels": {}
+				}]
+			}`), nil
+		},
+	}
+	r := newSDKRouter(t, cm)
+
+	w := httptestRecorder(t, r, "GET", "/api/v1/sdk/sandboxes/sb-unknown")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var detail map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, w.Body.String())
+	}
+	if detail["state"] != "unknown" {
+		t.Errorf("state = %v, want unknown (CubeMaster status 3)", detail["state"])
+	}
+}
+
 func TestSDK_GetSandbox_NotFoundInCM(t *testing.T) {
 	cm := &fakeCM{
 		getSandbox: func(_ context.Context, _, _ string) (json.RawMessage, error) {

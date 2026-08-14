@@ -1860,11 +1860,12 @@ components:
       - pause
     SandboxState:
       type: string
-      description: State of the sandbox (running | paused)
+      description: State of the sandbox (running | paused | pausing | unknown)
       enum:
       - running
       - paused
       - pausing
+      - unknown
     SandboxVolumeMount:
       type: object
       description: Volume mount inside the sandbox.

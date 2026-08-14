@@ -467,10 +467,10 @@ export interface components {
             logs: components["schemas"]["SandboxLogEntry"][];
         };
         /**
-         * @description State of the sandbox (running | paused)
+         * @description State of the sandbox (running | paused | pausing | unknown)
          * @enum {string}
          */
-        SandboxState: "running" | "paused" | "pausing";
+        SandboxState: "running" | "paused" | "pausing" | "unknown";
         /** @description Volume mount inside the sandbox. */
         SandboxVolumeMount: {
             name: string;

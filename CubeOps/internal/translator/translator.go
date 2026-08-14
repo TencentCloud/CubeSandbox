@@ -142,15 +142,17 @@ func SnakeToCamel(s string) string {
 
 // SandboxStateFromInt converts CubeMaster integer status to frontend state string.
 // CubeMaster: 0=created, 1=running, 2=exited/stopped, 3=unknown, 4=pausing, 5=paused
-// Frontend enum: "running" | "paused" | "pausing"
+// Frontend enum: "running" | "paused" | "pausing" | "unknown"
 func SandboxStateFromInt(s int) string {
 	switch s {
+	case 1:
+		return "running"
 	case 4:
 		return "pausing"
 	case 5:
 		return "paused"
 	default:
-		return "running"
+		return "unknown"
 	}
 }
 
@@ -164,16 +166,14 @@ func SandboxStateFromRaw(raw json.RawMessage) string {
 			return "paused"
 		case "pausing":
 			return "pausing"
-		case "1":
-			return "running"
-		case "2":
+		case "running", "1":
 			return "running"
 		case "4":
 			return "pausing"
 		case "5":
 			return "paused"
 		default:
-			return "running"
+			return "unknown"
 		}
 	}
 	// Try int.
@@ -181,7 +181,7 @@ func SandboxStateFromRaw(raw json.RawMessage) string {
 	if json.Unmarshal(raw, &n) == nil {
 		return SandboxStateFromInt(n)
 	}
-	return "running"
+	return "unknown"
 }
 
 // ParseMemoryMB converts "2048Mi" → 2048, "2048MB" → 2048, "2G" → 2048.
