@@ -25,6 +25,9 @@
 /* ARP hardware types */
 #define ARPHRD_ETHER			1	/* Ethernet */
 
+/* https://elixir.bootlin.com/linux/v5.4.217/source/include/linux/socket.h#L172 */
+#define AF_INET				2
+
 #define MAX_ENTRIES			8192
 #define MAX_IP_RULE_ENTRIES		8192
 #define MAX_DOMAIN_RULE_ENTRIES		1024

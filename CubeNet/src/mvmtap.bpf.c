@@ -169,8 +169,9 @@ static __always_inline long direct_egress_arp_request(struct __sk_buff *skb, __u
 	packet.arp.ar_sip = nodenic_ip;
 	packet.arp.ar_tip = daddr;
 
-	/* Leave padding after the ARP header so a delayed CHECKSUM_PARTIAL
-	 * write cannot clobber ar_tip, then zero it so we do not leak payload.
+	/* CHECKSUM_PARTIAL can write L4 csum after we return.
+	 * change_tail(96) keeps that slot. change_head(32) moves it past ARP.
+	 * Then store ARP and zero the rest (broadcast).
 	 */
 	err = bpf_skb_change_tail(skb, DIRECT_ARP_PRESERVED_LEN, 0);
 	if (err)
@@ -196,9 +197,17 @@ static __always_inline long direct_egress_arp_request(struct __sk_buff *skb, __u
 static __always_inline int prepare_egress_l2(struct __sk_buff *skb,
 					     struct ethhdr *l2, __u32 daddr)
 {
+	struct bpf_fib_lookup fib = {
+		.family = AF_INET,
+		.ifindex = nodenic_ifindex,
+		.ipv4_src = nodenic_ip,
+		.ipv4_dst = daddr,
+	};
 	struct direct_neighbor pending = {};
 	struct direct_neighbor *neighbor;
 	union macaddr *neighbor_mac;
+	const union macaddr *dmac;
+	const union macaddr *smac;
 	__u64 retry_at;
 	__u64 now;
 	long err;
@@ -206,6 +215,15 @@ static __always_inline int prepare_egress_l2(struct __sk_buff *skb,
 	if (!direct_egress_is_onlink(daddr)) {
 		set_mac_pair(l2, egress_smacaddr_p1, egress_smacaddr_p2,
 			     egress_dmacaddr_p1, egress_dmacaddr_p2);
+		return EGRESS_MAC_READY;
+	}
+
+	err = bpf_fib_lookup(skb, &fib, sizeof(fib),
+			     BPF_FIB_LOOKUP_DIRECT | BPF_FIB_LOOKUP_OUTPUT);
+	if (err == BPF_FIB_LKUP_RET_SUCCESS && fib.ifindex == nodenic_ifindex) {
+		smac = (const union macaddr *)fib.smac;
+		dmac = (const union macaddr *)fib.dmac;
+		set_mac_pair(l2, smac->p1, smac->p2, dmac->p1, dmac->p2);
 		return EGRESS_MAC_READY;
 	}
 
@@ -580,11 +598,11 @@ static __always_inline __u32 do_icmp_nat(struct __sk_buff *skb, struct mvm_meta 
 	struct ethhdr *l2;
 	struct iphdr *l3;
 	struct icmphdr *l4;
+	int mac_result;
 	__u16 ip_hlen;
 	__u16 snat_id;
 	__u64 flags;
 	__u64 now;
-	int mac_result;
 	long err;
 	bool ok;
 
@@ -687,11 +705,11 @@ static __always_inline __u32 do_udp_nat_inline(struct __sk_buff *skb,
 	struct ethhdr *l2;
 	struct iphdr *l3;
 	struct udphdr *l4;
+	int mac_result;
 	__u16 ip_hlen;
 	__u16 snat_port;
 	__u64 flags;
 	__u64 now;
-	int mac_result;
 	long err;
 	bool ok;
 
@@ -833,11 +851,11 @@ static __always_inline __u64 do_tcp_nat(struct __sk_buff *skb, struct mvm_meta *
 	struct ethhdr *l2;
 	struct iphdr *l3;
 	struct tcphdr *l4;
+	int mac_result;
 	__u16 ip_hlen;
 	__u16 snat_port;
 	__u64 flags;
 	__u64 now;
-	int mac_result;
 	long err;
 	bool ok;
 

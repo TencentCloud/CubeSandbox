@@ -17,10 +17,7 @@
 #include "dns_query.h"
 #include "dns_response.h"
 
-/* Learn the sender of an ARP reply only when direct egress already created a
- * pending cache entry for that IP. This also refreshes an existing entry when
- * the peer announces a MAC change.
- */
+/* Learn ARP replies only for IPs already present in the map. */
 static __always_inline void learn_direct_neighbor(struct __sk_buff *skb)
 {
 	struct direct_neighbor neighbor = {};
