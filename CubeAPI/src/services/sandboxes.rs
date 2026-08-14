@@ -370,9 +370,12 @@ impl SandboxService {
         let mut d = self.fetch_sandbox_detail(sandbox_id).await?;
 
         if d.status == SandboxStatus::Paused {
+            // Resume keeps timeout=0 unchanged by contract. Connect treats an
+            // explicit 0 like set_timeout(0), so apply it after the resume.
+            let resume_timeout = timeout.filter(|value| *value != 0);
             let resp = self
                 .cubemaster
-                .update_sandbox(&self.build_update_request(sandbox_id, "resume", timeout))
+                .update_sandbox(&self.build_update_request(sandbox_id, "resume", resume_timeout))
                 .await
                 .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
 
@@ -383,7 +386,19 @@ impl SandboxService {
                 "is already running",
             )?;
 
+            if timeout == Some(0) {
+                self.set_timeout(sandbox_id, 0).await?;
+            }
             d = self.fetch_sandbox_detail(sandbox_id).await?;
+        } else if d.status == SandboxStatus::Running {
+            if let Some(timeout) = timeout {
+                self.set_timeout(sandbox_id, timeout).await?;
+            }
+        } else if timeout.is_some() {
+            return Err(AppError::Conflict(format!(
+                "cannot apply connect timeout while sandbox is {:?}",
+                d.status
+            )));
         }
 
         let envd_version = envd_version_from_annotations(&d.annotations);
@@ -1241,7 +1256,7 @@ mod tests {
         extract::State,
         http::{header::RETRY_AFTER, StatusCode},
         response::IntoResponse,
-        routing::{delete, post},
+        routing::{delete, get, post},
         Json, Router,
     };
     use serde_json::Value;
@@ -1406,6 +1421,238 @@ mod tests {
                 StatusCode::INTERNAL_SERVER_ERROR
             );
         }
+    }
+
+    #[tokio::test]
+    async fn connect_running_sandbox_applies_explicit_timeout() {
+        #[derive(Clone, Default)]
+        struct Capture {
+            timeout_body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn info_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-info",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{
+                    "sandbox_id": "sb-running",
+                    "host_id": "host-1",
+                    "template_id": "tpl-1",
+                    "status": 1,
+                    "annotations": {}
+                }]
+            }))
+        }
+
+        async fn timeout_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            *capture.timeout_body.lock().await = Some(body);
+            Json(serde_json::json!({
+                "requestID": "req-timeout",
+                "sandboxID": "sb-running",
+                "ret": { "ret_code": 0, "ret_msg": "ok" }
+            }))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener address");
+        let capture = Capture::default();
+        let app = Router::new()
+            .route("/cube/sandbox/info", get(info_handler))
+            .route("/cube/sandbox/timeout", post(timeout_handler))
+            .with_state(capture.clone());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("server should run");
+        });
+
+        let service = SandboxService::new(
+            CubeMasterClient::new(format!("http://{address}"), reqwest::Client::new()),
+            "cubebox".to_string(),
+            "cube.app".to_string(),
+        );
+
+        service
+            .connect_sandbox("sb-running", Some(120))
+            .await
+            .expect("connect should succeed");
+
+        let body = capture
+            .timeout_body
+            .lock()
+            .await
+            .clone()
+            .expect("running connect should reset the explicit timeout");
+        assert_eq!(body["sandboxID"], "sb-running");
+        assert_eq!(body["timeout"], 120);
+    }
+
+    #[tokio::test]
+    async fn connect_paused_sandbox_applies_timeout_with_resume_only() {
+        #[derive(Clone, Default)]
+        struct Capture {
+            update_bodies: Arc<Mutex<Vec<Value>>>,
+            timeout_calls: Arc<Mutex<usize>>,
+        }
+
+        async fn info_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-info",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{
+                    "sandbox_id": "sb-paused",
+                    "host_id": "host-1",
+                    "template_id": "tpl-1",
+                    "status": 5,
+                    "annotations": {}
+                }]
+            }))
+        }
+
+        async fn update_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            capture.update_bodies.lock().await.push(body);
+            Json(serde_json::json!({
+                "ret": { "ret_code": 0, "ret_msg": "ok" }
+            }))
+        }
+
+        async fn timeout_handler(State(capture): State<Capture>) -> Json<Value> {
+            *capture.timeout_calls.lock().await += 1;
+            Json(serde_json::json!({
+                "requestID": "req-timeout",
+                "sandboxID": "sb-paused",
+                "ret": { "ret_code": 0, "ret_msg": "ok" }
+            }))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener address");
+        let capture = Capture::default();
+        let app = Router::new()
+            .route("/cube/sandbox/info", get(info_handler))
+            .route("/cube/sandbox/update", post(update_handler))
+            .route("/cube/sandbox/timeout", post(timeout_handler))
+            .with_state(capture.clone());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("server should run");
+        });
+
+        let service = SandboxService::new(
+            CubeMasterClient::new(format!("http://{address}"), reqwest::Client::new()),
+            "cubebox".to_string(),
+            "cube.app".to_string(),
+        );
+
+        service
+            .connect_sandbox("sb-paused", Some(120))
+            .await
+            .expect("connect should succeed");
+
+        let update_bodies = capture.update_bodies.lock().await;
+        assert_eq!(update_bodies.len(), 1);
+        assert_eq!(update_bodies[0]["action"], "resume");
+        assert_eq!(update_bodies[0]["timeout"], 120);
+        assert_eq!(*capture.timeout_calls.lock().await, 0);
+    }
+
+    #[tokio::test]
+    async fn connect_paused_sandbox_applies_zero_after_resume() {
+        #[derive(Clone, Default)]
+        struct Capture {
+            update_body: Arc<Mutex<Option<Value>>>,
+            timeout_body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn info_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-info",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{
+                    "sandbox_id": "sb-paused-zero",
+                    "host_id": "host-1",
+                    "template_id": "tpl-1",
+                    "status": 5,
+                    "annotations": {}
+                }]
+            }))
+        }
+
+        async fn update_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            *capture.update_body.lock().await = Some(body);
+            Json(serde_json::json!({
+                "ret": { "ret_code": 0, "ret_msg": "ok" }
+            }))
+        }
+
+        async fn timeout_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            *capture.timeout_body.lock().await = Some(body);
+            Json(serde_json::json!({
+                "requestID": "req-timeout",
+                "sandboxID": "sb-paused-zero",
+                "ret": { "ret_code": 0, "ret_msg": "ok" }
+            }))
+        }
+
+        let capture = Capture::default();
+        let service = spawn_fake_cubemaster(
+            Router::new()
+                .route("/cube/sandbox/info", get(info_handler))
+                .route("/cube/sandbox/update", post(update_handler))
+                .route("/cube/sandbox/timeout", post(timeout_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+
+        service
+            .connect_sandbox("sb-paused-zero", Some(0))
+            .await
+            .expect("connect should succeed");
+
+        let update_body = capture.update_body.lock().await.clone().unwrap();
+        assert!(update_body.get("timeout").is_none());
+        let timeout_body = capture.timeout_body.lock().await.clone().unwrap();
+        assert_eq!(timeout_body["timeout"], 0);
+    }
+
+    #[tokio::test]
+    async fn connect_rejects_explicit_timeout_for_unknown_state() {
+        async fn info_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-info",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{
+                    "sandbox_id": "sb-creating",
+                    "host_id": "host-1",
+                    "template_id": "tpl-1",
+                    "status": 0,
+                    "annotations": {}
+                }]
+            }))
+        }
+
+        let service =
+            spawn_fake_cubemaster(Router::new().route("/cube/sandbox/info", get(info_handler)))
+                .await;
+        let err = service
+            .connect_sandbox("sb-creating", Some(120))
+            .await
+            .expect_err("explicit timeout must not be silently ignored");
+
+        assert!(matches!(err, AppError::Conflict(message) if message.contains("Unknown")));
     }
 
     #[test]

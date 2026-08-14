@@ -137,17 +137,19 @@ sandbox.kill()
 ```python
 sandbox.pause()                       # 主动保存快照，释放 CPU/内存
 # ... 一段时间过去 ...
-sandbox.connect()                     # 从快照恢复
+sandbox.connect(timeout=300)          # 从快照恢复，并重置空闲超时
 sandbox.run_code("print('back!')")    # 像没暂停过一样继续用
 ```
 
 `pause()` **不会取消**空闲回收。默认 `on_timeout="kill"` 时，之后被暂停的沙箱空闲仍超过 `timeout` 一样会被销毁。若要保住暂停中的沙箱，请传 `timeout=NEVER_TIMEOUT`、省略 `timeout`（且服务端未设正数默认）、或把 `timeout` 设得足够大——见下文 [行为说明](#行为说明)。
 
-`connect()` 不会改变沙箱的空闲超时——创建时设置的值（或之后用 `set_timeout` 改的值）在暂停/恢复过程中保持不变。若要在恢复时改超时，用已弃用的 `resume(timeout=...)`：
+`connect(timeout=...)` 会重置空闲超时，无论沙箱已经在运行，还是需要先从暂停状态恢复。省略 `timeout` 时保持当前超时。
+
+已弃用的 `resume(timeout=...)` 对 `0` 的处理略有不同：
 
 | `resume(timeout=...)` | 效果 |
 |---|---|
-| 不传 / `None` | 保持当前超时（与 `connect()` 相同） |
+| 不传 / `None` | 保持当前超时 |
 | `0` | 保持当前超时（立刻到期请用 `set_timeout(0)`） |
 | `NEVER_TIMEOUT`（`-1`） | 恢复后永不超时 |
 | `N > 0` | 从恢复时刻起重新开 N 秒窗口 |
