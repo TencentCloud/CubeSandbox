@@ -359,11 +359,12 @@ pub struct SandboxDetail {
 // ─── Sandbox — pause/resume/connect/snapshot ──────────────────────────────
 
 /// Request body for POST /sandboxes/{id}/resume (deprecated).
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 #[allow(dead_code)]
 pub struct ResumedSandbox {
     /// Idle timeout in seconds; None when the client did not send one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[validate(custom(function = "validate_timeout_value"))]
     pub timeout: Option<i32>,
     #[serde(rename = "autoPause", default)]
     pub auto_pause: bool,
@@ -374,6 +375,7 @@ pub struct ResumedSandbox {
 pub struct ConnectSandbox {
     /// Idle timeout in seconds; None when the client did not send one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[validate(custom(function = "validate_timeout_value"))]
     pub timeout: Option<i32>,
 }
 
@@ -576,8 +578,8 @@ fn default_page_limit() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateTemplateRequest, NewSandbox, SandboxNetworkConfig, SetTimeoutRequest,
-        TemplateAliasLookupResponse,
+        ConnectSandbox, CreateTemplateRequest, NewSandbox, ResumedSandbox, SandboxNetworkConfig,
+        SetTimeoutRequest, TemplateAliasLookupResponse,
     };
     use validator::Validate;
 
@@ -607,6 +609,29 @@ mod tests {
             req.validate()
                 .unwrap_or_else(|e| panic!("timeout={timeout} should be valid: {e}"));
         }
+    }
+
+    #[test]
+    fn resume_and_connect_use_timeout_value_semantics() {
+        for timeout in [None, Some(-1), Some(0), Some(60)] {
+            ConnectSandbox { timeout }
+                .validate()
+                .unwrap_or_else(|e| panic!("connect timeout={timeout:?} should be valid: {e}"));
+            ResumedSandbox {
+                timeout,
+                auto_pause: false,
+            }
+            .validate()
+            .unwrap_or_else(|e| panic!("resume timeout={timeout:?} should be valid: {e}"));
+        }
+
+        assert!(ConnectSandbox { timeout: Some(-2) }.validate().is_err());
+        assert!(ResumedSandbox {
+            timeout: Some(-2),
+            auto_pause: false,
+        }
+        .validate()
+        .is_err());
     }
 
     #[test]

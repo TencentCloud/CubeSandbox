@@ -45,6 +45,11 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 		rsp.Ret.RetMsg = "action should be pause or resume"
 		return
 	}
+	if req.Timeout != nil && *req.Timeout < types.NeverTimeout {
+		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
+		rsp.Ret.RetMsg = "timeout must be >= -1 (use -1 for never timeout)"
+		return
+	}
 	if ret := normalizeSandboxIDInReq(ctx, &req.SandboxID); ret != nil {
 		rsp.Ret = ret
 		return
@@ -79,6 +84,9 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 		if config.GetConfig().Common.MockUpdateAction {
 			rsp.Ret.RetCode = int(errorcode.ErrorCode_Success)
 			rsp.Ret.RetMsg = "mock update action success"
+			if req.Action == "resume" && req.Timeout != nil {
+				refreshTimeoutMeta(ctx, req.SandboxID, *req.Timeout)
+			}
 			return nil
 		}
 
@@ -87,6 +95,9 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 			*rsp = *pauseSandbox(ctx, req, hostIP)
 		case "resume":
 			*rsp = *resumeFromPauseSnapshot(ctx, req, hostIP)
+		}
+		if req.Action == "resume" && req.Timeout != nil && rsp.Ret.RetCode == int(errorcode.ErrorCode_Success) {
+			refreshTimeoutMeta(ctx, req.SandboxID, *req.Timeout)
 		}
 		return nil
 	})

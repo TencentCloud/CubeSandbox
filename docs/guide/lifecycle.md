@@ -134,9 +134,11 @@ Existing `404 Not Found`, `408 Request Timeout`, and `running` sandbox delete be
 ```python
 sandbox.pause()                       # snapshot manually, free CPU/memory
 # ... time passes ...
-sandbox.connect()                     # restore from snapshot
+sandbox.connect(timeout=300)          # restore and optionally reset idle timeout
 sandbox.run_code("print('back!')")    # carry on as if never paused
 ```
+
+Like E2B, `connect(timeout=...)` resets the idle timeout whether the sandbox is already running or must first resume from a pause. Omitting `timeout` preserves Cube's current effective timeout instead of injecting an SDK default.
 
 See [`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/pause.py) for a full demo.
 

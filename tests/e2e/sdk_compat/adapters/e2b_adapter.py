@@ -99,6 +99,7 @@ def _sandbox_info_to_raw(info: Any) -> dict[str, Any]:
             "startedAt",
             "end_at",
             "endAt",
+            "timeout",
             "state",
             "status",
             "cpu_count",
@@ -215,7 +216,7 @@ class E2BAdapter(SandboxAdapter):
         connect_method = getattr(Sandbox, "connect", None)
         if callable(connect_method):
             kwargs = dict(_e2b_api_params(config))
-            if _accepts_keyword(connect_method, "timeout"):
+            if timeout is not None and _accepts_keyword(connect_method, "timeout"):
                 kwargs["timeout"] = timeout
             sandbox = connect_method(sandbox_id, **kwargs)
         else:

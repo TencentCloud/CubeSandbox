@@ -51,11 +51,17 @@ class CubeSandboxAdapter(SandboxAdapter):
         cls,
         sandbox_id: str,
         config: SdkE2EConfig,
+        *,
+        timeout: int | None = None,
     ) -> "CubeSandboxAdapter":
         from cubesandbox import Sandbox
 
         sdk_config = cls._sdk_config(config)
-        return cls(Sandbox.connect(sandbox_id, config=sdk_config), sdk_config=sdk_config, e2e_config=config)
+        return cls(
+            Sandbox.connect(sandbox_id, timeout=timeout, config=sdk_config),
+            sdk_config=sdk_config,
+            e2e_config=config,
+        )
 
     @classmethod
     def list_sandboxes(cls, config: SdkE2EConfig) -> list[dict[str, Any]]:
@@ -122,7 +128,11 @@ class CubeSandboxAdapter(SandboxAdapter):
         self._sandbox.pause(timeout=timeout)
 
     def resume_or_connect(self, *, timeout: int = 60) -> "CubeSandboxAdapter":
-        return type(self).connect(self.sandbox_id, self._e2e_config or SdkE2EConfig.from_env())
+        return type(self).connect(
+            self.sandbox_id,
+            self._e2e_config or SdkE2EConfig.from_env(),
+            timeout=timeout,
+        )
 
     def get_host(self, port: int) -> str:
         return str(self._sandbox.get_host(port))

@@ -80,17 +80,23 @@ def create_adapter_with_capacity_retry(
     )
 
 
-def connect_adapter(backend: str, sandbox_id: str, config: SdkE2EConfig) -> SandboxAdapter:
+def connect_adapter(
+    backend: str,
+    sandbox_id: str,
+    config: SdkE2EConfig,
+    *,
+    timeout: int | None = None,
+) -> SandboxAdapter:
     trace = get_current_trace()
 
     def _connect() -> SandboxAdapter:
-        return _adapter_for(backend).connect(sandbox_id, config)
+        return _adapter_for(backend).connect(sandbox_id, config, timeout=timeout)
 
     if trace is None:
         return _connect()
     adapter = trace.capture(
         "connect",
-        {"backend": backend, "sandbox_id": sandbox_id},
+        {"backend": backend, "sandbox_id": sandbox_id, "timeout": timeout},
         _connect,
         output=lambda result: {"sandbox_id": result.sandbox_id},
     )

@@ -351,6 +351,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_and_connect_reject_invalid_timeout_before_cubemaster() {
+        let server = test_server().await;
+
+        for path in ["/sandboxes/sb-1/resume", "/sandboxes/sb-1/connect"] {
+            let response = server
+                .post(path)
+                .json(&serde_json::json!({ "timeout": -2 }))
+                .await;
+            assert_eq!(
+                response.status_code(),
+                StatusCode::BAD_REQUEST,
+                "path={path}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn template_alias_route_is_mounted_before_template_id_route() {
         let server = test_server().await;
 
