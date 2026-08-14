@@ -372,6 +372,14 @@ func (c *Config) Validate() error {
 		if c.ReconcileInterval <= 0 {
 			return errors.New("reconcile interval must be > 0")
 		}
+		// ReconcileInterval doubles as the XAUTOCLAIM min-idle when a new
+		// leader takes over a dead predecessor's pending stream entries
+		// (see cmd main.go claimStalePending). Below the leader TTL those
+		// entries could be stolen from a merely partitioned — still alive —
+		// old leader, causing double processing.
+		if c.ReconcileInterval < c.LeaderTTL {
+			return errors.New("reconcile interval must be >= leader TTL")
+		}
 	}
 	return nil
 }

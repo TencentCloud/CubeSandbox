@@ -389,6 +389,7 @@ lifecycleManager:
     leaderRenewInterval: 5s
     # Full-resync cadence against the meta hash, and the minimum idle time
     # before a dead leader's pending stream entries are claimed.
+    # Must be >= leaderTTL (enforced by CLM config validation).
     reconcileInterval: 60s
   podAnnotations: {}
   listenAddr: "0.0.0.0:8083"

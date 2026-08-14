@@ -187,8 +187,9 @@ func (c *Client) Ack(ctx context.Context, group, id string) error {
 // for longer than minIdle — i.e. stuck on a dead or demoted consumer — to
 // `consumer`, returning them for processing. In active-standby mode the new
 // leader uses this to take over the previous leader's pending-entries list
-// (issue #1211); minIdle should be ≥ the leader lease TTL so entries a live
-// consumer is actively working on are never stolen. The caller must handle
+// (issue #1211); minIdle must be ≥ the leader lease TTL (enforced by config
+// validation when set through CUBE_LCM_*) so entries a live consumer is
+// actively working on are never stolen. The caller must handle
 // and Ack the returned events just like ReadGroup output. Requires Redis
 // 6.2+ (XAUTOCLAIM).
 func (c *Client) ClaimPending(ctx context.Context, group, consumer string, minIdle time.Duration, count int64) ([]Event, error) {

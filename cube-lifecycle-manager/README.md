@@ -75,7 +75,19 @@ HA-specific variables:
 | `CUBE_LCM_LEADER_KEY` | `cube:v1:shared:lock:lifecycle_manager:leader` | Lease key |
 | `CUBE_LCM_LEADER_TTL` | `15s` | Lease expiry; upper bound on failover time |
 | `CUBE_LCM_LEADER_RENEW_INTERVAL` | `5s` | Lease renewal / acquisition retry cadence |
-| `CUBE_LCM_RECONCILE_INTERVAL` | `60s` | Reconciler cadence; also the min idle time for `XAUTOCLAIM` takeover |
+| `CUBE_LCM_RECONCILE_INTERVAL` | `60s` | Reconciler cadence; also the min idle time for `XAUTOCLAIM` takeover (must be ≥ `CUBE_LCM_LEADER_TTL`) |
+
+Two failure-handling notes:
+
+- If the leader loops fail fast three times in a row (each stint shorter
+  than `CUBE_LCM_LEADER_TTL`, e.g. a bootstrap dependency is down while
+  Redis itself is fine), the process exits so the pod supervisor restarts
+  it — instead of hot-looping elect → fail → step down forever. A stint
+  that survives at least one TTL counts as healthy and resets the counter.
+- `CUBE_LCM_RECONCILE_INTERVAL` must be ≥ `CUBE_LCM_LEADER_TTL` (enforced
+  at startup): it doubles as the `XAUTOCLAIM` min-idle, and a smaller
+  value could steal pending stream entries from a merely partitioned —
+  still alive — old leader.
 
 The Helm chart enables this by default (`lifecycleManager.ha.enabled: true`,
 `replicas: 2`) and derives `CUBE_LCM_INSTANCE_ID` from the pod name.

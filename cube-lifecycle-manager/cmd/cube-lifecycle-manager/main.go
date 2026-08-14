@@ -21,6 +21,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/signal"
 	"syscall"
 	"time"
@@ -213,10 +214,27 @@ func run() error {
 		return runLeaderLoops(ctx, cfg, stream, masterClient, pushClient, reg, fleet, logger)
 	}
 	if elector != nil {
+		// A leader stint that keeps failing fast (e.g. a bootstrap
+		// dependency is down) would otherwise loop elect → fail → step
+		// down forever without the process ever exiting; past
+		// maxLeaderStintFails consecutive fast failures we give up and let
+		// the pod supervisor restart us. A stint that survived at least
+		// one leader TTL counts as healthy and resets the counter.
+		supervisor := newLeaderSupervisor(maxLeaderStintFails, cfg.LeaderTTL)
 		go func() {
 			errs <- elector.Run(rootCtx, leaderelect.Callbacks{
 				OnElected: func(leaderCtx context.Context) {
-					if err := leaderRun(leaderCtx); err != nil && !errors.Is(err, context.Canceled) {
+					start := time.Now()
+					err := leaderRun(leaderCtx)
+					if supervisor.Record(err, time.Since(start)) {
+						logger.Error("leader loop failed repeatedly; exiting so the pod supervisor restarts the process",
+							zap.Int("consecutive_failures", supervisor.Fails()),
+							zap.Error(err))
+						errs <- fmt.Errorf("leader loop failed %d consecutive times: %w",
+							supervisor.Fails(), err)
+						return
+					}
+					if err != nil && !errors.Is(err, context.Canceled) {
 						logger.Error("leader loop failed; stepping down so a standby can take over",
 							zap.Error(err))
 						elector.StepDown()

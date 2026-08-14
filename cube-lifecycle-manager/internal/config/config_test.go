@@ -136,6 +136,16 @@ func TestValidateHA(t *testing.T) {
 	bad.ReconcileInterval = 0
 	assert.ErrorContains(t, bad.Validate(), "reconcile interval")
 
+	// ReconcileInterval doubles as the XAUTOCLAIM min-idle for taking over
+	// a dead leader's pending entries, so it must cover the leader TTL.
+	bad = *cfg
+	bad.ReconcileInterval = bad.LeaderTTL - time.Second
+	assert.ErrorContains(t, bad.Validate(), ">= leader TTL")
+
+	bad = *cfg
+	bad.ReconcileInterval = bad.LeaderTTL
+	require.NoError(t, bad.Validate())
+
 	// With HA disabled the HA fields are not validated at all: a
 	// single-replica deployment must not have to care about them.
 	off := testConfig(t)
