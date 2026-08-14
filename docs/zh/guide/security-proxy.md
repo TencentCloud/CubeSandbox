@@ -16,14 +16,20 @@ Cube Sandbox 在每台宿主机上部署一个透明出网代理 —— **CubeEg
 ## 拦截链路
 
 CubeEgress 是一个 host-network 容器，在面向沙箱的 IP 上 bind 两个
-TPROXY listener：
+TPROXY listener —— 8080 上的 HTTP listener 和 8443 上的 HTTPS
+listener。哪些流量进哪个 listener，由每条规则声明的 port/scheme
+映射决定（见[自定义 L7 端口](#自定义-l7-端口)），而不再绑定固定的
+目的端口：
 
 ```
 sandbox ──→ cube-dev (主机网卡)
               │
-              ├─ iptables mangle/PREROUTING -j TPROXY
-              │     port 80  → 192.168.0.1:8080  (HTTP)
-              │     port 443 → 192.168.0.1:8443  (HTTPS)
+              ├─ eBPF (mvmtap) 按 allow_out_v3 里的 (host, port)→scheme
+              │     映射,在出方向 SYN 上打 skb->mark (HTTP 或 HTTPS)
+              │
+              ├─ iptables mangle/PREROUTING -m mark -j TPROXY
+              │     HTTP mark  → 192.168.0.1:8080  (HTTP)
+              │     HTTPS mark → 192.168.0.1:8443  (HTTPS)
               │
               ▼
         CubeEgress (OpenResty + lua)
@@ -75,13 +81,69 @@ with Sandbox.create(network={"rules": rules}) as sb:
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `scheme` | `"http"` / `"https"` | |
+| `scheme` | `"http"` / `"https"` | 大小写不敏感。与 `port` 的搭配语义见[自定义 L7 端口](#自定义-l7-端口)。 |
+| `port` | int | 要拦截的目的 TCP 端口，`1`–`65535`。必须与 `scheme` 同时设置；见[自定义 L7 端口](#自定义-l7-端口)。 |
 | `sni` | string | TLS ClientHello 的 SNI；以 `*.` 开头时表示"任意子域"——`*.example.com` 同时命中 `www.example.com` 和 `foo.bar.example.com`，但**不**命中 apex |
 | `host` | string | 匹配 HTTP `Host:` 头（自动去除端口部分）；语义与 `sni` 相同 —— 支持精确匹配，或以 `*.` 开头的子域通配（大小写不敏感）|
 | `method` | 方法列表 | 列表内 OR 关系（`["GET", "POST"]`） |
 | `path` | string | 匹配 `ngx.var.uri`；默认精确匹配，或以单个 `*` 结尾的前缀匹配（如 `/v1/*` 同时命中 `/v1/chat` 和 `/v1/embeddings`） |
 
 请求要同时满足所有出现的字段；未出现的字段视作通配。
+
+### 自定义 L7 端口
+
+默认情况下，一条规则拦截经典的 `{80/http, 443/https}` 集合。可选
+的 `port` + `scheme` 组合可以收窄或扩展哪个 TCP 端口会被送进代理：
+
+| `port` | `scheme` | 拦截范围 |
+| --- | --- | --- |
+| 省略 | 省略 | `{80/http, 443/https}` —— 默认集合（向后兼容） |
+| 省略 | `"http"` / `"https"` | 仅该 scheme 的默认端口（`http` → 80，`https` → 443） |
+| 设置 | 设置 | 精确的 `(host, port, scheme)` 组合 —— 例如 `tcp/8443` 上的 API |
+| 设置 | 省略 | 非法 —— `port` 必须搭配 `scheme` |
+
+```python
+from cubesandbox import Sandbox, Rule, Match, Action
+
+rules = [
+    # 拦截一个非标准 HTTPS 端口上的内部 API
+    Rule(
+        name="internal_api",
+        match=Match(host="api.internal.example", port=8443, scheme="https"),
+        action=Action(allow=True),
+    ),
+    # 拦截自定义端口上的明文 HTTP
+    Rule(
+        name="custom_http",
+        match=Match(host="metrics.internal.example", port=18080, scheme="http"),
+        action=Action(allow=True),
+    ),
+    # 只给 scheme 时仍走经典端口,但只匹配其中一侧
+    Rule(
+        name="https_only",
+        match=Match(host="public.example", scheme="https"),
+        action=Action(allow=True),
+    ),
+]
+
+with Sandbox.create(network={"rules": rules}) as sb:
+    sb.commands.run("curl -s https://api.internal.example:8443/health")
+    sb.commands.run("curl -s http://metrics.internal.example:18080/")
+    sb.commands.run("curl -s https://public.example/")  # → 被代理
+```
+
+约束（SDK 客户端先校验，服务端再校验一次）：
+
+- `port` 必须在 `[1, 65535]`；`scheme` 必须是 `http` 或
+  `https`（大小写不敏感）。
+- L7 规则的 host 必须是域名或单个 IP —— 不支持子网 CIDR（子网
+  无法出现在 HTTP `Host:` 头或 TLS SNI 里）。
+- 共享同一个 `(host, port)` 的所有规则必须对 `scheme` 达成一致；
+  冲突的 policy 会被整体拒绝。
+- 每个 host 最多 8 个不同的 `(port, scheme)` 组合。
+
+任何规则都没有覆盖的端口，仍回落到 L3/L4 的 `allow_out` /
+`deny_out` 策略，不会进入 CubeEgress。
 
 ::: tip 单层 vs 多层子域
 `*.example.com` 不区分子域层数，**所有**结尾命中的子域都算。
@@ -187,9 +249,11 @@ inject 的 `secret` 值在写入任何日志路径前都会被剥除。审计日
 
 - **`cube-dev` 内部流量** —— 沙箱到沙箱、沙箱到集群内服务（Cube
   API 等）不进 TPROXY 链路，不受规则约束。
-- **80/443 之外的 TCP/UDP** —— TPROXY 链路只重定向 80 和 443。
-  直连其它端口的 TCP 仍受 CubeNet 数据面的 L3/L4 `allow_out` /
-  `deny_out` 策略约束，但 CubeEgress 看不到。
+- **没有被 L7 规则覆盖的 TCP/UDP** —— TPROXY 链路只重定向被 L7
+  规则标记的流量：默认的 `{80/http, 443/https}` 集合，加上规则
+  声明的任意自定义 `(port, scheme)`。直连任何规则都没覆盖的端口
+  的 TCP，仍受 CubeNet 数据面的 L3/L4 `allow_out` / `deny_out`
+  策略约束，但 CubeEgress 看不到。
 - **没烘 CA 的模板** —— 如果模板用 `--with-cube-ca=false` 创建，
   沙箱里的 TLS 客户端**不**信任 CubeEgress 签的 leaf 证书，
   HTTPS 在规则评估之前就会因 self-signed cert 报错。

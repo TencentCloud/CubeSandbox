@@ -38,7 +38,7 @@ lint:
 	$(Q)golangci-lint run --fix
 
 .PHONY: test
-test:
+test: gen
 	$(call msg,RUN TESTS)
 	$(Q)go clean -testcache
 	$(Q)go test $(VERBOSE) -cover -coverprofile=$(COVERAGE_PROFILE) ./...

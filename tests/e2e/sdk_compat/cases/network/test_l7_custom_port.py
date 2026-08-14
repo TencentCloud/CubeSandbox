@@ -1,0 +1,434 @@
+# Copyright (c) 2026 Tencent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+"""E2E coverage for network.rules with custom L7 ports (feat/custom_l7_port).
+
+The custom L7 port feature lets an egress rule pin the TCP port CubeEgress
+intercepts on, via ``Match.port`` + ``Match.scheme``. This module exercises:
+
+  1. Custom HTTP port interception + credential injection — a rule with
+     ``(host, port, scheme=http)`` redirects a non-standard sandbox egress
+     port through CubeEgress and injects the rule's ``Inject`` header; the
+     upstream echo response reflects the marker back to the sandbox.
+  2. Backward-compatible scheme-only rule — ``Match`` with ``scheme`` but no
+     ``port`` still intercepts the classic default set (``:80``/``:443``) and
+     injects on ``:80``.
+  3. Create-time rejection of ``port`` without ``scheme`` (SDK ValueError).
+  4. Create-time rejection of a subnet-CIDR ``host`` (server-side policy error).
+
+Topology notes
+--------------
+* The custom-port leg runs a tiny HTTP echo server **in the test process** and
+  points the sandbox egress at ``SDK_E2E_L7_TARGET_HOST`` (a host IP reachable
+  from sandboxes, e.g. the bridge the sandbox pod attaches to). Set that env var
+  or the test is skipped — there is no portable default for "an IP the sandbox
+  can reach that is not the node IP".
+* Plaintext HTTP legs are used on purpose: they need no TLS interception CA, so
+  they pass in any cluster that runs CubeEgress. HTTPS custom-port legs (which
+  require the sandbox image to trust the interception CA) are covered by
+  ``examples/code-sandbox-quickstart/network_l7_custom_port_echo.py``.
+* All probing is done *inside* the sandbox via ``curl``; we grep the echoed
+  response for the injected marker secret.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import threading
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
+
+import pytest
+
+from adapters import create_adapter
+from framework.assertions import assert_command_ok
+from framework.capabilities import NETWORK_L7_CUSTOM_PORT, capabilities_for_backend
+from framework.cleanup import safe_kill
+from framework.config import SdkE2EConfig
+
+# Host the sandbox can reach for the custom-port egress leg. Required; the test
+# skips when unset (no safe portable default — see module docstring).
+L7_TARGET_HOST = os.environ.get("SDK_E2E_L7_TARGET_HOST")
+# Custom plaintext HTTP port the echo server listens on (+ the rule pins).
+L7_CUSTOM_HTTP_PORT = int(os.environ.get("SDK_E2E_L7_CUSTOM_HTTP_PORT", "18080"))
+# Public host for the scheme-only default-set leg (echoes request headers).
+L7_DEFAULT_HOST = os.environ.get("SDK_E2E_L7_DEFAULT_HOST", "httpbingo.org")
+L7_MARKER_HEADER = "X-Cube-L7-E2E"
+# Per-session unique secret so the grep cannot match ambient traffic.
+L7_MARKER_SECRET = f"e2e-{uuid.uuid4().hex[:12]}"
+
+# HTTPS custom-port leg. TLS MITM means the sandbox image must trust the L7
+# interception CA (same prerequisite as the SDK quickstart example). There is no
+# portable default for "a publicly-signed HTTPS endpoint on a non-standard
+# port whose upstream cert CubeEgress can verify", so the URL is configurable
+# and the whole leg is skipped unless the CA-trust prerequisite is declared.
+L7_CUSTOM_HTTPS_URL = os.environ.get(
+    "SDK_E2E_L7_CUSTOM_HTTPS_URL", "https://tls-v1-2.badssl.com:1012/"
+)
+_l7_https = urlparse(L7_CUSTOM_HTTPS_URL)
+L7_CUSTOM_HTTPS_HOST = _l7_https.hostname
+L7_CUSTOM_HTTPS_PORT = _l7_https.port  # None when the URL omits the port
+L7_HTTPS_CAP_TRUSTED = os.environ.get("SDK_E2E_L7_HTTPS_CAP_TRUSTED", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
+pytestmark = [
+    pytest.mark.e2e,
+    pytest.mark.sdk_compat,
+    pytest.mark.network,
+    pytest.mark.p1,
+]
+
+
+def _skip_without_capability(sdk_backend: str) -> None:
+    if NETWORK_L7_CUSTOM_PORT not in capabilities_for_backend(sdk_backend):
+        pytest.skip(
+            f"backend {sdk_backend!r} does not support {NETWORK_L7_CUSTOM_PORT}"
+        )
+
+
+class _HeaderEchoHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:  # noqa: N802
+        payload = json.dumps(
+            {"path": self.path, "headers": dict(self.headers)}
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *_args: object) -> None:
+        pass
+
+
+def _detect_bridge_ip() -> str | None:
+    """Best-effort mirror of the example's detect_target_host() for local runs.
+
+    Only used as a fallback when SDK_E2E_L7_TARGET_HOST is unset; the test still
+    skips unless the caller sets the env var (we never assume reachability).
+    """
+    try:
+        out = (
+            __import__("subprocess")
+            .check_output(["ip", "-4", "-o", "addr", "show", "up"], text=True)
+        )
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 4 and parts[1].startswith(("docker", "br-")):
+                return parts[3].split("/")[0]
+    except Exception:
+        pass
+    return None
+
+
+@pytest.fixture(scope="module")
+def l7_echo_server():
+    """Start the in-process HTTP echo server for the custom-port leg.
+
+    Skips the dependant test when no reachable target host is configured, so we
+    never bind a port or run a sandbox in environments that can't route to it.
+    """
+    if not L7_TARGET_HOST and not _detect_bridge_ip():
+        pytest.skip(
+            "SDK_E2E_L7_TARGET_HOST is required for the custom L7 port egress "
+            "leg (a host IP reachable from sandboxes)"
+        )
+    server = ThreadingHTTPServer(("0.0.0.0", L7_CUSTOM_HTTP_PORT), _HeaderEchoHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield L7_TARGET_HOST or _detect_bridge_ip()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _l7_rules_custom_http(target_host: str) -> list[dict]:
+    return [
+        {
+            "name": "e2e-custom-http",
+            "match": {
+                "host": target_host,
+                "port": L7_CUSTOM_HTTP_PORT,
+                "scheme": "http",
+            },
+            "action": {
+                "allow": True,
+                "inject": [{"header": L7_MARKER_HEADER, "secret": L7_MARKER_SECRET}],
+            },
+        }
+    ]
+
+
+def _l7_rules_scheme_only_default() -> list[dict]:
+    return [
+        {
+            "name": "e2e-default-http",
+            "match": {"host": L7_DEFAULT_HOST, "scheme": "http"},
+            "action": {
+                "allow": True,
+                "inject": [{"header": L7_MARKER_HEADER, "secret": L7_MARKER_SECRET}],
+            },
+        }
+    ]
+
+
+def _l7_rules_custom_https(host: str, port: int) -> list[dict]:
+    return [
+        {
+            "name": "e2e-custom-https",
+            "match": {"host": host, "port": port, "scheme": "https"},
+            "action": {"allow": True},
+        }
+    ]
+
+
+@pytest.mark.requires_capability(NETWORK_L7_CUSTOM_PORT)
+def test_l7_custom_port_injects_marker_on_custom_http_port(
+    sdk_backend: str,
+    sdk_e2e_config: SdkE2EConfig,
+    l7_echo_server: str,
+):
+    """A (host, port, scheme=http) rule intercepts a non-standard egress port
+    and injects the rule's credential header; the echo reflects it back."""
+    _skip_without_capability(sdk_backend)
+    target_host = l7_echo_server
+
+    adapter = None
+    try:
+        adapter = create_adapter(
+            sdk_backend,
+            sdk_e2e_config,
+            metadata={
+                "test_suite": "sdk_compat",
+                "test_backend": sdk_backend,
+                "test_case": "l7_custom_port_injects_marker",
+            },
+            create_options={
+                "allow_internet_access": False,
+                "network": {"rules": _l7_rules_custom_http(target_host)},
+            },
+        )
+
+        url = f"http://{target_host}:{L7_CUSTOM_HTTP_PORT}/headers"
+        result = adapter.run_command(
+            f"curl -sS --max-time 20 '{url}'",
+            timeout=sdk_e2e_config.command_timeout,
+        )
+        assert_command_ok(result)
+        assert L7_MARKER_SECRET in result.stdout, (
+            f"custom-port L7 rule should inject {L7_MARKER_HEADER!r} at {url}; "
+            f"response={result.stdout[:400]!r} stderr={result.stderr[:200]!r}"
+        )
+    finally:
+        if adapter is not None:
+            safe_kill(adapter, sdk_e2e_config)
+
+
+@pytest.mark.requires_capability(NETWORK_L7_CUSTOM_PORT)
+@pytest.mark.requires_internet
+def test_l7_custom_port_scheme_only_intercepts_default_http_set(
+    sdk_backend: str,
+    sdk_e2e_config: SdkE2EConfig,
+):
+    """A scheme-only rule (no port) keeps the classic :80 default behavior and
+    still injects on the default HTTP port — backward compatibility."""
+    _skip_without_capability(sdk_backend)
+
+    adapter = None
+    try:
+        adapter = create_adapter(
+            sdk_backend,
+            sdk_e2e_config,
+            metadata={
+                "test_suite": "sdk_compat",
+                "test_backend": sdk_backend,
+                "test_case": "l7_custom_port_scheme_only_default",
+            },
+            create_options={
+                "allow_internet_access": False,
+                "network": {"rules": _l7_rules_scheme_only_default()},
+            },
+        )
+
+        url = f"http://{L7_DEFAULT_HOST}/headers"
+        result = adapter.run_command(
+            f"curl -sS --max-time 20 '{url}'",
+            timeout=sdk_e2e_config.command_timeout,
+        )
+        assert_command_ok(result)
+        assert L7_MARKER_SECRET in result.stdout, (
+            f"scheme-only L7 rule should intercept :80 and inject "
+            f"{L7_MARKER_HEADER!r} at {url}; response={result.stdout[:400]!r} "
+            f"stderr={result.stderr[:200]!r}"
+        )
+    finally:
+        if adapter is not None:
+            safe_kill(adapter, sdk_e2e_config)
+
+
+@pytest.mark.requires_capability(NETWORK_L7_CUSTOM_PORT)
+def test_l7_custom_port_rejects_port_without_scheme(
+    sdk_backend: str,
+    sdk_e2e_config: SdkE2EConfig,
+):
+    """Match.port requires Match.scheme — the SDK raises ValueError before any
+    network round-trip (mirrors Match.__post_init__ / _normalize_match_dict)."""
+    _skip_without_capability(sdk_backend)
+
+    adapter = None
+    try:
+        with pytest.raises(Exception) as exc_info:
+            adapter = create_adapter(
+                sdk_backend,
+                sdk_e2e_config,
+                metadata={
+                    "test_suite": "sdk_compat",
+                    "test_backend": sdk_backend,
+                    "test_case": "l7_custom_port_port_without_scheme",
+                },
+                create_options={
+                    "network": {
+                        "rules": [
+                            {
+                                "name": "bad-port-no-scheme",
+                                "match": {"host": "198.51.100.7", "port": 1234},
+                                "action": {"allow": True},
+                            }
+                        ]
+                    }
+                },
+            )
+        message = str(exc_info.value).lower()
+        assert "port" in message and "scheme" in message, (
+            f"create failure should mention the port/scheme pairing constraint; "
+            f"got={exc_info.value!r}"
+        )
+    finally:
+        if adapter is not None:
+            safe_kill(adapter, sdk_e2e_config)
+
+
+@pytest.mark.requires_capability(NETWORK_L7_CUSTOM_PORT)
+def test_l7_custom_port_rejects_subnet_host(
+    sdk_backend: str,
+    sdk_e2e_config: SdkE2EConfig,
+):
+    """An L7 rule host must be a single host IP or a domain — a subnet CIDR is
+    rejected server-side (cubevs netpolicy: subnet CIDR not supported for L7)."""
+    _skip_without_capability(sdk_backend)
+
+    adapter = None
+    try:
+        with pytest.raises(Exception) as exc_info:
+            adapter = create_adapter(
+                sdk_backend,
+                sdk_e2e_config,
+                metadata={
+                    "test_suite": "sdk_compat",
+                    "test_backend": sdk_backend,
+                    "test_case": "l7_custom_port_subnet_host",
+                },
+                create_options={
+                    "network": {
+                        "rules": [
+                            {
+                                "name": "bad-subnet-host",
+                                "match": {
+                                    "host": "10.0.0.0/24",
+                                    "scheme": "http",
+                                },
+                                "action": {"allow": True},
+                            }
+                        ]
+                    }
+                },
+            )
+        message = str(exc_info.value).lower()
+        assert "subnet" in message or "cidr" in message or "host" in message, (
+            f"create failure should mention the subnet/host constraint; "
+            f"got={exc_info.value!r}"
+        )
+    finally:
+        if adapter is not None:
+            safe_kill(adapter, sdk_e2e_config)
+
+
+@pytest.mark.requires_capability(NETWORK_L7_CUSTOM_PORT)
+@pytest.mark.requires_internet
+def test_l7_custom_port_https_intercepts_custom_port(
+    sdk_backend: str,
+    sdk_e2e_config: SdkE2EConfig,
+):
+    """A (host, port, scheme=https) rule intercepts a non-standard HTTPS egress
+    port: CubeEgress does TLS MITM and forwards to the upstream. Proves the
+    port-scoped scheme=https interception path on a non-443 port.
+
+    This is the HTTPS counterpart of the plaintext custom-port leg. Injection is
+    not asserted here because the public upstream (default badssl) does not echo
+    request headers; the HTTP leg already proves injection, and this leg proves
+    the scheme=https + TLS-MITM path works on a custom port.
+    """
+    _skip_without_capability(sdk_backend)
+    if not L7_HTTPS_CAP_TRUSTED:
+        pytest.skip(
+            "HTTPS L7 interception needs the sandbox image to trust the L7 "
+            "interception CA; set SDK_E2E_L7_HTTPS_CAP_TRUSTED=1 to enable "
+            "(see examples/code-sandbox-quickstart/network_l7_custom_port_echo.py)"
+        )
+    if not L7_CUSTOM_HTTPS_HOST or not L7_CUSTOM_HTTPS_PORT:
+        pytest.skip(
+            f"SDK_E2E_L7_CUSTOM_HTTPS_URL must include an explicit port; "
+            f"got {L7_CUSTOM_HTTPS_URL!r}"
+        )
+    if L7_CUSTOM_HTTPS_PORT == 443:
+        pytest.skip(
+            "HTTPS custom-port leg exercises a non-standard port; "
+            f"{L7_CUSTOM_HTTPS_URL!r} resolves to :443 (use a non-443 port)"
+        )
+
+    adapter = None
+    try:
+        adapter = create_adapter(
+            sdk_backend,
+            sdk_e2e_config,
+            metadata={
+                "test_suite": "sdk_compat",
+                "test_backend": sdk_backend,
+                "test_case": "l7_custom_port_https_custom_port",
+            },
+            create_options={
+                "allow_internet_access": False,
+                "network": {
+                    "rules": _l7_rules_custom_https(
+                        L7_CUSTOM_HTTPS_HOST, L7_CUSTOM_HTTPS_PORT
+                    )
+                },
+            },
+        )
+
+        result = adapter.run_command(
+            f"curl -sS --max-time 20 -o /dev/null "
+            f"-w 'code=%{{http_code}} len=%{{size_download}}' "
+            f"'{L7_CUSTOM_HTTPS_URL}'",
+            timeout=sdk_e2e_config.command_timeout,
+        )
+        assert_command_ok(result)
+        out = result.stdout.strip()
+        assert "code=200" in out, (
+            f"custom-port HTTPS L7 rule should proxy {L7_CUSTOM_HTTPS_URL} to "
+            f"HTTP 200; curl output={out!r} stderr={result.stderr[:200]!r}"
+        )
+        assert "len=0" not in out, (
+            f"custom-port HTTPS L7 rule proxied {L7_CUSTOM_HTTPS_URL} but the "
+            f"upstream returned an empty body; curl output={out!r}"
+        )
+    finally:
+        if adapter is not None:
+            safe_kill(adapter, sdk_e2e_config)

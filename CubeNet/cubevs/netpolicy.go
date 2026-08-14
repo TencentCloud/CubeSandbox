@@ -148,14 +148,14 @@ func initNetPolicy(ifindex uint32) error {
 // flushInnerMap removes all entries from the inner LPM trie map
 // associated with the given ifindex in the outer hash-of-maps.
 func flushInnerMap(outerMap *ebpf.Map, ifindex uint32) error {
-	return flushInnerMapWithValue(outerMap, ifindex, new(uint32))
+	return flushInnerMapWithValue(outerMap, ifindex, new(lpmKey), new(uint32))
 }
 
 func flushAllowOutInnerMap(outerMap *ebpf.Map, ifindex uint32) error {
-	return flushInnerMapWithValue(outerMap, ifindex, new(netPolicyValueV3))
+	return flushInnerMapWithValue(outerMap, ifindex, new(lpmKeyV3), new(netPolicyValueV3))
 }
 
-func flushInnerMapWithValue(outerMap *ebpf.Map, ifindex uint32, value any) error {
+func flushInnerMapWithValue(outerMap *ebpf.Map, ifindex uint32, key, value any) error {
 	var innerMapID uint32
 	err := outerMap.Lookup(&ifindex, &innerMapID)
 	if err != nil {
@@ -171,10 +171,9 @@ func flushInnerMapWithValue(outerMap *ebpf.Map, ifindex uint32, value any) error
 	}
 	defer inner.Close()
 
-	var key lpmKey
 	iter := inner.Iterate()
-	for iter.Next(&key, value) {
-		if err := inner.Delete(&key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+	for iter.Next(key, value) {
+		if err := inner.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 			return fmt.Errorf("inner map delete failed: %w", err)
 		}
 	}

@@ -21,14 +21,22 @@ rule list attached at sandbox-creation time:
 ## How it intercepts
 
 CubeEgress runs as a host-network container and binds two TPROXY
-listeners on the sandbox-facing IP:
+listeners on the sandbox-facing IP — an HTTP listener on 8080 and
+an HTTPS listener on 8443. Which traffic reaches each listener is
+decided per-rule by the port/scheme mapping (see
+[Custom L7 ports](#custom-l7-ports)), not by a fixed destination
+port:
 
 ```
 sandbox ──→ cube-dev (host iface)
               │
-              ├─ iptables mangle/PREROUTING -j TPROXY
-              │     port 80  → 192.168.0.1:8080  (HTTP listener)
-              │     port 443 → 192.168.0.1:8443  (HTTPS listener)
+              ├─ eBPF (mvmtap) resolves the outbound (host, port) to
+              │     a scheme via allow_out_v3 and stamps an skb->mark
+              │     (HTTP or HTTPS) on the SYN
+              │
+              ├─ iptables mangle/PREROUTING -m mark -j TPROXY
+              │     HTTP mark  → 192.168.0.1:8080  (HTTP listener)
+              │     HTTPS mark → 192.168.0.1:8443  (HTTPS listener)
               │
               ▼
        CubeEgress (OpenResty + lua)
@@ -84,7 +92,8 @@ Match fields (all optional, AND'd together):
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `scheme` | `"http"` / `"https"` | |
+| `scheme` | `"http"` / `"https"` | Case-insensitive. See [Custom L7 ports](#custom-l7-ports) for how `scheme` interacts with `port`. |
+| `port` | int | Destination TCP port to intercept, `1`–`65535`. Must be paired with `scheme`; see [Custom L7 ports](#custom-l7-ports). |
 | `sni` | string | TLS ClientHello SNI; supports leading `*.` for "any subdomain" — `*.example.com` matches `www.example.com` and `foo.bar.example.com`, but not the apex |
 | `host` | string | Match against the HTTP `Host:` header (port stripped); same semantics as `sni` — exact match, or leading `*.` for "any subdomain" (case-insensitive) |
 | `method` | list of methods | OR within the list (`["GET", "POST"]`) |
@@ -92,6 +101,63 @@ Match fields (all optional, AND'd together):
 
 A request must match every present field; absent fields are
 wildcarded.
+
+### Custom L7 ports
+
+By default a rule intercepts the classic `{80/http, 443/https}`
+set. The optional `port` + `scheme` pair narrows or extends which
+TCP port gets steered through the proxy:
+
+| `port` | `scheme` | Intercepts |
+| --- | --- | --- |
+| omitted | omitted | `{80/http, 443/https}` — the default set (backward compatible) |
+| omitted | `"http"` / `"https"` | only that scheme on its default port (`http` → 80, `https` → 443) |
+| set | set | exactly that `(host, port, scheme)` tuple — e.g. an API on `tcp/8443` |
+| set | omitted | invalid — `port` requires `scheme` |
+
+```python
+from cubesandbox import Sandbox, Rule, Match, Action
+
+rules = [
+    # Intercept an internal API on a non-standard HTTPS port.
+    Rule(
+        name="internal_api",
+        match=Match(host="api.internal.example", port=8443, scheme="https"),
+        action=Action(allow=True),
+    ),
+    # Intercept plain HTTP on a custom port.
+    Rule(
+        name="custom_http",
+        match=Match(host="metrics.internal.example", port=18080, scheme="http"),
+        action=Action(allow=True),
+    ),
+    # scheme alone keeps the classic port but only matches one side.
+    Rule(
+        name="https_only",
+        match=Match(host="public.example", scheme="https"),
+        action=Action(allow=True),
+    ),
+]
+
+with Sandbox.create(network={"rules": rules}) as sb:
+    sb.commands.run("curl -s https://api.internal.example:8443/health")
+    sb.commands.run("curl -s http://metrics.internal.example:18080/")
+    sb.commands.run("curl -s https://public.example/")  # → proxied
+```
+
+Constraints (enforced by the SDK client and re-checked server-side):
+
+- `port` must be in `[1, 65535]`; `scheme` must be `http` or
+  `https` (case-insensitive).
+- An L7 host must be a domain name or a single IP — subnet CIDRs
+  are rejected (a subnet can't appear in an HTTP `Host:` header or
+  TLS SNI).
+- Every rule sharing the same `(host, port)` must agree on
+  `scheme`; a conflicting policy is rejected outright.
+- At most 8 distinct `(port, scheme)` tuples per host.
+
+Traffic to a port no rule covers still falls back to the L3/L4
+`allow_out` / `deny_out` policy and never reaches CubeEgress.
 
 ::: tip Single-level vs multi-level subdomain
 `*.example.com` matches **all** subdomains regardless of label
@@ -209,10 +275,12 @@ about:
 - **Internal `cube-dev` traffic** — sandbox-to-sandbox traffic and
   traffic to in-cluster services (Cube API, etc.) doesn't enter the
   TPROXY chain, so rules don't apply.
-- **Non-HTTP egress on TCP/UDP** — the TPROXY chain only redirects
-  ports 80 and 443. Direct TCP to other ports still goes out
-  subject to the L3/L4 `allow_out` / `deny_out` policy on the
-  CubeNet data plane, but is invisible to CubeEgress.
+- **TCP/UDP not covered by an L7 rule** — the TPROXY chain only
+  redirects traffic an L7 rule marked: the default `{80/http,
+  443/https}` set plus any custom `(port, scheme)` a rule declares.
+  Direct TCP to ports no rule covers still goes out subject to the
+  L3/L4 `allow_out` / `deny_out` policy on the CubeNet data plane,
+  but is invisible to CubeEgress.
 - **Sandboxes built from templates without the CA bake** — if the
   template was created with `--with-cube-ca=false`, the sandbox's
   TLS clients don't trust CubeEgress's leaf certs and HTTPS calls

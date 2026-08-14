@@ -153,13 +153,16 @@ static __always_inline __u8 classify_egress_flow(__u32 ifindex, __u32 daddr,
 		}
 	}
 
-	/* 2) Deny: /32 (or wider) lookup in deny_out */
+	/* 2) Deny: /32 (or wider) lookup in deny_out. deny_out inner maps are
+	 * keyed by the 8-byte struct lpm_key (see map.h), so use a dedicated key
+	 * rather than reusing the 12-byte lpm_key_v3 above — passing a v3 key to
+	 * an 8-byte-key map only works because the kernel reads map->key_size
+	 * bytes, which is an accident of struct layout, not a contract.
+	 */
 	inner_map = bpf_map_lookup_elem(&deny_out, &ifindex);
 	if (inner_map) {
-		key.prefixlen = 32;
-		key.ip = daddr;
-		key.port = 0;
-		if (bpf_map_lookup_elem(inner_map, &key))
+		struct lpm_key deny_key = { .prefixlen = 32, .ip = daddr };
+		if (bpf_map_lookup_elem(inner_map, &deny_key))
 			return FLOW_REJECT;
 	}
 

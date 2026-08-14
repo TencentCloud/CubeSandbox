@@ -12,6 +12,7 @@ PAUSE_RESUME = "pause_resume"
 NETWORK_ALLOW_DENY = "network_allow_deny"
 NETWORK_PUBLIC_ACCESS = "network_public_access"
 NETWORK_MASK_REQUEST_HOST = "network_mask_request_host"
+NETWORK_L7_CUSTOM_PORT = "network_l7_custom_port"
 # CubeVS domain allow_out + DNS A learning (exact / leading "*.").
 NETWORK_DNS_ALLOW = "network_dns_allow"
 # Built-in deny of sandbox-private / link-local CIDRs when public egress is on.
@@ -54,6 +55,7 @@ CUBESANDBOX_CAPABILITIES = frozenset(
         HOST_MOUNT,
         VOLUME_PLUGIN,
         AUTH_SIMPLE_KEY,
+        NETWORK_L7_CUSTOM_PORT,
     }
 )
 
