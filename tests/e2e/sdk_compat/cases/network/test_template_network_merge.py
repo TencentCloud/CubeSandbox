@@ -11,9 +11,11 @@ import time
 import pytest
 
 from adapters import create_adapter
+from framework.build_throttle import template_build_slot
 from framework.capabilities import NETWORK_TEMPLATE_MERGE, capabilities_for_backend
 from framework.cleanup import safe_kill
 from framework.config import SdkE2EConfig
+from framework.parallel import scale_timeout_for_xdist
 from framework.network_probe import (
     assert_tcp_blocked,
     assert_tcp_reachable,
@@ -76,9 +78,12 @@ def _template_image() -> str:
     )
 
 
-def _wait_for_template_ready(template_id: str, config, timeout: int = TEMPLATE_READY_TIMEOUT):
+def _wait_for_template_ready(template_id: str, config, timeout: int | None = None):
     from cubesandbox import Template
 
+    # Widen the serial-run budget under xdist (same-node build contention).
+    if timeout is None:
+        timeout = scale_timeout_for_xdist(TEMPLATE_READY_TIMEOUT)
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -163,13 +168,14 @@ def network_merge_template_id(pytestconfig: pytest.Config):
             guest_dns = _guest_dns()
             if guest_dns is not None:
                 build_kwargs["dns"] = guest_dns
-            job = Template.build(**build_kwargs)
-            assert job.template_id.startswith("tpl-"), job.template_id
-            created_id = job.template_id
-            info = _wait_for_template_ready(created_id, sdk_config)
-            assert info.status == "READY", (
-                f"template {created_id} finished with status={info.status!r}"
-            )
+            with template_build_slot(label="template_network_merge"):
+                job = Template.build(**build_kwargs)
+                assert job.template_id.startswith("tpl-"), job.template_id
+                created_id = job.template_id
+                info = _wait_for_template_ready(created_id, sdk_config)
+                assert info.status == "READY", (
+                    f"template {created_id} finished with status={info.status!r}"
+                )
             yield created_id
         except Exception as exc:  # noqa: BLE001 - defer to cubesandbox test body
             _TEMPLATE_BUILD_ERROR = exc

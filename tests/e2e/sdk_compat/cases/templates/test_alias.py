@@ -24,6 +24,8 @@ from cubesandbox import Config, Template
 from cubesandbox._exceptions import ApiError, TemplateNotFoundError
 
 from framework.auth import auth_headers
+from framework.build_throttle import template_build_slot
+from framework.parallel import scale_timeout_for_xdist
 
 pytestmark = [
     pytest.mark.e2e,
@@ -50,7 +52,13 @@ def _cfg(sdk_e2e_config):
     return Config(api_url=sdk_e2e_config.cube_api_url)
 
 
-def _wait_for_ready(template_id, config, timeout=120):
+def _wait_for_ready(template_id, config, timeout=None):
+    # Widen the serial-run budget for parallel (xdist) runs: every alias case
+    # builds a fresh template from the same image, so under xdist all workers
+    # submit near-identical builds that serialize on CubeMaster's per-artifactID
+    # lock. The last worker's build can then take well past the serial budget.
+    if timeout is None:
+        timeout = scale_timeout_for_xdist(120)
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -96,10 +104,11 @@ def test_template_create_from_image_and_cleanup(sdk_backend, sdk_e2e_config):
     cfg = _cfg(sdk_e2e_config)
     created_id = None
     try:
-        job = Template.build(image=DEFAULT_IMAGE, writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE, config=cfg)
-        assert job.template_id.startswith("tpl-")
-        created_id = job.template_id
-        _wait_for_ready(created_id, cfg)
+        with template_build_slot(label="alias_create_from_image"):
+            job = Template.build(image=DEFAULT_IMAGE, writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE, config=cfg)
+            assert job.template_id.startswith("tpl-")
+            created_id = job.template_id
+            _wait_for_ready(created_id, cfg)
         assert Template.get(created_id, config=cfg).status == "READY"
     finally:
         if created_id:
@@ -127,9 +136,10 @@ def test_template_alias_create_get_and_delete(sdk_backend, sdk_e2e_config):
     alias = f"e2e-alias-{uuid.uuid4().hex[:8]}"
     created_id = None
     try:
-        job = Template.build(name=alias, image=DEFAULT_IMAGE, writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE, config=cfg)
-        created_id = job.template_id
-        _wait_for_ready(created_id, cfg)
+        with template_build_slot(label="alias_create_get_delete"):
+            job = Template.build(name=alias, image=DEFAULT_IMAGE, writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE, config=cfg)
+            created_id = job.template_id
+            _wait_for_ready(created_id, cfg)
         assert Template.get(alias, config=cfg).template_id == created_id
         assert any(t.template_id == created_id for t in Template.list(config=cfg))
         _delete_with_retry(alias, cfg)
@@ -152,9 +162,10 @@ def test_template_alias_dedicated_lookup_endpoint(sdk_backend, sdk_e2e_config):
     alias = f"e2e-alias-ep-{uuid.uuid4().hex[:8]}"
     created_id = None
     try:
-        job = Template.build(name=alias, image=DEFAULT_IMAGE, writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE, config=cfg)
-        created_id = job.template_id
-        _wait_for_ready(created_id, cfg)
+        with template_build_slot(label="alias_dedicated_lookup"):
+            job = Template.build(name=alias, image=DEFAULT_IMAGE, writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE, config=cfg)
+            created_id = job.template_id
+            _wait_for_ready(created_id, cfg)
         resp = requests.get(
             f"{sdk_e2e_config.cube_api_url}/templates/aliases/{alias}",
             headers=auth_headers(),
@@ -177,14 +188,16 @@ def test_template_alias_rebuild_reassignment(sdk_backend, sdk_e2e_config):
     alias = f"e2e-alias-rebuild-{uuid.uuid4().hex[:8]}"
     template_ids = []
     try:
-        job_a = Template.build(name=alias, image=DEFAULT_IMAGE, writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE, config=cfg)
-        template_ids.append(job_a.template_id)
-        _wait_for_ready(job_a.template_id, cfg)
+        with template_build_slot(label="alias_rebuild_a"):
+            job_a = Template.build(name=alias, image=DEFAULT_IMAGE, writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE, config=cfg)
+            template_ids.append(job_a.template_id)
+            _wait_for_ready(job_a.template_id, cfg)
         assert Template.get(alias, config=cfg).template_id == job_a.template_id
 
-        job_b = Template.build(name=alias, image=DEFAULT_IMAGE, writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE, config=cfg)
-        template_ids.append(job_b.template_id)
-        _wait_for_ready(job_b.template_id, cfg)
+        with template_build_slot(label="alias_rebuild_b"):
+            job_b = Template.build(name=alias, image=DEFAULT_IMAGE, writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE, config=cfg)
+            template_ids.append(job_b.template_id)
+            _wait_for_ready(job_b.template_id, cfg)
         assert Template.get(alias, config=cfg).template_id == job_b.template_id
         assert Template.get(job_a.template_id, config=cfg).template_id == job_a.template_id
     finally:

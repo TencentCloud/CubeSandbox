@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,12 @@ from framework.trace import sanitize
 class JsonlReporter:
     def __init__(self, report_dir: Path) -> None:
         self._report_dir = report_dir
-        self._path = report_dir / "events.jsonl"
+        # Under pytest-xdist each worker is a separate process; a shared append
+        # log would interleave and corrupt lines. Give every worker its own file
+        # (events-gw0.jsonl, ...) and keep the serial run on plain events.jsonl.
+        worker = os.environ.get("PYTEST_XDIST_WORKER")
+        filename = f"events-{worker}.jsonl" if worker else "events.jsonl"
+        self._path = report_dir / filename
         self._report_dir.mkdir(parents=True, exist_ok=True)
         self._file = self._path.open("a", encoding="utf-8")
 

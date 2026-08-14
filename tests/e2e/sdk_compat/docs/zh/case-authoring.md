@@ -370,7 +370,8 @@ pytest --run-e2e --sdk-e2e-trace -vv \
 
 1. pytest 的 setup/call/teardown phase；
 2. terminal trace 的最后一次失败操作；
-3. `SDK_E2E_REPORT_DIR/events.jsonl` 中同一 node ID 的事件；
+3. `SDK_E2E_REPORT_DIR` 下同一 node ID 的事件（串行为 `events.jsonl`，
+   xdist 并行时在 `events-gw*.jsonl` 之一）；
 4. sandbox `info().raw` 中的 state、endAt、metadata；
 5. 平台生命周期场景下的 CubeProxy heartbeat 与 lifecycle-manager 日志。
 

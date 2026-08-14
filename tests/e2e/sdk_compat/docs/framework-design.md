@@ -67,8 +67,9 @@ preflight can also probe the CubeProxy admin heartbeat.
 
 `TraceCollector` records timestamp, operation, sanitized input/output,
 duration, and success. Secrets are redacted, large values are truncated, and
-file contents are represented by length only. JSONL events are written
-to `SDK_E2E_REPORT_DIR/events.jsonl`.
+file contents are represented by length only. JSONL events are written to
+`SDK_E2E_REPORT_DIR/events.jsonl` for serial runs, or per-worker
+`events-gw*.jsonl` files under pytest-xdist.
 
 Use `--sdk-e2e-trace` for live operation output:
 

@@ -219,7 +219,8 @@ sandbox 仍必须由 `managed_control_sandbox` 或 `finally` 清理。保留实�
 
 ## 9. 报告与诊断
 
-`JsonlReporter` 以 session 为边界持有 `events.jsonl` 文件句柄，并写入：
+`JsonlReporter` 以 session 为边界持有 JSONL 文件句柄（串行为 `events.jsonl`，
+pytest-xdist 下每个 worker 各自写 `events-gw*.jsonl`），并写入：
 
 - `preflight_passed` / `preflight_failed`；
 - `sandbox_created`；
