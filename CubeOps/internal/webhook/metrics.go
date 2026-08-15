@@ -17,6 +17,7 @@ const (
 	ResultRetryable = "retryable"
 	ResultPermanent = "permanent"
 	ResultShutdown  = "shutdown"
+	ResultDead      = "dead"
 )
 
 var (

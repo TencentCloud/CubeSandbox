@@ -205,4 +205,45 @@ func TestDelivery_MaterializationFailureUpsert(t *testing.T) {
 	}
 }
 
+// TestDelivery_RetentionCleanup removes terminal rows past their windows and
+// never touches retryable failed rows.
+func TestDelivery_RetentionCleanup(t *testing.T) {
+	env, ds := newDeliveryStore(t)
+	defer env.teardown()
+	ctx := context.Background()
+
+	sub := newWebhookSub("retention", "https://example.com/hook", "sandbox.created")
+	if err := env.store.CreateWebhookSubscription(ctx, sub); err != nil {
+		t.Fatalf("create sub: %v", err)
+	}
+	insert := func(eventID, status string, daysAgo int) {
+		t.Helper()
+		if err := env.store.DB().Exec(
+			`INSERT INTO t_webhook_delivery
+			  (event_id, subscription_id, payload, status, attempts, next_retry_at, updated_at)
+			 VALUES (?, ?, '{}', ?, 0, now(), now() - INTERVAL ? DAY)`,
+			eventID, sub.ID, status, daysAgo).Error; err != nil {
+			t.Fatalf("insert %s: %v", eventID, err)
+		}
+	}
+	insert("ret:old-succeeded", webhook.StatusSucceeded, 40)
+	insert("ret:old-failed", webhook.StatusFailed, 40)
+	insert("ret:new-succeeded", webhook.StatusSucceeded, 1)
+
+	n, err := ds.RetentionCleanup(ctx, 30*24*time.Hour, 90*24*time.Hour, 100)
+	if err != nil {
+		t.Fatalf("RetentionCleanup: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("cleaned %d rows, want 1 (old succeeded only)", n)
+	}
+	left, err := env.store.ListWebhookDeliveries(ctx, sub.ID, "", "", 0, 0)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(left) != 2 {
+		t.Fatalf("left %d rows, want 2 (failed + new succeeded)", len(left))
+	}
+}
+
 func intPtr(v int) *int { return &v }
