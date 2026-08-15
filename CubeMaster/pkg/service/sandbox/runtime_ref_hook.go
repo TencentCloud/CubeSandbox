@@ -128,7 +128,7 @@ func runAfterCreateSandboxSuccessHook(ctx context.Context, sandboxID, hostID, ho
 //
 // Action carries "pause" or "resume" (validated upstream). RequestID is
 // forwarded from the incoming request for log correlation.
-type UpdateSandboxSuccessHook func(ctx context.Context, sandboxID, instanceType, action, requestID string)
+type UpdateSandboxSuccessHook func(ctx context.Context, sandboxID, instanceType, action, requestID, source string)
 
 var (
 	updateHooksMu sync.RWMutex
@@ -154,7 +154,7 @@ func ResetAfterUpdateSandboxSuccessHooks() {
 	updateHooksMu.Unlock()
 }
 
-func runAfterUpdateSandboxSuccessHook(ctx context.Context, sandboxID, instanceType, action, requestID string) {
+func runAfterUpdateSandboxSuccessHook(ctx context.Context, sandboxID, instanceType, action, requestID, source string) {
 	updateHooksMu.RLock()
 	hooks := append([]UpdateSandboxSuccessHook(nil), updateHooks...)
 	updateHooksMu.RUnlock()
@@ -168,7 +168,7 @@ func runAfterUpdateSandboxSuccessHook(ctx context.Context, sandboxID, instanceTy
 					log.G(ctx).Warnf("afterUpdateSandboxSuccess hook panicked: %v", r)
 				}
 			}()
-			h(ctx, sandboxID, instanceType, action, requestID)
+			h(ctx, sandboxID, instanceType, action, requestID, source)
 		}()
 	}
 }

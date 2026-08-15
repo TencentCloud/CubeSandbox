@@ -99,6 +99,7 @@ type updateRequest struct {
 	SandboxID    string `json:"sandbox_id"`
 	InstanceType string `json:"instance_type"`
 	Action       string `json:"action"` // "pause" | "resume"
+	Source       string `json:"source,omitempty"`
 }
 
 type updateResponse struct {
@@ -123,13 +124,13 @@ type killRequest struct {
 // *APIError for any non-success ret_code; use APIError.IsNotFound /
 // IsAlreadyInState to classify.
 func (c *Client) Pause(ctx context.Context, sandboxID, instanceType string) error {
-	return c.update(ctx, sandboxID, instanceType, "pause")
+	return c.update(ctx, sandboxID, instanceType, "pause", "auto_pause")
 }
 
 // Resume asks CubeMaster to resume the given sandbox. Same error semantics
 // as Pause.
 func (c *Client) Resume(ctx context.Context, sandboxID, instanceType string) error {
-	return c.update(ctx, sandboxID, instanceType, "resume")
+	return c.update(ctx, sandboxID, instanceType, "resume", "auto_resume")
 }
 
 // Kill asks CubeMaster to destroy the given sandbox.
@@ -180,7 +181,7 @@ func (c *Client) Kill(ctx context.Context, sandboxID, instanceType, reason strin
 	return &APIError{RetCode: ur.Ret.RetCode, RetMsg: ur.Ret.RetMsg}
 }
 
-func (c *Client) update(ctx context.Context, sandboxID, instanceType, action string) error {
+func (c *Client) update(ctx context.Context, sandboxID, instanceType, action, source string) error {
 	if sandboxID == "" || instanceType == "" {
 		return errors.New("sandbox_id and instance_type are required")
 	}
@@ -190,6 +191,7 @@ func (c *Client) update(ctx context.Context, sandboxID, instanceType, action str
 		SandboxID:    sandboxID,
 		InstanceType: instanceType,
 		Action:       action,
+		Source:       source,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)

@@ -177,7 +177,7 @@ func PublishStateDefault(ctx context.Context, sandboxID, state, source string) {
 // Unknown actions are ignored (the update handler already validates that
 // action ∈ {"pause","resume"}; this is defence-in-depth against future
 // action codes reaching the hook chain without a schema update here).
-func onAfterUpdate(ctx context.Context, sandboxID, _ /*instanceType*/, action, _ /*requestID*/ string) {
+func onAfterUpdate(ctx context.Context, sandboxID, _ /*instanceType*/, action, _ /*requestID*/, source string) {
 	var state string
 	switch action {
 	case "pause":
@@ -187,5 +187,10 @@ func onAfterUpdate(ctx context.Context, sandboxID, _ /*instanceType*/, action, _
 	default:
 		return
 	}
-	PublishStateDefault(ctx, sandboxID, state, "api")
+	// Callers (CubeAPI) may omit the source; keep the historical default so
+	// public API-driven transitions remain labelled "api".
+	if source == "" {
+		source = "api"
+	}
+	PublishStateDefault(ctx, sandboxID, state, source)
 }

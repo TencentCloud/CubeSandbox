@@ -788,6 +788,10 @@ type UpdateRequest struct {
 	SandboxID    string `json:"sandbox_id"`
 	InstanceType string `json:"instance_type"`
 	Action       string `json:"action"`
+	// Source identifies who initiated the pause/resume. Empty means the
+	// caller did not declare a source; the lifecycle publisher normalizes
+	// it to "api" so public API-driven transitions keep their default label.
+	Source string `json:"source,omitempty"`
 }
 
 // SetTimeoutRequest is the wire shape for POST /cube/sandbox/timeout.
