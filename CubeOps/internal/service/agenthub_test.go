@@ -36,6 +36,7 @@ type fakeAgentStore struct {
 	getAgentSnapshot           func(ctx context.Context, agentID, snapshotID string) (*store.AgentSnapshot, error)
 	deleteAgentSnapshot        func(ctx context.Context, agentID, snapshotID string) error
 	getAgentTemplate           func(ctx context.Context, templateID string) (*store.AgentTemplate, error)
+	getRecommendedTemplate     func(ctx context.Context) (*store.AgentTemplate, error)
 	listAgentTemplates         func(ctx context.Context, limit, offset int) ([]store.AgentTemplate, error)
 	recordOperation            func(ctx context.Context, agentID, sandboxID, operationType, status, errMsg string) error
 	latestHealthySnapshot      func(ctx context.Context, agentID string) (string, error)
@@ -109,6 +110,12 @@ func (f *fakeAgentStore) GetAgentTemplate(ctx context.Context, templateID string
 		return nil, nil
 	}
 	return f.getAgentTemplate(ctx, templateID)
+}
+func (f *fakeAgentStore) GetRecommendedAgentTemplate(ctx context.Context) (*store.AgentTemplate, error) {
+	if f.getRecommendedTemplate == nil {
+		return nil, nil // default: none marked recommended
+	}
+	return f.getRecommendedTemplate(ctx)
 }
 func (f *fakeAgentStore) ListAgentTemplates(ctx context.Context, limit, offset int) ([]store.AgentTemplate, error) {
 	if f.listAgentTemplates == nil {
@@ -380,44 +387,44 @@ func rootfsSourceID(t *testing.T, cm *fakeServiceCM) string {
 
 // TestCreateInstance_DefaultTemplateSelection verifies which template
 // CreateInstance uses when the request names neither a snapshot nor a
-// templateId: the recommended registered template if there is one, else the
-// most recently registered one (ListAgentTemplates orders created_at DESC).
-// Before this, the request always went out with the hardcoded
-// defaultAgentTemplateID, which nothing provisions.
+// templateId: the operator-marked recommended template if there is one, else
+// the most recently registered one. Before this, the request always went out
+// with the hardcoded defaultAgentTemplateID, which nothing provisions.
 func TestCreateInstance_DefaultTemplateSelection(t *testing.T) {
 	tests := []struct {
-		name      string
-		templates []store.AgentTemplate
-		want      string
+		name        string
+		recommended *store.AgentTemplate
+		newest      []store.AgentTemplate
+		want        string
 	}{
 		{
-			name: "prefers the recommended template over a newer one",
-			templates: []store.AgentTemplate{
-				{TemplateID: "tpl-newest", Recommended: false},
-				{TemplateID: "tpl-recommended", Recommended: true},
-			},
-			want: "tpl-recommended",
+			name:        "prefers the recommended template over a newer one",
+			recommended: &store.AgentTemplate{TemplateID: "tpl-recommended", Recommended: true},
+			newest:      []store.AgentTemplate{{TemplateID: "tpl-newest"}},
+			want:        "tpl-recommended",
 		},
 		{
-			name: "falls back to the most recent when none is recommended",
-			templates: []store.AgentTemplate{
-				{TemplateID: "tpl-newest", Recommended: false},
-				{TemplateID: "tpl-older", Recommended: false},
-			},
-			want: "tpl-newest",
+			name:   "falls back to the most recent when none is recommended",
+			newest: []store.AgentTemplate{{TemplateID: "tpl-newest"}},
+			want:   "tpl-newest",
 		},
 		{
-			name:      "uses the built-in identifier when nothing is registered",
-			templates: nil,
-			want:      defaultAgentTemplateID,
+			name: "uses the built-in identifier when nothing is registered",
+			want: defaultAgentTemplateID,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cm := &fakeServiceCM{}
 			st := llmKeyStore()
-			st.listAgentTemplates = func(_ context.Context, _, _ int) ([]store.AgentTemplate, error) {
-				return tt.templates, nil
+			st.getRecommendedTemplate = func(_ context.Context) (*store.AgentTemplate, error) {
+				return tt.recommended, nil
+			}
+			st.listAgentTemplates = func(_ context.Context, limit, _ int) ([]store.AgentTemplate, error) {
+				if limit != 1 {
+					t.Errorf("ListAgentTemplates limit = %d, want 1 — only the newest is needed", limit)
+				}
+				return tt.newest, nil
 			}
 			svc := newTestService(st, cm)
 
@@ -434,23 +441,20 @@ func TestCreateInstance_DefaultTemplateSelection(t *testing.T) {
 	}
 }
 
-// TestCreateInstance_RecommendedBeyondFirstPage verifies that the recommended
-// preference is exact rather than window-limited: a recommended template that
-// only appears on a later page still wins over the newest one.
-func TestCreateInstance_RecommendedBeyondFirstPage(t *testing.T) {
-	full := make([]store.AgentTemplate, store.MaxListLimit)
-	for i := range full {
-		full[i] = store.AgentTemplate{TemplateID: "tpl-filler", Recommended: false}
-	}
-	full[0].TemplateID = "tpl-newest"
-
+// TestCreateInstance_RecommendedIsNotWindowLimited verifies that the
+// recommended preference does not depend on how many newer templates were
+// registered after it: the flag is resolved by its own query, so any number of
+// non-recommended registrations cannot bury it.
+func TestCreateInstance_RecommendedIsNotWindowLimited(t *testing.T) {
 	cm := &fakeServiceCM{}
 	st := llmKeyStore()
-	st.listAgentTemplates = func(_ context.Context, limit, offset int) ([]store.AgentTemplate, error) {
-		if offset == 0 {
-			return full, nil // exactly one full page, so a second is fetched
-		}
-		return []store.AgentTemplate{{TemplateID: "tpl-recommended", Recommended: true}}, nil
+	st.getRecommendedTemplate = func(_ context.Context) (*store.AgentTemplate, error) {
+		return &store.AgentTemplate{TemplateID: "tpl-recommended", Recommended: true}, nil
+	}
+	listed := false
+	st.listAgentTemplates = func(_ context.Context, _, _ int) ([]store.AgentTemplate, error) {
+		listed = true
+		return []store.AgentTemplate{{TemplateID: "tpl-newest"}}, nil
 	}
 	svc := newTestService(st, cm)
 
@@ -463,35 +467,63 @@ func TestCreateInstance_RecommendedBeyondFirstPage(t *testing.T) {
 	if got := rootfsSourceID(t, cm); got != "tpl-recommended" {
 		t.Errorf("rootfs_source_id = %q, want tpl-recommended", got)
 	}
+	if listed {
+		t.Error("the registry should not be listed once a recommended template is found")
+	}
 }
 
-// TestCreateInstance_TemplateListingFailureIsNotReportedAsUnregistered
-// verifies that a failed registry read is not turned into "no agent template
-// is registered": the listing never happened, so CubeMaster's own error is
-// what the caller gets.
-func TestCreateInstance_TemplateListingFailureIsNotReportedAsUnregistered(t *testing.T) {
-	cm := &fakeServiceCM{
-		createSandboxErr: &cubemaster.CMError{RetCode: 130404, RetMsg: "template not found"},
+// TestCreateInstance_TemplateReadFailureIsNotReportedAsUnregistered verifies
+// that a failed registry read is not turned into "no agent template is
+// registered": the query never completed, so CubeMaster's own error is what
+// the caller gets. Both reads are covered — either one failing is enough to
+// leave the registry's contents unknown.
+func TestCreateInstance_TemplateReadFailureIsNotReportedAsUnregistered(t *testing.T) {
+	dbDown := errors.New("dial tcp: connection refused")
+	tests := []struct {
+		name  string
+		store func(*fakeAgentStore)
+	}{
+		{
+			name: "recommended query fails",
+			store: func(st *fakeAgentStore) {
+				st.getRecommendedTemplate = func(_ context.Context) (*store.AgentTemplate, error) {
+					return nil, dbDown
+				}
+			},
+		},
+		{
+			name: "listing fails",
+			store: func(st *fakeAgentStore) {
+				st.listAgentTemplates = func(_ context.Context, _, _ int) ([]store.AgentTemplate, error) {
+					return nil, dbDown
+				}
+			},
+		},
 	}
-	st := llmKeyStore()
-	st.listAgentTemplates = func(_ context.Context, _, _ int) ([]store.AgentTemplate, error) {
-		return nil, errors.New("dial tcp: connection refused")
-	}
-	svc := newTestService(st, cm)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cm := &fakeServiceCM{
+				createSandboxErr: &cubemaster.CMError{RetCode: 130404, RetMsg: "template not found"},
+			}
+			st := llmKeyStore()
+			tt.store(st)
+			svc := newTestService(st, cm)
 
-	_, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
-		Name:   "my-agent",
-		Engine: "openclaw",
-	})
-	var svcErr *Error
-	if !errors.As(err, &svcErr) {
-		t.Fatalf("error is not *service.Error: %v", err)
-	}
-	if svcErr.Status != 502 {
-		t.Errorf("status = %d, want 502", svcErr.Status)
-	}
-	if strings.Contains(svcErr.Message, "no agent template is registered") {
-		t.Errorf("message = %q, should not claim an empty registry when the listing failed", svcErr.Message)
+			_, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+				Name:   "my-agent",
+				Engine: "openclaw",
+			})
+			var svcErr *Error
+			if !errors.As(err, &svcErr) {
+				t.Fatalf("error is not *service.Error: %v", err)
+			}
+			if svcErr.Status != 502 {
+				t.Errorf("status = %d, want 502", svcErr.Status)
+			}
+			if strings.Contains(svcErr.Message, "no agent template is registered") {
+				t.Errorf("message = %q, should not claim an empty registry when the read failed", svcErr.Message)
+			}
+		})
 	}
 }
 
@@ -500,10 +532,14 @@ func TestCreateInstance_TemplateListingFailureIsNotReportedAsUnregistered(t *tes
 func TestCreateInstance_ExplicitTemplateIDWins(t *testing.T) {
 	cm := &fakeServiceCM{}
 	st := llmKeyStore()
-	listed := false
+	consulted := false
+	st.getRecommendedTemplate = func(_ context.Context) (*store.AgentTemplate, error) {
+		consulted = true
+		return &store.AgentTemplate{TemplateID: "tpl-recommended", Recommended: true}, nil
+	}
 	st.listAgentTemplates = func(_ context.Context, _, _ int) ([]store.AgentTemplate, error) {
-		listed = true
-		return []store.AgentTemplate{{TemplateID: "tpl-recommended", Recommended: true}}, nil
+		consulted = true
+		return []store.AgentTemplate{{TemplateID: "tpl-newest"}}, nil
 	}
 	svc := newTestService(st, cm)
 
@@ -517,8 +553,8 @@ func TestCreateInstance_ExplicitTemplateIDWins(t *testing.T) {
 	if got := rootfsSourceID(t, cm); got != "tpl-explicit" {
 		t.Errorf("rootfs_source_id = %q, want tpl-explicit", got)
 	}
-	if listed {
-		t.Error("ListAgentTemplates should not be consulted when templateId is explicit")
+	if consulted {
+		t.Error("the template registry should not be consulted when templateId is explicit")
 	}
 }
 

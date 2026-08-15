@@ -143,6 +143,7 @@ type AgentStore interface {
 	GetAgentSnapshot(ctx context.Context, agentID, snapshotID string) (*store.AgentSnapshot, error)
 	DeleteAgentSnapshot(ctx context.Context, agentID, snapshotID string) error
 	GetAgentTemplate(ctx context.Context, templateID string) (*store.AgentTemplate, error)
+	GetRecommendedAgentTemplate(ctx context.Context) (*store.AgentTemplate, error)
 	ListAgentTemplates(ctx context.Context, limit, offset int) ([]store.AgentTemplate, error)
 	RecordOperation(ctx context.Context, agentID, sandboxID, operationType, status, errMsg string) error
 	LatestHealthySnapshot(ctx context.Context, agentID string) (string, error)
@@ -413,52 +414,38 @@ type CreateInstanceResult struct {
 }
 
 // defaultTemplateID picks the template CreateInstance uses when the caller
-// omits templateId: the recommended registered template if there is one,
-// otherwise the most recently registered one (ListAgentTemplates orders by
-// created_at DESC). The recommended flag is what the Dashboard sets on every
-// template it registers from the market.
+// omits templateId: the template an operator marked recommended if there is
+// one, otherwise the most recently registered one.
 //
-// The preference is exact rather than window-limited: pages are walked until
-// one comes back short, so a recommended template still wins when newer
-// non-recommended ones were registered after it. Any realistic registry fits
-// in the first page, so this is one query in practice.
+// Both are single bounded queries — the recommended preference is exact
+// without reading the registry, which matters because nothing sets the flag
+// automatically (see store.GetRecommendedAgentTemplate), so an install can
+// accumulate any number of newer non-recommended templates after the marked
+// one.
 //
 // none is true only when the registry was read successfully and holds nothing.
 // A failed read returns none=false — the caller must not report "nothing is
-// registered" on the strength of a listing that never happened. Either way the
+// registered" on the strength of a query that never completed. Either way the
 // returned id is then defaultAgentTemplateID, which the caller still passes to
 // CubeMaster so installs carrying that alias keep working.
 func (s *AgentHubService) defaultTemplateID(ctx context.Context) (id string, none bool) {
-	mostRecent := ""
-	for offset := 0; ; offset += store.MaxListLimit {
-		page, err := s.Store.ListAgentTemplates(ctx, store.MaxListLimit, offset)
-		if err != nil {
-			logging.G(ctx).Warnf("failed to list agent templates while choosing a default: %v", err)
-			break
-		}
-		for _, tmpl := range page {
-			if tmpl.Recommended {
-				return tmpl.TemplateID, false
-			}
-		}
-		if mostRecent == "" && len(page) > 0 {
-			mostRecent = page[0].TemplateID
-		}
-		if len(page) < store.MaxListLimit {
-			// Short page: the registry is exhausted and held no recommended
-			// template, so mostRecent (if any) is the answer.
-			if mostRecent != "" {
-				return mostRecent, false
-			}
-			return defaultAgentTemplateID, true
-		}
+	recommended, err := s.Store.GetRecommendedAgentTemplate(ctx)
+	if err != nil {
+		logging.G(ctx).Warnf("failed to read the recommended agent template: %v", err)
+		return defaultAgentTemplateID, false
 	}
-	// Listing failed part-way. Use anything already seen, and do not claim the
-	// registry is empty.
-	if mostRecent != "" {
-		return mostRecent, false
+	if recommended != nil {
+		return recommended.TemplateID, false
 	}
-	return defaultAgentTemplateID, false
+	newest, err := s.Store.ListAgentTemplates(ctx, 1, 0)
+	if err != nil {
+		logging.G(ctx).Warnf("failed to list agent templates while choosing a default: %v", err)
+		return defaultAgentTemplateID, false
+	}
+	if len(newest) > 0 {
+		return newest[0].TemplateID, false
+	}
+	return defaultAgentTemplateID, true
 }
 
 // CreateInstance orchestrates the full agent creation flow:

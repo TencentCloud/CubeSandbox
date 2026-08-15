@@ -507,6 +507,42 @@ func (s *Store) GetAgentTemplate(ctx context.Context, templateID string) (*Agent
 	return &tmpl, nil
 }
 
+// GetRecommendedAgentTemplate returns the most recently registered template
+// flagged recommended, or nil when none is flagged.
+//
+// The flag is set only through PATCH /agenthub/templates/{templateID}
+// (AgentHubHandler.UpdateTemplate, which the Dashboard's per-template toggle
+// calls). Neither registration path writes it — RegisterMarketTemplate omits
+// the column and UpsertTemplateSQL hardcodes it false — so an install has no
+// recommended template until an operator marks one.
+func (s *Store) GetRecommendedAgentTemplate(ctx context.Context) (*AgentTemplate, error) {
+	row := s.db.WithContext(ctx).Raw(
+		`SELECT template_id, name, source_agent_id, source_snapshot_id,
+		        source_sandbox_id, model, version, persistence_mode,
+		        recommended, created_at
+		 FROM t_agenthub_template
+		 WHERE recommended = ? AND deleted_at IS NULL
+		 ORDER BY created_at DESC, id DESC
+		 LIMIT 1`,
+		true,
+	).Row()
+	var tmpl AgentTemplate
+	var persistenceMode, created sql.NullString
+	if err := row.Scan(
+		&tmpl.TemplateID, &tmpl.Name, &tmpl.SourceAgentID, &tmpl.SourceSnapshotID,
+		&tmpl.SourceSandboxID, &tmpl.Model, &tmpl.Version, &persistenceMode,
+		&tmpl.Recommended, &created,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get recommended template: %w", err)
+	}
+	tmpl.PersistenceMode = nullStringPtr(persistenceMode)
+	tmpl.CreatedAt = nullStringPtr(created)
+	return &tmpl, nil
+}
+
 // DeleteAgentTemplate soft-deletes a template.
 //
 // This is the explicit AgentHub delete (DELETE /agenthub/templates/{id}).
