@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -22,10 +23,13 @@ type recordedCall struct {
 type fakeRedis struct {
 	mu    sync.Mutex
 	calls []recordedCall
-	// errOn maps command name -> error to return on the Nth call (counter-based).
 	failHSET bool
 	failHDEL bool
 	failXADD bool
+	// hgetMeta is returned by HGET; nil simulates a missing meta key.
+	hgetMeta []byte
+	// failHGET makes HGET return an error (Redis fault).
+	failHGET bool
 }
 
 func (f *fakeRedis) Do(cmd string, args ...interface{}) (interface{}, error) {
@@ -45,6 +49,11 @@ func (f *fakeRedis) Do(cmd string, args ...interface{}) (interface{}, error) {
 		if f.failXADD {
 			return nil, errors.New("XADD boom")
 		}
+	case "HGET":
+		if f.failHGET {
+			return nil, errors.New("HGET boom")
+		}
+		return f.hgetMeta, nil
 	}
 	return "OK", nil
 }
@@ -147,24 +156,108 @@ func TestStore_PublishDelete(t *testing.T) {
 	r := &fakeRedis{}
 	s := NewStore(r)
 
-	s.PublishDelete(context.Background(), "sbx-9")
+	s.PublishDelete(context.Background(), "sbx-9", "timeout")
 
 	calls := r.snapshot()
-	if len(calls) != 2 {
-		t.Fatalf("want HDEL + XADD, got %d", len(calls))
+	if len(calls) != 3 {
+		t.Fatalf("want HGET + HDEL + XADD, got %d: %+v", len(calls), calls)
 	}
-	if calls[0].cmd != "HDEL" || calls[0].args[1] != "sbx-9" {
-		t.Fatalf("HDEL wrong: %+v", calls[0])
+	if calls[0].cmd != "HGET" || calls[1].cmd != "HDEL" || calls[2].cmd != "XADD" {
+		t.Fatalf("call order wrong: %+v", calls)
 	}
-	if calls[1].cmd != "XADD" || calls[1].args[6] != OpDelete {
-		t.Fatalf("XADD op should be %q, got %+v", OpDelete, calls[1].args)
+	if calls[1].args[1] != "sbx-9" {
+		t.Fatalf("HDEL key wrong: %+v", calls[1])
 	}
-	// OpDelete carries no payload field.
-	for _, a := range calls[1].args {
-		if s, ok := a.(string); ok && s == FieldPayload {
-			t.Fatalf("delete event should not include payload field: %+v", calls[1].args)
+	if calls[2].args[6] != OpDelete {
+		t.Fatalf("XADD op should be %q, got %+v", OpDelete, calls[2].args)
+	}
+	var got DeletePayload
+	if err := json.Unmarshal(xaddPayload(t, calls[2].args), &got); err != nil {
+		t.Fatalf("payload json: %v", err)
+	}
+	if got.Reason != "timeout" || got.TemplateID != "" {
+		t.Fatalf("payload wrong: %+v", got)
+	}
+}
+
+func TestStore_PublishDelete_TemplateIDFromMeta(t *testing.T) {
+	metaJSON, err := json.Marshal(SandboxLifecycleMeta{SandboxID: "sbx-9", TemplateID: "tpl-9"})
+	if err != nil {
+		t.Fatalf("marshal meta: %v", err)
+	}
+	r := &fakeRedis{hgetMeta: metaJSON}
+	s := NewStore(r)
+
+	s.PublishDelete(context.Background(), "sbx-9", "orphaned")
+
+	calls := r.snapshot()
+	if len(calls) != 3 {
+		t.Fatalf("want HGET + HDEL + XADD, got %d", len(calls))
+	}
+	var got DeletePayload
+	if err := json.Unmarshal(xaddPayload(t, calls[2].args), &got); err != nil {
+		t.Fatalf("payload json: %v", err)
+	}
+	if got.TemplateID != "tpl-9" || got.Reason != "orphaned" {
+		t.Fatalf("payload should carry template_id from meta: %+v", got)
+	}
+}
+
+func TestStore_PublishDelete_HGETFailureStillPublishes(t *testing.T) {
+	r := &fakeRedis{failHGET: true}
+	s := NewStore(r)
+
+	s.PublishDelete(context.Background(), "sbx-9", "timeout")
+
+	calls := r.snapshot()
+	if len(calls) != 3 {
+		t.Fatalf("delete must publish even when HGET fails, got %d calls", len(calls))
+	}
+	if calls[1].cmd != "HDEL" || calls[2].cmd != "XADD" {
+		t.Fatalf("HDEL + XADD must still run after HGET error: %+v", calls)
+	}
+	var got DeletePayload
+	if err := json.Unmarshal(xaddPayload(t, calls[2].args), &got); err != nil {
+		t.Fatalf("payload json: %v", err)
+	}
+	if got.Reason != "timeout" || got.TemplateID != "" {
+		t.Fatalf("payload should carry reason only: %+v", got)
+	}
+}
+
+func TestStore_PublishDelete_ReasonSanitized(t *testing.T) {
+	reason := strings.Repeat("a", 300) + "\x00\x1b\x7f" + string([]byte{0xff, 0xfe})
+	r := &fakeRedis{}
+	s := NewStore(r)
+
+	s.PublishDelete(context.Background(), "sbx-9", reason)
+
+	calls := r.snapshot()
+	var got DeletePayload
+	if err := json.Unmarshal(xaddPayload(t, calls[2].args), &got); err != nil {
+		t.Fatalf("payload json: %v", err)
+	}
+	if len(got.Reason) > 256 {
+		t.Fatalf("reason not truncated: %d bytes", len(got.Reason))
+	}
+	for _, r := range got.Reason {
+		if r < 0x20 || r == 0x7f {
+			t.Fatalf("control char leaked into reason: %q", got.Reason)
 		}
 	}
+}
+
+func xaddPayload(t *testing.T, args []interface{}) []byte {
+	t.Helper()
+	for i := 0; i < len(args); i++ {
+		if s, ok := args[i].(string); ok && s == FieldPayload && i+1 < len(args) {
+			if b, ok := args[i+1].([]byte); ok {
+				return b
+			}
+		}
+	}
+	t.Fatalf("payload not found in XADD args: %+v", args)
+	return nil
 }
 
 func TestStore_DisabledIsNoOp(t *testing.T) {
@@ -173,7 +266,7 @@ func TestStore_DisabledIsNoOp(t *testing.T) {
 	s.SetEnabled(false)
 
 	s.PublishCreate(context.Background(), &SandboxLifecycleMeta{SandboxID: "sbx-1"})
-	s.PublishDelete(context.Background(), "sbx-1")
+	s.PublishDelete(context.Background(), "sbx-1", "request")
 	s.PublishState(context.Background(), "sbx-1", StatePaused, "api")
 
 	if got := len(r.snapshot()); got != 0 {
@@ -283,19 +376,19 @@ func TestStore_NilGuards(t *testing.T) {
 	// nil store, nil doer, nil meta, empty id — all must be safe.
 	var s *Store
 	s.PublishCreate(context.Background(), &SandboxLifecycleMeta{SandboxID: "x"})
-	s.PublishDelete(context.Background(), "x")
+	s.PublishDelete(context.Background(), "x", "request")
 	s.PublishState(context.Background(), "x", StatePaused, "api")
 
 	s2 := NewStore(nil)
 	s2.PublishCreate(context.Background(), &SandboxLifecycleMeta{SandboxID: "x"})
-	s2.PublishDelete(context.Background(), "x")
+	s2.PublishDelete(context.Background(), "x", "request")
 	s2.PublishState(context.Background(), "x", StatePaused, "api")
 
 	r := &fakeRedis{}
 	s3 := NewStore(r)
 	s3.PublishCreate(context.Background(), nil)
 	s3.PublishCreate(context.Background(), &SandboxLifecycleMeta{})
-	s3.PublishDelete(context.Background(), "")
+	s3.PublishDelete(context.Background(), "", "request")
 	s3.PublishState(context.Background(), "", StatePaused, "api")
 	if got := len(r.snapshot()); got != 0 {
 		t.Fatalf("nil/empty inputs must not reach Redis, got %d calls", got)

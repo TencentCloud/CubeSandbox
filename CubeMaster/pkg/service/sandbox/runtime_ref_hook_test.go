@@ -19,24 +19,24 @@ func TestDestroyHookChain_FIFOAndContinueOnError(t *testing.T) {
 	var order []string
 	wantErr := errors.New("h2 boom")
 
-	RegisterAfterDestroySandboxSuccessHook(func(_ context.Context, id string) error {
-		order = append(order, "h1:"+id)
+	RegisterAfterDestroySandboxSuccessHook(func(_ context.Context, id, reason string) error {
+		order = append(order, "h1:"+id+":"+reason)
 		return nil
 	})
-	RegisterAfterDestroySandboxSuccessHook(func(_ context.Context, id string) error {
-		order = append(order, "h2:"+id)
+	RegisterAfterDestroySandboxSuccessHook(func(_ context.Context, id, reason string) error {
+		order = append(order, "h2:"+id+":"+reason)
 		return wantErr
 	})
-	RegisterAfterDestroySandboxSuccessHook(func(_ context.Context, id string) error {
-		order = append(order, "h3:"+id)
+	RegisterAfterDestroySandboxSuccessHook(func(_ context.Context, id, reason string) error {
+		order = append(order, "h3:"+id+":"+reason)
 		return nil
 	})
 
-	err := runAfterDestroySandboxSuccessHook(context.Background(), "sbx-x")
+	err := runAfterDestroySandboxSuccessHook(context.Background(), "sbx-x", "orphaned")
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("first error must propagate, got %v", err)
 	}
-	if got := order; len(got) != 3 || got[0] != "h1:sbx-x" || got[1] != "h2:sbx-x" || got[2] != "h3:sbx-x" {
+	if got := order; len(got) != 3 || got[0] != "h1:sbx-x:orphaned" || got[1] != "h2:sbx-x:orphaned" || got[2] != "h3:sbx-x:orphaned" {
 		t.Fatalf("hooks ran out of order or stopped early: %v", got)
 	}
 }
@@ -68,7 +68,7 @@ func TestNilHookIgnored(t *testing.T) {
 	defer ResetAfterDestroySandboxSuccessHooks()
 
 	RegisterAfterDestroySandboxSuccessHook(nil)
-	if err := runAfterDestroySandboxSuccessHook(context.Background(), "x"); err != nil {
+	if err := runAfterDestroySandboxSuccessHook(context.Background(), "x", "request"); err != nil {
 		t.Fatalf("nil hook must be skipped silently, got %v", err)
 	}
 }

@@ -153,9 +153,9 @@ func onAfterCreate(ctx context.Context, sandboxID, hostID, hostIP string, req *s
 	return nil
 }
 
-func onAfterDestroy(ctx context.Context, sandboxID string) error {
+func onAfterDestroy(ctx context.Context, sandboxID, reason string) error {
 	if store := getDefaultStore(); store != nil {
-		store.PublishDelete(ctx, sandboxID)
+		store.PublishDelete(ctx, sandboxID, reason)
 	}
 	return nil
 }

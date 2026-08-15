@@ -13,12 +13,13 @@ import (
 
 var (
 	destroyTaskHooksMu sync.RWMutex
-	destroyTaskHooks   []func(context.Context, string) error
+	destroyTaskHooks   []func(context.Context, string, string) error
 )
 
 // RegisterAfterDestroyTaskSuccessHook appends a hook fired after the async
-// destroy task confirms the sandbox is gone. Hooks run sequentially.
-func RegisterAfterDestroyTaskSuccessHook(hook func(context.Context, string) error) {
+// destroy task confirms the sandbox is gone. Hooks run sequentially. The
+// second string argument is the destroy reason (KillReason, default "request").
+func RegisterAfterDestroyTaskSuccessHook(hook func(context.Context, string, string) error) {
 	if hook == nil {
 		return
 	}
@@ -28,7 +29,7 @@ func RegisterAfterDestroyTaskSuccessHook(hook func(context.Context, string) erro
 }
 
 // SetAfterDestroyTaskSuccessHook retained for backward compat: appends.
-func SetAfterDestroyTaskSuccessHook(hook func(context.Context, string) error) {
+func SetAfterDestroyTaskSuccessHook(hook func(context.Context, string, string) error) {
 	RegisterAfterDestroyTaskSuccessHook(hook)
 }
 
@@ -39,14 +40,14 @@ func ResetAfterDestroyTaskSuccessHooks() {
 	destroyTaskHooksMu.Unlock()
 }
 
-func runAfterDestroyTaskSuccessHook(ctx context.Context, sandboxID string) error {
+func runAfterDestroyTaskSuccessHook(ctx context.Context, sandboxID, reason string) error {
 	destroyTaskHooksMu.RLock()
-	hooks := append([]func(context.Context, string) error(nil), destroyTaskHooks...)
+	hooks := append([]func(context.Context, string, string) error(nil), destroyTaskHooks...)
 	destroyTaskHooksMu.RUnlock()
 
 	var firstErr error
 	for _, h := range hooks {
-		if err := h(ctx, sandboxID); err != nil {
+		if err := h(ctx, sandboxID, reason); err != nil {
 			if firstErr == nil {
 				firstErr = err
 			} else {

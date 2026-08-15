@@ -267,7 +267,7 @@ func Init(ctx context.Context) error {
 }
 
 func configureSnapshotRuntimeRefHooks() {
-	releaseBySandboxID := func(ctx context.Context, sandboxID string) error {
+	releaseBySandboxID := func(ctx context.Context, sandboxID, _ string) error {
 		errReleasingRefs := ReleaseSnapshotRuntimeRefsBySandbox(ctx, sandboxID, snapshotRuntimeRefReleasedByDestroy)
 		errDeletingSpec := sandboxspec.Delete(ctx, sandboxID)
 		if errReleasingRefs != nil && errDeletingSpec != nil {

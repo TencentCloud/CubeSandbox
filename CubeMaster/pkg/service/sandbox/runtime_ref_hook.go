@@ -17,14 +17,15 @@ import (
 // lifecycle metadata, ...) can react without stepping on each other.
 var (
 	destroyHooksMu sync.RWMutex
-	destroyHooks   []func(context.Context, string) error
+	destroyHooks   []func(context.Context, string, string) error
 )
 
 // RegisterAfterDestroySandboxSuccessHook appends a hook to the destroy chain.
 // Hooks run sequentially in registration order; an individual hook's error is
 // returned to the caller of runAfterDestroySandboxSuccessHook (joined when
-// multiple hooks fail) but does NOT short-circuit later hooks.
-func RegisterAfterDestroySandboxSuccessHook(hook func(context.Context, string) error) {
+// multiple hooks fail) but does NOT short-circuit later hooks. The second
+// string argument is the destroy reason (KillReason, default "request").
+func RegisterAfterDestroySandboxSuccessHook(hook func(context.Context, string, string) error) {
 	if hook == nil {
 		return
 	}
@@ -37,7 +38,7 @@ func RegisterAfterDestroySandboxSuccessHook(hook func(context.Context, string) e
 // with single-registration callers (templatecenter). It now appends to the
 // chain rather than replacing it; callers that genuinely need replacement
 // semantics should use ResetAfterDestroySandboxSuccessHooks first.
-func SetAfterDestroySandboxSuccessHook(hook func(context.Context, string) error) {
+func SetAfterDestroySandboxSuccessHook(hook func(context.Context, string, string) error) {
 	RegisterAfterDestroySandboxSuccessHook(hook)
 }
 
@@ -49,14 +50,14 @@ func ResetAfterDestroySandboxSuccessHooks() {
 	destroyHooksMu.Unlock()
 }
 
-func runAfterDestroySandboxSuccessHook(ctx context.Context, sandboxID string) error {
+func runAfterDestroySandboxSuccessHook(ctx context.Context, sandboxID, reason string) error {
 	destroyHooksMu.RLock()
-	hooks := append([]func(context.Context, string) error(nil), destroyHooks...)
+	hooks := append([]func(context.Context, string, string) error(nil), destroyHooks...)
 	destroyHooksMu.RUnlock()
 
 	var firstErr error
 	for _, h := range hooks {
-		if err := h(ctx, sandboxID); err != nil {
+		if err := h(ctx, sandboxID, reason); err != nil {
 			if firstErr == nil {
 				firstErr = err
 			} else {
