@@ -8,6 +8,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/wrapredis"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
@@ -143,9 +144,13 @@ func onAfterCreate(ctx context.Context, sandboxID, hostID, hostIP string, req *s
 		EndAt:          projectedEndAt(now, timeoutSeconds),
 	}
 	if req.Annotations != nil {
-		// Template ID is conventionally carried via annotations from CubeAPI;
-		// the field is informational so we tolerate it being absent.
+		// Template ID is conventionally carried via annotations from CubeAPI.
+		// Prefer the plain "template_id" key and fall back to the app-snapshot
+		// annotation so both historical and current producers populate it.
+		// The field is informational, so we tolerate it being absent.
 		if v, ok := req.Annotations["template_id"]; ok {
+			meta.TemplateID = v
+		} else if v, ok := req.Annotations[constants.CubeAnnotationAppSnapshotTemplateID]; ok {
 			meta.TemplateID = v
 		}
 	}

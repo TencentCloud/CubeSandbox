@@ -12,6 +12,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
 
 // recordedCall captures one Do invocation for later assertion.
@@ -21,8 +25,8 @@ type recordedCall struct {
 }
 
 type fakeRedis struct {
-	mu    sync.Mutex
-	calls []recordedCall
+	mu       sync.Mutex
+	calls    []recordedCall
 	failHSET bool
 	failHDEL bool
 	failXADD bool
@@ -369,6 +373,65 @@ func TestStore_PublishState_XADDFailureSwallowed(t *testing.T) {
 	calls := r.snapshot()
 	if len(calls) != 1 || calls[0].cmd != "XADD" {
 		t.Fatalf("expected single XADD attempt, got %+v", calls)
+	}
+}
+
+func TestStore_XADDFailureIncrementsCounter(t *testing.T) {
+	before := testutil.ToFloat64(xaddFailuresTotal)
+
+	r := &fakeRedis{failXADD: true}
+	s := NewStore(r)
+	s.PublishCreate(context.Background(), &SandboxLifecycleMeta{SandboxID: "sbx-1"})
+
+	delta := testutil.ToFloat64(xaddFailuresTotal) - before
+	if delta != 1 {
+		t.Fatalf("xadd failure counter delta = %v, want 1", delta)
+	}
+}
+
+func TestOnAfterCreate_TemplateIDAnnotationSources(t *testing.T) {
+	r := &fakeRedis{}
+	s := NewStore(r)
+	setDefaultStore(s)
+	defer setDefaultStore(nil)
+
+	cases := []struct {
+		name        string
+		annotations map[string]string
+		want        string
+	}{
+		{"legacy template_id key", map[string]string{"template_id": "tpl-legacy"}, "tpl-legacy"},
+		{"app snapshot annotation", map[string]string{constants.CubeAnnotationAppSnapshotTemplateID: "tpl-snapshot"}, "tpl-snapshot"},
+		{"plain key wins over snapshot annotation", map[string]string{
+			"template_id": "tpl-plain",
+			constants.CubeAnnotationAppSnapshotTemplateID: "tpl-snapshot",
+		}, "tpl-plain"},
+		{"absent tolerated", nil, ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &fakeRedis{}
+			s := NewStore(r)
+			setDefaultStore(s)
+			defer setDefaultStore(nil)
+
+			req := &sandboxtypes.CreateCubeSandboxReq{Annotations: tc.annotations}
+			if err := onAfterCreate(context.Background(), "sbx-t", "host-1", "10.0.0.1", req); err != nil {
+				t.Fatalf("onAfterCreate: %v", err)
+			}
+			calls := r.snapshot()
+			if len(calls) == 0 || calls[0].cmd != "HSET" {
+				t.Fatalf("expected HSET first, got %+v", calls)
+			}
+			var got SandboxLifecycleMeta
+			if err := json.Unmarshal(calls[0].args[2].([]byte), &got); err != nil {
+				t.Fatalf("meta json: %v", err)
+			}
+			if got.TemplateID != tc.want {
+				t.Fatalf("TemplateID = %q, want %q", got.TemplateID, tc.want)
+			}
+		})
 	}
 }
 

@@ -12,8 +12,20 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 )
+
+// xaddFailuresTotal counts every failed XADD of a lifecycle event. It is the
+// single source of truth for producer-side event loss (no outbox is kept):
+// alerts watch this counter, and the delete path recovers template_id before
+// HDEL so a Redis fault cannot strand a delete without its context.
+var xaddFailuresTotal = promauto.NewCounter(prometheus.CounterOpts{
+	Name: "cubemaster_lifecycle_xadd_failures_total",
+	Help: "Total failures publishing lifecycle events to the Redis stream (XADD).",
+})
 
 // redisDoer is the minimal redigo-shaped surface the writer needs. wrapredis's
 // *RedisWrap satisfies it; tests substitute a fake.
@@ -244,7 +256,11 @@ func (s *Store) xadd(op, sandboxID string, payload []byte) (interface{}, error) 
 	if len(payload) > 0 {
 		args = append(args, FieldPayload, payload)
 	}
-	return s.doer.Do("XADD", args...)
+	res, err := s.doer.Do("XADD", args...)
+	if err != nil {
+		xaddFailuresTotal.Inc()
+	}
+	return res, err
 }
 
 // defaultStore is the package-level singleton wired by Init(). Hooks call into
