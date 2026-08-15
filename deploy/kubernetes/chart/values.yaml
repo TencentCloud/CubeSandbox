@@ -337,7 +337,10 @@ cubeOps:
   # Required when webui.enabled=true.
   enabled: true
   replicas: 1
-  podAnnotations: {}
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "3010"
+    prometheus.io/path: "/metrics"
   bind: "0.0.0.0:3010"
   # Empty uses cubeProxy.domain for CUBE_API_SANDBOX_DOMAIN.
   sandboxDomain: ""
@@ -345,10 +348,18 @@ cubeOps:
     type: ClusterIP
     port: 3010
   env: []
+  # Webhook delivery worker (issue #642). Disabled by default; the worker
+  # requires a reachable lifecycle Redis stream (REDIS_URL). Additional knobs
+  # (CUBE_OPS_WEBHOOK_*) can be passed through cubeOps.env.
+  webhook:
+    enabled: false
+    # Lifecycle Redis URL, e.g. redis://:pass@redis:6379/0. Empty → the env
+    # is not set and CubeOps keeps its own REDIS_URL (or none).
+    redisUrl: ""
   probes:
     readiness:
       enabled: true
-      path: /health
+      path: /readyz
       initialDelaySeconds: 5
       periodSeconds: 10
       failureThreshold: 12
