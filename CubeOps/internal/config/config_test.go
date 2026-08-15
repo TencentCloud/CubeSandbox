@@ -104,3 +104,28 @@ func TestLoad_MissingDB_Fails(t *testing.T) {
 		t.Error("Load with no DB config = nil err, want error")
 	}
 }
+
+// TestLoad_WebhookEnabledEnv proves the webhook feature switch honours
+// CUBE_OPS_WEBHOOK_ENABLED and defaults to disabled.
+func TestLoad_WebhookEnabledEnv(t *testing.T) {
+	t.Setenv("CUBE_OPS_CONFIG", "/nonexistent/path/ops.yaml")
+	t.Setenv("DATABASE_URL", "mysql://root:pass@127.0.0.1:3306/webhookdb")
+
+	t.Setenv("CUBE_OPS_WEBHOOK_ENABLED", "true")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(enabled=true): %v", err)
+	}
+	if !cfg.Webhook.Enabled {
+		t.Error("webhook.enabled should be true when CUBE_OPS_WEBHOOK_ENABLED=true")
+	}
+
+	t.Setenv("CUBE_OPS_WEBHOOK_ENABLED", "false")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load(enabled=false): %v", err)
+	}
+	if cfg.Webhook.Enabled {
+		t.Error("webhook.enabled should be false when CUBE_OPS_WEBHOOK_ENABLED=false")
+	}
+}

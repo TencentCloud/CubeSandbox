@@ -71,6 +71,10 @@ type Config struct {
 	// by CubeDB/tombstone (7-day retention, hourly). DISABLED by default — the
 	// purge is irreversible, so it must be opted into explicitly.
 	SoftDeletePurge SoftDeletePurgeConf `yaml:"soft_delete_purge"`
+	// Webhook delivery worker (issue #642). Only the feature switch is
+	// introduced here; the full worker section is finalized by the delivery
+	// commit (webhook-refactor plan §6.1).
+	Webhook WebhookConfig `yaml:"webhook"`
 }
 
 // SoftDeletePurgeConf configures the CubeOps tombstone purger.
@@ -79,6 +83,13 @@ type SoftDeletePurgeConf struct {
 	DryRun    bool          `yaml:"dry_run"`
 	Retention time.Duration `yaml:"retention"` // <=0 -> 7d; (0,1h) clamped up to 1h
 	Interval  time.Duration `yaml:"interval"`  // <=0 -> 1h; (0,1m) clamped up to 1m
+}
+
+// WebhookConfig controls the CubeOps in-process webhook delivery worker.
+type WebhookConfig struct {
+	// Enabled turns the worker (consumer + sender) on. Defaults to false so
+	// existing deployments are unaffected until they opt in.
+	Enabled bool `yaml:"enabled"`
 }
 
 // Load reads configuration from YAML + environment variables (env wins).
@@ -324,6 +335,9 @@ func overrideFromEnv(cfg *Config) {
 	}
 	if v := os.Getenv("REDIS_URL"); v != "" {
 		cfg.RedisURL = v
+	}
+	if v := os.Getenv("CUBE_OPS_WEBHOOK_ENABLED"); v != "" {
+		cfg.Webhook.Enabled = strings.EqualFold(v, "true") || v == "1"
 	}
 	if v := os.Getenv("CUBE_API_SANDBOX_DOMAIN"); v != "" {
 		cfg.SandboxDomain = v

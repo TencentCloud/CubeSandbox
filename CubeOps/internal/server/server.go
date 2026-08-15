@@ -97,6 +97,7 @@ func (s *Server) buildRouter() *gin.Engine {
 	storeH := handler.NewStoreHandler(handler.DefaultRegistryClient())
 	configH := handler.NewConfigHandler(s.cfg.Bind, 100, s.cfg.JWTSecret != "", s.cfg.SandboxDomain, "cubebox")
 	agenthubH := handler.NewAgentHubHandler(s.store, s.cm)
+	webhookH := handler.NewWebhookHandler(service.NewWebhookService(s.store), s.cfg.Webhook.Enabled)
 	// SDK handler gets the AgentHubService so that E2B template/snapshot
 	// deletions can reverse-sync AgentHub registrations
 	sdkH := handler.NewSDKHandler(s.cm).WithAgentHubService(agenthubH.AgentHubService())
@@ -114,6 +115,7 @@ func (s *Server) buildRouter() *gin.Engine {
 	configH.Register(authed)
 	storeH.Register(authed)
 	agenthubH.Register(authed)
+	webhookH.Register(authed)
 
 	// SDK routes — mounted at both /api/v1/sdk and /api/v1/sdk/v2 because
 	// the WebUI and the E2B-compatible clients hit different prefixes.
