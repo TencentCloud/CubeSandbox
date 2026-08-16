@@ -57,6 +57,13 @@ func TestConsumer_MaterializesAndAcks(t *testing.T) {
 	backlog := webhook.NewBacklogCache(0)
 	consumer := webhook.NewConsumer(rdb, ds, env.store, "cube-webhook", "test-1",
 		10, 100*time.Millisecond, 0, time.Second, 10000, 200, backlog)
+	// Create the group BEFORE publishing: the consumer creates it at "$" on
+	// startup, and an entry published before group creation would sit behind
+	// the group cursor and never be delivered (real-world startup window, but
+	// the test must be deterministic).
+	if err := rdb.XGroupCreateMkStream(ctx, workerTestStreamKey, "cube-webhook", "$").Err(); err != nil {
+		t.Fatalf("pre-create group: %v", err)
+	}
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go consumer.Run(runCtx)
@@ -108,6 +115,11 @@ func TestConsumer_NoSubscribersAcks(t *testing.T) {
 	backlog := webhook.NewBacklogCache(0)
 	consumer := webhook.NewConsumer(rdb, ds, env.store, "cube-webhook", "test-1",
 		10, 100*time.Millisecond, 0, time.Second, 10000, 200, backlog)
+	// See TestConsumer_MaterializesAndAcks: pre-create the group so the entry
+	// is delivered deterministically.
+	if err := rdb.XGroupCreateMkStream(ctx, workerTestStreamKey, "cube-webhook", "$").Err(); err != nil {
+		t.Fatalf("pre-create group: %v", err)
+	}
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go consumer.Run(runCtx)
