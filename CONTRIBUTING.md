@@ -82,7 +82,7 @@ See the [Makefile](./Makefile) for the full list of build targets.
 
 ## Submitting a Pull Request
 
-1. **Fork** the repository and create a feature branch from `main`.
+1. **Fork** the repository and create a feature branch from `master`.
 2. **Make your changes** — keep commits focused and atomic.
 3. **Test** — make sure existing tests and linters still pass.
 4. **Add tests** — add focused test coverage when behavior changes.
