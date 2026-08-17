@@ -165,7 +165,7 @@ grep -aF '[plugin_volume] initialized' /data/log/Cubelet/Cubelet-req.log | tail 
 
 ## Usage
 
-Examples use **Python SDK `cubesandbox` ≥ 0.6.0**. See [Framework §2.1](../../../docs/guide/volume-plugin.md).
+Examples use **Python SDK `cubesandbox` ≥ 0.6.0**. See [Framework §2.1](../../../../docs/guide/volume-plugin.md).
 
 ### Create Volume
 
@@ -415,4 +415,4 @@ Volume still exists. `Volume.destroy("<id>")` first, then recreate.
 - [COS Go SDK](https://cloud.tencent.com/document/product/436/31215) (rpc example)
 - rpc example: [../rpc/](../rpc/)
 - Binary driver: [Cubelet/plugins/volume/binary/driver.go](../../../../Cubelet/plugins/volume/binary/driver.go)
-- Framework: [docs/guide/volume-plugin.md](../../../docs/guide/volume-plugin.md)
+- Framework: [docs/guide/volume-plugin.md](../../../../docs/guide/volume-plugin.md)
