@@ -172,6 +172,16 @@ port=8443, scheme="https"`, the deny still matches
 (first match wins). List the more specific allow rule first to grant
 the exception.
 
+The same domain may appear in both the L3/L4 `allow_out` list and an
+L7 `rule`. In that case the two coexist: the domain's learned IPs get
+a plain `/32` any-port allow entry (so non-rule ports keep ordinary
+L3/L4 SNAT access) **and** an L7 `(ip, port)` entry per rule port (so
+those ports are steered through CubeEgress). The more specific
+`(ip, port)` match wins for the rule's ports; the `/32` covers the
+rest. Put another way, adding an L7 rule for a domain already in
+`allow_out` does **not** remove its plain L3 access — it only adds L7
+interception on the rule's ports.
+
 ::: tip Single-level vs multi-level subdomain
 `*.example.com` matches **all** subdomains regardless of label
 depth. To allow only single-level subdomains (e.g. `www`,

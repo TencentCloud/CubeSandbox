@@ -178,6 +178,10 @@ const (
 	dnsPolicyFlagLearningEnabled = 1 << 0
 	// Network policy flags. Must match src/cubevs.h.
 	netPolicyFlagL7Required = 1 << 0
+	// netPolicyFlagL3Allowed marks a domain present in both plain allow_out
+	// and an L7 rule, so the datapath learns the plain /32 any-port entry
+	// alongside the L7 /48 entries. Must match src/cubevs.h.
+	netPolicyFlagL3Allowed = 1 << 1
 	// L7 scheme values in dns_allow_value / net_policy_value_v3 per-port
 	// entries. Must match L7_SCHEME_* in src/cubevs.h.
 	L7SchemeNone  uint8 = 0

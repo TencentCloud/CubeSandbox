@@ -671,7 +671,12 @@ func mergeAllowOutWithL7(base, l7 []allowOutPolicyEntry) []allowOutPolicyEntry {
 }
 
 // mergeDNSAllowRules combines the non-L7 domain rules with the L7 domain rules.
-// Same-key entries merge flags (OR) and adopt the L7 rule's port set.
+// Same-key entries merge flags (OR) and adopt the L7 rule's port set. When the
+// same domain is present in both (plain allow_out AND an L7 rule), the merged
+// entry is also marked netPolicyFlagL3Allowed so the datapath learns the plain
+// /32 any-port entry alongside the L7 /48 entries — otherwise the L7 rule
+// would silently narrow the same-domain plain allow_out to only the rule's
+// ports.
 func mergeDNSAllowRules(base, l7 []dnsAllowRule) []dnsAllowRule {
 	if len(l7) == 0 {
 		return base
@@ -684,7 +689,7 @@ func mergeDNSAllowRules(base, l7 []dnsAllowRule) []dnsAllowRule {
 	}
 	for _, r := range l7 {
 		if idx, ok := byKey[r.key]; ok {
-			out[idx].value.Flags |= r.value.Flags
+			out[idx].value.Flags |= r.value.Flags | netPolicyFlagL3Allowed
 			out[idx].value.PortCount = r.value.PortCount
 			out[idx].value.Ports = r.value.Ports
 			continue

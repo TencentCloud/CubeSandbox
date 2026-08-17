@@ -222,7 +222,10 @@ func TestBuildNetPolicyPlanDeduplicatesAndMergesFlags(t *testing.T) {
 	if got, want := len(plan.dnsAllowRules), 1; got != want {
 		t.Fatalf("len(plan.dnsAllowRules)=%d, want %d", got, want)
 	}
-	if got, want := plan.dnsAllowRules[0].value.Flags, uint8(netPolicyFlagL7Required); got != want {
+	// api.example.com is in BOTH plain allow_out and an L7 rule, so the merged
+	// entry carries L7Required|L3Allowed (the L3 bit keeps the plain /32
+	// any-port entry alongside the L7 /48 entries).
+	if got, want := plan.dnsAllowRules[0].value.Flags, uint8(netPolicyFlagL7Required|netPolicyFlagL3Allowed); got != want {
 		t.Fatalf("dns allow flags=%d, want %d", got, want)
 	}
 	if got, want := plan.dnsPolicyFlags, uint8(dnsPolicyFlagLearningEnabled); got != want {
@@ -233,6 +236,45 @@ func TestBuildNetPolicyPlanDeduplicatesAndMergesFlags(t *testing.T) {
 	}
 	if got, want := len(effectiveDenyOutEntriesForReplace(plan)), len(alwaysDeniedSandboxEntries)+1; got != want {
 		t.Fatalf("len(effectiveDenyOutEntriesForReplace(plan))=%d, want %d", got, want)
+	}
+}
+
+// TestBuildNetPolicyPlanL3AllowedCoexistence pins the plain-allow_out +
+// L7-rule coexistence semantics for a shared domain: the merged dns_allow
+// entry must carry netPolicyFlagL3Allowed (so the datapath learns both the
+// plain /32 any-port entry and the L7 /48 entries), while a domain present in
+// only one of them must not set it.
+func TestBuildNetPolicyPlanL3AllowedCoexistence(t *testing.T) {
+	allowOut := []string{"both.example.com", "plain.example.com"}
+	l7AllowOut := []L7Target{
+		{Host: "both.example.com", Port: 8443, Scheme: L7SchemeHTTPS},
+		{Host: "l7only.example.com", Port: 9090, Scheme: L7SchemeHTTP},
+	}
+
+	plan, err := buildNetPolicyPlan(MVMOptions{
+		AllowOut:   &allowOut,
+		L7AllowOut: &l7AllowOut,
+	})
+	if err != nil {
+		t.Fatalf("buildNetPolicyPlan returned error: %v", err)
+	}
+
+	flagsByDomain := make(map[string]uint8, len(plan.dnsAllowRules))
+	for _, r := range plan.dnsAllowRules {
+		flagsByDomain[r.domain] = r.value.Flags
+	}
+
+	l7bit := uint8(netPolicyFlagL7Required)
+	l3bit := uint8(netPolicyFlagL3Allowed)
+
+	if got := flagsByDomain["both.example.com"]; got != l7bit|l3bit {
+		t.Fatalf("both.example.com flags=%#x, want L7Required|L3Allowed (%#x)", got, l7bit|l3bit)
+	}
+	if got := flagsByDomain["l7only.example.com"]; got != l7bit {
+		t.Fatalf("l7only.example.com flags=%#x, want L7Required only (%#x)", got, l7bit)
+	}
+	if got := flagsByDomain["plain.example.com"]; got != 0 {
+		t.Fatalf("plain.example.com flags=%#x, want 0 (plain allow)", got)
 	}
 }
 

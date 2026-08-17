@@ -36,6 +36,14 @@
 #define MAX_DNS_NAME_LEN		256
 #define DNS_POLICY_FLAG_LEARNING_ENABLED	1
 #define NET_POLICY_FLAG_L7_REQUIRED	1
+/* Set alongside NET_POLICY_FLAG_L7_REQUIRED when a domain is present in BOTH
+ * a plain (L3) allow_out rule and an L7 rule. Tells dns_learn_response_ip to
+ * learn the plain /32 any-port entry in addition to the L7 (ip, port)/48
+ * entries, so non-rule ports keep plain SNAT access while the rule's ports are
+ * L7-intercepted. Without it an L7 rule silently narrows a same-domain plain
+ * allow_out to only the rule's ports.
+ */
+#define NET_POLICY_FLAG_L3_ALLOWED	2
 #define NSEC_PER_SEC			1000000000ULL
 
 /* L7 scheme values embedded in dns_allow_value / net_policy_value_v2 per-port

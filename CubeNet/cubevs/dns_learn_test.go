@@ -210,6 +210,69 @@ func TestDNSLearnL7ExplicitPorts(t *testing.T) {
 	}
 }
 
+// TestDNSLearnL7WithL3AlsoWritesPlainAndL7Entries covers the coexistence path:
+// a domain present in both plain allow_out and an L7 rule must learn BOTH the
+// /32 any-port entry (plain SNAT for non-rule ports) AND the /48 L7 entry
+// (interception for the rule's port). Previously the L7 flag subsumed the plain
+// allow, so only the rule's port was admitted and the domain lost plain L3
+// access on every other port.
+func TestDNSLearnL7WithL3AlsoWritesPlainAndL7Entries(t *testing.T) {
+	env := loadDNSLearnTestEnv(t)
+	ifindex := uint32(304)
+	ip := mustParseCIDRForTest(t, "192.0.2.80").IP
+
+	query := dnsQueryTrackValue{
+		Flags:     uint8(netPolicyFlagL7Required) | uint8(netPolicyFlagL3Allowed),
+		PortCount: 1,
+		Ports: [maxL7PortsPerHost]l7PortEntry{
+			{Port: htonsPort(8443), Scheme: L7SchemeHTTPS},
+		},
+	}
+	inner := runDNSLearn(t, env, ifindex, ip, 300, query)
+
+	// The /48 L7 entry for the rule's port is present and intercepted.
+	l7, ok := lookupAllowV3(t, inner, lpmKeyV3{Prefixlen: 48, IP: ip, Port: htonsPort(8443)})
+	if !ok {
+		t.Fatal("missing /48 L7 entry for rule port 8443")
+	}
+	if l7.Flags&uint8(netPolicyFlagL7Required) == 0 {
+		t.Fatal("/48 entry missing L7 flag")
+	}
+	if l7.Scheme != L7SchemeHTTPS {
+		t.Fatalf("/48 scheme=%d, want https", l7.Scheme)
+	}
+
+	// The /32 any-port plain entry is also present for everything else, and it
+	// must be a plain allow (no L7 / L3 marker bits leaked into the value).
+	plain, ok := lookupAllowV3(t, inner, lpmKeyV3{Prefixlen: 32, IP: ip, Port: 0})
+	if !ok {
+		t.Fatal("missing /32 plain entry for L3-allowed domain")
+	}
+	if plain.Flags&uint8(netPolicyFlagL7Required) != 0 {
+		t.Fatalf("/32 plain entry has unexpected L7 flag: %#x", plain.Flags)
+	}
+	if plain.Flags&uint8(netPolicyFlagL3Allowed) != 0 {
+		t.Fatalf("/32 plain entry leaked L3_ALLOWED marker: %#x", plain.Flags)
+	}
+	if plain.Scheme != L7SchemeNone {
+		t.Fatalf("/32 plain scheme=%d, want none", plain.Scheme)
+	}
+
+	// A lookup for a non-rule port must NOT match a /48 L7 entry; it falls back
+	// via LPM longest-prefix to the /32 plain entry (which is exactly how
+	// classify_egress_flow admits the flow via plain SNAT).
+	fallback, ok := lookupAllowV3(t, inner, lpmKeyV3{Prefixlen: 48, IP: ip, Port: htonsPort(443)})
+	if !ok {
+		t.Fatal("non-rule port 443 matched nothing, want fallback to the /32 plain entry")
+	}
+	if fallback.KeyPrefixlen == 48 && fallback.Flags&uint8(netPolicyFlagL7Required) != 0 {
+		t.Fatalf("non-rule port 443 unexpectedly matched a /48 L7 entry: %+v", fallback)
+	}
+	if fallback.KeyPrefixlen != 32 {
+		t.Fatalf("non-rule port 443 fell back to key_prefixlen=%d, want 32 (plain)", fallback.KeyPrefixlen)
+	}
+}
+
 // testFlagMarker is a high-bit flag used only by tests to detect improper
 // flag inheritance from COVERING entries (it is not a real netPolicyFlag*).
 const testFlagMarker = 0x40

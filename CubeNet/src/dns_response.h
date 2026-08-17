@@ -129,12 +129,22 @@ static __always_inline void dns_learn_response_ip(__u32 ifindex, __u32 ip, __u32
 	if (!inner_map)
 		return;
 
-	/* Plain (non-L7) allow: learn a single /32 (any-port) entry. */
-	if (!(query->flags & NET_POLICY_FLAG_L7_REQUIRED)) {
+	/* Learn the plain /32 (any-port) entry whenever the domain is
+	 * plain-allowed. For a non-L7 allow this is the whole policy; for a domain
+	 * that is both plain-allowed and L7-ruled (NET_POLICY_FLAG_L3_ALLOWED) it
+	 * coexists with the /48 L7 entries written below — a non-rule port falls
+	 * back to this /32 (plain SNAT) while the rule's ports match the longer
+	 * /48 prefix (L7 intercept) in classify_egress_flow. The L7/L3 marker bits
+	 * are stripped so the entry reads as a plain allow; for a non-L7 query
+	 * (flags==0) the mask is a no-op, so both cases share this one block.
+	 */
+	if (!(query->flags & NET_POLICY_FLAG_L7_REQUIRED) ||
+	    (query->flags & NET_POLICY_FLAG_L3_ALLOWED)) {
 		struct lpm_key_v3 key = { .prefixlen = 32, .ip = ip, .port = 0 };
 		struct net_policy_value_v3 value = {
 			.expires_at_ns = expires,
-			.flags = query->flags,
+			.flags = query->flags &
+				~(__u8)(NET_POLICY_FLAG_L7_REQUIRED | NET_POLICY_FLAG_L3_ALLOWED),
 			.scheme = L7_SCHEME_NONE,
 			.key_prefixlen = 32,
 		};
@@ -145,8 +155,11 @@ static __always_inline void dns_learn_response_ip(__u32 ifindex, __u32 ip, __u32
 				value.expires_at_ns = 0;
 		}
 		bpf_map_update_elem(inner_map, &key, &value, BPF_ANY);
-		return;
 	}
+
+	/* A non-L7 allow is fully handled by the /32 entry above. */
+	if (!(query->flags & NET_POLICY_FLAG_L7_REQUIRED))
+		return;
 
 	/* L7 allow: one exact (ip, port)/48 entry per (port, scheme).
 	 *
