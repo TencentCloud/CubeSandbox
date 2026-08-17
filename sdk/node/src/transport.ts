@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Tencent Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-import { Agent, buildConnector, fetch, type Dispatcher } from "undici";
+import { Agent, buildConnector, fetch, Headers, type Dispatcher } from "undici";
 
 import type { Config } from "./config.js";
 
@@ -71,9 +71,9 @@ export function controlFetch(
   init: Parameters<typeof fetch>[1] = {},
 ): ReturnType<typeof fetch> {
   const signal = init?.signal ?? AbortSignal.timeout(config.requestTimeoutMs);
-  const headers: Record<string, string> = { ...(init?.headers as Record<string, string>) };
-  if (config.apiKey && headers.Authorization === undefined) {
-    headers.Authorization = `Bearer ${config.apiKey}`;
+  const headers = new Headers(init?.headers);
+  if (config.apiKey && !headers.has("authorization")) {
+    headers.set("authorization", `Bearer ${config.apiKey}`);
   }
   return fetch(url, { ...init, headers, signal });
 }
