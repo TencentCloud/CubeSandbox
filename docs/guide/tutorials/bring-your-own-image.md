@@ -19,8 +19,6 @@ For the general workflow to create templates from OCI images and configure appli
 
 For interactive development and code-execution sandboxes, keeping `envd` is recommended so you can use the SDK to run commands, work with files, and troubleshoot the sandbox. An image that only serves its own application and does not use these capabilities can omit `envd`; configure its template probe to use the application's own HTTP health endpoint.
 
----
-
 ## 2. Quick start: build on top of `cubesandbox-base`
 
 `cubesandbox-base` is a plain `ubuntu:22.04` with `envd` preinstalled at
@@ -89,8 +87,6 @@ Once you have a `template_id`, you can use the CubeSandbox SDK or E2B SDK to cre
 
 Pin the exact envd version (`2026.16`) for reproducible builds.
 
----
-
 ## 3. Alternative: inject `envd` into an existing image
 
 When you want to bring your own custom image, copy `envd` and the
@@ -134,8 +130,6 @@ CMD ["uvicorn", "app:app", "--app-dir", "/srv", "--host", "0.0.0.0", "--port", "
 ```
 
 Build, push and template creation are identical to sections 2.2 / 2.3.
-
----
 
 ## 4. The entrypoint contract
 
@@ -182,8 +176,6 @@ control to your main process:
 exec "$@"
 ```
 
----
-
 ## 5. Verifying the image locally (optional)
 
 Before creating a template you can run the same smoke test that CI runs
@@ -210,8 +202,6 @@ If `/health` does not reach `204` within a few seconds, inspect
 docker exec "$cid" cat /var/log/envd.log
 ```
 
----
-
 ## 6. Troubleshooting
 
 | Symptom                                       | Likely cause                                                          | Fix                                                                                 |
@@ -223,8 +213,6 @@ docker exec "$cid" cat /var/log/envd.log
 | Port 49983 conflicts with your own service    | Your app also listens on 49983                                        | Move your app to a different port and expose both with `--expose-port`.             |
 | `sudo: command not found` in your CMD         | You started `FROM` a `-slim` / `-alpine` image without sudo           | Either `apt-get install -y sudo`, or drop `sudo` from your entrypoint — `cube-entrypoint.sh` doesn't require it. |
 | Template creation times out in `PULLING`      | Registry unreachable from Cube nodes                                  | Push to a registry the cluster can reach, or supply `--registry-username` / `--registry-password`. |
-
----
 
 ## 7. Advanced — rebuild the base image yourself
 

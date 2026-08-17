@@ -43,7 +43,7 @@ OpenAI Agents SDK 的 Sandbox Agents 目前处于 beta。示例 requirements 有
 ::: warning 控制平面与数据平面
 `E2B_API_URL` 用于选择 CubeAPI 控制平面端点。官方 E2B SDK 还会访问每个沙箱的数据平面域名。
 一键本地部署自带 CoreDNS；生产环境应配置泛域名 DNS。若必须在没有泛域名 DNS 的本地环境中
-使用官方 E2B SDK，请使用 [E2B 开发 sidecar](/zh/guide/connect-existing-cluster)。
+使用官方 E2B SDK，请使用 [E2B 开发 sidecar](/zh/guide/multi-node-deploy#官方-e2b-sdk-无泛域名-dns开发-sidecar)。
 :::
 
 ## 安装与配置
@@ -216,4 +216,4 @@ python simple_demo.py \
 - [可运行的 Shell Agent 与 SWE-bench 示例](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/openai-agents-example)
 - [可运行的 Code Interpreter 示例](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/openai-agents-code-interpreter)
 - [OpenAI Agents SDK × CubeSandbox 详细实现说明](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/openai-agents-example/openai-agents-sandbox-cube-integration_zh.md)
-- [连接现有 CubeSandbox 集群](/zh/guide/connect-existing-cluster)
+- [从客户端连接 CubeSandbox 集群](/zh/guide/multi-node-deploy#从客户端连接集群)

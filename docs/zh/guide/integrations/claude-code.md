@@ -11,8 +11,6 @@ lang: zh-CN
 
 # Claude Code
 
-[English](../../../guide/integrations/claude-code.md)
-
 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) 是 Anthropic 出品的、基于终端的 AI 编码 agent,它在终端里执行命令、编辑文件、运行代码。
 
 本指南介绍如何让 Claude Code 继续跑在**你的宿主机**上,同时用一个 `PreToolUse` hook 把它执行的**每一条 Bash 命令**透明转发进隔离的 CubeSandbox MicroVM。模型完全感知不到沙箱层,也无需改动 prompt 或使用方式。

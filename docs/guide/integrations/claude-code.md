@@ -11,8 +11,6 @@ lang: en-US
 
 # Claude Code
 
-[中文文档](../../zh/guide/integrations/claude-code.md)
-
 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) is a terminal-based AI coding agent developed by Anthropic. It runs commands, edits files, and executes code in your terminal.
 
 This guide shows how to keep Claude Code running **on your host** while transparently redirecting **every Bash command it runs** into an isolated CubeSandbox MicroVM, using a `PreToolUse` hook. The model never sees the sandbox layer, and no prompt or workflow changes are required.

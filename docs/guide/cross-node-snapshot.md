@@ -67,7 +67,7 @@ The scheduler (`restoreplace`) **always prefers the origin node**. It leaves tha
 
 In short: if the origin is up and schedulable, restore stays there. If it is gone or unschedulable **and** the snapshot meets the cross-node conditions, restore moves. Otherwise the API fails; it will not pick an incompatible node.
 
-An [isolated](./node-isolation.md) origin is unschedulable, which is the usual way to force a cross-node Resume in tests. A sandbox with a **host-mount** is pinned to the origin (`PinToOrigin`) and will not cross even when `remote_status=ready`.
+An [isolated](./node-operations.md) origin is unschedulable, which is the usual way to force a cross-node Resume in tests. A sandbox with a **host-mount** is pinned to the origin (`PinToOrigin`) and will not cross even when `remote_status=ready`.
 
 ### 1.3 The snapshot must be remotely `ready`
 
@@ -122,7 +122,7 @@ To point at your own S3 store, follow the [CubeS3lvol README](https://github.com
 
 ## 3. CLI fields for cross-node restore
 
-`cubemastercli` adds `backend` / `remote_status` / `origin_node` columns, and `--backend` on template create. Node list and isolate live on `cubeopscli` (CubeOps, default port `3010`); see [Node Isolation](./node-isolation.md) and [CLI Tools](./cli-tools.md).
+`cubemastercli` adds `backend` / `remote_status` / `origin_node` columns, and `--backend` on template create. Node list and isolate live on `cubeopscli` (CubeOps, default port `3010`); see [Node Operations](./node-operations.md) and [CLI Tools](./cli-tools.md).
 
 ### 3.1 `cubebox list`
 
@@ -261,5 +261,5 @@ Create from the **template** (`Sandbox.create(template=tpl-…)`).
 - [Snapshot, Rollback & Clone](./snapshot-rollback-clone.md)
 - [Sandbox Lifecycle](./lifecycle.md)
 - [Creating Templates from OCI Images](./tutorials/template-from-image.md)
-- [Node Isolation](./node-isolation.md)
+- [Node Operations](./node-operations.md)
 - [CubeS3lvol README](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeS3lvol/README.md)

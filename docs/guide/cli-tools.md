@@ -78,7 +78,7 @@ cubeopscli --address <cubeops-host> --port 3010 node delete <node-id>
 
 Deleting a node requires it to be **isolated and free of sandboxes**; in a batch, a failure on one node does not stop the rest, and the command exits non-zero if any deletion fails. `delete` is aliased as `rm`; use `--force` to delete when the sandbox inventory cannot be verified (isolation is still required).
 
-For node isolation and deletion details, see [Node Isolation](./node-isolation.md).
+For adding, isolating, and deleting nodes, see [Node Operations](./node-operations.md).
 
 ## `cubecli`
 

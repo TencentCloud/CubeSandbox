@@ -166,6 +166,91 @@ For the complete CubeMaster scheduler reference, including Cubelet node reports,
 
 After updating `cubemaster.yaml`, restart CubeMaster with your normal deployment procedure so the scheduler loads the new scoring configuration.
 
+## Connect Clients to the Cluster
+
+Client applications need the CubeAPI control-plane address and a route to sandbox services through CubeProxy. Choose the simplest data-plane access method that fits your client:
+
+| Method | Best for | Wildcard DNS | Extra component |
+| --- | --- | :---: | :---: |
+| CubeSandbox SDK with `CUBE_PROXY_NODE_IP` | Python, Go, and Node.js SDKs | No | No |
+| CubeProxy path mode | curl, backend services, generic HTTP clients | No | No |
+| Wildcard DNS | Production, browsers, SPAs, official E2B SDK | Yes | No |
+| E2B dev sidecar | Official E2B SDK in local development without DNS | No | Yes |
+
+### CubeSandbox SDK: direct CubeProxy access
+
+The CubeSandbox SDKs can connect directly to a CubeProxy IP while preserving the virtual `Host` used to route requests to the correct sandbox. This avoids wildcard DNS:
+
+```bash
+export CUBE_API_URL="http://<control-plane-ip>:3000"
+export CUBE_PROXY_NODE_IP="<cubeproxy-node-ip>"
+export CUBE_PROXY_PORT_HTTP=80
+export CUBE_TEMPLATE_ID="<your-template-id-or-alias>"
+```
+
+Use the SDK normally after setting these variables. Control-plane requests go to CubeAPI; data-plane requests connect directly to CubeProxy.
+
+### Generic HTTP clients: path mode
+
+Any HTTP client can access a sandbox service through the CubeProxy path prefix:
+
+```text
+http://<cubeproxy-host>:<http-port>/sandbox/<sandbox-id>/<container-port>/<path>
+```
+
+For example:
+
+```bash
+curl http://10.0.0.5/sandbox/abc123/49999/health
+```
+
+Path mode requires no DNS or certificate setup and supports WebSocket upgrades. It is not suitable for SPAs that load assets from root-absolute paths such as `/static/app.js`; use wildcard DNS for those applications.
+
+### Production and browser access: wildcard DNS
+
+Host-based routing uses sandbox domains in the form `<port>-<sandbox-id>.<domain>`. Configure a wildcard A record that points to CubeProxy:
+
+```text
+*.cube.example.com  →  <CubeProxy public or private IP>
+```
+
+Configure CubeAPI with the same base domain:
+
+```bash
+export CUBE_API_SANDBOX_DOMAIN=cube.example.com
+```
+
+The one-click deployment includes CoreDNS for local `*.cube.app` resolution. It is intended for local use; production and shared multi-machine environments should use managed DNS or an internal DNS service. `/etc/hosts` cannot provide wildcard records.
+
+See [HTTPS Certificates & Domain Resolution](./https-and-domain.md) for TLS and DNS configuration details.
+
+### Official E2B SDK without wildcard DNS: dev sidecar
+
+The official E2B SDK does not expose the CubeSandbox SDK's direct-IP option. When wildcard DNS is unavailable in local development, use the [E2B dev sidecar example](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/e2b-dev-sidecar):
+
+```bash
+cd examples/e2b-dev-sidecar
+pip install -r requirements.txt
+cp env.example .env
+```
+
+For a remote cluster, configure:
+
+```bash
+E2B_API_URL="http://<control-plane-ip>:3000"
+CUBE_REMOTE_PROXY_BASE="https://<cubeproxy-node-ip>:443"
+E2B_API_KEY="<api-key>"
+CUBE_TEMPLATE_ID="<your-template-id-or-alias>"
+```
+
+Then run:
+
+```bash
+python demo.py
+```
+
+`CUBE_REMOTE_PROXY_BASE` must point to CubeProxy, not to the sidecar's own listening address. When authentication is enabled, replace the placeholder API key with a valid key.
+
 ## Common Operations
 
 ### Stop Compute Node Services

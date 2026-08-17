@@ -368,6 +368,6 @@ More detail in the other docs in this directory:
 - [Architecture](./architecture.md)
 - [Upgrade](./upgrade.md)
 - [FAQ](./faq.md)
-- [Connect to an Existing Cube Cluster](../connect-existing-cluster.md)
+- [Connect Clients to the Cluster](../multi-node-deploy.md#connect-clients-to-the-cluster)
 - [WebUI Console](../webui.md)
 - [Authentication](../authentication.md)

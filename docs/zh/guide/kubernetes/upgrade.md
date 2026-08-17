@@ -5,7 +5,7 @@
 ---
 
 ::: warning Preview 版本警告
-计算面使用原生 `apps/v1` DaemonSet：镜像 / 资源 / template 变更会导致 Big Pod **删除重建**（PodIP / netns 变化），存量沙箱网络会中断。计算面升级会 **recreate `cube-node` Big Pod**（原生 DaemonSet），**会中断该节点上的存量沙箱**。升级前请先调用 CubeMaster 的 isolate API，将节点隔离 60 秒以上；并且销毁节点上的沙箱。在销毁沙箱后，才能安全的升级节点。隔离操作详见 [隔离节点](../node-isolation.md)。
+计算面使用原生 `apps/v1` DaemonSet：镜像 / 资源 / template 变更会导致 Big Pod **删除重建**（PodIP / netns 变化），存量沙箱网络会中断。计算面升级会 **recreate `cube-node` Big Pod**（原生 DaemonSet），**会中断该节点上的存量沙箱**。升级前请先调用 CubeMaster 的 isolate API，将节点隔离 60 秒以上；并且销毁节点上的沙箱。在销毁沙箱后，才能安全的升级节点。隔离操作详见[节点相关操作](../node-operations.md)。
 
 **若希望升级不中断沙箱，可从两个方向入手：**
 

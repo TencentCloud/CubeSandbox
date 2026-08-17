@@ -12,8 +12,6 @@ lang: zh-CN
 
 # Pi Agent 集成指南
 
-[English](../../../guide/integrations/pi-agent.md)
-
 在 CubeSandbox MicroVM 内运行 [Pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
 （面向终端的 AI 编码 Agent）。本文覆盖镜像构建、密钥注入、出网管控，以及基于快照的会话持久化，配套的可运行示例位于
 [`examples/pi-agent-integration`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/pi-agent-integration)。

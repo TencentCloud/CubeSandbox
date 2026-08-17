@@ -104,6 +104,14 @@ export default withMermaid(defineConfig({
           { text: 'Guide', link: '/guide/introduction' },
           { text: 'Architecture', link: '/architecture/overview' },
           { text: 'Developer', link: '/dev/' },
+          {
+            text: 'Community',
+            items: [
+              { text: 'Roadmap', link: '/guide/roadmap' },
+              { text: 'Cube 100 Program', link: '/guide/cube100' },
+              { text: 'Contributing', link: 'https://github.com/tencentcloud/CubeSandbox/blob/master/CONTRIBUTING.md' }
+            ]
+          },
           { text: 'Blog', link: '/blog/' },
           { text: 'Changelog', link: '/changelog/' },
           { text: 'Contributors', link: '/contributors' },
@@ -117,9 +125,15 @@ export default withMermaid(defineConfig({
               text: 'Getting Started',
               items: [
                 { text: 'Introduction', link: '/guide/introduction' },
-                { text: 'Quick Start', link: '/guide/quickstart' },
+                { text: 'Quick Start', link: '/guide/quickstart' }
+              ]
+            },
+            {
+              text: 'Deployment',
+              items: [
                 { text: 'PVM Deployment', link: '/guide/pvm-deploy' },
                 { text: 'Bare-Metal Deployment', link: '/guide/bare-metal-deploy' },
+                { text: 'Self-Build Deployment', link: '/guide/self-build-deploy' },
                 { text: 'Multi-Node Cluster', link: '/guide/multi-node-deploy' },
                 {
                   text: 'Kubernetes Deployment',
@@ -134,37 +148,53 @@ export default withMermaid(defineConfig({
                   ]
                 },
                 { text: 'Tencent Cloud Cluster (Terraform)', link: '/guide/tencentcloud-terraform-deploy' },
-                { text: 'Self-Build Deployment', link: '/guide/self-build-deploy' },
                 { text: 'Development Environment (QEMU VM)', link: '/guide/dev-environment' }
               ]
             },
             {
               text: 'Core Concepts',
               items: [
-                { text: 'Roadmap', link: '/guide/roadmap' },
                 { text: 'Sandbox Lifecycle', link: '/guide/lifecycle' },
                 { text: 'Templates Overview', link: '/guide/templates' },
                 { text: 'Snapshot, Rollback & Clone', link: '/guide/snapshot-rollback-clone' },
-                { text: 'Cross-Node Snapshots', link: '/guide/cross-node-snapshot' },
-                { text: 'Digital Assistant', link: '/guide/digital-assistant' },
-                { text: 'Performance Benchmark', link: '/guide/performance-benchmark' }
+                { text: 'Cross-Node Snapshots', link: '/guide/cross-node-snapshot' }
               ]
             },
             {
               text: 'Tutorials',
               items: [
-                { text: 'Create Templates from OCI Image', link: '/guide/tutorials/template-from-image' },
-                { text: 'Examples', link: '/guide/tutorials/examples' },
-                { text: 'Custom Image', link: '/guide/tutorials/bring-your-own-image' }
+                { text: 'Example Projects', link: '/guide/tutorials/examples' },
+                {
+                  text: 'SDK',
+                  collapsed: true,
+                  items: [
+                    { text: 'Python', link: '/guide/tutorials/sdk/python' },
+                    { text: 'Go', link: '/guide/tutorials/sdk/go' },
+                    { text: 'Node.js', link: '/guide/tutorials/sdk/nodejs' }
+                  ]
+                }
               ]
             },
             {
-              text: 'Networking',
+              text: 'Templates & Images',
+              items: [
+                { text: 'Create Templates from OCI Image', link: '/guide/tutorials/template-from-image' },
+                { text: 'Bring Your Own Image', link: '/guide/tutorials/bring-your-own-image' },
+                { text: 'Local & Remote Image Practice', link: '/guide/tutorials/template-build-practice' },
+                { text: 'Template Inspection & Request Preview', link: '/guide/template-inspection-and-preview' },
+                { text: 'Template Aliases', link: '/guide/template-aliases' }
+              ]
+            },
+            {
+              text: 'Networking & Security',
               items: [
                 { text: 'Network Policy', link: '/guide/network-policy' },
                 { text: 'Route-Aware Egress', link: '/guide/route-aware-egress' },
                 { text: 'Security Proxy', link: '/guide/security-proxy' },
-                { text: 'Restrict Public Access', link: '/guide/restrict-public-access' }
+                { text: 'Restrict Public Access', link: '/guide/restrict-public-access' },
+                { text: 'Authentication', link: '/guide/authentication' },
+                { text: 'HTTPS & Domain Resolution', link: '/guide/https-and-domain' },
+                { text: 'Network Hardening', link: '/guide/network-hardening' }
               ]
             },
             {
@@ -176,51 +206,67 @@ export default withMermaid(defineConfig({
               ]
             },
             {
-              text: 'Operations',
+              text: 'Management Tools',
               items: [
                 { text: 'WebUI Dashboard', link: '/guide/webui' },
+                { text: 'CLI Tools', link: '/guide/cli-tools' }
+              ]
+            },
+            {
+              text: 'Cluster Operations',
+              items: [
+                { text: 'Node Operations', link: '/guide/node-operations' },
                 { text: 'Service Management & Logs', link: '/guide/service-management' },
-                { text: 'CLI Tools', link: '/guide/cli-tools' },
                 { text: 'CubeMaster Scheduler Configuration', link: '/guide/cubemaster-scheduler-config' },
-                { text: 'Node Isolation', link: '/guide/node-isolation' },
-                { text: 'Sandbox Resource Metrics', link: '/guide/resource-metrics' },
-                { text: 'Sandbox Logs', link: '/guide/sandbox-logs' },
-                { text: 'Template Inspection & Request Preview', link: '/guide/template-inspection-and-preview' },
-                { text: 'HTTPS & Domain Resolution', link: '/guide/https-and-domain' },
-                { text: 'Network Hardening', link: '/guide/network-hardening' },
-                { text: 'Authentication', link: '/guide/authentication' },
                 { text: 'Soft-delete Purge', link: '/guide/soft-delete-purge' }
               ]
             },
             {
-              text: 'Integration',
+              text: 'Observability & Performance',
               items: [
-                { text: 'Connect to an Existing Cube Cluster', link: '/guide/connect-existing-cluster' }
+                { text: 'Sandbox Resource Metrics', link: '/guide/resource-metrics' },
+                { text: 'Sandbox Logs', link: '/guide/sandbox-logs' },
+                { text: 'Performance Benchmark', link: '/guide/performance-benchmark' }
               ]
             },
             {
-              text: 'Contribute',
+              text: 'Troubleshooting',
+              link: '/guide/troubleshooting/',
               items: [
+                { text: 'Overview', link: '/guide/troubleshooting/' },
+                { text: 'Deployment', link: '/guide/troubleshooting/deployment' },
+                { text: 'Templates', link: '/guide/troubleshooting/templates' },
+                { text: 'Network CIDR Conflicts', link: '/guide/troubleshooting/local-network-cidr-conflict' },
+                { text: 'Host Mount Permissions', link: '/guide/troubleshooting/host-mount-permissions' },
+                { text: 'Component Log Locations', link: '/guide/troubleshooting/component-log-locations' }
+              ]
+            },
+            {
+              text: 'Features & Integrations',
+              items: [
+                { text: 'Digital Assistant (Preview)', link: '/guide/digital-assistant' },
                 {
-                  text: 'Troubleshooting',
-                  link: '/guide/troubleshooting/',
+                  text: 'Framework & Tool Integrations',
+                  link: '/guide/integrations/',
+                  collapsed: true,
                   items: [
-                    { text: 'Deployment', link: '/guide/troubleshooting/deployment' },
-                    { text: 'Templates', link: '/guide/troubleshooting/templates' }
+                    { text: 'Claude Code', link: '/guide/integrations/claude-code' },
+                    { text: 'LangChain', link: '/guide/integrations/langchain' },
+                    { text: 'Pi Agent', link: '/guide/integrations/pi-agent' },
+                    { text: 'OpenAI Agents SDK', link: '/guide/integrations/openai-agents-sdk' }
                   ]
                 },
                 {
-                  text: 'Use Cases',
+                  text: 'Case Studies',
                   link: '/guide/usecases/',
+                  collapsed: true,
                   items: [
                     { text: 'trpc-agent-go', link: '/guide/usecases/trpc-agent-go' },
                     { text: 'Lexmount AI', link: '/guide/usecases/lexmount-browser-agent' },
                     { text: 'Hermes Agent', link: '/guide/usecases/hermes-agent' },
                     { text: 'Lenovo Cloud Agent', link: '/guide/usecases/lenovo-cloud-agent' }
                   ]
-                },
-                { text: 'Cube 100 Program', link: '/guide/cube100' },
-                { text: 'Integrations', link: '/guide/integrations/' }
+                }
               ]
             },
             {
@@ -263,6 +309,14 @@ export default withMermaid(defineConfig({
           { text: '指南', link: '/zh/guide/introduction' },
           { text: '架构', link: '/zh/architecture/overview' },
           { text: '开发者', link: '/zh/dev/' },
+          {
+            text: '社区',
+            items: [
+              { text: '路线图', link: '/zh/guide/roadmap' },
+              { text: 'Cube 100 计划', link: '/zh/guide/cube100' },
+              { text: '参与贡献', link: 'https://github.com/tencentcloud/CubeSandbox/blob/master/CONTRIBUTING_zh.md' }
+            ]
+          },
           { text: '博客', link: '/zh/blog/' },
           { text: '更新日志', link: '/zh/changelog/' },
           { text: '贡献者', link: '/zh/contributors' },
@@ -273,12 +327,18 @@ export default withMermaid(defineConfig({
           '/zh/blog/': [],
           '/zh/guide/': [
             {
-              text: '入门指南',
+              text: '入门',
               items: [
-                { text: '简介 (Intro)', link: '/zh/guide/introduction' },
-                { text: '快速开始', link: '/zh/guide/quickstart' },
-                { text: 'PVM部署', link: '/zh/guide/pvm-deploy' },
-                { text: '裸金属/物理机部署', link: '/zh/guide/bare-metal-deploy' },
+                { text: '产品简介', link: '/zh/guide/introduction' },
+                { text: '快速开始', link: '/zh/guide/quickstart' }
+              ]
+            },
+            {
+              text: '部署',
+              items: [
+                { text: 'PVM 部署', link: '/zh/guide/pvm-deploy' },
+                { text: '裸金属部署', link: '/zh/guide/bare-metal-deploy' },
+                { text: '本地构建部署', link: '/zh/guide/self-build-deploy' },
                 { text: '多机集群部署', link: '/zh/guide/multi-node-deploy' },
                 {
                   text: 'Kubernetes 部署',
@@ -292,38 +352,54 @@ export default withMermaid(defineConfig({
                     { text: '常见问题', link: '/zh/guide/kubernetes/faq' }
                   ]
                 },
-                { text: '腾讯云集群部署（Terraform）', link: '/zh/guide/tencentcloud-terraform-deploy' },
-                { text: '本地构建部署', link: '/zh/guide/self-build-deploy' },
+                { text: '腾讯云集群（Terraform）', link: '/zh/guide/tencentcloud-terraform-deploy' },
                 { text: '开发环境（QEMU 虚机）', link: '/zh/guide/dev-environment' }
               ]
             },
             {
               text: '核心概念',
               items: [
-                { text: '路线图', link: '/zh/guide/roadmap' },
                 { text: '沙箱生命周期', link: '/zh/guide/lifecycle' },
                 { text: '模板概览', link: '/zh/guide/templates' },
                 { text: '快照、回滚与克隆', link: '/zh/guide/snapshot-rollback-clone' },
-                { text: '跨机快照', link: '/zh/guide/cross-node-snapshot' },
-                { text: '数字助手', link: '/zh/guide/digital-assistant' },
-                { text: '性能测试', link: '/zh/guide/performance-benchmark' }
+                { text: '跨机快照', link: '/zh/guide/cross-node-snapshot' }
               ]
             },
             {
-              text: '场景教程',
+              text: '教程',
+              items: [
+                { text: '示例项目', link: '/zh/guide/tutorials/examples' },
+                {
+                  text: 'SDK',
+                  collapsed: true,
+                  items: [
+                    { text: 'Python', link: '/zh/guide/tutorials/sdk/python' },
+                    { text: 'Go', link: '/zh/guide/tutorials/sdk/go' },
+                    { text: 'Node.js', link: '/zh/guide/tutorials/sdk/nodejs' }
+                  ]
+                }
+              ]
+            },
+            {
+              text: '模板与镜像',
               items: [
                 { text: '从 OCI 镜像制作模板', link: '/zh/guide/tutorials/template-from-image' },
-                { text: '示例项目', link: '/zh/guide/tutorials/examples' },
-                { text: '自定义镜像', link: '/zh/guide/tutorials/bring-your-own-image' }
+                { text: '自带镜像接入', link: '/zh/guide/tutorials/bring-your-own-image' },
+                { text: '本地与远程镜像实战', link: '/zh/guide/tutorials/template-build-practice' },
+                { text: '模板检查与请求预览', link: '/zh/guide/template-inspection-and-preview' },
+                { text: '模板别名', link: '/zh/guide/template-aliases' }
               ]
             },
             {
-              text: '网络',
+              text: '网络与安全',
               items: [
                 { text: '网络策略', link: '/zh/guide/network-policy' },
                 { text: '路由感知出网', link: '/zh/guide/route-aware-egress' },
                 { text: '安全代理', link: '/zh/guide/security-proxy' },
-                { text: '限制公开访问', link: '/zh/guide/restrict-public-access' }
+                { text: '限制公开访问', link: '/zh/guide/restrict-public-access' },
+                { text: 'API 鉴权', link: '/zh/guide/authentication' },
+                { text: 'HTTPS 与域名解析', link: '/zh/guide/https-and-domain' },
+                { text: '网络加固', link: '/zh/guide/network-hardening' }
               ]
             },
             {
@@ -335,51 +411,67 @@ export default withMermaid(defineConfig({
               ]
             },
             {
-              text: '安全与运维',
+              text: '管理工具',
               items: [
                 { text: 'WebUI 控制台', link: '/zh/guide/webui' },
+                { text: '命令行工具', link: '/zh/guide/cli-tools' }
+              ]
+            },
+            {
+              text: '集群运维',
+              items: [
+                { text: '节点相关操作', link: '/zh/guide/node-operations' },
                 { text: '服务管理与日志', link: '/zh/guide/service-management' },
-                { text: '命令行工具', link: '/zh/guide/cli-tools' },
-                { text: 'CubeMaster 调度器配置参考', link: '/zh/guide/cubemaster-scheduler-config' },
-                { text: '隔离节点', link: '/zh/guide/node-isolation' },
-                { text: '沙箱资源指标', link: '/zh/guide/resource-metrics' },
-                { text: '沙箱日志', link: '/zh/guide/sandbox-logs' },
-                { text: '模板检查与请求预览', link: '/zh/guide/template-inspection-and-preview' },
-                { text: 'HTTPS 证书与域名解析', link: '/zh/guide/https-and-domain' },
-                { text: '网络加固', link: '/zh/guide/network-hardening' },
-                { text: '鉴权', link: '/zh/guide/authentication' },
+                { text: 'CubeMaster 调度器配置', link: '/zh/guide/cubemaster-scheduler-config' },
                 { text: '软删除数据清理', link: '/zh/guide/soft-delete-purge' }
               ]
             },
             {
-              text: '集成',
+              text: '可观测性与性能',
               items: [
-                { text: '连接到已有 Cube 集群', link: '/zh/guide/connect-existing-cluster' }
+                { text: '沙箱资源指标', link: '/zh/guide/resource-metrics' },
+                { text: '沙箱日志', link: '/zh/guide/sandbox-logs' },
+                { text: '性能基准', link: '/zh/guide/performance-benchmark' }
               ]
             },
             {
-              text: '社区共建',
+              text: '故障排查',
+              link: '/zh/guide/troubleshooting/',
               items: [
+                { text: '排障概览', link: '/zh/guide/troubleshooting/' },
+                { text: '部署问题', link: '/zh/guide/troubleshooting/deployment' },
+                { text: '模板问题', link: '/zh/guide/troubleshooting/templates' },
+                { text: '网络 CIDR 冲突', link: '/zh/guide/troubleshooting/local-network-cidr-conflict' },
+                { text: 'Host Mount 权限', link: '/zh/guide/troubleshooting/host-mount-permissions' },
+                { text: '组件日志位置', link: '/zh/guide/troubleshooting/component-log-locations' }
+              ]
+            },
+            {
+              text: '功能与生态集成',
+              items: [
+                { text: '数字助手（预览）', link: '/zh/guide/digital-assistant' },
                 {
-                  text: '故障排障',
-                  link: '/zh/guide/troubleshooting/',
+                  text: '框架与工具集成',
+                  link: '/zh/guide/integrations/',
+                  collapsed: true,
                   items: [
-                    { text: '部署相关', link: '/zh/guide/troubleshooting/deployment' },
-                    { text: '模板相关', link: '/zh/guide/troubleshooting/templates' }
+                    { text: 'Claude Code', link: '/zh/guide/integrations/claude-code' },
+                    { text: 'LangChain', link: '/zh/guide/integrations/langchain' },
+                    { text: 'Pi Agent', link: '/zh/guide/integrations/pi-agent' },
+                    { text: 'OpenAI Agents SDK', link: '/zh/guide/integrations/openai-agents-sdk' }
                   ]
                 },
                 {
-                  text: '应用案例',
+                  text: '案例实践',
                   link: '/zh/guide/usecases/',
+                  collapsed: true,
                   items: [
                     { text: 'trpc-agent-go', link: '/zh/guide/usecases/trpc-agent-go' },
                     { text: 'Lexmount AI', link: '/zh/guide/usecases/lexmount-browser-agent' },
                     { text: 'Hermes Agent', link: '/zh/guide/usecases/hermes-agent' },
                     { text: 'Lenovo Cloud Agent', link: '/zh/guide/usecases/lenovo-cloud-agent' }
                   ]
-                },
-                { text: 'Cube 100 计划', link: '/zh/guide/cube100' },
-                { text: '生态集成', link: '/zh/guide/integrations/' }
+                }
               ]
             },
             {

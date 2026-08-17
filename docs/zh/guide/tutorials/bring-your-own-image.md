@@ -19,8 +19,6 @@
 
 对于交互式开发或代码执行沙箱，建议保留 `envd`，便于通过 SDK 执行命令、读写文件和排障。仅提供自有业务服务且不使用上述能力的镜像可以不包含 `envd`，此时应将模板 probe 配置为应用自己的 HTTP 健康检查端点。
 
----
-
 ## 2. 快速开始：基于 `cubesandbox-base`
 
 `cubesandbox-base` 是一个普通的 `ubuntu:22.04`，在 `/usr/bin/envd` 预装
@@ -86,8 +84,6 @@ cubemastercli tpl create-from-image \
 
 为了保证可复现构建，**推荐 pin 到精确的 envd 版本 (`2026.16`)**。
 
----
-
 ## 3. 备选：往现有镜像里注入 `envd`
 
 如果你想使用你自定义的镜像，可以用 `COPY --from=` 从 `cubesandbox-base`
@@ -131,8 +127,6 @@ CMD ["uvicorn", "app:app", "--app-dir", "/srv", "--host", "0.0.0.0", "--port", "
 
 构建、推送、创建模板的流程和第 2.2 / 2.3 节一致。
 
----
-
 ## 4. 入口脚本契约
 
 `cube-entrypoint.sh` 实现了一个非常简单的 "envd 后台 + 用户应用前台" 的
@@ -173,8 +167,6 @@ CMD ["uvicorn", "app:app", "--app-dir", "/srv", "--host", "0.0.0.0", "--port", "
 exec "$@"
 ```
 
----
-
 ## 5. 本地验证镜像（可选）
 
 创建模板前，可以跑一遍 CI 用于验证 base 镜像的同款 smoke test：
@@ -199,8 +191,6 @@ docker rm -f "$cid"
 docker exec "$cid" cat /var/log/envd.log
 ```
 
----
-
 ## 6. 排错速查
 
 | 现象                                   | 可能原因                                                   | 解决                                                                                    |
@@ -212,8 +202,6 @@ docker exec "$cid" cat /var/log/envd.log
 | 49983 端口冲突                         | 你自己的应用也在监听 49983                                 | 把自家应用迁到别的端口，并一起 `--expose-port` 暴露                                     |
 | `sudo: command not found`              | 基于 `-slim` / `-alpine` 这种无 sudo 的镜像构建            | `apt-get install -y sudo`，或直接把 `sudo` 从 CMD 里去掉——`cube-entrypoint.sh` 不依赖它 |
 | 模板创建长时间卡在 `PULLING`           | registry 从 Cube 节点不可达                                | 推送到集群可访问的 registry，或用 `--registry-username` / `--registry-password`         |
-
----
 
 ## 7. 进阶 —— 自己重建基础镜像
 

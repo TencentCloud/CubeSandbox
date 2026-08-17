@@ -165,6 +165,91 @@ scheduler:
 
 更新 `cubemaster.yaml` 后，请按当前部署方式重启 CubeMaster，让调度器加载新的评分配置。
 
+## 从客户端连接集群
+
+客户端应用需要 CubeAPI 控制面地址，以及一条通过 CubeProxy 访问沙箱服务的数据面链路。根据客户端类型选择最简单的方式：
+
+| 方式 | 适用场景 | 泛域名 DNS | 额外组件 |
+| --- | --- | :---: | :---: |
+| CubeSandbox SDK + `CUBE_PROXY_NODE_IP` | Python、Go 和 Node.js SDK | 不需要 | 不需要 |
+| CubeProxy 路径模式 | curl、后端服务、通用 HTTP 客户端 | 不需要 | 不需要 |
+| 泛域名 DNS | 生产环境、浏览器、SPA、官方 E2B SDK | 需要 | 不需要 |
+| E2B 开发 sidecar | 本地没有 DNS，但必须使用官方 E2B SDK | 不需要 | 需要 |
+
+### CubeSandbox SDK：直连 CubeProxy
+
+CubeSandbox SDK 可以直接连接指定的 CubeProxy IP，同时保留用于沙箱路由的虚拟 `Host`，因此不需要配置泛域名 DNS：
+
+```bash
+export CUBE_API_URL="http://<控制面IP>:3000"
+export CUBE_PROXY_NODE_IP="<CubeProxy节点IP>"
+export CUBE_PROXY_PORT_HTTP=80
+export CUBE_TEMPLATE_ID="<模板ID或别名>"
+```
+
+设置后即可正常使用 SDK。控制面请求访问 CubeAPI，数据面请求直接连接 CubeProxy。
+
+### 通用 HTTP 客户端：路径模式
+
+任意 HTTP 客户端都可以通过 CubeProxy 路径前缀访问沙箱服务：
+
+```text
+http://<CubeProxy地址>:<HTTP端口>/sandbox/<sandbox-id>/<容器端口>/<路径>
+```
+
+例如：
+
+```bash
+curl http://10.0.0.5/sandbox/abc123/49999/health
+```
+
+路径模式不需要 DNS 或证书配置，并支持 WebSocket 升级。但它不适合使用 `/static/app.js` 等根绝对路径加载资源的 SPA，此类应用应使用泛域名 DNS。
+
+### 生产环境和浏览器访问：泛域名 DNS
+
+Host 模式使用 `<端口>-<sandbox-id>.<域名>` 格式的沙箱域名。需要配置指向 CubeProxy 的泛域名 A 记录：
+
+```text
+*.cube.example.com  →  <CubeProxy公网或内网IP>
+```
+
+CubeAPI 必须使用相同的基础域名：
+
+```bash
+export CUBE_API_SANDBOX_DOMAIN=cube.example.com
+```
+
+一键部署内置 CoreDNS，可供本机解析 `*.cube.app`。它主要用于本地体验；生产环境和多机共享环境应使用托管 DNS 或内网 DNS 服务。`/etc/hosts` 不支持泛域名记录。
+
+TLS 和 DNS 的完整配置请参阅 [HTTPS 证书与域名解析](./https-and-domain.md)。
+
+### 官方 E2B SDK 无泛域名 DNS：开发 sidecar
+
+官方 E2B SDK 没有 CubeSandbox SDK 的 IP 直连选项。本地开发环境无法配置泛域名 DNS 时，可以使用 [E2B 开发 sidecar 示例](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/e2b-dev-sidecar)：
+
+```bash
+cd examples/e2b-dev-sidecar
+pip install -r requirements.txt
+cp env.example .env
+```
+
+连接远程集群时配置：
+
+```bash
+E2B_API_URL="http://<控制面IP>:3000"
+CUBE_REMOTE_PROXY_BASE="https://<CubeProxy节点IP>:443"
+E2B_API_KEY="<API密钥>"
+CUBE_TEMPLATE_ID="<模板ID或别名>"
+```
+
+然后运行：
+
+```bash
+python demo.py
+```
+
+`CUBE_REMOTE_PROXY_BASE` 必须指向 CubeProxy，不能填写 sidecar 自己的监听地址。集群启用鉴权时，需要使用有效的 API Key。
+
 ## 常用操作
 
 ### 停止计算节点服务
@@ -206,7 +291,7 @@ sudo ./down.sh
 | `ONE_CLICK_RUN_QUICKCHECK` | `1` | 安装后是否执行健康检查 |
 | `CUBE_S3_*` | 空 / 由控制面 MinIO 填入 | **必填。** Volume 插件强制依赖 S3。从控制节点 `.one-click.env` 拷贝；`ENDPOINT` / `ACCESS_KEY_ID` / `SECRET_ACCESS_KEY` / `BUCKET` 无可用默认值。 |
 
-完整配置参考（构建选项、数据库、代理等）请参阅[本地构建部署 — 配置参考](./self-build-deploy.md#配置参考）。
+完整配置参考（构建选项、数据库、代理等）请参阅[本地构建部署 — 配置参考](./self-build-deploy.md#配置参考)。
 
 ## 故障排查
 

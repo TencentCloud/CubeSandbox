@@ -38,7 +38,7 @@ Go：`cubesandbox.NeverTimeout`；Python：`from cubesandbox import NEVER_TIMEOU
    create()       ┌────▼────┐   timeout & on_timeout=pause   ┌─────────┐
   ───────────────►│ running │ ──────────────────────────────►│ paused  │
                   │         │◄──────── connect() 或          │         │
-                  └─┬─────┬─┘     auto_resume 触发的请求     └────┬────┘
+                  └─┬─────┬─┘     auto_resume 触发的请求      └────┬────┘
                     │     │                                       │
         kill()      │     │ timeout & on_timeout=kill             │ kill()
         ────────────┘     └─────────────────┐                     │

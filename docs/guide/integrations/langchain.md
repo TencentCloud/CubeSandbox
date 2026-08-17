@@ -11,8 +11,6 @@ lang: en-US
 
 # LangChain Integration Guide
 
-[中文](../../zh/guide/integrations/langchain.md)
-
 Run a LangChain agent that calls a Python tool inside a
 [CubeSandbox](https://github.com/TencentCloud/CubeSandbox) MicroVM. Because Cube exposes an
 **E2B-compatible API**, migrating a LangChain app from E2B to Cube usually means changing a few

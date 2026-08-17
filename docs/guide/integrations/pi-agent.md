@@ -12,8 +12,6 @@ lang: en-US
 
 # Pi Agent Integration Guide
 
-[中文文档](../../zh/guide/integrations/pi-agent.md)
-
 Run the [Pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
 — a terminal-native AI coding agent — inside CubeSandbox MicroVMs. This guide
 covers image build, key injection, egress control, and snapshot-based session

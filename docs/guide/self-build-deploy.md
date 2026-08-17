@@ -70,7 +70,7 @@ The default expected filename is `vmlinux`. You can override the path via the `O
 Copy the build environment template if you need overrides, then run from the repository root:
 
 ```bash
-cd cube-sandbox
+cd CubeSandbox
 cp deploy/one-click/build.env.example deploy/one-click/build.env
 ./deploy/one-click/build-release-bundle-builder.sh
 ```

@@ -598,7 +598,7 @@ export E2B_API_URL=http://<cube-api-clb-vip>:3000
 export E2B_API_KEY=e2b_000000
 ```
 
-**注意：** E2B SDK 访问 sandbox 本身走 `*.cube.app` → cube-proxy，因此 **cube.app 域名解析与 TLS 证书** 是必须项，仅配置 `E2B_API_URL` 不够。更多接入方式见[连接已有集群](./connect-existing-cluster.md)。
+**注意：** E2B SDK 访问 sandbox 本身走 `*.cube.app` → cube-proxy，因此 **cube.app 域名解析与 TLS 证书** 是必须项，仅配置 `E2B_API_URL` 不够。更多接入方式见[从客户端连接集群](./multi-node-deploy.md#从客户端连接集群)。
 
 | 能力 | 单机 one-click | Terraform 集群版 |
 |------|----------------|------------------|

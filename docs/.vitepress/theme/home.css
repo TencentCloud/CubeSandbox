@@ -1,0 +1,13 @@
+/* Keep the Chinese home-page tagline on one line when the viewport has room.
+   Narrow screens retain VitePress's responsive wrapping behavior. */
+@media (min-width: 768px) {
+  .VPHomeHero .text {
+    max-width: none;
+    white-space: nowrap;
+  }
+
+  html[lang^='zh'] .VPHomeHero .tagline {
+    max-width: none;
+    white-space: nowrap;
+  }
+}

@@ -1,5 +1,4 @@
-# 
-：本地镜像 & 远程镜像实战文档
+# 本地镜像 & 远程镜像实战文档
 
 本文基于实际操作经验，介绍两种制作自定义 Cube Sandbox 模板的完整流程：
 - **方式一：本地构建镜像**（镜像只在当前机器，无需推送到远端）
@@ -7,7 +6,6 @@
 
 > 友情链接，建议同步阅读 [从 OCI 镜像制作模板](./template-from-image.md) 和 [自带镜像接入](./bring-your-own-image.md) 文档。
 
----
 
 ## 前置条件
 
@@ -21,7 +19,6 @@
 ls ~/.local/share/mkcert/rootCA.pem
 ```
 
----
 
 ## 方式一：本地构建镜像制作模板
 
@@ -176,7 +173,6 @@ hello-cube
 > 自定义模板需在 Dockerfile 中安装 `jupyter_kernel_gateway ipykernel`，
 > 并在制作模板时同时暴露 49983 和 49999 两个端口。
 
----
 
 ## 方式二：远程镜像制作模板
 
@@ -235,7 +231,6 @@ cubemastercli tpl create-from-image \
 
 与方式一 Step 5、Step 6 完全相同。
 
----
 
 ## 两种方式对比
 
@@ -247,7 +242,6 @@ cubemastercli tpl create-from-image \
 | **私有仓库认证** | 不需要 | 可能需要 `--registry-username/password` |
 | **速度** | 快（本地直接读） | 取决于网络和镜像大小 |
 
----
 
 ## 常见问题
 
@@ -277,7 +271,6 @@ RUN pip install --no-cache-dir \
     numpy pandas
 ```
 
----
 
 ### 💡 二、envd /health 不返回 204
 
@@ -299,7 +292,6 @@ CMD ["your-app-command"]
 exec "$@"
 ```
 
----
 
 ### 💡 三、SDK 报 `SSL: CERTIFICATE_VERIFY_FAILED`
 
@@ -321,7 +313,6 @@ warnings.filterwarnings('ignore')
 ssl._create_default_https_context = ssl._create_unverified_context
 ```
 
----
 
 ### 💡 四、模板一直卡在 `phase: PULLING`
 
@@ -343,7 +334,6 @@ docker pull <镜像地址>
 docker images | grep <镜像名>
 ```
 
----
 
 ### 💡 五、模板 `status: FAILED`（BUILDING 阶段）
 
@@ -358,7 +348,6 @@ cubemastercli tpl status --job-id <job_id> --json | jq '.last_error'
 - `--writable-layer-size` 设置过小，构建时磁盘写满
 - 节点磁盘空间不足：`df -h` 检查
 
----
 
 ### 💡 六、`distribution: 0/N ready` 长时间不变
 
@@ -371,7 +360,6 @@ cubemastercli tpl status --job-id <job_id> --json | jq '.last_error'
 # 检查目标节点 Cubelet 日志
 journalctl -u cubelet -f
 ```
----
 ### 💡 七、模板制作卡住，沙箱一直处于 running 状态且无法删除
 
 **现象：** 制作模板时（快照阶段）卡住不动，`tpl status` 显示任务长时间无进展；同时有沙箱残留，状态一直是 `running`，`DELETE /sandboxes/:id` 也无法删除。
@@ -421,7 +409,6 @@ journalctl -u cubelet -n 100 | grep <sandboxID>
 
 **预防：** 制作模板前确认宿主机磁盘剩余空间 > 镜像大小 × 2（需要同时存放 rootfs 和快照文件）。
 
----
 
 ### 💡 八、`probe` 和 `probe-path` 参数说明
 
@@ -435,7 +422,6 @@ journalctl -u cubelet -n 100 | grep <sandboxID>
 | `--probe` | 探活使用的端口，必须已在 `--expose-port` 中声明 |
 | `--probe-path` | 探活的 HTTP GET 路径，该路径必须返回 2xx |
 
----
 
 **不同镜像的正确配置：**
 
@@ -487,7 +473,6 @@ cubemastercli tpl create-from-image \
 
 
 
----
 
 **常见配错场景：**
 
@@ -498,7 +483,6 @@ cubemastercli tpl create-from-image \
 | 用 `sandbox-code` 镜像只暴露了 49983，未暴露 49999 | 模板 READY，但 `run_code` 报连接失败 | `sandbox-code` 需同时暴露 49999 和 49983 |
 | `--probe-path` 漏写开头的 `/`（写成 `health` 而非 `/health`）| 探活 404 | 路径必须以 `/` 开头 |
 
----
 
 **本地验证 probe 配置（制作模板前先跑）：**
 
@@ -510,7 +494,6 @@ docker exec "$cid" curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:<prob
 docker rm -f "$cid"
 ```
 
----
 
 
 
@@ -528,7 +511,6 @@ sed -i 's|setuptools.backends.legacy:build|setuptools.build_meta|g' pyproject.to
 pip install .
 ```
 
----
 
 ### 💡 十、如何向沙箱传递环境变量
 
@@ -599,7 +581,6 @@ print(os.environ['RUNTIME_VAR'])
 
 最常用的是**方式 2**，通过 `Sandbox.create(envs={...})` 传入，灵活且不污染模板。
 
----
 
 ## 快速参考
 

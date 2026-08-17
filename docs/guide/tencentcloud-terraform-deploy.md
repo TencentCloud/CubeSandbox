@@ -599,7 +599,7 @@ export E2B_API_URL=http://<cube-api-clb-vip>:3000
 export E2B_API_KEY=e2b_000000
 ```
 
-**Note:** sandbox traffic itself goes through `*.cube.app` → cube-proxy, so **cube.app DNS resolution and TLS certificates** are required — configuring `E2B_API_URL` alone is not enough. See also [Connecting to an Existing Cluster](./connect-existing-cluster.md).
+**Note:** sandbox traffic itself goes through `*.cube.app` → cube-proxy, so **cube.app DNS resolution and TLS certificates** are required — configuring `E2B_API_URL` alone is not enough. See also [Connect Clients to the Cluster](./multi-node-deploy.md#connect-clients-to-the-cluster).
 
 | Capability | Single-machine one-click | Terraform cluster |
 |------------|--------------------------|-------------------|

@@ -50,7 +50,7 @@ versions after validating them for a production deployment.
 also connects to per-sandbox data-plane hostnames. A one-click local deployment
 includes CoreDNS; production deployments should configure wildcard DNS. If you
 must use the official E2B SDK locally without wildcard DNS, use the
-[E2B development sidecar](/guide/connect-existing-cluster).
+[E2B development sidecar](/guide/multi-node-deploy#official-e2b-sdk-without-wildcard-dns-dev-sidecar).
 :::
 
 ## Setup
@@ -235,4 +235,4 @@ for its arguments and expected flow.
 - [Runnable Shell Agent and SWE-bench examples](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/openai-agents-example)
 - [Runnable Code Interpreter examples](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/openai-agents-code-interpreter)
 - [Detailed OpenAI Agents SDK × CubeSandbox implementation notes](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/openai-agents-example/openai-agents-sandbox-cube-integration.md)
-- [Connecting to an existing CubeSandbox cluster](/guide/connect-existing-cluster)
+- [Connecting clients to a CubeSandbox cluster](/guide/multi-node-deploy#connect-clients-to-the-cluster)

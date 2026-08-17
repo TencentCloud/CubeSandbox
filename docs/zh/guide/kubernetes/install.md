@@ -367,6 +367,6 @@ bootstrap:
 - [架构说明](./architecture.md)
 - [升级](./upgrade.md)
 - [常见问题](./faq.md)
-- [连接到已有 Cube 集群](../connect-existing-cluster.md)
+- [从客户端连接集群](../multi-node-deploy.md#从客户端连接集群)
 - [WebUI 控制台](../webui.md)
 - [鉴权](../authentication.md)

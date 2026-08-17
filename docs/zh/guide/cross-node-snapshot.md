@@ -80,7 +80,7 @@ cubemastercli tpl create-from-image \
 即：源节点在、且能调度 → 永远本机；源节点不在或不可调度，且快照满足跨机条件 → 跨机；
 否则直接报错，不会盲目落到不兼容的节点。
 
-源节点被 [隔离](./node-isolation.md) 时视为不可调度，因此隔离是验证跨机 Resume 的常用手段。
+源节点被 [隔离](./node-operations.md) 时视为不可调度，因此隔离是验证跨机 Resume 的常用手段。
 带 **host-mount** 的沙箱会钉在源节点（`PinToOrigin`），即使 `remote_status=ready` 也不会跨机。
 
 ### 1.3 快照必须在云端「就绪」
@@ -151,7 +151,7 @@ Cube 安装时默认安装 MinIO 作为 S3 服务，方便开箱体验。
 为支持跨机能力，`cubemastercli` 在多个子命令中新增了 `backend` / `remote_status` /
 `origin_node` 等显示列，并在模板创建时提供 `--backend` 标志。下面按子命令说明。
 
-节点列表与隔离已迁到 `cubeopscli`（CubeOps，默认端口 `3010`），见 [隔离节点](./node-isolation.md) 与 [命令行工具](./cli-tools.md)。
+节点列表与隔离已迁到 `cubeopscli`（CubeOps，默认端口 `3010`），见 [节点相关操作](./node-operations.md) 与 [命令行工具](./cli-tools.md)。
 
 ### 3.1 `cubebox list`（沙箱列表）
 
@@ -298,5 +298,5 @@ cubeopscli --address 127.0.0.1 --port 3010 node list --json
 - [快照、回滚与克隆](./snapshot-rollback-clone.md)
 - [沙箱生命周期](./lifecycle.md)
 - [从 OCI 镜像制作模板](./tutorials/template-from-image.md)
-- [隔离节点](./node-isolation.md)
+- [节点相关操作](./node-operations.md)
 - [CubeS3lvol README](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeS3lvol/README.md)

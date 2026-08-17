@@ -70,7 +70,7 @@ cp /path/to/vmlinux deploy/one-click/assets/kernel-artifacts/
 如需覆盖构建选项，先复制构建环境模板，然后在仓库根目录执行：
 
 ```bash
-cd cube-sandbox
+cd CubeSandbox
 cp deploy/one-click/build.env.example deploy/one-click/build.env
 ./deploy/one-click/build-release-bundle-builder.sh
 ```
@@ -286,7 +286,6 @@ sudo ./down.sh
 | `ONE_CLICK_CUBE_API_BIN` | 预编译 cube-api 路径 |
 | `ONE_CLICK_CUBE_AGENT_BIN` | 预编译 cube-agent 路径（打入 cube-agent.ext4） |
 | `ONE_CLICK_CUBE_INIT_BIN` | 预编译 cube-init 路径（注入 guest `/sbin/init`） |
-
 | `ONE_CLICK_CUBESHIM_BIN` | 预编译 containerd-shim-cube-rs 路径 |
 | `ONE_CLICK_CUBE_RUNTIME_BIN` | 预编译 cube-runtime 路径 |
 | `ONE_CLICK_MKCERT_BIN` | 构建时自定义 mkcert 二进制路径（默认：内置 `assets/bin/mkcert`） |
