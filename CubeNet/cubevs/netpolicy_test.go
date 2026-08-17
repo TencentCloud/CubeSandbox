@@ -317,6 +317,54 @@ func TestBuildNetPolicyPlanStaticL3AllowedCoexistence(t *testing.T) {
 	}
 }
 
+// TestBuildNetPolicyPlanWildcardPlainCoversL7Host covers the wildcard L3
+// fallback: an L7 rule host covered by a leading-"*." plain allow_out domain
+// must be marked netPolicyFlagL3Allowed, so the host keeps plain /32 L3 access
+// on non-rule ports even though the exact rule shadows the wildcard in the DNS
+// LPM match. Apex and unrelated domains must NOT be marked.
+func TestBuildNetPolicyPlanWildcardPlainCoversL7Host(t *testing.T) {
+	l7bit := uint8(netPolicyFlagL7Required)
+	l3bit := uint8(netPolicyFlagL3Allowed)
+
+	cases := []struct {
+		name      string
+		allowOut  []string
+		l7Host    string
+		wantFlags uint8
+	}{
+		{"wildcard covers subdomain", []string{"*.qq.com"}, "a.qq.com", l7bit | l3bit},
+		{"wildcard covers deep subdomain", []string{"*.qq.com"}, "a.b.qq.com", l7bit | l3bit},
+		{"wildcard does not cover apex", []string{"*.qq.com"}, "qq.com", l7bit},
+		{"wildcard does not cover unrelated", []string{"*.qq.com"}, "other.com", l7bit},
+		{"case + trailing dot normalized", []string{"*.QQ.com."}, "A.QQ.com", l7bit | l3bit},
+		{"exact plain covers same host", []string{"a.qq.com"}, "a.qq.com", l7bit | l3bit},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			allowOut := tc.allowOut
+			l7AllowOut := []L7Target{{Host: tc.l7Host, Port: 8443, Scheme: L7SchemeHTTPS}}
+			plan, err := buildNetPolicyPlan(MVMOptions{AllowOut: &allowOut, L7AllowOut: &l7AllowOut})
+			if err != nil {
+				t.Fatalf("buildNetPolicyPlan: %v", err)
+			}
+
+			want := strings.ToLower(strings.TrimSuffix(tc.l7Host, "."))
+			got, found := uint8(0), false
+			for _, r := range plan.dnsAllowRules {
+				if strings.ToLower(strings.TrimSuffix(r.domain, ".")) == want {
+					got, found = r.value.Flags, true
+				}
+			}
+			if !found {
+				t.Fatalf("L7 host %s not found in dnsAllowRules", tc.l7Host)
+			}
+			if got != tc.wantFlags {
+				t.Fatalf("%s flags=%#x, want %#x", tc.l7Host, got, tc.wantFlags)
+			}
+		})
+	}
+}
+
 func TestBuildNetPolicyPlanBlockAllKeepsDefaultDenyOutOnReplace(t *testing.T) {
 	allowInternetAccess := false
 	plan, err := buildNetPolicyPlan(MVMOptions{AllowInternetAccess: &allowInternetAccess})

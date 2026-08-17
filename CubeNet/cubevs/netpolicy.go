@@ -606,6 +606,11 @@ func buildNetPolicyPlan(opts MVMOptions) (*netPolicyPlan, error) {
 		return nil, err
 	}
 	dnsAllowRules = mergeDNSAllowRules(dnsAllowRules, l7DNSRules)
+	// Mark each L7 domain rule that is also covered by a plain (non-L7)
+	// allow_out domain — an exact same-host entry or a leading-"*." wildcard —
+	// so the datapath keeps the plain /32 L3 access alongside the L7 /48
+	// interception for that host.
+	markL3AllowedByPlainCover(dnsAllowRules, dnsAllowDomains)
 
 	var denyOutEntries []denyOutPolicyEntry
 	if opts.AllowInternetAccess != nil && !*opts.AllowInternetAccess {
@@ -675,12 +680,10 @@ func mergeAllowOutWithL7(base, l7 []allowOutPolicyEntry) []allowOutPolicyEntry {
 }
 
 // mergeDNSAllowRules combines the non-L7 domain rules with the L7 domain rules.
-// Same-key entries merge flags (OR) and adopt the L7 rule's port set. When the
-// same domain is present in both (plain allow_out AND an L7 rule), the merged
-// entry is also marked netPolicyFlagL3Allowed so the datapath learns the plain
-// /32 any-port entry alongside the L7 /48 entries — otherwise the L7 rule
-// would silently narrow the same-domain plain allow_out to only the rule's
-// ports.
+// Same-key entries merge flags (OR) and adopt the L7 rule's port set. The
+// netPolicyFlagL3Allowed marker (plain-L3 + L7 coexistence) is applied
+// separately by markL3AllowedByPlainCover, which handles both the exact
+// same-host case and a leading-"*." wildcard allow_out covering the L7 host.
 func mergeDNSAllowRules(base, l7 []dnsAllowRule) []dnsAllowRule {
 	if len(l7) == 0 {
 		return base
@@ -693,7 +696,7 @@ func mergeDNSAllowRules(base, l7 []dnsAllowRule) []dnsAllowRule {
 	}
 	for _, r := range l7 {
 		if idx, ok := byKey[r.key]; ok {
-			out[idx].value.Flags |= r.value.Flags | netPolicyFlagL3Allowed
+			out[idx].value.Flags |= r.value.Flags
 			out[idx].value.PortCount = r.value.PortCount
 			out[idx].value.Ports = r.value.Ports
 			continue
@@ -702,6 +705,51 @@ func mergeDNSAllowRules(base, l7 []dnsAllowRule) []dnsAllowRule {
 		out = append(out, r)
 	}
 	return out
+}
+
+// l7DomainHasPlainCover reports whether an L7 rule host is covered by a plain
+// (non-L7) allow_out domain — either an exact same-host entry or a
+// leading-"*." wildcard whose base the host is a subdomain of. Matching follows
+// the same semantics as makeDNSAllowRule / domain_match: case-insensitive, a
+// trailing dot is ignored, and "*.base" covers any-depth subdomains of base but
+// not the apex itself.
+func l7DomainHasPlainCover(host string, plainDomains []string) bool {
+	h := strings.ToLower(strings.TrimSuffix(host, "."))
+	for _, raw := range plainDomains {
+		d := strings.ToLower(strings.TrimSuffix(raw, "."))
+		if strings.HasPrefix(d, "*.") {
+			base := d[2:]
+			if h != base && strings.HasSuffix(h, "."+base) {
+				return true
+			}
+			continue
+		}
+		if h == d {
+			return true
+		}
+	}
+	return false
+}
+
+// markL3AllowedByPlainCover sets netPolicyFlagL3Allowed on each L7 dns_allow
+// rule whose host is also covered by a plain (non-L7) allow_out domain. This
+// is what lets a host keep its plain /32 L3 access (SNAT on non-rule ports)
+// alongside the L7 /48 interception on the rule's ports — both when the host
+// appears verbatim in allow_out and when a leading-"*." wildcard covers it
+// (the exact rule otherwise shadows the wildcard in the DNS LPM match, which
+// would silently deny the host's non-rule ports under deny-all).
+func markL3AllowedByPlainCover(rules []dnsAllowRule, plainDomains []string) {
+	for i := range rules {
+		if rules[i].value.Flags&uint8(netPolicyFlagL7Required) == 0 {
+			continue
+		}
+		if rules[i].value.Flags&uint8(netPolicyFlagL3Allowed) != 0 {
+			continue
+		}
+		if l7DomainHasPlainCover(rules[i].domain, plainDomains) {
+			rules[i].value.Flags |= uint8(netPolicyFlagL3Allowed)
+		}
+	}
 }
 
 func appendDenyOutPolicyEntries(dst, src []denyOutPolicyEntry) []denyOutPolicyEntry {
