@@ -68,6 +68,7 @@ The following are the standard keys currently registered in the system (`v1`). N
 | Sandbox op lock (pause/resume/delete) | `cube:v1:master:lock:sandbox:{sandboxID}` | String | master | CubeMaster | CubeMaster | SET NX EX by op: pause **180s**, resume/delete **120s**, other **60s**; unlock = token-matched Lua GET+DEL (no renew) |
 | CubeProxy replica registry | `cube:v1:shared:cube_proxy:registry` | Hash | shared | CubeProxy | cube-lifecycle-manager | none (evicted on heartbeat expiry via `HDEL`) |
 | CubeProxy replica heartbeat | `cube:v1:shared:cube_proxy:heartbeat` | Sorted Set | shared | CubeProxy | cube-lifecycle-manager | none (`ZREMRANGEBYSCORE` on expiry, default 15s) |
+| CLM active-standby leader lock | `cube:v1:shared:lock:lifecycle_manager:leader` | String | shared | cube-lifecycle-manager | cube-lifecycle-manager | SET NX EX (default 15s), holder renews periodically (default 5s); release = token-matched Lua GET+DEL |
 
 ### 5.1 Hash field conventions
 
@@ -137,6 +138,7 @@ See the `redis` tags on `InstanceInfoMap` in [`CubeMaster/pkg/base/types/redis.g
 | `lock:sandbox` | SET NX EX (op-specific) | Crash/leak safety net only; normal unlock is token-safe Lua (`GET` must match holder token before `DEL`). TTLs: pause **180s**, resume/delete **120s**, default **60s** (`CubeMaster/pkg/sandboxlock`). No renew. |
 | `cube_proxy:registry` | No TTL (heartbeat-derived) | Written by each CubeProxy replica on startup; entries are `HDEL`'d by cube-lifecycle-manager once the corresponding heartbeat expires |
 | `cube_proxy:heartbeat` | Sorted Set expiry | Score = last heartbeat unix ms; entries older than `heartbeat_ttl` (default 15s) are removed via `ZREMRANGEBYSCORE` |
+| `lock:lifecycle_manager:leader` | SET NX EX + renew | CLM active-standby leader lease (issue #1211): value is the holder instance ID (pod name / hostname), TTL defaults to 15s (`CUBE_LCM_LEADER_TTL`); the holder renews every `CUBE_LCM_LEADER_RENEW_INTERVAL` (default 5s) via token-matched Lua GET+PEXPIRE. On graceful exit or stepping down the lock is released with Lua GET+DEL; on crash the TTL is the fallback and a standby takes over within at most one TTL |
 | Cache keys (future) | TTL required | Must be declared on write and registered in this document |
 
 ## 7. Per-service implementation
