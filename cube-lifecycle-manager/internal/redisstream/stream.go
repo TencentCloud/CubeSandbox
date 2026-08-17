@@ -106,7 +106,34 @@ func (c *Client) ReadGroup(ctx context.Context, group, consumer string, block ti
 		}
 		return nil, fmt.Errorf("xreadgroup: %w", err)
 	}
+	return c.decodeMessages(ctx, group, res), nil
+}
 
+// ReadPending returns up to `count` entries that were already delivered to
+// this consumer but never acknowledged (its pending-entries list). Unlike
+// ReadGroup it never blocks: an empty result means the list is drained.
+// Consumers use it on startup to redeliver events a previous run failed to
+// finish, which is what makes delivery at-least-once across restarts.
+func (c *Client) ReadPending(ctx context.Context, group, consumer string, count int) ([]Event, error) {
+	res, err := c.rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
+		Group:    group,
+		Consumer: consumer,
+		Streams:  []string{lifecycle.EventStreamKey, "0"},
+		Count:    int64(count),
+	}).Result()
+
+	if errors.Is(err, redis.Nil) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("xreadgroup pending: %w", err)
+	}
+	return c.decodeMessages(ctx, group, res), nil
+}
+
+// decodeMessages decodes raw XREADGROUP results, acking (and dropping) any
+// entry that cannot be parsed so a poisoned entry cannot stall the group.
+func (c *Client) decodeMessages(ctx context.Context, group string, res []redis.XStream) []Event {
 	var out []Event
 	for _, stream := range res {
 		for _, msg := range stream.Messages {
@@ -121,7 +148,7 @@ func (c *Client) ReadGroup(ctx context.Context, group, consumer string, block ti
 			}
 		}
 	}
-	return out, nil
+	return out
 }
 
 // Ack marks the event as processed so it leaves the consumer's pending list.
