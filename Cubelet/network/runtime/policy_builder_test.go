@@ -270,3 +270,41 @@ func TestToEgressInputTranslatesL7Rules(t *testing.T) {
 func stringPtr(value string) *string {
 	return &value
 }
+
+// TestCloneEgressRulesDeepCopiesMatchPointers guards against the shallow-copy
+// regression: cloneEgressRules must not alias the caller's match pointers, so
+// mutating the request after the clone must not leak into the stored copy.
+func TestCloneEgressRulesDeepCopiesMatchPointers(t *testing.T) {
+	port := 8443
+	original := &EgressRule{
+		Name: "rule",
+		Match: &EgressRuleMatch{
+			SNI:    stringPtr("api.example.com"),
+			Host:   stringPtr("api.example.com"),
+			Path:   stringPtr("/v1/chat"),
+			Scheme: stringPtr("https"),
+			Port:   &port,
+			Method: []string{"GET"},
+		},
+		Action: &EgressRuleAction{Allow: true},
+	}
+
+	cloned := cloneEgressRules([]*EgressRule{original})
+	if len(cloned) != 1 || cloned[0].Match == nil {
+		t.Fatalf("cloneEgressRules returned %#v", cloned)
+	}
+
+	// Mutate every pointer field on the original; the clone must be unaffected.
+	*original.Match.SNI = "mutated.example.com"
+	*original.Match.Host = "mutated.example.com"
+	*original.Match.Path = "/mutated"
+	*original.Match.Scheme = "http"
+	*original.Match.Port = 9999
+
+	cm := cloned[0].Match
+	if *cm.SNI != "api.example.com" || *cm.Host != "api.example.com" ||
+		*cm.Path != "/v1/chat" || *cm.Scheme != "https" || *cm.Port != 8443 {
+		t.Fatalf("clone aliased caller pointers: SNI=%q Host=%q Path=%q Scheme=%q Port=%d",
+			*cm.SNI, *cm.Host, *cm.Path, *cm.Scheme, *cm.Port)
+	}
+}

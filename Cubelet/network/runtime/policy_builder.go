@@ -47,6 +47,14 @@ func cloneEgressRules(in []*EgressRule) []*EgressRule {
 		if r.Match != nil {
 			match := *r.Match
 			match.Method = append([]string(nil), r.Match.Method...)
+			// The pointer fields must be deep-copied too: a shallow struct copy
+			// would alias the caller's request, so a later mutation of the
+			// request would leak into the stored (supposedly immutable) copy.
+			match.SNI = cloneStringPtr(r.Match.SNI)
+			match.Host = cloneStringPtr(r.Match.Host)
+			match.Path = cloneStringPtr(r.Match.Path)
+			match.Scheme = cloneStringPtr(r.Match.Scheme)
+			match.Port = cloneIntPtr(r.Match.Port)
 			cp.Match = &match
 		}
 		if r.Action != nil {
@@ -74,6 +82,26 @@ func cloneEgressRules(in []*EgressRule) []*EgressRule {
 		out = append(out, cp)
 	}
 	return out
+}
+
+// cloneStringPtr returns a copy of a *string, or nil. Mirrors the CubeMaster
+// helper of the same name (pkg/service/sandbox/types/types.go).
+func cloneStringPtr(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+// cloneIntPtr returns a copy of a *int, or nil. Mirrors the CubeMaster helper
+// of the same name (pkg/service/sandbox/types/types.go).
+func cloneIntPtr(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 // formatCubeNetworkConfig renders a compact log-only view of the policy. It
