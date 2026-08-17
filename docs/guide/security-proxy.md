@@ -159,6 +159,19 @@ Constraints (enforced by the SDK client and re-checked server-side):
 Traffic to a port no rule covers still falls back to the L3/L4
 `allow_out` / `deny_out` policy and never reaches CubeEgress.
 
+An omitted `port` means different things for allow and deny rules.
+An **allow** rule without `port` narrows to the default set
+`{80/http, 443/https}` — fail-closed, so a custom-port flow is only
+proxied when a rule names that port. A **deny** rule without `port`
+is port-agnostic within the host — it matches every intercepted flow
+to the host regardless of port. This keeps a broad host deny from
+being bypassed by a narrower custom-port allow: with
+`deny host="*.example.com"` and `allow host="api.example.com",
+port=8443, scheme="https"`, the deny still matches
+`api.example.com:8443`, so the outcome is decided by rule order
+(first match wins). List the more specific allow rule first to grant
+the exception.
+
 ::: tip Single-level vs multi-level subdomain
 `*.example.com` matches **all** subdomains regardless of label
 depth. To allow only single-level subdomains (e.g. `www`,

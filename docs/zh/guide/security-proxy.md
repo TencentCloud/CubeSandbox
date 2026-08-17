@@ -145,6 +145,17 @@ with Sandbox.create(network={"rules": rules}) as sb:
 任何规则都没有覆盖的端口，仍回落到 L3/L4 的 `allow_out` /
 `deny_out` 策略，不会进入 CubeEgress。
 
+省略 `port` 对 allow 和 deny 规则的含义不同。**allow** 规则省略
+`port` 时会收窄到默认集合 `{80/http, 443/https}` —— 这是
+fail-closed 的选择，即自定义端口的流量只有被规则显式点名才会进
+代理。**deny** 规则省略 `port` 时则在该 host 内与端口无关 ——
+无论哪个端口进来的被拦截流量都会命中。这样可防止"较宽的 host
+deny 被较窄的自定义端口 allow 绕过"：例如 `deny
+host="*.example.com"` 与 `allow host="api.example.com", port=8443,
+scheme="https"` 同时存在时，deny 仍会命中
+`api.example.com:8443`，最终结果由规则顺序（先命中先生效）决定。
+若想放行这个例外，把更具体的 allow 规则放在前面。
+
 ::: tip 单层 vs 多层子域
 `*.example.com` 不区分子域层数，**所有**结尾命中的子域都算。
 若想只放行单层子域（如 `www`、`api`），需要为不希望放过的嵌套

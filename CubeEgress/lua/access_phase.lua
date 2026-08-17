@@ -123,8 +123,12 @@ end
 
 -- ---------- match evaluation ----------
 
--- Returns true if every constraint in `m` passes against `ctx`.
-local function rule_matches(m, ctx)
+-- Returns true if every constraint in `m` passes against `ctx`. `is_allow`
+-- selects the port/scheme semantics: an allow rule with an omitted port is
+-- narrowed to the default set {80/http,443/https} (fail-closed), while a deny
+-- rule with an omitted port is port-agnostic within the host (also fail-closed
+-- — a custom-port allow must not bypass a broader host deny).
+local function rule_matches(m, ctx, is_allow)
     if type(m) ~= "table" then return false end
 
     if m.sni ~= nil then
@@ -144,10 +148,15 @@ local function rule_matches(m, ctx)
     if m.path ~= nil then
         if not path_match(m.path, ctx.path) then return false end
     end
-    -- Port and scheme form one semantic constraint. Omitted fields mean the
-    -- backward-compatible default set {80/http,443/https}, not a wildcard
-    -- over every custom port intercepted for the same host.
-    if not port_scheme.matches(m.port, m.scheme, ctx.dst_port, ctx.scheme) then
+    -- Port and scheme form one semantic constraint whose meaning depends on
+    -- whether this rule allows or denies (see port_scheme.matches_deny).
+    local port_scheme_ok
+    if is_allow then
+        port_scheme_ok = port_scheme.matches(m.port, m.scheme, ctx.dst_port, ctx.scheme)
+    else
+        port_scheme_ok = port_scheme.matches_deny(m.port, m.scheme, ctx.dst_port, ctx.scheme)
+    end
+    if not port_scheme_ok then
         return false
     end
     return true
@@ -479,7 +488,7 @@ function _M.decide()
     decision.policy_id = p.policy_id
 
     for _, r in ipairs(p.rules or {}) do
-        if rule_matches(r.match, ctx) then
+        if rule_matches(r.match, ctx, r.action ~= nil and r.action.allow == true) then
             decision.rule_id     = r.id
             decision.audit_level = (r.action and r.action.audit) or "metadata"
             decision.inject      = r.action and r.action.inject  -- consumed in Pγ

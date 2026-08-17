@@ -32,13 +32,46 @@ assert_true(port_scheme.matches(8443, "https", 8443, "https"))
 assert_false(port_scheme.matches(8443, "https", 8443, "http"))
 assert_false(port_scheme.matches(8443, nil, 8443, "https"))
 
+-- matches_deny: a port-less deny is port-agnostic within the host, so a
+-- custom-port flow is still caught (fail-closed).
+assert_true(port_scheme.matches_deny(nil, nil, 8443, "https"))
+assert_true(port_scheme.matches_deny(nil, nil, 80, "http"))
+assert_true(port_scheme.matches_deny(nil, "https", 8443, "https"))
+assert_false(port_scheme.matches_deny(nil, "https", 8080, "http"))
+assert_true(port_scheme.matches_deny(8443, "https", 8443, "https"))
+assert_false(port_scheme.matches_deny(8443, "https", 443, "https"))
+
 -- Regression: a broad host rule must not shadow the custom-port rule.
+-- (Third arg is_allow=true: an allow rule with no port narrows to the default
+-- set, so it does NOT match the custom-port flow.)
 local ctx = {
     host = "api.example.com", sni = "api.example.com", method = "GET",
     path = "/", scheme = "https", dst_port = 8443,
 }
-assert_false(access._rule_matches({host = "api.example.com"}, ctx))
-assert_true(access._rule_matches({host = "api.example.com", port = 8443, scheme = "https"}, ctx))
+assert_false(access._rule_matches({host = "api.example.com"}, ctx, true))
+assert_true(access._rule_matches({host = "api.example.com", port = 8443, scheme = "https"}, ctx, true))
+
+-- Regression: a port-less DENY rule is port-agnostic within the host
+-- (fail-closed), so a custom-port allow cannot bypass a broader host deny.
+-- Same ctx: dst_port=8443, scheme=https, host=api.example.com.
+assert_true(access._rule_matches({host = "api.example.com"}, ctx, false),
+    "port-less deny should match the custom-port flow")
+assert_true(access._rule_matches({host = "*.example.com"}, ctx, false),
+    "wildcard port-less deny should match the custom-port flow")
+-- Scheme-only deny matches any intercepted port of that scheme...
+assert_true(access._rule_matches({host = "api.example.com", scheme = "https"}, ctx, false),
+    "scheme-only https deny should match :8443 https")
+-- ...but not the other scheme.
+local http_ctx = {
+    host = "api.example.com", sni = "api.example.com", method = "GET",
+    path = "/", scheme = "http", dst_port = 8080,
+}
+assert_false(access._rule_matches({host = "api.example.com", scheme = "https"}, http_ctx, false),
+    "scheme-only https deny should not match http flow")
+-- An explicit port+scheme deny still matches exactly that tuple.
+assert_true(access._rule_matches({host = "api.example.com", port = 8443, scheme = "https"}, ctx, false))
+assert_false(access._rule_matches({host = "api.example.com", port = 8443, scheme = "https"}, http_ctx, false),
+    "explicit-port deny should not match a different port/scheme")
 
 local function validate(rules)
     return policy.validate_policy({policy_id = "sandbox-1", rules = rules})

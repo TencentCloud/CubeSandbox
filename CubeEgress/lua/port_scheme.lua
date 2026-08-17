@@ -73,4 +73,32 @@ function _M.matches(port_value, scheme_value, dst_port, request_scheme)
     return false
 end
 
+-- matches_deny evaluates the port/scheme constraint for a DENY rule. An allow
+-- rule with an omitted port narrows to the default set {80/http,443/https}
+-- (fail-closed: a custom-port flow needs an explicit allow). A deny rule with
+-- an omitted port is instead port-AGNOSTIC within the host: it matches any
+-- intercepted flow to the host. Narrowing a deny to the default set would be
+-- fail-open — a custom-port allow rule (e.g. allow host="api.example.com"
+-- port=8443 scheme=https) would bypass a broader host deny (deny
+-- host="*.example.com") because the deny never matched port 8443. An
+-- explicitly-set port+scheme still matches exactly that tuple.
+function _M.matches_deny(port_value, scheme_value, dst_port, request_scheme)
+    local port, perr = normalize_port(port_value)
+    if perr then return false end
+    local scheme, serr = _M.normalize_scheme(scheme_value)
+    if serr then return false end
+    if port ~= nil then
+        -- Explicit port (+scheme): exact tuple, same as the allow path.
+        return _M.matches(port_value, scheme_value, dst_port, request_scheme)
+    end
+    if scheme == nil then
+        -- No port and no scheme: deny every intercepted flow to the host.
+        return true
+    end
+    -- No port but a scheme: deny every intercepted flow of that scheme,
+    -- regardless of which port carried it.
+    local req_scheme = _M.normalize_scheme(request_scheme)
+    return req_scheme ~= nil and req_scheme == scheme
+end
+
 return _M
