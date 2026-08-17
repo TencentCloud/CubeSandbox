@@ -45,8 +45,8 @@ type WebhookSubscriptionEvent struct {
 func (WebhookSubscriptionEvent) TableName() string { return "t_webhook_subscription_event" }
 
 // WebhookDelivery mirrors t_webhook_delivery. The read side is exercised by
-// the deliveries query endpoint; claim/update logic lives in the webhook
-// worker package (delivery.go, added by the delivery commit).
+// the deliveries query endpoint; the claim/update SQL lives in the webhook
+// worker package (internal/webhook/delivery.go).
 type WebhookDelivery struct {
 	ID             int64      `gorm:"column:id;primaryKey" json:"id"`
 	EventID        string     `gorm:"column:event_id" json:"event_id"`
@@ -176,6 +176,11 @@ func (s *Store) SoftDeleteWebhookSubscription(ctx context.Context, id int64) err
 		return err
 	}
 	now := time.Now()
+	// Rename, disable and mark deleted in ONE atomic UPDATE: either the whole
+	// transition lands or nothing changes. The renamed value embeds the row
+	// id, so it cannot collide with another row's renamed name; a collision
+	// with a user-created literal name would fail the statement atomically
+	// (no partial soft-delete), and the caller surfaces it as an error.
 	res := s.db.WithContext(ctx).Model(&WebhookSubscription{}).
 		Where("id = ? AND deleted_at IS NULL", id).
 		Updates(map[string]interface{}{

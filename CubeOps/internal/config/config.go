@@ -71,9 +71,9 @@ type Config struct {
 	// by CubeDB/tombstone (7-day retention, hourly). DISABLED by default — the
 	// purge is irreversible, so it must be opted into explicitly.
 	SoftDeletePurge SoftDeletePurgeConf `yaml:"soft_delete_purge"`
-	// Webhook delivery worker (issue #642). Only the feature switch is
-	// introduced here; the full worker section is finalized by the delivery
-	// commit (webhook-refactor plan §6.1).
+	// Webhook delivery worker. Disabled by default; when enabled CubeOps
+	// consumes the lifecycle stream and delivers sandbox events to
+	// subscribed endpoints (see docs/guide/webhook.md).
 	Webhook WebhookConfig `yaml:"webhook"`
 }
 
@@ -85,9 +85,9 @@ type SoftDeletePurgeConf struct {
 	Interval  time.Duration `yaml:"interval"`  // <=0 -> 1h; (0,1m) clamped up to 1m
 }
 
-// WebhookConfig controls the CubeOps in-process webhook delivery worker
-// (issue #642). The full worker section is finalized here; Commit 5 only
-// carried the feature switch.
+// WebhookConfig controls the CubeOps in-process webhook delivery worker.
+// Every field has a CUBE_OPS_WEBHOOK_* environment override and a default
+// applied in Load(); see config.example.yaml for the annotated section.
 type WebhookConfig struct {
 	// Enabled turns the worker (consumer + sender) on. Defaults to false so
 	// existing deployments are unaffected until they opt in.
