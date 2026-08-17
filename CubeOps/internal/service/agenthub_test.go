@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -921,6 +922,35 @@ func TestWrapCMError(t *testing.T) {
 			}
 			if tt.wantCode != "" && got.Code != tt.wantCode {
 				t.Errorf("code = %q, want %q", got.Code, tt.wantCode)
+			}
+		})
+	}
+}
+
+// TestIsCMNotFoundCoversBothShapes pins that a not-found is recognised whether
+// CubeMaster reports it as a business ret_code in a 200 body or as an HTTP 404.
+// Only the first shape appears in the #1327 repro; keying on it alone would let
+// the actionable 400 silently regress into a 502 leaking an identifier the
+// requester never supplied, which is what this path exists to prevent.
+func TestIsCMNotFoundCoversBothShapes(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"business 130404", &cubemaster.CMError{RetCode: 130404, RetMsg: "template not found"}, true},
+		{"business 404", &cubemaster.CMError{RetCode: 404, RetMsg: "template not found"}, true},
+		{"http 404", &cubemaster.HTTPError{Status: 404, Body: "template not found"}, true},
+		{"http 404 wrapped", fmt.Errorf("create sandbox: %w", &cubemaster.HTTPError{Status: 404}), true},
+		{"http 500", &cubemaster.HTTPError{Status: 500, Body: "boom"}, false},
+		{"business conflict", &cubemaster.CMError{RetCode: 130409, RetMsg: "exists"}, false},
+		{"unrelated", errors.New("network timeout"), false},
+		{"nil", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isCMNotFound(tt.err); got != tt.want {
+				t.Errorf("isCMNotFound(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
 	}

@@ -28,6 +28,26 @@ func (e *CMError) Error() string {
 	return fmt.Sprintf("cubemaster error %d: %s", e.RetCode, e.RetMsg)
 }
 
+// HTTPError carries a CubeMaster failure that arrived as an HTTP status rather
+// than as a ret_code in a 200 body. Both shapes occur, and a caller that knows
+// only about CMError mis-handles this one silently: errors.As(&CMError) fails,
+// so the response arrives as an opaque error and collapses into a generic 502
+// regardless of what it said. Keeping it typed lets a caller ask the same
+// question of either shape.
+type HTTPError struct {
+	Status int
+	Body   string
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("cubemaster returned %d: %s", e.Status, e.Body)
+}
+
+// IsNotFound reports an HTTP-level not-found.
+func (e *HTTPError) IsNotFound() bool {
+	return e.Status == http.StatusNotFound
+}
+
 // IsNotFound returns true for CubeMaster "not found" ret codes.
 func (e *CMError) IsNotFound() bool {
 	return e.RetCode == 130404 || e.RetCode == 404
@@ -420,7 +440,9 @@ func readResponse(resp *http.Response) (json.RawMessage, error) {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("cubemaster returned %d: %s", resp.StatusCode, string(data))
+		// Typed; the message is byte-identical to the previous fmt.Errorf so
+		// logs and any operator greps keep working.
+		return nil, &HTTPError{Status: resp.StatusCode, Body: string(data)}
 	}
 	// Check CubeMaster business error code. CubeMaster uses ret_code=200 for
 	// success (and sometimes 0). Any other value is a failure, even when HTTP

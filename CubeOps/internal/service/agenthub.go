@@ -118,11 +118,24 @@ func wrapCMError(err error) *Error {
 	}
 }
 
-// isCMNotFound reports whether err is a CubeMaster not-found (130404). Callers
-// that need the full status mapping should use wrapCMError instead.
+// isCMNotFound reports whether err is a CubeMaster not-found, in either shape
+// CubeMaster uses it: the business code 130404 carried in a 200 body, and an
+// HTTP-level 404. The repro in #1327 is the first shape, but keying only on it
+// would make this silently stop working the day CubeMaster answers with an HTTP
+// status instead — and the caller's whole purpose is to avoid leaking an
+// identifier the requester never supplied.
+//
+// Callers that need the full status mapping should use wrapCMError instead. Note
+// that wrapCMError deliberately still maps HTTPError to 502: widening the
+// service-wide status mapping is a larger behavioural change than this fix and
+// belongs in its own patch.
 func isCMNotFound(err error) bool {
 	var cmErr *cubemaster.CMError
-	return errors.As(err, &cmErr) && cmErr.IsNotFound()
+	if errors.As(err, &cmErr) && cmErr.IsNotFound() {
+		return true
+	}
+	var httpErr *cubemaster.HTTPError
+	return errors.As(err, &httpErr) && httpErr.IsNotFound()
 }
 
 // ── AgentStore interface ────────────────────────────────────────────────────
