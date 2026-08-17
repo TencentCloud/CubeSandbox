@@ -3,6 +3,7 @@ package cubevs
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
@@ -271,23 +272,38 @@ func attachTCFilter(progName string, ifindex uint32, direction TCDirection) erro
 	return nil
 }
 
+// persistentPolicyGenerationExists reports whether a complete current-generation
+// policy map set (both allow_out_v3 and dns_allow_v2) is pinned on bpffs.
+//
+// A half-pinned set (exactly one of the two) means a previous boot died between
+// pinning the two maps. That orphan is an empty, not-yet-migrated map, so we
+// remove it and report "no generation": Init then rebuilds a consistent pair
+// and re-migrates from the legacy pins (which are still present in this
+// scenario). Returning an error here instead would permanently brick startup —
+// Init's recovery defer is only registered on the generationExists==false path,
+// which an early error return skips, so the orphan would survive every restart.
 func persistentPolicyGenerationExists() (bool, error) {
-	allowExists := false
-	if _, err := os.Stat(pinPath(MapNameAllowOutV3)); err == nil {
-		allowExists = true
-	} else if !errors.Is(err, os.ErrNotExist) {
+	allowExists, err := pinnedMapExists(MapNameAllowOutV3)
+	if err != nil {
 		return false, err
 	}
-	dnsExists := false
-	if _, err := os.Stat(pinPath(MapNameDNSAllowV2)); err == nil {
-		dnsExists = true
-	} else if !errors.Is(err, os.ErrNotExist) {
+	dnsExists, err := pinnedMapExists(MapNameDNSAllowV2)
+	if err != nil {
 		return false, err
 	}
-	if allowExists != dnsExists {
-		return false, fmt.Errorf("incomplete policy map generation: %s exists=%t, %s exists=%t", MapNameAllowOutV3, allowExists, MapNameDNSAllowV2, dnsExists) //nolint:err113
+	if allowExists == dnsExists {
+		return allowExists, nil
 	}
-	return allowExists, nil
+
+	log.Printf("cubevs: incomplete policy map generation (%s exists=%t, %s exists=%t); removing orphaned pin and rebuilding",
+		MapNameAllowOutV3, allowExists, MapNameDNSAllowV2, dnsExists)
+	if allowExists {
+		_ = os.Remove(pinPath(MapNameAllowOutV3)) // NOCC:Path Traversal()
+	}
+	if dnsExists {
+		_ = os.Remove(pinPath(MapNameDNSAllowV2)) // NOCC:Path Traversal()
+	}
+	return false, nil
 }
 
 // Init should be called once before invoking any other CubeVS APIs.

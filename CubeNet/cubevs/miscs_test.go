@@ -1,6 +1,8 @@
 package cubevs
 
 import (
+	"errors"
+	"os"
 	"testing"
 
 	"github.com/cilium/ebpf"
@@ -107,5 +109,86 @@ func TestPopulateDNSTailCallsEmptyWhenObjectDoesNotOwnDNSPrograms(t *testing.T) 
 	contents := spec.Maps[mapNameDNSTailCalls].Contents
 	if len(contents) != 0 {
 		t.Fatalf("contents=%#v, want empty", contents)
+	}
+}
+
+// TestPersistentPolicyGenerationRecoversHalfPinned covers the F1 availability
+// regression: a boot that died between pinning allow_out_v3 and dns_allow_v2
+// leaves a half-pinned generation. persistentPolicyGenerationExists must treat
+// it as an incomplete generation — remove the orphan pin and report "no
+// generation" so Init rebuilds a consistent pair — rather than returning an
+// error that permanently bricks startup (Init's recovery defer is only
+// registered on the generationExists==false path, which an early error return
+// skips).
+func TestPersistentPolicyGenerationRecoversHalfPinned(t *testing.T) {
+	cases := []struct {
+		name      string
+		pinAllow  bool // pin allow_out_v3
+		pinDNS    bool // pin dns_allow_v2
+		wantExist bool
+	}{
+		{"neither pinned (fresh)", false, false, false},
+		{"both pinned (complete)", true, true, true},
+		{"only allow_out_v3 pinned (orphan)", true, false, false},
+		{"only dns_allow_v2 pinned (orphan)", false, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mountBpffs(t)
+			if tc.pinAllow {
+				m := newAllowOutV3OuterMap(t)
+				if err := m.Pin(pinPath(MapNameAllowOutV3)); err != nil {
+					t.Fatalf("pin %s: %v", MapNameAllowOutV3, err)
+				}
+			}
+			if tc.pinDNS {
+				m := newDNSAllowOuterMap(t)
+				if err := m.Pin(pinPath(MapNameDNSAllowV2)); err != nil {
+					t.Fatalf("pin %s: %v", MapNameDNSAllowV2, err)
+				}
+			}
+
+			exists, err := persistentPolicyGenerationExists()
+			if err != nil {
+				t.Fatalf("returned error (would brick startup): %v", err)
+			}
+			if exists != tc.wantExist {
+				t.Fatalf("exists=%t, want %t", exists, tc.wantExist)
+			}
+
+			// After the call the two pins must be consistent: both present
+			// (complete) or both absent (fresh / orphan recovered).
+			allowExists, err := pinnedMapExists(MapNameAllowOutV3)
+			if err != nil {
+				t.Fatalf("pinnedMapExists(%s): %v", MapNameAllowOutV3, err)
+			}
+			dnsExists, err := pinnedMapExists(MapNameDNSAllowV2)
+			if err != nil {
+				t.Fatalf("pinnedMapExists(%s): %v", MapNameDNSAllowV2, err)
+			}
+			if allowExists != dnsExists {
+				t.Fatalf("pins still inconsistent after recovery: %s=%t %s=%t",
+					MapNameAllowOutV3, allowExists, MapNameDNSAllowV2, dnsExists)
+			}
+		})
+	}
+}
+
+// TestPersistentPolicyGenerationRemovesOrphanPin asserts the orphan pin is
+// actually unlinked (not merely reported as absent) so the next fresh load
+// rebuilds a consistent pair.
+func TestPersistentPolicyGenerationRemovesOrphanPin(t *testing.T) {
+	mountBpffs(t)
+
+	orphan := newAllowOutV3OuterMap(t)
+	if err := orphan.Pin(pinPath(MapNameAllowOutV3)); err != nil {
+		t.Fatalf("pin %s: %v", MapNameAllowOutV3, err)
+	}
+
+	if _, err := persistentPolicyGenerationExists(); err != nil {
+		t.Fatalf("returned error (would brick startup): %v", err)
+	}
+	if _, err := os.Stat(pinPath(MapNameAllowOutV3)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("orphan %s pin still present after recovery: err=%v", MapNameAllowOutV3, err)
 	}
 }
