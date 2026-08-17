@@ -289,6 +289,32 @@ static __always_inline int _()
 	return b[0] + d[0] + r[0] + f[0] + g[0] + h[0] + i[0] + l[0] + n[0] + o[0] + p[0] + q[0];
 }
 
+/* Anchor inner-map key/value types as complete BTF entries.
+ *
+ * In the hash-of-maps definitions in map.h, __type(key/value, ...) expands to
+ * pointer members, so clang only ever sees these structs through pointers in
+ * the .maps section and degrades them to BTF_KIND_FWD, which makes bpf2go
+ * reject the inner map definitions with "type is unsized". Local by-value uses
+ * elsewhere (e.g. struct lpm_key key = {...} in mvmtap.bpf.c, dns_response.h)
+ * do NOT pin the type in BTF, so this anchor is required and must not be
+ * deleted on the assumption that a by-value use already covers it.
+ *
+ * Keep this list in sync with the inner __type(...) members in map.h
+ * (allow_out_v2, deny_out, dns_allow) and with the __builtin_btf_type_id path
+ * below: a new hash-of-maps inner type must be added in all three places.
+ *
+ * clang >= 12 exposes __builtin_btf_type_id() as the canonical way to force a
+ * type to be preserved. The official builder (docker/Dockerfile.builder) ships
+ * clang-14, so CI always takes this path. The __has_builtin() guard and the
+ * __attribute__((used)) fallback below exist only so BPF codegen still succeeds
+ * on an older local clang (< 12) that lacks the builtin; such a toolchain fails
+ * with "use of unknown builtin '__builtin_btf_type_id'". In the fallback the
+ * attribute is load-bearing: it is what keeps clang emitting a BTF record for a
+ * global no instruction references. The globals are const with a zero
+ * initializer so they land in read-only .rodata rather than a writable .bss
+ * map.
+ */
+#if __has_builtin(__builtin_btf_type_id)
 static __always_inline __attribute__((used)) __u32 __btf_pin(void)
 {
 	return __builtin_btf_type_id(*(struct lpm_key *)0, BPF_TYPE_ID_LOCAL) +
@@ -296,5 +322,11 @@ static __always_inline __attribute__((used)) __u32 __btf_pin(void)
 	       __builtin_btf_type_id(*(struct dns_allow_key *)0, BPF_TYPE_ID_LOCAL) +
 	       __builtin_btf_type_id(*(struct dns_allow_value *)0, BPF_TYPE_ID_LOCAL);
 }
+#else
+static const struct lpm_key __btf_pin_lpm_key __attribute__((used)) = {};
+static const struct net_policy_value_v2 __btf_pin_net_policy_value_v2 __attribute__((used)) = {};
+static const struct dns_allow_key __btf_pin_dns_allow_key __attribute__((used)) = {};
+static const struct dns_allow_value __btf_pin_dns_allow_value __attribute__((used)) = {};
+#endif
 
 #endif /* __CUBEVS_H */
