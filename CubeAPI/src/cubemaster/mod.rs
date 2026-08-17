@@ -1397,7 +1397,8 @@ pub struct SandboxUpdateRequest {
     /// "pause" | "resume"
     #[serde(rename = "action")]
     pub action: String,
-    /// TTL in seconds (for resume; 0 = keep original). Optional for pause.
+    /// Idle timeout in seconds for resume (-1 = never, 0 = immediate).
+    /// Omitted for pause or when the caller keeps the current timeout.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<i32>,
 }

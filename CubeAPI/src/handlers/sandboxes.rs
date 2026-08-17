@@ -300,6 +300,7 @@ pub async fn pause_sandbox(
     request_body = ResumedSandbox,
     responses(
         (status = 201, description = "Sandbox resumed", body = Sandbox),
+        (status = 400, description = "Invalid timeout value", body = ApiError),
         (status = 404, description = "Sandbox not found", body = ApiError),
         (status = 409, description = "Sandbox is already running", body = ApiError),
         (status = 500, description = "Unexpected backend error", body = ApiError)
@@ -310,6 +311,9 @@ pub async fn resume_sandbox(
     Path(sandbox_id): Path<String>,
     Json(body): Json<ResumedSandbox>,
 ) -> AppResult<impl IntoResponse> {
+    body.validate()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
     state
         .logger
         .log(
@@ -346,6 +350,7 @@ pub async fn resume_sandbox(
     request_body = ConnectSandbox,
     responses(
         (status = 200, description = "Sandbox connection info", body = Sandbox),
+        (status = 400, description = "Invalid timeout value", body = ApiError),
         (status = 404, description = "Sandbox not found", body = ApiError),
         (status = 500, description = "Unexpected backend error", body = ApiError)
     )
@@ -355,6 +360,9 @@ pub async fn connect_sandbox(
     Path(sandbox_id): Path<String>,
     Json(body): Json<ConnectSandbox>,
 ) -> AppResult<impl IntoResponse> {
+    body.validate()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
     state
         .logger
         .log(

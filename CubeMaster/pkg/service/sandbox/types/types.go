@@ -788,6 +788,7 @@ type UpdateRequest struct {
 	SandboxID    string `json:"sandbox_id"`
 	InstanceType string `json:"instance_type"`
 	Action       string `json:"action"`
+	Timeout      *int   `json:"timeout,omitempty"`
 }
 
 // SetTimeoutRequest is the wire shape for POST /cube/sandbox/timeout.

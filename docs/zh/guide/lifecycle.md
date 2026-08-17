@@ -134,9 +134,11 @@ sandbox.kill()
 ```python
 sandbox.pause()                       # 主动保存快照，释放 CPU/内存
 # ... 一段时间过去 ...
-sandbox.connect()                     # 从快照恢复
+sandbox.connect(timeout=300)          # 从快照恢复，并可选地重置空闲超时
 sandbox.run_code("print('back!')")    # 像没暂停过一样继续用
 ```
+
+与 E2B 一致，`connect(timeout=...)` 会重置空闲超时，无论 sandbox 已经在运行，还是需要先从暂停状态恢复。省略 `timeout` 时，Cube 保留当前实际生效的 timeout，不由 SDK 注入默认值。
 
 可参考示例：[`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/pause.py)。
 

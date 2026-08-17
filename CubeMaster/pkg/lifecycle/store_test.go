@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 )
 
 // recordedCall captures one Do invocation for later assertion.
@@ -22,6 +23,7 @@ type recordedCall struct {
 type fakeRedis struct {
 	mu    sync.Mutex
 	calls []recordedCall
+	hget  interface{}
 	// errOn maps command name -> error to return on the Nth call (counter-based).
 	failHSET bool
 	failHDEL bool
@@ -33,6 +35,11 @@ func (f *fakeRedis) Do(cmd string, args ...interface{}) (interface{}, error) {
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, recordedCall{cmd: cmd, args: args})
 	switch cmd {
+	case "HGET":
+		if f.hget != nil {
+			return f.hget, nil
+		}
+		return nil, nil
 	case "HSET":
 		if f.failHSET {
 			return nil, errors.New("HSET boom")
@@ -47,6 +54,52 @@ func (f *fakeRedis) Do(cmd string, args ...interface{}) (interface{}, error) {
 		}
 	}
 	return "OK", nil
+}
+
+func TestStoreTimeoutProviderRefreshesOnlyMutableTimeoutFields(t *testing.T) {
+	timeout := 60
+	createdAt := int64(1700000000000)
+	meta := SandboxLifecycleMeta{
+		SandboxID:      "sbx-refresh",
+		TemplateID:     "tpl-1",
+		HostID:         "host-1",
+		HostIP:         "10.0.0.1",
+		InstanceType:   "cubebox",
+		TimeoutSeconds: &timeout,
+		AutoPause:      true,
+		AutoResume:     true,
+		CreatedAt:      createdAt,
+	}
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("marshal seed meta: %v", err)
+	}
+	r := &fakeRedis{hget: raw}
+	provider := &storeTimeoutProvider{store: NewStore(r)}
+
+	endAt, err := provider.RefreshTimeout(context.Background(), meta.SandboxID, 120)
+	if err != nil {
+		t.Fatalf("refresh timeout: %v", err)
+	}
+	if endAt <= time.Now().UnixMilli() || endAt > time.Now().Add(121*time.Second).UnixMilli() {
+		t.Fatalf("endAt=%d is not a fresh 120-second deadline", endAt)
+	}
+
+	calls := r.snapshot()
+	if len(calls) != 3 || calls[0].cmd != "HGET" || calls[1].cmd != "HSET" || calls[2].cmd != "XADD" {
+		t.Fatalf("unexpected refresh calls: %+v", calls)
+	}
+	updated, ok := calls[1].args[2].([]byte)
+	if !ok {
+		t.Fatalf("updated meta payload type=%T", calls[1].args[2])
+	}
+	var got SandboxLifecycleMeta
+	if err := json.Unmarshal(updated, &got); err != nil {
+		t.Fatalf("unmarshal updated meta: %v", err)
+	}
+	if got.TimeoutSeconds == nil || *got.TimeoutSeconds != 120 || !got.AutoPause || !got.AutoResume || got.TemplateID != meta.TemplateID {
+		t.Fatalf("refresh did not preserve policy/identity fields: %+v", got)
+	}
 }
 
 func (f *fakeRedis) snapshot() []recordedCall {

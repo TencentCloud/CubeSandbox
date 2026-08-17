@@ -29,7 +29,7 @@ pytest --run-e2e -m "lifecycle and slow"
 | 文件 | 主要行为 | 能力/前提 | 风险与执行建议 |
 | --- | --- | --- | --- |
 | `cases/lifecycle/test_create.py` | 创建后的 `info`、Linux command smoke | `lifecycle` | P0/PR gate 候选 |
-| `cases/lifecycle/test_connect.py` | connect 既有实例、ID 与文件/命令可用性 | `lifecycle` | P1 |
+| `cases/lifecycle/test_connect.py` | connect 既有实例、ID 与文件/命令可用性，以及 running/paused sandbox 的显式 timeout 应用 | `lifecycle`；paused 用例还需 `pause_resume` | P1 |
 | `cases/lifecycle/test_create_options.py` | metadata、env vars、timeout 和创建参数后的 command | `lifecycle` | P1 |
 | `cases/lifecycle/test_pause_resume.py` | SDK pause、connect resume、文件/env/kernel 状态保留 | `pause_resume`，部分需 Code Interpreter | P1 |
 | `cases/lifecycle/test_pause_resume_network.py` | pause/resume 后仍保持出站 deny/allowlist 与限制公网访问 token | `pause_resume` + 网络能力；ingress token 用例需 CubeProxy | P1 + `requires_internet` |
