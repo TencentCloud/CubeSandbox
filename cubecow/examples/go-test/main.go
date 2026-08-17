@@ -79,6 +79,8 @@ const (
 	defaultVolumeName = "go-test-vol"
 	// Default snapshot name for testing
 	defaultSnapshotName = "go-test-snap"
+	// Default target name for volume-from-snapshot cloning
+	defaultCloneName = "go-test-clone"
 )
 
 // ---------------------------------------------------------------------------
@@ -144,9 +146,10 @@ func main() {
 	dumpJSON := flag.Bool("dump-json", false, "print the JSON payload that would be handed to libcubecow and exit")
 
 	// --- Action / lifecycle flags ---------------------------------------
-	action := flag.String("action", "all", "action to perform: init, create-vol, delete-vol, resize-vol, vol-info, list-vols, create-snap, delete-snap, list-snaps, metrics, all")
+	action := flag.String("action", "all", "action to perform: init, create-vol, delete-vol, resize-vol, vol-info, list-vols, create-snap, delete-snap, list-snaps, clone-from-snap, metrics, all")
 	volName := flag.String("vol", defaultVolumeName, "volume name")
 	snapName := flag.String("snap", defaultSnapshotName, "snapshot name")
+	cloneName := flag.String("clone", defaultCloneName, "name of the writable volume derived from -snap by clone-from-snap")
 	volSize := flag.Uint64("size", defaultVolumeSizeBytes, "volume size in bytes")
 	newSize := flag.Uint64("new-size", 2*defaultVolumeSizeBytes, "new volume size for resize (bytes)")
 	noCleanup := flag.Bool("no-cleanup", false, "for -action all: skip the final DeleteSnapshot/DeleteVolume so the volume and snapshot remain on disk for inspection")
@@ -227,11 +230,14 @@ func main() {
 	case "list-snaps":
 		doListSnapshots(engine, *volName)
 
+	case "clone-from-snap":
+		doCloneFromSnapshot(engine, *snapName, *cloneName)
+
 	case "metrics":
 		doGetMetrics(engine)
 
 	case "all":
-		runFullTest(engine, *volName, *snapName, *volSize, *newSize, *noCleanup)
+		runFullTest(engine, *volName, *snapName, *cloneName, *volSize, *newSize, *noCleanup)
 
 	default:
 		fmt.Fprintf(os.Stderr, "ERROR: unknown action: %s\n", *action)
@@ -367,7 +373,7 @@ func initEngine(mode initMode, tomlPath, jsonPayload string, withLogging bool) (
 // When skipCleanup is true the final DeleteSnapshot / DeleteVolume are
 // skipped so the operator can inspect the live artefacts (volume
 // files, FICLONE-shared extents) after the probe returns.
-func runFullTest(engine *cubecow.Engine, volName, snapName string, volSize, resizeSize uint64, skipCleanup bool) {
+func runFullTest(engine *cubecow.Engine, volName, snapName, cloneName string, volSize, resizeSize uint64, skipCleanup bool) {
 	fmt.Println("--- Running full lifecycle test ---")
 	fmt.Println()
 
@@ -389,28 +395,35 @@ func runFullTest(engine *cubecow.Engine, volName, snapName string, volSize, resi
 	// Step 6: List snapshots
 	doListSnapshots(engine, volName)
 
-	// Step 7: List volumes
-	doListVolumes(engine, "")
+	// Step 7: Derive a writable volume from the snapshot (auto-activated).
+	doCloneFromSnapshot(engine, snapName, cloneName)
 
-	// Step 8: Get metrics
+	// Step 8: List volumes
+	doListVolumes(engine)
+
+	// Step 9: Get metrics
 	doGetMetrics(engine)
 
-	// Step 9: Cleanup - delete snapshot then volume (unless -no-cleanup)
+	// Step 10: Cleanup - delete clone, snapshot, then volume (unless -no-cleanup)
 	if skipCleanup {
-		fmt.Println("[Cleanup] -no-cleanup set; preserving snapshot and volume for inspection.")
+		fmt.Println("[Cleanup] -no-cleanup set; preserving clone, snapshot and volume for inspection.")
 		fmt.Printf("    volume   : %s\n", volName)
 		fmt.Printf("    snapshot : %s\n", snapName)
+		fmt.Printf("    clone    : %s\n", cloneName)
 		fmt.Println("    Re-query with e.g.:")
 		fmt.Println("        cubecow-test -config <cfg> -action list-vols")
 		fmt.Println("        cubecow-test -config <cfg> -action list-snaps -vol " + volName)
 		fmt.Println("        cubecow-test -config <cfg> -action vol-info  -vol " + volName)
+		fmt.Println("        cubecow-test -config <cfg> -action vol-info  -vol " + cloneName)
 		fmt.Println("        sudo ls -lh <reflink_root_dir>/volumes/")
 		fmt.Println("        sudo xfs_io -c 'fiemap -v' <reflink_root_dir>/volumes/<vol>/<vol>")
 		fmt.Println("    When finished, clean up manually with:")
+		fmt.Println("        cubecow-test -config <cfg> -action delete-vol  -vol  " + cloneName)
 		fmt.Println("        cubecow-test -config <cfg> -action delete-snap -snap " + snapName)
 		fmt.Println("        cubecow-test -config <cfg> -action delete-vol  -vol  " + volName)
 	} else {
-		fmt.Println("[Cleanup] Deleting snapshot and volume...")
+		fmt.Println("[Cleanup] Deleting clone, snapshot and volume...")
+		doDeleteVolume(engine, cloneName)
 		doDeleteSnapshot(engine, snapName)
 		doDeleteVolume(engine, volName)
 	}
@@ -475,7 +488,14 @@ func doGetVolumeInfo(engine *cubecow.Engine, name string) {
 	fmt.Printf("    SizeBytes:      %d\n", vol.SizeBytes)
 	fmt.Printf("    DevicePath:     %s\n", vol.DevicePath)
 	fmt.Printf("    SnapshotCount:  %d\n", vol.SnapshotCount)
-	fmt.Printf("    CreatedAt:      %s\n\n", vol.CreatedAt)
+	fmt.Printf("    CreatedAt:      %s\n", vol.CreatedAt)
+	fmt.Printf("    ExportUUID:     %s\n", vol.ExportUUID)
+	fmt.Printf("    ExportStatus:   %s\n", vol.ExportStatus)
+	if vol.Deletable == nil {
+		fmt.Printf("    Deletable:      <n/a>\n\n")
+	} else {
+		fmt.Printf("    Deletable:      %v\n\n", *vol.Deletable)
+	}
 }
 
 func doGetVolumeBlockInfo(engine *cubecow.Engine, name string) {
@@ -531,6 +551,19 @@ func doDeleteSnapshot(engine *cubecow.Engine, snapName string) {
 	}
 	fmt.Println("    OK: snapshot deleted.")
 	fmt.Println()
+}
+
+func doCloneFromSnapshot(engine *cubecow.Engine, snapName, cloneName string) {
+	fmt.Printf("[CreateVolumeFromSnapshot] source_snapshot=%q volume=%q\n", snapName, cloneName)
+
+	start := time.Now()
+	devicePath, err := engine.CreateVolumeFromSnapshot(snapName, cloneName)
+	emitOpTiming("clone-from-snap", time.Since(start), err)
+	if err != nil {
+		fmt.Printf("    ERROR: %v\n\n", err)
+		return
+	}
+	fmt.Printf("    OK: device_path=%s (writable, data-independent from %q)\n\n", devicePath, snapName)
 }
 
 func doListSnapshots(engine *cubecow.Engine, volumeName string) {

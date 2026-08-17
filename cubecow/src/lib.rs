@@ -27,6 +27,7 @@ pub use crate::pkg::errors::{CubecowError, CubecowResult};
 
 // Engine trait + concrete backends.
 pub use crate::engine::reflink::ReflinkEngine;
+pub use crate::engine::s3::S3Engine;
 pub use crate::engine::Engine;
 
 // ---------------------------------------------------------------------------
@@ -37,6 +38,17 @@ pub use crate::engine::Engine;
 ///
 /// This is a clean, public-facing type that exposes only the information
 /// external consumers need.
+///
+/// The last three fields (`export_uuid`, `export_status`, `deletable`)
+/// exist so [`Engine::get_volume_info`] can present a **uniform view**
+/// regardless of whether the queried name is a writable volume or a
+/// snapshot. For a pure volume they are always the zero value
+/// (`""` / `""` / `None`); they only carry meaningful data when the
+/// projected entry is actually a snapshot that has been `export_snapshot`-ed.
+///
+/// This is required because `get_volume_info` returns a `Volume` for
+/// both `NameKind::Volume` and `NameKind::Snapshot` entries — snapshot
+/// upload-status must therefore surface on the same struct.
 #[derive(Debug, Clone)]
 pub struct Volume {
     /// User-specified volume name.
@@ -51,6 +63,20 @@ pub struct Volume {
     pub snapshot_count: i32,
     /// Creation timestamp (RFC3339).
     pub created_at: String,
+    /// Cross-node export uuid produced by
+    /// [`Engine::export_snapshot`]. Empty for volumes and for
+    /// snapshots that have never been exported.
+    pub export_uuid: String,
+    /// Upload status reported by the backend when the entry has an
+    /// `export_uuid`. Currently one of `"NONE"`, `"INPROGRESS"`,
+    /// `"DONE"`; empty when not applicable. See the S3 backend
+    /// design doc §2.4 for the underlying `rcow_get_snapshot_status`
+    /// RPC contract.
+    pub export_status: String,
+    /// Whether the backend currently considers this exported
+    /// snapshot safe to delete. `None` when not applicable (regular
+    /// volume, or snapshot that has not been exported).
+    pub deletable: Option<bool>,
 }
 
 /// Snapshot information returned by the library API.
@@ -87,6 +113,26 @@ pub struct Snapshot {
     pub origin_volume: String,
     /// Creation timestamp (RFC3339).
     pub created_at: String,
+    /// Cross-node export uuid produced by
+    /// [`Engine::export_snapshot`].
+    ///
+    /// Empty when this snapshot has never been exported. The S3
+    /// backend persists this value in its on-disk index so that a
+    /// subsequent [`Engine::get_volume_info`] can decide whether to
+    /// query the underlying upload progress via the
+    /// `rcow_get_snapshot_status` RPC.
+    pub export_uuid: String,
+    /// Upload status of this snapshot to the remote object store.
+    ///
+    /// Populated only for snapshots whose [`Self::export_uuid`] is
+    /// non-empty. One of `"NONE"`, `"INPROGRESS"`, `"DONE"` for the S3
+    /// backend; empty for backends that do not model cross-node
+    /// export (e.g. reflink).
+    pub export_status: String,
+    /// Whether the backend currently considers this exported
+    /// snapshot safe to delete. `None` when the snapshot has not been
+    /// exported or the backend does not report this signal.
+    pub deletable: Option<bool>,
 }
 
 /// Block-level info for a volume.
@@ -112,6 +158,7 @@ use crate::config::{AppConfig, BackendKind};
 pub fn initialize(config: AppConfig) -> anyhow::Result<Box<dyn Engine>> {
     match config.backend.kind {
         BackendKind::Reflink => Ok(Box::new(ReflinkEngine::initialize(config)?)),
+        BackendKind::S3 => Ok(Box::new(S3Engine::initialize(config)?)),
     }
 }
 
@@ -120,5 +167,6 @@ pub fn initialize(config: AppConfig) -> anyhow::Result<Box<dyn Engine>> {
 pub fn initialize_without_logging(config: AppConfig) -> anyhow::Result<Box<dyn Engine>> {
     match config.backend.kind {
         BackendKind::Reflink => Ok(Box::new(ReflinkEngine::initialize_without_logging(config)?)),
+        BackendKind::S3 => Ok(Box::new(S3Engine::initialize_without_logging(config)?)),
     }
 }

@@ -89,12 +89,9 @@ int32_t cubecow_resize_volume(
     uint64_t* out_new_size);
 
 int32_t cubecow_get_volume_info(
-    void* engine,
+    CubecowEngineHandle engine,
     const char* name,
-    uint64_t* out_size_bytes,
-    char** out_device_path,
-    int32_t* out_snapshot_count,
-    char** out_created_at);
+    char** out_json);
 
 int32_t cubecow_get_volume_block_info(
     void* engine,
@@ -114,7 +111,7 @@ int32_t cubecow_list_volumes(
 /* Snapshot operations                                                 */
 /* ------------------------------------------------------------------ */
 
-int32_t cubecow_create_snapshot(
+int32_t cubecow_create_snapshot_from_volume(
     void* engine,
     const char* source_name,
     const char* snapshot_name,
@@ -129,6 +126,12 @@ int32_t cubecow_activate_volume(
 int32_t cubecow_deactivate_volume(void* engine, const char* name);
 
 int32_t cubecow_delete_snapshot(void* engine, const char* snapshot_name);
+
+int32_t cubecow_create_volume_from_snapshot(
+    void* engine,
+    const char* source_snapshot,
+    const char* volume_name,
+    char** out_device_path);
 
 int32_t cubecow_list_snapshots(
     void* engine,

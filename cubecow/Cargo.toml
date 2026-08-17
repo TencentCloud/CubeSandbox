@@ -3,12 +3,24 @@ name = "cubecow"
 version = "0.1.0"
 edition = "2021"
 description = "An xfs-reflink based Copy-On-Write storage engine providing thin-provisioned volume management and O(1) snapshots/clones via FICLONE"
-license = "MIT"
 
 [lib]
 name = "cubecow"
 path = "src/lib.rs"
 crate-type = ["lib", "cdylib", "staticlib"]
+
+# -----------------------------------------------------------------------------
+# `cubecow-cli` — thin CLI wrapper around the public `Engine` trait
+# -----------------------------------------------------------------------------
+# One subcommand per API method (create-volume, delete-volume, resize-volume,
+# get-volume-info, get-volume-block-info, list-volumes, create-snapshot,
+# delete-snapshot, create-volume-from-snapshot, list-snapshots,
+# activate-volume, deactivate-volume, export-snapshot, import-lvol,
+# reset-node-storage, metrics). Handy for shell scripts and for the
+# `examples/cubecow_api_smoke` end-to-end test.
+[[bin]]
+name = "cubecow-cli"
+path = "src/bin/cubecow_cli.rs"
 
 [dependencies]
 # Serialization & config
@@ -72,3 +84,26 @@ strip = "symbols"
 [[bench]]
 name = "reflink_ops"
 harness = false
+
+# -----------------------------------------------------------------------------
+# Examples
+# -----------------------------------------------------------------------------
+# The `examples/` directory hosts two **standalone Cargo crates** (each
+# with its own `Cargo.toml` + `[workspace]` isolation) that exercise
+# cubecow at a different layer:
+#
+# * `examples/s3_rpc_smoke/` — drives the 11 raw JSON-RPC methods of
+#   the s3lvol / RCOW daemon over its Unix socket. Backend-level smoke
+#   test, does not link against the cubecow lib.
+# * `examples/cubecow_api_smoke/` — shells out to the `cubecow-cli`
+#   binary and exercises every public method of the `cubecow::Engine`
+#   trait end-to-end. API-level smoke test; works against either the
+#   reflink or the s3 backend depending on the config file supplied to
+#   `cubecow-cli`.
+#
+# Both crates are intentionally NOT declared as `[[example]]` targets
+# of the cubecow crate so they can be cross-compiled (e.g. to
+# `x86_64-unknown-linux-musl`) and shipped as single static binaries
+# independently of the main lib.
+#
+# Build & run instructions live in each crate's `README.md`.
