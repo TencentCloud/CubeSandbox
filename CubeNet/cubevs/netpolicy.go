@@ -646,8 +646,12 @@ func l7DNSDomainNames(rules []dnsAllowRule) []string {
 }
 
 // mergeAllowOutWithL7 combines the non-L7 base entries with the L7 entries.
-// When the same LPM key appears in both, the L7 version wins (its flags and
-// port set describe a strictly wider policy).
+// When the same LPM key appears in both, the L7 version's flags and port set
+// win, and the merged entry is also marked netPolicyFlagL3Allowed so
+// populateAllowOutInnerMap writes the plain /32 any-port entry alongside the
+// L7 /48 entries — otherwise an L7 rule would silently narrow a same-host
+// plain allow_out to only the rule's ports. (Domain hosts get the same
+// treatment in mergeDNSAllowRules.)
 func mergeAllowOutWithL7(base, l7 []allowOutPolicyEntry) []allowOutPolicyEntry {
 	if len(l7) == 0 {
 		return base
@@ -660,7 +664,7 @@ func mergeAllowOutWithL7(base, l7 []allowOutPolicyEntry) []allowOutPolicyEntry {
 	}
 	for _, e := range l7 {
 		if idx, ok := byKey[e.key]; ok {
-			out[idx].flags |= e.flags
+			out[idx].flags |= e.flags | netPolicyFlagL3Allowed
 			out[idx].ports = e.ports
 			continue
 		}
@@ -742,6 +746,10 @@ func expandedAllowOutEntryCount(entries []allowOutPolicyEntry) int {
 			n := len(e.ports)
 			if n == 0 {
 				n = defaultPorts
+			}
+			if e.flags&netPolicyFlagL3Allowed != 0 {
+				// The host also gets a plain /32 any-port entry (coexistence).
+				n++
 			}
 			total += n
 			continue
@@ -1014,6 +1022,23 @@ func populateAllowOutInnerMap(outerMap *ebpf.Map, ifindex uint32, entries []allo
 					return fmt.Errorf("inner map lookup failed: %w, cidr: %s", lerr, entry.source)
 				}
 				if uerr := inner.Update(&key, &val, ebpf.UpdateAny); uerr != nil {
+					return fmt.Errorf("inner map update failed: %w, cidr: %s", uerr, entry.source)
+				}
+			}
+
+			// Coexistence: this host is also in plain allow_out, so write a
+			// plain /32 any-port entry alongside the /48 L7 entries. The /48
+			// (longest-prefix) match wins for the rule's ports; the /32 covers
+			// all other ports via plain SNAT. Strip the L7/L3 marker bits so
+			// the entry reads as a plain allow.
+			if entry.flags&netPolicyFlagL3Allowed != 0 {
+				plainKey := lpmKeyV3{Prefixlen: entry.key.Prefixlen, IP: entry.key.IP, Port: 0}
+				plainVal := netPolicyValueV3{
+					Flags:        entry.flags &^ (netPolicyFlagL7Required | netPolicyFlagL3Allowed),
+					Scheme:       L7SchemeNone,
+					KeyPrefixlen: uint8(plainKey.Prefixlen),
+				}
+				if uerr := inner.Update(&plainKey, &plainVal, ebpf.UpdateAny); uerr != nil {
 					return fmt.Errorf("inner map update failed: %w, cidr: %s", uerr, entry.source)
 				}
 			}

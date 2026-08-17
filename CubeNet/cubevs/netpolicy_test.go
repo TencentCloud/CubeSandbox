@@ -216,7 +216,10 @@ func TestBuildNetPolicyPlanDeduplicatesAndMergesFlags(t *testing.T) {
 	if got, want := len(plan.allowOutEntries), 1; got != want {
 		t.Fatalf("len(plan.allowOutEntries)=%d, want %d", got, want)
 	}
-	if got, want := plan.allowOutEntries[0].flags, uint8(netPolicyFlagL7Required); got != want {
+	// 198.51.100.1 is in BOTH plain allow_out and an L7 rule, so the merged
+	// static entry carries L7Required|L3Allowed (the L3 bit keeps the plain /32
+	// any-port entry alongside the L7 /48 entries).
+	if got, want := plan.allowOutEntries[0].flags, uint8(netPolicyFlagL7Required|netPolicyFlagL3Allowed); got != want {
 		t.Fatalf("allow out flags=%d, want %d", got, want)
 	}
 	if got, want := len(plan.dnsAllowRules), 1; got != want {
@@ -275,6 +278,42 @@ func TestBuildNetPolicyPlanL3AllowedCoexistence(t *testing.T) {
 	}
 	if got := flagsByDomain["plain.example.com"]; got != 0 {
 		t.Fatalf("plain.example.com flags=%#x, want 0 (plain allow)", got)
+	}
+}
+
+// TestBuildNetPolicyPlanStaticL3AllowedCoexistence is the static-IP
+// counterpart of TestBuildNetPolicyPlanL3AllowedCoexistence: a host present in
+// both plain allow_out and an L7 rule must be marked netPolicyFlagL3Allowed in
+// allowOutEntries, so populateAllowOutInnerMap writes the plain /32 any-port
+// entry alongside the L7 /48 entries.
+func TestBuildNetPolicyPlanStaticL3AllowedCoexistence(t *testing.T) {
+	allowOut := []string{"198.51.100.10", "198.51.100.20"}
+	l7AllowOut := []L7Target{
+		{Host: "198.51.100.10", Port: 8443, Scheme: L7SchemeHTTPS},
+		{Host: "198.51.100.30", Port: 9090, Scheme: L7SchemeHTTP},
+	}
+
+	plan, err := buildNetPolicyPlan(MVMOptions{AllowOut: &allowOut, L7AllowOut: &l7AllowOut})
+	if err != nil {
+		t.Fatalf("buildNetPolicyPlan returned error: %v", err)
+	}
+
+	flagsByIP := make(map[string]uint8, len(plan.allowOutEntries))
+	for _, e := range plan.allowOutEntries {
+		flagsByIP[uint32ToIP(e.key.IP).String()] = e.flags
+	}
+
+	l7bit := uint8(netPolicyFlagL7Required)
+	l3bit := uint8(netPolicyFlagL3Allowed)
+
+	if got := flagsByIP["198.51.100.10"]; got != l7bit|l3bit {
+		t.Fatalf("198.51.100.10 flags=%#x, want L7Required|L3Allowed (%#x)", got, l7bit|l3bit)
+	}
+	if got := flagsByIP["198.51.100.30"]; got != l7bit {
+		t.Fatalf("198.51.100.30 flags=%#x, want L7Required only (%#x)", got, l7bit)
+	}
+	if got := flagsByIP["198.51.100.20"]; got != 0 {
+		t.Fatalf("198.51.100.20 flags=%#x, want 0 (plain allow)", got)
 	}
 }
 
@@ -1043,6 +1082,61 @@ func TestPopulateAllowOutStaticV3OverExactStaticMergesFlags(t *testing.T) {
 	}
 	if got.Flags&uint8(netPolicyFlagL7Required) == 0 {
 		t.Fatalf("static-over-static lost rule flags: %#x", got.Flags)
+	}
+}
+
+// TestPopulateAllowOutStaticL3AlsoWritesPlainAndL7Entries is the static-IP
+// counterpart of the DNS-learn coexistence test: a host in both plain
+// allow_out and an L7 rule must be written as BOTH a plain /32 any-port entry
+// (marker bits stripped) and the L7 /48 entries.
+func TestPopulateAllowOutStaticL3AlsoWritesPlainAndL7Entries(t *testing.T) {
+	outer := newAllowOutV3OuterMap(t)
+	ifindex := uint32(310)
+	inner := attachAllowOutV3Inner(t, outer, ifindex)
+	ip := mustParseCIDRForTest(t, "192.0.2.120").IP
+
+	entries := []allowOutPolicyEntry{{
+		key:   lpmKey{Prefixlen: 32, IP: ip},
+		flags: uint8(netPolicyFlagL7Required) | uint8(netPolicyFlagL3Allowed),
+		ports: []l7PortEntry{{Port: htonsPort(8443), Scheme: L7SchemeHTTPS}},
+	}}
+	if err := populateAllowOutInnerMap(outer, ifindex, entries); err != nil {
+		t.Fatalf("populateAllowOutInnerMap: %v", err)
+	}
+
+	// The /48 L7 entry for the rule port is present and intercepted.
+	l7 := mustLookupV3(t, inner, lpmKeyV3{Prefixlen: 48, IP: ip, Port: htonsPort(8443)})
+	if l7.KeyPrefixlen != 48 || l7.Flags&uint8(netPolicyFlagL7Required) == 0 {
+		t.Fatalf("/48 = %+v, want L7 /48 entry", l7)
+	}
+	if l7.Scheme != L7SchemeHTTPS {
+		t.Fatalf("/48 scheme=%d, want https", l7.Scheme)
+	}
+
+	// The /32 plain entry is present for everything else, with marker bits
+	// stripped and static (zero) expiry.
+	plain := mustLookupV3(t, inner, lpmKeyV3{Prefixlen: 32, IP: ip, Port: 0})
+	if plain.KeyPrefixlen != 32 {
+		t.Fatalf("/32 KeyPrefixlen=%d, want 32", plain.KeyPrefixlen)
+	}
+	if plain.Flags != 0 {
+		t.Fatalf("/32 flags=%#x, want 0 (plain, marker bits stripped)", plain.Flags)
+	}
+	if plain.Scheme != L7SchemeNone {
+		t.Fatalf("/32 scheme=%d, want none", plain.Scheme)
+	}
+	if plain.ExpiresAtNS != 0 {
+		t.Fatalf("/32 ExpiresAtNS=%d, want 0 (static)", plain.ExpiresAtNS)
+	}
+
+	// A lookup for a non-rule port must fall back to the /32 plain entry, not
+	// match a /48 L7 entry (this is how classify_egress_flow admits it as SNAT).
+	fallback := mustLookupV3(t, inner, lpmKeyV3{Prefixlen: 48, IP: ip, Port: htonsPort(9090)})
+	if fallback.KeyPrefixlen == 48 && fallback.Flags&uint8(netPolicyFlagL7Required) != 0 {
+		t.Fatalf("non-rule port unexpectedly matched a /48 L7 entry: %+v", fallback)
+	}
+	if fallback.KeyPrefixlen != 32 {
+		t.Fatalf("non-rule port fell back to KeyPrefixlen=%d, want 32 (plain)", fallback.KeyPrefixlen)
 	}
 }
 

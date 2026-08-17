@@ -117,6 +117,7 @@ type PolicyEntryDump struct {
 	ExpiresIn   string `json:"expires_in,omitempty"`
 	Expired     bool   `json:"expired"`
 	L7Required  bool   `json:"l7_required"`
+	L3Allowed   bool   `json:"l3_allowed"`
 	Flags       uint8  `json:"flags"`
 	Static      bool   `json:"static"`
 	// L7 port tuples inherited from a matched dns_allow_value at DNS-learn
@@ -148,6 +149,7 @@ type DNSAllowRuleDump struct {
 	Domain     string `json:"domain"`
 	Wildcard   bool   `json:"wildcard"`
 	L7Required bool   `json:"l7_required"`
+	L3Allowed  bool   `json:"l3_allowed"`
 	Flags      uint8  `json:"flags"`
 	NameLen    uint32 `json:"name_len"`
 	Prefixlen  uint32 `json:"prefixlen"`
@@ -168,6 +170,7 @@ type DNSQueryTrackDump struct {
 	ExpiresIn   string `json:"expires_in"`
 	Expired     bool   `json:"expired"`
 	L7Required  bool   `json:"l7_required"`
+	L3Allowed   bool   `json:"l3_allowed"`
 	Flags       uint8  `json:"flags"`
 	// L7 port tuples copied verbatim from the matched dns_allow_value so the
 	// response handler can rebuild net_policy_value_v3 without a second
@@ -529,6 +532,7 @@ func dumpPolicyInnerMap(innerMapID uint32, now uint64) ([]PolicyEntryDump, error
 			CIDR:       dumpLPMCIDRV3(key),
 			Expired:    netPolicyValueV3Expired(value, now),
 			L7Required: value.Flags&uint8(netPolicyFlagL7Required) != 0,
+			L3Allowed:  value.Flags&uint8(netPolicyFlagL3Allowed) != 0,
 			Flags:      value.Flags,
 			Static:     value.ExpiresAtNS == 0,
 		}
@@ -706,6 +710,7 @@ func dumpDNSQueryTrack(opts DumpOptions, now uint64) (any, error) {
 			ExpiresIn:   remainingDuration(value.ExpiresAtNS, now),
 			Expired:     value.ExpiresAtNS <= now,
 			L7Required:  value.Flags&uint8(netPolicyFlagL7Required) != 0,
+			L3Allowed:   value.Flags&uint8(netPolicyFlagL3Allowed) != 0,
 			Flags:       value.Flags,
 			PortCount:   value.PortCount,
 			Ports:       l7PortEntriesToDump(value.Ports[:], value.PortCount),
@@ -876,6 +881,7 @@ func dumpDNSAllowRule(key dnsAllowKey, value dnsAllowValue) (DNSAllowRuleDump, e
 		Domain:     domain,
 		Wildcard:   wildcard,
 		L7Required: value.Flags&uint8(netPolicyFlagL7Required) != 0,
+		L3Allowed:  value.Flags&uint8(netPolicyFlagL3Allowed) != 0,
 		Flags:      value.Flags,
 		NameLen:    value.NameLen,
 		Prefixlen:  key.Prefixlen,
