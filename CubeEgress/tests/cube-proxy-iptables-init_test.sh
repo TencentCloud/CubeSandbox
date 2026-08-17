@@ -90,6 +90,84 @@ remove_routing
 [[ "$(grep -c 'rule del fwmark' "${CALLS}" || true)" -eq 2 ]]
 [[ ! -s "${RULES_STATE}" ]]
 
+# --- install_chain builds into a scratch chain and swaps atomically ----------
+# A steering-rule failure must abort BEFORE the live chain / PREROUTING jump is
+# touched, so a partial install never leaves a fail-open gap. We mock iptables
+# and record every call; chain contents live in IPT_STATE, the PREROUTING jump
+# in JUMP_STATE.
+: > "${CALLS}"
+IPT_STATE="${TMP_DIR}/iptables_rules"
+JUMP_STATE="${TMP_DIR}/prerouting_jump"
+: > "${IPT_STATE}"
+: > "${JUMP_STATE}"
+FAIL_ON_MARK=""
+
+iptables() {
+    printf '%s\n' "$*" >> "${CALLS}"
+    local op="$3" target="$4"
+    local rest="${*:5}"
+    case "${op}" in
+        -N|-F|-X) return 0 ;;
+        -E) # rename chain $4 -> $5, carrying its rules
+            local from="$4" to="$5"
+            { grep -vF "${from}|" "${IPT_STATE}" || true
+              grep -F "${from}|" "${IPT_STATE}" | sed "s|^${from}|${to}|" || true
+            } > "${IPT_STATE}.new"
+            mv "${IPT_STATE}.new" "${IPT_STATE}"
+            return 0 ;;
+        -A)
+            if [[ "${target}" == "PREROUTING" ]]; then
+                printf '%s\n' "$6" > "${JUMP_STATE}"
+                return 0
+            fi
+            if [[ -n "${FAIL_ON_MARK}" && "${rest}" == *"${FAIL_ON_MARK}"* ]]; then
+                return 1
+            fi
+            printf '%s|%s\n' "${target}" "${rest}" >> "${IPT_STATE}"
+            return 0 ;;
+        -C)
+            if [[ "${target}" == "PREROUTING" ]]; then
+                [[ "$(cat "${JUMP_STATE}")" == "$6" ]] && return 0 || return 1
+            fi
+            grep -qF "${target}|${rest}" "${IPT_STATE}" && return 0 || return 1 ;;
+        -D)
+            if [[ "${target}" == "PREROUTING" ]]; then : > "${JUMP_STATE}"; fi
+            return 0 ;;
+    esac
+    return 0
+}
+
+# Success path: both steering rules are verified in the scratch chain BEFORE it
+# is renamed into the live chain, and PREROUTING only jumps at the live chain
+# after the swap.
+install_chain
+http_v="$(grep -n -- "-t mangle -C ${CHAIN}.new .*${CUBE_L7_MARK_HTTP}" "${CALLS}" | head -1 | cut -d: -f1)"
+https_v="$(grep -n -- "-t mangle -C ${CHAIN}.new .*${CUBE_L7_MARK_HTTPS}" "${CALLS}" | head -1 | cut -d: -f1)"
+swap="$(grep -n -- "-t mangle -E ${CHAIN}.new ${CHAIN}" "${CALLS}" | head -1 | cut -d: -f1)"
+jump="$(grep -n -- "-t mangle -A PREROUTING -j ${CHAIN}" "${CALLS}" | head -1 | cut -d: -f1)"
+[[ -n "${http_v}" && -n "${https_v}" && -n "${swap}" && -n "${jump}" ]]
+[[ "${http_v}" -lt "${swap}" && "${https_v}" -lt "${swap}" && "${swap}" -lt "${jump}" ]]
+# Post-swap, the live chain holds both steering rules.
+grep -qF "${CHAIN}|-i ${INGRESS_IFACE} -p tcp -m mark --mark ${CUBE_L7_MARK_HTTP}/${CUBE_L7_MARK_MASK} -j TPROXY --on-ip ${TPROXY_ON_IP} --on-port ${TPROXY_PORT_HTTP}" "${IPT_STATE}"
+grep -qF "${CHAIN}|-i ${INGRESS_IFACE} -p tcp -m mark --mark ${CUBE_L7_MARK_HTTPS}/${CUBE_L7_MARK_MASK} -j TPROXY --on-ip ${TPROXY_ON_IP} --on-port ${TPROXY_PORT_HTTPS}" "${IPT_STATE}"
+
+# Failure path: the HTTPS rule fails to add. The subshell aborts before the
+# swap and before any PREROUTING jump, so the live path is never half-built.
+: > "${CALLS}"; : > "${IPT_STATE}"; : > "${JUMP_STATE}"
+if ( FAIL_ON_MARK="${CUBE_L7_MARK_HTTPS}"; install_chain ); then
+    echo "install_chain succeeded despite HTTPS rule failure" >&2
+    exit 1
+fi
+if grep -q -- "-t mangle -E ${CHAIN}.new ${CHAIN}" "${CALLS}"; then
+    echo "live chain swapped in despite failed HTTPS rule (fail-open)" >&2
+    exit 1
+fi
+if grep -q -- "-t mangle -A PREROUTING -j ${CHAIN}" "${CALLS}"; then
+    echo "PREROUTING jump installed despite failed HTTPS rule (fail-open)" >&2
+    exit 1
+fi
+unset -f iptables
+
 # Verify migration ordering without touching the host network.
 : > "${CALLS}"
 require_root() { :; }

@@ -120,27 +120,61 @@ require_modules() {
     done
 }
 
-# Create-or-flush our sub-chain, then ensure PREROUTING jumps to it once.
+# Build the steering rules into a scratch chain and only swap it into the live
+# chain once every rule is verified present. Flushing and rebuilding the live
+# chain in place would be non-atomic: if the second (HTTPS) rule failed after
+# the first succeeded, the script would abort before install_routing() while
+# PREROUTING still jumped at a half-built chain — a silent fail-open that
+# bypasses L7 interception/deny for that scheme. Building in an unreferenced
+# scratch chain keeps the currently-live config intact until the swap.
 install_chain() {
-    iptables -t mangle -N "${CHAIN}" 2>/dev/null || true
-    iptables -t mangle -F "${CHAIN}"
+    local scratch="${CHAIN}.new"
 
-    iptables -t mangle -C PREROUTING -j "${CHAIN}" 2>/dev/null \
-        || iptables -t mangle -A PREROUTING -j "${CHAIN}"
+    # Start from a clean scratch chain. It is not referenced by PREROUTING yet,
+    # so a failure below never disturbs the currently-live chain.
+    iptables -t mangle -F "${scratch}" 2>/dev/null || true
+    iptables -t mangle -X "${scratch}" 2>/dev/null || true
+    iptables -t mangle -N "${scratch}"
 
     # HTTP: mvmtap stamps CUBE_L7_MARK_HTTP → steer to nginx HTTP listener.
-    iptables -t mangle -A "${CHAIN}" \
+    iptables -t mangle -A "${scratch}" \
         -i "${INGRESS_IFACE}" -p tcp \
         -m mark --mark "${CUBE_L7_MARK_HTTP}/${CUBE_L7_MARK_MASK}" \
         -j TPROXY --on-ip "${TPROXY_ON_IP}" --on-port "${TPROXY_PORT_HTTP}"
 
     # HTTPS: mvmtap stamps CUBE_L7_MARK_HTTPS → steer to nginx HTTPS listener.
-    iptables -t mangle -A "${CHAIN}" \
+    iptables -t mangle -A "${scratch}" \
         -i "${INGRESS_IFACE}" -p tcp \
         -m mark --mark "${CUBE_L7_MARK_HTTPS}/${CUBE_L7_MARK_MASK}" \
         -j TPROXY --on-ip "${TPROXY_ON_IP}" --on-port "${TPROXY_PORT_HTTPS}"
 
-    iptables -t mangle -A "${CHAIN}" -j RETURN
+    iptables -t mangle -A "${scratch}" -j RETURN
+
+    # Post-condition: both steering rules must exist before the swap, else a
+    # silently dropped rule would fail open for that scheme.
+    iptables -t mangle -C "${scratch}" \
+        -i "${INGRESS_IFACE}" -p tcp \
+        -m mark --mark "${CUBE_L7_MARK_HTTP}/${CUBE_L7_MARK_MASK}" \
+        -j TPROXY --on-ip "${TPROXY_ON_IP}" --on-port "${TPROXY_PORT_HTTP}" \
+        || fatal "HTTP TPROXY rule missing from ${scratch} after build"
+    iptables -t mangle -C "${scratch}" \
+        -i "${INGRESS_IFACE}" -p tcp \
+        -m mark --mark "${CUBE_L7_MARK_HTTPS}/${CUBE_L7_MARK_MASK}" \
+        -j TPROXY --on-ip "${TPROXY_ON_IP}" --on-port "${TPROXY_PORT_HTTPS}" \
+        || fatal "HTTPS TPROXY rule missing from ${scratch} after build"
+
+    # Swap: detach the previously-live chain from PREROUTING, drop it, rename
+    # the fully-built scratch chain into the live name, then point PREROUTING
+    # at it. The old config keeps serving until it is detached here, so there
+    # is no window with a half-configured chain.
+    while iptables -t mangle -C PREROUTING -j "${CHAIN}" 2>/dev/null; do
+        iptables -t mangle -D PREROUTING -j "${CHAIN}" || break
+    done
+    iptables -t mangle -F "${CHAIN}" 2>/dev/null || true
+    iptables -t mangle -X "${CHAIN}" 2>/dev/null || true
+    iptables -t mangle -E "${scratch}" "${CHAIN}"
+    iptables -t mangle -C PREROUTING -j "${CHAIN}" 2>/dev/null \
+        || iptables -t mangle -A PREROUTING -j "${CHAIN}"
 }
 
 install_routing() {
@@ -169,6 +203,9 @@ remove_chain() {
     done
     iptables -t mangle -F "${CHAIN}" 2>/dev/null || true
     iptables -t mangle -X "${CHAIN}" 2>/dev/null || true
+    # Drop any scratch chain left over from an aborted install.
+    iptables -t mangle -F "${CHAIN}.new" 2>/dev/null || true
+    iptables -t mangle -X "${CHAIN}.new" 2>/dev/null || true
 }
 
 remove_routing() {
