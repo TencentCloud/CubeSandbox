@@ -2,9 +2,16 @@ import { defineConfig } from 'vitepress'
 import { withMermaid } from 'vitepress-plugin-mermaid'
 
 export default withMermaid(defineConfig({
-  title: "Cube Sandbox",
+  title: "CubeSandbox",
   description: "Instant, Concurrent, Secure & Lightweight Sandbox Service for AI Agents",
   srcExclude: ['**/_template.md'],
+
+  markdown: {
+    // Shiki has no bundled PromQL grammar; alias so ```promql blocks do not warn.
+    languageAlias: {
+      promql: 'js'
+    }
+  },
   
   head: [
     ['link', { rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg' }]
@@ -98,8 +105,9 @@ export default withMermaid(defineConfig({
           { text: 'Architecture', link: '/architecture/overview' },
           { text: 'Developer', link: '/dev/' },
           { text: 'Blog', link: '/blog/' },
-          { text: 'About us', link: '/about-us' },
           { text: 'Changelog', link: '/changelog/' },
+          { text: 'Contributors', link: '/contributors' },
+          { text: 'About us', link: '/about-us' },
           { text: 'GitHub', link: 'https://github.com/tencentcloud/CubeSandbox' }
         ],
         sidebar: {
@@ -241,7 +249,7 @@ export default withMermaid(defineConfig({
       label: '简体中文',
       lang: 'zh',
       link: '/zh/',
-      title: 'Cube Sandbox',
+      title: 'CubeSandbox',
       description: '一个极速启动、高并发、安全且轻量化的 AI Agent 沙箱服务',
       themeConfig: {
         nav: [
@@ -250,8 +258,9 @@ export default withMermaid(defineConfig({
           { text: '架构', link: '/zh/architecture/overview' },
           { text: '开发者', link: '/zh/dev/' },
           { text: '博客', link: '/zh/blog/' },
-          { text: '关于我们', link: '/zh/about-us' },
           { text: '更新日志', link: '/zh/changelog/' },
+          { text: '贡献者', link: '/zh/contributors' },
+          { text: '关于我们', link: '/zh/about-us' },
           { text: 'GitHub', link: 'https://github.com/tencentcloud/CubeSandbox' }
         ],
         sidebar: {

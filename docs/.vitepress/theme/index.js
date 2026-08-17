@@ -1,3 +1,4 @@
+import { defineAsyncComponent } from 'vue'
 import DefaultTheme from 'vitepress/theme'
 import Layout from './Layout.vue'
 import BlogIndex from './BlogIndex.vue'
@@ -8,5 +9,9 @@ export default {
   Layout,
   enhanceApp({ app }) {
     app.component('BlogIndex', BlogIndex)
+    app.component(
+      'ContributorsWall',
+      defineAsyncComponent(() => import('./ContributorsWall.vue'))
+    )
   }
 }
