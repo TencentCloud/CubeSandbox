@@ -93,7 +93,10 @@ func (h *localCubeRunTemplateManager) ListLocalTemplates(ctx context.Context) (m
 	}
 	templateMap := make(map[string]*templatetypes.LocalRunTemplate)
 	for _, template := range templates {
-		templateMap[template.TemplateID] = template
+		if template == nil {
+			continue
+		}
+		templateMap[template.TemplateID] = template.Clone()
 	}
 	return templateMap, nil
 }
@@ -162,7 +165,6 @@ func (h *localCubeRunTemplateManager) removeMissingLocalTemplates(ctx context.Co
 }
 
 func (h *localCubeRunTemplateManager) EnsureCubeRunTemplate(ctx context.Context, templateID string) (*templatetypes.LocalRunTemplate, error) {
-
 	h.lock.Lock()
 	delete(h.unusedTemplateMap, templateID)
 	h.lock.Unlock()
@@ -170,15 +172,12 @@ func (h *localCubeRunTemplateManager) EnsureCubeRunTemplate(ctx context.Context,
 	if !h.IsReady() {
 		return nil, fmt.Errorf("local template manager is not ready")
 	}
-	templates, err := h.store.ByIndexGeneric(templateIDIndexerKey, templateID)
+	cloned, err := h.cloneAndHydrate(templateID)
 	if err != nil {
 		return nil, err
 	}
-	for _, template := range templates {
-		if template != nil {
-			hydrateLocalTemplateComponentVersions(template)
-			return template, nil
-		}
+	if cloned != nil {
+		return cloned, nil
 	}
 	if err := h.recoverLocalTemplatesFromSnapshotRoot(ctx, constants.DefaultSnapshotDir, templateID); err != nil {
 		log.G(ctx).WithFields(CubeLog.Fields{
@@ -186,15 +185,12 @@ func (h *localCubeRunTemplateManager) EnsureCubeRunTemplate(ctx context.Context,
 			"err":         err.Error(),
 		}).Warn("failed to recover template from snapshot root")
 	}
-	templates, err = h.store.ByIndexGeneric(templateIDIndexerKey, templateID)
+	cloned, err = h.cloneAndHydrate(templateID)
 	if err != nil {
 		return nil, err
 	}
-	for _, template := range templates {
-		if template != nil {
-			hydrateLocalTemplateComponentVersions(template)
-			return template, nil
-		}
+	if cloned != nil {
+		return cloned, nil
 	}
 	log.G(ctx).WithFields(CubeLog.Fields{
 		"template_id": templateID,
@@ -281,6 +277,22 @@ func isTemporarySnapshotPath(snapshotPath string) bool {
 	return strings.HasSuffix(base, ".tmp")
 }
 
+func (h *localCubeRunTemplateManager) cloneAndHydrate(templateID string) (*templatetypes.LocalRunTemplate, error) {
+	templates, err := h.store.ByIndexGeneric(templateIDIndexerKey, templateID)
+	if err != nil {
+		return nil, err
+	}
+	for _, template := range templates {
+		if template == nil {
+			continue
+		}
+		cloned := template.Clone()
+		hydrateLocalTemplateComponentVersions(cloned)
+		return cloned, nil
+	}
+	return nil, nil
+}
+
 func hydrateLocalTemplateComponentVersions(local *templatetypes.LocalRunTemplate) {
 	if local == nil {
 		return
@@ -288,10 +300,7 @@ func hydrateLocalTemplateComponentVersions(local *templatetypes.LocalRunTemplate
 	if len(templatetypes.VersionMapFromComponts(local)) > 0 {
 		return
 	}
-	snapshotPath := ""
-	if local.Snapshot.Snapshot.Path != "" {
-		snapshotPath = local.Snapshot.Snapshot.Path
-	}
+	snapshotPath := local.Snapshot.Snapshot.Path
 	if snapshotPath == "" {
 		return
 	}

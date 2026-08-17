@@ -117,10 +117,7 @@ func (cb *CubeBox) DeepCopy() *CubeBox {
 		copied.Status = cb.Status.DeepCopy()
 	}
 
-	if cb.LocalRunTemplate != nil {
-		templateCopy := *cb.LocalRunTemplate
-		copied.LocalRunTemplate = &templateCopy
-	}
+	copied.LocalRunTemplate = cb.LocalRunTemplate.Clone()
 
 	if cb.ComponentVersions != nil {
 		copied.ComponentVersions = make(map[string]string, len(cb.ComponentVersions))
