@@ -598,7 +598,6 @@ static __always_inline __u32 do_icmp_nat(struct __sk_buff *skb, struct mvm_meta 
 	struct ethhdr *l2;
 	struct iphdr *l3;
 	struct icmphdr *l4;
-	int mac_result;
 	__u16 ip_hlen;
 	__u16 snat_id;
 	__u64 flags;
@@ -649,13 +648,6 @@ do_nat:
 	ip_hlen <<= 2;
 	icmp_csum_off = ICMP_CSUM_OFF(ip_hlen);
 
-	/* update L2 first: csum/store helpers may invalidate packet pointers */
-	mac_result = prepare_egress_l2(skb, l2, key.dst_ip);
-	if (mac_result == EGRESS_MAC_DROP)
-		return 0;
-	if (mac_result == EGRESS_MAC_PROBE)
-		return sess->node_ifindex;
-
 	/* update ICMP csum: ICMP has no pseudo-header, so no BPF_F_PSEUDO_HDR.
 	 * Only the echo identifier change affects the csum (IP saddr is not
 	 * covered by ICMP checksum).
@@ -705,7 +697,6 @@ static __always_inline __u32 do_udp_nat_inline(struct __sk_buff *skb,
 	struct ethhdr *l2;
 	struct iphdr *l3;
 	struct udphdr *l4;
-	int mac_result;
 	__u16 ip_hlen;
 	__u16 snat_port;
 	__u64 flags;
@@ -751,13 +742,6 @@ do_nat:
 	ip_hlen = BPF_CORE_READ_BITFIELD(l3, ihl);
 	ip_hlen <<= 2;
 	udp_csum_off = UDP_CSUM_OFF(ip_hlen);
-
-	/* update L2 first: csum/store helpers may invalidate packet pointers */
-	mac_result = prepare_egress_l2(skb, l2, key.dst_ip);
-	if (mac_result == EGRESS_MAC_DROP)
-		return 0;
-	if (mac_result == EGRESS_MAC_PROBE)
-		return sess->node_ifindex;
 
 	/* update UDP csum only if it was non-zero (UDP csum is optional over IPv4).
 	 * BPF_F_MARK_MANGLED_0 keeps a 0 csum (= disabled) intact in case the
@@ -851,7 +835,6 @@ static __always_inline __u64 do_tcp_nat(struct __sk_buff *skb, struct mvm_meta *
 	struct ethhdr *l2;
 	struct iphdr *l3;
 	struct tcphdr *l4;
-	int mac_result;
 	__u16 ip_hlen;
 	__u16 snat_port;
 	__u64 flags;
@@ -923,13 +906,6 @@ do_nat:
 	ip_hlen = BPF_CORE_READ_BITFIELD(l3, ihl);
 	ip_hlen <<= 2;
 	tcp_csum_off = TCP_CSUM_OFF(ip_hlen);
-
-	/* update L2 first: csum/store helpers may invalidate packet pointers */
-	mac_result = prepare_egress_l2(skb, l2, key.dst_ip);
-	if (mac_result == EGRESS_MAC_DROP)
-		return TCP_NAT_DROP;
-	if (mac_result == EGRESS_MAC_PROBE)
-		return TCP_NAT_PACK(sess->node_ifindex, TCP_NAT_OK);
 
 	/* update TCP csum: IP saddr is part of pseudo-header, so BPF_F_PSEUDO_HDR */
 	flags = BPF_F_PSEUDO_HDR | sizeof(old_saddr);
@@ -1085,6 +1061,7 @@ int from_cube(struct __sk_buff *skb)
 	struct iphdr *l3;
 	struct tcphdr *l4;
 	struct udphdr *udp;
+	int mac_result;
 	__u16 *host_port;
 	__u32 dns_off;
 	__u8 proto;
@@ -1207,6 +1184,15 @@ int from_cube(struct __sk_buff *skb)
 			return TC_ACT_SHOT;
 		if (should_redirect_to_l7_proxy(ifindex, daddr, l4))
 			return bpf_redirect(cubegw0_ifindex, BPF_F_INGRESS);
+	}
+
+	mac_result = prepare_egress_l2(skb, l2, daddr);
+	if (mac_result == EGRESS_MAC_DROP)
+		return TC_ACT_SHOT;
+	if (mac_result == EGRESS_MAC_PROBE)
+		return bpf_redirect(nodenic_ifindex, 0);
+
+	if (proto == IPPROTO_TCP) {
 		tcp_ret = do_tcp_nat(skb, mvm_meta);
 		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_OK)
 			return bpf_redirect(TCP_NAT_IFINDEX(tcp_ret), egress_redirect_flags);
