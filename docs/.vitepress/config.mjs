@@ -170,6 +170,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: 'WebUI Dashboard', link: '/guide/webui' },
                 { text: 'Service Management & Logs', link: '/guide/service-management' },
+                { text: 'CLI Tools', link: '/guide/cli-tools' },
                 { text: 'CubeMaster Scheduler Configuration', link: '/guide/cubemaster-scheduler-config' },
                 { text: 'Node Isolation', link: '/guide/node-isolation' },
                 { text: 'Sandbox Resource Metrics', link: '/guide/resource-metrics' },
@@ -322,6 +323,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: 'WebUI 控制台', link: '/zh/guide/webui' },
                 { text: '服务管理与日志', link: '/zh/guide/service-management' },
+                { text: '命令行工具', link: '/zh/guide/cli-tools' },
                 { text: 'CubeMaster 调度器配置参考', link: '/zh/guide/cubemaster-scheduler-config' },
                 { text: '隔离节点', link: '/zh/guide/node-isolation' },
                 { text: '沙箱资源指标', link: '/zh/guide/resource-metrics' },
