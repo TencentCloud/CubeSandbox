@@ -91,10 +91,13 @@ func pinnedMapExists(name string) (bool, error) {
 }
 
 // migratePersistentPolicyMaps performs a one-way migration into the current
-// generation. The legacy pins are deleted once their contents have been
-// copied into the current maps so they don't linger as orphaned bpffs
-// entries. The current datapath and userspace only read allow_out_v3 and
-// dns_allow_v2.
+// generation. Both legacy maps are migrated first; the legacy pins are only
+// unlinked after both have been copied into the current maps. This ordering
+// matters for rollback: Init removes the freshly created allow_out_v3 /
+// dns_allow_v2 pins when migration fails, so if the allow pin were unlinked
+// before the DNS migration ran, a DNS failure would leave the allow_out
+// policy unmigratable (legacy pin gone, new pin rolled back). The current
+// datapath and userspace only read allow_out_v3 and dns_allow_v2.
 func migratePersistentPolicyMaps() error {
 	allowSrc, err := allowOutMigrationSource()
 	if err != nil {
@@ -106,15 +109,28 @@ func migratePersistentPolicyMaps() error {
 			// retried on the next restart.
 			return err
 		}
-		if err := removePinnedMap(allowSrc); err != nil {
-			return err
-		}
 	}
 
 	if err := migrateDNSAllowMap(MapNameDNSAllow); err != nil {
+		// Leave the legacy allow pin in place too, so both migrations are
+		// retried together on the next restart (see function comment).
 		return err
 	}
-	return removePinnedMap(MapNameDNSAllow)
+
+	// Both migrations succeeded, so the current maps now hold the policy and
+	// dropping the legacy pins is pure cleanup. Make it best-effort: a failed
+	// unlink must not fail Init (which would roll back the freshly migrated
+	// maps and lose the policy); a lingering pin is simply re-migrated
+	// (idempotently) on the next restart.
+	if allowSrc != "" {
+		if err := removePinnedMap(allowSrc); err != nil {
+			log.Printf("cubevs migration: leaving legacy pin %s after successful migration: %v", allowSrc, err)
+		}
+	}
+	if err := removePinnedMap(MapNameDNSAllow); err != nil {
+		log.Printf("cubevs migration: leaving legacy pin %s after successful migration: %v", MapNameDNSAllow, err)
+	}
+	return nil
 }
 
 // allowOutMigrationSource returns the name of the legacy allow_out pin to

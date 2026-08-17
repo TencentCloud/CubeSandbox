@@ -456,3 +456,77 @@ func TestMigrateAllowOutMapFailureKeepsLegacyPin(t *testing.T) {
 	}
 	src.Close()
 }
+
+// TestMigrateDNSFailureKeepsAllowOutLegacyPin covers the combined-failure
+// rollback case the single-map tests miss: the allow_out migration succeeds
+// but the DNS migration then fails. The legacy allow pin must survive the
+// failure — if migratePersistentPolicyMaps unlinked it before the DNS
+// migration ran, Init's rollback would drop the freshly populated
+// allow_out_v3 and the next restart would skip re-migration (legacy pin
+// gone), permanently losing the allow_out policy.
+func TestMigrateDNSFailureKeepsAllowOutLegacyPin(t *testing.T) {
+	mountBpffs(t)
+	ifindex := uint32(42)
+
+	// A good legacy allow_out_v2 (16-byte net_policy_value_v2 inner) that
+	// migrates cleanly.
+	allowOuter := newAllowOutOuterMapWithValueSize(t, uint32(unsafe.Sizeof(netPolicyValueV2{})))
+	allowInner := newAllowOutLPMInner(t, uint32(unsafe.Sizeof(netPolicyValueV2{})))
+	allowKey := lpmKey{Prefixlen: 32, IP: mustParseCIDRForTest(t, "192.0.2.44/32").IP}
+	allowVal := netPolicyValueV2{Flags: 0, ExpiresAtNS: 0}
+	if err := allowInner.Update(&allowKey, &allowVal, ebpf.UpdateAny); err != nil {
+		t.Fatalf("seed legacy allow entry: %v", err)
+	}
+	if err := allowOuter.Put(&ifindex, allowInner); err != nil {
+		t.Fatalf("attach legacy allow inner: %v", err)
+	}
+	allowInner.Close()
+	if err := allowOuter.Pin(pinPath(MapNameAllowOutV2)); err != nil {
+		t.Fatalf("pin legacy %s: %v", MapNameAllowOutV2, err)
+	}
+	// Destination allow_out_v3 outer.
+	newAllowOuter := newAllowOutV3OuterMap(t)
+	if err := newAllowOuter.Pin(pinPath(MapNameAllowOutV3)); err != nil {
+		t.Fatalf("pin %s: %v", MapNameAllowOutV3, err)
+	}
+
+	// A bad legacy dns_allow whose inner carries the unsupported 48-byte value
+	// layout, so the DNS migration fails.
+	badDNSOuter := newDNSAllowOuterMapWithValueSize(t, 48)
+	badDNSInner := newLPMInner(t, 48)
+	dnsKey, _, err := makeDNSAllowRule("api.example.com", uint8(netPolicyFlagL7Required))
+	if err != nil {
+		t.Fatalf("makeDNSAllowRule: %v", err)
+	}
+	var raw48 [48]byte
+	if err := badDNSInner.Update(&dnsKey, &raw48, ebpf.UpdateAny); err != nil {
+		t.Fatalf("seed 48-byte dns entry: %v", err)
+	}
+	if err := badDNSOuter.Put(&ifindex, badDNSInner); err != nil {
+		t.Fatalf("attach bad dns inner: %v", err)
+	}
+	badDNSInner.Close()
+	if err := badDNSOuter.Pin(pinPath(MapNameDNSAllow)); err != nil {
+		t.Fatalf("pin legacy %s: %v", MapNameDNSAllow, err)
+	}
+	// Destination dns_allow_v2 outer.
+	newDNSOuter := newDNSAllowOuterMap(t)
+	if err := newDNSOuter.Pin(pinPath(MapNameDNSAllowV2)); err != nil {
+		t.Fatalf("pin %s: %v", MapNameDNSAllowV2, err)
+	}
+
+	// Migration must fail on the unsupported DNS inner layout...
+	err = migratePersistentPolicyMaps()
+	if err == nil {
+		t.Fatal("migratePersistentPolicyMaps succeeded, want failure for unsupported DNS inner value_size")
+	}
+
+	// ...and the legacy allow pin must survive so the next restart retries
+	// both migrations together (this is the regression the fix addresses).
+	src, err := ebpf.LoadPinnedMap(pinPath(MapNameAllowOutV2), nil)
+	if err != nil {
+		t.Fatalf("legacy %s pin was removed after allow migration but DNS migration failed; "+
+			"allow_out policy would be lost on restart: %v", MapNameAllowOutV2, err)
+	}
+	src.Close()
+}
