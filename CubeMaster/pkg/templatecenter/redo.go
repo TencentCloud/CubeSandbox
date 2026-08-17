@@ -9,13 +9,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+	"sync"
+
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter/image"
-	"strings"
+	"gorm.io/gorm"
 )
 
 func normalizeRedoTemplateImageRequest(req *types.RedoTemplateFromImageReq) (*types.RedoTemplateFromImageReq, error) {
@@ -184,6 +187,39 @@ func failRedoTemplateImageJob(ctx context.Context, jobID, phase, message string)
 	})
 }
 
+// prepareRootfsArtifactForRedoBuild removes leftovers from an interrupted
+// BUILDING_EXT4 attempt while holding the same process-local lock used by
+// ensureRootfsArtifact. If another caller completed a reusable artifact before
+// this redo acquired the lock, keep that fresh artifact instead of deleting it.
+func prepareRootfsArtifactForRedoBuild(ctx context.Context, artifactID string) (*models.RootfsArtifact, bool) {
+	artifactID = strings.TrimSpace(artifactID)
+	if artifactID == "" {
+		return nil, false
+	}
+	muV, _ := artifactBuildLocks.LoadOrStore(artifactID, &sync.Mutex{})
+	mu := muV.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+
+	previousArtifact, err := getRootfsArtifactByID(ctx, artifactID)
+	if err != nil {
+		return nil, false
+	}
+	if previousArtifact.Status == ArtifactStatusReady && previousArtifact.GeneratedRequestJSON != "" {
+		if validationErr := validateReusableRootfsArtifactFile(previousArtifact); validationErr == nil {
+			return previousArtifact, true
+		}
+	}
+	if previousArtifact.Ext4Path != "" {
+		_ = cleanupLocalRootfsArtifact(previousArtifact.ArtifactID, previousArtifact.Ext4Path)
+	}
+	_ = updateRootfsArtifact(ctx, previousArtifact.ArtifactID, map[string]any{
+		"status":     ArtifactStatusFailed,
+		"last_error": "redo requested after artifact build failure",
+	})
+	return nil, false
+}
+
 func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoTemplateFromImageReq, downloadBaseURL string) {
 	logger := log.G(ctx).WithFields(map[string]any{
 		"job_id":      jobID,
@@ -224,25 +260,81 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 	if resumePhase == "" {
 		resumePhase = JobPhaseSnapshotting
 	}
-	if resumePhase == JobPhaseBuildingExt4 {
+	needsBuild := resumePhase == JobPhaseBuildingExt4
+	cleanupPreviousBuild := needsBuild
+	if !needsBuild {
+		artifact, err = getRootfsArtifactByID(ctx, jobRecord.ArtifactID)
+		if err != nil {
+			failRedoTemplateImageJob(ctx, jobID, resumePhase, err.Error())
+			return
+		}
+		muV, _ := artifactBuildLocks.LoadOrStore(artifact.ArtifactID, &sync.Mutex{})
+		mu := muV.(*sync.Mutex)
+		validationErr, reloadErr := func() (error, error) {
+			mu.Lock()
+			defer mu.Unlock()
+
+			// The artifact may have been rebuilt while this redo waited for the
+			// per-artifact lock. Reload the authoritative row so validation and
+			// subsequent distribution use the current token, SHA, and metadata.
+			refreshedArtifact, err := getRootfsArtifactByID(ctx, jobRecord.ArtifactID)
+			if err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return err, nil
+				}
+				return nil, err
+			}
+			artifact = refreshedArtifact
+			switch {
+			case artifact.Status != ArtifactStatusReady:
+				return fmt.Errorf("rootfs artifact %s status is %q, want %q", artifact.ArtifactID, artifact.Status, ArtifactStatusReady), nil
+			case strings.TrimSpace(artifact.GeneratedRequestJSON) == "":
+				return fmt.Errorf("rootfs artifact %s generated request is empty", artifact.ArtifactID), nil
+			default:
+				return validateReusableRootfsArtifactFile(artifact), nil
+			}
+		}()
+		if reloadErr != nil {
+			failRedoTemplateImageJob(ctx, jobID, resumePhase, fmt.Sprintf("reload rootfs artifact %s after acquiring build lock: %v", jobRecord.ArtifactID, reloadErr))
+			return
+		}
+		if validationErr != nil {
+			logger.Warnf("redo rootfs artifact %s is not reusable: %v; rebuilding", artifact.ArtifactID, validationErr)
+			needsBuild = true
+			resumePhase = JobPhaseBuildingExt4
+			// ensureRootfsArtifact revalidates and claims the row under the same
+			// artifact lock. Do not separately clean the invalid file here: a
+			// concurrent create may replace it with a fresh artifact meanwhile.
+			cleanupPreviousBuild = false
+		}
+	}
+	if needsBuild {
 		if ShouldInjectEnvdIntoTemplate(&workingReq) {
 			failRedoTemplateImageJob(ctx, jobID, JobPhaseBuildingExt4, "redo cannot rebuild envd-enabled template rootfs because the original envd payload is not persisted")
 			return
 		}
+		if cleanupPreviousBuild {
+			if reusableArtifact, reusable := prepareRootfsArtifactForRedoBuild(ctx, jobRecord.ArtifactID); reusable {
+				artifact = reusableArtifact
+				needsBuild = false
+				resumePhase = JobPhaseDistributing
+				if err := updateTemplateImageJob(ctx, jobID, map[string]any{
+					"artifact_id":               artifact.ArtifactID,
+					"template_spec_fingerprint": artifact.TemplateSpecFingerprint,
+					"source_image_digest":       artifact.SourceImageDigest,
+					"artifact_status":           artifact.Status,
+					"phase":                     JobPhaseDistributing,
+					"progress":                  60,
+				}); err != nil {
+					logger.Errorf("update redo reusable artifact fail: %v", err)
+				}
+			}
+		}
+	}
+	if needsBuild {
 		if err := image.EnsureArtifactBuildPreflight(ctx); err != nil {
 			failRedoTemplateImageJob(ctx, jobID, JobPhaseBuildingExt4, err.Error())
 			return
-		}
-		if jobRecord.ArtifactID != "" {
-			if previousArtifact, lookupErr := getRootfsArtifactByID(ctx, jobRecord.ArtifactID); lookupErr == nil {
-				if previousArtifact.Ext4Path != "" {
-					_ = cleanupLocalRootfsArtifact(previousArtifact.ArtifactID, previousArtifact.Ext4Path)
-				}
-				_ = updateRootfsArtifact(ctx, previousArtifact.ArtifactID, map[string]any{
-					"status":     ArtifactStatusFailed,
-					"last_error": "redo requested after artifact build failure",
-				})
-			}
 		}
 		source, prepErr := image.PrepareLocalSource(ctx, image.SourceSpec{ImageRef: workingReq.SourceImageRef, RegistryUsername: workingReq.RegistryUsername, RegistryPassword: workingReq.RegistryPassword, DownloadBaseURL: downloadBaseURL})
 		if prepErr != nil {
@@ -276,12 +368,6 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 			logger.Errorf("update redo rebuilt artifact fail: %v", err)
 		}
 		resumePhase = JobPhaseDistributing
-	} else {
-		artifact, err = getRootfsArtifactByID(ctx, jobRecord.ArtifactID)
-		if err != nil {
-			failRedoTemplateImageJob(ctx, jobID, resumePhase, err.Error())
-			return
-		}
 	}
 
 	var imageCfg image.DockerImageConfig
