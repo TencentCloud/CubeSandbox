@@ -19,11 +19,18 @@ pub async fn rate_limit(
     request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    let key = request
+    let identity = request
         .extensions()
         .get::<crate::middleware::auth::RateLimitIdentity>()
-        .map(|id| id.0.clone())
-        .unwrap_or_else(|| "unauthenticated".to_string());
+        .map(|id| id.0.clone());
+
+    debug_assert!(
+        identity.is_some() || !state.config.auth_is_configured(),
+        "unified_auth must run before rate_limit: no RateLimitIdentity was published, \
+         so every request would share one bucket"
+    );
+
+    let key = identity.unwrap_or_else(|| "unauthenticated".to_string());
 
     match state.rate_limiter.check_key(&key) {
         Ok(_) => Ok(next.run(request).await),
