@@ -17,17 +17,17 @@ const settingMasterKey = "secret_master_key"
 
 // GetSystemSetting retrieves a system-level setting value by key.
 func (s *Store) GetSystemSetting(ctx context.Context, key string) (string, error) {
-	var val string
+	var val sql.NullString
 	err := s.db.WithContext(ctx).Raw(
 		"SELECT setting_value FROM t_system_setting WHERE setting_key = ? LIMIT 1", key,
-	).Scan(&val).Error
+	).Row().Scan(&val)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", nil
 		}
 		return "", err
 	}
-	return val, nil
+	return val.String, nil
 }
 
 // GetOrCreateSystemSetting atomically gets an existing system setting or
@@ -55,17 +55,17 @@ func (s *Store) SetSystemSetting(ctx context.Context, key, value string) error {
 
 // GetSetting retrieves an AgentHub-level setting value by key.
 func (s *Store) GetSetting(ctx context.Context, key string) (string, error) {
-	var val string
+	var val sql.NullString
 	err := s.db.WithContext(ctx).Raw(
 		"SELECT setting_value FROM t_agenthub_setting WHERE setting_key = ? LIMIT 1", key,
-	).Scan(&val).Error
+	).Row().Scan(&val)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", nil
 		}
 		return "", err
 	}
-	return val, nil
+	return val.String, nil
 }
 
 // GetOrCreateSetting atomically gets an existing setting or creates it with the given value.
@@ -110,17 +110,17 @@ func (s *Store) SetSettingsTx(ctx context.Context, kv map[string]string) error {
 
 // GetUserPassword retrieves the stored password hash for a user.
 func (s *Store) GetUserPassword(ctx context.Context, username string) (string, error) {
-	var pwd string
+	var pwd sql.NullString
 	err := s.db.WithContext(ctx).Raw(
 		"SELECT password FROM t_system_user WHERE username = ? LIMIT 1", username,
-	).Scan(&pwd).Error
+	).Row().Scan(&pwd)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", nil
 		}
 		return "", err
 	}
-	return pwd, nil
+	return pwd.String, nil
 }
 
 // SetUserPassword updates the password hash for a user.
