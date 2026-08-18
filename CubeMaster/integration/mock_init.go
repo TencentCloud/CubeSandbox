@@ -22,6 +22,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gomodule/redigo/redis"
 	"github.com/google/uuid"
+	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db"
@@ -654,10 +655,26 @@ func metricNow() []byte {
 }
 
 func mock_db() {
-	mocktest_OssDb = db.Init(config.GetDbConfig())
+	// db.Init is a thin wrapper that returns dao.Default(), which panics
+	// with "dao: Open has not been called yet" until the shared handle is
+	// established by dao.Open. Open it here from the loaded DB config;
+	// dao.Open is idempotent for the same identity, so the later
+	// dao.Open in app.Run's startup path (initDatabaseSchema) is a no-op.
 	// Schema (including t_cube_host_type) is owned by the dao.Migrate
-	// path that the integration test bootstrap runs before tests.
+	// path that the app bootstrap runs before tests. The dao config must
+	// be built from the same snapshot as initDatabaseSchema: config
+	// hotswap between MockInit and app.Run could change the identity and
+	// make the second dao.Open fail with "dao: already opened with ...".
+	daoCfg, err := db.ConfigFromDBConfig(config.GetDbConfig())
+	if err != nil {
+		stdlog.Fatalf("integration: dao config fail: %v", err)
+	}
+	if _, err := dao.Open(mocktest_Ctx, daoCfg); err != nil {
+		stdlog.Fatalf("dao open fail:%v", err)
+	}
+	mocktest_OssDb = db.Init(config.GetDbConfig())
 }
+
 func mock_getstr() string {
 	return fmt.Sprintf("%d.%d.%d.%d", rand.Int31n(254), rand.Int31n(254), rand.Int31n(254), rand.Int31n(254))
 }

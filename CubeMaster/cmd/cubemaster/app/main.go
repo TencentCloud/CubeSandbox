@@ -24,6 +24,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeDB/migrate"
 	"github.com/tencentcloud/CubeSandbox/CubeDB/tombstone"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet/grpcconn"
@@ -235,23 +236,13 @@ func initDatabaseSchema(ctx context.Context, cfg *config.Config) error {
 	// covering the host/node inventory tables (t_cube_host_*, t_cube_node_*)
 	// and the instance tables (t_cube_template_*, t_cube_instance_*,
 	// t_cube_sandbox_spec, ...), all in the one configured database.
-	src := cfg.InstanceDBConfig
-	if src == nil {
-		return fmt.Errorf("dao: instance_db_config is not set")
-	}
-	daoCfg := dao.Config{
-		Driver:                      src.Driver,
-		Addr:                        src.Addr,
-		User:                        src.User,
-		Pwd:                         src.Pwd,
-		DBName:                      src.DBName,
-		ConnTimeoutSeconds:          src.ConnTimeout,
-		ReadTimeoutSeconds:          src.ReadTimeout,
-		WriteTimeoutSeconds:         src.WriteTimeout,
-		MaxIdleConns:                src.MaxIdleConns,
-		MaxOpenConns:                src.MaxOpenConns,
-		MaxConnLifeTimeSeconds:      src.MaxConnLifeTimeSeconds,
-		MigrationLockTimeoutSeconds: src.MigrationLockTimeoutSeconds,
+	// Build the dao config from the same snapshot as the integration /
+	// mock-debug bootstrap: config hotswap could otherwise change the
+	// identity between the two dao.Open calls and the second one would
+	// fail with "dao: already opened with ... (requested ...)".
+	daoCfg, err := db.ConfigFromDBConfig(cfg.InstanceDBConfig)
+	if err != nil {
+		return fmt.Errorf("dao: %w", err)
 	}
 	if _, err := dao.Open(ctx, daoCfg); err != nil {
 		return fmt.Errorf("dao open: %w", err)
