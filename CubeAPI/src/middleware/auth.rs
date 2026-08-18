@@ -9,6 +9,9 @@ use axum::{
     response::Response,
 };
 
+#[derive(Debug, Clone)]
+pub struct RateLimitIdentity(pub String);
+
 /// Auth credential extracted from the request headers.
 #[derive(Debug)]
 enum AuthCredential {
@@ -47,6 +50,24 @@ fn extract_credential(request: &Request) -> Option<AuthCredential> {
     None
 }
 
+fn identity_of(credential: &AuthCredential) -> String {
+    match credential {
+        AuthCredential::Bearer(t) => format!("bearer:{}", t),
+        AuthCredential::ApiKey(k) => format!("apikey:{}", k),
+    }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Unified auth middleware.
 ///
 /// Behavior (priority order):
@@ -78,7 +99,7 @@ fn extract_credential(request: &Request) -> Option<AuthCredential> {
 /// callback to enforce fine-grained (path + method) authorization.
 pub async fn unified_auth(
     State(state): State<AppState>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
     // Mode 1: callback auth — if a callback URL is configured, forward the
@@ -103,7 +124,7 @@ pub async fn unified_auth(
                     AuthCredential::Bearer(t) => t.as_str(),
                     AuthCredential::ApiKey(k) => k.as_str(),
                 };
-                if provided != expected_key {
+                if !constant_time_eq(provided.as_bytes(), expected_key.as_bytes()) {
                     tracing::warn!(
                         path = %request.uri().path(),
                         method = %request.method(),
@@ -113,6 +134,8 @@ pub async fn unified_auth(
                         "Invalid API key or token".to_string(),
                     ));
                 }
+                let identity = identity_of(&credential);
+                request.extensions_mut().insert(RateLimitIdentity(identity));
             }
         }
         // Mode 3: no auth (both unset) or simple-key match — pass through.
@@ -160,6 +183,9 @@ pub async fn unified_auth(
     };
 
     if callback_resp.status().as_u16() == 200 {
+        request
+            .extensions_mut()
+            .insert(RateLimitIdentity(identity_of(&credential)));
         tracing::debug!(
             path = %request_path,
             method = %request_method,

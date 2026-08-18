@@ -18,13 +18,11 @@ pub async fn rate_limit(
     request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    // Extract key; fall back to IP or "anonymous"
     let key = request
-        .headers()
-        .get("X-API-Key")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("anonymous")
-        .to_string();
+        .extensions()
+        .get::<crate::middleware::auth::RateLimitIdentity>()
+        .map(|id| id.0.clone())
+        .unwrap_or_else(|| "unauthenticated".to_string());
 
     match state.rate_limiter.check_key(&key) {
         Ok(_) => Ok(next.run(request).await),

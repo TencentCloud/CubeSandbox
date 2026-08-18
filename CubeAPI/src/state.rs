@@ -38,6 +38,7 @@ impl AppState {
     pub async fn new(config: crate::config::ServerConfig, logger: ArcLogger) -> Self {
         let quota = Quota::per_second(NonZeroU32::new(config.rate_limit_per_sec.max(1)).unwrap());
         let rate_limiter = Arc::new(RateLimiter::keyed(quota));
+        spawn_rate_limiter_gc(rate_limiter.clone());
 
         let http_client = reqwest::Client::builder()
             .pool_max_idle_per_host(100)
@@ -56,4 +57,14 @@ impl AppState {
             config: Arc::new(config),
         }
     }
+}
+
+fn spawn_rate_limiter_gc(limiter: Arc<DefaultKeyedRateLimiter<String>>) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            ticker.tick().await;
+            limiter.retain_recent();
+        }
+    });
 }
