@@ -13,6 +13,7 @@ const (
 	egressPolicyTestCaseLen = 16
 	flowVerdictReject       = uint8(0)
 	flowVerdictSNAT         = uint8(1)
+	flowVerdictHTTP         = uint8(2)
 	flowVerdictHTTPS        = uint8(3)
 )
 
@@ -201,6 +202,38 @@ func TestClassifyEgressFlowExactL7Match(t *testing.T) {
 		t.Fatalf("exact-port verdict=%d, want FLOW_HTTPS", got)
 	}
 	if got := runEgressPolicyCase(t, env.program, ifindex, daddr, htonsPort(443)); got != flowVerdictReject {
+		t.Fatalf("different-port verdict=%d, want FLOW_REJECT", got)
+	}
+}
+
+// TestClassifyEgressFlowExactL7MatchHTTP covers the plaintext HTTP interception
+// verdict (FLOW_HTTP) — the primary new data path the HTTPS-only cases did not
+// exercise. eBPF returns FLOW_HTTP for an L7 entry whose scheme is http.
+func TestClassifyEgressFlowExactL7MatchHTTP(t *testing.T) {
+	env := loadEgressPolicyTestEnv(t)
+	ifindex := uint32(152)
+	allowInner, denyInner := env.attachInnerMaps(t, ifindex)
+	daddr := mustParseCIDRForTest(t, "192.0.2.22").IP
+	dport := htonsPort(8080)
+	allowKey := lpmKeyV3{Prefixlen: 48, IP: daddr, Port: dport}
+	allowValue := netPolicyValueV3{
+		Flags:  uint8(netPolicyFlagL7Required),
+		Scheme: L7SchemeHTTP,
+	}
+	if err := allowInner.Put(&allowKey, &allowValue); err != nil {
+		t.Fatalf("insert exact L7 HTTP allow rule: %v", err)
+	}
+
+	denyAll := mustParseCIDRForTest(t, "0.0.0.0/0")
+	denyValue := uint32(1)
+	if err := denyInner.Put(&denyAll, &denyValue); err != nil {
+		t.Fatalf("insert deny-all rule: %v", err)
+	}
+
+	if got := runEgressPolicyCase(t, env.program, ifindex, daddr, dport); got != flowVerdictHTTP {
+		t.Fatalf("exact-port verdict=%d, want FLOW_HTTP", got)
+	}
+	if got := runEgressPolicyCase(t, env.program, ifindex, daddr, htonsPort(80)); got != flowVerdictReject {
 		t.Fatalf("different-port verdict=%d, want FLOW_REJECT", got)
 	}
 }
