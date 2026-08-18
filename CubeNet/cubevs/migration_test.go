@@ -530,3 +530,100 @@ func TestMigrateDNSFailureKeepsAllowOutLegacyPin(t *testing.T) {
 	}
 	src.Close()
 }
+
+// TestMigrateAllowOutMapOuterWithBpffs covers the allow_out success path the
+// rollback tests miss: a legacy allow_out_v2 outer (16-byte
+// net_policy_value_v2 inner, flags+expires but no ports) is migrated into a
+// fresh allow_out_v3 outer. An L7 entry expands to the default {80,443} /48
+// set — keeping the L7 flag, the per-port scheme, and the expiry — while a
+// plain entry becomes a /32 any-port entry.
+func TestMigrateAllowOutMapOuterWithBpffs(t *testing.T) {
+	mountBpffs(t)
+	ifindex := uint32(42)
+
+	l7IP := mustParseCIDRForTest(t, "192.0.2.44/32").IP
+	plainIP := mustParseCIDRForTest(t, "192.0.2.45/32").IP
+	expires := uint64(999999999)
+
+	// Legacy allow_out_v2 outer with a 16-byte net_policy_value_v2 inner,
+	// seeded with one L7 entry and one plain entry (both with an expiry).
+	legacyOuter := newAllowOutOuterMapWithValueSize(t, uint32(unsafe.Sizeof(netPolicyValueV2{})))
+	legacyInner := newAllowOutLPMInner(t, uint32(unsafe.Sizeof(netPolicyValueV2{})))
+	seed := []struct {
+		ip    uint32
+		flags uint8
+	}{
+		{l7IP, uint8(netPolicyFlagL7Required)},
+		{plainIP, 0},
+	}
+	for _, s := range seed {
+		key := lpmKey{Prefixlen: 32, IP: s.ip}
+		val := netPolicyValueV2{Flags: s.flags, ExpiresAtNS: expires}
+		if err := legacyInner.Update(&key, &val, ebpf.UpdateAny); err != nil {
+			t.Fatalf("seed legacy entry: %v", err)
+		}
+	}
+	if err := legacyOuter.Put(&ifindex, legacyInner); err != nil {
+		t.Fatalf("attach legacy inner: %v", err)
+	}
+	legacyInner.Close()
+	if err := legacyOuter.Pin(pinPath(MapNameAllowOutV2)); err != nil {
+		t.Fatalf("pin legacy %s: %v", MapNameAllowOutV2, err)
+	}
+
+	// Fresh allow_out_v3 outer as the destination.
+	newOuter := newAllowOutV3OuterMap(t)
+	if err := newOuter.Pin(pinPath(MapNameAllowOutV3)); err != nil {
+		t.Fatalf("pin %s: %v", MapNameAllowOutV3, err)
+	}
+
+	if err := migrateAllowOutMap(MapNameAllowOutV2); err != nil {
+		t.Fatalf("migrateAllowOutMap: %v", err)
+	}
+
+	dest, err := lookupInnerMap(newOuter, ifindex)
+	if err != nil {
+		t.Fatalf("lookupInnerMap: %v", err)
+	}
+	defer dest.Close()
+
+	// The L7 entry expands to the default {80/http, 443/https} /48 set.
+	for _, tc := range []struct {
+		port   uint16
+		scheme uint8
+	}{
+		{htonsPort(80), L7SchemeHTTP},
+		{htonsPort(443), L7SchemeHTTPS},
+	} {
+		key := lpmKeyV3{Prefixlen: 48, IP: l7IP, Port: tc.port}
+		var got netPolicyValueV3
+		if err := dest.Lookup(&key, &got); err != nil {
+			t.Fatalf("migrated L7 /48 entry for port %d missing: %v", ntohsPort(tc.port), err)
+		}
+		if got.Flags&uint8(netPolicyFlagL7Required) == 0 {
+			t.Fatalf("port %d lost L7 flag: %#x", ntohsPort(tc.port), got.Flags)
+		}
+		if got.Scheme != tc.scheme {
+			t.Fatalf("port %d scheme=%d, want %d", ntohsPort(tc.port), got.Scheme, tc.scheme)
+		}
+		if got.ExpiresAtNS != expires {
+			t.Fatalf("port %d expiry=%d, want %d (preserved)", ntohsPort(tc.port), got.ExpiresAtNS, expires)
+		}
+	}
+
+	// The plain entry becomes a single /32 any-port entry with no L7 flag.
+	plainKey := lpmKeyV3{Prefixlen: 32, IP: plainIP, Port: 0}
+	var plain netPolicyValueV3
+	if err := dest.Lookup(&plainKey, &plain); err != nil {
+		t.Fatalf("migrated plain /32 entry missing: %v", err)
+	}
+	if plain.Flags&uint8(netPolicyFlagL7Required) != 0 {
+		t.Fatalf("plain /32 has unexpected L7 flag: %#x", plain.Flags)
+	}
+	if plain.Scheme != L7SchemeNone {
+		t.Fatalf("plain /32 scheme=%d, want none", plain.Scheme)
+	}
+	if plain.ExpiresAtNS != expires {
+		t.Fatalf("plain /32 expiry=%d, want %d (preserved)", plain.ExpiresAtNS, expires)
+	}
+}
