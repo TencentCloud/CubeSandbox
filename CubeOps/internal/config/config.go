@@ -73,7 +73,7 @@ type Config struct {
 	SoftDeletePurge SoftDeletePurgeConf `yaml:"soft_delete_purge"`
 	// Webhook delivery worker. Disabled by default; when enabled CubeOps
 	// consumes the lifecycle stream and delivers sandbox events to
-	// subscribed endpoints (see docs/guide/webhook.md).
+	// subscribed endpoints (see docs/zh/guide/webhook.md).
 	Webhook WebhookConfig `yaml:"webhook"`
 }
 

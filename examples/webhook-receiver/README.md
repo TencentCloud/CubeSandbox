@@ -82,4 +82,4 @@ curl -X POST http://127.0.0.1:9090/webhook \
 ## 与 CubeOps 集成
 
 在 CubeOps 创建订阅时把 `url` 指向本服务的 `/webhook`,并配置相同的
-`secret`。订阅 API 见 `docs/guide/webhook.md`。
+`secret`。订阅 API 见 `docs/zh/guide/webhook.md`。
