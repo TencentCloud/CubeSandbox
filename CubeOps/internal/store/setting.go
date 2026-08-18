@@ -21,10 +21,13 @@ func (s *Store) GetSystemSetting(ctx context.Context, key string) (string, error
 	err := s.db.WithContext(ctx).Raw(
 		"SELECT setting_value FROM t_system_setting WHERE setting_key = ? LIMIT 1", key,
 	).Scan(&val).Error
-	if errors.Is(err, sql.ErrNoRows) || val == "" {
-		return "", nil
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", err
 	}
-	return val, err
+	return val, nil
 }
 
 // GetOrCreateSystemSetting atomically gets an existing system setting or
@@ -56,10 +59,13 @@ func (s *Store) GetSetting(ctx context.Context, key string) (string, error) {
 	err := s.db.WithContext(ctx).Raw(
 		"SELECT setting_value FROM t_agenthub_setting WHERE setting_key = ? LIMIT 1", key,
 	).Scan(&val).Error
-	if errors.Is(err, sql.ErrNoRows) || val == "" {
-		return "", nil
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", err
 	}
-	return val, err
+	return val, nil
 }
 
 // GetOrCreateSetting atomically gets an existing setting or creates it with the given value.
@@ -108,10 +114,13 @@ func (s *Store) GetUserPassword(ctx context.Context, username string) (string, e
 	err := s.db.WithContext(ctx).Raw(
 		"SELECT password FROM t_system_user WHERE username = ? LIMIT 1", username,
 	).Scan(&pwd).Error
-	if errors.Is(err, sql.ErrNoRows) || pwd == "" {
-		return "", nil
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", err
 	}
-	return pwd, err
+	return pwd, nil
 }
 
 // SetUserPassword updates the password hash for a user.
