@@ -73,3 +73,32 @@ func TestGetUserPasswordReturnsTheStoredHashForTheSeededAdmin(t *testing.T) {
 		t.Fatal("GetUserPassword returned an empty hash for the seeded admin account")
 	}
 }
+
+func TestGettersReportAnEmptyStoredValueAsAbsent(t *testing.T) {
+	env := newTestStore(t)
+	defer env.teardown()
+	s := env.store
+	ctx := context.Background()
+
+	if err := s.SetSystemSetting(ctx, "empty-on-purpose", ""); err != nil {
+		t.Fatalf("SetSystemSetting: %v", err)
+	}
+	got, err := s.GetSystemSetting(ctx, "empty-on-purpose")
+	if err != nil {
+		t.Fatalf("GetSystemSetting on an empty stored value returned an error: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("GetSystemSetting = %q, want empty", got)
+	}
+
+	if err := s.SetSetting(ctx, "empty-on-purpose", ""); err != nil {
+		t.Fatalf("SetSetting: %v", err)
+	}
+	got, err = s.GetSetting(ctx, "empty-on-purpose")
+	if err != nil {
+		t.Fatalf("GetSetting on an empty stored value returned an error: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("GetSetting = %q, want empty", got)
+	}
+}
