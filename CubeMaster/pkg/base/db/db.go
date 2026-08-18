@@ -30,7 +30,7 @@ func Init(cfg *config.DBConfig) *gorm.DB {
 // through this helper — keeping the two mappings from drifting.
 func ConfigFromDBConfig(src *config.DBConfig) (dao.Config, error) {
 	if src == nil {
-		return dao.Config{}, errors.New("db config is nil: instance_db_config is not set")
+		return dao.Config{}, errors.New("db config is nil")
 	}
 	return dao.Config{
 		Driver:                      src.Driver,

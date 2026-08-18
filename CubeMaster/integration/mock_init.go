@@ -655,16 +655,12 @@ func metricNow() []byte {
 }
 
 func mock_db() {
-	// db.Init is a thin wrapper that returns dao.Default(), which panics
-	// with "dao: Open has not been called yet" until the shared handle is
-	// established by dao.Open. Open it here from the loaded DB config;
-	// dao.Open is idempotent for the same identity, so the later
-	// dao.Open in app.Run's startup path (initDatabaseSchema) is a no-op.
-	// Schema (including t_cube_host_type) is owned by the dao.Migrate
-	// path that the app bootstrap runs before tests. The dao config must
-	// be built from the same snapshot as initDatabaseSchema: config
-	// hotswap between MockInit and app.Run could change the identity and
-	// make the second dao.Open fail with "dao: already opened with ...".
+	// Establish the shared dao handle before db.Init (a dao.Default()
+	// wrapper) needs it. dao.Open is idempotent for the same config
+	// identity, so the later open in app.Run's initDatabaseSchema is a
+	// no-op; schema migration (including t_cube_host_type) still runs
+	// there. Both call sites build their dao config through
+	// db.ConfigFromDBConfig so the identities cannot drift.
 	daoCfg, err := db.ConfigFromDBConfig(config.GetDbConfig())
 	if err != nil {
 		stdlog.Fatalf("integration: dao config fail: %v", err)

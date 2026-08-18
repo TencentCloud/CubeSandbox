@@ -236,10 +236,13 @@ func initDatabaseSchema(ctx context.Context, cfg *config.Config) error {
 	// covering the host/node inventory tables (t_cube_host_*, t_cube_node_*)
 	// and the instance tables (t_cube_template_*, t_cube_instance_*,
 	// t_cube_sandbox_spec, ...), all in the one configured database.
-	// Build the dao config from the same snapshot as the integration /
-	// mock-debug bootstrap: config hotswap could otherwise change the
-	// identity between the two dao.Open calls and the second one would
-	// fail with "dao: already opened with ... (requested ...)".
+	// Build the dao config through the same mapping as the integration /
+	// mock-debug bootstrap, so the two dao.Open identities cannot drift.
+	// The snapshots are still read at different times (mock_db reads the
+	// live global via config.GetDbConfig(); this reads cfg captured at
+	// Run() start), so a config hotswap landing between MockInit and here
+	// would still change the identity and fail this dao.Open with
+	// "dao: already opened with ... (requested ...)".
 	daoCfg, err := db.ConfigFromDBConfig(cfg.InstanceDBConfig)
 	if err != nil {
 		return fmt.Errorf("dao: %w", err)
