@@ -31,18 +31,33 @@ pytestmark = [
 ]
 
 
-def _resolve_and_probe_command(host: str, port: int, timeout: int) -> str:
-    """Resolve *host*, print addrs, then TCP-probe the first IPv4 address."""
+def _resolve_and_probe_command(host: str, port: int, timeout: int, attempts: int = 3) -> str:
+    """Resolve *host* (retrying transient DNS failures), print addrs, then
+    TCP-probe the first IPv4 address.
+
+    Only the resolution step is retried (temporary resolver failure / rate
+    limit); the TCP probe verdict (OK / FAIL) is a policy outcome and is never
+    retried, so a blocked domain still reports PROBE:FAIL immediately.
+    """
     return (
         "python3 - <<'PY'\n"
-        "import socket\n"
+        "import socket, time\n"
         f"host = {host!r}\n"
         f"port = {port!r}\n"
         f"timeout = {timeout!r}\n"
-        "try:\n"
-        "    infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)\n"
-        "except Exception as exc:\n"
-        "    print(f'RESOLVE:ERROR:{type(exc).__name__}:{exc}')\n"
+        f"attempts = {attempts!r}\n"
+        "infos = None\n"
+        "last = None\n"
+        "for attempt in range(attempts):\n"
+        "    try:\n"
+        "        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)\n"
+        "        break\n"
+        "    except Exception as exc:\n"
+        "        last = exc\n"
+        "        if attempt + 1 < attempts:\n"
+        "            time.sleep(min(2 ** attempt, 5))\n"
+        "if infos is None:\n"
+        "    print(f'RESOLVE:ERROR:{type(last).__name__}:{last}')\n"
         "    raise SystemExit(0)\n"
         "addrs = []\n"
         "for family, _, _, _, sockaddr in infos:\n"

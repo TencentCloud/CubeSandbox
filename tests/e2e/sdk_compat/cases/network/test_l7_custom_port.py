@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
@@ -267,7 +268,9 @@ def test_l7_custom_port_scheme_only_intercepts_default_http_set(
 
         url = f"http://{L7_DEFAULT_HOST}/headers"
         result = adapter.run_command(
-            f"curl -sS --max-time 20 '{url}'",
+            # --retry absorbs transient failures (timeout / connreset /
+            # temporary DNS) against the public echo endpoint.
+            f"curl -sS --max-time 20 --retry 3 --retry-delay 1 --retry-all-errors '{url}'",
             timeout=sdk_e2e_config.command_timeout,
         )
         assert_command_ok(result)
@@ -368,22 +371,32 @@ def test_l7_custom_port_rejects_subnet_host(
             safe_kill(adapter, sdk_e2e_config)
 
 
-def _fetch_leaf_issuer(adapter, sdk_e2e_config) -> str:
+def _fetch_leaf_issuer(adapter, sdk_e2e_config, attempts: int = 3) -> str:
     """Return the issuer of the TLS leaf cert the sandbox is presented with.
 
     Uses ``openssl s_client`` (no verification, so the handshake completes even
     for the interception CA) and extracts the leaf issuer via ``openssl x509``.
     An intercepted connection shows the cluster interception CA; a plain-SNAT
     passthrough shows the upstream's real public CA.
+
+    Retries when the handshake fails to produce a cert (transient connect/timeout
+    against the public endpoint), so a slow upstream does not flake the leg.
     """
     cmd = (
         f"openssl s_client -connect {L7_CUSTOM_HTTPS_HOST}:{L7_CUSTOM_HTTPS_PORT} "
         f"-servername {L7_CUSTOM_HTTPS_HOST} </dev/null 2>/dev/null "
         f"| openssl x509 -noout -issuer"
     )
-    result = adapter.run_command(cmd, timeout=sdk_e2e_config.command_timeout)
-    assert_command_ok(result)
-    return result.stdout.strip()
+    out = ""
+    for attempt in range(attempts):
+        result = adapter.run_command(cmd, timeout=sdk_e2e_config.command_timeout)
+        assert_command_ok(result)
+        out = result.stdout.strip()
+        if out:
+            return out
+        if attempt + 1 < attempts:
+            time.sleep(min(2 ** attempt, 5))
+    return out
 
 
 @pytest.mark.requires_capability(NETWORK_L7_CUSTOM_PORT)
@@ -441,7 +454,7 @@ def test_l7_custom_port_https_intercepts_custom_port(
         )
 
         result = adapter.run_command(
-            f"curl -sS --max-time 20 -o /dev/null "
+            f"curl -sS --max-time 20 --retry 3 --retry-delay 1 --retry-all-errors -o /dev/null "
             f"-w 'code=%{{http_code}} len=%{{size_download}}' "
             f"'{L7_CUSTOM_HTTPS_URL}'",
             timeout=sdk_e2e_config.command_timeout,

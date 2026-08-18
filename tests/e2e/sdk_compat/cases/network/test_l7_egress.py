@@ -55,27 +55,41 @@ def _https_rule(
     return {"name": name, "match": match, "action": action}
 
 
-def _http_json_command(url: str, *, method: str = "GET", timeout: int = 15) -> str:
-    """Fetch URL without TLS verify; print STATUS + body (or error)."""
+def _http_json_command(url: str, *, method: str = "GET", timeout: int = 15, attempts: int = 3) -> str:
+    """Fetch URL without TLS verify; print STATUS + body (or error).
+
+    Retries transient transport failures (timeout / connection reset / temporary
+    DNS) with backoff, since the public echo endpoints can be slow or rate-limit.
+    An HTTP 4xx/5xx is a real policy verdict and is returned as-is, never retried.
+    """
     return (
         "python3 - <<'PY'\n"
-        "import json, ssl, urllib.error, urllib.request\n"
+        "import ssl, time, urllib.error, urllib.request\n"
         f"url = {url!r}\n"
         f"method = {method!r}\n"
         f"timeout = {timeout!r}\n"
+        f"attempts = {attempts!r}\n"
         "ctx = ssl._create_unverified_context()\n"
-        "req = urllib.request.Request(url, method=method)\n"
-        "try:\n"
-        "    with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:\n"
-        "        body = resp.read().decode('utf-8', errors='replace')\n"
-        "        print(f'STATUS:{resp.status}')\n"
+        "last = None\n"
+        "for attempt in range(attempts):\n"
+        "    try:\n"
+        "        req = urllib.request.Request(url, method=method)\n"
+        "        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:\n"
+        "            body = resp.read().decode('utf-8', errors='replace')\n"
+        "            print(f'STATUS:{resp.status}')\n"
+        "            print(body)\n"
+        "        break\n"
+        "    except urllib.error.HTTPError as exc:\n"
+        "        body = exc.read().decode('utf-8', errors='replace')\n"
+        "        print(f'STATUS:{exc.code}')\n"
         "        print(body)\n"
-        "except urllib.error.HTTPError as exc:\n"
-        "    body = exc.read().decode('utf-8', errors='replace')\n"
-        "    print(f'STATUS:{exc.code}')\n"
-        "    print(body)\n"
-        "except Exception as exc:\n"
-        "    print(f'ERROR:{type(exc).__name__}:{exc}')\n"
+        "        break\n"
+        "    except Exception as exc:\n"
+        "        last = exc\n"
+        "        if attempt + 1 < attempts:\n"
+        "            time.sleep(min(2 ** attempt, 5))\n"
+        "else:\n"
+        "    print(f'ERROR:{type(last).__name__}:{last}')\n"
         "PY"
     )
 
@@ -118,23 +132,35 @@ def _header_ci(headers: dict[str, str], name: str) -> str | None:
     return None
 
 
-def _tls_issuer_command(host: str, timeout: int = 15) -> str:
+def _tls_issuer_command(host: str, timeout: int = 15, attempts: int = 3) -> str:
     return (
         "python3 - <<'PY'\n"
-        "import shutil, socket, ssl, subprocess, tempfile\n"
+        "import shutil, socket, ssl, subprocess, tempfile, time\n"
         f"host = {host!r}\n"
         f"timeout = {timeout!r}\n"
+        f"attempts = {attempts!r}\n"
         "if shutil.which('openssl') is None:\n"
         "    print('ISSUER:ERROR:openssl_not_found')\n"
         "    raise SystemExit(0)\n"
         "ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)\n"
         "ctx.check_hostname = False\n"
         "ctx.verify_mode = ssl.CERT_NONE\n"
-        "with socket.create_connection((host, 443), timeout=timeout) as sock:\n"
-        "    with ctx.wrap_socket(sock, server_hostname=host) as ssock:\n"
-        "        der = ssock.getpeercert(binary_form=True)\n"
+        "der = None\n"
+        "last = None\n"
+        # Retry transient connect/handshake failures (timeout / temp DNS) with
+        # backoff; the public echo endpoint can be slow or rate-limit.
+        "for attempt in range(attempts):\n"
+        "    try:\n"
+        "        with socket.create_connection((host, 443), timeout=timeout) as sock:\n"
+        "            with ctx.wrap_socket(sock, server_hostname=host) as ssock:\n"
+        "                der = ssock.getpeercert(binary_form=True)\n"
+        "        break\n"
+        "    except Exception as exc:\n"
+        "        last = exc\n"
+        "        if attempt + 1 < attempts:\n"
+        "            time.sleep(min(2 ** attempt, 5))\n"
         "if not der:\n"
-        "    print('ISSUER:ERROR:empty_peer_cert')\n"
+        "    print(f'ISSUER:ERROR:connect_failed:{type(last).__name__}:{last}')\n"
         "    raise SystemExit(0)\n"
         "try:\n"
         "    with tempfile.NamedTemporaryFile() as tmp:\n"
