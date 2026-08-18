@@ -18,9 +18,12 @@ HTTPBUN_HOST = os.environ.get("SDK_E2E_L7_ECHO_HOST", "httpbun.com")
 OTHER_HOST = os.environ.get("SDK_E2E_L7_OTHER_HOST", "example.com")
 INJECT_HEADER = os.environ.get("SDK_E2E_L7_INJECT_HEADER", "X-Cube-E2E-Inject")
 INJECT_SECRET = os.environ.get("SDK_E2E_L7_INJECT_SECRET", "e2e-inject-secret-not-a-real-key")
-# CubeEgress MITM CA CN varies by install path (one-click prepare vs chart bake).
-# Match a stable substring; override with SDK_E2E_L7_MITM_CA_CN when needed.
-MITM_CA_CN = os.environ.get("SDK_E2E_L7_MITM_CA_CN", "Cube Sandbox Egress CA")
+# CubeEgress MITM CA CN. The authoritative value (one-click prepare and the
+# k8s chart, deploy/.../cube-egress-prepare.sh + chart values caCommonName) is
+# "CubeSandbox Egress MITM CA". Override with SDK_E2E_L7_MITM_CA_CN if a
+# deployment customized it. A regex fallback in the test also tolerates
+# "Cube Sandbox Egress"-style spacing variants.
+MITM_CA_CN = os.environ.get("SDK_E2E_L7_MITM_CA_CN", "CubeSandbox Egress MITM CA")
 # Cold MITM path (DNS learn + TLS + upstream) needs more headroom than the
 # shared TCP network_probe_timeout default (5s).
 L7_HTTP_TIMEOUT = int(os.environ.get("SDK_E2E_L7_HTTP_TIMEOUT", "15"))
