@@ -382,11 +382,11 @@ instance_db_config:
   conn_timeout: 5
   read_timeout: 5
   write_timeout: 5
-  extra:
+  postgres:
     sslmode: "require"
 ```
 
-> **Semantic difference**: the PostgreSQL driver has no separate read/write timeouts; `read_timeout`/`write_timeout` are folded into a connection-level `statement_timeout`. For precise control, set `statement_timeout` (ms) or `idle_in_transaction_session_timeout` (ms) explicitly under `extra` — they override the folded value.
+> **Semantic difference**: the PostgreSQL driver has no separate read/write timeouts; `read_timeout`/`write_timeout` are folded into a connection-level `statement_timeout`. For precise control, set `statement_timeout` (ms) or `idle_in_transaction_session_timeout` (ms) explicitly under `postgres` — they override the folded value.
 
 > **Architecture note**: external database support applies to the entire control plane — both **CubeMaster** (sandbox lifecycle, scheduling, templates) and **CubeOps** (AgentHub digital-assistant management, cluster ops API used by the WebUI). The two services share the same database (`cube_mvp` by default). CubeAPI, the E2B-compatible stateless SDK gateway, does not connect to the database. The installer writes a `<driver>://…` `DATABASE_URL` to the runtime environment; CubeOps reads it and automatically selects the driver based on the URL scheme.
 

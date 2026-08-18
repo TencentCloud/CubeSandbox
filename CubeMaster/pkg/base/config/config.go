@@ -148,12 +148,27 @@ type DBConfig struct {
 	// at startup. Defaults to 60 seconds when zero.
 	MigrationLockTimeoutSeconds int `yaml:"migration_lock_timeout_seconds"`
 
-	// Extra carries driver-specific connection options passed through to
-	// dao.Config.Extra. Ignored by the mysql driver. Postgres recognizes:
-	// "sslmode" (default "disable"), "statement_timeout" (ms; overrides the
-	// value derived from read/write_timeout), and
-	// "idle_in_transaction_session_timeout" (ms).
-	Extra map[string]string `yaml:"extra"`
+	// Postgres holds PostgreSQL-specific connection options. Only read when
+	// Driver is "postgres"; ignored otherwise. Mapped to dao.Config.Extra at
+	// the CubeMaster→dao boundary.
+	Postgres *PostgresOptions `yaml:"postgres,omitempty"`
+}
+
+// PostgresOptions groups PostgreSQL-specific connection knobs exposed in
+// cubemaster.yaml under instance_db_config.postgres. These are mapped into
+// dao.Config.Extra so the dao layer stays engine-agnostic.
+type PostgresOptions struct {
+	// SSLMode controls the TLS negotiation mode (e.g. "disable", "require",
+	// "verify-full"). Default "disable".
+	SSLMode string `yaml:"sslmode"`
+
+	// StatementTimeout is the per-statement timeout in milliseconds. When set,
+	// it overrides the value derived from read/write_timeout.
+	StatementTimeout string `yaml:"statement_timeout,omitempty"`
+
+	// IdleInTransactionSessionTimeout kills sessions idle inside a transaction
+	// for more than this many milliseconds. Must be explicitly opted in.
+	IdleInTransactionSessionTimeout string `yaml:"idle_in_transaction_session_timeout,omitempty"`
 }
 
 type ExtraConf struct {

@@ -382,11 +382,11 @@ instance_db_config:
   conn_timeout: 5
   read_timeout: 5
   write_timeout: 5
-  extra:
+  postgres:
     sslmode: "require"
 ```
 
-> **语义差异**：PostgreSQL 驱动没有独立的读/写超时，`read_timeout`/`write_timeout` 会被折算为连接级的 `statement_timeout`。如需精确控制，可在 `extra` 里显式设置 `statement_timeout`（毫秒）或 `idle_in_transaction_session_timeout`（毫秒），它们会覆盖折算值。
+> **语义差异**：PostgreSQL 驱动没有独立的读/写超时，`read_timeout`/`write_timeout` 会被折算为连接级的 `statement_timeout`。如需精确控制，可在 `postgres` 里显式设置 `statement_timeout`（毫秒）或 `idle_in_transaction_session_timeout`（毫秒），它们会覆盖折算值。
 
 > **架构说明**：外部数据库支持作用于整个控制平面——包括 **CubeMaster**（沙箱生命周期、调度、模板）和 **CubeOps**（AgentHub 数字助手管理、WebUI 使用的集群运维 API）。两个服务共享同一个数据库（默认 `cube_mvp`）。CubeAPI 是 E2B 兼容的无状态 SDK 网关，不连接数据库。安装脚本会把 `<driver>://…` 形式的 `DATABASE_URL` 写入运行时环境；CubeOps 读取它并根据 URL scheme 自动选择驱动。
 

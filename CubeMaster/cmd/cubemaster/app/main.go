@@ -252,7 +252,7 @@ func initDatabaseSchema(ctx context.Context, cfg *config.Config) error {
 		MaxOpenConns:                src.MaxOpenConns,
 		MaxConnLifeTimeSeconds:      src.MaxConnLifeTimeSeconds,
 		MigrationLockTimeoutSeconds: src.MigrationLockTimeoutSeconds,
-		Extra:                       src.Extra,
+		Extra:                       postgresOptionsToExtra(src.Postgres),
 	}
 	if _, err := dao.Open(ctx, daoCfg); err != nil {
 		return fmt.Errorf("dao open: %w", err)
@@ -365,4 +365,27 @@ func initVolumePlugins(cfg *config.Config) error {
 		}
 	}
 	return nil
+}
+
+// postgresOptionsToExtra maps the typed PostgresOptions struct (user-facing
+// YAML surface) into the generic dao.Config.Extra map that the postgres driver
+// reads. Returns nil when opts is nil (MySQL path).
+func postgresOptionsToExtra(opts *config.PostgresOptions) map[string]string {
+	if opts == nil {
+		return nil
+	}
+	m := make(map[string]string)
+	if opts.SSLMode != "" {
+		m["sslmode"] = opts.SSLMode
+	}
+	if opts.StatementTimeout != "" {
+		m["statement_timeout"] = opts.StatementTimeout
+	}
+	if opts.IdleInTransactionSessionTimeout != "" {
+		m["idle_in_transaction_session_timeout"] = opts.IdleInTransactionSessionTimeout
+	}
+	if len(m) == 0 {
+		return nil
+	}
+	return m
 }

@@ -67,8 +67,6 @@ instance_db_config:
   max_idle_conns: 5
   max_open_conns: 20
   max_conn_life_time_seconds: 300
-  extra:
-    sslmode: "__CUBE_SANDBOX_DB_SSLMODE__"
 
 redis:
   nodes: "127.0.0.1:__CUBE_SANDBOX_REDIS_PORT__"

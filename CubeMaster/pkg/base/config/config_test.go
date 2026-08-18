@@ -347,18 +347,18 @@ func TestGetAllowedHostMountPrefixes_DefaultDefensiveCopy(t *testing.T) {
 	assert.Equal(t, "/data/shared/", got2[0])
 }
 
-// TestDBConfigExtraUnmarshal verifies the postgres-only `extra` map decodes
+// TestDBConfigPostgresUnmarshal verifies the `postgres:` subsection decodes
 // from yaml. buildDSN in driver/postgres reads these keys (sslmode etc.), so a
 // silently-dropped field would ship a plaintext connection where TLS was asked
 // for. Uses gopkg.in/yaml.v3 to match the hotswap loader.
-func TestDBConfigExtraUnmarshal(t *testing.T) {
+func TestDBConfigPostgresUnmarshal(t *testing.T) {
 	const doc = `
 driver: postgres
 addr: "127.0.0.1:5432"
 user: cube
 pwd: cube_pass
 db_name: cube_mvp
-extra:
+postgres:
   sslmode: require
   statement_timeout: "60000"
 `
@@ -366,13 +366,14 @@ extra:
 	err := yaml.Unmarshal([]byte(doc), &got)
 	assert.NoError(t, err)
 	assert.Equal(t, "postgres", got.Driver)
-	assert.Equal(t, "require", got.Extra["sslmode"])
-	assert.Equal(t, "60000", got.Extra["statement_timeout"])
+	assert.NotNil(t, got.Postgres)
+	assert.Equal(t, "require", got.Postgres.SSLMode)
+	assert.Equal(t, "60000", got.Postgres.StatementTimeout)
 }
 
-// TestDBConfigExtraOmittedIsNil confirms a config without `extra` leaves the
-// map nil (mysql path unchanged), so the field is a pure additive default.
-func TestDBConfigExtraOmittedIsNil(t *testing.T) {
+// TestDBConfigPostgresOmittedIsNil confirms a config without `postgres` leaves
+// the pointer nil (mysql path unchanged), so the field is a pure additive default.
+func TestDBConfigPostgresOmittedIsNil(t *testing.T) {
 	const doc = `
 driver: mysql
 addr: "127.0.0.1:3306"
@@ -383,5 +384,5 @@ db_name: cube_mvp
 	var got DBConfig
 	err := yaml.Unmarshal([]byte(doc), &got)
 	assert.NoError(t, err)
-	assert.Nil(t, got.Extra)
+	assert.Nil(t, got.Postgres)
 }

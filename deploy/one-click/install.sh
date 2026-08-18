@@ -502,7 +502,6 @@ generate_cubemaster_config_ports() {
   # rewrites driver -> the configured engine when CUBE_EXTERNAL_DB_HOST is set.
   sed -i \
     -e "s|__CUBE_SANDBOX_DB_DRIVER__|mysql|g" \
-    -e "s|__CUBE_SANDBOX_DB_SSLMODE__|disable|g" \
     -e "s|__CUBE_SANDBOX_MYSQL_PORT__|${mysql_port}|g" \
     -e "s|__CUBE_SANDBOX_MYSQL_USER__|$(escape_sed "${mysql_user}")|g" \
     -e "s|__CUBE_SANDBOX_MYSQL_PASSWORD__|$(escape_sed "${mysql_password}")|g" \
@@ -572,7 +571,7 @@ patch_cubemaster_external_deps() {
     db_driver_esc="$(escape_sed "${db_driver}")"
 
     # A conf.yaml from an older package (or hand-edited) may predate the
-    # driver:/extra.sslmode keys. Ensure they exist before substituting so a
+    # driver:/postgres.sslmode keys. Ensure they exist before substituting so a
     # missing line is not silently ignored. The awk scripts below are IDEMPOTENT
     # — they inspect the instance_db_config section and only insert when the key
     # is absent, so upgrades from older configs are handled correctly.
@@ -597,24 +596,27 @@ patch_cubemaster_external_deps() {
       END { flush_section() }
     ' "${cfg}" > "${cfg}.tmp" && mv "${cfg}.tmp" "${cfg}"
 
-    # 2) Guarantee instance_db_config has `extra:` with `sslmode:` inside it.
-    #    If the section already has `extra:` but no `sslmode:`, append sslmode
-    #    into the existing block (avoids duplicate `extra:` keys).
-    awk '
-      function inject_missing() {
-        if (!in_section || has_sslmode) return
-        if (!has_extra) printf "  extra:\n"
-        printf "    sslmode: \"disable\"\n"
-      }
-      /^instance_db_config:[[:space:]]*$/ { inject_missing(); in_section=1; has_extra=0; has_sslmode=0 }
-      in_section && /^  extra:[[:space:]]*$/ { has_extra=1 }
-      in_section && /^    sslmode:/ { has_sslmode=1 }
-      in_section && /^[a-z_]+:[[:space:]]*$/ && !/^instance_db_config:/ {
-        inject_missing(); in_section=0
-      }
-      { print }
-      END { inject_missing() }
-    ' "${cfg}" > "${cfg}.tmp" && mv "${cfg}.tmp" "${cfg}"
+    # 2) Guarantee instance_db_config has `postgres:` with `sslmode:` inside it
+    #    (only when driver is postgres). If the section already has `postgres:`
+    #    but no `sslmode:`, append sslmode into the existing block (avoids
+    #    duplicate `postgres:` keys).
+    if [[ "${db_driver}" == "postgres" ]]; then
+      awk '
+        function inject_missing() {
+          if (!in_section || has_sslmode) return
+          if (!has_postgres) printf "  postgres:\n"
+          printf "    sslmode: \"disable\"\n"
+        }
+        /^instance_db_config:[[:space:]]*$/ { inject_missing(); in_section=1; has_postgres=0; has_sslmode=0 }
+        in_section && /^  postgres:[[:space:]]*$/ { has_postgres=1 }
+        in_section && /^    sslmode:/ { has_sslmode=1 }
+        in_section && /^[a-z_]+:[[:space:]]*$/ && !/^instance_db_config:/ {
+          inject_missing(); in_section=0
+        }
+        { print }
+        END { inject_missing() }
+      ' "${cfg}" > "${cfg}.tmp" && mv "${cfg}.tmp" "${cfg}"
+    fi
 
     # Substitute connection details and driver. Key-prefix matching (no 'g'
     # flag) ensures each line is patched exactly once per section; Redis fields
