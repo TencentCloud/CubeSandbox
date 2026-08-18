@@ -56,7 +56,7 @@ func TestLoginUnknownUserStillReportsInvalidCredentials(t *testing.T) {
 }
 
 func TestChangePasswordSurfacesInfrastructureError(t *testing.T) {
-	dbDown := errors.New("context canceled")
+	dbDown := errors.New("dial tcp 10.0.0.5:3306: connect: connection refused")
 	svc := NewAuthService(dbErrorStore{err: dbDown}, stubIssuer{})
 
 	err := svc.ChangePassword(context.Background(), "admin", "old-pass", "new-pass")
@@ -65,6 +65,9 @@ func TestChangePasswordSurfacesInfrastructureError(t *testing.T) {
 	}
 	if errors.Is(err, ErrInvalidOldPassword) {
 		t.Fatalf("ChangePassword masked a database outage as a bad old password: %v", err)
+	}
+	if !errors.Is(err, dbDown) {
+		t.Fatalf("ChangePassword discarded the underlying database error: %v", err)
 	}
 }
 
