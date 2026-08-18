@@ -457,6 +457,40 @@ EOF
   assert_value "${out}" MY_CUSTOM_KEEP stays
 }
 
+test_drops_legacy_build_keys() {
+  local new="${TMP_DIR}/new_build.example" old="${TMP_DIR}/old_build.env"
+  local out="${TMP_DIR}/out_build.env" diff="${TMP_DIR}/diff_build.txt"
+  write_new_example "${new}"
+  # Old runtime env leaked build-machine knobs from the previously shared
+  # env.example. They must be dropped rather than kept as extra custom keys.
+  cat > "${old}" <<'EOF'
+CUBE_SANDBOX_MYSQL_PORT=3306
+ONE_CLICK_CUBEMASTER_BUILD_MODE=local
+ONE_CLICK_CUBELET_BUILD_MODE=local
+ONE_CLICK_CUBE_API_BUILD_MODE=local
+ONE_CLICK_CUBEMASTER_BIN=/tmp/cubemaster
+ENVD_LOCAL_PATH=/tmp/envd
+ONE_CLICK_WEB_DIST_DIR=/tmp/web/dist
+ONE_CLICK_MKCERT_BIN=/tmp/mkcert
+CUBE_BUILD_TIME=2026-01-01T00:00:00Z
+MY_CUSTOM_KEEP=stays
+EOF
+
+  merge_env_three_way "${new}" "${old}" "" "" "${out}" "${diff}" 2>/dev/null
+
+  for k in \
+    ONE_CLICK_CUBEMASTER_BUILD_MODE ONE_CLICK_CUBELET_BUILD_MODE \
+    ONE_CLICK_CUBE_API_BUILD_MODE ONE_CLICK_CUBEMASTER_BIN \
+    ENVD_LOCAL_PATH ONE_CLICK_WEB_DIST_DIR ONE_CLICK_MKCERT_BIN \
+    CUBE_BUILD_TIME; do
+    if grep -q "^${k}=" "${out}"; then
+      fail "build-only key ${k} should have been dropped from ${out}"
+    fi
+  done
+  assert_contains "${diff}" "[dropped] obsolete keys removed on upgrade:"
+  assert_value "${out}" MY_CUSTOM_KEEP stays
+}
+
 test_migrates_custom_cube_proxy_image_tag() {
   local new="${TMP_DIR}/new_proxy_img.example" old="${TMP_DIR}/old_proxy_img.env"
   local out="${TMP_DIR}/out_proxy_img.env" diff="${TMP_DIR}/diff_proxy_img.txt"
@@ -625,6 +659,7 @@ test_new_dotenv_overrides_take_priority
 test_version_lt
 test_diff_report_redacts_secrets
 test_drops_obsolete_agenthub_keys
+test_drops_legacy_build_keys
 test_migrates_custom_cube_proxy_image_tag
 test_drops_default_cube_proxy_image_tag_without_migration
 test_keeps_existing_cube_sandbox_cube_proxy_image_over_legacy_tag

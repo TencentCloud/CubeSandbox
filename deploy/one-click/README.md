@@ -17,7 +17,8 @@ This directory is used to build and deliver the single-machine one-click release
 - `install-compute.sh`: Entry point for installing a compute node on the target machine.
 - `down.sh`: Stops the services and dependencies installed by one-click.
 - `smoke.sh`: Runs basic health checks.
-- `env.example`: Shared environment variable template for both the build machine and the target machine.
+- `env.example`: Target-machine environment variable template.
+- `build.env.example`: Build-machine environment variable template for assembling the release bundle.
 - `lib/common.sh`: Common shell utility functions.
 - `scripts/one-click/`: Validation and maintenance helpers used by the systemd-managed deployment after installation.
 - `terraform/tencentcloud/`: Terraform deployer for a **clustered** CubeSandbox on Tencent Cloud (TKE control plane + CVM compute nodes). `create.sh` is the entry point; `destroy.sh` tears everything down. These files are shipped both at the release-bundle top level and inside `sandbox-package` (see "Tencent Cloud Cluster Deployment").
@@ -82,11 +83,11 @@ export ONE_CLICK_GUEST_IMAGE_TAR=/abs/path/to/cube-guest-image-amd64.tar.gz
 
 ## Building the Release Package
 
-It is recommended to copy the environment template first:
+It is recommended to copy the build environment template first:
 
 ```bash
 cd deploy/one-click
-cp env.example .env
+cp build.env.example build.env
 ```
 
 Run the following from the repository root on the host machine (recommended):

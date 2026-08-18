@@ -17,7 +17,8 @@
 - `install-compute.sh`：目标机计算节点安装入口。
 - `down.sh`：停止 one-click 安装的服务与依赖。
 - `smoke.sh`：执行基础健康检查。
-- `env.example`：构建机和目标机共用的环境变量模板。
+- `env.example`：目标机环境变量模板。
+- `build.env.example`：构建机环境变量模板，用于组装发布包。
 - `lib/common.sh`：公共 shell 函数。
 - `scripts/one-click/`：systemd 托管部署安装后使用的校验与维护辅助脚本。
 - `terraform/tencentcloud/`：在腾讯云上部署**集群版** CubeSandbox 的 Terraform 部署器（TKE 控制面 + CVM 计算节点）。`create.sh` 为入口，`destroy.sh` 负责整体销毁。这些文件同时位于发布包顶层和 `sandbox-package` 内（见“腾讯云集群部署”）。
@@ -82,11 +83,11 @@ export ONE_CLICK_GUEST_IMAGE_TAR=/abs/path/to/cube-guest-image-amd64.tar.gz
 
 ## 构建发布包
 
-建议先复制环境模板：
+建议先复制构建环境模板：
 
 ```bash
 cd deploy/one-click
-cp env.example .env
+cp build.env.example build.env
 ```
 
 推荐在宿主机的仓库根目录执行：

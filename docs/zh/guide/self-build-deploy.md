@@ -66,10 +66,11 @@ cp /path/to/vmlinux deploy/one-click/assets/kernel-artifacts/
 
 ### 1.2 执行构建
 
-在仓库根目录执行：
+如需覆盖构建选项，先复制构建环境模板，然后在仓库根目录执行：
 
 ```bash
 cd cube-sandbox
+cp deploy/one-click/build.env.example deploy/one-click/build.env
 ./deploy/one-click/build-release-bundle-builder.sh
 ```
 
@@ -252,9 +253,11 @@ sudo ./down.sh
 
 ## 配置参考
 
-所有配置通过 `.env` 文件管理。以下为完整参数说明。
+安装时配置通过从 `env.example` 复制的 `.env` 文件管理。构建时选项位于构建机上的 `build.env`（从 `build.env.example` 复制）。
 
 ### 构建时选项
+
+将 `deploy/one-click/build.env.example` 复制为 `deploy/one-click/build.env`，在其中设置覆盖项（也可在 shell 中 export）。
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
@@ -281,6 +284,7 @@ sudo ./down.sh
 
 | `ONE_CLICK_CUBESHIM_BIN` | 预编译 containerd-shim-cube-rs 路径 |
 | `ONE_CLICK_CUBE_RUNTIME_BIN` | 预编译 cube-runtime 路径 |
+| `ONE_CLICK_MKCERT_BIN` | 构建时自定义 mkcert 二进制路径（默认：内置 `assets/bin/mkcert`） |
 
 构建性能选项（均为可选）：
 
@@ -331,7 +335,6 @@ sudo ./down.sh
 | `CUBE_PROXY_DNS_ENABLE` | `1` | 启用 CoreDNS（一键部署必须为 `1`） |
 | `CUBE_PROXY_DNS_ANSWER_IP` | `${CUBE_SANDBOX_NODE_IP}` | CoreDNS 对 `cube.app` 返回的 IP |
 | `CUBE_PROXY_COREDNS_BIND_ADDR` | `127.0.0.54` | CoreDNS 绑定地址 |
-| `ONE_CLICK_MKCERT_BIN` | `assets/bin/mkcert`（内置） | 构建时自定义 mkcert 二进制路径 |
 
 ### 进程监听地址
 
