@@ -82,7 +82,13 @@ cd "$REPO_ROOT"
 # same package set (`-short` skips the Redis/KVM-dependent cases).
 WITH_TESTS=(
 	"cubeops|Go|0|make cubeops-test"
-	"cubemaster|Go|0|make builder-run BUILDER_CMD='cd /workspace/CubeMaster && go mod download && make proto && if [ -f test/conf.yaml ]; then export CUBE_MASTER_CONFIG_PATH=/workspace/CubeMaster/test/conf.yaml; fi && CI=true go test -short -timeout=20m ./api/... ./pkg/...'"
+	# -gcflags=all=-l disables inlining, which is REQUIRED by the gomonkey-based
+	# tests in ./pkg/templatecenter: gomonkey rewrites a function's machine code
+	# to redirect it, but an inlined call site bypasses that patch, so a stub
+	# intermittently fails to take effect and the real function runs (e.g. the
+	# flaky "template store is not initialized" failures). The repo already uses
+	# this flag for the integration tests (CubeMaster/Makefile testlocal/testtt).
+	"cubemaster|Go|0|make builder-run BUILDER_CMD='cd /workspace/CubeMaster && go mod download && make proto && if [ -f test/conf.yaml ]; then export CUBE_MASTER_CONFIG_PATH=/workspace/CubeMaster/test/conf.yaml; fi && CI=true go test -short -gcflags=all=-l -timeout=20m ./api/... ./pkg/...'"
 	# cubelet-network: the standalone network-agent module was removed in #1285 and
 	# folded into Cubelet/network/runtime (NetworkController). Its tests moved there
 	# and need the generated CubeNet/cubevs code but no cubecow/CGO, so build cubevs
