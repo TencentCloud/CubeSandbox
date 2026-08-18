@@ -246,10 +246,10 @@ func (localCache *LocalCache) shrinkCache() {
 		select {
 		case <-localCache.chShrinkCache:
 			curTime := time.Now()
-			curCacheSize := localCache.curCacheSize
+			curCacheSize := atomic.LoadInt64(&localCache.curCacheSize)
 			var shrinkNum, shrinkSize, size int64
 			for {
-				if localCache.curCacheSize > localCache.localCacheConfig.LowCacheSize {
+				if atomic.LoadInt64(&localCache.curCacheSize) > localCache.localCacheConfig.LowCacheSize {
 					localCache.Lock()
 					element := localCache.valueList.Front()
 					if element == nil {
@@ -330,10 +330,13 @@ func (localCache *LocalCache) saveFile(file string) {
 		var itm *util.CacheValue
 		switch value := item.Object.(type) {
 		case *list.Element:
+			localCache.Lock()
+			stored := value.Value
+			localCache.Unlock()
 			var ok bool
-			itm, ok = value.Value.(*util.CacheValue)
+			itm, ok = stored.(*util.CacheValue)
 			if !ok {
-				CubeLog.Errorf("Cache(%s) cannot persist key %s: list element contains %T", localCache.name, key, value.Value)
+				CubeLog.Errorf("Cache(%s) cannot persist key %s: list element contains %T", localCache.name, key, stored)
 				continue
 			}
 		case *util.CacheValue:
