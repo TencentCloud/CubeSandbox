@@ -7,8 +7,51 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/auth"
 )
+
+func mintWithEmptySecret(t *testing.T, claims jwt.Claims) string {
+	t.Helper()
+	signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(""))
+	if err != nil {
+		t.Fatalf("failed to mint a token with an empty key: %v", err)
+	}
+	return signed
+}
+
+func forgedAccessToken(t *testing.T) string {
+	t.Helper()
+	now := time.Now()
+	return mintWithEmptySecret(t, auth.AccessClaims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(now.Add(15 * time.Minute)),
+			IssuedAt:  jwt.NewNumericDate(now),
+			Subject:   "admin",
+			Audience:  jwt.ClaimStrings{"cubeops:access"},
+		},
+		Username: "admin",
+		Role:     "admin",
+		Scopes:   []string{},
+		Typ:      "access",
+	})
+}
+
+func forgedRefreshToken(t *testing.T) string {
+	t.Helper()
+	now := time.Now()
+	return mintWithEmptySecret(t, auth.RefreshClaims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(now.Add(168 * time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(now),
+			Subject:   "admin",
+			Audience:  jwt.ClaimStrings{"cubeops:refresh"},
+		},
+		Username: "admin",
+		TokenID:  "forged-token-id",
+		Typ:      "refresh",
+	})
+}
 
 func TestEmptySecretRejectedOnGenerate(t *testing.T) {
 	jm := auth.NewJWTManager("", 15*time.Minute, 168*time.Hour)
@@ -21,8 +64,19 @@ func TestEmptySecretRejectedOnGenerate(t *testing.T) {
 	}
 }
 
-func TestEmptySecretRejectedOnVerify(t *testing.T) {
-	signer := auth.NewJWTManager("forged-secret-32-bytes-long-ok!!", 15*time.Minute, 168*time.Hour)
+func TestForgedTokenSignedWithEmptySecretIsRejected(t *testing.T) {
+	empty := auth.NewJWTManager("", 15*time.Minute, 168*time.Hour)
+
+	if _, err := empty.VerifyAccessToken(forgedAccessToken(t)); err == nil {
+		t.Fatal("VerifyAccessToken accepted an admin token forged with the empty signing key")
+	}
+	if _, err := empty.VerifyRefreshToken(forgedRefreshToken(t)); err == nil {
+		t.Fatal("VerifyRefreshToken accepted a token forged with the empty signing key")
+	}
+}
+
+func TestTokenSignedWithADifferentSecretIsRejected(t *testing.T) {
+	signer := auth.NewJWTManager("other-secret-32-bytes-long-ok!!!", 15*time.Minute, 168*time.Hour)
 	minted, err := signer.GenerateAccessToken("admin")
 	if err != nil {
 		t.Fatalf("failed to mint a token for the test: %v", err)
@@ -30,10 +84,7 @@ func TestEmptySecretRejectedOnVerify(t *testing.T) {
 
 	empty := auth.NewJWTManager("", 15*time.Minute, 168*time.Hour)
 	if _, err := empty.VerifyAccessToken(minted); err == nil {
-		t.Fatal("VerifyAccessToken accepted a token while configured with an empty secret")
-	}
-	if _, err := empty.VerifyRefreshToken(minted); err == nil {
-		t.Fatal("VerifyRefreshToken accepted a token while configured with an empty secret")
+		t.Fatal("VerifyAccessToken accepted a token signed with a different secret")
 	}
 }
 
