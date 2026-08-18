@@ -64,7 +64,7 @@ func (h *Handler) Login(c *gin.Context) {
 			return
 		}
 		logging.G(c.Request.Context()).Errorf("login failed: internal error: username=%q client_ip=%s error=%q", req.Username, c.ClientIP(), err.Error())
-		httputil.WriteError(c, http.StatusInternalServerError, err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	httputil.WriteJSON(c, http.StatusOK, model.LoginResponse{
@@ -120,7 +120,7 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 		logging.G(c.Request.Context()).Errorf("password change failed: operator=%q result=error error=%q", username, err.Error())
 		// Validation errors and DB errors share the 500 path here; finer
 		// mapping can be added by wrapping with sentinel errors if needed.
-		httputil.WriteError(c, http.StatusInternalServerError, err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "internal server error")
 	}
 }
 
