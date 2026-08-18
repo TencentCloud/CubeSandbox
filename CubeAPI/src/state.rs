@@ -14,7 +14,7 @@ use std::sync::Arc;
 /// on every request, so real data must live behind Arc.
 #[derive(Clone)]
 pub struct AppState {
-    /// Per-API-key rate limiter (token bucket).
+    /// Per-identity rate limiter (token bucket), keyed on the validated credential.
     pub rate_limiter: Arc<DefaultKeyedRateLimiter<String>>,
 
     /// Shared reqwest connection pool.

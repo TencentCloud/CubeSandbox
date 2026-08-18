@@ -134,8 +134,10 @@ pub async fn unified_auth(
                         "Invalid API key or token".to_string(),
                     ));
                 }
-                let identity = identity_of(&credential);
-                request.extensions_mut().insert(RateLimitIdentity(identity));
+                request.extensions_mut().insert(RateLimitIdentity(format!(
+                    "configured-key:{}",
+                    expected_key
+                )));
             }
         }
         // Mode 3: no auth (both unset) or simple-key match — pass through.

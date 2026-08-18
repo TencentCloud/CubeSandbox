@@ -10,9 +10,10 @@ use axum::{
     response::Response,
 };
 
-/// Per-API-key token bucket rate limiter middleware.
-/// Reads the X-API-Key header and checks the shared governor limiter.
-/// Returns 429 if the key has exceeded its quota.
+/// Per-identity token bucket rate limiter middleware.
+/// Reads the `RateLimitIdentity` published by `unified_auth` after it validated
+/// the credential, and checks the shared governor limiter.
+/// Returns 429 if that identity has exceeded its quota.
 pub async fn rate_limit(
     State(state): State<AppState>,
     request: Request,
