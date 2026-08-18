@@ -4,6 +4,7 @@
 package auth
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -135,18 +136,65 @@ func TestTrustedProxyForwardedForIsHonoured(t *testing.T) {
 	}
 }
 
-func TestSweepBoundsTheFailureMap(t *testing.T) {
-	l := &loginLimiter{failures: map[string][]time.Time{}, limit: 5, window: time.Millisecond}
-	for i := 0; i < sweepThreshold+50; i++ {
-		l.recordFailure("10.9." + string(rune('0'+i%10)) + "." + string(rune('0'+(i/10)%10)))
-	}
-	time.Sleep(5 * time.Millisecond)
-	l.recordFailure("10.9.9.9")
+func distinctIP(i int) string {
+	return fmt.Sprintf("10.%d.%d.%d", (i>>16)&0xff, (i>>8)&0xff, i&0xff)
+}
 
+func mapSize(l *loginLimiter) int {
 	l.mu.Lock()
-	size := len(l.failures)
-	l.mu.Unlock()
-	if size > sweepThreshold {
-		t.Fatalf("failure map grew to %d entries, above the sweep threshold %d", size, sweepThreshold)
+	defer l.mu.Unlock()
+	return len(l.failures)
+}
+
+func TestExpiredEntriesAreSweptOnceTheThresholdIsReached(t *testing.T) {
+	l := &loginLimiter{failures: map[string][]time.Time{}, limit: 5, window: 20 * time.Millisecond}
+	for i := 0; i < sweepThreshold; i++ {
+		l.recordFailure(distinctIP(i))
+	}
+	if got := mapSize(l); got != sweepThreshold {
+		t.Fatalf("map holds %d entries before the sweep, want %d", got, sweepThreshold)
+	}
+
+	time.Sleep(40 * time.Millisecond)
+	l.recordFailure(distinctIP(sweepThreshold))
+
+	if got := mapSize(l); got != 1 {
+		t.Fatalf("map holds %d entries after the sweep, want only the fresh one", got)
+	}
+}
+
+func TestLiveEntriesAreEvictedSoTheMapStaysBounded(t *testing.T) {
+	l := &loginLimiter{failures: map[string][]time.Time{}, limit: 5, window: time.Hour}
+	const total = sweepThreshold * 3
+	low := total
+	for i := 0; i < total; i++ {
+		l.recordFailure(distinctIP(i))
+		got := mapSize(l)
+		if got > sweepThreshold {
+			t.Fatalf("map grew to %d entries at i=%d, above the threshold %d", got, i, sweepThreshold)
+		}
+		if i >= total-sweepThreshold && got < low {
+			low = got
+		}
+	}
+	if low > evictTarget+1 {
+		t.Fatalf("map never fell below %d entries, so live entries are never evicted", low)
+	}
+}
+
+func TestEvictionKeepsTheMostRecentAttackers(t *testing.T) {
+	l := &loginLimiter{failures: map[string][]time.Time{}, limit: 5, window: time.Hour}
+	for i := 0; i < sweepThreshold-6; i++ {
+		l.recordFailure(distinctIP(i))
+	}
+
+	recent := "203.0.113.7"
+	for i := 0; i < 5; i++ {
+		l.recordFailure(recent)
+	}
+	l.recordFailure(distinctIP(sweepThreshold))
+
+	if !l.isBlocked(recent) {
+		t.Fatal("the most recently active IP was evicted, so its failures were forgotten")
 	}
 }
