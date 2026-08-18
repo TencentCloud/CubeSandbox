@@ -139,6 +139,12 @@ GATED_TESTS=(
 NO_TESTS=(
 	"cubeegress|no unit tests present in CubeEgress/"
 	"web|no unit test script in web/package.json"
+	# CubeS3lvol ships integration tests only (test/integration/, driven by
+	# `make check` / `make check-offline`). They need a full SPDK/DPDK/AWS
+	# build plus root for the mount-based cases, so the builder sweep cannot
+	# run them as unit tests; the offline subset is covered by the dedicated
+	# CubeS3lvol CI workflow instead.
+	"cube-s3lvol|no unit tests; integration tests in test/ run via make check / check-offline (need SPDK build + root, covered by CI workflow)"
 )
 
 # --- output helpers ----------------------------------------------------------

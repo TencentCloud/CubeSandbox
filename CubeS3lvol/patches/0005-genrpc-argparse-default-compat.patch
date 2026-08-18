@@ -1,0 +1,25 @@
+diff --git a/scripts/genrpc.py b/scripts/genrpc.py
+index 1c3ffb7a7..a45bc3b1c 100755
+--- a/scripts/genrpc.py
++++ b/scripts/genrpc.py
+@@ -217,8 +217,18 @@ def lint_py_cli(schema: Dict[str, Any]) -> None:
+                     newtype = action.type
+                 if types[param['type']] != newtype:
+                     raise ValueError(f"For method {method['name']}: parameter '{param['name']}': 'type' field is mismatched")
+-                # argparse.BooleanOptionalAction auto-appends " (default: %(default)s)" when default is concrete; strip it.
+-                help_str = action.help.removesuffix(" (default: %(default)s)") if action.help else action.help
++                # argparse.BooleanOptionalAction appends a default hint when the default
++                # is concrete. Python >= 3.9.13 keeps the literal " (default: %(default)s)"
++                # in action.help and expands it only at format time; older pythons expand
++                # it eagerly (e.g. " (default: False)"). Strip either form so the schema
++                # comparison is python-version agnostic.
++                help_str = action.help if action.help else action.help
++                if help_str:
++                    for _suffix in (" (default: %(default)s)", " (default: False)",
++                                    " (default: True)", " (default: None)"):
++                        if help_str.endswith(_suffix):
++                            help_str = help_str[:-len(_suffix)]
++                            break
+                 if param['description'] != help_str and "\n" not in help_str and not method['name'].startswith('bdev_'):
+                     raise ValueError(f"For method {method['name']}: parameter '{param['name']}': 'description' field is mismatched")
+ 
