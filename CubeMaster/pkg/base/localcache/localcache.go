@@ -65,6 +65,8 @@ type LocalCache struct {
 	localCacheConfig   *LocalCacheConfig
 	sharedCalls        util.SharedCalls
 	consecutiveFailNum int64
+	expiredUse         atomic.Bool
+	destroyOnce        sync.Once
 }
 
 func NewCache(name string, loader LoaderFunc, localCacheConfig *LocalCacheConfig) *LocalCache {
@@ -77,6 +79,7 @@ func NewCache(name string, loader LoaderFunc, localCacheConfig *LocalCacheConfig
 		localCache.loadFile(localCacheConfig.LoadFileName)
 	}
 	localCache.localCacheConfig = localCache.SetupConfig(localCacheConfig)
+	localCache.expiredUse.Store(localCache.localCacheConfig.ExpiredUse)
 
 	localCache.chShrinkCache = make(chan bool, 1)
 	localCache.chCacheExit = make(chan bool)
@@ -99,36 +102,39 @@ func NewCache(name string, loader LoaderFunc, localCacheConfig *LocalCacheConfig
 }
 
 func (localCache *LocalCache) Destroy() {
-	if localCache != nil {
-		CubeLog.Infof("LruCache(%s) Destroy", localCache.name)
-		if localCache.chCacheExit != nil {
-			if localCache.localCacheConfig.OpenCacheFile {
-				localCache.saveFile(localCache.localCacheConfig.LoadFileName)
-			}
-			localCache.cache.Flush()
-			close(localCache.chCacheExit)
-			localCache.waitGroup.Wait()
-			localCache.chCacheExit = nil
-		}
+	if localCache == nil {
+		return
 	}
+	localCache.destroyOnce.Do(func() {
+		CubeLog.Infof("LruCache(%s) Destroy", localCache.name)
+		if localCache.chCacheExit == nil {
+			return
+		}
+		if localCache.localCacheConfig.OpenCacheFile {
+			localCache.saveFile(localCache.localCacheConfig.LoadFileName)
+		}
+		localCache.cache.Flush()
+		close(localCache.chCacheExit)
+		localCache.waitGroup.Wait()
+	})
 }
 
 func (localCache *LocalCache) Get(ctx context.Context, key string) (interface{}, bool, error) {
 	item, found := localCache.cache.Get(key)
 	if found {
 		element := item.(*list.Element)
+
+		localCache.Lock()
 		itm := element.Value.(*util.CacheValue)
+		localCache.valueList.MoveToBack(element)
+		localCache.Unlock()
 
 		if time.Now().Add(-itm.Expired).After(time.Unix(itm.LastAccess, 0)) {
 
-			if !localCache.localCacheConfig.ExpiredUse {
+			if !localCache.expiredUse.Load() {
 				r, f, err := localCache.loadAndRefresh(ctx, key)
 
 				if err != nil && localCache.localCacheConfig.DemotionExpiredUse {
-
-					localCache.Lock()
-					localCache.valueList.MoveToBack(element)
-					localCache.Unlock()
 					return itm.Value, true, nil
 				}
 
@@ -142,9 +148,6 @@ func (localCache *LocalCache) Get(ctx context.Context, key string) (interface{},
 			localCache.asyncRefresh(ctx, key)
 		}
 
-		localCache.Lock()
-		localCache.valueList.MoveToBack(element)
-		localCache.Unlock()
 		return itm.Value, true, nil
 	}
 
@@ -159,14 +162,17 @@ func (localCache *LocalCache) put(key string, val interface{}, expired time.Dura
 	if item, found := localCache.cache.Get(key); found {
 		element := item.(*list.Element)
 		localCache.Lock()
+		prev := element.Value.(*util.CacheValue)
+		next := &util.CacheValue{
+			Key:        prev.Key,
+			Value:      val,
+			LastAccess: time.Now().Unix(),
+			Expired:    expired}
+		element.Value = next
 		localCache.valueList.MoveToBack(element)
 		localCache.Unlock()
-		itm := element.Value.(*util.CacheValue)
-		atomic.AddInt64(&localCache.curCacheSize, -itm.Size())
-		itm.Value = val
-		itm.Expired = expired
-		itm.LastAccess = time.Now().Unix()
-		atomic.AddInt64(&localCache.curCacheSize, itm.Size())
+		atomic.AddInt64(&localCache.curCacheSize, -prev.Size())
+		atomic.AddInt64(&localCache.curCacheSize, next.Size())
 	} else {
 		itm := &util.CacheValue{
 			Key:        key,
@@ -180,7 +186,7 @@ func (localCache *LocalCache) put(key string, val interface{}, expired time.Dura
 		localCache.cache.Set(key, element, -1)
 	}
 
-	if localCache.curCacheSize >= localCache.localCacheConfig.HighCacheSize {
+	if atomic.LoadInt64(&localCache.curCacheSize) >= localCache.localCacheConfig.HighCacheSize {
 		localCache.chShrinkCache <- true
 	}
 }
@@ -198,7 +204,7 @@ func (localCache *LocalCache) loadAndRefresh(ctx context.Context, key string) (i
 				CubeLog.Errorf("Cache LoadAndRefresh Error:%s, %v, %s", key, found, err)
 				return nil, err
 			} else {
-				localCache.consecutiveFailNum = 0
+				atomic.StoreInt64(&localCache.consecutiveFailNum, 0)
 			}
 
 			if !found {
@@ -305,12 +311,12 @@ func (localCache *LocalCache) errStrategy() {
 					int64(localCache.localCacheConfig.MaxConsecutiveFailNum) {
 
 					if localCache.localCacheConfig.DemotionExpiredUse {
-						localCache.localCacheConfig.ExpiredUse = true
+						localCache.expiredUse.Store(true)
 					}
 				} else {
 
-					if localCache.localCacheConfig.DemotionExpiredUse && localCache.localCacheConfig.ExpiredUse {
-						localCache.localCacheConfig.ExpiredUse = false
+					if localCache.localCacheConfig.DemotionExpiredUse && localCache.expiredUse.Load() {
+						localCache.expiredUse.Store(false)
 					}
 				}
 			}
