@@ -45,10 +45,11 @@ WEBHOOK_SECRET=my-test-secret cargo run
 ### 第 3 步：登录 CubeOps 并创建订阅
 
 ```bash
-# 登录取 JWT（默认账号 admin/admin）
+# 登录取 JWT（默认账号 admin/admin；返回字段为驼峰的 accessToken）
 TOKEN=$(curl -s -X POST http://127.0.0.1:3010/api/v1/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"admin"}' | jq -r .access_token)
+  -d '{"username":"admin","password":"admin"}' \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['accessToken'])")
 
 # 创建订阅：接收 sandbox.created 事件，推送到本机接收端
 curl -s -X POST http://127.0.0.1:3010/api/v1/webhooks \
@@ -82,7 +83,7 @@ curl -s -X POST http://127.0.0.1:3010/api/v1/webhooks/1/test \
 
 ```bash
 curl -s "http://127.0.0.1:3010/api/v1/webhooks/1/deliveries?limit=20" \
-  -H "Authorization: Bearer $TOKEN" | jq
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
 ```
 
 每条投递记录包含 `status`（`succeeded` / `failed` / …）、`attempts`、`http_status`、`last_error` 等字段，是排查"接收端没收到"问题的第一入口。

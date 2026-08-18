@@ -87,6 +87,42 @@ func TestDelivery_MaterializedRowIsImmediatelyClaimable(t *testing.T) {
 	}
 }
 
+// TestDelivery_TestEndpointRowIsImmediatelyClaimable guards the test-delivery
+// INSERT: it must stamp next_retry_at with the database's now() (a zero time
+// is rejected by MySQL strict mode NO_ZERO_DATE, and a Go-side clock skews
+// due-detection by the client/server timezone offset).
+func TestDelivery_TestEndpointRowIsImmediatelyClaimable(t *testing.T) {
+	env := newTestStore(t)
+	defer env.teardown()
+	ctx := context.Background()
+
+	sub := newWebhookSub("test-ep", "https://example.com/hook", "sandbox.created")
+	if err := env.store.CreateWebhookSubscription(ctx, sub); err != nil {
+		t.Fatalf("create sub: %v", err)
+	}
+	d := &store.WebhookDelivery{
+		EventID:        "test:immediate",
+		SubscriptionID: sub.ID,
+		Payload:        `{"event":"sandbox.created"}`,
+		Status:         webhook.StatusPending,
+	}
+	if err := env.store.CreateWebhookDelivery(ctx, d); err != nil {
+		t.Fatalf("CreateWebhookDelivery: %v", err)
+	}
+	if d.ID == 0 {
+		t.Fatal("delivery id not populated")
+	}
+
+	ds := webhook.NewDeliveryStore(env.store.DB())
+	ids, err := ds.ClaimCandidatesDue(ctx, webhook.ClaimQuery{Limit: 10})
+	if err != nil {
+		t.Fatalf("candidates: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != d.ID {
+		t.Fatalf("test-endpoint row not immediately due: ids=%v want [%d]", ids, d.ID)
+	}
+}
+
 func TestDelivery_ClaimCompleteLifecycle(t *testing.T) {
 	env, ds := newDeliveryStore(t)
 	defer env.teardown()

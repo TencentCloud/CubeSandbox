@@ -44,11 +44,11 @@ log "CubeOps reachable"
 # 2. Obtain a token (or use CUBE_OPS_TOKEN).
 if [[ -z "${CUBE_OPS_TOKEN}" ]]; then
   [[ -n "${ADMIN_PASSWORD}" ]] || fail "set ADMIN_PASSWORD or CUBE_OPS_TOKEN"
-  LOGIN=$(curl -sf -X POST "${CUBE_OPS_ADDR}/api/v1/login" \
+  LOGIN=$(curl -sf -X POST "${CUBE_OPS_ADDR}/api/v1/auth/login" \
     -H "Content-Type: application/json" \
     -d "{\"username\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PASSWORD}\"}") \
     || fail "CubeOps login failed"
-  CUBE_OPS_TOKEN=$(printf '%s' "${LOGIN}" | jq -r '.access_token // .token // empty')
+  CUBE_OPS_TOKEN=$(printf '%s' "${LOGIN}" | jq -r '.accessToken // empty')
   [[ -n "${CUBE_OPS_TOKEN}" ]] || fail "could not extract access token from login response"
 fi
 AUTH=(-H "Authorization: Bearer ${CUBE_OPS_TOKEN}")

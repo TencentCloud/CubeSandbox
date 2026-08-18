@@ -225,16 +225,30 @@ func (s *Store) ListWebhookSubscriptionsByEventType(ctx context.Context, eventTy
 }
 
 // CreateWebhookDelivery inserts a delivery row (used by the test endpoint
-// and, later, by the materialization path). next_retry_at is normalized to
-// the database's now() so the row is immediately claimable regardless of any
-// client/server clock skew (the ledger compares against DB-side now()).
+// and, later, by the materialization path). The INSERT stamps
+// next_retry_at with the database's now() in a single statement: a gorm
+// Create would first write the Go zero time (0000-00-00), which MySQL
+// strict mode (NO_ZERO_DATE) rejects, and a Go-side clock would skew
+// due-detection by any client/server timezone offset.
 func (s *Store) CreateWebhookDelivery(ctx context.Context, d *WebhookDelivery) error {
-	if err := s.db.WithContext(ctx).Create(d).Error; err != nil {
+	const insert = `INSERT INTO t_webhook_delivery
+		(event_id, subscription_id, payload, status, next_retry_at)
+		VALUES (?, ?, ?, ?, now())`
+	if IsPostgres() {
+		return s.db.WithContext(ctx).Raw(insert+` RETURNING id`,
+			d.EventID, d.SubscriptionID, d.Payload, d.Status,
+		).Scan(&d.ID).Error
+	}
+	if err := s.db.WithContext(ctx).Exec(insert,
+		d.EventID, d.SubscriptionID, d.Payload, d.Status).Error; err != nil {
 		return err
 	}
-	return s.db.WithContext(ctx).Exec(
-		`UPDATE t_webhook_delivery SET next_retry_at = now() WHERE id = ?`, d.ID,
-	).Error
+	// MySQL has no RETURNING; the (event_id, subscription_id) unique key
+	// makes this lookup exact.
+	return s.db.WithContext(ctx).Raw(
+		`SELECT id FROM t_webhook_delivery WHERE event_id = ? AND subscription_id = ?`,
+		d.EventID, d.SubscriptionID,
+	).Scan(&d.ID).Error
 }
 
 // ListWebhookDeliveries returns a page of delivery rows for a subscription,
