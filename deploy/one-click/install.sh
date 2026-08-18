@@ -1532,6 +1532,33 @@ case "${CUBE_EGRESS_ADMIN_PORT}" in
     ;;
 esac
 
+# CubeS3lvol (s3lvol) options. Defaults mirror rcow_common.sh so the data
+# plane behaves out of the box. ONE_CLICK_ENABLE_S3LVOL only records the
+# intent here; the systemd unit wiring is done by install-units.sh when the
+# switch is 1 (the unit itself is always shipped).
+ONE_CLICK_ENABLE_S3LVOL="${ONE_CLICK_ENABLE_S3LVOL:-0}"
+case "${ONE_CLICK_ENABLE_S3LVOL}" in
+  0|1) ;;
+  *) die "ONE_CLICK_ENABLE_S3LVOL must be 0 or 1 (got: '${ONE_CLICK_ENABLE_S3LVOL}')" ;;
+esac
+RCOW_WAL_MB="${RCOW_WAL_MB:-32768}"
+RCOW_JOURNAL_MB="${RCOW_JOURNAL_MB:-1024}"
+# Chunk cache region on the WAL image. The image is created once, its total
+# size fixes the journal/WAL layout forever, so the default mirrors the README
+# contract: journal + WAL (32768 + 1024 MiB) plus a 479 GiB cache, 512 GiB
+# total. Tuning RCOW_CACHE_MB only matters before the first start.
+RCOW_CACHE_MB="${RCOW_CACHE_MB:-490496}"
+RCOW_CAPACITY_GB="${RCOW_CAPACITY_GB:-16384}"
+RCOW_TGT_CPUMASK="${RCOW_TGT_CPUMASK:-0x3}"
+RCOW_TGT_MEM_MB="${RCOW_TGT_MEM_MB:-16384}"
+RCOW_LISTEN_ADDR="${RCOW_LISTEN_ADDR:-127.0.0.1}"
+RCOW_LISTEN_PORT="${RCOW_LISTEN_PORT:-4420}"
+case "${RCOW_LISTEN_PORT}" in
+  *[!0-9]*|"")
+    die "invalid RCOW_LISTEN_PORT: ${RCOW_LISTEN_PORT}"
+    ;;
+esac
+
 patch_cubelet_config_template \
   "${PKG_ROOT}/Cubelet/config/config.toml" \
   "${CUBE_SANDBOX_ETH_NAME:-}" \
@@ -1571,6 +1598,7 @@ rm -rf \
   "${INSTALL_PREFIX}/CubeOps" \
   "${INSTALL_PREFIX}/CubeMaster" \
   "${INSTALL_PREFIX}/Cubelet" \
+  "${INSTALL_PREFIX}/CubeS3lvol" \
   "${INSTALL_PREFIX}/cubeproxy" \
   "${INSTALL_PREFIX}/coredns" \
   "${INSTALL_PREFIX}/webui" \
@@ -1597,6 +1625,12 @@ if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
     copy_dir_contents "${PKG_ROOT}/cube-agent" "${INSTALL_PREFIX}/cube-agent"
   fi
   copy_dir_contents "${PKG_ROOT}/cube-egress" "${INSTALL_PREFIX}/cube-egress"
+  # CubeS3lvol ships in the package only when the builder wrapper supplied
+  # ONE_CLICK_S3LVOL_DIR (build-release-bundle.sh warns+skips otherwise), so
+  # guard the directory like cube-agent does.
+  if [[ -d "${PKG_ROOT}/CubeS3lvol" ]]; then
+    copy_dir_contents "${PKG_ROOT}/CubeS3lvol" "${INSTALL_PREFIX}/CubeS3lvol"
+  fi
   copy_dir_contents "${PKG_ROOT}/systemd" "${INSTALL_PREFIX}/systemd"
   copy_dir_contents "${PKG_ROOT}/scripts" "${INSTALL_PREFIX}/scripts"
 else
@@ -1619,11 +1653,34 @@ mkdir -p \
   /data/log/Cubelet \
   /data/log/CubeShim \
   /data/log/CubeVmm \
+  /data/log/rcow \
   /data/cube-shim/disks \
   /data/snapshot_pack/disks \
   /data/cube-shared \
   /data/cube-shared/volume \
   /data/shared
+
+# CubeS3lvol (s3lvol): per-machine WAL image. The package never ships it --
+# its size fixes the journal/WAL layout and it must not be copied between
+# hosts or recreated after the first activation (rcow_start.sh refuses to
+# self-create an empty image, so this is install-time only). Create only
+# when absent so an upgrade never clobbers existing WAL state, and only
+# when the feature is enabled: a default install (ONE_CLICK_ENABLE_S3LVOL=0)
+# must not leave a ~512 GiB sparse file behind on nodes that never run s3lvol
+# (including control nodes, which copy the full package).
+if [[ "${ONE_CLICK_ENABLE_S3LVOL}" == "1" &&
+      -f "${INSTALL_PREFIX}/CubeS3lvol/bin/s3lvol_tgt" ]]; then
+  wal_img=/data/cubelet/rcow/wal_bdev.img
+  wal_mb=$((RCOW_WAL_MB + RCOW_JOURNAL_MB + RCOW_CACHE_MB))
+  if [[ ! -f "${wal_img}" ]]; then
+    mkdir -p "$(dirname "${wal_img}")"
+    truncate -s "${wal_mb}M" "${wal_img}" \
+      || die "failed to create CubeS3lvol WAL image ${wal_img} (${wal_mb} MiB)"
+    log "created CubeS3lvol WAL image ${wal_img} (${wal_mb} MiB)"
+  else
+    log "CubeS3lvol WAL image ${wal_img} already exists; keeping it"
+  fi
+fi
 
 if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
   mkdir -p \
@@ -1827,12 +1884,27 @@ else
   remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_S3FS_EXTRA_OPTS"
 fi
 
+# CubeS3lvol (s3lvol) runtime env: persist the resolved defaults (mirroring
+# rcow_common.sh) so the systemd unit picks them up via EnvironmentFile
+# without re-deriving them, and so `down.sh` / upgrade knows the intent.
+upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_ENABLE_S3LVOL" "${ONE_CLICK_ENABLE_S3LVOL}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_WAL_MB" "${RCOW_WAL_MB}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_JOURNAL_MB" "${RCOW_JOURNAL_MB}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_CACHE_MB" "${RCOW_CACHE_MB}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_CAPACITY_GB" "${RCOW_CAPACITY_GB}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_TGT_CPUMASK" "${RCOW_TGT_CPUMASK}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_TGT_MEM_MB" "${RCOW_TGT_MEM_MB}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_LISTEN_ADDR" "${RCOW_LISTEN_ADDR}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_LISTEN_PORT" "${RCOW_LISTEN_PORT}"
+
 chmod +x "${INSTALL_PREFIX}/Cubelet/bin/"*
 chmod +x "${INSTALL_PREFIX}/cube-vs/network/bin/"* 2>/dev/null || true
 chmod +x "${INSTALL_PREFIX}/cube-shim/bin/containerd-shim-cube-rs" "${INSTALL_PREFIX}/cube-shim/bin/cube-runtime"
 chmod +x "${INSTALL_PREFIX}/scripts/one-click/"*.sh
 chmod +x "${INSTALL_PREFIX}/scripts/systemd/"*.sh
 chmod +x "${INSTALL_PREFIX}/scripts/cube-egress/"*.sh 2>/dev/null || true
+chmod +x "${INSTALL_PREFIX}/CubeS3lvol/scripts/"*.sh 2>/dev/null || true
+chmod +x "${INSTALL_PREFIX}/CubeS3lvol/bin/s3lvol_tgt" 2>/dev/null || true
 
 if [[ -z "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
   # Log current CIDR for debugging
