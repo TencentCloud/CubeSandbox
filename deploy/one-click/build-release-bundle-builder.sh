@@ -377,6 +377,32 @@ track_shim() {
   install -m 0755 /workspace/CubeShim/target/release/cube-runtime "${PREBUILT_DIR}/cube-runtime"
 }
 
+track_s3lvol() {
+  # CubeS3lvol (s3lvol): remote COW on S3/COS fronted by an NVMe/TCP target,
+  # statically linked against SPDK/DPDK/AWS CRT. setup_dep.sh populates
+  # deps/spdk + deps/aws-* at pinned commits/tags (network on first run; the
+  # shared /workspace mount keeps the checkouts and object files across
+  # rebuilds, so only the first build pays the full SPDK/CRT compile).
+  # make_release.sh --skip-smoke defers the DPDK EAL runtime smoke test to
+  # deployment-time verification -- the EAL needs a real CPU affinity mask
+  # that the builder container cannot guarantee -- while the static
+  # self-contained gate (verify_binary: readelf/ldd) still runs inside it.
+  local s3lvol_jobs="${ONE_CLICK_S3LVOL_JOBS:-$(nproc)}"
+  local stage="${PREBUILT_DIR}/s3lvol-stage"
+  # Release-quality AWS CRT for a fresh checkout; an already-populated
+  # deps/aws is reused as-is (setup_dep.sh skips existing builds).
+  ( cd /workspace/CubeS3lvol && AWS_BUILD_TYPE=RelWithDebInfo ./setup_dep.sh --jobs "${s3lvol_jobs}" ) >&2
+  ( cd /workspace/CubeS3lvol && make S3LVOL_BUILD_TYPE=release -j"${s3lvol_jobs}" ) >&2
+  rm -rf "${stage}" "${PREBUILT_DIR}/s3lvol"
+  ( cd /workspace/CubeS3lvol && ./make_release.sh --no-tar --skip-smoke --version "${CUBE_VERSION}" --outdir "${stage}" ) >&2
+  mv "${stage}"/s3lvol-* "${PREBUILT_DIR}/s3lvol"
+  rm -rf "${stage}"
+  [[ -x "${PREBUILT_DIR}/s3lvol/bin/s3lvol_tgt" ]] || {
+    echo "[one-click] CubeS3lvol release missing bin/s3lvol_tgt" >&2
+    exit 1
+  }
+}
+
 # Serial pre-launch step: build cubemastercli with the client-supplied envd
 # payload when present. The envd payload must be embedded into the
 # cubemastercli binary before packaging, but that build cannot safely share the
@@ -403,6 +429,7 @@ echo "[one-click] building one-click components in parallel tracks" >&2
 # Queue order matters under a low concurrency cap: front-load the slowest,
 # LTO-heavy tracks (cube-api fat-LTO, shim, cube-agent) so they start first and
 # overlap the lighter Go tracks instead of tailing the build.
+queue_track s3lvol     track_s3lvol
 queue_track cube-api   track_cube_api
 queue_track shim       track_shim
 queue_track agent      track_agent
@@ -446,6 +473,11 @@ for artifact in \
 do
   ensure_file "${PREBUILT_DIR}/${artifact}"
 done
+
+# CubeS3lvol produces a release *directory* (bin/ + scripts/ + VERSION)
+# rather than a single binary, so verify it separately.
+ensure_dir "${PREBUILT_DIR}/s3lvol"
+ensure_file "${PREBUILT_DIR}/s3lvol/bin/s3lvol_tgt"
 
 log "packaging one-click release bundle on host with prebuilt artifacts"
 ONE_CLICK_CUBEMASTER_BIN="${PREBUILT_DIR}/cubemaster" \
