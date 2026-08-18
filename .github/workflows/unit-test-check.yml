@@ -237,6 +237,7 @@ jobs:
                     elif . == "cubedb" then "CubeDB"
                     elif . == "cube-lifecycle-manager" then "Cube Lifecycle Manager"
                     elif . == "cubelet" then "Cubelet"
+                    elif . == "cubevs" then "CubeVS"
                     elif . == "agent" then "Agent"
                     elif . == "hypervisor" then "Hypervisor"
                     else error("unsupported component: " + .)
