@@ -132,15 +132,11 @@ func (l *loginLimiter) isBlocked(ip string) bool {
 	return count >= l.limit
 }
 
-func clientIP(c *gin.Context) string {
-	return c.ClientIP()
-}
-
 // LoginRateLimit is a gin middleware that blocks IPs with too many recent
 // failed login attempts. It must be installed only on the /auth/login route.
 func LoginRateLimit() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		ip := clientIP(c)
+		ip := c.ClientIP()
 		if defaultLoginLimiter.isBlocked(ip) {
 			logging.G(c.Request.Context()).Warnf("login rate limit triggered: client_ip=%s path=%s", ip, c.Request.URL.Path)
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
@@ -155,5 +151,5 @@ func LoginRateLimit() gin.HandlerFunc {
 // markLoginFailure is called by the Login handler when authentication fails.
 // It is exported so the handler can trigger it after a failed login.
 func markLoginFailure(c *gin.Context) {
-	defaultLoginLimiter.recordFailure(clientIP(c))
+	defaultLoginLimiter.recordFailure(c.ClientIP())
 }

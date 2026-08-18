@@ -340,13 +340,14 @@ cubeOps:
   podAnnotations: {}
   bind: "0.0.0.0:3010"
   # Reverse proxies allowed to assert the client IP via X-Forwarded-For.
-  # The WebUI nginx sidecar proxies CubeOps, so the pod network must be trusted
-  # or the login rate limiter keys every request on the nginx pod IP and five
-  # failures lock out every user. Narrow this to your pod CIDR if you know it.
-  trustedProxies:
-    - "10.0.0.0/8"
-    - "172.16.0.0/12"
-    - "192.168.0.0/16"
+  # Empty trusts none: the login rate limiter keys on the real TCP peer, which
+  # is the safe default. CubeOps is a ClusterIP service, so anything that can
+  # reach it -- including tenant sandbox pods -- would be trusted if listed
+  # here; do NOT use a broad private range. Set this to the specific ingress or
+  # webui pod CIDR, and prefer a NetworkPolicy that stops tenant pods reaching
+  # the ops service at all. While it is empty, all clients behind a proxy share
+  # one bucket, so five failures from anyone throttles logins for that proxy.
+  trustedProxies: []
   # Empty uses cubeProxy.domain for CUBE_API_SANDBOX_DOMAIN.
   sandboxDomain: ""
   service:

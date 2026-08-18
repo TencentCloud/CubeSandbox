@@ -13,8 +13,11 @@ jwt_secret: ""             # leave empty to auto-generate on first start
 
 # Reverse proxies allowed to assert the client IP via X-Forwarded-For.
 # Empty (the default) trusts none: the login rate limiter keys on the real TCP
-# peer, which is correct for direct exposure. Behind nginx/an LB you MUST list
-# the proxy here as an IP or CIDR, otherwise every client shares one bucket.
+# peer, which is correct for direct exposure. Behind nginx/an LB, list the
+# proxy here as an IP or CIDR, otherwise every client shares one bucket.
+# Keep this as narrow as possible -- any peer whose source address matches is
+# trusted to assert any client IP, so a broad range such as 10.0.0.0/8 hands
+# that power to every workload on the network. 0.0.0.0/0 and ::/0 are rejected.
 # Env override: CUBE_OPS_TRUSTED_PROXIES (comma-separated).
 trusted_proxies: []
 

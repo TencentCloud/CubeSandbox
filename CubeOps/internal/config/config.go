@@ -337,13 +337,18 @@ func overrideFromEnv(cfg *Config) {
 
 func validateTrustedProxies(entries []string) error {
 	for _, e := range entries {
-		if _, _, err := net.ParseCIDR(e); err == nil {
+		if _, ipNet, err := net.ParseCIDR(e); err == nil {
+			ones, bits := ipNet.Mask.Size()
+			if ones == 0 && bits != 0 {
+				return fmt.Errorf("trusted_proxies entry %q trusts every source address, which disables client-IP validation entirely; list the proxy addresses or CIDR blocks instead (trusted_proxies in YAML %s, or CUBE_OPS_TRUSTED_PROXIES)",
+					e, yamlConfigPath())
+			}
 			continue
 		}
 		if net.ParseIP(e) != nil {
 			continue
 		}
-		return fmt.Errorf("trusted_proxies entry %q is not an IP address or CIDR block (set trusted_proxies in YAML %s or CUBE_OPS_TRUSTED_PROXIES)",
+		return fmt.Errorf("trusted_proxies entry %q is not an IP address or CIDR block; use forms like 10.1.2.3, 10.1.0.0/16 or ::1 (trusted_proxies in YAML %s, or CUBE_OPS_TRUSTED_PROXIES). Wildcards such as \"*\", 0.0.0.0/0 and ::/0 are not accepted",
 			e, yamlConfigPath())
 	}
 	return nil
