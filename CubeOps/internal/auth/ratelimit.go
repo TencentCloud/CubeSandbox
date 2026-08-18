@@ -26,6 +26,8 @@ type loginLimiter struct {
 	window   time.Duration
 }
 
+const sweepThreshold = 4096
+
 var defaultLoginLimiter = &loginLimiter{
 	failures: make(map[string][]time.Time),
 	limit:    5,               // 5 failed attempts
@@ -41,6 +43,9 @@ func (l *loginLimiter) recordFailure(ip string) {
 	defer l.mu.Unlock()
 	now := time.Now()
 	cutoff := now.Add(-l.window)
+	if len(l.failures) >= sweepThreshold {
+		l.sweepLocked(cutoff)
+	}
 	fails := l.failures[ip]
 	// Drop expired entries.
 	kept := fails[:0]
@@ -54,6 +59,22 @@ func (l *loginLimiter) recordFailure(ip string) {
 		delete(l.failures, ip)
 	} else {
 		l.failures[ip] = kept
+	}
+}
+
+func (l *loginLimiter) sweepLocked(cutoff time.Time) {
+	for ip, fails := range l.failures {
+		kept := fails[:0]
+		for _, t := range fails {
+			if t.After(cutoff) {
+				kept = append(kept, t)
+			}
+		}
+		if len(kept) == 0 {
+			delete(l.failures, ip)
+		} else {
+			l.failures[ip] = kept
+		}
 	}
 }
 
@@ -82,18 +103,7 @@ func (l *loginLimiter) isBlocked(ip string) bool {
 	return count >= l.limit
 }
 
-// clientIP extracts the client IP from the request, honoring
-// X-Forwarded-For (set by nginx). Falls back to RemoteAddr.
 func clientIP(c *gin.Context) string {
-	if xff := c.GetHeader("X-Forwarded-For"); xff != "" {
-		// Use the first (leftmost) address — that is the original client.
-		for i := 0; i < len(xff); i++ {
-			if xff[i] == ',' {
-				return xff[:i]
-			}
-		}
-		return xff
-	}
 	return c.ClientIP()
 }
 

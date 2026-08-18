@@ -81,6 +81,10 @@ func (s *Server) buildRouter() *gin.Engine {
 	// to stdout and bypasses any logger the operator has configured.
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
+	if err := r.SetTrustedProxies(s.cfg.TrustedProxies); err != nil {
+		logging.G(context.Background()).Errorf("invalid trusted_proxies, falling back to trusting none: err=%q", err.Error())
+		_ = r.SetTrustedProxies(nil)
+	}
 	r.Use(requestLogger())
 	r.Use(cubeopsRecovery())
 

@@ -34,12 +34,13 @@ import (
 // Config holds all CubeOps runtime configuration.
 type Config struct {
 	// Server
-	Bind        string `yaml:"bind"`
-	LogLevel    string `yaml:"log_level"`
-	LogDir      string `yaml:"log_dir"`
-	LogFileNum  int    `yaml:"log_file_num"`
-	LogFileSize int    `yaml:"log_file_size"`
-	JWTSecret   string `yaml:"jwt_secret"`
+	Bind           string   `yaml:"bind"`
+	LogLevel       string   `yaml:"log_level"`
+	LogDir         string   `yaml:"log_dir"`
+	LogFileNum     int      `yaml:"log_file_num"`
+	LogFileSize    int      `yaml:"log_file_size"`
+	JWTSecret      string   `yaml:"jwt_secret"`
+	TrustedProxies []string `yaml:"trusted_proxies"`
 
 	// Database — either a single URL or the individual fields below.
 	DatabaseURL   string `yaml:"database_url"`
@@ -281,6 +282,9 @@ func overrideFromEnv(cfg *Config) {
 	if v := os.Getenv("JWT_SECRET"); v != "" {
 		cfg.JWTSecret = v
 	}
+	if v := os.Getenv("CUBE_OPS_TRUSTED_PROXIES"); v != "" {
+		cfg.TrustedProxies = splitAndTrim(v)
+	}
 	if v := os.Getenv("DATABASE_URL"); v != "" {
 		cfg.DatabaseURL = v
 	}
@@ -324,4 +328,15 @@ func overrideFromEnv(cfg *Config) {
 			cfg.RefreshTTL = d
 		}
 	}
+}
+
+func splitAndTrim(v string) []string {
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
