@@ -5,6 +5,7 @@ package service_test
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -133,7 +134,16 @@ func (f *fakeWebhookStore) ListWebhookDeliveries(_ context.Context, subscription
 		}
 		out = append(out, d)
 	}
-	return out, nil
+	if limit <= 0 {
+		limit = len(out)
+	}
+	if offset >= len(out) {
+		return nil, nil
+	}
+	if offset+limit > len(out) {
+		limit = len(out) - offset
+	}
+	return out[offset : offset+limit], nil
 }
 
 func mustCreate(t *testing.T, svc *service.WebhookService, name, endpoint string, events []string) *store.WebhookSubscription {
@@ -321,6 +331,155 @@ func TestWebhookListDeliveries_Filters(t *testing.T) {
 	}
 }
 
+func TestWebhookUpdate_Fields(t *testing.T) {
+	svc := service.NewWebhookService(newFakeWebhookStore())
+	sub := mustCreate(t, svc, "sys", "https://example.com/hook", []string{"sandbox.created"})
+
+	name, url := "sys2", "https://example.com/v2"
+	enabled := false
+	updated, svcErr := svc.Update(context.Background(), sub.ID, &service.WebhookUpdateRequest{
+		Name: &name, URL: &url, Enabled: &enabled, Events: []string{"sandbox.deleted"},
+	})
+	if svcErr != nil {
+		t.Fatalf("Update: %v", svcErr)
+	}
+	if updated.Name != "sys2" || updated.URL != "https://example.com/v2" || updated.Enabled {
+		t.Fatalf("update did not persist fields: %+v", updated)
+	}
+	if len(updated.Events) != 1 || updated.Events[0].EventType != "sandbox.deleted" {
+		t.Fatalf("events not replaced: %+v", updated.Events)
+	}
+}
+
+func TestWebhookList_AfterSoftDelete(t *testing.T) {
+	svc := service.NewWebhookService(newFakeWebhookStore())
+	kept := mustCreate(t, svc, "keep", "https://example.com/hook", []string{"sandbox.created"})
+	gone := mustCreate(t, svc, "gone", "https://example.com/hook", []string{"sandbox.created"})
+	if svcErr := svc.Delete(context.Background(), gone.ID); svcErr != nil {
+		t.Fatalf("Delete: %v", svcErr)
+	}
+	list, svcErr := svc.List(context.Background(), 0, 0)
+	if svcErr != nil {
+		t.Fatalf("List: %v", svcErr)
+	}
+	for _, s := range list {
+		if s.ID == gone.ID {
+			t.Fatal("soft-deleted subscription must not appear in List")
+		}
+		if s.ID == kept.ID {
+			return
+		}
+	}
+	t.Fatal("kept subscription missing from List")
+}
+
+func TestWebhookCreate_WithEnabledFalse(t *testing.T) {
+	svc := service.NewWebhookService(newFakeWebhookStore())
+	f := false
+	sub, svcErr := svc.Create(context.Background(), &service.WebhookCreateRequest{
+		Name: "off", URL: "https://example.com/hook",
+		Events: []string{"sandbox.created"}, Enabled: &f,
+	})
+	if svcErr != nil {
+		t.Fatalf("Create: %v", svcErr)
+	}
+	if sub.Enabled {
+		t.Fatal("explicit enabled=false must be honoured")
+	}
+}
+
+func TestWebhookUpdate_InvalidInput(t *testing.T) {
+	svc := service.NewWebhookService(newFakeWebhookStore())
+	sub := mustCreate(t, svc, "sys", "https://example.com/hook", []string{"sandbox.created"})
+
+	cases := []struct {
+		name string
+		req  *service.WebhookUpdateRequest
+	}{
+		{"empty name", &service.WebhookUpdateRequest{Name: strPtr("")}},
+		{"bad scheme", &service.WebhookUpdateRequest{URL: strPtr("ftp://x/hook")}},
+		{"userinfo", &service.WebhookUpdateRequest{URL: strPtr("https://u:p@x/hook")}},
+		{"unknown event", &service.WebhookUpdateRequest{Events: []string{"sandbox.nope"}}},
+		{"empty events", &service.WebhookUpdateRequest{Events: []string{}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, svcErr := svc.Update(context.Background(), sub.ID, tc.req)
+			if svcErr == nil || svcErr.Status != 400 {
+				t.Fatalf("want 400, got %+v", svcErr)
+			}
+		})
+	}
+}
+
+func TestWebhookListDeliveries_StatusAndPrefixCombo(t *testing.T) {
+	fake := newFakeWebhookStore()
+	svc := service.NewWebhookService(fake)
+	sub := mustCreate(t, svc, "combo", "https://example.com/hook", []string{"sandbox.created"})
+	if _, svcErr := svc.CreateTestDelivery(context.Background(), sub.ID); svcErr != nil {
+		t.Fatalf("test delivery: %v", svcErr)
+	}
+	// Inject a failed row directly (mirrors real ledger state).
+	fake.deliveries = append(fake.deliveries, store.WebhookDelivery{
+		EventID: "test:failed-1", SubscriptionID: sub.ID, Status: "failed",
+	})
+
+	rows, svcErr := svc.ListDeliveries(context.Background(), sub.ID, "failed", "test:", 0, 0)
+	if svcErr != nil {
+		t.Fatalf("ListDeliveries: %v", svcErr)
+	}
+	if len(rows) != 1 || rows[0].EventID != "test:failed-1" {
+		t.Fatalf("combo filter mismatch: %+v", rows)
+	}
+	if rows, _ := svc.ListDeliveries(context.Background(), sub.ID, "failed", "real:", 0, 0); len(rows) != 0 {
+		t.Fatalf("no-match combo should be empty, got %d", len(rows))
+	}
+}
+
+func TestWebhookTestDelivery_PayloadFormat(t *testing.T) {
+	fake := newFakeWebhookStore()
+	svc := service.NewWebhookService(fake)
+	sub := mustCreate(t, svc, "payload", "https://example.com/hook", []string{"sandbox.created"})
+	d, svcErr := svc.CreateTestDelivery(context.Background(), sub.ID)
+	if svcErr != nil {
+		t.Fatalf("test delivery: %v", svcErr)
+	}
+	var pp map[string]interface{}
+	if err := json.Unmarshal([]byte(d.Payload), &pp); err != nil {
+		t.Fatalf("payload json: %v", err)
+	}
+	if pp["schema_version"] != "1" || pp["event"] != "sandbox.created" {
+		t.Fatalf("payload missing schema/event: %v", pp)
+	}
+	if _, ok := pp["timestamp"].(float64); !ok {
+		t.Fatalf("payload timestamp must be numeric: %v", pp)
+	}
+	if !strings.HasPrefix(d.EventID, "test:") {
+		t.Fatalf("event_id must be test: prefixed, got %q", d.EventID)
+	}
+}
+
+func TestWebhookTestDelivery_RequiresSubscribedEvent(t *testing.T) {
+	svc := service.NewWebhookService(newFakeWebhookStore())
+	sub := mustCreate(t, svc, "only-deleted", "https://example.com/hook", []string{"sandbox.deleted"})
+	if _, svcErr := svc.CreateTestDelivery(context.Background(), sub.ID); svcErr == nil || svcErr.Status != 400 {
+		t.Fatalf("test delivery on non-subscribed event: want 400, got %+v", svcErr)
+	}
+}
+
+func TestWebhookCreate_NoSecret(t *testing.T) {
+	svc := service.NewWebhookService(newFakeWebhookStore())
+	sub, svcErr := svc.Create(context.Background(), &service.WebhookCreateRequest{
+		Name: "nosecret", URL: "https://example.com/hook", Events: []string{"sandbox.created"},
+	})
+	if svcErr != nil {
+		t.Fatalf("Create: %v", svcErr)
+	}
+	if sub.SecretCiphertext != nil {
+		t.Fatal("omitted secret must leave ciphertext nil")
+	}
+}
+
 func TestWebhookStoreErrorMapping(t *testing.T) {
 	svc := service.NewWebhookService(newFakeWebhookStore())
 	if _, svcErr := svc.Get(context.Background(), 404); svcErr == nil || svcErr.Status != 404 {
@@ -330,3 +489,5 @@ func TestWebhookStoreErrorMapping(t *testing.T) {
 		t.Fatalf("Delete unknown: want 404, got %+v", svcErr)
 	}
 }
+
+func strPtr(s string) *string { return &s }

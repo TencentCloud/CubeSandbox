@@ -5,6 +5,8 @@ package store_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -111,6 +113,17 @@ func TestStore_WebhookSubscriptionCRUD(t *testing.T) {
 	if !strings.Contains(got.Name, "#del#") {
 		t.Fatalf("deleted name should carry #del# marker, got %q", got.Name)
 	}
+	// Deleted rows must still load their event allowlist.
+	if len(got.Events) != 1 || got.Events[0].EventType != "sandbox.paused" {
+		t.Fatalf("deleted subscription events not preserved: %+v", got.Events)
+	}
+	// Update and re-delete on a soft-deleted row must be NotFound.
+	if err := s.UpdateWebhookSubscription(ctx, updated); !errors.Is(err, store.ErrWebhookSubscriptionNotFound) {
+		t.Fatalf("update after delete: want ErrWebhookSubscriptionNotFound, got %v", err)
+	}
+	if err := s.SoftDeleteWebhookSubscription(ctx, sub.ID); !errors.Is(err, store.ErrWebhookSubscriptionNotFound) {
+		t.Fatalf("re-delete: want ErrWebhookSubscriptionNotFound, got %v", err)
+	}
 	list, err = s.ListWebhookSubscriptions(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("ListWebhookSubscriptions after delete: %v", err)
@@ -119,6 +132,85 @@ func TestStore_WebhookSubscriptionCRUD(t *testing.T) {
 		if x.ID == sub.ID {
 			t.Fatal("soft-deleted subscription must not appear in list")
 		}
+	}
+}
+
+// TestStore_WebhookSubscriptionPagination covers limit/offset semantics
+// including clamping and out-of-range offsets.
+func TestStore_WebhookSubscriptionPagination(t *testing.T) {
+	env := newTestStore(t)
+	defer env.teardown()
+	s := env.store
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		sub := newWebhookSub(fmt.Sprintf("page-%d", i), "https://example.com/hook", "sandbox.created")
+		if err := s.CreateWebhookSubscription(ctx, sub); err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+	}
+	page, err := s.ListWebhookSubscriptions(ctx, 1, 0)
+	if err != nil || len(page) != 1 {
+		t.Fatalf("limit=1: len=%d err=%v", len(page), err)
+	}
+	// Offset beyond the result set → empty, not an error.
+	beyond, err := s.ListWebhookSubscriptions(ctx, 10, 100)
+	if err != nil || len(beyond) != 0 {
+		t.Fatalf("offset beyond: len=%d err=%v, want 0", len(beyond), err)
+	}
+	// limit=0 falls back to the default (and does not error with 3 rows).
+	def, err := s.ListWebhookSubscriptions(ctx, 0, 0)
+	if err != nil || len(def) != 3 {
+		t.Fatalf("default limit: len=%d err=%v, want 3", len(def), err)
+	}
+}
+
+// TestStore_WebhookSubscriptionSecretUpdate verifies the store persists the
+// secret_ciphertext value as given (nil clears, non-nil replaces).
+func TestStore_WebhookSubscriptionSecretUpdate(t *testing.T) {
+	env := newTestStore(t)
+	defer env.teardown()
+	s := env.store
+	ctx := context.Background()
+
+	sub := newWebhookSub("secret-upd", "https://example.com/hook", "sandbox.created")
+	enc := "enc:v1:AAAA"
+	sub.SecretCiphertext = &enc
+	if err := s.CreateWebhookSubscription(ctx, sub); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	got, err := s.GetWebhookSubscription(ctx, sub.ID)
+	if err != nil || got.SecretCiphertext == nil || *got.SecretCiphertext != enc {
+		t.Fatalf("secret not persisted: %+v err=%v", got.SecretCiphertext, err)
+	}
+
+	// nil ciphertext clears the secret.
+	clear := &store.WebhookSubscription{
+		ID: sub.ID, Name: sub.Name, URL: sub.URL, Enabled: true,
+		SecretCiphertext: nil,
+		Events:           []store.WebhookSubscriptionEvent{{EventType: "sandbox.created"}},
+	}
+	if err := s.UpdateWebhookSubscription(ctx, clear); err != nil {
+		t.Fatalf("update(clear): %v", err)
+	}
+	got, _ = s.GetWebhookSubscription(ctx, sub.ID)
+	if got.SecretCiphertext != nil {
+		t.Fatal("nil ciphertext must clear the secret")
+	}
+
+	// Non-nil ciphertext replaces it.
+	enc2 := "enc:v1:BBBB"
+	replace := &store.WebhookSubscription{
+		ID: sub.ID, Name: sub.Name, URL: sub.URL, Enabled: true,
+		SecretCiphertext: &enc2,
+		Events:           []store.WebhookSubscriptionEvent{{EventType: "sandbox.created"}},
+	}
+	if err := s.UpdateWebhookSubscription(ctx, replace); err != nil {
+		t.Fatalf("update(replace): %v", err)
+	}
+	got, _ = s.GetWebhookSubscription(ctx, sub.ID)
+	if got.SecretCiphertext == nil || *got.SecretCiphertext != enc2 {
+		t.Fatalf("secret not replaced: %v", got.SecretCiphertext)
 	}
 }
 
@@ -166,5 +258,25 @@ func TestStore_WebhookDeliveries(t *testing.T) {
 	}
 	if len(pending) != 1 {
 		t.Fatalf("want 1 pending row with limit=1, got %d", len(pending))
+	}
+
+	// Combined status + prefix filter, and no-match → empty.
+	combo, err := s.ListWebhookDeliveries(ctx, sub.ID, "pending", "test:", 0, 0)
+	if err != nil || len(combo) != 2 {
+		t.Fatalf("combo filter: len=%d err=%v, want 2", len(combo), err)
+	}
+	none, err := s.ListWebhookDeliveries(ctx, sub.ID, "succeeded", "test:", 0, 0)
+	if err != nil || len(none) != 0 {
+		t.Fatalf("no-match combo: len=%d err=%v, want 0", len(none), err)
+	}
+
+	// Offset paging: page 2 of limit 2 → 1 row.
+	page2, err := s.ListWebhookDeliveries(ctx, sub.ID, "", "", 2, 2)
+	if err != nil || len(page2) != 1 {
+		t.Fatalf("offset page: len=%d err=%v, want 1", len(page2), err)
+	}
+	beyond, err := s.ListWebhookDeliveries(ctx, sub.ID, "", "", 10, 100)
+	if err != nil || len(beyond) != 0 {
+		t.Fatalf("offset beyond: len=%d err=%v, want 0", len(beyond), err)
 	}
 }

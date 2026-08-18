@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -68,14 +69,25 @@ func (f *fakeStore) GetWebhookSubscription(_ context.Context, id int64) (*store.
 	return &cp, nil
 }
 
-func (f *fakeStore) ListWebhookSubscriptions(_ context.Context, _, _ int) ([]store.WebhookSubscription, error) {
+func (f *fakeStore) ListWebhookSubscriptions(_ context.Context, limit, offset int) ([]store.WebhookSubscription, error) {
 	var out []store.WebhookSubscription
 	for _, s := range f.subs {
 		if s.DeletedAt == nil {
 			out = append(out, *s)
 		}
 	}
-	return out, nil
+	// Mirror the real store: newest first (id DESC), then page.
+	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	if limit <= 0 {
+		limit = len(out)
+	}
+	if offset >= len(out) {
+		return nil, nil
+	}
+	if offset+limit > len(out) {
+		limit = len(out) - offset
+	}
+	return out[offset : offset+limit], nil
 }
 
 func (f *fakeStore) UpdateWebhookSubscription(_ context.Context, sub *store.WebhookSubscription) error {
@@ -86,6 +98,7 @@ func (f *fakeStore) UpdateWebhookSubscription(_ context.Context, sub *store.Webh
 	existing.Name, existing.URL, existing.Enabled = sub.Name, sub.URL, sub.Enabled
 	existing.SecretCiphertext = sub.SecretCiphertext
 	existing.Events = append([]store.WebhookSubscriptionEvent(nil), sub.Events...)
+	existing.UpdatedAt = time.Now()
 	return nil
 }
 
@@ -185,6 +198,25 @@ func TestWebhookCRUD_Endpoints(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("update status = %d body=%s", w.Code, w.Body.String())
 	}
+	// Read back: the update must actually persist.
+	w = doJSON(t, r, "GET", "/api/v1/webhooks/"+itoa(id), "")
+	var after store.WebhookSubscription
+	if err := json.Unmarshal(w.Body.Bytes(), &after); err != nil {
+		t.Fatalf("unmarshal after update: %v", err)
+	}
+	if after.Name != "sys2" || after.Enabled {
+		t.Fatalf("update did not persist: %+v", after)
+	}
+
+	// Update with a new secret; it must never be returned by GET.
+	w = doJSON(t, r, "PUT", "/api/v1/webhooks/"+itoa(id), `{"secret":"new-secret"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("secret update status = %d", w.Code)
+	}
+	w = doJSON(t, r, "GET", "/api/v1/webhooks/"+itoa(id), "")
+	if strings.Contains(w.Body.String(), `"secret"`) {
+		t.Fatalf("secret leaked after update: %s", w.Body.String())
+	}
 
 	// Delete → 204; then GET still 200 with deleted_at; PUT → 404.
 	w = doJSON(t, r, "DELETE", "/api/v1/webhooks/"+itoa(id), "")
@@ -199,6 +231,11 @@ func TestWebhookCRUD_Endpoints(t *testing.T) {
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("put deleted: status=%d, want 404", w.Code)
 	}
+	// The soft-deleted subscription must disappear from the list.
+	w = doJSON(t, r, "GET", "/api/v1/webhooks", "")
+	if strings.Contains(w.Body.String(), `"sys2"`) {
+		t.Fatalf("soft-deleted subscription still listed: %s", w.Body.String())
+	}
 
 	// Unknown id → 404.
 	w = doJSON(t, r, "GET", "/api/v1/webhooks/999999", "")
@@ -211,6 +248,31 @@ func TestWebhookCRUD_Endpoints(t *testing.T) {
 		`{"name":"","url":"ftp://x","events":["sandbox.nope"]}`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("invalid create: status=%d, want 400", w.Code)
+	}
+}
+
+func TestWebhook_DeleteUnknownReturns404(t *testing.T) {
+	r := newWebhookRouter(true, newFakeStore())
+	w := doJSON(t, r, "DELETE", "/api/v1/webhooks/999999", "")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("delete unknown: status=%d, want 404", w.Code)
+	}
+}
+
+func TestWebhook_TestUnknownReturns404(t *testing.T) {
+	r := newWebhookRouter(true, newFakeStore())
+	w := doJSON(t, r, "POST", "/api/v1/webhooks/999999/test", "")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("test unknown: status=%d, want 404", w.Code)
+	}
+}
+
+func TestWebhook_UpdateInvalidReturns400(t *testing.T) {
+	r := newWebhookRouter(true, newFakeStore())
+	id := createViaAPI(t, r)
+	w := doJSON(t, r, "PUT", "/api/v1/webhooks/"+itoa(id), `{"url":"ftp://x/hook"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid update: status=%d, want 400", w.Code)
 	}
 }
 
