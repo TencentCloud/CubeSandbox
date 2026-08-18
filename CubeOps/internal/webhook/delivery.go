@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -39,6 +40,12 @@ type DeliveryForSend struct {
 // ErrSecretDecrypt marks a delivery whose subscription secret could not be
 // decrypted; the supervisor classifies it as a permanent failure.
 var ErrSecretDecrypt = errors.New("webhook secret decrypt failure")
+
+// ErrDeliveryGone marks a delivery whose row vanished or whose subscription
+// was soft-deleted; there is no endpoint left to deliver to, so the
+// supervisor records a permanent failure instead of retrying against an
+// empty URL.
+var ErrDeliveryGone = errors.New("webhook delivery target gone")
 
 // DeliveryStore owns the delivery-ledger SQL: idempotent materialization,
 // claim candidates + atomic claim, conditional completion, lease release,
@@ -79,12 +86,12 @@ func (d *DeliveryStore) MaterializeDeliveries(ctx context.Context, eventID strin
 func (d *DeliveryStore) materializeChunk(ctx context.Context, eventID string, payload []byte, ids []int64) (int, error) {
 	var inserted int
 	err := d.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		now := time.Now()
 		for _, sid := range ids {
-			// next_retry_at is explicitly written as now() — the claim query
-			// filters next_retry_at <= now() and NULL rows would never be
-			// picked up (defensive: the column is NOT NULL).
-			res := tx.Exec(insertDeliverySQL(), eventID, sid, string(payload), StatusPending, now)
+			// next_retry_at is written as the database's now() (not a Go
+			// time.Time): every claim/retry comparison happens against
+			// DB-side now(), so mixing a client-side clock would skew the
+			// whole ledger by the client/server timezone offset.
+			res := tx.Exec(insertDeliverySQL(), eventID, sid, string(payload), StatusPending)
 			if res.Error != nil {
 				return res.Error
 			}
@@ -99,12 +106,12 @@ func insertDeliverySQL() string {
 	if store.IsPostgres() {
 		return `INSERT INTO t_webhook_delivery
 			(event_id, subscription_id, payload, status, attempts, next_retry_at)
-			VALUES (?, ?, ?, ?, 0, ?)
+			VALUES (?, ?, ?, ?, 0, now())
 			ON CONFLICT (event_id, subscription_id) DO NOTHING`
 	}
 	return `INSERT IGNORE INTO t_webhook_delivery
 		(event_id, subscription_id, payload, status, attempts, next_retry_at)
-		VALUES (?, ?, ?, ?, 0, ?)`
+		VALUES (?, ?, ?, ?, 0, now())`
 }
 
 // ClaimQuery carries the filters for the two candidate scans. The delivery
@@ -121,85 +128,6 @@ type ClaimQuery struct {
 	AfterRetryID    int64
 	AfterLeaseUntil time.Time
 	AfterLeaseID    int64
-}
-
-// ClaimCandidates returns up to Limit candidate ids from the two claim
-// queries: pending/failed due for retry, and in_progress rows whose lease
-// has expired. Over-limit subscriptions and keep-pending window-expired
-// failed rows are excluded.
-func (d *DeliveryStore) ClaimCandidates(ctx context.Context, q ClaimQuery) ([]int64, error) {
-	if q.Limit <= 0 {
-		q.Limit = 32
-	}
-	ids := make([]int64, 0, q.Limit*2)
-
-	// ① 待发/待重试 — (status, next_retry_at) index.
-	args := []interface{}{}
-	where := `status IN ('pending','failed') AND next_retry_at <= now()`
-	if q.KeepPendingWindow > 0 {
-		where += ` AND NOT (status='failed' AND first_failed_at IS NOT NULL AND first_failed_at < now() - ` + intervalExpr(q.KeepPendingWindow) + `)`
-	}
-	if len(q.ExcludeSubscriptions) > 0 {
-		where += ` AND subscription_id NOT IN (` + placeholders(len(q.ExcludeSubscriptions)) + `)`
-		for _, s := range q.ExcludeSubscriptions {
-			args = append(args, s)
-		}
-	}
-	if !q.AfterRetryAt.IsZero() {
-		where += ` AND (next_retry_at, id) > (?, ?)`
-		args = append(args, q.AfterRetryAt, q.AfterRetryID)
-	}
-	args = append(args, q.Limit)
-	rows, err := d.db.WithContext(ctx).Raw(
-		`SELECT id FROM t_webhook_delivery WHERE `+where+` ORDER BY next_retry_at, id LIMIT ?`, args...).Rows()
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	// ② lease 过期的在途任务 — (status, lease_until) index.
-	args2 := []interface{}{}
-	where2 := `status = 'in_progress' AND lease_until < now()`
-	if len(q.ExcludeSubscriptions) > 0 {
-		where2 += ` AND subscription_id NOT IN (` + placeholders(len(q.ExcludeSubscriptions)) + `)`
-		for _, s := range q.ExcludeSubscriptions {
-			args2 = append(args2, s)
-		}
-	}
-	if !q.AfterLeaseUntil.IsZero() {
-		where2 += ` AND (lease_until, id) > (?, ?)`
-		args2 = append(args2, q.AfterLeaseUntil, q.AfterLeaseID)
-	}
-	args2 = append(args2, q.Limit)
-	rows2, err := d.db.WithContext(ctx).Raw(
-		`SELECT id FROM t_webhook_delivery WHERE `+where2+` ORDER BY lease_until, id LIMIT ?`, args2...).Rows()
-	if err != nil {
-		return nil, err
-	}
-	for rows2.Next() {
-		var id int64
-		if err := rows2.Scan(&id); err != nil {
-			rows2.Close()
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	rows2.Close()
-	if err := rows2.Err(); err != nil {
-		return nil, err
-	}
-	return ids, nil
 }
 
 // ClaimCandidatesDue runs claim query ① (pending/failed due for retry) only,
@@ -305,13 +233,15 @@ func (d *DeliveryStore) SubscriptionForDelivery(ctx context.Context, id int64) (
 
 // Claim atomically locks one delivery row. Returns true when this worker won
 // the lease. The keep-pending guard is applied again as defence-in-depth
-// (window=0 omits it).
+// (window=0 omits it). lease_until is computed from the database clock so it
+// stays consistent with the expiry comparisons (client/server clock skew is
+// otherwise added to every lease).
 func (d *DeliveryStore) Claim(ctx context.Context, id int64, owner string, effectiveLease, keepPendingWindow time.Duration) (bool, error) {
 	sql := `UPDATE t_webhook_delivery
-		SET status='in_progress', lease_owner=?, lease_until=?
+		SET status='in_progress', lease_owner=?, lease_until=` + addSecondsExpr() + `, updated_at=now()
 		WHERE id=? AND (
 			(status IN ('pending','failed') AND next_retry_at <= now()`
-	args := []interface{}{owner, time.Now().Add(effectiveLease), id}
+	args := []interface{}{owner, ceilSeconds(effectiveLease), id}
 	if keepPendingWindow > 0 {
 		sql += ` AND NOT (status='failed' AND first_failed_at IS NOT NULL AND first_failed_at < now() - ` + intervalExpr(keepPendingWindow) + `)`
 	}
@@ -329,7 +259,10 @@ func (d *DeliveryStore) Claim(ctx context.Context, id int64, owner string, effec
 
 // LoadDeliveryForSend loads the delivery row plus the subscription URL and
 // (decrypted) secret for a send. Decrypt failures are surfaced as errors and
-// counted; the caller classifies them as permanent.
+// counted; the caller classifies them as permanent. A vanished delivery row
+// or a soft-deleted subscription yields ErrDeliveryGone so the caller can
+// stop retrying instead of sending to an empty URL forever (gorm's Scan does
+// NOT return ErrRecordNotFound on zero rows, so the hit must be checked).
 func (d *DeliveryStore) LoadDeliveryForSend(ctx context.Context, id int64) (*DeliveryForSend, error) {
 	var row struct {
 		ID             int64
@@ -343,6 +276,9 @@ func (d *DeliveryStore) LoadDeliveryForSend(ctx context.Context, id int64) (*Del
 	).Scan(&row).Error; err != nil {
 		return nil, err
 	}
+	if row.ID == 0 {
+		return nil, fmt.Errorf("%w: delivery %d not found", ErrDeliveryGone, id)
+	}
 	var sub struct {
 		URL              string
 		SecretCiphertext *string
@@ -351,6 +287,9 @@ func (d *DeliveryStore) LoadDeliveryForSend(ctx context.Context, id int64) (*Del
 		`SELECT url, secret_ciphertext FROM t_webhook_subscription WHERE id = ? AND deleted_at IS NULL`, row.SubscriptionID,
 	).Scan(&sub).Error; err != nil {
 		return nil, err
+	}
+	if sub.URL == "" && sub.SecretCiphertext == nil {
+		return nil, fmt.Errorf("%w: subscription %d deleted", ErrDeliveryGone, row.SubscriptionID)
 	}
 	secret := ""
 	if sub.SecretCiphertext != nil {
@@ -377,8 +316,11 @@ type Completion struct {
 	Result      string // ResultSucceeded | ResultRetryable | ResultPermanent
 	HTTPStatus  *int
 	LastError   *string
-	NextRetryAt time.Time // retryable only
-	FirstFailed bool      // retryable only: set first_failed_at (COALESCE)
+	// NextRetryDelay is the retryable-only backoff delay added to the
+	// database's now(); passing a delay (instead of an absolute Go timestamp)
+	// keeps the ledger on a single clock.
+	NextRetryDelay time.Duration
+	FirstFailed    bool // retryable only: set first_failed_at (COALESCE)
 }
 
 // Complete applies the conditional completion update. Returns false when the
@@ -391,27 +333,27 @@ func (d *DeliveryStore) Complete(ctx context.Context, id int64, owner string, c 
 	case ResultSucceeded:
 		sql = `UPDATE t_webhook_delivery
 			SET status='succeeded', http_status=?, last_error=NULL, first_failed_at=NULL,
-			    lease_owner=NULL, lease_until=NULL
+			    lease_owner=NULL, lease_until=NULL, updated_at=now()
 			WHERE id=? AND lease_owner=? AND status='in_progress'`
 		args = append(args, c.HTTPStatus, id, owner)
 	case ResultRetryable:
 		sql = `UPDATE t_webhook_delivery
 			SET status='failed', attempts=attempts+1,
 			    first_failed_at=COALESCE(first_failed_at, now()),
-			    next_retry_at=?, http_status=?, last_error=?,
-			    lease_owner=NULL, lease_until=NULL
+			    next_retry_at=` + addSecondsExpr() + `, http_status=?, last_error=?,
+			    lease_owner=NULL, lease_until=NULL, updated_at=now()
 			WHERE id=? AND lease_owner=? AND status='in_progress'`
-		args = append(args, c.NextRetryAt, c.HTTPStatus, c.LastError, id, owner)
+		args = append(args, ceilSeconds(c.NextRetryDelay), c.HTTPStatus, c.LastError, id, owner)
 	case ResultPermanent:
 		sql = `UPDATE t_webhook_delivery
 			SET status='permanent_failed', http_status=?, last_error=?,
-			    lease_owner=NULL, lease_until=NULL
+			    lease_owner=NULL, lease_until=NULL, updated_at=now()
 			WHERE id=? AND lease_owner=? AND status='in_progress'`
 		args = append(args, c.HTTPStatus, c.LastError, id, owner)
 	case ResultDead:
 		sql = `UPDATE t_webhook_delivery
 			SET status='dead', http_status=?, last_error=?,
-			    lease_owner=NULL, lease_until=NULL
+			    lease_owner=NULL, lease_until=NULL, updated_at=now()
 			WHERE id=? AND lease_owner=? AND status='in_progress'`
 		args = append(args, c.HTTPStatus, c.LastError, id, owner)
 	default:
@@ -445,7 +387,7 @@ func (d *DeliveryStore) IsolateMaterializationFailure(ctx context.Context, event
 // touching attempts (graceful shutdown / abnormal exit path).
 func (d *DeliveryStore) ReleaseLease(ctx context.Context, id int64, owner string) error {
 	return d.db.WithContext(ctx).Exec(
-		`UPDATE t_webhook_delivery SET status='pending', lease_owner=NULL, lease_until=NULL
+		`UPDATE t_webhook_delivery SET status='pending', lease_owner=NULL, lease_until=NULL, updated_at=now()
 		 WHERE id=? AND lease_owner=? AND status='in_progress'`,
 		id, owner,
 	).Error
@@ -564,15 +506,14 @@ func (d *DeliveryStore) RecordMaterializationFailure(ctx context.Context, eventI
 }
 
 // MaterializationFailureAttempts reads the persisted poison-entry failure
-// count (0 when absent). Used by the consumer's self-heal check.
+// count (0 when absent). Used by the consumer's self-heal check. gorm's Scan
+// leaves the destination at its zero value on zero rows, so "absent" needs
+// no special casing.
 func (d *DeliveryStore) MaterializationFailureAttempts(ctx context.Context, eventID string) (int, error) {
 	var attempts int
 	err := d.db.WithContext(ctx).Raw(
 		`SELECT attempts FROM t_webhook_materialization_failure WHERE event_id = ?`, eventID,
 	).Scan(&attempts).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return 0, nil
-	}
 	return attempts, err
 }
 
@@ -621,6 +562,25 @@ func intervalExpr(d time.Duration) string {
 		return fmt.Sprintf("interval '%d second'", seconds)
 	}
 	return fmt.Sprintf("interval %d second", seconds)
+}
+
+// addSecondsExpr renders "now() + ? seconds" for the active dialect. The
+// seconds arrive as a bind parameter (never inlined) so the SQL text stays
+// stable for prepared-statement / trace tooling.
+func addSecondsExpr() string {
+	if store.IsPostgres() {
+		return "now() + (? * interval '1 second')"
+	}
+	return "DATE_ADD(now(), INTERVAL ? SECOND)"
+}
+
+// ceilSeconds rounds a duration up to whole seconds so a computed lease or
+// backoff is never shortened by sub-second truncation.
+func ceilSeconds(d time.Duration) int64 {
+	if d <= 0 {
+		return 0
+	}
+	return int64(math.Ceil(d.Seconds()))
 }
 
 func placeholders(n int) string {

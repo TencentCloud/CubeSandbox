@@ -8,25 +8,23 @@ import (
 	"time"
 )
 
-func TestBackoffTime_IsPositiveAndCapped(t *testing.T) {
+func TestBackoffDelay_IsPositiveAndCapped(t *testing.T) {
 	for attempts := 1; attempts <= 15; attempts++ {
-		nt := backoffTime(attempts)
-		delay := time.Until(nt)
+		delay := backoffDelay(attempts)
 		if delay <= 0 {
 			t.Fatalf("attempts=%d: delay %v must be positive", attempts, delay)
 		}
-		if delay > backoffCap+time.Second {
+		if delay > backoffCap+500*time.Millisecond {
 			t.Fatalf("attempts=%d: delay %v exceeds cap %v", attempts, delay, backoffCap)
 		}
 	}
 }
 
-func TestBackoffTime_IsDeterministicInRange(t *testing.T) {
+func TestBackoffDelay_IsDeterministicInRange(t *testing.T) {
 	// base * 2^(attempts-1) with jitter in [0, min(base,500ms)); the first
-	// attempt must be within (0, 1.5s).
-	nt := backoffTime(1)
-	delay := time.Until(nt)
-	if delay <= 0 || delay > 2*time.Second {
-		t.Fatalf("first retry delay = %v, want (0,2s]", delay)
+	// attempt must be within (0, 1.5s].
+	delay := backoffDelay(1)
+	if delay <= 0 || delay > 1500*time.Millisecond {
+		t.Fatalf("first retry delay = %v, want (0,1.5s]", delay)
 	}
 }

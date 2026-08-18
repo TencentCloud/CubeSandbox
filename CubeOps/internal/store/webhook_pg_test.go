@@ -168,9 +168,8 @@ func TestDelivery_Postgres(t *testing.T) {
 		t.Fatal("claim pg:2 failed")
 	}
 	msg := "boom"
-	next := time.Now().Add(time.Minute)
 	if ok, _ := ds.Complete(ctx, ids2[0], "pg-worker", webhook.Completion{
-		Result: webhook.ResultRetryable, HTTPStatus: &status, LastError: &msg, NextRetryAt: next,
+		Result: webhook.ResultRetryable, HTTPStatus: &status, LastError: &msg, NextRetryDelay: time.Minute,
 	}); !ok {
 		t.Fatal("retryable complete failed")
 	}

@@ -244,15 +244,16 @@ func (s *WebhookService) CreateTestDelivery(ctx context.Context, id int64) (*sto
 
 	eventID := "test:" + uuid.NewString()
 	now := time.Now()
+	// Field set mirrors the real consumer payload (including occurred_at) so
+	// receivers can validate the test delivery against the same schema.
 	payload := fmt.Sprintf(
-		`{"schema_version":"1","event":"sandbox.created","event_id":%q,"timestamp":%d,"sandbox_id":"test-sandbox","template_id":"test-template"}`,
-		eventID, now.UnixMilli())
+		`{"schema_version":"1","event":"sandbox.created","event_id":%q,"timestamp":%d,"occurred_at":%q,"sandbox_id":"test-sandbox","template_id":"test-template"}`,
+		eventID, now.UnixMilli(), now.UTC().Format(time.RFC3339))
 	d := &store.WebhookDelivery{
 		EventID:        eventID,
 		SubscriptionID: id,
 		Payload:        payload,
 		Status:         "pending",
-		NextRetryAt:    now,
 	}
 	if err := s.store.CreateWebhookDelivery(ctx, d); err != nil {
 		return nil, webhookStoreError(err)

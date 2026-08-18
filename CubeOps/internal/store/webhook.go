@@ -225,9 +225,16 @@ func (s *Store) ListWebhookSubscriptionsByEventType(ctx context.Context, eventTy
 }
 
 // CreateWebhookDelivery inserts a delivery row (used by the test endpoint
-// and, later, by the materialization path).
+// and, later, by the materialization path). next_retry_at is normalized to
+// the database's now() so the row is immediately claimable regardless of any
+// client/server clock skew (the ledger compares against DB-side now()).
 func (s *Store) CreateWebhookDelivery(ctx context.Context, d *WebhookDelivery) error {
-	return s.db.WithContext(ctx).Create(d).Error
+	if err := s.db.WithContext(ctx).Create(d).Error; err != nil {
+		return err
+	}
+	return s.db.WithContext(ctx).Exec(
+		`UPDATE t_webhook_delivery SET next_retry_at = now() WHERE id = ?`, d.ID,
+	).Error
 }
 
 // ListWebhookDeliveries returns a page of delivery rows for a subscription,

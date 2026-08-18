@@ -55,6 +55,38 @@ func TestDelivery_MaterializeIdempotentAndChunked(t *testing.T) {
 	}
 }
 
+// TestDelivery_MaterializedRowIsImmediatelyClaimable guards the single-clock
+// invariant: next_retry_at is written with the database's now(), so a freshly
+// materialized row must be a claim candidate IMMEDIATELY — no DB-side
+// backdating, no waiting. Regression test for the bug where a Go-side
+// time.Now() write made rows unclaimable for the client/server timezone
+// offset (e.g. 8 hours against a default UTC MySQL container).
+func TestDelivery_MaterializedRowIsImmediatelyClaimable(t *testing.T) {
+	env, ds := newDeliveryStore(t)
+	defer env.teardown()
+	ctx := context.Background()
+
+	sub := newWebhookSub("due", "https://example.com/hook", "sandbox.created")
+	if err := env.store.CreateWebhookSubscription(ctx, sub); err != nil {
+		t.Fatalf("create sub: %v", err)
+	}
+	if _, err := ds.MaterializeDeliveries(ctx, "evt:due", []byte(`{}`), []int64{sub.ID}, 10); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+
+	ids, err := ds.ClaimCandidatesDue(ctx, webhook.ClaimQuery{Limit: 10})
+	if err != nil {
+		t.Fatalf("candidates: %v", err)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("fresh materialized row not due: ids=%v", ids)
+	}
+	ok, err := ds.Claim(ctx, ids[0], "due-worker", time.Minute, 0)
+	if err != nil || !ok {
+		t.Fatalf("claim fresh row: ok=%v err=%v", ok, err)
+	}
+}
+
 func TestDelivery_ClaimCompleteLifecycle(t *testing.T) {
 	env, ds := newDeliveryStore(t)
 	defer env.teardown()
@@ -76,15 +108,8 @@ func TestDelivery_ClaimCompleteLifecycle(t *testing.T) {
 	if _, err := ds.MaterializeDeliveries(ctx, "evt:l", []byte(`{"event":"sandbox.created"}`), []int64{sub.ID}, 10); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
-	// Materialization stamps next_retry_at with the client clock, which can be
-	// a few microseconds ahead of the server now() used by the claim query
-	// (self-heals within one poll in production). Backdate for determinism.
-	if err := env.store.DB().Exec(
-		`UPDATE t_webhook_delivery SET next_retry_at = now() - INTERVAL 1 SECOND WHERE event_id = ?`, "evt:l").Error; err != nil {
-		t.Fatalf("backdate next_retry_at: %v", err)
-	}
 
-	ids, err := ds.ClaimCandidates(ctx, webhook.ClaimQuery{Limit: 10})
+	ids, err := ds.ClaimCandidatesDue(ctx, webhook.ClaimQuery{Limit: 10})
 	if err != nil {
 		t.Fatalf("candidates: %v", err)
 	}
@@ -139,22 +164,17 @@ func TestDelivery_RetryableBacklogAndKeepPendingSweep(t *testing.T) {
 	if _, err := ds.MaterializeDeliveries(ctx, "evt:r", []byte(`{}`), []int64{sub.ID}, 10); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
-	if err := env.store.DB().Exec(
-		`UPDATE t_webhook_delivery SET next_retry_at = now() - INTERVAL 1 SECOND WHERE event_id = ?`, "evt:r").Error; err != nil {
-		t.Fatalf("backdate next_retry_at: %v", err)
-	}
-	ids, err := ds.ClaimCandidates(ctx, webhook.ClaimQuery{Limit: 10})
+	ids, err := ds.ClaimCandidatesDue(ctx, webhook.ClaimQuery{Limit: 10})
 	if err != nil || len(ids) != 1 {
 		t.Fatalf("candidates: ids=%v err=%v", ids, err)
 	}
 	if _, err := ds.Claim(ctx, ids[0], "w", 60*time.Second, 0); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	later := time.Now().Add(time.Minute)
 	lastErr := "boom"
 	ok, err := ds.Complete(ctx, ids[0], "w", webhook.Completion{
 		Result: webhook.ResultRetryable, HTTPStatus: intPtr(500),
-		LastError: &lastErr, NextRetryAt: later,
+		LastError: &lastErr, NextRetryDelay: time.Minute,
 	})
 	if err != nil || !ok {
 		t.Fatalf("retryable complete: ok=%v err=%v", ok, err)

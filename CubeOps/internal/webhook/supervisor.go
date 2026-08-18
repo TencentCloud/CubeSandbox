@@ -220,18 +220,25 @@ func (s *Supervisor) sendOne(ctx context.Context, id, subID int64) {
 		}
 	}()
 
-	d, err := s.store.LoadDeliveryForSend(ctx, id)
+	// Ledger writes must outlive the claim loop's context: Shutdown cancels
+	// the claim context in step ① BEFORE the grace window, so using it here
+	// would make every in-flight completion fail (context canceled) and the
+	// row would be redelivered after lease expiry on every restart.
+	dbCtx := context.WithoutCancel(ctx)
+
+	d, err := s.store.LoadDeliveryForSend(dbCtx, id)
 	if err != nil {
-		// Secret decryption failure is permanent; any other load failure
+		// Secret decryption failure and a vanished target (deleted
+		// subscription / delivery row) are permanent; any other load failure
 		// returns the lease so another worker can retry.
-		if errors.Is(err, ErrSecretDecrypt) {
+		if errors.Is(err, ErrSecretDecrypt) || errors.Is(err, ErrDeliveryGone) {
 			msg := err.Error()
-			_, _ = s.store.Complete(ctx, id, s.owner, Completion{
+			_, _ = s.store.Complete(dbCtx, id, s.owner, Completion{
 				Result: ResultPermanent, LastError: &msg,
 			})
 			return
 		}
-		_ = s.store.ReleaseLease(ctx, id, s.owner)
+		_ = s.store.ReleaseLease(dbCtx, id, s.owner)
 		return
 	}
 
@@ -242,11 +249,11 @@ func (s *Supervisor) sendOne(ctx context.Context, id, subID int64) {
 	switch res.Class {
 	case ResultSucceeded:
 		status := res.HTTPStatus
-		_, _ = s.store.Complete(ctx, id, s.owner, Completion{Result: ResultSucceeded, HTTPStatus: &status})
+		_, _ = s.store.Complete(dbCtx, id, s.owner, Completion{Result: ResultSucceeded, HTTPStatus: &status})
 	case ResultPermanent:
 		status := res.HTTPStatus
 		msg := errText(res.Err)
-		_, _ = s.store.Complete(ctx, id, s.owner, Completion{
+		_, _ = s.store.Complete(dbCtx, id, s.owner, Completion{
 			Result: ResultPermanent, HTTPStatus: &status, LastError: &msg,
 		})
 	case ResultRetryable:
@@ -254,14 +261,14 @@ func (s *Supervisor) sendOne(ctx context.Context, id, subID int64) {
 		msg := errText(res.Err)
 		nextAttempts := d.Attempts + 1
 		if s.deadLetterMode == "dead-letter" && nextAttempts >= s.maxAttempts {
-			_, _ = s.store.Complete(ctx, id, s.owner, Completion{
+			_, _ = s.store.Complete(dbCtx, id, s.owner, Completion{
 				Result: ResultDead, HTTPStatus: &status, LastError: &msg,
 			})
 			return
 		}
-		_, _ = s.store.Complete(ctx, id, s.owner, Completion{
+		_, _ = s.store.Complete(dbCtx, id, s.owner, Completion{
 			Result: ResultRetryable, HTTPStatus: &status, LastError: &msg,
-			NextRetryAt: backoffTime(nextAttempts),
+			NextRetryDelay: backoffDelay(nextAttempts),
 		})
 	case ResultShutdown:
 		// Interrupted by graceful shutdown: no attempt recorded, lease stays
@@ -359,9 +366,11 @@ func (s *Supervisor) Started() bool { return s.started.Load() }
 // Healthy reports whether the loop is running and not shutting down.
 func (s *Supervisor) Healthy() bool { return s.healthy.Load() }
 
-// backoffTime computes next_retry_at using the capped exponential formula
-// base * 2^(attempts-1) + jitter, capped at backoffCap.
-func backoffTime(attempts int) time.Time {
+// backoffDelay computes the retry delay using the capped exponential formula
+// base * 2^(attempts-1) + jitter, capped at backoffCap. It returns a delay
+// (not an absolute timestamp): the ledger adds it to the database's now() so
+// only one clock is involved.
+func backoffDelay(attempts int) time.Duration {
 	delay := backoffBase
 	if attempts > 1 {
 		for i := 1; i < attempts && delay < backoffCap; i++ {
@@ -375,7 +384,7 @@ func backoffTime(attempts int) time.Time {
 	if jitter > delay/2 {
 		jitter = delay / 2
 	}
-	return time.Now().Add(delay + jitter)
+	return delay + jitter
 }
 
 func errText(err error) string {
