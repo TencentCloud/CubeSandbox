@@ -28,3 +28,11 @@ if [[ "${ROLE}" == "compute" ]]; then
 else
   systemctl stop cube-sandbox-control.target
 fi
+
+# CubeS3lvol (when enabled) is a Wants= member of the role target, so the
+# stop above pulls cube-sandbox-s3lvol.service down through its ExecStop
+# (cube-s3lvol-stop.sh: full teardown if the target is alive, target-side
+# cleanup only if it has crashed -- never disconnecting the NVMf initiator).
+# down.sh intentionally does NOT delete the s3lvol per-node state
+# (/data/cubelet/rcow/wal_bdev.img, lvstore/bstore metadata): the next
+# install/start attaches and replays it.

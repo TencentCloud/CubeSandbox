@@ -220,6 +220,28 @@ Before installation, you can explicitly set the current node's internal IP in `.
 
 If `CUBE_SANDBOX_NODE_IP` is explicitly set, the installation script will use that value directly; otherwise, the auto-detected node IP is persisted in the runtime environment and used to render `cube proxy` / DNS addresses.
 
+### CubeS3lvol stop/upgrade semantics
+
+CubeS3lvol (s3lvol) is managed as a `Wants=` member of the `cube-sandbox-*`
+role target:
+
+- **Stopping** (`down.sh` / `systemctl stop cube-sandbox-{control,compute}.target`):
+  the s3lvol unit goes through `cube-s3lvol-stop.sh`'s **conditional unload** —
+  when the target process is alive it runs the full `rcow_stop.sh` (disconnect
+  initiators -> flush/unload lvstore -> stop the target); when the target has
+  already crashed it only clears target-side residue and **never disconnects
+  the NVMf initiators**. `down.sh` only stops services, it does **not delete
+  any data** (`/data/cubelet/rcow/wal_bdev.img` and the bstore metadata are
+  kept); the next start recovers via attach/replay.
+- **Upgrading** (`install.sh` upgrade mode): the old `CubeS3lvol/` directory is
+  replaced (the new binary takes effect), then the target restarts with the
+  role target. `wal_bdev.img` is **never overwritten** (created only on first
+  install; its size fixes the journal/WAL layout), and the `RCOW_*` settings in
+  `.one-click.env` are merged and kept across the upgrade.
+- **Enable/disable**: flip `ONE_CLICK_ENABLE_S3LVOL` to 1/0 in `.env` and
+  re-run `install.sh` (or `systemctl enable/disable
+  cube-sandbox-s3lvol.service` directly).
+
 ### Digital Assistant Environment Variables
 
 The Digital Assistant (AgentHub) uses MySQL through CubeAPI to persist assistant instances, snapshots, templates, and operation history. In one-click deployments, `DATABASE_URL` is generated automatically from `CUBE_SANDBOX_MYSQL_HOST`, `CUBE_SANDBOX_MYSQL_PORT`, `CUBE_SANDBOX_MYSQL_USER`, `CUBE_SANDBOX_MYSQL_PASSWORD`, and `CUBE_SANDBOX_MYSQL_DB` when it is not set explicitly:
@@ -455,6 +477,8 @@ Conditional commands:
 - If `ONE_CLICK_ENABLE_TENCENT_DOCKER_MIRROR=1` is enabled and `/etc/docker/daemon.json` already exists, `python3` is required.
 - If the packaged `Cubelet/config/config.toml` enables `storage_backend = "cubecow"`, one-click also checks:
   `mkfs.ext4`, `mount`, `umount`, `losetup`
+- If `ONE_CLICK_ENABLE_S3LVOL=1` and the package ships `CubeS3lvol/bin/s3lvol_tgt`, one-click also checks:
+  `nvme` (nvme-cli), `python3`, `truncate`, and the shared libraries `s3lvol_tgt` links against (`ldd`; notably `libssl.so.1.1` / `libcrypto.so.1.1`, the OpenSSL 1.1 branch)
 
 Recommended packages to satisfy the cubecow command set:
 
@@ -471,6 +495,17 @@ sudo apt-get install -y e2fsprogs util-linux
 # OpenCloudOS / RHEL / CentOS
 sudo dnf install -y e2fsprogs util-linux || \
 sudo yum install -y e2fsprogs util-linux
+```
+
+Additional packages for `ONE_CLICK_ENABLE_S3LVOL=1`:
+
+```bash
+# Debian / Ubuntu (OpenSSL 1.1 is usually already present; confirm with ldd)
+sudo apt-get install -y nvme-cli python3 libaio1 libnuma1 uuid-runtime
+
+# OpenCloudOS / RHEL / CentOS (OpenSSL 3 needs compat-openssl11)
+sudo dnf install -y nvme-cli python3 libaio libnuma libuuid compat-openssl11 || \
+sudo yum install -y nvme-cli python3 libaio libnuma libuuid compat-openssl11
 ```
 
 ### Control Role (`install.sh`, default)
@@ -500,6 +535,8 @@ Conditional commands:
 - If `ONE_CLICK_ENABLE_TENCENT_DOCKER_MIRROR=1` is enabled and `/etc/docker/daemon.json` already exists, `python3` is required.
 - If the packaged `Cubelet/config/config.toml` enables `storage_backend = "cubecow"`, one-click also checks:
   `mkfs.ext4`, `mount`, `umount`, `losetup`
+- If `ONE_CLICK_ENABLE_S3LVOL=1` and the package ships `CubeS3lvol/bin/s3lvol_tgt`, one-click also checks:
+  `nvme` (nvme-cli), `python3`, `truncate`, and the shared libraries `s3lvol_tgt` links against (`ldd`; notably `libssl.so.1.1` / `libcrypto.so.1.1`, the OpenSSL 1.1 branch)
 
 Recommended packages to satisfy the cubecow command set:
 
@@ -516,6 +553,17 @@ sudo apt-get install -y e2fsprogs util-linux
 # OpenCloudOS / RHEL / CentOS
 sudo dnf install -y e2fsprogs util-linux || \
 sudo yum install -y e2fsprogs util-linux
+```
+
+Additional packages for `ONE_CLICK_ENABLE_S3LVOL=1`:
+
+```bash
+# Debian / Ubuntu (OpenSSL 1.1 is usually already present; confirm with ldd)
+sudo apt-get install -y nvme-cli python3 libaio1 libnuma1 uuid-runtime
+
+# OpenCloudOS / RHEL / CentOS (OpenSSL 3 needs compat-openssl11)
+sudo dnf install -y nvme-cli python3 libaio libnuma libuuid compat-openssl11 || \
+sudo yum install -y nvme-cli python3 libaio libnuma libuuid compat-openssl11
 ```
 
 ## Prerequisites

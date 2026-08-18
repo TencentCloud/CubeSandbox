@@ -195,6 +195,14 @@ sudo ./smoke.sh
 sudo ./down.sh
 ```
 
+### CubeS3lvol 的停止与升级语义
+
+CubeS3lvol（s3lvol）作为 `cube-sandbox-*` 角色 target 的 `Wants=` 成员被统一管理：
+
+- **停止（`down.sh` / `systemctl stop cube-sandbox-{control,compute}.target`）**：s3lvol 单元会走 `cube-s3lvol-stop.sh` 的**条件卸载**——target 进程存活时完整执行 `rcow_stop.sh`（断开 initiator → 卸载 lvstore/回刷 → 终止 target），target 已崩溃时只清理 target 侧残留、绝不断开 NVMf initiator。`down.sh` 只停止服务，**不删除任何数据**（`/data/cubelet/rcow/wal_bdev.img` 与 bstore 元数据保留），再次启动走 attach/replay 恢复。
+- **升级（`install.sh` 升级模式）**：旧 `CubeS3lvol/` 目录被替换（新二进制自动生效），随后 target 随角色 target 重启。`wal_bdev.img` **永不覆盖**（仅首次安装创建，其尺寸固定 journal/WAL 布局），`.one-click.env` 中 `RCOW_*` 配置经升级合并保留。
+- **启停开关**：`.env` 里 `ONE_CLICK_ENABLE_S3LVOL` 翻转为 1/0 后重跑 `install.sh`（或直接 `systemctl enable/disable cube-sandbox-s3lvol.service`）即可。
+
 控制节点安装完成后，可以打开 Dashboard：
 
 ```bash
