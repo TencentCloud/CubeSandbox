@@ -39,7 +39,7 @@
     "templateID": "Template ID",
     "required": "必填",
     "image": "镜像",
-    "imageHint": "容器镜像地址，例如 registry.example.com/code:latest",
+    "imageHint": "容器镜像地址，例如 registry.example.com/code:latest；明文 HTTP 仓库请加 http:// 前缀",
     "instanceType": "实例类型",
     "instanceTypeHint": "留空则使用默认值（标准）。",
     "cancel": "取消",

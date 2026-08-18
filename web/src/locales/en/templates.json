@@ -39,7 +39,7 @@
     "templateID": "Template ID",
     "required": "Required",
     "image": "Image",
-    "imageHint": "Container image, e.g. registry.example.com/code:latest",
+    "imageHint": "Container image, e.g. registry.example.com/code:latest; prefix plain HTTP registries with http://",
     "instanceType": "Instance type",
     "instanceTypeHint": "Defaults to standard when empty.",
     "cancel": "Cancel",

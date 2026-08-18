@@ -28,6 +28,10 @@ Once the template reaches `READY` status it can be referenced by its
 - The OCI image must be accessible from the CubeMaster nodes (public registry
   or authenticated private registry)
 
+Plain HTTP registries (no TLS) must be written with an `http://` prefix, for
+example `http://harbor.internal:5000/ns/app:tag`. Without that prefix CubeMaster
+defaults to HTTPS (except localhost and RFC1918 addresses).
+
 ### ⚠️ Your image must expose an HTTP server
 
 During template creation, Cube platform boots the container and **probes it
@@ -292,6 +296,7 @@ template deleted: tpl-748094d2f2374b0a8a37e6ec
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
 | `phase: PULLING` stuck for a long time | Image pull slow or registry unreachable from cluster nodes | Check network/firewall; for private registries add `--registry-username` / `--registry-password` |
+| Plain HTTP registry pull fails (`server gave HTTP response to HTTPS client`) | Image ref is missing the `http://` prefix | Use `http://harbor.internal:5000/ns/app:tag` |
 | `status: FAILED` after BUILDING | Build error (disk full, Dockerfile issue, etc.) | Re-run `tpl status --job-id <id> --json` and inspect `last_error` |
 | `distribution: 0/N ready` after READY | Artifact distribution still in progress (normal briefly) | Wait and re-run `tpl info`; if stuck check Cubelet logs on target nodes |
 | Sandbox fails readiness probe | Service not listening on the expected port/path at startup | Verify your container starts the HTTP server before signalling ready; adjust `--probe-path` if needed |

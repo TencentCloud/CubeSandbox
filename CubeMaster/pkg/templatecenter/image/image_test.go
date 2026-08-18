@@ -600,6 +600,12 @@ func TestRegistryHostFromImageRefStripsDockerTransport(t *testing.T) {
 	if got := registryHostFromImageRef("docker://example.com:5000/ns/app:tag"); got != "example.com:5000" {
 		t.Fatalf("registryHostFromImageRef()=%q, want example.com:5000", got)
 	}
+	if got := registryHostFromImageRef("http://harbor.internal:5000/ns/app:tag"); got != "harbor.internal:5000" {
+		t.Fatalf("registryHostFromImageRef()=%q, want harbor.internal:5000", got)
+	}
+	if got := registryHostFromImageRef("https://harbor.example.com/ns/app:tag"); got != "harbor.example.com" {
+		t.Fatalf("registryHostFromImageRef()=%q, want harbor.example.com", got)
+	}
 	if got := registryHostFromImageRef("library/nginx:latest"); got != "docker.io" {
 		t.Fatalf("registryHostFromImageRef()=%q, want docker.io", got)
 	}
@@ -612,9 +618,30 @@ func TestSkopeoDockerImageRefKeepsExistingTransport(t *testing.T) {
 	}
 }
 
+func TestParseImageReferenceSelectsPlainHTTPScheme(t *testing.T) {
+	httpsRef, err := parseImageReference("harbor.internal:5000/ns/app:tag")
+	if err != nil {
+		t.Fatalf("parse https ref: %v", err)
+	}
+	if got := httpsRef.Context().Registry.Scheme(); got != "https" {
+		t.Fatalf("scheme=%q, want https", got)
+	}
+
+	httpRef, err := parseImageReference("http://harbor.internal:5000/ns/app:tag")
+	if err != nil {
+		t.Fatalf("parse http ref: %v", err)
+	}
+	if got := httpRef.Context().Registry.Scheme(); got != "http" {
+		t.Fatalf("scheme=%q, want http", got)
+	}
+}
+
 func TestValidateImageRef(t *testing.T) {
 	valid := []string{
 		"docker://registry.example.com/image:latest",
+		"http://harbor.internal:5000/ns/app:tag",
+		"https://registry.example.com/image:latest",
+		"docker://http://harbor.internal:5000/ns/app:tag",
 		"registry.example.com:5000/ns/app:1.2.3",
 		"nginx",
 		"library/nginx",
@@ -630,6 +657,7 @@ func TestValidateImageRef(t *testing.T) {
 	invalid := []string{
 		"",
 		"docker://",
+		"http://",
 		"-rm -rf",
 		"--authfile=/etc/shadow",
 		"registry.example.com/image --authfile /etc/shadow",
@@ -746,6 +774,12 @@ func TestSplitImageRef(t *testing.T) {
 			imageRef: "docker://example.com/ns/app:stable@sha256:abcd",
 			wantName: "example.com/ns/app",
 			wantTag:  "stable",
+		},
+		{
+			name:     "http prefix with port and tag",
+			imageRef: "http://harbor.internal:5000/ns/app:tag",
+			wantName: "harbor.internal:5000/ns/app",
+			wantTag:  "tag",
 		},
 		{
 			name:     "digest without tag",

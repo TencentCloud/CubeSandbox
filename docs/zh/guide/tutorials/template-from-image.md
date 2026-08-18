@@ -20,6 +20,8 @@ OCI 镜像  ──拉取──►  ext4 rootfs  ──启动──►  快照  �
 - 设置环境变量 `CUBEMASTER_ADDR`，或在每条命令中加 `--server <host>`
 - OCI 镜像须可被 CubeMaster 节点访问（公开仓库或已配置认证的私有仓库）
 
+明文 HTTP 仓库（未启用 TLS）须在镜像引用前加上 `http://`，例如 `http://harbor.internal:5000/ns/app:tag`。不加此前缀时，CubeMaster 默认走 HTTPS（localhost 和 RFC1918 地址除外）。
+
 ### ⚠️ 镜像必须提供 HTTP 服务
 
 Cube 平台在制作模板时，会启动容器并**通过 HTTP 探测**容器是否已就绪。因此：
@@ -264,6 +266,7 @@ template deleted: tpl-748094d2f2374b0a8a37e6ec
 | 现象 | 可能原因 | 处理方式 |
 |------|----------|----------|
 | `phase: PULLING` 长时间卡住 | 镜像拉取慢或集群节点无法访问镜像仓库 | 检查网络/防火墙；私有仓库需添加 `--registry-username` / `--registry-password` |
+| 明文 HTTP 仓库拉取失败（`server gave HTTP response to HTTPS client`） | 镜像引用未加 `http://` 前缀 | 写成 `http://harbor.internal:5000/ns/app:tag` |
 | `status: FAILED`（BUILDING 阶段） | 构建错误（磁盘满、Dockerfile 问题等） | 执行 `tpl status --job-id <id> --json` 查看 `last_error` 字段 |
 | `distribution: 0/N ready`（状态已 READY） | artifact 分发仍在进行（短暂正常） | 等待后重新执行 `tpl info`；若长时间未恢复检查目标节点的 Cubelet 日志 |
 | 沙箱启动后就绪探针一直失败 | 容器内服务未在预期端口/路径监听，或服务尚未完全就绪时 HTTP server 已提前启动 | 确认 HTTP server 在应用完全就绪后再启动；检查 `--probe-path` 是否正确 |
