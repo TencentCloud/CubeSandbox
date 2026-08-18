@@ -54,7 +54,11 @@ type WebhookService struct {
 	store WebhookStore
 
 	// testLimits is a per-subscription in-memory rate limit for POST /:id/test.
-	testLimits sync.Map // int64 → *testWindow
+	// Guarded by testMu: concurrent requests must not race on window state.
+	testLimits map[int64]*testWindow
+	testMu     sync.Mutex
+	// now is injectable so tests can advance the rate-limit window.
+	now func() time.Time
 }
 
 type testWindow struct {
@@ -64,7 +68,11 @@ type testWindow struct {
 
 // NewWebhookService creates a WebhookService over the given store.
 func NewWebhookService(s WebhookStore) *WebhookService {
-	return &WebhookService{store: s}
+	return &WebhookService{
+		store:      s,
+		testLimits: map[int64]*testWindow{},
+		now:        time.Now,
+	}
 }
 
 // WebhookCreateRequest is the POST /api/v1/webhooks body.
@@ -227,6 +235,9 @@ func (s *WebhookService) CreateTestDelivery(ctx context.Context, id int64) (*sto
 	if !sub.Enabled {
 		return nil, NewConflict("subscription is disabled")
 	}
+	if !hasWebhookEvent(sub.Events, "sandbox.created") {
+		return nil, NewBadRequest("subscription does not subscribe to sandbox.created; cannot send a test delivery")
+	}
 	if !s.allowTestCall(id) {
 		return nil, NewError(429, "too many test deliveries for this subscription; retry later")
 	}
@@ -265,15 +276,29 @@ func (s *WebhookService) ListDeliveries(ctx context.Context, id int64, status, e
 // allowTestCall enforces the per-subscription in-memory rate limit. The
 // counter is intentionally process-local (see testWindowMaxCalls doc).
 func (s *WebhookService) allowTestCall(subscriptionID int64) bool {
-	now := time.Now()
-	raw, _ := s.testLimits.LoadOrStore(subscriptionID, &testWindow{resetAt: now.Add(testWindowDuration)})
-	w := raw.(*testWindow)
-	if now.After(w.resetAt) {
+	s.testMu.Lock()
+	defer s.testMu.Unlock()
+	now := s.now()
+	w := s.testLimits[subscriptionID]
+	if w == nil {
+		w = &testWindow{resetAt: now.Add(testWindowDuration)}
+		s.testLimits[subscriptionID] = w
+	}
+	if !now.Before(w.resetAt) {
 		w.count = 0
 		w.resetAt = now.Add(testWindowDuration)
 	}
 	w.count++
 	return w.count <= testWindowMaxCalls
+}
+
+func hasWebhookEvent(rows []store.WebhookSubscriptionEvent, eventType string) bool {
+	for _, r := range rows {
+		if r.EventType == eventType {
+			return true
+		}
+	}
+	return false
 }
 
 func validateWebhookInput(name, endpoint string, events []string) *Error {

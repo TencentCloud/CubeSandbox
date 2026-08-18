@@ -79,6 +79,7 @@ func (s *Store) CreateWebhookSubscription(ctx context.Context, sub *WebhookSubsc
 			return err
 		}
 		for i := range sub.Events {
+			sub.Events[i].ID = 0 // never trust caller-supplied event PKs
 			sub.Events[i].SubscriptionID = sub.ID
 		}
 		if len(sub.Events) > 0 {
@@ -139,6 +140,7 @@ func (s *Store) UpdateWebhookSubscription(ctx context.Context, sub *WebhookSubsc
 				"url":               sub.URL,
 				"enabled":           sub.Enabled,
 				"secret_ciphertext": sub.SecretCiphertext,
+				"updated_at":        time.Now(),
 			})
 		if res.Error != nil {
 			return res.Error
@@ -215,9 +217,8 @@ func renameDeletedSubscription(name string, id int64) string {
 func (s *Store) ListWebhookSubscriptionsByEventType(ctx context.Context, eventType string) ([]WebhookSubscription, error) {
 	var subs []WebhookSubscription
 	err := s.db.WithContext(ctx).
-		Table("t_webhook_subscription").
-		Joins("JOIN t_webhook_subscription_event e ON e.subscription_id = t_webhook_subscription.id").
-		Where("t_webhook_subscription.deleted_at IS NULL AND t_webhook_subscription.enabled = ? AND e.event_type = ?",
+		Where("deleted_at IS NULL AND enabled = ? AND id IN ("+
+			"SELECT subscription_id FROM t_webhook_subscription_event WHERE event_type = ?)",
 			true, eventType).
 		Find(&subs).Error
 	return subs, err
