@@ -5,6 +5,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
@@ -139,6 +140,9 @@ func (s *Store) BootstrapJWTSecret(ctx context.Context, envSecret string) (strin
 	winner, err := s.GetOrCreateSystemSetting(ctx, "jwt_secret", generated)
 	if err != nil {
 		return "", fmt.Errorf("persist JWT secret: %w", err)
+	}
+	if winner == "" {
+		return "", errors.New("JWT secret resolved to an empty value in t_system_setting")
 	}
 	if winner == generated {
 		logging.G(ctx).Info("JWT secret auto-generated and persisted to database (t_system_setting)")

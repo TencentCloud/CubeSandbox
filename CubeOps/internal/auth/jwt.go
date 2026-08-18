@@ -59,6 +59,15 @@ func NewJWTManager(secret string, accessTTL, refreshTTL time.Duration) *JWTManag
 	}
 }
 
+var errEmptyJWTSecret = errors.New("jwt: signing secret is empty")
+
+func (m *JWTManager) checkSecret() error {
+	if len(m.secret) == 0 {
+		return errEmptyJWTSecret
+	}
+	return nil
+}
+
 // AccessTTL returns the configured access-token TTL.
 func (m *JWTManager) AccessTTL() time.Duration { return m.accessTTL }
 
@@ -67,6 +76,9 @@ func (m *JWTManager) RefreshTTL() time.Duration { return m.refreshTTL }
 
 // GenerateAccessToken creates a signed JWT access token.
 func (m *JWTManager) GenerateAccessToken(username string) (string, error) {
+	if err := m.checkSecret(); err != nil {
+		return "", err
+	}
 	now := time.Now()
 	claims := AccessClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -86,6 +98,9 @@ func (m *JWTManager) GenerateAccessToken(username string) (string, error) {
 
 // GenerateRefreshToken creates a signed JWT refresh token.
 func (m *JWTManager) GenerateRefreshToken(username string) (string, string, error) {
+	if err := m.checkSecret(); err != nil {
+		return "", "", err
+	}
 	now := time.Now()
 	tokenID := uuid.New().String()
 	claims := RefreshClaims{
@@ -111,6 +126,9 @@ func (m *JWTManager) GenerateRefreshToken(username string) (string, string, erro
 // tokens by checking the "typ" claim and the audience, so a long-lived
 // refresh token cannot be used as an access token.
 func (m *JWTManager) VerifyAccessToken(tokenStr string) (*AccessClaims, error) {
+	if err := m.checkSecret(); err != nil {
+		return nil, err
+	}
 	token, err := jwt.ParseWithClaims(tokenStr, &AccessClaims{}, func(t *jwt.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
@@ -136,6 +154,9 @@ func (m *JWTManager) VerifyAccessToken(tokenStr string) (*AccessClaims, error) {
 // than on this package's internals. It rejects access tokens via the "typ"
 // claim and the audience.
 func (m *JWTManager) VerifyRefreshToken(tokenStr string) (*service.RefreshClaims, error) {
+	if err := m.checkSecret(); err != nil {
+		return nil, err
+	}
 	token, err := jwt.ParseWithClaims(tokenStr, &RefreshClaims{}, func(t *jwt.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
