@@ -24,6 +24,7 @@ AGENT_EXT4_CONTAINER_DIR := /workspace/$(patsubst $(ROOT_DIR)/%,%,$(abspath $(AG
 MANUAL_DEPLOY_SCRIPT ?= $(ROOT_DIR)/deploy/one-click/deploy-manual.sh
 WEB_DIR ?= $(ROOT_DIR)/web
 CUBECOW_DIR ?= $(ROOT_DIR)/cubecow
+CUBES3LVOL_DIR ?= $(ROOT_DIR)/CubeS3lvol
 CUBELET_COW_THIRD_PARTY_DIR ?= $(ROOT_DIR)/Cubelet/third_party/cubecow
 COW_STATICLIB ?= $(CUBELET_COW_THIRD_PARTY_DIR)/lib/libcubecow.a
 COW_HEADER ?= $(CUBELET_COW_THIRD_PARTY_DIR)/include/cubecow.h
@@ -136,6 +137,7 @@ help:
 	@printf "  cubelet       Build cubelet and cubecli in Docker\n"
 	@printf "  cubevsmapdump Build CubeVS eBPF business map dump tool in Docker\n"
 	@printf "  cubecow-sdk   Build cubecow static library for Cubelet\n"
+	@printf "  cube-s3lvol   Build CubeS3lvol (s3lvol) release in Docker\n"
 	@printf "  cubecow-smoke Build cubecow smoke test CLI in Docker\n"
 	@printf "  cubecow-test-native Build SDK artifacts and run native tests in Docker\n"
 	@printf "  cube-proxy-sidecar Build cube-proxy-sidecar (developer-only; not in 'all')\n"
@@ -261,6 +263,24 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 else
 	$(MAKE) builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk'
+endif
+
+# cube-s3lvol: developer entrypoint for building the CubeS3lvol (s3lvol)
+# self-contained release -- the same steps as the one-click track_s3lvol,
+# but producing _output/CubeS3lvol/s3lvol-<version>/ for local iteration.
+# setup_dep.sh only pays the full SPDK/DPDK/AWS CRT compile on first run;
+# later builds reuse the builder container's persistent workspace.
+.PHONY: cube-s3lvol
+cube-s3lvol:
+ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
+	@mkdir -p "$(OUTPUT_DIR)/CubeS3lvol"
+	cd "$(CUBES3LVOL_DIR)" && AWS_BUILD_TYPE=RelWithDebInfo ./setup_dep.sh --jobs "$$(nproc)"
+	cd "$(CUBES3LVOL_DIR)" && make S3LVOL_BUILD_TYPE=release -j"$$(nproc)"
+	cd "$(CUBES3LVOL_DIR)" && ./make_release.sh --no-tar --skip-smoke --version "$(CUBE_VERSION)" --outdir "$(OUTPUT_DIR)/CubeS3lvol"
+	@printf 'CubeS3lvol release: %s/CubeS3lvol/s3lvol-*/ (bin/s3lvol_tgt + scripts/ + VERSION)\n' "$(OUTPUT_DIR)"
+else
+	$(MAKE) builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cube-s3lvol'
 endif
 
 .PHONY: cubecow-clean
