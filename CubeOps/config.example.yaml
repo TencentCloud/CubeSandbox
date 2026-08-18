@@ -79,7 +79,6 @@ webhook:
   max_attempts: 5
   worker_concurrency: 8
   per_subscription_concurrency: 2       # per-replica; total = replicas * value
-  per_subscription_metrics_max: 5000    # per-subscription label cardinality cap
   dead_letter_mode: "keep-pending"      # keep-pending | dead-letter
   allow_private_networks: false         # dev/test only: allow loopback + RFC1918
   cleanup:

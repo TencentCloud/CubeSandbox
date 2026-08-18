@@ -42,11 +42,6 @@ var (
 		Help: "Actionable delivery backlog rows by status (pending/retryable failed).",
 	}, []string{"status"})
 
-	perSubscriptionBacklog = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "cubeops_webhook_subscription_backlog_rows",
-		Help: "Per-subscription actionable backlog. Cardinality is capped by webhook.per_subscription_metrics_max; beyond it only aggregate metrics are emitted.",
-	}, []string{"subscription_id"})
-
 	leaseContentionTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "cubeops_webhook_lease_contention_total",
 		Help: "Conditional claim/complete updates that affected 0 rows (lease lost or task re-claimed).",
@@ -55,11 +50,6 @@ var (
 	lateResultDroppedTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "cubeops_webhook_late_result_dropped_total",
 		Help: "Completion updates dropped because the lease was no longer owned.",
-	})
-
-	workerSaturation = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "cubeops_webhook_worker_saturation",
-		Help: "Current in-flight sends / worker_concurrency (0..1).",
 	})
 
 	keepPendingDeadTotal = promauto.NewCounter(prometheus.CounterOpts{

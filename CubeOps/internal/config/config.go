@@ -132,8 +132,6 @@ type WebhookConfig struct {
 	// PerSubscriptionConcurrency caps in-flight sends per subscription
 	// (per-replica semantics; total = replicas × value).
 	PerSubscriptionConcurrency int `yaml:"per_subscription_concurrency"`
-	// PerSubscriptionMetricsMax caps per-subscription label cardinality.
-	PerSubscriptionMetricsMax int `yaml:"per_subscription_metrics_max"`
 	// DeadLetterMode: "keep-pending" (default) or "dead-letter".
 	DeadLetterMode string `yaml:"dead_letter_mode"`
 	// AllowPrivateNetworks bypasses SSRF rejection of RFC1918 addresses.
@@ -267,9 +265,6 @@ func applyWebhookDefaults(w *WebhookConfig) {
 	if w.PerSubscriptionConcurrency == 0 {
 		w.PerSubscriptionConcurrency = 2
 	}
-	if w.PerSubscriptionMetricsMax == 0 {
-		w.PerSubscriptionMetricsMax = 5000
-	}
 	if w.DeadLetterMode == "" {
 		w.DeadLetterMode = "keep-pending"
 	}
@@ -321,14 +316,11 @@ func validateWebhookConfig(w *WebhookConfig, redisURL string) error {
 // DaoConfig converts the CubeOps config to a CubeDB dao.Config.
 //
 // If DatabaseURL is set, it is the single source of truth and the individual
-// MySQL* fields are ignored. This fixes R06: previously DatabaseURL was
-// accepted by Load() and passed the required-field check, but DaoConfig()
-// silently used the (possibly empty) MySQL* fields instead, causing CubeOps
-// to connect with empty user/db or fall back to localhost.
-//
-// S6 fix: the driver is selected from the URL scheme (mysql:// or
-// postgres://), so PostgreSQL deployments work instead of silently falling
-// back to MySQL and failing on dialect-specific SQL.
+// MySQL* fields are ignored (accepting a DatabaseURL while silently
+// connecting from the individual fields has historically caused empty
+// user/db connections). The driver is selected from the URL scheme
+// (mysql:// or postgres://) so PostgreSQL deployments work instead of
+// silently falling back to MySQL and failing on dialect-specific SQL.
 func (c *Config) DaoConfig() dao.Config {
 	// Fast path: no DatabaseURL — use the individual fields as before.
 	if c.DatabaseURL == "" {
@@ -551,7 +543,6 @@ func overrideWebhookFromEnv(w *WebhookConfig) {
 	w.MaxAttempts = envInt("CUBE_OPS_WEBHOOK_MAX_ATTEMPTS", w.MaxAttempts)
 	w.WorkerConcurrency = envInt("CUBE_OPS_WEBHOOK_WORKER_CONCURRENCY", w.WorkerConcurrency)
 	w.PerSubscriptionConcurrency = envInt("CUBE_OPS_WEBHOOK_PER_SUBSCRIPTION_CONCURRENCY", w.PerSubscriptionConcurrency)
-	w.PerSubscriptionMetricsMax = envInt("CUBE_OPS_WEBHOOK_PER_SUBSCRIPTION_METRICS_MAX", w.PerSubscriptionMetricsMax)
 	if v := os.Getenv("CUBE_OPS_WEBHOOK_DEAD_LETTER_MODE"); v != "" {
 		w.DeadLetterMode = v
 	}

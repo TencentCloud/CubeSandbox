@@ -44,7 +44,7 @@ export CUBE_OPS_WEBHOOK_ENABLED=true
 | GET | `/api/v1/webhooks` | 列表(默认排除已删除),分页 `limit`/`offset`(默认 50,上限 200) |
 | GET | `/api/v1/webhooks/:id` | 详情;**已删除订阅返回 200 且含 `deleted_at`——"已删除"= 只读可查(含历史投递归属),不可再 PUT/test/DELETE,请勿把 200 理解为订阅仍可用** |
 | PUT | `/api/v1/webhooks/:id` | 部分更新;对已删除订阅返回 404 |
-| DELETE | `/api/v1/webhooks/:id` | 软删除(置 `deleted_at` 并改名释放 name),204;重复 DELETE 幂等 |
+| DELETE | `/api/v1/webhooks/:id` | 软删除(置 `deleted_at` 并改名释放 name),204;重复 DELETE 返回 404(软删后该 id 即不存在于可操作集合) |
 | POST | `/api/v1/webhooks/:id/test` | 落一条测试投递,返回 `{delivery_id}`;全局关闭 503、停用 409、已删除 404;每订阅 60s 限 5 次(进程内存,多副本 = 5×副本数) |
 | GET | `/api/v1/webhooks/:id/deliveries` | 投递记录,支持 `status`、`event_id_prefix`、`limit`/`offset` |
 
@@ -95,6 +95,12 @@ X-Cube-Signature-256: {hex}   ← 仅当订阅配置了 secret
 恒定时间比较;再校验 `X-Cube-Timestamp` 偏差(建议 ±5 分钟,可配);最后按
 `X-Cube-Delivery` 幂等去重(重试复用同一 delivery id,不生成新 id)。完整示例
 见 `examples/webhook-receiver`。
+
+> **安全语义注意**:签名只覆盖请求体,`X-Cube-Timestamp` 等请求头**不参与签名**,
+> 因此时间戳偏差检查只能过滤过期请求,本身**不能防重放**——截获过 (body,
+> signature) 的攻击者可以随意改写未签名的头。真正的防重放依赖按
+> `X-Cube-Delivery`(或 body 内已签名的 `event_id`)做幂等去重,接收方**必须**
+> 实现去重,不要只依赖时间戳窗口。
 
 ## 重试与死信
 

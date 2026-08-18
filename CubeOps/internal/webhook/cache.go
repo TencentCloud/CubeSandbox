@@ -34,7 +34,8 @@ func NewBacklogCache(window time.Duration) *BacklogCache {
 	}
 }
 
-// Refresh recomputes global + per-subscription backlog counts from SQL.
+// Refresh recomputes global + per-subscription backlog counts from SQL and
+// publishes the global split to the backlog-by-status gauge.
 func (c *BacklogCache) Refresh(ctx context.Context, store *DeliveryStore) error {
 	global, err := store.BacklogCounts(ctx, c.window)
 	if err != nil {
@@ -48,6 +49,12 @@ func (c *BacklogCache) Refresh(ctx context.Context, store *DeliveryStore) error 
 	c.global = global
 	c.perSub = perSub
 	c.mu.Unlock()
+	for _, st := range []string{StatusPending, StatusFailed} {
+		backlogByStatus.WithLabelValues(st).Set(0)
+	}
+	for st, n := range global {
+		backlogByStatus.WithLabelValues(st).Set(float64(n))
+	}
 	return nil
 }
 

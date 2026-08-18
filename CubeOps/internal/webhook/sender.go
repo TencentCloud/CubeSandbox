@@ -24,8 +24,9 @@ const (
 )
 
 // Sender posts delivery payloads to subscription endpoints with HMAC signing
-// and SSRF-protected dialing. Each worker owns one Sender (its own Transport),
-// so webhook traffic never shares the management API connection pool.
+// and SSRF-protected dialing. One shared Sender (its own Transport) serves
+// all workers, so webhook traffic never shares the management API
+// connection pool.
 type Sender struct {
 	client *http.Client
 }
