@@ -152,6 +152,17 @@ check_unit_active() {
   done
 }
 
+# s3lvol_recovery_verify_ok: the authoritative layout check for the s3lvol
+# data plane. rcow_recovery.sh --verify-only never starts or attaches
+# anything -- it only reports -- and exits non-zero when the target is not
+# running, a replay plan is pending, or the active registry does not match
+# the attached namespaces. Retried like every other probe so a unit that is
+# still settling after (re)start is not a false negative.
+s3lvol_recovery_verify_ok() {
+  "${TOOLBOX_ROOT}/CubeS3lvol/scripts/rcow_recovery.sh" --verify-only \
+    >/dev/null 2>&1
+}
+
 http_ok() {
   curl -fsS \
     --connect-timeout "${QUICKCHECK_CURL_CONNECT_TIMEOUT}" \
@@ -359,6 +370,18 @@ quickcheck_main() {
 
   echo "[quickcheck] check systemd units"
   check_unit_active cube-sandbox-cubelet.service
+  # CubeS3lvol (s3lvol) is role-agnostic: either deployment role may flip
+  # ONE_CLICK_ENABLE_S3LVOL=1. When enabled, the unit must be active AND
+  # the data-plane layout must be consistent (rcow_recovery.sh --verify-only
+  # is the authoritative check: target running + no pending replay + active
+  # registry matches attached namespaces).
+  if [[ "${ONE_CLICK_ENABLE_S3LVOL:-0}" == "1" \
+        && -x "${TOOLBOX_ROOT}/CubeS3lvol/scripts/rcow_recovery.sh" ]]; then
+    echo "[quickcheck] check cube-sandbox-s3lvol.service + data-plane layout"
+    check_unit_active cube-sandbox-s3lvol.service
+    wait_until "s3lvol data-plane layout mismatch (rcow_recovery.sh --verify-only failed)" \
+      s3lvol_recovery_verify_ok
+  fi
   if [[ "${ROLE}" != "compute" ]]; then
     if [[ -n "${EXTERNAL_MYSQL_HOST}" ]]; then
       echo "[quickcheck] external MySQL (${EXTERNAL_MYSQL_HOST}); skipping local mysql unit check"
