@@ -40,6 +40,13 @@ func (s *Store) GetOrCreateSystemSetting(ctx context.Context, key, value string)
 	return s.GetSystemSetting(ctx, key)
 }
 
+func (s *Store) repairEmptySystemSetting(ctx context.Context, key, value string) error {
+	return s.db.WithContext(ctx).Exec(
+		"UPDATE t_system_setting SET setting_value = ? WHERE setting_key = ? AND (setting_value IS NULL OR setting_value = '')",
+		value, key,
+	).Error
+}
+
 // SetSystemSetting upserts a system-level setting value.
 func (s *Store) SetSystemSetting(ctx context.Context, key, value string) error {
 	return s.db.WithContext(ctx).Exec(

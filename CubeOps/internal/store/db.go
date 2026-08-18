@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
 	"github.com/tencentcloud/CubeSandbox/CubeDB/dao/driver/mysql"
@@ -141,8 +142,19 @@ func (s *Store) BootstrapJWTSecret(ctx context.Context, envSecret string) (strin
 	if err != nil {
 		return "", fmt.Errorf("persist JWT secret: %w", err)
 	}
-	if winner == "" {
-		return "", errors.New("JWT secret resolved to an empty value in t_system_setting")
+	if strings.TrimSpace(winner) == "" {
+		if err := s.repairEmptySystemSetting(ctx, "jwt_secret", generated); err != nil {
+			return "", fmt.Errorf("repair empty JWT secret: %w", err)
+		}
+		winner, err = s.GetSystemSetting(ctx, "jwt_secret")
+		if err != nil {
+			return "", fmt.Errorf("re-read JWT secret after repair: %w", err)
+		}
+		if strings.TrimSpace(winner) == "" {
+			return "", errors.New("could not resolve a usable JWT secret from t_system_setting: the stored value is empty and the repair did not take, or the read failed; set JWT_SECRET or delete the jwt_secret row")
+		}
+		logging.G(ctx).Info("JWT secret in database (t_system_setting) was empty; repaired with a freshly generated value")
+		return winner, nil
 	}
 	if winner == generated {
 		logging.G(ctx).Info("JWT secret auto-generated and persisted to database (t_system_setting)")

@@ -6,6 +6,7 @@ package auth
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -62,7 +63,7 @@ func NewJWTManager(secret string, accessTTL, refreshTTL time.Duration) *JWTManag
 var errEmptyJWTSecret = errors.New("jwt: signing secret is empty")
 
 func (m *JWTManager) checkSecret() error {
-	if len(m.secret) == 0 {
+	if strings.TrimSpace(string(m.secret)) == "" {
 		return errEmptyJWTSecret
 	}
 	return nil
