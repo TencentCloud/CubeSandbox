@@ -1388,6 +1388,22 @@ start_systemd_target() {
   systemctl disable --now \
     cube-sandbox-control.target \
     cube-sandbox-compute.target >/dev/null 2>&1 || true
+
+  # CubeS3lvol is NOT listed in the static Wants= of either target: its
+  # unit is always shipped, but enabling is gated on
+  # ONE_CLICK_ENABLE_S3LVOL. `systemctl enable` creates
+  # <target>.wants/cube-sandbox-s3lvol.service symlinks, which is exactly
+  # what makes `systemctl start <target>` pull the service up (and
+  # multi-user.target -> <target> chain makes it start on boot); the
+  # disable branch removes the symlinks on a downgrade so a reinstall
+  # with the switch off does not leave the service running.
+  if [[ "${ONE_CLICK_ENABLE_S3LVOL}" == "1" ]]; then
+    systemctl enable cube-sandbox-s3lvol.service >/dev/null 2>&1 \
+      || log "WARN: could not enable cube-sandbox-s3lvol.service"
+  else
+    systemctl disable cube-sandbox-s3lvol.service >/dev/null 2>&1 || true
+  fi
+
   systemctl enable --now "${target}"
 }
 
