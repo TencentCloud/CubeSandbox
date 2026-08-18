@@ -269,7 +269,13 @@ static __always_inline long snat_tcp(struct __sk_buff *skb,
 static __always_inline void update_session(enum ip_conntrack_dir dir, struct nat_session *sess,
 					   __u64 now_ns, bool syn, bool ack, bool fin, bool rst)
 {
-	enum tcp_conntrack old_state, new_state;
+	/* __u8 (not enum): keeps old_state in a single unsigned register. With a
+	 * signed enum, older clang (14) narrows the value with `&= 255` masks that
+	 * split it into a bounds-checked copy and a separate index copy, so the
+	 * verifier sees the tcp_conntracks index register as unbounded (umax=255)
+	 * and rejects the .rodata read. A plain __u8 keeps check and index unified.
+	 */
+	__u8 old_state, new_state;
 	unsigned int index;
 
 	session_lazy_refresh(sess, now_ns);
