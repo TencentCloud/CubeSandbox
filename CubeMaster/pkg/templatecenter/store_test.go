@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/go-sql-driver/mysql"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -197,7 +199,7 @@ func TestFinalizeTemplateReplicasClaimsAliasBeforePublishingReady(t *testing.T) 
 	defer patches.Reset()
 
 	var order []string
-	patches.ApplyFunc(claimTemplateAlias, func(ctx context.Context, templateID, alias string) error {
+	patches.ApplyFunc(claimTemplateAlias, func(ctx context.Context, templateID, alias string, requireReady bool) error {
 		order = append(order, "claim")
 		return nil
 	})
@@ -235,7 +237,7 @@ func TestFinalizeTemplateReplicasSkipsAliasClaimWhenFailed(t *testing.T) {
 	defer patches.Reset()
 
 	claimed := false
-	patches.ApplyFunc(claimTemplateAlias, func(ctx context.Context, templateID, alias string) error {
+	patches.ApplyFunc(claimTemplateAlias, func(ctx context.Context, templateID, alias string, requireReady bool) error {
 		claimed = true
 		return nil
 	})
@@ -264,7 +266,7 @@ func TestFinalizeTemplateReplicasClaimsAliasForPartiallyReady(t *testing.T) {
 	defer patches.Reset()
 
 	var order []string
-	patches.ApplyFunc(claimTemplateAlias, func(ctx context.Context, templateID, alias string) error {
+	patches.ApplyFunc(claimTemplateAlias, func(ctx context.Context, templateID, alias string, requireReady bool) error {
 		order = append(order, "claim")
 		return nil
 	})
@@ -303,7 +305,7 @@ func TestFinalizeTemplateReplicasSurfacesClaimWarningOnNonDuplicateError(t *test
 	defer patches.Reset()
 
 	published := false
-	patches.ApplyFunc(claimTemplateAlias, func(ctx context.Context, templateID, alias string) error {
+	patches.ApplyFunc(claimTemplateAlias, func(ctx context.Context, templateID, alias string, requireReady bool) error {
 		return errors.New("db unavailable")
 	})
 	patches.ApplyFunc(UpdateDefinitionStatus, func(ctx context.Context, templateID, status, lastError string) error {
@@ -337,7 +339,7 @@ func TestFinalizeTemplateReplicasSwallowsDuplicateAliasError(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 
-	patches.ApplyFunc(claimTemplateAlias, func(ctx context.Context, templateID, alias string) error {
+	patches.ApplyFunc(claimTemplateAlias, func(ctx context.Context, templateID, alias string, requireReady bool) error {
 		return &mysql.MySQLError{Number: 1062, Message: "duplicate entry"}
 	})
 	patches.ApplyFunc(UpdateDefinitionStatus, func(ctx context.Context, templateID, status, lastError string) error {
@@ -367,7 +369,7 @@ func TestFinalizeTemplateReplicasSkipsClaimForEmptyAlias(t *testing.T) {
 	defer patches.Reset()
 
 	claimed := false
-	patches.ApplyFunc(claimTemplateAlias, func(ctx context.Context, templateID, alias string) error {
+	patches.ApplyFunc(claimTemplateAlias, func(ctx context.Context, templateID, alias string, requireReady bool) error {
 		claimed = true
 		return nil
 	})
@@ -405,7 +407,7 @@ func TestRefreshTemplateReplicaSummaryClaimsAliasBeforePublishingReady(t *testin
 	patches.ApplyFunc(ListReplicas, func(ctx context.Context, templateID string) ([]models.TemplateReplica, error) {
 		return []models.TemplateReplica{{NodeID: "node-a", Status: ReplicaStatusReady}}, nil
 	})
-	patches.ApplyFunc(claimTemplateAlias, func(ctx context.Context, templateID, alias string) error {
+	patches.ApplyFunc(claimTemplateAlias, func(ctx context.Context, templateID, alias string, requireReady bool) error {
 		order = append(order, "claim")
 		return nil
 	})
@@ -438,7 +440,7 @@ func TestRefreshTemplateReplicaSummarySkipsAliasClaimWhenFailed(t *testing.T) {
 	patches.ApplyFunc(ListReplicas, func(ctx context.Context, templateID string) ([]models.TemplateReplica, error) {
 		return []models.TemplateReplica{{NodeID: "node-a", Status: ReplicaStatusFailed, ErrorMessage: "boom"}}, nil
 	})
-	patches.ApplyFunc(claimTemplateAlias, func(ctx context.Context, templateID, alias string) error {
+	patches.ApplyFunc(claimTemplateAlias, func(ctx context.Context, templateID, alias string, requireReady bool) error {
 		claimed = true
 		return nil
 	})
@@ -674,47 +676,58 @@ func TestGetTemplateByAliasFiltersByKindExcludesSnapshots(t *testing.T) {
 		"alias must be bound in the query; captured vars: %v", capturedVars)
 }
 
-// TestSetTemplateAlias_Clear_SetsEmptyDisplayName verifies the clear path
-// calls updateDefinitionFields with display_name="" on the target template.
-// We patch updateDefinitionFields with gomonkey (instead of the DryRun gorm.DB
-// trick used by TestGetTemplateByAliasFiltersByKindExcludesSnapshots) because
-// DryRun reliably suppresses connection attempts for SELECT but, in this gorm
-// version, still attempts to BEGIN a transaction for UPDATE statements — and
-// the test env has a live MySQL on 127.0.0.1:3306 that rejects the DSN's
-// credentials. Patching the private updateDefinitionFields directly captures
-// the exact map SetTemplateAlias builds, which is the assertion target.
+// TestSetTemplateAlias_Clear_SetsEmptyDisplayName verifies a real clear
+// (template currently holds an alias) reaches setTemplateAliasLocked with
+// an empty alias so the locked transaction can clear display_name + CREATE/REDO
+// job JSON together (design §3.6 I1).
 func TestSetTemplateAlias_Clear_SetsEmptyDisplayName(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(GetDefinition, func(ctx context.Context, templateID string) (*models.TemplateDefinition, error) {
+		return &models.TemplateDefinition{
+			TemplateID:  templateID,
+			Kind:        TemplateKindTemplate,
+			Status:      StatusReady,
+			DisplayName: "old-alias",
+		}, nil
+	})
+
+	var capturedTemplateID, capturedAlias string
+	called := false
+	patches.ApplyFunc(setTemplateAliasLocked, func(ctx context.Context, templateID, alias string) error {
+		capturedTemplateID = templateID
+		capturedAlias = alias
+		called = true
+		return nil
+	})
+
+	err := SetTemplateAlias(context.Background(), "tpl-clear-1", "")
+	require.NoError(t, err)
+	assert.True(t, called, "clear path must call setTemplateAliasLocked")
+	assert.Equal(t, "tpl-clear-1", capturedTemplateID)
+	assert.Equal(t, "", capturedAlias)
+}
+
+// TestSetTemplateAlias_ClearEmptyDisplayNameIsNoop verifies that clearing an
+// already-empty alias does not open a transaction or rewrite in-flight CREATE
+// job JSON (PENDING templates have empty DisplayName until finalize claims).
+func TestSetTemplateAlias_ClearEmptyDisplayNameIsNoop(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 	patches.ApplyFunc(GetDefinition, func(ctx context.Context, templateID string) (*models.TemplateDefinition, error) {
 		return &models.TemplateDefinition{
 			TemplateID: templateID,
 			Kind:       TemplateKindTemplate,
-			Status:     StatusReady,
+			Status:     StatusPending,
 		}, nil
 	})
-
-	var capturedTemplateID string
-	var capturedValues map[string]any
-	updateCalled := false
-	patches.ApplyFunc(updateDefinitionFields, func(ctx context.Context, templateID string, values map[string]any) error {
-		capturedTemplateID = templateID
-		// Copy the map so we can inspect it after the call (updateDefinitionFields
-		// itself mutates it by writing "updated_at").
-		capturedValues = map[string]any{}
-		for k, v := range values {
-			capturedValues[k] = v
-		}
-		updateCalled = true
+	patches.ApplyFunc(setTemplateAliasLocked, func(ctx context.Context, templateID, alias string) error {
+		t.Fatal("setTemplateAliasLocked must not run when DisplayName is already empty")
 		return nil
 	})
 
-	err := SetTemplateAlias(context.Background(), "tpl-clear-1", "")
+	err := SetTemplateAlias(context.Background(), "tpl-pending-1", "")
 	require.NoError(t, err)
-	assert.True(t, updateCalled, "clear path must call updateDefinitionFields")
-	assert.Equal(t, "tpl-clear-1", capturedTemplateID)
-	assert.Equal(t, "", capturedValues["display_name"],
-		"clear path must set display_name to empty string")
 }
 
 // TestSetTemplateAlias_RejectsSnapshot verifies that snapshots are rejected
@@ -779,121 +792,99 @@ func TestSetTemplateAlias_ClearAllowedOnFailed(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 	patches.ApplyFunc(GetDefinition, func(ctx context.Context, templateID string) (*models.TemplateDefinition, error) {
-		return &models.TemplateDefinition{TemplateID: templateID, Kind: TemplateKindTemplate, Status: StatusFailed}, nil
+		return &models.TemplateDefinition{
+			TemplateID:  templateID,
+			Kind:        TemplateKindTemplate,
+			Status:      StatusFailed,
+			DisplayName: "stuck",
+		}, nil
 	})
 	called := false
-	patches.ApplyFunc(updateDefinitionFields, func(ctx context.Context, templateID string, values map[string]any) error {
+	patches.ApplyFunc(setTemplateAliasLocked, func(ctx context.Context, templateID, alias string) error {
 		called = true
+		assert.Equal(t, "", alias)
 		return nil
 	})
 	err := SetTemplateAlias(context.Background(), "tpl-failed-1", "")
 	assert.NoError(t, err)
-	assert.True(t, called, "clear on a FAILED template must reach updateDefinitionFields")
+	assert.True(t, called, "clear on a FAILED template must reach setTemplateAliasLocked")
 }
 
-// TestSetTemplateAlias_IdempotentReclaimSucceeds locks the MySQL rows-changed
-// regression: re-claiming the alias a template already holds must succeed, not
-// 404 (the earlier RowsAffected==0 check broke this).
-func TestSetTemplateAlias_IdempotentReclaimSucceeds(t *testing.T) {
-	patches := gomonkey.NewPatches()
-	defer patches.Reset()
-	patches.ApplyFunc(GetDefinition, func(ctx context.Context, templateID string) (*models.TemplateDefinition, error) {
-		return &models.TemplateDefinition{TemplateID: templateID, Kind: TemplateKindTemplate, Status: StatusReady}, nil
-	})
-	patches.ApplyFunc(claimTemplateAlias, func(ctx context.Context, templateID, alias string) error {
-		return nil
-	})
-	err := SetTemplateAlias(context.Background(), "tpl-1", "my-alias")
-	assert.NoError(t, err)
-}
-
-// TestIsDeadlockError covers the PostgreSQL deadlock/lock-timeout SQLSTATEs
-// (string-matched) and confirms unrelated errors (incl. duplicate-key) are not
+// TestIsDeadlockError covers MySQL lock-wait/deadlock numbers and PostgreSQL
+// SQLSTATEs, and confirms unrelated errors (incl. duplicate-key) are not
 // treated as retriable deadlocks.
 func TestIsDeadlockError(t *testing.T) {
+	assert.True(t, isDeadlockError(&mysql.MySQLError{Number: 1205, Message: "Lock wait timeout exceeded"}))
+	assert.True(t, isDeadlockError(&mysql.MySQLError{Number: 1213, Message: "Deadlock found when trying to get lock"}))
+	assert.True(t, isDeadlockError(fmt.Errorf("claim fail: %w", &mysql.MySQLError{Number: 1213, Message: "Deadlock found"})))
 	assert.True(t, isDeadlockError(errors.New("ERROR: deadlock detected; SQLSTATE 40P01")))
 	assert.True(t, isDeadlockError(errors.New("ERROR: lock not available; SQLSTATE 55P03")))
+	assert.False(t, isDeadlockError(&mysql.MySQLError{Number: 1062, Message: "Duplicate entry"}))
 	assert.False(t, isDeadlockError(errors.New("Error 1062 (23000): Duplicate entry for key 'alias_key'")))
 	assert.False(t, isDeadlockError(errors.New("connection reset by peer")))
 }
 
-// TestSyncTemplateImageJobAlias_UpdatesAliasAndPreservesOthers verifies the
-// helper rewrites the alias in the image job's RequestJSON while preserving
-// unrelated fields (notably registry_password, which the struct marshaler
-// would strip).
-func TestSyncTemplateImageJobAlias_UpdatesAliasAndPreservesOthers(t *testing.T) {
-	oldDB := store.db
-	store.db = &gorm.DB{}
-	defer func() { store.db = oldDB }()
-	patches := gomonkey.NewPatches()
-	defer patches.Reset()
-	patches.ApplyFunc(listTemplateImageJobsByTemplateID, func(ctx context.Context, templateID string) ([]models.TemplateImageJob, error) {
-		return []models.TemplateImageJob{{JobID: "job-1", RequestJSON: `{"alias":"old","source_image_ref":"img","registry_password":"secret"}`}}, nil
-	})
-	var captured string
-	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, values map[string]any) error {
-		captured = values["request_json"].(string)
+func TestRetryOnceOnDeadlockRetriesThenSucceeds(t *testing.T) {
+	calls := 0
+	err := retryOnceOnDeadlock(func() error {
+		calls++
+		if calls == 1 {
+			return &mysql.MySQLError{Number: 1213, Message: "Deadlock found"}
+		}
 		return nil
 	})
-
-	require.NoError(t, syncTemplateImageJobAlias(context.Background(), "tpl-1", "new"))
-	assert.Contains(t, captured, `"alias":"new"`)
-	assert.Contains(t, captured, `"source_image_ref":"img"`)
-	assert.Contains(t, captured, `"registry_password":"secret"`)
-	assert.NotContains(t, captured, `"old"`)
+	require.NoError(t, err)
+	assert.Equal(t, 2, calls)
 }
 
-// TestSetTemplateAlias_ClaimSyncsJobAliasForTargetAndOldHolder verifies that a
-// claim syncs the operator alias into the target's image job AND clears the
-// old holder's image-job alias, so a later redo of either doesn't revert the
-// transfer (design §3.6).
-func TestSetTemplateAlias_ClaimSyncsJobAliasForTargetAndOldHolder(t *testing.T) {
-	patches := gomonkey.NewPatches()
-	defer patches.Reset()
-	patches.ApplyFunc(GetDefinition, func(ctx context.Context, templateID string) (*models.TemplateDefinition, error) {
-		return &models.TemplateDefinition{TemplateID: templateID, Kind: TemplateKindTemplate, Status: StatusReady}, nil
+func TestRetryOnceOnDeadlockNonDeadlockIsNotRetried(t *testing.T) {
+	calls := 0
+	sentinel := errors.New("not a deadlock")
+	err := retryOnceOnDeadlock(func() error {
+		calls++
+		return sentinel
 	})
-	patches.ApplyFunc(GetTemplateByAlias, func(ctx context.Context, alias string) (*models.TemplateDefinition, error) {
-		return &models.TemplateDefinition{TemplateID: "tpl-old"}, nil
-	})
-	patches.ApplyFunc(claimTemplateAlias, func(ctx context.Context, templateID, alias string) error { return nil })
-	var syncs []string
-	patches.ApplyFunc(syncTemplateImageJobAlias, func(ctx context.Context, templateID, alias string) error {
-		syncs = append(syncs, templateID+"="+alias)
-		return nil
-	})
-
-	require.NoError(t, SetTemplateAlias(context.Background(), "tpl-target", "new"))
-	assert.ElementsMatch(t, []string{"tpl-target=new", "tpl-old="}, syncs)
+	assert.ErrorIs(t, err, sentinel)
+	assert.Equal(t, 1, calls)
 }
 
-// TestClearAliasFromOtherInProgressJobs verifies that claiming an alias clears
-// it from OTHER templates' in-progress build jobs (so a still-building template
-// created with that alias can't reclaim it on completion), while leaving the
-// keep template and unrelated-alias jobs untouched.
-func TestClearAliasFromOtherInProgressJobs(t *testing.T) {
-	oldDB := store.db
-	store.db = &gorm.DB{}
-	defer func() { store.db = oldDB }()
+// TestSyncCreateRedoImageJobAliasTx_UpdatesCreateRequestJSON verifies CREATE
+// RequestJSON is rewritten while unrelated fields are preserved.
+func TestSyncCreateRedoImageJobAliasTx_UpdatesCreateRequestJSON(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
-	patches.ApplyFunc(listInProgressImageJobs, func(ctx context.Context) ([]models.TemplateImageJob, error) {
+	patches.ApplyFunc(listCreateRedoImageJobsByTemplateIDTx, func(tx *gorm.DB, templateID string) ([]models.TemplateImageJob, error) {
 		return []models.TemplateImageJob{
-			{JobID: "j-other", TemplateID: "tpl-other", RequestJSON: `{"alias":"x","source_image_ref":"img"}`},
-			{JobID: "j-keep", TemplateID: "tpl-keep", RequestJSON: `{"alias":"x","source_image_ref":"img"}`},
-			{JobID: "j-unrelated", TemplateID: "tpl-third", RequestJSON: `{"alias":"y","source_image_ref":"img"}`},
+			{JobID: "job-create", Operation: JobOperationCreate, RequestJSON: `{"alias":"old","source_image_ref":"img","registry_password":"secret"}`},
 		}, nil
 	})
-	var updated []string
-	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, values map[string]any) error {
-		updated = append(updated, jobID+"|"+values["request_json"].(string))
+	updated := map[string]string{}
+	patches.ApplyFunc(updateTemplateImageJobTx, func(tx *gorm.DB, jobID string, values map[string]any) error {
+		updated[jobID] = values["request_json"].(string)
 		return nil
 	})
 
-	require.NoError(t, clearAliasFromOtherInProgressJobs(context.Background(), "x", "tpl-keep"))
-	require.Len(t, updated, 1)
-	assert.Contains(t, updated[0], "j-other|")
-	assert.NotContains(t, updated[0], `"alias"`)
+	require.NoError(t, syncCreateRedoImageJobAliasTx(&gorm.DB{}, "tpl-1", "new"))
+	require.Contains(t, updated, "job-create")
+	assert.Contains(t, updated["job-create"], `"alias":"new"`)
+	assert.Contains(t, updated["job-create"], `"source_image_ref":"img"`)
+	assert.Contains(t, updated["job-create"], `"registry_password":"secret"`)
+}
+
+func TestSyncCreateRedoImageJobAliasTx_UpdateFailureIsFatal(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(listCreateRedoImageJobsByTemplateIDTx, func(tx *gorm.DB, templateID string) ([]models.TemplateImageJob, error) {
+		return []models.TemplateImageJob{
+			{JobID: "job-1", Operation: JobOperationCreate, RequestJSON: `{"alias":"old"}`},
+		}, nil
+	})
+	patches.ApplyFunc(updateTemplateImageJobTx, func(tx *gorm.DB, jobID string, values map[string]any) error {
+		return errors.New("update failed")
+	})
+	err := syncCreateRedoImageJobAliasTx(&gorm.DB{}, "tpl-1", "new")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "update failed")
 }
 
 // TestCurrentJobAlias_ReadsSyncedAlias verifies currentJobAlias re-reads the
@@ -925,9 +916,9 @@ func TestCurrentJobAlias_HonorsClearedAlias(t *testing.T) {
 	assert.Equal(t, "", a)
 }
 
-// TestCurrentJobAlias_ReadErrorFallsBack verifies a read failure returns
-// ok=false so the caller can fall back to the in-memory alias.
-func TestCurrentJobAlias_ReadErrorFallsBack(t *testing.T) {
+// TestCurrentJobAlias_ReadErrorSkipsClaim verifies a read failure returns
+// ok=false so finalize skips claim instead of falling back to a frozen alias.
+func TestCurrentJobAlias_ReadErrorSkipsClaim(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 	patches.ApplyFunc(getTemplateImageJobRecordByID, func(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
@@ -936,6 +927,32 @@ func TestCurrentJobAlias_ReadErrorFallsBack(t *testing.T) {
 	a, ok := currentJobAlias(context.Background(), "job-1")
 	assert.False(t, ok)
 	assert.Equal(t, "", a)
+	assert.Equal(t, "", aliasToClaimAtFinalize(context.Background(), "tpl-1", "job-1"),
+		"finalize must skip claim on read failure; never fall back to a frozen alias")
+}
+
+func TestAliasToClaimAtFinalize_PrefersDisplayName(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(getTemplateImageJobRecordByID, func(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
+		return &models.TemplateImageJob{JobID: jobID, RequestJSON: `{"alias":"from-job"}`}, nil
+	})
+	patches.ApplyFunc(GetDefinition, func(ctx context.Context, templateID string) (*models.TemplateDefinition, error) {
+		return &models.TemplateDefinition{TemplateID: templateID, DisplayName: "from-def"}, nil
+	})
+	assert.Equal(t, "from-def", aliasToClaimAtFinalize(context.Background(), "tpl-1", "job-1"))
+}
+
+func TestAliasToClaimAtFinalize_UsesJobAliasWhenDisplayNameEmpty(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(getTemplateImageJobRecordByID, func(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
+		return &models.TemplateImageJob{JobID: jobID, RequestJSON: `{"alias":"from-job"}`}, nil
+	})
+	patches.ApplyFunc(GetDefinition, func(ctx context.Context, templateID string) (*models.TemplateDefinition, error) {
+		return &models.TemplateDefinition{TemplateID: templateID, DisplayName: ""}, nil
+	})
+	assert.Equal(t, "from-job", aliasToClaimAtFinalize(context.Background(), "tpl-1", "job-1"))
 }
 
 // TestSetTemplateAlias_ValidatesAlias verifies that invalid alias strings
@@ -982,8 +999,7 @@ func TestSetTemplateAlias_RejectsEmptyID(t *testing.T) {
 }
 
 // TestSetTemplateAlias_ReachableClaim verifies the claim path delegates to
-// claimTemplateAlias with the right (templateID, alias). claimTemplateAlias
-// is patched so the test does not require a live DB transaction.
+// setTemplateAliasLocked (definition FOR UPDATE + CREATE/REDO sync).
 func TestSetTemplateAlias_ReachableClaim(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
@@ -997,7 +1013,7 @@ func TestSetTemplateAlias_ReachableClaim(t *testing.T) {
 
 	var capturedTemplateID, capturedAlias string
 	called := false
-	patches.ApplyFunc(claimTemplateAlias, func(ctx context.Context, templateID, alias string) error {
+	patches.ApplyFunc(setTemplateAliasLocked, func(ctx context.Context, templateID, alias string) error {
 		capturedTemplateID = templateID
 		capturedAlias = alias
 		called = true
@@ -1006,7 +1022,7 @@ func TestSetTemplateAlias_ReachableClaim(t *testing.T) {
 
 	err := SetTemplateAlias(context.Background(), "tpl-claim-1", "my-alias")
 	require.NoError(t, err)
-	assert.True(t, called, "claim path must invoke claimTemplateAlias")
+	assert.True(t, called, "claim path must invoke setTemplateAliasLocked")
 	assert.Equal(t, "tpl-claim-1", capturedTemplateID)
 	assert.Equal(t, "my-alias", capturedAlias)
 }
@@ -1023,4 +1039,41 @@ func TestSetTemplateAlias_PropagatesGetDefinitionNotFound(t *testing.T) {
 
 	err := SetTemplateAlias(context.Background(), "tpl-missing-1", "my-alias")
 	assert.ErrorIs(t, err, ErrTemplateNotFound)
+}
+
+func TestIsDuplicateAliasError_WrappedMySQL1062(t *testing.T) {
+	inner := &mysql.MySQLError{Number: 1062, Message: "Duplicate entry 'shared' for key 'alias_key'"}
+	wrapped := fmt.Errorf("claim alias %q for template %s fail: %w", "shared", "tpl-1", inner)
+	assert.True(t, isDuplicateAliasError(wrapped), "1062 must remain detectable after %%w wrap")
+}
+
+func TestIsDuplicateAliasError_WrappedPostgres23505(t *testing.T) {
+	inner := &pgconn.PgError{
+		Code:    "23505",
+		Message: "duplicate key value violates unique constraint \"idx_template_definition_alias_unique\"",
+	}
+	wrapped := fmt.Errorf("claim alias %q for template %s fail: %w", "shared", "tpl-1", inner)
+	assert.True(t, isDuplicateAliasError(wrapped), "23505 must remain detectable after %%w wrap")
+}
+
+func TestSyncCreateRedoImageJobAliasTx_NoJobsSucceeds(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(listCreateRedoImageJobsByTemplateIDTx, func(tx *gorm.DB, templateID string) ([]models.TemplateImageJob, error) {
+		return nil, nil
+	})
+	require.NoError(t, syncCreateRedoImageJobAliasTx(&gorm.DB{}, "tpl-commit-origin", "new"),
+		"commit-origin templates with no CREATE/REDO jobs must still succeed")
+}
+
+func TestAliasToClaimAtFinalize_ClearedJobAndEmptyDisplayNameSkips(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(getTemplateImageJobRecordByID, func(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
+		return &models.TemplateImageJob{JobID: jobID, RequestJSON: `{"source_image_ref":"img"}`}, nil
+	})
+	patches.ApplyFunc(GetDefinition, func(ctx context.Context, templateID string) (*models.TemplateDefinition, error) {
+		return &models.TemplateDefinition{TemplateID: templateID, DisplayName: ""}, nil
+	})
+	assert.Equal(t, "", aliasToClaimAtFinalize(context.Background(), "tpl-1", "job-1"))
 }

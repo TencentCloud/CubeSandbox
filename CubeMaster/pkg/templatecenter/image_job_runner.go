@@ -188,14 +188,7 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 	if persistErr != nil {
 		err = persistErr
 	} else {
-		// Re-read the alias from the job's RequestJSON at finalize time so an
-		// operator set/clear made after this build started is honored (the
-		// in-memory req.Alias is frozen at submit). Falls back to req.Alias on
-		// read failure. See design §3.6.
-		claimAlias := req.Alias
-		if a, ok := currentJobAlias(ctx, jobID); ok {
-			claimAlias = a
-		}
+		claimAlias := aliasToClaimAtFinalize(ctx, req.TemplateID, jobID)
 		info, claimWarning, err = finalizeTemplateReplicas(ctx, req.TemplateID, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), claimAlias, replicas)
 	}
 	if err != nil {

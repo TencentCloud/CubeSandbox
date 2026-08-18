@@ -40,6 +40,8 @@ func TestValidateTemplateAlias(t *testing.T) {
 		{name: "uppercase", alias: "MyApp", wantValid: false},
 		{name: "tpl-prefix", alias: "tpl-xxx", wantValid: false},
 		{name: "snap-prefix", alias: "snap-xxx", wantValid: false},
+		{name: "bare-tpl-prefix", alias: "tpl-", wantValid: false},
+		{name: "bare-snap-prefix", alias: "snap-", wantValid: false},
 		{name: "too-long-65-chars", alias: longAlias, wantValid: false},
 		{name: "underscore", alias: "my_app", wantValid: false},
 		{name: "leading-dash", alias: "-myapp", wantValid: false},

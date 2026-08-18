@@ -221,9 +221,14 @@ def test_template_alias_set_on_existing_template(sdk_backend, sdk_e2e_config):
         created_id = job.template_id
         _wait_for_ready(created_id, cfg)
 
+        with pytest.raises(ApiError) as exc:
+            Template.set_alias(created_id, "My-Alias", config=cfg)
+        assert exc.value.status_code == 400
+
         # 2. Set the alias on the existing template.
         updated = Template.set_alias(created_id, alias, config=cfg)
         assert updated.template_id == created_id
+        assert updated.name == alias
 
         # 3. GET by alias resolves to the template.
         assert Template.get(alias, config=cfg).template_id == created_id
