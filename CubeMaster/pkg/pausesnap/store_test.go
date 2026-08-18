@@ -4,7 +4,9 @@
 package pausesnap
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -48,4 +50,34 @@ func TestIsReadyPauseSnapshot(t *testing.T) {
 	require.False(t, isReadyPauseSnapshot(statusFailed))
 	require.False(t, isReadyPauseSnapshot(statusCreating))
 	require.False(t, isReadyPauseSnapshot(""))
+}
+
+// A READY binding means the sandbox is genuinely paused: Begin must wrap
+// ErrAlreadyExists (via %w) so the caller can detect it with errors.Is and
+// treat the pause as idempotent already-paused.
+func TestBeginReadyBindingWrapsErrAlreadyExists(t *testing.T) {
+	db := setupPauseDeleteTest(t)
+	seedPauseBinding(t, db, "sb-ready", "snap-ready", statusReady, "10.0.0.1")
+
+	_, err := Begin(context.Background(), "sb-ready", "node-1", "10.0.0.1", "cubebox")
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrAlreadyExists))
+	require.Contains(t, err.Error(), "snap-ready")
+}
+
+// A CREATING/FAILED binding is not a clean paused state: Begin must NOT wrap
+// ErrAlreadyExists, so the caller keeps the generic failure path instead of
+// masking an in-flight or terminally-failed pause as already-paused.
+func TestBeginNonReadyBindingDoesNotWrapErrAlreadyExists(t *testing.T) {
+	for _, status := range []string{statusCreating, statusFailed} {
+		t.Run(status, func(t *testing.T) {
+			db := setupPauseDeleteTest(t)
+			seedPauseBinding(t, db, "sb-x", "snap-x", status, "10.0.0.1")
+
+			_, err := Begin(context.Background(), "sb-x", "node-1", "10.0.0.1", "cubebox")
+			require.Error(t, err)
+			require.False(t, errors.Is(err, ErrAlreadyExists))
+			require.Contains(t, err.Error(), status)
+		})
+	}
 }

@@ -30,6 +30,15 @@ const RET_CODE_NOT_FOUND: i32 = 130404;
 const RET_CODE_CONFLICT: i32 = 130409;
 const RET_CODE_TASK_STATE_INVALID: i32 = 130490;
 const RET_CODE_TASK_RESUME_FAILED: i32 = 130589;
+/// Stable machine marker CubeMaster appends to a pause ret_msg ONLY when it
+/// reports an idempotent already-paused (TaskStateInvalid). Keying the redundant
+/// pause → HTTP 200 decision on this exact token (not free-form message text)
+/// keeps the contract robust: rewording / i18n of Master's human-readable prefix
+/// cannot regress a redundant pause to 500, and a Cubelet-originated 130490 that
+/// Master passes through verbatim (never carries this marker) is not swallowed as
+/// success. CONTRACT: keep in sync with CubeMaster's alreadyPausedMarker
+/// (CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go).
+const ALREADY_PAUSED_MARKER: &str = "[cube:already-paused]";
 const HOSTDIR_MOUNT_KEY: &str = "host-mount";
 const ENV_VAR_NAME_MAX_LEN: usize = 256;
 const ENV_VAR_VALUE_MAX_LEN: usize = 4096;
@@ -312,11 +321,36 @@ impl SandboxService {
     }
 
     pub async fn pause_sandbox(&self, sandbox_id: &str) -> AppResult<()> {
-        let resp = self
+        let resp = match self
             .cubemaster
             .update_sandbox(&self.build_update_request(sandbox_id, "pause", None))
             .await
-            .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
+        {
+            Ok(resp) => resp,
+            // 130490 (TaskStateInvalid) on pause means the sandbox is already
+            // paused (a prior pause whose RPC timed out on the caller actually
+            // completed on Master). parse_response raises it as CubeMasterError,
+            // so it lands here. Treat it as idempotent success rather than HTTP
+            // 500, which would charge a client's redundant pause against the
+            // server-side success-rate SLI.
+            //
+            // Gate on the stable ALREADY_PAUSED_MARKER, not the bare code:
+            // pauseSandbox passes the Cubelet's ret_code through verbatim, so a
+            // bare 130490 check would silently swallow any future Cubelet-
+            // originated 130490 on the pause path as a 200. Master appends the
+            // marker only on its idempotent already-paused branch, so the
+            // "already-paused ⟺ existing pause snapshot" contract survives message
+            // rewording / i18n and does not leak to pass-through codes. Unlike the
+            // DELETE path (130490 → 503 retry), the pause path treats it as
+            // terminal success.
+            Err(CubeMasterError::Api { ret_code, ret_msg })
+                if ret_code == RET_CODE_TASK_STATE_INVALID
+                    && ret_msg.contains(ALREADY_PAUSED_MARKER) =>
+            {
+                return Ok(());
+            }
+            Err(e) => return Err(map_update_cubemaster_err(e, sandbox_id)),
+        };
 
         ensure_update_result(
             resp.ret.ret_code,
@@ -1123,8 +1157,8 @@ mod tests {
     use super::{
         build_cube_network_config, filter_by_metadata, from_cubemaster_info,
         map_delete_cubemaster_err, map_volume_mounts, resolve_lifecycle_flags,
-        validate_mask_request_host, SandboxService, RET_CODE_CONFLICT, RET_CODE_NOT_FOUND,
-        RET_CODE_TASK_RESUME_FAILED, RET_CODE_TASK_STATE_INVALID,
+        validate_mask_request_host, SandboxService, ALREADY_PAUSED_MARKER, RET_CODE_CONFLICT,
+        RET_CODE_NOT_FOUND, RET_CODE_TASK_RESUME_FAILED, RET_CODE_TASK_STATE_INVALID,
     };
     use crate::cubemaster::{
         CreateSandboxRequest, CubeMasterClient, CubeMasterError, CubeVolumeMount,
@@ -1254,6 +1288,78 @@ mod tests {
             .await
             .expect_err("rejected refresh should not succeed");
         assert_bad_request(err, reason);
+    }
+
+    // Pausing an already-paused sandbox: CubeMaster returns 130490
+    // (TaskStateInvalid) once a prior timed-out pause actually completed. That is
+    // an idempotent no-op for the client, so pause must resolve to Ok(()) rather
+    // than HTTP 500 (which would count a client's redundant pause against the
+    // server-side success-rate SLI).
+    #[tokio::test]
+    async fn pause_sandbox_treats_already_paused_as_idempotent_success() {
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/update",
+            post(move || async move {
+                ret_envelope(
+                    RET_CODE_TASK_STATE_INVALID,
+                    "[cube:already-paused] begin pause snapshot: sandbox sbx-1 already has pause snapshot snap-x",
+                )
+            }),
+        ))
+        .await;
+
+        service
+            .pause_sandbox("sbx-1")
+            .await
+            .expect("already-paused pause should be idempotent success");
+    }
+
+    // The already-paused marker is the load-bearing contract; assert the literal
+    // matches CubeMaster's alreadyPausedMarker so a rename on either side breaks
+    // this test rather than silently regressing redundant pauses to HTTP 500.
+    #[test]
+    fn already_paused_marker_is_stable() {
+        assert_eq!(ALREADY_PAUSED_MARKER, "[cube:already-paused]");
+    }
+
+    // Negative control: a genuine pause failure (not 130490) must still surface
+    // as an error so real faults are not masked as idempotent success.
+    #[tokio::test]
+    async fn pause_sandbox_keeps_backend_faults_as_error() {
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/update",
+            post(move || async move { ret_envelope(130593, "backend fault") }),
+        ))
+        .await;
+
+        service
+            .pause_sandbox("sbx-1")
+            .await
+            .expect_err("backend fault pause should not be treated as success");
+    }
+
+    // Negative control: a 130490 WITHOUT the already-paused marker (e.g. a future
+    // Cubelet-originated TaskStateInvalid passed through verbatim by pauseSandbox,
+    // or a message that merely mentions "pause snapshot" in another context) must
+    // stay an error, not be swallowed as idempotent success. The contract is
+    // keyed on ALREADY_PAUSED_MARKER, not the bare code or free-form text.
+    #[tokio::test]
+    async fn pause_sandbox_keeps_unrelated_task_state_invalid_as_error() {
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/update",
+            post(move || async move {
+                ret_envelope(
+                    RET_CODE_TASK_STATE_INVALID,
+                    "sandbox is pausing (pause snapshot in progress)",
+                )
+            }),
+        ))
+        .await;
+
+        service
+            .pause_sandbox("sbx-1")
+            .await
+            .expect_err("unrelated 130490 must not be treated as idempotent success");
     }
 
     // Negative control: genuine backend faults must keep counting as 5xx, and

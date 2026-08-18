@@ -13,6 +13,7 @@ import (
 	"time"
 
 	cubebox "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
+	cubeleterrorcode "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
@@ -36,6 +37,17 @@ const (
 	// Resume may heal only for timeout + Cubelet PAUSED. Explicit Cubelet
 	// failure cannot Resume (delete only).
 	pauseCubeletRPCTimeout = 120 * time.Second
+
+	// alreadyPausedMarker is a stable machine token that Master appends to the
+	// ret_msg ONLY when a pause is reported as idempotent already-paused
+	// (TaskStateInvalid). CubeAPI keys its "redundant pause → HTTP 200" decision
+	// on this exact marker rather than free-form message text, so that (a)
+	// rewording / i18n of the human-readable prefix cannot silently regress a
+	// redundant pause back to 500, and (b) a Cubelet-originated 130490 that Master
+	// passes through verbatim (it never carries this marker) is never swallowed as
+	// success. CONTRACT: keep this literal in sync with CubeAPI's
+	// ALREADY_PAUSED_MARKER (CubeAPI/src/services/sandboxes.rs).
+	alreadyPausedMarker = "[cube:already-paused]"
 )
 
 // pauseSandbox:
@@ -57,11 +69,68 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string) 
 		nodeID = n.ID()
 	}
 
-	// Resume success + failed pausesnap.Delete must not brick the next Pause.
-	clearStalePauseBindingIfRunning(ctx, req.RequestID, req.SandboxID, hostIP)
+	// A leftover binding is what drives both the stale-RUNNING cleanup and the
+	// already-paused convergence below; a clean pause (no binding) needs neither.
+	// So only probe the live Cubelet state when a binding exists — a normal pause
+	// issues zero List calls (as before this fix), and a retried auto-pause of a
+	// stranded sandbox issues exactly one (both consumers share this single probe
+	// instead of taking a List each).
+	existing, getErr := pausesnap.GetBySandbox(ctx, req.SandboxID)
+	if getErr != nil && !errors.Is(getErr, pausesnap.ErrNotFound) {
+		log.G(ctx).Warnf("pause: get snapshot binding for sandbox %s: %v", req.SandboxID, getErr)
+	}
+	var (
+		liveState cubebox.ContainerState
+		liveFound bool
+		probeIP   string
+	)
+	if existing != nil {
+		probeIP = strings.TrimSpace(hostIP)
+		if ip := strings.TrimSpace(existing.NodeIP); ip != "" {
+			probeIP = ip
+		}
+		liveState, liveFound = probePauseLiveState(ctx, probeIP, req.SandboxID)
+
+		// Resume success + failed pausesnap.Delete must not brick the next Pause:
+		// clear the leftover binding only when the sandbox is confirmed RUNNING.
+		if liveFound && liveState == cubebox.ContainerState_CONTAINER_RUNNING {
+			clearStalePauseBinding(ctx, req.RequestID, probeIP, existing)
+		}
+	}
 
 	snapID, err := pausesnap.Begin(ctx, req.SandboxID, nodeID, hostIP, req.InstanceType)
 	if err != nil {
+		// A leftover binding means the sandbox may already be paused — most
+		// commonly when a prior pause RPC timed out on the caller side but
+		// actually completed on Master/Cubelet. Report this as an idempotent
+		// "already in state" (TaskStateInvalid) rather than a generic param error
+		// so the caller (CLM auto-pause) recognises it and converges the dataplane
+		// to paused instead of rolling proxy state back to running, which would
+		// leave auto-resume unable to fire (HTTP 504 on the next request). Only
+		// converge when the live probe confirms PAUSED: a stale binding on a
+		// genuinely RUNNING sandbox (or an inconclusive probe) must stay a hard
+		// error so CLM does not brick a running box. READY converges on a confirmed
+		// PAUSED probe; FAILED additionally requires the failure to be a timeout.
+		// Stale CREATING and timeout-FAILED bindings are healed to READY first.
+		if shouldTreatAsAlreadyPaused(err, existing, liveState, liveFound) {
+			status := strings.TrimSpace(existing.Status)
+			if strings.EqualFold(status, pausesnap.StatusCreating) || strings.EqualFold(status, pausesnap.StatusFailed) {
+				healedNodeID := strings.TrimSpace(existing.NodeID)
+				if healedNodeID == "" {
+					if n, ok := localcache.GetNodesByIp(probeIP); ok {
+						healedNodeID = n.ID()
+					}
+				}
+				if err := pausesnap.Complete(ctx, req.SandboxID, existing.SnapshotID, healedNodeID, probeIP, req.InstanceType, nil); err != nil {
+					rsp.Ret.RetCode = int(errorcode.ErrorCode_ReqCubeAPIFailed)
+					rsp.Ret.RetMsg = fmt.Sprintf("heal pause snapshot: %v", err)
+					return rsp
+				}
+			}
+			rsp.Ret.RetCode = int(errorcode.MasterCode(cubeleterrorcode.ErrorCode_TaskStateInvalid))
+			rsp.Ret.RetMsg = fmt.Sprintf("%s begin pause snapshot: %v", alreadyPausedMarker, err)
+			return rsp
+		}
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
 		rsp.Ret.RetMsg = fmt.Sprintf("begin pause snapshot: %v", err)
 		return rsp
@@ -118,24 +187,78 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string) 
 	return rsp
 }
 
-func cubeletReportsPaused(ctx context.Context, hostIP, sandboxID string) bool {
-	listRsp, err := cubelet.List(ctx, cubelet.GetCubeletAddr(hostIP), &cubebox.ListCubeSandboxRequest{
-		Id: &sandboxID,
-	})
-	if err != nil || listRsp == nil {
+// shouldTreatAsAlreadyPaused decides whether a Begin rejection for a leftover
+// binding should be reported as idempotent already-paused (TaskStateInvalid)
+// rather than a hard param error. It is a pure classifier over the Begin error,
+// the leftover binding, and the single live Cubelet probe result, so its logic
+// is unit-testable without patching:
+//
+//   - READY (ErrAlreadyExists): converge only when the live probe CONFIRMS
+//     PAUSED. A stale READY binding on a genuinely RUNNING sandbox, or an
+//     inconclusive probe (probe failed / no container found), stays a hard error
+//     so CLM does not converge a running sandbox to paused.
+//   - FAILED: additionally require the failure to be an RPC timeout that the
+//     Cubelet confirms PAUSED — the same signal recoverTimedOutPauseForResume
+//     heals on. An explicit failure stays hard.
+//   - CREATING: a retry has acquired the sandbox lock after the prior holder
+//     exited, so a confirmed PAUSED probe identifies a stale crash-window binding.
+func shouldTreatAsAlreadyPaused(beginErr error, rec *pausesnap.Record, liveState cubebox.ContainerState, liveFound bool) bool {
+	if rec == nil || !liveFound || liveState != cubebox.ContainerState_CONTAINER_PAUSED {
 		return false
 	}
+	if errors.Is(beginErr, pausesnap.ErrAlreadyExists) {
+		return true
+	}
+	status := strings.TrimSpace(rec.Status)
+	if strings.EqualFold(status, pausesnap.StatusCreating) {
+		return true
+	}
+	return strings.EqualFold(status, pausesnap.StatusFailed) && isPauseTimeoutFailure(rec)
+}
+
+// probePauseLiveState returns the observed container state for a sandbox on the
+// given node. liveFound is false when the probe could not be completed (List
+// error / nil response) or the sandbox container was not found — callers must
+// treat that as inconclusive, not as a confirmed absence of PAUSED.
+func probePauseLiveState(ctx context.Context, hostIP, sandboxID string) (cubebox.ContainerState, bool) {
+	hostIP = strings.TrimSpace(hostIP)
+	if hostIP == "" {
+		return cubebox.ContainerState_CONTAINER_UNKNOWN, false
+	}
+	req := &cubebox.ListCubeSandboxRequest{Id: &sandboxID}
+	endpoint := cubelet.GetCubeletAddr(hostIP)
+	listRsp, err := cubelet.List(ctx, endpoint, req)
+	if err != nil || listRsp == nil {
+		log.G(ctx).Warnf("pause: probe sandbox %s live state failed, retrying: %v", sandboxID, err)
+		listRsp, err = cubelet.List(ctx, endpoint, req)
+	}
+	if err != nil || listRsp == nil {
+		log.G(ctx).Warnf("pause: probe sandbox %s live state after retry: %v", sandboxID, err)
+		return cubebox.ContainerState_CONTAINER_UNKNOWN, false
+	}
+	var observed cubebox.ContainerState
+	found := false
 	for _, item := range listRsp.GetItems() {
 		if item.GetId() != sandboxID {
 			continue
 		}
 		for _, c := range item.GetContainers() {
-			if c.GetId() == sandboxID && c.GetState() == cubebox.ContainerState_CONTAINER_PAUSED {
-				return true
+			if c.GetId() != sandboxID {
+				continue
+			}
+			found = true
+			observed = c.GetState()
+			if observed == cubebox.ContainerState_CONTAINER_PAUSED {
+				return observed, true
 			}
 		}
 	}
-	return false
+	return observed, found
+}
+
+func cubeletReportsPaused(ctx context.Context, hostIP, sandboxID string) bool {
+	state, found := probePauseLiveState(ctx, hostIP, sandboxID)
+	return found && state == cubebox.ContainerState_CONTAINER_PAUSED
 }
 
 // recoverTimedOutPauseForResume heals a Master FAILED pause binding only when
@@ -215,45 +338,16 @@ func isPauseTimeoutMessage(msg string) bool {
 		(strings.Contains(e, "timeout") && strings.Contains(e, "rpc"))
 }
 
-// clearStalePauseBindingIfRunning drops a leftover pause binding when the
-// sandbox is already RUNNING (typical: Resume succeeded but pausesnap.Delete
-// failed). Does not touch a real Paused sandbox's binding.
-func clearStalePauseBindingIfRunning(ctx context.Context, requestID, sandboxID, hostIP string) {
-	rec, err := pausesnap.GetBySandbox(ctx, sandboxID)
-	if err != nil || rec == nil || strings.TrimSpace(rec.SnapshotID) == "" {
-		return
-	}
-	probeIP := hostIP
-	if ip := strings.TrimSpace(rec.NodeIP); ip != "" {
-		probeIP = ip
-	}
-	if probeIP == "" {
-		return
-	}
-	listRsp, err := cubelet.List(ctx, cubelet.GetCubeletAddr(probeIP), &cubebox.ListCubeSandboxRequest{
-		Id: &sandboxID,
-	})
-	if err != nil || listRsp == nil {
-		log.G(ctx).Warnf("pause: probe sandbox %s for stale binding: %v", sandboxID, err)
-		return
-	}
-	running := false
-	for _, item := range listRsp.GetItems() {
-		if item.GetId() != sandboxID {
-			continue
-		}
-		for _, c := range item.GetContainers() {
-			if c.GetId() == sandboxID && c.GetState() == cubebox.ContainerState_CONTAINER_RUNNING {
-				running = true
-				break
-			}
-		}
-	}
-	if !running {
+// clearStalePauseBinding drops a leftover pause binding for a sandbox the caller
+// has already confirmed is RUNNING (typical: Resume succeeded but pausesnap.Delete
+// failed). The caller supplies the binding and the probe node so this does not
+// re-probe the Cubelet. Never called for a real Paused sandbox's binding.
+func clearStalePauseBinding(ctx context.Context, requestID, probeIP string, rec *pausesnap.Record) {
+	if rec == nil || strings.TrimSpace(rec.SnapshotID) == "" || strings.TrimSpace(probeIP) == "" {
 		return
 	}
 	log.G(ctx).Warnf("pause: clearing stale pause binding sandbox=%s snap=%s (sandbox is RUNNING)",
-		sandboxID, rec.SnapshotID)
+		rec.SandboxID, rec.SnapshotID)
 	cleanupPauseSnapshotLocal(ctx, requestID, probeIP, rec.SnapshotID)
 	if delErr := pausesnap.Delete(ctx, rec.SnapshotID); delErr != nil {
 		log.G(ctx).Warnf("pause: delete stale binding %s: %v", rec.SnapshotID, delErr)

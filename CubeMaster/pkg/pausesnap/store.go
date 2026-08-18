@@ -33,7 +33,11 @@ const (
 	// Normal Commit snaps use templatecenter.TemplateKindSnapshot ("snapshot").
 	KindPauseSnapshot = "pause_snapshot"
 	statusReady       = "READY"
-	statusCreating    = "CREATING"
+	// StatusCreating is the initial (pause in flight) binding status. Exported so
+	// the pause path can recognise a binding stranded at CREATING by a Master
+	// crash between Cubelet PauseToSnapshot and Complete/MarkFailed.
+	StatusCreating = "CREATING"
+	statusCreating = StatusCreating
 	// StatusFailed is a terminal Pause failure. Binding and sandbox proxy are
 	// kept so the user can see the failure; Resume is rejected until Delete.
 	StatusFailed      = "FAILED"
@@ -49,6 +53,15 @@ var (
 
 	ErrNotReady = errors.New("pausesnap store not initialized")
 	ErrNotFound = errors.New("pause snapshot not found")
+	// ErrAlreadyExists means a READY pause snapshot binding already exists for
+	// the sandbox when Begin was called — i.e. the sandbox is already paused (or
+	// a prior pause whose RPC timed out on the caller side actually completed).
+	// Begin only wraps this for a READY binding; CREATING/FAILED bindings return
+	// a plain descriptive error instead. Callers should treat ErrAlreadyExists
+	// as an idempotent "already paused" success rather than a hard parameter
+	// error, so the dataplane state converges to paused instead of being rolled
+	// back to running.
+	ErrAlreadyExists = errors.New("pause snapshot already exists")
 )
 
 // Init attaches to the shared Master DB. Safe to call multiple times.
@@ -94,7 +107,18 @@ func Begin(ctx context.Context, sandboxID, nodeID, nodeIP, instanceType string) 
 		return "", errors.New("sandboxID is required")
 	}
 	if existing, err := GetBySandbox(ctx, sandboxID); err == nil && existing != nil {
-		return "", fmt.Errorf("sandbox %s already has pause snapshot %s", sandboxID, existing.SnapshotID)
+		if isReadyPauseSnapshot(existing.Status) {
+			// READY binding: the sandbox is genuinely paused, so callers may
+			// treat this as an idempotent already-paused success.
+			return "", fmt.Errorf("%w: sandbox %s already has pause snapshot %s",
+				ErrAlreadyExists, sandboxID, existing.SnapshotID)
+		}
+		// CREATING/FAILED: a pause is in flight or terminally failed — not a
+		// clean paused state. Keep the descriptive error so the caller does not
+		// mistake it for idempotent already-paused (which would mask the failure
+		// instead of routing to resume-heal / delete).
+		return "", fmt.Errorf("sandbox %s has pause snapshot %s in status %s",
+			sandboxID, existing.SnapshotID, existing.Status)
 	} else if err != nil && !errors.Is(err, ErrNotFound) {
 		return "", err
 	}
