@@ -1,0 +1,31 @@
+[Unit]
+Description=Cube Sandbox S3lvol (RCOW data plane)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
+RequiresMountsFor=/data/cubelet /data/log
+PartOf=cube-sandbox-control.target cube-sandbox-compute.target
+
+[Service]
+# Type=simple: the supervise script is the unit's main process and stays in
+# the foreground, so systemd sees the target die through it (exit 1 on
+# crash -> Restart=on-failure) -- Type=forking would not notice a crash of
+# the detached target.
+Type=simple
+EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
+ExecStart=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cube-s3lvol-supervise.sh
+# Conditional stop: full teardown (disconnect -> flush/unload -> SIGTERM)
+# when the target is alive; when it has crashed, only clean target-side
+# state and never disconnect the NVMf initiator, so nvme_tcp reconnects
+# to the rebuilt NQN/NSID grid without an I/O interruption.
+ExecStop=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cube-s3lvol-stop.sh
+Restart=on-failure
+RestartSec=3s
+StartLimitBurst=5
+TimeoutStartSec=300s
+TimeoutStopSec=180s
+KillMode=control-group
+
+[Install]
+WantedBy=cube-sandbox-control.target
+WantedBy=cube-sandbox-compute.target
