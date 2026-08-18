@@ -246,12 +246,107 @@ mod tests {
     };
     use axum::{
         extract::Json,
-        http::{header::RETRY_AFTER, StatusCode},
+        http::{
+            header::{AUTHORIZATION, RETRY_AFTER},
+            HeaderName, HeaderValue, StatusCode,
+        },
         routing::delete,
         Router,
     };
     use axum_test::TestServer;
     use serde_json::Value;
+
+    async fn rate_limited_server(rate_limit_per_sec: u32) -> TestServer {
+        let mut config = ServerConfig::default();
+        config.cubemaster_url = "http://127.0.0.1:9".to_string();
+        config.auth_callback_url = None;
+        config.cube_api_key = Some("supersecret".to_string());
+        config.rate_limit_per_sec = rate_limit_per_sec;
+
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        TestServer::new(build_router(state)).expect("router should build")
+    }
+
+    #[tokio::test]
+    async fn rotating_an_unvalidated_api_key_header_cannot_refresh_the_bucket() {
+        let server = rate_limited_server(3).await;
+
+        let mut statuses = Vec::new();
+        for i in 0..30 {
+            let response = server
+                .get("/sandboxes")
+                .add_header(
+                    AUTHORIZATION,
+                    HeaderValue::from_static("Bearer supersecret"),
+                )
+                .add_header(
+                    HeaderName::from_static("x-api-key"),
+                    HeaderValue::from_str(&format!("rotating-{i}")).expect("valid header"),
+                )
+                .await;
+            statuses.push(response.status_code());
+        }
+
+        let throttled = statuses
+            .iter()
+            .filter(|s| **s == StatusCode::TOO_MANY_REQUESTS)
+            .count();
+        assert!(
+            throttled > 20,
+            "rotating X-API-Key bypassed the limiter: only {throttled}/30 throttled, statuses {statuses:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bearer_client_is_throttled_without_any_api_key_header() {
+        let server = rate_limited_server(3).await;
+
+        let mut throttled = 0;
+        for _ in 0..30 {
+            let response = server
+                .get("/sandboxes")
+                .add_header(
+                    AUTHORIZATION,
+                    HeaderValue::from_static("Bearer supersecret"),
+                )
+                .await;
+            if response.status_code() == StatusCode::TOO_MANY_REQUESTS {
+                throttled += 1;
+            }
+        }
+        assert!(
+            throttled > 20,
+            "bearer client was not throttled: {throttled}/30"
+        );
+    }
+
+    #[tokio::test]
+    async fn alternating_header_styles_share_one_bucket_in_simple_key_mode() {
+        let server = rate_limited_server(3).await;
+
+        let mut throttled = 0;
+        for i in 0..30 {
+            let request = server.get("/sandboxes");
+            let request = if i % 2 == 0 {
+                request.add_header(
+                    AUTHORIZATION,
+                    HeaderValue::from_static("Bearer supersecret"),
+                )
+            } else {
+                request.add_header(
+                    HeaderName::from_static("x-api-key"),
+                    HeaderValue::from_static("supersecret"),
+                )
+            };
+            if request.await.status_code() == StatusCode::TOO_MANY_REQUESTS {
+                throttled += 1;
+            }
+        }
+        assert!(
+            throttled > 20,
+            "alternating Bearer and X-API-Key doubled the quota: only {throttled}/30 throttled"
+        );
+    }
 
     async fn test_server() -> TestServer {
         let mut config = ServerConfig::default();
