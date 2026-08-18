@@ -221,4 +221,26 @@ if (
     exit 1
 fi
 
+# --- sandbox_gateway_ip_from_cidr: TPROXY --on-ip = network address + 1 -------
+# The TPROXY target IP is derived from CUBE_SANDBOX_NETWORK_CIDR by this
+# arithmetic; a bug here would silently steer intercepted traffic to a wrong
+# gateway while CI stayed green.
+[[ "$(sandbox_gateway_ip_from_cidr 192.168.0.0/18)" == "192.168.0.1" ]]
+[[ "$(sandbox_gateway_ip_from_cidr 10.0.0.0/8)" == "10.0.0.1" ]]
+[[ "$(sandbox_gateway_ip_from_cidr 172.16.0.0/12)" == "172.16.0.1" ]]
+[[ "$(sandbox_gateway_ip_from_cidr 192.168.1.0/24)" == "192.168.1.1" ]]
+# Non-/8-aligned mask.
+[[ "$(sandbox_gateway_ip_from_cidr 10.128.0.0/9)" == "10.128.0.1" ]]
+# Host bits set: masked off before +1 (gateway is the network address + 1, not
+# the literal address + 1).
+[[ "$(sandbox_gateway_ip_from_cidr 192.168.5.7/24)" == "192.168.5.1" ]]
+# Invalid CIDRs are rejected (fatal exits the subshell, so a surviving subshell
+# means the value was wrongly accepted).
+for bad in "10.0.0.0/33" "10.0.0.0/0" "notacidr" "1.2.3.256/24" "10.0.0.0"; do
+    if ( sandbox_gateway_ip_from_cidr "${bad}" >/dev/null 2>&1 ); then
+        echo "invalid CIDR ${bad} was accepted" >&2
+        exit 1
+    fi
+done
+
 printf 'cube-proxy-iptables-init_test: PASS\n'
