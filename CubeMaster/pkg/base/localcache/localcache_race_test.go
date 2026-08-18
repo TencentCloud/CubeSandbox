@@ -6,6 +6,8 @@ package localcache
 
 import (
 	"context"
+	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -86,5 +88,50 @@ func TestConcurrentDestroyDoesNotRaceWithBackgroundLoops(t *testing.T) {
 			localCache.Destroy()
 		}()
 	}
+	wg.Wait()
+}
+
+func TestDestroySnapshotDoesNotRaceWithInFlightRefresh(t *testing.T) {
+	localCache := NewCache("destroy-snapshot-probe",
+		func(ctx context.Context, key string) (interface{}, bool, error) {
+			return RandString(16), true, nil
+		},
+		&LocalCacheConfig{
+			LowCacheSize:       1000000,
+			HighCacheSize:      2000000,
+			Expired:            time.Millisecond,
+			AsyncRefreshBefore: time.Millisecond,
+			MaxAsyncRefreshNum: 100,
+			ExpiredUse:         true,
+			OpenCacheFile:      true,
+			LoadFileName:       filepath.Join(t.TempDir(), "cache.gob"),
+		})
+
+	ctx := context.Background()
+	const keys = 64
+	for i := 0; i < keys; i++ {
+		if _, _, err := localCache.Get(ctx, "k"+strconv.Itoa(i)); err != nil {
+			t.Fatalf("seed Get: %v", err)
+		}
+	}
+
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+	wg.Add(8)
+	for r := 0; r < 8; r++ {
+		go func(r int) {
+			defer wg.Done()
+			for i := 0; !stop.Load(); i++ {
+				if _, _, err := localCache.Get(ctx, "k"+strconv.Itoa((i+r)%keys)); err != nil {
+					t.Errorf("Get: %v", err)
+					return
+				}
+			}
+		}(r)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	localCache.Destroy()
+	stop.Store(true)
 	wg.Wait()
 }
