@@ -492,4 +492,5 @@ ONE_CLICK_CUBE_AGENT_BIN="${PREBUILT_DIR}/cube-agent" \
 ONE_CLICK_CUBE_INIT_BIN="${PREBUILT_DIR}/cube-init" \
 ONE_CLICK_CUBESHIM_BIN="${PREBUILT_DIR}/containerd-shim-cube-rs" \
 ONE_CLICK_CUBE_RUNTIME_BIN="${PREBUILT_DIR}/cube-runtime" \
+ONE_CLICK_S3LVOL_DIR="${PREBUILT_DIR}/s3lvol" \
   "${SCRIPT_DIR}/build-release-bundle.sh" "$@"

@@ -86,6 +86,7 @@ API_BIN_OVERRIDE="${ONE_CLICK_CUBE_API_BIN:-}"
 CUBE_OPS_BIN_OVERRIDE="${ONE_CLICK_CUBE_OPS_BIN:-}"
 CUBE_OPS_CLI_BIN_OVERRIDE="${ONE_CLICK_CUBE_OPS_CLI_BIN:-}"
 CUBEVSMAPDUMP_BIN_OVERRIDE="${ONE_CLICK_CUBEVSMAPDUMP_BIN:-}"
+S3LVOL_DIR="${ONE_CLICK_S3LVOL_DIR:-}"
 
 go_version_ldflags() {
   local version_pkg="$1"
@@ -279,12 +280,17 @@ PY
   # Shim + runtime binaries: already copied to RUNTIME_LAYOUT_DIR by build-vm-assets.sh.
   local shim_bin="${RUNTIME_LAYOUT_DIR}/cube-shim/bin/containerd-shim-cube-rs"
   local runtime_bin="${RUNTIME_LAYOUT_DIR}/cube-shim/bin/cube-runtime"
+  local s3lvol_bin=""
+  if [[ -n "${S3LVOL_DIR}" ]]; then
+    s3lvol_bin="${S3LVOL_DIR}/bin/s3lvol_tgt"
+  fi
 
   python3 - "${output}" "${release_version}" "${cube_version}" "${cube_commit}" "${cube_build_time}" \
       "${guest_image_version}" "${guest_agent_version}" "${kernel_version}" "${kernel_pvm_version}" \
       "${CORE_BIN_DIR}" \
       "${agent_artifact}" "${shim_bin}" "${runtime_bin}" \
-      "${guest_image_path}" "${kernel_vmlinux}" "${kernel_pvm_vmlinux}" <<'PY'
+      "${guest_image_path}" "${kernel_vmlinux}" "${kernel_pvm_vmlinux}" \
+      "${s3lvol_bin}" <<'PY'
 import json, os, sys, hashlib
 
 output_path       = sys.argv[1]
@@ -303,6 +309,7 @@ runtime_bin       = sys.argv[13]
 guest_image_path  = sys.argv[14]
 kernel_vmlinux    = sys.argv[15]
 kernel_pvm_vmlinux = sys.argv[16] if len(sys.argv) > 16 else ""
+s3lvol_bin        = sys.argv[17] if len(sys.argv) > 17 else ""
 
 def sha256_hex(path):
     """Return sha256:hexdigest for an existing file."""
@@ -384,6 +391,16 @@ components["cube-lifecycle-manager"] = {
     "commit": cube_commit,
     "build_time": cube_build_time,
 }
+
+# ── CubeS3lvol (s3lvol release directory; present only when the builder
+#    wrapper supplied ONE_CLICK_S3LVOL_DIR) ──
+if s3lvol_bin and os.path.isfile(s3lvol_bin):
+    components["s3lvol"] = {
+        "version": cube_version,
+        "commit": cube_commit,
+        "build_time": cube_build_time,
+        "digest_sha256": required_sha256(s3lvol_bin),
+    }
 
 # ── Guest image ──
 guest_image = {
@@ -720,6 +737,7 @@ mkdir -p \
   "${PACKAGE_ROOT}/systemd" \
   "${PACKAGE_ROOT}/cube-vs/network/bin" \
   "${PACKAGE_ROOT}/cube-snapshot" \
+  "${PACKAGE_ROOT}/CubeS3lvol" \
   "${PACKAGE_ROOT}/scripts/one-click" \
   "${PACKAGE_ROOT}/scripts/systemd" \
   "${PACKAGE_ROOT}/scripts/cube-egress" \
@@ -857,6 +875,21 @@ copy_file "${CUBE_EGRESS_SOURCE_DIR}/scripts/cube-proxy-iptables-init.sh" \
 # the content as the installed version. Must match cube_version so the
 # declared-vs-actual comparison in CubeMaster's version matrix works.
 printf '%s\n' "${DIST_VERSION}" > "${PACKAGE_ROOT}/cube-egress/version"
+
+# CubeS3lvol (s3lvol) ships as a self-contained release directory
+# (bin/s3lvol_tgt statically linked against SPDK/DPDK/AWS CRT, scripts/,
+# VERSION) produced by track_s3lvol into .work/prebuilt/s3lvol. When the
+# prebuilt is absent (e.g. a direct build-release-bundle.sh invocation
+# without the builder wrapper), skip it with a warning instead of failing
+# the whole build -- mirroring how the optional *_BIN overrides behave.
+if [[ -n "${S3LVOL_DIR}" ]]; then
+  copy_dir_contents "${S3LVOL_DIR}" "${PACKAGE_ROOT}/CubeS3lvol"
+  ensure_file "${PACKAGE_ROOT}/CubeS3lvol/bin/s3lvol_tgt"
+  # Host-side version marker, same convention as cube-egress/version above.
+  printf '%s\n' "${DIST_VERSION}" > "${PACKAGE_ROOT}/CubeS3lvol/version"
+else
+  log "WARN: ONE_CLICK_S3LVOL_DIR not set; CubeS3lvol omitted from sandbox-package"
+fi
 
 copy_dir_contents "${SCRIPT_DIR}/terraform/tencentcloud" "${PACKAGE_ROOT}/terraform/tencentcloud"
 # Strip any developer-local terraform state / kubeconfig / SSH keys / TLS
