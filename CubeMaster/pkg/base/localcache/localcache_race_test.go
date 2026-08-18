@@ -6,12 +6,15 @@ package localcache
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/localcache/util"
 )
 
 func TestConcurrentGetAndRefreshOnSameKey(t *testing.T) {
@@ -134,4 +137,84 @@ func TestDestroySnapshotDoesNotRaceWithInFlightRefresh(t *testing.T) {
 	localCache.Destroy()
 	stop.Store(true)
 	wg.Wait()
+}
+
+func frontKey(t *testing.T, c *LocalCache) string {
+	t.Helper()
+	c.Lock()
+	defer c.Unlock()
+	front := c.valueList.Front()
+	if front == nil {
+		t.Fatal("value list is empty")
+	}
+	return front.Value.(*util.CacheValue).Key
+}
+
+func TestFailingRefreshDoesNotPromoteTheEntry(t *testing.T) {
+	var fail atomic.Bool
+	localCache := NewCache("lru-demotion-probe",
+		func(ctx context.Context, key string) (interface{}, bool, error) {
+			if fail.Load() && key == "a" {
+				return nil, false, errors.New("loader is down")
+			}
+			return "v-" + key, true, nil
+		},
+		&LocalCacheConfig{
+			LowCacheSize:       1000000,
+			HighCacheSize:      2000000,
+			Expired:            time.Millisecond,
+			ExpiredUse:         false,
+			DemotionExpiredUse: false,
+		})
+	defer localCache.Destroy()
+
+	ctx := context.Background()
+	for _, k := range []string{"a", "b"} {
+		if _, _, err := localCache.Get(ctx, k); err != nil {
+			t.Fatalf("seed Get(%s): %v", k, err)
+		}
+	}
+	if got := frontKey(t, localCache); got != "a" {
+		t.Fatalf("front is %q before the probe, want a", got)
+	}
+
+	fail.Store(true)
+	time.Sleep(5 * time.Millisecond)
+
+	if _, _, err := localCache.Get(ctx, "a"); err == nil {
+		t.Fatal("Get(a) succeeded while the loader was failing")
+	}
+	if got := frontKey(t, localCache); got != "a" {
+		t.Fatalf("a failing entry was promoted: front is %q, want a to stay evictable", got)
+	}
+}
+
+func TestSuccessfulHitPromotesTheEntry(t *testing.T) {
+	localCache := NewCache("lru-promote-probe",
+		func(ctx context.Context, key string) (interface{}, bool, error) {
+			return "v-" + key, true, nil
+		},
+		&LocalCacheConfig{
+			LowCacheSize:  1000000,
+			HighCacheSize: 2000000,
+			Expired:       time.Hour,
+		})
+	defer localCache.Destroy()
+
+	ctx := context.Background()
+	for _, k := range []string{"a", "b"} {
+		if _, _, err := localCache.Get(ctx, k); err != nil {
+			t.Fatalf("seed Get(%s): %v", k, err)
+		}
+	}
+	if got := frontKey(t, localCache); got != "a" {
+		t.Fatalf("front is %q before the probe, want a", got)
+	}
+
+	if _, _, err := localCache.Get(ctx, "a"); err != nil {
+		t.Fatalf("Get(a): %v", err)
+	}
+	if got := frontKey(t, localCache); got != "b" {
+		t.Fatalf("a fresh hit did not promote: front is %q, want b", got)
+	}
 }
