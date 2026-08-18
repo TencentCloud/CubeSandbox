@@ -75,16 +75,16 @@ func TestForgedTokenSignedWithEmptySecretIsRejected(t *testing.T) {
 	}
 }
 
-func TestTokenSignedWithADifferentSecretIsRejected(t *testing.T) {
-	signer := auth.NewJWTManager("other-secret-32-bytes-long-ok!!!", 15*time.Minute, 168*time.Hour)
-	minted, err := signer.GenerateAccessToken("admin")
-	if err != nil {
-		t.Fatalf("failed to mint a token for the test: %v", err)
-	}
+func TestWhitespaceOnlySecretIsTreatedAsEmpty(t *testing.T) {
+	for _, secret := range []string{" ", "\t", "\n", "   \t\n "} {
+		jm := auth.NewJWTManager(secret, 15*time.Minute, 168*time.Hour)
 
-	empty := auth.NewJWTManager("", 15*time.Minute, 168*time.Hour)
-	if _, err := empty.VerifyAccessToken(minted); err == nil {
-		t.Fatal("VerifyAccessToken accepted a token signed with a different secret")
+		if _, err := jm.GenerateAccessToken("admin"); err == nil {
+			t.Errorf("GenerateAccessToken accepted a whitespace-only secret %q", secret)
+		}
+		if _, err := jm.VerifyAccessToken(forgedAccessToken(t)); err == nil {
+			t.Errorf("VerifyAccessToken accepted a forged token with a whitespace-only secret %q", secret)
+		}
 	}
 }
 

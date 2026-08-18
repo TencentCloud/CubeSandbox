@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestBootstrapJWTSecretRejectsAnEmptyStoredValue(t *testing.T) {
+func TestBootstrapJWTSecretRepairsAnEmptyStoredValue(t *testing.T) {
 	env := newTestStore(t)
 	defer env.teardown()
 	s := env.store
@@ -20,14 +20,46 @@ func TestBootstrapJWTSecretRejectsAnEmptyStoredValue(t *testing.T) {
 	}
 
 	secret, err := s.BootstrapJWTSecret(ctx, "")
-	if err == nil {
-		t.Fatalf("BootstrapJWTSecret returned %q with no error for an empty stored secret", secret)
+	if err != nil {
+		t.Fatalf("BootstrapJWTSecret did not repair an empty stored secret: %v", err)
 	}
-	if secret != "" {
-		t.Fatalf("BootstrapJWTSecret returned %q alongside an error, want empty", secret)
+	if strings.TrimSpace(secret) == "" {
+		t.Fatal("BootstrapJWTSecret returned an empty secret after repair")
 	}
-	if !strings.Contains(err.Error(), "empty") {
-		t.Fatalf("BootstrapJWTSecret error = %v, want it to mention the empty value", err)
+
+	persisted, err := s.GetSystemSetting(ctx, "jwt_secret")
+	if err != nil {
+		t.Fatalf("GetSystemSetting: %v", err)
+	}
+	if persisted != secret {
+		t.Fatalf("repaired secret was not persisted: row=%q returned=%q", persisted, secret)
+	}
+
+	again, err := s.BootstrapJWTSecret(ctx, "")
+	if err != nil {
+		t.Fatalf("BootstrapJWTSecret after repair: %v", err)
+	}
+	if again != secret {
+		t.Fatalf("a later start got a different secret: %q != %q", again, secret)
+	}
+}
+
+func TestBootstrapJWTSecretDoesNotOverwriteAHealthyValue(t *testing.T) {
+	env := newTestStore(t)
+	defer env.teardown()
+	s := env.store
+	ctx := context.Background()
+
+	if err := s.SetSystemSetting(ctx, "jwt_secret", "already-good-32-bytes-long-ok!!!"); err != nil {
+		t.Fatalf("SetSystemSetting: %v", err)
+	}
+
+	secret, err := s.BootstrapJWTSecret(ctx, "")
+	if err != nil {
+		t.Fatalf("BootstrapJWTSecret: %v", err)
+	}
+	if secret != "already-good-32-bytes-long-ok!!!" {
+		t.Fatalf("BootstrapJWTSecret = %q, want the stored value untouched", secret)
 	}
 }
 
