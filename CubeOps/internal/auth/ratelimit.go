@@ -5,6 +5,7 @@ package auth
 
 import (
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -26,7 +27,10 @@ type loginLimiter struct {
 	window   time.Duration
 }
 
-const sweepThreshold = 4096
+const (
+	sweepThreshold = 4096
+	evictTarget    = sweepThreshold / 2
+)
 
 var defaultLoginLimiter = &loginLimiter{
 	failures: make(map[string][]time.Time),
@@ -45,6 +49,9 @@ func (l *loginLimiter) recordFailure(ip string) {
 	cutoff := now.Add(-l.window)
 	if len(l.failures) >= sweepThreshold {
 		l.sweepLocked(cutoff)
+		if len(l.failures) >= sweepThreshold {
+			l.evictOldestLocked(evictTarget)
+		}
 	}
 	fails := l.failures[ip]
 	// Drop expired entries.
@@ -75,6 +82,28 @@ func (l *loginLimiter) sweepLocked(cutoff time.Time) {
 		} else {
 			l.failures[ip] = kept
 		}
+	}
+}
+
+func (l *loginLimiter) evictOldestLocked(target int) {
+	type entry struct {
+		ip   string
+		last time.Time
+	}
+	entries := make([]entry, 0, len(l.failures))
+	for ip, fails := range l.failures {
+		if len(fails) == 0 {
+			delete(l.failures, ip)
+			continue
+		}
+		entries = append(entries, entry{ip: ip, last: fails[len(fails)-1]})
+	}
+	if len(entries) <= target {
+		return
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].last.Before(entries[j].last) })
+	for i := 0; i < len(entries)-target; i++ {
+		delete(l.failures, entries[i].ip)
 	}
 }
 

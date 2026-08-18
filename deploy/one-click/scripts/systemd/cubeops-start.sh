@@ -19,6 +19,7 @@ mkdir -p "${CUBE_OPS_LOG_DIR}"
 # Bind address — must be 0.0.0.0 in All-in-One mode so the WebUI nginx
 # container can reach CubeOps via host.docker.internal:3010.
 export CUBE_OPS_BIND="${CUBE_OPS_BIND:-0.0.0.0:3010}"
+export CUBE_OPS_TRUSTED_PROXIES="${CUBE_OPS_TRUSTED_PROXIES:-127.0.0.1,::1,172.16.0.0/12}"
 export CUBE_OPS_LOG_LEVEL="${CUBE_OPS_LOG_LEVEL:-info}"
 
 # CubeMaster address (same host in All-in-One mode).

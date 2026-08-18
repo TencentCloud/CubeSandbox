@@ -21,6 +21,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -113,6 +114,10 @@ func Load() (*Config, error) {
 	}
 	if cfg.SandboxDomain == "" {
 		cfg.SandboxDomain = "cube.app"
+	}
+
+	if err := validateTrustedProxies(cfg.TrustedProxies); err != nil {
+		return nil, err
 	}
 
 	// JWT_SECRET is optional — if not set, it will be auto-generated and
@@ -328,6 +333,20 @@ func overrideFromEnv(cfg *Config) {
 			cfg.RefreshTTL = d
 		}
 	}
+}
+
+func validateTrustedProxies(entries []string) error {
+	for _, e := range entries {
+		if _, _, err := net.ParseCIDR(e); err == nil {
+			continue
+		}
+		if net.ParseIP(e) != nil {
+			continue
+		}
+		return fmt.Errorf("trusted_proxies entry %q is not an IP address or CIDR block (set trusted_proxies in YAML %s or CUBE_OPS_TRUSTED_PROXIES)",
+			e, yamlConfigPath())
+	}
+	return nil
 }
 
 func splitAndTrim(v string) []string {
