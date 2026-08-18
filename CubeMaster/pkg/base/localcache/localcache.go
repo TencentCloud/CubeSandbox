@@ -79,7 +79,7 @@ func NewCache(name string, loader LoaderFunc, localCacheConfig *LocalCacheConfig
 		localCache.loadFile(localCacheConfig.LoadFileName)
 	}
 	localCache.localCacheConfig = localCache.SetupConfig(localCacheConfig)
-	localCache.expiredUse.Store(localCache.localCacheConfig.ExpiredUse)
+	localCache.expiredUse.Store(localCache.localCacheConfig != nil && localCache.localCacheConfig.ExpiredUse)
 
 	localCache.chShrinkCache = make(chan bool, 1)
 	localCache.chCacheExit = make(chan bool)
@@ -126,7 +126,6 @@ func (localCache *LocalCache) Get(ctx context.Context, key string) (interface{},
 
 		localCache.Lock()
 		itm := element.Value.(*util.CacheValue)
-		localCache.valueList.MoveToBack(element)
 		localCache.Unlock()
 
 		if time.Now().Add(-itm.Expired).After(time.Unix(itm.LastAccess, 0)) {
@@ -135,6 +134,10 @@ func (localCache *LocalCache) Get(ctx context.Context, key string) (interface{},
 				r, f, err := localCache.loadAndRefresh(ctx, key)
 
 				if err != nil && localCache.localCacheConfig.DemotionExpiredUse {
+
+					localCache.Lock()
+					localCache.valueList.MoveToBack(element)
+					localCache.Unlock()
 					return itm.Value, true, nil
 				}
 
@@ -148,6 +151,9 @@ func (localCache *LocalCache) Get(ctx context.Context, key string) (interface{},
 			localCache.asyncRefresh(ctx, key)
 		}
 
+		localCache.Lock()
+		localCache.valueList.MoveToBack(element)
+		localCache.Unlock()
 		return itm.Value, true, nil
 	}
 
