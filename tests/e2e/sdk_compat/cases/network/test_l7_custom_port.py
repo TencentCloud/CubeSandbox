@@ -53,7 +53,10 @@ from framework.config import SdkE2EConfig
 # skips when unset (no safe portable default — see module docstring).
 L7_TARGET_HOST = os.environ.get("SDK_E2E_L7_TARGET_HOST")
 # Custom plaintext HTTP port the echo server listens on (+ the rule pins).
-L7_CUSTOM_HTTP_PORT = int(os.environ.get("SDK_E2E_L7_CUSTOM_HTTP_PORT", "18080"))
+# 0 = let the OS assign a free port. A fixed default can collide with a
+# leftover echo server from an interrupted run (EADDRINUSE); overriding via
+# SDK_E2E_L7_CUSTOM_HTTP_PORT is still possible when a fixed port is required.
+L7_CUSTOM_HTTP_PORT = int(os.environ.get("SDK_E2E_L7_CUSTOM_HTTP_PORT", "0"))
 # Public host for the scheme-only default-set leg (echoes request headers).
 L7_DEFAULT_HOST = os.environ.get("SDK_E2E_L7_DEFAULT_HOST", "httpbingo.org")
 L7_MARKER_HEADER = "X-Cube-L7-E2E"
@@ -152,19 +155,21 @@ def l7_echo_server():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield L7_TARGET_HOST or _detect_bridge_ip()
+        # server.server_address[1] is the OS-assigned port when
+        # L7_CUSTOM_HTTP_PORT == 0 (the default).
+        yield L7_TARGET_HOST or _detect_bridge_ip(), server.server_address[1]
     finally:
         server.shutdown()
         server.server_close()
 
 
-def _l7_rules_custom_http(target_host: str) -> list[dict]:
+def _l7_rules_custom_http(target_host: str, port: int) -> list[dict]:
     return [
         {
             "name": "e2e-custom-http",
             "match": {
                 "host": target_host,
-                "port": L7_CUSTOM_HTTP_PORT,
+                "port": port,
                 "scheme": "http",
             },
             "action": {
@@ -202,12 +207,12 @@ def _l7_rules_custom_https(host: str, port: int) -> list[dict]:
 def test_l7_custom_port_injects_marker_on_custom_http_port(
     sdk_backend: str,
     sdk_e2e_config: SdkE2EConfig,
-    l7_echo_server: str,
+    l7_echo_server: tuple[str, int],
 ):
     """A (host, port, scheme=http) rule intercepts a non-standard egress port
     and injects the rule's credential header; the echo reflects it back."""
     _skip_without_capability(sdk_backend)
-    target_host = l7_echo_server
+    target_host, http_port = l7_echo_server
 
     adapter = None
     try:
@@ -221,11 +226,11 @@ def test_l7_custom_port_injects_marker_on_custom_http_port(
             },
             create_options={
                 "allow_internet_access": False,
-                "network": {"rules": _l7_rules_custom_http(target_host)},
+                "network": {"rules": _l7_rules_custom_http(target_host, http_port)},
             },
         )
 
-        url = f"http://{target_host}:{L7_CUSTOM_HTTP_PORT}/headers"
+        url = f"http://{target_host}:{http_port}/headers"
         result = adapter.run_command(
             f"curl -sS --max-time 20 '{url}'",
             timeout=sdk_e2e_config.command_timeout,
