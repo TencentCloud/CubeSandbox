@@ -431,6 +431,8 @@ export E2B_API_KEY=e2b_000000
 - 若启用 `ONE_CLICK_ENABLE_TENCENT_DOCKER_MIRROR=1` 且 `/etc/docker/daemon.json` 已存在，需要 `python3`
 - 若打包内 `Cubelet/config/config.toml` 启用了 `storage_backend = "cubecow"`，还会额外检查：
   `mkfs.ext4`、`mount`、`umount`、`losetup`
+- 若 `ONE_CLICK_ENABLE_S3LVOL=1` 且包内存在 `CubeS3lvol/bin/s3lvol_tgt`，还会额外检查：
+  `nvme`（nvme-cli）、`python3`、`truncate`，以及 `s3lvol_tgt` 动态链接的共享库（`ldd` 探测；重点：`libssl.so.1.1` / `libcrypto.so.1.1` 属于 OpenSSL 1.1 分支）
 
 推荐安装包（覆盖上述 `cubecow` 依赖）：
 
@@ -446,6 +448,17 @@ sudo apt-get install -y e2fsprogs util-linux
 # OpenCloudOS / RHEL / CentOS
 sudo dnf install -y e2fsprogs util-linux || \
 sudo yum install -y e2fsprogs util-linux
+```
+
+启用 `ONE_CLICK_ENABLE_S3LVOL=1` 时额外安装包：
+
+```bash
+# Debian / Ubuntu（openssl 1.1 通常已满足；缺库时用 ldd 确认）
+sudo apt-get install -y nvme-cli python3 libaio1 libnuma1 uuid-runtime
+
+# OpenCloudOS / RHEL / CentOS（openssl 3 需 compat-openssl11）
+sudo dnf install -y nvme-cli python3 libaio libnuma libuuid compat-openssl11 || \
+sudo yum install -y nvme-cli python3 libaio libnuma libuuid compat-openssl11
 ```
 
 ### control 角色（`install.sh`，默认）
@@ -475,6 +488,8 @@ sudo yum install -y e2fsprogs util-linux
 - 若启用 `ONE_CLICK_ENABLE_TENCENT_DOCKER_MIRROR=1` 且 `/etc/docker/daemon.json` 已存在，需要 `python3`
 - 若打包内 `Cubelet/config/config.toml` 启用了 `storage_backend = "cubecow"`，还会额外检查：
   `mkfs.ext4`、`mount`、`umount`、`losetup`
+- 若 `ONE_CLICK_ENABLE_S3LVOL=1` 且包内存在 `CubeS3lvol/bin/s3lvol_tgt`，还会额外检查：
+  `nvme`（nvme-cli）、`python3`、`truncate`，以及 `s3lvol_tgt` 动态链接的共享库（`ldd` 探测；重点：`libssl.so.1.1` / `libcrypto.so.1.1` 属于 OpenSSL 1.1 分支）
 
 推荐安装包（覆盖上述 `cubecow` 依赖）：
 
@@ -490,6 +505,17 @@ sudo apt-get install -y e2fsprogs util-linux
 # OpenCloudOS / RHEL / CentOS
 sudo dnf install -y e2fsprogs util-linux || \
 sudo yum install -y e2fsprogs util-linux
+```
+
+启用 `ONE_CLICK_ENABLE_S3LVOL=1` 时额外安装包：
+
+```bash
+# Debian / Ubuntu（openssl 1.1 通常已满足；缺库时用 ldd 确认）
+sudo apt-get install -y nvme-cli python3 libaio1 libnuma1 uuid-runtime
+
+# OpenCloudOS / RHEL / CentOS（openssl 3 需 compat-openssl11）
+sudo dnf install -y nvme-cli python3 libaio libnuma libuuid compat-openssl11 || \
+sudo yum install -y nvme-cli python3 libaio libnuma libuuid compat-openssl11
 ```
 
 ## 前置条件

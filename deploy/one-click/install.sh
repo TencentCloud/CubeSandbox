@@ -1559,6 +1559,11 @@ case "${RCOW_LISTEN_PORT}" in
     ;;
 esac
 
+# CubeS3lvol runtime deps (nvme-cli, python3, truncate, and the shared
+# libraries s3lvol_tgt needs -- notably libssl.so.1.1) are validated once
+# here, fail-fast, before the installer touches the system.
+validate_cubelet_s3lvol_startup_deps "${PKG_ROOT}/CubeS3lvol/bin/s3lvol_tgt"
+
 patch_cubelet_config_template \
   "${PKG_ROOT}/Cubelet/config/config.toml" \
   "${CUBE_SANDBOX_ETH_NAME:-}" \

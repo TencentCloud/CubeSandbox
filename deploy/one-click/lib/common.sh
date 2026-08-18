@@ -292,6 +292,73 @@ validate_cubelet_cow_startup_deps() {
   log "cubelet cubecow startup dependencies OK: ${cmds[*]}"
 }
 
+one_click_s3lvol_required_commands() {
+  printf '%s\n' \
+    nvme \
+    python3 \
+    truncate
+}
+
+# validate_cubelet_s3lvol_startup_deps: check the runtime deps of the
+# installed s3lvol_tgt binary. The binary statically links SPDK/DPDK/AWS
+# CRT, so `ldd` on it is the authoritative probe for exactly the system
+# libraries the target machine must provide (glibc is assumed present).
+# Runs only when ONE_CLICK_ENABLE_S3LVOL=1 and the binary is actually in
+# the package.
+validate_cubelet_s3lvol_startup_deps() {
+  local s3lvol_bin="$1" # <prefix>/CubeS3lvol/bin/s3lvol_tgt
+  [[ -n "${s3lvol_bin}" && -f "${s3lvol_bin}" ]] || return 0
+  [[ "${ONE_CLICK_ENABLE_S3LVOL:-0}" == "1" ]] || return 0
+
+  require_cmd ldd
+
+  local cmds=()
+  local cmd
+  while IFS= read -r cmd; do
+    [[ -n "${cmd}" ]] && cmds+=("${cmd}")
+  done < <(one_click_s3lvol_required_commands)
+
+  local missing=()
+  for cmd in "${cmds[@]}"; do
+    if ! command -v "${cmd}" >/dev/null 2>&1; then
+      missing+=("${cmd}")
+    fi
+  done
+  if [[ "${#missing[@]}" -gt 0 ]]; then
+    die "CubeS3lvol startup dependency check failed for ${s3lvol_bin}; missing commands in PATH: ${missing[*]} (required commands: ${cmds[*]})"
+  fi
+
+  local missing_libs=()
+  while IFS= read -r lib; do
+    [[ -n "${lib}" ]] && missing_libs+=("${lib}")
+  done < <(ldd "${s3lvol_bin}" 2>/dev/null | awk '/=> not found/{print $1}')
+
+  if [[ "${#missing_libs[@]}" -gt 0 ]]; then
+    die "CubeS3lvol startup dependency check failed for ${s3lvol_bin}; missing shared libraries: ${missing_libs[*]} (the binary links against OpenSSL 1.1 -- on distros shipping OpenSSL 3 install the compat package, e.g. compat-openssl11 on RHEL/CentOS/OpenCloudOS)"
+  fi
+
+  # A missing COS config makes the target fail on first connect, the unit
+  # hits StartLimitBurst and the role target gives up. Fail here instead,
+  # with the fix spelled out.
+  local cos_cfg="${RCOW_COS_CFG:-/data/cubelet/cos.cfg}"
+  if [[ ! -f "${cos_cfg}" ]]; then
+    die "CubeS3lvol is enabled but its COS config is missing: ${cos_cfg}. Create it from the template in deploy/one-click/env.example (or point RCOW_COS_CFG at an existing file) and re-run install.sh"
+  fi
+
+  # The subsystem grid is exported with -a (allow_any_host), so the listener
+  # must stay on loopback; anywhere else the target is an unauthenticated
+  # block device on the network. Fail closed rather than ship that.
+  local listen_addr="${RCOW_LISTEN_ADDR:-127.0.0.1}"
+  case "${listen_addr}" in
+    127.*|localhost|::1) ;;
+    *)
+      die "CubeS3lvol listens on non-loopback ${listen_addr} but exports subsystems with allow_any_host (-a); refusing to expose an unauthenticated block device. Keep RCOW_LISTEN_ADDR on 127.0.0.1 (or add a hostnqn allowlist to the export path first)"
+      ;;
+  esac
+
+  log "CubeS3lvol startup dependencies OK: ${cmds[*]} + $(ldd "${s3lvol_bin}" 2>/dev/null | awk '/=> \//{n++} END{print n+0}') shared libs resolved; COS config at ${cos_cfg}"
+}
+
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
     die "this script must run as root"
