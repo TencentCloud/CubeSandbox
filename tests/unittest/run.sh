@@ -88,6 +88,12 @@ WITH_TESTS=(
 	# and need the generated CubeNet/cubevs code but no cubecow/CGO, so build cubevs
 	# then run just the runtime package rather than the whole Cubelet suite.
 	"cubelet-network|Go|0|make builder-run BUILDER_CMD='cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && go mod download && go test ./network/runtime/...'"
+	# cubevs: the CubeNet/cubevs module's OWN unit tests (dataplane policy, DNS
+	# learning, migration, dump, classify). cubelet-network builds cubevs's
+	# generated code but runs Cubelet's tests, so these never ran. cubevs-test
+	# regenerates the BPF objects (make gen) and runs the full module set in a
+	# privileged root builder (eBPF load + bpffs mount need the privilege).
+	"cubevs|Go|0|make cubevs-test"
 	"cubecow|Go+CGO|0|make cubecow-test-native"
 	"cube-lifecycle-manager|Go|0|make builder-run BUILDER_CMD='cd /workspace/cube-lifecycle-manager && go mod download && go test ./...'"
 	"cube-api|Rust|0|make cube-api-test"

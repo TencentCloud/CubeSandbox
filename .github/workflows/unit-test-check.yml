@@ -182,6 +182,12 @@ jobs:
                 CubeShim/*)
                   add_component "CubeShim"
                   ;;
+                CubeNet/cubevs/*)
+                  # cubevs is its own Go module with its own unit tests; run
+                  # those, and keep cubelet (it embeds the cubevs runtime).
+                  add_component "cubevs"
+                  add_component "cubelet"
+                  ;;
                 CubeNet/*)
                   # Embedded network runtime lives under Cubelet; CubeNet eBPF
                   # helper changes still need the cubelet test set.
@@ -247,6 +253,7 @@ jobs:
                     elif . == "cubedb" then "cubedb-test"
                     elif . == "cube-lifecycle-manager" then "cube-lifecycle-manager-test"
                     elif . == "cubelet" then "cubelet-pkg-test"
+                    elif . == "cubevs" then "cubevs-test"
                     elif . == "agent" then "agent-test"
                     elif . == "hypervisor" then "hypervisor-test"
                     else error("unsupported component: " + .)
