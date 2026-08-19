@@ -82,6 +82,23 @@ local function validate_policy(p)
         if type(r.match) ~= "table" then
             return false, "rules[" .. i .. "].match required (object; empty {} allowed)"
         end
+        for _, field in ipairs({"sni", "host", "path", "scheme"}) do
+            if r.match[field] ~= nil and type(r.match[field]) ~= "string" then
+                return false, string.format(
+                    "rules[%d].match.%s must be a string", i, field)
+            end
+        end
+        if r.match.method ~= nil then
+            if type(r.match.method) ~= "table" then
+                return false, string.format("rules[%d].match.method must be an array of strings", i)
+            end
+            for j, mm in ipairs(r.match.method) do
+                if type(mm) ~= "string" then
+                    return false, string.format(
+                        "rules[%d].match.method[%d] must be a string", i, j)
+                end
+            end
+        end
         if type(r.action) ~= "table" then
             return false, "rules[" .. i .. "].action required (object)"
         end

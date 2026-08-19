@@ -136,7 +136,7 @@ local function rule_matches(m, ctx)
         if type(m.method) ~= "table" then return false end
         local hit = false
         for _, mm in ipairs(m.method) do
-            if string.upper(mm) == ctx.method then hit = true; break end
+            if type(mm) == "string" and string.upper(mm) == ctx.method then hit = true; break end
         end
         if not hit then return false end
     end
@@ -144,7 +144,7 @@ local function rule_matches(m, ctx)
         if not path_match(m.path, ctx.path) then return false end
     end
     if m.scheme ~= nil then
-        if string.lower(m.scheme) ~= ctx.scheme then return false end
+        if type(m.scheme) ~= "string" or string.lower(m.scheme) ~= ctx.scheme then return false end
     end
     return true
 end
