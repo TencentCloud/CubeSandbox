@@ -112,7 +112,7 @@ type Node struct {
 
 	// schedulingDisabled is the cordon flag (true → block new sandboxes).
 	// Exposed via SchedulingDisabled() / JSON as "SchedulingDisabled".
-	schedulingDisabled atomic.Bool
+	schedulingDisabled int32
 
 	labelsCache *nodeLabelsCacheStore
 }
@@ -133,18 +133,22 @@ func (n *Node) SetSchedulingDisabled(disabled bool) {
 	if n == nil {
 		return
 	}
-	n.schedulingDisabled.Store(disabled)
+	var v int32
+	if disabled {
+		v = 1
+	}
+	atomic.StoreInt32(&n.schedulingDisabled, v)
 }
 
 // SchedulingDisabled reports whether this node is cordoned.
 func (n *Node) SchedulingDisabled() bool {
-	return n != nil && n.schedulingDisabled.Load()
+	return n != nil && atomic.LoadInt32(&n.schedulingDisabled) == 1
 }
 
 // SchedulingAllowed reports whether this node may receive new sandboxes based
 // solely on cordon state (health / metrics are orthogonal).
 func (n *Node) SchedulingAllowed() bool {
-	return n != nil && !n.schedulingDisabled.Load()
+	return n != nil && atomic.LoadInt32(&n.schedulingDisabled) != 1
 }
 
 // MarshalJSON emits SchedulingDisabled from the atomic cordon flag.
@@ -197,7 +201,6 @@ func (n *Node) Clone() *Node {
 	schedulingDisabled := n.SchedulingDisabled()
 	cloned := *n
 	cloned.LocalCreateNum = localCreateNum
-	cloned.schedulingDisabled = atomic.Bool{}
 	cloned.SetSchedulingDisabled(schedulingDisabled)
 	cloned.labelsCache = nil
 	if n.VirtualNodeQuotaArray != nil {
@@ -217,9 +220,6 @@ func (n *Node) Clone() *Node {
 }
 
 func (n *Node) labelsCacheStore() *nodeLabelsCacheStore {
-	if n.labelsCache != nil {
-		return n.labelsCache
-	}
 	nodeLabelsCacheInitMu.Lock()
 	defer nodeLabelsCacheInitMu.Unlock()
 	if n.labelsCache == nil {
@@ -270,9 +270,10 @@ func (n *Node) Labels() map[string]string {
 }
 
 func (n *Node) InvalidateLabelsCache() {
-	if n.labelsCache != nil {
-		n.labelsCache.cache.Store(nil)
+	if n == nil {
+		return
 	}
+	n.labelsCacheStore().cache.Store(nil)
 }
 
 type NodeList []*Node
