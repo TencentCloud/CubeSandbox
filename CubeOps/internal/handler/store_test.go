@@ -34,13 +34,13 @@ type cachingFakeFetchOnly struct {
 }
 
 func (f *cachingFakeFetchOnly) FetchLatest(_ context.Context, ref string) *ImageMeta {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	m, ok := f.meta[ref]
 	if !ok {
 		return nil
 	}
-	f.mu.Lock()
 	f.meta[ref] = m
-	f.mu.Unlock()
 	return &m
 }
 
