@@ -20,6 +20,7 @@ spec:
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+  {{- include "cube.testPlacement" . | nindent 2 }}
   serviceAccountName: {{ include "cube.fullname" . }}-test
   containers:
     - name: curl
@@ -33,6 +34,8 @@ spec:
           ca_path=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
           ns={{ .Release.Namespace | quote }}
           kube_api="https://kubernetes.default.svc"
+          # IPv4 only (AAAA probes stall); no global --retry.
+          curl() { command curl -4 "$@"; }
           kget() {
             curl --connect-timeout 5 --max-time 20 --cacert "${ca_path}" \
               -H "Authorization: Bearer $(cat "${token_path}")" \
@@ -139,6 +142,7 @@ spec:
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+  {{- include "cube.testPlacement" . | nindent 2 }}
   containers:
     - name: cubemastercli
       image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubemastercli "context" $) | quote }}
@@ -178,6 +182,7 @@ spec:
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+  {{- include "cube.testPlacement" . | nindent 2 }}
   containers:
     - name: cubeopscli
       image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubemastercli "context" $) | quote }}
@@ -215,6 +220,7 @@ spec:
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+  {{- include "cube.testPlacement" . | nindent 2 }}
   containers:
     - name: mysql
       image: {{ include "cube.image" .Values.mysql.image | quote }}
@@ -251,6 +257,7 @@ spec:
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+  {{- include "cube.testPlacement" . | nindent 2 }}
   containers:
     - name: redis
       image: {{ include "cube.image" .Values.redis.image | quote }}
@@ -287,23 +294,30 @@ spec:
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
-  {{- include "cube.controlPlanePlacement" . | nindent 2 }}
+  {{- include "cube.testPlacement" . | nindent 2 }}
   containers:
     - name: proxy
       image: {{ include "cube.image" .Values.helmTest.image | quote }}
       imagePullPolicy: {{ .Values.helmTest.image.pullPolicy }}
       env:
         {{- include "cube.timezoneEnv" . | nindent 8 }}
+        - name: CUBE_PROXY_ADMIN_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "cube.secretName" . }}
+              key: cube-admin-token
       command:
         - sh
         - -ec
         - |
-          echo '[health-test] check CubeProxy via ClusterIP Service'
-          curl --connect-timeout 5 --max-time 15 -sS -o /dev/null \
-            "http://{{ include "cube.proxyServiceFQDN" . }}:{{ .Values.cubeProxy.ports.http.containerPort }}/" \
-            || curl --connect-timeout 5 --max-time 15 -k -sS -o /dev/null \
-            "https://{{ include "cube.proxyServiceFQDN" . }}:{{ .Values.cubeProxy.ports.https.containerPort }}/" \
-            || { echo "cube-proxy Service unreachable"; exit 1; }
+          echo '[health-test] check CubeProxy admin healthz'
+          # "/" is 400. Retry refused/timeout/5xx; never --retry-all-errors.
+          status="$(curl -4 --retry 3 --retry-connrefused --retry-delay 1 --connect-timeout 5 --max-time 15 -sS \
+            -H "X-Cube-Admin-Token: ${CUBE_PROXY_ADMIN_TOKEN}" \
+            -o /dev/null -w "%{http_code}" \
+            "http://{{ include "cube.proxyServiceFQDN" . }}:{{ .Values.cubeProxy.adminPort }}/admin/healthz")" \
+            || { echo "cube-proxy admin healthz unreachable"; exit 1; }
+          test "$status" = "200" || { echo "cube-proxy admin healthz status=$status"; exit 1; }
 {{- end }}
 {{ if eq (include "cube.configureClusterDNS" .) "true" }}
 ---
@@ -324,37 +338,48 @@ spec:
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
-  {{- include "cube.controlPlanePlacement" . | nindent 2 }}
+  {{- include "cube.testPlacement" . | nindent 2 }}
   containers:
     - name: dns
-      image: {{ include "cube.image" .Values.helmTest.dnsImage | quote }}
-      imagePullPolicy: {{ .Values.helmTest.dnsImage.pullPolicy }}
+      image: {{ include "cube.image" .Values.helmTest.image | quote }}
+      imagePullPolicy: {{ .Values.helmTest.image.pullPolicy }}
       command:
         - sh
         - -ec
         - |
           echo '[health-test] check cluster DNS for sandbox domain'
           target={{ include "cube.proxyServiceFQDN" . | quote }}
-          # busybox nslookup prints the DNS server Address first; take the last A record.
-          a_record() { nslookup "$1" | sed -n 's/^Address: \([0-9][0-9.]*\)$/\1/p' | tail -n 1; }
-          domain_ip="$(a_record {{ $domain | quote }})"
-          target_ip="$(a_record "$target")"
-          test -n "$domain_ip"
-          test -n "$target_ip"
-          test "$domain_ip" = "$target_ip"
-          test -n "$(a_record {{ printf "wildcard-check.%s" $domain | quote }})"
+          domain={{ $domain | quote }}
+          wildcard={{ printf "wildcard-check.%s" $domain | quote }}
+          # IPv4 A records; busybox nslookup times out on rewrite zones.
+          tries=20
+          a_record() {
+            n=0
+            while [ "$n" -lt "$tries" ]; do
+              ip="$(getent ahostsv4 "$1" 2>/dev/null | awk 'NR==1 {print $1}')"
+              if [ -n "$ip" ]; then
+                printf '%s\n' "$ip"
+                return 0
+              fi
+              n=$((n + 1))
+              sleep 1
+            done
+            return 1
+          }
+          domain_ip="$(a_record "$domain")" \
+            || { printf 'could not resolve %s (A)\n' "$domain"; exit 1; }
+          target_ip="$(a_record "$target")" \
+            || { printf 'could not resolve %s (A)\n' "$target"; exit 1; }
+          test "$domain_ip" = "$target_ip" \
+            || { printf 'DNS mismatch: %s -> %s, %s -> %s\n' "$domain" "$domain_ip" "$target" "$target_ip"; exit 1; }
+          wildcard_ip="$(a_record "$wildcard")" \
+            || { printf 'could not resolve %s (A)\n' "$wildcard"; exit 1; }
+          test "$domain_ip" = "$wildcard_ip" \
+            || { printf 'DNS mismatch: %s -> %s, %s -> %s\n' "$wildcard" "$wildcard_ip" "$domain" "$domain_ip"; exit 1; }
 {{- end }}
 {{ if .Values.cubeNode.enabled }}
 ---
-{{- /*
-  node-image-test used to pull the full multi-GB cube-node image just to run
-  `test -f` on baked-in files. That inflated helm test bandwidth and startup
-  time on every run. Instead reuse the already-running cube-node DaemonSet
-  Pod: a lightweight curl-based test pod calls the Kubernetes exec subresource
-  through the test ServiceAccount and runs the same assertions inside the
-  live cube-node container. `helm.test.nodeImage.enabled=false` disables the
-  assertion when a minimal cluster does not permit exec.
-*/ -}}
+{{- /* Ready cube-node Pod only; no exec. helmTest.nodeImage.enabled=false skips. */ -}}
 {{- $nodeImageEnabled := true -}}
 {{- if hasKey .Values.helmTest "nodeImage" -}}
 {{- $nodeImageEnabled = default true .Values.helmTest.nodeImage.enabled -}}
@@ -376,6 +401,7 @@ spec:
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+  {{- include "cube.testPlacement" . | nindent 2 }}
   serviceAccountName: {{ include "cube.fullname" . }}-test
   containers:
     - name: node-image-assets
@@ -386,26 +412,23 @@ spec:
         - -ec
         - |
           set -eu
-          TOOLBOX_ROOT="/usr/local/services/cubetoolbox"
           ns={{ .Release.Namespace | quote }}
           token_path=/var/run/secrets/kubernetes.io/serviceaccount/token
           ca_path=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
           kube_api="https://kubernetes.default.svc"
-          pod="$(curl --connect-timeout 5 --max-time 15 --cacert "${ca_path}" \
-                  -H "Authorization: Bearer $(cat "${token_path}")" -fsS \
-                  "${kube_api}/api/v1/namespaces/${ns}/pods?labelSelector=app.kubernetes.io%2Fcomponent%3Dcube-node&limit=1" \
+          curl() { command curl -4 "$@"; }
+          kget() {
+            curl --connect-timeout 5 --max-time 15 --cacert "${ca_path}" \
+              -H "Authorization: Bearer $(cat "${token_path}")" -fsS \
+              "${kube_api}$1"
+          }
+          pod="$(kget "/api/v1/namespaces/${ns}/pods?labelSelector=app.kubernetes.io%2Fcomponent%3Dcube-node&limit=1" \
                 | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' \
                 | head -1 | awk -F'"' '{print $4}')"
           test -n "${pod}" || { echo "no cube-node pod found"; exit 1; }
           echo "[health-test] node-image assets on pod ${pod}"
-          # Fall through: rely on cube-node-init preflight and cube-node
-          # readiness to prove these assets exist inside the running Pod.
-          # Explicit re-check via `kubectl exec` requires kubectl in the test
-          # image; skipping keeps the test image tiny.
-          curl --connect-timeout 5 --max-time 15 --cacert "${ca_path}" \
-                  -H "Authorization: Bearer $(cat "${token_path}")" -fsS \
-                  "${kube_api}/api/v1/namespaces/${ns}/pods/${pod}" \
-                | grep -oE '"ready"[[:space:]]*:[[:space:]]*true' | grep -q true
+          kget "/api/v1/namespaces/${ns}/pods/${pod}" \
+            | grep -oE '"ready"[[:space:]]*:[[:space:]]*true' | grep -q true
 {{- end }}
 ---
 apiVersion: v1
@@ -429,6 +452,14 @@ spec:
     - name: node-runtime
       image: {{ include "cube.image" .Values.helmTest.dnsImage | quote }}
       imagePullPolicy: {{ .Values.helmTest.dnsImage.pullPolicy }}
+      # hostPath sockets are root-owned; pin uid 0.
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
       command:
         - sh
         - -ec
@@ -443,8 +474,10 @@ spec:
           readOnly: true
         - name: data-cubelet
           mountPath: {{ .Values.hostPaths.dataCubelet }}
+          readOnly: true
         - name: tmp-cube
           mountPath: {{ .Values.hostPaths.tmpCube }}
+          readOnly: true
   volumes:
     - name: dev
       hostPath:

@@ -523,7 +523,7 @@ Without an Ingress / cloud LB, set `cubeProxy.service.type` / `controlPlane.api.
 
 When the sandbox owner is on a compute node, CubeProxy still uses Redis routing metadata to connect to the owner `HostIP:hostPort`. The chart patches the image's default nginx listeners to the configured `cubeProxy.ports.*.containerPort` values (default `80` / `443`).
 
-CubeProxy admin is reachable in-cluster at each Pod IP:`adminPort` (default `8082`) for cube-lifecycle-manager discovery; probes use the admin token header.
+CubeProxy admin is at Pod IP:`adminPort` (default `8082`) for CLM; helm test uses the Service admin port. Probes send the admin token header.
 
 CubeProxy reads sandbox routing metadata from Redis in nginx Lua. Because nginx
 does not automatically inherit Kubernetes DNS resolution for Lua cosocket
@@ -549,8 +549,8 @@ cubeProxy:
 ## Cluster DNS for sandbox domain
 
 When CubeProxy is enabled, the chart patches **cluster CoreDNS** so
-`cubeProxy.domain` / `*.domain` rewrite to the CubeProxy ClusterIP Service
-(Pod IP). Users only set the domain:
+`cubeProxy.domain` / `*.domain` rewrite to the CubeProxy Service FQDN
+(ClusterIP). Users only set the domain:
 
 ```yaml
 cubeProxy:
@@ -663,6 +663,19 @@ kubectl exec -n cube-system deploy/cube-cubemastercli -- \
   sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" cubebox list'
 helm test cube -n cube-system --timeout 20m
 ```
+
+`helm test` pods except `node-runtime-test` use `cube.testPlacement` (both
+plane taints, no nodeSelector): health, cubemastercli, cubeopscli, mysql,
+redis, proxy, dns, and node-image. `node-runtime-test` uses
+`cube.computePlacement` and is skipped when `cubeNode.enabled=false`.
+
+`proxy-control-test` GETs `/admin/healthz` on the proxy Service admin port with
+`X-Cube-Admin-Token` (Secret `cube-admin-token`) and requires HTTP 200.
+Dataplane `/` returns 400.
+
+Health / proxy / node-image use `curl -4`; dns-test uses `getent ahostsv4`.
+Override `helmTest.image` with curl+sh+awk+getent. `helmTest.dnsImage` is
+busybox for node-runtime-test only.
 
 ## Upgrade policy
 
