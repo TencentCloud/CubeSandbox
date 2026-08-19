@@ -451,8 +451,7 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 	// refreshTemplateReplicaSummary claims the alias *before* publishing the
 	// READY status so a client that observes the template as READY can always
 	// resolve the alias (closes the redo/claim publish-ordering race).
-	claimAlias := aliasToClaimAtFinalize(ctx, req.TemplateID, jobID)
-	claimWarning, err := refreshTemplateReplicaSummary(ctx, req.TemplateID, claimAlias)
+	claimWarning, err := refreshTemplateReplicaSummary(ctx, req.TemplateID, jobID)
 	if err != nil {
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":          JobStatusFailed,

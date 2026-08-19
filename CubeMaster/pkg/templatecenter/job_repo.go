@@ -11,12 +11,25 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func getTemplateImageJobRecordByID(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
 	record := &models.TemplateImageJob{}
 	if err := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
 		Where("job_id = ?", jobID).First(record).Error; err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+func getCreateRedoImageJobByIDTx(tx *gorm.DB, templateID, jobID string) (*models.TemplateImageJob, error) {
+	record := &models.TemplateImageJob{}
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Table(constants.TemplateImageJobTableName).
+		Where("template_id = ? AND job_id = ? AND operation IN ?", templateID, jobID, createRedoJobOperations).
+		First(record).Error
+	if err != nil {
 		return nil, err
 	}
 	return record, nil
@@ -42,6 +55,19 @@ func getLatestCreateRedoImageJobByTemplateIDTx(tx *gorm.DB, templateID string) (
 	err := tx.Table(constants.TemplateImageJobTableName).
 		Where("template_id = ? AND operation IN ?", templateID, createRedoJobOperations).
 		Order("attempt_no desc, id desc").First(record).Error
+	if err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+// getNewestCreateRedoImageJobByTemplateIDTx uses the global row ID rather
+// than attempt_no because alias arbitration follows persisted submission order.
+func getNewestCreateRedoImageJobByTemplateIDTx(tx *gorm.DB, templateID string) (*models.TemplateImageJob, error) {
+	record := &models.TemplateImageJob{}
+	err := tx.Table(constants.TemplateImageJobTableName).
+		Where("template_id = ? AND operation IN ?", templateID, createRedoJobOperations).
+		Order("id desc").First(record).Error
 	if err != nil {
 		return nil, err
 	}
