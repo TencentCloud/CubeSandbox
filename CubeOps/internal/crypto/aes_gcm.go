@@ -189,6 +189,9 @@ func HashPassword(password string) (string, error) {
 // VerifyPassword verifies a candidate password against a stored value.
 // bcrypt hashes start with $2; anything else is treated as legacy plaintext.
 func VerifyPassword(stored, candidate string) bool {
+	if stored == "" || candidate == "" {
+		return false
+	}
 	if strings.HasPrefix(stored, "$2") {
 		return bcrypt.CompareHashAndPassword([]byte(stored), []byte(candidate)) == nil
 	}
