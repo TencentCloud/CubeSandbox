@@ -46,7 +46,7 @@ curl -s http://127.0.0.1:3010/webhook/healthz
 ```
 
 ::: tip About the REDIS_URL password
-The one-click deployment enables `requirepass` on Redis by default (default password `ceuhvu123`, overridable at install time via `CUBE_SANDBOX_REDIS_PASSWORD` / `CUBE_EXTERNAL_REDIS_PASSWORD`). If you are unsure of the actual password, run `docker inspect cube-sandbox-redis --format '{{.Config.Cmd}}'` to see the value after `--requirepass`. The URL format is `redis://[:password]@host:port/db`; the password can only be omitted when you run your own Redis without `requirepass`.
+The one-click deployment enables `requirepass` on Redis by default (default password `ceuhvu123`, overridable at install time via `CUBE_SANDBOX_REDIS_PASSWORD` / `CUBE_EXTERNAL_REDIS_PASSWORD`). If you are unsure of the actual password, inspect the Redis container with `docker inspect cube-sandbox-redis` — its command line (the `Cmd` field) shows the `--requirepass` value. The URL format is `redis://[:password]@host:port/db`; the password can only be omitted when you run your own Redis without `requirepass`.
 :::
 
 ::: warning About allow_private_networks

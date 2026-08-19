@@ -46,7 +46,7 @@ curl -s http://127.0.0.1:3010/webhook/healthz
 ```
 
 ::: tip 关于 REDIS_URL 的密码
-一键安装部署的 Redis 默认开启 requirepass（默认密码 `ceuhvu123`，安装时可用 `CUBE_SANDBOX_REDIS_PASSWORD` / `CUBE_EXTERNAL_REDIS_PASSWORD` 覆盖）。若不确定实际密码，用 `docker inspect cube-sandbox-redis --format '{{.Config.Cmd}}'` 查看 `--requirepass` 后的值；连接串格式为 `redis://[:密码]@主机:端口/库`，只有自建且未开启 requirepass 的 Redis 才能省略密码。
+一键安装部署的 Redis 默认开启 requirepass（默认密码 `ceuhvu123`，安装时可用 `CUBE_SANDBOX_REDIS_PASSWORD` / `CUBE_EXTERNAL_REDIS_PASSWORD` 覆盖）。若不确定实际密码，用 `docker inspect cube-sandbox-redis` 查看容器启动命令（`Cmd` 字段）即可看到 `--requirepass` 后的值；连接串格式为 `redis://[:密码]@主机:端口/库`，只有自建且未开启 requirepass 的 Redis 才能省略密码。
 :::
 
 ::: warning 关于 allow_private_networks
