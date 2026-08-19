@@ -39,7 +39,13 @@ FROM alpine:3.20
 
 RUN apk add --no-cache ca-certificates docker-cli tzdata
 
+RUN addgroup -S cube && adduser -S -G cube cube \
+    && mkdir -p /data/log/CubeOps \
+    && chown -R cube:cube /data/log/CubeOps
+
 COPY --from=builder /usr/local/bin/cubeops /usr/local/bin/cubeops
+
+USER cube
 
 EXPOSE 3010
 
