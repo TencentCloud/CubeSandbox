@@ -18,6 +18,15 @@ enum AuthCredential {
     ApiKey(String),
 }
 
+fn strip_bearer_prefix(value: &str) -> Option<&str> {
+    let (scheme, rest) = value.split_once(' ')?;
+    if scheme.eq_ignore_ascii_case("bearer") {
+        Some(rest)
+    } else {
+        None
+    }
+}
+
 /// Extract the auth credential from request headers (Bearer takes priority over X-API-Key).
 fn extract_credential(request: &Request) -> Option<AuthCredential> {
     let headers = request.headers();
@@ -25,7 +34,7 @@ fn extract_credential(request: &Request) -> Option<AuthCredential> {
     // Prefer Authorization: Bearer
     if let Some(auth_val) = headers.get("Authorization") {
         if let Ok(auth_str) = auth_val.to_str() {
-            if let Some(token) = auth_str.strip_prefix("Bearer ") {
+            if let Some(token) = strip_bearer_prefix(auth_str) {
                 let token = token.trim().to_string();
                 if !token.is_empty() {
                     return Some(AuthCredential::Bearer(token));
