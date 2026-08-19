@@ -53,6 +53,111 @@ func TestIntegrationHealthTemplateAndList(t *testing.T) {
 	}
 }
 
+func TestIntegrationFilesForUserIsolation(t *testing.T) {
+	cfg := integrationConfig(t)
+	client := NewClient(cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+
+	sb := createIntegrationSandbox(t, ctx, client, CreateOptions{
+		Timeout: DurationPtr(2 * time.Minute),
+		Metadata: map[string]string{
+			"sdk":      "go",
+			"scenario": "integration-files-user-isolation",
+		},
+	})
+
+	rootFiles := sb.Files().ForUser("root")
+	nobodyFiles := sb.Files().ForUser("nobody")
+
+	// Prove that the secondary user exists and can use both filesystem
+	// transports before asserting that access to a root-only path is denied.
+	nobodyDir := "/tmp/cubesandbox-go-sdk-nobody"
+	if _, err := nobodyFiles.MakeDir(ctx, nobodyDir); err != nil {
+		t.Fatalf("nobody Files.MakeDir returned error; template must provide the nobody user: %v", err)
+	}
+	nobodyPath := nobodyDir + "/owned.txt"
+	if err := nobodyFiles.Write(ctx, nobodyPath, []byte("nobody-content")); err != nil {
+		t.Fatalf("nobody Files.Write returned error: %v", err)
+	}
+	nobodyContent, err := nobodyFiles.Read(ctx, nobodyPath)
+	if err != nil {
+		t.Fatalf("nobody Files.Read returned error: %v", err)
+	}
+	if nobodyContent != "nobody-content" {
+		t.Fatalf("nobody file content=%q, want nobody-content", nobodyContent)
+	}
+	nobodyEntry, err := nobodyFiles.Stat(ctx, nobodyPath)
+	if err != nil {
+		t.Fatalf("nobody Files.Stat returned error: %v", err)
+	}
+	if nobodyEntry.Owner != "nobody" {
+		t.Fatalf("nobody file owner=%q, want nobody", nobodyEntry.Owner)
+	}
+
+	privateDir := "/tmp/cubesandbox-go-sdk-root-private"
+	if _, err := rootFiles.MakeDir(ctx, privateDir); err != nil {
+		t.Fatalf("root Files.MakeDir returned error: %v", err)
+	}
+	chmod, err := sb.Commands().Run(ctx, "chmod 0700 "+privateDir, CommandOptions{
+		Timeout: 30 * time.Second,
+		User:    "root",
+	})
+	if err != nil {
+		t.Fatalf("chmod root-only directory returned error: %v", err)
+	}
+	if chmod.ExitCode != 0 {
+		t.Fatalf("chmod root-only directory failed: %#v", chmod)
+	}
+
+	privatePath := privateDir + "/private.txt"
+	if err := rootFiles.Write(ctx, privatePath, []byte("root-content")); err != nil {
+		t.Fatalf("root Files.Write returned error: %v", err)
+	}
+	rootContent, err := rootFiles.Read(ctx, privatePath)
+	if err != nil {
+		t.Fatalf("root Files.Read returned error: %v", err)
+	}
+	if rootContent != "root-content" {
+		t.Fatalf("root file content=%q, want root-content", rootContent)
+	}
+	rootEntry, err := rootFiles.Stat(ctx, privatePath)
+	if err != nil {
+		t.Fatalf("root Files.Stat returned error: %v", err)
+	}
+	if rootEntry.Owner != "root" {
+		t.Fatalf("root file owner=%q, want root", rootEntry.Owner)
+	}
+
+	// Files.Read and Files.Stat are privileged envd management operations. The
+	// selected user controls path expansion and ownership, but these operations
+	// do not switch the envd process UID. Verify the actual POSIX permission
+	// boundary by running commands as the requested users instead.
+	rootRead, err := sb.Commands().Run(ctx, "cat "+privatePath, CommandOptions{
+		Timeout: 30 * time.Second,
+		User:    "root",
+		Cwd:     "/tmp",
+	})
+	if err != nil {
+		t.Fatalf("root command read returned error: %v", err)
+	}
+	if rootRead.ExitCode != 0 || rootRead.Stdout != "root-content" {
+		t.Fatalf("root command read failed: %#v", rootRead)
+	}
+
+	nobodyRead, err := sb.Commands().Run(ctx, "cat "+privatePath, CommandOptions{
+		Timeout: 30 * time.Second,
+		User:    "nobody",
+		Cwd:     "/tmp",
+	})
+	if err != nil {
+		t.Fatalf("nobody command read returned transport error: %v", err)
+	}
+	if nobodyRead.ExitCode == 0 {
+		t.Fatalf("nobody command unexpectedly accessed a root-only file: %#v", nobodyRead)
+	}
+}
+
 func TestIntegrationSandboxExecutionCommandsFilesAndErrors(t *testing.T) {
 	cfg := integrationConfig(t)
 	client := NewClient(cfg)

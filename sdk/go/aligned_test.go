@@ -410,12 +410,14 @@ func TestCloneKillsSiblingsOnFailure(t *testing.T) {
 
 func TestFilesWriteOctetStreamThenMultipartFallback(t *testing.T) {
 	var contentTypes []string
+	var usernames []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/files" {
 			t.Fatalf("request=%s %s", r.Method, r.URL.Path)
 		}
 		ct := r.Header.Get("Content-Type")
 		contentTypes = append(contentTypes, ct)
+		usernames = append(usernames, r.URL.Query().Get("username"))
 		_, _ = io.Copy(io.Discard, r.Body)
 		if strings.HasPrefix(ct, "application/octet-stream") {
 			http.Error(w, "use multipart", http.StatusBadRequest) // force fallback
@@ -432,14 +434,32 @@ func TestFilesWriteOctetStreamThenMultipartFallback(t *testing.T) {
 	client := NewClient(Config{ProxyNodeIP: host, ProxyPortHTTP: port, SandboxDomain: "cube.test", RequestTimeout: time.Second})
 	sb := &Sandbox{client: client, SandboxID: "sb-files", EnvdAccessToken: "tok"}
 
-	if err := sb.Files().Write(context.Background(), "/tmp/x.txt", []byte("hi")); err != nil {
+	if err := sb.Files().ForUser("app").Write(context.Background(), "/tmp/x.txt", []byte("hi")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	if len(contentTypes) != 2 {
 		t.Fatalf("attempts=%d, want 2 (octet-stream then multipart)", len(contentTypes))
 	}
+	if len(usernames) != 2 || usernames[0] != "app" || usernames[1] != "app" {
+		t.Fatalf("usernames=%v, want app on both upload attempts", usernames)
+	}
 	if _, _, err := mime.ParseMediaType(contentTypes[1]); err != nil {
 		t.Fatalf("multipart content-type=%q: %v", contentTypes[1], err)
+	}
+
+	contentTypes = nil
+	usernames = nil
+	if err := sb.Files().Write(context.Background(), "/tmp/unscoped.txt", []byte("hi")); err != nil {
+		t.Fatalf("unscoped Write: %v", err)
+	}
+	if len(contentTypes) != 2 {
+		t.Fatalf("unscoped attempts=%d, want 2 (octet-stream then multipart)", len(contentTypes))
+	}
+	if len(usernames) != 2 || usernames[0] != "" || usernames[1] != "" {
+		t.Fatalf("unscoped usernames=%v, want empty on both upload attempts", usernames)
+	}
+	if _, _, err := mime.ParseMediaType(contentTypes[1]); err != nil {
+		t.Fatalf("unscoped multipart content-type=%q: %v", contentTypes[1], err)
 	}
 }
 

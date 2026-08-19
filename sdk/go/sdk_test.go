@@ -884,12 +884,15 @@ func (s *fakeProcessStarter) startProcess(_ context.Context, payload processStar
 
 type fakeFileReader struct {
 	path    string
+	user    string
 	content string
 	err     error
 }
 
-func (r *fakeFileReader) readFile(_ context.Context, path string) (string, error) {
+func (r *fakeFileReader) readFile(_ context.Context, path string, options ...fileRequestOption) (string, error) {
 	r.path = path
+	opts := resolveFileRequestOptions(options...)
+	r.user = opts.user
 	return r.content, r.err
 }
 

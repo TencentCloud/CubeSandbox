@@ -114,12 +114,12 @@ func (s *Sandbox) startProcess(ctx context.Context, payload processStartRequest,
 	return result, nil
 }
 
-func (s *Sandbox) readFile(ctx context.Context, path string) (string, error) {
+func (s *Sandbox) readFile(ctx context.Context, path string, options ...fileRequestOption) (string, error) {
 	if err := s.ensureClient(); err != nil {
 		return "", err
 	}
 
-	query := url.Values{"path": []string{path}}
+	query := newEnvdFileQuery(path, options...)
 	req, err := s.newEnvdRequest(ctx, http.MethodGet, "/files", query, nil)
 	if err != nil {
 		return "", err
@@ -149,11 +149,11 @@ func (s *Sandbox) readFile(ctx context.Context, path string) (string, error) {
 // writeFile uploads data through envd's POST /files API. It first tries a raw
 // octet-stream body and, if the envd version rejects that, retries as a
 // multipart upload — mirroring the Python SDK's fallback.
-func (s *Sandbox) writeFile(ctx context.Context, path string, data []byte) error {
+func (s *Sandbox) writeFile(ctx context.Context, path string, data []byte, options ...fileRequestOption) error {
 	if err := s.ensureClient(); err != nil {
 		return err
 	}
-	query := url.Values{"path": []string{path}}
+	query := newEnvdFileQuery(path, options...)
 
 	resp, err := s.doEnvdUpload(ctx, query, bytes.NewReader(data), "application/octet-stream")
 	if err != nil {
@@ -181,6 +181,15 @@ func (s *Sandbox) writeFile(ctx context.Context, path string, data []byte) error
 		return fmt.Errorf("failed to write %s: %s", path, message)
 	}
 	return nil
+}
+
+func newEnvdFileQuery(path string, options ...fileRequestOption) url.Values {
+	query := url.Values{"path": []string{path}}
+	opts := resolveFileRequestOptions(options...)
+	if opts.user != "" {
+		query.Set("username", opts.user)
+	}
+	return query
 }
 
 func (s *Sandbox) doEnvdUpload(ctx context.Context, query url.Values, body io.Reader, contentType string) (*http.Response, error) {
@@ -241,6 +250,27 @@ func basicAuthUser(user string) string {
 		user = defaultEnvdUser
 	}
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"))
+}
+
+func setFilesystemRPCHeaders(req *http.Request, options ...fileRequestOption) {
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Connect-Protocol-Version", connectProtocolVersion)
+	setFilesystemRPCUser(req, options...)
+}
+
+func setFilesystemRPCStreamHeaders(req *http.Request, options ...fileRequestOption) {
+	req.Header.Set("Content-Type", connectContentType)
+	req.Header.Set("Connect-Protocol-Version", connectProtocolVersion)
+	setFilesystemRPCUser(req, options...)
+}
+
+func setFilesystemRPCUser(req *http.Request, options ...fileRequestOption) {
+	opts := resolveFileRequestOptions(options...)
+	if opts.user != "" {
+		// Preserve the legacy unscoped request shape. An explicit ForUser("root")
+		// is intentionally different and sends root through Basic authentication.
+		req.SetBasicAuth(opts.user, "")
+	}
 }
 
 func parseProcessStartStream(r io.Reader) (*processStartResult, error) {
@@ -322,7 +352,7 @@ func decodeProcessBytes(value string) (string, error) {
 	return string(raw), nil
 }
 
-func (s *Sandbox) filesystemRPC(ctx context.Context, method string, reqBody any) ([]byte, int, error) {
+func (s *Sandbox) filesystemRPC(ctx context.Context, method string, reqBody any, options ...fileRequestOption) ([]byte, int, error) {
 	if err := s.ensureClient(); err != nil {
 		return nil, 0, err
 	}
@@ -334,8 +364,7 @@ func (s *Sandbox) filesystemRPC(ctx context.Context, method string, reqBody any)
 	if err != nil {
 		return nil, 0, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Connect-Protocol-Version", connectProtocolVersion)
+	setFilesystemRPCHeaders(req, options...)
 
 	resp, err := s.client.dataHTTP.Do(req)
 	if err != nil {
@@ -349,8 +378,8 @@ func (s *Sandbox) filesystemRPC(ctx context.Context, method string, reqBody any)
 	return body, resp.StatusCode, nil
 }
 
-func (s *Sandbox) listDir(ctx context.Context, path string) ([]FileEntry, error) {
-	body, status, err := s.filesystemRPC(ctx, "ListDir", map[string]string{"path": path})
+func (s *Sandbox) listDir(ctx context.Context, path string, options ...fileRequestOption) ([]FileEntry, error) {
+	body, status, err := s.filesystemRPC(ctx, "ListDir", map[string]string{"path": path}, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -369,8 +398,8 @@ func (s *Sandbox) listDir(ctx context.Context, path string) ([]FileEntry, error)
 	return result.Entries, nil
 }
 
-func (s *Sandbox) statFile(ctx context.Context, path string) (*FileEntry, error) {
-	body, status, err := s.filesystemRPC(ctx, "Stat", map[string]string{"path": path})
+func (s *Sandbox) statFile(ctx context.Context, path string, options ...fileRequestOption) (*FileEntry, error) {
+	body, status, err := s.filesystemRPC(ctx, "Stat", map[string]string{"path": path}, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -389,8 +418,8 @@ func (s *Sandbox) statFile(ctx context.Context, path string) (*FileEntry, error)
 	return &result.Entry, nil
 }
 
-func (s *Sandbox) removeFile(ctx context.Context, path string) error {
-	body, status, err := s.filesystemRPC(ctx, "Remove", map[string]string{"path": path})
+func (s *Sandbox) removeFile(ctx context.Context, path string, options ...fileRequestOption) error {
+	body, status, err := s.filesystemRPC(ctx, "Remove", map[string]string{"path": path}, options...)
 	if err != nil {
 		return err
 	}
@@ -400,8 +429,8 @@ func (s *Sandbox) removeFile(ctx context.Context, path string) error {
 	return nil
 }
 
-func (s *Sandbox) moveFile(ctx context.Context, source, destination string) (*FileEntry, error) {
-	body, status, err := s.filesystemRPC(ctx, "Move", map[string]string{"source": source, "destination": destination})
+func (s *Sandbox) moveFile(ctx context.Context, source, destination string, options ...fileRequestOption) (*FileEntry, error) {
+	body, status, err := s.filesystemRPC(ctx, "Move", map[string]string{"source": source, "destination": destination}, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -417,8 +446,8 @@ func (s *Sandbox) moveFile(ctx context.Context, source, destination string) (*Fi
 	return &result.Entry, nil
 }
 
-func (s *Sandbox) makeDirFile(ctx context.Context, path string) (*FileEntry, error) {
-	body, status, err := s.filesystemRPC(ctx, "MakeDir", map[string]string{"path": path})
+func (s *Sandbox) makeDirFile(ctx context.Context, path string, options ...fileRequestOption) (*FileEntry, error) {
+	body, status, err := s.filesystemRPC(ctx, "MakeDir", map[string]string{"path": path}, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -474,7 +503,7 @@ type watchDirFrame struct {
 	Keepalive  *struct{}     `json:"keepalive,omitempty"`
 }
 
-func (s *Sandbox) watchDir(ctx context.Context, path string) (*Watcher, error) {
+func (s *Sandbox) watchDir(ctx context.Context, path string, options ...fileRequestOption) (*Watcher, error) {
 	if err := s.ensureClient(); err != nil {
 		return nil, err
 	}
@@ -490,8 +519,7 @@ func (s *Sandbox) watchDir(ctx context.Context, path string) (*Watcher, error) {
 		cancel()
 		return nil, err
 	}
-	req.Header.Set("Content-Type", connectContentType)
-	req.Header.Set("Connect-Protocol-Version", connectProtocolVersion)
+	setFilesystemRPCStreamHeaders(req, options...)
 
 	resp, err := s.client.dataHTTP.Do(req)
 	if err != nil {
