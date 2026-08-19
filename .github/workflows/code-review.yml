@@ -51,14 +51,15 @@ jobs:
           permission-pull-requests: write
 
       - name: Prefetch PR review inputs
+        id: prefetch
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          # Snapshot the trusted publisher script hash outside the workspace so
-          # a later Write cannot replace the expected digest.
-          sha256sum scripts/gh.sh > "${RUNNER_TEMP}/gh.sh.sha256"
+          # Snapshot the trusted publisher script hash into a step output, which
+          # is captured now and cannot be replaced by a later Write.
+          echo "gh_sh_sha256=$(sha256sum scripts/gh.sh | cut -d" " -f1)" >> "${GITHUB_OUTPUT}"
           mkdir -p review-input
           gh pr view "$PR_NUMBER" \
             --json title,body,author,baseRefName,headRefName,headRefOid,files,additions,deletions \
@@ -123,6 +124,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_GH_SH_SHA256: ${{ steps.prefetch.outputs.gh_sh_sha256 }}
         run: |
           set -euo pipefail
           if [ ! -f review-input/summary.md ]; then
@@ -135,8 +137,15 @@ jobs:
             exit 1
           fi
           # Refuse to run a publisher script that Write may have overwritten.
-          if ! sha256sum -c "${RUNNER_TEMP}/gh.sh.sha256"; then
+          if [ -z "${EXPECTED_GH_SH_SHA256}" ]; then
+            echo "ERROR: no scripts/gh.sh digest was recorded by the prefetch step; refusing to publish."
+            exit 1
+          fi
+          ACTUAL_GH_SH_SHA256="$(sha256sum scripts/gh.sh | cut -d" " -f1)"
+          if [ "${ACTUAL_GH_SH_SHA256}" != "${EXPECTED_GH_SH_SHA256}" ]; then
             echo "ERROR: scripts/gh.sh integrity check failed; refusing to publish."
+            echo "  expected ${EXPECTED_GH_SH_SHA256}"
+            echo "  actual   ${ACTUAL_GH_SH_SHA256}"
             exit 1
           fi
           ./scripts/gh.sh pr review-comment "$PR_NUMBER" --body-file - < review-input/summary.md
