@@ -77,58 +77,55 @@ locals {
         replace(
           replace(
             replace(
-              fileexists("${path.module}/cubeproxy-nginx.conf") ? file("${path.module}/cubeproxy-nginx.conf") : (
-                fileexists("${path.module}/../../cubeproxy/nginx.conf.template") ? file("${path.module}/../../cubeproxy/nginx.conf.template") : <<-EOF
-                  user root;
-                  worker_processes auto;
-                  error_log /data/log/cube-proxy/error.log notice;
-                  daemon off;
-                  events { worker_connections 100000; }
-                  http {
-                    include mime.types;
-                    default_type application/octet-stream;
-                    server {
-                      listen __CUBE_PROXY_HTTP_PORT__;
-                      server_name _;
-                      location / { return 404; }
+              replace(
+                fileexists("${path.module}/cubeproxy-nginx.conf") ? file("${path.module}/cubeproxy-nginx.conf") : (
+                  fileexists("${path.module}/../../cubeproxy/nginx.conf.template") ? file("${path.module}/../../cubeproxy/nginx.conf.template") : <<-EOF
+                    user root;
+                    worker_processes auto;
+                    error_log /data/log/cube-proxy/error.log notice;
+                    daemon off;
+                    events { worker_connections 100000; }
+                    http {
+                      include mime.types;
+                      default_type application/octet-stream;
+                      server {
+                        listen __CUBE_PROXY_HTTP_PORT__;
+                        server_name _;
+                        location / { return 404; }
+                      }
+                      server {
+                        listen __CUBE_PROXY_HTTPS_PORT__ ssl;
+                        server_name _;
+                        ssl_certificate /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_CERT__;
+                        ssl_certificate_key /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_KEY__;
+                        location / { return 404; }
+                      }
+                      server {
+                        listen __CUBE_PROXY_ADMIN_LISTEN__:__CUBE_PROXY_ADMIN_PORT__;
+                        server_name _;
+                        location / { return 404; }
+                      }
                     }
-                    server {
-                      listen __CUBE_PROXY_HTTPS_PORT__ ssl;
-                      server_name _;
-                      ssl_certificate /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_CERT__;
-                      ssl_certificate_key /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_KEY__;
-                      location / { return 404; }
-                    }
-                    server {
-                      listen __CUBE_PROXY_ADMIN_LISTEN__:__CUBE_PROXY_ADMIN_PORT__;
-                      server_name _;
-                      location / { return 404; }
-                    }
-                  }
-                EOF
+                  EOF
+                ),
+                "__CUBE_PROXY_HTTP_PORT__",
+                "8081"
               ),
-              "__CUBE_PROXY_HTTP_PORT__",
-              "8081"
+              "__CUBE_PROXY_HTTPS_PORT__",
+              "8080"
             ),
-            "__CUBE_PROXY_HTTPS_PORT__",
-            "8080"
+            "__CUBE_PROXY_GRPC_PORT__",
+            "9090"
           ),
-          "__CUBE_PROXY_GRPC_PORT__",
-          "9090"
+          "__CUBE_PROXY_SSL_CERT__",
+          "cube.app+3.pem"
         ),
-        "__CUBE_PROXY_SSL_CERT__",
-        "cube.app+3.pem"
+        "__CUBE_PROXY_SSL_KEY__",
+        "cube.app+3-key.pem"
       ),
-      "__CUBE_PROXY_SSL_KEY__",
-      "cube.app+3-key.pem"
+      "__CUBE_PROXY_ADMIN_LISTEN__",
+      "0.0.0.0"
     ),
-    "__CUBE_PROXY_ADMIN_LISTEN__",
-    "0.0.0.0"
-  )
-  # Pods run with per-pod networking, so the admin server binds 0.0.0.0 and the
-  # port is parametrized independently for consistency with the systemd path.
-  cubeproxy_nginx_conf_rendered = replace(
-    local.cubeproxy_nginx_conf,
     "__CUBE_PROXY_ADMIN_PORT__",
     tostring(var.cube_proxy_admin_port)
   )
@@ -938,7 +935,7 @@ resource "kubernetes_config_map" "cubeproxy_nginx_conf" {
   }
 
   data = {
-    "nginx.conf" = local.cubeproxy_nginx_conf_rendered
+    "nginx.conf" = local.cubeproxy_nginx_conf
   }
 }
 

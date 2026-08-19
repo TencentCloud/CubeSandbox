@@ -127,12 +127,7 @@ case "${COMPOSE_DETACH}" in
   *) die "unsupported ONE_CLICK_COMPOSE_DETACH: ${COMPOSE_DETACH} (expected 0 or 1)" ;;
 esac
 
-# Validate the three host-network ports cube-proxy binds. Unlike the Terraform
-# variable (which has `> 0 && < 65536` range validation), the shell path had no
-# guard, so a typo like CUBE_PROXY_ADMIN_PORT=abc flowed straight into `ss`,
-# `escape_sed`, and the nginx template -- either confusing errors or a
-# specification that silently matches every sport. Reject a numeric-out-of-range
-# or non-numeric value up front with a clear, named message.
+# Host-network ports cube-proxy binds must be valid TCP ports.
 _validate_host_port() {
   local name="$1" port="$2"
   [[ "${port}" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )) \
@@ -142,21 +137,10 @@ _validate_host_port CUBE_PROXY_HTTP_PORT  "${CUBE_PROXY_HTTP_PORT}"
 _validate_host_port CUBE_PROXY_HTTPS_PORT "${CUBE_PROXY_HTTPS_PORT}"
 _validate_host_port CUBE_PROXY_GRPC_PORT  "${CUBE_PROXY_GRPC_PORT}"
 _validate_host_port CUBE_PROXY_ADMIN_PORT "${CUBE_PROXY_ADMIN_PORT}"
-# HTTP/HTTPS/gRPC must be distinct from the admin port (an accidental collision
-# would make nginx bind two server blocks to the same host port and crash-loop).
 if [[ "${CUBE_PROXY_ADMIN_PORT}" == "${CUBE_PROXY_HTTP_PORT}" \
    || "${CUBE_PROXY_ADMIN_PORT}" == "${CUBE_PROXY_HTTPS_PORT}" \
    || "${CUBE_PROXY_ADMIN_PORT}" == "${CUBE_PROXY_GRPC_PORT}" ]]; then
   die "CUBE_PROXY_ADMIN_PORT (${CUBE_PROXY_ADMIN_PORT}) must differ from CUBE_PROXY_HTTP_PORT (${CUBE_PROXY_HTTP_PORT}), CUBE_PROXY_HTTPS_PORT (${CUBE_PROXY_HTTPS_PORT}) and CUBE_PROXY_GRPC_PORT (${CUBE_PROXY_GRPC_PORT})"
-fi
-# HTTP and HTTPS must also differ from each other: nginx generates two `listen`
-# directives for them (one plain, one `ssl reuseport`) from the same template,
-# so a duplicated port makes both try to bind the same host port. The `ss`
-# pre-check only catches an *external* listener, not this self-conflict, so an
-# equal pair would otherwise crash-loop the container with a cryptic
-# "address already in use" from nginx.
-if [[ "${CUBE_PROXY_HTTP_PORT}" == "${CUBE_PROXY_HTTPS_PORT}" ]]; then
-  die "CUBE_PROXY_HTTP_PORT (${CUBE_PROXY_HTTP_PORT}) and CUBE_PROXY_HTTPS_PORT (${CUBE_PROXY_HTTPS_PORT}) must differ"
 fi
 
 install_mkcert() {
@@ -255,15 +239,9 @@ fi
 compose_run down --remove-orphans >/dev/null 2>&1 || true
 docker_rm_if_exists "${CUBE_PROXY_CONTAINER_NAME}"
 
-# cube-proxy uses network_mode: host, so HTTP/HTTPS/gRPC and admin ports must be
-# free on the host before we attempt to start the container; otherwise the
-# failure mode is a cryptic "address already in use" from nginx inside the
-# container that crash-loops without surfacing the real reason. The admin port
-# in particular has no default liveness check, so a conflict there would
-# otherwise stall the installer at cube-sandbox-control.target.
-# Map each port to the environment variable that overrides it, so the conflict
-# message names the *specific* override the operator should set (not always the
-# admin port, which is misleading when e.g. port 80 is the one already in use).
+# Host networking: HTTP/HTTPS/gRPC/admin must be free. Name the specific
+# override variable so a collision on 80 does not tell the operator to change
+# CUBE_PROXY_ADMIN_PORT.
 for entry in "${CUBE_PROXY_HTTP_PORT}:CUBE_PROXY_HTTP_PORT" \
              "${CUBE_PROXY_HTTPS_PORT}:CUBE_PROXY_HTTPS_PORT" \
              "${CUBE_PROXY_GRPC_PORT}:CUBE_PROXY_GRPC_PORT" \
@@ -332,12 +310,6 @@ for _ in {1..30}; do
   sleep 2
 done
 
-# Report every port that failed to bind in one message (not just the first),
-# so the operator does not need to re-run once per failing port. Each failure
-# names its override variable and points at the container logs, since the root
-# cause of a missing listener is usually a bind() error (e.g. "address already
-# in use") buried in `docker logs` that never surfaces through the target's
-# Wants= exit code.
 readiness_failures=()
 [[ "${http_ready}"  == "1" ]] || readiness_failures+=("HTTP port ${CUBE_PROXY_HTTP_PORT} (override CUBE_PROXY_HTTP_PORT)")
 [[ "${https_ready}" == "1" ]] || readiness_failures+=("HTTPS port ${CUBE_PROXY_HTTPS_PORT} (override CUBE_PROXY_HTTPS_PORT)")

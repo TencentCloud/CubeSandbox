@@ -122,131 +122,32 @@ wait_until() {
   done
 }
 
-_unit_dump_diagnostics() {
-  local unit="$1"
-  log "systemd unit '${unit}' is not active; recent status and journal follow:"
-  systemctl status --no-pager --lines=0 "${unit}" >&2 || true
-  journalctl --no-pager -u "${unit}" -n 40 >&2 || true
-}
-
-# check_unit_active -- readiness gate for a cube-sandbox systemd unit.
-#
-# Not delegated to wait_until: cube-sandbox-*.target pulls its members in via
-# Wants=, so a failed unit (e.g. cube-proxy losing a port race) does NOT make
-# `systemctl enable --now <target>` return non-zero. This is the exit-code-
-# independent place that catches it, so on the deadline we dump the unit's
-# status and journal -- otherwise the actionable root cause (like a port
-# already in use) stays buried in the service journal and the operator only
-# sees a generic "unit not active".
-#
-# systemd has multiple independent state categories (LoadState, ActiveState,
-# SubState, Result, plus any in-flight Job and NRestarts). Reading only
-# `is-active` conflates them and produced two bugs in the previous version:
-#   1. A TOCTOU race -- it queried `is-active --quiet` then `is-active` again,
-#      so a state flip between the two calls could return the wrong verdict.
-#   2. It treated every non-active status as terminal (e.g. `activating`,
-#      `inactive` with a pending start Job) and would fail-fast on a unit that
-#      was legitimately still coming up.
-# We therefore fetch every category in a single `systemctl show` call and branch
-# exactly once per iteration on the snapshot, so the verdict is consistent.
+# control.target only Wants= cube-proxy, so a failed child does not fail
+# `enable --now`. If the unit is already failed (e.g. admin-port bind), die
+# immediately instead of burning the readiness budget.
 check_unit_active() {
   local unit="$1"
-  local output key value
-  local load_state active_state sub_state result job restarts=""
-  local now remaining delay
+  local state now remaining delay
   while :; do
-    load_state=""
-    active_state=""
-    sub_state=""
-    result=""
-    job=""
-    restarts=""
-    # One call snapshots all categories atomically; `|| true` so a transient
-    # systemctl error leaves the produce-empty-state branch (unknown -> wait).
-    output="$(
-      systemctl show "${unit}" \
-        --no-pager \
-        --property=LoadState \
-        --property=ActiveState \
-        --property=SubState \
-        --property=Result \
-        --property=Job \
-        --property=NRestarts \
-        2>/dev/null || true
-    )"
-    while IFS='=' read -r key value; do
-      case "${key}" in
-        LoadState) load_state="${value}" ;;
-        ActiveState) active_state="${value}" ;;
-        SubState) sub_state="${value}" ;;
-        Result) result="${value}" ;;
-        Job) job="${value}" ;;
-        NRestarts) restarts="${value}" ;;
-      esac
-    done <<< "${output}"
-
-    # Load problem means the unit can never start in this configuration -- fail
-    # immediately rather than burn the readiness budget. An empty `load_state`
-    # means `systemctl show` produced no output (the unit name does not exist on
-    # this host, or systemctl itself errored): likewise fail fast instead of
-    # looping until QUICKCHECK_DEADLINE on what is almost certainly a typo /
-    # wiring error rather than a transient readiness gap.
-    case "${load_state}" in
-      "")
-        _unit_dump_diagnostics "${unit}"
-        die "systemd unit has no LoadState: ${unit} \
-(unit not found on this host, or systemctl unavailable; active=${active_state:-unknown}, sub=${sub_state:-unknown})"
-        ;;
-      not-found|bad-setting|error|masked)
-        _unit_dump_diagnostics "${unit}"
-        die "systemd unit cannot be loaded: ${unit} \
-(load=${load_state}, active=${active_state:-unknown}, sub=${sub_state:-unknown})"
-        ;;
-    esac
-
-    case "${active_state}" in
-      active|reloading|refreshing)
+    state="$(systemctl show -p ActiveState --value "${unit}" 2>/dev/null || true)"
+    case "${state}" in
+      active|reloading)
         return 0
         ;;
       failed)
-        # e.g. nginx aborting with "address already in use": the actionable root
-        # cause is in the journal, so surface it immediately instead of looping.
-        _unit_dump_diagnostics "${unit}"
-        die "systemd unit failed: ${unit} \
-(sub=${sub_state:-unknown}, result=${result:-unknown}, restarts=${restarts:-0})"
-        ;;
-      inactive|deactivating)
-        # `deactivating` always has an in-flight job, but `inactive` only.
-        if [[ "${active_state}" != "deactivating" && -z "${job}" && -n "${load_state}" ]]; then
-          _unit_dump_diagnostics "${unit}"
-          die "systemd unit is inactive with no pending job: ${unit} \
-(sub=${sub_state:-unknown}, result=${result:-unknown})"
-        fi
-        ;;
-      activating|maintenance)
-        # Legit transient states: keep waiting until the deadline.
-        ;;
-      *)
-        # Unknown or temporarily-unavailable state (e.g. systemctl itself
-        # errored): let the deadline decide rather than guess.
+        systemctl status --no-pager --lines=0 "${unit}" >&2 || true
+        die "systemd unit failed: ${unit}"
         ;;
     esac
-
     now="$(date +%s)"
     if (( now >= QUICKCHECK_DEADLINE )); then
-      _unit_dump_diagnostics "${unit}"
-      die "systemd unit did not become active: ${unit} \
-(load=${load_state:-unknown}, active=${active_state:-unknown}, sub=${sub_state:-unknown}, \
-result=${result:-unknown}, restarts=${restarts:-0}; not ready within ${QUICKCHECK_READY_TIMEOUT}s; see status/journal above)"
+      die "expected systemd unit not active: ${unit} (not ready within ${QUICKCHECK_READY_TIMEOUT}s)"
     fi
-    # Never sleep past the overall budget.
     remaining=$((QUICKCHECK_DEADLINE - now))
     delay="${QUICKCHECK_READY_INTERVAL}"
     if (( delay > remaining )); then
       delay="${remaining}"
     fi
-    # Tolerate a signal-interrupted sleep so `set -e` does not abort here; the
-    # next iteration's deadline check reports the descriptive failure instead.
     sleep "${delay}" || true
   done
 }

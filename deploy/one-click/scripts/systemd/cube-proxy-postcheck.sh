@@ -19,9 +19,5 @@ wait_for_tcp_port "${postcheck_port}" "${postcheck_retries}" "${postcheck_delay}
 log "checking cube-proxy gRPC tcp port ${postcheck_grpc_port}"
 wait_for_tcp_port "${postcheck_grpc_port}" "${postcheck_retries}" "${postcheck_delay}" || die "cube-proxy gRPC tcp port not ready: ${postcheck_grpc_port}"
 
-# nginx binds all listen directives at master startup, so an admin-port bind
-# failure (e.g. 8082 already in use) crash-loops the whole container. Probe the
-# admin port too so the failure surfaces here instead of silently stalling the
-# cube-sandbox-control.target unit.
 log "checking cube-proxy admin tcp port ${admin_port}"
 wait_for_tcp_port "${admin_port}" "${postcheck_retries}" "${postcheck_delay}" || die "cube-proxy admin tcp port not ready: ${admin_port} (check 'docker logs cube-proxy' for a bind() failure; override with CUBE_PROXY_ADMIN_PORT if the port is taken)"
