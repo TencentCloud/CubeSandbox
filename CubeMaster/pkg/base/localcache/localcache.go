@@ -105,11 +105,11 @@ func (localCache *LocalCache) Destroy() {
 	if localCache == nil {
 		return
 	}
+	if localCache.chCacheExit == nil {
+		return
+	}
 	localCache.destroyOnce.Do(func() {
 		CubeLog.Infof("LruCache(%s) Destroy", localCache.name)
-		if localCache.chCacheExit == nil {
-			return
-		}
 		if localCache.localCacheConfig.OpenCacheFile {
 			localCache.saveFile(localCache.localCacheConfig.LoadFileName)
 		}
@@ -193,7 +193,10 @@ func (localCache *LocalCache) put(key string, val interface{}, expired time.Dura
 	}
 
 	if atomic.LoadInt64(&localCache.curCacheSize) >= localCache.localCacheConfig.HighCacheSize {
-		localCache.chShrinkCache <- true
+		select {
+		case localCache.chShrinkCache <- true:
+		default:
+		}
 	}
 }
 
