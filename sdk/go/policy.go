@@ -38,7 +38,7 @@ func (i Inject) Render() string {
 	if format == "" {
 		format = "${SECRET}"
 	}
-	return strings.ReplaceAll(format, "${SECRET}", i.Secret)
+	return strings.Replace(format, "${SECRET}", i.Secret, 1)
 }
 
 // Action is a rule action. Allow passes the request through (optionally
