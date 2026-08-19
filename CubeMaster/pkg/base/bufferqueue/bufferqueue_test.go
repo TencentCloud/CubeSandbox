@@ -128,7 +128,9 @@ func TestQueueCheckTimestampPriority(t *testing.T) {
 	waittime := time.Duration(testnum*10) * time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), waittime)
 	defer cancel()
+	watcherDone := make(chan struct{})
 	go func() {
+		defer close(watcherDone)
 		for {
 			select {
 			case <-ctx.Done():
@@ -143,6 +145,7 @@ func TestQueueCheckTimestampPriority(t *testing.T) {
 			}
 		}
 	}()
+	defer func() { <-watcherDone }()
 
 	bw.GraceFullStop(ctx)
 	assert.Equal(t, int32(testnum), worked)

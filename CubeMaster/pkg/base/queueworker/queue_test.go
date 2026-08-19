@@ -6,6 +6,7 @@ package queueworker
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -61,18 +62,24 @@ func TestQueue(t *testing.T) {
 func TestQueueBlock(t *testing.T) {
 	q := NewQueue(5)
 
-	got := false
+	var got atomic.Bool
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		q.BPop()
-		got = true
+		got.Store(true)
 	}()
 
-	if got {
+	if got.Load() {
 		t.Error("BPop should block when queue is empty")
 	}
 	q.Push(1)
-	time.Sleep(time.Second)
-	if !got {
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("BPop did not return after Push")
+	}
+	if !got.Load() {
 		t.Error("BPop should got value when queue is not empty")
 	}
 }

@@ -144,7 +144,7 @@ func TestGoWithRetryWithCrash(t *testing.T) {
 		atomic.AddInt32(&panicTime, 1)
 	})
 	time.Sleep(2 * time.Second)
-	if int(panicTime) != retryTime {
+	if int(atomic.LoadInt32(&panicTime)) != retryTime {
 		t.Errorf("should be %d, actual %d", 0, 1)
 	}
 }
