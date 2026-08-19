@@ -60,8 +60,8 @@ func TestConcurrentGetAndRefreshOnSameKey(t *testing.T) {
 	}
 	wg.Wait()
 
-	if atomic.LoadInt64(&loads) == 0 {
-		t.Fatal("loader never ran; the test did not exercise the refresh path")
+	if got := atomic.LoadInt64(&loads); got < 2 {
+		t.Fatalf("loader ran %d time(s); only the initial miss was exercised, not the refresh path", got)
 	}
 }
 
@@ -216,5 +216,30 @@ func TestSuccessfulHitPromotesTheEntry(t *testing.T) {
 	}
 	if got := frontKey(t, localCache); got != "b" {
 		t.Fatalf("a fresh hit did not promote: front is %q, want b", got)
+	}
+}
+
+func TestPutAfterDestroyDoesNotBlockForever(t *testing.T) {
+	localCache := NewCache("post-destroy-put-probe",
+		func(ctx context.Context, key string) (interface{}, bool, error) {
+			return "v", true, nil
+		},
+		&LocalCacheConfig{LowCacheSize: 1, HighCacheSize: 1, Expired: time.Hour})
+
+	localCache.put("seed-a", RandString(16), time.Hour)
+	localCache.Destroy()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		localCache.put("after-destroy-1", RandString(16), time.Hour)
+		localCache.put("after-destroy-2", RandString(16), time.Hour)
+		localCache.put("after-destroy-3", RandString(16), time.Hour)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("put blocked after Destroy: the shrink signal has no reader once shrinkCache has exited")
 	}
 }
