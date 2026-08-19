@@ -474,6 +474,7 @@ redis:
   # Empty host installs and uses the chart-managed cube-redis service.
   # Non-empty host uses the configured third-party Redis service and skips cube-redis.
   # Sentinel mode (non-empty masterName) skips cube-redis and must leave host empty.
+  # CubeProxy resolves this via nginx (no search domains): use an FQDN or IP literal.
   host: ""
   port: 6379
   # Redis Sentinel (external). Non-empty masterName enables Sentinel for
@@ -713,6 +714,7 @@ cubeProxy:
       containerPort: 9090
   redis:
     # Empty host uses redis.host or chart-managed cube-redis.
+    # Overrides must be an FQDN or IP literal (nginx resolver has no search domains).
     host: ""
     port: ""
     db: 0
@@ -776,7 +778,8 @@ cubeProxy:
     # configured by DNS name (the default Kubernetes Service DNS name).
     # Empty addresses auto-discovers nameservers from the Pod /etc/resolv.conf.
     addresses: []
-    valid: 30s
+    # Keep well below lifecycleManager.heartbeatTTL (15s) so heartbeats recover after redis IP changes.
+    valid: 5s
     timeout: 5s
     ipv6: false
   probes:
