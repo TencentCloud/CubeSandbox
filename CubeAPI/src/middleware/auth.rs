@@ -50,10 +50,15 @@ fn extract_credential(request: &Request) -> Option<AuthCredential> {
     None
 }
 
+fn identity_hash(kind: &str, credential: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{}:{:x}", kind, Sha256::digest(credential.as_bytes()))
+}
+
 fn identity_of(credential: &AuthCredential) -> String {
     match credential {
-        AuthCredential::Bearer(t) => format!("bearer:{}", t),
-        AuthCredential::ApiKey(k) => format!("apikey:{}", k),
+        AuthCredential::Bearer(t) => identity_hash("bearer", t),
+        AuthCredential::ApiKey(k) => identity_hash("apikey", k),
     }
 }
 
@@ -134,10 +139,9 @@ pub async fn unified_auth(
                         "Invalid API key or token".to_string(),
                     ));
                 }
-                request.extensions_mut().insert(RateLimitIdentity(format!(
-                    "configured-key:{}",
-                    expected_key
-                )));
+                request
+                    .extensions_mut()
+                    .insert(RateLimitIdentity("configured-key".to_string()));
             }
         }
         // Mode 3: no auth (both unset) or simple-key match — pass through.
@@ -211,6 +215,51 @@ pub async fn unified_auth(
 
 #[cfg(test)]
 mod tests {
+    use super::{identity_of, AuthCredential};
+
+    #[test]
+    fn rate_limit_identities_never_contain_the_raw_credential() {
+        let token = "eyJhbGciOiJIUzI1NiJ9.super-secret-tenant-token.signature";
+        let key = "sk-live-super-secret-api-key";
+
+        let bearer = identity_of(&AuthCredential::Bearer(token.to_string()));
+        let apikey = identity_of(&AuthCredential::ApiKey(key.to_string()));
+
+        assert!(
+            !bearer.contains(token),
+            "bearer identity leaks the token: {bearer}"
+        );
+        assert!(
+            !apikey.contains(key),
+            "apikey identity leaks the key: {apikey}"
+        );
+        assert!(bearer.starts_with("bearer:"));
+        assert!(apikey.starts_with("apikey:"));
+        assert_eq!(
+            bearer.len(),
+            "bearer:".len() + 64,
+            "expected a hex sha256 digest"
+        );
+        assert_eq!(
+            apikey.len(),
+            "apikey:".len() + 64,
+            "expected a hex sha256 digest"
+        );
+    }
+
+    #[test]
+    fn the_same_credential_always_maps_to_the_same_identity() {
+        let a = identity_of(&AuthCredential::Bearer("tok".to_string()));
+        let b = identity_of(&AuthCredential::Bearer("tok".to_string()));
+        let c = identity_of(&AuthCredential::ApiKey("tok".to_string()));
+
+        assert_eq!(a, b, "identity must be stable or buckets would churn");
+        assert_ne!(
+            a, c,
+            "a bearer token and an api key with the same value must not collide"
+        );
+    }
+
     use super::*;
     use crate::{
         config::ServerConfig,
