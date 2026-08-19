@@ -32,6 +32,9 @@ local INDEX_LOCK_TIMEOUT_MS = 1000
 -- (and would bloat policy_store fast).
 local SECRET_MAX_BYTES = 65536
 
+local MAX_RULES_PER_POLICY = 256
+local MAX_INJECTS_PER_RULE = 32
+
 -- ---------- validation ----------
 
 -- IPv4 dotted-quad. No IPv6 for now.
@@ -66,6 +69,10 @@ local function validate_policy(p)
     if n == 0 then
         return false, "policy.rules must have at least one rule"
     end
+    if n > MAX_RULES_PER_POLICY then
+        return false, string.format(
+            "policy.rules has %d rules, max %d", n, MAX_RULES_PER_POLICY)
+    end
     local seen_ids = {}
     for i = 1, n do
         local r = p.rules[i]
@@ -92,6 +99,11 @@ local function validate_policy(p)
         if r.action.inject ~= nil then
             if type(r.action.inject) ~= "table" then
                 return false, "rules[" .. i .. "].action.inject must be array"
+            end
+            if #r.action.inject > MAX_INJECTS_PER_RULE then
+                return false, string.format(
+                    "rules[%d].action.inject has %d entries, max %d",
+                    i, #r.action.inject, MAX_INJECTS_PER_RULE)
             end
             for j, inj in ipairs(r.action.inject) do
                 if type(inj) ~= "table" then
@@ -206,8 +218,12 @@ local function index_add(sandbox_ip)
             if ip == sandbox_ip then return true end
         end
         table.insert(arr, sandbox_ip)
-        local ok, err = d:set(INDEX_KEY, cjson.encode(arr))
+        local ok, err, forcible = d:set(INDEX_KEY, cjson.encode(arr))
         if not ok then error("index set: " .. tostring(err)) end
+        if forcible then
+            ngx.log(ngx.ERR, "policy_store full: writing the policy index evicted ",
+                             "other entries; increase lua_shared_dict policy_store")
+        end
         return true
     end)
 end
@@ -274,8 +290,13 @@ function _M.put(sandbox_ip, policy)
     end
     local encoded = cjson.encode(policy)
     if not encoded then return nil, "policy encode failed" end
-    local set_ok, set_err = shared():set(sandbox_ip, encoded)
+    local set_ok, set_err, forcible = shared():set(sandbox_ip, encoded)
     if not set_ok then return nil, "shared_dict set: " .. tostring(set_err) end
+    if forcible then
+        ngx.log(ngx.ERR, "policy_store full: storing the policy for ", sandbox_ip,
+                         " evicted other sandboxes' policies (they will be denied ",
+                         "egress until re-pushed); increase lua_shared_dict policy_store")
+    end
     local _, idx_err = index_add(sandbox_ip)
     if idx_err then
         -- Best-effort: data is in store but index is stale. Surface it.
@@ -336,7 +357,12 @@ end
 
 -- count() -> integer (number of policies in index)
 function _M.count()
-    return #read_index()
+    local d = shared()
+    local live = 0
+    for _, ip in ipairs(read_index()) do
+        if d:get(ip) then live = live + 1 end
+    end
+    return live
 end
 
 -- bulk_load(policies_map) -> (n_loaded, errors_table)
