@@ -129,17 +129,6 @@ class TracingSandboxAdapter(SandboxAdapter):
         )
         return wrap_adapter(resumed, self._trace)
 
-    def get_host(self, port: int) -> str:
-        return self._trace.capture(
-            "get_host",
-            {
-                "backend": self.backend,
-                "sandbox_id": self.sandbox_id,
-                "port": port,
-            },
-            lambda: self._wrapped.get_host(port),
-        )
-
     def traffic_access_token(self) -> str | None:
         return self._trace.capture(
             "traffic_access_token",
