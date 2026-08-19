@@ -280,10 +280,10 @@ func (l *local) monitorLimit() {
 				}
 				newMasterNodes := localcache.HealthyMasterNodes()
 
-				newCreateLimitOfEveryNode := max(int64(math.Ceil(float64(totalLimitCreate*1.0/newHealthyNodes))),
+				newCreateLimitOfEveryNode := max(int64(math.Ceil(float64(totalLimitCreate)/float64(newHealthyNodes))),
 					config.GetConfig().CubeletConf.CreateConcurrentLimit)
 
-				limitCreate := int64(math.Ceil(float64(newHealthyNodes * newCreateLimitOfEveryNode * 1.0 / newMasterNodes)))
+				limitCreate := int64(math.Ceil(float64(newHealthyNodes*newCreateLimitOfEveryNode) / float64(newMasterNodes)))
 				if bufferQ.lastCreateConcurrentLimit != limitCreate {
 					bufferQ.setLastCreateConcurrentLimit(limitCreate)
 					bufferQ.setBufferTaskConcurrent(limitCreate)
@@ -306,7 +306,7 @@ func (l *local) monitorLimit() {
 			newMasterNodes := localcache.HealthyMasterNodes()
 
 			newLimitDesroyOfEveryNode := limitDestroyOfEveryNode()
-			limitDestroy := int64(math.Ceil(float64(newHealthyNodes * newLimitDesroyOfEveryNode * 1.0 / newMasterNodes)))
+			limitDestroy := int64(math.Ceil(float64(newHealthyNodes*newLimitDesroyOfEveryNode) / float64(newMasterNodes)))
 			if l.lastDestroyconcurrentLimit != limitDestroy && limitDestroy >= 1 {
 				l.lastDestroyconcurrentLimit = limitDestroy
 				task.SetTaskWorkerConcurrent(task.DestroySandbox, limitDestroy)
