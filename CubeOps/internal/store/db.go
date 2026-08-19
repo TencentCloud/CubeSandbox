@@ -128,7 +128,7 @@ func (s *Store) bootstrapMasterKey(ctx context.Context) error {
 // settings table, and returned.  This allows zero-config deployment — the
 // secret is auto-generated on first run and reused on subsequent runs.
 func (s *Store) BootstrapJWTSecret(ctx context.Context, envSecret string) (string, error) {
-	if envSecret != "" {
+	if strings.TrimSpace(envSecret) != "" {
 		return envSecret, nil
 	}
 	// Use GetOrCreateSystemSetting (INSERT IGNORE + read-back) so that
@@ -143,7 +143,7 @@ func (s *Store) BootstrapJWTSecret(ctx context.Context, envSecret string) (strin
 		return "", fmt.Errorf("persist JWT secret: %w", err)
 	}
 	if strings.TrimSpace(winner) == "" {
-		if err := s.repairEmptySystemSetting(ctx, "jwt_secret", generated); err != nil {
+		if err := s.repairSystemSettingIfStill(ctx, "jwt_secret", winner, generated); err != nil {
 			return "", fmt.Errorf("repair empty JWT secret: %w", err)
 		}
 		winner, err = s.GetSystemSetting(ctx, "jwt_secret")
