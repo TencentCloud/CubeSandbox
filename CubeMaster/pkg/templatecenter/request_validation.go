@@ -127,7 +127,10 @@ func validateTemplateAlias(alias string) error {
 	if alias == "" {
 		return nil
 	}
-	if hasValidTemplateIDPrefix(alias) {
+	// Reject any alias that collides with a template/snapshot ID prefix,
+	// including the bare "tpl-"/"snap-" (hasValidTemplateIDPrefix only flags
+	// prefix+suffix). Matches CubeAPI's is_valid_alias so the two layers agree.
+	if strings.HasPrefix(alias, "tpl-") || strings.HasPrefix(alias, "snap-") {
 		return fmt.Errorf("alias %q must not start with 'tpl-' or 'snap-'", alias)
 	}
 	if !aliasValidationRe.MatchString(alias) {

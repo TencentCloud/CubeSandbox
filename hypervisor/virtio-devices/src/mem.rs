@@ -268,7 +268,7 @@ impl VirtioMemConfig {
         // in the usable region.
         if addr % self.block_size != 0
             || size == 0
-            || (addr < self.addr || addr + size >= self.addr + self.usable_region_size)
+            || (addr < self.addr || addr + size > self.addr + self.usable_region_size)
         {
             return false;
         }

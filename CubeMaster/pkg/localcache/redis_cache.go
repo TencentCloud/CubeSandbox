@@ -168,6 +168,25 @@ func WriteNodeMetric(ctx context.Context, m *NodeMetric) error {
 	return nil
 }
 
+// DeleteNodeMetric removes both current and legacy metric keys for a retired
+// node. Cache eviction remains correct if Redis is temporarily unavailable,
+// so callers may log this error after the database transaction has committed.
+func DeleteNodeMetric(ctx context.Context, nodeID string) error {
+	if nodeID == "" {
+		return errors.New("DeleteNodeMetric: node id required")
+	}
+	keys := rediskey.DeleteKeys(rediskey.NodeMetric(nodeID), rediskey.LegacyNodeMetric(nodeID))
+	args := redis.Args{}
+	for _, key := range keys {
+		args = args.Add(key)
+	}
+	if _, err := wrapredis.GetRedis().Do("DEL", args...); err != nil {
+		log.G(ctx).Errorf("DeleteNodeMetric DEL failed node_id=%s: %v", nodeID, err)
+		return err
+	}
+	return nil
+}
+
 // nodeMetricTTLSec returns the configured node-metric safety TTL in seconds.
 func nodeMetricTTLSec() int {
 	if c := config.GetConfig().RedisConf; c != nil {
@@ -278,10 +297,13 @@ func (l *local) loopUpdateMetric(ctx context.Context) {
 				defer func() {
 					checkDeadline = time.Now().Add(config.GetConfig().Common.SyncMetricDataInterval)
 				}()
-				ctx = context.WithValue(ctx, CubeLog.KeyRequestID, uuid.New().String())
+				// Keep the loop's base context immutable. Reassigning ctx here would
+				// create an unbounded valueCtx chain (one layer per metric tick),
+				// making every later ctx.Value/Done lookup increasingly expensive.
+				metricCtx := context.WithValue(ctx, CubeLog.KeyRequestID, uuid.New().String())
 				elems := l.cache.Items()
 				for k := range elems {
-					if tmpNode, found, err := l.getNodeMetricWithFallback(ctx, k); found && err == nil {
+					if tmpNode, found, err := l.getNodeMetricWithFallback(metricCtx, k); found && err == nil {
 						if err := l.updateNodeMetric(tmpNode); err != nil {
 
 							CubeLog.WithContext(context.Background()).Fatalf("updateMetric fail:%v", err)

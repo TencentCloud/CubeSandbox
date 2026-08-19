@@ -49,10 +49,12 @@ test:
 	bash tests/test_lua_syntax.sh
 	@if command -v lua >/dev/null 2>&1; then \
 		lua tests/redis_iresty_sentinel_test.lua; \
+		lua tests/backend_cache_test.lua; \
 	elif command -v luajit >/dev/null 2>&1; then \
 		luajit tests/redis_iresty_sentinel_test.lua; \
+		luajit tests/backend_cache_test.lua; \
 	else \
-		echo "skip redis_iresty_sentinel_test.lua (no lua/luajit)"; \
+		echo "skip lua unit tests (no lua/luajit): redis_iresty_sentinel_test.lua backend_cache_test.lua"; \
 	fi
 
 # Push the architecture-specific image to all registries.

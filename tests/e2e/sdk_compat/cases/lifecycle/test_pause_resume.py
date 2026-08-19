@@ -7,7 +7,11 @@ import pytest
 
 from framework.assertions import assert_code_ok, assert_command_ok
 from framework.capabilities import PAUSE_RESUME, RUN_CODE
-from framework.lifecycle import wait_until_paused
+from framework.lifecycle import (
+    wait_until_data_plane_ready,
+    wait_until_paused,
+    wait_until_running,
+)
 
 pytestmark = [
     pytest.mark.e2e,
@@ -16,6 +20,19 @@ pytestmark = [
     pytest.mark.p1,
     pytest.mark.requires_capability(PAUSE_RESUME),
 ]
+
+
+def _pause_and_resume(sdk_sandbox, sdk_e2e_config):
+    sdk_sandbox.pause(timeout=sdk_e2e_config.default_timeout)
+    wait_until_paused(sdk_sandbox, timeout=sdk_e2e_config.default_timeout)
+    resumed = sdk_sandbox.resume_or_connect(timeout=sdk_e2e_config.default_timeout)
+    wait_until_running(resumed, timeout=sdk_e2e_config.default_timeout)
+    wait_until_data_plane_ready(
+        resumed,
+        timeout=sdk_e2e_config.default_timeout,
+        command_timeout=sdk_e2e_config.command_timeout,
+    )
+    return resumed
 
 
 def test_pause_sets_state_paused(sdk_sandbox, sdk_e2e_config):
@@ -27,8 +44,7 @@ def test_pause_sets_state_paused(sdk_sandbox, sdk_e2e_config):
 def test_pause_and_connect_resume_preserves_files(sdk_sandbox, sdk_e2e_config):
     sdk_sandbox.write_file("/tmp/sdk-compat-pause.txt", "before-pause")
 
-    sdk_sandbox.pause(timeout=sdk_e2e_config.default_timeout)
-    resumed = sdk_sandbox.resume_or_connect(timeout=sdk_e2e_config.default_timeout)
+    resumed = _pause_and_resume(sdk_sandbox, sdk_e2e_config)
     try:
         assert resumed.sandbox_id == sdk_sandbox.sandbox_id
         assert resumed.read_file("/tmp/sdk-compat-pause.txt") == "before-pause"
@@ -37,8 +53,7 @@ def test_pause_and_connect_resume_preserves_files(sdk_sandbox, sdk_e2e_config):
 
 
 def test_pause_and_connect_resume_allows_commands(sdk_sandbox, sdk_e2e_config):
-    sdk_sandbox.pause(timeout=sdk_e2e_config.default_timeout)
-    resumed = sdk_sandbox.resume_or_connect(timeout=sdk_e2e_config.default_timeout)
+    resumed = _pause_and_resume(sdk_sandbox, sdk_e2e_config)
     try:
         result = resumed.run_command(
             "printf resumed",
@@ -52,8 +67,7 @@ def test_pause_and_connect_resume_allows_commands(sdk_sandbox, sdk_e2e_config):
 
 @pytest.mark.sandbox_create_options(env_vars={"SDK_COMPAT_PAUSE_ENV": "pause-env"})
 def test_pause_and_connect_resume_preserves_env_vars(sdk_sandbox, sdk_e2e_config):
-    sdk_sandbox.pause(timeout=sdk_e2e_config.default_timeout)
-    resumed = sdk_sandbox.resume_or_connect(timeout=sdk_e2e_config.default_timeout)
+    resumed = _pause_and_resume(sdk_sandbox, sdk_e2e_config)
     try:
         result = resumed.run_command(
             'printf "%s" "$SDK_COMPAT_PAUSE_ENV"',
@@ -74,8 +88,7 @@ def test_pause_and_connect_resume_preserves_run_code_state(sdk_sandbox, sdk_e2e_
     )
     assert_code_ok(first)
 
-    sdk_sandbox.pause(timeout=sdk_e2e_config.default_timeout)
-    resumed = sdk_sandbox.resume_or_connect(timeout=sdk_e2e_config.default_timeout)
+    resumed = _pause_and_resume(sdk_sandbox, sdk_e2e_config)
     try:
         second = resumed.run_code(
             "sdk_compat_pause_value + 1",

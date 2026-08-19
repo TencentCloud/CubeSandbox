@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -279,4 +280,332 @@ func TestGetTemplateIncludesDisplayMetadata(t *testing.T) {
 	assert.Equal(t, "2026-06-17 12:00:00", got.CreatedAt)
 	assert.Equal(t, "docker.io/library/python:3.12", got.ImageInfo)
 	assert.Equal(t, int64(errorcode.ErrorCode_Success), rt.RetCode)
+}
+
+// TestSetTemplateAliasHandler_ResolvesIdentifier_And_ReturnsUpdatedDetail
+// verifies the happy path: path param is fed to resolveTemplateIdentifierFn,
+// setTemplateAliasFn is invoked on the resolved id, and on success the
+// refreshed TemplateInfo is returned with RetCode=Success.
+func TestSetTemplateAliasHandler_ResolvesIdentifier_And_ReturnsUpdatedDetail(t *testing.T) {
+	origResolveFn := resolveTemplateIdentifierFn
+	origSetFn := setTemplateAliasFn
+	origGetInfoFn := getTemplateInfoFn
+	t.Cleanup(func() {
+		resolveTemplateIdentifierFn = origResolveFn
+		setTemplateAliasFn = origSetFn
+		getTemplateInfoFn = origGetInfoFn
+	})
+
+	var resolvedIdentifier string
+	resolveTemplateIdentifierFn = func(ctx context.Context, identifier string) (string, error) {
+		resolvedIdentifier = identifier
+		return "tpl-resolved", nil
+	}
+	var setCalledID, setCalledAlias string
+	setTemplateAliasFn = func(ctx context.Context, templateID, alias string) error {
+		setCalledID = templateID
+		setCalledAlias = alias
+		return nil
+	}
+	getTemplateInfoFn = func(ctx context.Context, templateID string) (*templatecenter.TemplateInfo, error) {
+		return &templatecenter.TemplateInfo{
+			TemplateID:   templateID,
+			InstanceType: "cubebox",
+			Version:      "v2",
+			Status:       "READY",
+			DisplayName:  "my-alias",
+		}, nil
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/cube/template/stable-python/alias",
+		strings.NewReader(`{"alias":"my-alias"}`))
+	rt := &CubeLog.RequestTrace{}
+	resp := setTemplateAlias(req, rt, "stable-python")
+
+	got, ok := resp.(*templateResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, "stable-python", resolvedIdentifier,
+		"path template_id must be forwarded to resolveTemplateIdentifierFn")
+	assert.Equal(t, "tpl-resolved", setCalledID,
+		"SetTemplateAlias must be invoked on the resolved id")
+	assert.Equal(t, "my-alias", setCalledAlias)
+	assert.Equal(t, int(errorcode.ErrorCode_Success), got.Ret.RetCode)
+	assert.Equal(t, "tpl-resolved", got.TemplateID)
+	assert.Equal(t, "my-alias", got.DisplayName)
+	assert.Equal(t, int64(errorcode.ErrorCode_Success), rt.RetCode)
+}
+
+// TestSetTemplateAliasHandler_ClearPath_NoBody verifies that a PUT with no
+// body is treated as a clear (alias=""), matching the shared contract
+// ("omitted / null / empty alias -> clear").
+func TestSetTemplateAliasHandler_ClearPath_NoBody(t *testing.T) {
+	origResolveFn := resolveTemplateIdentifierFn
+	origSetFn := setTemplateAliasFn
+	origGetInfoFn := getTemplateInfoFn
+	t.Cleanup(func() {
+		resolveTemplateIdentifierFn = origResolveFn
+		setTemplateAliasFn = origSetFn
+		getTemplateInfoFn = origGetInfoFn
+	})
+	resolveTemplateIdentifierFn = func(ctx context.Context, identifier string) (string, error) {
+		return identifier, nil
+	}
+	var setCalledAlias string
+	setTemplateAliasFn = func(ctx context.Context, templateID, alias string) error {
+		setCalledAlias = alias
+		return nil
+	}
+	getTemplateInfoFn = func(ctx context.Context, templateID string) (*templatecenter.TemplateInfo, error) {
+		return &templatecenter.TemplateInfo{TemplateID: templateID, Status: "READY"}, nil
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/cube/template/tpl-1/alias", nil)
+	rt := &CubeLog.RequestTrace{}
+	resp := setTemplateAlias(req, rt, "tpl-1")
+
+	got, ok := resp.(*templateResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, "", setCalledAlias, "absent body must arrive as alias=\"\" (clear)")
+	assert.Equal(t, int(errorcode.ErrorCode_Success), got.Ret.RetCode)
+}
+
+// TestSetTemplateAliasHandler_400_OnInvalidAlias verifies that
+// ErrInvalidAlias from SetTemplateAlias maps to MasterParamsError (400).
+// SetTemplateAlias wraps validateTemplateAlias failures in ErrInvalidAlias
+// so the handler can distinguish validation errors from raw DB errors
+// (which map to 500).
+func TestSetTemplateAliasHandler_400_OnInvalidAlias(t *testing.T) {
+	origResolveFn := resolveTemplateIdentifierFn
+	origSetFn := setTemplateAliasFn
+	t.Cleanup(func() {
+		resolveTemplateIdentifierFn = origResolveFn
+		setTemplateAliasFn = origSetFn
+	})
+	resolveTemplateIdentifierFn = func(ctx context.Context, identifier string) (string, error) {
+		return identifier, nil
+	}
+	setTemplateAliasFn = func(ctx context.Context, templateID, alias string) error {
+		return fmt.Errorf("%w: alias %q is invalid", templatecenter.ErrInvalidAlias, "BadAlias")
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/cube/template/tpl-1/alias",
+		strings.NewReader(`{"alias":"BadAlias"}`))
+	rt := &CubeLog.RequestTrace{}
+	resp := setTemplateAlias(req, rt, "tpl-1")
+
+	got, ok := resp.(*templateResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Ret.RetCode)
+	assert.Contains(t, got.Ret.RetMsg, "invalid")
+	assert.Equal(t, int64(errorcode.ErrorCode_MasterParamsError), rt.RetCode)
+}
+
+// TestSetTemplateAliasHandler_500_OnUnknownDBError verifies that a raw
+// (non-sentinel) DB error from SetTemplateAlias maps to 500 rather than
+// being mis-classified as a 400 params error.
+func TestSetTemplateAliasHandler_500_OnUnknownDBError(t *testing.T) {
+	origResolveFn := resolveTemplateIdentifierFn
+	origSetFn := setTemplateAliasFn
+	t.Cleanup(func() {
+		resolveTemplateIdentifierFn = origResolveFn
+		setTemplateAliasFn = origSetFn
+	})
+	resolveTemplateIdentifierFn = func(ctx context.Context, identifier string) (string, error) {
+		return identifier, nil
+	}
+	setTemplateAliasFn = func(ctx context.Context, templateID, alias string) error {
+		return errors.New("connection refused: dial tcp 10.0.0.1:3306: connect: connection refused")
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/cube/template/tpl-1/alias",
+		strings.NewReader(`{"alias":"my-alias"}`))
+	rt := &CubeLog.RequestTrace{}
+	resp := setTemplateAlias(req, rt, "tpl-1")
+
+	got, ok := resp.(*templateResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_MasterInternalError), got.Ret.RetCode,
+		"raw DB errors must surface as 500, not 400")
+	assert.Equal(t, int64(errorcode.ErrorCode_MasterInternalError), rt.RetCode)
+}
+
+// TestSetTemplateAliasHandler_404_OnMissingTemplate verifies that
+// ErrTemplateNotFound from SetTemplateAlias maps to NotFound (404).
+func TestSetTemplateAliasHandler_404_OnMissingTemplate(t *testing.T) {
+	origResolveFn := resolveTemplateIdentifierFn
+	origSetFn := setTemplateAliasFn
+	t.Cleanup(func() {
+		resolveTemplateIdentifierFn = origResolveFn
+		setTemplateAliasFn = origSetFn
+	})
+	resolveTemplateIdentifierFn = func(ctx context.Context, identifier string) (string, error) {
+		return identifier, nil
+	}
+	setTemplateAliasFn = func(ctx context.Context, templateID, alias string) error {
+		return templatecenter.ErrTemplateNotFound
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/cube/template/tpl-missing/alias",
+		strings.NewReader(`{"alias":"my-alias"}`))
+	rt := &CubeLog.RequestTrace{}
+	resp := setTemplateAlias(req, rt, "tpl-missing")
+
+	got, ok := resp.(*templateResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_NotFound), got.Ret.RetCode)
+	assert.Equal(t, int64(errorcode.ErrorCode_NotFound), rt.RetCode)
+}
+
+// TestSetTemplateAliasHandler_400_OnSnapshot verifies that
+// ErrAliasNotApplicableToSnapshot maps to 400 (a snapshot exists but has no
+// alias slot — distinct from a genuine 404 "template not found").
+func TestSetTemplateAliasHandler_400_OnSnapshot(t *testing.T) {
+	origResolveFn := resolveTemplateIdentifierFn
+	origSetFn := setTemplateAliasFn
+	t.Cleanup(func() {
+		resolveTemplateIdentifierFn = origResolveFn
+		setTemplateAliasFn = origSetFn
+	})
+	resolveTemplateIdentifierFn = func(ctx context.Context, identifier string) (string, error) {
+		return identifier, nil
+	}
+	setTemplateAliasFn = func(ctx context.Context, templateID, alias string) error {
+		return templatecenter.ErrAliasNotApplicableToSnapshot
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/cube/template/snap-1/alias",
+		strings.NewReader(`{"alias":"my-alias"}`))
+	rt := &CubeLog.RequestTrace{}
+	resp := setTemplateAlias(req, rt, "snap-1")
+
+	got, ok := resp.(*templateResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Ret.RetCode)
+	assert.Equal(t, int64(errorcode.ErrorCode_MasterParamsError), rt.RetCode)
+}
+
+// TestSetTemplateAliasHandler_409_OnDuplicateAlias verifies that a
+// duplicate-key error from SetTemplateAlias (two clients racing to claim the
+// same alias) is mapped to ErrorCode_Conflict (130409). CubeAPI's map_err
+// then translates 130409 → HTTP 409 (design §3.3).
+func TestSetTemplateAliasHandler_409_OnDuplicateAlias(t *testing.T) {
+	origResolveFn := resolveTemplateIdentifierFn
+	origSetFn := setTemplateAliasFn
+	t.Cleanup(func() {
+		resolveTemplateIdentifierFn = origResolveFn
+		setTemplateAliasFn = origSetFn
+	})
+	resolveTemplateIdentifierFn = func(ctx context.Context, identifier string) (string, error) {
+		return identifier, nil
+	}
+	// Simulate a duplicate-key error by returning an error that the real
+	// IsDuplicateAliasError recognises. The detector keys on
+	// *mysql.MySQLError(1062) or "23505"/"unique_constraint" in the message;
+	// we use the message form so the test does not import the mysql driver.
+	setTemplateAliasFn = func(ctx context.Context, templateID, alias string) error {
+		return errors.New("Error 1062 (23000): Duplicate entry 'my-alias' for key 'alias_key' unique_constraint")
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/cube/template/tpl-1/alias",
+		strings.NewReader(`{"alias":"my-alias"}`))
+	rt := &CubeLog.RequestTrace{}
+	resp := setTemplateAlias(req, rt, "tpl-1")
+
+	got, ok := resp.(*templateResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_Conflict), got.Ret.RetCode)
+	assert.Equal(t, int64(errorcode.ErrorCode_Conflict), rt.RetCode)
+}
+
+// TestSetTemplateAliasHandler_409_OnNotReady verifies that a non-READY target
+// is mapped to ErrorCode_Conflict (130409) -> CubeAPI HTTP 409, giving the
+// client a clear retry signal (design §3.3, §3.5).
+func TestSetTemplateAliasHandler_409_OnNotReady(t *testing.T) {
+	origResolveFn := resolveTemplateIdentifierFn
+	origSetFn := setTemplateAliasFn
+	t.Cleanup(func() {
+		resolveTemplateIdentifierFn = origResolveFn
+		setTemplateAliasFn = origSetFn
+	})
+	resolveTemplateIdentifierFn = func(ctx context.Context, identifier string) (string, error) {
+		return identifier, nil
+	}
+	setTemplateAliasFn = func(ctx context.Context, templateID, alias string) error {
+		return templatecenter.ErrTemplateNotReady
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/cube/template/tpl-1/alias",
+		strings.NewReader(`{"alias":"my-alias"}`))
+	rt := &CubeLog.RequestTrace{}
+	resp := setTemplateAlias(req, rt, "tpl-1")
+
+	got, ok := resp.(*templateResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_Conflict), got.Ret.RetCode)
+	assert.Equal(t, int64(errorcode.ErrorCode_Conflict), rt.RetCode)
+}
+
+// TestSetTemplateAliasHandler_ResolvesIdentifierFailure_PropagatesNotFound
+// verifies that when resolveTemplateIdentifierFn returns ErrTemplateNotFound
+// (e.g. alias-as-identifier does not exist), the handler returns 404 rather
+// than calling SetTemplateAlias.
+func TestSetTemplateAliasHandler_ResolvesIdentifierFailure_PropagatesNotFound(t *testing.T) {
+	origResolveFn := resolveTemplateIdentifierFn
+	origSetFn := setTemplateAliasFn
+	t.Cleanup(func() {
+		resolveTemplateIdentifierFn = origResolveFn
+		setTemplateAliasFn = origSetFn
+	})
+	resolveTemplateIdentifierFn = func(ctx context.Context, identifier string) (string, error) {
+		return "", templatecenter.ErrTemplateNotFound
+	}
+	setCalled := false
+	setTemplateAliasFn = func(ctx context.Context, templateID, alias string) error {
+		setCalled = true
+		return nil
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/cube/template/missing-alias/alias",
+		strings.NewReader(`{"alias":"my-alias"}`))
+	rt := &CubeLog.RequestTrace{}
+	resp := setTemplateAlias(req, rt, "missing-alias")
+
+	got, ok := resp.(*templateResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_NotFound), got.Ret.RetCode)
+	assert.False(t, setCalled, "SetTemplateAlias must not be called when resolution fails")
+}
+
+// TestSetTemplateAliasHandler_400_OnMissingTemplateID verifies the path
+// param is required (empty template_id → 400 before any fn is called).
+func TestSetTemplateAliasHandler_400_OnMissingTemplateID(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPut, "/cube/template//alias",
+		strings.NewReader(`{"alias":"my-alias"}`))
+	rt := &CubeLog.RequestTrace{}
+	resp := setTemplateAlias(req, rt, "")
+
+	got, ok := resp.(*templateResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Ret.RetCode)
+	assert.Equal(t, "template_id is required", got.Ret.RetMsg)
 }

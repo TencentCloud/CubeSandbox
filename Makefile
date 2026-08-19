@@ -8,6 +8,10 @@ BUILDER_CONTAINER_HOME ?= /home/builder
 TMP_GIT_CREDENTIALS ?= /tmp/.cube-sandbox-builder-tmp-git-credentials
 BUILDER_CMD ?= bash
 BUILDER_RUN_EXTRA_MOUNTS ?=
+# User the builder container runs as. Defaults to the host user so bind-mounted
+# outputs stay host-writable; privileged test targets (e.g. cubevs-test, which
+# loads eBPF / mounts bpffs) override this to 0:0 along with --privileged.
+BUILDER_USER ?= $(UID):$(GID)
 ROOT_DIR := $(shell pwd)
 UID := $(shell id -u)
 GID := $(shell id -g)
@@ -205,7 +209,7 @@ ifeq ($(strip $(BUILDER_CMD)),)
 	$(error BUILDER_CMD must not be empty)
 endif
 	docker run --rm -i \
-		--user "$(UID):$(GID)" \
+		--user "$(BUILDER_USER)" \
 		-e HOME=$(BUILDER_CONTAINER_HOME) \
 		-e CARGO_HOME=$(BUILDER_CONTAINER_HOME)/.cargo \
 		-e RUSTUP_HOME=/usr/local/rustup \
@@ -322,7 +326,7 @@ cube-api: cubeapi
 .PHONY: cubeops
 cubeops: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD="mkdir -p /workspace/_output/bin && cd /workspace/CubeOps && go mod download && CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -ldflags '-s -w -X main.Version=$(CUBE_VERSION) -X main.Commit=$(CUBE_COMMIT) -X main.BuildTime=$(CUBE_BUILD_TIME)' -o /workspace/_output/bin/cubeops ./cmd/cubeops"
+	$(MAKE) builder-run BUILDER_CMD="mkdir -p /workspace/_output/bin && cd /workspace/CubeOps && go mod download && CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -ldflags '-s -w -X github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.Version=$(CUBE_VERSION) -X github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.Commit=$(CUBE_COMMIT) -X github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.BuildTime=$(CUBE_BUILD_TIME)' -o /workspace/_output/bin/cubeops ./cmd/cubeops"
 
 .PHONY: cubeops-test
 cubeops-test: builder-image
@@ -370,6 +374,19 @@ cube-lifecycle-manager-test: builder-image
 .PHONY: cubelet-pkg-test
 cubelet-pkg-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && make proto && go test -short ./pkg/...'
+
+# cubevs-test runs the CubeNet/cubevs module's own unit tests (dataplane policy,
+# DNS learning, migration, dump, classify), which the cubelet targets never
+# compile. It regenerates the BPF objects first (make gen) since the test files
+# embed them, then runs the full module test set. The eBPF-loading tests need a
+# privileged root container (CAP_BPF/CAP_SYS_ADMIN for bpf() and the bpffs
+# mount), so this runs the builder privileged as root. Note: the generated .o
+# files under CubeNet/cubevs become root-owned in the bind-mounted workspace;
+# that is harmless in CI (fresh checkout) but may require sudo to clean locally.
+# Use plain `go test ./...` (no -coverprofile): the builder lacks covdata.
+.PHONY: cubevs-test
+cubevs-test: builder-image
+	$(MAKE) builder-run BUILDER_USER=0:0 BUILDER_RUN_EXTRA_MOUNTS='--privileged' BUILDER_CMD='cd /workspace/CubeNet/cubevs && make gen && go test ./...'
 
 .PHONY: agent-test
 agent-test: builder-image

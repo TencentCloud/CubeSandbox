@@ -26,6 +26,7 @@ type CubeVSAdapter interface {
 	DeleteTAPDeviceMetadata(ifindex uint32, ip net.IP) error
 	AttachFilter(ifindex uint32) error
 	InstallTAPDefaultDenyPolicy(ifindex uint32) error
+	GCStaleNetPolicyMaps(keep map[uint32]struct{}, stillPresent func(uint32) bool, onConflict func(uint32)) (int, error)
 	AddPortMapping(ifindex uint32, containerPort, hostPort uint16) error
 	DelPortMapping(ifindex uint32, containerPort, hostPort uint16) error
 	DeletePortMappingsByIfindex(ifindex uint32) error
@@ -71,6 +72,10 @@ func (realCubeVSAdapter) InstallTAPDefaultDenyPolicy(ifindex uint32) error {
 	return cubevs.InstallTAPDefaultDenyPolicy(ifindex)
 }
 
+func (realCubeVSAdapter) GCStaleNetPolicyMaps(keep map[uint32]struct{}, stillPresent func(uint32) bool, onConflict func(uint32)) (int, error) {
+	return cubevs.GCStaleNetPolicyMaps(keep, stillPresent, onConflict)
+}
+
 func (realCubeVSAdapter) AddPortMapping(ifindex uint32, containerPort, hostPort uint16) error {
 	return cubevs.AddPortMapping(ifindex, containerPort, hostPort)
 }
@@ -86,7 +91,10 @@ func (realCubeVSAdapter) DeletePortMappingsByIfindex(ifindex uint32) error {
 // registerCubeVSTap writes the complete TAP metadata and policy options into
 // CubeVS for a newly-created sandbox.
 func (s *NetworkController) registerCubeVSTap(ifindex int, ip net.IP, sandboxID string, cfg *CubeNetworkConfig) (err error) {
-	opts := cubeVSTapRegistration(cfg)
+	opts, err := cubeVSTapRegistration(cfg)
+	if err != nil {
+		return err
+	}
 	CubeLog.WithContext(context.Background()).Infof(
 		"network runtime register cubevs tap: sandbox_id=%s ifindex=%d sandbox_ip=%s cube_network_config=%s allow_internet_access=%v allow_out=%v l7_allow_out=%v deny_out=%v",
 		sandboxID,
@@ -115,7 +123,10 @@ func (s *NetworkController) registerCubeVSTap(ifindex int, ip net.IP, sandboxID 
 // Legacy recovery uses this to avoid carrying old allow/deny/DNS residue into
 // the recovered Active sandbox.
 func (s *NetworkController) replaceCubeVSTap(ifindex int, ip net.IP, sandboxID string, cfg *CubeNetworkConfig) error {
-	opts := cubeVSTapRegistration(cfg)
+	opts, err := cubeVSTapRegistration(cfg)
+	if err != nil {
+		return err
+	}
 	CubeLog.WithContext(context.Background()).Infof(
 		"network runtime replace cubevs tap: sandbox_id=%s ifindex=%d sandbox_ip=%s cube_network_config=%s allow_internet_access=%v allow_out=%v l7_allow_out=%v deny_out=%v",
 		sandboxID,

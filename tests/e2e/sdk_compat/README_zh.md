@@ -8,7 +8,8 @@
   的后端。
 
 测试套件默认不执行在线测试。未指定 `--run-e2e` 时，pytest 只进行安全的
-收集。默认后端是 `cubesandbox`；使用
+收集：所有在线用例都会被跳过，仅运行标记为 `framework` 的纯逻辑单元测试。
+默认后端是 `cubesandbox`；使用
 `SDK_E2E_BACKENDS=e2b,cubesandbox` 执行双后端兼容性测试。
 
 相关文档：
@@ -193,6 +194,20 @@ cp env.example .env
 - `SDK_E2E_API_TIMEOUT`：CubeAPI 控制面请求超时，用于 preflight、诊断
   和清理，默认 `5` 秒；
 - `SDK_E2E_CREATE_TIMEOUT`：创建超时，默认 `120` 秒；
+- `SDK_E2E_CREATE_CAPACITY_RETRIES`：当调度器瞬时返回 `no more resource`
+  （错误码 `130597`）时，额外重试创建 sandbox 的次数，给刚释放的节点留出回收
+  时间，默认 `5`；设为 `0` 可关闭重试、遇到容量错误即失败；
+- `SDK_E2E_CREATE_CAPACITY_BACKOFF`：容量重试的基础退避秒数，按次指数增长，
+  并加入完全抖动（full jitter），避免并行 worker 同步重试，默认 `2`；
+- `SDK_E2E_CREATE_CAPACITY_BACKOFF_MAX`：容量重试退避的上限秒数，默认 `30`；
+  取值 `<= 0` 表示关闭单次退避上限（退避将增长至内置的 `3600` 秒上限），
+  并非“无退避”，除非确实需要无上限增长，否则请保持为正值；
+- `SDK_E2E_CREATE_CAPACITY_BUDGET`：单次创建在所有容量重试中累计的**休眠**时间
+  上限（秒），默认 `90`；设为 `0` 可关闭、仅依赖 `RETRIES`。它仅约束累计退避
+  休眠，不约束 `create()` 调用本身：每次尝试仍可耗时至多 `SDK_E2E_CREATE_TIMEOUT`，
+  因此在调度器缓慢拒绝时，单个用例最坏可耗时约
+  `(RETRIES + 1) × CREATE_TIMEOUT + BUDGET`。在快速拒绝路径（立即返回 HTTP 500）
+  下，该预算可有效约束单次创建的重试时长；
 - `SDK_E2E_COMMAND_TIMEOUT`：命令超时，默认 `30` 秒；
 - `SDK_E2E_RUN_CODE_TIMEOUT`：代码执行超时，默认 `60` 秒；
 - `SDK_E2E_NETWORK_PROBE_TIMEOUT`：network policy 用例中的 TCP socket
@@ -215,7 +230,20 @@ cp env.example .env
 - `SDK_E2E_SKIP_INTERNET_TESTS`：当 runner 或环境没有稳定公网出站时，
   跳过 `requires_internet` 测试，默认 `false`；
 - `SDK_E2E_REPORT_DIR`：JSONL 报告目录；
-- `CUBE_PYTHON_SDK_PATH`：覆盖本地 CubeSandbox Python SDK 路径；
+- `SDK_E2E_WORKERS`：`--run-e2e` 的 pytest-xdist worker 数量。并行需显式开启，
+  未设置（或 `0`/`1`/`no`/`off`）时串行运行，避免压垮同机的控制面；传整数、
+  `auto` 或 `logical` 才会并行；显式 `-n`/`--numprocesses`（或 `-p no:xdist`）
+  优先。不带 `--run-e2e` 时忽略，因此 hermetic `framework` gate 仍为串行；
+- `SDK_E2E_TEMPLATE_BUILD_CONCURRENCY`：xdist 各 worker 间并发的 live template
+  build 上限，默认 `1`（完全串行，使结果与串行运行一致）；小于 `1` 或非整数回退
+  为 `1`；当取值不小于 worker 数时跳过节流；仅 POSIX（无 `fcntl` 时为 no-op）；
+  节流按 UID 而非按 run 命名：同一用户在同一主机上并发的两个 `--run-e2e` 任务会
+  共享 slot 并相互串行化其构建。这是有意为之——两个任务都在争用同一台共享构建
+  主机——且 `SDK_E2E_TEMPLATE_BUILD_WAIT` 上限会限制任务在降级为不节流前的等待
+  时长；
+- `SDK_E2E_TEMPLATE_BUILD_WAIT`：等待 build slot 的单前驱上限（秒），超时后该
+  worker 放弃节流直接构建，避免某个卡死的 worker 拖垮整个套件；实际等待时间按
+  worker 数缩放；默认 `1800`；`<= 0` 表示无限等待；
 - `SDK_E2E_PLATFORM_LIFECYCLE`：启用平台生命周期测试；
 - `SDK_E2E_PLATFORM_LIFECYCLE_IDLE_TIMEOUT`：平台空闲超时，默认 `30` 秒；
 - `SDK_E2E_PLATFORM_LIFECYCLE_WAIT_MARGIN`：额外等待时间，默认 `20` 秒；
@@ -275,10 +303,13 @@ CubeProxy admin heartbeat。
 
 ## 报告和 Trace
 
-JSONL 报告写入：
+JSONL 报告写入 `SDK_E2E_REPORT_DIR`。串行运行写入单个 `events.jsonl`；启用
+pytest-xdist 后，每个 worker 各自写入 `events-gw0.jsonl`、`events-gw1.jsonl`……
+以避免行交错，因此应读取或聚合 `events*.jsonl` 而非固定的 `events.jsonl`：
 
 ```text
-SDK_E2E_REPORT_DIR/events.jsonl
+SDK_E2E_REPORT_DIR/events.jsonl        # 串行
+SDK_E2E_REPORT_DIR/events-gw0.jsonl    # xdist worker
 ```
 
 主要事件包括：
@@ -376,9 +407,11 @@ Capability marker：
 - `@pytest.mark.auth`：`CUBE_API_KEY` 简单密钥鉴权用例，未为 runner 设置
   `CUBE_API_KEY` 或后端不支持 `auth_simple_key`（仅 CubeSandbox）时跳过。
 
-常用 capability 有 `lifecycle`、`commands`、`filesystem`、`run_code`。
-可选共享 capability 包括 `pause_resume`、`network_allow_deny`、
-`network_public_access`。
+公共 capability 有 `lifecycle`、`commands`、`filesystem`、
+`filesystem_extended`、`run_code`。可选 capability 包括 `code_interpreter`、
+`pause_resume`、`set_timeout`、`rollback_clone`、`network_allow_deny`、
+`network_public_access`、`network_mask_request_host`、`platform_lifecycle`、
+`host_mount`、`volume_plugin` 和 `auth_simple_key`。
 当前分支的 `platform_lifecycle` 与 `volume_plugin` 仅在 CubeSandbox
 capability 集合中启用。
 这不是 E2B 的固有能力限制，而是 E2B SDK 传递的 lifecycle 参数与 CubeAPI

@@ -444,6 +444,17 @@ variable "cube_admin_token" {
   }
 }
 
+variable "cube_proxy_admin_port" {
+  description = "Port cube-proxy's /admin/* server listens on (auto-pause coordination). Defaults to 8082; override if the port is already taken."
+  type        = number
+  default     = 8082
+
+  validation {
+    condition     = var.cube_proxy_admin_port > 0 && var.cube_proxy_admin_port < 65536
+    error_message = "cube_proxy_admin_port must be a valid TCP port between 1 and 65535."
+  }
+}
+
 variable "cube_proxy_heartbeat_interval_ms" {
   description = "Heartbeat interval in milliseconds for cube-proxy Redis registration."
   type        = number

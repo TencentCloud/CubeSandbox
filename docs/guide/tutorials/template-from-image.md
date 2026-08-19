@@ -28,6 +28,10 @@ Once the template reaches `READY` status it can be referenced by its
 - The OCI image must be accessible from the CubeMaster nodes (public registry
   or authenticated private registry)
 
+Plain HTTP registries (no TLS) must be written with an `http://` prefix, for
+example `http://harbor.internal:5000/ns/app:tag`. Without that prefix CubeMaster
+defaults to HTTPS (except localhost and RFC1918 addresses).
+
 ### ⚠️ Your image must expose an HTTP server
 
 During template creation, Cube platform boots the container and **probes it
@@ -45,6 +49,23 @@ over HTTP** to determine when it is ready.  This means:
 
 Failing to expose an HTTP server or passing wrong probe parameters will cause
 the template creation to time out.
+
+### Sandbox readiness
+
+The probed port is also the readiness contract for sandboxes: because the
+template only becomes ready once the probe returns HTTP 2xx, a **running**
+sandbox created from that template is expected to serve that port immediately.
+Clients do not need to wait or retry after `create` returns, and the same holds
+for sandboxes brought back by resume or auto-resume.
+
+Two limits are worth knowing:
+
+- **Only the probed port is covered.** A service on a port that is exposed but
+  not probed may still be starting up when the sandbox begins serving traffic;
+  if you need that readiness guarantee, probe that port instead.
+- **The service itself must be healthy.** The guarantee is about the platform
+  making the port reachable — a service that crashes or stops listening inside
+  a running sandbox is unreachable until it recovers.
 
 ---
 
@@ -275,6 +296,7 @@ template deleted: tpl-748094d2f2374b0a8a37e6ec
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
 | `phase: PULLING` stuck for a long time | Image pull slow or registry unreachable from cluster nodes | Check network/firewall; for private registries add `--registry-username` / `--registry-password` |
+| Plain HTTP registry pull fails (`server gave HTTP response to HTTPS client`) | Image ref is missing the `http://` prefix | Use `http://harbor.internal:5000/ns/app:tag` |
 | `status: FAILED` after BUILDING | Build error (disk full, Dockerfile issue, etc.) | Re-run `tpl status --job-id <id> --json` and inspect `last_error` |
 | `distribution: 0/N ready` after READY | Artifact distribution still in progress (normal briefly) | Wait and re-run `tpl info`; if stuck check Cubelet logs on target nodes |
 | Sandbox fails readiness probe | Service not listening on the expected port/path at startup | Verify your container starts the HTTP server before signalling ready; adjust `--probe-path` if needed |

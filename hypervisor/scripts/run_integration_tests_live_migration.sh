@@ -45,15 +45,6 @@ if [ $? -ne 0 ]; then
 fi
 popd
 
-# Download Cloud Hypervisor binary from its last stable release
-LAST_RELEASE_VERSION="v26.0"
-CH_RELEASE_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/$LAST_RELEASE_VERSION/cloud-hypervisor-static"
-CH_RELEASE_NAME="cloud-hypervisor-static"
-pushd $WORKLOADS_DIR
-time wget --quiet $CH_RELEASE_URL -O "$CH_RELEASE_NAME" || exit 1
-chmod +x $CH_RELEASE_NAME
-popd
-
 # Build custom kernel based on virtio-pmem and virtio-fs upstream patches
 VMLINUX_IMAGE="$WORKLOADS_DIR/vmlinux"
 
@@ -87,9 +78,18 @@ if [[ "${BUILD_TARGET}" == "x86_64-unknown-linux-musl" ]]; then
 fi
 
 cargo build --all --release $features --target $BUILD_TARGET
-strip target/$BUILD_TARGET/release/cloud-hypervisor
+strip target/$BUILD_TARGET/release/cube-hypervisor
 strip target/$BUILD_TARGET/release/vhost_user_net
 strip target/$BUILD_TARGET/release/ch-remote
+
+# Use locally-built cube-hypervisor as the "old release" binary for live
+# upgrade tests. Upstream cloud-hypervisor-static v26 lacks PVM CPUID
+# support and cannot boot the PVM guest kernel. Both source and
+# destination use the same binary, so the cross-version upgrade path
+# is not exercised on PVM.
+CH_RELEASE_NAME="cloud-hypervisor-static"
+cp -f target/$BUILD_TARGET/release/cube-hypervisor "$WORKLOADS_DIR"/"$CH_RELEASE_NAME" || exit 1
+chmod +x "$WORKLOADS_DIR"/"$CH_RELEASE_NAME"
 
 # Test ovs-dpdk relies on hugepages
 echo 6144 | sudo tee /proc/sys/vm/nr_hugepages

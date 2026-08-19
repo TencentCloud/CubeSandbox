@@ -1,3 +1,4 @@
 .env
+build.env
 .work/
 dist/

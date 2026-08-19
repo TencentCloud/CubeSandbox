@@ -167,44 +167,10 @@ func newStateStore(dir string) (*stateStore, error) {
 		return nil, err
 	}
 	s := &stateStore{dir: dir, noSync: isTmpfs(dir)}
-	if err := s.migrateFlatStateFiles(); err != nil {
-		return nil, err
-	}
 	if err := s.normalizeFileModes(); err != nil {
 		return nil, err
 	}
 	return s, nil
-}
-
-// migrateFlatStateFiles moves pre-shard-layout state files from the state dir
-// root into their hash shards. It runs once at startup and is a no-op for new
-// installs; files written by a downgraded binary are picked up on the next
-// startup.
-func (s *stateStore) migrateFlatStateFiles() error {
-	entries, err := os.ReadDir(s.dir)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		sandboxID, kind, ok := parseStateFileName(entry.Name())
-		if !ok {
-			continue
-		}
-		dst, err := s.path(sandboxID, kind)
-		if err != nil {
-			return err
-		}
-		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-			return err
-		}
-		if err := os.Rename(filepath.Join(s.dir, entry.Name()), dst); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // normalizeFileModes enforces private permissions on every state file across
@@ -355,10 +321,10 @@ func (s *stateStore) LoadAny(sandboxID string) (*StateRecord, error) {
 	return nil, os.ErrNotExist
 }
 
-// Scan returns every valid state file in deterministic order: root-level
-// (pre-shard or downgrade-written) files first, then each shard in name order.
-// Invalid names are ignored so unrelated files in the state directory do not
-// break runtime startup.
+// Scan returns every valid state file under hash shards in deterministic
+// shard-name then filename order. Invalid names are ignored so unrelated files
+// in the state directory do not break runtime startup. Flat (unsharded) layout
+// was never released, so root-level "*.json" state files are not scanned.
 func (s *stateStore) Scan() ([]*StateRecord, error) {
 	rootEntries, err := os.ReadDir(s.dir)
 	if err != nil {
@@ -368,11 +334,6 @@ func (s *stateStore) Scan() ([]*StateRecord, error) {
 		return rootEntries[i].Name() < rootEntries[j].Name()
 	})
 	var records []*StateRecord
-	flat, err := s.scanDir(s.dir, rootEntries)
-	if err != nil {
-		return nil, err
-	}
-	records = append(records, flat...)
 	for _, entry := range rootEntries {
 		if !entry.IsDir() || !isShardName(entry.Name()) {
 			continue
@@ -391,8 +352,8 @@ func (s *stateStore) Scan() ([]*StateRecord, error) {
 	return records, nil
 }
 
-// scanDir reads valid state files from one directory (state root or a single
-// shard) in deterministic filename order.
+// scanDir reads valid state files from one shard directory in deterministic
+// filename order.
 func (s *stateStore) scanDir(dir string, entries []os.DirEntry) ([]*StateRecord, error) {
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].Name() < entries[j].Name()

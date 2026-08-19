@@ -147,6 +147,8 @@ scheduler:
 
 对于多机集群，建议将 `scheduler.priority_select_num` 设置为大于 `1` 的值，让 CubeMaster 从评分最高的一组节点中随机选择。随项目提供的默认配置使用 `priority_select_num: 1`，这意味着评分只会决定下一个沙箱落到哪一个节点，而不会在多个高分节点之间分散放置。小规模集群可以从 `3` 开始，并根据节点数量继续调整。`scheduler.least_select_name` 默认值为 `random`，通常不需要显式设置。
 
+完整的 CubeMaster 调度配置、Cubelet 节点上报、quota / label / 并发对调度的影响，以及新增计算节点后的 template redo 操作，请参阅[CubeMaster 调度器配置参考](./cubemaster-scheduler-config.md)。
+
 更新 `cubemaster.yaml` 后，请按当前部署方式重启 CubeMaster，让调度器加载新的评分配置。
 
 ## 常用操作

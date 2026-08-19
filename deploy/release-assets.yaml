@@ -1,0 +1,23 @@
+# Cube product release pins for heavy assets.
+# Product (v*) releases download from these dedicated Releases; they do not
+# rebuild kernel / guest-image.
+#
+# kernel-release-* / guest-image-* are artifact-store versions (e.g. v1.0.0),
+# NOT OpenCloudOS / PVM source tags. BM and PVM source tags differ and live
+# inside the dedicated build workflows.
+#
+# Each kernel family may point at a different Release:
+#   kernel_bm_amd64  → vmlinux-amd64 (+ kernel-metadata.json)
+#   kernel_bm_arm64  → vmlinux-arm64 (+ kernel-metadata.json)
+#   kernel_pvm       → vmlinux-pvm-amd64 + PVM host deb/rpm (+ kernel-metadata.json)
+#
+# Each pinned kernel-release-* must include kernel-metadata.json so product
+# releases can record BM/PVM source tags in release-manifest.json.
+#
+# Update these after publishing dedicated Releases, for example:
+#   git tag kernel-release-v1.0.0 && git push origin kernel-release-v1.0.0
+#   git tag guest-image-v1.0.0 && git push origin guest-image-v1.0.0
+kernel_bm_amd64: kernel-release-v1.0.0
+kernel_bm_arm64: kernel-release-v1.0.0
+kernel_pvm: kernel-release-v1.0.0
+guest_image: guest-image-v1.0.0

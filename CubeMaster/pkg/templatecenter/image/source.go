@@ -76,10 +76,9 @@ func prepareNativeSource(ctx context.Context, spec SourceSpec) (*PreparedSource,
 		return nil, err
 	}
 
-	rawRef := strings.TrimPrefix(spec.ImageRef, "docker://")
-	ref, err := name.ParseReference(rawRef)
+	ref, err := parseImageReference(spec.ImageRef)
 	if err != nil {
-		return nil, fmt.Errorf("native export failed to parse image ref %q: %w", rawRef, err)
+		return nil, fmt.Errorf("native export failed to parse image ref %q: %w", spec.ImageRef, err)
 	}
 
 	var authCfg *RegistryAuthConfig
@@ -93,17 +92,17 @@ func prepareNativeSource(ctx context.Context, spec SourceSpec) (*PreparedSource,
 
 	img, err := remote.Image(ref, remote.WithContext(ctx), authOpt, platOpt, jobsOpt)
 	if err != nil {
-		return nil, fmt.Errorf("native export failed to resolve image %q (if this is a multi-arch index, verify the requested platform exists): %w", rawRef, err)
+		return nil, fmt.Errorf("native export failed to resolve image %q (if this is a multi-arch index, verify the requested platform exists): %w", spec.ImageRef, err)
 	}
 
 	cfgFile, err := img.ConfigFile()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get config file for %q: %w", rawRef, err)
+		return nil, fmt.Errorf("failed to get config file for %q: %w", spec.ImageRef, err)
 	}
 
 	manifest, err := img.Manifest()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get manifest for %q: %w", rawRef, err)
+		return nil, fmt.Errorf("failed to get manifest for %q: %w", spec.ImageRef, err)
 	}
 
 	var compressedSize int64
@@ -113,7 +112,7 @@ func prepareNativeSource(ctx context.Context, spec SourceSpec) (*PreparedSource,
 
 	digest, err := img.Digest()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get digest for %q: %w", rawRef, err)
+		return nil, fmt.Errorf("failed to get digest for %q: %w", spec.ImageRef, err)
 	}
 
 	// Make sure the digest aligns with the dockerless/skopeo canonical format

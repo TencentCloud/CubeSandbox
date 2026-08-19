@@ -17,10 +17,10 @@ pytest cases
                                   -> terminal / JSONL
 ```
 
-Cases use only the shared adapter methods: `info`, `run_command`, `run_code`,
-`write_file`, `read_file`, `pause`, `resume_or_connect`, `get_host`,
-`traffic_access_token`, `kill`, and `close`. SDK-specific translation belongs
-in `adapters/`.
+Cases use only the shared adapter surface, including lifecycle, command/code,
+filesystem, timeout, snapshot/rollback/clone, and network methods defined by
+`SandboxAdapter`. SDK-specific translation belongs in `adapters/`; the base
+class is the authoritative method list.
 
 ## Fixture lifecycle
 
@@ -47,8 +47,12 @@ Use `requires_capability` for backend support boundaries:
 ```
 
 Available capability domains include `lifecycle`, `commands`, `filesystem`,
-`run_code`, `pause_resume`, `network_allow_deny`, `network_public_access`, and
-`platform_lifecycle`.
+`filesystem_extended`, `run_code`, `pause_resume`, `set_timeout`,
+`rollback_clone`, `code_interpreter`, `network_allow_deny`,
+`network_public_access`, `network_mask_request_host`, `platform_lifecycle`,
+`host_mount`, `volume_plugin`, and `auth_simple_key`. `rollback_clone`,
+`platform_lifecycle`, `host_mount`, `volume_plugin`, and `auth_simple_key` are
+CubeSandbox-only capabilities in the current backend map.
 
 `platform_lifecycle` is currently enabled only where the backend can correctly
 honor lifecycle create fields through CubeAPI. E2B coverage should be revisited
@@ -67,8 +71,9 @@ preflight can also probe the CubeProxy admin heartbeat.
 
 `TraceCollector` records timestamp, operation, sanitized input/output,
 duration, and success. Secrets are redacted, large values are truncated, and
-file contents are represented by length only. JSONL events are written
-to `SDK_E2E_REPORT_DIR/events.jsonl`.
+file contents are represented by length only. JSONL events are written to
+`SDK_E2E_REPORT_DIR/events.jsonl` for serial runs, or per-worker
+`events-gw*.jsonl` files under pytest-xdist.
 
 Use `--sdk-e2e-trace` for live operation output:
 

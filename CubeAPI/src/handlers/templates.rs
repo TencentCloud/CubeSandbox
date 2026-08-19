@@ -16,8 +16,9 @@ use crate::{
     error::{AppError, AppResult},
     models::{
         ApiError, CreateTemplateRequest, ListTemplatesQuery, RebuildTemplateRequest,
-        TemplateAliasLookupResponse, TemplateBuildJob, TemplateBuildStatus,
-        TemplateCompatAdoptResponseView, TemplateCompatMatrixView, TemplateDetail, TemplateSummary,
+        SetTemplateAliasRequest, TemplateAliasLookupResponse, TemplateBuildJob,
+        TemplateBuildStatus, TemplateCompatAdoptResponseView, TemplateCompatMatrixView,
+        TemplateDetail, TemplateSummary,
     },
     state::AppState,
 };
@@ -206,6 +207,38 @@ pub async fn update_template(
         "template metadata update is not supported; use POST /templates/{id} to rebuild"
             .to_string(),
     ))
+}
+
+// ─── PUT /templates/:templateID/alias ────────────────────────────────────────
+
+#[utoipa::path(
+    put,
+    path = "/templates/{templateID}/alias",
+    params(
+        ("templateID" = String, Path, description = "Template identifier or current alias")
+    ),
+    request_body = SetTemplateAliasRequest,
+    responses(
+        (status = 200, description = "Alias updated", body = TemplateDetail),
+        (status = 400, description = "Invalid alias, or alias requested on a snapshot (not applicable)", body = ApiError),
+        (status = 404, description = "Template not found", body = ApiError),
+        (status = 409, description = "Template is not READY, or concurrent alias claim conflict; retry may succeed", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn set_template_alias(
+    State(state): State<AppState>,
+    Path(template_id): Path<String>,
+    Json(body): Json<SetTemplateAliasRequest>,
+) -> AppResult<impl IntoResponse> {
+    // Forward the raw body; normalization (trim, empty->None) lives in the
+    // service layer so it is the single boundary for all callers.
+    let detail = state
+        .services
+        .templates
+        .set_template_alias(&template_id, body.alias.as_deref())
+        .await?;
+    Ok((StatusCode::OK, Json(detail)))
 }
 
 // ─── DELETE /templates/:templateID ────────────────────────────────────────────

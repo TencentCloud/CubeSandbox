@@ -11,7 +11,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"time"
+
+	"github.com/google/uuid"
+	cubelog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
 // CMError carries a CubeMaster business error (non-zero ret_code) out of
@@ -158,10 +160,7 @@ func (c *Client) GetTemplate(ctx context.Context, templateID string) (json.RawMe
 
 // DeleteSnapshot deletes a snapshot via CubeMaster.
 func (c *Client) DeleteSnapshot(ctx context.Context, snapshotID string) (json.RawMessage, error) {
-	body := map[string]interface{}{
-		"request_id": fmt.Sprintf("cubeops-del-snap-%d", time.Now().UnixNano()),
-	}
-	return c.deleteWithBody(ctx, fmt.Sprintf("/cube/snapshot/%s", snapshotID), body)
+	return c.deleteWithBody(ctx, fmt.Sprintf("/cube/snapshot/%s", snapshotID), map[string]interface{}{})
 }
 
 // RollbackSandbox rolls back a sandbox to a snapshot via CubeMaster.
@@ -177,7 +176,6 @@ func (c *Client) UpdateSandbox(ctx context.Context, body interface{}) (json.RawM
 // ConnectSandbox resumes a paused sandbox via CubeMaster (POST /cube/sandbox/connect).
 func (c *Client) ConnectSandbox(ctx context.Context, sandboxID string, timeout int) (json.RawMessage, error) {
 	return c.post(ctx, "/cube/sandbox/connect", map[string]interface{}{
-		"request_id":    fmt.Sprintf("req-%d", time.Now().UnixNano()),
 		"sandbox_id":    sandboxID,
 		"instance_type": "cubebox",
 		"timeout":       timeout,
@@ -263,6 +261,49 @@ func (c *Client) AdoptTemplateCompatBaseline(ctx context.Context, body interface
 	return c.post(ctx, "/cube/template/compat", body)
 }
 
+// RequestIDFromContext returns the inbound trace RequestID, or a fresh UUID
+// when none is set. Outbound bodies reuse it for cross-service correlation.
+func RequestIDFromContext(ctx context.Context) string {
+	if rt := cubelog.GetTraceInfo(ctx); rt != nil && rt.RequestID != "" {
+		return rt.RequestID
+	}
+	return uuid.NewString()
+}
+
+// EnsureRequestID writes requestID/RequestID/request_id into body, returns the
+// id used. All three spellings are written because CubeMaster binds a different
+// one per endpoint; unknown keys are ignored on decode. Non-map bodies —
+// including a typed-nil map, which escapes the `body == nil` check and would
+// panic on assignment — are a no-op.
+func EnsureRequestID(ctx context.Context, body interface{}) string {
+	rid := RequestIDFromContext(ctx)
+	if body == nil || rid == "" {
+		return rid
+	}
+	m, ok := body.(map[string]interface{})
+	if !ok || m == nil {
+		return rid
+	}
+	m["requestID"] = rid
+	m["RequestID"] = rid
+	m["request_id"] = rid
+	return rid
+}
+
+// EnsureRequestIDQuery injects the inbound trace RequestID into query params
+// and returns the id that was used (see EnsureRequestID).
+//
+// Both `requestID` and `request_id` are written because CubeMaster binds a
+// different one per endpoint; PascalCase `RequestID` is not read from query.
+func EnsureRequestIDQuery(ctx context.Context, params map[string]string) string {
+	rid := RequestIDFromContext(ctx)
+	if params != nil {
+		params["requestID"] = rid
+		params["request_id"] = rid
+	}
+	return rid
+}
+
 // --- internal helpers ---
 
 func (c *Client) get(ctx context.Context, path string) (json.RawMessage, error) {
@@ -270,6 +311,13 @@ func (c *Client) get(ctx context.Context, path string) (json.RawMessage, error) 
 	if err != nil {
 		return nil, err
 	}
+	rid := RequestIDFromContext(ctx)
+	setTraceHeaders(req, rid)
+	// Inject RequestID into query params for cross-service trace correlation.
+	q := req.URL.Query()
+	q.Set("requestID", rid)
+	q.Set("request_id", rid)
+	req.URL.RawQuery = q.Encode()
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
@@ -283,6 +331,7 @@ func (c *Client) getWithQuery(ctx context.Context, path string, params map[strin
 	if err != nil {
 		return nil, err
 	}
+	rid := EnsureRequestIDQuery(ctx, params)
 	q := req.URL.Query()
 	for k, v := range params {
 		if v != "" {
@@ -290,6 +339,7 @@ func (c *Client) getWithQuery(ctx context.Context, path string, params map[strin
 		}
 	}
 	req.URL.RawQuery = q.Encode()
+	setTraceHeaders(req, rid)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
@@ -299,6 +349,7 @@ func (c *Client) getWithQuery(ctx context.Context, path string, params map[strin
 }
 
 func (c *Client) post(ctx context.Context, path string, body interface{}) (json.RawMessage, error) {
+	rid := EnsureRequestID(ctx, body)
 	var bodyReader io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -314,6 +365,7 @@ func (c *Client) post(ctx context.Context, path string, body interface{}) (json.
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	setTraceHeaders(req, rid)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
@@ -327,6 +379,7 @@ func (c *Client) delete(ctx context.Context, path string) (json.RawMessage, erro
 	if err != nil {
 		return nil, err
 	}
+	setTraceHeaders(req, RequestIDFromContext(ctx))
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
@@ -336,6 +389,7 @@ func (c *Client) delete(ctx context.Context, path string) (json.RawMessage, erro
 }
 
 func (c *Client) deleteWithBody(ctx context.Context, path string, body interface{}) (json.RawMessage, error) {
+	rid := EnsureRequestID(ctx, body)
 	var bodyReader io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -351,6 +405,7 @@ func (c *Client) deleteWithBody(ctx context.Context, path string, body interface
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	setTraceHeaders(req, rid)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
@@ -388,4 +443,16 @@ func trimTrailingSlash(s string) string {
 		s = s[:len(s)-1]
 	}
 	return s
+}
+
+func setTraceHeaders(req *http.Request, rid string) {
+	// CubeOps is the caller here; the inbound client identity stays in our stat
+	// log. CubeMaster uses X-Caller for logging, sandbox caller label and gRPC
+	// pool keying only — not authn/authz or quotas.
+	req.Header.Set("X-Caller", "cubeops")
+	// rid is passed in, not re-derived from req.Context(), so the header matches
+	// the body/query id.
+	if rid != "" {
+		req.Header.Set("X-RequestID", rid)
+	}
 }

@@ -48,10 +48,10 @@ func (l *local) genRuntimeCfgAnnotationOpt(ctx context.Context, ociRuntime *cube
 	}
 	runtimeAnno[constants.AnnotationsRuntimeCfgPath] = cfgPath
 
-	if path, ok := realReq.GetAnnotations()[constants.AnnotationsVMImagePath]; ok {
+	if path, ok := realReq.GetAnnotations()[constants.AnnotationsVMOSImagePath]; ok {
 		ok, _ := utils.DenExist(path)
 		if ok {
-			runtimeAnno[constants.AnnotationsVMImagePath] = path
+			runtimeAnno[constants.AnnotationsVMOSImagePath] = path
 		}
 	}
 
@@ -59,6 +59,13 @@ func (l *local) genRuntimeCfgAnnotationOpt(ctx context.Context, ociRuntime *cube
 		ok, _ := utils.DenExist(path)
 		if ok {
 			runtimeAnno[constants.AnnotationsVMKernelPath] = path
+		}
+	}
+
+	if path, ok := realReq.GetAnnotations()[constants.AnnotationsVMAgentPath]; ok {
+		ok, _ := utils.DenExist(path)
+		if ok {
+			runtimeAnno[constants.AnnotationsVMAgentPath] = path
 		}
 	}
 	return append(tmpSpecs, oci.WithAnnotations(runtimeAnno))

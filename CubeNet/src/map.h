@@ -110,13 +110,18 @@ struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } direct_neigh SEC(".maps");
 
-/* Egress allow list v2 (hash of maps)
+/* Egress allow list v3 (hash of maps)
  *
  * key:   ifindex of the TAP device
- * value: fd of inner LPM trie map (destination IP allow list)
+ * value: fd of inner LPM trie map (destination ip[:port] allow list)
  *
- * Inner values use net_policy_value_v2. A zero expires_at_ns means a static
- * allow entry; a non-zero expires_at_ns means a temporary DNS-learned entry.
+ * Inner keys use lpm_key_v3 so a single longest-prefix lookup resolves
+ * exact (ip, port) (prefixlen 48), ip-only / any-port (prefixlen 32),
+ * or ip/mask subnet (prefixlen < 32) rules. Inner values use
+ * net_policy_value_v3, which marks the L7 scheme directly (the port is
+ * now part of the key, so no per-packet (port, scheme) array scan).
+ * A zero expires_at_ns means a static entry; a non-zero expires_at_ns
+ * means a temporary DNS-learned entry.
  */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH_OF_MAPS);
@@ -126,11 +131,11 @@ struct {
 	__array(values, struct {
 		__uint(type, BPF_MAP_TYPE_LPM_TRIE);
 		__uint(max_entries, MAX_IP_RULE_ENTRIES);
-		__type(key, struct lpm_key);
-		__type(value, struct net_policy_value_v2);
+		__type(key, struct lpm_key_v3);
+		__type(value, struct net_policy_value_v3);
 		__uint(map_flags, BPF_F_NO_PREALLOC);
 	});
-} allow_out_v2 SEC(".maps");
+} allow_out_v3 SEC(".maps");
 
 /* Egress deny list (hash of maps)
  *
@@ -160,7 +165,7 @@ struct {
  * value: fd of inner LPM trie map for this sandbox's DNS policy rules
  *
  * Inner keys are reversed lower-case domain name prefixes. DNS policy mode is
- * stored in ifindex_to_mvmmeta, while dns_allow stores only domain rules.
+ * stored in ifindex_to_mvmmeta, while dns_allow_v2 stores only domain rules.
  * Exact rule "qq.com" is encoded as "moc.qq\0" with the trailing NUL included
  * in prefixlen. Wildcard rule "*.qq.com" is encoded as "moc.qq." without NUL,
  * so only subdomains such as "a.qq.com" can match it.
@@ -177,13 +182,13 @@ struct {
 		__type(value, struct dns_allow_value);
 		__uint(map_flags, BPF_F_NO_PREALLOC);
 	});
-} dns_allow SEC(".maps");
+} dns_allow_v2 SEC(".maps");
 
 /* Pending DNS queries waiting for responses.
  *
  * key:   sandbox ifindex + DNS server IP + sandbox UDP source port + DNS id
  *        + raw DNS QNAME hash
- * value: L7 flags inherited from dns_allow and pending expiration time
+ * value: L7 flags inherited from dns_allow_v2 and pending expiration time
  */
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);

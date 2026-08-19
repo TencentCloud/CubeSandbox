@@ -1026,7 +1026,6 @@ dependencies = [
 name = "logging"
 version = "0.1.0"
 dependencies = [
- "chrono",
  "lazy_static",
  "serde",
  "slog",
@@ -2532,6 +2531,7 @@ dependencies = [
  "libc",
  "linux-loader",
  "log",
+ "logging",
  "micro_http",
  "net_util",
  "once_cell",

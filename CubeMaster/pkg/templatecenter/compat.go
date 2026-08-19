@@ -85,6 +85,8 @@ func ScheduleCompatScanForNode(nodeID string) {
 	}()
 }
 
+// ScanNodeCompat updates replica compat_status for the compat matrix only.
+// It does not touch scheduling caches: READY replicas remain schedulable regardless of STALE.
 func ScanNodeCompat(ctx context.Context, nodeID string) error {
 	if !isReady() {
 		return ErrTemplateStoreNotInitialized
@@ -109,9 +111,6 @@ func ScanNodeCompat(ctx context.Context, nodeID string) error {
 		if err := updateReplicaCompat(ctx, row.TemplateID, nodeID, next); err != nil {
 			return err
 		}
-		if next == CompatStatusStale {
-			evictReplicaFromSchedulingCaches(row.TemplateID, nodeID)
-		}
 	}
 	return nil
 }
@@ -133,9 +132,6 @@ func markNodeReadyReplicasCompat(ctx context.Context, nodeID, status string) err
 		}
 		if err := updateReplicaCompat(ctx, row.TemplateID, nodeID, status); err != nil {
 			return err
-		}
-		if status == CompatStatusStale {
-			evictReplicaFromSchedulingCaches(row.TemplateID, nodeID)
 		}
 	}
 	return nil

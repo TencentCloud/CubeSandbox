@@ -5,8 +5,10 @@
 package node
 
 import (
+	"encoding/json"
 	"fmt"
 	pseudorand "math/rand"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -316,6 +318,73 @@ func TestNodeLabelsCacheInvalidation(t *testing.T) {
 	assert.Equal(t, "8192Mi", newLabels[constants.AffinityKeyMemorySize])
 	assert.NotContains(t, newLabels, "gpu")
 	assert.Equal(t, "true", newLabels["ssd"])
+}
+
+func TestNodeCloneDeepCopiesHostFacts(t *testing.T) {
+	n := &Node{
+		InsID: "node-1",
+		HostFacts: &HostFacts{
+			CPUVendor:             "GenuineIntel",
+			CPUIDHash:             "sha256:cpu",
+			HostKernelFingerprint: "sha256:kernel",
+			KVMAPIVersion:         12,
+		},
+	}
+
+	cloned := n.Clone()
+	if cloned.HostFacts == n.HostFacts {
+		t.Fatalf("clone must not share the HostFacts pointer")
+	}
+	cloned.HostFacts.CPUVendor = "AuthenticAMD"
+	cloned.HostFacts.KVMAPIVersion = 13
+	if n.HostFacts.CPUVendor != "GenuineIntel" || n.HostFacts.KVMAPIVersion != 12 {
+		t.Errorf("mutating clone must not affect source: %+v", n.HostFacts)
+	}
+}
+
+func TestNodeCloneNilHostFacts(t *testing.T) {
+	n := &Node{InsID: "node-1"}
+	cloned := n.Clone()
+	if cloned.HostFacts != nil {
+		t.Errorf("nil HostFacts must stay nil after clone, got %+v", cloned.HostFacts)
+	}
+}
+
+func TestNodeHostFactsJSONRoundTrip(t *testing.T) {
+	n := &Node{
+		InsID: "node-1",
+		HostFacts: &HostFacts{
+			CPUVendor:            "GenuineIntel",
+			CPUIDHash:            "sha256:cpu",
+			KVMAPIVersion:        12,
+			KVMModuleTaint:       "EO",
+			KVMModuleFingerprint: "sha256:kvmmod",
+		},
+	}
+	raw, err := json.Marshal(n)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var out Node
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.HostFacts == nil {
+		t.Fatalf("HostFacts lost in round-trip: %s", raw)
+	}
+	if *out.HostFacts != *n.HostFacts {
+		t.Errorf("round-trip mismatch:\n in=%+v\nout=%+v", n.HostFacts, out.HostFacts)
+	}
+}
+
+func TestNodeHostFactsJSONOmittedWhenNil(t *testing.T) {
+	raw, err := json.Marshal(&Node{InsID: "node-1"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "HostFacts") {
+		t.Errorf("nil HostFacts must be omitted, got %s", raw)
+	}
 }
 
 func TestNodeCloneDoesNotShareLabelsCache(t *testing.T) {

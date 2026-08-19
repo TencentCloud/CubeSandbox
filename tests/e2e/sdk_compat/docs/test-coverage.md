@@ -33,6 +33,9 @@ pytest --run-e2e -m "lifecycle and slow"
 | `cases/lifecycle/test_connect.py` | connect to an existing sandbox, ID and file/command usability | `lifecycle` | P1 |
 | `cases/lifecycle/test_create_options.py` | metadata, env vars, timeout, command after create options | `lifecycle` | P1 |
 | `cases/lifecycle/test_pause_resume.py` | SDK pause, connect resume, file/env/kernel preservation | `pause_resume`, partially Code Interpreter | P1 |
+| `cases/lifecycle/test_pause_resume_network.py` | pause/resume keeps egress deny/allowlist and restricted public-access token | `pause_resume` + network capabilities; CubeProxy for ingress token case | P1 + `requires_internet` |
+| `cases/lifecycle/test_rollback_clone.py` | Rollback errors/filesystem/kernel state; default/concurrent clone state and temporary-snapshot cleanup | `rollback_clone` (CubeSandbox only), partially Code Interpreter | P1 |
+| `cases/lifecycle/test_negative_and_timeout.py` | Missing create/connect targets, pause-after-delete and online timeout update | `lifecycle`, `pause_resume`, `set_timeout` | P1 |
 | `cases/lifecycle/test_kill.py` | unusable after kill, list removal, idempotent terminal semantics | `lifecycle` | P1 |
 | `cases/lifecycle/test_auto_lifecycle.py` | auto-pause, manual/auto resume, reentrant resume, auto-kill, manual pause before timeout | `platform_lifecycle`, CubeProxy, lifecycle-manager, partially Code Interpreter | P1 + `slow`, daily run |
 
@@ -49,6 +52,9 @@ with file, kernel and command data-plane behavior. A sandbox reported as
 `running` is expected to have a working data plane; data-plane failures after
 `running` should be reported as backend regressions, not hidden behind extra
 readiness sleeps.
+
+The manual-pause/auto-kill case verifies that the lifecycle timeout destroys a
+manually paused sandbox and removes it from sandbox listings.
 
 ### 2.2 Commands
 
@@ -73,8 +79,16 @@ data-plane regressions.
 - interoperability between file API and shell;
 - missing file error semantics.
 
-The current coverage is text-file focused. Directories, permissions, binary
-round-trips, atomic replace and concurrent file access are not covered yet.
+`cases/filesystem/test_extended.py` covers directory and file metadata, nested
+and empty directory listing, exists, remove, rename and mkdir through the SDK
+filesystem API.
+
+`cases/filesystem/test_batch_and_watch.py` covers multi-file writes and live
+directory create/write/remove events through both SDK backends.
+
+The current content coverage is text-file focused. Non-root permission
+behavior, binary round-trips, atomic replace and concurrent file access are not
+covered yet.
 
 ### 2.4 Run Code
 
@@ -102,11 +116,30 @@ These scenarios require Code Interpreter support and validate normalized
   `e2b-traffic-access-token` and `cube-traffic-access-token` both work with the
   correct token.
 
+`cases/lifecycle/test_pause_resume_network.py` covers the same create-time
+policies after an SDK pause + connect resume:
+
+- `allow_internet_access=False` and `deny_out=0.0.0.0/0` still block egress;
+- allowlist (`allow_out` with public internet disabled) still permits only the
+  listed target;
+- restricted public access still requires a traffic access token after resume
+  (CubeProxy HostIP rewrite path).
+
+Shared TCP / public-access probe helpers live in
+`framework/network_probe.py`.
+
 The current network suite uses configurable public TCP targets for L3/L4 egress
 checks. Cases are marked `requires_internet`; runners without stable public
 egress should set `SDK_E2E_SKIP_INTERNET_TESTS=true`.
 
-### 2.6 Concurrency
+### 2.6 Templates
+
+`cases/templates/test_alias.py` covers list/get/build/delete and alias lifecycle.
+It also builds a template with writable-layer size, exposed ports, HTTP probe
+and environment variables, then verifies those advanced parameters in the
+template detail returned by CubeAPI. Template operations are CubeSandbox-only.
+
+### 2.7 Concurrency
 
 `cases/concurrency/test_isolation.py` currently validates file isolation between
 two sandboxes writing different content to the same path. The peer sandbox is
@@ -115,7 +148,7 @@ created and cleaned up through `managed_control_sandbox`.
 This proves basic instance isolation, but it is not a concurrency stress test,
 resource contention test or multi-worker safety validation.
 
-### 2.7 Volume
+### 2.8 Volume
 
 `cases/volume/` covers Volume Plugin CRUD, sandbox bind/unbind and delete-while-bound behavior. It also verifies that one Volume can remain writable in one sandbox while a concurrent attachment is read-only in another sandbox, including read access and rejected create, write, rename and delete operations. These cases are CubeSandbox-only and remain skipped unless `SDK_E2E_VOLUME_PLUGIN=true` explicitly confirms that the deployment has a configured Volume Plugin.
 

@@ -228,7 +228,7 @@ spec:
               command:
                 - /bin/bash
                 - -ec
-                - {{ include "cube.egressNetProbeCommand" . | quote }}
+                - {{ include "cube.egressNetProbeCommand" . | replace "\r" "" | quote }}
             initialDelaySeconds: {{ .Values.cubeEgress.network.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.cubeEgress.network.probes.readiness.periodSeconds }}
             failureThreshold: {{ .Values.cubeEgress.network.probes.readiness.failureThreshold }}
@@ -239,7 +239,7 @@ spec:
               command:
                 - /bin/bash
                 - -ec
-                - {{ include "cube.egressNetProbeCommand" . | quote }}
+                - {{ include "cube.egressNetProbeCommand" . | replace "\r" "" | quote }}
             initialDelaySeconds: {{ .Values.cubeEgress.network.probes.liveness.initialDelaySeconds }}
             periodSeconds: {{ .Values.cubeEgress.network.probes.liveness.periodSeconds }}
             failureThreshold: {{ .Values.cubeEgress.network.probes.liveness.failureThreshold }}

@@ -41,6 +41,12 @@ type Config struct {
 	ReqTemplateConf  *ReqTemplateConf      `yaml:"req_template_conf"`
 	HookWhitelist    *HookWhitelist        `yaml:"hook_whitelist"`
 	CubeEgressConf   *CubeEgressConf       `yaml:"cube_egress_conf"`
+	CubeProxyConf    *CubeProxyConf        `yaml:"cube_proxy_conf"`
+
+	// SoftDeletePurge configures the scheduled hard-purge of soft-deleted
+	// (tombstoned) database rows (issue #973). nil leaves the purger at its
+	// safe defaults (7-day retention, hourly, enabled). See CubeDB/tombstone.
+	SoftDeletePurge *SoftDeletePurgeConf `yaml:"soft_delete_purge"`
 
 	// VolumePlugins lists external Controller Hook Plugin configurations.
 	// Types: binary (fork CLI) or rpc (gRPC VolumeControllerService).
@@ -150,6 +156,24 @@ type ExtraConf struct {
 	// A hostPath is allowed if it is under at least one prefix.
 	// Default (when empty): ["/data/shared/"].
 	AllowedHostMountPrefixes []string `yaml:"allowed_host_mount_prefixes"`
+}
+
+// CubeProxyConf controls how CubeMaster invalidates CubeProxy local routing
+// caches after Resume rewrites Redis SandboxIP / port mappings.
+type CubeProxyConf struct {
+	// AdminPort is the per-node CubeProxy admin listen port used when the
+	// Redis registry is empty (default 8082).
+	AdminPort int `yaml:"admin_port"`
+	// AdminToken is sent as X-Cube-Admin-Token when non-empty (must match
+	// CubeProxy $cube_admin_token).
+	AdminToken string `yaml:"admin_token"`
+	// AdminURLs optionally lists static admin base URLs (e.g. http://ip:8082).
+	// When set, InvalidateBackendCache broadcasts to these instead of reading
+	// the Redis CubeProxy registry.
+	AdminURLs []string `yaml:"admin_urls"`
+	// HeartbeatTTLMs is how fresh a registry heartbeat must be to treat a
+	// replica as live (default 15000).
+	HeartbeatTTLMs int64 `yaml:"heartbeat_ttl_ms"`
 }
 
 type RedisConf struct {
@@ -641,6 +665,29 @@ type CubeEgressConf struct {
 	Required bool `yaml:"required"`
 }
 
+// SoftDeletePurgeConf configures the scheduled hard-purge of soft-deleted rows.
+// All fields are optional; zero/nil values fall back to safe defaults enforced
+// by CubeDB/tombstone.Config.Sanitized (7-day retention, hourly interval). The
+// purger is DISABLED when the block or `enable` is absent — the purge is
+// irreversible, so it must be opted into explicitly. It only touches the
+// verified tombstone tables; see docs/guide/soft-delete-purge.md.
+type SoftDeletePurgeConf struct {
+	// Enable gates the purger. nil/missing -> DISABLED (default-off): the purge is
+	// irreversible, so operators must opt in explicitly (review: an upgrade must
+	// not silently hard-delete tombstones that were previously retained forever).
+	Enable *bool `yaml:"enable"`
+	// DryRun selects candidate rows and logs counts but issues no DELETE --
+	// use for a safe first rollout against a large existing backlog.
+	DryRun bool `yaml:"dry_run"`
+	// Retention: rows with deleted_at older than now-Retention are purged.
+	// <=0 -> 7-day default; values in (0, 1h) are clamped UP to the 1h minimum
+	// (avoids the cutoff>=now foot-gun that would purge seconds-old tombstones).
+	Retention time.Duration `yaml:"retention"`
+	// Interval between purge passes. <=0 -> 1h default; values in (0, 1m) are
+	// clamped UP to the 1m minimum.
+	Interval time.Duration `yaml:"interval"`
+}
+
 // DefaultCubeEgressCAPath is the canonical install path. Used when
 // CubeEgressConf is unset or its CAPath is empty AND Required is true
 // (meaning: an operator opted into the strict mode but forgot to
@@ -854,6 +901,16 @@ func preComHandleConf(config *Config) error {
 	}
 	if config.Common.DbRetryInterval == 0 {
 		config.Common.DbRetryInterval = 5 * time.Millisecond
+	}
+
+	if config.CubeProxyConf == nil {
+		config.CubeProxyConf = &CubeProxyConf{}
+	}
+	if config.CubeProxyConf.AdminPort == 0 {
+		config.CubeProxyConf.AdminPort = 8082
+	}
+	if config.CubeProxyConf.HeartbeatTTLMs == 0 {
+		config.CubeProxyConf.HeartbeatTTLMs = 15000
 	}
 
 	if config.Common.MaxNICQueue == 0 {

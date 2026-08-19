@@ -157,12 +157,21 @@ type EgressRule struct {
 
 // EgressRuleMatch holds the per-request match conditions for an EgressRule.
 // All fields are optional; an empty match matches any request.
+//
+// Port + Scheme together select which TCP port CubeEgress intercepts:
+//   - both nil: legacy behavior — CubeEgress captures the default {80/http,
+//     443/https} pair.
+//   - both set: CubeEgress captures the specific (host, port) tuple, routing
+//     via skb->mark to the HTTP (scheme="http") or HTTPS (scheme="https")
+//     TPROXY listener. Every rule sharing the same (host, port) MUST agree on
+//     scheme; the server rejects the whole policy if it detects a mismatch.
 type EgressRuleMatch struct {
 	SNI    *string  `json:"sni,omitempty"`
 	Host   *string  `json:"host,omitempty"`
 	Method []string `json:"method,omitempty"`
 	Path   *string  `json:"path,omitempty"`
 	Scheme *string  `json:"scheme,omitempty"`
+	Port   *int     `json:"port,omitempty"`
 }
 
 // EgressRuleAction holds the action taken when an EgressRule matches.
@@ -215,6 +224,7 @@ func (r *EgressRule) DeepCopy() *EgressRule {
 			Method: append([]string(nil), r.Match.Method...),
 			Path:   cloneStringPtr(r.Match.Path),
 			Scheme: cloneStringPtr(r.Match.Scheme),
+			Port:   cloneIntPtr(r.Match.Port),
 		}
 	}
 	if r.Action != nil {
@@ -248,6 +258,14 @@ func cloneBoolPtr(value *bool) *bool {
 }
 
 func cloneStringPtr(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func cloneIntPtr(value *int) *int {
 	if value == nil {
 		return nil
 	}

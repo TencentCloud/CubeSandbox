@@ -22,8 +22,15 @@ RUN go mod download
 COPY CubeOps/ .
 
 ARG TARGETARCH
+ARG CUBE_VERSION=0.0.0-dev
+ARG CUBE_COMMIT=unknown
+ARG CUBE_BUILD_TIME=unknown
+
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
-    -ldflags="-s -w" \
+    -ldflags="-s -w \
+      -X 'github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.Version=${CUBE_VERSION}' \
+      -X 'github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.Commit=${CUBE_COMMIT}' \
+      -X 'github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.BuildTime=${CUBE_BUILD_TIME}'" \
     -o /usr/local/bin/cubeops \
     ./cmd/cubeops
 

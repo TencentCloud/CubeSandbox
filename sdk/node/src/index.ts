@@ -33,7 +33,17 @@ export {
   ApiError,
   FilesystemNotFoundError,
   PartialWriteError,
+  VolumeNotFoundError,
+  VolumeInUseError,
 } from "./exceptions.js";
+
+export {
+  Volume,
+  VolumeInfo,
+  VolumeMount,
+  MAX_VOLUME_NAME_LEN,
+  type VolumeMountsArg,
+} from "./volume.js";
 
 export {
   Commands,

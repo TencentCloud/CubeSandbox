@@ -133,6 +133,15 @@ type CubeBox struct {
 
 	Volumes []*cubebox.Volume `json:"volumes,omitempty"`
 
+	// Recreate-needed Create fields for Pause→Resume (packed into sandbox_spec.json).
+	// Mirror Master sandboxspec's create-time CubeNetworkConfig / network_type /
+	// exposed_ports / runtime_handler — CubeBox previously dropped them, so Resume
+	// rebuilt the NIC with default egress policy.
+	NetworkType       string                     `json:"network_type,omitempty"`
+	RuntimeHandler    string                     `json:"runtime_handler,omitempty"`
+	ExposedPorts      []int64                    `json:"exposed_ports,omitempty"`
+	CubeNetworkConfig *cubebox.CubeNetworkConfig `json:"cube_network_config,omitempty"`
+
 	HotPlugDevices map[string]*shimtypes.CubeShimDevice `json:"hot_plug_devices,omitempty"`
 
 	HotPlugDisk map[string]*shimtypes.ChDiskDevice `json:"hot_plug_disk,omitempty"`
@@ -145,6 +154,9 @@ type CubeBox struct {
 	UserDeleteMark
 
 	LocalRunTemplate *templatetypes.LocalRunTemplate
+
+	// ComponentVersions: inventory dir name → version string (no absolute paths).
+	ComponentVersions map[string]string `json:"component_versions,omitempty"`
 
 	ImageReferences map[string]ImageReference
 

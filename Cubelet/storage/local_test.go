@@ -213,6 +213,8 @@ type fakeCowVolumeManager struct {
 	metrics             map[string]uint64
 }
 
+func (m *fakeCowVolumeManager) Name() string { return "xfscow" }
+
 func (m *fakeCowVolumeManager) CreateDefaultMediumVolume(ctx context.Context, sandboxID, volumeName string, sizeBytes uint64) (*cowVolume, error) {
 	_ = ctx
 	m.mu.Lock()
@@ -450,6 +452,34 @@ func TestCleanupTemplateLocalDataIsIdempotent(t *testing.T) {
 	}
 
 	require.NoError(t, CleanupTemplateLocalData(context.Background(), templateID, snapshotPath))
+}
+
+func TestCleanupTemplateLocalDataRemovesSnapIDParentDir(t *testing.T) {
+	cfg := makeTestConfig(t)
+
+	s := &local{}
+	s.config = cfg
+	assert.NoError(t, s.init(&plugin.InitContext{Context: context.Background()}))
+
+	previousLocalStorage := localStorage
+	localStorage = s
+	t.Cleanup(func() {
+		localStorage = previousLocalStorage
+	})
+
+	snapID := "snap-cleanup-parent-" + uuid.NewString()
+	// Production layout: .../cubebox/<snapID>/<specDir>/catalog.json
+	snapIDDir := filepath.Join(s.config.RootPath, "cubebox", snapID)
+	leafPath := filepath.Join(snapIDDir, "2C2000M")
+	require.NoError(t, os.MkdirAll(leafPath, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(leafPath, "catalog.json"), []byte("{}"), 0o644))
+
+	require.NoError(t, CleanupTemplateLocalData(context.Background(), snapID, leafPath))
+
+	_, err := os.Stat(leafPath)
+	assert.True(t, os.IsNotExist(err), "specDir leaf must be removed")
+	_, err = os.Stat(snapIDDir)
+	assert.True(t, os.IsNotExist(err), "empty snapID parent must not be left behind")
 }
 
 func TestCreateWithTimeoutCtx(t *testing.T) {

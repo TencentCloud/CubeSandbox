@@ -8,10 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-ENV_FILE="${ONE_CLICK_ENV_FILE:-${SCRIPT_DIR}/.env}"
-if [[ -f "${ENV_FILE}" ]]; then
-  load_env_file "${ENV_FILE}"
-fi
+load_build_env
 
 # tar_czf: create a gzip-compressed tarball, using pigz (parallel gzip) when it
 # is installed and falling back to tar's built-in single-threaded gzip
@@ -221,14 +218,43 @@ generate_release_manifest() {
   local kernel_vmlinux="${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-bm"
   local kernel_pvm_vmlinux="${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-pvm"
 
-  # Kernel versions (use CI env or hardcoded tags from release-one-click.yml).
-  local kernel_version="${KERNEL_TAG:-unknown}"
-  local kernel_pvm_version="${PVM_KERNEL_TAG:-unknown}"
-  if [[ "${kernel_version}" == "unknown" ]]; then
-    log "WARNING: KERNEL_TAG is not set; release manifest will record kernel.version=unknown"
+  # Prefer version.json variant digests for kernel inventory keys.
+  local kernel_version=""
+  local kernel_pvm_version=""
+  local kernel_json="${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/version.json"
+  if [[ -f "${kernel_json}" ]]; then
+    kernel_version="$(python3 - "${kernel_json}" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(((d.get("variants") or {}).get("bm") or {}).get("version") or "", end="")
+PY
+)"
+    kernel_pvm_version="$(python3 - "${kernel_json}" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(((d.get("variants") or {}).get("pvm") or {}).get("version") or "", end="")
+PY
+)"
   fi
-  if [[ -f "${kernel_pvm_vmlinux}" && "${kernel_pvm_version}" == "unknown" ]]; then
-    log "WARNING: PVM_KERNEL_TAG is not set; release manifest will record kernel.pvm_version=unknown"
+  if [[ -z "${kernel_version}" || "${kernel_version}" == "unknown" ]]; then
+    kernel_version="$(file_content_version "${kernel_vmlinux}")" || kernel_version="unknown"
+  fi
+  if [[ "${kernel_version}" == "unknown" ]]; then
+    log "WARNING: cannot resolve kernel.version (no vmlinux-bm); manifest will record unknown"
+  else
+    log "release manifest kernel.version=${kernel_version} (content short hash)"
+  fi
+
+  if [[ -z "${kernel_pvm_version}" || "${kernel_pvm_version}" == "unknown" ]]; then
+    if [[ -f "${kernel_pvm_vmlinux}" ]]; then
+      kernel_pvm_version="$(file_content_version "${kernel_pvm_vmlinux}")" \
+        || kernel_pvm_version="unknown"
+      log "release manifest kernel.pvm_version=${kernel_pvm_version} (content short hash)"
+    else
+      kernel_pvm_version="unknown"
+    fi
+  else
+    log "release manifest kernel.pvm_version=${kernel_pvm_version} (content short hash)"
   fi
 
   # Agent digest: prefer cube-agent.ext4; fall back to ELF binary for older layouts.
@@ -454,13 +480,13 @@ EOF
       -e 's|^\(\s*listen \)9090\( http2 reuseport;\)|\1__CUBE_PROXY_GRPC_PORT__\2|' \
       -e 's|^\(\s*set \$host_proxy_port \)8081;|\1__CUBE_PROXY_HTTP_PORT__;|' \
       -e 's|^\(\s*set \$host_proxy_port \)8080;|\1__CUBE_PROXY_HTTPS_PORT__;|' \
-      -e 's|^\(\s*listen \)127\.0\.0\.1:8082;|\1__CUBE_PROXY_ADMIN_LISTEN__:8082;|' \
+      -e 's|^\(\s*listen \)127\.0\.0\.1:8082;|\1__CUBE_PROXY_ADMIN_LISTEN__:__CUBE_PROXY_ADMIN_PORT__;|' \
       -e 's|/usr/local/openresty/nginx/certs/cube\.app+3\.pem|/usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_CERT__|' \
       -e 's|/usr/local/openresty/nginx/certs/cube\.app+3-key\.pem|/usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_KEY__|' \
       "${src}"
   } > "${dst}"
 
-  for token in __CUBE_PROXY_HTTP_PORT__ __CUBE_PROXY_HTTPS_PORT__ __CUBE_PROXY_GRPC_PORT__ __CUBE_PROXY_ADMIN_LISTEN__ __CUBE_PROXY_SSL_CERT__ __CUBE_PROXY_SSL_KEY__; do
+  for token in __CUBE_PROXY_HTTP_PORT__ __CUBE_PROXY_HTTPS_PORT__ __CUBE_PROXY_GRPC_PORT__ __CUBE_PROXY_ADMIN_LISTEN__ __CUBE_PROXY_ADMIN_PORT__ __CUBE_PROXY_SSL_CERT__ __CUBE_PROXY_SSL_KEY__; do
     if ! grep -q -F "${token}" "${dst}"; then
       die "generated nginx.conf.template is missing placeholder ${token}; upstream CubeProxy/nginx.conf may have changed"
     fi
@@ -637,6 +663,7 @@ mkdir -p "${CORE_BIN_DIR}"
 
 CUBEMASTER_VERSION_PKG="github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version"
 CUBELET_VERSION_PKG="github.com/tencentcloud/CubeSandbox/Cubelet/pkg/version"
+CUBEOPS_VERSION_PKG="github.com/tencentcloud/CubeSandbox/CubeOps/internal/version"
 
 build_or_copy_go_binary \
   "cubemaster" "${CUBEMASTER_BIN_OVERRIDE}" \
@@ -661,7 +688,7 @@ build_or_copy_rust_binary \
 build_or_copy_go_binary \
   "cubeops" "${CUBE_OPS_BIN_OVERRIDE}" \
   "${ROOT_DIR}/CubeOps" "${CUBE_OPS_BUILD_MODE}" \
-  "${CORE_BIN_DIR}/cubeops" ./cmd/cubeops
+  "${CORE_BIN_DIR}/cubeops" ./cmd/cubeops "${CUBEOPS_VERSION_PKG}"
 
 build_or_copy_go_binary \
   "cubevsmapdump" "${CUBEVSMAPDUMP_BIN_OVERRIDE}" \

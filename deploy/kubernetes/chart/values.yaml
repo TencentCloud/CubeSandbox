@@ -270,6 +270,9 @@ controlPlane:
     service:
       type: ClusterIP
       port: 3000
+      # Optional host port when type is NodePort or LoadBalancer.
+      # Leave empty for Kubernetes auto-allocation. Must not be set for ClusterIP.
+      nodePort: ""
     internalLoadBalancer:
       enabled: false
       annotations: {}
@@ -471,6 +474,7 @@ redis:
   # Empty host installs and uses the chart-managed cube-redis service.
   # Non-empty host uses the configured third-party Redis service and skips cube-redis.
   # Sentinel mode (non-empty masterName) skips cube-redis and must leave host empty.
+  # CubeProxy resolves this via nginx (no search domains): use an FQDN or IP literal.
   host: ""
   port: 6379
   # Redis Sentinel (external). Non-empty masterName enables Sentinel for
@@ -543,9 +547,10 @@ cubeNode:
   dns:
     clusterDomain: cluster.local
     sandbox:
-      # Guests inherit the cube-node Pod nameservers (cluster DNS) so they can
-      # resolve in-cluster Services and *.cubeProxy.domain.
-      # Set nameservers to an explicit list to override.
+      # Guests inherit the cube-node Pod DNS (nameservers + search + options,
+      # e.g. ndots:5) so they can resolve in-cluster Services and *.cubeProxy.domain.
+      # Set nameservers to an explicit list to override: that turns follow-node
+      # off for the whole guest DNS config (search/options are not copied either).
       followNodeDns: true
       nameservers: []
 
@@ -675,6 +680,17 @@ cubeProxy:
   service:
     type: ClusterIP
     annotations: {}
+    # Optional host ports when type is NodePort or LoadBalancer (range
+    # 30000-32767). Leave empty for auto-allocation. Must not be set for
+    # ClusterIP. Typical bare-metal / no-Ingress profile:
+    #   type: NodePort
+    #   nodePorts: { http: 30080, https: 30443, grpc: 30090 }
+    # and set ingress.enabled=false.
+    nodePorts:
+      http: ""
+      https: ""
+      grpc: ""
+      admin: ""
   ingress:
     # Requires a cluster Ingress Controller. Set false to manage the entrypoint
     # yourself (still keep the ClusterIP Service as the backend).
@@ -698,6 +714,7 @@ cubeProxy:
       containerPort: 9090
   redis:
     # Empty host uses redis.host or chart-managed cube-redis.
+    # Overrides must be an FQDN or IP literal (nginx resolver has no search domains).
     host: ""
     port: ""
     db: 0
@@ -761,7 +778,8 @@ cubeProxy:
     # configured by DNS name (the default Kubernetes Service DNS name).
     # Empty addresses auto-discovers nameservers from the Pod /etc/resolv.conf.
     addresses: []
-    valid: 30s
+    # Keep well below lifecycleManager.heartbeatTTL (15s) so heartbeats recover after redis IP changes.
+    valid: 5s
     timeout: 5s
     ipv6: false
   probes:

@@ -138,7 +138,7 @@ sudo systemctl restart cube-sandbox-<service>.service
 | `create_timeout_insec` | 仅限制创建/调度 RPC 的截止时间，**不是**沙箱空闲 TTL。未配置时默认 `300`。 |
 | `common_timeout_insec` | CubeMaster 访问 Cubelet 的通用 RPC 超时（非 create 专用）。 |
 
-修改 `default_timeout_insec` 后需重启 CubeMaster；客户端可见语义见[沙箱生命周期 — 设计与运维要点](lifecycle.md#集群默认空闲超时default_timeout_insec)。
+修改 `default_timeout_insec` 后需重启 CubeMaster；客户端可见语义见[沙箱生命周期 — 设计与运维要点](lifecycle.md#集群默认空闲超时default_timeout_insec)。如果要调整节点选择、quota、label、调度评分或新增计算节点后的 template redo，请参阅[CubeMaster 调度器配置参考](./cubemaster-scheduler-config.md)。
 
 ### 场景 B：服务挂了 / 反复重启
 
@@ -249,6 +249,30 @@ sudo tail -F /data/log/CubeAPI/cube-api-$(date +%F).log
 # 沙箱启动慢 / 启动失败：看 VMM 日志
 sudo tail -200 /data/log/CubeVmm/vmm.log
 ```
+
+### CubeShim 和 VMM 日志轮转
+
+CubeShim 和 VMM 运行期间会保持日志文件打开。CubeShim 通过内部每 30 分钟轮转事件 reopen。VMM 控制线程自己持有 monotonic `timerfd`，每小时发出已有的 `LOG_CTRL_REOPEN` 控制记录。reopen 由固定周期驱动：宿主机执行“`rename` + `create`”后，会在下一次计划中的 reopen 时切换到新文件，而不是在任意一次写入时立即检测。该定时器由 VMM 控制线程持有，不依赖延迟 logger 初始化，也不会由 vCPU/API 线程创建。因此宿主机侧仍应按小时执行轮转，并使用“`rename` + `create`”方式，不要使用 `copytruncate`。
+
+例如，将下面内容保存为 `/etc/logrotate.d/cubesandbox`，并确保宿主机每小时执行一次 `logrotate`：
+
+```text
+/data/log/CubeVmm/vmm.log
+/data/log/CubeShim/*.log {
+    hourly
+    rotate 24
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0640 root root
+}
+```
+
+`rotate 24` 表示保留 24 个小时文件，可按实际保留周期调整。`delaycompress` 会将最新的轮转文件延迟一个周期压缩，因为 writer 在下一次计划中的 reopen 之前可能仍使用旧 fd。CubeShim 每 30 分钟触发一次内部事件，VMM 控制线程每小时发送一次 reopen 控制事件。不需要 `postrotate` 信号或重启服务；该策略保证宿主机侧 retention 有界，但不承诺对任意手工轮转立即响应，也不支持 `copytruncate`。
+
+示例使用 `root root`，因为随附的一键部署 systemd 服务以 root 运行。如果 CubeShim 或 VMM 使用其他账号运行，请把 `create` 的 owner 和 group 改成对应账号；否则新建文件可能无法被 reopen。
+示例中的 `0640` 只适用于 `logrotate` 创建的文件；CubeShim 和 VMM writer 本身仍遵循进程的 umask。
 
 ### `journalctl` 启动期日志
 
@@ -430,5 +454,6 @@ sudo ss -lntp 'sport = :3000'
 
 - [快速开始](./quickstart.md) — 安装入口
 - [多机集群部署](./multi-node-deploy.md) — 计算节点的服务子集
+- [CubeMaster 调度器配置参考](./cubemaster-scheduler-config.md) — 节点选择、quota、label、评分和 template redo
 - [部署相关排障](./troubleshooting/deployment.md) — XFS / 网段冲突等环境问题
 - [模板相关排障](./troubleshooting/templates.md) — 模板创建相关问题

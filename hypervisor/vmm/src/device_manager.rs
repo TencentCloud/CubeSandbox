@@ -2443,8 +2443,8 @@ impl DeviceManager {
                     virtio_devices::Net::new(
                         id.clone(),
                         Some(tap_if_name),
-                        None,
-                        None,
+                        Some(net_cfg.ip),
+                        Some(net_cfg.mask),
                         Some(net_cfg.mac),
                         &mut net_cfg.host_mac,
                         net_cfg.mtu,

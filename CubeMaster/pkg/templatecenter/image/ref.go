@@ -18,13 +18,37 @@ import (
 // registry/repository[:tag][@algo:hexdigest] references.
 var imageRefAllowedPattern = regexp.MustCompile(`^[A-Za-z0-9._:/@-]+$`)
 
+// stripImageTransport peels optional docker:// and http(s):// prefixes from an
+// image reference. plainHTTP is true only when the caller explicitly wrote
+// http://, which selects a plaintext registry.
+func stripImageTransport(imageRef string) (raw string, plainHTTP bool) {
+	raw = strings.TrimPrefix(imageRef, "docker://")
+	switch {
+	case strings.HasPrefix(raw, "http://"):
+		return strings.TrimPrefix(raw, "http://"), true
+	case strings.HasPrefix(raw, "https://"):
+		return strings.TrimPrefix(raw, "https://"), false
+	default:
+		return raw, false
+	}
+}
+
+func parseImageReference(imageRef string) (name.Reference, error) {
+	raw, plainHTTP := stripImageTransport(imageRef)
+	if plainHTTP {
+		return name.ParseReference(raw, name.Insecure)
+	}
+	return name.ParseReference(raw)
+}
+
 // ValidateImageRef guards every external image consumer against argument
 // injection and rejects syntactically invalid Docker/OCI references.
 //
-// The optional docker:// transport is accepted for compatibility with skopeo,
-// but it is not passed to the semantic parser.
+// Optional docker://, http://, and https:// transports are accepted. http://
+// selects a plaintext registry on the native pull path; the other prefixes
+// are stripped before the semantic parser runs.
 func ValidateImageRef(imageRef string) error {
-	rawRef := strings.TrimPrefix(imageRef, "docker://")
+	rawRef, _ := stripImageTransport(imageRef)
 	if rawRef == "" {
 		return errors.New("empty image reference")
 	}
@@ -55,13 +79,13 @@ func ociLayoutImageRef(ociDir, imageRef string) string {
 	return ociDir + ":" + tag
 }
 
-// splitImageRef strips the docker:// transport prefix and any @digest suffix,
-// then splits the remainder into the repository name and the tag. The final
-// ":" is only treated as a tag separator when it appears after the last "/", so
-// a registry port (e.g. registry:5000/image) is not mistaken for a tag. When
-// the reference carries no tag, name is the whole remainder and tag is empty.
+// splitImageRef strips transport prefixes and any @digest suffix, then splits
+// the remainder into the repository name and the tag. The final ":" is only
+// treated as a tag separator when it appears after the last "/", so a registry
+// port (e.g. registry:5000/image) is not mistaken for a tag. When the
+// reference carries no tag, name is the whole remainder and tag is empty.
 func splitImageRef(imageRef string) (name, tag string) {
-	imageRef = strings.TrimPrefix(imageRef, "docker://")
+	imageRef, _ = stripImageTransport(imageRef)
 	if digestIndex := strings.LastIndex(imageRef, "@"); digestIndex >= 0 {
 		imageRef = imageRef[:digestIndex]
 	}
@@ -84,7 +108,7 @@ func imageNameWithoutTagDigest(imageRef string) string {
 }
 
 func registryHostFromImageRef(imageRef string) string {
-	imageRef = strings.TrimPrefix(imageRef, "docker://")
+	imageRef, _ = stripImageTransport(imageRef)
 	parts := strings.Split(imageRef, "/")
 	if len(parts) == 0 {
 		return "docker.io"

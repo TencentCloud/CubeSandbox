@@ -4,27 +4,68 @@
 
 package cubebox
 
-import "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/versioninfo"
+import (
+	"strings"
+
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
+	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+)
 
 type guestEnvironmentVersions struct {
 	GuestImage string
 	Agent      string
 	Kernel     string
+	Shim       string
 }
 
+// collectGuestEnvironmentVersions reads the live toolbox once via the same
+// inventory path used for catalog ComponentVersions (normalized keys).
 func collectGuestEnvironmentVersions() guestEnvironmentVersions {
-	collector := versioninfo.NewCollector("")
-	versions := collector.Collect()
-	out := guestEnvironmentVersions{}
-	for _, item := range versions {
-		switch item.Component {
-		case versioninfo.ComponentGuestImage:
-			out.GuestImage = item.Version
-		case versioninfo.ComponentCubeAgent:
-			out.Agent = item.Version
-		case versioninfo.ComponentKernel:
-			out.Kernel = item.Version
-		}
+	return guestEnvironmentVersionsFromComponentMap(inventoryVersionsFromLive(), guestEnvironmentVersions{})
+}
+
+// guestEnvironmentVersionsFromCubeBox prefers versions already captured on the
+// CubeBox (same source as snapshot catalog) and only scans the live toolbox when
+// fields are still missing. Callers should CaptureForCubeBox first.
+func guestEnvironmentVersionsFromCubeBox(cb *cubeboxstore.CubeBox) guestEnvironmentVersions {
+	var versions map[string]string
+	if cb != nil {
+		versions = cb.ComponentVersions
+	}
+	out := guestEnvironmentVersionsFromComponentMap(versions, guestEnvironmentVersions{})
+	if guestEnvironmentVersionsComplete(out) {
+		return out
+	}
+	return guestEnvironmentVersionsFromComponentMap(versions, collectGuestEnvironmentVersions())
+}
+
+func guestEnvironmentVersionsFromComponentMap(versions map[string]string, fallback guestEnvironmentVersions) guestEnvironmentVersions {
+	out := fallback
+	if ver := componentVersionFromMap(versions, templatetypes.CubeComponentCubeImage); ver != "" {
+		out.GuestImage = ver
+	}
+	if ver := componentVersionFromMap(versions, templatetypes.CubeComponentCubeAgent); ver != "" {
+		out.Agent = ver
+	}
+	if ver := componentVersionFromMap(versions, templatetypes.CubeComponentCubeKernel); ver != "" {
+		out.Kernel = ver
+	}
+	if ver := componentVersionFromMap(versions, templatetypes.CubeComponentCubeShim); ver != "" {
+		out.Shim = ver
 	}
 	return out
+}
+
+func guestEnvironmentVersionsComplete(v guestEnvironmentVersions) bool {
+	return strings.TrimSpace(v.GuestImage) != "" &&
+		strings.TrimSpace(v.Agent) != "" &&
+		strings.TrimSpace(v.Kernel) != "" &&
+		strings.TrimSpace(v.Shim) != ""
+}
+
+func componentVersionFromMap(versions map[string]string, name string) string {
+	if len(versions) == 0 {
+		return ""
+	}
+	return templatetypes.InventoryVersionKey(strings.TrimSpace(versions[name]))
 }

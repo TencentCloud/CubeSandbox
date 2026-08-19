@@ -231,6 +231,8 @@ postgres:
 
 The chart installs `cube-redis` StatefulSet only when `redis.enabled=true` and `redis.host` is empty.
 Set `redis.host` to use an existing Redis service; the chart will not install `cube-redis`.
+CubeProxy registry heartbeats resolve Redis by hostname, so a redis Pod IP change self-heals.
+Use an FQDN or IP literal: nginx's `resolver` does not apply search domains.
 
 ## CubeMaster configuration
 
@@ -451,6 +453,8 @@ CubeProxy runs on the **Pod network** (no `hostNetwork`). Traffic path:
 
 TLS for `cube.app` / wildcards still terminates **inside CubeProxy**. The default Ingress annotations enable nginx-ingress SSL passthrough + HTTPS backend; override `cubeProxy.ingress.className` / `annotations` for TKE CLB or other controllers. Set `cubeProxy.ingress.enabled=false` if you manage the entrypoint yourself (keep the Service as backend).
 
+Without an Ingress / cloud LB, set `cubeProxy.service.type` / `controlPlane.api.service.type` to `NodePort` (or `LoadBalancer`) and optionally pin host ports via `cubeProxy.service.nodePorts.*` / `controlPlane.api.service.nodePort` (Kubernetes range `30000-32767`; empty keeps auto-allocation). Explicit `nodePort` values are rejected when `type` is still `ClusterIP`.
+
 When the sandbox owner is on a compute node, CubeProxy still uses Redis routing metadata to connect to the owner `HostIP:hostPort`. The chart patches the image's default nginx listeners to the configured `cubeProxy.ports.*.containerPort` values (default `80` / `443`).
 
 CubeProxy admin is reachable in-cluster at each Pod IP:`adminPort` (default `8082`) for cube-lifecycle-manager discovery; probes use the admin token header.
@@ -462,14 +466,16 @@ connections, the chart renders an nginx `resolver` into
 discovers resolver addresses from the Pod `/etc/resolv.conf`, which resolves the
 chart-managed `cube-redis.<namespace>.svc.cluster.local` Service name and
 third-party Redis DNS names. Override only when the cluster requires explicit
-DNS servers:
+DNS servers. Keep `cubeProxy.resolver.valid` well below
+`lifecycleManager.heartbeatTTL` (defaults `5s` / `15s`) so a redis restart
+does not look like a dead proxy.
 
 ```yaml
 cubeProxy:
   resolver:
     addresses:
       - 172.18.0.10
-    valid: 30s
+    valid: 5s
     timeout: 5s
     ipv6: false
 ```
@@ -487,7 +493,8 @@ cubeProxy:
 cubeNode:
   dns:
     sandbox:
-      followNodeDns: true          # guests use node/cluster DNS
+      followNodeDns: true          # guests use node/cluster DNS (nameservers+search+options)
+                                   # explicit nameservers[] overrides and disables follow-node
 ```
 
 ## WebUI and CubeOps

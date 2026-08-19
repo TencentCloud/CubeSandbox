@@ -19,10 +19,24 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-var netlinkLinkByIndex = netlink.LinkByIndex
-var netlinkLinkByName = netlink.LinkByName
-var netlinkLinkList = netlink.LinkList
+// Dump-style netlink reads retry on ErrDumpInterrupted (see systemnet.WithDumpRetry).
+// Hot-path create prefers openTapFdByName to avoid these reads entirely; cleaner
+// and destroy/restore paths still need them under concurrent TAP churn.
+var netlinkLinkByIndex = func(index int) (netlink.Link, error) {
+	return systemnet.WithDumpRetry(func() (netlink.Link, error) {
+		return netlink.LinkByIndex(index)
+	})
+}
+var netlinkLinkByName = func(name string) (netlink.Link, error) {
+	return systemnet.WithDumpRetry(func() (netlink.Link, error) {
+		return netlink.LinkByName(name)
+	})
+}
+var netlinkLinkList = func() ([]netlink.Link, error) {
+	return systemnet.WithDumpRetry(netlink.LinkList)
+}
 var netlinkLinkDel = netlink.LinkDel
+var deleteTAPDevicePolicyMaps = cubevs.DeleteTAPDevicePolicyMaps
 var unixOpen = unix.Open
 var unixClose = unix.Close
 var unixIoctlIfreq = unix.IoctlIfreq
@@ -317,6 +331,15 @@ func listCubeTaps() (map[string]*tapDevice, error) {
 	return ipToTap, nil
 }
 
+// isTapNotFound reports whether err means the named host link is absent.
+func isTapNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	var notFound netlink.LinkNotFoundError
+	return errors.As(err, &notFound)
+}
+
 // getTapByName returns identity for one runtime-managed TAP by name.
 func getTapByName(name string) (*tapDevice, error) {
 	link, err := netlinkLinkByName(name)
@@ -345,17 +368,57 @@ func getTapByName(name string) (*tapDevice, error) {
 
 // destroyTap removes a TAP by ifindex. It first tries to clear TUNSETPERSIST via
 // /dev/net/tun because persistent TAPs may survive netlink deletion alone.
+// After the netdev is confirmed gone it best-effort deletes HashOfMaps outer
+// policy keys so destroyed ifindexes cannot accumulate stale allow_out_v2 /
+// deny_out / dns_allow inners. Policy cleanup never changes the destroy result:
+// a missing BPF map must not leave pool/cleanup stuck on a dead netdev.
 func destroyTap(ifIdx int) error {
 	link, err := netlinkLinkByIndex(ifIdx)
 	if err != nil {
+		if isTapNotFound(err) {
+			// Confirmed absent — drop orphaned outer keys. Transient lookup
+			// errors must not wipe policy for a TAP that may still be up.
+			cleanupDestroyedTapPolicyMaps(ifIdx)
+		}
 		return err
 	}
+	destroyed := false
 	if tap, ok := link.(*netlink.Tuntap); ok {
 		if err := deletePersistentTapByName(tap.Name); err == nil {
-			return nil
+			destroyed = true
 		}
 	}
-	return netlinkLinkDel(link)
+	if !destroyed {
+		if err := netlinkLinkDel(link); err != nil {
+			return err
+		}
+	}
+	cleanupDestroyedTapPolicyMaps(ifIdx)
+	return nil
+}
+
+// cleanupDestroyedTapPolicyMaps deletes HashOfMaps outer keys for ifIdx only
+// when that ifindex no longer has a host netdev. If the index was reused by a
+// new device between LinkDel and this call, cleanup is skipped.
+func cleanupDestroyedTapPolicyMaps(ifIdx int) {
+	_, err := netlinkLinkByIndex(ifIdx)
+	switch {
+	case err == nil:
+		// ifindex reused (or delete raced); do not touch the new device's policy.
+		return
+	case !isTapNotFound(err):
+		CubeLog.WithContext(context.Background()).Warnf(
+			"network runtime tap policy map cleanup skipped: ifindex=%d lookup_err=%v",
+			ifIdx, err,
+		)
+		return
+	}
+	if cleanErr := deleteTAPDevicePolicyMaps(uint32(ifIdx)); cleanErr != nil {
+		CubeLog.WithContext(context.Background()).Warnf(
+			"network runtime tap policy map cleanup failed: ifindex=%d err=%v",
+			ifIdx, cleanErr,
+		)
+	}
 }
 
 // deletePersistentTapByName opens the TAP and clears TUNSETPERSIST, making the

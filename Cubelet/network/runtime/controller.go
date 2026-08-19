@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -213,7 +214,6 @@ func newProductionControllerDeps(cfg Config) (networkControllerDeps, error) {
 	if err != nil {
 		return networkControllerDeps{}, err
 	}
-	startCubeVSSessionLogDrain()
 	return networkControllerDeps{
 		store:             store,
 		allocator:         allocator,
@@ -293,6 +293,9 @@ func initCubeVS(cfg Config, device *systemnet.HostDevice, cubeDev *systemnet.Cub
 		NodeMacAddr:         device.Mac,
 		NodeGatewayMacAddr:  device.GatewayMac,
 	}
+	if err := loadL7MarksConfig(&params); err != nil {
+		return nil, err
+	}
 	if err := cubevs.Init(params); err != nil {
 		return nil, err
 	}
@@ -306,6 +309,64 @@ func initCubeVS(cfg Config, device *systemnet.HostDevice, cubeDev *systemnet.Cub
 		return nil, fmt.Errorf("set ip_local_port_range failed: %w", err)
 	}
 	return cubeRouter, nil
+}
+
+// l7MarksConfigPath is the install-time config shared with the
+// cube-proxy-iptables-init script, so the dataplane (eBPF globals) and the
+// iptables TPROXY rules stamp/match the same skb->mark values. It is a var so
+// tests can point it at a temp file instead of the real /etc path.
+var l7MarksConfigPath = "/etc/cubeegress/l7-marks.conf"
+
+// loadL7MarksConfig overlays CUBE_L7_MARK_{HTTP,HTTPS,MASK} from
+// l7MarksConfigPath onto params.L7Mark*. A missing file leaves the shipped
+// defaults (cubevs.resolveL7Marks applies them); unset keys likewise fall
+// back to defaults. Values are hex (e.g. 0xCE010000), matching the shell
+// KEY=VALUE format the iptables script sources. Because the iptables script
+// sources the same file as POSIX shell, hand-edited but shell-legal lines
+// are tolerated here too: an "export " key prefix and a trailing
+// " # comment" on the value.
+func loadL7MarksConfig(params *cubevs.Params) error {
+	data, err := os.ReadFile(l7MarksConfigPath) // NOCC:Path Traversal()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, raw, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		if strings.HasPrefix(key, "export") {
+			// `export KEY=value` — without this the key would match no case
+			// below and the override would be silently ignored, diverging
+			// the dataplane marks from the iptables rules.
+			key = strings.TrimSpace(strings.TrimPrefix(key, "export"))
+		}
+		// Strip a trailing ` # comment` before parsing; without this the
+		// ParseUint below would fail and block controller startup.
+		raw, _, _ = strings.Cut(raw, "#")
+		text := strings.Trim(strings.TrimSpace(raw), `"'`)
+		value, perr := strconv.ParseUint(text, 0, 32)
+		if perr != nil {
+			return fmt.Errorf("parse %q in %s: %w", line, l7MarksConfigPath, perr)
+		}
+		switch key {
+		case "CUBE_L7_MARK_HTTP":
+			params.L7MarkHTTP = uint32(value)
+		case "CUBE_L7_MARK_HTTPS":
+			params.L7MarkHTTPS = uint32(value)
+		case "CUBE_L7_MARK_MASK":
+			params.L7MarkMask = uint32(value)
+		}
+	}
+	return nil
 }
 
 func startCubeVSSessionLogDrain() {
@@ -326,6 +387,12 @@ func (s *NetworkController) startControllerRuntime() error {
 	if err := s.recover(); err != nil {
 		return err
 	}
+	// Stale HashOfMaps cleanup is part of startup reconciliation. Complete it
+	// before starting the reaper, background pool creation, or returning the
+	// controller to request-serving code so it cannot race a new TAP lifecycle.
+	s.runStaleNetPolicyMapGC()
+	startCubeVSSessionLogDrain()
+
 	// Pool warmup runs in the background so first-deploy startup
 	// (~63ms × TapInitNum) does not block NewNetworkController and trip
 	// systemd's ExecStartPost timeout. EnsureNetwork transparently

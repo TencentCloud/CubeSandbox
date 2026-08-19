@@ -71,6 +71,8 @@ This deployment uses cloud resources to **quickly stand up a highly-available Cu
 Both default to `2` but serve completely different roles.
 :::
 
+Compute node count, instance type, Cubelet report frequency, quota, labels, and template replica availability all affect CubeMaster scheduling. For the complete configuration reference and the required `cubemastercli tpl redo` step after adding compute nodes, see [CubeMaster Scheduler Configuration](./cubemaster-scheduler-config.md).
+
 ## Default Deployment Mode
 
 Matching `env.example` / `variables.tf`, the **default is public images + single-replica control plane + no CFS** — a POC configuration:

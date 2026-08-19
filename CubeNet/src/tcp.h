@@ -195,7 +195,15 @@ static const u8 tcp_conntracks[2][6][TCP_CONNTRACK_MAX] = {
 	}
 };
 
-static unsigned int get_conntrack_index(bool syn, bool ack, bool fin, bool rst)
+/* Force inlining: with a single call site inside update_session clang would
+ * usually inline anyway, but if it ever emits a real BPF subprog the verifier
+ * must track the returned index through the subprog boundary — extra burden
+ * on the already-fragile 3D tcp_conntracks[dir][index][old_state] access.
+ * Inlining lets clang constant-propagate index when the flag inputs are
+ * compile-time constants (as in the tcp_state test macro and the production
+ * do_tcp_nat literal-dir call), collapsing one array dimension.
+ */
+static __always_inline unsigned int get_conntrack_index(bool syn, bool ack, bool fin, bool rst)
 {
 	if (rst) return TCP_RST_SET;
 	else if (syn) return (ack ? TCP_SYNACK_SET : TCP_SYN_SET);
@@ -261,7 +269,13 @@ static __always_inline long snat_tcp(struct __sk_buff *skb,
 static __always_inline void update_session(enum ip_conntrack_dir dir, struct nat_session *sess,
 					   __u64 now_ns, bool syn, bool ack, bool fin, bool rst)
 {
-	enum tcp_conntrack old_state, new_state;
+	/* __u8 (not enum): keeps old_state in a single unsigned register. With a
+	 * signed enum, older clang (14) narrows the value with `&= 255` masks that
+	 * split it into a bounds-checked copy and a separate index copy, so the
+	 * verifier sees the tcp_conntracks index register as unbounded (umax=255)
+	 * and rejects the .rodata read. A plain __u8 keeps check and index unified.
+	 */
+	__u8 old_state, new_state;
 	unsigned int index;
 
 	session_lazy_refresh(sess, now_ns);
@@ -290,6 +304,31 @@ static __always_inline void update_session(enum ip_conntrack_dir dir, struct nat
 	}
 
 	new_state = tcp_conntracks[dir][index][old_state];
+
+	if (index == TCP_FIN_SET) {
+		/* A retransmitted FIN from the side that initiated close must not be
+		 * mistaken for the peer's FIN. The generic conntrack table cannot
+		 * distinguish direction once it reaches FIN_WAIT/CLOSE_WAIT, so use
+		 * active_close to retain the state until the opposite side sends FIN.
+		 */
+		if ((old_state == TCP_CONNTRACK_FIN_WAIT ||
+		     old_state == TCP_CONNTRACK_CLOSE_WAIT) &&
+		    ((sess->active_close && dir == IP_CT_DIR_ORIGINAL) ||
+		     (!sess->active_close && dir == IP_CT_DIR_REPLY)))
+			new_state = old_state;
+
+		/* Record only a real original-direction transition that initiates
+		 * close. Checking the classified packet and computed transition avoids
+		 * marking RST|FIN or SYN|FIN packets as active closes. If reply sent
+		 * FIN first, the state is already FIN_WAIT/CLOSE_WAIT when original
+		 * later sends FIN and active_close remains zero.
+		 */
+		if (dir == IP_CT_DIR_ORIGINAL &&
+		    new_state == TCP_CONNTRACK_FIN_WAIT &&
+		    new_state != old_state)
+			sess->active_close = 1;
+	}
+
 	/* no store if state remain unchanged */
 	if (new_state != old_state)
 		sess->state = new_state;
@@ -298,10 +337,11 @@ static __always_inline void update_session(enum ip_conntrack_dir dir, struct nat
 static __always_inline bool create_new_sessions(struct __sk_buff *skb,
 						struct session_key *ekey,
 						__u64 now_ns, __u32 vm_ifindex,
-						struct snat_ip *snat_ip, __u16 snat_port)
+						struct snat_ip *snat_ip, __u16 snat_port,
+						__u8 packet_class, __u8 l7_scheme)
 {
 	return create_nat_session(skb, ekey, now_ns, vm_ifindex, snat_ip, snat_port,
-				  TCP_CONNTRACK_SYN_SENT);
+				  TCP_CONNTRACK_SYN_SENT, packet_class, l7_scheme);
 }
 
 #endif /* __TCP_H */

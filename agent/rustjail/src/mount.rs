@@ -1129,6 +1129,7 @@ fn readonly_path(path: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::assert_result;
+    use crate::skip_if_no_cap;
     use crate::skip_if_not_root;
     use std::fs::create_dir;
     use std::fs::create_dir_all;
@@ -1365,35 +1366,64 @@ mod tests {
         defer!(let _ = unistd::chdir(&olddir););
         let _ = unistd::chdir(tempdir.path());
 
-        let dev = oci::LinuxDevice {
+        // A FIFO node needs no CAP_MKNOD, so this exercises mknod_dev's success
+        // path (type lookup, mode, chown) even where character/block device-node
+        // creation is forbidden, e.g. the rootless-podman builder.
+        let fifo = oci::LinuxDevice {
             path: "/fifo".to_string(),
-            r#type: "c".to_string(),
+            r#type: "p".to_string(),
             major: 0,
             minor: 0,
             file_mode: Some(0660),
             uid: Some(unistd::getuid().as_raw()),
             gid: Some(unistd::getgid().as_raw()),
         };
-        let path = Path::new("fifo");
+        let ret = mknod_dev(&fifo, Path::new("fifo"));
+        assert!(ret.is_ok(), "Should pass. Got: {:?}", ret);
+        let st = stat::stat(Path::new("fifo")).unwrap();
+        assert_eq!(st.st_mode & SFlag::S_IFMT.bits(), SFlag::S_IFIFO.bits());
 
-        let ret = mknod_dev(&dev, path);
-        // Creating a device node can be denied even for uid 0: CAP_MKNOD may be
-        // dropped, and inside a user namespace mknod(S_IFCHR) is refused
-        // regardless of the capability. Both surface as EPERM, so skip rather
-        // than fail when the environment forbids the operation.
+        // An unrecognized device type is rejected regardless of privileges.
+        let bad = oci::LinuxDevice {
+            r#type: "x".to_string(),
+            ..fifo.clone()
+        };
+        assert!(mknod_dev(&bad, Path::new("bad")).is_err());
+
+        // Character-device creation needs CAP_MKNOD, which is commonly dropped
+        // from root in container/CI environments. Gate on the capability up
+        // front: the syscall's denial surfaces as EPERM or ENOENT depending on
+        // the runtime, so checking the effective cap set is more robust than
+        // matching an errno after the fact.
+        skip_if_no_cap!(caps::Capability::CAP_MKNOD);
+        let chr = oci::LinuxDevice {
+            r#type: "c".to_string(),
+            ..fifo
+        };
+        let ret = mknod_dev(&chr, Path::new("char"));
+        // Even with CAP_MKNOD in the effective set, mknod(S_IFCHR) can be denied
+        // when the target filesystem's superblock is owned by a parent user
+        // namespace (e.g. unshare -Ur, or a rootless runtime leaving /tmp
+        // host-owned) or by an LSM/seccomp policy. The kernel evaluates the
+        // permission check in the owning namespace, not the current one, so the
+        // capability gate above cannot see it. Skip rather than fail on the
+        // resulting EPERM/ENOENT.
         if let Err(ref e) = ret {
-            if e.downcast_ref::<nix::Error>() == Some(&nix::Error::EPERM) {
+            if matches!(
+                e.downcast_ref::<nix::Error>(),
+                Some(&nix::Error::EPERM) | Some(&nix::Error::ENOENT)
+            ) {
                 println!(
-                    "INFO: skipping {} which needs device-node creation (got EPERM)",
-                    module_path!()
+                    "INFO: skipping {} char-device case: mknod denied ({:?})",
+                    module_path!(),
+                    e
                 );
                 return;
             }
         }
         assert!(ret.is_ok(), "Should pass. Got: {:?}", ret);
-
-        let ret = stat::stat(path);
-        assert!(ret.is_ok(), "Should pass. Got: {:?}", ret);
+        let st = stat::stat(Path::new("char")).unwrap();
+        assert_eq!(st.st_mode & SFlag::S_IFMT.bits(), SFlag::S_IFCHR.bits());
     }
 
     #[test]

@@ -301,23 +301,152 @@ func TestGenHostsFileWithHostName(t *testing.T) {
 func TestGenResolvContent(t *testing.T) {
 
 	loadNetfileTestConfig(t, "common:\n  default_dns_servers:\n    - 119.29.29.29\n")
-	dnsServers := []string{"8.8.8.8", "9.9.9.9"}
-	content, err := genResolvContent(dnsServers)
+	content, err := genResolvContent(EffectiveDNSConfig{Servers: []string{"8.8.8.8", "9.9.9.9"}})
 	assert.NoError(t, err)
 	assert.Equal(t, "nameserver 8.8.8.8\nnameserver 9.9.9.9\n", string(content))
 
 	loadNetfileTestConfig(t, "common:\n  default_dns_servers:\n    - 1.1.1.1\n    - 119.29.29.29\n")
-	content, err = genResolvContent(nil)
+	content, err = genResolvContent(EffectiveDNSConfig{})
 	assert.NoError(t, err)
 	assert.Equal(t, "nameserver 1.1.1.1\nnameserver 119.29.29.29\n", string(content))
 
 	loadNetfileTestConfig(t, "common: {}\n")
-	content, err = genResolvContent(nil)
+	content, err = genResolvContent(EffectiveDNSConfig{})
 	assert.NoError(t, err)
 	assert.Equal(t, "nameserver 119.29.29.29\n", string(content))
 
-	_, err = genResolvContent([]string{"invalid-ip"})
+	_, err = genResolvContent(EffectiveDNSConfig{Servers: []string{"invalid-ip"}})
 	assert.Error(t, err)
+
+	loadNetfileTestConfig(t, `common:
+  default_dns_servers:
+    - 10.96.0.10
+  default_dns_searches:
+    - default.svc.cluster.local
+    - svc.cluster.local
+  default_dns_options:
+    - ndots:5
+`)
+	content, err = genResolvContent(EffectiveDNSConfig{})
+	assert.NoError(t, err)
+	assert.Equal(t, "search default.svc.cluster.local svc.cluster.local\nnameserver 10.96.0.10\noptions ndots:5\n", string(content))
+
+	content, err = genResolvContent(EffectiveDNSConfig{
+		Servers:  []string{"8.8.8.8"},
+		Searches: []string{"example.com"},
+		Options:  []string{"timeout:2"},
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, "search example.com\nnameserver 8.8.8.8\noptions timeout:2\n", string(content))
+
+	// Empty Servers falls back to defaults only for servers; caller searches/options kept.
+	content, err = genResolvContent(EffectiveDNSConfig{
+		Searches: []string{"keep.example"},
+		Options:  []string{"ndots:2"},
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, "search keep.example\nnameserver 10.96.0.10\noptions ndots:2\n", string(content))
+}
+
+func TestResolveEffectiveDNSConfig(t *testing.T) {
+	loadNetfileTestConfig(t, `common:
+  default_dns_servers:
+    - 10.96.0.10
+  default_dns_searches:
+    - default.svc.cluster.local
+    - svc.cluster.local
+  default_dns_options:
+    - ndots:5
+`)
+
+	t.Run("follow-node defaults when request has no servers", func(t *testing.T) {
+		got, err := ResolveEffectiveDNSConfig(&cubebox.RunCubeSandboxRequest{
+			Containers: []*cubebox.ContainerConfig{{}},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, []string{"10.96.0.10"}, got.Servers)
+		assert.Equal(t, []string{"default.svc.cluster.local", "svc.cluster.local"}, got.Searches)
+		assert.Equal(t, []string{"ndots:5"}, got.Options)
+		assert.Equal(t, []string{
+			"search default.svc.cluster.local svc.cluster.local",
+			"10.96.0.10",
+			"options ndots:5",
+		}, got.AnnotationLines())
+	})
+
+	t.Run("explicit servers override whole DNS config without default search/options", func(t *testing.T) {
+		got, err := ResolveEffectiveDNSConfig(&cubebox.RunCubeSandboxRequest{
+			Containers: []*cubebox.ContainerConfig{
+				{DnsConfig: &cubebox.DNSConfig{Servers: []string{"8.8.8.8"}}},
+			},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, []string{"8.8.8.8"}, got.Servers)
+		assert.Empty(t, got.Searches)
+		assert.Empty(t, got.Options)
+		assert.Equal(t, []string{"8.8.8.8"}, got.AnnotationLines())
+	})
+
+	t.Run("explicit servers with request search/options", func(t *testing.T) {
+		got, err := ResolveEffectiveDNSConfig(&cubebox.RunCubeSandboxRequest{
+			Containers: []*cubebox.ContainerConfig{
+				{DnsConfig: &cubebox.DNSConfig{
+					Servers:  []string{"1.1.1.1"},
+					Searches: []string{"example.com"},
+					Options:  []string{"timeout:2"},
+				}},
+			},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, []string{"1.1.1.1"}, got.Servers)
+		assert.Equal(t, []string{"example.com"}, got.Searches)
+		assert.Equal(t, []string{"timeout:2"}, got.Options)
+	})
+
+	t.Run("request searches without servers still fall back to default servers", func(t *testing.T) {
+		got, err := ResolveEffectiveDNSConfig(&cubebox.RunCubeSandboxRequest{
+			Containers: []*cubebox.ContainerConfig{
+				{DnsConfig: &cubebox.DNSConfig{Searches: []string{"custom.local"}}},
+			},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, []string{"10.96.0.10"}, got.Servers)
+		assert.Equal(t, []string{"custom.local"}, got.Searches)
+		assert.Equal(t, []string{"ndots:5"}, got.Options)
+	})
+
+	t.Run("reject option with embedded newline", func(t *testing.T) {
+		_, err := ResolveEffectiveDNSConfig(&cubebox.RunCubeSandboxRequest{
+			Containers: []*cubebox.ContainerConfig{
+				{DnsConfig: &cubebox.DNSConfig{
+					Options: []string{"ndots:5\nnameserver 6.6.6.6"},
+				}},
+			},
+		})
+		assert.Error(t, err)
+	})
+
+	t.Run("reject search with comment marker", func(t *testing.T) {
+		_, err := ResolveEffectiveDNSConfig(&cubebox.RunCubeSandboxRequest{
+			Containers: []*cubebox.ContainerConfig{
+				{DnsConfig: &cubebox.DNSConfig{
+					Searches: []string{"example.com #evil"},
+				}},
+			},
+		})
+		assert.Error(t, err)
+	})
+
+	t.Run("reject search with whitespace", func(t *testing.T) {
+		_, err := ResolveEffectiveDNSConfig(&cubebox.RunCubeSandboxRequest{
+			Containers: []*cubebox.ContainerConfig{
+				{DnsConfig: &cubebox.DNSConfig{
+					Searches: []string{"bad domain"},
+				}},
+			},
+		})
+		assert.Error(t, err)
+	})
 }
 
 func TestResolveEffectiveDNSServers(t *testing.T) {

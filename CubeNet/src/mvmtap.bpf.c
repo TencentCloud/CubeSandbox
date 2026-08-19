@@ -208,7 +208,6 @@ static __always_inline int prepare_egress_l2(struct __sk_buff *skb,
 	union macaddr *neighbor_mac;
 	const union macaddr *dmac;
 	const union macaddr *smac;
-	__u64 retry_at;
 	__u64 now;
 	long err;
 
@@ -236,16 +235,8 @@ static __always_inline int prepare_egress_l2(struct __sk_buff *skb,
 			return EGRESS_MAC_DROP;
 		}
 
-		/* Touch only the deadline so a concurrent learn cannot lose its MAC. */
-		retry_at = now + DIRECT_NEIGH_PROBE_INTERVAL_NS;
-		neighbor->next_probe_at_ns = retry_at;
-		neighbor = bpf_map_lookup_elem(&direct_neigh, &daddr);
-		if (!neighbor)
-			return EGRESS_MAC_DROP;
-		/* Later deadline: another CPU already refreshed this entry. */
-		if (!direct_neighbor_is_zero(neighbor) &&
-		    neighbor->next_probe_at_ns > retry_at)
-			goto set_neighbor;
+		/* A concurrent learn may make this probe redundant, which is harmless. */
+		neighbor->next_probe_at_ns = now + DIRECT_NEIGH_PROBE_INTERVAL_NS;
 	} else {
 		pending.next_probe_at_ns = now + DIRECT_NEIGH_PROBE_INTERVAL_NS;
 		err = bpf_map_update_elem(&direct_neigh, &daddr, &pending, BPF_NOEXIST);
@@ -264,42 +255,18 @@ set_neighbor:
 	return EGRESS_MAC_READY;
 }
 
-/*
- * Check whether a TCP flow should be redirected to the L7 proxy.
- *
- * Looks up allow_out_v2 for the given ifindex/daddr and returns true iff
- * the entry carries NET_POLICY_FLAG_L7_REQUIRED and the destination port
- * is 80 or 443. This is a fast, self-contained lookup — the general
- * egress policy check (allow / deny) is enforced later inside
- * create_nat_session().
+/* Egress flow classification now lives in classify_egress_flow() (session.h),
+ * which merges the former l7_scheme_for_flow() and session_policy_allowed()
+ * into a single policy verdict (reject / accept-SNAT / accept-HTTP /
+ * accept-HTTPS). It is applied once, when a new flow is created, and the
+ * result is cached in nat_session for reuse on every later packet.
  */
-static __always_inline bool should_redirect_to_l7_proxy(__u32 ifindex, __u32 daddr,
-							const struct tcphdr *l4)
-{
-	struct lpm_key key = { .prefixlen = 32, .ip = daddr };
-	struct net_policy_value_v2 *value;
-	void *inner_map;
-
-	if (l4->dest != bpf_htons(80) && l4->dest != bpf_htons(443))
-		return false;
-
-	inner_map = bpf_map_lookup_elem(&allow_out_v2, &ifindex);
-	if (!inner_map)
-		return false;
-
-	value = bpf_map_lookup_elem(inner_map, &key);
-	if (!value)
-		return false;
-	if (value->expires_at_ns != 0 && value->expires_at_ns <= bpf_ktime_get_ns())
-		return false;
-
-	return value->flags & NET_POLICY_FLAG_L7_REQUIRED;
-}
-
 enum tcp_nat_result {
 	TCP_NAT_DROP = 0,
 	TCP_NAT_OK,
+	TCP_NAT_PROBE,
 	TCP_NAT_RESET,
+	TCP_L7PROXY_OK,
 };
 
 /* do_tcp_nat() returns a 64-bit value that encodes both the status enum
@@ -568,6 +535,31 @@ static __always_inline struct snat_ip *pick_snat_ip_port(__u32 mvm_ip, const str
 	return NULL;
 }
 
+/* Reserve the reverse-flow key for an L7 proxy session. L7 traffic is not
+ * source-NATed, so the reply tuple is the exact reverse of the sandbox's
+ * original tuple. create_nat_session() later inserts the matching egress value
+ * and rolls this reservation back if that insertion fails.
+ */
+static __always_inline bool create_l7_ingress_session(const struct session_key *ekey)
+{
+	struct ingress_session isess = {
+		.version = ekey->version,
+		.vm_ip = ekey->src_ip,
+		.vm_port = ekey->src_port,
+	};
+	struct session_key ikey = {
+		.src_ip = ekey->dst_ip,
+		.dst_ip = ekey->src_ip,
+		.src_port = ekey->dst_port,
+		.dst_port = ekey->src_port,
+		.version = 0,
+		.protocol = ekey->protocol,
+	};
+
+	return bpf_map_update_elem(&ingress_sessions, &ikey, &isess,
+				   BPF_NOEXIST) == 0;
+}
+
 static __always_inline void del_session(struct session_key *ekey, struct nat_session *sess)
 {
 	struct session_key ikey = {
@@ -628,6 +620,9 @@ static __always_inline __u32 do_icmp_nat(struct __sk_buff *skb, struct mvm_meta 
 	}
 
 	/* create new session */
+	if (classify_egress_flow(skb->ingress_ifindex, key.dst_ip,
+				 key.dst_port) == FLOW_REJECT)
+		return 0;
 	snat_ip = pick_snat_ip_port(mvm_meta->ip, &key, &snat_id);
 	if (!snat_ip || !snat_ip->ip || !snat_id)
 		return 0;
@@ -722,6 +717,9 @@ static __always_inline __u32 do_udp_nat_inline(struct __sk_buff *skb,
 	}
 
 	/* create new session */
+	if (classify_egress_flow(skb->ingress_ifindex, key.dst_ip,
+				 key.dst_port) == FLOW_REJECT)
+		return 0;
 	snat_ip = pick_snat_ip_port(mvm_meta->ip, &key, &snat_port);
 	if (!snat_ip || !snat_ip->ip || !snat_port)
 		return 0;
@@ -831,6 +829,7 @@ static __always_inline __u64 do_tcp_nat(struct __sk_buff *skb, struct mvm_meta *
 	struct session_key key = {};
 	struct nat_session *sess;
 	struct snat_ip *snat_ip;
+	struct snat_ip l7_endpoint = {};
 	bool syn, ack, fin, rst;
 	struct ethhdr *l2;
 	struct iphdr *l3;
@@ -839,6 +838,12 @@ static __always_inline __u64 do_tcp_nat(struct __sk_buff *skb, struct mvm_meta *
 	__u16 snat_port;
 	__u64 flags;
 	__u64 now;
+	__u32 l7_mark;
+	__u8 packet_class = SNAT_PACKET;
+	__u8 l7_scheme = L7_SCHEME_NONE;
+	__u8 verdict = FLOW_SNAT;
+	bool create_snat = false;
+	int mac_result;
 	long err;
 	bool ok;
 
@@ -861,6 +866,16 @@ static __always_inline __u64 do_tcp_nat(struct __sk_buff *skb, struct mvm_meta *
 		sess = bpf_map_lookup_elem(&egress_sessions, &key);
 		if (sess) {
 			if (sess->state == TCP_CONNTRACK_CLOSE || sess->state == TCP_CONNTRACK_TIME_WAIT) {
+				/* L7 sessions use an identity reverse tuple, so immediately
+				 * replacing a terminal session would let delayed packets from
+				 * the old connection mutate the new session. Keep the old pair
+				 * until the userspace reaper removes it and reject premature
+				 * tuple reuse. Ordinary SNAT sessions remain safe to recreate
+				 * because they allocate a fresh reverse-side source port.
+				 */
+				if (sess->packet_class == L7PROXY_PACKET)
+					return TCP_NAT_PACK(0, TCP_NAT_RESET);
+
 				/* guest kernel reuse source port too fast */
 				del_session(&key, sess);
 				goto do_create;
@@ -869,35 +884,134 @@ static __always_inline __u64 do_tcp_nat(struct __sk_buff *skb, struct mvm_meta *
 			goto do_update;
 		}
 do_create:
-		/* create new session */
-		snat_ip = pick_snat_ip_port(mvm_meta->ip, &key, &snat_port);
-		if (!snat_ip || !snat_ip->ip || !snat_port)
+	/* Classify the flow with the unified egress policy. The verdict is
+	 * cached in nat_session and reused for every later packet.
+	 */
+	verdict = classify_egress_flow(skb->ingress_ifindex, key.dst_ip,
+				       key.dst_port);
+	switch (verdict) {
+	case FLOW_HTTP:
+	case FLOW_HTTPS:
+		if (!create_l7_ingress_session(&key))
 			return TCP_NAT_DROP;
-		ok = create_new_sessions(skb, &key, now, skb->ingress_ifindex, snat_ip, snat_port);
-		if (!ok) {
-			/* Preserve RST-on-deny: create_nat_session stamps
-			 * skb->cb when the failure is due to net policy.
-			 */
-			if (nat_cb_get(skb) == NAT_CB_DENIED_BY_POLICY)
-				return TCP_NAT_PACK(0, TCP_NAT_RESET);
-			return TCP_NAT_DROP;
-		}
-		sess = bpf_map_lookup_elem(&egress_sessions, &key);
-		if (!sess)
-			return TCP_NAT_DROP;
-		goto do_nat;
+		l7_endpoint.ifindex = cubegw0_ifindex;
+		l7_endpoint.ip = key.src_ip;
+		snat_ip = &l7_endpoint;
+		snat_port = key.src_port;
+		packet_class = L7PROXY_PACKET;
+		l7_scheme = (verdict == FLOW_HTTP) ? L7_SCHEME_HTTP :
+						     L7_SCHEME_HTTPS;
+		break;
+	case FLOW_REJECT:
+		/* Denied by egress policy: signal the caller so it can emit an
+		 * RST, exactly as the old create_nat_session path did.
+		 */
+		nat_cb_set(skb, NAT_CB_DENIED_BY_POLICY);
+		return TCP_NAT_PACK(0, TCP_NAT_RESET);
+	case FLOW_SNAT:
+	default:
+		create_snat = true;
+		goto prepare_snat;
+	}
+create_session:
+	ok = create_new_sessions(skb, &key, now, skb->ingress_ifindex,
+				 snat_ip, snat_port, packet_class, l7_scheme);
+	if (!ok)
+		return TCP_NAT_DROP;
+	sess = bpf_map_lookup_elem(&egress_sessions, &key);
+	if (!sess)
+		return TCP_NAT_DROP;
+	goto do_nat;
 	} else {
 		/* lookup existing session */
 		sess = bpf_map_lookup_elem(&egress_sessions, &key);
-		if (!sess)
+		if (!sess) {
+			/* Legacy default-port (80/443) connection drain: the eBPF session
+			 * entry was lost (agent restart, map eviction, or expiry) AND the
+			 * allow_out_v3 /48 entry for this (ip, port) has aged out, so
+			 * classify_egress_flow would return FLOW_REJECT. But the proxy
+			 * still holds an established TPROXY socket for this 4-tuple — the
+			 * connection was legitimately opened when the policy allowed it.
+			 * Re-stamp the mark so iptables TPROXY steers the packet to the
+			 * proxy, keeping the connection alive instead of resetting it.
+			 * Custom-port connections are intentionally excluded: they should
+			 * respect the current policy when their allow_out_v3 entry expires.
+			 * No session is re-created, so each packet on the drained flow
+			 * re-enters this path (per-packet socket lookup — acceptable for
+			 * draining connections that will eventually close).
+			 */
+			if (l4->dest == bpf_htons(80) || l4->dest == bpf_htons(443)) {
+				struct bpf_sock *sk;
+				struct bpf_sock_tuple tuple = {};
+				tuple.ipv4.saddr = key.src_ip;
+				tuple.ipv4.daddr = key.dst_ip;
+				tuple.ipv4.sport = l4->source;
+				tuple.ipv4.dport = l4->dest;
+				sk = bpf_skc_lookup_tcp(skb, &tuple, sizeof(tuple.ipv4), BPF_F_CURRENT_NETNS, 0);
+				if (sk) {
+					__u32 state = sk->state;
+
+					bpf_sk_release(sk);
+					if (state == BPF_TCP_ESTABLISHED) {
+						if (l4->dest == bpf_htons(80)) {
+							skb->mark = (skb->mark & ~cube_l7_mark_mask) | cube_l7_mark_http;
+						} else {
+							skb->mark = (skb->mark & ~cube_l7_mark_mask) | cube_l7_mark_https;
+						}
+						return TCP_NAT_PACK(cubegw0_ifindex, TCP_L7PROXY_OK);
+					}
+				}
+			}
 			return rst ? TCP_NAT_DROP : TCP_NAT_RESET;
+		}
 	}
 
 do_update:
+	if (sess->packet_class == L7PROXY_PACKET)
+		goto update_existing;
+
+prepare_snat:
+	/* Resolve external L2 before allocating or mutating TCP session state.
+	 * A cold miss consumes this packet as an ARP probe, so the original TCP
+	 * packet must remain untouched and a new session must not be installed.
+	 */
+	mac_result = prepare_egress_l2(skb, l2, key.dst_ip);
+	if (mac_result == EGRESS_MAC_DROP)
+		return TCP_NAT_DROP;
+	if (mac_result == EGRESS_MAC_PROBE)
+		return TCP_NAT_PACK(nodenic_ifindex, TCP_NAT_PROBE);
+
+	if (create_snat) {
+		snat_ip = pick_snat_ip_port(mvm_meta->ip, &key, &snat_port);
+		if (!snat_ip || !snat_ip->ip || !snat_port)
+			return TCP_NAT_DROP;
+		goto create_session;
+	}
+
+	/* prepare_egress_l2() may update the neighbor map. Reacquire the session
+	 * value before updating it or using it for the NAT rewrite.
+	 */
+	sess = bpf_map_lookup_elem(&egress_sessions, &key);
+	if (!sess || sess->packet_class == L7PROXY_PACKET)
+		return TCP_NAT_DROP;
+
+update_existing:
 	/* update session */
 	update_session(IP_CT_DIR_ORIGINAL, sess, now, syn, ack, fin, rst);
 
 do_nat:
+	if (sess->packet_class == L7PROXY_PACKET) {
+		if (sess->l7_scheme == L7_SCHEME_HTTP)
+			l7_mark = cube_l7_mark_http;
+		else if (sess->l7_scheme == L7_SCHEME_HTTPS)
+			l7_mark = cube_l7_mark_https;
+		else
+			return TCP_NAT_DROP;
+
+		skb->mark = (skb->mark & ~cube_l7_mark_mask) | l7_mark;
+		return TCP_NAT_PACK(sess->node_ifindex, TCP_L7PROXY_OK);
+	}
+
 	old_saddr = l3->saddr;
 	new_saddr = sess->node_ip;
 	old_sport = l4->source;
@@ -1026,7 +1140,7 @@ int dns_finish(struct __sk_buff *skb)
 	if (!dns_policy_enabled(mvm_meta))
 		return finish_udp_nat(skb, mvm_meta);
 
-	inner_map = bpf_map_lookup_elem(&dns_allow, &ifindex);
+	inner_map = bpf_map_lookup_elem(&dns_allow_v2, &ifindex);
 	if (!inner_map)
 		return finish_udp_nat(skb, mvm_meta);
 
@@ -1041,7 +1155,7 @@ int dns_finish(struct __sk_buff *skb)
 	if (!matched)
 		return finish_udp_nat(skb, mvm_meta);
 
-	dns_track_allowed_query(skb, state, matched->flags, qname_hash);
+	dns_track_allowed_query(skb, state, matched, qname_hash);
 	return finish_udp_nat(skb, mvm_meta);
 }
 
@@ -1053,10 +1167,8 @@ int from_cube(struct __sk_buff *skb)
 {
 	__u32 daddr, ifindex, dst_ifindex;
 	__u64 tcp_ret;
-	struct bpf_sock_tuple tuple = {};
 	struct mvm_port mvm_port = {};
 	struct mvm_meta *mvm_meta;
-	struct bpf_sock *sk;
 	struct ethhdr *l2;
 	struct iphdr *l3;
 	struct tcphdr *l4;
@@ -1141,23 +1253,6 @@ int from_cube(struct __sk_buff *skb)
 		}
 	}
 
-	if (proto == IPPROTO_TCP &&
-	    __pull_headers(skb, &l2, &l3, &l4) &&
-	    (l4->dest == bpf_htons(80) || l4->dest == bpf_htons(443))) {
-		tuple.ipv4.saddr = mvm_meta->ip;
-		tuple.ipv4.daddr = daddr;
-		tuple.ipv4.sport = l4->source;
-		tuple.ipv4.dport = l4->dest;
-		sk = bpf_skc_lookup_tcp(skb, &tuple, sizeof(tuple.ipv4), BPF_F_CURRENT_NETNS, 0);
-		if (sk) {
-			__u32 state = sk->state;
-
-			bpf_sk_release(sk);
-			if (state == BPF_TCP_ESTABLISHED)
-				return bpf_redirect(cubegw0_ifindex, BPF_F_INGRESS);
-		}
-	}
-
 	ret = pull_headers(skb, &l2, &l3);
 	if (ret != TC_ACT_OK)
 		return ret;
@@ -1167,23 +1262,32 @@ int from_cube(struct __sk_buff *skb)
 
 	if (l3->daddr == nodenic_ip) {
 		/* This branch bypasses do_*_nat() and therefore the policy
-		 * check inside create_nat_session(). Enforce policy inline.
-		 * TCP callers get an RST to match the guest-visible behavior
-		 * of the do_tcp_nat() path; UDP/ICMP silently drop.
+		 * check applied there. Enforce the unified egress policy
+		 * inline. TCP callers get an RST to match the guest-visible
+		 * behavior of the do_tcp_nat() path; UDP/ICMP silently drop.
+		 * dport is 0 because the original check was port-agnostic.
 		 */
-		if (!session_policy_allowed(ifindex, daddr)) {
+		switch (classify_egress_flow(ifindex, daddr, 0)) {
+		case FLOW_REJECT:
 			if (proto == IPPROTO_TCP)
 				return tcp_reply_reset(skb, ifindex);
 			return TC_ACT_SHOT;
+		default:
+			return bpf_redirect(cubegw0_ifindex, BPF_F_INGRESS);
 		}
-		return bpf_redirect(cubegw0_ifindex, BPF_F_INGRESS);
 	}
 
 	if (proto == IPPROTO_TCP) {
-		if (!__pull_headers(skb, &l2, &l3, &l4))
-			return TC_ACT_SHOT;
-		if (should_redirect_to_l7_proxy(ifindex, daddr, l4))
-			return bpf_redirect(cubegw0_ifindex, BPF_F_INGRESS);
+		tcp_ret = do_tcp_nat(skb, mvm_meta);
+		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_OK)
+			return bpf_redirect(TCP_NAT_IFINDEX(tcp_ret), egress_redirect_flags);
+		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_PROBE)
+			return bpf_redirect(TCP_NAT_IFINDEX(tcp_ret), 0);
+		if (TCP_NAT_STATUS(tcp_ret) == TCP_L7PROXY_OK)
+			return bpf_redirect(TCP_NAT_IFINDEX(tcp_ret), BPF_F_INGRESS);
+		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_RESET)
+			return tcp_reply_reset(skb, ifindex);
+		return TC_ACT_SHOT;
 	}
 
 	mac_result = prepare_egress_l2(skb, l2, daddr);
@@ -1191,14 +1295,6 @@ int from_cube(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	if (mac_result == EGRESS_MAC_PROBE)
 		return bpf_redirect(nodenic_ifindex, 0);
-
-	if (proto == IPPROTO_TCP) {
-		tcp_ret = do_tcp_nat(skb, mvm_meta);
-		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_OK)
-			return bpf_redirect(TCP_NAT_IFINDEX(tcp_ret), egress_redirect_flags);
-		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_RESET)
-			return tcp_reply_reset(skb, ifindex);
-	}
 
 	if (proto == IPPROTO_UDP) {
 		if (!__pull_headers_udp(skb, &l2, &l3, &udp))

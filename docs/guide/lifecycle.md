@@ -112,28 +112,22 @@ sandbox.kill()
 
 Both `kill()` and `DELETE /sandboxes/{sandboxID}` can delete sandboxes in the `running` or `paused` state.
 
-When deleting a `paused` sandbox, CubeSandbox first restores its runtime, then runs the standard destroy flow. This can take longer than deleting a `running` sandbox. The API remains synchronous: it returns `204 No Content` only after the sandbox and its resources have been cleaned up.
+When deleting a `paused` sandbox, CubeSandbox does **not** resume or wake the MicroVM. It removes the paused tombstone, deletes the pause snapshot (catalog / CoW), and clears control-plane pause metadata. Plugin-volume refcounts were already adjusted at Pause time, so delete does not re-attach volumes only to tear them down again.
 
-The internal restore is only used to complete deletion. It is not treated as a separate resume operation:
+The API remains synchronous: it returns `204 No Content` only after cleanup finishes. This path is not a resume:
 
 - It does not emit a `sandbox.resumed` lifecycle event.
 - It does not reset the idle timeout.
-- It does not change the synchronous DELETE semantics.
-
-To leave enough time for the destroy flow, the internal restore runs for at most five seconds. If the request does not have enough time left for restore and destroy, CubeSandbox returns a retryable error before starting destroy.
+- It does not require node capacity admission (there is no restore-before-delete).
 
 When deleting a `paused` sandbox, the following responses are possible:
 
-- **`204 No Content`**: The sandbox and its resources have been cleaned up.
-- **`409 Conflict`**: The restore did not pass the resource admission check, for example because the node lacks capacity or the sandbox is missing required resource metadata. The sandbox remains `paused`. Follow the diagnostic in the response: retry after capacity is released, or repair or recreate the sandbox when resource metadata is missing.
-- **`503 Service Unavailable` + `Retry-After: 2`**: The sandbox is entering the paused state, or another lifecycle operation has not completed. Wait at least two seconds before retrying.
-- **`503 Service Unavailable` + `Retry-After: 5`**: The pre-delete restore or state preparation did not finish within its time budget, or too little time remains to start the destroy flow. Check the sandbox state and wait at least five seconds before retrying.
+- **`204 No Content`**: The sandbox, pause snapshot, and related resources have been cleaned up.
+- **`503 Service Unavailable` + `Retry-After: 2`**: The sandbox is entering the paused state, or another lifecycle operation (pause / resume / delete) holds the sandbox lock. Wait at least two seconds before retrying.
 
 `Retry-After` is in seconds and tells the client when to retry. It does not mean that CubeSandbox continues deletion or starts a background retry.
 
 Existing `404 Not Found`, `408 Request Timeout`, and `running` sandbox delete behavior remain unchanged.
-
-If the restore reports an error but the runtime confirms that the sandbox is already `running`, CubeSandbox continues with destroy. A later destroy failure uses the existing destroy error semantics; the sandbox is not paused again and no background cleanup task is created.
 
 ## Explicit Pause / Resume
 
@@ -145,6 +139,17 @@ sandbox.run_code("print('back!')")    # carry on as if never paused
 ```
 
 See [`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/pause.py) for a full demo.
+
+### CubeProxy cache after Resume
+
+Resume recreates the guest NIC / host ports and rewrites the Redis sandbox proxy map. CubeMaster then best-effort purges CubeProxy `local_cache` via `POST /admin/backend_cache/delete` so traffic does not keep routing to the pre-pause IP (same-node 504).
+
+For that purge to succeed, **CubeMaster and CubeProxy must share the same admin token**:
+
+- CubeMaster: `cubeproxy.admin_token` (sent as `X-Cube-Admin-Token`)
+- CubeProxy: `$cube_admin_token` in `nginx.conf` (see `CubeProxy/lua/admin_phase.lua`)
+
+If the token is set on only one side, or the values differ, cache purge returns **403**, Redis is still correct, but CubeProxy may serve a stale cached backend until the entry expires. Align the token in deploy / Helm values whenever Resume is used.
 
 ## Platform-managed Auto-pause / Auto-resume
 
@@ -217,7 +222,7 @@ The repository ships with **no cluster-wide idle timeout** (`default_timeout_ins
 - **Pause fidelity**: CPU registers, process memory, TCP state (with no external peer), and filesystem mutations all survive the snapshot. Outbound sockets the sandbox itself opened are dropped on pause and must be reopened by the application after resume.
 - **Cluster coordination**: auto-pause is driven by the `cube-lifecycle-manager` service that runs on the control node. It consumes lifecycle events CubeMaster publishes via Redis stream, discovers every live CubeProxy replica through a Redis-backed registration table, and broadcasts state to each of them. Cross-replica races are resolved by Redis `SETNX` state locks so the same sandbox is never paused or resumed twice concurrently.
 - **Failure mode**: when an auto-resume RPC fails, CubeProxy returns `503 + Retry-After` to the client immediately rather than hanging on a long timeout. When the sandbox has already been killed (`killing` / `killed`) the proxy returns `410 Gone` instead, telling SDK clients to stop retrying.
-- **Diagnostics**: `docker logs cube-lifecycle-manager` (control node) is the runtime log for the auto-pause coordinator. Look for `create event applied`, `auto-paused sandbox`, `auto-resumed sandbox`, `timeout-killed sandbox`. Each CubeProxy replica additionally exposes `GET http://<node-ip>:8082/admin/healthz` reporting `heartbeat_last_pushed_ms` (the last time it announced itself to the manager).
+- **Diagnostics**: `docker logs cube-lifecycle-manager` (control node) is the runtime log for the auto-pause coordinator. Look for `create event applied`, `auto-paused sandbox`, `auto-resumed sandbox`, `timeout-killed sandbox`. Each CubeProxy replica additionally exposes `GET http://<node-ip>:8082/admin/healthz` reporting `heartbeat_last_pushed_ms` (the last time it announced itself to the manager). The admin port defaults to `8082`; override it with `CUBE_PROXY_ADMIN_PORT` when that port is already in use on the host (CubeProxy uses host networking).
 
 ### Paused Resource Release & Scheduling Quota
 

@@ -16,13 +16,25 @@ ROOT = Path(__file__).resolve().parents[3]
 SDK_COMPAT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(SDK_COMPAT_ROOT))
 
-from adapters import create_adapter  # noqa: E402
+from adapters import create_adapter_with_capacity_retry  # noqa: E402
+from framework.capabilities import (  # noqa: E402
+    CODE_INTERPRETER,
+    capabilities_for_backend,
+)
 from framework.cleanup import safe_kill  # noqa: E402
-from framework.capabilities import CODE_INTERPRETER, capabilities_for_backend  # noqa: E402
 from framework.config import SdkE2EConfig  # noqa: E402
+from framework.parallel import (  # noqa: E402
+    apply_worker_count,
+    current_worker_count,
+    wants_parallel,
+)
 from framework.preflight import run_preflight  # noqa: E402
 from framework.reporting import JsonlReporter  # noqa: E402
-from framework.trace import TraceCollector, reset_current_trace, set_current_trace  # noqa: E402
+from framework.trace import (  # noqa: E402
+    TraceCollector,
+    reset_current_trace,
+    set_current_trace,
+)
 
 
 def _load_dotenv(path: Path) -> None:
@@ -81,7 +93,62 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
-def pytest_configure(config: pytest.Config) -> None:
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_cmdline_main(config: pytest.Config):
+    # Live SDK E2E is I/O-bound: every test provisions its own per-UUID sandbox
+    # and the create path already jitters capacity retries so parallel workers
+    # do not retry in lockstep. Parallelism is opt-in via ``SDK_E2E_WORKERS`` (or
+    # ``-n``): the default stays serial so ``pytest --run-e2e`` does not overload
+    # the local CubeAPI/scheduler sharing the box. Runs without --run-e2e only
+    # collect hermetic ``framework`` unit tests, which stay serial.
+    #
+    # This ``tryfirst`` cmdline_main hookwrapper must run before xdist reads
+    # ``numprocesses`` to decide whether to activate. That ordering is a pluggy
+    # convention (conftest plugins sort before the ``xdist`` plugin), not a
+    # documented contract, and the failure mode would be silent -- a fallback to
+    # serial with no speedup -- so log the resolved plan below to make an ignored
+    # ``SDK_E2E_WORKERS`` visible instead of invisible.
+    try:
+        workers = apply_worker_count(config)
+    except ValueError as exc:
+        raise pytest.UsageError(str(exc)) from None
+    # xdist re-runs this hook in every worker (with ``numprocesses=None``); only
+    # the controller decides and reports the plan. Logging from workers would spam
+    # a "serial" line per worker for a run that is in fact parallel, so guard it.
+    if config.getoption("--run-e2e") and not os.environ.get("PYTEST_XDIST_WORKER"):
+        if workers is not None:
+            # We set numprocesses ourselves from SDK_E2E_WORKERS.
+            _setup_log(f"SDK E2E parallelism: xdist numprocesses={workers} (from SDK_E2E_WORKERS)")
+            config._sdk_e2e_expected_parallel = workers
+        else:
+            # apply_worker_count returned None either because we stayed serial or
+            # because an explicit -n/--numprocesses already won. Read the option
+            # back so the log reflects the plan xdist will actually run, rather
+            # than mislabeling ``-n 2`` as "serial".
+            explicit = getattr(config.option, "numprocesses", None)
+            if explicit:
+                _setup_log(f"SDK E2E parallelism: xdist numprocesses={explicit} (explicit -n)")
+                config._sdk_e2e_expected_parallel = explicit
+            elif not config.pluginmanager.hasplugin("xdist") and wants_parallel(os.environ.get("SDK_E2E_WORKERS")):
+                # SDK_E2E_WORKERS asked for parallelism but xdist is unavailable
+                # (not installed or ``-p no:xdist``): apply_worker_count returned
+                # None for that reason, not because the env var was unset. Say so
+                # rather than implying the env var was silently ignored.
+                _setup_log(
+                    "WARNING: SDK_E2E_WORKERS is set but pytest-xdist is unavailable "
+                    "(not installed or disabled via -p no:xdist); running SERIALLY."
+                )
+            else:
+                _setup_log("SDK E2E parallelism: serial (SDK_E2E_WORKERS unset/disabled, no -n)")
+    yield
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_configure(config: pytest.Config):
+    # ``pytest_configure`` is a historic hook and cannot be a hookwrapper, so use
+    # ``trylast`` to run after xdist's own ``pytest_configure`` (which registers
+    # the ``dsession`` controller when distribution mode activates). That lets
+    # ``_verify_xdist_activated`` observe the real activation state below.
     for marker in (
         "sdk_compat: SDK compatibility E2E tests",
         "requires_capability(name): current SDK backend must support this capability",
@@ -93,6 +160,32 @@ def pytest_configure(config: pytest.Config) -> None:
         "auth: CUBE_API_KEY simple-key authentication control-plane tests",
     ):
         config.addinivalue_line("markers", marker)
+    _verify_xdist_activated(config)
+
+
+def _verify_xdist_activated(config: pytest.Config) -> None:
+    # Runs after xdist's own ``pytest_configure`` (this hook is ``trylast``). When ``-n``/
+    # ``SDK_E2E_WORKERS`` asks for parallelism, ``pytest_cmdline_main`` above sets
+    # ``numprocesses`` and logs the plan, but that only *requests* xdist -- actual
+    # activation depends on xdist's ``pytest_cmdline_main`` running before its
+    # ``pytest_configure`` reads the plan, an ordering that is a pluggy convention,
+    # not a contract. If it ever breaks, ``numprocesses`` is set but no workers
+    # start and the run silently falls back to serial. xdist registers its
+    # ``dsession`` controller plugin only when distribution mode truly activated,
+    # so treat its presence as the authoritative signal and warn loudly on a
+    # mismatch rather than letting the earlier "numprocesses=N" log lie.
+    expected = getattr(config, "_sdk_e2e_expected_parallel", None)
+    if not expected:
+        return
+    if config.getoption("collectonly", False):
+        return
+    if not config.pluginmanager.hasplugin("dsession"):
+        _setup_log(
+            "WARNING: requested SDK E2E parallelism "
+            f"(numprocesses={expected}) but xdist did not activate "
+            "(no 'dsession' controller registered); the run will execute SERIALLY. "
+            "Check pytest-xdist is installed and not disabled (-p no:xdist)."
+        )
 
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
@@ -119,7 +212,11 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     if not config.getoption("--run-e2e"):
         skip = pytest.mark.skip(reason="live SDK E2E disabled; pass --run-e2e to run")
         for item in items:
-            item.add_marker(skip)
+            # Only ``framework`` tests are hermetic pure-logic unit tests that run
+            # on every gate. Everything else (including any test that forgets a
+            # marker) is treated as live and skipped, so the gate stays hermetic.
+            if not item.get_closest_marker("framework"):
+                item.add_marker(skip)
         return
     if volume_skip is None:
         return
@@ -183,15 +280,19 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         reporter.close()
 
 
-@pytest.fixture(scope="session")
-def sdk_e2e_config(pytestconfig: pytest.Config) -> SdkE2EConfig:
-    cfg = _config_from_pytest(pytestconfig)
+def _prepare_runtime_env(cfg: SdkE2EConfig) -> None:
     if cfg.cube_python_sdk_path:
         sys.path.insert(0, cfg.cube_python_sdk_path)
     else:
         sys.path.insert(0, str(ROOT / "sdk" / "python"))
     for key, value in cfg.env().items():
         os.environ.setdefault(key, value)
+
+
+@pytest.fixture(scope="session")
+def sdk_e2e_config(pytestconfig: pytest.Config) -> SdkE2EConfig:
+    cfg = _config_from_pytest(pytestconfig)
+    _prepare_runtime_env(cfg)
     if pytestconfig.getoption("--run-e2e"):
         _log_effective_environment(cfg)
     return cfg
@@ -225,6 +326,10 @@ def sdk_e2e_trace(request: pytest.FixtureRequest, pytestconfig: pytest.Config) -
 
 @pytest.fixture(scope="session", autouse=True)
 def sdk_e2e_preflight(pytestconfig: pytest.Config, sdk_e2e_config: SdkE2EConfig, sdk_e2e_reporter: JsonlReporter):
+    # Under pytest-xdist "session" scope is per worker process, so preflight runs
+    # once per worker (a health check + template sweep). That is intentional: each
+    # worker must fail fast on its own before provisioning sandboxes, and the read
+    # traffic is negligible next to the sandbox creates the workers go on to issue.
     if not pytestconfig.getoption("--run-e2e"):
         return
     try:
@@ -239,6 +344,15 @@ def sdk_e2e_preflight(pytestconfig: pytest.Config, sdk_e2e_config: SdkE2EConfig,
             ),
         )
     except RuntimeError as exc:
+        # ``pytest.exit`` from inside an xdist worker does not stop the session
+        # cleanly: it terminates the worker process mid-test, which the
+        # controller surfaces as an opaque "worker 'gwN' crashed while running
+        # ..." instead of the real preflight diagnostic. Under xdist raise the
+        # error so this session-scoped autouse fixture fails every test at setup
+        # with the actual message; keep the clean early ``pytest.exit`` for the
+        # serial run where it stops the whole session as intended.
+        if os.environ.get("PYTEST_XDIST_WORKER"):
+            raise
         pytest.exit(str(exc), returncode=2)
 
 
@@ -302,11 +416,21 @@ def sdk_sandbox(
                 f"template_id={node_config.cube_template_id} "
                 f"nodeid={request.node.nodeid}"
             )
-            adapter = create_adapter(
+
+            def _log_capacity_retry(attempt: int, delay: float, exc: BaseException) -> None:
+                _setup_log(
+                    f"scheduler out of capacity creating sandbox "
+                    f"backend={sdk_backend} nodeid={request.node.nodeid}; "
+                    f"retry {attempt}/{node_config.create_capacity_retries} "
+                    f"in {delay:.1f}s: {exc}"
+                )
+
+            adapter = create_adapter_with_capacity_retry(
                 sdk_backend,
                 node_config,
                 metadata=metadata,
                 create_options=create_options,
+                on_retry=_log_capacity_retry,
             )
         except ImportError as exc:
             pytest.skip(str(exc))
@@ -337,10 +461,34 @@ def sdk_sandbox(
 
 
 def _config_from_pytest(config: pytest.Config) -> SdkE2EConfig:
-    return SdkE2EConfig.from_env(
+    cfg = SdkE2EConfig.from_env(
         backends=config.getoption("--sdk-e2e-backends"),
         cube_api_url=config.getoption("--cube-api-url"),
         cube_template_id=config.getoption("--cube-template-id"),
+    )
+    return _scale_capacity_retries_for_xdist(cfg)
+
+
+def _scale_capacity_retries_for_xdist(cfg: SdkE2EConfig) -> SdkE2EConfig:
+    """Widen the sandbox-create capacity-retry patience by the xdist worker count.
+
+    The single co-located node has a finite concurrent-sandbox ceiling. Serially
+    (``-n1``) a create never sees ``130597: no more resource``; with N workers all
+    creating at once, some creates transiently bounce off the ceiling and only
+    succeed once a peer's sandbox is torn down. The retry budget is what absorbs
+    that, so a run at high ``-n`` reaches the SAME per-test outcome as ``-n1`` —
+    just after a few retries. Fixed defaults sized for serial runs can be
+    exhausted under load and turn a would-pass test into a spurious ERROR, so
+    scale both the attempt count and the sleep budget with the worker count.
+    Serial runs (factor 1) keep the configured values unchanged.
+    """
+    workers = current_worker_count()
+    if workers <= 1:
+        return cfg
+    return replace(
+        cfg,
+        create_capacity_retries=cfg.create_capacity_retries * workers,
+        create_capacity_budget=cfg.create_capacity_budget * workers,
     )
 
 

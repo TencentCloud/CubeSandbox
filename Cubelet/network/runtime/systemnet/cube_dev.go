@@ -43,7 +43,7 @@ func GetOrCreateCubeDev(ip net.IP, mask, mtu int, macAddr string) (*CubeDev, err
 		if !ok {
 			return nil, fmt.Errorf("%s is not dummy", cubeDevName)
 		}
-		addrs, err := netlink.AddrList(dummy, netlink.FAMILY_V4)
+		addrs, err := netlinkAddrList(dummy, netlink.FAMILY_V4)
 		if err != nil {
 			return nil, err
 		}

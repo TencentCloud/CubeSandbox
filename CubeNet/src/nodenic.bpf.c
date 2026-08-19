@@ -111,24 +111,6 @@ static int tcp_nat_proxy(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr 
 	return bpf_redirect(mvm_port->ifindex, 0);
 }
 
-static __always_inline struct nat_session *lookup_session(const struct session_key *ikey)
-{
-	struct ingress_session *isess;
-	struct session_key key = {};
-
-	isess = bpf_map_lookup_elem(&ingress_sessions, ikey);
-	if (!isess)
-		return NULL;
-
-	key.src_ip = isess->vm_ip;
-	key.dst_ip = ikey->src_ip;
-	key.src_port = isess->vm_port;
-	key.dst_port = ikey->src_port;
-	key.version = isess->version;
-	key.protocol = ikey->protocol;
-	return bpf_map_lookup_elem(&egress_sessions, &key);
-}
-
 static int tcp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr *l3, struct tcphdr *l4)
 {
 	__u32 old_daddr, new_daddr, tcp_csum_off;
@@ -495,7 +477,7 @@ int dns_handle_response_prog(struct __sk_buff *skb)
 	if (!rstate)
 		return TC_ACT_OK;
 
-	/* Learn A records into allow_out_v2 before reverse NAT. */
+	/* Learn A records into allow_out_v3 before reverse NAT. */
 	dns_handle_response(skb, rstate->dns_off, rstate->ifindex,
 			    rstate->server_ip, rstate->source_port);
 

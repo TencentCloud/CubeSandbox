@@ -17,7 +17,8 @@
 - `install-compute.sh`：目标机计算节点安装入口。
 - `down.sh`：停止 one-click 安装的服务与依赖。
 - `smoke.sh`：执行基础健康检查。
-- `env.example`：构建机和目标机共用的环境变量模板。
+- `env.example`：目标机环境变量模板。
+- `build.env.example`：构建机环境变量模板，用于组装发布包。
 - `lib/common.sh`：公共 shell 函数。
 - `scripts/one-click/`：systemd 托管部署安装后使用的校验与维护辅助脚本。
 - `terraform/tencentcloud/`：在腾讯云上部署**集群版** CubeSandbox 的 Terraform 部署器（TKE 控制面 + CVM 计算节点）。`create.sh` 为入口，`destroy.sh` 负责整体销毁。这些文件同时位于发布包顶层和 `sandbox-package` 内（见“腾讯云集群部署”）。
@@ -56,7 +57,14 @@ export ONE_CLICK_CUBE_KERNEL_VMLINUX=/abs/path/to/vmlinux
 export ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX=/abs/path/to/vmlinux-pvm
 ```
 
-运行时仍然使用 `cube-kernel-scf/vmlinux`。默认情况下该文件是普通 guest kernel；如果目标机安装时设置 `CUBE_PVM_ENABLE=1`，安装脚本会把包内的 `vmlinux-pvm` 覆盖安装为 `cube-kernel-scf/vmlinux`。
+内核多版本库存（内容寻址）：
+
+- 安装时对 `vmlinux-bm` / `vmlinux-pvm` **分别**按内容 sha256 入库到 `component_versions/cube-kernel-scf/sha256-<12位>/`
+- 每个库存目录内：`vmlinux-bm|pvm`、`vmlinux` 软链、`variant`（`bm`/`pvm`）、`version`（`sha256:<64位>`，供 shim 比对）
+- `KERNEL_TAG` / `PVM_KERNEL_TAG` **不作为**库存目录名；`release-manifest` 的 `kernel.version` / `pvm_version` 同样记录内容短哈希
+- Ensure 从 Master identity 中的 digest 映射到上述短 key
+
+运行时仍然使用 `cube-kernel-scf/vmlinux`。包内保留 `vmlinux-bm`，`vmlinux` 为软链：默认指向 `vmlinux-bm`；目标机安装时设 `CUBE_PVM_ENABLE=1` 则指向 `vmlinux-pvm`。
 
 guest image 不再依赖本地 zip。默认在构建 one-click 发布包时基于 `deploy/guest-image/Dockerfile` 本地生成。常用覆盖参数如下：
 
@@ -75,11 +83,11 @@ export ONE_CLICK_GUEST_IMAGE_TAR=/abs/path/to/cube-guest-image-amd64.tar.gz
 
 ## 构建发布包
 
-建议先复制环境模板：
+建议先复制构建环境模板：
 
 ```bash
 cd deploy/one-click
-cp env.example .env
+cp build.env.example build.env
 ```
 
 推荐在宿主机的仓库根目录执行：
@@ -152,6 +160,7 @@ one-click 不会在目标机额外创建一层全局 `configs/`，而是直接�
   - `cubelet_conf.default_timeout_insec`: cluster default sandbox idle TTL when the client omits `timeout`; unset or `<= 0` means **no cluster-wide idle timeout** (shipped default `-1`). See [lifecycle — 设计与运维要点](../../docs/zh/guide/lifecycle.md#集群默认空闲超时default_timeout_insec)。
 - `Cubelet/config/` -> `Cubelet/config/`
 - `Cubelet/dynamicconf/` -> `Cubelet/dynamicconf/`
+- `CUBE_L7_MARK_{HTTP,HTTPS,MASK}`（环境变量） -> `/etc/cubeegress/l7-marks.conf` —— L7 egress 的 skb->mark 值，由 Cubelet 内置 network runtime 的 eBPF 数据面（负责打标）与 `cube-proxy-iptables-init` 的 TPROXY 规则（负责匹配）共用。两侧读取同一文件并各自校验（`HTTP != HTTPS`、取值只能落在 mask 位内）。默认值与覆盖方式见 `env.example`。
 - `CubeAPI/bin/cube-api` -> `/usr/local/services/cubetoolbox/CubeAPI/bin/cube-api`
 - `support/` -> `/usr/local/services/cubetoolbox/support/`
 - `cubeproxy/` -> `/usr/local/services/cubetoolbox/cubeproxy/`

@@ -17,7 +17,8 @@ This directory is used to build and deliver the single-machine one-click release
 - `install-compute.sh`: Entry point for installing a compute node on the target machine.
 - `down.sh`: Stops the services and dependencies installed by one-click.
 - `smoke.sh`: Runs basic health checks.
-- `env.example`: Shared environment variable template for both the build machine and the target machine.
+- `env.example`: Target-machine environment variable template.
+- `build.env.example`: Build-machine environment variable template for assembling the release bundle.
 - `lib/common.sh`: Common shell utility functions.
 - `scripts/one-click/`: Validation and maintenance helpers used by the systemd-managed deployment after installation.
 - `terraform/tencentcloud/`: Terraform deployer for a **clustered** CubeSandbox on Tencent Cloud (TKE control plane + CVM compute nodes). `create.sh` is the entry point; `destroy.sh` tears everything down. These files are shipped both at the release-bundle top level and inside `sandbox-package` (see "Tencent Cloud Cluster Deployment").
@@ -56,7 +57,14 @@ export ONE_CLICK_CUBE_KERNEL_VMLINUX=/abs/path/to/vmlinux
 export ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX=/abs/path/to/vmlinux-pvm
 ```
 
-The installed runtime still uses `cube-kernel-scf/vmlinux` as the active guest kernel path. The package stores the ordinary guest kernel as `vmlinux-bm` and keeps `vmlinux` as a symlink: by default it points to `vmlinux-bm`; if the target machine sets `CUBE_PVM_ENABLE=1` during installation, the installer points it to `vmlinux-pvm`.
+Kernel multi-version inventory (content-addressed):
+
+- On install, `vmlinux-bm` / `vmlinux-pvm` are each inventoried under `component_versions/cube-kernel-scf/sha256-<12 hex>/`
+- Each inventory dir contains: `vmlinux-bm|pvm`, `vmlinux` symlink, `variant` (`bm`/`pvm`), and `version` (`sha256:<64 hex>` for shim)
+- `KERNEL_TAG` / `PVM_KERNEL_TAG` are **not** inventory directory names; `release-manifest` `kernel.version` / `pvm_version` also record content short hashes
+- Ensure maps the digest from Master identity onto that short key
+
+The installed runtime still uses `cube-kernel-scf/vmlinux` as the active guest kernel path. The package stores `vmlinux-bm` and keeps `vmlinux` as a symlink: by default it points to `vmlinux-bm`; if the target machine sets `CUBE_PVM_ENABLE=1` during installation, the installer points it to `vmlinux-pvm`.
 
 The guest image no longer depends on a local zip file. By default it is generated locally from `deploy/guest-image/Dockerfile` during the one-click release package build. Common override parameters:
 
@@ -75,11 +83,11 @@ export ONE_CLICK_GUEST_IMAGE_TAR=/abs/path/to/cube-guest-image-amd64.tar.gz
 
 ## Building the Release Package
 
-It is recommended to copy the environment template first:
+It is recommended to copy the build environment template first:
 
 ```bash
 cd deploy/one-click
-cp env.example .env
+cp build.env.example build.env
 ```
 
 Run the following from the repository root on the host machine (recommended):
@@ -163,6 +171,7 @@ One-click does not create an extra global `configs/` layer on the target machine
   - `cubelet_conf.default_timeout_insec`: cluster default sandbox idle TTL when the client omits `timeout`; unset or `<= 0` means **no cluster-wide idle timeout** (shipped default `-1`). See [lifecycle — Operational Notes](../../docs/guide/lifecycle.md#cluster-default-idle-timeout-default_timeout_insec).
 - `Cubelet/config/` → `Cubelet/config/`
 - `Cubelet/dynamicconf/` → `Cubelet/dynamicconf/`
+- `CUBE_L7_MARK_{HTTP,HTTPS,MASK}` (env) → `/etc/cubeegress/l7-marks.conf` — the L7 egress skb->mark values shared by Cubelet's embedded network runtime eBPF dataplane (which stamps `skb->mark`) and the `cube-proxy-iptables-init` TPROXY rules (which match it). Both read the same file, and both validate the values (`HTTP != HTTPS`, bits confined to the mask). See `env.example` for the shipped defaults and how to override them.
 - `CubeAPI/bin/cube-api` → `/usr/local/services/cubetoolbox/CubeAPI/bin/cube-api`
 - `support/` → `/usr/local/services/cubetoolbox/support/`
 - `cubeproxy/` → `/usr/local/services/cubetoolbox/cubeproxy/`

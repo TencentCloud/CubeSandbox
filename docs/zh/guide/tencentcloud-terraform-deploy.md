@@ -70,6 +70,8 @@
 两者独立配置，默认均为 `2`，但职责完全不同。
 :::
 
+计算节点数量、机型、Cubelet 上报频率、quota、label 和模板副本可用性都会影响 CubeMaster 调度。完整配置说明和新增计算节点后的 `cubemastercli tpl redo` 操作见[CubeMaster 调度器配置参考](./cubemaster-scheduler-config.md)。
+
 ## 默认部署模式
 
 与 `env.example` / `variables.tf` 一致，**默认是公网镜像 + 单副本控制面 + 无 CFS 的 POC 配置**：

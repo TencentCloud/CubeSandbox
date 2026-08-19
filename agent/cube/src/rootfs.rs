@@ -75,7 +75,7 @@ pub struct PropagationContainerUmount {
 }
 
 pub fn exit_proc_failed(msg: String) {
-    println!("{}", msg);
+    eprintln!("{}", msg);
     std::process::exit(1);
 }
 

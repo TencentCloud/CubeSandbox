@@ -19,7 +19,7 @@ import warnings
 
 import pytest
 
-from adapters import create_adapter
+from adapters import create_adapter, create_adapter_with_capacity_retry
 from framework.capabilities import HOST_MOUNT, capabilities_for_backend
 from framework.cleanup import safe_kill
 
@@ -164,7 +164,7 @@ def provision_host_dirs(backend: str, config, subpaths: list[str]) -> None:
         [mount_option(ALLOWED_PREFIX, _PROVISION_MOUNT, read_only=False)]
     )
     targets = " ".join(f"{_PROVISION_MOUNT}/{r}" for r in rel)
-    adapter = create_adapter(
+    adapter = create_adapter_with_capacity_retry(
         backend, config, metadata={"test_role": "host_mount_provision", **metadata}
     )
     try:

@@ -1,5 +1,10 @@
 name: Release One-Click Bundle
 
+# Cube product release (v*). Heavy assets (kernel / guest-image) are NOT built
+# here: they are downloaded from dedicated Releases pinned in
+# deploy/release-assets.yaml. This workflow builds product components,
+# cube-agent, docker images, and one-click bundles.
+
 on:
   push:
     tags:
@@ -16,18 +21,8 @@ permissions:
 
 env:
   BUILDER_IMAGE: ghcr.io/tencentcloud/cubesandbox-builder:ubuntu2004
-  VMLINUX_CACHE_PATH: kernel-cache/vmlinux
-  VMLINUX_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/vmlinux
-  KERNEL_TAG: 6.6.119-49.6
-  PVM_KERNEL_TAG: 6.6.69-1.2.cubesandbox
-  PVM_VMLINUX_CACHE_PATH: kernel-cache/vmlinux-pvm
-  PVM_VMLINUX_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/vmlinux-pvm
 
 jobs:
-  # Fail fast when a hard-coded component image tag in the bundle (terraform
-  # defaults, cube-egress launcher, env examples, ...) does not match the git
-  # tag being released. Gating the whole pipeline on this guarantees the
-  # published bundle never references an image tag that was not built/pushed.
   verify_versions:
     name: Verify release image tags
     runs-on: ubuntu-latest
@@ -38,97 +33,124 @@ jobs:
       - name: Check hard-coded image tags match the release tag
         run: scripts/bump-image.sh --check "${GITHUB_REF_NAME}"
 
-  build_pvm_guest_vmlinux:
-    name: Build PVM guest vmlinux for release (x86_64)
-    runs-on: arc-runner-set-16c32g-containerd
+  resolve_pins:
+    name: Resolve pinned asset Releases
+    runs-on: ubuntu-latest
     needs: verify_versions
-    container:
-      image: ubuntu:24.04
-
+    outputs:
+      kernel_bm_amd64_release_tag: ${{ steps.pins.outputs.kernel_bm_amd64_release_tag }}
+      kernel_bm_arm64_release_tag: ${{ steps.pins.outputs.kernel_bm_arm64_release_tag }}
+      kernel_pvm_release_tag: ${{ steps.pins.outputs.kernel_pvm_release_tag }}
+      guest_image_release_tag: ${{ steps.pins.outputs.guest_image_release_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install verification tools
-        run: |
-          apt-get update
-          apt-get install -y file sudo build-essential git bc bison flex \
-            libelf-dev libssl-dev libncurses-dev dwarves cpio kmod \
-            fakeroot rsync dpkg-dev debhelper wget curl ca-certificates python3
+      - name: Install PyYAML
+        run: pip install pyyaml
 
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
+      - name: Read deploy/release-assets.yaml
+        id: pins
+        run: scripts/read-release-assets.sh --export
 
-      - name: Compute PVM vmlinux cache metadata
-        id: pvm_vmlinux_metadata
+      - name: Fail fast if pinned Releases are missing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KERNEL_BM_AMD64_RELEASE_TAG: ${{ steps.pins.outputs.kernel_bm_amd64_release_tag }}
+          KERNEL_BM_ARM64_RELEASE_TAG: ${{ steps.pins.outputs.kernel_bm_arm64_release_tag }}
+          KERNEL_PVM_RELEASE_TAG: ${{ steps.pins.outputs.kernel_pvm_release_tag }}
+          GUEST_IMAGE_RELEASE_TAG: ${{ steps.pins.outputs.guest_image_release_tag }}
         run: |
-          source_hash="$(
-            sha256sum \
-              deploy/pvm/build-pvm-guest-vmlinux.sh \
-              deploy/pvm/common.sh \
-              deploy/pvm/configs/pvm_guest \
-              | sha256sum \
-              | awk '{print $1}'
+          set -euo pipefail
+          echo "kernel_bm_amd64 pin: ${KERNEL_BM_AMD64_RELEASE_TAG}"
+          echo "kernel_bm_arm64 pin: ${KERNEL_BM_ARM64_RELEASE_TAG}"
+          echo "kernel_pvm pin: ${KERNEL_PVM_RELEASE_TAG}"
+          echo "guest_image pin: ${GUEST_IMAGE_RELEASE_TAG}"
+
+          require_assets() {
+            local tag="$1"
+            shift
+            local assets
+            if ! assets="$(
+              gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json assets \
+                --jq '.assets[].name' 2>/dev/null
+            )"; then
+              echo "pinned Release not found: ${tag}" >&2
+              echo "publish it first: git tag ${tag} && git push origin ${tag}" >&2
+              exit 1
+            fi
+            local name
+            for name in "$@"; do
+              if ! grep -Fxq "${name}" <<<"${assets}"; then
+                echo "missing required asset ${name} on ${tag}" >&2
+                echo "assets on ${tag}:" >&2
+                printf '%s\n' "${assets}" >&2
+                exit 1
+              fi
+            done
+          }
+
+          require_assets "${KERNEL_BM_AMD64_RELEASE_TAG}" vmlinux-amd64 kernel-metadata.json
+          require_assets "${KERNEL_BM_ARM64_RELEASE_TAG}" vmlinux-arm64 kernel-metadata.json
+          require_assets "${KERNEL_PVM_RELEASE_TAG}" vmlinux-pvm-amd64 kernel-metadata.json
+          require_assets "${GUEST_IMAGE_RELEASE_TAG}" \
+            cube-guest-image-amd64.tar.gz \
+            cube-guest-image-arm64.tar.gz
+
+          # Validate metadata fields (dedupe when pins share a Release).
+          declare -A meta_checked=()
+          validate_metadata() {
+            local tag="$1"
+            [[ -n "${meta_checked[${tag}]:-}" ]] && return 0
+            local dir
+            dir="$(mktemp -d)"
+            gh release download "${tag}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --pattern "kernel-metadata.json" \
+              --dir "${dir}"
+            scripts/read-kernel-metadata.sh "${dir}/kernel-metadata.json" >/dev/null
+            rm -rf "${dir}"
+            meta_checked["${tag}"]=1
+            echo "validated kernel-metadata.json on ${tag}"
+          }
+          validate_metadata "${KERNEL_BM_AMD64_RELEASE_TAG}"
+          validate_metadata "${KERNEL_BM_ARM64_RELEASE_TAG}"
+          validate_metadata "${KERNEL_PVM_RELEASE_TAG}"
+
+          pvm_assets="$(
+            gh release view "${KERNEL_PVM_RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets \
+              --jq '.assets[].name'
           )"
-          echo "source_hash=${source_hash}" >> "${GITHUB_OUTPUT}"
-          echo "cache_key=vmlinux-pvm-${PVM_KERNEL_TAG}-x86_64-${source_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
-          echo "artifact_name=vmlinux-pvm-${PVM_KERNEL_TAG}-x86_64-${source_hash}" >> "${GITHUB_OUTPUT}"
-
-      - name: Restore cached PVM vmlinux
-        id: restore_pvm_vmlinux
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ env.PVM_VMLINUX_CACHE_PATH }}
-          key: ${{ steps.pvm_vmlinux_metadata.outputs.cache_key }}
-
-      - name: Build PVM guest vmlinux
-        if: steps.restore_pvm_vmlinux.outputs.cache-hit != 'true'
-        run: |
-          WORK_DIR="${GITHUB_WORKSPACE}/pvm-guest-build" \
-          OUTPUT_DIR="${GITHUB_WORKSPACE}/pvm-guest-build/output" \
-            bash deploy/pvm/build-pvm-guest-vmlinux.sh
-          install -D -m 0644 \
-            "${GITHUB_WORKSPACE}/pvm-guest-build/output/vmlinux" \
-            "${PVM_VMLINUX_CACHE_PATH}"
-
-      - name: Verify PVM vmlinux
-        run: |
-          test -f "${PVM_VMLINUX_CACHE_PATH}"
-          file "${PVM_VMLINUX_CACHE_PATH}"
-
-      - name: Save PVM vmlinux cache
-        if: steps.restore_pvm_vmlinux.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ env.PVM_VMLINUX_CACHE_PATH }}
-          key: ${{ steps.pvm_vmlinux_metadata.outputs.cache_key }}
-
-      - name: Stage PVM vmlinux artifact payload
-        run: |
-          rm -rf pvm-vmlinux-artifact
-          install -D -m 0644 "${PVM_VMLINUX_CACHE_PATH}" pvm-vmlinux-artifact/vmlinux-pvm
-
-      - name: Upload PVM vmlinux artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.pvm_vmlinux_metadata.outputs.artifact_name }}
-          path: pvm-vmlinux-artifact/vmlinux-pvm
-          if-no-files-found: error
-          retention-days: 14
+          has_rpm=0
+          has_deb=0
+          while IFS= read -r name; do
+            [[ -n "${name}" ]] || continue
+            case "${name}" in
+              kernel-*opencloudos9.cubesandbox.pvm.host*.x86_64.rpm)
+                case "${name}" in
+                  *headers*) ;;
+                  *) has_rpm=1 ;;
+                esac
+                ;;
+              linux-image-*opencloudos9.cubesandbox.pvm.host*_amd64.deb)
+                case "${name}" in
+                  *-dbg_*) ;;
+                  *) has_deb=1 ;;
+                esac
+                ;;
+            esac
+          done <<<"${pvm_assets}"
+          if [[ "${has_rpm}" -ne 1 || "${has_deb}" -ne 1 ]]; then
+            echo "missing main PVM host rpm/deb on ${KERNEL_PVM_RELEASE_TAG}" >&2
+            printf '%s\n' "${pvm_assets}" >&2
+            exit 1
+          fi
+          echo "pinned Releases exist and contain required assets"
 
   ensure_release:
     name: Ensure GitHub Release exists
     runs-on: ubuntu-latest
     needs: verify_versions
-
     steps:
       - name: Ensure GitHub Release exists
         env:
@@ -140,304 +162,9 @@ jobs:
               --title "${GITHUB_REF_NAME}" \
               --notes "Automated one-click release bundle."
 
-  # Upload guest kernel Release assets before release-docker-images so cube-kernel
-  # can download vmlinux-{amd64,arm64} (and amd64 PVM) without waiting for the
-  # one-click bundle job. amd64 and arm64 are separate jobs so arm64 does not
-  # wait on build_pvm_guest_vmlinux (PVM guest is x86_64-only).
-  publish_kernel_amd64:
-    name: Publish kernel Release assets (amd64)
-    runs-on: ubuntu-latest
-    needs:
-      - ensure_release
-      - build_pvm_guest_vmlinux
-    env:
-      KERNEL_ARCH: x86_64
-      BUNDLE_ARCH: amd64
-      VMLINUX_CACHE_PATH: kernel-cache/x86_64/vmlinux
-      VMLINUX_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/vmlinux
-      PVM_VMLINUX_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/vmlinux-pvm
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Compute vmlinux cache metadata
-        id: vmlinux_metadata
-        run: |
-          config_hash="$(sha256sum "configs/kernel-oc9.${KERNEL_ARCH}.config" | awk '{print $1}')"
-          echo "cache_key=vmlinux-opencloudos-${KERNEL_TAG}-${KERNEL_ARCH}-${config_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
-          echo "artifact_name=vmlinux-opencloudos-${KERNEL_TAG}-${KERNEL_ARCH}-${config_hash}" >> "${GITHUB_OUTPUT}"
-
-      - name: Prepare vmlinux directories
-        run: |
-          mkdir -p "$(dirname "${VMLINUX_CACHE_PATH}")"
-          mkdir -p "$(dirname "${VMLINUX_RELEASE_PATH}")"
-          mkdir -p "$(dirname "${PVM_VMLINUX_RELEASE_PATH}")"
-
-      - name: Restore cached vmlinux
-        id: restore_vmlinux
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ env.VMLINUX_CACHE_PATH }}
-          key: ${{ steps.vmlinux_metadata.outputs.cache_key }}
-
-      - name: Stage cached vmlinux
-        if: steps.restore_vmlinux.outputs.cache-hit == 'true'
-        run: install -D -m 0644 "${VMLINUX_CACHE_PATH}" "${VMLINUX_RELEASE_PATH}"
-
-      - name: Resolve vmlinux artifact fallback
-        id: resolve_vmlinux_artifact
-        if: steps.restore_vmlinux.outputs.cache-hit != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VMLINUX_ARTIFACT_NAME: ${{ steps.vmlinux_metadata.outputs.artifact_name }}
-        run: |
-          get_latest_artifact_url() {
-            gh api --paginate --slurp "/repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" | \
-              python3 -c 'import json, sys; artifact_name = sys.argv[1]; artifacts = [artifact for page in json.load(sys.stdin) for artifact in page.get("artifacts", []) if artifact.get("name") == artifact_name and not artifact.get("expired", False)]; artifacts.sort(key=lambda artifact: artifact.get("created_at", ""), reverse=True); print(artifacts[0].get("archive_download_url", "") if artifacts else "")' "${VMLINUX_ARTIFACT_NAME}"
-          }
-
-          artifact_url="$(get_latest_artifact_url)"
-          if [[ -z "${artifact_url}" ]]; then
-            echo "vmlinux cache miss and no unexpired artifact found, triggering build-vmlinux workflow..." >&2
-            trigger_epoch="$(date -u +%s)"
-            expected_title="Build vmlinux ${KERNEL_ARCH}"
-            gh workflow run build-vmlinux.yml --ref "${GITHUB_REF_NAME}" -f kernel_arch="${KERNEL_ARCH}"
-
-            run_id=""
-            for attempt in {1..30}; do
-              runs_json="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/workflows/build-vmlinux.yml/runs?event=workflow_dispatch&per_page=20")"
-              run_id="$(
-                python3 -c 'import json, sys; from datetime import datetime, timezone; head_sha = sys.argv[1]; trigger_epoch = int(sys.argv[2]); expected_title = sys.argv[3]; data = json.load(sys.stdin); runs = []; [runs.append(run) for run in data.get("workflow_runs", []) if run.get("head_sha") == head_sha and run.get("display_title") == expected_title and run.get("created_at") and int(datetime.strptime(run["created_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()) >= trigger_epoch]; runs.sort(key=lambda run: run.get("created_at", ""), reverse=True); print(runs[0].get("id", "") if runs else "")' "${GITHUB_SHA}" "${trigger_epoch}" "${expected_title}" <<<"${runs_json}"
-              )"
-              if [[ -n "${run_id}" ]]; then
-                break
-              fi
-              sleep 10
-            done
-
-            if [[ -z "${run_id}" ]]; then
-              echo "failed to locate the dispatched build-vmlinux workflow run for ${KERNEL_ARCH}" >&2
-              exit 1
-            fi
-
-            gh run watch "${run_id}" --interval 20 --exit-status
-            artifact_url="$(get_latest_artifact_url)"
-          fi
-
-          if [[ -z "${artifact_url}" ]]; then
-            echo "vmlinux artifact is still unavailable after build-vmlinux completed" >&2
-            exit 1
-          fi
-
-          echo "artifact_url=${artifact_url}" >> "${GITHUB_OUTPUT}"
-
-      - name: Download vmlinux artifact fallback
-        if: steps.restore_vmlinux.outputs.cache-hit != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          rm -rf downloaded-vmlinux
-          mkdir -p downloaded-vmlinux/extracted
-          curl -fsSL \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "${{ steps.resolve_vmlinux_artifact.outputs.artifact_url }}" \
-            -o downloaded-vmlinux/artifact.zip
-          unzip -q downloaded-vmlinux/artifact.zip -d downloaded-vmlinux/extracted
-          install -D -m 0644 \
-            downloaded-vmlinux/extracted/vmlinux \
-            "${VMLINUX_CACHE_PATH}"
-          install -D -m 0644 \
-            "${VMLINUX_CACHE_PATH}" \
-            "${VMLINUX_RELEASE_PATH}"
-
-      - name: Refresh vmlinux cache from artifact
-        if: steps.restore_vmlinux.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ env.VMLINUX_CACHE_PATH }}
-          key: ${{ steps.vmlinux_metadata.outputs.cache_key }}
-
-      - name: Compute PVM vmlinux cache metadata
-        id: pvm_vmlinux_metadata
-        run: |
-          source_hash="$(
-            sha256sum \
-              deploy/pvm/build-pvm-guest-vmlinux.sh \
-              deploy/pvm/common.sh \
-              deploy/pvm/configs/pvm_guest \
-              | sha256sum \
-              | awk '{print $1}'
-          )"
-          echo "artifact_name=vmlinux-pvm-${PVM_KERNEL_TAG}-x86_64-${source_hash}" >> "${GITHUB_OUTPUT}"
-
-      - name: Download PVM vmlinux artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ steps.pvm_vmlinux_metadata.outputs.artifact_name }}
-          path: downloaded-pvm-vmlinux
-
-      - name: Stage kernel Release assets
-        run: |
-          test -f "${VMLINUX_RELEASE_PATH}"
-          rm -rf kernel-release-assets
-          mkdir -p kernel-release-assets
-          install -D -m 0644 \
-            "${VMLINUX_RELEASE_PATH}" \
-            "kernel-release-assets/vmlinux-${BUNDLE_ARCH}"
-          install -D -m 0644 \
-            downloaded-pvm-vmlinux/vmlinux-pvm \
-            "${PVM_VMLINUX_RELEASE_PATH}"
-          install -D -m 0644 \
-            "${PVM_VMLINUX_RELEASE_PATH}" \
-            "kernel-release-assets/vmlinux-pvm-${BUNDLE_ARCH}"
-
-      - name: Upload kernel assets to Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release upload "${GITHUB_REF_NAME}" \
-            "kernel-release-assets/vmlinux-${BUNDLE_ARCH}" \
-            "kernel-release-assets/vmlinux-pvm-${BUNDLE_ARCH}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --clobber
-
-  publish_kernel_arm64:
-    name: Publish kernel Release assets (arm64)
-    runs-on: ubuntu-latest
-    needs:
-      - ensure_release
-    env:
-      KERNEL_ARCH: aarch64
-      BUNDLE_ARCH: arm64
-      VMLINUX_CACHE_PATH: kernel-cache/aarch64/vmlinux
-      VMLINUX_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/vmlinux
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Compute vmlinux cache metadata
-        id: vmlinux_metadata
-        run: |
-          config_hash="$(sha256sum "configs/kernel-oc9.${KERNEL_ARCH}.config" | awk '{print $1}')"
-          echo "cache_key=vmlinux-opencloudos-${KERNEL_TAG}-${KERNEL_ARCH}-${config_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
-          echo "artifact_name=vmlinux-opencloudos-${KERNEL_TAG}-${KERNEL_ARCH}-${config_hash}" >> "${GITHUB_OUTPUT}"
-
-      - name: Prepare vmlinux directories
-        run: |
-          mkdir -p "$(dirname "${VMLINUX_CACHE_PATH}")"
-          mkdir -p "$(dirname "${VMLINUX_RELEASE_PATH}")"
-
-      - name: Restore cached vmlinux
-        id: restore_vmlinux
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ env.VMLINUX_CACHE_PATH }}
-          key: ${{ steps.vmlinux_metadata.outputs.cache_key }}
-
-      - name: Stage cached vmlinux
-        if: steps.restore_vmlinux.outputs.cache-hit == 'true'
-        run: install -D -m 0644 "${VMLINUX_CACHE_PATH}" "${VMLINUX_RELEASE_PATH}"
-
-      - name: Resolve vmlinux artifact fallback
-        id: resolve_vmlinux_artifact
-        if: steps.restore_vmlinux.outputs.cache-hit != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VMLINUX_ARTIFACT_NAME: ${{ steps.vmlinux_metadata.outputs.artifact_name }}
-        run: |
-          get_latest_artifact_url() {
-            gh api --paginate --slurp "/repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" | \
-              python3 -c 'import json, sys; artifact_name = sys.argv[1]; artifacts = [artifact for page in json.load(sys.stdin) for artifact in page.get("artifacts", []) if artifact.get("name") == artifact_name and not artifact.get("expired", False)]; artifacts.sort(key=lambda artifact: artifact.get("created_at", ""), reverse=True); print(artifacts[0].get("archive_download_url", "") if artifacts else "")' "${VMLINUX_ARTIFACT_NAME}"
-          }
-
-          artifact_url="$(get_latest_artifact_url)"
-          if [[ -z "${artifact_url}" ]]; then
-            echo "vmlinux cache miss and no unexpired artifact found, triggering build-vmlinux workflow..." >&2
-            trigger_epoch="$(date -u +%s)"
-            expected_title="Build vmlinux ${KERNEL_ARCH}"
-            gh workflow run build-vmlinux.yml --ref "${GITHUB_REF_NAME}" -f kernel_arch="${KERNEL_ARCH}"
-
-            run_id=""
-            for attempt in {1..30}; do
-              runs_json="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/workflows/build-vmlinux.yml/runs?event=workflow_dispatch&per_page=20")"
-              run_id="$(
-                python3 -c 'import json, sys; from datetime import datetime, timezone; head_sha = sys.argv[1]; trigger_epoch = int(sys.argv[2]); expected_title = sys.argv[3]; data = json.load(sys.stdin); runs = []; [runs.append(run) for run in data.get("workflow_runs", []) if run.get("head_sha") == head_sha and run.get("display_title") == expected_title and run.get("created_at") and int(datetime.strptime(run["created_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()) >= trigger_epoch]; runs.sort(key=lambda run: run.get("created_at", ""), reverse=True); print(runs[0].get("id", "") if runs else "")' "${GITHUB_SHA}" "${trigger_epoch}" "${expected_title}" <<<"${runs_json}"
-              )"
-              if [[ -n "${run_id}" ]]; then
-                break
-              fi
-              sleep 10
-            done
-
-            if [[ -z "${run_id}" ]]; then
-              echo "failed to locate the dispatched build-vmlinux workflow run for ${KERNEL_ARCH}" >&2
-              exit 1
-            fi
-
-            gh run watch "${run_id}" --interval 20 --exit-status
-            artifact_url="$(get_latest_artifact_url)"
-          fi
-
-          if [[ -z "${artifact_url}" ]]; then
-            echo "vmlinux artifact is still unavailable after build-vmlinux completed" >&2
-            exit 1
-          fi
-
-          echo "artifact_url=${artifact_url}" >> "${GITHUB_OUTPUT}"
-
-      - name: Download vmlinux artifact fallback
-        if: steps.restore_vmlinux.outputs.cache-hit != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          rm -rf downloaded-vmlinux
-          mkdir -p downloaded-vmlinux/extracted
-          curl -fsSL \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "${{ steps.resolve_vmlinux_artifact.outputs.artifact_url }}" \
-            -o downloaded-vmlinux/artifact.zip
-          unzip -q downloaded-vmlinux/artifact.zip -d downloaded-vmlinux/extracted
-          install -D -m 0644 \
-            downloaded-vmlinux/extracted/vmlinux \
-            "${VMLINUX_CACHE_PATH}"
-          install -D -m 0644 \
-            "${VMLINUX_CACHE_PATH}" \
-            "${VMLINUX_RELEASE_PATH}"
-
-      - name: Refresh vmlinux cache from artifact
-        if: steps.restore_vmlinux.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ env.VMLINUX_CACHE_PATH }}
-          key: ${{ steps.vmlinux_metadata.outputs.cache_key }}
-
-      - name: Stage kernel Release assets
-        run: |
-          test -f "${VMLINUX_RELEASE_PATH}"
-          rm -rf kernel-release-assets
-          mkdir -p kernel-release-assets
-          install -D -m 0644 \
-            "${VMLINUX_RELEASE_PATH}" \
-            "kernel-release-assets/vmlinux-${BUNDLE_ARCH}"
-
-      - name: Upload kernel assets to Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release upload "${GITHUB_REF_NAME}" \
-            "kernel-release-assets/vmlinux-${BUNDLE_ARCH}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --clobber
-
-  # Upload per-arch guest rootfs Release assets before release-docker-images so
-  # cube-guest can download cube-guest-image-{amd64,arm64}.tar.gz without waiting
-  # for the full one-click bundle job.
-  publish_guest_release_assets:
-    name: Publish guest Release assets (${{ matrix.arch }})
+          # Product-side agent assets still live on the v* Release.
+  publish_agent_release_assets:
+    name: Publish agent Release assets (${{ matrix.arch }})
     strategy:
       fail-fast: false
       matrix:
@@ -456,18 +183,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: false
-          swap-storage: true
-
-      - name: Install guest image tools
+      - name: Install agent image tools
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends e2fsprogs
@@ -482,7 +198,7 @@ jobs:
       - name: Pull builder image
         run: docker pull "${BUILDER_IMAGE}"
 
-      - name: Build cube-init and cube-agent in builder
+      - name: Build cube-agent in builder
         env:
           CUBE_VERSION: ${{ github.ref_name }}
           CUBE_COMMIT: ${{ github.sha }}
@@ -492,65 +208,52 @@ jobs:
           export CUBE_VERSION CUBE_COMMIT CUBE_BUILD_TIME
           make builder-run \
             BUILDER_IMAGE="${BUILDER_IMAGE}" \
-            BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/guest-init && make -j1 && make BINDIR=/workspace/_output/bin install && cd /workspace/agent && make -j1 && make BINDIR=/workspace/_output/bin install'
-          test -x _output/bin/cube-init
+            BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/agent && make -j1 && make BINDIR=/workspace/_output/bin install'
           test -x _output/bin/cube-agent
 
-      - name: Build guest image and cube-agent.ext4 artifacts
+      - name: Build cube-agent.ext4 artifact
         env:
           CUBE_VERSION: ${{ github.ref_name }}
           CUBE_COMMIT: ${{ github.sha }}
-          ONE_CLICK_CUBE_INIT_BIN: ${{ github.workspace }}/_output/bin/cube-init
           ONE_CLICK_CUBE_AGENT_BIN: ${{ github.workspace }}/_output/bin/cube-agent
-          OUTPUT_DIR: ${{ github.workspace }}/guest-release-assets/cube-image
-          AGENT_OUTPUT_DIR: ${{ github.workspace }}/guest-release-assets/cube-agent
+          AGENT_OUTPUT_DIR: ${{ github.workspace }}/agent-release-assets/cube-agent
         run: |
           set -euo pipefail
           CUBE_BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           export CUBE_VERSION CUBE_COMMIT CUBE_BUILD_TIME
-          mkdir -p "${OUTPUT_DIR}" "${AGENT_OUTPUT_DIR}"
-          ./deploy/one-click/build-guest-image.sh
-          test -f "${OUTPUT_DIR}/cube-guest-image-cpu.img"
-          test -f "${OUTPUT_DIR}/version"
-          test ! -f "${OUTPUT_DIR}/agent-version"
+          mkdir -p "${AGENT_OUTPUT_DIR}"
           OUTPUT_DIR="${AGENT_OUTPUT_DIR}" ./deploy/one-click/build-agent-ext4.sh
           test -f "${AGENT_OUTPUT_DIR}/cube-agent.ext4"
           test -f "${AGENT_OUTPUT_DIR}/version"
 
-      - name: Pack guest and agent Release assets
+      - name: Pack agent Release asset
         run: |
           set -euo pipefail
-          tar -C guest-release-assets/cube-image -czf \
-            "guest-release-assets/cube-guest-image-${BUNDLE_ARCH}.tar.gz" .
-          tar -C guest-release-assets/cube-agent -czf \
-            "guest-release-assets/cube-agent-${BUNDLE_ARCH}.tar.gz" .
-          ls -lh "guest-release-assets/cube-guest-image-${BUNDLE_ARCH}.tar.gz" \
-            "guest-release-assets/cube-agent-${BUNDLE_ARCH}.tar.gz"
+          tar -C agent-release-assets/cube-agent -czf \
+            "agent-release-assets/cube-agent-${BUNDLE_ARCH}.tar.gz" .
+          ls -lh "agent-release-assets/cube-agent-${BUNDLE_ARCH}.tar.gz"
 
-      - name: Upload guest and agent assets to Release
+      - name: Upload agent asset to Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "${GITHUB_REF_NAME}" \
-            "guest-release-assets/cube-guest-image-${BUNDLE_ARCH}.tar.gz" \
-            "guest-release-assets/cube-agent-${BUNDLE_ARCH}.tar.gz" \
+            "agent-release-assets/cube-agent-${BUNDLE_ARCH}.tar.gz" \
             --repo "${GITHUB_REPOSITORY}" \
             --clobber
 
-  # Build one-click bundles after per-arch kernel + guest assets are on the
-  # Release. Guest image is reused from cube-guest-image-*.tar.gz (same asset
-  # as release_docker_images / cube-guest) via ONE_CLICK_GUEST_IMAGE_TAR so
-  # the one-click package stays consistent with published docker images.
-  # publish_one_click_* still waits for release_docker_images (incl. CN sync).
   build_one_click_amd64:
     name: Build one-click bundle (amd64)
     runs-on: ubuntu-latest
     needs:
-      - publish_kernel_amd64
-      - publish_guest_release_assets
+      - resolve_pins
+      - publish_agent_release_assets
     env:
       VMLINUX_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/vmlinux
       PVM_VMLINUX_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/vmlinux-pvm
+      KERNEL_BM_AMD64_RELEASE_TAG: ${{ needs.resolve_pins.outputs.kernel_bm_amd64_release_tag }}
+      KERNEL_PVM_RELEASE_TAG: ${{ needs.resolve_pins.outputs.kernel_pvm_release_tag }}
+      GUEST_IMAGE_RELEASE_TAG: ${{ needs.resolve_pins.outputs.guest_image_release_tag }}
 
     steps:
       - name: Checkout
@@ -569,18 +272,34 @@ jobs:
           docker-images: false
           swap-storage: true
 
-      - name: Download kernel assets from Release
+      - name: Download kernel assets from pinned Releases
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           rm -rf downloaded-kernel
-          mkdir -p downloaded-kernel
-          gh release download "${GITHUB_REF_NAME}" \
+          mkdir -p downloaded-kernel/bm-meta downloaded-kernel/pvm-meta
+          gh release download "${KERNEL_BM_AMD64_RELEASE_TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
             --pattern "vmlinux-amd64" \
+            --dir downloaded-kernel
+          gh release download "${KERNEL_BM_AMD64_RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "kernel-metadata.json" \
+            --dir downloaded-kernel/bm-meta
+          gh release download "${KERNEL_PVM_RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
             --pattern "vmlinux-pvm-amd64" \
             --dir downloaded-kernel
+          if [[ "${KERNEL_PVM_RELEASE_TAG}" == "${KERNEL_BM_AMD64_RELEASE_TAG}" ]]; then
+            cp downloaded-kernel/bm-meta/kernel-metadata.json \
+              downloaded-kernel/pvm-meta/kernel-metadata.json
+          else
+            gh release download "${KERNEL_PVM_RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --pattern "kernel-metadata.json" \
+              --dir downloaded-kernel/pvm-meta
+          fi
           install -D -m 0644 \
             downloaded-kernel/vmlinux-amd64 \
             "${VMLINUX_RELEASE_PATH}"
@@ -592,14 +311,24 @@ jobs:
           file "${VMLINUX_RELEASE_PATH}"
           file "${PVM_VMLINUX_RELEASE_PATH}"
 
-      - name: Download guest image from Release
+          eval "$(scripts/read-kernel-metadata.sh downloaded-kernel/bm-meta/kernel-metadata.json)"
+          KERNEL_TAG="${KERNEL_BM_SOURCE_TAG}"
+          eval "$(scripts/read-kernel-metadata.sh downloaded-kernel/pvm-meta/kernel-metadata.json)"
+          PVM_KERNEL_TAG="${KERNEL_PVM_SOURCE_TAG}"
+          {
+            echo "KERNEL_TAG=${KERNEL_TAG}"
+            echo "PVM_KERNEL_TAG=${PVM_KERNEL_TAG}"
+          } >> "${GITHUB_ENV}"
+          echo "KERNEL_TAG=${KERNEL_TAG} PVM_KERNEL_TAG=${PVM_KERNEL_TAG}"
+
+      - name: Download guest image from pinned Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           rm -rf downloaded-guest
           mkdir -p downloaded-guest
-          gh release download "${GITHUB_REF_NAME}" \
+          gh release download "${GUEST_IMAGE_RELEASE_TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
             --pattern "cube-guest-image-amd64.tar.gz" \
             --dir downloaded-guest
@@ -618,7 +347,6 @@ jobs:
 
       - name: Build one-click release bundle
         env:
-          # Propagates to Go ldflags, Rust build.rs, web build, and guest-image version.
           CUBE_VERSION: ${{ github.ref_name }}
           CUBE_COMMIT: ${{ github.sha }}
           ONE_CLICK_DIST_VERSION: ${{ github.ref_name }}-amd64
@@ -661,10 +389,13 @@ jobs:
     name: Build one-click bundle (arm64)
     runs-on: ubuntu-24.04-arm
     needs:
-      - publish_kernel_arm64
-      - publish_guest_release_assets
+      - resolve_pins
+      - publish_agent_release_assets
     env:
       VMLINUX_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/vmlinux
+      KERNEL_BM_ARM64_RELEASE_TAG: ${{ needs.resolve_pins.outputs.kernel_bm_arm64_release_tag }}
+      KERNEL_PVM_RELEASE_TAG: ${{ needs.resolve_pins.outputs.kernel_pvm_release_tag }}
+      GUEST_IMAGE_RELEASE_TAG: ${{ needs.resolve_pins.outputs.guest_image_release_tag }}
 
     steps:
       - name: Checkout
@@ -683,31 +414,54 @@ jobs:
           docker-images: false
           swap-storage: true
 
-      - name: Download kernel assets from Release
+      - name: Download kernel assets from pinned Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           rm -rf downloaded-kernel
-          mkdir -p downloaded-kernel
-          gh release download "${GITHUB_REF_NAME}" \
+          mkdir -p downloaded-kernel/bm-meta downloaded-kernel/pvm-meta
+          gh release download "${KERNEL_BM_ARM64_RELEASE_TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
             --pattern "vmlinux-arm64" \
             --dir downloaded-kernel
+          gh release download "${KERNEL_BM_ARM64_RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "kernel-metadata.json" \
+            --dir downloaded-kernel/bm-meta
+          if [[ "${KERNEL_PVM_RELEASE_TAG}" == "${KERNEL_BM_ARM64_RELEASE_TAG}" ]]; then
+            cp downloaded-kernel/bm-meta/kernel-metadata.json \
+              downloaded-kernel/pvm-meta/kernel-metadata.json
+          else
+            gh release download "${KERNEL_PVM_RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --pattern "kernel-metadata.json" \
+              --dir downloaded-kernel/pvm-meta
+          fi
           install -D -m 0644 \
             downloaded-kernel/vmlinux-arm64 \
             "${VMLINUX_RELEASE_PATH}"
           test -f "${VMLINUX_RELEASE_PATH}"
           file "${VMLINUX_RELEASE_PATH}"
 
-      - name: Download guest image from Release
+          eval "$(scripts/read-kernel-metadata.sh downloaded-kernel/bm-meta/kernel-metadata.json)"
+          KERNEL_TAG="${KERNEL_BM_SOURCE_TAG}"
+          eval "$(scripts/read-kernel-metadata.sh downloaded-kernel/pvm-meta/kernel-metadata.json)"
+          PVM_KERNEL_TAG="${KERNEL_PVM_SOURCE_TAG}"
+          {
+            echo "KERNEL_TAG=${KERNEL_TAG}"
+            echo "PVM_KERNEL_TAG=${PVM_KERNEL_TAG}"
+          } >> "${GITHUB_ENV}"
+          echo "KERNEL_TAG=${KERNEL_TAG} PVM_KERNEL_TAG=${PVM_KERNEL_TAG}"
+
+      - name: Download guest image from pinned Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           rm -rf downloaded-guest
           mkdir -p downloaded-guest
-          gh release download "${GITHUB_REF_NAME}" \
+          gh release download "${GUEST_IMAGE_RELEASE_TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
             --pattern "cube-guest-image-arm64.tar.gz" \
             --dir downloaded-guest
@@ -726,7 +480,6 @@ jobs:
 
       - name: Build one-click release bundle
         env:
-          # Propagates to Go ldflags, Rust build.rs, web build, and guest-image version.
           CUBE_VERSION: ${{ github.ref_name }}
           CUBE_COMMIT: ${{ github.sha }}
           ONE_CLICK_DIST_VERSION: ${{ github.ref_name }}-arm64
@@ -765,85 +518,12 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --clobber
 
-  # Wait for parallel release-pvm-host-kernel.yml to upload host RPM/DEB onto
-  # this tag's Release before cube-pvm-host-bootstrap is built.
-  wait_pvm_host_release_assets:
-    name: Wait for PVM host Release packages
-    runs-on: ubuntu-latest
-    needs:
-      - ensure_release
-    steps:
-      - name: Wait until PVM host rpm/deb exist on Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          release_tag="${GITHUB_REF_NAME}"
-          deadline=$((SECONDS + 10800))  # 3 hours
-          echo "waiting for PVM host packages on Release ${release_tag} (timeout 3h)"
-
-          has_main_packages() {
-            local assets
-            assets="$(
-              gh release view "${release_tag}" --repo "${GITHUB_REPOSITORY}" --json assets \
-                --jq '[.assets[].name] | join("\n")' 2>/dev/null || true
-            )"
-            [[ -n "${assets}" ]] || return 1
-
-            local has_rpm=0 has_deb=0
-            while IFS= read -r name; do
-              [[ -n "${name}" ]] || continue
-              case "${name}" in
-                kernel-*opencloudos9.cubesandbox.pvm.host*.x86_64.rpm)
-                  case "${name}" in
-                    *headers*) ;;
-                    *) has_rpm=1 ;;
-                  esac
-                  ;;
-                linux-image-*opencloudos9.cubesandbox.pvm.host*_amd64.deb)
-                  case "${name}" in
-                    *-dbg_*) ;;
-                    *) has_deb=1 ;;
-                  esac
-                  ;;
-              esac
-            done <<<"${assets}"
-
-            [[ "${has_rpm}" -eq 1 && "${has_deb}" -eq 1 ]]
-          }
-
-          while true; do
-            if has_main_packages; then
-              echo "PVM host main RPM and DEB are present on Release ${release_tag}"
-              gh release view "${release_tag}" --repo "${GITHUB_REPOSITORY}" --json assets \
-                --jq '.assets[].name' | grep -E 'pvm\.host' || true
-              exit 0
-            fi
-            if (( SECONDS >= deadline )); then
-              echo "timed out waiting for PVM host packages on Release ${release_tag}" >&2
-              echo "expected parallel workflow release-pvm-host-kernel.yml to upload them" >&2
-              gh release view "${release_tag}" --repo "${GITHUB_REPOSITORY}" --json assets \
-                --jq '.assets[].name' >&2 || true
-              exit 1
-            fi
-            echo "packages not ready yet; sleeping 60s..."
-            sleep 60
-          done
-
-  # Build and push release component images via the reusable workflow (also
-  # runnable manually from Actions → Release Docker Images). publish_one_click_*
-  # wait on this job (including CN sync) before uploading bundles to Release.
-  # Kernel BM+PVM, guest rootfs, and PVM host packages must already be on the
-  # Release so cube-kernel / cube-guest / cube-pvm-host-bootstrap can download
-  # them during the image build.
   release_docker_images:
     name: Build release docker images
     needs:
       - verify_versions
-      - publish_kernel_amd64
-      - publish_kernel_arm64
-      - publish_guest_release_assets
-      - wait_pvm_host_release_assets
+      - resolve_pins
+      - publish_agent_release_assets
     if: github.repository == 'TencentCloud/CubeSandbox'
     permissions:
       contents: read
@@ -852,8 +532,8 @@ jobs:
     with:
       image_tag: ${{ github.ref_name }}
       components: all
-      # Assets were just uploaded for this tag; do not fall back to latest.
-      allow_kernel_release_fallback: false
-      allow_guest_release_fallback: false
-      allow_pvm_host_release_fallback: false
+      kernel_bm_amd64_release_tag: ${{ needs.resolve_pins.outputs.kernel_bm_amd64_release_tag }}
+      kernel_bm_arm64_release_tag: ${{ needs.resolve_pins.outputs.kernel_bm_arm64_release_tag }}
+      kernel_pvm_release_tag: ${{ needs.resolve_pins.outputs.kernel_pvm_release_tag }}
+      guest_image_release_tag: ${{ needs.resolve_pins.outputs.guest_image_release_tag }}
     secrets: inherit

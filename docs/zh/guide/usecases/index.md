@@ -49,3 +49,4 @@ lang: zh-CN
 | 标题 | 作者         | 日期 | 标签 |
 | --- |------------| --- | --- |
 | [trpc-agent-go：基于 Cube Sandbox 的安全代码执行后端](./trpc-agent-go.md) | joeyczheng | 2026-06-03 | agent, code-execution, e2b, golang |
+| [Lexmount AI：把浏览器运行时搬进 Agent 沙箱](./lexmount-browser-agent.md) | 熊袖璋 | 2026-08-13 | agent, browser, browser-runtime, production |

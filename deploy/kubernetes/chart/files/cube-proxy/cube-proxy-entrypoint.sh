@@ -96,21 +96,6 @@ sidecar_addr="${CUBE_SIDECAR_LISTEN_ADDR:-}"
   exit 1
 }
 
-# proxy_registry.lua publishes from ngx.timer, which has no nginx resolver.
-# Resolve a hostname REDIS target to an IP up-front when possible.
-# Sentinel mode does not need a fixed registry host.
-if [ -z "${CUBE_PROXY_REGISTRY_REDIS_MASTER_NAME:-}" ] && [ -n "${CUBE_PROXY_REGISTRY_REDIS_HOST:-}" ]; then
-  case "${CUBE_PROXY_REGISTRY_REDIS_HOST}" in
-    *[!0-9.]* )
-      resolved="$(getent ahostsv4 "${CUBE_PROXY_REGISTRY_REDIS_HOST}" 2>/dev/null | awk 'NR==1 {print $1}')"
-      if [ -n "${resolved}" ]; then
-        CUBE_PROXY_REGISTRY_REDIS_HOST="${resolved}"
-        export CUBE_PROXY_REGISTRY_REDIS_HOST
-      fi
-      ;;
-  esac
-fi
-
 cat > /usr/local/openresty/nginx/conf/global/global.conf <<EOF
 resolver ${resolver_addrs} valid=${CUBE_PROXY_RESOLVER_VALID} ipv6=${CUBE_PROXY_RESOLVER_IPV6};
 resolver_timeout ${CUBE_PROXY_RESOLVER_TIMEOUT};

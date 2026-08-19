@@ -8,7 +8,10 @@ on:
   release:
     types: [published, edited]
   workflow_run:
-    workflows: ["Release One-Click Bundle"]
+    workflows:
+      - "Release One-Click Bundle"
+      - "Release Kernel Assets"
+      - "Release Guest Image"
     types: [completed]
   workflow_dispatch:
     inputs:
@@ -97,8 +100,16 @@ jobs:
               should_sync_assets="true"
               ;;
             workflow_run)
-              if [[ "${WORKFLOW_RUN_NAME}" != "Release One-Click Bundle" ]]; then
-                echo "Skipping unrelated workflow_run: ${WORKFLOW_RUN_NAME}"
+              case "${WORKFLOW_RUN_NAME}" in
+                "Release One-Click Bundle"|"Release Kernel Assets"|"Release Guest Image")
+                  ;;
+                *)
+                  echo "Skipping unrelated workflow_run: ${WORKFLOW_RUN_NAME}"
+                  WORKFLOW_RUN_CONCLUSION="skipped"
+                  ;;
+              esac
+              if [[ "${WORKFLOW_RUN_CONCLUSION}" == "skipped" ]]; then
+                :
               elif [[ "${WORKFLOW_RUN_CONCLUSION}" != "success" ]]; then
                 echo "Skipping unsuccessful workflow_run: ${WORKFLOW_RUN_CONCLUSION}"
               else

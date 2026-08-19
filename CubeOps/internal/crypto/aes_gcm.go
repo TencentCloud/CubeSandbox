@@ -9,6 +9,7 @@
 package crypto
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -17,10 +18,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"strings"
 	"sync"
 
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -170,10 +171,7 @@ func DecryptOrPassthrough(stored string) string {
 		if len(prefix) > 16 {
 			prefix = prefix[:16] + "..."
 		}
-		slog.Warn("DecryptOrPassthrough: decrypt failed; returning empty string",
-			"err", err,
-			"stored_prefix", prefix,
-		)
+		logging.G(context.Background()).Warnf("DecryptOrPassthrough: decrypt failed; returning empty string: err=%q stored_prefix=%s", err.Error(), prefix)
 		return ""
 	}
 	return plaintext

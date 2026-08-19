@@ -610,6 +610,11 @@ message EgressRuleMatch {
   repeated string method = 4;
   optional string path = 5;
   optional string scheme = 7;
+  // L7 destination port. When set, `scheme` MUST also be set — together they
+  // pin the (host, port, scheme) tuple CubeEgress intercepts via skb->mark +
+  // iptables TPROXY. Both omitted keeps the legacy default {80/http, 443/https}
+  // behavior.
+  optional int32 port = 8;
 }
 
 message EgressRuleAction {
@@ -752,6 +757,9 @@ message UpdateCubeSandboxResponse {
   string requestID     = 1;
   // Ret.
   cubelet.services.errorcode.v1.Ret ret   = 2;
+  // Same shape as DestroyCubeSandboxResponse.ext_info. Pause returns volume
+  // ref-count events after in-process keep_tombstone cleanup.
+  map<string, bytes> ext_info = 3;
 }
 
 // IDMapping describes host to container ID mappings for a pod sandbox.
@@ -839,6 +847,8 @@ message AppSnapshotResponse {
   string kernel_version = 13;
   // envd semantic version collected in-guest at snapshot time (best-effort).
   string envd_version = 14;
+  // cube-shim (and sibling cube-runtime) version bound when this snapshot was created.
+  string shim_version = 15;
 }
 
 message CommitSandboxRequest {
@@ -885,6 +895,8 @@ message CommitSandboxResponse {
   string kernel_version = 15;
   // envd semantic version collected in-guest at commit time (best-effort).
   string envd_version = 16;
+  // cube-shim (and sibling cube-runtime) version bound when this snapshot was created.
+  string shim_version = 17;
 }
 
 message RollbackSandboxRequest {
@@ -968,6 +980,9 @@ message CleanupTemplateResponse {
   cubelet.services.errorcode.v1.Ret ret = 2;
   // Logical template ID.
   string templateID = 3;
+  // Deprecated: unused. Pause/Resume volume refcounts follow normal
+  // Create/Destroy ExtInfo events; CleanupTemplate does not adjust them.
+  repeated string plugin_volume_ids = 4;
 }
 
 message ListSandboxSnapshotsRequest {

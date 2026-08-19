@@ -11,9 +11,11 @@ import (
 type CubeComponent = string
 
 const (
+	// Component directory names under cubetoolbox / component_versions.
 	CubeComponentCubeShim   = "cube-shim"
-	CubeComponentCubeKernel = "cube-agent"
+	CubeComponentCubeKernel = "cube-kernel-scf"
 	CubeComponentCubeImage  = "cube-image"
+	CubeComponentCubeAgent  = "cube-agent"
 
 	StorageMediumErofs = "erofs"
 )

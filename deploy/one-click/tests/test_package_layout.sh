@@ -151,14 +151,15 @@ test_cubeproxy_nginx_template_generation() {
     -e 's|^worker_processes [0-9]\+;|worker_processes auto;|' \
     -e 's|^\(\s*listen \)8081\( reuseport;\)|\1__CUBE_PROXY_HTTP_PORT__\2|' \
     -e 's|^\(\s*listen \)8080\( ssl reuseport;\)|\1__CUBE_PROXY_HTTPS_PORT__\2|' \
+    -e 's|^\(\s*listen \)9090\( http2 reuseport;\)|\1__CUBE_PROXY_GRPC_PORT__\2|' \
     -e 's|^\(\s*set \$host_proxy_port \)8081;|\1__CUBE_PROXY_HTTP_PORT__;|' \
     -e 's|^\(\s*set \$host_proxy_port \)8080;|\1__CUBE_PROXY_HTTPS_PORT__;|' \
-    -e 's|^\(\s*listen \)127\.0\.0\.1:8082;|\1__CUBE_PROXY_ADMIN_LISTEN__:8082;|' \
+    -e 's|^\(\s*listen \)127\.0\.0\.1:8082;|\1__CUBE_PROXY_ADMIN_LISTEN__:__CUBE_PROXY_ADMIN_PORT__;|' \
     -e 's|/usr/local/openresty/nginx/certs/cube\.app+3\.pem|/usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_CERT__|' \
     -e 's|/usr/local/openresty/nginx/certs/cube\.app+3-key\.pem|/usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_KEY__|' \
     "${src}" >"${tmp}"
 
-  for token in __CUBE_PROXY_HTTP_PORT__ __CUBE_PROXY_HTTPS_PORT__ __CUBE_PROXY_ADMIN_LISTEN__ __CUBE_PROXY_SSL_CERT__ __CUBE_PROXY_SSL_KEY__; do
+  for token in __CUBE_PROXY_HTTP_PORT__ __CUBE_PROXY_HTTPS_PORT__ __CUBE_PROXY_GRPC_PORT__ __CUBE_PROXY_ADMIN_LISTEN__ __CUBE_PROXY_ADMIN_PORT__ __CUBE_PROXY_SSL_CERT__ __CUBE_PROXY_SSL_KEY__; do
     grep -q -F "${token}" "${tmp}" || fail "cube-proxy nginx template generation is missing ${token}; CubeProxy/nginx.conf may have changed"
   done
   rm -f "${tmp}"
@@ -255,6 +256,38 @@ test_reinstall_cleanup_tracks_packaged_components() {
   fi
 }
 
+# 3g) Build-machine knobs live in build.env.example; the shipped env.example is
+#     deploy-only. The release bundle must copy env.example and must not ship
+#     build.env.example.
+test_env_templates_are_split() {
+  local env_example="${ONE_CLICK_DIR}/env.example"
+  local build_example="${ONE_CLICK_DIR}/build.env.example"
+  require_file "${env_example}" "deploy env.example"
+  require_file "${build_example}" "build.env.example"
+
+  if grep -E '^[[:space:]]*(#[[:space:]]*)?ONE_CLICK_[A-Z0-9_]+_BUILD_MODE=' "${env_example}" >/dev/null; then
+    fail "env.example must not contain ONE_CLICK_*_BUILD_MODE keys"
+  fi
+  if grep -E '^[[:space:]]*(#[[:space:]]*)?ONE_CLICK_[A-Z0-9_]+_BIN=' "${env_example}" >/dev/null; then
+    fail "env.example must not contain ONE_CLICK_*_BIN keys"
+  fi
+
+  grep -q '^ONE_CLICK_CUBEMASTER_BUILD_MODE=' "${build_example}" \
+    || fail "build.env.example missing ONE_CLICK_CUBEMASTER_BUILD_MODE"
+  grep -q 'ONE_CLICK_CUBEMASTER_BIN=' "${build_example}" \
+    || fail "build.env.example missing ONE_CLICK_CUBEMASTER_BIN"
+  grep -q 'ONE_CLICK_MKCERT_BIN=' "${build_example}" \
+    || fail "build.env.example missing ONE_CLICK_MKCERT_BIN"
+  grep -q 'ONE_CLICK_WEB_DIST_DIR=' "${build_example}" \
+    || fail "build.env.example missing ONE_CLICK_WEB_DIST_DIR"
+
+  grep -q 'copy_file "${SCRIPT_DIR}/env.example"' "${BUNDLE_SH}" \
+    || fail "build-release-bundle.sh must copy env.example into DIST_ROOT"
+  if grep -q 'build.env.example' "${BUNDLE_SH}"; then
+    fail "build-release-bundle.sh must not ship build.env.example"
+  fi
+}
+
 # 4) The build entrypoints AND every shipped Terraform deployer script must at
 #    least be syntactically valid — a cheap, cloud-free guard so a broken script
 #    fails here instead of only when a user runs it from the bundle.
@@ -275,6 +308,7 @@ test_cubeproxy_host_log_wiring
 test_tke_addons_network_config_key
 test_reinstall_cleanup_tracks_packaged_components
 test_terraform_deployer_files_present
+test_env_templates_are_split
 test_build_scripts_parse
 
 if [[ "${failures}" -gt 0 ]]; then

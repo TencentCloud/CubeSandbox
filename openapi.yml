@@ -780,6 +780,55 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+  /templates/{templateID}/alias:
+    put:
+      tags:
+      - handlers::templates
+      operationId: set_template_alias
+      parameters:
+      - name: templateID
+        in: path
+        description: Template identifier or current alias
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetTemplateAliasRequest'
+        required: true
+      responses:
+        '200':
+          description: Alias set or cleared; returns the updated template detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplateDetail'
+        '400':
+          description: Invalid alias, or alias requested on a snapshot (not applicable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Template not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Template is not READY, or concurrent alias claim conflict; retry may succeed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
   /templates/{templateID}/builds/{buildID}:
     post:
       tags:
@@ -1493,6 +1542,20 @@ components:
           - boolean
           - 'null'
           description: SDK sends this as snake_case (known quirk).
+        autoPause:
+          type:
+          - boolean
+          - 'null'
+          description: |-
+            e2b SDK compatibility: the SDK flattens its user-facing `lifecycle`
+            object into top-level `autoPause` / `autoResume` before it hits the
+            wire, so `lifecycle` never arrives from an SDK caller. Ignored when
+            `lifecycle` is present.
+        autoResume:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxAutoResume'
+            description: See `auto_pause`. Only meaningful alongside `autoPause = true`.
         distributionScope:
           type:
           - array
@@ -1573,6 +1636,18 @@ components:
           - integer
           - 'null'
           format: int32
+    SetTemplateAliasRequest:
+      type: object
+      description: Body for PUT /templates/{id}/alias (set, reassign, or clear alias).
+      properties:
+        alias:
+          type:
+          - string
+          - 'null'
+          description: |-
+            New alias for the template. Validated against `^[a-z0-9][a-z0-9-]{0,63}$`
+            with `tpl-`/`snap-` prefixes rejected. Omitted, null, or empty string
+            clears the alias.
     ResumedSandbox:
       type: object
       description: Request body for POST /sandboxes/{id}/resume (deprecated).
@@ -1645,6 +1720,20 @@ components:
           type:
           - string
           - 'null'
+    SandboxAutoResume:
+      oneOf:
+      - type: boolean
+      - type: object
+        required:
+        - enabled
+        properties:
+          enabled:
+            type: boolean
+      description: |-
+        Wire shape of the top-level `autoResume` field the e2b SDK sends. Current
+        SDK releases send `{"enabled": true}`; older ones and hand-rolled clients
+        send a bare `true`. Both mean the same thing, so accept either rather than
+        rejecting on shape.
     SandboxDetail:
       type: object
       description: Detailed sandbox info returned by GET /sandboxes/{sandboxID}.

@@ -68,6 +68,7 @@
 -- deployments use "skipped" + admin API for policy installation.
 
 local policy = require "policy"
+local port_scheme = require "port_scheme"
 
 local _M = {}
 
@@ -122,8 +123,12 @@ end
 
 -- ---------- match evaluation ----------
 
--- Returns true if every constraint in `m` passes against `ctx`.
-local function rule_matches(m, ctx)
+-- Returns true if every constraint in `m` passes against `ctx`. `is_allow`
+-- selects the port/scheme semantics: an allow rule with an omitted port is
+-- narrowed to the default set {80/http,443/https} (fail-closed), while a deny
+-- rule with an omitted port is port-agnostic within the host (also fail-closed
+-- — a custom-port allow must not bypass a broader host deny).
+local function rule_matches(m, ctx, is_allow)
     if type(m) ~= "table" then return false end
 
     if m.sni ~= nil then
@@ -143,8 +148,16 @@ local function rule_matches(m, ctx)
     if m.path ~= nil then
         if not path_match(m.path, ctx.path) then return false end
     end
-    if m.scheme ~= nil then
-        if string.lower(m.scheme) ~= ctx.scheme then return false end
+    -- Port and scheme form one semantic constraint whose meaning depends on
+    -- whether this rule allows or denies (see port_scheme.matches_deny).
+    local port_scheme_ok
+    if is_allow then
+        port_scheme_ok = port_scheme.matches(m.port, m.scheme, ctx.dst_port, ctx.scheme)
+    else
+        port_scheme_ok = port_scheme.matches_deny(m.port, m.scheme, ctx.dst_port, ctx.scheme)
+    end
+    if not port_scheme_ok then
+        return false
     end
     return true
 end
@@ -294,6 +307,13 @@ local function build_ctx()
         method       = ngx.var.request_method,
         path         = ngx.var.uri,
         dst_ip       = dst_ip,
+        -- dst_port is the original sandbox-side destination port preserved
+        -- by TPROXY. In an IP_TRANSPARENT listener, nginx's $server_port is
+        -- read via getsockname() on the tproxy socket, which reports the
+        -- ORIGINAL dst — not the 8080/8443 listener port we bind to. Used
+        -- by rule_matches() to enforce match.port constraints on rules that
+        -- pin to a custom port (e.g. tcp/8443 for an internal API).
+        dst_port     = tonumber(ngx.var.server_port),
         scheme       = ngx.var.scheme,
     }
 end
@@ -408,6 +428,7 @@ function _M.decide()
         method           = ctx.method,
         path             = ctx.path,
         dst_ip           = ctx.dst_ip,
+        dst_port         = ctx.dst_port,
         scheme           = ctx.scheme,
         policy_id        = nil,
         rule_id          = nil,
@@ -467,7 +488,7 @@ function _M.decide()
     decision.policy_id = p.policy_id
 
     for _, r in ipairs(p.rules or {}) do
-        if rule_matches(r.match, ctx) then
+        if rule_matches(r.match, ctx, r.action ~= nil and r.action.allow == true) then
             decision.rule_id     = r.id
             decision.audit_level = (r.action and r.action.audit) or "metadata"
             decision.inject      = r.action and r.action.inject  -- consumed in Pγ

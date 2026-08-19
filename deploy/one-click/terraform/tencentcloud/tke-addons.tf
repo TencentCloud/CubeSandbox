@@ -77,53 +77,57 @@ locals {
         replace(
           replace(
             replace(
-              fileexists("${path.module}/cubeproxy-nginx.conf") ? file("${path.module}/cubeproxy-nginx.conf") : (
-                fileexists("${path.module}/../../cubeproxy/nginx.conf.template") ? file("${path.module}/../../cubeproxy/nginx.conf.template") : <<-EOF
-                  user root;
-                  worker_processes auto;
-                  error_log /data/log/cube-proxy/error.log notice;
-                  daemon off;
-                  events { worker_connections 100000; }
-                  http {
-                    include mime.types;
-                    default_type application/octet-stream;
-                    server {
-                      listen __CUBE_PROXY_HTTP_PORT__;
-                      server_name _;
-                      location / { return 404; }
+              replace(
+                fileexists("${path.module}/cubeproxy-nginx.conf") ? file("${path.module}/cubeproxy-nginx.conf") : (
+                  fileexists("${path.module}/../../cubeproxy/nginx.conf.template") ? file("${path.module}/../../cubeproxy/nginx.conf.template") : <<-EOF
+                    user root;
+                    worker_processes auto;
+                    error_log /data/log/cube-proxy/error.log notice;
+                    daemon off;
+                    events { worker_connections 100000; }
+                    http {
+                      include mime.types;
+                      default_type application/octet-stream;
+                      server {
+                        listen __CUBE_PROXY_HTTP_PORT__;
+                        server_name _;
+                        location / { return 404; }
+                      }
+                      server {
+                        listen __CUBE_PROXY_HTTPS_PORT__ ssl;
+                        server_name _;
+                        ssl_certificate /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_CERT__;
+                        ssl_certificate_key /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_KEY__;
+                        location / { return 404; }
+                      }
+                      server {
+                        listen __CUBE_PROXY_ADMIN_LISTEN__:__CUBE_PROXY_ADMIN_PORT__;
+                        server_name _;
+                        location / { return 404; }
+                      }
                     }
-                    server {
-                      listen __CUBE_PROXY_HTTPS_PORT__ ssl;
-                      server_name _;
-                      ssl_certificate /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_CERT__;
-                      ssl_certificate_key /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_KEY__;
-                      location / { return 404; }
-                    }
-                    server {
-                      listen __CUBE_PROXY_ADMIN_LISTEN__:8082;
-                      server_name _;
-                      location / { return 404; }
-                    }
-                  }
-                EOF
+                  EOF
+                ),
+                "__CUBE_PROXY_HTTP_PORT__",
+                "8081"
               ),
-              "__CUBE_PROXY_HTTP_PORT__",
-              "8081"
+              "__CUBE_PROXY_HTTPS_PORT__",
+              "8080"
             ),
-            "__CUBE_PROXY_HTTPS_PORT__",
-            "8080"
+            "__CUBE_PROXY_GRPC_PORT__",
+            "9090"
           ),
-          "__CUBE_PROXY_GRPC_PORT__",
-          "9090"
+          "__CUBE_PROXY_SSL_CERT__",
+          "cube.app+3.pem"
         ),
-        "__CUBE_PROXY_SSL_CERT__",
-        "cube.app+3.pem"
+        "__CUBE_PROXY_SSL_KEY__",
+        "cube.app+3-key.pem"
       ),
-      "__CUBE_PROXY_SSL_KEY__",
-      "cube.app+3-key.pem"
+      "__CUBE_PROXY_ADMIN_LISTEN__",
+      "0.0.0.0"
     ),
-    "__CUBE_PROXY_ADMIN_LISTEN__:8082",
-    "0.0.0.0:8082"
+    "__CUBE_PROXY_ADMIN_PORT__",
+    tostring(var.cube_proxy_admin_port)
   )
 
   # Precondition for creating the TKE addons
@@ -1008,7 +1012,7 @@ resource "kubernetes_deployment" "cube_proxy" {
           }
           port {
             name           = "admin"
-            container_port = 8082
+            container_port = var.cube_proxy_admin_port
             protocol       = "TCP"
           }
           env {
@@ -1054,11 +1058,11 @@ resource "kubernetes_deployment" "cube_proxy" {
           }
           env {
             name  = "CUBE_PROXY_ADMIN_URL"
-            value = "http://$(POD_IP):8082"
+            value = "http://$(POD_IP):${var.cube_proxy_admin_port}"
           }
           env {
             name  = "CUBE_PROXY_RESUME_URL"
-            value = "http://$(POD_IP):8082"
+            value = "http://$(POD_IP):${var.cube_proxy_admin_port}"
           }
           env {
             name  = "CUBE_PROXY_NODE_IP"

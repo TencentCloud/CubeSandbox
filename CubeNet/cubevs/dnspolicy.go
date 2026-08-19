@@ -31,11 +31,11 @@ func newInnerDNSAllowMap() (*ebpf.Map, error) {
 
 // ensureDNSAllowInnerMap creates the per-sandbox DNS allow map when it is absent.
 func ensureDNSAllowInnerMap(outerMap *ebpf.Map, ifindex uint32) error {
-	return ensureInnerMapWithFactory(outerMap, ifindex, MapNameDNSAllow, newInnerDNSAllowMap)
+	return ensureInnerMapWithFactory(outerMap, ifindex, MapNameDNSAllowV2, newInnerDNSAllowMap)
 }
 
 func initDNSAllow(ifindex uint32) error {
-	dnsAllow, err := loadPinnedMap(MapNameDNSAllow)
+	dnsAllow, err := loadPinnedMap(MapNameDNSAllowV2)
 	if err != nil {
 		return err
 	}
@@ -89,35 +89,25 @@ type dnsAllowRule struct {
 	domain string
 }
 
-func buildDNSAllowRules(domains, l7Domains []string) ([]dnsAllowRule, error) {
-	rules := make([]dnsAllowRule, 0, len(domains)+len(l7Domains))
-	indexByKey := make(map[dnsAllowKey]int, len(domains)+len(l7Domains))
+func buildDNSAllowRules(domains []string) ([]dnsAllowRule, error) {
+	rules := make([]dnsAllowRule, 0, len(domains))
+	indexByKey := make(map[dnsAllowKey]int, len(domains))
 
-	add := func(domains []string, flags uint8) error {
-		for _, domain := range domains {
-			key, value, err := makeDNSAllowRule(domain, flags)
-			if err != nil {
-				return err
-			}
-			if idx, ok := indexByKey[key]; ok {
-				rules[idx].value.Flags |= flags
-				continue
-			}
-			indexByKey[key] = len(rules)
-			rules = append(rules, dnsAllowRule{
-				key:    key,
-				value:  value,
-				domain: domain,
-			})
+	for _, domain := range domains {
+		key, value, err := makeDNSAllowRule(domain, 0)
+		if err != nil {
+			return nil, err
 		}
-		return nil
-	}
-
-	if err := add(domains, 0); err != nil {
-		return nil, err
-	}
-	if err := add(l7Domains, uint8(netPolicyFlagL7Required)); err != nil {
-		return nil, err
+		if idx, ok := indexByKey[key]; ok {
+			rules[idx].value.Flags |= value.Flags
+			continue
+		}
+		indexByKey[key] = len(rules)
+		rules = append(rules, dnsAllowRule{
+			key:    key,
+			value:  value,
+			domain: domain,
+		})
 	}
 	return rules, nil
 }
@@ -133,15 +123,13 @@ func populateDNSAllowInnerMap(inner *ebpf.Map, rules []dnsAllowRule) error {
 }
 
 func flushDNSAllowForIfindex(outerMap *ebpf.Map, ifindex uint32) error {
-	inner, err := lookupInnerMap(outerMap, ifindex)
+	inner, err := lookupInnerMap(outerMap, ifindex, MapNameDNSAllowV2)
 	if errors.Is(err, ebpf.ErrKeyNotExist) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	defer inner.Close()
-
 	return flushDNSAllowInnerMap(inner)
 }
 
@@ -150,6 +138,12 @@ func updateDNSAllowRule(inner *ebpf.Map, rule dnsAllowRule) error {
 	var oldValue dnsAllowValue
 	if err := inner.Lookup(&rule.key, &oldValue); err == nil {
 		value.Flags |= oldValue.Flags
+		// Preserve any port tuples already installed for this key. Rule
+		// order should not cause a later rule with a subset of the port
+		// set to clobber an earlier rule's ports. buildL7Plan is the
+		// single point where scheme conflicts are detected, so any port
+		// present in both rules must agree on scheme by construction.
+		mergePortsIntoDNSValue(&value, oldValue.Ports[:oldValue.PortCount])
 	} else if !errors.Is(err, ebpf.ErrKeyNotExist) {
 		return fmt.Errorf("dns allow lookup failed: %w, domain: %s", err, rule.domain)
 	}
@@ -160,38 +154,45 @@ func updateDNSAllowRule(inner *ebpf.Map, rule dnsAllowRule) error {
 	return nil
 }
 
-func flushDNSAllowInnerMap(inner *ebpf.Map) error {
-	var oldKey dnsAllowKey
-	var oldValue dnsAllowValue
-	iter := inner.Iterate()
-	for iter.Next(&oldKey, &oldValue) {
-		if err := inner.Delete(&oldKey); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return fmt.Errorf("dns allow delete failed: %w", err)
+// mergePortsIntoDNSValue unions src into v.Ports without exceeding
+// maxL7PortsPerHost. Silently drops overflow — buildL7Plan already enforces
+// the budget in userspace.
+func mergePortsIntoDNSValue(v *dnsAllowValue, src []l7PortEntry) {
+	for _, p := range src {
+		exists := false
+		for i := uint8(0); i < v.PortCount; i++ {
+			if v.Ports[i].Port == p.Port {
+				exists = true
+				break
+			}
 		}
+		if exists || v.PortCount >= maxL7PortsPerHost {
+			continue
+		}
+		v.Ports[v.PortCount] = p
+		v.PortCount++
 	}
-	if err := iter.Err(); err != nil {
-		return fmt.Errorf("dns allow iterate failed: %w", err)
-	}
-	return nil
+}
+
+func flushDNSAllowInnerMap(inner *ebpf.Map) error {
+	return flushInnerEntries[dnsAllowKey, dnsAllowValue](inner)
 }
 
 // cleanupDNSAllow clears the sandbox DNS allow inner map while keeping it preallocated.
 func cleanupDNSAllow(ifindex uint32) error {
-	dnsAllow, err := loadPinnedMap(MapNameDNSAllow)
+	dnsAllow, err := loadPinnedMap(MapNameDNSAllowV2)
 	if err != nil {
 		return err
 	}
 	defer dnsAllow.Close()
 
-	inner, err := lookupInnerMap(dnsAllow, ifindex)
+	inner, err := lookupInnerMap(dnsAllow, ifindex, MapNameDNSAllowV2)
 	if err != nil {
 		if errors.Is(err, ebpf.ErrKeyNotExist) {
 			return nil
 		}
 		return err
 	}
-	defer inner.Close()
-
 	return flushDNSAllowInnerMap(inner)
 }
 
@@ -201,7 +202,7 @@ func applyDNSAllow(ifindex uint32, rules []dnsAllowRule, replace bool) error {
 		return nil
 	}
 
-	dnsAllow, err := loadPinnedMap(MapNameDNSAllow)
+	dnsAllow, err := loadPinnedMap(MapNameDNSAllowV2)
 	if err != nil {
 		return err
 	}
@@ -210,16 +211,11 @@ func applyDNSAllow(ifindex uint32, rules []dnsAllowRule, replace bool) error {
 	if len(rules) == 0 {
 		return flushDNSAllowForIfindex(dnsAllow, ifindex)
 	}
-	if err := ensureDNSAllowInnerMap(dnsAllow, ifindex); err != nil {
-		return err
-	}
 
-	inner, err := lookupInnerMap(dnsAllow, ifindex)
+	inner, err := acquireInnerMap(dnsAllow, ifindex, MapNameDNSAllowV2, newInnerDNSAllowMap)
 	if err != nil {
 		return err
 	}
-	defer inner.Close()
-
 	if replace {
 		if err := flushDNSAllowInnerMap(inner); err != nil {
 			return err

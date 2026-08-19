@@ -6,10 +6,11 @@ package templatecenter
 
 import (
 	"context"
+	"time"
+
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"gorm.io/gorm"
-	"time"
 )
 
 func getTemplateImageJobRecordByID(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
@@ -22,14 +23,38 @@ func getTemplateImageJobRecordByID(ctx context.Context, jobID string) (*models.T
 }
 
 func getLatestTemplateImageJobByTemplateID(ctx context.Context, templateID string) (*models.TemplateImageJob, error) {
+	return getLatestTemplateImageJobByTemplateIDTx(store.db.WithContext(ctx), templateID)
+}
+
+func getLatestTemplateImageJobByTemplateIDTx(tx *gorm.DB, templateID string) (*models.TemplateImageJob, error) {
 	record := &models.TemplateImageJob{}
-	err := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+	err := tx.Table(constants.TemplateImageJobTableName).
 		Where("template_id = ?", templateID).
 		Order("attempt_no desc, id desc").First(record).Error
 	if err != nil {
 		return nil, err
 	}
-	return record, err
+	return record, nil
+}
+
+func getLatestCreateRedoImageJobByTemplateIDTx(tx *gorm.DB, templateID string) (*models.TemplateImageJob, error) {
+	record := &models.TemplateImageJob{}
+	err := tx.Table(constants.TemplateImageJobTableName).
+		Where("template_id = ? AND operation IN ?", templateID, createRedoJobOperations).
+		Order("attempt_no desc, id desc").First(record).Error
+	if err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+func listCreateRedoImageJobsByTemplateIDTx(tx *gorm.DB, templateID string) ([]models.TemplateImageJob, error) {
+	var records []models.TemplateImageJob
+	err := tx.Table(constants.TemplateImageJobTableName).
+		Select("job_id, operation, request_json").
+		Where("template_id = ? AND operation IN ?", templateID, createRedoJobOperations).
+		Order("attempt_no desc, id desc").Find(&records).Error
+	return records, err
 }
 
 func getTemplateImageJobByTemplateID(ctx context.Context, templateID string) (*models.TemplateImageJob, error) {
@@ -37,8 +62,12 @@ func getTemplateImageJobByTemplateID(ctx context.Context, templateID string) (*m
 }
 
 func getActiveTemplateImageJobByTemplateID(ctx context.Context, templateID string) (*models.TemplateImageJob, error) {
+	return getActiveTemplateImageJobByTemplateIDTx(store.db.WithContext(ctx), templateID)
+}
+
+func getActiveTemplateImageJobByTemplateIDTx(tx *gorm.DB, templateID string) (*models.TemplateImageJob, error) {
 	record := &models.TemplateImageJob{}
-	err := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+	err := tx.Table(constants.TemplateImageJobTableName).
 		Where("template_id = ? AND status IN ?", templateID, []string{JobStatusPending, JobStatusRunning}).
 		Order("attempt_no desc, id desc").First(record).Error
 	if err != nil {
@@ -133,13 +162,17 @@ func getRootfsArtifactByFingerprintUnscoped(ctx context.Context, fingerprint str
 }
 
 func updateTemplateImageJob(ctx context.Context, jobID string, values map[string]any) error {
+	return updateTemplateImageJobTx(store.db.WithContext(ctx), jobID, values)
+}
+
+func updateTemplateImageJobTx(tx *gorm.DB, jobID string, values map[string]any) error {
 	values["updated_at"] = time.Now()
-	tx := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+	result := tx.Table(constants.TemplateImageJobTableName).
 		Where("job_id = ?", jobID).Updates(values)
-	if tx.Error != nil {
-		return tx.Error
+	if result.Error != nil {
+		return result.Error
 	}
-	if tx.RowsAffected == 0 {
+	if result.RowsAffected == 0 {
 		return gorm.ErrRecordNotFound
 	}
 	return nil

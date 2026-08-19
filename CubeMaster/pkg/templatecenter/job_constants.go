@@ -68,6 +68,12 @@ const (
 	defaultDistributionWorkers = 4
 )
 
+var createRedoJobOperations = []string{JobOperationCreate, JobOperationRedo}
+
+func isCreateRedoJobOperation(op string) bool {
+	return op == JobOperationCreate || op == JobOperationRedo
+}
+
 var ErrNoFailedTemplateReplicas = errors.New("no failed template replicas matched redo request")
 
 func latestJobIDFromJob(job *models.TemplateImageJob) string {

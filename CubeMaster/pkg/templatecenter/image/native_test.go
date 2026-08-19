@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/synctest"
 
@@ -122,6 +123,36 @@ func TestPrepareNativeSourceExtractsDigestAndConfig(t *testing.T) {
 	}
 	if source.RegistryAuth != nil {
 		t.Errorf("expected RegistryAuth to be nil without explicit credentials, got %#v", source.RegistryAuth)
+	}
+}
+
+func TestPrepareNativeSourceAcceptsHTTPRegistryPrefix(t *testing.T) {
+	s := httptest.NewServer(registry.New())
+	defer s.Close()
+
+	img, err := mutate.Config(empty.Image, v1.Config{Cmd: []string{"/bin/sh"}})
+	if err != nil {
+		t.Fatalf("mutate.Config: %v", err)
+	}
+	ref, err := name.ParseReference(strings.TrimPrefix(s.URL, "http://")+"/test-http:latest", name.Insecure)
+	if err != nil {
+		t.Fatalf("ParseReference: %v", err)
+	}
+	if err := remote.Write(ref, img); err != nil {
+		t.Fatalf("remote.Write: %v", err)
+	}
+
+	source, err := prepareNativeSource(context.Background(), SourceSpec{
+		ImageRef: "http://" + ref.Name(),
+	})
+	if err != nil {
+		t.Fatalf("prepareNativeSource failed: %v", err)
+	}
+	if source.ExportMode != ExportModeNative {
+		t.Errorf("expected ExportMode=ExportModeNative, got %q", source.ExportMode)
+	}
+	if source.nativeImage == nil {
+		t.Fatal("expected prepared native image to be cached")
 	}
 }
 

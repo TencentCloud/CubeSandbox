@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -43,6 +44,13 @@ func TestCubeBoxDeepCopy(t *testing.T) {
 				HostPort:      80,
 			},
 		},
+		NetworkType:    "tap",
+		RuntimeHandler: "cube",
+		ExposedPorts:   []int64{8080, 443},
+		CubeNetworkConfig: &cubebox.CubeNetworkConfig{
+			AllowOut: []string{"10.0.0.0/8"},
+		},
+		Volumes: []*cubebox.Volume{{Name: "tmp"}},
 		ImageReferences: map[string]ImageReference{
 			"img1": {
 				ID:         "img1",
@@ -73,6 +81,27 @@ func TestCubeBoxDeepCopy(t *testing.T) {
 
 	if copied.Namespace != original.Namespace {
 		t.Errorf("Namespace not copied correctly")
+	}
+
+	if copied.NetworkType != original.NetworkType || copied.RuntimeHandler != original.RuntimeHandler {
+		t.Errorf("network recreate fields not copied")
+	}
+	if len(copied.ExposedPorts) != 2 || copied.ExposedPorts[0] != 8080 {
+		t.Errorf("ExposedPorts not copied: %v", copied.ExposedPorts)
+	}
+	if copied.CubeNetworkConfig == nil || len(copied.CubeNetworkConfig.AllowOut) != 1 {
+		t.Errorf("CubeNetworkConfig not copied")
+	}
+	copied.CubeNetworkConfig.AllowOut[0] = "mutated"
+	if original.CubeNetworkConfig.AllowOut[0] == "mutated" {
+		t.Errorf("Modifying copied CubeNetworkConfig affected original")
+	}
+	if len(copied.Volumes) != 1 || copied.Volumes[0].GetName() != "tmp" {
+		t.Errorf("Volumes not copied")
+	}
+	copied.Volumes[0].Name = "mutated"
+	if original.Volumes[0].GetName() == "mutated" {
+		t.Errorf("Modifying copied Volumes affected original")
 	}
 
 	copied.Annotations["key1"] = "modified"
@@ -107,6 +136,33 @@ func TestCubeBoxDeepCopy(t *testing.T) {
 	}
 	if !copied.DeletedTime.Equal(*original.DeletedTime) {
 		t.Errorf("DeletedTime value should be equal")
+	}
+}
+
+func TestCubeBoxDeepCopyCompontsIndependent(t *testing.T) {
+	original := &CubeBox{
+		LocalRunTemplate: &templatetypes.LocalRunTemplate{
+			Componts: map[string]templatetypes.LocalComponent{
+				templatetypes.CubeComponentCubeShim: {Component: templatetypes.MachineComponent{Version: "v1"}},
+			},
+			Volumes: map[string]templatetypes.LocalBaseVolume{
+				"root": {VolumeID: "vol-1"},
+			},
+		},
+	}
+	copied := original.DeepCopy()
+	if copied.LocalRunTemplate == original.LocalRunTemplate {
+		t.Fatal("DeepCopy shared LocalRunTemplate pointer")
+	}
+	copied.LocalRunTemplate.Componts[templatetypes.CubeComponentCubeShim] = templatetypes.LocalComponent{
+		Component: templatetypes.MachineComponent{Version: "mutated"},
+	}
+	copied.LocalRunTemplate.Volumes["root"] = templatetypes.LocalBaseVolume{VolumeID: "mutated"}
+	if original.LocalRunTemplate.Componts[templatetypes.CubeComponentCubeShim].Component.Version != "v1" {
+		t.Fatal("DeepCopy shared Componts map")
+	}
+	if original.LocalRunTemplate.Volumes["root"].VolumeID != "vol-1" {
+		t.Fatal("DeepCopy shared Volumes map")
 	}
 }
 

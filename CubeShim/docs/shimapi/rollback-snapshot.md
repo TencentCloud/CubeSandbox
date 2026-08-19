@@ -4,26 +4,27 @@ Roll back a running sandbox VM to a previously taken snapshot.
 
 ## Overview
 
-The caller pauses the current VM, snapshots it to a temporary path, then resumes from a
-caller-supplied snapshot URL. On success the sandbox continues running from the target
-snapshot state. The temporary pause snapshot is discarded automatically.
+CubeShim marks the sandbox paused (a logical state transition, not a VMM-level pause),
+disconnects the guest agent, deletes the VM with `VmDelete`, then restores the
+caller-supplied snapshot. No temporary safety checkpoint is taken: if restore fails,
+teardown is terminal and the previous VM cannot be restored.
 
 **Precondition:** the sandbox must be in `Normal` (running) state. The operation will
 fail if the sandbox is already paused, pausing, or has pending exec tasks.
 
 ## Trigger
 
-This action is invoked via the **containerd Shim v2 `UpdateContainer` RPC**
-([spec](https://github.com/containerd/containerd/blob/main/core/runtime/v2/README.md)).
-The caller sets custom `annotations` on the `UpdateContainerRequest`; CubeShim's
+This action is invoked via the **containerd Shim v2 Task `Update` RPC**
+([spec](https://github.com/containerd/containerd/blob/main/docs/runtime-v2.md)).
+The caller sets custom `annotations` on the `UpdateTaskRequest`; CubeShim's
 `update_ext::update_route()` dispatches on `cube.shimapi.update.action`.
 
 ```
-caller  ──UpdateContainerRequest { id, annotations }──▶  CubeShim (ttrpc)
+caller  ──UpdateTaskRequest { id, annotations }──▶  CubeShim (ttrpc)
+                                                    │
+                                                    └─▶ update_ext::update_route()
                                                               │
-                                                              └─▶ update_ext::update_route()
-                                                                        │
-                                                                        └─▶ RollbackSnapshot handler
+                                                              └─▶ RollbackSnapshot handler
 ```
 
 | Annotation Key | Required | Value |
@@ -260,4 +261,4 @@ cube-runtime snapshot \
 | `invalid cube.shimapi.update.rollback.restore_config: ...` | The annotation value is not valid JSON or missing required fields |
 | `sandbox not running, cannot rollback` | Sandbox is not in `Normal` state |
 | `sandbox pause forbidding, terminate exec tasks first` | There are active exec tasks blocking the pause |
-| `rollback snapshot failed: ...` | Lower-level hypervisor error during pause/restore |
+| `rollback snapshot failed: ...` | Shim log line for any error returned by `rollback_vm` (VM delete or restore); the caller-visible ttrpc error is `update sandbox failed:<e>` |

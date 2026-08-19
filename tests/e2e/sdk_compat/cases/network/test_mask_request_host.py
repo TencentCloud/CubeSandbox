@@ -28,7 +28,9 @@ from adapters import create_adapter
 from framework.assertions import assert_command_ok
 from framework.capabilities import NETWORK_MASK_REQUEST_HOST
 from framework.cleanup import safe_kill
+from framework.build_throttle import template_build_slot
 from framework.config import SdkE2EConfig
+from framework.parallel import scale_timeout_for_xdist
 
 SERVICE_PORT = 8765
 # With ${PORT}: expands to the requested sandbox container port.
@@ -86,9 +88,14 @@ def _template_image() -> str:
     )
 
 
-def _wait_for_template_ready(template_id: str, config, timeout: int = TEMPLATE_READY_TIMEOUT):
+def _wait_for_template_ready(template_id: str, config, timeout: int | None = None):
     from cubesandbox import Template
 
+    # Widen the serial-run budget for parallel (xdist) runs: same-image builds
+    # serialize on CubeMaster's per-artifactID lock, so the last worker's build
+    # can queue well past TEMPLATE_READY_TIMEOUT on a loaded-but-healthy node.
+    if timeout is None:
+        timeout = scale_timeout_for_xdist(TEMPLATE_READY_TIMEOUT)
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -136,22 +143,26 @@ def mask_request_host_template_id(pytestconfig: pytest.Config):
     sdk_config = Config(api_url=base.cube_api_url)
     created_id: str | None = None
     try:
-        job = Template.build(
-            image=_template_image(),
-            writable_layer_size=os.environ.get(
-                "CUBE_TEMPLATE_E2E_WRITABLE_LAYER_SIZE",
-                DEFAULT_WRITABLE_LAYER_SIZE,
-            ),
-            exposed_ports=TEMPLATE_EXPOSED_PORTS,
-            probe_port=49999,
-            config=sdk_config,
-        )
-        assert job.template_id.startswith("tpl-"), job.template_id
-        created_id = job.template_id
-        info = _wait_for_template_ready(created_id, sdk_config)
-        assert info.status == "READY", (
-            f"template {created_id} finished with status={info.status!r}"
-        )
+        # Hold a build slot across build + READY wait so concurrent in-flight
+        # template builds stay bounded regardless of the xdist worker count;
+        # this keeps the outcome identical to a serial ``-n1`` run.
+        with template_build_slot(label="mask_request_host"):
+            job = Template.build(
+                image=_template_image(),
+                writable_layer_size=os.environ.get(
+                    "CUBE_TEMPLATE_E2E_WRITABLE_LAYER_SIZE",
+                    DEFAULT_WRITABLE_LAYER_SIZE,
+                ),
+                exposed_ports=TEMPLATE_EXPOSED_PORTS,
+                probe_port=49999,
+                config=sdk_config,
+            )
+            assert job.template_id.startswith("tpl-"), job.template_id
+            created_id = job.template_id
+            info = _wait_for_template_ready(created_id, sdk_config)
+            assert info.status == "READY", (
+                f"template {created_id} finished with status={info.status!r}"
+            )
         yield created_id
     finally:
         if created_id is not None:

@@ -12,7 +12,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
+	sandboxservice "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	"gorm.io/gorm"
 )
 
@@ -26,24 +28,28 @@ const (
 	nodeLabelsAction    = "/nodes/:node_id/labels"
 	nodeIsolationAction = "/nodes/:node_id/isolation"
 	versionMatrixAction = "/version-matrix"
+	// get template component versions
+	templateComponentVersionsAction = "/templates/:template_id/component-versions"
 )
 
 type nodesResponse struct {
-	RequestID string                   `json:"requestID,omitempty"`
-	Ret       *sandboxtypes.Ret        `json:"ret,omitempty"`
-	Data      []*nodemeta.NodeSnapshot `json:"data,omitempty"`
+	*sandboxtypes.Res
+	Data []*nodemeta.NodeSnapshot `json:"data,omitempty"`
 }
 
 type nodeResponse struct {
-	RequestID string                 `json:"requestID,omitempty"`
-	Ret       *sandboxtypes.Ret      `json:"ret,omitempty"`
-	Data      *nodemeta.NodeSnapshot `json:"data,omitempty"`
+	*sandboxtypes.Res
+	Data *nodemeta.NodeSnapshot `json:"data,omitempty"`
 }
 
 type versionMatrixResponse struct {
-	RequestID string                  `json:"requestID,omitempty"`
-	Ret       *sandboxtypes.Ret       `json:"ret,omitempty"`
-	Data      *nodemeta.VersionMatrix `json:"data,omitempty"`
+	*sandboxtypes.Res
+	Data *nodemeta.VersionMatrix `json:"data,omitempty"`
+}
+
+type templateComponentVersionsResponse struct {
+	*sandboxtypes.Res
+	Data *templatecenter.TemplateComponentVersions `json:"data,omitempty"`
 }
 
 func MetaURI() string {
@@ -72,6 +78,10 @@ func NodeStatusAction() string {
 
 func VersionMatrixAction() string {
 	return versionMatrixAction
+}
+
+func TemplateComponentVersionsAction() string {
+	return templateComponentVersionsAction
 }
 
 func NodeLabelsAction() string {
@@ -109,9 +119,8 @@ func registerNodeGinHandler(c *gin.Context) {
 		return
 	}
 	common.WriteAPI(c, &nodeResponse{
-		RequestID: req.RequestID,
-		Ret:       successRet(),
-		Data:      data,
+		Res:  &sandboxtypes.Res{RequestID: req.RequestID, Ret: successRet()},
+		Data: data,
 	})
 }
 
@@ -128,9 +137,8 @@ func updateNodeStatusGinHandler(c *gin.Context) {
 		return
 	}
 	common.WriteAPI(c, &nodeResponse{
-		RequestID: req.RequestID,
-		Ret:       successRet(),
-		Data:      data,
+		Res:  &sandboxtypes.Res{RequestID: req.RequestID, Ret: successRet()},
+		Data: data,
 	})
 }
 
@@ -142,9 +150,18 @@ func getNodeGinHandler(c *gin.Context) {
 		return
 	}
 	common.WriteAPI(c, &nodeResponse{
-		Ret:  successRet(),
+		Res:  &sandboxtypes.Res{Ret: successRet()},
 		Data: data,
 	})
+}
+
+func deleteNodeGinHandler(c *gin.Context) {
+	force := c.Query("force") == "true"
+	if err := sandboxservice.DeleteNode(c.Request.Context(), c.Param("node_id"), force); err != nil {
+		writeErr(c.Writer, http.StatusOK, err)
+		return
+	}
+	common.WriteAPI(c, &sandboxtypes.Res{Ret: successRet()})
 }
 
 func listNodesGinHandler(c *gin.Context) {
@@ -154,7 +171,7 @@ func listNodesGinHandler(c *gin.Context) {
 		return
 	}
 	common.WriteAPI(c, &nodesResponse{
-		Ret:  successRet(),
+		Res:  &sandboxtypes.Res{Ret: successRet()},
 		Data: data,
 	})
 }
@@ -166,7 +183,20 @@ func versionMatrixGinHandler(c *gin.Context) {
 		return
 	}
 	common.WriteAPI(c, &versionMatrixResponse{
-		Ret:  successRet(),
+		Res:  &sandboxtypes.Res{Ret: successRet()},
+		Data: data,
+	})
+}
+
+func templateComponentVersionsGinHandler(c *gin.Context) {
+	templateID := c.Param("template_id")
+	data, err := templatecenter.GetTemplateComponentVersions(c.Request.Context(), templateID)
+	if err != nil {
+		writeErr(c.Writer, http.StatusOK, err)
+		return
+	}
+	common.WriteAPI(c, &templateComponentVersionsResponse{
+		Res:  &sandboxtypes.Res{Ret: successRet()},
 		Data: data,
 	})
 }
@@ -215,7 +245,10 @@ func writeIsolation(c *gin.Context, disabled bool) {
 		writeErr(c.Writer, http.StatusOK, err)
 		return
 	}
-	common.WriteAPI(c, &nodeResponse{Ret: successRet(), Data: data})
+	common.WriteAPI(c, &nodeResponse{
+		Res:  &sandboxtypes.Res{Ret: successRet()},
+		Data: data,
+	})
 }
 
 func successRet() *sandboxtypes.Ret {
@@ -228,9 +261,11 @@ func successRet() *sandboxtypes.Ret {
 func writeErr(w http.ResponseWriter, status int, err error) {
 	retCode := int(errorcode.ErrorCode_MasterInternalError)
 	switch {
-	case errors.Is(err, gorm.ErrRecordNotFound):
+	case errors.Is(err, gorm.ErrRecordNotFound), errors.Is(err, templatecenter.ErrTemplateNotFound), errors.Is(err, nodemeta.ErrNodeNotFound):
 		retCode = int(errorcode.ErrorCode_NotFound)
 	case errors.Is(err, nodemeta.ErrLabelsJSONCorrupt), errors.Is(err, nodemeta.ErrSchedulingLabelRejected):
+		retCode = int(errorcode.ErrorCode_MasterParamsError)
+	case errors.Is(err, nodemeta.ErrNodeNotIsolated), errors.Is(err, sandboxservice.ErrNodeHasSandboxes):
 		retCode = int(errorcode.ErrorCode_MasterParamsError)
 	}
 	common.WriteResponse(w, status, &sandboxtypes.Res{

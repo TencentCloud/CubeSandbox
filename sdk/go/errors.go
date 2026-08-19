@@ -17,12 +17,18 @@ const (
 	apiErrorKindAuthentication   = "authentication"
 	apiErrorKindSandboxNotFound  = "sandbox_not_found"
 	apiErrorKindTemplateNotFound = "template_not_found"
+	apiErrorKindVolumeNotFound   = "volume_not_found"
+	apiErrorKindVolumeInUse      = "volume_in_use"
 )
 
 var (
 	ErrAuthentication   = errors.New("cubesandbox: authentication failed")
 	ErrSandboxNotFound  = errors.New("cubesandbox: sandbox not found")
 	ErrTemplateNotFound = errors.New("cubesandbox: template not found")
+	ErrVolumeNotFound   = errors.New("cubesandbox: volume not found")
+	// ErrVolumeInUse matches the HTTP 409 the server returns when deleting a
+	// volume that is still mounted by one or more sandboxes.
+	ErrVolumeInUse = errors.New("cubesandbox: volume is still in use")
 )
 
 // APIError describes an HTTP error returned by the CubeSandbox API.
@@ -53,6 +59,10 @@ func (e *APIError) Is(target error) bool {
 		return e.Kind == apiErrorKindSandboxNotFound
 	case ErrTemplateNotFound:
 		return e.Kind == apiErrorKindTemplateNotFound
+	case ErrVolumeNotFound:
+		return e.Kind == apiErrorKindVolumeNotFound
+	case ErrVolumeInUse:
+		return e.Kind == apiErrorKindVolumeInUse
 	default:
 		return false
 	}
@@ -75,16 +85,36 @@ func apiErrorFromStatus(statusCode int, message string) *APIError {
 	case http.StatusUnauthorized, http.StatusForbidden:
 		kind = apiErrorKindAuthentication
 	case http.StatusNotFound:
-		if strings.Contains(lowerMessage, "template") {
+		switch {
+		case strings.Contains(lowerMessage, "template"):
 			kind = apiErrorKindTemplateNotFound
-		} else {
+		// Match the exact server phrasing ("volume not found: <id>" from
+		// CubeMaster's volume handlers) rather than the bare word "volume",
+		// so a sandbox-related 404 that merely mentions a volume cannot be
+		// misclassified as ErrVolumeNotFound.
+		case strings.Contains(lowerMessage, "volume not found"):
+			kind = apiErrorKindVolumeNotFound
+		default:
 			kind = apiErrorKindSandboxNotFound
+		}
+	case http.StatusConflict:
+		// CubeMaster refuses to delete a mounted volume with
+		// "volume <id> is in use by <n> node(s); ..." relayed as HTTP 409.
+		// This mapping is coupled to that wording (handleDeleteVolume in
+		// CubeMaster) — keep the two in sync. If the server rewords the
+		// message, errors.Is(err, ErrVolumeInUse) degrades to false and the
+		// error surfaces as a generic 409 APIError. The duplicate-name 409
+		// ("volume already exists") intentionally stays generic.
+		if strings.Contains(lowerMessage, "volume") && strings.Contains(lowerMessage, "in use") {
+			kind = apiErrorKindVolumeInUse
 		}
 	}
 	if kind == apiErrorKindAPI && strings.Contains(lowerMessage, "not found") {
 		switch {
 		case strings.Contains(lowerMessage, "template"):
 			kind = apiErrorKindTemplateNotFound
+		case strings.Contains(lowerMessage, "volume not found"):
+			kind = apiErrorKindVolumeNotFound
 		case strings.Contains(lowerMessage, "sandbox"):
 			kind = apiErrorKindSandboxNotFound
 		}

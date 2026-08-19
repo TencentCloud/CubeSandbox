@@ -5,6 +5,7 @@
 package runtime
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -46,6 +47,14 @@ func cloneEgressRules(in []*EgressRule) []*EgressRule {
 		if r.Match != nil {
 			match := *r.Match
 			match.Method = append([]string(nil), r.Match.Method...)
+			// The pointer fields must be deep-copied too: a shallow struct copy
+			// would alias the caller's request, so a later mutation of the
+			// request would leak into the stored (supposedly immutable) copy.
+			match.SNI = cloneStringPtr(r.Match.SNI)
+			match.Host = cloneStringPtr(r.Match.Host)
+			match.Path = cloneStringPtr(r.Match.Path)
+			match.Scheme = cloneStringPtr(r.Match.Scheme)
+			match.Port = cloneIntPtr(r.Match.Port)
 			cp.Match = &match
 		}
 		if r.Action != nil {
@@ -75,6 +84,26 @@ func cloneEgressRules(in []*EgressRule) []*EgressRule {
 	return out
 }
 
+// cloneStringPtr returns a copy of a *string, or nil. Mirrors the CubeMaster
+// helper of the same name (pkg/service/sandbox/types/types.go).
+func cloneStringPtr(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+// cloneIntPtr returns a copy of a *int, or nil. Mirrors the CubeMaster helper
+// of the same name (pkg/service/sandbox/types/types.go).
+func cloneIntPtr(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
 // formatCubeNetworkConfig renders a compact log-only view of the policy. It
 // deliberately avoids dumping full L7 rule bodies, which may contain secrets in
 // header-injection rules.
@@ -94,10 +123,10 @@ func formatCubeNetworkConfig(in *CubeNetworkConfig) string {
 // allow_internet_access / allow_out / deny_out, and it also receives network
 // targets extracted from L7 rules as L7 allow targets. The complete L7 rules
 // are still pushed to CubeEgress separately.
-func cubeVSTapRegistration(cfg *CubeNetworkConfig) cubevs.MVMOptions {
+func cubeVSTapRegistration(cfg *CubeNetworkConfig) (cubevs.MVMOptions, error) {
 	if cfg == nil {
 		allowInternetAccess := true
-		return cubevs.MVMOptions{AllowInternetAccess: &allowInternetAccess}
+		return cubevs.MVMOptions{AllowInternetAccess: &allowInternetAccess}, nil
 	}
 	opts := cubevs.MVMOptions{}
 	if cfg.AllowInternetAccess != nil {
@@ -111,46 +140,135 @@ func cubeVSTapRegistration(cfg *CubeNetworkConfig) cubevs.MVMOptions {
 		allowOut := append([]string(nil), cfg.AllowOut...)
 		opts.AllowOut = &allowOut
 	}
-	if l7AllowOut := extractL7AllowOutTargetsFromRules(cfg.Rules); len(l7AllowOut) > 0 {
+	l7AllowOut, err := extractL7AllowOutTargetsFromRules(cfg.Rules)
+	if err != nil {
+		return cubevs.MVMOptions{}, err
+	}
+	if len(l7AllowOut) > 0 {
 		opts.L7AllowOut = &l7AllowOut
 	}
 	if len(cfg.DenyOut) > 0 {
 		denyOut := append([]string(nil), cfg.DenyOut...)
 		opts.DenyOut = &denyOut
 	}
-	return opts
+	return opts, nil
 }
 
-// extractL7AllowOutTargetsFromRules converts SNI/Host matches into the coarse
-// network targets that cubevs needs to allow before CubeEgress can inspect L7
-// traffic. Invalid or non-IPv4-looking targets are ignored rather than failing
-// sandbox creation; the full rule is still validated by CubeEgress on push.
-func extractL7AllowOutTargetsFromRules(rules []*EgressRule) []string {
-	seen := make(map[string]struct{})
-	targets := make([]string, 0, len(rules))
-	add := func(target string, ok bool) {
+// extractL7AllowOutTargetsFromRules walks the L7 rule list and produces the
+// (host, port, scheme) tuples cubevs needs for its per-host dns_allow_v2 /
+// allow_out_v3 port set. SNI-only rules and rules without a Match.Host are
+// treated as legacy port-agnostic entries — they expand to {80/http, 443/https}
+// downstream in buildL7Plan. Rules that specify a Port MUST also specify a
+// scheme ("http" or "https"). Any invalid port/scheme pair rejects the whole
+// projection so CubeVS and CubeEgress cannot observe different policies.
+//
+// Duplicate (host, port, scheme) tuples are deduplicated to keep the map
+// value's port_count within maxL7PortsPerHost when a user attaches the same
+// port to several rules.
+func extractL7AllowOutTargetsFromRules(rules []*EgressRule) ([]cubevs.L7Target, error) {
+	type key struct {
+		host   string
+		port   uint16
+		scheme uint8
+	}
+	seen := make(map[key]struct{})
+	targets := make([]cubevs.L7Target, 0, len(rules))
+	add := func(host string, ok bool, port uint16, scheme uint8) {
 		if !ok {
 			return
 		}
-		if _, exists := seen[target]; exists {
+		k := key{host, port, scheme}
+		if _, exists := seen[k]; exists {
 			return
 		}
-		seen[target] = struct{}{}
-		targets = append(targets, target)
+		seen[k] = struct{}{}
+		targets = append(targets, cubevs.L7Target{Host: host, Port: port, Scheme: scheme})
 	}
 
-	for _, rule := range rules {
+	for i, rule := range rules {
 		if rule == nil || rule.Match == nil {
 			continue
 		}
+		port, scheme, err := extractL7PortScheme(rule.Match)
+		if err != nil {
+			return nil, fmt.Errorf("network.rules[%d] %q: %w", i, rule.Name, err)
+		}
+		// A rule carrying both SNI and Host projects BOTH as L7 targets (SNI
+		// first, then Host), not Host alone.
 		if rule.Match.SNI != nil {
-			add(normalizeL7DomainTarget(*rule.Match.SNI))
+			host, ok := normalizeL7DomainTarget(*rule.Match.SNI)
+			add(host, ok, port, scheme)
 		}
 		if rule.Match.Host != nil {
-			add(normalizeL7HostTarget(*rule.Match.Host))
+			host, ok := normalizeL7HostTarget(*rule.Match.Host)
+			add(host, ok, port, scheme)
 		}
 	}
-	return targets
+	return targets, nil
+}
+
+// extractL7PortScheme reads Match.Port + Match.Scheme and normalises them into
+// cubevs.L7Target's numeric representation.
+//
+//   - Port set, Scheme nil → invalid (port without scheme cannot decide the
+//     nginx listener); reject.
+//   - Port nil, Scheme set  → fill in the scheme's default port (http → 80,
+//     https → 443). Callers that only want to say "https on this host" can
+//     omit port and get the conventional default.
+//   - Port set, Scheme set  → new port-scoped feature: exact tuple.
+//   - Both nil              → legacy: buildL7Plan expands to
+//     {80/http, 443/https}.
+//
+// Any recognised, non-empty Scheme string is normalised to lowercase and
+// stripped of surrounding whitespace before comparison — the wire form is
+// case-insensitive.
+func extractL7PortScheme(match *EgressRuleMatch) (uint16, uint8, error) {
+	if match.Port == nil && match.Scheme == nil {
+		// Legacy: buildL7Plan will expand to {80/http, 443/https}.
+		return 0, cubevs.L7SchemeNone, nil
+	}
+
+	// Scheme presence guides port validation. Decode it first (nil is fine).
+	var schemeValue uint8 = cubevs.L7SchemeNone
+	if match.Scheme != nil {
+		switch strings.ToLower(strings.TrimSpace(*match.Scheme)) {
+		case "http":
+			schemeValue = cubevs.L7SchemeHTTP
+		case "https":
+			schemeValue = cubevs.L7SchemeHTTPS
+		default:
+			return 0, 0, fmt.Errorf("scheme must be http or https, got %q", *match.Scheme)
+		}
+	}
+
+	if match.Port == nil {
+		// Scheme only → fill in scheme's canonical default port.
+		return defaultPortForScheme(schemeValue), schemeValue, nil
+	}
+
+	if match.Scheme == nil {
+		return 0, 0, errors.New("port requires scheme")
+	}
+
+	p := *match.Port
+	if p <= 0 || p > 65535 {
+		return 0, 0, fmt.Errorf("port must be in [1, 65535], got %d", p)
+	}
+	return uint16(p), schemeValue, nil
+}
+
+// defaultPortForScheme returns the conventional port for a bare scheme.
+// http → 80, https → 443. Any other scheme value returns 0 (should never be
+// reached: extractL7PortScheme rejects unknown schemes before calling this).
+func defaultPortForScheme(scheme uint8) uint16 {
+	switch scheme {
+	case cubevs.L7SchemeHTTP:
+		return 80
+	case cubevs.L7SchemeHTTPS:
+		return 443
+	default:
+		return 0
+	}
 }
 
 // normalizeL7DomainTarget canonicalizes a DNS name or wildcard suffix for the

@@ -65,7 +65,7 @@ If any number is red, click into **Nodes** to see which host is unhappy.
 ### 3.2 Create a sandbox
 
 1. Click **Sandboxes** in the left rail, then **+ New sandbox** (top-right).
-2. Pick a template from the grid. Templates marked `STALE` are disabled — pick a `READY` one.
+2. Pick a template from the grid. Prefer a `READY` template. A `STALE` badge only means the node's current component versions differ from those recorded on the template — creation is still allowed; make sure the node already has the component versions the template needs.
 3. (Optional) Add a few `meta` key/value pairs as labels.
 4. Click **Create**. Within a couple of seconds you'll be redirected to the sandbox's detail page, where you can watch its logs stream in real time.
 

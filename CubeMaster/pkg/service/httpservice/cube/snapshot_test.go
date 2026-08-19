@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
@@ -364,4 +365,136 @@ func TestBindAppSnapshotTemplateReplicaRequiresReadyReplica(t *testing.T) {
 	req := &types.CreateCubeSandboxReq{Annotations: map[string]string{}}
 	err := bindAppSnapshotTemplateReplica(context.Background(), "tpl-missing", req)
 	assert.Error(t, err)
+}
+
+func TestCompatibleNodesBySnapshot(t *testing.T) {
+	origFn := listCompatibleNodesForSnapshotFn
+	t.Cleanup(func() { listCompatibleNodesForSnapshotFn = origFn })
+	listCompatibleNodesForSnapshotFn = func(ctx context.Context, snapshotID string, includeAll bool) (*templatecenter.CompatibleNodesResult, error) {
+		assert.Equal(t, "snap-1", snapshotID)
+		assert.False(t, includeAll)
+		return &templatecenter.CompatibleNodesResult{
+			SnapshotID: snapshotID,
+			OriginNode: "node-a",
+			Nodes:      []templatecenter.CompatibleNode{{NodeID: "node-b", Compatible: true}},
+		}, nil
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/cube/snapshot/snap-1/compatible-nodes?request_id=req-1", nil)
+	rt := &CubeLog.RequestTrace{}
+	got := compatibleNodes(req, rt, "snap-1").(*compatibleNodesResponse)
+
+	assert.Equal(t, int(errorcode.ErrorCode_Success), got.Ret.RetCode)
+	assert.Equal(t, "snap-1", got.SnapshotID)
+	assert.Equal(t, "node-a", got.OriginNode)
+	if assert.Len(t, got.Nodes, 1) {
+		assert.Equal(t, "node-b", got.Nodes[0].NodeID)
+	}
+}
+
+func TestCompatibleNodesByFactors(t *testing.T) {
+	origFn := listCompatibleNodesForFactorsFn
+	t.Cleanup(func() { listCompatibleNodesForFactorsFn = origFn })
+	listCompatibleNodesForFactorsFn = func(ctx context.Context, factors *nodemeta.HostFacts, includeAll bool) (*templatecenter.CompatibleNodesResult, error) {
+		assert.Equal(t, "sha256:cpu", factors.CPUIDHash)
+		assert.Equal(t, "5.15.0", factors.HostKernelRelease)
+		assert.True(t, includeAll)
+		return &templatecenter.CompatibleNodesResult{
+			Nodes: []templatecenter.CompatibleNode{{NodeID: "node-b", Compatible: true}},
+		}, nil
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/cube/snapshot/ignored/compatible-nodes?cpuid_hash=sha256:cpu&host_kernel_release=5.15.0&include_all=true", nil)
+	rt := &CubeLog.RequestTrace{}
+	got := compatibleNodes(req, rt, "ignored").(*compatibleNodesResponse)
+
+	assert.Equal(t, int(errorcode.ErrorCode_Success), got.Ret.RetCode)
+	assert.Len(t, got.Nodes, 1)
+}
+
+// The dedicated /compatible-nodes-by-factors route serves the bare-factor mode
+// without a dummy snapshot_id segment.
+func TestCompatibleNodesByFactorsDedicatedRoute(t *testing.T) {
+	origFn := listCompatibleNodesForFactorsFn
+	t.Cleanup(func() { listCompatibleNodesForFactorsFn = origFn })
+	listCompatibleNodesForFactorsFn = func(ctx context.Context, factors *nodemeta.HostFacts, includeAll bool) (*templatecenter.CompatibleNodesResult, error) {
+		assert.Equal(t, "sha256:cpu", factors.CPUIDHash)
+		assert.Equal(t, "5.15.0", factors.HostKernelRelease)
+		return &templatecenter.CompatibleNodesResult{
+			Nodes: []templatecenter.CompatibleNode{{NodeID: "node-b", Compatible: true}},
+		}, nil
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/cube/snapshot/compatible-nodes-by-factors?cpuid_hash=sha256:cpu&host_kernel_release=5.15.0", nil)
+	rt := &CubeLog.RequestTrace{}
+	got := compatibleNodesByFactors(req, rt).(*compatibleNodesResponse)
+
+	assert.Equal(t, int(errorcode.ErrorCode_Success), got.Ret.RetCode)
+	assert.Len(t, got.Nodes, 1)
+}
+
+// The dedicated route rejects an under-specified query the same way the shared
+// mode does, without reaching the listing fn.
+func TestCompatibleNodesByFactorsDedicatedRouteUnderspecified(t *testing.T) {
+	origFn := listCompatibleNodesForFactorsFn
+	t.Cleanup(func() { listCompatibleNodesForFactorsFn = origFn })
+	called := false
+	listCompatibleNodesForFactorsFn = func(ctx context.Context, factors *nodemeta.HostFacts, includeAll bool) (*templatecenter.CompatibleNodesResult, error) {
+		called = true
+		return &templatecenter.CompatibleNodesResult{}, nil
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/cube/snapshot/compatible-nodes-by-factors?cpuid_hash=sha256:cpu", nil)
+	rt := &CubeLog.RequestTrace{}
+	got := compatibleNodesByFactors(req, rt).(*compatibleNodesResponse)
+
+	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Ret.RetCode)
+	assert.False(t, called, "factors fn must not be called for under-specified query")
+}
+
+func TestCompatibleNodesMissingParams(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/cube/snapshot//compatible-nodes", nil)
+	rt := &CubeLog.RequestTrace{}
+	got := compatibleNodes(req, rt, "").(*compatibleNodesResponse)
+
+	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Ret.RetCode)
+	assert.Equal(t, int64(errorcode.ErrorCode_MasterParamsError), rt.RetCode)
+}
+
+func TestCompatibleNodesFactorsErrorMapsToParamsError(t *testing.T) {
+	origFn := listCompatibleNodesForFactorsFn
+	t.Cleanup(func() { listCompatibleNodesForFactorsFn = origFn })
+	listCompatibleNodesForFactorsFn = func(ctx context.Context, factors *nodemeta.HostFacts, includeAll bool) (*templatecenter.CompatibleNodesResult, error) {
+		return nil, templatecenter.ErrRestoreCompatNoFactors
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/cube/snapshot/ignored/compatible-nodes?cpuid_hash=x&host_kernel_release=5.15.0", nil)
+	rt := &CubeLog.RequestTrace{}
+	got := compatibleNodes(req, rt, "ignored").(*compatibleNodesResponse)
+
+	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Ret.RetCode)
+}
+
+// A bare-factor query supplying only one of the two required factors must be
+// rejected with a params error rather than silently returning an empty list
+// (the missing required dimension would otherwise fail closed against every
+// candidate). The factors fn must never be reached.
+func TestCompatibleNodesBareFactorUnderspecified(t *testing.T) {
+	origFn := listCompatibleNodesForFactorsFn
+	t.Cleanup(func() { listCompatibleNodesForFactorsFn = origFn })
+	called := false
+	listCompatibleNodesForFactorsFn = func(ctx context.Context, factors *nodemeta.HostFacts, includeAll bool) (*templatecenter.CompatibleNodesResult, error) {
+		called = true
+		return &templatecenter.CompatibleNodesResult{}, nil
+	}
+
+	for _, q := range []string{"cpuid_hash=sha256:cpu", "host_kernel_release=5.15.0"} {
+		req := httptest.NewRequest(http.MethodGet, "/cube/snapshot/ignored/compatible-nodes?"+q, nil)
+		rt := &CubeLog.RequestTrace{}
+		got := compatibleNodes(req, rt, "ignored").(*compatibleNodesResponse)
+
+		assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Ret.RetCode)
+		assert.Equal(t, int64(errorcode.ErrorCode_MasterParamsError), rt.RetCode)
+	}
+	assert.False(t, called, "factors fn must not be called for under-specified query")
 }

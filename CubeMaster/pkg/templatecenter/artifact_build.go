@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter/cube_egress_ca"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter/image"
@@ -72,9 +74,13 @@ func ensureRootfsArtifact(ctx context.Context, req *types.CreateTemplateFromImag
 		record.DeletedAt = gorm.DeletedAt{}
 	}
 	if err == nil && record.Status == ArtifactStatusReady && record.GeneratedRequestJSON != "" {
-		generatedReq, err = generateTemplateCreateRequest(req, record, source.Config, downloadBaseURL)
-		if err == nil {
-			return record, generatedReq, false, nil
+		if validationErr := validateReusableRootfsArtifactFile(record); validationErr != nil {
+			log.G(ctx).Warnf("rootfs artifact %s is not reusable: %v; rebuilding", record.ArtifactID, validationErr)
+		} else {
+			generatedReq, err = generateTemplateCreateRequest(req, record, source.Config, downloadBaseURL)
+			if err == nil {
+				return record, generatedReq, false, nil
+			}
 		}
 	}
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -106,9 +112,13 @@ func ensureRootfsArtifact(ctx context.Context, req *types.CreateTemplateFromImag
 				record.DeletedAt = gorm.DeletedAt{}
 			}
 			if record.Status == ArtifactStatusReady && record.GeneratedRequestJSON != "" {
-				generatedReq, err = generateTemplateCreateRequest(req, record, source.Config, downloadBaseURL)
-				if err == nil {
-					return record, generatedReq, false, nil
+				if validationErr := validateReusableRootfsArtifactFile(record); validationErr != nil {
+					log.G(ctx).Warnf("rootfs artifact %s is not reusable: %v; rebuilding", record.ArtifactID, validationErr)
+				} else {
+					generatedReq, err = generateTemplateCreateRequest(req, record, source.Config, downloadBaseURL)
+					if err == nil {
+						return record, generatedReq, false, nil
+					}
 				}
 			}
 		}
@@ -236,6 +246,32 @@ func validateReusableRootfsArtifact(record *models.RootfsArtifact, fingerprint, 
 		return nil, fmt.Errorf("rootfs artifact %s fingerprint mismatch: want %s got %s", artifactID, fingerprint, record.TemplateSpecFingerprint)
 	}
 	return record, nil
+}
+
+func validateReusableRootfsArtifactFile(record *models.RootfsArtifact) error {
+	if record == nil {
+		return gorm.ErrRecordNotFound
+	}
+	if strings.TrimSpace(record.Ext4Path) == "" {
+		return fmt.Errorf("rootfs artifact %s ext4 path is empty", record.ArtifactID)
+	}
+	if record.Ext4SizeBytes <= 0 {
+		return fmt.Errorf("rootfs artifact %s ext4 size is invalid: %d", record.ArtifactID, record.Ext4SizeBytes)
+	}
+	info, err := os.Stat(record.Ext4Path) // NOCC:Path Traversal()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("rootfs artifact %s ext4 file %q is missing: %w", record.ArtifactID, record.Ext4Path, err)
+		}
+		return fmt.Errorf("stat rootfs artifact %s ext4 file %q: %w", record.ArtifactID, record.Ext4Path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("rootfs artifact %s ext4 path %q is not a regular file", record.ArtifactID, record.Ext4Path)
+	}
+	if info.Size() != record.Ext4SizeBytes {
+		return fmt.Errorf("rootfs artifact %s ext4 size mismatch: got %d want %d", record.ArtifactID, info.Size(), record.Ext4SizeBytes)
+	}
+	return nil
 }
 
 func rootfsArtifactSoftDeleted(record *models.RootfsArtifact) bool {

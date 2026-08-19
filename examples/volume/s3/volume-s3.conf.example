@@ -1,0 +1,30 @@
+# CubeMaster/plugin/volume-s3.conf or Cubelet/plugin/volume-s3.conf
+# (one-click install) — same directory as the cube-volume-s3 binary.
+#
+# Holds a plaintext secret: keep it root-owned and chmod 600.
+
+# Access key pair with read/write permission on BUCKET.
+ACCESS_KEY_ID=<your-access-key-id>
+SECRET_ACCESS_KEY=<your-secret-access-key>
+
+# Bucket that holds every volume, one prefix per volume: volumes/<volume_id>/
+BUCKET=my-cube-volumes
+
+# Required. The S3-compatible endpoint URL of your storage provider:
+#   AWS S3           https://s3.<region>.amazonaws.com
+#   Tigris           https://t3.storage.dev
+#   Cloudflare R2    https://<account-id>.r2.cloudflarestorage.com
+#   MinIO            http://<minio-host>:9000
+ENDPOINT=https://<your-s3-endpoint>
+
+# Optional. Region used for SigV4 signing; default us-east-1.
+# AWS: the bucket's region. Tigris/R2: auto. MinIO: any value.
+# REGION=us-east-1
+
+# Optional. Extra s3fs mount options, whitespace-separated, appended verbatim.
+# MinIO (and bucket names containing dots) usually need path-style addressing:
+# S3FS_EXTRA_OPTS=-ouse_path_request_style
+
+# FUSE mount base is passed by Cubelet on attach (--volume-base-dir,
+# default /data/cube-shared/volume). host_path must be under it, e.g.
+# /data/cube-shared/volume/s3-<volume_id>.

@@ -71,6 +71,101 @@ func (s *NetworkController) recover() error {
 	return nil
 }
 
+// runStaleNetPolicyMapGC deletes allow_out_v2 / deny_out / dns_allow outer keys
+// for ifindexes that are not in the live TAP set / pool. Normal TAP teardown
+// removes these keys, so the healthy startup path only scans the three outer
+// maps and deletes nothing. Cleanup can be slow when failed/bypassed teardown
+// has left thousands of stale inners; that exceptional recovery work runs
+// synchronously during controller startup.
+//
+// startControllerRuntime invokes this after recover has registered every live
+// TAP, but before the DNS reaper, background pool warmup, and request handling
+// can create or use another TAP lifecycle. The stillPresent/onConflict callbacks
+// remain as defensive checks for host-netdev changes outside this controller.
+func (s *NetworkController) runStaleNetPolicyMapGC() {
+	logger := CubeLog.WithContext(context.Background())
+	keep, err := s.buildStaleNetPolicyKeepSet()
+	if err != nil {
+		logger.Warnf(
+			"network runtime stale policy map gc: list taps failed, skip gc: %v",
+			err,
+		)
+		return
+	}
+	deleted, err := s.cubevsAdapter.GCStaleNetPolicyMaps(
+		keep,
+		netPolicyIfindexStillPresent,
+		s.restoreDefaultDenyAfterStaleGCConflict,
+	)
+	if err != nil {
+		logger.Warnf(
+			"network runtime stale policy map gc: keep=%d deleted=%d err=%v",
+			len(keep), deleted, err,
+		)
+		return
+	}
+	logger.Infof(
+		"network runtime stale policy map gc: keep=%d deleted=%d",
+		len(keep), deleted,
+	)
+}
+
+// restoreDefaultDenyAfterStaleGCConflict reinstalls reusable-pool default deny
+// when GC deleted outer keys for an ifindex that became live again (create
+// raced between stillPresent and outer.Delete).
+func (s *NetworkController) restoreDefaultDenyAfterStaleGCConflict(ifindex uint32) {
+	if err := s.cubevsAdapter.InstallTAPDefaultDenyPolicy(ifindex); err != nil {
+		CubeLog.WithContext(context.Background()).Warnf(
+			"network runtime stale policy map gc: restore default deny failed: ifindex=%d err=%v",
+			ifindex, err,
+		)
+		return
+	}
+	CubeLog.WithContext(context.Background()).Warnf(
+		"network runtime stale policy map gc: restored default deny after create race: ifindex=%d",
+		ifindex,
+	)
+}
+
+// buildStaleNetPolicyKeepSet returns ifindexes that must not have their
+// HashOfMaps outer policy keys deleted: every live Cube TAP plus every pool
+// entry (Ready/Cleaning/Active). Listing live TAPs is required; an incomplete
+// keep set would let GC treat live ifindexes as stale.
+func (s *NetworkController) buildStaleNetPolicyKeepSet() (map[uint32]struct{}, error) {
+	keep := make(map[uint32]struct{})
+	taps, err := s.tapAdapter.List()
+	if err != nil {
+		return nil, err
+	}
+	for _, tap := range taps {
+		if tap != nil && tap.Index > 0 {
+			keep[uint32(tap.Index)] = struct{}{}
+		}
+	}
+	if s.tapPool != nil {
+		for _, entry := range s.tapPool.Entries() {
+			if entry != nil && entry.TapIfIndex > 0 {
+				keep[uint32(entry.TapIfIndex)] = struct{}{}
+			}
+		}
+	}
+	return keep, nil
+}
+
+// netPolicyIfindexStillPresent reports whether a host netdev still occupies
+// ifindex. Transient netlink errors are treated as present so GC prefers a
+// temporary leak over wiping deny_out for a live TAP.
+func netPolicyIfindexStillPresent(ifindex uint32) bool {
+	_, err := netlinkLinkByIndex(int(ifindex))
+	if err == nil {
+		return true
+	}
+	if isTapNotFound(err) {
+		return false
+	}
+	return true
+}
+
 func (s *NetworkController) indexRecoverableStates(records []*StateRecord) (map[string]*StateRecord, map[string]struct{}, error) {
 	statesByTapNameOrIP := make(map[string]*StateRecord, len(records)*2)
 	statesBySandboxID := make(map[string]*StateRecord, len(records))
@@ -675,19 +770,25 @@ func (s *NetworkController) claimRecoveredSuccessResources(state *managedState) 
 }
 
 // cleanupConflictingTap destroys a stale host tap that collides with a freshly
-// allocated IP. It must be called without holding s.mu: the netlink list and the
-// destroy syscall run lock-free, while the membership checks against the
+// allocated IP. It must be called without holding s.mu: the netlink lookup and
+// the destroy syscall run lock-free, while the membership checks against the
 // in-memory collections are performed under s.mu. The IP is already exclusively
 // owned by the caller (handed out by the allocator) and tap names derive
 // uniquely from the IP, so no other goroutine can re-reference this tap between
 // the check and the destroy.
+//
+// Lookup is by deterministic tap name (RTM_GETLINK), not LinkList. A full dump
+// of every host interface on every pool-miss create races with concurrent TAP
+// churn and surfaces as netlink ErrDumpInterrupted under density load.
 func (s *NetworkController) cleanupConflictingTap(ip net.IP) error {
-	taps, err := s.tapAdapter.List()
+	tap, err := s.tapAdapter.GetByName(tapName(ip.String()))
 	if err != nil {
+		if isTapNotFound(err) {
+			return nil
+		}
 		return err
 	}
-	tap, ok := taps[ip.String()]
-	if !ok {
+	if tap == nil {
 		return nil
 	}
 	if err := s.checkTapConflict(tap, ip); err != nil {

@@ -168,6 +168,53 @@ func TestMigrationVersionParityAcrossDialects(t *testing.T) {
 	}
 }
 
+// mysqlGETLockNameMaxLen is MySQL's hard limit for user-level lock names
+// (GET_LOCK / RELEASE_LOCK). Exceeding it fails with Error 4163.
+const mysqlGETLockNameMaxLen = 64
+
+var migrationLockNameRe = regexp.MustCompile(
+	`(?:cubemaster_acquire_migration_lock|RELEASE_LOCK|pg_advisory_unlock\(hashtext)\('([^']+)'`)
+
+// TestMigrationLockNamesRespectMySQLGETLockLimit ensures every migration lock
+// name fits in MySQL's 64-char GET_LOCK limit. Postgres advisory locks hash the
+// name, but we keep the same strings across dialects, so the MySQL limit
+// applies to both trees. Long filenames must use an abbreviated suffix (see
+// migrations/*/README.md), e.g. ..._shim_ver not ..._template_replica_shim_version.
+func TestMigrationLockNamesRespectMySQLGETLockLimit(t *testing.T) {
+	for _, dialect := range migrationDialects {
+		t.Run(dialect, func(t *testing.T) {
+			dir := filepath.Join("migrations", dialect)
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatalf("read %s: %v", dir, err)
+			}
+			for _, e := range entries {
+				if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+					continue
+				}
+				path := filepath.Join(dir, e.Name())
+				body, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatalf("read %s: %v", path, err)
+				}
+				seen := map[string]bool{}
+				for _, m := range migrationLockNameRe.FindAllSubmatch(body, -1) {
+					name := string(m[1])
+					if seen[name] {
+						continue
+					}
+					seen[name] = true
+					if len(name) > mysqlGETLockNameMaxLen {
+						t.Errorf("%s: lock name %q is %d chars (MySQL GET_LOCK max %d); "+
+							"abbreviate the suffix (e.g. _shim_ver, _rt_active, _tpl_alias_unique)",
+							path, name, len(name), mysqlGETLockNameMaxLen)
+					}
+				}
+			}
+		})
+	}
+}
+
 // listMigrationVersionFiles maps integer goose version → filename for every
 // .sql migration under dir.
 func listMigrationVersionFiles(t *testing.T, dir string) map[int64]string {

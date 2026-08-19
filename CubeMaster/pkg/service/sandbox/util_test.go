@@ -36,6 +36,49 @@ func ensureSandboxTestConfig(t *testing.T) *config.Config {
 	return cfg
 }
 
+func TestValidateEgressRuleMatch(t *testing.T) {
+	strPtr := func(s string) *string { return &s }
+	intPtr := func(i int) *int { return &i }
+
+	valid := []struct {
+		name  string
+		match *types.EgressRuleMatch
+	}{
+		{"nil match", nil},
+		{"empty match", &types.EgressRuleMatch{}},
+		{"scheme only", &types.EgressRuleMatch{Scheme: strPtr("https")}},
+		{"scheme case variant", &types.EgressRuleMatch{Scheme: strPtr("HTTPS")}},
+		{"scheme with spaces", &types.EgressRuleMatch{Scheme: strPtr(" http ")}},
+		{"port with scheme", &types.EgressRuleMatch{Port: intPtr(8443), Scheme: strPtr("https")}},
+		{"port boundary low", &types.EgressRuleMatch{Port: intPtr(1), Scheme: strPtr("http")}},
+		{"port boundary high", &types.EgressRuleMatch{Port: intPtr(65535), Scheme: strPtr("https")}},
+	}
+	for _, tt := range valid {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.NoError(t, validateEgressRuleMatch(tt.match, 0))
+		})
+	}
+
+	invalid := []struct {
+		name    string
+		match   *types.EgressRuleMatch
+		wantErr string
+	}{
+		{"port without scheme", &types.EgressRuleMatch{Port: intPtr(8443)}, "requires match.scheme"},
+		{"port zero", &types.EgressRuleMatch{Port: intPtr(0), Scheme: strPtr("http")}, "[1, 65535]"},
+		{"port negative", &types.EgressRuleMatch{Port: intPtr(-1), Scheme: strPtr("http")}, "[1, 65535]"},
+		{"port too large", &types.EgressRuleMatch{Port: intPtr(65536), Scheme: strPtr("http")}, "[1, 65535]"},
+		{"scheme not http", &types.EgressRuleMatch{Scheme: strPtr("ftp")}, "must be 'http' or 'https'"},
+	}
+	for _, tt := range invalid {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateEgressRuleMatch(tt.match, 0)
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
 func TestValidateMaskRequestHost(t *testing.T) {
 	for _, value := range []string{
 		"localhost",

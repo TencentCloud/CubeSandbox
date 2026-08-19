@@ -66,6 +66,66 @@ describe("serializeRule", () => {
       { header: "Authorization", secret: "sk_xxx", format: "Bearer ${SECRET}" },
     ]);
   });
+
+  it("emits port and normalizes scheme casing on the wire", () => {
+    const wire = serializeRule({
+      name: "r1",
+      match: { host: "api.example.com", port: 8443, scheme: "HTTPS" as "https" },
+      action: { allow: true },
+    });
+    expect(wire.match).toEqual({ host: "api.example.com", port: 8443, scheme: "https" });
+  });
+
+  it("rejects port without scheme", () => {
+    expect(() =>
+      serializeRule({
+        name: "r1",
+        match: { host: "api.example.com", port: 8443 },
+        action: { allow: true },
+      }),
+    ).toThrow("match.port requires match.scheme to be set");
+  });
+
+  it("rejects out-of-range ports", () => {
+    for (const port of [0, -1, 65536, 99999]) {
+      expect(() =>
+        serializeRule({
+          name: "r1",
+          match: { host: "api.example.com", port, scheme: "https" },
+          action: { allow: true },
+        }),
+      ).toThrow("match.port must be in [1, 65535]");
+    }
+  });
+
+  it("rejects non-integer ports", () => {
+    expect(() =>
+      serializeRule({
+        name: "r1",
+        match: { host: "api.example.com", port: 443.5, scheme: "https" },
+        action: { allow: true },
+      }),
+    ).toThrow("match.port must be an int");
+  });
+
+  it("rejects unknown schemes", () => {
+    expect(() =>
+      serializeRule({
+        name: "r1",
+        match: { host: "api.example.com", scheme: "gopher" as "http" },
+        action: { allow: true },
+      }),
+    ).toThrow("match.scheme must be 'http' or 'https'");
+  });
+
+  it("accepts scheme alone (legacy default-set filter)", () => {
+    const wire = serializeRule({
+      name: "r1",
+      match: { host: "api.example.com", scheme: "https" },
+      action: { allow: true },
+    });
+    expect(wire.match).toEqual({ host: "api.example.com", scheme: "https" });
+  });
 });
 
 describe("renderInject", () => {

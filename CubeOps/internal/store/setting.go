@@ -7,6 +7,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+
+	"gorm.io/gorm"
 )
 
 const settingMasterKey = "secret_master_key"
@@ -80,6 +82,22 @@ func (s *Store) SetSetting(ctx context.Context, key, value string) error {
 		upsertSettingSQL("t_agenthub_setting"),
 		key, value,
 	).Error
+}
+
+// SetSettingsTx upserts multiple AgentHub settings atomically in one
+// transaction, rolling back the whole batch on any failure.
+func (s *Store) SetSettingsTx(ctx context.Context, kv map[string]string) error {
+	if len(kv) == 0 {
+		return nil
+	}
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for key, value := range kv {
+			if err := tx.Exec(upsertSettingSQL("t_agenthub_setting"), key, value).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // ── System users (t_system_user) ────────────────────────────────────────────

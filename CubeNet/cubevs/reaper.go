@@ -165,7 +165,9 @@ type natSession struct {
 	VMPort      uint16
 	State       uint8
 	ActiveClose uint8
-	Reserved    [34]uint8
+	PacketClass uint8
+	L7Scheme    uint8
+	Reserved    [32]uint8
 }
 
 // timeout returns the timeout for the session in nanoseconds.
@@ -219,6 +221,14 @@ type ingressSessionValue struct {
 	VMIP     uint32
 	VMPort   uint16
 	Reserved [3]uint16
+}
+
+//nolint:unused
+func ingressSession(key *sessionKey, value *ingressSessionValue) string {
+	return fmt.Sprintf("%s:%d->%s:%d(%s:%d)",
+		uint32ToIP(key.SourceIP), ntohs(key.SourcePort),
+		uint32ToIP(key.TargetIP), ntohs(key.TargetPort),
+		uint32ToIP(value.VMIP), ntohs(value.VMPort))
 }
 
 // StartSessionReaper starts a goroutine that will periodically

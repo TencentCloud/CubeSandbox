@@ -50,6 +50,8 @@ type SnapshotCatalogEntry struct {
 	BuildRootfsVol  string `json:"build_rootfs_vol,omitempty"`
 	BuildRootfsKind string `json:"build_rootfs_kind,omitempty"`
 	RootfsSizeBytes uint64 `json:"rootfs_size_bytes,omitempty"`
+	// ComponentVersions: inventory dir name → version string (no absolute paths).
+	ComponentVersions map[string]string `json:"component_versions,omitempty"`
 	// Kind distinguishes the producer/semantics of this catalog entry so
 	// CleanupTemplate/GetLocalSnapshot consumers can branch where needed.
 	// Empty == legacy entry (pre-v4) and should be treated as a runtime
@@ -66,6 +68,10 @@ const (
 	// CatalogKindTemplate is produced by AppSnapshot (building a template
 	// from an image / one-shot sandbox).
 	CatalogKindTemplate = "template"
+	// CatalogKindPauseSnapshot is produced by Pause when the MicroVM is
+	// snapshotted into CubeCow and the shim exits. Resume recreates the
+	// sandbox from this catalog entry with the same sandboxID.
+	CatalogKindPauseSnapshot = "pause_snapshot"
 )
 
 // SnapshotCatalogEntryResolved enriches a catalog entry with freshly re-resolved
@@ -260,11 +266,11 @@ func ResolveLocalSnapshot(ctx context.Context, snapshotID string) (*SnapshotCata
 		return nil, err
 	}
 	out := &SnapshotCatalogEntryResolved{SnapshotCatalogEntry: *entry}
-	rootfsDev, err := ResolveCowDevPath(ctx, entry.RootfsVol, entry.RootfsKind)
+	rootfsDev, err := ResolveObjectPath(ctx, entry.RootfsVol, entry.RootfsKind)
 	if err != nil {
 		return nil, fmt.Errorf("resolve rootfs dev: %w", err)
 	}
-	memoryDev, err := ResolveCowDevPath(ctx, entry.MemoryVol, entry.MemoryKind)
+	memoryDev, err := ResolveObjectPath(ctx, entry.MemoryVol, entry.MemoryKind)
 	if err != nil {
 		return nil, fmt.Errorf("resolve memory dev: %w", err)
 	}
@@ -333,10 +339,25 @@ func readSnapshotCatalogFile(path string) (*SnapshotCatalogEntry, error) {
 	return entry, nil
 }
 
+// ReadSnapshotCatalogAt loads catalog.json under snapshotPath when present.
+func ReadSnapshotCatalogAt(snapshotPath string) (*SnapshotCatalogEntry, error) {
+	snapshotPath = strings.TrimSpace(snapshotPath)
+	if snapshotPath == "" {
+		return nil, ErrSnapshotCatalogNotFound
+	}
+	return readSnapshotCatalogFile(filepath.Join(filepath.Clean(snapshotPath), snapshotCatalogFileName))
+}
+
 func cloneCatalogEntry(in *SnapshotCatalogEntry) *SnapshotCatalogEntry {
 	if in == nil {
 		return nil
 	}
 	out := *in
+	if in.ComponentVersions != nil {
+		out.ComponentVersions = make(map[string]string, len(in.ComponentVersions))
+		for k, v := range in.ComponentVersions {
+			out.ComponentVersions[k] = v
+		}
+	}
 	return &out
 }

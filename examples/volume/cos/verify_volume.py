@@ -31,7 +31,9 @@
 #       4) sandbox      -> inspect mount + read/write (CLI + SDK)
 #       5) destroy()    -> delete volume
 #       6) list()       -> assert entry is gone
-#     Drivers not deployed here (cfs / s3 / nfs) are skipped when listed.
+#     Drivers not deployed here (cfs / s3 / nfs by default) are skipped when
+#     listed; override the skip list with CUBE_VOLUME_SKIP_DRIVERS (empty
+#     string = skip nothing, e.g. when examples/volume/s3 is deployed).
 #
 #   Block 2 — Multi-sandbox data-plane scenarios (one working driver):
 #     B   one volume, two sandboxes  -> both inspect mount; A writes, B reads
@@ -222,8 +224,14 @@ def create_sandbox(template_id: str, volume_mounts=None, **kwargs):
     return Sandbox.create(template=template_id, **kwargs)
 
 # Drivers not deployed in the default COS demo environment; skip if listed in
-# CUBE_VOLUME_DRIVERS instead of failing block 1.
-SKIPPED_DRIVERS = frozenset({"cfs", "s3", "nfs"})
+# CUBE_VOLUME_DRIVERS instead of failing block 1. Environments that do deploy
+# one of these names (e.g. the generic examples/volume/s3 plugin as "s3")
+# override the list via CUBE_VOLUME_SKIP_DRIVERS; an empty string skips nothing.
+SKIPPED_DRIVERS = frozenset(
+    d.strip()
+    for d in os.environ.get("CUBE_VOLUME_SKIP_DRIVERS", "cfs,s3,nfs").split(",")
+    if d.strip()
+)
 
 PASS = 0
 FAIL = 0

@@ -356,6 +356,13 @@ func (em *eventMonitor) handleContainerExit(ctx context.Context, e *eventtypes.T
 		log.G(ctx).Infof("ignoring TaskExit for container %s: rollback in flight", e.ID)
 		return nil
 	}
+	// CoW PauseToSnapshot exits the shim on purpose. TaskExit must not stamp
+	// FinishedAt / drive task.Delete while PausingAt or PausedAt is set —
+	// otherwise List/Info flicker to EXITED instead of PAUSING/PAUSED.
+	if cntr.Status != nil && cntr.Status.IsPaused() {
+		log.G(ctx).Infof("ignoring TaskExit for container %s: pause lifecycle in flight", e.ID)
+		return nil
+	}
 	if cntr.Container == nil {
 		return nil
 	}

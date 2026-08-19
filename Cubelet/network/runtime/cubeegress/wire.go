@@ -59,6 +59,7 @@ type MatchInput struct {
 	Method []string
 	Path   *string
 	Scheme *string
+	Port   *int
 }
 
 // ActionInput mirrors runtime.EgressRuleAction.
@@ -174,6 +175,12 @@ func renderMatch(m *MatchInput) map[string]any {
 	}
 	if m.Scheme != nil {
 		out["scheme"] = *m.Scheme
+	}
+	if m.Port != nil {
+		// CubeEgress's access_phase.lua rule_matches compares match.port
+		// against ctx.dst_port (from tproxy's $server_port). Emit as a
+		// number so cjson decodes it to a numeric type in openresty.
+		out["port"] = *m.Port
 	}
 	return out
 }

@@ -28,6 +28,7 @@ type SnapshotInfo struct {
 	DisplayName               string                             `json:"display_name,omitempty"`
 	OriginSandboxID           string                             `json:"origin_sandbox_id,omitempty"`
 	OriginNodeID              string                             `json:"origin_node_id,omitempty"`
+	OriginHostFactsJSON       string                             `json:"origin_host_facts_json,omitempty"`
 	StorageBackend            string                             `json:"storage_backend,omitempty"`
 	Retain                    bool                               `json:"retain,omitempty"`
 	RootfsSizeBytesAtSnapshot uint64                             `json:"rootfs_size_bytes_at_snapshot,omitempty"`
@@ -72,6 +73,8 @@ func ListSnapshots(ctx context.Context, opts *ListSnapshotsOptions) ([]SnapshotI
 	normalized := normalizeListSnapshotsOptions(opts)
 	filtered := make([]SnapshotInfo, 0, len(infos))
 	for _, info := range infos {
+		// Pause snaps share snap-* IDs but Kind=pause_snapshot; never list them
+		// as user-visible normal snapshots.
 		if !strings.EqualFold(strings.TrimSpace(info.Kind), TemplateKindSnapshot) {
 			continue
 		}
@@ -199,6 +202,7 @@ func snapshotInfoFromTemplateInfo(info *TemplateInfo, createReq *sandboxtypes.Cr
 		DisplayName:               info.DisplayName,
 		OriginSandboxID:           info.OriginSandboxID,
 		OriginNodeID:              info.OriginNodeID,
+		OriginHostFactsJSON:       info.OriginHostFactsJSON,
 		StorageBackend:            info.StorageBackend,
 		Retain:                    info.Retain,
 		RootfsSizeBytesAtSnapshot: info.RootfsSizeBytesAtSnapshot,

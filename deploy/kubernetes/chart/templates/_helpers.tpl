@@ -820,6 +820,8 @@ Installer: toolbox only (no dataplane mounts).
   mountPath: /usr/local/services/cubetoolbox
 - name: bootstrap-state
   mountPath: {{ .Values.hostPaths.bootstrapState }}
+- name: data-cubelet
+  mountPath: {{ .Values.hostPaths.dataCubelet }}
 {{- end -}}
 
 {{- define "cube.installerComponentEnv" -}}
@@ -830,6 +832,8 @@ Installer: toolbox only (no dataplane mounts).
   value: /opt/cube-image
 - name: STATE_DIR
   value: {{ .Values.hostPaths.bootstrapState | quote }}
+- name: COMPONENT_VERSIONS_ROOT
+  value: {{ printf "%s/root/component_versions" .Values.hostPaths.dataCubelet | quote }}
 - name: CUBE_PVM_ENABLE
   value: {{ ternary "1" "0" .Values.cubeNode.pvmGuestKernel.enabled | quote }}
 {{- end -}}

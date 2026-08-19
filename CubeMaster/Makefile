@@ -127,8 +127,13 @@ test:
 	$(call msg,Run unit tests)
 	$(Q)go clean -testcache
 	$(Q)mkdir -p coverage
+	@# -gcflags=all=-l disables inlining, which is REQUIRED by the gomonkey-based
+	@# tests (e.g. ./pkg/templatecenter): gomonkey redirects a function by
+	@# rewriting its machine code, but an inlined call site bypasses the patch, so
+	@# a stub intermittently fails to take effect and the real function runs. The
+	@# integration targets (testlocal/testtt) already pass this flag.
 	@( for pkg in ${COVERAGE_PACKAGES}; do \
-		CI=true go test -short -v -timeout=20m ${TEST_FLAGS} \
+		CI=true go test -short -v -gcflags=all=-l -timeout=20m ${TEST_FLAGS} \
 			-coverprofile=coverage/unit-test-`echo $$pkg | tr "/" "_"`.cov \
 			$$pkg || exit 1 ;\
 	done )

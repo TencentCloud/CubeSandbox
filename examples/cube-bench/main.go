@@ -35,6 +35,8 @@ type Config struct {
 	APIKey         string
 	ThemeName      string
 	HostMount      string // raw JSON array for config display and report export
+	NetworkPolicy  string // none | rules
+	networkFP      networkConfigFingerprint
 	hostMountValue string // compacted once for request-time reuse
 	requestBody    []byte
 	requestHeaders map[string]string
@@ -48,8 +50,10 @@ type Config struct {
 }
 
 type createRequest struct {
-	TemplateID string            `json:"templateID"`
-	Metadata   map[string]string `json:"metadata,omitempty"`
+	TemplateID          string                `json:"templateID"`
+	AllowInternetAccess *bool                 `json:"allow_internet_access,omitempty"`
+	Network             *sandboxNetworkConfig `json:"network,omitempty"`
+	Metadata            map[string]string     `json:"metadata,omitempty"`
 }
 
 func prepareHostMount(rawJSON string) (string, error) {
@@ -72,10 +76,21 @@ func prepareHostMount(rawJSON string) (string, error) {
 	return compact.String(), nil
 }
 
-func buildCreateRequestBody(template string, hostMount string) ([]byte, error) {
+func buildCreateRequestBody(template string, hostMount string, networkPolicy string) ([]byte, error) {
 	reqBody := createRequest{TemplateID: template}
 	if hostMount != "" {
 		reqBody.Metadata = map[string]string{"host-mount": hostMount}
+	}
+	switch networkPolicy {
+	case "", networkPolicyNone:
+		// empty-network baseline (historical cube-bench behavior)
+	case networkPolicyRules:
+		denyAll := false
+		net := rulesNetworkConfig()
+		reqBody.AllowInternetAccess = &denyAll
+		reqBody.Network = &net
+	default:
+		return nil, fmt.Errorf("unsupported network policy %q", networkPolicy)
 	}
 	return json.Marshal(reqBody)
 }
@@ -96,6 +111,8 @@ func parseConfig() *Config {
 	flag.StringVar(&cfg.Output, "o", "", "Export JSON report to file")
 	flag.StringVar(&cfg.Output, "output", "", "Export JSON report to file")
 	flag.StringVar(&cfg.HostMount, "host-mount", "", "Host mount list as a JSON array")
+	flag.StringVar(&cfg.NetworkPolicy, "network-policy", networkPolicyNone, "Network policy on create: none (no rules) | rules")
+	flag.StringVar(&cfg.NetworkPolicy, "np", networkPolicyNone, "Short for --network-policy")
 	flag.StringVar(&cfg.APIURL, "api-url", "", "CubeAPI base URL (overrides E2B_API_URL)")
 	flag.StringVar(&cfg.APIKey, "api-key", "", "API key (overrides E2B_API_KEY)")
 	flag.StringVar(&cfg.ThemeName, "theme", "auto", "Color theme: dark | light | auto")
@@ -110,6 +127,14 @@ func parseConfig() *Config {
 	flag.Parse()
 
 	cfg.NoTUI = noTUI || !term.IsTerminal(int(os.Stdout.Fd()))
+
+	policy, err := parseNetworkPolicy(cfg.NetworkPolicy)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.NetworkPolicy = policy
+	cfg.networkFP = networkFingerprint(policy)
 
 	cfg.DryLatencyMean = 80
 	cfg.DryLatencyStd = 30
@@ -163,7 +188,7 @@ func parseConfig() *Config {
 	cfg.hostMountValue = hostMountValue
 	cfg.requestHeaders = map[string]string{"Authorization": "Bearer " + cfg.APIKey}
 
-	requestBody, err := buildCreateRequestBody(cfg.Template, cfg.hostMountValue)
+	requestBody, err := buildCreateRequestBody(cfg.Template, cfg.hostMountValue, cfg.NetworkPolicy)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: create request body build failed: %v\n", err)
 		os.Exit(1)
@@ -189,6 +214,7 @@ func renderConfig(cfg *Config) {
 		{"Total Requests", fmt.Sprintf("%d", cfg.Total)},
 		{"Warmup Rounds", fmt.Sprintf("%d", cfg.Warmup)},
 		{"Mode", cfg.Mode},
+		{"Network Policy", cfg.networkFP.summary()},
 	}
 	if cfg.HostMount != "" {
 		// Pretty-print the original host-mount JSON for readability.
@@ -294,13 +320,17 @@ func exportJSON(results []IterResult, cfg *Config) {
 	report := map[string]interface{}{
 		"timestamp": time.Now().UTC().Format(time.RFC3339),
 		"config": map[string]interface{}{
-			"template":    cfg.Template,
-			"api_url":     cfg.APIURL,
-			"concurrency": cfg.Concurrency,
-			"total":       cfg.Total,
-			"warmup":      cfg.Warmup,
-			"mode":        cfg.Mode,
-			"host_mount":  cfg.HostMount,
+			"template":             cfg.Template,
+			"api_url":              cfg.APIURL,
+			"concurrency":          cfg.Concurrency,
+			"total":                cfg.Total,
+			"warmup":               cfg.Warmup,
+			"mode":                 cfg.Mode,
+			"host_mount":           cfg.HostMount,
+			"network_policy":       cfg.networkFP.Policy,
+			"network_allow_out":    cfg.networkFP.AllowOut,
+			"network_rules":        cfg.networkFP.Rules,
+			"network_inject_rules": cfg.networkFP.InjectRules,
 		},
 		"summary": map[string]interface{}{
 			"total_time_s":   cfg.elapsed,

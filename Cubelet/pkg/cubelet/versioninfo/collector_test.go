@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 )
 
 func versionOf(t *testing.T, list []ComponentVersion, component string) (ComponentVersion, bool) {
@@ -40,14 +42,19 @@ func writeManifest(t *testing.T, dir string) {
   "kernel": {
     "version": "5.10.0-100",
     "pvm_version": "6.6.69-1.2.cubesandbox",
-    "vmlinux_digest_sha256": "sha256:ordinary",
-    "vmlinux_pvm_digest_sha256": "sha256:pvm"
+    "vmlinux_digest_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "vmlinux_pvm_digest_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
   }
 }`
 	if err := os.WriteFile(filepath.Join(dir, manifestFileName), []byte(manifest), 0o644); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
 }
+
+const (
+	testBMKernelIdentity  = "sha256-aaaaaaaaaaaa@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testPVMKernelIdentity = "sha256-bbbbbbbbbbbb@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+)
 
 func mkComponentDir(t *testing.T, base, name string) {
 	t.Helper()
@@ -173,7 +180,7 @@ func TestCollectCubeletFromBinaryAndSpecialComponents(t *testing.T) {
 	}
 
 	kernel, ok := versionOf(t, got, ComponentKernel)
-	if !ok || kernel.Version != "5.10.0-100@sha256:ordinary" {
+	if !ok || kernel.Version != testBMKernelIdentity {
 		t.Errorf("kernel must come from kernel identity, got %+v ok=%v", kernel, ok)
 	}
 
@@ -228,7 +235,7 @@ func TestCollectKernelFromActiveOrdinarySymlink(t *testing.T) {
 	got := c.Collect()
 
 	kernel, ok := versionOf(t, got, ComponentKernel)
-	if !ok || kernel.Version != "5.10.0-100@sha256:ordinary" || kernel.Source != SourceFile {
+	if !ok || kernel.Version != testBMKernelIdentity || kernel.Source != SourceFile {
 		t.Fatalf("kernel must follow ordinary active symlink, got %+v ok=%v", kernel, ok)
 	}
 }
@@ -242,7 +249,7 @@ func TestCollectKernelFromActivePVMSymlink(t *testing.T) {
 	got := c.Collect()
 
 	kernel, ok := versionOf(t, got, ComponentKernel)
-	if !ok || kernel.Version != "6.6.69-1.2.cubesandbox@sha256:pvm" || kernel.Source != SourceFile {
+	if !ok || kernel.Version != testPVMKernelIdentity || kernel.Source != SourceFile {
 		t.Fatalf("kernel must follow PVM active symlink, got %+v ok=%v", kernel, ok)
 	}
 }
@@ -256,8 +263,8 @@ func TestCollectKernelIdentityFallsBackToDigestWhenTagUnknown(t *testing.T) {
   "kernel": {
     "version": "unknown",
     "pvm_version": "unknown",
-    "vmlinux_digest_sha256": "sha256:ordinary",
-    "vmlinux_pvm_digest_sha256": "sha256:pvm"
+    "vmlinux_digest_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "vmlinux_pvm_digest_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
   }
 }`
 	if err := os.WriteFile(filepath.Join(dir, manifestFileName), []byte(manifest), 0o644); err != nil {
@@ -269,7 +276,7 @@ func TestCollectKernelIdentityFallsBackToDigestWhenTagUnknown(t *testing.T) {
 	got := c.Collect()
 
 	kernel, ok := versionOf(t, got, ComponentKernel)
-	if !ok || kernel.Version != "sha256:pvm" || kernel.Source != SourceFile {
+	if !ok || kernel.Version != testPVMKernelIdentity || kernel.Source != SourceFile {
 		t.Fatalf("kernel must use digest when tag is unknown, got %+v ok=%v", kernel, ok)
 	}
 }
@@ -289,8 +296,21 @@ func TestCollectKernelIdentityFallbackForLegacyNonSymlink(t *testing.T) {
 	got := c.Collect()
 
 	kernel, ok := versionOf(t, got, ComponentKernel)
-	if !ok || kernel.Version != "5.10.0-100@sha256:ordinary" || kernel.Source != SourceManifest {
+	if !ok || kernel.Version != testBMKernelIdentity || kernel.Source != SourceManifest {
 		t.Fatalf("legacy non-symlink kernel must fall back to ordinary identity, got %+v ok=%v", kernel, ok)
+	}
+}
+
+func TestKernelContentIdentity(t *testing.T) {
+	full := "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	if got := templatetypes.ContentAddressedKernelIdentity(full); got != "sha256-cccccccccccc@"+full {
+		t.Fatalf("ContentAddressedKernelIdentity=%q", got)
+	}
+	if got := templatetypes.ContentAddressedKernelIdentity("unknown"); got != "" {
+		t.Fatalf("unknown digest must be empty, got %q", got)
+	}
+	if got := templatetypes.ContentAddressedKernelIdentity("sha256:nothex!!!!"); got != "sha256:nothex!!!!" {
+		t.Fatalf("non-hex digest returns as-is, got %q", got)
 	}
 }
 
@@ -322,13 +342,13 @@ func TestKernelSymlinkReread(t *testing.T) {
 	mkKernelLayout(t, dir, "vmlinux-bm")
 
 	c := NewCollector(dir)
-	if kernel, _ := versionOf(t, c.Collect(), ComponentKernel); kernel.Version != "5.10.0-100@sha256:ordinary" {
+	if kernel, _ := versionOf(t, c.Collect(), ComponentKernel); kernel.Version != testBMKernelIdentity {
 		t.Fatalf("expected ordinary kernel, got %q", kernel.Version)
 	}
 
 	time.Sleep(10 * time.Millisecond)
 	mkKernelLayout(t, dir, "vmlinux-pvm")
-	if kernel, _ := versionOf(t, c.Collect(), ComponentKernel); kernel.Version != "6.6.69-1.2.cubesandbox@sha256:pvm" {
+	if kernel, _ := versionOf(t, c.Collect(), ComponentKernel); kernel.Version != testPVMKernelIdentity {
 		t.Fatalf("expected PVM kernel after symlink switch, got %q", kernel.Version)
 	}
 }
@@ -492,8 +512,8 @@ func TestCollectKernelFromVersionJSONAndActiveSymlink(t *testing.T) {
 	body := `{
   "schema_version": 1,
   "variants": {
-    "bm": {"version": "bm@sha256:bm"},
-    "pvm": {"version": "pvm@sha256:pvm"}
+    "bm": {"version": "sha256-aaaaaaaaaaaa", "digest_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    "pvm": {"version": "sha256-bbbbbbbbbbbb", "digest_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
   }
 }`
 	if err := os.WriteFile(filepath.Join(dir, "cube-kernel-scf", "version.json"), []byte(body), 0o644); err != nil {
@@ -503,7 +523,7 @@ func TestCollectKernelFromVersionJSONAndActiveSymlink(t *testing.T) {
 	c := NewCollector(dir)
 	got := c.Collect()
 	k, ok := versionOf(t, got, ComponentKernel)
-	if !ok || k.Version != "pvm@sha256:pvm" || k.Variant != "pvm" || k.Source != SourceComponentJSON {
+	if !ok || k.Version != testPVMKernelIdentity || k.Variant != "pvm" || k.Source != SourceComponentJSON {
 		t.Fatalf("kernel from version.json+symlink, got %+v ok=%v", k, ok)
 	}
 }
@@ -615,8 +635,8 @@ func TestCollectKernelPrefersVmlinuxActiveOverArtifactSymlink(t *testing.T) {
 	body := `{
   "schema_version": 1,
   "variants": {
-    "bm": {"version": "bm@sha256:bm"},
-    "pvm": {"version": "pvm@sha256:pvm"}
+    "bm": {"version": "sha256-aaaaaaaaaaaa", "digest_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    "pvm": {"version": "sha256-bbbbbbbbbbbb", "digest_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
   }
 }`
 	if err := os.WriteFile(filepath.Join(dir, "cube-kernel-scf", "version.json"), []byte(body), 0o644); err != nil {
@@ -629,7 +649,7 @@ func TestCollectKernelPrefersVmlinuxActiveOverArtifactSymlink(t *testing.T) {
 	c := NewCollectorWithDirs(dir, boot)
 	got := c.Collect()
 	k, ok := versionOf(t, got, ComponentKernel)
-	if !ok || k.Version != "pvm@sha256:pvm" || k.Variant != "pvm" {
+	if !ok || k.Version != testPVMKernelIdentity || k.Variant != "pvm" {
 		t.Fatalf("vmlinux-active should win over artifact bm symlink, got %+v ok=%v", k, ok)
 	}
 }

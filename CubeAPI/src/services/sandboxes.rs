@@ -17,8 +17,9 @@ use crate::{
     },
     error::{AppError, AppResult},
     models::{
-        EgressRule, LogLevel as ModelLogLevel, NewSandbox, Sandbox, SandboxDetail, SandboxLog,
-        SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxState,
+        EgressRule, EgressRuleMatch, LogLevel as ModelLogLevel, NewSandbox, Sandbox,
+        SandboxAutoResume, SandboxDetail, SandboxLifecycleConfig, SandboxLog, SandboxLogEntry,
+        SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxOnTimeout, SandboxState,
         SandboxVolumeMount,
     },
 };
@@ -100,7 +101,7 @@ impl SandboxService {
             .cubemaster
             .list_sandboxes(&req)
             .await
-            .map_err(internal_error)?;
+            .map_err(params_error_or_internal)?;
 
         ensure_create_result(resp.ret.ret_code, resp.ret.ret_msg)?;
 
@@ -155,6 +156,8 @@ impl SandboxService {
             template_id,
             timeout,
             lifecycle,
+            auto_pause: flat_auto_pause,
+            auto_resume: flat_auto_resume,
             allow_internet_access,
             network,
             metadata,
@@ -190,19 +193,11 @@ impl SandboxService {
         let cube_network_config =
             build_cube_network_config(allow_internet_access, network.as_ref())?;
 
-        // Derive the two CubeMaster-side bools from the e2b-shaped lifecycle
-        // object. Absent lifecycle keeps today's behaviour: idle sandboxes
-        // are killed (auto_pause = false), and auto_resume defaults off.
-        let (auto_pause, auto_resume) = lifecycle
-            .as_ref()
-            .map(|lc| {
-                use crate::models::SandboxOnTimeout;
-                (
-                    matches!(lc.on_timeout, SandboxOnTimeout::Pause),
-                    lc.auto_resume,
-                )
-            })
-            .unwrap_or((false, false));
+        let (auto_pause, auto_resume) = resolve_lifecycle_flags(
+            lifecycle.as_ref(),
+            flat_auto_pause,
+            flat_auto_resume.as_ref(),
+        );
 
         // Convert e2b-style volumeMounts into the CubeMaster wire format.
         // Volumes (pod-level declarations) are passed in the volumes field;
@@ -279,7 +274,7 @@ impl SandboxService {
             .cubemaster
             .create_sandbox(&req)
             .await
-            .map_err(internal_error)?;
+            .map_err(params_error_or_internal)?;
 
         resp.ret.into_result().map_err(internal_error)?;
 
@@ -436,7 +431,7 @@ impl SandboxService {
             Err(e) if e.is_not_found() => {
                 Err(AppError::NotFound(format!("sandbox {} not found", sandbox_id)))
             }
-            Err(e) => Err(internal_error(e)),
+            Err(e) => Err(params_error_or_internal(e)),
         }
     }
 
@@ -473,7 +468,7 @@ impl SandboxService {
                 "sandbox {} not found",
                 sandbox_id
             ))),
-            Err(e) => Err(internal_error(e)),
+            Err(e) => Err(params_error_or_internal(e)),
         }
     }
 
@@ -489,7 +484,7 @@ impl SandboxService {
             .cubemaster
             .set_sandbox_timeout(&req)
             .await
-            .map_err(internal_error)?;
+            .map_err(|e| sandbox_not_found_or_internal(e, sandbox_id))?;
 
         resp.ret
             .into_result()
@@ -510,7 +505,7 @@ impl SandboxService {
             .cubemaster
             .refresh_sandbox(&req)
             .await
-            .map_err(internal_error)?;
+            .map_err(|e| sandbox_not_found_or_internal(e, sandbox_id))?;
 
         resp.ret
             .into_result()
@@ -527,13 +522,7 @@ impl SandboxService {
             .cubemaster
             .get_sandbox(sandbox_id, &self.instance_type)
             .await
-            .map_err(|e| {
-                if e.is_not_found() {
-                    AppError::NotFound(format!("sandbox {} not found", sandbox_id))
-                } else {
-                    internal_error(e)
-                }
-            })?;
+            .map_err(|e| sandbox_not_found_or_internal(e, sandbox_id))?;
 
         if !is_success_ret_code(resp.ret.ret_code) {
             if resp.ret.ret_code == RET_CODE_NOT_FOUND {
@@ -700,6 +689,21 @@ fn internal_error(error: impl std::fmt::Display) -> AppError {
     AppError::Internal(anyhow::anyhow!(error.to_string()))
 }
 
+// parse_response converts every non-success ret_code into CubeMasterError::Api before
+// the envelope reaches the caller, so a rejection of the client's own input has to be
+// classified here — the ret.into_result()/ensure_* checks never observe it.
+fn params_error_or_internal(e: CubeMasterError) -> AppError {
+    if e.is_invalid_path_parameter() || e.is_params_error() {
+        // Same reasoning as templates::map_err: the caller sent something invalid, so
+        // this is a 400. Reporting it as 500 misleads clients into retrying a request
+        // that can never succeed, and charges a client mistake against the
+        // server-side success-rate SLI.
+        AppError::BadRequest(e.to_string())
+    } else {
+        internal_error(e)
+    }
+}
+
 fn ensure_create_result(ret_code: i32, ret_msg: String) -> AppResult<()> {
     if is_success_ret_code(ret_code) {
         return Ok(());
@@ -717,7 +721,7 @@ fn sandbox_not_found_or_internal(e: CubeMasterError, sandbox_id: &str) -> AppErr
     if e.is_not_found() {
         AppError::NotFound(format!("sandbox {} not found", sandbox_id))
     } else {
-        internal_error(e)
+        params_error_or_internal(e)
     }
 }
 
@@ -1012,6 +1016,34 @@ fn validate_mask_request_host(value: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Derive CubeMaster's `(auto_pause, auto_resume)` bools from whichever
+/// lifecycle representation the caller sent.
+///
+/// Two shapes reach this endpoint. `lifecycle` is CubeSandbox's native nested
+/// object. The e2b SDK never sends it — `Sandbox.create(lifecycle=...)` is
+/// flattened client-side into top-level `autoPause` / `autoResume` before the
+/// request goes out. Both are accepted; the nested object wins when present,
+/// since an explicit `lifecycle` can only come from a direct API caller who
+/// meant it. Neither present keeps today's behaviour: idle sandboxes are
+/// killed.
+pub(crate) fn resolve_lifecycle_flags(
+    lifecycle: Option<&SandboxLifecycleConfig>,
+    auto_pause: Option<bool>,
+    auto_resume: Option<&SandboxAutoResume>,
+) -> (bool, bool) {
+    if let Some(lc) = lifecycle {
+        return (
+            matches!(lc.on_timeout, SandboxOnTimeout::Pause),
+            lc.auto_resume,
+        );
+    }
+
+    (
+        auto_pause.unwrap_or(false),
+        auto_resume.is_some_and(SandboxAutoResume::enabled),
+    )
+}
+
 pub(crate) fn build_cube_network_config(
     allow_internet_access: Option<bool>,
     network: Option<&SandboxNetworkConfig>,
@@ -1025,6 +1057,12 @@ pub(crate) fn build_cube_network_config(
         &deny_out,
         allow_internet_access == Some(false),
     )?;
+
+    if let Some(rs) = network.and_then(|n| n.rules.as_ref()) {
+        for (index, rule) in rs.iter().enumerate() {
+            validate_egress_rule_match(&rule.r#match, index)?;
+        }
+    }
 
     let rules: Vec<CubeEgressRule> = network
         .and_then(|n| n.rules.as_ref())
@@ -1057,6 +1095,33 @@ pub(crate) fn build_cube_network_config(
     }))
 }
 
+/// Validate the port/scheme pair on one egress rule match, mirroring the
+/// SDK client-side contract and the CubeEgress Lua validation: a set port
+/// must be in [1, 65535] and must be paired with a scheme, and a set scheme
+/// must be http or https (case-insensitive — downstream normalizes).
+fn validate_egress_rule_match(rule_match: &EgressRuleMatch, index: usize) -> AppResult<()> {
+    if let Some(port) = rule_match.port {
+        if !(1..=65535).contains(&port) {
+            return Err(AppError::BadRequest(format!(
+                "network.rules[{index}].match.port must be in [1, 65535], got {port}"
+            )));
+        }
+        if rule_match.scheme.is_none() {
+            return Err(AppError::BadRequest(format!(
+                "network.rules[{index}].match.port requires match.scheme to be set"
+            )));
+        }
+    }
+    if let Some(scheme) = rule_match.scheme.as_deref() {
+        if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+            return Err(AppError::BadRequest(format!(
+                "network.rules[{index}].match.scheme must be 'http' or 'https', got {scheme:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn map_egress_rule(rule: &EgressRule) -> CubeEgressRule {
     CubeEgressRule {
         name: rule.name.clone(),
@@ -1066,6 +1131,7 @@ fn map_egress_rule(rule: &EgressRule) -> CubeEgressRule {
             method: rule.r#match.method.clone(),
             path: rule.r#match.path.clone(),
             scheme: rule.r#match.scheme.clone(),
+            port: rule.r#match.port,
         },
         action: CubeEgressRuleAction {
             allow: rule.action.allow,
@@ -1090,9 +1156,9 @@ mod tests {
 
     use super::{
         build_cube_network_config, filter_by_metadata, from_cubemaster_info,
-        map_delete_cubemaster_err, map_volume_mounts, validate_mask_request_host, SandboxService,
-        RET_CODE_CONFLICT, RET_CODE_NOT_FOUND, RET_CODE_TASK_RESUME_FAILED,
-        RET_CODE_TASK_STATE_INVALID,
+        map_delete_cubemaster_err, map_volume_mounts, resolve_lifecycle_flags,
+        validate_mask_request_host, SandboxService, RET_CODE_CONFLICT, RET_CODE_NOT_FOUND,
+        RET_CODE_TASK_RESUME_FAILED, RET_CODE_TASK_STATE_INVALID,
     };
     use crate::cubemaster::{
         CreateSandboxRequest, CubeMasterClient, CubeMasterError, CubeVolumeMount,
@@ -1101,7 +1167,8 @@ mod tests {
     use crate::error::AppError;
     use crate::models::{
         EgressRule, EgressRuleAction, EgressRuleInject, EgressRuleMatch, NewSandbox,
-        SandboxNetworkConfig, SandboxState, SandboxVolumeMount,
+        SandboxAutoResume, SandboxLifecycleConfig, SandboxNetworkConfig, SandboxOnTimeout,
+        SandboxState, SandboxVolumeMount,
     };
     use axum::{
         extract::State,
@@ -1112,6 +1179,142 @@ mod tests {
     };
     use serde_json::Value;
     use tokio::sync::Mutex;
+
+    async fn spawn_fake_cubemaster(app: Router) -> SandboxService {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("server should run");
+        });
+        SandboxService::new(
+            CubeMasterClient::new(format!("http://{}", addr), reqwest::Client::new()),
+            "cubebox".to_string(),
+            "cube.app".to_string(),
+        )
+    }
+
+    fn ret_envelope(ret_code: i32, ret_msg: &str) -> Json<Value> {
+        Json(serde_json::json!({
+            "requestID": "req-1",
+            "ret": { "ret_code": ret_code, "ret_msg": ret_msg }
+        }))
+    }
+
+    fn params_error_reason() -> &'static str {
+        r#""host-mount" entry[0]: hostPath "/tmp" is not within an allowed mount prefix"#
+    }
+
+    fn probe_sandbox() -> NewSandbox {
+        NewSandbox {
+            template_id: "tpl-1".to_string(),
+            timeout: Some(30),
+            lifecycle: None,
+            auto_pause: None,
+            auto_resume: None,
+            secure: None,
+            allow_internet_access: None,
+            network: None,
+            metadata: None,
+            distribution_scope: None,
+            env_vars: None,
+            mcp: None,
+            volume_mounts: None,
+        }
+    }
+
+    fn assert_bad_request(err: AppError, expected_reason: &str) {
+        assert!(
+            matches!(err, AppError::BadRequest(ref m) if m.contains(expected_reason)),
+            "expected BadRequest carrying the backend reason, got {err:?}"
+        );
+        assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+    }
+
+    // CubeMaster returns MasterParamsError (130400) when the request itself is
+    // rejected — e.g. a host-mount hostPath outside allowed_host_mount_prefixes.
+    // templates::map_err already treats it as 400 via is_params_error(); the sandbox
+    // paths were reporting it as 500, which misleads clients into retrying a request
+    // that can never succeed and charges a client mistake against the server-side
+    // success-rate SLI.
+    //
+    // Driven end-to-end through the service so the assertion covers the path the
+    // request actually takes: parse_response raises CubeMasterError::Api before the
+    // envelope is visible, so the fix has to sit on the transport error.
+    #[tokio::test]
+    async fn create_sandbox_maps_cubemaster_params_error_to_bad_request() {
+        let reason = params_error_reason();
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox",
+            post(move || async move { ret_envelope(130400, reason) }),
+        ))
+        .await;
+
+        let err = service
+            .create_sandbox(probe_sandbox())
+            .await
+            .expect_err("rejected create should not succeed");
+        assert_bad_request(err, reason);
+    }
+
+    #[tokio::test]
+    async fn set_timeout_maps_cubemaster_params_error_to_bad_request() {
+        let reason = "timeout must be positive";
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/timeout",
+            post(move || async move { ret_envelope(130400, reason) }),
+        ))
+        .await;
+
+        let err = service
+            .set_timeout("sbx-1", -1)
+            .await
+            .expect_err("rejected timeout update should not succeed");
+        assert_bad_request(err, reason);
+    }
+
+    #[tokio::test]
+    async fn refresh_maps_cubemaster_params_error_to_bad_request() {
+        let reason = "duration out of range";
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/refresh",
+            post(move || async move { ret_envelope(130400, reason) }),
+        ))
+        .await;
+
+        let err = service
+            .refresh("sbx-1", 1 << 30)
+            .await
+            .expect_err("rejected refresh should not succeed");
+        assert_bad_request(err, reason);
+    }
+
+    // Negative control: genuine backend faults must keep counting as 5xx, and
+    // 130408 CubeletUnHealthy must not be swept up by the 1304xx prefix.
+    #[tokio::test]
+    async fn create_sandbox_keeps_backend_faults_internal() {
+        for ret_code in [130408, 130593] {
+            let service = spawn_fake_cubemaster(Router::new().route(
+                "/cube/sandbox",
+                post(move || async move { ret_envelope(ret_code, "backend fault") }),
+            ))
+            .await;
+
+            let err = service
+                .create_sandbox(probe_sandbox())
+                .await
+                .expect_err("backend fault should not succeed");
+            assert!(
+                matches!(err, AppError::Internal(_)),
+                "ret_code {ret_code} must stay 5xx, got {err:?}"
+            );
+            assert_eq!(
+                err.into_response().status(),
+                StatusCode::INTERNAL_SERVER_ERROR
+            );
+        }
+    }
 
     #[test]
     fn map_volume_mounts_returns_none_for_empty_input() {
@@ -1318,6 +1521,7 @@ mod tests {
                         method: Some(vec!["POST".to_string()]),
                         path: Some("/v1/chat".to_string()),
                         sni: Some("api.deepseek.com".to_string()),
+                        port: None,
                     },
                     action: EgressRuleAction {
                         allow: true,
@@ -1384,6 +1588,91 @@ mod tests {
         // None fields are skipped on the wire.
         assert!(rule["action"].get("audit").is_none());
         assert!(rule["action"].get("inject").is_none());
+    }
+
+    fn network_with_match(rule_match: EgressRuleMatch) -> SandboxNetworkConfig {
+        SandboxNetworkConfig {
+            allow_public_traffic: None,
+            allow_out: None,
+            deny_out: None,
+            mask_request_host: None,
+            rules: Some(vec![EgressRule {
+                name: "r1".to_string(),
+                r#match: rule_match,
+                action: EgressRuleAction {
+                    allow: true,
+                    audit: None,
+                    inject: None,
+                },
+            }]),
+        }
+    }
+
+    #[test]
+    fn egress_match_port_requires_scheme() {
+        let err = build_cube_network_config(
+            None,
+            Some(&network_with_match(EgressRuleMatch {
+                port: Some(8443),
+                ..Default::default()
+            })),
+        )
+        .expect_err("port without scheme must be rejected");
+        assert!(err.to_string().contains("requires match.scheme"), "{err}");
+    }
+
+    #[test]
+    fn egress_match_port_range_enforced() {
+        for port in [0, -1, 65536, 99999] {
+            let err = build_cube_network_config(
+                None,
+                Some(&network_with_match(EgressRuleMatch {
+                    port: Some(port),
+                    scheme: Some("https".to_string()),
+                    ..Default::default()
+                })),
+            )
+            .expect_err("out-of-range port must be rejected");
+            assert!(err.to_string().contains("[1, 65535]"), "{err}");
+        }
+    }
+
+    #[test]
+    fn egress_match_invalid_scheme_rejected() {
+        let err = build_cube_network_config(
+            None,
+            Some(&network_with_match(EgressRuleMatch {
+                scheme: Some("ftp".to_string()),
+                ..Default::default()
+            })),
+        )
+        .expect_err("non-http(s) scheme must be rejected");
+        assert!(
+            err.to_string().contains("must be 'http' or 'https'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn egress_match_valid_port_scheme_accepted() {
+        build_cube_network_config(
+            None,
+            Some(&network_with_match(EgressRuleMatch {
+                port: Some(8443),
+                scheme: Some("https".to_string()),
+                ..Default::default()
+            })),
+        )
+        .expect("valid port+scheme pair");
+        // Case variants are accepted (downstream normalizes to lowercase).
+        build_cube_network_config(
+            None,
+            Some(&network_with_match(EgressRuleMatch {
+                scheme: Some("HTTPS".to_string()),
+                ..Default::default()
+            })),
+        )
+        .expect("uppercase scheme is accepted");
     }
 
     #[test]
@@ -1486,6 +1775,86 @@ mod tests {
         );
     }
 
+    /// The e2b Python SDK does not put `lifecycle` on the wire. It flattens
+    /// the user-facing object into top-level `autoPause` / `autoResume` before
+    /// calling `POST /sandboxes`. Unknown fields are dropped silently by serde,
+    /// so a missing binding here means auto-pause is ignored and the sandbox is
+    /// killed at timeout instead of paused.
+    #[test]
+    fn new_sandbox_deserializes_e2b_flat_lifecycle_fields() {
+        let body = serde_json::json!({
+            "templateID": "tpl-1",
+            "timeout": 30,
+            "autoPause": true,
+            "autoResume": { "enabled": true }
+        });
+
+        let new_sandbox: NewSandbox =
+            serde_json::from_value(body).expect("e2b create body should deserialize");
+
+        assert_eq!(new_sandbox.auto_pause, Some(true));
+        assert_eq!(
+            new_sandbox
+                .auto_resume
+                .as_ref()
+                .map(SandboxAutoResume::enabled),
+            Some(true)
+        );
+    }
+
+    /// `autoResume` is an object in the current SDK, but older releases and
+    /// hand-rolled clients send a bare bool. Accept both rather than 400-ing on
+    /// a shape difference that carries the same meaning.
+    #[test]
+    fn new_sandbox_accepts_bare_bool_auto_resume() {
+        let body = serde_json::json!({
+            "templateID": "tpl-1",
+            "autoResume": true
+        });
+
+        let new_sandbox: NewSandbox =
+            serde_json::from_value(body).expect("bare-bool autoResume should deserialize");
+
+        assert_eq!(
+            new_sandbox
+                .auto_resume
+                .as_ref()
+                .map(SandboxAutoResume::enabled),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn flat_lifecycle_fields_enable_pause_and_resume() {
+        let auto_resume = SandboxAutoResume::Config { enabled: true };
+        let flags = resolve_lifecycle_flags(None, Some(true), Some(&auto_resume));
+
+        assert_eq!(flags, (true, true));
+    }
+
+    /// `lifecycle` is CubeSandbox's native, richer form. When a caller sends it
+    /// explicitly it wins over the flattened compatibility fields. The e2b SDK
+    /// never sends both, so this only disambiguates direct API callers.
+    #[test]
+    fn nested_lifecycle_wins_over_flat_lifecycle_fields() {
+        let lifecycle = SandboxLifecycleConfig {
+            on_timeout: SandboxOnTimeout::Kill,
+            auto_resume: false,
+        };
+        let auto_resume = SandboxAutoResume::Enabled(true);
+
+        let flags = resolve_lifecycle_flags(Some(&lifecycle), Some(true), Some(&auto_resume));
+
+        assert_eq!(flags, (false, false));
+    }
+
+    #[test]
+    fn absent_lifecycle_fields_keep_kill_behaviour() {
+        let flags = resolve_lifecycle_flags(None, None, None);
+
+        assert_eq!(flags, (false, false));
+    }
+
     fn empty_create_request() -> CreateSandboxRequest {
         CreateSandboxRequest {
             request_id: "req-1".to_string(),
@@ -1571,22 +1940,17 @@ mod tests {
     /// The inbound API mirrors the e2b `lifecycle` object (camelCase nested
     /// struct). CubeAPI then translates it to the two CubeMaster-side bools
     /// when constructing the create-sandbox RPC. Verify the translation
-    /// covers each meaningful combination.
+    /// covers each meaningful combination via the real resolver.
     #[test]
     fn lifecycle_object_translates_to_cubemaster_bools() {
-        use crate::models::{NewSandbox, SandboxOnTimeout};
+        use crate::models::NewSandbox;
 
-        // Helper that mimics services::create_sandbox's lifecycle decoding.
-        fn translate(body: &NewSandbox) -> (bool, bool) {
-            body.lifecycle
-                .as_ref()
-                .map(|lc| {
-                    (
-                        matches!(lc.on_timeout, SandboxOnTimeout::Pause),
-                        lc.auto_resume,
-                    )
-                })
-                .unwrap_or((false, false))
+        fn flags(body: &NewSandbox) -> (bool, bool) {
+            resolve_lifecycle_flags(
+                body.lifecycle.as_ref(),
+                body.auto_pause,
+                body.auto_resume.as_ref(),
+            )
         }
 
         // Absent lifecycle => preserve historical behaviour.
@@ -1594,7 +1958,7 @@ mod tests {
             "templateID": "tpl",
         }))
         .unwrap();
-        assert_eq!(translate(&absent), (false, false));
+        assert_eq!(flags(&absent), (false, false));
 
         // Explicit kill (with auto_resume=true) is still kill — auto_resume
         // doesn't auto-imply pause. Server-side enforcement of the e2b
@@ -1605,7 +1969,7 @@ mod tests {
             "lifecycle": {"onTimeout": "kill", "autoResume": true},
         }))
         .unwrap();
-        assert_eq!(translate(&kill), (false, true));
+        assert_eq!(flags(&kill), (false, true));
 
         // Pause + auto_resume — the canonical e2b auto-resume case.
         let pause_with_resume: NewSandbox = serde_json::from_value(serde_json::json!({
@@ -1613,7 +1977,7 @@ mod tests {
             "lifecycle": {"onTimeout": "pause", "autoResume": true},
         }))
         .unwrap();
-        assert_eq!(translate(&pause_with_resume), (true, true));
+        assert_eq!(flags(&pause_with_resume), (true, true));
 
         // Some Python SDK versions and direct callers may send the Pythonic
         // snake_case shape. Keep accepting it so lifecycle does not silently
@@ -1623,7 +1987,7 @@ mod tests {
             "lifecycle": {"on_timeout": "pause", "auto_resume": true},
         }))
         .unwrap();
-        assert_eq!(translate(&snake_case_pause_with_resume), (true, true));
+        assert_eq!(flags(&snake_case_pause_with_resume), (true, true));
 
         // Pause without auto_resume — caller must call connect() manually.
         let pause_only: NewSandbox = serde_json::from_value(serde_json::json!({
@@ -1631,7 +1995,7 @@ mod tests {
             "lifecycle": {"onTimeout": "pause"},
         }))
         .unwrap();
-        assert_eq!(translate(&pause_only), (true, false));
+        assert_eq!(flags(&pause_only), (true, false));
 
         // Empty lifecycle object — defaults: kill on timeout, no auto-resume.
         let empty: NewSandbox = serde_json::from_value(serde_json::json!({
@@ -1639,7 +2003,104 @@ mod tests {
             "lifecycle": {},
         }))
         .unwrap();
-        assert_eq!(translate(&empty), (false, false));
+        assert_eq!(flags(&empty), (false, false));
+
+        // e2b SDK wire shape: flattened top-level fields, no nested lifecycle.
+        let flat: NewSandbox = serde_json::from_value(serde_json::json!({
+            "templateID": "tpl",
+            "autoPause": true,
+            "autoResume": { "enabled": true },
+        }))
+        .unwrap();
+        assert_eq!(flags(&flat), (true, true));
+    }
+
+    /// The failure mode this PR fixes is silent drop between inbound flat
+    /// fields and the CubeMaster create body. Deserialization and
+    /// `resolve_lifecycle_flags` alone cannot catch a regression that unbinds
+    /// `auto_pause`/`auto_resume` from the `NewSandbox` destructuring (`..`
+    /// still compiles). Drive the full service path and assert the outbound
+    /// flags.
+    #[tokio::test]
+    async fn create_sandbox_forwards_e2b_flat_lifecycle_flags_to_cubemaster() {
+        #[derive(Clone, Default)]
+        struct Capture {
+            create_body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn create_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            *capture.create_body.lock().await = Some(body);
+            Json(serde_json::json!({
+                "requestID": "req-1",
+                "sandbox_id": "sb-flat-lifecycle",
+                "ret": { "ret_code": 0, "ret_msg": "ok" }
+            }))
+        }
+
+        async fn spawn_server(app: Router) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("listener should bind");
+            let addr = listener.local_addr().expect("listener addr");
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("server should run");
+            });
+            format!("http://{}", addr)
+        }
+
+        let capture = Capture::default();
+        let cubemaster_url = spawn_server(
+            Router::new()
+                .route("/cube/sandbox", post(create_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+
+        let service = SandboxService::new(
+            CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
+            "cubebox".to_string(),
+            "cube.app".to_string(),
+        );
+
+        let sandbox = service
+            .create_sandbox(NewSandbox {
+                template_id: "tpl-1".to_string(),
+                timeout: Some(30),
+                lifecycle: None,
+                auto_pause: Some(true),
+                auto_resume: Some(SandboxAutoResume::Config { enabled: true }),
+                secure: None,
+                allow_internet_access: None,
+                network: None,
+                metadata: None,
+                distribution_scope: None,
+                env_vars: None,
+                mcp: None,
+                volume_mounts: None,
+            })
+            .await
+            .expect("sandbox create should succeed");
+
+        assert_eq!(sandbox.sandbox_id, "sb-flat-lifecycle");
+        let create_body = capture
+            .create_body
+            .lock()
+            .await
+            .clone()
+            .expect("create body");
+        assert_eq!(
+            create_body.get("auto_pause"),
+            Some(&serde_json::Value::Bool(true)),
+            "flat autoPause must reach CubeMaster, got: {create_body}"
+        );
+        assert_eq!(
+            create_body.get("auto_resume"),
+            Some(&serde_json::Value::Bool(true)),
+            "flat autoResume must reach CubeMaster, got: {create_body}"
+        );
     }
 
     #[tokio::test]
@@ -1695,6 +2156,8 @@ mod tests {
                 template_id: "tpl-1".to_string(),
                 timeout: Some(15),
                 lifecycle: None,
+                auto_pause: None,
+                auto_resume: None,
                 secure: None,
                 allow_internet_access: None,
                 network: None,
@@ -1770,6 +2233,8 @@ mod tests {
                 template_id: "tpl-1".to_string(),
                 timeout: Some(15),
                 lifecycle: None,
+                auto_pause: None,
+                auto_resume: None,
                 secure: None,
                 allow_internet_access: None,
                 network: None,
@@ -1837,6 +2302,8 @@ mod tests {
                 template_id: "tpl-1".to_string(),
                 timeout: Some(15),
                 lifecycle: None,
+                auto_pause: None,
+                auto_resume: None,
                 secure: None,
                 allow_internet_access: None,
                 network: None,

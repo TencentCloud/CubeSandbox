@@ -36,6 +36,22 @@ type ComponentVersion struct {
 	Variant   string `json:"variant,omitempty"` // kernel: bm|pvm
 }
 
+// HostFacts describes the static host-level identity (CPU feature set, running
+// host kernel, KVM ABI version) used by the control plane to judge whether a
+// snapshot created on one node can be restored on another. Distinct from the
+// guest-environment component Versions.
+type HostFacts struct {
+	CPUVendor             string `json:"cpu_vendor,omitempty"`
+	CPUModel              string `json:"cpu_model,omitempty"`
+	CPUIDHash             string `json:"cpuid_hash,omitempty"`
+	HostKernelRelease     string `json:"host_kernel_release,omitempty"`
+	HostKernelFingerprint string `json:"host_kernel_fingerprint,omitempty"`
+	KVMAPIVersion         int    `json:"kvm_api_version,omitempty"`
+	KVMModuleFingerprint  string `json:"kvm_module_fingerprint,omitempty"`
+	KVMModuleTaint        string `json:"kvm_module_taint,omitempty"`
+	KVMModuleScanned      bool   `json:"kvm_module_scanned,omitempty"`
+}
+
 type RegisterNodeRequest struct {
 	RequestID           string             `json:"requestID,omitempty"`
 	NodeID              string             `json:"node_id,omitempty"`
@@ -52,6 +68,7 @@ type RegisterNodeRequest struct {
 	MaxMvmNum           int64              `json:"max_mvm_num,omitempty"`
 	Versions            []ComponentVersion `json:"versions,omitempty"`
 	InventoryIncomplete bool               `json:"inventory_incomplete,omitempty"`
+	HostFacts           *HostFacts         `json:"host_facts,omitempty"`
 }
 
 type UpdateNodeStatusRequest struct {
@@ -67,6 +84,7 @@ type UpdateNodeStatusRequest struct {
 
 	Versions            []ComponentVersion `json:"versions,omitempty"`
 	InventoryIncomplete bool               `json:"inventory_incomplete,omitempty"`
+	HostFacts           *HostFacts         `json:"host_facts,omitempty"`
 }
 
 // AllocatedResources represents sandbox-quota resources already committed by

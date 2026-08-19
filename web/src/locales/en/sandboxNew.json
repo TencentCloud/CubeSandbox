@@ -23,8 +23,8 @@
     "addMeta": "Add entry"
   },
   "compat": {
-    "stale": "Needs rebuild",
-    "staleHelp": "This template is stale in the current node environment. Rebuild it or adopt the current baseline before creating a sandbox."
+    "stale": "Version drift",
+    "staleHelp": "The node's current component versions differ from those recorded on this template. You can still create a sandbox; make sure the node already has the versions this template needs."
   },
   "actions": {
     "cancel": "Cancel",

@@ -23,6 +23,7 @@ type TemplateDefinition struct {
 	Retain                    bool   `json:"retain" gorm:"column:retain"`
 	RootfsSizeBytesAtSnapshot uint64 `json:"rootfs_size_bytes_at_snapshot" gorm:"column:rootfs_size_bytes_at_snapshot"`
 	RootfsArtifactID          string `json:"rootfs_artifact_id" gorm:"column:rootfs_artifact_id"`
+	OriginHostFactsJSON       string `json:"origin_host_facts_json" gorm:"column:origin_host_facts_json"`
 	RequestJSON               string `json:"request_json" gorm:"column:request_json"`
 	LastError                 string `json:"last_error" gorm:"column:last_error"`
 }
@@ -55,6 +56,7 @@ type TemplateReplica struct {
 	GuestImageVersion string `json:"guest_image_version" gorm:"column:guest_image_version"`
 	AgentVersion      string `json:"agent_version" gorm:"column:agent_version"`
 	KernelVersion     string `json:"kernel_version" gorm:"column:kernel_version"`
+	ShimVersion       string `json:"shim_version" gorm:"column:shim_version"`
 	CompatStatus      string `json:"compat_status" gorm:"column:compat_status"`
 	CompatPolicy      string `json:"compat_policy" gorm:"column:compat_policy"`
 	CompatCheckedUnix int64  `json:"compat_checked_unix" gorm:"column:compat_checked_unix"`

@@ -47,6 +47,39 @@ type ComponentVersion struct {
 	Variant   string `json:"variant,omitempty"` // kernel: bm|pvm
 }
 
+// HostFacts mirrors the cubelet-side masterclient.HostFacts. It carries the
+// static host-level identity (CPU feature set, running host kernel, KVM ABI)
+// used to judge cross-node snapshot restore compatibility.
+type HostFacts struct {
+	CPUVendor             string `json:"cpu_vendor,omitempty"`
+	CPUModel              string `json:"cpu_model,omitempty"`
+	CPUIDHash             string `json:"cpuid_hash,omitempty"`
+	HostKernelRelease     string `json:"host_kernel_release,omitempty"`
+	HostKernelFingerprint string `json:"host_kernel_fingerprint,omitempty"`
+	KVMAPIVersion         int    `json:"kvm_api_version,omitempty"`
+	KVMModuleFingerprint  string `json:"kvm_module_fingerprint,omitempty"`
+	KVMModuleTaint        string `json:"kvm_module_taint,omitempty"`
+	// KVMModuleScanned is a transient per-heartbeat collection signal, not a
+	// persisted fact: it reports whether the cubelet successfully read /sys/module
+	// this cycle, letting mergeIncomingHostFacts tell "module unloaded"
+	// (authoritative empty) from "read gap" (preserve prev). It is zeroed before
+	// the merged facts are stored or frozen onto a snapshot, so it never reaches
+	// MySQL or the compatibility judgment.
+	KVMModuleScanned bool `json:"kvm_module_scanned,omitempty"`
+}
+
+// IsZero reports whether no meaningful host fact was collected. KVMModuleScanned
+// is a transient collection signal, not a fact, so it is excluded — a report
+// carrying only Scanned=true is still "empty".
+func (f *HostFacts) IsZero() bool {
+	if f == nil {
+		return true
+	}
+	return f.CPUVendor == "" && f.CPUModel == "" && f.CPUIDHash == "" &&
+		f.HostKernelRelease == "" && f.HostKernelFingerprint == "" && f.KVMAPIVersion == 0 &&
+		f.KVMModuleFingerprint == "" && f.KVMModuleTaint == ""
+}
+
 type ContainerImage struct {
 	Names     []string `json:"names,omitempty"`
 	SizeBytes int64    `json:"size_bytes,omitempty"`
@@ -78,6 +111,7 @@ type RegisterNodeRequest struct {
 	MaxMvmNum           int64              `json:"max_mvm_num,omitempty"`
 	Versions            []ComponentVersion `json:"versions,omitempty"`
 	InventoryIncomplete bool               `json:"inventory_incomplete,omitempty"`
+	HostFacts           *HostFacts         `json:"host_facts,omitempty"`
 }
 
 type UpdateNodeStatusRequest struct {
@@ -93,6 +127,7 @@ type UpdateNodeStatusRequest struct {
 
 	Versions            []ComponentVersion `json:"versions,omitempty"`
 	InventoryIncomplete bool               `json:"inventory_incomplete,omitempty"`
+	HostFacts           *HostFacts         `json:"host_facts,omitempty"`
 }
 
 // AllocatedResources is cubelet-side aggregation of sandbox-quota CPU /
@@ -134,6 +169,7 @@ type NodeSnapshot struct {
 	Images              []ContainerImage       `json:"images,omitempty"`
 	LocalTemplates      []LocalTemplate        `json:"local_templates,omitempty"`
 	Versions            []ComponentVersion     `json:"versions,omitempty"`
+	HostFacts           *HostFacts             `json:"host_facts,omitempty"`
 	HeartbeatTime       time.Time              `json:"heartbeat_time,omitempty"`
 	ReportedReady       bool                   `json:"-"`
 	Healthy             bool                   `json:"healthy"`
@@ -148,6 +184,12 @@ type NodeSnapshot struct {
 	// labelsJSONCorrupt marks that labels_json failed to parse; scheduling is
 	// fail-closed. Not serialised.
 	labelsJSONCorrupt bool
+	// hostFactsDirty marks that the last persistHostFacts write failed, so the
+	// in-memory facts are ahead of MySQL. Since host facts are static, the next
+	// heartbeat carries the same value and hostFactsEqual would otherwise skip
+	// the write forever; this flag forces a retry until the DB catches up. Not
+	// serialised.
+	hostFactsDirty bool
 }
 
 type service struct {
@@ -167,10 +209,18 @@ type service struct {
 	// version writes or overwrite a newer in-memory hash with an older one.
 	versionWriteLocks sync.Map
 
-	// labelWriteLocks serialises label read-modify-write (register merge,
-	// admin labels, isolation) per node so DB commit and in-memory/localcache
-	// publication stay ordered.
+	// labelWriteLocks serialises the complete per-node lifecycle (register,
+	// heartbeat, labels, isolation, deletion) so DB commit and in-memory/cache
+	// publication stay ordered on a replica. Database row locks provide the
+	// corresponding cross-replica ordering.
 	labelWriteLocks sync.Map
+
+	// hostFactsWriteLocks serialises the host-facts persist per node so
+	// concurrent heartbeats cannot interleave and let an older facts blob's write
+	// land after a newer one's (last-write-wins), permanently diverging MySQL from
+	// the in-memory value. The persist re-reads the latest in-memory facts under
+	// this lock, so the write always reflects the most recent heartbeat.
+	hostFactsWriteLocks sync.Map
 }
 
 var global = &service{
@@ -218,6 +268,22 @@ func RegisterNode(ctx context.Context, req *RegisterNodeRequest) (*NodeSnapshot,
 		log.G(ctx).Warnf("cubelet attempted to set scheduling-disabled label node_id=%s", req.NodeID)
 		return nil, ErrSchedulingLabelRejected
 	}
+	// Merge the reported facts against the last-known ones the same way the
+	// heartbeat path does, so a re-registration landing during a transient
+	// /sys/module read gap (KVMModuleScanned=false, empty module state) cannot
+	// wipe the persisted kvm_module_taint that the compatible-nodes aggregate and
+	// the target-side gate read. Without this the register path would write
+	// req.HostFacts verbatim and bypass the guard the heartbeat path relies on.
+	mergedFacts := req.HostFacts
+	if !req.HostFacts.IsZero() {
+		global.mu.RLock()
+		var prev *HostFacts
+		if snap, ok := global.nodes[req.NodeID]; ok {
+			prev = snap.HostFacts
+		}
+		global.mu.RUnlock()
+		mergedFacts = mergeIncomingHostFacts(prev, req.HostFacts)
+	}
 	reg := &models.NodeRegistration{
 		NodeID:              req.NodeID,
 		HostIP:              req.HostIP,
@@ -230,7 +296,9 @@ func RegisterNode(ctx context.Context, req *RegisterNodeRequest) (*NodeSnapshot,
 		QuotaMemMB:          req.QuotaMemMB,
 		CreateConcurrentNum: req.CreateConcurrentNum,
 		MaxMvmNum:           req.MaxMvmNum,
+		HostFactsJSON:       marshalHostFacts(mergedFacts),
 	}
+	applyHostFactColumns(reg, mergedFacts)
 	// Read existing labels from DB, merge cubelet labels (cubelet wins on
 	// conflict for user keys), preserve the control-plane scheduling-disabled
 	// key, then write back. Use SELECT ... FOR UPDATE inside a transaction
@@ -238,15 +306,24 @@ func RegisterNode(ctx context.Context, req *RegisterNodeRequest) (*NodeSnapshot,
 	unlock := global.lockNodeLabels(req.NodeID)
 	defer unlock()
 
+	updateColumns := []string{
+		"host_ip", "grpc_port", "capacity_json", "allocatable_json",
+		"instance_type", "cluster_label", "quota_cpu", "quota_mem_mb",
+		"create_concurrent_num", "max_mvm_num", "updated_at",
+	}
+	// Only overwrite the host-fact columns (json blob + promoted keys) when this
+	// report actually carries facts, so an older cubelet (nil HostFacts) cannot
+	// wipe previously stored facts.
+	if !req.HostFacts.IsZero() {
+		updateColumns = append(updateColumns,
+			"host_facts_json", "cpu_vendor", "cpu_model", "cpuid_hash", "host_kernel_release")
+	}
+
 	var mergedLabels map[string]string
 	if err := global.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Clauses(clause.OnConflict{
-			Columns: []clause.Column{{Name: "node_id"}},
-			DoUpdates: clause.AssignmentColumns([]string{
-				"host_ip", "grpc_port", "capacity_json", "allocatable_json",
-				"instance_type", "cluster_label", "quota_cpu", "quota_mem_mb",
-				"create_concurrent_num", "max_mvm_num", "updated_at",
-			}),
+			Columns:   []clause.Column{{Name: "node_id"}},
+			DoUpdates: clause.AssignmentColumns(updateColumns),
 		}).Create(reg).Error; err != nil {
 			return err
 		}
@@ -284,6 +361,10 @@ func RegisterNode(ctx context.Context, req *RegisterNodeRequest) (*NodeSnapshot,
 	snap.QuotaMemMB = req.QuotaMemMB
 	snap.CreateConcurrentNum = req.CreateConcurrentNum
 	snap.MaxMvmNum = req.MaxMvmNum
+	if !mergedFacts.IsZero() {
+		hf := *mergedFacts
+		snap.HostFacts = &hf
+	}
 	applyCurrentHealth(snap, time.Now())
 	global.mu.Unlock()
 	syncLocalcache(snap)
@@ -310,13 +391,26 @@ func UpdateNodeStatus(ctx context.Context, nodeID string, req *UpdateNodeStatusR
 		HeartbeatUnix:      req.HeartbeatTime.Unix(),
 		Healthy:            reportedReady,
 	}
-	if err := global.db.Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "node_id"}},
-		DoUpdates: clause.AssignmentColumns([]string{
-			"conditions_json", "images_json", "local_templates_json",
-			"heartbeat_unix", "healthy", "updated_at",
-		}),
-	}).Create(status).Error; err != nil {
+	// Serialize status writes with the complete per-node lifecycle. The
+	// registration row lock prevents a heartbeat from recreating status after
+	// deletion has committed; a heartbeat for a retired registration therefore
+	// fails instead of leaving an orphan NodeStatus row.
+	unlock := global.lockNodeLabels(nodeID)
+	defer unlock()
+	if err := global.db.Transaction(func(tx *gorm.DB) error {
+		var reg models.NodeRegistration
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("node_id = ?", nodeID).Take(&reg).Error; err != nil {
+			return err
+		}
+		return tx.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "node_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"conditions_json", "images_json", "local_templates_json",
+				"heartbeat_unix", "healthy", "updated_at",
+			}),
+		}).Create(status).Error
+	}); err != nil {
 		return nil, err
 	}
 
@@ -328,6 +422,24 @@ func UpdateNodeStatus(ctx context.Context, nodeID string, req *UpdateNodeStatusR
 	snap.LocalTemplates = append([]LocalTemplate(nil), req.LocalTemplates...)
 	snap.HeartbeatTime = req.HeartbeatTime
 	snap.ReportedReady = reportedReady
+	hostFactsChanged := false
+	if !req.HostFacts.IsZero() {
+		merged := mergeIncomingHostFacts(snap.HostFacts, req.HostFacts)
+		if !hostFactsEqual(snap.HostFacts, merged) {
+			snap.HostFacts = merged
+			hostFactsChanged = true
+		}
+	}
+	// Retry a previously-failed persist even when the facts did not change:
+	// static facts mean there is normally no next *changed* heartbeat to piggy
+	// back on, so a one-off write failure would otherwise leave MySQL stale
+	// until a master restart.
+	persistFacts := hostFactsChanged || (snap.hostFactsDirty && !snap.HostFacts.IsZero())
+	var factsToPersist *HostFacts
+	if persistFacts && snap.HostFacts != nil {
+		hf := *snap.HostFacts
+		factsToPersist = &hf
+	}
 	applyCurrentHealth(snap, time.Now())
 	global.mu.Unlock()
 	syncLocalcache(snap)
@@ -339,7 +451,156 @@ func UpdateNodeStatus(ctx context.Context, nodeID string, req *UpdateNodeStatusR
 	// already provides the cross-replica fan-out used by the scheduler.
 	fanOutResourceMetric(ctx, nodeID, req)
 	global.persistVersions(ctx, nodeID, req.Versions, req.InventoryIncomplete)
+	// Host facts are static per boot; persist only when they actually change (or
+	// to retry a prior failed write) so the 10s heartbeat does not turn them into
+	// a MySQL write storm.
+	if factsToPersist != nil {
+		// Serialise the persist per node so two interleaved heartbeats cannot let an
+		// older facts blob's write land after a newer one's. Under the lock, re-read
+		// the current in-memory facts just before writing: whichever heartbeat holds
+		// the lock last writes the most recent value, so MySQL always converges to
+		// what memory holds instead of a stale last-writer-wins blob.
+		unlock := global.lockHostFactsWrite(nodeID)
+		global.mu.Lock()
+		var latest *HostFacts
+		if snap.HostFacts != nil {
+			hf := *snap.HostFacts
+			latest = &hf
+		}
+		// Mark dirty *before* issuing the write so a reload landing mid-write sees
+		// the in-memory facts as pending and does not adopt the older DB value over
+		// them. Cleared only once the write confirms the DB caught up.
+		snap.hostFactsDirty = true
+		global.mu.Unlock()
+		var err error
+		if latest != nil && !latest.IsZero() {
+			err = global.persistHostFacts(ctx, nodeID, latest)
+		}
+		global.mu.Lock()
+		snap.hostFactsDirty = err != nil
+		global.mu.Unlock()
+		unlock()
+	}
 	return cloneSnapshot(snap), nil
+}
+
+// persistHostFacts writes the node's host facts to the registration row. It
+// returns the write error (nil on success) so the caller can mark the in-memory
+// snapshot dirty and retry on a later heartbeat — host facts are static, so a
+// dropped write has no next *changed* heartbeat to piggyback on.
+func (s *service) persistHostFacts(ctx context.Context, nodeID string, facts *HostFacts) error {
+	if facts.IsZero() {
+		return nil
+	}
+	// Write the json blob and the promoted query columns together so the indexed
+	// compatible-nodes lookup can never observe a row whose columns disagree with
+	// its host_facts_json.
+	res := s.db.WithContext(ctx).Table(constants.NodeMetaRegistrationTable).
+		Where("node_id = ?", nodeID).
+		Updates(map[string]interface{}{
+			"host_facts_json":     marshalHostFacts(facts),
+			"cpu_vendor":          facts.CPUVendor,
+			"cpu_model":           facts.CPUModel,
+			"cpuid_hash":          facts.CPUIDHash,
+			"host_kernel_release": facts.HostKernelRelease,
+		})
+	if err := res.Error; err != nil {
+		log.G(ctx).Errorf("persist host facts failed node_id=%s: %v", nodeID, err)
+		return err
+	}
+	// Zero rows affected is ambiguous: it means "no row matched" only under the
+	// go-sql-driver default (changed-rows semantics), where re-writing identical
+	// values to an existing row also reports 0. Since the DSN does not set
+	// clientFoundRows, a lagging replica writing values already in the DB would
+	// otherwise be treated as a permanent failure and stay dirty forever. Confirm
+	// the row is actually missing before reporting a retryable error; a
+	// matched-but-unchanged write is a success.
+	if res.RowsAffected == 0 {
+		var count int64
+		if err := s.db.WithContext(ctx).Table(constants.NodeMetaRegistrationTable).
+			Where("node_id = ?", nodeID).Count(&count).Error; err != nil {
+			log.G(ctx).Errorf("persist host facts existence check failed node_id=%s: %v", nodeID, err)
+			return err
+		}
+		if count == 0 {
+			log.G(ctx).Warnf("persist host facts affected 0 rows node_id=%s: registration row missing, will retry", nodeID)
+			return fmt.Errorf("persist host facts: no registration row for node_id=%s", nodeID)
+		}
+	}
+	return nil
+}
+
+// applyHostFactColumns denormalises the promoted query keys onto the
+// registration row. Called wherever host_facts_json is set so the indexed
+// columns stay in lockstep with the blob.
+func applyHostFactColumns(reg *models.NodeRegistration, facts *HostFacts) {
+	if facts.IsZero() {
+		return
+	}
+	reg.CPUVendor = facts.CPUVendor
+	reg.CPUModel = facts.CPUModel
+	reg.CPUIDHash = facts.CPUIDHash
+	reg.HostKernelRelease = facts.HostKernelRelease
+}
+
+func hostFactsEqual(a, b *HostFacts) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// mergeIncomingHostFacts folds a fresh heartbeat's facts onto the last-known
+// snapshot, guarding the KVM module signals against a transient read failure on
+// the node while still letting a genuine module unload clear a stale taint.
+//
+// The cubelet reports KVMModuleScanned=true whenever it successfully read
+// /sys/module this cycle (even when no KVM module is loaded) and false only on a
+// read failure. So an empty incoming module state has two meanings:
+//   - Scanned=false → a read gap. Preserving the previous fingerprint+taint
+//     avoids (a) churning the DB (empty differs from the stored value, so it
+//     persists, then the next heartbeat restores and persists again) and (b)
+//     silently disabling the absolute kvm_module_taint gate — and freezing a
+//     clean-looking origin fingerprint onto any snapshot created in that window.
+//   - Scanned=true → the module is authoritatively absent (kvm.ko unloaded); the
+//     empty state is adopted so a once-observed taint can actually clear instead
+//     of latching until reboot.
+//
+// A non-empty incoming module state is always adopted (a reload). Every other
+// (boot-static) fact is taken from the incoming report as-is. KVMModuleScanned
+// itself is a transient collection signal, so it is zeroed on the merged result
+// and never stored or frozen onto a snapshot.
+func mergeIncomingHostFacts(prev, incoming *HostFacts) *HostFacts {
+	merged := *incoming
+	if prev != nil && incoming.KVMModuleFingerprint == "" && incoming.KVMModuleTaint == "" &&
+		!incoming.KVMModuleScanned {
+		merged.KVMModuleFingerprint = prev.KVMModuleFingerprint
+		merged.KVMModuleTaint = prev.KVMModuleTaint
+	}
+	merged.KVMModuleScanned = false
+	return &merged
+}
+
+func marshalHostFacts(facts *HostFacts) string {
+	if facts.IsZero() {
+		return ""
+	}
+	return mustJSON(facts)
+}
+
+func unmarshalHostFacts(raw string) *HostFacts {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var facts HostFacts
+	if err := json.Unmarshal([]byte(raw), &facts); err != nil {
+		return nil
+	}
+	if facts.IsZero() {
+		return nil
+	}
+	return &facts
 }
 
 // incompleteVersionsHashTag is appended to the content hash when the report
@@ -437,6 +698,13 @@ func mergeComponentVersions(prev, next []ComponentVersion) []ComponentVersion {
 
 func (s *service) lockVersionWrite(nodeID string) func() {
 	lockAny, _ := s.versionWriteLocks.LoadOrStore(nodeID, &sync.Mutex{})
+	lock := lockAny.(*sync.Mutex)
+	lock.Lock()
+	return lock.Unlock
+}
+
+func (s *service) lockHostFactsWrite(nodeID string) func() {
+	lockAny, _ := s.hostFactsWriteLocks.LoadOrStore(nodeID, &sync.Mutex{})
 	lock := lockAny.(*sync.Mutex)
 	lock.Lock()
 	return lock.Unlock
@@ -548,6 +816,126 @@ func GetNodeComponentVersions(ctx context.Context, nodeID string) (map[string]st
 	return compatRelevantVersions(cloned.Versions), true
 }
 
+// GetNodeHostFacts returns the trusted host facts (CPU feature set, host
+// kernel, KVM ABI) for a healthy node. The boolean is false when the node is
+// unknown, unhealthy, its heartbeat has expired, or no host facts were ever
+// reported; callers should treat that as UNKNOWN rather than reusing stale
+// values. Mirrors GetNodeComponentVersions gating semantics.
+func GetNodeHostFacts(ctx context.Context, nodeID string) (*HostFacts, bool) {
+	_ = ctx
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return nil, false
+	}
+	global.mu.RLock()
+	snap, ok := global.nodes[nodeID]
+	if !ok || snap == nil {
+		global.mu.RUnlock()
+		return nil, false
+	}
+	cloned := cloneSnapshotWithCurrentHealth(snap, time.Now())
+	global.mu.RUnlock()
+	if !cloned.Healthy || cloned.HostFacts.IsZero() {
+		return nil, false
+	}
+	return cloned.HostFacts, true
+}
+
+// GetPersistedNodeHostFacts reads the node's last-persisted host facts straight
+// from the registration row, ignoring live health. It exists as a backfill for
+// snapshot create: GetNodeHostFacts fails closed on a momentary heartbeat
+// expiry, and freezing that empty result onto a snapshot would permanently
+// degrade it to origin_fingerprint_unknown even though the node's real facts are
+// still on disk. Host facts are boot-static, so the persisted value is a safe
+// stand-in when the live node is transiently unhealthy. Returns false when no
+// row exists or no facts were ever persisted.
+func GetPersistedNodeHostFacts(ctx context.Context, nodeID string) (*HostFacts, bool) {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return nil, false
+	}
+	var row struct {
+		HostFactsJSON string
+	}
+	err := global.db.WithContext(ctx).
+		Table(constants.NodeMetaRegistrationTable).
+		Select("host_facts_json").
+		Where("node_id = ?", nodeID).
+		Scan(&row).Error
+	if err != nil {
+		return nil, false
+	}
+	facts := unmarshalHostFacts(row.HostFactsJSON)
+	if facts.IsZero() {
+		return nil, false
+	}
+	return facts, true
+}
+
+// CandidateNode is one healthy node's full host facts, returned by the
+// host-fact candidate query. HostFacts is decoded from host_facts_json so the
+// caller can apply the taint gate and build the per-node dimensions.
+type CandidateNode struct {
+	NodeID    string
+	HostIP    string
+	HostFacts *HostFacts
+}
+
+// QueryHostFactCandidates returns the healthy nodes to evaluate for restore
+// compatibility, pushing the two required (blocking) equality keys down to the
+// database so the common path is a single indexed SELECT instead of a full
+// in-memory scan + JSON decode of every node.
+//
+// It joins t_cube_node_registration against t_cube_node_status and keeps only
+// rows whose heartbeat is within the health timeout (the same freshness rule the
+// in-memory view applies), so a stale-heartbeat node is never offered as a
+// restore target.
+//
+// The two required keys are equality-filtered in SQL. Everything else — the
+// absolute kvm_module_taint gate and the informational dimensions — stays in
+// host_facts_json and is applied in-app by the caller, because the taint gate is
+// not an origin==target comparison and cannot be expressed as a column predicate.
+//
+// When matchAll is true the required-key predicate is dropped and every healthy
+// node with facts is returned, so a diagnostic caller (include_all) can see why
+// each node fails; the caller still runs the full judgment per node.
+//
+// ARM-safe: the required keys are cpuid_hash and host_kernel_release, both
+// populated on aarch64 (cpu_vendor/cpu_model are empty there and are never part
+// of the predicate).
+func QueryHostFactCandidates(ctx context.Context, requiredCPUIDHash, requiredKernelRelease string, matchAll bool) ([]*CandidateNode, error) {
+	cutoff := time.Now().Add(-healthTimeout()).Unix()
+	q := global.db.WithContext(ctx).
+		Table(constants.NodeMetaRegistrationTable+" AS reg").
+		Select("reg.node_id AS node_id, reg.host_ip AS host_ip, reg.host_facts_json AS host_facts_json").
+		Joins("JOIN "+constants.NodeMetaStatusTable+" AS st ON st.node_id = reg.node_id").
+		Where("st.healthy = ?", true).
+		Where("st.heartbeat_unix >= ?", cutoff).
+		Where("reg.host_facts_json <> ''")
+	if !matchAll {
+		q = q.Where("reg.cpuid_hash = ?", requiredCPUIDHash).
+			Where("reg.host_kernel_release = ?", requiredKernelRelease)
+	}
+	var rows []struct {
+		NodeID        string
+		HostIP        string
+		HostFactsJSON string
+	}
+	if err := q.Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]*CandidateNode, 0, len(rows))
+	for _, r := range rows {
+		facts := unmarshalHostFacts(r.HostFactsJSON)
+		if facts == nil {
+			continue
+		}
+		out = append(out, &CandidateNode{NodeID: r.NodeID, HostIP: r.HostIP, HostFacts: facts})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].NodeID < out[j].NodeID })
+	return out, nil
+}
+
 // fanOutResourceMetric is best-effort: write failures to Redis fall back
 // to in-process update so the receiving replica still schedules correctly,
 // and the next heartbeat (≤NodeStatusUpdateFrequency) reattempts the write.
@@ -594,7 +982,7 @@ func GetNode(ctx context.Context, nodeID string) (*NodeSnapshot, error) {
 	defer global.mu.RUnlock()
 	snap, ok := global.nodes[nodeID]
 	if !ok {
-		return nil, gorm.ErrRecordNotFound
+		return nil, fmt.Errorf("%w: %s", ErrNodeNotFound, nodeID)
 	}
 	return cloneSnapshotWithCurrentHealth(snap, time.Now()), nil
 }
@@ -901,6 +1289,7 @@ func (s *service) reload() error {
 		}
 		_ = json.Unmarshal([]byte(reg.CapacityJSON), &snap.Capacity)
 		_ = json.Unmarshal([]byte(reg.AllocatableJSON), &snap.Allocatable)
+		snap.HostFacts = unmarshalHostFacts(reg.HostFactsJSON)
 		next[reg.NodeID] = snap
 	}
 	for _, st := range statuses {
@@ -959,8 +1348,17 @@ func (s *service) reload() error {
 // it could not match and sandbox creation failed with "template has no ready
 // replica" (130400). Pushing node health here lets that DB fallback match and
 // self-heal template locality on demand.
+//
+// Known race: next is a point-in-time DB snapshot. If node deletion commits
+// after reload reads that snapshot but before it is merged here, the stale
+// snapshot can briefly reinsert the deleted node into s.nodes and localcache.
+// The node was required to be isolated before deletion, so the stale snapshot
+// remains scheduling-disabled and does not admit new sandboxes; a subsequent
+// reload removes it after observing the missing registration. We currently
+// accept this short-lived visibility inconsistency instead of adding deletion
+// tombstones or per-node snapshot generations.
 func (s *service) applyReloadResult(next map[string]*NodeSnapshot) {
-	syncSnaps := s.mergeReloadResult(next)
+	syncSnaps, evicted := s.mergeReloadResult(next)
 
 	// s.ready is set true at the end of Init, after the initial reload and
 	// before localcache.Init. The very first reload therefore skips the sync
@@ -974,16 +1372,40 @@ func (s *service) applyReloadResult(next map[string]*NodeSnapshot) {
 	for _, snap := range syncSnaps {
 		syncNodeHealthFn(snap)
 	}
+	for _, nodeID := range evicted {
+		func() {
+			// RegisterNode holds the same lifecycle lock until its in-memory and
+			// localcache publications finish. If a registration raced with this
+			// stale DB snapshot, wait for it and do not evict the new registration.
+			unlock := s.lockNodeLabels(nodeID)
+			defer unlock()
+			s.mu.RLock()
+			_, registered := s.nodes[nodeID]
+			s.mu.RUnlock()
+			if !registered {
+				evictNodeFn(nodeID)
+			}
+		}()
+	}
 }
 
 // mergeReloadResult merges the DB reload snapshot into the in-memory node map
-// under s.mu and returns a clone of every touched node for the caller to sync
-// into localcache outside the lock. The critical section uses
+// under s.mu and returns clones of touched nodes plus IDs removed by the
+// snapshot. Computing both results in the same critical section prevents a
+// concurrent registration from being classified using an earlier view.
+// The caller syncs localcache outside the lock. The critical section uses
 // defer s.mu.Unlock() so a panic in the merge loop cannot leak the lock and
 // silently deadlock subsequent register/heartbeat handlers.
-func (s *service) mergeReloadResult(next map[string]*NodeSnapshot) []*NodeSnapshot {
+func (s *service) mergeReloadResult(next map[string]*NodeSnapshot) ([]*NodeSnapshot, []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	evicted := make([]string, 0)
+	for nodeID := range s.nodes {
+		if _, stillPresent := next[nodeID]; !stillPresent {
+			delete(s.nodes, nodeID)
+			evicted = append(evicted, nodeID)
+		}
+	}
 	syncSnaps := make([]*NodeSnapshot, 0, len(next))
 	for nodeID, newSnap := range next {
 		if existing, ok := s.nodes[nodeID]; ok {
@@ -1001,6 +1423,26 @@ func (s *service) mergeReloadResult(next map[string]*NodeSnapshot) []*NodeSnapsh
 			existing.GRPCPort = newSnap.GRPCPort
 			existing.Versions = append([]ComponentVersion(nil), newSnap.Versions...)
 			existing.versionsHash = newSnap.versionsHash
+			// Host facts: adopt the DB value when it is fresher than what this
+			// replica holds (another replica may have persisted updated facts
+			// under a newer heartbeat), or when memory has none. A stale DB read
+			// never clobbers a fresher in-memory value written by a heartbeat on
+			// this replica. Keying on the same heartbeat freshness as the block
+			// below prevents a replica that learned the node via an early reload
+			// from serving indefinitely-stale facts to restore-compat.
+			//
+			// hostFactsDirty guards against the status/persist clock skew: the
+			// status HeartbeatTime advances on every heartbeat, but host facts are
+			// only written to the DB when they change (and the write may fail). If
+			// this replica holds facts pending a (re)persist, the DB is known to
+			// carry the *older* facts even though its status heartbeat may be newer
+			// — adopting it would revert the pending facts (e.g. a fresh
+			// KVMModuleTaint), so the dirty in-memory value always wins.
+			if newSnap.HostFacts != nil && !existing.hostFactsDirty &&
+				(existing.HostFacts == nil || newSnap.HeartbeatTime.After(existing.HeartbeatTime)) {
+				hf := *newSnap.HostFacts
+				existing.HostFacts = &hf
+			}
 			if newSnap.HeartbeatTime.After(existing.HeartbeatTime) {
 				existing.Conditions = newSnap.Conditions
 				existing.Images = newSnap.Images
@@ -1015,8 +1457,11 @@ func (s *service) mergeReloadResult(next map[string]*NodeSnapshot) []*NodeSnapsh
 			syncSnaps = append(syncSnaps, cloneSnapshot(newSnap))
 		}
 	}
-	return syncSnaps
+	return syncSnaps, evicted
 }
+
+// evictNodeFn is a test seam for the reload -> localcache eviction path.
+var evictNodeFn = localcache.EvictNode
 
 func (s *service) loopReload(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
@@ -1113,6 +1558,18 @@ func toSchedulerNode(snap *NodeSnapshot) *node.Node {
 		// correctly be excluded by the timeout filter until cubelet
 		// reports usage.
 	}
+	if snap.HostFacts != nil {
+		n.HostFacts = &node.HostFacts{
+			CPUVendor:             snap.HostFacts.CPUVendor,
+			CPUModel:              snap.HostFacts.CPUModel,
+			CPUIDHash:             snap.HostFacts.CPUIDHash,
+			HostKernelRelease:     snap.HostFacts.HostKernelRelease,
+			HostKernelFingerprint: snap.HostFacts.HostKernelFingerprint,
+			KVMAPIVersion:         snap.HostFacts.KVMAPIVersion,
+			KVMModuleFingerprint:  snap.HostFacts.KVMModuleFingerprint,
+			KVMModuleTaint:        snap.HostFacts.KVMModuleTaint,
+		}
+	}
 	n.SetSchedulingDisabled(snapshotSchedulingDisabled(snap))
 	return n
 }
@@ -1164,6 +1621,10 @@ func cloneSnapshot(in *NodeSnapshot) *NodeSnapshot {
 	out.Images = append([]ContainerImage(nil), in.Images...)
 	out.LocalTemplates = append([]LocalTemplate(nil), in.LocalTemplates...)
 	out.Versions = append([]ComponentVersion(nil), in.Versions...)
+	if in.HostFacts != nil {
+		hf := *in.HostFacts
+		out.HostFacts = &hf
+	}
 	out.SchedulingDisabled = snapshotSchedulingDisabled(in)
 	return &out
 }

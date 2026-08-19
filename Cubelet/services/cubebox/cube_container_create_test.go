@@ -197,67 +197,54 @@ func TestStoreNumaQueues(t *testing.T) {
 	}
 }
 
-func TestSandboxDNSServersFromContainers(t *testing.T) {
-	tests := []struct {
-		name       string
-		defaultDNS []string
-		req        *cubebox.RunCubeSandboxRequest
-		want       []string
-		wantErr    bool
-	}{
-		{
-			name: "aggregate unique dns servers in order",
-			req: &cubebox.RunCubeSandboxRequest{
-				Containers: []*cubebox.ContainerConfig{
-					{DnsConfig: &cubebox.DNSConfig{Servers: []string{"8.8.8.8", " 1.1.1.1 "}}},
-					{DnsConfig: &cubebox.DNSConfig{Servers: []string{"1.1.1.1", "9.9.9.9"}}},
-				},
-			},
-			want: []string{"1.1.1.1", "8.8.8.8", "9.9.9.9"},
-		},
-		{
-			name:       "fallback to cubelet default dns entries",
-			defaultDNS: []string{"1.1.1.1", "9.9.9.9"},
-			req: &cubebox.RunCubeSandboxRequest{
-				Containers: []*cubebox.ContainerConfig{
-					{DnsConfig: &cubebox.DNSConfig{Servers: []string{"", " "}}},
-				},
-			},
-			want: []string{"1.1.1.1", "9.9.9.9"},
-		},
-		{
-			name: "fallback to hardcoded dns server when config empty",
-			req: &cubebox.RunCubeSandboxRequest{
-				Containers: []*cubebox.ContainerConfig{{}},
-			},
-			want: []string{"119.29.29.29"},
-		},
-		{
-			name: "reject invalid dns server",
-			req: &cubebox.RunCubeSandboxRequest{
-				Containers: []*cubebox.ContainerConfig{
-					{DnsConfig: &cubebox.DNSConfig{Servers: []string{"not-an-ip"}}},
-				},
-			},
-			wantErr: true,
-		},
-	}
+func TestSandboxDNSLinesFromContainers(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	config.GetCommon().DefaultDNSServers = []string{"10.96.0.10"}
+	config.GetCommon().DefaultDNSSearches = []string{"default.svc.cluster.local", "svc.cluster.local"}
+	config.GetCommon().DefaultDNSOptions = []string{"ndots:5"}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := config.Init("", true)
-			require.NoError(t, err)
-			config.GetCommon().DefaultDNSServers = append([]string(nil), tt.defaultDNS...)
-			got, err := sandboxDNSServersFromContainers(tt.req)
-			if tt.wantErr {
-				require.Error(t, err)
-				return
-			}
-
-			require.NoError(t, err)
-			assert.Equal(t, tt.want, got)
+	t.Run("follow-node defaults", func(t *testing.T) {
+		got, err := sandboxDNSLinesFromContainers(&cubebox.RunCubeSandboxRequest{
+			Containers: []*cubebox.ContainerConfig{{}},
 		})
-	}
+		require.NoError(t, err)
+		assert.Equal(t, []string{
+			"search default.svc.cluster.local svc.cluster.local",
+			"10.96.0.10",
+			"options ndots:5",
+		}, got)
+	})
+
+	t.Run("explicit servers do not inherit default search/options", func(t *testing.T) {
+		got, err := sandboxDNSLinesFromContainers(&cubebox.RunCubeSandboxRequest{
+			Containers: []*cubebox.ContainerConfig{
+				{DnsConfig: &cubebox.DNSConfig{Servers: []string{"8.8.8.8"}}},
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"8.8.8.8"}, got)
+	})
+
+	t.Run("aggregate unique servers", func(t *testing.T) {
+		got, err := sandboxDNSLinesFromContainers(&cubebox.RunCubeSandboxRequest{
+			Containers: []*cubebox.ContainerConfig{
+				{DnsConfig: &cubebox.DNSConfig{Servers: []string{"8.8.8.8", " 1.1.1.1 "}}},
+				{DnsConfig: &cubebox.DNSConfig{Servers: []string{"1.1.1.1", "9.9.9.9"}}},
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"1.1.1.1", "8.8.8.8", "9.9.9.9"}, got)
+	})
+
+	t.Run("reject invalid server", func(t *testing.T) {
+		_, err := sandboxDNSLinesFromContainers(&cubebox.RunCubeSandboxRequest{
+			Containers: []*cubebox.ContainerConfig{
+				{DnsConfig: &cubebox.DNSConfig{Servers: []string{"not-an-ip"}}},
+			},
+		})
+		require.Error(t, err)
+	})
 }
 
 func TestAppendExt4NetfileMounts(t *testing.T) {

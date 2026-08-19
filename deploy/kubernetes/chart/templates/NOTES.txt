@@ -56,7 +56,9 @@ External control plane:
 Cube Node DaemonSet:
   {{ include "cube.nodeName" . }}
 {{- if .Values.cubeNode.dns.sandbox.followNodeDns }}
-  Sandbox guest DNS: follow node / cluster DNS
+  Sandbox guest DNS: follow node / cluster DNS (nameservers + search + options)
+{{- else if .Values.cubeNode.dns.sandbox.nameservers }}
+  Sandbox guest DNS: explicit nameservers (follow-node search/options not applied)
 {{- end }}
 {{- if eq (include "cube.proxyEnabled" .) "true" }}
 

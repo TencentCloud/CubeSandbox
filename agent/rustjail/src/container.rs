@@ -1692,7 +1692,10 @@ pub async fn start_exec_process(
     println!("exec a child process");
     let exec_path = std::env::current_exe().map_err(|e| format!("get exe path failed:{}", e))?;
     let mut cmd = std::process::Command::new(exec_path);
-    cmd.arg("exec").env(ENV_CONTAINER_PID, format!("{}", pid));
+    cmd.arg("exec")
+        .env(ENV_CONTAINER_PID, format!("{}", pid))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     if let Some(mnt) = exec_mnts {
         cmd.env(ANNO_PROPAGATION_EXEC_MNTS, format!("{}", mnt));
     }
@@ -1702,22 +1705,45 @@ pub async fn start_exec_process(
     }
     let _lock = WAIT_PID_LOCKER.lock().await;
 
-    let mut child = cmd
+    let child = cmd
         .spawn()
         .map_err(|e| format!("spawn child process failed:{}", e))?;
-
-    let status = child
-        .wait()
+    let output = child
+        .wait_with_output()
         .map_err(|e| format!("wait child failed:{}", e))?;
-    match status.code() {
+    match output.status.code() {
         Some(code) => {
             if code != 0 {
-                return Err(format!("exec process exit code:{}", code));
+                // Surface the child's real failure reason (e.g.
+                // "the source dir X not exists") instead of a bare
+                // exit code. exit_proc_failed writes to stderr.
+                let detail = String::from_utf8_lossy(&output.stderr);
+                let detail = if detail.trim().is_empty() {
+                    String::from_utf8_lossy(&output.stdout)
+                } else {
+                    detail
+                };
+                let detail = detail.trim();
+                if detail.is_empty() {
+                    return Err(format!("exec process exit code:{}", code));
+                }
+                return Err(detail.to_string());
             }
         }
         None => {
             return Err("exec process terminated by signal".to_string());
         }
+    }
+
+    // On success, log child stdout for observability (was previously
+    // inherited to the agent's stdout before piping was added).
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.trim().is_empty() {
+        debug!(
+            slog_scope::logger(),
+            "exec mount child output: {}",
+            stdout.trim()
+        );
     }
 
     Ok(())

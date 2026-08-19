@@ -1,0 +1,670 @@
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,650;0,9..144,750;1,9..144,550&family=JetBrains+Mono:wght@400;500;700&family=Noto+Serif+SC:wght@600;900&display=swap');
+
+/* ---------------------------------------------------------------------------
+   Contributors — editorial "tribute wall".
+   The logo blue is an ACCENT, never the canvas: light mode is cool paper with
+   navy ink, dark mode is neutral near-black so the cube blue can breathe.
+   No boxes anywhere — hairlines, typography and motion do the work.
+--------------------------------------------------------------------------- */
+
+.ct-page {
+  --ct-ink: #17263c;
+  --ct-ink-soft: rgba(23, 38, 60, 0.64);
+  --ct-ink-faint: rgba(23, 38, 60, 0.4);
+  --ct-line: rgba(23, 38, 60, 0.16);
+  --ct-accent: #39619b;
+  --ct-accent-2: #5d99d4;
+  --ct-paper-0: #fcfcfa;
+  --ct-paper-1: #f3f5f9;
+  --ct-mark: rgba(23, 38, 60, 0.05);
+  position: relative;
+  width: 100vw;
+  margin-left: calc(50% - 50vw);
+  margin-top: calc(-1 * (var(--vp-nav-height) + 32px));
+  padding: calc(var(--vp-nav-height) + 32px) 24px 0;
+  overflow: hidden;
+  color: var(--ct-ink);
+  background: linear-gradient(180deg, var(--ct-paper-0) 0%, var(--ct-paper-1) 100%);
+}
+
+.dark .ct-page {
+  --ct-ink: #e9eef6;
+  --ct-ink-soft: rgba(233, 238, 246, 0.68);
+  --ct-ink-faint: rgba(233, 238, 246, 0.42);
+  --ct-line: rgba(233, 238, 246, 0.15);
+  --ct-accent: #8bb8e8;
+  --ct-accent-2: #619cd4;
+  --ct-mark: rgba(97, 156, 212, 0.07);
+  background: linear-gradient(180deg, #0c0f14 0%, #0f141c 55%, #0c1017 100%);
+}
+
+/* ledger columns — faint vertical hairlines across the whole canvas */
+.ct-page::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(
+    90deg,
+    var(--ct-line) 0,
+    var(--ct-line) 1px,
+    transparent 1px,
+    transparent 160px
+  );
+  opacity: 0.28;
+  mask-image: linear-gradient(180deg, #000 0%, transparent 78%);
+}
+
+/* hand the canvas back to the site chrome at the very bottom */
+.ct-page::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 72px;
+  pointer-events: none;
+  background: linear-gradient(180deg, transparent, var(--vp-c-bg));
+}
+
+.ct-hero,
+.ct-wall,
+.ct-footer {
+  position: relative;
+  z-index: 1;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* ---- Hero ---------------------------------------------------------------- */
+
+.ct-hero {
+  max-width: 920px;
+  padding: 104px 0 84px;
+  text-align: center;
+}
+
+.ct-watermark {
+  position: absolute;
+  top: 30px;
+  right: -70px;
+  width: min(46vw, 500px);
+  pointer-events: none;
+  transform: translate3d(var(--px, 0), var(--py, 0), 0);
+  transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  z-index: -1;
+}
+
+/* keep the mark faint so ink text stays readable */
+.ct-watermark img {
+  width: 100%;
+  height: auto;
+  opacity: 0.09;
+}
+
+.dark .ct-watermark img {
+  opacity: 0.14;
+  mix-blend-mode: screen;
+}
+
+.vp-doc .ct-kicker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin: 0 0 26px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.34em;
+  text-transform: uppercase;
+  color: var(--ct-accent);
+}
+
+.vp-doc .ct-kicker::before,
+.vp-doc .ct-kicker::after {
+  content: '';
+  height: 1px;
+  width: 64px;
+  background: var(--ct-line);
+}
+
+.vp-doc .ct-title {
+  margin: 0 0 22px;
+  padding: 0;
+  border: none;
+  font-family: 'Fraunces', 'Noto Serif SC', serif;
+  font-optical-sizing: auto;
+  font-size: clamp(52px, 8vw, 96px);
+  font-weight: 650;
+  line-height: 1.02;
+  letter-spacing: -0.03em;
+  color: var(--ct-ink);
+}
+
+.vp-doc .ct-title-accent {
+  font-style: italic;
+  font-weight: 550;
+  color: var(--ct-accent);
+}
+
+html[lang='zh'] .vp-doc .ct-title,
+html[lang='zh-CN'] .vp-doc .ct-title {
+  font-family: 'Fraunces', 'Noto Serif SC', serif;
+  font-weight: 900;
+  letter-spacing: 0.02em;
+}
+
+.vp-doc .ct-lead {
+  margin: 0 auto;
+  max-width: 33rem;
+  color: var(--ct-ink-soft);
+  font-size: 16px;
+  line-height: 1.8;
+}
+
+/* ---- Facts: one hairline row, no boxes ----------------------------------- */
+
+.ct-facts {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  margin: 68px auto 0;
+  padding: 0;
+  max-width: 760px;
+  border-top: 1px solid var(--ct-line);
+}
+
+.ct-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 30px 12px 4px;
+  text-align: center;
+}
+
+.ct-fact + .ct-fact {
+  border-left: 1px solid var(--ct-line);
+}
+
+.vp-doc .ct-fact-value {
+  margin: 0;
+  font-family: 'Fraunces', 'Noto Serif SC', serif;
+  font-size: clamp(34px, 4.6vw, 52px);
+  font-weight: 650;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  color: var(--ct-ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.vp-doc .ct-fact-label {
+  margin: 0;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--ct-ink-faint);
+}
+
+/* ---- Loading: pulsing circle placeholders -------------------------------- */
+
+.ct-loading {
+  max-width: 980px;
+  margin: 24px auto 140px;
+  text-align: center;
+}
+
+.ct-loading-circles {
+  display: flex;
+  justify-content: center;
+  gap: 20px;
+  margin-bottom: 26px;
+}
+
+.ct-loading-circles span {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--ct-line);
+  animation: ct-pulse 1.2s ease-in-out infinite;
+}
+
+.ct-loading-circles span:nth-child(2) { animation-delay: 0.12s; }
+.ct-loading-circles span:nth-child(3) { animation-delay: 0.24s; }
+.ct-loading-circles span:nth-child(4) { animation-delay: 0.36s; }
+.ct-loading-circles span:nth-child(5) { animation-delay: 0.48s; }
+
+@keyframes ct-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+.vp-doc .ct-loading-text {
+  margin: 0;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ct-ink-faint);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ct-loading-circles span {
+    animation: none;
+    opacity: 0.6;
+  }
+
+  .ct-avatar-ph {
+    animation: none;
+  }
+
+  .ct-avatar {
+    transition: none;
+  }
+}
+
+/* ---- Active contributors: same wall language, own section ---------------- */
+
+.ct-active {
+  max-width: 980px;
+  margin: 0 auto 88px;
+}
+
+/* ---- Wall ---------------------------------------------------------------- */
+
+.ct-wall {
+  max-width: 980px;
+  padding-bottom: 8px;
+}
+
+.ct-wall-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 34px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--ct-line);
+  flex-wrap: wrap;
+}
+
+.vp-doc .ct-wall-title {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  font-family: 'Fraunces', 'Noto Serif SC', serif;
+  font-size: 30px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  color: var(--ct-ink);
+}
+
+.ct-count {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ct-ink-faint);
+}
+
+.ct-count::before { content: '/ '; }
+
+.ct-search {
+  display: block;
+  min-width: min(100%, 260px);
+  flex: 0 1 260px;
+}
+
+.ct-search-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.ct-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 2px;
+  border: none;
+  border-bottom: 1px solid var(--ct-line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--ct-ink);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 13px;
+  transition: border-color 0.25s ease;
+}
+
+.ct-search-input::placeholder {
+  color: var(--ct-ink-faint);
+}
+
+.ct-search-input:focus {
+  outline: none;
+  border-bottom-color: var(--ct-accent);
+}
+
+.vp-doc .ct-empty {
+  margin: 48px 0;
+  color: var(--ct-ink-faint);
+  text-align: center;
+}
+
+/* ---- Grid: borderless hexagons, focus-by-dimming ------------------------- */
+
+.ct-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(116px, 1fr));
+  gap: 6px 10px;
+}
+
+.vp-doc a.ct-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  padding: 20px 6px 16px;
+  border: none;
+  border-radius: 12px;
+  text-decoration: none;
+  color: inherit;
+  font-weight: 400;
+  opacity: 0;
+  transform: translateY(14px);
+  transition:
+    opacity 0.55s cubic-bezier(0.22, 1, 0.36, 1) var(--d, 0ms),
+    transform 0.55s cubic-bezier(0.22, 1, 0.36, 1) var(--d, 0ms),
+    filter 0.25s ease;
+}
+
+.vp-doc a.ct-card.ct-in {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.ct-grid.ct-plain .ct-card,
+.vp-doc .ct-grid.ct-plain a.ct-card {
+  opacity: 1;
+  transform: none;
+  transition: opacity 0.25s ease, filter 0.25s ease;
+}
+
+/* hovering the wall dims everyone else — but only once the pointer has
+   rested (.ct-focus is set by JS after ~600ms of stillness), so sweeping
+   across the grid never flashes the dim state */
+@media (hover: hover) {
+  .ct-grid.ct-focus:hover a.ct-card.ct-in:not(:hover),
+  .ct-grid.ct-plain.ct-focus:hover a.ct-card:not(:hover) {
+    opacity: 0.32;
+    filter: saturate(0.5);
+  }
+}
+
+.vp-doc a.ct-card:hover {
+  text-decoration: none;
+  transform: translateY(-4px);
+}
+
+.ct-ring {
+  display: block;
+  padding: 1.5px;
+  border-radius: 50%;
+  background: var(--ct-line);
+  transition: background 0.25s ease, transform 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.vp-doc a.ct-card:hover .ct-ring {
+  background: linear-gradient(150deg, var(--ct-accent-2), var(--ct-accent));
+  transform: scale(1.08);
+}
+
+.ct-avatar-wrap {
+  position: relative;
+  display: block;
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: var(--ct-paper-1);
+}
+
+.dark .ct-avatar-wrap {
+  background: #141a24;
+}
+
+.ct-avatar-ph {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--ct-ink-faint);
+  animation: ct-ph-breathe 1.8s ease-in-out infinite;
+}
+
+@keyframes ct-ph-breathe {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+
+.ct-avatar {
+  position: relative;
+  display: block;
+  width: 76px;
+  height: 76px;
+  object-fit: cover;
+  border-radius: 50%;
+  opacity: 0;
+  transition: opacity 0.45s ease;
+}
+
+.ct-avatar.ct-avatar-on {
+  opacity: 1;
+}
+
+.vp-doc .ct-login {
+  margin: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ct-ink-soft);
+  transition: color 0.2s ease;
+}
+
+.vp-doc a.ct-card:hover .ct-login {
+  color: var(--ct-accent);
+}
+
+/* ---- Join: three editorial steps, hairline-separated --------------------- */
+
+.ct-join {
+  max-width: 980px;
+  margin: 88px auto 0;
+  text-align: center;
+}
+
+.vp-doc .ct-join-title {
+  margin: 0 0 40px;
+  padding: 0;
+  border: none;
+  font-family: 'Fraunces', 'Noto Serif SC', serif;
+  font-size: clamp(30px, 4vw, 44px);
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  color: var(--ct-ink);
+}
+
+.ct-steps {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--ct-line);
+  text-align: left;
+}
+
+.ct-step {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 28px 28px 8px;
+}
+
+.ct-step:first-child {
+  padding-left: 4px;
+}
+
+.ct-step + .ct-step {
+  border-left: 1px solid var(--ct-line);
+}
+
+.ct-step-num {
+  font-family: 'Fraunces', 'Noto Serif SC', serif;
+  font-size: 30px;
+  font-weight: 550;
+  font-style: italic;
+  line-height: 1;
+  color: var(--ct-accent);
+}
+
+.vp-doc .ct-step-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ct-ink);
+}
+
+.vp-doc .ct-step-desc {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--ct-ink-soft);
+}
+
+/* ---- Footer: text links, no buttons -------------------------------------- */
+
+.ct-footer {
+  max-width: 980px;
+  margin-top: 56px;
+  padding-bottom: 56px;
+  text-align: center;
+}
+
+.vp-doc .ct-updated {
+  margin: 0 0 22px;
+  color: var(--ct-ink-faint);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.vp-doc .ct-links {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin: 0;
+}
+
+.vp-doc a.ct-link {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 4px;
+  color: var(--ct-ink);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-decoration: none;
+  border-bottom: 1px solid var(--ct-line);
+  transition: color 0.2s ease, border-color 0.2s ease;
+}
+
+.vp-doc a.ct-link + a.ct-link {
+  margin-left: 36px;
+}
+
+.vp-doc a.ct-link:hover {
+  color: var(--ct-accent);
+  border-bottom-color: var(--ct-accent);
+  text-decoration: none;
+}
+
+.ct-arrow {
+  display: inline-block;
+  transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.vp-doc a.ct-link:hover .ct-arrow {
+  transform: translate(3px, -3px);
+}
+
+/* ---- Responsive & motion prefs ------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .vp-doc a.ct-card {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+
+  .ct-watermark {
+    transition: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .ct-hero {
+    padding: 72px 0 60px;
+  }
+
+  .ct-watermark {
+    right: -120px;
+    width: 420px;
+  }
+
+  .ct-facts {
+    grid-template-columns: 1fr;
+    max-width: 280px;
+  }
+
+  .ct-fact + .ct-fact {
+    border-left: none;
+    border-top: 1px solid var(--ct-line);
+  }
+
+  .ct-fact {
+    padding: 20px 0 16px;
+  }
+
+  .ct-search {
+    flex: 1 1 100%;
+  }
+
+  .ct-steps {
+    grid-template-columns: 1fr;
+  }
+
+  .ct-step {
+    padding: 20px 4px 16px;
+  }
+
+  .ct-step + .ct-step {
+    border-left: none;
+    border-top: 1px solid var(--ct-line);
+  }
+}

@@ -3,12 +3,19 @@
 # CubeSandbox transparent proxy — host-side network setup.
 # Phase 1: full MITM via OpenResty + TPROXY.
 #
-# Selection model: traffic is matched purely by ingress interface and
-# destination port — `iif cube-dev` + tcp dport 80/443. There is NO
-# fwmark involved in either the forward (sandbox→OpenResty) or the
-# return (OpenResty→sandbox) direction. The cube-egress worker's
-# replies are routed naturally by the kernel and re-injected into the
-# sandbox tap by the from_envoy BPF program on cube-dev egress.
+# Selection model: traffic is matched by ingress interface and by an
+# skb->mark stamped from the sandbox tap's eBPF datapath. The mvmtap
+# program reads allow_out_v3 to find the (host, port) → scheme mapping
+# for the outgoing SYN, then writes CUBE_L7_MARK_HTTP (0xCE010000) or
+# CUBE_L7_MARK_HTTPS (0xCE020000) so this chain can steer the packet at
+# 8080 (nginx HTTP listener) or 8443 (nginx HTTPS listener) regardless
+# of the original destination port. This lets users configure L7
+# capture on arbitrary ports (e.g. an API on tcp/3000) without teaching
+# iptables about their port map.
+#
+# The cube-owned mark uses the CUBE_L7_MARK_MASK (0xFFFF0000) high-16
+# range so the low 16 bits remain free for host-level marks users may
+# set for other purposes.
 #
 # Idempotent: safe to re-run. Rules live in a dedicated TRANSPROXY
 # sub-chain so 'down' tears down our config without touching anything
@@ -64,6 +71,38 @@ SANDBOX_NETWORK_CIDR="${CUBE_SANDBOX_NETWORK_CIDR:-192.168.0.0/18}"
 TPROXY_ON_IP="$(sandbox_gateway_ip_from_cidr "${SANDBOX_NETWORK_CIDR}")"  # cube-dev IP
 TPROXY_PORT_HTTP=8080
 TPROXY_PORT_HTTPS=8443
+# skb->mark values written by the mvmtap L7 proxy path (the cube_l7_mark_http /
+# cube_l7_mark_https / cube_l7_mark_mask globals in CubeNet/src/cubevs.h). Only
+# the high 16 bits are cube-owned; the mask lets users co-exist with other
+# host-level fwmark schemes on the low 16 bits.
+#
+# Defaults match the shipped values; a deployment may override them via
+# /etc/cubeegress/l7-marks.conf so these rules and the dataplane (which reads
+# the same file into its eBPF globals) stay in lock-step.
+CUBE_L7_MARK_HTTP=0xCE010000
+CUBE_L7_MARK_HTTPS=0xCE020000
+CUBE_L7_MARK_MASK=0xFFFF0000
+if [ -f /etc/cubeegress/l7-marks.conf ]; then
+    # shellcheck disable=SC1091
+    . /etc/cubeegress/l7-marks.conf
+fi
+# Validate the (possibly overridden) marks: http must differ from https, and
+# both may only set bits inside the mask. Compare arithmetically (not as
+# strings) so the same value in different notations — 0xCE010000 vs
+# 0xce010000 vs 3456172032 — is still rejected, matching the uint32
+# comparison in cubevs.resolveL7Marks.
+validate_l7_marks() {
+    if (( CUBE_L7_MARK_HTTP == CUBE_L7_MARK_HTTPS )); then
+        echo "cube-proxy-iptables-init: CUBE_L7_MARK_HTTP (${CUBE_L7_MARK_HTTP}) must differ from CUBE_L7_MARK_HTTPS" >&2
+        exit 1
+    fi
+    if [ $(( CUBE_L7_MARK_HTTP & ~CUBE_L7_MARK_MASK )) -ne 0 ] || \
+       [ $(( CUBE_L7_MARK_HTTPS & ~CUBE_L7_MARK_MASK )) -ne 0 ]; then
+        echo "cube-proxy-iptables-init: L7 marks must set bits only within CUBE_L7_MARK_MASK (${CUBE_L7_MARK_MASK})" >&2
+        exit 1
+    fi
+}
+validate_l7_marks
 ROUTE_TABLE=100
 INGRESS_IFACE="${CUBE_INGRESS_IFACE:-cube-dev}"
 CHAIN="TRANSPROXY"
@@ -81,33 +120,73 @@ require_modules() {
     done
 }
 
-# Create-or-flush our sub-chain, then ensure PREROUTING jumps to it once.
+# Build the steering rules into a scratch chain and only swap it into the live
+# chain once every rule is verified present. Flushing and rebuilding the live
+# chain in place would be non-atomic: if the second (HTTPS) rule failed after
+# the first succeeded, the script would abort before install_routing() while
+# PREROUTING still jumped at a half-built chain — a silent fail-open that
+# bypasses L7 interception/deny for that scheme. Building in an unreferenced
+# scratch chain keeps the currently-live config intact until the swap.
 install_chain() {
-    iptables -t mangle -N "${CHAIN}" 2>/dev/null || true
-    iptables -t mangle -F "${CHAIN}"
+    local scratch="${CHAIN}.new"
 
-    iptables -t mangle -C PREROUTING -j "${CHAIN}" 2>/dev/null \
-        || iptables -t mangle -A PREROUTING -j "${CHAIN}"
+    # Start from a clean scratch chain. It is not referenced by PREROUTING yet,
+    # so a failure below never disturbs the currently-live chain.
+    iptables -t mangle -F "${scratch}" 2>/dev/null || true
+    iptables -t mangle -X "${scratch}" 2>/dev/null || true
+    iptables -t mangle -N "${scratch}"
 
-    iptables -t mangle -A "${CHAIN}" \
-        -i "${INGRESS_IFACE}" -p tcp --dport 80 \
+    # HTTP: mvmtap stamps CUBE_L7_MARK_HTTP → steer to nginx HTTP listener.
+    iptables -t mangle -A "${scratch}" \
+        -i "${INGRESS_IFACE}" -p tcp \
+        -m mark --mark "${CUBE_L7_MARK_HTTP}/${CUBE_L7_MARK_MASK}" \
         -j TPROXY --on-ip "${TPROXY_ON_IP}" --on-port "${TPROXY_PORT_HTTP}"
 
-    iptables -t mangle -A "${CHAIN}" \
-        -i "${INGRESS_IFACE}" -p tcp --dport 443 \
+    # HTTPS: mvmtap stamps CUBE_L7_MARK_HTTPS → steer to nginx HTTPS listener.
+    iptables -t mangle -A "${scratch}" \
+        -i "${INGRESS_IFACE}" -p tcp \
+        -m mark --mark "${CUBE_L7_MARK_HTTPS}/${CUBE_L7_MARK_MASK}" \
         -j TPROXY --on-ip "${TPROXY_ON_IP}" --on-port "${TPROXY_PORT_HTTPS}"
 
-    iptables -t mangle -A "${CHAIN}" -j RETURN
+    iptables -t mangle -A "${scratch}" -j RETURN
+
+    # Post-condition: both steering rules must exist before the swap, else a
+    # silently dropped rule would fail open for that scheme.
+    iptables -t mangle -C "${scratch}" \
+        -i "${INGRESS_IFACE}" -p tcp \
+        -m mark --mark "${CUBE_L7_MARK_HTTP}/${CUBE_L7_MARK_MASK}" \
+        -j TPROXY --on-ip "${TPROXY_ON_IP}" --on-port "${TPROXY_PORT_HTTP}" \
+        || fatal "HTTP TPROXY rule missing from ${scratch} after build"
+    iptables -t mangle -C "${scratch}" \
+        -i "${INGRESS_IFACE}" -p tcp \
+        -m mark --mark "${CUBE_L7_MARK_HTTPS}/${CUBE_L7_MARK_MASK}" \
+        -j TPROXY --on-ip "${TPROXY_ON_IP}" --on-port "${TPROXY_PORT_HTTPS}" \
+        || fatal "HTTPS TPROXY rule missing from ${scratch} after build"
+
+    # Swap: detach the previously-live chain from PREROUTING, drop it, rename
+    # the fully-built scratch chain into the live name, then point PREROUTING
+    # at it. The old config keeps serving until it is detached here, so there
+    # is no window with a half-configured chain.
+    while iptables -t mangle -C PREROUTING -j "${CHAIN}" 2>/dev/null; do
+        iptables -t mangle -D PREROUTING -j "${CHAIN}" || break
+    done
+    iptables -t mangle -F "${CHAIN}" 2>/dev/null || true
+    iptables -t mangle -X "${CHAIN}" 2>/dev/null || true
+    iptables -t mangle -E "${scratch}" "${CHAIN}"
+    iptables -t mangle -C PREROUTING -j "${CHAIN}" 2>/dev/null \
+        || iptables -t mangle -A PREROUTING -j "${CHAIN}"
 }
 
 install_routing() {
-    # Two ip rules: tcp/80 and tcp/443 from cube-dev → table 100.
-    # Match by selectors (iif/ipproto/dport), not fwmark.
-    local proto port
-    for port in 80 443; do
+    # Two ip rules: cube-owned mark bits → table 100. Match on fwmark so the
+    # rule set stays independent of the original destination port; user rules
+    # may attach L7 handling to arbitrary ports (e.g. tcp/3000) and mvmtap
+    # writes the same mark for all of them.
+    local mark
+    for mark in "${CUBE_L7_MARK_HTTP}" "${CUBE_L7_MARK_HTTPS}"; do
         if ! ip rule show \
-             | grep -q "iif ${INGRESS_IFACE} ipproto tcp dport ${port} lookup ${ROUTE_TABLE}"; then
-            ip rule add iif "${INGRESS_IFACE}" ipproto tcp dport "${port}" \
+             | grep -qiE "fwmark ${mark}/${CUBE_L7_MARK_MASK} lookup ${ROUTE_TABLE}[[:space:]]*$"; then
+            ip rule add fwmark "${mark}/${CUBE_L7_MARK_MASK}" \
                        table "${ROUTE_TABLE}"
         fi
     done
@@ -124,18 +203,34 @@ remove_chain() {
     done
     iptables -t mangle -F "${CHAIN}" 2>/dev/null || true
     iptables -t mangle -X "${CHAIN}" 2>/dev/null || true
+    # Drop any scratch chain left over from an aborted install.
+    iptables -t mangle -F "${CHAIN}.new" 2>/dev/null || true
+    iptables -t mangle -X "${CHAIN}.new" 2>/dev/null || true
 }
 
 remove_routing() {
-    local port
-    for port in 80 443; do
+    local mark
+    for mark in "${CUBE_L7_MARK_HTTP}" "${CUBE_L7_MARK_HTTPS}"; do
         while ip rule show \
-              | grep -q "iif ${INGRESS_IFACE} ipproto tcp dport ${port} lookup ${ROUTE_TABLE}"; do
-            ip rule del iif "${INGRESS_IFACE}" ipproto tcp dport "${port}" \
+              | grep -qiE "fwmark ${mark}/${CUBE_L7_MARK_MASK} lookup ${ROUTE_TABLE}[[:space:]]*$"; do
+            ip rule del fwmark "${mark}/${CUBE_L7_MARK_MASK}" \
                        table "${ROUTE_TABLE}" || break
         done
     done
     ip route flush table "${ROUTE_TABLE}" 2>/dev/null || true
+}
+
+# Remove policy-routing selectors installed by the pre-fwmark implementation.
+# Delete only the exact cube-dev TCP/80 and TCP/443 selectors; unrelated rules
+# using table 100 are outside this script's ownership.
+remove_legacy_dport_routing() {
+    local port
+    for port in 80 443; do
+        while ip rule del iif "${INGRESS_IFACE}" ipproto tcp dport "${port}" \
+                      table "${ROUTE_TABLE}" 2>/dev/null; do
+            :
+        done
+    done
 }
 
 show_status() {
@@ -163,6 +258,7 @@ main() {
             require_modules
             install_chain
             install_routing
+            remove_legacy_dport_routing
             log "cube-proxy iptables/route rules installed"
             show_status
             ;;
@@ -170,6 +266,7 @@ main() {
             require_root
             remove_chain
             remove_routing
+            remove_legacy_dport_routing
             log "cube-proxy iptables/route rules removed"
             ;;
         status)
@@ -182,4 +279,6 @@ main() {
     esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
