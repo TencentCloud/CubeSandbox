@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import struct
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import Any, Iterator, List, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +122,7 @@ class Filesystem:
 
     def write_files(
         self,
-        files: list[tuple[str, str | bytes]],
+        files: List[tuple[str, str | bytes]],
         *,
         user: str | None = None,
     ) -> int:
@@ -140,7 +140,7 @@ class Filesystem:
                 ) from e
         return len(files)
 
-    def list(self, path: str) -> list[dict[str, Any]]:
+    def list(self, path: str) -> List[dict[str, Any]]:
         """List entries in a directory."""
         result = self._filesystem_rpc("ListDir", {"path": path})
         return result.get("entries", [])

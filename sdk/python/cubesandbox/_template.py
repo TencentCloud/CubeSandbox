@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import requests
 
@@ -41,7 +41,7 @@ class TemplateBuild:
     message: str = ""
     created_at: str = ""
     finished_at: str = ""
-    logs: list[str] = field(default_factory=list)
+    logs: List[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict) -> "TemplateBuild":
@@ -80,11 +80,11 @@ class TemplateInfo:
     public: bool = False
     cpu_count: int = 0
     memory_mb: int = 0
-    replicas: list[dict] = field(default_factory=list)
+    replicas: List[dict] = field(default_factory=list)
     create_request: dict | None = None
     network_type: str | None = None
     allow_internet_access: bool | None = None
-    builds: list[TemplateBuild] = field(default_factory=list)
+    builds: List[TemplateBuild] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict) -> "TemplateInfo":
@@ -146,7 +146,7 @@ class Template:
 
 
     @classmethod
-    def list(cls, *, config: Config | None = None) -> list[TemplateInfo]:
+    def list(cls, *, config: Config | None = None) -> List[TemplateInfo]:
         """GET /templates — List all templates.
 
         Args:
@@ -217,7 +217,7 @@ class Template:
         start_cmd: str | None = None,
         instance_type: str | None = None,
         writable_layer_size: str | None = None,
-        exposed_ports: list[int] | None = None,
+        exposed_ports: List[int] | None = None,
         probe_port: int | None = None,
         probe_path: str | None = None,
         cpu_count: int | None = None,
@@ -225,14 +225,14 @@ class Template:
         envs: Dict[str, str] | None = None,
         allow_internet_access: bool | None = None,
         network_type: str | None = None,
-        nodes: list[str] | None = None,
+        nodes: List[str] | None = None,
         registry_username: str | None = None,
         registry_password: str | None = None,
-        command: list[str] | None = None,
-        args: list[str] | None = None,
-        dns: list[str] | None = None,
-        allow_out: list[str] | None = None,
-        deny_out: list[str] | None = None,
+        command: List[str] | None = None,
+        args: List[str] | None = None,
+        dns: List[str] | None = None,
+        allow_out: List[str] | None = None,
+        deny_out: List[str] | None = None,
         enable_ivshmem: bool | None = None,
         config: Config | None = None,
         **kwargs: Any,

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import threading
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, List
 
 import httpx
 import requests
@@ -190,7 +190,7 @@ class Sandbox:
         env_vars: Dict[str, str] | None = None,
         envs: Dict[str, str] | None = None,
         metadata: Dict[str, str] | None = None,
-        distribution_scope: list[str] | None = None,
+        distribution_scope: List[str] | None = None,
         allow_internet_access: bool = True,
         network: Dict[str, Any] | None = None,
         lifecycle: Dict[str, Any] | None = None,
@@ -354,7 +354,7 @@ class Sandbox:
 
 
     @classmethod
-    def list(cls, config: Config | None = None) -> list[dict]:
+    def list(cls, config: Config | None = None) -> List[dict]:
         """GET /sandboxes - List all running sandboxes (v1).
 
         Args:
@@ -371,7 +371,7 @@ class Sandbox:
         return resp.json()
 
     @classmethod
-    def list_v2(cls, config: Config | None = None) -> list[dict]:
+    def list_v2(cls, config: Config | None = None) -> List[dict]:
         """GET /v2/sandboxes - List all running sandboxes (v2).
 
         Supports state / metadata filtering on the server side.
@@ -644,7 +644,7 @@ class Sandbox:
         limit: int | None = None,
         next_token: str | None = None,
         config: Config | None = None,
-    ) -> tuple[list[SnapshotInfo], str | None]:
+    ) -> tuple[List[SnapshotInfo], str | None]:
         """GET /snapshots — List snapshots (1.2).
 
         Args:
@@ -758,7 +758,7 @@ class Sandbox:
             pass
         self._session = self._build_session()
 
-    def clone(self, n: int = 1, *, concurrency: int = 1) -> list["Sandbox"]:
+    def clone(self, n: int = 1, *, concurrency: int = 1) -> List["Sandbox"]:
         """Clone this sandbox *n* times (1.6).
 
         Internally this executes three steps:
@@ -807,7 +807,7 @@ class Sandbox:
         def _create_one() -> Sandbox:
             return Sandbox.create(template=snap_id, config=cfg)
 
-        sandboxes: list[Sandbox] = []
+        sandboxes: List[Sandbox] = []
         first_error: BaseException | None = None
         if concurrency <= 1 or n <= 1:
             # Sequential: short-circuit on first failure to preserve the

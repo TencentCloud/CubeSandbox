@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 import threading
 from dataclasses import dataclass
-from typing import Dict, Union
+from typing import Dict, List, Union
 
 import requests
 
@@ -198,9 +198,9 @@ def _validate_mount_path(path: str) -> str:
     return path
 
 
-def _serialize_volume_mounts(mounts: VolumeMountsArg) -> list[dict[str, object]]:
+def _serialize_volume_mounts(mounts: VolumeMountsArg) -> List[dict[str, object]]:
     """Serialize the e2b-style ``{path: volume}`` mapping into the wire format."""
-    serialized: list[dict[str, object]] = []
+    serialized: List[dict[str, object]] = []
     for path, value in mounts.items():
         if isinstance(value, VolumeMount):
             volume = value.volume
@@ -244,7 +244,7 @@ class Volume:
             sb.files.write("/workspace/note.txt", "persisted!")
 
         # List / get_info / connect / destroy
-        for v in Volume.list():           # list[VolumeInfo]
+        for v in Volume.list():           # List[VolumeInfo]
             print(v.volume_id, v.name)
         Volume.get_info(vol.volume_id)    # VolumeInfo
         vol = Volume.connect("my-data")   # Volume instance (== e2b)
@@ -376,7 +376,7 @@ class Volume:
         return cls._from_info(VolumeInfo.from_dict(resp.json()), cfg)
 
     @classmethod
-    def list(cls, *, config: Config | None = None) -> list[VolumeInfo]:
+    def list(cls, *, config: Config | None = None) -> List[VolumeInfo]:
         """GET /volumes — List all volumes.
 
         The returned entries never carry a ``token`` (it is only surfaced on
