@@ -8,6 +8,16 @@ common:
   collect_metric_interval: 1s
   default_headless_service_nodes_num: 1
   enable_check_com_net_id_param: false
+  # Template build wiring: a single boolean switch, mirroring
+  # controlPlane.templateCenter.enabled. False serves every template path
+  # locally; true forwards template-from-image builds to CubeTemplateCenter.
+  #
+  # CubeTemplateCenter's address is deliberately NOT here: it is a deployment
+  # fact, so it is injected as the CUBE_TEMPLATE_CENTER_ADDR environment
+  # variable on the CubeMaster Deployment (the counterpart of CUBE_MASTER_ADDR,
+  # which TC uses to call back). Keeping it out of conf means changing the
+  # address never requires editing this file.
+  templatecenter_enabled: {{ include "cube.templateCenterEnabledConf" . }}
 
 log:
   module: "cubemaster"

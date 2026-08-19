@@ -26,4 +26,13 @@ else
   log "cubemaster artifact store ${CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR} unavailable, fallback handled by cubemaster"
 fi
 
+# CubeTemplateCenter's address, read only when templatecenter_enabled=true in
+# conf.yaml. It is an environment variable (not a conf key) because an address
+# is a deployment fact; this is the exact counterpart of CUBE_MASTER_ADDR on
+# the TC side. The default points at the TC unit the same bundle installs on
+# this host, so enabling TC needs only the conf flip, no addressing. Export
+# unconditionally: when the conf switch is off the binary never reads it, and
+# having it set keeps the later enable to a single edit.
+export CUBE_TEMPLATE_CENTER_ADDR="${CUBE_TEMPLATE_CENTER_ADDR:-http://127.0.0.1:8090}"
+
 exec "${CUBEMASTER_BIN}"

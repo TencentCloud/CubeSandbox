@@ -18,7 +18,7 @@ on:
         type: string
         default: ''
       components:
-        description: 'Comma-separated components to build, or "all" (cube-egress, cube-egress-net, cube-master, cubemastercli, cubelet, cube-shim, cube-kernel, cube-guest, cube-agent, cube-pvm-host-bootstrap, cube-node-init, cube-wait-node-prep, cube-api, cube-ops, cube-proxy, webui, cube-lifecycle-manager)'
+        description: 'Comma-separated components to build, or "all" (cube-egress, cube-egress-net, cube-master, cubemastercli, cube-templatecenter, cubelet, cube-shim, cube-kernel, cube-guest, cube-agent, cube-pvm-host-bootstrap, cube-node-init, cube-wait-node-prep, cube-api, cube-ops, cube-proxy, webui, cube-lifecycle-manager)'
         required: false
         type: string
         default: all
@@ -206,6 +206,7 @@ jobs:
               "cube-egress-net",
               "cube-master",
               "cubemastercli",
+              "cube-templatecenter",
               "cubelet",
               "cube-shim",
               "cube-kernel",
@@ -258,6 +259,13 @@ jobs:
                   "context": ".",
                   "dockerfile": "CubeMaster/docker/Dockerfile.cubemastercli",
                   "cache_scope": "cubemastercli",
+              },
+              {
+                  "component": "cube-templatecenter",
+                  "image": "cube-templatecenter",
+                  "context": ".",
+                  "dockerfile": "CubeTemplateCenter/docker/Dockerfile",
+                  "cache_scope": "cube-templatecenter",
               },
               {
                   "component": "cubelet",

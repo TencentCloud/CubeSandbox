@@ -17,7 +17,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter/cube_egress_ca"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter/image"
@@ -73,14 +72,21 @@ func ensureRootfsArtifact(ctx context.Context, req *types.CreateTemplateFromImag
 		}
 		record.DeletedAt = gorm.DeletedAt{}
 	}
+	// A READY row is only reusable while its ext4 file is still on disk. If the
+	// artifact store did not survive a restart the row outlives the file, and
+	// reusing it here would skip the build and push a phantom artifact to the
+	// cubelets on every single retry. rootfsArtifactReuseVerdict demotes such a
+	// row so the code below rebuilds it in place -- except when the artifact is
+	// held by another CubeMaster, where rebuilding would overwrite the shared
+	// row and break every replica the holder already served (issue #1005).
 	if err == nil && record.Status == ArtifactStatusReady && record.GeneratedRequestJSON != "" {
-		if validationErr := validateReusableRootfsArtifactFile(record); validationErr != nil {
-			log.G(ctx).Warnf("rootfs artifact %s is not reusable: %v; rebuilding", record.ArtifactID, validationErr)
-		} else {
+		if reuseErr := rootfsArtifactReuseVerdict(ctx, record); reuseErr == nil {
 			generatedReq, err = generateTemplateCreateRequest(req, record, source.Config, downloadBaseURL)
 			if err == nil {
 				return record, generatedReq, false, nil
 			}
+		} else if errors.Is(reuseErr, ErrRootfsArtifactForeign) {
+			return nil, nil, false, fmt.Errorf("template artifact %s is held by another cubemaster and cannot be served or rebuilt here: %w", record.ArtifactID, reuseErr)
 		}
 	}
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -112,13 +118,13 @@ func ensureRootfsArtifact(ctx context.Context, req *types.CreateTemplateFromImag
 				record.DeletedAt = gorm.DeletedAt{}
 			}
 			if record.Status == ArtifactStatusReady && record.GeneratedRequestJSON != "" {
-				if validationErr := validateReusableRootfsArtifactFile(record); validationErr != nil {
-					log.G(ctx).Warnf("rootfs artifact %s is not reusable: %v; rebuilding", record.ArtifactID, validationErr)
-				} else {
+				if reuseErr := rootfsArtifactReuseVerdict(ctx, record); reuseErr == nil {
 					generatedReq, err = generateTemplateCreateRequest(req, record, source.Config, downloadBaseURL)
 					if err == nil {
 						return record, generatedReq, false, nil
 					}
+				} else if errors.Is(reuseErr, ErrRootfsArtifactForeign) {
+					return nil, nil, false, fmt.Errorf("template artifact %s is held by another cubemaster and cannot be served or rebuilt here: %w", record.ArtifactID, reuseErr)
 				}
 			}
 		}

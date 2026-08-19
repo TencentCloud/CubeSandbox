@@ -74,41 +74,60 @@ type CommonConf struct {
 	HttpPort               int           `yaml:"http_port"`
 	// HttpBind is the HTTP listen address. Empty means 0.0.0.0 (all
 	// interfaces); set to 127.0.0.1 to keep the API loopback-only.
-	HttpBind                        string            `yaml:"http_bind"`
-	WriteTimeout                    int               `yaml:"http_writetimeout"`
-	ReadTimeout                     int               `yaml:"http_readtimeout"`
-	IdleTimeout                     int               `yaml:"http_idletimeout"`
-	GraceFullStopTimeoutInSec       int               `yaml:"gracefull_stop_timeout_insec"`
-	SyncMetaDataInterval            time.Duration     `yaml:"sync_meta_data_interval"`
-	SyncMetricDataInterval          time.Duration     `yaml:"sync_metric_data_interval"`
-	CleanSandboxCacheInterval       time.Duration     `yaml:"clean_sandbox_cache_interval"`
-	EnabledListRunningSandboxCache  bool              `yaml:"enabled_list_running_sandbox_cache"`
-	AsyncTaskQueueSize              int               `yaml:"async_task_queue_size"`
-	AsyncTaskWorkerNum              int               `yaml:"async_task_worker_num"`
-	HeadlessServiceName             string            `yaml:"headless_service_name"`
-	DefaultHeadlessServiceNodesNum  int64             `yaml:"default_headless_service_nodes_num"`
-	ListFilterOutLables             map[string]string `yaml:"list_filter_out_lables"`
-	CollectMetricInterval           time.Duration     `yaml:"collect_metric_interval"`
-	ReportLocalCreateNum            bool              `yaml:"report_local_create_num"`
-	ReportStdevMetric               bool              `yaml:"report_stdev_metric"`
-	GwCacheExpiredTime              time.Duration     `yaml:"gw_cache_expired_time"`
-	GwCacheEnable                   bool              `yaml:"gw_cache_enable"`
-	ReportGWRedisGetMetric          bool              `yaml:"report_gw_redis_get_metric"`
-	EnableGetStatusFromCubelet      bool              `yaml:"enable_get_status_from_cubelet"`
-	DisableHardDelete               bool              `yaml:"disable_hard_delete"`
-	CollectSandboxMemoryWhitelist   []string          `yaml:"collect_sandbox_memory_whitelist"`
-	EnableAllCollectSandboxMemory   bool              `yaml:"enable_all_collect_sandbox_memory"`
-	FilterErrMsgErrorCode           map[int]bool      `yaml:"filter_err_msg_error_code"`
-	DescribeInstancesWhiteList      map[string]bool   `yaml:"describe_instances_white_list"`
-	DescribeTaskExpireTime          int               `yaml:"describe_task_expire_time"`
-	EnablePrivateIpQuery            bool              `yaml:"enable_private_ip_query"`
-	DbMaxRetryCount                 int               `yaml:"db_max_retry_count"`
-	DbRetryInterval                 time.Duration     `yaml:"db_retry_interval"`
-	EnableCheckComNetIDParam        bool              `yaml:"enable_check_com_net_id_param"`
-	EnableDescribeInstanceFromRedis bool              `yaml:"enable_describe_instance_from_redis"`
-	MaxNICQueue                     int               `yaml:"max_nic_queue"`
-	DisableCreateImageCluster       map[string]bool   `yaml:"disable_create_image_cluster"`
-	EnableAGSColdStartSwitch        bool              `yaml:"enable_ags_cold_start_switch"`
+	HttpBind                       string            `yaml:"http_bind"`
+	WriteTimeout                   int               `yaml:"http_writetimeout"`
+	ReadTimeout                    int               `yaml:"http_readtimeout"`
+	IdleTimeout                    int               `yaml:"http_idletimeout"`
+	GraceFullStopTimeoutInSec      int               `yaml:"gracefull_stop_timeout_insec"`
+	SyncMetaDataInterval           time.Duration     `yaml:"sync_meta_data_interval"`
+	SyncMetricDataInterval         time.Duration     `yaml:"sync_metric_data_interval"`
+	CleanSandboxCacheInterval      time.Duration     `yaml:"clean_sandbox_cache_interval"`
+	EnabledListRunningSandboxCache bool              `yaml:"enabled_list_running_sandbox_cache"`
+	AsyncTaskQueueSize             int               `yaml:"async_task_queue_size"`
+	AsyncTaskWorkerNum             int               `yaml:"async_task_worker_num"`
+	HeadlessServiceName            string            `yaml:"headless_service_name"`
+	DefaultHeadlessServiceNodesNum int64             `yaml:"default_headless_service_nodes_num"`
+	ListFilterOutLables            map[string]string `yaml:"list_filter_out_lables"`
+	CollectMetricInterval          time.Duration     `yaml:"collect_metric_interval"`
+	ReportLocalCreateNum           bool              `yaml:"report_local_create_num"`
+	ReportStdevMetric              bool              `yaml:"report_stdev_metric"`
+	GwCacheExpiredTime             time.Duration     `yaml:"gw_cache_expired_time"`
+	GwCacheEnable                  bool              `yaml:"gw_cache_enable"`
+	ReportGWRedisGetMetric         bool              `yaml:"report_gw_redis_get_metric"`
+	EnableGetStatusFromCubelet     bool              `yaml:"enable_get_status_from_cubelet"`
+	DisableHardDelete              bool              `yaml:"disable_hard_delete"`
+
+	// TemplateCenterEnabled is the master switch for handing template work to
+	// the standalone CubeTemplateCenter process.
+	//
+	// Default and unset are both false: the YAML zero value and a missing key
+	// both leave every template path served locally, exactly as before the
+	// split. An explicit "true" forwards template-from-image builds to
+	// CubeTemplateCenter and waits for its status callback.
+	//
+	// This is the only template-center knob: there is deliberately no build or
+	// route mode string. Either CubeMaster does the template work in-process
+	// (false), or CubeTemplateCenter does (true) -- anything more granular
+	// would be a second switch to keep in sync with this one.
+	TemplateCenterEnabled bool `yaml:"templatecenter_enabled"`
+	// CubeTemplateCenter's address is deliberately NOT a config key. It is a
+	// deployment fact that changes with the environment, so it lives in the
+	// CUBE_TEMPLATE_CENTER_ADDR environment variable -- the exact counterpart
+	// of CUBE_MASTER_ADDR, which every component (TC included) uses to find
+	// CubeMaster. See Config.TemplateCenterAddr.
+	CollectSandboxMemoryWhitelist   []string        `yaml:"collect_sandbox_memory_whitelist"`
+	EnableAllCollectSandboxMemory   bool            `yaml:"enable_all_collect_sandbox_memory"`
+	FilterErrMsgErrorCode           map[int]bool    `yaml:"filter_err_msg_error_code"`
+	DescribeInstancesWhiteList      map[string]bool `yaml:"describe_instances_white_list"`
+	DescribeTaskExpireTime          int             `yaml:"describe_task_expire_time"`
+	EnablePrivateIpQuery            bool            `yaml:"enable_private_ip_query"`
+	DbMaxRetryCount                 int             `yaml:"db_max_retry_count"`
+	DbRetryInterval                 time.Duration   `yaml:"db_retry_interval"`
+	EnableCheckComNetIDParam        bool            `yaml:"enable_check_com_net_id_param"`
+	EnableDescribeInstanceFromRedis bool            `yaml:"enable_describe_instance_from_redis"`
+	MaxNICQueue                     int             `yaml:"max_nic_queue"`
+	DisableCreateImageCluster       map[string]bool `yaml:"disable_create_image_cluster"`
+	EnableAGSColdStartSwitch        bool            `yaml:"enable_ags_cold_start_switch"`
 }
 
 type AuthConf struct {
@@ -1231,6 +1250,51 @@ func validate(cfg *Config) error {
 //go:noinline
 func GetConfig() *Config {
 	return cfg
+}
+
+// TemplateCenterEnabled reports whether template work is handed to the
+// standalone CubeTemplateCenter process. It is the single feature gate for the
+// whole split: true forwards template-from-image builds to TC, false keeps
+// every template path in-process.
+//
+// Returns false when the config is absent or the key is unset, so callers can
+// gate on it directly without a nil check.
+func (c *Config) TemplateCenterEnabled() bool {
+	if c == nil || c.Common == nil {
+		return false
+	}
+	return c.Common.TemplateCenterEnabled
+}
+
+// TemplateBuildRemote names the call site it serves: the remote-build branch
+// of the template-from-image handler. Behaviourally a pure alias of
+// TemplateCenterEnabled -- builds are remote exactly when the master switch
+// is on. Kept as a separate method so the handler names the intent
+// ("is this a remote build?") rather than the underlying toggle.
+func (c *Config) TemplateBuildRemote() bool {
+	return c.TemplateCenterEnabled()
+}
+
+// TemplateCenterRequired reports whether any template path depends on reaching
+// CubeTemplateCenter, i.e. a missing CUBE_TEMPLATE_CENTER_ADDR is a real error
+// rather than an unused default. True exactly when the master switch is on.
+func (c *Config) TemplateCenterRequired() bool {
+	return c.TemplateCenterEnabled()
+}
+
+// EnvTemplateCenterAddr is how CubeMaster finds CubeTemplateCenter. It mirrors
+// CUBE_MASTER_ADDR, the variable every other component uses to find CubeMaster:
+// one name per target component, shared by whoever needs to reach it, so a
+// deployment sets each address exactly once. An address is a deployment fact,
+// not a process tunable, which is why it is an environment variable and not a
+// conf.yaml key.
+const EnvTemplateCenterAddr = "CUBE_TEMPLATE_CENTER_ADDR"
+
+// TemplateCenterAddr returns CubeTemplateCenter's base URL with no trailing
+// slash, or "" when unset. Read from the environment on every call so it can
+// be changed without editing (or even loading) conf.yaml.
+func (c *Config) TemplateCenterAddr() string {
+	return strings.TrimRight(strings.TrimSpace(os.Getenv(EnvTemplateCenterAddr)), "/")
 }
 
 var defaultAllowedHostMountPrefixes = []string{"/data/shared/"}

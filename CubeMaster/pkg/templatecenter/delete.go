@@ -15,6 +15,7 @@ import (
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
@@ -35,6 +36,12 @@ var (
 	runArtifactCleanup       = cleanupTemplateArtifact
 	runMetadataCleanup       = cleanupTemplateMetadata
 	runTemplateJobCleanup    = cleanupTemplateJobs
+	// runInUseCheck and runFailActiveWork follow the same seam convention as the
+	// cleanup stages above so the force-delete ordering can be tested without a
+	// live node cache (isTemplateInUse short-circuits to false when no healthy
+	// node is registered, which would mask the in-use guard entirely).
+	runInUseCheck     = isTemplateInUse
+	runFailActiveWork = failActiveTemplateWork
 )
 
 // templateCleanupLocator identifies a single cubelet that may hold artifacts
@@ -71,7 +78,32 @@ func cleanupLocatorKey(locator templateCleanupLocator) string {
 	}, "|")
 }
 
+// DeleteTemplateOptions carries the non-identifying knobs of a delete.
+type DeleteTemplateOptions struct {
+	// Force allows the delete to proceed even though a build job or a
+	// definition build is still marked active.
+	//
+	// WHY THIS EXISTS
+	// ---------------
+	// A template whose job is stuck in PENDING/RUNNING cannot be deleted at
+	// all: the guards below reject it, and the only thing that ever clears the
+	// state is failStaleRunningJobs, which waits for the staleness window to
+	// elapse. Until then the template is undeletable and its name is taken,
+	// with no way for an operator to intervene. Force marks the in-flight work
+	// FAILED and continues.
+	//
+	// Force deliberately does NOT relax the in-use check: a template still
+	// referenced by a live sandbox stays undeletable, because deleting its
+	// artifact would break a running workload. Force is about unsticking
+	// bookkeeping, not about overriding data safety.
+	Force bool
+}
+
 func DeleteTemplate(ctx context.Context, templateID, instanceType string) error {
+	return DeleteTemplateWithOptions(ctx, templateID, instanceType, DeleteTemplateOptions{})
+}
+
+func DeleteTemplateWithOptions(ctx context.Context, templateID, instanceType string, opts DeleteTemplateOptions) error {
 	if !isReady() {
 		return ErrTemplateStoreNotInitialized
 	}
@@ -80,13 +112,16 @@ func DeleteTemplate(ctx context.Context, templateID, instanceType string) error 
 		if err != nil {
 			return err
 		}
-		return deleteTemplateWithTargets(ctx, templateID, targets)
+		return deleteTemplateWithTargets(ctx, templateID, targets, opts)
 	})
 }
 
-func deleteTemplateWithTargets(ctx context.Context, templateID string, targets *templateCleanupTargets) error {
-	if !targets.hasCleanupState() {
-		return ErrTemplateNotFound
+// activeWorkBlocker returns the error that stops a non-forced delete, or nil
+// when no in-flight work is in the way. Split out from the delete flow so the
+// state matrix is testable without a database.
+func activeWorkBlocker(targets *templateCleanupTargets, templateID string) error {
+	if targets == nil {
+		return nil
 	}
 	if targets.hasActiveJob() {
 		return fmt.Errorf("%w: template %s deletion is blocked while a build job is still active", ErrTemplateAttemptInProgress, templateID)
@@ -94,16 +129,46 @@ func deleteTemplateWithTargets(ctx context.Context, templateID string, targets *
 	if targets.hasActiveDefinitionBuild() {
 		return fmt.Errorf("%w: template %s deletion is blocked while definition creation is still active", ErrTemplateAttemptInProgress, templateID)
 	}
-	if targets.requiresCleanupLocator() {
-		return fmt.Errorf("%w: template %s has historical cleanup state but no node locator", ErrTemplateCleanupLocatorMissing, templateID)
+	return nil
+}
+
+func deleteTemplateWithTargets(ctx context.Context, templateID string, targets *templateCleanupTargets, opts DeleteTemplateOptions) error {
+	if !targets.hasCleanupState() {
+		return ErrTemplateNotFound
 	}
+	blocker := activeWorkBlocker(targets, templateID)
+	if blocker != nil && !opts.Force {
+		return blocker
+	}
+	if targets.requiresCleanupLocator() {
+		if !opts.Force {
+			return fmt.Errorf("%w: template %s has historical cleanup state but no node locator", ErrTemplateCleanupLocatorMissing, templateID)
+		}
+		// Being unable to name a node is exactly the kind of stuck bookkeeping
+		// force exists to clear: there is nowhere to send a cubelet cleanup, so
+		// the remaining work is metadata-only.
+		log.G(ctx).Warnf("force-deleting template %s with no node locator; cubelet-side cleanup is skipped", templateID)
+	}
+	// The in-use check MUST run before any status is rewritten. shouldCheckInUse
+	// returns false once the definition reads FAILED, so failing the in-flight
+	// work first would silently skip this check and let a force delete pull the
+	// artifact out from under a running sandbox.
 	if targets.shouldCheckInUse() {
-		inUse, err := isTemplateInUse(ctx, templateID, targets.InstanceType)
+		inUse, err := runInUseCheck(ctx, templateID, targets.InstanceType)
 		if err != nil {
 			return err
 		}
 		if inUse {
 			return ErrTemplateInUse
+		}
+	}
+	if blocker != nil {
+		// Force path. The in-flight job's goroutine may still be running and
+		// would otherwise write its rows back after the cleanup below,
+		// resurrecting a half-deleted template. Marking it FAILED first makes
+		// those late writes land on a terminal row instead.
+		if err := runFailActiveWork(ctx, templateID, targets); err != nil {
+			return err
 		}
 	}
 	if err := runReplicaCleanup(ctx, templateID, targets.Locators); err != nil {
@@ -121,6 +186,43 @@ func deleteTemplateWithTargets(ctx context.Context, templateID string, targets *
 		return err
 	}
 	return nil
+}
+
+// forcedDeleteJobError is recorded on jobs terminated by a force delete so the
+// reason survives in logs and in any job row that outlives the cleanup.
+const forcedDeleteJobError = "template force-deleted while this job was still active"
+
+// failActiveTemplateWork marks every PENDING/RUNNING job and an in-progress
+// definition build as FAILED. Errors are joined rather than returned early: a
+// force delete that gives up halfway would leave exactly the inconsistent state
+// the caller is trying to escape.
+func failActiveTemplateWork(ctx context.Context, templateID string, targets *templateCleanupTargets) error {
+	if targets == nil {
+		return nil
+	}
+	var errs error
+	for _, job := range targets.Jobs {
+		if !strings.EqualFold(job.Status, JobStatusPending) && !strings.EqualFold(job.Status, JobStatusRunning) {
+			continue
+		}
+		log.G(ctx).Warnf("force delete: marking active template job %s (status=%s phase=%s) as %s",
+			job.JobID, job.Status, job.Phase, JobStatusFailed)
+		if err := updateTemplateImageJob(ctx, job.JobID, map[string]any{
+			"status":        JobStatusFailed,
+			"progress":      100,
+			"error_message": forcedDeleteJobError,
+		}); err != nil {
+			errs = errors.Join(errs, fmt.Errorf("fail active job %s: %w", job.JobID, err))
+		}
+	}
+	if targets.hasActiveDefinitionBuild() {
+		log.G(ctx).Warnf("force delete: marking template %s definition (status=%s) as %s",
+			templateID, targets.Definition.Status, StatusFailed)
+		if err := UpdateDefinitionStatus(ctx, templateID, StatusFailed, forcedDeleteJobError); err != nil {
+			errs = errors.Join(errs, fmt.Errorf("fail definition build: %w", err))
+		}
+	}
+	return errs
 }
 
 func discoverTemplateCleanupTargets(ctx context.Context, templateID, instanceType string) (*templateCleanupTargets, error) {

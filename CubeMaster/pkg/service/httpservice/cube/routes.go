@@ -55,7 +55,50 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	g.DELETE(SnapshotAction+"/:snapshot_id", deleteSnapshotGinHandler)
 	g.GET(OperationAction+"/:operation_id", handleSnapshotOperationAction)
 
-	// Template
+	// Template control plane. Served in-process by CubeMaster. When
+	// templatecenter_enabled is true, createTemplateFromImageGinHandler hands
+	// the BUILD to CubeTemplateCenter (see template_from_image_remote.go) while
+	// CubeMaster keeps serving the API -- the build is data-plane work, the
+	// control plane stays here.
+	g.POST(TemplateAction, createTemplateGinHandler)
+	g.GET(TemplateAction, getTemplateGinHandler)
+	g.DELETE(TemplateAction, deleteTemplateGinHandler)
+	g.GET(TemplateCompatAction, getTemplateCompatGinHandler)
+	g.POST(TemplateCompatAction, updateTemplateCompatGinHandler)
+	g.POST(TemplateRedoAction, handleRedoTemplateAction)
+	g.GET(TemplateBuildStatusAction+"/:build_id/status", handleTemplateBuildStatusAction)
+	g.GET(TemplateFromImageAction, getTemplateFromImageGinHandler)
+	g.POST(TemplateFromImageAction, createTemplateFromImageGinHandler)
+
+	// Data plane: NOT proxied even in proxy mode. Artifacts are multi-GB files
+	// on the disk CubeMaster and CubeTemplateCenter share (§9.7), so serving
+	// them here avoids relaying the whole transfer through the proxy.
+	g.GET(TemplateArtifactDownloadAction, downloadTemplateArtifactGinHandler)
+	g.HEAD(TemplateArtifactDownloadAction, headTemplateArtifactGinHandler)
+
+	// Artifact / CA download (data plane, same reasoning as above)
+	g.GET(CADownloadActionPrefix+":filename", downloadCAGinHandler)
+	g.HEAD(CADownloadActionPrefix+":filename", headCAGinHandler)
+	g.GET(RootfsArtifactAction, handleRootfsArtifactAction)
+
+	// Inventory
+	g.POST(ListInventoryAction, handleListInventoryAction)
+
+	// Volume plugin CRUD
+	g.GET(VolumeAction, handleListVolumes)
+	g.POST(VolumeAction, handleCreateVolume)
+	g.GET(VolumeAction+"/:volume_id", handleGetVolume)
+	g.DELETE(VolumeAction+"/:volume_id", handleDeleteVolume)
+}
+
+// RegisterTemplateRoutes registers ONLY the template-related routes onto g.
+// Used by the standalone CubeTemplateCenter process — sandbox / snapshot /
+// volume CRUD stay with CubeMaster and are NOT registered here.
+//
+// Mirrors the Template + Artifact/CA + RootfsArtifact block of
+// RegisterCubeRoutes. Keep in sync with that function.
+func RegisterTemplateRoutes(g *gin.RouterGroup) {
+	// Template CRUD + build status
 	g.POST(TemplateAction, createTemplateGinHandler)
 	g.GET(TemplateAction, getTemplateGinHandler)
 	g.DELETE(TemplateAction, deleteTemplateGinHandler)
@@ -73,13 +116,12 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	g.GET(CADownloadActionPrefix+":filename", downloadCAGinHandler)
 	g.HEAD(CADownloadActionPrefix+":filename", headCAGinHandler)
 	g.GET(RootfsArtifactAction, handleRootfsArtifactAction)
+}
 
-	// Inventory
-	g.POST(ListInventoryAction, handleListInventoryAction)
-
-	// Volume plugin CRUD
-	g.GET(VolumeAction, handleListVolumes)
-	g.POST(VolumeAction, handleCreateVolume)
-	g.GET(VolumeAction+"/:volume_id", handleGetVolume)
-	g.DELETE(VolumeAction+"/:volume_id", handleDeleteVolume)
+// RegisterInternalTemplateRoutes registers internal callbacks used by the
+// remote build mode (CubeTemplateCenter -> CubeMaster status reports).
+// Mounted on CubeMaster only — see pkg/server/server.go. These routes are
+// NOT part of the public /cube API surface.
+func RegisterInternalTemplateRoutes(g *gin.RouterGroup) {
+	g.POST("/internal/template/jobs/:job_id/status", handleTemplateJobStatusCallback)
 }
