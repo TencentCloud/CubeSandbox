@@ -48,15 +48,15 @@ func TestSupervisor_GracefulShutdownRecordsInFlightSend(t *testing.T) {
 	sup := webhook.NewSupervisor(
 		ds, delaySender{300 * time.Millisecond}, webhook.NewBacklogCache(0),
 		"owner-shutdown",
-		30*time.Second,        // lease
-		0,                     // keep-pending window
-		50*time.Millisecond,   // poll
-		2*time.Second,         // shutdownTimeout (grace) — longer than the send
-		10,                    // claimBatch
-		4,                     // workerConcurrency
-		2,                     // perSubConcurrency
-		1000,                  // softLimit
-		5,                     // maxAttempts
+		30*time.Second,      // lease
+		0,                   // keep-pending window
+		50*time.Millisecond, // poll
+		2*time.Second,       // shutdownTimeout (grace) — longer than the send
+		10,                  // claimBatch
+		4,                   // workerConcurrency
+		2,                   // perSubConcurrency
+		1000,                // softLimit
+		5,                   // maxAttempts
 		"keep-pending",
 	)
 	sup.Start(ctx)
