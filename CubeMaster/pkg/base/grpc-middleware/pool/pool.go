@@ -111,11 +111,15 @@ func New(ua, address string, option Options) (Pool, error) {
 }
 
 func (p *pool) incrRef() int32 {
-	newRef := atomic.AddInt32(&p.ref, 1)
-	if newRef >= math.MaxInt32 {
-		newRef = math.MaxInt32
+	for {
+		cur := atomic.LoadInt32(&p.ref)
+		if cur == math.MaxInt32 {
+			return cur
+		}
+		if atomic.CompareAndSwapInt32(&p.ref, cur, cur+1) {
+			return cur + 1
+		}
 	}
-	return newRef
 }
 
 func (p *pool) decrRef() {
@@ -123,9 +127,16 @@ func (p *pool) decrRef() {
 		return
 	}
 
-	newRef := atomic.AddInt32(&p.ref, -1)
-	if newRef < 0 {
-		newRef = 0
+	var newRef int32
+	for {
+		cur := atomic.LoadInt32(&p.ref)
+		if cur <= 0 {
+			break
+		}
+		if atomic.CompareAndSwapInt32(&p.ref, cur, cur-1) {
+			newRef = cur - 1
+			break
+		}
 	}
 
 	if newRef == 0 && atomic.LoadInt32(&p.current) > int32(p.opt.MaxIdle) {
