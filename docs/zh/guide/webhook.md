@@ -4,9 +4,9 @@ CubeSandbox 可以把沙箱的生命周期事件（创建、删除、暂停、�
 
 推送由 CubeOps 内置的投递组件完成：它消费平台内部的生命周期事件流，把每个事件按订阅写入投递账本，再逐条推送到各订阅端点，失败自动重试。该组件默认关闭，开启方式见[开启与配置](#开启与配置)。
 
-本文面向两类读者：
+本文涉及的职责分两层，实际使用中常由同一个人或同一团队承担：
 
-- **接收方开发者**：想订阅沙箱事件并在自己的服务里处理。从[快速开始](#快速开始)入手，然后阅读[事件类型与 Payload](#事件类型与-payload)和[请求头与验签](#请求头与验签)，即可完成对接。
+- **事件消费方（业务系统侧）**：订阅沙箱事件，在自己现有的业务系统里处理回调，完成 CubeSandbox 与业务的集成。从[快速开始](#快速开始)入手，然后阅读[事件类型与 Payload](#事件类型与-payload)和[请求头与验签](#请求头与验签)，即可完成对接。
 - **平台运维**：负责开启、配置和监控投递组件。重点阅读[开启与配置](#开启与配置)、[投递语义](#投递语义)、[监控与告警](#监控与告警)和[手动重放](#手动重放)。
 
 ## 快速开始
@@ -18,15 +18,36 @@ CubeSandbox 可以把沙箱的生命周期事件（创建、删除、暂停、�
 
 ### 第 1 步：开启投递组件
 
-在 CubeOps 的运行环境中设置（以 one-click / systemd 为例，写入 `cubeops-start.sh` 同级的 env 或直接 export 后重启服务）：
+投递组件由 CubeOps 进程**启动时**的环境变量控制，默认关闭；订阅本身在第 3 步通过 REST API 注册（`POST /api/v1/webhooks`），两者是不同层面的配置：环境变量管「组件是否开启」，REST 管「往哪个端点推、推哪些事件」。
+
+以 one-click / systemd 部署为例，CubeOps 服务通过 `EnvironmentFile` 读取 `/usr/local/services/cubetoolbox/.one-click.env`，追加以下变量并重启服务：
 
 ```bash
-export REDIS_URL="redis://127.0.0.1:6379/0"          # 平台共用的 Redis
-export CUBE_OPS_WEBHOOK_ENABLED=true
-export CUBE_OPS_WEBHOOK_ALLOW_PRIVATE_NETWORKS=true  # 仅本地联调，见下方说明
+cat >> /usr/local/services/cubetoolbox/.one-click.env <<'EOF'
+# 平台共用的 Redis（一键安装默认密码 ceuhvu123，见下方 tip）
+REDIS_URL=redis://:ceuhvu123@127.0.0.1:6379/0
+# 开启投递组件
+CUBE_OPS_WEBHOOK_ENABLED=true
+# 仅本地联调，生产保持 false（见下方 warning）
+CUBE_OPS_WEBHOOK_ALLOW_PRIVATE_NETWORKS=true
+EOF
+
+# 重启服务使配置生效
+systemctl restart cube-sandbox-cubeops
 ```
 
-重启 CubeOps 后，访问 `http://<cubeops>:3010/webhook/healthz`，返回 `{"webhook":"ready"}` 即表示投递组件已就绪。
+> 非 systemd 部署（直接运行 CubeOps 二进制）：在启动进程前 `export` 同样的三个变量再启动即可，无需改环境文件。
+
+验证：
+
+```bash
+curl -s http://127.0.0.1:3010/webhook/healthz
+# 期望 {"webhook":"ready"}；未开启时为 {"webhook":"disabled"}
+```
+
+::: tip 关于 REDIS_URL 的密码
+一键安装部署的 Redis 默认开启 requirepass（默认密码 `ceuhvu123`，安装时可用 `CUBE_SANDBOX_REDIS_PASSWORD` / `CUBE_EXTERNAL_REDIS_PASSWORD` 覆盖）。若不确定实际密码，用 `docker inspect cube-sandbox-redis --format '{{.Config.Cmd}}'` 查看 `--requirepass` 后的值；连接串格式为 `redis://[:密码]@主机:端口/库`，只有自建且未开启 requirepass 的 Redis 才能省略密码。
+:::
 
 ::: warning 关于 allow_private_networks
 出于 SSRF 防护，投递组件默认拒绝向 loopback 和 RFC1918 私网地址推送。本例的接收端运行在本机 `127.0.0.1`，因此临时打开了该开关。**生产环境必须保持 `false`**，端点应为公网或集群内可路由地址。
@@ -34,13 +55,47 @@ export CUBE_OPS_WEBHOOK_ALLOW_PRIVATE_NETWORKS=true  # 仅本地联调，见下�
 
 ### 第 2 步：启动示例接收端
 
-仓库自带一个最小接收端 `examples/webhook-receiver`，能够验签、校验时间戳、按投递 ID 去重，并把事件打印到终端：
+本步是给「接收方开发者」的参考实现：用示例接收端代替你将要接入的业务服务，先验证事件能带正确签名送达。如果你已有自己的接收端点，可直接跳到第 3 步，订阅时填你的 URL。
+
+仓库自带一个最小接收端 `examples/webhook-receiver`（Rust），能够验签、校验时间戳、按投递 ID 去重，并把事件打印到终端。它只需能被 CubeOps 网络访问即可，不必与 CubeOps 同机。
+
+在开发机上执行（未克隆请先克隆仓库）：
 
 ```bash
-cd examples/webhook-receiver
-WEBHOOK_SECRET=my-test-secret cargo run
-# webhook-receiver listening on http://127.0.0.1:9090
+git clone https://github.com/tencentcloud/CubeSandbox.git
+cd CubeSandbox/examples/webhook-receiver
+WEBHOOK_SECRET=my-test-secret PORT=9095 cargo run
+# webhook-receiver listening on http://127.0.0.1:9095
 ```
+
+> 接收端默认监听 `127.0.0.1:9090`，但 one-click 部署的 cube-egress（沙箱出口代理）已占用 9090（cube-proxy 的 gRPC 也默认 9090），因此文档统一用 `PORT=9095`，并把第 3 步订阅 URL 的端口保持一致。若改用其他端口，两处需同步修改。
+
+没有源码也没有 Rust 环境时（例如直接在部署服务器上验证，需已安装 python3），用 python3 起一个最小接收端即可：
+
+```bash
+cat > /tmp/webhook-recv.py <<'PY'
+import hmac, hashlib
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class H(BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get('Content-Length', 0)))
+        sig = (self.headers.get('X-Cube-Signature-256') or '').strip()
+        if sig.startswith('sha256='):
+            sig = sig[len('sha256='):]
+        ok = hmac.compare_digest(sig, hmac.new(b'my-test-secret', body, hashlib.sha256).hexdigest())
+        print('sig_ok=%s event_id=%s body=%s' % (ok, self.headers.get('X-Cube-Event-ID'), body.decode('utf-8', 'replace')), flush=True)
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'ok')
+    def log_message(self, *a):
+        pass
+HTTPServer(('127.0.0.1', 9095), H).serve_forever()
+PY
+python3 /tmp/webhook-recv.py
+# webhook-receiver listening on http://127.0.0.1:9095
+```
+
+> 无论用哪种方式，接收端的 SECRET 必须与第 3 步订阅里的 `secret` 一致（本示例统一为 `my-test-secret`）。
 
 ### 第 3 步：登录 CubeOps 并创建订阅
 
@@ -57,7 +112,7 @@ curl -s -X POST http://127.0.0.1:3010/api/v1/webhooks \
   -H "Content-Type: application/json" \
   -d '{
     "name": "local-test",
-    "url": "http://127.0.0.1:9090/webhook",
+    "url": "http://127.0.0.1:9095/webhook",
     "events": ["sandbox.created"],
     "secret": "my-test-secret"
   }'
@@ -77,7 +132,19 @@ curl -s -X POST http://127.0.0.1:3010/api/v1/webhooks/1/test \
 
 ### 第 5 步：触发真实事件
 
-用任意方式创建一个沙箱（例如按[快速开始](./quickstart.md)用 SDK 或 API 创建），接收端会收到一条真实的 `sandbox.created`，payload 中带有该沙箱的 `sandbox_id` 和模板信息。
+创建一个沙箱，接收端会收到一条真实的 `sandbox.created`，payload 中带有该沙箱的 `sandbox_id` 和模板信息。下面给出最直接的 API 方式（E2B 兼容接口，端口 `3000`）；也可按[快速开始](./quickstart.md)用 Python SDK 创建。
+
+先确认有一个 `READY` 的模板（快速开始第 3 步会创建，模板 ID 形如 `tpl-xxx`；也可用 `cubemastercli tpl list` 查看），然后：
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/sandboxes \
+  -H "Content-Type: application/json" -H "X-API-Key: e2b_000000" \
+  -d '{"templateID":"tpl-<你的模板ID>"}'
+# 返回示例：
+# {"templateID":"tpl-xxx","sandboxID":"...","clientID":"...","envdVersion":"...","domain":"cube.app"}
+```
+
+> 注意请求体字段是驼峰 `templateID`（不是 `template`）。创建成功后，接收端 log 会多出一条 `event_id` 为纯数字（Redis Stream ID）的真实 `sandbox.created`。
 
 ### 第 6 步：核对投递记录
 
