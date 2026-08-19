@@ -184,16 +184,32 @@ func TestLiveEntriesAreEvictedSoTheMapStaysBounded(t *testing.T) {
 
 func TestEvictionKeepsTheMostRecentAttackers(t *testing.T) {
 	l := &loginLimiter{failures: map[string][]time.Time{}, limit: 5, window: time.Hour}
-	for i := 0; i < sweepThreshold-6; i++ {
-		l.recordFailure(distinctIP(i))
+
+	filler := 0
+	fillTo := func(target int) {
+		for mapSize(l) < target {
+			l.recordFailure(distinctIP(filler))
+			filler++
+		}
 	}
+
+	fillTo(sweepThreshold - 8)
 
 	recent := "203.0.113.7"
-	for i := 0; i < 5; i++ {
+	for i := 0; i < l.limit; i++ {
 		l.recordFailure(recent)
 	}
-	l.recordFailure(distinctIP(sweepThreshold))
 
+	fillTo(sweepThreshold)
+	if got := mapSize(l); got != sweepThreshold {
+		t.Fatalf("map holds %d entries, want exactly %d so the next failure triggers eviction", got, sweepThreshold)
+	}
+
+	l.recordFailure(distinctIP(filler))
+
+	if got := mapSize(l); got > evictTarget+1 {
+		t.Fatalf("eviction did not run: map still holds %d entries", got)
+	}
 	if !l.isBlocked(recent) {
 		t.Fatal("the most recently active IP was evicted, so its failures were forgotten")
 	}

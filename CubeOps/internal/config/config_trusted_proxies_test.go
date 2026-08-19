@@ -44,3 +44,33 @@ func TestValidateTrustedProxiesRejectsMalformedEntries(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateTrustedProxiesTrimsEntries(t *testing.T) {
+	entries := []string{"  10.0.0.1  ", "\t10.42.0.0/16\n"}
+	if err := validateTrustedProxies(entries); err != nil {
+		t.Fatalf("validateTrustedProxies rejected padded entries: %v", err)
+	}
+	if entries[0] != "10.0.0.1" || entries[1] != "10.42.0.0/16" {
+		t.Fatalf("entries were not trimmed in place: %q", entries)
+	}
+}
+
+func TestBroadTrustedProxiesFlagsWideRanges(t *testing.T) {
+	broad := BroadTrustedProxies([]string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"10.42.0.0/16",
+		"10.42.1.5",
+		"fd00::/48",
+		"fd00::/64",
+	})
+	want := map[string]bool{"10.0.0.0/8": true, "172.16.0.0/12": true, "fd00::/48": true}
+	if len(broad) != len(want) {
+		t.Fatalf("BroadTrustedProxies = %v, want %d entries", broad, len(want))
+	}
+	for _, b := range broad {
+		if !want[b] {
+			t.Errorf("BroadTrustedProxies flagged %q, which is narrow enough", b)
+		}
+	}
+}
