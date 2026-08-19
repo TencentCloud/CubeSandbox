@@ -24,8 +24,11 @@ Topology notes
   or the test is skipped — there is no portable default for "an IP the sandbox
   can reach that is not the node IP".
 * Plaintext HTTP legs are used on purpose: they need no TLS interception CA, so
-  they pass in any cluster that runs CubeEgress. HTTPS custom-port legs (which
-  require the sandbox image to trust the interception CA) are covered by
+  they pass in any cluster that runs CubeEgress. The public :80 leg is resolved
+  by the test host and pinned with curl ``--resolve`` so guest DNS learning is
+  tested independently in ``test_dns_allow.py``.
+* HTTPS custom-port legs require the sandbox image to trust the interception CA
+  and are also covered by
   ``examples/code-sandbox-quickstart/network_l7_custom_port_echo.py``.
 * All probing is done *inside* the sandbox via ``curl``; we grep the echoed
   response for the injected marker secret.
@@ -33,8 +36,12 @@ Topology notes
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
+import shlex
+import socket
+import sys
 import threading
 import time
 import uuid
@@ -42,7 +49,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 import pytest
-
 from adapters import create_adapter
 from framework.assertions import assert_command_ok
 from framework.capabilities import NETWORK_L7_CUSTOM_PORT, capabilities_for_backend
@@ -180,8 +186,8 @@ def _l7_rules_custom_http(target_host: str, port: int) -> list[dict]:
     ]
 
 
-def _l7_rules_scheme_only_default() -> list[dict]:
-    return [
+def _l7_rules_scheme_only_default(target_ips: tuple[str, ...]) -> list[dict]:
+    rules = [
         {
             "name": "e2e-default-http",
             "match": {"host": L7_DEFAULT_HOST, "scheme": "http"},
@@ -191,6 +197,124 @@ def _l7_rules_scheme_only_default() -> list[dict]:
             },
         }
     ]
+    # IP rules permit transport; only the Host-matched rule above may inject.
+    rules.extend(
+        {
+            "name": f"e2e-default-http-transport-{index}",
+            "match": {"host": target_ip, "scheme": "http"},
+            "action": {"allow": True},
+        }
+        for index, target_ip in enumerate(target_ips)
+        if target_ip != L7_DEFAULT_HOST
+    )
+    return rules
+
+
+def _resolve_default_host_ipv4(attempts: int = 3) -> tuple[str, ...]:
+    try:
+        address = ipaddress.IPv4Address(L7_DEFAULT_HOST)
+        addresses = (address,)
+    except ipaddress.AddressValueError:
+        for attempt in range(attempts):
+            try:
+                addrinfo = socket.getaddrinfo(
+                    L7_DEFAULT_HOST, 80, family=socket.AF_INET, type=socket.SOCK_STREAM
+                )
+                break
+            except socket.gaierror as exc:
+                if attempt + 1 == attempts:
+                    raise RuntimeError(
+                        f"failed to resolve IPv4 addresses for {L7_DEFAULT_HOST!r}"
+                    ) from exc
+                time.sleep(min(2**attempt, 5))
+        addresses = tuple(
+            dict.fromkeys(
+                ipaddress.IPv4Address(sockaddr[0])
+                for family, _, _, _, sockaddr in addrinfo
+                if family == socket.AF_INET
+            )
+        )
+    if not addresses:
+        raise RuntimeError(f"no IPv4 address found for {L7_DEFAULT_HOST!r}")
+    if any(not address.is_global for address in addresses):
+        raise RuntimeError(f"non-public IPv4 address found for {L7_DEFAULT_HOST!r}")
+    return tuple(map(str, addresses))
+
+
+def _scheme_only_curl_command(target_ips: tuple[str, ...]) -> str:
+    addresses = ",".join(target_ips)
+    resolve = shlex.quote(f"{L7_DEFAULT_HOST}:80:{addresses}")
+    url = shlex.quote(f"http://{L7_DEFAULT_HOST}/headers")
+    return (
+        f"curl -4 -sS --connect-timeout 5 --max-time 8 --retry 2 "
+        f"--retry-delay 1 --retry-all-errors --resolve {resolve} {url}"
+    )
+
+
+@pytest.mark.framework
+def test_scheme_only_probe_uses_all_resolved_public_ipv4(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys.modules[__name__], "L7_DEFAULT_HOST", "example.com")
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.35", 80)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.35", 80)),
+        ],
+    )
+
+    target_ips = _resolve_default_host_ipv4()
+
+    assert target_ips == ("93.184.216.35", "93.184.216.34")
+    assert [
+        rule["match"]["host"] for rule in _l7_rules_scheme_only_default(target_ips)
+    ] == [L7_DEFAULT_HOST, *target_ips]
+    command = _scheme_only_curl_command(target_ips)
+    assert f"{L7_DEFAULT_HOST}:80:{','.join(target_ips)}" in command
+    assert "curl -4" in command
+    assert "--retry-max-time" not in command
+
+
+@pytest.mark.framework
+def test_scheme_only_probe_rejects_non_public_ipv4(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys.modules[__name__], "L7_DEFAULT_HOST", "example.com")
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="non-public IPv4"):
+        _resolve_default_host_ipv4()
+
+
+@pytest.mark.framework
+def test_scheme_only_probe_retries_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    attempts = iter(
+        [
+            socket.gaierror("temporary failure"),
+            [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))],
+        ]
+    )
+
+    def resolve(*_args, **_kwargs):
+        result = next(attempts)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(sys.modules[__name__], "L7_DEFAULT_HOST", "example.com")
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    monkeypatch.setattr(time, "sleep", lambda _delay: None)
+
+    assert _resolve_default_host_ipv4() == ("93.184.216.34",)
 
 
 def _l7_rules_custom_https(host: str, port: int) -> list[dict]:
@@ -255,6 +379,7 @@ def test_l7_custom_port_scheme_only_intercepts_default_http_set(
     still injects on the default HTTP port — backward compatibility."""
     _skip_without_capability(sdk_backend)
 
+    target_ips = _resolve_default_host_ipv4()
     adapter = None
     try:
         adapter = create_adapter(
@@ -267,15 +392,13 @@ def test_l7_custom_port_scheme_only_intercepts_default_http_set(
             },
             create_options={
                 "allow_internet_access": False,
-                "network": {"rules": _l7_rules_scheme_only_default()},
+                "network": {"rules": _l7_rules_scheme_only_default(target_ips)},
             },
         )
 
         url = f"http://{L7_DEFAULT_HOST}/headers"
         result = adapter.run_command(
-            # --retry absorbs transient failures (timeout / connreset /
-            # temporary DNS) against the public echo endpoint.
-            f"curl -sS --max-time 20 --retry 3 --retry-delay 1 --retry-all-errors '{url}'",
+            _scheme_only_curl_command(target_ips),
             timeout=sdk_e2e_config.command_timeout,
         )
         assert_command_ok(result)
@@ -459,9 +582,10 @@ def test_l7_custom_port_https_intercepts_custom_port(
         )
 
         result = adapter.run_command(
-            f"curl -sS --max-time 20 --retry 3 --retry-delay 1 --retry-all-errors -o /dev/null "
-            f"-w 'code=%{{http_code}} len=%{{size_download}}' "
-            f"'{L7_CUSTOM_HTTPS_URL}'",
+            f"curl -sS --connect-timeout 5 --max-time 8 --retry 2 "
+            f"--retry-delay 1 --retry-all-errors "
+            f"-o /dev/null -w 'code=%{{http_code}} len=%{{size_download}}' "
+            f"{shlex.quote(L7_CUSTOM_HTTPS_URL)}",
             timeout=sdk_e2e_config.command_timeout,
         )
         assert_command_ok(result)
