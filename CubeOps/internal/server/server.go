@@ -85,6 +85,15 @@ func (s *Server) buildRouter() *gin.Engine {
 		logging.G(context.Background()).Errorf("invalid trusted_proxies, falling back to trusting none: err=%q", err.Error())
 		_ = r.SetTrustedProxies(nil)
 	}
+	if len(s.cfg.TrustedProxies) == 0 {
+		logging.G(context.Background()).Warnf("trusted_proxies is empty: X-Forwarded-For is ignored and the login rate limiter keys on the TCP peer. " +
+			"Behind a reverse proxy every client shares one bucket, so five failures from anyone throttle logins for that proxy. " +
+			"Set trusted_proxies (or CUBE_OPS_TRUSTED_PROXIES) to the proxy address or CIDR.")
+	}
+	if broad := config.BroadTrustedProxies(s.cfg.TrustedProxies); len(broad) > 0 {
+		logging.G(context.Background()).Warnf("trusted_proxies contains broad ranges %v: every host in them can assert any client IP via X-Forwarded-For "+
+			"and so bypass the login rate limiter. Narrow this to the actual proxy addresses.", broad)
+	}
 	r.Use(requestLogger())
 	r.Use(cubeopsRecovery())
 

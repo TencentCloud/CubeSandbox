@@ -17,7 +17,13 @@ jwt_secret: ""             # leave empty to auto-generate on first start
 # proxy here as an IP or CIDR, otherwise every client shares one bucket.
 # Keep this as narrow as possible -- any peer whose source address matches is
 # trusted to assert any client IP, so a broad range such as 10.0.0.0/8 hands
-# that power to every workload on the network. 0.0.0.0/0 and ::/0 are rejected.
+# that power to every workload on the network. 0.0.0.0/0 and ::/0 are rejected,
+# and ranges wider than /16 (v4) or /64 (v6) are accepted but warned about at
+# startup. An empty list is also warned about, since it means every client
+# behind a proxy shares one login bucket.
+# Note: gin expands a bare loopback entry such as 127.0.0.1 to the whole
+# 127.0.0.0/8, and in containerised deployments the proxy usually connects from
+# a bridge address rather than loopback, so 127.0.0.1 is often not what you want.
 # Env override: CUBE_OPS_TRUSTED_PROXIES (comma-separated).
 trusted_proxies: []
 

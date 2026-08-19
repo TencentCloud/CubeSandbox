@@ -335,8 +335,33 @@ func overrideFromEnv(cfg *Config) {
 	}
 }
 
-func validateTrustedProxies(entries []string) error {
+// BroadTrustedProxies returns the configured entries whose prefix is wide
+// enough that a large share of the network can assert a client IP. Callers
+// warn about these; they are not rejected because a pod or VPC CIDR can
+// legitimately be this wide.
+func BroadTrustedProxies(entries []string) []string {
+	var broad []string
 	for _, e := range entries {
+		_, ipNet, err := net.ParseCIDR(strings.TrimSpace(e))
+		if err != nil {
+			continue
+		}
+		ones, bits := ipNet.Mask.Size()
+		limit := 16
+		if bits > 32 {
+			limit = 64
+		}
+		if ones < limit {
+			broad = append(broad, e)
+		}
+	}
+	return broad
+}
+
+func validateTrustedProxies(entries []string) error {
+	for i, e := range entries {
+		e = strings.TrimSpace(e)
+		entries[i] = e
 		if _, ipNet, err := net.ParseCIDR(e); err == nil {
 			ones, bits := ipNet.Mask.Size()
 			if ones == 0 && bits != 0 {
