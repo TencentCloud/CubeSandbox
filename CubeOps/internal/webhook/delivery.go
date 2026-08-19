@@ -313,9 +313,9 @@ func (d *DeliveryStore) LoadDeliveryForSend(ctx context.Context, id int64) (*Del
 
 // Completion carries the ledger update for one finished send.
 type Completion struct {
-	Result      string // ResultSucceeded | ResultRetryable | ResultPermanent
-	HTTPStatus  *int
-	LastError   *string
+	Result     string // ResultSucceeded | ResultRetryable | ResultPermanent
+	HTTPStatus *int
+	LastError  *string
 	// NextRetryDelay is the retryable-only backoff delay added to the
 	// database's now(); passing a delay (instead of an absolute Go timestamp)
 	// keeps the ledger on a single clock.
@@ -352,7 +352,7 @@ func (d *DeliveryStore) Complete(ctx context.Context, id int64, owner string, c 
 		args = append(args, c.HTTPStatus, c.LastError, id, owner)
 	case ResultDead:
 		sql = `UPDATE t_webhook_delivery
-			SET status='dead', http_status=?, last_error=?,
+			SET status='dead', attempts=attempts+1, http_status=?, last_error=?,
 			    lease_owner=NULL, lease_until=NULL, updated_at=now()
 			WHERE id=? AND lease_owner=? AND status='in_progress'`
 		args = append(args, c.HTTPStatus, c.LastError, id, owner)
