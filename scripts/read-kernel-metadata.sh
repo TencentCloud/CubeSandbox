@@ -50,6 +50,7 @@ fi
 PARSED="$(
   python3 - "${META_FILE}" <<'PY'
 import json
+import re
 import shlex
 import sys
 
@@ -69,6 +70,14 @@ if not bm_tag:
     raise SystemExit(f"{path}: missing bm.source_tag")
 if not pvm_tag:
     raise SystemExit(f"{path}: missing pvm.source_tag")
+
+_SAFE_TAG = re.compile(r"\A[A-Za-z0-9._+-]+\Z")
+for name, value in (("bm.source_tag", bm_tag), ("pvm.source_tag", pvm_tag)):
+    if not _SAFE_TAG.match(value):
+        raise SystemExit(
+            f"{path}: {name} must match [A-Za-z0-9._+-]+ (got {value!r}); "
+            "release tags are written verbatim into $GITHUB_ENV and $GITHUB_OUTPUT"
+        )
 
 print(f"KERNEL_BM_SOURCE_TAG={shlex.quote(bm_tag)}")
 print(f"KERNEL_PVM_SOURCE_TAG={shlex.quote(pvm_tag)}")

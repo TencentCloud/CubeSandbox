@@ -22,6 +22,7 @@ fi
 
 PINS="$(
   python3 - "${PIN_FILE}" <<'PY'
+import re
 import shlex
 import sys
 
@@ -59,6 +60,14 @@ for key in required:
 unknown = sorted(set(data) - set(required))
 if unknown:
     raise SystemExit(f"unknown keys in {path}: {', '.join(unknown)}")
+
+_SAFE_TAG = re.compile(r"\A[A-Za-z0-9._+-]+\Z")
+for key, value in pins.items():
+    if not _SAFE_TAG.match(value):
+        raise SystemExit(
+            f"{key} in {path} must match [A-Za-z0-9._+-]+ (got {value!r}); "
+            "release tags are written verbatim into $GITHUB_ENV and $GITHUB_OUTPUT"
+        )
 
 for key in ("kernel_bm_amd64", "kernel_bm_arm64", "kernel_pvm"):
     if not pins[key].startswith("kernel-release-"):
