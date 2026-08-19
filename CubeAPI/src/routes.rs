@@ -216,10 +216,9 @@ fn with_auth_and_rate_limit(
     state: &AppState,
     auth_configured: bool,
 ) -> Router<AppState> {
+    let routes = routes.layer(middleware::from_fn_with_state(state.clone(), rate_limit));
     if auth_configured {
-        routes
-            .layer(middleware::from_fn_with_state(state.clone(), rate_limit))
-            .layer(middleware::from_fn_with_state(state.clone(), unified_auth))
+        routes.layer(middleware::from_fn_with_state(state.clone(), unified_auth))
     } else {
         routes
     }
@@ -252,6 +251,32 @@ mod tests {
     };
     use axum_test::TestServer;
     use serde_json::Value;
+
+    async fn unauthenticated_server(rate_limit_per_sec: u32) -> TestServer {
+        let mut config = ServerConfig::default();
+        config.cubemaster_url = "http://127.0.0.1:9".to_string();
+        config.auth_callback_url = None;
+        config.cube_api_key = None;
+        config.rate_limit_per_sec = rate_limit_per_sec;
+
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        TestServer::new(build_router(state)).expect("router should build")
+    }
+
+    #[tokio::test]
+    async fn rate_limit_applies_when_auth_is_not_configured() {
+        let server = unauthenticated_server(1).await;
+
+        let mut statuses = Vec::new();
+        for _ in 0..5 {
+            statuses.push(server.get("/sandboxes").await.status_code());
+        }
+
+        assert!(
+            statuses.contains(&StatusCode::TOO_MANY_REQUESTS),
+            "unauthenticated routes must still be rate limited, got {statuses:?}"
+        );
+    }
 
     async fn test_server() -> TestServer {
         let mut config = ServerConfig::default();

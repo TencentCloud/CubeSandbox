@@ -111,6 +111,14 @@ struct Cli {
     #[arg(long, value_name = "TYPE")]
     instance_type: Option<String>,
 
+    /// Allow serving without authentication on a non-loopback bind address.
+    ///
+    /// Without this flag cube-api refuses to start when neither CUBE_API_KEY nor
+    /// an auth callback is configured and the bind address is not loopback.
+    /// Overrides the CUBE_API_ALLOW_UNAUTHENTICATED environment variable.
+    #[arg(long)]
+    allow_unauthenticated: bool,
+
     /// Domain string returned in sandbox API responses (default: "cube.app").
     #[arg(long, value_name = "DOMAIN")]
     sandbox_domain: Option<String>,
@@ -175,14 +183,45 @@ fn main() -> anyhow::Result<()> {
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.log_level)))
         .init();
 
+    let auth_enabled = cfg
+        .auth_callback_url
+        .as_deref()
+        .is_some_and(|u| !u.is_empty())
+        || cfg.cube_api_key.as_deref().is_some_and(|k| !k.is_empty());
+
     tracing::info!(
         debug_mode = cli.debug,
         log_level = %cfg.log_level,
         bind = %cfg.bind,
-        auth_enabled = cfg.auth_callback_url.is_some()
-            || cfg.cube_api_key.is_some(),
+        auth_enabled = auth_enabled,
         "cube-api starting"
     );
+
+    if !auth_enabled {
+        let allow_unauthenticated = cli.allow_unauthenticated
+            || std::env::var("CUBE_API_ALLOW_UNAUTHENTICATED")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+        if bind_is_loopback(&cfg.bind) {
+            tracing::warn!(
+                bind = %cfg.bind,
+                "cube-api is serving WITHOUT authentication; set CUBE_API_KEY or an auth callback"
+            );
+        } else if allow_unauthenticated {
+            tracing::warn!(
+                bind = %cfg.bind,
+                "cube-api is serving WITHOUT authentication on a non-loopback address because \
+                 --allow-unauthenticated was set; the sandbox control plane is exposed"
+            );
+        } else {
+            anyhow::bail!(
+                "refusing to start: no authentication is configured (CUBE_API_KEY / auth callback) \
+                 and bind address {} is not loopback. Set CUBE_API_KEY, configure an auth callback, \
+                 bind to 127.0.0.1, or pass --allow-unauthenticated to override.",
+                cfg.bind
+            );
+        }
+    }
 
     // ── Tokio runtime ──────────────────────────────────────────────────────
     let mut builder = tokio::runtime::Builder::new_multi_thread();
@@ -195,6 +234,18 @@ fn main() -> anyhow::Result<()> {
         .build()?;
 
     rt.block_on(async_main(cfg, cli.debug))
+}
+
+fn bind_is_loopback(bind: &str) -> bool {
+    let host = match bind.rsplit_once(':') {
+        Some((h, _)) => h,
+        None => bind,
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => host.eq_ignore_ascii_case("localhost"),
+    }
 }
 
 async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()> {
@@ -272,4 +323,36 @@ async fn shutdown_signal() {
     }
 
     tracing::info!("shutdown signal received");
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::bind_is_loopback;
+
+    #[test]
+    fn loopback_binds_are_recognised() {
+        for bind in [
+            "127.0.0.1:3000",
+            "127.9.9.9:3000",
+            "localhost:3000",
+            "LocalHost:3000",
+            "[::1]:3000",
+            "127.0.0.1",
+        ] {
+            assert!(bind_is_loopback(bind), "{bind} should be loopback");
+        }
+    }
+
+    #[test]
+    fn exposed_binds_are_not_loopback() {
+        for bind in [
+            "0.0.0.0:3000",
+            "10.0.0.5:3000",
+            "[::]:3000",
+            "192.168.1.10:3000",
+            "cube-api.internal:3000",
+        ] {
+            assert!(!bind_is_loopback(bind), "{bind} should not be loopback");
+        }
+    }
 }
