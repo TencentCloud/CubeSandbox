@@ -137,7 +137,8 @@ func (h *Handler) Refresh(c *gin.Context) {
 			httputil.WriteError(c, http.StatusUnauthorized, "invalid or expired refresh token")
 			return
 		}
-		httputil.WriteError(c, http.StatusInternalServerError, err.Error())
+		logging.G(c.Request.Context()).Errorf("token refresh failed: internal error: client_ip=%s error=%q", c.ClientIP(), err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	httputil.WriteJSON(c, http.StatusOK, model.RefreshResponse{

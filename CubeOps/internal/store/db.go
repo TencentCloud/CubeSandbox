@@ -87,9 +87,10 @@ func (s *Store) bootstrapMasterKey(ctx context.Context) error {
 
 	if b64 == "" {
 		// 2. Fallback: read from the old agenthub settings table.
-		//    This covers the upgrade window where the migration has run and
-		//    the key was copied to t_system_setting. An unmigrated DB no
-		//    longer reaches here: the read above now returns a real
+		//    This covers the upgrade window where the migration has run but
+		//    the key has not been copied into t_system_setting yet, plus the
+		//    rollback case where only the old table holds it. An unmigrated DB
+		//    no longer reaches here: the read above returns a real
 		//    table-not-found error and startup fails, as it would anyway at
 		//    seedDefaultAdmin.
 		b64, err = s.GetSetting(ctx, "secret_master_key")
