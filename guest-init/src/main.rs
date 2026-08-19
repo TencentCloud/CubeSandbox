@@ -62,16 +62,27 @@ fn mount_pmem() -> Result<()> {
     Ok(())
 }
 
+fn agent_argv() -> [CString; 1] {
+    [CString::new(CUBE_AGENT).expect("new cmd failed")]
+}
+
 fn start_agent() -> ! {
-    let args: Vec<CString> = Vec::new();
-    let cmd = CString::new(CUBE_AGENT).expect("new cmd failed");
-    let err = unistd::execvp(cmd.as_c_str(), &args).unwrap_err();
+    let args = agent_argv();
+    let err = unistd::execvp(args[0].as_c_str(), &args).unwrap_err();
     panic!("exec agent failed:{}", err);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_argv_carries_program_name() {
+        let argv = agent_argv();
+        assert_eq!(argv.len(), 1);
+        assert_eq!(argv[0].to_str().unwrap(), CUBE_AGENT);
+        assert!(!argv[0].as_bytes().is_empty());
+    }
 
     #[test]
     fn agent_exec_path_constant() {
