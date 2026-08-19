@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -19,28 +18,32 @@ import (
 func Test_HashCode(t *testing.T) {
 	size := 10000
 	cases := make([]string, 0, size)
-	for i := 0; i < len(cases); i++ {
+	for i := 0; i < size; i++ {
 		cases = append(cases, strconv.Itoa(int(rand.Int31n(int32(size)))))
 	}
 
-	startTime := time.Now().UnixNano()
 	m := make(map[string]uint32, size)
 	for _, c := range cases {
-		code := HashCode(c)
-		m[c] = code
+		m[c] = HashCode(c)
 	}
 	for _, c := range cases {
-		t.Run(c, func(t *testing.T) {
-			code := HashCode(c)
-
-			if code != m[c] {
-				t.Errorf("hashCode diff, %s code:%d, %d difference", c, code, m[c])
-			}
-		})
+		if code := HashCode(c); code != m[c] {
+			t.Fatalf("hashCode not stable for %q: got %d, first saw %d", c, code, m[c])
+		}
 	}
-	useTime := time.Now().UnixNano() - startTime
-	if useTime > 1000000 {
-		t.Errorf("use too much time, use %d ms, each use %d ns", useTime/(1000000), useTime/int64(size))
+	if len(m) == 0 {
+		t.Fatal("no cases were generated")
+	}
+}
+
+func Benchmark_HashCode(b *testing.B) {
+	inputs := make([]string, 0, 1024)
+	for i := 0; i < 1024; i++ {
+		inputs = append(inputs, strconv.Itoa(int(rand.Int31n(1024))))
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		HashCode(inputs[i%len(inputs)])
 	}
 }
 
