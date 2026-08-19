@@ -163,14 +163,14 @@ func getReqResource(req *types.CreateCubeSandboxReq) (cpu, mem resource.Quantity
 			err = ret.Err(errorcode.ErrorCode_MasterParamsError, "request Resources nil")
 			break
 		}
-		ctncpuQuantity, err := resource.ParseQuantity(ctr.Resources.Cpu)
-		if err != nil {
-			err = fmt.Errorf("parse container %q cpu limit: %w", ctr.Name, err)
+		ctncpuQuantity, cpuErr := resource.ParseQuantity(ctr.Resources.Cpu)
+		if cpuErr != nil {
+			err = fmt.Errorf("parse container %q cpu limit: %w", ctr.Name, cpuErr)
 			break
 		}
-		ctnmemQuantity, err := resource.ParseQuantity(ctr.Resources.Mem)
-		if err != nil {
-			err = fmt.Errorf("parse container %q mem limit: %w", ctr.Name, err)
+		ctnmemQuantity, memErr := resource.ParseQuantity(ctr.Resources.Mem)
+		if memErr != nil {
+			err = fmt.Errorf("parse container %q mem limit: %w", ctr.Name, memErr)
 			break
 		}
 		cpu.Add(ctncpuQuantity)
