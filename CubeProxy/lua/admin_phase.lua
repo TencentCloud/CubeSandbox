@@ -34,14 +34,40 @@ local function reply_error(status, msg)
     reply(status, { error = msg })
 end
 
+local function constant_time_equal(a, b)
+    if type(a) ~= "string" or type(b) ~= "string" then
+        return false
+    end
+    if #a ~= #b then
+        return false
+    end
+    local diff = 0
+    for i = 1, #a do
+        if string.byte(a, i) ~= string.byte(b, i) then
+            diff = diff + 1
+        end
+    end
+    return diff == 0
+end
+
+local function is_loopback(addr)
+    return addr == "127.0.0.1" or addr == "::1"
+end
+
 local function check_token()
     local expected = ngx.var.cube_admin_token
-    if not expected or expected == "" then
+    if expected and expected ~= "" then
+        if not constant_time_equal(ngx.var.http_x_cube_admin_token, expected) then
+            reply_error(ngx.HTTP_FORBIDDEN, "admin token mismatch")
+        end
         return
     end
-    local got = ngx.var.http_x_cube_admin_token
-    if got ~= expected then
-        reply_error(ngx.HTTP_FORBIDDEN, "admin token mismatch")
+    if not is_loopback(ngx.var.remote_addr) then
+        ngx.log(ngx.ERR, "admin API reached from ", tostring(ngx.var.remote_addr),
+                         " with no $cube_admin_token configured; refusing. ",
+                         "Set CUBE_PROXY_ADMIN_TOKEN or bind the admin server to loopback.")
+        reply_error(ngx.HTTP_SERVICE_UNAVAILABLE,
+            "admin token not configured; refusing non-loopback request")
     end
 end
 
