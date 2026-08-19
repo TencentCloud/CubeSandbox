@@ -188,6 +188,7 @@ func runScoreFilter(selCtx *selctx.SelectorCtx, scores []score.Selector) error {
 			continue
 		}
 		if tmpResult, err := f.Select(selCtx); err != nil {
+			log.G(selCtx.Ctx).Warnf("runScoreFilter_skipped, selector: %s, err: %v", f.ID(), err)
 			continue
 		} else {
 			if len(tmpResult) > 0 {
