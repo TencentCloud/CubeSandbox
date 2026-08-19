@@ -7,7 +7,6 @@ package utils
 
 import (
 	"io"
-	"reflect"
 	"unsafe"
 
 	"slices"
@@ -29,13 +28,7 @@ func DecodeHttpBody(body io.ReadCloser, obj interface{}) error {
 }
 
 func String2Slice(s string) []byte {
-	sh := (*reflect.StringHeader)(unsafe.Pointer(&s))
-	bh := reflect.SliceHeader{
-		Data: sh.Data,
-		Len:  sh.Len,
-		Cap:  sh.Len,
-	}
-	return *(*[]byte)(unsafe.Pointer(&bh))
+	return unsafe.Slice(unsafe.StringData(s), len(s))
 }
 
 func Int64Ptr(v int64) *int64 {

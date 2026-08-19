@@ -12,7 +12,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"reflect"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -894,12 +893,10 @@ func (m needDeleteType) Swap(i int, j int) {
 }
 
 func slice2Str(b []byte) string {
-	bh := (*reflect.SliceHeader)(unsafe.Pointer(&b))
-	sh := reflect.StringHeader{
-		Data: bh.Data,
-		Len:  bh.Len,
+	if len(b) == 0 {
+		return ""
 	}
-	return *(*string)(unsafe.Pointer(&sh))
+	return unsafe.String(&b[0], len(b))
 }
 
 func lessByLastUsedTime(e1, e2 *meta) bool {
