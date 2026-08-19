@@ -44,6 +44,33 @@ spec:
               value: /data/CubeMaster/storage
             - name: CUBE_NODE_IPS
               value: {{ join "," .Values.controlPlane.master.nodeIPs | quote }}
+            # CubeTemplateCenter's address, injected as an environment variable
+            # rather than rendered into conf.yaml: an address is a deployment
+            # fact, and this is the exact counterpart of CUBE_MASTER_ADDR on the
+            # TC side. Only present when TC is deployed; when it is absent the
+            # conf's templatecenter_enabled=false keeps builds local, so the
+            # variable is simply unread.
+            {{- $tcAddr := include "cube.templateCenterEndpoint" . }}
+            {{- if $tcAddr }}
+            - name: CUBE_TEMPLATE_CENTER_ADDR
+              value: {{ $tcAddr | quote }}
+            {{- end }}
+            {{- if .Values.controlPlane.master.skipMigrationFingerprintCheck }}
+            # Escape hatch for a database that was migrated by a DIFFERENT build
+            # line than this image: versions applied there are absent from this
+            # image's migrations tree, and the preflight refuses to start with
+            #   applied file "..." is missing from the migrations tree
+            #
+            # A database NEWER than the binary is the safe direction (the extra
+            # tables/indexes simply go unused), so this makes startup possible.
+            # It is off by default because CubeMaster is the schema owner and the
+            # check is exactly what catches an edited/reused migration.
+            #
+            # This does not reconcile the schemas -- prefer a clean db_name when
+            # the two build lines are not meant to share a database.
+            - name: CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK
+              value: "true"
+            {{- end }}
             {{- with .Values.controlPlane.master.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

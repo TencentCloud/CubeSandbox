@@ -6,6 +6,8 @@ package templatecenter
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -20,6 +22,44 @@ func getTemplateImageJobRecordByID(ctx context.Context, jobID string) (*models.T
 		return nil, err
 	}
 	return record, nil
+}
+
+// ErrTerminalJobStatusFlip is returned when a status callback tries to move a
+// job OUT of a terminal state. The callback endpoint is unauthenticated, so its
+// payloads are untrusted: without this guard any caller that can reach the
+// internal route could flip an already-READY or already-FAILED job back to
+// RUNNING/BUILT, resurrecting completed work or re-triggering the pipeline.
+var ErrTerminalJobStatusFlip = errors.New("refusing to move a terminal template job back to a non-terminal status")
+
+// templateJobTerminal reports whether a job status is terminal.
+func templateJobTerminal(status string) bool {
+	return status == JobStatusReady || status == JobStatusFailed
+}
+
+// ValidateTemplateJobStatusTransition checks that applying `newStatus` to job
+// `jobID` is a legal transition. It exists to stop an unauthenticated status
+// callback from flipping a terminal job back to life. The check is best-effort:
+// a missing job (or an unreadable store) does not block the update, since the
+// callback must still work for the very first report of a job.
+//
+// Allowed: any transition whose current state is NOT terminal, plus idempotent
+// re-reporting of the same terminal state (a retried READY/FAILED callback is
+// harmless). Forbidden: terminal -> a DIFFERENT status.
+func ValidateTemplateJobStatusTransition(ctx context.Context, jobID, newStatus string) error {
+	if !isReady() {
+		return nil
+	}
+	job, err := getTemplateImageJobRecordByID(ctx, jobID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return nil // unreadable store: do not block the callback on a lookup error
+	}
+	if templateJobTerminal(job.Status) && job.Status != newStatus {
+		return fmt.Errorf("%w: job %s is %s, cannot move to %s", ErrTerminalJobStatusFlip, jobID, job.Status, newStatus)
+	}
+	return nil
 }
 
 func getLatestTemplateImageJobByTemplateID(ctx context.Context, templateID string) (*models.TemplateImageJob, error) {
@@ -176,6 +216,13 @@ func updateTemplateImageJobTx(tx *gorm.DB, jobID string, values map[string]any) 
 		return gorm.ErrRecordNotFound
 	}
 	return nil
+}
+
+// UpdateTemplateImageJob exports updateTemplateImageJob for the internal
+// status-callback handler used by the remote build mode (CubeTemplateCenter
+// reports job progress back to CubeMaster).
+func UpdateTemplateImageJob(ctx context.Context, jobID string, values map[string]any) error {
+	return updateTemplateImageJob(ctx, jobID, values)
 }
 
 func updateRootfsArtifact(ctx context.Context, artifactID string, values map[string]any) error {

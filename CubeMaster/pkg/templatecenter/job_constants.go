@@ -30,6 +30,10 @@ const (
 	JobStatusRunning = "RUNNING"
 	JobStatusReady   = "READY"
 	JobStatusFailed  = "FAILED"
+	// JobStatusBuilt marks a remote-mode job whose rootfs artifact has been
+	// built by CubeTemplateCenter and reported back via the internal status
+	// callback. Distribution + template registration happen after this point.
+	JobStatusBuilt = "BUILT"
 
 	JobOperationCreate           = "CREATE"
 	JobOperationRedo             = "REDO"

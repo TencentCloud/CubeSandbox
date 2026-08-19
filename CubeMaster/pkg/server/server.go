@@ -108,6 +108,7 @@ func (s *internalHttp) registerRoutes() {
 
 	notify.RegisterNotifyRoutes(root.Group(notify.NotifyURI()))
 	cube.RegisterCubeRoutes(root.Group(cube.CubeURI()))
+	cube.RegisterInternalTemplateRoutes(root)
 	inner.RegisterInnerRoutes(root.Group(inner.InnerURI()))
 	metahttp.RegisterMetaRoutes(root.Group(metahttp.MetaURI()))
 }

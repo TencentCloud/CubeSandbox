@@ -89,6 +89,7 @@ DOWNLOAD_CONNECT_TIMEOUT="${DOWNLOAD_CONNECT_TIMEOUT:-20}"
 
 ALL_IMAGES=(
   cube-master
+  cube-templatecenter
   cube-api
   cube-ops
   cubemastercli
@@ -114,6 +115,7 @@ PACKAGE_IMAGES=()
 # Images that read source trees under REPO_ROOT (worktree or SOURCE_REF export).
 SOURCE_IMAGES=(
   cube-master
+  cube-templatecenter
   cubemastercli
   cubelet
   cube-shim
@@ -634,6 +636,25 @@ build_cube_master_image() {
   record_built cube-master
 }
 
+# Same as .github/workflows/release-docker-images.yml for component
+# "cube-templatecenter": context=., file=CubeTemplateCenter/docker/Dockerfile.
+# TC reuses CubeMaster's templatecenter package, so it needs the same sibling
+# modules (cubelog / CubeDB / Cubelet) as cube-master.
+build_cube_templatecenter_image() {
+  [[ -f "${REPO_ROOT}/CubeTemplateCenter/docker/Dockerfile" ]] \
+    || fail "missing CubeTemplateCenter/docker/Dockerfile in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/CubeTemplateCenter/go.mod" ]] || fail "missing CubeTemplateCenter go.mod in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/CubeMaster/go.mod" ]] || fail "missing CubeMaster go.mod in ${REPO_ROOT}"
+  [[ -d "${REPO_ROOT}/cubelog" ]] || fail "missing cubelog sibling module in ${REPO_ROOT}"
+  [[ -d "${REPO_ROOT}/CubeDB" ]] || fail "missing CubeDB sibling module in ${REPO_ROOT}"
+  [[ -d "${REPO_ROOT}/Cubelet" ]] || fail "missing Cubelet sibling module in ${REPO_ROOT}"
+  build_image cube-templatecenter "${REPO_ROOT}" "${REPO_ROOT}/CubeTemplateCenter/docker/Dockerfile" \
+    --build-arg "CUBE_VERSION=${IMAGE_TAG}" \
+    --build-arg "CUBE_COMMIT=${CUBE_COMMIT}" \
+    --build-arg "CUBE_BUILD_TIME=${CUBE_BUILD_TIME}"
+  record_built cube-templatecenter
+}
+
 # Same as .github/workflows/release-docker-images.yml for component "cubemastercli":
 # context=., file=CubeMaster/docker/Dockerfile.cubemastercli, CUBE_* build-args.
 build_cubemastercli_image() {
@@ -1025,6 +1046,11 @@ run_selected_builds() {
   if should_build cube-master; then
     ensure_source_tree
     build_cube_master_image
+  fi
+
+  if should_build cube-templatecenter; then
+    ensure_source_tree
+    build_cube_templatecenter_image
   fi
 
   if should_build cube-api; then

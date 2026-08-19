@@ -1,0 +1,39 @@
+[Unit]
+Description=Cube Sandbox CubeTemplateCenter
+# TC needs the database (schema migration) and Redis (pull-progress snapshots).
+# cubemaster is a Wants/After rather than a Requires: TC reports build results to
+# it over HTTP with bounded retries, so a master that is briefly down delays a
+# report instead of invalidating the build. Ordering after it also keeps the two
+# processes from racing for the schema migration lock on a cold boot.
+After=network-online.target cube-sandbox-mysql.service cube-sandbox-redis.service cube-sandbox-cubemaster.service
+Wants=network-online.target cube-sandbox-mysql.service cube-sandbox-redis.service cube-sandbox-cubemaster.service
+ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
+# The artifact store is SHARED with cubemaster: TC writes the ext4 and cubemaster
+# serves it over /cube/template/artifact/download (design 9.7). Refusing to start
+# before the data disk is mounted avoids building into the root filesystem and
+# then having cubemaster fail to find the file.
+RequiresMountsFor=/data/CubeMaster/storage
+PartOf=cube-sandbox-control.target
+
+[Service]
+Type=simple
+# root is required, not merely convenient: `umoci unpack` must preserve the
+# original uid/gid of image layers, and mkfs.ext4 + losetup need privileges.
+# This is the same reason cubemaster runs as root.
+User=root
+WorkingDirectory=/usr/local/services/cubetoolbox
+EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
+Environment=CUBE_TEMPLATE_CENTER_CONFIG_PATH=/usr/local/services/cubetoolbox/CubeTemplateCenter/conf.yaml
+ExecStart=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cubetemplatecenter-start.sh
+ExecStartPost=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cubetemplatecenter-postcheck.sh
+Restart=on-failure
+RestartSec=2s
+TimeoutStartSec=60s
+TimeoutStopSec=30s
+
+[Install]
+# Deliberately NOT listed in cube-sandbox-control.target's Wants: handing builds
+# to TC is opt-in (CubeMaster defaults to templatecenter_enabled=false), so this
+# unit is installed but stays inactive until an operator runs
+#   systemctl enable --now cube-sandbox-cubetemplatecenter.service
+WantedBy=cube-sandbox-control.target

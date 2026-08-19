@@ -91,7 +91,14 @@ func createTemplateFromImage(r *http.Request, rt *CubeLog.RequestTrace) interfac
 		"Action":       "CreateTemplateFromImage",
 		"TemplateID":   req.TemplateID,
 	}))
-	job, err := templatecenter.SubmitTemplateFromImageWithEnvdPayload(ctx, req, requestBaseURL(r), envdPayload)
+	var job *types.TemplateImageJobInfo
+	if remoteTemplateBuildEnabled() {
+		// Remote build mode (gray rollout): validate + persist the job here,
+		// then let CubeTemplateCenter do the actual build and call back.
+		job, err = templatecenter.SubmitTemplateFromImageWithoutBuild(ctx, req, requestBaseURL(r))
+	} else {
+		job, err = templatecenter.SubmitTemplateFromImageWithEnvdPayload(ctx, req, requestBaseURL(r), envdPayload)
+	}
 	if err != nil {
 		return &types.CreateTemplateFromImageRes{
 			RequestID: req.RequestID,
@@ -100,6 +107,9 @@ func createTemplateFromImage(r *http.Request, rt *CubeLog.RequestTrace) interfac
 				RetMsg:  err.Error(),
 			},
 		}
+	}
+	if remoteTemplateBuildEnabled() {
+		go forwardBuildJobToTemplateCenter(job.JobID, req, requestBaseURL(r), envdPayload)
 	}
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
 	return &types.CreateTemplateFromImageRes{
@@ -124,9 +134,9 @@ func getTemplateFromImage(r *http.Request, rt *CubeLog.RequestTrace) interface{}
 	}
 	job, err := templatecenter.GetTemplateImageJobInfo(r.Context(), jobID)
 	if err != nil {
-		code := int(errorcode.ErrorCode_MasterInternalError)
-		if errors.Is(err, templatecenter.ErrTemplateStoreNotInitialized) {
-			code = int(errorcode.ErrorCode_DBError)
+		code := templateImageJobErrorCode(err)
+		if rt != nil {
+			rt.RetCode = int64(code)
 		}
 		return &types.CreateTemplateFromImageRes{
 			Ret: &types.Ret{
@@ -135,13 +145,36 @@ func getTemplateFromImage(r *http.Request, rt *CubeLog.RequestTrace) interface{}
 			},
 		}
 	}
-	rt.RetCode = int64(errorcode.ErrorCode_Success)
+	if rt != nil {
+		rt.RetCode = int64(errorcode.ErrorCode_Success)
+	}
 	return &types.CreateTemplateFromImageRes{
 		Ret: &types.Ret{
 			RetCode: int(errorcode.ErrorCode_Success),
 			RetMsg:  "success",
 		},
 		Job: job,
+	}
+}
+
+// templateImageJobErrorCode maps a build-job lookup error to a ret code.
+//
+// Shared by every handler that reads a job so they cannot disagree on what an
+// absent job means. Anything unrecognised stays MasterInternalError: guessing
+// a client-side code for an unknown failure would hide real server faults.
+func templateImageJobErrorCode(err error) int {
+	switch {
+	case err == nil:
+		return int(errorcode.ErrorCode_Success)
+	case errors.Is(err, templatecenter.ErrTemplateImageJobNotFound):
+		// "no such job" is a client-side fact, not a server fault. Returning
+		// MasterInternalError here made every probe for a missing job look like
+		// CubeMaster had broken.
+		return int(errorcode.ErrorCode_NotFound)
+	case errors.Is(err, templatecenter.ErrTemplateStoreNotInitialized):
+		return int(errorcode.ErrorCode_DBError)
+	default:
+		return int(errorcode.ErrorCode_MasterInternalError)
 	}
 }
 

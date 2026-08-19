@@ -1,0 +1,239 @@
+{{- if and .Values.controlPlane.enabled .Values.controlPlane.templateCenter.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cube.templateCenterName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: templatecenter
+spec:
+  # Fixed at 1, not configurable. Artifacts live on the node-local CBS disk with
+  # no cross-node sharing layer, so a second replica could neither read the
+  # first one's artifacts nor take over its builds (design 9.7). High
+  # availability is carried by CubeMaster, which is stateless.
+  replicas: 1
+  # Recreate, never RollingUpdate: the artifact PVC is ReadWriteOnce, so a
+  # surge Pod would try to attach a volume the outgoing Pod still holds and hang
+  # on multi-attach.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: templatecenter
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: templatecenter
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      {{- if .Values.controlPlane.templateCenter.colocateWithMaster }}
+      # TC must land on the same NODE as CubeMaster. ReadWriteOnce is a
+      # single-node constraint rather than a single-Pod one, so co-located Pods
+      # can share the artifact PVC — and they have to, because TC writes the ext4
+      # while CubeMaster is the one that serves it to Cubelet over
+      # /cube/template/artifact/download (design 9.7).
+      #
+      # required, not preferred: a TC scheduled elsewhere would either fail to
+      # attach the volume or silently build into a different disk, leaving every
+      # download 404ing.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "cube.selectorLabels" . | nindent 18 }}
+                  app.kubernetes.io/component: master
+      {{- else }}
+      {{- with .Values.controlPlane.templateCenter.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      containers:
+        - name: cube-templatecenter
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.templateCenter "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.templateCenter.pullPolicy }}
+          {{- with .Values.controlPlane.templateCenter.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.controlPlane.templateCenter.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # mkfs.ext4 + losetup + `umoci unpack` (which must preserve the image
+          # layers' original uid/gid) all need privileges. Same requirement that
+          # makes the systemd unit run as root.
+          securityContext:
+            privileged: true
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            # All CUBE_TEMPLATE_CENTER_*: the pre-rename CUBE_TC_* /
+            # CUBEMASTER_* spellings still work as a fallback and log a
+            # deprecation notice. See CubeTemplateCenter/pkg/tcconfig.
+            #
+            # Not a -conf flag: the process reuses CubeMaster's config loader,
+            # which only reads an environment variable.
+            - name: CUBE_TEMPLATE_CENTER_CONFIG_PATH
+              value: /usr/local/services/cubetoolbox/CubeTemplateCenter/conf.yaml
+            # Must resolve to the same directory CubeMaster serves downloads from.
+            - name: CUBE_TEMPLATE_CENTER_ARTIFACT_STORE_DIR
+              value: /data/CubeMaster/storage
+            # Where build results are reported. CUBE_MASTER_ADDR is the one name
+            # every component uses for CubeMaster's address; the older
+            # CUBE_TEMPLATE_CENTER_MASTER_ENDPOINT / CUBE_MASTER_ENDPOINT are
+            # only fallbacks in tcconfig.
+            - name: CUBE_MASTER_ADDR
+              value: {{ printf "http://%s" (include "cube.masterEndpoint" .) | quote }}
+            # Off by default: CubeMaster owns the public template API and drives
+            # distribution after TC reports BUILT. Turning this on also makes TC
+            # load the node view, which it otherwise does not need.
+            - name: CUBE_TEMPLATE_CENTER_SERVE_TEMPLATE_API
+              value: {{ .Values.controlPlane.templateCenter.servePublicTemplateAPI | quote }}
+            # Node address, used for the log identity. It deliberately does NOT
+            # become the listen address here: the node IP is outside the Pod's
+            # network namespace, so binding to it would fail and the readiness
+            # probe targets the Pod IP. tcconfig detects that and keeps 0.0.0.0.
+            - name: CUBE_TEMPLATE_CENTER_NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            # Shared CubeDB with CubeMaster: both migrate it and race for the
+            # migration lock. A version applied by one image but absent from the
+            # other's migrations tree is only reported now, not fatal, so this
+            # escape hatch is no longer needed for that case and stays off.
+            #
+            # Enable it only to bypass a real content drift (a migration edited
+            # after it was applied), which remains a startup failure by design.
+            {{- if .Values.controlPlane.templateCenter.skipMigrationFingerprintCheck }}
+            - name: CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK
+              value: "true"
+            {{- end }}
+            {{- with .Values.controlPlane.templateCenter.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: templatecenter
+              containerPort: {{ .Values.controlPlane.templateCenter.service.port }}
+          {{- if .Values.controlPlane.templateCenter.probes.readiness.enabled }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.controlPlane.templateCenter.probes.readiness.path | quote }}
+              port: templatecenter
+            initialDelaySeconds: {{ .Values.controlPlane.templateCenter.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.controlPlane.templateCenter.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.controlPlane.templateCenter.probes.readiness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.controlPlane.templateCenter.probes.liveness.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.controlPlane.templateCenter.probes.liveness.path | quote }}
+              port: templatecenter
+            # Long period and a high threshold on purpose: a restart mid-build
+            # abandons the ext4 and leaves the job for the reconciler to fail, so
+            # the liveness probe must not fire on a busy process.
+            initialDelaySeconds: {{ .Values.controlPlane.templateCenter.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.controlPlane.templateCenter.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.controlPlane.templateCenter.probes.liveness.failureThreshold }}
+          {{- end }}
+          volumeMounts:
+            - name: cube-templatecenter-config
+              mountPath: /usr/local/services/cubetoolbox/CubeTemplateCenter/conf.yaml
+              subPath: conf.yaml
+              readOnly: true
+          {{- if .Values.cubeEgress.enabled }}
+            # Read by the --with-cube-ca bake, which is what TC does before mkfs.
+            - name: cube-egress-ca
+              mountPath: /etc/cube/ca
+              readOnly: true
+          {{- end }}
+            - name: cube-templatecenter-log
+              mountPath: /data/log/CubeTemplateCenter
+            - name: cube-master-storage
+              mountPath: /data/CubeMaster/storage
+          {{- with .Values.controlPlane.templateCenter.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: cube-templatecenter-config
+          secret:
+            secretName: {{ include "cube.templateCenterConfigSecretName" . }}
+      {{- if .Values.cubeEgress.enabled }}
+        - name: cube-egress-ca
+          secret:
+            secretName: {{ include "cube.egressCASecretName" . }}
+      {{- end }}
+        - name: cube-templatecenter-log
+          emptyDir: {}
+        # The SAME volume CubeMaster mounts. hostPath and PVC are both honoured so
+        # this follows whatever the master is configured with; an emptyDir here
+        # would be pod-local and CubeMaster could never serve the result.
+        - name: cube-master-storage
+          {{- if and .Values.controlPlane.master.persistence.enabled .Values.controlPlane.master.persistence.hostPath }}
+          hostPath:
+            path: {{ .Values.controlPlane.master.persistence.hostPath | quote }}
+            type: DirectoryOrCreate
+          {{- else if .Values.controlPlane.master.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "cube.templateCenterStorageClaimName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cube.templateCenterName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: templatecenter
+spec:
+  type: {{ .Values.controlPlane.templateCenter.service.type }}
+  selector:
+    {{- include "cube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: templatecenter
+  ports:
+    - name: templatecenter
+      port: {{ .Values.controlPlane.templateCenter.service.port }}
+      targetPort: templatecenter
+      {{- with .Values.controlPlane.templateCenter.service.nodePort }}
+      nodePort: {{ . }}
+      {{- end }}
+{{- if .Values.controlPlane.templateCenter.internalLoadBalancer.enabled }}
+---
+# VPC-internal CLB. This is for reaching TC from outside the cluster (debugging,
+# or a CubeMaster that lives outside it). CubeMaster's own
+# CUBE_TEMPLATE_CENTER_ADDR keeps using the ClusterIP Service above, so normal
+# control-plane traffic does not traverse the load balancer.
+#
+# The endpoint is unauthenticated, so the CLB MUST stay VPC-internal: annotate it
+# with an internal subnet id and a security group.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cube.templateCenterName" . }}-internal
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: templatecenter
+  annotations:
+    {{- toYaml .Values.controlPlane.templateCenter.internalLoadBalancer.annotations | nindent 4 }}
+spec:
+  type: LoadBalancer
+  selector:
+    {{- include "cube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: templatecenter
+  ports:
+    - name: templatecenter
+      protocol: TCP
+      port: {{ .Values.controlPlane.templateCenter.internalLoadBalancer.port }}
+      targetPort: templatecenter
+{{- end }}
+{{- end }}

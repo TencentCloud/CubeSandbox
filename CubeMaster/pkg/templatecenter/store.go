@@ -73,8 +73,12 @@ const (
 )
 
 var (
-	ErrTemplateStoreNotInitialized  = errors.New("template store is not initialized")
-	ErrTemplateNotFound             = errors.New("template not found")
+	ErrTemplateStoreNotInitialized = errors.New("template store is not initialized")
+	ErrTemplateNotFound            = errors.New("template not found")
+	// ErrTemplateImageJobNotFound is the domain-level "no such build job".
+	// Handlers must be able to answer NotFound without importing gorm, so the
+	// repository translates gorm.ErrRecordNotFound into this.
+	ErrTemplateImageJobNotFound     = errors.New("template image job not found")
 	ErrTemplateIDRequired           = errors.New("template id is required")
 	ErrTemplateHasNoReadyReplica    = errors.New("template has no ready replica")
 	ErrNoTemplateNodes              = errors.New("no healthy nodes available for template creation")
@@ -241,7 +245,35 @@ func ListTemplates(ctx context.Context) ([]TemplateInfo, error) {
 	return out, nil
 }
 
+// Init boots templatecenter for CubeMaster (the in-process monolith case).
+// It wires BOTH snapshot-side and template-side concerns — see
+// docs/dev/templatecenter-design.md §2.3 for the ownership split.
+//
+// When the standalone CubeTemplateCenter process calls Init, it gets
+// snapshot hooks it does not own (sandbox.SetAfterDestroySandboxSuccessHook
+// etc.) which only CubeMaster should set. Use InitForTemplateCenter instead
+// for that process.
 func Init(ctx context.Context) error {
+	return initCommon(ctx, true /* includeSnapshotSide */)
+}
+
+// InitForTemplateCenter boots templatecenter for the standalone
+// CubeTemplateCenter process. Skips snapshot-side wiring (snapshot
+// runtime-ref hooks, sandboxspec hooks, sandboxspec init, snapshot
+// reconciler) — those belong to CubeMaster and would otherwise double-register
+// hooks or leak goroutines that only CubeMaster should own.
+//
+// Template-side wiring kept here:
+//   - store.db (the canonical handle for template_* tables)
+//   - compat hooks (template compat table maintenance)
+//   - warm ready template locality (so CreateSandbox can hit locality quickly)
+//   - artifact GC (orphan/expired rootfs_artifact sweeper)
+//   - initial compat scan
+func InitForTemplateCenter(ctx context.Context) error {
+	return initCommon(ctx, false /* includeSnapshotSide */)
+}
+
+func initCommon(ctx context.Context, includeSnapshotSide bool) error {
 	_ = ctx
 	if config.GetDbConfig() == nil {
 		return ErrTemplateStoreNotInitialized
@@ -253,17 +285,26 @@ func Init(ctx context.Context) error {
 		// the existing *gorm.DB.
 		store.db = db.Init(config.GetDbConfig())
 		store.dbAddr = config.GetDbConfig().Addr
-		if initErr = sandboxspec.Init(store.db); initErr != nil {
-			return
+		if includeSnapshotSide {
+			if initErr = sandboxspec.Init(store.db); initErr != nil {
+				return
+			}
+			configureSnapshotRuntimeRefHooks()
+			configureSandboxSpecHooks()
 		}
-		pausesnap.Init(store.db)
-		configureSnapshotRuntimeRefHooks()
-		configureSandboxSpecHooks()
 		configureCompatHooks()
 		if warmErr := warmReadyTemplateLocality(ctx); warmErr != nil {
 			log.G(ctx).Warnf("warm ready template locality fail:%v", warmErr)
 		}
-		startSnapshotReconciler(ctx)
+		if includeSnapshotSide {
+			startSnapshotReconciler(ctx)
+			// CubeMaster only. The stuck-job sweep replays the post-build
+			// pipeline (artifact registration + distribution + template
+			// definition), which is CubeMaster's responsibility -- the
+			// standalone CubeTemplateCenter process must never write that
+			// state, so it does not run this.
+			startImageJobReconciler(ctx)
+		}
 		startArtifactGC(ctx)
 		scheduleInitialCompatScan(ctx)
 	})
@@ -303,6 +344,20 @@ func configureSandboxSpecHooks() {
 
 func isReady() bool {
 	return store.db != nil
+}
+
+// IsReady reports whether the templatecenter store has been initialized.
+// Exported so the standalone CubeTemplateCenter process can use it in
+// its /health endpoint without probing via ListTemplates.
+func IsReady() bool {
+	return isReady()
+}
+
+// GetDB exposes the initialized gorm handle. The standalone
+// CubeTemplateCenter process needs it for the DB session locks used by its
+// background reconciler (design §7.2 / §9.3). Returns nil before Init.
+func GetDB() *gorm.DB {
+	return store.db
 }
 
 func NormalizeRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.CreateCubeSandboxReq, string, error) {

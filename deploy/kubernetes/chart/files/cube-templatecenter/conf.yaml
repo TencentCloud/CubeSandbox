@@ -1,0 +1,75 @@
+common:
+  http_port: {{ .Values.controlPlane.templateCenter.service.port }}
+  http_readtimeout: 120
+  # Generous write timeout: a build streams progress for as long as the image
+  # pull and mkfs take.
+  http_writetimeout: 360
+  http_idletimeout: 360
+  sync_meta_data_interval: 30s
+  sync_metric_data_interval: 1s
+  collect_metric_interval: 1s
+
+log:
+  module: "templatecenter"
+  path: "/data/log/CubeTemplateCenter"
+  file_size: 100
+  file_num: 10
+  level: "info"
+
+# Same database as CubeMaster, deliberately: TC uses it for schema migration and
+# for the reconciler's session lock only. Every business-state write goes through
+# CubeMaster's status callback (design 2.2), so the two processes do not contend
+# on template rows.
+instance_db_config:
+  driver: {{ include "cube.dbDriver" . | quote }}
+  addr: {{ printf "%s:%v" (include "cube.dbHost" .) (include "cube.dbPort" .) | quote }}
+  user: {{ include "cube.dbUser" . | quote }}
+  pwd: {{ include "cube.dbPassword" . | quote }}
+  db_name: {{ include "cube.dbName" . | quote }}
+  conn_timeout: 5
+  read_timeout: 5
+  write_timeout: 5
+  max_idle_conns: 5
+  max_open_conns: 20
+  max_conn_life_time_seconds: 300
+
+# Redis carries the live pull-progress snapshots, written through localcache with
+# the same keys CubeMaster reads when answering a progress query.
+redis:
+  nodes: {{ include "cube.redisNodes" . | quote }}
+  master_name: {{ .Values.redis.masterName | default "" | quote }}
+  sentinel_nodes: {{ .Values.redis.sentinelNodes | default "" | quote }}
+  sentinel_password: {{ .Values.redis.sentinelPassword | default "" | quote }}
+  password: {{ .Values.redis.password | quote }}
+  db_no: 0
+  max_idle: 8
+  max_active: 32
+  idle_timeout: 30
+  max_retry: 2
+
+redis_read:
+  nodes: {{ include "cube.redisNodes" . | quote }}
+  master_name: {{ .Values.redis.masterName | default "" | quote }}
+  sentinel_nodes: {{ .Values.redis.sentinelNodes | default "" | quote }}
+  sentinel_password: {{ .Values.redis.sentinelPassword | default "" | quote }}
+  password: {{ .Values.redis.password | quote }}
+  db_no: 0
+  max_idle: 8
+  max_active: 32
+  idle_timeout: 30
+  max_retry: 2
+
+redis_write:
+  nodes: {{ include "cube.redisNodes" . | quote }}
+  master_name: {{ .Values.redis.masterName | default "" | quote }}
+  sentinel_nodes: {{ .Values.redis.sentinelNodes | default "" | quote }}
+  sentinel_password: {{ .Values.redis.sentinelPassword | default "" | quote }}
+  password: {{ .Values.redis.password | quote }}
+  db_no: 0
+  max_idle: 8
+  max_active: 32
+  idle_timeout: 30
+  max_retry: 2
+
+auth:
+  enable: false
