@@ -71,7 +71,7 @@ webhook:
   claim_batch_size: 32             # >= worker_concurrency
   backlog_watermark: 10000         # global actionable backlog that pauses reads
   per_subscription_backlog_limit: 1000  # soft send limit per subscription
-  keep_pending_max_retry_window: "168h" # 0 = infinite retries (requires alerting + SOP)
+  keep_pending_max_retry_window: "168h" # keep-pending retry window; 0 = infinite retries only via env CUBE_OPS_WEBHOOK_KEEP_PENDING_MAX_RETRY_WINDOW=0 (a bare 0 in YAML fails to parse for a duration)
   max_subscriptions_per_event: 200      # materialization chunk size
   lease_duration: "60s"                 # floor; effective = max(this, 2*http_timeout)
   http_timeout: "10s"

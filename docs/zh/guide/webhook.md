@@ -270,7 +270,7 @@ X-Cube-Signature-256: {hex}   ← 仅当订阅配置了 secret
 - 可重试的失败：HTTP 408 / 429 / 5xx、网络错误、超时、重定向。每次重试 `attempts` 加一，指数退避（基准 1 秒、封顶 10 分钟、带随机抖动）。
 - 永久失败：其他 4xx（接收端明确拒绝）、secret 解密失败、SSRF 地址策略拒绝。直接置为 `permanent_failed`，保留 `last_error` / `http_status` 供排查，不再重试。
 - 两种兜底模式（`dead_letter_mode` 配置）：
-  - `keep-pending`（默认）：持续重试，但受 `keep_pending_max_retry_window`（默认 7 天）限制，超期转 `dead`。设为 `0` 表示无限重试，此时必须配置积压告警与人工处置流程。
+  - `keep-pending`（默认）：持续重试，但受 `keep_pending_max_retry_window`（默认 7 天）限制，超期转 `dead`。设为 `0` 表示无限重试（只能通过环境变量 `CUBE_OPS_WEBHOOK_KEEP_PENDING_MAX_RETRY_WINDOW=0` 设置，YAML 里无法表达裸 `0`），此时必须配置积压告警与人工处置流程。
   - `dead-letter`：`max_attempts`（默认 5）耗尽后转 `dead`。
 
 ## 开启与配置
@@ -284,7 +284,7 @@ X-Cube-Signature-256: {hex}   ← 仅当订阅配置了 secret
 | `worker_concurrency` / `per_subscription_concurrency` | 8 / 2 | 每副本的发送并发：总量与单订阅上限。多副本时总并发为副本数乘以该值 |
 | `http_timeout` | `10s` | 单次推送的超时时间 |
 | `max_attempts` | `5` | `dead-letter` 模式下的最大尝试次数 |
-| `keep_pending_max_retry_window` | `168h` | `keep-pending` 模式的重试总窗口，`0` = 无限重试（须配告警） |
+| `keep_pending_max_retry_window` | `168h` | `keep-pending` 模式的重试总窗口；`0` = 无限重试（须配告警），**仅能通过环境变量 `CUBE_OPS_WEBHOOK_KEEP_PENDING_MAX_RETRY_WINDOW=0` 设置**，YAML 写裸 `0` 会解析失败、写 `"0s"` 会被默认值覆盖 |
 | `dead_letter_mode` | `keep-pending` | 兜底模式，见上文 |
 | `allow_private_networks` | `false` | 放行 loopback / RFC1918 地址，仅本地联调用，生产必须关闭 |
 | `cleanup.*` | 30 天 / 90 天 / 24h | 终态投递记录的保留时长与清理周期 |
