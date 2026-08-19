@@ -91,7 +91,10 @@ func (o *FileOperator) reload(path string) bool {
 		return false
 	}
 	new, err := yaml.Marshal(config)
-	if len(o.backupOldCfg) == len(new) && bytes.EqualFold(o.backupOldCfg, new) {
+	if err != nil {
+		return false
+	}
+	if bytes.Equal(o.backupOldCfg, new) {
 		return false
 	}
 	o.backupOldCfg = new
