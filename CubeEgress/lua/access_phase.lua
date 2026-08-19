@@ -216,6 +216,9 @@ local function inject_gates(ctx)
         if not ctx.host or ctx.host == "" then
             return false, "g4_missing_host", true
         end
+        if ctx.allow_plaintext_inject ~= true then
+            return false, "g5_plaintext_inject_not_permitted", true
+        end
     end
     return true
 end
@@ -354,9 +357,10 @@ local function allow(decision)
             end
         end
         local ok, reason, sec = inject_gates({
-            scheme = decision.scheme,
-            sni    = decision.sni,
-            host   = decision.host,
+            scheme                 = decision.scheme,
+            sni                    = decision.sni,
+            host                   = decision.host,
+            allow_plaintext_inject = decision.allow_plaintext_inject,
         })
         if not ok then
             decision.inject_dropped = reason
@@ -471,6 +475,7 @@ function _M.decide()
             decision.rule_id     = r.id
             decision.audit_level = (r.action and r.action.audit) or "metadata"
             decision.inject      = r.action and r.action.inject  -- consumed in Pγ
+            decision.allow_plaintext_inject = r.action and r.action.allow_plaintext_inject == true
             if r.action and r.action.allow == true then
                 return allow(decision)
             else

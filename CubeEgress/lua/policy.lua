@@ -89,6 +89,11 @@ local function validate_policy(p)
             return false, "rules[" .. i .. "].action.allow required (boolean)"
         end
         -- inject is optional; if present must be array of {header, secret, format}.
+        if r.action.allow_plaintext_inject ~= nil
+           and type(r.action.allow_plaintext_inject) ~= "boolean" then
+            return false, string.format(
+                "rules[%d].action.allow_plaintext_inject must be a boolean", i)
+        end
         if r.action.inject ~= nil then
             if type(r.action.inject) ~= "table" then
                 return false, "rules[" .. i .. "].action.inject must be array"
