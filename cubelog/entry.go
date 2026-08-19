@@ -354,6 +354,14 @@ func (entry *Entry) Fatalf(format string, v ...interface{}) {
 	entry.writef(entry.ctx, FATAL, format, v)
 }
 
+func (entry *Entry) Criticalf(format string, v ...interface{}) {
+	entry.writef(entry.ctx, FATAL, format, v)
+}
+
+func (entry *Entry) Critical(v ...interface{}) {
+	entry.writef(entry.ctx, FATAL, "", v)
+}
+
 func (entry *Entry) GetFields() Fields {
 	return entry.data
 }

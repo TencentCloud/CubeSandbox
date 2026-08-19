@@ -112,3 +112,11 @@ func Errorf(format string, args ...interface{}) {
 func Fatalf(format string, args ...interface{}) {
 	std.Fatalf(format, args...)
 }
+
+func Criticalf(format string, args ...interface{}) {
+	std.Criticalf(format, args...)
+}
+
+func Critical(args ...interface{}) {
+	std.Critical(args...)
+}

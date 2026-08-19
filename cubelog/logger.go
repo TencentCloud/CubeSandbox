@@ -307,6 +307,14 @@ func (logger *Logger) Fatalf(format string, v ...interface{}) {
 	logger.writef(context.TODO(), FATAL, format, v)
 }
 
+func (logger *Logger) Criticalf(format string, v ...interface{}) {
+	logger.writef(context.TODO(), FATAL, format, v)
+}
+
+func (logger *Logger) Critical(v ...interface{}) {
+	logger.writef(context.TODO(), FATAL, "", v)
+}
+
 func getPackageName(f string) string {
 	for {
 		lastPeriod := strings.LastIndex(f, ".")
