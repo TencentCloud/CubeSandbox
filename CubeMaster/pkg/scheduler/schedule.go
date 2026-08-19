@@ -151,9 +151,14 @@ func parallelRunFilters(selCtx *selctx.SelectorCtx, filters []filter.Selector) (
 			if tmp, err := f.Select(selCtx); err != nil {
 				return err
 			} else {
+				counted := make(map[string]struct{}, len(tmp))
 				for _, n := range tmp {
-
-					tmpStat.Add(n.ID(), 1)
+					id := n.ID()
+					if _, duplicate := counted[id]; duplicate {
+						continue
+					}
+					counted[id] = struct{}{}
+					tmpStat.Add(id, 1)
 				}
 			}
 			return nil
