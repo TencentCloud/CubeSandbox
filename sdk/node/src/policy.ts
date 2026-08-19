@@ -126,14 +126,14 @@ function isE2BPerHostRules(rules: NetworkRules): rules is E2BPerHostRules {
 function convertE2BTransformToInject(transform: {
   headers?: Record<string, string>;
 }): Inject[] {
-  if (typeof transform !== "object" || transform === null) {
+  if (typeof transform !== "object" || transform === null || Array.isArray(transform)) {
     throw new Error("network.rules transform must be an object");
   }
   const headers = transform.headers;
   if (headers === undefined) {
     throw new Error("network.rules transform requires a 'headers' field");
   }
-  if (typeof headers !== "object" || headers === null) {
+  if (typeof headers !== "object" || headers === null || Array.isArray(headers)) {
     throw new Error("network.rules transform.headers must be an object");
   }
   const unknown = Object.keys(transform).filter((k) => k !== "headers");
