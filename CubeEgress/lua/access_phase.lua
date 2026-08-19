@@ -484,6 +484,28 @@ function _M.decide()
     return deny("no_rule_match", decision)
 end
 
+function _M.handshake_allowed()
+    local meta = ngx.shared.meta_store
+    local bootstrap_status = (meta and meta:get("bootstrap_status")) or "unknown"
+    if bootstrap_status ~= "ready" and bootstrap_status ~= "skipped" then
+        return false, "bootstrap_not_ready:" .. bootstrap_status
+    end
+
+    local sandbox_ip = ngx.var.remote_addr
+    if not sandbox_ip then
+        return false, "no_remote_addr"
+    end
+
+    local p, perr = policy.get(sandbox_ip)
+    if perr then
+        return false, "policy_lookup_error"
+    end
+    if not p then
+        return false, "no_policy_for_sandbox"
+    end
+    return true
+end
+
 -- Exposed for unit-testing the matcher in isolation.
 _M._rule_matches = rule_matches
 
