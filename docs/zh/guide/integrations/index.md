@@ -51,3 +51,4 @@ lang: zh-CN
 | [Claude Code 集成指南](./claude-code.md) | shsaihdsaiudh | 2026-07-06 | integration, claude-code, coding-agent |
 | [LangChain 集成指南](./langchain.md) | peerless-hero | 2026-07-07 | integration, langchain, agent |
 | [Tigris Volume 集成指南](./tigris.md) | davidmyriel | 2026-07-31 | integration, tigris, volume, storage, s3 |
+| [OpenAI Agents SDK 集成指南](./openai-agents-sdk.md) | ZedingZhang | 2026-08-19 | integration, openai-agents-sdk, agent |
