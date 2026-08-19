@@ -22,6 +22,7 @@ local altname_lib = require "resty.openssl.x509.altname"
 local ext_lib     = require "resty.openssl.x509.extension"
 local digest_lib  = require "resty.openssl.digest"
 local bn_lib      = require "resty.openssl.bn"
+local resty_random = require "resty.random"
 
 local _M = {}
 
@@ -93,6 +94,24 @@ function _M.bootstrap(opts)
                       "s cache_ttl=", CACHE_TTL_SEC, "s")
 end
 
+local SERIAL_BYTES = 16
+
+local function random_serial()
+    local raw = resty_random.bytes(SERIAL_BYTES, true)
+    if not raw then
+        raw = resty_random.bytes(SERIAL_BYTES)
+    end
+    if not raw or #raw ~= SERIAL_BYTES then
+        return nil, "no random bytes available"
+    end
+    local first = string.byte(raw, 1) % 128
+    if first == 0 then
+        first = 1
+    end
+    raw = string.char(first) .. string.sub(raw, 2)
+    return bn_lib.from_binary(raw)
+end
+
 -- ---- Internal: sign a fresh leaf for (sni, dst_ip) ----
 local function sign_leaf(sni, dst_ip)
     -- 1. Generate leaf key (ECDSA P-256: fast, small)
@@ -103,9 +122,14 @@ local function sign_leaf(sni, dst_ip)
     local cert = x509_lib.new()
     cert:set_version(3)
 
-    -- Random 64-bit serial; uniqueness is best-effort for short-lived MITM certs.
-    local serial = bn_lib.new(math.floor(ngx.now() * 1000000) + math.random(1, 1e9))
-    if serial then cert:set_serial_number(serial) end
+    local serial, serial_err = random_serial()
+    if not serial then
+        return nil, "generate serial: " .. tostring(serial_err)
+    end
+    local ok_serial, err_serial = cert:set_serial_number(serial)
+    if not ok_serial then
+        return nil, "set serial: " .. tostring(err_serial)
+    end
 
     local now = ngx.time()
     cert:set_not_before(now - 60)              -- 60s clock skew tolerance
