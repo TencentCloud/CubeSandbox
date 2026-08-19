@@ -296,14 +296,18 @@ func (b *PortBinder) Reserve(owner string, requestedMappings []PortMapping, defa
 			b.releaseOwnedLocked(owner, ownedNow)
 			return nil, fmt.Errorf("host port %d appears more than once in one reservation request", port)
 		}
+		preOwned := false
 		if !automatic {
+			preOwned = b.assigned[port] == owner
 			if err := b.ownLocked(owner, port); err != nil {
 				b.releaseOwnedLocked(owner, ownedNow)
 				return nil, err
 			}
 		}
 		seenHostPorts[port] = struct{}{}
-		ownedNow = append(ownedNow, port)
+		if !preOwned {
+			ownedNow = append(ownedNow, port)
+		}
 		actualMappings = append(actualMappings, PortMapping{
 			Protocol:      nonEmpty(mapping.Protocol, "tcp"),
 			HostIP:        nonEmpty(mapping.HostIP, defaultHostIP),
