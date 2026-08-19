@@ -60,7 +60,7 @@ cd "$REPO_ROOT"
 #   invocation reproduces CI. Live/integration suites are excluded by each
 #   tool's own gate:
 #     go     — integration_test.go is `//go:build integration`, so the default
-#              `go test ./...` skips it.
+#              `go test -race ./...` skips it.
 #     node   — the live suite is `describe.skipIf(CUBE_RUN_INTEGRATION!=1)`, so
 #              `npm test` runs only unit tests.
 #     python — pytest collects only tests/test_*.py; the standalone
@@ -69,7 +69,7 @@ cd "$REPO_ROOT"
 #              only one of the two.
 
 SDKS=(
-	"go|Go|cd sdk/go && go test ./..."
+	"go|Go|cd sdk/go && go test -race ./..."
 	"node|Node|cd sdk/node && npm ci && npm test"
 	"python|Python|cd sdk/python && py=\$(command -v python3 || command -v python) && \"\$py\" -m pip install -e '.[dev]' && \"\$py\" -m pytest"
 )

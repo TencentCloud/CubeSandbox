@@ -353,15 +353,15 @@ shim-test: builder-image
 # container is faster.
 .PHONY: cubelog-test
 cubelog-test:
-	cd cubelog && go test -short ./...
+	cd cubelog && go test -short -race ./...
 
 .PHONY: cubedb-test
 cubedb-test:
-	cd CubeDB && go mod download && go test ./...
+	cd CubeDB && go mod download && go test -race ./...
 
 .PHONY: cube-lifecycle-manager-test
 cube-lifecycle-manager-test: builder-image
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace/cube-lifecycle-manager && go mod download && go test ./...'
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/cube-lifecycle-manager && go mod download && go test -race ./...'
 
 # cubelet-pkg-test bypasses cubelet-test: that target runs `go test
 # -coverprofile`, and the builder's Go toolchain lacks the `covdata` tool, so
