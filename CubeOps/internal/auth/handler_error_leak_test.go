@@ -23,6 +23,10 @@ func (o *outageUserStore) GetUserPassword(_ context.Context, _ string) (string, 
 	return "", errors.New(dbErrorDetail)
 }
 
+func (o *outageUserStore) IsRefreshTokenRevoked(_ context.Context, _ string) (bool, error) {
+	return false, errors.New(dbErrorDetail)
+}
+
 func newOutageRouter(t *testing.T) *gin.Engine {
 	t.Helper()
 	jm := auth.NewJWTManager("test-secret-32-bytes-long-enough!", 15*time.Minute, 168*time.Hour)
@@ -53,6 +57,9 @@ func TestLoginOutageDoesNotLeakDatabaseDetailsToTheCaller(t *testing.T) {
 	if !strings.Contains(body, "internal server error") {
 		t.Errorf("500 body = %s, want a generic message", body)
 	}
+	if strings.Contains(body, "required") {
+		t.Errorf("the request never reached the database path: %s", body)
+	}
 }
 
 func TestChangePasswordOutageDoesNotLeakDatabaseDetailsToTheCaller(t *testing.T) {
@@ -74,5 +81,30 @@ func TestChangePasswordOutageDoesNotLeakDatabaseDetailsToTheCaller(t *testing.T)
 		if strings.Contains(body, secret) {
 			t.Errorf("500 body leaks %q to the caller: %s", secret, body)
 		}
+	}
+}
+
+func TestRefreshOutageDoesNotLeakDatabaseDetailsToTheCaller(t *testing.T) {
+	jm := auth.NewJWTManager("test-secret-32-bytes-long-enough!", 15*time.Minute, 168*time.Hour)
+	refresh, _, err := jm.GenerateRefreshToken("admin")
+	if err != nil {
+		t.Fatalf("GenerateRefreshToken: %v", err)
+	}
+
+	r := newOutageRouter(t)
+	w := doRequest(t, r, "POST", "/api/v1/auth/refresh",
+		`{"refreshToken":"`+refresh+`"}`, "")
+
+	if w.Code != 500 {
+		t.Fatalf("status = %d, want 500 (body: %s)", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, secret := range []string{dbErrorDetail, "10.0.0.5", "3306", "dial tcp", "connection refused"} {
+		if strings.Contains(body, secret) {
+			t.Errorf("500 body leaks %q to the caller: %s", secret, body)
+		}
+	}
+	if !strings.Contains(body, "internal server error") {
+		t.Errorf("500 body = %s, want a generic message", body)
 	}
 }
