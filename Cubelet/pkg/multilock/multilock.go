@@ -53,9 +53,9 @@ func NewMultiLock(options *Options) *MultiLock {
 }
 
 func (m *MultiLock) Get(key string) RWLock {
-	l, ok := m.Load(key)
-	if ok {
+	if l, ok := m.Load(key); ok {
 		lock := l.(*rwLock)
+		lock.touch()
 		return lock
 	}
 
@@ -65,8 +65,10 @@ func (m *MultiLock) Get(key string) RWLock {
 		time.Now().Unix(),
 	}
 
-	l, _ = m.LoadOrStore(key, newL)
-	return l.(*rwLock)
+	l, _ := m.LoadOrStore(key, newL)
+	lock := l.(*rwLock)
+	lock.touch()
+	return lock
 }
 
 func (m *MultiLock) loop() {
@@ -107,6 +109,10 @@ type rwLock struct {
 	*sync.RWMutex
 	key      string
 	updateAt int64
+}
+
+func (m *rwLock) touch() {
+	atomic.StoreInt64(&m.updateAt, time.Now().Unix())
 }
 
 func (m *rwLock) LockAt() {
