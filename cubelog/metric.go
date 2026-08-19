@@ -197,14 +197,16 @@ func Trace(trace *RequestTrace) {
 	if tmcluster == "" {
 		tmcluster = cluster
 	}
-	version := trace.Version
-	if version == "" {
-		version = moduleVersion
-	}
 
 	if enableLogMetric {
 		fields := makeLogFieldsFromTrace(trace)
 		fields["CostTime"] = cost
+		if region != "" {
+			fields["Region"] = region
+		}
+		if tmcluster != "" {
+			fields["Cluster"] = tmcluster
+		}
 
 		if traceStd.writer != nil {
 			traceStd.WithFields(fields).Errorf("")
