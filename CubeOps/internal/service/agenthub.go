@@ -436,18 +436,27 @@ type CreateInstanceResult struct {
 // accumulate any number of newer non-recommended templates after the marked
 // one.
 //
-// none is true only when the registry was read successfully and holds nothing.
-// A failed read returns none=false — the caller must not report "nothing is
-// registered" on the strength of a query that never completed. Either way the
-// returned id is then defaultAgentTemplateID, which the caller still passes to
-// CubeMaster so installs carrying that alias keep working.
+// none is true only when the listing completed and came back empty. The listing
+// is what settles emptiness — a marked template is also a listed one, so a
+// successful empty listing rules out both — while a failed listing returns
+// none=false, because the caller must not report "nothing is registered" on the
+// strength of a query that never completed. Either way the returned id is then
+// defaultAgentTemplateID, which the caller still passes to CubeMaster so
+// installs carrying that alias keep working.
+//
+// A failed recommended-flag read is not fatal: the flag expresses which
+// registered template to prefer, not whether one exists, so losing it falls
+// through to the newest rather than failing a create the registry can still
+// satisfy.
 func (s *AgentHubService) defaultTemplateID(ctx context.Context) (id string, none bool) {
 	recommended, err := s.Store.GetRecommendedAgentTemplate(ctx)
-	if err != nil {
-		logging.G(ctx).Warnf("failed to read the recommended agent template: %v", err)
-		return defaultAgentTemplateID, false
-	}
-	if recommended != nil {
+	switch {
+	case err != nil:
+		// Log rather than return: an operator's marked choice is about to be
+		// passed over, and this is the only place that knows it happened.
+		logging.G(ctx).Warnf("failed to read the recommended agent template, "+
+			"falling back to the newest registered one: %v", err)
+	case recommended != nil:
 		return recommended.TemplateID, false
 	}
 	newest, err := s.Store.ListAgentTemplates(ctx, 1, 0)

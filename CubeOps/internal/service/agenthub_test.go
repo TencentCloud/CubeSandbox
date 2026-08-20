@@ -473,58 +473,98 @@ func TestCreateInstance_RecommendedIsNotWindowLimited(t *testing.T) {
 	}
 }
 
-// TestCreateInstance_TemplateReadFailureIsNotReportedAsUnregistered verifies
-// that a failed registry read is not turned into "no agent template is
-// registered": the query never completed, so CubeMaster's own error is what
-// the caller gets. Both reads are covered — either one failing is enough to
-// leave the registry's contents unknown.
-func TestCreateInstance_TemplateReadFailureIsNotReportedAsUnregistered(t *testing.T) {
-	dbDown := errors.New("dial tcp: connection refused")
-	tests := []struct {
-		name  string
-		store func(*fakeAgentStore)
-	}{
-		{
-			name: "recommended query fails",
-			store: func(st *fakeAgentStore) {
-				st.getRecommendedTemplate = func(_ context.Context) (*store.AgentTemplate, error) {
-					return nil, dbDown
-				}
-			},
-		},
-		{
-			name: "listing fails",
-			store: func(st *fakeAgentStore) {
-				st.listAgentTemplates = func(_ context.Context, _, _ int) ([]store.AgentTemplate, error) {
-					return nil, dbDown
-				}
-			},
-		},
+// TestCreateInstance_TemplateListingFailureIsNotReportedAsUnregistered verifies
+// that a failed *listing* is not turned into "no agent template is registered":
+// that query never completed, so the registry's contents are unknown and
+// CubeMaster's own error is what the caller gets.
+//
+// The recommended-flag query is deliberately not covered here — losing it does
+// not leave the registry unknown, since a marked template is also a listed one.
+// The two tests below pin what a failure there does instead.
+func TestCreateInstance_TemplateListingFailureIsNotReportedAsUnregistered(t *testing.T) {
+	cm := &fakeServiceCM{
+		createSandboxErr: &cubemaster.CMError{RetCode: 130404, RetMsg: "template not found"},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cm := &fakeServiceCM{
-				createSandboxErr: &cubemaster.CMError{RetCode: 130404, RetMsg: "template not found"},
-			}
-			st := llmKeyStore()
-			tt.store(st)
-			svc := newTestService(st, cm)
+	st := llmKeyStore()
+	st.listAgentTemplates = func(_ context.Context, _, _ int) ([]store.AgentTemplate, error) {
+		return nil, errors.New("dial tcp: connection refused")
+	}
+	svc := newTestService(st, cm)
 
-			_, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
-				Name:   "my-agent",
-				Engine: "openclaw",
-			})
-			var svcErr *Error
-			if !errors.As(err, &svcErr) {
-				t.Fatalf("error is not *service.Error: %v", err)
-			}
-			if svcErr.Status != 502 {
-				t.Errorf("status = %d, want 502", svcErr.Status)
-			}
-			if strings.Contains(svcErr.Message, "no agent template is registered") {
-				t.Errorf("message = %q, should not claim an empty registry when the read failed", svcErr.Message)
-			}
-		})
+	_, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+		Name:   "my-agent",
+		Engine: "openclaw",
+	})
+	var svcErr *Error
+	if !errors.As(err, &svcErr) {
+		t.Fatalf("error is not *service.Error: %v", err)
+	}
+	if svcErr.Status != 502 {
+		t.Errorf("status = %d, want 502", svcErr.Status)
+	}
+	if strings.Contains(svcErr.Message, "no agent template is registered") {
+		t.Errorf("message = %q, should not claim an empty registry when the read failed", svcErr.Message)
+	}
+}
+
+// TestCreateInstance_RecommendedReadFailureFallsBackToNewest verifies that
+// losing the recommended-flag query does not fail a create the registry can
+// still satisfy. The flag says which registered template to prefer, not whether
+// one exists, so a transient failure there falls through to the newest instead
+// of handing CubeMaster an identifier no install has to carry.
+func TestCreateInstance_RecommendedReadFailureFallsBackToNewest(t *testing.T) {
+	cm := &fakeServiceCM{}
+	st := llmKeyStore()
+	st.getRecommendedTemplate = func(_ context.Context) (*store.AgentTemplate, error) {
+		return nil, errors.New("dial tcp: connection refused")
+	}
+	st.listAgentTemplates = func(_ context.Context, _, _ int) ([]store.AgentTemplate, error) {
+		return []store.AgentTemplate{{TemplateID: "tpl-newest"}}, nil
+	}
+	svc := newTestService(st, cm)
+
+	if _, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+		Name:   "my-agent",
+		Engine: "openclaw",
+	}); err != nil {
+		t.Fatalf("CreateInstance returned error: %v", err)
+	}
+	if got := rootfsSourceID(t, cm); got != "tpl-newest" {
+		t.Errorf("rootfs_source_id = %q, want tpl-newest", got)
+	}
+}
+
+// TestCreateInstance_EmptyListingSettlesEmptinessDespiteRecommendedFailure
+// verifies the other half: when the recommended query fails but the listing
+// completes and comes back empty, the registry really is empty — a marked
+// template would have been listed too — so the caller still gets the actionable
+// registration hint rather than a 502 naming the built-in identifier.
+func TestCreateInstance_EmptyListingSettlesEmptinessDespiteRecommendedFailure(t *testing.T) {
+	cm := &fakeServiceCM{
+		createSandboxErr: &cubemaster.CMError{RetCode: 130404, RetMsg: "template not found"},
+	}
+	st := llmKeyStore()
+	st.getRecommendedTemplate = func(_ context.Context) (*store.AgentTemplate, error) {
+		return nil, errors.New("dial tcp: connection refused")
+	}
+	st.listAgentTemplates = func(_ context.Context, _, _ int) ([]store.AgentTemplate, error) {
+		return nil, nil
+	}
+	svc := newTestService(st, cm)
+
+	_, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+		Name:   "my-agent",
+		Engine: "openclaw",
+	})
+	var svcErr *Error
+	if !errors.As(err, &svcErr) {
+		t.Fatalf("error is not *service.Error: %v", err)
+	}
+	if svcErr.Status != 400 {
+		t.Errorf("status = %d, want 400", svcErr.Status)
+	}
+	if !strings.Contains(svcErr.Message, "no agent template is registered") {
+		t.Errorf("message = %q, want it to name the missing registration", svcErr.Message)
 	}
 }
 
