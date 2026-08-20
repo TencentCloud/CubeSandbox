@@ -629,6 +629,51 @@ func TestCreateInstance_NoTemplateRegisteredReportsMissingRegistration(t *testin
 	if strings.Contains(svcErr.Message, defaultAgentTemplateID) {
 		t.Errorf("message = %q, should not surface the built-in identifier to the caller", svcErr.Message)
 	}
+	if svcErr.Cause == nil {
+		t.Error("Cause is nil; the CubeMaster error must stay attached for diagnosis")
+	}
+}
+
+// TestCreateInstance_DefaultedTemplateVanishingIsAConflict covers the race the
+// registry read cannot close: a template that was registered when the request
+// started and gone by the time CubeMaster resolved it. The caller named no
+// template, so reporting a not-found for the one we picked would name an
+// identifier they never chose — the failure class this path exists to remove —
+// and it is not a missing registration either, because one was registered.
+// Retrying re-resolves and may pick another, so it is a conflict.
+func TestCreateInstance_DefaultedTemplateVanishingIsAConflict(t *testing.T) {
+	cm := &fakeServiceCM{
+		createSandboxErr: &cubemaster.CMError{
+			RetCode: 130404,
+			RetMsg:  `failed to resolve template identifier "tpl-vanished": template not found`,
+		},
+	}
+	st := llmKeyStore()
+	st.listAgentTemplates = func(_ context.Context, _, _ int) ([]store.AgentTemplate, error) {
+		return []store.AgentTemplate{{TemplateID: "tpl-vanished"}}, nil
+	}
+	svc := newTestService(st, cm)
+
+	_, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+		Name:   "my-agent",
+		Engine: "openclaw",
+	})
+	var svcErr *Error
+	if !errors.As(err, &svcErr) {
+		t.Fatalf("error is not *service.Error: %v", err)
+	}
+	if svcErr.Status != 409 {
+		t.Errorf("status = %d, want 409", svcErr.Status)
+	}
+	if strings.Contains(svcErr.Message, "tpl-vanished") {
+		t.Errorf("message = %q, should not surface an identifier the caller never chose", svcErr.Message)
+	}
+	if strings.Contains(svcErr.Message, "no agent template is registered") {
+		t.Errorf("message = %q, should not claim an empty registry when one was registered", svcErr.Message)
+	}
+	if svcErr.Cause == nil {
+		t.Error("Cause is nil; the CubeMaster error must stay attached for diagnosis")
+	}
 }
 
 // TestCreateInstance_ExplicitTemplateNotFoundStaysBadGateway guards the

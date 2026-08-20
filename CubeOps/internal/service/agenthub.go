@@ -427,6 +427,24 @@ type CreateInstanceResult struct {
 }
 
 // defaultTemplateID picks the template CreateInstance uses when the caller
+// templateOrigin says where a defaulted template identifier came from, which is
+// what decides how to report a CubeMaster not-found for it: whether nothing is
+// registered, whether what was registered vanished under us, or whether we
+// simply do not know because the read failed.
+type templateOrigin int
+
+const (
+	// templateFromRegistry: a real registered template was picked.
+	templateFromRegistry templateOrigin = iota
+	// templateFallbackEmptyRegistry: the listing completed and held nothing, so
+	// the built-in identifier is in play and nothing is registered.
+	templateFallbackEmptyRegistry
+	// templateFallbackRegistryUnknown: the listing failed, so the built-in
+	// identifier is in play but the registry's contents are unknown — nothing
+	// may be claimed about them.
+	templateFallbackRegistryUnknown
+)
+
 // omits templateId: the template an operator marked recommended if there is
 // one, otherwise the most recently registered one.
 //
@@ -448,7 +466,7 @@ type CreateInstanceResult struct {
 // registered template to prefer, not whether one exists, so losing it falls
 // through to the newest rather than failing a create the registry can still
 // satisfy.
-func (s *AgentHubService) defaultTemplateID(ctx context.Context) (id string, none bool) {
+func (s *AgentHubService) defaultTemplateID(ctx context.Context) (string, templateOrigin) {
 	recommended, err := s.Store.GetRecommendedAgentTemplate(ctx)
 	switch {
 	case err != nil:
@@ -457,17 +475,17 @@ func (s *AgentHubService) defaultTemplateID(ctx context.Context) (id string, non
 		logging.G(ctx).Warnf("failed to read the recommended agent template, "+
 			"falling back to the newest registered one: %v", err)
 	case recommended != nil:
-		return recommended.TemplateID, false
+		return recommended.TemplateID, templateFromRegistry
 	}
 	newest, err := s.Store.ListAgentTemplates(ctx, 1, 0)
 	if err != nil {
 		logging.G(ctx).Warnf("failed to list agent templates while choosing a default: %v", err)
-		return defaultAgentTemplateID, false
+		return defaultAgentTemplateID, templateFallbackRegistryUnknown
 	}
 	if len(newest) > 0 {
-		return newest[0].TemplateID, false
+		return newest[0].TemplateID, templateFromRegistry
 	}
-	return defaultAgentTemplateID, true
+	return defaultAgentTemplateID, templateFallbackEmptyRegistry
 }
 
 // CreateInstance orchestrates the full agent creation flow:
@@ -514,7 +532,12 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 	// found empty, so the unprovisioned defaultAgentTemplateID was used; lets
 	// the CreateSandbox error below name the real problem. Deliberately not
 	// set when the registry could not be read — see defaultTemplateID.
-	noTemplateRegistered := false
+	// Set whenever the template was chosen for the caller rather than named by
+	// them — including when a real registered template was picked. Either way
+	// the identifier is not one the caller can be told about usefully, so a
+	// not-found for it must not be reported verbatim.
+	templateDefaulted := false
+	origin := templateFromRegistry
 	if snapshotID != "" {
 		rootfsSourceType = "snapshot"
 		rootfsSourceID = snapshotID
@@ -522,7 +545,8 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 		if req.TemplateID != "" {
 			rootfsSourceID = req.TemplateID
 		} else {
-			rootfsSourceID, noTemplateRegistered = s.defaultTemplateID(ctx)
+			rootfsSourceID, origin = s.defaultTemplateID(ctx)
+			templateDefaulted = true
 		}
 	}
 	templateID := rootfsSourceID
@@ -623,18 +647,38 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 		// could not resolve the fallback either. Report the missing
 		// registration rather than a not-found for an identifier the caller
 		// never supplied.
-		if noTemplateRegistered && isCMNotFound(err) {
-			// The rewrite drops CubeMaster's own words on purpose: they name the
-			// built-in fallback, which the caller never supplied and cannot act
-			// on. An operator can act on it, though, and this is the one place
-			// that still knows it — log before dropping, so a not-found that is
-			// really about something else in the request is diagnosable instead
-			// of being flattened into the registration advice.
-			logging.G(ctx).Warnf("agenthub: create failed with an empty template registry, "+
-				"reporting it as a missing registration; cubemaster said: %v", err)
-			return nil, NewBadRequest("no agent template is registered: register one from the template " +
-				"market (POST /api/v1/agenthub/templates/market) or publish one from a running agent " +
-				"(POST /api/v1/agenthub/instances/{agentID}/publish-template), or pass templateId explicitly")
+		// Both branches drop CubeMaster's own words on purpose: they name a
+		// template identifier the caller never supplied and cannot act on. An
+		// operator can act on it, so log it and keep it as Cause (which
+		// writeServiceError does not serialise) rather than discarding it.
+		if templateDefaulted && isCMNotFound(err) && origin != templateFallbackRegistryUnknown {
+			if origin == templateFallbackEmptyRegistry {
+				logging.G(ctx).Warnf("agenthub: create failed with an empty template registry, "+
+					"reporting it as a missing registration; cubemaster said: %v", err)
+				return nil, &Error{
+					Status: http.StatusBadRequest,
+					Message: "no agent template is registered: register one from the template " +
+						"market (POST /api/v1/agenthub/templates/market) or publish one from a running agent " +
+						"(POST /api/v1/agenthub/instances/{agentID}/publish-template), or pass templateId explicitly",
+					Cause: err,
+				}
+			}
+			// The registry did hold a template when we read it, and CubeMaster
+			// could not find it moments later — a delete that landed in between,
+			// or infra removed underneath it. Retrying re-resolves and may well
+			// pick a different one, so this is a conflict rather than a bad
+			// request, and it is not the 502 naming an identifier the caller
+			// never chose.
+			logging.G(ctx).Warnf("agenthub: the default template resolved from the registry was gone by "+
+				"create time; cubemaster said: %v", err)
+			return nil, &Error{
+				Status: http.StatusConflict,
+				Code:   "conflict",
+				Message: "the agent template selected by default is no longer available — it was registered " +
+					"when the request started and gone by the time the sandbox was created. Retry, or pass " +
+					"templateId explicitly to choose one yourself",
+				Cause: err,
+			}
 		}
 		return nil, NewBadGateway("failed to create sandbox: " + err.Error())
 	}
