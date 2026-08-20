@@ -55,12 +55,6 @@ type TemplateCompatMatrix struct {
 	Templates []TemplateCompatRow   `json:"templates"`
 }
 
-func configureCompatHooks() {
-	nodemeta.OnGuestAgentVersionChanged = func(nodeID string) {
-		ScheduleCompatScanForNode(nodeID)
-	}
-}
-
 func scheduleInitialCompatScan(ctx context.Context) {
 	nodes := localcache.GetNodes(-1)
 	for _, n := range nodes {

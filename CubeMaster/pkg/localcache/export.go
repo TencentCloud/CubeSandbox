@@ -49,17 +49,6 @@ func RegisterNodeLoader(loader func(context.Context) ([]*node.Node, error)) {
 	externalNodeLoader = loader
 }
 
-// onNodeVersionsChanged fires when a node's component versions change between
-// sync cycles. Registered by nodemeta.Init to trigger templatecenter's compat
-// scan, avoiding an import cycle.
-var onNodeVersionsChanged func(nodeID string)
-
-// RegisterNodeVersionsChangedCallback sets the callback fired when a node's
-// component versions change during a sync cycle.
-func RegisterNodeVersionsChangedCallback(cb func(nodeID string)) {
-	onNodeVersionsChanged = cb
-}
-
 func Init(ctx context.Context) error {
 	start := time.Now()
 	l.event = make(chan *Event, 1000)

@@ -69,6 +69,28 @@ func TestRegisterNode_RejectsSchedulingLabel(t *testing.T) {
 	}
 }
 
+func TestRegisterNode_IsolatedNodeReRegisters(t *testing.T) {
+	// Regression: an isolated node re-registering must not be rejected for the
+	// reserved scheduling-disabled label, and must keep its isolation mark.
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+	req := &model.RegisterNodeRequest{NodeID: "node-1", HostIP: "node-1"}
+	if _, err := svc.RegisterNode(ctx, req); err != nil {
+		t.Fatalf("initial register: %v", err)
+	}
+	if _, err := svc.SetNodeSchedulingDisabled(ctx, "node-1", true, "admin", ""); err != nil {
+		t.Fatalf("isolate: %v", err)
+	}
+
+	snap, err := svc.RegisterNode(ctx, req)
+	if err != nil {
+		t.Fatalf("re-register isolated node: %v", err)
+	}
+	if !snap.SchedulingDisabled {
+		t.Error("re-registered node lost scheduling-disabled mark")
+	}
+}
+
 func TestRegisterNode_RejectsInvalidLabels(t *testing.T) {
 	svc, _ := newTestService(t)
 	req := &model.RegisterNodeRequest{

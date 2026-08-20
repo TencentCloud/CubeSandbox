@@ -477,8 +477,10 @@ func TestCountNodeSandboxes(t *testing.T) {
 		// Array shape.
 		{"array empty", `{"ret":{"ret_code":0},"data":[]}`, 0, "", false},
 		{"array one", `{"ret":{"ret_code":0},"data":[{"id":"sb-1"}]}`, 1, "", false},
-		// JSON null decodes to a nil slice (count 0) with err == nil.
-		{"null data", `{"ret":{"ret_code":0},"data":null}`, 0, "", false},
+		// data key omitted (CubeMaster omits an empty list via omitempty) = no sandboxes.
+		{"data key omitted", `{"ret":{"ret_code":200},"size":1,"total":2}`, 0, "", false},
+		// data=null means cubelet unreachable; must error, not return 0.
+		{"null data", `{"ret":{"ret_code":0},"data":null}`, 0, "data=null", false},
 		// { "list": [...] } shape.
 		{"list empty", `{"ret":{"ret_code":0},"data":{"list":[]}}`, 0, "", false},
 		{"list one", `{"ret":{"ret_code":0},"data":{"list":[{"id":"sb-1"}]}}`, 1, "", false},

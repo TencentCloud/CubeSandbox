@@ -12,7 +12,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 )
 
-func SyncNodeTemplates(nodeID string, templateIDs []string) {
+func SyncNodeTemplates(ctx context.Context, nodeID string, templateIDs []string) {
 	if nodeID == "" {
 		return
 	}
@@ -23,21 +23,21 @@ func SyncNodeTemplates(nodeID string, templateIDs []string) {
 		previous = discoverNodeTemplateSet(nodeID)
 	}
 
-	log.G(context.Background()).Infof("SyncNodeTemplates nodeID=%s current=%v previous=%v previousCached=%v", nodeID, current, previous, ok)
+	log.G(ctx).Infof("SyncNodeTemplates nodeID=%s current=%v previous=%v previousCached=%v", nodeID, current, previous, ok)
 
 	for templateID := range previous {
 		if _, exists := current[templateID]; exists {
 			continue
 		}
-		log.G(context.Background()).Infof("SyncNodeTemplates deregister nodeID=%s templateID=%s", nodeID, templateID)
+		log.G(ctx).Infof("SyncNodeTemplates deregister nodeID=%s templateID=%s", nodeID, templateID)
 		deregisterTemplateReplica(templateID, nodeID, false)
 	}
 	for templateID := range current {
 		if _, exists := previous[templateID]; exists && GetImageStateByNode(templateID, nodeID) != nil {
-			log.G(context.Background()).Infof("SyncNodeTemplates skip nodeID=%s templateID=%s (already registered)", nodeID, templateID)
+			log.G(ctx).Infof("SyncNodeTemplates skip nodeID=%s templateID=%s (already registered)", nodeID, templateID)
 			continue
 		}
-		log.G(context.Background()).Infof("SyncNodeTemplates register nodeID=%s templateID=%s", nodeID, templateID)
+		log.G(ctx).Infof("SyncNodeTemplates register nodeID=%s templateID=%s", nodeID, templateID)
 		registerTemplateReplica(templateID, nodeID, 1, false)
 	}
 	setCachedNodeTemplateSet(nodeID, current)

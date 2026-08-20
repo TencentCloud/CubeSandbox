@@ -32,6 +32,18 @@ func TestValidateLabelKey(t *testing.T) {
 	}
 }
 
+func TestValidateLabelsSkippingReserved(t *testing.T) {
+	// Reserved control-plane label must be exempt, other labels still validated.
+	ok := map[string]string{model.LabelSchedulingDisabled: "true", "app": "demo"}
+	if err := service.ValidateLabelsSkippingReserved(ok); err != nil {
+		t.Errorf("reserved label should be skipped, got %v", err)
+	}
+	bad := map[string]string{model.LabelSchedulingDisabled: "true", "": "v"}
+	if err := service.ValidateLabelsSkippingReserved(bad); err == nil {
+		t.Error("invalid user label should still be rejected")
+	}
+}
+
 func TestStripAndPreserveSchedulingLabel(t *testing.T) {
 	existing := map[string]string{"zone": "gz", model.LabelSchedulingDisabled: model.LabelSchedulingDisabledValue}
 	cubelet := map[string]string{"rack": "r1", model.LabelSchedulingDisabled: "false"}

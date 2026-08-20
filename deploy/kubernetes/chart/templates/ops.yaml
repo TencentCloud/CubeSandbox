@@ -8,6 +8,9 @@ metadata:
     {{- include "cube.labels" . | nindent 4 }}
     app.kubernetes.io/component: ops
 spec:
+  {{- if gt (int .Values.cubeOps.replicas) 1 }}
+  {{- fail "cubeOps.replicas must be 1; node metadata is in-process. See values.yaml." }}
+  {{- end }}
   replicas: {{ .Values.cubeOps.replicas }}
   {{- include "cube.deploymentStrategy" . | nindent 2 }}
   selector:
@@ -77,6 +80,15 @@ spec:
                 secretKeyRef:
                   name: {{ include "cube.secretName" . }}
                   key: redis-password
+            - name: REDIS_MASTER_NAME
+              value: {{ .Values.redis.masterName | default "" | quote }}
+            - name: REDIS_SENTINEL_NODES
+              value: {{ .Values.redis.sentinelNodes | default "" | quote }}
+            - name: REDIS_SENTINEL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: redis-sentinel-password
             {{- with .Values.cubeOps.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

@@ -76,10 +76,10 @@ func TestAgent_RegisterNode(t *testing.T) {
 		},
 	}
 	r := gin.New()
-	handler.NewAgentHandler(svc).Register(r.Group("/internal/node-agent/v1"))
+	handler.NewAgentHandler(svc).Register(r.Group("/internal/v1/node-agent"))
 
 	body, _ := json.Marshal(model.RegisterNodeRequest{NodeID: "n-1", HostIP: "10.0.0.1"})
-	req := httptest.NewRequest(http.MethodPost, "/internal/node-agent/v1/nodes/register", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/node-agent/nodes/register", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -98,9 +98,9 @@ func TestAgent_RegisterNode(t *testing.T) {
 
 func TestAgent_Readyz(t *testing.T) {
 	r := gin.New()
-	handler.NewAgentHandler(&fakeNodeService{}).Register(r.Group("/internal/node-agent/v1"))
+	handler.NewAgentHandler(&fakeNodeService{}).Register(r.Group("/internal/v1/node-agent"))
 
-	req := httptest.NewRequest(http.MethodGet, "/internal/node-agent/v1/readyz", nil)
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/node-agent/readyz", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -128,10 +128,10 @@ func TestAgent_UpdateStatus(t *testing.T) {
 		},
 	}
 	r := gin.New()
-	handler.NewAgentHandler(svc).Register(r.Group("/internal/node-agent/v1"))
+	handler.NewAgentHandler(svc).Register(r.Group("/internal/v1/node-agent"))
 
 	body, _ := json.Marshal(model.UpdateNodeStatusRequest{Conditions: []model.NodeCondition{{Type: "Ready", Status: "True"}}})
-	req := httptest.NewRequest(http.MethodPost, "/internal/node-agent/v1/nodes/n-1/status", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/node-agent/nodes/n-1/status", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -152,13 +152,13 @@ func TestAgent_UpdateStatus_WithAllocated(t *testing.T) {
 		},
 	}
 	r := gin.New()
-	handler.NewAgentHandler(svc).Register(r.Group("/internal/node-agent/v1"))
+	handler.NewAgentHandler(svc).Register(r.Group("/internal/v1/node-agent"))
 
 	body, _ := json.Marshal(model.UpdateNodeStatusRequest{
 		Conditions: []model.NodeCondition{{Type: "Ready", Status: "True"}},
 		Allocated:  &model.AllocatedResources{MilliCPU: 1000, MemoryMB: 2048, MvmNum: 3},
 	})
-	req := httptest.NewRequest(http.MethodPost, "/internal/node-agent/v1/nodes/n-1/status", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/node-agent/nodes/n-1/status", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -186,13 +186,13 @@ func TestAgent_UpdateStatus_WithLocalTemplates(t *testing.T) {
 		},
 	}
 	r := gin.New()
-	handler.NewAgentHandler(svc).Register(r.Group("/internal/node-agent/v1"))
+	handler.NewAgentHandler(svc).Register(r.Group("/internal/v1/node-agent"))
 
 	body, _ := json.Marshal(model.UpdateNodeStatusRequest{
 		Conditions:     []model.NodeCondition{{Type: "Ready", Status: "True"}},
 		LocalTemplates: []model.LocalTemplate{{TemplateID: "tpl-1"}, {TemplateID: "tpl-2"}},
 	})
-	req := httptest.NewRequest(http.MethodPost, "/internal/node-agent/v1/nodes/n-1/status", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/node-agent/nodes/n-1/status", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -211,9 +211,9 @@ func TestAgent_UpdateStatus_WithLocalTemplates(t *testing.T) {
 func TestAgent_UpdateStatus_BadRequestOnNilBody(t *testing.T) {
 	svc := &fakeNodeService{}
 	r := gin.New()
-	handler.NewAgentHandler(svc).Register(r.Group("/internal/node-agent/v1"))
+	handler.NewAgentHandler(svc).Register(r.Group("/internal/v1/node-agent"))
 
-	req := httptest.NewRequest(http.MethodPost, "/internal/node-agent/v1/nodes/n-1/status", nil)
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/node-agent/nodes/n-1/status", nil)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -230,10 +230,10 @@ func TestAgent_UpdateStatus_UnregisteredNode(t *testing.T) {
 		},
 	}
 	r := gin.New()
-	handler.NewAgentHandler(svc).Register(r.Group("/internal/node-agent/v1"))
+	handler.NewAgentHandler(svc).Register(r.Group("/internal/v1/node-agent"))
 
 	body, _ := json.Marshal(model.UpdateNodeStatusRequest{Conditions: []model.NodeCondition{{Type: "Ready", Status: "True"}}})
-	req := httptest.NewRequest(http.MethodPost, "/internal/node-agent/v1/nodes/n-1/status", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/node-agent/nodes/n-1/status", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -246,10 +246,10 @@ func TestAgent_UpdateStatus_UnregisteredNode(t *testing.T) {
 func TestAgent_UpdateStatus_MissingNodeID(t *testing.T) {
 	svc := &fakeNodeService{}
 	r := gin.New()
-	handler.NewAgentHandler(svc).Register(r.Group("/internal/node-agent/v1"))
+	handler.NewAgentHandler(svc).Register(r.Group("/internal/v1/node-agent"))
 
 	body, _ := json.Marshal(model.UpdateNodeStatusRequest{Conditions: []model.NodeCondition{{Type: "Ready", Status: "True"}}})
-	req := httptest.NewRequest(http.MethodPost, "/internal/node-agent/v1/nodes//status", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/node-agent/nodes//status", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)

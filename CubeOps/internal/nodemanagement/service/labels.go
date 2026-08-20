@@ -58,6 +58,26 @@ func ValidateLabels(labels map[string]string) error {
 	return nil
 }
 
+// ValidateLabelsSkippingReserved validates user labels while exempting
+// control-plane reserved labels (scheduling-disabled) kept on the register path.
+func ValidateLabelsSkippingReserved(labels map[string]string) error {
+	if len(labels) > maxLabelsPerNode {
+		return fmt.Errorf("label request cannot contain more than %d labels, got %d", maxLabelsPerNode, len(labels))
+	}
+	for k, v := range labels {
+		if IsReservedLabelKey(k) {
+			continue
+		}
+		if err := ValidateLabelKey(k); err != nil {
+			return err
+		}
+		if errs := validateLabelValue(v); len(errs) != 0 {
+			return fmt.Errorf("label value for key %q is invalid: %s", k, strings.Join(errs, ", "))
+		}
+	}
+	return nil
+}
+
 func ValidateLabelKey(key string) error {
 	if errs := isQualifiedLabelKey(key); len(errs) != 0 {
 		return fmt.Errorf("label key %q is invalid: %s", key, strings.Join(errs, ", "))

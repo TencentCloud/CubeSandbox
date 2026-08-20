@@ -67,7 +67,12 @@ func (svc *NodeService) DeleteNode(ctx context.Context, nodeID string, force boo
 	svc.mu.RUnlock()
 
 	// Fail closed: any checker error means "cannot verify; refuse to delete".
+	// "No sandboxes" is only trustworthy when the cubelet has a recent heartbeat.
 	if !force {
+		if before == nil || !before.Healthy {
+			logging.G(ctx).Warnf("nodemgmt: delete sandbox check skipped: node=%s unhealthy", nodeID)
+			return nil, fmt.Errorf("%w: node %s is unhealthy or unreachable; restore Cubelet connectivity and retry, or retry with force=true", ErrSandboxCheckFailed, nodeID)
+		}
 		if checker := svc.sandboxChecker(); checker != nil {
 			count, err := checker.CountNodeSandboxes(ctx, nodeID)
 			if err != nil {

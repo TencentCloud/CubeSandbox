@@ -65,3 +65,27 @@ func TestWriteNodeMetric_HookErrorPropagated(t *testing.T) {
 		t.Errorf("err = %v, want %v", err, wantErr)
 	}
 }
+
+func TestParseRedisAddrs(t *testing.T) {
+	cases := []struct {
+		input string
+		want  int
+	}{
+		{"", 0},
+		{"10.0.0.1", 1},
+		{"10.0.0.1,10.0.0.2", 2},
+		{" 10.0.0.1 , 10.0.0.2 ", 2},
+		{"10.0.0.1:26380,10.0.0.2", 2},
+	}
+	for _, tc := range cases {
+		got := parseRedisAddrs(tc.input)
+		if len(got) != tc.want {
+			t.Errorf("parseRedisAddrs(%q) = %d addrs, want %d", tc.input, len(got), tc.want)
+		}
+	}
+	// Bare host defaults to sentinel port 26379.
+	addrs := parseRedisAddrs("10.0.0.1")
+	if addrs[0] != "10.0.0.1:26379" {
+		t.Errorf("bare host should default to :26379, got %s", addrs[0])
+	}
+}

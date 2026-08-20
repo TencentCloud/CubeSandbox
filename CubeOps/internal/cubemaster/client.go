@@ -434,9 +434,8 @@ func setTraceHeaders(req *http.Request, rid string) {
 }
 
 // CountNodeSandboxes returns how many sandboxes CubeMaster reports on hostID.
-// Only the count matters, so size=1 is requested. Unrecognised data shapes
-// error (fail-closed) so an unreachable cubelet (ret_code=0, data=null) is
-// never mistaken for "no sandboxes" — see service.ErrSandboxCheckFailed.
+// size=1 is requested; only the count matters. JSON null and unrecognised
+// shapes error (fail-closed) — see service.ErrSandboxCheckFailed.
 func (c *Client) CountNodeSandboxes(ctx context.Context, hostID string) (int, error) {
 	if hostID == "" {
 		return 0, errors.New("CountNodeSandboxes: host_id is required")
@@ -462,7 +461,15 @@ func (c *Client) CountNodeSandboxes(ctx context.Context, hostID string) (int, er
 	if env.Ret.RetCode != 0 && env.Ret.RetCode != 200 {
 		return 0, &CMError{RetCode: env.Ret.RetCode, RetMsg: env.Ret.RetMsg}
 	}
-	// Array shape; JSON null decodes to a nil slice (count 0) with err == nil.
+	// data:null means CubeMaster could not reach the cubelet; fail closed.
+	if bytes.Equal(bytes.TrimSpace(env.Data), []byte("null")) {
+		return 0, errors.New("count node sandboxes: data=null (cubelet may be unreachable)")
+	}
+	// data key omitted (CubeMaster omits an empty list via omitempty) = no sandboxes.
+	if len(env.Data) == 0 {
+		return 0, nil
+	}
+	// Array shape; "[]" decodes to a nil slice (count 0) with err == nil.
 	var items []json.RawMessage
 	if err := json.Unmarshal(env.Data, &items); err == nil {
 		return len(items), nil

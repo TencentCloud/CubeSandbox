@@ -177,7 +177,7 @@ func TestSyncNodeTemplatesReconcilesHeartbeatState(t *testing.T) {
 	RegisterTemplateReplica("tpl-old", "node-a", 1)
 	RegisterTemplateReplica("tpl-keep", "node-a", 1)
 
-	SyncNodeTemplates("node-a", []string{"tpl-keep", "tpl-new"})
+	SyncNodeTemplates(context.Background(), "node-a", []string{"tpl-keep", "tpl-new"})
 
 	if state := GetImageStateByNode("tpl-old", "node-a"); state != nil {
 		t.Fatal("tpl-old should be removed from node locality after heartbeat sync")
@@ -216,7 +216,7 @@ func TestSyncNodeTemplatesDiscoversWarmStateWithoutReverseIndex(t *testing.T) {
 	l.addImageCache("tpl-stale", fwk.NewImageStateSummary(1, "", "node-a"))
 	l.addImageCache("tpl-keep", fwk.NewImageStateSummary(1, "", "node-a"))
 
-	SyncNodeTemplates("node-a", []string{"tpl-keep"})
+	SyncNodeTemplates(context.Background(), "node-a", []string{"tpl-keep"})
 
 	if state := GetImageStateByNode("tpl-stale", "node-a"); state != nil {
 		t.Fatal("tpl-stale should be removed when syncing from discovered warm cache state")
@@ -257,7 +257,7 @@ func TestInvalidateImageStateAllowsHeartbeatToRebuildLocality(t *testing.T) {
 		t.Fatal("reverse index should drop invalidated template membership")
 	}
 
-	SyncNodeTemplates("node-a", []string{"tpl-replay"})
+	SyncNodeTemplates(context.Background(), "node-a", []string{"tpl-replay"})
 
 	if state := GetImageStateByNode("tpl-replay", "node-a"); state == nil {
 		t.Fatal("heartbeat replay should rebuild template locality after invalidation")
@@ -443,7 +443,7 @@ func TestSyncNodeTemplates_EmptyListCleansUp(t *testing.T) {
 	RegisterTemplateReplica("tpl-old", "node-a", 1)
 	RegisterTemplateReplica("tpl-stale", "node-a", 1)
 
-	SyncNodeTemplates("node-a", []string{})
+	SyncNodeTemplates(context.Background(), "node-a", []string{})
 
 	if state := GetImageStateByNode("tpl-old", "node-a"); state != nil {
 		t.Fatal("tpl-old should be removed after empty heartbeat")

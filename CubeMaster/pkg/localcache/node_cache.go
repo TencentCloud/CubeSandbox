@@ -168,10 +168,6 @@ func (l *local) dealEvent(ctx context.Context) {
 }
 
 func (l *local) checkDirty(allFromDb map[string]struct{}) {
-	if len(allFromDb) == 0 {
-		CubeLog.WithContext(context.Background()).Warnf("checkDirty allFromDb is empty")
-		return
-	}
 	elems := l.cache.Items()
 	for _, v := range elems {
 		h, ok := v.Object.(*node.Node)
@@ -197,6 +193,11 @@ func (l *local) delNodeCache(n *node.Node) {
 	if n == nil {
 		CubeLog.WithContext(context.Background()).Warnf("node is nil")
 		return
+	}
+	// Clean template locality: empty list deregisters all replicas.
+	SyncNodeTemplates(context.Background(), n.ID(), nil)
+	if l.templateNodeCache != nil {
+		l.templateNodeCache.Delete(n.ID())
 	}
 	l.cache.Delete(n.ID())
 	l.delSortedNodes(n)
@@ -334,13 +335,6 @@ func (l *local) updateNodeFromMetaData(n *node.Node) error {
 		old.NodeLabels = labels
 		old.InvalidateLabelsCache()
 		old.SetSchedulingDisabled(n.SchedulingDisabled())
-		// On guest-image / cube-agent version change, trigger templatecenter's
-		// incremental compat scan.
-		if onNodeVersionsChanged != nil {
-			if compatVersionsChanged(old.Versions, n.Versions) {
-				go onNodeVersionsChanged(old.ID())
-			}
-		}
 		old.Versions = n.Versions
 		l.lockMetaData.Unlock()
 
@@ -377,29 +371,4 @@ func (l *local) updateNodeMetric(n *node.Node) error {
 	} else {
 		return fmt.Errorf("item %s doesn't exist", n.ID())
 	}
-}
-
-// compatVersionsChanged reports whether the guest-image or cube-agent version
-// differs between prev and next. These are the components templatecenter's
-// compat scan cares about.
-func compatVersionsChanged(prev, next []node.ComponentVersion) bool {
-	prevMap := compatRelevantVersions(prev)
-	nextMap := compatRelevantVersions(next)
-	for _, component := range []string{"guest-image", "cube-agent"} {
-		if prevMap[component] != nextMap[component] {
-			return true
-		}
-	}
-	return false
-}
-
-func compatRelevantVersions(versions []node.ComponentVersion) map[string]string {
-	out := map[string]string{"guest-image": "", "cube-agent": ""}
-	for _, v := range versions {
-		switch v.Component {
-		case "guest-image", "cube-agent":
-			out[v.Component] = v.Version
-		}
-	}
-	return out
 }

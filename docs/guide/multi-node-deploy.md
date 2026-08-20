@@ -19,7 +19,7 @@ You must have a working control node deployed via the [Self-Build Deployment Gui
 │  CubeProxy, CoreDNS, MySQL, Redis,      │
 │  Cubelet (network runtime)              │
 └──────────────────┬──────────────────────┘
-                   │  /internal/node-agent/v1 API
+                   │  /internal/v1/node-agent API
        ┌───────────┼───────────┐
        ▼           ▼           ▼
 ┌────────────┐┌────────────┐┌────────────┐
@@ -106,7 +106,7 @@ The compute-node install script will:
 1. Install only `Cubelet` with the embedded network runtime, `cube-shim`, `cube-image`, `cube-kernel-scf`, and the runtime scripts
 2. Start only the host process `cubelet`
 3. Automatically point `Cubelet`'s `meta_server_endpoint` to the control-plane `CubeOps`
-4. Register the node and report status through the control plane `/internal/node-agent/v1` API to CubeOps
+4. Register the node and report status through the control plane `/internal/v1/node-agent` API to CubeOps
 
 ## Verifying the Deployment
 

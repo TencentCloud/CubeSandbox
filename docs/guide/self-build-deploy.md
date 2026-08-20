@@ -304,7 +304,7 @@ Build-performance knobs (all optional):
 |----------|---------|-------------|
 | `ONE_CLICK_DEPLOY_ROLE` | `control` | Deployment role: `control` for single-node (default). For compute-only nodes, see [Multi-Node Cluster Deployment](./multi-node-deploy.md) |
 | `ONE_CLICK_CONTROL_PLANE_IP` | empty | Compute-node mode only. See [Multi-Node Cluster Deployment](./multi-node-deploy.md#step-2-configure-environment-variables) |
-| `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` | empty | Compute-node mode only. See [Multi-Node Cluster Deployment](./multi-node-deploy.md#step-2-configure-environment-variables) |
+| `ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR` | empty | Compute-node mode only. Cubelet registers against CubeOps on port 3010. See [Multi-Node Cluster Deployment](./multi-node-deploy.md#step-2-configure-environment-variables) |
 | `CUBE_SANDBOX_NODE_IP` | auto-detected from `eth0` | Node's primary network interface IP. Auto-detected if unset; set explicitly if your interface differs. |
 | `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18` | cubevs local network CIDR for sandbox IP allocation. IPv4 CIDR format (e.g., `10.100.0.0/18`), mask range /16–/24. Conflicts with host interfaces, routes, or resolver nameservers abort installation during preflight. Uses the fixed default when unset. |
 | `CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK` | `0` | Set to `1` to skip CIDR conflict detection for the default or custom sandbox CIDR (not recommended). |

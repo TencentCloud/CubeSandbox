@@ -7,6 +7,7 @@ package nodemeta
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -31,10 +32,6 @@ var (
 	declaredVersions   = map[string]string{}
 )
 
-// OnGuestAgentVersionChanged is registered by templatecenter compat
-// management. Kept in nodemeta to avoid a package import cycle.
-var OnGuestAgentVersionChanged func(nodeID string)
-
 // Init loads declared component versions and registers the CubeOps node
 // loader into localcache.
 func Init(ctx context.Context) error {
@@ -49,19 +46,16 @@ func Init(ctx context.Context) error {
 		log.G(ctx).Infof("nodemeta using CubeOps node loader addr=%s", addr)
 		loader := NewCubeOpsLoader(addr).
 			WithBootRetry(common.CubeOpsBootRetries, common.CubeOpsBootBackoff)
+		// Fail fast: CubeOps is the authoritative node source. An unreachable
+		// CubeOps at boot would serve an empty node list (no scheduling candidates).
+		if _, err := loader.LoadNodes(ctx); err != nil {
+			return fmt.Errorf("CubeOps unreachable at boot (addr=%s): %w; start CubeOps first, then CubeMaster", addr, err)
+		}
 		localcache.RegisterNodeLoader(cubeopsNodeLoader(loader))
 	} else {
 		log.G(ctx).Warnf("nodemeta: cube_ops_addr not configured; localcache will fall back to its own DB loader")
 	}
 
-	// Wire version-change detection: localcache fires this when a node's
-	// guest-image / cube-agent version changes between sync cycles, and
-	// templatecenter's compat scan hook picks it up for an incremental rescan.
-	localcache.RegisterNodeVersionsChangedCallback(func(nodeID string) {
-		if OnGuestAgentVersionChanged != nil {
-			OnGuestAgentVersionChanged(nodeID)
-		}
-	})
 	return nil
 }
 

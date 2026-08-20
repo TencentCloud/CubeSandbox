@@ -7,7 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,15 +18,12 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
 )
 
-// nodeMetricKeyPrefix mirrors CubeMaster's rediskey.NodeMetric:
-// cube:v1:master:node:metric:{nodeID}. Inlined to avoid a CubeMaster dep.
-const nodeMetricKeyPrefix = "cube:v1:master:node:metric:"
-
-// legacyNodeMetricKeyPrefix cleans up metrics written by pre-migration
-// CubeMaster replicas on node retirement.
-const legacyNodeMetricKeyPrefix = "cube:v1:redis_node_info:"
-
-const nodeMetricTTLSec = 600
+const (
+	nodeMetricKeyPrefix       = "cube:v1:master:node:metric:"
+	legacyNodeMetricKeyPrefix = "cube:v1:redis_node_info:"
+	nodeMetricTTLSec          = 600
+	redisDialTimeout          = 3 * time.Second
+)
 
 var (
 	pool     *redis.Pool
@@ -42,17 +41,18 @@ func SetWriteNodeMetricHook(hook func(*NodeMetric) error) func() {
 	return func() { writeNodeMetricHook = prev }
 }
 
-// Init initializes the Redis pool. No-op when neither REDIS_URL nor the
-// REDIS_HOST/REDIS_PORT triple is configured.
+// Init initializes the Redis pool. No-op when Redis is not configured.
+// Supports standalone (REDIS_URL/HOST) and Sentinel (MASTER_NAME) modes.
 func Init(cfg *config.Config) error {
 	if cfg == nil {
 		return nil
 	}
+	sentinel := cfg.RedisMasterName != ""
 	url := cfg.RedisURL
-	if url == "" && cfg.RedisHost != "" {
+	if !sentinel && url == "" && cfg.RedisHost != "" {
 		url = buildRedisURL(cfg.RedisHost, cfg.RedisPort, cfg.RedisPassword)
 	}
-	if url == "" {
+	if !sentinel && url == "" {
 		return nil
 	}
 	poolOnce.Do(func() {
@@ -61,10 +61,13 @@ func Init(cfg *config.Config) error {
 			MaxActive:   20,
 			IdleTimeout: 5 * time.Minute,
 			Dial: func() (redis.Conn, error) {
+				if sentinel {
+					return dialSentinel(cfg)
+				}
 				return redis.DialURL(url,
-					redis.DialConnectTimeout(3*time.Second),
-					redis.DialReadTimeout(3*time.Second),
-					redis.DialWriteTimeout(3*time.Second),
+					redis.DialConnectTimeout(redisDialTimeout),
+					redis.DialReadTimeout(redisDialTimeout),
+					redis.DialWriteTimeout(redisDialTimeout),
 				)
 			},
 		}
@@ -77,6 +80,78 @@ func Init(cfg *config.Config) error {
 	}
 	logging.G(context.Background()).Infof("nodemetric: redis pool initialized")
 	return nil
+}
+
+// dialSentinel resolves the current master via SENTINEL get-master-addr-by-name,
+// then dials it directly.
+func dialSentinel(cfg *config.Config) (redis.Conn, error) {
+	addr, err := lookupSentinelMaster(cfg.RedisSentinelNodes, cfg.RedisMasterName, cfg.RedisSentinelPassword)
+	if err != nil {
+		return nil, err
+	}
+	return redis.Dial("tcp", addr,
+		redis.DialConnectTimeout(redisDialTimeout),
+		redis.DialReadTimeout(redisDialTimeout),
+		redis.DialWriteTimeout(redisDialTimeout),
+		redis.DialPassword(cfg.RedisPassword),
+	)
+}
+
+// lookupSentinelMaster queries each sentinel for the master address.
+func lookupSentinelMaster(sentinelNodes, masterName, sentinelPwd string) (string, error) {
+	sentinels := parseRedisAddrs(sentinelNodes)
+	if len(sentinels) == 0 {
+		return "", fmt.Errorf("sentinel_nodes is required when master_name is set")
+	}
+	var lastErr error
+	for _, s := range sentinels {
+		c, err := redis.Dial("tcp", s,
+			redis.DialConnectTimeout(redisDialTimeout),
+			redis.DialReadTimeout(redisDialTimeout),
+			redis.DialWriteTimeout(redisDialTimeout),
+		)
+		if err != nil {
+			lastErr = fmt.Errorf("dial sentinel %s: %w", s, err)
+			continue
+		}
+		if sentinelPwd != "" {
+			if _, err := redis.String(c.Do("AUTH", sentinelPwd)); err != nil {
+				c.Close()
+				lastErr = fmt.Errorf("auth sentinel %s: %w", s, err)
+				continue
+			}
+		}
+		reply, err := redis.Strings(c.Do("SENTINEL", "get-master-addr-by-name", masterName))
+		c.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("sentinel get-master-addr-by-name %q via %s: %w", masterName, s, err)
+			continue
+		}
+		if len(reply) != 2 {
+			lastErr = fmt.Errorf("sentinel %s returned unexpected reply for %q: %v", s, masterName, reply)
+			continue
+		}
+		return net.JoinHostPort(reply[0], reply[1]), nil
+	}
+	return "", fmt.Errorf("sentinel lookup for master %q failed: %w", masterName, lastErr)
+}
+
+// parseRedisAddrs splits comma-separated host:port pairs; bare hosts default
+// to sentinel port 26379.
+func parseRedisAddrs(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if !strings.Contains(p, ":") {
+			p = net.JoinHostPort(p, "26379")
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // buildRedisURL assembles a redis:// URL from split host/port/password.

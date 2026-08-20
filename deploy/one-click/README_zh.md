@@ -259,7 +259,7 @@ sudo ./install-compute.sh
 - 启动 `cubelet`，并通过 `cube-sandbox-compute.target` 拉起 `cube-egress`（透明出网 MITM 代理，以 docker 容器运行，用于强制执行沙箱出网策略）
 - `cube-egress` 启动前会通过主节点的 `/cube/ca/<file>` 接口拉取与模板一致的 MITM 根 CA（含私钥），保证模板信任 compute 节点上 `cube-egress` 签发的叶子证书
 - 将 `Cubelet` 的 `meta_server_endpoint` 指向 `ONE_CLICK_CONTROL_PLANE_IP:3010`（CubeOps node-agent）
-- 通过主节点的 `/internal/node-agent/v1` 接口自动注册节点
+- 通过主节点的 `/internal/v1/node-agent` 接口自动注册节点
 
 注意事项：
 

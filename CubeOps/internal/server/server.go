@@ -52,7 +52,7 @@ func New(cfg *config.Config, s *store.Store) *Server {
 // Start begins listening for HTTP requests.
 func (s *Server) Start() error {
 	if err := nodemetric.Init(s.cfg); err != nil {
-		logging.G(context.Background()).Warnf("nodemetric init failed: %v", err)
+		return fmt.Errorf("nodemetric init: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -143,7 +143,7 @@ func (s *Server) buildRouter() *gin.Engine {
 
 	// Internal routes — no auth. These endpoints must not be exposed through
 	// nginx or a public Bind address. Callers: Cubelet (register + heartbeat).
-	agentH.Register(r.Group("/internal/node-agent/v1"))
+	agentH.Register(r.Group("/internal/v1/node-agent"))
 
 	// SDK routes — mounted at both /api/v1/sdk and /api/v1/sdk/v2 because
 	// the WebUI and the E2B-compatible clients hit different prefixes.

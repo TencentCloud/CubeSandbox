@@ -127,7 +127,8 @@ func (svc *NodeService) RegisterNode(ctx context.Context, req *model.RegisterNod
 		return nil, fmt.Errorf("%w: %v", ErrLabelsJSONCorrupt, err)
 	}
 	mergedLabels := StripAndPreserveSchedulingLabel(existingLabels, req.Labels)
-	if err := ValidateLabels(mergedLabels); err != nil {
+	// Scheduling-disabled is control-plane managed; validate user labels without rejecting it.
+	if err := ValidateLabelsSkippingReserved(mergedLabels); err != nil {
 		logging.G(ctx).Warnf("nodemgmt: register labels invalid: node=%s: %v", req.NodeID, err)
 		return nil, fmt.Errorf("register labels invalid: %w", err)
 	}

@@ -19,7 +19,7 @@
 │  CubeProxy, CoreDNS, MySQL, Redis,      │
 │  Cubelet (network runtime)              │
 └──────────────────┬──────────────────────┘
-                   │  /internal/node-agent/v1 API
+                   │  /internal/v1/node-agent API
        ┌───────────┼───────────┐
        ▼           ▼           ▼
 ┌────────────┐┌────────────┐┌────────────┐
@@ -105,7 +105,7 @@ sudo ./install-compute.sh
 1. 只安装内置 network runtime 的 `Cubelet`、`cube-shim`、`cube-image`、`cube-kernel-scf` 和运行时脚本
 2. 只启动宿主机进程：`cubelet`
 3. 自动把 `Cubelet` 的 `meta_server_endpoint` 指向控制面 `CubeOps`
-4. 通过控制面的 `/internal/node-agent/v1` 接口向 CubeOps 注册节点并上报状态
+4. 通过控制面的 `/internal/v1/node-agent` 接口向 CubeOps 注册节点并上报状态
 
 ## 验证部署
 

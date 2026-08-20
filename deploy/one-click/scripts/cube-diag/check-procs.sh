@@ -61,6 +61,7 @@ Environment variables:
                                      container; 0 skips it (no local MinIO)
   ONE_CLICK_CONTROL_PLANE_IP         Control plane IP for compute role
   ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR  Full cubemaster address for compute role
+  ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR     Full cubeops address for compute role (Cubelet registers here)
 
   When ONE_CLICK_DEPLOY_ROLE=compute, cubemaster and cube-api checks use the
   control-plane address instead of localhost.

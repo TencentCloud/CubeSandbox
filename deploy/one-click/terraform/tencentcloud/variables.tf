@@ -356,13 +356,13 @@ variable "cube_api_replicas" {
 }
 
 variable "cube_ops_replicas" {
-  description = "cube-ops Deployment replica count"
+  description = "cube-ops Deployment replica count. Must be 1: node metadata is in-process; replicas > 1 diverge on heartbeat/isolate/delete and lose state on restart."
   type        = number
   default     = 1
 
   validation {
-    condition     = var.cube_ops_replicas >= 1 && floor(var.cube_ops_replicas) == var.cube_ops_replicas
-    error_message = "cube_ops_replicas must be an integer >= 1."
+    condition     = var.cube_ops_replicas == 1
+    error_message = "cube_ops_replicas must be 1 until CubeOps node state moves out of process memory."
   }
 }
 

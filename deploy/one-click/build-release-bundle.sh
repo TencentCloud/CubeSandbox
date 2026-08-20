@@ -351,14 +351,6 @@ components["cubeops"] = {
     "digest_sha256": required_sha256(os.path.join(core_bin_dir, "cubeops")),
 }
 
-# ── cubeopscli from CORE_BIN_DIR ──
-components["cubeopscli"] = {
-    "version": cube_version,
-    "commit": cube_commit,
-    "build_time": cube_build_time,
-    "digest_sha256": required_sha256(os.path.join(core_bin_dir, "cubeopscli")),
-}
-
 # ── Rust binaries from build-vm-assets.sh ──
 components["cube-agent"] = {
     "version": cube_version,

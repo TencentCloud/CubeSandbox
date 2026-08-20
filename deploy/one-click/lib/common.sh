@@ -2336,11 +2336,8 @@ EOF
 }
 
 # check_compute_control_plane_preflight: fail fast when a compute node is
-# missing the mandatory control plane address. This mirrors the resolution
-# logic in resolve_control_plane_cubemaster_addr() (both scripts/one-click/
-# and scripts/systemd/) and must run before package extraction or dependency
-# installation so the user gets a friendly, actionable error before any
-# destructive change.
+# missing the mandatory control plane address (CubeMaster + CubeOps).
+# Mirrors resolve_control_plane_cubemaster_addr / resolve_control_plane_cubeops_addr.
 check_compute_control_plane_preflight() {
   local role
   role="$(one_click_deploy_role)"
@@ -2349,14 +2346,11 @@ check_compute_control_plane_preflight() {
 
   local addr="${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR:-}"
   local ip="${ONE_CLICK_CONTROL_PLANE_IP:-}"
-  # 8089 is the cubemaster protocol port (a fixed constant); do not derive it
-  # from CUBEMASTER_ADDR, which is the control node's local listen address.
+  local cubeops_addr="${ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR:-}"
   local cubemaster_port=8089
+  local cubeops_port=3010
 
   # Guard: when both variables are set they MUST resolve to the same address.
-  # ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR takes priority at runtime; silently
-  # ignoring a conflicting ONE_CLICK_CONTROL_PLANE_IP would be a configuration
-  # trap — the user would believe they are connecting to IP when they are not.
   if [[ -n "${addr}" && -n "${ip}" ]]; then
     local ip_resolved="${ip}:${cubemaster_port}"
     if [[ "${addr}" != "${ip_resolved}" ]]; then
@@ -2367,17 +2361,12 @@ check_compute_control_plane_preflight() {
   if [[ -n "${addr}" ]]; then
     validate_host_port "${addr}" "ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR"
     log "control plane cubemaster address preflight OK: ${addr}"
-    return 0
-  fi
-
-  if [[ -n "${ip}" ]]; then
+  elif [[ -n "${ip}" ]]; then
     validate_ipv4_literal "${ip}" "ONE_CLICK_CONTROL_PLANE_IP"
     validate_host_port "${ip}:${cubemaster_port}" "ONE_CLICK_CONTROL_PLANE_IP-derived cubemaster address"
     log "control plane IP preflight OK: ${ip} (cubemaster port ${cubemaster_port})"
-    return 0
-  fi
-
-  cat >&2 <<'EOF'
+  else
+    cat >&2 <<'EOF'
 
 ╔══════════════════════════════════════════════════════════════════╗
 ║  [!!] CONTROL PLANE ADDRESS NOT CONFIGURED                     ║
@@ -2400,5 +2389,22 @@ check_compute_control_plane_preflight() {
 ╚══════════════════════════════════════════════════════════════════╝
 
 EOF
-  die "ONE_CLICK_CONTROL_PLANE_IP or ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR is required for compute role"
+    die "ONE_CLICK_CONTROL_PLANE_IP or ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR is required for compute role"
+  fi
+
+  # CubeOps address: prefer explicit, otherwise derive from the control
+  # plane IP or the CubeMaster addr host (port 3010).
+  if [[ -n "${cubeops_addr}" ]]; then
+    validate_host_port "${cubeops_addr}" "ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR"
+    log "control plane cubeops address preflight OK: ${cubeops_addr}"
+  elif [[ -n "${ip}" ]]; then
+    validate_host_port "${ip}:${cubeops_port}" "ONE_CLICK_CONTROL_PLANE_IP-derived cubeops address"
+    log "control plane cubeops address preflight OK: ${ip}:${cubeops_port} (derived)"
+  elif [[ -n "${addr}" ]]; then
+    local cubeops_host="${addr%%:*}"
+    validate_host_port "${cubeops_host}:${cubeops_port}" "ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR-derived cubeops address"
+    log "control plane cubeops address preflight OK: ${cubeops_host}:${cubeops_port} (derived from cubemaster addr)"
+  else
+    die "ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR or ONE_CLICK_CONTROL_PLANE_IP is required for CubeOps registration"
+  fi
 }

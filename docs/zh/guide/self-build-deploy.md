@@ -304,7 +304,7 @@ sudo ./down.sh
 |------|--------|------|
 | `ONE_CLICK_DEPLOY_ROLE` | `control` | 部署角色：`control` 为单机部署（默认）。计算节点请参阅[多机集群部署](./multi-node-deploy.md) |
 | `ONE_CLICK_CONTROL_PLANE_IP` | 空 | 仅计算节点模式使用。详见[多机集群部署 — 配置环境变量](./multi-node-deploy.md#第二步配置环境变量) |
-| `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` | 空 | 仅计算节点模式使用。详见[多机集群部署 — 配置环境变量](./multi-node-deploy.md#第二步配置环境变量) |
+| `ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR` | 空 | 仅计算节点模式使用。Cubelet 向 CubeOps注册，端口 3010。详见[多机集群部署 — 配置环境变量](./multi-node-deploy.md#第二步配置环境变量) |
 | `CUBE_SANDBOX_NODE_IP` | 自动从 `eth0` 探测 | 节点主网卡 IP 地址。未设置时自动探测；若网卡名称不同请显式指定。 |
 | `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18` | cubevs 本地网络 CIDR，用于沙箱 IP 分配。格式为 IPv4 CIDR（如 `10.100.0.0/18`），掩码范围 /16~/24。若与宿主机网卡、路由或 DNS 解析器地址冲突，安装前置检测会直接中止安装。未设置时使用固定默认值。 |
 | `CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK` | `0` | 设为 `1` 可跳过默认或自定义沙箱 CIDR 的冲突检测（不推荐）。 |

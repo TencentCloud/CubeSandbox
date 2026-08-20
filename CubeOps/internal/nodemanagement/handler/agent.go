@@ -13,7 +13,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/model"
 )
 
-// AgentHandler serves /internal/node-agent/v1/node* routes for Cubelet.
+// AgentHandler serves /internal/v1/node-agent/node* routes for Cubelet.
 type AgentHandler struct {
 	svc NodeService
 }

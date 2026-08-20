@@ -36,13 +36,18 @@ func (f *fakeSandboxChecker) callCount() int {
 	return f.calls
 }
 
-// registerAndIsolate creates a node and isolates it.
+// registerAndIsolate creates a healthy node and isolates it. A heartbeat is
+// sent so the node counts as healthy for DeleteNode's sandbox verification.
 func registerAndIsolate(t *testing.T, svc *service.NodeService, nodeID string) {
 	t.Helper()
 	ctx := context.Background()
-	_, err := svc.RegisterNode(ctx, &model.RegisterNodeRequest{NodeID: nodeID, HostIP: nodeID})
-	if err != nil {
+	if _, err := svc.RegisterNode(ctx, &model.RegisterNodeRequest{NodeID: nodeID, HostIP: nodeID}); err != nil {
 		t.Fatalf("register: %v", err)
+	}
+	if _, err := svc.UpdateNodeStatus(ctx, nodeID, &model.UpdateNodeStatusRequest{
+		Conditions: []model.NodeCondition{{Type: "Ready", Status: "True"}},
+	}); err != nil {
+		t.Fatalf("heartbeat: %v", err)
 	}
 	if _, err := svc.SetNodeSchedulingDisabled(ctx, nodeID, true, "test", ""); err != nil {
 		t.Fatalf("isolate: %v", err)
@@ -132,6 +137,34 @@ func TestDeleteNode_SandboxCheckFails(t *testing.T) {
 	// Node should still exist (fail closed).
 	if _, err := svc.GetNode(ctx, "node-1"); err != nil {
 		t.Fatalf("node should still exist after failed check: %v", err)
+	}
+}
+
+func TestDeleteNode_UnhealthyNodeRefused(t *testing.T) {
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+	// Register but do NOT send a heartbeat, so the node stays unhealthy.
+	if _, err := svc.RegisterNode(ctx, &model.RegisterNodeRequest{NodeID: "node-1", HostIP: "node-1"}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, err := svc.SetNodeSchedulingDisabled(ctx, "node-1", true, "test", ""); err != nil {
+		t.Fatalf("isolate: %v", err)
+	}
+
+	checker := &fakeSandboxChecker{}
+	svc.SetSandboxInventoryChecker(checker)
+
+	_, err := svc.DeleteNode(ctx, "node-1", false)
+	if !errors.Is(err, service.ErrSandboxCheckFailed) {
+		t.Fatalf("expected ErrSandboxCheckFailed for unhealthy node, got %v", err)
+	}
+	// The inventory checker must not be consulted when the node is unhealthy.
+	if checker.callCount() != 0 {
+		t.Fatalf("expected no checker call for unhealthy node, got %d", checker.callCount())
+	}
+	// Node should still exist (fail closed).
+	if _, err := svc.GetNode(ctx, "node-1"); err != nil {
+		t.Fatalf("node should still exist after refused delete: %v", err)
 	}
 }
 

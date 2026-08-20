@@ -34,6 +34,25 @@ func newFakeNodeStore() *fakeNodeStore {
 func (f *fakeNodeStore) UpsertRegistration(_ context.Context, reg *store.NodeRegistration) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// Mirror gormNodeStore.UpsertRegistration: keep labels_json on an existing
+	// row so re-registering an isolated node can be reproduced in tests.
+	if existing, ok := f.regs[reg.NodeID]; ok {
+		existing.HostIP = reg.HostIP
+		existing.GRPCPort = reg.GRPCPort
+		existing.CapacityJSON = reg.CapacityJSON
+		existing.AllocatableJSON = reg.AllocatableJSON
+		existing.InstanceType = reg.InstanceType
+		existing.ClusterLabel = reg.ClusterLabel
+		existing.QuotaCPU = reg.QuotaCPU
+		existing.QuotaMemMB = reg.QuotaMemMB
+		existing.CreateConcurrentNum = reg.CreateConcurrentNum
+		existing.MaxMvmNum = reg.MaxMvmNum
+		existing.HostFactsJSON = reg.HostFactsJSON
+		existing.CPUIDHash = reg.CPUIDHash
+		existing.HostKernelRelease = reg.HostKernelRelease
+		f.regs[reg.NodeID] = existing
+		return nil
+	}
 	f.regs[reg.NodeID] = reg
 	return nil
 }
