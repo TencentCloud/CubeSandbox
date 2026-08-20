@@ -148,8 +148,8 @@ pub async fn rollback_sandbox(
         .await?;
 
     tracing::info!(
-        sandbox_id = %resp.sandbox_id,
-        snapshot_id = %resp.snapshot_id,
+        sandbox_id = %sandbox_id,
+        snapshot_id = %body.snapshot_id,
         operation_id = %resp.operation_id,
         "rollback_sandbox: success"
     );
