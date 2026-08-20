@@ -188,7 +188,11 @@ To check one version, install it and run the suite normally:
 
 ```bash
 # Full coverage: pair the interpreter package, because the run_code cases need it.
-pip install 'e2b==2.21.0' 'e2b-code-interpreter==2.8.1'
+# Pick a pairing plain pip can resolve: `e2b-code-interpreter` declares
+# `e2b>=2.26.0,<3.0.0`, so the 2.21.0 row in `e2b-versions.txt` installs only
+# under a constraint override (that row documents it) and is the wrong thing to
+# paste into a first run.
+pip install 'e2b==2.26.0' 'e2b-code-interpreter==2.8.1'
 pytest --run-e2e --sdk-e2e-backends=e2b -m "smoke or p0"
 
 # Core SDK only: the interpreter-dependent cases MUST be deselected. The e2b

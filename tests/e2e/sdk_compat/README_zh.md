@@ -171,7 +171,10 @@ CubeSandbox 版本预期能配合哪些 SDK 版本，而不必等线上故障才
 
 ```bash
 # 完整覆盖：配对安装 interpreter 包，run_code 用例依赖它。
-pip install 'e2b==2.21.0' 'e2b-code-interpreter==2.8.1'
+# 挑一个 pip 能直接解出来的组合：`e2b-code-interpreter` 声明 `e2b>=2.26.0,<3.0.0`，
+# 因此 `e2b-versions.txt` 里 2.21.0 那一行只有覆盖约束才装得上（该行自己有说明），
+# 不适合作为第一次执行时照抄的命令。
+pip install 'e2b==2.26.0' 'e2b-code-interpreter==2.8.1'
 pytest --run-e2e --sdk-e2e-backends=e2b -m "smoke or p0"
 
 # 只装核心 SDK 时**必须**排除依赖 interpreter 的用例：e2b 后端无条件声明了

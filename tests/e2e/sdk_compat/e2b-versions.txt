@@ -2,7 +2,9 @@
 #
 # Nothing in this repository parses this file — it is read by people, and the
 # lines are written as pip arguments only so they can be pasted straight into
-# `pip install`. Each line names one package set, validated unless the section it
+# `pip install` — with one exception, called out on the row itself: a pairing
+# that sits below `e2b-code-interpreter`'s declared floor needs a constraint
+# override, since plain pip refuses to resolve it. Each line names one package set, validated unless the section it
 # sits under says otherwise (see "Not yet validated" below); pair
 # `e2b-code-interpreter` with `e2b` when the line should cover the `run_code`
 # cases, since those need the interpreter package (a line pinning only `e2b`
@@ -17,6 +19,11 @@
 # By a downstream consumer, 2026-07-22: commands.run, files.write, background +
 # wait, on_stdout streaming. The first row is that consumer's production pairing
 # and has carried real traffic since.
+#
+# NOTE: the pairing below is *not* plain-pip-installable — 2.21.0 is under the
+# interpreter package's declared floor of 2.26.0, so it resolves only under a
+# constraint override (see "The two E2B packages do not agree" below). It is
+# recorded because it runs in production, not as a command to copy blindly.
 e2b==2.21.0 e2b-code-interpreter==2.8.1
 e2b==2.26.0
 e2b==2.29.5
