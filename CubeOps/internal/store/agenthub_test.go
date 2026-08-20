@@ -259,7 +259,8 @@ func TestStore_AgentTemplate(t *testing.T) {
 // TestStore_GetRecommendedAgentTemplate covers the query AgentHub uses to pick
 // a default template: nothing recommended by default (registration never sets
 // the flag), the marked row once PATCH sets it — even when a newer unmarked
-// one exists — and no resurrection after a soft delete.
+// one exists — the newest one when several are marked, and no resurrection
+// after a soft delete.
 func TestStore_GetRecommendedAgentTemplate(t *testing.T) {
 	env := newTestStore(t)
 	defer env.teardown()
@@ -304,6 +305,28 @@ func TestStore_GetRecommendedAgentTemplate(t *testing.T) {
 	}
 	if !got.Recommended {
 		t.Error("Recommended = false on the row returned by the recommended query")
+	}
+
+	// Nothing stops an operator marking several, since the toggle is per
+	// template and clears nothing else. With more than one marked, the ORDER BY
+	// decides — the newest wins, and with both rows written in the same second
+	// it is the id tiebreaker that settles it.
+	if err := s.DB().WithContext(ctx).Exec(
+		`UPDATE t_agenthub_template SET recommended = ? WHERE template_id = ?`, true, "tpl-rec-new",
+	).Error; err != nil {
+		t.Fatalf("mark second recommended: %v", err)
+	}
+	got, err = s.GetRecommendedAgentTemplate(ctx)
+	if err != nil {
+		t.Fatalf("GetRecommendedAgentTemplate: %v", err)
+	}
+	if got == nil || got.TemplateID != "tpl-rec-new" {
+		t.Fatalf("got %v, want tpl-rec-new — the newest of several marked rows must win", got)
+	}
+	if err := s.DB().WithContext(ctx).Exec(
+		`UPDATE t_agenthub_template SET recommended = ? WHERE template_id = ?`, false, "tpl-rec-new",
+	).Error; err != nil {
+		t.Fatalf("unmark second recommended: %v", err)
 	}
 
 	// A soft-deleted recommendation must not come back.
