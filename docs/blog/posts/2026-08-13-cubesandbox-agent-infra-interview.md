@@ -3,8 +3,7 @@ title: "From Sub-100ms Startup to Production-Grade Deployment: Why Tencent Cloud
 date: 2026-08-13
 author: InfoQ
 description: "In early 2026, OpenClaw single-handedly sparked a local terminal Agent craze, and people began handing over file systems, browsers, email, terminals, and various account permissions to Agents. But behind the hype lies a risk more immediate than model hallucination. This article is InfoQ's exclusive interview with Jin Feng, head of Tencent Cloud's IaaS Frontier Technology Team, exploring Cube's evolution from Serverless infrastructure to Agent sandbox and the path from 'can run' to 'production-ready.'"
-featured: true
-weight: 1
+featured: false
 ---
 
 # From Sub-100ms Startup to Production-Grade Deployment: Why Tencent Cloud Rebuilt the Agent Sandbox
