@@ -43,9 +43,32 @@ func (e *HTTPError) Error() string {
 	return fmt.Sprintf("cubemaster returned %d: %s", e.Status, e.Body)
 }
 
-// IsNotFound reports an HTTP-level not-found.
+// IsNotFound reports a not-found that arrived over the HTTP channel, by status
+// or by ret_code in the error body — CubeMaster picks the two independently.
+// meta's writeErr, for one, derives ret_code 130404 from gorm.ErrRecordNotFound
+// while the status comes from the call site, so the pairing is a convention, not
+// an invariant. Keying on the status alone would let a caller's not-found
+// handling turn on which channel happened to carry it.
 func (e *HTTPError) IsNotFound() bool {
-	return e.Status == http.StatusNotFound
+	if e.Status == http.StatusNotFound {
+		return true
+	}
+	cmErr := CMError{RetCode: retCodeFromBody([]byte(e.Body))}
+	return cmErr.IsNotFound()
+}
+
+// retCodeFromBody extracts CubeMaster's business ret_code from a response body,
+// returning 0 when the body is not one of its envelopes.
+func retCodeFromBody(data []byte) int {
+	var envelope struct {
+		Ret struct {
+			RetCode int `json:"ret_code"`
+		} `json:"ret"`
+	}
+	if json.Unmarshal(data, &envelope) != nil {
+		return 0
+	}
+	return envelope.Ret.RetCode
 }
 
 // IsNotFound returns true for CubeMaster "not found" ret codes.

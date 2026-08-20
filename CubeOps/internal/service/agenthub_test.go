@@ -927,8 +927,9 @@ func TestWrapCMError(t *testing.T) {
 	}
 }
 
-// TestIsCMNotFoundCoversBothShapes pins that a not-found is recognised whether
-// CubeMaster reports it as a business ret_code in a 200 body or as an HTTP 404.
+// TestIsCMNotFoundCoversBothShapes pins that a not-found is recognised however
+// CubeMaster reports it: as a business ret_code in a 200 body, as an HTTP 404,
+// or as a ret_code envelope under some other >=400 status.
 // Only the first shape appears in the #1327 repro; keying on it alone would let
 // the actionable 400 silently regress into a 502 leaking an identifier the
 // requester never supplied, which is what this path exists to prevent.
@@ -943,6 +944,20 @@ func TestIsCMNotFoundCoversBothShapes(t *testing.T) {
 		{"http 404", &cubemaster.HTTPError{Status: 404, Body: "template not found"}, true},
 		{"http 404 wrapped", fmt.Errorf("create sandbox: %w", &cubemaster.HTTPError{Status: 404}), true},
 		{"http 500", &cubemaster.HTTPError{Status: 500, Body: "boom"}, false},
+		// The status line and the ret_code are chosen independently on the
+		// CubeMaster side, so a not-found can arrive under some other >=400
+		// status. Recognise it by content, not by which channel carried it.
+		{
+			"http 400 carrying 130404",
+			&cubemaster.HTTPError{Status: 400, Body: `{"ret":{"ret_code":130404,"ret_msg":"template not found"}}`},
+			true,
+		},
+		{
+			"http 400 carrying a non-not-found code",
+			&cubemaster.HTTPError{Status: 400, Body: `{"ret":{"ret_code":130400,"ret_msg":"bad instance_type"}}`},
+			false,
+		},
+		{"http 500 with a non-envelope body", &cubemaster.HTTPError{Status: 500, Body: "130404"}, false},
 		{"business conflict", &cubemaster.CMError{RetCode: 130409, RetMsg: "exists"}, false},
 		{"unrelated", errors.New("network timeout"), false},
 		{"nil", nil, false},
