@@ -26,6 +26,15 @@
 # constraint override (see "The two E2B packages do not agree" below). It is
 # recorded because it runs in production, not as a command to copy blindly.
 e2b==2.21.0 e2b-code-interpreter==2.8.1
+#
+# The two rows below were validated by the same consumer in the same 2026-07-22
+# pass and over the same surface, with one difference worth stating: they pin
+# only the core SDK, so that pass ran with the interpreter-dependent cases
+# deselected (-m "... and not requires_code_interpreter") and says nothing about
+# run_code on those cores. 2.29.5 is the core that consumer moved its own pin to
+# on 2026-07-27 once the regression pass was clean; 2.26.0 is recorded because
+# it is the interpreter package's declared floor, which makes it the pairing
+# plain pip resolves and the one the README uses as its example.
 e2b==2.26.0
 e2b==2.29.5
 
@@ -78,9 +87,9 @@ e2b==2.37.1
 #      for v in 2.37.1 2.38.0 <new>; do
 #        python3 -m venv "/tmp/e2b-$v" && "/tmp/e2b-$v/bin/pip" -q install "e2b==$v"
 #        printf '%s ' "$v"
-#        "/tmp/e2b-$v/bin/python" -c 'import inspect
-#      from e2b.api.client_sync import get_transport
-#      print(inspect.signature(get_transport))'
+#        expr='import inspect, e2b.api.client_sync as c'
+#        expr="$expr; print(inspect.signature(c.get_transport))"
+#        "/tmp/e2b-$v/bin/python" -c "$expr"
 #      done
 #
 #    A signature still carrying `http2` means e2b-code-interpreter 2.9.0 works
