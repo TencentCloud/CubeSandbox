@@ -632,8 +632,9 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 			// of being flattened into the registration advice.
 			logging.G(ctx).Warnf("agenthub: create failed with an empty template registry, "+
 				"reporting it as a missing registration; cubemaster said: %v", err)
-			return nil, NewBadRequest("no agent template is registered: register one from the template market " +
-				"(POST /api/v1/agenthub/templates/market), or pass templateId explicitly")
+			return nil, NewBadRequest("no agent template is registered: register one from the template " +
+				"market (POST /api/v1/agenthub/templates/market) or publish one from a running agent " +
+				"(POST /api/v1/agenthub/instances/{agentID}/publish-template), or pass templateId explicitly")
 		}
 		return nil, NewBadGateway("failed to create sandbox: " + err.Error())
 	}
