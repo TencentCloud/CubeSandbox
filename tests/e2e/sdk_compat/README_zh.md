@@ -168,8 +168,8 @@ pytest --run-e2e
 CubeSandbox 版本预期能配合哪些 SDK 版本，而不必等线上故障才发现。
 
 验证某个版本时，装上它再照常执行。下面的命令假定"快速开始"里那套 E2B 后端环境变量已经
-导出——如果是从 `e2b-versions.txt` 直接跳到这一节，请先设置，否则会在创建沙箱时失败并报
-`E2B backend requires E2B_API_KEY`：
+导出——如果是从 `e2b-versions.txt` 直接跳到这一节，请先设置，否则 preflight 会在创建任何
+沙箱之前直接结束整个 session（`e2b backend requires E2B_API_KEY`，退出码 2）：
 
 ```bash
 export E2B_API_KEY=<e2b-api-key>
@@ -192,9 +192,9 @@ pytest --run-e2e --sdk-e2e-backends=e2b -m "smoke or p0"
 # test_pause_resume.py、test_auto_lifecycle.py 与 test_rollback_clone.py），它们带
 # `requires_code_interpreter` 但没有 run_code marker。`requires_code_interpreter`
 # 才是不依赖"用例放在哪个文件"的那个开关——这正是关键，因为用例还在不断新增。
-#（它是独立 marker，由 conftest.py 中的 CODE_INTERPRETER capability 控制；不存在
-# `requires_capability(code_interpreter)` 这种写法，别照着
-# `requires_capability(ROLLBACK_CLONE)` 的样子去找。）
+#（它是由 CODE_INTERPRETER capability 控制的专用 marker。写成通用的
+# `requires_capability(CODE_INTERPRETER)` 效果等价，但本套件统一用专用的那个：
+# skip 信息更清楚，上面的 -m 表达式也是按它来选的。）
 #
 # 想知道两种写法当前差多少，请自己跑，而不要相信这里写死的数字（数字会腐烂，本注释
 # 之前就带过一个过期的）：
@@ -224,8 +224,8 @@ pytest --run-e2e --sdk-e2e-backends=e2b -m "(smoke or p0) and not requires_code_
   marker 排除（`-m "(smoke or p0) and not requires_code_interpreter"`），而不是把
   "缺包"报成失败。只排除 `run_code` marker 不够：它仅覆盖 `cases/run_code/`，而
   `cases/lifecycle/` 下也有带 `requires_code_interpreter`、但没有 `run_code` marker 的依赖
-  interpreter 用例。注意它自成一个 marker，不属于 `requires_capability(...)` 家族——尽管
-  `CODE_INTERPRETER` 本身确实是一个 capability 常量。
+  interpreter 用例。注意本套件用的是专用的 `requires_code_interpreter`，而不是通用的
+  `requires_capability(CODE_INTERPRETER)`——两者等价，`-m` 表达式按前者来写。
 
 ## 环境变量
 

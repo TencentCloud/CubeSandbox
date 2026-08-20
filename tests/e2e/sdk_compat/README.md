@@ -186,8 +186,9 @@ CubeSandbox release instead of discovering it by outage.
 
 To check one version, install it and run the suite normally. The commands below
 assume the E2B backend environment from "Quick Start" is already exported —
-arriving here straight from `e2b-versions.txt`, set it first, or the run fails at
-sandbox creation with `E2B backend requires E2B_API_KEY`:
+arriving here straight from `e2b-versions.txt`, set it first, or preflight ends
+the session before a single sandbox is created (`e2b backend requires
+E2B_API_KEY`, exit code 2):
 
 ```bash
 export E2B_API_KEY=<your-e2b-api-key>
@@ -213,10 +214,11 @@ pytest --run-e2e --sdk-e2e-backends=e2b -m "smoke or p0"
 # and test_rollback_clone.py at the time of writing) carrying the capability
 # marker but not the run_code one. `requires_code_interpreter` is the lever that
 # does not depend on which file a case happens to live in — which is the point,
-# since new cases keep arriving. (It is a standalone marker, gated on the
-# CODE_INTERPRETER capability in conftest.py; there is no
-# `requires_capability(code_interpreter)` spelling, so do not go looking for one
-# alongside `requires_capability(ROLLBACK_CLONE)` and friends.)
+# since new cases keep arriving. (It is a dedicated marker gated on the
+# CODE_INTERPRETER capability, which the suite prefers over the generic
+# `requires_capability(CODE_INTERPRETER)` — that spelling would gate identically,
+# but the dedicated one gives a clearer skip message and is what the -m
+# expressions here select on.)
 #
 # To see the current gap between the two spellings rather than trusting a number
 # written here (that number rots — this note previously carried a stale one):
@@ -253,9 +255,10 @@ Notes that make the matrix more than a version list:
   failures that are really a missing package. The `run_code` marker is not
   enough — it only covers `cases/run_code/`, while `cases/lifecycle/` has
   interpreter-dependent cases that carry `requires_code_interpreter` but not the
-  `run_code` one. Note it is its own marker, not a member of the
-  `requires_capability(...)` family, even though `CODE_INTERPRETER` is a
-  capability constant.
+  `run_code` one. Note the suite gates this through the dedicated
+  `requires_code_interpreter` marker rather than the generic
+  `requires_capability(CODE_INTERPRETER)`, which is why the `-m` expressions
+  select on the former.
 
 ## Environment
 
