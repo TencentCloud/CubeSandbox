@@ -331,8 +331,9 @@ mod tests {
         event
             .fields
             .get(key)
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
+            .unwrap_or_else(|| panic!("expected event field `{key}` to exist"))
+            .as_str()
+            .unwrap_or_else(|| panic!("expected event field `{key}` to be a string"))
             .to_string()
     }
 

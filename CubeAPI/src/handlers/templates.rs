@@ -295,7 +295,7 @@ pub async fn delete_template(
         if let Some(origin_sandbox_id) = snapshot_context.origin_sandbox_id {
             event = event.field("sandbox_id", origin_sandbox_id);
         } else {
-            tracing::warn!(
+            tracing::debug!(
                 snapshot_id = %snapshot_context.snapshot_id,
                 "snapshot delete event emitted without origin sandbox id"
             );

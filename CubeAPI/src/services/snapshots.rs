@@ -419,11 +419,7 @@ fn snapshot_resource_to_list_item(r: SnapshotResource) -> SnapshotListItem {
         snapshot_id: r.snapshot_id,
         names,
         status: r.status,
-        origin_sandbox_id: if r.origin_sandbox_id.is_empty() {
-            None
-        } else {
-            Some(r.origin_sandbox_id)
-        },
+        origin_sandbox_id: non_empty_string(r.origin_sandbox_id),
         created_at: r.created_at,
         updated_at: r.updated_at,
     }
@@ -604,6 +600,25 @@ mod tests {
                 .and_then(|values| values.first())
                 .and_then(|value| value.as_str()),
             Some("snap-name")
+        );
+    }
+
+    #[test]
+    fn snapshot_origin_sandbox_id_normalization_is_consistent() {
+        let mut list_snapshot = sample_snapshot("READY");
+        list_snapshot.origin_sandbox_id = "  \t\n".into();
+        let mut context_snapshot = list_snapshot.clone();
+
+        let list_item = snapshot_resource_to_list_item(list_snapshot);
+        let context = snapshot_resource_to_context(context_snapshot.clone());
+
+        assert_eq!(list_item.origin_sandbox_id, None);
+        assert_eq!(context.origin_sandbox_id, None);
+
+        context_snapshot.origin_sandbox_id = "sb-2".into();
+        assert_eq!(
+            snapshot_resource_to_context(context_snapshot).origin_sandbox_id,
+            Some("sb-2".to_string())
         );
     }
 }
