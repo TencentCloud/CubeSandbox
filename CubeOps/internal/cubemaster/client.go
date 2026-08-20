@@ -57,6 +57,13 @@ func (e *HTTPError) Error() string {
 // after the wrong fix while the real problem is that we never reached
 // CubeMaster at all.
 func (e *HTTPError) IsNotFound() bool {
+	// A 5xx is the server saying it failed, not that the thing is missing. Even
+	// when such a body carries a not-found envelope, the caller cannot fix it by
+	// supplying something different, so classifying it as not-found turns a
+	// transient server failure into client-correctable advice.
+	if e.Status >= http.StatusInternalServerError {
+		return false
+	}
 	cmErr := CMError{RetCode: retCodeFromBody([]byte(e.Body))}
 	return cmErr.IsNotFound()
 }

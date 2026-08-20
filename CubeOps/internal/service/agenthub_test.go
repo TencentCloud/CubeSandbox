@@ -998,6 +998,19 @@ func TestIsCMNotFoundCoversBothShapes(t *testing.T) {
 		// that CubeOps never reached CubeMaster.
 		{"http 404 from something in the path", &cubemaster.HTTPError{Status: 404, Body: "404 page not found"}, false},
 		{"http 500", &cubemaster.HTTPError{Status: 500, Body: "boom"}, false},
+		// A server-side failure is not the caller's to fix, whatever its body
+		// says — otherwise a transient 5xx is rewritten into "register a
+		// template", advice the operator cannot act on and that hides an outage.
+		{
+			"http 500 carrying 130404",
+			&cubemaster.HTTPError{Status: 500, Body: `{"ret":{"ret_code":130404,"ret_msg":"template not found"}}`},
+			false,
+		},
+		{
+			"http 503 carrying 130404",
+			&cubemaster.HTTPError{Status: 503, Body: `{"ret":{"ret_code":130404,"ret_msg":"template not found"}}`},
+			false,
+		},
 		// The status line and the ret_code are chosen independently on the
 		// CubeMaster side, so a not-found can arrive under some other >=400
 		// status. Recognise it by content, not by which channel carried it.
