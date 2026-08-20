@@ -315,6 +315,27 @@ load_env_file() {
   fi
 }
 
+# Load build-machine overrides for release-bundle scripts.
+# Precedence: ONE_CLICK_BUILD_ENV_FILE > ${ONE_CLICK_DIR}/build.env >
+# legacy ONE_CLICK_ENV_FILE / .env (with a migration hint).
+load_build_env() {
+  local build_env_file legacy_env_file
+  if [[ -n "${ONE_CLICK_BUILD_ENV_FILE:-}" ]]; then
+    load_env_file "${ONE_CLICK_BUILD_ENV_FILE}"
+    return
+  fi
+  build_env_file="${ONE_CLICK_DIR}/build.env"
+  if [[ -f "${build_env_file}" ]]; then
+    load_env_file "${build_env_file}"
+    return
+  fi
+  legacy_env_file="${ONE_CLICK_ENV_FILE:-${ONE_CLICK_DIR}/.env}"
+  if [[ -f "${legacy_env_file}" ]]; then
+    log "build.env not found; falling back to ${legacy_env_file} (copy build.env.example to build.env for build-only overrides)"
+    load_env_file "${legacy_env_file}"
+  fi
+}
+
 ensure_file() {
   local path="$1"
   [[ -f "${path}" ]] || die "required file not found: ${path}"
@@ -1085,6 +1106,44 @@ DEPRECATED_KEYS = {
     # the old local-build knobs must not linger as kept-extra after upgrade.
     "CUBE_PROXY_IMAGE_TAG",
     "CUBE_PROXY_BASE_IMAGE",
+    # Build-machine knobs used to live in env.example and could leak into
+    # .one-click.env. They now live in build.env.example and are unused at
+    # install/runtime, so drop them on upgrade instead of keeping them extra.
+    "BUILDER_IMAGE",
+    "ONE_CLICK_CUBEMASTER_BUILD_MODE",
+    "ONE_CLICK_CUBELET_BUILD_MODE",
+    "ONE_CLICK_CUBE_API_BUILD_MODE",
+    "ONE_CLICK_CUBE_OPS_BUILD_MODE",
+    "ONE_CLICK_CUBE_AGENT_BUILD_MODE",
+    "ONE_CLICK_CUBE_SHIM_BUILD_MODE",
+    "ONE_CLICK_CUBE_INIT_BUILD_MODE",
+    "ONE_CLICK_BUILD_JOBS",
+    "ONE_CLICK_DISABLE_PIGZ",
+    "ONE_CLICK_SEQUENTIAL_WEB_BUILD",
+    "CUBE_BUILD_TIME",
+    "ONE_CLICK_CUBEMASTER_BIN",
+    "ONE_CLICK_CUBEMASTERCLI_BIN",
+    "ENVD_LOCAL_PATH",
+    "ONE_CLICK_CUBELET_BIN",
+    "ONE_CLICK_CUBECLI_BIN",
+    "ONE_CLICK_CUBE_API_BIN",
+    "ONE_CLICK_CUBE_OPS_BIN",
+    "ONE_CLICK_CUBE_AGENT_BIN",
+    "ONE_CLICK_CUBE_INIT_BIN",
+    "ONE_CLICK_CUBESHIM_BIN",
+    "ONE_CLICK_CUBE_RUNTIME_BIN",
+    "ONE_CLICK_GUEST_IMAGE_DOCKERFILE",
+    "ONE_CLICK_GUEST_IMAGE_CONTEXT_DIR",
+    "ONE_CLICK_GUEST_IMAGE_REF",
+    "ONE_CLICK_GUEST_IMAGE_VERSION",
+    "ONE_CLICK_GUEST_IMAGE_TAR",
+    "ONE_CLICK_AGENT_EXT4_OUTPUT_DIR",
+    "ONE_CLICK_CUBE_KERNEL_VMLINUX",
+    "ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX",
+    "ONE_CLICK_RUNTIME_CFG_SRC",
+    "ONE_CLICK_GUEST_IMAGE_RESERVED_BYTES",
+    "ONE_CLICK_MKCERT_BIN",
+    "ONE_CLICK_WEB_DIST_DIR",
 }
 
 LEGACY_CUBE_PROXY_CERT_DIR_DEFAULTS = {

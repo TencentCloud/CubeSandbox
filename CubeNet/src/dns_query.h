@@ -178,10 +178,15 @@ static __always_inline bool dns_query_should_filter_ipv4_a(struct __sk_buff *skb
 	return is_ipv4_a;
 }
 
-/* Track an allowed IPv4 A query so the response can inherit its L7 flags. */
+/* Track an allowed IPv4 A query so the response can inherit its L7 flags
+ * and per-host port set. Copies port_count + ports[] verbatim from the matched
+ * dns_allow_value so dns_learn_response_ip can rebuild net_policy_value_v3
+ * without a second dns_allow_v2 lookup at response time.
+ */
 static __always_inline void dns_track_allowed_query(struct __sk_buff *skb,
 						    const struct dns_query_state *state,
-						    __u8 flags, __u64 qname_hash)
+						    const struct dns_allow_value *matched,
+						    __u64 qname_hash)
 {
 	struct dns_query_track_key track_key = {};
 	struct dns_query_track_value track_value = {};
@@ -189,6 +194,7 @@ static __always_inline void dns_track_allowed_query(struct __sk_buff *skb,
 	struct ethhdr *l2;
 	struct iphdr *l3;
 	struct udphdr *udp;
+	int i;
 
 	if (!__pull_headers_udp(skb, &l2, &l3, &udp))
 		return;
@@ -200,8 +206,26 @@ static __always_inline void dns_track_allowed_query(struct __sk_buff *skb,
 	track_key.source_port = udp->source;
 	track_key.dns_id = hdr.id;
 	track_key.qname_hash = qname_hash;
-	track_value.flags = flags;
+	track_value.flags = matched->flags;
 	track_value.expires_at_ns = bpf_ktime_get_ns() + DNS_QUERY_TRACK_TTL_NS;
+	track_value.port_count = matched->port_count;
+	if (track_value.port_count > MAX_L7_PORTS_PER_HOST)
+		track_value.port_count = MAX_L7_PORTS_PER_HOST;
+
+#pragma unroll
+	for (i = 0; i < MAX_L7_PORTS_PER_HOST; i++) {
+		/* Guard inside body (not `break`) so clang keeps this as a
+		 * fixed-trip-count loop and fully unrolls it — otherwise the BPF
+		 * verifier rejects ports[i] writes as variable-offset stack
+		 * accesses. Field-by-field assignment sidesteps clang's memcpy
+		 * lowering for whole-struct copies (which is disallowed in BPF).
+		 */
+		if (i < track_value.port_count) {
+			track_value.ports[i].port = matched->ports[i].port;
+			track_value.ports[i].scheme = matched->ports[i].scheme;
+			track_value.ports[i]._pad = matched->ports[i]._pad;
+		}
+	}
 
 	bpf_map_update_elem(&dns_query_track, &track_key, &track_value, BPF_ANY);
 }
@@ -226,7 +250,7 @@ static __always_inline void dns_init_query_state(struct dns_query_state *state,
 
 /* Query hook for sandbox-originated UDP/53 traffic.
  *
- * Each sandbox owns one precreated DNS allow LPM trie via dns_allow[ifindex].
+ * Each sandbox owns one precreated DNS allow LPM trie via dns_allow_v2[ifindex].
  * Callers only invoke this hook when per-sandbox metadata flags in
  * ifindex_to_mvmmeta enable DNS policy processing. The DNS allow trie stores
  * only reversed lower-case domain rules and their rule-specific flags.
@@ -243,7 +267,7 @@ static __always_inline int dns_handle_query(struct __sk_buff *skb, __u32 dns_off
 	if (!dns_read_query_header(skb, dns_off, &hdr, &flags))
 		return CUBE_DNS_PASS;
 
-	inner_map = bpf_map_lookup_elem(&dns_allow, &ifindex);
+	inner_map = bpf_map_lookup_elem(&dns_allow_v2, &ifindex);
 	if (!inner_map)
 		return CUBE_DNS_PASS;
 

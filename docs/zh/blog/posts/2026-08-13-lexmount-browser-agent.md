@@ -3,8 +3,7 @@ title: "把浏览器搬进 Agent 沙箱：Lexmount 在 CubeSandbox 上的一线�
 date: 2026-08-13
 author: 熊袖璋（Lexmount 揽岳智能全栈工程师）
 description: "Agent 浏览器运行时是一个复合工作负载。它对 AI Agent 沙箱的运行有四个核心层面的硬需求：出站网络能否连到真实互联网、批量拉起时的启动时序稳不稳、每个沙箱的运行时状态能否被动态注入、真实容量能不能被准确感知。Lexmount 团队在把浏览器运行时接入 Cube Sandbox 的实践中，逐一碰上并解决了这四个问题。"
-featured: true
-weight: 2
+featured: false
 ---
 
 # 把浏览器搬进 Agent 沙箱：Lexmount 在 CubeSandbox 上的一线实战

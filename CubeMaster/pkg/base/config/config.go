@@ -43,6 +43,11 @@ type Config struct {
 	CubeEgressConf   *CubeEgressConf       `yaml:"cube_egress_conf"`
 	CubeProxyConf    *CubeProxyConf        `yaml:"cube_proxy_conf"`
 
+	// SoftDeletePurge configures the scheduled hard-purge of soft-deleted
+	// (tombstoned) database rows (issue #973). nil leaves the purger at its
+	// safe defaults (7-day retention, hourly, enabled). See CubeDB/tombstone.
+	SoftDeletePurge *SoftDeletePurgeConf `yaml:"soft_delete_purge"`
+
 	// VolumePlugins lists external Controller Hook Plugin configurations.
 	// Types: binary (fork CLI) or rpc (gRPC VolumeControllerService).
 	//
@@ -658,6 +663,29 @@ type CubeEgressConf struct {
 	// where the CA file is absent fails loudly instead of producing a
 	// silently-broken template.
 	Required bool `yaml:"required"`
+}
+
+// SoftDeletePurgeConf configures the scheduled hard-purge of soft-deleted rows.
+// All fields are optional; zero/nil values fall back to safe defaults enforced
+// by CubeDB/tombstone.Config.Sanitized (7-day retention, hourly interval). The
+// purger is DISABLED when the block or `enable` is absent — the purge is
+// irreversible, so it must be opted into explicitly. It only touches the
+// verified tombstone tables; see docs/guide/soft-delete-purge.md.
+type SoftDeletePurgeConf struct {
+	// Enable gates the purger. nil/missing -> DISABLED (default-off): the purge is
+	// irreversible, so operators must opt in explicitly (review: an upgrade must
+	// not silently hard-delete tombstones that were previously retained forever).
+	Enable *bool `yaml:"enable"`
+	// DryRun selects candidate rows and logs counts but issues no DELETE --
+	// use for a safe first rollout against a large existing backlog.
+	DryRun bool `yaml:"dry_run"`
+	// Retention: rows with deleted_at older than now-Retention are purged.
+	// <=0 -> 7-day default; values in (0, 1h) are clamped UP to the 1h minimum
+	// (avoids the cutoff>=now foot-gun that would purge seconds-old tombstones).
+	Retention time.Duration `yaml:"retention"`
+	// Interval between purge passes. <=0 -> 1h default; values in (0, 1m) are
+	// clamped UP to the 1m minimum.
+	Interval time.Duration `yaml:"interval"`
 }
 
 // DefaultCubeEgressCAPath is the canonical install path. Used when

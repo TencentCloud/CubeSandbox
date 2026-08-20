@@ -7,6 +7,35 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestSessionClassificationStrings(t *testing.T) {
+	for _, tt := range []struct {
+		value uint8
+		want  string
+	}{
+		{0, "snat"},
+		{1, "l7_proxy"},
+		{9, "unknown(9)"},
+	} {
+		if got := packetClassToString(tt.value); got != tt.want {
+			t.Fatalf("packetClassToString(%d)=%q, want %q", tt.value, got, tt.want)
+		}
+	}
+
+	for _, tt := range []struct {
+		value uint8
+		want  string
+	}{
+		{L7SchemeNone, "none"},
+		{L7SchemeHTTP, "http"},
+		{L7SchemeHTTPS, "https"},
+		{9, "unknown(9)"},
+	} {
+		if got := l7SchemeToString(tt.value); got != tt.want {
+			t.Fatalf("l7SchemeToString(%d)=%q, want %q", tt.value, got, tt.want)
+		}
+	}
+}
+
 func TestBusinessMapNamesReturnsCopy(t *testing.T) {
 	names := BusinessMapNames()
 	if len(names) == 0 {
@@ -21,15 +50,15 @@ func TestBusinessMapNamesReturnsCopy(t *testing.T) {
 
 func TestNormalizeBusinessMapNames(t *testing.T) {
 	got, err := normalizeBusinessMapNames([]string{
-		MapNameDNSAllow,
-		MapNameDNSAllow,
-		MapNameAllowOutV2,
+		MapNameDNSAllowV2,
+		MapNameDNSAllowV2,
+		MapNameAllowOutV3,
 	})
 	if err != nil {
 		t.Fatalf("normalizeBusinessMapNames returned error: %v", err)
 	}
 
-	want := []string{MapNameDNSAllow, MapNameAllowOutV2}
+	want := []string{MapNameDNSAllowV2, MapNameAllowOutV3}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("normalizeBusinessMapNames()=%v, want %v", got, want)
 	}
@@ -139,5 +168,32 @@ func TestDumpSessionKey(t *testing.T) {
 	}
 	if got.ProtocolName != "tcp" {
 		t.Fatalf("ProtocolName=%q, want tcp", got.ProtocolName)
+	}
+}
+
+// TestL7PortEntriesToDumpRendersHostByteOrder guards the NBO→host port
+// conversion: ports are stored in network byte order on the datapath, and a
+// regression that drops the ntohs() would render the raw wire value (e.g.
+// 0xEB20) instead of the user-facing host-order port (8443).
+func TestL7PortEntriesToDumpRendersHostByteOrder(t *testing.T) {
+	ports := []l7PortEntry{
+		{Port: htonsPort(8443), Scheme: L7SchemeHTTPS},
+		{Port: htonsPort(8080), Scheme: L7SchemeHTTP},
+	}
+
+	got := l7PortEntriesToDump(ports, 2)
+	if len(got) != 2 {
+		t.Fatalf("len(got)=%d, want 2", len(got))
+	}
+	if got[0].Port != 8443 || got[0].Scheme != "https" {
+		t.Fatalf("entry[0]=%+v, want port 8443 scheme https", got[0])
+	}
+	if got[1].Port != 8080 || got[1].Scheme != "http" {
+		t.Fatalf("entry[1]=%+v, want port 8080 scheme http", got[1])
+	}
+
+	// count == 0 renders nothing (default-set fallback is implicit).
+	if got := l7PortEntriesToDump(ports, 0); got != nil {
+		t.Fatalf("count=0 rendered %v, want nil", got)
 	}
 }

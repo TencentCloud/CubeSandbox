@@ -165,7 +165,7 @@ grep -aF '[plugin_volume] initialized' /data/log/Cubelet/Cubelet-req.log | tail 
 
 ## 使用
 
-以下示例使用 **Python SDK `cubesandbox` ≥ 0.6.0**。请先安装 SDK 并配置环境变量（见 [框架指南 §2.1](../../../docs/zh/guide/volume-plugin.md)）。
+以下示例使用 **Python SDK `cubesandbox` ≥ 0.6.0**。请先安装 SDK 并配置环境变量（见 [框架指南 §2.1](../../../../docs/zh/guide/volume-plugin.md)）。
 
 ### 创建 Volume
 
@@ -435,4 +435,4 @@ ln -sf /opt/coscmd-venv/bin/coscmd /usr/local/bin/coscmd
 - COS Go SDK（rpc 示例用）：[Go SDK 快速入门](https://cloud.tencent.com/document/product/436/31215)
 - rpc 类型示例：[../rpc/](../rpc/)
 - Binary plugin 驱动：[Cubelet/plugins/volume/binary/driver.go](../../../../Cubelet/plugins/volume/binary/driver.go)
-- VolumePlugin 框架：[docs/zh/guide/volume-plugin.md](../../../docs/zh/guide/volume-plugin.md)
+- VolumePlugin 框架：[docs/zh/guide/volume-plugin.md](../../../../docs/zh/guide/volume-plugin.md)

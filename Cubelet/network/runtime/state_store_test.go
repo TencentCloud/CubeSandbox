@@ -16,8 +16,11 @@ func TestStateStoreUsesPrivatePermissions(t *testing.T) {
 	if err := os.Mkdir(stateDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	oldStatePath := filepath.Join(stateDir, "old.success.json")
-	if err := os.WriteFile(oldStatePath, []byte("{}"), 0o644); err != nil {
+	shardPath := filepath.Join(stateDir, shardOf("old"), "old.success.json")
+	if err := os.MkdirAll(filepath.Dir(shardPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(shardPath, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -26,15 +29,7 @@ func TestStateStoreUsesPrivatePermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertFileMode(t, stateDir, 0o700)
-	// The flat legacy-layout file is migrated into its shard on startup.
-	migratedPath, err := store.path("old", StateFileSuccess)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertFileMode(t, migratedPath, 0o600)
-	if _, err := os.Stat(oldStatePath); !os.IsNotExist(err) {
-		t.Fatalf("flat legacy state file should be migrated into shard, stat err=%v", err)
-	}
+	assertFileMode(t, shardPath, 0o600)
 
 	state := testPersistedState("sandbox1")
 	if err := store.WriteTmp(state); err != nil {
@@ -45,44 +40,6 @@ func TestStateStoreUsesPrivatePermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertFileMode(t, tmpPath, 0o600)
-}
-
-func TestStateStoreMigratesFlatLayoutOnStartup(t *testing.T) {
-	stateDir := t.TempDir()
-	flat := testPersistedState("flat-sandbox")
-	data, err := flat.MarshalJSON()
-	if err != nil {
-		t.Fatal(err)
-	}
-	flatPath := filepath.Join(stateDir, "flat-sandbox.creating.json")
-	if err := os.WriteFile(flatPath, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	store, err := newStateStore(stateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(flatPath); !os.IsNotExist(err) {
-		t.Fatalf("flat file should be migrated, stat err=%v", err)
-	}
-	record, err := store.LoadAny("flat-sandbox")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if record.Kind != StateFileCreating || record.State.SandboxID != "flat-sandbox" {
-		t.Fatalf("record = %#v", record)
-	}
-	records, err := store.Scan()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(records) != 1 || records[0].State.SandboxID != "flat-sandbox" {
-		t.Fatalf("scan records = %#v", records)
-	}
-	if filepath.Dir(records[0].Path) != filepath.Join(stateDir, shardOf("flat-sandbox")) {
-		t.Fatalf("record not in shard dir: %s", records[0].Path)
-	}
 }
 
 func TestStateStoreLifecycleRenames(t *testing.T) {

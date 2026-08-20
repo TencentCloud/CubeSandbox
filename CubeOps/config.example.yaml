@@ -47,3 +47,13 @@ redis_url: ""
 
 # --- Sandbox domain exposed to SDK clients via /config ---
 sandbox_domain: "cube.app"
+
+# --- Soft-delete tombstone purge (issue #973) ---
+# Scheduled hard-purge of soft-deleted ("tombstoned") agenthub rows. All
+# fields optional; retention/interval default to 7d/1h. OFF by default — the
+# purge is irreversible, so opt in explicitly. See docs/guide/soft-delete-purge.md.
+soft_delete_purge:
+  enable: false       # default-off: this purge is irreversible, opt in explicitly
+  dry_run: false      # count-only first rollout (no DELETE issued)
+  retention: "168h"   # rows with deleted_at older than now-retention are purged
+  interval: "1h"      # time between purge passes

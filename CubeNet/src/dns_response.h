@@ -98,31 +98,113 @@ static __always_inline bool dns_response_learning_enabled(__u32 ifindex)
 	return mvm_meta && (mvm_meta->dns_policy_flags & DNS_POLICY_FLAG_LEARNING_ENABLED);
 }
 
-/* Add an IPv4 A-record address as a temporary DNS-learned allow_out_v2 entry. */
+/* Add an IPv4 A-record address as temporary DNS-learned allow_out_v3
+ * entries.
+ *
+ * Two shapes, mirroring how the rule was installed:
+ *   - Plain (non-L7) allow: a single /32 (any-port) entry, exactly as the
+ *     pre-v3 dataplane did. Without this a plain domain-based allow rule
+ *     would resolve via DNS yet never be admitted by classify_egress_flow,
+ *     regressing to a default-deny drop.
+ *   - L7 allow: v3 carries the destination port in the LPM key, so we write
+ *     one exact (ip, port)/48 entry per (port, scheme) the query inherited
+ *     from its matched dns_allow_v2 rule. port_count == 0 means the default
+ *     {80/http, 443/https} set.
+ * Each entry is refreshed independently; an existing entry for the EXACT
+ * same key keeps its flags and its (zero) expiry, so a static rule
+ * survives a later DNS refresh of the same IP. "Exact" is checked via
+ * old->key_prefixlen: the LPM lookup alone is longest-prefix and would
+ * otherwise match a shorter COVERING entry (e.g. a static /24), making
+ * the learned entry wrongly inherit the static zero expiry (never ages)
+ * or the covering entry's flags.
+ */
 static __always_inline void dns_learn_response_ip(__u32 ifindex, __u32 ip, __u32 ttl,
-						  __u8 flags)
+						  const struct dns_query_track_value *query)
 {
-	struct lpm_key key = { .prefixlen = 32, .ip = ip };
-	struct net_policy_value_v2 value = {
-		.expires_at_ns = bpf_ktime_get_ns() + ((__u64)ttl * NSEC_PER_SEC),
-		.flags = flags,
-	};
-	struct net_policy_value_v2 *old_value;
+	__u64 now = bpf_ktime_get_ns();
+	__u64 expires = now + ((__u64)ttl * NSEC_PER_SEC);
 	void *inner_map;
 
-	inner_map = bpf_map_lookup_elem(&allow_out_v2, &ifindex);
+	inner_map = bpf_map_lookup_elem(&allow_out_v3, &ifindex);
 	if (!inner_map)
 		return;
 
-	/* DNS learning must not downgrade flags or shorten static allow rules. */
-	old_value = bpf_map_lookup_elem(inner_map, &key);
-	if (old_value) {
-		value.flags |= old_value->flags;
-		if (old_value->expires_at_ns == 0)
-			value.expires_at_ns = 0;
+	/* Learn the plain /32 (any-port) entry whenever the domain is
+	 * plain-allowed. For a non-L7 allow this is the whole policy; for a domain
+	 * that is both plain-allowed and L7-ruled (NET_POLICY_FLAG_L3_ALLOWED) it
+	 * coexists with the /48 L7 entries written below — a non-rule port falls
+	 * back to this /32 (plain SNAT) while the rule's ports match the longer
+	 * /48 prefix (L7 intercept) in classify_egress_flow. The L7/L3 marker bits
+	 * are stripped so the entry reads as a plain allow; for a non-L7 query
+	 * (flags==0) the mask is a no-op, so both cases share this one block.
+	 */
+	if (!(query->flags & NET_POLICY_FLAG_L7_REQUIRED) ||
+	    (query->flags & NET_POLICY_FLAG_L3_ALLOWED)) {
+		struct lpm_key_v3 key = { .prefixlen = 32, .ip = ip, .port = 0 };
+		struct net_policy_value_v3 value = {
+			.expires_at_ns = expires,
+			.flags = query->flags &
+				~(__u8)(NET_POLICY_FLAG_L7_REQUIRED | NET_POLICY_FLAG_L3_ALLOWED),
+			.scheme = L7_SCHEME_NONE,
+			.key_prefixlen = 32,
+		};
+		struct net_policy_value_v3 *old = bpf_map_lookup_elem(inner_map, &key);
+		if (old && old->key_prefixlen == key.prefixlen) {
+			value.flags |= old->flags;
+			if (old->expires_at_ns == 0)
+				value.expires_at_ns = 0;
+		}
+		bpf_map_update_elem(inner_map, &key, &value, BPF_ANY);
 	}
 
-	bpf_map_update_elem(inner_map, &key, &value, BPF_ANY);
+	/* A non-L7 allow is fully handled by the /32 entry above. */
+	if (!(query->flags & NET_POLICY_FLAG_L7_REQUIRED))
+		return;
+
+	/* L7 allow: one exact (ip, port)/48 entry per (port, scheme).
+	 *
+	 * The loop uses a fixed trip count with the bound as a guard inside the
+	 * body (not `break`), so clang fully unrolls it. That turns each
+	 * query->ports[i] into a constant-offset access the verifier accepts. A
+	 * `break`-bound loop is not unrolled and was rejected by the verifier as
+	 * a variable-offset map-value read (off beyond the 48-byte value).
+	 */
+	__u8 count = query->port_count;
+	bool use_defaults = count == 0;
+	__u8 limit = use_defaults ? 2 : count;
+	if (limit > MAX_L7_PORTS_PER_HOST)
+		limit = MAX_L7_PORTS_PER_HOST;
+
+#pragma unroll
+	for (__u8 i = 0; i < MAX_L7_PORTS_PER_HOST; i++) {
+		if (i >= limit)
+			continue;
+
+		__u16 port;
+		__u8 scheme;
+		if (use_defaults) {
+			port = (i == 0) ? bpf_htons(80) : bpf_htons(443);
+			scheme = (i == 0) ? L7_SCHEME_HTTP : L7_SCHEME_HTTPS;
+		} else {
+			port = query->ports[i].port;
+			scheme = query->ports[i].scheme;
+		}
+
+		struct lpm_key_v3 key = { .prefixlen = 48, .ip = ip, .port = port };
+		struct net_policy_value_v3 value = {
+			.expires_at_ns = expires,
+			.flags = query->flags,
+			.scheme = scheme,
+			.key_prefixlen = 48,
+		};
+		struct net_policy_value_v3 *old = bpf_map_lookup_elem(inner_map, &key);
+		if (old && old->key_prefixlen == key.prefixlen) {
+			value.flags |= old->flags;
+			if (old->expires_at_ns == 0)
+				value.expires_at_ns = 0;
+		}
+		bpf_map_update_elem(inner_map, &key, &value, BPF_ANY);
+	}
 }
 
 /* Return true when an answer RR carries an IN A record payload. */
@@ -142,7 +224,7 @@ static __always_inline bool dns_response_record_is_ipv4_a(const struct dns_rr_he
  */
 static __always_inline bool dns_process_response_answer(struct __sk_buff *skb,
 							__u32 *cursor, __u32 ifindex,
-							__u8 flags)
+							const struct dns_query_track_value *query)
 {
 	struct dns_rr_header rr;
 	__u16 rdlength;
@@ -161,7 +243,7 @@ static __always_inline bool dns_process_response_answer(struct __sk_buff *skb,
 			return false;
 		ttl = bpf_ntohl(rr.ttl);
 		if (ttl < 300) ttl = 300;
-		dns_learn_response_ip(ifindex, ip, ttl, flags);
+		dns_learn_response_ip(ifindex, ip, ttl, query);
 	}
 
 	/* Keep cursor advancement bounded even for unsupported RR types. */
@@ -187,7 +269,7 @@ static __always_inline struct dns_query_track_value *dns_lookup_response_query(
 
 /* Response hook for DNS replies returning to a sandbox.
  *
- * The path learns IPv4 A records into allow_out_v2 as temporary DNS-learned IP
+ * The path learns IPv4 A records into allow_out_v3 as temporary DNS-learned IP
  * policy entries. It intentionally preserves the existing filtering semantics.
  *
  * Marked __always_inline so the calling SEC("tc") program contains no
@@ -238,7 +320,7 @@ static __always_inline void dns_handle_response(struct __sk_buff *skb, __u32 dns
 	for (i = 0; i < DNS_MAX_RESPONSE_ANSWERS; i++) {
 		if (i >= ancount)
 			break;
-		if (!dns_process_response_answer(skb, &cursor, ifindex, query->flags))
+		if (!dns_process_response_answer(skb, &cursor, ifindex, query))
 			goto delete_query;
 	}
 

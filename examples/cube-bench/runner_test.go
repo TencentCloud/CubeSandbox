@@ -10,7 +10,7 @@ import (
 )
 
 func TestRunWarmupCompletesBeforeBenchmark(t *testing.T) {
-	requestBody, err := buildCreateRequestBody("tpl-warmup", "")
+	requestBody, err := buildCreateRequestBody("tpl-warmup", "", networkPolicyNone)
 	if err != nil {
 		t.Fatalf("buildCreateRequestBody returned error: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestBenchOneSendsHostMountMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepareHostMount returned error: %v", err)
 	}
-	requestBody, err := buildCreateRequestBody("tpl-test", hostMountValue)
+	requestBody, err := buildCreateRequestBody("tpl-test", hostMountValue, networkPolicyNone)
 	if err != nil {
 		t.Fatalf("buildCreateRequestBody returned error: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestBenchOneSendsHostMountMetadata(t *testing.T) {
 }
 
 func TestBenchOneDeletePath(t *testing.T) {
-	requestBody, err := buildCreateRequestBody("tpl-delete", "")
+	requestBody, err := buildCreateRequestBody("tpl-delete", "", networkPolicyNone)
 	if err != nil {
 		t.Fatalf("buildCreateRequestBody returned error: %v", err)
 	}

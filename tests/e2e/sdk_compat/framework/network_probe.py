@@ -56,20 +56,33 @@ def tcp_probe_command(
     )
 
 
-def assert_tcp_reachable(result, target: str) -> None:
+def assert_tcp_reachable(result, target: str, port: int | None = None) -> None:
+    if port is None:
+        port = TCP_TARGET_PORT
     assert_command_ok(result)
     assert result.stdout.strip() == "OK", (
-        f"TCP target {target}:{TCP_TARGET_PORT} should be reachable; "
+        f"TCP target {target}:{port} should be reachable; "
         f"stdout={result.stdout!r} stderr={result.stderr!r}"
     )
 
 
-def assert_tcp_blocked(result, target: str) -> None:
+def assert_tcp_blocked(result, target: str, port: int | None = None) -> None:
+    """Accept REJECT (FAIL:<errno>) or DROP (timeout / TimeoutError) as blocked."""
+    if port is None:
+        port = TCP_TARGET_PORT
     assert_command_ok(result)
     output = result.stdout.strip()
-    assert output.startswith("FAIL:"), (
-        f"TCP target {target}:{TCP_TARGET_PORT} should be blocked; "
+    blocked = output.startswith("FAIL:") or _is_timeout_block(output)
+    assert blocked, (
+        f"TCP target {target}:{port} should be blocked; "
         f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
+def _is_timeout_block(output: str) -> bool:
+    # Silent drop often surfaces as socket.timeout from settimeout, not errno.
+    return output.startswith("ERROR:") and (
+        "Timeout" in output or "timed out" in output.lower()
     )
 
 

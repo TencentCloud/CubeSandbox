@@ -187,3 +187,5 @@ replace github.com/tencentcloud/CubeSandbox/cubelog => ../cubelog
 replace github.com/tencentcloud/CubeSandbox/CubeDB => ../CubeDB
 
 replace github.com/tencentcloud/CubeSandbox/Cubelet => ../Cubelet
+
+replace github.com/tencentcloud/CubeSandbox/CubeNet/cubevs => ../CubeNet/cubevs

@@ -12,7 +12,7 @@ use std::io;
 use std::io::Write;
 use std::mem;
 use std::os::unix::io::AsRawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use std::time::SystemTime;
 use time::format_description::well_known::Rfc3339;
@@ -57,6 +57,7 @@ macro_rules! errf {
 }
 
 const LOG_ITEM_COUNT: usize = 1024;
+const LOG_REOPEN_INTERVAL: Duration = Duration::from_secs(1800);
 const LOG_DIR: &str = "/data/log/CubeShim/";
 const LOF_FILE: &str = "cube-shim-req.log";
 const STAT_FILE: &str = "cube-shim-stat.log";
@@ -115,6 +116,55 @@ struct StatItem {
     ret_code: StatRet,
     cost_time: u128,
     function_type: String,
+}
+
+struct ReopenableFile {
+    path: PathBuf,
+    file: tokio::fs::File,
+}
+
+impl ReopenableFile {
+    async fn open(path: &Path) -> CResult<Self> {
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(true)
+            .open(path)
+            .await
+            .map_err(|e| format!("open log file failed:{} file:{:?}", e, path))?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            file,
+        })
+    }
+
+    async fn reopen(&mut self) -> CResult<()> {
+        self.file
+            .flush()
+            .await
+            .map_err(|e| format!("flush log file before reopen failed:{}", e))?;
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(true)
+            .open(&self.path)
+            .await
+            .map_err(|e| format!("reopen log file failed:{} file:{:?}", e, self.path))?;
+        self.file = file;
+        Ok(())
+    }
+
+    async fn write(&mut self, content: &[u8]) -> CResult<()> {
+        self.file
+            .write_all(content)
+            .await
+            .map_err(|e| format!("write log file failed:{} file:{:?}", e, self.path))?;
+        self.file
+            .flush()
+            .await
+            .map_err(|e| format!("flush log file failed:{} file:{:?}", e, self.path))?;
+        Ok(())
+    }
 }
 
 impl Default for Log {
@@ -252,7 +302,7 @@ impl Log {
         });
 
         loop {
-            sleep(Duration::from_secs(1800)).await;
+            sleep(LOG_REOPEN_INTERVAL).await;
             if let Err(e) = send.send((LogType::Rotate, "".to_string())).await {
                 eprintln!("send rotate failed:{}", e);
             }
@@ -264,51 +314,21 @@ impl Log {
         log_file_path: &PathBuf,
         stat_file_path: &PathBuf,
     ) -> CResult<()> {
-        let log_file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .append(true)
-            .open(log_file_path.clone())
-            .await
-            .map_err(|e| format!("open log file failed:{} file:{:?}", e, log_file_path))?;
-        let mut log_writer = tokio::io::BufReader::new(log_file);
-
-        let stat_file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .append(true)
-            .open(stat_file_path.clone())
-            .await
-            .map_err(|e| format!("open stat file failed:{} file:{:?}", e, stat_file_path))?;
-        let mut stat_writer = tokio::io::BufReader::new(stat_file);
+        let mut log_writer = ReopenableFile::open(log_file_path).await?;
+        let mut stat_writer = ReopenableFile::open(stat_file_path).await?;
 
         //let lf = ['\n' as u8];
         while let Some(msg) = recv.recv().await {
             match msg.0 {
                 LogType::Log => {
-                    log_writer
-                        .write_all(msg.1.as_bytes())
-                        .await
-                        .map_err(|e| format!("write log file failed:{}", e))?;
-                    //log_writer.write_all(&lf).await.map_err(|e| format!("write log file failed:{}", e));
-                    log_writer
-                        .flush()
-                        .await
-                        .map_err(|e| format!("flush log failed:{}", e))?;
+                    log_writer.write(msg.1.as_bytes()).await?;
                 }
                 LogType::Stat => {
-                    stat_writer
-                        .write_all(msg.1.as_bytes())
-                        .await
-                        .map_err(|e| format!("write stat file failed:{}", e))?;
-                    //stat_writer.write_all(&lf).await.map_err(|e| format!("write stat file failed:{}", e));
-                    stat_writer
-                        .flush()
-                        .await
-                        .map_err(|e| format!("flush stat failed:{}", e))?;
+                    stat_writer.write(msg.1.as_bytes()).await?;
                 }
                 LogType::Rotate => {
-                    break;
+                    log_writer.reopen().await?;
+                    stat_writer.reopen().await?;
                 }
             }
         }
@@ -433,4 +453,81 @@ fn log_to_file(module: String, insid: String, log: String, func_type: String) ->
         .map_err(|e| format!("write file failed:{:?} file:{:?}", e, log_file))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn test_log_path() -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let test_id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "cube-shim-log-reopen-{}-{}-{}",
+            std::process::id(),
+            suffix,
+            test_id
+        ))
+    }
+
+    struct TestLogFiles {
+        active: PathBuf,
+        rotated: PathBuf,
+    }
+
+    impl TestLogFiles {
+        fn new() -> Self {
+            let active = test_log_path();
+            let rotated = active.with_extension("log.1");
+            Self { active, rotated }
+        }
+    }
+
+    impl Drop for TestLogFiles {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.active);
+            let _ = fs::remove_file(&self.rotated);
+        }
+    }
+
+    #[tokio::test]
+    async fn reopens_after_periodic_rotation() {
+        let files = TestLogFiles::new();
+        let mut writer = ReopenableFile::open(&files.active).await.unwrap();
+
+        writer.write(b"before\n").await.unwrap();
+        fs::rename(&files.active, &files.rotated).unwrap();
+        fs::File::create(&files.active).unwrap();
+        writer.reopen().await.unwrap();
+        writer.write(b"after\n").await.unwrap();
+        drop(writer);
+
+        assert_eq!(fs::read_to_string(&files.rotated).unwrap(), "before\n");
+        assert_eq!(fs::read_to_string(&files.active).unwrap(), "after\n");
+    }
+
+    #[tokio::test]
+    async fn failed_reopen_keeps_current_descriptor_usable() {
+        let files = TestLogFiles::new();
+        let mut writer = ReopenableFile::open(&files.active).await.unwrap();
+
+        writer.write(b"before\n").await.unwrap();
+        writer.path = std::env::temp_dir();
+        assert!(writer.reopen().await.is_err());
+        writer.write(b"after\n").await.unwrap();
+        drop(writer);
+
+        assert_eq!(
+            fs::read_to_string(&files.active).unwrap(),
+            "before\nafter\n"
+        );
+    }
 }

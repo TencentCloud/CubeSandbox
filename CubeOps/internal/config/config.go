@@ -65,6 +65,20 @@ type Config struct {
 	// Sandbox domain exposed to SDK clients; matches SDK handler's
 	// CUBE_API_SANDBOX_DOMAIN env so the /config endpoint stays in sync.
 	SandboxDomain string `yaml:"sandbox_domain"`
+
+	// SoftDeletePurge (issue #973) configures the scheduled hard-purge of
+	// soft-deleted (tombstoned) rows. All fields optional; defaults are enforced
+	// by CubeDB/tombstone (7-day retention, hourly). DISABLED by default — the
+	// purge is irreversible, so it must be opted into explicitly.
+	SoftDeletePurge SoftDeletePurgeConf `yaml:"soft_delete_purge"`
+}
+
+// SoftDeletePurgeConf configures the CubeOps tombstone purger.
+type SoftDeletePurgeConf struct {
+	Enable    *bool         `yaml:"enable"` // nil -> default-off (irreversible; opt in)
+	DryRun    bool          `yaml:"dry_run"`
+	Retention time.Duration `yaml:"retention"` // <=0 -> 7d; (0,1h) clamped up to 1h
+	Interval  time.Duration `yaml:"interval"`  // <=0 -> 1h; (0,1m) clamped up to 1m
 }
 
 // Load reads configuration from YAML + environment variables (env wins).

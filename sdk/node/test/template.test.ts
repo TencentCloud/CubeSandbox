@@ -216,6 +216,32 @@ describe("Template.rebuild", () => {
   });
 });
 
+describe("Template.setAlias", () => {
+  it("PUTs alias to /templates/:id/alias and parses the response", async () => {
+    handler = (req) => {
+      expect(req.method).toBe("PUT");
+      expect(req.pathname).toBe("/templates/tpl-1/alias");
+      expect(JSON.parse(req.body.toString())).toEqual({ alias: "my-alias" });
+      return {
+        status: 200,
+        json: { templateID: "tpl-1", aliases: ["my-alias"], status: "READY" },
+      };
+    };
+    const info = await Template.setAlias("tpl-1", "my-alias", { config: makeConfig() });
+    expect(info.templateId).toBe("tpl-1");
+    expect(info.name).toBe("my-alias");
+  });
+
+  it("sends an empty alias string when clearing (null)", async () => {
+    handler = (req) => {
+      expect(JSON.parse(req.body.toString())).toEqual({ alias: "" });
+      return { status: 200, json: { templateID: "tpl-1", aliases: [] } };
+    };
+    const info = await Template.setAlias("tpl-1", null, { config: makeConfig() });
+    expect(info.name).toBe("");
+  });
+});
+
 describe("Template.getBuildLogs", () => {
   it("GETs the build logs endpoint and returns the payload", async () => {
     handler = (req) => {

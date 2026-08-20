@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/tencentcloud/CubeSandbox/CubeDB/tombstone"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/config"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/server"
@@ -47,6 +48,24 @@ func main() {
 		os.Exit(1)
 	}
 	defer s.Close()
+
+	// Launch the scheduled tombstone purger (issue #973): hard-purges
+	// soft-deleted agenthub rows older than the configured retention.
+	// Stops when ctx is cancelled (SIGINT/SIGTERM). DISABLED by default: the
+	// purge is irreversible — opt in via soft_delete_purge.enable: true.
+	sp := cfg.SoftDeletePurge
+	spEnabled := false
+	if sp.Enable != nil {
+		spEnabled = *sp.Enable
+	}
+	tombstone.Start(ctx, s.DB(), tombstone.Config{
+		Enabled:   spEnabled,
+		DryRun:    sp.DryRun,
+		Retention: sp.Retention,
+		Interval:  sp.Interval,
+		Tables:    []string{store.AgenthubInstanceTable, store.AgenthubSnapshotTable, store.AgenthubTemplateTable},
+		LockName:  "cubeops_tombstone_purge_v1",
+	})
 
 	// Bootstrap JWT secret: use JWT_SECRET env var if set, otherwise
 	// auto-generate and persist to DB (zero-config deployment).

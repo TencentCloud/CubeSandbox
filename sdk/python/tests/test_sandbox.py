@@ -2600,6 +2600,22 @@ class TestTemplateAPI:
             Template.build(image="python:3.11-slim", config=make_config())
         assert "name" not in post.call_args.kwargs["json"]
 
+    def test_set_alias_forwards_put_with_alias(self):
+        body = {"templateID": "tpl-1", "aliases": ["my-alias"], "status": "READY"}
+        with patch("requests.Session.put", return_value=mock_response(body)) as put:
+            info = Template.set_alias("tpl-1", "my-alias", config=make_config())
+        assert put.call_args.args[0].endswith("/templates/tpl-1/alias")
+        assert put.call_args.kwargs["json"] == {"alias": "my-alias"}
+        assert info.template_id == "tpl-1"
+        assert info.name == "my-alias"
+
+    def test_set_alias_clear_sends_empty_string(self):
+        body = {"templateID": "tpl-1", "aliases": [], "status": "READY"}
+        with patch("requests.Session.put", return_value=mock_response(body)) as put:
+            info = Template.set_alias("tpl-1", None, config=make_config())
+        assert put.call_args.kwargs["json"] == {"alias": ""}
+        assert info.name == ""
+
     def test_template_get_parses_network_fields(self):
         body = {
             "templateID": "tpl-network",

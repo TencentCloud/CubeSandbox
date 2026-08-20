@@ -258,6 +258,24 @@ Optional:
 - `SDK_E2E_SKIP_INTERNET_TESTS`: skip tests marked `requires_internet` when
   the runner or environment has no stable public egress. Defaults to `false`.
 - `SDK_E2E_REPORT_DIR`: JSONL report directory. Defaults to `reports/sdk-dual`.
+- `SDK_E2E_WORKERS`: pytest-xdist worker count for `--run-e2e`. Parallelism is
+  opt-in; unset (or `0`/`1`/`no`/`off`) runs serial to avoid overloading the
+  co-located control plane. Set an integer, `auto`, or `logical` to fan out. An
+  explicit `-n`/`--numprocesses` (or `-p no:xdist`) always wins. Ignored without
+  `--run-e2e`, so the hermetic `framework` gate stays serial.
+- `SDK_E2E_TEMPLATE_BUILD_CONCURRENCY`: max concurrent live template builds
+  across xdist workers. Defaults to `1` (builds fully serialized so results match
+  a serial run); values `< 1` or non-integer fall back to `1`. When the value is
+  at least the worker count the throttle is skipped. POSIX-only (a no-op without
+  `fcntl`). The throttle is namespaced per-UID, not per-run: two concurrent
+  `--run-e2e` jobs of the same user on one host share the slots and serialize
+  their builds against each other. This is intentional -- both jobs contend on
+  the one shared build host -- and the `SDK_E2E_TEMPLATE_BUILD_WAIT` ceiling
+  bounds how long a job waits before degrading to unthrottled.
+- `SDK_E2E_TEMPLATE_BUILD_WAIT`: per-predecessor ceiling (seconds) on waiting for
+  a build slot before a worker gives up and builds unthrottled, so one wedged
+  peer cannot stall the whole suite. The effective wait scales by the worker
+  count. Defaults to `1800`; `<= 0` waits forever.
 - `CUBE_PYTHON_SDK_PATH`: override local CubeSandbox Python SDK path.
 - `SDK_E2E_PLATFORM_LIFECYCLE`: enable platform-managed lifecycle cases
   (`auto-pause`, `auto-resume`, `auto-kill`). Defaults to `false`.
@@ -302,7 +320,10 @@ probes CubeProxy admin health (`heartbeat_last_pushed_ms`) when
 
 ## Reporting
 
-The suite writes JSONL events to `SDK_E2E_REPORT_DIR/events.jsonl`.
+The suite writes JSONL events to `SDK_E2E_REPORT_DIR`. A serial run writes a
+single `events.jsonl`; under pytest-xdist each worker writes its own
+`events-gw0.jsonl`, `events-gw1.jsonl`, ... to avoid interleaved lines, so read
+or aggregate `events*.jsonl` rather than a fixed `events.jsonl`.
 
 To generate a standard HTML report, pass pytest-html options explicitly:
 
@@ -395,8 +416,12 @@ Capability markers:
 - `@pytest.mark.requires_cubeproxy`: platform lifecycle cases that depend on cube-proxy and lifecycle-manager coordination. Skipped unless `SDK_E2E_PLATFORM_LIFECYCLE=true`.
 - `@pytest.mark.volume`: Volume Plugin cases. Skipped unless `SDK_E2E_VOLUME_PLUGIN=true`.
 - `@pytest.mark.auth`: `CUBE_API_KEY` simple-key auth cases. Skipped unless `CUBE_API_KEY` is set for the runner and the backend supports `auth_simple_key` (CubeSandbox only).
-- Common capabilities include `lifecycle`, `commands`, `filesystem`, and `run_code`.
-- Shared optional capabilities include `pause_resume`, `network_allow_deny`, and `network_public_access`.
+- Common capabilities include `lifecycle`, `commands`, `filesystem`,
+  `filesystem_extended`, and `run_code`.
+- Optional capabilities include `code_interpreter`, `pause_resume`, `set_timeout`,
+  `rollback_clone`, `network_allow_deny`, `network_public_access`,
+  `network_mask_request_host`, `platform_lifecycle`, `host_mount`,
+  `volume_plugin`, and `auth_simple_key`.
 - `platform_lifecycle` is available only to CubeSandbox platform-managed lifecycle cases.
 - `host_mount` is a CubeSandbox-only extension; `cases/host-mount/` uses it via
   `@pytest.mark.requires_capability("host_mount")` to skip backends (e.g. e2b) that

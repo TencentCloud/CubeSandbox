@@ -82,12 +82,24 @@ cd "$REPO_ROOT"
 # same package set (`-short` skips the Redis/KVM-dependent cases).
 WITH_TESTS=(
 	"cubeops|Go|0|make cubeops-test"
-	"cubemaster|Go|0|make builder-run BUILDER_CMD='cd /workspace/CubeMaster && go mod download && make proto && if [ -f test/conf.yaml ]; then export CUBE_MASTER_CONFIG_PATH=/workspace/CubeMaster/test/conf.yaml; fi && CI=true go test -short -timeout=20m ./api/... ./pkg/...'"
+	# -gcflags=all=-l disables inlining, which is REQUIRED by the gomonkey-based
+	# tests in ./pkg/templatecenter: gomonkey rewrites a function's machine code
+	# to redirect it, but an inlined call site bypasses that patch, so a stub
+	# intermittently fails to take effect and the real function runs (e.g. the
+	# flaky "template store is not initialized" failures). The repo already uses
+	# this flag for the integration tests (CubeMaster/Makefile testlocal/testtt).
+	"cubemaster|Go|0|make builder-run BUILDER_CMD='cd /workspace/CubeMaster && go mod download && make proto && if [ -f test/conf.yaml ]; then export CUBE_MASTER_CONFIG_PATH=/workspace/CubeMaster/test/conf.yaml; fi && CI=true go test -short -gcflags=all=-l -timeout=20m ./api/... ./pkg/...'"
 	# cubelet-network: the standalone network-agent module was removed in #1285 and
 	# folded into Cubelet/network/runtime (NetworkController). Its tests moved there
 	# and need the generated CubeNet/cubevs code but no cubecow/CGO, so build cubevs
 	# then run just the runtime package rather than the whole Cubelet suite.
 	"cubelet-network|Go|0|make builder-run BUILDER_CMD='cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && go mod download && go test ./network/runtime/...'"
+	# cubevs: the CubeNet/cubevs module's OWN unit tests (dataplane policy, DNS
+	# learning, migration, dump, classify). cubelet-network builds cubevs's
+	# generated code but runs Cubelet's tests, so these never ran. cubevs-test
+	# regenerates the BPF objects (make gen) and runs the full module set in a
+	# privileged root builder (eBPF load + bpffs mount need the privilege).
+	"cubevs|Go|0|make cubevs-test"
 	"cubecow|Go+CGO|0|make cubecow-test-native"
 	"cube-lifecycle-manager|Go|0|make builder-run BUILDER_CMD='cd /workspace/cube-lifecycle-manager && go mod download && go test ./...'"
 	"cube-api|Rust|0|make cube-api-test"

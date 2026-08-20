@@ -250,6 +250,49 @@ sudo tail -F /data/log/CubeAPI/cube-api-$(date +%F).log
 sudo tail -200 /data/log/CubeVmm/vmm.log
 ```
 
+### Rotating CubeShim and VMM logs
+
+CubeShim and the VMM keep their log files open while they run. CubeShim
+reopens its files on an internal 30-minute rotation event. The VMM control
+thread owns a monotonic `timerfd` and emits the existing `LOG_CTRL_REOPEN`
+control record once per hour. Reopen is schedule-driven: an external
+`rename` + `create` is picked up at the next scheduled reopen rather than
+detected immediately on an arbitrary write. The timer is owned by the VMM
+control thread, not by deferred logger initialization or a vCPU/API thread.
+The host-side policy should run hourly and use `rename` + `create`; do not use
+`copytruncate`.
+
+For example, install the following as `/etc/logrotate.d/cubesandbox` and make
+sure the host invokes `logrotate` hourly:
+
+```text
+/data/log/CubeVmm/vmm.log
+/data/log/CubeShim/*.log {
+    hourly
+    rotate 24
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0640 root root
+}
+```
+
+`rotate 24` retains 24 hourly files; adjust it to the required retention period.
+`delaycompress` keeps the newest rotated file uncompressed for one cycle because
+a writer may still use the old descriptor until its next scheduled reopen.
+CubeShim's internal event runs every 30 minutes, while the VMM control thread
+sends a reopen control event every hour. No `postrotate` signal or service
+restart is required. This policy guarantees bounded retention on the host,
+but does not promise immediate handling of an arbitrary manual rotation; it
+does not support `copytruncate`.
+
+The example uses `root root` because the bundled one-click systemd services run as
+root. If CubeShim or the VMM run under another account, set the `create` owner and
+group to that account; otherwise a newly-created file may not be reopenable.
+The `0640` mode in this example applies to files created by `logrotate`; the
+CubeShim and VMM writers themselves continue to use the process umask.
+
 ### `journalctl` startup logs
 
 journalctl captures **stdout/stderr from when systemd starts the process until it stabilizes (or exits)**, useful for:

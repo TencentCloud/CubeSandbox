@@ -3,10 +3,16 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from framework.assertions import assert_command_ok
-from framework.capabilities import NETWORK_ALLOW_DENY, NETWORK_PUBLIC_ACCESS
+from framework.capabilities import (
+    NETWORK_ALLOW_DENY,
+    NETWORK_ALWAYS_DENIED,
+    NETWORK_PUBLIC_ACCESS,
+)
 from framework.network_probe import (
     ALTERNATE_TCP_TARGET_IP,
     TCP_TARGET_IP,
@@ -171,3 +177,47 @@ def test_restricted_public_access_requires_traffic_token(
             headers={header_name: token},
         )
         assert_public_response(response)
+
+
+# Representative addresses from CubeVS built-in deny CIDRs when public egress
+# is enabled (link-local + RFC1918; see docs/guide/network-policy.md).
+ALWAYS_DENIED_TARGETS = (
+    os.environ.get("SDK_E2E_ALWAYS_DENIED_LINK_LOCAL_IP", "169.254.1.1"),
+    os.environ.get("SDK_E2E_ALWAYS_DENIED_PRIVATE_IP", "10.255.255.1"),
+)
+ALWAYS_DENIED_PORT = int(os.environ.get("SDK_E2E_ALWAYS_DENIED_PORT", "80"))
+
+
+@pytest.mark.requires_capability(NETWORK_ALWAYS_DENIED)
+@pytest.mark.sandbox_create_options(allow_internet_access=True)
+def test_always_denied_blocks_link_local_and_private_by_default(
+    sdk_sandbox,
+    sdk_e2e_config,
+):
+    """Smoke: with public egress on, representative private/link-local targets fail.
+
+    This is not a strong proof that CubeVS always-deny is installed: generic
+    addresses like 169.254.1.1 / 10.255.255.1 are usually unreachable even
+    without policy. A discriminating check needs a lab-routable private IP
+    that would succeed if always-deny were absent (not wired here).
+    """
+    public_ok = sdk_sandbox.run_command(
+        tcp_probe_command(
+            TCP_TARGET_IP,
+            TCP_TARGET_PORT,
+            timeout=sdk_e2e_config.network_probe_timeout,
+        ),
+        timeout=sdk_e2e_config.command_timeout,
+    )
+    assert_tcp_reachable(public_ok, TCP_TARGET_IP)
+
+    for target in ALWAYS_DENIED_TARGETS:
+        blocked = sdk_sandbox.run_command(
+            tcp_probe_command(
+                target,
+                ALWAYS_DENIED_PORT,
+                timeout=sdk_e2e_config.network_probe_timeout,
+            ),
+            timeout=sdk_e2e_config.command_timeout,
+        )
+        assert_tcp_blocked(blocked, target, ALWAYS_DENIED_PORT)

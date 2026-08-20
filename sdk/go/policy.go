@@ -4,6 +4,7 @@
 package cubesandbox
 
 import (
+	"fmt"
 	"net"
 	"strings"
 )
@@ -16,12 +17,52 @@ import (
 // Match holds rule match conditions. All fields are optional; an empty Match
 // matches any request. Fields are AND-ed; Method values are OR-ed;
 // sni/host/scheme are compared case-insensitively server-side.
+//
+// Port + Scheme together drive which TCP port CubeEgress intercepts on the
+// sandbox side. Both must be set together or both omitted:
+//   - Both omitted → default set {80/http, 443/https} (backward compatible).
+//   - Both set → CubeEgress intercepts only that (host, port, scheme) tuple.
+//
+// Every rule sharing the same (host, port) MUST agree on Scheme — a port can
+// only route to one nginx listener. The server rejects the whole policy on
+// mismatch.
 type Match struct {
 	SNI    string   `json:"sni,omitempty"`
 	Host   string   `json:"host,omitempty"`
 	Method []string `json:"method,omitempty"`
 	Path   string   `json:"path,omitempty"`
 	Scheme string   `json:"scheme,omitempty"`
+	Port   int      `json:"port,omitempty"`
+}
+
+// validate checks the port/scheme pair, mirroring the Python and TypeScript
+// SDKs and the CubeAPI/CubeMaster server-side contract: a set Port must be in
+// [1, 65535] and must be paired with Scheme, and a set Scheme must be http or
+// https (case-insensitive). Client-side validation catches typos before the
+// network round-trip; the server rejects the same shapes.
+func (m Match) validate() error {
+	if m.Scheme != "" {
+		scheme := strings.ToLower(strings.TrimSpace(m.Scheme))
+		if scheme != "http" && scheme != "https" {
+			return fmt.Errorf("match.scheme must be 'http' or 'https', got %q", m.Scheme)
+		}
+	}
+	if m.Port != 0 {
+		if m.Port < 1 || m.Port > 65535 {
+			return fmt.Errorf("match.port must be in [1, 65535], got %d", m.Port)
+		}
+		if m.Scheme == "" {
+			return fmt.Errorf("match.port requires match.scheme to be set")
+		}
+	}
+	return nil
+}
+
+// normalized returns a copy with Scheme canonicalized (stripped, lowercased)
+// so the wire form is consistent regardless of caller casing.
+func (m Match) normalized() Match {
+	m.Scheme = strings.ToLower(strings.TrimSpace(m.Scheme))
+	return m
 }
 
 // Inject injects a credential header on an allowed HTTPS request whose

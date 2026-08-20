@@ -78,6 +78,11 @@ pub struct EgressRule {
 ///
 /// Multi-field semantics: AND across fields, OR within `method`.
 /// Comparisons on sni/host/scheme are case-insensitive.
+///
+/// `port` + `scheme` together pin the (host, port) tuple CubeEgress intercepts.
+/// Both nil keeps the legacy default {80/http, 443/https}. When `port` is set,
+/// `scheme` MUST also be set — same-`(host, port)` rules across the policy
+/// must agree on `scheme` (the server rejects the whole policy on mismatch).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, ToSchema)]
 pub struct EgressRuleMatch {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -90,6 +95,8 @@ pub struct EgressRuleMatch {
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scheme: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<i32>,
 }
 
 /// Rule action.
@@ -950,6 +957,17 @@ pub struct CreateTemplateRequest {
 pub struct RebuildTemplateRequest {
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Body for PUT /templates/:id/alias (set / modify / clear alias).
+///
+/// `alias` is `None` / null / empty string ⇒ clear the current alias.
+/// A non-empty value is validated by CubeMaster's `validateTemplateAlias`
+/// (the single source of truth; CubeAPI does not re-validate).
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetTemplateAliasRequest {
+    #[serde(default)]
+    pub alias: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

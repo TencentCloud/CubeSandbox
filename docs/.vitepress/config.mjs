@@ -2,9 +2,16 @@ import { defineConfig } from 'vitepress'
 import { withMermaid } from 'vitepress-plugin-mermaid'
 
 export default withMermaid(defineConfig({
-  title: "Cube Sandbox",
+  title: "CubeSandbox",
   description: "Instant, Concurrent, Secure & Lightweight Sandbox Service for AI Agents",
   srcExclude: ['**/_template.md'],
+
+  markdown: {
+    // Shiki has no bundled PromQL grammar; alias so ```promql blocks do not warn.
+    languageAlias: {
+      promql: 'js'
+    }
+  },
   
   head: [
     ['link', { rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg' }]
@@ -98,8 +105,9 @@ export default withMermaid(defineConfig({
           { text: 'Architecture', link: '/architecture/overview' },
           { text: 'Developer', link: '/dev/' },
           { text: 'Blog', link: '/blog/' },
-          { text: 'About us', link: '/about-us' },
           { text: 'Changelog', link: '/changelog/' },
+          { text: 'Contributors', link: '/contributors' },
+          { text: 'About us', link: '/about-us' },
           { text: 'GitHub', link: 'https://github.com/tencentcloud/CubeSandbox' }
         ],
         sidebar: {
@@ -170,6 +178,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: 'WebUI Dashboard', link: '/guide/webui' },
                 { text: 'Service Management & Logs', link: '/guide/service-management' },
+                { text: 'CLI Tools', link: '/guide/cli-tools' },
                 { text: 'CubeMaster Scheduler Configuration', link: '/guide/cubemaster-scheduler-config' },
                 { text: 'Node Isolation', link: '/guide/node-isolation' },
                 { text: 'Sandbox Resource Metrics', link: '/guide/resource-metrics' },
@@ -177,7 +186,8 @@ export default withMermaid(defineConfig({
                 { text: 'Template Inspection & Request Preview', link: '/guide/template-inspection-and-preview' },
                 { text: 'HTTPS & Domain Resolution', link: '/guide/https-and-domain' },
                 { text: 'Network Hardening', link: '/guide/network-hardening' },
-                { text: 'Authentication', link: '/guide/authentication' }
+                { text: 'Authentication', link: '/guide/authentication' },
+                { text: 'Soft-delete Purge', link: '/guide/soft-delete-purge' }
               ]
             },
             {
@@ -202,7 +212,9 @@ export default withMermaid(defineConfig({
                   link: '/guide/usecases/',
                   items: [
                     { text: 'trpc-agent-go', link: '/guide/usecases/trpc-agent-go' },
-                    { text: 'Lexmount AI', link: '/guide/usecases/lexmount-browser-agent' }
+                    { text: 'Lexmount AI', link: '/guide/usecases/lexmount-browser-agent' },
+                    { text: 'Hermes Agent', link: '/guide/usecases/hermes-agent' },
+                    { text: 'Lenovo Cloud Agent', link: '/guide/usecases/lenovo-cloud-agent' }
                   ]
                 },
                 { text: 'Cube 100 Program', link: '/guide/cube100' },
@@ -241,7 +253,7 @@ export default withMermaid(defineConfig({
       label: '简体中文',
       lang: 'zh',
       link: '/zh/',
-      title: 'Cube Sandbox',
+      title: 'CubeSandbox',
       description: '一个极速启动、高并发、安全且轻量化的 AI Agent 沙箱服务',
       themeConfig: {
         nav: [
@@ -250,8 +262,9 @@ export default withMermaid(defineConfig({
           { text: '架构', link: '/zh/architecture/overview' },
           { text: '开发者', link: '/zh/dev/' },
           { text: '博客', link: '/zh/blog/' },
-          { text: '关于我们', link: '/zh/about-us' },
           { text: '更新日志', link: '/zh/changelog/' },
+          { text: '贡献者', link: '/zh/contributors' },
+          { text: '关于我们', link: '/zh/about-us' },
           { text: 'GitHub', link: 'https://github.com/tencentcloud/CubeSandbox' }
         ],
         sidebar: {
@@ -322,6 +335,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: 'WebUI 控制台', link: '/zh/guide/webui' },
                 { text: '服务管理与日志', link: '/zh/guide/service-management' },
+                { text: '命令行工具', link: '/zh/guide/cli-tools' },
                 { text: 'CubeMaster 调度器配置参考', link: '/zh/guide/cubemaster-scheduler-config' },
                 { text: '隔离节点', link: '/zh/guide/node-isolation' },
                 { text: '沙箱资源指标', link: '/zh/guide/resource-metrics' },
@@ -329,7 +343,8 @@ export default withMermaid(defineConfig({
                 { text: '模板检查与请求预览', link: '/zh/guide/template-inspection-and-preview' },
                 { text: 'HTTPS 证书与域名解析', link: '/zh/guide/https-and-domain' },
                 { text: '网络加固', link: '/zh/guide/network-hardening' },
-                { text: '鉴权', link: '/zh/guide/authentication' }
+                { text: '鉴权', link: '/zh/guide/authentication' },
+                { text: '软删除数据清理', link: '/zh/guide/soft-delete-purge' }
               ]
             },
             {
@@ -354,7 +369,9 @@ export default withMermaid(defineConfig({
                   link: '/zh/guide/usecases/',
                   items: [
                     { text: 'trpc-agent-go', link: '/zh/guide/usecases/trpc-agent-go' },
-                    { text: 'Lexmount AI', link: '/zh/guide/usecases/lexmount-browser-agent' }
+                    { text: 'Lexmount AI', link: '/zh/guide/usecases/lexmount-browser-agent' },
+                    { text: 'Hermes Agent', link: '/zh/guide/usecases/hermes-agent' },
+                    { text: 'Lenovo Cloud Agent', link: '/zh/guide/usecases/lenovo-cloud-agent' }
                   ]
                 },
                 { text: 'Cube 100 计划', link: '/zh/guide/cube100' },

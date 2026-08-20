@@ -64,6 +64,10 @@ docker push   my-registry.example.com/my-team/my-sandbox:v1
 
 镜像仓库需要能被 Cube 集群拉到。
 
+::: tip 明文 HTTP 仓库
+镜像引用须加 `http://` 前缀，例如 `http://my-registry.example.com/my-team/my-sandbox:v1`。
+:::
+
 ### 2.3 创建 Cube 模板
 
 暴露 `49983`（envd），外加你自己应用监听的端口：

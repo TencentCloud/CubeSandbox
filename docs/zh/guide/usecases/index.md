@@ -50,3 +50,5 @@ lang: zh-CN
 | --- |------------| --- | --- |
 | [trpc-agent-go：基于 Cube Sandbox 的安全代码执行后端](./trpc-agent-go.md) | joeyczheng | 2026-06-03 | agent, code-execution, e2b, golang |
 | [Lexmount AI：把浏览器运行时搬进 Agent 沙箱](./lexmount-browser-agent.md) | 熊袖璋 | 2026-08-13 | agent, browser, browser-runtime, production |
+| [Hermes Agent：在 Cube Sandbox 中运行常驻 Agent 平台](./hermes-agent.md) | 陈金博 | 2026-08-20 | agent, persistence, skills, host-mount |
+| [Lenovo Cloud Agent：从 Daytona 到 CubeSandbox 的沙箱迁移](./lenovo-cloud-agent.md) | 李健 | 2026-08-20 | agent, migration, daytona, e2b-compat |

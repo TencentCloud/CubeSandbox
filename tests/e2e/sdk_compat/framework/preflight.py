@@ -5,13 +5,46 @@ from __future__ import annotations
 
 import importlib
 import os
-from typing import Any
+import time
+from typing import Any, Callable, TypeVar
 
 from adapters.api_adapter import ApiClient
 from framework.config import SdkE2EConfig
 from framework.models import first_present
 from framework.platform_lifecycle import probe_platform_lifecycle
 from framework.reporting import JsonlReporter
+
+T = TypeVar("T")
+
+# Under pytest-xdist every worker runs this preflight once, so N workers issue
+# their health/template reads against the co-located control plane at nearly the
+# same instant. A single transient blip there (a warmup 401, a 503, a dropped
+# connection) would otherwise fail one worker's preflight and — because preflight
+# is a session-scoped autouse fixture — error every test that worker owns. Retry
+# the read a few times with a short backoff so a momentary hiccup does not sink a
+# whole worker; a genuinely down/misconfigured server still fails after the
+# retries and reports the real error.
+_PREFLIGHT_READ_ATTEMPTS = 3
+_PREFLIGHT_READ_BACKOFF = 2.0
+
+
+def _retry_transient(fn: Callable[[], T], *, attempts: int = _PREFLIGHT_READ_ATTEMPTS,
+                     backoff: float = _PREFLIGHT_READ_BACKOFF) -> T:
+    """Call ``fn`` and retry it on any exception up to ``attempts`` times.
+
+    Preflight reads are pure GETs (health, template metadata), so retrying is
+    safe. The last exception propagates once the attempts are exhausted.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 - preflight aggregates diagnostics
+            last_exc = exc
+            if attempt < attempts:
+                time.sleep(backoff * attempt)
+    assert last_exc is not None
+    raise last_exc
 
 
 def run_preflight(
@@ -37,7 +70,7 @@ def run_preflight(
     api = ApiClient(config)
     try:
         try:
-            health = api.health()
+            health = _retry_transient(api.health)
             details["health"] = health
             if health.get("status") not in ("ok", "healthy"):
                 errors.append(f"CubeAPI health returned unexpected status: {health!r}")
@@ -48,7 +81,7 @@ def run_preflight(
             template_summaries = []
             try:
                 for template_id in sorted(effective_template_ids):
-                    template = api.get_template(template_id)
+                    template = _retry_transient(lambda tid=template_id: api.get_template(tid))
                     template_summaries.append(_template_summary(template_id, template))
                     if not template:
                         errors.append(f"template {template_id!r} was not found")

@@ -7,6 +7,11 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+// bpfFSPath is the bpffs mount point used for pinning maps. It is a var (not a
+// const) so tests can point it at a temporary bpffs mount instead of the real
+// /sys/fs/bpf.
+var bpfFSPath = "/sys/fs/bpf"
+
 func pinPath(name string) string {
 	path := filepath.Join(bpfFSPath, name)
 

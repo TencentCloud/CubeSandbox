@@ -59,6 +59,9 @@ make cubemaster
 make cubelet
 make agent
 make shim
+
+# 清理本地 Go/Rust 编译产物（不清全局缓存）
+make clean
 ```
 
 完整的构建目标列表请参见 [Makefile](./Makefile)。
@@ -81,7 +84,7 @@ make shim
 
 ## 提交 Pull Request
 
-1. **Fork** 仓库，并从 `main` 分支创建功能分支。
+1. **Fork** 仓库，并从 `master` 分支创建功能分支。
 2. **修改代码** — 保持每个提交专注且原子化。
 3. **测试** — 确保现有测试和 Lint 检查均能通过。
 4. **添加测试** — 行为变更时请补充针对性的测试覆盖。

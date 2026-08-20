@@ -3,7 +3,7 @@
 本文面向**第一次使用 Volume 插件**的用户：按顺序完成下面步骤，即可用 COS 做持久化存储（创建 Volume → 挂载到沙箱 → 读写 → 解绑 → 删除）。
 
 > **版本要求**：Cube 平台 **≥ 0.6.0**、Python SDK **`cubesandbox` ≥ 0.6.0**。  
-> 协议与 Hook 细节见 [Volume 插件框架](../../docs/zh/guide/volume-plugin.md)。
+> 协议与 Hook 细节见 [Volume 插件框架](../../../docs/zh/guide/volume-plugin.md)。
 
 **默认走 binary 插件**（`driver=cos`，Shell + coscmd + cosfs，最容易跑通）。若要用 Go rpc 插件（`driver=cos-rpc`），见文末 [rpc 路径](#rpc-路径可选)。
 
@@ -355,7 +355,7 @@ python3 verify_volume.py
 | SDK 写文件失败 | 是否设置 `CUBE_PROXY_NODE_IP`；CubeAPI / 模板是否 READY |
 | `Volume.create` 无 driver 但不是 cos | `volume_plugins` **列表顺序**：第一项才是默认 driver |
 
-更多见 [框架指南 §8 故障排查](../../docs/zh/guide/volume-plugin.md#八调试与排障)。
+更多见 [框架指南 §8 故障排查](../../../docs/zh/guide/volume-plugin.md#调试与排障)。
 
 ---
 
@@ -419,4 +419,4 @@ examples/volume/cos/
 | [binary/README.zh.md](binary/README.zh.md) | 插件脚本实现细节、手动 attach/detach |
 | [rpc/README.zh.md](rpc/README.zh.md) | rpc 构建、systemd、双插件并存 |
 | [verify_volume.py](verify_volume.py) | Python SDK 自动化验证 |
-| [Volume 插件框架](../../docs/zh/guide/volume-plugin.md) | 协议、RefCount、Hook 语义 |
+| [Volume 插件框架](../../../docs/zh/guide/volume-plugin.md) | 协议、RefCount、Hook 语义 |

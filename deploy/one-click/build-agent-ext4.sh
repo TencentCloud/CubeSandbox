@@ -14,10 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-ENV_FILE="${ONE_CLICK_ENV_FILE:-${SCRIPT_DIR}/.env}"
-if [[ -f "${ENV_FILE}" ]]; then
-  load_env_file "${ENV_FILE}"
-fi
+load_build_env
 
 WORK_ROOT="${ONE_CLICK_WORK_ROOT:-${SCRIPT_DIR}/.work}"
 OUTPUT_DIR="${OUTPUT_DIR:-${ONE_CLICK_AGENT_EXT4_OUTPUT_DIR:-}}"

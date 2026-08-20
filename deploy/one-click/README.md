@@ -17,7 +17,8 @@ This directory is used to build and deliver the single-machine one-click release
 - `install-compute.sh`: Entry point for installing a compute node on the target machine.
 - `down.sh`: Stops the services and dependencies installed by one-click.
 - `smoke.sh`: Runs basic health checks.
-- `env.example`: Shared environment variable template for both the build machine and the target machine.
+- `env.example`: Target-machine environment variable template.
+- `build.env.example`: Build-machine environment variable template for assembling the release bundle.
 - `lib/common.sh`: Common shell utility functions.
 - `scripts/one-click/`: Validation and maintenance helpers used by the systemd-managed deployment after installation.
 - `terraform/tencentcloud/`: Terraform deployer for a **clustered** CubeSandbox on Tencent Cloud (TKE control plane + CVM compute nodes). `create.sh` is the entry point; `destroy.sh` tears everything down. These files are shipped both at the release-bundle top level and inside `sandbox-package` (see "Tencent Cloud Cluster Deployment").
@@ -82,11 +83,11 @@ export ONE_CLICK_GUEST_IMAGE_TAR=/abs/path/to/cube-guest-image-amd64.tar.gz
 
 ## Building the Release Package
 
-It is recommended to copy the environment template first:
+It is recommended to copy the build environment template first:
 
 ```bash
 cd deploy/one-click
-cp env.example .env
+cp build.env.example build.env
 ```
 
 Run the following from the repository root on the host machine (recommended):
@@ -170,6 +171,7 @@ One-click does not create an extra global `configs/` layer on the target machine
   - `cubelet_conf.default_timeout_insec`: cluster default sandbox idle TTL when the client omits `timeout`; unset or `<= 0` means **no cluster-wide idle timeout** (shipped default `-1`). See [lifecycle — Operational Notes](../../docs/guide/lifecycle.md#cluster-default-idle-timeout-default_timeout_insec).
 - `Cubelet/config/` → `Cubelet/config/`
 - `Cubelet/dynamicconf/` → `Cubelet/dynamicconf/`
+- `CUBE_L7_MARK_{HTTP,HTTPS,MASK}` (env) → `/etc/cubeegress/l7-marks.conf` — the L7 egress skb->mark values shared by Cubelet's embedded network runtime eBPF dataplane (which stamps `skb->mark`) and the `cube-proxy-iptables-init` TPROXY rules (which match it). Both read the same file, and both validate the values (`HTTP != HTTPS`, bits confined to the mask). See `env.example` for the shipped defaults and how to override them.
 - `CubeAPI/bin/cube-api` → `/usr/local/services/cubetoolbox/CubeAPI/bin/cube-api`
 - `support/` → `/usr/local/services/cubetoolbox/support/`
 - `cubeproxy/` → `/usr/local/services/cubetoolbox/cubeproxy/`

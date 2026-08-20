@@ -253,7 +253,7 @@ go test -bench=. ./pkg/store/membolt/
 
 ## 文档
 
-- [快速开始](QUICK_START.md) - 5 分钟快速上手
+- [快速开始](#快速开始) - 5 分钟快速上手
 - [使用示例](USAGE_EXAMPLE.md) - 详细的使用示例
 - [设计文档](DESIGN.md) - 架构设计和实现细节
 
@@ -340,4 +340,4 @@ MIT
 
 - [Kubernetes cache.Store](https://pkg.go.dev/k8s.io/client-go/tools/cache)
 - [BoltDB](https://github.com/etcd-io/bbolt)
-- [CubeStore](../utils/localstorage.go)
+- [CubeStore](../../utils/localstorage.go)

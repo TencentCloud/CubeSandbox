@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
 
@@ -77,5 +78,83 @@ func TestConfigureTapFDStopsWhenRequiredOffloadConfigurationFails(t *testing.T) 
 	}
 	if featureCalled {
 		t.Fatal("optional ethtool feature ran after required offload configuration failed")
+	}
+}
+
+func TestDestroyTapSkipsPolicyCleanupOnTransientLookupError(t *testing.T) {
+	origLookup := netlinkLinkByIndex
+	origDelete := deleteTAPDevicePolicyMaps
+	t.Cleanup(func() {
+		netlinkLinkByIndex = origLookup
+		deleteTAPDevicePolicyMaps = origDelete
+	})
+
+	transient := errors.New("dump interrupted")
+	netlinkLinkByIndex = func(int) (netlink.Link, error) { return nil, transient }
+	deleted := false
+	deleteTAPDevicePolicyMaps = func(uint32) error {
+		deleted = true
+		return nil
+	}
+
+	err := destroyTap(77)
+	if !errors.Is(err, transient) {
+		t.Fatalf("destroyTap error=%v, want %v", err, transient)
+	}
+	if deleted {
+		t.Fatal("policy maps must not be deleted on transient lookup errors")
+	}
+}
+
+func TestDestroyTapCleansPolicyWhenLinkAlreadyGone(t *testing.T) {
+	origLookup := netlinkLinkByIndex
+	origDelete := deleteTAPDevicePolicyMaps
+	t.Cleanup(func() {
+		netlinkLinkByIndex = origLookup
+		deleteTAPDevicePolicyMaps = origDelete
+	})
+
+	notFound := netlink.LinkNotFoundError{}
+	netlinkLinkByIndex = func(int) (netlink.Link, error) { return nil, notFound }
+	var gotIfindex uint32
+	deleteTAPDevicePolicyMaps = func(ifindex uint32) error {
+		gotIfindex = ifindex
+		return nil
+	}
+
+	err := destroyTap(88)
+	if !errors.As(err, &netlink.LinkNotFoundError{}) {
+		t.Fatalf("destroyTap error=%v, want LinkNotFoundError", err)
+	}
+	if gotIfindex != 88 {
+		t.Fatalf("policy cleanup ifindex=%d, want 88", gotIfindex)
+	}
+}
+
+func TestDestroyTapPolicyCleanupFailureDoesNotFailDestroy(t *testing.T) {
+	origLookup := netlinkLinkByIndex
+	origDelete := deleteTAPDevicePolicyMaps
+	origDel := netlinkLinkDel
+	t.Cleanup(func() {
+		netlinkLinkByIndex = origLookup
+		deleteTAPDevicePolicyMaps = origDelete
+		netlinkLinkDel = origDel
+	})
+
+	lookups := 0
+	netlinkLinkByIndex = func(int) (netlink.Link, error) {
+		lookups++
+		if lookups == 1 {
+			return &netlink.Device{LinkAttrs: netlink.LinkAttrs{Index: 99, Name: "z192.168.0.99"}}, nil
+		}
+		return nil, netlink.LinkNotFoundError{}
+	}
+	netlinkLinkDel = func(netlink.Link) error { return nil }
+	deleteTAPDevicePolicyMaps = func(uint32) error {
+		return errors.New("bpf map missing")
+	}
+
+	if err := destroyTap(99); err != nil {
+		t.Fatalf("destroyTap error=%v, want nil when only policy cleanup fails", err)
 	}
 }

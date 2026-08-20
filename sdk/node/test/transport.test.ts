@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TLSSocket } from "node:tls";
 
-import { fetch } from "undici";
+import { fetch, Headers } from "undici";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { Config } from "../src/config.js";
@@ -54,6 +54,17 @@ describe("controlFetch auth", () => {
     await controlFetch(cfg, `http://127.0.0.1:${port}/health`, {
       headers: { Authorization: "Bearer caller" },
     });
+    expect(seenAuth).toBe("Bearer caller");
+  });
+
+  it.each([
+    ["lowercase record", { authorization: "Bearer caller" }],
+    ["Headers instance", new Headers({ Authorization: "Bearer caller" })],
+    ["tuple list", [["Authorization", "Bearer caller"]] as [string, string][]],
+  ])("preserves caller Authorization from a %s", async (_name, headers) => {
+    seenAuth = undefined;
+    const cfg = new Config({ apiKey: "secret-key" });
+    await controlFetch(cfg, `http://127.0.0.1:${port}/health`, { headers });
     expect(seenAuth).toBe("Bearer caller");
   });
 });

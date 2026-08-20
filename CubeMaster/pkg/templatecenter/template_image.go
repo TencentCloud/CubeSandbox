@@ -191,42 +191,59 @@ func SubmitRedoTemplateFromImage(ctx context.Context, req *types.RedoTemplateFro
 	jobID := uuid.NewString()
 	var redoJob *models.TemplateImageJob
 	if err := withTemplateWriteLock(normalized.TemplateID, func() error {
-		if _, err := getActiveTemplateImageJobByTemplateID(ctx, normalized.TemplateID); err == nil {
-			return fmt.Errorf("%w: template %s is currently running", ErrTemplateAttemptInProgress, normalized.TemplateID)
-		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
-		latestJob, err := getLatestTemplateImageJobByTemplateID(ctx, normalized.TemplateID)
-		if err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return ErrTemplateNotFound
+		return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if _, err := lockTemplateDefinitionTx(tx, normalized.TemplateID); err != nil {
+				return err
 			}
-			return err
-		}
-		if err := allowRedoResumePhase(latestJob); err != nil {
-			return err
-		}
-		sourceReq, err := unmarshalTemplateImageJobRequest(latestJob.RequestJSON)
-		if err != nil {
-			return fmt.Errorf("decode latest template image request fail: %w", err)
-		}
-		sourceReq.TemplateID = normalized.TemplateID
-		replicas, err := ListReplicas(ctx, normalized.TemplateID)
-		if err != nil {
-			return err
-		}
-		targetNodes, err := resolveRedoTargets(sourceReq.InstanceType, normalized, replicas)
-		if err != nil {
-			return err
-		}
-		targetScope := distributionScopeFromTargets(targetNodes)
-		attemptNo := nextAttemptNoFromLatest(latestJob.AttemptNo)
-		requestSnapshot, err := marshalTemplateImageJobRequest(sourceReq)
-		if err != nil {
-			return err
-		}
-		redoJob = newRedoTemplateImageJobRecord(jobID, normalized, latestJob, sourceReq, requestSnapshot, attemptNo, targetScope, replicas)
-		return store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).Create(redoJob).Error
+			if _, err := getActiveTemplateImageJobByTemplateIDTx(tx, normalized.TemplateID); err == nil {
+				return fmt.Errorf("%w: template %s is currently running", ErrTemplateAttemptInProgress, normalized.TemplateID)
+			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+			latestJob, err := getLatestTemplateImageJobByTemplateIDTx(tx, normalized.TemplateID)
+			if err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return ErrTemplateNotFound
+				}
+				return err
+			}
+			if err := allowRedoResumePhase(latestJob); err != nil {
+				return err
+			}
+			sourceJob := latestJob
+			if !isCreateRedoJobOperation(latestJob.Operation) {
+				createRedoJob, lookupErr := getLatestCreateRedoImageJobByTemplateIDTx(tx, normalized.TemplateID)
+				if lookupErr == nil {
+					sourceJob = createRedoJob
+				} else if !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+					return lookupErr
+				}
+			}
+			sourceReq, err := unmarshalTemplateImageJobRequest(sourceJob.RequestJSON)
+			if err != nil {
+				return fmt.Errorf("decode latest template image request fail: %w", err)
+			}
+			sourceReq.TemplateID = normalized.TemplateID
+			if !isCreateRedoJobOperation(sourceJob.Operation) {
+				sourceReq.Alias = ""
+			}
+			replicas, err := ListReplicas(ctx, normalized.TemplateID)
+			if err != nil {
+				return err
+			}
+			targetNodes, err := resolveRedoTargets(sourceReq.InstanceType, normalized, replicas)
+			if err != nil {
+				return err
+			}
+			targetScope := distributionScopeFromTargets(targetNodes)
+			attemptNo := nextAttemptNoFromLatest(latestJob.AttemptNo)
+			requestSnapshot, err := marshalTemplateImageJobRequest(sourceReq)
+			if err != nil {
+				return err
+			}
+			redoJob = newRedoTemplateImageJobRecord(jobID, normalized, latestJob, sourceReq, requestSnapshot, attemptNo, targetScope, replicas)
+			return tx.Table(constants.TemplateImageJobTableName).Create(redoJob).Error
+		})
 	}); err != nil {
 		return nil, err
 	}

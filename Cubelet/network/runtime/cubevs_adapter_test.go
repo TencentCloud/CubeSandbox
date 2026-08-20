@@ -88,6 +88,10 @@ func (f *fakeCubeVSAdapter) InstallTAPDefaultDenyPolicy(ifindex uint32) error {
 	return nil
 }
 
+func (f *fakeCubeVSAdapter) GCStaleNetPolicyMaps(_ map[uint32]struct{}, _ func(uint32) bool, _ func(uint32)) (int, error) {
+	return 0, nil
+}
+
 func (f *fakeCubeVSAdapter) AddPortMapping(ifindex uint32, containerPort, hostPort uint16) error {
 	if f.recorder != nil {
 		f.recorder.record("cubevs_port_mapping")

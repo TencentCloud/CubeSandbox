@@ -231,6 +231,8 @@ postgres:
 
 The chart installs `cube-redis` StatefulSet only when `redis.enabled=true` and `redis.host` is empty.
 Set `redis.host` to use an existing Redis service; the chart will not install `cube-redis`.
+CubeProxy registry heartbeats resolve Redis by hostname, so a redis Pod IP change self-heals.
+Use an FQDN or IP literal: nginx's `resolver` does not apply search domains.
 
 ## CubeMaster configuration
 
@@ -464,14 +466,16 @@ connections, the chart renders an nginx `resolver` into
 discovers resolver addresses from the Pod `/etc/resolv.conf`, which resolves the
 chart-managed `cube-redis.<namespace>.svc.cluster.local` Service name and
 third-party Redis DNS names. Override only when the cluster requires explicit
-DNS servers:
+DNS servers. Keep `cubeProxy.resolver.valid` well below
+`lifecycleManager.heartbeatTTL` (defaults `5s` / `15s`) so a redis restart
+does not look like a dead proxy.
 
 ```yaml
 cubeProxy:
   resolver:
     addresses:
       - 172.18.0.10
-    valid: 30s
+    valid: 5s
     timeout: 5s
     ipv6: false
 ```

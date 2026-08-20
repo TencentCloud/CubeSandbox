@@ -160,10 +160,25 @@ func (c *Client) createPayload(opts CreateOptions) (map[string]any, error) {
 		network["denyOut"] = opts.Network.DenyOut
 	}
 	if len(opts.Network.Rules) > 0 {
-		network["rules"] = opts.Network.Rules
+		rules := make([]Rule, len(opts.Network.Rules))
+		for i, rule := range opts.Network.Rules {
+			if err := rule.Match.validate(); err != nil {
+				return nil, fmt.Errorf("network.rules[%d] %q: %w", i, rule.Name, err)
+			}
+			rule.Match = rule.Match.normalized()
+			rules[i] = rule
+		}
+		network["rules"] = rules
 	}
 	if len(network) > 0 {
 		payload["network"] = network
+	}
+
+	if len(opts.VolumeMounts) > 0 {
+		if err := validateVolumeMounts(opts.VolumeMounts); err != nil {
+			return nil, err
+		}
+		payload["volumeMounts"] = opts.VolumeMounts
 	}
 
 	for key, value := range opts.Extra {

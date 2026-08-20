@@ -188,7 +188,8 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 	if persistErr != nil {
 		err = persistErr
 	} else {
-		info, claimWarning, err = finalizeTemplateReplicas(ctx, req.TemplateID, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), req.Alias, replicas)
+		claimAlias := aliasToClaimAtFinalize(ctx, req.TemplateID, jobID)
+		info, claimWarning, err = finalizeTemplateReplicas(ctx, req.TemplateID, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), claimAlias, replicas)
 	}
 	if err != nil {
 		if builtFreshArtifact {

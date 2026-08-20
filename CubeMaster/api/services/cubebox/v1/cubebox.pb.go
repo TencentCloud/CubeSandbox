@@ -3152,12 +3152,15 @@ func (x *EgressRule) GetAction() *EgressRuleAction {
 }
 
 type EgressRuleMatch struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Sni           *string                `protobuf:"bytes,1,opt,name=sni,proto3,oneof" json:"sni,omitempty"`
-	Host          *string                `protobuf:"bytes,3,opt,name=host,proto3,oneof" json:"host,omitempty"`
-	Method        []string               `protobuf:"bytes,4,rep,name=method,proto3" json:"method,omitempty"`
-	Path          *string                `protobuf:"bytes,5,opt,name=path,proto3,oneof" json:"path,omitempty"`
-	Scheme        *string                `protobuf:"bytes,7,opt,name=scheme,proto3,oneof" json:"scheme,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Sni    *string                `protobuf:"bytes,1,opt,name=sni,proto3,oneof" json:"sni,omitempty"`
+	Host   *string                `protobuf:"bytes,3,opt,name=host,proto3,oneof" json:"host,omitempty"`
+	Method []string               `protobuf:"bytes,4,rep,name=method,proto3" json:"method,omitempty"`
+	Path   *string                `protobuf:"bytes,5,opt,name=path,proto3,oneof" json:"path,omitempty"`
+	Scheme *string                `protobuf:"bytes,7,opt,name=scheme,proto3,oneof" json:"scheme,omitempty"`
+	// L7 destination port. When set, `scheme` MUST also be set — together they
+	// pin the (host, port, scheme) tuple CubeEgress intercepts.
+	Port          *int32 `protobuf:"varint,8,opt,name=port,proto3,oneof" json:"port,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3225,6 +3228,13 @@ func (x *EgressRuleMatch) GetScheme() string {
 		return *x.Scheme
 	}
 	return ""
+}
+
+func (x *EgressRuleMatch) GetPort() int32 {
+	if x != nil && x.Port != nil {
+		return *x.Port
+	}
+	return 0
 }
 
 type EgressRuleAction struct {
@@ -6792,17 +6802,19 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\x05match\x18\x02 \x01(\v2,.cubelet.services.cubebox.v1.EgressRuleMatchH\x00R\x05match\x88\x01\x01\x12J\n" +
 	"\x06action\x18\x03 \x01(\v2-.cubelet.services.cubebox.v1.EgressRuleActionH\x01R\x06action\x88\x01\x01B\b\n" +
 	"\x06_matchB\t\n" +
-	"\a_action\"\xb4\x01\n" +
+	"\a_action\"\xd6\x01\n" +
 	"\x0fEgressRuleMatch\x12\x15\n" +
 	"\x03sni\x18\x01 \x01(\tH\x00R\x03sni\x88\x01\x01\x12\x17\n" +
 	"\x04host\x18\x03 \x01(\tH\x01R\x04host\x88\x01\x01\x12\x16\n" +
 	"\x06method\x18\x04 \x03(\tR\x06method\x12\x17\n" +
 	"\x04path\x18\x05 \x01(\tH\x02R\x04path\x88\x01\x01\x12\x1b\n" +
-	"\x06scheme\x18\a \x01(\tH\x03R\x06scheme\x88\x01\x01B\x06\n" +
+	"\x06scheme\x18\a \x01(\tH\x03R\x06scheme\x88\x01\x01\x12\x17\n" +
+	"\x04port\x18\b \x01(\x05H\x04R\x04port\x88\x01\x01B\x06\n" +
 	"\x04_sniB\a\n" +
 	"\x05_hostB\a\n" +
 	"\x05_pathB\t\n" +
-	"\a_scheme\"\x94\x01\n" +
+	"\a_schemeB\a\n" +
+	"\x05_port\"\x94\x01\n" +
 	"\x10EgressRuleAction\x12\x14\n" +
 	"\x05allow\x18\x01 \x01(\bR\x05allow\x12\x19\n" +
 	"\x05audit\x18\x02 \x01(\tH\x00R\x05audit\x88\x01\x01\x12E\n" +

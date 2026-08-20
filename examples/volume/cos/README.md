@@ -3,7 +3,7 @@
 This guide is for **first-time Volume Plugin users**: follow the steps in order to use COS as persistent storage (create Volume → mount in sandbox → read/write → unmount → delete).
 
 > **Version requirement:** Cube platform **≥ 0.6.0**, Python SDK **`cubesandbox` ≥ 0.6.0**.  
-> Protocol and Hook details: [Volume Plugin framework](../../docs/guide/volume-plugin.md).
+> Protocol and Hook details: [Volume Plugin framework](../../../docs/guide/volume-plugin.md).
 
 **Default path: binary plugin** (`driver=cos`, Shell + coscmd + cosfs — easiest to run). For the Go rpc plugin (`driver=cos-rpc`), see [rpc path](#rpc-path-optional) at the end.
 
@@ -356,7 +356,7 @@ The script prints a grouped report (PASS / FAIL / SKIP). Exit code is non-zero i
 | SDK write fails | `CUBE_PROXY_NODE_IP`; CubeAPI / template READY |
 | `Volume.create` without driver not using cos | **First** entry in `volume_plugins` is the default driver |
 
-More: [Framework §8 Troubleshooting](../../docs/guide/volume-plugin.md#8-debugging-and-troubleshooting).
+More: [Framework §8 Troubleshooting](../../../docs/guide/volume-plugin.md#debugging-and-troubleshooting).
 
 ---
 
@@ -420,4 +420,4 @@ examples/volume/cos/
 | [binary/README.md](binary/README.md) | Script implementation, manual attach/detach |
 | [rpc/README.md](rpc/README.md) | rpc build, systemd, running both plugins |
 | [verify_volume.py](verify_volume.py) | Automated Python SDK verification |
-| [Volume Plugin framework](../../docs/guide/volume-plugin.md) | Protocol, RefCount, Hook semantics |
+| [Volume Plugin framework](../../../docs/guide/volume-plugin.md) | Protocol, RefCount, Hook semantics |

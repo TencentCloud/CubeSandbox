@@ -23,6 +23,7 @@ import {
 import { Pty } from "./pty.js";
 import { createIdleTimeout, parseNdjsonStream, type RunCodeCallbacks } from "./stream.js";
 import { buildDataDispatcher, controlFetch, dataScheme } from "./transport.js";
+import { serializeVolumeMounts, type VolumeMountsArg } from "./volume.js";
 
 export const JUPYTER_PORT = 49999;
 
@@ -53,6 +54,16 @@ export interface CreateOptions {
   allowInternetAccess?: boolean;
   network?: NetworkOptions;
   lifecycle?: LifecycleOptions;
+  /**
+   * Persistent volumes to mount at creation — an e2b-style mapping of mount
+   * path → volume (a `Volume`/`VolumeInfo` instance or volume-ID string, or a
+   * `VolumeMount` wrapper for the read-only Cube extension):
+   *
+   * ```ts
+   * volumeMounts: { "/workspace": vol, "/dataset": new VolumeMount(vol2, { readOnly: true }) }
+   * ```
+   */
+  volumeMounts?: VolumeMountsArg;
   config?: Config | ConfigOptions;
   /** Extra fields forwarded verbatim into the create request body. */
   extra?: Record<string, unknown>;
@@ -393,6 +404,9 @@ export class Sandbox {
     }
     if (options.lifecycle) {
       payload.lifecycle = serializeLifecycle(options.lifecycle);
+    }
+    if (options.volumeMounts && Object.keys(options.volumeMounts).length > 0) {
+      payload.volumeMounts = serializeVolumeMounts(options.volumeMounts);
     }
     if (options.extra) {
       Object.assign(payload, options.extra);

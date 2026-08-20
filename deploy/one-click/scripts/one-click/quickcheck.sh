@@ -122,13 +122,34 @@ wait_until() {
   done
 }
 
-unit_is_active() {
-  systemctl is-active --quiet "$1"
-}
-
+# control.target only Wants= cube-proxy, so a failed child does not fail
+# `enable --now`. If the unit is already failed (e.g. admin-port bind), die
+# immediately instead of burning the readiness budget.
 check_unit_active() {
   local unit="$1"
-  wait_until "expected systemd unit not active: ${unit}" unit_is_active "${unit}"
+  local state now remaining delay
+  while :; do
+    state="$(systemctl show -p ActiveState --value "${unit}" 2>/dev/null || true)"
+    case "${state}" in
+      active|reloading)
+        return 0
+        ;;
+      failed)
+        systemctl status --no-pager --lines=0 "${unit}" >&2 || true
+        die "systemd unit failed: ${unit}"
+        ;;
+    esac
+    now="$(date +%s)"
+    if (( now >= QUICKCHECK_DEADLINE )); then
+      die "expected systemd unit not active: ${unit} (not ready within ${QUICKCHECK_READY_TIMEOUT}s)"
+    fi
+    remaining=$((QUICKCHECK_DEADLINE - now))
+    delay="${QUICKCHECK_READY_INTERVAL}"
+    if (( delay > remaining )); then
+      delay="${remaining}"
+    fi
+    sleep "${delay}" || true
+  done
 }
 
 http_ok() {

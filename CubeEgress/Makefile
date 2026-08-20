@@ -27,6 +27,13 @@ else
 	MAKEFLAGS += --no-print-directory
 endif
 
+.PHONY: test-lua
+test-lua:
+	$(Q)LUA_BIN=$$(command -v luajit || command -v lua); \
+		test -n "$$LUA_BIN" || { echo "error: lua or luajit not installed"; exit 1; }; \
+		$$LUA_BIN tests/port_scheme_test.lua && \
+		$$LUA_BIN tests/port_scheme_extra_test.lua
+
 .PHONY: build
 build:
 	$(call msg,BUILD IMAGE $(IMAGE_LOCAL):$(IMAGE_TAG)-$(ARCH))

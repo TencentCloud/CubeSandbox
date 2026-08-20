@@ -146,6 +146,23 @@ func (c *Client) DeleteTemplate(ctx context.Context, templateID string) error {
 	return c.doJSON(ctx, http.MethodDelete, path, nil, nil, http.StatusNoContent)
 }
 
+// SetTemplateAlias sets, reassigns, or clears the alias of an existing template
+// via PUT /templates/:id/alias. An empty alias clears it. The returned
+// TemplateInfo reflects the post-update state. templateID may be a canonical ID
+// or the template's current alias.
+func (c *Client) SetTemplateAlias(ctx context.Context, templateID, alias string) (*TemplateInfo, error) {
+	if strings.TrimSpace(templateID) == "" {
+		return nil, fmt.Errorf("templateID is required")
+	}
+	payload := map[string]any{"alias": alias}
+	var templateInfo TemplateInfo
+	path := "/templates/" + url.PathEscape(templateID) + "/alias"
+	if err := c.doJSON(ctx, http.MethodPut, path, payload, &templateInfo, http.StatusOK); err != nil {
+		return nil, err
+	}
+	return &templateInfo, nil
+}
+
 func (c *Client) GetTemplateBuildStatus(ctx context.Context, templateID, buildID string) (*TemplateBuildStatus, error) {
 	if strings.TrimSpace(templateID) == "" || strings.TrimSpace(buildID) == "" {
 		return nil, fmt.Errorf("templateID and buildID are required")

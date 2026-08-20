@@ -303,6 +303,54 @@ const clones = await sb.clone(3, { concurrency: 3 });
 `concurrency`), then deletes the ephemeral snapshot. If any create fails, all
 successful siblings are killed and the first error is re-thrown.
 
+### Volumes
+
+Persistent volumes survive sandbox lifecycles and are mounted at creation via
+the e2b-style `volumeMounts` mapping (`{ mountPath: volume }`):
+
+```ts
+import { Sandbox, Volume, VolumeMount, VolumeInUseError, VolumeNotFoundError } from "@cubesandbox/sdk";
+
+// driver is optional: when omitted the backend uses its first configured
+// volume plugin (e2b compatible). name is optional too — when omitted the
+// server generates a UUID used as both name and volume ID.
+const vol = await Volume.create({ name: "my-data", driver: "cos" }); // POST /volumes
+console.log(vol.volumeId, vol.token);
+
+const volumes = await Volume.list(); // GET /volumes (no tokens)
+const info = await Volume.getInfo("my-data"); // GET /volumes/:id (includes token)
+const reconnected = await Volume.connect("my-data"); // e2b compatible; wraps getInfo
+
+const sb = await Sandbox.create({
+  volumeMounts: {
+    "/workspace": vol, // Volume instance…
+    "/cache": "shared-cache", // …or a volume-ID string
+    "/dataset": new VolumeMount(vol, { readOnly: true }), // read-only (Cube extension)
+  },
+});
+
+await sb.kill();
+await Volume.destroy("my-data"); // DELETE /volumes/:id — true, or false when already gone
+```
+
+Deleting a volume does not auto-detach it: destroy the sandboxes using it
+first, otherwise the server refuses with a `VolumeInUseError` (HTTP 409):
+
+```ts
+try {
+  await Volume.destroy("my-data");
+} catch (err) {
+  if (err instanceof VolumeInUseError) {
+    // still mounted — destroy the sandboxes using it first
+  } else {
+    throw err;
+  }
+}
+```
+
+`VolumeInfo`'s `toString`/`console.log` output masks `token` (a data-plane
+credential) — read the field directly when the actual value is needed.
+
 ### List & health check
 
 ```ts
@@ -377,6 +425,16 @@ var**. Inline fields accepted by `create`: `apiUrl`, `proxyNodeIp`,
 | `Sandbox.health(config?)` | `GET /health` — service health check |
 | `Sandbox.listSnapshots(options?)` | `GET /snapshots` — list snapshots (paginated) |
 | `Sandbox.deleteSnapshot(snapshotId, options?)` | `DELETE /templates/:id` — delete a snapshot |
+
+### `Volume` — static methods
+
+| Method | Description |
+|---|---|
+| `Volume.create(options?)` | `POST /volumes` — create a volume (`name`/`driver` optional) |
+| `Volume.list(options?)` | `GET /volumes` — list volumes (no tokens) |
+| `Volume.getInfo(volumeId, options?)` | `GET /volumes/:id` — get one volume, includes `token` |
+| `Volume.connect(volumeId, options?)` | e2b-compatible connect (wraps `getInfo`) |
+| `Volume.destroy(volumeId, options?)` | `DELETE /volumes/:id` — `true`, or `false` when already gone |
 
 ### `Sandbox` — instance methods
 

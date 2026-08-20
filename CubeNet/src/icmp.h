@@ -40,7 +40,7 @@ static __always_inline bool create_icmp_sessions(struct __sk_buff *skb,
 						 struct snat_ip *snat_ip, __u16 snat_id)
 {
 	return create_nat_session(skb, ekey, now_ns, vm_ifindex, snat_ip, snat_id,
-				  ICMP_CT_UNREPLIED);
+				  ICMP_CT_UNREPLIED, SNAT_PACKET, L7_SCHEME_NONE);
 }
 
 #endif /* __ICMP_H */

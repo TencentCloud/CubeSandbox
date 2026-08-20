@@ -69,6 +69,10 @@ docker push   my-registry.example.com/my-team/my-sandbox:v1
 
 The registry must be reachable from your Cube cluster.
 
+::: tip Plain HTTP registry
+Prefix the image with `http://`, for example `http://my-registry.example.com/my-team/my-sandbox:v1`.
+:::
+
 ### 2.3 Create a Cube template
 
 Expose `49983` (envd) plus whatever ports your own application listens on:

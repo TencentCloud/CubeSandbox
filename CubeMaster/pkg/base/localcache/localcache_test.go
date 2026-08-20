@@ -45,13 +45,13 @@ func TestLocalCache(t *testing.T) {
 	for i := 0; i < 2700; i++ {
 
 		wg.Add(1)
-		ctx = context.WithValue(ctx, ctxKey, i)
-		go func() {
+		iterCtx := context.WithValue(ctx, ctxKey, i)
+		go func(c context.Context) {
 			defer wg.Done()
 			start := time.Now()
-			localCache.Get(ctx, RandString(8))
+			localCache.Get(c, RandString(8))
 			fmt.Printf("=====%d====\n", time.Since(start).Milliseconds())
-		}()
+		}(iterCtx)
 
 	}
 	wg.Wait()

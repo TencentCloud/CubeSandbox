@@ -5,24 +5,59 @@
 package systemnet
 
 import (
+	"errors"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
 
+// maxDumpRetries is higher than containernetworking/plugins netlinksafe (5)
+// because Cubelet density creates can keep the link table mutating for longer
+// than a single LinkList of hundreds of TAPs takes to complete.
+const maxDumpRetries = 16
+
+// dumpRetryBackoff is a short pause between interrupted dumps so concurrent
+// LinkAdd/LinkDel traffic can settle before the next attempt.
+const dumpRetryBackoff = 2 * time.Millisecond
+
 var (
 	// Package-level function variables are test seams for host networking helpers.
+	// Dump-style reads go through WithDumpRetry so NLM_F_DUMP_INTR under TAP
+	// churn is retried; mutating calls are left unwrapped.
 	netlinkRouteReplace      = netlink.RouteReplace
-	netlinkRouteListFiltered = netlink.RouteListFiltered
-	netlinkRouteList         = netlink.RouteList
-	netlinkLinkByName        = netlink.LinkByName
-	netlinkLinkList          = netlink.LinkList
-	netlinkLinkDel           = netlink.LinkDel
-	netlinkNeighList         = netlink.NeighList
-	netlinkAddrList          = netlink.AddrList
-	netlinkRouteDel          = netlink.RouteDel
+	netlinkRouteListFiltered = func(family int, filter *netlink.Route, mask uint64) ([]netlink.Route, error) {
+		return WithDumpRetry(func() ([]netlink.Route, error) {
+			return netlink.RouteListFiltered(family, filter, mask)
+		})
+	}
+	netlinkRouteList = func(link netlink.Link, family int) ([]netlink.Route, error) {
+		return WithDumpRetry(func() ([]netlink.Route, error) {
+			return netlink.RouteList(link, family)
+		})
+	}
+	netlinkLinkByName = func(name string) (netlink.Link, error) {
+		return WithDumpRetry(func() (netlink.Link, error) {
+			return netlink.LinkByName(name)
+		})
+	}
+	netlinkLinkList = func() ([]netlink.Link, error) {
+		return WithDumpRetry(netlink.LinkList)
+	}
+	netlinkLinkDel   = netlink.LinkDel
+	netlinkNeighList = func(linkIndex, family int) ([]netlink.Neigh, error) {
+		return WithDumpRetry(func() ([]netlink.Neigh, error) {
+			return netlink.NeighList(linkIndex, family)
+		})
+	}
+	netlinkAddrList = func(link netlink.Link, family int) ([]netlink.Addr, error) {
+		return WithDumpRetry(func() ([]netlink.Addr, error) {
+			return netlink.AddrList(link, family)
+		})
+	}
+	netlinkRouteDel = netlink.RouteDel
 )
 
 // HostDevice captures the configured host network device selected by Cubelet.
@@ -41,7 +76,7 @@ func GetHostDevice(ifName string) (*HostDevice, error) {
 	if err != nil {
 		return nil, err
 	}
-	addrs, err := netlink.AddrList(link, netlink.FAMILY_V4)
+	addrs, err := netlinkAddrList(link, netlink.FAMILY_V4)
 	if err != nil {
 		return nil, err
 	}
@@ -132,4 +167,29 @@ func isUsableGatewayNeighbor(neigh netlink.Neigh, gatewayIP net.IP) bool {
 	default:
 		return false
 	}
+}
+
+// WithDumpRetry runs op, retrying when a netlink dump was interrupted because
+// the table changed mid-read (ErrDumpInterrupted / EINTR). Other errors and
+// success return immediately. Mutating netlink calls should not use this.
+func WithDumpRetry[T any](op func() (T, error)) (T, error) {
+	var (
+		zero T
+		last error
+	)
+	for attempt := 0; attempt < maxDumpRetries; attempt++ {
+		v, err := op()
+		if err == nil || !isDumpInterrupted(err) {
+			return v, err
+		}
+		last = err
+		if attempt+1 < maxDumpRetries {
+			time.Sleep(dumpRetryBackoff)
+		}
+	}
+	return zero, last
+}
+
+func isDumpInterrupted(err error) bool {
+	return errors.Is(err, netlink.ErrDumpInterrupted) || errors.Is(err, unix.EINTR)
 }

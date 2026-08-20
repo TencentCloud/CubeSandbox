@@ -3,6 +3,7 @@ package cubevs
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
@@ -13,8 +14,8 @@ import (
 
 const (
 	typeNameU32           = "__u32"
-	typeNameLPMKey        = "lpm_key"
-	typeNamePolicyValue   = "net_policy_value_v2"
+	typeNameLPMKey        = "lpm_key_v3"
+	typeNamePolicyValue   = "net_policy_value_v3"
 	typeNameDNSAllowKey   = "dns_allow_key"
 	typeNameDNSAllowValue = "dns_allow_value"
 )
@@ -31,8 +32,53 @@ func init() {
 	_ = rlimit.RemoveMemlock()
 }
 
+// Shipped defaults for the L7 skb->mark values. A zero Params field means
+// "use the default"; deployments override via the install-time config.
+const (
+	defaultL7MarkHTTP  = 0xCE010000
+	defaultL7MarkHTTPS = 0xCE020000
+	defaultL7MarkMask  = 0xFFFF0000
+)
+
+// resolveL7Marks returns the effective L7 mark values shared by the dataplane
+// and iptables, applying shipped defaults for any field left at zero and
+// validating the result: http must differ from https, and both may only set
+// bits inside the mask.
+func resolveL7Marks(p Params) (http, https, mask uint32, err error) {
+	http, https, mask = p.L7MarkHTTP, p.L7MarkHTTPS, p.L7MarkMask
+	if http == 0 {
+		http = defaultL7MarkHTTP
+	}
+	if https == 0 {
+		https = defaultL7MarkHTTPS
+	}
+	if mask == 0 {
+		mask = defaultL7MarkMask
+	}
+	if http == https {
+		return 0, 0, 0, fmt.Errorf("l7 mark http %#x must differ from https %#x", http, https) //nolint:err113
+	}
+	if http&^mask != 0 || https&^mask != 0 {
+		return 0, 0, 0, fmt.Errorf("l7 marks http %#x https %#x must set bits only within mask %#x", http, https, mask) //nolint:err113
+	}
+	return http, https, mask, nil
+}
+
 func rewriteConstants(vars map[string]*ebpf.VariableSpec, params Params) error {
 	var err error
+	l7HTTP, l7HTTPS, l7Mask, l7Err := resolveL7Marks(params)
+	if l7Err != nil {
+		return l7Err
+	}
+	if v := vars[globalNameCubeL7MarkHTTP]; v != nil {
+		err = errors.Join(err, v.Set(l7HTTP))
+	}
+	if v := vars[globalNameCubeL7MarkHTTPS]; v != nil {
+		err = errors.Join(err, v.Set(l7HTTPS))
+	}
+	if v := vars[globalNameCubeL7MarkMask]; v != nil {
+		err = errors.Join(err, v.Set(l7Mask))
+	}
 	err = errors.Join(err, vars[globalNameMVMInnerIP].Set(ipToUint32(params.MVMInnerIP)))
 	err = errors.Join(err, vars[globalNameMVMMacaddrP1].Set(hardwareAddrToUint32(params.MVMMacAddr)))
 	err = errors.Join(err, vars[globalNameMVMMacaddrP2].Set(hardwareAddrToUint16(params.MVMMacAddr)))
@@ -226,13 +272,59 @@ func attachTCFilter(progName string, ifindex uint32, direction TCDirection) erro
 	return nil
 }
 
+// persistentPolicyGenerationExists reports whether a complete current-generation
+// policy map set (both allow_out_v3 and dns_allow_v2) is pinned on bpffs.
+//
+// A half-pinned set (exactly one of the two) means a previous boot died between
+// pinning the two maps. That orphan is an empty, not-yet-migrated map, so we
+// remove it and report "no generation": Init then rebuilds a consistent pair
+// and re-migrates from the legacy pins (which are still present in this
+// scenario). Returning an error here instead would permanently brick startup —
+// Init's recovery defer is only registered on the generationExists==false path,
+// which an early error return skips, so the orphan would survive every restart.
+func persistentPolicyGenerationExists() (bool, error) {
+	allowExists, err := pinnedMapExists(MapNameAllowOutV3)
+	if err != nil {
+		return false, err
+	}
+	dnsExists, err := pinnedMapExists(MapNameDNSAllowV2)
+	if err != nil {
+		return false, err
+	}
+	if allowExists == dnsExists {
+		return allowExists, nil
+	}
+
+	log.Printf("cubevs: incomplete policy map generation (%s exists=%t, %s exists=%t); removing orphaned pin and rebuilding",
+		MapNameAllowOutV3, allowExists, MapNameDNSAllowV2, dnsExists)
+	if allowExists {
+		_ = os.Remove(pinPath(MapNameAllowOutV3)) // NOCC:Path Traversal()
+	}
+	if dnsExists {
+		_ = os.Remove(pinPath(MapNameDNSAllowV2)) // NOCC:Path Traversal()
+	}
+	return false, nil
+}
+
 // Init should be called once before invoking any other CubeVS APIs.
-func Init(params Params) error {
+func Init(params Params) (retErr error) {
+	generationExists, err := persistentPolicyGenerationExists()
+	if err != nil {
+		return err
+	}
+	if !generationExists {
+		defer func() {
+			if retErr != nil {
+				_ = os.Remove(pinPath(MapNameAllowOutV3)) // NOCC:Path Traversal()
+				_ = os.Remove(pinPath(MapNameDNSAllowV2)) // NOCC:Path Traversal()
+			}
+		}()
+	}
 	_ = os.Remove(pinPath("tungrp_to_tuns")) // NOCC:Path Traversal()
 	// dns_query_track is runtime pending-query state, not persisted policy.
 	_ = os.Remove(pinPath(MapNameDNSQueryTrack)) // NOCC:Path Traversal()
 
-	err := loadObject(params, loadLocalgw, "loadLocalgw")
+	err = loadObject(params, loadLocalgw, "loadLocalgw")
 	if err != nil {
 		return err
 	}
@@ -255,8 +347,12 @@ func Init(params Params) error {
 		return err
 	}
 
-	if err := migrateAllowOutV1ToV2(); err != nil {
-		return err
+	if !generationExists {
+		if err := migratePersistentPolicyMaps(); err != nil {
+			// The deferred cleanup above removes the new pins on error;
+			// the legacy source pins are intentionally left for retry.
+			return err
+		}
 	}
 
 	// attach TC filter to cube-dev

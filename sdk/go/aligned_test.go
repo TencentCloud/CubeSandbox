@@ -69,6 +69,97 @@ func TestCreateSerializesPolicyAndPublicTraffic(t *testing.T) {
 	}
 }
 
+func TestCreateSerializesRulePortAndNormalizesScheme(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, sandboxJSON(testSandboxID, "tpl-env"))
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, TemplateID: "tpl-env", Timeout: 300 * time.Second})
+	_, err := client.Create(context.Background(), CreateOptions{
+		Network: NetworkOptions{
+			Rules: []Rule{{
+				Name:   "custom-https",
+				Match:  Match{Host: "api.example.com", Port: 8443, Scheme: " HTTPS "},
+				Action: Action{Allow: true},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	network := got["network"].(map[string]any)
+	rules := network["rules"].([]any)
+	rule := rules[0].(map[string]any)
+	match := rule["match"].(map[string]any)
+	if match["port"] != float64(8443) {
+		t.Fatalf("match.port=%#v, want 8443", match["port"])
+	}
+	if match["scheme"] != "https" {
+		t.Fatalf("match.scheme=%#v, want normalized https", match["scheme"])
+	}
+}
+
+func TestCreateRejectsInvalidRulePortScheme(t *testing.T) {
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, sandboxJSON(testSandboxID, "tpl-env"))
+	}))
+	defer server.Close()
+
+	tests := []struct {
+		name    string
+		match   Match
+		wantErr string
+	}{
+		{"port without scheme", Match{Host: "a.com", Port: 8443}, "port requires match.scheme"},
+		{"port too low", Match{Host: "a.com", Port: 0, Scheme: "https"}, "not-reached"}, // 0 means unset
+		{"port negative", Match{Host: "a.com", Port: -1, Scheme: "https"}, "[1, 65535]"},
+		{"port too high", Match{Host: "a.com", Port: 65536, Scheme: "https"}, "[1, 65535]"},
+		{"unknown scheme", Match{Host: "a.com", Scheme: "gopher"}, "must be 'http' or 'https'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.wantErr == "not-reached" {
+				return // Port 0 is the zero value (unset); covered by the "port without scheme" case
+			}
+			client := NewClient(Config{APIURL: server.URL, TemplateID: "tpl-env"})
+			_, err := client.Create(context.Background(), CreateOptions{
+				Network: NetworkOptions{
+					Rules: []Rule{{Name: "r1", Match: tt.match, Action: Action{Allow: true}}},
+				},
+			})
+			if err == nil {
+				t.Fatalf("err=nil, want %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("err=%q, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+	if called {
+		t.Fatal("server was called despite client-side validation failure")
+	}
+}
+
+func TestMatchValidateAcceptsLegacySchemeOnly(t *testing.T) {
+	// Scheme alone (no port) filters HTTP vs HTTPS on the default {80, 443}
+	// set — the classic behavior, not the port-scoped feature.
+	m := Match{Host: "api.example.com", Scheme: "HTTPS"}
+	if err := m.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if got := m.normalized().Scheme; got != "https" {
+		t.Fatalf("normalized scheme=%q, want https", got)
+	}
+}
+
 func TestCreateRejectsAllowOutDomainWithoutDenyAll(t *testing.T) {
 	called := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -319,12 +410,14 @@ func TestCloneKillsSiblingsOnFailure(t *testing.T) {
 
 func TestFilesWriteOctetStreamThenMultipartFallback(t *testing.T) {
 	var contentTypes []string
+	var usernames []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/files" {
 			t.Fatalf("request=%s %s", r.Method, r.URL.Path)
 		}
 		ct := r.Header.Get("Content-Type")
 		contentTypes = append(contentTypes, ct)
+		usernames = append(usernames, r.URL.Query().Get("username"))
 		_, _ = io.Copy(io.Discard, r.Body)
 		if strings.HasPrefix(ct, "application/octet-stream") {
 			http.Error(w, "use multipart", http.StatusBadRequest) // force fallback
@@ -341,14 +434,32 @@ func TestFilesWriteOctetStreamThenMultipartFallback(t *testing.T) {
 	client := NewClient(Config{ProxyNodeIP: host, ProxyPortHTTP: port, SandboxDomain: "cube.test", RequestTimeout: time.Second})
 	sb := &Sandbox{client: client, SandboxID: "sb-files", EnvdAccessToken: "tok"}
 
-	if err := sb.Files().Write(context.Background(), "/tmp/x.txt", []byte("hi")); err != nil {
+	if err := sb.Files().ForUser("app").Write(context.Background(), "/tmp/x.txt", []byte("hi")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	if len(contentTypes) != 2 {
 		t.Fatalf("attempts=%d, want 2 (octet-stream then multipart)", len(contentTypes))
 	}
+	if len(usernames) != 2 || usernames[0] != "app" || usernames[1] != "app" {
+		t.Fatalf("usernames=%v, want app on both upload attempts", usernames)
+	}
 	if _, _, err := mime.ParseMediaType(contentTypes[1]); err != nil {
 		t.Fatalf("multipart content-type=%q: %v", contentTypes[1], err)
+	}
+
+	contentTypes = nil
+	usernames = nil
+	if err := sb.Files().Write(context.Background(), "/tmp/unscoped.txt", []byte("hi")); err != nil {
+		t.Fatalf("unscoped Write: %v", err)
+	}
+	if len(contentTypes) != 2 {
+		t.Fatalf("unscoped attempts=%d, want 2 (octet-stream then multipart)", len(contentTypes))
+	}
+	if len(usernames) != 2 || usernames[0] != "" || usernames[1] != "" {
+		t.Fatalf("unscoped usernames=%v, want empty on both upload attempts", usernames)
+	}
+	if _, _, err := mime.ParseMediaType(contentTypes[1]); err != nil {
+		t.Fatalf("unscoped multipart content-type=%q: %v", contentTypes[1], err)
 	}
 }
 

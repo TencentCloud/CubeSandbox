@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -135,6 +136,33 @@ func TestCubeBoxDeepCopy(t *testing.T) {
 	}
 	if !copied.DeletedTime.Equal(*original.DeletedTime) {
 		t.Errorf("DeletedTime value should be equal")
+	}
+}
+
+func TestCubeBoxDeepCopyCompontsIndependent(t *testing.T) {
+	original := &CubeBox{
+		LocalRunTemplate: &templatetypes.LocalRunTemplate{
+			Componts: map[string]templatetypes.LocalComponent{
+				templatetypes.CubeComponentCubeShim: {Component: templatetypes.MachineComponent{Version: "v1"}},
+			},
+			Volumes: map[string]templatetypes.LocalBaseVolume{
+				"root": {VolumeID: "vol-1"},
+			},
+		},
+	}
+	copied := original.DeepCopy()
+	if copied.LocalRunTemplate == original.LocalRunTemplate {
+		t.Fatal("DeepCopy shared LocalRunTemplate pointer")
+	}
+	copied.LocalRunTemplate.Componts[templatetypes.CubeComponentCubeShim] = templatetypes.LocalComponent{
+		Component: templatetypes.MachineComponent{Version: "mutated"},
+	}
+	copied.LocalRunTemplate.Volumes["root"] = templatetypes.LocalBaseVolume{VolumeID: "mutated"}
+	if original.LocalRunTemplate.Componts[templatetypes.CubeComponentCubeShim].Component.Version != "v1" {
+		t.Fatal("DeepCopy shared Componts map")
+	}
+	if original.LocalRunTemplate.Volumes["root"].VolumeID != "vol-1" {
+		t.Fatal("DeepCopy shared Volumes map")
 	}
 }
 

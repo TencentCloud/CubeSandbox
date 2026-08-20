@@ -18,6 +18,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/membolt"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/multimeta"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
@@ -78,6 +79,11 @@ func (h *localCubeRunTemplateManager) ListLocalTemplates(ctx context.Context) (m
 			"err": err.Error(),
 		}).Warn("failed to recover local templates from snapshot root")
 	}
+	if err := h.removeMissingLocalTemplates(ctx); err != nil {
+		log.G(ctx).WithFields(CubeLog.Fields{
+			"err": err.Error(),
+		}).Warn("failed to remove missing local templates")
+	}
 	templates, err := h.store.ListGeneric()
 	if err != nil {
 		log.G(ctx).WithFields(CubeLog.Fields{
@@ -87,13 +93,78 @@ func (h *localCubeRunTemplateManager) ListLocalTemplates(ctx context.Context) (m
 	}
 	templateMap := make(map[string]*templatetypes.LocalRunTemplate)
 	for _, template := range templates {
-		templateMap[template.TemplateID] = template
+		if template == nil {
+			continue
+		}
+		templateMap[template.TemplateID] = template.Clone()
 	}
 	return templateMap, nil
 }
 
-func (h *localCubeRunTemplateManager) EnsureCubeRunTemplate(ctx context.Context, templateID string) (*templatetypes.LocalRunTemplate, error) {
+// removeMissingLocalTemplates reconciles the persisted local-template store
+// with snapshot data on disk. CleanupTemplate removes snapshot directories,
+// but historical records may remain in this store and otherwise continue to
+// be reported in every node heartbeat.
+func (h *localCubeRunTemplateManager) removeMissingLocalTemplates(ctx context.Context) error {
+	templates, err := h.store.ListGeneric()
+	if err != nil {
+		return err
+	}
+	for _, template := range templates {
+		if template == nil {
+			continue
+		}
+		snapshotPath := strings.TrimSpace(template.Snapshot.Snapshot.Path)
+		if snapshotPath == "" {
+			continue
+		}
+		exists, err := utils.DenExist(snapshotPath)
+		if err != nil {
+			log.G(ctx).WithFields(CubeLog.Fields{
+				"template_id": template.TemplateID,
+				"path":        snapshotPath,
+				"err":         err.Error(),
+			}).Warn("failed to inspect local template path")
+			continue
+		}
+		if exists {
+			continue
+		}
 
+		// Snapshot writers build the replacement under <snapshotPath>.tmp,
+		// then remove the old final directory and rename the temporary one.
+		// During that publish window the final path is briefly absent. Check
+		// the temporary path, then the final path again in case the rename
+		// completed between the two checks, before treating metadata as stale.
+		for _, path := range []string{snapshotPath + ".tmp", snapshotPath} {
+			exists, err = utils.DenExist(path)
+			if err != nil {
+				log.G(ctx).WithFields(CubeLog.Fields{
+					"template_id": template.TemplateID,
+					"path":        path,
+					"err":         err.Error(),
+				}).Warn("failed to inspect local template path")
+				break
+			}
+			if exists {
+				break
+			}
+		}
+		if err != nil || exists {
+			continue
+		}
+		if err := h.store.Delete(template); err != nil {
+			return fmt.Errorf("delete missing local template %s: %w", template.TemplateID, err)
+		}
+		log.G(ctx).WithFields(CubeLog.Fields{
+			"template_id": template.TemplateID,
+			"path":        snapshotPath,
+		}).Info("removed missing local template metadata")
+	}
+	return nil
+}
+
+func (h *localCubeRunTemplateManager) EnsureCubeRunTemplate(ctx context.Context, templateID string) (*templatetypes.LocalRunTemplate, error) {
 	h.lock.Lock()
 	delete(h.unusedTemplateMap, templateID)
 	h.lock.Unlock()
@@ -101,15 +172,12 @@ func (h *localCubeRunTemplateManager) EnsureCubeRunTemplate(ctx context.Context,
 	if !h.IsReady() {
 		return nil, fmt.Errorf("local template manager is not ready")
 	}
-	templates, err := h.store.ByIndexGeneric(templateIDIndexerKey, templateID)
+	cloned, err := h.cloneAndHydrate(templateID)
 	if err != nil {
 		return nil, err
 	}
-	for _, template := range templates {
-		if template != nil {
-			hydrateLocalTemplateComponentVersions(template)
-			return template, nil
-		}
+	if cloned != nil {
+		return cloned, nil
 	}
 	if err := h.recoverLocalTemplatesFromSnapshotRoot(ctx, constants.DefaultSnapshotDir, templateID); err != nil {
 		log.G(ctx).WithFields(CubeLog.Fields{
@@ -117,15 +185,12 @@ func (h *localCubeRunTemplateManager) EnsureCubeRunTemplate(ctx context.Context,
 			"err":         err.Error(),
 		}).Warn("failed to recover template from snapshot root")
 	}
-	templates, err = h.store.ByIndexGeneric(templateIDIndexerKey, templateID)
+	cloned, err = h.cloneAndHydrate(templateID)
 	if err != nil {
 		return nil, err
 	}
-	for _, template := range templates {
-		if template != nil {
-			hydrateLocalTemplateComponentVersions(template)
-			return template, nil
-		}
+	if cloned != nil {
+		return cloned, nil
 	}
 	log.G(ctx).WithFields(CubeLog.Fields{
 		"template_id": templateID,
@@ -212,6 +277,22 @@ func isTemporarySnapshotPath(snapshotPath string) bool {
 	return strings.HasSuffix(base, ".tmp")
 }
 
+func (h *localCubeRunTemplateManager) cloneAndHydrate(templateID string) (*templatetypes.LocalRunTemplate, error) {
+	templates, err := h.store.ByIndexGeneric(templateIDIndexerKey, templateID)
+	if err != nil {
+		return nil, err
+	}
+	for _, template := range templates {
+		if template == nil {
+			continue
+		}
+		cloned := template.Clone()
+		hydrateLocalTemplateComponentVersions(cloned)
+		return cloned, nil
+	}
+	return nil, nil
+}
+
 func hydrateLocalTemplateComponentVersions(local *templatetypes.LocalRunTemplate) {
 	if local == nil {
 		return
@@ -219,10 +300,7 @@ func hydrateLocalTemplateComponentVersions(local *templatetypes.LocalRunTemplate
 	if len(templatetypes.VersionMapFromComponts(local)) > 0 {
 		return
 	}
-	snapshotPath := ""
-	if local.Snapshot.Snapshot.Path != "" {
-		snapshotPath = local.Snapshot.Snapshot.Path
-	}
+	snapshotPath := local.Snapshot.Snapshot.Path
 	if snapshotPath == "" {
 		return
 	}

@@ -3,8 +3,7 @@ title: "Putting the Browser Inside the Agent Sandbox: Lexmount's Hands-On Experi
 date: 2026-08-13
 author: Xiong Xiuzhang (Lexmount Full-stack Engineer)
 description: "Agent browser runtime is a 'composite workload.' It imposes four core hard requirements on AI Agent sandboxes: can outbound network reach the real internet, is the startup sequencing stable under batch creation, can per-sandbox runtime state be dynamically injected, and can real capacity be accurately perceived. The Lexmount team hit and resolved all four of these problems when integrating their browser runtime with CubeSandbox."
-featured: true
-weight: 2
+featured: false
 ---
 
 # Putting the Browser Inside the Agent Sandbox: Lexmount's Hands-On Experience with CubeSandbox

@@ -246,6 +246,7 @@ type fakeTapDeviceAdapter struct {
 	closeHook        func(*os.File)
 	restoreWithoutFD bool
 	listResult       map[string]*tapDevice
+	listErr          error
 }
 
 func (f *fakeTapDeviceAdapter) Create(ip net.IP, _ string, _ int, _ int) (*tapDevice, error) {
@@ -280,6 +281,9 @@ func (f *fakeTapDeviceAdapter) Close(file *os.File) {
 }
 
 func (f *fakeTapDeviceAdapter) List() (map[string]*tapDevice, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	return f.listResult, nil
 }
 

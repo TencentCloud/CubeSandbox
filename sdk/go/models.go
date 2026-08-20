@@ -66,7 +66,11 @@ type CreateOptions struct {
 	Metadata            map[string]string
 	AllowInternetAccess *bool
 	Network             NetworkOptions
-	Extra               map[string]any
+	// VolumeMounts attaches existing persistent volumes at creation. Each
+	// mount's Name must be an existing volumeID (see Client.CreateVolume) and
+	// Path a clean absolute path inside the sandbox.
+	VolumeMounts []VolumeMount
+	Extra        map[string]any
 }
 
 // DurationPtr returns a pointer to d. It is a convenience for optional

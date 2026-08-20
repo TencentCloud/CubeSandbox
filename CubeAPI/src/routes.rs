@@ -4,7 +4,7 @@
 
 use axum::{
     middleware,
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
     Router,
 };
 use std::time::Duration;
@@ -162,6 +162,10 @@ fn build_template_routes(state: &AppState, auth_configured: bool) -> Router<AppS
         .route("/templates/:templateID", get(templates::get_template))
         .route("/templates/:templateID", post(templates::rebuild_template))
         .route("/templates/:templateID", patch(templates::update_template))
+        .route(
+            "/templates/:templateID/alias",
+            put(templates::set_template_alias),
+        )
         .route(
             "/templates/:templateID/builds/:buildID",
             post(templates::start_template_build),
@@ -360,6 +364,56 @@ mod tests {
             StatusCode::NOT_FOUND,
             "alias route should be mounted as its own route, not swallowed by /templates/:templateID"
         );
+    }
+
+    #[tokio::test]
+    async fn put_template_alias_forwards_to_cubemaster_and_returns_detail() {
+        use axum::{extract::Path, routing::put, Json, Router};
+        use serde_json::Value;
+
+        async fn alias_handler(
+            Path(template_id): Path<String>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            assert_eq!(template_id, "tpl-1");
+            let alias = body["alias"].as_str().unwrap_or_default();
+            Json(serde_json::json!({
+                "RequestID": "req-1",
+                "ret": { "ret_code": 0, "ret_msg": "success" },
+                "template_id": "tpl-1",
+                "display_name": alias,
+                "status": "READY",
+                "replicas": []
+            }))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock CubeMaster listener should bind");
+        let address = listener.local_addr().expect("mock CubeMaster address");
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/cube/template/:template_id/alias", put(alias_handler)),
+            )
+            .await
+            .expect("mock CubeMaster server should run");
+        });
+
+        let mut config = ServerConfig::default();
+        config.cubemaster_url = format!("http://{address}");
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        let server = TestServer::new(build_router(state)).expect("router should build");
+
+        let resp = server
+            .put("/templates/tpl-1/alias")
+            .json(&serde_json::json!({ "alias": "my-alias" }))
+            .await;
+
+        assert_eq!(resp.status_code(), StatusCode::OK);
+        let body: Value = resp.json();
+        assert_eq!(body["templateID"], "tpl-1");
+        assert_eq!(body["aliases"], serde_json::json!(["my-alias"]));
     }
 
     #[tokio::test]

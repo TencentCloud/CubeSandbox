@@ -133,6 +133,11 @@ Consume output via **either** `Output()` **or** `Wait(onData)`, not both — the
 content, err := sb.Files().Read(ctx, "/etc/hosts")
 err = sb.Files().Write(ctx, "/tmp/hello.txt", []byte("hi"))
 
+// Execute all filesystem operations as a specific sandbox user.
+rootFiles := sb.Files().ForUser("root")
+content, err = rootFiles.Read(ctx, "/root/hello.txt")
+err = rootFiles.Write(ctx, "/root/hello.txt", []byte("hi"))
+
 // Batch write
 n, err := sb.Files().WriteFiles(ctx, []cubesandbox.WriteEntry{
 	{Path: "/tmp/a.txt", Data: []byte("aaa")},
@@ -160,6 +165,7 @@ for ev := range watcher.Events {
 
 | Method | Description |
 |---|---|
+| `ForUser(user)` | Return an immutable view that runs all filesystem operations as `user` |
 | `Read(ctx, path)` | Download file content via `GET /files` |
 | `Write(ctx, path, data)` | Upload via `POST /files` (octet-stream, multipart fallback) |
 | `WriteFiles(ctx, entries)` | Batch write, stops on first error, returns count |
@@ -189,6 +195,48 @@ clones, err := sb.Clone(ctx, cubesandbox.CloneOptions{N: 3, Concurrency: 3})
 ```
 
 `Clone` snapshots the sandbox, creates `N` sandboxes from it (capped by `Concurrency`), then deletes the ephemeral snapshot. If any create fails, all successful siblings are killed and the first error is returned. `Rollback` restarts the sandbox process and drops pooled data-plane connections so the next call reconnects.
+
+## Volumes
+
+Persistent volumes survive sandbox lifecycles and are mounted at creation via `VolumeMounts`.
+
+```go
+// Driver is optional: when empty the backend uses its first configured
+// volume plugin (e2b compatible). Name is optional too — when empty the
+// server generates a UUID used as both name and volume ID.
+volume, err := client.CreateVolume(ctx, cubesandbox.CreateVolumeOptions{
+	Name:   "my-data",
+	Driver: "cos",
+}) // POST /volumes
+
+volumes, err := client.ListVolumes(ctx)         // GET /volumes (no tokens)
+volume, err = client.GetVolume(ctx, "my-data")  // GET /volumes/:id (includes token)
+
+sb, err := client.Create(ctx, cubesandbox.CreateOptions{
+	TemplateID: "base",
+	VolumeMounts: []cubesandbox.VolumeMount{
+		{Name: "my-data", Path: "/workspace"},
+		{Name: "shared-cache", Path: "/cache", ReadOnly: true},
+	},
+})
+
+err = client.DeleteVolume(ctx, "my-data") // DELETE /volumes/:id
+```
+
+Deleting a volume does not auto-detach it: destroy the sandboxes using it first, otherwise the server refuses with an error matching `ErrVolumeInUse`. A delete of a missing volume matches `ErrVolumeNotFound`, so idempotent cleanup can ignore that case:
+
+```go
+if err := client.DeleteVolume(ctx, "my-data"); err != nil {
+	switch {
+	case errors.Is(err, cubesandbox.ErrVolumeInUse):
+		// still mounted — destroy the sandboxes using it first
+	case errors.Is(err, cubesandbox.ErrVolumeNotFound):
+		// already gone
+	default:
+		return err
+	}
+}
+```
 
 ## L7 Egress Policy
 

@@ -1,30 +1,31 @@
 ---
-title: Node Isolation
+title: Node Isolation and Deletion
 lang: en-US
 ---
 
-# Node Isolation
+# Node Isolation and Deletion
 
 Node isolation (isolate) temporarily **stops CubeMaster from scheduling new sandboxes onto a compute node** during maintenance, upgrades, or troubleshooting. It behaves like Kubernetes `cordon`: the node can stay healthy and existing sandboxes keep running — it simply stops receiving new work.
 
 ::: tip Current entry points
-WebUI / CubeOps / the public OpenAPI surface do **not** expose isolation yet. Use the **CubeMaster HTTP API**, or **`cubemastercli`** on the control node, to isolate and unisolate nodes.
+WebUI / CubeOps / the public OpenAPI surface do **not** expose node isolation or deletion yet. Use the **CubeMaster HTTP API**, or **`cubemastercli`** on the control node.
 :::
 
 ## What you'll learn
 
 - How isolation differs from taking a node offline or draining it
 - How to find a `node_id` and isolate / unisolate it
+- How to safely remove a retired node's control-plane record
 - How to verify that isolation took effect
 - Recommended order of operations for upgrades and maintenance
 
 ## Behavior
 
-| Aspect | After isolation |
-|---|---|
-| **New sandbox scheduling** | The node is skipped; creates fail if no other schedulable node remains |
-| **Existing sandboxes** | **Unaffected** — nothing is destroyed or migrated automatically |
-| **Node health** | Orthogonal to isolation: an isolated node can still report `healthy=true` |
+| Aspect                           | After isolation                                                                 |
+| -------------------------------- | ------------------------------------------------------------------------------- |
+| **New sandbox scheduling**       | The node is skipped; creates fail if no other schedulable node remains          |
+| **Existing sandboxes**           | **Unaffected** — nothing is destroyed or migrated automatically                 |
+| **Node health**                  | Orthogonal to isolation: an isolated node can still report `healthy=true`       |
 | **Cubelet heartbeat / register** | Continues normally; the node cannot override or clear the isolation mark itself |
 
 Under the hood, CubeMaster writes a reserved label on the node metadata:
@@ -53,7 +54,7 @@ List cluster nodes and check the current isolation state:
 
 ```bash
 # CLI
-cubemastercli --address 127.0.0.1 --port 8089 node list
+cubemastercli node list
 
 # Or call the API directly
 curl -s http://127.0.0.1:8089/internal/meta/nodes | jq .
@@ -107,13 +108,13 @@ The call is **idempotent**: repeating `PUT` on an already-isolated node is safe.
 
 ```bash
 # Isolate one node
-cubemastercli --address 127.0.0.1 --port 8089 node isolate <node_id>
+cubemastercli node isolate <node_id>
 
 # Isolate multiple nodes
-cubemastercli --address 127.0.0.1 --port 8089 node isolate <node_id_1> <node_id_2>
+cubemastercli node isolate <node_id_1> <node_id_2>
 
 # Raw JSON response
-cubemastercli --address 127.0.0.1 --port 8089 node isolate --json <node_id>
+cubemastercli node isolate --json <node_id>
 ```
 
 On success the CLI prints something like:
@@ -130,7 +131,7 @@ Query the node again and confirm `scheduling_disabled` is `true`:
 curl -s http://127.0.0.1:8089/internal/meta/nodes/<node_id> | jq '.scheduling_disabled'
 # Expected: true
 
-cubemastercli --address 127.0.0.1 --port 8089 node list
+cubemastercli node list
 # SCHEDULING_DISABLED should be true
 ```
 
@@ -147,10 +148,78 @@ When maintenance is done, remove the cordon so the node can receive new sandboxe
 curl -X DELETE "http://127.0.0.1:8089/internal/meta/nodes/<node_id>/isolation"
 
 # CLI
-cubemastercli --address 127.0.0.1 --port 8089 node unisolate <node_id>
+cubemastercli node unisolate <node_id>
 ```
 
 Afterwards `scheduling_disabled` should be `false`, and the `scheduling-disabled` label should be gone.
+
+## Delete a node
+
+Node deletion removes a retired node's control-plane record from CubeMaster. It deletes the node registration, status, and component-version metadata and clears scheduling and metric caches. It **does not touch processes, sandboxes, disks, or the Kubernetes Node on the compute host**.
+
+::: warning Isolate and empty the node first
+CubeMaster only deletes a node that is **isolated and has no sandboxes**. The delete operation does not isolate the node and does not destroy or migrate sandboxes. Isolate it, allow in-flight creates to finish, and explicitly destroy every sandbox on the node first.
+
+If the compute node is currently unreachable but must be deleted, use forced deletion. Forced deletion bypasses sandbox inventory verification, but still requires prior isolation.
+:::
+
+### Recommended sequence
+
+1. Isolate the target node.
+2. Wait ≥ 60 seconds for in-flight scheduling / create windows to finish.
+3. Destroy all sandboxes on the target node.
+4. Delete the node.
+5. Stop or retire Cubelet.
+6. Confirm that the record is absent from the node list.
+
+If the Cubelet compute node is unreachable, normal node deletion fails because CubeMaster can no longer determine how many sandboxes remain on it. In that case, use forced deletion.
+
+### Option 1 (recommended): cubemastercli
+
+```bash
+# Delete one node
+cubemastercli node delete <node_id>
+
+# rm is an alias for delete; multiple nodes are also supported
+cubemastercli node rm <node_id_1> <node_id_2>
+
+# Force deletion without sandbox inventory verification
+cubemastercli node rm --force <node_id>
+```
+
+Batch deletion processes every node independently: a failure does not prevent later nodes from being attempted, but the command ultimately returns an error listing the failed nodes. If inventory verification fails, the error tells the operator to restore connectivity or explicitly retry with `--force`. On success, the CLI prints:
+
+```text
+node node-1 deleted
+```
+
+### Option 2: HTTP API
+
+```bash
+curl -X DELETE "http://127.0.0.1:8089/internal/meta/nodes/<node_id>"
+
+# Force deletion when live inventory cannot be verified
+curl -X DELETE "http://127.0.0.1:8089/internal/meta/nodes/<node_id>?force=true"
+```
+
+A successful response has no `data` field:
+
+```json
+{
+  "ret": {
+    "RetCode": 200,
+    "RetMsg": "Success"
+  }
+}
+```
+
+This internal endpoint may still return HTTP 200 when a business validation fails, so automation must also check `ret.RetCode`. Common failures include a missing node, a node that is not isolated, remaining sandboxes, or an inventory that cannot be verified reliably. `force=true` bypasses only the sandbox inventory check; it does not bypass isolation.
+
+### After deletion
+
+- The node disappears immediately from the current CubeMaster instance; other CubeMaster instances remove it on their next metadata refresh.
+- Deletion is not a permanent deregistration or ban. A running or restarted Cubelet can register the same `node_id` again.
+- To return the node to service, wait for it to register again and verify its health. The new registration does not retain the previous isolation mark.
 
 ## Typical workflows
 
@@ -179,7 +248,7 @@ Full steps: [Kubernetes upgrade guide](./kubernetes/upgrade.md).
 - **Single-node / all-isolated clusters**: if no other schedulable node remains, new sandbox creates fail (no host selected).
 - **Orthogonal to health checks**: an isolated node can stay Healthy and may still appear in healthy-node listings; it is only excluded from the schedulable set.
 - **Independent of Kubernetes `kubectl cordon`**: this only affects CubeMaster scheduling; it does not cordon the Kubernetes Node.
-- **Auth**: with CubeMaster HTTP auth disabled (the default), you can call the API directly. If you enable CubeMaster auth, add the required signature headers per your cluster config. Current `cubemastercli node isolate/unisolate` does **not** attach signatures automatically — prefer signed HTTP requests when auth is on.
+- **Auth**: with CubeMaster HTTP auth disabled (the default), you can call the API directly. If you enable CubeMaster auth, add the required signature headers per your cluster config. Current `cubemastercli node isolate/unisolate/delete` does **not** attach signatures automatically — prefer signed HTTP requests when auth is on.
 
 ## Related
 

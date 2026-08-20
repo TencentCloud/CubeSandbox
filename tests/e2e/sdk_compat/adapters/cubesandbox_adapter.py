@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import threading
+import time
+from collections.abc import Callable
 from typing import Any
 
 from adapters.base import SandboxAdapter, cleanup_raw_sandbox
@@ -107,6 +110,80 @@ class CubeSandboxAdapter(SandboxAdapter):
     def read_file(self, path: str, *, user: str = "root") -> str:
         return self._sandbox.files.read(path, user=user)
 
+    def list_files(self, path: str) -> list[dict[str, Any]]:
+        return list(self._sandbox.files.list(path))
+
+    def stat_file(self, path: str) -> dict[str, Any]:
+        return dict(self._sandbox.files.stat(path))
+
+    def file_exists(self, path: str) -> bool:
+        return bool(self._sandbox.files.exists(path))
+
+    def remove_file(self, path: str) -> None:
+        self._sandbox.files.remove(path)
+
+    def rename_file(self, old_path: str, new_path: str) -> dict[str, Any]:
+        return dict(self._sandbox.files.rename(old_path, new_path))
+
+    def make_dir(self, path: str) -> None:
+        self._sandbox.files.make_dir(path)
+
+    def write_files(self, files: list[tuple[str, str | bytes]]) -> int:
+        return int(self._sandbox.files.write_files(files))
+
+    def watch_dir_events(
+        self,
+        path: str,
+        operation: Callable[[], None],
+        *,
+        timeout: float = 5,
+        until: Callable[[list[dict[str, str]]], bool] | None = None,
+    ) -> list[dict[str, str]]:
+        watcher = self._sandbox.files.watch_dir(path)
+        events: list[dict[str, str]] = []
+        errors: list[Exception] = []
+        closing = threading.Event()
+
+        def collect() -> None:
+            try:
+                for event in watcher:
+                    event_type = str(event.get("type", ""))
+                    events.append(
+                        {
+                            "name": str(event.get("name", "")),
+                            "type": event_type.removeprefix("EVENT_TYPE_").lower(),
+                        }
+                    )
+                    if until is not None and until(events):
+                        return
+            except Exception as exc:  # noqa: BLE001 - forward watcher failures
+                if not closing.is_set():
+                    errors.append(exc)
+
+        thread = threading.Thread(target=collect, daemon=True)
+        thread.start()
+        completed = False
+        try:
+            operation()
+            _wait_for_events(events, errors, timeout=timeout, until=until)
+            completed = True
+        finally:
+            closing.set()
+            try:
+                watcher.close()
+            except Exception:
+                if completed:
+                    raise
+            finally:
+                thread.join(timeout=min(max(timeout, 1), 5))
+        if thread.is_alive():
+            raise TimeoutError(
+                f"watcher thread did not stop within the cleanup timeout for {path!r}"
+            )
+        if errors:
+            raise errors[0]
+        return events
+
     def run_code(self, code: str, *, timeout: int = 60) -> CodeResult:
         execution = self._sandbox.run_code(code, timeout=timeout)
         stdout = _normalize_log_lines(execution.logs.stdout) if execution.logs else []
@@ -131,6 +208,36 @@ class CubeSandboxAdapter(SandboxAdapter):
     def set_timeout(self, timeout: int) -> None:
         self._sandbox.set_timeout(timeout)
 
+    def create_snapshot(self) -> str:
+        return str(self._sandbox.create_snapshot().snapshot_id)
+
+    def delete_snapshot(self, snapshot_id: str) -> None:
+        from cubesandbox import Sandbox
+
+        Sandbox.delete_snapshot(snapshot_id, config=self._sdk_config)
+
+    def rollback(self, snapshot_id: str) -> dict[str, Any]:
+        return dict(self._sandbox.rollback(snapshot_id))
+
+    def clone(self, n: int = 1, *, concurrency: int = 1) -> list["CubeSandboxAdapter"]:
+        return [
+            type(self)(
+                sandbox,
+                sdk_config=self._sdk_config,
+                e2e_config=self._e2e_config,
+            )
+            for sandbox in self._sandbox.clone(n=n, concurrency=concurrency)
+        ]
+
+    def list_snapshot_ids(self) -> set[str]:
+        from cubesandbox import Sandbox
+
+        snapshots, _ = Sandbox.list_snapshots(
+            sandbox_id=self.sandbox_id,
+            config=self._sdk_config,
+        )
+        return {str(snapshot.snapshot_id) for snapshot in snapshots}
+
     def get_host(self, port: int) -> str:
         return str(self._sandbox.get_host(port))
 
@@ -153,3 +260,32 @@ class CubeSandboxAdapter(SandboxAdapter):
 
 def _normalize_log_lines(items: Any) -> list[str]:
     return [str(getattr(item, "line", item)) for item in items or []]
+
+
+def _wait_for_events(
+    events: list[dict[str, str]],
+    errors: list[Exception],
+    *,
+    timeout: float,
+    until: Callable[[list[dict[str, str]]], bool] | None,
+    quiet_period: float = 0.5,
+) -> None:
+    deadline = time.monotonic() + timeout
+    previous_count = -1
+    unchanged_since = time.monotonic()
+    while time.monotonic() < deadline:
+        if errors:
+            raise errors[0]
+        if until is not None and until(events):
+            return
+        count = len(events)
+        if count != previous_count:
+            previous_count = count
+            unchanged_since = time.monotonic()
+        elif (
+            until is None
+            and count
+            and time.monotonic() - unchanged_since >= quiet_period
+        ):
+            return
+        time.sleep(0.05)

@@ -17,6 +17,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
+	sandboxservice "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
@@ -72,6 +73,61 @@ func TestGetNodeExtractsNodeIDFromPath(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "node-42", gotNodeID, "node_id must be extracted from the path param")
 	assert.Equal(t, int(errorcode.ErrorCode_Success), decodeRetCode(t, w.Body.Bytes()))
+}
+
+func TestDeleteNodeExtractsNodeIDFromPath(t *testing.T) {
+	var gotNodeID string
+	var gotForce bool
+	patch := gomonkey.ApplyFunc(sandboxservice.DeleteNode,
+		func(_ context.Context, nodeID string, force bool) error {
+			gotNodeID = nodeID
+			gotForce = force
+			return nil
+		})
+	defer patch.Reset()
+
+	r := newMetaEngine()
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodDelete, MetaURI()+"/nodes/node-42", nil))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "node-42", gotNodeID)
+	assert.False(t, gotForce)
+	assert.Equal(t, int(errorcode.ErrorCode_Success), decodeRetCode(t, w.Body.Bytes()))
+	assert.NotContains(t, w.Body.String(), `"data"`)
+}
+
+func TestDeleteNodeForwardsForceQuery(t *testing.T) {
+	var gotForce bool
+	patch := gomonkey.ApplyFunc(sandboxservice.DeleteNode,
+		func(_ context.Context, _ string, force bool) error {
+			gotForce = force
+			return nil
+		})
+	defer patch.Reset()
+
+	r := newMetaEngine()
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodDelete, MetaURI()+"/nodes/node-42?force=true", nil))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.True(t, gotForce)
+	assert.Equal(t, int(errorcode.ErrorCode_Success), decodeRetCode(t, w.Body.Bytes()))
+}
+
+func TestDeleteNodeMapsNodeNotFound(t *testing.T) {
+	patch := gomonkey.ApplyFunc(sandboxservice.DeleteNode,
+		func(context.Context, string, bool) error {
+			return nodemeta.ErrNodeNotFound
+		})
+	defer patch.Reset()
+
+	r := newMetaEngine()
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodDelete, MetaURI()+"/nodes/missing-node", nil))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, int(errorcode.ErrorCode_NotFound), decodeRetCode(t, w.Body.Bytes()))
 }
 
 // TestDeleteNodeLabelExtractsNodeIDAndKeyQuery proves both extraction axes:

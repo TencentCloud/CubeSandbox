@@ -8,6 +8,10 @@ BUILDER_CONTAINER_HOME ?= /home/builder
 TMP_GIT_CREDENTIALS ?= /tmp/.cube-sandbox-builder-tmp-git-credentials
 BUILDER_CMD ?= bash
 BUILDER_RUN_EXTRA_MOUNTS ?=
+# User the builder container runs as. Defaults to the host user so bind-mounted
+# outputs stay host-writable; privileged test targets (e.g. cubevs-test, which
+# loads eBPF / mounts bpffs) override this to 0:0 along with --privileged.
+BUILDER_USER ?= $(UID):$(GID)
 ROOT_DIR := $(shell pwd)
 UID := $(shell id -u)
 GID := $(shell id -g)
@@ -41,9 +45,7 @@ KERNEL_IMAGE_TARGET ?= vmlinux
 KERNEL_BUILD_JOBS ?=
 KERNEL_CROSS_COMPILE ?=
 
-# Top-level Rust project directories. Each owns its own Cargo workspace and
-# `target/`; sub-crates share their workspace's target dir, so cleaning these
-# five removes all Rust build artifacts in the repo.
+# Top-level Rust project directories. Each owns its own Cargo workspace.
 RUST_PROJECT_DIRS := \
 	$(ROOT_DIR)/CubeAPI \
 	$(ROOT_DIR)/CubeShim \
@@ -51,6 +53,30 @@ RUST_PROJECT_DIRS := \
 	$(ROOT_DIR)/guest-init \
 	$(ROOT_DIR)/cubecow \
 	$(ROOT_DIR)/hypervisor
+
+# Cargo workspaces visited by `make clean`.
+RUST_CARGO_CLEAN_DIRS := \
+	$(RUST_PROJECT_DIRS) \
+	$(ROOT_DIR)/agent/libs
+
+# Local Go build outputs and installed binaries. Intentionally excludes
+# `_output/kernel` and `_output/release`, which are expensive to rebuild.
+GO_BUILD_ARTIFACT_DIRS := \
+	$(ROOT_DIR)/CubeMaster/build \
+	$(ROOT_DIR)/CubeMaster/coverage \
+	$(ROOT_DIR)/CubeMaster/docker/cubemaster \
+	$(ROOT_DIR)/Cubelet/build \
+	$(ROOT_DIR)/Cubelet/coverage \
+	$(ROOT_DIR)/CubeOps/bin \
+	$(ROOT_DIR)/CubeProxy/bin \
+	$(ROOT_DIR)/cube-lifecycle-manager/bin \
+	$(ROOT_DIR)/examples/cube-bench/bin \
+	$(CUBELET_COW_THIRD_PARTY_DIR) \
+	$(OUTPUT_DIR) \
+	$(AGENT_EXT4_OUTPUT_DIR)
+
+GO_BUILD_ARTIFACT_FILES := \
+	$(ROOT_DIR)/cubecow/examples/go-test/cubecow-test
 
 BINARIES := \
 	agent \
@@ -139,7 +165,9 @@ help:
 	@printf "  guest-kernel  Build guest kernel vmlinux/Image (KERNEL_SRC=...; native or cross x86_64<->aarch64)\n"
 	@printf "  all           Build all default binaries in Docker\n"
 	@printf "  manual-release Build binaries and package manual update tarball\n"
-	@printf "  clean-rust-target-dirs Remove target/ in every top-level Rust project\n"
+	@printf "  clean         Remove local Go/Rust build artifacts (not global caches)\n"
+	@printf "  clean-go-build-dirs Remove Go component build/bin dirs and _output/{bin,cube-agent}\n"
+	@printf "  clean-rust-target-dirs cargo clean every Rust workspace in Docker\n"
 	@printf "  web-install   Install WebUI npm dependencies\n"
 	@printf "  web-dev       Start WebUI Vite dev server\n"
 	@printf "  web-build     Build WebUI static assets\n"
@@ -205,7 +233,7 @@ ifeq ($(strip $(BUILDER_CMD)),)
 	$(error BUILDER_CMD must not be empty)
 endif
 	docker run --rm -i \
-		--user "$(UID):$(GID)" \
+		--user "$(BUILDER_USER)" \
 		-e HOME=$(BUILDER_CONTAINER_HOME) \
 		-e CARGO_HOME=$(BUILDER_CONTAINER_HOME)/.cargo \
 		-e RUSTUP_HOME=/usr/local/rustup \
@@ -240,14 +268,35 @@ cubecow-clean:
 	rm -rf "$(CUBELET_COW_THIRD_PARTY_DIR)"
 	cd "$(CUBECOW_DIR)" && cargo clean
 
-.PHONY: clean-rust-target-dirs
-clean-rust-target-dirs:
-	@for dir in $(RUST_PROJECT_DIRS); do \
-		if [ -d "$$dir/target" ]; then \
-			printf '  %-8s %s\n' "RM" "$$dir/target"; \
-			rm -rf "$$dir/target"; \
+.PHONY: clean-go-build-dirs
+clean-go-build-dirs:
+	@for dir in $(GO_BUILD_ARTIFACT_DIRS); do \
+		if [ -d "$$dir" ]; then \
+			printf '  %-8s %s\n' "RM" "$$dir"; \
+			rm -rf "$$dir"; \
 		fi; \
 	done
+	@for f in $(GO_BUILD_ARTIFACT_FILES); do \
+		if [ -e "$$f" ]; then \
+			printf '  %-8s %s\n' "RM" "$$f"; \
+			rm -f "$$f"; \
+		fi; \
+	done
+
+.PHONY: clean-rust-target-dirs
+clean-rust-target-dirs:
+ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
+	@for dir in $(RUST_CARGO_CLEAN_DIRS); do \
+		printf '  %-8s %s\n' "CARGO" "clean $$dir"; \
+		cargo clean --manifest-path "$$dir/Cargo.toml"; \
+	done
+else
+	$(MAKE) builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make clean-rust-target-dirs'
+endif
+
+.PHONY: clean
+clean: clean-go-build-dirs clean-rust-target-dirs
 
 .PHONY: cubecow-smoke
 cubecow-smoke: builder-image
@@ -370,6 +419,19 @@ cube-lifecycle-manager-test: builder-image
 .PHONY: cubelet-pkg-test
 cubelet-pkg-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && make proto && go test -short ./pkg/...'
+
+# cubevs-test runs the CubeNet/cubevs module's own unit tests (dataplane policy,
+# DNS learning, migration, dump, classify), which the cubelet targets never
+# compile. It regenerates the BPF objects first (make gen) since the test files
+# embed them, then runs the full module test set. The eBPF-loading tests need a
+# privileged root container (CAP_BPF/CAP_SYS_ADMIN for bpf() and the bpffs
+# mount), so this runs the builder privileged as root. Note: the generated .o
+# files under CubeNet/cubevs become root-owned in the bind-mounted workspace;
+# that is harmless in CI (fresh checkout) but may require sudo to clean locally.
+# Use plain `go test ./...` (no -coverprofile): the builder lacks covdata.
+.PHONY: cubevs-test
+cubevs-test: builder-image
+	$(MAKE) builder-run BUILDER_USER=0:0 BUILDER_RUN_EXTRA_MOUNTS='--privileged' BUILDER_CMD='cd /workspace/CubeNet/cubevs && make gen && go test ./...'
 
 .PHONY: agent-test
 agent-test: builder-image

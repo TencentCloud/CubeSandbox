@@ -780,6 +780,55 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+  /templates/{templateID}/alias:
+    put:
+      tags:
+      - handlers::templates
+      operationId: set_template_alias
+      parameters:
+      - name: templateID
+        in: path
+        description: Template identifier or current alias
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetTemplateAliasRequest'
+        required: true
+      responses:
+        '200':
+          description: Alias set or cleared; returns the updated template detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplateDetail'
+        '400':
+          description: Invalid alias, or alias requested on a snapshot (not applicable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Template not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Template is not READY, or concurrent alias claim conflict; retry may succeed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
   /templates/{templateID}/builds/{buildID}:
     post:
       tags:
@@ -1587,6 +1636,18 @@ components:
           - integer
           - 'null'
           format: int32
+    SetTemplateAliasRequest:
+      type: object
+      description: Body for PUT /templates/{id}/alias (set, reassign, or clear alias).
+      properties:
+        alias:
+          type:
+          - string
+          - 'null'
+          description: |-
+            New alias for the template. Validated against `^[a-z0-9][a-z0-9-]{0,63}$`
+            with `tpl-`/`snap-` prefixes rejected. Omitted, null, or empty string
+            clears the alias.
     ResumedSandbox:
       type: object
       description: Request body for POST /sandboxes/{id}/resume (deprecated).

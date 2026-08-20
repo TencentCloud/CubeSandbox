@@ -33,6 +33,7 @@ import (
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/task"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -72,13 +73,16 @@ const (
 )
 
 var (
-	ErrTemplateStoreNotInitialized = errors.New("template store is not initialized")
-	ErrTemplateNotFound            = errors.New("template not found")
-	ErrTemplateIDRequired          = errors.New("template id is required")
-	ErrTemplateHasNoReadyReplica   = errors.New("template has no ready replica")
-	ErrNoTemplateNodes             = errors.New("no healthy nodes available for template creation")
-	ErrDuplicateTemplate           = errors.New("template already exists")
-	ErrTemplateAttemptInProgress   = errors.New("template attempt is already in progress")
+	ErrTemplateStoreNotInitialized  = errors.New("template store is not initialized")
+	ErrTemplateNotFound             = errors.New("template not found")
+	ErrTemplateIDRequired           = errors.New("template id is required")
+	ErrTemplateHasNoReadyReplica    = errors.New("template has no ready replica")
+	ErrNoTemplateNodes              = errors.New("no healthy nodes available for template creation")
+	ErrDuplicateTemplate            = errors.New("template already exists")
+	ErrTemplateAttemptInProgress    = errors.New("template attempt is already in progress")
+	ErrAliasNotApplicableToSnapshot = errors.New("alias is not applicable to snapshot")
+	ErrInvalidAlias                 = errors.New("alias is invalid")
+	ErrTemplateNotReady             = errors.New("template is not ready")
 )
 
 type localStore struct {
@@ -950,21 +954,10 @@ func GetTemplateByAlias(ctx context.Context, alias string) (*models.TemplateDefi
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
 	}
-	alias = strings.TrimSpace(alias)
-	if alias == "" {
+	if strings.TrimSpace(alias) == "" {
 		return nil, ErrTemplateNotFound
 	}
-	def := &models.TemplateDefinition{}
-	err := store.db.WithContext(ctx).Table(constants.TemplateDefinitionTableName).
-		Where("alias_key = ? AND status <> ?", alias, StatusDeleting).
-		First(def).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrTemplateNotFound
-		}
-		return nil, err
-	}
-	return def, nil
+	return getTemplateByAliasTx(store.db.WithContext(ctx), alias)
 }
 
 // ResolveTemplateIdentifier resolves an identifier that may be either a
@@ -987,11 +980,18 @@ func ResolveTemplateIdentifier(ctx context.Context, identifier string) (string, 
 	return def.TemplateID, nil
 }
 
-// claimTemplateAlias atomically claims an alias for a template: releases it
-// from any other non-deleting template that currently holds it, then sets
-// display_name on the target template. Call this only for a non-FAILED template
-// so an alias never points to a broken one (callers gate on status != FAILED).
-func claimTemplateAlias(ctx context.Context, templateID, alias string) error {
+// claimTemplateAlias atomically claims an alias for a template.
+//
+// requireReady=true is the operator SetTemplateAlias path (design §3.6 I2):
+// it MAY release the alias from any other holder (last-commit-wins transfer),
+// then claims the target only if status='READY'.
+//
+// requireReady=false is the create/redo finalize path: it MUST NOT release
+// other holders. If another template already occupies alias_key, the UPDATE
+// hits the unique index (1062/23505) and claimAliasForReadyTemplate treats
+// that as "READY without alias". Idempotent re-claim of an alias the target
+// already holds is confirmed via COUNT, not RowsAffected (MySQL rows-changed).
+func claimTemplateAlias(ctx context.Context, templateID, alias string, requireReady bool) error {
 	alias = strings.TrimSpace(alias)
 	if alias == "" {
 		return nil
@@ -999,17 +999,102 @@ func claimTemplateAlias(ctx context.Context, templateID, alias string) error {
 	if !isReady() {
 		return ErrTemplateStoreNotInitialized
 	}
-	return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return retryOnceOnDeadlock(func() error {
+		return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			return claimTemplateAliasTx(tx, templateID, alias, requireReady)
+		})
+	})
+}
+
+func claimTemplateAliasTx(tx *gorm.DB, templateID, alias string, requireReady bool) error {
+	// Status predicate for the claim/confirm. The shared create/redo path
+	// (claimAliasForReadyTemplate) only excludes DELETING — it legitimately
+	// claims at PARTIALLY_READY, before READY is published. The operator
+	// SetTemplateAlias path (requireReady) additionally requires READY so a
+	// target that starts rebuilding between GetDefinition and the claim can't
+	// receive an alias (design §3.5).
+	statusExpr := "status <> ?"
+	statusVal := StatusDeleting
+	if requireReady {
+		statusExpr = "status = ?"
+		statusVal = StatusReady
+	}
+	// Release is operator-only. Create/redo must not clear a READY (or
+	// FAILED/DELETING) holder — uniqueness is enforced by alias_key.
+	if requireReady {
 		if err := tx.Table(constants.TemplateDefinitionTableName).
 			Where("alias_key = ? AND template_id <> ?",
 				alias, templateID).
 			Update("display_name", "").Error; err != nil {
 			return fmt.Errorf("release stale alias %q fail: %w", alias, err)
 		}
-		return tx.Table(constants.TemplateDefinitionTableName).
-			Where("template_id = ?", templateID).
-			Update("display_name", alias).Error
-	})
+	}
+	if err := tx.Table(constants.TemplateDefinitionTableName).
+		Where(fmt.Sprintf("template_id = ? AND %s", statusExpr), templateID, statusVal).
+		Update("display_name", alias).Error; err != nil {
+		return fmt.Errorf("claim alias %q for template %s fail: %w", alias, templateID, err)
+	}
+	// Confirm the target still exists, holds the alias, and satisfies the
+	// status predicate. If it was hard-deleted / flipped to DELETING /
+	// (operator path) no longer READY between GetDefinition and this
+	// transaction, the confirm matches 0 rows and returning here rolls
+	// back the release so the original holder keeps its alias. A SELECT
+	// (not RowsAffected) avoids MySQL's rows-changed conflation.
+	var claimed int64
+	if err := tx.Table(constants.TemplateDefinitionTableName).
+		Where(fmt.Sprintf("template_id = ? AND alias_key = ? AND %s", statusExpr), templateID, alias, statusVal).
+		Count(&claimed).Error; err != nil {
+		return fmt.Errorf("confirm alias claim for template %s fail: %w", templateID, err)
+	}
+	if claimed == 0 {
+		// Operator path: distinguish "deleted" (404) from "exists but no
+		// longer READY" (409, retry once it rebuilds to READY).
+		if requireReady {
+			var exists int64
+			if err := tx.Table(constants.TemplateDefinitionTableName).
+				Where("template_id = ?", templateID).Count(&exists).Error; err != nil {
+				return fmt.Errorf("confirm existence for template %s fail: %w", templateID, err)
+			}
+			if exists > 0 {
+				return ErrTemplateNotReady
+			}
+		}
+		return ErrTemplateNotFound
+	}
+	return nil
+}
+
+func lockTemplateDefinitionTx(tx *gorm.DB, templateID string) (*models.TemplateDefinition, error) {
+	def := &models.TemplateDefinition{}
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Table(constants.TemplateDefinitionTableName).
+		Where("template_id = ?", templateID).
+		First(def).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrTemplateNotFound
+		}
+		return nil, err
+	}
+	return def, nil
+}
+
+func getTemplateByAliasTx(tx *gorm.DB, alias string) (*models.TemplateDefinition, error) {
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return nil, ErrTemplateNotFound
+	}
+	def := &models.TemplateDefinition{}
+	err := tx.Table(constants.TemplateDefinitionTableName).
+		Where("alias_key = ? AND status <> ?", alias, StatusDeleting).
+		First(def).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrTemplateNotFound
+		}
+		return nil, err
+	}
+	return def, nil
 }
 
 // isDuplicateAliasError returns true for MySQL (1062) and PostgreSQL (23505)
@@ -1027,6 +1112,36 @@ func isDuplicateAliasError(err error) bool {
 	return strings.Contains(s, "23505") || strings.Contains(s, "unique_constraint")
 }
 
+// isDeadlockError reports transient lock errors worth one retry in the alias
+// release+claim transaction: InnoDB deadlock (1213) / lock-wait-timeout (1205),
+// and the PostgreSQL equivalents 40P01 (deadlock_detected) / 55P03
+// (lock_not_available). PG codes are string-matched like isDuplicateAliasError
+// because pgx may not be imported in all build configurations.
+func isDeadlockError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) && (mysqlErr.Number == 1205 || mysqlErr.Number == 1213) {
+		return true
+	}
+	s := err.Error()
+	return strings.Contains(s, "40P01") || strings.Contains(s, "55P03")
+}
+
+func retryOnceOnDeadlock(run func() error) error {
+	if err := run(); err != nil {
+		if isDeadlockError(err) {
+			return run()
+		}
+		return err
+	}
+	return nil
+}
+
+// IsDuplicateAliasError is the exported wrapper around isDuplicateAliasError
+// so the HTTP layer (separate package) can map concurrent-claim failures to
+// HTTP 409 / RetCode=ErrorCode_Conflict without duplicating the driver
+// detection logic. See design §3.3.
+func IsDuplicateAliasError(err error) bool { return isDuplicateAliasError(err) }
+
 // claimAliasForReadyTemplate is the shared alias-claim helper used by both the
 // image-job and redo paths. It is called for a template that has reached a
 // non-FAILED status, and — per the create/claim ordering fix — runs *before*
@@ -1039,7 +1154,7 @@ func claimAliasForReadyTemplate(ctx context.Context, templateID, alias string) (
 	if alias == "" {
 		return "", ""
 	}
-	if claimErr := claimTemplateAlias(ctx, templateID, alias); claimErr != nil {
+	if claimErr := claimTemplateAlias(ctx, templateID, alias, false); claimErr != nil {
 		if isDuplicateAliasError(claimErr) {
 			log.G(ctx).Infof("alias %q concurrently claimed by another template; template %s is READY without alias", alias, templateID)
 			return "", ""
@@ -1051,6 +1166,214 @@ func claimAliasForReadyTemplate(ctx context.Context, templateID, alias string) (
 	// the alias itself — no read-back needed.
 	return "", alias
 }
+
+// SetTemplateAlias atomically sets, transfers, or clears the alias (display_name)
+// of an existing template-kind definition.
+//
+//	alias == ""  → clear: UPDATE display_name = '' WHERE template_id = ?
+//	alias != ""  → claim: operator transfer (release + claim + confirm) inside
+//	                    one transaction with CREATE/REDO job JSON sync.
+//
+// Claim requires the target to be READY (non-READY → ErrTemplateNotReady), so
+// an alias never points at a building/failed template. Clear is allowed for any
+// non-DELETING template, so an alias stuck on a FAILED template can be released
+// without deleting the template. Snapshots are rejected
+// (ErrAliasNotApplicableToSnapshot) because their display_name is an
+// informational label, not a unique alias (alias_key is always NULL per the
+// STORED generated column). DELETING templates return ErrTemplateNotFound,
+// matching GetTemplateByAlias' behavior (store.go:921).
+//
+// display_name and the template's CREATE/REDO RequestJSON are updated in the
+// same DB transaction (design §3.6 I1). COMMIT / SNAPSHOT_* / LEGACY jobs are
+// never rewritten. A failure rolls back; the API does not return success with
+// a stale redo blob.
+func SetTemplateAlias(ctx context.Context, templateID, alias string) error {
+	if strings.TrimSpace(templateID) == "" {
+		return ErrTemplateIDRequired
+	}
+	alias = strings.TrimSpace(alias)
+	if err := validateTemplateAlias(alias); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidAlias, err)
+	}
+	def, err := GetDefinition(ctx, templateID)
+	if err != nil {
+		return err
+	}
+	if isSnapshotDefinition(def) {
+		return ErrAliasNotApplicableToSnapshot
+	}
+	if def.Status == StatusDeleting {
+		return ErrTemplateNotFound
+	}
+	// Claim requires READY; clear is allowed for any non-DELETING template so a
+	// stuck alias (e.g. on a FAILED template) can always be released.
+	if alias != "" && def.Status != StatusReady {
+		return ErrTemplateNotReady
+	}
+	// Idempotent clear of an already-empty alias is a no-op: do not rewrite
+	// in-flight first-create job JSON (design §3.6 — PENDING DisplayName is
+	// empty until finalize claims).
+	if alias == "" && strings.TrimSpace(def.DisplayName) == "" {
+		return nil
+	}
+	return setTemplateAliasLocked(ctx, templateID, alias)
+}
+
+// setTemplateAliasLocked holds the definition row, mutates display_name, and
+// syncs CREATE/REDO job JSON in one transaction.
+func setTemplateAliasLocked(ctx context.Context, templateID, alias string) error {
+	if !isReady() {
+		return ErrTemplateStoreNotInitialized
+	}
+	return retryOnceOnDeadlock(func() error {
+		return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			def, err := lockTemplateDefinitionTx(tx, templateID)
+			if err != nil {
+				return err
+			}
+			if isSnapshotDefinition(def) {
+				return ErrAliasNotApplicableToSnapshot
+			}
+			if def.Status == StatusDeleting {
+				return ErrTemplateNotFound
+			}
+			if alias == "" {
+				if strings.TrimSpace(def.DisplayName) == "" {
+					return nil
+				}
+				if err := tx.Table(constants.TemplateDefinitionTableName).
+					Where("template_id = ?", templateID).
+					Updates(map[string]any{
+						"display_name": "",
+						"updated_at":   gorm.Expr("CURRENT_TIMESTAMP"),
+					}).Error; err != nil {
+					return err
+				}
+				return syncCreateRedoImageJobAliasTx(tx, templateID, "")
+			}
+			if def.Status != StatusReady {
+				return ErrTemplateNotReady
+			}
+			oldHolder := ""
+			if cur, err := getTemplateByAliasTx(tx, alias); err == nil && cur != nil && cur.TemplateID != templateID {
+				oldHolder = cur.TemplateID
+			} else if err != nil && !errors.Is(err, ErrTemplateNotFound) {
+				return err
+			}
+			if err := claimTemplateAliasTx(tx, templateID, alias, true); err != nil {
+				return err
+			}
+			if err := syncCreateRedoImageJobAliasTx(tx, templateID, alias); err != nil {
+				return err
+			}
+			if oldHolder != "" {
+				if err := syncCreateRedoImageJobAliasTx(tx, oldHolder, ""); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	})
+}
+
+// applyAliasToRequestJSON returns payload with its "alias" field set to alias
+// (omitted when alias is ""). Unrelated fields are preserved semantically via
+// a generic JSON edit (UseNumber keeps numeric precision; RegistryPassword is
+// not stripped — marshalTemplateImageJobRequest would). The result is not
+// byte-identical: json.Marshal may reorder keys. changed is false when the
+// alias already matched.
+func applyAliasToRequestJSON(payload, alias string) (string, bool, error) {
+	dec := json.NewDecoder(strings.NewReader(payload))
+	dec.UseNumber()
+	var m map[string]any
+	if err := dec.Decode(&m); err != nil {
+		return "", false, err
+	}
+	if cur, _ := m["alias"].(string); cur == alias {
+		return payload, false, nil
+	}
+	if alias == "" {
+		delete(m, "alias")
+	} else {
+		m["alias"] = alias
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return "", false, err
+	}
+	return string(out), true, nil
+}
+
+// aliasFromRequestJSON reads the "alias" field from a job's RequestJSON (""
+// if absent/unparseable).
+func aliasFromRequestJSON(payload string) string {
+	dec := json.NewDecoder(strings.NewReader(payload))
+	dec.UseNumber()
+	var m map[string]any
+	if err := dec.Decode(&m); err != nil {
+		return ""
+	}
+	a, _ := m["alias"].(string)
+	return a
+}
+
+// currentJobAlias re-reads the alias from the image job's stored RequestJSON.
+// Returns ok=false only on a read failure so finalize can skip claim (design
+// §3.6); a successfully-read "" is a real "cleared". Callers MUST NOT fall
+// back to a submit-time frozen alias when ok is false.
+func currentJobAlias(ctx context.Context, jobID string) (string, bool) {
+	job, err := getTemplateImageJobRecordByID(ctx, jobID)
+	if err != nil || job == nil {
+		return "", false
+	}
+	return aliasFromRequestJSON(job.RequestJSON), true
+}
+
+// aliasToClaimAtFinalize is the create/redo finalize alias (design §3.6):
+//  1. currentJobAlias ok=false → skip claim (empty)
+//  2. definition.DisplayName nonempty → claim DisplayName (covers operator SET
+//     during an in-flight redo; does NOT cover CLEAR)
+//  3. otherwise claim the job alias (first create, or operator CLEAR that
+//     already synced RequestJSON to "")
+func aliasToClaimAtFinalize(ctx context.Context, templateID, jobID string) string {
+	jobAlias, ok := currentJobAlias(ctx, jobID)
+	if !ok {
+		return ""
+	}
+	def, err := GetDefinition(ctx, templateID)
+	if err == nil && strings.TrimSpace(def.DisplayName) != "" {
+		return strings.TrimSpace(def.DisplayName)
+	}
+	return jobAlias
+}
+
+// syncCreateRedoImageJobAliasTx writes the operator alias into every CREATE
+// and REDO job's RequestJSON for the template (design §3.6 I1). COMMIT /
+// SNAPSHOT_* / LEGACY jobs are never touched — their payloads are compared
+// byte-wise for idempotency. Failures abort the caller's transaction.
+func syncCreateRedoImageJobAliasTx(tx *gorm.DB, templateID, alias string) error {
+	jobs, err := listCreateRedoImageJobsByTemplateIDTx(tx, templateID)
+	if err != nil {
+		return fmt.Errorf("list CREATE/REDO image jobs for template %s: %w", templateID, err)
+	}
+	for i := range jobs {
+		if jobs[i].RequestJSON == "" {
+			continue
+		}
+		newPayload, changed, err := applyAliasToRequestJSON(jobs[i].RequestJSON, alias)
+		if err != nil {
+			return fmt.Errorf("edit request_json alias for job %s: %w", jobs[i].JobID, err)
+		}
+		if !changed {
+			continue
+		}
+		if err := updateTemplateImageJobTx(tx, jobs[i].JobID, map[string]any{"request_json": newPayload}); err != nil {
+			return fmt.Errorf("sync image job alias: update job %s for template %s failed: %w", jobs[i].JobID, templateID, err)
+		}
+	}
+	return nil
+}
+
 func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.CreateCubeSandboxReq, error) {
 	cacheStart := time.Now()
 	if req, hit, err := getCachedTemplateRequest(templateID); err != nil {

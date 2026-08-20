@@ -23,25 +23,42 @@ func reapDNSState() {
 	reapDNSQueryTrack(now)
 }
 
-// reapDNSLearnedPolicies scans allow_out_v2 and removes expired DNS-learned entries.
+// reapDNSLearnedPolicies removes expired DNS-learned allow_out_v3 entries.
+//
+// The fast path iterates ifindex_to_mvmmeta so Ready-pool TAPs (metadata
+// deleted, allow_out flushed) are skipped without walking every HashOfMaps
+// outer key. If metadata cannot be loaded, fall back to iterating allow_out_v3
+// outers so a transient pin/ENOENT failure cannot stall DNS TTL expiry for
+// every subsequent tick.
 func reapDNSLearnedPolicies(now uint64) {
-	allowOut, err := loadPinnedMap(MapNameAllowOutV2)
+	allowOut, err := loadPinnedMap(MapNameAllowOutV3)
 	if err != nil {
 		enqueueEvent(Event{
 			Error:   err,
-			Message: "failed to load allow_out_v2 map",
+			Message: "failed to load allow_out_v3 map",
 		})
 		return
 	}
 	defer allowOut.Close()
 
+	meta, err := loadPinnedMap(MapNameIfindexToMVMMetadata)
+	if err != nil {
+		enqueueEvent(Event{
+			Error:   err,
+			Message: "failed to load ifindex_to_mvmmeta map; falling back to allow_out_v3 outer scan",
+		})
+		reapDNSLearnedPoliciesFromAllowOutOuter(allowOut, now)
+		return
+	}
+	defer meta.Close()
+
 	var (
-		ifindex    uint32
-		innerMapID uint32
+		ifindex uint32
+		mvmMeta mvmMetadata
 	)
-	iter := allowOut.Iterate()
-	for iter.Next(&ifindex, &innerMapID) {
-		if err := reapDNSLearnedPoliciesForInnerMap(innerMapID, now); err != nil {
+	iter := meta.Iterate()
+	for iter.Next(&ifindex, &mvmMeta) {
+		if err := reapDNSLearnedPoliciesForIfindex(allowOut, ifindex, now); err != nil {
 			enqueueEvent(Event{
 				Error:   err,
 				Message: fmt.Sprintf("failed to reap DNS-learned policies, ifindex: %d", ifindex),
@@ -51,27 +68,54 @@ func reapDNSLearnedPolicies(now uint64) {
 	if err := iter.Err(); err != nil {
 		enqueueEvent(Event{
 			Error:   err,
-			Message: "failed to iterate allow_out_v2 map",
+			Message: "failed to iterate ifindex_to_mvmmeta map",
 		})
-		return
 	}
 }
 
-// reapDNSLearnedPoliciesForInnerMap deletes expired DNS-learned entries from one allow_out_v2 inner map.
-func reapDNSLearnedPoliciesForInnerMap(innerMapID uint32, now uint64) error {
-	inner, err := ebpf.NewMapFromID(ebpf.MapID(innerMapID))
-	if err != nil {
-		return fmt.Errorf("ebpf.NewMapFromID failed: %w, id: %d", err, innerMapID)
-	}
-	defer inner.Close()
-
+func reapDNSLearnedPoliciesFromAllowOutOuter(allowOut *ebpf.Map, now uint64) {
 	var (
-		key   lpmKey
-		value netPolicyValueV2
+		ifindex uint32
+		value   uint32
+	)
+	iter := allowOut.Iterate()
+	for iter.Next(&ifindex, &value) {
+		if err := reapDNSLearnedPoliciesForIfindex(allowOut, ifindex, now); err != nil {
+			enqueueEvent(Event{
+				Error:   err,
+				Message: fmt.Sprintf("failed to reap DNS-learned policies, ifindex: %d", ifindex),
+			})
+		}
+	}
+	if err := iter.Err(); err != nil {
+		enqueueEvent(Event{
+			Error:   err,
+			Message: "failed to iterate allow_out_v3 outer map",
+		})
+	}
+}
+
+func reapDNSLearnedPoliciesForIfindex(allowOut *ebpf.Map, ifindex uint32, now uint64) error {
+	inner, err := acquireInnerMap(allowOut, ifindex, MapNameAllowOutV3, nil)
+	if err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return nil
+		}
+		return fmt.Errorf("failed to open allow_out_v3 inner map: %w", err)
+	}
+	return reapDNSLearnedPoliciesForInner(inner, now)
+}
+
+// reapDNSLearnedPoliciesForInner deletes expired DNS-learned entries from one
+// allow_out_v3 inner map.
+func reapDNSLearnedPoliciesForInner(inner *ebpf.Map, now uint64) error {
+	var (
+		key   lpmKeyV3
+		value netPolicyValueV3
 	)
 	iter := inner.Iterate()
 	for iter.Next(&key, &value) {
-		if !netPolicyValueV2Expired(value, now) {
+		if !netPolicyValueV3Expired(value, now) {
 			continue
 		}
 		if err := inner.Delete(&key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
@@ -79,9 +123,20 @@ func reapDNSLearnedPoliciesForInnerMap(innerMapID uint32, now uint64) error {
 		}
 	}
 	if err := iter.Err(); err != nil {
-		return fmt.Errorf("failed to iterate allow_out_v2 inner map: %w", err)
+		return fmt.Errorf("failed to iterate allow_out_v3 inner map: %w", err)
 	}
 	return nil
+}
+
+// reapDNSLearnedPoliciesForInnerMap is kept for tests/callers that still pass a
+// map ID. Prefer reapDNSLearnedPoliciesForInner with a cached FD.
+func reapDNSLearnedPoliciesForInnerMap(innerMapID uint32, now uint64) error {
+	inner, err := ebpf.NewMapFromID(ebpf.MapID(innerMapID))
+	if err != nil {
+		return fmt.Errorf("ebpf.NewMapFromID failed: %w, id: %d", err, innerMapID)
+	}
+	defer inner.Close()
+	return reapDNSLearnedPoliciesForInner(inner, now)
 }
 
 // reapDNSQueryTrack deletes expired pending DNS queries that never got a response.

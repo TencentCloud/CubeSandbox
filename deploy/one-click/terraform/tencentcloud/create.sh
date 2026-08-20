@@ -613,10 +613,11 @@ prepare_cubeproxy_nginx_conf() {
 	if [ -f "${dst}" ]; then
 		# Stale pre-gRPC templates would leave Service:9090 open with no nginx
 		# listener. Force regeneration when the gRPC placeholder is missing.
-		if grep -q -F '__CUBE_PROXY_GRPC_PORT__' "${dst}"; then
+		if grep -q -F '__CUBE_PROXY_GRPC_PORT__' "${dst}" \
+			&& grep -q -F '__CUBE_PROXY_ADMIN_PORT__' "${dst}"; then
 			return 0
 		fi
-		echo -e "  ${YELLOW}⚠ existing cubeproxy-nginx.conf lacks __CUBE_PROXY_GRPC_PORT__; regenerating${NC}"
+		echo -e "  ${YELLOW}⚠ existing cubeproxy-nginx.conf lacks __CUBE_PROXY_GRPC_PORT__ or __CUBE_PROXY_ADMIN_PORT__; regenerating${NC}"
 		rm -f "${dst}"
 	fi
 
@@ -624,9 +625,10 @@ prepare_cubeproxy_nginx_conf() {
 	src="${SCRIPT_DIR}/../../cubeproxy/nginx.conf.template"
 	if [ -f "${src}" ]; then
 		cp -f "${src}" "${dst}"
-		if ! grep -q -F '__CUBE_PROXY_GRPC_PORT__' "${dst}"; then
+		if ! grep -q -F '__CUBE_PROXY_GRPC_PORT__' "${dst}" \
+			|| ! grep -q -F '__CUBE_PROXY_ADMIN_PORT__' "${dst}"; then
 			rm -f "${dst}"
-			echo -e "  ${RED}✗ cubeproxy nginx template is missing __CUBE_PROXY_GRPC_PORT__; refusing stale ${src}${NC}" >&2
+			echo -e "  ${RED}✗ cubeproxy nginx template is missing __CUBE_PROXY_GRPC_PORT__ or __CUBE_PROXY_ADMIN_PORT__; refusing stale ${src}${NC}" >&2
 			return 1
 		fi
 		echo -e "  ${GREEN}✓ Generated cubeproxy-nginx.conf from ${src}${NC}"
@@ -648,13 +650,13 @@ EOF
 				-e 's|^\(\s*listen \)9090\( http2 reuseport;\)|\1__CUBE_PROXY_GRPC_PORT__\2|' \
 				-e 's|^\(\s*set \$host_proxy_port \)8081;|\1__CUBE_PROXY_HTTP_PORT__;|' \
 				-e 's|^\(\s*set \$host_proxy_port \)8080;|\1__CUBE_PROXY_HTTPS_PORT__;|' \
-				-e 's|^\(\s*listen \)127\.0\.0\.1:8082;|\1__CUBE_PROXY_ADMIN_LISTEN__:8082;|' \
+				-e 's|^\(\s*listen \)127\.0\.0\.1:8082;|\1__CUBE_PROXY_ADMIN_LISTEN__:__CUBE_PROXY_ADMIN_PORT__;|' \
 				-e 's|/usr/local/openresty/nginx/certs/cube\.app+3\.pem|/usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_CERT__|' \
 				-e 's|/usr/local/openresty/nginx/certs/cube\.app+3-key\.pem|/usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_KEY__|' \
 				"${src}"
 		} >"${dst}"
 		local token
-		for token in __CUBE_PROXY_HTTP_PORT__ __CUBE_PROXY_HTTPS_PORT__ __CUBE_PROXY_GRPC_PORT__ __CUBE_PROXY_ADMIN_LISTEN__ __CUBE_PROXY_SSL_CERT__ __CUBE_PROXY_SSL_KEY__; do
+		for token in __CUBE_PROXY_HTTP_PORT__ __CUBE_PROXY_HTTPS_PORT__ __CUBE_PROXY_GRPC_PORT__ __CUBE_PROXY_ADMIN_LISTEN__ __CUBE_PROXY_ADMIN_PORT__ __CUBE_PROXY_SSL_CERT__ __CUBE_PROXY_SSL_KEY__; do
 			if ! grep -q -F "${token}" "${dst}"; then
 				rm -f "${dst}"
 				echo -e "  ${RED}✗ cube-proxy nginx template is missing ${token}; upstream CubeProxy/nginx.conf may have changed${NC}" >&2
@@ -687,7 +689,7 @@ http {
     location / { return 404; }
   }
   server {
-    listen __CUBE_PROXY_ADMIN_LISTEN__:8082;
+    listen __CUBE_PROXY_ADMIN_LISTEN__:__CUBE_PROXY_ADMIN_PORT__;
     server_name _;
     location / { return 404; }
   }
@@ -913,6 +915,9 @@ setup_env() {
 	export TF_VAR_cube_lifecycle_manager_discovery_refresh="${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DISCOVERY_REFRESH:-3s}"
 	export TF_VAR_cube_admin_token="${TENCENTCLOUD_CUBE_ADMIN_TOKEN:-}"
 	export TF_VAR_cube_proxy_heartbeat_interval_ms="${TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS:-5000}"
+	# cube-proxy admin port (host-network admin listener, auto-pause coordination).
+	# Mirrors the systemd path's CUBE_PROXY_ADMIN_PORT; the TF default stays 8082.
+	export TF_VAR_cube_proxy_admin_port="${TENCENTCLOUD_CUBE_PROXY_ADMIN_PORT:-8082}"
 	# Network exposure mode. Default (false) fronts cube-api/cube-proxy/cube-webui
 	# with VPC-internal CLBs; set to 'true' for public CLBs reachable from the
 	# internet (see the "Hardening the Public-Facing Services" doc section).
@@ -4238,6 +4243,7 @@ TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_HEARTBEAT_TTL='${TF_VAR_cube_lifecycle_manag
 TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DISCOVERY_REFRESH='${TF_VAR_cube_lifecycle_manager_discovery_refresh:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DISCOVERY_REFRESH:-3s}}'
 TENCENTCLOUD_CUBE_ADMIN_TOKEN='${TF_VAR_cube_admin_token:-${TENCENTCLOUD_CUBE_ADMIN_TOKEN:-}}'
 TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS='${TF_VAR_cube_proxy_heartbeat_interval_ms:-${TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS:-5000}}'
+TENCENTCLOUD_CUBE_PROXY_ADMIN_PORT='${TF_VAR_cube_proxy_admin_port:-${TENCENTCLOUD_CUBE_PROXY_ADMIN_PORT:-8082}}'
 TENCENTCLOUD_ENABLE_PUBLIC_NETWORK='${TF_VAR_enable_public_network:-${TENCENTCLOUD_ENABLE_PUBLIC_NETWORK:-false}}'
 TENCENTCLOUD_LOCAL_BUNDLE='${LOCAL_BUNDLE:-${TENCENTCLOUD_LOCAL_BUNDLE:-}}'
 TENCENTCLOUD_PVM_KERNEL_VMLINUX='${PVM_KERNEL_VMLINUX:-${TENCENTCLOUD_PVM_KERNEL_VMLINUX:-}}'
@@ -4452,6 +4458,7 @@ write_resolved_tfvars_file() {
 		--arg cube_lifecycle_manager_discovery_refresh "${TF_VAR_cube_lifecycle_manager_discovery_refresh:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DISCOVERY_REFRESH:-3s}}" \
 		--arg cube_admin_token "${TF_VAR_cube_admin_token:-${TENCENTCLOUD_CUBE_ADMIN_TOKEN:-}}" \
 		--argjson cube_proxy_heartbeat_interval_ms "$(_number_or_default "${TF_VAR_cube_proxy_heartbeat_interval_ms:-${TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS:-5000}}" 5000)" \
+		--argjson cube_proxy_admin_port "$(_number_or_default "${TF_VAR_cube_proxy_admin_port:-${TENCENTCLOUD_CUBE_PROXY_ADMIN_PORT:-8082}}" 8082)" \
 		'{
 			vpc_name: $vpc_name,
 			region: $region,
@@ -4503,6 +4510,7 @@ write_resolved_tfvars_file() {
 			cube_lifecycle_manager_discovery_refresh: $cube_lifecycle_manager_discovery_refresh,
 			cube_admin_token: $cube_admin_token,
 			cube_proxy_heartbeat_interval_ms: $cube_proxy_heartbeat_interval_ms,
+			cube_proxy_admin_port: $cube_proxy_admin_port,
 		}
 		| with_entries(select(.value != "" and .value != null))' >"$tmp"
 

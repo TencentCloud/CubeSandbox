@@ -66,10 +66,11 @@ The default expected filename is `vmlinux`. You can override the path via the `O
 
 ### 1.2 Run the Build
 
-From the repository root:
+Copy the build environment template if you need overrides, then run from the repository root:
 
 ```bash
 cd cube-sandbox
+cp deploy/one-click/build.env.example deploy/one-click/build.env
 ./deploy/one-click/build-release-bundle-builder.sh
 ```
 
@@ -252,9 +253,11 @@ To reinstall over an existing deployment, simply run `install.sh` again. The scr
 
 ## Configuration Reference
 
-All configuration is managed through the `.env` file. Below is the full parameter reference.
+Install-time configuration is managed through the `.env` file copied from `env.example`. Build-time options live in `build.env` (copied from `build.env.example`) on the build machine.
 
 ### Build-time Options
+
+Copy `deploy/one-click/build.env.example` to `deploy/one-click/build.env` and set overrides there (or export them in the shell).
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -281,6 +284,7 @@ You can also point to prebuilt binaries to skip compilation:
 
 | `ONE_CLICK_CUBESHIM_BIN` | Path to prebuilt containerd-shim-cube-rs binary |
 | `ONE_CLICK_CUBE_RUNTIME_BIN` | Path to prebuilt cube-runtime binary |
+| `ONE_CLICK_MKCERT_BIN` | Override path to mkcert binary at build time (default: bundled `assets/bin/mkcert`) |
 
 Build-performance knobs (all optional):
 
@@ -331,7 +335,6 @@ Build-performance knobs (all optional):
 | `CUBE_PROXY_DNS_ENABLE` | `1` | Enable CoreDNS (must be `1` for one-click) |
 | `CUBE_PROXY_DNS_ANSWER_IP` | `${CUBE_SANDBOX_NODE_IP}` | IP returned by CoreDNS for `cube.app` |
 | `CUBE_PROXY_COREDNS_BIND_ADDR` | `127.0.0.54` | CoreDNS bind address |
-| `ONE_CLICK_MKCERT_BIN` | `assets/bin/mkcert` (bundled) | Override path to mkcert binary at build time |
 
 ### Process Addresses
 

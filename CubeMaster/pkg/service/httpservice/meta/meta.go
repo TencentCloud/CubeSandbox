@@ -12,6 +12,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
+	sandboxservice "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	"gorm.io/gorm"
@@ -154,6 +155,15 @@ func getNodeGinHandler(c *gin.Context) {
 	})
 }
 
+func deleteNodeGinHandler(c *gin.Context) {
+	force := c.Query("force") == "true"
+	if err := sandboxservice.DeleteNode(c.Request.Context(), c.Param("node_id"), force); err != nil {
+		writeErr(c.Writer, http.StatusOK, err)
+		return
+	}
+	common.WriteAPI(c, &sandboxtypes.Res{Ret: successRet()})
+}
+
 func listNodesGinHandler(c *gin.Context) {
 	data, err := nodemeta.ListNodes(c.Request.Context())
 	if err != nil {
@@ -251,9 +261,11 @@ func successRet() *sandboxtypes.Ret {
 func writeErr(w http.ResponseWriter, status int, err error) {
 	retCode := int(errorcode.ErrorCode_MasterInternalError)
 	switch {
-	case errors.Is(err, gorm.ErrRecordNotFound), errors.Is(err, templatecenter.ErrTemplateNotFound):
+	case errors.Is(err, gorm.ErrRecordNotFound), errors.Is(err, templatecenter.ErrTemplateNotFound), errors.Is(err, nodemeta.ErrNodeNotFound):
 		retCode = int(errorcode.ErrorCode_NotFound)
 	case errors.Is(err, nodemeta.ErrLabelsJSONCorrupt), errors.Is(err, nodemeta.ErrSchedulingLabelRejected):
+		retCode = int(errorcode.ErrorCode_MasterParamsError)
+	case errors.Is(err, nodemeta.ErrNodeNotIsolated), errors.Is(err, sandboxservice.ErrNodeHasSandboxes):
 		retCode = int(errorcode.ErrorCode_MasterParamsError)
 	}
 	common.WriteResponse(w, status, &sandboxtypes.Res{

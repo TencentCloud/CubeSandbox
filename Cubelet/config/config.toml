@@ -34,6 +34,10 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
   disable = true
 [debug]
   address = ":9966"
+[cubelog]
+  path = "/data/log/Cubelet"
+  file_num = 10      # retained files (current + numbered backups)
+  file_size = "500m" # per-file roll size: 500m, 1g, 2g (binary MiB/GiB); unitless integer is MiB
 [plugins]
   [plugins."io.cubelet.controller.config.v1.cubelet"]
     # Static-only cadence for node status and resource reporting.

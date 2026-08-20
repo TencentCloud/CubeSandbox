@@ -1,4 +1,5 @@
 pytest>=7.0
+pytest-xdist>=3.0
 httpx>=0.27
 requests>=2
 

@@ -209,9 +209,10 @@ type service struct {
 	// version writes or overwrite a newer in-memory hash with an older one.
 	versionWriteLocks sync.Map
 
-	// labelWriteLocks serialises label read-modify-write (register merge,
-	// admin labels, isolation) per node so DB commit and in-memory/localcache
-	// publication stay ordered.
+	// labelWriteLocks serialises the complete per-node lifecycle (register,
+	// heartbeat, labels, isolation, deletion) so DB commit and in-memory/cache
+	// publication stay ordered on a replica. Database row locks provide the
+	// corresponding cross-replica ordering.
 	labelWriteLocks sync.Map
 
 	// hostFactsWriteLocks serialises the host-facts persist per node so
@@ -390,13 +391,26 @@ func UpdateNodeStatus(ctx context.Context, nodeID string, req *UpdateNodeStatusR
 		HeartbeatUnix:      req.HeartbeatTime.Unix(),
 		Healthy:            reportedReady,
 	}
-	if err := global.db.Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "node_id"}},
-		DoUpdates: clause.AssignmentColumns([]string{
-			"conditions_json", "images_json", "local_templates_json",
-			"heartbeat_unix", "healthy", "updated_at",
-		}),
-	}).Create(status).Error; err != nil {
+	// Serialize status writes with the complete per-node lifecycle. The
+	// registration row lock prevents a heartbeat from recreating status after
+	// deletion has committed; a heartbeat for a retired registration therefore
+	// fails instead of leaving an orphan NodeStatus row.
+	unlock := global.lockNodeLabels(nodeID)
+	defer unlock()
+	if err := global.db.Transaction(func(tx *gorm.DB) error {
+		var reg models.NodeRegistration
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("node_id = ?", nodeID).Take(&reg).Error; err != nil {
+			return err
+		}
+		return tx.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "node_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"conditions_json", "images_json", "local_templates_json",
+				"heartbeat_unix", "healthy", "updated_at",
+			}),
+		}).Create(status).Error
+	}); err != nil {
 		return nil, err
 	}
 
@@ -968,7 +982,7 @@ func GetNode(ctx context.Context, nodeID string) (*NodeSnapshot, error) {
 	defer global.mu.RUnlock()
 	snap, ok := global.nodes[nodeID]
 	if !ok {
-		return nil, gorm.ErrRecordNotFound
+		return nil, fmt.Errorf("%w: %s", ErrNodeNotFound, nodeID)
 	}
 	return cloneSnapshotWithCurrentHealth(snap, time.Now()), nil
 }
@@ -1334,8 +1348,17 @@ func (s *service) reload() error {
 // it could not match and sandbox creation failed with "template has no ready
 // replica" (130400). Pushing node health here lets that DB fallback match and
 // self-heal template locality on demand.
+//
+// Known race: next is a point-in-time DB snapshot. If node deletion commits
+// after reload reads that snapshot but before it is merged here, the stale
+// snapshot can briefly reinsert the deleted node into s.nodes and localcache.
+// The node was required to be isolated before deletion, so the stale snapshot
+// remains scheduling-disabled and does not admit new sandboxes; a subsequent
+// reload removes it after observing the missing registration. We currently
+// accept this short-lived visibility inconsistency instead of adding deletion
+// tombstones or per-node snapshot generations.
 func (s *service) applyReloadResult(next map[string]*NodeSnapshot) {
-	syncSnaps := s.mergeReloadResult(next)
+	syncSnaps, evicted := s.mergeReloadResult(next)
 
 	// s.ready is set true at the end of Init, after the initial reload and
 	// before localcache.Init. The very first reload therefore skips the sync
@@ -1349,16 +1372,40 @@ func (s *service) applyReloadResult(next map[string]*NodeSnapshot) {
 	for _, snap := range syncSnaps {
 		syncNodeHealthFn(snap)
 	}
+	for _, nodeID := range evicted {
+		func() {
+			// RegisterNode holds the same lifecycle lock until its in-memory and
+			// localcache publications finish. If a registration raced with this
+			// stale DB snapshot, wait for it and do not evict the new registration.
+			unlock := s.lockNodeLabels(nodeID)
+			defer unlock()
+			s.mu.RLock()
+			_, registered := s.nodes[nodeID]
+			s.mu.RUnlock()
+			if !registered {
+				evictNodeFn(nodeID)
+			}
+		}()
+	}
 }
 
 // mergeReloadResult merges the DB reload snapshot into the in-memory node map
-// under s.mu and returns a clone of every touched node for the caller to sync
-// into localcache outside the lock. The critical section uses
+// under s.mu and returns clones of touched nodes plus IDs removed by the
+// snapshot. Computing both results in the same critical section prevents a
+// concurrent registration from being classified using an earlier view.
+// The caller syncs localcache outside the lock. The critical section uses
 // defer s.mu.Unlock() so a panic in the merge loop cannot leak the lock and
 // silently deadlock subsequent register/heartbeat handlers.
-func (s *service) mergeReloadResult(next map[string]*NodeSnapshot) []*NodeSnapshot {
+func (s *service) mergeReloadResult(next map[string]*NodeSnapshot) ([]*NodeSnapshot, []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	evicted := make([]string, 0)
+	for nodeID := range s.nodes {
+		if _, stillPresent := next[nodeID]; !stillPresent {
+			delete(s.nodes, nodeID)
+			evicted = append(evicted, nodeID)
+		}
+	}
 	syncSnaps := make([]*NodeSnapshot, 0, len(next))
 	for nodeID, newSnap := range next {
 		if existing, ok := s.nodes[nodeID]; ok {
@@ -1410,8 +1457,11 @@ func (s *service) mergeReloadResult(next map[string]*NodeSnapshot) []*NodeSnapsh
 			syncSnaps = append(syncSnaps, cloneSnapshot(newSnap))
 		}
 	}
-	return syncSnaps
+	return syncSnaps, evicted
 }
+
+// evictNodeFn is a test seam for the reload -> localcache eviction path.
+var evictNodeFn = localcache.EvictNode
 
 func (s *service) loopReload(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
