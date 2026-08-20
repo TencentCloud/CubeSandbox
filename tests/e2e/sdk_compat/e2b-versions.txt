@@ -22,8 +22,28 @@ e2b==2.26.0
 e2b==2.29.5
 
 # --- Not yet validated by anyone --------------------------------------------
-# Listed as the upper bound to check when cutting the next release.
-e2b==2.35.0
+# The highest candidate worth validating before the next release: 2.38.0 is
+# already known bad (see below) and 2.37.1 is the last core the current
+# interpreter package can pair with, so it is the ceiling, not 2.35.0.
+e2b==2.37.1
+
+# --- The two E2B packages do not agree with each other -----------------------
+# Worth stating before the individual pairings, because the packages' own
+# metadata does not describe the working set in either direction:
+#
+#   * `e2b-code-interpreter` 2.8.1 and 2.9.0 both declare `e2b>=2.26.0,<3.0.0`.
+#     The pairing validated against CubeSandbox v0.5.1 is 2.8.1 with e2b
+#     **2.21.0** — below its own floor. It is installable only by overriding the
+#     constraint (a downstream consumer runs it in production with
+#     `[tool.uv] override-dependencies`), and the run_code surface works.
+#     So the declared floor is stricter than reality.
+#   * In the other direction the declared range is too *loose*: 2.9.0 accepts
+#     any `e2b<3.0.0`, but calls `get_transport(config, http2=False)`, which
+#     e2b dropped in 2.38.0 — inside the range it claims to support (below).
+#
+# Net: resolving the two packages by their metadata alone can produce both a
+# combination that is rejected but works, and one that is accepted but crashes
+# at client construction. Pin the pair explicitly; do not let a resolver pick.
 
 # --- Known bad ---------------------------------------------------------------
 # Kept as a record rather than a target.

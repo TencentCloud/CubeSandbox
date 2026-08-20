@@ -198,10 +198,17 @@ pytest --run-e2e --sdk-e2e-backends=e2b -m "smoke or p0"
 #
 # Deselect on `requires_code_interpreter`, not on the `run_code` marker: that
 # marker lives only in cases/run_code/, while cases/lifecycle/test_pause_resume.py
-# and test_auto_lifecycle.py also call run_code and carry only the capability
-# marker. At "smoke or p0" both spellings happen to select the same 21 cases; at
-# "p0 or p1" `not run_code` leaves 87 and `not requires_code_interpreter` leaves
-# 82 — those 5 are exactly the ones that would fail on a missing package.
+# and test_auto_lifecycle.py also call run_code and carry the capability marker
+# but not the run_code one. At "smoke or p0" both spellings happen to select the
+# same 21 cases; at "p0 or p1" `not run_code` leaves 87 and
+# `not requires_code_interpreter` leaves 82.
+#
+# Of those 5, only test_pause_resume.py::test_pause_and_connect_resume_preserves_
+# run_code_state actually reaches a run_code call without the package: the four
+# test_auto_lifecycle.py cases also require the platform_lifecycle capability,
+# which the e2b backend does not declare, so the fixture skips them first. The
+# deselect is still the right lever — it is the one that does not depend on which
+# file a case happens to live in.
 pip install 'e2b==2.29.5'
 pytest --run-e2e --sdk-e2e-backends=e2b -m "(smoke or p0) and not requires_code_interpreter"
 ```
@@ -224,7 +231,8 @@ Notes that make the matrix more than a version list:
   (`-m "(smoke or p0) and not requires_code_interpreter"`) rather than report
   failures that are really a missing package. The `run_code` marker is not
   enough — it only covers `cases/run_code/`, while `cases/lifecycle/` has
-  interpreter-dependent cases carrying just the capability marker.
+  interpreter-dependent cases that carry the capability marker but not the
+  `run_code` one.
 
 ## Environment
 

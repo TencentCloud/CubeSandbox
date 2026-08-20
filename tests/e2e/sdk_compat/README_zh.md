@@ -180,9 +180,14 @@ pytest --run-e2e --sdk-e2e-backends=e2b -m "smoke or p0"
 #
 # 要按 `requires_code_interpreter` 排除，而不是按 `run_code` marker：后者只存在于
 # cases/run_code/ 下，而 cases/lifecycle/test_pause_resume.py 与 test_auto_lifecycle.py
-# 同样调用 run_code、却只带 capability marker。在 "smoke or p0" 下两种写法恰好都选中
-# 21 个用例；在 "p0 or p1" 下 `not run_code` 收集 87 个、`not requires_code_interpreter`
-# 收集 82 个——差的这 5 个正是会因缺包而失败的那批。
+# 同样调用 run_code，带 capability marker 但没有 run_code marker。在 "smoke or p0" 下
+# 两种写法恰好都选中 21 个用例；在 "p0 or p1" 下 `not run_code` 收集 87 个、
+# `not requires_code_interpreter` 收集 82 个。
+#
+# 这 5 个里真正会在缺包时跑到 run_code 的只有 test_pause_resume.py::
+# test_pause_and_connect_resume_preserves_run_code_state：另外 4 个 test_auto_lifecycle.py
+# 用例还要求 platform_lifecycle capability，而 e2b 后端没有声明它，fixture 会先跳过。
+# 但排除依据仍应选 capability marker——它不依赖用例恰好放在哪个文件里。
 pip install 'e2b==2.29.5'
 pytest --run-e2e --sdk-e2e-backends=e2b -m "(smoke or p0) and not requires_code_interpreter"
 ```
@@ -201,7 +206,7 @@ pytest --run-e2e --sdk-e2e-backends=e2b -m "(smoke or p0) and not requires_code_
 - **依赖 interpreter 的用例。** 未安装 `e2b-code-interpreter` 的组合应按 capability
   marker 排除（`-m "(smoke or p0) and not requires_code_interpreter"`），而不是把
   "缺包"报成失败。只排除 `run_code` marker 不够：它仅覆盖 `cases/run_code/`，而
-  `cases/lifecycle/` 下也有只带 capability marker 的依赖 interpreter 用例。
+  `cases/lifecycle/` 下也有带 capability marker、但没有 `run_code` marker 的依赖 interpreter 用例。
 
 ## 环境变量
 
