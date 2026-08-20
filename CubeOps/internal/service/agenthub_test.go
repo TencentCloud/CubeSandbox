@@ -927,9 +927,9 @@ func TestWrapCMError(t *testing.T) {
 	}
 }
 
-// TestIsCMNotFoundCoversBothShapes pins that a not-found is recognised however
-// CubeMaster reports it: as a business ret_code in a 200 body, as an HTTP 404,
-// or as a ret_code envelope under some other >=400 status.
+// TestIsCMNotFoundCoversBothShapes pins that a not-found is recognised whenever
+// CubeMaster states one in its envelope — under a 200 body or under any >=400
+// status — and is NOT inferred from a bare 404 whose body says nothing.
 // Only the first shape appears in the #1327 repro; keying on it alone would let
 // the actionable 400 silently regress into a 502 leaking an identifier the
 // requester never supplied, which is what this path exists to prevent.
@@ -941,8 +941,22 @@ func TestIsCMNotFoundCoversBothShapes(t *testing.T) {
 	}{
 		{"business 130404", &cubemaster.CMError{RetCode: 130404, RetMsg: "template not found"}, true},
 		{"business 404", &cubemaster.CMError{RetCode: 404, RetMsg: "template not found"}, true},
-		{"http 404", &cubemaster.HTTPError{Status: 404, Body: "template not found"}, true},
-		{"http 404 wrapped", fmt.Errorf("create sandbox: %w", &cubemaster.HTTPError{Status: 404}), true},
+		{
+			"http 404 stating it in the envelope",
+			&cubemaster.HTTPError{Status: 404, Body: `{"ret":{"ret_code":130404,"ret_msg":"template not found"}}`},
+			true,
+		},
+		{
+			"http 404 wrapped",
+			fmt.Errorf("create sandbox: %w", &cubemaster.HTTPError{Status: 404, Body: `{"ret":{"ret_code":130404}}`}),
+			true,
+		},
+		// A bare 404 is evidence about the route, not the resource: CubeMaster
+		// states resource-not-found in the envelope, so an opaque one came from a
+		// proxy or a misconfigured base URL. Classifying it as a missing template
+		// would answer "register a template" to an operator whose real problem is
+		// that CubeOps never reached CubeMaster.
+		{"http 404 from something in the path", &cubemaster.HTTPError{Status: 404, Body: "404 page not found"}, false},
 		{"http 500", &cubemaster.HTTPError{Status: 500, Body: "boom"}, false},
 		// The status line and the ret_code are chosen independently on the
 		// CubeMaster side, so a not-found can arrive under some other >=400

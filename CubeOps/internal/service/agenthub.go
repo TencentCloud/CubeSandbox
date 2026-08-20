@@ -615,6 +615,14 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 		// registration rather than a not-found for an identifier the caller
 		// never supplied.
 		if noTemplateRegistered && isCMNotFound(err) {
+			// The rewrite drops CubeMaster's own words on purpose: they name the
+			// built-in fallback, which the caller never supplied and cannot act
+			// on. An operator can act on it, though, and this is the one place
+			// that still knows it — log before dropping, so a not-found that is
+			// really about something else in the request is diagnosable instead
+			// of being flattened into the registration advice.
+			logging.G(ctx).Warnf("agenthub: create failed with an empty template registry, "+
+				"reporting it as a missing registration; cubemaster said: %v", err)
 			return nil, NewBadRequest("no agent template is registered: register one from the template market " +
 				"(POST /agenthub/templates/market), or pass templateId explicitly")
 		}

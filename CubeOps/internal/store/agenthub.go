@@ -519,7 +519,7 @@ func (s *Store) GetRecommendedAgentTemplate(ctx context.Context) (*AgentTemplate
 	row := s.db.WithContext(ctx).Raw(
 		`SELECT template_id, name, source_agent_id, source_snapshot_id,
 		        source_sandbox_id, model, version, persistence_mode,
-		        recommended, created_at
+		        recommended, `+formatTimestamp("created_at")+` AS created_at
 		 FROM t_agenthub_template
 		 WHERE recommended = ? AND deleted_at IS NULL
 		 ORDER BY created_at DESC, id DESC

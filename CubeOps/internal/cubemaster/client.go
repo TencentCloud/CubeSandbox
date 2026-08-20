@@ -43,16 +43,20 @@ func (e *HTTPError) Error() string {
 	return fmt.Sprintf("cubemaster returned %d: %s", e.Status, e.Body)
 }
 
-// IsNotFound reports a not-found that arrived over the HTTP channel, by status
-// or by ret_code in the error body — CubeMaster picks the two independently.
-// meta's writeErr, for one, derives ret_code 130404 from gorm.ErrRecordNotFound
-// while the status comes from the call site, so the pairing is a convention, not
-// an invariant. Keying on the status alone would let a caller's not-found
-// handling turn on which channel happened to carry it.
+// IsNotFound reports a not-found that CubeMaster stated in its response
+// envelope, whatever status carried it — the status and the ret_code are chosen
+// independently on that side (meta's writeErr derives 130404 from
+// gorm.ErrRecordNotFound while the status comes from the call site), so keying
+// on one channel alone would make the answer depend on which one was used.
+//
+// A bare 404 with a body that is not one of CubeMaster's envelopes deliberately
+// does NOT count. CubeMaster states resource-not-found in the envelope; it does
+// not answer a missing resource with a bare HTTP 404. So an opaque 404 is
+// evidence about the *route* — a wrong base URL, a proxy in the path, gin's own
+// "404 page not found" — and treating it as a missing resource sends the caller
+// after the wrong fix while the real problem is that we never reached
+// CubeMaster at all.
 func (e *HTTPError) IsNotFound() bool {
-	if e.Status == http.StatusNotFound {
-		return true
-	}
 	cmErr := CMError{RetCode: retCodeFromBody([]byte(e.Body))}
 	return cmErr.IsNotFound()
 }
