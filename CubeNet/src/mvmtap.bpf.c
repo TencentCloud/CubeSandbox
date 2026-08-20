@@ -170,8 +170,8 @@ static __always_inline long direct_egress_arp_request(struct __sk_buff *skb, __u
 	packet.arp.ar_tip = daddr;
 
 	/* CHECKSUM_PARTIAL can write L4 csum after we return.
-	 * change_tail(96) keeps that slot. change_head(32) moves it past ARP.
-	 * Then store ARP and zero the rest (broadcast).
+	 * change_tail will not shrink below that write (min_len).
+	 * change_head(32) moves it past ARP. Then store ARP and zero the rest.
 	 */
 	err = bpf_skb_change_tail(skb, DIRECT_ARP_PRESERVED_LEN, 0);
 	if (err)
