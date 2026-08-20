@@ -210,8 +210,9 @@ pytest --run-e2e --sdk-e2e-backends=e2b -m "smoke or p0"
 #
 # Mind the scope, because it decides whether the deselect does anything. Inside
 # `smoke or p0` the only interpreter-dependent cases are in cases/run_code/,
-# which carry both markers, so the two spellings select exactly the same 21
-# cases today and the choice is free. It stops being free the moment the
+# which carry both markers, so the two spellings select the same set there and
+# the choice is free. (No count here on purpose — run the diff below at this
+# scope if you want the current one.) It stops being free the moment the
 # selection widens — a core-only `p0 or p1` run (the dual-backend regression
 # documented above) collects the p1 lifecycle cases, and only
 # `requires_code_interpreter` deselects them.
