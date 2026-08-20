@@ -5,19 +5,9 @@
 
 ---
 
-## 1. 相关 Issue / PR（背景参考）
+## 1. 现状分析（代码走读结论）
 
-- [#695](https://github.com/TencentCloud/CubeSandbox/issues/695) — Concurrent CreateSandbox has no lock — scheduling race can oversell VMs（并发创建时调度超卖风险，与本任务的"创建成功率/装箱率"指标直接相关）
-- [#1156](https://github.com/TencentCloud/CubeSandbox/issues/1156) / PR #1157 — scarce-resource scheduler filter (SRA)，**是"新增一个调度 Filter 插件"的完整范例**，可作为本任务插件开发的对标参考
-- [#573](https://github.com/TencentCloud/CubeSandbox/issues/573) — Scheduler binds to first sorted node when scoring is unconfigured（打分缺省时的退化行为）
-- [#342](https://github.com/TencentCloud/CubeSandbox/issues/342) / #326 / #301 — Cubelet `/v1/metrics/scheduler` 节点配额指标上报链路
-- [#1040](https://github.com/TencentCloud/CubeSandbox/issues/1040) — Top Contributor Program
-
----
-
-## 2. 现状分析（代码走读结论）
-
-### 2.1 调度流水线
+### 1.1 调度流水线
 
 入口：`CubeMaster/pkg/scheduler/schedule.go:28` `Select()`，调用方为
 `sandbox_run.go:474`（创建）与 `sandbox_migrate.go:40`（迁移）。
@@ -60,7 +50,7 @@ PreFilter ──► Filter（并行执行，取交集）──► Score（加权
   缺失**。后续由 Profile 显式配置 `best` / `top_n_uniform` / `top_n_weighted`，把选择语义从
   两个互相纠缠的缺省值中解放出来，避免名称与行为不一致。
 
-### 2.2 插件注册机制现状
+### 1.2 插件注册机制现状
 
 - 注册方式是**包内静态 map + reflect 调用**：
   `filter/init.go:43` 的 `filters` map、`score/init.go:56` 的 `scores` map。
@@ -76,7 +66,7 @@ PreFilter ──► Filter（并行执行，取交集）──► Score（加权
 2. `ScorePluginConf` 是**固定字段结构体**，每加一个 score 插件就要改 config 结构体。
    现成的反面例证：`config.go:632` 已定义 `TemplateScore *TemplateScore` 字段并可被 yaml 解析，
    但 `score/init.go:56` 的注册表中**并没有对应的构造函数**——配置面存在、实现面缺失的死字段。
-   配置结构与插件集合分离正是 §4.4 改用 per-plugin `args` 的直接动因；
+   配置结构与插件集合分离正是 §3.3 改用 per-plugin `args` 的直接动因；
 3. 没有"策略 Profile"概念：切换一套策略要同时改 enable_filters / enable_scorers / 多个
    plugin_conf / resource_weights，无法一键切换、也无法按场景组合；
 4. reflect 调用无编译期检查（`filter/init.go:32`、`score/init.go:39`），插件名拼写错误时
@@ -84,9 +74,9 @@ PreFilter ──► Filter（并行执行，取交集）──► Score（加权
    实际生效策略与配置声明不一致却无任何告警；
 5. 构造函数在配置缺失时直接 `panic`，且**并非个例——4 个 score 插件全部如此**：
    `realtimescore.go:28`、`affinityscore.go:24`、`imagescore.go:38`、`multifactorscore.go:24`。
-   §4.2.1 要求工厂返回 error 而非 panic，需一并整改这 4 处。
+   §3.2 要求工厂返回 error 而非 panic，需一并整改这 4 处。
 
-### 2.3 调度质量指标现状
+### 1.3 调度质量指标现状
 
 - 仅有零散运行指标：`pkg/scheduler/local.go:239` `reportStdevTrace()` 每 10s 用
   `rcrowley/go-metrics` 计算节点 CPU/内存/MvmNum 使用率**标准差**（`local.go:259-261`）
@@ -96,73 +86,71 @@ PreFilter ──► Filter（并行执行，取交集）──► Score（加权
 
 ---
 
-## 3. 目标与验收标准映射
+## 2. 目标与验收标准映射
 
 | # | 验收标准 | 设计方案对应章节 |
 |---|---|---|
-| 1 | 指标定义文档，benchmark 输出 ≥5 项调度质量指标 | §4.1 指标定义 + §6 benchmark 报告 |
-| 2 | 插件统一接入流水线，配置文件可切换策略 Profile | §4.2 插件 API/Registry + §4.3 独立装配 + §4.4 Profile 编译 |
-| 3 | ≥3 种内置调度策略，各有适用场景说明与配置示例 | §5.1 ~ 5.3 |
-| 4 | 用户自定义插件开发示例与文档 | §5.4 |
-| 5 | benchmark 含 ≥3 种 workload，一键运行生成对比报告 | §6.2 |
-| 6 | 新策略至少一项指标明显改善，trade-off 需说明 | §6.3 报告 + §9 验收阈值 |
-| 7 | 单测覆盖新增插件核心逻辑，PR 过代码规范检查 | §7、§8 |
+| 1 | 指标定义文档，benchmark 输出 ≥5 项调度质量指标 | §3.1 指标定义 + §5 benchmark 报告 |
+| 2 | 插件统一接入流水线，配置文件可切换策略 Profile | §3.2 注册表 + §3.3 Profile 与 per-plugin 配置 |
+| 3 | ≥3 种内置调度策略，各有适用场景说明与配置示例 | §4.1 ~ 5.3 |
+| 4 | 用户自定义插件开发示例与文档 | §4.4 |
+| 5 | benchmark 含 ≥3 种 workload，一键运行生成对比报告 | §5.2 |
+| 6 | 新策略至少一项指标明显改善，trade-off 需说明 | §5.3 报告 + §8 验收阈值 |
+| 7 | 单测覆盖新增插件核心逻辑，PR 过代码规范检查 | §6、§7 |
 
 ---
 
-## 4. 总体设计
+## 3. 总体设计
 
-### 4.0 设计思路、架构与重点技术
+### 3.0 设计思路
 
-本方案优先解决四个问题：插件仓库与上游仓库解耦、热路径性能不退化、配置可复现、
-接口升级可验证。这里的“插件不用动”应准确理解为：**上游正常更新不会造成插件源码的
-Git 合并冲突；在 `pluginapi/v1` 兼容范围内插件源码无需修改，只需要用目标上游版本重新
-构建并通过兼容测试**。任何项目都不能在依赖语义发生破坏性变化时承诺二进制永远兼容。
+任务要求是"**在现有 `filter.Selector` / `score.Selector` 接口基础上**，设计可扩展的调度插件
+注册与配置机制"。因此本方案**不新建插件接口**：两个 `Selector` 接口保持原样，新插件与内置
+插件实现同一接口，不存在 legacy 与新 API 的双轨。
 
-对成熟项目的实现调研如下：
+现有接口已经具备验收所需的三项能力，缺口全部在**注册与配置层**：
 
-| 项目 | 采用方式 | 可借鉴点 | 本项目结论 |
-|---|---|---|---|
-| Kubernetes Scheduler Framework | 扩展点 + Profile；插件静态编译进自定义 scheduler，通过 `WithPlugin` 显式注入 | 扩展点清晰、配置与代码解耦、out-of-tree 插件不改上游源码 | 采用显式注入、Profile、版本兼容矩阵 |
-| Caddy / xcaddy | 模块注册 + 构建器生成临时 Go module，将第三方模块静态编译进二进制 | 用户插件独立仓库、版本可锁定、发行过程可自动化 | 二期提供 `cubemaster-builder`，不要求用户维护上游 fork |
-| Volcano Scheduler | Session 生命周期；每轮调度读取一致的 Cluster Snapshot | 避免一次调度中节点数据前后不一致，生命周期边界明确 | 采用 CycleState/快照以及 Start/Close 生命周期 |
-| HashiCorp go-plugin / Terraform | 外部进程 + RPC/gRPC + 协议版本 | 隔离崩溃、支持独立升级 | 不用于逐节点 Filter/Score 热路径；RPC 开销和运维复杂度过高 |
-| Go `plugin` | 运行时加载 `.so` | 无需重编主程序 | 不采用：工具链、依赖、构建参数需严格一致，平台支持有限 |
+| 验收要求 | 现有接口 | 缺口 |
+|---|---|---|
+| 启用/禁用插件 | `score.Selector.Disable()` 已定义并被 4 个插件实现 | 无（Profile 直接复用） |
+| 调整权重 | `score.Selector.Weight()` 已定义，`runScoreFilter` 已加权求和并归一化（`schedule.go:246`） | 无（Profile 直接复用） |
+| 组合为策略 Profile | — | 配置层缺 Profile 分组 |
+| 插件注册 | 包级 map + reflect（`filter/init.go:32,43`、`score/init.go:39,56`） | 换成显式注册表 |
+| 插件参数 | 固定字段 `ScorePluginConf`（`config.go:627`） | 换成 per-plugin `args` |
 
-最终选择：**版本化插件 SDK + 实例级 Registry + 组合根显式注入 + out-of-tree 自定义发行版
-以及静态编译**。这不是简单地把静态 map 换成全局 map：全局 `init()` 注册只能消除 reflect，
-仍存在隐式依赖、测试相互污染和接入文件冲突；显式注入才真正把插件所有权移出上游源码。
+即 `Weight()` / `Disable()` 本来就是为可配置化设计的，只是上层没有对应的配置结构。三项改造
+互相独立，均不触及 `Selector` 接口签名：
 
-总体架构：
+1. **注册表**（§3.2）：显式 `Register`/`New` 取代 reflect，未知插件名 fail fast，构造失败返回
+   error 而非 panic；
+2. **per-plugin `args`**（§3.3）：取代固定字段结构体，新增插件不必再改 config 结构；
+3. **Profile**（§3.3）：命名策略组合，一处配置切换整套 filter/score/权重/picker。
+
+自定义插件的接入方式即任务要求的"**实现标准接口并注册即可**"：在自己的包里实现
+`filter.Selector` 或 `score.Selector`，调用 `Register` 注册，在装配处 import 该包，
+重新构建即可生效。不要求动态热加载。
+
+架构：
 
 ```text
-独立插件仓库                         CubeSandbox 上游仓库
+conf.yaml (profiles)                 CubeMaster
 ┌──────────────────┐              ┌──────────────────────────────────────┐
-│ my-filter        │ 依赖稳定 v1  │ scheduler-plugin-sdk/v1              │
-│ my-score         ├─────────────►│ pluginapi/v1: Factory/Snapshot/Status│
-└────────┬─────────┘              └────────────────┬─────────────────────┘
-         │ WithSchedulerPlugin                     │ adapter
-         ▼                                         ▼
-┌──────────────────┐              ┌──────────────────────────────────────┐
-│ custom main 或   │─────────────►│ Registry → Profile Compiler         │
-│ cubemaster-builder│ 显式装配      │ → Pipeline Runtime (immutable)      │
-└────────┬─────────┘              └────────────────┬─────────────────────┘
-         │ 静态编译                                 │ 每次调度创建 CycleState
-         ▼                                         ▼
+│ active_profile   │─────────────►│ ProfileCompiler                      │
+│ profiles[]       │   启动期编译  │  查名 → 解码 args → 校验 → 实例化     │
+└──────────────────┘              └────────────────┬─────────────────────┘
+                                                   │ 产出 []Selector
+用户插件包                                          ▼
+┌──────────────────┐  Register    ┌──────────────────────────────────────┐
+│ 实现 Selector    ├─────────────►│ Registry (filter / score)            │
+│ init() 或显式注册 │              └────────────────┬─────────────────────┘
+└──────────────────┘                               │
+                                                   ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│ PreFilter → Filter → Score → PostScore → Pick → Metrics/Trace         │
+│ PreFilter → Filter → Score(→归一化→PostScore→排序) → Pick → Metrics    │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-关键边界：SDK 只暴露稳定、只读的请求与节点快照；scheduler 内部的 `localcache`、
-`node.Node`、全局配置和可写方法均不属于插件 API。旧 `filter.Selector` / `score.Selector`
-暂时保留，通过 adapter 接入同一 Pipeline，完成迁移后再弃用。
-
-重点技术包括：用版本化 import path 固化外部契约；用依赖注入取代全局 `init()`；用
-ProfileCompiler 将 YAML 编译成不可变 Pipeline；用 CycleState 保证单轮一致读；用 typed
-Status 统一失败/Backoff 语义；用虚拟事件、确定性 RNG 和共享事件流保证 benchmark 可复现。
-
-### 4.1 调度评估指标体系（交付物 1）
+### 3.1 调度评估指标体系（交付物 1）
 
 沿用 CubeMaster 已有 Prometheus 暴露链路，在 `CubeMaster/pkg/scheduler/metrics.go` 集中定义
 指标；速率和分位数由 PromQL 从 counter/histogram 推导，不再重复维护易漂移的 rate gauge。
@@ -195,140 +183,51 @@ Status 统一失败/Backoff 语义；用虚拟事件、确定性 RNG 和共享�
 指标定义、PromQL 示例和 label 基数约束分别落到
 `docs/dev/scheduler-metrics.md` 与 `docs/zh/dev/scheduler-metrics.md`。
 
-### 4.2 版本化插件 API 与实例级 Registry（交付物 2）
+### 3.2 插件注册表（交付物 2 之注册部分）
 
-#### 4.2.1 `pluginapi/v1`
-
-第一版即建立小而稳定的 API，避免让仓库外插件直接依赖 `selctx.SelectorCtx` 和
-`node.Node` 等内部类型：
+`Selector` 接口不变，只把"名字 → 实例"的构造方式从 reflect 换成显式注册表。
+`filter` 与 `score` 各一份，结构同构：
 
 ```go
-package v1
+// CubeMaster/pkg/selector/filter/registry.go（新增）
+package filter
 
-type Plugin interface { Name() string }
+// Factory 由插件提供；args 为该插件在 Profile 中的私有配置，未配置时为空。
+// 配置非法必须返回 error，不允许 panic。
+type Factory func(args json.RawMessage) (Selector, error)
 
-type FilterPlugin interface {
-    Plugin
-    Filter(ctx context.Context, state CycleState, node NodeSnapshot) Status
-}
-
-type ScorePlugin interface {
-    Plugin
-    Score(ctx context.Context, state CycleState, node NodeSnapshot) (int64, Status)
-}
-
-type Factory func(
-    ctx context.Context,
-    args json.RawMessage,
-    handle Handle,
-) (Plugin, error)
+func Register(name string, f Factory) error
+func New(name string, args json.RawMessage) (Selector, error)
+func Names() []string   // 排序返回，便于诊断
 ```
 
-`NodeSnapshot`、`RequestSnapshot` 只含调度必需的不可变值；`Handle` 只提供稳定服务，
-如 logger、metrics、clock 和只读的镜像状态查询。工厂在启动期完成参数解析和校验，配置
-错误必须返回 error 并阻止启动，不允许 `panic`，也不创建 `Disable()=true` 的半有效实例。
+`score` 包同构，`Factory` 返回 `score.Selector`（含 `Weight()` / `Disable()`）。
 
-`Status` 使用有限类型而不是依赖错误字符串：`Success`、`Unschedulable`、
-`UnschedulableAndUnresolvable`、`Error`。硬约束插件返回 `Unresolvable` 后框架不执行
-Backoff，从框架层替代当前针对 Template 的 `shouldSkipBackoffForTemplate` 特判。
-
-`pluginapi/v1` 发布后只允许增加新的独立可选接口或字段能力，不给已有接口增加方法；
-破坏性变更进入新的 import path `pluginapi/v2`。SDK 与 CubeMaster release 的支持范围由
-兼容矩阵声明并在 CI 中实际编译、运行契约测试。
-
-#### 4.2.2 实例级 Registry
+内置插件在各自包的 `init()` 中注册，`filters` / `scores` 两个 map 随之删除：
 
 ```go
-type Registry struct {
-    factories map[string]pluginapi.Factory
-    frozen    bool
-}
-
-func NewRegistry() *Registry
-func (r *Registry) Register(name string, f pluginapi.Factory) error
-func (r *Registry) Freeze()
-func (r *Registry) New(ctx context.Context, name string,
-    args json.RawMessage, h pluginapi.Handle) (pluginapi.Plugin, error)
-```
-
-- Registry 隶属于一个 `App` 实例，不使用 package-global map，也不依赖 `init()` 顺序；
-- 空名称、nil factory、重复注册、冻结后注册都返回明确错误；应用启动时统一失败；
-- `Names()` 返回排序结果，便于诊断和生成 `--list-scheduler-plugins`；
-- 内置插件由 `DefaultRegistry()` 显式注册；单测可创建干净 Registry，互不污染；
-- 配置引用未知插件、插件类型与扩展点不匹配时 fail fast，不能告警后跳过，否则实际
-  调度策略会与配置声明不一致。
-
-现有 Selector 由 `legacyFilterAdapter` / `legacyScoreAdapter` 包装，迁移阶段保持默认配置
-行为不变；新插件只面向 v1 API 开发，不把临时兼容接口继续扩散为公共契约。
-
-### 4.3 组合入口、独立插件仓库与构建器
-
-#### 4.3.1 显式组合入口
-
-将 flag、配置初始化和 server 启动收敛到可复用入口，并使用 Option 注入插件：
-
-```go
-// CubeMaster/cmd/cubemaster/app
-func Main(opts ...Option)
-
-func WithSchedulerPlugin(name string, factory pluginapi.Factory) Option
-
-// 上游默认二进制
-func main() { app.Main() }
-```
-
-外部插件仓库自行提供约十行的发行入口，不修改 CubeSandbox 的 `main.go` 或 selector 源码：
-
-```go
-package main
-
-import (
-    "company.example/cube-plugins/myfilter"
-    "github.com/tencentcloud/CubeSandbox/CubeMaster/cmd/cubemaster/app"
-)
-
-func main() {
-    app.Main(app.WithSchedulerPlugin(myfilter.Name, myfilter.New))
+func init() {
+    Register("cpu", func(json.RawMessage) (Selector, error) { return NewCpuFilter(), nil })
+    Register("template_locality", ...)
 }
 ```
 
-推荐目录：
+相对现状的改进，逐条对应 §1.2 列出的问题：
 
-```text
-cube-plugins/                       # 独立 Git 仓库
-├── go.mod                          # 固定 CubeSandbox 与 pluginapi 版本
-├── cmd/cubemaster-custom/main.go   # 组合根
-├── plugins/myfilter/
-├── compatibility.yaml              # 已验证的 core/SDK 版本矩阵
-└── .github/workflows/compat.yaml   # build + contract test
-```
+- **编译期检查**取代 reflect：`Factory` 签名不符直接编译失败，不再等到运行期
+  （现状 `filter/init.go:32` `reflect.ValueOf` + `fn.Call(nil)`）；
+- **未知插件名 fail fast**：现状 `!fn.IsValid() → continue` 静默跳过
+  （`filter/init.go:34`、`score/init.go:41`），导致实际策略与配置声明不一致且无告警；
+  改为启动期返回 error 并终止，配置写错必须立刻可见；
+- **构造失败返回 error 而非 panic**：整改 4 处（`realtimescore.go:28`、`affinityscore.go:24`、
+  `imagescore.go:38`、`multifactorscore.go:24`）；
+- **第三方插件无需改 selector 包**：在自己的包里实现 `Selector` 并调用 `Register`，
+  在装配处 import 即可。
 
-这回答了“写在项目下面，后续更新会不会冲突”：如果插件目录和 blank-import 挂载文件直接
-放在上游工作树里，Git pull/rebase **仍可能冲突**；改成独立仓库和自定义入口后，上游升级
-只是修改 `go.mod` 版本并重新构建，不会发生源码合并冲突。编译或契约测试失败时才需要按
-明确的 API 变化升级插件。
+注册表是包级的，与现状一致；单测通过 `Register` + 独立 `New` 调用即可覆盖，无需暴露实例级
+容器。重复注册同名插件返回 error，在启动期暴露。
 
-#### 4.3.2 `cubemaster-builder`（二期）
-
-借鉴 xcaddy，提供可复现构建器：
-
-```bash
-cubemaster-builder build \
-  --core github.com/tencentcloud/CubeSandbox@v0.6.0 \
-  --with company.example/cube-plugins/myfilter@v1.2.0
-```
-
-构建器创建临时 Go module、生成显式 Option 装配的 main、执行 `go mod verify` 和测试后
-输出静态二进制/镜像及 `build-manifest.json`（core、SDK、插件版本与源码校验和）。它降低
-发行门槛，但不参与运行时；第一期先交付自定义 main 模板，不让构建器阻塞核心能力。
-
-不选择方案的原因：
-
-- 不用 Go `.so` 动态加载：其工具链与依赖一致性要求比“重新静态构建”更难运维；
-- 不用 RPC sidecar 执行每节点打分：节点数 × 插件数会放大序列化、网络与故障处理成本；
-- 不承诺运行时热插拔：调度策略是控制面关键路径，静态插件 + 启动校验更可预测。
-
-### 4.4 Profile 编译与不可变运行时配置
+### 3.3 Profile 与 per-plugin 配置（交付物 2 之配置部分）
 
 Profile 不直接复用固定字段的 `ScorePluginConf`，每个插件拥有独立 `args`：
 
@@ -358,7 +257,7 @@ scheduler:
 > 消费点 `pkg/selector/score/utils.go:18-53`）：`realtime_create_num`（非
 > `real_time_create_num`）、`quota_cpu_usage` / `quota_mem_usage`（非 `quota_cpu` / `quota_mem`）、
 > `mvm_num`、`cpu_util`、`image_id`、`template_id`。legacy translator 依赖这套名字做双向映射，
-> 若在新 API 中改名则属于破坏性变更，须走 §4.2.1 的 v2 流程，本方案不改名。
+> 本方案不改名。
 
 与 legacy 的结构差异：现状 `EnableWeightFactors []string`（`config.go:644-648`）只声明启用哪些
 因子，权重统一从全局 `Score.ResourceWeights map[string]float64`（`config.go:68`）查
@@ -367,19 +266,23 @@ scheduler:
 的 `map[string]float64`，legacy translator 负责把旧的 `[]string` + 全局 map 翻译成等价的
 per-plugin map，保证默认行为不变。
 
-启动时由 `ProfileCompiler` 完成 schema 校验、插件查找、args 解码、权重范围检查和实例化，
-输出不可变 `RuntimeConfig`。Pipeline 只读取该快照，不在调度热路径读取全局配置。
+启动时由 `ProfileCompiler` 按 `active_profile` 查表，对每个插件执行：注册表查名 → 解码
+`args` → 校验（权重范围、因子名合法性）→ 调用 `Factory` 实例化，产出 `[]filter.Selector` 与
+`[]score.Selector`，交给现有 `runFilter` / `runScoreFilter` 执行。任一步失败即启动失败。
 
-兼容策略：未配置 `profiles` 时，通过 legacy translator 把现有
-`enable_filters/enable_scorers/plugin_conf` 编译成 `legacy-default` Profile；迁移两个
-release 后再评估弃用。第一版 Profile 变更明确要求重启 CubeMaster。现有配置热更新与插件
-实例生命周期并不一致，若只热更权重会形成“旧实例 + 新配置”的混合状态；后续若确有需要，
-再以“构建新 Pipeline → 原子切换 → drain 旧 Pipeline → Close”的方式实现整组热切换。
+`Weight()` 的取值来源随之统一：Profile 中的 `weight` 字段在实例化时传入插件，
+`Selector.Weight()` 返回该值，`runScoreFilter`（`schedule.go:246`）的加权归一化逻辑不变。
+
+兼容策略：未配置 `profiles` 时，legacy translator 把现有
+`enable_filters` / `enable_scorers` / `plugin_conf` / `resource_weights` 翻译成等价的
+`legacy-default` Profile，默认行为逐字节不变。
+
+Profile 变更需重启 CubeMaster 生效。
 
 Profile 的 picker 支持：`best`、`top_n_uniform`、`top_n_weighted`。
 
 `legacy-default` Profile 的 picker **必须由 `least_select_name` 与 `priority_select_num`
-两个配置项联合翻译**，不能简单固定为某一种（§2.1）：
+两个配置项联合翻译**，不能简单固定为某一种（§1.1）：
 
 | legacy 配置 | 等价 picker |
 |---|---|
@@ -387,67 +290,54 @@ Profile 的 picker 支持：`best`、`top_n_uniform`、`top_n_weighted`。
 | `least_select_name: random` + `priority_select_num: N` | `top_n_uniform` with N |
 | `least_select_name: rw`/`sw`/`rrw` + `priority_select_num: N` | `top_n_weighted` with N |
 
-翻译错误会悄悄改变结果分布，因此 §7 的 legacy golden test 必须覆盖上表全部组合。
+翻译错误会悄悄改变结果分布，因此 §6 的 legacy golden test 必须覆盖上表全部组合。
 
-### 4.5 CycleState、生命周期与并发模型
+### 3.4 调度链路埋点
 
-每次调度创建一个 `CycleState`，包含 RequestSnapshot、候选节点快照、Profile generation
-以及同一轮插件共享的只读/局部状态。所有插件在一次调度中观察到同一版本的数据，避免
-Filter 和 Score 分别读取 localcache 时出现时间撕裂。
+- `Select()` 出入口用 defer 记录 attempts 和 duration，失败原因映射到有限枚举；
+- Pick 后判断模板命中并计数；
+- 创建链路记录端到端 create counter/histogram；
+- 10s 周期任务（`local.go:239` 现有链路）从同一节点快照计算 quota、CV、active nodes
+  和 fragmentation；
+- 热路径只做固定 label 的 Counter/Histogram 观测，不记录 node_id/template_id，
+  防止 Prometheus 时序爆炸。注：现有 `cube_snapshot_storage_mode`
+  （`snapshot_metrics.go:29-32`）已使用 node 级 label，本方案不扩大该模式。
 
-可选生命周期接口：
-
-```go
-type Validator interface { Validate() error }
-type Starter interface { Start(context.Context) error }
-type Closer interface { Close() error }
-```
-
-框架顺序固定为 `New → Validate → Start → Serve → Close`。异步预计算 scorer 在 `Start`
-中启动 goroutine，在 `Close` 中退出；错误由 context 取消和健康指标反馈，不允许插件自行
-管理无界后台任务。Filter/Score 必须支持并发调用，框架在文档中明确线程安全契约。
-
-`CycleState` 解决读取一致性，不等于资源预占。#695 所述并发超卖仍需独立的原子
-reservation/rollback 机制；benchmark 同时模拟有无 reservation，并将 oversell 单独报告，
-不能把策略得分改善误写为并发正确性修复。
-
-### 4.6 调度链路埋点
-
-- Pipeline 出入口用 defer 记录 attempts 和 duration，失败原因映射到有限枚举；
-- Pick 后根据同一 CycleState 判断模板命中，避免再次读缓存造成口径漂移；
-- 创建链路记录真正的端到端 create counter/histogram；Profile generation 写入日志/trace，
-  不作为 Prometheus label；
-- 10s 周期任务从同一节点快照计算 quota、CV、active nodes 和 fragmentation；
-- 热路径只做无界 label 禁止的 Counter/Histogram 观测，不记录 node_id/template_id，
-  防止 Prometheus 时序爆炸。
+> 本方案不涉及资源预占。#695 所述并发超卖需要独立的原子 reservation/rollback 机制，
+> 属于并发正确性问题，与调度策略质量正交，不在本任务范围内。
 
 ---
 
-## 5. 内置调度策略（交付物 3）
+## 4. 内置调度策略（交付物 3）
 
-三个策略均是可版本化 Profile；尽量组合现有插件，只在缺少能力时新增插件。
+三个策略均为 Profile 配置；尽量组合现有插件，只在缺少能力时新增插件。
 
-### 5.1 `burst-spread`：突发短生命周期沙箱
+### 4.1 `burst-spread`：突发短生命周期沙箱
 
 - **场景**：AI Agent 并发拉起大量秒级至分钟级沙箱，优先避免单节点创建风暴；
 - **Filter**：`cpu`、`mem`、`disk`、`realtime_create_num`；不使用模板硬亲和；
 - **Score**：复用已有 `real_time_weighted_average`，提高 `realtime_create_num`、
-  `mvm_num`、`cpu_util` 权重（因子名见 §4.4 表格）。原方案的 `spread_score` 与现有实时打分
+  `mvm_num`、`cpu_util` 权重（因子名见 §3.3）。原方案的 `spread_score` 与现有实时打分
   公式重复，不新增；
 - **Picker**：`top_n_weighted`，N=3~5，在保持质量的同时减少同分热点；
 - **权衡**：预期负载 CV 下降，但模板本地命中率和缓存复用可能下降。
 
-### 5.2 `template-hotstart`：同模板高频热启动
+### 4.2 `template-hotstart`：同模板高频热启动
 
 - **场景**：RL 训练、批量评测等重复创建同一模板，优先缓存命中和启动延迟；
 - **Filter**：默认只保留资源、磁盘与并发硬约束，不用 `template_locality` 硬过滤；
-- **Score**：提高现有 `image_score` 权重，并用 `real_time_weighted_average` 在副本节点间均衡。
-  原方案再增加 `template_affinity_score` 会与 `image_score` 重复，因此删除；
+- **Score**：提高现有 `image_score` 的 `template_id` 因子权重，并用
+  `real_time_weighted_average` 在副本节点间均衡。原方案再增加 `template_affinity_score`
+  会与 `image_score` 重复，因此删除；
+- **权重需实验确定**：`calculatePriority`（`imagescore.go:160-168`）在单模板场景下把本地性
+  压缩为"命中满分 / 未命中零分"两档，因此 `image_score` 与 `real_time_weighted_average`
+  的权重比落在一个较窄区间——过高退化为硬过滤，过低则本地性完全失效。该比值由阶段 3（9/3–9/8）的
+  敏感性扫描（§7）在 `template_storm` workload 上扫出，不预设固定值；
 - **Picker**：`best`，使高权重本地性得分稳定生效；
 - **严格模式**：可选 `template-hotstart-strict` Profile 加入 locality 硬 Filter。它可能获得
   接近 100% 的命中率，但资源不足时会降低成功率，必须单独报告，不作为默认值。
 
-### 5.3 `binpack`：大规格长驻沙箱
+### 4.3 `binpack`：大规格长驻沙箱
 
 - **场景**：大规格、长生命周期沙箱，目标是减少活跃节点与不可用碎片；
 - **Filter**：`cpu`、`mem`、`disk`；
@@ -467,45 +357,63 @@ score = 100 × (1 - weightedMean(cpuRemain, memRemain))
 策略 benchmark 必须固定相同 overcommit ratio；把 overcommit 与策略同时改变会产生混杂
 变量，无法说明收益来自插件。生产 Profile 可以覆盖 overcommit，但报告需将其作为单独实验。
 
-### 5.4 自定义插件开发示例（交付物 4）
+### 4.4 自定义插件开发示例（交付物 4）
 
-新增中英文 `scheduler-plugin-development.md`，提供一个独立可构建的
-`examples/scheduler-plugin/`：
+新增中英文 `docs/dev/scheduler-plugin-development.md` 与
+`docs/zh/dev/scheduler-plugin-development.md`，配套示例代码
+`CubeMaster/pkg/selector/examples/`，覆盖"实现标准接口并注册"的完整流程：
 
-- `label_filter` 展示 v1 Filter、args 解码、typed Status 与表驱动测试；
-- `zone_spread_score` 展示 Score、CycleState、指标和确定性打分；
-- `cmd/cubemaster-custom` 展示 `WithSchedulerPlugin` 显式装配，不修改上游文件；
-- `go.mod` 固定 core/SDK 版本，CI 对最近两个 CubeSandbox release 与 `master` 执行 build、
-  race test 和最小契约测试；
-- 文档说明 API 稳定面、版本矩阵、升级步骤、线程安全和生命周期要求。
+- **示例 1（Filter）`label_filter`**：按节点 label 过滤，约 40 行。
+  实现 `filter.Selector` 的 `Select` / `ID`，在 `init()` 中 `filter.Register`，
+  演示从 `args` 解码自定义参数；
+- **示例 2（Score）`zone_spread_score`**：跨可用区打散打分，约 60 行。
+  实现 `score.Selector` 的 `Select` / `ID` / `Weight` / `Disable`，
+  演示权重如何由 Profile 注入、`Disable()` 如何响应配置；
+- **接入步骤**（文档正文）：实现接口 → `Register` 注册 → 在装配处 import 插件包 →
+  在 Profile 的 `filters` / `scores` 中按名启用并配 `args` → 重新构建 CubeMaster；
+- 每个示例配 `_test.go`（表驱动 + fake NodeList），参考既有
+  `filter/template_locality_test.go`、`score/imagescore_test.go` 的写法；
+- 文档同时说明：`Select` 可能被并发调用，插件需自行保证线程安全；插件不应持有
+  跨调度轮次的可变状态。
 
 ---
 
-## 6. 可复现调度 Benchmark / 仿真器（交付物 5、6）
+## 5. 调度 Benchmark 与实机验证（交付物 5、6）
 
-### 6.1 形态与可信度边界
+### 5.1 实机验证环境（验收数据以实机测量为准）
 
-新增 `CubeMaster/cmd/schedbench/`，将生产调度主流程提取为可注入依赖的 `Pipeline`。
-生产与 benchmark 共用完整的 PreFilter/Filter/Score/PostScore/Pick 代码，差别仅在
-NodeProvider、ImageProvider、Clock、RNG 和资源账本的实现。
+项目环境具备真实 CPU 资源，对比实验直接在真实集群上运行，验收数字全部来自实测，
+不依赖离线仿真：
 
-仿真器采用虚拟事件时间，不 `sleep`，事件依次为：
+- **集群形态**：1 个 CubeMaster + ≥3 个 cubelet 节点（可用同机多 VM 或多 cubelet 实例，
+  机器规格与节点清单写入报告）。CV、装箱率、活跃节点数、碎片率等**分布类指标必须
+  多节点才有意义**，因此多节点集群是实验的前置条件，在实验记录中固定；
+- **模板预置**：`template_storm` 需要的 30% 副本分布通过预部署实现，并写入实验记录；
+- **对照一致性**：overcommit 等参数在所有 profile 间保持一致；切换策略 =
+  改 `active_profile` + 重启 CubeMaster；
+- **重复与记录**：每组（workload × profile）实验跑 ≥3 次，报告均值与离散程度；
+  每份报告记录 Git commit、Profile 内容哈希、workload 参数、节点清单、Go 版本。
 
-```text
-Arrival → Schedule → Admission/Reservation → CreateComplete
-                                           → LifetimeExpire → Release
-```
+执行器：扩展 `examples/cube-bench`（已具备打真实 CubeAPI 的创建/删除压测能力），
+新增三种 workload 的请求序列生成与报告输出：
 
-- 同一 workload 事件流在所有 Profile 间复用；随机源由 `--seeds` 指定，默认跑固定 seed 集；
-- picker 的同分节点使用 NodeID 稳定破平，不依赖 map 遍历顺序；
-- `--reservation=optimistic|none` 对比原子预占与当前竞态窗口，输出 oversell 次数；
-- 每份报告记录 Git commit、Profile 内容哈希、workload 参数、seed、Go 版本；
-- 离线工具只能报告调度耗时与**建模启动成本**，不得把模型值命名为真实“创建 P95”；
-  真实端到端创建延迟通过可选 cluster 模式复用 `examples/cube-bench` 测量。
+- 请求序列（到达时刻、规格、寿命、TemplateID）由固定 seed **预生成**，
+  同一 workload 的序列文件在所有 profile 间复用——各策略面对完全相同的负载流；
+- 按序列中的寿命到期自动发起删除，形成分配/回收闭环；
+- 一键入口 `make sched-bench`，输出 Markdown、JSON、CSV。
 
-一键入口：`make sched-bench`，输出 Markdown、JSON 和 CSV。
+指标来源分两侧：执行器侧测**真实**端到端创建延迟 P50/P95 与请求成功率；
+master 侧从 §3.1/§3.4 的指标链路（Prometheus `/metrics`）在实验窗口内采集
+调度耗时 P50/P95、调度成功率、重调度率、模板命中率；
+节点侧同窗口采集 CPU/Mem CV、装箱率、碎片率、活跃/空节点数。
 
-### 6.2 三种内置 Workload
+需要的改造（单测与基准测试同样需要，与仿真无关）：`template_locality`
+（`template_locality.go:50,91`）与 `realtime_create_num`（`realtimecreatelimit.go:40-48`）
+目前直接调用 localcache 包级函数，需补上与 `imagescore.go:34`、`prefilter.go:26`
+同款的函数指针注入点，使这两个插件在单测与 go bench 中可注入 fake 数据。
+这是 §7 阶段 2 注册表改造的一部分。
+
+### 5.2 三种内置 Workload
 
 | Workload | 默认参数 | 模拟目标 |
 |---|---|---|
@@ -514,13 +422,16 @@ Arrival → Schedule → Admission/Reservation → CreateComplete
 | `mixed_spec` | 400 请求、1C2G:2C4G:8C16G=6:3:1、混合寿命 | 大小规格组合与资源碎片 |
 
 实验矩阵 = workload × profile（legacy-default / burst-spread / template-hotstart / binpack）
-× seed；节点快照、请求序列和 overcommit 对照组完全一致。
+× 重复次数（≥3）。请求规模与节点数按实际集群规模等比缩放并写入报告；
+同一 workload 的预生成请求序列、节点初始状态和 overcommit 在所有 profile 间完全一致。
 
-### 6.3 报告指标与调优建议
+### 5.3 报告指标与调优建议
 
-报告至少输出：调度成功率、P50/P95 调度耗时、模板命中率、CPU/Mem CV、活跃节点数、
-空节点数、CPU/Mem 碎片率、重调度率、oversell 次数以及模拟成本。关键表格同时给出绝对值、
-相对 baseline 变化、seed 间均值和离散程度，避免用单个随机种子下结论。
+报告至少输出：**真实**端到端创建延迟 P50/P95、调度耗时 P50/P95、调度成功率、
+模板命中率、CPU/Mem CV、CPU/Mem 装箱率、活跃节点数、空节点数、CPU/Mem 碎片率、
+重调度率。所有延迟与成功率均为实测值，报告中不出现模型估算值。
+关键表格同时给出绝对值、相对 legacy-default 变化、≥3 次重复的均值和离散程度，
+避免用单次运行下结论。
 
 自动建议仅基于显式规则生成，例如 CV 过高时提示增加实时余量权重、模板命中低且成功率
 有余量时提示增加 `image_score` 权重。报告必须同时列出负向变化，不输出“全面优于默认”
@@ -528,40 +439,42 @@ Arrival → Schedule → Admission/Reservation → CreateComplete
 
 ---
 
-## 7. 测试与质量保障
+## 6. 测试与质量保障
 
 | 层级 | 覆盖点 |
 |---|---|
-| SDK 契约测试 | v1 DTO/Status 行为、Factory 错误传播、接口兼容样例可编译 |
-| Registry 单测 | 实例隔离、重复/冻结注册、排序 Names、未知插件、扩展点类型错误 |
-| Profile 编译测试 | legacy 翻译、args schema、权重边界、未知名 fail fast、快照不可变 |
-| Pipeline 单测 | 各扩展点顺序、typed Status/Backoff、取消、panic recovery、并发安全 |
+| 注册表单测 | 注册/重复注册报错、按名构造、未知名 fail fast、`Names()` 排序、Factory 返回 error 不 panic |
+| Profile 编译测试 | legacy 翻译（含 §3.3 picker 映射表全部组合）、args 解码、权重边界、未知插件名启动失败 |
+| 调度链路单测 | 各阶段顺序、PostScore 在归一化后排序前、取消、panic recovery、并发安全 |
 | 策略单测 | 打分单调性、零配额、极端规格、dominant resource、稳定破平 |
 | 指标单测 | counter 标签、CV 边界、利用率/碎片率公式、模板命中口径 |
-| Benchmark 回归 | 固定事件流结果确定、账本最终释放、reservation 模式可检出 oversell |
-| 兼容矩阵 | 插件示例对最近两个 release 和 master build/test；记录允许失败的开发分支 |
+| Benchmark 回归 | 请求序列固定 seed 可复现；每组实验 ≥3 次重复取均值与离散；单机 go bench 守住性能门槛 |
+| 示例插件 | 两个示例插件的表驱动单测，与内置插件同一套 fake NodeList 写法 |
 
 新增代码执行 `go test -race ./...`（资源允许的 package）、`go vet ./...`、
-`golangci-lint run ./...` 和 `gofmt`。基准测试设置性能门槛：默认 Profile 在固定 100 节点
-用例中，调度吞吐下降不超过 5%，P95 额外开销不超过 5%；超限需 profile/pprof 解释。
+`golangci-lint run ./...` 和 `gofmt`。基准测试设置性能门槛：`legacy-default` Profile 在固定
+100 节点用例中，调度吞吐下降不超过 5%，P95 额外开销不超过 5%；超限需 profile/pprof 解释。
+该门槛的基线由阶段 1（8/19–8/26）搭建的单机基准用例产出（§7）。
 
 ---
 
-## 8. 时间规划与阶段交付
+## 7. 时间规划与阶段交付
 
-按 6 周安排，每周形成可独立审查、可回滚的 PR，避免最后一次性提交大改动：
+按硬期限倒排：**设计文档 2026-08-26 交付，2026-09-11 前提交全部 PR**。总工期约三周半，
+压缩为四个阶段，每个阶段形成可独立审查、可回滚的 PR，避免最后一次性提交大改动：
 
 | 时间 | 重点工作 | 交付物与退出条件 |
 |---|---|---|
-| 第 1 周 | 指标口径、Pipeline 依赖抽取、设计评审 | 本方案定稿；指标文档；legacy 行为 golden test 通过 |
-| 第 2 周 | `pluginapi/v1`、实例 Registry、legacy adapter | SDK/Registry PR；契约与 race test 通过；默认行为不变 |
-| 第 3 周 | `app.Main(opts...)`、外部示例、ProfileCompiler | 独立插件仓库模板可构建；legacy 配置可翻译；错误配置启动失败 |
-| 第 4 周 | 三个 Profile、demand-aware binpack、Prometheus 埋点 | 策略/指标 PR；单测和性能门槛通过 |
-| 第 5 周 | schedbench、三类 workload、reservation 对照 | 一键生成 MD/JSON/CSV；固定 seed 可复现；输出 ≥5 指标 |
-| 第 6 周 | 参数实验、文档、兼容矩阵、上游反馈修订 | 对比报告；中英文开发文档；全部 CI 通过；准备提交 PR |
+| 阶段 1（8/19–8/26） | 设计评审与定稿；指标口径与埋点、cube-bench workload 扩展骨架先行 | **8/26 设计文档交付**；指标文档；cube-bench 可跑通单 workload 实机流程；单机基准用例产出性能门槛基线 |
+| 阶段 2（8/27–9/2） | filter/score 注册表、localcache 注入点、4 处 panic 整改；per-plugin `args` + Profile + legacy translator | 注册表 PR 与 Profile PR 提交；未知插件名 fail fast；legacy 配置逐字节等价；默认行为 golden test 通过 |
+| 阶段 3（9/3–9/8） | 三个 Profile、demand-aware binpack、权重敏感性扫描；cube-bench 三类 workload 与报告生成、实机矩阵实验 | 策略 PR 提交；一键生成 MD/JSON/CSV、固定 seed 可复现、输出 ≥5 指标；§4.2 权重区间由实机实验确定 |
+| 阶段 4（9/9–9/11） | 参数实验收尾、中英文文档、示例插件、CI 收尾 | **9/11 前提交全部 PR**：对比报告、开发文档与示例、全部 CI 通过 |
 
-推荐 PR 顺序：Pipeline/指标基础 → SDK/Registry → 显式入口/Profile → 策略 → benchmark →
-文档与示例。`cubemaster-builder` 是二期增强，不进入六周关键路径。
+阶段 2 的两个 PR 串行合入，阶段 3 的策略与 benchmark 可并行推进；若阶段 3 进度受挤压，
+优先保证策略 PR 与对比报告，中英文文档与示例插件在 9/11 前以独立 PR 补齐。
+
+推荐 PR 顺序：指标/benchmark 基线 → 注册表 → Profile → 策略 → benchmark 报告 →
+文档与示例。
 
 PR 提交注意（遵循 `CONTRIBUTING.md` 与根目录 `AGENTS.md`）：
 
@@ -572,7 +485,7 @@ PR 提交注意（遵循 `CONTRIBUTING.md` 与根目录 `AGENTS.md`）：
 
 ---
 
-## 9. 预期效果、验收阈值与风险
+## 8. 预期效果、验收阈值与风险
 
 以下是验收目标，不是脱离实验的性能承诺；最终以相同 workload、seed 和 overcommit 的
 对照报告为准，至少一个新策略达到对应主目标且守住成功率门槛：
@@ -580,57 +493,21 @@ PR 提交注意（遵循 `CONTRIBUTING.md` 与根目录 `AGENTS.md`）：
 | Profile | 主目标（相对 legacy-default） | 守门指标 | 已知权衡 |
 |---|---|---|---|
 | `burst-spread` | `burst` CPU 或 Mem CV 相对下降 ≥10% | 成功率下降 ≤1 个百分点 | 模板命中可能降低 |
-| `template-hotstart` | 命中率提升 ≥10 个百分点；cluster 模式同时观察创建 P95 | 成功率下降 ≤1 个百分点 | 热点节点负载升高 |
+| `template-hotstart` | 命中率提升 ≥10 个百分点；实机创建 P95 同步观察 | 成功率下降 ≤1 个百分点 | 热点节点负载升高 |
 | `binpack` | `mixed_spec` 活跃节点数或碎片率相对下降 ≥10% | 成功率下降 ≤1 个百分点 | CV 与故障影响面升高 |
 
-工程效果：外部插件不修改上游工作树；Profile 切换由一份配置完成；错误插件和错误参数在
-启动期暴露；benchmark 可复现实验且报告不少于五项质量指标；新增插件有完整示例和兼容矩阵。
+工程效果：新增插件无需修改 selector 包，实现接口 + 注册即可接入；Profile 切换由一份配置
+完成；错误插件名和错误参数在启动期暴露；benchmark 可复现实验且报告不少于五项质量指标；
+新增插件有可运行的开发示例与中英文文档。
 
 主要风险及应对：
 
-- **API 设计过宽**：v1 只暴露不可变 DTO 和最小 Handle；新增能力走独立可选接口；
-- **静态编译仍需重建**：这是换取热路径性能和部署确定性的明确权衡，builder 降低操作成本；
-- **Profile 热更新预期**：v1 文档明确 restart-required，避免半更新状态；
+- **改动波及现有调度行为**：注册表与 Profile 均为等价替换，`legacy-default` 由 translator
+  保证逐字节兼容，golden test 覆盖 §3.3 picker 映射表全部组合；
+- **模板本地性打分二值化**：`calculatePriority`（`imagescore.go:160-168`）使模板命中呈
+  满分/零分两档，§4.2 的权重比需由阶段 3（9/3–9/8）的敏感性扫描确定，不预设固定值；
 - **指标基数与性能**：禁止请求、节点、模板 ID 作为 label；通过 benchmark 守住 5% 门槛；
-- **调度与资源竞态混淆**：单列 reservation/oversell 指标，#695 作为并发正确性后续项；
+- **实机实验噪声与规模限制**：集群规模有限（≥3 节点）且存在环境噪声，每组实验
+  ≥3 次重复并报告均值与离散程度；结论仅在报告记录的节点清单与参数下成立；
 - **策略不存在全局最优**：每个 Profile 明确适用 workload 与负向指标，报告展示完整 trade-off。
 
----
-
-## 10. 调研依据
-
-- [Kubernetes Scheduling Framework](https://kubernetes.io/docs/concepts/scheduling-eviction/scheduling-framework/)：扩展点、调度周期与插件模型；
-- [Kubernetes Scheduler Configuration](https://kubernetes.io/docs/reference/scheduling/config/)：多 Profile 与插件配置；
-- [Kubernetes Scheduling Framework KEP](https://github.com/kubernetes/enhancements/blob/master/keps/sig-scheduling/624-scheduling-framework/README.md)：out-of-tree 插件和 `WithPlugin`；
-- [Kubernetes scheduler-plugins](https://github.com/kubernetes-sigs/scheduler-plugins)：自定义 scheduler 入口与版本兼容矩阵；
-- [Caddy Extending Caddy](https://caddyserver.com/docs/extending-caddy) 与 [xcaddy](https://github.com/caddyserver/xcaddy)：外部模块静态组合和构建器；
-- [Volcano Scheduler Configuration](https://github.com/volcano-sh/volcano/blob/master/docs/user-guide/how_to_configure_scheduler.md)：插件 Session 生命周期；
-- [HashiCorp go-plugin](https://github.com/hashicorp/go-plugin)：外部进程插件、协议版本与隔离边界；
-- [Go plugin package](https://pkg.go.dev/plugin)：动态加载的工具链、依赖和平台限制。
-
----
-
-## 附：关键代码位置速查
-
-| 内容 | 位置 |
-|---|---|
-| 调度主流程 `Select()` | `CubeMaster/pkg/scheduler/schedule.go:28` |
-| 并行 Filter / 评分 / PostScore 调用 | `schedule.go:157` / `:201` / `:251` |
-| 调度器全局单例与初始化 | `CubeMaster/pkg/scheduler/init.go:33`（包级变量）、`:43` `InitScheduler` |
-| `Select`/`BackoffSelect` 全部调用点 | `sandbox_run.go:474`、`sandbox_migrate.go:40`（仅此 2 处） |
-| Filter 接口与静态注册 | `CubeMaster/pkg/selector/filter/init.go:17,32,43` |
-| Score 接口与静态注册 | `CubeMaster/pkg/selector/score/init.go:19,39,56` |
-| 调度上下文 | `CubeMaster/pkg/scheduler/selctx/selectcontext.go:21`、`:151` `LeastRandomSelect` |
-| 选择器权重被忽略之处 | `CubeMaster/pkg/scheduler/selctx/random_select.go:21-23` |
-| 调度配置结构体 | `CubeMaster/pkg/base/config/config.go:241`（SchedulerConf）、`:627`（ScorePluginConf） |
-| 选择相关缺省值 | `config.go:248-249`（字段）、`config.go:1203-1208`（缺省填充） |
-| overcommit 默认值与生效逻辑 | `config.go:339-340`（默认值）、`config.go:348` `GetEffectiveOvercommitRatio` |
-| `EffectiveAllocated` 归零陷阱 | `config.go:441`（受 `ignore_redis_allocation` 影响，§4.1 观测口径依据） |
-| 权重因子常量与消费点 | `pkg/base/constants/constants.go:221-240`、`pkg/selector/score/utils.go:18-53,65-76` |
-| 现有负载均衡度上报（stddev） | `CubeMaster/pkg/scheduler/local.go:239,259-261` |
-| 模板本地性 Filter（阶段内重读缓存） | `pkg/selector/filter/template_locality.go:50,91` |
-| 镜像/模板 Score | `pkg/selector/score/imagescore.go:128-129`（template_id 因子）、`:160-168`（打分二值化） |
-| score 构造函数 panic（需整改 4 处） | `realtimescore.go:28`、`affinityscore.go:24`、`imagescore.go:38`、`multifactorscore.go:24` |
-| 现有 Prometheus 链路 | `CubeMaster/go.mod:30`、`pkg/server/server.go:107`（`/metrics`）、`pkg/templatecenter/snapshot_metrics.go:13-32` |
-| 端到端压测工具（cluster 模式可复用） | `examples/cube-bench/` |
-| 新增 Filter 插件的既有范例 | 上游 PR #1157（SRA filter） |
