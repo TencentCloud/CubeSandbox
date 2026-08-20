@@ -60,6 +60,9 @@ make cubemaster
 make cubelet
 make agent
 make shim
+
+# Remove local Go/Rust build artifacts (not global caches)
+make clean
 ```
 
 See the [Makefile](./Makefile) for the full list of build targets.
