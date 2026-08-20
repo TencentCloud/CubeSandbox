@@ -13,6 +13,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
+// multiFactorWeightedAverageScore 多因子加权平均评分插件：
+// 直接使用后台协程（loopAsyncScore）异步计算并写回的节点 Score 字段作为本插件得分
 type multiFactorWeightedAverageScore struct {
 	weight float64
 }
@@ -42,6 +44,7 @@ func (l *multiFactorWeightedAverageScore) Disable() bool {
 	return config.GetConfig().Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage.Disable
 }
 
+// Select 将每个候选节点已异步计算好的 Score 原样包装为评分结果返回
 func (l *multiFactorWeightedAverageScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeScoreList,
 	err error) {
 	defer func() {

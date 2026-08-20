@@ -12,6 +12,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
+// realtimecreatelimit 实时创建并发数过滤插件：
+// 剔除当前创建并发数已达上限的节点，避免单节点创建压力过大
 type realtimecreatelimit struct {
 }
 
@@ -27,6 +29,9 @@ func (l *realtimecreatelimit) String() string {
 	return l.ID()
 }
 
+// Select 过滤规则：
+// 1. 节点全局实时创建并发数（RealTimeCreateConcurrentLimit）必须小于创建并发上限；
+// 2. 节点本地创建并发数按 master 节点数折算后的全局估算值也必须小于上限
 func (l *realtimecreatelimit) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error) {
 	inList := selCtx.Nodes()
 	nodes := make(node.NodeList, 0, inList.Len())
