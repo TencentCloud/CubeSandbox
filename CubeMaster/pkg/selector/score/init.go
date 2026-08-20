@@ -15,6 +15,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
+// Selector 评分插件接口：Select 为候选节点打分，Weight 返回插件权重，Disable 表示是否禁用
 type Selector interface {
 	Select(selCtx *selctx.SelectorCtx) (node.NodeScoreList, error)
 
@@ -25,6 +26,8 @@ type Selector interface {
 	Disable() bool
 }
 
+// NewSelector 根据配置中启用的评分器名列表构造评分插件；
+// 若启用了多因子加权平均评分，同时启动异步评分后台协程预计算节点分数
 func NewSelector(ctx context.Context) []Selector {
 	conf := config.GetConfig().Scheduler
 	if conf == nil || conf.Score == nil || conf.Score.ResourceWeights == nil || len(conf.Score.EnableScorers) == 0 {
@@ -49,6 +52,7 @@ func NewSelector(ctx context.Context) []Selector {
 	return ss
 }
 
+// scores 注册表：评分器配置名 -> 构造函数的映射
 var scores = map[string]interface{}{
 	"real_time_weighted_average":    NewRealTimeWeightedAverageScore,
 	"multi_factor_weighted_average": NewMultiFactorWeightedAverageScore,
