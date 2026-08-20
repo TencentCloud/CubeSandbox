@@ -184,9 +184,16 @@ records the versions this suite is known to have been run against, so a consumer
 reading it can tell which SDK versions are expected to work with a given
 CubeSandbox release instead of discovering it by outage.
 
-To check one version, install it and run the suite normally:
+To check one version, install it and run the suite normally. The commands below
+assume the E2B backend environment from "Quick Start" is already exported —
+arriving here straight from `e2b-versions.txt`, set it first, or the run fails at
+sandbox creation with `E2B backend requires E2B_API_KEY`:
 
 ```bash
+export E2B_API_KEY=<your-e2b-api-key>
+# Self-hosted HTTPS endpoints also need the local CA:
+export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem
+
 # Full coverage: pair the interpreter package, because the run_code cases need it.
 # Pick a pairing plain pip can resolve: `e2b-code-interpreter` declares
 # `e2b>=2.26.0,<3.0.0`, so the 2.21.0 row in `e2b-versions.txt` installs only
@@ -204,9 +211,12 @@ pytest --run-e2e --sdk-e2e-backends=e2b -m "smoke or p0"
 # run_code marker lives only in cases/run_code/, while interpreter-dependent
 # cases also sit in cases/lifecycle/ (test_pause_resume.py, test_auto_lifecycle.py
 # and test_rollback_clone.py at the time of writing) carrying the capability
-# marker but not the run_code one. The capability marker is the lever that does
-# not depend on which file a case happens to live in — which is the point, since
-# new cases keep arriving.
+# marker but not the run_code one. `requires_code_interpreter` is the lever that
+# does not depend on which file a case happens to live in — which is the point,
+# since new cases keep arriving. (It is a standalone marker, gated on the
+# CODE_INTERPRETER capability in conftest.py; there is no
+# `requires_capability(code_interpreter)` spelling, so do not go looking for one
+# alongside `requires_capability(ROLLBACK_CLONE)` and friends.)
 #
 # To see the current gap between the two spellings rather than trusting a number
 # written here (that number rots — this note previously carried a stale one):
@@ -217,7 +227,8 @@ pytest --run-e2e --sdk-e2e-backends=e2b -m "smoke or p0"
 # Not every case in that gap would actually fail on a missing package: for the
 # e2b backend the auto_lifecycle ones need the platform_lifecycle capability and
 # the rollback_clone ones need rollback_clone, neither of which the backend
-# declares, so the fixture skips them first. Deselecting on the capability marker
+# declares, so the fixture skips them first. Deselecting on
+# `requires_code_interpreter`
 # covers all of them regardless.
 pip install 'e2b==2.29.5'
 pytest --run-e2e --sdk-e2e-backends=e2b -m "(smoke or p0) and not requires_code_interpreter"
@@ -237,12 +248,14 @@ Notes that make the matrix more than a version list:
   `e2b>=2.26.0,<3.0.0`, so a row pinning an older `e2b` cannot also take the
   current interpreter package — the `run_code` cases are unavailable there.
 - **Cases that need the interpreter.** Lines without `e2b-code-interpreter`
-  should deselect on the capability marker
+  should deselect on `requires_code_interpreter`
   (`-m "(smoke or p0) and not requires_code_interpreter"`) rather than report
   failures that are really a missing package. The `run_code` marker is not
   enough — it only covers `cases/run_code/`, while `cases/lifecycle/` has
-  interpreter-dependent cases that carry the capability marker but not the
-  `run_code` one.
+  interpreter-dependent cases that carry `requires_code_interpreter` but not the
+  `run_code` one. Note it is its own marker, not a member of the
+  `requires_capability(...)` family, even though `CODE_INTERPRETER` is a
+  capability constant.
 
 ## Environment
 

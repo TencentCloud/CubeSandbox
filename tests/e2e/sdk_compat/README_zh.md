@@ -167,9 +167,15 @@ pytest --run-e2e
 着的那个"版本。`e2b-versions.txt` 记录本套件实际验证过的版本，使用者读它即可判断某个
 CubeSandbox 版本预期能配合哪些 SDK 版本，而不必等线上故障才发现。
 
-验证某个版本时，装上它再照常执行：
+验证某个版本时，装上它再照常执行。下面的命令假定"快速开始"里那套 E2B 后端环境变量已经
+导出——如果是从 `e2b-versions.txt` 直接跳到这一节，请先设置，否则会在创建沙箱时失败并报
+`E2B backend requires E2B_API_KEY`：
 
 ```bash
+export E2B_API_KEY=<e2b-api-key>
+# 自建 HTTPS 端点还需要本地 CA：
+export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem
+
 # 完整覆盖：配对安装 interpreter 包，run_code 用例依赖它。
 # 挑一个 pip 能直接解出来的组合：`e2b-code-interpreter` 声明 `e2b>=2.26.0,<3.0.0`，
 # 因此 `e2b-versions.txt` 里 2.21.0 那一行只有覆盖约束才装得上（该行自己有说明），
@@ -184,8 +190,11 @@ pytest --run-e2e --sdk-e2e-backends=e2b -m "smoke or p0"
 # 要按 `requires_code_interpreter` 排除，而不是按 `run_code` marker。后者只存在于
 # cases/run_code/ 下，而依赖 interpreter 的用例在 cases/lifecycle/ 里同样有（写作时是
 # test_pause_resume.py、test_auto_lifecycle.py 与 test_rollback_clone.py），它们带
-# capability marker 但没有 run_code marker。capability marker 才是不依赖"用例放在哪个
-# 文件"的那个开关——这正是关键，因为用例还在不断新增。
+# `requires_code_interpreter` 但没有 run_code marker。`requires_code_interpreter`
+# 才是不依赖"用例放在哪个文件"的那个开关——这正是关键，因为用例还在不断新增。
+#（它是独立 marker，由 conftest.py 中的 CODE_INTERPRETER capability 控制；不存在
+# `requires_capability(code_interpreter)` 这种写法，别照着
+# `requires_capability(ROLLBACK_CLONE)` 的样子去找。）
 #
 # 想知道两种写法当前差多少，请自己跑，而不要相信这里写死的数字（数字会腐烂，本注释
 # 之前就带过一个过期的）：
@@ -195,7 +204,7 @@ pytest --run-e2e --sdk-e2e-backends=e2b -m "smoke or p0"
 #
 # 差集里也不是每个都会因缺包而失败：对 e2b 后端，auto_lifecycle 那几个还要求
 # platform_lifecycle capability、rollback_clone 那两个要求 rollback_clone，而后端都没有
-# 声明，fixture 会先跳过。按 capability marker 排除则一次覆盖全部。
+# 声明，fixture 会先跳过。按 `requires_code_interpreter` 排除则一次覆盖全部。
 pip install 'e2b==2.29.5'
 pytest --run-e2e --sdk-e2e-backends=e2b -m "(smoke or p0) and not requires_code_interpreter"
 ```
@@ -214,7 +223,9 @@ pytest --run-e2e --sdk-e2e-backends=e2b -m "(smoke or p0) and not requires_code_
 - **依赖 interpreter 的用例。** 未安装 `e2b-code-interpreter` 的组合应按 capability
   marker 排除（`-m "(smoke or p0) and not requires_code_interpreter"`），而不是把
   "缺包"报成失败。只排除 `run_code` marker 不够：它仅覆盖 `cases/run_code/`，而
-  `cases/lifecycle/` 下也有带 capability marker、但没有 `run_code` marker 的依赖 interpreter 用例。
+  `cases/lifecycle/` 下也有带 `requires_code_interpreter`、但没有 `run_code` marker 的依赖
+  interpreter 用例。注意它自成一个 marker，不属于 `requires_capability(...)` 家族——尽管
+  `CODE_INTERPRETER` 本身确实是一个 capability 常量。
 
 ## 环境变量
 
