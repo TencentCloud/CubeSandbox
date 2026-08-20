@@ -196,19 +196,25 @@ pytest --run-e2e --sdk-e2e-backends=e2b -m "smoke or p0"
 # deselect they are collected, call Sandbox.run_code on the plain SDK, and fail
 # for a missing package rather than a real incompatibility.
 #
-# Deselect on `requires_code_interpreter`, not on the `run_code` marker: that
-# marker lives only in cases/run_code/, while cases/lifecycle/test_pause_resume.py
-# and test_auto_lifecycle.py also call run_code and carry the capability marker
-# but not the run_code one. At "smoke or p0" both spellings happen to select the
-# same 21 cases; at "p0 or p1" `not run_code` leaves 87 and
-# `not requires_code_interpreter` leaves 82.
+# Deselect on `requires_code_interpreter`, not on the `run_code` marker. The
+# run_code marker lives only in cases/run_code/, while interpreter-dependent
+# cases also sit in cases/lifecycle/ (test_pause_resume.py, test_auto_lifecycle.py
+# and test_rollback_clone.py at the time of writing) carrying the capability
+# marker but not the run_code one. The capability marker is the lever that does
+# not depend on which file a case happens to live in — which is the point, since
+# new cases keep arriving.
 #
-# Of those 5, only test_pause_resume.py::test_pause_and_connect_resume_preserves_
-# run_code_state actually reaches a run_code call without the package: the four
-# test_auto_lifecycle.py cases also require the platform_lifecycle capability,
-# which the e2b backend does not declare, so the fixture skips them first. The
-# deselect is still the right lever — it is the one that does not depend on which
-# file a case happens to live in.
+# To see the current gap between the two spellings rather than trusting a number
+# written here (that number rots — this note previously carried a stale one):
+#
+#   diff <(pytest --collect-only -q -m "(p0 or p1) and not run_code") \
+#        <(pytest --collect-only -q -m "(p0 or p1) and not requires_code_interpreter")
+#
+# Not every case in that gap would actually fail on a missing package: for the
+# e2b backend the auto_lifecycle ones need the platform_lifecycle capability and
+# the rollback_clone ones need rollback_clone, neither of which the backend
+# declares, so the fixture skips them first. Deselecting on the capability marker
+# covers all of them regardless.
 pip install 'e2b==2.29.5'
 pytest --run-e2e --sdk-e2e-backends=e2b -m "(smoke or p0) and not requires_code_interpreter"
 ```

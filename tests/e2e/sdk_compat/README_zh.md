@@ -178,16 +178,21 @@ pytest --run-e2e --sdk-e2e-backends=e2b -m "smoke or p0"
 # run_code capability，不排除就会被收集、在纯 SDK 上调用 Sandbox.run_code，
 # 最终报成失败——而那只是缺包，不是真的不兼容。
 #
-# 要按 `requires_code_interpreter` 排除，而不是按 `run_code` marker：后者只存在于
-# cases/run_code/ 下，而 cases/lifecycle/test_pause_resume.py 与 test_auto_lifecycle.py
-# 同样调用 run_code，带 capability marker 但没有 run_code marker。在 "smoke or p0" 下
-# 两种写法恰好都选中 21 个用例；在 "p0 or p1" 下 `not run_code` 收集 87 个、
-# `not requires_code_interpreter` 收集 82 个。
+# 要按 `requires_code_interpreter` 排除，而不是按 `run_code` marker。后者只存在于
+# cases/run_code/ 下，而依赖 interpreter 的用例在 cases/lifecycle/ 里同样有（写作时是
+# test_pause_resume.py、test_auto_lifecycle.py 与 test_rollback_clone.py），它们带
+# capability marker 但没有 run_code marker。capability marker 才是不依赖"用例放在哪个
+# 文件"的那个开关——这正是关键，因为用例还在不断新增。
 #
-# 这 5 个里真正会在缺包时跑到 run_code 的只有 test_pause_resume.py::
-# test_pause_and_connect_resume_preserves_run_code_state：另外 4 个 test_auto_lifecycle.py
-# 用例还要求 platform_lifecycle capability，而 e2b 后端没有声明它，fixture 会先跳过。
-# 但排除依据仍应选 capability marker——它不依赖用例恰好放在哪个文件里。
+# 想知道两种写法当前差多少，请自己跑，而不要相信这里写死的数字（数字会腐烂，本注释
+# 之前就带过一个过期的）：
+#
+#   diff <(pytest --collect-only -q -m "(p0 or p1) and not run_code") \
+#        <(pytest --collect-only -q -m "(p0 or p1) and not requires_code_interpreter")
+#
+# 差集里也不是每个都会因缺包而失败：对 e2b 后端，auto_lifecycle 那几个还要求
+# platform_lifecycle capability、rollback_clone 那两个要求 rollback_clone，而后端都没有
+# 声明，fixture 会先跳过。按 capability marker 排除则一次覆盖全部。
 pip install 'e2b==2.29.5'
 pytest --run-e2e --sdk-e2e-backends=e2b -m "(smoke or p0) and not requires_code_interpreter"
 ```
