@@ -9,7 +9,9 @@
 # validated" below); pair
 # `e2b-code-interpreter` with `e2b` when the line should cover the `run_code`
 # cases, since those need the interpreter package (a line pinning only `e2b`
-# must deselect them: -m "(smoke or p0) and not requires_code_interpreter").
+# must deselect them: -m "(smoke or p0) and not requires_code_interpreter" —
+# and note the deselect only starts doing real work once the selection widens
+# past smoke/p0, where the p1 lifecycle cases live; see the README).
 #
 # Purpose: give consumers a stated compatibility range per CubeSandbox release
 # instead of leaving them to discover breakage in production. Install one line

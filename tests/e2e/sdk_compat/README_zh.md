@@ -187,6 +187,11 @@ pytest --run-e2e --sdk-e2e-backends=e2b -m "smoke or p0"
 # run_code capability，不排除就会被收集、在纯 SDK 上调用 Sandbox.run_code，
 # 最终报成失败——而那只是缺包，不是真的不兼容。
 #
+# 注意选择范围，它决定这个排除条件到底起不起作用：在 `smoke or p0` 之内，依赖 interpreter
+# 的用例只在 cases/run_code/ 下，而它们两个 marker 都带，所以两种写法今天选出的是同样的
+# 21 个用例，怎么写都一样。一旦范围放宽就不一样了——只装核心 SDK 跑 `p0 or p1`（也就是上
+# 面那套双后端回归）会收集到 p1 的 lifecycle 用例，只有 `requires_code_interpreter` 排得掉。
+#
 # 要按 `requires_code_interpreter` 排除，而不是按 `run_code` marker。后者只存在于
 # cases/run_code/ 下，而依赖 interpreter 的用例在 cases/lifecycle/ 里同样有（写作时是
 # test_pause_resume.py、test_auto_lifecycle.py 与 test_rollback_clone.py），它们带

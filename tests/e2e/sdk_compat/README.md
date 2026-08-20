@@ -208,6 +208,14 @@ pytest --run-e2e --sdk-e2e-backends=e2b -m "smoke or p0"
 # deselect they are collected, call Sandbox.run_code on the plain SDK, and fail
 # for a missing package rather than a real incompatibility.
 #
+# Mind the scope, because it decides whether the deselect does anything. Inside
+# `smoke or p0` the only interpreter-dependent cases are in cases/run_code/,
+# which carry both markers, so the two spellings select exactly the same 21
+# cases today and the choice is free. It stops being free the moment the
+# selection widens — a core-only `p0 or p1` run (the dual-backend regression
+# documented above) collects the p1 lifecycle cases, and only
+# `requires_code_interpreter` deselects them.
+#
 # Deselect on `requires_code_interpreter`, not on the `run_code` marker. The
 # run_code marker lives only in cases/run_code/, while interpreter-dependent
 # cases also sit in cases/lifecycle/ (test_pause_resume.py, test_auto_lifecycle.py
